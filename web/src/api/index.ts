@@ -359,6 +359,11 @@ export function attachmentUrl(id: string): Promise<string> {
   return transport.blobUrl(`/attachments/${encodeURIComponent(id)}`)
 }
 
+/** 對話裡 Markdown 圖片的本機路徑（相對於 bot 的專案目錄）；專案外、非圖片一律 404。 */
+export function localImageUrl(botId: string, path: string): Promise<string> {
+  return transport.blobUrl(`/bots/${encodeURIComponent(botId)}/local-image?path=${encodeURIComponent(path)}`)
+}
+
 /** `identity` (claude) picks whose settings.json the default effort comes from (SPEC §17.1); unknown falls back safely. */
 export async function fetchModels(kind: BotKind, host?: string, identity?: string | null): Promise<ModelInfo[]> {
   const q = new URLSearchParams({ kind })

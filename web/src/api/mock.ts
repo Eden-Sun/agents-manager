@@ -603,6 +603,14 @@ export class MockTransport implements Transport {
   }
 
   async blobUrl(path: string): Promise<string> {
+    // 對話裡的本機圖片：畫一張標出路徑的示意圖，`missing` 開頭的演 404。
+    const local = path.match(/^\/bots\/[^/]+\/local-image\?path=(.*)$/)
+    if (local) {
+      const p = decodeURIComponent(local[1])
+      if (p.includes('missing')) throw new ApiError(404, { error: 'not_found', what: 'image' }, 'not found')
+      const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="320" height="120"><rect width="320" height="120" fill="#dbeafe"/><text x="12" y="64" font-size="14" fill="#1e3a8a">${p.replace(/[<&]/g, '')}</text></svg>`
+      return URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }))
+    }
     const id = decodeURIComponent(path.replace('/attachments/', ''))
     const blob = this.blobs.get(id)
     if (!blob) throw new ApiError(404, { error: 'not_found', reason: 'unknown attachment' }, 'not found')
@@ -2388,7 +2396,12 @@ export class MockTransport implements Transport {
       setTimeout(() => this.finishTurn(botId, turn, 'terminal_fallback'), 2600)
     } else {
       // A few `turn_progress` frames before the final reply.
-      const reply = replyOverride ?? this.nextReply()
+      // 「圖片」：演對話裡的本機圖片（專案內顯示、專案外只寫路徑）。
+      const reply =
+        replyOverride ??
+        (lowered.includes('圖片')
+          ? '截圖在這：\n\n![menu](docs/screenshots/project-mem/project-mem-390-menu.png)\n\n專案外的：![](/tmp/missing-shot.png)'
+          : this.nextReply())
       const slow = lowered.includes('slow')
       const frames = slow ? 4 : 3
       // Thinking phase: `activity` only, empty `text`. Real verb is random; only the counter shape matters.

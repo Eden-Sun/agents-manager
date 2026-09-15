@@ -292,6 +292,10 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 
 路徑不存在或不是目錄 → 400。
 
+### `GET /api/bots/{id}/local-image?path=<路徑>`
+對話 Markdown 裡的本機圖片（`![](docs/shot.png)`、`/Users/…/x.png`、`file://…`）。相對路徑以該 bot 的**專案目錄**為底；符號連結解開後仍須在專案目錄內，副檔名限 `png/jpg/jpeg/gif/webp`（不含 svg），≤ 20 MiB。回圖片位元組與對應 `Content-Type`。
+專案外、非圖片、不存在、太大、遠端主機的專案一律 `404 {"what":"image"}`；缺 `path` 400；bot 不存在 404。前端讀不到就把路徑寫成文字，不畫破圖。
+
 ## 記憶體
 
 ### `GET /api/mem`

@@ -30,6 +30,7 @@ mod hook_cmd;
 mod hookrecv;
 mod hosts;
 mod lifecycle;
+mod local_image;
 mod memproc;
 mod memstat;
 mod mission;
