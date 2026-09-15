@@ -104,18 +104,19 @@ pub async fn fork_bot(
                 .iter_mut()
                 .find(|p| p.id.as_deref() == Some(source.project_id.as_str()))
                 .ok_or_else(|| anyhow::anyhow!("not-in-config"))?;
-            let src: BotCfg = p
+            let at = p
                 .bots
                 .iter()
-                .find(|b| b.id.as_deref() == Some(source.id.as_str()))
-                .cloned()
+                .position(|b| b.id.as_deref() == Some(source.id.as_str()))
                 .ok_or_else(|| anyhow::anyhow!("not-in-config"))?;
+            let src: BotCfg = p.bots[at].clone();
             let taken = |n: &str| p.bots.iter().any(|x| x.name == n);
             let name = if taken(&wanted) { crate::api::next_free_name(&wanted, &taken) } else { wanted.clone() };
             *used_name.lock().unwrap() = name.clone();
             // 設定照抄（模型、強度、身份、env、人設、args）：同一個帳號目錄才找得到那段對話。
             // autostart 不抄——fork 是一次性的分岔，不該每次開 daemon 都多一顆。
-            p.bots.push(BotCfg { id: Some(new_id.clone()), name, autostart: false, herdr_session: None, ..src });
+            // 插在來源正下方（陣列位置＝側欄順序）：分出來的那顆要看得出是誰分的，不是掉到專案最底下（使用者 2026-09-15）。
+            p.bots.insert(at + 1, BotCfg { id: Some(new_id.clone()), name, autostart: false, herdr_session: None, ..src });
             Ok(())
         })
         .await;
@@ -300,6 +301,24 @@ mod tests {
             .await
             .unwrap();
         assert!(text.contains("alfa") && text.contains("sid-alfa"), "{text}");
+    }
+
+    /// fork 出來的 bot 排在來源正下方，不是專案最底下（config 陣列位置＝側欄順序）。
+    #[tokio::test]
+    async fn a_fork_lands_right_below_its_source() {
+        let e = env().await;
+        let first = source_bot(&e, "claude", "alfa", "user").await;
+        source_bot(&e, "claude", "bravo", "user").await;
+        source_bot(&e, "claude", "charlie", "user").await;
+        let out = fork(&e, &first, None).await.unwrap();
+        let names: Vec<String> = e.app.cfg.get().await.projects[0].bots.iter().map(|b| b.name.clone()).collect();
+        assert_eq!(names, ["alfa", "alfa-fork", "bravo", "charlie"]);
+        let position: i64 = sqlx::query_scalar("SELECT position FROM bots WHERE id = ?")
+            .bind(out["bot_id"].as_str().unwrap())
+            .fetch_one(&e.app.db)
+            .await
+            .unwrap();
+        assert_eq!(position, 1, "DB 的 position 跟著投影");
     }
 
     /// codex：`fork` 是子命令，排在所有參數最前面；撞名自動加尾碼。

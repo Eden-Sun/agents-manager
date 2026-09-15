@@ -528,7 +528,7 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
 ### 6.10 Fork 頂層 bot（接續對話脈絡）
 - 入口：側欄 bot 列 `⋯` →「開同類分身…」→ 選「接續對話（fork）」→ `POST /api/bots/:id/fork`（`daemon/src/fork.rs`）；選「全新對話」走原本的建 bot＋啟動。只給頂層 bot：child 的 pane 與帳號環境是母 agent 開的，daemon 重建不出來；從 default session 匯入的也不行（§6.5.1）。
 - 來源 session：來源 bot 最近一次有 `native_session_id` 的 run（跑著的也算——三家 CLI 的 fork 都是讀對話檔，不打擾原本那顆）。本機對話檔不在就拒絕，避免 CLI 找不到對話直接退出。
-- 新 bot：config.toml 條目照抄來源（同一個 identity／env 才找得到那段對話），`autostart=false`，名字預設 `<來源>-fork`。建好後以 `StartOpts.fork_session` 啟動一次：
+- 新 bot：config.toml 條目照抄來源（同一個 identity／env 才找得到那段對話），`autostart=false`，名字預設 `<來源>-fork`，**插在來源正下方**（陣列位置＝側欄順序；使用者 2026-09-15）。建好後以 `StartOpts.fork_session` 啟動一次：
   claude、grok 附 `--resume <id> --fork-session`；codex 的 `fork` 是子命令，`fork <id>` 排在所有參數最前（三家 CLI help 2026-09-14 實測）。不寫 `runs.resume_session_id`：fork 本來就會拿到新 id，不能當成 resume mismatch。
 - 之後兩顆各走各的：新 bot 的下一次重啟用它自己的新 session（照 §6.9 的 resume）。分叉前的訊息不複製到新 bot 的對話紀錄（CLI 裡有），改在新 bot 對話放一則系統訊息指回來源。
 - 跟「開同類分身並啟動」的差別只在脈絡：分身是全新對話。

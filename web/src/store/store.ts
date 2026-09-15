@@ -1255,6 +1255,9 @@ export const useStore = create<StoreState>((set, get) => ({
       }
       await get().refreshState()
       if (get().bots.some((b) => b.id === tempId)) dropPlaceholder()
+      // daemon 建 bot 一律接在專案最後；分身要排在本尊正下方（使用者 2026-09-15），存成正式順序。
+      const rest = botsOfProject(get(), bot.project_id).map((b) => b.id).filter((x) => x !== id)
+      get().moveBot(id, rest[rest.indexOf(botId) + 1] ?? null)
       set({ selectedBotId: id })
       get().notify('info', `已新增 Bot ${name}`)
       // 啟動不等：CLI 就緒要好幾秒，交給側欄燈號。

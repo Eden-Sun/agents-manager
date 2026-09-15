@@ -645,7 +645,7 @@ export class MockTransport implements Transport {
 
     if (method === 'GET' && rawPath === '/state') return this.state()
     // 前端已樂觀套用排序，mock 收下就好。
-    if (method === 'POST' && rawPath === '/order') return { ok: true }
+    if (method === 'POST' && rawPath === '/order') return this.saveOrder(b)
     if (method === 'GET' && rawPath === '/fs/dirs') {
       return this.dirs(q.get('path') ?? '', q.get('host') ?? '', q.get('hidden') === '1')
     }
@@ -1892,6 +1892,20 @@ export class MockTransport implements Transport {
     return { bot_id: bot.id, name: bot.name }
   }
 
+  /** `POST /order` 的 bots 部分：照給的 id 順序重排該專案的 bot（沒列到的留在後面）。 */
+  private saveOrder(b: Rec) {
+    const bots = b.bots && typeof b.bots === 'object' ? (b.bots as Record<string, unknown>) : {}
+    for (const [pid, ids] of Object.entries(bots)) {
+      if (!Array.isArray(ids)) continue
+      const rank = new Map(ids.map((id, i) => [String(id), i]))
+      const mine = this.bots.filter((x) => x.project_id === pid)
+      const sorted = [...mine].sort((x, y) => (rank.get(x.id) ?? Infinity) - (rank.get(y.id) ?? Infinity))
+      let k = 0
+      this.bots = this.bots.map((x) => (x.project_id === pid ? sorted[k++] : x))
+    }
+    return { ok: true }
+  }
+
   /** 規則照 `daemon/src/fork.rs`：只給頂層 bot；設定照抄、autostart 關、名字 `<來源>-fork` 撞名加尾碼。 */
   private fork(botId: string, b: Rec) {
     const src = this.bots.find((x) => x.id === botId)
@@ -1922,6 +1936,10 @@ export class MockTransport implements Transport {
       source: 'system',
       incomplete: 0,
     })
+    // 跟 daemon 一樣排在來源正下方。
+    const made = this.bots.findIndex((x) => x.id === created.bot_id)
+    const [bot] = this.bots.splice(made, 1)
+    this.bots.splice(this.bots.findIndex((x) => x.id === src.id) + 1, 0, bot)
     const { run_id } = this.start(created.bot_id)
     return { ...created, forked_from: { bot_id: src.id, session_id: 'mock-session' }, run_id, start_error: null }
   }
