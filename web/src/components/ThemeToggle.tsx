@@ -2,33 +2,29 @@ import { useState } from 'react'
 import { applyTheme, loadTheme, type ThemeMode } from '../lib/theme'
 import './themeToggle.css'
 
-const MODES: { mode: ThemeMode; label: string; title: string }[] = [
-  { mode: 'system', label: '自動', title: '跟隨系統的深淺設定' },
-  { mode: 'light', label: '淺', title: '固定淺色' },
-  { mode: 'dark', label: '深', title: '固定深色' },
-]
+const NEXT: Record<ThemeMode, ThemeMode> = { system: 'light', light: 'dark', dark: 'system' }
+const LOOK: Record<ThemeMode, { icon: string; name: string }> = {
+  system: { icon: '◐', name: '跟隨系統' },
+  light: { icon: '☀', name: '淺色' },
+  dark: { icon: '☾', name: '深色' },
+}
 
-/** 左上角的三段式主題切換（2026-09-15 使用者）。 */
+/** 左上角主題鈕：同一顆按鈕三段輪流切換 自動 → 淺 → 深（2026-09-15 使用者）。 */
 export function ThemeToggle() {
   const [mode, setMode] = useState<ThemeMode>(loadTheme)
+  const next = NEXT[mode]
   return (
-    <span className="theme-toggle" role="radiogroup" aria-label="主題">
-      {MODES.map((m) => (
-        <button
-          key={m.mode}
-          type="button"
-          role="radio"
-          aria-checked={mode === m.mode}
-          className={mode === m.mode ? 'on' : undefined}
-          title={m.title}
-          onClick={() => {
-            applyTheme(m.mode)
-            setMode(m.mode)
-          }}
-        >
-          {m.label}
-        </button>
-      ))}
-    </span>
+    <button
+      type="button"
+      className="theme-toggle"
+      title={`主題：${LOOK[mode].name}（點一下換成${LOOK[next].name}）`}
+      aria-label={`主題：${LOOK[mode].name}`}
+      onClick={() => {
+        applyTheme(next)
+        setMode(next)
+      }}
+    >
+      {LOOK[mode].icon}
+    </button>
   )
 }

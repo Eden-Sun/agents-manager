@@ -252,7 +252,7 @@
   background: #5c636b;
 }
 
-/* 深色：跟隨系統時看 prefers-color-scheme；左上角三段鈕選「深」時用 data-theme 強制（2026-09-15）。 */
+/* 深色：跟隨系統時看 prefers-color-scheme；左上角主題鈕切到「深」時用 data-theme 強制（2026-09-15）。 */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) .kind-mark.claude {
     background: #e0b483;
