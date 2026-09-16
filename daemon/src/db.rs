@@ -220,6 +220,16 @@ pub async fn claim_resend(pool: &SqlitePool, turn_id: &str, max: i64) -> bool {
     )
 }
 
+/// 退還一次重送額度。只有在**確定一個位元組都沒寫進 pane** 時才准叫（`Delivered::NotAttempted`
+/// 的契約）：把「試過但被當下就消失的原因擋掉」算成「送過一次」，等於讓唯一一次補救機會白白蒸發
+/// （review 2026-09-16）。
+pub async fn refund_resend(pool: &SqlitePool, turn_id: &str) {
+    let _ = sqlx::query("UPDATE turns SET resend_count = resend_count - 1 WHERE id = ? AND resend_count > 0")
+        .bind(turn_id)
+        .execute(pool)
+        .await;
+}
+
 pub fn now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
@@ -600,6 +610,31 @@ mod tests {
             .fetch_all(pool)
             .await
             .unwrap()
+    }
+
+    /// 一個字都沒寫進去的那次重送要退還額度：`MAX_PROMPT_RESENDS` 是 1，
+    /// 被「框裡剛好有字」這種兩秒後就消失的原因吃掉，等於永遠補救不了。
+    #[tokio::test]
+    async fn a_resend_that_wrote_nothing_gives_the_budget_back() {
+        let dir = std::env::temp_dir().join(format!("am-refund-{}", ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pool = open(&dir.join("t.sqlite3")).await.unwrap();
+        sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES ('p','/tmp','p',?)").bind(now()).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('b','p','b','claude','t',?)").bind(now()).execute(&pool).await.unwrap();
+        let conv = conversation_id(&pool, "b").await.unwrap();
+        sqlx::query("INSERT INTO turns (id,conversation_id,origin,status,delivery,created_at) VALUES ('t',?,'web','in_flight','ok',?)")
+            .bind(&conv).bind(now()).execute(&pool).await.unwrap();
+
+        assert!(claim_resend(&pool, "t", 1).await, "第一次拿得到");
+        assert!(!claim_resend(&pool, "t", 1).await, "額度只有一次");
+        refund_resend(&pool, "t").await;
+        assert!(claim_resend(&pool, "t", 1).await, "退還之後還有一次");
+        refund_resend(&pool, "t").await;
+        refund_resend(&pool, "t").await;
+        let n: i64 = sqlx::query_scalar("SELECT resend_count FROM turns WHERE id='t'").fetch_one(&pool).await.unwrap();
+        assert_eq!(n, 0, "退還不會退成負數");
+        pool.close().await;
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[tokio::test]
