@@ -114,6 +114,11 @@ async fn read_facts(
     }
 }
 
+/// `panes.listen_ports` 欄（逗號分隔）→ port 清單。
+pub fn parse_ports(s: Option<&str>) -> Vec<u16> {
+    s.map(|s| s.split(',').filter_map(|p| p.trim().parse::<u16>().ok()).collect()).unwrap_or_default()
+}
+
 /// 本機才算 listen port：pane 行程樹的 pid 對 `lsof`。遠端留空（§6.5e：不為了它多開 ssh 往返）。
 pub async fn listen_ports(host: &str, pids: &[i32]) -> HashMap<i32, Vec<u16>> {
     let mut out: HashMap<i32, Vec<u16>> = HashMap::new();
@@ -198,6 +203,9 @@ pub struct Observed {
 /// 掃一台主機的非 agent pane，寫進 `panes`。`snapshot_panes` 是 `session.snapshot` 的 `panes` 陣列
 /// （已經含 `agent`），所以不用再打一次 RPC。
 pub async fn scan_host(app: &Arc<App>, host: &str, snapshot_panes: &[Value]) -> Result<ScanOutcome> {
+    // 對帳那一輪與定期那一輪不交錯寫同一張表（兩邊的 DELETE 會互相把對方剛記的列刪掉）。
+    static SCAN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _one_at_a_time = SCAN.lock().await;
     let non_agent: Vec<&Value> = snapshot_panes.iter().filter(|p| !is_agent_pane(p)).collect();
     // 環境快照：pane 行程樹的 `AM_BOT_ID` 就是歸屬（§6.5e）。讀不到就這一輪不更新歸屬，不要猜。
     let dump = match crate::memproc::dump(app, host).await {
@@ -231,6 +239,37 @@ pub async fn scan_host(app: &Arc<App>, host: &str, snapshot_panes: &[Value]) -> 
         }
     }
     Ok(scan)
+}
+
+/// 定期掃描的間隔。對帳只在事件觸發時跑（開機、重連、agent 被偵測），pane 裡開始跑 dev server 不會產生任何事件，
+/// 表上的 kind／port 會一直是舊的（review 2026-09-16 core 4）。
+const RESCAN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// 單獨重掃一台主機的 pane（不動 agent pane 的對帳、不跑 GC 與通知——那兩件事仍跟著對帳）。
+pub async fn rescan(app: &Arc<App>, host: &str) -> Result<ScanOutcome> {
+    let (client, _) = crate::api::shell::client_for(app, host).await.map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    let snapshot = client.snapshot().await?;
+    // 同 reconcile 的規則：連 key 都沒有＝不認得的形狀，當成空的會把整台的列清光。
+    let Some(panes) = snapshot.get("panes").and_then(Value::as_array) else {
+        anyhow::bail!("session.snapshot on host `{host}` has no `panes`; skipping the pane scan");
+    };
+    scan_host(app, host, panes).await
+}
+
+pub fn spawn_scanner(app: Arc<App>) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(RESCAN_INTERVAL).await;
+            for host in app.hosts.names().await {
+                if !app.host_connected(&host).await {
+                    continue;
+                }
+                if let Err(e) = rescan(&app, &host).await {
+                    tracing::debug!(host, error = %e, "periodic pane scan skipped");
+                }
+            }
+        }
+    });
 }
 
 /// [`scan_host`] 的寫入那半（可測：事實由呼叫端給）。`observed` 裡沒有、或是 `None` 的 pane＝這一輪讀不到。
@@ -637,6 +676,7 @@ pub async fn notify_unowned_and_orphans(app: &Arc<App>, host: &str) -> Result<us
 
 pub fn row_json(r: &sqlx::sqlite::SqliteRow) -> Value {
     use sqlx::Row;
+    let ports = parse_ports(r.get::<Option<String>, _>("listen_ports").as_deref());
     json!({
         "pane_id": r.get::<String, _>("pane_id"),
         "host": r.get::<String, _>("host"),
@@ -648,9 +688,9 @@ pub fn row_json(r: &sqlx::sqlite::SqliteRow) -> Value {
         "project_id": r.get::<Option<String>, _>("project_id"),
         "purpose": r.get::<Option<String>, _>("purpose"),
         "foreground": r.get::<Option<String>, _>("foreground"),
-        "listen_ports": r.get::<Option<String>, _>("listen_ports")
-            .map(|s| s.split(',').filter_map(|p| p.parse::<u16>().ok()).collect::<Vec<_>>())
-            .unwrap_or_default(),
+        // 打字權限看 port，不看 kind（`shell::allowed`）：前端直接用這一欄決定鎖不鎖輸入框。
+        "read_only": !ports.is_empty(),
+        "listen_ports": ports,
         "last_output_at": r.get::<String, _>("last_output_at"),
         "first_seen": r.get::<String, _>("first_seen"),
         "last_seen": r.get::<String, _>("last_seen"),
@@ -1080,6 +1120,94 @@ mod tests {
         std::fs::remove_dir_all(&app.data_dir).ok();
     }
 
+    async fn cached(app: &Arc<App>, pane: &crate::herdr::PaneInfo, kind: &str) {
+        let now = crate::db::now();
+        sqlx::query(
+            "INSERT INTO panes (pane_id, host, workspace_id, tab_id, kind, last_output_at, first_seen, last_seen)
+             VALUES (?, 'local', ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&pane.pane_id)
+        .bind(&pane.workspace_id)
+        .bind(&pane.tab_id)
+        .bind(kind)
+        .bind(&now)
+        .bind(&now)
+        .bind(&now)
+        .execute(&app.db)
+        .await
+        .unwrap();
+    }
+
+    fn with_confirm() -> Query<HashMap<String, String>> {
+        Query(HashMap::from([("confirm".to_string(), "true".to_string())]))
+    }
+
+    /// review 2026-09-16 core 4：表上的 kind 是掃描的快取，關閉不能只信它，也要比照打字擋 agent。
+    #[tokio::test]
+    async fn closing_a_pane_checks_it_live_instead_of_trusting_the_cached_kind() {
+        let env = crate::testing::env().await;
+        let app = &env.app;
+        let (_, pane) = app.herdr.workspace_create("/tmp", "w", json!({})).await.unwrap();
+        cached(app, &pane, "shell").await;
+
+        // 記成 shell，但這一刻讀不到它在跑什麼：當成 service，要人確認。
+        match close(State(app.clone()), Path(pane.pane_id.clone()), Query(HashMap::new())).await {
+            Err(LcError::Conflict(body)) => {
+                assert_eq!(body["reason"], "service_pane");
+                assert_eq!(body["unverified"], true);
+            }
+            other => panic!("讀不到就要確認：{other:?}"),
+        }
+
+        // herdr 說裡面現在有 agent（shell 裡被 `herdr agent start --pane` 起了子 agent）：帶 confirm 也不給關。
+        env.herdr.set_agent("kid", &pane.pane_id, false);
+        match close(State(app.clone()), Path(pane.pane_id.clone()), with_confirm()).await {
+            Err(LcError::Forbidden(body)) => assert_eq!(body["error"], "agent_pane"),
+            other => panic!("agent 的 pane 不歸這支關：{other:?}"),
+        }
+
+        // 有 active run 也一樣（不用問 herdr）。
+        let (_, busy) = app.herdr.workspace_create("/tmp", "b", json!({})).await.unwrap();
+        cached(app, &busy, "shell").await;
+        let bot = crate::testing::claude_bot(app, &env.project_id, "b").await;
+        sqlx::query("INSERT INTO runs (id, bot_id, state, agent_status, pane_id, herdr_session, started_at) VALUES ('r1', ?, 'running', 'idle', ?, 'test', ?)")
+            .bind(&bot.id)
+            .bind(&busy.pane_id)
+            .bind(crate::db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        assert!(matches!(close(State(app.clone()), Path(busy.pane_id.clone()), with_confirm()).await, Err(LcError::Forbidden(_))));
+
+        // herdr 說 pane 已經不在：刪掉快取的列，回 404。
+        let gone = crate::herdr::PaneInfo { pane_id: "ws-9:p9".into(), ..pane.clone() };
+        cached(app, &gone, "shell").await;
+        assert!(matches!(close(State(app.clone()), Path(gone.pane_id.clone()), with_confirm()).await, Err(LcError::NotFound(_))));
+        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM panes WHERE pane_id='ws-9:p9'").fetch_one(&app.db).await.unwrap();
+        assert_eq!(left, 0);
+
+        // 確認過就關。
+        let (_, plain) = app.herdr.workspace_create("/tmp", "p", json!({})).await.unwrap();
+        cached(app, &plain, "shell").await;
+        let out = close(State(app.clone()), Path(plain.pane_id.clone()), with_confirm()).await.expect("確認過就關");
+        assert_eq!(out.0["closed"], true);
+        assert!(app.herdr.pane_get(&plain.pane_id).await.unwrap().is_none(), "herdr 上真的關掉了");
+    }
+
+    /// 對帳只在事件觸發時跑；定期重掃讓表跟上 herdr（pane 被 agent 佔走、關掉）。
+    #[tokio::test]
+    async fn the_periodic_rescan_keeps_the_table_in_step_with_herdr() {
+        let env = crate::testing::env().await;
+        let app = &env.app;
+        let (_, pane) = app.herdr.workspace_create("/tmp", "w", json!({})).await.unwrap();
+        let scan = rescan(app, "local").await.unwrap();
+        assert_eq!(scan.panes, 1);
+        let row: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM panes WHERE pane_id=?").bind(&pane.pane_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(row, 1);
+        env.herdr.set_agent("kid", &pane.pane_id, false);
+        assert_eq!(rescan(app, "local").await.unwrap().panes, 0, "變成 agent pane 就不歸這張表");
+    }
+
     /// adopt 不會偷偷把使用者手開的 pane 變成可 GC：要明確帶 allow_gc（§6.5e）。
     #[tokio::test]
     async fn adopt_only_opts_a_user_pane_into_gc_when_asked() {
@@ -1297,12 +1425,19 @@ pub async fn adopt(
 }
 
 /// `POST /api/panes/{id}/close`：人按的關閉。服務 pane 要帶 `confirm=true`（UI 會先顯示 port）。
+///
+/// 表上的 kind 是掃描的快取（review 2026-09-16 core 4），所以關之前即時再看一次：
+/// - 有 active run、或 herdr 說裡面現在有 agent → 403 `agent_pane`（比照打字那條線；agent 走 bot 的 stop）。
+/// - herdr 說 pane 已經不在 → 刪列、404。
+/// - 現在是 service（前景有非 shell 程式或 listen port），或**讀不到**事實 → 沒帶 confirm 就 409 `service_pane`，
+///   body 的 `pane` 換成即時的 kind／前景／port；讀不到時多一個 `unverified: true`。
 pub async fn close(
     State(app): State<Arc<App>>,
     Path(pane_id): Path<String>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, LcError> {
     let sql = |e: sqlx::Error| LcError::Upstream(e.to_string());
+    let up = |e: anyhow::Error| LcError::Upstream(format!("{e:#}"));
     let host = q.get("host").cloned().unwrap_or_else(|| crate::config::LOCAL_HOST.to_string());
     let row = sqlx::query("SELECT * FROM panes WHERE host=? AND pane_id=?")
         .bind(&host)
@@ -1311,16 +1446,52 @@ pub async fn close(
         .await
         .map_err(sql)?
         .ok_or_else(|| LcError::NotFound("pane".into()))?;
-    let info = row_json(&row);
+    let mut info = row_json(&row);
+    let agent_pane = || LcError::Forbidden(json!({"error": "agent_pane", "message": "這顆 pane 正在跑 agent，請從 bot 停掉"}));
+    let session = app.session_for_host(&host).await.unwrap_or_default();
+    if !crate::db::active_runs_for_pane(&app.db, &host, &pane_id, &session, &session).await.map_err(up)?.is_empty() {
+        return Err(agent_pane());
+    }
+    let (client, _) = crate::api::shell::client_for(&app, &host).await?;
+    match client.pane_get(&pane_id).await.map_err(up)? {
+        None => {
+            sqlx::query("DELETE FROM panes WHERE host=? AND pane_id=?").bind(&host).bind(&pane_id).execute(&app.db).await.map_err(sql)?;
+            return Err(LcError::NotFound("pane".into()));
+        }
+        Some(p) if p.agent.as_deref().is_some_and(|a| !a.is_empty()) => return Err(agent_pane()),
+        Some(_) => {}
+    }
+    let live = match (crate::memproc::dump(&app, &host).await, client.pane_shell(&pane_id).await) {
+        (Ok(dump), Ok(shell)) => match facts_from(&shell, &dump, &pane_id) {
+            Some(f) => {
+                let mut ports: Vec<u16> = listen_ports(&host, &f.pids).await.into_values().flatten().collect();
+                ports.sort_unstable();
+                ports.dedup();
+                Some((f, ports))
+            }
+            None => None,
+        },
+        _ => None,
+    };
+    let needs_confirm = match &live {
+        Some((f, ports)) => {
+            let kind = classify(f.foreground.as_deref(), ports);
+            info["kind"] = json!(kind);
+            info["foreground"] = json!(f.foreground);
+            info["read_only"] = json!(!ports.is_empty());
+            info["listen_ports"] = json!(ports);
+            kind == "service"
+        }
+        None => true,
+    };
     let confirmed = q.get("confirm").map(|v| v == "true" || v == "1").unwrap_or(false);
-    if info["kind"] == "service" && !confirmed {
+    if needs_confirm && !confirmed {
         // 關掉服務 pane 會殺掉裡面在跑的東西：要人看過 port 再點一次。
         return Err(LcError::conflict(
             "service pane needs confirm=true",
-            json!({"reason": "service_pane", "pane": info}),
+            json!({"reason": "service_pane", "pane": info, "unverified": live.is_none()}),
         ));
     }
-    let (client, _) = crate::api::shell::client_for(&app, &host).await?;
     crate::lifecycle::close_pane_and_tab(
         &client,
         info["workspace_id"].as_str(),
@@ -1334,6 +1505,7 @@ pub async fn close(
         .execute(&app.db)
         .await
         .map_err(sql)?;
+    app.pane_live.lock().await.remove(&(host.clone(), pane_id.clone()));
     tracing::info!(host, pane_id, kind = %info["kind"], "pane closed by request");
     Ok(Json(json!({"closed": true, "pane": info})))
 }
