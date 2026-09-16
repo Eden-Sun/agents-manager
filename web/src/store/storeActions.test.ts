@@ -231,3 +231,62 @@ test('daemon 回 403：面板鎖成唯讀並帶著 daemon 的說明；別的 pan
   assert.equal(useStore.getState().shellView?.readOnly, true)
   assert.equal(useStore.getState().shellView?.readOnlyReason, '這顆 pane 開著 port，只能看')
 })
+
+test('側欄與專案頁同一份 pane 清單：專案頁關掉的，側欄同時不見；正開著它的面板也收掉', async () => {
+  seed()
+  useStore.setState({
+    sidePanes: { p1: [pane({ kind: 'shell' }) as never] },
+    unownedPanes: [],
+    shellView: { host: 'local', paneId: 'w1:p9', cwd: '/p', traced: true },
+  })
+  routeDaemon((req) => {
+    if (req.path.includes('/close')) return json({ closed: true }, 200)
+    if (req.path.includes('unowned=1')) return json({ panes: [] }, 200)
+    if (req.path.includes('/panes')) return json({ panes: [] }, 200)
+    return json({}, 200)
+  })
+  assert.equal(await useStore.getState().closeTracedPane(pane({ kind: 'shell' }) as never, false), 'closed')
+  assert.equal(useStore.getState().sidePanes.p1, undefined)
+  assert.equal(useStore.getState().shellView, null)
+})
+
+test('關閉時才發現已經變成服務 pane：拿 daemon 附上的那列回來問人，不是只跳 409', async () => {
+  seed()
+  useStore.setState({ sidePanes: { p1: [pane({ kind: 'shell' }) as never] }, unownedPanes: [] })
+  const fresh = pane({ kind: 'service', listen_ports: [3010], foreground: 'node next dev' })
+  routeDaemon(() => json({ error: 'conflict', reason: 'service_pane', pane: fresh }, 409))
+  const r = await useStore.getState().closeTracedPane(pane({ kind: 'shell' }) as never, false)
+  assert.ok(r && r !== 'closed')
+  assert.equal(r.kind, 'service')
+  assert.deepEqual(r.listen_ports, [3010])
+  assert.equal(useStore.getState().sidePanes.p1[0].kind, 'service', '清單也換成最新那列')
+  assert.equal(noticeTexts().length, 0, '這不是失敗')
+})
+
+test('點到已經不在的 pane：面板收掉、清單拿掉，而且講一聲', () => {
+  seed()
+  useStore.setState({
+    sidePanes: { p1: [pane() as never] },
+    unownedPanes: [],
+    shellView: { host: 'local', paneId: 'w1:p9', cwd: '/p', traced: true },
+  })
+  routeDaemon(() => json({ panes: [] }, 200))
+  useStore.getState().paneGone('local', 'w1:p9')
+  assert.equal(useStore.getState().shellView, null)
+  assert.equal(useStore.getState().sidePanes.p1, undefined)
+  assert.ok(noticeTexts().some((t) => t.includes('已經關掉')))
+})
+
+test('重讀 pane：依 project_id 分組，沒歸屬的只進底部那一組', async () => {
+  seed()
+  const scratch = pane({ pane_id: 'w1:pS', project_id: null, owned_by: 'none', kind: 'shell' })
+  routeDaemon((req) => {
+    if (req.path.includes('unowned=1')) return json({ panes: [{ ...scratch, scratch: true }] }, 200)
+    if (req.path.includes('/panes')) return json({ panes: [pane(), scratch] }, 200)
+    return json({}, 200)
+  })
+  await useStore.getState().refreshPanes()
+  const s = useStore.getState()
+  assert.deepEqual(Object.keys(s.sidePanes), ['p1'])
+  assert.deepEqual(s.unownedPanes.map((p) => [p.pane_id, p.scratch]), [['w1:pS', true]])
+})

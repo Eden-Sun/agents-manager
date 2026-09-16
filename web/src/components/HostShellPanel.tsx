@@ -141,6 +141,7 @@ export function HostShellPanel({
     s.shellView?.host === host && s.shellView.paneId === paneId ? (s.shellView.readOnlyReason ?? null) : null,
   )
   const lockShellView = useStore((s) => s.lockShellView)
+  const paneGone = useStore((s) => s.paneGone)
   const traced = useStore((s) => Boolean(s.shellView?.host === host && s.shellView.paneId === paneId && s.shellView.traced))
   const hostUp = useStore((s) => (host === 'local' ? s.connected : (s.hosts.find((h) => h.name === host)?.connected ?? false)))
   const ending = useStore((s) => Boolean(s.busy[`shell:${host}:${paneId}`]))
@@ -199,7 +200,8 @@ export function HostShellPanel({
         }
       } catch (e) {
         if (e instanceof ApiError && e.status === 404) {
-          if (alive) closeShellView()
+          // 點到已經不在的 pane（例如專案頁剛關掉）：講一聲，不是閃一下就沒了（review M3）。
+          if (alive) paneGone(host, paneId)
           return
         }
         const denied = shellForbidden(e)
@@ -213,7 +215,7 @@ export function HostShellPanel({
       alive = false
       if (timer) clearTimeout(timer)
     }
-  }, [closeShellView, lockShellView, host, paneId, source, lines, nonce, syncOn])
+  }, [paneGone, lockShellView, host, paneId, source, lines, nonce, syncOn])
 
   const refresh = useCallback(() => setNonce((n) => n + 1), [])
 

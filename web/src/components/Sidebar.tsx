@@ -29,7 +29,7 @@ import { HeadMoreMenu } from './HeadMoreMenu'
 import { DirPicker } from './DirPicker'
 import { IdentitiesPanel, IdentityBadge } from './IdentitiesPanel'
 import { Modal } from './Modal'
-import { SidebarPanes } from './SidebarPanes'
+import { SidebarPanes, SidebarUnownedPanes } from './SidebarPanes'
 import { RunElapsed } from './RunElapsed'
 import { SupervisorPanel } from './SupervisorPanel'
 import { IdentityOptions, PersonaField, PersonaMark } from './BotSettingsPanel'
@@ -1323,6 +1323,8 @@ export function Sidebar() {
           <TerminalIcon /> 開 shell
           <span className="disclosure-note">本機</span>
         </button>
+        {/* 對不到專案的 pane（含 scratch）放這裡，不掛在任何專案底下（SPEC §6.5e）。 */}
+        <SidebarUnownedPanes />
 
         {/* 總管面板不是聊天室，對話從面板裡開。 */}
         <button

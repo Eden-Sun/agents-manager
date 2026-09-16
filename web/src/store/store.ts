@@ -32,6 +32,7 @@ import { acceptStateSeq, singleFlight } from './singleFlight'
 import { quotaForIdentity } from './quotaLookup'
 import { botStatusConnTarget } from './botStatusConn'
 import { paneReadOnly } from '../lib/shellAccess'
+import { groupByProject, withPane, withoutPane } from '../lib/paneLists'
 import { prependDraft, restoreQueued } from './queuedSend'
 import { missionRequests } from './missionRequests'
 
@@ -450,9 +451,16 @@ export interface StoreState {
   openHostShell: (host: string, cwd?: string) => Promise<boolean>
   /** 切到已開著的 shell，不打 API。 */
   viewHostShell: (shell: HostShell) => void
-  /** SPEC §6.5e：選單裡每個專案被 trace 的 pane，點得進去。 */
+  /** SPEC §6.5e：每個專案被 trace 的 pane（依 `project_id` 分）。側欄與專案頁讀的是同一份。 */
   sidePanes: Record<string, ProjectPane[]>
-  loadSidePanes: (projectId: string) => Promise<void>
+  /** 對不到專案的 pane：側欄底部「開 shell」旁那一組，不掛在任何專案底下。 */
+  unownedPanes: ProjectPane[]
+  /** 重讀上面兩份（single-flight）；舊 daemon 沒有端點時什麼都不動。 */
+  refreshPanes: () => Promise<void>
+  /** 專案頁的「關閉」。`'closed'`＝不在了；回一列 pane＝服務 pane 要先確認（daemon 409 附上的最新那列）；`null`＝失敗（已通知）。 */
+  closeTracedPane: (pane: ProjectPane, confirm: boolean) => Promise<'closed' | ProjectPane | null>
+  /** 面板讀到 404：那顆已經不在了。收掉面板、兩份清單一起拿掉，講一聲。 */
+  paneGone: (host: string, paneId: string) => void
   viewPane: (pane: ProjectPane) => void
   /** 只關面板，shell 留著。 */
   closeShellView: () => void
@@ -1719,14 +1727,48 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   sidePanes: {},
+  unownedPanes: [],
 
-  async loadSidePanes(projectId) {
+  // 一次讀全部再依 `project_id` 分：側欄每個專案各打一支、專案頁再自己打一支，三份各自過期（review M3）。
+  refreshPanes: singleFlight(async () => {
+    let all: ProjectPane[]
     try {
-      const panes = await api.fetchProjectPanes(projectId)
-      set((s) => ({ sidePanes: { ...s.sidePanes, [projectId]: panes } }))
+      all = await api.fetchAllPanes()
     } catch {
       // 舊 daemon 沒有這支端點：選單不多出東西，其他照舊。
+      return
     }
+    // scratch 只有 `?unowned=1` 會標；讀不到就退回「對不到專案的全部列、不標」。
+    const unowned = await api.fetchUnownedPanes().catch(() => all.filter((p) => !p.project_id))
+    set({ sidePanes: groupByProject(all), unownedPanes: unowned })
+  }),
+
+  async closeTracedPane(pane, confirm) {
+    try {
+      await api.closePane(pane.pane_id, pane.host, confirm)
+    } catch (e) {
+      // 清單讀到時還是 shell、之後才開了 dev server：daemon 擋下來並附上最新那列，拿它來問人（review L2）。
+      const fresh = api.servicePaneConflict(e)
+      if (fresh) {
+        set((s) => withPane(s, fresh))
+        return fresh
+      }
+      if (e instanceof ApiError && e.status === 404) {
+        get().paneGone(pane.host, pane.pane_id)
+        return 'closed'
+      }
+      get().notify('error', `關閉失敗：${errText(e)}`)
+      return null
+    }
+    dropPane(set, pane.host, pane.pane_id)
+    void get().refreshPanes()
+    return 'closed'
+  },
+
+  paneGone(host, paneId) {
+    dropPane(set, host, paneId)
+    get().notify('info', '這顆 pane 已經關掉了')
+    void get().refreshPanes()
   },
 
   // 同一個 shell 面板：面板只認 (host, paneId)，白名單在 daemon 那一側（`shell::registered`）。
@@ -2383,6 +2425,14 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
     default:
       return
   }
+}
+
+/** 一顆 pane 不在了：兩份清單一起拿掉；正開著它的面板也收掉。 */
+function dropPane(set: SetFn, host: string, paneId: string) {
+  set((s) => ({
+    ...withoutPane(s, host, paneId),
+    ...(s.shellView?.host === host && s.shellView.paneId === paneId ? { shellView: null } : {}),
+  }))
 }
 
 /** 退回輸入框的字也要寫進 localStorage：只 `set` 的話，重整一次就沒了。 */

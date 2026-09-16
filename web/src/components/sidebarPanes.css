@@ -58,3 +58,13 @@
   color: var(--text-faint);
   font-size: 10px;
 }
+
+/* 側欄底部那一組（沒有歸屬專案）：跟「開 shell」對齊，不縮排。 */
+.side-panes.unowned {
+  padding: 0 0 4px;
+}
+
+.side-pane-tag.extra {
+  border-color: var(--warn);
+  color: var(--warn);
+}

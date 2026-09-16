@@ -260,5 +260,8 @@ shell 面板本來只有「打一行、Enter 送出」：TUI（`top`、`vim`、�
 - **掛在側欄專案的 Bot 清單底下**，點一下在 app 裡打開（沿用主機 shell 面板，不另做一個看 pane 的畫面）。跟專案頁那塊分工：這裡只負責「進去」，細節與關閉留在專案頁。字比 Bot 列小一號、沒有燈號——它是交代，不是主角。class 用 `side-pane*`，不跟專案頁的 `project-pane*` 撞。
 - **名字**：用途 > 前景程式執行檔名 > cwd 最後一段 > pane id，永遠有字——空字串的按鈕點不到。路徑、port、是不是你手開的放在滑過去的提示。
 - **有 port 的 pane 只能看**：看 daemon 給的 `read_only`（舊 daemon 沒這欄時退回看 `listen_ports`），**不看 `kind`**——掃描一看到 vim／less／sudo 就把 pane 分成 service，照 kind 鎖會讓人卡在 vim 裡出不來。進去後輸入框鎖住、鍵盤同步不算數（localStorage 記著「開」也一樣）、按鍵列整列拿掉並寫明原因。送一個 Ctrl-C 給 dev server 就是把它關掉；讓人按下去才被 403 更糟。打到一半 daemon 才回 403（`read_only_pane`／`agent_pane`）時，面板當場鎖成唯讀、關掉同步，顯示 daemon 的說明。按鍵列用條件渲染而不是 `hidden`——`.keypad{display:flex}` 會把 `hidden` 蓋掉，按鈕照樣按得到（實走時抓到的）。
+- **側欄與專案頁是同一份清單**（store 的 `sidePanes`，`GET /api/panes` 一次讀完依 `project_id` 分，30 秒重讀）：專案頁關掉的，側欄同時不見；點到已經不在的 pane（面板讀到 404）收掉面板並講一聲「這顆 pane 已經關掉了」，不是閃一下就沒了。
+- **沒歸屬的不掛在專案底下**：放側欄底部「開 shell」正下方一組。scratch 由 daemon 標（`GET /api/panes?unowned=1` 的 `scratch: true`），固定第一列、標「scratch」；其他標「多出來的」。舊 daemon 沒這欄就全部列、一個都不標——前端不自己猜哪顆是 scratch。
+- **關閉時才發現是服務 pane**：清單讀到時還是 shell、之後才跑起 dev server，daemon 回 409 並附上最新那列；專案頁拿那一列直接跳確認框，不是只顯示「關閉失敗 (409)」。
 - **不給「結束 shell」**：面板那顆只認面板自己開的 shell，對被 trace 的 pane 按下去是靜悄悄什麼都不做。關它回專案頁。
 - **重整回得來、唯讀照現況**：`shellView` 連 `readOnly` 一起存；深連結查不到自己開的 shell 就查 daemon 的 pane 表。原本會直接丟回首頁。從 `/` 進來（只走 `restoreShellView`）時一樣照 daemon 當下的 pane 列重算 `readOnly`／`traced`，不沿用 localStorage 的舊值。
