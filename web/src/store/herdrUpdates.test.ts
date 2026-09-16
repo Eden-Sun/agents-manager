@@ -302,3 +302,193 @@ test('手動重新檢查走 refresh 端點，失敗一樣保留舊資料', async
   assert.equal(store.get()?.latest.version, '0.9.1', '重查失敗不吞掉剛拿到的')
   assert.equal(store.get()?.error, 'nope')
 })
+
+// ---------------------------------------------------------------------------
+// 請求排隊：讀可以合流，使用者動作不可以被合流掉。用 deferred promise 把「還沒回來」
+// 這個狀態真的做出來，而不是靠時序運氣。
+// ---------------------------------------------------------------------------
+
+interface Deferred {
+  settle: (payload: unknown) => void
+  fail: (e: unknown) => void
+  promise: Promise<HerdrUpdates>
+}
+
+interface SlowRig {
+  deps: StoreDeps
+  gets: Deferred[]
+  refreshes: Deferred[]
+  seens: { version: string; d: Deferred }[]
+}
+
+function defer(): Deferred {
+  let settle!: (p: unknown) => void
+  let fail!: (e: unknown) => void
+  const promise = new Promise<HerdrUpdates>((res, rej) => {
+    settle = (p: unknown) => res(toUpdates(p))
+    fail = rej
+  })
+  return { settle, fail, promise }
+}
+
+/** 三支 API 都「掛著不回」，由測試決定什麼時候回、回什麼。 */
+function slowRig(): SlowRig {
+  const gets: Deferred[] = []
+  const refreshes: Deferred[] = []
+  const seens: { version: string; d: Deferred }[] = []
+  return {
+    gets,
+    refreshes,
+    seens,
+    deps: {
+      fetchCache: () => {
+        const d = defer()
+        gets.push(d)
+        return d.promise
+      },
+      refreshNow: () => {
+        const d = defer()
+        refreshes.push(d)
+        return d.promise
+      },
+      markSeen: (version) => {
+        const d = defer()
+        seens.push({ version, d })
+        return d.promise
+      },
+      setInterval: () => 'handle',
+      clearInterval: () => {},
+      now: () => 1_000_000,
+      onWake: () => () => {},
+      isVisible: () => true,
+    },
+  }
+}
+
+test('GET 還沒回來時按「知道了」，POST 真的送出去，不是被合流掉當成功', async () => {
+  const r = slowRig()
+  const store = createHerdrUpdatesStore(r.deps)
+  store.subscribe(() => {})
+  await settle()
+  assert.equal(r.gets.length, 1, '掛載時的那一次 GET 還掛著')
+
+  // 先讓畫面上有一版可按。
+  r.gets[0]?.settle(behindPayload('0.9.0'))
+  await settle()
+  // 再開一輪 GET（模擬輪詢），故意不讓它回來。
+  void store.load(true)
+  await settle()
+  assert.equal(r.gets.length, 2, '第二次 GET 在飛')
+
+  void store.markSeenNow()
+  await settle()
+  assert.equal(r.seens.length, 1, 'seen 必須真的送出，不能被進行中的 GET 吞掉')
+  assert.equal(r.seens[0]?.version, '0.9.0')
+})
+
+test('GET 還沒回來時按「重新檢查」，refresh 也真的送出去', async () => {
+  const r = slowRig()
+  const store = createHerdrUpdatesStore(r.deps)
+  store.subscribe(() => {})
+  await settle()
+  void store.refresh()
+  await settle()
+  assert.equal(r.refreshes.length, 1, 'refresh 不能被掛著的 GET 合流掉')
+  assert.equal(r.gets.length, 1, '而且不會變成第二次 GET')
+})
+
+test('出發較早的 GET 後到，不能把已完成的 seen 結果蓋回未讀', async () => {
+  const r = slowRig()
+  const store = createHerdrUpdatesStore(r.deps)
+  store.subscribe(() => {})
+  await settle()
+  r.gets[0]?.settle(behindPayload('0.9.0'))
+  await settle()
+  assert.equal(store.get()?.unread, true)
+
+  // 舊的輪詢在飛（它看到的還是「未讀」）。
+  void store.load(true)
+  await settle()
+  // 使用者按掉，POST 先回來。
+  void store.markSeenNow()
+  await settle()
+  r.seens[0]?.d.settle({ ...behindPayload('0.9.0'), unread: false })
+  await settle()
+  assert.equal(store.get()?.unread, false, '按掉之後是已讀')
+
+  // 那個更早出發的 GET 現在才回來，帶著過時的「未讀」。
+  r.gets[1]?.settle(behindPayload('0.9.0'))
+  await settle()
+  assert.equal(store.get()?.unread, false, '舊回應不能把已讀翻回未讀')
+})
+
+test('seen 綁按下去那一版：排隊時新 release 到了也不會誤標新版', async () => {
+  const r = slowRig()
+  const store = createHerdrUpdatesStore(r.deps)
+  store.subscribe(() => {})
+  await settle()
+  r.gets[0]?.settle(behindPayload('0.9.0'))
+  await settle()
+
+  // 先讓寫入佇列忙著（重新檢查還沒回來）。
+  void store.refresh()
+  await settle()
+  assert.equal(r.refreshes.length, 1)
+
+  // 使用者按下「知道了 0.9.0」，排在 refresh 後面。
+  void store.markSeenNow()
+  await settle()
+  assert.equal(r.seens.length, 0, '還輪不到它送出')
+
+  // 排隊期間官方出了 0.9.1，輪詢先把它帶進畫面。
+  void store.load(true)
+  await settle()
+  r.gets[1]?.settle(behindPayload('0.9.1'))
+  await settle()
+  assert.equal(store.get()?.latest.version, '0.9.1')
+
+  // 輪到 seen 送出：送的必須是按下去時看到的 0.9.0。
+  r.refreshes[0]?.settle(behindPayload('0.9.1'))
+  await settle()
+  assert.equal(r.seens.length, 1)
+  assert.equal(r.seens[0]?.version, '0.9.0', '不能把使用者沒看過的 0.9.1 標成已讀')
+})
+
+test('兩個使用者動作依序送出，不交錯', async () => {
+  const r = slowRig()
+  const store = createHerdrUpdatesStore(r.deps)
+  store.subscribe(() => {})
+  await settle()
+  r.gets[0]?.settle(behindPayload('0.9.0'))
+  await settle()
+
+  void store.refresh()
+  void store.markSeenNow()
+  await settle()
+  assert.equal(r.refreshes.length, 1)
+  assert.equal(r.seens.length, 0, '第二個要等第一個結束')
+
+  r.refreshes[0]?.settle(behindPayload('0.9.0'))
+  await settle()
+  assert.equal(r.seens.length, 1, '前一個結束才輪到它')
+})
+
+test('使用者動作失敗不會卡住後面的動作', async () => {
+  const r = slowRig()
+  const store = createHerdrUpdatesStore(r.deps)
+  store.subscribe(() => {})
+  await settle()
+  r.gets[0]?.settle(behindPayload('0.9.0'))
+  await settle()
+
+  void store.refresh()
+  await settle()
+  r.refreshes[0]?.fail(new HerdrUpdatesError('boom', 500))
+  await settle()
+  assert.equal(store.get()?.error, 'boom')
+  assert.equal(store.get()?.latest.version, '0.9.0', '失敗不清空')
+
+  void store.markSeenNow()
+  await settle()
+  assert.equal(r.seens.length, 1, '前一個失敗了，後面的照樣送得出去')
+})
