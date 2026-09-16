@@ -43,7 +43,7 @@ function mockFlag(name: string): boolean {
  *
  * 要人工走完 LAN 配對那一段（SPEC §7.1a）就在網址加 `?pair=1`——`session()` 會像區網上的手機一樣
  * 收到 403 `pairing_required`，畫面換成輸入配對碼。碼要另外開一個**沒帶** `?pair=1` 的分頁，
- * 從「環境設定 → 手機配對」按出來。再加 `?pairRemote=1` 則連產碼都會被 403 `loopback_only` 擋下，
+ * 從「環境設定 → 手機配對」按出來（mock 的碼存在 `am.mock.paircodes`，兩個分頁才對得起來）。再加 `?pairRemote=1` 則連產碼都會被 403 `loopback_only` 擋下，
  * 用來看「只有本機產得出來」那句說明。
  *
  * 配對成功的 token 跟真的一樣存進 localStorage，所以重整之後就不會再問——要重看一次配對畫面，
@@ -56,6 +56,46 @@ const PAIR_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
 const PAIR_TTL_SECS = 300
 const PAIR_MAX_FAILURES = 5
 const PAIR_LOCKOUT_SECS = 600
+/** mock 的碼要跨分頁看得到（見 `pairCodes`）；讀寫都可能丟例外（無痕視窗、封鎖 site data）。 */
+const PAIR_CODES_KEY = 'am.mock.paircodes'
+
+function mockPairCodes() {
+  // 存不進 localStorage（無痕視窗、測試環境根本沒有這個物件）時退回只活這一頁的鏡像，
+  // 行為就跟改這一段之前一樣——跨分頁對不起來，但單頁流程照走。
+  let mirror: Record<string, number> = {}
+  const read = (): Record<string, number> => {
+    try {
+      const raw = localStorage.getItem(PAIR_CODES_KEY)
+      const parsed: unknown = raw ? JSON.parse(raw) : null
+      return parsed && typeof parsed === 'object' ? (parsed as Record<string, number>) : mirror
+    } catch {
+      return mirror
+    }
+  }
+  const write = (all: Record<string, number>) => {
+    mirror = all
+    try {
+      localStorage.setItem(PAIR_CODES_KEY, JSON.stringify(all))
+    } catch {
+      /* 存不了就只活這一頁 */
+    }
+  }
+  return {
+    get(code: string): number | undefined {
+      return read()[code]
+    },
+    set(code: string, expires: number) {
+      const all = read()
+      all[code] = expires
+      write(all)
+    },
+    delete(code: string) {
+      const all = read()
+      delete all[code]
+      write(all)
+    },
+  }
+}
 
 interface MockRun {
   id: string
@@ -429,8 +469,13 @@ export class MockTransport implements Transport {
   /** 跟真 transport 用同一個保存處，配對過的 mock 分頁重整也不會被退回配對畫面。 */
   private readonly tokens = deviceTokenStore()
   private pairingListener: (() => void) | null = null
-  /** 發出去還沒過期的碼 → 到期時刻（epoch ms）。跟 daemon 一樣只活在記憶體。 */
-  private pairCodes = new Map<string, number>()
+  /**
+   * 發出去還沒過期的碼 → 到期時刻（epoch ms）。
+   *
+   * 真 daemon 只記在記憶體，mock 這裡**刻意落地**：要走完這段流程，碼得在「環境設定」那個分頁產生、
+   * 到 `?pair=1` 的分頁輸入，而兩個分頁各有自己的 `MockTransport`——記在記憶體就永遠對不起來。
+   */
+  private readonly pairCodes = mockPairCodes()
   private pairFailures = 0
   private pairLockedUntil = 0
 
