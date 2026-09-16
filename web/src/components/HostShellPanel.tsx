@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ClipboardEvent as ReactClipboardEvent, KeyboardEvent as ReactKeyboardEvent } from 'react'
 import * as api from '../api'
 import { herdrKeyFromEvent, useShellKeys } from '../hooks/usePaneKeys'
-import { keySyncActive, shellForbidden } from '../lib/shellAccess'
+import { keySyncActive, shellForbidden, shellStateUnknown } from '../lib/shellAccess'
 import { ApiError } from '../api/types'
 import type { TerminalSnapshot, TerminalSource } from '../api/types'
 import { useStore } from '../store/store'
@@ -234,7 +234,8 @@ export function HostShellPanel({
     (e: unknown) => {
       const denied = shellForbidden(e)
       if (!denied) {
-        setErr(e instanceof Error ? e.message : String(e))
+        // 讀不到狀態：這次沒送，但不是唯讀——顯示說明、不鎖面板。
+        setErr(shellStateUnknown(e) ?? (e instanceof Error ? e.message : String(e)))
         return
       }
       lockShellView(host, paneId, denied)
