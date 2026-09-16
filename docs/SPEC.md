@@ -466,6 +466,7 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run
 
 ### 6.4 停止／刪除 Bot（per-bot 鎖內）
 - `interrupt`：`agent.send_keys [esc]`，Run 狀態不變。
+  **按了 interrupt 之後，這顆 bot 排著的 queued 不立刻送**（AGM 2026-09-16）：使用者按 Esc 多半是要親手接管、馬上打字，AGM 的派工搶進去等於跟他搶輸入框。flush 要等 bot **連續閒置滿寬限**（預設 60 秒，`AM_QUEUE_INTERRUPT_GRACE_SECS` 可調，看不懂／0／負數回預設）才送；寬限從「按 interrupt 的時刻」與「這個對話最後一個回合結束」較晚的那個算起，所以使用者在寬限內自己送的 prompt 會先跑，排隊的接在它後面。判斷在 `flush_queued_locked` 裡（所有 flush 呼叫端都吃得到），排在「交辦已不要就撤銷」之後；寬限內 return 會掛 timer 到寬限結束。接管標記只在記憶體、最久 30 分鐘：daemon 重啟就回到一般排隊。abort 仍不撤 queued；寬限內的 queued 照樣算送達臨界區（會延長換版窗口被擋的時間）。
 - `stop`：Run `stopping` → in-flight Turn 標 `failed` → `ctrl+c` ×2（間隔 500 ms）→ 等 `pane.exited` 或 agent 消失最多 10 秒 → 否則 `pane.close` → `stopped` → 關訂閱。
 - `POST /bots/:id/restart`：有 Run 先 stop 再 start，用來套用改過的 model／args／identity／env。
 - DELETE Bot：TOML 移除＋DB `deleted_at`（單一臨界區，§3.1；保留對話）→ stop（child 與自己）→ 刪 `~/.config/agents-manager/bots/<bot_id>/`（遠端 ssh `rm -rf`，失敗只 log）。

@@ -6,6 +6,77 @@ use super::*;
 /// (the one-in-flight / one-queued unique indexes make a lost race an error). Early returns leave
 /// the turn queued; after the claim, any give-up must `requeue_turn` — `in_flight` +
 /// `delivery='pending'` has no other way out.
+/// 使用者按 interrupt（Esc）之後，排隊的派工先讓他拿回輸入框（AGM 2026-09-16 裁示）：按 Esc 多半是要親手接管、
+/// 馬上打字，這時 AGM 的派工搶先打進去，等於跟使用者搶輸入框。
+pub const INTERRUPT_GRACE_SECS: u64 = 60;
+pub const INTERRUPT_GRACE_ENV: &str = "AM_QUEUE_INTERRUPT_GRACE_SECS";
+/// 接管標記最久活這麼久：之後就算一直有人在講話，也回到一般的排隊行為（不讓一次 Esc 永遠壓著佇列）。
+const INTERRUPT_HOLD_MAX: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// 看不懂、0、負數一律回預設——一個手滑的值不該讓 Esc 之後的派工立刻搶進去（或永遠不送）。
+pub fn interrupt_grace() -> std::time::Duration {
+    let secs = std::env::var(INTERRUPT_GRACE_ENV)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(INTERRUPT_GRACE_SECS);
+    std::time::Duration::from_secs(secs)
+}
+
+/// bot → 使用者接管的時刻。只在記憶體：daemon 重啟就當沒有接管，排隊照一般規則送（不動 schema）。
+fn interrupt_holds() -> &'static std::sync::Mutex<std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>> {
+    static M: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>>> =
+        std::sync::OnceLock::new();
+    M.get_or_init(Default::default)
+}
+
+/// 使用者剛按了 interrupt：從現在起，這顆 bot 排著的派工要等它連續閒置滿寬限才送。
+pub fn note_user_interrupt(bot_id: &str) {
+    if let Ok(mut m) = interrupt_holds().lock() {
+        m.insert(bot_id.to_string(), chrono::Utc::now());
+    }
+}
+
+/// 還要再等多久（`None`＝不用等）。純函式：寬限從「接管時刻」與「最後一個回合結束」較晚的那個算起——
+/// 使用者在寬限內自己送了 prompt，那一回合跑完之後才重新計時，排隊的就接在他那則後面。
+pub(crate) fn interrupt_grace_remaining(
+    hold_at: Option<chrono::DateTime<chrono::Utc>>,
+    last_completed_at: Option<chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+    grace: std::time::Duration,
+) -> Option<std::time::Duration> {
+    let hold_at = hold_at?;
+    if (now - hold_at).to_std().is_ok_and(|age| age >= INTERRUPT_HOLD_MAX) {
+        return None;
+    }
+    let idle_since = last_completed_at.map_or(hold_at, |c| c.max(hold_at));
+    let idle = (now - idle_since).to_std().unwrap_or_default();
+    grace.checked_sub(idle).filter(|left| !left.is_zero())
+}
+
+/// 讀這顆 bot 的接管標記與最後一個回合結束時間，算出還要等多久；等完了就把標記收掉。
+async fn interrupt_hold_left(app: &Arc<App>, bot_id: &str, conv: &str) -> Option<std::time::Duration> {
+    let hold_at = interrupt_holds().lock().ok()?.get(bot_id).copied()?;
+    let last: Option<String> =
+        sqlx::query_scalar("SELECT MAX(completed_at) FROM turns WHERE conversation_id=? AND completed_at IS NOT NULL")
+            .bind(conv)
+            .fetch_one(&app.db)
+            .await
+            .ok()
+            .flatten();
+    let last = last.and_then(|t| chrono::DateTime::parse_from_rfc3339(&t).ok()).map(|t| t.with_timezone(&chrono::Utc));
+    let left = interrupt_grace_remaining(Some(hold_at), last, chrono::Utc::now(), interrupt_grace());
+    if left.is_none() {
+        if let Ok(mut m) = interrupt_holds().lock() {
+            // 只收掉同一次接管的標記：等的這段時間裡使用者又按了一次，就留給新的那次。
+            if m.get(bot_id) == Some(&hold_at) {
+                m.remove(bot_id);
+            }
+        }
+    }
+    left
+}
+
 pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow::Result<()> {
     let conv = match db::conversation_id(&app.db, bot_id).await {
         Ok(conv) => conv,
@@ -37,6 +108,14 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
         return Ok(());
     }
     if db::in_flight_turn(&app.db, &run.id).await?.is_some() {
+        return Ok(());
+    }
+    // 使用者剛按了 interrupt：讓他先拿回輸入框。判斷放在這裡（而不是觸發端）是因為 flush 不只一個呼叫端
+    // （`stuck_turns` 在同一把鎖裡直接呼叫）；排在撤銷檢查之後，不要的派工照樣當場撤。閒著的 bot 不會再有
+    // `working -> idle` 邊叫醒它，所以要掛 timer 到寬限結束。
+    if let Some(left) = interrupt_hold_left(app, bot_id, &conv).await {
+        tracing::info!(bot = %bot_id, turn = %turn.id, wait_s = left.as_secs(), "使用者剛 interrupt：排隊的派工等寬限結束再送");
+        schedule_flush_retry(app, bot_id, left);
         return Ok(());
     }
     let Some(bot) = db::bot(&app.db, bot_id).await? else { return Ok(()) };
@@ -628,6 +707,74 @@ mod flush_queue_tests {
         .await
         .unwrap();
         Fixture { env, bot_id, conv, run_id, turn_id }
+    }
+
+    fn at(iso: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(iso).unwrap().with_timezone(&chrono::Utc)
+    }
+
+    /// AGM 2026-09-16：使用者 interrupt 之後，排隊的派工要等 bot 連續閒置滿寬限才送；寬限內使用者自己送的那一回合
+    /// 跑完之後才重新計時。
+    #[test]
+    fn the_interrupt_grace_counts_from_the_later_of_the_interrupt_and_the_last_turn() {
+        let grace = std::time::Duration::from_secs(60);
+        let now = at("2026-09-16T12:00:00Z");
+        // 沒有接管：不用等。
+        assert_eq!(interrupt_grace_remaining(None, None, now, grace), None);
+        // 20 秒前按 Esc：還要 40 秒。
+        assert_eq!(interrupt_grace_remaining(Some(at("2026-09-16T11:59:40Z")), None, now, grace), Some(std::time::Duration::from_secs(40)));
+        // 按 Esc 之後使用者自己送了一則、10 秒前才跑完：從那時算，還要 50 秒。
+        assert_eq!(
+            interrupt_grace_remaining(Some(at("2026-09-16T11:58:00Z")), Some(at("2026-09-16T11:59:50Z")), now, grace),
+            Some(std::time::Duration::from_secs(50))
+        );
+        // 早於接管的回合結束時間不算（被 interrupt 的那一回合就是在接管時結束的）。
+        assert_eq!(
+            interrupt_grace_remaining(Some(at("2026-09-16T11:59:40Z")), Some(at("2026-09-16T11:50:00Z")), now, grace),
+            Some(std::time::Duration::from_secs(40))
+        );
+        // 閒置滿寬限：送。
+        assert_eq!(interrupt_grace_remaining(Some(at("2026-09-16T11:58:00Z")), None, now, grace), None);
+        // 接管標記最久 30 分鐘，之後回到一般排隊（不讓一次 Esc 永遠壓著）。
+        assert_eq!(
+            interrupt_grace_remaining(Some(at("2026-09-16T11:29:00Z")), Some(at("2026-09-16T11:59:59Z")), now, grace),
+            None
+        );
+    }
+
+    #[test]
+    fn a_broken_grace_env_falls_back_to_sixty_seconds() {
+        for bad in ["0", "-5", "abc", ""] {
+            std::env::set_var(INTERRUPT_GRACE_ENV, bad);
+            assert_eq!(interrupt_grace(), std::time::Duration::from_secs(60), "{bad:?}");
+        }
+        std::env::set_var(INTERRUPT_GRACE_ENV, "5");
+        assert_eq!(interrupt_grace(), std::time::Duration::from_secs(5));
+        std::env::remove_var(INTERRUPT_GRACE_ENV);
+    }
+
+    /// 真的走 flush：剛 interrupt 的 bot 排著的派工不動（不 claim、不算重試、掛好 timer）；
+    /// 寬限過了就照常往下送。
+    #[tokio::test]
+    async fn a_queued_dispatch_waits_out_the_grace_after_the_user_interrupts() {
+        let f = queued("test").await;
+        let app = f.env.app.clone();
+        note_user_interrupt(&f.bot_id);
+        forget_queue_retry_timer(&f.bot_id);
+
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+        let t = turn(&app, &f.turn_id).await;
+        assert_eq!(t.status, "queued");
+        assert_eq!((t.flush_retries, t.next_flush_at.clone()), (0, None), "寬限內連試都不試");
+        assert!(queue_retry_timer_armed(&f.bot_id), "閒著的 bot 沒有邊會叫醒它，要掛 timer");
+
+        // 寬限過了：標記往回撥到 2 分鐘前，flush 就照常往下走（這裡沒有 herdr，會被放回佇列並算一次重試）。
+        interrupt_holds().lock().unwrap().insert(f.bot_id.clone(), chrono::Utc::now() - chrono::Duration::seconds(120));
+        forget_queue_retry_timer(&f.bot_id);
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+        let t = turn(&app, &f.turn_id).await;
+        assert!(t.flush_retries > 0 || t.status != "queued", "寬限過了要真的去送：{} retries={}", t.status, t.flush_retries);
+        assert!(interrupt_holds().lock().unwrap().get(&f.bot_id).is_none(), "等完就收掉標記");
     }
 
     async fn turn(app: &Arc<App>, id: &str) -> db::Turn {
