@@ -2450,7 +2450,9 @@ pub async fn add_note(pool: &SqlitePool, kind: &str, body: &Value) -> Result<Str
 /// 每筆核准的決定歷程，最舊在前。一次查完再分組：核准筆數不多，但一筆一次查詢會變 N+1。
 pub async fn approval_decisions(pool: &SqlitePool) -> Result<std::collections::HashMap<String, Vec<Value>>> {
     let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT body, created_at FROM supervisor_notes WHERE supervisor_id=? AND kind='approval_decision' ORDER BY created_at ASC, id ASC",
+        // 同一毫秒寫進去的兩筆（核准後馬上撤銷）靠 `rowid` 排：`id` 是 ULID，同一毫秒內的亂數段不保證遞增，
+        // 以前用 `id ASC` 當第二鍵，歷程偶爾會倒過來（review 2026-09-16）。
+        "SELECT body, created_at FROM supervisor_notes WHERE supervisor_id=? AND kind='approval_decision' ORDER BY created_at ASC, rowid ASC",
     )
     .bind(SUPERVISOR_ID)
     .fetch_all(pool)
@@ -3806,6 +3808,29 @@ mod tests {
         assert_eq!(approval(&p, &second.id).await.unwrap().unwrap().status, "approved", "接手的這張還在用");
         let notes = approval_decisions(&p).await.unwrap();
         assert!(notes.get(&first.id).is_some_and(|v| !v.is_empty()), "消耗要留在決定歷程裡");
+    }
+
+    /// 同一毫秒的兩筆裁示（核准後馬上撤銷）照寫入順序排，不看 ULID 的亂數段（review 2026-09-16：偶發紅）。
+    #[tokio::test]
+    async fn decisions_written_in_the_same_millisecond_keep_their_order() {
+        let p = pool().await;
+        get_or_init(&p).await.unwrap();
+        let at = "2026-09-16T12:00:00.000Z";
+        // id 故意跟寫入順序相反：第一筆的 ULID 比第二筆大。
+        for (id, from, to) in [("01ZZZZZZZZZZZZZZZZZZZZZZZZ", "pending", "approved"), ("01AAAAAAAAAAAAAAAAAAAAAAAA", "approved", "revoked")] {
+            sqlx::query("INSERT INTO supervisor_notes (id, supervisor_id, kind, body, version, created_at) VALUES (?,?,?,?,1,?)")
+                .bind(id)
+                .bind(SUPERVISOR_ID)
+                .bind("approval_decision")
+                .bind(json!({"approval_id": "ap", "from": from, "to": to}).to_string())
+                .bind(at)
+                .execute(&p)
+                .await
+                .unwrap();
+        }
+        let history = approval_decisions(&p).await.unwrap();
+        let order: Vec<&str> = history["ap"].iter().map(|d| d["to"].as_str().unwrap()).collect();
+        assert_eq!(order, vec!["approved", "revoked"]);
     }
 
     #[tokio::test]
