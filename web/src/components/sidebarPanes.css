@@ -1,0 +1,60 @@
+/* 選單裡的 shell／服務 pane（SPEC §6.5e）。Bot 列已經夠重，這一區刻意做輕：
+   它是「這個專案還掛著這些東西」的交代，不是主角。class 用 `side-pane*`，不跟專案頁的 `project-pane*` 撞。 */
+
+.side-panes {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 2px 8px 6px 26px;
+}
+
+.side-pane {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 3px 6px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.side-pane:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.side-pane.current {
+  background: var(--bg-active);
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.side-pane-icon {
+  flex: none;
+  width: 1.4em;
+  color: var(--text-faint);
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+
+/* 路徑／用途可能很長，側欄寬度是固定的：截斷而不是把整列撐開。 */
+.side-pane-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.side-pane-tag {
+  flex: none;
+  margin-left: auto;
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-faint);
+  font-size: 10px;
+}

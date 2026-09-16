@@ -511,6 +511,10 @@ Project 可在另一台機器，daemon 透過 SSH 轉發連遠端 herdr。`host`
   兩者共用同一個前端佇列（`web/src/lib/keyQueue.ts`）：**同一時間只有一個請求在路上**，飛的期間按的鍵合成下一批。
   一鍵一個 POST 會同時在路上、抵達順序不保證——打 `ls` 可能變成 `sl`。貼上不拆成鍵：文字裡的換行會變成 Enter 直接執行。
 - 每台最多 8 個：`409 {"reason":"too_many_shells","host","max":8}`。host 不存在 404；沒連線 502。
+- **白名單兩份**（2026-09-16，SPEC §6.5e「選單點得進去」）：`terminal`／`text`／`keys` 除了這裡開的 shell，也接受 `panes` 表裡的 pane。
+  `kind` 當權限——`shell` 可看可打字；`service` 只可看，打字回 `403 {"error":"read_only_pane","kind":"service"}`；
+  有 active run 的 pane 一律 `403 {"error":"agent_pane"}`（連看都不給）。沒被 trace 的 pane 照舊 404。
+  `DELETE` 仍只認這裡開的那幾顆；關被 trace 的 pane 走 `POST /api/panes/{id}/close`。
 - `recent` / `recent_unwrapped` 只給**已捲出畫面**的內容：沒捲過的 pane 兩者回 `text:""` + `truncated:true`，前端要說明而不是顯示空白。
 
 ## 身份 identities（SPEC §16）

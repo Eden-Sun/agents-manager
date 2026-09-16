@@ -134,6 +134,9 @@ export function HostShellPanel({
 }) {
   const closeShellView = useStore((s) => s.closeShellView)
   const endHostShell = useStore((s) => s.endHostShell)
+  // 從選單點進來的 pane（§6.5e）：服務 pane 唯讀；不是這個面板開的就不給「結束 shell」。
+  const readOnly = useStore((s) => Boolean(s.shellView?.host === host && s.shellView.paneId === paneId && s.shellView.readOnly))
+  const traced = useStore((s) => Boolean(s.shellView?.host === host && s.shellView.paneId === paneId && s.shellView.traced))
   const hostUp = useStore((s) => (host === 'local' ? s.connected : (s.hosts.find((h) => h.name === host)?.connected ?? false)))
   const ending = useStore((s) => Boolean(s.busy[`shell:${host}:${paneId}`]))
 
@@ -336,15 +339,18 @@ export function HostShellPanel({
       <button type="button" className="mini-btn" onClick={closeShellView} title="只關掉這個畫面，shell 留著">
         關閉
       </button>
-      <button
-        type="button"
-        className="mini-btn danger"
-        disabled={ending}
-        onClick={() => setConfirmEnd(true)}
-        title="關掉這個 shell 的 pane"
-      >
-        {ending ? '結束中…' : '結束 shell'}
-      </button>
+      {/* 被 trace 的 pane 不是這裡開的：daemon 的 DELETE 只認自己開的那幾顆，按了會是一顆什麼都不做的按鈕。 */}
+      {traced ? null : (
+        <button
+          type="button"
+          className="mini-btn danger"
+          disabled={ending}
+          onClick={() => setConfirmEnd(true)}
+          title="關掉這個 shell 的 pane"
+        >
+          {ending ? '結束中…' : '結束 shell'}
+        </button>
+      )}
     </div>
   )
 
@@ -412,6 +418,7 @@ export function HostShellPanel({
             type="button"
             className={`mini-btn${sync ? ' on' : ''}`}
             aria-pressed={sync}
+            disabled={readOnly}
             onClick={() => setSync(!sync)}
             title={
               sync
@@ -465,6 +472,12 @@ export function HostShellPanel({
           </div>
         ) : null}
 
+        {readOnly ? (
+          <div className="shell-sync-note" role="status">
+            這是服務 pane（例如 dev server），只能看不能打字——送一個 Ctrl-C 就是把它關掉。
+          </div>
+        ) : null}
+
         <form
           className="shell-input"
           onSubmit={(e) => {
@@ -482,8 +495,10 @@ export function HostShellPanel({
             value={text}
             spellCheck={false}
             autoComplete="off"
-            disabled={sync}
-            placeholder={sync ? '鍵盤同步中：直接在上面的終端打字' : '輸入指令，Enter 送出（↑↓ 翻歷史）'}
+            disabled={sync || readOnly}
+            placeholder={
+              readOnly ? '服務 pane 只能看' : sync ? '鍵盤同步中：直接在上面的終端打字' : '輸入指令，Enter 送出（↑↓ 翻歷史）'
+            }
             aria-label={`對 ${host} 的 shell 輸入指令`}
             onChange={(e) => {
               setText(e.target.value)
@@ -491,26 +506,29 @@ export function HostShellPanel({
             }}
             onKeyDown={onKeyDown}
           />
-          <button type="submit" className="btn primary" disabled={sending || sync}>
+          <button type="submit" className="btn primary" disabled={sending || sync || readOnly}>
             {sending ? '送出中…' : '送出'}
           </button>
         </form>
 
-        <div className="keypad shell-keypad">
-          {KEYS.map((k) => (
-            <button key={k.label} type="button" className="key-btn" title={k.title} onClick={() => void pressKeys(k.keys)}>
-              {k.label}
+        {/* 唯讀時整列不渲染：`hidden` 會被 `.keypad{display:flex}` 蓋掉，按鈕照樣看得到也按得到。 */}
+        {readOnly ? null : (
+          <div className="keypad shell-keypad">
+            {KEYS.map((k) => (
+              <button key={k.label} type="button" className="key-btn" title={k.title} onClick={() => void pressKeys(k.keys)}>
+                {k.label}
+              </button>
+            ))}
+            {/* 清畫面 = 真的送 `clear`：前端清 state 下次輪詢就會抓回原內容。 */}
+            <button type="button" className="key-btn" title="送出 clear，清掉終端畫面" onClick={() => void run('clear')}>
+              清畫面
             </button>
-          ))}
-          {/* 清畫面 = 真的送 `clear`：前端清 state 下次輪詢就會抓回原內容。 */}
-          <button type="button" className="key-btn" title="送出 clear，清掉終端畫面" onClick={() => void run('clear')}>
-            清畫面
-          </button>
-          <span className="spacer" />
-          <span className="hint shell-keypad-note">
-            按鍵原樣送到那個 pane。↑↓ 在輸入框裡走的是這裡的指令歷史。
-          </span>
-        </div>
+            <span className="spacer" />
+            <span className="hint shell-keypad-note">
+              按鍵原樣送到那個 pane。↑↓ 在輸入框裡走的是這裡的指令歷史。
+            </span>
+          </div>
+        )}
       </div>
 
       <ConfirmDialog

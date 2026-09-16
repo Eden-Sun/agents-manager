@@ -563,6 +563,18 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
   也不得隨手關掉不是自己開的 pane。
 - daemon 重啟後靠同一輪掃描重建 `panes`，不留記憶體狀態。
 
+#### 選單點得進去（使用者 2026-09-16：「這 shell pane 要在 menu 可點選進入」）
+- 側欄（手機是選單抽屜）每個專案的 Bot 清單底下列該專案被 trace 的 pane（`SidebarPanes`，資料同 `GET /api/projects/{id}/panes`），
+  **點一下在這個 app 裡打開那顆 pane**——沿用主機 shell 面板，手機上也進得去。專案頁「其他 pane」區塊的「聚焦」是 herdr
+  `pane.focus`，只動得了那台機器的 TUI，兩者不互相取代。重整／深連結（`/hosts/<host>/shells/<pane>`）先查面板自己開的 shell，
+  查不到再查 `GET /api/panes`。
+- **白名單兩份**（`shell::registered`）：面板自己開的（`app.host_shells`，只在記憶體）加上 `panes` 表。後者活過重啟。
+- **`kind` 當權限**（`shell::allowed`）：`shell` 可看可打字；`service` **只可看**——送一個 Ctrl-C 給 dev server 就是把它關掉，
+  UI 把輸入框鎖住、按鍵列整列拿掉並講明；其他一律不給。**有 active run 的 pane 一律 403**：掃描可能在 agent 還沒被 herdr
+  認出來的空檔把 bot 的 pane 記成 shell，那一刻也不能讓按鍵繞過回合那條線（§6.5.1／§6.9 的教訓）。
+- 面板對被 trace 的 pane 不給「結束 shell」：那顆 `DELETE` 只認面板自己開的，按了會是什麼都不做的按鈕；關這種 pane 走
+  `POST /api/panes/{id}/close`（服務 pane 要 `confirm`），自動關照上面的生命週期。
+
 #### 「最後輸出」怎麼量（AGM 2026-09-16 補充）
 herdr 的 `pane.list` 沒有輸出時間戳，**不要讀畫面內容來判斷**（讀 400 行只為了看它有沒有動，成本與誤判都高）。
 用 pane 的 `revision`（沒有就退回 `state_change_seq`）：daemon 每輪掃描與上次記下的值比對，**值變了就把 `last_output_at`
