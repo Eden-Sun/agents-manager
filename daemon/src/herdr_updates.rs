@@ -721,8 +721,15 @@ pub async fn refresh(app: &Arc<App>, manual: bool) {
             }
         }
     }
+    // 各主機平行探：一台 ssh 逾時（最久 20 秒）不該把整輪拖成「主機數 × 20 秒」，
+    // 手動 refresh 那條 HTTP 請求還等在後面。
+    let mut probes = tokio::task::JoinSet::new();
     for conn in app.hosts.list().await {
-        let p = probe_host(app, &conn).await;
+        let app = app.clone();
+        probes.spawn(async move { probe_host(&app, &conn).await });
+    }
+    while let Some(done) = probes.join_next().await {
+        let Ok(p) = done else { continue };
         if let Err(e) = save_host(&app.db, &p).await {
             tracing::warn!(host = %p.host, error = %e, "herdr 主機版本寫不進 DB");
         }
