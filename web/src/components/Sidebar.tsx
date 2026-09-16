@@ -161,7 +161,12 @@ function BotRow({
     }),
   )
   const selected = useStore((s) => s.selectedBotId === botId)
-  const unread = useStore((s) => s.botUnread[botId] ?? 0)
+  // 總管專案裡的往來是 AGM 的內部事務，使用者不會想知道，未讀回合數不顯示（2026-09-16 使用者）。
+  const unread = useStore((s) => {
+    const b = s.bots.find((x) => x.id === botId)
+    if (b && s.supervisorProjectId && b.project_id === s.supervisorProjectId) return 0
+    return s.botUnread[botId] ?? 0
+  })
   const selectBot = useStore((s) => s.selectBot)
   const agentTitle = useStore((s) => {
     const r = s.runs[botId]
@@ -724,7 +729,14 @@ function ProjectTitle({
   const selected = useStore((s) => s.selectedProjectId === projectId)
   const unread = useStore((s) => s.groupUnread[projectId] ?? 0)
   const foldedUnread = useStore((s) =>
-    folded ? s.bots.reduce((n, b) => (b.project_id === projectId ? n + (s.botUnread[b.id] ?? 0) : n), 0) : 0,
+    folded
+      ? s.bots.reduce((n, b) => {
+          if (b.project_id !== projectId) return n
+          // 同上：總管專案的未讀不進群組加總。
+          if (s.supervisorProjectId && b.project_id === s.supervisorProjectId) return n
+          return n + (s.botUnread[b.id] ?? 0)
+        }, 0)
+      : 0,
   )
   const selectProject = useStore((s) => s.selectProject)
   // `<input>` can't live in a `<button>`: renaming swaps the row for a same-class `<div>`.
