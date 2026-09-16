@@ -5,12 +5,13 @@ daemon 預設 `http://127.0.0.1:7788`（`config.toml` 的 `server.listen`）。�
 
 ## 0. 認證
 
-1. `GET /api/session` 不需 token，但 `Host` 必須是 `127.0.0.1:<port>` / `localhost:<port>` / `[::1]:<port>`，`Origin`（若有）為本機。回 `{"token":"<32 hex>","port":7788}`。
+1. `GET /api/session` 不需 token，但**連線的 TCP 對端**必須是 loopback（不看 `Host`：那是呼叫端自己填的），`Origin`（若有）的主機必須是 `127.0.0.1` / `localhost` / `[::1]`（不限 port）。回 `{"token":"<32 hex>","port":7788}`。
+   開發版（`allow_lan`，見 SPEC §7.1）這兩項都直接放行：同網段誰都拿得到 token——這是使用者裁示保留的風險（`e7392dd`）。
 2. 其餘 `/api/*` 需 header `X-AM-Token`；缺或錯 → `401 {"error":"missing or bad X-AM-Token"}`。
 3. WebSocket：`/ws?token=<token>[&since=<seq>]`。
-4. `/hook/*`、`/relay/announce` 用 per-bot 的 `X-AM-Bot-Token`。
+4. `/hook/*`、`/relay/announce`、`/relay/pane` 用 per-bot 的 `X-AM-Bot-Token`。
 
-Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon，並開 `changeOrigin: true`（daemon 檢查 `Host`）。
+Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daemon 不檢查 `Host`；proxy 從本機連過來，對端就是 loopback。
 
 ## 1. 錯誤格式
 
@@ -18,7 +19,7 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon，並�
 |---|---|---|
 | 400 | `{"error":"bad_request","message":"..."}` | 參數錯誤 |
 | 401 | `{"error":"..."}` | token 錯 |
-| 403 | `{"error":"..."}` | Host / Origin 非本機 |
+| 403 | `{"error":"..."}` | 對端（只有 `/api/session`）／`Origin` 非本機；另有各端點自己的 403（例如 `read_only_pane`） |
 | 404 | `{"error":"not_found","what":"bot"\|"project"\|"run"\|"pane"\|"turn"}` | 找不到 |
 | 409 | `{"error":"conflict","reason":"<人類可讀>", ...extra}` | 狀態機衝突；extra 視情況含 `run_id` / `turn_id` / `bot_id` / `name` / `path` / `state` |
 | 502 | `{"error":"upstream","message":"..."}` | herdr / DB 出錯 |
