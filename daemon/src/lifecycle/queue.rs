@@ -15,6 +15,14 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
         }
     };
     let Some(turn) = db::queued_turn(&app.db, &conv).await? else { return Ok(()) };
+    // 交辦已經不要了（cancel／superseded／failed）：撤銷，不送。API 做決定的當下已經撤過一次，這裡是保險——
+    // 繞過 API 改了狀態、或決定 commit 之後還沒撤就重啟，都不能讓一則已取消的指令在錯的時機送到（AGM 2026-09-16）。
+    if let Some(why) = withdrawn_assignment_reason(app, &turn.id).await {
+        if let Err(e) = revoke_queued_turn(app, &turn.id, &why).await {
+            tracing::error!(bot = %bot_id, turn = %turn.id, error = %e, "could not revoke a withdrawn queued prompt");
+        }
+        return Ok(());
+    }
     // Put back with a backoff: other wake-ups must not spend its retries early. Its timer brings it back.
     if let Some(at) = turn.next_flush_at.as_deref().and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok()) {
         if at > chrono::Utc::now() {
@@ -236,6 +244,47 @@ async fn defer_queued_turn(
     tx.commit().await?;
     tracing::info!(turn = turn_id, reason, attempt = retries + 1, retry_in_s = delay.as_secs(), "queued prompt not sent yet; put back");
     Ok(Some(delay))
+}
+
+/// 這筆 queued turn 掛的交辦已經不要了（cancelled／superseded／failed）→ 寫進對話的撤銷理由；還要、或沒掛交辦 → `None`。
+pub(crate) async fn withdrawn_assignment_reason(app: &Arc<App>, turn_id: &str) -> Option<String> {
+    let a = crate::supervisor::store::assignment_by_turn(&app.db, turn_id).await.ok()??;
+    let what = match a.status.as_str() {
+        "cancelled" => "已取消",
+        "superseded" => "已被後續交辦取代",
+        "failed" => "已判定失敗",
+        _ => return None,
+    };
+    let why = a.review_reason.as_deref().map(str::trim).filter(|r| !r.is_empty()).map(|r| format!("（{r}）")).unwrap_or_default();
+    Some(format!("排隊中的這則沒有送出：交辦 {} {what}{why}，一併撤銷，不會再送。", a.id))
+}
+
+/// 撤銷一筆還在排隊的 turn：標成 failed、寫明理由、釋放這個對話的 queued 名額，**不送**。
+/// 只動 `queued`——已經 in_flight 或送出的撤不回來，不假裝撤回。`Ok(true)`＝這次真的撤掉了。
+pub(crate) async fn revoke_queued_turn(app: &Arc<App>, turn_id: &str, why: &str) -> anyhow::Result<bool> {
+    let mut tx = app.db.begin().await?;
+    let revoked = sqlx::query(
+        "UPDATE turns SET status='failed', delivery='failed', completed_at=?, next_flush_at=NULL WHERE id=? AND status='queued'",
+    )
+    .bind(db::now())
+    .bind(turn_id)
+    .execute(&mut *tx)
+    .await?;
+    if revoked.rows_affected() == 0 {
+        return Ok(false);
+    }
+    let (conv, bot_id): (String, String) = sqlx::query_as(
+        "SELECT t.conversation_id, c.bot_id FROM turns t JOIN conversations c ON c.id = t.conversation_id WHERE t.id = ?",
+    )
+    .bind(turn_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    let message = insert_message_tx(&mut tx, &conv, Some(turn_id), "system", why, "system", false, None).await?;
+    tx.commit().await?;
+    tracing::info!(turn = turn_id, bot = %bot_id, "revoked a queued prompt whose assignment was withdrawn");
+    emit_message_added(app, &bot_id, message).await;
+    emit_turn(app, turn_id).await;
+    Ok(true)
 }
 
 /// Fail a claimed turn together with the system message that explains it.
@@ -520,6 +569,100 @@ mod flush_queue_tests {
             .fetch_one(&app.db)
             .await
             .unwrap()
+    }
+
+    /// 交辦掛上這筆 queued turn（AGM 派工遇到回合中就是這個形狀）。
+    async fn queued_assignment(f: &Fixture) -> String {
+        crate::supervisor::store::get_or_init(&f.env.app.db).await.unwrap();
+        let a = crate::supervisor::store::insert_assignment(&f.env.app.db, None, &f.bot_id, "crid-fence", "請釋放 fence 21", &[], None, true)
+            .await
+            .unwrap();
+        crate::supervisor::store::mark_delivered(&f.env.app.db, &a.id, &f.turn_id, "queued").await.unwrap();
+        a.id
+    }
+
+    async fn decide(app: &Arc<App>, id: &str, decision: &str) -> Value {
+        let input: crate::supervisor::api::ReviewIn =
+            serde_json::from_value(json!({"decision": decision, "reason": "改主意了"})).unwrap();
+        crate::supervisor::api::post_review(axum::extract::State(app.clone()), axum::extract::Path(id.to_string()), axum::http::HeaderMap::new(), axum::Json(input))
+            .await
+            .map(|j| j.0)
+            .unwrap()
+    }
+
+    /// cancel 當下就撤掉它排著的 queued turn：終態、寫明理由、名額立刻釋放，之後的 flush 也不會送出去。
+    #[tokio::test]
+    async fn cancelling_an_assignment_revokes_its_queued_turn_and_frees_the_slot() {
+        let f = queued("test").await;
+        let app = f.env.app.clone();
+        f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
+        sqlx::query("UPDATE turns SET prompt_text = '請釋放 fence 21' WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        let a = queued_assignment(&f).await;
+
+        let out = decide(&app, &a, "cancel").await;
+        assert_eq!(out["status"], "cancelled");
+        assert_eq!(out["revoked_turn_id"], json!(f.turn_id));
+        let t = turn(&app, &f.turn_id).await;
+        assert_eq!((t.status.as_str(), t.delivery.as_str()), ("failed", "failed"), "終態，不佔名額");
+        let why: String = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id = ? AND role = 'system'")
+            .bind(&f.turn_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert!(why.contains(&a) && why.contains("已取消") && why.contains("改主意了"), "{why}");
+
+        // 名額釋放：同一個對話馬上排得進下一筆。
+        sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, delivery, prompt_text, created_at) VALUES (?,?,'web','queued','pending','下一則',?)")
+            .bind(db::ulid())
+            .bind(&f.conv)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .expect("queued 名額已經釋放");
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+        let typed = f.env.herdr.pane("pane-1").unwrap().transcript;
+        assert!(!typed.iter().any(|l| l.contains("fence 21")), "已取消的那則一個字都沒送：{typed:?}");
+        assert!(typed.iter().any(|l| l.contains("下一則")), "排在後面的照常送：{typed:?}");
+    }
+
+    /// 已經 in_flight（送出去了）的撤不回來：cancel 不動 turn，也不說撤掉了。
+    #[tokio::test]
+    async fn an_assignment_whose_prompt_already_went_out_is_not_pretended_away() {
+        let f = queued("test").await;
+        let app = f.env.app.clone();
+        let a = queued_assignment(&f).await;
+        sqlx::query("UPDATE turns SET status = 'in_flight', delivery = 'ok', run_id = ? WHERE id = ?")
+            .bind(&f.run_id)
+            .bind(&f.turn_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let out = decide(&app, &a, "cancel").await;
+        assert_eq!(out["status"], "cancelled");
+        assert!(out.get("revoked_turn_id").is_none(), "{out}");
+        assert_eq!(turn(&app, &f.turn_id).await.status, "in_flight");
+    }
+
+    /// 繞過 API 改成 superseded／failed（或決定 commit 之後還沒撤就重啟）：flush 送出前也會撤掉，不送。
+    #[tokio::test]
+    async fn the_flush_never_sends_a_prompt_whose_assignment_was_withdrawn() {
+        for status in ["superseded", "failed", "cancelled"] {
+            let f = queued("test").await;
+            let app = f.env.app.clone();
+            f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
+            let a = queued_assignment(&f).await;
+            sqlx::query("UPDATE supervisor_assignments SET status = ? WHERE id = ?").bind(status).bind(&a).execute(&app.db).await.unwrap();
+            flush_queued_locked(&app, &f.bot_id).await.unwrap();
+            assert_eq!(turn(&app, &f.turn_id).await.status, "failed", "{status}");
+            assert!(f.env.herdr.pane("pane-1").map_or(true, |p| p.transcript.is_empty()), "{status}：一個字都沒打");
+        }
+        // 對照：交辦還在（delivered）的照常送。
+        let f = queued("test").await;
+        let app = f.env.app.clone();
+        f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
+        queued_assignment(&f).await;
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+        assert_eq!(turn(&app, &f.turn_id).await.status, "in_flight");
     }
 
     /// 框裡有字時排隊的 prompt 一個字都不打、放回隊列；框清空後再 flush 就送出去（第七輪 #2）。
