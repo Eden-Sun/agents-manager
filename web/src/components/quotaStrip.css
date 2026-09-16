@@ -730,8 +730,16 @@
     display: none;
   }
 
+  /* 額度格跟桌面一樣動態增寬（2026-09-16 使用者）：basis 0 均分整列；min-width 保底是內容寬，
+     帳號多到塞不下時仍照舊橫向捲動，不會把字擠斷。 */
+  .main-head .quota-open {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
   .main-head .quota-hp {
-    flex: none;
+    flex: 1 0 0;
+    min-width: max-content;
   }
 
   /* 同列三個 claude 身分時，沒有 cc0／cc1／cc2 會一模一樣。 */
