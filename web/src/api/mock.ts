@@ -1226,6 +1226,9 @@ export class MockTransport implements Transport {
   }
 
   /** 跟 daemon 同一個形狀（SPEC §6.5f）：新的排前面，每個檔案帶剩餘秒數；grok 這顆演遠端。 */
+  /** bot 在 mock 回合裡「放進 outbox」的檔名（`outbox` 關鍵字），依序累積。 */
+  private outboxAdded = new Map<string, string[]>()
+
   private outbox(botId: string) {
     const bot = this.bot(botId)
     const ttl = 3600
@@ -1241,7 +1244,12 @@ export class MockTransport implements Transport {
     return {
       dir: `/Users/me/.config/agents-manager/outbox/${botId}`,
       ttl_secs: ttl,
-      files: [file('tracking.tsv', 18_432, 120), file('出貨追蹤 v2.md', 4_096, 1_500), file('run.log', 1_204_233, 3_300)],
+      files: [
+        ...(this.outboxAdded.get(botId) ?? []).map((name) => file(name, 141, 5)),
+        file('tracking.tsv', 18_432, 120),
+        file('出貨追蹤 v2.md', 4_096, 1_500),
+        file('run.log', 1_204_233, 3_300),
+      ],
     }
   }
 
@@ -2565,6 +2573,12 @@ export class MockTransport implements Transport {
           ? '截圖在這：\n\n![menu](docs/screenshots/project-mem/project-mem-390-menu.png)\n\n專案外的：![](/tmp/missing-shot.png)'
           : this.nextReply())
       const slow = lowered.includes('slow')
+      // 「outbox」：演 bot 在回合裡放檔，回合結束那一刻清單就該出現（不必切頁或按 ↻）。
+      if (lowered.includes('outbox')) {
+        const list = this.outboxAdded.get(botId) ?? []
+        list.push(`download-test-${list.length + 1}.txt`)
+        this.outboxAdded.set(botId, list)
+      }
       const frames = slow ? 4 : 3
       // Thinking phase: `activity` only, empty `text`. Real verb is random; only the counter shape matters.
       const thinking = ['Boogieing… (2s · ↑ 0.4k tokens)', 'Puttering… (4s · ↑ 1.2k tokens)']

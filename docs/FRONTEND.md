@@ -56,6 +56,6 @@ web/src/
 - **全域鍵盤**：⌥↑／⌥↓ 換 bot（bot 列內與對話框開著時不接）；**Control+1…9 跳到側欄第 n 個專案的群組對話、把側欄捲到那一列並 focus 輸入框**（2026-09-16 使用者）——認 `event.code` 的 `Digit1…9`，所以中文輸入法照樣有效；用 Control 而非 ⌘（⌘1…9 是瀏覽器換分頁）；正在組字、對話框開著、事件已被處理就不接；第 n 個專案不存在就什麼都不做。
 - **群組任務入口**：`/api/missions` 不存在時整個入口靜默不出現，不重試不報錯。
 - **Mock**：`api/mock.ts` 的回應形狀刻意與 `daemon/src/api.rs` 一致。訊息含 `blocked`／`rm -rf` → 進 blocked；`fallback` → terminal_fallback 回覆；
-  `slow` → 延遲 8 秒。console 有 `__amMock.dropSocket() / resync() / block(name) / disconnect() / reconnect()`。
+  `slow` → 延遲 8 秒；`outbox` → 回合裡放一個 `download-test-N.txt` 進「bot 給你的檔案」（回合結束就該自己出現）。console 有 `__amMock.dropSocket() / resync() / block(name) / disconnect() / reconnect()`。
   被 trace 的 pane（§6.5e）跟 daemon 一樣分兩份白名單：看過畫面不會變成「自己開的 shell」，有 port 的每次打字都 403；第一個專案底下有 dev server（唯讀）、跑 vim 的 shell（沒 port，打得進去）、手開的 shell，另有對不到專案的 scratch 與「多出來的」各一顆。
 - 深淺色跟隨系統，不提供手動切換；`prefers-reduced-motion` 關掉所有動畫。
