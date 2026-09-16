@@ -1,0 +1,8 @@
+/* components/RunElapsed.tsx：側欄「已跑 N 分」小字，比模型標籤更輕，不搶燈號。 */
+.run-elapsed {
+  flex: none;
+  color: var(--text-faint);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
