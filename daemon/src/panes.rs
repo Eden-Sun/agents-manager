@@ -119,18 +119,20 @@ pub fn parse_ports(s: Option<&str>) -> Vec<u16> {
     s.map(|s| s.split(',').filter_map(|p| p.trim().parse::<u16>().ok()).collect()).unwrap_or_default()
 }
 
-/// 本機才算 listen port：pane 行程樹的 pid 對 `lsof`。遠端留空（§6.5e：不為了它多開 ssh 往返）。
-pub async fn listen_ports(host: &str, pids: &[i32]) -> HashMap<i32, Vec<u16>> {
-    let mut out: HashMap<i32, Vec<u16>> = HashMap::new();
+/// 本機才算 listen port：pane 行程樹的 pid 對 `lsof`，回這些 pid 合起來的 port（排序、去重）。遠端回空的
+/// （§6.5e：不為了它多開 ssh 往返）。`None`＝`lsof` 起不來或逾時：**不是「沒有 port」**，呼叫端要當成讀不到
+/// （以前這裡回空的，打字前的複查就等於放行）。
+pub async fn listen_ports(host: &str, pids: &[i32]) -> Option<Vec<u16>> {
     if host != crate::config::LOCAL_HOST || pids.is_empty() {
-        return out;
+        return Some(Vec::new());
     }
     let list = pids.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(",");
     let script = format!("lsof -nP -iTCP -sTCP:LISTEN -a -p {list} -Fpn 2>/dev/null");
-    let Ok(Some(o)) = crate::hosts::sh_local(&script, std::time::Duration::from_secs(10)).await else { return out };
-    let text = String::from_utf8_lossy(&o.stdout);
-    out.extend(parse_lsof(&text));
-    out
+    let Ok(Some(o)) = crate::hosts::sh_local(&script, std::time::Duration::from_secs(10)).await else { return None };
+    let mut ports: Vec<u16> = parse_lsof(&String::from_utf8_lossy(&o.stdout)).into_values().flatten().collect();
+    ports.sort_unstable();
+    ports.dedup();
+    Some(ports)
 }
 
 /// `lsof -Fpn` 是一行一個欄位：`p<pid>` 之後的 `n<addr>` 都屬於那個 pid。位址取最後一個 `:` 之後的數字。
@@ -220,12 +222,8 @@ pub async fn scan_host(app: &Arc<App>, host: &str, snapshot_panes: &[Value]) -> 
     for p in &non_agent {
         let Some(pane_id) = p.get("pane_id").and_then(Value::as_str) else { continue };
         let seen = match read_facts(client.as_ref(), dump.as_deref(), pane_id).await {
-            Some(facts) => {
-                let mut ports: Vec<u16> = listen_ports(host, &facts.pids).await.into_values().flatten().collect();
-                ports.sort_unstable();
-                ports.dedup();
-                Some(Observed { facts, ports })
-            }
+            // port 讀不到跟事實讀不到一樣：這一輪不改寫這顆。
+            Some(facts) => listen_ports(host, &facts.pids).await.map(|ports| Observed { facts, ports }),
             None => None,
         };
         observed.insert(pane_id.to_string(), seen);
@@ -611,8 +609,8 @@ async fn close_if_still_idle(
     if !f.shell_only {
         return Ok(false);
     }
-    let ports: Vec<u16> = listen_ports(host, &f.pids).await.into_values().flatten().collect();
-    if !ports.is_empty() {
+    // port 讀不到也不關。
+    if listen_ports(host, &f.pids).await.is_none_or(|ports| !ports.is_empty()) {
         return Ok(false);
     }
     // 2. 關之前把畫面最後幾行記進 log：自動關不可逆，出事要說得出關掉的是什麼。
@@ -677,19 +675,23 @@ pub async fn notify_unowned_and_orphans(app: &Arc<App>, host: &str) -> Result<us
 pub fn row_json(r: &sqlx::sqlite::SqliteRow) -> Value {
     use sqlx::Row;
     let ports = parse_ports(r.get::<Option<String>, _>("listen_ports").as_deref());
+    let host: String = r.get("host");
+    let kind: String = r.get("kind");
+    // 跟 `shell::typing_decision` 同一條：遠端不算 port，退回表上的 kind（service 就唯讀）。
+    let read_only = !ports.is_empty() || (host != crate::config::LOCAL_HOST && kind == "service");
     json!({
         "pane_id": r.get::<String, _>("pane_id"),
-        "host": r.get::<String, _>("host"),
+        "host": host,
         "workspace_id": r.get::<Option<String>, _>("workspace_id"),
         "tab_id": r.get::<Option<String>, _>("tab_id"),
         "cwd": r.get::<Option<String>, _>("cwd"),
-        "kind": r.get::<String, _>("kind"),
+        "kind": kind,
         "owner_bot_id": r.get::<Option<String>, _>("owner_bot_id"),
         "project_id": r.get::<Option<String>, _>("project_id"),
         "purpose": r.get::<Option<String>, _>("purpose"),
         "foreground": r.get::<Option<String>, _>("foreground"),
-        // 打字權限看 port，不看 kind（`shell::allowed`）：前端直接用這一欄決定鎖不鎖輸入框。
-        "read_only": !ports.is_empty(),
+        // 打字權限（`shell::typing_decision`）：本機看 port，遠端退回 kind。前端直接用這一欄決定鎖不鎖輸入框。
+        "read_only": read_only,
         "listen_ports": ports,
         "last_output_at": r.get::<String, _>("last_output_at"),
         "first_seen": r.get::<String, _>("first_seen"),
@@ -1509,12 +1511,7 @@ pub(crate) async fn close_tracked(app: &Arc<App>, host: &str, pane_id: &str, con
     }
     let live = match (crate::memproc::dump(&app, &host).await, client.pane_shell(&pane_id).await) {
         (Ok(dump), Ok(shell)) => match facts_from(&shell, &dump, &pane_id) {
-            Some(f) => {
-                let mut ports: Vec<u16> = listen_ports(&host, &f.pids).await.into_values().flatten().collect();
-                ports.sort_unstable();
-                ports.dedup();
-                Some((f, ports))
-            }
+            Some(f) => listen_ports(&host, &f.pids).await.map(|ports| (f, ports)),
             None => None,
         },
         _ => None,

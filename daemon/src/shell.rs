@@ -171,8 +171,8 @@ pub enum LiveVerdict {
     Gone,
 }
 
-/// 問 herdr 這顆 pane 現在的樣子（本機另外對 listen port）。問不到回 `None`，由呼叫端退回表上的值。
-/// 遠端不算 port（§6.5e：不為了它多開 ssh 往返），所以遠端只會是 Typeable／Agent／Gone。
+/// 問 herdr 這顆 pane 現在的樣子（本機另外對 listen port）。問不到回 `None`——呼叫端**不放行**（比照 GC「讀不到就不關」）。
+/// 遠端不算 port（§6.5e：不為了它多開 ssh 往返），所以遠端只會是 Typeable／Agent／Gone；遠端的 Typeable 還要再看表上的事實。
 pub(crate) async fn live_verdict(app: &Arc<App>, host: &str, pane_id: &str) -> Option<LiveVerdict> {
     let key = (host.to_string(), pane_id.to_string());
     if let Some((at, v)) = app.pane_live.lock().await.get(&key).copied() {
@@ -189,8 +189,8 @@ pub(crate) async fn live_verdict(app: &Arc<App>, host: &str, pane_id: &str) -> O
             let dump = crate::memproc::dump(app, host).await.ok()?;
             let shell = client.pane_shell(pane_id).await.ok()?;
             let facts = crate::panes::facts_from(&shell, &dump, pane_id)?;
-            let ports = crate::panes::listen_ports(host, &facts.pids).await;
-            if ports.values().any(|p| !p.is_empty()) {
+            let ports = crate::panes::listen_ports(host, &facts.pids).await?;
+            if !ports.is_empty() {
                 LiveVerdict::ReadOnly
             } else {
                 LiveVerdict::Typeable
@@ -209,6 +209,27 @@ fn read_only_error(ports: &[u16]) -> LcError {
         format!("這顆 pane 在 listen {list}，只能看不能打字（送 Ctrl-C 就是把它關掉）")
     };
     LcError::Forbidden(json!({"error": "read_only_pane", "listen_ports": ports, "message": message}))
+}
+
+/// 打字前的即時複查讀不到（herdr 沒回、`ps` 失敗、herdr 沒報 shell pid）：不放行，請人稍後再試（AGM 2026-09-16 驗收退回）。
+fn state_unknown_error() -> LcError {
+    LcError::conflict(
+        "pane_state_unknown",
+        json!({"retryable": true, "message": "無法確認這顆 pane 現在的狀態（是不是在 listen、裡面有沒有 agent），請稍後再試"}),
+    )
+}
+
+/// 打字前的判定（純函式，可測）。`live` 是 [`live_verdict`] 的結果；遠端的 herdr 回答不含 port，
+/// 所以遠端退回表上已知的事實：`kind='service'` 或記過 listen port 就唯讀（AGM 2026-09-16 驗收退回）。
+pub(crate) fn typing_decision(live: Option<LiveVerdict>, local: bool, kind: &str, stored_ports: &[u16]) -> Result<(), LcError> {
+    match live {
+        None => Err(state_unknown_error()),
+        Some(LiveVerdict::Gone) => Err(LcError::NotFound("shell".into())),
+        Some(LiveVerdict::Agent) => Err(agent_pane_error()),
+        Some(LiveVerdict::ReadOnly) => Err(read_only_error(&[])),
+        Some(LiveVerdict::Typeable) if !local && (kind == "service" || !stored_ports.is_empty()) => Err(read_only_error(stored_ports)),
+        Some(LiveVerdict::Typeable) => Ok(()),
+    }
 }
 
 fn agent_pane_error() -> LcError {
@@ -241,7 +262,8 @@ async fn registered(app: &Arc<App>, host: &str, pane_id: &str, access: Access) -
         return Err(LcError::NotFound("shell".into()));
     };
     let ports = crate::panes::parse_ports(ports.as_deref());
-    if !allowed(&kind, !ports.is_empty(), access) {
+    // 表裡不該有的 kind 一律不給；port 在這裡不擋——本機打字前會即時重對，表上的可能是好幾分鐘前的。
+    if !allowed(&kind, false, access) {
         return Err(read_only_error(&ports));
     }
     let session = app.session_for_host(host).await.unwrap_or_default();
@@ -250,12 +272,8 @@ async fn registered(app: &Arc<App>, host: &str, pane_id: &str, access: Access) -
         return Err(agent_pane_error());
     }
     if access == Access::Type {
-        match live_verdict(app, host, pane_id).await {
-            Some(LiveVerdict::Gone) => return Err(LcError::NotFound("shell".into())),
-            Some(LiveVerdict::Agent) => return Err(agent_pane_error()),
-            Some(LiveVerdict::ReadOnly) => return Err(read_only_error(&[])),
-            Some(LiveVerdict::Typeable) | None => {}
-        }
+        let local = host == crate::config::LOCAL_HOST;
+        typing_decision(live_verdict(app, host, pane_id).await, local, &kind, &ports)?;
     }
     Ok(HostShell {
         host: host.to_string(),
@@ -396,31 +414,57 @@ mod tests {
 
     /// 被 trace 的 shell pane 要點得進去——**而且活過重啟**：記憶體那份白名單重啟就空了，
     /// 這一條走的是 `panes` 表（§6.5e，使用者 2026-09-16「這 shell pane 要在 menu 可點選進入」）。
-    /// 唯讀看 listen port：跑著 vim 的（kind=service、沒有 port）要打得進去，不然人出不來（web review H2）。
     #[tokio::test]
-    async fn a_tracked_pane_is_typeable_unless_it_listens_on_a_port() {
+    async fn a_tracked_pane_is_reachable_through_the_pane_table() {
         let app = app().await;
         tracked(&app, "w1:pS", "shell").await;
-        tracked(&app, "w1:pVim", "service").await;
-        tracked(&app, "w1:pV", "service").await;
-        sqlx::query("UPDATE panes SET listen_ports='3010' WHERE pane_id='w1:pV'").execute(&app.db).await.unwrap();
-
-        let got = registered(&app, "local", "w1:pS", Access::Type).await.expect("shell 可以打字");
+        let got = registered(&app, "local", "w1:pS", Access::View).await.expect("看得到");
         assert_eq!((got.cwd.as_str(), got.workspace_id.as_str()), ("/tmp/proj", "w1"));
-        assert!(registered(&app, "local", "w1:pVim", Access::Type).await.is_ok(), "跑著 vim 的 service 要打得進去");
-        assert!(registered(&app, "local", "w1:pV", Access::View).await.is_ok(), "dev server 看得到");
-        match registered(&app, "local", "w1:pV", Access::Type).await {
-            Err(LcError::Forbidden(body)) => {
-                assert_eq!(body["error"], "read_only_pane");
-                assert_eq!(body["listen_ports"], json!([3010]));
-            }
-            other => panic!("dev server 不能打字：{:?}", other.map(|s| s.pane_id)),
-        }
         // 沒被 trace 的 pane 仍然是陌生人。
         assert!(matches!(registered(&app, "local", "w1:pX", Access::View).await, Err(LcError::NotFound(_))));
         // 主機不對也不算（pane id 只在單一主機內唯一）。
         assert!(matches!(registered(&app, "m4p", "w1:pS", Access::View).await, Err(LcError::NotFound(_))));
         std::fs::remove_dir_all(&app.data_dir).ok();
+    }
+
+    /// AGM 2026-09-16 驗收退回 (1)：打字前的即時複查讀不到（這裡沒有 herdr），比照 GC「讀不到就不關」——不放行，
+    /// 回 409 `pane_state_unknown` 請人稍後再試。只看畫面不需要複查。
+    #[tokio::test]
+    async fn typing_is_refused_when_the_pane_cannot_be_checked() {
+        let app = app().await;
+        tracked(&app, "w1:pS", "shell").await;
+        match registered(&app, "local", "w1:pS", Access::Type).await {
+            Err(LcError::Conflict(body)) => {
+                assert_eq!(body["reason"], "pane_state_unknown");
+                assert_eq!(body["retryable"], true);
+            }
+            other => panic!("讀不到不能放行：{:?}", other.map(|s| s.pane_id)),
+        }
+        assert!(registered(&app, "local", "w1:pS", Access::View).await.is_ok());
+        std::fs::remove_dir_all(&app.data_dir).ok();
+    }
+
+    /// AGM 2026-09-16 驗收退回 (2)：遠端的 herdr 回答不含 port，退回表上已知的事實——`kind='service'` 或記過 port 就唯讀。
+    /// 本機的 port 是即時重對的，所以本機跑著 vim 的 service（沒 port）照樣可以打字（web review H2）。
+    #[test]
+    fn a_remote_service_pane_is_read_only_but_a_local_one_without_ports_is_not() {
+        let t = Some(LiveVerdict::Typeable);
+        let code = |r: Result<(), LcError>| match r {
+            Ok(()) => "ok".to_string(),
+            Err(LcError::Forbidden(b)) => b["error"].as_str().unwrap().to_string(),
+            Err(LcError::Conflict(b)) => b["reason"].as_str().unwrap().to_string(),
+            Err(LcError::NotFound(_)) => "404".to_string(),
+            Err(_) => "other".to_string(),
+        };
+        assert_eq!(code(typing_decision(t, false, "service", &[])), "read_only_pane", "遠端 service");
+        assert_eq!(code(typing_decision(t, false, "shell", &[8080])), "read_only_pane", "遠端記過 port");
+        assert_eq!(code(typing_decision(t, false, "shell", &[])), "ok", "遠端 shell");
+        assert_eq!(code(typing_decision(t, true, "service", &[])), "ok", "本機跑著 vim、沒有 port");
+        assert_eq!(code(typing_decision(None, false, "shell", &[])), "pane_state_unknown", "遠端讀不到也不放行");
+        assert_eq!(code(typing_decision(None, true, "shell", &[])), "pane_state_unknown");
+        assert_eq!(code(typing_decision(Some(LiveVerdict::ReadOnly), true, "shell", &[])), "read_only_pane");
+        assert_eq!(code(typing_decision(Some(LiveVerdict::Agent), true, "shell", &[])), "agent_pane");
+        assert_eq!(code(typing_decision(Some(LiveVerdict::Gone), true, "shell", &[])), "404");
     }
 
     /// 掃描在 agent 還沒被 herdr 認出來的空檔可能把 bot 的 pane 記成 shell。那一刻也不能讓按鍵
@@ -440,40 +484,64 @@ mod tests {
         std::fs::remove_dir_all(&app.data_dir).ok();
     }
 
-    /// review 2026-09-16 core 4：打字前即時問 herdr。表上記成 shell，但裡面現在有 agent、或 pane 已經不在，
-    /// 都不能照表放行；問不到才退回表上的 port。
+    /// review 2026-09-16 core 4：打字前即時問 herdr 並在本機重對 listen port。表上記成 shell，但現在在 listen、
+    /// 裡面現在有 agent、或 pane 已經不在，都不能照表放行；表上記過 port、現在沒有了（server 停了）也不該擋。
     #[tokio::test]
     async fn typing_rechecks_the_pane_live() {
         let env = crate::testing::env().await;
         let app = &env.app;
-        let (_, pane) = app.herdr.workspace_create("/tmp", "w", json!({})).await.unwrap();
         let now = crate::db::now();
-        for id in [pane.pane_id.as_str(), "ws-9:pGone"] {
-            sqlx::query(
-                "INSERT INTO panes (pane_id, host, workspace_id, tab_id, kind, last_output_at, first_seen, last_seen)
-                 VALUES (?, 'local', ?, ?, 'shell', ?, ?, ?)",
-            )
-            .bind(id)
-            .bind(&pane.workspace_id)
-            .bind(&pane.tab_id)
-            .bind(&now)
-            .bind(&now)
-            .bind(&now)
-            .execute(&app.db)
-            .await
-            .unwrap();
+        let track = |id: String, ws: String, tab: String, ports: Option<&'static str>| {
+            let (app, now) = (app.clone(), now.clone());
+            async move {
+                sqlx::query(
+                    "INSERT INTO panes (pane_id, host, workspace_id, tab_id, kind, listen_ports, last_output_at, first_seen, last_seen)
+                     VALUES (?, 'local', ?, ?, 'service', ?, ?, ?, ?)",
+                )
+                .bind(id)
+                .bind(ws)
+                .bind(tab)
+                .bind(ports)
+                .bind(&now)
+                .bind(&now)
+                .bind(&now)
+                .execute(&app.db)
+                .await
+                .unwrap();
+            }
+        };
+
+        // 跑著 vim 的 pane：shell 底下一個不 listen 的行程。表上還記著舊的 port——即時的為準，可以打字。
+        let (_, vim) = app.herdr.workspace_create("/tmp", "vim", json!({})).await.unwrap();
+        let mut idle = std::process::Command::new("sleep").arg("60").spawn().unwrap();
+        env.herdr.set_shell_pid(&vim.pane_id, i64::from(idle.id()));
+        track(vim.pane_id.clone(), vim.workspace_id.clone(), vim.tab_id.clone(), Some("3010")).await;
+        let typed = registered(app, "local", &vim.pane_id, Access::Type).await;
+        let _ = idle.kill();
+        assert!(typed.is_ok(), "{:?}", typed.map(|s| s.pane_id));
+
+        // 真的在 listen 的：唯讀（shell pid 用這個測試行程自己，它正 listen 一個 port）。
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let (_, dev) = app.herdr.workspace_create("/tmp", "dev", json!({})).await.unwrap();
+        env.herdr.set_shell_pid(&dev.pane_id, i64::from(std::process::id()));
+        track(dev.pane_id.clone(), dev.workspace_id.clone(), dev.tab_id.clone(), None).await;
+        match registered(app, "local", &dev.pane_id, Access::Type).await {
+            Err(LcError::Forbidden(body)) => assert_eq!(body["error"], "read_only_pane"),
+            other => panic!("在 listen 的不能打字：{:?}", other.map(|s| s.pane_id)),
         }
-        assert!(registered(app, "local", &pane.pane_id, Access::Type).await.is_ok(), "mock 沒有 shell_pid：問不到 port，照表放行");
+        drop(listener);
+
+        // pane 已經不在：404。
+        track("ws-9:pGone".into(), "ws-9".into(), "ws-9:t1".into(), None).await;
         assert!(matches!(registered(app, "local", "ws-9:pGone", Access::Type).await, Err(LcError::NotFound(_))));
 
-        env.herdr.set_agent("kid", &pane.pane_id, false);
+        // 裡面現在有 agent：403。
+        env.herdr.set_agent("kid", &vim.pane_id, false);
         app.pane_live.lock().await.clear();
-        match registered(app, "local", &pane.pane_id, Access::Type).await {
+        match registered(app, "local", &vim.pane_id, Access::Type).await {
             Err(LcError::Forbidden(body)) => assert_eq!(body["error"], "agent_pane"),
             other => panic!("pane 裡現在有 agent：{:?}", other.map(|s| s.pane_id)),
         }
-        // 只看畫面不需要即時問（面板每 0.25 秒讀一次）。
-        assert!(registered(app, "local", &pane.pane_id, Access::View).await.is_ok());
     }
 
     /// web review M2：daemon 重啟後記憶體那份白名單是空的，「結束 shell」以前回 200 卻什麼都沒關。

@@ -30,6 +30,8 @@ pub struct MockHerdr {
     pub argvs: Arc<StdMutex<BTreeMap<String, Vec<String>>>>,
     /// `pane.process_info` pid (default 1); only tests reading the process's account (SPEC §16.6) need it.
     pub pids: Arc<StdMutex<BTreeMap<String, i64>>>,
+    /// `pane.process_info` 的 `shell_pid`，per pane id（沒設就不回，像讀不到的 herdr）。
+    pub shell_pids: Arc<StdMutex<BTreeMap<String, i64>>>,
     /// Every `(method, params)` sent, so a test can assert *how* the daemon asked.
     pub calls: Arc<StdMutex<Vec<(String, Value)>>>,
     /// Panes that behave like a TUI: typing lands in a composer, Enter moves it to the transcript.
@@ -144,6 +146,7 @@ struct MockState {
     ignore_ansi: Arc<std::sync::atomic::AtomicBool>,
     argvs: Arc<StdMutex<BTreeMap<String, Vec<String>>>>,
     pids: Arc<StdMutex<BTreeMap<String, i64>>>,
+    shell_pids: Arc<StdMutex<BTreeMap<String, i64>>>,
     seq: Arc<std::sync::atomic::AtomicU64>,
 }
 
@@ -203,11 +206,12 @@ impl MockHerdr {
             ignore_ansi: Default::default(),
             argvs: Default::default(),
             pids: Default::default(),
+            shell_pids: Default::default(),
             seq: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         };
         let (workspaces, tabs, calls, agents) =
             (state.workspaces.clone(), state.tabs.clone(), state.calls.clone(), state.agents.clone());
-        let (screens, argvs, pids) = (state.screens.clone(), state.argvs.clone(), state.pids.clone());
+        let (screens, argvs, pids, shell_pids) = (state.screens.clone(), state.argvs.clone(), state.pids.clone(), state.shell_pids.clone());
         let live = state.live.clone();
         let reject_ansi = state.reject_ansi.clone();
         let ignore_ansi = state.ignore_ansi.clone();
@@ -414,10 +418,11 @@ impl MockHerdr {
                         "pane.process_info" => {
                             let pid = wid_of("pane_id");
                             let os_pid = st.pids.lock().unwrap().get(&pid).copied().unwrap_or(1);
+                            let shell_pid = st.shell_pids.lock().unwrap().get(&pid).copied();
                             match st.argvs.lock().unwrap().get(&pid).cloned() {
                                 None => json!({"id": id, "result": {"process_info":
-                                    {"pane_id": pid, "foreground_processes": []}}}),
-                                Some(argv) => json!({"id": id, "result": {"process_info": {"pane_id": pid,
+                                    {"pane_id": pid, "shell_pid": shell_pid, "foreground_processes": []}}}),
+                                Some(argv) => json!({"id": id, "result": {"process_info": {"pane_id": pid, "shell_pid": shell_pid,
                                     "foreground_processes": [{"argv": argv, "argv0": argv.first().cloned(),
                                     "cwd": "/tmp/p", "pid": os_pid}]}}}),
                             }
@@ -586,7 +591,7 @@ impl MockHerdr {
                 });
             }
         });
-        MockHerdr { workspaces, tabs, calls, agents, screens, live, reject_ansi, ignore_ansi, argvs, pids, handle }
+        MockHerdr { workspaces, tabs, calls, agents, screens, live, reject_ansi, ignore_ansi, argvs, pids, shell_pids, handle }
     }
 
     pub fn methods(&self) -> Vec<String> {
@@ -632,6 +637,11 @@ impl MockHerdr {
 
     pub fn set_pid(&self, pane_id: &str, pid: i64) {
         self.pids.lock().unwrap().insert(pane_id.to_string(), pid);
+    }
+
+    /// `pane.process_info` 回這個 `shell_pid`（§6.5e：GC 與打字前複查都從它走 `ps` 的行程樹）。
+    pub fn set_shell_pid(&self, pane_id: &str, pid: i64) {
+        self.shell_pids.lock().unwrap().insert(pane_id.to_string(), pid);
     }
 
     pub fn tab(&self, tab_id: &str) -> Option<MockTab> {
