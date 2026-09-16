@@ -25,10 +25,14 @@ bot `name` 是可隨時改的暱稱（不需重啟、允許 CJK，禁空白與 `
 ### 2.1 Turn 狀態機
 
 ```
-status:   in_flight ──► completed            （hook 配對成功）
+status:   queued ────► in_flight             （排在前一回合後面的 prompt 被 flush 領走；目前只有 AGM 派工會排，§6）
+            ▲  └─────► failed                （送不出去：重試用完、內容空、無法照原樣送）
+            └───────── in_flight             （領走後、打第一個字之前被擋下：放回佇列）
+          in_flight ──► completed            （hook 配對成功）
               │    └──► completed_fallback   （終端備援；之後不被 hook 覆蓋，UI 標「可能不完整」）
               └───────► failed               （agent_blocked / interrupt / stop / 使用者放棄）
-delivery: pending → ok | unknown | failed    （agent.prompt RPC 的結果，獨立於 status）
+delivery: pending → ok | unknown | failed    （送出的結果——打字證據或 agent.prompt；獨立於 status。
+                                              有沒有證據、能不能重送另記 delivery_verified／auto_resend，§6）
 origin:   web | external                     （external = 非本系統送出、由 hook 或快照得知）
 ```
 
@@ -321,7 +325,7 @@ pane 上回過 ok 卻沒送進去（wits-c1-op-xh 14:24、15:33，第二次距 s
 **結果五種，對呼叫端意義不同**：
 - `Submitted`：打字進 pane，而且有無損證據證明送出。verified=1、可重送。
 - `Handed`：交給 herdr `agent.prompt`。它回 ok 卻不保證字進得去（2026-09-14 wits-c1-op-xh 實例），
-  所以**沒有證據**：verified=0、API 回 `"delivery":"unverified"`、UI 標「未驗證送達」；重送照舊允許。
+  所以**沒有證據**：verified=0、API 回 `"delivery":"unverified"`；重送照舊允許，所以 UI **不**標「未驗證送達」（只在 hover 說明，見上）。
 - `Unverified`：沒有無損證據可用，照樣打字送出；框收下貼上、Enter 後清空，就回報成送出，但標成「要人工核對」。
   DB 存 `delivery='ok'`＋`turns.delivery_verified=0`（`delivery` 的 CHECK 只有原本四種狀態，不改表），API 回
   `"delivery":"unverified"`，AGM 交辦記成 `delivery=unverified`，UI 在使用者泡泡上標「未驗證送達」。它照常掛 stall
@@ -387,8 +391,8 @@ cancel 撤掉的是還沒送出的那則時，review 回應不再帶「turn 還�
 可重試原因（框忙、transcript 還沒回報、畫面檢查擋下〔選單／登入畫面〕、拿不到 herdr client…）放回 `queued` **並掛重試 timer**
 （閒著的 bot 不會再有 `working → idle` 邊來叫醒它，review 2 L2），退避 15 秒起每次加倍、上限 5 分鐘；次數與
 下次時間存在 `turns.flush_retries`／`turns.next_flush_at`，時間未到的其他喚醒不動它；每顆 bot 同時只有一個重試 timer；放回
-12 次仍送不出就標 failed 並插說明（同一個 transaction）。daemon 重啟（`reconcile::rearm_progress`）時掃描所有帶
-`next_flush_at` 的 queued turn，以 `max(now, next_flush_at)` 為每顆 bot 重建唯一的 timer。直接送出的 409 回應則由呼叫端（或 AGM
+12 次仍送不出就標 failed 並插說明（同一個 transaction）。daemon 重啟（`reconcile::rearm_progress`）時掃描**所有** queued turn
+（沒有 `next_flush_at` 的當作現在到期），以 `max(now, next_flush_at)` 為每顆 bot 重建唯一的 timer。直接送出的 409 回應則由呼叫端（或 AGM
 交辦的既有退避）重試。
 
 `auto_resend=0` 的 turn 同時把 `turns.resend_count` 設到上限：就算退回不認得 `auto_resend` 的舊 binary，也不會被自動重打一次。
