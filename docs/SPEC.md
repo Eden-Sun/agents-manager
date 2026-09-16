@@ -494,7 +494,7 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
    認到就在**插入當下**寫 `relay_from`（事後補的話 `message_added` 已經推出去了）。
 4. 認不出來維持 NULL = 使用者自己打的。寧可少標，不把使用者的話說成別人送的。
 
-### 6.5e shell／服務 pane 的歸屬與生命週期（草稿，2026-09-16 使用者交辦，等 AGM review）
+### 6.5e shell／服務 pane 的歸屬與生命週期（2026-09-16 使用者交辦；AGM 2026-09-16 review 通過，實作另行派工）
 
 **問題**：AG Man 只認 agent pane（§6.5.1「不採用普通 shell pane」）。實測 30 個 pane 有 5 個非 agent pane 完全在管理之外：
 一個是 wits-ops 起的 Next dev server（w168:p62，listen 3010，卻開在 agents-manager 的 workspace，wt 專案頁看不到），
@@ -505,7 +505,7 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
 |---|---|---|
 | `agent` | herdr `agent.list` 認得（claude／codex／grok） | 既有邏輯，這一段完全不碰（§6.5.1、§6.9 的教訓） |
 | `service` | 前景有非 shell 程式，**或**該 pane 的行程樹有 listen port | 不自動關；只有在「擁有它的 bot 已刪除／專案已移除」時發 `pane_orphaned` 通知，由人決定 |
-| `shell` | 只有 shell（zsh/bash/sh/fish），沒有 listen port | 歸屬得到的 bot 才受 GC：閒置超過門檻自動關 |
+| `shell` | 只有 shell（zsh/bash/sh/fish），沒有 listen port，**且行程樹只有 shell 本身** | 歸屬得到的 bot 才受 GC：閒置超過門檻自動關 |
 
 #### 歸屬怎麼來（與交辦計畫 C 的差異，這裡取代原案）
 原案要 shim 用 `herdr pane report-metadata` 帶 owner／project／purpose。**不可行**：`report-metadata` 是 herdr 的
@@ -528,9 +528,17 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
 
 #### 生命週期
 - `shell` pane，**有歸屬**且無前景程式、無 listen port、`last_output_at` 超過 `[panes] idle_close_secs`（預設 21600＝6 小時）
-  → daemon 在 reconcile 的同一輪關掉並記 info log（含 pane id、owner、閒置時長）。關之前重新取一次前景與 port，避免競態。
+  → daemon 在 reconcile 的同一輪關掉。三條守門（AGM 2026-09-16 裁示）：
+  - **「閒置」要把停住的工作算進去**：只看前景程式與 listen port 會漏掉 Ctrl-Z 丟到背景的編輯器、背景 job、還沒回答的
+    sudo／確認提示——關掉這種 pane 會讓人丟掉沒存的東西。判準是**行程樹只有 shell 本身**（沒有 stopped／background job），
+    才算可關。
+  - **關之前把畫面最後 20 行記進 log**（連同 pane id、owner、閒置時長）。自動關 pane 不可逆，出事時要說得出「我們關掉的
+    是什麼」；事後猜比先記貴太多。
+  - **關之前重新取一次前景、port 與行程樹**（避免競態）。那一次取值**失敗就不關**——讀不到不等於是空的。
 - `service` pane：不自動關。擁有的 bot 被刪、或 project 被移除 → 推一則 inbox `pane_orphaned`（帶 pane id、workspace、
   前景程式、listen ports、最後輸出時間），AGM／人決定。
+- **有歸屬的 `shell` pane，但擁有它的 bot 被刪／專案被移除**：跟 service 一樣推 `pane_orphaned`，但**仍受 GC**——
+  通知歸通知，閒置超過門檻照關（AGM 2026-09-16 裁示）。shell pane 沒有跑著的東西，留著它不會比通知更有價值。
 - **使用者手開的（沒有 `AM_BOT_ID`）**：永不自動關，也不通知；只在 UI 顯示，讓人自己決定。
 - daemon 重啟後靠同一輪掃描重建 `panes`，不留記憶體狀態。
 
@@ -544,7 +552,7 @@ listen port 只在本機算（pane 行程樹的 pid 對 `lsof -nP -iTCP -sTCP:LI
 #### 邊界
 - 不動 agent pane 的 reconcile／run 配對／孤兒清掃（§6.9 附註的 09-11 教訓）。
 - GC 規則從 `bin/pane-gc.sh` 搬進 daemon 之後，該腳本只留互動式登入 pane 那條或退役（§18.4 同批處理）。
-- 門檻與「不動使用者手開」寫在 config，不寫死。
+- 門檻與「不動使用者手開」寫在 config，不寫死。`idle_close_secs` 另外要能用環境變數覆寫（與 §18.8 的保險絲門檻同一套規矩：看不懂／0／負數一律回預設——一個手滑的值不該把 GC 變成「立刻關」）。
 
 ### 6.5.1 採用使用者的 Herdr `default` session
 
