@@ -9,6 +9,7 @@ import { useStore } from '../store/store'
 import { ConfirmDialog } from './ConfirmDialog'
 import { HostBadge } from './HostsPanel'
 import { linkifyTerm } from './TermLinks'
+import { splitAtCursor } from '../lib/termCursor'
 import { setTermWrap, useTermWrap } from './termWrap'
 import './hostShellPanel.css'
 
@@ -18,17 +19,17 @@ import './hostShellPanel.css'
  */
 
 /**
- * 鍵盤同步（每個 pane 各記一份，localStorage）：開著時終端本身收鍵盤，每一下原樣送進那個 pane，
- * 就像坐在那台終端前面。關著時是原本的「打一行、Enter 送出」。
+ * 鍵盤直通（每個 pane 各記一份，localStorage）：開著時終端本身收鍵盤，每一下原樣送進那個 pane，
+ * 就像坐在那台終端前面。**預設開著**（2026-09-17 使用者），只記「被關掉的」；關著時是「打一行、Enter 送出」。
  */
-const SYNC_KEY = 'am.shellKeySync'
+const SYNC_OFF_KEY = 'am.shellKeySyncOff'
 /** 同步時輪詢要快一點，不然自己打的字要等一秒才看得到。 */
 const SYNC_POLL_MS = 250
 const IDLE_POLL_MS = 1_000
 
-function readSyncSet(): Set<string> {
+function readSyncOffSet(): Set<string> {
   try {
-    const raw = localStorage.getItem(SYNC_KEY)
+    const raw = localStorage.getItem(SYNC_OFF_KEY)
     const parsed: unknown = raw ? JSON.parse(raw) : null
     return new Set(Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : [])
   } catch {
@@ -38,10 +39,10 @@ function readSyncSet(): Set<string> {
 
 function writeSync(target: string, on: boolean) {
   try {
-    const set = readSyncSet()
-    if (on) set.add(target)
-    else set.delete(target)
-    localStorage.setItem(SYNC_KEY, JSON.stringify([...set]))
+    const set = readSyncOffSet()
+    if (on) set.delete(target)
+    else set.add(target)
+    localStorage.setItem(SYNC_OFF_KEY, JSON.stringify([...set]))
   } catch {
     /* storage unavailable: 這一頁還記得 */
   }
@@ -103,15 +104,6 @@ function writeDraft(key: string, text: string) {
   }
 }
 
-/** 送給 daemon（再原樣送 herdr）的鍵名，同 `usePaneKeys` 的契約。 */
-const KEYS: { label: string; keys: string[]; title: string }[] = [
-  { label: 'ctrl+c', keys: ['ctrl+c'], title: '中斷正在跑的指令' },
-  { label: 'Esc', keys: ['esc'], title: '送出 Esc' },
-  { label: 'Tab', keys: ['tab'], title: '送出 Tab（讓 shell 自己補完）' },
-  { label: '↑', keys: ['up'], title: '送出 ↑（shell 自己的歷史）' },
-  { label: 'Enter', keys: ['enter'], title: '只按 Enter' },
-]
-
 /** 標題列只放 cwd 最後兩段（完整路徑在 tooltip）；倒數第二段手機用 CSS 藏掉。 */
 function cwdTail(cwd: string): { parent: string; leaf: string } {
   const seg = cwd.split('/').filter(Boolean)
@@ -133,7 +125,6 @@ export function HostShellPanel({
   /** 掛在 ChatPanel 標題列底下當分頁：不畫自己的 `main-head`，主機與關閉鍵改放抓法列。 */
   embedded?: boolean
 }) {
-  const closeShellView = useStore((s) => s.closeShellView)
   const endHostShell = useStore((s) => s.endHostShell)
   // 從選單點進來的 pane（§6.5e）：有 port 的唯讀；關閉鍵照樣給（叫「關閉 pane」），服務 pane 由 daemon 先 409 再問一次。
   const readOnly = useStore((s) => Boolean(s.shellView?.host === host && s.shellView.paneId === paneId && s.shellView.readOnly))
@@ -164,7 +155,7 @@ export function HostShellPanel({
     [target],
   )
   const [sending, setSending] = useState(false)
-  const [sync, setSyncState] = useState(() => readSyncSet().has(target))
+  const [sync, setSyncState] = useState(() => !readSyncOffSet().has(target))
   // 唯讀時記著「開」也不算：不然按鍵照樣一下一下送出去、一下一下吃 403，按鈕還 disabled 關不掉。
   const syncOn = keySyncActive(sync, readOnly)
   /** 有沒有真的握著鍵盤：同步開著但焦點在別處時，打字不會進到 pane，要講清楚。 */
@@ -186,7 +177,7 @@ export function HostShellPanel({
     setErr(null)
     setTextState(readDrafts()[target] ?? '')
     setHistAt(-1)
-    setSyncState(readSyncSet().has(target))
+    setSyncState(!readSyncOffSet().has(target))
     setTyping(false)
   }
 
@@ -279,19 +270,6 @@ export function HostShellPanel({
     [failed, host, paneId, refresh, remember, setText],
   )
 
-  const pressKeys = useCallback(
-    async (keys: string[]) => {
-      try {
-        await api.sendHostShellKeys(host, paneId, keys)
-        setErr(null)
-        refresh()
-      } catch (e) {
-        failed(e)
-      }
-    },
-    [failed, host, paneId, refresh],
-  )
-
   const { press: pressSync, paste: pasteSync } = useShellKeys(
     host,
     paneId,
@@ -365,14 +343,23 @@ export function HostShellPanel({
     if (!snap.text.trim() && source === 'recent_unwrapped') {
       return '（還沒有捲出畫面的內容——這個 shell 的輸出目前都還在「畫面」裡。）'
     }
+    // 鍵盤直通時在 shell 等輸入的地方畫一個閃爍游標（位置是從畫面推的，見 `splitAtCursor`）。
+    if (syncOn && !readOnly && source === 'visible') {
+      const { before, gap, after } = splitAtCursor(snap.text)
+      return (
+        <>
+          {linkifyTerm(before, snap.columns)}
+          {gap}
+          <span className={`term-cursor${typing ? ' is-live' : ''}`} aria-hidden="true" />
+          {after}
+        </>
+      )
+    }
     return linkifyTerm(snap.text, snap.columns)
-  }, [err, snap, source])
+  }, [err, snap, source, syncOn, readOnly, typing])
 
   const headActions = (
     <div className="head-actions">
-      <button type="button" className="mini-btn" onClick={closeShellView} title="只關掉這個畫面，shell 留著">
-        關閉
-      </button>
       {/* 被 trace 的 pane 也給（2026-09-17 使用者：直接在這裡關 pane）：`endHostShell` 不在面板清單裡就走
           `POST /api/panes/{id}/close`，服務 pane 會先 409、第二道確認框列出 port；pane 已經不在就當作關好了。 */}
       <button
@@ -455,11 +442,11 @@ export function HostShellPanel({
             onClick={() => setSync(!syncOn)}
             title={
               syncOn
-                ? '關掉鍵盤同步，回到「打一行、Enter 送出」'
-                : '鍵盤同步：點終端之後每一下按鍵直接送進這個 pane（⌘ 系列留給瀏覽器）'
+                ? '關掉鍵盤直通，改用下方輸入框「打一行、Enter 送出」'
+                : '打開鍵盤直通：每一下按鍵直接送進這個 pane（⌘ 系列留給瀏覽器）'
             }
           >
-            {syncOn ? '鍵盤同步中' : '鍵盤同步'}
+            {syncOn ? '鍵盤直通' : '鍵盤直通（關）'}
           </button>
           <label className="conn" title="折行後 TUI 畫的框線與對齊會跑掉，但整行讀得到；不折行則維持原樣，靠橫捲看右半邊。">
             <input type="checkbox" checked={wrap} onChange={(e) => setTermWrap(e.target.checked)} />
@@ -472,7 +459,7 @@ export function HostShellPanel({
           {snap?.truncated ? <span className="hint">已截斷</span> : null}
           <span className="spacer" />
           <span className="hint term-bar-note">
-            {syncOn ? '鍵盤同步中，每 0.25 秒更新' : '每秒更新，指令送出後立刻重讀'}
+            {syncOn ? '鍵盤直通中，每 0.25 秒更新' : '每秒更新，指令送出後立刻重讀'}
           </span>
           {embedded ? headActions : null}
         </div>
@@ -489,7 +476,7 @@ export function HostShellPanel({
           className={`term shell-term${wrap ? ' term-wrap' : ''}${syncOn ? ' term-sync' : ''}${syncOn && typing ? ' term-sync-live' : ''}`}
           tabIndex={syncOn ? 0 : -1}
           role={syncOn ? 'textbox' : undefined}
-          aria-label={syncOn ? `${host === 'local' ? '本機' : host} shell 的終端，鍵盤同步中` : undefined}
+          aria-label={syncOn ? `${host === 'local' ? '本機' : host} shell 的終端，鍵盤直通中` : undefined}
           onKeyDown={onTermKeyDown}
           onPaste={onTermPaste}
           onFocus={() => setTyping(true)}
@@ -500,8 +487,8 @@ export function HostShellPanel({
         {syncOn ? (
           <div className={`shell-sync-note${typing ? ' is-live' : ''}`} role="status">
             {typing
-              ? '鍵盤同步中：按鍵直接送進這個 pane。⌘C／⌘R／⌘V 仍是瀏覽器的；Delete／Home／End／PgUp herdr 不收。'
-              : '鍵盤同步開著，但焦點不在終端上——點一下上面的畫面才會收你的鍵盤。'}
+              ? '鍵盤直通中：按鍵直接送進這個 pane。⌘C／⌘R／⌘V 仍是瀏覽器的；Delete／Home／End／PgUp herdr 不收。'
+              : '鍵盤直通開著，但焦點不在終端上——點一下上面的畫面才會收你的鍵盤。'}
           </div>
         ) : null}
 
@@ -511,6 +498,8 @@ export function HostShellPanel({
           </div>
         ) : null}
 
+        {/* 鍵盤直通關掉時才有輸入框（手機沒有實體鍵盤就靠它）。 */}
+        {syncOn ? null : (
         <form
           className="shell-input"
           onSubmit={(e) => {
@@ -530,7 +519,7 @@ export function HostShellPanel({
             autoComplete="off"
             disabled={syncOn || readOnly}
             placeholder={
-              readOnly ? '這顆 pane 只能看' : syncOn ? '鍵盤同步中：直接在上面的終端打字' : '輸入指令，Enter 送出（↑↓ 翻歷史）'
+              readOnly ? '這顆 pane 只能看' : '輸入指令，Enter 送出（↑↓ 翻歷史）'
             }
             aria-label={`對 ${host} 的 shell 輸入指令`}
             onChange={(e) => {
@@ -543,24 +532,6 @@ export function HostShellPanel({
             {sending ? '送出中…' : '送出'}
           </button>
         </form>
-
-        {/* 唯讀時整列不渲染：`hidden` 會被 `.keypad{display:flex}` 蓋掉，按鈕照樣看得到也按得到。 */}
-        {readOnly ? null : (
-          <div className="keypad shell-keypad">
-            {KEYS.map((k) => (
-              <button key={k.label} type="button" className="key-btn" title={k.title} onClick={() => void pressKeys(k.keys)}>
-                {k.label}
-              </button>
-            ))}
-            {/* 清畫面 = 真的送 `clear`：前端清 state 下次輪詢就會抓回原內容。 */}
-            <button type="button" className="key-btn" title="送出 clear，清掉終端畫面" onClick={() => void run('clear')}>
-              清畫面
-            </button>
-            <span className="spacer" />
-            <span className="hint shell-keypad-note">
-              按鍵原樣送到那個 pane。↑↓ 在輸入框裡走的是這裡的指令歷史。
-            </span>
-          </div>
         )}
       </div>
 

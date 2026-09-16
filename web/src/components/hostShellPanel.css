@@ -149,3 +149,31 @@
   border-color: var(--accent, #4a90d9);
   color: var(--accent, #4a90d9);
 }
+
+/* 鍵盤直通的游標提示（2026-09-17 使用者）：位置從畫面推（shell 等輸入的行尾），焦點在終端上才閃。 */
+.shell-pane .shell-term .term-cursor {
+  display: inline-block;
+  width: 0.6em;
+  height: 1.1em;
+  margin-bottom: -0.2em;
+  background: var(--text-dim, #888);
+  opacity: 0.5;
+}
+
+.shell-pane .shell-term .term-cursor.is-live {
+  background: var(--accent, #4a90d9);
+  opacity: 1;
+  animation: term-cursor-blink 1s steps(1, end) infinite;
+}
+
+@keyframes term-cursor-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shell-pane .shell-term .term-cursor.is-live {
+    animation: none;
+  }
+}
