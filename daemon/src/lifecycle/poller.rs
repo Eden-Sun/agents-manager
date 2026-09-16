@@ -633,31 +633,52 @@ pub(crate) fn prompt_never_reached_screen(kind: &str, screen: &str, sent: &[Stri
     any_needle
 }
 
+/// What a resend attempt came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Resend {
+    /// Re-delivered.
+    Sent,
+    /// Nothing to do (guards, the prompt is on screen after all, budget spent, the send failed).
+    Skipped,
+    /// Refused before a single byte was typed (`Delivered::NotAttempted`); the budget was given back.
+    Blocked { reason: &'static str, retry: bool },
+}
+
+impl Resend {
+    fn sent(self) -> bool {
+        self == Resend::Sent
+    }
+}
+
+/// How long the stall watchdog waits before it retries a resend that was blocked before typing
+/// (the box had a draft for a moment, the transcript could not be read yet).
+const RESEND_RETRY_SECS: u64 = 3;
+
 /// Re-deliver a prompt that never reached the pane, at most [`MAX_PROMPT_RESENDS`] times per turn.
-/// Same guards as [`nudge_unsent_prompt`]; every reason to do nothing is `false`.
-async fn resend_lost_prompt(app: &Arc<App>, run_id: &str, turn_id: &str, sent: &[String]) -> bool {
-    let Ok(Some(run)) = db::run(&app.db, run_id).await else { return false };
+/// Same guards as [`nudge_unsent_prompt`]; every reason to do nothing is `Skipped`.
+async fn resend_lost_prompt(app: &Arc<App>, run_id: &str, turn_id: &str, sent: &[String]) -> Resend {
+    let Ok(Some(run)) = db::run(&app.db, run_id).await else { return Resend::Skipped };
     if run.agent_status == "working" || run.agent_status == "blocked" {
-        return false;
+        return Resend::Skipped;
     }
     // 重送看 `auto_resend`，不看有沒有證據（AGM 2026-09-16）：打過字但證不明的那條路重送會重複派工，
     // 所以它是 0；`agent.prompt` 一樣沒有證據，但它沒送進去才會走到這裡，重送是安全的。
     if !matches!(db::in_flight_turn(&app.db, run_id).await, Ok(Some(t)) if t.id == turn_id && t.delivery == "ok" && t.auto_resend != 0) {
-        return false;
+        return Resend::Skipped;
     }
-    let Ok(Some(bot)) = db::bot(&app.db, &run.bot_id).await else { return false };
-    let Some(pane) = run.pane_id.clone() else { return false };
-    let Ok(client) = client_for_run(app, &run).await else { return false };
-    let Ok(read) = client.pane_read(&pane, crate::lifecycle::delivery::SCAN_SOURCE, RESEND_SCAN_LINES).await else { return false };
+    let Ok(Some(bot)) = db::bot(&app.db, &run.bot_id).await else { return Resend::Skipped };
+    let Some(pane) = run.pane_id.clone() else { return Resend::Skipped };
+    let Ok(client) = client_for_run(app, &run).await else { return Resend::Skipped };
+    let Ok(read) = client.pane_read(&pane, crate::lifecycle::delivery::SCAN_SOURCE, RESEND_SCAN_LINES).await else { return Resend::Skipped };
     if !prompt_never_reached_screen(&bot.kind, &read.text, sent) {
-        return false;
+        return Resend::Skipped;
     }
     // `sent[0]` is the delivered form (attachment paths included), exactly what was sent before.
-    let Some(text) = sent.first() else { return false };
+    let Some(text) = sent.first() else { return Resend::Skipped };
     // The claim is the lock and it lives in the DB: a queue flush and this watchdog cannot both
     // resend, and a daemon restart does not hand the same turn a fresh budget (sol review #3).
     if !db::claim_resend(&app.db, turn_id, MAX_PROMPT_RESENDS).await {
-        return false;
+        return Resend::Skipped;
     }
     // The first delivery just failed silently; re-deliver the way that is verified on screen.
     let res = deliver_prompt(app, &client, &run, &bot, text, true, true).await;
@@ -665,28 +686,66 @@ async fn resend_lost_prompt(app: &Arc<App>, run_id: &str, turn_id: &str, sent: &
         Ok(Delivered::Submitted | Delivered::Handed) => {
             tracing::warn!(run_id, turn = %turn_id, bot = %bot.name,
                            "prompt never reached the pane (empty composer, no echo in scrollback); re-delivered it");
-            true
+            Resend::Sent
         }
         Ok(Delivered::Unverified) => {
             tracing::warn!(run_id, turn = %turn_id, "prompt re-delivered without lossless evidence");
-            true
+            Resend::Sent
         }
-        Ok(Delivered::NotAttempted { reason, .. }) => {
+        Ok(Delivered::NotAttempted { reason, retry }) => {
             // 一個字都沒寫進去（`NotAttempted` 的契約），所以這次不該算進唯一一次重送額度：
-            // 擋下它的原因（框裡剛好有字）通常兩秒後就消失了。
+            // 擋下它的原因（框裡剛好有字）通常兩秒後就消失了——呼叫端（`arm_stall`）會再試一次。
             db::refund_resend(&app.db, turn_id).await;
             tracing::warn!(run_id, turn = %turn_id, reason, "re-delivery was not attempted; the resend budget is given back");
-            false
+            Resend::Blocked { reason, retry }
         }
         Ok(Delivered::Unproven(why)) => {
             tracing::warn!(run_id, turn = %turn_id, reason = why, "re-delivery could not be proven either");
-            false
+            Resend::Skipped
         }
         Err(e) => {
             tracing::warn!(run_id, turn = %turn_id, error = %e, "re-delivering a lost prompt failed");
-            false
+            Resend::Skipped
         }
     }
+}
+
+/// The watchdog's resend, with one retry when the first try was refused before typing anything.
+///
+/// Before this, a refunded budget was never used: `arm_stall` failed the turn right after the refusal,
+/// and nothing re-arms a watchdog later (review2 deliv #4). `None` = the stall timer was replaced
+/// meanwhile (the caller stops); otherwise `(re-delivered, what blocked the last try)`.
+async fn resend_with_retry(
+    app: &Arc<App>,
+    run_id: &str,
+    bot_id: &str,
+    turn_id: &str,
+    sent: &[String],
+    generation: u64,
+    retry_after: Duration,
+) -> Option<(bool, Option<&'static str>)> {
+    let mut blocked = None;
+    for attempt in 0..2 {
+        if attempt > 0 {
+            tokio::time::sleep(retry_after).await;
+        }
+        let lock = app.bot_lock(bot_id).await;
+        let _g = lock.lock().await;
+        if app.stall_timers.lock().await.get(run_id) != Some(&generation) {
+            return None;
+        }
+        match resend_lost_prompt(app, run_id, turn_id, sent).await {
+            Resend::Sent => return Some((true, None)),
+            Resend::Skipped => return Some((false, blocked)),
+            Resend::Blocked { reason, retry } => {
+                blocked = Some(reason);
+                if !retry {
+                    break;
+                }
+            }
+        }
+    }
+    Some((false, blocked))
 }
 
 /// The agent must leave `idle` within `STALL_SECS` after delivery, or the Turn sits `in_flight`
@@ -726,13 +785,14 @@ pub async fn arm_stall(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &str
         // Not in the box either: the prompt never reached the TUI. Deliver it again once instead of
         // failing the turn with a system message the user has to act on.
         let mut resent = false;
+        let mut blocked = None;
         if !nudged {
-            let lock = app2.bot_lock(&bot_id).await;
-            let _g = lock.lock().await;
-            if app2.stall_timers.lock().await.get(&run_id) != Some(&generation) {
+            let Some((r, b)) =
+                resend_with_retry(&app2, &run_id, &bot_id, &turn_id, &sent, generation, Duration::from_secs(RESEND_RETRY_SECS)).await
+            else {
                 return;
-            }
-            resent = resend_lost_prompt(&app2, &run_id, &turn_id, &sent).await;
+            };
+            (resent, blocked) = (r, b);
         }
         if nudged || resent {
             tokio::time::sleep(Duration::from_secs(NUDGE_GRACE_SECS)).await;
@@ -754,7 +814,7 @@ pub async fn arm_stall(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &str
         if app2.stall_timers.lock().await.get(&run_id) != Some(&generation) {
             return;
         }
-        if let Err(e) = fail_stalled_turn(&app2, &run_id, &bot_id, &turn_id, nudged, resent).await {
+        if let Err(e) = fail_stalled_turn(&app2, &run_id, &bot_id, &turn_id, nudged, resent, blocked).await {
             tracing::warn!(error = ?e, "stall watchdog failed");
         }
         let mut timers = app2.stall_timers.lock().await;
@@ -775,6 +835,7 @@ async fn fail_stalled_turn(
     turn_id: &str,
     nudged: bool,
     resent: bool,
+    resend_blocked: Option<&str>,
 ) -> anyhow::Result<()> {
     let Some(run) = db::run(&app.db, run_id).await? else { return Ok(()) };
     if run.agent_status == "working" || run.agent_status == "blocked" {
@@ -798,6 +859,9 @@ async fn fail_stalled_turn(
     let mut reason = stall_reason(&hints, nudged);
     if resent {
         reason.push_str(&format!("\n（第一次送出後畫面上完全沒有這則訊息，已自動重送 {MAX_PROMPT_RESENDS} 次，仍沒有反應。）"));
+    } else if let Some(why) = resend_blocked {
+        // 以前這種情況的訊息完全不提試過重送：看起來像 agent 沒反應，其實是重送被擋下（review2 deliv #4）。
+        reason.push_str(&format!("\n（畫面上完全沒有這則訊息；試著自動重送時被擋下（{why}），一個字都沒打，所以沒有送出。清掉擋住的東西後請重送。）"));
     }
     let mut tx = app.db.begin().await?;
     let res = sqlx::query("UPDATE turns SET status='failed', completed_at=? WHERE id=? AND status='in_flight'")
@@ -1780,7 +1844,7 @@ mod issue_17_tests {
             .await
             .unwrap();
         let sent = vec!["Reply with PONG".to_string()];
-        assert!(!resend_lost_prompt(&app, &f.run_id, &f.turn_id, &sent).await);
+        assert!(!resend_lost_prompt(&app, &f.run_id, &f.turn_id, &sent).await.sent());
         assert_eq!(count(&f, "pane.send_text") + count(&f, "pane.send_keys"), 0);
     }
 
@@ -1796,7 +1860,7 @@ mod issue_17_tests {
             .await
             .unwrap();
         let sent = vec!["Reply with PONG".to_string()];
-        assert!(resend_lost_prompt(&app, &f.run_id, &f.turn_id, &sent).await);
+        assert!(resend_lost_prompt(&app, &f.run_id, &f.turn_id, &sent).await.sent());
         assert_eq!(count(&f, "pane.send_text"), 1);
     }
 
@@ -2007,7 +2071,7 @@ mod issue_17_tests {
             .await
             .unwrap();
         let sent = vec!["Reply with PONG".to_string()];
-        assert!(!resend_lost_prompt(&app, &f.run_id, &f.turn_id, &sent).await, "舊的 unverified 列照舊不重送");
+        assert!(!resend_lost_prompt(&app, &f.run_id, &f.turn_id, &sent).await.sent(), "舊的 unverified 列照舊不重送");
         assert_eq!(count(&f, "pane.send_text"), 0);
     }
 
@@ -2116,10 +2180,68 @@ mod issue_17_tests {
             resend_lost_prompt(&app, &f.run_id, &f.turn_id, &sent),
             resend_lost_prompt(&app, &f.run_id, &f.turn_id, &sent),
         );
-        assert_eq!([a, b].iter().filter(|x| **x).count(), 1);
+        assert_eq!([a, b].iter().filter(|x| x.sent()).count(), 1);
         let pane = f.env.herdr.pane("pane-17").unwrap();
         assert_eq!(pane.transcript.iter().filter(|l| l.contains("Reply with PONG")).count(), 1);
         assert!(!db::claim_resend(&app.db, &f.turn_id, MAX_PROMPT_RESENDS).await);
+    }
+
+    /// 重送在打字前被擋下（證據檔一時讀不到）：額度退回，watchdog 隔一下用退回的額度再試一次，這次送出去
+    /// （review2 deliv #4：以前退回的額度沒人用得到，回合馬上被判失敗）。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_resend_blocked_before_typing_is_retried_with_the_refunded_budget() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = fixture("claude", "").await;
+        let t = with_transcript(&f, wide()).await;
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        let generation = 4242;
+        app.stall_timers.lock().await.insert(f.run_id.clone(), generation);
+        let sent = vec!["Reply with PONG please".to_string()];
+        std::fs::set_permissions(&t, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let unlock = {
+            let t = t.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                std::fs::set_permissions(&t, std::fs::Permissions::from_mode(0o644)).unwrap();
+            })
+        };
+        let out = resend_with_retry(&app, &f.run_id, &f.bot_id, &f.turn_id, &sent, generation, Duration::from_millis(900)).await;
+        unlock.await.unwrap();
+        assert_eq!(out, Some((true, None)), "第二次用退回的額度送出去");
+        assert_eq!(count(&f, "pane.send_text"), 1, "只送了一次");
+        assert!(!db::claim_resend(&app.db, &f.turn_id, MAX_PROMPT_RESENDS).await, "額度這次真的用掉了");
+    }
+
+    /// 兩次都被擋：回合照樣判失敗，但訊息說出試過重送、被什麼擋下，不是「agent 沒反應」。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_resend_blocked_twice_says_what_blocked_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = fixture("claude", "").await;
+        let t = with_transcript(&f, wide()).await;
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        app.stall_timers.lock().await.insert(f.run_id.clone(), 7);
+        let sent = vec!["Reply with PONG please".to_string()];
+        std::fs::set_permissions(&t, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let out = resend_with_retry(&app, &f.run_id, &f.bot_id, &f.turn_id, &sent, 7, Duration::from_millis(50)).await;
+        std::fs::set_permissions(&t, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let Some((false, Some(why))) = out else { panic!("expected blocked twice, got {out:?}") };
+        assert_eq!(count(&f, "pane.send_text"), 0, "一個字都沒打");
+        assert!(db::claim_resend(&app.db, &f.turn_id, MAX_PROMPT_RESENDS).await, "額度還在（兩次都退回了）");
+
+        fail_stalled_turn(&app, &f.run_id, &f.bot_id, &f.turn_id, false, false, Some(why)).await.unwrap();
+        let msg: String = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='system'")
+            .bind(&f.turn_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert!(msg.contains("試著自動重送時被擋下") && msg.contains(why), "{msg}");
+
+        // 計時器被換掉（新的回合、取消）就停手，不動任何東西。
+        assert_eq!(resend_with_retry(&app, &f.run_id, &f.bot_id, &f.turn_id, &sent, 8, Duration::from_millis(1)).await, None);
     }
 
     #[tokio::test]
@@ -2128,7 +2250,7 @@ mod issue_17_tests {
         let app = f.env.app.clone();
         let rx = app.subscribe();
 
-        fail_stalled_turn(&app, &f.run_id, &f.bot_id, &f.turn_id, false, false).await.unwrap();
+        fail_stalled_turn(&app, &f.run_id, &f.bot_id, &f.turn_id, false, false, None).await.unwrap();
         let message: (String, String, String) = sqlx::query_as(
             "SELECT role, content, source FROM messages WHERE conversation_id=? AND turn_id=? AND role='system'",
         )
