@@ -111,8 +111,11 @@ async function applyRoute(r: Route) {
       try {
         // pane 活不過 daemon 重啟，要對現況；順便補回網址裡沒有的 `cwd`。
         const shell = (await api.fetchHostShells(r.host)).find((x) => x.pane_id === r.paneId)
-        if (!shell) return backHome('這個 shell 已經關掉了')
-        s.viewHostShell(shell)
+        if (shell) return s.viewHostShell(shell)
+        // 選單點進去的 pane（§6.5e）不在「自己開的」那份裡；它記在 daemon 的 pane 表，活得過重啟。
+        const traced = (await api.fetchAllPanes()).find((x) => x.host === r.host && x.pane_id === r.paneId)
+        if (!traced) return backHome('這個 shell 已經關掉了')
+        s.viewPane(traced)
       } catch {
         backHome('讀不到這台主機的 shell')
       }

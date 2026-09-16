@@ -25,6 +25,7 @@ import {
 } from '../api/normalize'
 import { ApiError } from '../api/types'
 import type { Bot, BotKind, RestartBatch, GroupChatResult, Mission, MissionDetail, NewMissionInput, MemSnapshot, GroupMessage, Host, HostResult, HostShell, Identity, IdentityStatusMap, Lamp, Message, ModelInfo, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, PatchBotInput, PatchProjectInput, Project, QuotaMap, Run, TerminalSource, ToolMap, Turn } from '../api/types'
+import type { ProjectPane } from '../api'
 import { dropHostModels, modelsKey, shouldFetchModels, type ModelsCache } from './modelsCache'
 import { MESSAGE_CAP, byId, byTime, capList, insertSorted, pruneTurns } from './lists'
 import { acceptStateSeq, singleFlight } from './singleFlight'
@@ -114,7 +115,15 @@ const initialSelection = readSelection()
 
 const SHELL_VIEW_KEY = 'am.shellView'
 
-type ShellView = { host: string; paneId: string; cwd: string }
+type ShellView = {
+  host: string
+  paneId: string
+  cwd: string
+  /** 服務 pane（dev server 之類）：只能看。送一個 Ctrl-C 就是把它關掉（§6.5e）。 */
+  readOnly?: boolean
+  /** 從選單點進來的 pane，不是這個面板自己開的：關它走 pane 的生命週期，面板不給「結束 shell」。 */
+  traced?: boolean
+}
 
 /** 重整要回到同一個 shell；pane 可能已關，`bootstrap` 會對 `GET /api/hosts/:host/shells` 驗一次。 */
 function readShellView(): ShellView | null {
@@ -125,7 +134,14 @@ function readShellView(): ShellView | null {
     const host = optStr(pick(parsed, 'host'))
     const paneId = optStr(pick(parsed, 'paneId'))
     if (!host || !paneId) return null
-    return { host, paneId, cwd: optStr(pick(parsed, 'cwd')) ?? '' }
+    return {
+      host,
+      paneId,
+      cwd: optStr(pick(parsed, 'cwd')) ?? '',
+      // 重整之後唯讀要跟著回來，不然 dev server 的面板一重整就又能打字了。
+      readOnly: parsed.readOnly === true,
+      traced: parsed.traced === true,
+    }
   } catch {
     return null
   }
@@ -348,7 +364,7 @@ export interface StoreState {
   reviseMission: (missionId: string, text: string) => Promise<string | null>
 
   /** 非 null = 主面板顯示 `HostShellPanel`（優先於其他選取）。 */
-  shellView: { host: string; paneId: string; cwd: string } | null
+  shellView: ShellView | null
 
   selectedBotId: string | null
   rightTab: RightTab
@@ -431,6 +447,10 @@ export interface StoreState {
   openHostShell: (host: string, cwd?: string) => Promise<boolean>
   /** 切到已開著的 shell，不打 API。 */
   viewHostShell: (shell: HostShell) => void
+  /** SPEC §6.5e：選單裡每個專案被 trace 的 pane，點得進去。 */
+  sidePanes: Record<string, ProjectPane[]>
+  loadSidePanes: (projectId: string) => Promise<void>
+  viewPane: (pane: ProjectPane) => void
   /** 只關面板，shell 留著。 */
   closeShellView: () => void
   restoreShellView: () => Promise<void>
@@ -1677,6 +1697,24 @@ export const useStore = create<StoreState>((set, get) => ({
     })
   },
 
+  sidePanes: {},
+
+  async loadSidePanes(projectId) {
+    try {
+      const panes = await api.fetchProjectPanes(projectId)
+      set((s) => ({ sidePanes: { ...s.sidePanes, [projectId]: panes } }))
+    } catch {
+      // 舊 daemon 沒有這支端點：選單不多出東西，其他照舊。
+    }
+  },
+
+  // 同一個 shell 面板：面板只認 (host, paneId)，白名單在 daemon 那一側（`shell::registered`）。
+  viewPane: (pane) =>
+    set({
+      shellView: { host: pane.host, paneId: pane.pane_id, cwd: pane.cwd ?? '', readOnly: pane.kind === 'service', traced: true },
+      settingsBotId: null,
+    }),
+
   viewHostShell: (shell) =>
     set({ shellView: { host: shell.host, paneId: shell.pane_id, cwd: shell.cwd }, settingsBotId: null }),
 
@@ -1687,7 +1725,10 @@ export const useStore = create<StoreState>((set, get) => ({
     if (!v) return
     try {
       const alive = await api.fetchHostShells(v.host)
-      if (!alive.some((sh) => sh.pane_id === v.paneId)) set({ shellView: null })
+      if (alive.some((sh) => sh.pane_id === v.paneId)) return
+      // daemon 自己開的那份清單只在記憶體，重啟就空了；被 trace 的 pane 活得比它久（§6.5e）。
+      const tracked = await api.fetchAllPanes()
+      if (!tracked.some((p) => p.host === v.host && p.pane_id === v.paneId)) set({ shellView: null })
     } catch {
       // 暫時連不上就留著：面板會顯示讀取失敗。
     }

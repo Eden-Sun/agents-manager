@@ -29,6 +29,7 @@ import { HeadMoreMenu } from './HeadMoreMenu'
 import { DirPicker } from './DirPicker'
 import { IdentitiesPanel, IdentityBadge } from './IdentitiesPanel'
 import { Modal } from './Modal'
+import { SidebarPanes } from './SidebarPanes'
 import { RunElapsed } from './RunElapsed'
 import { SupervisorPanel } from './SupervisorPanel'
 import { IdentityOptions, PersonaField, PersonaMark } from './BotSettingsPanel'
@@ -1292,6 +1293,8 @@ export function Sidebar() {
                 })}
                 </div>
               )}
+              {/* 這個專案被 trace 的 shell／服務 pane（§6.5e）：點一下在這裡打開，不是任開任關。 */}
+              {projectShut ? null : <SidebarPanes projectId={p.id} />}
               {/* 腳註交代隱藏數，免得以為 bot 不見了。 */}
               {!projectShut && list.length > 0 && hiddenCount > 0 ? (
                 <p className="project-quota-hidden">{hiddenCount} 個 Bot 已隱藏（額度不足）</p>

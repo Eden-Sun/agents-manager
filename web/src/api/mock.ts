@@ -687,6 +687,8 @@ export class MockTransport implements Transport {
     { const m = rawPath.match(/^\/bots\/([^/]+)\/read$/); if (method === 'POST' && m) return { bot_id: decodeURIComponent(m[1]), read_mark: { at: typeof b.at === 'string' ? b.at : new Date().toISOString(), id: typeof b.message_id === 'string' ? b.message_id : '' }, unread: 0 } }
     // §6.5e：專案底下的非 agent pane。
     { const m = rawPath.match(/^\/projects\/([^/]+)\/panes$/); if (method === 'GET' && m) return this.projectPanes(decodeURIComponent(m[1])) }
+    // 全部被 trace 的 pane：前端重整時靠它把選單點進去的 pane 還原（§6.5e）。
+    if (method === 'GET' && rawPath === '/panes') return { panes: this.projectPanes(this.projects[0]?.id ?? '').panes }
     { const m = rawPath.match(/^\/panes\/([^/]+)\/(focus|close|adopt)$/); if (method === 'POST' && m) {
         const pane = decodeURIComponent(m[1])
         if (m[2] === 'close') {
@@ -2801,10 +2803,34 @@ export class MockTransport implements Transport {
   }
 
   /** 白名單：非自己開的 pane 一律 404（同 daemon）。 */
-  private shell(host: string, paneId: string): MockShell {
+  /**
+   * 白名單兩份（跟 daemon 的 `shell::registered` 一樣，§6.5e）：自己開的那幾顆，加上被 trace 的 pane。
+   * `kind` 當權限——service 只能看，打字回 403。
+   */
+  private shell(host: string, paneId: string, access: 'view' | 'type' = 'view'): MockShell {
     const s = this.shells.get(`${host}/${paneId}`)
-    if (!s) throw new ApiError(404, { error: 'not_found', what: 'shell' }, 'shell not found')
-    return s
+    if (s) return s
+    const traced = this.projectPanes(this.projects[0]?.id ?? '').panes.find((x) => x.host === host && x.pane_id === paneId)
+    if (!traced) throw new ApiError(404, { error: 'not_found', what: 'shell' }, 'shell not found')
+    if (traced.kind === 'service' && access === 'type') {
+      throw new ApiError(403, { error: 'read_only_pane', kind: 'service', message: '這是服務 pane，只能看不能打字' }, 'read only')
+    }
+    const cwd = String(traced.cwd ?? '/Users/me')
+    const made: MockShell = {
+      host,
+      workspace_id: String(traced.workspace_id ?? 'w1'),
+      tab_id: String(traced.tab_id ?? 'w1:t1'),
+      pane_id: paneId,
+      cwd,
+      created_at: String(traced.first_seen ?? new Date().toISOString()),
+      lines:
+        traced.kind === 'service'
+          ? ['$ npm run dev', '', '  ▲ Next.js 15.0.0', '  - Local:   http://localhost:3010', '', ' ✓ Ready in 1.2s']
+          : [`${cwd.split('/').pop() ?? '~'} % ls`, 'README.md  daemon  web'],
+      typed: '',
+    }
+    this.shells.set(`${host}/${paneId}`, made)
+    return made
   }
 
   private closeShell(host: string, paneId: string) {
@@ -2830,7 +2856,7 @@ export class MockTransport implements Transport {
   }
 
   private shellText(host: string, paneId: string, text: string, enter: boolean) {
-    const s = this.shell(host, paneId)
+    const s = this.shell(host, paneId, 'type')
     s.typed += text
     if (!enter) return {}
     const cmd = s.typed.trim()
@@ -2861,7 +2887,7 @@ export class MockTransport implements Transport {
   }
 
   private shellKeys(host: string, paneId: string, keys: unknown) {
-    const s = this.shell(host, paneId)
+    const s = this.shell(host, paneId, 'type')
     const list = Array.isArray(keys) ? keys.map((k) => String(k)) : []
     if (list.length === 0) throw new ApiError(400, { error: 'bad_request', message: 'keys must not be empty' }, 'bad request')
     for (const k of list) {
