@@ -1,14 +1,8 @@
 import { useEffect, useState } from 'react'
 import { botLamp, useStore } from '../store/store'
+import { fmtElapsed } from '../lib/elapsed'
 import './runElapsed.css'
 
-/** 2m / 45m / 1h20 — 只到分，秒級跳動在側欄只會吵。 */
-function fmtElapsed(ms: number): string {
-  const m = Math.floor(ms / 60000)
-  if (m < 1) return '<1m'
-  if (m < 60) return `${m}m`
-  return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, '0')}`
-}
 
 /** 跑多久了（2026-09-16 使用者：子 agent 執行中要有小字說已 run 幾分；同日改成只寫時間、放燈號下方）。只在 working 時出現。 */
 /** 這一頁看到某顆 bot「開始在跑」的時刻；daemon 沒有 turn 紀錄時（多半是別人派的回合）拿來墊底。 */
@@ -24,7 +18,7 @@ export function RunElapsed({ botId }: { botId: string }) {
     return start
   })
   const working = useStore((s) => botLamp(s, botId) === 'working')
-  // 一分鐘一跳就夠；沒在跑時不開計時器。
+  // 每秒上數；沒在跑時不開計時器。
   const [, tick] = useState(0)
   useEffect(() => {
     if (!working) {
@@ -32,7 +26,7 @@ export function RunElapsed({ botId }: { botId: string }) {
       return
     }
     if (!seenWorkingAt.has(botId)) seenWorkingAt.set(botId, Date.now())
-    const id = setInterval(() => tick((n) => n + 1), 20000)
+    const id = setInterval(() => tick((n) => n + 1), 1000)
     return () => clearInterval(id)
   }, [working, botId])
   if (!working) return null
