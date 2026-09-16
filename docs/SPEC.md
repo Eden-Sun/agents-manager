@@ -494,6 +494,58 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
    認到就在**插入當下**寫 `relay_from`（事後補的話 `message_added` 已經推出去了）。
 4. 認不出來維持 NULL = 使用者自己打的。寧可少標，不把使用者的話說成別人送的。
 
+### 6.5e shell／服務 pane 的歸屬與生命週期（草稿，2026-09-16 使用者交辦，等 AGM review）
+
+**問題**：AG Man 只認 agent pane（§6.5.1「不採用普通 shell pane」）。實測 30 個 pane 有 5 個非 agent pane 完全在管理之外：
+一個是 wits-ops 起的 Next dev server（w168:p62，listen 3010，卻開在 agents-manager 的 workspace，wt 專案頁看不到），
+其餘四個是空 zsh，永遠留著。沒有歸屬（關掉會不會炸沒人知道）、放錯 workspace、沒有生命週期。
+
+#### 分類（依觀察到的事實，不依誰開的）
+| kind | 判準 | 處置 |
+|---|---|---|
+| `agent` | herdr `agent.list` 認得（claude／codex／grok） | 既有邏輯，這一段完全不碰（§6.5.1、§6.9 的教訓） |
+| `service` | 前景有非 shell 程式，**或**該 pane 的行程樹有 listen port | 不自動關；只有在「擁有它的 bot 已刪除／專案已移除」時發 `pane_orphaned` 通知，由人決定 |
+| `shell` | 只有 shell（zsh/bash/sh/fish），沒有 listen port | 歸屬得到的 bot 才受 GC：閒置超過門檻自動關 |
+
+#### 歸屬怎麼來（與交辦計畫 C 的差異，這裡取代原案）
+原案要 shim 用 `herdr pane report-metadata` 帶 owner／project／purpose。**不可行**：`report-metadata` 是 herdr 的
+**display-only** 介面（只有 `--title`／`--display-agent` 之類），不保存自訂欄位，也不會回到 `pane.list`／`pane.get`，
+拿它當歸屬的真相會在 herdr 重啟或改版後靜靜消失。改成兩條，真相在 daemon：
+
+1. **環境推斷（主要來源，不需要新協定）**：bot 的 pane 由 shim 開，`--env` 一定帶 `AM_BOT_ID`／`AM_RUN_ID`（§6.5b），
+   子 pane 的 shell 與其行程樹都繼承得到。daemon 用既有的 `memproc` 環境快照（`ps -E` / `/proc/<pid>/environ`，
+   已經在用來算每個專案的 RAM）把 pane 的行程樹對回 `AM_BOT_ID` → bot → project。**沒有 `AM_BOT_ID` 就是使用者手開的**，
+   一律不動：不關、不搬、不改名，只在 UI 列出來（見下）。
+2. **用途標記（次要，只補 purpose 與顯示）**：shim 在 `pane split` / `pane run` 之後對 daemon
+   `POST /relay/pane`（表單 `bot_id`／`pane_id`／`purpose`，header `X-AM-Bot-Token`，與 §6.5d 的 `/relay/announce` 同一條路），
+   daemon 記在 `panes.purpose`。報不成功只是少一個用途字串，歸屬仍由第 1 條決定。同時 `herdr pane rename` 與
+   `tab rename` 用 `<bot herdr 名>-sh-<用途>`（純顯示，不是真相）。
+
+**workspace 歸位**：bot 開的非 agent pane 應該落在自己 project 的 workspace。**但已經跑起來的 service pane 不搬**——
+搬 pane 會殺掉裡面的行程（w168:p62 的 dev server 就是這種）。做法是：shim 在**開 pane 當下**用 project 的 workspace
+（`herdr pane split --pane` 以母 pane 為基準時本來就同 workspace；`pane new`／`tab create` 補 `--workspace`），
+已經放錯的只在 UI 標「在 `<workspace>`（不是本專案）」，由人決定要不要重開。
+
+#### 生命週期
+- `shell` pane，**有歸屬**且無前景程式、無 listen port、`last_output_at` 超過 `[panes] idle_close_secs`（預設 21600＝6 小時）
+  → daemon 在 reconcile 的同一輪關掉並記 info log（含 pane id、owner、閒置時長）。關之前重新取一次前景與 port，避免競態。
+- `service` pane：不自動關。擁有的 bot 被刪、或 project 被移除 → 推一則 inbox `pane_orphaned`（帶 pane id、workspace、
+  前景程式、listen ports、最後輸出時間），AGM／人決定。
+- **使用者手開的（沒有 `AM_BOT_ID`）**：永不自動關，也不通知；只在 UI 顯示，讓人自己決定。
+- daemon 重啟後靠同一輪掃描重建 `panes`，不留記憶體狀態。
+
+#### 資料與 API（§6.5f 實作時展開）
+`panes` 表：`pane_id`、`host`、`workspace_id`、`tab_id`、`cwd`、`kind`、`owner_bot_id`、`project_id`、`purpose`、
+`foreground`（argv 摘要）、`listen_ports`、`last_output_at`、`first_seen`、`last_seen`。
+`GET /api/projects/{id}/panes`、`POST /api/panes/{id}/close`、`POST /api/panes/{id}/adopt`（補 owner／purpose，人工修正用）。
+listen port 只在本機算（pane 行程樹的 pid 對 `lsof -nP -iTCP -sTCP:LISTEN`）；遠端主機這一欄留空並標明「遠端不判斷」，
+不要為了它多開 ssh 往返。
+
+#### 邊界
+- 不動 agent pane 的 reconcile／run 配對／孤兒清掃（§6.9 附註的 09-11 教訓）。
+- GC 規則從 `bin/pane-gc.sh` 搬進 daemon 之後，該腳本只留互動式登入 pane 那條或退役（§18.4 同批處理）。
+- 門檻與「不動使用者手開」寫在 config，不寫死。
+
 ### 6.5.1 採用使用者的 Herdr `default` session
 
 daemon 另外唯讀觀察本機 Herdr `default` session（`~/.config/herdr/herdr.sock`），不替它啟動 server。啟動、事件重連與定期輪詢時：
