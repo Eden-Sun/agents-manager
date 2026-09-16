@@ -35,6 +35,7 @@ function seed() {
 }
 
 const settle = () => new Promise((r) => setTimeout(r, 10))
+const noticeTexts = () => useStore.getState().notices.map((n) => n.text)
 
 test('任務被清掉：收掉那一張卡，其他任務與「交給 AGM」不受影響', async () => {
   seed()
@@ -77,4 +78,71 @@ test('交給 AGM 的回應在路上斷掉：再按一次沿用同一個 crid，�
   assert.equal(crids.length, 2)
   assert.ok(crids[0], 'store 要自己給 crid')
   assert.equal(crids[0], crids[1], '重送必須是同一個 crid，daemon 才回同一筆')
+})
+
+test('排序沒存起來：通知說回到原本的順序，畫面就真的要回去', async () => {
+  seed()
+  routeDaemon(() => json({ error: 'upstream', message: 'daemon rebuilding' }, 502))
+  useStore.getState().moveBot('b2', 'b1')
+  assert.deepEqual(useStore.getState().botOrder.p1, ['b2', 'b1'], '先樂觀套用')
+  await settle()
+  assert.equal(useStore.getState().botOrder.p1, undefined, '失敗後要讓位給 daemon 的順序')
+  assert.ok(noticeTexts().some((t) => t.includes('回到原本的順序')))
+
+  useStore.setState({ botOrder: { p1: ['b2', 'b1'] }, notices: [] })
+  useStore.getState().moveBot('b1', 'b2')
+  await settle()
+  assert.deepEqual(useStore.getState().botOrder.p1, ['b2', 'b1'], '收回到這次拖動之前的那一份，不是清空')
+})
+
+test('專案排序沒存起來也一樣收回', async () => {
+  seed()
+  useStore.setState({ projects: [project(), { id: 'p2', label: 'p2', path: '/p2', host: 'local' } as Project] })
+  routeDaemon(() => json({ error: 'upstream', message: 'daemon rebuilding' }, 502))
+  useStore.getState().moveProject('p2', 'p1')
+  assert.deepEqual(useStore.getState().projectOrder, ['p2', 'p1'])
+  await settle()
+  assert.deepEqual(useStore.getState().projectOrder, [], '失敗後回到原本的順序')
+})
+
+test('回合還在跑時排第二則：第一則退回輸入框，不是無聲消失', () => {
+  seed()
+  useStore.getState().queueSend('b1', '先跑一次測試', ['a1'])
+  useStore.getState().queueSend('b1', '順便看一下 lint', [])
+  const s = useStore.getState()
+  assert.deepEqual(s.queuedSends.b1, { text: '順便看一下 lint', attachments: [] })
+  assert.equal(s.drafts['bot:b1'], '先跑一次測試', '第一則要看得到，不能只留在記憶裡')
+  assert.ok(noticeTexts().some((t) => t.includes('退回輸入框')))
+})
+
+test('已讀送不出去：daemon 的舊數字不可以把徽章點回來', async () => {
+  seed()
+  // 訊息載過了：否則 `loadMessages` 會用已讀標記重算，蓋掉這裡要看的那一步。
+  useStore.setState({ botUnread: { b1: 3, b2: 1 }, loadedBots: { b1: true, b2: true } })
+  routeDaemon((req) => {
+    if (req.path.includes('/read')) return json({ error: 'upstream', message: 'daemon restarting' }, 502)
+    if (req.path.startsWith('/api/state')) {
+      return json(
+        {
+          daemon_seq: 1,
+          connected: true,
+          hosts: [],
+          projects: [project()],
+          bots: [{ ...bot('b1'), unread: 3 }, { ...bot('b2'), unread: 1 }],
+          runs: [],
+          turns: [],
+          identities: [],
+        },
+        200,
+      )
+    }
+    return json({}, 200)
+  })
+  useStore.getState().markBotRead('b1')
+  await settle()
+  assert.equal(useStore.getState().botUnread.b1, undefined, '本機先清掉')
+  await useStore.getState().refreshState()
+  const after = useStore.getState().botUnread
+  assert.equal(after.b1, undefined, '送不出去的已讀還沒補上，快照的舊數字不算')
+  assert.equal(after.b2, 1, '沒讀過的那顆照舊由 daemon 說了算')
 })
