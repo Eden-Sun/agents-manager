@@ -454,8 +454,13 @@ export class MockTransport implements Transport {
   /** 模擬舊 daemon 沒有 `/api/missions`（`__amMock.missionsOff()`）。 */
   private missionsDisabled = false
 
-  /** key = `<host>/<pane_id>`。 */
+  /** 面板自己開的 shell（daemon 的 `app.host_shells`）。key = `<host>/<pane_id>`。 */
   private shells = new Map<string, MockShell>()
+  /**
+   * 被 trace 的 pane 的畫面緩衝。**不放進 `shells`**：放進去就會被 `GET …/shells` 列成「自己開的」、
+   * 之後 `shell()` 直接放行不再看唯讀——daemon 那邊這兩份白名單一直是分開的（第二輪 review M6）。
+   */
+  private tracedScreens = new Map<string, MockShell>()
   private shellSeq = 0
 
   /** 新遠端主機預設同 m4p 實測：active token 失效、另有可切帳號。 */
@@ -685,10 +690,10 @@ export class MockTransport implements Transport {
     // 前端已樂觀套用排序，mock 收下就好。
     // 跨裝置已讀：mock 只有一個瀏覽器，記下來就好。
     { const m = rawPath.match(/^\/bots\/([^/]+)\/read$/); if (method === 'POST' && m) return { bot_id: decodeURIComponent(m[1]), read_mark: { at: typeof b.at === 'string' ? b.at : new Date().toISOString(), id: typeof b.message_id === 'string' ? b.message_id : '' }, unread: 0 } }
-    // §6.5e：專案底下的非 agent pane。
+    // §6.5e：專案底下的非 agent pane（只回這個專案自己的，沒歸屬的走 `?unowned=1`）。
     { const m = rawPath.match(/^\/projects\/([^/]+)\/panes$/); if (method === 'GET' && m) return this.projectPanes(decodeURIComponent(m[1])) }
-    // 全部被 trace 的 pane：前端重整時靠它把選單點進去的 pane 還原（§6.5e）。
-    if (method === 'GET' && rawPath === '/panes') return { panes: this.projectPanes(this.projects[0]?.id ?? '').panes }
+    // 全部被 trace 的 pane；`unowned=1` 只回對不到專案的，並標哪一顆是 scratch（§6.5e）。
+    if (method === 'GET' && rawPath === '/panes') return { panes: q.get('unowned') === '1' ? this.unownedPanes() : this.allPanes() }
     { const m = rawPath.match(/^\/panes\/([^/]+)\/(focus|close|adopt)$/); if (method === 'POST' && m) {
         const pane = decodeURIComponent(m[1])
         if (m[2] === 'close') {
@@ -697,6 +702,7 @@ export class MockTransport implements Transport {
             throw new ApiError(409, { error: 'conflict', reason: 'service_pane', pane: row }, 'service pane needs confirm')
           }
           this.panes = this.panes.filter((p) => p.pane_id !== pane)
+          this.tracedScreens.delete(`${String(row?.host ?? 'local')}/${pane}`)
           return { closed: true }
         }
         return { ok: true, pane_id: pane }
@@ -979,31 +985,56 @@ export class MockTransport implements Transport {
     return { host, pid, signal: typeof b.signal === 'string' ? b.signal : 'TERM', exe: row.exe, freed_bytes: row.subtree_bytes }
   }
 
-  /** §6.5e：一顆 bot 開的 dev server（有 port）與一顆使用者自己開的 shell。 */
+  /**
+   * §6.5e：第一個專案底下一顆 bot 開的 dev server（有 port，唯讀）、一顆跑著 vim 的 shell（掃描分成 service，
+   * 但沒有 port，打得進去）、一顆使用者自己開的 shell；另外兩顆對不到專案：scratch 與「多出來的」。
+   */
   private panes: Array<Record<string, unknown>> = []
 
+  private seedPanes() {
+    if (this.panes.length > 0) return
+    const bot = this.bots[0]
+    const pid = this.projects[0]?.id ?? null
+    const ago = (m: number) => new Date(Date.now() - m * 60000).toISOString()
+    const row = (over: Record<string, unknown>) => ({
+      host: 'local', workspace_id: 'w168', tab_id: 'w168:t39', cwd: '/Users/me/project/agents-manager',
+      kind: 'shell', owned_by: 'user', owner_bot_id: null, project_id: pid, purpose: null, foreground: null,
+      listen_ports: [], last_output_at: ago(5), first_seen: ago(600), last_seen: ago(0), gc_optin: false, ...over,
+    })
+    this.panes = [
+      row({ pane_id: 'w168:p62', kind: 'service', owned_by: 'bot', owner_bot_id: bot?.id ?? null, purpose: 'dev-server',
+        foreground: 'node next dev --port 3010', listen_ports: [3010], last_output_at: ago(1), first_seen: ago(180) }),
+      row({ pane_id: 'w168:p63', kind: 'service', foreground: 'vim notes.md', last_output_at: ago(2), first_seen: ago(90) }),
+      row({ pane_id: 'w1HJ:p4W', workspace_id: 'w1HJ', tab_id: 'w1HJ:t2K', cwd: '/Users/me/project/agents-manager/web',
+        last_output_at: ago(420) }),
+      row({ pane_id: 'w9:p1', workspace_id: 'w9', tab_id: 'w9:t1', cwd: '/Users/me', owned_by: 'none', project_id: null,
+        first_seen: ago(3000) }),
+      row({ pane_id: 'w9:p7', workspace_id: 'w9', tab_id: 'w9:t7', cwd: '/tmp', owned_by: 'none', project_id: null,
+        last_output_at: ago(400), first_seen: ago(500) }),
+    ]
+  }
+
+  /** daemon 的唯讀規則：有 listen port 才唯讀（`shell::allowed`），跟 kind 無關。 */
+  private paneRow(p: Record<string, unknown>): Record<string, unknown> {
+    return { ...p, read_only: Array.isArray(p.listen_ports) && p.listen_ports.length > 0 }
+  }
+
+  private allPanes() {
+    this.seedPanes()
+    return this.panes.map((p) => this.paneRow(p))
+  }
+
   private projectPanes(projectId: string) {
-    if (this.panes.length === 0) {
-      const bot = this.bots[0]
-      const ago = (m: number) => new Date(Date.now() - m * 60000).toISOString()
-      this.panes = [
-        {
-          pane_id: 'w168:p62', host: 'local', workspace_id: 'w168', tab_id: 'w168:t39',
-          cwd: '/Users/me/project/agents-manager', kind: 'service', owned_by: 'bot',
-          owner_bot_id: bot?.id ?? null, project_id: projectId, purpose: 'dev-server',
-          foreground: 'node next dev --port 3010', listen_ports: [3010],
-          last_output_at: ago(1), first_seen: ago(180), last_seen: ago(0), gc_optin: false,
-        },
-        {
-          pane_id: 'w1HJ:p4W', host: 'local', workspace_id: 'w1HJ', tab_id: 'w1HJ:t2K',
-          cwd: '/Users/me/project/agents-manager/web', kind: 'shell', owned_by: 'user',
-          owner_bot_id: null, project_id: projectId, purpose: null,
-          foreground: null, listen_ports: [],
-          last_output_at: ago(420), first_seen: ago(600), last_seen: ago(0), gc_optin: false,
-        },
-      ]
-    }
-    return { project_id: projectId, host: 'local', panes: this.panes }
+    this.seedPanes()
+    const project = this.projects.find((p) => p.id === projectId)
+    return { project_id: projectId, host: project?.host ?? 'local', panes: this.allPanes().filter((p) => p.project_id === projectId) }
+  }
+
+  /** scratch＝對不到專案的 shell 裡 `first_seen` 最早的那顆，由 daemon 標，前端不重算。 */
+  private unownedPanes() {
+    const rows = this.allPanes().filter((p) => p.project_id === null)
+    const scratch = rows.filter((p) => p.kind === 'shell').sort((a, b) => String(a.first_seen).localeCompare(String(b.first_seen)))[0]
+    return rows.map((p) => ({ ...p, scratch: p === scratch }))
   }
 
   /** SPEC §15：依執行中 bot 數推算，啟停 bot 時數字才會動。 */
@@ -2806,19 +2837,21 @@ export class MockTransport implements Transport {
     return [...this.shells.values()].filter((s) => s.host === host).map((s) => this.shellJson(s))
   }
 
-  /** 白名單：非自己開的 pane 一律 404（同 daemon）。 */
   /**
    * 白名單兩份（跟 daemon 的 `shell::registered` 一樣，§6.5e）：自己開的那幾顆，加上被 trace 的 pane。
-   * `kind` 當權限——service 只能看，打字回 403。
+   * 被 trace 的**每一次**都照 pane 表判斷：有 listen port 的只能看，打字回 403；看過一次不會變成自己開的。
    */
   private shell(host: string, paneId: string, access: 'view' | 'type' = 'view'): MockShell {
-    const s = this.shells.get(`${host}/${paneId}`)
+    const key = `${host}/${paneId}`
+    const s = this.shells.get(key)
     if (s) return s
-    const traced = this.projectPanes(this.projects[0]?.id ?? '').panes.find((x) => x.host === host && x.pane_id === paneId)
+    const traced = this.allPanes().find((x) => x.host === host && x.pane_id === paneId)
     if (!traced) throw new ApiError(404, { error: 'not_found', what: 'shell' }, 'shell not found')
-    if (traced.kind === 'service' && access === 'type') {
-      throw new ApiError(403, { error: 'read_only_pane', kind: 'service', message: '這是服務 pane，只能看不能打字' }, 'read only')
+    if (traced.read_only && access === 'type') {
+      throw new ApiError(403, { error: 'read_only_pane', kind: traced.kind, message: '這顆 pane 開著 port（dev server 之類），只能看不能打字' }, 'read only')
     }
+    const screen = this.tracedScreens.get(key)
+    if (screen) return screen
     const cwd = String(traced.cwd ?? '/Users/me')
     const made: MockShell = {
       host,
@@ -2827,13 +2860,14 @@ export class MockTransport implements Transport {
       pane_id: paneId,
       cwd,
       created_at: String(traced.first_seen ?? new Date().toISOString()),
-      lines:
-        traced.kind === 'service'
-          ? ['$ npm run dev', '', '  ▲ Next.js 15.0.0', '  - Local:   http://localhost:3010', '', ' ✓ Ready in 1.2s']
+      lines: traced.read_only
+        ? ['$ npm run dev', '', '  ▲ Next.js 15.0.0', '  - Local:   http://localhost:3010', '', ' ✓ Ready in 1.2s']
+        : traced.foreground
+          ? [`${cwd.split('/').pop() ?? '~'} % ${String(traced.foreground)}`, '~', '~', '"notes.md" 3L, 42B']
           : [`${cwd.split('/').pop() ?? '~'} % ls`, 'README.md  daemon  web'],
       typed: '',
     }
-    this.shells.set(`${host}/${paneId}`, made)
+    this.tracedScreens.set(key, made)
     return made
   }
 
