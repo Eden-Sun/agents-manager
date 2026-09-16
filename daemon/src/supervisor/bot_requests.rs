@@ -210,9 +210,14 @@ pub async fn queue(
         "sender_verified": verified,
         "via": via,
     });
-    let new_id = store::push_inbox(&app.db, &key, "bot_request", None, Some(from_bot_id), None, &payload).await.map_err(up)?;
-    let (id, duplicate) = match new_id {
-        Some(id) => {
+    // 沒帶 request id 的重送去重只擋「前一筆**還沒處理完**」：已經結案（協調者看過、ack 了）之後同一句
+    // 再送一次，是 bot 照裁示改完又來申請，不是重播（review 2026-09-16 c3 L1）。這時換一把鍵
+    // （`#2`、`#3`…）重新入列。帶了 request id 的照舊：同一個 id 就是同一件事，結案了也回原本那筆。
+    let mut key = key;
+    let mut round = 1;
+    let (id, duplicate) = loop {
+        let new_id = store::push_inbox(&app.db, &key, "bot_request", None, Some(from_bot_id), None, &payload).await.map_err(up)?;
+        if let Some(id) = new_id {
             // 寫入就分類，不等下一個 tick：去重與角色從這一刻起就是確定的。
             let rt = roles::route("bot_request", &payload, None);
             sqlx::query("UPDATE supervisor_inbox SET role=?, wake=? WHERE id=?")
@@ -222,35 +227,40 @@ pub async fn queue(
                 .execute(&app.db)
                 .await
                 .map_err(up)?;
-            (id, false)
+            break (id, false);
         }
-        None => {
-            // 這個 key 已經有一筆了。只有**內容也一樣**才算重播；同一個 request id 換一段話會被
-            // 讀成「我的新申請送到了」，但它其實沒有進任何人的佇列。
-            let (id, existing): (String, String) =
-                sqlx::query_as("SELECT id, payload_json FROM supervisor_inbox WHERE supervisor_id=? AND event_key=?")
-                    .bind(store::SUPERVISOR_ID)
-                    .bind(&key)
-                    .fetch_one(&app.db)
-                    .await
-                    .map_err(up)?;
-            let old: Value = serde_json::from_str(&existing).unwrap_or_else(|_| json!({}));
-            let same = old.get("fingerprint").and_then(Value::as_str) == Some(fp.as_str());
-            if !same {
-                return Err(LcError::conflict(
-                    "client_request_id already used for a different request",
-                    json!({
-                        "reason": "request_mismatch",
-                        "inbox_event_id": id,
-                        "client_request_id": client_request_id,
-                        "existing_fingerprint": old.get("fingerprint"),
-                        "fingerprint": fp,
-                    }),
-                ));
-            }
-            let _ = roles::count_duplicate(&app.db, to).await;
-            (id, true)
+        // 這個 key 已經有一筆了。只有**內容也一樣**才算重播；同一個 request id 換一段話會被
+        // 讀成「我的新申請送到了」，但它其實沒有進任何人的佇列。
+        let (id, existing, state): (String, String, String) =
+            sqlx::query_as("SELECT id, payload_json, state FROM supervisor_inbox WHERE supervisor_id=? AND event_key=?")
+                .bind(store::SUPERVISOR_ID)
+                .bind(&key)
+                .fetch_one(&app.db)
+                .await
+                .map_err(up)?;
+        let old: Value = serde_json::from_str(&existing).unwrap_or_else(|_| json!({}));
+        let same = old.get("fingerprint").and_then(Value::as_str) == Some(fp.as_str());
+        if !same {
+            return Err(LcError::conflict(
+                "client_request_id already used for a different request",
+                json!({
+                    "reason": "request_mismatch",
+                    "inbox_event_id": id,
+                    "client_request_id": client_request_id,
+                    "existing_fingerprint": old.get("fingerprint"),
+                    "fingerprint": fp,
+                }),
+            ));
         }
+        let no_crid = client_request_id.map(str::trim).is_none_or(str::is_empty);
+        // 上限只是防呆：同一個十分鐘格子裡同一句被結案又重送幾十次，不是正常的申請。
+        if no_crid && state == "handled" && round < 50 {
+            round += 1;
+            key = format!("{}#{round}", key.split('#').next().unwrap_or(&key));
+            continue;
+        }
+        let _ = roles::count_duplicate(&app.db, to).await;
+        break (id, true);
     };
     let state: String = sqlx::query_scalar("SELECT state FROM supervisor_inbox WHERE id=?").bind(&id).fetch_one(&app.db).await.map_err(up)?;
     if !duplicate {
@@ -605,6 +615,35 @@ pub(crate) mod flow_tests {
         )
         .await;
         assert!(err.is_err(), "協調者不能指巡檢的回合當來源");
+    }
+
+    /// 沒帶 request id 的申請：前一筆還沒處理完才算重送；已經結案（協調者 ack 了）之後同一句再送，
+    /// 是新的一次申請，要重新入列並叫醒（review 2026-09-16 c3 L1）。帶了 id 的照舊回原本那筆。
+    #[tokio::test]
+    async fn the_same_words_after_the_first_was_handled_are_a_new_request() {
+        let app = app().await;
+        configure_responder(&app).await;
+        let first = intercept(&app, "patrol", "w1", "請核准重建", None, &[], true, "shim", ReplyMark::default()).await.unwrap().unwrap();
+        let again = intercept(&app, "patrol", "w1", "請核准重建", None, &[], true, "shim", ReplyMark::default()).await.unwrap().unwrap();
+        assert_eq!(again["duplicate"], true, "還沒處理：逾時重跑的 shim 不變成兩件事");
+        assert_eq!(again["inbox_event_id"], first["inbox_event_id"]);
+
+        let first_id = first["inbox_event_id"].as_str().unwrap().to_string();
+        assert_eq!(roles::ack(&app.db, &first_id, Some(Role::Responder), true).await.unwrap(), roles::AckOutcome::Acked);
+        let after = intercept(&app, "patrol", "w1", "請核准重建", None, &[], true, "shim", ReplyMark::default()).await.unwrap().unwrap();
+        assert_eq!(after["duplicate"], false, "結案之後同一句是新的申請");
+        assert_ne!(after["inbox_event_id"], first["inbox_event_id"]);
+        assert_eq!(after["state"], "pending");
+        assert_eq!(after["wake"], true);
+        let replay = intercept(&app, "patrol", "w1", "請核准重建", None, &[], true, "shim", ReplyMark::default()).await.unwrap().unwrap();
+        assert_eq!(replay["inbox_event_id"], after["inbox_event_id"], "新的那筆沒處理前，重送仍然併進它");
+
+        // 帶 request id：結案了也是同一件事。
+        let with_id = intercept(&app, "patrol", "w2", "請核准重啟", Some("r-7"), &[], true, "api", ReplyMark::default()).await.unwrap().unwrap();
+        let wid = with_id["inbox_event_id"].as_str().unwrap().to_string();
+        roles::ack(&app.db, &wid, Some(Role::Responder), true).await.unwrap();
+        let retry = intercept(&app, "patrol", "w2", "請核准重啟", Some("r-7"), &[], true, "api", ReplyMark::default()).await.unwrap().unwrap();
+        assert_eq!((retry["duplicate"].as_bool(), retry["inbox_event_id"].as_str()), (Some(true), Some(wid.as_str())));
     }
 
     /// 同一個 request id 換一段話**不是**重播：回 409 而不是假裝送到了（那會讓申請靜靜消失）。
