@@ -322,8 +322,9 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 
 - 只列**第一層的一般檔案**（不遞迴；子目錄與符號連結不列），新的排前面，最多 300 筆。
 - `expires_at` = mtime + `ttl_secs`；`remaining_secs` 是回應當下還剩幾秒，到期是 0（AGM 的 `com.agm.outbox-gc` 每 10 分鐘才清一次，0 的檔案還會出現一下）。前端從回應那一刻往下扣，不拿瀏覽器時鐘比 `expires_at`。
-- **一律不列**：隱藏檔、資料庫與旁檔（檔名含 `.sqlite`，或 `.db` 結尾／`.db-`／`.db.`）、金鑰與憑證（`.pem` `.key` `.p12` `.pfx` `.jks` `.keystore` `.ppk` `.kdbx` `.env`、`id_rsa*` 等），以及檔頭是 `SQLite format 3` 或 PEM 私鑰的檔案。規則本來就禁止放這些，這是第二道。
+- **一律不列**：隱藏檔、資料庫與旁檔（檔名含 `.sqlite`，或 `.db` 結尾／`.db-`／`.db.`）、金鑰與憑證（`.pem` `.key` `.p12` `.pfx` `.jks` `.keystore` `.ppk` `.kdbx` `.env` `.token` `.keychain`、`id_rsa*` 等，以及 `auth.json`、`credentials.json`、`application_default_credentials.json`、`hosts.yml`、`ui-token`），以及檔頭是 `SQLite format 3` 或 PEM 私鑰的檔案。規則本來就禁止放這些，這是第二道。
 - 目錄不存在（還沒寫過、被清理收掉）→ `200` 空清單。遠端主機的 bot → `200 {"files":[],"ttl_secs":3600,"reason":"outbox_remote"}`。bot 不存在 404。
+- `outbox` 或 `<bot_id>` 這兩段是符號連結、或擁有者跟資料目錄不同 → `200 {"files":[],"ttl_secs":3600,"reason":"outbox_untrusted"}`，下載 404：界線不能跟著連結搬到別處（例如 `~/.codex`）。
 
 ### `GET /api/bots/{id}/outbox/file?path=<檔名>`
 下載 outbox 裡的一個檔案。`path` 解開符號連結後必須仍在該 bot 的 outbox 內、是一般檔案、路徑上沒有隱藏目錄、也不是上面「一律不列」的那幾類，否則 `404 {"what":"file"}`（指到 scratchpad 的絕對路徑或符號連結一樣 404）；缺 `path` 400；bot 不存在 404；遠端主機的 bot 409 `outbox_remote`；大於 64 MiB 409 `file_too_large`。
