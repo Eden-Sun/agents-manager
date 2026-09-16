@@ -662,7 +662,36 @@ pub async fn restart_bot_with(app: &Arc<App>, bot_id: &str, opts: StartOpts) -> 
             return Err(cannot_resume(bot_id, why));
         }
     }
+    let stopping = db::active_run(&app.db, bot_id).await.map_err(up)?.map(|r| r.id);
     stop_bot_locked(app, bot_id).await?;
+    let started = restart_start(app, bot_id, opts).await;
+    if started.is_err() {
+        if let Some(run_id) = stopping.as_deref() {
+            left_down_by_restart(app, bot_id, run_id).await;
+        }
+    }
+    started
+}
+
+/// 重啟停掉了 bot、卻沒能把它開回來（start 在前置檢查就失敗，連新的 run 都沒建）：剛停掉的那個 run 改記
+/// `exited`。`stopped` 的意思是「使用者要它停」——incident 探針靠它分辨故意停的 bot，留著的話一顆
+/// `autostart=1` 的 bot 從此沒在跑、卻永遠不開 `bot_stopped`，health 一直是綠的（review 2026-09-16 c1 L3）。
+async fn left_down_by_restart(app: &Arc<App>, bot_id: &str, run_id: &str) {
+    let res = sqlx::query(
+        "UPDATE runs SET state='exited' WHERE id=? AND state='stopped'
+           AND NOT EXISTS (SELECT 1 FROM runs WHERE bot_id=? AND state IN ('starting','running','stopping'))",
+    )
+    .bind(run_id)
+    .bind(bot_id)
+    .execute(&app.db)
+    .await;
+    if matches!(res, Ok(r) if r.rows_affected() > 0) {
+        tracing::warn!(bot = bot_id, run = run_id, "restart stopped the bot but could not start it again; recorded as exited, not as a user stop");
+        app.emit_bot_status(bot_id).await;
+    }
+}
+
+async fn restart_start(app: &Arc<App>, bot_id: &str, opts: StartOpts) -> LcResult<String> {
     match start_bot_locked_with(app, bot_id, opts.clone()).await {
         Err(LcError::Conflict(v)) if v.get("reason").and_then(|r| r.as_str()) == Some("active run already exists") => {
             let Some(run) = db::active_run(&app.db, bot_id).await.map_err(up)? else {
@@ -1424,6 +1453,28 @@ mod idle_restart_tests {
             LcError::Conflict(v) => (v["reason"].as_str().unwrap_or_default().into(), v["busy"].as_str().unwrap_or_default().into()),
             other => panic!("expected 409, got {other:?}"),
         }
+    }
+
+    /// 重啟時 stop 成功、start 在前置檢查就失敗（這裡是身分在這台主機不存在）：剛停掉的 run 不能留成
+    /// `stopped`——那代表「使用者要它停」，incident 探針就永遠不替這顆 autostart bot 開 `bot_stopped`
+    /// （review 2026-09-16 c1 L3）。使用者自己 stop 的照舊是 `stopped`。
+    #[tokio::test]
+    async fn a_restart_that_cannot_start_again_is_not_recorded_as_a_user_stop() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, run_id) = bot_with_run(&env, "user", "idle").await;
+        sqlx::query("UPDATE bots SET identity='nope-not-on-this-host', autostart=1 WHERE id=?").bind(&bot_id).execute(&app.db).await.unwrap();
+        let err = restart_bot(&app, &bot_id).await.expect_err("身分不在這台主機：start 一定失敗");
+        assert!(matches!(err, LcError::Conflict(_)), "{err:?}");
+        let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(&run_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(state, "exited", "重啟沒開回來，不是使用者停的");
+        assert!(db::active_run(&app.db, &bot_id).await.unwrap().is_none());
+
+        // 對照：使用者自己 stop 的 run 留在 `stopped`。
+        let (other, other_run) = bot_with_run(&env, "user", "idle").await;
+        stop_bot(&app, &other).await.unwrap();
+        let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(&other_run).fetch_one(&app.db).await.unwrap();
+        assert_eq!(state, "stopped");
     }
 
     /// 排到它的那一刻還閒著、拿到鎖時已經在跑：不送 ctrl+c、run 原封不動。
