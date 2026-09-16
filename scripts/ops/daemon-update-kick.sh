@@ -48,12 +48,15 @@ log "== check"
 # 觸發條件有三個：整點的例行檢查、**累積夠多重建申請**（使用者 2026-09-14），或**最早一筆申請已經等太久**
 # （使用者 2026-09-15：不能一直卡著等湊滿）。launchd 每 5 分鐘跑一次，所以「整點」＝分鐘 < 5；
 # 門檻 `AGM_REBUILD_THRESHOLD`（預設 3；使用者 2026-09-16 從 5 降下來）、等待上限 `AGM_REBUILD_MAX_WAIT_MIN`（預設 30 分鐘）。
-# 請求＝上次真的上線（`daemon-update.built` 的 mtime）之後建立、還沒被否決的 rebuild 核准申請，
-# 同一個 requester 對同一個 commit 只算一筆。數不出來就當 0，也就是退回純整點的舊行為。
+# 請求＝上次真的上線（`daemon-update.built` 的 mtime）之後建立、還沒被否決、**還沒過期**的 rebuild 核准申請，
+# 同一個 requester 對同一個 commit 只算一筆。**這支腳本自己的申請不算**（review2 2026-09-16）：算進去的話
+# 自己先申請、30 分鐘後自己觸發「等太久」，每 5 分鐘跑一輪、main 一動就再申請一筆，協調者每 5 分鐘被叫一次。
+# 自己有還在等的申請（pending／approved、沒過期）時另外照常每輪往下跑：在等 AGM 裁示或安全窗口，不必等整點。
+# 數不出來就當 0，也就是退回純整點的舊行為。
 THRESHOLD=${AGM_REBUILD_THRESHOLD:-3}
 MAX_WAIT_MIN=${AGM_REBUILD_MAX_WAIT_MIN:-30}
 MINUTE=$(( 10#${AGM_TEST_MINUTE:-$(date +%M)} ))   # AGM_TEST_MINUTE 只給隔離測試用
-REQUESTS=$("$AGM" --compact approval list 2>/dev/null | BUILT_FILE="$BUILT" python3 -c '
+REQUESTS=$("$AGM" --compact approval list 2>/dev/null | BUILT_FILE="$BUILT" OWNER="$OWNER" python3 -c '
 import json, os, sys
 from datetime import datetime, timezone
 try:
@@ -76,30 +79,43 @@ def created(row):
     if d.tzinfo is None:
         d = d.replace(tzinfo=timezone.utc)
     return d.timestamp()
+now = datetime.now(timezone.utc).timestamp()
 seen = set()
 oldest = None
+mine = 0
 for r in rows:
     if not isinstance(r, dict) or r.get("purpose") != "rebuild":
         continue
     if r.get("status") not in ("pending", "approved"):
+        continue
+    exp = created({"created_at": r.get("expires_at")}) if r.get("expires_at") else None
+    if exp is not None and exp <= now:
+        continue
+    if str(r.get("requester") or "") == os.environ["OWNER"]:
+        mine = 1
         continue
     at = created(r)
     if at is None or at <= since:
         continue
     seen.add((str(r.get("requester") or ""), str(r.get("target_commit") or "")))
     oldest = at if oldest is None else min(oldest, at)
-# 第二欄＝最早那筆等了幾分鐘（沒有申請、或時間在未來就是 0）。
-waited = 0 if oldest is None else max(0, int((datetime.now(timezone.utc).timestamp() - oldest) // 60))
-print(len(seen), waited)
+# 第二欄＝最早那筆等了幾分鐘（沒有申請、或時間在未來就是 0）；第三欄＝自己有沒有還在等的申請。
+waited = 0 if oldest is None else max(0, int((now - oldest) // 60))
+print(len(seen), waited, mine)
 ' 2>/dev/null) || REQUESTS=""
+MINE=${REQUESTS##* }
 WAITED=${REQUESTS#* }
+WAITED=${WAITED%% *}
 REQUESTS=${REQUESTS%% *}
 case "$REQUESTS" in ''|*[!0-9]*) log "讀不到重建申請數，當 0"; REQUESTS=0 ;; esac
 case "$WAITED" in ''|*[!0-9]*) WAITED=0 ;; esac
+case "$MINE" in 1) ;; *) MINE=0 ;; esac
 if [ "$REQUESTS" -ge "$THRESHOLD" ]; then
   log "重建申請 ${REQUESTS}/${THRESHOLD}，不等整點"
 elif [ "$REQUESTS" -gt 0 ] && [ "$WAITED" -ge "$MAX_WAIT_MIN" ]; then
   log "最早一筆重建申請已等 ${WAITED} 分鐘（上限 ${MAX_WAIT_MIN}），不等整點（申請 ${REQUESTS}/${THRESHOLD}）"
+elif [ "$MINE" = 1 ]; then
+  log "自己的重建核准還在等（裁示或安全窗口），不等整點（別人的申請 ${REQUESTS}/${THRESHOLD}）"
 elif [ "$MINUTE" -ge 5 ]; then
   log "非整點且重建申請只有 ${REQUESTS}/${THRESHOLD}（最早一筆等了 ${WAITED} 分鐘），這輪不檢查"; exit 0
 fi
@@ -195,27 +211,56 @@ REVIEW=()
 # every tick makes an asynchronous AGM decision impossible to consume. Store the full commit
 # and requester so approval for one tree/owner can never authorize another.
 APPROVAL=""
+APPR_COMMIT="$HEAD_SHA"   # 這筆核准是針對哪個 commit（acquire 要對得上）
+SUPERSEDE=""
 if [ -f "$APPROVAL_STATE" ]; then
-  APPROVAL=$(python3 -c '
+  STATE_LINE=$(python3 -c '
 import json,sys
 with open(sys.argv[1]) as f: d=json.load(f)
-if d["commit"] == sys.argv[2] and d["owner"] == sys.argv[3]:
-    if not isinstance(d["id"], str) or not d["id"]: sys.exit(1)
-    print(d["id"])
-' "$APPROVAL_STATE" "$HEAD_SHA" "$OWNER" 2>/dev/null) || {
+if d["owner"] == sys.argv[2]:
+    if not isinstance(d["id"], str) or not d["id"] or not isinstance(d["commit"], str) or not d["commit"]: sys.exit(1)
+    print(d["id"], d["commit"])
+' "$APPROVAL_STATE" "$OWNER" 2>/dev/null) || {
     log "核准狀態檔損毀，交 AGM 檢查，這輪不派"; exit 0;
   }
+  if [ -n "$STATE_LINE" ]; then
+    OLD_ID=${STATE_LINE%% *}
+    OLD_COMMIT=${STATE_LINE#* }
+    # shellcheck disable=SC2086  # PATHS 是刻意要拆成多個參數的
+    if [ "$OLD_COMMIT" = "$HEAD_SHA" ]; then
+      APPROVAL=$OLD_ID
+    elif "$GIT" -C "$REPO" cat-file -e "${OLD_COMMIT}^{commit}" 2>/dev/null \
+         && "$GIT" -C "$REPO" diff --quiet "$OLD_COMMIT" origin/main -- $PATHS; then
+      # main 動了，但只動到不進 binary 的檔：建出來的東西一樣，沿用原本的核准（不為 docs-only 的 commit 再叫醒協調者）。
+      APPROVAL=$OLD_ID
+      APPR_COMMIT=$OLD_COMMIT
+      log "origin/main ${OLD_COMMIT} → ${HEAD_SHA} 只動到不進 binary 的檔，沿用核准 ${OLD_ID}"
+    else
+      # 真的換了要建的東西：新申請取代舊的，等待時間接過去（SPEC §18.10 supersedes）。
+      SUPERSEDE=$OLD_ID
+    fi
+  fi
 fi
+# 舊的 `bin/agm` 不認得 --supersedes（argparse 會整筆拒絕）：先問 CLI 支不支援，不支援就照舊開一筆新的。
+SUP_ARGS=()
+if [ -n "$SUPERSEDE" ] && "$AGM" approval --help 2>/dev/null | grep -q -- '--supersedes'; then
+  SUP_ARGS=(--supersedes "$SUPERSEDE")
+fi
+
+# 最多兩輪：舊的那筆已經被用掉／取代時（例如上一個窗口過期沒交還，daemon 當場消耗了它），這一輪就重新申請，
+# 不要白等到下一個整點。
+for ROUND in 1 2; do
 if [ -z "$APPROVAL" ]; then
   APPROVAL=$("$AGM" --compact approval request \
     --requester "$OWNER" --purpose rebuild \
     --scope "release rebuild（daemon/web/persona/agm.py）；restart 另行核准" \
-    --commit "$HEAD_SHA" --expires-in 5400 2>>"$LOG" | python3 -c '
+    --commit "$HEAD_SHA" --expires-in 5400 ${SUP_ARGS[@]+"${SUP_ARGS[@]}"} 2>>"$LOG" | python3 -c '
 import json,sys
 d=json.load(sys.stdin)
 if not isinstance(d.get("id"),str) or not d["id"]: sys.exit(1)
 print(d["id"])
 ' 2>/dev/null) || { log "申請核准失敗，這輪不派"; exit 0; }
+  APPR_COMMIT="$HEAD_SHA"
   python3 -c '
 import json,os,sys
 path,commit,owner,aid=sys.argv[1:]
@@ -224,7 +269,12 @@ os.replace(path+".tmp",path)
 ' "$APPROVAL_STATE" "$HEAD_SHA" "$OWNER" "$APPROVAL" || {
     log "保存核准 ID 失敗，這輪不派"; exit 0;
   }
-  log "已申請核准 ${APPROVAL}（commit ${HEAD_SHA}），等 AGM 裁示"
+  if [ ${#SUP_ARGS[@]} -gt 0 ]; then
+    log "已申請核准 ${APPROVAL}（commit ${HEAD_SHA}，取代 ${SUPERSEDE}），等 AGM 裁示"
+  else
+    log "已申請核准 ${APPROVAL}（commit ${HEAD_SHA}），等 AGM 裁示"
+  fi
+  SUP_ARGS=()
 fi
 
 STATUS=$("$AGM" --compact approval list 2>/dev/null | APPROVAL="$APPROVAL" python3 -c '
@@ -239,10 +289,18 @@ if a.get("expires_at") and status in ("pending","approved"):
     if expiry <= datetime.datetime.now(datetime.timezone.utc): status="expired"
 print(status)
 ' 2>/dev/null) || { log "無法確認核准 ${APPROVAL}，這輪不派"; exit 0; }
-if [ "$STATUS" = "expired" ]; then
-  rm -f "$APPROVAL_STATE"
-  log "核准 ${APPROVAL} 已過期，下輪重新申請"; exit 0
-fi
+case "$STATUS" in
+  expired|consumed|superseded)
+    rm -f "$APPROVAL_STATE"
+    if [ "$ROUND" = 1 ]; then
+      log "核准 ${APPROVAL} 已經不能用（${STATUS}），重新申請"
+      APPROVAL=""
+      continue
+    fi
+    log "核准 ${APPROVAL} 剛申請就不能用（${STATUS}），下輪再試"; exit 0 ;;
+esac
+break
+done
 if [ "$STATUS" != "approved" ]; then
   log "核准狀態是 ${STATUS:-unknown}，這輪不派（下個整點再看）"; exit 0
 fi
@@ -302,7 +360,7 @@ fi
 
 # acquire 的回應同時帶 fence 與**一次性的 lease_token**：交還窗口要出示它（owner／fence 是公開欄位，
 # 光憑它們誰都能把別人正在換 binary 的窗口收掉）。token 只在這一次回應裡出現，之後查不到。
-ACQUIRED=$("$AGM" --compact lease acquire rebuild --approval "$APPROVAL" --commit "$HEAD_SHA" \
+ACQUIRED=$("$AGM" --compact lease acquire rebuild --approval "$APPROVAL" --commit "$APPR_COMMIT" \
   --owner "$OWNER" --ttl 3600 "${EXCL[@]}" 2>>"$LOG" | python3 -c '
 import json,sys
 d = json.load(sys.stdin)
@@ -314,8 +372,23 @@ if [ -z "$LEASE" ]; then
   log "拿不到 rebuild 窗口（可能有人正在做或核准對不上），這輪不派"; exit 0
 fi
 # 舊 daemon 還沒有 token（升級前的那一版）：照舊不帶，release 那邊會放行並留 warn。
+# token **不進派工正文**（review2 sup #5）：正文會出現在 `GET /api/supervisor/assignments`、建置 child 的對話紀錄，
+# 而 assign 的輸出還會寫進這份 log。寫進只有本人讀得到的檔案，正文只給路徑，child 用 `$(cat …)` 帶上。
+TOKEN_FILE="$DIR/daemon-update.lease-token"
 TOKEN_ARG=""
-[ -n "$LEASE_TOKEN" ] && TOKEN_ARG=" --lease-token $LEASE_TOKEN"
+TOKEN_TEXT=""
+rm -f "$TOKEN_FILE"
+if [ -n "$LEASE_TOKEN" ]; then
+  TOKEN_ARG=" --lease-token $LEASE_TOKEN"
+  if ( umask 077 && printf '%s' "$LEASE_TOKEN" > "$TOKEN_FILE" ); then
+    TOKEN_TEXT=" --lease-token \"\$(cat $TOKEN_FILE)\""
+  else
+    log "寫不進 lease token 檔，交還窗口，這輪不派"
+    # shellcheck disable=SC2086
+    "$AGM" --compact lease release rebuild --owner "$OWNER" --fence "$LEASE" $TOKEN_ARG >> "$LOG" 2>&1 || true
+    exit 0
+  fi
+fi
 log "已取得 rebuild 窗口 fence=$LEASE"
 
 TMP=$(mktemp)
@@ -325,8 +398,8 @@ cat "$DIR/daemon-update-task.md" > "$TMP" 2>/dev/null || true
   printf 'origin/main %s。核准 %s，rebuild 租約 fence %s（owner %s）。\n' "$HEAD_SHA" "$APPROVAL" "$LEASE" "$OWNER"
   [ -n "$ESC_NOTE" ] && printf '%s\n' "$ESC_NOTE"
   # shellcheck disable=SC2016  # 單引號是刻意的：反引號與 %s 都是要原樣印出去的文字
-  printf '做完請回報，並用 `bin/agm lease release rebuild --owner %s --fence %s%s` 交還窗口；\n' "$OWNER" "$LEASE" "$TOKEN_ARG"
-  printf '（lease-token 只在 acquire 那一次出現，查不到第二次；真的拿不到就請 AGM 用 --force 並附理由接管。）\n'
+  printf '做完請回報，並用 `bin/agm lease release rebuild --owner %s --fence %s%s` 交還窗口；\n' "$OWNER" "$LEASE" "$TOKEN_TEXT"
+  printf '（lease-token 只在 acquire 那一次出現、只寫在上面那個檔案裡，不要把它印出來或貼進回報；真的拿不到就請 AGM 用 --force 並附理由接管。）\n'
   printf '需要重啟正式 daemon 另外申請 restart 核准與租約，替換前請 AGM 重驗所有使用者與排程回合。\n'
 } >> "$TMP"
 if "$AGM" --compact assign --bot "$BOT" --text-file "$TMP" \
@@ -338,5 +411,6 @@ else
   log "派工失敗，交還窗口"
   # shellcheck disable=SC2086  # TOKEN_ARG 是刻意要拆成兩個參數的（沒有 token 時是空字串）
   "$AGM" --compact lease release rebuild --owner "$OWNER" --fence "$LEASE" $TOKEN_ARG >> "$LOG" 2>&1 || true
+  rm -f "$TOKEN_FILE"
 fi
 rm -f "$TMP"

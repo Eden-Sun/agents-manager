@@ -11,15 +11,17 @@
 例行更新：正式 daemon 的 release binary 落後 `origin/main` 時，申請核准、取得 rebuild 租約，
 再把重建重啟任務派給建置 child。
 
-**三個觸發條件**：整點的例行檢查（launchd 每 5 分鐘跑一次，分鐘 < 5 的那一輪）、
-**重建申請集滿門檻**（`AGM_REBUILD_THRESHOLD`，預設 3；使用者 2026-09-14 訂 5、2026-09-16 降成 3），
-或**最早一筆申請已經等超過上限**（`AGM_REBUILD_MAX_WAIT_MIN`，預設 30 分鐘；使用者 2026-09-15——不能卡著等湊滿）。
-三個都不成立就立刻 `exit 0`，連 `git fetch` 之後的判斷都不做。同一個 `origin/main` 已經派過就不會重派，
+**四個觸發條件**：整點的例行檢查（launchd 每 5 分鐘跑一次，分鐘 < 5 的那一輪）、
+**重建申請集滿門檻**（`AGM_REBUILD_THRESHOLD`，預設 3；使用者 2026-09-14 訂 5、2026-09-16 降成 3）、
+**最早一筆申請已經等超過上限**（`AGM_REBUILD_MAX_WAIT_MIN`，預設 30 分鐘；使用者 2026-09-15——不能卡著等湊滿），
+或**自己有還在等的核准**（pending／approved、沒過期：在等 AGM 裁示或安全窗口）。
+四個都不成立就立刻 `exit 0`，連 `git fetch` 之後的判斷都不做。同一個 `origin/main` 已經派過就不會重派，
 所以「等太久」在部署卡住時每 5 分鐘觸發一次也只會記一行「已經派過，跳過」。
 
 「申請」的定義：`purpose=rebuild` 的核准申請（`agm approval request`／`POST /api/supervisor/approvals`），
-建立時間晚於上次真的上線（`daemon-update.built` 的 mtime）、狀態是 `pending` 或 `approved`；
-`denied` 不算，同一個 requester 對同一個 commit 重複申請算一筆。bot 在對話裡的口頭申請由 AGM 補一筆
+建立時間晚於上次真的上線（`daemon-update.built` 的 mtime）、狀態是 `pending` 或 `approved`、**還沒過期**；
+`denied` 不算，同一個 requester 對同一個 commit 重複申請算一筆，**這支腳本自己（`AM_AGENT_NAME`）的申請不算**
+（review2 2026-09-16：算進去的話自己申請、30 分鐘後自己觸發「等太久」，每 5 分鐘一輪、main 一動就再對協調者開一筆）。bot 在對話裡的口頭申請由 AGM 補一筆
 approval，所以 approval 表就是唯一真相。數不出來（端點壞了、格式不符）就當 0，退回純整點的舊行為。
 網頁左上角 RAM 那一格旁邊的 chip 顯示同一個數字（`web/src/api/rebuildRequests.ts`）。
 
@@ -44,7 +46,10 @@ approval，所以 approval 表就是唯一真相。數不出來（端點壞了�
 3. 空閒判斷改成 `lease safety`（等窗口）＋ `lease acquire`（在同一個鎖裡重驗並拿走窗口）。
    依 SPEC §18.2，建置前排除建置 child 與 runtime.json 的 `manager_bot_id`；safety 與 acquire 都帶同一份兩顆 `--exclude-bot`；CLI 以 `?exclude=<id,id>` 傳給 safety API。新版回應會列出 `excluded_bot_ids`，腳本直接採用 daemon 判定；缺少該欄或名單不符就跳過，不自行過濾快照。其他 bot 仍受保護；runtime 缺少有效管理員 ID 就跳過並記錄原因。這個排除僅用於 rebuild，restart 另行核准。
    拿著 `restart` 租約期間 supervisor assignment 派送會暫停；這不是所有 prompt 路徑的全域互斥鎖，正式替換前仍須由 AGM 重驗窗口。
-4. `daemon-update.approval.json` 保存同一完整 commit 與申請者的核准 ID，下個整點接續查核。pending、denied、revoked 不另建申請；過期後下輪才重新申請。查派工或核准失敗時停止，不當作無工作或已獲准。
+4. `daemon-update.approval.json` 保存同一完整 commit 與申請者的核准 ID，下一輪接續查核。pending、denied、revoked 不另建申請；過期、已被用掉（`consumed`，例如上一個窗口過期沒交還）或被取代時**同一輪**重新申請。查派工或核准失敗時停止，不當作無工作或已獲准。
+   `origin/main` 動了但 `build-inputs` 路徑沒變（docs-only）：沿用原核准，acquire 的 `--commit` 用核准那一顆，不為了建出一樣的東西再叫醒協調者。
+   真的動到要建的東西：新申請帶 `--supersedes <舊 id>`，daemon 把舊的標 `superseded`、等待時間接過去（升級計時不因為 main 動了就歸零，SPEC §18.10）；舊的 `bin/agm` 不認得這個旗標時照舊開新的一筆。
+7. `lease_token` **不進派工正文**：寫進 `daemon-update.lease-token`（權限 600），正文只給 `--lease-token "$(cat …)"`。正文會出現在 assignments API、建置 child 的對話紀錄與這份 log。
 5. `daemon-update.lock` 防止腳本重疊執行。若程序被強制終止留下鎖，由 AGM 確認沒有執行者後移除。核准狀態檔損毀或 ID 不在查詢結果中也交 AGM 檢查，不自動繞過。
 6. AGM 雙角色（SPEC §18.15）：idle 檢查另外排除協調者（`agm responder show` 有 `bot_id` 時）；runtime.json 有 `role` 才帶 `assign --review-by <role>`
    （巡檢目錄＝`patrol`，更新結果回巡檢驗收）。舊部署兩者都沒有，行為照舊。

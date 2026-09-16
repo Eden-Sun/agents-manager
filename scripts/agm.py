@@ -639,6 +639,9 @@ def cmd_approval(client: Client, cfg: dict, args) -> object:
         # 重送同一個 request id 回原本那一筆（回應的 created=false）；換了 purpose／scope／commit 回 409。
         if args.request_id:
             body["request_id"] = args.request_id
+        # 同一個申請者換 commit 重新申請：舊的那筆標 superseded，等待起點接過來（SPEC §18.10）。
+        if args.supersedes:
+            body["supersedes"] = args.supersedes
         return client.post("/api/supervisor/approvals", body)
     if not args.approval_id:
         raise AgmError("bad_args", "approval decide 需要 approval id", 2)
@@ -1086,6 +1089,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="request：穩定 id，重送同一個回原本那一筆（回應 created=false）；換了內容回 409。不確定送出去沒有時用它重送，不要換新 id",
     )
     s.add_argument("--expires-in", type=int, dest="expires_in", metavar="SECS", help="多久之後失效")
+    s.add_argument(
+        "--supersedes",
+        metavar="APPROVAL_ID",
+        help="request：取代自己先前同一種用途的申請（換 commit 重申請）；舊的標 superseded，升級的等待時間接過來",
+    )
     s.add_argument("--decision", choices=["approve", "deny", "revoke"], help="decide：核准／駁回／撤銷")
     s.add_argument("--reason", help="decide：理由")
     s.add_argument("--actor", default="AGM", help="decide：決定者（預設 AGM）")

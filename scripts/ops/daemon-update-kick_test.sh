@@ -43,6 +43,7 @@ case "$sub:$op" in
   lease:release)     printf '%s' '{"released":true}' ;;
   approval:request)  printf '%s' "$STUB_APPROVAL" ;;
   approval:list)     printf '%s' "$STUB_APPROVAL_LIST" ;;
+  approval:)         printf '%s\n' "${STUB_APPROVAL_HELP- --supersedes APPROVAL_ID}" ;;   # `approval --help`
   assign:*)          for i in $(seq 1 $#); do
                        eval "a=\${$i}"
                        case "$a" in --text-file) eval "f=\${$((i+1))}"; cat "$f" >> "$AGM_DIR/assign-body.txt" ;; esac
@@ -475,12 +476,21 @@ check_no "舊 daemon 不寫升級紀錄" "升級後" "$AGM_DIR/assign-body.txt"
 teardown
 
 echo "----"
-# 26. 租約憑證（SPEC §18.10）：acquire 回的 lease_token 要進派工正文，交還窗口時帶著它。
+# 26. 租約憑證（SPEC §18.10）：token 不進派工正文（會出現在 assignments API、child 的對話紀錄與這份 log），
+# 寫進只有本人讀得到的檔案，正文只給路徑（review2 sup #5）。
 setup
 export AGM_TEST_MINUTE="0"
 export STUB_ACQUIRE='{"lease":{"fence":9,"resource":"rebuild"},"lease_token":"tok-abc123"}'
 bash "$SCRIPT"
-check "派工正文帶 lease-token" "--lease-token tok-abc123" "$AGM_DIR/assign-body.txt"
+check "派工正文用檔案帶 lease-token" "--lease-token \"\$(cat $AGM_DIR/daemon-update.lease-token)\"" "$AGM_DIR/assign-body.txt"
+check_no "派工正文沒有 token 本身" "tok-abc123" "$AGM_DIR/assign-body.txt"
+check_no "log 裡也沒有" "tok-abc123" "$AGM_DIR/daemon-update.log"
+check "token 檔的內容" "^tok-abc123$" "$AGM_DIR/daemon-update.lease-token"
+if [ "$(stat -f %Lp "$AGM_DIR/daemon-update.lease-token" 2>/dev/null || stat -c %a "$AGM_DIR/daemon-update.lease-token")" = "600" ]; then
+  echo "ok   - token 檔只有本人讀得到"; PASS=$((PASS + 1))
+else
+  echo "FAIL - token 檔權限不是 600"; FAIL=$((FAIL + 1))
+fi
 teardown
 
 # 派工失敗要交還窗口，一樣要出示憑證。
@@ -500,6 +510,94 @@ export STUB_ASSIGN_FAIL=1
 bash "$SCRIPT"
 check_no "舊 daemon 不帶空旗標" "--lease-token " "$AGM_DIR/calls.log"
 check "舊 daemon 照樣交還窗口" "lease release rebuild --owner" "$AGM_DIR/calls.log"
+teardown
+
+echo "----"
+# 27. 申請計數不算自己的、也不算過期的（review2 sup 新發現 2）：自己先申請、30 分鐘後再被自己觸發，
+# 每 5 分鐘一輪、main 一動就對協調者再開一筆。
+setup
+export AGM_TEST_MINUTE="37"
+export STUB_APPROVAL_LIST='{"approvals":[
+  {"id":"m1","purpose":"rebuild","status":"denied","requester":"test-owner","target_commit":"c1","created_at":"2000-01-01T00:00:00.000Z"},
+  {"id":"x1","purpose":"rebuild","status":"pending","requester":"bot-1","target_commit":"c1","created_at":"2000-01-01T00:00:00.000Z","expires_at":"2000-01-01T01:00:00Z"},
+  {"id":"x2","purpose":"rebuild","status":"approved","requester":"bot-2","target_commit":"c1","created_at":"2000-01-01T00:00:00.000Z","expires_at":"2000-01-01T01:00:00Z"},
+  {"id":"x3","purpose":"rebuild","status":"pending","requester":"bot-3","target_commit":"c1","created_at":"2000-01-01T00:00:00.000Z","expires_at":"2000-01-01T01:00:00Z"}
+]}'
+bash "$SCRIPT"
+check "過期的申請不算、也不觸發等太久" "非整點且重建申請只有 0/3（最早一筆等了 0 分鐘）" "$AGM_DIR/daemon-update.log"
+teardown
+
+setup
+export AGM_TEST_MINUTE="37"
+export STUB_APPROVAL_LIST='{"approvals":[
+  {"id":"ap-1","purpose":"rebuild","status":"approved","requester":"test-owner","target_commit":"c1","created_at":"2000-01-01T00:00:00.000Z"},
+  {"id":"m2","purpose":"rebuild","status":"pending","requester":"test-owner","target_commit":"c2","created_at":"2000-01-01T00:00:00.000Z"},
+  {"id":"m3","purpose":"rebuild","status":"pending","requester":"test-owner","target_commit":"c3","created_at":"2000-01-01T00:00:00.000Z"}
+]}'
+bash "$SCRIPT"
+check_no "自己的申請不算進門檻" "重建申請 3/3" "$AGM_DIR/daemon-update.log"
+check_no "自己的申請不觸發等太久" "最早一筆重建申請已等" "$AGM_DIR/daemon-update.log"
+check "自己還有在等的核准就照常往下跑" "自己的重建核准還在等（裁示或安全窗口），不等整點（別人的申請 0/3）" "$AGM_DIR/daemon-update.log"
+teardown
+
+# 28. main 只動到不進 binary 的檔：沿用原本的核准（commit 對原本那顆），不為 docs-only 再叫醒協調者。
+setup
+export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"pending"}]}'
+bash "$SCRIPT"
+H1=$(cd "$AGM_REPO" && /usr/bin/git rev-parse HEAD)
+( cd "$AGM_REPO" && echo more >> docs/goals/notes.md && /usr/bin/git add -A && /usr/bin/git commit -qm docs \
+    && /usr/bin/git update-ref refs/remotes/origin/main HEAD ) >/dev/null 2>&1
+: > "$AGM_DIR/calls.log"
+export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"approved"}]}'
+bash "$SCRIPT"
+check_no "docs-only 不重新申請" "approval request" "$AGM_DIR/calls.log"
+check "沿用原核准、commit 對原本那顆" "lease acquire rebuild --approval ap-1 --commit $H1" "$AGM_DIR/calls.log"
+check "log 寫明沿用" "只動到不進 binary 的檔，沿用核准 ap-1" "$AGM_DIR/daemon-update.log"
+check "照常派工" "已派工" "$AGM_DIR/daemon-update.log"
+teardown
+
+# 29. main 動到要建的東西：新申請取代舊的（--supersedes），等待時間由 daemon 接過去。
+setup
+export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"approved"}]}'
+export STUB_SAFETY='{"safe":false,"working":[{"bot_id":"b9","name":"busy"}],"in_flight":[],"unreadable":[],"excluded_bot_ids":["bot-build","bot-manager"]}'
+bash "$SCRIPT"
+( cd "$AGM_REPO" && echo y >> daemon/main.rs && /usr/bin/git add -A && /usr/bin/git commit -qm code \
+    && /usr/bin/git update-ref refs/remotes/origin/main HEAD ) >/dev/null 2>&1
+H2=$(cd "$AGM_REPO" && /usr/bin/git rev-parse HEAD)
+: > "$AGM_DIR/calls.log"
+export STUB_APPROVAL='{"id":"ap-2","status":"pending"}'
+export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"superseded"},{"id":"ap-2","status":"pending"}]}'
+bash "$SCRIPT"
+check "換了要建的東西就取代舊申請" "approval request --requester test-owner --purpose rebuild .* --commit $H2 --expires-in 5400 --supersedes ap-1" "$AGM_DIR/calls.log"
+check "log 寫明取代誰" "已申請核准 ap-2（commit ${H2}，取代 ap-1）" "$AGM_DIR/daemon-update.log"
+teardown
+
+# 舊的 bin/agm 不認得 --supersedes：照舊開一筆新的，不要讓整筆申請被 argparse 拒絕。
+setup
+export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"pending"}]}'
+bash "$SCRIPT"
+( cd "$AGM_REPO" && echo y >> daemon/main.rs && /usr/bin/git add -A && /usr/bin/git commit -qm code \
+    && /usr/bin/git update-ref refs/remotes/origin/main HEAD ) >/dev/null 2>&1
+: > "$AGM_DIR/calls.log"
+export STUB_APPROVAL_HELP="usage: agm approval [--requester R]"
+export STUB_APPROVAL='{"id":"ap-2","status":"pending"}'
+bash "$SCRIPT"
+check "舊 CLI 照樣申請" "approval request" "$AGM_DIR/calls.log"
+check_no "舊 CLI 不帶 --supersedes" "--supersedes" "$AGM_DIR/calls.log"
+unset STUB_APPROVAL_HELP
+teardown
+
+# 30. 舊的核准已經被用掉（上一個窗口過期沒交還，daemon 當場消耗）：同一輪就重新申請，不白等到下一個整點。
+setup
+export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"pending"}]}'
+bash "$SCRIPT"
+: > "$AGM_DIR/calls.log"
+export STUB_APPROVAL='{"id":"ap-2","status":"pending"}'
+export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"consumed"},{"id":"ap-2","status":"approved"}]}'
+bash "$SCRIPT"
+check "用掉的核准當場重新申請" "approval request" "$AGM_DIR/calls.log"
+check "用新的那筆拿窗口" "lease acquire rebuild --approval ap-2" "$AGM_DIR/calls.log"
+check "log 寫明為什麼重申請" "核准 ap-1 已經不能用（consumed），重新申請" "$AGM_DIR/daemon-update.log"
 teardown
 
 echo "$PASS passed, $FAIL failed"
