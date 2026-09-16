@@ -906,6 +906,10 @@ pub struct SafetyQuery {
     /// Comma-separated bot IDs, matching acquire's exclude_bot_ids.
     #[serde(default)]
     pub exclude: Option<String>,
+    /// 要問「這一筆核准現在開得了窗口嗎」時帶上它：升級的計時就綁在它身上（SPEC §18.10）。
+    /// 不帶＝純查詢，退回看最早那筆還活著的核准。
+    #[serde(default)]
+    pub approval: Option<String>,
 }
 
 pub async fn get_maintenance_safety(
@@ -918,7 +922,8 @@ pub async fn get_maintenance_safety(
             exclude.push(id.to_string());
         }
     }
-    let mut snapshot = super::maintenance::safety(&app, &exclude).await?;
+    let approval = q.approval.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let mut snapshot = super::maintenance::safety_for(&app, &exclude, approval).await?;
     // Echo the applied IDs so callers can distinguish an older daemon ignoring the query.
     snapshot["excluded_bot_ids"] = json!(exclude);
     Ok(Json(snapshot))

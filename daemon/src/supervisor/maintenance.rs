@@ -76,15 +76,27 @@ pub struct Escalation {
     pub escalated: bool,
 }
 
-pub async fn escalation(app: &Arc<App>) -> Result<Option<Escalation>, LcError> {
+/// 誰等太久就放寬誰（AGM 裁示 2026-09-16）：`approval_id` 給了就只看**那一筆**核准等了多久，
+/// 別人放著沒用掉的核准不算數。沒給（唯讀查詢，還不知道會用哪一筆）才退回最早那筆還活著的。
+pub async fn escalation_for(app: &Arc<App>, approval_id: Option<&str>) -> Result<Option<Escalation>, LcError> {
     let now = crate::db::now();
-    let found = store::oldest_live_window_approval(&app.db, &now)
-        .await
-        .map_err(|e| LcError::Upstream(e.to_string()))?;
+    let found = match approval_id {
+        Some(id) => store::approval(&app.db, id)
+            .await
+            .map_err(|e| LcError::Upstream(e.to_string()))?
+            // 只有「還能用來開窗口」的核准才有資格計時：已消耗、被撤、過期的都不算。
+            .filter(|a| a.status == "approved" && RESOURCES.contains(&a.purpose.as_str()))
+            .filter(|a| !a.expires_at.as_deref().is_some_and(|t| t <= now.as_str())),
+        None => store::oldest_live_window_approval(&app.db, &now).await.map_err(|e| LcError::Upstream(e.to_string()))?,
+    };
     let Some(a) = found else { return Ok(None) };
     let Some(decided) = a.decided_at.as_deref() else { return Ok(None) };
     let waited = waited_secs(decided, &now);
     Ok(Some(Escalation { approval_id: a.id, waited_secs: waited, escalated: waited >= escalate_after_secs() }))
+}
+
+pub async fn escalation(app: &Arc<App>) -> Result<Option<Escalation>, LcError> {
+    escalation_for(app, None).await
 }
 
 /// 還握在別人手上的租約。縮小封鎖面時這是**唯一**新增的阻擋條件：窗口一次只給一個人。
@@ -211,6 +223,11 @@ pub async fn release_restart_on_startup(app: &Arc<App>) {
 /// wait for hours, and the restart path skips blocked panes anyway. What blocks a window is work
 /// actually running.
 pub async fn safety(app: &Arc<App>, exclude: &[String]) -> Result<Value, LcError> {
+    safety_for(app, exclude, None).await
+}
+
+/// 同一份檢查，但升級的計時綁在 `approval_id` 那一筆核准上（見 [`escalation_for`]）。
+pub async fn safety_for(app: &Arc<App>, exclude: &[String], approval_id: Option<&str>) -> Result<Value, LcError> {
     let bots = crate::db::live_bots(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     let sup = store::get_or_init(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     let mut working = Vec::new();
@@ -262,7 +279,7 @@ pub async fn safety(app: &Arc<App>, exclude: &[String]) -> Result<Value, LcError
     }
     let open = store::open_assignments(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     let held = held_leases(app).await?;
-    let esc = escalation(app).await?;
+    let esc = escalation_for(app, approval_id).await?;
     // Not knowing about even one bot is enough to refuse: the window's whole promise is that
     // nothing is running, and we cannot promise that about a bot we could not look at.
     let strict = working.is_empty() && in_flight.is_empty() && unreadable.is_empty();
@@ -330,7 +347,8 @@ pub async fn acquire(
         ));
     }
 
-    let safety = safety(app, exclude).await?;
+    // 放寬與否只看**這一筆**核准等了多久：別人放著沒用的核准不能替它開門。
+    let safety = safety_for(app, exclude, Some(&approval.id)).await?;
     if require_idle && safety.get("safe") != Some(&Value::Bool(true)) {
         return Err(LcError::conflict(
             "something is still running; wait for a safe window",
@@ -464,6 +482,61 @@ mod tests {
         assert!(s["waited_secs"].as_i64().unwrap() >= 2400);
         assert_eq!(s["working"].as_array().unwrap().len(), 1, "還是照實回報誰在跑，只是不再擋");
         assert_eq!(s["escalate_after_secs"], 1800);
+    }
+
+    /// 誰等太久就放寬誰：A 放了很久沒用掉，不能替剛核下來的 B 開門。
+    /// 這是這條規則的界線——否則一張被遺忘的核准等於把所有人的窗口都打開。
+    #[tokio::test]
+    async fn a_window_is_only_relaxed_by_its_own_wait() {
+        let e = crate::testing::env().await;
+        let (app, pid) = (&e.app, e.project_id.clone());
+        thinking_bot(app, &pid, "user").await;
+        let old = approved_window(app, 40).await;
+        let fresh = approved_window(app, 0).await;
+
+        // 綁在哪一筆，就看哪一筆等了多久。
+        let by_old = safety_for(app, &[], Some(&old)).await.unwrap();
+        assert_eq!((by_old["escalated"].as_bool(), by_old["safe"].as_bool()), (Some(true), Some(true)));
+        assert_eq!(by_old["escalation_approval_id"], old);
+        let by_fresh = safety_for(app, &[], Some(&fresh)).await.unwrap();
+        assert_eq!((by_fresh["escalated"].as_bool(), by_fresh["safe"].as_bool()), (Some(false), Some(false)));
+        assert_eq!(by_fresh["escalation_approval_id"], fresh);
+        assert!(by_fresh["waited_secs"].as_i64().unwrap() < 60);
+
+        // 不帶 approval id 的純查詢維持舊行為：看最早那筆還活著的。
+        let plain = safety(app, &[]).await.unwrap();
+        assert_eq!((plain["escalated"].as_bool(), plain["escalation_approval_id"].as_str()), (Some(true), Some(old.as_str())));
+
+        // 認不得、已消耗、已過期的核准都不算數：不放寬，也不會炸。
+        for bad in [crate::db::ulid().as_str(), ""] {
+            let s = safety_for(app, &[], Some(bad)).await.unwrap();
+            assert_eq!((s["escalated"].as_bool(), s["safe"].as_bool()), (Some(false), Some(false)), "{bad:?}");
+        }
+        store::decide_approval(&app.db, &old, "consumed", "AGM", None, None).await.unwrap();
+        let used = safety_for(app, &[], Some(&old)).await.unwrap();
+        assert_eq!(used["escalated"], false, "用掉的核准不能再拿來計時");
+    }
+
+    /// 真的走 acquire：拿著剛核下來的 B，即使 A 已經等了很久，窗口一樣拿不到。
+    #[tokio::test]
+    async fn acquire_with_a_fresh_approval_does_not_borrow_another_ones_wait() {
+        let e = crate::testing::env().await;
+        let (app, pid) = (&e.app, e.project_id.clone());
+        thinking_bot(app, &pid, "user").await;
+        let old = approved_window(app, 40).await;
+        let fresh = approved_window(app, 0).await;
+
+        let refused = acquire(app, "rebuild", "ops", &fresh, None, 300, true, &[]).await.unwrap_err();
+        let LcError::Conflict(detail) = &refused else { panic!("expected a conflict, got {refused:?}") };
+        assert_eq!(detail["reason"], "not_idle");
+        assert_eq!(detail["safety"]["escalated"], false, "B 自己才剛核下來");
+        assert!(store::leases(&app.db).await.unwrap().is_empty(), "拿不到就什麼都不該留下");
+
+        // 換成等很久的那一筆：同一個盤面就開得了窗口。
+        let taken = acquire(app, "rebuild", "ops", &old, None, 300, true, &[]).await.unwrap();
+        assert_eq!(taken["safety"]["escalated"], true);
+        assert_eq!(taken["safety"]["escalation_approval_id"], old);
+        assert_eq!(taken["lease"]["owner"], "ops");
     }
 
     /// 放寬之後仍然擋的三件事：正在送出、排隊中待送、別人還握著租約。
