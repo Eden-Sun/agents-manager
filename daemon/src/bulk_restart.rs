@@ -34,6 +34,8 @@ pub enum Skip {
     Blocked,
     UnknownStatus,
     TurnInFlight,
+    /// 排到它的時候已經不用重啟了：更新套用過、run 不在了、bot 被刪了。
+    NoLongerPending,
 }
 
 impl Skip {
@@ -45,6 +47,7 @@ impl Skip {
             Skip::Blocked => "blocked",
             Skip::UnknownStatus => "unknown_status",
             Skip::TurnInFlight => "turn_in_flight",
+            Skip::NoLongerPending => "no_longer_pending",
         }
     }
 
@@ -56,6 +59,7 @@ impl Skip {
             Skip::Blocked => "卡在提問，等人回答",
             Skip::UnknownStatus => "狀態不明，不確定它在不在忙",
             Skip::TurnInFlight => "還有一回合沒收掉",
+            Skip::NoLongerPending => "排到它時已經不用重啟了（更新套用過或 run 不在了）",
         }
     }
 }
@@ -65,34 +69,52 @@ pub fn is_candidate(c: &Cand) -> bool {
     c.kind == "claude" && c.has_update
 }
 
-/// 順序即優先序，回報理由取第一個命中的（使用者最該先處理的那件）。
+/// 這顆候選為什麼不能動；`None`＝可以重啟。順序即優先序，回報理由取第一個命中的（使用者最該先處理的那件）。
+/// 計畫時用一次，**輪到它真的要重啟前再用一次**（[`run_batch`]）。
+pub fn skip_reason(c: &Cand) -> Option<Skip> {
+    if c.default_session {
+        // SPEC §6.5.1：重啟會關掉使用者自己的 pane（2026-09-12 review #4）。
+        Some(Skip::DefaultSession)
+    } else if c.state != "running" {
+        Some(Skip::NotRunning)
+    } else if c.agent_status == "working" {
+        Some(Skip::Working)
+    } else if c.agent_status == "blocked" {
+        Some(Skip::Blocked)
+    } else if c.agent_status != "idle" {
+        Some(Skip::UnknownStatus)
+    } else if c.turn_in_flight {
+        Some(Skip::TurnInFlight)
+    } else {
+        None
+    }
+}
+
 /// 子 agent 也進來，走 [`crate::lifecycle::restart_child_in_pane`]（2026-09-12 使用者：三顆子 agent 全被跳過）。
 pub fn plan(cands: &[Cand]) -> (Vec<&Cand>, Vec<(&Cand, Skip)>) {
     let mut go = Vec::new();
     let mut skip = Vec::new();
     for c in cands.iter().filter(|c| is_candidate(c)) {
-        let why = if c.default_session {
-            // SPEC §6.5.1：重啟會關掉使用者自己的 pane（2026-09-12 review #4）。
-            Some(Skip::DefaultSession)
-        } else if c.state != "running" {
-            Some(Skip::NotRunning)
-        } else if c.agent_status == "working" {
-            Some(Skip::Working)
-        } else if c.agent_status == "blocked" {
-            Some(Skip::Blocked)
-        } else if c.agent_status != "idle" {
-            Some(Skip::UnknownStatus)
-        } else if c.turn_in_flight {
-            Some(Skip::TurnInFlight)
-        } else {
-            None
-        };
-        match why {
+        match skip_reason(c) {
             Some(w) => skip.push((c, w)),
             None => go.push(c),
         }
     }
     (go, skip)
+}
+
+async fn cand_of(app: &Arc<App>, run: &db::Run, bot: &db::Bot) -> anyhow::Result<Cand> {
+    Ok(Cand {
+        bot_id: bot.id.clone(),
+        name: bot.name.clone(),
+        kind: bot.kind.clone(),
+        managed_by: bot.managed_by.clone(),
+        state: run.state.clone(),
+        agent_status: run.agent_status.clone(),
+        has_update: run.update_notice.as_deref().is_some_and(|s| !s.trim().is_empty()),
+        turn_in_flight: db::in_flight_turn(&app.db, &run.id).await?.is_some(),
+        default_session: lifecycle::in_default_session(run) || bot.herdr_session.as_deref() == Some("default"),
+    })
 }
 
 pub async fn candidates(app: &Arc<App>) -> anyhow::Result<Vec<Cand>> {
@@ -102,19 +124,40 @@ pub async fn candidates(app: &Arc<App>) -> anyhow::Result<Vec<Cand>> {
         if bot.deleted_at.is_some() {
             continue;
         }
-        out.push(Cand {
-            bot_id: bot.id.clone(),
-            name: bot.name.clone(),
-            kind: bot.kind.clone(),
-            managed_by: bot.managed_by.clone(),
-            state: run.state.clone(),
-            agent_status: run.agent_status.clone(),
-            has_update: run.update_notice.as_deref().is_some_and(|s| !s.trim().is_empty()),
-            turn_in_flight: db::in_flight_turn(&app.db, &run.id).await?.is_some(),
-            default_session: lifecycle::in_default_session(&run) || bot.herdr_session.as_deref() == Some("default"),
-        });
+        out.push(cand_of(app, &run, &bot).await?);
     }
     Ok(out)
+}
+
+/// 輪到這顆真的要重啟前再看一次（計畫是按下去那一刻的快照）。`None`＝還是可以重啟。
+async fn recheck(app: &Arc<App>, bot_id: &str) -> Option<Skip> {
+    let (Ok(Some(run)), Ok(Some(bot))) = (db::active_run(&app.db, bot_id).await, db::bot(&app.db, bot_id).await) else {
+        return Some(Skip::NoLongerPending);
+    };
+    if bot.deleted_at.is_some() {
+        return Some(Skip::NoLongerPending);
+    }
+    let Ok(c) = cand_of(app, &run, &bot).await else { return Some(Skip::UnknownStatus) };
+    if !is_candidate(&c) {
+        return Some(Skip::NoLongerPending);
+    }
+    skip_reason(&c)
+}
+
+/// 這個 daemon（以 `data_dir` 分）正在跑的那一批。同時只准一批：連按兩次、或使用者按一次 AGM 也叫一次，
+/// 以前會生出兩份重疊的清單，同一顆 bot 被重啟兩次（review 2026-09-16）。
+fn running_batches() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
+    static M: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> = std::sync::OnceLock::new();
+    M.get_or_init(Default::default)
+}
+
+/// 批次結束（含 panic）就放掉。
+struct BatchSlot(String);
+
+impl Drop for BatchSlot {
+    fn drop(&mut self) {
+        running_batches().lock().unwrap().remove(&self.0);
+    }
 }
 
 fn skip_json(c: &Cand, w: Skip) -> serde_json::Value {
@@ -122,10 +165,20 @@ fn skip_json(c: &Cand, w: Skip) -> serde_json::Value {
 }
 
 /// 只回計畫、背景執行：一顆 `stop_bot` 最久等十秒，同步做會拖爆 HTTP；進度走 WS。
+/// 已經有一批在跑：不另開，回那一批的 `batch_id`（`already_running: true`），進度與結果照舊從那一批的事件來。
 pub async fn spawn(app: &Arc<App>) -> anyhow::Result<serde_json::Value> {
+    let slot_key = app.data_dir.display().to_string();
+    let batch_id = db::ulid();
+    {
+        let mut running = running_batches().lock().unwrap();
+        if let Some(existing) = running.get(&slot_key) {
+            return Ok(json!({"batch_id": existing, "total": 0, "planned": [], "skipped": [], "already_running": true}));
+        }
+        running.insert(slot_key.clone(), batch_id.clone());
+    }
+    let slot = BatchSlot(slot_key);
     let cands = candidates(app).await?;
     let (go, skipped) = plan(&cands);
-    let batch_id = db::ulid();
     let supervisor = supervisor_bot_id(app).await;
     let targets = supervisor_last(go.iter().map(|c| (c.bot_id.clone(), c.name.clone())).collect(), supervisor.as_deref());
     let planned: Vec<serde_json::Value> = targets.iter().map(|(id, name)| json!({"bot_id": id, "name": name})).collect();
@@ -136,8 +189,12 @@ pub async fn spawn(app: &Arc<App>) -> anyhow::Result<serde_json::Value> {
         let app2 = app.clone();
         let bid = batch_id.clone();
         let skipped_for_task = skipped_json.clone();
-        tokio::spawn(async move { run_batch(&app2, &bid, targets, skipped_for_task, supervisor).await });
+        tokio::spawn(async move {
+            let _slot = slot;
+            run_batch(&app2, &bid, targets, skipped_for_task, supervisor).await
+        });
     } else {
+        drop(slot);
         // 空批次也送 done，前端不必另外處理「什麼都沒發生」。
         app.emit(
             "bots_restart_done",
@@ -165,8 +222,23 @@ async fn run_batch(
     let total = targets.len();
     let mut ok: Vec<serde_json::Value> = Vec::new();
     let mut failed: Vec<serde_json::Value> = Vec::new();
+    let mut skipped = skipped;
     for (i, (bot_id, name)) in targets.into_iter().enumerate() {
         let index = i + 1;
+        // 計畫是按下去那一刻的快照，一顆 `stop_bot` 最久十秒，排在後面的要等上一兩分鐘；這段時間裡 AGM 派了工、
+        // 使用者打了字，它就在回合中了。硬重啟會把回合連同 in-flight turn 一起砍掉（review 2026-09-16）。
+        if let Some(why) = recheck(app, &bot_id).await {
+            tracing::info!(bot = %name, reason = why.code(), "skipped at restart time: its state changed after the plan");
+            let row = json!({"bot_id": bot_id, "name": name, "reason": why.code(), "reason_label": why.label()});
+            app.emit(
+                "bots_restart_progress",
+                json!({"batch_id": batch_id, "index": index, "total": total, "bot_id": bot_id, "name": name,
+                       "status": "skipped", "reason": why.code(), "reason_label": why.label()}),
+            )
+            .await;
+            skipped.push(row);
+            continue;
+        }
         app.emit(
             "bots_restart_progress",
             json!({"batch_id": batch_id, "index": index, "total": total,
@@ -453,7 +525,9 @@ mod tests {
         .execute(&app.db)
         .await
         .unwrap();
-        crate::testing::fake_run(&app, &bot).await;
+        let run = crate::testing::fake_run(&app, &bot).await;
+        // 真的候選才會被排進批次：帶著更新通知、閒置（輪到它時會再看一次）。
+        sqlx::query("UPDATE runs SET update_notice='Update installed · Restart to update' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
 
         run_batch(&app, "batch-1", vec![(bot.clone(), "alfa".into())], vec![], None).await;
 
@@ -461,6 +535,58 @@ mod tests {
         let inbox = crate::supervisor::store::inbox(&app.db, 50).await.unwrap();
         let ev = inbox.iter().find(|e| e.kind == "bot_restart_failed").expect("the supervisor is told");
         assert_eq!(ev.bot_id.as_deref(), Some(bot.as_str()));
+    }
+
+    /// review 2026-09-16（上一輪 #5）：計畫之後、輪到它之前，AGM 派了工或使用者打了字，它就在回合中了。
+    /// 以前 `run_batch` 照計畫硬重啟，把回合連同 in-flight turn 一起砍掉；現在輪到它時重看一次，改記成跳過。
+    #[tokio::test]
+    async fn a_bot_that_got_busy_after_the_plan_is_skipped_not_restarted() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "alfa").await;
+        let run = crate::testing::fake_run(&app, &bot.id).await;
+        sqlx::query("UPDATE runs SET update_notice='Update installed · Restart to update', agent_status='working' WHERE id=?")
+            .bind(&run)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let mut events = app.subscribe();
+
+        run_batch(&app, "batch-busy", vec![(bot.id.clone(), "alfa".into())], vec![], None).await;
+
+        assert_eq!(db::active_run(&app.db, &bot.id).await.unwrap().map(|r| r.id), Some(run), "回合中的 bot 不能被重啟");
+        let mut done = None;
+        while let Ok(ev) = events.try_recv() {
+            if ev.kind == "bots_restart_done" {
+                done = Some(ev.data);
+            }
+        }
+        let done = done.expect("done 一定會送");
+        assert_eq!(done["ok"].as_array().unwrap().len(), 0);
+        assert_eq!(done["skipped"][0]["reason"], "working", "{done}");
+        // 更新已經套用過（沒有 update_notice）的也不重啟。
+        assert_eq!(recheck(&app, &bot.id).await, Some(Skip::Working));
+        sqlx::query("UPDATE runs SET update_notice=NULL, agent_status='idle' WHERE bot_id=?").bind(&bot.id).execute(&app.db).await.unwrap();
+        assert_eq!(recheck(&app, &bot.id).await, Some(Skip::NoLongerPending));
+    }
+
+    /// 同時只准一批：第二次按下去拿到正在跑的那一批，不另開一份重疊的清單。
+    #[tokio::test]
+    async fn a_second_batch_while_one_is_running_joins_the_first() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let key = app.data_dir.display().to_string();
+        running_batches().lock().unwrap().insert(key.clone(), "batch-first".into());
+        let second = spawn(&app).await.unwrap();
+        assert_eq!(second["batch_id"], "batch-first");
+        assert_eq!(second["already_running"], true);
+        assert_eq!(second["total"], 0);
+        drop(BatchSlot(key.clone()));
+        assert!(!running_batches().lock().unwrap().contains_key(&key), "批次結束就放掉");
+        let third = spawn(&app).await.unwrap();
+        assert_ne!(third["batch_id"], "batch-first");
+        assert!(third.get("already_running").is_none());
+        assert!(!running_batches().lock().unwrap().contains_key(&key), "空批次不佔著");
     }
 
     #[test]
