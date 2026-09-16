@@ -14,9 +14,18 @@ import type { BotKind, Identity, KindQuota, QuotaMap } from '../api/types'
 /** 共用工具預設帳號的身分名。 */
 export const DEFAULT_IDENTITY = 'cc0'
 
-/** 共用預設帳號（`cc0`／env 留空）：它的 statusline 數字會落在裸的 `<kind>` key 上。 */
+/** 每個 kind 用哪個環境變數指到自己的帳號目錄（daemon `pane_identity::config_dir_var`）。 */
+const HOME_VAR: Partial<Record<BotKind, string>> = { claude: 'CLAUDE_CONFIG_DIR', codex: 'CODEX_HOME', grok: 'GROK_HOME' }
+
+/**
+ * 共用預設帳號：它的 statusline 數字落在裸的 `<kind>` key 上。**跟 daemon `quota::identity_shares_default`
+ * 同一條**——看 env 裡有沒有**那個 kind 的 home 變數**，不看名字。以前前端是「名字叫 cc0 或 env 整個空」：
+ * 只帶 `ANTHROPIC_API_KEY` 的身分 daemon 寫裸 key、前端找分開那格；叫 cc0 卻設了 `CLAUDE_CONFIG_DIR` 的
+ * daemon 寫 `claude:cc0`、前端卻去讀裸 key。
+ */
 export function sharesBareQuotaKey(idn: Identity): boolean {
-  return idn.name === DEFAULT_IDENTITY || Object.keys(idn.env).length === 0
+  const v = HOME_VAR[idn.kind]
+  return v ? !(v in idn.env) : Object.keys(idn.env).length === 0
 }
 
 /**
@@ -29,7 +38,8 @@ export function sharesBareQuotaKey(idn: Identity): boolean {
 export function bareQuotaOwner(identities: readonly Identity[], kind: BotKind): string | null {
   const ofKind = identities.filter((i) => i.kind === kind)
   if (ofKind.length === 0) return DEFAULT_IDENTITY
-  if (ofKind.some((i) => i.name === DEFAULT_IDENTITY)) return DEFAULT_IDENTITY
+  // cc0 優先——但前提是它真的用預設帳號（設了自己 home 變數的 cc0 有自己那一格）。
+  if (ofKind.some((i) => i.name === DEFAULT_IDENTITY && sharesBareQuotaKey(i))) return DEFAULT_IDENTITY
   const sharing = ofKind.filter(sharesBareQuotaKey).map((i) => i.name).sort()
   return sharing[0] ?? null
 }
@@ -43,6 +53,9 @@ export function quotaBaseKey(
   identities: readonly Identity[],
 ): string {
   if (!identity) return kind
+  // 別的 kind 的身分（codex bot 身上的 claude `cc1`）不是這個 CLI 的帳號代號：daemon 一律寫裸 kind。
+  const own = identities.find((i) => i.name === identity)
+  if (own && own.kind !== kind) return kind
   const keyed = `${kind}:${identity}`
   if (quota[quotaKey(host, keyed)] != null) return keyed
   const bare = quotaKey(host, kind)

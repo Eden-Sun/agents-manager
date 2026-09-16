@@ -69,3 +69,19 @@ test('兩個都不叫 cc0 的空 env 身分：誰認領裸 key 不看傳進來�
   assert.equal(bareQuotaOwner([idn('zeta'), idn('alpha')], 'claude'), 'alpha')
   assert.equal(bareQuotaOwner([idn('alpha'), idn('zeta')], 'claude'), 'alpha')
 })
+
+/** 跟 daemon `quota::identity_shares_default` 同一條：看那個 kind 的 home 變數，不看名字。 */
+test('只帶 API key 的身分仍用預設帳號；叫 cc0 卻設了自己 config dir 的有自己那一格', () => {
+  const quota: QuotaMap = { claude: q(97), 'claude:cc0': q(10) }
+  const apiKeyOnly = idn('work', { ANTHROPIC_API_KEY: 'x' })
+  const ownCc0 = idn('cc0', { CLAUDE_CONFIG_DIR: '/home/me/.claude-cc0' })
+  assert.equal(bareQuotaOwner([apiKeyOnly, ownCc0], 'claude'), 'work', 'cc0 有自己的帳號，裸 key 不歸它')
+  assert.equal(quotaBaseKey(quota, 'local', 'claude', 'work', [apiKeyOnly, ownCc0]), 'claude')
+  assert.equal(quotaBaseKey(quota, 'local', 'claude', 'cc0', [apiKeyOnly, ownCc0]), 'claude:cc0')
+})
+
+test('codex bot 身上掛 claude 的 cc1：那不是 codex 的帳號代號，一律看裸 codex', () => {
+  const quota: QuotaMap = { codex: q(50) }
+  const cc1: Identity = { name: 'cc1', kind: 'claude', env: { CLAUDE_CONFIG_DIR: '/x' }, args: [] }
+  assert.equal(quotaBaseKey(quota, 'local', 'codex', 'cc1', [cc1]), 'codex')
+})
