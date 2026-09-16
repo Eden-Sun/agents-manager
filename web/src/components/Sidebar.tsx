@@ -29,6 +29,7 @@ import { HeadMoreMenu } from './HeadMoreMenu'
 import { DirPicker } from './DirPicker'
 import { IdentitiesPanel, IdentityBadge } from './IdentitiesPanel'
 import { Modal } from './Modal'
+import { PairCodeBox } from './PairCodeBox'
 import { RunElapsed } from './RunElapsed'
 import { SupervisorPanel } from './SupervisorPanel'
 import { IdentityOptions, PersonaField, PersonaMark } from './BotSettingsPanel'
@@ -1407,6 +1408,10 @@ export function Sidebar() {
           <section className="env-sec">
             <h3>身分</h3>
             <IdentitiesPanel />
+          </section>
+          <section className="env-sec">
+            <h3>手機配對</h3>
+            <PairCodeBox />
           </section>
           <section className="env-sec">
             <h3>顯示</h3>
