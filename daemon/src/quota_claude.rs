@@ -622,7 +622,10 @@ pub async fn refresh_claude(app: &Arc<App>, host: &str) -> Result<bool> {
         for (k, v) in &id.env {
             env.insert(k.clone(), expand_home(v, &home));
         }
-        if env.is_empty() {
+        // 「這個身分就是預設帳號嗎」只能有一份規則：`env.is_empty()` 會把只帶
+        // `ANTHROPIC_BASE_URL`（沒有 CLAUDE_CONFIG_DIR）的身分算成獨立帳號，跟 statusline 那邊
+        // 的落點不一致，同一個帳號的數字會分裂在兩格（review 2026-09-16）。
+        if crate::quota::identity_shares_default("claude", &id.env) {
             bare_names.push(id.name.clone());
             continue;
         }

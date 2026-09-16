@@ -1044,7 +1044,9 @@ inbox `assignment_noticed`（`needs_review=false`）。送不出去或回合失�
 - **上限橫幅三條規則**：① 寫進該 bot 身份的 key（`quota_base(kind, identity)`，與 `limit_hit_for_bot` 的 `<kind>:<identity>` → 裸 kind 查法一致）；
   ② 只設 `limit_hit`（含 `until`）與「量表用完」，**不**把時間寫進窗口 `resets_at`；③ 同一張橫幅再掃到不算新證據（時間戳不前推）。
   **後到的結構化讀數不會清掉橫幅**（2026-09-13 晚改回）：codex 的 credits 用完時 5h／7d 這兩條**速率**視窗可以是滿的、app-server 也照實回報 0% 已用，
-  唯一講出「現在收不下工作」的就是橫幅——那正是 `limit_hit` 這一格存在的理由。清掉它只有兩條路：`until` 到了，或下一回合真的跑完（`clear_limit_hit`）。
+  唯一講出「現在收不下工作」的就是橫幅——那正是 `limit_hit` 這一格存在的理由。清掉它只有兩條路：`until` 到了，或下一回合真的跑完（`clear_limit_hit`，**只有 codex 走這條**：claude 的 Fable 用完換 opus 照樣能跑，成功回合不算解除）。
+  所以 claude 這一側 `until` 是唯一的出口：橫幅指的那一桶還沒有讀數（daemon 剛重啟、statusLine 還沒進來）時，改用桶別的保底長度（session 5h、weekly／Fable 7d、認不出 5h）從撞上限的時刻起算，
+  不再留下 `until=None`——那等於永遠不過期，交辦會卡在 `quota_blocked` 到有人重啟 daemon（review 2026-09-16）。
 - controller 每 tick 掃：仍擋就順延；不擋了回 `queued` 立刻重送，用 `<client_request_id>#r<n>`（`lifecycle::prompt` 的冪等是同 crid 回同 turn，不換序號等於沒送）。
 - `assignment_quota_blocked` / `assignment_quota_resumed` 各推一則 inbox（`needs_review=false`），不開 incident。重送 6 次仍被擋 → `awaiting_review` + `turn_status=quota_exhausted`（通常是 credits 真的用完）。
   mission 交辦另有 `quota_policy` 與身份切換，見 §18.14。

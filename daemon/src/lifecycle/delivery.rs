@@ -689,6 +689,17 @@ fn evidence(kind: &str, proof: &Proof, offset: u64, screen: &str, text: &str) ->
     }
 }
 
+/// 要不要再貼一次：只有在**看得出來第一次沒進去**的時候。
+///
+/// `Proof::Unverified` 的 `evidence` 恆為 0（＝恆等於 baseline），所以「證據沒長」對它永遠成立，
+/// 條件會退化成「框看起來是空的就再貼」——而 Unverified 正是遠端／grok／codex 還沒回報 session
+/// 這些最慢的情境：TUI 晚一幀重畫就會貼第二次，兩段文字接在一起送進 agent，而且因為是 Unverified，
+/// 送出後框清空就回報成功，沒有任何跡象顯示送出去的字跟使用者看到的不一樣（review 2026-09-16）。
+/// 沒有守門員時寧可不動第二次寫入。
+fn should_repaste(proof: &Proof, box_empty: bool, evidence_grew: bool) -> bool {
+    !matches!(proof, Proof::Unverified) && box_empty && !evidence_grew
+}
+
 /// Is the run still on the session the transcript proof was taken from?
 async fn same_session(app: &Arc<App>, run_id: &str, proof: &Proof) -> bool {
     let Proof::Transcript { format, path, session_id } = proof else { return true };
@@ -771,7 +782,9 @@ pub(crate) async fn execute_delivery(
     client.pane_send_text(&pane, text).await?;
     tokio::time::sleep(Duration::from_millis(TYPE_SETTLE_MS)).await;
     let mut seen = read().await?;
-    if box_state(&bot.kind, &seen) == BoxState::Empty && evidence(&bot.kind, &proof, offset, &seen, text)? == baseline {
+    let box_empty = box_state(&bot.kind, &seen) == BoxState::Empty;
+    let evidence_grew = evidence(&bot.kind, &proof, offset, &seen, text)? > baseline;
+    if should_repaste(&proof, box_empty, evidence_grew) {
         tracing::warn!(run = %run.id, bot = %bot.name, "the paste did not reach the composer; pasting once more");
         client.pane_send_text(&pane, text).await?;
         tokio::time::sleep(Duration::from_millis(TYPE_SETTLE_MS)).await;
@@ -862,6 +875,19 @@ mod tests {
     use super::*;
 
     const RULE: &str = "─────────────────────────────────────────────";
+
+    /// 沒有無損證據時不准重貼：那個判斷只有在證據看得見時才有意義，
+    /// 對 `Unverified` 會退化成「框看起來空的就再貼一次」＝貼兩次。
+    #[test]
+    fn a_proof_we_cannot_read_never_earns_a_second_paste() {
+        for (box_empty, grew) in [(true, false), (true, true), (false, false), (false, true)] {
+            assert!(!should_repaste(&Proof::Unverified, box_empty, grew), "unverified 不該重貼 {box_empty} {grew}");
+        }
+        let readable = Proof::EchoRow;
+        assert!(should_repaste(&readable, true, false), "框空、證據沒長＝第一次沒進去，要重貼");
+        assert!(!should_repaste(&readable, true, true), "證據長了＝進去了，只是框已經被送掉");
+        assert!(!should_repaste(&readable, false, false), "框裡有東西＝貼進去了");
+    }
 
     fn screen(transcript: &[&str], box_rows: &[&str]) -> String {
         let mut s = String::new();
