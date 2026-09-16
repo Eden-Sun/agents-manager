@@ -346,7 +346,8 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
             "owned_by":"bot","label":null,"scratch":false,"orphaned":false}] }
 ```
 - `kind`：`service`（有前景程式或 listen port）／`shell`（只有 shell）。agent pane 不在這裡。**不是權限**。
-- `read_only`：`listen_ports` 非空。打字權限只看這個（`kind=service` 但沒有 port 的，例如跑著 vim，照樣可以打字）。
+- `read_only`：本機＝`listen_ports` 非空（`kind=service` 但沒有 port 的，例如跑著 vim，照樣可以打字）；遠端不算 port，
+  ＝`kind=service` 或記過 port。跟打字那一端（`/hosts/{name}/shells/{pane_id}/text|keys`）同一條規則。
 - `owner_bot_id`／`owned_by`：`bot`＝從 pane 行程樹的 `AM_BOT_ID` 推斷；`user`＝沒有標記但 cwd 對得到這個專案（列在專案底下，**預設仍不自動關**）；`none`＝連專案都對不到。
 - `listen_ports` 只在本機判斷，遠端一律空陣列。`last_output_at` 由 herdr 的 `revision` 變化推進，不讀畫面內容。
 - Project 不存在 404。
@@ -528,10 +529,13 @@ Project 可在另一台機器，daemon 透過 SSH 轉發連遠端 herdr。`host`
   一鍵一個 POST 會同時在路上、抵達順序不保證——打 `ls` 可能變成 `sl`。貼上不拆成鍵：文字裡的換行會變成 Enter 直接執行。
 - 每台最多 8 個：`409 {"reason":"too_many_shells","host","max":8}`。host 不存在 404；沒連線 502。
 - **白名單兩份**（2026-09-16，SPEC §6.5e「選單點得進去」）：`terminal`／`text`／`keys` 除了這裡開的 shell，也接受 `panes` 表裡的 pane。
-  **打字看 listen port，不看 `kind`**——有 port（pane 列 `read_only:true`）只可看，打字回
+  **打字看 listen port，不看 `kind`**——本機有 port（pane 列 `read_only:true`）只可看，打字回
   `403 {"error":"read_only_pane","listen_ports":[…],"message":"…"}`；沒 port 的（含跑著 vim 的 `service`）可以打字。
+  遠端不算 port，退回表上的事實：`kind=service` 或記過 port 就 403 `read_only_pane`。
   有 active run 的 pane 一律 `403 {"error":"agent_pane","message":"…"}`（連看都不給）。沒被 trace 的 pane 照舊 404。
-  `text`／`keys` 之前即時問 herdr（結果重用 3 秒）：裡面現在有 agent 403 `agent_pane`、pane 不在 404、本機重對到 port 403 `read_only_pane`；問不到退回表上的 port。遠端不算 port。
+  `text`／`keys` 之前即時問 herdr（結果重用 3 秒）：裡面現在有 agent 403 `agent_pane`、pane 不在 404、本機重對到 port 403 `read_only_pane`；
+  **問不到就不放行**（herdr 沒回、`ps`／`lsof` 失敗或逾時、沒報 shell pid）：
+  `409 {"error":"conflict","reason":"pane_state_unknown","retryable":true,"message":"無法確認這顆 pane 現在的狀態…，請稍後再試"}`。
   `DELETE` 同樣認兩份（daemon 重啟後面板自己開的 shell 只剩 `panes` 表認得；以前找不到就回 200、什麼都沒關）。
   一般要關被 trace 的 pane 仍走 `POST /api/panes/{id}/close`（服務 pane 會先 409 要人確認）。
 - `recent` / `recent_unwrapped` 只給**已捲出畫面**的內容：沒捲過的 pane 兩者回 `text:""` + `truncated:true`，前端要說明而不是顯示空白。

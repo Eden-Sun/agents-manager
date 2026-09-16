@@ -631,11 +631,14 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
 - **白名單兩份**（`shell::registered`）：面板自己開的（`app.host_shells`，只在記憶體）加上 `panes` 表。後者活過重啟。
 - **打字權限看 listen port，不看 `kind`**（`shell::allowed`，2026-09-16 統整者裁示）：**有 listen port 的 pane 只可看**——送一個
   Ctrl-C 給 dev server 就是把它關掉，UI 把輸入框鎖住、按鍵列整列拿掉並講明；**沒有 port 的都可以打字**，`kind=service` 也一樣：
-  跑著 vim／less／sudo／python 的 shell 必須打得進去，不然人卡在裡面出不來。pane 列帶 `read_only`（＝有 port）給前端直接用。
-  遠端不算 port（見「資料與 API」），所以遠端的 pane 一律可以打字。**有 active run 的 pane 一律 403**：掃描可能在 agent 還沒被
+  跑著 vim／less／sudo／python 的 shell 必須打得進去，不然人卡在裡面出不來。pane 列帶 `read_only` 給前端直接用。
+  遠端不算 port（見「資料與 API」），所以**遠端退回表上已知的事實**：`kind='service'` 或記過 listen port 就唯讀（AGM 2026-09-16 驗收）。
+  **有 active run 的 pane 一律 403**：掃描可能在 agent 還沒被
   herdr 認出來的空檔把 bot 的 pane 記成 shell，那一刻也不能讓按鍵繞過回合那條線（§6.5.1／§6.9 的教訓）。
 - **表是快取，動手前即時再看一次**（review 2026-09-16 core 4）：打字前問 herdr `pane.get`（裡面現在有 agent → 403 `agent_pane`；
-  pane 不在 → 404）並在本機重對 listen port（有 → 403 `read_only_pane`），結果重用 3 秒（鍵盤同步一鍵一個請求）；問不到才退回表上的 port。
+  pane 不在 → 404）並在本機重對 listen port（有 → 403 `read_only_pane`），結果重用 3 秒（鍵盤同步一鍵一個請求）。
+  **問不到就不打**（比照 GC「讀不到就不關」，AGM 2026-09-16 驗收）：herdr 沒回、`ps`／`lsof` 失敗或逾時、herdr 沒報 shell pid →
+  409 `pane_state_unknown`（`retryable: true`），請人稍後再試，不默默放行。
   `POST /api/panes/{id}/close` 同樣：有 active run 或 herdr 說裡面有 agent → 403；pane 不在 → 刪列 404；即時的分類是 service、
   或讀不到事實，沒帶 `confirm` 就 409。另外 daemon 每 60 秒重掃一次 pane（只掃不關，GC 與通知仍跟著對帳）：pane 裡開始跑
   dev server 不會產生任何 herdr 事件，對帳也不定期跑。
