@@ -1139,10 +1139,7 @@ pub async fn switch_candidate(
 pub async fn apply_quota_policy(app: &Arc<App>) -> Result<bool, LcError> {
     let sup = store::get_or_init(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     let Some(bot_id) = sup.bot_id.clone() else { return Ok(false) };
-    let quota = {
-        let quotas = app.quotas.lock().await;
-        quotas.get(&format!("claude:{}", sup.identity)).or_else(|| quotas.get("claude")).cloned()
-    };
+    let quota = manager_quota(app, &sup.identity).await;
     let liveness = super::manager_liveness(app, &bot_id).await.unwrap_or("stopped");
     match policy::decide(&sup, quota.as_ref(), liveness, chrono::Utc::now()) {
         policy::Decision::Keep => Ok(false),
@@ -1174,11 +1171,21 @@ pub async fn apply_quota_policy(app: &Arc<App>) -> Result<bool, LcError> {
     }
 }
 
+/// AGM 自己那個身分的額度讀數，走跟寫入端同一條 key 規則（`quota::quota_base_for_host`）。
+///
+/// 以前手拼 `claude:{identity}`、查不到就借裸 `claude`：cc0 若有自己的 `CLAUDE_CONFIG_DIR`，讀到的是
+/// **預設帳號**的數字，AGM 會因為別的帳號見底而換模型或停下來等（review2 quota L3）。查不到就是沒有讀數，
+/// `policy::decide` 把 `None` 當 Keep。key 在拿 `app.quotas` 鎖之前算好。
+async fn manager_quota(app: &Arc<App>, identity: &str) -> Option<crate::quota::Quota> {
+    let host = crate::config::LOCAL_HOST;
+    let key = crate::quota::quota_key(host, &crate::quota::quota_base_for_host(app, host, "claude", Some(identity)).await);
+    app.quotas.lock().await.get(&key).cloned()
+}
+
 /// The soonest window reset this identity is known to have. `None` = we have no reading, and
 /// the plan is explicit that an unknown quota must not be treated as a full one.
 async fn quota_reset_at(app: &Arc<App>, identity: &str) -> Option<String> {
-    let q = app.quotas.lock().await;
-    let quota = q.get(&format!("claude:{identity}")).or_else(|| q.get("claude"))?;
+    let quota = manager_quota(app, identity).await?;
     [&quota.five_hour, &quota.seven_day, &quota.fable]
         .into_iter()
         .flatten()
@@ -1570,6 +1577,33 @@ mod patrol_wake_tests {
             sqlx::query_as("SELECT state, notify_attempts FROM supervisor_inbox").fetch_all(&app.db).await.unwrap();
         assert!(rows.iter().all(|(s, n)| s == "pending" && *n == 0), "{rows:?}");
         assert!(store::get_or_init(&app.db).await.unwrap().last_notify_at.is_none());
+    }
+}
+
+/// AGM 自己的額度讀數不借別的帳號（review2 quota L3）。
+#[cfg(test)]
+mod manager_quota_tests {
+    use super::*;
+    use crate::quota::{Quota, Window};
+
+    fn reading(used: f64, reset: &str) -> Quota {
+        let w = Some(Window { used_pct: used, resets_at: Some(reset.into()) });
+        Quota { five_hour: w.clone(), seven_day: w.clone(), fable: w, reset_credits: None, limit_hit: None, plan: None,
+                updated_at: crate::db::now(), source: "test".into(), account: None, host: "local".into() }
+    }
+
+    /// 身分查不到（還沒偵測、或有自己的 config dir）：key 是 `claude:<name>`。只有預設帳號有讀數時不能拿它來用。
+    #[tokio::test]
+    async fn the_manager_never_borrows_the_default_accounts_reading() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        app.quotas.lock().await.insert("claude".into(), reading(100.0, "2999-01-01T00:00:00Z"));
+        assert!(manager_quota(&app, "cc9").await.is_none(), "裸 claude 是另一個帳號");
+        assert_eq!(quota_reset_at(&app, "cc9").await, None, "沒有讀數就是沒有，不是別人的重置時間");
+
+        app.quotas.lock().await.insert("claude:cc9".into(), reading(20.0, "2999-02-01T00:00:00Z"));
+        assert_eq!(manager_quota(&app, "cc9").await.map(|q| q.five_hour.unwrap().used_pct), Some(20.0));
+        assert_eq!(quota_reset_at(&app, "cc9").await.as_deref(), Some("2999-02-01T00:00:00Z"));
     }
 }
 
