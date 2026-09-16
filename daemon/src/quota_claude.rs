@@ -404,7 +404,9 @@ pub fn parse_claude_usage_report(segment: &str, account: Option<&str>) -> Option
             Some("weekly_all") => seven = win(row),
             Some("weekly_scoped") => {
                 let model = row.pointer("/scope/model/display_name").and_then(Value::as_str).unwrap_or_default();
-                if model.eq_ignore_ascii_case("fable") {
+                // 2.1.273 實機是 `Fable`；帶版號的 `Fable 5.1` 也要認，不然 `fable` 窗永遠是 None，
+                // 撞限的保底時間與 `mission::pick` 的桶判斷都會退回猜測（review 2026-09-16「沒把握」一節）。
+                if model.split_whitespace().next().is_some_and(|w| w.eq_ignore_ascii_case("fable")) {
                     fable = win(row);
                 }
             }
@@ -949,6 +951,18 @@ AM_USAGE_DONE=0
         assert_eq!(q.fable.as_ref().unwrap().resets_at.as_deref(), Some("2026-09-21T03:59:59Z"));
         assert_eq!(q.account.as_deref(), Some("cc1"));
         assert_eq!(q.source, "claude-usage");
+    }
+
+    /// Fable 列的 `display_name` 帶版號（`Fable 5.1`）也要認；別的模型（`Opus`）不能被當成 Fable。
+    #[test]
+    fn a_versioned_fable_name_still_fills_the_fable_window() {
+        let row = |name: &str| format!(
+            r#"{{"usage_report":{{"rate_limits":{{"limits":[{{"kind":"weekly_scoped","percent":41,"resets_at":"2026-09-21T03:59:59+00:00","scope":{{"model":{{"display_name":"{name}"}}}}}}]}}}}}}"#
+        );
+        assert_eq!(parse_claude_usage_report(&row("Fable 5.1"), None).and_then(|q| q.fable).map(|w| w.used_pct), Some(41.0));
+        assert_eq!(parse_claude_usage_report(&row("fable"), None).and_then(|q| q.fable).map(|w| w.used_pct), Some(41.0));
+        assert!(parse_claude_usage_report(&row("Opus 5"), None).is_none(), "別的模型的週列沒有對應的桶");
+        assert!(parse_claude_usage_report(&row("Fabled"), None).is_none());
     }
 
     /// 舊 CLI 沒有這個欄位（`grep` 沒抓到 → 跑純文字版）：JSON 解析回 None，交給原本的文字解析。

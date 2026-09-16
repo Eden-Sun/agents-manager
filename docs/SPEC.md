@@ -1052,7 +1052,7 @@ API：`GET /api/projects/:id/messages`、`POST /api/projects/:id/chat`（`API.md
   只有 **env 整個是空的**身分併進裸 `claude` 那一趟（用空 env 探）；env 不空、卻沒有自己 `CLAUDE_CONFIG_DIR` 的身分（`ANTHROPIC_API_KEY`…）額度仍落在裸 `claude`，
   但登入答案另開一趟**帶它自己的 env、不跑 `/usage`** 去問，而且登入已知就不再問——以前用空 env 探，預設帳號的 email／方案被記到它名下（review 2026-09-16）。
   `/usage` 先跑 `--output-format stream-json --verbose` 並 `grep -m1 usage_report`：claude 2.1.273 起那一行帶結構化的 `usage_report.rate_limits.limits[]`
-  （`kind` = `session`／`weekly_all`／`weekly_scoped`＋`scope.model.display_name`、`percent`、ISO `resets_at`、`severity`），分桶一律看 `kind` 不看顯示字串，重置時間直接用 ISO。
+  （`kind` = `session`／`weekly_all`／`weekly_scoped`＋`scope.model.display_name`、`percent`、ISO `resets_at`、`severity`），分桶一律看 `kind` 不看顯示字串，重置時間直接用 ISO；Fable 列認 `display_name` 的第一個字（`Fable`、`Fable 5.1` 都算）。
   `grep` 沒抓到（舊 CLI 不認這個旗標或還沒有這個欄位）才跑純文字版，交給既有的文字解析（`parse_claude_usage`）。
 - **grok `/usage` 探測**：§12.6 的 TUI 流程。
 - 兩者本機開在專屬 `am-quota` session；遠端借 **daemon 在那台的 named session**（遠端只有一條轉發 socket，再開 session 要多一條轉發）。
