@@ -439,20 +439,53 @@ async fn get_state(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> 
     Ok(Json(state_json(&app).await?))
 }
 
+/// 每個呼叫端都是**先** `app.cfg.update` 落盤、**再**投影：被擋下時這次的變更已經在 config.toml 裡了。
 async fn reproject(app: &Arc<App>) -> Result<(), LcError> {
     crate::projection::project_config(&app.cfg, &app.db).await.map_err(|e| {
         // 閘門擋下來是**狀態不對**，不是上游壞掉：502 會讓呼叫端以為 herdr／DB 出問題，
         // 而真正要做的事（去 config.toml 把那幾列補回來）沒有任何線索（review 2026-09-16）。
         match e.downcast_ref::<crate::projection::ProjectionRefused>() {
+            // `config_written`：照提示補完 config 再**重試同一個請求**會撞「已存在」（例如 409 project path already
+            // registered）而 UI／DB 都還看不到它——要做的是補回被擋的那幾列，讓下一次投影把它帶進來（review 2026-09-16 驗證 2）。
             Some(r) => LcError::conflict(
                 "projection_refused",
-                json!({"reason": "projection_refused", "message": r.detail,
+                json!({"reason": "projection_refused",
+                       "message": format!("{}（這次的變更已經寫進 config.toml，只是還沒套用；不要重試同一個請求，補回上面那幾列後任何一次寫設定或重啟都會套用）", r.detail),
+                       "config_written": true,
                        "bots": r.bots, "projects": r.projects,
                        "allow_env": crate::projection::ALLOW_BULK_ENV}),
             ),
             None => any_err(e),
         }
     })
+}
+
+#[cfg(test)]
+mod reproject_tests {
+    /// review 2026-09-16 驗證 2：閘門在落盤之後才判，409 要講明變更已經寫進 config.toml。
+    #[tokio::test]
+    async fn a_refused_projection_says_the_change_is_already_in_the_config() {
+        let _env = crate::projection::BULK_ENV.lock().await;
+        let env = crate::testing::env().await;
+        let app = &env.app;
+        let mut text = String::from("[server]\nlisten = '127.0.0.1:7788'\n\n[[projects]]\nid = 'p1'\npath = '/tmp'\nlabel = 'demo'\nhost = 'remote'\n");
+        for b in ["b1", "b2", "b3", "b4"] {
+            text.push_str(&format!("\n[[projects.bots]]\nid = '{b}'\nname = '{b}'\nkind = 'claude'\n"));
+        }
+        std::fs::write(&app.cfg.path, text).unwrap();
+        app.cfg.update(|_| Ok(())).await.unwrap();
+        super::reproject(app).await.expect("第一次投影");
+        std::fs::write(&app.cfg.path, "[server]\nlisten = '127.0.0.1:7788'\n").unwrap();
+        app.cfg.update(|_| Ok(())).await.unwrap();
+        match super::reproject(app).await {
+            Err(crate::lifecycle::LcError::Conflict(body)) => {
+                assert_eq!(body["reason"], "projection_refused");
+                assert_eq!(body["config_written"], true);
+                assert!(body["message"].as_str().unwrap().contains("已經寫進 config.toml"), "{body}");
+            }
+            other => panic!("{:?}", other.err().map(|e| format!("{e:?}"))),
+        }
+    }
 }
 
 /// 刪除走 `projection::delete_from_config` 的單一臨界區。目標不在 config、或授權以外還有列會不見，
