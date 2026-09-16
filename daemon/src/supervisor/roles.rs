@@ -171,9 +171,16 @@ pub struct Route {
 ///
 /// 不認得的種類給巡檢並喚醒：新事件寧可被看到一次，也不要無聲地躺在沒人收的角色底下。
 pub fn route(kind: &str, payload: &Value, review_role: Option<&str>) -> Route {
+    known_route(kind, payload, review_role).unwrap_or(Route { role: Role::Patrol, wake: true })
+}
+
+/// 表上**明寫**的分支；`None` ＝ 落到預設。拆出來是為了測得到「每一種寫進 inbox 的 kind 都有自己的分支」：
+/// 表上寫 `quota_blocked`、寫入端寫 `assignment_quota_blocked`，兩年都不會有人發現——落到預設
+/// 只是多叫醒巡檢一次，不會壞得很大聲（review 2026-09-16）。
+fn known_route(kind: &str, payload: &Value, review_role: Option<&str>) -> Option<Route> {
     let needs_review = payload.get("needs_review").and_then(Value::as_bool);
     let reviewer = review_role.and_then(Role::parse).unwrap_or(Role::Responder);
-    let r = |role, wake| Route { role, wake };
+    let r = |role, wake| Some(Route { role, wake });
     match kind {
         // bot 的申請：寫入時已決定收件角色（`bot_requests::intercept`）。
         "bot_request" => r(
@@ -181,18 +188,23 @@ pub fn route(kind: &str, payload: &Value, review_role: Option<&str>) -> Route {
             payload.get("wake").and_then(Value::as_bool).unwrap_or(true),
         ),
         "assignment_completed" | "assignment_failed" => r(reviewer, needs_review != Some(false)),
+        // 送不進去、停在 blocked：要驗收角色決定改派、followup 或放掉（controller::undeliverable）。
+        "assignment_undeliverable" => r(reviewer, true),
         // 通知型交辦送到了、額度擋住／恢復：controller 自己會處理，這些只是記錄。
         // 排隊中（`assignment_queued`）同理：它還在路上，等回合結束自己會送出。
-        "assignment_noticed" | "assignment_queued" | "quota_blocked" | "quota_resumed" => r(reviewer, false),
+        "assignment_noticed" | "assignment_queued" | "assignment_quota_blocked" | "assignment_quota_resumed" => r(reviewer, false),
         "approval_requested" | "mission_created" | "mission_question" | "mission_answered" | "mission_resumed"
         | "mission_identity_switch" => r(Role::Responder, true),
+        // 系統層的故障：巡檢收、叫醒。
+        "incident_opened" | "watchdog_gave_up" | "responder_watchdog_gave_up" | "responder_bot_missing" | "bot_restart_failed"
+        | "supervisor_restart_retry" | "agm_cli_stale" | "pane_unowned" => r(Role::Patrol, true),
         // 恢復不叫醒人：開的那一筆已經叫過，關掉只要記下來。
         "incident_resolved" => r(Role::Patrol, false),
         "health_changed" => {
             let status = payload.pointer("/manager_health/status").and_then(Value::as_str).unwrap_or("unknown");
             r(Role::Patrol, status != "healthy")
         }
-        _ => r(Role::Patrol, true),
+        _ => None,
     }
 }
 
@@ -710,9 +722,13 @@ mod tests {
         }
         assert_eq!(route("assignment_completed", &json!({"needs_review": true}), None), Route { role: Role::Responder, wake: true });
         assert_eq!(route("assignment_failed", &json!({"needs_review": true}), Some("patrol")), Route { role: Role::Patrol, wake: true }, "巡檢自己的例行派工回到巡檢");
-        for kind in ["assignment_noticed", "quota_blocked", "quota_resumed"] {
-            assert!(!route(kind, &p, None).wake, "{kind} 只記錄");
+        // 寫入端真正用的名字（store::park_quota_blocked／resume_quota_blocked），不是表上以前寫的 `quota_blocked`。
+        for kind in ["assignment_noticed", "assignment_queued", "assignment_quota_blocked", "assignment_quota_resumed"] {
+            assert_eq!(route(kind, &p, None), Route { role: Role::Responder, wake: false }, "{kind} 只記錄、歸驗收角色");
+            assert_eq!(route(kind, &p, Some("patrol")).role, Role::Patrol, "{kind} 跟著交辦的驗收角色");
         }
+        assert_eq!(route("assignment_undeliverable", &p, None), Route { role: Role::Responder, wake: true }, "送不進去要驗收角色決定");
+        assert_eq!(route("assignment_undeliverable", &p, Some("patrol")), Route { role: Role::Patrol, wake: true });
         for kind in ["incident_opened", "watchdog_gave_up", "bot_restart_failed", "supervisor_restart_retry", "responder_watchdog_gave_up", "brand_new_kind"] {
             assert_eq!(route(kind, &p, None), Route { role: Role::Patrol, wake: true }, "{kind}");
         }
@@ -724,6 +740,131 @@ mod tests {
             Route { role: Role::Patrol, wake: false }
         );
         assert_eq!(route("bot_request", &json!({}), None), Route { role: Role::Responder, wake: true });
+    }
+
+    /// 從原始碼撈出「寫進 supervisor_inbox 的 kind」：`push_inbox(…)`／`push_inbox_tx(…)` 的第三個參數、
+    /// `settle_and_notify(…)` 的第八個、`INSERT … supervisor_inbox … VALUES` 裡寫死的字串、
+    /// `let kind = if … { "…" } else { "…" }` 的分支，以及 mission 的 `(key, "…", &payload)` 三元組。
+    /// 手寫清單正是 09ec464 那個錯的來源，所以清單由寫入端自己長出來。
+    fn inbox_kinds_written_in_source() -> std::collections::BTreeMap<String, String> {
+        fn args_of(src: &str, open: usize) -> Vec<String> {
+            let (mut depth, mut args, mut cur, mut chars) = (0i32, Vec::new(), String::new(), src[open..].chars().peekable());
+            while let Some(c) = chars.next() {
+                match c {
+                    '"' => {
+                        cur.push(c);
+                        while let Some(s) = chars.next() {
+                            cur.push(s);
+                            if s == '\\' {
+                                if let Some(e) = chars.next() {
+                                    cur.push(e);
+                                }
+                            } else if s == '"' {
+                                break;
+                            }
+                        }
+                        continue;
+                    }
+                    '(' | '[' | '{' => {
+                        depth += 1;
+                        if depth == 1 {
+                            continue;
+                        }
+                    }
+                    ')' | ']' | '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            args.push(cur.trim().to_string());
+                            return args;
+                        }
+                    }
+                    ',' if depth == 1 => {
+                        args.push(std::mem::take(&mut cur).trim().to_string());
+                        continue;
+                    }
+                    _ => {}
+                }
+                cur.push(c);
+            }
+            args
+        }
+        fn is_kind(s: &str) -> bool {
+            s.contains('_') && !s.starts_with('_') && s.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+        }
+        fn literal(arg: &str) -> Option<String> {
+            let s = arg.strip_prefix('"')?.strip_suffix('"')?;
+            is_kind(s).then(|| s.to_string())
+        }
+        /// `open` 的前一個字（略過空白）是 `before`、`close` 的後一個字是 `after` 的 `"…"`。
+        fn wrapped(src: &str, before: char, after: &str) -> Vec<String> {
+            let mut out = Vec::new();
+            let parts: Vec<&str> = src.split('"').collect();
+            for i in (1..parts.len()).step_by(2) {
+                let prev = parts[i - 1].trim_end();
+                let next = parts.get(i + 1).map_or("", |n| n.trim_start());
+                if prev.ends_with(before) && next.starts_with(after) && is_kind(parts[i]) {
+                    out.push(parts[i].to_string());
+                }
+            }
+            out
+        }
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    out.push(p);
+                }
+            }
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        walk(&root, &mut files);
+        let mut kinds = std::collections::BTreeMap::new();
+        for f in files {
+            let src = std::fs::read_to_string(&f).unwrap();
+            let at = f.strip_prefix(&root).unwrap().display().to_string();
+            let mut add = |k: String| {
+                kinds.entry(k).or_insert_with(|| at.clone());
+            };
+            for (call, idx) in [("push_inbox(", 2), ("push_inbox_tx(", 2), ("settle_and_notify(", 7)] {
+                for (pos, _) in src.match_indices(call) {
+                    if let Some(k) = args_of(&src, pos + call.len() - 1).get(idx).and_then(|a| literal(a)) {
+                        add(k);
+                    }
+                }
+            }
+            for (pos, _) in src.match_indices("INTO supervisor_inbox") {
+                let tail = &src[pos..];
+                let Some(v) = tail.find("VALUES") else { continue };
+                let values = &tail[v..tail[v..].find(')').map_or(tail.len(), |e| v + e)];
+                for s in values.split('\'').skip(1).step_by(2).filter(|s| is_kind(s)) {
+                    add(s.to_string());
+                }
+            }
+            for line in src.lines().filter(|l| l.contains("let kind = ")) {
+                for k in wrapped(line, '{', "}") {
+                    add(k);
+                }
+            }
+            for k in wrapped(&src, ',', ", &payload)") {
+                add(k);
+            }
+        }
+        kinds
+    }
+
+    /// 每一種寫進 inbox 的 kind 都要在路由表有**明寫**的分支（review 2026-09-16 新發現 5）。
+    #[test]
+    fn every_kind_written_to_the_inbox_has_its_own_routing_branch() {
+        let kinds = inbox_kinds_written_in_source();
+        // 撈取本身要撈得到東西：否則 regex 一壞，這個測試會安靜地變成恆真。
+        for must in ["assignment_quota_blocked", "assignment_quota_resumed", "assignment_undeliverable", "assignment_completed", "approval_requested", "bot_request", "incident_opened", "mission_question"] {
+            assert!(kinds.contains_key(must), "source scan lost {must}: {kinds:?}");
+        }
+        let unrouted: Vec<_> = kinds.iter().filter(|(k, _)| known_route(k, &json!({}), None).is_none()).collect();
+        assert!(unrouted.is_empty(), "these kinds are written to the inbox but fall through to the default route: {unrouted:?}");
     }
 
     /// 舊資料庫：欄位補上、舊列在下一個 tick 被分類，重跑 migrate 不會壞。
