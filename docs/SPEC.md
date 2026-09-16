@@ -571,8 +571,22 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
 
 ### 7.1 存取控制
 - bind：開發版 bind `0.0.0.0`；打包成 macOS app 的執行檔（路徑在 `…app/Contents/MacOS/`）bind `127.0.0.1`；`AM_DEV_LAN` 可雙向覆寫（`main.rs::dev_lan_default`）。
-- 啟動時產生 UI token 寫 `~/.config/agents-manager/ui-token`；`GET /api/session`（`Host` 須為 `127.0.0.1:<port>` 或 `localhost:<port>`）回 token；
+- 啟動時產生 UI token 寫 `~/.config/agents-manager/ui-token`；`GET /api/session` 回 token，**判斷的是 TCP peer 不是 `Host`**（`Host` 是呼叫端自己填的）；
   其餘 `/api/*` 要 header `X-AM-Token`，`/ws` 用 `?token=`；`Origin` 存在時須為本機。
+
+### 7.1a LAN 要配對才拿得到 token（AGM 裁示 2026-09-16）
+`GET /api/session` 是**唯一不需要 token** 的端點，而那把 token 過得了 `auth()`＝整個 API（往任何 bot 的 TUI 打字、開主機 shell、kill 程序、刪專案）。
+`allow_lan` 打開時 daemon 綁 `0.0.0.0`，以前 `peer_is_local()` 第一行就 `if allow_lan { return true }`——同網段（**含 Tailscale 這種疊加網路，等於跨網際網路可達**）任何裝置一個 `curl http://<ip>:7788/api/session` 就拿到整把鑰匙。2026-09-16 實測拿得到。
+
+- **直接發 token 只限 loopback**（127.0.0.1／::1）。非 loopback 回 `403 {"error":"pairing_required"}` 並留一行 warn（peer、Origin）。
+- **非 loopback 走配對**：本機端產生一次性配對碼（六碼、拿掉會唸錯的 I／O／0／1，顯示成 `ABC-DEF`），
+  兩個取得管道——環境設定畫面的按鈕，或 `bin/agm pair-code`。碼**五分鐘到期、用過即失效**，比對時忽略大小寫、空白與連字號。
+  裝置帶碼 `POST /api/session/pair` 換 token，之後存在該裝置上。
+- **猜錯會被限流**：同一個來源連續五次失敗鎖十分鐘（回 429 與 `retry_after_secs`），其他來源不受影響，成功一次就把計數清掉。
+  碼不對／過期／用過對外都是同一種回答，不透露是哪一種。
+- **已經有 token 的裝置不受影響**：`auth()` 只看 token，不需要重新配對。`allow_lan` 關著時（打包版）行為完全不變。
+- 配對成功與失敗都留一行 log（peer、時間）。碼只在記憶體，daemon 重啟就重來——它本來就只活五分鐘。
+- 產生碼的那一支（`POST /api/session/pair-code`）**要 token 且只收 loopback**：把權限交出去的人必須已經站在這台機器前面。
 - `/hook/*` 與 `/relay/announce` 驗 **per-bot** `X-AM-Bot-Token`。
 
 ### 7.3 WebSocket `/ws`

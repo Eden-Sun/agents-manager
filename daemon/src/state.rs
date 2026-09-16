@@ -68,6 +68,8 @@ pub struct App {
     /// How "which account is this pid running under" gets answered (SPEC §16.6). Empty in a
     /// real daemon, which means `ps`; a test installs its own reader.
     pub proc_env: crate::pane_identity::ProcEnvHook,
+    /// LAN 配對碼（SPEC §7.1a）。只在記憶體：daemon 重啟就重來，碼本來就只活五分鐘。
+    pub pairing: Mutex<crate::pairing::Pairing>,
 
     locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     bus: broadcast::Sender<WsEvent>,
@@ -146,6 +148,7 @@ impl App {
             connected: std::sync::atomic::AtomicBool::new(false),
             default_connected: std::sync::atomic::AtomicBool::new(false),
             proc_env: Default::default(),
+            pairing: Mutex::new(Default::default()),
             locks: Mutex::new(HashMap::new()),
             bus,
             turn_bus,

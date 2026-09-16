@@ -652,6 +652,15 @@ def cmd_approval(client: Client, cfg: dict, args) -> object:
     return client.post(f"/api/supervisor/approvals/{urllib.parse.quote(args.approval_id)}/decide", body)
 
 
+def cmd_pair_code(client: Client, cfg: dict, args) -> object:
+    """印一個一次性的 LAN 配對碼。
+
+    `GET /api/session` 只對 loopback 直接發 token（SPEC §7.1a）——手機那種非 loopback 的裝置
+    要拿這個碼去換。碼五分鐘到期、用過即失效、猜錯會被限流。
+    """
+    return client.post("/api/session/pair-code", {})
+
+
 def cmd_lease(client: Client, cfg: dict, args) -> object:
     """執行租約：等安全窗口用 `safety`（唯讀），真的要動手用 `acquire`。
 
@@ -1084,6 +1093,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--reason", help="decide：理由")
     s.add_argument("--actor", default="AGM", help="decide：決定者（預設 AGM）")
     s.set_defaults(func=cmd_approval)
+
+    s = sub.add_parser(
+        "pair-code",
+        help="產生一次性的 LAN 配對碼（手機第一次連要用）",
+        description="GET /api/session 只對 loopback 直接發 token；其他裝置帶這個碼換。五分鐘到期、用過即失效。",
+    )
+    s.set_defaults(func=cmd_pair_code)
 
     s = sub.add_parser(
         "lease",
