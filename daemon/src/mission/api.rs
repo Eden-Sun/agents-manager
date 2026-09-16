@@ -139,7 +139,21 @@ pub async fn post_mission(
         return Err(LcError::BadValue(json!({"error": "remote_not_supported", "host": project.host})));
     }
     let crid = b.client_request_id.clone().unwrap_or_else(crate::db::ulid);
-    let (m, created) = store::create(
+    let payload_of = |m: &store::Mission| {
+        json!({
+            "mission_id": m.id,
+            "project_id": project.id,
+            "project": project.label,
+            "cwd": project.path,
+            "text": m.text,
+            "delivery_mode": m.delivery_mode,
+            "executor_kind": m.executor_kind,
+            "on_5h_limit": m.on_5h_limit,
+            "max_rounds": m.max_rounds,
+        })
+    };
+    // 任務列、instruction 與 `mission_created` 同一個交易（store::create_announced）。
+    let (m, created) = store::create_announced(
         &app.db,
         &store::NewMission {
             project_id: &project.id,
@@ -151,26 +165,18 @@ pub async fn post_mission(
             max_rounds,
             parent_mission_id: None,
         },
+        payload_of,
     )
     .await
     .map_err(up)?;
     if created {
-        store::add_event(&app.db, &m.id, "instruction", text, None, &json!({})).await.map_err(up)?;
-        let payload = json!({
-            "mission_id": m.id,
-            "project_id": project.id,
-            "project": project.label,
-            "cwd": project.path,
-            "text": text,
-            "delivery_mode": m.delivery_mode,
-            "executor_kind": m.executor_kind,
-            "on_5h_limit": m.on_5h_limit,
-            "max_rounds": m.max_rounds,
-        });
-        crate::supervisor::store::push_inbox(&app.db, &format!("mission:{}:created", m.id), "mission_created", None, None, None, &payload)
+        emit(&app, &m).await;
+    } else {
+        // 重送也補推一次：交易上線以前寫一半的舊列（任務在、通知不在）靠這裡補回來。
+        // event_key 相同，已經有的（含已 ack 的）不會多一筆、不會再叫醒誰。
+        crate::supervisor::store::push_inbox(&app.db, &format!("mission:{}:created", m.id), "mission_created", None, None, None, &payload_of(&m))
             .await
             .map_err(up)?;
-        emit(&app, &m).await;
     }
     let mut out = m.json();
     out["created"] = created.into();
@@ -986,6 +992,52 @@ mod tests {
             .fetch_all(&app.db)
             .await
             .unwrap()
+    }
+
+    /// 建任務、instruction、`mission_created` 一次交易；重送不多寫一筆，但會補推寫一半的舊列漏掉的通知（review 2026-09-16）。
+    #[tokio::test]
+    async fn a_resent_mission_announces_itself_once_even_if_the_first_write_was_cut_short() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let pid = env.project_id.clone();
+        let count = |kind: &'static str, id: String| {
+            let app = app.clone();
+            async move {
+                let n: i64 = if kind == "instruction" {
+                    sqlx::query_scalar("SELECT COUNT(*) FROM mission_events WHERE mission_id=? AND kind='instruction'").bind(&id).fetch_one(&app.db).await.unwrap()
+                } else {
+                    sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE event_key=?").bind(format!("mission:{id}:created")).fetch_one(&app.db).await.unwrap()
+                };
+                n
+            }
+        };
+
+        let Json(first) = post_mission(State(app.clone()), Path(pid.clone()), Json(new_mission("once", "pr"))).await.unwrap();
+        let id = first["id"].as_str().unwrap().to_string();
+        assert_eq!(first["created"], true);
+        let Json(again) = post_mission(State(app.clone()), Path(pid.clone()), Json(new_mission("once", "pr"))).await.unwrap();
+        assert_eq!((again["created"].as_bool(), again["id"].as_str()), (Some(false), Some(id.as_str())));
+        assert_eq!((count("instruction", id.clone()).await, count("inbox", id.clone()).await), (1, 1), "重送不多寫");
+
+        // 舊程式寫一半：任務列在、instruction 與通知都沒寫進去（三個各自 await 的語句之間掛掉）。
+        let (half, created) = store::create(
+            &app.db,
+            &store::NewMission { project_id: &pid, client_request_id: "half", text: "寫一半的任務", delivery_mode: "pr",
+                                 executor_kind: "claude", on_5h_limit: "switch", max_rounds: 2, parent_mission_id: None },
+        )
+        .await
+        .unwrap();
+        assert!(created);
+        assert_eq!(count("inbox", half.id.clone()).await, 0);
+        let Json(resent) = post_mission(State(app.clone()), Path(pid.clone()), Json(new_mission("half", "pr"))).await.unwrap();
+        assert_eq!(resent["created"], false);
+        assert_eq!(count("inbox", half.id.clone()).await, 1, "重送補推 mission_created，AGM 才知道有這件事");
+        let payload: String = sqlx::query_scalar("SELECT payload_json FROM supervisor_inbox WHERE event_key=?")
+            .bind(format!("mission:{}:created", half.id))
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert!(payload.contains("寫一半的任務"), "通知帶的是那筆任務自己的內容：{payload}");
     }
 
     /// 完成的任務可以被追問，而追問**不能**改變任何交付事實。這是「已完成清單不可覆寫」的底線。
