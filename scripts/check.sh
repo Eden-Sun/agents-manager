@@ -4,7 +4,7 @@
 #   scripts/check.sh            # OB + web + daemon
 #   scripts/check.sh web        # bun install --frozen-lockfile、tsc、oxlint、bun test、vite build
 #   scripts/check.sh daemon     # cargo test -p agents-managerd（要先有 web/dist）
-#   scripts/check.sh ob         # OB queue/operator 與瀏覽器契約（隔離，不用登入）
+#   scripts/check.sh ob         # 沒有被追蹤的 bytecode；OB queue/operator 與瀏覽器契約（隔離，不用登入）
 #   scripts/check.sh fmt        # cargo fmt --check（只報告，現況不乾淨）
 #   scripts/check.sh clippy     # cargo clippy（只報告，現況不乾淨）
 #   scripts/check.sh all        # 以上全部
@@ -49,6 +49,15 @@ check_daemon() {
 }
 
 check_ob() {
+    step "repo: 沒有被追蹤的 Python bytecode"
+    # 各 bot 在自己的 worktree 跑 python 測試就會改寫 __pycache__；被追蹤的話，git status 會出現
+    # 一筆「別人的改動」，還會被誤帶進 commit。.gitignore 已經擋，這裡擋已經被 add 進去的。
+    local tracked
+    tracked="$(git ls-files -- '*.pyc' '*__pycache__*')"
+    if [ -n "$tracked" ]; then
+        printf '這些 bytecode 被 git 追蹤，請 git rm --cached：\n%s\n' "$tracked" >&2
+        exit 1
+    fi
     step "OB: queue/operator contracts"
     python3 -B scripts/ob_test.py
     step "OB: browser transport contracts"
