@@ -10,8 +10,8 @@ import { rawTransport } from './index'
 import { ApiError } from './types'
 import { pendingRebuilds, type RebuildRequest } from '../lib/rebuildCount'
 
-/** daemon 還沒有「門檻是多少」的欄位，所以前端也用 5（見 docs/UI-DECISIONS.md）。 */
-export const REBUILD_THRESHOLD = 5
+/** daemon 還沒有「門檻是多少」的欄位，所以前端也寫死同一個值（見 docs/UI-DECISIONS.md）。 */
+export const REBUILD_THRESHOLD = 3
 
 /** 最早一筆申請等超過這麼多分鐘也不等整點（`AGM_REBUILD_MAX_WAIT_MIN`，使用者 2026-09-15）。 */
 export const REBUILD_MAX_WAIT_MIN = 30

@@ -299,12 +299,33 @@ check "舊部署照常派工" "已派工" "$AGM_DIR/daemon-update.log"
 teardown
 
 echo "----"
+# 7b. 預設門檻是 3（使用者 2026-09-16 從 5 降下來）：兩筆還要等整點，第三筆一到就不等。
+setup
+export AGM_TEST_MINUTE="37"
+two='{"id":"a1","purpose":"rebuild","status":"pending","requester":"bot-1","target_commit":"c1","created_at":"2099-01-01T00:00:00.000Z"},
+  {"id":"a2","purpose":"rebuild","status":"pending","requester":"bot-2","target_commit":"c1","created_at":"2099-01-01T00:00:00.000Z"}'
+export STUB_APPROVAL_LIST="{\"approvals\":[$two]}"
+bash "$SCRIPT"
+check "兩筆還不夠" "非整點且重建申請只有 2/3" "$AGM_DIR/daemon-update.log"
+check_no "兩筆不會去拿窗口" "lease acquire" "$AGM_DIR/calls.log"
+teardown
+
+setup
+export AGM_TEST_MINUTE="37"
+export STUB_APPROVAL_LIST="{\"approvals\":[{\"id\":\"ap-1\",\"status\":\"approved\"},$two,
+  {\"id\":\"a3\",\"purpose\":\"rebuild\",\"status\":\"pending\",\"requester\":\"bot-3\",\"target_commit\":\"c2\",\"created_at\":\"2099-01-01T00:00:00.000Z\"}]}"
+bash "$SCRIPT"
+check "第三筆就不等整點" "重建申請 3/3，不等整點" "$AGM_DIR/daemon-update.log"
+check "照樣派工" "已派工 agm-daemon-update-" "$AGM_DIR/daemon-update.log"
+teardown
+
+echo "----"
 # 8. 非整點又沒有累積夠的重建申請：整輪跳過，連 fetch 之後的判斷都不做（使用者 2026-09-14）。
 setup
 export AGM_TEST_MINUTE="37"
 export STUB_APPROVAL_LIST='{"approvals":[]}'
 bash "$SCRIPT"
-check "非整點且請求不足就不檢查" "非整點且重建申請只有 0/5" "$AGM_DIR/daemon-update.log"
+check "非整點且請求不足就不檢查" "非整點且重建申請只有 0/3" "$AGM_DIR/daemon-update.log"
 check_no "不會申請核准" "approval request" "$AGM_DIR/calls.log"
 check_no "不會去拿窗口" "lease acquire" "$AGM_DIR/calls.log"
 teardown
@@ -324,7 +345,7 @@ export STUB_APPROVAL_LIST='{"approvals":[
   {"id":"a8","purpose":"rebuild","status":"denied","requester":"bot-8","target_commit":"c8","created_at":"2099-01-01T00:00:00.000Z"}
 ]}'
 bash "$SCRIPT"
-check "集滿門檻就不等整點" "重建申請 5/5，不等整點" "$AGM_DIR/daemon-update.log"
+check "集滿門檻就不等整點" "重建申請 5/3，不等整點" "$AGM_DIR/daemon-update.log"
 check "照樣派工" "已派工 agm-daemon-update-" "$AGM_DIR/daemon-update.log"
 teardown
 
@@ -352,7 +373,7 @@ export STUB_APPROVAL_LIST='{"approvals":[
   {"id":"a5","purpose":"rebuild","status":"pending","requester":"bot-5","target_commit":"c1","created_at":"2000-01-01T00:00:00.000Z"}
 ]}'
 bash "$SCRIPT"
-check "上次上線之前的申請不算" "非整點且重建申請只有 0/5" "$AGM_DIR/daemon-update.log"
+check "上次上線之前的申請不算" "非整點且重建申請只有 0/3" "$AGM_DIR/daemon-update.log"
 teardown
 
 # 12. 申請沒湊滿，但最早一筆已經等超過 30 分鐘：不等整點（使用者 2026-09-15）。
@@ -373,7 +394,7 @@ export AGM_TEST_MINUTE="37"
 now_iso=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
 export STUB_APPROVAL_LIST="{\"approvals\":[{\"id\":\"a1\",\"purpose\":\"rebuild\",\"status\":\"pending\",\"requester\":\"bot-1\",\"target_commit\":\"c1\",\"created_at\":\"$now_iso\"}]}"
 bash "$SCRIPT"
-check "剛建立的申請不觸發" "非整點且重建申請只有 1/5（最早一筆等了 0 分鐘）" "$AGM_DIR/daemon-update.log"
+check "剛建立的申請不觸發" "非整點且重建申請只有 1/3（最早一筆等了 0 分鐘）" "$AGM_DIR/daemon-update.log"
 check_no "不會去拿窗口" "lease acquire" "$AGM_DIR/calls.log"
 teardown
 
@@ -384,7 +405,7 @@ export STUB_APPROVAL_LIST='{"approvals":[
   {"id":"a1","purpose":"rebuild","status":"pending","requester":"bot-1","target_commit":"c1","created_at":"2000-01-01T00:00:00.000Z"}
 ]}'
 bash "$SCRIPT"
-check "等待上限可以調大" "非整點且重建申請只有 1/5" "$AGM_DIR/daemon-update.log"
+check "等待上限可以調大" "非整點且重建申請只有 1/3" "$AGM_DIR/daemon-update.log"
 teardown
 
 echo "$PASS passed, $FAIL failed"
