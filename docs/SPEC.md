@@ -425,7 +425,9 @@ stall watchdog 的自動補送走同一條驗證路徑，次數記在 `turns.res
 3. 對帳（§6.5）。
 4. 建全域事件連線與各 active Run 的狀態連線。
 5. 每個 bot 重放 spool。
-6. `autostart = true` 且無 active Run 的 bot 走 §6.2。
+6. `autostart = true` 且無 active Run 的 bot 走 §6.2。**每台主機在這顆 daemon 的一生只跑一次，而且要那台的對帳成功**：
+   本機在開機對帳之後；遠端在那台連上並對帳成功之後（`reconcile::autostart_after_reconcile`）。對帳失敗那次不算數、下次連上再試；
+   ssh 斷線重連不再跑——`stop` 不改 `autostart`，使用者停掉的 bot 不能因為筆電睡醒重連就被重開（review 2026-09-16 core 5）。
 
 ### 6.2 啟動 Bot（per-bot 鎖內）
 1. `INSERT runs (state='starting')`；違反 active Run 唯一索引 → 409 附既有 `run_id`。

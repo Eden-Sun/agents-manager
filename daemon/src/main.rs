@@ -211,9 +211,13 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     app.hosts.apply_config(&app, &cfg.hosts).await;
 
     // §6.1.3 reconcile, §6.1.4 event connections, §6.1.5 spool replay, §6.1.6 autostart.
-    if let Err(e) = reconcile::reconcile_host(&app, config::LOCAL_HOST).await {
-        tracing::error!(error = ?e, "initial reconcile failed");
-    }
+    let local_reconciled = match reconcile::reconcile_host(&app, config::LOCAL_HOST).await {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::error!(error = ?e, "initial reconcile failed");
+            false
+        }
+    };
     // Runs are adopted by now, so any Turn that outlived the restart can get its poller back.
     reconcile::rearm_progress(&app).await;
     // #61: directories of bots deleted before every deletion path purged them.
@@ -268,11 +272,10 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     panes::spawn_scanner(app.clone());
 
     {
-        // 這一輪只起得了**已經連上**的主機（實務上就是本機）：遠端要先 ssh／launchctl，量級是秒，
-        // 而這段在毫秒內就跑完了。遠端那份由 `hosts.rs` 在連上並對帳之後再跑一次
-        // （§6.1 第 6 步沒有「遠端除外」這個但書，以前卻從來沒發生過——review 2026-09-16）。
+        // 這一輪只起本機：遠端一律由 `hosts.rs` 在那台連上並對帳成功之後跑（§6.1 第 6 步沒有「遠端除外」這個但書）。
+        // 以前這裡是「全部已連上的主機」，剛好先連上、但對帳失敗的遠端會被這一輪照樣起 bot（review 2026-09-16 core 5）。
         let app2 = app.clone();
-        tokio::spawn(async move { reconcile::autostart_connected(&app2, None).await });
+        tokio::spawn(async move { reconcile::autostart_after_reconcile(&app2, config::LOCAL_HOST, local_reconciled).await });
     }
 
     let router = api::router(app.clone());

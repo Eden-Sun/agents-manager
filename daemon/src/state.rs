@@ -115,6 +115,8 @@ pub struct App {
     pub host_shells: crate::api::shell::Registry,
     /// 被 trace 的 pane 打字前的即時複查結果，幾秒內重用（`shell::live_verdict`）。
     pub pane_live: crate::api::shell::LiveCache,
+    /// 這顆 daemon 已經跑過 autostart 的主機（§6.1 第 6 步：每台主機一生一次，`reconcile::autostart_after_reconcile`）。
+    pub autostarted_hosts: Mutex<std::collections::HashSet<String>>,
     /// `serve` 起在非預設資料目錄時的實例名（`startup::instance`）。測試裡預設 `None`（正式實例）。
     instance: std::sync::RwLock<Option<String>>,
 }
@@ -173,6 +175,7 @@ impl App {
             gh_device: Mutex::new(HashMap::new()),
             host_shells: Default::default(),
             pane_live: Default::default(),
+            autostarted_hosts: Default::default(),
         })
     }
 
