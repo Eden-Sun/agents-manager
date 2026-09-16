@@ -586,7 +586,9 @@ herdr 的 CLI 說明原樣保留（升級會帶進新文字）。裝不起來只
 agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話只以 prompt 回音從 hook 回來，會跟使用者打的字長得一樣。補法同 §6.5b，做成機制：
 
 1. shim 攔 `agent prompt`：目標名 herdr 認得（`herdr agent get` 找得到：AGM、其他頂層 bot、pane id）就照原名送，找不到才當自己的子 agent 補前綴。
-   決定名字後先 `POST /relay/announce`（表單 `bot_id`／`to_agent`／`text`，header `X-AM-Bot-Token` 用該 bot 的 hook token），再轉給真的 herdr。
+   決定名字後先 `POST /relay/announce`（表單 `bot_id`／`to_agent`／`text`／`ack`／`reply_to`，header `X-AM-Bot-Token` 用該 bot 的 hook token），再轉給真的 herdr。
+   `text` 只含 TEXT 位置參數（herdr 的 `--wait`／`--until`／`--timeout` 不算）；`--ack`、`--reply-to <id>` 是 shim 自己的旗標（§18.15），送給 daemon、不轉給 herdr。
+   curl 逾時（exit 28）再問一次（15 秒）才退回直送：daemon 可能已經排進 AGM 的佇列，只是回得慢。連不上照舊直送。
    報不成功只是少一次標示；名字前面帶旗標時整串原樣轉發。
 2. daemon 把「誰要送什麼給哪個 agent」記在行程內的短命表（5 分鐘）。
 3. 回音從 hook 回來時用 run 的 `agent_name` 認領：忽略所有空白（TUI 任意折行），長度取兩邊較短者且至少 12 字元；更短就要完全一樣。
@@ -1701,7 +1703,10 @@ supervisor 相關資料表與欄位都是 additive，`db::migrate` 重跑冪等�
 - **表上的名字就是寫入端的名字**：每一種寫進 inbox 的 kind 都要有**明寫**的分支（`roles::known_route`），測試從原始碼撈出所有寫入點（`push_inbox`、`settle_and_notify`、SQL 裡寫死的 kind）逐一核對。
   以前表上寫 `quota_blocked`／`quota_resumed`，寫入端寫的卻是 `assignment_quota_*`，每一次撞限與恢復都落到預設、叫醒巡檢（review 2026-09-16）。
 - **只記錄、不叫醒**（`wake=0`）：`assignment_noticed`、`assignment_queued`、`assignment_quota_blocked`／`assignment_quota_resumed`、`incident_resolved`、巡檢與協調者兩半都 `healthy` 的 `health_changed`、
-  bot 對通知型交辦（`--notice`）的回覆、角色之間在同一次喚醒回合裡的回信。它們跟下一次有事的喚醒一起送，自己不開回合。
+  寄件端**明講**是回覆的 `bot_request`（`--ack`，或 `--reply-to <id>` 對得上一則跟寄件者有關的 inbox 事件或派給它的交辦）。它們跟下一次有事的喚醒一起送，自己不開回合。
+  **不從「寄件時在哪種回合」推斷**（review 2026-09-16 H1）：以前 bot 在通知型交辦的回合裡、或角色在收到對方那一批的回合裡送出的一律當回覆，
+  「已核准可以建置」回合裡接著送的「建置完成，請核准重啟」、協調者交接回巡檢的「要使用者裁示」都被標成只記錄而吞掉。沒標記、或 `reply_to` 對不上的一律叫醒；
+  角色之間的回信迴圈靠 persona 要求回信帶 `--ack`／`--reply-to`，以及兩邊各自的喚醒節流（巡檢 600 秒、協調者短窗批次）收斂。
 - **巡檢送前合併**：還沒送出的 `health_changed` 只留最新一筆；同一個 incident 在送出前就開了又恢復，兩筆一起結案（`acked_by=daemon`）。
 - **bot 找 AGM**：`POST /api/bots/{巡檢或協調者}/prompt` 帶 `relay_from=<bot>`、或 pane 裡 `herdr agent prompt <AGM>`（shim 先打 `/relay/announce`），
   協調者建立後都**不開回合**：寫成 `bot_request`（202，`routed`），shim 看到 `routed` 就不打進 pane。

@@ -674,7 +674,7 @@ fn digest(events: &[store::InboxEvent]) -> String {
     let mut s = String::from(
         "[AG Man 協調通知] 以下是 bot 的申請與你追蹤中的事件（已依 event_key 去重、同一段時間合併成一次）。\n\
          處理完用 `bin/agm ack <event_id>`。回覆 bot 用 `bin/agm assign --notice --bot <bot_id> --request-id <穩定id> --text …`；\
-         純告知（「收到」）不必回，對方回你的 ack 也不會再叫醒你。\n\
+         純告知（「收到」）不必回。標「只記錄」的是對方明講的回覆（--ack／--reply-to），沒標的都是新的事；你回巡檢只是告知時加 `--ack`。\n\
          交辦結果要看證據後 `bin/agm review`；核准用 `bin/agm approval decide`。系統故障與使用者對話是巡檢 AGM 的事，不在這裡。\n",
     );
     for e in events {
@@ -1062,7 +1062,7 @@ mod flow_tests {
     async fn an_out_of_quota_responder_keeps_its_requests_and_patrol_never_gets_them() {
         let app = fx::app().await;
         fx::configure_responder(&app).await;
-        bot_requests::intercept(&app, "patrol", "w1", "請核准重建", Some("r1"), &[], true, "api").await.unwrap().unwrap();
+        bot_requests::intercept(&app, "patrol", "w1", "請核准重建", Some("r1"), &[], true, "api", bot_requests::ReplyMark::default()).await.unwrap().unwrap();
         age_everything(&app).await;
         sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,started_at) VALUES ('run-r','resp','running','idle',?)")
             .bind(crate::db::now())
@@ -1133,7 +1133,7 @@ mod flow_tests {
         let app = fx::app().await;
         fx::configure_responder(&app).await;
         sqlx::query("UPDATE bots SET identity='cc1' WHERE id='resp'").execute(&app.db).await.unwrap();
-        bot_requests::intercept(&app, "patrol", "w1", "請核准重建", Some("r1"), &[], true, "api").await.unwrap().unwrap();
+        bot_requests::intercept(&app, "patrol", "w1", "請核准重建", Some("r1"), &[], true, "api", bot_requests::ReplyMark::default()).await.unwrap().unwrap();
         age_everything(&app).await;
         sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,started_at) VALUES ('run-r','resp','running','idle',?)")
             .bind(crate::db::now())
@@ -1307,7 +1307,7 @@ mod flow_tests {
     async fn a_blocked_responder_does_not_push_its_retry_time_every_tick() {
         let app = fx::app().await;
         fx::configure_responder(&app).await;
-        bot_requests::intercept(&app, "patrol", "w1", "請核准重建", Some("r1"), &[], true, "api").await.unwrap().unwrap();
+        bot_requests::intercept(&app, "patrol", "w1", "請核准重建", Some("r1"), &[], true, "api", bot_requests::ReplyMark::default()).await.unwrap().unwrap();
         age_everything(&app).await;
         app.quotas.lock().await.insert("claude:cc0".into(), blocked());
 
@@ -1358,7 +1358,7 @@ mod flow_tests {
     async fn a_stopped_responder_leaves_everything_pending_across_a_daemon_restart() {
         let app = fx::app().await;
         fx::configure_responder(&app).await;
-        bot_requests::intercept(&app, "patrol", "w1", "請協調 ownership", Some("r2"), &[], true, "api").await.unwrap().unwrap();
+        bot_requests::intercept(&app, "patrol", "w1", "請協調 ownership", Some("r2"), &[], true, "api", bot_requests::ReplyMark::default()).await.unwrap().unwrap();
         age_everything(&app).await;
         notify(&app).await; // 沒有 run：不送、不改狀態
         let db_path = app.data_dir.join("test.sqlite");

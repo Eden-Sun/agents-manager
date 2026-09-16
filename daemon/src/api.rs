@@ -215,6 +215,11 @@ struct RelayAnnounce {
     bot_id: String,
     to_agent: String,
     text: String,
+    /// shim 的 `--ack`（`1`）／`--reply-to <id>`：寄件端明講是回覆才不叫醒 AGM（SPEC §18.15）。
+    #[serde(default)]
+    ack: Option<String>,
+    #[serde(default)]
+    reply_to: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -263,7 +268,11 @@ async fn relay_announce(
     }
     // 寫給 AGM 的：協調者存在時排進它的佇列，shim 看到 `routed` 就不再打進 pane（SPEC §18.15）。
     if let Ok(Some(target)) = crate::supervisor::bot_requests::role_bot_by_agent(&app, &body.to_agent).await {
-        match crate::supervisor::bot_requests::intercept(&app, &target, &body.bot_id, &body.text, None, &[], true, "herdr_shim").await {
+        let mark = crate::supervisor::bot_requests::ReplyMark {
+            ack: matches!(body.ack.as_deref().map(str::trim), Some("1" | "true")),
+            reply_to: body.reply_to.as_deref(),
+        };
+        match crate::supervisor::bot_requests::intercept(&app, &target, &body.bot_id, &body.text, None, &[], true, "herdr_shim", mark).await {
             Ok(Some(v)) => return (StatusCode::OK, Json(v)),
             Ok(None) => {}
             Err(e) => tracing::warn!(error = ?e, "could not queue a bot request for AGM; falling back to the pane"),
@@ -2243,6 +2252,12 @@ struct PromptIn {
     /// 2026-09-12 使用者：「就連 AGM 自己的 message 也要區分是由 daemon 觸發而非 user」。
     #[serde(default)]
     relay_from: Option<String>,
+    /// bot 寫給 AGM 時明講「這是回覆」：`ack`（純告知）或 `reply_to`（回哪一則事件／交辦）。
+    /// 都沒帶 = 新的事，叫醒協調者（SPEC §18.15）。
+    #[serde(default)]
+    ack: bool,
+    #[serde(default)]
+    reply_to: Option<String>,
 }
 
 async fn prompt_bot(
@@ -2266,7 +2281,8 @@ async fn prompt_bot(
     if let Some(from) = relay_from.as_deref().filter(|f| *f != crate::agent_relay::DAEMON_SENDER) {
         let token = headers.get("X-AM-Bot-Token").and_then(|v| v.to_str().ok());
         let verified = crate::supervisor::bot_requests::sender_verified(&app, token, from).await;
-        let queued = crate::supervisor::bot_requests::intercept(&app, &id, from, &b.text, given_crid.as_deref(), &b.attachments, verified, "api");
+        let mark = crate::supervisor::bot_requests::ReplyMark { ack: b.ack, reply_to: b.reply_to.as_deref() };
+        let queued = crate::supervisor::bot_requests::intercept(&app, &id, from, &b.text, given_crid.as_deref(), &b.attachments, verified, "api", mark);
         if let Some(v) = queued.await? {
             return Ok((StatusCode::ACCEPTED, Json(v)).into_response());
         }
@@ -3269,7 +3285,7 @@ mod prompt_route_tests {
     }
 
     async fn call(e: &crate::testing::Env, bot: &str, text: String, crid: &str) -> (StatusCode, Value) {
-        let body = PromptIn { text, client_request_id: Some(crid.into()), attachments: vec![], relay_from: None };
+        let body = PromptIn { text, client_request_id: Some(crid.into()), attachments: vec![], relay_from: None, ack: false, reply_to: None };
         let resp = match prompt_bot(State(e.app.clone()), Path(bot.to_string()), HeaderMap::new(), Json(body)).await {
             Ok(r) => r,
             Err(err) => err.into_response(),
