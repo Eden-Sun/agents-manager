@@ -149,7 +149,9 @@ pub async fn dispatch(app: &Arc<App>, assignment_id: &str) {
         tracing::warn!(assignment = %a.id, "holding the assignment: the supervisor has no bot to attribute it to");
         return;
     };
-    match lifecycle::prompt_relayed(app, &a.target_bot_id, &a.text, &a.dispatch_crid(), &[], Some(&from)).await {
+    // 對方回合中就排隊，不要每五分鐘賭一次它剛好在兩個回合之間（AGM 2026-09-16 裁示）。
+    // 只有這條派工路徑排隊；使用者與 web 的 `/prompt` 維持 409。
+    match lifecycle::prompt_relayed_queueable(app, &a.target_bot_id, &a.text, &a.dispatch_crid(), Some(&from)).await {
         Ok(out) => {
             // `failed` from the CLI itself is terminal; `unknown` means we do not know whether
             // it landed, and is reconciled against the turn rather than re-sent.
@@ -157,7 +159,13 @@ pub async fn dispatch(app: &Arc<App>, assignment_id: &str) {
                 dispatch_failed(app, &a, "delivery failed").await;
                 return;
             }
+            // `queued` 也記成 delivered（turn 已經存在、id 已經綁定）：回合結束時 queue flush 會送出，
+            // 之後的完成事件照舊對得上這筆交辦。等太久沒送出由 `block_stale_queues` 收尾。
             let _ = store::mark_delivered(&app.db, &a.id, &out.turn_id, &out.delivery).await;
+            if out.delivery == "queued" {
+                tracing::info!(assignment = %a.id, bot = %a.target_bot_id, turn = %out.turn_id,
+                               "對方回合中：交辦排進佇列，等它回合結束再送");
+            }
             app.emit("supervisor_changed", json!({"assignment_id": a.id, "status": "delivered"})).await;
         }
         // A busy bot, an in-flight turn, a bot that is not running: all temporary, all keep
@@ -618,6 +626,50 @@ async fn sweep_missing_events(app: &Arc<App>) {
     }
 }
 
+/// 排進佇列但等太久還沒送出的交辦：停在 `blocked` 並通知 AGM 一次，不要無聲排下去（AGM 2026-09-16）。
+///
+/// 只看「turn 還停在 `queued`」的那些：一旦 queue flush 送出去，turn 會變成 in_flight／完成，
+/// 這條就不再管它。等待上限 `[supervisor] assignment_queue_wait_secs`（預設 30 分鐘）。
+async fn block_stale_queues(app: &Arc<App>) {
+    let limit = app.cfg.get().await.supervisor.assignment_queue_wait_secs as i64;
+    let Ok(open) = store::open_assignments(&app.db).await else { return };
+    for a in open {
+        if a.status != "delivered" || a.delivery.as_deref() != Some("queued") {
+            continue;
+        }
+        let Some(turn_id) = a.turn_id.clone() else { continue };
+        let Ok(Some((status, created_at))) = sqlx::query_as::<_, (String, String)>("SELECT status, created_at FROM turns WHERE id=?")
+            .bind(&turn_id)
+            .fetch_optional(&app.db)
+            .await
+        else {
+            continue;
+        };
+        if status != "queued" {
+            continue;
+        }
+        let waited = chrono::DateTime::parse_from_rfc3339(&created_at)
+            .ok()
+            .map(|t| (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_seconds())
+            .unwrap_or(0);
+        if waited < limit {
+            continue;
+        }
+        let why = format!("排進佇列等了 {} 分鐘，對方一直沒有回合結束的空檔，沒有送出", waited / 60);
+        match store::block_stale_queue(&app.db, &a.id, &why).await {
+            Ok(true) => {
+                tracing::warn!(assignment = %a.id, bot = %a.target_bot_id, waited_s = waited, "排隊太久，交辦停在 blocked");
+                let payload = json!({"bot_id": a.target_bot_id, "turn_id": turn_id, "waited_s": waited, "error": why, "needs_review": true});
+                let key = format!("queue_blocked:{}:{}", a.id, turn_id);
+                let _ = store::push_inbox(&app.db, &key, "assignment_failed", Some(&a.id), Some(&a.target_bot_id), Some(&turn_id), &payload).await;
+                app.emit("supervisor_changed", json!({"assignment_id": a.id, "status": "blocked"})).await;
+            }
+            Ok(false) => {}
+            Err(e) => tracing::warn!(assignment = %a.id, error = ?e, "could not block a stale queued assignment"),
+        }
+    }
+}
+
 /// Offer every due queued assignment again.
 async fn drain_queue(app: &Arc<App>) {
     // A hold whose window is no longer held (released by any path, or expired) is not a reason
@@ -1048,6 +1100,7 @@ pub fn spawn(app: Arc<App>, generation: i64) {
                     }
                     reconcile(&app).await;
                     resume_quota_blocked(&app).await;
+                    block_stale_queues(&app).await;
                     drain_queue(&app).await;
                     // Before pushing anything new: give back the notifications that went out
                     // and were never answered. A delivered event nobody acked is still owed.
@@ -1674,5 +1727,94 @@ mod no_grace_period_tests {
         let still = store::assignment(&app.db, &a.id).await.unwrap().unwrap();
         assert_eq!(still.status, "queued");
         assert!(still.next_attempt_at.is_some());
+    }
+}
+
+/// 派工遇到對方回合中改成排隊（AGM 2026-09-16 裁示）：排太久要停在 `blocked`，不能無聲排下去。
+#[cfg(test)]
+mod queue_dispatch_tests {
+    use super::*;
+
+    async fn app() -> Arc<App> {
+        let dir = std::env::temp_dir().join(format!("agm-queue-dispatch-{}", crate::db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = crate::db::open(&dir.join("test.sqlite")).await.unwrap();
+        let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
+        let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
+        let app = App::new(db, client.clone(), client, cfg, dir.clone(), dir.join("daemon"), 7799, "test".into(), "test".into(), false);
+        store::get_or_init(&app.db).await.unwrap();
+        let now = crate::db::now();
+        sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES ('p','/tmp','p',?)").bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('b','p','b','claude','t',?)")
+            .bind(&now)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        app
+    }
+
+    /// 排一筆 queued turn，交辦記成 delivered/queued，turn 的建立時間可調。
+    async fn queued_assignment(app: &Arc<App>, age_secs: i64) -> store::Assignment {
+        let a = store::insert_assignment(&app.db, None, "b", "crid-q", "做這件事", &[], None, true).await.unwrap();
+        let conv = crate::db::conversation_id(&app.db, "b").await.unwrap();
+        let turn_id = crate::db::ulid();
+        let created = (chrono::Utc::now() - chrono::Duration::seconds(age_secs)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, client_request_id, created_at, prompt_text)
+             VALUES (?,?,NULL,'web','queued','pending','crid-q',?,'做這件事')",
+        )
+        .bind(&turn_id)
+        .bind(&conv)
+        .bind(&created)
+        .execute(&app.db)
+        .await
+        .unwrap();
+        store::mark_delivered(&app.db, &a.id, &turn_id, "queued").await.unwrap();
+        store::assignment(&app.db, &a.id).await.unwrap().unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_queue_that_never_flushes_ends_up_blocked_and_visible() {
+        let app = app().await;
+        // 還沒超過等待上限：不動它。
+        let fresh = queued_assignment(&app, 60).await;
+        block_stale_queues(&app).await;
+        assert_eq!(store::assignment(&app.db, &fresh.id).await.unwrap().unwrap().status, "delivered");
+
+        // 超過上限（預設 30 分鐘）：停在 blocked，並留下理由與一則通知給 AGM。
+        sqlx::query("UPDATE turns SET created_at=? WHERE client_request_id='crid-q'")
+            .bind((chrono::Utc::now() - chrono::Duration::minutes(45)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+            .execute(&app.db)
+            .await
+            .unwrap();
+        block_stale_queues(&app).await;
+        let a = store::assignment(&app.db, &fresh.id).await.unwrap().unwrap();
+        assert_eq!(a.status, "blocked");
+        assert!(a.error.unwrap_or_default().contains("排進佇列"), "理由要說得出是排隊排不出去");
+        let events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE assignment_id=?")
+            .bind(&a.id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(events, 1, "AGM 看得到");
+
+        // 已經 blocked 的不會被重複處理。
+        block_stale_queues(&app).await;
+        let again: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE assignment_id=?")
+            .bind(&a.id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(again, 1);
+    }
+
+    /// turn 已經被 flush 出去（不再是 queued）就不歸這條管。
+    #[tokio::test]
+    async fn a_queue_that_flushed_in_time_is_left_alone() {
+        let app = app().await;
+        let a = queued_assignment(&app, 3600).await;
+        sqlx::query("UPDATE turns SET status='in_flight' WHERE client_request_id='crid-q'").execute(&app.db).await.unwrap();
+        block_stale_queues(&app).await;
+        assert_eq!(store::assignment(&app.db, &a.id).await.unwrap().unwrap().status, "delivered");
     }
 }

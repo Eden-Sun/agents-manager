@@ -1350,6 +1350,23 @@ pub async fn settle_and_notify(
 /// controller 屆時用下一個 `#r<n>` 重送。之所以要單獨一個狀態而不是塞回 `queued`，是因為
 /// queued 每 10 秒就會被試一次——撞上限的帳號會被一路重試到 backoff 用完，然後變成
 /// `dispatch_failed`，工作就這樣無聲斷掉（2026-09-12 codex-astra 三次都是這樣）。
+/// 排進佇列後等太久還沒送出：停在 `blocked` 並留下理由，讓 AGM 看得到（AGM 2026-09-16）。
+/// 只動 `delivered` 的列（就是排隊中的那些），回 true = 這次真的把它擋下了。
+pub async fn block_stale_queue(pool: &SqlitePool, id: &str, why: &str) -> Result<bool> {
+    let moved = sqlx::query(
+        "UPDATE supervisor_assignments SET status='blocked', error=?, updated_at=?
+          WHERE id=? AND status='delivered'",
+    )
+    .bind(why)
+    .bind(crate::db::now())
+    .bind(id)
+    .execute(pool)
+    .await?
+    .rows_affected()
+        > 0;
+    Ok(moved)
+}
+
 pub async fn park_quota_blocked(
     pool: &SqlitePool,
     id: &str,

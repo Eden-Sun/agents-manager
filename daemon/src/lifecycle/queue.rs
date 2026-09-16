@@ -292,9 +292,12 @@ where
 
 /// Queued prompts waiting out a backoff, one entry per bot (its soonest), with the time left.
 pub(crate) async fn pending_queue_retries(app: &Arc<App>) -> anyhow::Result<Vec<(String, std::time::Duration)>> {
+    // `next_flush_at IS NULL` 的也要收：AGM 派工排進來的 queued turn 沒有退避時間，靠回合結束的事件送出；
+    // daemon 重啟時那個事件早就過去了，不補一次就變成永遠不會送的孤兒（AGM 2026-09-16）。
     let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT c.bot_id, t.next_flush_at FROM turns t JOIN conversations c ON c.id = t.conversation_id
-          WHERE t.status = 'queued' AND t.next_flush_at IS NOT NULL",
+        "SELECT c.bot_id, COALESCE(t.next_flush_at, '1970-01-01T00:00:00Z')
+           FROM turns t JOIN conversations c ON c.id = t.conversation_id
+          WHERE t.status = 'queued'",
     )
     .fetch_all(&app.db)
     .await?;
@@ -847,6 +850,31 @@ mod flush_queue_tests {
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
         assert_eq!(turn(&app, &f.turn_id).await.status, "queued");
         assert_eq!(f.env.herdr.methods().iter().filter(|m| m.starts_with("pane.send")).count(), 0);
+    }
+
+    /// AGM 派工排進來的 queued turn 沒有 `next_flush_at`（靠回合結束的事件送）。daemon 重啟後那個事件不會再來，
+    /// 所以重啟掃描也要收它，不然就是永遠不會送的孤兒（AGM 2026-09-16）。
+    #[tokio::test]
+    async fn a_queued_turn_without_a_backoff_is_still_rearmed_after_a_restart() {
+        let f = queued_kind("grok", "test").await;
+        let app = f.env.app.clone();
+        sqlx::query("UPDATE turns SET status='queued', run_id=NULL, next_flush_at=NULL, prompt_text='AGM 派的工作' WHERE id=?")
+            .bind(&f.turn_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        forget_queue_retry_timer(&f.bot_id);
+        let fired = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = fired.clone();
+        let armed = rearm_queue_retries_with(&app, move |bot: String| seen.lock().unwrap().push(bot)).await;
+        assert_eq!(armed, 1, "沒有 next_flush_at 的 queued turn 也要重新掛上");
+        for _ in 0..40 {
+            if !fired.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert_eq!(fired.lock().unwrap().as_slice(), &[f.bot_id.clone()], "立刻補一次 flush");
     }
 
     /// 真的「重啟」：同一個 DB 開一個新的 App，走啟動時真正呼叫的 `reconcile::rearm_progress`，timer 被接回來。
