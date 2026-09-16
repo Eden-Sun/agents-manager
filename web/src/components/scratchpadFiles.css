@@ -7,6 +7,17 @@
   flex-direction: column;
   gap: 4px;
   min-height: 0;
+  /* 檔案一多（兩三百個）整欄會被它吃掉，上半段的暫存就看不到了：最高佔暫存欄的 60%，其餘在清單裡捲
+     （使用者 2026-09-16）。 */
+  flex: 0 1 auto;
+  max-height: 60%;
+}
+
+/* 窄螢幕的暫存區只有 `max-height: 46vh`，不是確定的高度，百分比會失效：直接換算成同一個 60%。 */
+@media (width <= 1024px) {
+  .sp-files {
+    max-height: calc(46vh * 0.6);
+  }
 }
 
 .sp-head {
@@ -42,6 +53,7 @@
   flex-direction: column;
   gap: 2px;
   overflow-y: auto;
+  min-height: 0;
 }
 
 .sp-file {
