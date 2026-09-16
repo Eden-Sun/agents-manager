@@ -147,6 +147,24 @@ pub fn host_of_key<'a>(key: &'a str, hosts: &[String]) -> (&'a str, &'a str) {
     }
 }
 
+/// 每台主機各跑一份、**同時**跑，全部跑完才回來（SPEC §14.3）。以前三個 poller 都是 `for host in …` 一台一台 await：
+/// `probe_lock` 是 per host，本意就是「一台慢的 ssh 主機不拖住本機」，串列迴圈下這層保護等於沒有（review 2026-09-16）。
+pub async fn for_each_host<F, Fut>(hosts: Vec<String>, f: F)
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let mut set = tokio::task::JoinSet::new();
+    for host in hosts {
+        set.spawn(f(host));
+    }
+    while let Some(res) = set.join_next().await {
+        if let Err(e) = res {
+            tracing::warn!(error = %e, "a per-host quota poll task failed");
+        }
+    }
+}
+
 pub async fn pollable_hosts(app: &Arc<App>) -> Vec<String> {
     app.hosts
         .list()
@@ -710,19 +728,23 @@ pub fn spawn_codex_poller(app: Arc<App>) {
             if ask_server {
                 last_server = Some(std::time::Instant::now());
             }
-            for host in pollable_hosts(&app).await {
-                if ask_server {
-                    match refresh_codex(&app, &host).await {
-                        Ok(true) => {}
-                        Ok(false) => tracing::info!(host = %host, "codex not installed; codex quota stays null"),
-                        Err(e) => tracing::warn!(host = %host, error = %e, "codex quota refresh failed"),
+            for_each_host(pollable_hosts(&app).await, |host| {
+                let app = app.clone();
+                async move {
+                    if ask_server {
+                        match refresh_codex(&app, &host).await {
+                            Ok(true) => {}
+                            Ok(false) => tracing::info!(host = %host, "codex not installed; codex quota stays null"),
+                            Err(e) => tracing::warn!(host = %host, error = %e, "codex quota refresh failed"),
+                        }
+                    }
+                    let n = refresh_codex_from_panes(&app, &host).await;
+                    if n > 0 {
+                        tracing::debug!(host = %host, panes = n, "codex quota read off the status line");
                     }
                 }
-                let n = refresh_codex_from_panes(&app, &host).await;
-                if n > 0 {
-                    tracing::debug!(host = %host, panes = n, "codex quota read off the status line");
-                }
-            }
+            })
+            .await;
             tokio::time::sleep(CODEX_PANE_POLL).await;
         }
     });
@@ -1086,6 +1108,22 @@ mod tests {
         assert_eq!(q.source, "codex-statusline", "來源分得出來");
         assert_eq!(q.five_hour.as_ref().unwrap().used_pct, 10.0);
         assert!(q.limit_hit.is_some(), "撞上限那一格要留著");
+    }
+
+    /// SPEC §14.3：同輪各主機併發。兩台都要等對方到齊才放行——串列跑就會卡到逾時。
+    #[tokio::test]
+    async fn hosts_are_polled_at_the_same_time() {
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let done = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let run = for_each_host(vec!["local".into(), "m4p".into()], |_host| {
+            let (barrier, done) = (barrier.clone(), done.clone());
+            async move {
+                barrier.wait().await;
+                done.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), run).await.expect("一台一台跑會卡在 barrier");
+        assert_eq!(done.load(std::sync::atomic::Ordering::SeqCst), 2, "全部跑完才回來");
     }
 
     #[test]

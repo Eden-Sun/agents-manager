@@ -354,14 +354,18 @@ pub fn spawn_grok_poller(app: Arc<App>) {
     tokio::spawn(async move {
         sweep_stale(&app).await;
         loop {
-            for host in crate::quota::pollable_hosts(&app).await {
-                match refresh_grok_if_due(&app, &host).await {
-                    Ok(Some(true)) => {}
-                    Ok(Some(false)) => tracing::info!(host = %host, "grok not installed; grok quota stays null"),
-                    Ok(None) => tracing::debug!(host = %host, "grok probe skipped (logged out or cooling down)"),
-                    Err(e) => tracing::warn!(host = %host, error = %e, retry_in_s = RETRY_AFTER_FAILURE.as_secs(), "grok quota refresh failed; parking this host"),
+            crate::quota::for_each_host(crate::quota::pollable_hosts(&app).await, |host| {
+                let app = app.clone();
+                async move {
+                    match refresh_grok_if_due(&app, &host).await {
+                        Ok(Some(true)) => {}
+                        Ok(Some(false)) => tracing::info!(host = %host, "grok not installed; grok quota stays null"),
+                        Ok(None) => tracing::debug!(host = %host, "grok probe skipped (logged out or cooling down)"),
+                        Err(e) => tracing::warn!(host = %host, error = %e, retry_in_s = RETRY_AFTER_FAILURE.as_secs(), "grok quota refresh failed; parking this host"),
+                    }
                 }
-            }
+            })
+            .await;
             tokio::time::sleep(GROK_POLL).await;
         }
     });

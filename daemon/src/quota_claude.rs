@@ -854,13 +854,17 @@ pub fn spawn_claude_poller(app: Arc<App>) {
     tokio::spawn(async move {
         sweep_stale(&app).await;
         loop {
-            for host in crate::quota::pollable_hosts(&app).await {
-                match refresh_claude(&app, &host).await {
-                    Ok(true) => {}
-                    Ok(false) => tracing::info!(host = %host, "claude not installed; claude quota stays null"),
-                    Err(e) => tracing::warn!(host = %host, error = %e, "claude quota refresh failed"),
+            crate::quota::for_each_host(crate::quota::pollable_hosts(&app).await, |host| {
+                let app = app.clone();
+                async move {
+                    match refresh_claude(&app, &host).await {
+                        Ok(true) => {}
+                        Ok(false) => tracing::info!(host = %host, "claude not installed; claude quota stays null"),
+                        Err(e) => tracing::warn!(host = %host, error = %e, "claude quota refresh failed"),
+                    }
                 }
-            }
+            })
+            .await;
             tokio::time::sleep(CLAUDE_POLL).await;
         }
     });
