@@ -603,7 +603,8 @@ env 值的 `$HOME`、`${HOME}` 與開頭 `~` 展開成**該 host 的 home**。id
 ### `POST /api/identities` / `DELETE /api/identities/{name}?host=`
 - POST `{name, kind, env, args, host?}` → `200 {"name"}`；名稱或 kind 不合法 400；未知的 host `409 {"reason":"unknown host","host"}`；
   **同一台**重複 `409 {"reason":"identity name already in use","name"}`——鍵是 `(host, name)`，同名在別台是另一筆（SPEC §16.2）。`host` 省略＝不寫 host：鍵算本機，本機優先、遠端讓位給那台同名的身分；只要本機傳 `"local"`。
-- DELETE `?host=`（省略＝本機）→ `200 {}`；仍有**同一台**的 bot 綁著 `409 {"reason":"identity still used by bots","bot_id"}`。
+- DELETE `?host=`（省略＝本機）→ `200 {}`；仍有**同一台**的 bot 綁著 `409 {"reason":"identity still used by bots","bot_id","host"}`。
+  刪的是**沒寫 host** 的那筆時，遠端的 bot 也算：那台沒有自己同名的身分（config 明寫、或 shell 偵測到的 `ccN`；還沒偵測過照「沒有」算）就是在用這一筆，同樣 409。
 - WS `identities_changed {}` → 重拉 state；bot 的 identity/env 變更沿用 `bot_changed`。
 
 ### `POST /api/hosts/{name}/identities/{identity}/login`
