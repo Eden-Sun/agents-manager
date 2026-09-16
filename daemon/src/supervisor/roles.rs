@@ -195,8 +195,15 @@ fn known_route(kind: &str, payload: &Value, review_role: Option<&str>) -> Option
         "assignment_noticed" | "assignment_queued" | "assignment_quota_blocked" | "assignment_quota_resumed" => r(reviewer, false),
         "approval_requested" | "mission_created" | "mission_question" | "mission_answered" | "mission_resumed"
         | "mission_identity_switch" | "mission_paused" | "mission_cancelled" => r(Role::Responder, true),
+        // 倒下的就是巡檢自己：它的看門狗放棄、或它的通知一直送不出去（`notify_exhausted`）。送給巡檢等於
+        // 送進已知壞掉的那條路——活著的協調者才收得到（review 2026-09-16 c1 M2、L4）。反方向對稱：
+        // 協調者倒了是 `responder_watchdog_gave_up` 給巡檢。協調者沒建立時巡檢的 `due_for` 照樣撈得到。
+        "watchdog_gave_up" => r(Role::Responder, true),
+        "incident_opened" | "incident_resolved" if payload.pointer("/incident/kind").and_then(Value::as_str) == Some("notify_exhausted") => {
+            r(Role::Responder, kind == "incident_opened")
+        }
         // 系統層的故障：巡檢收、叫醒。
-        "incident_opened" | "watchdog_gave_up" | "responder_watchdog_gave_up" | "responder_bot_missing" | "bot_restart_failed"
+        "incident_opened" | "responder_watchdog_gave_up" | "responder_bot_missing" | "bot_restart_failed"
         | "supervisor_restart_retry" | "agm_cli_stale" | "pane_unowned" | "pane_orphaned" => r(Role::Patrol, true),
         // 恢復不叫醒人：開的那一筆已經叫過，關掉只要記下來。
         "incident_resolved" => r(Role::Patrol, false),
@@ -732,9 +739,15 @@ mod tests {
         }
         assert_eq!(route("assignment_undeliverable", &p, None), Route { role: Role::Responder, wake: true }, "送不進去要驗收角色決定");
         assert_eq!(route("assignment_undeliverable", &p, Some("patrol")), Route { role: Role::Patrol, wake: true });
-        for kind in ["incident_opened", "watchdog_gave_up", "bot_restart_failed", "supervisor_restart_retry", "responder_watchdog_gave_up", "brand_new_kind"] {
+        for kind in ["incident_opened", "bot_restart_failed", "supervisor_restart_retry", "responder_watchdog_gave_up", "brand_new_kind"] {
             assert_eq!(route(kind, &p, None), Route { role: Role::Patrol, wake: true }, "{kind}");
         }
+        // 巡檢自己倒了：送給巡檢等於沒送。活著的協調者收（review 2026-09-16 c1 M2、L4）。
+        assert_eq!(route("watchdog_gave_up", &p, None), Route { role: Role::Responder, wake: true });
+        let exhausted = json!({"incident": {"kind": "notify_exhausted"}});
+        assert_eq!(route("incident_opened", &exhausted, None), Route { role: Role::Responder, wake: true });
+        assert_eq!(route("incident_resolved", &exhausted, None), Route { role: Role::Responder, wake: false });
+        assert_eq!(route("incident_opened", &json!({"incident": {"kind": "host_disconnected"}}), None).role, Role::Patrol);
         assert_eq!(route("incident_resolved", &p, None), Route { role: Role::Patrol, wake: false }, "恢復不叫醒人");
         assert!(!route("health_changed", &json!({"manager_health": {"status": "healthy"}}), None).wake);
         assert!(route("health_changed", &json!({"manager_health": {"status": "degraded"}}), None).wake);

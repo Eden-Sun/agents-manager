@@ -133,7 +133,8 @@ pub async fn tick(app: &Arc<App>) {
 ///
 /// Three channels because they answer different questions: `status_detail` for anyone looking
 /// at the supervisor now, an SSE event for an open UI, and an **inbox event** so AGM finds out
-/// even though the thing that would normally tell it is the thing that is down. The write is
+/// even though the thing that would normally tell it is the thing that is down — the routing table
+/// hands `watchdog_gave_up` to the responder, the half that is still up (`roles::route`). The write is
 /// guarded by `mark_watchdog_gave_up`, so ticks two through infinity are silent.
 async fn report_gave_up(app: &Arc<App>, why: &str) {
     let first = store::mark_watchdog_gave_up(&app.db, why).await.unwrap_or(false);

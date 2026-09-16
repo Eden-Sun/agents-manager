@@ -1069,6 +1069,7 @@ body 直接是檔案位元組（**不是** multipart），`Content-Type` 就是�
   `responder_health{status,responder_status,inbox_open,retry_at}` 單獨一格，不併進頂層 `status`。
 - `GET /api/supervisor/incidents?all=0|1` → `{incidents:[{id,kind,resource,severity,status,detail,occurrences,first_seen_at,last_seen_at,resolved_at}],open,all}`。
   `kind`：`host_disconnected` | `bot_stopped` | `assignment_stalled` | `assignment_undelivered` | `notify_exhausted`（SPEC §18.9）。一個 resource 同時只有一筆 open；開啟與恢復各推 inbox `incident_opened` / `incident_resolved`。
+  `notify_exhausted` 例外：協調者建立時推（路由給協調者，開啟叫醒、恢復只記錄）；沒有協調者不入 inbox，只在這支與 `system_health` 看得到。
 
 ### 遠端入口
 `GET /api/supervisor/remote` → `{status,stored_status,revoked,source,observed_at,observed_by,session_id,current_session_id,url,url_is_evidence,capability,ttl_secs}`。
