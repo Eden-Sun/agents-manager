@@ -516,8 +516,13 @@ function forkErrText(e: unknown): string {
   return `fork 失敗：${errText(e)}`
 }
 
+/** daemon 回的機器 key 換成人話；沒列到的照原樣顯示。 */
+const REASON_TEXT: Record<string, string> = {
+  composer_unreadable: '沒送出：讀不到 bot 的輸入框（可能正在切換畫面或還在啟動），稍後再送一次',
+}
+
 function errText(e: unknown): string {
-  if (e instanceof ApiError) return `${e.message}（HTTP ${e.status}）`
+  if (e instanceof ApiError) return `${REASON_TEXT[e.message] ?? e.message}（HTTP ${e.status}）`
   if (e instanceof Error) return e.message
   return String(e)
 }

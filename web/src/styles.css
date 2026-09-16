@@ -2112,8 +2112,10 @@ button.run-debug-toggle:hover:not(:disabled) {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  z-index: 20;
+  /* 要蓋過右側檔案暫存區（z 40）；之前被它擋住，只露出半個字（2026-09-17 使用者截圖）。 */
+  z-index: 1100;
   max-width: min(420px, calc(100vw - 32px));
+  overflow-wrap: anywhere;
 }
 
 .notice {
