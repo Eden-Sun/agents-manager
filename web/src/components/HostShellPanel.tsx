@@ -171,6 +171,8 @@ export function HostShellPanel({
   const [typing, setTyping] = useState(false)
   const termRef = useRef<HTMLPreElement>(null)
   const [confirmEnd, setConfirmEnd] = useState(false)
+  /** daemon 說要再確認（服務 pane 在 listen，或讀不到它在跑什麼）時帶回來的那一列。 */
+  const [endNeedsConfirm, setEndNeedsConfirm] = useState<api.CloseNeedsConfirm | null>(null)
   const [history, setHistory] = useState<HistoryMap>(readHistory)
   /** 在歷史裡的位置；`-1` = 正在編輯的那一行（還沒往上翻）。 */
   const [histAt, setHistAt] = useState(-1)
@@ -576,7 +578,43 @@ export function HostShellPanel({
         onCancel={() => setConfirmEnd(false)}
         onConfirm={() => {
           setConfirmEnd(false)
-          void endHostShell(host, paneId)
+          void endHostShell(host, paneId).then((needs) => {
+            if (needs) setEndNeedsConfirm(needs)
+          })
+        }}
+      />
+
+      {/* 第二道：daemon 擋下來了。講清楚是哪一種，看過 port 才能確認（AGM 驗收 9f05b03）。 */}
+      <ConfirmDialog
+        open={endNeedsConfirm !== null}
+        title="這顆 pane 還在做事"
+        body={
+          endNeedsConfirm?.unverified ? (
+            <>daemon 讀不到這顆 pane 現在在跑什麼，無法確認裡面沒有 dev server 之類的服務。確定要關嗎？</>
+          ) : (
+            <>
+              這顆 pane 正在 listen
+              {endNeedsConfirm?.pane?.listen_ports.length ? (
+                <>
+                  {' '}
+                  <strong>{endNeedsConfirm.pane.listen_ports.join('、')}</strong>
+                </>
+              ) : null}
+              {endNeedsConfirm?.pane?.foreground ? (
+                <>
+                  （<code>{endNeedsConfirm.pane.foreground}</code>）
+                </>
+              ) : null}
+              。關掉它等於把裡面的服務一起停掉。確定要關嗎？
+            </>
+          )
+        }
+        confirmLabel="仍要關掉"
+        danger
+        onCancel={() => setEndNeedsConfirm(null)}
+        onConfirm={() => {
+          setEndNeedsConfirm(null)
+          void endHostShell(host, paneId, true)
         }}
       />
     </>

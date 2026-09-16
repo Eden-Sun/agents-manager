@@ -312,7 +312,7 @@ test('daemon 重啟後結束面板自己開的 shell：不在記憶體清單裡�
   })
   await useStore.getState().endHostShell('local', 'w9:s1')
   const calls = requests.map((r) => `${r.method} ${r.path}`)
-  assert.ok(calls.some((c) => c.startsWith('POST') && c.includes('/panes/w9%3As1/close') && c.includes('confirm=true')), calls.join('\n'))
+  assert.ok(calls.some((c) => c.startsWith('POST') && c.includes('/panes/w9%3As1/close') && !c.includes('confirm=true')), '沒看過 port 不帶 confirm：' + calls.join('\n'))
   assert.ok(!calls.some((c) => c.startsWith('DELETE')), '那支 DELETE 在重啟後什麼都不做')
   assert.equal(useStore.getState().shellView, null)
 })
@@ -354,3 +354,32 @@ test('已經有一批在跑時再按一鍵重啟：不蓋掉進度，也不說�
   assert.ok(!noticeTexts().some((t) => t.includes('沒有')), noticeTexts().join('|'))
   assert.ok(noticeTexts().some((t) => t.includes('已經有一批')))
 })
+
+/** AGM 驗收 9f05b03：服務 pane（在 listen）或讀不到狀態時，daemon 回 409 要人再確認——不能預設帶 confirm 把這道繞掉。 */
+for (const [label, body, route] of [
+  ['面板自己開的（DELETE）', { reason: 'service_pane', unverified: false, pane: { pane_id: 'w9:s1', host: 'local', kind: 'service', listen_ports: [3010] } }, 'own'],
+  ['被 trace 的（pane 表）讀不到狀態', { reason: 'service_pane', unverified: true, pane: { pane_id: 'w9:s1', host: 'local', kind: 'shell', listen_ports: [] } }, 'traced'],
+] as const) {
+  test(`結束 shell 遇到要再確認（${label}）：不關、不跳錯誤，把 port／讀不到帶回去；確認後才帶 confirm`, async () => {
+    seed()
+    useStore.setState({ shellView: { host: 'local', paneId: 'w9:s1', cwd: '/p' } })
+    const own = route === 'own' ? [{ host: 'local', pane_id: 'w9:s1', cwd: '/p' }] : []
+    routeDaemon((req) => {
+      if (req.method === 'GET' && req.path.includes('/hosts/local/shells')) return json({ host: 'local', shells: own }, 200)
+      if (req.path.includes('confirm=true')) return json({ closed: true }, 200)
+      return json({ error: 'conflict', ...body }, 409)
+    })
+    const needs = await useStore.getState().endHostShell('local', 'w9:s1')
+    assert.ok(needs, '要回傳給面板再問一次')
+    assert.equal(needs?.unverified, body.unverified)
+    assert.deepEqual(needs?.pane?.listen_ports, body.pane.listen_ports)
+    assert.notEqual(useStore.getState().shellView, null, '還沒確認就不能收掉面板')
+    assert.equal(noticeTexts().length, 0, '要人確認不是錯誤')
+    assert.ok(!requests.some((r) => r.path.includes('confirm=true')), '第一次不帶 confirm')
+
+    const again = await useStore.getState().endHostShell('local', 'w9:s1', true)
+    assert.equal(again, null)
+    assert.ok(requests.some((r) => r.path.includes('confirm=true')), '確認後才帶 confirm')
+    assert.equal(useStore.getState().shellView, null)
+  })
+}

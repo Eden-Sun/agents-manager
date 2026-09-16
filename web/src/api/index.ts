@@ -203,6 +203,21 @@ export function servicePaneConflict(e: unknown): ProjectPane | null {
   return pane.pane_id ? pane : null
 }
 
+/**
+ * 關 pane 被擋下要人再確認：在 listen 的服務 pane，或 daemon 讀不到它現在在跑什麼（`unverified`）。
+ * 帶著 daemon 附上的那一列回來，UI 才講得出「正在 listen 3010」或「讀不到狀態」。
+ */
+export interface CloseNeedsConfirm {
+  pane: ProjectPane | null
+  unverified: boolean
+}
+
+export function closeNeedsConfirm(e: unknown): CloseNeedsConfirm | null {
+  if (!(e instanceof ApiError) || e.status !== 409 || e.body.reason !== 'service_pane') return null
+  const pane = toPane(e.body.pane)
+  return { pane: pane.pane_id ? pane : null, unverified: e.body.unverified === true }
+}
+
 export async function focusPane(paneId: string, host: string): Promise<void> {
   await transport.request('POST', `/panes/${encodeURIComponent(paneId)}/focus?host=${encodeURIComponent(host)}`)
 }
@@ -708,10 +723,11 @@ export async function sendHostShellKeys(host: string, paneId: string, keys: stri
 }
 
 /** 已經沒了也算成功。 */
-export async function closeHostShell(host: string, paneId: string): Promise<void> {
+/** `confirm` 只在人看過 port／「讀不到狀態」之後才帶；沒帶時服務 pane 與讀不到的 pane 會回 409 `service_pane`。 */
+export async function closeHostShell(host: string, paneId: string, confirm = false): Promise<void> {
   await transport.request(
     'DELETE',
-    `/hosts/${encodeURIComponent(host || 'local')}/shells/${encodeURIComponent(paneId)}`,
+    `/hosts/${encodeURIComponent(host || 'local')}/shells/${encodeURIComponent(paneId)}${confirm ? '?confirm=true' : ''}`,
   )
 }
 

@@ -468,7 +468,11 @@ export interface StoreState {
   /** daemon 回 403（只能看／正在跑 agent）：面板鎖成唯讀並顯示它的說明。 */
   lockShellView: (host: string, paneId: string, reason: string) => void
   restoreShellView: () => Promise<void>
-  endHostShell: (host: string, paneId: string) => Promise<void>
+  /**
+   * 結束 shell。`confirm` 只在人看過「正在 listen」或「讀不到狀態」之後才帶；沒帶而 daemon 要確認時，
+   * 回傳它附上的那一列（面板據此再問一次），**不關也不跳錯誤**。
+   */
+  endHostShell: (host: string, paneId: string, confirm?: boolean) => Promise<api.CloseNeedsConfirm | null>
 
   loadQuota: () => Promise<void>
   loadMem: () => Promise<void>
@@ -1816,26 +1820,38 @@ export const useStore = create<StoreState>((set, get) => ({
     }
   },
 
-  async endHostShell(host, paneId) {
+  async endHostShell(host, paneId, confirm = false) {
+    let needs: api.CloseNeedsConfirm | null = null
     await guarded(set, get, `shell:${host}:${paneId}`, async () => {
       // 面板自己開的那份清單只在 daemon 記憶體：重啟後這顆還活著（pane 表認得，面板照常顯示），
       // `DELETE` 卻在清單裡找不到而回 200、什麼都沒關，面板收掉看起來像結束了（review M2）。
-      // 不在那份清單裡就改走 pane 表的關閉——確認框已經講明「裡面正在跑的也會結束」，所以帶 confirm。
-      const own = await api.fetchHostShells(host)
-      if (own.some((sh) => sh.pane_id === paneId)) {
-        await api.closeHostShell(host, paneId)
-      } else {
-        try {
-          await api.closePane(paneId, host, true)
-        } catch (e) {
-          // 兩份都不認得＝已經不在了；其他錯誤照常跳通知、面板留著。
-          if (!(e instanceof ApiError && e.status === 404)) throw e
+      // 不在那份清單裡就改走 pane 表的關閉。
+      //
+      // **不預設帶 confirm**（AGM 驗收 9f05b03）：在 listen 的服務 pane、或讀不到它在跑什麼時，daemon 要先回 409
+      // 讓人看過 port 再確認——第一個「結束 shell」確認框只講了「指令會結束」，沒講「裡面是 dev server」。
+      try {
+        const own = await api.fetchHostShells(host)
+        if (own.some((sh) => sh.pane_id === paneId)) {
+          await api.closeHostShell(host, paneId, confirm)
+        } else {
+          try {
+            await api.closePane(paneId, host, confirm)
+          } catch (e) {
+            // 兩份都不認得＝已經不在了；其他錯誤照常往上丟。
+            if (!(e instanceof ApiError && e.status === 404)) throw e
+          }
         }
+      } catch (e) {
+        needs = api.closeNeedsConfirm(e)
+        // 要人再確認不是失敗：面板留著、不跳錯誤，回傳給面板去問。
+        if (needs) return
+        throw e
       }
       set((s) =>
         s.shellView && s.shellView.host === host && s.shellView.paneId === paneId ? { shellView: null } : {},
       )
     })
+    return needs
   },
 
   // 群組任務（mission）
