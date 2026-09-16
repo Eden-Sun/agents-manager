@@ -331,6 +331,9 @@ pub fn quota_from_statusline(payload: &Value, account: Option<&str>) -> Option<Q
 pub async fn set(app: &Arc<App>, host: &str, base: &str, mut q: Quota) {
     q.host = host.to_string();
     let key = quota_key(host, base);
+    // 撞限校正只看**這份讀數自己帶來的**窗；下面沿用的舊窗不是新證據。
+    let brings_its_own_hit = q.limit_hit.is_some();
+    let fresh = q.clone();
     let mut quotas = app.quotas.lock().await;
     // A window the new reading lacks keeps the previous value: statusLine has no Fable and
     // otherwise wipes the probe's F bar every few seconds.
@@ -362,6 +365,9 @@ pub async fn set(app: &Arc<App>, host: &str, base: &str, mut q: Quota) {
             q.limit_hit = prev.limit_hit.clone();
         }
     }
+    if !brings_its_own_hit {
+        q.limit_hit = q.limit_hit.take().and_then(|h| recalibrate_limit_hit(h, &fresh));
+    }
     if limit_hit_expired(q.limit_hit.as_ref()) {
         q.limit_hit = None;
     }
@@ -379,6 +385,36 @@ pub async fn set(app: &Arc<App>, host: &str, base: &str, mut q: Quota) {
     quotas.insert(key.clone(), q.clone());
     drop(quotas);
     app.emit("quota_updated", json!({"kind": key, "host": host, "quota": q})).await;
+}
+
+fn parse_utc(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(s.trim()).ok().map(|t| t.with_timezone(&chrono::Utc))
+}
+
+/// 知道桶名的撞限（claude 橫幅）遇到**那一桶的新讀數**時校正，不然保底時間（Fable 7 天）與橫幅當下讀到的
+/// `resets_at` 之後永遠不會被真讀數改寫——claude 沒有 `clear_limit_hit`，帳號恢復後照樣擋到 7 天（review 2026-09-16 M2）。
+///
+/// - 讀數的窗是撞限**之後**才開的（`resets_at − 窗長 ≥ hit.at`）：那一桶已經重置過了，撞限作廢。
+///   用窗的起點判斷而不是看百分比：撞限前就開始、撞限後才回來的 `/usage` 探測，百分比可能還沒到頂。
+/// - 否則撞限最晚到這個窗重置為止：`until = min(until, resets_at)`。
+///
+/// 沒有桶名（codex 的 credits 用完、開機回填的格子）一律不動：那種撞限只有橫幅說得準。
+fn recalibrate_limit_hit(mut hit: LimitHit, fresh: &Quota) -> Option<LimitHit> {
+    let (window, len) = match hit.bucket.as_deref() {
+        Some("five_hour") => (fresh.five_hour.as_ref(), chrono::Duration::hours(5)),
+        Some("seven_day") => (fresh.seven_day.as_ref(), chrono::Duration::days(7)),
+        Some("fable") => (fresh.fable.as_ref(), chrono::Duration::days(7)),
+        _ => return Some(hit),
+    };
+    let Some(resets) = window.and_then(|w| w.resets_at.as_deref()).and_then(parse_utc) else { return Some(hit) };
+    let Some(at) = parse_utc(&hit.at) else { return Some(hit) };
+    if resets - len >= at {
+        return None;
+    }
+    if hit.until.as_deref().and_then(parse_utc).map_or(true, |u| resets < u) {
+        hit.until = Some(resets.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+    }
+    Some(hit)
 }
 
 /// 沒寫時間的一律**不**過期，只能靠 [`clear_limit_hit`]。
@@ -988,6 +1024,73 @@ mod tests {
         assert!(got(&app).await.limit_hit.is_some(), "量表滿了不代表 CLI 收得下一句話");
         clear_limit_hit(&app, LOCAL_HOST, "codex").await;
         assert!(got(&app).await.limit_hit.is_none());
+    }
+
+    fn iso(t: chrono::DateTime<chrono::Utc>) -> String {
+        t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    }
+
+    /// M2（review 2026-09-16）：Fable 撞限時那一桶還沒讀數，保底 7 天；之後 `/usage` 的真讀數要能把它縮短，
+    /// 窗重置之後的讀數要能把它清掉。claude 沒有成功回合清撞限這條路，`until` 是唯一出口。
+    #[tokio::test]
+    async fn a_claude_hit_is_corrected_by_later_readings_of_its_own_bucket() {
+        let app = crate::testing::env().await.app.clone();
+        let now = chrono::Utc::now();
+        let at = now - chrono::Duration::hours(1);
+        let hit = LimitHit {
+            message: "You've reached your Fable limit".into(),
+            until: Some(iso(at + chrono::Duration::days(7))),
+            at: iso(at),
+            bucket: Some("fable".into()),
+        };
+        let mut banner = codex_q("claude-limit-hit", Some(hit));
+        banner.five_hour = None;
+        banner.seven_day = None;
+        set(&app, LOCAL_HOST, "claude:cc1", banner).await;
+        let until = |app: Arc<App>| async move {
+            app.quotas.lock().await.get("claude:cc1").unwrap().limit_hit.as_ref().map(|h| h.until.clone().unwrap())
+        };
+
+        // 撞限後讀到的 Fable 窗：還見底，明天 08:00 重置 → 撞限最晚到那時，不是下週。
+        let tomorrow = now + chrono::Duration::hours(20);
+        let mut usage = codex_q("claude-usage", None);
+        usage.fable = Some(Window { used_pct: 100.0, resets_at: Some(iso(tomorrow)) });
+        set(&app, LOCAL_HOST, "claude:cc1", usage.clone()).await;
+        assert_eq!(until(app.clone()).await, Some(iso(tomorrow)), "保底的 7 天要被那一桶自己的重置時間截短");
+
+        // 不相干的桶（statusLine 只有 5h／7d）不算那一桶的讀數。
+        let mut status = codex_q("statusline", None);
+        status.five_hour = Some(Window { used_pct: 3.0, resets_at: Some(iso(now + chrono::Duration::hours(4))) });
+        set(&app, LOCAL_HOST, "claude:cc1", status).await;
+        assert_eq!(until(app.clone()).await, Some(iso(tomorrow)));
+
+        // 重置之後的讀數：窗的起點在撞限之後 → 撞限作廢。
+        let mut after = codex_q("claude-usage", None);
+        after.fable = Some(Window { used_pct: 0.0, resets_at: Some(iso(at + chrono::Duration::days(7) + chrono::Duration::minutes(1))) });
+        set(&app, LOCAL_HOST, "claude:cc1", after).await;
+        assert_eq!(until(app.clone()).await, None, "那一桶重置過了，撞限不能再擋");
+    }
+
+    /// 撞限前就開始、撞限後才回來的讀數（百分比可能還沒到頂）不能把撞限清掉，只能截短時間。
+    /// 沒有桶名的撞限（codex credits 用完、開機回填）完全不動。
+    #[test]
+    fn a_reading_from_before_the_hit_only_shortens_it_and_a_bucketless_hit_is_left_alone() {
+        let now = chrono::Utc::now();
+        let at = now - chrono::Duration::minutes(10);
+        let hit = |bucket: Option<&str>| LimitHit {
+            message: "You've hit your session limit".into(),
+            until: Some(iso(at + chrono::Duration::hours(5))),
+            at: iso(at),
+            bucket: bucket.map(String::from),
+        };
+        let mut reading = codex_q("statusline", None);
+        reading.five_hour = Some(Window { used_pct: 94.0, resets_at: Some(iso(now + chrono::Duration::minutes(20))) });
+        let got = recalibrate_limit_hit(hit(Some("five_hour")), &reading).expect("窗在撞限之前就開了：還在擋");
+        assert_eq!(got.until, Some(iso(now + chrono::Duration::minutes(20))));
+        assert_eq!(recalibrate_limit_hit(hit(None), &reading), Some(hit(None)), "沒有桶名就不猜");
+        let mut later = reading.clone();
+        later.five_hour.as_mut().unwrap().resets_at = Some(iso(at + chrono::Duration::hours(6)));
+        assert_eq!(recalibrate_limit_hit(hit(Some("five_hour")), &later), None);
     }
 
     #[tokio::test]
