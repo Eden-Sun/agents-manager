@@ -582,8 +582,9 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
 
 **workspace 歸位**：bot 開的非 agent pane 應該落在自己 project 的 workspace。**但已經跑起來的 service pane 不搬**——
 搬 pane 會殺掉裡面的行程（w168:p62 的 dev server 就是這種）。做法是：shim 在**開 pane 當下**用 project 的 workspace
-（`herdr pane split --pane` 以母 pane 為基準時本來就同 workspace；`tab create` 沒指定時 shim 補 `--workspace $AM_WORKSPACE_ID`，
-那是 bot 專案的 workspace，由 daemon 隨 pane env 帶下去），
+（`herdr pane split --pane` 以母 pane 為基準時本來就同 workspace；`tab create` 沒指定時 shim 補 `--workspace`：先問 herdr 母 pane
+`$HERDR_PANE_ID` 現在所在的 workspace，問不到才用 daemon 隨 pane env 帶下去的 `$AM_WORKSPACE_ID`——後者是 workspace 決定**之前**算的，
+第一次啟動或 herdr 重開後沒有、舊映射失效時是死掉的 id；子 pane 繼承的 `AM_WORKSPACE_ID` 是實際落點），
 已經放錯的只在 UI 標「在 `<workspace>`（不是本專案）」，由人決定要不要重開。
 
 #### 生命週期
