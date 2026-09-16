@@ -29,6 +29,7 @@ import { HeadMoreMenu } from './HeadMoreMenu'
 import { DirPicker } from './DirPicker'
 import { IdentitiesPanel, IdentityBadge } from './IdentitiesPanel'
 import { Modal } from './Modal'
+import { RunElapsed } from './RunElapsed'
 import { SupervisorPanel } from './SupervisorPanel'
 import { IdentityOptions, PersonaField, PersonaMark } from './BotSettingsPanel'
 import { HostBadge, HostsPanel } from './HostsPanel'
@@ -372,6 +373,7 @@ function BotRow({
           ) : (
             <>
               <ModelTag botId={botId} />
+              <RunElapsed botId={botId} />
               {/* 黃燈：與頂端 QuotaStrip 一致；critical 走上面的警語。 */}
               {quotaLevel ? (
                 <span
