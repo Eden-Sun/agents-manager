@@ -23,8 +23,11 @@ function run(options = {}) {
   try {
     const journal = join(dir, 'journal.json');
     if (options.progress) writeFileSync(journal, JSON.stringify(options.progress));
+    // rotate = 這個 project 已經有一串（`previous_url`），但這一題要開新的一串（`url` 空）。
     const args = {project_id: pid, project_label: 'AM', question: 'review this', request_key: key,
-      url: options.newProject ? null : url, journal, collect: !!options.collect, timeout_ms: 600000};
+      url: options.newProject || options.rotate ? null : url,
+      previous_url: options.rotate ? url : null,
+      journal, collect: !!options.collect, timeout_ms: 600000};
     const prelude = `
       const actions=[];
       const opts=${JSON.stringify(options)};
@@ -46,7 +49,7 @@ function run(options = {}) {
           if(!s.includes('send-button'))return;
           if(opts.failSend)throw new Error('send interrupted');
           rows=rows.concat(opts.afterSend||${JSON.stringify(boundTurn)});
-          if(opts.newProject)currentUrl='https://chatgpt.com/c/new-project';},
+          if(opts.newProject||opts.rotate)currentUrl='https://chatgpt.com/c/new-project';},
         keyboard:{insertText:async s=>actions.push(['insert',s])},
         evaluate:async(fn,arg)=>fn.toString().includes('busy:')?{busy:!!opts.busy,draft:opts.draft||''}:fn(arg),
         waitForFunction:async(fn,arg,{timeout})=>{
@@ -60,7 +63,7 @@ function run(options = {}) {
         },
         url:async()=>currentUrl};
       globalThis.taskSpace=async name=>({
-        tabs:async()=>[{url:base,label:'p2'},{url:'https://chatgpt.com/',label:'p3'}],
+        tabs:async()=>opts.noTabs?[]:[{url:base,label:'p2'},{url:'https://chatgpt.com/',label:'p3'}],
         page:label=>{actions.push(['reuse',label]);return page;},
         newPage:async()=>{actions.push(['new']);return page;}
       });
@@ -175,4 +178,21 @@ test('a partial response without its completed-turn controls is not accepted', (
   const stopping=collect({rows:boundTurn,stop:true});
   assert.notEqual(stopping.code,0);
   assert.equal(stopping.journal.phase,'sent');
+});
+
+test('換一串時重用這個 project 自己的分頁，不是再開一個', () => {
+  const r = run({rotate: true});
+  assert.equal(r.code, 0, r.error);
+  assert.ok(r.actions.some(a => a[0] === 'reuse' && a[1] === 'p2'), JSON.stringify(r.actions));
+  assert.ok(!r.actions.some(a => a[0] === 'new'), '不該再開一個分頁：一個 project 一個分頁');
+  assert.deepEqual(r.actions.find(a => a[0] === 'goto'), ['goto', 'https://chatgpt.com/'], '導到新對話');
+  assert.equal(r.journal.url, 'https://chatgpt.com/c/new-project', '記下來的是新那一串');
+  // 新的一串要重新自我介紹：不然那串裡沒有任何東西說得出它屬於哪個 project。
+  assert.ok(r.actions.some(a => a[0] === 'insert' && a[1].includes(`OB｜AM｜${pid}`)), JSON.stringify(r.actions));
+});
+
+test('沒有舊分頁可重用時才開新分頁', () => {
+  const r = run({rotate: true, noTabs: true});
+  assert.equal(r.code, 0, r.error);
+  assert.ok(r.actions.some(a => a[0] === 'new'), JSON.stringify(r.actions));
 });

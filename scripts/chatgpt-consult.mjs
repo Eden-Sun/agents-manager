@@ -3,7 +3,7 @@
 const fs = await import("node:fs/promises");
 const args = globalThis.CONSULT_ARGS;
 const { project_id: project, project_label: label, question, request_key: requestKey, url: known,
-  journal, timeout_ms: timeout = 600000, collect = false } = args;
+  previous_url: previous, journal, timeout_ms: timeout = 600000, collect = false } = args;
 if (!/^[0-9A-HJKMNP-TV-Z]{26}$/.test(project) || !/^[a-f0-9]{32}$/.test(requestKey) || !journal || !question) {
   throw new Error("OB requires project_id, question and journal from its worker");
 }
@@ -24,12 +24,22 @@ if (progress?.phase === "done") {
   if (progress?.phase === "dispatching" && !collect) throw new Error("delivery_unknown: collect only, do not resend");
   if (collect && !progress?.url) throw new Error("delivery_unknown: inspect original tab manually; no known conversation URL");
   const url = progress?.url || known;
-  if (url && !/^https:\/\/chatgpt\.com\/c\/[a-zA-Z0-9-]+$/.test(url)) throw new Error("invalid_conversation_url");
+  for (const u of [url, previous]) {
+    if (u && !/^https:\/\/chatgpt\.com\/c\/[a-zA-Z0-9-]+$/.test(u)) throw new Error("invalid_conversation_url");
+  }
   const tabs = await task.tabs();
-  const mine = url ? tabs.find(t => t.url.split("?")[0] === url) : null;
+  // 換一串（url 空、previous 有值）時**重用這個 project 自己的分頁**，只是把它導到新對話：
+  // 每換一串就開一個新分頁的話，一個 project 會累積一堆分頁，RAM 也是這樣吃光的。
+  const findTab = (u) => (u ? tabs.find(t => t.url.split("?")[0] === u) : null);
+  const mine = findTab(url) || (url ? null : findTab(previous));
   let page;
-  if (mine) page = mine.label ? task.page(mine.label) : await task.adopt(mine.page);
-  else {
+  if (mine) {
+    page = mine.label ? task.page(mine.label) : await task.adopt(mine.page);
+    if (!url) {
+      await page.goto("https://chatgpt.com/");
+      await save({ phase: "opened", page: page.label, url: null });
+    }
+  } else {
     // Do not adopt a generic ChatGPT home tab: another project/user might be composing there.
     page = await task.newPage();
     await page.goto(url || "https://chatgpt.com/");

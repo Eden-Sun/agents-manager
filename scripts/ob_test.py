@@ -131,10 +131,90 @@ class QueueTests(unittest.TestCase):
         self.s.link(B, "b", UB)
         a = self.ask()
         token = self.s.claim()["claim_token"]
-        with self.assertRaises(sqlite3.IntegrityError):
+        # 以前這裡漏出 sqlite 的 IntegrityError（靠 projects.url 的 UNIQUE）；現在先查 conversations
+        # 再寫，錯誤跟 `link` 同一個具名的那顆。要守的性質沒變：拒絕並整筆回滾。
+        with self.assertRaises(OBError) as caught:
             self.s.finish(a["id"], "answer", UB, token)
+        self.assertIn("conversation_already_owned", str(caught.exception))
         self.assertEqual(self.s.get(a["id"])["status"], "running")
         self.assertIsNone(self.s.project(A)["url"])
+
+    def test_one_conversation_per_project_but_it_rotates(self):
+        """一個 project 一串，但那一串不能無限長：滿了就開下一串，舊的留著查得到。"""
+        a = self.ask(rid="q1")
+        self.s.claim()
+        self.s.finish(a["id"], "ans", UA, self.s.get(a["id"])["claim_token"])
+        self.assertEqual(self.s.project(A)["url"], UA)
+        self.assertEqual(self.s.current_conversation(A)["turns"], 1)
+        self.assertEqual(self.s.rotate_due(A)[0], False, "才一題不該換")
+
+        # 題數到了：下一單要換串。
+        self.s.db.execute("UPDATE conversations SET turns=? WHERE url=?", (Store.ROTATE_TURNS, UA))
+        due, why = self.s.rotate_due(A)
+        self.assertTrue(due)
+        self.assertIn("turns", why)
+
+        # 沒有 rotate 旗標的單仍然不准換對話（別的分頁冒充這個 project）。
+        b = self.ask(rid="q2", text="another")
+        self.s.claim()
+        with self.assertRaises(OBError) as caught:
+            self.s.finish(b["id"], "ans", "https://chatgpt.com/c/project-a2", self.s.get(b["id"])["claim_token"])
+        self.assertIn("conversation_changed", str(caught.exception))
+
+        # 標了才准，而且舊的那串被收起來、歷史留著。
+        self.s.mark_rotate(b["id"])
+        self.s.finish(b["id"], "ans", "https://chatgpt.com/c/project-a2", self.s.get(b["id"])["claim_token"])
+        self.assertEqual(self.s.project(A)["url"], "https://chatgpt.com/c/project-a2")
+        live = self.s.current_conversation(A)
+        self.assertEqual(live["url"], "https://chatgpt.com/c/project-a2")
+        self.assertEqual(live["turns"], 1, "新的一串從頭算")
+        history = self.s.conversations(A)
+        self.assertEqual([c["url"] for c in history], [UA, "https://chatgpt.com/c/project-a2"])
+        self.assertIsNotNone(history[0]["retired_at"], "舊的那串收起來但查得到")
+
+    def test_rotate_command_marks_the_next_question_not_an_empty_thread(self):
+        a = self.ask(rid="q1")
+        self.s.claim()
+        self.s.finish(a["id"], "ans", UA, self.s.get(a["id"])["claim_token"])
+        out = self.s.request_rotation(A)
+        self.assertEqual(out["current"], UA)
+        self.assertTrue(self.s.rotate_due(A)[0], "下一題會換")
+        self.assertEqual(self.s.current_conversation(A)["url"], UA, "現在還是用舊那串——不預先開一個空對話")
+        with self.assertRaises(OBError):
+            self.s.request_rotation(B)  # 還沒有對話的 project
+
+    def test_a_conversation_also_rotates_when_it_gets_old(self):
+        a = self.ask(rid="q1")
+        self.s.claim()
+        self.s.finish(a["id"], "ans", UA, self.s.get(a["id"])["claim_token"])
+        self.assertEqual(self.s.rotate_due(A)[0], False)
+        old = time.time() - (Store.ROTATE_DAYS + 1) * 86400
+        self.s.db.execute("UPDATE conversations SET started_at=? WHERE url=?", (old, UA))
+        due, why = self.s.rotate_due(A)
+        self.assertTrue(due)
+        self.assertIn("age", why)
+
+    def test_dispatch_asks_for_a_new_thread_in_the_same_tab(self):
+        """派送時把「要換串」變成瀏覽器那邊的參數：url 空、previous_url 指著舊的那一串（＝那個分頁）。"""
+        a = self.ask(rid="q1")
+        self.s.claim()
+        self.s.finish(a["id"], "ans", UA, self.s.get(a["id"])["claim_token"])
+        self.s.db.execute("UPDATE conversations SET turns=? WHERE url=?", (Store.ROTATE_TURNS, UA))
+        b = self.ask(rid="q2", text="another")
+        token = self.s.claim()["claim_token"]
+        seen = {}
+
+        def fake(cmd, **kw):
+            seen.update(json.loads(kw["stdin"].split("globalThis.CONSULT_ARGS = ", 1)[1].split(";\n", 1)[0]))
+            return (0, '{"result":"ok"}', "")
+
+        with patch.object(operator, "run_process", side_effect=fake):
+            cfg = dict(claude_config_dir=str(Path.home() / ".claude"), claude_binary="/fake/claude", ego_binary="/fake/ego")
+            with self.assertRaises(OBError):
+                operator.browser_consult(self.s, b["id"], cfg, token=token)
+        self.assertIsNone(seen["url"], "換串時不給舊 url")
+        self.assertEqual(seen["previous_url"], UA, "但要說是哪個分頁")
+        self.assertEqual(self.s.get(b["id"])["rotate"], 1, "旗標留在列上，collect 也才換得回來")
 
     def test_recovery_collect_finishes_unknown_without_new_request(self):
         a = self.ask()

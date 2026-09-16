@@ -6,6 +6,19 @@
 
 - 索引只用 **AG Man project ID**，不用 project label／目錄名／worktree 名。同 ID 改名或換 bot 仍沿用對話；不同 ID 即使同名也不能共用 URL。
 - 每專案一個 ChatGPT 對話、一個分頁。首則新對話訊息寫 `OB｜專案名稱｜project ID`；ChatGPT 自動產生的側欄標題不是索引依據。
+
+### 對話輪替（使用者 2026-09-16）
+
+一個 project 一串，但**那一串會輪替**：問滿 `OB_ROTATE_TURNS`（預設 20）題、或開了 `OB_ROTATE_DAYS`（預設 14）天之後，
+下一題會在**同一個分頁**開新的一串，舊的收起來但查得到（`conversations` 表，`retired_at` 有值）。
+不輪替的話那串只會愈長愈慢，而且 GPT 回答新題目時帶著整段不相干的舊脈絡——不同題目擠在同一個對話正是這樣來的。
+
+- `projects.url` 永遠是**目前**那一串。歷史在 `ob.py status --project-id <id>` 的 `conversations`，
+  同一個欄位也會說下一題會不會換（`rotate_next`）。
+- 換串是**派送前**決定、記在那一單的 `rotate` 欄位上：`remember_url`／`finish` 靠它分辨「刻意換串」與
+  「別的分頁冒充這個 project」——後者仍然一律 `conversation_changed`。所以 `collect` 一筆換串中的舊單也還原得回去。
+- 手動：`python3 scripts/ob.py rotate --project-id <id>`——標記「下一題換」，不會現在就開一個沒人問過問題的空對話。
+- 分頁不會跟著變多：換串時重用這個 project 原本那個分頁，把它導到新對話。
 - 共用一個 worker（不是每個 project 一顆常駐模型）。每筆呼叫 `claude --print --model sonnet --effort low`，不 resume、不保存模型 session；在新的空目錄中只帶本筆問題，不載入 caller 的 hooks、MCP、CLAUDE.md 或其他專案 context。
 - Sonnet 只有綁定本筆 project/request 的 `consult` MCP tool，不能改收件專案、正文或自行回覆。tool 收據的網頁原文才是 `answer`，不採用 Sonnet 的轉述當原文。
 - 請求、結果與 project→URL 對應在 `~/.config/agents-manager/ob/ob.sqlite3`。SQLite 交易、唯一鍵與 OS worker/browser lock 防止重複派送、跨專案 JSON 覆蓋與同時操作網頁。

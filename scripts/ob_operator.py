@@ -87,8 +87,20 @@ def browser_consult(store, ident, config, collect=False, token=None):
         if progress and not collect:
             raise OBError("delivery_unknown：不可再次送出，請 collect")
         project = store.project(job["project_id"])
+        # 一個 project 一串，但那一串會輪替（SPEC：OB）。決定在派送前做完並記在列上：
+        # `remember_url`／`finish` 要靠那個旗標分辨「這次是刻意換串」與「別的分頁冒充這個 project」。
+        if not collect and not job["rotate"]:
+            rotate, why = store.rotate_due(project["id"])
+            if rotate:
+                store.mark_rotate(ident)
+                job = store.get(ident)
+                print(f"ob: rotating conversation for {project['id']} ({why})", file=sys.stderr)
+        rotating = bool(job["rotate"]) and not collect
         args = dict(project_id=project["id"], project_label=project["label"], question=job["question"], request_key=ident,
-                    url=project["url"], journal=str(journal_for(store, ident)), collect=collect,
+                    # 換串時不給 url：mjs 會在**同一個分頁**開一串新的（`previous_url` 認得那個分頁）。
+                    url=None if rotating else project["url"],
+                    previous_url=project["url"] if rotating else None,
+                    journal=str(journal_for(store, ident)), collect=collect,
                     timeout_ms=600000)
         script = "globalThis.CONSULT_ARGS = " + json.dumps(args, ensure_ascii=False) + ";\n"
         script += (HERE / "chatgpt-consult.mjs").read_text()

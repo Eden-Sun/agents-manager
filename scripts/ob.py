@@ -93,6 +93,8 @@ def main(argv=None):
     resolve = commands.add_parser("resolve", help="對帳確認沒送出後才解除 unknown")
     resolve.add_argument("id")
     resolve.add_argument("--confirmed-not-sent", action="store_true", required=True)
+    rotate = commands.add_parser("rotate", help="下一題改開新的一串（舊的留著查得到）")
+    rotate.add_argument("--project-id", required=True)
     link = commands.add_parser("link", help="明確綁定既有對話；不根據 label 自動猜測")
     link.add_argument("--project-id", required=True)
     which = link.add_mutually_exclusive_group(required=True)
@@ -146,6 +148,16 @@ def main(argv=None):
                                                    "worker_running": recovered is None, "recovered": recovered or [],
                                                    "stop_requested": store.setting("stop_requested", False),
                                                    "retry_after": store.setting("retry_after")}
+        # 現在在用哪一串、問過幾題、下一題會不會換串——不然「怎麼又是同一個對話」只能自己去翻 DB。
+        if not args.id and args.project_id:
+            live = store.current_conversation(args.project_id)
+            due, why = store.rotate_due(args.project_id)
+            result["conversation"] = live
+            result["rotate_next"] = {"due": due, "why": why, "turns_limit": Store.ROTATE_TURNS, "days_limit": Store.ROTATE_DAYS}
+            result["conversations"] = store.conversations(args.project_id)
+    elif args.command == "rotate":
+        # 不是現在就去開一串空的（那會留下一個沒人問過問題的對話）：標起來，下一題送出時才換。
+        result = store.request_rotation(args.project_id)
     elif args.command == "recover":
         recovered = recover(store)
         result = {"worker_running": recovered is None, "recovered": recovered or []}
