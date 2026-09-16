@@ -840,9 +840,10 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
 
 ### 7.1 存取控制
 - bind：開發版 bind `0.0.0.0`；打包成 macOS app 的執行檔（路徑在 `…app/Contents/MacOS/`）bind `127.0.0.1`；`AM_DEV_LAN` 可雙向覆寫（`main.rs::dev_lan_default`）。
-- 啟動時產生 UI token 寫 `~/.config/agents-manager/ui-token`；`GET /api/session`（`Host` 須為 `127.0.0.1:<port>` 或 `localhost:<port>`）回 token；
-  其餘 `/api/*` 要 header `X-AM-Token`，`/ws` 用 `?token=`；`Origin` 存在時須為本機。
-- `/hook/*` 與 `/relay/announce` 驗 **per-bot** `X-AM-Bot-Token`。
+- 啟動時產生 UI token 寫 `~/.config/agents-manager/ui-token`；`GET /api/session`（**TCP 對端**須為 loopback——不看 `Host`，那是呼叫端自己填的）回 token；
+  其餘 `/api/*` 要 header `X-AM-Token`，`/ws` 用 `?token=`；`Origin` 存在時主機須為本機。
+  開發版（`App::allow_lan`，跟 bind `0.0.0.0` 同一個判斷）對端與 `Origin` 都直接放行，同網段誰都拿得到 token：使用者裁示保留（`e7392dd` 撤掉配對碼時記明）。
+- `/hook/*`、`/relay/announce`、`/relay/pane` 驗 **per-bot** `X-AM-Bot-Token`。
 
 ### 7.3 WebSocket `/ws`
 - 事件帶遞增 `seq`（記憶體，daemon 重啟從 0）。客戶端帶 `?since=`；daemon 保留最近 200 則，補不齊或 seq 倒退 → `{"type":"resync"}`，客戶端重新 `GET /state` 與訊息。
