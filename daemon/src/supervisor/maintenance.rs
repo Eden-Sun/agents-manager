@@ -126,9 +126,13 @@ async fn delivery_critical(pool: &sqlx::SqlitePool, bot_id: &str) -> anyhow::Res
     Ok(sqlx::query_scalar::<_, String>(
         // queued 只在這顆 bot 還有活著的 run 時才算：沒有 run 就沒有人會送它，是遺留下來的（會被撤銷），
         // 算進來的話 restart safety 永遠判成臨界區，縮小封鎖面之後也 unsafe（AGM 2026-09-16）。
+        // run 此刻停在 `blocked`（等使用者回答）也不算：flush 在 blocked 時不會開始打字，queued 跨 daemon 重啟保得住；
+        // 不放行的話「有人在等使用者」就讓整台機器不能換版（AGM 裁示 2026-09-16）。一離開 blocked 就立刻回到臨界區——
+        // 讀的是 runs 的即時狀態，acquire 在鎖內重判一次；已經開始送的 in_flight＋pending 不管 blocked 與否照算。
         "SELECT t.id FROM turns t JOIN conversations c ON c.id = t.conversation_id
           WHERE c.bot_id = ?
-            AND ((t.status='queued' AND EXISTS (SELECT 1 FROM runs r WHERE r.bot_id = c.bot_id AND r.state IN ('starting','running','stopping')))
+            AND ((t.status='queued' AND EXISTS (SELECT 1 FROM runs r WHERE r.bot_id = c.bot_id
+                                                AND r.state IN ('starting','running','stopping') AND r.agent_status <> 'blocked'))
                  OR (t.status='in_flight' AND t.delivery='pending'))
           LIMIT 1",
     )
@@ -532,6 +536,59 @@ mod tests {
         sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,delivery,created_at) VALUES ('tp','cq','rq2','web','in_flight','pending',?)")
             .bind(&now).execute(&app.db).await.unwrap();
         assert_eq!(delivery_critical(&app.db, "q").await.unwrap().as_deref(), Some("tp"));
+    }
+
+    /// 等使用者回答的 bot（run `blocked`）排著的 queued 不擋窗口；一離開 blocked 立刻回到臨界區；
+    /// 已經開始送的（in_flight＋pending）不管 blocked 與否照擋。用 acquire 真的走一遍：它在鎖內重判。
+    #[tokio::test]
+    async fn a_queued_prompt_behind_a_bot_waiting_for_the_user_holds_the_window_only_once_it_can_flush() {
+        let e = crate::testing::env().await;
+        let (app, pid) = (&e.app, e.project_id.clone());
+        let now = crate::db::now();
+        sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('ask',?,'ask','claude','tok-ask',?)")
+            .bind(&pid).bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO conversations (id,bot_id,created_at) VALUES ('ca','ask',?)").bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,started_at) VALUES ('ra','ask','running','working',?)")
+            .bind(&now).execute(&app.db).await.unwrap();
+        // 正在問使用者的那一回合（已送達）＋排在後面的 AGM 派工。
+        sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,delivery,created_at) VALUES ('tq_ask','ca','ra','web','in_flight','ok',?)")
+            .bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO turns (id,conversation_id,origin,status,delivery,prompt_text,created_at) VALUES ('tq_next','ca','web','queued','pending','x',?)")
+            .bind(&now).execute(&app.db).await.unwrap();
+        let waited = approved_window(app, 40).await;
+        let set = |status: &'static str| {
+            let db = app.db.clone();
+            async move { sqlx::query("UPDATE runs SET agent_status=? WHERE id='ra'").bind(status).execute(&db).await.unwrap(); }
+        };
+
+        // 還在 working：queued 算臨界區，窗口拿不到。
+        assert_eq!(delivery_critical(&app.db, "ask").await.unwrap().as_deref(), Some("tq_next"));
+        let refused = acquire(app, "rebuild", "ops", &waited, None, 300, true, &[]).await.unwrap_err();
+        let LcError::Conflict(detail) = &refused else { panic!("expected a conflict, got {refused:?}") };
+        assert_eq!(detail["safety"]["delivering"][0]["turn_id"], "tq_next", "{detail}");
+
+        // 停在 blocked（AskUserQuestion 開著）：不擋，同一筆核准在鎖內重判就拿得到。
+        set("blocked").await;
+        assert_eq!(delivery_critical(&app.db, "ask").await.unwrap(), None);
+        let s = safety_for(app, &[], Some(&waited)).await.unwrap();
+        assert_eq!((s["safe"].as_bool(), s["delivering"].as_array().map(Vec::len)), (Some(true), Some(0)), "{s}");
+        assert_eq!(s["blocked_waiting_for_user"][0]["bot_id"], "ask", "照實回報在等使用者");
+
+        // 使用者回答了（離開 blocked）：立刻回到臨界區，不沿用剛才的判定。
+        set("working").await;
+        assert_eq!(delivery_critical(&app.db, "ask").await.unwrap().as_deref(), Some("tq_next"));
+        assert_eq!(safety_for(app, &[], Some(&waited)).await.unwrap()["safe"], false);
+
+        // flush 已經開始送（in_flight＋pending）：就算又跳回 blocked 也照擋。
+        sqlx::query("UPDATE turns SET status='completed' WHERE id='tq_ask'").execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET status='in_flight', run_id='ra' WHERE id='tq_next'").execute(&app.db).await.unwrap();
+        set("blocked").await;
+        assert_eq!(delivery_critical(&app.db, "ask").await.unwrap().as_deref(), Some("tq_next"));
+
+        set("blocked").await;
+        sqlx::query("UPDATE turns SET delivery='ok' WHERE id='tq_next'").execute(&app.db).await.unwrap();
+        let taken = acquire(app, "rebuild", "ops", &waited, None, 300, true, &[]).await.unwrap();
+        assert_eq!(taken["lease"]["owner"], "ops", "送達之後只剩思考中，縮小封鎖面就放行");
     }
 
     /// 一顆有 active run、正在 working、而且該筆 turn 已經送達的 bot：思考中的樣子。
