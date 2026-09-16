@@ -103,3 +103,11 @@
     min-width: 0;
   }
 }
+
+/* 名字那一塊改固定寬（2026-09-16 使用者：名字＋★⚙ 固定，剩下的全給額度均分）。 */
+@media (width > 1024px) {
+  .bot-head .main-title {
+    flex: 0 0 18em;
+    min-width: 0;
+  }
+}

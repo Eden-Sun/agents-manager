@@ -890,3 +890,15 @@
     width: 100%;
   }
 }
+
+/* 每個帳號一格等寬（2026-09-16 使用者）：basis 0 才會均分，不然寬度跟著內容跑。 */
+@media (width > 1024px) {
+  .main-head .quota-hp {
+    flex: 1 1 0;
+  }
+
+  /* 格子均分之後條就別再設上限，不然多出來的寬度變成空白。 */
+  .main-head .quota-bar-wrap {
+    max-width: none;
+  }
+}
