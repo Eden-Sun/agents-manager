@@ -552,6 +552,12 @@ pub(crate) async fn pane_env(
     }
     let local_data_dir = (host == LOCAL_HOST).then(|| app.data_dir.to_string_lossy().into_owned());
     reserve_instance_env(&mut env, app.instance().as_deref(), local_data_dir.as_deref());
+    // §6.5f：給使用者的檔案放這裡（不是 scratchpad）。跟 AM_DATA_DIR 一樣在自訂 env 合併之後才由 daemon 蓋回去：
+    // 被改掉的話 bot 寫到別處，使用者在網頁上看不到。遠端主機不給——那台的檔案這台 daemon 拿不到。
+    match (host == LOCAL_HOST).then(|| crate::outbox::ensure(&app.data_dir, &bot.id)).flatten() {
+        Some(dir) => env.insert("AM_OUTBOX".into(), json!(dir.to_string_lossy())),
+        None => env.remove("AM_OUTBOX"),
+    };
     Value::Object(env)
 }
 
@@ -1318,6 +1324,30 @@ mod pane_env_tests {
                 }
             }
         }
+    }
+
+    /// §6.5f：本機 pane 拿到自己的 outbox（啟動時就建好），自訂 env 搬不走；遠端沒有。
+    #[tokio::test]
+    async fn a_local_pane_gets_its_own_outbox_that_custom_env_cannot_move() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "alfa").await;
+        let want = env.app.data_dir.join("outbox").join(&bot.id);
+        let e = pane_env(&env.app, &bot, LOCAL_HOST, "run-1", "proj-alfa", None).await;
+        assert_eq!(e["AM_OUTBOX"], json!(want.to_string_lossy()));
+        assert!(want.is_dir(), "啟動時就建好");
+        assert!(pane_env(&env.app, &bot, "box", "run-1", "proj-alfa", None).await.get("AM_OUTBOX").is_none(), "遠端沒有");
+
+        sqlx::query("UPDATE bots SET env_json = ? WHERE id = ?")
+            .bind(r#"{"AM_OUTBOX":"/elsewhere","FOO":"kept"}"#)
+            .bind(&bot.id)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        let bot = db::bot(&env.app.db, &bot.id).await.unwrap().unwrap();
+        let e = pane_env(&env.app, &bot, LOCAL_HOST, "run-1", "proj-alfa", None).await;
+        assert_eq!(e["AM_OUTBOX"], json!(want.to_string_lossy()), "bot.env 蓋不過去");
+        assert_eq!(e["FOO"], json!("kept"));
+        assert!(pane_env(&env.app, &bot, "box", "run-1", "proj-alfa", None).await.get("AM_OUTBOX").is_none(), "遠端也不留自訂的假路徑");
     }
 
     /// hook 打不通時會 spool 到 `AM_DATA_DIR`；沒注入的話隔離跑的 bot 會把檔案丟進正式資料目錄，

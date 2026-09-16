@@ -253,7 +253,7 @@ am_forward_with_env() {
     if [ "$_has_workspace" = 0 ] && [ "$_sub1 $_sub2" = "tab create" ] && [ -n "${AM_WORKSPACE_ID:-}" ]; then
         set -- "$@" --workspace "$AM_WORKSPACE_ID"
     fi
-    for _k in CLAUDE_CONFIG_DIR CODEX_HOME AM_BOT_ID AM_HOOK_TOKEN AM_PORT AM_RUN_ID AM_AGENT_NAME AM_KIND AM_MODEL AM_EFFORT AM_PROJECT_ID AM_WORKSPACE_ID AM_REAL_HERDR PATH; do
+    for _k in CLAUDE_CONFIG_DIR CODEX_HOME AM_BOT_ID AM_HOOK_TOKEN AM_PORT AM_RUN_ID AM_AGENT_NAME AM_KIND AM_MODEL AM_EFFORT AM_PROJECT_ID AM_WORKSPACE_ID AM_OUTBOX AM_REAL_HERDR PATH; do
         eval "_v=\${$_k:-}"
         [ -n "$_v" ] || continue
         case " $_seen " in
@@ -381,7 +381,7 @@ mod tests {
             // 在 bot 的 pane 裡跑測試時，AM_BOT_ID／AM_HOOK_TOKEN／AM_PORT 都有值，shim 會真的去打
             // 正在跑的 daemon——而雙角色上線之後，daemon 會把寫給 AGM 的那句攔進佇列、shim 不再轉給
             // herdr，測試就看到空輸出。需要這幾個值的測試自己設。
-            for key in ["AM_MODEL", "AM_EFFORT", "AM_KIND", "AM_BOT_ID", "AM_HOOK_TOKEN", "AM_PORT", "AM_INSTANCE", "AM_DATA_DIR"] {
+            for key in ["AM_MODEL", "AM_EFFORT", "AM_KIND", "AM_BOT_ID", "AM_HOOK_TOKEN", "AM_PORT", "AM_INSTANCE", "AM_DATA_DIR", "AM_OUTBOX"] {
                 cmd.env_remove(key);
             }
             for (k, v) in env {
@@ -417,6 +417,19 @@ mod tests {
         // `pane split` 以母 pane 為基準，本來就同 workspace：不補。
         let (out, _) = s.run(&[("AM_WORKSPACE_ID", "w1HJ")], &["pane", "split", "--pane", "w168:p1"]);
         assert!(!out.iter().any(|a| a == "--workspace"), "{out:?}");
+    }
+
+    /// §6.5f：子 pane 寫的檔案也要落在母 bot 的 outbox，使用者才在同一個地方看得到。
+    #[test]
+    fn a_child_pane_inherits_the_outbox() {
+        let s = Sandbox::new();
+        let outbox = [("AM_OUTBOX", "/data/outbox/B1")];
+        for argv in [&["pane", "split", "--pane", "w168:p1"][..], &["tab", "create", "--cwd", "/tmp"][..]] {
+            let (out, _) = s.run(&outbox, argv);
+            assert!(out.windows(2).any(|w| w[0] == "--env" && w[1] == "AM_OUTBOX=/data/outbox/B1"), "{argv:?} → {out:?}");
+        }
+        let (out, _) = s.run(&[], &["pane", "split", "--pane", "w168:p1"]);
+        assert!(!out.iter().any(|a| a.starts_with("AM_OUTBOX=")), "母 pane 沒有就不帶：{out:?}");
     }
 
     #[test]
