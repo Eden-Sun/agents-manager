@@ -241,7 +241,7 @@ pub fn merge_identities(
 ) -> Vec<(crate::config::IdentityCfg, &'static str)> {
     let host = if host.is_empty() { LOCAL_HOST } else { host };
     let mut out: Vec<(crate::config::IdentityCfg, &'static str)> = Vec::new();
-    let mut push = |out: &mut Vec<(crate::config::IdentityCfg, &'static str)>, i: &crate::config::IdentityCfg, src: &'static str| {
+    let push = |out: &mut Vec<(crate::config::IdentityCfg, &'static str)>, i: &crate::config::IdentityCfg, src: &'static str| {
         if !out.iter().any(|(x, _)| x.name == i.name) {
             out.push((i.clone(), src));
         }
