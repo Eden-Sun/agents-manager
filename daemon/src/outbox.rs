@@ -45,6 +45,27 @@ pub(crate) fn ensure(data_dir: &Path, bot_id: &str) -> Option<PathBuf> {
     Some(dir)
 }
 
+/// 這顆 bot 的 outbox 這條路本身能不能信：`outbox` 與 `<bot_id>` 兩段都不能是符號連結，擁有者要跟資料目錄同一個 uid。
+/// [`resolve`] 以**解開後**的目錄當界線：bot 把自己的 outbox 換成指向 `~/.codex` 的連結，界線就整個搬過去，
+/// `auth.json` 列得出來、載得下來（review 2026-09-16 core 11 洞 1——原本在 scratchpad，換成 outbox 之後同一個形狀還在）。
+/// 還不存在的段落不算不安全（還沒寫過、被清理收掉）。
+pub(crate) fn dir_is_trusted(data_dir: &Path, dir: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    let Ok(owner) = std::fs::metadata(data_dir).map(|m| m.uid()) else { return false };
+    let Ok(rel) = dir.strip_prefix(data_dir) else { return false };
+    let mut at = data_dir.to_path_buf();
+    for part in rel.components() {
+        at.push(part);
+        match std::fs::symlink_metadata(&at) {
+            Ok(m) if m.file_type().is_symlink() || !m.is_dir() || m.uid() != owner => return false,
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return true,
+            Err(_) => return false,
+        }
+    }
+    true
+}
+
 /// 不列、不給下載的檔案（2a96096 的黑名單，在 outbox 上保留當第二道：規則本來就禁止放這些，放了也拿不走）。
 /// 先看名字（隱藏檔、資料庫與它的旁檔、金鑰與憑證），名字看不出來的再看開頭幾個位元組（改過副檔名的 SQLite、PEM 私鑰）。
 pub(crate) fn withheld(path: &Path) -> bool {
@@ -60,8 +81,13 @@ fn withheld_name(name: &str) -> bool {
     if name.contains(".sqlite") || name.ends_with(".db") || name.contains(".db-") || name.contains(".db.") {
         return true;
     }
-    const KEYS: [&str; 9] = [".pem", ".key", ".p12", ".pfx", ".jks", ".keystore", ".ppk", ".kdbx", ".env"];
-    KEYS.iter().any(|ext| name.ends_with(ext)) || ["id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"].iter().any(|k| name.starts_with(k))
+    const KEYS: [&str; 12] =
+        [".pem", ".key", ".p12", ".pfx", ".jks", ".keystore", ".ppk", ".kdbx", ".env", ".token", ".keychain", ".keychain-db"];
+    // 名單以外、但就是憑證的常見檔名：codex OAuth、gcloud ADC、gh 的 hosts.yml、這個 daemon 自己的 ui-token（review core 11 洞 2）。
+    const CREDENTIAL_FILES: [&str; 5] = ["auth.json", "credentials.json", "application_default_credentials.json", "hosts.yml", "ui-token"];
+    KEYS.iter().any(|ext| name.ends_with(ext))
+        || CREDENTIAL_FILES.contains(&name)
+        || ["id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"].iter().any(|k| name.starts_with(k))
 }
 
 fn withheld_content(path: &Path) -> bool {
@@ -191,6 +217,10 @@ pub async fn list(State(app): State<Arc<App>>, UrlPath(id): UrlPath<String>) -> 
         }
         Err(e) => return Err(e),
     };
+    if !dir_is_trusted(&app.data_dir, &dir) {
+        tracing::warn!(bot = %id, dir = %dir.display(), "outbox path is a symlink or not ours; not listing it");
+        return Ok((StatusCode::OK, axum::Json(json!({"files": [], "ttl_secs": TTL_SECS, "reason": "outbox_untrusted"}))).into_response());
+    }
     // 讀目錄、讀檔頭是同步的：別卡在 async worker 上。目錄不在（還沒寫過、被清理收掉）就是空清單。
     let scan_dir = dir.clone();
     let files = tokio::task::spawn_blocking(move || scan(&scan_dir, now_secs())).await.unwrap_or_default();
@@ -206,6 +236,9 @@ pub async fn file(
     let not_found = || LcError::NotFound("file".into());
     let requested = q.get("path").ok_or_else(|| LcError::Bad("path required".into()))?;
     let dir = outbox_of(&app, &id).await?;
+    if !dir_is_trusted(&app.data_dir, &dir) {
+        return Err(not_found());
+    }
     let path = servable(&dir, requested).ok_or_else(not_found)?;
     let meta = tokio::fs::metadata(&path).await.map_err(|_| not_found())?;
     if meta.len() > MAX_BYTES {
@@ -292,12 +325,17 @@ mod tests {
         put("id_ed25519", b"x");
         put("prod.env", b"TOKEN=x");
         put(".env", b"TOKEN=x");
+        put("auth.json", b"{\"tokens\":{}}");
+        put("application_default_credentials.json", b"{}");
+        put("hosts.yml", b"github.com:\n  oauth_token: x");
+        put("ui-token", b"abc");
+        put("gh.token", b"abc");
         std::fs::write(root.join(".secret/plain.txt"), b"hi").unwrap();
 
         let listed: Vec<String> = scan(&root, 0).iter().map(|f| f["name"].as_str().unwrap().to_string()).collect();
         assert_eq!(listed, vec!["report.md".to_string()], "只剩一般檔案");
         assert!(servable(&root, "report.md").is_some());
-        for p in ["migrate-check.sqlite3", "bak1644.db", "bak1644.db-wal", "agents-manager.sqlite3.bak-20260916", "innocent.bin", "server.pem", "notes.txt", "id_ed25519", "prod.env", ".env", ".secret/plain.txt"] {
+        for p in ["migrate-check.sqlite3", "bak1644.db", "bak1644.db-wal", "agents-manager.sqlite3.bak-20260916", "innocent.bin", "server.pem", "notes.txt", "id_ed25519", "prod.env", ".env", ".secret/plain.txt", "auth.json", "application_default_credentials.json", "hosts.yml", "ui-token", "gh.token"] {
             assert!(servable(&root, p).is_none(), "{p} 不能下載");
         }
         std::fs::remove_dir_all(&base).unwrap();
@@ -382,6 +420,32 @@ mod tests {
         let (status, bytes) = body(list(State(env.app.clone()), UrlPath(bot.id.clone())).await.unwrap()).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["files"], json!([]));
+    }
+
+    /// review 2026-09-16 core 11 洞 1：bot 把自己的 outbox 換成指向別處（例如 `~/.codex`）的符號連結，界線不能跟著搬過去。
+    #[tokio::test]
+    async fn a_symlinked_outbox_is_neither_listed_nor_served() {
+        let env = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&env.app, &env.project_id, "alfa").await;
+        let elsewhere = env.dir.join("dot-codex");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("session-notes.md"), b"# not for download").unwrap();
+        let outbox = dir_for(&env.app.data_dir, &bot.id).unwrap();
+        std::fs::create_dir_all(outbox.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &outbox).unwrap();
+
+        assert!(!dir_is_trusted(&env.app.data_dir, &outbox));
+        let (status, bytes) = body(list(State(env.app.clone()), UrlPath(bot.id.clone())).await.unwrap()).await;
+        assert_eq!(status, StatusCode::OK);
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!((v["files"].clone(), v["reason"].clone()), (json!([]), json!("outbox_untrusted")));
+        assert_eq!(get_file(&env.app, &bot.id, "session-notes.md").await.0, StatusCode::NOT_FOUND);
+
+        // 真的目錄照常；還沒建也不算不安全。
+        std::fs::remove_file(&outbox).unwrap();
+        assert!(dir_is_trusted(&env.app.data_dir, &outbox), "還沒建");
+        ensure(&env.app.data_dir, &bot.id).unwrap();
+        assert!(dir_is_trusted(&env.app.data_dir, &outbox));
     }
 
     /// 遠端主機的 bot：清單回空＋原因，下載不給。
