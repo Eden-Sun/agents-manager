@@ -29,6 +29,40 @@ const QUOTA_BLIND_WAIT_SECS: i64 = 30 * 60;
 /// 無限重送只會把一件做不完的事永遠掛在清單上。
 const MAX_QUOTA_RETRIES: i64 = 6;
 
+/// 409（對方正在回合中、bot 沒在跑…）是暫時的，但「暫時」要有盡頭。
+///
+/// 原本這條分支用同一張 `RETRY_BACKOFF`（上限 5 分鐘）而且**沒有次數上限**：對一顆回合 10～20 分鐘
+/// 的 bot，等於每 5 分鐘賭一次「它剛好在兩個回合之間」，忙的時候永遠賭不到，而交辦會一直停在
+/// `queued` 排到有人 cancel——2026-09-16 有一張就這樣重試 12 次、42 分鐘後被手動取消。
+/// 真正的修法是讓派送排進佇列（k8bw2f 的送達線），這裡是保險絲：就算那條壞了也不能無聲消失。
+const CONFLICT_BACKOFF_CAP_SECS: i64 = 900;
+/// 送不進去多久之後放棄重試、改成讓人看得見。**不判 fail**：工作沒失敗，是進不去。
+const CONFLICT_GIVE_UP_MINS: i64 = 30;
+pub const CONFLICT_BACKOFF_ENV: &str = "AM_DISPATCH_CONFLICT_BACKOFF_SECS";
+pub const CONFLICT_GIVE_UP_ENV: &str = "AM_DISPATCH_CONFLICT_GIVE_UP_MINS";
+
+/// 環境變數覆寫，壞值（看不懂、0、負數）一律回預設——一個手滑的值不該把保險絲變成「立刻放棄」。
+fn env_i64(key: &str, default: i64) -> i64 {
+    std::env::var(key).ok().and_then(|v| v.trim().parse::<i64>().ok()).filter(|n| *n > 0).unwrap_or(default)
+}
+
+/// 409 自己的退避梯：15 秒起每次加倍，上限預設 900 秒（大於典型回合長度）。
+fn conflict_backoff_secs(attempts: i64) -> i64 {
+    let cap = env_i64(CONFLICT_BACKOFF_ENV, CONFLICT_BACKOFF_CAP_SECS);
+    let n = attempts.clamp(0, 16) as u32;
+    15i64.saturating_mul(1i64 << n).min(cap)
+}
+
+/// 從建立到現在超過門檻就不要再賭了。
+fn conflict_gave_up(created_at: &str, now: chrono::DateTime<chrono::Utc>) -> bool {
+    let limit = env_i64(CONFLICT_GIVE_UP_ENV, CONFLICT_GIVE_UP_MINS);
+    match chrono::DateTime::parse_from_rfc3339(created_at) {
+        Ok(t) => (now - t.with_timezone(&chrono::Utc)).num_minutes() >= limit,
+        // 讀不懂時間就不要放棄：寧可繼續重試，也不要因為一個壞欄位把工作收起來。
+        Err(_) => false,
+    }
+}
+
 fn backoff_for(attempts: i64) -> Duration {
     let i = (attempts.max(0) as usize).min(RETRY_BACKOFF.len() - 1);
     Duration::from_secs(RETRY_BACKOFF[i])
@@ -129,8 +163,13 @@ pub async fn dispatch(app: &Arc<App>, assignment_id: &str) {
         // A busy bot, an in-flight turn, a bot that is not running: all temporary, all keep
         // the assignment queued with the same id.
         Err(LcError::Conflict(v)) => {
-            let wait = backoff_for(a.attempts).as_secs() as i64;
-            let _ = store::defer(&app.db, &a.id, &iso_in(wait), &conflict_reason(&v)).await;
+            let why = conflict_reason(&v);
+            if conflict_gave_up(&a.created_at, chrono::Utc::now()) {
+                undeliverable(app, &a, &why).await;
+            } else {
+                let wait = conflict_backoff_secs(a.attempts);
+                let _ = store::defer(&app.db, &a.id, &iso_in(wait), &why).await;
+            }
         }
         Err(LcError::NotFound(what)) => {
             dispatch_failed(app, &a, &format!("not found: {what}")).await;
@@ -183,6 +222,30 @@ fn conflict_reason(v: &serde_json::Value) -> String {
 /// the work. So it lands on `awaiting_review` like any other outcome, with `turn_status =
 /// dispatch_failed`, and AGM decides whether to re-target it, follow it up or drop it. Work the
 /// user believes is running must not disappear from the list on the daemon's own say-so.
+/// 一直送不進去：標成 `blocked` 並推一則 inbox 事件——**不能只寫 log**，那等於沒人知道。
+/// 不判 `dispatch_failed`：工作沒失敗，是進不去那顆 bot（它一直在回合中），該由 AGM 決定怎麼辦。
+async fn undeliverable(app: &Arc<App>, a: &store::Assignment, why: &str) {
+    let mins = env_i64(CONFLICT_GIVE_UP_ENV, CONFLICT_GIVE_UP_MINS);
+    let note = format!("對方一直在回合中，沒有排進佇列（{mins} 分鐘內試了 {} 次，最後一次：{why}）", a.attempts);
+    if !store::mark_undeliverable(&app.db, &a.id, &note).await.unwrap_or(false) {
+        return; // 這一輪已經被別的路徑改掉了（結案、取消…）：不要蓋回去
+    }
+    tracing::warn!(assignment = %a.id, bot = %a.target_bot_id, attempts = a.attempts, why, "assignment could not be delivered; marked blocked");
+    let _ = store::push_inbox(
+        &app.db,
+        &event_key("assignment_undeliverable", a),
+        "assignment_undeliverable",
+        Some(&a.id),
+        Some(&a.target_bot_id),
+        None,
+        &json!({"assignment_id": a.id, "target_bot_id": a.target_bot_id, "attempts": a.attempts,
+                "waited_mins": mins, "reason": why, "status": "blocked",
+                "hint": "那顆 bot 一直在回合中。等它空下來再 `assign` 一次（同一個 request id），或改派給別人。"}),
+    )
+    .await;
+    app.emit("supervisor_changed", json!({"assignment_id": a.id, "status": "blocked"})).await;
+}
+
 async fn dispatch_failed(app: &Arc<App>, a: &store::Assignment, why: &str) {
     tracing::warn!(assignment = %a.id, bot = %a.target_bot_id, why, "assignment could not be dispatched");
     settle(app, a, "dispatch_failed", true, None, Some(why)).await;
@@ -1025,6 +1088,30 @@ pub async fn respawn(app: &Arc<App>) {
 mod tests {
     use super::*;
 
+    /// 409 的退避要爬得過一個典型回合（10～20 分鐘），而且壞掉的環境變數不能把保險絲變成
+    /// 「立刻放棄」（review 續補 2026-09-16）。
+    #[test]
+    fn the_conflict_backoff_climbs_past_a_typical_turn_and_then_stops() {
+        assert_eq!(
+            [0, 1, 2, 3, 4, 5, 6, 7, 40].map(conflict_backoff_secs),
+            [15, 30, 60, 120, 240, 480, 900, 900, 900],
+            "15 秒起加倍，上限 900（>典型回合）"
+        );
+        // 泛用那條梯子沒被動到：其他分支的行為不變。
+        assert_eq!([0, 4, 9].map(|a| backoff_for(a).as_secs()), [15, 300, 300]);
+    }
+
+    /// 送不進去多久才算「不要再賭了」。讀不懂的時間**不放棄**：寧可繼續重試，也不要因為一個
+    /// 壞欄位把工作收起來。
+    #[test]
+    fn the_fuse_only_blows_after_the_window_and_never_on_a_bad_timestamp() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-16T12:00:00Z").unwrap().with_timezone(&chrono::Utc);
+        assert!(!conflict_gave_up("2026-09-16T11:31:00Z", now), "29 分鐘還在重試");
+        assert!(conflict_gave_up("2026-09-16T11:30:00Z", now), "滿 30 分鐘就換一條路");
+        assert!(conflict_gave_up("2026-09-16T10:00:00Z", now));
+        assert!(!conflict_gave_up("not-a-time", now));
+    }
+
     /// 2026-09-13 實況：22:15:22 派工，CLI 橫幅還印著剛過去 22 秒的 `10:15 PM`，app-server 卻
     /// 已經說 22:20 重置。兩邊都看、取最早且未來的那個——只信橫幅會把交辦排去等 24 小時。
     #[test]
@@ -1417,6 +1504,42 @@ mod mission_quota_tests {
         assert_eq!(a.turn_status.as_deref(), Some("quota_exhausted"));
         let m = mstore::get(&app.db, &mid).await.unwrap().unwrap();
         assert_eq!(m.paused_reason.as_deref(), Some("no_fable_for_verifier"));
+    }
+
+    /// 送不進去的交辦要**看得見**：標成 blocked（不是 failed——工作沒失敗，是進不去），
+    /// 並推一則 AGM 收得到的 inbox 事件。只寫 log 等於沒人知道，那張 42 分鐘的交辦就是這樣消失的。
+    #[tokio::test]
+    async fn an_assignment_that_never_lands_becomes_visible_instead_of_retrying_forever() {
+        let app = app().await;
+        bot(&app, "b-busy", "cc0", None).await;
+        let a = store::insert_assignment(&app.db, None, "b-busy", "stuck", "做 X", &[], None, true).await.unwrap();
+        // 這一筆是半小時前建立的，而對方一直在回合中。
+        sqlx::query("UPDATE supervisor_assignments SET created_at=?, attempts=9 WHERE id=?")
+            .bind((chrono::Utc::now() - chrono::Duration::minutes(45)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+            .bind(&a.id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let a = store::assignment(&app.db, &a.id).await.unwrap().unwrap();
+
+        undeliverable(&app, &a, "turn_in_flight: a turn is already in flight").await;
+
+        let after = store::assignment(&app.db, &a.id).await.unwrap().unwrap();
+        assert_eq!(after.status, "blocked", "不是 failed：工作沒失敗，是進不去");
+        assert!(after.is_open(), "還是未結案，不會從 ownership 衝突裡消失");
+        assert_eq!(after.next_attempt_at, None, "不再每隔幾分鐘賭一次");
+        assert!(after.error.as_deref().is_some_and(|e| e.contains("一直在回合中")), "{:?}", after.error);
+
+        let rows: Vec<(String, Option<String>)> =
+            sqlx::query_as("SELECT kind, assignment_id FROM supervisor_inbox").fetch_all(&app.db).await.unwrap();
+        assert!(
+            rows.iter().any(|(k, id)| k == "assignment_undeliverable" && id.as_deref() == Some(a.id.as_str())),
+            "AGM 要看得到：{rows:?}"
+        );
+        // 已經被別的路徑改掉的那一筆不會被蓋回去。
+        sqlx::query("UPDATE supervisor_assignments SET status='cancelled' WHERE id=?").bind(&a.id).execute(&app.db).await.unwrap();
+        undeliverable(&app, &a, "again").await;
+        assert_eq!(store::assignment(&app.db, &a.id).await.unwrap().unwrap().status, "cancelled");
     }
 
     #[tokio::test]

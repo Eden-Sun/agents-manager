@@ -1234,6 +1234,22 @@ pub async fn defer(pool: &SqlitePool, id: &str, next_attempt_at: &str, why: &str
     Ok(())
 }
 
+/// 一直送不進去：標成 `blocked` 而**不是** `dispatch_failed`——工作沒有失敗，是進不去那顆 bot。
+/// `blocked` 仍在 `OPEN_STATES` 裡（不會從未結案與 ownership 衝突裡消失），但不再每隔幾分鐘重試。
+pub async fn mark_undeliverable(pool: &SqlitePool, id: &str, why: &str) -> Result<bool> {
+    Ok(sqlx::query(
+        "UPDATE supervisor_assignments SET status='blocked', error=?, next_attempt_at=NULL, updated_at=?
+          WHERE id=? AND status='queued'",
+    )
+    .bind(why)
+    .bind(crate::db::now())
+    .bind(id)
+    .execute(pool)
+    .await?
+    .rows_affected()
+        > 0)
+}
+
 /// What one execution outcome did to the world.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Settled {
