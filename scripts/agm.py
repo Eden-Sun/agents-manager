@@ -668,14 +668,20 @@ def cmd_lease(client: Client, cfg: dict, args) -> object:
             query["exclude"] = ",".join(args.exclude_bot)
         if args.approval:
             query["approval"] = args.approval
+        # --owner：以這個人的身分問，他自己握的租約不算擋（SPEC §18.10「自己的租約不擋自己」）。
+        # 只有明確帶了才送：不帶就是舊行為，每一把租約都算擋。
+        if args.owner:
+            query["owner"] = args.owner
         return client.get("/api/supervisor/maintenance/safety", query or None)
     if not args.resource:
         raise AgmError("bad_args", f"lease {args.op} 需要 resource（rebuild / restart）", 2)
+    # acquire／renew／release 一定要有 owner：沒帶就用 $AM_AGENT_NAME（safety 則刻意不補，見上）。
+    owner = args.owner or os.environ.get("AM_AGENT_NAME", "agm-ops")
     path = f"/api/supervisor/leases/{urllib.parse.quote(args.resource)}/{args.op}"
     if args.op == "acquire":
         if not args.approval:
             raise AgmError("bad_args", "lease acquire 需要 --approval（核准 id）", 2)
-        body: dict = {"owner": args.owner, "approval_id": args.approval, "require_idle": not args.allow_busy}
+        body: dict = {"owner": owner, "approval_id": args.approval, "require_idle": not args.allow_busy}
         if args.commit:
             body["commit"] = args.commit
         if args.ttl:
@@ -687,7 +693,7 @@ def cmd_lease(client: Client, cfg: dict, args) -> object:
         raise AgmError("bad_args", f"lease {args.op} 需要 --fence（acquire 回傳的那個）", 2)
     # renew／release 要出示 acquire 當下發的一次性憑證：owner 與 fence 是公開欄位
     # （`lease status` 就看得到），只靠它們等於誰都能把別人正在換 binary 的窗口收掉。
-    body = {"owner": args.owner, "fence": args.fence}
+    body = {"owner": owner, "fence": args.fence}
     if args.ttl:
         body["ttl_secs"] = args.ttl
     if args.lease_token:
@@ -1092,7 +1098,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     s.add_argument("op", choices=["safety", "acquire", "renew", "release", "status"])
     s.add_argument("resource", nargs="?", choices=["rebuild", "restart"], help="acquire/renew/release 的目標")
-    s.add_argument("--owner", default=os.environ.get("AM_AGENT_NAME", "agm-ops"), help="誰持有（預設 $AM_AGENT_NAME）")
+    s.add_argument(
+        "--owner",
+        help="acquire/renew/release：誰持有（預設 $AM_AGENT_NAME）；safety：以這個人的身分問，他自己握的租約不算擋（不帶＝每一把都算擋）",
+    )
     s.add_argument("--approval", help="acquire：核准 id；safety：用這筆核准的等待時間判斷要不要縮小封鎖面")
     s.add_argument("--commit", help="acquire：要處理的 commit，必須符合核准")
     s.add_argument("--ttl", type=int, metavar="SECS", help="租約長度（預設 900，上限 3600）")

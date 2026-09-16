@@ -99,14 +99,19 @@ pub async fn escalation(app: &Arc<App>) -> Result<Option<Escalation>, LcError> {
     escalation_for(app, None).await
 }
 
-/// 還握在別人手上的租約。縮小封鎖面時這是**唯一**新增的阻擋條件：窗口一次只給一個人。
-async fn held_leases(app: &Arc<App>) -> Result<Vec<Value>, LcError> {
+/// 還握著的租約。縮小封鎖面時這是**唯一**新增的阻擋條件：窗口一次只給一個人。
+///
+/// `own` 標出「就是發問的這個 owner 自己握的」（`owner` 給了才會是 true）。**自己的租約不擋自己**
+/// （AGM 2026-09-16，58d3587 的規格漏洞）：標準換版是同一人先拿 rebuild、build 完再拿 restart，
+/// 把自己手上的 rebuild 也算成「別人握著窗口」，restart 就會被卡到 rebuild 自己到期為止。
+async fn held_leases(app: &Arc<App>, owner: Option<&str>) -> Result<Vec<Value>, LcError> {
     let now = crate::db::now();
     let mut out = Vec::new();
     for resource in RESOURCES {
         let l = store::lease(&app.db, resource).await.map_err(|e| LcError::Upstream(e.to_string()))?;
         if let Some(l) = l.filter(|l| l.held_at(&now)) {
-            out.push(json!({"resource": resource, "owner": l.owner, "fence": l.fence, "expires_at": l.expires_at}));
+            let own = owner.is_some_and(|o| l.owner.as_deref() == Some(o));
+            out.push(json!({"resource": resource, "owner": l.owner, "own": own, "fence": l.fence, "expires_at": l.expires_at}));
         }
     }
     Ok(out)
@@ -249,6 +254,17 @@ pub async fn safety(app: &Arc<App>, exclude: &[String]) -> Result<Value, LcError
 
 /// 同一份檢查，但升級的計時綁在 `approval_id` 那一筆核准上（見 [`escalation_for`]）。
 pub async fn safety_for(app: &Arc<App>, exclude: &[String], approval_id: Option<&str>) -> Result<Value, LcError> {
+    safety_as(app, exclude, approval_id, None).await
+}
+
+/// 再多一個 `owner`：以這個人的身分問，**他自己握的租約不算擋**（只在縮小封鎖面時有差，
+/// 全靜止模式本來就不看租約）。不給 `owner` 就是舊行為：每一把租約都算擋。
+pub async fn safety_as(
+    app: &Arc<App>,
+    exclude: &[String],
+    approval_id: Option<&str>,
+    owner: Option<&str>,
+) -> Result<Value, LcError> {
     let bots = crate::db::live_bots(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     let sup = store::get_or_init(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     let mut working = Vec::new();
@@ -299,14 +315,16 @@ pub async fn safety_for(app: &Arc<App>, exclude: &[String], approval_id: Option<
         }
     }
     let open = store::open_assignments(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?;
-    let held = held_leases(app).await?;
+    let held = held_leases(app, owner).await?;
+    // 擋人的只有別人的：同一個 owner 先拿 rebuild 再拿 restart 是標準換版流程，不是搶窗口。
+    let held_by_others = held.iter().filter(|l| l.get("own") != Some(&Value::Bool(true))).count();
     let esc = escalation_for(app, approval_id).await?;
     // Not knowing about even one bot is enough to refuse: the window's whole promise is that
     // nothing is running, and we cannot promise that about a bot we could not look at.
     let strict = working.is_empty() && in_flight.is_empty() && unreadable.is_empty();
     // 縮小封鎖面：思考中不再擋，送達臨界區、還握著的租約與讀不到畫面照擋（SPEC §18.10）。
     let escalated = esc.as_ref().is_some_and(|e| e.escalated);
-    let safe = if escalated { delivering.is_empty() && unreadable.is_empty() && held.is_empty() } else { strict };
+    let safe = if escalated { delivering.is_empty() && unreadable.is_empty() && held_by_others == 0 } else { strict };
     Ok(json!({
         "safe": safe,
         // 這一刻是不是已經放寬了，以及最早那筆沒用掉的核准等了多久（沒有這種核准時是 null）。
@@ -314,9 +332,12 @@ pub async fn safety_for(app: &Arc<App>, exclude: &[String], approval_id: Option<
         "waited_secs": esc.as_ref().map(|e| e.waited_secs),
         "escalation_approval_id": esc.as_ref().map(|e| e.approval_id.clone()),
         "escalate_after_secs": escalate_after_secs(),
-        // 放寬之後仍然會擋的兩項，列出來才看得懂為什麼還是 false。
+        // 放寬之後仍然會擋的兩項，列出來才看得懂為什麼還是 false。租約全部列出、各自帶 owner；
+        // `own: true` 的是發問者自己握的，不算擋。
         "delivering": delivering,
         "held_leases": held,
+        // 以誰的身分問的（沒給就是 null＝每一把租約都算擋）。回聲出來，呼叫端才分得出是不是舊 daemon 忽略了它。
+        "owner": owner,
         "working": working,
         "in_flight": in_flight,
         // Bots whose state could not be read this pass. Never empty *and* `safe` at once.
@@ -369,7 +390,8 @@ pub async fn acquire(
     }
 
     // 放寬與否只看**這一筆**核准等了多久：別人放著沒用的核准不能替它開門。
-    let safety = safety_for(app, exclude, Some(&approval.id)).await?;
+    // 以 acquire 的 owner 問：自己手上的 rebuild 不擋自己的 restart。
+    let safety = safety_as(app, exclude, Some(&approval.id), Some(owner)).await?;
     if require_idle && safety.get("safe") != Some(&Value::Bool(true)) {
         return Err(LcError::conflict(
             "something is still running; wait for a safe window",
@@ -410,7 +432,7 @@ pub async fn acquire(
             resource,
             owner,
             waited,
-            "這個窗口是升級後（縮小封鎖面）才拿到的：有 bot 還在回合中，只確認了沒人在送達臨界區、沒有別的租約、畫面都讀得到"
+            "這個窗口是升級後（縮小封鎖面）才拿到的：有 bot 還在回合中，只確認了沒人在送達臨界區、沒有別人的租約、畫面都讀得到"
         );
     }
     app.emit("supervisor_changed", json!({"lease": lease.to_json()})).await;
@@ -594,6 +616,86 @@ mod tests {
         let s = safety(app, &[]).await.unwrap();
         assert_eq!(s["safe"], false, "窗口一次只給一個人");
         assert_eq!(s["held_leases"][0]["owner"], "someone-else");
+    }
+
+    /// 已核准、還沒用掉的 restart 窗口（同 [`approved_window`]，只是用途不同）。
+    async fn approved_restart(app: &Arc<App>, mins: i64) -> String {
+        let a = store::create_approval(&app.db, "bot", "restart", "release", None, None, None).await.unwrap().approval;
+        store::decide_approval(&app.db, &a.id, "approved", "AGM", None, None).await.unwrap();
+        let at = (chrono::Utc::now() - chrono::Duration::minutes(mins)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        sqlx::query("UPDATE supervisor_approvals SET decided_at=? WHERE id=?").bind(&at).bind(&a.id).execute(&app.db).await.unwrap();
+        a.id
+    }
+
+    async fn hold_rebuild(app: &Arc<App>, owner: &str) {
+        store::acquire_lease(&app.db, "rebuild", owner, None, None,
+            &(chrono::Utc::now() + chrono::Duration::minutes(50)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true), &json!({}))
+            .await.unwrap().unwrap();
+    }
+
+    /// 2026-09-16 09:26Z 實況：k8bw2f 先拿 rebuild（fence 21）、build 完要拿 restart，`held_leases` 列出來的就是它自己那把。
+    /// 標準換版流程（同一人先 rebuild 後 restart）不能被自己卡到 rebuild 到期。
+    #[tokio::test]
+    async fn my_own_rebuild_lease_does_not_block_my_escalated_restart() {
+        let e = crate::testing::env().await;
+        let (app, pid) = (&e.app, e.project_id.clone());
+        // 有人在思考中：全靜止模式會擋，所以拿得到窗口只可能是走升級那條路。
+        thinking_bot(app, &pid, "user").await;
+        hold_rebuild(app, "k8bw2f").await;
+        let restart = approved_restart(app, 40).await;
+
+        let taken = acquire(app, "restart", "k8bw2f", &restart, None, 300, true, &[]).await.unwrap();
+        assert_eq!(taken["safety"]["escalated"], true);
+        assert_eq!(taken["safety"]["held_leases"][0]["owner"], "k8bw2f");
+        assert_eq!(taken["safety"]["held_leases"][0]["own"], true, "自己的那把要標出來，而且不算擋");
+        assert_eq!(taken["lease"]["owner"], "k8bw2f");
+    }
+
+    /// 別人握著 rebuild 時照擋：「窗口一次只給一個人」的語意不變。
+    #[tokio::test]
+    async fn someone_elses_rebuild_lease_still_blocks_an_escalated_restart() {
+        let e = crate::testing::env().await;
+        let (app, pid) = (&e.app, e.project_id.clone());
+        thinking_bot(app, &pid, "user").await;
+        hold_rebuild(app, "someone-else").await;
+        let restart = approved_restart(app, 40).await;
+
+        let refused = acquire(app, "restart", "k8bw2f", &restart, None, 300, true, &[]).await.unwrap_err();
+        let LcError::Conflict(detail) = &refused else { panic!("expected a conflict, got {refused:?}") };
+        assert_eq!(detail["reason"], "not_idle");
+        assert_eq!(detail["safety"]["escalated"], true, "有升級，擋下來的是別人的租約");
+        assert_eq!(detail["safety"]["held_leases"][0]["owner"], "someone-else");
+        assert_eq!(detail["safety"]["held_leases"][0]["own"], false);
+        assert!(store::lease(&app.db, "restart").await.unwrap().is_none(), "拿不到就什麼都不該留下");
+    }
+
+    /// 唯讀 safety：不帶 owner 維持舊行為（全部列出、全部算擋）；帶了 owner 用同一條規則排除自己的。
+    #[tokio::test]
+    async fn read_only_safety_only_excludes_leases_when_asked_as_their_owner() {
+        let e = crate::testing::env().await;
+        let (app, pid) = (&e.app, e.project_id.clone());
+        thinking_bot(app, &pid, "user").await;
+        hold_rebuild(app, "k8bw2f").await;
+        let restart = approved_restart(app, 40).await;
+
+        let anonymous = safety_for(app, &[], Some(&restart)).await.unwrap();
+        assert_eq!((anonymous["escalated"].as_bool(), anonymous["safe"].as_bool()), (Some(true), Some(false)), "不帶 owner：每一把都算擋");
+        assert_eq!(anonymous["held_leases"][0]["owner"], "k8bw2f");
+        assert_eq!(anonymous["held_leases"][0]["own"], false);
+        assert_eq!(anonymous["owner"], Value::Null);
+
+        let mine = safety_as(app, &[], Some(&restart), Some("k8bw2f")).await.unwrap();
+        assert_eq!(mine["safe"], true, "以握著它的人問：自己的租約不擋");
+        assert_eq!(mine["held_leases"][0]["own"], true);
+        assert_eq!(mine["owner"], "k8bw2f");
+
+        assert_eq!(safety_as(app, &[], Some(&restart), Some("someone-else")).await.unwrap()["safe"], false, "別人問照擋");
+
+        // 全靜止模式本來就不看租約：沒有可升級的核准時，帶了 owner 也照樣由 working 決定。
+        sqlx::query("DELETE FROM supervisor_approvals").execute(&app.db).await.unwrap();
+        let strict = safety_as(app, &[], None, Some("k8bw2f")).await.unwrap();
+        assert_eq!(strict["escalated"], false);
+        assert_eq!(strict["safe"], false, "非升級模式行為不變：有人在思考就不安全");
     }
 
     /// AGM 三顆（巡檢、協調者、建置 child）由呼叫端排除，門檻高低都一樣——放寬不是「連排除都不管了」。
