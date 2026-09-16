@@ -690,9 +690,19 @@ export async function createMission(
   return { mission: toMission(pick(root, 'mission') ?? raw), created: pick(root, 'created') !== false }
 }
 
-/** 舊 daemon 沒這些路由（SPA fallback 會回 index.html）。 */
+/** 這一筆任務不在（daemon 的結構化 404，`docs/API.md`「群組任務」）。 */
+export function isMissionGone(e: unknown): boolean {
+  return e instanceof ApiError && e.status === 404 && e.body.error === 'not_found'
+}
+
+/**
+ * 舊 daemon 沒這些路由（SPA fallback 會回 index.html）。
+ * 404 兩種都有：body 認得出是 daemon 的結構化錯誤就代表路由在、只是那一筆不見了——
+ * 把它一起當成「這台不支援」會因為一張過期的任務卡把整個群組任務功能靜默關掉。
+ */
 export function isMissionsUnsupported(e: unknown): boolean {
-  return e instanceof ApiError && (e.status === 404 || e.status === 405 || e.status === 501)
+  if (!(e instanceof ApiError)) return false
+  return e.status === 405 || e.status === 501 || (e.status === 404 && !isMissionGone(e))
 }
 
 export function missionRejectReason(e: unknown): string | null {
