@@ -440,16 +440,13 @@ test('seen 綁按下去那一版：排隊時新 release 到了也不會誤標新
   await settle()
   assert.equal(r.seens.length, 0, '還輪不到它送出')
 
-  // 排隊期間官方出了 0.9.1，輪詢先把它帶進畫面。
-  void store.load(true)
-  await settle()
-  r.gets[1]?.settle(behindPayload('0.9.1'))
+  // 排隊期間官方出了 0.9.1：排在前面的「重新檢查」真的去問了官方站，把它帶進畫面。
+  // （寫入期間的輪詢會延到寫完才出發，所以新版是由這個 refresh 帶進來的。）
+  r.refreshes[0]?.settle(behindPayload('0.9.1'))
   await settle()
   assert.equal(store.get()?.latest.version, '0.9.1')
 
   // 輪到 seen 送出：送的必須是按下去時看到的 0.9.0。
-  r.refreshes[0]?.settle(behindPayload('0.9.1'))
-  await settle()
   assert.equal(r.seens.length, 1)
   assert.equal(r.seens[0]?.version, '0.9.0', '不能把使用者沒看過的 0.9.1 標成已讀')
 })
@@ -491,4 +488,82 @@ test('使用者動作失敗不會卡住後面的動作', async () => {
   void store.markSeenNow()
   await settle()
   assert.equal(r.seens.length, 1, '前一個失敗了，後面的照樣送得出去')
+})
+
+// ---------------------------------------------------------------------------
+// 寫入還沒 commit 時發出的讀：它出發得比 POST 晚（序號較大），讀到的卻是 POST 生效前的狀態。
+// 只靠「出發序號」排結果，這個 GET 先回來就會把較晚回來的 POST 結果丟掉，畫面卡在未讀。
+// ---------------------------------------------------------------------------
+
+/** 載入一版未讀的 0.9.0，然後按「知道了」但讓 POST 掛著。 */
+async function seenInFlight() {
+  const r = slowRig()
+  const store = createHerdrUpdatesStore(r.deps)
+  store.subscribe(() => {})
+  await settle()
+  r.gets[0]?.settle(behindPayload('0.9.0'))
+  await settle()
+  assert.equal(store.get()?.unread, true)
+  void store.markSeenNow()
+  await settle()
+  assert.equal(r.seens.length, 1, 'POST 已送出、還沒回來')
+  return { r, store }
+}
+
+test('POST 還沒 commit 時觸發的讀，GET 先回 → 最後仍是已讀', async () => {
+  const { r, store } = await seenInFlight()
+  void store.load(true)
+  await settle()
+  // 若 GET 真的送出了，它讀到的是 POST 生效前的 daemon 狀態：先讓它回來。
+  r.gets[1]?.settle(behindPayload('0.9.0'))
+  await settle()
+  r.seens[0]?.d.settle({ ...behindPayload('0.9.0'), unread: false })
+  await settle()
+  // 讀若被延到寫入之後，這時才送出；它看到的是 commit 後的狀態。
+  r.gets[1]?.settle({ ...behindPayload('0.9.0'), unread: false })
+  await settle()
+  assert.equal(store.get()?.unread, false, 'POST 的結果不能因為一個較晚出發、較早回來的 GET 被丟掉')
+})
+
+test('POST 還沒 commit 時觸發的讀，GET 後回 → 最後仍是已讀', async () => {
+  const { r, store } = await seenInFlight()
+  void store.load(true)
+  await settle()
+  r.seens[0]?.d.settle({ ...behindPayload('0.9.0'), unread: false })
+  await settle()
+  assert.equal(store.get()?.unread, false, 'POST 一回來就是已讀')
+  // GET 回來時 daemon 已經 commit：它讀到的也是已讀。
+  r.gets[1]?.settle({ ...behindPayload('0.9.0'), unread: false })
+  await settle()
+  assert.equal(store.get()?.unread, false)
+})
+
+test('寫入期間的讀不會被吞掉：寫完之後一定補送一次 GET', async () => {
+  const { r, store } = await seenInFlight()
+  void store.load(true)
+  await settle()
+  r.seens[0]?.d.settle({ ...behindPayload('0.9.0'), unread: false })
+  await settle()
+  assert.equal(r.gets.length, 2, '寫入結束後要真的讀一次，不是當作沒發生')
+  r.gets[1]?.settle({ ...behindPayload('0.9.1'), unread: true })
+  await settle()
+  assert.equal(store.get()?.latest.version, '0.9.1', '寫完之後讀到的新 release 照常顯示')
+})
+
+test('寫入前就出發的 GET 先回、POST 後回 → POST 的結果勝出', async () => {
+  const r = slowRig()
+  const store = createHerdrUpdatesStore(r.deps)
+  store.subscribe(() => {})
+  await settle()
+  r.gets[0]?.settle(behindPayload('0.9.0'))
+  await settle()
+  void store.load(true)
+  await settle()
+  void store.markSeenNow()
+  await settle()
+  r.gets[1]?.settle(behindPayload('0.9.0'))
+  await settle()
+  r.seens[0]?.d.settle({ ...behindPayload('0.9.0'), unread: false })
+  await settle()
+  assert.equal(store.get()?.unread, false)
 })

@@ -53,6 +53,8 @@ export function createHerdrUpdatesStore(deps: StoreDeps): HerdrUpdatesStore {
   let readInflight: Promise<void> | null = null
   /** 使用者動作排成一列，彼此不交錯。 */
   let writes: Promise<unknown> = Promise.resolve()
+  /** 還沒回來的使用者動作數。> 0 時新的讀要等它們 commit 完才出發。 */
+  let pendingWrites = 0
   /** 送出的第幾個請求 / 最後一個寫進 `cached` 的請求。舊請求的回應不准蓋掉新的。 */
   let started = 0
   let published = 0
@@ -97,8 +99,11 @@ export function createHerdrUpdatesStore(deps: StoreDeps): HerdrUpdatesStore {
     const at = cached?.syncedAt
     if (!force && at != null && deps.now() - at < FRESH_MS) return Promise.resolve()
     if (readInflight) return readInflight
-    const seq = ++started
-    readInflight = settle(seq, deps.fetchCache).finally(() => {
+    // 寫入還沒 commit 時不發讀：那個 GET 出發得比 POST 晚（序號較大），讀到的卻是 POST 生效前的狀態，
+    // 先回來就會讓較晚回來的 POST 結果被序號規則丟掉，畫面卡在未讀。排在寫入後面才出發、才取號，
+    // 讀到的一定是 commit 之後的狀態；讀本身不會被吞掉，只是晚一點送。
+    const run = () => settle(++started, deps.fetchCache)
+    readInflight = (pendingWrites > 0 ? writes.then(run) : run()).finally(() => {
       readInflight = null
     })
     return readInflight
@@ -110,7 +115,10 @@ export function createHerdrUpdatesStore(deps: StoreDeps): HerdrUpdatesStore {
    */
   const write = (call: () => Promise<HerdrUpdates>): Promise<void> => {
     // `++started` 在輪到它**真正送出**時才取號，順序才跟實際發出的順序一致。
-    const p = writes.then(() => settle(++started, call))
+    pendingWrites += 1
+    const p = writes.then(() => settle(++started, call)).finally(() => {
+      pendingWrites -= 1
+    })
     writes = p.catch(() => {})
     return p
   }
