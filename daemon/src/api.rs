@@ -1941,6 +1941,61 @@ async fn get_quota(State(app): State<Arc<App>>, Query(q): Query<HashMap<String, 
 }
 
 #[cfg(test)]
+mod delete_identity_tests {
+    use super::*;
+
+    fn ident(name: &str, kind: &str, host: Option<&str>) -> crate::config::IdentityCfg {
+        crate::config::IdentityCfg { name: name.into(), kind: kind.into(), host: host.map(String::from), env: Default::default(), args: vec![] }
+    }
+
+    /// 沒寫 host 的身分在遠端也生效（quota 那顆 `dca3c4c`），除非那台有自己同名的（config 明寫、或 shell 的 `ccN`）。
+    #[test]
+    fn a_hostless_identity_is_in_effect_on_a_remote_host_unless_that_host_has_its_own() {
+        let hostless = vec![ident("work", "codex", None)];
+        assert!(hostless_identity_in_effect(&hostless, "m4p", None, "work"));
+        let shadowed = vec![ident("work", "codex", None), ident("work", "codex", Some("m4p"))];
+        assert!(!hostless_identity_in_effect(&shadowed, "m4p", None, "work"), "那台有明寫的");
+        let cc = vec![ident("cc1", "claude", None)];
+        let m4p_shell = vec![ident("cc1", "claude", None)];
+        assert!(!hostless_identity_in_effect(&cc, "m4p", Some(&m4p_shell), "cc1"), "那台 shell 自己有 cc1");
+        assert!(hostless_identity_in_effect(&cc, "m4p", Some(&[]), "cc1"), "那台偵測過、沒有 cc1");
+        assert!(hostless_identity_in_effect(&cc, "m4p", None, "cc1"), "還沒偵測：照最保守的算");
+    }
+
+    /// 刪掉沒寫 host 的 `work`：m4p 上的 bot 正在用它（那台沒有自己的 `work`）→ 409，不能只看本機的 bot。
+    #[tokio::test]
+    async fn deleting_a_hostless_identity_is_refused_while_a_remote_bot_relies_on_it() {
+        let env = crate::testing::env().await;
+        let app = &env.app;
+        let text = |own: &str| {
+            format!(
+                "[server]\nlisten = '127.0.0.1:7788'\n\n[[identities]]\nname = 'work'\nkind = 'codex'\n{own}\n\
+                 [[projects]]\nid = 'p9'\npath = '/Users/me/wt'\nlabel = 'wt'\nhost = 'm4p'\n\n\
+                 [[projects.bots]]\nid = 'b9'\nname = 'worker'\nkind = 'codex'\nidentity = 'work'\n"
+            )
+        };
+        std::fs::write(&app.cfg.path, text("")).unwrap();
+        app.cfg.update(|_| Ok(())).await.unwrap();
+        crate::projection::project_config(&app.cfg, &app.db).await.unwrap();
+
+        let del = || delete_identity(State(app.clone()), Path("work".into()), Query(IdentityHostQuery { host: None }));
+        match del().await {
+            Err(LcError::Conflict(body)) => assert_eq!((body["bot_id"].as_str(), body["host"].as_str()), (Some("b9"), Some("m4p"))),
+            other => panic!("遠端 bot 還靠它：{:?}", other.map(|r| r.status())),
+        }
+        assert_eq!(app.cfg.get().await.identities.len(), 1, "什麼都沒刪");
+
+        // m4p 有自己的 work：刪沒寫 host 的那筆不影響那台的 bot。
+        std::fs::write(&app.cfg.path, text("\n[[identities]]\nname = 'work'\nkind = 'codex'\nhost = 'm4p'\n")).unwrap();
+        app.cfg.update(|_| Ok(())).await.unwrap();
+        crate::projection::project_config(&app.cfg, &app.db).await.unwrap();
+        del().await.expect("那台用的是自己的 work");
+        let left = app.cfg.get().await.identities;
+        assert_eq!((left.len(), left[0].host.as_deref()), (1, Some("m4p")));
+    }
+}
+
+#[cfg(test)]
 mod quota_refresh_tests {
     /// 逾時就先回，背景的探測不能被取消（它跑完照樣寫進 quota、推 WS）。
     #[tokio::test]
@@ -2023,20 +2078,42 @@ struct IdentityHostQuery {
     host: Option<String>,
 }
 
+/// `host` 上名叫 `name` 的身分，實際生效的是不是那筆**沒寫 host** 的 config（`tools::merge_identities` 的規則）。
+/// 那台還沒偵測過 shell 的 `ccN`（`shell` 是 `None`）時照「偵測完、那台沒有」算：寧可擋下一次刪除，
+/// 也不要刪掉之後那台 bot 下次啟動才發現身分沒了（quota 修正 2026-09-16 轉來）。
+fn hostless_identity_in_effect(
+    config: &[crate::config::IdentityCfg],
+    host: &str,
+    shell: Option<&[crate::config::IdentityCfg]>,
+    name: &str,
+) -> bool {
+    crate::tools::merge_identities(config, host, Some(shell.unwrap_or_default()))
+        .into_iter()
+        .find(|(i, _)| i.name == name)
+        // shell 讀到的 `ccN` 也沒有 host：要看來源，不能只看 `is_hostless`。
+        .is_some_and(|(i, source)| source == crate::tools::SOURCE_CONFIG && i.is_hostless())
+}
+
 async fn delete_identity(
     State(app): State<Arc<App>>,
     Path(name): Path<String>,
     Query(q): Query<IdentityHostQuery>,
 ) -> Result<Response, LcError> {
     let host = q.host.as_deref().map(str::trim).filter(|h| !h.is_empty()).unwrap_or(crate::config::LOCAL_HOST).to_string();
+    let cfg = app.cfg.get().await;
+    // 刪本機那一筆時，沒寫 host 的那份也一起刪（`host_or_local`）；它在遠端也適用（`tools::merge_identities` 第 4 條）。
+    let removing_hostless = host == crate::config::LOCAL_HOST && cfg.identities.iter().any(|i| i.name == name && i.is_hostless());
     for b in db::live_bots(&app.db).await.map_err(any_err)? {
         if b.identity.as_deref() != Some(name.as_str()) {
             continue;
         }
-        // 只有**同一台**的 bot 才算還在用它：同名的 `cc1` 在別台是別的帳號。
+        // 同一台的 bot 還在用它。同名的 `cc1` 在別台通常是別的帳號——除非那台用的正是這筆沒寫 host 的。
         let bot_host = db::bot_host(&app.db, &b.id).await.unwrap_or_else(|_| crate::config::LOCAL_HOST.to_string());
-        if bot_host == host {
-            return Err(LcError::conflict("identity still used by bots", json!({"bot_id": b.id})));
+        let shell = app.tools.lock().await.get(&bot_host).map(|t| t.shell_identities.clone());
+        if bot_host == host
+            || (removing_hostless && hostless_identity_in_effect(&cfg.identities, &bot_host, shell.as_deref(), &name))
+        {
+            return Err(LcError::conflict("identity still used by bots", json!({"bot_id": b.id, "host": bot_host})));
         }
     }
     let (n2, h2) = (name.clone(), host.clone());
