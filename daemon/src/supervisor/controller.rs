@@ -1484,7 +1484,7 @@ mod no_grace_period_tests {
 
     /// 拿 restart 租約，再讓一件交辦照 controller 的做法被 hold 到租約到期。
     async fn held_window(app: &Arc<App>, crid: &str) -> (store::Lease, store::Assignment) {
-        let ap = store::create_approval(&app.db, "owner", "restart", "daemon", None, None).await.unwrap();
+        let ap = store::create_approval(&app.db, "owner", "restart", "daemon", None, None, None).await.unwrap().approval;
         store::decide_approval(&app.db, &ap.id, "approved", "AGM", None, None).await.unwrap();
         let until = iso_in(900);
         let lease = store::acquire_lease(&app.db, "restart", "owner", Some(&ap.id), None, &until, &json!({})).await.unwrap().unwrap();
