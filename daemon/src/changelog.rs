@@ -103,14 +103,19 @@ pub fn pick_sections(all: &[Section], from: Option<&str>, to: &str) -> Vec<Secti
     picked
 }
 
-/// **磁碟上**的版本；跑著的 process 可能還是舊的，`update_watch` 靠這個差判斷有更新。
-pub async fn installed_version(app: &Arc<App>, host: &str, kind: &str) -> Result<String> {
+/// `<kind> --version` 印出來的**第一行原文**，例如 `2.1.5 (Claude Code)`、`herdr 0.8.2`。
+///
+/// 解析刻意留給呼叫端：各家 CLI 的招牌長得不一樣（claude 把版本放第一個 token，herdr 放在名字後面），
+/// [`version_string`] 只吃前者，硬套會讓後者永遠「看不出版本」。空輸出（找不到、跑失敗、非 0 離開）回 `Err`。
+///
+/// `kind` 也可以是可執行檔的絕對路徑（`command -v /abs/path` 認路徑），測試靠這點餵假的 CLI。
+pub async fn version_line(app: &Arc<App>, host: &str, kind: &str, timeout: Duration) -> Result<String> {
     let script = format!(
         r#"p=$( "${{SHELL:-/bin/sh}}" -lic "command -v {kind}" 2>/dev/null | tail -1 ); [ -n "$p" ] || p=$(command -v {kind} 2>/dev/null); [ -n "$p" ] && "$p" --version 2>/dev/null </dev/null | head -1 | tr -d '\r'"#
     );
     let out = if host == LOCAL_HOST {
         let o = tokio::time::timeout(
-            VERSION_TIMEOUT,
+            timeout,
             tokio::process::Command::new("/bin/sh").arg("-c").arg(&script).stdin(std::process::Stdio::null()).output(),
         )
         .await
@@ -120,8 +125,17 @@ pub async fn installed_version(app: &Arc<App>, host: &str, kind: &str) -> Result
         let conn = app.hosts.get(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
         conn.ssh_exec_path(&script).await?
     };
-    let line = out.lines().next().unwrap_or("").trim();
-    version_string(line).ok_or_else(|| anyhow!("`{kind} --version` 回了「{line}」，看不出版本"))
+    let line = out.lines().next().unwrap_or("").trim().to_string();
+    if line.is_empty() {
+        return Err(anyhow!("`{kind} --version` 沒有輸出（找不到、跑不起來或離開碼非 0）"));
+    }
+    Ok(line)
+}
+
+/// **磁碟上**的版本；跑著的 process 可能還是舊的，`update_watch` 靠這個差判斷有更新。
+pub async fn installed_version(app: &Arc<App>, host: &str, kind: &str) -> Result<String> {
+    let line = version_line(app, host, kind, VERSION_TIMEOUT).await?;
+    version_string(&line).ok_or_else(|| anyhow!("`{kind} --version` 回了「{line}」，看不出版本"))
 }
 
 pub fn source_url(kind: &str) -> &'static str {

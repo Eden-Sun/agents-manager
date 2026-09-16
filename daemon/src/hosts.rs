@@ -574,6 +574,20 @@ impl HostManager {
         self.list().await.into_iter().map(|c| c.name.clone()).collect()
     }
 
+    /// Tests only: a configured host that has never connected — no ssh master, no socket. The point
+    /// is to exercise "this host is in config but we know nothing about it yet" without a network.
+    #[cfg(test)]
+    pub async fn insert_disconnected_for_test(&self, cfg: HostCfg) {
+        let conn = HostConn::remote(cfg);
+        self.conns.lock().await.insert(conn.name.clone(), conn);
+    }
+
+    /// Tests only: forget a host, the way `apply_config` does when it leaves config.toml.
+    #[cfg(test)]
+    pub async fn remove_for_test(&self, name: &str) {
+        self.conns.lock().await.remove(name);
+    }
+
     /// Supervisors whose config is unchanged are left alone.
     pub async fn apply_config(&self, app: &Arc<App>, hosts: &[HostCfg]) -> HashSet<String> {
         let wanted: HashMap<String, HostCfg> = hosts.iter().map(|h| (h.name.clone(), h.clone())).collect();
