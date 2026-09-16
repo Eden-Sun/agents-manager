@@ -3,7 +3,9 @@
  * Prompt keywords (`blocked`/`fallback`/`slow`) and `window.__amMock` helpers: see docs/FRONTEND.md.
  */
 
+import { normalizePairCode } from '../lib/pairing'
 import { parseMentions } from './mentions'
+import { deviceTokenStore } from './sessionToken'
 import { ApiError, BOT_KINDS } from './types'
 import type { BotKind } from './types'
 import type { HttpMethod, SocketHandlers, Transport } from './transport'
@@ -24,6 +26,36 @@ const now = () => new Date().toISOString()
 
 /** herdr workspace 總欄數（2026-09-06 實測 185）；同分頁 pane 平分，獨佔分頁全拿。 */
 const WORKSPACE_COLUMNS = 185
+
+const MOCK_TOKEN = 'mock-ui-token'
+
+/** URL query 讀不到（SSR／測試）就當沒開。 */
+function mockFlag(name: string): boolean {
+  try {
+    return new URLSearchParams(location.search).get(name) === '1'
+  } catch {
+    return false
+  }
+}
+
+/**
+ * mock 預設維持原本的行為：`session()` 直接發 token。
+ *
+ * 要人工走完 LAN 配對那一段（SPEC §7.1a）就在網址加 `?pair=1`——`session()` 會像區網上的手機一樣
+ * 收到 403 `pairing_required`，畫面換成輸入配對碼。碼要另外開一個**沒帶** `?pair=1` 的分頁，
+ * 從「環境設定 → 手機配對」按出來。再加 `?pairRemote=1` 則連產碼都會被 403 `loopback_only` 擋下，
+ * 用來看「只有本機產得出來」那句說明。
+ *
+ * 配對成功的 token 跟真的一樣存進 localStorage，所以重整之後就不會再問——要重看一次配對畫面，
+ * 把 `am.session.token` 清掉（或換個無痕視窗）。
+ */
+const MOCK_PAIRING = mockFlag('pair')
+const MOCK_PAIR_REMOTE = mockFlag('pairRemote')
+/** 碼的字母表與長度跟 daemon 同一套（拿掉會唸錯的 I／O／0／1）。 */
+const PAIR_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+const PAIR_TTL_SECS = 300
+const PAIR_MAX_FAILURES = 5
+const PAIR_LOCKOUT_SECS = 600
 
 interface MockRun {
   id: string
@@ -394,6 +426,14 @@ interface MockMissionEvent {
 export class MockTransport implements Transport {
   readonly mock = true
 
+  /** 跟真 transport 用同一個保存處，配對過的 mock 分頁重整也不會被退回配對畫面。 */
+  private readonly tokens = deviceTokenStore()
+  private pairingListener: (() => void) | null = null
+  /** 發出去還沒過期的碼 → 到期時刻（epoch ms）。跟 daemon 一樣只活在記憶體。 */
+  private pairCodes = new Map<string, number>()
+  private pairFailures = 0
+  private pairLockedUntil = 0
+
   private hosts: MockHost[] = []
   /** grok missing, codex not logged in — exercises the hint UI. */
   private localTools: Record<BotKind, MockTool> = {
@@ -610,7 +650,69 @@ export class MockTransport implements Transport {
   // transport
 
   session(): Promise<string> {
-    return Promise.resolve('mock-ui-token')
+    const saved = this.tokens.get()
+    if (saved) return Promise.resolve(saved)
+    if (MOCK_PAIRING) {
+      return Promise.reject(
+        new ApiError(
+          403,
+          { error: 'pairing_required', message: '這台裝置還沒配對：在本機的環境設定按「產生配對碼」，再把碼輸入這裡。' },
+          'pairing required',
+        ),
+      )
+    }
+    return Promise.resolve(MOCK_TOKEN)
+  }
+
+  adoptToken(token: string): void {
+    this.tokens.set(token)
+  }
+
+  setPairingListener(cb: (() => void) | null): void {
+    this.pairingListener = cb
+  }
+
+  /** `POST /session/pair-code`：只有 loopback 產得出來，`?pairRemote=1` 演另一種。 */
+  private issuePairCode(): Rec {
+    if (MOCK_PAIR_REMOTE) throw new ApiError(403, { error: 'loopback_only' }, 'loopback only')
+    const code = Array.from({ length: 6 }, () => PAIR_ALPHABET[Math.floor(Math.random() * PAIR_ALPHABET.length)]).join('')
+    const expires = Date.now() + PAIR_TTL_SECS * 1000
+    this.pairCodes.set(code, expires)
+    return {
+      code: `${code.slice(0, 3)}-${code.slice(3)}`,
+      expires_in_secs: PAIR_TTL_SECS,
+      expires_at: new Date(expires).toISOString(),
+    }
+  }
+
+  /** `POST /session/pair`：碼不對／過期／用過一律同一種回答，連錯五次鎖十分鐘——跟 daemon 同一套。 */
+  private redeemPairCode(raw: string): Rec {
+    const nowMs = Date.now()
+    if (nowMs < this.pairLockedUntil) {
+      throw new ApiError(
+        429,
+        { error: 'pairing_rate_limited', retry_after_secs: Math.ceil((this.pairLockedUntil - nowMs) / 1000) },
+        'pairing rate limited',
+      )
+    }
+    const code = normalizePairCode(raw)
+    const expires = this.pairCodes.get(code)
+    if (expires === undefined || expires <= nowMs) {
+      this.pairCodes.delete(code)
+      this.pairFailures += 1
+      if (this.pairFailures >= PAIR_MAX_FAILURES) {
+        this.pairLockedUntil = nowMs + PAIR_LOCKOUT_SECS * 1000
+        this.pairFailures = 0
+      }
+      throw new ApiError(
+        403,
+        { error: 'pairing_failed', message: '配對碼不正確或已失效，請重新產生一個。' },
+        'pairing failed',
+      )
+    }
+    this.pairCodes.delete(code)
+    this.pairFailures = 0
+    return { token: MOCK_TOKEN, port: 7788 }
   }
 
   async upload(path: string, file: Blob): Promise<unknown> {
@@ -676,6 +778,8 @@ export class MockTransport implements Transport {
     const b = (body ?? {}) as Rec
     const seg = rawPath.split('/').filter(Boolean)
 
+    if (method === 'POST' && rawPath === '/session/pair-code') return this.issuePairCode()
+    if (method === 'POST' && rawPath === '/session/pair') return this.redeemPairCode(String(b.code ?? ''))
     if (method === 'GET' && rawPath === '/state') return this.state()
     // 前端已樂觀套用排序，mock 收下就好。
     // 跨裝置已讀：mock 只有一個瀏覽器，記下來就好。
@@ -2906,6 +3010,15 @@ export class MockTransport implements Transport {
   setForeignPanes(n: number) {
     this.foreignPanes = Math.max(0, Math.floor(n))
   }
+
+  /**
+   * 演「這台裝置的 token 被作廢了」（真 transport 是收到 401 之後走到這一步）：
+   * 丟掉存起來的 token，並把畫面踢回配對。`__amMock.unpair()`。
+   */
+  unpair() {
+    this.tokens.clear()
+    this.pairingListener?.()
+  }
 }
 
 function sleep(ms: number) {
@@ -2924,5 +3037,7 @@ function installDevHelpers(mock: MockTransport) {
     hosts: () => mock.hostNames(),
     // 窄 pane / 移到自己的分頁
     paneSqueeze: (n = 5) => mock.setForeignPanes(n),
+    // LAN 配對：丟掉這台裝置的 token，回到配對畫面（`?pair=1` 下才配得回來）
+    unpair: () => mock.unpair(),
   }
 }

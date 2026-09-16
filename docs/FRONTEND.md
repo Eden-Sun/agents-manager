@@ -56,5 +56,10 @@ web/src/
 - **全域鍵盤**：⌥↑／⌥↓ 換 bot（bot 列內與對話框開著時不接）；**Control+1…9 跳到側欄第 n 個專案的群組對話、把側欄捲到那一列並 focus 輸入框**（2026-09-16 使用者）——認 `event.code` 的 `Digit1…9`，所以中文輸入法照樣有效；用 Control 而非 ⌘（⌘1…9 是瀏覽器換分頁）；正在組字、對話框開著、事件已被處理就不接；第 n 個專案不存在就什麼都不做。
 - **群組任務入口**：`/api/missions` 不存在時整個入口靜默不出現，不重試不報錯。
 - **Mock**：`api/mock.ts` 的回應形狀刻意與 `daemon/src/api.rs` 一致。訊息含 `blocked`／`rm -rf` → 進 blocked；`fallback` → terminal_fallback 回覆；
-  `slow` → 延遲 8 秒。console 有 `__amMock.dropSocket() / resync() / block(name) / disconnect() / reconnect()`。
+  `slow` → 延遲 8 秒。console 有 `__amMock.dropSocket() / resync() / block(name) / disconnect() / reconnect() / unpair()`。
+- **LAN 配對（SPEC §7.1a）**：token 存 `localStorage['am.session.token']`，有存過就優先用、連 `GET /api/session` 都不問（非 loopback 問了只會拿到
+  403 `pairing_required`）；任何請求收到 401 才清掉它、重新取得一次再送，**只重試一次**。重取時又被要求配對就回到配對畫面（`store.needsPairing`）。
+  碼在「環境設定 → 手機配對」產生（`POST /api/session/pair-code`，只有 loopback 產得出來）。
+  mock 預設照舊直接發 token；`?pair=1` 讓 `session()` 回 403 `pairing_required`（走配對畫面），再加 `?pairRemote=1` 連產碼都回 403 `loopback_only`。
+  配對成功的 token 跟真的一樣落地，要重看一次配對畫面就 `__amMock.unpair()` 或清掉那個 key。
 - 深淺色跟隨系統，不提供手動切換；`prefers-reduced-motion` 關掉所有動畫。
