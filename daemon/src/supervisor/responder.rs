@@ -502,7 +502,9 @@ async fn report_missing(app: &Arc<App>, bot_id: &str) {
     .await;
     let pushed = store::push_inbox(
         &app.db,
-        &format!("responder_bot_missing:{bot_id}"),
+        // event_key 帶一個時間格：`push_inbox` 是 INSERT OR IGNORE，固定鍵的話這則一輩子只推一次，
+        // 巡檢 ack 掉之後協調者不見了就再也沒有人會被提醒（review 2026-09-16）。
+        &format!("responder_bot_missing:{bot_id}:{}", crate::db::now().get(..13).unwrap_or_default()),
         "responder_bot_missing",
         None,
         None,

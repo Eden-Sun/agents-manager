@@ -43,7 +43,11 @@ pub async fn snapshot(app: &Arc<App>) -> Result<Value, LcError> {
     // The compat projection. `status` used to mean "is AGM all right", and a caller that only
     // reads this field must not be told everything is fine while a host is down — so it is now
     // the worse of the two halves, and the halves are published next to it. See docs/SPEC.md §18.
-    let severity = crate::supervisor::incidents::worst(manager_severity, system_severity);
+    // 協調者也算進頂層：它是 bot 申請、核准請求與所有 mission 事件的**唯一**收件人，
+    // 它卡住時使用者入口顯示 healthy、沒有任何人被叫醒，申請可以躺好幾天（review 2026-09-16）。
+    // 「兩個問題兩個答案」的分格照舊留著，頂層只是不再漏掉這一半。
+    let core = crate::supervisor::incidents::worst(manager_severity, system_severity);
+    let severity = crate::supervisor::incidents::worst(&core, responder_severity);
     Ok(json!({
         "status": severity,
         "checked_at": crate::db::now(),
