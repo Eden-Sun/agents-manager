@@ -502,6 +502,20 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run
 4. orphan pane 回收：`exited/stopped` Run 的 `pane_id` 仍在 snapshot 且沒有 agent → `pane.close`。
 5. 重建各 active Run 的狀態訂閱。
 
+### 6.5.2 計畫中的 herdr server 重啟（AGM 2026-09-17，herdr 0.9.0 升級）
+herdr server 重啟會讓**所有** pane 同時消失。照 §6.5 的規則，每一顆子 agent 都會被當成「pane 關了、做完了」而軟刪，
+所有 bot 的 run 都變 `exited`，之後 autostart 也只會開新對話。
+
+1. **維護狀態**：`POST /api/supervisor/herdr-maintenance/open`（API §10.3d）。只有 AGM 角色能開關，必附理由，上限 30 分鐘，
+   逾時自動結束（讀取時就地收尾、到期也有計時器、daemon 開機會接手）；開、關、逾時都寫 `supervisor_notes`。
+2. **維護期間的對帳**：agent 不在的 run 照樣標 `exited`，但 `managed_by=child` 的 bot **不軟刪**（兩條退休路徑都一樣）。
+3. **維護結束或逾時**：這段期間被標 `exited`、到那一刻仍沒有 active run 的子 agent，照原規則退休；接回來的留著。非維護期間行為完全不變。
+4. **接回對話**：`POST /api/bots/{id}/start?resume=native`（或 `restart?resume=native`）用 DB 記的 native session 啟動；
+   接不回就回 `409 cannot_resume`、**不開新對話**。argv：claude `--resume <sid>`、grok `--resume <sid>`、codex `resume <sid>`（子命令排最前）。
+   `GET /api/capabilities` 宣告 `resume_native_start`。
+5. herdr 自己的 `[session] resume_agents_on_restore` 要關掉：它會在 pane 裡打不帶 daemon 參數（`--settings`、權限旗標、帳號環境）的 `claude --resume`，
+   跟 daemon 的接回撞成兩份。子 agent 仍由父 agent 重開（`start` 對子 agent 一律拒絕，§6.5a）。
+
 ### 6.5a 子 agent 認領（血緣優先）
 
 一個 bot 一個 tab。對帳的逐 bot 迴圈走完後，`agent.list` 裡**沒有 bot 認領**的 agent 依序試兩條線索：

@@ -15,6 +15,9 @@ async fn identity_args(app: &Arc<App>, bot: &db::Bot, host: &str) -> Vec<String>
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StartOpts {
     pub resume_native: bool,
+    /// 跟 `resume_native` 一起用：接不回原本的對話就**不啟動**，回 409 `resumed:false`＋原因，
+    /// 由呼叫端決定要不要改成開新對話（`?resume=native`，herdr 升級 2026-09-17）。沒設的話照舊退回開新對話。
+    pub resume_required: bool,
     pub fork_session: Option<String>,
     pub require_idle: bool,
 }
@@ -69,6 +72,13 @@ pub async fn start_bot_locked_with(app: &Arc<App>, bot_id: &str, opts: StartOpts
     refuse_default_session(&bot)?;
     if let Some(existing) = db::active_run(&app.db, bot_id).await.map_err(up)? {
         return Err(LcError::conflict("active run already exists", json!({"run_id": existing.id})));
+    }
+    // 要求接回原對話：在任何副作用（run 列、pane、shim）之前就判斷，接不回就整個不啟動。
+    if opts.resume_native && opts.resume_required {
+        let host = db::bot_host(&app.db, bot_id).await.map_err(up)?;
+        if let Err(why) = native_resume_plan(app, &bot, &host, false).await? {
+            return Err(cannot_resume(bot_id, why));
+        }
     }
     let project = db::project(&app.db, &bot.project_id)
         .await
@@ -173,17 +183,53 @@ pub async fn start_bot_locked_with(app: &Arc<App>, bot_id: &str, opts: StartOpts
     }
 }
 
-/// Native-session continuation args. codex `resume` is a subcommand (must come first); grok has none.
+/// Native-session continuation args. codex `resume` is a subcommand (must come first).
+/// grok 1.0.34 起 `--resume <id>` 接得回（2026-09-17 herdr 0.9.0 隔離實測：server 重啟後記得先前的暗號）。
 fn resume_args_by_kind(kind: &str, session_id: &str) -> Result<Vec<String>, &'static str> {
     if session_id.trim().is_empty() {
         return Err("no_session_id");
     }
     match kind {
-        "claude" => Ok(vec!["--resume".into(), session_id.into()]),
+        "claude" | "grok" => Ok(vec!["--resume".into(), session_id.into()]),
         "codex" => Ok(vec!["resume".into(), session_id.into()]),
-        "grok" => Err("unsupported_kind"),
         _ => Err("unsupported_kind"),
     }
+}
+
+/// 這顆 bot 接得回哪一段原生對話：`Ok((session id, argv))`，接不回就是原因代碼
+/// （`no_session_id`／`transcript_missing`／`unsupported_kind`）。`include_active`：重啟前查——
+/// 那時現在這一個 run 還沒結束，它的 session 才是要接的那段。
+pub(crate) async fn native_resume_plan(
+    app: &Arc<App>,
+    bot: &db::Bot,
+    host: &str,
+    include_active: bool,
+) -> LcResult<Result<(String, Vec<String>), &'static str>> {
+    let last = if include_active {
+        sqlx::query_as::<_, (String, Option<String>)>(
+            "SELECT native_session_id, transcript_path FROM runs
+              WHERE bot_id = ? AND native_session_id IS NOT NULL ORDER BY started_at DESC LIMIT 1",
+        )
+        .bind(&bot.id)
+        .fetch_optional(&app.db)
+        .await
+        .map_err(up)?
+    } else {
+        db::last_native_session(&app.db, &bot.id).await.map_err(up)?
+    };
+    Ok(match last {
+        // No transcript = cannot resume: `--resume` prints "No conversation found" and exits
+        // right after a "successful" restart (2026-09-11 restart-idle repro).
+        Some((_, Some(transcript))) if host == LOCAL_HOST && !transcript.trim().is_empty() && !std::path::Path::new(&transcript).exists() => {
+            Err("transcript_missing")
+        }
+        Some((session_id, _)) if !session_id.trim().is_empty() => resume_args_by_kind(&bot.kind, &session_id).map(|a| (session_id, a)),
+        _ => Err("no_session_id"),
+    })
+}
+
+fn cannot_resume(bot_id: &str, why: &str) -> LcError {
+    LcError::conflict("cannot_resume", json!({"bot_id": bot_id, "resumed": false, "resume_reason": why}))
 }
 
 /// 分出新 session 的參數。claude、grok 是 `--resume <id> --fork-session`；codex 的 `fork` 跟 `resume`
@@ -353,23 +399,11 @@ async fn start_inner(
     // Reopen only: resolve the previous native session after preflight. The requested id is
     // persisted before `agent.start`; hookrecv uses it to detect a provider that ignored resume.
     let resume = if opts.resume_native {
-        match db::last_native_session(&app.db, &bot.id).await.map_err(up)? {
-            // No transcript = cannot resume: `--resume` prints "No conversation found" and exits
-            // right after a "successful" restart (2026-09-11 restart-idle repro). Start fresh.
-            Some((session_id, Some(transcript))) if host == LOCAL_HOST && !transcript.trim().is_empty() && !std::path::Path::new(&transcript).exists() => {
-                tracing::info!(bot = %bot.name, session = %session_id, transcript, "native session has no transcript on disk; not resuming it");
-                context_lost(app, bot, "transcript_missing").await?;
-                None
-            }
-            Some((session_id, _)) if !session_id.trim().is_empty() => match resume_args_by_kind(&bot.kind, &session_id) {
-                Ok(resume_args) => Some((session_id, resume_args)),
-                Err(why) => {
-                    context_lost(app, bot, why).await?;
-                    None
-                }
-            },
-            _ => {
-                context_lost(app, bot, "no_session_id").await?;
+        match native_resume_plan(app, bot, &host, false).await? {
+            Ok(plan) => Some(plan),
+            // 預設退回開新對話；`resume_required` 的呼叫在前面就擋掉了。
+            Err(why) => {
+                context_lost(app, bot, why).await?;
                 None
             }
         }
@@ -621,6 +655,13 @@ pub async fn restart_bot_with(app: &Arc<App>, bot_id: &str, opts: StartOpts) -> 
             return Err(not_idle(bot_id, why));
         }
     }
+    // 停之前就確定接得回，免得 ctrl+c 掉之後才發現只能開新對話。
+    if opts.resume_native && opts.resume_required {
+        let host = db::bot_host(&app.db, bot_id).await.map_err(up)?;
+        if let Err(why) = native_resume_plan(app, &bot, &host, true).await? {
+            return Err(cannot_resume(bot_id, why));
+        }
+    }
     stop_bot_locked(app, bot_id).await?;
     match start_bot_locked_with(app, bot_id, opts.clone()).await {
         Err(LcError::Conflict(v)) if v.get("reason").and_then(|r| r.as_str()) == Some("active run already exists") => {
@@ -796,7 +837,7 @@ pub async fn restart_child_in_pane_with(app: &Arc<App>, bot_id: &str, require_id
 /// over a hiccup is the worse mistake.
 #[cfg(test)]
 mod resume_args_tests {
-    use super::{resume_args_by_kind, start_bot, start_bot_with, stop_bot, StartOpts};
+    use super::{resume_args_by_kind, restart_bot_with, start_bot, start_bot_with, stop_bot, LcError, StartOpts};
     use crate::db;
     use crate::testing::{claude_bot, env, Env};
     use serde_json::Value;
@@ -821,7 +862,8 @@ mod resume_args_tests {
     fn provider_resume_arguments_are_exact() {
         assert_eq!(resume_args_by_kind("claude", "sid-1").unwrap(), vec!["--resume", "sid-1"]);
         assert_eq!(resume_args_by_kind("codex", "sid-1").unwrap(), vec!["resume", "sid-1"]);
-        assert_eq!(resume_args_by_kind("grok", "sid-1"), Err("unsupported_kind"));
+        assert_eq!(resume_args_by_kind("grok", "sid-1").unwrap(), vec!["--resume", "sid-1"]);
+        assert_eq!(resume_args_by_kind("gemini", "sid-1"), Err("unsupported_kind"));
         assert_eq!(resume_args_by_kind("claude", ""), Err("no_session_id"));
     }
 
@@ -851,6 +893,58 @@ mod resume_args_tests {
         start_bot(&e.app, &pm.id).await.unwrap();
         let args = started_args(&e).pop().unwrap();
         assert!(!args.contains(&"--resume".into()));
+        stop_bot(&e.app, &pm.id).await.unwrap();
+    }
+
+    /// `?resume=native`（resume_required）：接不回就**整個不啟動**，回 `resumed:false`＋原因，不默默開新對話；
+    /// 接得回就帶 `--resume <sid>` 並記下 `resume_session_id`。反向：沒要求的照舊退回開新對話（上面那條）。
+    #[tokio::test]
+    async fn a_required_resume_refuses_instead_of_starting_fresh() {
+        let e = env().await;
+        let pm = claude_bot(&e.app, &e.project_id, "pm").await;
+        let strict = StartOpts { resume_native: true, resume_required: true, ..Default::default() };
+        let err = start_bot_with(&e.app, &pm.id, strict.clone()).await.unwrap_err();
+        match err {
+            LcError::Conflict(v) => {
+                assert_eq!((v["reason"].as_str(), v["resumed"].as_bool(), v["resume_reason"].as_str()), (Some("cannot_resume"), Some(false), Some("no_session_id")))
+            }
+            other => panic!("expected 409, got {other:?}"),
+        }
+        assert!(started_args(&e).is_empty(), "nothing was started");
+        assert!(db::active_run(&e.app.db, &pm.id).await.unwrap().is_none(), "no run row left behind");
+
+        let transcript = e.dir.join("pm.jsonl");
+        std::fs::write(&transcript, "{}\n").unwrap();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, native_session_id, transcript_path, started_at, ended_at)
+             VALUES (?,?,'stopped','idle','sid-pm',?,'2026-09-01T00:00:00Z','2026-09-01T00:01:00Z')",
+        )
+        .bind(db::ulid())
+        .bind(&pm.id)
+        .bind(transcript.to_str().unwrap())
+        .execute(&e.app.db)
+        .await
+        .unwrap();
+        let run_id = start_bot_with(&e.app, &pm.id, strict.clone()).await.unwrap();
+        assert!(started_args(&e).pop().unwrap().windows(2).any(|w| w == ["--resume", "sid-pm"]));
+        let sid: Option<String> = sqlx::query_scalar("SELECT resume_session_id FROM runs WHERE id=?").bind(&run_id).fetch_one(&e.app.db).await.unwrap();
+        assert_eq!(sid.as_deref(), Some("sid-pm"));
+
+        // restart：停之前就判斷（看現在這個 run 的 session），接不回就連停都不停。
+        sqlx::query("UPDATE runs SET native_session_id='sid-live' WHERE id=?").bind(&run_id).execute(&e.app.db).await.unwrap();
+        restart_bot_with(&e.app, &pm.id, strict.clone()).await.unwrap();
+        assert!(started_args(&e).pop().unwrap().windows(2).any(|w| w == ["--resume", "sid-live"]));
+        std::fs::remove_file(&transcript).unwrap();
+        let before = db::active_run(&e.app.db, &pm.id).await.unwrap().unwrap().id;
+        sqlx::query("UPDATE runs SET native_session_id='sid-gone', transcript_path=? WHERE id=?")
+            .bind(transcript.to_str().unwrap())
+            .bind(&before)
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        let err = restart_bot_with(&e.app, &pm.id, strict).await.unwrap_err();
+        assert!(matches!(err, LcError::Conflict(ref v) if v["resume_reason"] == "transcript_missing"), "{err:?}");
+        assert_eq!(db::active_run(&e.app.db, &pm.id).await.unwrap().map(|r| r.id), Some(before), "the running agent was not stopped");
         stop_bot(&e.app, &pm.id).await.unwrap();
     }
 

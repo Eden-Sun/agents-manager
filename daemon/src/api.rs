@@ -190,6 +190,10 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/identities", post(create_identity))
         .route("/identities/{name}", delete(delete_identity))
         .route("/fs/dirs", get(list_dirs))
+        .route("/capabilities", get(get_capabilities))
+        .route("/supervisor/herdr-maintenance", get(crate::herdr_maintenance::get))
+        .route("/supervisor/herdr-maintenance/open", post(crate::herdr_maintenance::open))
+        .route("/supervisor/herdr-maintenance/end", post(crate::herdr_maintenance::end))
         .layer(axum::middleware::from_fn_with_state(app.clone(), auth))
         .route("/session", get(get_session));
 
@@ -2137,9 +2141,43 @@ async fn delete_identity(
     Ok((StatusCode::OK, Json(json!({}))).into_response())
 }
 
-async fn start_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
-    let run_id = lifecycle::start_bot(&app, &id).await?;
-    Ok((StatusCode::OK, Json(json!({"run_id": run_id}))).into_response())
+#[derive(Deserialize, Default)]
+struct StartQuery {
+    /// `native`：接回 DB 記的原生對話；接不回回 409 `resumed:false`，**不會**默默開新對話。
+    resume: Option<String>,
+}
+
+fn resume_opts(q: &StartQuery) -> Result<lifecycle::StartOpts, LcError> {
+    match q.resume.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        None => Ok(lifecycle::StartOpts::default()),
+        Some("native") => Ok(lifecycle::StartOpts { resume_native: true, resume_required: true, ..Default::default() }),
+        Some(other) => Err(LcError::Bad(format!("unknown resume mode `{other}` (only `native`)"))),
+    }
+}
+
+/// 回應裡的 `resumed`／`session_id`：看新 run 實際要求接回哪個 session（`runs.resume_session_id`）。
+async fn started_json(app: &Arc<App>, run_id: &str, opts: &lifecycle::StartOpts) -> Result<Value, LcError> {
+    if !opts.resume_native {
+        return Ok(json!({"run_id": run_id}));
+    }
+    let sid: Option<String> = sqlx::query_scalar("SELECT resume_session_id FROM runs WHERE id = ?")
+        .bind(run_id)
+        .fetch_optional(&app.db)
+        .await
+        .map_err(any_err)?
+        .flatten();
+    Ok(json!({"run_id": run_id, "resumed": sid.is_some(), "session_id": sid}))
+}
+
+async fn start_bot(State(app): State<Arc<App>>, Path(id): Path<String>, Query(q): Query<StartQuery>) -> Result<Response, LcError> {
+    let opts = resume_opts(&q)?;
+    let run_id = lifecycle::start_bot_with(&app, &id, opts.clone()).await?;
+    Ok((StatusCode::OK, Json(started_json(&app, &run_id, &opts).await?)).into_response())
+}
+
+/// 這顆 daemon 支援哪些要先確認才能用的能力（例如升級腳本在停 herdr 前要確定 `resume_native_start`）。
+async fn get_capabilities() -> Json<Value> {
+    Json(json!({"capabilities": ["resume_native_start", "herdr_maintenance"]}))
 }
 
 /// SPEC §6.9。立刻回計畫、進度走 WS：一顆 `stop_bot` 最久十秒，同步做完會拖死 HTTP 連線。
@@ -2148,13 +2186,18 @@ async fn restart_idle_bots(State(app): State<Arc<App>>) -> Result<Response, LcEr
     Ok((StatusCode::ACCEPTED, Json(plan)).into_response())
 }
 
-async fn restart_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
-    // 子 agent 的 pane 是父開的，stop + start 會被拒（SPEC §6.5a），改在原 pane 裡 exit + resume。
+async fn restart_bot(State(app): State<Arc<App>>, Path(id): Path<String>, Query(q): Query<StartQuery>) -> Result<Response, LcError> {
+    let opts = resume_opts(&q)?;
+    // 子 agent 的 pane 是父開的，stop + start 會被拒（SPEC §6.5a），改在原 pane 裡 exit + resume（本來就接回）。
     let child = db::bot(&app.db, &id).await.map_err(any_err)?.is_some_and(|b| b.managed_by == "child");
-    let run_id =
-        if child { lifecycle::restart_child_in_pane(&app, &id).await? } else { lifecycle::restart_bot(&app, &id).await? };
+    let body = if child {
+        json!({"run_id": lifecycle::restart_child_in_pane(&app, &id).await?})
+    } else {
+        let run_id = lifecycle::restart_bot_with(&app, &id, opts.clone()).await?;
+        started_json(&app, &run_id, &opts).await?
+    };
     app.emit("bot_changed", json!({"bot_id": id})).await;
-    Ok((StatusCode::OK, Json(json!({"run_id": run_id}))).into_response())
+    Ok((StatusCode::OK, Json(body)).into_response())
 }
 
 async fn stop_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
@@ -3264,5 +3307,27 @@ mod prompt_route_tests {
         assert_eq!(body["retryable"], true);
         let turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns").fetch_one(&e.app.db).await.unwrap();
         assert_eq!(turns, 0);
+    }
+}
+
+#[cfg(test)]
+mod resume_query_tests {
+    use super::*;
+
+    #[test]
+    fn only_native_is_a_resume_mode_and_it_is_strict() {
+        let q = |v: Option<&str>| StartQuery { resume: v.map(str::to_string) };
+        assert_eq!(resume_opts(&q(None)).unwrap(), lifecycle::StartOpts::default(), "預設行為不變");
+        assert_eq!(resume_opts(&q(Some(""))).unwrap(), lifecycle::StartOpts::default());
+        let native = resume_opts(&q(Some("native"))).unwrap();
+        assert!(native.resume_native && native.resume_required, "native 一定是「接不回就不啟動」");
+        assert!(matches!(resume_opts(&q(Some("fresh"))), Err(LcError::Bad(_))));
+    }
+
+    #[tokio::test]
+    async fn capabilities_advertise_the_resume_entry_and_maintenance() {
+        let v = get_capabilities().await.0;
+        let caps: Vec<&str> = v["capabilities"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+        assert!(caps.contains(&"resume_native_start") && caps.contains(&"herdr_maintenance"), "{v}");
     }
 }
