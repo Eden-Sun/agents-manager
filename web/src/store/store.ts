@@ -1810,7 +1810,20 @@ export const useStore = create<StoreState>((set, get) => ({
 
   async endHostShell(host, paneId) {
     await guarded(set, get, `shell:${host}:${paneId}`, async () => {
-      await api.closeHostShell(host, paneId)
+      // 面板自己開的那份清單只在 daemon 記憶體：重啟後這顆還活著（pane 表認得，面板照常顯示），
+      // `DELETE` 卻在清單裡找不到而回 200、什麼都沒關，面板收掉看起來像結束了（review M2）。
+      // 不在那份清單裡就改走 pane 表的關閉——確認框已經講明「裡面正在跑的也會結束」，所以帶 confirm。
+      const own = await api.fetchHostShells(host)
+      if (own.some((sh) => sh.pane_id === paneId)) {
+        await api.closeHostShell(host, paneId)
+      } else {
+        try {
+          await api.closePane(paneId, host, true)
+        } catch (e) {
+          // 兩份都不認得＝已經不在了；其他錯誤照常跳通知、面板留著。
+          if (!(e instanceof ApiError && e.status === 404)) throw e
+        }
+      }
       set((s) =>
         s.shellView && s.shellView.host === host && s.shellView.paneId === paneId ? { shellView: null } : {},
       )
