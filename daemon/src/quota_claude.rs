@@ -532,7 +532,12 @@ fn mark_usage_seen(key: &str) {
 }
 
 fn usage_fresh(key: &str) -> bool {
-    usage_seen().lock().unwrap().get(key).is_some_and(|t| t.elapsed() < USAGE_REFRESH)
+    usage_fresh_at(key, std::time::Instant::now())
+}
+
+/// `now` 由呼叫端給：測試往後推時間，不必從 `Instant::now()` 往回減（開機不到十分鐘時會 panic）。
+fn usage_fresh_at(key: &str, now: std::time::Instant) -> bool {
+    usage_seen().lock().unwrap().get(key).is_some_and(|t| now.saturating_duration_since(*t) < USAGE_REFRESH)
 }
 
 /// 這一輪要不要**跳過**這把 key 的 `/usage` pane。
@@ -568,12 +573,13 @@ pub(crate) struct ProbeEvidence {
     pub cooling_down: bool,
 }
 
-/// A stale "logged out" must never park an identity forever (how m4p's `cc1`/`cc2` lost their
-/// quota). Positive evidence always wins; otherwise only our own recent failure holds a probe back.
+/// 只有我們自己最近的失敗能擋住一次探測；退避多久由 [`failure_backoff`] 照**現在**的證據算。
+///
+/// 以前「狀態列有在更新／有 run 在跑」直接無視退避：`/usage` 一壞（CLI 改格式、pane 卡住），一直有 bot
+/// 在講話的帳號每 60 秒就開一個 pane、佔住 `probe_lock` 40 秒，grok 輪詢與 `?refresh=1` 一直排隊
+/// （review 2026-09-16 M4）。證據的用處改成「把沒登入的 30 分鐘縮成 5 分鐘」，不是完全不退避——
+/// 過時的「沒登入」一樣不會把帳號永遠停掉（m4p 的 cc1／cc2 當年就是這樣丟了額度）。
 pub(crate) fn should_probe_identity(e: ProbeEvidence) -> bool {
-    if e.reported_statusline || e.has_live_run {
-        return true;
-    }
     !e.cooling_down
 }
 
@@ -585,27 +591,38 @@ pub(crate) fn failure_backoff(e: ProbeEvidence) -> Duration {
     }
 }
 
+/// 一次失敗的探測：什麼時候，以及那時 CLI 說不說沒登入。
+#[derive(Clone, Copy, Debug)]
+struct Failure {
+    at: std::time::Instant,
+    cli_says_logged_out: bool,
+}
+
 /// In memory only: a restart costs one extra probe, the safe direction to err in.
-fn backoff_map() -> &'static std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>> {
-    static M: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>> =
-        std::sync::OnceLock::new();
+fn backoff_map() -> &'static std::sync::Mutex<std::collections::HashMap<String, Failure>> {
+    static M: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, Failure>>> = std::sync::OnceLock::new();
     M.get_or_init(Default::default)
 }
 
-fn cooling_down(key: &str) -> bool {
+/// 退避長度照失敗那時的登入答案、加上**現在**的證據算（[`failure_backoff`]）：失敗之後才開始有 bot 在用的帳號，
+/// 不必等滿沒登入的 30 分鐘。
+fn cooling_down_at(key: &str, reported_statusline: bool, has_live_run: bool, now: std::time::Instant) -> bool {
     let mut m = backoff_map().lock().unwrap();
-    match m.get(key) {
-        Some(t) if *t > std::time::Instant::now() => true,
-        Some(_) => {
-            m.remove(key);
-            false
-        }
-        None => false,
+    let Some(f) = m.get(key).copied() else { return false };
+    let e = ProbeEvidence { cli_says_logged_out: f.cli_says_logged_out, reported_statusline, has_live_run, cooling_down: false };
+    if now.saturating_duration_since(f.at) < failure_backoff(e) {
+        return true;
     }
+    m.remove(key);
+    false
 }
 
-fn park(key: &str, how_long: Duration) {
-    backoff_map().lock().unwrap().insert(key.to_string(), std::time::Instant::now() + how_long);
+fn cooling_down(key: &str, reported_statusline: bool, has_live_run: bool) -> bool {
+    cooling_down_at(key, reported_statusline, has_live_run, std::time::Instant::now())
+}
+
+fn park(key: &str, cli_says_logged_out: bool) {
+    backoff_map().lock().unwrap().insert(key.to_string(), Failure { at: std::time::Instant::now(), cli_says_logged_out });
 }
 
 fn unpark(key: &str) {
@@ -624,8 +641,8 @@ struct Target {
     /// Identity rows the `auth status` answer describes; the bare target speaks for every
     /// no-env identity (`cc0`), since that *is* the default account.
     names: Vec<String>,
-    /// `None` for the bare default account, which is never parked.
-    evidence: Option<ProbeEvidence>,
+    /// 裸的預設帳號也有：以前它「永不 park」，`/usage` 一壞就每 60 秒開一個 pane（review 2026-09-16 M4）。
+    evidence: ProbeEvidence,
 }
 
 /// 停用又沒有 run 在跑的身份跳過探測。**還在跑的不跳**：那顆 bot 的額度使用者仍然需要看得到，
@@ -634,26 +651,56 @@ fn skip_disabled(disabled: &[String], live: &std::collections::BTreeSet<String>,
     disabled.iter().any(|d| d == name) && !live.contains(name)
 }
 
-pub async fn refresh_claude(app: &Arc<App>, host: &str) -> Result<bool> {
-    let _guard = crate::quota::probe_lock(host).await;
-    // `~` expands against the *probed* host's home, not the daemon's.
-    let home = host_home(app, host).await;
-    // `ccN` are per host (SPEC §16): cc1 on m4p is a different account than here.
-    let identities = crate::tools::identities_for_host(app, host).await;
+/// 裸的預設帳號要不要跳過：它代表的每一個共用預設帳號的身分（`cc0`…）都停用了、都沒有 run，而且沒有任何
+/// 不帶身分的 claude bot 在跑（那些也吃預設帳號）。沒有任何身分指到它時照探——那就是「沒命名的預設帳號」，
+/// 沒有東西可以停用（SPEC §16.3b，review 2026-09-16 L4）。
+fn skip_disabled_default(
+    disabled: &[String],
+    live: &std::collections::BTreeSet<String>,
+    names: &[String],
+    unnamed_bot_running: bool,
+) -> bool {
+    !names.is_empty() && !unnamed_bot_running && names.iter().all(|n| skip_disabled(disabled, live, n))
+}
+
+/// 這台主機上有沒有不帶身分、正在跑的 claude bot（它們用的就是預設帳號）。
+async fn unnamed_claude_running(app: &Arc<App>, host: &str) -> bool {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM runs r JOIN bots b ON b.id = r.bot_id JOIN projects p ON p.id = b.project_id
+          WHERE r.state IN ('starting','running','stopping') AND p.host = ? AND b.deleted_at IS NULL
+            AND b.kind = 'claude' AND (b.identity IS NULL OR b.identity = '')",
+    )
+    .bind(host)
+    .fetch_one(&app.db)
+    .await
+    .map(|n| n > 0)
+    // 讀不到就當有：寧可多探一次，也不要把正在用的預設帳號弄瞎。
+    .unwrap_or(true)
+}
+
+/// 這一輪要探哪些 target（純函式，好測）。裸的預設帳號排第一個。
+struct PlanInput<'a> {
+    host: &'a str,
+    home: &'a str,
+    identities: &'a [crate::config::IdentityCfg],
+    logins: &'a BTreeMap<String, crate::tools::IdentityInfo>,
+    live: &'a std::collections::BTreeSet<String>,
+    off: &'a [String],
+    /// 這台有沒有不帶身分、正在跑的 claude bot。
+    unnamed_running: bool,
+    /// 完整 key：最近一次寫進來的是 statusLine。
+    statusline_keys: &'a std::collections::BTreeSet<String>,
+}
+
+fn plan_targets(i: &PlanInput, cooling: impl Fn(&str, bool, bool) -> bool) -> Vec<Target> {
+    let host = i.host;
     let mut targets: Vec<Target> = Vec::new();
-
-    let logins = app.tools.lock().await.get(host).map(|t| t.identities.clone()).unwrap_or_default();
-    // DB-backed so a daemon restart doesn't lose the proof.
-    let live = crate::db::live_identities_on_host(&app.db, host).await.unwrap_or_default();
-    // 停用的身份不上額度條（使用者 2026-09-16），所以也不必再花探測去問它。
-    let off = crate::mission::store::disabled_identities(&app.db, host, "claude").await.unwrap_or_default();
-
     let mut bare_names = Vec::new();
     let mut rest: Vec<Target> = Vec::new();
-    for id in identities.iter().filter(|i| i.kind == "claude") {
+    for id in i.identities.iter().filter(|x| x.kind == "claude") {
         let mut env = BTreeMap::new();
         for (k, v) in &id.env {
-            env.insert(k.clone(), expand_home(v, &home));
+            env.insert(k.clone(), expand_home(v, i.home));
         }
         // 「這個身分就是預設帳號嗎」只能有一份規則：`env.is_empty()` 會把只帶
         // `ANTHROPIC_BASE_URL`（沒有 CLAUDE_CONFIG_DIR）的身分算成獨立帳號，跟 statusline 那邊
@@ -662,32 +709,66 @@ pub async fn refresh_claude(app: &Arc<App>, host: &str) -> Result<bool> {
             bare_names.push(id.name.clone());
             continue;
         }
-        if skip_disabled(&off, &live, &id.name) {
+        if skip_disabled(i.off, i.live, &id.name) {
             tracing::debug!(host, identity = %id.name, "identity is disabled and idle; skipping its quota probe");
             continue;
         }
         let key = format!("claude:{}", id.name);
         let full = crate::quota::quota_key(host, &key);
+        let reported_statusline = i.statusline_keys.contains(&full);
+        let has_live_run = i.live.contains(&id.name);
         let evidence = ProbeEvidence {
-            cli_says_logged_out: logins.get(&id.name).map(|i| i.logged_in) == Some(Some(false)),
-            reported_statusline: app.quotas.lock().await.get(&full).is_some_and(|q| q.source == "statusline"),
-            has_live_run: live.contains(&id.name),
-            cooling_down: cooling_down(&full),
+            cli_says_logged_out: i.logins.get(&id.name).map(|x| x.logged_in) == Some(Some(false)),
+            reported_statusline,
+            has_live_run,
+            cooling_down: cooling(&full, reported_statusline, has_live_run),
         };
         if !should_probe_identity(evidence) {
             tracing::debug!(host, identity = %id.name, "identity probe is cooling down after a failure; skipping");
             continue;
         }
-        rest.push(Target { key, account: Some(id.name.clone()), env, names: vec![id.name.clone()], evidence: Some(evidence) });
+        rest.push(Target { key, account: Some(id.name.clone()), env, names: vec![id.name.clone()], evidence });
     }
-    targets.push(Target {
-        key: "claude".into(),
-        account: bare_names.first().cloned(),
-        env: BTreeMap::new(),
-        names: bare_names,
-        evidence: None,
-    });
+    if skip_disabled_default(i.off, i.live, &bare_names, i.unnamed_running) {
+        tracing::debug!(host, identities = ?bare_names, "the default account's identities are all disabled and idle; skipping its quota probe");
+    } else {
+        let bare_full = crate::quota::quota_key(host, "claude");
+        let reported_statusline = i.statusline_keys.contains(&bare_full);
+        let has_live_run = i.unnamed_running || bare_names.iter().any(|n| i.live.contains(n));
+        let evidence = ProbeEvidence {
+            cli_says_logged_out: bare_names.iter().any(|n| i.logins.get(n).map(|x| x.logged_in) == Some(Some(false))),
+            reported_statusline,
+            has_live_run,
+            cooling_down: cooling(&bare_full, reported_statusline, has_live_run),
+        };
+        if should_probe_identity(evidence) {
+            targets.push(Target { key: "claude".into(), account: bare_names.first().cloned(), env: BTreeMap::new(), names: bare_names, evidence });
+        } else {
+            tracing::debug!(host, "default-account probe is cooling down after a failure; skipping");
+        }
+    }
     targets.append(&mut rest);
+    targets
+}
+
+pub async fn refresh_claude(app: &Arc<App>, host: &str) -> Result<bool> {
+    let _guard = crate::quota::probe_lock(host).await;
+    // `~` expands against the *probed* host's home, not the daemon's.
+    let home = host_home(app, host).await;
+    // `ccN` are per host (SPEC §16): cc1 on m4p is a different account than here.
+    let identities = crate::tools::identities_for_host(app, host).await;
+    let logins = app.tools.lock().await.get(host).map(|t| t.identities.clone()).unwrap_or_default();
+    // DB-backed so a daemon restart doesn't lose the proof.
+    let live = crate::db::live_identities_on_host(&app.db, host).await.unwrap_or_default();
+    // 停用的身份不上額度條（使用者 2026-09-16），所以也不必再花探測去問它。
+    let off = crate::mission::store::disabled_identities(&app.db, host, "claude").await.unwrap_or_default();
+    let unnamed_running = unnamed_claude_running(app, host).await;
+    let statusline_keys: std::collections::BTreeSet<String> =
+        app.quotas.lock().await.iter().filter(|(_, q)| q.source == "statusline").map(|(k, _)| k.clone()).collect();
+    let targets = plan_targets(
+        &PlanInput { host, home: &home, identities: &identities, logins: &logins, live: &live, off: &off, unnamed_running, statusline_keys: &statusline_keys },
+        cooling_down,
+    );
 
     let mut any = false;
     let mut saw_missing = false;
@@ -718,21 +799,18 @@ pub async fn refresh_claude(app: &Arc<App>, host: &str) -> Result<bool> {
                     unpark(&full);
                     // 這把 key 的 `/usage` 剛答過：接下來十分鐘讓狀態列接手，不用再開 pane。
                     mark_usage_seen(&full);
-                } else if let Some(ev) = t.evidence {
+                } else {
                     // No plan lines: park it using the login answer we just got.
-                    let how_long = failure_backoff(ProbeEvidence { cli_says_logged_out: o.logged_in == Some(false), ..ev });
-                    park(&full, how_long);
-                    tracing::info!(host, key = %t.key, logged_in = ?o.logged_in, retry_in_s = how_long.as_secs(), "claude reported no plan lines; parking this identity");
+                    let logged_out = o.logged_in == Some(false);
+                    park(&full, logged_out);
+                    let retry = failure_backoff(ProbeEvidence { cli_says_logged_out: logged_out, ..t.evidence });
+                    tracing::info!(host, key = %t.key, logged_in = ?o.logged_in, retry_in_s = retry.as_secs(), "claude reported no plan lines; parking this account");
                 }
             }
             Err(e) => {
-                if let Some(ev) = t.evidence {
-                    let how_long = failure_backoff(ev);
-                    park(&full, how_long);
-                    tracing::warn!(host, key = %t.key, error = %e, retry_in_s = how_long.as_secs(), "claude quota probe failed; parking this identity");
-                } else {
-                    tracing::warn!(host, key = %t.key, error = %e, "claude quota refresh failed");
-                }
+                park(&full, t.evidence.cli_says_logged_out);
+                let retry = failure_backoff(t.evidence);
+                tracing::warn!(host, key = %t.key, error = %e, retry_in_s = retry.as_secs(), "claude quota probe failed; parking this account");
             }
         }
     }
@@ -895,9 +973,8 @@ AM_USAGE_DONE=0
         assert!(!usage_fresh(&key), "沒問過的 key 不能算新");
         mark_usage_seen(&key);
         assert!(usage_fresh(&key));
-        // 十分鐘是上限：把時間往回撥就該重新問一次（直接改記的時刻，不等真的十分鐘）。
-        usage_seen().lock().unwrap().insert(key.clone(), std::time::Instant::now() - USAGE_REFRESH);
-        assert!(!usage_fresh(&key), "超過 USAGE_REFRESH 就要再問一次");
+        // 十分鐘是上限：往後推時間就該重新問一次。不從 `Instant::now()` 往回減——開機不到十分鐘時那會 panic。
+        assert!(!usage_fresh_at(&key, std::time::Instant::now() + USAGE_REFRESH), "超過 USAGE_REFRESH 就要再問一次");
     }
 
     #[test]
@@ -1020,7 +1097,79 @@ AM_USAGE_DONE=0
     fn a_live_bot_run_beats_the_login_answer() {
         let e = ProbeEvidence { cli_says_logged_out: true, has_live_run: true, ..Default::default() };
         assert!(should_probe_identity(e));
-        assert!(should_probe_identity(ProbeEvidence { cooling_down: true, ..e }));
+        // 有 run 在跑，沒登入的 30 分鐘縮成 5 分鐘——但不是完全不退避（M4）。
+        let k = format!("test/claude:{}", ulid::Ulid::new());
+        let t0 = std::time::Instant::now();
+        park(&k, true);
+        let ten_min = t0 + Duration::from_secs(10 * 60);
+        assert!(cooling_down_at(&k, false, false, ten_min), "沒有任何證據：沒登入的帳號等滿 30 分鐘");
+        assert!(!cooling_down_at(&k, false, true, ten_min), "失敗之後開始有 bot 在用：5 分鐘就再問");
+    }
+
+    /// M4（review 2026-09-16）：`/usage` 壞掉（CLI 改格式、pane 卡住）時，一直有 bot 在講話的帳號以前無視退避，
+    /// 每 60 秒開一個 pane、佔住 `probe_lock` 40 秒。現在一樣退避 5 分鐘。
+    #[test]
+    fn a_busy_account_still_backs_off_after_a_failed_probe() {
+        let k = format!("test/claude:{}", ulid::Ulid::new());
+        let t0 = std::time::Instant::now();
+        park(&k, false);
+        assert!(cooling_down_at(&k, true, true, t0 + Duration::from_secs(60)), "下一輪（60 秒後）不能又開 pane");
+        let e = ProbeEvidence { reported_statusline: true, has_live_run: true, cooling_down: true, ..Default::default() };
+        assert!(!should_probe_identity(e), "證據不再蓋過退避");
+        assert!(!cooling_down_at(&k, true, true, t0 + RETRY_AFTER_FAILURE + Duration::from_secs(1)), "5 分鐘到了照樣再問");
+    }
+
+    fn ident(name: &str, env: &[(&str, &str)]) -> crate::config::IdentityCfg {
+        crate::config::IdentityCfg {
+            name: name.into(),
+            kind: "claude".into(),
+            host: None,
+            env: env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            args: vec![],
+        }
+    }
+
+    /// M4：裸的預設帳號以前「永不 park」——`/usage` 一壞，cc0 這種一直有 bot 在講話的帳號每 60 秒開一個 pane。
+    /// 現在它跟其他身分一樣吃退避，證據只影響退避長度。
+    #[test]
+    fn the_default_account_target_backs_off_like_any_other() {
+        let identities = vec![ident("cc0", &[]), ident("cc1", &[("CLAUDE_CONFIG_DIR", "$HOME/.claude-cc1")])];
+        let logins = BTreeMap::new();
+        let live: std::collections::BTreeSet<String> = ["cc0".to_string(), "cc1".to_string()].into_iter().collect();
+        let statusline: std::collections::BTreeSet<String> = ["claude".to_string(), "claude:cc1".to_string()].into_iter().collect();
+        let input = PlanInput {
+            host: "local",
+            home: "/home/me",
+            identities: &identities,
+            logins: &logins,
+            live: &live,
+            off: &[],
+            unnamed_running: false,
+            statusline_keys: &statusline,
+        };
+        let keys = |ts: Vec<Target>| ts.into_iter().map(|t| t.key).collect::<Vec<_>>();
+        assert_eq!(keys(plan_targets(&input, |_, _, _| false)), ["claude", "claude:cc1"]);
+        assert_eq!(keys(plan_targets(&input, |k, _, _| k == "claude")), ["claude:cc1"], "預設帳號剛失敗：這一輪不開 pane");
+        let bare = plan_targets(&input, |_, _, _| false).into_iter().next().unwrap();
+        assert_eq!(bare.names, ["cc0"]);
+        assert!(bare.evidence.has_live_run && bare.evidence.reported_statusline);
+    }
+
+    /// L4（review 2026-09-16）：共用預設帳號的身分（cc0）停用了、沒有 run，也沒有不帶身分的 claude bot 在跑，
+    /// 裸 `claude` 就不再探測（SPEC §16.3b）。沒有任何身分指到預設帳號時照探——沒有東西可以停用。
+    #[test]
+    fn the_default_account_is_skipped_only_when_everything_on_it_is_disabled_and_idle() {
+        let off = vec!["cc0".to_string()];
+        let idle: std::collections::BTreeSet<String> = Default::default();
+        let busy: std::collections::BTreeSet<String> = ["cc0".to_string()].into_iter().collect();
+        let names = vec!["cc0".to_string()];
+        assert!(skip_disabled_default(&off, &idle, &names, false));
+        assert!(!skip_disabled_default(&off, &busy, &names, false), "cc0 還有 run 在跑");
+        assert!(!skip_disabled_default(&off, &idle, &names, true), "不帶身分的 claude bot 也吃預設帳號");
+        assert!(!skip_disabled_default(&[], &idle, &names, false), "沒停用");
+        assert!(!skip_disabled_default(&off, &idle, &[], false), "沒有身分指到預設帳號");
+        let two = vec!["cc0".to_string(), "main".to_string()];
+        assert!(!skip_disabled_default(&off, &idle, &two, false), "還有一個共用預設帳號的身分沒停用");
     }
 
     #[test]
@@ -1055,12 +1204,12 @@ AM_USAGE_DONE=0
     #[test]
     fn parking_expires_and_a_success_clears_it() {
         let k = format!("test/claude:{}", ulid::Ulid::new());
-        assert!(!cooling_down(&k));
-        park(&k, Duration::from_secs(60));
-        assert!(cooling_down(&k));
+        assert!(!cooling_down(&k, false, false));
+        park(&k, false);
+        assert!(cooling_down(&k, false, false));
         unpark(&k);
-        assert!(!cooling_down(&k));
-        park(&k, Duration::from_millis(0));
-        assert!(!cooling_down(&k), "a cool-down in the past is over");
+        assert!(!cooling_down(&k, false, false));
+        park(&k, false);
+        assert!(!cooling_down_at(&k, false, false, std::time::Instant::now() + RETRY_AFTER_FAILURE), "a cool-down in the past is over");
     }
 }

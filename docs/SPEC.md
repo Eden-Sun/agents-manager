@@ -1041,7 +1041,8 @@ API：`GET /api/projects/:id/messages`、`POST /api/projects/:id/chat`（`API.md
 - **claude statusLine**：hook 進來時查 `bot_host(bot_id)` 寫進那台的列（遠端經 §11.4.5 的單槽檔）。有 bot 在對話的帳號就有即時數字。
 - **claude `/usage` 探測**：在用完即丟的 pane 跑一行 `claude auth status --json` 接 `claude -p "/usage"`，輸出以 `AM_AUTH_BEGIN` / `AM_AUTH_END` / `AM_USAGE_DONE=` 標記包起來，
   `pane.read recent_unwrapped` 等到最後標記（逾時 40 秒）。`-p` 印純文字、不會有 TUI 對話框或信任視窗；同一次探測順便拿到該身份的登入狀態、`account`、`plan`
-  （claude 身份不經 ssh 探登入：非登入 ssh 讀不到 Keychain）。沒登入的身份 park 30 分鐘，其他失敗 5 分鐘。
+  （claude 身份不經 ssh 探登入：非登入 ssh 讀不到 Keychain）。沒登入的身份 park 30 分鐘，其他失敗 5 分鐘；失敗後才開始有 statusLine 或 run 的帳號沒登入那段也只等 5 分鐘。
+  **裸的預設帳號一樣吃退避**，「有 bot 在講話」只縮短退避、不再蓋過退避——以前兩者都豁免，`/usage` 一壞這些帳號每 60 秒開一個 pane、佔住 `probe_lock`（review 2026-09-16）。
   `/usage` 先跑 `--output-format stream-json --verbose` 並 `grep -m1 usage_report`：claude 2.1.273 起那一行帶結構化的 `usage_report.rate_limits.limits[]`
   （`kind` = `session`／`weekly_all`／`weekly_scoped`＋`scope.model.display_name`、`percent`、ISO `resets_at`、`severity`），分桶一律看 `kind` 不看顯示字串，重置時間直接用 ISO。
   `grep` 沒抓到（舊 CLI 不認這個旗標或還沒有這個欄位）才跑純文字版，交給既有的文字解析（`parse_claude_usage`）。
@@ -1145,7 +1146,7 @@ pane 的終端快照是 UI 顯示 device code / URL 的唯一通道；這些內�
 `PUT /api/identities/{name}/disabled {kind, disabled, host?}`（daemon 的 `identity_prefs`，不是瀏覽器 localStorage）。
 停用是**挑不挑得到**的問題，不是能不能跑：群組任務挑身分、Bot 設定的身份選單、**標題列的額度條**、快速新增 Bot 的清單、側欄的身分計數都不再出現它（使用者 2026-09-16：「停用就別顯示在 header 及任何地方」）；唯一還看得到它的是環境設定那一頁自己，不然沒有地方把它按回來。
 已經綁著它的 bot 照跑，那顆 bot 的設定裡仍看得到自己選的那一個（否則設定看起來會像空的）。
-額度也不再探測它（`quota_claude::refresh_claude` 跳過），**除非它還有 run 在跑**——停用是「別再挑它」，不是把正在用的額度弄瞎。
+額度也不再探測它（`quota_claude::refresh_claude` 跳過），**除非它還有 run 在跑**——停用是「別再挑它」，不是把正在用的額度弄瞎。共用預設帳號的身分（cc0）也一樣：指到裸 `claude` 的身分全都停用、都沒有 run、也沒有不帶身分的 claude bot 在跑，才跳過裸 `claude` 的探測。
 主機上的 alias 不動、登入狀態不動，隨時可以按「啟用」放回來。偵測到但不打算用的 `ccN`（例如只是 zshrc 裡留著）就用這個標掉。
 
 ### 16.5 alias 定期重讀
