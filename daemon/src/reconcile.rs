@@ -537,6 +537,13 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
     }
     // SPEC §4.4a: adopted runs have NULL `runtime_*`; codex's status line has all three.
     fill_codex_runtime(app, host, &client).await;
+    // §6.5e：非 agent 的 shell／服務 pane 收進 `panes`。與上面 agent pane 的邏輯完全分開，失敗只記 warn。
+    let all_panes: Vec<serde_json::Value> =
+        snapshot.get("panes").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    match crate::panes::scan_host(app, host, &all_panes).await {
+        Ok(n) => tracing::debug!(host, panes = n, "scanned non-agent panes"),
+        Err(e) => tracing::warn!(host, error = ?e, "non-agent pane scan failed"),
+    }
     Ok(())
 }
 

@@ -310,6 +310,31 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 對話 Markdown 裡的本機圖片（`![](docs/shot.png)`、`/Users/…/x.png`、`file://…`）。相對路徑以該 bot 的**專案目錄**為底；符號連結解開後仍須在專案目錄內，副檔名限 `png/jpg/jpeg/gif/webp`（不含 svg），≤ 20 MiB。回圖片位元組與對應 `Content-Type`。
 專案外、非圖片、不存在、太大、遠端主機的專案一律 `404 {"what":"image"}`；缺 `path` 400；bot 不存在 404。前端讀不到就把路徑寫成文字，不畫破圖。
 
+## 非 agent 的 pane（SPEC §6.5e）
+
+### `GET /api/projects/{id}/panes`
+這個專案 host 上、**不是 agent** 的 pane：屬於這個專案的，加上還沒歸屬的（使用者手開的也要看得到）。
+```json
+{ "project_id":"01M1…", "host":"local",
+  "panes":[{"pane_id":"w168:p62","host":"local","workspace_id":"w168","tab_id":"t39","cwd":"/Users/m4p/…/wt",
+            "kind":"service","owner_bot_id":"01M1…","project_id":"01M1…","purpose":"dev-server",
+            "foreground":"node next dev","listen_ports":[3010],
+            "last_output_at":"2026-09-16T07:10:00.000Z","first_seen":"…","last_seen":"…","gc_optin":false}] }
+```
+- `kind`：`service`（有前景程式或 listen port）／`shell`（只有 shell）。agent pane 不在這裡。
+- `owner_bot_id`：從 pane 行程樹的 `AM_BOT_ID` 推斷；`null` = 使用者手開的（永不自動關）。
+- `listen_ports` 只在本機判斷，遠端一律空陣列。`last_output_at` 由 herdr 的 `revision` 變化推進，不讀畫面內容。
+- Project 不存在 404。
+
+### `POST /api/panes/{id}/adopt?host=local`
+`{"owner_bot_id"?, "purpose"?, "allow_gc"?}` → 補歸屬與用途。省略的欄位不動。
+**使用者手開的 pane 不會因為 adopt 就變成可自動關**，除非帶 `allow_gc: true`（寫進 `gc_optin`，並記 log）。
+adopt 之後孤兒通知標記會清掉。pane 不存在 404、`owner_bot_id` 不存在 404。
+
+### `POST /api/panes/{id}/close?host=local[&confirm=true]`
+關掉那個 pane（空了的 tab 一併收）。`kind=service` 必須帶 `confirm=true`，否則
+`409 {"reason":"service_pane","pane":{…}}`——UI 要先把 port 顯示給人看再問一次。pane 不存在 404。
+
 ## 記憶體
 
 ### `GET /api/mem`

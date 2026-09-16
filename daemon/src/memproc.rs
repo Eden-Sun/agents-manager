@@ -190,6 +190,50 @@ fn listed(procs: &[Proc], raws: &[Raw]) -> Vec<MemProcess> {
     rows
 }
 
+/// 一個 pane 現在到底在跑什麼（§6.5e 的 shell／service 分類用）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PaneFacts {
+    /// pane 行程樹裡看到的 `AM_BOT_ID`（通常只有一個；多個代表這個 pane 被不同 bot 用過）。
+    pub bot_ids: Vec<String>,
+    /// 這個 pane 底下所有行程的 pid，用來對 listen port。
+    pub pids: Vec<i32>,
+    /// 最有代表性的前景程式（shell 以外最上層的那個）；只有 shell 時是 `None`。
+    pub foreground: Option<String>,
+    /// 行程樹只有 shell 自己：沒有前景程式，也沒有被 Ctrl-Z 丟到背景的 job。
+    pub shell_only: bool,
+}
+
+const SHELLS: &[&str] = &["bash", "zsh", "sh", "fish", "dash", "ksh", "login", "-zsh", "-bash"];
+
+/// 以 `HERDR_PANE_ID` 把一份環境 dump 切成「每個 pane 在跑什麼」。`AM_BOT_ID` 來自 shim 開 pane 時帶的 `--env`
+/// （§6.5b），所以有這個變數＝這顆 pane 是 bot 開的；沒有＝使用者自己開的，一律不動（§6.5e）。
+pub fn pane_facts_from_dump(out: &str) -> HashMap<String, PaneFacts> {
+    let (procs, raws) = scan(out);
+    let mut by_pane: HashMap<String, PaneFacts> = HashMap::new();
+    for r in &raws {
+        let Some(pane) = r.pane_id.clone() else { continue };
+        let p = &procs[r.p_index];
+        let exe = exe_name(&p.argv);
+        let e = by_pane.entry(pane).or_default();
+        e.pids.push(p.pid);
+        if let Some(b) = &r.bot_id {
+            if !e.bot_ids.contains(b) {
+                e.bot_ids.push(b.clone());
+            }
+        }
+        // herdr 自己與 shell 不算前景程式；其餘取第一個（掃描順序是由根往下）。
+        if !is_herdr(p) && !SHELLS.contains(&exe) && e.foreground.is_none() {
+            e.foreground = Some(p.argv.clone());
+        }
+    }
+    for f in by_pane.values_mut() {
+        f.shell_only = f.foreground.is_none();
+        f.pids.sort_unstable();
+        f.pids.dedup();
+    }
+    by_pane
+}
+
 /// Resident memory by bot, from one dump: every process in the herdr tree that carries `AM_BOT_ID`
 /// counts once (its own RSS, not its subtree — children inherit the variable and count themselves),
 /// with the panes those processes run in. Bot ids only; the caller maps them to projects.

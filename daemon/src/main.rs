@@ -36,6 +36,7 @@ mod memstat;
 mod mission;
 mod models;
 mod pane_identity;
+mod panes;
 mod projection;
 mod quota;
 mod quota_claude;

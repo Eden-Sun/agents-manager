@@ -52,6 +52,10 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/projects/{id}", patch(patch_project).delete(delete_project))
         .route("/projects/{id}/bots", post(create_bot))
         .route("/projects/{id}/messages", get(get_project_messages))
+        // §6.5e：非 agent 的 shell／服務 pane。
+        .route("/projects/{id}/panes", get(crate::panes::list_for_project))
+        .route("/panes/{id}/adopt", post(crate::panes::adopt))
+        .route("/panes/{id}/close", post(crate::panes::close))
         .route("/projects/{id}/chat", post(project_chat))
         // 群組任務（docs/goals/agm-missions.md）。
         .route(
