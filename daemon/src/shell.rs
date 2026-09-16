@@ -132,20 +132,69 @@ pub async fn list(app: &Arc<App>, host: &str) -> LcResult<Vec<HostShell>> {
     Ok(alive)
 }
 
+/// 這一次操作要不要打字。看得到與打得進去是兩種權限：`service` pane 只能看
+/// ——送一個 Ctrl-C 給 dev server 就是把它殺掉（§6.5e）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Access {
+    View,
+    Type,
+}
+
+/// 這顆被 trace 的 pane 允不允許這次操作。`kind` 直接當權限用（SPEC §6.5e）。
+pub fn allowed(kind: &str, access: Access) -> bool {
+    match kind {
+        "shell" => true,
+        "service" => access == Access::View,
+        // agent pane 根本不該進 `panes` 表；真的混進來也一律不給（§6.5.1／§6.9 的教訓）。
+        _ => false,
+    }
+}
+
 /// The whitelist check every endpoint below runs.
-async fn registered(app: &Arc<App>, host: &str, pane_id: &str) -> LcResult<HostShell> {
-    app.host_shells
-        .lock()
-        .await
-        .iter()
-        .find(|s| s.host == host && s.pane_id == pane_id)
-        .cloned()
-        .ok_or_else(|| LcError::NotFound("shell".into()))
+///
+/// 兩份白名單（§6.5e，使用者 2026-09-16「這 shell pane 要在 menu 可點選進入」）：
+/// 1. `app.host_shells`——daemon 自己開的，只在記憶體；
+/// 2. `panes` 表——掃描認出來、已經綁到專案的 shell／service pane。選單裡點得到的就是這一批，
+///    而且它活過重啟（記憶體那份不會）。
+///
+/// 安全界線沒有放寬：`kind` 當權限用（service 唯讀），而且**正在跑 agent 的 pane 一律不給**
+/// ——就算掃描在 agent 還沒被 herdr 認出來的空檔把它記成 shell，也不能讓按鍵繞過回合那條線。
+async fn registered(app: &Arc<App>, host: &str, pane_id: &str, access: Access) -> LcResult<HostShell> {
+    if let Some(s) = app.host_shells.lock().await.iter().find(|s| s.host == host && s.pane_id == pane_id).cloned() {
+        return Ok(s);
+    }
+    let row: Option<(String, Option<String>, Option<String>, Option<String>, String)> =
+        sqlx::query_as("SELECT kind, workspace_id, tab_id, cwd, first_seen FROM panes WHERE host=? AND pane_id=?")
+            .bind(host)
+            .bind(pane_id)
+            .fetch_optional(&app.db)
+            .await
+            .map_err(up)?;
+    let Some((kind, workspace_id, tab_id, cwd, first_seen)) = row else {
+        return Err(LcError::NotFound("shell".into()));
+    };
+    if !allowed(&kind, access) {
+        return Err(LcError::Forbidden(json!({"error": "read_only_pane", "kind": kind, "message": "這是服務 pane，只能看不能打字"})));
+    }
+    let session = app.session_for_host(host).await.unwrap_or_default();
+    let runs = crate::db::active_runs_for_pane(&app.db, host, pane_id, &session, &session).await.map_err(up)?;
+    if !runs.is_empty() {
+        return Err(LcError::Forbidden(json!({"error": "agent_pane", "message": "這顆 pane 正在跑 agent，請走 bot 對話"})));
+    }
+    Ok(HostShell {
+        host: host.to_string(),
+        herdr_session: session,
+        workspace_id: workspace_id.unwrap_or_default(),
+        tab_id: tab_id.unwrap_or_default(),
+        pane_id: pane_id.to_string(),
+        cwd: cwd.unwrap_or_default(),
+        created_at: first_seen,
+    })
 }
 
 /// `GET /api/hosts/:name/shells/:pane_id/terminal` — same shape as `GET /bots/:id/terminal`.
 pub async fn read(app: &Arc<App>, host: &str, pane_id: &str, source: &str, lines: u32) -> LcResult<Value> {
-    let shell = registered(app, host, pane_id).await?;
+    let shell = registered(app, host, pane_id, Access::View).await?;
     if !["visible", "recent", "recent_unwrapped", "detection"].contains(&source) {
         return Err(LcError::Bad("bad source".into()));
     }
@@ -166,7 +215,7 @@ pub async fn read(app: &Arc<App>, host: &str, pane_id: &str, source: &str, lines
 /// `POST /api/hosts/:name/shells/:pane_id/text`. Enter is a **separate** `pane.send_keys`: a `\n`
 /// in `pane.send_text` is a pasted line break to herdr. Empty `text` + `enter` = "just press Enter".
 pub async fn send_text(app: &Arc<App>, host: &str, pane_id: &str, text: &str, enter: bool) -> LcResult<()> {
-    registered(app, host, pane_id).await?;
+    registered(app, host, pane_id, Access::Type).await?;
     let (client, _) = client_for(app, host).await?;
     if !text.is_empty() {
         client.pane_send_text(pane_id, text).await.map_err(up)?;
@@ -179,7 +228,7 @@ pub async fn send_text(app: &Arc<App>, host: &str, pane_id: &str, text: &str, en
 
 /// `POST /api/hosts/:name/shells/:pane_id/keys` — names go to herdr verbatim, like `POST /bots/:id/keys`.
 pub async fn send_keys(app: &Arc<App>, host: &str, pane_id: &str, keys: &[String]) -> LcResult<()> {
-    registered(app, host, pane_id).await?;
+    registered(app, host, pane_id, Access::Type).await?;
     if keys.is_empty() {
         return Err(LcError::Bad("keys must not be empty".into()));
     }
@@ -237,5 +286,81 @@ mod tests {
         assert!(!found("m4p", "w1:p2"));
         // …and neither must a pane the daemon never opened, which is every bot pane.
         assert!(!found("local", "w1:p1"));
+    }
+
+    async fn app() -> Arc<App> {
+        let dir = std::env::temp_dir().join(format!("am-shell-{}", crate::db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = crate::db::open(&dir.join("t.sqlite3")).await.unwrap();
+        let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
+        let client = HerdrClient::new(dir.join("absent.sock"));
+        App::new(db, client.clone(), client, cfg, dir.clone(), dir.join("daemon"), 7799, "test".into(), "test".into(), false)
+    }
+
+    async fn tracked(app: &Arc<App>, pane_id: &str, kind: &str) {
+        let now = crate::db::now();
+        sqlx::query(
+            "INSERT INTO panes (pane_id, host, workspace_id, tab_id, cwd, kind, last_output_at, first_seen, last_seen)
+             VALUES (?, 'local', 'w1', 'w1:t1', '/tmp/proj', ?, ?, ?, ?)",
+        )
+        .bind(pane_id)
+        .bind(kind)
+        .bind(&now)
+        .bind(&now)
+        .bind(&now)
+        .execute(&app.db)
+        .await
+        .unwrap();
+    }
+
+    /// 被 trace 的 shell pane 要點得進去——**而且活過重啟**：記憶體那份白名單重啟就空了，
+    /// 這一條走的是 `panes` 表（§6.5e，使用者 2026-09-16「這 shell pane 要在 menu 可點選進入」）。
+    #[tokio::test]
+    async fn a_tracked_shell_pane_is_reachable_but_a_service_pane_is_read_only() {
+        let app = app().await;
+        tracked(&app, "w1:pS", "shell").await;
+        tracked(&app, "w1:pV", "service").await;
+
+        let got = registered(&app, "local", "w1:pS", Access::Type).await.expect("shell 可以打字");
+        assert_eq!((got.cwd.as_str(), got.workspace_id.as_str()), ("/tmp/proj", "w1"));
+        assert!(registered(&app, "local", "w1:pV", Access::View).await.is_ok(), "service 看得到");
+        assert!(
+            matches!(registered(&app, "local", "w1:pV", Access::Type).await, Err(LcError::Forbidden(_))),
+            "service 不能打字"
+        );
+        // 沒被 trace 的 pane 仍然是陌生人。
+        assert!(matches!(registered(&app, "local", "w1:pX", Access::View).await, Err(LcError::NotFound(_))));
+        // 主機不對也不算（pane id 只在單一主機內唯一）。
+        assert!(matches!(registered(&app, "m4p", "w1:pS", Access::View).await, Err(LcError::NotFound(_))));
+        std::fs::remove_dir_all(&app.data_dir).ok();
+    }
+
+    /// 掃描在 agent 還沒被 herdr 認出來的空檔可能把 bot 的 pane 記成 shell。那一刻也不能讓按鍵
+    /// 繞過回合那條線：有 active run 的 pane 一律擋掉（§6.5.1／§6.9 的教訓）。
+    #[tokio::test]
+    async fn a_pane_with_a_live_run_is_never_typeable_even_if_it_got_recorded_as_a_shell() {
+        let app = app().await;
+        let now = crate::db::now();
+        sqlx::query("INSERT INTO projects (id,path,label,host,created_at) VALUES ('p','/tmp/proj','p','local',?)").bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('b','p','b','claude','t',?)").bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO runs (id, bot_id, state, agent_status, pane_id, started_at) VALUES ('r','b','running','idle','w1:pA',?)").bind(&now).execute(&app.db).await.unwrap();
+        tracked(&app, "w1:pA", "shell").await;
+
+        for access in [Access::View, Access::Type] {
+            assert!(matches!(registered(&app, "local", "w1:pA", access).await, Err(LcError::Forbidden(_))), "{access:?}");
+        }
+        std::fs::remove_dir_all(&app.data_dir).ok();
+    }
+
+    /// 選單點得進去的那一批（`panes` 表）用 `kind` 當權限：shell 可看可打字、service 只可看、
+    /// 其他一律不給。送一個 Ctrl-C 給 dev server 就是把它殺掉（§6.5e）。
+    #[test]
+    fn a_service_pane_can_be_watched_but_never_typed_into() {
+        assert!(allowed("shell", Access::View) && allowed("shell", Access::Type));
+        assert!(allowed("service", Access::View));
+        assert!(!allowed("service", Access::Type), "dev server 收到按鍵就沒了");
+        for kind in ["agent", "", "anything"] {
+            assert!(!allowed(kind, Access::View) && !allowed(kind, Access::Type), "{kind}");
+        }
     }
 }
