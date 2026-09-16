@@ -378,6 +378,12 @@ impl HerdrClient {
         Ok(())
     }
 
+    /// herdr 上顯示的 pane 名字（§6.5e：固定的 scratch 叫 `[panes] scratch_name`）。純顯示。
+    pub async fn pane_rename(&self, pane_id: &str, label: &str) -> Result<()> {
+        self.call("pane.rename", json!({"pane_id": pane_id, "label": label})).await?;
+        Ok(())
+    }
+
     pub async fn pane_rects(&self, workspace_id: &str) -> Result<Vec<(String, u32, u32)>> {
         self.rects(json!({"workspace_id": workspace_id})).await
     }

@@ -582,13 +582,18 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
     是什麼」；事後猜比先記貴太多。
   - **關之前重新取一次前景、port 與行程樹**（避免競態）。那一次取值**失敗就不關**——讀不到不等於是空的。
 - `service` pane：不自動關。擁有的 bot 被刪、或 project 被移除 → 推一則 inbox `pane_orphaned`（帶 pane id、workspace、
-  前景程式、listen ports、最後輸出時間），AGM／人決定。
+  前景程式、listen ports、最後輸出時間），AGM／人決定。環境綁過的專案記在 `panes.bound_project_id`：讀不到那顆 pane 的環境的
+  那幾輪（macOS 讀不到閒著的 `-zsh`）沿用它，不然專案一刪、綁定跟著蒸發，孤兒就掉成「沒歸屬」去搶 scratch。孤兒標 `panes.orphaned`，
+  不是 scratch 的候選，也不推 `pane_unowned`。
 - **有歸屬的 `shell` pane，但擁有它的 bot 被刪／專案被移除**：跟 service 一樣推 `pane_orphaned`，但**仍受 GC**——
   通知歸通知，閒置超過門檻照關（AGM 2026-09-16 裁示）。shell pane 沒有跑著的東西，留著它不會比通知更有價值。
 - **使用者手開的（沒有 `AM_BOT_ID`）但 cwd 對得到專案**：列在那個專案底下（這就是「加入專案 trace」），
   但**預設永不自動關**——要它可 GC 只有一條路：`adopt` 帶 `allow_gc: true`，等於人簽過名（見下）。
 - **連 cwd 都對不到任何專案的 shell pane：全機只准有一顆**（使用者 2026-09-16 裁示）。那一顆是固定用途的雜事 pane，
-  名字固定為 `[panes] scratch_name`（預設 `scratch`，daemon 開機掃到就 `herdr pane rename` 成這個名字），**永不自動關**。
+  名字固定為 `[panes] scratch_name`（預設 `scratch`，選中時 daemon 就 `herdr pane rename` 成這個名字），**永不自動關**。
+  怎麼選（每輪**完整**掃描後重算，`panes.scratch` 記住）：候選只有「沒歸屬、不是孤兒」的 pane——名字已經是 `scratch_name` 的優先；
+  其次是上一輪選中的（裡面暫時跑 htop 變成 service 也還是它）；名字被一顆不是候選的 pane 佔著（例如 scratch 裡正在跑 claude）
+  那一輪不選；否則在 **`kind='shell'`** 裡取 `first_seen` 最早的。跑著 `tail -f` 的 service pane、刪掉專案留下的孤兒都搶不走。
   第二顆以後一律視為「該歸屬而沒歸屬」：UI 標示、推一則 inbox `pane_unowned`（去重規則同 `pane_orphaned`），
   並套用與有歸屬 shell pane **相同**的 GC 規則（同一個閒置門檻與三條守門）。理由是使用者的裁示是「只准一顆」，
   不是「都不要動」——但關掉的門檻一點都不放寬：行程樹只有 shell、關前留 20 行 log、取值失敗不關。
@@ -659,7 +664,8 @@ w168 那四個空 zsh（p61／p4W／p5Y／p64）**很可能是使用者手開的
 `panes` 表：`pane_id`、`host`、`workspace_id`、`tab_id`、`cwd`、`kind`、`owner_bot_id`、`project_id`、
 `owned_by`（`bot`／`user`——`project_id` 是靠 cwd 對到的就是 `user`，看得出這一列的歸屬有多硬）、`purpose`、
 `foreground`（argv 摘要）、`listen_ports`、`last_revision`、`last_output_at`、`first_seen`、`last_seen`、
-`orphan_notified_at`、`unowned_notified_at`、`gc_optin`。
+`orphan_notified_at`、`unowned_notified_at`、`gc_optin`、`label`（herdr 的 pane 名字）、`scratch`、`bound_project_id`、`orphaned`。
+inbox 的 key 是 `<kind>:<host>:<pane_id>:<first_seen>`：herdr 重開後 pane id 會重用，舊 pane 用掉的 key 不能擋住新 pane 的通知。
 `GET /api/projects/{id}/panes`、`POST /api/panes/{id}/close`、`POST /api/panes/{id}/adopt`（補 owner／purpose，人工修正用）。
 `GET /api/panes?unowned=1` 列出對不到專案的那些（那顆固定的 `scratch` 也在裡面，標出來）。
 listen port 只在本機算（pane 行程樹的 pid 對 `lsof -nP -iTCP -sTCP:LISTEN`）；遠端主機這一欄留空並標明「遠端不判斷」，

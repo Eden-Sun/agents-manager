@@ -32,6 +32,14 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
            unowned_notified_at TEXT,
            -- 使用者手開的 pane 只有人明確簽名（adopt allow_gc）才可自動關。
            gc_optin INTEGER NOT NULL DEFAULT 0,
+           -- herdr 上的 pane 名字；scratch 靠它認（`[panes] scratch_name`）。
+           label TEXT,
+           -- 這一台那顆固定的 scratch（每輪完整掃描後重算，選中就黏住，不隨 first_seen 漂移）。
+           scratch INTEGER NOT NULL DEFAULT 0,
+           -- 環境（AM_PROJECT_ID，或 AM_BOT_ID 的專案）綁過的專案。讀不到環境的那幾輪（macOS 閒著的 -zsh）沿用。
+           bound_project_id TEXT,
+           -- 綁過的專案被刪、或擁有它的 bot 被刪（§6.5e 的 `pane_orphaned`）。孤兒不是 scratch 的候選。
+           orphaned INTEGER NOT NULL DEFAULT 0,
            PRIMARY KEY (host, pane_id)
          )",
     )
@@ -41,6 +49,10 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
     for (col, ddl) in [
         ("owned_by", "ALTER TABLE panes ADD COLUMN owned_by TEXT NOT NULL DEFAULT 'none'"),
         ("unowned_notified_at", "ALTER TABLE panes ADD COLUMN unowned_notified_at TEXT"),
+        ("label", "ALTER TABLE panes ADD COLUMN label TEXT"),
+        ("scratch", "ALTER TABLE panes ADD COLUMN scratch INTEGER NOT NULL DEFAULT 0"),
+        ("bound_project_id", "ALTER TABLE panes ADD COLUMN bound_project_id TEXT"),
+        ("orphaned", "ALTER TABLE panes ADD COLUMN orphaned INTEGER NOT NULL DEFAULT 0"),
     ] {
         if !crate::db::has_column(pool, "panes", col).await? {
             sqlx::query(ddl).execute(pool).await?;
@@ -157,10 +169,20 @@ pub fn project_for_cwd<'a>(cwd: &str, projects: &'a [(String, String)]) -> Optio
 
 /// 一輪掃描的結果。`complete=false`＝有 pane 的事實這一輪讀不到（行程 dump 或 herdr 失敗）：那幾列的分類與
 /// 歸屬沿用上一輪，呼叫端這一輪不跑 GC 與通知（§6.5e：讀不到不等於是空的）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanOutcome {
     pub panes: usize,
     pub complete: bool,
+    /// 這一輪選出來的 scratch 名字還不是 `scratch_name`：呼叫端去 herdr 改名（純顯示）。
+    pub rename_scratch: Option<String>,
+}
+
+fn is_agent_pane(p: &Value) -> bool {
+    p.get("agent").and_then(Value::as_str).is_some_and(|a| !a.is_empty())
+}
+
+fn label_of(p: &Value) -> Option<&str> {
+    p.get("label").and_then(Value::as_str).filter(|l| !l.is_empty())
 }
 
 /// 這一輪對一顆 pane 實際讀到的東西。
@@ -173,10 +195,7 @@ pub struct Observed {
 /// 掃一台主機的非 agent pane，寫進 `panes`。`snapshot_panes` 是 `session.snapshot` 的 `panes` 陣列
 /// （已經含 `agent`），所以不用再打一次 RPC。
 pub async fn scan_host(app: &Arc<App>, host: &str, snapshot_panes: &[Value]) -> Result<ScanOutcome> {
-    let non_agent: Vec<&Value> = snapshot_panes
-        .iter()
-        .filter(|p| p.get("agent").and_then(Value::as_str).filter(|a| !a.is_empty()).is_none())
-        .collect();
+    let non_agent: Vec<&Value> = snapshot_panes.iter().filter(|p| !is_agent_pane(p)).collect();
     // 環境快照：pane 行程樹的 `AM_BOT_ID` 就是歸屬（§6.5e）。讀不到就這一輪不更新歸屬，不要猜。
     let dump = match crate::memproc::dump(app, host).await {
         Ok(out) => Some(out),
@@ -200,20 +219,29 @@ pub async fn scan_host(app: &Arc<App>, host: &str, snapshot_panes: &[Value]) -> 
         };
         observed.insert(pane_id.to_string(), seen);
     }
-    record_scan(app, host, &non_agent, &observed).await
+    let scan = record_scan(app, host, snapshot_panes, &observed).await?;
+    if let (Some(pane_id), Some(client)) = (&scan.rename_scratch, &client) {
+        let name = app.cfg.get().await.panes.scratch_name.clone();
+        match client.pane_rename(pane_id, &name).await {
+            Ok(()) => tracing::info!(host, pane_id, name, "scratch pane renamed"),
+            Err(e) => tracing::warn!(host, pane_id, error = %e, "could not rename the scratch pane"),
+        }
+    }
+    Ok(scan)
 }
 
 /// [`scan_host`] 的寫入那半（可測：事實由呼叫端給）。`observed` 裡沒有、或是 `None` 的 pane＝這一輪讀不到。
 pub(crate) async fn record_scan(
     app: &Arc<App>,
     host: &str,
-    non_agent: &[&Value],
+    snapshot_panes: &[Value],
     observed: &HashMap<String, Option<Observed>>,
 ) -> Result<ScanOutcome> {
+    let non_agent: Vec<&Value> = snapshot_panes.iter().filter(|p| !is_agent_pane(p)).collect();
     if non_agent.is_empty() {
         // 這台沒有非 agent pane：把舊的收乾淨（pane 已經關了）。
         sqlx::query("DELETE FROM panes WHERE host=?").bind(host).execute(&app.db).await?;
-        return Ok(ScanOutcome { panes: 0, complete: true });
+        return Ok(ScanOutcome { panes: 0, complete: true, rename_scratch: None });
     }
     let now = crate::db::now();
     // canonical path 比對用（§6.5e 的 cwd 回退）。
@@ -225,19 +253,22 @@ pub(crate) async fn record_scan(
         .collect();
     let mut seen = Vec::new();
     let mut complete = true;
-    for p in non_agent {
+    for p in &non_agent {
         let Some(pane_id) = p.get("pane_id").and_then(Value::as_str) else { continue };
         seen.push(pane_id.to_string());
         let revision = p.get("revision").and_then(Value::as_u64).map(|v| v as i64);
-        let prev: Option<(Option<i64>, String, String)> =
-            sqlx::query_as("SELECT last_revision, last_output_at, first_seen FROM panes WHERE host=? AND pane_id=?")
-                .bind(host)
-                .bind(pane_id)
-                .fetch_optional(&app.db)
-                .await?;
+        let label = label_of(p);
+        type Prev = (Option<i64>, String, String, Option<String>, Option<String>);
+        let prev: Option<Prev> = sqlx::query_as(
+            "SELECT last_revision, last_output_at, first_seen, bound_project_id, owner_bot_id FROM panes WHERE host=? AND pane_id=?",
+        )
+        .bind(host)
+        .bind(pane_id)
+        .fetch_optional(&app.db)
+        .await?;
         // revision 變了才算「有輸出」；第一次看到就以 first_seen 當基準（§6.5e）。
         let (last_output_at, first_seen) = match &prev {
-            Some((old_rev, out_at, first)) => {
+            Some((old_rev, out_at, first, _, _)) => {
                 let moved = revision.is_some() && *old_rev != revision;
                 ((if moved { now.clone() } else { out_at.clone() }), first.clone())
             }
@@ -251,12 +282,13 @@ pub(crate) async fn record_scan(
             complete = false;
             if prev.is_some() {
                 sqlx::query(
-                    "UPDATE panes SET workspace_id=?, tab_id=?, cwd=?, last_revision=?, last_output_at=?, last_seen=?
+                    "UPDATE panes SET workspace_id=?, tab_id=?, cwd=?, label=?, last_revision=?, last_output_at=?, last_seen=?
                       WHERE host=? AND pane_id=?",
                 )
                 .bind(p.get("workspace_id").and_then(Value::as_str))
                 .bind(p.get("tab_id").and_then(Value::as_str))
                 .bind(p.get("cwd").and_then(Value::as_str))
+                .bind(label)
                 .bind(revision)
                 .bind(&last_output_at)
                 .bind(&now)
@@ -267,15 +299,16 @@ pub(crate) async fn record_scan(
             } else {
                 let project = project_for_cwd(cwd, &project_paths);
                 sqlx::query(
-                    "INSERT INTO panes (pane_id, host, workspace_id, tab_id, cwd, kind, project_id, last_revision,
+                    "INSERT INTO panes (pane_id, host, workspace_id, tab_id, cwd, label, kind, project_id, last_revision,
                                         last_output_at, first_seen, last_seen, owned_by)
-                     VALUES (?,?,?,?,?,'service',?,?,?,?,?,?)",
+                     VALUES (?,?,?,?,?,?,'service',?,?,?,?,?,?)",
                 )
                 .bind(pane_id)
                 .bind(host)
                 .bind(p.get("workspace_id").and_then(Value::as_str))
                 .bind(p.get("tab_id").and_then(Value::as_str))
                 .bind(p.get("cwd").and_then(Value::as_str))
+                .bind(label)
                 .bind(project)
                 .bind(revision)
                 .bind(&last_output_at)
@@ -289,61 +322,72 @@ pub(crate) async fn record_scan(
         };
 
         let kind = classify(f.foreground.as_deref(), ports);
-        let owner = f.bot_ids.first().cloned();
+        let (prev_bound, prev_owner) = prev.as_ref().map(|p| (p.3.clone(), p.4.clone())).unwrap_or_default();
+        let env_bot = f.bot_ids.first().cloned();
+        let owner = env_bot.clone();
         // 歸屬順序（§6.5e，使用者 2026-09-16 第 3 條裁示）：
         //   1. `AM_PROJECT_ID`——開 pane 當下就綁好的專案。**bot 被刪也不失效**，否則孤兒 pane 會掉成
         //      「非專案」，再撞上「只准一顆」的規則被當成多餘的那一顆。
         //   2. `AM_BOT_ID`——只補 owner 與顯示；它的專案只在第 1 條沒有時才拿來用。
         //   3. 兩個 env 都沒有才用 cwd 比對。
         //   4. 都對不到才是沒歸屬（scratch 的候選）。
-        // 每輪掃描都以 env 為準覆寫 project_id，不留記憶體狀態。
-        let mut owned_by = "none";
-        let mut project = f.project_ids.iter().find(|id| !id.trim().is_empty()).cloned();
-        if project.is_some() {
-            owned_by = "bot";
-        }
-        if project.is_none() {
-            if let Some(b) = &owner {
-                owned_by = "bot";
-                project = crate::db::bot(&app.db, b).await.ok().flatten().map(|b| b.project_id);
+        // 綁定（1、2）以讀得到的環境為準；這一輪讀不到這顆 pane 的環境（macOS 讀不到閒著的 `-zsh`）就沿用上一輪記下的，
+        // 不然專案一刪、綁定跟著蒸發，孤兒就掉成「沒歸屬」去搶 scratch（review 2026-09-16 core 2）。
+        let bound = if f.env_seen {
+            match f.project_ids.iter().find(|id| !id.trim().is_empty()).cloned() {
+                Some(id) => Some(id),
+                None => match &env_bot {
+                    Some(b) => crate::db::bot(&app.db, b).await.ok().flatten().map(|b| b.project_id),
+                    None => None,
+                },
             }
-        }
-        if project.is_none() {
-            if let Some(id) = project_for_cwd(cwd, &project_paths) {
-                owned_by = if owner.is_some() { "bot" } else { "user" };
-                project = Some(id.to_string());
-            }
-        }
-        // 專案本身被刪掉了：綁定留著沒有意義，回到沒歸屬（孤兒通知另外處理）。
-        if let Some(id) = &project {
-            if !project_paths.iter().any(|(pid, _)| pid == id) {
-                project = None;
-                owned_by = "none";
-            }
-        }
+        } else {
+            prev_bound
+        };
+        // 擁有它的 bot 被刪（或根本不在這顆 DB）也是孤兒。DB 讀不到就不下結論。
+        let owner_bot = if f.env_seen { env_bot.clone() } else { prev_owner };
+        let bot_gone = match &owner_bot {
+            Some(b) => matches!(crate::db::bot(&app.db, b).await, Ok(None) | Ok(Some(crate::db::Bot { deleted_at: Some(_), .. }))),
+            None => false,
+        };
+        let live = |id: &str| project_paths.iter().any(|(pid, _)| pid == id);
+        let (project, owned_by, orphaned) = match &bound {
+            Some(id) if live(id) => (Some(id.clone()), "bot", bot_gone),
+            // 綁過的專案被刪了：沒歸屬，但它是孤兒（通知 `pane_orphaned`、照 GC），不是 scratch 的候選。
+            Some(_) => (None, "none", true),
+            None => match project_for_cwd(cwd, &project_paths) {
+                Some(id) if owner.is_some() => (Some(id.to_string()), "bot", bot_gone),
+                Some(id) => (Some(id.to_string()), "user", false),
+                None => (None, "none", owner.is_some() && bot_gone),
+            },
+        };
         sqlx::query(
-            "INSERT INTO panes (pane_id, host, workspace_id, tab_id, cwd, kind, owner_bot_id, project_id,
-                                foreground, listen_ports, last_revision, last_output_at, first_seen, last_seen, owned_by)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            "INSERT INTO panes (pane_id, host, workspace_id, tab_id, cwd, label, kind, owner_bot_id, project_id,
+                                foreground, listen_ports, last_revision, last_output_at, first_seen, last_seen, owned_by,
+                                bound_project_id, orphaned)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
              ON CONFLICT(host, pane_id) DO UPDATE SET
-               workspace_id=excluded.workspace_id, tab_id=excluded.tab_id, cwd=excluded.cwd, kind=excluded.kind,
+               workspace_id=excluded.workspace_id, tab_id=excluded.tab_id, cwd=excluded.cwd, label=excluded.label,
+               kind=excluded.kind,
                -- 人工 adopt 過的 owner／purpose 不被掃描蓋掉（§6.5e）。
                owner_bot_id=COALESCE(panes.owner_bot_id, excluded.owner_bot_id),
                -- 每輪以 env 為準覆寫（§6.5e）：綁定來自 pane 的環境，不是我們記住的舊值。
-               project_id=excluded.project_id,
+               project_id=excluded.project_id, bound_project_id=excluded.bound_project_id,
                foreground=excluded.foreground, listen_ports=excluded.listen_ports,
                last_revision=excluded.last_revision, last_output_at=excluded.last_output_at, last_seen=excluded.last_seen,
-               owned_by=excluded.owned_by,
-               -- 歸屬回來了就把「沒歸屬」的通知標記清掉（去重規則同 orphan）。
-               unowned_notified_at=CASE WHEN excluded.owned_by='none' THEN panes.unowned_notified_at ELSE NULL END,
-               -- owner 又對得到 bot 了就把孤兒標記清掉，下次真的變孤兒才會再通知一次。
-               orphan_notified_at=CASE WHEN excluded.project_id IS NOT NULL THEN NULL ELSE panes.orphan_notified_at END",
+               owned_by=excluded.owned_by, orphaned=excluded.orphaned,
+               -- 歸屬回來了（或它其實是孤兒）就把「沒歸屬」的通知標記清掉。
+               unowned_notified_at=CASE WHEN excluded.owned_by='none' AND excluded.orphaned=0
+                                        THEN panes.unowned_notified_at ELSE NULL END,
+               -- 不再是孤兒就把孤兒標記清掉，下次真的變孤兒才會再通知一次。
+               orphan_notified_at=CASE WHEN excluded.orphaned=0 THEN NULL ELSE panes.orphan_notified_at END",
         )
         .bind(pane_id)
         .bind(host)
         .bind(p.get("workspace_id").and_then(Value::as_str))
         .bind(p.get("tab_id").and_then(Value::as_str))
         .bind(p.get("cwd").and_then(Value::as_str))
+        .bind(label)
         .bind(kind)
         .bind(owner.as_deref())
         .bind(project.as_deref())
@@ -354,6 +398,8 @@ pub(crate) async fn record_scan(
         .bind(&first_seen)
         .bind(&now)
         .bind(owned_by)
+        .bind(bound.as_deref())
+        .bind(orphaned)
         .execute(&app.db)
         .await?;
     }
@@ -363,7 +409,64 @@ pub(crate) async fn record_scan(
         .bind(host)
         .execute(&app.db)
         .await?;
-    Ok(ScanOutcome { panes: seen.len(), complete })
+    // scratch 只在完整的一輪重選：不完整時 kind／歸屬是上一輪的，拿來選會讓它來回跳。
+    let mut rename_scratch = None;
+    if complete {
+        let name = app.cfg.get().await.panes.scratch_name.clone();
+        let cands: Vec<ScratchCandidate> = sqlx::query_as(
+            "SELECT pane_id, kind, owned_by, orphaned, label, scratch, first_seen FROM panes WHERE host=?",
+        )
+        .bind(host)
+        .fetch_all(&app.db)
+        .await?;
+        let name_in_use = !name.is_empty() && snapshot_panes.iter().any(|p| label_of(p) == Some(name.as_str()));
+        let pick = pick_scratch(&cands, &name, name_in_use);
+        sqlx::query("UPDATE panes SET scratch = CASE WHEN pane_id = ? THEN 1 ELSE 0 END WHERE host=?")
+            .bind(pick.map(|c| c.pane_id.as_str()).unwrap_or(""))
+            .bind(host)
+            .execute(&app.db)
+            .await?;
+        rename_scratch = pick.filter(|c| !name.is_empty() && c.label.as_deref() != Some(name.as_str())).map(|c| c.pane_id.clone());
+    }
+    Ok(ScanOutcome { panes: seen.len(), complete, rename_scratch })
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub(crate) struct ScratchCandidate {
+    pub pane_id: String,
+    pub kind: String,
+    pub owned_by: String,
+    pub orphaned: bool,
+    pub label: Option<String>,
+    pub scratch: bool,
+    pub first_seen: String,
+}
+
+/// 這一台那顆固定的 scratch（§6.5e「連 cwd 都對不到任何專案的 shell pane：全機只准有一顆」）。
+///
+/// 候選只有「沒歸屬、不是孤兒」的 pane，依序：
+/// 1. 名字就是 `scratch_name` 的（SPEC：scratch 的名字固定，靠名字認，不隨 first_seen 漂移）；
+/// 2. 上一輪已經選中的（改名失敗時靠這一欄黏住；裡面暫時跑著 htop 變成 service 也還是它）；
+/// 3. `scratch_name` 被一顆不是候選的 pane 佔著（例如 scratch 裡正在跑 claude，這一輪是 agent pane）→ 這一輪**不選**，
+///    不然會有另一顆被扶正、改名，原本那顆回來反而變成多出來的；
+/// 4. 否則在 `kind='shell'` 裡取 first_seen 最早的——跑著 `tail -f` 的 service pane 不能搶走這個位置（review core 2）。
+pub(crate) fn pick_scratch<'a>(cands: &'a [ScratchCandidate], name: &str, name_in_use: bool) -> Option<&'a ScratchCandidate> {
+    let eligible = || cands.iter().filter(|c| c.owned_by == "none" && !c.orphaned);
+    let earliest = |it: &mut dyn Iterator<Item = &'a ScratchCandidate>| {
+        it.min_by(|a, b| a.first_seen.cmp(&b.first_seen).then_with(|| a.pane_id.cmp(&b.pane_id)))
+    };
+    if !name.is_empty() {
+        if let Some(c) = earliest(&mut eligible().filter(|c| c.label.as_deref() == Some(name))) {
+            return Some(c);
+        }
+    }
+    if let Some(c) = earliest(&mut eligible().filter(|c| c.scratch)) {
+        return Some(c);
+    }
+    if name_in_use {
+        return None;
+    }
+    earliest(&mut eligible().filter(|c| c.kind == "shell"))
 }
 
 /// shim 回報的用途：pane 還沒被掃到就先建一列（`kind` 先當 shell，下一輪掃描會修正）。
@@ -403,28 +506,20 @@ pub async fn gc_host(app: &Arc<App>, host: &str) -> Result<usize> {
     let cfg = app.cfg.get().await;
     let idle_limit = cfg.panes.idle_close_secs() as i64;
     let log_lines = cfg.panes.close_log_lines;
-    let rows = sqlx::query_as::<_, (String, String, Option<String>, Option<String>, String, i64, Option<String>)>(
-        "SELECT pane_id, kind, workspace_id, tab_id, last_output_at, gc_optin, owned_by FROM panes WHERE host=?",
+    type GcRow = (String, String, Option<String>, Option<String>, String, i64, Option<String>, bool);
+    let rows = sqlx::query_as::<_, GcRow>(
+        "SELECT pane_id, kind, workspace_id, tab_id, last_output_at, gc_optin, owned_by, scratch FROM panes WHERE host=?",
     )
     .bind(host)
     .fetch_all(&app.db)
     .await?;
-    if rows.is_empty() {
-        return Ok(0);
-    }
-    // 沒歸屬的那一顆＝最早看到的那顆，是 scratch，永不自動關；其餘的才受 GC（使用者「只准一顆」的裁示）。
-    let scratch: Option<String> = sqlx::query_scalar(
-        "SELECT pane_id FROM panes WHERE host=? AND owned_by='none' ORDER BY first_seen, pane_id LIMIT 1",
-    )
-    .bind(host)
-    .fetch_optional(&app.db)
-    .await?;
     let mut closed = 0;
-    for (pane_id, kind, ws, tab, last_output_at, gc_optin, owned_by) in rows {
+    for (pane_id, kind, ws, tab, last_output_at, gc_optin, owned_by, scratch) in rows {
         if kind != "shell" {
             continue;
         }
-        if scratch.as_deref() == Some(pane_id.as_str()) {
+        // 那顆固定的 scratch 永不自動關；其餘沒歸屬的才受 GC（使用者「只准一顆」的裁示）。
+        if scratch {
             continue;
         }
         // 使用者手開的（cwd 對得到專案）預設不關，除非 adopt 時簽過名。
@@ -486,35 +581,43 @@ async fn close_if_still_idle(
 }
 
 /// 孤兒與「該歸屬而沒歸屬」的通知，各自只發一次（§6.5e 去重）。
+///
+/// - `pane_unowned`：沒歸屬、不是孤兒、也不是 scratch 的（「多出來的」）。
+/// - `pane_orphaned`：綁過的專案被刪、或擁有它的 bot 被刪。帶前景、port、最後輸出時間，由人決定（service 不自動關，
+///   shell 照 GC）。
+///
+/// inbox 的 key 帶 `first_seen`：herdr 重開後 pane id 會重用，不能讓舊 pane 用掉的 key 擋住新 pane 的通知。
 pub async fn notify_unowned_and_orphans(app: &Arc<App>, host: &str) -> Result<usize> {
-    let scratch: Option<String> = sqlx::query_scalar(
-        "SELECT pane_id FROM panes WHERE host=? AND owned_by='none' ORDER BY first_seen, pane_id LIMIT 1",
-    )
-    .bind(host)
-    .fetch_optional(&app.db)
-    .await?;
-    let rows = sqlx::query_as::<_, (String, String, Option<String>, Option<String>, Option<String>, String)>(
-        "SELECT pane_id, kind, workspace_id, foreground, listen_ports, owned_by
-           FROM panes WHERE host=? AND owned_by='none' AND unowned_notified_at IS NULL",
+    type NotifyRow = (String, String, Option<String>, Option<String>, Option<String>, String, String, Option<String>, Option<String>, bool);
+    let rows = sqlx::query_as::<_, NotifyRow>(
+        "SELECT pane_id, kind, workspace_id, foreground, listen_ports, last_output_at, first_seen,
+                owner_bot_id, bound_project_id, orphaned
+           FROM panes
+          WHERE host=? AND scratch=0
+            AND ((orphaned=1 AND orphan_notified_at IS NULL)
+              OR (orphaned=0 AND owned_by='none' AND unowned_notified_at IS NULL))",
     )
     .bind(host)
     .fetch_all(&app.db)
     .await?;
     let mut sent = 0;
-    for (pane_id, kind, ws, fg, ports, _) in rows {
-        if scratch.as_deref() == Some(pane_id.as_str()) {
-            continue; // 那一顆是 scratch，不是「多出來的」。
-        }
+    for (pane_id, kind, ws, fg, ports, last_output_at, first_seen, owner, bound, orphaned) in rows {
+        let (event, column, message) = if orphaned {
+            ("pane_orphaned", "orphan_notified_at", "這顆 pane 綁過的專案或擁有它的 bot 已經刪掉了；service 不會自動關，要不要關由人決定")
+        } else {
+            ("pane_unowned", "unowned_notified_at", "這顆 pane 對不到任何專案，而且不是那顆固定的 scratch")
+        };
         let payload = json!({
             "host": host, "pane_id": pane_id, "kind": kind, "workspace_id": ws,
-            "foreground": fg, "listen_ports": ports,
-            "message": "這顆 pane 對不到任何專案，而且不是那顆固定的 scratch",
+            "foreground": fg, "listen_ports": ports, "last_output_at": last_output_at,
+            "owner_bot_id": owner, "project_id": bound,
+            "message": message,
         });
-        let key = format!("pane_unowned:{host}:{pane_id}");
-        if crate::supervisor::store::push_inbox(&app.db, &key, "pane_unowned", None, None, None, &payload).await?.is_some() {
+        let key = format!("{event}:{host}:{pane_id}:{first_seen}");
+        if crate::supervisor::store::push_inbox(&app.db, &key, event, None, None, None, &payload).await?.is_some() {
             sent += 1;
         }
-        sqlx::query("UPDATE panes SET unowned_notified_at=? WHERE host=? AND pane_id=?")
+        sqlx::query(&format!("UPDATE panes SET {column}=? WHERE host=? AND pane_id=?"))
             .bind(crate::db::now())
             .bind(host)
             .bind(&pane_id)
@@ -545,6 +648,9 @@ pub fn row_json(r: &sqlx::sqlite::SqliteRow) -> Value {
         "last_seen": r.get::<String, _>("last_seen"),
         "gc_optin": r.get::<i64, _>("gc_optin") != 0,
         "owned_by": r.get::<String, _>("owned_by"),
+        "label": r.get::<Option<String>, _>("label"),
+        "scratch": r.get::<bool, _>("scratch"),
+        "orphaned": r.get::<bool, _>("orphaned"),
     })
 }
 
@@ -652,6 +758,7 @@ mod tests {
                 pids: vec![1],
                 shell_only: foreground.is_none(),
                 foreground: foreground.map(String::from),
+                env_seen: bot.is_some() || project.is_some(),
             },
             ports: ports.to_vec(),
         })
@@ -676,7 +783,7 @@ mod tests {
         project_and_bot(&app).await;
         let dev = json!({"pane_id": "w1:pDev", "workspace_id": "w1", "tab_id": "t1", "cwd": "/elsewhere", "revision": 1});
         let known = HashMap::from([("w1:pDev".to_string(), observed(Some("next dev"), Some("b1"), Some("p1"), &[3010]))]);
-        let scan = record_scan(&app, "local", &[&dev], &known).await.unwrap();
+        let scan = record_scan(&app, "local", &[dev], &known).await.unwrap();
         assert!(scan.complete);
         let before = row(&app, "w1:pDev").await;
         assert_eq!((before.0.as_str(), before.1.as_str(), before.2.as_deref()), ("service", "bot", Some("p1")));
@@ -685,13 +792,85 @@ mod tests {
         let moved = json!({"pane_id": "w1:pDev", "workspace_id": "w2", "tab_id": "t9", "cwd": "/elsewhere", "revision": 2});
         let fresh = json!({"pane_id": "w1:pNew", "workspace_id": "w1", "tab_id": "t1", "cwd": "/elsewhere", "revision": 1});
         let unknown = HashMap::from([("w1:pDev".to_string(), None)]);
-        let scan = record_scan(&app, "local", &[&moved, &fresh], &unknown).await.unwrap();
-        assert_eq!(scan, ScanOutcome { panes: 2, complete: false });
+        let scan = record_scan(&app, "local", &[moved, fresh], &unknown).await.unwrap();
+        assert_eq!(scan, ScanOutcome { panes: 2, complete: false, rename_scratch: None });
         assert_eq!(row(&app, "w1:pDev").await, before, "kind／歸屬／前景／port 沿用上一輪");
         let ws: String = sqlx::query_scalar("SELECT workspace_id FROM panes WHERE pane_id='w1:pDev'").fetch_one(&app.db).await.unwrap();
         assert_eq!(ws, "w2", "位置照樣更新");
         let new_row = row(&app, "w1:pNew").await;
         assert_eq!((new_row.0.as_str(), new_row.1.as_str()), ("service", "none"), "新列先當 service，不會被 GC 當成閒置 shell");
+        std::fs::remove_dir_all(&app.data_dir).ok();
+    }
+
+    fn cand(id: &str, kind: &str, owned_by: &str, first_seen: &str) -> ScratchCandidate {
+        ScratchCandidate {
+            pane_id: id.into(),
+            kind: kind.into(),
+            owned_by: owned_by.into(),
+            orphaned: false,
+            label: None,
+            scratch: false,
+            first_seen: first_seen.into(),
+        }
+    }
+
+    /// review 2026-09-16 core 2 情境 A：先在 `~` 開一顆跑 `tail -f` 的 pane，後來才開當雜事用的 zsh。
+    /// 以前 service 那顆因為比較早被選成 scratch，真正的 scratch 反而成了「多出來的」被 GC。
+    #[test]
+    fn the_scratch_is_a_shell_found_by_name_and_it_sticks() {
+        let tail = cand("w1:pTail", "service", "none", "2026-09-16T00:00:00Z");
+        let zsh = cand("w1:pZsh", "shell", "none", "2026-09-16T01:00:00Z");
+        let pick = |c: &[ScratchCandidate], in_use: bool| pick_scratch(c, "scratch", in_use).map(|c| c.pane_id.clone());
+        assert_eq!(pick(&[tail.clone(), zsh.clone()], false).as_deref(), Some("w1:pZsh"), "service 不能搶 scratch");
+
+        // 名字就是 scratch 的那顆優先，比它早的 shell 也搶不走。
+        let early = cand("w1:pEarly", "shell", "none", "2026-09-15T00:00:00Z");
+        let named = ScratchCandidate { label: Some("scratch".into()), ..zsh.clone() };
+        assert_eq!(pick(&[early.clone(), named.clone()], true).as_deref(), Some("w1:pZsh"));
+
+        // 選中之後就黏住：裡面暫時跑 htop 變成 service 也還是它（改名失敗時靠這一欄）。
+        let busy = ScratchCandidate { kind: "service".into(), scratch: true, ..zsh.clone() };
+        assert_eq!(pick(&[early.clone(), busy], false).as_deref(), Some("w1:pZsh"));
+
+        // 孤兒（綁過的專案被刪）與有歸屬的都不是候選。
+        let orphan = ScratchCandidate { orphaned: true, ..early.clone() };
+        let owned = cand("w1:pUser", "shell", "user", "2026-09-14T00:00:00Z");
+        assert_eq!(pick(&[orphan, owned, zsh.clone()], false).as_deref(), Some("w1:pZsh"));
+
+        // 名字被一顆不是候選的 pane 佔著（scratch 裡正在跑 claude）：這一輪不扶正別人。
+        assert_eq!(pick(&[early, zsh], true), None);
+    }
+
+    /// review 2026-09-16 core 2 情境 B：刪掉專案 P，P 的 bot 開的 build shell 以前會變成「沒歸屬」而且比
+    /// 使用者的 scratch 早，於是孤兒永不 GC、使用者的 scratch 反而被關。現在它是孤兒：不當 scratch、推 pane_orphaned。
+    /// macOS 讀不到閒著的 `-zsh` 的環境，所以綁定要沿用上一輪記下的。
+    #[tokio::test]
+    async fn a_deleted_projects_pane_is_an_orphan_not_the_scratch() {
+        let app = app().await;
+        project_and_bot(&app).await;
+        let build = json!({"pane_id": "w1:pBuild", "workspace_id": "w1", "tab_id": "t1", "cwd": "/tmp/p1", "revision": 1});
+        let facts = HashMap::from([("w1:pBuild".to_string(), observed(None, Some("b1"), Some("p1"), &[]))]);
+        let scan = record_scan(&app, "local", &[build.clone()], &facts).await.unwrap();
+        assert_eq!(scan.rename_scratch, None, "有歸屬的不是 scratch");
+
+        sqlx::query("UPDATE projects SET deleted_at=? WHERE id='p1'").bind(crate::db::now()).execute(&app.db).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        // 這一輪讀得到事實，但讀不到 build shell 的環境（閒著的 -zsh）；使用者這時才開了雜事 pane。
+        let mine = json!({"pane_id": "w1:pMine", "workspace_id": "w1", "tab_id": "t2", "cwd": "/Users/me", "revision": 1});
+        let idle = |id: &str| (id.to_string(), Some(Observed { facts: crate::memproc::PaneFacts { pids: vec![1], shell_only: true, ..Default::default() }, ports: vec![] }));
+        let facts = HashMap::from([idle("w1:pBuild"), idle("w1:pMine")]);
+        let scan = record_scan(&app, "local", &[build, mine], &facts).await.unwrap();
+        assert!(scan.complete);
+        assert_eq!(scan.rename_scratch.as_deref(), Some("w1:pMine"), "使用者那顆才是 scratch，而且要改名");
+
+        let (owned_by, orphaned, scratch): (String, bool, bool) =
+            sqlx::query_as("SELECT owned_by, orphaned, scratch FROM panes WHERE pane_id='w1:pBuild'").fetch_one(&app.db).await.unwrap();
+        assert_eq!((owned_by.as_str(), orphaned, scratch), ("none", true, false));
+
+        assert_eq!(notify_unowned_and_orphans(&app, "local").await.unwrap(), 1);
+        let kinds: Vec<String> = sqlx::query_scalar("SELECT kind FROM supervisor_inbox").fetch_all(&app.db).await.unwrap();
+        assert_eq!(kinds, vec!["pane_orphaned".to_string()], "孤兒推 pane_orphaned；scratch 不推");
+        assert_eq!(notify_unowned_and_orphans(&app, "local").await.unwrap(), 0, "同一顆只推一次");
         std::fs::remove_dir_all(&app.data_dir).ok();
     }
 
@@ -743,17 +922,18 @@ mod tests {
         std::fs::remove_dir_all(&app.data_dir).ok();
     }
 
-    /// 沒歸屬的第一顆是 scratch，永不自動關；第二顆起受 GC 並推一次 pane_unowned。
+    /// scratch 永不自動關；其他沒歸屬的受 GC 並推一次 pane_unowned。
     #[tokio::test]
-    async fn only_the_first_unowned_pane_is_spared_and_the_rest_are_reported_once() {
+    async fn only_the_scratch_is_spared_and_the_rest_are_reported_once() {
         let app = app().await;
         let old = (chrono::Utc::now() - chrono::Duration::hours(9)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        for (id, first_seen) in [("w1:pScratch", "2026-09-16T00:00:00.000Z"), ("w1:pExtra", "2026-09-16T01:00:00.000Z")] {
+        for (id, first_seen, scratch) in [("w1:pScratch", "2026-09-16T00:00:00.000Z", 1), ("w1:pExtra", "2026-09-16T01:00:00.000Z", 0)] {
             sqlx::query(
-                "INSERT INTO panes (pane_id, host, kind, owned_by, last_output_at, first_seen, last_seen)
-                 VALUES (?,'local','shell','none',?,?,?)",
+                "INSERT INTO panes (pane_id, host, kind, owned_by, scratch, last_output_at, first_seen, last_seen)
+                 VALUES (?,'local','shell','none',?,?,?,?)",
             )
             .bind(id)
+            .bind(scratch)
             .bind(&old)
             .bind(first_seen)
             .bind(&old)
