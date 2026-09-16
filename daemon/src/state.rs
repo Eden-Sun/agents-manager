@@ -39,8 +39,10 @@ pub struct TurnEvent {
 impl TurnEvent {
     /// Whether this turn has finished (the only transition a scheduler acts on).
     #[allow(dead_code)]
+    /// 回合真的結束了嗎。**`queued` 不算**：排隊中的 turn 還沒送出去，把它當成結束會讓交辦被
+    /// 當作失敗結案（2026-09-16 AGM：notice 排進佇列卻推了 assignment_failed）。
     pub fn is_done(&self) -> bool {
-        self.status != "in_flight"
+        matches!(self.status.as_str(), "completed" | "completed_fallback" | "failed")
     }
 }
 

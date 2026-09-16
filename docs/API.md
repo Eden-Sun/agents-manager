@@ -1071,6 +1071,7 @@ body 直接是檔案位元組（**不是** multipart），`Content-Type` 就是�
   `{id,target_bot_id,client_request_id,turn_id,status,text,delivery,result,error,attempts,request_id,created_at,updated_at,completed_at,turn_status,evidence_complete,open,awaiting_review,
   review:{decision,by,at,reason,followup_assignment_id},follow_up_of,legacy_closed,ownership,ownership_conflicts,resume_at,quota_retries,next_attempt_at}`。
   - `status`：`queued` | `delivered` | `unknown`（還在跑）→ `awaiting_review` → `completed` | `failed` | `cancelled` | `superseded`；另有 `blocked`、`quota_blocked`（都算未結案）。
+  - 對方正在回合中：排成 `queued` turn，交辦停在 `delivered`＋`delivery="queued"`，推一則 `assignment_queued`（只記錄、不叫醒），不算失敗也不結案。
   - 一直送不進去（對方持續在回合中）：超過 `AM_DISPATCH_CONFLICT_GIVE_UP_MINS`（預設 30 分）改成 `blocked`＋inbox 的 `assignment_undeliverable`，
     **不是** `dispatch_failed`——工作沒失敗，是進不去（SPEC §18.8）。
   - `turn_status`（回合還在跑時 `null`）：`completed` / `completed_fallback` / `failed` / `dispatch_failed` / `turn_missing` / `quota_exhausted` / `identity_switch`。**回合結束不會自己變 `completed`。**
