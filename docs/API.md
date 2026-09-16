@@ -922,7 +922,9 @@ body 直接是檔案位元組（**不是** multipart），`Content-Type` 就是�
 - **只讀**：沒有下載、`herdr update`、`server stop/restart`。回應固定帶 `read_only: true`。升級**可能**影響正在跑的 pane：0.9 起 client 更新可以不動相容的 server 與它底下的 pane，但 endpoint generation 比 1 舊的 server 需要一次性升級，那次才會動到 pane。是哪一種由 AGM 看兩邊版本決定並安排時間窗。
 - 三個版本分開，**任一個未知就不能說「已是最新」**：`hosts[].server`（那台跑著的 herdr server，來自 herdr `ping` 的 `version`/`protocol`）、`hosts[].disk`（那台磁碟上的 `herdr --version`，用本模組自己的解析——`herdr 0.8.2` 的版本不在第一個 token，`changelog` 那支 `version_string` 吃不下）、`latest`（官方 stable）。
 - **主機清單以 `app.hosts`（設定檔）為準**，DB 只是快取：從設定移除的主機不再出現（否則它會永遠參與落後判斷與通知），剛加進來還沒巡到的主機以「未知」出現而不是整台消失。
-- `standing` 是**現在**的判斷：`unknown` | `latest` | `behind` | `ahead`（比官方 stable 新，例如跑 prerelease）。只要這一邊的讀數不是剛確認過的（`fresh: false`：離線、探測失敗、整列超過 13 小時沒巡過）、或 `latest.stale` / `latest.version` 為 null，一律 `unknown`。歷史值仍留在 `version`，它當時的比較結果放在 `cached_standing`——那只能當歷史說明，不能拿來發綠燈。
+- `standing` 是**現在**的判斷：`unknown` | `latest` | `behind` | `ahead`（比官方 stable 新，例如跑 prerelease）。只要這一邊的讀數不是剛確認過的（`fresh: false`）、或官方最新版本身沒確認過，一律 `unknown`。
+  - `server.fresh` 另外要求**主機現在是連著的**：上一輪成功、下一秒斷線，到下一輪（最久 6 小時）之前 `error` 還是空的，只看它會讓斷線的主機一路顯示已是最新。`disk.fresh` 不綁連線——`herdr --version` 走 shell／ssh，跟 herdr socket 通不通是兩回事。
+  - 官方最新版「沒確認過」＝ `latest.version` 為 null、`latest.stale`（超過 13 小時沒抓成功）、**或 `latest.error` 非 null**（最近一次查失敗）。歷史值仍留在 `version`，它當時的比較結果放在 `cached_standing`——那只能當歷史說明，不能拿來發綠燈。
 - `behind_hosts` 只收 `standing == "behind"`（即新鮮的落後）；`unknown_hosts` 是任一邊現在未知的主機（含磁碟側）；`stale_hosts` 是讀數已經不算數的主機。
 - 來源固定 `https://herdr.dev/latest.json`（不可設定）。真實 schema：頂層 `version` / `protocol` / `endpoint_generation` / `notes`，加一份 `releases`（版本 → `{notes, protocol, endpoint_generation, …}`）。**最新**取頂層與 `releases` 裡最大的 **stable**，prerelease 不推薦。啟動查一次、之後每 6 小時；body 上限 2 MiB、timeout 20 秒、不執行抓回來的內容。
 - 抓失敗只更新 `latest.checked_at` 與 `latest.error`，`version` / `fetched_at` / release notes 都留著上次成功的值；太久沒查成功時 `stale: true`（值照顯示，但不能講成剛確認過）。離線主機保留上次讀到的版本並帶 `error`，**不拿本機版本冒充**。
