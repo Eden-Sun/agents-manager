@@ -146,6 +146,8 @@ export interface ProjectPane {
   gc_optin: boolean
   /** daemon 判的「只能看」（有 listen port）。舊 daemon 沒這欄＝`undefined`，呼叫端退回看 port（`lib/shellAccess`）。 */
   read_only?: boolean
+  /** 只在 `GET /api/panes?unowned=1`：daemon 認定的那顆固定 scratch。舊 daemon 沒這欄＝`undefined`。 */
+  scratch?: boolean
 }
 
 function toPane(v: unknown): ProjectPane {
@@ -170,6 +172,7 @@ function toPane(v: unknown): ProjectPane {
     last_seen: str(r.last_seen),
     gc_optin: r.gc_optin === true,
     ...(typeof r.read_only === 'boolean' ? { read_only: r.read_only } : {}),
+    ...(typeof r.scratch === 'boolean' ? { scratch: r.scratch } : {}),
   }
 }
 
@@ -184,6 +187,20 @@ export async function fetchAllPanes(): Promise<ProjectPane[]> {
   const raw = await transport.request('GET', '/panes')
   const list = (raw as { panes?: unknown[] })?.panes
   return Array.isArray(list) ? list.map(toPane) : []
+}
+
+/** 對不到任何專案的 pane（`GET /api/panes?unowned=1`），側欄底部那一組；daemon 會標哪一顆是 scratch。 */
+export async function fetchUnownedPanes(): Promise<ProjectPane[]> {
+  const raw = await transport.request('GET', '/panes?unowned=1')
+  const list = (raw as { panes?: unknown[] })?.panes
+  return Array.isArray(list) ? list.map(toPane) : []
+}
+
+/** 關服務 pane 沒帶 confirm 的 409：回 daemon 附上的那一列（最新的 kind／port），拿來問人。其他錯誤回 `null`。 */
+export function servicePaneConflict(e: unknown): ProjectPane | null {
+  if (!(e instanceof ApiError) || e.status !== 409 || e.body.reason !== 'service_pane') return null
+  const pane = toPane(e.body.pane)
+  return pane.pane_id ? pane : null
 }
 
 export async function focusPane(paneId: string, host: string): Promise<void> {

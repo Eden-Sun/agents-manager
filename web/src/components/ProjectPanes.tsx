@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
 import * as api from '../api'
 import type { ProjectPane } from '../api'
 import { useStore } from '../store/store'
@@ -25,43 +25,44 @@ const OWNER_LABEL: Record<ProjectPane['owned_by'], string> = {
  * 專案頁的「其他 pane」（SPEC §6.5e）：這個專案底下不是 agent 的 pane——bot 開的 shell／服務，
  * 以及你自己在專案目錄裡開的。列出用途、前景程式、port、擁有者、閒置多久、在哪個 workspace；
  * 可以聚焦或關閉。**服務 pane 關閉要再確認一次**，因為關掉它等於殺掉裡面在跑的東西。
+ *
+ * 清單跟側欄是 store 裡同一份（`sidePanes`）：這裡關掉的，側欄同時不見。對不到專案的不在這裡，在側欄底部。
  */
 export function ProjectPanes({ projectId, workspaceId }: { projectId: string; workspaceId: string | null }) {
-  const [panes, setPanes] = useState<ProjectPane[] | null>(null)
+  const panes = useStore((s) => s.sidePanes[projectId])
+  const refresh = useStore((s) => s.refreshPanes)
+  const closeTracedPane = useStore((s) => s.closeTracedPane)
   const [busy, setBusy] = useState<string | null>(null)
   const [confirming, setConfirming] = useState<ProjectPane | null>(null)
   const bots = useStore((s) => s.bots)
   const notify = useStore((s) => s.notify)
 
-  const load = useCallback(async () => {
-    try {
-      setPanes(await api.fetchProjectPanes(projectId))
-    } catch {
-      // 舊 daemon 沒有這支 API：整個區塊不出現，不要在專案頁丟錯誤。
-      setPanes([])
-    }
-  }, [projectId])
-
   useEffect(() => {
-    void load()
-    const t = setInterval(() => void load(), 30_000)
+    void refresh()
+    const t = setInterval(() => void refresh(), 30_000)
     return () => clearInterval(t)
-  }, [load])
+  }, [refresh, projectId])
 
   if (!panes || panes.length === 0) return null
 
-  const act = async (p: ProjectPane, what: 'focus' | 'close', confirm = false) => {
+  const focus = async (p: ProjectPane) => {
     setBusy(p.pane_id)
     try {
-      if (what === 'focus') await api.focusPane(p.pane_id, p.host)
-      else await api.closePane(p.pane_id, p.host, confirm)
-      await load()
+      await api.focusPane(p.pane_id, p.host)
     } catch (e) {
-      notify('error', `${what === 'focus' ? '聚焦' : '關閉'}失敗：${e instanceof Error ? e.message : String(e)}`)
+      notify('error', `聚焦失敗：${e instanceof Error ? e.message : String(e)}`)
     } finally {
       setBusy(null)
-      setConfirming(null)
     }
+  }
+
+  const close = async (p: ProjectPane, confirm = false) => {
+    setBusy(p.pane_id)
+    setConfirming(null)
+    const r = await closeTracedPane(p, confirm)
+    setBusy(null)
+    // 清單上還是 shell、其實已經開起 dev server：daemon 擋下來，換成它附上的最新那列再問一次。
+    if (r && r !== 'closed') setConfirming(r)
   }
 
   return (
@@ -94,14 +95,14 @@ export function ProjectPanes({ projectId, workspaceId }: { projectId: string; wo
                 <span className="pane-idle">閒置 {idleFor(p.last_output_at)}</span>
               </div>
               <div className="project-pane-actions">
-                <button type="button" className="mini-btn" disabled={busy === p.pane_id} onClick={() => void act(p, 'focus')}>
+                <button type="button" className="mini-btn" disabled={busy === p.pane_id} onClick={() => void focus(p)}>
                   聚焦
                 </button>
                 <button
                   type="button"
                   className="mini-btn danger"
                   disabled={busy === p.pane_id}
-                  onClick={() => (p.kind === 'service' ? setConfirming(p) : void act(p, 'close'))}
+                  onClick={() => (p.kind === 'service' ? setConfirming(p) : void close(p))}
                 >
                   關閉
                 </button>
@@ -128,7 +129,7 @@ export function ProjectPanes({ projectId, workspaceId }: { projectId: string; wo
               <button type="button" className="btn" onClick={() => setConfirming(null)}>
                 取消
               </button>
-              <button type="button" className="btn danger" onClick={() => void act(confirming, 'close', true)}>
+              <button type="button" className="btn danger" onClick={() => void close(confirming, true)}>
                 關閉
               </button>
             </div>
