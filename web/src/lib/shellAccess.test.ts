@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { ApiError } from '../api/types.ts'
-import { keySyncActive, paneReadOnly, shellForbidden } from './shellAccess.ts'
+import { keySyncActive, paneReadOnly, shellForbidden, shellStateUnknown } from './shellAccess.ts'
 
 test('唯讀看 daemon 的 read_only；舊 daemon 沒這欄時退回看 port，不看 kind', () => {
   // 跑著 vim 的 shell 被掃描分成 service，但沒有 port：要打得進去，不然人出不來。
@@ -24,4 +24,12 @@ test('唯讀時 localStorage 記著的鍵盤同步不算數', () => {
   assert.equal(keySyncActive(true, true), false)
   assert.equal(keySyncActive(true, false), true)
   assert.equal(keySyncActive(false, false), false)
+})
+
+test('讀不到 pane 狀態的 409：顯示 daemon 的說明、不當成唯讀', () => {
+  const unknown = new ApiError(409, { error: 'conflict', reason: 'pane_state_unknown', message: '請稍後再試' } as never, 'conflict')
+  assert.equal(shellStateUnknown(unknown), '請稍後再試')
+  assert.equal(shellForbidden(unknown), null, '不能拿去鎖面板')
+  assert.equal(shellStateUnknown(new ApiError(409, { error: 'conflict', reason: 'pane_state_unknown' } as never, 'conflict'))?.includes('稍後再試'), true)
+  assert.equal(shellStateUnknown(new ApiError(409, { error: 'conflict', reason: 'service_pane' } as never, 'conflict')), null)
 })

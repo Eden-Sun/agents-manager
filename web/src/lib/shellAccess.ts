@@ -25,6 +25,16 @@ export function shellForbidden(e: unknown): string | null {
   return kind === 'agent_pane' ? '這顆 pane 正在跑 agent，請走 bot 對話' : '這顆 pane 只能看不能打字'
 }
 
+/**
+ * daemon 確認不了 pane 現在的狀態（409 `pane_state_unknown`，AGM 驗收 9b54b6e：讀不到就不打）：
+ * 這次沒送出去、但**不是唯讀**——稍後再試就好，所以不鎖面板，只把 daemon 的說明顯示出來。
+ */
+export function shellStateUnknown(e: unknown): string | null {
+  if (!(e instanceof ApiError) || e.status !== 409 || e.body.reason !== 'pane_state_unknown') return null
+  const msg = typeof e.body.message === 'string' ? e.body.message.trim() : ''
+  return msg || '無法確認這顆 pane 現在的狀態，這次沒有送出，請稍後再試'
+}
+
 /** 鍵盤同步實際上開著沒：唯讀時一律不算，localStorage 記著「開」也一樣（第二輪 review L1）。 */
 export function keySyncActive(remembered: boolean, readOnly: boolean): boolean {
   return remembered && !readOnly
