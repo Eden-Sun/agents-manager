@@ -322,8 +322,8 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 
 列不出來時**不是錯誤**：回 `200 {"dir":"","session_id":null,"files":[],"reason":"…"}`，`reason ∈ scratchpad_remote`（bot 在遠端主機，檔案不在這台機器）`| scratchpad_no_session`（沒跑過或不是 claude）`| scratchpad_missing`（目錄還沒建立）。bot 不存在 404。
 
-### `GET /api/bots/{id}/scratchpad/file?name=<檔名>`
-下載上面列出的某一個檔案。`name` 解開符號連結後必須仍在該 bot 的 scratchpad 目錄內且是一般檔案，否則 `404 {"what":"file"}`；缺 `name` 400；bot 不存在 404。
+### `GET /api/bots/{id}/scratchpad/file?path=<檔名>`
+下載上面列出的某一個檔案。`path` 解開符號連結後必須仍在該 bot 的 scratchpad 目錄內且是一般檔案，否則 `404 {"what":"file"}`；缺 `path` 400；bot 不存在 404。
 
 一律 `Content-Disposition: attachment`（檔名走 `filename` + RFC 5987 `filename*`，非 ASCII 檔名也存得對），加 `X-Content-Type-Options: nosniff` 與 `Cache-Control: no-store`。`Content-Type` 只認白名單（文字/JSON/CSV/TSV/PNG/JPEG/GIF/WebP/PDF/zip），其餘一律 `application/octet-stream`——瀏覽器不會把 bot 寫出來的東西當 HTML 執行。只讀，沒有刪除或覆寫的端點。
 ## 非 agent 的 pane（SPEC §6.5e）
