@@ -365,6 +365,24 @@ async fn project_totals(app: &Arc<App>, hosts: &[HostMem]) -> Vec<ProjectMem> {
 }
 
 /// A project's row moved enough to be worth a frame: pane count changed or ≥1 MiB drift.
+/// 使用者實際在看的那兩個訊號：剩餘 RAM 與瀏覽器分頁數（還有「這台量不到了」）。
+/// 它們跟 herdr 樹的用量無關，所以不能綁在 `total_bytes` 的漂移上。
+fn host_signals_changed(prev: &[HostMem], next: &[HostMem]) -> bool {
+    if prev.len() != next.len() {
+        return true;
+    }
+    prev.iter().zip(next).any(|(a, b)| {
+        a.host != b.host
+            || a.error.is_some() != b.error.is_some()
+            || a.browsers.len() != b.browsers.len()
+            || a.browsers.iter().zip(&b.browsers).any(|(x, y)| x.name != y.name || x.tabs != y.tabs)
+            || match (&a.machine, &b.machine) {
+                (Some(x), Some(y)) => x.available_bytes.abs_diff(y.available_bytes) >= 64 * 1024 * 1024,
+                (x, y) => x.is_some() != y.is_some(),
+            }
+    })
+}
+
 fn projects_changed(prev: &[ProjectMem], next: &[ProjectMem]) -> bool {
     prev.len() != next.len()
         || prev.iter().zip(next).any(|(a, b)| {
@@ -383,6 +401,10 @@ pub fn spawn_poller(app: Arc<App>) {
                     prev.total_bytes.abs_diff(snap.total_bytes) >= 1024 * 1024
                         || prev.hosts.len() != snap.hosts.len()
                         || projects_changed(&prev.projects, &snap.projects)
+                        // 剩餘 RAM 與瀏覽器分頁數跟 herdr 樹的用量無關，卻被綁在它身上：
+                        // 晚上沒有 bot 在跑時 herdr 樹幾乎不動，使用者開了四十個分頁、可用記憶體掉到
+                        // 800 MiB，一次事件都不會送——正好在最該示警的時候失效（review 2026-09-16）。
+                        || host_signals_changed(&prev.hosts, &snap.hosts)
                 }
                 None => true,
             };

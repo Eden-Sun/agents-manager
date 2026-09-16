@@ -611,6 +611,7 @@ pub(crate) async fn apply_codex_limit_hit_quota(app: &Arc<App>, host: &str, iden
         message: notice.to_string(),
         until: resets.clone(),
         at: crate::db::now(),
+            bucket: None,
     });
     q.updated_at = crate::db::now();
     q.source = "codex-limit-hit".into();

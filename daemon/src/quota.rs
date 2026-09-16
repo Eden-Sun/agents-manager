@@ -206,6 +206,11 @@ pub struct LimitHit {
     /// 沒寫時間就 `None`，只能等下一次成功的回合清掉。
     pub until: Option<String>,
     pub at: String,
+    /// 橫幅說的是哪一桶（`five_hour`／`seven_day`／`fable`）。解析時就知道了，**不要讓下游再猜一次**：
+    /// `mission::pick` 以前是用「當下哪個桶見底」倒推，撞 Fable 上限而 5h 剛好也快滿時會把
+    /// Fable 的下週重置時間當成「5 小時窗什麼時候回來」（review 2026-09-16）。舊資料是 `None`。
+    #[serde(default)]
+    pub bucket: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -443,6 +448,23 @@ pub fn quota_from_codex_status(q: &crate::codex_live::CodexStatusQuota, account:
 
 /// app-server 讀數會落後 CLI 一整輪（2026-09-13 使用者截圖：量表 5h 100、pane 90% left），
 /// CLI 狀態列才是它當下擋你的依據。與 app-server 共用同一格，後到覆蓋先到。
+/// 這個 pane 的狀態列讀數這一輪有沒有變過。記在行程裡就夠：daemon 重啟後第一輪本來就該重讀一次。
+/// 數字一樣就是同一張畫面（真的沒變時，跳過也只是少寫一次一模一樣的值——但 `updated_at` 不會被
+/// 刷新成「剛剛讀到的」，那正是重點）。
+async fn status_line_changed(host: &str, pane_id: &str, line: &str) -> bool {
+    static SEEN: std::sync::OnceLock<tokio::sync::Mutex<std::collections::HashMap<String, String>>> =
+        std::sync::OnceLock::new();
+    let mut map = SEEN.get_or_init(|| tokio::sync::Mutex::new(std::collections::HashMap::new())).lock().await;
+    let key = format!("{host}:{pane_id}");
+    match map.get(&key) {
+        Some(prev) if prev == line => false,
+        _ => {
+            map.insert(key, line.to_string());
+            true
+        }
+    }
+}
+
 pub async fn refresh_codex_from_panes(app: &Arc<App>, host: &str) -> usize {
     let rows: Vec<(String, Option<String>)> = match sqlx::query_as(
         // 最近有動靜的 pane 排前面：它的狀態列最新。閒著的 pane 也會刷新，但剛跑完回合的那顆最準。
@@ -473,6 +495,15 @@ pub async fn refresh_codex_from_panes(app: &Arc<App>, host: &str) -> usize {
         let Some(client) = app.herdr_for(host).await else { continue };
         let Ok(read) = client.pane_read(&pane_id, "visible", 60).await else { continue };
         let Some(parsed) = crate::codex_live::parse_status_quota(&read.text) else { continue };
+        // pane 讀的是**畫面**，不是感測器：一顆閒著三小時的 pane，狀態列上的數字就是三小時前那一回合的，
+        // 而這裡每 60 秒把同一張沒變過的畫面重新解析一次、蓋上 now() 當新讀數——app-server 剛寫進去的
+        // 「視窗重置了」會被它蓋回見底，量表在滿與見底之間跳（review 2026-09-16）。
+        // 同一段字就是同一張畫面：沒變就不是新讀數。（`limit_banner` 用同樣的想法分辨重播與新撞限。）
+        let reading = format!("{:?}/{:?}", parsed.five_hour_left, parsed.weekly_left);
+        if !status_line_changed(host, &pane_id, &reading).await {
+            seen.insert(base);
+            continue;
+        }
         let Some(q) = quota_from_codex_status(&parsed, identity.as_deref()) else { continue };
         set(app, host, &base, q).await;
         seen.insert(base);
@@ -617,10 +648,21 @@ mod tests {
         assert_eq!(used(app.clone()).await, 7.0, "93% left 那顆較新");
 
         // 最新那顆正在壓縮、讀不到狀態列：換同帳號的下一顆，不是這輪整個跳過。
-        env.herdr.screens.lock().unwrap().insert(fresh_pane, "• Compacting context (1m 17s • esc to interrupt)\n".into());
-        env.herdr.screens.lock().unwrap().insert(old_pane, line(88));
+        env.herdr.screens.lock().unwrap().insert(fresh_pane.clone(), "• Compacting context (1m 17s • esc to interrupt)\n".into());
+        env.herdr.screens.lock().unwrap().insert(old_pane.clone(), line(88));
         assert_eq!(refresh_codex_from_panes(&app, LOCAL_HOST).await, 1);
         assert_eq!(used(app.clone()).await, 12.0);
+
+        // 同一張沒變過的畫面不是新讀數：再讀一次不該把 `updated_at` 刷新成「剛剛」，
+        // 否則閒著的 pane 每 60 秒就把 app-server 剛寫進去的「視窗重置了」蓋回見底（review 2026-09-16）。
+        let before = app.quotas.lock().await.get("codex").unwrap().updated_at.clone();
+        assert_eq!(refresh_codex_from_panes(&app, LOCAL_HOST).await, 0, "畫面沒變就不算一次讀數");
+        assert_eq!(app.quotas.lock().await.get("codex").unwrap().updated_at, before);
+
+        // 畫面真的變了才是新讀數。
+        env.herdr.screens.lock().unwrap().insert(old_pane, line(70));
+        assert_eq!(refresh_codex_from_panes(&app, LOCAL_HOST).await, 1);
+        assert_eq!(used(app.clone()).await, 30.0);
     }
 
     /// 截斷只讀到 5h 時不可洗掉 7d（2026-09-13 使用者：header 的 codex 只剩一條）。
@@ -704,7 +746,7 @@ mod tests {
         assert_eq!(quota_base_for_host(&app, LOCAL_HOST, "codex", Some("nobody")).await, "codex:nobody", "查不到的身分寧可分開");
 
         // 裸 codex 撞限：cc1 的 codex bot 讀得到，cc2 的讀不到（它有自己的帳號）。
-        let hit = LimitHit { message: "You've hit your usage limit.".into(), until: Some("2999-01-01T00:00:00Z".into()), at: crate::db::now() };
+        let hit = LimitHit { message: "You've hit your usage limit.".into(), until: Some("2999-01-01T00:00:00Z".into()), at: crate::db::now(), bucket: None };
         let mut q = codex_q("codex-limit-hit", Some(hit));
         q.five_hour = Some(Window { used_pct: 100.0, resets_at: None });
         set(&app, LOCAL_HOST, "codex", q).await;
@@ -755,6 +797,7 @@ mod tests {
             message: "You've hit your usage limit.".into(),
             until: Some("2999-01-01T00:00:00Z".into()),
             at: crate::db::now(),
+            bucket: None,
         };
         let mut server = quota_from_codex_status(
             &crate::codex_live::CodexStatusQuota { five_hour_left: Some(50.0), weekly_left: Some(50.0) },
@@ -837,6 +880,7 @@ mod tests {
             message: "ERROR: You've hit your usage limit.".into(),
             until: Some("2999-01-01T00:00:00.000Z".into()),
             at: "2026-09-13T14:15:30.000Z".into(),
+            bucket: None,
         };
         let mut blocked = codex_q("codex-limit-hit", Some(hit));
         blocked.updated_at = "2026-09-13T14:15:30.000Z".into();
@@ -858,7 +902,7 @@ mod tests {
     async fn a_limit_hit_past_its_reset_time_is_dropped() {
         let app = crate::testing::env().await.app.clone();
         let past = (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339();
-        let hit = LimitHit { message: "ERROR: You've hit your usage limit.".into(), until: Some(past), at: crate::db::now() };
+        let hit = LimitHit { message: "ERROR: You've hit your usage limit.".into(), until: Some(past), at: crate::db::now(), bucket: None };
         set(&app, LOCAL_HOST, "codex", codex_q("codex-limit-hit", Some(hit))).await;
         let got = app.quotas.lock().await.get(&quota_key(LOCAL_HOST, "codex")).cloned().unwrap();
         assert!(got.limit_hit.is_none(), "過了恢復時間的橫幅不該再擋著畫面");
@@ -867,7 +911,7 @@ mod tests {
     /// codex 當天只寫 `try again at 5:07 AM`，解析不出來寧可留著等下一回合成功再清。
     #[test]
     fn a_limit_hit_without_a_time_never_expires_on_its_own() {
-        let hit = LimitHit { message: "ERROR: usage limit".into(), until: None, at: crate::db::now() };
+        let hit = LimitHit { message: "ERROR: usage limit".into(), until: None, at: crate::db::now(), bucket: None };
         assert!(!limit_hit_expired(Some(&hit)));
         assert!(!limit_hit_expired(None));
     }

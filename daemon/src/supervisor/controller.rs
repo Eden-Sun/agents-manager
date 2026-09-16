@@ -1355,7 +1355,7 @@ mod mission_quota_tests {
     }
 
     fn hit() -> LimitHit {
-        LimitHit { message: "You've reached your limit".into(), until: Some("2999-01-07T00:00:00Z".into()), at: crate::db::now() }
+        LimitHit { message: "You've reached your limit".into(), until: Some("2999-01-07T00:00:00Z".into()), at: crate::db::now(), bucket: None }
     }
 
     async fn inbox_kinds(app: &Arc<App>) -> Vec<String> {

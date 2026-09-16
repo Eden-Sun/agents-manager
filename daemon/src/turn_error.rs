@@ -61,6 +61,16 @@ fn limit_bucket(lower: &str) -> LimitBucket {
 /// 那一桶沒有讀數時，撞限要撐多久才自己過期。claude 這一側沒有 `clear_limit_hit`（Fable 用完換
 /// opus 照樣能跑，成功回合不能當作解除），所以 `until=None` ＝ 永遠不過期：交辦會卡在 `quota_blocked`
 /// 直到有人重啟 daemon（review 2026-09-16）。寧可保守地等一個視窗長度，也不要沒有出口。
+/// 給下游用的桶名，跟 `Quota` 的欄位同名。認不出來就 `None`——不要編一個。
+fn bucket_name(lower: &str) -> Option<String> {
+    match limit_bucket(lower) {
+        LimitBucket::Session => Some("five_hour".into()),
+        LimitBucket::Weekly => Some("seven_day".into()),
+        LimitBucket::Fable => Some("fable".into()),
+        LimitBucket::Unknown => None,
+    }
+}
+
 fn fallback_until(lower: &str, at: &str) -> Option<String> {
     let hours = match limit_bucket(lower) {
         LimitBucket::Session => 5,
@@ -345,7 +355,8 @@ async fn mark_claude_limit_hit(app: &Arc<App>, bot_id: &str, line: &str) {
     // 那一桶還沒有讀數時 `saturate_bucket` 回 None，而 `None` 在 `limit_hit_expired` 是「永不過期」。
     // 給一個保底時間，撞限才有出口（review 2026-09-16）。
     let until = saturate_bucket(&mut q, &lower).or_else(|| fallback_until(&lower, &at));
-    q.limit_hit = Some(crate::quota::LimitHit { message: line.to_string(), until, at });
+    q.limit_hit =
+        Some(crate::quota::LimitHit { message: line.to_string(), until, at, bucket: bucket_name(&lower) });
     q.updated_at = db::now();
     crate::quota::set(app, &host, &base, q).await;
 }

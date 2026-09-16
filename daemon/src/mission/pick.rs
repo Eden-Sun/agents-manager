@@ -99,13 +99,22 @@ fn reset_of(w: Option<&Window>) -> Option<String> {
 /// 都看不出來（例如 credits 用完、桶子卻是滿的）就當週窗——等不到，只能換身分。
 fn block_of(q: &Quota, now: DateTime<Utc>) -> Block {
     if let Some(hit) = q.limit_hit.as_ref().filter(|h| hit_active(h, now)) {
+        // `hit.until` 是**橫幅那一桶**的重置時間，只有在算出來的封鎖是同一桶時才能拿來用。
+        // 以前一律拿它：撞 Fable 上限而 5h 剛好也快滿時，「5 小時窗什麼時候回來」會變成下週一，
+        // 整個身分被鎖到下週（review 2026-09-16）。桶名對不上就用那個視窗自己的 resets_at。
+        let until_for = |bucket: &str, own: Option<String>| match hit.bucket.as_deref() {
+            Some(b) if b == bucket => hit.until.clone().or(own),
+            // 舊資料沒有 bucket：維持舊行為（拿 hit.until），否則升級後反而少了時間。
+            None => hit.until.clone().or(own),
+            Some(_) => own,
+        };
         if exhausted(q.five_hour.as_ref()) && !exhausted(q.seven_day.as_ref()) {
-            return Block::FiveHour(hit.until.clone().or_else(|| reset_of(q.five_hour.as_ref())));
+            return Block::FiveHour(until_for("five_hour", reset_of(q.five_hour.as_ref())));
         }
         if exhausted(q.fable.as_ref()) && !exhausted(q.seven_day.as_ref()) && !exhausted(q.five_hour.as_ref()) {
-            return Block::FableOnly(reset_of(q.fable.as_ref()));
+            return Block::FableOnly(until_for("fable", reset_of(q.fable.as_ref())));
         }
-        return Block::SevenDay(hit.until.clone().or_else(|| reset_of(q.seven_day.as_ref())));
+        return Block::SevenDay(until_for("seven_day", reset_of(q.seven_day.as_ref())));
     }
     if exhausted(q.seven_day.as_ref()) {
         return Block::SevenDay(reset_of(q.seven_day.as_ref()));
@@ -228,7 +237,7 @@ mod tests {
     }
 
     fn hit(mut quota: Quota, until: Option<&str>) -> Quota {
-        quota.limit_hit = Some(LimitHit { message: "You've reached your limit".into(), until: until.map(String::from), at: "2026-09-13T11:50:00Z".into() });
+        quota.limit_hit = Some(LimitHit { message: "You've reached your limit".into(), until: until.map(String::from), at: "2026-09-13T11:50:00Z".into(), bucket: None });
         quota
     }
 
@@ -241,6 +250,55 @@ mod tests {
             Pick::Use { identity, model, .. } => (identity, model.as_deref()),
             other => panic!("expected Use, got {other:?}"),
         }
+    }
+
+    /// 橫幅說是哪一桶就照它的。以前用「當下哪個桶見底」倒推：撞 Fable 上限而 5h 剛好也快滿時，
+    /// 會把 Fable 的下週重置時間當成「5 小時窗什麼時候回來」，整個身分被鎖到下週（review 2026-09-16）。
+    #[test]
+    fn the_banner_says_which_bucket_and_that_beats_guessing() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-16T10:00:00Z").unwrap().with_timezone(&Utc);
+        let w = |used: f64| Some(crate::quota::Window { used_pct: used, resets_at: Some("2026-09-23T00:00:00Z".into()) });
+        let mut q = crate::quota::Quota {
+            five_hour: w(96.0), // 剛好也快滿
+            seven_day: w(40.0),
+            fable: w(100.0),
+            reset_credits: None,
+            limit_hit: None,
+            plan: None,
+            updated_at: "2026-09-16T09:59:00Z".into(),
+            source: "test".into(),
+            account: None,
+            host: "local".into(),
+        };
+        let hit = |bucket: Option<&str>| crate::quota::LimitHit {
+            message: "You've hit your Fable limit".into(),
+            until: Some("2026-09-23T00:00:00Z".into()),
+            at: "2026-09-16T09:59:00Z".into(),
+            bucket: bucket.map(str::to_string),
+        };
+        // 5h 也見底了，所以封鎖確實是 5h——但**時間不能拿 Fable 的**。
+        q.limit_hit = Some(hit(Some("fable")));
+        assert_eq!(
+            block_of(&q, now),
+            Block::FiveHour(Some("2026-09-23T00:00:00Z".into())),
+            "桶名對不上時要用 5h 自己的 resets_at"
+        );
+        let five_reset = |t: &str| {
+            let mut q2 = q.clone();
+            q2.five_hour = Some(crate::quota::Window { used_pct: 96.0, resets_at: Some(t.into()) });
+            q2
+        };
+        let mut q3 = five_reset("2026-09-16T14:00:00Z");
+        q3.limit_hit = Some(hit(Some("fable")));
+        assert_eq!(block_of(&q3, now), Block::FiveHour(Some("2026-09-16T14:00:00Z".into())), "5h 的時間才對");
+        // 橫幅就是這一桶：照它的。
+        let mut q4 = five_reset("2026-09-16T14:00:00Z");
+        q4.limit_hit = Some(crate::quota::LimitHit { bucket: Some("five_hour".into()), ..hit(None) });
+        assert_eq!(block_of(&q4, now), Block::FiveHour(Some("2026-09-23T00:00:00Z".into())), "橫幅說的就是 5h");
+        // 舊資料沒有 bucket：維持舊行為。
+        let mut q5 = five_reset("2026-09-16T14:00:00Z");
+        q5.limit_hit = Some(hit(None));
+        assert_eq!(block_of(&q5, now), Block::FiveHour(Some("2026-09-23T00:00:00Z".into())), "沒有 bucket 時照舊");
     }
 
     #[test]
