@@ -31,10 +31,10 @@ import { MESSAGE_CAP, byId, byTime, capList, insertSorted, pruneTurns } from './
 import { acceptStateSeq, singleFlight } from './singleFlight'
 import { quotaForIdentity } from './quotaLookup'
 import { botStatusConnTarget } from './botStatusConn'
-import { restoreQueued } from './queuedSend'
+import { prependDraft, restoreQueued } from './queuedSend'
 import { missionRequests } from './missionRequests'
 
-import type { QueuedSend } from './queuedSend'
+import type { QueuedSend, RestoreResult } from './queuedSend'
 import { laterMark, serverUnread } from './sharedUnread'
 import { confirmGroupTurn, dropLegacyGroupCounts, noteGroupPrompt, noteGroupPrompts } from './groupUnread'
 import {
@@ -476,6 +476,8 @@ export interface StoreState {
 
   queueSend: (botId: string, text: string, attachments: string[]) => void
   cancelQueuedSend: (botId: string) => void
+  /** 取消排隊：那則接回輸入框最前面（不蓋掉正在打的字）。 */
+  unqueueToDraft: (botId: string) => void
   /** 送失敗時放回佇列或輸入框；三個送出入口共用，免得 409 把字吃掉。 */
   restoreQueuedSend: (botId: string, pending: QueuedSend) => void
 }
@@ -1119,7 +1121,7 @@ export const useStore = create<StoreState>((set, get) => ({
     set((st) => ({ queuedSends: { ...st.queuedSends, [botId]: { text, attachments } } }))
     if (!prev) return
     const r = restoreQueued(get(), botId, prev)
-    set(r.patch)
+    applyRestore(set, r)
     const lost = r.droppedAttachments > 0 ? `，${r.droppedAttachments} 個附件要重新加` : ''
     get().notify('error', `一次只排得下一則，前一則已退回輸入框${lost}`)
   },
@@ -1128,9 +1130,23 @@ export const useStore = create<StoreState>((set, get) => ({
     set((st) => ({ queuedSends: withoutKey(st.queuedSends, botId) }))
   },
 
+  unqueueToDraft(botId) {
+    const pending = get().queuedSends[botId]
+    if (!pending) return
+    const key = `bot:${botId}` as const
+    // 接在現有草稿前面，不是蓋掉：輸入框裡可能正是上一次被退回的那一則。
+    const text = prependDraft(pending.text, get().drafts[key] ?? '')
+    set((st) => ({ queuedSends: withoutKey(st.queuedSends, botId) }))
+    get().setDraft(key, text)
+    get().setDraftCursor(key, pending.text.length)
+    if (pending.attachments.length > 0) {
+      get().notify('error', `訊息已放回輸入框，但 ${pending.attachments.length} 個附件要重新加`)
+    }
+  },
+
   restoreQueuedSend(botId, pending) {
     const r = restoreQueued(get(), botId, pending)
-    set(r.patch)
+    applyRestore(set, r)
     if (r.droppedAttachments > 0) {
       get().notify('error', `訊息已退回輸入框，但 ${r.droppedAttachments} 個附件要重新加`)
     }
@@ -2351,6 +2367,12 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
     default:
       return
   }
+}
+
+/** 退回輸入框的字也要寫進 localStorage：只 `set` 的話，重整一次就沒了。 */
+function applyRestore(set: SetFn, r: RestoreResult) {
+  set(r.patch)
+  if (r.patch.drafts) writeDrafts(r.patch.drafts)
 }
 
 function withoutKey<T>(map: Record<string, T>, key: string): Record<string, T> {
