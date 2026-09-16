@@ -1152,7 +1152,8 @@ body 直接是檔案位元組（**不是** multipart），`Content-Type` 就是�
 - `POST /api/supervisor/assignments/{id}/review {decision,actor?,source?,reason?,evidence?,followup_text?,followup_request_id?,followup_bot_id?,ownership?}` → 更新後的 assignment（`followup` 時另含 `followup`）。
   帶角色 bot token 時 `actor` 以 token 為準（`AGM:<role>`）。
   **唯一的結案路徑**。`accept`→`completed`、`fail`→`failed`、`cancel`→`cancelled`、`block`→`blocked`、`followup`→原本 `superseded` 並以 `followup_request_id` 另開 `follow_up_of` 的新交辦（不改寫已送出的 text）。
-  同 decision 重送冪等；followup 重送須同 request ID、文字與目標，不同 409 `followup_mismatch`。已結案 409 `already_closed`；還在跑只接受 `cancel`（409 `still_executing`，且 cancel 不中止回合）。
+  同 decision 重送冪等；followup 重送須同 request ID、文字與目標，不同 409 `followup_mismatch`。`followup_request_id` 已經是別件交辦的 → 409 `followup_request_id_taken`（`{client_request_id,assignment_id}`，換一個 id）。
+  續作沿用父交辦的 `expects_review`（通知的續作仍是通知）、`review_role` 與任務連結。已結案 409 `already_closed`；還在跑只接受 `cancel`（409 `still_executing`，且 cancel 不中止回合）。
   決定成 `cancelled`／`superseded`／`failed` 時，交辦名下還在 `queued` 的 turn 一併撤銷（標 `failed`、插 system 訊息、釋放 queued 名額），回應多 `revoked_turn_id`；已經 `in_flight`／送出的不動、也不帶這個欄位（SPEC §4.4a）。
 
 ### 交接、inbox、狀態、證據
