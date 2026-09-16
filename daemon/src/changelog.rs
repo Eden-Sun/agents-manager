@@ -106,28 +106,39 @@ pub fn pick_sections(all: &[Section], from: Option<&str>, to: &str) -> Vec<Secti
 /// `<kind> --version` 印出來的**第一行原文**，例如 `2.1.5 (Claude Code)`、`herdr 0.8.2`。
 ///
 /// 解析刻意留給呼叫端：各家 CLI 的招牌長得不一樣（claude 把版本放第一個 token，herdr 放在名字後面），
-/// [`version_string`] 只吃前者，硬套會讓後者永遠「看不出版本」。空輸出（找不到、跑失敗、非 0 離開）回 `Err`。
+/// [`version_string`] 只吃前者，硬套會讓後者永遠「看不出版本」。
+///
+/// 三種失敗都回 `Err`，本機與遠端一致：找不到那支程式、**離開碼非 0**（就算它先印了一行像樣的招牌）、
+/// 沒有輸出。離開碼靠 `out=$(…) || exit $?` 保住——以前最後一段是 `… | head -1 | tr -d '\r'`，管線的
+/// 離開碼是 `tr` 的，CLI 印完招牌再 `exit 1` 會被當成成功。
 ///
 /// `kind` 也可以是可執行檔的絕對路徑（`command -v /abs/path` 認路徑），測試靠這點餵假的 CLI。
 pub async fn version_line(app: &Arc<App>, host: &str, kind: &str, timeout: Duration) -> Result<String> {
     let script = format!(
-        r#"p=$( "${{SHELL:-/bin/sh}}" -lic "command -v {kind}" 2>/dev/null | tail -1 ); [ -n "$p" ] || p=$(command -v {kind} 2>/dev/null); [ -n "$p" ] && "$p" --version 2>/dev/null </dev/null | head -1 | tr -d '\r'"#
+        r#"p=$( "${{SHELL:-/bin/sh}}" -lic "command -v {kind}" 2>/dev/null | tail -1 ); [ -n "$p" ] || p=$(command -v {kind} 2>/dev/null); [ -n "$p" ] || exit 127; out=$("$p" --version 2>/dev/null </dev/null) || exit $?; printf '%s\n' "$out" | head -1 | tr -d '\r'"#
     );
     let out = if host == LOCAL_HOST {
-        let o = tokio::time::timeout(
-            timeout,
-            tokio::process::Command::new("/bin/sh").arg("-c").arg(&script).stdin(std::process::Stdio::null()).output(),
-        )
-        .await
-        .map_err(|_| anyhow!("`{kind} --version` timed out"))??;
+        // `hosts::sh_local`：自己一個 process group、`kill_on_drop`，逾時時整組 `kill -9`。
+        // 直接 `Command::output()` 在逾時 drop 掉之後，`$SHELL -lic` 與它 spawn 的 CLI 會留在背景。
+        let o = crate::hosts::sh_local(&script, timeout)
+            .await?
+            .ok_or_else(|| anyhow!("`{kind} --version` timed out"))?;
+        if !o.status.success() {
+            return Err(match o.status.code() {
+                Some(127) => anyhow!("找不到 `{kind}`"),
+                Some(c) => anyhow!("`{kind} --version` 離開碼 {c}"),
+                None => anyhow!("`{kind} --version` 被信號中止"),
+            });
+        }
         String::from_utf8_lossy(&o.stdout).to_string()
     } else {
         let conn = app.hosts.get(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
-        conn.ssh_exec_path(&script).await?
+        // 遠端的離開碼由 `ssh_exec_timeout` 把關（非 0 直接 bail），所以兩邊規則一致。
+        conn.ssh_exec_path_timeout(&script, timeout).await?
     };
     let line = out.lines().next().unwrap_or("").trim().to_string();
     if line.is_empty() {
-        return Err(anyhow!("`{kind} --version` 沒有輸出（找不到、跑不起來或離開碼非 0）"));
+        return Err(anyhow!("`{kind} --version` 沒有輸出"));
     }
     Ok(line)
 }
