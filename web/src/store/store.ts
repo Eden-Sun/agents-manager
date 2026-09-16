@@ -519,6 +519,29 @@ let appliedStateSeq = 0
 let supervisorProjectAsked = false
 let identityPrefsAsked = false
 let lastRefreshError: string | null = null
+/**
+ * 送不出去的已讀。2026-09-15 改成「未讀數以 daemon 為準」之後，這個 POST 就不再是 fire-and-forget：
+ * 失敗代表下一次 `refreshState` 會拿 daemon 的舊數字把本機剛清掉的徽章點回來（剛讀完的 bot 又亮
+ * `!3`，而且不再點一次就一直亮著）。補送成功前 `serverUnread` 一律跳過這些 bot。
+ */
+const unsentReads = new Map<string, ReadMark>()
+
+function sendReadMark(botId: string, mark: ReadMark) {
+  unsentReads.set(botId, mark)
+  void api
+    .markBotRead(botId, mark)
+    .then(() => {
+      // 只有還是同一筆標記才清：中途又讀過一次的話那筆還沒送到。
+      if (unsentReads.get(botId) === mark) unsentReads.delete(botId)
+    })
+    .catch(() => {})
+}
+
+/** socket 重開＝daemon 回來了，把欠的已讀補送出去（別台裝置也才看得到）。 */
+function flushUnsentReads() {
+  for (const [botId, mark] of [...unsentReads]) sendReadMark(botId, mark)
+}
+
 /** 在飛的 `POST /api/order` 數；歸零時 `refreshState` 清掉樂觀順序，別台裝置的順序才會過來。 */
 let orderSavesInFlight = 0
 function saveOrderTracked(input: Parameters<typeof api.saveOrder>[0], onFail: () => void) {
@@ -706,7 +729,7 @@ export const useStore = create<StoreState>((set, get) => ({
     })
     {
       const s = get()
-      const next = serverUnread(s.bots, s.botUnread, (id) => viewingBot(s, id) && windowActive())
+      const next = serverUnread(s.bots, s.botUnread, (id) => viewingBot(s, id) && windowActive(), unsentReads)
       if (next) {
         set({ botUnread: next })
         persistUnread(get())
@@ -877,8 +900,12 @@ export const useStore = create<StoreState>((set, get) => ({
       const next = [...rest.slice(0, at), botId, ...rest.slice(at)]
       if (next.join() === current.join()) return {}
       const botOrder = { ...s.botOrder, [pid]: next }
+      const prev = s.botOrder[pid]
       // 順序存 daemon（config.toml）讓各裝置一致；先樂觀套用，等 `project_changed`。
+      // 失敗一定要自己收回：daemon 沒收到就不會推 `project_changed`、也就不會 `refreshState`，
+      // 「讓位給權威順序」那條路永遠走不到，樂觀順序反而是最持久的——跟通知說的正好相反。
       saveOrderTracked({ bots: { [pid]: next } }, () => {
+        set((st) => ({ botOrder: prev ? { ...st.botOrder, [pid]: prev } : withoutKey(st.botOrder, pid) }))
         get().notify('error', '排序沒存起來（daemon 沒收到），已回到原本的順序')
       })
       return { botOrder }
@@ -894,7 +921,9 @@ export const useStore = create<StoreState>((set, get) => ({
       if (beforeId !== null && at < 0) return {}
       const next = [...rest.slice(0, at), projectId, ...rest.slice(at)]
       if (next.join() === current.join()) return {}
+      const prev = s.projectOrder
       saveOrderTracked({ projects: next }, () => {
+        set({ projectOrder: prev })
         get().notify('error', '排序沒存起來（daemon 沒收到），已回到原本的順序')
       })
       return { projectOrder: next }
@@ -956,8 +985,7 @@ export const useStore = create<StoreState>((set, get) => ({
   markBotRead: (botId) => {
     const mark = markOfMessages(get().messages[botId] ?? []) ?? markNow()
     setReadMark(botKey(botId), mark)
-    // 跨裝置：送不出去只是別台晚一點才知道，本機照常清。
-    if (!botId.startsWith('pending:')) void api.markBotRead(botId, mark).catch(() => {})
+    if (!botId.startsWith('pending:')) sendReadMark(botId, mark)
     if (!get().botUnread[botId]) return
     set((s) => ({ botUnread: withoutKey(s.botUnread, botId) }))
     persistUnread(get())
@@ -1065,7 +1093,15 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   queueSend(botId, text, attachments) {
+    // 槽位只有一格，而 UI 完全沒表達這個上限（輸入框清空、還寫著「先打下一則」）。不先把舊的接回去，
+    // 第二次 Enter 會把第一則從 store 裡整個刪掉：沒有通知、沒有草稿，附件 id 也一起孤兒化。
+    const prev = get().queuedSends[botId]
     set((st) => ({ queuedSends: { ...st.queuedSends, [botId]: { text, attachments } } }))
+    if (!prev) return
+    const r = restoreQueued(get(), botId, prev)
+    set(r.patch)
+    const lost = r.droppedAttachments > 0 ? `，${r.droppedAttachments} 個附件要重新加` : ''
+    get().notify('error', `一次只排得下一則，前一則已退回輸入框${lost}`)
   },
 
   cancelQueuedSend(botId) {
@@ -1890,6 +1926,7 @@ function connectSocket(set: SetFn, get: GetFn) {
         // Re-fetch on every open: a failed frame already advanced lastSeq; the snapshot repairs the gap.
         set({ socket, stateStale: false })
         void get().refreshState()
+        flushUnsentReads()
         // 額度也整份重抓（取代，不合併）：WS 只會推「某個 key 更新了」，daemon 刪掉的 key 永遠不會
         // 通知。2026-09-14 daemon 重啟清掉 `codex:cc1` 之後，開著的分頁標題列仍一直顯示它。
         void get().loadQuota()

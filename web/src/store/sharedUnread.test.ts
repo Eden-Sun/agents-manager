@@ -23,3 +23,9 @@ test('本機與 daemon 的標記取較新的；同時間戳看 id', () => {
   assert.equal(laterMark(local, null), local)
   assert.equal(laterMark({ at: server.at, id: 'm3' }, server)?.id, 'm3')
 })
+
+test('已讀還沒送到 daemon 的那顆跳過：快照的舊數字不可以把徽章點回來', () => {
+  const unsent = new Set(['a'])
+  assert.equal(serverUnread([bot('a', 3)], {}, () => false, unsent), null)
+  assert.deepEqual(serverUnread([bot('a', 3), bot('b', 2)], {}, () => false, unsent), { b: 2 })
+})
