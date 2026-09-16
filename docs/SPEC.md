@@ -1451,6 +1451,8 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
   - **仍然擋**：送達臨界區（`turns.status='queued'` **且那顆 bot 還有活著的 run**——沒有 run 的 queued 沒有人會送，是遺留的，會被撤銷（§4.4a），算進來的話永遠 unsafe；或 `status='in_flight'` 且 `delivery='pending'`——daemon 正在往 pane 打字／送出）、**別人**還握著的租約、讀不到狀態的 bot（`unreadable`）。
   - **自己的租約不擋自己**（AGM 2026-09-16，58d3587 的規格漏洞）：跟這次 acquire **同一個 owner** 握著的租約不算擋。標準換版是同一人先拿 rebuild、build 完再拿 restart；把自己手上的 rebuild 也算成「別人握著窗口」，restart 就會被卡到 rebuild 自己到期為止（09:26Z 實測：k8bw2f 握 rebuild fence 21，restart 的 safety 列出來的就是它自己）。別人的照擋，「窗口一次只給一個人」的語意不變。唯讀 safety 帶 `owner` 時套同一條規則，不帶就維持舊行為（每一把都算擋）；`held_leases` 每一筆都帶 `owner` 與 `own`。全靜止模式本來就不看租約，不受影響。
   - **不再擋**：bot 只是在 `working`／思考（已送達的 `in_flight`）。`blocked` 照舊只回報不擋。`delivery='unknown'` 是停在那裡等人處理的狀態，不算臨界區。
+  - **放寬只會放寬**（review 2 總管 4）：`safe = 全靜止 || 縮小封鎖面的條件`。全靜止成立的窗口，等滿門檻之後也一定成立——
+    以前是二選一，等超過 30 分鐘反而多擋全靜止不看的兩樣（放回佇列、正在閒置的 queued；別人握著的租約，其互斥由 acquire 本身把關）。
   - AGM 三顆（巡檢、協調者、建置 child）照舊由呼叫端排除，門檻高低都一樣。
   - **留痕**：safety 多回 `escalated`、`waited_secs`、`escalation_approval_id`，以及 `delivering`／`held_leases` 兩份清單；acquire 把整份 safety 寫進租約 meta 並在 log 明寫「升級後才拿到窗口」；`daemon-update-kick.sh` 的 log 與派工正文也寫明這次是升級後才換的。
   沒等超過門檻時**完全不變**：全靜止才 `safe`。

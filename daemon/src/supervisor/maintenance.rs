@@ -329,7 +329,11 @@ pub async fn safety_as(
     let strict = working.is_empty() && in_flight.is_empty() && unreadable.is_empty();
     // 縮小封鎖面：思考中不再擋，送達臨界區、還握著的租約與讀不到畫面照擋（SPEC §18.10）。
     let escalated = esc.as_ref().is_some_and(|e| e.escalated);
-    let safe = if escalated { delivering.is_empty() && unreadable.is_empty() && held_by_others == 0 } else { strict };
+    // 放寬只會放寬：全靜止成立的窗口，等滿門檻之後也一定成立（review 2 總管 4）。以前是二選一，
+    // 等超過 30 分鐘反而多擋兩樣全靜止不看的東西——放回佇列、正在閒置的 queued 與別人的租約
+    // （租約的互斥由 acquire 本身把關，全靜止本來就不看）。
+    let relaxed = escalated && delivering.is_empty() && unreadable.is_empty() && held_by_others == 0;
+    let safe = strict || relaxed;
     Ok(json!({
         "safe": safe,
         // 這一刻是不是已經放寬了，以及最早那筆沒用掉的核准等了多久（沒有這種核准時是 null）。
@@ -582,6 +586,39 @@ mod tests {
         assert!(s["waited_secs"].as_i64().unwrap() >= 2400);
         assert_eq!(s["working"].as_array().unwrap().len(), 1, "還是照實回報誰在跑，只是不再擋");
         assert_eq!(s["escalate_after_secs"], 1800);
+    }
+
+    /// 放寬只會放寬：全靜止時是 safe 的窗口，等超過門檻之後不能變成 unsafe。
+    /// 以前的反例：大家都閒著，但有一筆放回佇列、正在等退避的 queued（bot 還有 run），或別人握著租約——
+    /// 全靜止判 safe，等滿 30 分鐘改走縮小封鎖面的規則反而判 unsafe。
+    #[tokio::test]
+    async fn waiting_past_the_threshold_never_makes_a_quiet_box_unsafe() {
+        let e = crate::testing::env().await;
+        let (app, pid) = (&e.app, e.project_id.clone());
+        let now = crate::db::now();
+        sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('idle',?,'idle','claude','tok-idle',?)")
+            .bind(&pid).bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,started_at) VALUES ('ri','idle','running','idle',?)")
+            .bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO conversations (id,bot_id,created_at) VALUES ('ci','idle',?)").bind(&now).execute(&app.db).await.unwrap();
+        // 畫面擋住被放回佇列、正在等退避的那一則：bot 閒著、沒有 in_flight。
+        sqlx::query("INSERT INTO turns (id,conversation_id,origin,status,delivery,prompt_text,next_flush_at,created_at) VALUES ('tb','ci','web','queued','pending','x','2099-01-01T00:00:00Z',?)")
+            .bind(&now).execute(&app.db).await.unwrap();
+
+        let fresh = approved_window(app, 0).await;
+        let quiet = safety_for(app, &[], Some(&fresh)).await.unwrap();
+        assert_eq!((quiet["escalated"].as_bool(), quiet["safe"].as_bool()), (Some(false), Some(true)), "全靜止：safe");
+
+        let waited = approved_window(app, 40).await;
+        let relaxed = safety_for(app, &[], Some(&waited)).await.unwrap();
+        assert_eq!(relaxed["escalated"], true);
+        assert_eq!(relaxed["delivering"].as_array().unwrap().len(), 1, "照實列出那一則");
+        assert_eq!(relaxed["safe"], true, "等得越久不能越難開：{relaxed}");
+
+        // 對照：有人在思考、又有送達中的那一則 → 全靜止不成立，縮小封鎖面也不成立，照擋。
+        thinking_bot(app, &pid, "busy").await;
+        let blocked = safety_for(app, &[], Some(&waited)).await.unwrap();
+        assert_eq!(blocked["safe"], false, "{blocked}");
     }
 
     /// 誰等太久就放寬誰：A 放了很久沒用掉，不能替剛核下來的 B 開門。
