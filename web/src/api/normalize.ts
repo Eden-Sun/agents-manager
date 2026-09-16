@@ -269,9 +269,11 @@ export function toIdentity(v: unknown): Identity | null {
   const name = str(pick(v, 'name'))
   if (!name) return null
   const rawArgs = pick(v, 'args')
+  const host = str(pick(v, 'host'))
   return {
     name,
     kind: oneOf<BotKind>(v.kind, BOT_KINDS, 'claude'),
+    host: host || null,
     env: envMap(pick(v, 'env')),
     args: Array.isArray(rawArgs) ? rawArgs.map((a) => str(a)) : [],
   }

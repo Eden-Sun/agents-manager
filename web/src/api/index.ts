@@ -233,8 +233,10 @@ export async function createIdentity(input: NewIdentityInput): Promise<void> {
   await transport.request('POST', '/identities', input)
 }
 
-export async function deleteIdentity(name: string): Promise<void> {
-  await transport.request('DELETE', `/identities/${encodeURIComponent(name)}`)
+/** 刪的是**那一台**的那一筆：同名的 `cc1` 在別台是別的帳號（SPEC §16.2）。 */
+export async function deleteIdentity(name: string, host = 'local'): Promise<void> {
+  const q = host && host !== 'local' ? `?host=${encodeURIComponent(host)}` : ''
+  await transport.request('DELETE', `/identities/${encodeURIComponent(name)}${q}`)
 }
 
 export async function createBot(projectId: string, input: NewBotInput): Promise<{ id: string; name: string }> {

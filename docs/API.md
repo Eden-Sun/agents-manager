@@ -465,8 +465,10 @@ Project 可在另一台機器，daemon 透過 SSH 轉發連遠端 herdr。`host`
 
 ```toml
 [[identities]]
-name = "cc1"                         # [a-z][a-z0-9_-]{0,31}，唯一
+name = "cc1"                         # [a-z][a-z0-9_-]{0,31}
 kind = "claude"                      # claude | codex | grok
+# host = "m4p"                       # 選填；省略＝只適用本機。鍵是 (host, name)：
+                                     # 同名的 cc1 在別台是別的帳號（SPEC §16.2）
 args = []
 [identities.env]
 CLAUDE_CONFIG_DIR = "$HOME/.claude-ccompany"
@@ -486,7 +488,7 @@ env 值的 `$HOME`、`${HOME}` 與開頭 `~` 展開成**該 host 的 home**。id
 
 ```json
 {
-  "identities": [ {"name":"cc1","kind":"claude","env":{"CLAUDE_CONFIG_DIR":"$HOME/.claude-ccompany"},"args":[]} ],
+  "identities": [ {"name":"cc1","kind":"claude","host":null,"env":{"CLAUDE_CONFIG_DIR":"$HOME/.claude-ccompany"},"args":[]} ],
   "hosts": [ {
     "name": "m4p",
     "shell_identities": [ {"name": "cc0", "kind": "claude", "env": {}, "args": []} ],
@@ -517,9 +519,10 @@ env 值的 `$HOME`、`${HOME}` 與開頭 `~` 展開成**該 host 的 home**。id
 `POST /api/projects/{id}/bots`、`PATCH /api/bots/{id}` 接受 `identity` 與 `env`：`identity` 省略 = 不變（PATCH）／`null`（POST），傳 `null` 或 `""` 解除；
 `env` 傳整個物件會**取代**。不存在的 identity 404；kind 不符 400。
 
-### `POST /api/identities` / `DELETE /api/identities/{name}`
-- POST `{name, kind, env, args}` → `200 {"name"}`；名稱或 kind 不合法 400；重複 `409 {"reason":"identity name already in use","name"}`。
-- DELETE → `200 {}`；仍有 bot 綁著 `409 {"reason":"identity still used by bots","bot_id"}`。
+### `POST /api/identities` / `DELETE /api/identities/{name}?host=`
+- POST `{name, kind, env, args, host?}` → `200 {"name"}`；名稱或 kind 不合法 400；未知的 host `409 {"reason":"unknown host","host"}`；
+  **同一台**重複 `409 {"reason":"identity name already in use","name"}`——鍵是 `(host, name)`，同名在別台是另一筆（SPEC §16.2）。`host` 省略＝本機。
+- DELETE `?host=`（省略＝本機）→ `200 {}`；仍有**同一台**的 bot 綁著 `409 {"reason":"identity still used by bots","bot_id"}`。
 - WS `identities_changed {}` → 重拉 state；bot 的 identity/env 變更沿用 `bot_changed`。
 
 ### `POST /api/hosts/{name}/identities/{identity}/login`

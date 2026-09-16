@@ -201,6 +201,8 @@ export type BotManagedBy = 'user' | 'child'
 /** 身份預設（例如 `cc1` = 另一個 `CLAUDE_CONFIG_DIR`）；`args` 接在 daemon 注入參數之後。 */
 export interface Identity {
   name: string
+  /** 哪一台主機的身分（SPEC §16.2）。`null`／缺 = 只適用本機。同名的 `cc1` 在不同機器上是不同帳號。 */
+  host?: string | null
   kind: BotKind
   env: Record<string, string>
   args: string[]

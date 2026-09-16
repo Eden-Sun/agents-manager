@@ -42,7 +42,7 @@ export function QuickAddBots({ projectId }: { projectId: string }) {
     const out: Choice[] = []
     for (const kind of BOT_KINDS) {
       if (!tools[kind]?.installed) continue
-      const ids = enabledIdentities(disabledIdentities, host, identitiesOfHost(allIdentities, status)).filter((i) => i.kind === kind)
+      const ids = enabledIdentities(disabledIdentities, host, identitiesOfHost(allIdentities, status, host)).filter((i) => i.kind === kind)
       if (ids.length === 0) {
         // 沒登入的按下去只會停在登入畫面：留著讓人看得到這個 kind，但點不下去。
         const loggedOut = tools[kind].logged_in === false

@@ -1846,6 +1846,9 @@ struct NewIdentity {
     env: BTreeMap<String, String>,
     #[serde(default)]
     args: Vec<String>,
+    /// 哪一台主機的身分（SPEC §16.2）。省略＝本機。
+    #[serde(default)]
+    host: Option<String>,
 }
 
 async fn create_identity(State(app): State<Arc<App>>, Json(b): Json<NewIdentity>) -> Result<Response, LcError> {
@@ -1855,11 +1858,19 @@ async fn create_identity(State(app): State<Arc<App>>, Json(b): Json<NewIdentity>
     if !crate::config::valid_kind(&b.kind) {
         return Err(LcError::Bad(format!("kind must be {}", crate::config::kinds_list())));
     }
-    let cfg = IdentityCfg { name: b.name.clone(), kind: b.kind.clone(), env: b.env.clone(), args: b.args.clone() };
+    let host = b.host.clone().map(|h| h.trim().to_string()).filter(|h| !h.is_empty());
+    if let Some(h) = host.as_deref().filter(|h| *h != crate::config::LOCAL_HOST) {
+        let known = app.hosts.list().await.iter().any(|c| c.name == h);
+        if !known {
+            return Err(LcError::conflict("unknown host", json!({"host": h})));
+        }
+    }
+    let cfg = IdentityCfg { name: b.name.clone(), kind: b.kind.clone(), host, env: b.env.clone(), args: b.args.clone() };
     let res = app
         .cfg
         .update(move |f| {
-            if f.identities.iter().any(|i| i.name == cfg.name) {
+            // 鍵是 `(host, name)`：同一個名字可以在不同主機各有一份（同名不同帳號正是 §16.2 的前提）。
+            if f.identities.iter().any(|i| i.name == cfg.name && i.host_or_local() == cfg.host_or_local()) {
                 anyhow::bail!("duplicate");
             }
             f.identities.push(cfg);
@@ -1881,16 +1892,33 @@ async fn create_identity(State(app): State<Arc<App>>, Json(b): Json<NewIdentity>
     Ok((StatusCode::OK, Json(json!({"name": b.name}))).into_response())
 }
 
-async fn delete_identity(State(app): State<Arc<App>>, Path(name): Path<String>) -> Result<Response, LcError> {
+#[derive(Deserialize)]
+struct IdentityHostQuery {
+    /// 要刪哪一台的那一筆（SPEC §16.2）。省略＝本機。
+    #[serde(default)]
+    host: Option<String>,
+}
+
+async fn delete_identity(
+    State(app): State<Arc<App>>,
+    Path(name): Path<String>,
+    Query(q): Query<IdentityHostQuery>,
+) -> Result<Response, LcError> {
+    let host = q.host.as_deref().map(str::trim).filter(|h| !h.is_empty()).unwrap_or(crate::config::LOCAL_HOST).to_string();
     for b in db::live_bots(&app.db).await.map_err(any_err)? {
-        if b.identity.as_deref() == Some(name.as_str()) {
+        if b.identity.as_deref() != Some(name.as_str()) {
+            continue;
+        }
+        // 只有**同一台**的 bot 才算還在用它：同名的 `cc1` 在別台是別的帳號。
+        let bot_host = db::bot_host(&app.db, &b.id).await.unwrap_or_else(|_| crate::config::LOCAL_HOST.to_string());
+        if bot_host == host {
             return Err(LcError::conflict("identity still used by bots", json!({"bot_id": b.id})));
         }
     }
-    let n2 = name.clone();
+    let (n2, h2) = (name.clone(), host.clone());
     app.cfg
         .update(move |f| {
-            f.identities.retain(|i| i.name != n2);
+            f.identities.retain(|i| !(i.name == n2 && i.host_or_local() == h2));
             Ok(())
         })
         .await

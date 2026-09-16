@@ -713,6 +713,7 @@ mod tests {
         let ident = |name: &str, pairs: &[(&str, &str)]| crate::config::IdentityCfg {
             name: name.into(),
             kind: "claude".into(),
+            host: None,
             env: env(pairs),
             args: vec![],
         };
@@ -729,6 +730,7 @@ mod tests {
                     crate::config::IdentityCfg {
                         name: "cx2".into(),
                         kind: "codex".into(),
+                        host: None,
                         env: env(&[("CODEX_HOME", "$HOME/.codex-cx2")]),
                         args: vec![],
                     },

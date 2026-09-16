@@ -163,12 +163,30 @@ pub struct IdentityCfg {
     pub name: String,
     /// Must match the bot it is applied to.
     pub kind: String,
+    /// 這個身分屬於哪一台主機（SPEC §16.2：同名的 `cc1` 在不同機器上是不同帳號）。
+    /// 省略＝**只適用本機**——以前沒有這一欄，一個全域設定會靜默遮蔽掉每一台機器上同名的
+    /// `ccN`，遠端 bot 於是被注入一個那台根本不存在的設定目錄（review 2026-09-16）。
+    /// 鍵是 `(host, name)`：同一個名字可以在不同主機各有一份。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
     /// `$HOME` / `${HOME}` / leading `~` expand to the *host's* home.
     #[serde(default)]
     pub env: std::collections::BTreeMap<String, String>,
     /// Inserted between the daemon's injected args and the bot's own.
     #[serde(default)]
     pub args: Vec<String>,
+}
+
+impl IdentityCfg {
+    /// 這一筆屬於哪一台。沒寫就是本機。
+    pub fn host_or_local(&self) -> &str {
+        self.host.as_deref().map(str::trim).filter(|h| !h.is_empty()).unwrap_or(LOCAL_HOST)
+    }
+
+    /// 這一筆適用於 `host` 嗎。
+    pub fn applies_to(&self, host: &str) -> bool {
+        self.host_or_local() == if host.is_empty() { LOCAL_HOST } else { host }
+    }
 }
 
 /// SPEC §11.2 — a remote machine reached over SSH, running its own herdr.

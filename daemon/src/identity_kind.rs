@@ -115,7 +115,7 @@ mod tests {
     }
 
     fn ident(name: &str, kind: &str) -> crate::config::IdentityCfg {
-        crate::config::IdentityCfg { name: name.into(), kind: kind.into(), env: Default::default(), args: vec![] }
+        crate::config::IdentityCfg { name: name.into(), kind: kind.into(), host: None, env: Default::default(), args: vec![] }
     }
 
     #[tokio::test]

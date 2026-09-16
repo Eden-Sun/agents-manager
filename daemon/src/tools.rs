@@ -217,7 +217,7 @@ pub fn parse_shell_identities(out: &str) -> Vec<crate::config::IdentityCfg> {
         // Later definitions win, like the shell.
         found.insert(
             name.to_string(),
-            crate::config::IdentityCfg { name: name.to_string(), kind: "claude".into(), env, args: vec![] },
+            crate::config::IdentityCfg { name: name.to_string(), kind: "claude".into(), host: None, env, args: vec![] },
         );
     }
     SHELL_IDENTITY_NAMES.iter().filter_map(|n| found.remove(*n)).collect()
@@ -225,7 +225,11 @@ pub fn parse_shell_identities(out: &str) -> Vec<crate::config::IdentityCfg> {
 
 /// Hand-written `[[identities]]` always win over a colliding `ccN` alias.
 pub async fn identities_for_host(app: &Arc<App>, host: &str) -> Vec<crate::config::IdentityCfg> {
-    let mut out = app.cfg.get().await.identities.clone();
+    // 只鋪上**屬於這一台**的 config 身分（沒寫 host 的＝本機）。以前是全部鋪上去，於是一個
+    // 全域的 `cc1` 會遮蔽掉 m4p 上那個真正的 `cc1`，遠端 bot 被注入一個那台不存在的設定目錄，
+    // 額度也去問那個空目錄（SPEC §16.2、review 2026-09-16）。
+    let mut out: Vec<crate::config::IdentityCfg> =
+        app.cfg.get().await.identities.iter().filter(|i| i.applies_to(host)).cloned().collect();
     if let Some(ht) = app.tools.lock().await.get(host) {
         for i in &ht.shell_identities {
             if !out.iter().any(|x| x.name == i.name) {
@@ -829,6 +833,55 @@ pub async fn install_via_bot(
 
 #[cfg(test)]
 mod tests {
+    /// 現行 config.toml 的形狀（`[[identities]]` 不寫 host）在**本機**的行為一個字都不能變，
+    /// 但不能再遮蔽遠端同名的 `ccN`——本機 cc1 與 m4p 的 cc1 是不同帳號（SPEC §16.2、review 2026-09-16）。
+    #[tokio::test]
+    async fn a_config_identity_without_a_host_is_local_only() {
+        let env = crate::testing::env().await;
+        let app = &env.app;
+        app.cfg
+            .update(|cfg| {
+                cfg.identities = vec![crate::config::IdentityCfg {
+                    name: "cc1".into(),
+                    kind: "claude".into(),
+                    host: None, // 現行形狀
+                    env: [("CLAUDE_CONFIG_DIR".to_string(), "/home/me/.claude-cc1".to_string())].into(),
+                    args: vec![],
+                }];
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        // 本機：照舊拿得到，env 也照舊。
+        let local = identity_for_host(app, crate::config::LOCAL_HOST, "cc1").await.expect("本機照舊");
+        assert_eq!(local.env.get("CLAUDE_CONFIG_DIR").map(String::as_str), Some("/home/me/.claude-cc1"));
+        assert!(identities_for_host(app, crate::config::LOCAL_HOST).await.iter().any(|i| i.name == "cc1"));
+
+        // 遠端：不再被它遮蔽。那台的 cc1 要由那台自己的 shell alias 決定。
+        assert!(identity_for_host(app, "m4p", "cc1").await.is_none(), "沒寫 host 的只適用本機");
+        assert!(!identities_for_host(app, "m4p").await.iter().any(|i| i.name == "cc1"));
+
+        // 明寫 host 的那一台才拿得到，而且同名可以兩台各一份。
+        app.cfg
+            .update(|cfg| {
+                cfg.identities.push(crate::config::IdentityCfg {
+                    name: "cc1".into(),
+                    kind: "claude".into(),
+                    host: Some("m4p".into()),
+                    env: [("CLAUDE_CONFIG_DIR".to_string(), "/home/m4p/.claude-ccompany".to_string())].into(),
+                    args: vec![],
+                });
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let remote = identity_for_host(app, "m4p", "cc1").await.expect("那台自己那份");
+        assert_eq!(remote.env.get("CLAUDE_CONFIG_DIR").map(String::as_str), Some("/home/m4p/.claude-ccompany"));
+        let still_local = identity_for_host(app, crate::config::LOCAL_HOST, "cc1").await.unwrap();
+        assert_eq!(still_local.env.get("CLAUDE_CONFIG_DIR").map(String::as_str), Some("/home/me/.claude-cc1"));
+    }
+
     #[test]
     fn onboarding_flag_is_set_only_when_logged_in_and_missing() {
         let dir = std::env::temp_dir().join(format!("am-onboard-{}", ulid::Ulid::new()));

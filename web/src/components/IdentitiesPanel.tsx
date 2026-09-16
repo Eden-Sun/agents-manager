@@ -235,6 +235,8 @@ function IdentityRow({ name }: { name: string }) {
         <span className="identity-name">
           <IdentityBadge name={ident.name} />
           <KindTag kind={ident.kind} />
+          {/* 身分是每台一份（SPEC §16.2）：同名的 cc1 在別台是別的帳號，列上要看得出是哪一台。 */}
+          <span className="host-count">{ident.host || '本機'}</span>
           <span className="host-count">{used > 0 ? `${used} 個 Bot` : '未使用'}</span>
           <DisabledChip host="local" kind={ident.kind} name={ident.name} />
         </span>
@@ -273,7 +275,7 @@ function IdentityRow({ name }: { name: string }) {
         onCancel={() => setConfirmDelete(false)}
         onConfirm={() => {
           setConfirmDelete(false)
-          void removeIdentity(name)
+          void removeIdentity(name, ident.host || 'local')
         }}
       />
     </div>

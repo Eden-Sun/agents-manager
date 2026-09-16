@@ -1083,6 +1083,7 @@ mod flow_tests {
                 cfg.identities.push(crate::config::IdentityCfg {
                     name: "cc0".into(),
                     kind: "claude".into(),
+                    host: None,
                     env: Default::default(), // 空 env＝預設帳號
                     args: vec![],
                 });
@@ -1091,6 +1092,7 @@ mod flow_tests {
                 cfg.identities.push(crate::config::IdentityCfg {
                     name: "cc2".into(),
                     kind: "claude".into(),
+                    host: None,
                     env,
                     args: vec![],
                 });
