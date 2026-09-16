@@ -165,6 +165,13 @@ pub async fn dispatch(app: &Arc<App>, assignment_id: &str) {
             if out.delivery == "queued" {
                 tracing::info!(assignment = %a.id, bot = %a.target_bot_id, turn = %out.turn_id,
                                "對方回合中：交辦排進佇列，等它回合結束再送");
+                // 排隊是正常路徑，不是需要決策的事件：只記錄，不叫醒 AGM（2026-09-16 裁示）。
+                let key = format!("assignment_queued:{}:{}", a.id, out.turn_id);
+                let payload = json!({
+                    "bot_id": a.target_bot_id, "turn_id": out.turn_id, "needs_review": false,
+                    "message": "對方正在回合中，這一筆排進佇列，等它回合結束就送出",
+                });
+                let _ = store::push_inbox(&app.db, &key, "assignment_queued", Some(&a.id), Some(&a.target_bot_id), Some(&out.turn_id), &payload).await;
             }
             app.emit("supervisor_changed", json!({"assignment_id": a.id, "status": "delivered"})).await;
         }
@@ -564,6 +571,10 @@ async fn last_reply(app: &Arc<App>, turn_id: &str) -> Option<String> {
 /// A tracked turn finished. That ends the *execution*, not the job: the assignment moves to
 /// `awaiting_review` and waits for an explicit decision (docs/SPEC.md §18.3).
 async fn on_turn_done(app: &Arc<App>, turn_id: &str, status: &str) {
+    // 只有真的終態才結案。`queued`／`in_flight` 是「還在路上」，結案會把排隊寫成失敗。
+    if !matches!(status, "completed" | "completed_fallback" | "failed") {
+        return;
+    }
     let Ok(Some(a)) = store::assignment_by_turn(&app.db, turn_id).await else { return };
     if !a.is_executing() {
         return;
@@ -1807,6 +1818,52 @@ mod queue_dispatch_tests {
         .unwrap();
         store::mark_delivered(&app.db, &a.id, &turn_id, "queued").await.unwrap();
         store::assignment(&app.db, &a.id).await.unwrap().unwrap()
+    }
+
+    /// 排進佇列是成功排隊，不是失敗（2026-09-16 AGM）：不推 assignment_failed、不填 completed_at、
+    /// error 不寫 'queued'；notice 也不會停在 awaiting_review。
+    #[tokio::test]
+    async fn queuing_a_notice_is_not_a_failure_and_does_not_close_it() {
+        let app = app().await;
+        let a = queued_assignment(&app, 10).await;
+        // 通知型：expects_review=0。
+        sqlx::query("UPDATE supervisor_assignments SET expects_review=0 WHERE id=?")
+            .bind(&a.id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        // 排隊中的 turn 也會推 turn_updated：這條路徑以前把它當成回合結束。
+        on_turn_done(&app, a.turn_id.as_deref().unwrap(), "queued").await;
+        let row = store::assignment(&app.db, &a.id).await.unwrap().unwrap();
+        assert_eq!(row.status, "delivered", "還在排隊，不是結案");
+        assert_eq!(row.delivery.as_deref(), Some("queued"));
+        assert!(row.completed_at.is_none(), "沒送出就不該有完成時間");
+        assert!(row.error.is_none(), "'queued' 不是錯誤訊息：{:?}", row.error);
+        let failed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE kind='assignment_failed'")
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(failed, 0, "排隊不推 assignment_failed");
+
+        // 真的送出、回合結束：notice 自動結案，不進 awaiting_review。
+        on_turn_done(&app, a.turn_id.as_deref().unwrap(), "completed").await;
+        let row = store::assignment(&app.db, &a.id).await.unwrap().unwrap();
+        assert_eq!(row.status, "completed");
+        assert!(row.completed_at.is_some());
+        let kinds: Vec<String> = sqlx::query_scalar("SELECT kind FROM supervisor_inbox WHERE assignment_id=? ORDER BY kind")
+            .bind(&a.id)
+            .fetch_all(&app.db)
+            .await
+            .unwrap();
+        assert!(kinds.contains(&"assignment_noticed".to_string()), "{kinds:?}");
+        assert!(!kinds.contains(&"assignment_failed".to_string()), "{kinds:?}");
+    }
+
+    /// `assignment_queued` 只記錄，不叫醒 AGM（排隊是正常路徑）。
+    #[test]
+    fn a_queued_event_never_wakes_anyone() {
+        let route = crate::supervisor::roles::route("assignment_queued", &json!({"needs_review": false}), None);
+        assert!(!route.wake);
     }
 
     #[tokio::test]

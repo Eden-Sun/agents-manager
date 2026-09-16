@@ -182,7 +182,8 @@ pub fn route(kind: &str, payload: &Value, review_role: Option<&str>) -> Route {
         ),
         "assignment_completed" | "assignment_failed" => r(reviewer, needs_review != Some(false)),
         // 通知型交辦送到了、額度擋住／恢復：controller 自己會處理，這些只是記錄。
-        "assignment_noticed" | "quota_blocked" | "quota_resumed" => r(reviewer, false),
+        // 排隊中（`assignment_queued`）同理：它還在路上，等回合結束自己會送出。
+        "assignment_noticed" | "assignment_queued" | "quota_blocked" | "quota_resumed" => r(reviewer, false),
         "approval_requested" | "mission_created" | "mission_question" | "mission_answered" | "mission_resumed"
         | "mission_identity_switch" => r(Role::Responder, true),
         // 恢復不叫醒人：開的那一筆已經叫過，關掉只要記下來。
