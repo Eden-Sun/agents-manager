@@ -71,7 +71,7 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon，並�
 }
 ```
 
-- `queued_turn`：排在下一個要送的 Turn（`status = "queued"`，§5），沒有就 `null`；前端據此把輸入框畫成「已排隊」。**目前主線永遠是 `null`**：沒有任何生產者會建 `queued` turn（`/prompt` 遇到 in-flight 是 409），見 SPEC §4.4a 的說明。
+- `queued_turn`：排在下一個要送的 Turn（`status = "queued"`，§5），沒有就 `null`；前端據此把輸入框畫成「已排隊」。**生產者只有 AGM 派工**（2026-09-16）：對方回合中時 AGM 的派工會排一筆 queued，使用者的 `/prompt` 仍是 409，見 SPEC §4.4a。
 - `unread` 固定 `0`（未讀由前端算）。
 - 其他欄位（hosts、identities、bot 的 model/effort/fast/persona/identity/managed_by/parent_bot_id、run 的 runtime_* 等）見各節。
 
@@ -179,7 +179,9 @@ config.toml 裡沒有的 id（child、已刪）忽略。成功推 `project_chang
 
 判斷送達看回應有沒有 `message_id`：409 的 body 也可能帶 `turn_id`。
 active Run 的 herdr session 已不可用 → 寫入 Turn 前回 502，不留 Turn 或 user message。
-排隊中的 prompt 是 `status = "queued"` 的 Turn（每個對話最多一筆，`state.bots[].queued_turn`），daemon 在前一回合結束後送出。**這條路目前沒有生產者**（SPEC §4.4a）：直接送出遇到 in-flight 回 409，由呼叫端重試，daemon 不會替你排隊。
+排隊中的 prompt 是 `status = "queued"` 的 Turn（每個對話最多一筆，`state.bots[].queued_turn`），daemon 在前一回合結束後送出。
+**只有 AGM 的派工會排隊**（2026-09-16）：`supervisor` 派工遇到 in-flight 會建一筆 queued（交辦記成 `delivery="queued"`），排超過
+`[supervisor] assignment_queue_wait_secs`（預設 30 分鐘）沒送出就把交辦停在 `blocked`。**使用者與 web 的 `POST /api/bots/{id}/prompt` 遇到 in-flight 仍回 409**，由呼叫端重試，daemon 不會替你排隊。
 
 409 `reason`：`bot has no active run`、`run is not running`、`agent is blocked; answer the prompt first`、`a turn is already in flight`、
 `a previous turn has unknown delivery; abandon it first`、`needs_login`、`picker_open`、`dialog_open`。後三者 daemon 送之前先讀 pane：

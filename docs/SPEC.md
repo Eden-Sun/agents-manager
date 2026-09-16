@@ -338,10 +338,17 @@ herdr 回錯且訊息明確提到 `format`（舊版或遠端不認得這個參�
 marker 列與框的邊之間多出任何一列（含空白列）、marker 後多打一格（沒有框的輸入框）、dim 提示後面多了非 dim 的字、跟要送的一模一樣的字
 ——都是非空，一律不代送、零寫入。認不出框的畫面是 `Unready`。
 
-**排隊中的 prompt 重試**（⚠️ **目前主線沒有生產者**：`POST /api/bots/{id}/prompt` 遇到 in-flight turn 是直接 409，
-從不插 `queued` turn，所以下面整段機制與 `state.bots[].queued_turn` 在正式路徑上不會被觸發。留著是因為
-`lifecycle/queue.rs` 的退避／重建 timer 都還在且有測試；要啟用就是在 409 那個分支真的插一筆 `queued`。
-**不要照這段設計「送一次就好，daemon 會排隊」的流程**——那則 prompt 會直接消失，review 2026-09-16）：
+**誰會建 `queued` turn**（2026-09-16 AGM 裁示）：**只有 AGM 的派工／通知**這條路
+（`supervisor::controller::dispatch` → `lifecycle::prompt::prompt_relayed_queueable`）。對方回合中時它排一筆 `queued`
+而不是 409——一顆回合 10～20 分鐘的 bot，用退避重試等於每五分鐘賭一次它剛好在兩個回合之間（實例：交辦
+01M2MC8CB2AGDKPB86XDW1FB0Q 重試 12 次、42 分鐘都沒送出）。**使用者與 web 的 `POST /api/bots/{id}/prompt`
+維持 409**，那條路的語意變更要單獨評估，不要照這段設計「送一次就好，daemon 會排隊」的使用者流程。
+
+界線：每個對話最多一筆 `queued`（`turns_one_queued`），同一筆交辦重試回同一筆（`turns_client_req`），撞到就回 409 照舊退避；
+排超過 `[supervisor] assignment_queue_wait_secs`（預設 1800 秒）還沒送出，controller 把交辦停在 `blocked` 並推一則通知；
+daemon 重啟時把所有 `queued` turn（含沒有 `next_flush_at` 的）重新掛上 flush，不留孤兒。送出時機與證據記錄完全沿用下面這套。
+
+**排隊中的 prompt 重試**：
 可重試原因（框忙、transcript 還沒回報…）放回 `queued`，退避 15 秒起每次加倍、上限 5 分鐘；次數與
 下次時間存在 `turns.flush_retries`／`turns.next_flush_at`，時間未到的其他喚醒不動它；每顆 bot 同時只有一個重試 timer；放回
 12 次仍送不出就標 failed 並插說明（同一個 transaction）。daemon 重啟（`reconcile::rearm_progress`）時掃描所有帶

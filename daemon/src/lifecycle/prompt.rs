@@ -153,6 +153,76 @@ pub async fn prompt_relayed(
     prompt_grouped(app, bot_id, text, client_request_id, None, None, attachment_ids, relay_from).await
 }
 
+/// AGM 派工專用：對方正在回合中時**排隊**而不是 409（AGM 2026-09-16 裁示）。
+///
+/// 使用者與 web 的 `/prompt` 不走這條——那條路的語意變更要單獨評估。排進 `queued` 之後由既有的
+/// `queue::flush_queued_locked` 在回合結束時送出，送達判定與證據記錄完全沿用（`Handed`／`auto_resend` 不變）。
+/// 回傳 `delivery = "queued"` 代表「已排隊、還沒送」。
+pub async fn prompt_relayed_queueable(
+    app: &Arc<App>,
+    bot_id: &str,
+    text: &str,
+    client_request_id: &str,
+    relay_from: Option<&str>,
+) -> LcResult<PromptOut> {
+    prompt_inner(app, bot_id, text, client_request_id, None, None, &[], relay_from, true).await
+}
+
+/// 排一筆 `queued` turn 等下一回合（只有 AGM 派工走這裡）。
+///
+/// 界線都靠 DB：`turns_one_queued`（每個對話最多一筆 queued）擋住「同一顆 bot 疊第二筆」，
+/// `turns_client_req` 擋住「同一筆交辦重試疊出第二筆」——撞到就回原本的 409，讓呼叫端照舊退避。
+/// `prompt_text` 存要送的內容（含附件路徑展開後的樣子），與 queue flush 用的是同一欄。
+#[allow(clippy::too_many_arguments)]
+async fn queue_for_next_turn(
+    app: &Arc<App>,
+    conv: &str,
+    bot_id: &str,
+    text: &str,
+    deliver: &str,
+    client_request_id: &str,
+    group_id: Option<&str>,
+    relay_from: Option<&str>,
+) -> LcResult<PromptOut> {
+    let turn_id = db::ulid();
+    let msg_id = db::ulid();
+    let mut tx = app.db.begin().await.map_err(up)?;
+    let queued = sqlx::query(
+        "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, client_request_id, created_at, prompt_text)
+         VALUES (?,?,NULL,'web','queued','pending',?,?,?)",
+    )
+    .bind(&turn_id)
+    .bind(conv)
+    .bind(client_request_id)
+    .bind(db::now())
+    .bind(deliver)
+    .execute(&mut *tx)
+    .await;
+    if let Err(e) = queued {
+        // 已經有一筆在排（這顆 bot 或這筆交辦）：照舊回 409，呼叫端退避後再問。
+        tracing::info!(bot = %bot_id, error = %e, "另一筆 prompt 已經在排隊，這次照舊回 409");
+        return Err(LcError::conflict("a turn is already queued for this bot", json!({"conversation_id": conv})));
+    }
+    sqlx::query(
+        "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, group_id, relay_from, created_at) VALUES (?,?,?,'user',?,'web',?,?,?)",
+    )
+    .bind(&msg_id)
+    .bind(conv)
+    .bind(&turn_id)
+    .bind(text)
+    .bind(group_id)
+    .bind(relay_from)
+    .bind(db::now())
+    .execute(&mut *tx)
+    .await
+    .map_err(up)?;
+    tx.commit().await.map_err(up)?;
+    emit_prompt_message(app, bot_id, &msg_id).await;
+    emit_turn(app, &turn_id).await;
+    tracing::info!(bot = %bot_id, turn = %turn_id, "對方回合中：prompt 排進佇列，等回合結束再送");
+    Ok(PromptOut { turn_id, message_id: msg_id, delivery: "queued".into() })
+}
+
 /// The screen checks every prompt passes before text enters the pane — shared with the queue
 /// flush (review 2026-09-12 #6: the flush skipped them and typed into codex's `/model` menu).
 /// Refusals insert a system hint and 409 with `needs_login` / `dialog_open` / `picker_open`.
@@ -213,8 +283,24 @@ pub async fn prompt_grouped(
     group_id: Option<&str>,
     deliver: Option<&str>,
     attachment_ids: &[String],
+    relay_from: Option<&str>,
+) -> LcResult<PromptOut> {
+    prompt_inner(app, bot_id, text, client_request_id, group_id, deliver, attachment_ids, relay_from, false).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn prompt_inner(
+    app: &Arc<App>,
+    bot_id: &str,
+    text: &str,
+    client_request_id: &str,
+    group_id: Option<&str>,
+    deliver: Option<&str>,
+    attachment_ids: &[String],
     // `None` = 使用者自己在畫面上打的。
     relay_from: Option<&str>,
+    // 對方回合中時排隊而不是 409。只有 AGM 派工會給 true。
+    queue_if_busy: bool,
 ) -> LcResult<PromptOut> {
     let deliver = deliver.unwrap_or(text);
     let lock = app.bot_lock(bot_id).await;
@@ -261,6 +347,9 @@ pub async fn prompt_grouped(
         return Err(LcError::conflict("agent is blocked; answer the prompt first", json!({"run_id": run.id})));
     }
     if let Some(t) = db::in_flight_turn(&app.db, &run.id).await.map_err(up)? {
+        if queue_if_busy {
+            return queue_for_next_turn(app, &conv, bot_id, text, &deliver, client_request_id, group_id, relay_from).await;
+        }
         return Err(LcError::conflict("a turn is already in flight", json!({"turn_id": t.id})));
     }
     pane_ready_for_prompt(app, &bot, &run, &conv).await?;
@@ -439,6 +528,54 @@ mod prompt_tests {
         .await
         .unwrap();
         id
+    }
+
+    /// 在對方回合中派工：AGM 那條路排隊（queued turn），使用者的 `/prompt` 仍是 409（AGM 2026-09-16 裁示）。
+    #[tokio::test]
+    async fn an_agm_dispatch_queues_behind_an_in_flight_turn_but_a_user_prompt_still_gets_409() {
+        let f = fixture("codex", "test").await;
+        let app = f.env.app.clone();
+        // 先佔住一個回合。
+        let busy = db::ulid();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at)
+             VALUES (?,?,?,'web','in_flight','ok',?)",
+        )
+        .bind(&busy)
+        .bind(&f.conv)
+        .bind(&f.run_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        // 使用者：照舊 409，不排隊。
+        let user = prompt(&app, &f.bot_id, "使用者自己打的", "user-1").await;
+        assert!(matches!(user, Err(LcError::Conflict(_))), "使用者的 /prompt 仍是 409");
+
+        // AGM 派工：排一筆 queued，內容存在 prompt_text 等 flush。
+        let out = prompt_relayed_queueable(&app, &f.bot_id, "AGM 派的工作", "agm-1", Some("agm-bot")).await.unwrap();
+        assert_eq!(out.delivery, "queued");
+        let (status, run_id, text): (String, Option<String>, Option<String>) =
+            sqlx::query_as("SELECT status, run_id, prompt_text FROM turns WHERE id=?")
+                .bind(&out.turn_id)
+                .fetch_one(&app.db)
+                .await
+                .unwrap();
+        assert_eq!((status.as_str(), run_id, text.as_deref()), ("queued", None, Some("AGM 派的工作")));
+
+        // 同一筆交辦重試：回原本那一筆，不會疊第二筆。
+        let again = prompt_relayed_queueable(&app, &f.bot_id, "AGM 派的工作", "agm-1", Some("agm-bot")).await.unwrap();
+        assert_eq!(again.turn_id, out.turn_id);
+        // 另一筆交辦想排第二筆：擋下來，照舊 409（每個對話只留一筆 queued）。
+        let other = prompt_relayed_queueable(&app, &f.bot_id, "另一件事", "agm-2", Some("agm-bot")).await;
+        assert!(matches!(other, Err(LcError::Conflict(_))), "每個對話只留一筆 queued");
+        let queued: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE conversation_id=? AND status='queued'")
+            .bind(&f.conv)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(queued, 1);
     }
 
     /// A missing run session is rejected before writing, so a retry reports the same upstream problem.

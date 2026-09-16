@@ -62,6 +62,10 @@ pub struct SupervisorCfg {
     pub bot_stopped_secs: u64,
     #[serde(default = "default_assignment_stalled_secs")]
     pub assignment_stalled_secs: u64,
+    /// 派工遇到對方回合中時排進 `queued`；排超過這個時間還沒送出就把交辦標成 blocked，不要無聲排下去
+    /// （AGM 2026-09-16）。
+    #[serde(default = "default_assignment_queue_wait_secs")]
+    pub assignment_queue_wait_secs: u64,
     /// 協調者（AGM responder）的短窗批次：第一件待辦等滿這麼久、距上次喚醒也滿這麼久才叫醒，
     /// 同一陣的申請合成一次（SPEC §18.15）。
     #[serde(default = "default_responder_batch_secs")]
@@ -103,6 +107,10 @@ fn default_assignment_stalled_secs() -> u64 {
     7200
 }
 
+fn default_assignment_queue_wait_secs() -> u64 {
+    1800
+}
+
 impl Default for SupervisorCfg {
     fn default() -> Self {
         Self {
@@ -112,6 +120,7 @@ impl Default for SupervisorCfg {
             host_disconnected_secs: default_host_disconnected_secs(),
             bot_stopped_secs: default_bot_stopped_secs(),
             assignment_stalled_secs: default_assignment_stalled_secs(),
+            assignment_queue_wait_secs: default_assignment_queue_wait_secs(),
             responder_batch_secs: default_responder_batch_secs(),
             responder_max_backoff_secs: default_responder_max_backoff_secs(),
         }
