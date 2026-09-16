@@ -329,6 +329,39 @@ fn squash_ws(s: &str) -> String {
 
 /// The scraped echo may be wrapped or clipped at the column width, so containment either way
 /// counts as the same message (equality alone would add a second bubble).
+/// 這一回合的使用者訊息原文：codex 的 hook 直接帶；claude 的 Stop 沒帶，從 transcript 尾巴找最後一則。
+/// 讀不到就是 `None`（沒有證據，呼叫端照舊認領）。
+async fn hook_user_text(from_hook: Option<&str>, transcript_path: Option<&str>) -> Option<String> {
+    if let Some(u) = from_hook.map(str::trim).filter(|s| !s.is_empty()) {
+        return Some(u.to_string());
+    }
+    let path = std::path::PathBuf::from(transcript_path?);
+    tokio::task::spawn_blocking(move || last_transcript_user_text(&path)).await.ok().flatten()
+}
+
+/// transcript 最後一則使用者訊息。只讀尾巴：回合結束時它一定在最後幾百 KB 裡。
+fn last_transcript_user_text(path: &std::path::Path) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    const TAIL: u64 = 512 * 1024;
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    f.seek(SeekFrom::Start(len.saturating_sub(TAIL))).ok()?;
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf).ok()?;
+    String::from_utf8_lossy(&buf).lines().rev().find_map(crate::lifecycle::transcript_user_text)
+}
+
+/// 有兩邊的原文、而且怎麼比都對不上，才算「hook 回答的是另一句」。去空白後互相包含就算同一句
+/// （刮下來的回音、transcript 的折行都可能截斷一邊）。任一邊沒有就不下判斷。
+fn answers_another_prompt(prompt: Option<&str>, hook_user: Option<&str>) -> bool {
+    let (Some(p), Some(u)) = (prompt, hook_user) else { return false };
+    let (p, u) = (squash_ws(p), squash_ws(u));
+    if p.is_empty() || u.is_empty() {
+        return false;
+    }
+    !(p.contains(&u) || u.contains(&p))
+}
+
 fn hook_user_is_new(existing: &[String], incoming: &str) -> bool {
     let inc = squash_ws(incoming);
     if inc.is_empty() {
@@ -572,6 +605,20 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             let target = match &run {
                 Some(r) => db::in_flight_turn(&app.db, &r.id).await?,
                 None => None,
+            };
+            // `unknown`＝打字進去但沒有證據。這時 hook 若看得到**別句**使用者訊息，那是使用者在終端手打的另一句：
+            // 答案不能掛到原本那則，更不能順手把它標成「已送達」（第二輪 review 送達線 #3）。看不到使用者訊息時照舊認領。
+            let (target, user) = match target {
+                Some(t) if t.delivery == "unknown" => {
+                    let seen = hook_user_text(user.as_deref(), transcript_path.as_deref()).await;
+                    if answers_another_prompt(t.prompt_text.as_deref(), seen.as_deref()) {
+                        tracing::info!(turn = %t.id, bot = %bot.id, "hook 的使用者訊息不是這一筆 unknown 的 prompt：不認領，記成外部回合");
+                        (None, user.or(seen))
+                    } else {
+                        (Some(t), user)
+                    }
+                }
+                other => (other, user),
             };
             let body_text = assistant.clone().unwrap_or_default();
 
@@ -1247,6 +1294,138 @@ mod external_claim_tests {
             .await
             .unwrap();
         assert_eq!(after, full);
+    }
+
+    async fn unknown_turn(app: &Arc<App>, project_id: &str, kind: &str, prompt: &str) -> (String, String, String) {
+        let bot_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, created_at)
+             VALUES (?,?,?,?,'[]',0,1,'tok',?)",
+        )
+        .bind(&bot_id)
+        .bind(project_id)
+        .bind(format!("hook-{}", &bot_id[..6]))
+        .bind(kind)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let conversation_id = db::conversation_id(&app.db, &bot_id).await.unwrap();
+        let run_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','working','ws-1','pane-1','agent','test',?)",
+        )
+        .bind(&run_id)
+        .bind(&bot_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let turn_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, prompt_text, created_at)
+             VALUES (?,?,?,'web','in_flight','unknown',?,?)",
+        )
+        .bind(&turn_id)
+        .bind(&conversation_id)
+        .bind(&run_id)
+        .bind(prompt)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        (bot_id, conversation_id, turn_id)
+    }
+
+    fn codex_done(bot_id: &str, user: &str) -> HookBody {
+        HookBody {
+            bot_id: bot_id.to_string(),
+            provider: "codex".into(),
+            payload: json!({
+                "type": "agent-turn-complete",
+                "thread-id": format!("thread-{bot_id}"),
+                "turn-id": format!("turn-{}", db::ulid()),
+                "input-messages": [user],
+                "last-assistant-message": "hook reply",
+            }),
+            received_at: None,
+            truncated: false,
+        }
+    }
+
+    /// 第二輪 review 送達線 #3：`unknown` 期間使用者在終端手打另一句，答案不能掛到原本那則、也不能把它標成已送達。
+    #[tokio::test]
+    async fn a_hook_answering_another_prompt_does_not_claim_the_unknown_turn() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, conv, turn_id) = unknown_turn(&app, &env.project_id, "codex", "跑一次測試").await;
+
+        process(&app, &codex_done(&bot_id, "順便看一下 lint")).await.unwrap();
+
+        let turn = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!((turn.status.as_str(), turn.delivery.as_str()), ("in_flight", "unknown"), "原本那則原封不動");
+        let external: Vec<(String, String)> = sqlx::query_as(
+            "SELECT t.id, m.content FROM turns t JOIN messages m ON m.turn_id=t.id
+              WHERE t.conversation_id=? AND t.origin='external' AND m.role='user'",
+        )
+        .bind(&conv)
+        .fetch_all(&app.db)
+        .await
+        .unwrap();
+        assert_eq!(external.len(), 1, "答案記在一筆外部回合上");
+        assert_eq!(external[0].1, "順便看一下 lint");
+    }
+
+    /// 同一句（去空白後互相包含）就照舊認領並把 unknown 升成 ok。
+    #[tokio::test]
+    async fn a_hook_answering_the_same_prompt_still_resolves_the_unknown_turn() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, _conv, turn_id) = unknown_turn(&app, &env.project_id, "codex", "跑一次   測試").await;
+
+        process(&app, &codex_done(&bot_id, "跑一次 測試")).await.unwrap();
+
+        let turn = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!((turn.status.as_str(), turn.delivery.as_str()), ("completed", "ok"));
+    }
+
+    /// claude 的 Stop 沒帶使用者訊息：從 transcript 尾巴讀。對不上一樣不認領；讀不到（沒有 transcript）就照舊認領。
+    #[tokio::test]
+    async fn claude_reads_the_prompt_from_the_transcript_before_claiming_an_unknown_turn() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, _conv, turn_id) = unknown_turn(&app, &env.project_id, "claude", "跑一次測試").await;
+        let transcript = app.data_dir.join(format!("t-{}.jsonl", db::ulid()));
+        std::fs::write(
+            &transcript,
+            format!(
+                "{}\n{}\n",
+                json!({"type": "user", "message": {"role": "user", "content": "跑一次測試"}}),
+                json!({"type": "user", "message": {"role": "user", "content": "算了，先幫我看 README"}}),
+            ),
+        )
+        .unwrap();
+        let stop = |sid: &str| HookBody {
+            bot_id: bot_id.clone(),
+            provider: "claude".into(),
+            payload: json!({
+                "hook_event_name": "Stop",
+                "session_id": sid,
+                "prompt_id": db::ulid(),
+                "transcript_path": transcript.to_string_lossy(),
+                "last_assistant_message": "hook reply",
+            }),
+            received_at: None,
+            truncated: false,
+        };
+        process(&app, &stop("s1")).await.unwrap();
+        let turn = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(turn.status, "in_flight", "transcript 最後一則是別句：不認領");
+
+        assert!(!answers_another_prompt(Some("跑一次測試"), None), "讀不到就不下判斷");
+        assert!(!answers_another_prompt(None, Some("x")));
+        assert!(answers_another_prompt(Some("跑一次測試"), Some("算了")));
     }
 
     #[tokio::test]
