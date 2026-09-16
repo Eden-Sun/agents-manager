@@ -172,6 +172,9 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
         // Put-backs spent waiting for a codex rollout, counted only for that reason and only for
         // the run and session in `rollout_wait_key` (`<run id>:<session id>`); a different key
         // starts the count again (sol review round ten #2).
+        // 能不能自動重送，與「有沒有證據」分開（AGM 2026-09-16）。既有列給 1＝維持今天的行為：
+        // 舊的 unverified 列早就把 resend_count 頂到上限，照樣不會被重送。
+        ("turns", "auto_resend", "ALTER TABLE turns ADD COLUMN auto_resend INTEGER NOT NULL DEFAULT 1"),
         ("turns", "rollout_waits", "ALTER TABLE turns ADD COLUMN rollout_waits INTEGER NOT NULL DEFAULT 0"),
         ("turns", "rollout_wait_key", "ALTER TABLE turns ADD COLUMN rollout_wait_key TEXT"),
     ] {
@@ -407,9 +410,13 @@ pub struct Turn {
     /// Exact prompt payload for a queued web turn; never exposed in REST/WS turn JSON.
     #[serde(skip_serializing)]
     pub prompt_text: Option<String>,
-    /// 0 = delivered without lossless evidence ("unverified"); see the migration note.
+    /// 0 = 沒有無損證據（UI 標「未驗證送達」）。只講證據，不決定重送。
     #[sqlx(default)]
     pub delivery_verified: i64,
+    /// 0 = 這一則不做自動重送（打過字但證不明，重送會重複派工）。欄位預設 1；
+    /// 真的讀不到這一欄時（理論上不會，migrate 先跑）退成 0＝不重送，寧可少送不要重複送。
+    #[sqlx(default)]
+    pub auto_resend: i64,
     /// Times a queued prompt was put back because it could not be typed yet.
     #[sqlx(default)]
     #[serde(skip_serializing)]

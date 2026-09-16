@@ -34,7 +34,12 @@ pub(crate) enum BoxState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Delivered {
+    /// 打字進 pane，而且有無損證據（transcript／rollout／一列回音）證明它進了輸入框。
     Submitted,
+    /// 交給 herdr `agent.prompt`。對方回 ok，但**沒有任何證據**說它真的進了輸入框
+    /// （2026-09-14 wits-c1-op-xh：回 ok、字沒進去）。證據面記為未驗證，重送照舊允許
+    /// （AGM 2026-09-16 裁示：證據與重送是兩件事）。
+    Handed,
     /// Nothing reached the pane or the agent. `retry` = the condition can clear by itself (a busy
     /// box, a transcript not yet reported); `false` = this prompt can never be proven on this run.
     NotAttempted { reason: &'static str, retry: bool },
@@ -44,6 +49,32 @@ pub(crate) enum Delivered {
     /// lossless evidence exists — grok, remote hosts, a codex session not reported yet. Delivered
     /// as far as the screen can tell, **never** re-sent, and marked for a human to check.
     Unverified,
+}
+
+/// 一則送達要記下的兩件事，刻意分開（AGM 2026-09-16 裁示，review 第 3 條）：
+/// * `verified` 只講**證據**——有沒有無損證據證明它進了對方的輸入框／session。
+/// * `auto_resend` 只講**能不能自動重送**——打過字但證不明的那條路重送會重複派工，所以關掉；
+///   `agent.prompt` 沒有證據但重送是安全的（沒進去才會重送），所以開著。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DeliveryRecord {
+    /// 寫進 `turns.delivery`（CHECK 只認 pending/ok/unknown/failed）。
+    pub stored: &'static str,
+    pub verified: bool,
+    pub auto_resend: bool,
+}
+
+impl Delivered {
+    /// `None` = 這個結果不會寫 delivery（`NotAttempted` 的 turn 會被撤回）。
+    pub(crate) fn record(&self) -> Option<DeliveryRecord> {
+        match self {
+            Delivered::Submitted => Some(DeliveryRecord { stored: "ok", verified: true, auto_resend: true }),
+            Delivered::Handed => Some(DeliveryRecord { stored: "ok", verified: false, auto_resend: true }),
+            Delivered::Unverified => Some(DeliveryRecord { stored: "ok", verified: false, auto_resend: false }),
+            // unknown 不會被重送（閘門要 delivery=ok），所以不動重送額度。
+            Delivered::Unproven(_) => Some(DeliveryRecord { stored: "unknown", verified: false, auto_resend: true }),
+            Delivered::NotAttempted { .. } => None,
+        }
+    }
 }
 
 /// Which agent wrote a session log, i.e. how to read a user entry out of it.
@@ -732,7 +763,7 @@ pub(crate) async fn execute_delivery(
             client
                 .call_timeout("agent.prompt", json!({"target": target, "text": text}), Duration::from_secs(10))
                 .await?;
-            return Ok(Delivered::Submitted);
+            return Ok(Delivered::Handed);
         }
         Plan::Type { pane, proof } => (pane, proof),
     };
@@ -1382,6 +1413,22 @@ mod api_tests {
     }
 
     /// grok 多行沒有無損證據：照樣打字送出，回 200 `unverified`，turn 留下「要人工核對」的標記（不是 unknown）。
+    /// 證據與重送分家（AGM 2026-09-16 裁示，review 第 3 條）：
+    /// `agent.prompt` 沒有證據 → 未驗證，但重送照舊開著；打字證不明 → 未驗證且關掉重送。
+    #[test]
+    fn evidence_and_auto_resend_are_recorded_separately() {
+        let r = |d: Delivered| d.record().expect("a delivered outcome records something");
+        // 打字＋無損證據：有證據、可重送。
+        assert_eq!(r(Delivered::Submitted), DeliveryRecord { stored: "ok", verified: true, auto_resend: true });
+        // agent.prompt：沒有證據（它回 ok 卻沒送進去過），但沒送到才會重送，所以重送安全。
+        assert_eq!(r(Delivered::Handed), DeliveryRecord { stored: "ok", verified: false, auto_resend: true });
+        // 打過字、證不明：重送會重複派工，關掉。
+        assert_eq!(r(Delivered::Unverified), DeliveryRecord { stored: "ok", verified: false, auto_resend: false });
+        // unknown 本來就過不了重送閘門（要 delivery=ok），所以不動重送額度。
+        assert_eq!(r(Delivered::Unproven("x")), DeliveryRecord { stored: "unknown", verified: false, auto_resend: true });
+        assert!(Delivered::NotAttempted { reason: "x", retry: true }.record().is_none());
+    }
+
     #[tokio::test]
     async fn a_grok_multi_line_prompt_is_sent_and_marked_unverified() {
         let env = tt::env().await;

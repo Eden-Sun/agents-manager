@@ -47,23 +47,22 @@ async fn emit_prompt_message(app: &Arc<App>, bot_id: &str, message_id: &str) {
 }
 
 
-/// Record a delivery outcome. `unverified` is stored as `delivery='ok'` plus
-/// `delivery_verified=0` (the column's CHECK constraint only knows the four original states).
-pub(crate) async fn mark_delivery(app: &Arc<App>, turn_id: &str, delivery: &str) {
-    let (stored, verified) = match delivery {
-        "unverified" => ("ok", 0),
-        other => (other, 1),
-    };
-    // An unverified prompt also has its resend budget used up: a binary rolled back to one that
-    // does not know `delivery_verified` still will not type it a second time.
+/// 記下一則送達：`delivery`（CHECK 只認四種）＋ `delivery_verified`（有沒有證據）＋ `auto_resend`
+/// （能不能自動重送）。後兩者是兩件事，見 [`crate::lifecycle::delivery::DeliveryRecord`]。
+pub(crate) async fn mark_delivery(app: &Arc<App>, turn_id: &str, rec: DeliveryRecord) {
+    let verified = i64::from(rec.verified);
+    let auto = i64::from(rec.auto_resend);
+    // 不重送的那條路照樣把重送額度用掉：回滾到不認得 `auto_resend` 的舊 binary 時，
+    // 它仍然不會把同一則再打一次。
     let _ = sqlx::query(
-        "UPDATE turns SET delivery=?, delivery_verified=?,
+        "UPDATE turns SET delivery=?, delivery_verified=?, auto_resend=?,
                 resend_count = CASE WHEN ? = 0 THEN MAX(resend_count, ?) ELSE resend_count END
           WHERE id=?",
     )
-    .bind(stored)
+    .bind(rec.stored)
     .bind(verified)
-    .bind(verified)
+    .bind(auto)
+    .bind(auto)
     .bind(crate::lifecycle::MAX_PROMPT_RESENDS)
     .bind(turn_id)
     .execute(&app.db)
@@ -327,11 +326,21 @@ pub async fn prompt_grouped(
 
     // 4. deliver
     let res = execute_delivery(app, &client, &run, &bot, &deliver, plan).await;
+    // `delivery` 是回給呼叫端／UI 的字；`rec` 是要寫進 DB 的兩個欄位（證據、能不能重送）。
+    let mut rec = DeliveryRecord { stored: "unknown", verified: false, auto_resend: true };
     let delivery = match res {
-        Ok(Delivered::Submitted) => "ok",
+        // 打字＋無損證據。`Handed`（agent.prompt）沒有證據，API 也照證據說「unverified」，
+        // 但它照舊可以自動重送（AGM 2026-09-16：證據與重送分開）。
+        Ok(d @ (Delivered::Submitted | Delivered::Handed)) => {
+            rec = d.record().expect("delivered outcome records");
+            if matches!(d, Delivered::Submitted) { "ok" } else { "unverified" }
+        }
         // Typed and submitted on a run with no lossless evidence (grok, remote, codex before its
         // session is known): delivered as far as anyone can tell, marked for a human, never re-sent.
-        Ok(Delivered::Unverified) => "unverified",
+        Ok(d @ Delivered::Unverified) => {
+            rec = d.record().expect("delivered outcome records");
+            "unverified"
+        }
         // The box filled between the plan and the first keystroke: nothing was sent. Take the turn
         // back out so the same request id can be sent again, and answer 409 like the plan would.
         Ok(not @ Delivered::NotAttempted { .. }) => {
@@ -363,7 +372,7 @@ pub async fn prompt_grouped(
             "unknown"
         }
     };
-    mark_delivery(app, &turn_id, delivery).await;
+    mark_delivery(app, &turn_id, rec).await;
     emit_turn(app, &turn_id).await;
     if delivery == "ok" || delivery == "unverified" {
         arm_stall(app, &run.id, bot_id, &turn_id).await;

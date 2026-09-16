@@ -292,8 +292,17 @@ pane 上回過 ok 卻沒送進去（wits-c1-op-xh 14:24、15:33，第二次距 s
 
 超過 20 萬字一律 `NotAttempted(prompt_too_long_to_prove)`（422），不打。
 
-**結果四種，對呼叫端意義不同**：
-- `Submitted`：有無損證據證明送出。
+**「有沒有證據」與「能不能自動重送」是兩件事**（AGM 2026-09-16 裁示）：
+- `turns.delivery_verified` 只講**證據**：有沒有無損證據證明它進了對方的輸入框／session。
+- `turns.auto_resend` 只講**能不能自動重送**：打過字但證不明的那條路重送會重複派工，所以是 0；
+  `agent.prompt` 同樣沒有證據，但沒送進去才會走到重送，所以是 1。重送閘門看 `auto_resend`，不看 `delivery_verified`。
+- 欄位 additive、migrate 可重入；既有列 `auto_resend` 預設 1，行為與拆開前相同（舊的 unverified 列當時已把
+  `resend_count` 頂到上限，照樣不會被重送）。
+
+**結果五種，對呼叫端意義不同**：
+- `Submitted`：打字進 pane，而且有無損證據證明送出。verified=1、可重送。
+- `Handed`：交給 herdr `agent.prompt`。它回 ok 卻不保證字進得去（2026-09-14 wits-c1-op-xh 實例），
+  所以**沒有證據**：verified=0、API 回 `"delivery":"unverified"`、UI 標「未驗證送達」；重送照舊允許。
 - `Unverified`：沒有無損證據可用，照樣打字送出；框收下貼上、Enter 後清空，就回報成送出，但標成「要人工核對」。
   DB 存 `delivery='ok'`＋`turns.delivery_verified=0`（`delivery` 的 CHECK 只有原本四種狀態，不改表），API 回
   `"delivery":"unverified"`，AGM 交辦記成 `delivery=unverified`，UI 在使用者泡泡上標「未驗證送達」。它照常掛 stall
@@ -337,7 +346,8 @@ marker 列與框的邊之間多出任何一列（含空白列）、marker 後多
 `next_flush_at` 的 queued turn，以 `max(now, next_flush_at)` 為每顆 bot 重建唯一的 timer。直接送出的 409 回應則由呼叫端（或 AGM
 交辦的既有退避）重試。
 
-unverified 的 turn 同時把 `turns.resend_count` 設到上限：就算退回不認得 `delivery_verified` 的舊 binary，也不會被自動重打一次。
+`auto_resend=0` 的 turn 同時把 `turns.resend_count` 設到上限：就算退回不認得 `auto_resend` 的舊 binary，也不會被自動重打一次。
+（反過來，`Handed` 這種 verified=0 但可重送的列，退回舊 binary 時會被舊的 `delivery_verified` 閘門擋著不重送——少送不會重複送。）
 
 打字流程：空框 → 一次貼上 → 框變成非空（仍是空的且證據沒變才再貼一次；**沒有可讀證據的 `Unverified` 一律不貼第二次**——
 那個判斷對它恆成立，會變成「框看起來空的就再貼」，遠端／grok 晚一幀重畫就送出兩段接在一起的文字）→ Enter → 框回到空的**且**證據比基準多一。
