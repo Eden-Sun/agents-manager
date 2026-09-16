@@ -546,7 +546,7 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
 一個是 wits-ops 起的 Next dev server（w168:p62，listen 3010，卻開在 agents-manager 的 workspace，wt 專案頁看不到），
 其餘四個是空 zsh，永遠留著。沒有歸屬（關掉會不會炸沒人知道）、放錯 workspace、沒有生命週期。
 
-#### 分類（依觀察到的事實，不依誰開的）
+#### 分類（依觀察到的事實，不依誰開的；`kind` 不是打字權限，見「側欄進入與權限」）
 | kind | 判準 | 處置 |
 |---|---|---|
 | `agent` | herdr `agent.list` 認得（claude／codex／grok） | 既有邏輯，這一段完全不碰（§6.5.1、§6.9 的教訓） |
@@ -629,7 +629,9 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
   `pane.focus`，只動得了那台機器的 TUI，兩者不互相取代。重整／深連結（`/hosts/<host>/shells/<pane>`）先查面板自己開的 shell，
   查不到再查 `GET /api/panes`。
 - **白名單兩份**（`shell::registered`）：面板自己開的（`app.host_shells`，只在記憶體）加上 `panes` 表。後者活過重啟。
-- **打字權限看 listen port，不看 `kind`**（`shell::allowed`，2026-09-16 統整者裁示）：**有 listen port 的 pane 只可看**——送一個
+- **打字權限看是否在 listen，不看 `kind`**（`shell::typing_decision`，2026-09-16 統整者裁示、巡檢同意）。`kind` 只剩顯示、GC 與
+  「關閉要不要先確認」用，**不是權限**；程式與這段規格同一條規則。判準依序：有 active run 一律擋；即時複查讀不到一律擋；
+  本機看即時重對的 listen port；遠端看 `panes` 表已記錄的 `kind`／`listen_ports`。**有 listen port 的 pane 只可看**——送一個
   Ctrl-C 給 dev server 就是把它關掉，UI 把輸入框鎖住、按鍵列整列拿掉並講明；**沒有 port 的都可以打字**，`kind=service` 也一樣：
   跑著 vim／less／sudo／python 的 shell 必須打得進去，不然人卡在裡面出不來。pane 列帶 `read_only` 給前端直接用。
   遠端不算 port（見「資料與 API」），所以**遠端退回表上已知的事實**：`kind='service'` 或記過 listen port 就唯讀（AGM 2026-09-16 驗收）。
