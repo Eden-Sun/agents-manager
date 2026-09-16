@@ -1057,14 +1057,17 @@ body 直接是檔案位元組（**不是** multipart），`Content-Type` 就是�
   `{reason:"already_decided"|"decided_concurrently",status,decided_by,allowed_from}`，什麼都沒寫（後到的 deny 不會把 approved 改掉）。
   成功回 `decided_from` 與 `audit_note_id`；決定歷程 append-only 存在 `supervisor_notes`。帶角色 bot token 時 `decided_by` 記 `AGM:patrol`／`AGM:responder`。
   核准決定與租約續租共用 supervisor lock；核准紀錄遺失 409 `approval_missing`（不延長租約）。
-- `GET /api/supervisor/maintenance/safety?exclude=<id,id>&approval=<id>` → `{safe,working,in_flight,unreadable,blocked_waiting_for_user,queued_assignments,checked_at,excluded_bot_ids,
-  escalated,waited_secs,escalation_approval_id,escalate_after_secs,delivering,held_leases}`。唯讀快照；`blocked` 只回報不阻擋。
+- `GET /api/supervisor/maintenance/safety?exclude=<id,id>&approval=<id>&owner=<name>` → `{safe,working,in_flight,unreadable,blocked_waiting_for_user,queued_assignments,checked_at,excluded_bot_ids,
+  escalated,waited_secs,escalation_approval_id,escalate_after_secs,delivering,held_leases,owner}`。唯讀快照；`blocked` 只回報不阻擋。
   CLI `agm lease safety --exclude-bot <id>` 傳此查詢。
   `escalated=true`＝最早那筆已核准未消耗的 rebuild／restart 核准等超過 `escalate_after_secs`（預設 1800，`AM_MAINTENANCE_ESCALATE_MINS` 可調），
   此時 `safe` 只看 `delivering`（送達臨界區：`queued` 或 `in_flight`＋`delivery='pending'`）、`held_leases`（還握著的租約）與 `unreadable`，`working` 只回報不阻擋（SPEC §18.10）。
   沒有這種核准時 `waited_secs`／`escalation_approval_id` 是 `null`，`safe` 的判準完全照舊。
   `approval=<id>`＝只看**那一筆**核准等了多久（acquire 一律這樣算，用它自己的 `approval_id`）；不帶才退回看最早那筆還活著的。
   認不得、已消耗、被撤或過期的 id 不放寬也不報錯。
+  `owner=<name>`（CLI `--owner`）＝以這個人的身分問：**他自己握的租約不算擋**（只在升級時有差）。`held_leases` 每筆 `{resource,owner,own,fence,expires_at}`，
+  `own:true` 就是發問者自己的。不帶 owner＝舊行為，每一把都算擋、`own` 一律 false；回傳的 `owner` 回聲讓呼叫端分得出舊 daemon 忽略了它。
+  acquire 一律以自己的 `owner` 問（SPEC §18.10「自己的租約不擋自己」）。
 - `GET /api/supervisor/leases` → `{leases:[{resource,owner,approval_id,fence,target_commit,acquired_at,expires_at,released_at,held}]}`。
 - `POST /api/supervisor/leases/{rebuild|restart}/acquire {owner,approval_id,commit?,ttl_secs?,require_idle=true,exclude_bot_ids?}` → `{lease,lease_token,approval,safety}`；同 lock 內重驗核准與 idle，
   搶輸 409 `lease_held`。ttl 預設 900、上限 3600。`POST …/renew {owner,fence,ttl_secs?,lease_token}`、`POST …/release {owner,fence,lease_token}`；舊 fence 409 `lease_lost`；release 把核准標 `consumed`。

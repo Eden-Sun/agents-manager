@@ -441,6 +441,22 @@ check "別人握著租約就是不換" "還有人在跑（租約:restart）" "$A
 check_no "有租約不取租約" "lease acquire" "$AGM_DIR/calls.log"
 teardown
 
+# 自己握的租約不擋自己（SPEC §18.10）：safety 要用跟 acquire 同一個 owner 問，daemon 判安全就照常派。
+setup
+export STUB_SAFETY='{"safe":true,"escalated":true,"waited_secs":2700,"working":[{"bot_id":"b9","name":"wits-pro"}],"in_flight":[],"unreadable":[],"delivering":[],"held_leases":[{"resource":"rebuild","owner":"test-owner","own":true}],"owner":"test-owner","excluded_bot_ids":["bot-build","bot-manager"]}'
+bash "$SCRIPT"
+check "safety 以自己的 owner 問" "--exclude-bot bot-manager --owner test-owner" "$AGM_DIR/calls.log"
+check "自己的租約不擋，照常取租約" "lease acquire" "$AGM_DIR/calls.log"
+teardown
+
+# 就算 daemon 判不安全，理由裡也不把自己的那把列成「租約」——看 log 的人才不會以為是別人卡住。
+setup
+export STUB_SAFETY='{"safe":false,"escalated":true,"waited_secs":2700,"working":[],"in_flight":[],"unreadable":[],"delivering":[{"bot_id":"b1","name":"AM-1-XH","turn_id":"t1"}],"held_leases":[{"resource":"rebuild","owner":"test-owner","own":true}],"owner":"test-owner","excluded_bot_ids":["bot-build","bot-manager"]}'
+bash "$SCRIPT"
+check "擋人的理由是送達中" "還有人在跑（送達中:AM-1-XH）" "$AGM_DIR/daemon-update.log"
+check_no "自己的租約不出現在理由裡" "租約:rebuild" "$AGM_DIR/daemon-update.log"
+teardown
+
 # 17. 沒升級時照舊：daemon 判不安全，理由還是那顆在跑的 bot。
 setup
 export STUB_SAFETY='{"safe":false,"escalated":false,"waited_secs":null,"working":[{"bot_id":"b9","name":"wits-pro"}],"in_flight":[],"unreadable":[],"delivering":[],"held_leases":[],"excluded_bot_ids":["bot-build","bot-manager"]}'

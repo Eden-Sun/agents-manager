@@ -1311,7 +1311,8 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
   - **誰等太久就放寬誰**（AGM 裁示 2026-09-16）：`acquire` 只看**當下這筆核准自己**等了多久，別人放著沒用掉的核准不算數——否則一張被遺忘的核准等於把所有人的窗口都打開。
     唯讀的 `safety` 帶 `?approval=<id>`（CLI `agm lease safety --approval <id>`）時同樣只看那一筆；不帶（純查詢，還不知道會用哪一筆）才退回看最早那筆還活著的核准。回傳的 `escalation_approval_id` 就是這次計時用的那一筆。
     認不得、已消耗、被撤、過期或還沒決定的核准一律不計時（＝不放寬）。
-  - **仍然擋**：送達臨界區（`turns.status='queued'`，或 `status='in_flight'` 且 `delivery='pending'`——daemon 正在往 pane 打字／送出）、任何**還握著**的租約、讀不到狀態的 bot（`unreadable`）。
+  - **仍然擋**：送達臨界區（`turns.status='queued'`，或 `status='in_flight'` 且 `delivery='pending'`——daemon 正在往 pane 打字／送出）、**別人**還握著的租約、讀不到狀態的 bot（`unreadable`）。
+  - **自己的租約不擋自己**（AGM 2026-09-16，58d3587 的規格漏洞）：跟這次 acquire **同一個 owner** 握著的租約不算擋。標準換版是同一人先拿 rebuild、build 完再拿 restart；把自己手上的 rebuild 也算成「別人握著窗口」，restart 就會被卡到 rebuild 自己到期為止（09:26Z 實測：k8bw2f 握 rebuild fence 21，restart 的 safety 列出來的就是它自己）。別人的照擋，「窗口一次只給一個人」的語意不變。唯讀 safety 帶 `owner` 時套同一條規則，不帶就維持舊行為（每一把都算擋）；`held_leases` 每一筆都帶 `owner` 與 `own`。全靜止模式本來就不看租約，不受影響。
   - **不再擋**：bot 只是在 `working`／思考（已送達的 `in_flight`）。`blocked` 照舊只回報不擋。`delivery='unknown'` 是停在那裡等人處理的狀態，不算臨界區。
   - AGM 三顆（巡檢、協調者、建置 child）照舊由呼叫端排除，門檻高低都一樣。
   - **留痕**：safety 多回 `escalated`、`waited_secs`、`escalation_approval_id`，以及 `delivering`／`held_leases` 兩份清單；acquire 把整份 safety 寫進租約 meta 並在 log 明寫「升級後才拿到窗口」；`daemon-update-kick.sh` 的 log 與派工正文也寫明這次是升級後才換的。

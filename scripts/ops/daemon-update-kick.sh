@@ -254,7 +254,9 @@ fi
 # 決定自己要不要繼續，升級邏輯在這條路上等於死碼（review 2026-09-16）。
 # `safe` 由 daemon 判（SPEC §18.10）：核准等超過門檻時它會自己縮小封鎖面，這裡不能再 AND 一次
 # 自己的條件，否則「思考中不擋」永遠生效不了。格式不對仍然一律當不安全。
-SAFE_RAW=$("$AGM" --compact lease safety --approval "$APPROVAL" "${EXCL[@]}" 2>/dev/null | BUILD_BOT="$BOT" MANAGER_BOT="$MANAGER" RESPONDER_BOT="$RESPONDER" python3 -c '
+# `--owner`：跟等一下 acquire 用同一個身分問，自己手上的租約（例如上一輪還沒交還的 rebuild）不算擋
+# ——否則這裡判不安全，而 acquire 其實拿得到（SPEC §18.10「自己的租約不擋自己」）。
+SAFE_RAW=$("$AGM" --compact lease safety --approval "$APPROVAL" "${EXCL[@]}" --owner "$OWNER" 2>/dev/null | BUILD_BOT="$BOT" MANAGER_BOT="$MANAGER" RESPONDER_BOT="$RESPONDER" python3 -c '
 import json,sys,os
 d=json.load(sys.stdin)
 if not isinstance(d,dict) or not isinstance(d.get("safe"),bool): sys.exit(1)
@@ -268,7 +270,9 @@ def rows(key):
     return v if isinstance(v,list) and all(isinstance(x,dict) for x in v) else []
 def names(v): return ",".join(str(r.get("name") or r.get("bot_id") or "?") for r in v)
 working,in_flight,unreadable=d["working"],d["in_flight"],d["unreadable"]
-delivering,held=rows("delivering"),rows("held_leases")
+delivering=rows("delivering")
+# 自己握的租約不算擋，理由也不該把它列出來（daemon 標 own:true）。
+held=[l for l in rows("held_leases") if l.get("own") is not True]
 if d["safe"]:
     state="yes"
 elif delivering: state="送達中:"+names(delivering)

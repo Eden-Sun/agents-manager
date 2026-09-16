@@ -930,6 +930,10 @@ pub struct SafetyQuery {
     /// 不帶＝純查詢，退回看最早那筆還活著的核准。
     #[serde(default)]
     pub approval: Option<String>,
+    /// 以這個 owner 的身分問：他自己握的租約不算擋（SPEC §18.10「自己的租約不擋自己」）。
+    /// 不帶＝舊行為，每一把租約都算擋。
+    #[serde(default)]
+    pub owner: Option<String>,
 }
 
 pub async fn get_maintenance_safety(
@@ -943,7 +947,8 @@ pub async fn get_maintenance_safety(
         }
     }
     let approval = q.approval.as_deref().map(str::trim).filter(|s| !s.is_empty());
-    let mut snapshot = super::maintenance::safety_for(&app, &exclude, approval).await?;
+    let owner = q.owner.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let mut snapshot = super::maintenance::safety_as(&app, &exclude, approval, owner).await?;
     // Echo the applied IDs so callers can distinguish an older daemon ignoring the query.
     snapshot["excluded_bot_ids"] = json!(exclude);
     Ok(Json(snapshot))
