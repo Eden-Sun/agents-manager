@@ -555,6 +555,8 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
         }
         Err(e) => tracing::warn!(host, error = ?e, "non-agent pane scan failed"),
     }
+    // agent 早就 idle、turn 還停在 in_flight：收尾並放行排在後面的 queued（AGM 2026-09-16）。
+    crate::lifecycle::sweep_stuck_turns(app, Some(host)).await;
     Ok(())
 }
 

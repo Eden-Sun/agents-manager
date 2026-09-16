@@ -6,7 +6,7 @@ use super::*;
 /// (the one-in-flight / one-queued unique indexes make a lost race an error). Early returns leave
 /// the turn queued; after the claim, any give-up must `requeue_turn` — `in_flight` +
 /// `delivery='pending'` has no other way out.
-async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow::Result<()> {
+pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow::Result<()> {
     let conv = match db::conversation_id(&app.db, bot_id).await {
         Ok(conv) => conv,
         Err(error) => {
