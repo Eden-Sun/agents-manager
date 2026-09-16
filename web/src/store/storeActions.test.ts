@@ -57,6 +57,33 @@ test('任務被清掉：收掉那一張卡，其他任務與「交給 AGM」不�
   assert.match(s.missionLoadErrors.m1, /不在/)
 })
 
+test('重抓一筆已在清單裡的任務：原地換掉，不搬到最前面（畫面不在手指底下跳）', async () => {
+  seed()
+  const row = (id: string, text: string) => ({ id, project_id: 'p1', text, status: 'done' }) as Mission
+  useStore.setState({ missions: { p1: [row('m1', 'a'), row('m2', 'b'), row('m3', 'c')] } })
+  routeDaemon((r) =>
+    r.path.includes('/missions/m3')
+      ? json({ id: 'm3', project_id: 'p1', text: 'c（重抓）', status: 'done', events: [], assignments: [], revisions: [], parent: null }, 200)
+      : json({}, 404),
+  )
+  await useStore.getState().loadMission('m3')
+  assert.deepEqual(
+    useStore.getState().missions.p1.map((m) => [m.id, m.text]),
+    [
+      ['m1', 'a'],
+      ['m2', 'b'],
+      ['m3', 'c（重抓）'],
+    ],
+  )
+  // 清單裡沒有的（從連結點進來的舊任務）才插到最前面。
+  routeDaemon(() => json({ id: 'm9', project_id: 'p1', text: '舊的', status: 'done', events: [], assignments: [], revisions: [], parent: null }, 200))
+  await useStore.getState().loadMission('m9')
+  assert.deepEqual(
+    useStore.getState().missions.p1.map((m) => m.id),
+    ['m9', 'm1', 'm2', 'm3'],
+  )
+})
+
 test('SPA fallback 的 404（body 不是 daemon 的錯誤）仍然當成這台沒有群組任務', async () => {
   seed()
   routeDaemon(() => new Response('<!doctype html>', { status: 404 }))

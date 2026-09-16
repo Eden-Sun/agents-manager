@@ -2008,11 +2008,17 @@ function dropMission(map: Record<string, Mission[]>, missionId: string): Record<
   return changed ? out : map
 }
 
-/** 清單沒載過就不併：憑一筆建出半份清單會讓任務看起來只有一筆。 */
+/**
+ * 清單沒載過就不併：憑一筆建出半份清單會讓任務看起來只有一筆。
+ *
+ * 已經在清單裡的**原地替換**：以前一律搬到最前面，點開已完成清單的第 6 筆，回應一到它就跳到第 1 位、
+ * 畫面在手指底下移動（review3 c1 L10）。找不到的（剛建、或從連結點進來的舊任務）才插到最前。
+ */
 function mergeMission(map: Record<string, Mission[]>, mission: Mission): Record<string, Mission[]> {
   const list = map[mission.project_id]
   if (!list) return map
-  const next = [mission, ...list.filter((m) => m.id !== mission.id)]
+  const at = list.findIndex((m) => m.id === mission.id)
+  const next = at < 0 ? [mission, ...list] : list.map((m, i) => (i === at ? mission : m))
   return { ...map, [mission.project_id]: next }
 }
 
