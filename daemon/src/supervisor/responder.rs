@@ -200,9 +200,16 @@ pub async fn ensure_env(
     std::fs::create_dir_all(&d).map_err(|e| LcError::Bad(format!("{}: {e}", d.display())))?;
     let path = crate::config::canonical_path(&d.to_string_lossy()).map_err(|e| LcError::Bad(e.to_string()))?;
     let persona = effective_persona(app).await?;
-    let manager_id = store::get_or_init(&app.db).await.map_err(up)?.bot_id;
+    // 舊安裝的協調者自成一個專案；先搬進巡檢的專案，下面就是在同一個專案裡更新同一顆 bot。
+    let adopted = match row.bot_id.as_deref() {
+        Some(b) => adopt_into_manager_project(app, b).await?,
+        None => None,
+    };
+    let manager = store::get_or_init(&app.db).await.map_err(up)?;
+    let manager_id = manager.bot_id.clone();
+    let manager_project = manager.project_id.clone();
 
-    let known_project = row.project_id.clone();
+    let known_project = adopted.or_else(|| row.project_id.clone());
     let known_bot = row.bot_id.clone();
     let fresh_project = crate::db::ulid();
     let fresh_bot = crate::db::ulid();
@@ -210,10 +217,12 @@ pub async fn ensure_env(
     let (project_id, bot_id) = app
         .cfg
         .update(move |cfg| {
+            // 巡檢的專案優先：協調者是同一顆總管的另一個角色，側欄不該分成兩個專案（使用者 2026-09-16）。
             let pidx = cfg
                 .projects
                 .iter()
-                .position(|p| known_project.is_some() && p.id == known_project)
+                .position(|p| manager_project.is_some() && p.id == manager_project)
+                .or_else(|| cfg.projects.iter().position(|p| known_project.is_some() && p.id == known_project))
                 .or_else(|| cfg.projects.iter().position(|p| p.path == p2 && p.host == crate::config::LOCAL_HOST));
             let pidx = match pidx {
                 Some(i) => i,
@@ -286,10 +295,82 @@ pub async fn ensure_env(
             }
         })?;
     crate::projection::project_config(&app.cfg, &app.db).await.map_err(up)?;
+    // 專案只有一個 path，所以跟巡檢同專案之後，協調者自己的目錄改由 bot 記住。
+    set_cwd(app, &bot_id, &path).await?;
     let deployed = deploy_files(app, &bot_id, manager_id.as_deref(), &persona).map_err(up)?;
     roles::set_env(&app.db, Role::Responder, &bot_id, &project_id, &deployed.cwd).await.map_err(up)?;
     roles::set_runtime(&app.db, Role::Responder, &identity, &model, &effort).await.map_err(up)?;
     Ok((project_id, bot_id, deployed))
+}
+
+/// 協調者的工作目錄記在 bot 自己身上（`bots.cwd`，`lifecycle::bot_cwd` 讀的就是這一欄）。
+/// 一個專案只有一個 path，所以兩個角色同專案時，目錄不能再靠專案表達。
+async fn set_cwd(app: &Arc<App>, bot_id: &str, cwd: &str) -> Result<(), LcError> {
+    sqlx::query("UPDATE bots SET cwd=? WHERE id=?").bind(cwd).bind(bot_id).execute(&app.db).await.map_err(up)?;
+    Ok(())
+}
+
+/// 把協調者的 bot 搬進巡檢的專案（SPEC §18.15）。
+///
+/// 側欄上「AGM」跟「AGM-responder」各自一個專案，看起來像兩顆總管，但它們是同一顆的兩個角色
+/// （使用者 2026-09-16）。工作目錄仍然各自一個——claude 的 session 以 cwd 為鍵，共用目錄會互相接到
+/// 對方的 session、覆寫對方的 `persona.md`——只是改由 `bots.cwd` 記，不再自成一個專案。
+///
+/// 可重入：已經在同一個專案就只補 cwd 與角色欄位。回傳協調者現在的 project id（沒設定過就 `None`）。
+pub async fn merge_into_manager_project(app: &Arc<App>) -> Result<Option<String>, LcError> {
+    let Some(bot_id) = roles::get(&app.db, Role::Responder).await.map_err(up)?.bot_id else {
+        return Ok(None);
+    };
+    adopt_into_manager_project(app, &bot_id).await
+}
+
+async fn adopt_into_manager_project(app: &Arc<App>, bot_id: &str) -> Result<Option<String>, LcError> {
+    // 巡檢還沒設定就沒有可以搬進去的專案：什麼都不動。
+    let Some(manager_project) = store::get_or_init(&app.db).await.map_err(up)?.project_id else {
+        return Ok(None);
+    };
+    let d = dir(app);
+    let cwd = crate::config::canonical_path(&d.to_string_lossy()).unwrap_or_else(|_| d.to_string_lossy().into_owned());
+    let (mp, bid, c2) = (manager_project.clone(), bot_id.to_string(), cwd.clone());
+    let moved = app
+        .cfg
+        .update(move |cfg| {
+            let Some(from) = cfg.projects.iter().position(|p| p.bots.iter().any(|b| b.id.as_deref() == Some(bid.as_str()))) else {
+                anyhow::bail!("missing");
+            };
+            if cfg.projects[from].id.as_deref() == Some(mp.as_str()) {
+                return Ok(false);
+            }
+            let Some(to) = cfg.projects.iter().position(|p| p.id.as_deref() == Some(mp.as_str())) else {
+                anyhow::bail!("missing");
+            };
+            let at = cfg.projects[from].bots.iter().position(|b| b.id.as_deref() == Some(bid.as_str())).expect("found above");
+            let bot = cfg.projects[from].bots.remove(at);
+            cfg.projects[to].bots.push(bot);
+            // 舊專案只是「協調者的目錄」那層殼，空了就拿掉，不然側欄會留一個空專案。
+            // 只拿掉路徑對得上的那一個：別人的專案就算空了也不是這裡能刪的。
+            if cfg.projects[from].bots.is_empty() && cfg.projects[from].path == c2 {
+                cfg.projects.remove(from);
+            }
+            Ok(true)
+        })
+        .await;
+    let moved = match moved {
+        Ok(m) => m,
+        // 協調者不在 config.toml（被手改過），或巡檢的專案不見了：交給 setup 重建，不在這裡猜。
+        Err(e) if e.to_string() == "missing" => return Ok(None),
+        Err(e) => return Err(up(e)),
+    };
+    if moved {
+        crate::projection::project_config(&app.cfg, &app.db).await.map_err(up)?;
+    }
+    set_cwd(app, bot_id, &cwd).await?;
+    roles::set_env(&app.db, Role::Responder, bot_id, &manager_project, &cwd).await.map_err(up)?;
+    if moved {
+        tracing::info!(bot = bot_id, project = %manager_project, cwd = %cwd, "AGM 協調者併回巡檢的專案（工作目錄仍然分開）");
+        app.emit("bot_changed", json!({"bot_id": bot_id})).await;
+    }
+    Ok(Some(manager_project))
 }
 
 /// 人設寫回衍生副本（config 的 bot persona、`persona.md`）。
@@ -778,6 +859,91 @@ pub async fn status_json(app: &Arc<App>) -> Result<Value, LcError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// config 上一顆 bot 的最小樣子（`toml::from_str` 省得把每個欄位寫一遍）。
+    fn cfg_bot(id: &str, name: &str) -> BotCfg {
+        toml::from_str(&format!("id = '{id}'\nname = '{name}'\nkind = 'claude'\n")).unwrap()
+    }
+
+    fn cfg_project(id: &str, path: &std::path::Path, label: &str, bots: Vec<BotCfg>) -> ProjectCfg {
+        ProjectCfg {
+            id: Some(id.into()),
+            path: crate::config::canonical_path(&path.to_string_lossy()).unwrap(),
+            label: label.into(),
+            host: crate::config::LOCAL_HOST.into(),
+            bots,
+        }
+    }
+
+    /// 線上的舊形狀：協調者自成一個專案。併入之後它要跟巡檢同一個專案、還是同一顆 bot（歷史不斷），
+    /// 而且**工作目錄不跟著搬**——claude 的 session 以 cwd 為鍵，兩個角色共用目錄會互相接到對方的 session。
+    #[tokio::test]
+    async fn the_responder_folds_into_the_manager_project_but_keeps_its_own_directory() {
+        let e = crate::testing::env().await;
+        let app = &e.app;
+        let agm_dir = app.data_dir.join("supervisor").join("AGM");
+        let resp_dir = dir(app);
+        std::fs::create_dir_all(&agm_dir).unwrap();
+        std::fs::create_dir_all(&resp_dir).unwrap();
+        let resp_path = crate::config::canonical_path(&resp_dir.to_string_lossy()).unwrap();
+        app.cfg
+            .update(|cfg| {
+                cfg.projects = vec![
+                    cfg_project("p-agm", &agm_dir, "AGM", vec![cfg_bot("b-agm", "AGM")]),
+                    cfg_project("p-resp", &resp_dir, BOT_NAME, vec![cfg_bot("b-resp", BOT_NAME)]),
+                ];
+                Ok(())
+            })
+            .await
+            .unwrap();
+        crate::projection::project_config(&app.cfg, &app.db).await.unwrap();
+        store::get_or_init(&app.db).await.unwrap();
+        store::set_env(&app.db, "b-agm", "p-agm", &agm_dir.to_string_lossy()).await.unwrap();
+        roles::set_env(&app.db, Role::Responder, "b-resp", "p-resp", &resp_path).await.unwrap();
+
+        assert_eq!(merge_into_manager_project(app).await.unwrap().as_deref(), Some("p-agm"));
+
+        let bot = crate::db::bot(&app.db, "b-resp").await.unwrap().unwrap();
+        assert_eq!(bot.project_id, "p-agm", "協調者要跟巡檢在同一個專案");
+        assert!(bot.deleted_at.is_none(), "是搬家不是重建：同一顆 bot、同一段對話歷史");
+        // `lifecycle::bot_cwd` 讀的就是這一欄：pane 仍然開在協調者自己的目錄。
+        assert_eq!(bot.cwd.as_deref(), Some(resp_path.as_str()));
+        let old = crate::db::project(&app.db, "p-resp").await.unwrap().unwrap();
+        assert!(old.deleted_at.is_some(), "空掉的舊專案不留在側欄");
+        let cfg = app.cfg.get().await;
+        assert!(cfg.projects.iter().all(|p| p.id.as_deref() != Some("p-resp")), "config 也不該再有那個專案");
+        assert_eq!(cfg.projects.iter().find(|p| p.id.as_deref() == Some("p-agm")).unwrap().bots.len(), 2);
+        let row = roles::get(&app.db, Role::Responder).await.unwrap();
+        assert_eq!(row.project_id.as_deref(), Some("p-agm"));
+        assert_eq!(row.cwd.as_deref(), Some(resp_path.as_str()), "角色表記的還是自己的目錄");
+
+        // 可重入：每次開機都會跑一次，第二次不能再動 config。
+        let before = app.cfg.get().await;
+        assert_eq!(merge_into_manager_project(app).await.unwrap().as_deref(), Some("p-agm"));
+        assert_eq!(app.cfg.get().await.projects, before.projects);
+    }
+
+    /// 巡檢還沒設定（新裝、或 supervisors 那列還沒有專案）時不要亂搬：什麼都不動。
+    #[tokio::test]
+    async fn without_a_manager_project_nothing_moves() {
+        let e = crate::testing::env().await;
+        let app = &e.app;
+        let resp_dir = dir(app);
+        std::fs::create_dir_all(&resp_dir).unwrap();
+        app.cfg
+            .update(|cfg| {
+                cfg.projects = vec![cfg_project("p-resp", &resp_dir, BOT_NAME, vec![cfg_bot("b-resp", BOT_NAME)])];
+                Ok(())
+            })
+            .await
+            .unwrap();
+        crate::projection::project_config(&app.cfg, &app.db).await.unwrap();
+        roles::set_env(&app.db, Role::Responder, "b-resp", "p-resp", &resp_dir.to_string_lossy()).await.unwrap();
+
+        assert_eq!(merge_into_manager_project(app).await.unwrap(), None);
+        assert_eq!(crate::db::bot(&app.db, "b-resp").await.unwrap().unwrap().project_id, "p-resp");
+        assert_eq!(app.cfg.get().await.projects.len(), 1);
+    }
 
     #[test]
     fn a_burst_waits_for_the_window_and_the_next_wake_is_spaced() {

@@ -1181,9 +1181,15 @@ supervisor 相關資料表與欄位都是 additive，`db::migrate` 重跑冪等�
 | 是誰 | 原本那顆 AGM：`supervisors.bot_id`、`GET /api/supervisor` 的頂層欄位 | 第二顆 bot `AGM-responder`：`supervisor_roles` 的 `responder` 列 |
 | 模型 | cc0/fable/low → cc0/opus/low（§18.5 的控制器） | cc0/opus/high，固定，沒有自動切換（`responder setup` 可指定） |
 | 入口 | 使用者 web／手機 Remote Control（**唯一**的 remote） | 沒有 remote；只有 daemon 的通知 |
-| 目錄 | `supervisor/AGM` | `supervisor/AGM-responder`（自己的專案；claude session 以 cwd 為鍵，共用會互相接到對方的 session 與 `persona.md`） |
+| 目錄 | `supervisor/AGM` | `supervisor/AGM-responder`（記在 `bots.cwd`；claude session 以 cwd 為鍵，共用會互相接到對方的 session 與 `persona.md`） |
+| 專案 | 巡檢的專案 | **同一個**（見下）；側欄上兩個角色在同一塊 |
 | 收什麼 | `health_changed`、`incident_*`、`watchdog_gave_up`、`bot_restart_failed`、`supervisor_restart_retry`、`responder_watchdog_gave_up`、`review_role=patrol` 的交辦回報、不認得的種類 | `bot_request`、`approval_requested`、`mission_*`、其餘交辦回報 |
 | 喚醒節流 | `notify_interval_secs`（600） | 短窗批次 `responder_batch_secs`（15）：最舊的待辦等滿、且距上次喚醒也滿才叫 |
+
+**一顆總管、一個專案**（使用者 2026-09-16）：協調者最早自成一個專案，因為一個專案只有一個 path；但側欄上「AGM」與「AGM-responder」分成兩塊看起來像兩顆總管。
+現在協調者的 bot 掛在巡檢的專案底下，工作目錄改由 `bots.cwd` 表達（`lifecycle::bot_cwd` 先看它，再退回專案的 path）——目錄仍然分開，只是不再自成一個專案。
+`responder::merge_into_manager_project` 在 daemon 啟動與 `responder setup` 時各跑一次，把舊安裝搬過去：同一顆 bot（id 不變，對話歷史不斷）、
+空掉的舊專案只在**路徑對得上協調者目錄**時才拿掉，可重入；巡檢還沒設定專案時什麼都不動。
 
 **路由由 daemon 決定**（`supervisor/roles.rs::route`，純函式），只看事件種類、payload 明寫的欄位與交辦的 `review_role`，不問模型、不比對名字；
 不先叫醒巡檢再請它轉交。每筆 inbox 事件記 `role`、`wake`、`claimed_by`、`acked_by`、`merged_into`。

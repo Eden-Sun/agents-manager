@@ -247,6 +247,10 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     quota_claude::spawn_claude_poller(app.clone());
     quota_grok::spawn_grok_poller(app.clone());
     github::spawn_detect_all(app.clone());
+    // 協調者跟巡檢是同一顆總管的兩個角色：舊安裝把它放在自己的專案，開機時併回去（工作目錄仍然分開）。
+    if let Err(e) = supervisor::responder::merge_into_manager_project(&app).await {
+        tracing::warn!(error = ?e, "AGM 協調者併回巡檢的專案失敗，這一輪維持原樣");
+    }
     supervisor::controller::respawn(&app).await;
     supervisor::health::spawn(app.clone());
     // Agent titles have no herdr event, so they are polled.
