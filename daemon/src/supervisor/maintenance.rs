@@ -42,6 +42,79 @@ pub const RESOURCES: [&str; 2] = ["rebuild", "restart"];
 /// the module docs); do not read a held restart lease as "nothing can reach any bot".
 pub const EXCLUSIVE: [&str; 1] = ["restart"];
 
+/// 等太久就縮小封鎖面（SPEC §18.10）：一筆已核准、還沒用掉的窗口從**核准時間**起等超過這麼多分鐘，
+/// 安全檢查就從「全靜止才 safe」換成「只有送達臨界區／還握著的租約／讀不到畫面才擋」。
+///
+/// 為什麼要有這條：這台機器上隨時有人在跟 bot 講話，「任何 bot 在回合中就不換」在這個負載下
+/// 等同永遠不安全——2026-09-15 那筆核准因此卡了 11 小時。放寬有界線，不是「有人講話也照換」。
+pub const ESCALATE_AFTER_MINS: i64 = 30;
+/// 覆寫上面那個門檻（分鐘）。0、負數或看不懂的值一律當沒設，回到 30。
+pub const ESCALATE_ENV: &str = "AM_MAINTENANCE_ESCALATE_MINS";
+
+pub fn escalate_after_secs() -> i64 {
+    parse_escalate_mins(std::env::var(ESCALATE_ENV).ok().as_deref()) * 60
+}
+
+/// 純函式，測得到：看不懂、0 或負數都回預設，不要讓一個手滑的環境變數把門檻變成「馬上放寬」。
+pub fn parse_escalate_mins(raw: Option<&str>) -> i64 {
+    raw.and_then(|v| v.trim().parse::<i64>().ok()).filter(|m| *m > 0).unwrap_or(ESCALATE_AFTER_MINS)
+}
+
+/// 兩個 RFC3339 之間差幾秒。看不懂的時間回 0——不知道等了多久就不該升級。
+pub fn waited_secs(since: &str, now: &str) -> i64 {
+    match (chrono::DateTime::parse_from_rfc3339(since), chrono::DateTime::parse_from_rfc3339(now)) {
+        (Ok(a), Ok(b)) => (b - a).num_seconds().max(0),
+        _ => 0,
+    }
+}
+
+/// 最早那筆還沒用掉的窗口核准等了多久，以及是不是已經超過門檻。
+#[derive(Debug, Clone)]
+pub struct Escalation {
+    pub approval_id: String,
+    pub waited_secs: i64,
+    pub escalated: bool,
+}
+
+pub async fn escalation(app: &Arc<App>) -> Result<Option<Escalation>, LcError> {
+    let now = crate::db::now();
+    let found = store::oldest_live_window_approval(&app.db, &now)
+        .await
+        .map_err(|e| LcError::Upstream(e.to_string()))?;
+    let Some(a) = found else { return Ok(None) };
+    let Some(decided) = a.decided_at.as_deref() else { return Ok(None) };
+    let waited = waited_secs(decided, &now);
+    Ok(Some(Escalation { approval_id: a.id, waited_secs: waited, escalated: waited >= escalate_after_secs() }))
+}
+
+/// 還握在別人手上的租約。縮小封鎖面時這是**唯一**新增的阻擋條件：窗口一次只給一個人。
+async fn held_leases(app: &Arc<App>) -> Result<Vec<Value>, LcError> {
+    let now = crate::db::now();
+    let mut out = Vec::new();
+    for resource in RESOURCES {
+        let l = store::lease(&app.db, resource).await.map_err(|e| LcError::Upstream(e.to_string()))?;
+        if let Some(l) = l.filter(|l| l.held_at(&now)) {
+            out.push(json!({"resource": resource, "owner": l.owner, "fence": l.fence, "expires_at": l.expires_at}));
+        }
+    }
+    Ok(out)
+}
+
+/// 這顆 bot 此刻在不在**送達臨界區**：有排隊中待送的 prompt（`queued`），或 daemon 正在往 pane
+/// 打字／送出（`in_flight` 而 `delivery` 還是 `pending`）。回傳擋住的那一筆 turn id。
+///
+/// `delivery='unknown'` 不算：那是送完但驗不到、停在那裡等人處理的狀態，跟 `blocked` 一樣可以等很久。
+async fn delivery_critical(pool: &sqlx::SqlitePool, bot_id: &str) -> anyhow::Result<Option<String>> {
+    Ok(sqlx::query_scalar::<_, String>(
+        "SELECT t.id FROM turns t JOIN conversations c ON c.id = t.conversation_id
+          WHERE c.bot_id = ? AND (t.status='queued' OR (t.status='in_flight' AND t.delivery='pending'))
+          LIMIT 1",
+    )
+    .bind(bot_id)
+    .fetch_optional(pool)
+    .await?)
+}
+
 /// Default and maximum lease lifetime. Long enough for a release build and a restart, short
 /// enough that a crashed holder does not block the next window for an afternoon.
 pub const DEFAULT_TTL_SECS: i64 = 900;
@@ -109,9 +182,16 @@ pub async fn release_restart_on_startup(app: &Arc<App>) {
         match store::lease(&app.db, resource).await {
             Ok(Some(l)) if l.released_at.is_none() => {
                 let owner = l.owner.clone().unwrap_or_default();
+                let escalated = serde_json::from_str::<Value>(&l.detail_json)
+                    .ok()
+                    .and_then(|d| d.get("safety").and_then(|s| s.get("escalated")).and_then(Value::as_bool))
+                    .unwrap_or(false);
                 match release(app, resource, &owner, l.fence).await {
                     Ok(true) => {
-                        tracing::info!(resource, owner, fence = l.fence, "daemon started: released the restart lease left from before the restart");
+                        tracing::info!(resource, owner, fence = l.fence, escalated, "daemon started: released the restart lease left from before the restart");
+                        if escalated {
+                            tracing::warn!(resource, owner, "上一次換版是升級後（縮小封鎖面）才拿到窗口的，不是等到全靜止");
+                        }
                         app.emit("supervisor_changed", json!({"lease": store::lease(&app.db, resource).await.ok().flatten().map(|l| l.to_json())})).await;
                     }
                     Ok(false) => {}
@@ -136,6 +216,8 @@ pub async fn safety(app: &Arc<App>, exclude: &[String]) -> Result<Value, LcError
     let mut working = Vec::new();
     let mut blocked = Vec::new();
     let mut in_flight = Vec::new();
+    // 送達臨界區（SPEC §18.10）：縮小封鎖面之後就只剩這個、還握著的租約與讀不到畫面會擋。
+    let mut delivering = Vec::new();
     // A read that fails is not a bot that is idle. Before this, `let Ok(Some(run)) = … else
     // continue` swallowed the error and the bot silently counted as free — a failing database
     // would have read as "the coast is clear", which is the one answer this must never invent.
@@ -143,6 +225,15 @@ pub async fn safety(app: &Arc<App>, exclude: &[String]) -> Result<Value, LcError
     for b in &bots {
         if exclude.contains(&b.id) {
             continue;
+        }
+        // 在看 run 之前先問：沒有 active run 的 bot 也可能有一筆排隊中的 prompt。
+        match delivery_critical(&app.db, &b.id).await {
+            Ok(Some(turn_id)) => delivering.push(json!({"bot_id": b.id, "name": b.name, "turn_id": turn_id})),
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(bot = %b.id, error = ?e, "safety probe could not read this bot's delivery state");
+                unreadable.push(json!({"bot_id": b.id, "name": b.name}));
+            }
         }
         let run = match crate::db::active_run(&app.db, &b.id).await {
             Ok(r) => r,
@@ -170,11 +261,24 @@ pub async fn safety(app: &Arc<App>, exclude: &[String]) -> Result<Value, LcError
         }
     }
     let open = store::open_assignments(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?;
+    let held = held_leases(app).await?;
+    let esc = escalation(app).await?;
     // Not knowing about even one bot is enough to refuse: the window's whole promise is that
     // nothing is running, and we cannot promise that about a bot we could not look at.
-    let safe = working.is_empty() && in_flight.is_empty() && unreadable.is_empty();
+    let strict = working.is_empty() && in_flight.is_empty() && unreadable.is_empty();
+    // 縮小封鎖面：思考中不再擋，送達臨界區、還握著的租約與讀不到畫面照擋（SPEC §18.10）。
+    let escalated = esc.as_ref().is_some_and(|e| e.escalated);
+    let safe = if escalated { delivering.is_empty() && unreadable.is_empty() && held.is_empty() } else { strict };
     Ok(json!({
         "safe": safe,
+        // 這一刻是不是已經放寬了，以及最早那筆沒用掉的核准等了多久（沒有這種核准時是 null）。
+        "escalated": escalated,
+        "waited_secs": esc.as_ref().map(|e| e.waited_secs),
+        "escalation_approval_id": esc.as_ref().map(|e| e.approval_id.clone()),
+        "escalate_after_secs": escalate_after_secs(),
+        // 放寬之後仍然會擋的兩項，列出來才看得懂為什麼還是 false。
+        "delivering": delivering,
+        "held_leases": held,
         "working": working,
         "in_flight": in_flight,
         // Bots whose state could not be read this pass. Never empty *and* `safe` at once.
@@ -257,7 +361,18 @@ pub async fn acquire(
             json!({"reason": "lease_held", "lease": held.map(|l| l.to_json())}),
         ));
     };
-    tracing::info!(resource, owner, fence = lease.fence, "maintenance lease acquired");
+    let escalated = safety.get("escalated") == Some(&Value::Bool(true));
+    let waited = safety.get("waited_secs").and_then(|v| v.as_i64()).unwrap_or(0);
+    tracing::info!(resource, owner, fence = lease.fence, escalated, waited, "maintenance lease acquired");
+    if escalated {
+        // 換版紀錄要看得出這次不是等到全靜止才換的（SPEC §18.10）。整份 safety 也寫在租約 meta 裡。
+        tracing::warn!(
+            resource,
+            owner,
+            waited,
+            "這個窗口是升級後（縮小封鎖面）才拿到的：有 bot 還在回合中，只確認了沒人在送達臨界區、沒有別的租約、畫面都讀得到"
+        );
+    }
     app.emit("supervisor_changed", json!({"lease": lease.to_json()})).await;
     Ok(json!({"lease": lease.to_json(), "approval": approval.to_json(), "safety": safety}))
 }
@@ -285,6 +400,129 @@ pub fn pause_note(until: &str) -> String {
 mod tests {
     use super::*;
     use crate::supervisor::store::Approval;
+
+    /// 升級門檻的環境變數：只有「正整數」算數，其他一律回預設 30 分鐘。
+    #[test]
+    fn a_broken_threshold_env_falls_back_to_thirty_minutes() {
+        assert_eq!(parse_escalate_mins(None), 30);
+        assert_eq!(parse_escalate_mins(Some("45")), 45);
+        assert_eq!(parse_escalate_mins(Some("  45 ")), 45);
+        for bad in ["0", "-5", "abc", "", "30m"] {
+            assert_eq!(parse_escalate_mins(Some(bad)), 30, "{bad:?} 不該被當成門檻");
+        }
+    }
+
+    /// 一顆有 active run、正在 working、而且該筆 turn 已經送達的 bot：思考中的樣子。
+    async fn thinking_bot(app: &Arc<App>, project: &str, id: &str) {
+        let now = crate::db::now();
+        sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES (?,?,?,'claude',?,?)")
+            .bind(id).bind(project).bind(id).bind(format!("tok-{id}")).bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,started_at) VALUES (?,?,'running','working',?)")
+            .bind(id).bind(id).bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO conversations (id,bot_id,created_at) VALUES (?,?,?)")
+            .bind(id).bind(id).bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,delivery,created_at) VALUES (?,?,?,'web','in_flight','ok',?)")
+            .bind(id).bind(id).bind(id).bind(&now).execute(&app.db).await.unwrap();
+    }
+
+    /// 已核准、還沒用掉的 rebuild 窗口，決定時間往前推 `mins` 分鐘。
+    async fn approved_window(app: &Arc<App>, mins: i64) -> String {
+        let a = store::create_approval(&app.db, "bot", "rebuild", "release", None, None).await.unwrap();
+        store::decide_approval(&app.db, &a.id, "approved", "AGM", None, None).await.unwrap();
+        let at = (chrono::Utc::now() - chrono::Duration::minutes(mins)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        sqlx::query("UPDATE supervisor_approvals SET decided_at=? WHERE id=?").bind(&at).bind(&a.id).execute(&app.db).await.unwrap();
+        a.id
+    }
+
+    /// 核准後一直等不到全靜止時才放寬，而且只放寬「思考中」這一項。
+    #[tokio::test]
+    async fn only_a_window_that_waited_past_the_threshold_stops_blocking_on_thinking() {
+        let e = crate::testing::env().await;
+        let (app, pid) = (&e.app, e.project_id.clone());
+        thinking_bot(app, &pid, "user").await;
+
+        // 1. 沒有任何已核准的窗口：照舊，working 就是不安全。
+        let s = safety(app, &[]).await.unwrap();
+        assert_eq!((s["safe"].as_bool(), s["escalated"].as_bool()), (Some(false), Some(false)));
+        assert_eq!(s["waited_secs"], serde_json::Value::Null);
+        assert_eq!(s["working"].as_array().unwrap().len(), 1);
+
+        // 2. 剛核准 10 分鐘：還沒到門檻，一樣不安全。
+        let id = approved_window(app, 10).await;
+        let s = safety(app, &[]).await.unwrap();
+        assert_eq!(s["escalated"], false, "10 分鐘就放寬的話這條規則等於沒有界線");
+        assert_eq!(s["safe"], false);
+        assert!(s["waited_secs"].as_i64().unwrap() >= 600);
+        assert_eq!(s["escalation_approval_id"], id);
+
+        // 3. 等超過 30 分鐘：思考中不再擋。
+        sqlx::query("UPDATE supervisor_approvals SET decided_at=? WHERE id=?")
+            .bind((chrono::Utc::now() - chrono::Duration::minutes(40)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+            .bind(&id).execute(&app.db).await.unwrap();
+        let s = safety(app, &[]).await.unwrap();
+        assert_eq!((s["escalated"].as_bool(), s["safe"].as_bool()), (Some(true), Some(true)));
+        assert!(s["waited_secs"].as_i64().unwrap() >= 2400);
+        assert_eq!(s["working"].as_array().unwrap().len(), 1, "還是照實回報誰在跑，只是不再擋");
+        assert_eq!(s["escalate_after_secs"], 1800);
+    }
+
+    /// 放寬之後仍然擋的三件事：正在送出、排隊中待送、別人還握著租約。
+    #[tokio::test]
+    async fn the_relaxed_window_still_waits_for_delivery_and_leases() {
+        let e = crate::testing::env().await;
+        let (app, pid) = (&e.app, e.project_id.clone());
+        thinking_bot(app, &pid, "user").await;
+        approved_window(app, 40).await;
+        assert_eq!(safety(app, &[]).await.unwrap()["safe"], true, "先確認這個盤面本來是安全的");
+
+        // a) daemon 正在往 pane 打字／送出：turn 還在 in_flight 而 delivery 是 pending。
+        sqlx::query("UPDATE turns SET delivery='pending' WHERE id='user'").execute(&app.db).await.unwrap();
+        let s = safety(app, &[]).await.unwrap();
+        assert_eq!(s["safe"], false, "送達臨界區不能被打斷");
+        assert_eq!(s["delivering"][0]["bot_id"], "user");
+
+        // b) 送完了，但還有一筆排隊中的 prompt 等著進去。
+        sqlx::query("UPDATE turns SET delivery='ok' WHERE id='user'").execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO turns (id,conversation_id,origin,status,delivery,created_at) VALUES ('q','user','web','queued','pending',?)")
+            .bind(crate::db::now()).execute(&app.db).await.unwrap();
+        let s = safety(app, &[]).await.unwrap();
+        assert_eq!(s["safe"], false, "排隊中待送的 prompt 也算臨界區");
+        assert_eq!(s["delivering"][0]["turn_id"], "q");
+
+        // c) 沒有任何待送，但別人還握著窗口。
+        sqlx::query("DELETE FROM turns WHERE id='q'").execute(&app.db).await.unwrap();
+        assert_eq!(safety(app, &[]).await.unwrap()["safe"], true);
+        store::acquire_lease(&app.db, "rebuild", "someone-else", None, None,
+            &(chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true), &json!({}))
+            .await.unwrap().unwrap();
+        let s = safety(app, &[]).await.unwrap();
+        assert_eq!(s["safe"], false, "窗口一次只給一個人");
+        assert_eq!(s["held_leases"][0]["owner"], "someone-else");
+    }
+
+    /// AGM 三顆（巡檢、協調者、建置 child）由呼叫端排除，門檻高低都一樣——放寬不是「連排除都不管了」。
+    #[tokio::test]
+    async fn excluded_agm_bots_are_ignored_at_both_thresholds() {
+        let e = crate::testing::env().await;
+        let (app, pid) = (&e.app, e.project_id.clone());
+        for id in ["manager", "responder", "builder"] {
+            thinking_bot(app, &pid, id).await;
+        }
+        // 連 AGM 自己正在送出的一筆也照排除：它就是那個要換 binary 的人。
+        sqlx::query("UPDATE turns SET delivery='pending' WHERE id='builder'").execute(&app.db).await.unwrap();
+        let exclude = ["manager".to_string(), "responder".to_string(), "builder".to_string()];
+
+        let strict = safety(app, &exclude).await.unwrap();
+        assert_eq!((strict["escalated"].as_bool(), strict["safe"].as_bool()), (Some(false), Some(true)));
+        assert!(strict["working"].as_array().unwrap().is_empty());
+
+        approved_window(app, 40).await;
+        let relaxed = safety(app, &exclude).await.unwrap();
+        assert_eq!((relaxed["escalated"].as_bool(), relaxed["safe"].as_bool()), (Some(true), Some(true)));
+        assert!(relaxed["delivering"].as_array().unwrap().is_empty(), "被排除的 bot 連送達中都不算數");
+        // 沒排除的話，那筆正在送出的就會擋下來。
+        assert_eq!(safety(app, &[]).await.unwrap()["safe"], false);
+    }
 
     fn approval(status: &str, purpose: &str, commit: Option<&str>, expires: Option<&str>) -> Approval {
         Approval {

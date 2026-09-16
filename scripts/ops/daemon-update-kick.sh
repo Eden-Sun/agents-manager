@@ -191,7 +191,9 @@ REVIEW=()
 # safety 與 acquire 都傳同一份排除清單，由 daemon 判定；不再自行過濾快照。
 # 回應須確認實際排除的 ID。舊 daemon / CLI 尚未支援或格式有誤就跳過，
 # 保留正式熱修腳本直到 daemon 升級後再安裝本版。重啟仍另行核准。
-SAFE=$("$AGM" --compact lease safety "${EXCL[@]}" 2>/dev/null | BUILD_BOT="$BOT" MANAGER_BOT="$MANAGER" RESPONDER_BOT="$RESPONDER" python3 -c '
+# `safe` 由 daemon 判（SPEC §18.10）：核准等超過門檻時它會自己縮小封鎖面，這裡不能再 AND 一次
+# 自己的條件，否則「思考中不擋」永遠生效不了。格式不對仍然一律當不安全。
+SAFE_RAW=$("$AGM" --compact lease safety "${EXCL[@]}" 2>/dev/null | BUILD_BOT="$BOT" MANAGER_BOT="$MANAGER" RESPONDER_BOT="$RESPONDER" python3 -c '
 import json,sys,os
 d=json.load(sys.stdin)
 if not isinstance(d,dict) or not isinstance(d.get("safe"),bool): sys.exit(1)
@@ -200,12 +202,37 @@ for key in ("working","in_flight","unreadable"):
 ex={os.environ["BUILD_BOT"],os.environ["MANAGER_BOT"]} | ({os.environ["RESPONDER_BOT"]} if os.environ.get("RESPONDER_BOT") else set())
 applied=d.get("excluded_bot_ids")
 if not isinstance(applied,list) or any(not isinstance(x,str) for x in applied) or set(applied) != ex: sys.exit(1)
+def rows(key):
+    v=d.get(key)
+    return v if isinstance(v,list) and all(isinstance(x,dict) for x in v) else []
+def names(v): return ",".join(str(r.get("name") or r.get("bot_id") or "?") for r in v)
 working,in_flight,unreadable=d["working"],d["in_flight"],d["unreadable"]
-ok=d["safe"] and not working and not in_flight and not unreadable
-print("yes" if ok else ",".join(b.get("name","?") for b in working) or ("unreadable" if unreadable else "in_flight" if in_flight else "unknown"))
-' 2>/dev/null) || SAFE="unknown"
+delivering,held=rows("delivering"),rows("held_leases")
+if d["safe"]:
+    state="yes"
+elif delivering: state="送達中:"+names(delivering)
+elif held: state="租約:"+",".join(str(l.get("resource") or "?") for l in held)
+elif unreadable: state="unreadable"
+elif working: state=names(working)
+elif in_flight: state="in_flight"
+else: state="unknown"
+waited=d.get("waited_secs")
+print("%s|%d|%d" % (state, 1 if d.get("escalated") is True else 0, waited if isinstance(waited,int) else 0))
+' 2>/dev/null) || SAFE_RAW="unknown|0|0"
+SAFE=${SAFE_RAW%%|*}
+ESC_REST=${SAFE_RAW#*|}
+ESCALATED=${ESC_REST%%|*}
+WAITED_SECS=${ESC_REST##*|}
+case "$WAITED_SECS" in ''|*[!0-9]*) WAITED_SECS=0 ;; esac
 if [ "$SAFE" != "yes" ]; then
   log "還有人在跑（${SAFE}），這輪不派"; exit 0
+fi
+# 這次不是等到全靜止才換的：log 與派工正文都要寫明（SPEC §18.10）。
+ESC_NOTE=""
+if [ "$ESCALATED" = "1" ]; then
+  ESC_MINS=$((WAITED_SECS / 60))
+  ESC_NOTE="這次是升級後才換：核准後已等 ${ESC_MINS} 分鐘，daemon 縮小封鎖面（思考中不擋，只擋送達臨界區／租約／讀不到畫面）。"
+  log "安全窗口是升級後才成立的：核准後已等 ${ESC_MINS} 分鐘（縮小封鎖面）"
 fi
 
 # Reuse the same durable approval on later invocations. Creating a fresh pending request on
@@ -280,6 +307,7 @@ cat "$DIR/daemon-update-task.md" > "$TMP" 2>/dev/null || true
 {
   printf '\n---\n'
   printf 'origin/main %s。核准 %s，rebuild 租約 fence %s（owner %s）。\n' "$HEAD_SHA" "$APPROVAL" "$LEASE" "$OWNER"
+  [ -n "$ESC_NOTE" ] && printf '%s\n' "$ESC_NOTE"
   # shellcheck disable=SC2016  # 單引號是刻意的：反引號與 %s 都是要原樣印出去的文字
   printf '做完請回報，並用 `bin/agm lease release rebuild --owner %s --fence %s` 交還窗口；\n' "$OWNER" "$LEASE"
   printf '需要重啟正式 daemon 另外申請 restart 核准與租約，替換前請 AGM 重驗所有使用者與排程回合。\n'
