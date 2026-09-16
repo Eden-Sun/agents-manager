@@ -51,8 +51,9 @@
   --term-bg: #f7f8fa;
   --term-text: #24272d;
 
-  /* 1180px 在寬螢幕一行八十幾字會跳行，收到 1000px；composer 與停止列共用才對得齊。 */
-  --chat-max: 1000px;
+  /* 面板的 90%，但至少 1000px（2026-09-16 使用者：桌機訊息窗可以寬到 90% 比較好讀）。
+     composer 與停止列共用同一個值才對得齊。 */
+  --chat-max: max(1000px, 90%);
 
   --radius: 8px;
   --radius-lg: 14px;
