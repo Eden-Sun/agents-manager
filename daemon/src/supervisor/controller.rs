@@ -476,6 +476,35 @@ async fn park_quota(app: &Arc<App>, a: &store::Assignment, hit: &crate::quota::L
     }
 }
 
+/// 開機回填：把還在等額度的交辦記的 `resume_at` 寫回該 kind／identity 的 `limit_hit`。
+///
+/// `app.quotas` 不落地（SPEC §12.4），所以重啟後沒有任何一格記得「這個帳號還在擋」，而橫幅要等
+/// 下一次真的跑回合才會再出現。`resume_at` 是唯一活過重啟的那份記憶，開機時就用它把格子補回來，
+/// `resume_quota_blocked` 與 `dispatch` 才不會在重啟後把一批還在擋的交辦全部放出去。
+///
+/// 同一把 quota key 可能有好幾張交辦：全部餵給 [`crate::quota::seed_limit_hit`]，它只留最晚的那個，
+/// 已經過期的一律跳過（過期＝這段等待早就該結束了，不要再憑空造一個撞限出來）。
+async fn backfill_quota_limits(app: &Arc<App>) {
+    let Ok(rows) = store::quota_blocked_all(&app.db).await else { return };
+    let mut seeded = 0usize;
+    for a in rows {
+        let Some(resume_at) = a.resume_at.as_deref().map(str::trim).filter(|s| !s.is_empty()) else { continue };
+        if past(resume_at) {
+            continue;
+        }
+        let Ok(Some(bot)) = crate::db::bot(&app.db, &a.target_bot_id).await else { continue };
+        let host = crate::db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| crate::config::LOCAL_HOST.to_string());
+        let base = crate::quota::quota_base_for_host(app, &host, &bot.kind, bot.identity.as_deref()).await;
+        let why = format!("重啟前記下的等待：{} 還在等額度", a.id);
+        if crate::quota::seed_limit_hit(app, &host, &base, resume_at, &why).await {
+            seeded += 1;
+        }
+    }
+    if seeded > 0 {
+        tracing::info!(seeded, "重啟回填：用 parked assignment 的 resume_at 補回 limit_hit");
+    }
+}
+
 /// 額度回來了就重送：每個 tick 看一次被擋住的那幾件。
 ///
 /// 兩個條件都算數：`resume_at` 到了，或者 CLI 那格 `limit_hit` 已經被清掉（下一回合跑成功、
@@ -498,8 +527,12 @@ async fn resume_quota_blocked(app: &Arc<App>) {
                 }
                 continue;
             }
-            // 不擋了：回到 queued 並馬上試一次。
-            (None, _) => {}
+            // 記憶體裡沒有撞限紀錄，但我們自己記的時間還沒到：**不重送**。
+            // daemon 一重啟 `app.quotas` 就是空的（純記憶體），「查不到 limit_hit」不等於額度回來了；
+            // 持久化的 `resume_at` 才是那段等待唯一的記錄（review 2026-09-16）。
+            (None, false) => continue,
+            // 時間到了、也沒人說還在擋：回到 queued 並馬上試一次。
+            (None, true) => {}
         }
         let key = format!("quota_resumed:{}:{}", a.id, a.quota_retries);
         let payload = json!({"bot_id": a.target_bot_id, "retries": a.quota_retries + 1, "needs_review": false});
@@ -1063,6 +1096,9 @@ pub fn spawn(app: Arc<App>, generation: i64) {
         let mut turns = app.subscribe_turns();
         let mut tick = tokio::time::interval(TICK);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // 先補回「還在等額度」那幾格，再做其他開機對帳：順序反過來的話，reconcile／resume 會在
+        // 記憶體還空著的時候就把 parked 的交辦當成額度回來了。
+        backfill_quota_limits(&app).await;
         // Startup reconciliation: results that arrived while the daemon was down.
         reconcile(&app).await;
         loop {
@@ -1816,5 +1852,123 @@ mod queue_dispatch_tests {
         sqlx::query("UPDATE turns SET status='in_flight' WHERE client_request_id='crid-q'").execute(&app.db).await.unwrap();
         block_stale_queues(&app).await;
         assert_eq!(store::assignment(&app.db, &a.id).await.unwrap().unwrap().status, "delivered");
+    }
+}
+
+/// 重啟之後那批「還在等額度」的交辦（`backfill_quota_limits` ＋ `resume_quota_blocked`）。
+#[cfg(test)]
+mod quota_restart_tests {
+    use super::*;
+
+    async fn app() -> Arc<App> {
+        let dir = std::env::temp_dir().join(format!("agm-quota-restart-{}", crate::db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = crate::db::open(&dir.join("test.sqlite")).await.unwrap();
+        let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
+        let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
+        let app = App::new(db, client.clone(), client, cfg, dir.clone(), dir.join("daemon"), 7799, "test".into(), "test".into(), false);
+        store::get_or_init(&app.db).await.unwrap();
+        let now = crate::db::now();
+        sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES ('p','/tmp','p',?)").bind(&now).execute(&app.db).await.unwrap();
+        app
+    }
+
+    async fn bot(app: &Arc<App>, id: &str, identity: &str) {
+        sqlx::query("INSERT INTO bots (id,project_id,name,kind,identity,hook_token,created_at) VALUES (?,'p',?,'claude',?,'t',?)")
+            .bind(id)
+            .bind(id)
+            .bind(identity)
+            .bind(crate::db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+    }
+
+    /// 直接寫成 parked：重啟後資料庫裡就長這樣（記憶體那格是空的）。
+    async fn parked(app: &Arc<App>, bot_id: &str, resume_at: &str, updated_at: &str) -> String {
+        let a = store::insert_assignment(&app.db, None, bot_id, &crate::db::ulid(), "做 X", &[], None, true).await.unwrap();
+        sqlx::query("UPDATE supervisor_assignments SET status='quota_blocked', resume_at=?, updated_at=? WHERE id=?")
+            .bind(resume_at)
+            .bind(updated_at)
+            .bind(&a.id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        a.id
+    }
+
+    async fn status_of(app: &Arc<App>, id: &str) -> (String, i64) {
+        let a = store::assignment(&app.db, id).await.unwrap().unwrap();
+        (a.status, a.quota_retries)
+    }
+
+    /// 重啟後 `app.quotas` 是空的，但 `resume_at` 還沒到——那段等待沒有結束，不能重送。
+    /// 沒有這條，daemon 一開機就會把整批 parked 的交辦倒給還在被擋的帳號。
+    #[tokio::test]
+    async fn a_restart_does_not_resend_while_the_parked_time_is_still_in_the_future() {
+        let app = app().await;
+        bot(&app, "b1", "cc2").await;
+        let id = parked(&app, "b1", "2999-01-01T00:00:00Z", &crate::db::now()).await;
+        assert!(app.quotas.lock().await.is_empty(), "重啟後記憶體本來就沒有讀數");
+
+        resume_quota_blocked(&app).await;
+
+        assert_eq!(status_of(&app, &id).await, ("quota_blocked".into(), 0), "時間沒到就不動它");
+    }
+
+    /// 時間到了、也沒有任何一格說還在擋：這才是「額度回來了」，重送一次。
+    #[tokio::test]
+    async fn a_parked_assignment_whose_time_has_passed_is_sent_again() {
+        let app = app().await;
+        bot(&app, "b1", "cc2").await;
+        let id = parked(&app, "b1", "2020-01-01T00:00:00Z", &crate::db::now()).await;
+
+        resume_quota_blocked(&app).await;
+
+        let (status, retries) = status_of(&app, &id).await;
+        assert_ne!(status, "quota_blocked", "時間到了就要放它出去（實際派送在測試環境會被 defer）");
+        assert_eq!(retries, 1, "重送算一次");
+    }
+
+    /// 回填：同一把 quota key 取**最晚**的 `resume_at`（先讀到晚的也不能被早的蓋掉），
+    /// 已經過期的一律不寫——那格撞限是憑空造出來的，只會把還能跑的帳號多關一段時間。
+    #[tokio::test]
+    async fn the_backfill_keeps_the_latest_resume_at_and_skips_the_expired_ones() {
+        let app = app().await;
+        bot(&app, "b-cc2", "cc2").await;
+        bot(&app, "b-cc1", "cc1").await;
+        // 先讀到晚的（updated_at 較早），再讀到早的：`quota_blocked_all` 照 updated_at ASC。
+        parked(&app, "b-cc2", "2999-01-02T00:00:00Z", "2026-09-16T00:00:01Z").await;
+        parked(&app, "b-cc2", "2999-01-01T00:00:00Z", "2026-09-16T00:00:02Z").await;
+        parked(&app, "b-cc2", "2020-01-01T00:00:00Z", "2026-09-16T00:00:03Z").await;
+        // 這個帳號只剩一張過期的：完全不該生出一格撞限。
+        parked(&app, "b-cc1", "2020-01-01T00:00:00Z", "2026-09-16T00:00:04Z").await;
+
+        backfill_quota_limits(&app).await;
+
+        let q = app.quotas.lock().await;
+        let hit = q.get("claude:cc2").and_then(|x| x.limit_hit.clone()).expect("還在等額度的那格要補回來");
+        assert_eq!(hit.until.as_deref(), Some("2999-01-02T00:00:00Z"), "取最晚的那個");
+        assert!(q.get("claude:cc1").is_none(), "只剩過期的就什麼都不寫");
+        // 量表與重置時間不是這條路該碰的東西。
+        assert!(q.get("claude:cc2").is_some_and(|x| x.five_hour.is_none() && x.seven_day.is_none()));
+    }
+
+    /// 回填完再跑一次 resume：兩段合起來就是重啟的真實順序，parked 的交辦要原地不動。
+    #[tokio::test]
+    async fn backfill_then_resume_leaves_the_still_blocked_assignment_parked() {
+        let app = app().await;
+        bot(&app, "b1", "cc2").await;
+        let id = parked(&app, "b1", "2999-01-01T00:00:00Z", &crate::db::now()).await;
+
+        backfill_quota_limits(&app).await;
+        resume_quota_blocked(&app).await;
+
+        assert_eq!(status_of(&app, &id).await, ("quota_blocked".into(), 0));
+        let q = app.quotas.lock().await;
+        assert_eq!(
+            q.get("claude:cc2").and_then(|x| x.limit_hit.as_ref()).and_then(|h| h.until.clone()).as_deref(),
+            Some("2999-01-01T00:00:00Z")
+        );
     }
 }
