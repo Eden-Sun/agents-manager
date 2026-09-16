@@ -246,6 +246,8 @@ pub async fn abort_turns(app: &Arc<App>, bot_id: &str) -> LcResult<Value> {
         if let Ok(Some(t)) = db::in_flight_turn(&app.db, &r.id).await {
             aborted.push(t.id.clone());
         }
+        // 強制中止也是使用者要接手：排著的派工照樣不撤，只是先讓使用者拿回輸入框（§4.4a）。
+        note_user_interrupt(bot_id);
         fail_in_flight(app, &r.id, "回合已由使用者強制中止").await;
         if let Some(c) = client.as_ref() {
             clear_restored_prompt(c, r, &bot).await;

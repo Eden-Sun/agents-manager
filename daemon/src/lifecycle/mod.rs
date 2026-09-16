@@ -23,6 +23,7 @@ mod poller;
 mod screen;
 mod limit_banner;
 mod stuck_turns;
+mod interrupt_grace;
 
 /// Runs the daemon has typed into during **this** boot. `runs.pane_typed` is the durable record;
 /// this is the conservative in-process copy, so a row that later becomes unreadable cannot send a
@@ -49,6 +50,7 @@ pub(crate) use slash::*;
 pub(crate) use delivery::*;
 pub(crate) use start::*;
 pub(crate) use stop::*;
+pub(crate) use interrupt_grace::note_user_interrupt;
 pub(crate) use stuck_turns::{observe as observe_agent_status, spawn_stuck_turn_sweeper, sweep as sweep_stuck_turns};
 
 #[derive(Debug)]

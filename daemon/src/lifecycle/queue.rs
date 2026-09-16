@@ -6,77 +6,6 @@ use super::*;
 /// (the one-in-flight / one-queued unique indexes make a lost race an error). Early returns leave
 /// the turn queued; after the claim, any give-up must `requeue_turn` — `in_flight` +
 /// `delivery='pending'` has no other way out.
-/// 使用者按 interrupt（Esc）之後，排隊的派工先讓他拿回輸入框（AGM 2026-09-16 裁示）：按 Esc 多半是要親手接管、
-/// 馬上打字，這時 AGM 的派工搶先打進去，等於跟使用者搶輸入框。
-pub const INTERRUPT_GRACE_SECS: u64 = 60;
-pub const INTERRUPT_GRACE_ENV: &str = "AM_QUEUE_INTERRUPT_GRACE_SECS";
-/// 接管標記最久活這麼久：之後就算一直有人在講話，也回到一般的排隊行為（不讓一次 Esc 永遠壓著佇列）。
-const INTERRUPT_HOLD_MAX: std::time::Duration = std::time::Duration::from_secs(30 * 60);
-
-/// 看不懂、0、負數一律回預設——一個手滑的值不該讓 Esc 之後的派工立刻搶進去（或永遠不送）。
-pub fn interrupt_grace() -> std::time::Duration {
-    let secs = std::env::var(INTERRUPT_GRACE_ENV)
-        .ok()
-        .and_then(|v| v.trim().parse::<u64>().ok())
-        .filter(|n| *n > 0)
-        .unwrap_or(INTERRUPT_GRACE_SECS);
-    std::time::Duration::from_secs(secs)
-}
-
-/// bot → 使用者接管的時刻。只在記憶體：daemon 重啟就當沒有接管，排隊照一般規則送（不動 schema）。
-fn interrupt_holds() -> &'static std::sync::Mutex<std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>> {
-    static M: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>>> =
-        std::sync::OnceLock::new();
-    M.get_or_init(Default::default)
-}
-
-/// 使用者剛按了 interrupt：從現在起，這顆 bot 排著的派工要等它連續閒置滿寬限才送。
-pub fn note_user_interrupt(bot_id: &str) {
-    if let Ok(mut m) = interrupt_holds().lock() {
-        m.insert(bot_id.to_string(), chrono::Utc::now());
-    }
-}
-
-/// 還要再等多久（`None`＝不用等）。純函式：寬限從「接管時刻」與「最後一個回合結束」較晚的那個算起——
-/// 使用者在寬限內自己送了 prompt，那一回合跑完之後才重新計時，排隊的就接在他那則後面。
-pub(crate) fn interrupt_grace_remaining(
-    hold_at: Option<chrono::DateTime<chrono::Utc>>,
-    last_completed_at: Option<chrono::DateTime<chrono::Utc>>,
-    now: chrono::DateTime<chrono::Utc>,
-    grace: std::time::Duration,
-) -> Option<std::time::Duration> {
-    let hold_at = hold_at?;
-    if (now - hold_at).to_std().is_ok_and(|age| age >= INTERRUPT_HOLD_MAX) {
-        return None;
-    }
-    let idle_since = last_completed_at.map_or(hold_at, |c| c.max(hold_at));
-    let idle = (now - idle_since).to_std().unwrap_or_default();
-    grace.checked_sub(idle).filter(|left| !left.is_zero())
-}
-
-/// 讀這顆 bot 的接管標記與最後一個回合結束時間，算出還要等多久；等完了就把標記收掉。
-async fn interrupt_hold_left(app: &Arc<App>, bot_id: &str, conv: &str) -> Option<std::time::Duration> {
-    let hold_at = interrupt_holds().lock().ok()?.get(bot_id).copied()?;
-    let last: Option<String> =
-        sqlx::query_scalar("SELECT MAX(completed_at) FROM turns WHERE conversation_id=? AND completed_at IS NOT NULL")
-            .bind(conv)
-            .fetch_one(&app.db)
-            .await
-            .ok()
-            .flatten();
-    let last = last.and_then(|t| chrono::DateTime::parse_from_rfc3339(&t).ok()).map(|t| t.with_timezone(&chrono::Utc));
-    let left = interrupt_grace_remaining(Some(hold_at), last, chrono::Utc::now(), interrupt_grace());
-    if left.is_none() {
-        if let Ok(mut m) = interrupt_holds().lock() {
-            // 只收掉同一次接管的標記：等的這段時間裡使用者又按了一次，就留給新的那次。
-            if m.get(bot_id) == Some(&hold_at) {
-                m.remove(bot_id);
-            }
-        }
-    }
-    left
-}
-
 pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow::Result<()> {
     let conv = match db::conversation_id(&app.db, bot_id).await {
         Ok(conv) => conv,
@@ -110,15 +39,15 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
     if db::in_flight_turn(&app.db, &run.id).await?.is_some() {
         return Ok(());
     }
-    // 使用者剛按了 interrupt：讓他先拿回輸入框。判斷放在這裡（而不是觸發端）是因為 flush 不只一個呼叫端
+    let Some(bot) = db::bot(&app.db, bot_id).await? else { return Ok(()) };
+    // 使用者剛按了 interrupt：讓他先拿回輸入框（§4.4a）。判斷放在這裡（而不是觸發端）是因為 flush 不只一個呼叫端
     // （`stuck_turns` 在同一把鎖裡直接呼叫）；排在撤銷檢查之後，不要的派工照樣當場撤。閒著的 bot 不會再有
     // `working -> idle` 邊叫醒它，所以要掛 timer 到寬限結束。
-    if let Some(left) = interrupt_hold_left(app, bot_id, &conv).await {
+    if let Some(left) = super::interrupt_grace::hold(app, &bot, &run, &conv).await {
         tracing::info!(bot = %bot_id, turn = %turn.id, wait_s = left.as_secs(), "使用者剛 interrupt：排隊的派工等寬限結束再送");
         schedule_flush_retry(app, bot_id, left);
         return Ok(());
     }
-    let Some(bot) = db::bot(&app.db, bot_id).await? else { return Ok(()) };
     let text = turn.prompt_text.clone().unwrap_or_default();
     if text.trim().is_empty() {
         // Nothing deliverable: drop it rather than leave the queue permanently blocked.
@@ -713,44 +642,30 @@ mod flush_queue_tests {
         chrono::DateTime::parse_from_rfc3339(iso).unwrap().with_timezone(&chrono::Utc)
     }
 
-    /// AGM 2026-09-16：使用者 interrupt 之後，排隊的派工要等 bot 連續閒置滿寬限才送；寬限內使用者自己送的那一回合
-    /// 跑完之後才重新計時。
+    /// AGM 2026-09-16：使用者 interrupt 之後，排隊的派工要等 bot **連續 idle** 滿寬限才送。
+    /// 2b0fe98 原本的「使用者自己的回合跑完之後從那時重新計時」照規格 3 改掉：使用者有新輸入就不再擋，
+    /// 那一回合結束後照一般規則馬上送；另照規格 4 改看 idle 狀態，中間 working 過就重算。
+    /// （它原本的環境變數測試搬進 `interrupt_grace`，改成測解析函式。）
     #[test]
-    fn the_interrupt_grace_counts_from_the_later_of_the_interrupt_and_the_last_turn() {
-        let grace = std::time::Duration::from_secs(60);
+    fn the_interrupt_grace_counts_continuous_idle_and_yields_to_new_user_input() {
+        use super::super::interrupt_grace::interrupt_grace_remaining as left;
+        let s = std::time::Duration::from_secs;
+        let grace = s(60);
         let now = at("2026-09-16T12:00:00Z");
         // 沒有接管：不用等。
-        assert_eq!(interrupt_grace_remaining(None, None, now, grace), None);
-        // 20 秒前按 Esc：還要 40 秒。
-        assert_eq!(interrupt_grace_remaining(Some(at("2026-09-16T11:59:40Z")), None, now, grace), Some(std::time::Duration::from_secs(40)));
-        // 按 Esc 之後使用者自己送了一則、10 秒前才跑完：從那時算，還要 50 秒。
-        assert_eq!(
-            interrupt_grace_remaining(Some(at("2026-09-16T11:58:00Z")), Some(at("2026-09-16T11:59:50Z")), now, grace),
-            Some(std::time::Duration::from_secs(50))
-        );
-        // 早於接管的回合結束時間不算（被 interrupt 的那一回合就是在接管時結束的）。
-        assert_eq!(
-            interrupt_grace_remaining(Some(at("2026-09-16T11:59:40Z")), Some(at("2026-09-16T11:50:00Z")), now, grace),
-            Some(std::time::Duration::from_secs(40))
-        );
-        // 閒置滿寬限：送。
-        assert_eq!(interrupt_grace_remaining(Some(at("2026-09-16T11:58:00Z")), None, now, grace), None);
-        // 接管標記最久 30 分鐘，之後回到一般排隊（不讓一次 Esc 永遠壓著）。
-        assert_eq!(
-            interrupt_grace_remaining(Some(at("2026-09-16T11:29:00Z")), Some(at("2026-09-16T11:59:59Z")), now, grace),
-            None
-        );
-    }
-
-    #[test]
-    fn a_broken_grace_env_falls_back_to_sixty_seconds() {
-        for bad in ["0", "-5", "abc", ""] {
-            std::env::set_var(INTERRUPT_GRACE_ENV, bad);
-            assert_eq!(interrupt_grace(), std::time::Duration::from_secs(60), "{bad:?}");
-        }
-        std::env::set_var(INTERRUPT_GRACE_ENV, "5");
-        assert_eq!(interrupt_grace(), std::time::Duration::from_secs(5));
-        std::env::remove_var(INTERRUPT_GRACE_ENV);
+        assert_eq!(left(None, false, s(0), now, grace), None);
+        // 20 秒前按 Esc、之後一直閒著：還要 40 秒。
+        assert_eq!(left(Some(at("2026-09-16T11:59:40Z")), false, s(20), now, grace), Some(s(40)));
+        // 按 Esc 之後使用者自己送了一則（規格 3）：不再擋，那一回合結束後照一般規則送。
+        assert_eq!(left(Some(at("2026-09-16T11:58:00Z")), true, s(10), now, grace), None);
+        // 兩分鐘前按 Esc，但十秒前才又閒下來（中間 working 過，規格 4）：從閒下來算，還要 50 秒。
+        assert_eq!(left(Some(at("2026-09-16T11:58:00Z")), false, s(10), now, grace), Some(s(50)));
+        // idle 計時比中斷還早（Esc 在閒著的時候按）：從中斷算。
+        assert_eq!(left(Some(at("2026-09-16T11:59:40Z")), false, s(600), now, grace), Some(s(40)));
+        // 連續閒置滿寬限：送。
+        assert_eq!(left(Some(at("2026-09-16T11:58:00Z")), false, s(120), now, grace), None);
+        // 接管最久 30 分鐘，之後回到一般排隊（不讓一次 Esc 永遠壓著）。
+        assert_eq!(left(Some(at("2026-09-16T11:29:00Z")), false, s(1), now, grace), None);
     }
 
     /// 真的走 flush：剛 interrupt 的 bot 排著的派工不動（不 claim、不算重試、掛好 timer）；
@@ -769,12 +684,15 @@ mod flush_queue_tests {
         assert!(queue_retry_timer_armed(&f.bot_id), "閒著的 bot 沒有邊會叫醒它，要掛 timer");
 
         // 寬限過了：標記往回撥到 2 分鐘前，flush 就照常往下走（這裡沒有 herdr，會被放回佇列並算一次重試）。
-        interrupt_holds().lock().unwrap().insert(f.bot_id.clone(), chrono::Utc::now() - chrono::Duration::seconds(120));
+        // （規格 4：看連續 idle，所以 idle 計時也要撥回兩分鐘前。）
+        super::super::interrupt_grace::note_user_interrupt_at(&f.bot_id, chrono::Utc::now() - chrono::Duration::seconds(120));
+        super::super::stuck_turns::observe_at(&f.run_id, "working", ago(121));
+        super::super::stuck_turns::observe_at(&f.run_id, "idle", ago(120));
         forget_queue_retry_timer(&f.bot_id);
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
         let t = turn(&app, &f.turn_id).await;
         assert!(t.flush_retries > 0 || t.status != "queued", "寬限過了要真的去送：{} retries={}", t.status, t.flush_retries);
-        assert!(interrupt_holds().lock().unwrap().get(&f.bot_id).is_none(), "等完就收掉標記");
+        assert!(!super::super::interrupt_grace::is_held(&f.bot_id), "等完就收掉標記");
     }
 
     async fn turn(app: &Arc<App>, id: &str) -> db::Turn {
@@ -940,6 +858,166 @@ mod flush_queue_tests {
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
         assert_eq!(turn(&app, &f.turn_id).await.status, "failed");
         assert!(f.env.herdr.pane("pane-1").map_or(true, |p| p.transcript.is_empty()));
+    }
+
+    fn ago(secs: u64) -> std::time::Instant {
+        std::time::Instant::now().checked_sub(std::time::Duration::from_secs(secs)).unwrap_or_else(std::time::Instant::now)
+    }
+
+    fn typed(f: &Fixture, text: &str) -> usize {
+        f.env.herdr.pane("pane-1").map_or(0, |p| p.transcript.iter().filter(|l| l.contains(text)).count())
+    }
+
+    /// 使用者剛按 Esc：排著的派工不立刻打進去，timer 掛好等寬限。
+    #[tokio::test]
+    async fn after_the_user_interrupts_the_queued_prompt_waits_for_the_grace() {
+        let f = queued("test").await;
+        let app = f.env.app.clone();
+        f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
+        sqlx::query("UPDATE turns SET prompt_text = 'AGM 的派工' WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        note_user_interrupt(&f.bot_id);
+        super::super::stuck_turns::observe_at(&f.run_id, "idle", std::time::Instant::now());
+
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+        assert_eq!(turn(&app, &f.turn_id).await.status, "queued", "寬限內不送");
+        assert_eq!(typed(&f, "AGM 的派工"), 0, "一個字都沒打");
+        assert!(queue_retry_timer_armed(&f.bot_id), "寬限到了自己再來一次");
+    }
+
+    /// 連續 idle 滿寬限、期間沒有使用者新輸入才送；中斷很久但剛剛才又閒下來（有動靜）還是要等。
+    #[tokio::test]
+    async fn once_the_bot_has_been_quiet_for_the_whole_grace_the_queued_prompt_goes_out() {
+        let f = queued("test").await;
+        let app = f.env.app.clone();
+        f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
+        sqlx::query("UPDATE turns SET prompt_text = 'AGM 的派工' WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        super::super::interrupt_grace::note_user_interrupt_at(&f.bot_id, chrono::Utc::now() - chrono::Duration::seconds(300));
+
+        // 中斷是五分鐘前，但 bot 十秒前才又閒下來（中間 working 過）：從閒下來那刻算，不送。
+        super::super::stuck_turns::observe_at(&f.run_id, "working", ago(11));
+        super::super::stuck_turns::observe_at(&f.run_id, "idle", ago(10));
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+        assert_eq!(turn(&app, &f.turn_id).await.status, "queued");
+
+        // 連續閒了超過 60 秒：送。
+        super::super::stuck_turns::observe_at(&f.run_id, "working", ago(62));
+        super::super::stuck_turns::observe_at(&f.run_id, "idle", ago(61));
+        sqlx::query("UPDATE turns SET next_flush_at = NULL WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+        assert_eq!(turn(&app, &f.turn_id).await.status, "in_flight");
+        assert_eq!(typed(&f, "AGM 的派工"), 1);
+    }
+
+    /// 寬限內使用者自己送了一則：在跑的時候派工排在後面；使用者那一回合結束後照一般規則馬上送，不再等寬限。
+    #[tokio::test]
+    async fn a_prompt_the_user_sends_inside_the_grace_goes_first() {
+        let f = queued("test").await;
+        let app = f.env.app.clone();
+        f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
+        sqlx::query("UPDATE turns SET prompt_text = 'AGM 的派工' WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        super::super::interrupt_grace::note_user_interrupt_at(&f.bot_id, chrono::Utc::now() - chrono::Duration::seconds(5));
+        super::super::stuck_turns::observe_at(&f.run_id, "idle", std::time::Instant::now());
+
+        let mine = db::ulid();
+        sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'web','in_flight','ok',?)")
+            .bind(&mine).bind(&f.conv).bind(&f.run_id).bind(db::now()).execute(&app.db).await.unwrap();
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+        assert_eq!(turn(&app, &f.turn_id).await.status, "queued", "使用者那則在跑，派工排在後面");
+
+        sqlx::query("UPDATE turns SET status = 'completed' WHERE id = ?").bind(&mine).execute(&app.db).await.unwrap();
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+        assert_eq!(turn(&app, &f.turn_id).await.status, "in_flight", "使用者那一回合結束：照一般規則，不等寬限");
+    }
+
+    /// 一般回合結束（沒有中斷）照舊立刻送。
+    #[tokio::test]
+    async fn an_ordinary_turn_end_still_flushes_at_once() {
+        let f = queued("test").await;
+        let app = f.env.app.clone();
+        f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
+        super::super::stuck_turns::observe_at(&f.run_id, "idle", std::time::Instant::now());
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+        assert_eq!(turn(&app, &f.turn_id).await.status, "in_flight");
+    }
+
+    /// 使用者直接在 pane 裡按 Esc（daemon 沒有事件）：從 transcript 認出來，一樣先等。
+    #[tokio::test]
+    async fn an_escape_pressed_in_the_pane_itself_is_read_from_the_transcript() {
+        let f = queued("test").await;
+        let app = f.env.app.clone();
+        f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
+        let path = f.env.dir.join("t.jsonl");
+        let write = |at: chrono::DateTime<chrono::Utc>| {
+            let marker = json!({"type": "user", "timestamp": at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true), "interruptedMessageId": "m",
+                                "message": {"role": "user", "content": [{"type": "text", "text": "[Request interrupted by user]"}]}});
+            let prompt = json!({"type": "user", "message": {"role": "user", "content": "長回合"}});
+            std::fs::write(&path, format!("{prompt}\n{marker}\n")).unwrap();
+        };
+        sqlx::query("UPDATE runs SET transcript_path = ? WHERE id = ?").bind(path.to_string_lossy()).bind(&f.run_id).execute(&app.db).await.unwrap();
+
+        write(chrono::Utc::now());
+        super::super::stuck_turns::observe_at(&f.run_id, "idle", std::time::Instant::now());
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+        assert_eq!(turn(&app, &f.turn_id).await.status, "queued", "transcript 說剛被中斷");
+
+        write(chrono::Utc::now() - chrono::Duration::seconds(120));
+        super::super::stuck_turns::observe_at(&f.run_id, "working", ago(121));
+        super::super::stuck_turns::observe_at(&f.run_id, "idle", ago(120));
+        sqlx::query("UPDATE turns SET next_flush_at = NULL WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+        assert_eq!(turn(&app, &f.turn_id).await.status, "in_flight", "兩分鐘前中斷、之後一直閒著：送");
+    }
+
+    /// 寬限內 AGM 直接派新的一件（沒有 in_flight，本來會直接打字）：一樣排進佇列等寬限。
+    #[tokio::test]
+    async fn a_dispatch_arriving_inside_the_grace_is_queued_instead_of_typed() {
+        let f = queued("test").await;
+        let app = f.env.app.clone();
+        f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
+        sqlx::query("DELETE FROM turns WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        note_user_interrupt(&f.bot_id);
+        super::super::stuck_turns::observe_at(&f.run_id, "idle", std::time::Instant::now());
+        let out = prompt_relayed_queueable(&app, &f.bot_id, "新的派工", "crid-grace", None).await.unwrap();
+        assert_eq!(out.delivery, "queued");
+        assert_eq!(typed(&f, "新的派工"), 0);
+        assert!(queue_retry_timer_armed(&f.bot_id));
+        // AGM 自己排進去的那筆不是「使用者新輸入」：下一次 flush 照樣等寬限。
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+        assert_eq!(typed(&f, "新的派工"), 0);
+    }
+
+    /// 網頁按 Esc（interrupt_bot）端到端：收掉回合觸發的 flush 不會把排著的派工打進去。
+    #[tokio::test]
+    async fn the_web_escape_button_holds_the_queue_behind_it() {
+        let f = queued("test").await;
+        let app = f.env.app.clone();
+        f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
+        f.env.herdr.set_agent("agent", "pane-1", true);
+        sqlx::query("UPDATE turns SET prompt_text = 'AGM 的派工' WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'web','in_flight','ok',?)")
+            .bind(db::ulid()).bind(&f.conv).bind(&f.run_id).bind(db::now()).execute(&app.db).await.unwrap();
+        super::super::stuck_turns::observe_at(&f.run_id, "idle", std::time::Instant::now());
+
+        interrupt_bot(&app, &f.bot_id).await.unwrap();
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+        assert_eq!(turn(&app, &f.turn_id).await.status, "queued");
+        assert_eq!(typed(&f, "AGM 的派工"), 0);
+    }
+
+    /// 強制中止（abort_turns）也是使用者要接手：不撤排著的派工（裁示不變），只是先等寬限。
+    #[tokio::test]
+    async fn the_abort_button_holds_the_queue_behind_it_without_revoking_it() {
+        let f = queued("test").await;
+        let app = f.env.app.clone();
+        f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
+        f.env.herdr.set_agent("agent", "pane-1", true);
+        sqlx::query("UPDATE turns SET prompt_text = 'AGM 的派工' WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        super::super::stuck_turns::observe_at(&f.run_id, "idle", std::time::Instant::now());
+
+        abort_turns(&app, &f.bot_id).await.unwrap();
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+        assert_eq!(turn(&app, &f.turn_id).await.status, "queued", "不撤，也不立刻送");
+        assert_eq!(typed(&f, "AGM 的派工"), 0);
     }
 
     /// 框裡有字時排隊的 prompt 一個字都不打、放回隊列；框清空後再 flush 就送出去（第七輪 #2）。

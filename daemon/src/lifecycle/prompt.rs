@@ -363,6 +363,14 @@ async fn prompt_inner(
         }
         return Err(LcError::conflict("a turn is already in flight", json!({"turn_id": t.id})));
     }
+    // AGM 派工遇到「使用者剛按 Esc」：一樣先讓使用者拿回輸入框——排進佇列，寬限到了才送（§4.4a）。
+    if queue_if_busy {
+        if let Some(wait) = super::interrupt_grace::hold(app, &bot, &run, &conv).await {
+            let out = queue_for_next_turn(app, &conv, bot_id, text, &deliver, client_request_id, group_id, relay_from).await?;
+            schedule_flush_retry(app, bot_id, wait);
+            return Ok(out);
+        }
+    }
     pane_ready_for_prompt(app, &bot, &run, &conv).await?;
     if let Some(t) = sqlx::query_as::<_, db::Turn>(
         "SELECT * FROM turns WHERE conversation_id=? AND delivery='unknown' AND status='in_flight' LIMIT 1",
