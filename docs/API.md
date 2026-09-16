@@ -334,7 +334,7 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 ## 非 agent 的 pane（SPEC §6.5e）
 
 ### `GET /api/projects/{id}/panes`
-這個專案 host 上、**不是 agent** 的 pane：屬於這個專案的，加上還沒歸屬的（使用者手開的也要看得到）。
+這個專案 host 上、**不是 agent** 且屬於這個專案的 pane。**沒歸屬的不在這裡**（它不屬於任何專案，掛在每個專案底下會重複出現）：走 `GET /api/panes?unowned=1`。
 ```json
 { "project_id":"01M1…", "host":"local",
   "panes":[{"pane_id":"w168:p62","host":"local","workspace_id":"w168","tab_id":"t39","cwd":"/Users/m4p/…/wt",
@@ -355,7 +355,10 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 token 不對 401；其他失敗照樣回 200（`recorded:false`），少一個用途字串不該讓 bot 開 pane 失敗。
 
 ### `GET /api/panes?unowned=1`
-全機的非 agent pane；`unowned=1` 只回 `owned_by="none"`（連 cwd 都對不到專案）的那些。
+全機的非 agent pane（列的形狀同上）；`unowned=1` 只回 `owned_by="none"`（連 cwd 都對不到專案）的那些，同一台的 scratch 排第一。
+- `scratch: true`：這台那顆固定的 scratch（daemon 選的，規則見 SPEC §6.5e；前端不要自己重算）。其餘是「多出來的」。
+- `orphaned: true`：綁過的專案或擁有它的 bot 已經刪掉（推過 `pane_orphaned`），不會是 scratch。
+- `label`：herdr 上的 pane 名字；scratch 選中時會被改成 `[panes] scratch_name`。
 
 ### `POST /api/panes/{id}/focus?host=local`
 把 herdr 的焦點切到那顆 pane，只動焦點。主機沒連上 502。
