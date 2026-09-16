@@ -408,7 +408,12 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
                 tracing::info!(host, bot = %bot.name, run = %run.id, "reconcile: agent gone, marking run exited");
                 crate::lifecycle::mark_run_exited(app, &run.id, "agent not found during reconcile").await;
                 // A child exists only as long as its pane; its conversation is kept.
-                if bot.managed_by == "child" {
+                // 計畫中的 herdr 重啟期間不算：所有 pane 同時消失不是子 agent 做完了（§6.5.2）。
+                // 維護結束時仍沒接回的，由 `herdr_maintenance` 照同一條規則退休。
+                let in_maintenance = matches!(crate::herdr_maintenance::active(app).await, Ok(Some(_)));
+                if bot.managed_by == "child" && in_maintenance {
+                    tracing::info!(host, bot = %bot.name, "reconcile: herdr maintenance in progress, child kept (run marked exited)");
+                } else if bot.managed_by == "child" {
                     sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?")
                         .bind(db::now())
                         .bind(&bot.id)
@@ -458,7 +463,9 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
             (None, None) => {
                 // #60: `pane_closed` ended the child's run before we got here, so "agent gone" above
                 // never sees it. A child cannot be restarted (`start_bot` refuses): retire it.
-                if bot.managed_by == "child" {
+                if bot.managed_by == "child" && matches!(crate::herdr_maintenance::active(app).await, Ok(Some(_))) {
+                    tracing::info!(host, bot = %bot.name, "reconcile: herdr maintenance in progress, child with an ended run kept");
+                } else if bot.managed_by == "child" {
                     let ended: i64 = sqlx::query_scalar(
                         "SELECT COUNT(*) FROM runs WHERE bot_id = ? AND state NOT IN ('starting','running','stopping')",
                     )
@@ -1540,6 +1547,50 @@ mod compat_tests {
 
         let b = db::bot(&app.db, &kid).await.unwrap().unwrap();
         assert!(b.deleted_at.is_some(), "a child whose pane was closed must leave the sidebar");
+    }
+
+    /// 計畫中的 herdr 重啟（§6.5.2）：維護中兩條退休路徑都不刪子 agent；run 照樣結束。
+    /// 反向：同樣的情境不在維護中就照舊退休（上面那條測試），逾時的窗口也不算維護中。
+    #[tokio::test]
+    async fn children_are_kept_while_herdr_maintenance_is_open() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, _root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let parent = a_bot(&env, "alfa").await;
+        let open_until = |until: &str| {
+            sqlx::query("INSERT OR REPLACE INTO herdr_maintenance (id, opened_at, until, opened_by, reason) VALUES (1,?,?,'patrol','test')")
+                .bind(db::now())
+                .bind(until.to_string())
+        };
+        open_until("2999-01-01T00:00:00.000Z").execute(&app.db).await.unwrap();
+
+        // 路徑 1：run 還開著，agent 不見了。
+        let p1 = client.tab_create(&ws.workspace_id, "/tmp/p", "k1", json!({})).await.unwrap();
+        let a1 = format!("{}-k1", crate::config::agent_name("proj", &parent));
+        let (k1, r1) = a_child(&env, &parent, "k1", &a1, &ws.workspace_id, &p1.tab_id, &p1.pane_id).await;
+        // 路徑 2：pane_closed 先把 run 結束了。
+        let p2 = client.tab_create(&ws.workspace_id, "/tmp/p", "k2", json!({})).await.unwrap();
+        let a2 = format!("{}-k2", crate::config::agent_name("proj", &parent));
+        let (k2, r2) = a_child(&env, &parent, "k2", &a2, &ws.workspace_id, &p2.tab_id, &p2.pane_id).await;
+        client.pane_close(&p1.pane_id).await.unwrap();
+        client.pane_close(&p2.pane_id).await.unwrap();
+        env.herdr.agents.lock().unwrap().clear();
+        crate::lifecycle::mark_run_exited(&app, &r2, "pane exited").await;
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+
+        for (kid, run) in [(&k1, &r1), (&k2, &r2)] {
+            assert!(db::bot(&app.db, kid).await.unwrap().unwrap().deleted_at.is_none(), "maintenance keeps the child");
+            let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(run).fetch_one(&app.db).await.unwrap();
+            assert!(!["starting", "running", "stopping"].contains(&state.as_str()), "the run still ends: {state}");
+        }
+
+        // 窗口過期：下一輪對帳就照原規則退休（過期當下由 herdr_maintenance 收尾）。
+        open_until("2020-01-01T00:00:00.000Z").execute(&app.db).await.unwrap();
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+        for kid in [&k1, &k2] {
+            assert!(db::bot(&app.db, kid).await.unwrap().unwrap().deleted_at.is_some(), "expired window: normal rule again");
+        }
     }
 
     /// An ended run is not enough: a still-listed child agent gets its run back.

@@ -26,6 +26,7 @@ mod github;
 mod group;
 mod herdr;
 mod herdr_shim;
+mod herdr_maintenance;
 mod hook_cmd;
 mod hookrecv;
 mod hosts;
@@ -283,6 +284,8 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     tracing::info!(%addr, "listening");
     // Restarting is how a restart window ends: nothing waits out the old lease (SPEC §18.10).
     supervisor::maintenance::release_restart_on_startup(&app).await;
+    // 上一顆 daemon 開的 herdr 維護窗口：沒到期就重新排截止，過期就當場收尾（§6.5.2）。
+    herdr_maintenance::arm_on_startup(&app).await;
     // SPEC §11.3.5: close every ssh master on the way out; remote herdr servers stay alive.
     let shutdown_app = app.clone();
     axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>())

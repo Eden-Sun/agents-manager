@@ -121,6 +121,7 @@ config.toml 裡沒有的 id（child、已刪）忽略。成功推 `project_chang
 | 方法 | 路徑 | body | 回應 |
 |---|---|---|---|
 | POST | `/api/bots/{id}/start` | — | `200 {"run_id"}`；已有 active Run → `409 {"reason":"active run already exists","run_id"}`；`herdr_session = "default"` 的 bot（SPEC §6.5.1）→ `409 {"reason":"default_session"}`；herdr 失敗 502 |
+| POST | `/api/bots/{id}/start?resume=native` | — | 接回 DB 記的原生對話（SPEC §6.5.2）：`200 {"run_id","resumed":true,"session_id"}`；接不回**不啟動**、不開新對話 → `409 {"reason":"cannot_resume","resumed":false,"resume_reason":"no_session_id"|"transcript_missing"|"unsupported_kind","bot_id"}`，由呼叫端決定要不要改成不帶 `resume` 重送。`resume` 只認 `native`，其他值 400 |
 | POST | `/api/bots/{id}/stop` | — | `200 {}`；沒有 Run → `204`。default session 的 bot 只送 ctrl+c、不關 pane |
 | POST | `/api/bots/{id}/interrupt` | — | `200 {}`（送 `esc`，in-flight Turn 標 failed）；`esc` 送不出 → 502，Turn 維持 in-flight |
 | POST | `/api/bots/{id}/abort` | — | `200 {"aborted":["<turn_id>",…],"keys_sent":true,"key_error":null}`，見 §4.2 |
@@ -675,6 +676,16 @@ readback_model_mismatch|readback_effort_mismatch|readback_fast_mismatch>`。以�
 ### 10.3 `POST /api/bots/{id}/restart`
 有 Run 先 stop（ctrl+c ×2、逾時關 pane）再 start → `200 {"run_id"}`（新 Run）。沒有 Run 也可呼叫（= start）。錯誤同 start。過程推 `bot_status`。
 子 agent 在原 pane 重開（SPEC §6.9）。
+`?resume=native`：同 start 的語意，**停之前**就判斷接不接得回（看現在這個 Run 的 session）；接不回回 `409 cannot_resume`，原本的 agent 不會被停。預設（不帶）行為不變。
+
+### 10.3c `GET /api/capabilities`
+`200 {"capabilities":["resume_native_start","herdr_maintenance"]}`。會停 herdr server 的腳本先確認這裡有 `resume_native_start` 才動手。
+
+### 10.3d herdr 維護狀態 `/api/supervisor/herdr-maintenance`（SPEC §6.5.2）
+- `GET` → `{"active":bool,"window":{"opened_at","until","opened_by","reason"}|null,"max_minutes":30}`；過了 `until` 的窗口在讀取當下自動結束。
+- `POST …/open` body `{"minutes"?:1..30（預設 30）,"reason":"必填"}` → `{"active":true,"window"}`。**只有 AGM 角色**（`X-AM-Bot-Id`＋該 bot 的 `X-AM-Bot-Token`）：其他呼叫端 `403 herdr_maintenance_forbidden`；已經開著 `409`；分鐘數越界或沒有理由 400。
+- `POST …/end` body `{"reason"?}` → `{"active":false,"closed":true,"retired_children":["<name>",…]}`；沒開著回 `{"closed":false}`。同樣只有 AGM 角色。
+- 開、關、逾時都寫 `supervisor_notes`（`herdr_maintenance_start`／`_end`／`_expired`）。
 
 ### 10.3b `POST /api/bots/{id}/fork`
 從頂層 bot 分出一顆新 bot，讓它的 CLI 接續來源到目前為止的完整對話脈絡（SPEC §6.10）。body 可省略：`{"name"?:"alfa-fork"}`（省略＝`<來源>-fork`，撞名自動加 `-N`）。
