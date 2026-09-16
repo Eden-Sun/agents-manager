@@ -267,5 +267,6 @@ shell 面板本來只有「打一行、Enter 送出」：TUI（`top`、`vim`、�
 - **側欄與專案頁是同一份清單**（store 的 `sidePanes`，`GET /api/panes` 一次讀完依 `project_id` 分，30 秒重讀）：專案頁關掉的，側欄同時不見；點到已經不在的 pane（面板讀到 404）收掉面板並講一聲「這顆 pane 已經關掉了」，不是閃一下就沒了。
 - **沒歸屬的不掛在專案底下**：放側欄底部「開 shell」正下方一組。scratch 由 daemon 標（`GET /api/panes?unowned=1` 的 `scratch: true`），固定第一列、標「scratch」；其他標「多出來的」。舊 daemon 沒這欄就全部列、一個都不標——前端不自己猜哪顆是 scratch。
 - **關閉時才發現是服務 pane**：清單讀到時還是 shell、之後才跑起 dev server，daemon 回 409 並附上最新那列；專案頁拿那一列直接跳確認框，不是只顯示「關閉失敗 (409)」。
+  mock 實走：`docs/screenshots/side-panes-unowned/`（側欄底部那組、跑 vim 的 pane 打得進去、dev server 唯讀）。
 - **不給「結束 shell」**：面板那顆只認面板自己開的 shell，對被 trace 的 pane 按下去是靜悄悄什麼都不做。關它回專案頁。
 - **重整回得來、唯讀照現況**：`shellView` 連 `readOnly` 一起存；深連結查不到自己開的 shell 就查 daemon 的 pane 表。原本會直接丟回首頁。從 `/` 進來（只走 `restoreShellView`）時一樣照 daemon 當下的 pane 列重算 `readOnly`／`traced`，不沿用 localStorage 的舊值。
