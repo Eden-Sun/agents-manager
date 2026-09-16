@@ -113,6 +113,8 @@ pub struct App {
     pub gh_device: Mutex<HashMap<String, crate::gh_auth::DeviceSession>>,
     /// 這個 daemon 開過的主機 shell。只放記憶體：它同時是送鍵的白名單，重啟不該繼承。
     pub host_shells: crate::api::shell::Registry,
+    /// 被 trace 的 pane 打字前的即時複查結果，幾秒內重用（`shell::live_verdict`）。
+    pub pane_live: crate::api::shell::LiveCache,
     /// `serve` 起在非預設資料目錄時的實例名（`startup::instance`）。測試裡預設 `None`（正式實例）。
     instance: std::sync::RwLock<Option<String>>,
 }
@@ -170,6 +172,7 @@ impl App {
             submodules_cache: Mutex::new(HashMap::new()),
             gh_device: Mutex::new(HashMap::new()),
             host_shells: Default::default(),
+            pane_live: Default::default(),
         })
     }
 

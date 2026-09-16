@@ -264,6 +264,8 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     update_watch::spawn_update_watcher(app.clone());
     // SPEC §11.4.4: remote hook spools whose status event never arrived (one ssh per host, 30s).
     hookrecv::spawn_spool_scanner(app.clone());
+    // §6.5e：pane 裡開始跑 dev server 沒有任何 herdr 事件，對帳又不定期跑；表上的 kind／port 靠這個跟上。
+    panes::spawn_scanner(app.clone());
 
     {
         // 這一輪只起得了**已經連上**的主機（實務上就是本機）：遠端要先 ssh／launchctl，量級是秒，

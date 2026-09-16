@@ -339,10 +339,12 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 { "project_id":"01M1…", "host":"local",
   "panes":[{"pane_id":"w168:p62","host":"local","workspace_id":"w168","tab_id":"t39","cwd":"/Users/m4p/…/wt",
             "kind":"service","owner_bot_id":"01M1…","project_id":"01M1…","purpose":"dev-server",
-            "foreground":"node next dev","listen_ports":[3010],
-            "last_output_at":"2026-09-16T07:10:00.000Z","first_seen":"…","last_seen":"…","gc_optin":false}] }
+            "foreground":"node next dev","listen_ports":[3010],"read_only":true,
+            "last_output_at":"2026-09-16T07:10:00.000Z","first_seen":"…","last_seen":"…","gc_optin":false,
+            "owned_by":"bot","label":null,"scratch":false,"orphaned":false}] }
 ```
-- `kind`：`service`（有前景程式或 listen port）／`shell`（只有 shell）。agent pane 不在這裡。
+- `kind`：`service`（有前景程式或 listen port）／`shell`（只有 shell）。agent pane 不在這裡。**不是權限**。
+- `read_only`：`listen_ports` 非空。打字權限只看這個（`kind=service` 但沒有 port 的，例如跑著 vim，照樣可以打字）。
 - `owner_bot_id`／`owned_by`：`bot`＝從 pane 行程樹的 `AM_BOT_ID` 推斷；`user`＝沒有標記但 cwd 對得到這個專案（列在專案底下，**預設仍不自動關**）；`none`＝連專案都對不到。
 - `listen_ports` 只在本機判斷，遠端一律空陣列。`last_output_at` 由 herdr 的 `revision` 變化推進，不讀畫面內容。
 - Project 不存在 404。
@@ -364,8 +366,12 @@ token 不對 401；其他失敗照樣回 200（`recorded:false`），少一個�
 adopt 之後孤兒通知標記會清掉。pane 不存在 404、`owner_bot_id` 不存在 404。
 
 ### `POST /api/panes/{id}/close?host=local[&confirm=true]`
-關掉那個 pane（空了的 tab 一併收）。`kind=service` 必須帶 `confirm=true`，否則
-`409 {"reason":"service_pane","pane":{…}}`——UI 要先把 port 顯示給人看再問一次。pane 不存在 404。
+關掉那個 pane（空了的 tab 一併收）。表上的 `kind` 是掃描的快取，所以關之前即時再看一次：
+- 有 active run、或 herdr 說裡面現在有 agent → `403 {"error":"agent_pane"}`（帶 confirm 也一樣；agent 走 bot 的 stop）。
+- herdr 說 pane 已經不在 → 刪掉那一列，`404 {"what":"pane"}`。
+- 即時的分類是 `service`，或讀不到事實 → 沒帶 `confirm=true` 就 `409 {"reason":"service_pane","pane":{…},"unverified":bool}`，
+  `pane` 的 `kind`／`foreground`／`listen_ports`／`read_only` 換成即時值（`unverified:true`＝讀不到，沿用表上的）——UI 要先把 port 顯示給人看再問一次。
+- 表裡沒有這顆 404；主機沒連上 502。
 
 ## 記憶體
 
@@ -517,8 +523,10 @@ Project 可在另一台機器，daemon 透過 SSH 轉發連遠端 herdr。`host`
   一鍵一個 POST 會同時在路上、抵達順序不保證——打 `ls` 可能變成 `sl`。貼上不拆成鍵：文字裡的換行會變成 Enter 直接執行。
 - 每台最多 8 個：`409 {"reason":"too_many_shells","host","max":8}`。host 不存在 404；沒連線 502。
 - **白名單兩份**（2026-09-16，SPEC §6.5e「選單點得進去」）：`terminal`／`text`／`keys` 除了這裡開的 shell，也接受 `panes` 表裡的 pane。
-  `kind` 當權限——`shell` 可看可打字；`service` 只可看，打字回 `403 {"error":"read_only_pane","kind":"service"}`；
-  有 active run 的 pane 一律 `403 {"error":"agent_pane"}`（連看都不給）。沒被 trace 的 pane 照舊 404。
+  **打字看 listen port，不看 `kind`**——有 port（pane 列 `read_only:true`）只可看，打字回
+  `403 {"error":"read_only_pane","listen_ports":[…],"message":"…"}`；沒 port 的（含跑著 vim 的 `service`）可以打字。
+  有 active run 的 pane 一律 `403 {"error":"agent_pane","message":"…"}`（連看都不給）。沒被 trace 的 pane 照舊 404。
+  `text`／`keys` 之前即時問 herdr（結果重用 3 秒）：裡面現在有 agent 403 `agent_pane`、pane 不在 404、本機重對到 port 403 `read_only_pane`；問不到退回表上的 port。遠端不算 port。
   `DELETE` 仍只認這裡開的那幾顆；關被 trace 的 pane 走 `POST /api/panes/{id}/close`。
 - `recent` / `recent_unwrapped` 只給**已捲出畫面**的內容：沒捲過的 pane 兩者回 `text:""` + `truncated:true`，前端要說明而不是顯示空白。
 
