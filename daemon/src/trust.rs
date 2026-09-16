@@ -3,8 +3,9 @@
 //! → `agent_not_running`). `--dangerously-skip-permissions` does not suppress it (verified).
 //!
 //! We write the record the dialog would: claude `hasTrustDialogAccepted` in `.claude.json`, codex
-//! `trust_level = "trusted"` in `config.toml`; grok has no start-up gate (verified grok 4.6,
-//! 2026-09-06). Gotchas: the file must be the one the *bot's identity* reads
+//! `trust_level = "trusted"` in `config.toml`, grok `[folders."<path>"] trusted = true` in
+//! `trusted_folders.toml` (grok had no gate until 1.0.34 added "Do you trust the contents of this
+//! directory?", 2026-09-17). Gotchas: the file must be the one the *bot's identity* reads
 //! (`CLAUDE_CONFIG_DIR` / `CODEX_HOME`), and the path must be physical (`/tmp` → `/private/tmp`),
 //! see [`canonical`]. These files belong to the CLIs: amend in place via temp file + `rename`,
 //! and leave untouched when already trusted.
@@ -47,6 +48,10 @@ pub fn store_path(kind: &str, env: &BTreeMap<String, String>, home: &str) -> Opt
         "codex" => {
             let dir = var("CODEX_HOME").unwrap_or_else(|| format!("{home}/.codex"));
             Some(PathBuf::from(dir).join("config.toml"))
+        }
+        "grok" => {
+            let dir = var("GROK_HOME").unwrap_or_else(|| format!("{home}/.grok"));
+            Some(PathBuf::from(dir).join("trusted_folders.toml"))
         }
         _ => None,
     }
@@ -114,6 +119,36 @@ pub fn codex_merge(existing: &str, paths: &[String]) -> Result<Option<String>> {
     Ok(Some(doc.to_string()))
 }
 
+/// grok 1.0.34 `trusted_folders.toml`：`[folders."/path"] trusted = true, decided_at = <epoch 秒>`，
+/// 跟 grok 自己按 `y` 寫的一樣。`None` when already trusted.
+pub fn grok_merge(existing: &str, paths: &[String], now_secs: i64) -> Result<Option<String>> {
+    let mut doc: toml_edit::DocumentMut = if existing.trim().is_empty() {
+        toml_edit::DocumentMut::new()
+    } else {
+        existing.parse().context("grok `trusted_folders.toml` is not valid TOML")?
+    };
+    let folders = doc.entry("folders").or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
+    let Some(folders) = folders.as_table_mut() else { bail!("`folders` in grok `trusted_folders.toml` is not a table") };
+    folders.set_implicit(true);
+
+    let mut changed = false;
+    for p in paths {
+        let entry = folders.entry(p).or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
+        let Some(entry) = entry.as_table_mut() else {
+            bail!("`folders.{p}` in grok `trusted_folders.toml` is not a table");
+        };
+        if entry.get("trusted").and_then(|v| v.as_bool()) != Some(true) {
+            entry["trusted"] = toml_edit::value(true);
+            entry["decided_at"] = toml_edit::value(now_secs);
+            changed = true;
+        }
+    }
+    if !changed {
+        return Ok(None);
+    }
+    Ok(Some(doc.to_string()))
+}
+
 /// Temp file + fsync + `rename`: a crash must not corrupt the user's own agent-CLI state files.
 fn write_atomic(path: &Path, text: &str) -> Result<()> {
     use std::io::Write;
@@ -151,6 +186,10 @@ pub fn mark_trusted(kind: &str, store: &Path, paths: &[String]) -> Result<bool> 
     let next = match kind {
         "claude" => claude_merge(&existing, paths)?,
         "codex" => codex_merge(&existing, paths)?,
+        "grok" => {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+            grok_merge(&existing, paths, now)?
+        }
         _ => None,
     };
     let Some(next) = next else { return Ok(false) };
@@ -229,7 +268,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_store_follows_codex_home_and_grok_has_no_gate() {
+    fn codex_store_follows_codex_home_and_other_kinds_have_no_gate() {
         assert_eq!(
             store_path("codex", &env(&[]), "/home/u").unwrap(),
             PathBuf::from("/home/u/.codex/config.toml")
@@ -238,7 +277,28 @@ mod tests {
             store_path("codex", &env(&[("CODEX_HOME", "~/alt")]), "/home/u").unwrap(),
             PathBuf::from("/home/u/alt/config.toml")
         );
-        assert!(store_path("grok", &env(&[]), "/home/u").is_none());
+        assert!(store_path("shell", &env(&[]), "/home/u").is_none());
+    }
+
+    #[test]
+    fn grok_merge_writes_what_grok_writes_and_leaves_a_trusted_folder_alone() {
+        let existing = "[folders.\"/Users/m4p/project/agents-manager\"]\ntrusted = true\ndecided_at = 1789389148\n";
+        let out = grok_merge(existing, &["/tmp/rt".into()], 42).unwrap().expect("new folder is written");
+        let doc: toml_edit::DocumentMut = out.parse().unwrap();
+        assert_eq!(doc["folders"]["/tmp/rt"]["trusted"].as_bool(), Some(true));
+        assert_eq!(doc["folders"]["/tmp/rt"]["decided_at"].as_integer(), Some(42));
+        assert_eq!(doc["folders"]["/Users/m4p/project/agents-manager"]["decided_at"].as_integer(), Some(1789389148));
+        assert!(!out.contains("[folders]\n"), "no bare [folders] header: {out}");
+        assert!(grok_merge(&out, &["/tmp/rt".into()], 99).unwrap().is_none(), "already trusted");
+        assert!(grok_merge("folders = 3", &["/tmp/rt".into()], 1).is_err());
+    }
+
+    #[test]
+    fn grok_store_follows_grok_home() {
+        let mut env = BTreeMap::new();
+        assert_eq!(store_path("grok", &env, "/h"), Some(PathBuf::from("/h/.grok/trusted_folders.toml")));
+        env.insert("GROK_HOME".into(), "/x/g2".into());
+        assert_eq!(store_path("grok", &env, "/h"), Some(PathBuf::from("/x/g2/trusted_folders.toml")));
     }
 
     #[test]
@@ -375,8 +435,8 @@ trust_level = "trusted"
             .collect();
         assert!(strays.is_empty(), "temp files left: {strays:?}");
 
-        let none = dir.join("grok-nothing");
-        assert!(!mark_trusted("grok", &none, &["/w1".into()]).unwrap());
+        let none = dir.join("shell-nothing");
+        assert!(!mark_trusted("shell", &none, &["/w1".into()]).unwrap());
         assert!(!none.exists());
 
         let cx = dir.join("sub").join("config.toml");

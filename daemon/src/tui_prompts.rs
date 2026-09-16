@@ -126,6 +126,13 @@ pub fn is_switch_model_dialog(screen: &str) -> bool {
     t.contains("switch model?") && t.contains("yes, switch to") && t.contains("no, go back")
 }
 
+/// grok 1.0.34 開在沒信任過的目錄時跳「Do you trust the contents of this directory?」（y／n），
+/// herdr 看不出是對話框，prompt 打進去會被吃掉（2026-09-17 使用者截圖，報 composer_unreadable）。
+pub fn is_grok_trust_dialog(screen: &str) -> bool {
+    let t = flatten(screen);
+    t.contains("do you trust the contents of this directory") && t.contains("yes, proceed") && t.contains("no, quit")
+}
+
 /// 確認框連同框線與 statusLine 的最大高度；再往上是正文。
 const DIALOG_TAIL_LINES: usize = 12;
 
@@ -187,6 +194,13 @@ pub fn spawn_survey_watcher(app: Arc<App>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn grok_trust_dialog_is_recognised_even_when_centred_and_wrapped() {
+        let screen = "  main ~/p/h/projects/rt\n\n⠀⠀⠀⠀⠀⠀⣀⣀⡀\nDo you trust the contents of this directory?\n                /Users/m4p/project/hermes-agents/projects/rt\n\nGrok Build may run or modify contents in this directory,\n              posing security risks.\n\nYes, proceed                 y\n                  No, quit                     n\n\nGrok Build  1.0.34 [stable]\n";
+        assert!(super::is_grok_trust_dialog(screen));
+        assert!(!super::is_grok_trust_dialog("> Do you trust the contents of this directory? I asked grok that yesterday."));
+    }
+
     #[test]
     fn recognises_the_login_menu_even_when_wrapped() {
         let screen = "Welcome to Claude Code v2.1.263\n\nSelect login\n method:\n\n❯ 1. Claude account with subscription · Pro, Max\n   2. Anthropic Console account · API usage billing\n";
