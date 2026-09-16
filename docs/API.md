@@ -23,6 +23,10 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon，並�
 | 409 | `{"error":"conflict","reason":"<人類可讀>", ...extra}` | 狀態機衝突；extra 視情況含 `run_id` / `turn_id` / `bot_id` / `name` / `path` / `state` |
 | 502 | `{"error":"upstream","message":"..."}` | herdr / DB 出錯 |
 
+寫設定的 API（建專案／建 bot／改設定／排序／還原）在投影被大量軟刪閘門擋下來時回
+`409 {"reason":"projection_refused", message, bots, projects, allow_env}`——不是 502：那代表 config.toml 看起來被外部改過，
+要做的事是去把那幾列補回來（或用 `AM_ALLOW_BULK_DELETE=1` 放行一次），不是去查 herdr。
+
 ## 2. `GET /api/state`
 
 一次取回整棵樹。前端啟動、收到 `resync`、`project_changed` / `bot_changed` 時重拉。

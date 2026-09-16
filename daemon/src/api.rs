@@ -396,7 +396,19 @@ async fn get_state(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> 
 }
 
 async fn reproject(app: &Arc<App>) -> Result<(), LcError> {
-    crate::projection::project_config(&app.cfg, &app.db).await.map_err(any_err)
+    crate::projection::project_config(&app.cfg, &app.db).await.map_err(|e| {
+        // 閘門擋下來是**狀態不對**，不是上游壞掉：502 會讓呼叫端以為 herdr／DB 出問題，
+        // 而真正要做的事（去 config.toml 把那幾列補回來）沒有任何線索（review 2026-09-16）。
+        match e.downcast_ref::<crate::projection::ProjectionRefused>() {
+            Some(r) => LcError::conflict(
+                "projection_refused",
+                json!({"reason": "projection_refused", "message": r.detail,
+                       "bots": r.bots, "projects": r.projects,
+                       "allow_env": crate::projection::ALLOW_BULK_ENV}),
+            ),
+            None => any_err(e),
+        }
+    })
 }
 
 /// 刪除走 `projection::delete_from_config` 的單一臨界區。目標不在 config、或授權以外還有列會不見，
@@ -648,8 +660,9 @@ async fn patch_project(
 async fn delete_project(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
     // 拿著專案裡每顆 bot 的 per-bot 鎖（start 用同一把）再確認都停了、再定案：鎖外檢查會跟 start 競爭，
     // 刪掉剛被重新啟動的 bot（sol 四輪）。依 id 排序拿鎖；其他路徑一次只拿一把，不會形成環。
-    let ids: Vec<String> =
-        db::live_bots(&app.db).await.map_err(any_err)?.into_iter().filter(|b| b.project_id == id).map(|b| b.id).collect();
+    let in_project: Vec<db::Bot> =
+        db::live_bots(&app.db).await.map_err(any_err)?.into_iter().filter(|b| b.project_id == id).collect();
+    let ids: Vec<String> = in_project.iter().map(|b| b.id.clone()).collect();
     let (ids, guards) = lock_bots_in_order(&app, ids).await;
     for bot_id in &ids {
         if db::active_run(&app.db, bot_id).await.map_err(any_err)?.is_some() {
@@ -659,6 +672,20 @@ async fn delete_project(State(app): State<Arc<App>>, Path(id): Path<String>) -> 
     // 授權範圍在臨界區裡從**當下的** TOML 算；TOML 裡多出沒鎖住的 bot 就拒絕。
     let held: std::collections::HashSet<String> = ids.iter().cloned().collect();
     delete_in_config(&app, crate::projection::DeleteTarget::Project { id: &id, held: &held }).await?;
+    // config 投影只軟刪「不在 TOML 裡的 user bot」，child 本來就不進 TOML，所以會留下一批
+    // `deleted_at IS NULL`、project 卻已經軟刪的列：UI 看不到、reconcile 也掃不到（`live_bots_on_host`
+    // 要求專案還活著），它們的 pane 與 hook 目錄從此沒人回收（review 2026-09-16）。
+    // 鎖還在手上，順手比照 delete_bot 收掉。
+    let host = db::project(&app.db, &id).await.ok().flatten().map(|p| p.host).unwrap_or_else(|| crate::config::LOCAL_HOST.to_string());
+    for bot in in_project.iter().filter(|b| b.managed_by != "user") {
+        let _ = sqlx::query("UPDATE bots SET deleted_at=? WHERE id=? AND deleted_at IS NULL")
+            .bind(db::now())
+            .bind(&bot.id)
+            .execute(&app.db)
+            .await;
+        lifecycle::purge_bot_dir(&app, &bot.id, &host).await;
+        tracing::info!(bot = %bot.name, project = %id, "project deleted; its child bot went with it");
+    }
     drop(guards);
     app.emit("project_changed", json!({"project_id": id})).await;
     Ok((StatusCode::OK, Json(json!({}))).into_response())

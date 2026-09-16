@@ -210,11 +210,33 @@ am_forward_with_env() {
         eval "_v=\${$_k:-}"
         [ -z "$_v" ] || set -- "$@" --env "$_k=$_v"
     done
+    # 呼叫者自己設過的 key 不補母 pane 的值。比對要**兩種拼法都認**（`--env K=V` 與 `--env=K=V`），
+    # 而且只看 --env 的位置：以前用 `case " $* "` 比整串 argv，`--env=K=V` 因為前面是 `=` 不算數，
+    # 於是同一個 key 被補第二份（子 agent 可能跑在母 bot 的帳號下），而隨便一個參數的值裡含有
+    # " AM_PORT=" 之類的字樣又會讓那個 env 整個不被傳下去（review 2026-09-16）。
+    _seen=""
+    _n=$#
+    _i=0
+    while [ "$_i" -lt "$_n" ]; do
+        _a=$1
+        shift
+        _i=$((_i + 1))
+        case "$_a" in
+            --env)
+                [ "$_i" -lt "$_n" ] && _seen="$_seen ${1%%=*}"
+                ;;
+            --env=*)
+                _rest=${_a#--env=}
+                _seen="$_seen ${_rest%%=*}"
+                ;;
+        esac
+        set -- "$@" "$_a"
+    done
     for _k in CLAUDE_CONFIG_DIR CODEX_HOME AM_BOT_ID AM_HOOK_TOKEN AM_PORT AM_RUN_ID AM_AGENT_NAME AM_KIND AM_MODEL AM_EFFORT AM_REAL_HERDR PATH; do
         eval "_v=\${$_k:-}"
         [ -n "$_v" ] || continue
-        case " $* " in
-            *" $_k="*) continue ;;
+        case " $_seen " in
+            *" $_k "*) continue ;;
         esac
         set -- "$@" --env "$_k=$_v"
     done
@@ -482,6 +504,30 @@ mod tests {
         );
         assert_eq!(out.iter().filter(|a| a.starts_with("CLAUDE_CONFIG_DIR=")).count(), 1);
         assert!(out.contains(&"CLAUDE_CONFIG_DIR=/other".to_string()));
+    }
+
+    /// `--env=KEY=V` 也是呼叫者設過了。以前比對的是整串 argv 裡有沒有「空白＋KEY=」，
+    /// 這種拼法前面是 `=`，於是同一個 key 被補第二份——子 agent 可能跑在母 bot 的帳號下。
+    #[test]
+    fn the_equals_spelling_also_counts_as_the_caller_setting_it() {
+        let s = Sandbox::new();
+        let (out, _) = s.run(
+            &[("CLAUDE_CONFIG_DIR", "/home/u/.claude")],
+            &["tab", "create", "--workspace", "w1", "--env=CLAUDE_CONFIG_DIR=/other"],
+        );
+        assert_eq!(env_values(&out, "CLAUDE_CONFIG_DIR"), vec!["/other".to_string()], "{out:?}");
+    }
+
+    /// 別的參數的值裡剛好有「 KEY=」不該讓那個 env 消失：以前比對整串 argv，
+    /// `--label 'run with AM_PORT=x'` 會讓 AM_PORT 整個不被傳下去。
+    #[test]
+    fn a_label_that_mentions_a_key_does_not_swallow_that_env() {
+        let s = Sandbox::new();
+        let (out, _) = s.run(
+            &[("AM_PORT", "7788")],
+            &["tab", "create", "--workspace", "w1", "--label", "run with AM_PORT=x"],
+        );
+        assert_eq!(env_values(&out, "AM_PORT"), vec!["7788".to_string()], "{out:?}");
     }
 
     /// `--env KEY=V`／`--env=KEY=V` 裡某個 key 的所有值（只看 `--` 之前）。

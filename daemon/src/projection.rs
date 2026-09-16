@@ -53,6 +53,18 @@ pub struct NotInConfig(pub String);
 #[error("拒絕刪除：{0}")]
 pub struct DeleteRefused(pub String);
 
+/// 投影被大量軟刪閘門擋下來。**不是上游壞掉**：呼叫端（UI、AGM、其他 bot）要分得出
+/// 「你的設定沒被套用，因為 config.toml 看起來被外部改過」跟「ssh 斷了」，否則只會看到一個
+/// 沒有線索的 502，而且之後每一次寫設定都會再撞一次（review 2026-09-16）。
+#[derive(Debug, thiserror::Error)]
+#[error("{detail}")]
+pub struct ProjectionRefused {
+    pub detail: String,
+    /// 這次會被軟刪掉的 bot／專案名字，讓人知道要去 config.toml 補回哪幾列。
+    pub bots: Vec<String>,
+    pub projects: Vec<String>,
+}
+
 /// 刪除的單一臨界區：重讀 config → 確認目標此刻在 TOML → 算出實際要拿掉的 id → 閘門（寫入前）→
 /// 寫 config → 投影。呼叫端（API）在這之前拿好 per-bot 鎖、在這之後才停機，所以拒絕一定發生在任何東西被停之前。
 pub async fn delete_from_config(store: &ConfigStore, pool: &SqlitePool, target: DeleteTarget<'_>) -> Result<Deleting> {
@@ -376,11 +388,15 @@ async fn guard_removals(
         return Ok(());
     }
     tracing::error!("拒絕投影 config.toml：{detail}");
-    bail!(
-        "拒絕投影 config.toml：{detail}。\
-         這通常是 daemon 開錯資料目錄（同一顆 DB 被另一份 config 投影），不是有人刪了 bot；\
-         先確認 --config 與資料目錄（見 startup.rs）。確認過真的要刪就用 {ALLOW_BULK_ENV}=1 放行一次。"
-    );
+    return Err(anyhow::Error::new(ProjectionRefused {
+        detail: format!(
+            "拒絕投影 config.toml：{detail}。\
+             這通常是 daemon 開錯資料目錄（同一顆 DB 被另一份 config 投影），不是有人刪了 bot；\
+             先確認 --config 與資料目錄（見 startup.rs）。確認過真的要刪就用 {ALLOW_BULK_ENV}=1 放行一次。"
+        ),
+        bots: gone_bots,
+        projects: gone_projects,
+    }));
 }
 
 #[cfg(test)]

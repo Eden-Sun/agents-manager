@@ -63,6 +63,8 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
 - **投影不得大量軟刪**（2026-09-14 事故）：一次要軟刪的 bot／專案超過 3 列、或超過現有的 30%（兩列以上才算），或 config 裡一個專案都沒有而 DB 還有列 → **在任何寫入之前**拒絕整次投影並記 `error`，daemon 不啟動。
   啟動與 runtime 的**每一次**重投都走閘門：`ConfigStore::update` 會在磁碟 mtime 變了時重讀，「外面把 TOML 換掉／清空，再由 API 或總管觸發重投」是同一條事故路徑。
   DB 的活列＝上一次投影的結果，所以「config 空了但 DB 還有列」必然是拿錯 config／被換掉的檔案。
+  閘門擋下來時 API 回 **409 `projection_refused`**（帶會被軟刪的 bot／專案名字與 `AM_ALLOW_BULK_DELETE` 提示），不是 502——
+  502 的定義是「herdr／DB 出錯」，呼叫端分不出「你的設定沒被套用」跟「ssh 斷了」，而且之後每一次寫設定都會再撞一次（review 2026-09-16）。
   唯一的例外是明確的刪除 API（`DELETE /api/bots/:id`、`DELETE /api/projects/:id`），走 `projection::delete_from_config` 的單一臨界區：
   **重讀 config → 確認目標此刻在 TOML（不在就 409 `not_in_config`）→ 從當下的 TOML 算出實際要拿掉的 id → 閘門（寫檔前）→ 寫 config → 投影**。
   刪除模式的閘門是嚴格的：除了這次拿掉的 id，只要還有任何一列會不見就 409 `delete_refused`，不套小量門檻、不吃 `AM_ALLOW_BULK_DELETE`。
@@ -396,6 +398,9 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run
   先定案再停：拒絕只會發生在任何東西被停之前（2026-09-14 sol 四輪；原本是 stop 在前）。全程持該 bot 的 per-bot 鎖。
   `child` 不在 TOML，直接 `deleted_at` 並停 pane。
 - DELETE Project：拿齊專案內每顆 bot 的 per-bot 鎖 → 鎖內確認都已停止 → TOML 移除；不關 workspace、不刪目錄。
+  **child bot 一併軟刪**（鎖還在手上時做）：child 不進 TOML，投影的「不在 TOML 就軟刪」只管 user bot，
+  不收的話會留下一批 `deleted_at IS NULL`、專案卻已軟刪的列——UI 看不到、reconcile 也掃不到（`live_bots_on_host` 要求專案還活著），
+  它們的 pane 與 hook 目錄從此沒人回收（review 2026-09-16）。
 
 ### 6.5 對帳（啟動、事件連線重連；逐 bot 在鎖內）
 1. `session.snapshot` + `agent.list`。

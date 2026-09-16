@@ -261,22 +261,11 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     hookrecv::spawn_spool_scanner(app.clone());
 
     {
+        // 這一輪只起得了**已經連上**的主機（實務上就是本機）：遠端要先 ssh／launchctl，量級是秒，
+        // 而這段在毫秒內就跑完了。遠端那份由 `hosts.rs` 在連上並對帳之後再跑一次
+        // （§6.1 第 6 步沒有「遠端除外」這個但書，以前卻從來沒發生過——review 2026-09-16）。
         let app2 = app.clone();
-        tokio::spawn(async move {
-            for bot in db::live_bots(&app2.db).await.unwrap_or_default() {
-                let host = db::bot_host(&app2.db, &bot.id).await.unwrap_or_else(|_| config::LOCAL_HOST.to_string());
-                if !app2.host_connected(&host).await {
-                    tracing::info!(bot = %bot.name, host, "autostart skipped: host not connected");
-                    continue;
-                }
-                if bot.autostart == 1 && db::active_run(&app2.db, &bot.id).await.ok().flatten().is_none() {
-                    tracing::info!(bot = %bot.name, "autostart");
-                    if let Err(e) = lifecycle::start_bot(&app2, &bot.id).await {
-                        tracing::error!(bot = %bot.name, error = ?e, "autostart failed");
-                    }
-                }
-            }
-        });
+        tokio::spawn(async move { reconcile::autostart_connected(&app2, None).await });
     }
 
     let router = api::router(app.clone());

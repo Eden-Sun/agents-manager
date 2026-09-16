@@ -493,6 +493,9 @@ fn spawn_supervisor(app: Arc<App>, conn: Arc<HostConn>, generation: u64) -> toki
                     crate::events::spawn_global_for_host(app.clone(), conn.name.clone()).await;
                     crate::hookrecv::replay_host(&app, &conn.name).await;
                     crate::tools::spawn_detect(app.clone(), conn.name.clone());
+                    // 開機那一輪跑的時候這台還沒連上，它的 autostart bot 因此從來沒被起過
+                    // （review 2026-09-16）。對帳完才叫：先知道哪些其實還活著。
+                    crate::reconcile::autostart_connected(&app, Some(&conn.name)).await;
 
                     loop {
                         tokio::time::sleep(PING_INTERVAL).await;
