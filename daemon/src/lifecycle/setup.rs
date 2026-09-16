@@ -494,6 +494,14 @@ pub(crate) async fn pane_env(
     env.insert("AM_AGENT_NAME".into(), json!(agent_name));
     // 母 bot 的 kind／模型／強度：子 agent 沒指定 `--model` 時 shim 拿來補（SPEC §6.5b）。
     env.insert("AM_KIND".into(), json!(bot.kind));
+    // §6.5e：bot 開的 pane 要落在自己 project 的 workspace。shim 在 `tab create`／`workspace create`
+    // 沒指定時補這個值；`pane split` 以母 pane 為基準，本來就同 workspace。
+    env.insert("AM_PROJECT_ID".into(), json!(bot.project_id));
+    if let Ok(Some(p)) = crate::db::project(&app.db, &bot.project_id).await {
+        if let Some(ws) = p.workspace_id.filter(|w| !w.trim().is_empty()) {
+            env.insert("AM_WORKSPACE_ID".into(), json!(ws));
+        }
+    }
     if let Some(m) = bot.model.as_deref().filter(|m| !m.trim().is_empty()) {
         env.insert("AM_MODEL".into(), json!(m));
     }

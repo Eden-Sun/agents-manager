@@ -326,6 +326,11 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 - `listen_ports` 只在本機判斷，遠端一律空陣列。`last_output_at` 由 herdr 的 `revision` 變化推進，不讀畫面內容。
 - Project 不存在 404。
 
+### `POST /relay/pane`（表單，bot 專用）
+`bot_id`／`pane_id`／`purpose`，header `X-AM-Bot-Token`；shim 開完 pane 後自己呼叫（`herdr … --purpose <文字>`）。
+只記用途：pane 還沒被掃到就先建一列，**已經有 owner 的不會被改寫**（歸屬永遠由掃描時的 `AM_BOT_ID` 決定）。
+token 不對 401；其他失敗照樣回 200（`recorded:false`），少一個用途字串不該讓 bot 開 pane 失敗。
+
 ### `POST /api/panes/{id}/adopt?host=local`
 `{"owner_bot_id"?, "purpose"?, "allow_gc"?}` → 補歸屬與用途。省略的欄位不動。
 **使用者手開的 pane 不會因為 adopt 就變成可自動關**，除非帶 `allow_gc: true`（寫進 `gc_optin`，並記 log）。

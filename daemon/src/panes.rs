@@ -188,6 +188,35 @@ pub async fn scan_host(app: &Arc<App>, host: &str, snapshot_panes: &[Value]) -> 
     Ok(seen.len())
 }
 
+/// shim 回報的用途：pane 還沒被掃到就先建一列（`kind` 先當 shell，下一輪掃描會修正）。
+/// owner 只在這一列還沒有 owner 時才寫——掃描推斷出來的歸屬優先，回報不能改寫別人的 pane。
+pub async fn note_purpose(app: &Arc<App>, host: &str, pane_id: &str, bot: &crate::db::Bot, purpose: &str) -> Result<()> {
+    if pane_id.trim().is_empty() {
+        return Ok(());
+    }
+    let now = crate::db::now();
+    sqlx::query(
+        "INSERT INTO panes (pane_id, host, kind, owner_bot_id, project_id, purpose, last_output_at, first_seen, last_seen)
+         VALUES (?,?,'shell',?,?,?,?,?,?)
+         ON CONFLICT(host, pane_id) DO UPDATE SET
+           purpose=CASE WHEN excluded.purpose IS NULL OR excluded.purpose='' THEN panes.purpose ELSE excluded.purpose END,
+           owner_bot_id=COALESCE(panes.owner_bot_id, excluded.owner_bot_id),
+           project_id=COALESCE(panes.project_id, excluded.project_id)",
+    )
+    .bind(pane_id)
+    .bind(host)
+    .bind(&bot.id)
+    .bind(&bot.project_id)
+    .bind(if purpose.is_empty() { None } else { Some(purpose) })
+    .bind(&now)
+    .bind(&now)
+    .bind(&now)
+    .execute(&app.db)
+    .await?;
+    tracing::info!(host, pane_id, bot = %bot.id, purpose, "pane purpose reported by the shim");
+    Ok(())
+}
+
 pub fn row_json(r: &sqlx::sqlite::SqliteRow) -> Value {
     use sqlx::Row;
     json!({
@@ -283,6 +312,44 @@ mod tests {
         assert_eq!(scan_host(&app, "local", &[pane("w1:pA", Some("claude"), 3)]).await.unwrap(), 0);
         let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM panes").fetch_one(&app.db).await.unwrap();
         assert_eq!(left, 0);
+        std::fs::remove_dir_all(&app.data_dir).ok();
+    }
+
+    /// shim 回報的用途：pane 還沒被掃到也先記著；掃描推斷出來的 owner 不會被回報改寫。
+    #[tokio::test]
+    async fn a_reported_purpose_is_kept_without_overwriting_the_scanned_owner() {
+        let app = app().await;
+        let now = crate::db::now();
+        sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES ('p','/tmp','p',?)").bind(&now).execute(&app.db).await.unwrap();
+        for (id, name) in [("b1", "owner"), ("b2", "someone-else")] {
+            sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES (?,'p',?,'claude','t',?)")
+                .bind(id)
+                .bind(name)
+                .bind(&now)
+                .execute(&app.db)
+                .await
+                .unwrap();
+        }
+        let b1 = crate::db::bot(&app.db, "b1").await.unwrap().unwrap();
+        let b2 = crate::db::bot(&app.db, "b2").await.unwrap().unwrap();
+
+        // 還沒掃到就先記：建一列。
+        note_purpose(&app, "local", "w1:pS", &b1, "dev-server").await.unwrap();
+        let (owner, purpose): (Option<String>, Option<String>) =
+            sqlx::query_as("SELECT owner_bot_id, purpose FROM panes WHERE pane_id='w1:pS'").fetch_one(&app.db).await.unwrap();
+        assert_eq!((owner.as_deref(), purpose.as_deref()), (Some("b1"), Some("dev-server")));
+
+        // 別的 bot 事後回報：用途可以更新，owner 不會被改寫（歸屬是掃描推斷的）。
+        note_purpose(&app, "local", "w1:pS", &b2, "logs").await.unwrap();
+        let (owner, purpose): (Option<String>, Option<String>) =
+            sqlx::query_as("SELECT owner_bot_id, purpose FROM panes WHERE pane_id='w1:pS'").fetch_one(&app.db).await.unwrap();
+        assert_eq!((owner.as_deref(), purpose.as_deref()), (Some("b1"), Some("logs")));
+
+        // 空字串不會把用途洗掉。
+        note_purpose(&app, "local", "w1:pS", &b1, "").await.unwrap();
+        let purpose: Option<String> =
+            sqlx::query_scalar("SELECT purpose FROM panes WHERE pane_id='w1:pS'").fetch_one(&app.db).await.unwrap();
+        assert_eq!(purpose.as_deref(), Some("logs"));
         std::fs::remove_dir_all(&app.data_dir).ok();
     }
 

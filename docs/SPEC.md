@@ -516,14 +516,17 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
    子 pane 的 shell 與其行程樹都繼承得到。daemon 用既有的 `memproc` 環境快照（`ps -E` / `/proc/<pid>/environ`，
    已經在用來算每個專案的 RAM）把 pane 的行程樹對回 `AM_BOT_ID` → bot → project。**沒有 `AM_BOT_ID` 就是使用者手開的**，
    一律不動：不關、不搬、不改名，只在 UI 列出來（見下）。
-2. **用途標記（次要，只補 purpose 與顯示）**：shim 在 `pane split` / `pane run` 之後對 daemon
+2. **用途標記（次要，只補 purpose 與顯示）**：bot 開 pane 時多帶 `--purpose <文字>`（shim 自己的旗標，轉發前剝掉），
+   shim 在 `pane split` / `tab create` / `pane new` / `workspace create` 之後對 daemon
    `POST /relay/pane`（表單 `bot_id`／`pane_id`／`purpose`，header `X-AM-Bot-Token`，與 §6.5d 的 `/relay/announce` 同一條路），
-   daemon 記在 `panes.purpose`。報不成功只是少一個用途字串，歸屬仍由第 1 條決定。同時 `herdr pane rename` 與
+   daemon 記在 `panes.purpose`（pane 還沒被掃到就先建一列）。**回報不能改寫 owner**：已經有 owner 的 pane 只更新 purpose，
+   歸屬永遠由第 1 條的環境推斷決定。報不成功只是少一個用途字串。同時 `herdr pane rename` 與
    `tab rename` 用 `<bot herdr 名>-sh-<用途>`（純顯示，不是真相）。
 
 **workspace 歸位**：bot 開的非 agent pane 應該落在自己 project 的 workspace。**但已經跑起來的 service pane 不搬**——
 搬 pane 會殺掉裡面的行程（w168:p62 的 dev server 就是這種）。做法是：shim 在**開 pane 當下**用 project 的 workspace
-（`herdr pane split --pane` 以母 pane 為基準時本來就同 workspace；`pane new`／`tab create` 補 `--workspace`），
+（`herdr pane split --pane` 以母 pane 為基準時本來就同 workspace；`tab create` 沒指定時 shim 補 `--workspace $AM_WORKSPACE_ID`，
+那是 bot 專案的 workspace，由 daemon 隨 pane env 帶下去），
 已經放錯的只在 UI 標「在 `<workspace>`（不是本專案）」，由人決定要不要重開。
 
 #### 生命週期
