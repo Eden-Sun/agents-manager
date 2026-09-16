@@ -53,6 +53,24 @@ pub async fn autostart_connected(app: &Arc<App>, only_host: Option<&str>) {
     }
 }
 
+/// 對帳做完之後才叫的 autostart 入口（§6.1 第 6 步，review 2026-09-16 core 5）。回 `true`＝這次真的跑了。
+///
+/// - **對帳沒成功就不跑**：不知道 herdr 上哪些 agent 其實還活著，開下去就是同一顆 bot 兩個 agent。
+/// - **每台主機在這顆 daemon 的一生只跑一次**：遠端 ssh 斷線重連會再走一次「連上」，而 `stop` 不會改 `autostart`——
+///   使用者停掉的 autostart bot 在筆電睡醒重連後被重開、開始吃額度，本機同樣設定的卻不會。對帳失敗不算數，下次連上再試。
+pub async fn autostart_after_reconcile(app: &Arc<App>, host: &str, reconciled: bool) -> bool {
+    if !reconciled {
+        tracing::warn!(host, "autostart skipped: reconcile did not succeed; will retry on the next successful connect");
+        return false;
+    }
+    if !app.autostarted_hosts.lock().await.insert(host.to_string()) {
+        tracing::info!(host, "autostart already ran for this host in this daemon's lifetime; not restarting stopped bots");
+        return false;
+    }
+    autostart_connected(app, Some(host)).await;
+    true
+}
+
 /// A Turn that outlives a restart has no poller: no live bubble, and nothing completes it if its
 /// hook never arrives. Re-arm every in-flight Turn once the runs are adopted.
 pub async fn rearm_progress(app: &Arc<App>) {
@@ -780,6 +798,21 @@ async fn sync_pane_model(app: &Arc<App>, host: &str, client: &crate::herdr::Herd
     }
     tracing::info!(bot = %bot.name, pane = %agent.pane_id, ?model, ?effort, "reconcile: read the child's model off its argv");
     app.emit("bot_changed", json!({"bot_id": bot.id})).await;
+}
+
+#[cfg(test)]
+mod autostart_tests {
+    /// review 2026-09-16 core 5：遠端每次重連都走一次「連上」分支。使用者停掉的 autostart bot（`stop` 不改 `autostart`）
+    /// 不能在筆電睡醒重連後被重開；對帳失敗的那一次也不能跑（不知道哪些 agent 其實還活著）。
+    #[tokio::test]
+    async fn autostart_runs_once_per_host_and_only_after_a_successful_reconcile() {
+        let env = crate::testing::env().await;
+        let app = &env.app;
+        assert!(!super::autostart_after_reconcile(app, "m4p", false).await, "對帳失敗不跑");
+        assert!(super::autostart_after_reconcile(app, "m4p", true).await, "失敗那次不算數：下次連上照跑");
+        assert!(!super::autostart_after_reconcile(app, "m4p", true).await, "重連不再跑");
+        assert!(super::autostart_after_reconcile(app, "local", true).await, "每台主機各算各的");
+    }
 }
 
 #[cfg(test)]

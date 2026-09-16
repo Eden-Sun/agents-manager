@@ -487,15 +487,19 @@ fn spawn_supervisor(app: Arc<App>, conn: Arc<HostConn>, generation: u64) -> toki
                     *conn.error.lock().await = None;
                     crate::state::emit_host_changed(&app, &conn).await;
 
-                    if let Err(e) = crate::reconcile::reconcile_host(&app, &conn.name).await {
-                        tracing::error!(host = %conn.name, error = ?e, "reconcile after connect failed");
-                    }
+                    let reconciled = match crate::reconcile::reconcile_host(&app, &conn.name).await {
+                        Ok(()) => true,
+                        Err(e) => {
+                            tracing::error!(host = %conn.name, error = ?e, "reconcile after connect failed");
+                            false
+                        }
+                    };
                     crate::events::spawn_global_for_host(app.clone(), conn.name.clone()).await;
                     crate::hookrecv::replay_host(&app, &conn.name).await;
                     crate::tools::spawn_detect(app.clone(), conn.name.clone());
-                    // 開機那一輪跑的時候這台還沒連上，它的 autostart bot 因此從來沒被起過
-                    // （review 2026-09-16）。對帳完才叫：先知道哪些其實還活著。
-                    crate::reconcile::autostart_connected(&app, Some(&conn.name)).await;
+                    // 開機那一輪跑的時候這台還沒連上，它的 autostart bot 因此從來沒被起過（review 2026-09-16）。
+                    // 對帳成功才跑、每台一生一次：重連不能把使用者停掉的 bot 再開起來（core 5）。
+                    crate::reconcile::autostart_after_reconcile(&app, &conn.name, reconciled).await;
 
                     loop {
                         tokio::time::sleep(PING_INTERVAL).await;
