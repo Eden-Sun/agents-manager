@@ -220,6 +220,53 @@ pub async fn create(pool: &SqlitePool, m: &NewMission<'_>) -> Result<(Mission, b
     Ok((row, res.rows_affected() == 1))
 }
 
+/// 群組「交給 AGM」建任務：任務列、它的 instruction 事件、叫醒 AGM 的 `mission_created`，**一次交易**。
+///
+/// 以前是三個各自 await 的語句：任務列寫進去之後掛掉，重送（`created=false`）只回那一筆，instruction 與
+/// 通知永遠補不回來——AGM 不知道有這件事（review 2026-09-16）。同 [`create_child`] 的做法。
+pub async fn create_announced(
+    pool: &SqlitePool,
+    m: &NewMission<'_>,
+    inbox_payload_of: impl Fn(&Mission) -> serde_json::Value,
+) -> Result<(Mission, bool)> {
+    if let Some(existing) = by_crid(pool, m.project_id, m.client_request_id).await? {
+        return Ok((existing, false));
+    }
+    let id = crate::db::ulid();
+    let now = crate::db::now();
+    let mut tx = pool.begin().await?;
+    let res = sqlx::query(
+        "INSERT OR IGNORE INTO missions
+           (id, project_id, client_request_id, text, delivery_mode, executor_kind, on_5h_limit, max_rounds,
+            parent_mission_id, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+    )
+    .bind(&id)
+    .bind(m.project_id)
+    .bind(m.client_request_id)
+    .bind(m.text)
+    .bind(m.delivery_mode)
+    .bind(m.executor_kind)
+    .bind(m.on_5h_limit)
+    .bind(m.max_rounds)
+    .bind(m.parent_mission_id)
+    .bind(&now)
+    .bind(&now)
+    .execute(&mut *tx)
+    .await?;
+    if res.rows_affected() == 0 {
+        // 並發的同一個請求先寫進去了：回它那一筆，這邊什麼都不補（它的交易會一起寫）。
+        drop(tx);
+        let row = by_crid(pool, m.project_id, m.client_request_id).await?.ok_or_else(|| anyhow::anyhow!("mission vanished after insert"))?;
+        return Ok((row, false));
+    }
+    insert_event(&mut tx, &id, "instruction", m.text, None, &serde_json::json!({}), None, None).await?;
+    let row = sqlx::query_as::<_, Mission>("SELECT * FROM missions WHERE id = ?").bind(&id).fetch_one(&mut *tx).await?;
+    push_inbox_tx(&mut tx, &format!("mission:{id}:created"), "mission_created", &inbox_payload_of(&row), &now).await?;
+    tx.commit().await?;
+    Ok((get(pool, &id).await?.ok_or_else(|| anyhow::anyhow!("mission vanished after insert"))?, true))
+}
+
 /// 建續作的四種結果。
 #[derive(Debug)]
 pub enum ChildCreate {
