@@ -185,6 +185,7 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
     crate::supervisor::store::migrate(pool).await?;
     crate::read_marks::migrate(pool).await?;
     crate::panes::migrate(pool).await?;
+    crate::herdr_updates::migrate(pool).await?;
     crate::mission::store::migrate(pool).await?;
     check_schema_drift(pool).await?;
     Ok(())

@@ -131,6 +131,10 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/hosts/{name}/shells/{pane_id}/keys", post(host_shell_keys))
         .route("/models", get(get_models))
         .route("/changelog", get(get_changelog))
+        // Herdr 自己的版本追蹤（只讀＋通知，沒有升級動作）。
+        .route("/herdr/updates", get(crate::herdr_updates::http_get))
+        .route("/herdr/updates/refresh", post(crate::herdr_updates::http_refresh))
+        .route("/herdr/updates/seen", post(crate::herdr_updates::http_seen))
         .route("/quota", get(get_quota))
         .route("/mem", get(get_mem))
         .route("/mem/processes", get(get_mem_processes))

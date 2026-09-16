@@ -26,6 +26,7 @@ mod github;
 mod group;
 mod herdr;
 mod herdr_shim;
+mod herdr_updates;
 mod hook_cmd;
 mod hookrecv;
 mod hosts;
@@ -261,6 +262,8 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     events::spawn_title_poller(app.clone());
     tui_prompts::spawn_survey_watcher(app.clone());
     update_watch::spawn_update_watcher(app.clone());
+    // Herdr 自己的版本：啟動查一次官方 latest.json，之後每 6 小時；只追蹤與通知，不升級。
+    herdr_updates::spawn_watcher(app.clone());
     // SPEC §11.4.4: remote hook spools whose status event never arrived (one ssh per host, 30s).
     hookrecv::spawn_spool_scanner(app.clone());
 
