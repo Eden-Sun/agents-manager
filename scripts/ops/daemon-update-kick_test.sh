@@ -102,12 +102,15 @@ check "上一筆等驗收時不再派" "還沒結案" "$AGM_DIR/daemon-update.lo
 check_no "而且不會去申請核准" "approval request" "$AGM_DIR/calls.log"
 teardown
 
-# 3. 有人在跑：連核准都不申請。
+# 3. 有人在跑：不取窗口、不派工。**核准照樣先申請**——「等太久就縮小封鎖面」的計時是從
+# 自己這筆核准被核准的時刻起算（SPEC §18.10），不先申請的話那個時鐘永遠不會開始走。
 setup
 export STUB_SAFETY='{"safe":false,"working":[{"bot_id":"bot-busy","name":"bot-busy"}],"in_flight":[],"unreadable":[],"excluded_bot_ids":["bot-build","bot-manager"]}'
 bash "$SCRIPT"
 check "有人在跑就不派" "還有人在跑（bot-busy）" "$AGM_DIR/daemon-update.log"
-check_no "不會申請核准" "approval request" "$AGM_DIR/calls.log"
+check_no "有人在跑不取窗口" "lease acquire" "$AGM_DIR/calls.log"
+check_no "有人在跑不派工" "assign --bot" "$AGM_DIR/calls.log"
+check "safety 帶著自己那筆核准問" "lease safety --approval" "$AGM_DIR/calls.log"
 teardown
 
 # 4. AGM 還沒核准：停在這裡，不硬做，也不去拿窗口。
@@ -259,7 +262,7 @@ done
 setup
 export STUB_SAFETY='{"safe":true,"working":[],"in_flight":[],"unreadable":[],"excluded_bot_ids":["bot-build","bot-manager"]}'
 bash "$SCRIPT"
-check "safety 傳兩顆排除 ID" "lease safety --exclude-bot bot-build --exclude-bot bot-manager" "$AGM_DIR/calls.log"
+check "safety 傳兩顆排除 ID" "lease safety --approval ap-1 --exclude-bot bot-build --exclude-bot bot-manager" "$AGM_DIR/calls.log"
 check "新版 daemon 確認安全後派工" "已派工" "$AGM_DIR/daemon-update.log"
 teardown
 
@@ -290,7 +293,7 @@ printf '%s' '{"manager_bot_id":"bot-manager","role":"patrol","self_bot_id":"bot-
 export STUB_RESPONDER='{"configured":true,"bot_id":"bot-resp"}'
 export STUB_SAFETY='{"safe":true,"working":[],"in_flight":[],"unreadable":[],"excluded_bot_ids":["bot-build","bot-manager","bot-resp"]}'
 bash "$SCRIPT"
-check "safety 也排除協調者" "lease safety --exclude-bot bot-build --exclude-bot bot-manager --exclude-bot bot-resp" "$AGM_DIR/calls.log"
+check "safety 也排除協調者" "lease safety --approval ap-1 --exclude-bot bot-build --exclude-bot bot-manager --exclude-bot bot-resp" "$AGM_DIR/calls.log"
 check "派工帶上巡檢角色" "--review-by patrol" "$AGM_DIR/calls.log"
 check "雙角色下照常派工" "已派工" "$AGM_DIR/daemon-update.log"
 teardown

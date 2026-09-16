@@ -463,6 +463,17 @@ pub const EXECUTING_STATES: [&str; 3] = ["queued", "delivered", "unknown"];
 pub const OPEN_STATES: [&str; 6] =
     ["queued", "delivered", "unknown", "awaiting_review", "blocked", "quota_blocked"];
 
+/// `'a','b',…` 給 SQL 的 `IN (…)` 用。以前四個查詢各自把清單硬寫進字串，三種答案：
+/// `quota_blocked` 因此從 ownership 衝突與未結案計數裡消失——AGM 查過衝突、回報「沒有人握著這塊」，
+/// 然後把同一個模組派給第二顆 bot（review 2026-09-16）。清單只准有一份。
+fn sql_list(states: &[&str]) -> String {
+    states.iter().map(|s| format!("'{s}'")).collect::<Vec<_>>().join(",")
+}
+
+/// 「卡住了沒人管」只看這些：`quota_blocked` 在等一個已知的時間點（SPEC §18.9 明講不算卡住），
+/// `blocked` 在等人回答——兩個都不是沒人管，所以刻意不進這張表。其餘的未結案都算。
+pub const STALLED_STATES: [&str; 4] = ["queued", "delivered", "unknown", "awaiting_review"];
+
 impl Assignment {
     /// The wire shape the front end and the `agm` CLI agreed on.
     pub fn to_json(&self) -> Value {
@@ -1102,11 +1113,12 @@ pub async fn open_assignments(pool: &SqlitePool) -> Result<Vec<Assignment>> {
 /// list the handoff, the open count and the dispatch UI read — a job whose turn happens to have
 /// ended is still on it until somebody accepts it.
 pub async fn unsettled_assignments(pool: &SqlitePool) -> Result<Vec<Assignment>> {
-    Ok(sqlx::query_as::<_, Assignment>(
+    Ok(sqlx::query_as::<_, Assignment>(&format!(
         "SELECT * FROM supervisor_assignments WHERE supervisor_id=?
-           AND status IN ('queued','delivered','unknown','awaiting_review','blocked')
+           AND status IN ({})
           ORDER BY created_at ASC",
-    )
+        sql_list(&OPEN_STATES)
+    ))
     .bind(SUPERVISOR_ID)
     .fetch_all(pool)
     .await?)
@@ -1136,11 +1148,14 @@ pub async fn assignments_idle_since(pool: &SqlitePool, cutoff: &str) -> Result<V
     Ok(sqlx::query_as::<_, Assignment>(
         // 兩種「不動」不是卡住：通知本來就沒人要驗收（它也不會停在 awaiting_review），
         // 被額度擋下的那種是**在等一個已知的時間點**，controller 自己會重送。把它們報成
-        // incident 只會讓 AGM 每兩小時被叫醒一次去看一件沒有人需要做的事。
-        "SELECT * FROM supervisor_assignments WHERE supervisor_id=?
-           AND status IN ('queued','delivered','unknown','awaiting_review')
-           AND NOT (expects_review=0 AND status='awaiting_review')
-           AND updated_at <= ? ORDER BY updated_at ASC",
+        // incident 只會讓 AGM 每兩小時被叫醒一次去看一件沒有人需要做的事。清單見 STALLED_STATES。
+        &format!(
+            "SELECT * FROM supervisor_assignments WHERE supervisor_id=?
+               AND status IN ({})
+               AND NOT (expects_review=0 AND status='awaiting_review')
+               AND updated_at <= ? ORDER BY updated_at ASC",
+            sql_list(&STALLED_STATES)
+        ),
     )
     .bind(SUPERVISOR_ID)
     .bind(cutoff)
@@ -1784,10 +1799,11 @@ pub async fn pending_inbox(pool: &SqlitePool) -> Result<Vec<InboxEvent>> {
 /// Assignments not yet settled: in flight, waiting for acceptance, or blocked. A turn that
 /// ended does not take its assignment off this count — only a decision does.
 pub async fn open_assignment_count(pool: &SqlitePool) -> Result<i64> {
-    Ok(sqlx::query_scalar(
+    Ok(sqlx::query_scalar(&format!(
         "SELECT COUNT(*) FROM supervisor_assignments WHERE supervisor_id=?
-           AND status IN ('queued','delivered','unknown','awaiting_review','blocked')",
-    )
+           AND status IN ({})",
+        sql_list(&OPEN_STATES)
+    ))
     .bind(SUPERVISOR_ID)
     .fetch_one(pool)
     .await?)
@@ -2327,6 +2343,18 @@ pub async fn acquire_lease(
         .bind(&now)
         .execute(pool)
         .await?;
+    // 前一個持有者**過期**而不是 release（腳本掛了、child 被殺）時，沒有人走過 release，
+    // 它背後的核准因此還是 `approved`——同一張「可以」可以在有效期內開好幾個窗口，
+    // 而決定歷程上一筆紀錄都沒有（review 2026-09-16）。接手前先把它消耗掉。
+    let stale_approval = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT approval_id FROM supervisor_leases
+          WHERE resource=? AND released_at IS NULL AND expires_at IS NOT NULL AND expires_at <= ?",
+    )
+    .bind(resource)
+    .bind(&now)
+    .fetch_optional(pool)
+    .await?
+    .flatten();
     let taken = sqlx::query(
         "UPDATE supervisor_leases
             SET owner=?, approval_id=?, target_commit=?, fence=fence+1, acquired_at=?, expires_at=?,
@@ -2347,6 +2375,12 @@ pub async fn acquire_lease(
         > 0;
     if !taken {
         return Ok(None);
+    }
+    if let Some(stale) = stale_approval.filter(|a| Some(a.as_str()) != approval_id) {
+        // `decide_approval_from` 只在它還是 `approved` 時才動，而且**會寫進 supervisor_notes**
+        // （`decide_approval` 是無條件 UPDATE，還會把 `decided_at` 覆寫成消耗時間，
+        // 升級判定的計時就是從那個欄位算的）。
+        let _ = decide_approval_from(pool, &stale, "approved", "consumed", "daemon", Some("lease expired"), None).await;
     }
     lease(pool, resource).await
 }
@@ -3471,6 +3505,50 @@ mod tests {
         assert!(a.created);
         assert!(!create_approval(&p, "bot", "rebuild", "daemon", None, None, Some("r-1")).await.unwrap().created);
         assert_eq!(approvals(&p, 10).await.unwrap().len(), 2);
+    }
+
+    /// 「未結案」以前被抄成四份、三種答案：`quota_blocked` 從 ownership 衝突與未結案計數裡消失，
+    /// AGM 於是回報「沒有人握著這塊」，把同一個模組派給第二顆 bot（review 2026-09-16）。
+    #[tokio::test]
+    async fn every_open_state_shows_up_where_ownership_is_checked() {
+        let p = pool().await;
+        get_or_init(&p).await.unwrap();
+        for (i, st) in OPEN_STATES.iter().enumerate() {
+            let a = insert_assignment(&p, None, "b", &format!("crid-{i}"), "做事", &["daemon/src".to_string()], None, true).await.unwrap();
+            sqlx::query("UPDATE supervisor_assignments SET status=? WHERE id=?").bind(st).bind(&a.id).execute(&p).await.unwrap();
+        }
+        assert_eq!(open_assignment_count(&p).await.unwrap(), OPEN_STATES.len() as i64, "未結案計數要涵蓋每一個未結案狀態");
+        let unsettled: Vec<String> = unsettled_assignments(&p).await.unwrap().into_iter().map(|a| a.status).collect();
+        for st in OPEN_STATES {
+            assert!(unsettled.iter().any(|s| s == st), "{st} 不在 ownership 衝突看的清單裡：{unsettled:?}");
+        }
+        // 「卡住沒人管」是另一張表，而且刻意不含這兩個（都在等一個確定的東西）。
+        assert!(!STALLED_STATES.contains(&"quota_blocked"));
+        assert!(!STALLED_STATES.contains(&"blocked"));
+    }
+
+    /// 前一個持有者過期而不是 release 時，那張「可以」以前還是 approved——同一筆核准可以開好幾個
+    /// 重啟窗口，而且決定歷程上看不出來被用過（review 2026-09-16）。
+    #[tokio::test]
+    async fn taking_over_an_expired_lease_consumes_the_approval_it_rested_on() {
+        let p = pool().await;
+        get_or_init(&p).await.unwrap();
+        let first = create_approval(&p, "bot-a", "restart", "daemon", None, None, None).await.unwrap().approval;
+        decide_approval(&p, &first.id, "approved", "AGM", None, None).await.unwrap();
+        let past = (chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        acquire_lease(&p, "restart", "runner-1", Some(&first.id), None, &past, &json!({})).await.unwrap().unwrap();
+        assert_eq!(approval(&p, &first.id).await.unwrap().unwrap().status, "approved");
+
+        // 沒有人 release，租約自己過期，下一個人接手。
+        let second = create_approval(&p, "bot-a", "restart", "daemon", None, None, None).await.unwrap().approval;
+        decide_approval(&p, &second.id, "approved", "AGM", None, None).await.unwrap();
+        let later = (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        acquire_lease(&p, "restart", "runner-2", Some(&second.id), None, &later, &json!({})).await.unwrap().unwrap();
+
+        assert_eq!(approval(&p, &first.id).await.unwrap().unwrap().status, "consumed", "過期沒 release 的那張要被消耗掉");
+        assert_eq!(approval(&p, &second.id).await.unwrap().unwrap().status, "approved", "接手的這張還在用");
+        let notes = approval_decisions(&p).await.unwrap();
+        assert!(notes.get(&first.id).is_some_and(|v| !v.is_empty()), "消耗要留在決定歷程裡");
     }
 
     #[tokio::test]

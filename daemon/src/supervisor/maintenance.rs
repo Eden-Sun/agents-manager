@@ -175,7 +175,9 @@ pub async fn release(app: &Arc<App>, resource: &str, owner: &str, fence: i64) ->
             if let Some(ap) = l.approval_id.as_deref() {
                 if let Ok(Some(a)) = store::approval(&app.db, ap).await {
                     if a.status == "approved" {
-                        let _ = store::decide_approval(&app.db, ap, "consumed", owner, Some("lease released"), None).await;
+                        // 走有稽核的那支：`decide_approval` 是無條件 UPDATE，不寫 supervisor_notes，
+                        // 而且會把 `decided_at` 覆寫成消耗時間——升級判定（§18.10）的計時就是看那一欄。
+                        let _ = store::decide_approval_from(&app.db, ap, "approved", "consumed", owner, Some("lease released"), None).await;
                     }
                 }
             }
