@@ -1155,6 +1155,7 @@ body 直接是檔案位元組（**不是** multipart），`Content-Type` 就是�
   同 decision 重送冪等；followup 重送須同 request ID、文字與目標，不同 409 `followup_mismatch`。`followup_request_id` 已經是別件交辦的 → 409 `followup_request_id_taken`（`{client_request_id,assignment_id}`，換一個 id）。
   續作沿用父交辦的 `expects_review`（通知的續作仍是通知）、`review_role` 與任務連結。已結案 409 `already_closed`；還在跑只接受 `cancel`（409 `still_executing`，且 cancel 不中止回合）。
   決定成 `cancelled`／`superseded`／`failed` 時，交辦名下還在 `queued` 的 turn 一併撤銷（標 `failed`、插 system 訊息、釋放 queued 名額），回應多 `revoked_turn_id`；已經 `in_flight`／送出的不動、也不帶這個欄位（SPEC §4.4a）。
+  撤回成功時，這次決定的稽核列（`reviews[].evidence`）也改寫成「排隊中的 turn … 已撤回，沒有送出」，不留「turn 還在跑」的警告。
 
 ### 交接、inbox、狀態、證據
 - `GET /api/supervisor/handoff` → `{summary,summary_version,updated_at,requests,assignments,inbox,open_assignments,pending_count}`；`PUT {summary}` → `{summary,summary_version}`，同時寫 `handoff.md`（權威在 DB）。

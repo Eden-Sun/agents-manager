@@ -1626,6 +1626,8 @@ pub struct FollowupSpec<'a> {
 pub struct Decided {
     pub updated: Assignment,
     pub followup: Option<Assignment>,
+    /// 這次決定寫下的稽核列；撤回 queued turn 之後要改寫它的 evidence（[`amend_review_evidence`]）。
+    pub review_id: String,
 }
 
 /// `followup_request_id` 已經是**另一件**交辦的 client_request_id（不是這個 parent 的同一份續作）。
@@ -1764,13 +1766,14 @@ pub async fn review_with_followup(
         created = Some(new_id);
     }
 
+    let review_id = crate::db::ulid();
     sqlx::query(
         "INSERT INTO supervisor_reviews
            (id, supervisor_id, assignment_id, decision, from_status, to_status, actor, source,
             reason, evidence, followup_assignment_id, created_at)
          VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
     )
-    .bind(crate::db::ulid())
+    .bind(&review_id)
     .bind(SUPERVISOR_ID)
     .bind(id)
     .bind(decision)
@@ -1791,7 +1794,21 @@ pub async fn review_with_followup(
         Some(fid) => assignment(pool, &fid).await?,
         None => None,
     };
-    Ok(Some(Decided { updated, followup }))
+    Ok(Some(Decided { updated, followup, review_id }))
+}
+
+/// 改寫**同一個請求剛寫下**的稽核列的 evidence。只給 `post_review` 用：決定寫進去時還不知道排著的
+/// turn 撤不撤得回來，撤回之後「turn 還在跑」那句就不成立，不能永久留在稽核裡讓後來的人不敢重派
+/// （review 2026-09-16 c1 L1）。只在內容還是當初寫的那句時改，別的寫入不會被蓋掉。
+pub async fn amend_review_evidence(pool: &SqlitePool, review_id: &str, expected: Option<&str>, evidence: Option<&str>) -> Result<bool> {
+    Ok(sqlx::query("UPDATE supervisor_reviews SET evidence=? WHERE id=? AND evidence IS ?")
+        .bind(evidence)
+        .bind(review_id)
+        .bind(expected)
+        .execute(pool)
+        .await?
+        .rows_affected()
+        > 0)
 }
 
 /// Every decision taken on one assignment, oldest first.
