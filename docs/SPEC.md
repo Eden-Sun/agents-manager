@@ -1002,9 +1002,10 @@ claude 的 statusLine 每次重繪都呼叫、沒有回合語意，不進 spool�
 - `GET /api/state` 帶 `hosts: [{name, ssh, herdr_session, connected, error?}]`、`projects[].host`；`POST /api/hosts`、`DELETE /api/hosts/:name`（需無 project 使用）、`POST /api/hosts/:name/reconnect`；
   `POST /api/projects` 可帶 `host`。WS `daemon_status {herdr_connected, hosts}`、`host_changed`。細節見 `API.md`。
 - UI：sidebar Project 標題顯示 host 徽章（本機不顯示）；新增 Project 表單有主機下拉，目錄選擇器跟著切換；主機管理表單列出連線狀態與重連；host 斷線時其 bot 燈號灰。
-- **shell 的鍵盤同步**（使用者 2026-09-16）：shell 面板的「鍵盤同步」開關打開後，終端本身收鍵盤，每一下按鍵原樣送進那個 pane（`…/shells/{pane}/keys`），
-  貼上走 `…/text` 且 `enter:false`（不拆成鍵——換行會變成 Enter 直接執行）。輪詢從 1 秒加快到 0.25 秒，指令列讓位（disabled）。
-  ⌘ 系列與 herdr 不收的鍵（Delete／Home／End／PgUp）回 `null` 留給瀏覽器，使用者不會被關在框裡。開關狀態每個 pane 各記一份（localStorage）。
+- **shell 的鍵盤直通**（使用者 2026-09-16；2026-09-17 改成預設開、改名）：shell 面板打開就是「鍵盤直通」，終端本身收鍵盤，每一下按鍵原樣送進那個 pane（`…/shells/{pane}/keys`），
+  貼上走 `…/text` 且 `enter:false`（不拆成鍵——換行會變成 Enter 直接執行）。輪詢從 1 秒加快到 0.25 秒。直通時沒有指令列也沒有虛擬鍵；關掉直通才出現「打一行、Enter 送出」的指令列。
+  終端上在 shell 等輸入的地方（從畫面推：最後一行有字的行尾）畫一個閃爍游標，焦點在終端上才閃。
+  ⌘ 系列與 herdr 不收的鍵（Delete／Home／End／PgUp）回 `null` 留給瀏覽器，使用者不會被關在框裡。localStorage 只記被關掉直通的 pane。
   送出一律走同一個佇列（`keyQueue`）：同一時間只有一個請求在路上，否則抵達順序不保證，打 `ls` 可能變成 `sl`。
 
 ### 11.7 不做
