@@ -1890,7 +1890,10 @@ export const useStore = create<StoreState>((set, get) => ({
     try {
       // crid 交給 `missionRequests`：每按一次就換一個（例如 `Date.now()`）等於把 API 的冪等關掉——
       // daemon 已經 commit 但回應在路上斷掉時，使用者照提示再按一次就會多出第二筆任務。
-      const { mission, created } = await sendMissionRequest('create', projectId, input.text, (id) =>
+      // 選項也算進 key：同一段文字改了執行者或交付方式再送是另一個要求。沿用舊 crid 的話 daemon 不比對內容、
+      // 直接回舊的那筆（`created:false` 不提示），輸入框還被清掉（第二輪 review 修正驗證 #6）。
+      const variant = [input.delivery_mode, input.executor_kind, input.on_5h_limit, input.max_rounds ?? ''].join('|')
+      const { mission, created } = await sendMissionRequest(`create:${variant}`, projectId, input.text, (id) =>
         api.createMission(projectId, { ...input, client_request_id: id }),
       )
       if (!mission) return null
