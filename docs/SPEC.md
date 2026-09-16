@@ -390,7 +390,24 @@ cancel 撤掉的是還沒送出的那則時，review 回應不再帶「turn 還�
 定時掃描（每 60 秒，§4.3b 那一支）也收一次「run 早就不在的 queued」，包含這條規則上線前就留下來的。
 
 **abort 不動 queued**（AGM 裁示 2026-09-16）：`POST /api/bots/{id}/abort` 的語意是「停掉這一回合」，排在後面的是 AGM 正當的派工，
-abort 之後照常 flush 出去。要取消排隊的派工，走交辦 `cancel`（上面那條會一併撤 queued）。這不是漏撤，不要當成 bug 修。
+abort 之後照常 flush 出去（但先照下一段等寬限）。要取消排隊的派工，走交辦 `cancel`（上面那條會一併撤 queued）。這不是漏撤，不要當成 bug 修。
+
+**使用者中斷之後，先讓使用者拿回輸入框**（AGM 裁示 2026-09-16，AM-1-XH 第二輪 review；2b0fe98 起頭、之後補齊到規格）：使用者按 Esc 多半是要親手接管、馬上打字，
+排在後面的派工立刻 flush 等於跟使用者搶輸入框。`lifecycle::interrupt_grace`：
+- **觸發**：這顆 bot 最近一個回合是被使用者中斷結束的。三個來源：網頁 Esc（`interrupt_bot`）、強制中止（`abort_turns`）當下記一筆
+  （CLI 寫 transcript 比收回合觸發的 flush 慢，只靠 log 會被搶先）；使用者直接在 pane 裡按 Esc 沒有事件，讀 log 的最後一個回合邊界——
+  claude transcript 帶 `interruptedMessageId` 的 `[Request interrupted by user…]`，codex rollout `event_msg`／`turn_aborted`（`reason: interrupted`）。
+  中斷之後又有 prompt、或回完一回合，就不算。
+- **等多久**：這顆 bot **連續 idle** 滿寬限（預設 60 秒，`AM_INTERRUPT_FLUSH_GRACE_SECS`，看不懂／0／負數回預設），而且不早於中斷本身；
+  中間 working 過就重算。idle 計時跟 §4.3b 的卡住回合共用同一份來源，語意分開（那邊收尾 in_flight，這邊讓使用者先拿回輸入框）。
+  寬限內 flush 不送、掛 timer 到寬限結束自己再來一次（閒著的 bot 沒有別的邊叫醒它）。
+- **使用者有新輸入就不再擋**：中斷之後這個對話開了任何非 queued 的 turn（網頁送 prompt、在 pane 裡打字送出）＝使用者已經拿回輸入框。
+  那則在跑時派工本來就排在後面；那一回合結束後照一般規則馬上送，不再等寬限。AGM 自己排進去的 queued 不算使用者輸入。
+- **寬限內 AGM 直接派新的一件**（對方沒有 in_flight，本來會直接打字）：一樣排進佇列等寬限，不直接打。
+- **不變的**：一般回合結束照舊立刻 flush；不撤 queued（上面的 abort 裁示）；撤銷檢查排在寬限之前（不要的派工照樣當場撤）；
+  寬限中的 queued 對 §18.10 `delivery_critical` **照原規則算**——bot 有活著的 run 且不是 `blocked` 就是臨界區，不另開例外。
+  接管最久算 30 分鐘，之後回到一般排隊（不讓一次 Esc 永遠壓著佇列）；計時與網頁的接管標記都在記憶體，
+  daemon 重啟後從第一次看到 idle 重新算（log 裡的中斷照樣認得）。
 
 **排隊中的 prompt 重試**：
 可重試原因（框忙、transcript 還沒回報、畫面檢查擋下〔選單／登入畫面〕、拿不到 herdr client…）放回 `queued` **並掛重試 timer**
@@ -466,7 +483,7 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run
 
 ### 6.4 停止／刪除 Bot（per-bot 鎖內）
 - `interrupt`：`agent.send_keys [esc]`，Run 狀態不變。
-  **按了 interrupt 之後，這顆 bot 排著的 queued 不立刻送**（AGM 2026-09-16）：使用者按 Esc 多半是要親手接管、馬上打字，AGM 的派工搶進去等於跟他搶輸入框。flush 要等 bot **連續閒置滿寬限**（預設 60 秒，`AM_QUEUE_INTERRUPT_GRACE_SECS` 可調，看不懂／0／負數回預設）才送；寬限從「按 interrupt 的時刻」與「這個對話最後一個回合結束」較晚的那個算起，所以使用者在寬限內自己送的 prompt 會先跑，排隊的接在它後面。判斷在 `flush_queued_locked` 裡（所有 flush 呼叫端都吃得到），排在「交辦已不要就撤銷」之後；寬限內 return 會掛 timer 到寬限結束。接管標記只在記憶體、最久 30 分鐘：daemon 重啟就回到一般排隊。abort 仍不撤 queued；寬限內的 queued 照樣算送達臨界區（會延長換版窗口被擋的時間）。
+  **按了 interrupt 之後，這顆 bot 排著的 queued 不立刻送**：先讓使用者拿回輸入框，規則見 §4.4a「使用者中斷之後，先讓使用者拿回輸入框」。
 - `stop`：Run `stopping` → in-flight Turn 標 `failed` → `ctrl+c` ×2（間隔 500 ms）→ 等 `pane.exited` 或 agent 消失最多 10 秒 → 否則 `pane.close` → `stopped` → 關訂閱。
 - `POST /bots/:id/restart`：有 Run 先 stop 再 start，用來套用改過的 model／args／identity／env。
 - DELETE Bot：TOML 移除＋DB `deleted_at`（單一臨界區，§3.1；保留對話）→ stop（child 與自己）→ 刪 `~/.config/agents-manager/bots/<bot_id>/`（遠端 ssh `rm -rf`，失敗只 log）。
