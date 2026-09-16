@@ -1329,15 +1329,18 @@ launchd `com.agm.claude-release` 每 30 分鐘跑 `bin/claude-release-kick.sh`�
   終端備援不會因為「跑完了」就被驗收。派不出去的交辦也進 `awaiting_review`（`dispatch_failed`）。
 - **送不進去的保險絲**（AGM 裁示 2026-09-16）：對方正在回合中會回 409，那是暫時的——但「暫時」要有盡頭。
   409 這條分支有自己的退避梯（15 秒起加倍，上限 `AM_DISPATCH_CONFLICT_BACKOFF_SECS`，預設 **900 秒**，要大於典型回合長度；其他分支的梯子不變），
-  而且**有時間上限**：從建立起超過 `AM_DISPATCH_CONFLICT_GIVE_UP_MINS`（預設 30 分鐘）還送不進去，就把交辦標成 **`blocked`**（不是 `dispatch_failed`——工作沒失敗，是進不去），
+  而且**有時間上限**：從**這一輪第一次撞 409**（`conflict_since`）起超過 `AM_DISPATCH_CONFLICT_GIVE_UP_MINS`（預設 30 分鐘）還送不進去，就把交辦標成 **`blocked`**（不是 `dispatch_failed`——工作沒失敗，是進不去），
   並推一則 `assignment_undeliverable` 進 inbox（AGM 看得到，不是只寫 log）。`blocked` 仍在 `OPEN_STATES` 裡，所以不會從未結案與 ownership 衝突裡消失。
+  計時不從 `created_at` 起（review2 2026-09-16）：在 `quota_blocked` 等額度、被 restart 窗口 hold 是合法的等待，算進去的話恢復後第一個暫時性 409 就直接 `blocked`。
+  `conflict_since` 在第一次 409 時寫下，進 `quota_blocked`、被窗口 hold（含窗口結束解除 hold）、送達時清掉；`error` 照實寫最後一次 409 的原因與起點。
+  `assignment_undeliverable` 的 `hint` 指向 `review --decision followup`（新的 `followup_request_id`）或 `cancel`——**同一個 request id 再 `assign` 是冪等查詢**，只會拿回那筆 `blocked`。
 - **排進佇列不是失敗**（2026-09-16 AGM）：對方回合中時交辦停在 `delivered`＋`delivery='queued'`，
   只推一則 `assignment_queued`（`needs_review:false`，路由表歸在「只記錄、不叫醒」那一組），
   **不填 `completed_at`、不把 `queued` 寫進 `error`、不推 `assignment_failed`**。
   根因是 `TurnEvent::is_done()` 把「非 in_flight」都當成結束，於是剛建好的 `queued` turn 事件立刻把交辦結案；
   現在 `is_done()` 只認 `completed`／`completed_fallback`／`failed`，`on_turn_done` 也再擋一次。
   `--notice` 排隊之後照舊：真的送出、對方回合結束就自動結案（`assignment_noticed`），不進 `awaiting_review`。
-  壞掉的環境變數（看不懂、0、負數）一律回預設；讀不懂 `created_at` 就繼續重試，不因為一個壞欄位把工作收起來。
+  壞掉的環境變數（看不懂、0、負數）一律回預設；讀不懂 `conflict_since` 就繼續重試，不因為一個壞欄位把工作收起來。
   這條保險絲跟「派送真的排進佇列」是兩件事：後者（§4.4a 的 `queued` 生產者）上線之後，這條仍然有效——排進去也送不出來時一樣要看得見。
   2026-09-16 的實況：一張交辦對一顆回合 10～20 分鐘的 bot 重試 12 次、42 分鐘，狀態一直是 `queued`，最後由人手動取消——沒有任何地方會自己說「這件事沒送出去」。
 - 驗收走 `POST /api/supervisor/assignments/{id}/review`，記 actor、來源、理由、證據（`supervisor_reviews`），同 decision 重送冪等。回合還在跑時只接受 `cancel`（不中止回合，之後的回覆不再記到這筆）；

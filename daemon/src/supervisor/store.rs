@@ -313,6 +313,9 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
         // 回合結束時 run 上記的 `turn_error`（撞限、API 錯誤、斷線…）。`turn_status` 只有
         // completed/failed 這種粗分類，換手要看的是「為什麼」。
         ("turn_error", "ALTER TABLE supervisor_assignments ADD COLUMN turn_error TEXT"),
+        // 這一輪「一直 409 送不進去」從什麼時候開始（第一次撞 409 寫下）。409 保險絲從這裡計時，
+        // 不是 `created_at`：在 quota_blocked 或 restart 窗口 hold 裡合法等待的時間不算「送不進去」。
+        ("conflict_since", "ALTER TABLE supervisor_assignments ADD COLUMN conflict_since TEXT"),
     ] {
         if !has_column(pool, "supervisor_assignments", col).await? {
             sqlx::query(ddl).execute(pool).await?;
@@ -461,6 +464,9 @@ pub struct Assignment {
     /// 回報給哪個 AGM 角色驗收（`patrol` | `responder`；NULL = 協調者）。見 roles.rs。
     #[sqlx(default)]
     pub review_role: Option<String>,
+    /// 這一輪第一次撞 409 的時間（見 migrate 的欄位註解）。
+    #[sqlx(default)]
+    pub conflict_since: Option<String>,
 }
 
 /// Lifecycle states an assignment can still move out of on its own.
@@ -531,6 +537,8 @@ impl Assignment {
             "mission_id": self.mission_id,
             "role": self.mission_role,
             "turn_error": self.turn_error,
+            // 一直 409 送不進去的這一輪從什麼時候開始；保險絲從這裡計時（SPEC §18.8）。
+            "conflict_since": self.conflict_since,
         })
     }
 
@@ -1176,7 +1184,7 @@ pub async fn mark_delivered(pool: &SqlitePool, id: &str, turn_id: &str, delivery
     let status = if delivery == "unknown" { "unknown" } else { "delivered" };
     sqlx::query(
         "UPDATE supervisor_assignments SET turn_id=?, delivery=?, status=?, attempts=attempts+1,
-           next_attempt_at=NULL, updated_at=? WHERE id=?",
+           next_attempt_at=NULL, conflict_since=NULL, updated_at=? WHERE id=?",
     )
     .bind(turn_id)
     .bind(delivery)
@@ -1192,10 +1200,10 @@ pub async fn mark_delivered(pool: &SqlitePool, id: &str, turn_id: &str, delivery
 ///
 /// Waiting out a maintenance window is not a failed delivery: counting it would push the
 /// assignment up the backoff ladder, and enough windows would eventually retire work that was
-/// never actually tried.
+/// never actually tried. For the same reason the 409 streak ends here (`conflict_since`).
 pub async fn hold(pool: &SqlitePool, id: &str, until: &str, why: &str) -> Result<()> {
     sqlx::query(
-        "UPDATE supervisor_assignments SET next_attempt_at=?, error=?, updated_at=? WHERE id=? AND status='queued'",
+        "UPDATE supervisor_assignments SET next_attempt_at=?, error=?, conflict_since=NULL, updated_at=? WHERE id=? AND status='queued'",
     )
     .bind(until)
     .bind(why)
@@ -1211,7 +1219,7 @@ pub async fn hold(pool: &SqlitePool, id: &str, until: &str, why: &str) -> Result
 /// deadline written into the hold; returns how many were lifted.
 pub async fn clear_restart_holds(pool: &SqlitePool) -> Result<u64> {
     Ok(sqlx::query(
-        "UPDATE supervisor_assignments SET next_attempt_at=NULL, error=NULL, updated_at=?
+        "UPDATE supervisor_assignments SET next_attempt_at=NULL, error=NULL, conflict_since=NULL, updated_at=?
           WHERE status='queued' AND error LIKE 'restart window held until %'",
     )
     .bind(crate::db::now())
@@ -1228,6 +1236,25 @@ pub async fn defer(pool: &SqlitePool, id: &str, next_attempt_at: &str, why: &str
     .bind(next_attempt_at)
     .bind(why)
     .bind(crate::db::now())
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// 409（對方回合中、沒有 run、框裡有字…）：跟 [`defer`] 一樣排下一次，並記下這一輪第一次撞 409 的時間。
+/// 已經有就不動——保險絲量的是「連續送不進去多久」。
+pub async fn defer_conflict(pool: &SqlitePool, id: &str, next_attempt_at: &str, why: &str) -> Result<()> {
+    let now = crate::db::now();
+    sqlx::query(
+        "UPDATE supervisor_assignments SET attempts=attempts+1, next_attempt_at=?, error=?,
+                conflict_since=COALESCE(conflict_since, ?), updated_at=?
+          WHERE id=? AND status='queued'",
+    )
+    .bind(next_attempt_at)
+    .bind(why)
+    .bind(&now)
+    .bind(&now)
     .bind(id)
     .execute(pool)
     .await?;
@@ -1386,7 +1413,7 @@ pub async fn park_quota_blocked(
     let mut tx = pool.begin().await?;
     let moved = sqlx::query(
         "UPDATE supervisor_assignments
-            SET status='quota_blocked', resume_at=?, error=?, updated_at=?
+            SET status='quota_blocked', resume_at=?, error=?, conflict_since=NULL, updated_at=?
           WHERE id=? AND status IN ('queued','delivered','unknown')",
     )
     .bind(resume_at)
