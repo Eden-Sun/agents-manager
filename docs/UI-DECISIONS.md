@@ -18,6 +18,7 @@
 - 真正的 modal（新增 Project／Bot、環境設定、確認框、BlockedModal、MemPaneModal、手機抽屜、圖片放大）才有遮罩並共用
   `useDialogFocus`（Tab 循環、關閉還原觸發元件；確認框先 focus 輸入欄或「取消」）。Bot 設定在桌機是**非模態** popover（背景可點、可拖圖），
   手機是全螢幕 sheet。
+- 對話寬度：對話欄 `--chat-max: max(1000px, 90%)`；**每則訊息也吃到 90%**（2026-09-16 使用者：欄放寬了但訊息還卡在 680px，寬螢幕等於沒放寬）。自己打的那一側留 `min(900px, 82%)`，左右分邊還看得出來。
 - Composer 只在首次掛載／切換對象時還原選取；自動 focus 前 `activeElement` 必須是 `body` 或同一個 composer 內，手機一律不自動 focus（不彈鍵盤）。
 - 每個畫面有自己的 URL（`lib/routes.ts` 純函式 + `store/routeSync.ts`）。網址是 store 的投影：入口照舊走 store，不改成 `<a href>`。
   對話↔終端用 `replaceState`；設定浮窗與手機抽屜用 `pushState`（上一頁＝關掉）。壞連結回首頁並提示；`?token=` 不留在網址上。

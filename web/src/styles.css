@@ -1611,7 +1611,9 @@ button.run-debug-toggle:hover:not(:disabled) {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  max-width: min(680px, 88%);
+  /* 2026-09-16 使用者：對話窗放寬到 90% 之後，訊息仍被 680px 卡住，寬螢幕等於沒放寬。
+     改成跟著對話欄走（`--chat-max` 已經是 max(1000px, 90%)），只留一個讀得下去的上限。 */
+  max-width: 90%;
   margin-top: 22px;
 }
 
@@ -1629,12 +1631,13 @@ button.run-debug-toggle:hover:not(:disabled) {
 .msg.user {
   align-self: flex-end;
   align-items: flex-end;
-  max-width: min(560px, 82%);
+  /* 自己打的字通常短，維持窄一點才看得出左右分邊；長訊息照樣吃得到 90%。 */
+  max-width: min(900px, 82%);
 }
 
 .msg.assistant {
   align-self: flex-start;
-  max-width: min(680px, 88%);
+  max-width: 90%;
 }
 
 .msg.system {
