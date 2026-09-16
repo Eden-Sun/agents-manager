@@ -333,12 +333,8 @@ function GroupComposer({
     if (toAgm) {
       if (sending) return
       setSending(true)
-      void startMission(projectId, {
-        text: body,
-        // 同一個請求重送回同一筆任務，手滑連按兩下不會開兩個。
-        client_request_id: `mission-${projectId}-${Date.now()}`,
-        ...missionOpts,
-      }).then((id) => {
+      // crid 由 store 的 `missionRequests` 給：同一段草稿重送回同一筆任務，手滑連按兩下不會開兩個。
+      void startMission(projectId, { text: body, ...missionOpts }).then((id) => {
         setSending(false)
         if (id) setText('')
       })

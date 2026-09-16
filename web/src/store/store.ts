@@ -1696,6 +1696,15 @@ export const useStore = create<StoreState>((set, get) => ({
             set({ missionsSupported: false })
             return
           }
+          // 這一筆被清掉了（AGM 結案時常有）：收掉這張卡就好，其他任務跟「交給 AGM」開關照常。
+          if (api.isMissionGone(e)) {
+            set((s) => ({
+              missionDetail: withoutKey(s.missionDetail, missionId),
+              missions: dropMission(s.missions, missionId),
+              missionLoadErrors: { ...s.missionLoadErrors, [missionId]: '這筆任務已經不在了' },
+            }))
+            return
+          }
           set((s) => ({ missionLoadErrors: { ...s.missionLoadErrors, [missionId]: errText(e) } }))
         } finally {
           set((s) => ({ missionLoading: { ...s.missionLoading, [missionId]: false } }))
@@ -1708,7 +1717,11 @@ export const useStore = create<StoreState>((set, get) => ({
 
   async startMission(projectId, input) {
     try {
-      const { mission, created } = await api.createMission(projectId, input)
+      // crid 交給 `missionRequests`：每按一次就換一個（例如 `Date.now()`）等於把 API 的冪等關掉——
+      // daemon 已經 commit 但回應在路上斷掉時，使用者照提示再按一次就會多出第二筆任務。
+      const { mission, created } = await sendMissionRequest('create', projectId, input.text, (id) =>
+        api.createMission(projectId, { ...input, client_request_id: id }),
+      )
       if (!mission) return null
       set((s) => ({ missions: mergeMission(s.missions, mission) }))
       // 同 client_request_id 重送回 `created:false`，不再提示。
@@ -1779,6 +1792,18 @@ export const useStore = create<StoreState>((set, get) => ({
     }
   },
 }))
+
+/** 任務不在了：從已載入的清單裡拿掉，沒載過的專案不動。 */
+function dropMission(map: Record<string, Mission[]>, missionId: string): Record<string, Mission[]> {
+  const out: Record<string, Mission[]> = {}
+  let changed = false
+  for (const [pid, list] of Object.entries(map)) {
+    const next = list.filter((m) => m.id !== missionId)
+    if (next.length !== list.length) changed = true
+    out[pid] = next
+  }
+  return changed ? out : map
+}
 
 /** 清單沒載過就不併：憑一筆建出半份清單會讓任務看起來只有一筆。 */
 function mergeMission(map: Record<string, Mission[]>, mission: Mission): Record<string, Mission[]> {

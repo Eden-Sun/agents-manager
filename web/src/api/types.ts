@@ -872,7 +872,8 @@ export interface MissionParentRef {
 /** `POST /api/projects/:id/missions`（§11） */
 export interface NewMissionInput {
   text: string
-  client_request_id: string
+  /** 省略時由 store 的 `missionRequests` 給：重送要沿用同一個，才吃得到 daemon 的冪等。 */
+  client_request_id?: string
   delivery_mode: MissionDelivery
   executor_kind: BotKind
   on_5h_limit: MissionOn5h
