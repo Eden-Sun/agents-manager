@@ -121,10 +121,14 @@ pub struct Deployed {
 ///
 /// No token, by design: `bin/agm` asks the daemon for one over loopback at run time, so the
 /// credential never sits in a file, in argv, or in a handoff note.
-fn runtime_json(port: u16, bot_id: &str, data_dir: &str) -> Value {
+///
+/// `responder_id`：協調者的 bot（沒建立就是 null）。巡檢目錄的 ops 腳本（`claude-release-kick.sh`）派工給它——
+/// 巡檢不能對自己下交辦。以前只有協調者自己的目錄寫這一欄，全新安裝的巡檢目錄沒有，腳本每一輪都跳過（review2 sup #1）。
+fn runtime_json(port: u16, bot_id: &str, responder_id: Option<&str>, data_dir: &str) -> Value {
     json!({
         "daemon_url": format!("http://127.0.0.1:{port}"),
         "manager_bot_id": bot_id,
+        "responder_bot_id": responder_id,
         // The CLI also accepts `bot_id`, which an earlier draft wrote. Both are emitted so a
         // deployment cannot be broken by whichever half is upgraded first.
         "bot_id": bot_id,
@@ -144,15 +148,12 @@ fn runtime_json(port: u16, bot_id: &str, data_dir: &str) -> Value {
 /// `persona` is the **stored** text, passed in rather than read from the binary: `persona.md`
 /// is a readable copy of what the manager is actually running on, and regenerating it from the
 /// embedded default would make the copy disagree with the original.
-pub fn deploy_files(app: &Arc<App>, bot_id: &str, persona: &str) -> std::io::Result<Deployed> {
+pub fn deploy_files(app: &Arc<App>, bot_id: &str, responder_id: Option<&str>, persona: &str) -> std::io::Result<Deployed> {
     let dir = agm_dir(app);
     std::fs::create_dir_all(dir.join("bin"))?;
     std::fs::write(dir.join("CLAUDE.md"), claude_md(&dir, bot_id, app.port))?;
     std::fs::write(dir.join("persona.md"), persona)?;
-    std::fs::write(
-        dir.join("runtime.json"),
-        serde_json::to_string_pretty(&runtime_json(app.port, bot_id, &app.data_dir.to_string_lossy()))?,
-    )?;
+    write_runtime_json(app, bot_id, responder_id)?;
     if !dir.join("handoff.md").exists() {
         std::fs::write(dir.join("handoff.md"), "# AGM 管理摘要\n\n（尚未寫入。權威紀錄在 AG Man 資料庫。）\n")?;
     }
@@ -164,6 +165,19 @@ pub fn deploy_files(app: &Arc<App>, bot_id: &str, persona: &str) -> std::io::Res
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))?;
     }
     Ok(Deployed { cwd: dir.to_string_lossy().to_string(), agm_cli: "deployed".into() })
+}
+
+/// 只重寫巡檢目錄的 `runtime.json`。協調者在巡檢之後才建立時由 `responder::ensure_env` 呼叫，
+/// 巡檢目錄還不存在（沒 setup 過）就什麼都不做。
+pub fn write_runtime_json(app: &Arc<App>, bot_id: &str, responder_id: Option<&str>) -> std::io::Result<()> {
+    let dir = agm_dir(app);
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    std::fs::write(
+        dir.join("runtime.json"),
+        serde_json::to_string_pretty(&runtime_json(app.port, bot_id, responder_id, &app.data_dir.to_string_lossy()))?,
+    )
 }
 
 /// Create (or find) the AGM project and bot in config.toml, then project it into SQLite.
@@ -294,7 +308,8 @@ pub async fn ensure_env(app: &Arc<App>) -> Result<(String, String, Deployed), Lc
 
     crate::projection::project_config(&app.cfg, &app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?;
 
-    let deployed = deploy_files(app, &bot_id, &persona).map_err(|e| LcError::Upstream(e.to_string()))?;
+    let responder = super::roles::responder_bot(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?.map(|b| b.id);
+    let deployed = deploy_files(app, &bot_id, responder.as_deref(), &persona).map_err(|e| LcError::Upstream(e.to_string()))?;
     store::set_env(&app.db, &bot_id, &project_id, &deployed.cwd)
         .await
         .map_err(|e| LcError::Upstream(e.to_string()))?;
@@ -325,14 +340,44 @@ mod tests {
     /// directory the manager itself can read and quote back.
     #[test]
     fn the_runtime_file_names_the_manager_and_carries_no_secret() {
-        let v = runtime_json(7788, "botULID", "/data");
+        let v = runtime_json(7788, "botULID", Some("respULID"), "/data");
         assert_eq!(v["daemon_url"], "http://127.0.0.1:7788");
         assert_eq!(v["manager_bot_id"], "botULID");
+        assert_eq!(v["responder_bot_id"], "respULID", "巡檢目錄的 ops 腳本派工給協調者要讀得到");
+        assert_eq!(runtime_json(7788, "botULID", None, "/data")["responder_bot_id"], Value::Null, "單角色安裝照實寫 null");
         assert_eq!(v["bot_id"], "botULID", "the older key stays, so either half can upgrade first");
         assert_eq!(v["role"], "patrol");
         assert_eq!(v["self_bot_id"], "botULID");
         let text = v.to_string().to_lowercase();
         assert!(!text.contains("token"), "no token, and no field that could hold one: {text}");
+    }
+
+    /// ops 腳本測試用的 runtime.json 必須是**真的** `runtime_json()` 寫出來的形狀：上一輪測試自己造了一份
+    /// 正式安裝根本不存在的形狀，腳本在測試裡綠、在正式環境每一輪跳過（review2 sup #1）。
+    /// 形狀一變這裡就紅；照訊息把 fixture 換成新的輸出，bash 測試才會跟著吃到。
+    #[test]
+    fn the_ops_script_fixture_is_what_setup_actually_writes() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/ops/fixtures/patrol-runtime.json");
+        let want = runtime_json(7788, "bot-agm", Some("bot-resp"), "/data");
+        let have: Value = serde_json::from_str(&std::fs::read_to_string(path).expect("fixture exists")).expect("fixture is JSON");
+        assert_eq!(have, want, "scripts/ops/fixtures/patrol-runtime.json 要換成：\n{}", serde_json::to_string_pretty(&want).unwrap());
+    }
+
+    /// 協調者在巡檢之後才建立：巡檢目錄的 runtime.json 要補上它；巡檢還沒 setup 過就什麼都不寫。
+    #[tokio::test]
+    async fn the_patrol_runtime_file_learns_about_a_responder_set_up_later() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let file = agm_dir(&app).join("runtime.json");
+        write_runtime_json(&app, "bot-agm", Some("bot-resp")).unwrap();
+        assert!(!file.exists(), "巡檢目錄不存在時不替它建");
+        std::fs::create_dir_all(agm_dir(&app)).unwrap();
+        write_runtime_json(&app, "bot-agm", None).unwrap();
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(v["responder_bot_id"], Value::Null);
+        write_runtime_json(&app, "bot-agm", Some("bot-resp")).unwrap();
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!((v["manager_bot_id"].as_str(), v["responder_bot_id"].as_str()), (Some("bot-agm"), Some("bot-resp")));
     }
 
     #[test]

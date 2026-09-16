@@ -1,0 +1,11 @@
+{
+  "daemon_url": "http://127.0.0.1:7788",
+  "manager_bot_id": "bot-agm",
+  "responder_bot_id": "bot-resp",
+  "bot_id": "bot-agm",
+  "role": "patrol",
+  "self_bot_id": "bot-agm",
+  "data_dir": "/data",
+  "supervisor_id": "AGM",
+  "remote_name": "AGM"
+}

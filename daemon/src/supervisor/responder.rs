@@ -298,6 +298,12 @@ pub async fn ensure_env(
     // 專案只有一個 path，所以跟巡檢同專案之後，協調者自己的目錄改由 bot 記住。
     set_cwd(app, &bot_id, &path).await?;
     let deployed = deploy_files(app, &bot_id, manager_id.as_deref(), &persona).map_err(up)?;
+    // 巡檢的 runtime.json 也要知道協調者是誰：它目錄裡的 ops 腳本派工給協調者（巡檢不能對自己下交辦）。
+    if let Some(m) = manager_id.as_deref() {
+        if let Err(e) = super::setup::write_runtime_json(app, m, Some(&bot_id)) {
+            tracing::warn!(error = %e, "could not record the responder in the patrol runtime.json");
+        }
+    }
     roles::set_env(&app.db, Role::Responder, &bot_id, &project_id, &deployed.cwd).await.map_err(up)?;
     roles::set_runtime(&app.db, Role::Responder, &identity, &model, &effort).await.map_err(up)?;
     Ok((project_id, bot_id, deployed))

@@ -80,7 +80,7 @@ Claude Code 換版就派 AGM 解析新版有什麼用得上的，AGM 的回覆�
 | --- | --- | --- |
 | `AGM_DIR` | `~/.config/agents-manager/supervisor/AGM` | 總管 cwd（`bin/agm`、log、state） |
 | `CLAUDE_VERSIONS_DIR` | `~/.local/share/claude/versions` | 版本目錄；目錄名就是版本號，最新的那個是現在會跑的 |
-| `AGM_RELEASE_BOT` | `runtime.json` 的 `manager_bot_id` | 派給誰；查不到就跳過，不亂派給別的 bot |
+| `AGM_RELEASE_BOT` | `runtime.json` 的 `release_bot_id`，沒有就 `responder_bot_id`（協調者） | 派給誰；**不能是巡檢自己**（daemon 擋總管對自己下交辦）。查不到就跳過，不亂派給別的 bot |
 
 狀態檔 `claude-release.last`＝已經解析過的版本；派工成功才寫。隔離測試：`bash scripts/ops/claude-release-kick_test.sh`（假的 AGM 目錄、版本目錄與 `bin/agm`）。
 

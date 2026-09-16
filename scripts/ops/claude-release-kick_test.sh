@@ -14,8 +14,10 @@ setup() {
   export AGM_DIR="$ROOT/agm" CLAUDE_VERSIONS_DIR="$ROOT/versions"
   mkdir -p "$AGM_DIR/bin" "$CLAUDE_VERSIONS_DIR"
   cp "$HERE/claude-release-task.md" "$AGM_DIR/claude-release-task.md"
-  # 正式安裝的形狀：巡檢＋協調者。派工目標**不能**是巡檗自己（daemon 會 400）。
-  printf '%s' '{"manager_bot_id":"bot-agm","responder_bot_id":"bot-resp"}' > "$AGM_DIR/runtime.json"
+  # 正式安裝的形狀：`supervisor::setup::runtime_json()` 真正寫出來的那份（巡檢＋協調者），由 Rust 測試
+  # `the_ops_script_fixture_is_what_setup_actually_writes` 釘住——上一輪這裡手寫了一份正式環境根本不存在的形狀。
+  # 派工目標**不能**是巡檢自己（daemon 會 400）。
+  cp "$HERE/fixtures/patrol-runtime.json" "$AGM_DIR/runtime.json"
   cat > "$AGM_DIR/bin/agm" <<'STUB'
 #!/bin/bash
 echo "$*" >> "$AGM_DIR/calls.log"
@@ -110,6 +112,16 @@ ver 2.1.274
 bash "$SCRIPT"
 check "找不到對象就跳過" "找不到要派給誰" "$AGM_DIR/claude-release.log"
 check_no "不亂派" "assign" "$AGM_DIR/calls.log"
+teardown
+
+# 5b. 單角色安裝（setup 寫 responder_bot_id: null）：跳過，不退回派給巡檢自己。
+setup
+ver 2.1.273; bash "$SCRIPT"
+python3 -c 'import json,sys;p=sys.argv[1];d=json.load(open(p));d["responder_bot_id"]=None;json.dump(d,open(p,"w"))' "$AGM_DIR/runtime.json"
+ver 2.1.274
+bash "$SCRIPT"
+check "沒有協調者就跳過" "找不到要派給誰" "$AGM_DIR/claude-release.log"
+check_no "不派給巡檢自己" "--bot bot-agm" "$AGM_DIR/calls.log"
 teardown
 
 # 6. 殘留的鎖：不派，交 AGM 檢查。
