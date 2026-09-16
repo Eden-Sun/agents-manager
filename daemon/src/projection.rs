@@ -213,7 +213,12 @@ async fn project_inner(store: &ConfigStore, pool: &SqlitePool, allow: Option<&De
                         // A host's shell `ccN` alias is a legal binding too (API.md §10.2: the
                         // identity list is `[[identities]]` ∪ that host's `ccN`); the config never
                         // owns those, so an unknown name is only an error outside that set.
-                        match identities.iter().find(|i| i.name == idn) {
+                        // 身份以 `(host, name)` 為鍵（`26a14c2`）：本機的 `work`（claude）與 m4p 的 `work`（codex）可以並存，
+                        // 只看名字會拿到第一筆同名的、判成 kind 不符，而那時 config 已經落盤、之後 daemon 起不來（review core 6）。
+                        // 規則跟 API 的 `tools::identity_for_host` 同一份（`merge_identities`）。這裡拿不到那台偵測到的 `ccN`，
+                        // 所以傳 `None`：沒寫 host 的 `ccN` 在遠端先不給，落到下面「shell alias 本來就合法」那條。
+                        let merged = crate::tools::merge_identities(&identities, &p.host, None);
+                        match merged.iter().map(|(i, _)| i).find(|i| i.name == idn) {
                             None if crate::tools::SHELL_IDENTITY_NAMES.contains(&idn) => {}
                             None => bail!("bot `{}` references unknown identity `{idn}`", b.name),
                             Some(i) if i.kind != b.kind => {
@@ -435,6 +440,35 @@ mod tests {
     }
 
     /// 2026-09-14：第二顆 daemon 用 /tmp 的空 config 開到正式 DB，8 秒軟刪 15 顆 bot／6 個專案。
+    /// review 2026-09-16 core 6：跨主機同名、不同 kind 的身份。API 分主機放行並寫進 config，投影卻只看名字、
+    /// 拿到本機那份 claude 判成 kind 不符——之後每支寫設定的 API 都 502，重啟時 daemon 起不來。
+    #[tokio::test]
+    async fn an_identity_name_is_resolved_on_the_bots_own_host() {
+        let dir = std::env::temp_dir().join(format!("am-projection-identity-{}", db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let text = |bot_kind: &str| {
+            format!(
+                "[server]\nlisten = '127.0.0.1:7788'\n\n\
+                 [[identities]]\nname = 'work'\nkind = 'claude'\n\n\
+                 [[identities]]\nname = 'work'\nkind = 'codex'\nhost = 'm4p'\n\n\
+                 [[projects]]\nid = 'p1'\npath = '/Users/me/wt'\nlabel = 'wt'\nhost = 'm4p'\n\n\
+                 [[projects.bots]]\nid = 'b1'\nname = 'worker'\nkind = '{bot_kind}'\nidentity = 'work'\n"
+            )
+        };
+        std::fs::write(&path, text("codex")).unwrap();
+        let store = ConfigStore::load(path.clone()).await.unwrap();
+        let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
+        project_config(&store, &pool).await.expect("m4p 的 work 是 codex，跟 bot 一致");
+
+        // 在 m4p 上綁 claude：那台的 work 是 codex，照樣擋（不會去拿本機那份 claude 放行）。
+        std::fs::write(&path, text("claude")).unwrap();
+        let err = project_config(&store, &pool).await.unwrap_err().to_string();
+        assert!(err.contains("is for codex"), "{err}");
+        pool.close().await;
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[tokio::test]
     async fn refuses_an_empty_config_over_a_populated_db() {
         let dir = std::env::temp_dir().join(format!("am-projection-bulk-{}", db::ulid()));
