@@ -5,7 +5,10 @@
 /* 沒額度／limit_hit：紅框要留、紅點不要（2026-09-16 使用者）。
    只有這一格用圓角外框，旁邊選取格不再做成第二張卡。 */
 .quota-hp.quota-blocked,
-.quota-hp.focused.quota-blocked {
+.quota-hp.focused.quota-blocked,
+/* 分隔線規則 `.quota-hp + .quota-hp` 跟這條同特異度，載入順序一翻就把左邊那條染回灰色，看起來像缺一邊
+   （2026-09-16 使用者：紅框左側不見了）。多一個 class 的特異度贏過它，不靠檔案順序。 */
+.quota-hp + .quota-hp.quota-blocked {
   border-color: color-mix(in srgb, var(--danger) 55%, var(--border));
   border-radius: 7px;
   margin: 0 2px;
