@@ -238,7 +238,7 @@ pub(crate) fn idle_threshold(said_something: bool, agent_status: &str) -> u32 {
 /// Every form of what we sent, for echo matching: image prompts were delivered with
 /// `attach::deliver_text`'s appendix, which came back stored as an answer
 /// (`01M1XSVME9SKEG1NZXG51HFP73`, 2026-09-07). Delivered form first so the longer text strips first.
-async fn turn_echo_texts(app: &Arc<App>, turn_id: &str) -> Vec<String> {
+pub(crate) async fn turn_echo_texts(app: &Arc<App>, turn_id: &str) -> Vec<String> {
     let rows = db::turn_user_messages_with_attachments(&app.db, turn_id).await.unwrap_or_default();
     let mut out = Vec::new();
     for (content, attachments) in rows {

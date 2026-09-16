@@ -260,6 +260,7 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     // Agent titles have no herdr event, so they are polled.
     events::spawn_title_poller(app.clone());
     tui_prompts::spawn_survey_watcher(app.clone());
+    lifecycle::spawn_stuck_turn_sweeper(app.clone());
     update_watch::spawn_update_watcher(app.clone());
     // SPEC §11.4.4: remote hook spools whose status event never arrived (one ssh per host, 30s).
     hookrecv::spawn_spool_scanner(app.clone());

@@ -297,6 +297,8 @@ async fn handle_status(app: &Arc<App>, host: &str, session: &str, ev: &crate::he
         return;
     };
     let prev = run.agent_status.clone();
+    // 卡住的 turn 要「持續」idle 才收：每個狀態事件都記，閃一下 working 就重算。
+    crate::lifecycle::observe_agent_status(&run.id, &status);
     if prev != status {
         let _ = sqlx::query("UPDATE runs SET agent_status = ? WHERE id = ?")
             .bind(&status)

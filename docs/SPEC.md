@@ -150,6 +150,23 @@ pane env 的 `AM_RUN_ID` 只供診斷。
   - 沒有游標時要求畫面上有 prompt 回音（否則整個 scrollback 變一則訊息）；擷取不到只推游標、不寫訊息。
   - 去重：游標 + 與上一則 assistant 比對（herdr 同一輪可能報兩次 idle；重啟會讀到同一畫面）；單則上限 6000 字；認領時的補記只在對話為空時做一次。
 
+### 4.3b 回合結束沒被偵測到：reconcile 收尾（AGM 2026-09-16）
+上面兩個觸發點都會漏：hook 沒來；快照備援只收 `delivery = ok`、畫面殘留 spinner 就放手、事件漏掉 `working → idle` 那一邊就根本沒排。
+漏掉的 Turn 永遠停在 `in_flight`：同一對話的 `queued` 送不出去、佔住「每對話一筆 queued」的名額，掛在上面的交辦停在 `delivered`。
+（實例：k8bw2f `01M2MR95RXVHADA4TS8M0YHVH7` 09:20 起、09:59 已 idle、10:22 重啟才清，期間部署交辦 409 七次被保險絲標 `blocked`；
+R-部署console-fork `01M2MG74HFY3PYD8FMBJKEJX8J` 是 AskUserQuestion 被中斷；AGM-responder 09-15 08:49 卡 6.5 小時。）
+- **觸發**：run 的 `agent_status` **持續** `idle` 超過門檻（預設 5 分鐘，環境變數 `AM_STUCK_TURN_IDLE_MINS`，看不懂／0／負數回預設）仍有 `in_flight` Turn。
+  `working`／`blocked`（等使用者回答，例如 AskUserQuestion 還開著）一律不收；**中間閃一下 working 就重算**——每個
+  `pane.agent_status_changed` 事件都記一次，每輪掃描也拿 DB 的現況再對一次（事件漏掉時靠這個）。idle 計時在記憶體：
+  daemon 重啟後從第一次看到 idle 重新算，寧可晚收。
+- **何時掃**：每輪 reconcile（只看那台主機），另有每 60 秒一次的全主機掃描——reconcile 只在連線、agent 出現、子 pane 關掉時才跑，
+  一顆靜靜 idle 的 bot 不會觸發它。還沒到門檻的 bot 不去等它的鎖；拿到鎖後重讀 run 與 Turn，狀態變了就放手。
+- **收尾**：先讀 transcript（claude：我們送的 prompt 最後一次出現之後、下一個 prompt 之前，有 `stop_reason: end_turn` 的 assistant 訊息）／
+  rollout（codex：同樣範圍內 `event_msg`／`task_complete` 且 `last_agent_message` 非空）的尾端 8 MiB。證得出 → `completed`，
+  回覆以 `source = transcript` 補進對話（已經有 assistant 訊息就不寫第二份）；證不出（遠端、grok、被中斷、只有 error）→ `completed_fallback`，
+  並插一則 system 訊息寫明「閒置 N 分鐘仍 in_flight，由 reconcile 收尾」。**不標 `failed`**：回合多半做完了，只是結束沒被看見。
+- **之後**：走 `emit_turn`（交辦照一般回合結束流程：notice 自動結案、task 進 `awaiting_review`），並在同一把 bot 鎖裡立刻 flush 這顆 bot 的 `queued`。
+
 ### 4.3a 回合被 API 中斷
 
 claude 連線在回應中途掉了時，pane 只多一行 `⏺ API Error: Connection lost mid-response…` 然後收工——hook 照送 Stop、herdr 照報 idle，回合被記成
