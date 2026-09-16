@@ -79,11 +79,6 @@
   }
 }
 
-/* `.quota-hp + .quota-hp` 透明左框同權重且在後，吃掉選取格左框（2026-09-11 使用者截圖：藍框缺一段）。 */
-.quota-hp + .quota-hp.focused {
-  border-left-color: var(--accent);
-}
-
 /*
  * 名字與 model 那一塊要大一點（2026-09-14 使用者截圖：「這塊要大一點，保留 max-width for showing name and
  * model name」）。實拍時 model 被切成 `opus –L…`、pane id 切成 `w168…`，額度格卻整排攤開。

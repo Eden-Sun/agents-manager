@@ -2,9 +2,7 @@
    credits 用完時仍可滿格；唯一訊號是 CLI 橫幅（daemon 的 `quota.limit_hit`），所以畫成格子狀態。 */
 /* 畫法（2026-09-13 使用者：「目前看來很衝突」）：**一個紅點 + 其餘全部退色**，不整格染紅（綠量表同時說「還很夠」）。
    class 叫 `quota-blocked` 不是 `blocked`：`styles.css` 有裸的 `.blocked`（BlockedPanel 外框），撞上會整片染紅加內距。 */
-.quota-hp.quota-blocked {
-  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
-}
+/* 擋住＝紅點＋退色，不再加一圈紅框（2026-09-16 實拍 codex 跟 grok 藍框搶成兩張卡片）。 */
 
 /* 灰階而非降透明：留著綠色就還在說「還很夠用」。 */
 .quota-hp.quota-blocked .quota-bar,
