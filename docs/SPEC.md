@@ -1350,6 +1350,8 @@ inbox `assignment_noticed`（`needs_review=false`）。送不出去或回合失�
   唯一講出「現在收不下工作」的就是橫幅——那正是 `limit_hit` 這一格存在的理由。清掉它只有兩條路：`until` 到了，或下一回合真的跑完（`clear_limit_hit`，**只有 codex 走這條**：claude 的 Fable 用完換 opus 照樣能跑，成功回合不算解除）。
   所以 claude 這一側 `until` 是唯一的出口：橫幅指的那一桶還沒有讀數（daemon 剛重啟、statusLine 還沒進來）時，改用桶別的保底長度（session 5h、weekly／Fable 7d、認不出 5h）從撞上限的時刻起算，
   不再留下 `until=None`——那等於永遠不過期，交辦會卡在 `quota_blocked` 到有人重啟 daemon（review 2026-09-16）。
+  保底或橫幅當下的時間**之後要被那一桶的真讀數校正**（`quota::set`，只對帶桶名的撞限）：新讀數那一桶的窗起點（`resets_at − 窗長`）晚於撞限時刻＝已經重置過，撞限作廢；
+  否則 `until = min(until, 那一桶的 resets_at)`。沒有桶名的撞限（codex credits 用完、開機回填）不校正。
 - controller 每 tick 掃：仍擋而 `resume_at` 到了就**順延並算一次** `quota_retries`，新時間照上一條的規則重算（取最早、>6 小時改 15 分鐘後、都沒有 +30 分鐘）——
   不再直接抄橫幅的 `until`（帶日期的橫幅能壓好幾天），沒寫時間的撞限也不會每 30 分鐘順延到永遠（review 2026-09-16）。不擋了回 `queued` 立刻重送，用 `<client_request_id>#r<n>`（`lifecycle::prompt` 的冪等是同 crid 回同 turn，不換序號等於沒送）。
   「不擋了」要**兩個條件同時成立**：查不到未過期的 `limit_hit`，**而且** `resume_at` 已經到了。查不到讀數不等於額度回來了——`app.quotas` 只在記憶體（§12.4），

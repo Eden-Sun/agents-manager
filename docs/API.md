@@ -853,8 +853,9 @@ Project 底下所有存活 bot 的訊息合併，以插入順序（`rowid`）倒
 - `used_pct` 0–100；`resets_at` RFC3339 或 `null`；`five_hour` / `seven_day` 任一可為 `null`。
 - `fable`：Claude Max 方案的 Fable 週額度（`Current week (Fable)`），形狀同 `seven_day`；沒有這個桶一律 `null`，**UI 不畫也不佔位**。
 - `reset_credits`（只有 codex）：`account/rateLimits/read` 的 `rateLimitResetCredits`——`available` = 可用張數，`title`/`expires_at` 取第一張 available 的。daemon 只讀不用。
-- `limit_hit`：CLI 印的上限橫幅 `{"message","until": "…"|null,"at"}`。速率視窗可以顯示 0% 已用但 credits 用完，這一格是唯一說「現在收不了工作」的地方，所以**黏著**：
-  不帶這欄的輪詢沿用舊值，直到 `until` 過了、同一身份有更新的結構化讀數說 5h 還有餘裕、或下一回合真的答完（`quota::clear_limit_hit`）。寫進該 bot 身份的 key。UI 標「被擋」並壓灰量表。
+- `limit_hit`：CLI 印的上限橫幅 `{"message","until": "…"|null,"at","bucket": "five_hour"|"seven_day"|"fable"|null}`。速率視窗可以顯示 0% 已用但 credits 用完，這一格是唯一說「現在收不了工作」的地方，所以**黏著**：
+  不帶這欄的輪詢沿用舊值，直到 `until` 過了、或 codex 下一回合真的答完（`quota::clear_limit_hit_for_bot`）。帶 `bucket`（`five_hour`／`seven_day`／`fable`，claude 橫幅才有）的撞限，
+  遇到那一桶的新讀數會校正：窗是撞限之後才開的就清掉，否則 `until` 取與該窗 `resets_at` 較早者。寫進該 bot 身份的 key。UI 標「被擋」並壓灰量表。
 - `low` / `critical`：daemon 算好的門檻（`quota.rs` 的 `LOW_REMAINING_PCT = 30`、`CRITICAL_REMAINING_PCT = 5`，以剩餘 % 判斷）。**前端只讀旗標，不寫死百分比。**
   `low` → 顯示剩餘數字；`critical` → 側欄 bot 列提示。
 - `?refresh=1`：立刻重讀 `local` + 每台已連線遠端（依序；claude 探測最久 40 秒、grok 25 秒）；`&host=` 只重讀那台（不存在 404）。
