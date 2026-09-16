@@ -2595,6 +2595,15 @@ export function identitiesOfHost(all: Identity[], status: IdentityStatusMap): Id
   return out
 }
 
+/**
+ * 停用的身份不出現在**任何**地方：額度條、快速新增、身份選單、側欄的身分計數（使用者 2026-09-16）。
+ * 唯一的例外是環境設定那一頁自己——不然沒有地方可以把它按回來。
+ */
+export function enabledIdentities(disabled: string[], host: string, list: Identity[]): Identity[] {
+  if (disabled.length === 0) return list
+  return list.filter((i) => !disabled.includes(api.identityPrefKey(host, i.kind, i.name)))
+}
+
 /** 這個身份在這台主機上被停用了嗎（停用是 host＋kind＋name 一組）。 */
 export function identityDisabled(state: StoreState, host: string, kind: string, name: string): boolean {
   return state.disabledIdentities.includes(api.identityPrefKey(host, kind, name))

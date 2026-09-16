@@ -2,7 +2,8 @@ import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 
 import type { ReactNode } from 'react'
 import type { BotKind, Identity, KindQuota, QuotaLimitHit, QuotaMap, QuotaResetCredits, QuotaWindow } from '../api/types'
 import { LOCAL_HOST, quotaKey } from '../api/types'
-import { identitiesOfHost, identityStatusOfHost, toolsOfHost, useStore } from '../store/store'
+import { identityPrefKey } from '../api'
+import { enabledIdentities, identitiesOfHost, identityStatusOfHost, toolsOfHost, useStore } from '../store/store'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import './mobileQuota.css'
 import { isQuotaDisabled, quotaDisableKey, setQuotaDisabled, useDisabledQuota } from '../store/quotaHide'
@@ -849,7 +850,14 @@ export function QuotaStrip({
     wrap.current?.querySelector('.quota-hp.focused')?.scrollIntoView({ inline: 'center', block: 'nearest' })
   }, [phone, focusKind, focusIdentity])
 
-  const ordered = useMemo(() => collectEntries(quota, identities, host), [quota, identities, host])
+  const disabledIdentities = useStore((s) => s.disabledIdentities)
+  // 停用的身份不上額度條：連它自己那把 `claude:<name>` 孤兒 key 也不列（使用者 2026-09-16）。
+  const ordered = useMemo(() => {
+    const live = enabledIdentities(disabledIdentities, host, identities)
+    return collectEntries(quota, live, host).filter(
+      (e) => !e.identity || !disabledIdentities.includes(identityPrefKey(host, e.kind, e.identity)),
+    )
+  }, [quota, identities, host, disabledIdentities])
 
   const popEntries = ordered
 

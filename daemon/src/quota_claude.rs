@@ -595,6 +595,12 @@ struct Target {
     evidence: Option<ProbeEvidence>,
 }
 
+/// 停用又沒有 run 在跑的身份跳過探測。**還在跑的不跳**：那顆 bot 的額度使用者仍然需要看得到，
+/// 停用只是「不要再挑它」，不是把正在用的東西弄瞎。
+fn skip_disabled(disabled: &[String], live: &std::collections::BTreeSet<String>, name: &str) -> bool {
+    disabled.iter().any(|d| d == name) && !live.contains(name)
+}
+
 pub async fn refresh_claude(app: &Arc<App>, host: &str) -> Result<bool> {
     let _guard = crate::quota::probe_lock(host).await;
     // `~` expands against the *probed* host's home, not the daemon's.
@@ -606,6 +612,8 @@ pub async fn refresh_claude(app: &Arc<App>, host: &str) -> Result<bool> {
     let logins = app.tools.lock().await.get(host).map(|t| t.identities.clone()).unwrap_or_default();
     // DB-backed so a daemon restart doesn't lose the proof.
     let live = crate::db::live_identities_on_host(&app.db, host).await.unwrap_or_default();
+    // 停用的身份不上額度條（使用者 2026-09-16），所以也不必再花探測去問它。
+    let off = crate::mission::store::disabled_identities(&app.db, host, "claude").await.unwrap_or_default();
 
     let mut bare_names = Vec::new();
     let mut rest: Vec<Target> = Vec::new();
@@ -616,6 +624,10 @@ pub async fn refresh_claude(app: &Arc<App>, host: &str) -> Result<bool> {
         }
         if env.is_empty() {
             bare_names.push(id.name.clone());
+            continue;
+        }
+        if skip_disabled(&off, &live, &id.name) {
+            tracing::debug!(host, identity = %id.name, "identity is disabled and idle; skipping its quota probe");
             continue;
         }
         let key = format!("claude:{}", id.name);
@@ -714,6 +726,18 @@ pub fn spawn_claude_poller(app: Arc<App>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 停用的身份不再探測，但**還在跑的例外**：停用是「別再挑它」，不是把正在用的額度弄瞎。
+    #[test]
+    fn a_disabled_identity_is_only_skipped_while_nothing_is_running_on_it() {
+        let off = vec!["cc2".to_string()];
+        let idle: std::collections::BTreeSet<String> = Default::default();
+        let busy: std::collections::BTreeSet<String> = ["cc2".to_string()].into_iter().collect();
+        assert!(skip_disabled(&off, &idle, "cc2"));
+        assert!(!skip_disabled(&off, &busy, "cc2"), "還有 run 在跑就照探");
+        assert!(!skip_disabled(&off, &idle, "cc1"), "沒被停用的不受影響");
+        assert!(!skip_disabled(&[], &idle, "cc2"), "沒人被停用時什麼都不跳");
+    }
 
     const SCREEN: &str = r#"
 ▎ Using Opus 5 (1M context) (from .claude/settings.json) · /model
