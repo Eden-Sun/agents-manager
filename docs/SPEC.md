@@ -778,6 +778,10 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   | 以上都不中 | — | 重啟 |
 
   刻意保守：批次最不能做的就是砍掉使用者正在等的回合。
+  **輪到那一顆真的要重啟前再判斷一次**（`bulk_restart::recheck`，同一張表，外加「已經不是候選」→ `no_longer_pending`）：計畫是按下去那一刻的快照，
+  排在後面的要等上一兩分鐘，這段時間 AGM 派了工或使用者打了字，它就在回合中了（review 2026-09-16）。改判跳過的推 `bots_restart_progress` `status:"skipped"`，也列進 `done.skipped`。
+  剩下的空檔是「重看」到 `restart_bot_with` 拿到 bot 鎖之間（毫秒級），要完全關掉得在鎖裡判斷。
+- **同時只准一批**：已經有一批在跑時再按，回那一批的 `batch_id`（`already_running: true`、`total: 0`），不另開一份重疊的清單。
 - **執行**：序列、一顆一顆，每顆 `lifecycle::restart_bot_with(StartOpts { resume_native: true })`——stop 與 start 在**同一次持有 bot 鎖**裡做完
   （中間有空檔時，拿鎖前讀了 agent 清單的 reconcile 會搶進來把剛停掉的 agent 收編成新 run，start 就以 `active run already exists` 放棄，bot 從此沒人拉起）。
   start 被一個 pane 已不存在的 run 擋住時先結束那個 run 再試。`stop_bot` 寫上 `ended_at` 後剛結束的 session 成為「上一個 session」，claude 拿到 `--resume <session>`。
