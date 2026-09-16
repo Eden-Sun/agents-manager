@@ -101,6 +101,14 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   對 running 的 claude run `pane.read visible 80`，認到就寫 `runs.update_notice` 並推 `bot_status`，消失就清 NULL（讀不到畫面不清）；不限 idle。
   認法（`tui_prompts::update_notice`）：兩段字都要中，**且只看最下面 6 行非空白**（正文引用這兩句時會誤中）。存在 run 上：重啟（套用更新本身）後的新 run 本來就沒有。
   畫面上讀不到那句時退到版本比對：statusLine 的 `version`（process 在跑的）對 `claude --version`（磁碟上的），磁碟較新才算；磁碟版本每台主機快取 5 分鐘。
+- **Herdr 自己的版本**（`herdr_updates`，與上一條無關：那條追 agent CLI，這條追我們賴以管 pane 的 herdr）：啟動查一次、之後每 6 小時抓官方
+  `https://herdr.dev/latest.json`（來源寫死、body 上限 2 MiB、timeout 20 秒、不執行抓回來的內容）。每台主機分開記三件事——跑著的 herdr server
+  （`ping` 的 `version`/`protocol`）、磁碟上的 `herdr --version`、官方最新 stable；**任一個未知就是未知，不得顯示「已是最新」**。
+  抓失敗只寫 `checked_at`/`error`，舊快取與 release notes 都留著；離線主機保留上次讀到的值並標示，不拿本機版本冒充。
+  磁碟比 server 新 = 新版已裝好、換 server 才生效（`restart_pending`）。
+  有**已知落後**的主機時推一筆 `herdr_update_available` 進 `supervisor_inbox`（`event_key = herdr_update:<version>`），走既有巡檢路由與 notify 節流；
+  該表的唯一索引就是去重標記，所以一個 release 最多一筆合併事件，重啟或一台主機多個 pane 都不會重複叫醒，寫失敗則下一輪重試。沒有更新就不叫醒模型，輪詢不用 LLM。
+  **只追蹤與通知**：沒有下載、`herdr update` 或 `server stop/restart`——0.8→0.9 這種跨 protocol 升級要停 server、會殺掉正在跑的 pane，交給 AGM 走既有運維流程。API 見 `docs/API.md`。
 
 ### 3.2 前端
 
