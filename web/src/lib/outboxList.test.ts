@@ -43,3 +43,9 @@ test('新的排前面，同一秒的依名字排（順序不要每次重整都�
   const out = orderFiles([file('b.txt', 100), file('a.txt', 100), file('newest.txt', 200), file('old.txt', 50)])
   assert.deepEqual(out.map((x) => x.name), ['newest.txt', 'a.txt', 'b.txt', 'old.txt'])
 })
+
+test('outbox 被判不可信時講清楚，不說成還沒有檔案', () => {
+  const text = emptyReason('outbox_untrusted', true)
+  assert.match(text, /符號連結|擁有者/)
+  assert.doesNotMatch(text, /還沒有檔案/)
+})
