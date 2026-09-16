@@ -38,6 +38,7 @@ origin:   web | external                     （external = 非本系統送出、
 
 - 「進行中」= `status = in_flight`（不論 delivery）；`completed_fallback` 不算。
 - `delivery = unknown` 時禁止再送 prompt，只允許 `interrupt`、`stop` 或 `POST /turns/:id/abandon`——否則下一則 hook 會配錯回合。
+  hook 回報回合結束時照舊認領這顆 run 唯一的 in-flight turn 並把 `unknown` 升成 `ok`，**除非** hook 看得到這一回合的使用者訊息（codex 直接帶 `input-messages`；claude 從 `transcript_path` 尾巴讀最後一則），而且跟這筆的 `prompt_text` 去空白後互不包含——那是使用者在終端手打的另一句：不認領、記成一筆外部回合，原本那筆維持 `in_flight`／`unknown`（第二輪 review 送達線 #3）。讀不到使用者訊息時不下判斷。
 
 ### 2.2 Bot 狀態（UI 呈現）
 
