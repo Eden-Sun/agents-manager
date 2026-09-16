@@ -296,10 +296,10 @@ async fn run_batch(
 async fn restart_resuming(app: &Arc<App>, bot_id: &str) -> anyhow::Result<String> {
     // 子 agent 的 pane 是父 agent 開的：關掉再開等於搬家，所以原地重啟。
     if db::bot(&app.db, bot_id).await.ok().flatten().is_some_and(|b| b.managed_by == "child") {
-        return lifecycle::restart_child_in_pane(app, bot_id).await.map_err(why);
+        return lifecycle::restart_child_in_pane_with(app, bot_id, true).await.map_err(why);
     }
     // One lock hold for both halves — closes the 2026-09-10 23:02 race (see `restart_bot_with`).
-    lifecycle::restart_bot_with(app, bot_id, StartOpts { resume_native: true, ..Default::default() }).await.map_err(why)
+    lifecycle::restart_bot_with(app, bot_id, StartOpts { resume_native: true, require_idle: true, ..Default::default() }).await.map_err(why)
 }
 
 /// Read straight off the row: `get_or_init` would create a supervisor the user never asked for.
