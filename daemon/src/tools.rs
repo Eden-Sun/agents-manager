@@ -223,21 +223,58 @@ pub fn parse_shell_identities(out: &str) -> Vec<crate::config::IdentityCfg> {
     SHELL_IDENTITY_NAMES.iter().filter_map(|n| found.remove(*n)).collect()
 }
 
-/// Hand-written `[[identities]]` always win over a colliding `ccN` alias.
-pub async fn identities_for_host(app: &Arc<App>, host: &str) -> Vec<crate::config::IdentityCfg> {
-    // 只鋪上**屬於這一台**的 config 身分（沒寫 host 的＝本機）。以前是全部鋪上去，於是一個
-    // 全域的 `cc1` 會遮蔽掉 m4p 上那個真正的 `cc1`，遠端 bot 被注入一個那台不存在的設定目錄，
-    // 額度也去問那個空目錄（SPEC §16.2、review 2026-09-16）。
-    let mut out: Vec<crate::config::IdentityCfg> =
-        app.cfg.get().await.identities.iter().filter(|i| i.applies_to(host)).cloned().collect();
-    if let Some(ht) = app.tools.lock().await.get(host) {
-        for i in &ht.shell_identities {
-            if !out.iter().any(|x| x.name == i.name) {
-                out.push(i.clone());
+/// 一台主機看得到哪些身分，照優先序合併（SPEC §16.2）。**只有這一份規則**：啟動 bot 的
+/// [`identities_for_host`] 與偵測登入狀態的 `detect_identities` 都走它。`shell` 是那台讀到的 `ccN`，`None`＝還沒偵測過。
+///
+/// 1. config 裡**明寫這一台**的。
+/// 2. 本機：沒寫 host 的 config 身分——現行 config.toml 在本機的行為一個字都沒變。
+/// 3. 那台自己的 shell `ccN`。
+/// 4. 遠端：沒寫 host 的 config 身分，**讓位給**那台同名的身分。名字是 `ccN` 時還要等那台的 alias 讀過才給：
+///    偵測前不知道那台有沒有自己的 `cc1`，先給就是注入一個那台不存在的設定目錄（26a14c2 要擋的遮蔽）。
+///
+/// 以前第 4 條不存在（沒寫 host＝只適用本機）：codex／grok 身分只可能寫在 config 裡，升級後遠端 bot 一啟動就 409
+/// `identity is not known on this host`（review 2026-09-16 M6）。
+pub fn merge_identities(
+    config: &[crate::config::IdentityCfg],
+    host: &str,
+    shell: Option<&[crate::config::IdentityCfg]>,
+) -> Vec<(crate::config::IdentityCfg, &'static str)> {
+    let host = if host.is_empty() { LOCAL_HOST } else { host };
+    let mut out: Vec<(crate::config::IdentityCfg, &'static str)> = Vec::new();
+    let mut push = |out: &mut Vec<(crate::config::IdentityCfg, &'static str)>, i: &crate::config::IdentityCfg, src: &'static str| {
+        if !out.iter().any(|(x, _)| x.name == i.name) {
+            out.push((i.clone(), src));
+        }
+    };
+    for i in config.iter().filter(|i| !i.is_hostless() && i.host_or_local() == host) {
+        push(&mut out, i, SOURCE_CONFIG);
+    }
+    if host == LOCAL_HOST {
+        for i in config.iter().filter(|i| i.is_hostless()) {
+            push(&mut out, i, SOURCE_CONFIG);
+        }
+    }
+    for i in shell.unwrap_or_default() {
+        push(&mut out, i, SOURCE_SHELL);
+    }
+    if host != LOCAL_HOST {
+        for i in config.iter().filter(|i| i.is_hostless()) {
+            if shell.is_none() && SHELL_IDENTITY_NAMES.contains(&i.name.as_str()) {
+                continue;
             }
+            push(&mut out, i, SOURCE_CONFIG);
         }
     }
     out
+}
+
+/// Hand-written `[[identities]]` win over a colliding `ccN` alias on the host they are written for
+/// (see [`merge_identities`]).
+pub async fn identities_for_host(app: &Arc<App>, host: &str) -> Vec<crate::config::IdentityCfg> {
+    let cfg = app.cfg.get().await;
+    let tools = app.tools.lock().await;
+    let shell = tools.get(host).map(|t| t.shell_identities.as_slice());
+    merge_identities(&cfg.identities, host, shell).into_iter().map(|(i, _)| i).collect()
 }
 
 pub async fn identity_for_host(app: &Arc<App>, host: &str, name: &str) -> Option<crate::config::IdentityCfg> {
@@ -594,14 +631,9 @@ async fn detect_identities(
     shell: &[crate::config::IdentityCfg],
 ) -> BTreeMap<String, IdentityInfo> {
     let cfg = app.cfg.get().await;
-    // Same precedence as [`identities_for_host`], which is what actually starts the bots.
-    let mut all: Vec<(&crate::config::IdentityCfg, &'static str)> =
-        cfg.identities.iter().map(|i| (i, SOURCE_CONFIG)).collect();
-    for i in shell {
-        if !all.iter().any(|(x, _)| x.name == i.name) {
-            all.push((i, SOURCE_SHELL));
-        }
-    }
+    // Same precedence as [`identities_for_host`], which is what actually starts the bots. 以前這裡把 config 裡
+    // **每一台**的身分都列進來（包括明寫給別台的），用這台的 env 去問登入狀態。
+    let all = merge_identities(&cfg.identities, host, Some(shell));
     let home = host_home(app, host).await;
     let dir_of = |i: &crate::config::IdentityCfg| {
         i.env.get("CLAUDE_CONFIG_DIR").map(|v| crate::config::expand_home(v, &home))
@@ -842,51 +874,76 @@ pub async fn install_via_bot(
 mod tests {
     /// 現行 config.toml 的形狀（`[[identities]]` 不寫 host）在**本機**的行為一個字都不能變，
     /// 但不能再遮蔽遠端同名的 `ccN`——本機 cc1 與 m4p 的 cc1 是不同帳號（SPEC §16.2、review 2026-09-16）。
+    /// 也不能因此讓遠端用不到它：codex／grok 身分只可能寫在 config 裡（review 2026-09-16 M6）。
     #[tokio::test]
-    async fn a_config_identity_without_a_host_is_local_only() {
+    async fn a_config_identity_without_a_host_applies_everywhere_but_yields_to_that_hosts_own() {
         let env = crate::testing::env().await;
         let app = &env.app;
+        let cfg = |name: &str, kind: &str, host: Option<&str>, var: &str, dir: &str| crate::config::IdentityCfg {
+            name: name.into(),
+            kind: kind.into(),
+            host: host.map(String::from),
+            env: [(var.to_string(), dir.to_string())].into(),
+            args: vec![],
+        };
         app.cfg
-            .update(|cfg| {
-                cfg.identities = vec![crate::config::IdentityCfg {
-                    name: "cc1".into(),
-                    kind: "claude".into(),
-                    host: None, // 現行形狀
-                    env: [("CLAUDE_CONFIG_DIR".to_string(), "/home/me/.claude-cc1".to_string())].into(),
-                    args: vec![],
-                }];
+            .update(|c| {
+                c.identities = vec![
+                    cfg("cc1", "claude", None, "CLAUDE_CONFIG_DIR", "/home/me/.claude-cc1"), // 現行形狀
+                    cfg("cx2", "codex", None, "CODEX_HOME", "$HOME/.codex-cx2"),
+                ];
                 Ok(())
             })
             .await
             .unwrap();
+        let dir_of = |i: Option<crate::config::IdentityCfg>, var: &str| i.and_then(|i| i.env.get(var).cloned());
 
         // 本機：照舊拿得到，env 也照舊。
-        let local = identity_for_host(app, crate::config::LOCAL_HOST, "cc1").await.expect("本機照舊");
-        assert_eq!(local.env.get("CLAUDE_CONFIG_DIR").map(String::as_str), Some("/home/me/.claude-cc1"));
-        assert!(identities_for_host(app, crate::config::LOCAL_HOST).await.iter().any(|i| i.name == "cc1"));
+        let local = identity_for_host(app, crate::config::LOCAL_HOST, "cc1").await;
+        assert_eq!(dir_of(local, "CLAUDE_CONFIG_DIR").as_deref(), Some("/home/me/.claude-cc1"));
 
-        // 遠端：不再被它遮蔽。那台的 cc1 要由那台自己的 shell alias 決定。
-        assert!(identity_for_host(app, "m4p", "cc1").await.is_none(), "沒寫 host 的只適用本機");
-        assert!(!identities_for_host(app, "m4p").await.iter().any(|i| i.name == "cc1"));
+        // 遠端還沒偵測：codex 身分馬上能用（那台不可能有同名 shell 身分）；`ccN` 要等那台的 alias 讀過。
+        assert_eq!(dir_of(identity_for_host(app, "m4p", "cx2").await, "CODEX_HOME").as_deref(), Some("$HOME/.codex-cx2"), "codex 身分只能寫在 config 裡，遠端要用得到");
+        assert!(identity_for_host(app, "m4p", "cc1").await.is_none(), "還不知道 m4p 有沒有自己的 cc1");
 
-        // 明寫 host 的那一台才拿得到，而且同名可以兩台各一份。
+        // m4p 偵測到自己的 cc1：那台的說了算，不被本機那筆遮蔽。
+        let shell = |dir: Option<&str>| crate::tools::HostTools {
+            tools: Default::default(),
+            identities: Default::default(),
+            shell_identities: dir.map(|d| vec![cfg("cc1", "claude", None, "CLAUDE_CONFIG_DIR", d)]).unwrap_or_default(),
+            checked_at: crate::db::now(),
+        };
+        app.tools.lock().await.insert("m4p".into(), shell(Some("$HOME/.claude-ccompany")));
+        assert_eq!(dir_of(identity_for_host(app, "m4p", "cc1").await, "CLAUDE_CONFIG_DIR").as_deref(), Some("$HOME/.claude-ccompany"));
+        // m4p 偵測完、沒有自己的 cc1：沒寫 host 的那筆就適用。
+        app.tools.lock().await.insert("m4p".into(), shell(None));
+        assert_eq!(dir_of(identity_for_host(app, "m4p", "cc1").await, "CLAUDE_CONFIG_DIR").as_deref(), Some("/home/me/.claude-cc1"));
+
+        // 明寫 host 的最優先，而且只給那一台；`host = "local"` 就是只要本機。
         app.cfg
-            .update(|cfg| {
-                cfg.identities.push(crate::config::IdentityCfg {
-                    name: "cc1".into(),
-                    kind: "claude".into(),
-                    host: Some("m4p".into()),
-                    env: [("CLAUDE_CONFIG_DIR".to_string(), "/home/m4p/.claude-ccompany".to_string())].into(),
-                    args: vec![],
-                });
+            .update(|c| {
+                c.identities.push(cfg("cc1", "claude", Some("m4p"), "CLAUDE_CONFIG_DIR", "/home/m4p/.claude-ccompany"));
+                c.identities.push(cfg("solo", "claude", Some("local"), "CLAUDE_CONFIG_DIR", "/home/me/.claude-solo"));
                 Ok(())
             })
             .await
             .unwrap();
-        let remote = identity_for_host(app, "m4p", "cc1").await.expect("那台自己那份");
-        assert_eq!(remote.env.get("CLAUDE_CONFIG_DIR").map(String::as_str), Some("/home/m4p/.claude-ccompany"));
-        let still_local = identity_for_host(app, crate::config::LOCAL_HOST, "cc1").await.unwrap();
-        assert_eq!(still_local.env.get("CLAUDE_CONFIG_DIR").map(String::as_str), Some("/home/me/.claude-cc1"));
+        assert_eq!(dir_of(identity_for_host(app, "m4p", "cc1").await, "CLAUDE_CONFIG_DIR").as_deref(), Some("/home/m4p/.claude-ccompany"));
+        assert_eq!(dir_of(identity_for_host(app, crate::config::LOCAL_HOST, "cc1").await, "CLAUDE_CONFIG_DIR").as_deref(), Some("/home/me/.claude-cc1"));
+        assert!(identity_for_host(app, "m4p", "solo").await.is_none(), "寫了 host = local 就只給本機");
+        assert!(identity_for_host(app, crate::config::LOCAL_HOST, "solo").await.is_some());
+    }
+
+    /// 本機：沒寫 host 的 config 身分仍然蓋過同名的 shell alias（現行行為），偵測登入狀態用的清單跟啟動用的是同一份。
+    #[test]
+    fn detection_and_start_share_one_precedence() {
+        let c = |name: &str, host: Option<&str>| crate::config::IdentityCfg { name: name.into(), kind: "claude".into(), host: host.map(String::from), env: Default::default(), args: vec![] };
+        let config = vec![c("cc1", None), c("far", Some("m4p"))];
+        let shell = vec![c("cc1", None), c("cc2", None)];
+        let local = merge_identities(&config, crate::config::LOCAL_HOST, Some(&shell));
+        assert_eq!(local.iter().map(|(i, s)| (i.name.as_str(), *s)).collect::<Vec<_>>(), [("cc1", SOURCE_CONFIG), ("cc2", SOURCE_SHELL)], "明寫給 m4p 的不出現在本機");
+        let remote = merge_identities(&config, "m4p", Some(&shell));
+        assert_eq!(remote.iter().map(|(i, s)| (i.name.as_str(), *s)).collect::<Vec<_>>(), [("far", SOURCE_CONFIG), ("cc1", SOURCE_SHELL), ("cc2", SOURCE_SHELL)]);
     }
 
     #[test]

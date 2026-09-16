@@ -1128,11 +1128,15 @@ printf '%s\n' "$al" | grep -E "(^|[[:space:]])(alias[[:space:]]+)?cc[0-6]="
 - `hosts[].identities.<name>`：登入狀態 + `source`（`config`/`shell`）+ `config_dir`（用那台的 `$HOME` 展開）。無法判定時 `logged_in: null` 並帶 `reason`（CLI 缺失、指令失敗、解析失敗），UI 顯示「未知」。
   - 登入探測（`tools::login_probe_args`）：codex `login status`、grok `models`、**本機 claude `auth status --json`**（帶該身分的 `CLAUDE_CONFIG_DIR`，每次完整偵測都問）。遠端 claude 不問——非登入 ssh 讀不到 Keychain 會謊報 `loggedIn:false`——改由 pane 的 `/usage` 探測回填。
   - **這一輪問不到就沿用上一輪**（`tools::carry_over`）：整張表每次重建，不沿用的話每次重探都把 claude 身分打回「未知」，看起來像帳號自己登出（2026-09-16 使用者）。真的回 `loggedIn:false` 照樣覆蓋。
-- 合併只有一條 `tools::identities_for_host()`：**config 的 `[[identities]]` 先，同名 shell 身份讓位**——但只限**屬於那一台**的那幾筆。
-- **`[[identities]]` 有 host 維度**（AGM 裁示 2026-09-16）：鍵是 `(host, name)`；`host` 省略＝**只適用本機**。
+- 合併只有一條 `tools::merge_identities()`（`identities_for_host` 與偵測登入的 `detect_identities` 共用），同名時前面的贏：
+  ① config 裡**明寫這一台**的；② 本機：沒寫 host 的 config 身分；③ 那台自己的 shell `ccN`；④ 遠端：沒寫 host 的 config 身分——名字是 `ccN` 時要等那台的 alias 偵測過才給。
+- **`[[identities]]` 有 host 維度**（AGM 裁示 2026-09-16）：鍵是 `(host, name)`；`host` 省略＝**本機優先、遠端讓位給那台同名的身分**；只要本機就寫 `host = "local"`。
   以前沒有這一欄，一個全域設定會靜默遮蔽掉每一台機器上同名的 `ccN`：使用者寫一筆 `cc1` 想固定本機的帳號，m4p 上所有選 `cc1` 的 bot 就被注入一個那台根本不存在的設定目錄，
   claude 以未登入狀態開一個空的設定目錄，額度探測也去問那個空目錄——UI 上兩者名字一模一樣，沒有任何地方會提示它們不是同一個帳號（review 2026-09-16）。
-  **現行 config.toml（不寫 host）在本機的行為一個字都沒變**，有測試釘住；變的只是它不再外溢到遠端。
+  **現行 config.toml（不寫 host）在本機的行為一個字都沒變**，有測試釘住；在遠端它不再蓋掉那台的 `ccN`。
+  **遷移**（review 2026-09-16）：中間有一版把「省略」做成**只適用本機**，但 shell 只認得 claude 的 `ccN`，codex 的 `CODEX_HOME`、grok 的 `GROK_HOME` 身分只可能寫在 config 裡——
+  沒寫 host 的那幾筆一升級，遠端 bot 啟動就 409 `identity is not known on this host`。現在沒寫 host 的在遠端照樣可用（④），不必手動補；
+  想讓某一筆只給本機用，改寫 `host = "local"`。遠端還沒偵測完時，名字是 `ccN` 的那幾筆暫時查不到（那台可能有自己的同名帳號），偵測完就收斂。
   額度 key：遠端 bot 若因此改由那台自己的 shell 身分解析，key 可能從裸 `claude` 變成 `claude:<name>`（或相反）。`app.quotas` 只在記憶體、不落 DB，所以下一輪探測就收斂，沒有東西要搬。
   `POST /identities` 可帶 `host`（未知主機 409）；`DELETE /identities/{name}?host=` 刪的是那一台的那一筆，「還有 bot 在用」也只看同一台的 bot。
 
