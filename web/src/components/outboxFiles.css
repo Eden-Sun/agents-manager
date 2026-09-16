@@ -1,6 +1,6 @@
-/* 檔案暫存區下半段：從 bot 拿出來的檔案。跟上半段（要送進對話的暫存）之間畫一條線分開——
+/* 檔案暫存區下半段：bot 放進 $AM_OUTBOX 交給使用者的檔案。跟上半段（要送進對話的暫存）之間畫一條線分開——
    兩者的方向相反，混在一起使用者會拖錯。 */
-.sp-files {
+.outbox-files {
   border-top: 1px solid var(--border);
   padding: 6px 8px 8px;
   display: flex;
@@ -15,12 +15,12 @@
 
 /* 窄螢幕的暫存區只有 `max-height: 46vh`，不是確定的高度，百分比會失效：直接換算成同一個 60%。 */
 @media (width <= 1024px) {
-  .sp-files {
+  .outbox-files {
     max-height: calc(46vh * 0.6);
   }
 }
 
-.sp-head {
+.outbox-head {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -28,57 +28,35 @@
   color: var(--text-faint);
 }
 
-.sp-title {
+.outbox-title {
   font-weight: 600;
 }
 
-.sp-count {
+.outbox-count {
   padding: 0 5px;
   border-radius: 999px;
   border: 1px solid var(--border);
 }
 
-.sp-empty {
+.outbox-empty {
   margin: 0;
   font-size: 11px;
   line-height: 1.5;
   color: var(--text-faint);
 }
 
-.sp-scroll {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  overflow-y: auto;
-  min-height: 0;
-}
-
-.sp-list {
+.outbox-list {
   list-style: none;
   margin: 0;
   padding: 0;
   display: flex;
   flex-direction: column;
   gap: 2px;
+  overflow-y: auto;
+  min-height: 0;
 }
 
-/* 「其他 N 個」：bot 自己的工作檔，收起來是預設。字跟標題列一樣淡，不跟檔名搶。 */
-.sp-others-toggle {
-  align-self: flex-start;
-  padding: 2px 6px;
-  border: 0;
-  background: none;
-  font-size: 11px;
-  color: var(--text-faint);
-  cursor: pointer;
-}
-
-.sp-others-toggle:hover,
-.sp-others-toggle:focus-visible {
-  color: inherit;
-}
-
-.sp-file {
+.outbox-file {
   width: 100%;
   text-align: left;
   display: flex;
@@ -92,18 +70,18 @@
   color: inherit;
 }
 
-.sp-file:hover,
-.sp-file:focus-visible {
+.outbox-file:hover,
+.outbox-file:focus-visible {
   border-color: var(--border);
   background: var(--bg-sunken, rgba(127, 127, 127, 0.08));
 }
 
-.sp-file:disabled {
+.outbox-file:disabled {
   cursor: progress;
   opacity: 0.6;
 }
 
-.sp-name {
+.outbox-name {
   font-size: 12px;
   /* 檔名會很長（`出貨追蹤 v2.tsv`、`run-2026-09-16.log`）：截尾比折行好認。 */
   overflow: hidden;
@@ -111,7 +89,12 @@
   white-space: nowrap;
 }
 
-.sp-meta {
+.outbox-meta {
   font-size: 10px;
   color: var(--text-faint);
+}
+
+/* 剩不到 10 分鐘：提醒趕快下載，下一輪清理（每 10 分鐘）可能就不在了。 */
+.outbox-meta.soon {
+  color: var(--warn);
 }
