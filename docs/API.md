@@ -578,7 +578,7 @@ env 值的 `$HOME`、`${HOME}` 與開頭 `~` 展開成**該 host 的 home**。id
 
 - 頂層 `identities` 是 config.toml 那一份（沒設定 `[]`）；`hosts[].shell_identities` 是那台登入 shell alias 認出的 `cc0`…`cc6`（env 為字面值、`args` 永遠 `[]`）。
 - `hosts[].identities.<name>`：`logged_in` 為 `true`/`false`/`null`（`null` = 未知，帶 `reason`）；`source` 為 `config`（可編輯）或 `shell`（唯讀）；`config_dir` 用那台 home 展開，預設帳號沒有。
-- 同名時 config 勝出（`tools::identities_for_host`）。identity 存在性在**該 bot／專案的 host 上**檢查，找不到 → `404 {"what":"identity"}`。
+- 同名時的優先序（`tools::merge_identities`）：明寫這一台的 config → 本機才有：沒寫 host 的 config → 那台的 shell `ccN` → 遠端才有：沒寫 host 的 config（名字是 `ccN` 時等那台偵測過才給）。identity 存在性在**該 bot／專案的 host 上**檢查，找不到 → `404 {"what":"identity"}`。
 - 每個 bot 都有 `identity`（`string|null`）與 `env`（預設 `{}`）。
 - **身分有 kind，bot 只能帶同 kind 的身分**（2026-09-14 使用者指正：`cc0`／`cc1`／`cc2` 是 Claude Code 的帳號代號，跟
   codex 無關）。API 建立／修改已經擋（kind 不符 400）；daemon 收編子 agent 的那條路也照這條：**只繼承同 kind 母 bot 的
@@ -596,7 +596,7 @@ env 值的 `$HOME`、`${HOME}` 與開頭 `~` 展開成**該 host 的 home**。id
 
 ### `POST /api/identities` / `DELETE /api/identities/{name}?host=`
 - POST `{name, kind, env, args, host?}` → `200 {"name"}`；名稱或 kind 不合法 400；未知的 host `409 {"reason":"unknown host","host"}`；
-  **同一台**重複 `409 {"reason":"identity name already in use","name"}`——鍵是 `(host, name)`，同名在別台是另一筆（SPEC §16.2）。`host` 省略＝本機。
+  **同一台**重複 `409 {"reason":"identity name already in use","name"}`——鍵是 `(host, name)`，同名在別台是另一筆（SPEC §16.2）。`host` 省略＝不寫 host：鍵算本機，本機優先、遠端讓位給那台同名的身分；只要本機傳 `"local"`。
 - DELETE `?host=`（省略＝本機）→ `200 {}`；仍有**同一台**的 bot 綁著 `409 {"reason":"identity still used by bots","bot_id"}`。
 - WS `identities_changed {}` → 重拉 state；bot 的 identity/env 變更沿用 `bot_changed`。
 
