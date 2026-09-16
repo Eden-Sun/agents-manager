@@ -762,7 +762,7 @@ export class MockTransport implements Transport {
     // 群組任務
     if (seg[0] === 'projects' && seg[2] === 'missions' && !this.missionsDisabled) {
       if (method === 'POST') return this.createMission(seg[1], b)
-      if (method === 'GET') return this.listMissions(seg[1], q.get('status') ?? 'all')
+      if (method === 'GET') return this.listMissions(seg[1], q.get('status') ?? 'all', Number(q.get('limit') ?? 100))
     }
     if (seg[0] === 'missions' && seg.length >= 2 && !this.missionsDisabled) {
       const id = seg[1]
@@ -1601,13 +1601,15 @@ export class MockTransport implements Transport {
     return { mission: this.missionJson(m), created: true }
   }
 
-  private listMissions(projectId: string, status: string): Rec {
+  private listMissions(projectId: string, status: string, limit: number): Rec {
     const all = this.missions.filter((m) => m.project_id === projectId)
     const keep = all.filter((m) => {
       const s = this.missionJson(m).status
       return status === 'all' || s === status || (status === 'open' && s === 'paused')
     })
-    return { project_id: projectId, missions: keep.map((m) => this.missionJson(m)) }
+    // 照 daemon：新的在前，`limit` 夾在 1..=500。
+    const cap = Math.min(500, Math.max(1, Number.isFinite(limit) ? limit : 100))
+    return { project_id: projectId, missions: keep.slice(0, cap).map((m) => this.missionJson(m)) }
   }
 
   private missionDetail(id: string): Rec {

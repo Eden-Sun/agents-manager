@@ -30,6 +30,7 @@ const OPEN_SHOWN = 2
 export function MissionsBar({ projectId }: { projectId: string }) {
   const supported = useStore((s) => s.missionsSupported)
   const missions = useStore(useShallow((s) => s.missions[projectId] ?? []))
+  const capped = useStore((s) => s.missionsCapped[projectId])
   const loadMissions = useStore((s) => s.loadMissions)
 
   useEffect(() => {
@@ -124,7 +125,7 @@ export function MissionsBar({ projectId }: { projectId: string }) {
             onClick={() => setShowDone((v) => !v)}
           >
             <span aria-hidden="true">{showDone ? '▾' : '▸'}</span>
-            已完成任務（{done.length}）
+            {capped?.done ? `已完成任務（最近 ${done.length} 筆）` : `已完成任務（${done.length}）`}
           </button>
           {showDone ? (
             <ul className="mission-done-list">
@@ -146,7 +147,7 @@ export function MissionsBar({ projectId }: { projectId: string }) {
             onClick={() => setShowCancelled((v) => !v)}
           >
             <span aria-hidden="true">{showCancelled ? '▾' : '▸'}</span>
-            已取消（{cancelled.length}）
+            {capped?.cancelled ? `已取消（最近 ${cancelled.length} 筆）` : `已取消（${cancelled.length}）`}
           </button>
           {showCancelled ? (
             <ul className="mission-done-list">
