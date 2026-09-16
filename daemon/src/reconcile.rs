@@ -26,6 +26,33 @@ pub async fn reconcile(app: &Arc<App>) -> Result<()> {
     }
 }
 
+/// `autostart = true` 且沒有 active Run 的 bot 走 §6.2。`only_host` 給了就只看那一台
+/// （主機剛連上時用），`None` ＝ 全部（開機時用，連不上的那些留給連上的那一刻）。
+///
+/// 一定要在對帳**之後**才叫：否則會把 herdr 上還活著、只是 DB 還沒認回來的那顆再開一次。
+pub async fn autostart_connected(app: &Arc<App>, only_host: Option<&str>) {
+    for bot in db::live_bots(&app.db).await.unwrap_or_default() {
+        if bot.autostart != 1 {
+            continue;
+        }
+        let host = db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| crate::config::LOCAL_HOST.to_string());
+        if only_host.is_some_and(|h| h != host) {
+            continue;
+        }
+        if !app.host_connected(&host).await {
+            tracing::info!(bot = %bot.name, host, "autostart skipped: host not connected");
+            continue;
+        }
+        if db::active_run(&app.db, &bot.id).await.ok().flatten().is_some() {
+            continue;
+        }
+        tracing::info!(bot = %bot.name, host, "autostart");
+        if let Err(e) = crate::lifecycle::start_bot(app, &bot.id).await {
+            tracing::error!(bot = %bot.name, error = ?e, "autostart failed");
+        }
+    }
+}
+
 /// A Turn that outlives a restart has no poller: no live bubble, and nothing completes it if its
 /// hook never arrives. Re-arm every in-flight Turn once the runs are adopted.
 pub async fn rearm_progress(app: &Arc<App>) {
@@ -120,6 +147,14 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
     };
     crate::github::spawn_detect_host(app.clone(), host.to_string());
     let snapshot = client.snapshot().await?;
+    // A1 的同一條規則也要套在 snapshot 上：`panes`／`workspaces` 這兩個 key 不在（不是「陣列是空的」，
+    // 是「連 key 都沒有」）＝這份回應不是我們認得的形狀，下面每一段都會把它讀成「什麼都不存在」，
+    // 於是整台主機的 workspace 映射被清光（review 2026-09-16）。跳過這一輪，不要清任何東西。
+    for key in ["panes", "workspaces"] {
+        if snapshot.get(key).is_none() {
+            anyhow::bail!("session.snapshot on host `{host}` has no `{key}`; skipping reconcile so nothing is cleared");
+        }
+    }
     // A1: never reconcile against an empty list — a transient RPC failure would exit every Run.
     let agents = client.agent_list().await.map_err(|e| {
         anyhow::anyhow!("agent.list failed on host `{host}`: {e}; skipping reconcile so runs are not falsely exited")

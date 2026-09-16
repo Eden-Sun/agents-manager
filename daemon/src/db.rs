@@ -182,7 +182,62 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
     crate::supervisor::store::migrate(pool).await?;
     crate::read_marks::migrate(pool).await?;
     crate::mission::store::migrate(pool).await?;
+    check_schema_drift(pool).await?;
     Ok(())
+}
+
+/// `SCHEMA` 的 `CREATE TABLE IF NOT EXISTS` 對**既有**資料庫是完全的 no-op，所以「欄位有哪些」其實
+/// 記在兩個地方：宣告式的 SCHEMA，與上面那份手維護的 ALTER 名單。往 SCHEMA 加一欄卻忘了補 ALTER，
+/// 在開發者自己的機器上一律是綠的（每個測試都開新 DB），到使用者那裡才會炸——而且是 `SELECT *` 的
+/// `FromRow` 整個失敗，daemon 起不來，錯誤訊息是 sqlx 的 column-not-found（review 2026-09-16）。
+///
+/// 所以 migrate 的最後一步自己對一次帳：宣告了什麼欄位，DB 就要有什麼欄位。
+async fn check_schema_drift(pool: &SqlitePool) -> Result<()> {
+    for (table, declared) in declared_columns(SCHEMA) {
+        let have: Vec<(i64, String, String, i64, Option<String>, i64)> =
+            sqlx::query_as(&format!("PRAGMA table_info({table})")).fetch_all(pool).await?;
+        if have.is_empty() {
+            continue; // 這一版沒建出來（舊功能留下的宣告）：不是這個檢查要管的事
+        }
+        let missing: Vec<&str> =
+            declared.iter().filter(|c| !have.iter().any(|h| h.1.eq_ignore_ascii_case(c))).map(|c| c.as_str()).collect();
+        anyhow::ensure!(
+            missing.is_empty(),
+            "schema drift：`SCHEMA` 宣告了 {table}.{} 但這個資料庫沒有。CREATE TABLE IF NOT EXISTS 對既有 DB 不做事，\
+             請在 db.rs 的 ALTER 名單補一條 `ALTER TABLE {table} ADD COLUMN …`（既有列要能留白）。",
+            missing.join("、")
+        );
+    }
+    Ok(())
+}
+
+/// 從 `CREATE TABLE IF NOT EXISTS <名字> ( … )` 抽出欄位名。只認每一行的第一個 token，
+/// 約束子句（PRIMARY／FOREIGN／UNIQUE／CHECK／CONSTRAINT）與 `--` 註解跳過。
+fn declared_columns(schema: &str) -> Vec<(String, Vec<String>)> {
+    const HEAD: &str = "CREATE TABLE IF NOT EXISTS ";
+    let mut out = Vec::new();
+    for chunk in schema.split(HEAD).skip(1) {
+        let Some(open) = chunk.find('(') else { continue };
+        let table = chunk[..open].trim().trim_matches('"').to_string();
+        let Some(close) = chunk.find("\n)") else { continue };
+        let mut cols = Vec::new();
+        for line in chunk[open + 1..close].lines() {
+            let line = line.split("--").next().unwrap_or("").trim().trim_end_matches(',').trim();
+            let Some(first) = line.split_whitespace().next() else { continue };
+            let upper = first.to_ascii_uppercase();
+            if ["PRIMARY", "FOREIGN", "UNIQUE", "CHECK", "CONSTRAINT"].contains(&upper.as_str()) {
+                continue;
+            }
+            if first.is_empty() || first.starts_with('(') {
+                continue;
+            }
+            cols.push(first.trim_matches('"').to_string());
+        }
+        if !cols.is_empty() {
+            out.push((table, cols));
+        }
+    }
+    out
 }
 
 pub async fn has_column(pool: &SqlitePool, table: &str, col: &str) -> Result<bool> {
@@ -610,6 +665,43 @@ mod tests {
             .fetch_all(pool)
             .await
             .unwrap()
+    }
+
+    /// 往 `SCHEMA` 加欄位卻忘了補 ALTER 名單：以前在開發者機器上一律是綠的（每個測試都開新 DB），
+    /// 到使用者那裡才炸成 `SELECT *` 的 FromRow 失敗、daemon 起不來。現在 migrate 自己對帳。
+    #[tokio::test]
+    async fn a_column_the_alter_list_forgot_is_caught_before_the_user_sees_it() {
+        let dir = std::env::temp_dir().join(format!("am-drift-{}", ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("old.sqlite3");
+        // 舊資料庫：`bots` 少了一堆後來才加的欄位，而且 CREATE TABLE IF NOT EXISTS 不會補。
+        {
+            let old = sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect(&format!("sqlite://{}?mode=rwc", path.display()))
+                .await
+                .unwrap();
+            // 少的是 `env_json`：它在 SCHEMA 裡、不在 ALTER 名單裡，也沒有索引用到它——
+            // 正好是「加欄位忘了補 ALTER」會留下的形狀。索引要用的欄位照給，才測得到這個檢查本身。
+            sqlx::query(
+                "CREATE TABLE bots (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL,
+                   kind TEXT NOT NULL, model TEXT, effort TEXT, fast INTEGER NOT NULL DEFAULT 0, persona TEXT,
+                   args_json TEXT NOT NULL DEFAULT '[]', autostart INTEGER NOT NULL DEFAULT 0,
+                   inject_hooks INTEGER NOT NULL DEFAULT 1, auto_approve INTEGER NOT NULL DEFAULT 1,
+                   identity TEXT, managed_by TEXT NOT NULL DEFAULT 'user', cwd TEXT, herdr_session TEXT,
+                   parent_bot_id TEXT, hook_token TEXT NOT NULL, deleted_at TEXT, created_at TEXT NOT NULL,
+                   is_primary INTEGER NOT NULL DEFAULT 0, position INTEGER NOT NULL DEFAULT 0)",
+            )
+            .execute(&old)
+            .await
+            .unwrap();
+            old.close().await;
+        }
+        let err = open(&path).await.expect_err("少欄位的舊 DB 不該靜靜開起來").to_string();
+        assert!(err.contains("schema drift"), "{err}");
+        assert!(err.contains("bots."), "錯誤訊息要指名是哪張表：{err}");
+        assert!(err.contains("ALTER TABLE"), "要告訴人怎麼修：{err}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// 一個字都沒寫進去的那次重送要退還額度：`MAX_PROMPT_RESENDS` 是 1，

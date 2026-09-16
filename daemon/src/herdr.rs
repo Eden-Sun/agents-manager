@@ -282,9 +282,16 @@ impl HerdrClient {
     }
 
     /// herdr wraps the payload as `{"type":"session_snapshot","snapshot":{...}}`; unwrap it.
+    ///
+    /// 沒有 `snapshot` 欄位就是**回應形狀跟我們以為的不一樣**（herdr 換版最常見的樣子），
+    /// 以前是「把整個信封當酬載」回去——下游三個 `unwrap_or_default()` 於是拿到空清單，
+    /// 對帳把整台主機的 workspace 映射清成 NULL（review 2026-09-16）。假空值比錯誤難查太多。
     pub async fn snapshot(&self) -> Result<Value> {
         let v = self.call("session.snapshot", json!({})).await?;
-        Ok(v.get("snapshot").cloned().unwrap_or(v))
+        match v.get("snapshot") {
+            Some(s) => Ok(s.clone()),
+            None => anyhow::bail!("session.snapshot 的回應沒有 `snapshot` 欄位（herdr 換版？）：不拿信封當酬載"),
+        }
     }
 
     pub async fn workspace_list(&self) -> Result<Vec<WorkspaceInfo>> {
