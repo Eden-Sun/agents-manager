@@ -1041,7 +1041,8 @@ body 直接是檔案位元組（**不是** multipart），`Content-Type` 就是�
   `responder`（同 `GET /api/supervisor/responder`）。
 
 ### 協調者（responder，SPEC §18.15）
-- `GET /api/supervisor/responder` → `{configured,bot_present,bot_id,project_id,identity,model,effort,remote_control:false,status,status_detail,quota_reset_at,desired_running,watchdog:{attempts,next_at,gave_up_at},inbox_open,stats:{…}}`。
+- `GET /api/supervisor/responder` → `{configured,bot_present,bot_id,project_id,identity,model,effort,remote_control:false,status,status_detail,quota_reset_at,desired_running,watchdog:{attempts,next_at,gave_up_at},inbox_open,wake_pending,stats:{…}}`。`wake_pending` = 還沒送出、會叫醒它的事件數。
+  `POST /api/supervisor/responder/start` 先記 `desired_running=true` 再啟動：啟動失敗回錯誤，但看門狗會照 §18.9 的退避重試。
   `status`：`not_configured` | `stopped` | `starting` | `idle` | `busy` | `waiting_quota` | `missing`（登記過但那顆 bot 被刪了；事件仍留在它的佇列，另推一則 `responder_bot_missing` 給巡檢）。
   `configured` 是「登記過」，`bot_present` 才是「那顆 bot 還在」：路由只看前者。`model`／`effort` 是設定值，
   `runtime{model,effort,started_at}` 是它現在實際跑的（`/model` 換過就會不一樣）。
@@ -1066,7 +1067,8 @@ body 直接是檔案位元組（**不是** multipart），`Content-Type` 就是�
 - `GET /api/supervisor/health` → `status`（`healthy`／`degraded`／`critical`）、AGM 狀態、bot running/busy/stopped 計數、host 連線、quota、`pending_assignments`（未結案，含 `awaiting_review`／`blocked`）、
   `awaiting_review`、`inbox_open`（三者分開不相加）；`manager_health{status,supervisor_status,daemon_connected}` 與 `system_health{status,open_incidents,incidents}`，頂層 `status` 取兩者較嚴重者。
   daemon 每 30 秒檢查，指紋變化才推 WS `supervisor_health`；inbox `health_changed` 只在巡檢或協調者的嚴重度（`manager_health.status`／`responder_health.status`）或總管狀態（idle/busy 視為 running）真的改變時入列，總管 stopped/starting 期間不入列、恢復後補一則。
-  `responder_health{status,responder_status,inbox_open,retry_at}` 單獨一格，不併進頂層 `status`。
+  `responder_health{status,responder_status,inbox_open,wake_pending,retry_at}` 單獨一格，**也併進**頂層 `status`（取較嚴重者）。
+  協調者 `waiting_quota`、`desired_running` 卻沒在跑、或沒在跑（stopped／missing）而 `wake_pending>0` → `degraded`。
 - `GET /api/supervisor/incidents?all=0|1` → `{incidents:[{id,kind,resource,severity,status,detail,occurrences,first_seen_at,last_seen_at,resolved_at}],open,all}`。
   `kind`：`host_disconnected` | `bot_stopped` | `assignment_stalled` | `assignment_undelivered` | `notify_exhausted`（SPEC §18.9）。一個 resource 同時只有一筆 open；開啟與恢復各推 inbox `incident_opened` / `incident_resolved`。
   `notify_exhausted` 例外：協調者建立時推（路由給協調者，開啟叫醒、恢復只記錄）；沒有協調者不入 inbox，只在這支與 `system_health` 看得到。

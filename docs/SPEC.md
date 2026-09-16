@@ -1762,7 +1762,10 @@ supervisor 相關資料表與欄位都是 additive，`db::migrate` 重跑冪等�
   followup 沿用父交辦的 `review_role`。協調者存在且驗收角色是它時，派工訊息的 `relay_from` 標協調者，bot 回話才找對人。
 - **計數**：每個角色 `wakes`、`events_delivered`、`duplicates`（擋下的重複申請）、`merged`、`last_wake_at`、`last_wake_reason`（這一批的事件種類）。
   「fable 不會因為 bot 申請被叫醒」看巡檢的 `wakes` 與 `last_wake_reason` 裡沒有 `bot_request`。
-- **健康**：`GET /api/supervisor/health` 另有 `responder_health{status,responder_status,inbox_open,retry_at}`，不併進頂層 `status`（協調者等額度不等於使用者入口不能用）。
+- **健康**：`GET /api/supervisor/health` 另有 `responder_health{status,responder_status,inbox_open,wake_pending,retry_at}`，併進頂層 `status`（見上方「協調者的健康算進頂層」）。
+  協調者**沒在跑**（setup 完還沒 start、start 失敗、手動 stop、bot 被刪）而佇列裡有會叫醒它的事件（`wake_pending>0`）也是 `degraded`：分流只看「建立過」，
+  以前這種狀態只要 `desired_running=0` 就算 healthy，申請、核准、mission 事件無限期累積而沒有人被叫醒（review 2026-09-16 c3 M1）。
+  `responder start` 先記 `desired_running=1` 再啟動，失敗交給看門狗重試。
 - **限制**：bot 繞過 shim 直接用真的 herdr 打進巡檢 pane、或 daemon 不在時 shim 退回直送，daemon 看到的是外部回合（當成使用者），會吃巡檢一回合。
   協調者在自己的專案，web 的「剛跑完」晶片列目前只排除 `GET /api/supervisor` 的 `project_id`（巡檢專案），協調者會出現在那一列。
 - **部署**（合入 main 後由 AGM 安排，不在程式裡自動做）：`agm responder setup` → 同步兩份 persona（§18.11，協調者走 `PUT /api/supervisor/responder/persona`）→

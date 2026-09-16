@@ -832,6 +832,13 @@ pub async fn status_json(app: &Arc<App>) -> Result<Value, LcError> {
             .fetch_one(&app.db)
             .await
             .map_err(up)?;
+    // 還沒送出、會叫醒它的事件。協調者沒在跑時這個數字就是「有人在等、而沒有人會被叫醒」（health.rs）。
+    let wake_pending: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM supervisor_inbox WHERE COALESCE(claimed_by, role)='responder' AND state='pending' AND COALESCE(wake, 1)=1",
+    )
+    .fetch_one(&app.db)
+    .await
+    .map_err(up)?;
     Ok(json!({
         "configured": row.bot_id.is_some(),
         "bot_present": bot.is_some(),
@@ -850,6 +857,7 @@ pub async fn status_json(app: &Arc<App>) -> Result<Value, LcError> {
         "desired_running": row.desired_running != 0,
         "watchdog": {"attempts": row.watchdog_attempts, "next_at": row.watchdog_next_at, "gave_up_at": row.watchdog_gave_up_at},
         "inbox_open": open,
+        "wake_pending": wake_pending,
         "stats": row.stats_json(),
     }))
 }

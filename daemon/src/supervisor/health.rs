@@ -30,12 +30,7 @@ pub async fn snapshot(app: &Arc<App>) -> Result<Value, LcError> {
     // 協調者自己一格，跟巡檢分開：協調者等額度或倒了，不是「AGM 不能用」——使用者入口還在。
     let responder = supervisor.get("responder").cloned().unwrap_or(Value::Null);
     let responder_status = responder.get("status").and_then(Value::as_str).unwrap_or("not_configured");
-    let responder_severity = match responder_status {
-        "not_configured" | "idle" | "busy" | "starting" => "healthy",
-        "waiting_quota" => "degraded",
-        _ if responder.pointer("/desired_running").and_then(Value::as_bool) == Some(true) => "degraded",
-        _ => "healthy",
-    };
+    let responder_severity = responder_severity(&responder);
     let hosts = app.hosts.list().await;
     let disconnected_hosts = hosts.iter().filter(|h| !h.is_connected()).count();
     let system = crate::supervisor::incidents::system_health(app).await;
@@ -63,6 +58,7 @@ pub async fn snapshot(app: &Arc<App>) -> Result<Value, LcError> {
             "status": responder_severity,
             "responder_status": responder_status,
             "inbox_open": responder.get("inbox_open"),
+            "wake_pending": responder.get("wake_pending"),
             "retry_at": responder.pointer("/stats/notify_next_at"),
         },
         "daemon": {"connected": app.connected.load(std::sync::atomic::Ordering::SeqCst)},
@@ -76,6 +72,24 @@ pub async fn snapshot(app: &Arc<App>) -> Result<Value, LcError> {
         "inbox_open": crate::supervisor::store::open_inbox_count(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?,
         "hosts": {"total": hosts.len(), "disconnected": disconnected_hosts},
     }))
+}
+
+/// 協調者那一格的嚴重度。
+///
+/// 「建立過」就一直攔 bot 的申請（SPEC §18.15），所以它**沒在跑**時——setup 完還沒 start、start 失敗、
+/// 使用者手動 stop、bot 被刪——只要佇列裡有會叫醒它的事件，就是有人在等而沒有人會被叫醒。以前這種
+/// 狀態只要 `desired_running=0` 就算 healthy，申請、核准、mission 事件無限期累積（review 2026-09-16 c3 M1）。
+/// degraded 會讓 `health_changed` 入列並叫醒巡檢。
+pub fn responder_severity(responder: &Value) -> &'static str {
+    let status = responder.get("status").and_then(Value::as_str).unwrap_or("not_configured");
+    let waiting = responder.get("wake_pending").and_then(Value::as_i64).unwrap_or(0) > 0;
+    match status {
+        "not_configured" | "idle" | "busy" | "starting" => "healthy",
+        "waiting_quota" => "degraded",
+        _ if responder.pointer("/desired_running").and_then(Value::as_bool) == Some(true) => "degraded",
+        _ if waiting => "degraded",
+        _ => "healthy",
+    }
 }
 
 /// What the inbox debounce keys on. `idle` and `busy` are one state here: the manager going
@@ -234,6 +248,35 @@ mod tests {
         assert!(d.observe(&inbox_severity(&snap("healthy", Some("healthy"))), "idle"), "and its recovery too");
         // 舊 snapshot 沒有 responder_health：當 healthy，不會憑空多一則。
         assert_eq!(inbox_severity(&snap("healthy", None)), inbox_severity(&snap("healthy", Some("healthy"))));
+    }
+
+    /// 協調者建立過但沒在跑（setup 完沒 start、start 失敗、手動 stop、bot 被刪）：佇列裡有會叫醒它的事件
+    /// 就不是 healthy——沒有人會被叫醒（review 2026-09-16 c3 M1）。沒有待辦的停著仍是 healthy。
+    #[test]
+    fn a_responder_that_is_not_running_while_requests_wait_is_degraded() {
+        let r = |status: &str, desired: bool, waiting: i64| json!({"status": status, "desired_running": desired, "wake_pending": waiting});
+        assert_eq!(responder_severity(&r("stopped", false, 0)), "healthy", "停著、沒人在等：不是故障");
+        assert_eq!(responder_severity(&r("stopped", false, 2)), "degraded");
+        assert_eq!(responder_severity(&r("missing", false, 1)), "degraded");
+        assert_eq!(responder_severity(&r("stopped", true, 0)), "degraded", "想要它跑卻停著，照舊是 degraded");
+        assert_eq!(responder_severity(&r("idle", false, 5)), "healthy", "在跑就會被叫醒");
+        assert_eq!(responder_severity(&r("not_configured", false, 3)), "healthy", "沒建立：事件歸巡檢");
+        assert_eq!(responder_severity(&json!({"status": "stopped"})), "healthy", "舊形狀沒有 wake_pending");
+    }
+
+    /// 端到端：setup 過、從沒 start，bot 送來一筆申請 → 健康頂層不再是 healthy。
+    #[tokio::test]
+    async fn a_request_queued_for_a_responder_that_never_started_shows_up_in_health() {
+        use crate::supervisor::bot_requests::{self, flow_tests, ReplyMark};
+        let app = flow_tests::app().await;
+        flow_tests::configure_responder(&app).await;
+        let snap = snapshot(&app).await.unwrap();
+        assert_eq!(snap.pointer("/responder_health/status").and_then(Value::as_str), Some("healthy"));
+        bot_requests::intercept(&app, "patrol", "w1", "請核准重建 abc", Some("r-1"), &[], true, "api", ReplyMark::default()).await.unwrap().unwrap();
+        let snap = snapshot(&app).await.unwrap();
+        assert_eq!(snap.pointer("/responder_health/status").and_then(Value::as_str), Some("degraded"), "{snap}");
+        assert_eq!(snap.pointer("/responder_health/wake_pending").and_then(Value::as_i64), Some(1));
+        assert_ne!(snap.get("status").and_then(Value::as_str), Some("healthy"));
     }
 
     #[test]
