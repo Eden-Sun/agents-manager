@@ -2802,19 +2802,38 @@ export function toolsOfHost(state: StoreState, host: string): ToolMap {
  * 是純函式而不是 selector：兩個輸入都是 store 裡的穩定引用，元件端用 `useMemo` 合併，
  * 避免每次 render 都回一個新陣列（React #185）。
  */
+/** 遠端還沒偵測過 alias 時，沒寫 host 的 config 不能搶這些名字（daemon `tools::SHELL_IDENTITY_NAMES`）。 */
+const SHELL_IDENTITY_NAMES = ['cc0', 'cc1', 'cc2', 'cc3', 'cc4', 'cc5', 'cc6']
+
+/**
+ * 這台主機能用的身分，**跟 daemon `tools::merge_identities` 同一條優先序**（SPEC §16.2），同名前面的贏：
+ * ① config 明寫這一台的 → ② 本機才有：沒寫 host 的 config → ③ 那台自己的 shell `ccN`
+ * → ④ 遠端才有：沒寫 host 的 config（讓位給那台同名的；名字是 cc0…cc6 時要等那台偵測過才給）。
+ *
+ * 以前前端是「沒寫 host＝只有本機」，daemon 改成「所有主機都適用」之後（dca3c4c），遠端的 bot 在
+ * daemon 那邊拿得到身分，選單與額度條卻看不到它。
+ */
 export function identitiesOfHost(all: Identity[], status: IdentityStatusMap, host = LOCAL_HOST): Identity[] {
-  // config 身分只屬於它自己那一台（沒寫 host 的＝本機，SPEC §16.2）：以前全部鋪上去，
-  // 於是一個全域的 `cc1` 會遮蔽掉 m4p 上那個真正的 `cc1`。
   const want = host || LOCAL_HOST
-  const out = all.filter((i) => (i.host || LOCAL_HOST) === want)
+  const hostless = (i: Identity) => !i.host
+  const out: Identity[] = []
+  const push = (i: Identity) => {
+    if (!out.some((x) => x.name === i.name)) out.push(i)
+  }
+  for (const i of all) if (!hostless(i) && i.host === want) push(i)
+  if (want === LOCAL_HOST) for (const i of all) if (hostless(i)) push(i)
   for (const st of Object.values(status)) {
-    if (st.source !== 'shell' || out.some((i) => i.name === st.name)) continue
-    out.push({
-      name: st.name,
-      kind: st.kind,
-      env: st.config_dir ? { CLAUDE_CONFIG_DIR: st.config_dir } : {},
-      args: [],
-    })
+    if (st.source !== 'shell') continue
+    push({ name: st.name, kind: st.kind, env: st.config_dir ? { CLAUDE_CONFIG_DIR: st.config_dir } : {}, args: [] })
+  }
+  if (want !== LOCAL_HOST) {
+    // 那台的身分狀態還沒到＝alias 還沒偵測過（daemon 的 `shell: None`）。
+    const detected = Object.keys(status).length > 0
+    for (const i of all) {
+      if (!hostless(i)) continue
+      if (!detected && SHELL_IDENTITY_NAMES.includes(i.name)) continue
+      push(i)
+    }
   }
   return out
 }
