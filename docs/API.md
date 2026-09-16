@@ -862,7 +862,7 @@ Project 底下所有存活 bot 的訊息合併，以插入順序（`rowid`）倒
 - 背景輪詢：codex 5 分、claude 60 秒、grok 30 秒，每輪各主機併發。
 - `source`：
   - `codex-app-server`：每 5 分鐘 `account/rateLimits/read`（遠端 ssh）。
-  - `codex-statusline`：同一輪讀每個 running codex pane 底下 `… · 5h 90% left · weekly 48% left`，寫同一把 key、後到覆蓋；只有剩餘 %，`resets_at`／`reset_credits`／`limit_hit` 沿用前一份。
+  - `codex-statusline`：同一輪讀每個 running codex pane 底下 `… · 5h 90% left · weekly 48% left`，寫同一把 key（畫面比 app-server 目前這個窗還舊就不採用，同一個窗只增不減，見 SPEC §14.2）；只有剩餘 %，`resets_at`／`reset_credits`／`limit_hit` 沿用前一份。
   - `statusline`：claude bot 對話中，daemon 注入的 `statusLine` 把 `rate_limits.five_hour/seven_day` POST 到 `/hook/claude`（`hook_event_name = "StatusLine"`，不建 Turn）。
   - `claude-usage`：背景 pane 探測 `claude auth status --json` + `claude -p "/usage"`（SPEC §14.2），純文字一行一個桶，依序對應 `five_hour` / `seven_day` / `fable`
     （`Current session` / `Current week (all models)` / `Current week (Fable)`，其他 model 週列忽略）；`plan` 取 `subscriptionType`。

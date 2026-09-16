@@ -572,29 +572,74 @@ pub fn quota_from_codex_status(q: &crate::codex_live::CodexStatusQuota, account:
     })
 }
 
-/// app-server 讀數會落後 CLI 一整輪（2026-09-13 使用者截圖：量表 5h 100、pane 90% left），
-/// CLI 狀態列才是它當下擋你的依據。與 app-server 共用同一格，後到覆蓋先到。
-/// 這個 pane 的狀態列讀數這一輪有沒有變過。記在行程裡就夠：daemon 重啟後第一輪本來就該重讀一次。
-/// 數字一樣就是同一張畫面（真的沒變時，跳過也只是少寫一次一模一樣的值——但 `updated_at` 不會被
-/// 刷新成「剛剛讀到的」，那正是重點）。
-async fn status_line_changed(host: &str, pane_id: &str, line: &str) -> bool {
+/// 這張狀態列畫面在這個行程裡是第一次看到、跟上次不一樣、還是同一張。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Sighting {
+    New,
+    Changed,
+    Same,
+}
+
+/// 記在行程裡就夠：daemon 重啟後第一次看到的畫面算 [`Sighting::New`]，年紀另外用回合時間判斷。
+async fn status_line_sighting(host: &str, pane_id: &str, line: &str) -> Sighting {
     static SEEN: std::sync::OnceLock<tokio::sync::Mutex<std::collections::HashMap<String, String>>> =
         std::sync::OnceLock::new();
     let mut map = SEEN.get_or_init(|| tokio::sync::Mutex::new(std::collections::HashMap::new())).lock().await;
     let key = format!("{host}:{pane_id}");
-    match map.get(&key) {
-        Some(prev) if prev == line => false,
-        _ => {
-            map.insert(key, line.to_string());
-            true
-        }
+    match map.insert(key, line.to_string()) {
+        None => Sighting::New,
+        Some(prev) if prev == line => Sighting::Same,
+        Some(_) => Sighting::Changed,
     }
 }
 
+/// pane 狀態列上的某一格窗（已用 %）要不要寫進去。
+///
+/// pane 讀的是**畫面**，不是感測器：數字停在那顆 pane 最後一回合的時候。兩個方向都出過事——
+/// - 閒著三小時的 pane 每 60 秒被重新解析、蓋上 now()：app-server 剛寫進去的「視窗重置了」被蓋回見底（review 2026-09-16）。
+/// - 改成「畫面沒變就不寫」之後，app-server 落後的數字（CLI 說 90% left、app-server 還是 100%）在 pane 閒著時
+///   再也沒人蓋回去（2026-09-15 使用者回報的症狀回來了，review 2026-09-16 M5）。
+///
+/// 所以看的是「這張畫面屬於哪一個窗」：
+/// - 這個行程裡看著它**變了**（剛跑完一回合）：CLI 當下的說法，照寫。
+/// - 其他（同一張、或重啟後第一次看到）用那顆 pane 最後一回合的時間 `screen_at` 對 app-server 給的重置時間：
+///   畫面比現在這個窗的起點（`resets_at − 窗長`）還舊 → 不採用；在同一個窗裡 → 用量只增不減，比現有的大才寫
+///   （app-server 落後時補上，別的 pane 已經用更多時不倒退）。記著的窗已經過了重置時間 → 畫面要晚於那次重置才採用。
+/// - 沒有重置時間（app-server 還沒答過）：只採用這個行程第一次看到的畫面，同一張不重寫。
+fn pane_window_used(
+    pane_used: Option<f64>,
+    stored: Option<&Window>,
+    window_len: chrono::Duration,
+    screen_at: Option<chrono::DateTime<chrono::Utc>>,
+    sighting: Sighting,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<f64> {
+    let p = pane_used?;
+    if sighting == Sighting::Changed {
+        return Some(p);
+    }
+    let reset = stored.and_then(|w| w.resets_at.as_deref()).and_then(parse_utc);
+    match (reset, screen_at) {
+        (None, _) => (sighting == Sighting::New).then_some(p),
+        (Some(_), None) => None,
+        (Some(r), Some(s)) if r <= now => (s >= r).then_some(p),
+        (Some(r), Some(s)) if s < r - window_len => None,
+        (Some(_), Some(_)) => match stored {
+            Some(w) if w.used_pct >= p => None,
+            _ => Some(p),
+        },
+    }
+}
+
+/// app-server 讀數會落後 CLI 一整輪（2026-09-13 使用者截圖：量表 5h 100、pane 90% left），CLI 狀態列才是它當下擋你的
+/// 依據。與 app-server 共用同一格；什麼時候採用 pane 上的數字見 [`pane_window_used`]。
 pub async fn refresh_codex_from_panes(app: &Arc<App>, host: &str) -> usize {
-    let rows: Vec<(String, Option<String>)> = match sqlx::query_as(
+    let rows: Vec<(String, Option<String>, Option<String>)> = match sqlx::query_as(
         // 最近有動靜的 pane 排前面：它的狀態列最新。閒著的 pane 也會刷新，但剛跑完回合的那顆最準。
-        "SELECT r.pane_id, b.identity FROM runs r JOIN bots b ON b.id = r.bot_id JOIN projects p ON p.id = b.project_id
+        // 第三欄是那顆 pane 畫面的年紀：最後一回合結束（或開始）的時間，沒有回合就是 run 起來的時間。
+        "SELECT r.pane_id, b.identity,
+                COALESCE((SELECT MAX(COALESCE(t.completed_at, t.created_at)) FROM turns t WHERE t.run_id = r.id), r.started_at)
+           FROM runs r JOIN bots b ON b.id = r.bot_id JOIN projects p ON p.id = b.project_id
           WHERE p.host = ? AND b.kind = 'codex' AND r.state = 'running' AND r.pane_id IS NOT NULL
             AND b.deleted_at IS NULL
           ORDER BY COALESCE((SELECT MAX(t.created_at) FROM turns t WHERE t.run_id = r.id), r.started_at) DESC",
@@ -611,7 +656,7 @@ pub async fn refresh_codex_from_panes(app: &Arc<App>, host: &str) -> usize {
     };
     let mut wrote = 0;
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for (pane_id, identity) in rows {
+    for (pane_id, identity, screen_at) in rows {
         let base = quota_base_for_host(app, host, "codex", identity.as_deref()).await;
         // 同一個身分讀到一次就夠——但要「讀到」才算：那顆 pane 正在壓縮對話、捲動中讀不到狀態列時，
         // 換同帳號的下一顆，而不是整個帳號這輪都停在 app-server 落後的數字（2026-09-15）。
@@ -621,18 +666,18 @@ pub async fn refresh_codex_from_panes(app: &Arc<App>, host: &str) -> usize {
         let Some(client) = app.herdr_for(host).await else { continue };
         let Ok(read) = client.pane_read(&pane_id, "visible", 60).await else { continue };
         let Some(parsed) = crate::codex_live::parse_status_quota(&read.text) else { continue };
-        // pane 讀的是**畫面**，不是感測器：一顆閒著三小時的 pane，狀態列上的數字就是三小時前那一回合的，
-        // 而這裡每 60 秒把同一張沒變過的畫面重新解析一次、蓋上 now() 當新讀數——app-server 剛寫進去的
-        // 「視窗重置了」會被它蓋回見底，量表在滿與見底之間跳（review 2026-09-16）。
-        // 同一段字就是同一張畫面：沒變就不是新讀數。（`limit_banner` 用同樣的想法分辨重播與新撞限。）
+        seen.insert(base.clone());
         let reading = format!("{:?}/{:?}", parsed.five_hour_left, parsed.weekly_left);
-        if !status_line_changed(host, &pane_id, &reading).await {
-            seen.insert(base);
-            continue;
-        }
-        let Some(q) = quota_from_codex_status(&parsed, identity.as_deref()) else { continue };
+        let sighting = status_line_sighting(host, &pane_id, &reading).await;
+        let stored = app.quotas.lock().await.get(&quota_key(host, &base)).cloned();
+        let screen_at = screen_at.as_deref().and_then(parse_utc);
+        let now = chrono::Utc::now();
+        let used = |left: Option<f64>| left.map(|l| (100.0 - l).clamp(0.0, 100.0));
+        let five = pane_window_used(used(parsed.five_hour_left), stored.as_ref().and_then(|q| q.five_hour.as_ref()), chrono::Duration::hours(5), screen_at, sighting, now);
+        let weekly = pane_window_used(used(parsed.weekly_left), stored.as_ref().and_then(|q| q.seven_day.as_ref()), chrono::Duration::days(7), screen_at, sighting, now);
+        let status = crate::codex_live::CodexStatusQuota { five_hour_left: five.map(|u| 100.0 - u), weekly_left: weekly.map(|u| 100.0 - u) };
+        let Some(q) = quota_from_codex_status(&status, identity.as_deref()) else { continue };
         set(app, host, &base, q).await;
-        seen.insert(base);
         wrote += 1;
     }
     wrote
@@ -789,6 +834,99 @@ mod tests {
         env.herdr.screens.lock().unwrap().insert(old_pane, line(70));
         assert_eq!(refresh_codex_from_panes(&app, LOCAL_HOST).await, 1);
         assert_eq!(used(app.clone()).await, 30.0);
+    }
+
+    /// M5（review 2026-09-16）：pane 剛跑完回合說 5h 90% left，之後 app-server 寫進落後的「0% 已用」。pane 閒著、畫面沒變，
+    /// 以前就再也沒人蓋回去；現在畫面屬於同一個窗，就把用量補回來（只增不減）。
+    /// 反過來，畫面比現在這個窗還舊（重置之前那一回合）就不採用——那是 2026-09-16 量表在滿與見底之間跳的原因。
+    #[tokio::test]
+    async fn an_idle_codex_pane_corrects_a_lagging_server_but_not_a_newer_window() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let bot = crate::db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, managed_by, created_at)
+             VALUES (?,?,'cx','codex','[]',0,1,'tok','user',?)",
+        )
+        .bind(&bot)
+        .bind(&env.project_id)
+        .bind(crate::db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let run = crate::testing::fake_run(&app, &bot).await;
+        let now = chrono::Utc::now();
+        let turn_done = |ago: chrono::Duration| {
+            let app = app.clone();
+            let (run, bot) = (run.clone(), bot.clone());
+            async move {
+                sqlx::query("DELETE FROM turns WHERE run_id=?").bind(&run).execute(&app.db).await.unwrap();
+                let conv = crate::db::conversation_id(&app.db, &bot).await.unwrap();
+                let t = iso(now - ago);
+                sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, created_at, completed_at) VALUES (?,?,?,'web','completed',?,?)")
+                    .bind(crate::db::ulid())
+                    .bind(conv)
+                    .bind(&run)
+                    .bind(&t)
+                    .bind(&t)
+                    .execute(&app.db)
+                    .await
+                    .unwrap();
+            }
+        };
+        let pane = crate::db::run(&app.db, &run).await.unwrap().unwrap().pane_id.unwrap();
+        let screen = |left: u32| format!("\n› Ask Codex\n  gpt-6-astra low · /tmp · Context 20% used · 5h {left}% left · weekly 65% left\n");
+        let server = |used: f64, resets: chrono::DateTime<chrono::Utc>| {
+            let mut q = codex_q("codex-app-server", None);
+            q.five_hour = Some(Window { used_pct: used, resets_at: Some(iso(resets)) });
+            q.seven_day = Some(Window { used_pct: 35.0, resets_at: Some(iso(now + chrono::Duration::days(3))) });
+            q
+        };
+        let five_used = |app: Arc<App>| async move { app.quotas.lock().await.get("codex").unwrap().five_hour.clone().unwrap().used_pct };
+
+        // 窗 1 小時前開始；回合 10 分鐘前跑完，pane 說 90% left。
+        turn_done(chrono::Duration::minutes(10)).await;
+        set(&app, LOCAL_HOST, "codex", server(0.0, now + chrono::Duration::hours(4))).await;
+        env.herdr.screens.lock().unwrap().insert(pane.clone(), screen(90));
+        refresh_codex_from_panes(&app, LOCAL_HOST).await;
+        assert_eq!(five_used(app.clone()).await, 10.0);
+        // app-server 落後，又寫回 0%；pane 閒著、畫面沒變——同一個窗，照樣補回來。
+        set(&app, LOCAL_HOST, "codex", server(0.0, now + chrono::Duration::hours(4))).await;
+        assert_eq!(refresh_codex_from_panes(&app, LOCAL_HOST).await, 1);
+        assert_eq!(five_used(app.clone()).await, 10.0, "落後的 app-server 不能讓量表停在偏滿");
+        // 已經是一樣的數字就不重寫（`updated_at` 不被刷成「剛剛」）。
+        assert_eq!(refresh_codex_from_panes(&app, LOCAL_HOST).await, 0);
+
+        // 同一張畫面，但回合是 3 小時前跑的，而 app-server 說窗 1 小時前才重置：畫面屬於上一個窗，不採用。
+        turn_done(chrono::Duration::hours(3)).await;
+        set(&app, LOCAL_HOST, "codex", server(5.0, now + chrono::Duration::hours(4))).await;
+        assert_eq!(refresh_codex_from_panes(&app, LOCAL_HOST).await, 0);
+        assert_eq!(five_used(app.clone()).await, 5.0, "重置之前的畫面不能把量表蓋回去");
+    }
+
+    #[test]
+    fn a_pane_window_is_used_only_when_it_belongs_to_the_current_window() {
+        let now = chrono::Utc::now();
+        let h = chrono::Duration::hours;
+        let len = h(5);
+        let w = |used: f64, resets: chrono::DateTime<chrono::Utc>| Window { used_pct: used, resets_at: Some(iso(resets)) };
+        let cur = w(20.0, now + h(4)); // 窗從 1 小時前開始
+        // 剛看著它變：照寫，連比較小的數字也寫（CLI 當下的說法，例如用了重置券）。
+        assert_eq!(pane_window_used(Some(5.0), Some(&cur), len, Some(now), Sighting::Changed, now), Some(5.0));
+        // 同一個窗：只增不減。
+        assert_eq!(pane_window_used(Some(30.0), Some(&cur), len, Some(now - h(0)), Sighting::Same, now), Some(30.0));
+        assert_eq!(pane_window_used(Some(10.0), Some(&cur), len, Some(now), Sighting::Same, now), None);
+        // 畫面比這個窗還舊：不管 New 還是 Same 都不採用。
+        assert_eq!(pane_window_used(Some(90.0), Some(&cur), len, Some(now - h(2)), Sighting::New, now), None);
+        // 記著的窗已經過了重置：畫面要晚於那次重置才採用。
+        let ended = w(90.0, now - h(1));
+        assert_eq!(pane_window_used(Some(3.0), Some(&ended), len, Some(now - h(2)), Sighting::Same, now), None);
+        assert_eq!(pane_window_used(Some(3.0), Some(&ended), len, Some(now - chrono::Duration::minutes(30)), Sighting::Same, now), Some(3.0));
+        // 沒有重置時間：只收這個行程第一次看到的畫面。
+        let bare = Window { used_pct: 20.0, resets_at: None };
+        assert_eq!(pane_window_used(Some(7.0), Some(&bare), len, Some(now), Sighting::New, now), Some(7.0));
+        assert_eq!(pane_window_used(Some(7.0), Some(&bare), len, Some(now), Sighting::Same, now), None);
+        assert_eq!(pane_window_used(None, Some(&cur), len, Some(now), Sighting::Changed, now), None);
     }
 
     /// 截斷只讀到 5h 時不可洗掉 7d（2026-09-13 使用者：header 的 codex 只剩一條）。
