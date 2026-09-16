@@ -1172,17 +1172,19 @@ body 直接是檔案位元組（**不是** multipart），`Content-Type` 就是�
 
 ### bot 寫給 AGM（SPEC §18.15）
 協調者建立後，下面兩條路目標是巡檢或協調者 bot 時**不開回合**，改寫 inbox `bot_request`：
-- `POST /api/bots/{id}/prompt {text,client_request_id?,attachments?,relay_from:<bot id>}`（可帶 `X-AM-Bot-Token` 證明寄件者）→ **202**
+- `POST /api/bots/{id}/prompt {text,client_request_id?,attachments?,relay_from:<bot id>,ack?,reply_to?}`（可帶 `X-AM-Bot-Token` 證明寄件者）→ **202**
   `{routed:"responder"|"patrol",queued:true,duplicate,wake,inbox_event_id,state,delivery:"queued",turn_id:null,message_id:null,note}`。
   沒有 `relay_from`（使用者）、`relay_from:"daemon"`、目標不是角色 bot、協調者未建立 → 照舊 200 `PromptOut`。
-- `POST /relay/announce`（shim，`X-AM-Bot-Token`）的 `to_agent` 對得上角色 bot（名字、agent 名、pane id）→ 200 同上形狀；shim 見 `routed` 不再轉給真的 herdr。其他 → `{}`（照舊記來源）。
+- `POST /relay/announce`（shim，`X-AM-Bot-Token`，表單 `bot_id,to_agent,text,ack?,reply_to?`）的 `to_agent` 對得上角色 bot（名字、agent 名、pane id）→ 200 同上形狀；shim 見 `routed` 不再轉給真的 herdr。其他 → `{}`（照舊記來源）。
 - 去重：同寄件者同 `client_request_id` 一筆；沒 id 時同寄件者、同內容指紋、同一個十分鐘格子一筆。指紋 = 收件角色＋目標＋正文（逐字）＋附件。
   重複且指紋相同 → `duplicate:true`、同一個 `inbox_event_id`；指紋不同 → 409 `request_mismatch`（不寫入，回報既有事件 id）。
-- `wake:false`：寄件者當下的回合是一件通知型交辦（`quiet_reason:"reply_to_notice"`），或是一次喚醒而那批事件來自收件角色（`"reply_between_roles"`）。
+- `wake:false` 只在寄件端明講是回覆時：`ack:true`（`quiet_reason:"ack"`），或 `reply_to` 對得上一則跟寄件者有關的 inbox 事件（寄給它的角色、它寄的、收件角色寄來的）或派給它的交辦（id 或 `client_request_id`）（`"reply"`）。
+  沒帶、或 `reply_to` 對不上（payload `reply_to_matched:false`）→ `wake:true`。不看寄件者當下在跑哪種回合。
+  `POST /api/supervisor/assignments` 對角色 bot 的交接同樣收 `ack`／`reply_to`；對一般 bot 的交辦帶它們 → 400。
 
 ### `bin/agm`
 `scripts/agm.py` 由 `include_str!` 編進 daemon，`setup` 時寫成 `<cwd>/bin/agm`。子命令：`state`、`supervisor`、`search`、`messages`、`bot`（`start`／`stop`／`restart`／`create`／`delete`）、
-`assign`（含 `--notice`、`--mission`／`--role`、`--review-by patrol|responder`）、`assignments`、`inbox`（`--all`、`--limit`、`--role patrol|responder|mine`）、`ack`、`handoff`、`quota`、`health`、`lease`、`mission`、
+`assign`（含 `--notice`、`--mission`／`--role`、`--review-by patrol|responder`、交接用的 `--ack`／`--reply-to <event_id>`）、`assignments`、`inbox`（`--all`、`--limit`、`--role patrol|responder|mine`）、`ack`、`handoff`、`quota`、`health`、`lease`、`mission`、
 `whoami`、`responder`（`show`／`setup`／`start`／`stop`）、`persona --role responder`；輸出一律 JSON。
 執行期設定讀 `<cwd>/runtime.json`：`{daemon_url, manager_bot_id, responder_bot_id, bot_id, role, self_bot_id, data_dir, supervisor_id, remote_name}`（巡檢目錄的 `responder_bot_id` 在沒有協調者時是 `null`）；**沒有 token**，CLI 執行期 `GET /api/session` 取；`daemon_url` 只接受 loopback。
 `role` 缺省＝`patrol`。環境 `AM_BOT_ID` 等於 `self_bot_id` 時，API 請求另帶 `X-AM-Bot-Id`／`X-AM-Bot-Token`（`AM_HOOK_TOKEN`）證明角色；mission 回報的 `relay_from` 用 `self_bot_id`。

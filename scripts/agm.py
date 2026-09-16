@@ -504,6 +504,11 @@ def cmd_assign(client: Client, cfg: dict, args) -> object:
     if getattr(args, "notice", False):
         body["kind"] = "notice"
         body["expects_review"] = False
+    # 交接給另一個 AGM 角色時明講「這是回覆」：沒帶就當新的事、叫醒對方（SPEC §18.15）。
+    if getattr(args, "ack", False):
+        body["ack"] = True
+    if getattr(args, "reply_to", None):
+        body["reply_to"] = args.reply_to
     # 群組任務：這件交辦屬於哪個任務、擔任哪個角色。兩個一起給——少一個 daemon 會回 400，
     # 在這裡先擋，免得一件沒掛上任務的工作被派出去。
     mission, role = getattr(args, "mission", None), getattr(args, "role", None)
@@ -1037,6 +1042,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--notice",
         action="store_true",
         help="通知，不是交辦：送到、回合結束就自動結案，不進 awaiting_review、不會被當成卡住的工作",
+    )
+    s.add_argument(
+        "--ack",
+        action="store_true",
+        help="只用在交接給另一個 AGM 角色：這句是純告知（「收到」），不叫醒對方。沒帶＝新的事，會叫醒",
+    )
+    s.add_argument(
+        "--reply-to",
+        dest="reply_to",
+        metavar="EVENT_ID",
+        help="只用在交接給另一個 AGM 角色：這句回的是哪一則 inbox 事件，不叫醒對方。要對方處理的事不要帶",
     )
     s.add_argument("--mission", help="群組任務 id：這件交辦屬於哪個任務（要和 --role 一起給）")
     s.add_argument("--role", choices=["executor", "reviewer", "verifier"], help="在任務裡擔任的角色")

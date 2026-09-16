@@ -116,6 +116,12 @@ pub struct AssignIn {
     pub mission_id: Option<String>,
     #[serde(default)]
     pub role: Option<String>,
+    /// 交接給另一個 AGM 角色時明講「這是回覆」：`ack`（純告知）或 `reply_to`（回哪一則事件）。
+    /// 都沒帶就叫醒對方（SPEC §18.15）；對一般 bot 的交辦帶它是 400。
+    #[serde(default)]
+    pub ack: bool,
+    #[serde(default)]
+    pub reply_to: Option<String>,
 }
 
 impl AssignIn {
@@ -159,6 +165,7 @@ pub async fn post_assignment(
         mission.as_ref().map(|(m, r)| (m.as_str(), r.as_str())),
         review_role,
         actor,
+        super::bot_requests::ReplyMark { ack: b.ack, reply_to: b.reply_to.as_deref() },
     )
     .await?;
     Ok(Json(a))

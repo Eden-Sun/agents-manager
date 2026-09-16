@@ -381,6 +381,17 @@ class AssignCommandTest(CliCase):
         self.assertEqual(body["kind"], "notice")
         self.assertIs(body["expects_review"], False)
 
+    def test_a_handover_reply_says_so_and_an_unmarked_one_does_not(self):
+        """寄件端明講才算回覆（review 2026-09-16 H1）：`--ack`／`--reply-to` 要進 body；沒帶就不能多出這兩個欄位。"""
+        FakeDaemon.routes["POST /api/supervisor/assignments"] = (200, {"kind": "handover", "routed": "patrol", "wake": False})
+        self.ok("assign", "--bot", "b1", "--text", "收到，我接手", "--request-id", "h-1", "--notice", "--ack", "--reply-to", "ev-7")
+        self.ok("assign", "--bot", "b1", "--text", "需要使用者裁示", "--request-id", "h-2", "--notice")
+        posted = [r["body"] for r in FakeDaemon.seen if r["method"] == "POST"]
+        self.assertIs(posted[0]["ack"], True)
+        self.assertEqual(posted[0]["reply_to"], "ev-7")
+        self.assertNotIn("ack", posted[1])
+        self.assertNotIn("reply_to", posted[1])
+
     def test_without_the_flag_nothing_changes(self):
         FakeDaemon.routes["POST /api/supervisor/assignments"] = (200, {"id": "a8"})
         self.ok("assign", "--bot", "b1", "--text", "做這個", "--request-id", "t-1")

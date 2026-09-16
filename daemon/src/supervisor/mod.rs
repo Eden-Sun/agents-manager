@@ -190,6 +190,8 @@ pub async fn assign(
     review_role: Option<roles::Role>,
     // 呼叫端自己是哪個角色（bot token 驗過的）。`None` = UI／腳本。
     actor: Option<roles::Role>,
+    // 角色之間的交接明講是回覆（`--ack`／`--reply-to`）；只對交接有意義。
+    reply: bot_requests::ReplyMark<'_>,
 ) -> Result<Value, LcError> {
     if client_request_id.trim().is_empty() {
         return Err(LcError::Bad("client_request_id must not be empty".into()));
@@ -245,11 +247,16 @@ pub async fn assign(
             &[],
             actor.is_some(),
             "assignment",
+            reply,
         )
         .await?;
         out["kind"] = json!("handover");
         out["expects_review"] = json!(expects_review);
         return Ok(out);
+    }
+    // 「這是回覆」只有交接走的佇列看得懂；對一般 bot 下的交辦帶它，呼叫端會以為對方不會被打擾。
+    if reply.is_set() {
+        return Err(LcError::Bad("ack / reply_to only apply to a handover between AGM roles".into()));
     }
     crate::db::bot(&app.db, target_bot_id)
         .await

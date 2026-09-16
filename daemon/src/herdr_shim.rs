@@ -153,13 +153,75 @@ am_agent_prompt() {
     if ! "$AM_HERDR" agent get "$_name" >/dev/null 2>&1; then
         _name=$(am_child_name "$_name")
     fi
+    # 我們自己的旗標（SPEC §18.15）：`--ack`（純告知，不叫醒 AGM）、`--reply-to <id>`（回哪一則事件／交辦）。
+    # 真的 herdr 不認得，一律剝掉；沒帶就是新的事，AGM 會被叫醒。
+    _ack=""
+    _reply_to=""
+    _n=$#
+    _i=0
+    while [ "$_i" -lt "$_n" ]; do
+        _a=$1
+        shift
+        _i=$((_i + 1))
+        case "$_a" in
+            --ack)
+                _ack=1
+                continue
+                ;;
+            --reply-to)
+                if [ "$_i" -lt "$_n" ]; then
+                    _reply_to=$1
+                    shift
+                    _i=$((_i + 1))
+                fi
+                continue
+                ;;
+            --reply-to=*)
+                _reply_to=${_a#--reply-to=}
+                continue
+                ;;
+        esac
+        set -- "$@" "$_a"
+    done
+    # 正文只是 TEXT 那個位置參數：`--wait`、`--until X`、`--timeout X` 是 herdr 的旗標，混進正文會讓
+    # 同一句申請因為逾時值不同就變成兩個指紋。
+    _text=""
+    _skip=0
+    for _a in "$@"; do
+        if [ "$_skip" = 1 ]; then
+            _skip=0
+            continue
+        fi
+        case "$_a" in
+            --wait | --until=* | --timeout=*) continue ;;
+            --until | --timeout)
+                _skip=1
+                continue
+                ;;
+        esac
+        _text="${_text:+$_text }$_a"
+    done
     if [ -n "${AM_BOT_ID:-}" ] && [ -n "${AM_HOOK_TOKEN:-}" ] && [ -n "${AM_PORT:-}" ] && command -v curl >/dev/null 2>&1; then
         # 表單編碼：prompt 內容有引號、換行、`&` 都不會壞，也不必在 sh 裡拼 JSON。
         _resp=$(curl -s -m 2 -X POST "http://127.0.0.1:${AM_PORT}/relay/announce" \
             -H "X-AM-Bot-Token: ${AM_HOOK_TOKEN}" \
             --data-urlencode "bot_id=${AM_BOT_ID}" \
             --data-urlencode "to_agent=${_name}" \
-            --data-urlencode "text=$*" 2>/dev/null) || _resp=""
+            --data-urlencode "text=${_text}" \
+            --data-urlencode "ack=${_ack}" \
+            --data-urlencode "reply_to=${_reply_to}" 2>/dev/null)
+        # 28 = curl 逾時：daemon 可能已經排進佇列、只是回得慢。這時退回直送會讓同一句又打進 AGM 的
+        # pane。再問一次、給久一點——沒帶 request id 的申請 daemon 以內容指紋去重，重問不會變兩筆。
+        # 連不上（daemon 不在）才照舊直送。
+        if [ "$?" = 28 ]; then
+            _resp=$(curl -s -m 15 -X POST "http://127.0.0.1:${AM_PORT}/relay/announce" \
+                -H "X-AM-Bot-Token: ${AM_HOOK_TOKEN}" \
+                --data-urlencode "bot_id=${AM_BOT_ID}" \
+                --data-urlencode "to_agent=${_name}" \
+                --data-urlencode "text=${_text}" \
+                --data-urlencode "ack=${_ack}" \
+                --data-urlencode "reply_to=${_reply_to}" 2>/dev/null) || _resp=""
+        fi
         # 寫給 AGM 的申請 daemon 已經排進協調者的佇列（SPEC §18.15）：不再打進 AGM 的 pane，
         # 否則同一句話會先燒一輪巡檢的回合。daemon 沒回應時照舊送（寧可多一回合，不能掉訊息）。
         case "$_resp" in
@@ -546,6 +608,73 @@ mod tests {
         env.push(("AM_TEST_CURL_REPLY", "{}"));
         let (out, _) = s.run(&env, &["agent", "prompt", "agm-pxf2pv", "請准我重啟 daemon"]);
         assert_eq!(out, ["agent", "prompt", "agm-pxf2pv", "請准我重啟 daemon"]);
+    }
+
+    /// `--ack`／`--reply-to` 是我們的旗標（review 2026-09-16 H1：寄件端明講才算回覆）：送給 daemon、不給真的
+    /// herdr。herdr 自己的 `--wait --timeout` 不算正文。curl 逾時（28）先再問一次，不直接打進 AGM 的 pane。
+    #[test]
+    fn reply_marks_go_to_the_daemon_and_a_slow_daemon_is_asked_again_before_falling_back() {
+        let s = Sandbox::new();
+        let log = s.dir.join("curl.log");
+        let count = s.dir.join("curl.count");
+        let fake_curl = s.dir.join("real").join("curl");
+        // 每次呼叫把 --data-urlencode 的值一行一行記下來；第一次照 AM_TEST_CURL_FIRST_RC 結束。
+        std::fs::write(
+            &fake_curl,
+            format!(
+                "#!/bin/sh\n\
+                 n=$(cat '{count}' 2>/dev/null || echo 0); n=$((n + 1)); echo $n > '{count}'\n\
+                 prev=''\n\
+                 for a in \"$@\"; do [ \"$prev\" = --data-urlencode ] && printf '%s\\n' \"$a\" >> '{log}'; prev=$a; done\n\
+                 echo --- >> '{log}'\n\
+                 if [ \"$n\" = 1 ] && [ -n \"${{AM_TEST_CURL_FIRST_RC:-}}\" ]; then exit \"$AM_TEST_CURL_FIRST_RC\"; fi\n\
+                 printf '%s' \"${{AM_TEST_CURL_REPLY:-}}\"\n",
+                count = count.display(),
+                log = log.display(),
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&fake_curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let base = [("AM_AGENT_NAME", "proj-abc123"), ("AM_TEST_AGENTS", "agm-pxf2pv"), ("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_PORT", "1")];
+
+        // daemon 沒排進佇列（`{}`）→ 照舊直送，但我們的旗標不給 herdr，herdr 的旗標原樣保留。
+        let mut env = base.to_vec();
+        env.push(("AM_TEST_CURL_REPLY", "{}"));
+        let (out, _) = s.run(&env, &["agent", "prompt", "agm-pxf2pv", "收到", "--ack", "--reply-to", "ev-1", "--wait", "--timeout", "5000"]);
+        assert_eq!(out, ["agent", "prompt", "agm-pxf2pv", "收到", "--wait", "--timeout", "5000"]);
+        let sent = std::fs::read_to_string(&log).unwrap();
+        assert!(sent.contains("text=收到\n"), "正文不含 herdr 的旗標：{sent}");
+        assert!(sent.contains("ack=1\n") && sent.contains("reply_to=ev-1\n"), "{sent}");
+
+        // 沒帶旗標：ack／reply_to 送空的（daemon 當成新的事、叫醒）。
+        std::fs::remove_file(&log).unwrap();
+        std::fs::remove_file(&count).unwrap();
+        let (_, _) = s.run(&env, &["agent", "prompt", "agm-pxf2pv", "請核准重啟"]);
+        let sent = std::fs::read_to_string(&log).unwrap();
+        assert!(sent.contains("ack=\n") && sent.contains("reply_to=\n"), "{sent}");
+
+        // 第一次逾時、第二次 daemon 說排進佇列了：不打進 pane。
+        std::fs::remove_file(&log).unwrap();
+        std::fs::remove_file(&count).unwrap();
+        let mut env = base.to_vec();
+        env.push(("AM_TEST_CURL_FIRST_RC", "28"));
+        env.push(("AM_TEST_CURL_REPLY", r#"{"routed":"responder","inbox_event_id":"e9"}"#));
+        let (out, err) = s.run(&env, &["agent", "prompt", "agm-pxf2pv", "請核准重啟"]);
+        assert!(out.is_empty(), "逾時後再問到了，真的 herdr 不該被叫到：{out:?}");
+        assert!(err.contains("e9"), "{err}");
+        assert_eq!(std::fs::read_to_string(&count).unwrap().trim(), "2");
+
+        // 連不上（7）不重問，照舊直送。
+        std::fs::remove_file(&count).unwrap();
+        let mut env = base.to_vec();
+        env.push(("AM_TEST_CURL_FIRST_RC", "7"));
+        let (out, _) = s.run(&env, &["agent", "prompt", "agm-pxf2pv", "請核准重啟"]);
+        assert_eq!(out, ["agent", "prompt", "agm-pxf2pv", "請核准重啟"]);
+        assert_eq!(std::fs::read_to_string(&count).unwrap().trim(), "1");
     }
 
     #[test]

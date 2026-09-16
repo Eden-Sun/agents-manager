@@ -55,34 +55,78 @@ pub fn event_key(from: &str, crid: Option<&str>, fingerprint: &str, now_unix: i6
     }
 }
 
-/// 為什麼這一筆不叫醒人（`None` = 要叫醒）。只看 daemon 自己的紀錄，不看字面。
+/// 寄件端**明講**這一句是回覆。兩個欄位都沒有 = 新的事，一律叫醒（舊的 shim／CLI 不帶，行為就是叫醒）。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ReplyMark<'a> {
+    /// `--ack`：純告知（「收到」「已開始」），不需要收件角色處理。
+    pub ack: bool,
+    /// `--reply-to <id>`：回的是哪一則 inbox 事件或交辦（id 或 client_request_id）。
+    pub reply_to: Option<&'a str>,
+}
+
+impl ReplyMark<'_> {
+    pub fn is_set(&self) -> bool {
+        self.ack || self.reply_to.is_some_and(|r| !r.trim().is_empty())
+    }
+}
+
+/// 為什麼這一筆不叫醒人（`None` = 要叫醒），以及 `reply_to` 有沒有對上一筆真的東西。
 ///
-/// * 寄件者現在跑的回合是一件**通知型交辦**（`--notice`）：這是它對通知的回覆（「收到」）。
-/// * 寄件者現在跑的回合是一次喚醒（digest），而那批事件裡有收件角色送來的東西：這是角色之間的
-///   來回，不再往回叫醒對方。
-async fn quiet_reason(app: &Arc<App>, from: &str, to_bot: Option<&str>) -> Result<Option<&'static str>, LcError> {
-    let Some(run) = crate::db::active_run(&app.db, from).await.map_err(up)? else { return Ok(None) };
-    let Some(turn) = crate::db::in_flight_turn(&app.db, &run.id).await.map_err(up)? else { return Ok(None) };
-    if let Some(a) = store::assignment_by_turn(&app.db, &turn.id).await.map_err(up)? {
-        if a.is_notice() {
-            return Ok(Some("reply_to_notice"));
+/// **不從「寄件時在哪種回合」推斷**（review 2026-09-16 H1）：bot 在通知型交辦的回合裡做完事、
+/// 接著申請重啟，或協調者在處理巡檢交接的那一批裡把「要使用者裁示」交接回去——那都是新的事，
+/// 以前卻被判成回覆、標「只記錄」，申請就此被吞掉。所以只認寄件端自己說的：
+///
+/// * `ack` → `"ack"`。
+/// * `reply_to` 對得上一則跟寄件者有關的 inbox 事件（寄給它的角色、它寄的、或收件角色寄來的），
+///   或一件派給它的交辦 → `"reply"`。對不上（打錯、編的）就當新事件叫醒，寧可多一回合也不吞申請。
+async fn quiet_reason(
+    app: &Arc<App>,
+    from: &str,
+    sender: Option<Role>,
+    to_bot: Option<&str>,
+    mark: ReplyMark<'_>,
+) -> Result<(Option<&'static str>, Option<bool>), LcError> {
+    let reply_to = mark.reply_to.map(str::trim).filter(|r| !r.is_empty());
+    let matched = match reply_to {
+        None => None,
+        Some(r) => {
+            let event: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM supervisor_inbox
+                  WHERE supervisor_id=? AND id=?
+                    AND (bot_id=? OR json_extract(payload_json,'$.from_bot_id') IN (?, ?)
+                         OR (? IS NOT NULL AND COALESCE(claimed_by, role)=?))",
+            )
+            .bind(store::SUPERVISOR_ID)
+            .bind(r)
+            .bind(from)
+            .bind(from)
+            .bind(to_bot.unwrap_or(""))
+            .bind(sender.map(Role::as_str))
+            .bind(sender.map(Role::as_str))
+            .fetch_one(&app.db)
+            .await
+            .map_err(up)?;
+            let assignment: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM supervisor_assignments WHERE supervisor_id=? AND (id=? OR client_request_id=?) AND target_bot_id=?",
+            )
+            .bind(store::SUPERVISOR_ID)
+            .bind(r)
+            .bind(r)
+            .bind(from)
+            .fetch_one(&app.db)
+            .await
+            .map_err(up)?;
+            Some(event + assignment > 0)
         }
-    }
-    if let Some(to) = to_bot {
-        let echoed: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM supervisor_inbox WHERE notify_turn_id=? AND (bot_id=? OR json_extract(payload_json,'$.from_bot_id')=?)",
-        )
-        .bind(&turn.id)
-        .bind(to)
-        .bind(to)
-        .fetch_one(&app.db)
-        .await
-        .map_err(up)?;
-        if echoed > 0 {
-            return Ok(Some("reply_between_roles"));
-        }
-    }
-    Ok(None)
+    };
+    let reason = if mark.ack {
+        Some("ack")
+    } else if matched == Some(true) {
+        Some("reply")
+    } else {
+        None
+    };
+    Ok((reason, matched))
 }
 
 /// `X-AM-Bot-Token` 是寄件 bot 自己的 hook token 才算驗證過。沒有也照收，只是記下來。
@@ -114,6 +158,7 @@ pub async fn intercept(
     attachments: &[String],
     verified: bool,
     via: &str,
+    mark: ReplyMark<'_>,
 ) -> Result<Option<Value>, LcError> {
     // 協調者「建立過」就一直攔：它停了、沒額度、bot 被刪掉，申請都排進它的佇列等，
     // 不會因為它不在就倒回巡檢（SPEC §18.15）。
@@ -123,7 +168,7 @@ pub async fn intercept(
     let Some(target) = roles::role_of_bot(&app.db, target_bot_id).await.map_err(up)? else { return Ok(None) };
     let sender = roles::role_of_bot(&app.db, from_bot_id).await.map_err(up)?;
     let Some(to) = recipient(target, sender) else { return Ok(None) };
-    Ok(Some(queue(app, to, from_bot_id, target_bot_id, text, client_request_id, attachments, verified, via).await?))
+    Ok(Some(queue(app, to, from_bot_id, target_bot_id, text, client_request_id, attachments, verified, via, mark).await?))
 }
 
 /// 寫一筆 `bot_request` 進收件角色的佇列。`intercept`（prompt／shim）與角色之間的交接
@@ -139,17 +184,21 @@ pub async fn queue(
     attachments: &[String],
     verified: bool,
     via: &str,
+    mark: ReplyMark<'_>,
 ) -> Result<Value, LcError> {
     let to_bot = roles::bot_for(&app.db, to).await.map_err(up)?;
-    let quiet = quiet_reason(app, from_bot_id, to_bot.as_deref()).await?;
-    let from_bot = crate::db::bot(&app.db, from_bot_id).await.map_err(up)?;
     let sender = roles::role_of_bot(&app.db, from_bot_id).await.map_err(up)?;
+    let (quiet, reply_matched) = quiet_reason(app, from_bot_id, sender, to_bot.as_deref(), mark).await?;
+    let from_bot = crate::db::bot(&app.db, from_bot_id).await.map_err(up)?;
     let fp = fingerprint(to, target_bot_id, text, attachments);
     let key = event_key(from_bot_id, client_request_id, &fp, chrono::Utc::now().timestamp());
     let payload = json!({
         "to_role": to.as_str(),
         "wake": quiet.is_none(),
         "quiet_reason": quiet,
+        "ack": mark.ack,
+        "reply_to": mark.reply_to.map(str::trim).filter(|r| !r.is_empty()),
+        "reply_to_matched": reply_matched,
         "from_bot_id": from_bot_id,
         "from_name": from_bot.as_ref().map(|b| b.name.clone()),
         "from_role": sender.map(Role::as_str),
@@ -326,7 +375,7 @@ pub(crate) mod flow_tests {
     #[tokio::test]
     async fn without_a_responder_nothing_is_intercepted() {
         let app = app().await;
-        assert!(intercept(&app, "patrol", "w1", "請核准", Some("r1"), &[], true, "api").await.unwrap().is_none());
+        assert!(intercept(&app, "patrol", "w1", "請核准", Some("r1"), &[], true, "api", ReplyMark::default()).await.unwrap().is_none());
         assert!(inbox(&app).await.is_empty());
     }
 
@@ -336,7 +385,7 @@ pub(crate) mod flow_tests {
         configure_responder(&app).await;
         let mut ids = std::collections::HashSet::new();
         for _ in 0..100 {
-            let out = intercept(&app, "patrol", "w1", "請核准重建 abc123", Some("rebuild-abc123"), &[], true, "api").await.unwrap().unwrap();
+            let out = intercept(&app, "patrol", "w1", "請核准重建 abc123", Some("rebuild-abc123"), &[], true, "api", ReplyMark::default()).await.unwrap().unwrap();
             assert_eq!(out["routed"], "responder");
             ids.insert(out["inbox_event_id"].as_str().unwrap().to_string());
         }
@@ -356,36 +405,58 @@ pub(crate) mod flow_tests {
     async fn users_daemon_and_ordinary_targets_are_left_alone() {
         let app = app().await;
         configure_responder(&app).await;
-        assert!(intercept(&app, "patrol", crate::agent_relay::DAEMON_SENDER, "tick", None, &[], false, "api").await.unwrap().is_none());
-        assert!(intercept(&app, "w2", "w1", "幫我看一下", None, &[], true, "api").await.unwrap().is_none(), "bot 對一般 bot 不關 AGM 的事");
-        assert!(intercept(&app, "patrol", "patrol", "自言自語", None, &[], true, "api").await.unwrap().is_none());
+        assert!(intercept(&app, "patrol", crate::agent_relay::DAEMON_SENDER, "tick", None, &[], false, "api", ReplyMark::default()).await.unwrap().is_none());
+        assert!(intercept(&app, "w2", "w1", "幫我看一下", None, &[], true, "api", ReplyMark::default()).await.unwrap().is_none(), "bot 對一般 bot 不關 AGM 的事");
+        assert!(intercept(&app, "patrol", "patrol", "自言自語", None, &[], true, "api", ReplyMark::default()).await.unwrap().is_none());
     }
 
+    /// 寄件時在哪種回合**不算數**（review 2026-09-16 H1）：bot 在協調者的通知型交辦（「已核准，可以建置」）
+    /// 裡建完、接著在同一個回合申請重啟——那是新的申請，要叫醒協調者。只有寄件端明講 `--ack`／
+    /// `--reply-to` 的才只記錄。
     #[tokio::test]
-    async fn roles_can_hand_over_but_a_reply_to_a_notice_does_not_wake_anyone() {
+    async fn a_new_request_sent_inside_a_notice_turn_still_wakes_the_responder() {
         let app = app().await;
         configure_responder(&app).await;
-        let out = intercept(&app, "resp", "patrol", "巡檢發現 builder 卡住", Some("p-1"), &[], true, "api").await.unwrap().unwrap();
+        let out = intercept(&app, "resp", "patrol", "巡檢發現 builder 卡住", Some("p-1"), &[], true, "api", ReplyMark::default()).await.unwrap().unwrap();
         assert_eq!(out["routed"], "responder");
         assert_eq!(out["wake"], true);
 
-        // w1 正在跑一件協調者發給它的通知；它在那個回合裡回「收到」。
+        // w1 正在跑一件協調者發給它的通知（「已核准，可以建置」）。
         let now = crate::db::now();
         sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,started_at) VALUES ('run-w1','w1','running','working',?)").bind(&now).execute(&app.db).await.unwrap();
         sqlx::query("INSERT INTO conversations (id,bot_id,created_at) VALUES ('c-w1','w1',?)").bind(&now).execute(&app.db).await.unwrap();
         sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,created_at) VALUES ('t-w1','c-w1','run-w1','web','in_flight',?)").bind(&now).execute(&app.db).await.unwrap();
-        let a = store::insert_assignment(&app.db, None, "w1", "note-1", "核准，去做", &[], None, false).await.unwrap();
+        let a = store::insert_assignment(&app.db, None, "w1", "note-1", "已核准，可以建置", &[], None, false).await.unwrap();
         store::mark_delivered(&app.db, &a.id, "t-w1", "ok").await.unwrap();
-        let out = intercept(&app, "resp", "w1", "收到，開始做", None, &[], true, "shim").await.unwrap().unwrap();
-        assert_eq!(out["wake"], false, "對通知的回覆只記錄");
-        assert!(
-            roles::due_for(&app.db, Role::Responder, true, "2999-01-01T00:00:00Z", 0).await.unwrap().iter().filter(|e| e.wake == Some(1)).count() == 1,
-            "只有巡檢那一筆會叫醒協調者"
-        );
+
+        // 同一個 notice 回合裡的新申請：沒有標記 → 叫醒，不寫成「只記錄」。
+        let restart = intercept(&app, "resp", "w1", "建置完成，請核准重啟 daemon", None, &[], true, "shim", ReplyMark::default()).await.unwrap().unwrap();
+        assert_eq!(restart["wake"], true, "notice 回合裡的新申請不是回覆");
+        let p: Value = serde_json::from_str(
+            &sqlx::query_scalar::<_, String>("SELECT payload_json FROM supervisor_inbox WHERE id=?")
+                .bind(restart["inbox_event_id"].as_str().unwrap())
+                .fetch_one(&app.db)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(p["quiet_reason"].is_null(), "{p}");
+
+        // 寄件端明講 `--ack`：只記錄。
+        let ack = intercept(&app, "resp", "w1", "收到，開始建置", None, &[], true, "shim", ReplyMark { ack: true, reply_to: None }).await.unwrap().unwrap();
+        assert_eq!(ack["wake"], false);
+        // `--reply-to <交辦>`：對得上派給它的那一件 → 只記錄。
+        let reply = intercept(&app, "resp", "w1", "照 note-1 開始", None, &[], true, "shim", ReplyMark { ack: false, reply_to: Some("note-1") }).await.unwrap().unwrap();
+        assert_eq!(reply["wake"], false);
+        // 對不上的 id（打錯或編的）不能拿來讓申請安靜。
+        let bogus = intercept(&app, "resp", "w1", "請核准重啟（編的 id）", None, &[], true, "shim", ReplyMark { ack: false, reply_to: Some("nope") }).await.unwrap().unwrap();
+        assert_eq!(bogus["wake"], true);
+
+        let due = roles::due_for(&app.db, Role::Responder, true, "2999-01-01T00:00:00Z", 0).await.unwrap();
+        assert_eq!(due.iter().filter(|e| e.wake == Some(1)).count(), 3, "巡檢的交接、重啟申請、編的 reply_to 都要叫醒");
+        assert_eq!(due.iter().filter(|e| e.wake == Some(0)).count(), 2, "只有明講的兩句只記錄");
     }
 
-    /// 協調者被一批含巡檢交接的事件叫醒，在那個回合裡回巡檢一句：記下來，但不叫醒巡檢，
-    /// 否則兩個角色會互相請示到額度用完。
     async fn turn_for(app: &Arc<App>, bot: &str, run: &str, conv: &str, turn: &str) {
         let now = crate::db::now();
         sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,started_at) VALUES (?,?,'running','working',?)")
@@ -397,13 +468,13 @@ pub(crate) mod flow_tests {
     }
 
     /// 端到端：巡檢用 `assign`（persona 教的那條路）交接給協調者 → 進協調者的佇列，不是一件
-    /// 交辦、也不開任何回合；協調者在收到那一批的回合裡回一句 → 只記錄，不再叫醒巡檢。
+    /// 交辦、也不開任何回合；協調者回一句明講 `--ack` 的 → 只記錄；沒標記的 → 叫醒巡檢。
     #[tokio::test]
-    async fn an_assignment_addressed_to_a_role_goes_through_the_queue_and_the_reply_wakes_nobody() {
+    async fn an_assignment_addressed_to_a_role_goes_through_the_queue_and_only_a_marked_reply_stays_quiet() {
         let app = app().await;
         configure_responder(&app).await;
         let out = crate::supervisor::assign(
-            &app, "resp", "交接：builder 卡在 rebase，請你接手協調", "handover-1", None, &[], None, false, None, None, Some(Role::Patrol),
+            &app, "resp", "交接：builder 卡在 rebase，請你接手協調", "handover-1", None, &[], None, false, None, None, Some(Role::Patrol), ReplyMark::default(),
         )
         .await
         .unwrap();
@@ -423,22 +494,41 @@ pub(crate) mod flow_tests {
         assert_eq!(payload["from_bot_id"], "patrol");
         assert_eq!(payload["via"], "assignment");
 
-        // 協調者被那一批叫醒；它在同一個回合裡回巡檢一句「收到，我接手」。
+        // 協調者被那一批叫醒；它在同一個回合裡明講 `--ack` 回巡檢一句「收到，我接手」→ 只記錄。
         turn_for(&app, "resp", "run-r", "c-r", "t-r").await;
         roles::mark_delivered(&app.db, &[ev[0].id.clone()], Role::Responder, "t-r", "ok").await.unwrap();
         let back = crate::supervisor::assign(
             &app, "patrol", "收到，我接手 builder", "handover-1-ack", None, &[], None, false, None, None, Some(Role::Responder),
+            ReplyMark { ack: true, reply_to: None },
         )
         .await
         .unwrap();
         assert_eq!(back["routed"], "patrol");
-        assert_eq!(back["wake"], false, "回信只記錄，不叫醒巡檢");
+        assert_eq!(back["wake"], false, "明講 ack 的回信只記錄，不叫醒巡檢");
         let patrol_due = roles::due_for(&app.db, Role::Patrol, true, "2999-01-01T00:00:00Z", 5).await.unwrap();
         assert!(patrol_due.iter().all(|e| e.wake == Some(0)));
 
+        // 同一個回合裡另一句「要使用者裁示」沒有標記：那是新的事，叫醒巡檢（review 2026-09-16 H1 的第二條路）。
+        let ask = crate::supervisor::assign(
+            &app, "patrol", "builder 要刪使用者的 worktree，需要使用者裁示", "handover-1-ask", None, &[], None, false, None, None, Some(Role::Responder),
+            ReplyMark::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(ask["wake"], true);
+        let patrol_due = roles::due_for(&app.db, Role::Patrol, true, "2999-01-01T00:00:00Z", 5).await.unwrap();
+        assert_eq!(patrol_due.iter().filter(|e| e.wake == Some(1)).count(), 1);
+
+        // 對一般 bot 的交辦帶 ack 是呼叫端搞錯了，不要默默吞掉。
+        let err = crate::supervisor::assign(
+            &app, "w1", "去做", "ack-to-worker", None, &[], None, false, None, None, Some(Role::Responder), ReplyMark { ack: true, reply_to: None },
+        )
+        .await;
+        assert!(matches!(err, Err(LcError::Bad(_))), "{err:?}");
+
         // 對自己交辦仍然是錯的。
         let err = crate::supervisor::assign(
-            &app, "resp", "自言自語", "self-1", None, &[], None, false, None, None, Some(Role::Responder),
+            &app, "resp", "自言自語", "self-1", None, &[], None, false, None, None, Some(Role::Responder), ReplyMark::default(),
         )
         .await;
         assert!(err.is_err());
@@ -467,12 +557,12 @@ pub(crate) mod flow_tests {
         }
 
         let by_responder = crate::supervisor::assign(
-            &app, "w1", "去修 builder 的 rebase", "src-resp", None, &[], None, true, None, None, Some(Role::Responder),
+            &app, "w1", "去修 builder 的 rebase", "src-resp", None, &[], None, true, None, None, Some(Role::Responder), ReplyMark::default(),
         )
         .await
         .unwrap();
         let by_patrol = crate::supervisor::assign(
-            &app, "w2", "去看登入流程", "src-patrol", None, &[], None, true, None, None, Some(Role::Patrol),
+            &app, "w2", "去看登入流程", "src-patrol", None, &[], None, true, None, None, Some(Role::Patrol), ReplyMark::default(),
         )
         .await
         .unwrap();
@@ -501,7 +591,7 @@ pub(crate) mod flow_tests {
 
         // 認不出呼叫者就不猜：記成交辦文字本身，不替某個人編一句話。
         let anon = crate::supervisor::assign(
-            &app, "w1", "腳本派的例行工作", "src-anon", None, &[], None, true, None, None, None,
+            &app, "w1", "腳本派的例行工作", "src-anon", None, &[], None, true, None, None, None, ReplyMark::default(),
         )
         .await
         .unwrap();
@@ -511,7 +601,7 @@ pub(crate) mod flow_tests {
 
         // 明講別人的回合也不行。
         let err = crate::supervisor::assign(
-            &app, "w1", "借別人的授權", "src-borrow", Some("t-p"), &[], None, true, None, None, Some(Role::Responder),
+            &app, "w1", "借別人的授權", "src-borrow", Some("t-p"), &[], None, true, None, None, Some(Role::Responder), ReplyMark::default(),
         )
         .await;
         assert!(err.is_err(), "協調者不能指巡檢的回合當來源");
@@ -522,12 +612,12 @@ pub(crate) mod flow_tests {
     async fn the_same_request_id_with_different_content_is_refused_not_swallowed() {
         let app = app().await;
         configure_responder(&app).await;
-        let first = intercept(&app, "patrol", "w1", "請核准重建 abc123", Some("r-1"), &[], true, "api").await.unwrap().unwrap();
-        let again = intercept(&app, "patrol", "w1", "請核准重建 abc123", Some("r-1"), &[], true, "api").await.unwrap().unwrap();
+        let first = intercept(&app, "patrol", "w1", "請核准重建 abc123", Some("r-1"), &[], true, "api", ReplyMark::default()).await.unwrap().unwrap();
+        let again = intercept(&app, "patrol", "w1", "請核准重建 abc123", Some("r-1"), &[], true, "api", ReplyMark::default()).await.unwrap().unwrap();
         assert_eq!(again["duplicate"], true);
         assert_eq!(again["inbox_event_id"], first["inbox_event_id"]);
 
-        let err = intercept(&app, "patrol", "w1", "請核准重建 def456", Some("r-1"), &[], true, "api").await.unwrap_err();
+        let err = intercept(&app, "patrol", "w1", "請核准重建 def456", Some("r-1"), &[], true, "api", ReplyMark::default()).await.unwrap_err();
         match err {
             LcError::Conflict(v) => {
                 assert_eq!(v["reason"], "request_mismatch");
@@ -538,7 +628,7 @@ pub(crate) mod flow_tests {
         let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox").fetch_one(&app.db).await.unwrap();
         assert_eq!(rows, 1, "被擋下來的那一筆不會偷偷寫進去");
         // 附件也算內容。
-        let err = intercept(&app, "patrol", "w1", "請核准重建 abc123", Some("r-1"), &["img-1".into()], true, "api").await;
+        let err = intercept(&app, "patrol", "w1", "請核准重建 abc123", Some("r-1"), &["img-1".into()], true, "api", ReplyMark::default()).await;
         assert!(err.is_err());
     }
 
@@ -550,7 +640,7 @@ pub(crate) mod flow_tests {
         configure_responder(&app).await;
         sqlx::query("UPDATE bots SET deleted_at=? WHERE id='resp'").bind(crate::db::now()).execute(&app.db).await.unwrap();
 
-        let out = intercept(&app, "patrol", "w1", "請協調 ownership", Some("r-9"), &[], true, "api").await.unwrap().unwrap();
+        let out = intercept(&app, "patrol", "w1", "請協調 ownership", Some("r-9"), &[], true, "api", ReplyMark::default()).await.unwrap().unwrap();
         assert_eq!(out["routed"], "responder");
         assert!(roles::due_for(&app.db, Role::Patrol, true, "2999-01-01T00:00:00Z", 5).await.unwrap().is_empty(), "不倒回巡檢");
         assert_eq!(roles::due_for(&app.db, Role::Responder, true, "2999-01-01T00:00:00Z", 0).await.unwrap().len(), 1);
@@ -610,20 +700,24 @@ pub(crate) mod flow_tests {
         assert_eq!(roles::list_for(&app.db, None, false, 1000).await.unwrap().len(), 221);
     }
 
+    /// 角色之間的回信要**明講**回哪一則（`--reply-to <event_id>`）才只記錄；只因為「在收到那一批的回合裡」
+    /// 就當成回信，會把協調者交接回來的新問題吞掉。
     #[tokio::test]
-    async fn a_reply_between_roles_inside_the_wake_that_carried_it_does_not_ping_back() {
+    async fn a_reply_between_roles_is_quiet_only_when_it_names_what_it_answers() {
         let app = app().await;
         configure_responder(&app).await;
-        let handover = intercept(&app, "resp", "patrol", "巡檢：builder 卡住三小時", Some("p-2"), &[], true, "api").await.unwrap().unwrap();
-        let now = crate::db::now();
-        sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,started_at) VALUES ('run-r','resp','running','working',?)").bind(&now).execute(&app.db).await.unwrap();
-        sqlx::query("INSERT INTO conversations (id,bot_id,created_at) VALUES ('c-r','resp',?)").bind(&now).execute(&app.db).await.unwrap();
-        sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,created_at) VALUES ('t-r','c-r','run-r','web','in_flight',?)").bind(&now).execute(&app.db).await.unwrap();
-        roles::mark_delivered(&app.db, &[handover["inbox_event_id"].as_str().unwrap().to_string()], Role::Responder, "t-r", "ok").await.unwrap();
-        let reply = intercept(&app, "patrol", "resp", "收到，已派 builder 續作", None, &[], true, "api").await.unwrap().unwrap();
-        assert_eq!(reply["routed"], "patrol");
+        let handover = intercept(&app, "resp", "patrol", "巡檢：builder 卡住三小時", Some("p-2"), &[], true, "api", ReplyMark::default()).await.unwrap().unwrap();
+        let handover_id = handover["inbox_event_id"].as_str().unwrap().to_string();
+        turn_for(&app, "resp", "run-r", "c-r", "t-r").await;
+        roles::mark_delivered(&app.db, &[handover_id.clone()], Role::Responder, "t-r", "ok").await.unwrap();
+
+        let unmarked = intercept(&app, "patrol", "resp", "builder 要動使用者的設定，請問使用者", None, &[], true, "api", ReplyMark::default()).await.unwrap().unwrap();
+        assert_eq!(unmarked["routed"], "patrol");
+        assert_eq!(unmarked["wake"], true, "沒標記就是新的事");
+
+        let reply = intercept(&app, "patrol", "resp", "收到，已派 builder 續作", None, &[], true, "api", ReplyMark { ack: false, reply_to: Some(&handover_id) }).await.unwrap().unwrap();
         assert_eq!(reply["wake"], false);
         let due = roles::due_for(&app.db, Role::Patrol, true, "2999-01-01T00:00:00Z", 5).await.unwrap();
-        assert!(due.iter().all(|e| e.wake == Some(0)), "巡檢不會因為這句被叫醒");
+        assert_eq!(due.iter().filter(|e| e.wake == Some(1)).count(), 1, "只有沒標記的那句叫醒巡檢");
     }
 }
