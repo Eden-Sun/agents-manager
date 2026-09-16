@@ -11,6 +11,7 @@ import {
   botQuotaWarning,
   botMatches,
   botsOfProject,
+  enabledIdentities,
   identitiesOfHost,
   orderedProjects,
   projectHostName,
@@ -835,9 +836,10 @@ export function Sidebar() {
   // config 身份＋本機 shell 認到的 ccN（SPEC §16）。
   const configuredIdentities = useStore((s) => s.identities)
   const localIdentityStatus = useStore((s) => s.localIdentityStatus)
+  const disabledIdentities = useStore((s) => s.disabledIdentities)
   const identityCount = useMemo(
-    () => identitiesOfHost(configuredIdentities, localIdentityStatus).length,
-    [configuredIdentities, localIdentityStatus],
+    () => enabledIdentities(disabledIdentities, 'local', identitiesOfHost(configuredIdentities, localIdentityStatus)).length,
+    [configuredIdentities, localIdentityStatus, disabledIdentities],
   )
   const [deleteProject, setDeleteProject] = useState<{ id: string; label: string } | null>(null)
   const runs = useStore((s) => s.runs)

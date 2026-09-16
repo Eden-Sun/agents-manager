@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import type { BotKind } from '../api/types'
 import { BOT_KINDS } from '../api/types'
-import { identitiesOfHost, identityStatusOfHost, projectHostName, toolsOfHost, useStore } from '../store/store'
+import { enabledIdentities, identitiesOfHost, identityStatusOfHost, projectHostName, toolsOfHost, useStore } from '../store/store'
 import { isQuotaDisabled, quotaDisableKey, useDisabledQuota } from '../store/quotaHide'
 import { KindTag } from './KindTag'
 import './quickAddBots.css'
@@ -37,11 +37,12 @@ export function QuickAddBots({ projectId }: { projectId: string }) {
   const [busy, setBusy] = useState<string | null>(null)
   const hostLabel = !host || host === 'local' ? '本機' : host
 
+  const disabledIdentities = useStore((s) => s.disabledIdentities)
   const choices = useMemo<Choice[]>(() => {
     const out: Choice[] = []
     for (const kind of BOT_KINDS) {
       if (!tools[kind]?.installed) continue
-      const ids = identitiesOfHost(allIdentities, status).filter((i) => i.kind === kind)
+      const ids = enabledIdentities(disabledIdentities, host, identitiesOfHost(allIdentities, status)).filter((i) => i.kind === kind)
       if (ids.length === 0) {
         // 沒登入的按下去只會停在登入畫面：留著讓人看得到這個 kind，但點不下去。
         const loggedOut = tools[kind].logged_in === false
@@ -81,7 +82,7 @@ export function QuickAddBots({ projectId }: { projectId: string }) {
       }
     }
     return out
-  }, [tools, allIdentities, status, hostLabel, host, disabledQuota])
+  }, [tools, allIdentities, status, hostLabel, host, disabledQuota, disabledIdentities])
 
   if (choices.length === 0) return null
 
