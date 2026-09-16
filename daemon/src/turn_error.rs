@@ -58,6 +58,20 @@ fn limit_bucket(lower: &str) -> LimitBucket {
     }
 }
 
+/// 那一桶沒有讀數時，撞限要撐多久才自己過期。claude 這一側沒有 `clear_limit_hit`（Fable 用完換
+/// opus 照樣能跑，成功回合不能當作解除），所以 `until=None` ＝ 永遠不過期：交辦會卡在 `quota_blocked`
+/// 直到有人重啟 daemon（review 2026-09-16）。寧可保守地等一個視窗長度，也不要沒有出口。
+fn fallback_until(lower: &str, at: &str) -> Option<String> {
+    let hours = match limit_bucket(lower) {
+        LimitBucket::Session => 5,
+        LimitBucket::Weekly | LimitBucket::Fable => 24 * 7,
+        // 認不出是哪一桶：用最短的那個，寧可早一點放行讓它再撞一次。
+        LimitBucket::Unknown => 5,
+    };
+    let base = chrono::DateTime::parse_from_rfc3339(at).ok()?.with_timezone(&chrono::Utc);
+    Some((base + chrono::Duration::hours(hours)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+}
+
 /// 把橫幅說的那一桶標成 100%，回傳它的重置時間（撞限到那時才解除）。認不出是哪一桶時照舊先 5h 再 7d。
 fn saturate_bucket(q: &mut crate::quota::Quota, lower: &str) -> Option<String> {
     let full = |w: &mut Option<crate::quota::Window>| {
@@ -309,10 +323,9 @@ async fn mark_claude_limit_hit(app: &Arc<App>, bot_id: &str, line: &str) {
         return;
     }
     let host = db::bot_host(&app.db, bot_id).await.unwrap_or_else(|_| "local".to_string());
-    let base = match bot.identity.as_deref() {
-        Some(id) if !id.is_empty() => format!("claude:{id}"),
-        _ => "claude".to_string(),
-    };
+    // 落點只能有一份規則：手拼 `claude:{id}` 會讓「共用預設帳號」的身分（cc0）寫進一格沒有人查的
+    // key，`limit_hit_for_bot` 讀的是裸 `claude`，於是撞限對 AGM 完全隱形（review 2026-09-16）。
+    let base = crate::quota::quota_base_for_host(app, &host, "claude", bot.identity.as_deref()).await;
     let key = crate::quota::quota_key(&host, &base);
     let prev = app.quotas.lock().await.get(&key).cloned();
     let mut q = prev.unwrap_or_else(|| crate::quota::Quota {
@@ -327,8 +340,12 @@ async fn mark_claude_limit_hit(app: &Arc<App>, bot_id: &str, line: &str) {
         account: bot.identity.clone(),
         host: host.clone(),
     });
-    let until = saturate_bucket(&mut q, &line.to_ascii_lowercase());
-    q.limit_hit = Some(crate::quota::LimitHit { message: line.to_string(), until, at: db::now() });
+    let lower = line.to_ascii_lowercase();
+    let at = db::now();
+    // 那一桶還沒有讀數時 `saturate_bucket` 回 None，而 `None` 在 `limit_hit_expired` 是「永不過期」。
+    // 給一個保底時間，撞限才有出口（review 2026-09-16）。
+    let until = saturate_bucket(&mut q, &lower).or_else(|| fallback_until(&lower, &at));
+    q.limit_hit = Some(crate::quota::LimitHit { message: line.to_string(), until, at });
     q.updated_at = db::now();
     crate::quota::set(app, &host, &base, q).await;
 }
@@ -368,6 +385,32 @@ mod quota_limit_tests {
             account: None,
             host: "local".into(),
         }
+    }
+
+    /// 那一桶還沒有讀數時（daemon 剛重啟、statusline 還沒進來），撞限一樣要有出口：
+    /// claude 沒有 `clear_limit_hit`，`until=None` 等於永遠卡在 `quota_blocked`。
+    #[test]
+    fn a_banner_with_no_window_reading_still_expires() {
+        let at = "2026-09-16T10:00:00Z";
+        for (line, want) in [
+            ("You've hit your session limit", "2026-09-16T15:00:00Z"),
+            ("You've hit your weekly limit", "2026-09-23T10:00:00Z"),
+            ("You've hit your Fable limit", "2026-09-23T10:00:00Z"),
+            ("You've hit your limit", "2026-09-16T15:00:00Z"),
+        ] {
+            assert_eq!(fallback_until(&line.to_ascii_lowercase(), at).as_deref(), Some(want), "{line}");
+        }
+        assert_eq!(fallback_until("session limit", "not-a-time"), None, "讀不懂時間就不要編一個出來");
+
+        // 有讀數時照舊用那一桶自己的 resets_at，保底不會蓋掉它。
+        let mut q = crate::quota::Quota {
+            five_hour: Some(crate::quota::Window { used_pct: 10.0, resets_at: Some("2026-09-16T12:00:00Z".into()) }),
+            seven_day: None, fable: None, reset_credits: None, limit_hit: None, plan: None,
+            updated_at: at.into(), source: "test".into(), account: None, host: "local".into(),
+        };
+        let lower = "you've hit your session limit".to_string();
+        let until = saturate_bucket(&mut q, &lower).or_else(|| fallback_until(&lower, at));
+        assert_eq!(until.as_deref(), Some("2026-09-16T12:00:00Z"));
     }
 
     /// 前綴與桶名取自 2.1.271 binary 的字串表（`You've hit your`／`You've reached your`、`session limit`、`weekly limit`、
