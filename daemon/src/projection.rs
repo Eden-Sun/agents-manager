@@ -404,6 +404,11 @@ async fn guard_removals(
     }));
 }
 
+/// `AM_ALLOW_BULK_DELETE` 是整個行程共用的環境變數：設它的測試與「期待被擋下」的測試平行跑時，
+/// 後者會偶爾被放行（實測 3 次紅 2 次）。兩邊（含 api 的測試）都拿這把鎖。
+#[cfg(test)]
+pub(crate) static BULK_ENV: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -439,7 +444,6 @@ mod tests {
         project_config(&ConfigStore::load(path.to_path_buf()).await.unwrap(), pool).await
     }
 
-    /// 2026-09-14：第二顆 daemon 用 /tmp 的空 config 開到正式 DB，8 秒軟刪 15 顆 bot／6 個專案。
     /// review 2026-09-16 core 6：跨主機同名、不同 kind 的身份。API 分主機放行並寫進 config，投影卻只看名字、
     /// 拿到本機那份 claude 判成 kind 不符——之後每支寫設定的 API 都 502，重啟時 daemon 起不來。
     #[tokio::test]
@@ -469,8 +473,12 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    use super::BULK_ENV;
+
+    /// 2026-09-14：第二顆 daemon 用 /tmp 的空 config 開到正式 DB，8 秒軟刪 15 顆 bot／6 個專案。
     #[tokio::test]
     async fn refuses_an_empty_config_over_a_populated_db() {
+        let _env = BULK_ENV.lock().await;
         let dir = std::env::temp_dir().join(format!("am-projection-bulk-{}", db::ulid()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
@@ -503,6 +511,7 @@ mod tests {
     /// 再由 API／總管觸發重投——不擋的話事故路徑只是換個入口（sol 複審 2026-09-14）。
     #[tokio::test]
     async fn a_config_swapped_under_a_running_daemon_is_refused() {
+        let _env = BULK_ENV.lock().await;
         let dir = std::env::temp_dir().join(format!("am-projection-reload-{}", db::ulid()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
