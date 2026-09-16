@@ -43,13 +43,18 @@ case "$sub:$op" in
   lease:release)     printf '%s' '{"released":true}' ;;
   approval:request)  printf '%s' "$STUB_APPROVAL" ;;
   approval:list)     printf '%s' "$STUB_APPROVAL_LIST" ;;
-  assign:*)          [ -n "$STUB_ASSIGN_FAIL" ] && exit 1; printf '%s' '{"id":"a-1"}' ;;
+  assign:*)          for i in $(seq 1 $#); do
+                       eval "a=\${$i}"
+                       case "$a" in --text-file) eval "f=\${$((i+1))}"; cat "$f" >> "$AGM_DIR/assign-body.txt" ;; esac
+                     done
+                     [ -n "$STUB_ASSIGN_FAIL" ] && exit 1; printf '%s' '{"id":"a-1"}' ;;
   responder:show)    [ -n "${STUB_RESPONDER:-}" ] && printf '%s' "$STUB_RESPONDER" || printf '%s' '{}' ;;
   *)                 printf '%s' '{}' ;;
 esac
 STUB
   chmod +x "$AGM_DIR/bin/agm"
   : > "$AGM_DIR/calls.log"
+  : > "$AGM_DIR/assign-body.txt"
   # 預設是「一路順」，各 case 只覆寫自己要測的那一項。
   export STUB_BUILD_INPUTS='{"paths":["daemon","web","Cargo.toml","docs/goals/agm-supervisor-persona.md","scripts/agm.py"]}'
   export STUB_STATE='{"bots":[{"id":"bot-build","name":"build"}]}'
@@ -406,6 +411,48 @@ export STUB_APPROVAL_LIST='{"approvals":[
 ]}'
 bash "$SCRIPT"
 check "等待上限可以調大" "非整點且重建申請只有 1/3" "$AGM_DIR/daemon-update.log"
+teardown
+
+echo "----"
+# 15. 縮小封鎖面（SPEC §18.10）：daemon 判 safe，即使還有 bot 在 working 也照換，log 與派工正文寫明是升級後才換的。
+setup
+export STUB_SAFETY='{"safe":true,"escalated":true,"waited_secs":2700,"working":[{"bot_id":"b9","name":"wits-pro"}],"in_flight":[{"bot_id":"b9","turn_id":"t9"}],"unreadable":[],"delivering":[],"held_leases":[],"excluded_bot_ids":["bot-build","bot-manager"]}'
+bash "$SCRIPT"
+check "升級後照樣拿窗口" "lease acquire" "$AGM_DIR/calls.log"
+check "log 寫明是升級後才換" "安全窗口是升級後才成立的：核准後已等 45 分鐘" "$AGM_DIR/daemon-update.log"
+check "派工正文也寫明" "這次是升級後才換：核准後已等 45 分鐘" "$AGM_DIR/assign-body.txt"
+teardown
+
+# 16. 升級歸升級，daemon 說不安全就是不安全——而且理由要指出真正擋住的那一項。
+setup
+export STUB_SAFETY='{"safe":false,"escalated":true,"waited_secs":2700,"working":[{"bot_id":"b9","name":"wits-pro"}],"in_flight":[],"unreadable":[],"delivering":[{"bot_id":"b1","name":"AM-1-XH","turn_id":"t1"}],"held_leases":[],"excluded_bot_ids":["bot-build","bot-manager"]}'
+bash "$SCRIPT"
+check "送達中就是不換" "還有人在跑（送達中:AM-1-XH）" "$AGM_DIR/daemon-update.log"
+check_no "送達中不取租約" "lease acquire" "$AGM_DIR/calls.log"
+teardown
+
+setup
+export STUB_SAFETY='{"safe":false,"escalated":true,"waited_secs":2700,"working":[],"in_flight":[],"unreadable":[],"delivering":[],"held_leases":[{"resource":"restart","owner":"someone"}],"excluded_bot_ids":["bot-build","bot-manager"]}'
+bash "$SCRIPT"
+check "別人握著租約就是不換" "還有人在跑（租約:restart）" "$AGM_DIR/daemon-update.log"
+check_no "有租約不取租約" "lease acquire" "$AGM_DIR/calls.log"
+teardown
+
+# 17. 沒升級時照舊：daemon 判不安全，理由還是那顆在跑的 bot。
+setup
+export STUB_SAFETY='{"safe":false,"escalated":false,"waited_secs":null,"working":[{"bot_id":"b9","name":"wits-pro"}],"in_flight":[],"unreadable":[],"delivering":[],"held_leases":[],"excluded_bot_ids":["bot-build","bot-manager"]}'
+bash "$SCRIPT"
+check "沒升級照舊擋" "還有人在跑（wits-pro）" "$AGM_DIR/daemon-update.log"
+check_no "沒升級不取租約" "lease acquire" "$AGM_DIR/calls.log"
+check_no "沒升級不寫升級 log" "升級後才成立" "$AGM_DIR/daemon-update.log"
+teardown
+
+# 18. 舊 daemon（沒有 escalated／delivering 欄位）：行為完全照舊，也不會誤寫升級紀錄。
+setup
+export STUB_SAFETY='{"safe":true,"working":[],"in_flight":[],"unreadable":[],"excluded_bot_ids":["bot-build","bot-manager"]}'
+bash "$SCRIPT"
+check "舊 daemon 照樣派工" "已派工" "$AGM_DIR/daemon-update.log"
+check_no "舊 daemon 不寫升級紀錄" "升級後" "$AGM_DIR/assign-body.txt"
 teardown
 
 echo "$PASS passed, $FAIL failed"

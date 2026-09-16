@@ -2012,6 +2012,23 @@ pub async fn approval(pool: &SqlitePool, id: &str) -> Result<Option<Approval>> {
         .await?)
 }
 
+/// 已核准、還沒被消耗、也還沒過期的 `rebuild`／`restart` 申請裡，**最早被決定**的那一筆。
+///
+/// SPEC §18.10「等太久就縮小封鎖面」的計時從它的 `decided_at` 起算：一筆核准放著沒用掉，
+/// 代表這段時間一直等不到安全窗口。
+pub async fn oldest_live_window_approval(pool: &SqlitePool, now: &str) -> Result<Option<Approval>> {
+    Ok(sqlx::query_as::<_, Approval>(
+        "SELECT * FROM supervisor_approvals
+          WHERE supervisor_id=? AND status='approved' AND purpose IN ('rebuild','restart')
+            AND decided_at IS NOT NULL AND (expires_at IS NULL OR expires_at > ?)
+          ORDER BY decided_at LIMIT 1",
+    )
+    .bind(SUPERVISOR_ID)
+    .bind(now)
+    .fetch_optional(pool)
+    .await?)
+}
+
 pub async fn approvals(pool: &SqlitePool, limit: i64) -> Result<Vec<Approval>> {
     Ok(sqlx::query_as::<_, Approval>(
         "SELECT * FROM supervisor_approvals WHERE supervisor_id=? ORDER BY created_at DESC LIMIT ?",
