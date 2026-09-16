@@ -1112,7 +1112,7 @@ mod tests {
         assert_eq!(owner(app.clone()).await.0.as_deref(), Some("b1"));
 
         // 人 adopt 指定 b2：之後掃描不再改它。
-        adopt(State(app.clone()), Path("w1:pS".into()), Query(HashMap::new()), Some(Json(AdoptIn { owner_bot_id: Some("b2".into()), purpose: None, allow_gc: false })))
+        let _ = adopt(State(app.clone()), Path("w1:pS".into()), Query(HashMap::new()), Some(Json(AdoptIn { owner_bot_id: Some("b2".into()), purpose: None, allow_gc: false })))
             .await
             .unwrap();
         record_scan(&app, "local", &[pane], &env).await.unwrap();
