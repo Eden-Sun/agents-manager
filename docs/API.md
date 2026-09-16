@@ -176,7 +176,7 @@ config.toml 裡沒有的 id（child、已刪）忽略。成功推 `project_chang
 active Run 的 herdr session 已不可用 → 寫入 Turn 前回 502，不留 Turn 或 user message。
 排隊中的 prompt 是 `status = "queued"` 的 Turn（每個對話最多一筆，`state.bots[].queued_turn`），daemon 在前一回合結束後送出。
 **只有 AGM 的派工會排隊**（2026-09-16）：`supervisor` 派工遇到 in-flight 會建一筆 queued（交辦記成 `delivery="queued"`），排超過
-`[supervisor] assignment_queue_wait_secs`（預設 30 分鐘）沒送出就把交辦停在 `blocked`。**使用者與 web 的 `POST /api/bots/{id}/prompt` 遇到 in-flight 仍回 409**，由呼叫端重試，daemon 不會替你排隊。
+`[supervisor] assignment_queue_wait_secs`（預設 30 分鐘）沒送出就撤回那則 queued、把交辦停在 `blocked`，inbox 推 `assignment_undeliverable`（payload 帶 `revoked_turn_id`）。**使用者與 web 的 `POST /api/bots/{id}/prompt` 遇到 in-flight 仍回 409**，由呼叫端重試，daemon 不會替你排隊。
 
 409 `reason`：`bot has no active run`、`run is not running`、`agent is blocked; answer the prompt first`、`a turn is already in flight`、
 `a previous turn has unknown delivery; abandon it first`、`needs_login`、`picker_open`、`dialog_open`。後三者 daemon 送之前先讀 pane：

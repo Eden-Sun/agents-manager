@@ -541,6 +541,15 @@ async fn resume_quota_blocked(app: &Arc<App>) {
             // 時間到了、也沒人說還在擋：回到 queued 並馬上試一次。
             (None, true) => {}
         }
+        // 重送會開新的一則（下一個 `#r<n>`），而且下面會清掉 `turn_id`：舊的那則若還排著，清掉之後就
+        // 再也對不回交辦——留著會佔 queued 名額、之後照送變成做兩次。現行路徑走不到（停進 quota_blocked
+        // 時回合都已結束或還沒有 turn），但 `park_quota_blocked` 接受 delivered，先擋住。
+        if let Some(old) = a.turn_id.as_deref() {
+            let text = format!("排隊中的這則沒有送出：交辦 {} 撞到額度上限，額度回來後用新的一則重送，舊的這則撤回，不會再送。", a.id);
+            if let Err(e) = crate::lifecycle::revoke_queued_turn(app, old, &text).await {
+                tracing::error!(assignment = %a.id, turn = old, error = %e, "could not revoke the old queued turn before a quota resend");
+            }
+        }
         let key = format!("quota_resumed:{}:{}", a.id, a.quota_retries);
         let payload = json!({"bot_id": a.target_bot_id, "retries": a.quota_retries + 1, "needs_review": false});
         match store::resume_quota_blocked(&app.db, &a.id, &key, &payload).await {
@@ -700,26 +709,39 @@ async fn block_stale_queues(app: &Arc<App>) {
             continue;
         }
         let why = format!("排進佇列等了 {} 分鐘，對方一直沒有回合結束的空檔，沒有送出", waited / 60);
-        match store::block_stale_queue(&app.db, &a.id, &why).await {
-            Ok(true) => {
-                tracing::warn!(assignment = %a.id, bot = %a.target_bot_id, waited_s = waited, "排隊太久，交辦停在 blocked");
-                // 排著的那筆一併撤掉：留著的話之後照送、結果沒地方收，AGM 以為沒送出又重派（AGM 2026-09-16）。
-                let revoked = match crate::lifecycle::withdrawn_assignment_reason(app, &turn_id).await {
-                    Some(text) => crate::lifecycle::revoke_queued_turn(app, &turn_id, &text).await.unwrap_or_else(|e| {
-                        tracing::error!(assignment = %a.id, turn = %turn_id, error = %e, "could not revoke a blocked assignment's queued turn");
-                        false
-                    }),
-                    None => false,
-                };
-                let payload = json!({"bot_id": a.target_bot_id, "turn_id": turn_id, "waited_s": waited, "error": why, "needs_review": true, "revoked_turn": revoked});
+        let text = format!("排隊中的這則沒有送出：交辦 {} {why}，已停在 blocked，一併撤回，不會再送。", a.id);
+        // 先撤 turn、撤成功才標 blocked，同一個交易（AGM 2026-09-16，review 2 H1）：
+        // - 只標 blocked 不撤：之後照送、結果沒地方收（blocked 不在執行中），AGM 以為沒送出又重派。
+        // - 先標再撤：flush 剛好在兩步之間領走 turn 時，會把已經送出的交辦標成「沒有送出」。
+        //   撤不到＝已經被 flush 領走，交辦維持 delivered，照一般回合結束流程走。
+        match revoke_and_block(app, &a.id, &turn_id, &why, &text).await {
+            Ok(Some(revoked)) => {
+                tracing::warn!(assignment = %a.id, bot = %a.target_bot_id, waited_s = waited, "排隊太久：撤回排著的 prompt，交辦停在 blocked");
+                // 先 commit 再推：turn 事件到 `on_turn_done` 時交辦已經是 blocked，不會被當成回合失敗結案。
+                crate::lifecycle::announce_revoked(app, &turn_id, revoked).await;
+                let payload = json!({"assignment_id": a.id, "bot_id": a.target_bot_id, "turn_id": turn_id, "revoked_turn_id": turn_id,
+                    "waited_s": waited, "reason": why, "status": "blocked", "needs_review": true,
+                    "hint": "排著的那則已撤回，不會再送。等那顆 bot 空下來再派一次（followup），或改派給別人。"});
                 let key = format!("queue_blocked:{}:{}", a.id, turn_id);
-                let _ = store::push_inbox(&app.db, &key, "assignment_failed", Some(&a.id), Some(&a.target_bot_id), Some(&turn_id), &payload).await;
+                let _ = store::push_inbox(&app.db, &key, "assignment_undeliverable", Some(&a.id), Some(&a.target_bot_id), Some(&turn_id), &payload).await;
                 app.emit("supervisor_changed", json!({"assignment_id": a.id, "status": "blocked"})).await;
             }
-            Ok(false) => {}
+            Ok(None) => {}
             Err(e) => tracing::warn!(assignment = %a.id, error = ?e, "could not block a stale queued assignment"),
         }
     }
+}
+
+/// 保險絲的寫入：撤掉排著的 turn、把交辦標 blocked，**兩個都成功才 commit**。
+/// turn 已經不是 queued（被 flush 領走）或交辦已經不是 delivered（別人先決定了）→ `None`，什麼都不寫。
+async fn revoke_and_block(app: &Arc<App>, assignment_id: &str, turn_id: &str, why: &str, text: &str) -> anyhow::Result<Option<crate::lifecycle::Revoked>> {
+    let mut tx = app.db.begin().await?;
+    let Some(revoked) = crate::lifecycle::revoke_queued_turn_tx(&mut tx, turn_id, text).await? else { return Ok(None) };
+    if !store::block_stale_queue_tx(&mut tx, assignment_id, why).await? {
+        return Ok(None); // 交易回滾：turn 也不撤。
+    }
+    tx.commit().await?;
+    Ok(Some(revoked))
 }
 
 /// Offer every due queued assignment again.
@@ -1906,12 +1928,15 @@ mod queue_dispatch_tests {
             .await
             .unwrap();
         assert!(why.contains("blocked") && why.contains("排進佇列"), "{why}");
-        let payload: String = sqlx::query_scalar("SELECT payload_json FROM supervisor_inbox WHERE assignment_id=?")
+        let (kind, payload): (String, String) = sqlx::query_as("SELECT kind, payload_json FROM supervisor_inbox WHERE assignment_id=?")
             .bind(&a.id)
             .fetch_one(&app.db)
             .await
             .unwrap();
-        assert!(payload.contains("\"revoked_turn\":true"), "{payload}");
+        assert_eq!(kind, "assignment_undeliverable", "送不進去，不是回合失敗（SPEC §18.8 的原意）");
+        let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(payload["revoked_turn_id"], json!(turn_id));
+        assert!(payload["hint"].as_str().unwrap().contains("不會再送"), "{payload}");
         let events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE assignment_id=?")
             .bind(&a.id)
             .fetch_one(&app.db)
@@ -1927,6 +1952,56 @@ mod queue_dispatch_tests {
             .await
             .unwrap();
         assert_eq!(again, 1);
+    }
+
+    /// 讀完 turn 還是 queued、要擋的那一刻 flush 剛好把它領走：撤不到就不標 blocked，交辦維持 delivered。
+    /// （先標再撤會把已經送出的交辦說成「沒有送出」。）
+    #[tokio::test]
+    async fn the_fuse_does_not_block_an_assignment_whose_prompt_was_just_claimed() {
+        let app = app().await;
+        let a = queued_assignment(&app, 3600).await;
+        let turn_id = a.turn_id.clone().unwrap();
+        // flush 在保險絲讀完 turn 之後、寫入之前領走它。
+        sqlx::query("UPDATE turns SET status='in_flight' WHERE id=?").bind(&turn_id).execute(&app.db).await.unwrap();
+        assert!(revoke_and_block(&app, &a.id, &turn_id, "why", "text").await.unwrap().is_none(), "撤不到");
+        assert_eq!(store::assignment(&app.db, &a.id).await.unwrap().unwrap().status, "delivered", "不把已經送出的說成沒送出");
+        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(status, "in_flight", "送出去的那則不動");
+        block_stale_queues(&app).await;
+        assert_eq!(store::assignment(&app.db, &a.id).await.unwrap().unwrap().status, "delivered");
+        let events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE assignment_id=? AND kind='assignment_undeliverable'")
+            .bind(&a.id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(events, 0);
+    }
+
+    /// 別人剛好先決定了（交辦已經不是 delivered）：交易回滾，turn 也不撤。
+    #[tokio::test]
+    async fn the_fuse_leaves_the_turn_alone_when_the_assignment_was_decided_first() {
+        let app = app().await;
+        let a = queued_assignment(&app, 3600).await;
+        let turn_id = a.turn_id.clone().unwrap();
+        sqlx::query("UPDATE supervisor_assignments SET status='cancelled' WHERE id=?").bind(&a.id).execute(&app.db).await.unwrap();
+        assert!(revoke_and_block(&app, &a.id, &turn_id, "why", "text").await.unwrap().is_none(), "已經不是 delivered，不標");
+        assert_eq!(store::assignment(&app.db, &a.id).await.unwrap().unwrap().status, "cancelled");
+        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(status, "queued", "撤銷跟著回滾");
+    }
+
+    /// 額度回來重送前，舊的那則若還排著就先撤：不然清掉 turn_id 後它對不回交辦，佔著名額、之後照送。
+    #[tokio::test]
+    async fn a_quota_resend_revokes_the_old_prompt_if_it_is_still_queued() {
+        let app = app().await;
+        let a = queued_assignment(&app, 60).await;
+        let old = a.turn_id.clone().unwrap();
+        let past = (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        sqlx::query("UPDATE supervisor_assignments SET status='quota_blocked', resume_at=? WHERE id=?").bind(&past).bind(&a.id).execute(&app.db).await.unwrap();
+        resume_quota_blocked(&app).await;
+        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(&old).fetch_one(&app.db).await.unwrap();
+        assert_eq!(status, "failed", "舊的撤掉");
+        let conv = crate::db::conversation_id(&app.db, "b").await.unwrap();
+        assert_ne!(crate::db::queued_turn(&app.db, &conv).await.unwrap().map(|t| t.id), Some(old), "名額不再被舊的佔著");
+        let row = store::assignment(&app.db, &a.id).await.unwrap().unwrap();
+        assert_ne!(row.status, "quota_blocked", "照常重送");
     }
 
     /// turn 已經被 flush 出去（不再是 queued）就不歸這條管。

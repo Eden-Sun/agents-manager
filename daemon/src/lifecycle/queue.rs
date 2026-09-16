@@ -63,13 +63,16 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
     }
     emit_turn(app, &turn.id).await;
 
-    // Refused by a screen check → back on the queue; the next `working -> idle` edge retries.
+    let wait_key = rollout_wait_key(&run);
+    // Refused by a screen check → back on the queue **with a timed retry**: a bot left idle on a
+    // menu it cannot close produces no `working -> idle` edge, so waiting for one parked the prompt
+    // until somebody happened to use the bot (review 2 L2).
     if let Err(e) = pane_ready_for_prompt(app, &bot, &run, &conv).await {
         let why = match &e {
             LcError::Conflict(v) => v.get("reason").and_then(|r| r.as_str()).unwrap_or("conflict").to_string(),
             other => format!("{other:?}"),
         };
-        requeue_turn(app, &turn.id, bot_id, &format!("pane not ready for a prompt: {why}")).await;
+        put_back_with_retry(app, &conv, &turn.id, bot_id, &format!("pane not ready for a prompt: {why}"), &wait_key).await;
         return Ok(());
     }
 
@@ -79,13 +82,12 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
     let client = match client_for_run(app, &run).await {
         Ok(c) => c,
         Err(e) => {
-            requeue_turn(app, &turn.id, bot_id, &format!("no herdr client: {e:?}")).await;
+            put_back_with_retry(app, &conv, &turn.id, bot_id, &format!("no herdr client: {e:?}"), &wait_key).await;
             return Ok(());
         }
     };
     // A queued prompt waits a few put-backs for a codex rollout that is on its way, then goes out
     // with what is available. Counted only for that reason and only for this run and session.
-    let wait_key = rollout_wait_key(&run);
     let waited_for_log = turn.rollout_wait_key.as_deref() == Some(wait_key.as_str()) && turn.rollout_waits >= CODEX_LOG_WAIT_RETRIES;
     let res = deliver_prompt(app, &client, &run, &bot, &text, false, waited_for_log).await;
     // `delivery` 是回給呼叫端／UI 的字；`rec` 是要寫進 DB 的兩個欄位（證據、能不能重送）。
@@ -155,23 +157,17 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
     Ok(())
 }
 
-/// Undo a `queued -> in_flight` claim that never became a delivery. Bot lock held and only for
-/// a turn this flush claimed, so `turns_one_queued` cannot be violated.
-async fn requeue_turn(app: &Arc<App>, turn_id: &str, bot_id: &str, reason: &str) {
-    match sqlx::query("UPDATE turns SET status='queued', run_id=NULL WHERE id=? AND status='in_flight'")
-        .bind(turn_id)
-        .execute(&app.db)
-        .await
-    {
-        Ok(r) if r.rows_affected() > 0 => {
-            tracing::warn!(bot = %bot_id, turn = %turn_id, %reason, "queued prompt put back on the queue");
+/// Undo a `queued -> in_flight` claim that never became a delivery, and arm a retry timer for it —
+/// the same backoff and retry limit as any other put-back (`defer_queued_turn`). Bot lock held and
+/// only for a turn this flush claimed, so `turns_one_queued` cannot be violated.
+async fn put_back_with_retry(app: &Arc<App>, conv: &str, turn_id: &str, bot_id: &str, reason: &str, wait_key: &str) {
+    match defer_queued_turn(app, conv, turn_id, reason, wait_key).await {
+        Ok(Some(delay)) => {
+            tracing::warn!(bot = %bot_id, turn = %turn_id, %reason, retry_in_s = delay.as_secs(), "queued prompt put back on the queue");
+            schedule_flush_retry(app, bot_id, delay);
         }
-        Ok(_) => return,
-        Err(e) => {
-            tracing::error!(bot = %bot_id, turn = %turn_id, %reason, error = %e,
-                            "could not put a claimed prompt back on the queue");
-            return;
-        }
+        Ok(None) => tracing::warn!(bot = %bot_id, turn = %turn_id, %reason, "queued prompt gave up after its retry limit"),
+        Err(e) => tracing::error!(bot = %bot_id, turn = %turn_id, %reason, error = %e, "could not put a claimed prompt back on the queue"),
     }
     emit_turn(app, turn_id).await;
 }
@@ -255,6 +251,8 @@ pub(crate) async fn withdrawn_assignment_reason(app: &Arc<App>, turn_id: &str) -
         "superseded" => ("已被後續交辦取代", a.review_reason.as_deref()),
         "failed" => ("已判定失敗", a.review_reason.as_deref()),
         "blocked" => ("已停在 blocked", a.error.as_deref()),
+        // 額度回來後 controller 會用下一個 `#r<n>` 另開一則重送；這一則送出去就是做兩次。
+        "quota_blocked" => ("在等額度回來，屆時會用新的一則重送", None),
         _ => return None,
     };
     let why = detail.map(str::trim).filter(|r| !r.is_empty()).map(|r| format!("（{r}）")).unwrap_or_default();
@@ -265,28 +263,49 @@ pub(crate) async fn withdrawn_assignment_reason(app: &Arc<App>, turn_id: &str) -
 /// 只動 `queued`——已經 in_flight 或送出的撤不回來，不假裝撤回。`Ok(true)`＝這次真的撤掉了。
 pub(crate) async fn revoke_queued_turn(app: &Arc<App>, turn_id: &str, why: &str) -> anyhow::Result<bool> {
     let mut tx = app.db.begin().await?;
+    let Some(revoked) = revoke_queued_turn_tx(&mut tx, turn_id, why).await? else { return Ok(false) };
+    tx.commit().await?;
+    announce_revoked(app, turn_id, revoked).await;
+    Ok(true)
+}
+
+/// 撤銷已經 commit 之後要推的東西（訊息、turn 事件）。
+pub(crate) struct Revoked {
+    bot_id: String,
+    message: db::Message,
+}
+
+/// [`revoke_queued_turn`] 的交易內版本：要跟別的寫入綁在一起時用（例如保險絲「撤成功才標 blocked」）。
+/// `None`＝這筆已經不是 queued（被 flush 領走、或早就撤過），什麼都沒寫。commit 之後呼叫 [`announce_revoked`]。
+pub(crate) async fn revoke_queued_turn_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    turn_id: &str,
+    why: &str,
+) -> anyhow::Result<Option<Revoked>> {
     let revoked = sqlx::query(
         "UPDATE turns SET status='failed', delivery='failed', completed_at=?, next_flush_at=NULL WHERE id=? AND status='queued'",
     )
     .bind(db::now())
     .bind(turn_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
     if revoked.rows_affected() == 0 {
-        return Ok(false);
+        return Ok(None);
     }
     let (conv, bot_id): (String, String) = sqlx::query_as(
         "SELECT t.conversation_id, c.bot_id FROM turns t JOIN conversations c ON c.id = t.conversation_id WHERE t.id = ?",
     )
     .bind(turn_id)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut **tx)
     .await?;
-    let message = insert_message_tx(&mut tx, &conv, Some(turn_id), "system", why, "system", false, None).await?;
-    tx.commit().await?;
-    tracing::info!(turn = turn_id, bot = %bot_id, "revoked a queued prompt whose assignment was withdrawn");
-    emit_message_added(app, &bot_id, message).await;
+    let message = insert_message_tx(tx, &conv, Some(turn_id), "system", why, "system", false, None).await?;
+    Ok(Some(Revoked { bot_id, message }))
+}
+
+pub(crate) async fn announce_revoked(app: &Arc<App>, turn_id: &str, revoked: Revoked) {
+    tracing::info!(turn = turn_id, bot = %revoked.bot_id, "revoked a queued prompt that will not be sent");
+    emit_message_added(app, &revoked.bot_id, revoked.message).await;
     emit_turn(app, turn_id).await;
-    Ok(true)
 }
 
 /// 這顆 bot 已經沒有活著的 run：它排著的 queued turn 沒有人會送，收掉（AGM 2026-09-16）。
@@ -650,6 +669,7 @@ mod flush_queue_tests {
         let out = decide(&app, &a, "cancel").await;
         assert_eq!(out["status"], "cancelled");
         assert_eq!(out["revoked_turn_id"], json!(f.turn_id));
+        assert!(out.get("warning").is_none() && out.get("may_still_be_running").is_none(), "撤掉的是還沒送出的那則，不能再說它還在跑：{out}");
         let t = turn(&app, &f.turn_id).await;
         assert_eq!((t.status.as_str(), t.delivery.as_str()), ("failed", "failed"), "終態，不佔名額");
         let why: String = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id = ? AND role = 'system'")
@@ -760,6 +780,19 @@ mod flush_queue_tests {
         assert_eq!(revoke_all_orphaned_queued_turns(&app).await, vec![f.turn_id.clone()]);
         assert_eq!(turn(&app, &f.turn_id).await.status, "failed");
         assert!(revoke_all_orphaned_queued_turns(&app).await.is_empty(), "撤過的不再撤");
+    }
+
+    /// 在等額度的交辦：排著的那則不送（額度回來會用新的一則重送，送了就是做兩次）。
+    #[tokio::test]
+    async fn a_prompt_whose_assignment_waits_for_quota_is_not_sent() {
+        let f = queued("test").await;
+        let app = f.env.app.clone();
+        f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
+        let a = queued_assignment(&f).await;
+        sqlx::query("UPDATE supervisor_assignments SET status = 'quota_blocked' WHERE id = ?").bind(&a).execute(&app.db).await.unwrap();
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+        assert_eq!(turn(&app, &f.turn_id).await.status, "failed");
+        assert!(f.env.herdr.pane("pane-1").map_or(true, |p| p.transcript.is_empty()));
     }
 
     /// 框裡有字時排隊的 prompt 一個字都不打、放回隊列；框清空後再 flush 就送出去（第七輪 #2）。
@@ -1164,6 +1197,10 @@ mod flush_queue_tests {
             Some(f.turn_id.clone()),
             "the durable queue still holds it, so a later transition retries the delivery",
         );
+        // review 2 L2：放回去要自己掛 timer——閒著的 bot 不會再有 working→idle 邊來叫醒它。
+        assert_eq!(t.flush_retries, 1, "算進重試次數，有上限");
+        assert!(t.next_flush_at.is_some(), "有下一次嘗試的時間");
+        assert!(queue_retry_timer_armed(&f.bot_id), "timer 已經掛上");
 
         // Still retryable: requeueing didn't poison `turns_one_queued` or the CAS.
         f.env.herdr.set_agent("agent", "pane-1", true);
@@ -1172,6 +1209,10 @@ mod flush_queue_tests {
             .execute(&app.db)
             .await
             .unwrap();
+        // 退避時間到之前的其他喚醒不搶先；timer 到點（清掉 next_flush_at）才送。
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+        assert_eq!(turn(&app, &f.turn_id).await.status, "queued", "still inside its backoff");
+        sqlx::query("UPDATE turns SET next_flush_at = NULL WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
         let t = turn(&app, &f.turn_id).await;
         assert_eq!(t.status, "in_flight", "the retry got to claim it");
@@ -1229,6 +1270,7 @@ mod flush_queue_tests {
 
         let t = turn(&app, &f.turn_id).await;
         assert_eq!(t.status, "queued");
+        assert!(t.next_flush_at.is_some() && queue_retry_timer_armed(&f.bot_id), "畫面擋住也要自己掛 timer（L2）");
         assert!(!f.env.herdr.methods().iter().any(|m| m == "agent.prompt"));
         let hints: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE conversation_id=? AND role='system'")
             .bind(&f.conv)

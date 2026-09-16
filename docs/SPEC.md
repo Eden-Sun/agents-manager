@@ -362,7 +362,7 @@ marker 列與框的邊之間多出任何一列（含空白列）、marker 後多
 維持 409**，那條路的語意變更要單獨評估，不要照這段設計「送一次就好，daemon 會排隊」的使用者流程。
 
 界線：每個對話最多一筆 `queued`（`turns_one_queued`），同一筆交辦重試回同一筆（`turns_client_req`），撞到就回 409 照舊退避；
-排超過 `[supervisor] assignment_queue_wait_secs`（預設 1800 秒）還沒送出，controller 把交辦停在 `blocked` 並推一則通知；
+排超過 `[supervisor] assignment_queue_wait_secs`（預設 1800 秒）還沒送出，controller 撤回那則 queued、把交辦停在 `blocked`，並推 `assignment_undeliverable`（見下面「交辦不要了」）；
 daemon 重啟時把所有 `queued` turn（含沒有 `next_flush_at` 的）重新掛上 flush，不留孤兒。送出時機與證據記錄完全沿用下面這套。
 
 **交辦不要了，排著的也撤掉**（AGM 2026-09-16）：交辦變成 `cancelled`／`superseded`／`failed`，或被排隊保險絲停在 `blocked` 時，它名下還是 `queued` 的 turn
@@ -370,8 +370,13 @@ daemon 重啟時把所有 `queued` turn（含沒有 `next_flush_at` 的）重新
 這個對話的 queued 名額立刻釋放。**已經 `in_flight` 或送出的不動**——撤不回來的不假裝撤回。兩道：review API 決定 commit 之後馬上撤
 （回應帶 `revoked_turn_id`）；`flush` 送出前也再查一次掛的交辦，已經不要了就撤、不送——繞過 API 改狀態、或 commit 之後還沒撤就重啟，
 都不能讓一則已取消的指令（實例：「請釋放 fence 21」`01M2MRM42CNZ1QZT5QZ8Z2ASFD` 在取消後 10:27 照樣送出）在錯的時機送到。
-保險絲（`assignment_queue_wait_secs`）把交辦停在 `blocked` 時同樣當場撤（inbox payload 帶 `revoked_turn`）：blocked 的交辦不在執行中，
-留著的那筆之後照送、結果沒地方收，AGM 以為沒送出又重派。
+保險絲（`assignment_queue_wait_secs`）**先撤 turn、撤成功才把交辦標 `blocked`，同一個交易**：只標不撤的話，那筆之後照送、結果沒地方收
+（blocked 不在執行中，`on_turn_done` 直接 return），AGM 以為沒送出又重派；先標再撤的話，flush 剛好在兩步之間領走 turn 時，
+會把已經送出的交辦說成「沒有送出」。撤不到（已被 flush 領走）或交辦已經不是 `delivered`（別人先決定了）就整筆回滾、什麼都不動。
+推的是 `assignment_undeliverable`（送不進去，不是回合失敗），payload 帶 `revoked_turn_id` 與「已撤回，不會再送」。
+`quota_blocked` 也算「這一則不送」：額度回來後 controller 用下一個 `#r<n>` 另開一則重送；重送前若舊的那則還排著，先撤掉再清 `turn_id`
+（清掉之後它就對不回交辦，會佔名額、之後照送變成做兩次）。
+cancel 撤掉的是還沒送出的那則時，review 回應不再帶「turn 還在跑」的 `warning`／`may_still_be_running`。
 
 **沒有 run 的 queued 一律收掉**：排隊只會發生在「有 running run、正在回合中」的時候，所以 bot 被 stop、或 run 結束
 （`mark_run_exited`：pane 不見、agent 退出）時，它排著的 queued 沒有人會送——當場撤銷（標 `failed`＋system 訊息），
@@ -379,7 +384,8 @@ daemon 重啟時把所有 `queued` turn（含沒有 `next_flush_at` 的）重新
 定時掃描（每 60 秒，§4.3b 那一支）也收一次「run 早就不在的 queued」，包含這條規則上線前就留下來的。
 
 **排隊中的 prompt 重試**：
-可重試原因（框忙、transcript 還沒回報…）放回 `queued`，退避 15 秒起每次加倍、上限 5 分鐘；次數與
+可重試原因（框忙、transcript 還沒回報、畫面檢查擋下〔選單／登入畫面〕、拿不到 herdr client…）放回 `queued` **並掛重試 timer**
+（閒著的 bot 不會再有 `working → idle` 邊來叫醒它，review 2 L2），退避 15 秒起每次加倍、上限 5 分鐘；次數與
 下次時間存在 `turns.flush_retries`／`turns.next_flush_at`，時間未到的其他喚醒不動它；每顆 bot 同時只有一個重試 timer；放回
 12 次仍送不出就標 failed 並插說明（同一個 transaction）。daemon 重啟（`reconcile::rearm_progress`）時掃描所有帶
 `next_flush_at` 的 queued turn，以 `max(now, next_flush_at)` 為每顆 bot 重建唯一的 timer。直接送出的 409 回應則由呼叫端（或 AGM
