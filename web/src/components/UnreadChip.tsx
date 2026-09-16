@@ -133,7 +133,7 @@ export function UnreadChip() {
 
   const barRef = useRef<HTMLDivElement | null>(null)
   const [expanded, setExpanded] = useState(false)
-  const hidden = useOverflowRows(barRef, !narrow && !expanded, items.length)
+  const { hidden, clipPx } = useOverflowRows(barRef, !narrow && !expanded, items.length)
 
   if (items.length === 0) return null
   if (narrow) {
@@ -149,6 +149,7 @@ export function UnreadChip() {
     <div className="unread-bar-wrap">
       <div
         className={`unread-bar${clipped ? ' clipped' : ''}${expanded ? ' expanded' : ''}`}
+        style={clipped && clipPx > 0 ? { maxHeight: clipPx } : undefined}
         ref={barRef}
         role="status"
         aria-live="polite"
@@ -190,9 +191,13 @@ function botTitle(name: string, pinned: boolean, n: number, needsReply: boolean,
   return `${who}。${tail}`
 }
 
-/** 兩行裝不下的顆數（依 `offsetTop` 分行）。永遠全畫、CSS 裁切，不切陣列——render 依賴測量會震盪。 */
-function useOverflowRows(barRef: RefObject<HTMLDivElement | null>, active: boolean, count: number): number {
+/**
+ * 兩行裝不下的顆數（依 `offsetTop` 分行），以及裁在第二行底下的高度。永遠全畫、CSS 裁切，不切陣列——render 依賴測量會震盪。
+ * 裁切高度用量的：寫死 46px 在晶片加了星號與徽章變高之後，第二行被切一半（2026-09-16 使用者截圖）。
+ */
+function useOverflowRows(barRef: RefObject<HTMLDivElement | null>, active: boolean, count: number): { hidden: number; clipPx: number } {
   const [hidden, setHidden] = useState(0)
+  const [clipPx, setClipPx] = useState(0)
   const measure = useCallback(() => {
     const bar = barRef.current
     if (!bar || !active) {
@@ -206,6 +211,14 @@ function useOverflowRows(barRef: RefObject<HTMLDivElement | null>, active: boole
     // 值沒變就不寫 state，否則 layout effect 每幀重繪。
     const n = rows.length <= 2 ? 0 : chips.filter((c) => c.offsetTop > cut).length
     setHidden((prev) => (prev === n ? prev : n))
+    // 第二行最低那顆的底緣＋下內距：裁切改變的是 bar 自己的高，不影響晶片的 offsetTop，所以量得穩。
+    let px = 0
+    if (n > 0) {
+      const top = bar.getBoundingClientRect().top
+      const bottom = Math.max(...chips.filter((c) => c.offsetTop <= cut).map((c) => c.getBoundingClientRect().bottom))
+      px = Math.ceil(bottom - top + parseFloat(getComputedStyle(bar).paddingBottom || '0'))
+    }
+    setClipPx((prev) => (prev === px ? prev : px))
   }, [active, barRef])
   useLayoutEffect(measure, [measure, count])
   useEffect(() => {
@@ -215,7 +228,7 @@ function useOverflowRows(barRef: RefObject<HTMLDivElement | null>, active: boole
     ro.observe(bar)
     return () => ro.disconnect()
   }, [barRef, measure])
-  return hidden
+  return { hidden, clipPx }
 }
 
 /** 手機橫捲：滾輪映射成橫捲；只在真的捲得動時 `preventDefault`，否則整頁被鎖住。 */
