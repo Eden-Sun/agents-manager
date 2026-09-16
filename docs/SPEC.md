@@ -1344,7 +1344,7 @@ inbox `assignment_noticed`（`needs_review=false`）。送不出去或回合失�
   回合結束那次的「回覆」是系統錯誤，記進 `error`，不寫 `result`、不算 `completed`。
 - **`resume_at` 取橫幅與 app-server 讀數中最早且仍在未來的**（橫幅會舊，`five_hour.resets_at` 會延遲）。防線：橫幅時間只過去 ≤ 15 分鐘視為舊橫幅，改 5 分鐘後再問，不滾到隔天；
   算出等待 > 6 小時改 15 分鐘後重試；兩邊都沒有時間退回 +30 分鐘。
-- **上限橫幅三條規則**：① 寫進該 bot 身份的 key（`quota_base(kind, identity)`，與 `limit_hit_for_bot` 的 `<kind>:<identity>` → 裸 kind 查法一致）；
+- **上限橫幅三條規則**：① 寫進該 bot 身份的 key——寫入、查詢（`limit_hit_for_bot`）、清除（`clear_limit_hit_for_bot`）三端都走 `quota::quota_base_for_host`，有自己 `CODEX_HOME` 的 `cx2` 成功回合清的是 `codex:cx2`，不是裸 `codex`；
   ② 只設 `limit_hit`（含 `until`）與「量表用完」，**不**把時間寫進窗口 `resets_at`；③ 同一張橫幅再掃到不算新證據（時間戳不前推）。
   **後到的結構化讀數不會清掉橫幅**（2026-09-13 晚改回）：codex 的 credits 用完時 5h／7d 這兩條**速率**視窗可以是滿的、app-server 也照實回報 0% 已用，
   唯一講出「現在收不下工作」的就是橫幅——那正是 `limit_hit` 這一格存在的理由。清掉它只有兩條路：`until` 到了，或下一回合真的跑完（`clear_limit_hit`，**只有 codex 走這條**：claude 的 Fable 用完換 opus 照樣能跑，成功回合不算解除）。

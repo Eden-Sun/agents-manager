@@ -390,6 +390,15 @@ pub fn limit_hit_expired(hit: Option<&LimitHit>) -> bool {
     }
 }
 
+/// 這顆 bot 真的答完一回合：清掉**它自己那把 key** 的撞限。key 跟寫入端（`apply_codex_limit_hit_quota`）
+/// 與查詢端（[`limit_hit_for_bot`]）走同一支 [`quota_base_for_host`]——以前寫死裸 `codex`，有自己
+/// `CODEX_HOME` 的 `cx2` 一撞限就永遠清不掉，反而把預設帳號真的撞限清掉（review 2026-09-16 H1）。
+pub async fn clear_limit_hit_for_bot(app: &Arc<App>, bot: &crate::db::Bot) {
+    let host = crate::db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| LOCAL_HOST.to_string());
+    let base = quota_base_for_host(app, &host, &bot.kind, bot.identity.as_deref()).await;
+    clear_limit_hit(app, &host, &base).await;
+}
+
 /// 一回合真的跑完就拿掉「撞上限」，不必等它自己寫的時間。
 pub async fn clear_limit_hit(app: &Arc<App>, host: &str, base: &str) {
     let key = quota_key(host, base);
