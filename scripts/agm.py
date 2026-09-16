@@ -654,8 +654,14 @@ def cmd_lease(client: Client, cfg: dict, args) -> object:
     if args.op == "status":
         return client.get("/api/supervisor/leases")
     if args.op == "safety":
-        query = {"exclude": ",".join(args.exclude_bot)} if args.exclude_bot else None
-        return client.get("/api/supervisor/maintenance/safety", query)
+        # --approval：問「這一筆核准現在開得了窗口嗎」。升級（等太久就縮小封鎖面）的計時綁在它身上；
+        # 不帶就是純查詢，看最早那筆還活著的核准。
+        query = {}
+        if args.exclude_bot:
+            query["exclude"] = ",".join(args.exclude_bot)
+        if args.approval:
+            query["approval"] = args.approval
+        return client.get("/api/supervisor/maintenance/safety", query or None)
     if not args.resource:
         raise AgmError("bad_args", f"lease {args.op} 需要 resource（rebuild / restart）", 2)
     path = f"/api/supervisor/leases/{urllib.parse.quote(args.resource)}/{args.op}"
@@ -1066,7 +1072,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("op", choices=["safety", "acquire", "renew", "release", "status"])
     s.add_argument("resource", nargs="?", choices=["rebuild", "restart"], help="acquire/renew/release 的目標")
     s.add_argument("--owner", default=os.environ.get("AM_AGENT_NAME", "agm-ops"), help="誰持有（預設 $AM_AGENT_NAME）")
-    s.add_argument("--approval", help="acquire：核准 id")
+    s.add_argument("--approval", help="acquire：核准 id；safety：用這筆核准的等待時間判斷要不要縮小封鎖面")
     s.add_argument("--commit", help="acquire：要處理的 commit，必須符合核准")
     s.add_argument("--ttl", type=int, metavar="SECS", help="租約長度（預設 900，上限 3600）")
     s.add_argument("--fence", type=int, help="renew/release：acquire 回傳的 fence")
