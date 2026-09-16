@@ -640,9 +640,9 @@ async fn resend_lost_prompt(app: &Arc<App>, run_id: &str, turn_id: &str, sent: &
     if run.agent_status == "working" || run.agent_status == "blocked" {
         return false;
     }
-    // Only a proven-sent turn is ever re-sent: an unverified prompt (`delivery_verified = 0`) may
-    // well have been taken, and typing it again would duplicate the work.
-    if !matches!(db::in_flight_turn(&app.db, run_id).await, Ok(Some(t)) if t.id == turn_id && t.delivery == "ok" && t.delivery_verified != 0) {
+    // 重送看 `auto_resend`，不看有沒有證據（AGM 2026-09-16）：打過字但證不明的那條路重送會重複派工，
+    // 所以它是 0；`agent.prompt` 一樣沒有證據，但它沒送進去才會走到這裡，重送是安全的。
+    if !matches!(db::in_flight_turn(&app.db, run_id).await, Ok(Some(t)) if t.id == turn_id && t.delivery == "ok" && t.auto_resend != 0) {
         return false;
     }
     let Ok(Some(bot)) = db::bot(&app.db, &run.bot_id).await else { return false };
@@ -662,7 +662,7 @@ async fn resend_lost_prompt(app: &Arc<App>, run_id: &str, turn_id: &str, sent: &
     // The first delivery just failed silently; re-deliver the way that is verified on screen.
     let res = deliver_prompt(app, &client, &run, &bot, text, true, true).await;
     match res {
-        Ok(Delivered::Submitted) => {
+        Ok(Delivered::Submitted | Delivered::Handed) => {
             tracing::warn!(run_id, turn = %turn_id, bot = %bot.name,
                            "prompt never reached the pane (empty composer, no echo in scrollback); re-delivered it");
             true
@@ -1768,16 +1768,36 @@ mod issue_17_tests {
         assert_eq!(pane.transcript.iter().filter(|l| l.starts_with('❯')).count(), 1);
     }
 
-    /// unverified 的 turn 絕不自動重送：它很可能已經被收下了。
+    /// 打過字、證不明的 turn 絕不自動重送（`auto_resend = 0`）：它很可能已經被收下了。
     #[tokio::test]
-    async fn an_unverified_turn_is_never_resent() {
+    async fn a_turn_marked_no_auto_resend_is_never_resent() {
         let f = fixture("grok", "").await;
         live(&f, crate::testing::LivePane { boxed: true, ..wide() });
         let app = f.env.app.clone();
-        sqlx::query("UPDATE turns SET delivery_verified = 0 WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET delivery_verified = 0, auto_resend = 0 WHERE id = ?")
+            .bind(&f.turn_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
         let sent = vec!["Reply with PONG".to_string()];
         assert!(!resend_lost_prompt(&app, &f.run_id, &f.turn_id, &sent).await);
         assert_eq!(count(&f, "pane.send_text") + count(&f, "pane.send_keys"), 0);
+    }
+
+    /// 沒有證據不等於不能重送（AGM 2026-09-16）：`agent.prompt` 那條路記成未驗證，但畫面證明它沒進去時照樣重送。
+    #[tokio::test]
+    async fn an_unverified_but_resendable_turn_is_still_resent() {
+        let f = fixture("grok", "").await;
+        live(&f, crate::testing::LivePane { boxed: true, ..wide() });
+        let app = f.env.app.clone();
+        sqlx::query("UPDATE turns SET delivery_verified = 0, auto_resend = 1 WHERE id = ?")
+            .bind(&f.turn_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let sent = vec!["Reply with PONG".to_string()];
+        assert!(resend_lost_prompt(&app, &f.run_id, &f.turn_id, &sent).await);
+        assert_eq!(count(&f, "pane.send_text"), 1);
     }
 
     /// codex 本機：找到它自己的 rollout 就用 rollout 逐字證明多行 prompt。
@@ -1930,6 +1950,64 @@ mod issue_17_tests {
         let client = client_for_run(&app, &run).await.unwrap();
         let _ = deliver_prompt(&app, &client, &run, &bot, "Reply with PONG please", false, false).await;
         assert_eq!(count(&f, "agent.prompt"), 1);
+        assert_eq!(count(&f, "pane.send_text"), 0);
+    }
+
+    /// `agent.prompt` 走完之後 DB 記的是「沒有證據、但可以重送」，而且沒有用掉重送額度。
+    #[tokio::test]
+    async fn the_agent_prompt_route_is_recorded_unverified_but_still_resendable() {
+        // 路由本身由 `an_agent_with_a_session_binding_still_goes_through_agent_prompt` 蓋；
+        // mock 不實作 agent.prompt，這裡只驗那條路的結果怎麼記。
+        let f = fixture("claude", "").await;
+        let app = f.env.app.clone();
+        crate::lifecycle::prompt::mark_delivery(&app, &f.turn_id, Delivered::Handed.record().unwrap()).await;
+        let (delivery, verified, auto, resends): (String, i64, i64, i64) =
+            sqlx::query_as("SELECT delivery, delivery_verified, auto_resend, resend_count FROM turns WHERE id = ?")
+                .bind(&f.turn_id)
+                .fetch_one(&app.db)
+                .await
+                .unwrap();
+        assert_eq!((delivery.as_str(), verified, auto), ("ok", 0, 1), "沒有證據，但重送照舊");
+        assert_eq!(resends, 0, "沒有用掉重送額度");
+    }
+
+    /// 打字證不明（grok 多行）：一樣沒有證據，但重送關掉、額度也被用掉（回滾到舊 binary 也不會重打）。
+    #[tokio::test]
+    async fn a_typed_but_unprovable_prompt_is_recorded_without_auto_resend() {
+        let f = fixture("grok", "").await;
+        let app = f.env.app.clone();
+        crate::lifecycle::prompt::mark_delivery(&app, &f.turn_id, Delivered::Unverified.record().unwrap()).await;
+        let (delivery, verified, auto, resends): (String, i64, i64, i64) =
+            sqlx::query_as("SELECT delivery, delivery_verified, auto_resend, resend_count FROM turns WHERE id = ?")
+                .bind(&f.turn_id)
+                .fetch_one(&app.db)
+                .await
+                .unwrap();
+        assert_eq!((delivery.as_str(), verified, auto), ("ok", 0, 0));
+        assert_eq!(resends, crate::lifecycle::MAX_PROMPT_RESENDS);
+    }
+
+    /// 升級前就存在的列：`auto_resend` 預設 1，行為與今天相同——verified=1 的照樣可重送，
+    /// 舊的 unverified 列因為當時已把 resend_count 頂到上限，還是不會被重送。
+    #[tokio::test]
+    async fn rows_written_before_the_split_keep_todays_behaviour() {
+        let f = fixture("grok", "").await;
+        live(&f, crate::testing::LivePane { boxed: true, ..wide() });
+        let app = f.env.app.clone();
+        let auto: i64 = sqlx::query_scalar("SELECT auto_resend FROM turns WHERE id = ?")
+            .bind(&f.turn_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(auto, 1, "既有列的預設");
+        sqlx::query("UPDATE turns SET delivery_verified = 0, resend_count = ? WHERE id = ?")
+            .bind(crate::lifecycle::MAX_PROMPT_RESENDS)
+            .bind(&f.turn_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let sent = vec!["Reply with PONG".to_string()];
+        assert!(!resend_lost_prompt(&app, &f.run_id, &f.turn_id, &sent).await, "舊的 unverified 列照舊不重送");
         assert_eq!(count(&f, "pane.send_text"), 0);
     }
 

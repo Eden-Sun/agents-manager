@@ -80,11 +80,21 @@ async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow::Result<()>
     let wait_key = rollout_wait_key(&run);
     let waited_for_log = turn.rollout_wait_key.as_deref() == Some(wait_key.as_str()) && turn.rollout_waits >= CODEX_LOG_WAIT_RETRIES;
     let res = deliver_prompt(app, &client, &run, &bot, &text, false, waited_for_log).await;
+    // `delivery` 是回給呼叫端／UI 的字；`rec` 是要寫進 DB 的兩個欄位（證據、能不能重送）。
+    let mut rec = DeliveryRecord { stored: "unknown", verified: false, auto_resend: true };
     let delivery = match res {
-        Ok(Delivered::Submitted) => "ok",
+        // 打字＋無損證據。`Handed`（agent.prompt）沒有證據，API 也照證據說「unverified」，
+        // 但它照舊可以自動重送（AGM 2026-09-16：證據與重送分開）。
+        Ok(d @ (Delivered::Submitted | Delivered::Handed)) => {
+            rec = d.record().expect("delivered outcome records");
+            if matches!(d, Delivered::Submitted) { "ok" } else { "unverified" }
+        }
         // Typed and submitted on a run with no lossless evidence (grok, remote, codex before its
         // session is known): delivered as far as anyone can tell, marked for a human, never re-sent.
-        Ok(Delivered::Unverified) => "unverified",
+        Ok(d @ Delivered::Unverified) => {
+            rec = d.record().expect("delivered outcome records");
+            "unverified"
+        }
         // Nothing was typed. A temporary reason goes back on the queue with a timed retry — a busy
         // box produces no `working -> idle` edge to wake the flush (sol review round seven #2).
         Ok(Delivered::NotAttempted { reason, retry: true }) => {
@@ -128,7 +138,7 @@ async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow::Result<()>
             "unknown"
         }
     };
-    mark_delivery(app, &turn.id, delivery).await;
+    mark_delivery(app, &turn.id, rec).await;
     emit_turn(app, &turn.id).await;
     if delivery == "ok" || delivery == "unverified" {
         arm_stall(app, &run.id, bot_id, &turn.id).await;
