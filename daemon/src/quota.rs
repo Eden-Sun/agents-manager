@@ -404,6 +404,61 @@ pub async fn clear_limit_hit(app: &Arc<App>, host: &str, base: &str) {
     app.emit("quota_updated", json!({"kind": key, "host": host, "quota": out})).await;
 }
 
+/// 重啟後的回填來源：這一格的撞限是從「還在等額度的交辦」推回來的，不是誰真的看到橫幅。
+pub const PARKED_SOURCE: &str = "parked-assignment";
+
+/// 重啟後把「還在等額度」這件事補回記憶體。
+///
+/// `app.quotas` 只活在記憶體裡（SPEC §12.4）：daemon 一重啟就全空，而撞限橫幅要等下一次真的
+/// 跑回合才會再出現。少了這一格，supervisor 會把「沒有讀數」誤讀成「額度回來了」，一開機就把
+/// 整批 parked 的交辦重送出去——對方帳號其實還在擋（review 2026-09-16）。
+///
+/// 只寫 `limit_hit`，不動任何量表或重置時間（那是橫幅／app-server／statusLine 的事）。已經過期的
+/// 時間不寫；同一格已經有**更晚**（或沒寫時間＝黏著）的撞限時也不覆蓋，所以呼叫端可以照順序把
+/// 每一張交辦餵進來，最晚的那個自然會留下。回傳有沒有真的寫進去。
+pub async fn seed_limit_hit(app: &Arc<App>, host: &str, base: &str, until: &str, message: &str) -> bool {
+    let parse = |s: &str| chrono::DateTime::parse_from_rfc3339(s).ok().map(|t| t.with_timezone(&chrono::Utc));
+    let Some(t) = parse(until) else { return false };
+    if t <= chrono::Utc::now() {
+        return false;
+    }
+    let key = quota_key(host, base);
+    let mut quotas = app.quotas.lock().await;
+    if let Some(hit) = quotas.get(&key).and_then(|q| q.limit_hit.as_ref()) {
+        if !limit_hit_expired(Some(hit)) {
+            // 沒寫時間的撞限永不過期（`limit_hit_expired`），一定比任何時間都「晚」。
+            let keep = match hit.until.as_deref().and_then(parse) {
+                None => true,
+                Some(prev) => prev >= t,
+            };
+            if keep {
+                return false;
+            }
+        }
+    }
+    let now = crate::db::now();
+    let mut q = quotas.get(&key).cloned().unwrap_or_else(|| Quota {
+        five_hour: None,
+        seven_day: None,
+        fable: None,
+        reset_credits: None,
+        limit_hit: None,
+        plan: None,
+        updated_at: now.clone(),
+        source: PARKED_SOURCE.into(),
+        account: None,
+        host: host.to_string(),
+    });
+    q.limit_hit =
+        Some(LimitHit { message: message.to_string(), until: Some(until.to_string()), at: now.clone(), bucket: None });
+    q.updated_at = now;
+    let out = q.clone();
+    quotas.insert(key.clone(), q);
+    drop(quotas);
+    app.emit("quota_updated", json!({"kind": key, "host": host, "quota": out})).await;
+    true
+}
+
 /// Base kinds always present per host (empty bars before first report); orphan-host keys dropped.
 pub async fn snapshot(app: &Arc<App>) -> Value {
     let hosts = app.hosts.names().await;

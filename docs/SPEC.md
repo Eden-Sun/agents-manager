@@ -1116,6 +1116,10 @@ inbox `assignment_noticed`（`needs_review=false`）。送不出去或回合失�
   所以 claude 這一側 `until` 是唯一的出口：橫幅指的那一桶還沒有讀數（daemon 剛重啟、statusLine 還沒進來）時，改用桶別的保底長度（session 5h、weekly／Fable 7d、認不出 5h）從撞上限的時刻起算，
   不再留下 `until=None`——那等於永遠不過期，交辦會卡在 `quota_blocked` 到有人重啟 daemon（review 2026-09-16）。
 - controller 每 tick 掃：仍擋就順延；不擋了回 `queued` 立刻重送，用 `<client_request_id>#r<n>`（`lifecycle::prompt` 的冪等是同 crid 回同 turn，不換序號等於沒送）。
+  「不擋了」要**兩個條件同時成立**：查不到未過期的 `limit_hit`，**而且** `resume_at` 已經到了。查不到讀數不等於額度回來了——`app.quotas` 只在記憶體（§12.4），
+  daemon 一重啟就全空，只憑「沒有 limit_hit」重送會在開機瞬間把整批還在被擋的交辦倒出去（review 2026-09-16）。反過來，CLI 說還在擋但我們記的時間過了，是把 `resume_at` 往後挪。
+- **開機回填**（`controller::backfill_quota_limits`）：控制器啟動時先用 parked 交辦的 `resume_at` 把該 host＋`quota_base` 的 `limit_hit` 補回記憶體（`quota::seed_limit_hit`，
+  `source=parked-assignment`）。同一把 key 取**最晚**的 `resume_at`，已經過期的不寫；只寫 `limit_hit`，不碰任何量表或 `resets_at`。這樣重啟後 `dispatch` 也照樣看得到「這個帳號還在擋」。
 - `assignment_quota_blocked` / `assignment_quota_resumed` 各推一則 inbox（`needs_review=false`），不開 incident。重送 6 次仍被擋 → `awaiting_review` + `turn_status=quota_exhausted`（通常是 credits 真的用完）。
   mission 交辦另有 `quota_policy` 與身份切換，見 §18.14。
 
