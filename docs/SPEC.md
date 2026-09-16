@@ -1078,6 +1078,13 @@ launchd `com.agm.claude-release` 每 30 分鐘跑 `bin/claude-release-kick.sh`�
 
 - 回合原始事實各自留欄：`delivery`、`turn_status`（`completed` / `completed_fallback` / `failed` / `dispatch_failed` / `turn_missing` / `quota_exhausted` / `identity_switch`）、`evidence_complete`。
   終端備援不會因為「跑完了」就被驗收。派不出去的交辦也進 `awaiting_review`（`dispatch_failed`）。
+- **送不進去的保險絲**（AGM 裁示 2026-09-16）：對方正在回合中會回 409，那是暫時的——但「暫時」要有盡頭。
+  409 這條分支有自己的退避梯（15 秒起加倍，上限 `AM_DISPATCH_CONFLICT_BACKOFF_SECS`，預設 **900 秒**，要大於典型回合長度；其他分支的梯子不變），
+  而且**有時間上限**：從建立起超過 `AM_DISPATCH_CONFLICT_GIVE_UP_MINS`（預設 30 分鐘）還送不進去，就把交辦標成 **`blocked`**（不是 `dispatch_failed`——工作沒失敗，是進不去），
+  並推一則 `assignment_undeliverable` 進 inbox（AGM 看得到，不是只寫 log）。`blocked` 仍在 `OPEN_STATES` 裡，所以不會從未結案與 ownership 衝突裡消失。
+  壞掉的環境變數（看不懂、0、負數）一律回預設；讀不懂 `created_at` 就繼續重試，不因為一個壞欄位把工作收起來。
+  這條保險絲跟「派送真的排進佇列」是兩件事：後者（§4.4a 的 `queued` 生產者）上線之後，這條仍然有效——排進去也送不出來時一樣要看得見。
+  2026-09-16 的實況：一張交辦對一顆回合 10～20 分鐘的 bot 重試 12 次、42 分鐘，狀態一直是 `queued`，最後由人手動取消——沒有任何地方會自己說「這件事沒送出去」。
 - 驗收走 `POST /api/supervisor/assignments/{id}/review`，記 actor、來源、理由、證據（`supervisor_reviews`），同 decision 重送冪等。回合還在跑時只接受 `cancel`（不中止回合，之後的回覆不再記到這筆）；
   `block` 要等回合結束。
 - 「要求續作」是新開一筆 `follow_up_of` 指回原本的交辦（原本變 `superseded`），用 `followup_request_id` 去重——不改寫已送出的文字。續作繼承 mission 連結。
