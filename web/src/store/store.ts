@@ -31,6 +31,7 @@ import { MESSAGE_CAP, byId, byTime, capList, insertSorted, pruneTurns } from './
 import { acceptStateSeq, singleFlight } from './singleFlight'
 import { quotaForIdentity } from './quotaLookup'
 import { botStatusConnTarget } from './botStatusConn'
+import { paneReadOnly } from '../lib/shellAccess'
 import { prependDraft, restoreQueued } from './queuedSend'
 import { missionRequests } from './missionRequests'
 
@@ -119,8 +120,10 @@ type ShellView = {
   host: string
   paneId: string
   cwd: string
-  /** 服務 pane（dev server 之類）：只能看。送一個 Ctrl-C 就是把它關掉（§6.5e）。 */
+  /** 只能看的 pane（有 listen port 的 dev server 之類）：送一個 Ctrl-C 就是把它關掉（§6.5e）。 */
   readOnly?: boolean
+  /** daemon 回 403 時它給的說明；只在這一頁有效，重整不帶回來（`readShellView` 不讀它）。 */
+  readOnlyReason?: string
   /** 從選單點進來的 pane，不是這個面板自己開的：關它走 pane 的生命週期，面板不給「結束 shell」。 */
   traced?: boolean
 }
@@ -453,6 +456,8 @@ export interface StoreState {
   viewPane: (pane: ProjectPane) => void
   /** 只關面板，shell 留著。 */
   closeShellView: () => void
+  /** daemon 回 403（只能看／正在跑 agent）：面板鎖成唯讀並顯示它的說明。 */
+  lockShellView: (host: string, paneId: string, reason: string) => void
   restoreShellView: () => Promise<void>
   endHostShell: (host: string, paneId: string) => Promise<void>
 
@@ -1727,7 +1732,7 @@ export const useStore = create<StoreState>((set, get) => ({
   // 同一個 shell 面板：面板只認 (host, paneId)，白名單在 daemon 那一側（`shell::registered`）。
   viewPane: (pane) =>
     set({
-      shellView: { host: pane.host, paneId: pane.pane_id, cwd: pane.cwd ?? '', readOnly: pane.kind === 'service', traced: true },
+      shellView: { host: pane.host, paneId: pane.pane_id, cwd: pane.cwd ?? '', readOnly: paneReadOnly(pane), traced: true },
       settingsBotId: null,
     }),
 
@@ -1736,15 +1741,26 @@ export const useStore = create<StoreState>((set, get) => ({
 
   closeShellView: () => set({ shellView: null }),
 
+  lockShellView(host, paneId, reason) {
+    set((s) =>
+      s.shellView && s.shellView.host === host && s.shellView.paneId === paneId
+        ? { shellView: { ...s.shellView, readOnly: true, readOnlyReason: reason } }
+        : {},
+    )
+  },
+
   async restoreShellView() {
     const v = get().shellView
     if (!v) return
+    // 回來時 pane 可能已經換了樣子：唯讀／是不是自己開的都照 daemon 現在說的，不沿用 localStorage 的舊值。
+    const still = (next: ShellView | null) =>
+      set((s) => (s.shellView && s.shellView.host === v.host && s.shellView.paneId === v.paneId ? { shellView: next } : {}))
     try {
       const alive = await api.fetchHostShells(v.host)
-      if (alive.some((sh) => sh.pane_id === v.paneId)) return
+      if (alive.some((sh) => sh.pane_id === v.paneId)) return still({ ...v, readOnly: false, traced: false })
       // daemon 自己開的那份清單只在記憶體，重啟就空了；被 trace 的 pane 活得比它久（§6.5e）。
-      const tracked = await api.fetchAllPanes()
-      if (!tracked.some((p) => p.host === v.host && p.pane_id === v.paneId)) set({ shellView: null })
+      const tracked = (await api.fetchAllPanes()).find((p) => p.host === v.host && p.pane_id === v.paneId)
+      still(tracked ? { ...v, readOnly: paneReadOnly(tracked), traced: true } : null)
     } catch {
       // 暫時連不上就留著：面板會顯示讀取失敗。
     }

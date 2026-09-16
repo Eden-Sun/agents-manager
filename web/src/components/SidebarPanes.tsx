@@ -1,5 +1,6 @@
 import { useEffect } from 'react'
 import { paneHint, paneLabel } from '../lib/panes'
+import { paneReadOnly } from '../lib/shellAccess'
 import { useStore } from '../store/store'
 import './sidebarPanes.css'
 
@@ -10,7 +11,7 @@ import './sidebarPanes.css'
  * 管的是看細節、聚焦與關閉；這裡只做一件事——**點一下就在這個 app 裡打開那顆 pane**，手機上也進得去
  * （herdr 的聚焦只動得了那台機器的 TUI）。
  *
- * `service`（dev server 之類）只能看不能打字——界線在 daemon（`shell::allowed`），面板也照著鎖住。
+ * 有 listen port 的 pane（dev server 之類）只能看不能打字——界線在 daemon（`shell::allowed`），面板也照著鎖住。
  */
 export function SidebarPanes({ projectId }: { projectId: string }) {
   const panes = useStore((s) => s.sidePanes[projectId])
@@ -35,7 +36,7 @@ export function SidebarPanes({ projectId }: { projectId: string }) {
             type="button"
             role="listitem"
             className={`side-pane${here ? ' current' : ''}${p.kind === 'service' ? ' service' : ''}`}
-            title={`${paneHint(p)}${p.kind === 'service' ? '（服務 pane，只能看）' : ''}`}
+            title={`${paneHint(p)}${paneReadOnly(p) ? '（開著 port，只能看）' : ''}`}
             onClick={() => viewPane(p)}
           >
             <span className="side-pane-icon" aria-hidden="true">

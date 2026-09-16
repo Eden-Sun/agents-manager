@@ -192,3 +192,42 @@ test('已讀送不出去：daemon 的舊數字不可以把徽章點回來', asyn
   assert.equal(after.b1, undefined, '送不出去的已讀還沒補上，快照的舊數字不算')
   assert.equal(after.b2, 1, '沒讀過的那顆照舊由 daemon 說了算')
 })
+
+const pane = (over: Record<string, unknown> = {}) => ({
+  pane_id: 'w1:p9', host: 'local', workspace_id: 'w1', tab_id: 'w1:t1', cwd: '/p', kind: 'service', owned_by: 'user',
+  owner_bot_id: null, project_id: 'p1', purpose: null, foreground: 'vim notes.md', listen_ports: [],
+  last_output_at: '', first_seen: '', last_seen: '', gc_optin: false, ...over,
+})
+
+test('從選單點進 vim 的 shell（被分成 service、沒有 port）：要打得進去', () => {
+  seed()
+  useStore.getState().viewPane(pane() as never)
+  assert.equal(useStore.getState().shellView?.readOnly, false, '照 kind 鎖的話人會卡在 vim 裡出不來')
+  useStore.getState().viewPane(pane({ kind: 'shell', listen_ports: [3010] }) as never)
+  assert.equal(useStore.getState().shellView?.readOnly, true, '有 port 的才唯讀')
+  useStore.getState().viewPane(pane({ listen_ports: [3010], read_only: false }) as never)
+  assert.equal(useStore.getState().shellView?.readOnly, false, 'daemon 給了 read_only 就照它')
+})
+
+test('從 / 重整回來：readOnly／traced 照 daemon 當下的 pane 列重算，不沿用 localStorage 的舊值', async () => {
+  seed()
+  useStore.setState({ shellView: { host: 'local', paneId: 'w1:p9', cwd: '/p', readOnly: true, traced: true } })
+  routeDaemon((req) => {
+    if (req.path.includes('/hosts/local/shells')) return json({ host: 'local', shells: [] }, 200)
+    if (req.path.includes('/panes')) return json({ panes: [pane({ listen_ports: [] })] }, 200)
+    return json({}, 200)
+  })
+  await useStore.getState().restoreShellView()
+  assert.equal(useStore.getState().shellView?.readOnly, false)
+  assert.equal(useStore.getState().shellView?.traced, true)
+})
+
+test('daemon 回 403：面板鎖成唯讀並帶著 daemon 的說明；別的 pane 不受影響', () => {
+  seed()
+  useStore.setState({ shellView: { host: 'local', paneId: 'w1:p9', cwd: '/p', readOnly: false, traced: true } })
+  useStore.getState().lockShellView('local', 'w1:p8', '別顆')
+  assert.equal(useStore.getState().shellView?.readOnly, false)
+  useStore.getState().lockShellView('local', 'w1:p9', '這顆 pane 開著 port，只能看')
+  assert.equal(useStore.getState().shellView?.readOnly, true)
+  assert.equal(useStore.getState().shellView?.readOnlyReason, '這顆 pane 開著 port，只能看')
+})

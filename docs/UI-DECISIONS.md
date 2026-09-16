@@ -259,6 +259,6 @@ shell 面板本來只有「打一行、Enter 送出」：TUI（`top`、`vim`、�
 
 - **掛在側欄專案的 Bot 清單底下**，點一下在 app 裡打開（沿用主機 shell 面板，不另做一個看 pane 的畫面）。跟專案頁那塊分工：這裡只負責「進去」，細節與關閉留在專案頁。字比 Bot 列小一號、沒有燈號——它是交代，不是主角。class 用 `side-pane*`，不跟專案頁的 `project-pane*` 撞。
 - **名字**：用途 > 前景程式執行檔名 > cwd 最後一段 > pane id，永遠有字——空字串的按鈕點不到。路徑、port、是不是你手開的放在滑過去的提示。
-- **服務 pane 只能看**：清單標「服務」，進去後輸入框鎖住、鍵盤同步關掉、按鍵列整列拿掉並寫明原因。送一個 Ctrl-C 給 dev server 就是把它關掉；讓人按下去才被 403 更糟。按鍵列用條件渲染而不是 `hidden`——`.keypad{display:flex}` 會把 `hidden` 蓋掉，按鈕照樣按得到（實走時抓到的）。
+- **有 port 的 pane 只能看**：看 daemon 給的 `read_only`（舊 daemon 沒這欄時退回看 `listen_ports`），**不看 `kind`**——掃描一看到 vim／less／sudo 就把 pane 分成 service，照 kind 鎖會讓人卡在 vim 裡出不來。進去後輸入框鎖住、鍵盤同步不算數（localStorage 記著「開」也一樣）、按鍵列整列拿掉並寫明原因。送一個 Ctrl-C 給 dev server 就是把它關掉；讓人按下去才被 403 更糟。打到一半 daemon 才回 403（`read_only_pane`／`agent_pane`）時，面板當場鎖成唯讀、關掉同步，顯示 daemon 的說明。按鍵列用條件渲染而不是 `hidden`——`.keypad{display:flex}` 會把 `hidden` 蓋掉，按鈕照樣按得到（實走時抓到的）。
 - **不給「結束 shell」**：面板那顆只認面板自己開的 shell，對被 trace 的 pane 按下去是靜悄悄什麼都不做。關它回專案頁。
-- **重整回得來、唯讀也跟著回來**：`shellView` 連 `readOnly` 一起存；深連結查不到自己開的 shell 就查 daemon 的 pane 表。原本會直接丟回首頁。
+- **重整回得來、唯讀照現況**：`shellView` 連 `readOnly` 一起存；深連結查不到自己開的 shell 就查 daemon 的 pane 表。原本會直接丟回首頁。從 `/` 進來（只走 `restoreShellView`）時一樣照 daemon 當下的 pane 列重算 `readOnly`／`traced`，不沿用 localStorage 的舊值。

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ClipboardEvent as ReactClipboardEvent, KeyboardEvent as ReactKeyboardEvent } from 'react'
 import * as api from '../api'
 import { herdrKeyFromEvent, useShellKeys } from '../hooks/usePaneKeys'
+import { keySyncActive, shellForbidden } from '../lib/shellAccess'
 import { ApiError } from '../api/types'
 import type { TerminalSnapshot, TerminalSource } from '../api/types'
 import { useStore } from '../store/store'
@@ -134,8 +135,12 @@ export function HostShellPanel({
 }) {
   const closeShellView = useStore((s) => s.closeShellView)
   const endHostShell = useStore((s) => s.endHostShell)
-  // 從選單點進來的 pane（§6.5e）：服務 pane 唯讀；不是這個面板開的就不給「結束 shell」。
+  // 從選單點進來的 pane（§6.5e）：有 port 的唯讀；不是這個面板開的就不給「結束 shell」。
   const readOnly = useStore((s) => Boolean(s.shellView?.host === host && s.shellView.paneId === paneId && s.shellView.readOnly))
+  const readOnlyReason = useStore((s) =>
+    s.shellView?.host === host && s.shellView.paneId === paneId ? (s.shellView.readOnlyReason ?? null) : null,
+  )
+  const lockShellView = useStore((s) => s.lockShellView)
   const traced = useStore((s) => Boolean(s.shellView?.host === host && s.shellView.paneId === paneId && s.shellView.traced))
   const hostUp = useStore((s) => (host === 'local' ? s.connected : (s.hosts.find((h) => h.name === host)?.connected ?? false)))
   const ending = useStore((s) => Boolean(s.busy[`shell:${host}:${paneId}`]))
@@ -159,6 +164,8 @@ export function HostShellPanel({
   )
   const [sending, setSending] = useState(false)
   const [sync, setSyncState] = useState(() => readSyncSet().has(target))
+  // 唯讀時記著「開」也不算：不然按鍵照樣一下一下送出去、一下一下吃 403，按鈕還 disabled 關不掉。
+  const syncOn = keySyncActive(sync, readOnly)
   /** 有沒有真的握著鍵盤：同步開著但焦點在別處時，打字不會進到 pane，要講清楚。 */
   const [typing, setTyping] = useState(false)
   const termRef = useRef<HTMLPreElement>(null)
@@ -195,23 +202,44 @@ export function HostShellPanel({
           if (alive) closeShellView()
           return
         }
-        if (alive) setErr(e instanceof Error ? e.message : String(e))
+        const denied = shellForbidden(e)
+        if (denied) lockShellView(host, paneId, denied)
+        if (alive) setErr(denied ?? (e instanceof Error ? e.message : String(e)))
       }
-      if (alive) timer = setTimeout(() => void tick(), sync ? SYNC_POLL_MS : IDLE_POLL_MS)
+      if (alive) timer = setTimeout(() => void tick(), syncOn ? SYNC_POLL_MS : IDLE_POLL_MS)
     }
     void tick()
     return () => {
       alive = false
       if (timer) clearTimeout(timer)
     }
-  }, [closeShellView, host, paneId, source, lines, nonce, sync])
+  }, [closeShellView, lockShellView, host, paneId, source, lines, nonce, syncOn])
 
   const refresh = useCallback(() => setNonce((n) => n + 1), [])
 
   useEffect(() => {
-    if (sync) termRef.current?.focus()
+    if (syncOn) termRef.current?.focus()
     else inputRef.current?.focus()
-  }, [host, paneId, sync])
+  }, [host, paneId, syncOn])
+
+  /**
+   * 送字／送鍵失敗。daemon 回 403（有 port 的 pane、正在跑 agent）時不是「再試一次」的錯：
+   * 把面板鎖成唯讀、關掉同步，顯示 daemon 的說明，別讓人對著原始的 403 一直打。
+   */
+  const failed = useCallback(
+    (e: unknown) => {
+      const denied = shellForbidden(e)
+      if (!denied) {
+        setErr(e instanceof Error ? e.message : String(e))
+        return
+      }
+      lockShellView(host, paneId, denied)
+      setSyncState(false)
+      writeSync(target, false)
+      setErr(null)
+    },
+    [host, lockShellView, paneId, target],
+  )
 
   const remember = useCallback(
     (cmd: string) => {
@@ -238,12 +266,12 @@ export function HostShellPanel({
         setErr(null)
         refresh()
       } catch (e) {
-        setErr(e instanceof Error ? e.message : String(e))
+        failed(e)
       } finally {
         setSending(false)
       }
     },
-    [host, paneId, refresh, remember, setText],
+    [failed, host, paneId, refresh, remember, setText],
   )
 
   const pressKeys = useCallback(
@@ -253,10 +281,10 @@ export function HostShellPanel({
         setErr(null)
         refresh()
       } catch (e) {
-        setErr(e instanceof Error ? e.message : String(e))
+        failed(e)
       }
     },
-    [host, paneId, refresh],
+    [failed, host, paneId, refresh],
   )
 
   const { press: pressSync, paste: pasteSync } = useShellKeys(
@@ -264,10 +292,11 @@ export function HostShellPanel({
     paneId,
     useCallback(
       (e: unknown | null) => {
-        setErr(e ? (e instanceof Error ? e.message : String(e)) : null)
+        if (e) failed(e)
+        else setErr(null)
         refresh()
       },
-      [refresh],
+      [failed, refresh],
     ),
   )
 
@@ -287,7 +316,7 @@ export function HostShellPanel({
    * 所以 ⌘C／⌘R／⌘V 照常，使用者不會被關在這個框裡出不去。
    */
   const onTermKeyDown = (e: ReactKeyboardEvent<HTMLPreElement>) => {
-    if (!sync) return
+    if (!syncOn) return
     const key = herdrKeyFromEvent(e.nativeEvent)
     if (!key) return
     e.preventDefault()
@@ -295,7 +324,7 @@ export function HostShellPanel({
   }
 
   const onTermPaste = (e: ReactClipboardEvent<HTMLPreElement>) => {
-    if (!sync) return
+    if (!syncOn) return
     const text = e.clipboardData.getData('text')
     if (!text) return
     e.preventDefault()
@@ -416,17 +445,17 @@ export function HostShellPanel({
           </button>
           <button
             type="button"
-            className={`mini-btn${sync ? ' on' : ''}`}
-            aria-pressed={sync}
+            className={`mini-btn${syncOn ? ' on' : ''}`}
+            aria-pressed={syncOn}
             disabled={readOnly}
-            onClick={() => setSync(!sync)}
+            onClick={() => setSync(!syncOn)}
             title={
-              sync
+              syncOn
                 ? '關掉鍵盤同步，回到「打一行、Enter 送出」'
                 : '鍵盤同步：點終端之後每一下按鍵直接送進這個 pane（⌘ 系列留給瀏覽器）'
             }
           >
-            {sync ? '鍵盤同步中' : '鍵盤同步'}
+            {syncOn ? '鍵盤同步中' : '鍵盤同步'}
           </button>
           <label className="conn" title="折行後 TUI 畫的框線與對齊會跑掉，但整行讀得到；不折行則維持原樣，靠橫捲看右半邊。">
             <input type="checkbox" checked={wrap} onChange={(e) => setTermWrap(e.target.checked)} />
@@ -439,7 +468,7 @@ export function HostShellPanel({
           {snap?.truncated ? <span className="hint">已截斷</span> : null}
           <span className="spacer" />
           <span className="hint term-bar-note">
-            {sync ? '鍵盤同步中，每 0.25 秒更新' : '每秒更新，指令送出後立刻重讀'}
+            {syncOn ? '鍵盤同步中，每 0.25 秒更新' : '每秒更新，指令送出後立刻重讀'}
           </span>
           {embedded ? headActions : null}
         </div>
@@ -453,10 +482,10 @@ export function HostShellPanel({
 
         <pre
           ref={termRef}
-          className={`term shell-term${wrap ? ' term-wrap' : ''}${sync ? ' term-sync' : ''}${sync && typing ? ' term-sync-live' : ''}`}
-          tabIndex={sync ? 0 : -1}
-          role={sync ? 'textbox' : undefined}
-          aria-label={sync ? `${host === 'local' ? '本機' : host} shell 的終端，鍵盤同步中` : undefined}
+          className={`term shell-term${wrap ? ' term-wrap' : ''}${syncOn ? ' term-sync' : ''}${syncOn && typing ? ' term-sync-live' : ''}`}
+          tabIndex={syncOn ? 0 : -1}
+          role={syncOn ? 'textbox' : undefined}
+          aria-label={syncOn ? `${host === 'local' ? '本機' : host} shell 的終端，鍵盤同步中` : undefined}
           onKeyDown={onTermKeyDown}
           onPaste={onTermPaste}
           onFocus={() => setTyping(true)}
@@ -464,7 +493,7 @@ export function HostShellPanel({
         >
           {body}
         </pre>
-        {sync ? (
+        {syncOn ? (
           <div className={`shell-sync-note${typing ? ' is-live' : ''}`} role="status">
             {typing
               ? '鍵盤同步中：按鍵直接送進這個 pane。⌘C／⌘R／⌘V 仍是瀏覽器的；Delete／Home／End／PgUp herdr 不收。'
@@ -474,7 +503,7 @@ export function HostShellPanel({
 
         {readOnly ? (
           <div className="shell-sync-note" role="status">
-            這是服務 pane（例如 dev server），只能看不能打字——送一個 Ctrl-C 就是把它關掉。
+            {readOnlyReason ?? '這顆 pane 開著 port（例如 dev server），只能看不能打字——送一個 Ctrl-C 就是把它關掉。'}
           </div>
         ) : null}
 
@@ -495,9 +524,9 @@ export function HostShellPanel({
             value={text}
             spellCheck={false}
             autoComplete="off"
-            disabled={sync || readOnly}
+            disabled={syncOn || readOnly}
             placeholder={
-              readOnly ? '服務 pane 只能看' : sync ? '鍵盤同步中：直接在上面的終端打字' : '輸入指令，Enter 送出（↑↓ 翻歷史）'
+              readOnly ? '這顆 pane 只能看' : syncOn ? '鍵盤同步中：直接在上面的終端打字' : '輸入指令，Enter 送出（↑↓ 翻歷史）'
             }
             aria-label={`對 ${host} 的 shell 輸入指令`}
             onChange={(e) => {
@@ -506,7 +535,7 @@ export function HostShellPanel({
             }}
             onKeyDown={onKeyDown}
           />
-          <button type="submit" className="btn primary" disabled={sending || sync || readOnly}>
+          <button type="submit" className="btn primary" disabled={sending || syncOn || readOnly}>
             {sending ? '送出中…' : '送出'}
           </button>
         </form>
