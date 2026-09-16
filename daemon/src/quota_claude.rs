@@ -511,6 +511,39 @@ async fn refresh_claude_account(
 }
 
 /// Unparsable timestamps count as stale.
+/// 狀態列補不上的那一份（Fable 週窗、方案名、登入答案）最久多久要再問一次 `/usage`。
+///
+/// 為什麼需要它：狀態列**永遠不含 Fable**（SPEC §12.4），而底下那條「狀態列很新就別開 pane」的
+/// 捷徑會讓有 bot 在講話的帳號**每一輪都被跳過**——cc0 每 30 秒就有一次狀態列，於是 daemon 重啟後
+/// 那一格的 `fable` 再也填不回來（2026-09-16 使用者：「怎麼不 show fable 用量了」）。
+/// 重啟前看得到只是因為 `quota::set` 會沿用舊的 `fable`，探到過就黏著。
+const USAGE_REFRESH: Duration = Duration::from_secs(10 * 60);
+
+/// `quota_key` → 上一次**成功**讀到 `/usage` 的時刻。只在記憶體：重啟就當沒問過，多開一次 pane
+/// 是安全的方向（`backoff_map` 同理）。
+fn usage_seen() -> &'static std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>> {
+    static M: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>> =
+        std::sync::OnceLock::new();
+    M.get_or_init(Default::default)
+}
+
+fn mark_usage_seen(key: &str) {
+    usage_seen().lock().unwrap().insert(key.to_string(), std::time::Instant::now());
+}
+
+fn usage_fresh(key: &str) -> bool {
+    usage_seen().lock().unwrap().get(key).is_some_and(|t| t.elapsed() < USAGE_REFRESH)
+}
+
+/// 這一輪要不要**跳過**這把 key 的 `/usage` pane。
+///
+/// 只有兩件事都成立才跳過：①狀態列剛送過同樣那幾個窗（開 pane 重讀是純成本），②`/usage` 自己
+/// 的那一份還新。少了②，有 bot 在講話的帳號就永遠問不到 Fable 與方案——省下的成本是「那格資料
+/// 再也不會出現」，不是省。
+pub(crate) fn skip_probe_for_fresh_statusline(login_known: bool, statusline_fresh: bool, usage_fresh: bool) -> bool {
+    login_known && statusline_fresh && usage_fresh
+}
+
 fn fresher_than(updated_at: &str, window: Duration) -> bool {
     let Ok(t) = chrono::DateTime::parse_from_rfc3339(updated_at) else { return false };
     match chrono::Utc::now().signed_duration_since(t.with_timezone(&chrono::Utc)).to_std() {
@@ -664,13 +697,15 @@ pub async fn refresh_claude(app: &Arc<App>, host: &str) -> Result<bool> {
         // Fresh statusLine = skip (many `ccN` per host, SPEC §16, would queue probes), unless
         // we've never had a login answer for it — that rides on the probe.
         let login_known = t.names.iter().all(|n| logins.get(n).is_some_and(|i| i.logged_in.is_some()));
-        if login_known {
-            if let Some(q) = app.quotas.lock().await.get(&full) {
-                if q.source == "statusline" && fresher_than(&q.updated_at, CLAUDE_POLL) {
-                    any = true;
-                    continue;
-                }
-            }
+        let statusline_fresh = app
+            .quotas
+            .lock()
+            .await
+            .get(&full)
+            .is_some_and(|q| q.source == "statusline" && fresher_than(&q.updated_at, CLAUDE_POLL));
+        if skip_probe_for_fresh_statusline(login_known, statusline_fresh, usage_fresh(&full)) {
+            any = true;
+            continue;
         }
         match refresh_claude_account(app, host, &t.key, t.account.as_deref(), t.env).await {
             Ok(None) => saw_missing = true,
@@ -681,6 +716,8 @@ pub async fn refresh_claude(app: &Arc<App>, host: &str) -> Result<bool> {
                 if o.quota.is_some() {
                     any = true;
                     unpark(&full);
+                    // 這把 key 的 `/usage` 剛答過：接下來十分鐘讓狀態列接手，不用再開 pane。
+                    mark_usage_seen(&full);
                 } else if let Some(ev) = t.evidence {
                     // No plan lines: park it using the login answer we just got.
                     let how_long = failure_backoff(ProbeEvidence { cli_says_logged_out: o.logged_in == Some(false), ..ev });
@@ -834,6 +871,33 @@ AM_USAGE_DONE=0
         assert!(five_reset.contains("T05:20:00") || five_reset.contains("T13:20:00"), "{five_reset}");
         let week_reset = q.seven_day.as_ref().unwrap().resets_at.as_deref().unwrap();
         assert!(week_reset.starts_with("2026-09-11"), "{week_reset}");
+    }
+
+    /// 2026-09-16 使用者：「怎麼不 show fable 用量了」。cc0 底下一直有 bot 在講話，狀態列每 30 秒
+    /// 就刷一次，於是「狀態列很新就別開 pane」那條捷徑每一輪都成立，`/usage` 永遠輪不到——而 Fable
+    /// 週窗與方案名**只有** `/usage` 讀得到。重啟前看得到只是因為 `quota::set` 會沿用舊的 `fable`。
+    #[test]
+    fn a_chatty_account_still_gets_its_usage_probe() {
+        // 從沒問過 `/usage`：狀態列再新也要開一次 pane，否則 Fable 那格永遠是空的。
+        assert!(!skip_probe_for_fresh_statusline(true, true, false));
+        // 問過而且還新：這一輪讓狀態列接手，不用再開 pane（原本省成本的用意保留）。
+        assert!(skip_probe_for_fresh_statusline(true, true, true));
+        // 狀態列不新（帳號安靜了）：照樣要問。
+        assert!(!skip_probe_for_fresh_statusline(true, false, true));
+        // 還不知道這個帳號登入了沒：登入答案跟 `/usage` 同一趟，值得一個 pane。
+        assert!(!skip_probe_for_fresh_statusline(false, true, true));
+    }
+
+    /// 記帳本身：沒問過就是不新，問過之後才在十分鐘內算數。
+    #[test]
+    fn the_usage_bookkeeping_starts_empty_and_expires() {
+        let key = format!("claude:test-{}", crate::db::ulid());
+        assert!(!usage_fresh(&key), "沒問過的 key 不能算新");
+        mark_usage_seen(&key);
+        assert!(usage_fresh(&key));
+        // 十分鐘是上限：把時間往回撥就該重新問一次（直接改記的時刻，不等真的十分鐘）。
+        usage_seen().lock().unwrap().insert(key.clone(), std::time::Instant::now() - USAGE_REFRESH);
+        assert!(!usage_fresh(&key), "超過 USAGE_REFRESH 就要再問一次");
     }
 
     #[test]
