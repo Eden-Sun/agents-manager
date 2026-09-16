@@ -1026,7 +1026,7 @@ mod flow_tests {
             seven_day: None,
             fable: None,
             reset_credits: None,
-            limit_hit: Some(LimitHit { message: "You've hit your limit".into(), until: Some("2999-01-01T05:00:00Z".into()), at: crate::db::now() }),
+            limit_hit: Some(LimitHit { message: "You've hit your limit".into(), until: Some("2999-01-01T05:00:00Z".into()), at: crate::db::now(), bucket: None }),
             plan: None,
             updated_at: crate::db::now(),
             source: "test".into(),

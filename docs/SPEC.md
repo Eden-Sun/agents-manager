@@ -327,7 +327,11 @@ herdr 回錯且訊息明確提到 `format`（舊版或遠端不認得這個參�
 marker 列與框的邊之間多出任何一列（含空白列）、marker 後多打一格（沒有框的輸入框）、dim 提示後面多了非 dim 的字、跟要送的一模一樣的字
 ——都是非空，一律不代送、零寫入。認不出框的畫面是 `Unready`。
 
-**排隊中的 prompt 重試**：可重試原因（框忙、transcript 還沒回報…）放回 `queued`，退避 15 秒起每次加倍、上限 5 分鐘；次數與
+**排隊中的 prompt 重試**（⚠️ **目前主線沒有生產者**：`POST /api/bots/{id}/prompt` 遇到 in-flight turn 是直接 409，
+從不插 `queued` turn，所以下面整段機制與 `state.bots[].queued_turn` 在正式路徑上不會被觸發。留著是因為
+`lifecycle/queue.rs` 的退避／重建 timer 都還在且有測試；要啟用就是在 409 那個分支真的插一筆 `queued`。
+**不要照這段設計「送一次就好，daemon 會排隊」的流程**——那則 prompt 會直接消失，review 2026-09-16）：
+可重試原因（框忙、transcript 還沒回報…）放回 `queued`，退避 15 秒起每次加倍、上限 5 分鐘；次數與
 下次時間存在 `turns.flush_retries`／`turns.next_flush_at`，時間未到的其他喚醒不動它；每顆 bot 同時只有一個重試 timer；放回
 12 次仍送不出就標 failed 並插說明（同一個 transaction）。daemon 重啟（`reconcile::rearm_progress`）時掃描所有帶
 `next_flush_at` 的 queued turn，以 `max(now, next_flush_at)` 為每顆 bot 重建唯一的 timer。直接送出的 409 回應則由呼叫端（或 AGM
