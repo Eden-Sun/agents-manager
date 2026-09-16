@@ -368,6 +368,21 @@ pub async fn post_review(
     };
     let updated = decided.updated;
 
+    // 交辦不要了：它排著還沒送出的 queued turn 一併撤銷、釋放名額（AGM 2026-09-16）。
+    // 已經 in_flight 或送出的撤不回來，不動——上面的 warning 已經講清楚。
+    let mut revoked_turn = None;
+    if matches!(updated.status.as_str(), "cancelled" | "superseded" | "failed") {
+        if let Some(tid) = updated.turn_id.as_deref() {
+            if let Some(why) = crate::lifecycle::withdrawn_assignment_reason(&app, tid).await {
+                match crate::lifecycle::revoke_queued_turn(&app, tid, &why).await {
+                    Ok(true) => revoked_turn = Some(tid.to_string()),
+                    Ok(false) => {}
+                    Err(e) => tracing::error!(assignment = %updated.id, turn = tid, error = %e, "could not revoke the withdrawn assignment's queued turn"),
+                }
+            }
+        }
+    }
+
     // Committed, so now it can go out. Dispatch is best effort exactly as in `assign`: a
     // failure leaves the row `queued`, which is the recoverable state.
     if let Some(f) = decided.followup.as_ref() {
@@ -384,6 +399,9 @@ pub async fn post_review(
     out["reviews"] = json!(store::reviews(&app.db, &updated.id).await.map_err(up)?);
     if let Some(f) = followup {
         out["followup"] = f;
+    }
+    if let Some(t) = revoked_turn {
+        out["revoked_turn_id"] = json!(t);
     }
     if let Some(note) = still_running {
         out["warning"] = json!(note);

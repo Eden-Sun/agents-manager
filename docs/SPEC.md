@@ -365,6 +365,12 @@ marker 列與框的邊之間多出任何一列（含空白列）、marker 後多
 排超過 `[supervisor] assignment_queue_wait_secs`（預設 1800 秒）還沒送出，controller 把交辦停在 `blocked` 並推一則通知；
 daemon 重啟時把所有 `queued` turn（含沒有 `next_flush_at` 的）重新掛上 flush，不留孤兒。送出時機與證據記錄完全沿用下面這套。
 
+**交辦不要了，排著的也撤掉**（AGM 2026-09-16）：交辦變成 `cancelled`／`superseded`／`failed` 時，它名下還是 `queued` 的 turn
+一併標成 `failed`（`delivery='failed'`、清掉 `next_flush_at`），插一則 system 訊息寫明哪張交辦、怎麼決定、理由，
+這個對話的 queued 名額立刻釋放。**已經 `in_flight` 或送出的不動**——撤不回來的不假裝撤回。兩道：review API 決定 commit 之後馬上撤
+（回應帶 `revoked_turn_id`）；`flush` 送出前也再查一次掛的交辦，已經不要了就撤、不送——繞過 API 改狀態、或 commit 之後還沒撤就重啟，
+都不能讓一則已取消的指令（實例：「請釋放 fence 21」`01M2MRM42CNZ1QZT5QZ8Z2ASFD` 在取消後 10:27 照樣送出）在錯的時機送到。
+
 **排隊中的 prompt 重試**：
 可重試原因（框忙、transcript 還沒回報…）放回 `queued`，退避 15 秒起每次加倍、上限 5 分鐘；次數與
 下次時間存在 `turns.flush_retries`／`turns.next_flush_at`，時間未到的其他喚醒不動它；每顆 bot 同時只有一個重試 timer；放回
