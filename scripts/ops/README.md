@@ -12,7 +12,7 @@
 再把重建重啟任務派給建置 child。
 
 **三個觸發條件**：整點的例行檢查（launchd 每 5 分鐘跑一次，分鐘 < 5 的那一輪）、
-**重建申請集滿門檻**（`AGM_REBUILD_THRESHOLD`，預設 5；使用者 2026-09-14），
+**重建申請集滿門檻**（`AGM_REBUILD_THRESHOLD`，預設 3；使用者 2026-09-14 訂 5、2026-09-16 降成 3），
 或**最早一筆申請已經等超過上限**（`AGM_REBUILD_MAX_WAIT_MIN`，預設 30 分鐘；使用者 2026-09-15——不能卡著等湊滿）。
 三個都不成立就立刻 `exit 0`，連 `git fetch` 之後的判斷都不做。同一個 `origin/main` 已經派過就不會重派，
 所以「等太久」在部署卡住時每 5 分鐘觸發一次也只會記一行「已經派過，跳過」。
@@ -31,7 +31,7 @@ approval，所以 approval 表就是唯一真相。數不出來（端點壞了�
 | `AGM_REPO` | `~/project/agents-manager` | 要比對的 repo |
 | `AGM_BUILD_BOT` | （無） | 建置 child 的 bot id。**沒設就整支跳過**——寧可不做，也不要改派給使用者的 bot |
 | `AM_AGENT_NAME` | `daemon-update-kick` | 租約 owner |
-| `AGM_REBUILD_THRESHOLD` | `5` | 累積幾個重建申請就不等整點，立刻檢查 |
+| `AGM_REBUILD_THRESHOLD` | `3` | 累積幾個重建申請就不等整點，立刻檢查 |
 | `AGM_REBUILD_MAX_WAIT_MIN` | `30` | 最早一筆重建申請等超過幾分鐘就不等整點（申請沒湊滿也一樣） |
 | `AGM_TEST_MINUTE` | （無） | 只給隔離測試用：假裝現在是第幾分鐘 |
 

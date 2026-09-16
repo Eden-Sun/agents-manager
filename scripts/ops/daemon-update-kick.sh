@@ -46,11 +46,11 @@ trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
 log "== check"
 
 # 觸發條件有三個：整點的例行檢查、**累積夠多重建申請**（使用者 2026-09-14），或**最早一筆申請已經等太久**
-# （使用者 2026-09-15：不能一直卡著等湊滿 5 筆）。launchd 每 5 分鐘跑一次，所以「整點」＝分鐘 < 5；
-# 門檻 `AGM_REBUILD_THRESHOLD`（預設 5）、等待上限 `AGM_REBUILD_MAX_WAIT_MIN`（預設 30 分鐘）。
+# （使用者 2026-09-15：不能一直卡著等湊滿）。launchd 每 5 分鐘跑一次，所以「整點」＝分鐘 < 5；
+# 門檻 `AGM_REBUILD_THRESHOLD`（預設 3；使用者 2026-09-16 從 5 降下來）、等待上限 `AGM_REBUILD_MAX_WAIT_MIN`（預設 30 分鐘）。
 # 請求＝上次真的上線（`daemon-update.built` 的 mtime）之後建立、還沒被否決的 rebuild 核准申請，
 # 同一個 requester 對同一個 commit 只算一筆。數不出來就當 0，也就是退回純整點的舊行為。
-THRESHOLD=${AGM_REBUILD_THRESHOLD:-5}
+THRESHOLD=${AGM_REBUILD_THRESHOLD:-3}
 MAX_WAIT_MIN=${AGM_REBUILD_MAX_WAIT_MIN:-30}
 MINUTE=$(( 10#${AGM_TEST_MINUTE:-$(date +%M)} ))   # AGM_TEST_MINUTE 只給隔離測試用
 REQUESTS=$("$AGM" --compact approval list 2>/dev/null | BUILT_FILE="$BUILT" python3 -c '
