@@ -59,6 +59,8 @@ struct Raw {
     pane_id: Option<String>,
     socket_path: Option<String>,
     bot_id: Option<String>,
+    /// `AM_PROJECT_ID`：pane 開出來當下綁定的專案（§6.5e）。
+    project_id: Option<String>,
     owner: &'static str,
     subtree_bytes: u64,
     children: u32,
@@ -154,8 +156,10 @@ fn scan(out: &str) -> (Vec<Proc>, Vec<Raw>) {
         let bot_id = blob.and_then(|b| env_value(b, "AM_BOT_ID"));
         let pane_id = blob.and_then(|b| env_value(b, "HERDR_PANE_ID"));
         let socket_path = blob.and_then(|b| env_value(b, "HERDR_SOCKET_PATH"));
+        // §6.5e：pane 開出來時就綁專案（shim 轉發 AM_PROJECT_ID），bot 被刪也不會失去歸屬。
+        let project_id = blob.and_then(|b| env_value(b, "AM_PROJECT_ID"));
         let owner = owner_of(is_herdr(p), bot_id.as_deref(), pane_id.as_deref());
-        raws.push(Raw { p_index: i, pane_id, socket_path, bot_id, owner, subtree_bytes: bytes, children: kids });
+        raws.push(Raw { p_index: i, pane_id, socket_path, bot_id, project_id, owner, subtree_bytes: bytes, children: kids });
     }
     (procs, raws)
 }
@@ -195,6 +199,8 @@ fn listed(procs: &[Proc], raws: &[Raw]) -> Vec<MemProcess> {
 pub struct PaneFacts {
     /// pane 行程樹裡看到的 `AM_BOT_ID`（通常只有一個；多個代表這個 pane 被不同 bot 用過）。
     pub bot_ids: Vec<String>,
+    /// pane 行程樹裡看到的 `AM_PROJECT_ID`：開 pane 當下綁的專案，bot 被刪也還在（§6.5e）。
+    pub project_ids: Vec<String>,
     /// 這個 pane 底下所有行程的 pid，用來對 listen port。
     pub pids: Vec<i32>,
     /// 最有代表性的前景程式（shell 以外最上層的那個）；只有 shell 時是 `None`。
@@ -219,6 +225,11 @@ pub fn pane_facts_from_dump(out: &str) -> HashMap<String, PaneFacts> {
         if let Some(b) = &r.bot_id {
             if !e.bot_ids.contains(b) {
                 e.bot_ids.push(b.clone());
+            }
+        }
+        if let Some(pid) = &r.project_id {
+            if !e.project_ids.contains(pid) {
+                e.project_ids.push(pid.clone());
             }
         }
         // herdr 自己與 shell 不算前景程式；其餘取第一個（掃描順序是由根往下）。

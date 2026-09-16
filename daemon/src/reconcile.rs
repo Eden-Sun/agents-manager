@@ -541,7 +541,18 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
     let all_panes: Vec<serde_json::Value> =
         snapshot.get("panes").and_then(|v| v.as_array()).cloned().unwrap_or_default();
     match crate::panes::scan_host(app, host, &all_panes).await {
-        Ok(n) => tracing::debug!(host, panes = n, "scanned non-agent panes"),
+        Ok(n) => {
+            tracing::debug!(host, panes = n, "scanned non-agent panes");
+            // 掃完才 GC：同一輪先有最新的歸屬與 last_output_at，再決定關誰（§6.5e）。
+            match crate::panes::gc_host(app, host).await {
+                Ok(0) => {}
+                Ok(k) => tracing::info!(host, closed = k, "pane GC 關掉了閒置的 shell pane"),
+                Err(e) => tracing::warn!(host, error = ?e, "pane GC failed"),
+            }
+            if let Err(e) = crate::panes::notify_unowned_and_orphans(app, host).await {
+                tracing::warn!(host, error = ?e, "pane 通知失敗");
+            }
+        }
         Err(e) => tracing::warn!(host, error = ?e, "non-agent pane scan failed"),
     }
     Ok(())
