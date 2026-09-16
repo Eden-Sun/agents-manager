@@ -48,7 +48,7 @@ web/src/
   `delivery="failed"` 不塞假 turn，文字留在框裡；`pending/ok/unknown` 才先補一筆 turn 讓輸入框立即鎖住。
   輸入框鎖定原因的順序在 `composerState()`；Enter 送出、Shift+Enter 換行、組字中的 Enter 不送。
 - **來源標籤**：`hook` 不標；`terminal_fallback` 標「可能不完整」；系統訊息另有來源標。
-- **WS**：指數退避重連（上限 10 秒 + jitter），重連帶 `?since=<最高 seq>`；`resync` 或 `project_changed`／`bot_changed` → 重新 `GET /api/state`。
+- **WS**：指數退避重連（250ms 起跳、上限 3 秒 + jitter；`transport.ts`），重連帶 `?since=<最高 seq>`；`resync` 或 `project_changed`／`bot_changed` → 重新 `GET /api/state`。
 - **blocked**：`BlockedModal`（全畫面，blocked 1 秒後自動彈出，只彈正在看的 bot，關過就不再彈直到下一次 blocked）與
   `BlockedPanel`（對話上方，全畫面開著時暫停輪詢）共用 `useTerminalSnapshot` 與 `usePaneKeys`。
   全畫面的鍵盤直通把 `KeyboardEvent` 翻成 herdr 鍵名（⌘ 系列留給瀏覽器，Home/End/PgUp/PgDn herdr 不收）；直通時 Esc 也送給 agent。

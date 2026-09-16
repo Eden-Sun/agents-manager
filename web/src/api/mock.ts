@@ -559,6 +559,8 @@ export class MockTransport implements Transport {
       cwd: null,
       created_at: now(),
     })
+    // 先鋪歷史再鋪示範訊息：示範的那兩則要留在最新一頁，不然翻頁才看得到就失去意義。
+    this.seedLongHistory(p.id)
     this.seedGroupRelay(p.id)
     installDevHelpers(this)
   }
@@ -583,6 +585,26 @@ export class MockTransport implements Transport {
       group_id: ulid('grp'),
       relay_from: agm?.id ?? 'daemon',
     })
+  }
+
+  /**
+   * 第一顆 bot 的對話塞超過一頁（`PAGE_SIZE` 200）：不然 `has_more` 永遠是 false，
+   * 「載入更早的訊息」在 mock 下根本長不出來，往前翻頁那條路也就從來沒被走過。
+   */
+  private seedLongHistory(projectId: string) {
+    const target = this.bots.find((b) => b.project_id === projectId)
+    if (!target) return
+    const base = {
+      conversation_id: this.conv(target.id),
+      bot_id: target.id,
+      source: 'web' as const,
+      incomplete: 0,
+    }
+    for (let i = 1; i <= 120; i++) {
+      const turnId = ulid('turn')
+      this.addMessage({ ...base, turn_id: turnId, role: 'user', content: `第 ${i} 輪：把這段的測試補上` })
+      this.addMessage({ ...base, turn_id: turnId, role: 'assistant', content: `第 ${i} 輪：補好了，兩條都綠。` })
+    }
   }
 
   // transport
@@ -734,7 +756,7 @@ export class MockTransport implements Transport {
       const action = seg[2]
       if (method === 'PATCH' && !action) return this.patchBot(botId, b)
       if (method === 'DELETE' && !action) return this.deleteBot(botId)
-      if (method === 'GET' && action === 'messages') return this.messagesOf(botId)
+      if (method === 'GET' && action === 'messages') return this.messagesOf(botId, q)
       if (method === 'GET' && action === 'terminal') {
         return this.terminal(botId, q.get('source') ?? 'visible', Number(q.get('lines') ?? 40))
       }
@@ -2559,13 +2581,36 @@ export class MockTransport implements Transport {
     return { ok: true }
   }
 
-  private messagesOf(botId: string) {
+  /**
+   * Mirrors `daemon/src/api.rs::messages`：插入順序倒序分頁（`before` = 目前最舊一則的 id），
+   * `turn_id`／`role` 在同一段對話裡先過濾再分頁，回傳的 `messages` 已依時間正序。
+   * 不吃這些參數的話，issue #25 的往前翻頁與群組未讀的回合確認在 mock 下永遠走不到真 daemon 那條路。
+   */
+  private messagesOf(botId: string, q: URLSearchParams) {
+    const limit = Math.min(500, Math.max(1, Number(q.get('limit') ?? 100) || 100))
+    const before = q.get('before') ?? ''
+    const turnId = q.get('turn_id') ?? ''
+    const role = q.get('role') ?? ''
+    // 靜默忽略會讓呼叫端以為過濾過了，拿整段當成某個 role 的全部（同 daemon 回 400）。
+    if (role && !['user', 'assistant', 'system'].includes(role)) {
+      throw new ApiError(400, { error: 'bad_request', message: `bad role \`${role}\`` }, 'bad request')
+    }
+    const mine = this.messages.filter((m) => m.bot_id === botId)
+    let upto = mine.length
+    if (before) {
+      const at = mine.findIndex((m) => m.id === before)
+      if (at < 0) throw new ApiError(400, { error: 'bad_request', message: `before message \`${before}\` not found` }, 'bad request')
+      upto = at
+    }
+    const rows = mine
+      .slice(0, upto)
+      .filter((m) => (!turnId || m.turn_id === turnId) && (!role || m.role === role))
     return {
       bot_id: botId,
       conversation_id: this.conv(botId),
-      messages: this.messages.filter((m) => m.bot_id === botId),
+      messages: rows.slice(Math.max(0, rows.length - limit)),
       turns: this.turns.filter((t) => t.bot_id === botId),
-      has_more: false,
+      has_more: rows.length > limit,
     }
   }
 
