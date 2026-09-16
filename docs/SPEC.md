@@ -1295,7 +1295,10 @@ launchd `com.agm.browser-gc` 跑 `bin/browser-gc-kick.sh`，`StartInterval` 依�
 ### 18.5a Claude Code 換版就解析（使用者 2026-09-16）
 
 launchd `com.agm.claude-release` 每 30 分鐘跑 `bin/claude-release-kick.sh`：比對 `~/.local/share/claude/versions` 最新的版本與 `claude-release.last`，
-換版才派 `claude-release-task.md` 給 AGM 自己（`--review-by patrol`，request id `agm-claude-release-<版本>`），AGM 的回覆就是使用者看到的通知。規則：
+換版才派 `claude-release-task.md` 給**協調者**（巡檢不能對自己下交辦；`AGM_RELEASE_BOT` ＞ `runtime.json` 的 `release_bot_id` ＞ `responder_bot_id`，
+都沒有就跳過），`--review-by patrol`、request id `agm-claude-release-<版本>`，協調者解析完把通知交給巡檢，使用者才看得到。規則：
+- 巡檢目錄的 `runtime.json` 由 setup 寫 `responder_bot_id`（協調者之後才建立時，`responder setup` 會回頭補寫；單角色安裝是 `null`）。
+  腳本測試用的 runtime.json 是 `scripts/ops/fixtures/patrol-runtime.json`，Rust 測試釘住它等於 `runtime_json()` 的真實輸出。
 
 - 第一次執行只記下目前版本，不為「本來就在的版本」派一次工；沒換版安靜退出（不寫 log）。
 - 派工失敗不寫 `claude-release.last`，下一輪重派；同時只准一個執行者（`claude-release.lock`），殘留鎖交 AGM 檢查。
