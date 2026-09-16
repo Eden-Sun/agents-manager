@@ -1013,9 +1013,18 @@ pub struct LeaseHolderIn {
     pub reason: Option<String>,
 }
 
-/// 把 body 換成一個憑證。`force` 一定要附理由：強制釋放是可以做的事，但要留下是誰、為什麼。
-fn lease_proof<'a>(b: &'a LeaseHolderIn) -> Result<store::LeaseProof<'a>, LcError> {
+/// 把 body 換成一個憑證。`force` 是**授權**問題，不只是稽核問題：只有 AGM 角色能接管別人的窗口，
+/// 而且一定要附理由。少了角色檢查的話，任何打得到 7788 的呼叫端多帶一個 `force=true` 就能把別人
+/// 正在換 binary 的窗口收掉——留了紀錄，但沒有界線（review 續補 2026-09-16）。
+fn lease_proof<'a>(b: &'a LeaseHolderIn, actor: Option<super::roles::Role>) -> Result<store::LeaseProof<'a>, LcError> {
     if b.force {
+        let Some(role) = actor else {
+            return Err(LcError::Forbidden(json!({
+                "error": "forbidden", "reason": "lease_force_forbidden",
+                "message": "只有 AGM 角色可以強制接管窗口；持有者請用 acquire 當下拿到的 lease_token 交還"
+            })));
+        };
+        let _ = role;
         let ok = b.reason.as_deref().map(str::trim).is_some_and(|r| !r.is_empty());
         if !ok {
             return Err(LcError::Bad("force 需要 --reason（會寫進稽核紀錄）".into()));
@@ -1027,6 +1036,21 @@ fn lease_proof<'a>(b: &'a LeaseHolderIn) -> Result<store::LeaseProof<'a>, LcErro
         Some(t) => store::LeaseProof::Token(t),
         None => store::LeaseProof::Absent,
     })
+}
+
+/// 被擋下來的 force 也要留一行：誰、在哪個 resource、判定到什麼角色。
+fn force_warn(e: LcError, resource: &str, owner: &str, actor: Option<super::roles::Role>) -> LcError {
+    if let LcError::Forbidden(v) = &e {
+        if v["reason"] == "lease_force_forbidden" {
+            tracing::warn!(
+                resource,
+                claimed_owner = owner,
+                role = actor.map(|r| r.as_str()).unwrap_or("none"),
+                "refused a forced lease release from a caller that is not an AGM role"
+            );
+        }
+    }
+    e
 }
 
 /// 憑證對不上：一個字都不動。
@@ -1042,8 +1066,10 @@ fn lease_forbidden(resource: &str, owner: &str, had_token: bool) -> LcError {
 pub async fn post_lease_renew(
     State(app): State<Arc<App>>,
     Path(resource): Path<String>,
+    headers: HeaderMap,
     Json(b): Json<LeaseHolderIn>,
 ) -> Result<Json<Value>, LcError> {
+    let actor = super::bot_requests::actor_role(&app, &headers).await;
     let _g = super::lock().await;
     let ttl = b.ttl_secs.unwrap_or(super::maintenance::DEFAULT_TTL_SECS).clamp(30, super::maintenance::MAX_TTL_SECS);
     // Renewal re-checks the permission, it does not just extend the clock. An approval that was
@@ -1070,7 +1096,7 @@ pub async fn post_lease_renew(
         }
     }
     // 憑證在任何寫入之前比對；`renew_lease` 只認 owner＋fence，那兩個是公開欄位。
-    let proof = lease_proof(&b)?;
+    let proof = lease_proof(&b, actor).map_err(|e| force_warn(e, &resource, &b.owner, actor))?;
     if !proof.allows(store::lease_token(&app.db, &resource).await.map_err(up)?.as_deref()) {
         return Err(lease_forbidden(&resource, &b.owner, b.lease_token.is_some()));
     }
@@ -1089,9 +1115,11 @@ pub async fn post_lease_renew(
 pub async fn post_lease_release(
     State(app): State<Arc<App>>,
     Path(resource): Path<String>,
+    headers: HeaderMap,
     Json(b): Json<LeaseHolderIn>,
 ) -> Result<Json<Value>, LcError> {
-    let proof = lease_proof(&b)?;
+    let actor = super::bot_requests::actor_role(&app, &headers).await;
+    let proof = lease_proof(&b, actor).map_err(|e| force_warn(e, &resource, &b.owner, actor))?;
     // Consumes the approval (one yes, one window) and, for a restart window, lifts the holds it
     // placed so held assignments go out on the next pass.
     let released = super::maintenance::release(&app, &resource, &b.owner, b.fence, proof).await.map_err(|e| {
@@ -1103,11 +1131,13 @@ pub async fn post_lease_release(
     })?;
     if b.force {
         let reason = b.reason.clone().unwrap_or_default();
-        tracing::warn!(resource = %resource, owner = %b.owner, reason = %reason, "a maintenance window was force-released");
+        let role = actor.map(|r| r.as_str()).unwrap_or("?");
+        tracing::warn!(resource = %resource, owner = %b.owner, role, reason = %reason, "a maintenance window was force-released");
         let _ = store::add_note(
             &app.db,
             "lease_force_release",
-            &json!({"resource": resource, "owner": b.owner, "fence": b.fence, "reason": reason, "released": released}),
+            &json!({"resource": resource, "owner": b.owner, "fence": b.fence, "reason": reason,
+                    "released": released, "by_role": role}),
         )
         .await;
     }
@@ -1206,7 +1236,7 @@ mod approval_decision_tests {
         let body = |v: serde_json::Value| -> LeaseHolderIn { serde_json::from_value(v).unwrap() };
 
         // 什麼都不帶：403，租約一個字都不動。
-        let err = post_lease_release(State(app.clone()), Path("rebuild".into()), Json(body(json!({"owner": "runner", "fence": lease.fence}))))
+        let err = post_lease_release(State(app.clone()), Path("rebuild".into()), HeaderMap::new(), Json(body(json!({"owner": "runner", "fence": lease.fence}))))
             .await
             .unwrap_err();
         let LcError::Forbidden(v) = &err else { panic!("expected 403, got {err:?}") };
@@ -1217,6 +1247,7 @@ mod approval_decision_tests {
         let err = post_lease_release(
             State(app.clone()),
             Path("rebuild".into()),
+            HeaderMap::new(),
             Json(body(json!({"owner": "runner", "fence": lease.fence, "lease_token": "0".repeat(token.len())}))),
         )
         .await
@@ -1230,6 +1261,7 @@ mod approval_decision_tests {
         let Json(out) = post_lease_release(
             State(app.clone()),
             Path("rebuild".into()),
+            HeaderMap::new(),
             Json(body(json!({"owner": "runner", "fence": lease.fence, "lease_token": token}))),
         )
         .await
@@ -1239,6 +1271,29 @@ mod approval_decision_tests {
         assert_eq!(store::approval(&app.db, &ap.id).await.unwrap().unwrap().status, "consumed");
         app.db.close().await;
         std::fs::remove_dir_all(&app.data_dir).unwrap();
+    }
+
+    /// 巡檢角色的呼叫端：`X-AM-Bot-Id` + 那顆 bot 自己的 hook token（CLI 在角色的 pane 裡跑，
+    /// 環境本來就有這兩個值）。模型打出來的字串冒充不了。
+    async fn agm_role_headers(app: &Arc<App>) -> HeaderMap {
+        let id = crate::db::ulid();
+        sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES ('p-agm','/tmp','AGM',?)")
+            .bind(crate::db::now())
+            .execute(&app.db)
+            .await
+            .ok();
+        sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES (?,'p-agm','AGM','claude','agm-tok',?)")
+            .bind(&id)
+            .bind(crate::db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        store::set_env(&app.db, &id, "p-agm", "/tmp").await.unwrap();
+        crate::supervisor::roles::set_env(&app.db, crate::supervisor::roles::Role::Patrol, &id, "p-agm", "/tmp").await.unwrap();
+        let mut h = HeaderMap::new();
+        h.insert("X-AM-Bot-Id", id.parse().unwrap());
+        h.insert("X-AM-Bot-Token", "agm-tok".parse().unwrap());
+        h
     }
 
     /// 強制釋放是可以做的事（持有者不在了），但要留下是誰、為什麼；沒理由就不准。
@@ -1251,9 +1306,24 @@ mod approval_decision_tests {
         let lease = store::acquire_lease(&app.db, "rebuild", "runner", Some(&ap.id), None, &until, &json!({})).await.unwrap().unwrap();
         let body = |v: serde_json::Value| -> LeaseHolderIn { serde_json::from_value(v).unwrap() };
 
+        // 一般呼叫端（沒有角色）就算附了理由也不能接管：force 是授權問題，不只是稽核問題。
         let err = post_lease_release(
             State(app.clone()),
             Path("rebuild".into()),
+            HeaderMap::new(),
+            Json(body(json!({"owner": "someone-else", "fence": lease.fence, "force": true, "reason": "我想收掉"}))),
+        )
+        .await
+        .unwrap_err();
+        let LcError::Forbidden(v) = &err else { panic!("expected 403, got {err:?}") };
+        assert_eq!(v["reason"], "lease_force_forbidden");
+        assert!(store::lease(&app.db, "rebuild").await.unwrap().unwrap().released_at.is_none(), "被擋下就不該動到租約");
+
+        let agm = agm_role_headers(&app).await;
+        let err = post_lease_release(
+            State(app.clone()),
+            Path("rebuild".into()),
+            agm.clone(),
             Json(body(json!({"owner": "agm", "fence": lease.fence, "force": true}))),
         )
         .await
@@ -1264,16 +1334,19 @@ mod approval_decision_tests {
         let Json(out) = post_lease_release(
             State(app.clone()),
             Path("rebuild".into()),
+            agm,
             Json(body(json!({"owner": "agm", "fence": lease.fence, "force": true, "reason": "持有者的 pane 不在了"}))),
         )
         .await
         .unwrap();
         assert_eq!(out["released"], true);
-        let notes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_notes WHERE kind='lease_force_release'")
+        let note: String = sqlx::query_scalar("SELECT body FROM supervisor_notes WHERE kind='lease_force_release'")
             .fetch_one(&app.db)
             .await
             .unwrap();
-        assert_eq!(notes, 1, "強制釋放要留稽核紀錄");
+        let note: Value = serde_json::from_str(&note).unwrap();
+        assert_eq!(note["reason"], "持有者的 pane 不在了");
+        assert_eq!(note["by_role"], "patrol", "稽核紀錄要記下是哪個角色做的");
         app.db.close().await;
         std::fs::remove_dir_all(&app.data_dir).unwrap();
     }
@@ -1290,7 +1363,7 @@ mod approval_decision_tests {
         sqlx::query("UPDATE supervisor_leases SET lease_token=NULL WHERE resource='rebuild'").execute(&app.db).await.unwrap();
 
         let body: LeaseHolderIn = serde_json::from_value(json!({"owner": "runner", "fence": lease.fence})).unwrap();
-        let Json(out) = post_lease_release(State(app.clone()), Path("rebuild".into()), Json(body)).await.unwrap();
+        let Json(out) = post_lease_release(State(app.clone()), Path("rebuild".into()), HeaderMap::new(), Json(body)).await.unwrap();
         assert_eq!(out["released"], true, "舊租約要還得了");
         app.db.close().await;
         std::fs::remove_dir_all(&app.data_dir).unwrap();
@@ -1537,7 +1610,7 @@ mod review_boundary_tests {
         store::decide_approval(&app.db, &approval.id, "revoked", "AGM", None, None).await.unwrap();
         for expected in ["approval_revoked", "approval_missing"] {
             let input: LeaseHolderIn = serde_json::from_value(json!({"owner":"owner","fence":lease.fence,"ttl_secs":3600})).unwrap();
-            let err = post_lease_renew(State(app.clone()), Path("rebuild".into()), Json(input)).await.unwrap_err();
+            let err = post_lease_renew(State(app.clone()), Path("rebuild".into()), HeaderMap::new(), Json(input)).await.unwrap_err();
             assert!(format!("{err:?}").contains(expected));
             assert_eq!(store::lease(&app.db, "rebuild").await.unwrap().unwrap().expires_at, lease.expires_at);
             sqlx::query("DELETE FROM supervisor_approvals WHERE id=?").bind(&approval.id).execute(&app.db).await.unwrap();

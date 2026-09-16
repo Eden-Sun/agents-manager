@@ -1505,7 +1505,7 @@ mod no_grace_period_tests {
             json!({"owner": "owner", "fence": lease.fence, "lease_token": lease.lease_token}),
         )
         .unwrap();
-        post_lease_release(State(app.clone()), Path("restart".into()), Json(input)).await.unwrap();
+        post_lease_release(State(app.clone()), Path("restart".into()), axum::http::HeaderMap::new(), Json(input)).await.unwrap();
         let lifted = store::assignment(&app.db, &a.id).await.unwrap().unwrap();
         assert_eq!(lifted.status, "queued");
         assert_eq!(lifted.next_attempt_at, None, "hold 解除，不等原本的 until");

@@ -1118,7 +1118,8 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
 - 租約有只增不減的 `fence`；過期被接手後舊 fence 的 renew／release 一律失敗。到期自動釋放。acquire 與 renew 取「要求到期」與「核准到期」較早者，renew 重驗核准狀態。
 - **憑證**（AGM 裁示 2026-09-16）：`acquire` 的回應多一個一次性的 `lease_token`（隨機 32 字元）。`renew`／`release` 必須帶對的 token，否則 **403**（`lease_token_required`／`lease_token_mismatch`），租約一個字都不動並留一行 warn。
   token **只在 acquire 的回應裡出現一次**：`lease status`、`GET /api/supervisor`、WS 事件與 `Lease::to_json()` 都不含它。owner 與 fence 是公開欄位，光憑它們等於誰都能把別人正在換 binary 的窗口收掉——那一刻正好最不能被打斷。
-  例外只有兩條，都留稽核：(a) daemon 啟動時釋放上一輪殘留的 `restart` 租約（現行行為不變）；(b) AGM 的強制釋放 `--force`（`reason` 必填，寫進 `supervisor_notes` 的 `lease_force_release`，log warn，且不比對 owner／fence——持有者可能已經不在了）。
+  例外只有兩條，都留稽核：(a) daemon 啟動時釋放上一輪殘留的 `restart` 租約（現行行為不變）；(b) **AGM 角色**（patrol／responder，`X-AM-Bot-Id`＋該 bot 自己的 hook token 驗出來的）的強制釋放 `--force`：`reason` 必填，寫進 `supervisor_notes` 的 `lease_force_release`（含判定到的角色），log warn，且不比對 owner／fence——持有者可能已經不在了。
+  **不是 AGM 角色帶 `force` → 403 `lease_force_forbidden`**，租約一個字都不動：force 是授權問題，不只是稽核問題；只留紀錄而沒有界線，等於誰都能接管別人正在換 binary 的窗口。
   升級過渡：欄位是 additive，升級前建立的租約 `lease_token IS NULL`，這種**不帶 token 也能釋放**（否則升級當下握著的窗口永遠沒人還得了），釋放時留一行 warn。過期自動失效與 fence 只增不減的語意都沒變。
   ops 腳本把 token 寫進派工正文（執行者要用它交還窗口）：那是一個有效期最多一小時的窗口憑證，不是帳號憑證。
 - 持有 `restart` 租約期間 **supervisor 的 assignment 派送 hold**（留 `queued`，不算重試）。**只管這一條通道**：`POST /api/bots/{id}/prompt` 沒被 gate。

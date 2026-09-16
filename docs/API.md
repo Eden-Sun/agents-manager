@@ -1005,7 +1005,7 @@ body 直接是檔案位元組（**不是** multipart），`Content-Type` 就是�
 - `POST /api/supervisor/leases/{rebuild|restart}/acquire {owner,approval_id,commit?,ttl_secs?,require_idle=true,exclude_bot_ids?}` → `{lease,lease_token,approval,safety}`；同 lock 內重驗核准與 idle，
   搶輸 409 `lease_held`。ttl 預設 900、上限 3600。`POST …/renew {owner,fence,ttl_secs?,lease_token}`、`POST …/release {owner,fence,lease_token}`；舊 fence 409 `lease_lost`；release 把核准標 `consumed`。
   **`lease_token` 只在 acquire 的回應裡出現一次**（`GET /leases`、`GET /api/supervisor`、WS 事件都不含它）。renew／release 不帶或帶錯 → `403 {"reason":"lease_token_required"|"lease_token_mismatch"}`，租約不動。
-  強制接管：`{force:true, reason:"…"}`（`reason` 必填，否則 400），不比對 owner／fence，寫進 `supervisor_notes` 的 `lease_force_release`。升級前建立的租約沒有 token，不帶也能 release（見 SPEC §18.10）。
+  強制接管：`{force:true, reason:"…"}`，**只有 AGM 角色**（`X-AM-Bot-Id`＋該 bot 的 hook token）可以；其他呼叫端 403 `lease_force_forbidden`。`reason` 必填（否則 400），不比對 owner／fence，寫進 `supervisor_notes` 的 `lease_force_release`（含 `by_role`）。升級前建立的租約沒有 token，不帶也能 release（見 SPEC §18.10）。
   持有 `restart` 租約期間 assignment 派送 hold（留 `queued`、不算重試）。
 
 ### 交辦 assignments（SPEC §18.8）
