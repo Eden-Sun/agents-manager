@@ -28,12 +28,16 @@ export function useProjectJumpKeys() {
       selectProject(project.id)
       // 選完才畫得出輸入框：等這一輪 render 完再給焦點，拿不到就退回專案標題（至少鍵盤位置對了）。
       requestAnimationFrame(() => {
+        // 側欄也要跟著捲過去（2026-09-16 使用者），不然看不出跳到哪個專案。`nearest` 不會沒事亂捲。
+        const row = document.querySelector<HTMLElement>(`.project[data-project-id="${CSS.escape(project.id)}"]`)
+        row?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
         const box = document.querySelector<HTMLTextAreaElement>('.composer textarea')
         if (box && !box.disabled) {
-          box.focus()
+          // focus 會把元素捲進視野：`preventScroll` 保住上面那一捲，也避免主面板被拉動。
+          box.focus({ preventScroll: true })
           return
         }
-        document.querySelector<HTMLElement>('.project-label-btn.selected')?.focus()
+        document.querySelector<HTMLElement>('.project-label-btn.selected')?.focus({ preventScroll: true })
       })
     }
     window.addEventListener('keydown', onKey)
