@@ -6,6 +6,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { requests, reset, routeDaemon } from './storeEnv.harness.ts'
 import type { Bot, Mission, MissionDetail, Project } from '../api/types.ts'
+import { queueFromComposer, settleComposerSend } from './queuedSend.ts'
 
 const { useStore } = await import('./store.ts')
 
@@ -113,6 +114,51 @@ test('回合還在跑時排第二則：第一則退回輸入框，不是無聲�
   assert.deepEqual(s.queuedSends.b1, { text: '順便看一下 lint', attachments: [] })
   assert.equal(s.drafts['bot:b1'], '先跑一次測試', '第一則要看得到，不能只留在記憶裡')
   assert.ok(noticeTexts().some((t) => t.includes('退回輸入框')))
+})
+
+/** 元件的 `setText` 就是寫 store 草稿；附件列在這裡用不到。 */
+const composerIO = (botId: string) => ({
+  setText: (v: string) => useStore.getState().setDraft(`bot:${botId}`, v),
+  clearFiles: () => {},
+  queueSend: useStore.getState().queueSend,
+  restoreQueuedSend: useStore.getState().restoreQueuedSend,
+})
+
+test('照 ChatPanel 的呼叫順序排第二則：退回的第一則真的留在輸入框', () => {
+  seed()
+  const io = composerIO('b1')
+  // 使用者打字 → Enter：草稿裡就是要排的那一則。
+  useStore.getState().setDraft('bot:b1', '先跑一次測試')
+  queueFromComposer(io, 'b1', '先跑一次測試', ['a1'])
+  assert.equal(useStore.getState().drafts['bot:b1'], undefined, '排進去的那則不留在輸入框')
+  useStore.getState().setDraft('bot:b1', '順便看一下 lint')
+  queueFromComposer(io, 'b1', '順便看一下 lint', [])
+  const s = useStore.getState()
+  assert.deepEqual(s.queuedSends.b1, { text: '順便看一下 lint', attachments: [] })
+  assert.equal(s.drafts['bot:b1'], '先跑一次測試', '通知說已退回輸入框，輸入框就要真的有')
+  assert.ok(noticeTexts().some((t) => t.includes('退回輸入框') && t.includes('1 個附件')))
+})
+
+test('中止並取代送出的是排隊那則：輸入框裡被退回的上一則不能跟著清掉', () => {
+  seed()
+  useStore.setState({ queuedSends: { b1: { text: '第二則', attachments: [] } }, drafts: { 'bot:b1': '第一則' } })
+  const wasQueued = useStore.getState().queuedSends.b1
+  useStore.getState().cancelQueuedSend('b1')
+  settleComposerSend(composerIO('b1'), 'b1', wasQueued, true)
+  assert.equal(useStore.getState().drafts['bot:b1'], '第一則')
+
+  // 沒排隊、送的是輸入框本身：照常清掉。
+  settleComposerSend(composerIO('b1'), 'b1', null, true)
+  assert.equal(useStore.getState().drafts['bot:b1'], undefined)
+})
+
+test('取消排隊：那則接回輸入框最前面，不蓋掉正在打的字', () => {
+  seed()
+  useStore.setState({ queuedSends: { b1: { text: '排隊那則', attachments: [] } }, drafts: { 'bot:b1': '打到一半' } })
+  useStore.getState().unqueueToDraft('b1')
+  const s = useStore.getState()
+  assert.equal(s.queuedSends.b1, undefined)
+  assert.equal(s.drafts['bot:b1'], '排隊那則\n打到一半')
 })
 
 test('已讀送不出去：daemon 的舊數字不可以把徽章點回來', async () => {

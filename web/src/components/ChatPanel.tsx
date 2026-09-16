@@ -12,6 +12,7 @@ import { useScrollTail } from '../hooks/useScrollTail'
 import { useTapCopy } from '../hooks/useTapCopy'
 import { cleanLiveActivity, cleanLiveText } from '../store/liveText'
 import { typeAlongside } from '../store/alongside'
+import { queueFromComposer, settleComposerSend } from '../store/queuedSend'
 import { anchorOf, botLamp, composerState, inFlightTurn, liveReplyOf, projectHostName, toolsOfHost, useStore } from '../store/store'
 import { AttachPicker, AttachTray, DropVeil, MessageAttachments, useAttachments, useDropTarget } from './Attachments'
 import { BlockedBadge } from './BlockedBadge'
@@ -677,6 +678,7 @@ function Composer({
   const queueSend = useStore((s) => s.queueSend)
   const cancelQueuedSend = useStore((s) => s.cancelQueuedSend)
   const restoreQueuedSend = useStore((s) => s.restoreQueuedSend)
+  const unqueueToDraft = useStore((s) => s.unqueueToDraft)
   const sendText = useStore((s) => s.sendText)
   const notify = useStore((s) => s.notify)
   const queued = useStore((s) => s.queuedSends[botId] ?? null)
@@ -711,9 +713,7 @@ function Composer({
     if (sending || files.uploading) return
     // Turn still running: queue instead of eating a 409.
     if (state.queued) {
-      queueSend(botId, body, files.ids)
-      setText('')
-      files.clear()
+      queueFromComposer({ setText, clearFiles: files.clear, queueSend }, botId, body, files.ids)
       return
     }
     setSending(true)
@@ -741,12 +741,7 @@ function Composer({
     const stopped = await abortBot(botId)
     const ok = stopped && (await sendPrompt(botId, body, ids))
     setSending(false)
-    if (ok) {
-      setText('')
-      files.clear()
-    } else if (wasQueued) {
-      restoreQueuedSend(botId, wasQueued)
-    }
+    settleComposerSend({ setText, clearFiles: files.clear, restoreQueuedSend }, botId, wasQueued, ok)
   }
 
   // 直接打進 pane、不建新回合：回覆併在目前這一輪。
@@ -759,8 +754,8 @@ function Composer({
     // 整段走 `POST /bots/:id/text`、Enter 另送（見 store/alongside.ts）；拆鍵名會把 `\n` 當鍵弄丟內容。
     const ok = await typeAlongside({ sendText }, botId, body)
     setSending(false)
-    if (ok) setText('')
-    else if (wasQueued) restoreQueuedSend(botId, wasQueued)
+    // 併送帶不了附件：附件列留著。
+    settleComposerSend({ setText, clearFiles: () => {}, restoreQueuedSend }, botId, wasQueued, ok)
   }
 
   // in-flight 時輸入框不鎖，但仍要顯示這條，否則回合中沒有中斷入口（`.running`）。
@@ -785,11 +780,7 @@ function Composer({
             type="button"
             className="mini-btn"
             title="取消排隊，把訊息放回輸入框"
-            onClick={() => {
-            cancelQueuedSend(botId)
-            setText(queued.text)
-            setDraftCursor(draftKey, queued.text.length)
-          }}
+            onClick={() => unqueueToDraft(botId)}
           >
             取消
           </button>
