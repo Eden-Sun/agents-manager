@@ -402,6 +402,9 @@ export class MockTransport implements Transport {
     grok: { installed: false, path: null, version: null, logged_in: null },
   }
   /** cc1 未登入演「未登入」標記；cc2 來自 zshrc alias（SPEC §16），演兩種來源的差別。 */
+  /** 停用名單，鍵是 `host|kind|name`（真 daemon 存在 `identity_prefs`）。 */
+  private disabledIdentities: string[] = []
+
   private localIdentityStatus: Record<string, MockIdentityStatus> = {
     cc0: { name: 'cc0', kind: 'claude', logged_in: true, account: 'me@example.com', plan: 'max', source: 'config' },
     cc1: { name: 'cc1', kind: 'claude', logged_in: false, source: 'config' },
@@ -668,6 +671,11 @@ export class MockTransport implements Transport {
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'tools' && seg[3] === 'install') return this.installTool(seg[1], b)
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'tools' && seg[3] === 'refresh') return this.refreshTools(seg[1])
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'identities' && seg[4] === 'login') return this.loginIdentity(seg[1], decodeURIComponent(seg[3]))
+    if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'identities' && seg[4] === 'logout') return this.logoutIdentity(seg[1], decodeURIComponent(seg[3]))
+    if (method === 'GET' && seg[0] === 'identity-prefs') return { disabled: this.disabledIdentities }
+    if (method === 'PUT' && seg[0] === 'identities' && seg[2] === 'disabled') {
+      return this.setIdentityDisabled(decodeURIComponent(seg[1]), String(b.kind ?? ''), Boolean(b.disabled), String(b.host ?? 'local'))
+    }
     if (seg[0] === 'hosts' && seg[2] === 'gh' && method === 'GET' && seg.length === 3) return this.ghStatus(seg[1])
     if (seg[0] === 'hosts' && seg[2] === 'gh' && seg[3] === 'login' && method === 'POST') return this.ghLogin(seg[1], b)
     if (seg[0] === 'hosts' && seg[2] === 'gh' && seg[3] === 'cancel' && method === 'POST') return this.ghCancel(seg[1])
@@ -1083,6 +1091,34 @@ export class MockTransport implements Transport {
     st.account = st.account ?? 'mock@example.com'
     this.emit('host_changed', { name: host || 'local', connected: true, identities })
     return shell
+  }
+
+  /** 登出：跟登入同一條路，只是指令與結果相反（帳號憑證被清掉）。 */
+  private logoutIdentity(host: string, name: string) {
+    const remote = host && host !== 'local' ? this.host(host) : null
+    const identities = remote ? remote.identities : this.localIdentityStatus
+    const st = identities[name]
+    if (!st) throw new ApiError(404, { error: 'not_found', what: 'identity' }, 'identity not found')
+    const shell = this.openShell(host, '')
+    const pane = this.shell(host, shell.pane_id)
+    const dir = st.config_dir ? `CLAUDE_CONFIG_DIR='${st.config_dir}' ` : ''
+    const command = st.kind === 'claude' ? `${dir}claude /logout` : `${dir}${st.kind} logout`
+    pane.lines.push(`${pane.cwd.split('/').pop() ?? '~'} % ${command}`, '已登出，憑證已清除。', '')
+    st.logged_in = false
+    st.account = undefined
+    this.emit('host_changed', { name: host || 'local', connected: true, identities })
+    return shell
+  }
+
+  private setIdentityDisabled(name: string, kind: string, disabled: boolean, host: string) {
+    const key = `${host || 'local'}|${kind}|${name}`
+    this.disabledIdentities = disabled
+      ? this.disabledIdentities.includes(key)
+        ? this.disabledIdentities
+        : [...this.disabledIdentities, key]
+      : this.disabledIdentities.filter((k) => k !== key)
+    this.emit('identity_prefs_changed', { host: host || 'local', kind, identity: name, disabled })
+    return { host: host || 'local', kind, identity: name, disabled }
   }
 
   private ghKey(name: string): string {

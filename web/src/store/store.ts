@@ -276,6 +276,8 @@ export interface StoreState {
   localTools: ToolMap
   /** Local machine's `hosts[0].identities`. */
   localIdentityStatus: IdentityStatusMap
+  /** 被標為停用的身份，鍵是 `api.identityPrefKey(host, kind, name)`（daemon 端的設定，不是瀏覽器記的）。 */
+  disabledIdentities: string[]
   /** SPEC §15；null = 還沒讀到。 */
   mem: MemSnapshot | null
   /** key = kind or `kind:identity`. */
@@ -434,6 +436,9 @@ export interface StoreState {
   /** Ask a running bot on `host` to install + log in `kind`; opens that bot's chat. null = failed. */
   installTool: (host: string, kind: BotKind, viaBotId: string) => Promise<string | null>
   loginIdentity: (host: string, identity: string) => Promise<boolean>
+  logoutIdentity: (host: string, identity: string) => Promise<boolean>
+  loadIdentityPrefs: () => Promise<void>
+  setIdentityDisabled: (host: string, kind: string, name: string, disabled: boolean) => Promise<void>
   /** `''` / `local` = this machine. */
   refreshTools: (host: string) => Promise<boolean>
   setKindDisplay: (mode: KindDisplay) => void
@@ -506,6 +511,7 @@ function keptAfterPage<T extends { id: string; created_at: string }>(existing: T
 /** issue #23：最近一次套用到 store 的 `GET /api/state` 的 `daemon_seq`；更舊的快照不套用。 */
 let appliedStateSeq = 0
 let supervisorProjectAsked = false
+let identityPrefsAsked = false
 let lastRefreshError: string | null = null
 /** 在飛的 `POST /api/order` 數；歸零時 `refreshState` 清掉樂觀順序，別台裝置的順序才會過來。 */
 let orderSavesInFlight = 0
@@ -540,6 +546,7 @@ export const useStore = create<StoreState>((set, get) => ({
   attachCommand: 'herdr --session agents-manager',
   localTools: toToolMap(undefined),
   localIdentityStatus: {},
+  disabledIdentities: [],
   quota: {},
   mem: null,
   models: {},
@@ -705,6 +712,10 @@ export const useStore = create<StoreState>((set, get) => ({
     if (proj && !get().loadedProjects[proj]) await get().loadGroupMessages(proj)
     // 讀不到就算了：排除規則退回「不排除」，只是多幾顆晶片。
     if (get().supervisorProjectId === null) void get().loadSupervisorProject()
+    if (!identityPrefsAsked) {
+      identityPrefsAsked = true
+      void get().loadIdentityPrefs()
+    }
   }, (e) => reportStateRefreshError(set, get, e)),
 
   async loadSupervisorProject() {
@@ -1593,13 +1604,34 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   async loginIdentity(host, identity) {
-    let ok = false
-    await guarded(set, get, `identity-login:${host}:${identity}`, async () => {
-      const shell = await api.loginIdentity(host, identity)
-      set({ shellView: { host, paneId: shell.pane_id, cwd: shell.cwd }, settingsBotId: null })
-      ok = true
+    return identityAuth(set, get, host, identity, 'login')
+  },
+
+  async logoutIdentity(host, identity) {
+    return identityAuth(set, get, host, identity, 'logout')
+  },
+
+  async loadIdentityPrefs() {
+    try {
+      set({ disabledIdentities: await api.fetchDisabledIdentities() })
+    } catch {
+      // 讀不到就當作沒有人被停用：選單多幾個選項，比整個面板掛掉好。
+    }
+  },
+
+  async setIdentityDisabled(host, kind, name, disabled) {
+    const key = api.identityPrefKey(host, kind, name)
+    await guarded(set, get, `identity-disabled:${key}`, async () => {
+      await api.setIdentityDisabled(host, kind, name, disabled)
+      // 事件也會送一份；先自己更新，按下去才不會等一個來回。
+      set((s) => ({
+        disabledIdentities: disabled
+          ? s.disabledIdentities.includes(key)
+            ? s.disabledIdentities
+            : [...s.disabledIdentities, key]
+          : s.disabledIdentities.filter((k) => k !== key),
+      }))
     })
-    return ok
   },
 
   viewHostShell: (shell) =>
@@ -1801,6 +1833,17 @@ async function guarded(set: SetFn, get: GetFn, key: string, fn: () => Promise<vo
   }
 }
 
+/** 登入與登出走同一段：都是開一個臨時 pane 看 CLI 跑完，差別只在打哪一行指令。 */
+async function identityAuth(set: SetFn, get: GetFn, host: string, identity: string, op: 'login' | 'logout') {
+  let ok = false
+  await guarded(set, get, `identity-${op}:${host}:${identity}`, async () => {
+    const shell = op === 'login' ? await api.loginIdentity(host, identity) : await api.logoutIdentity(host, identity)
+    set({ shellView: { host, paneId: shell.pane_id, cwd: shell.cwd }, settingsBotId: null })
+    ok = true
+  })
+  return ok
+}
+
 let disconnect: (() => void) | null = null
 let quotaSweep: ReturnType<typeof setInterval> | null = null
 const QUOTA_SWEEP_MS = 5 * 60_000
@@ -1903,6 +1946,19 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
         if (raw !== undefined) patch.hosts = mergeHosts(s.hosts, hostArray(raw))
         return patch
       })
+      return
+    }
+    case 'identity_prefs_changed': {
+      if (!isRec(data)) return
+      const key = api.identityPrefKey(str(pick(data, 'host')), str(pick(data, 'kind')), str(pick(data, 'identity')))
+      const on = bool(pick(data, 'disabled'), false)
+      set((s) => ({
+        disabledIdentities: on
+          ? s.disabledIdentities.includes(key)
+            ? s.disabledIdentities
+            : [...s.disabledIdentities, key]
+          : s.disabledIdentities.filter((k) => k !== key),
+      }))
       return
     }
     case 'host_changed': {
@@ -2537,6 +2593,11 @@ export function identitiesOfHost(all: Identity[], status: IdentityStatusMap): Id
     })
   }
   return out
+}
+
+/** 這個身份在這台主機上被停用了嗎（停用是 host＋kind＋name 一組）。 */
+export function identityDisabled(state: StoreState, host: string, kind: string, name: string): boolean {
+  return state.disabledIdentities.includes(api.identityPrefKey(host, kind, name))
 }
 
 export function identityStatusOfHost(state: StoreState, host: string): IdentityStatusMap {
