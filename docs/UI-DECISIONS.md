@@ -270,3 +270,7 @@ shell 面板本來只有「打一行、Enter 送出」：TUI（`top`、`vim`、�
   mock 實走：`docs/screenshots/side-panes-unowned/`（側欄底部那組、跑 vim 的 pane 打得進去、dev server 唯讀）。
 - **不給「結束 shell」**：面板那顆只認面板自己開的 shell，對被 trace 的 pane 按下去是靜悄悄什麼都不做。關它回專案頁。
 - **重整回得來、唯讀照現況**：`shellView` 連 `readOnly` 一起存；深連結查不到自己開的 shell 就查 daemon 的 pane 表。原本會直接丟回首頁。從 `/` 進來（只走 `restoreShellView`）時一樣照 daemon 當下的 pane 列重算 `readOnly`／`traced`，不沿用 localStorage 的舊值。
+
+## 「結束 shell」遇到服務 pane 要再問一次（2026-09-16，AGM 驗收 9f05b03）
+
+第一個確認框只講「裡面正在跑的指令會結束」，沒講「裡面是 dev server」。所以前端**不預設帶 confirm**：daemon 對在 listen 的服務 pane、或讀不到它在跑什麼的 pane 回 409 `service_pane`，面板接著跳第二個確認框，寫出 port（或「讀不到狀態」），按「仍要關掉」才帶 `confirm=true` 重送。這一步不是錯誤，不跳紅字、面板也不收掉。
