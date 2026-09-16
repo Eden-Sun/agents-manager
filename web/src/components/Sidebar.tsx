@@ -303,6 +303,8 @@ function BotRow({
             </span>
           ) : null}
         </span>
+        {/* 跑了多久放在燈號正下方（2026-09-16 使用者）：第二行留給模型與額度。 */}
+        <RunElapsed botId={botId} />
         {childCount > 0 && onToggleChildren ? (
         <button
           type="button"
@@ -374,7 +376,6 @@ function BotRow({
           ) : (
             <>
               <ModelTag botId={botId} />
-              <RunElapsed botId={botId} />
               {/* 黃燈：與頂端 QuotaStrip 一致；critical 走上面的警語。 */}
               {quotaLevel ? (
                 <span

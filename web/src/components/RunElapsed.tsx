@@ -10,7 +10,7 @@ function fmtElapsed(ms: number): string {
   return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, '0')}`
 }
 
-/** 跑多久了（2026-09-16 使用者：子 agent 執行中要有小字說已 run 幾分）。只在 working 時出現。 */
+/** 跑多久了（2026-09-16 使用者：子 agent 執行中要有小字說已 run 幾分；同日改成只寫時間、放燈號下方）。只在 working 時出現。 */
 /** 這一頁看到某顆 bot「開始在跑」的時刻；daemon 沒有 turn 紀錄時（多半是別人派的回合）拿來墊底。 */
 const seenWorkingAt = new Map<string, number>()
 
@@ -45,7 +45,7 @@ export function RunElapsed({ botId }: { botId: string }) {
       className="run-elapsed"
       title={startedAt ? `這一回合從 ${new Date(startedAt).toLocaleTimeString()} 開始跑` : '從這個網頁看到它開始跑算起（daemon 沒有這一回合的紀錄）'}
     >
-      已跑 {fmtElapsed(ms)}
+      {fmtElapsed(ms)}
     </span>
   )
 }

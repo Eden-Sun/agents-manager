@@ -1,8 +1,11 @@
-/* components/RunElapsed.tsx：側欄「已跑 N 分」小字，比模型標籤更輕，不搶燈號。 */
+/* components/RunElapsed.tsx：側欄燈號正下方的「4m」小字，比模型標籤更輕，不搶燈號。 */
 .run-elapsed {
   flex: none;
   color: var(--text-faint);
   font-size: 10px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+  line-height: 1;
+  /* 燈號欄固定 26px 是全部列的對齊基準：`1h20` 比欄寬時往兩側溢出，不撐寬欄位。 */
+  align-self: center;
 }
