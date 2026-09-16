@@ -560,7 +560,9 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
    shim 在 `pane split` / `tab create` / `pane new` / `workspace create` 之後對 daemon
    `POST /relay/pane`（表單 `bot_id`／`pane_id`／`purpose`，header `X-AM-Bot-Token`，與 §6.5d 的 `/relay/announce` 同一條路），
    daemon 記在 `panes.purpose`（pane 還沒被掃到就先建一列）。**回報不能改寫 owner**：已經有 owner 的 pane 只更新 purpose，
-   歸屬永遠由第 1 條的環境推斷決定。報不成功只是少一個用途字串。同時 `herdr pane rename` 與
+   歸屬永遠由第 1 條的環境推斷決定——回報比掃描早到很常見，掃描讀到的 `AM_BOT_ID` 會蓋過回報寫的 owner；
+   只有人用 adopt 指定過的（`panes.owner_adopted`）才不被蓋。回報也會補空的 `bound_project_id`，讀不到那顆 pane 環境的輪次
+   （macOS 閒著的 `-zsh`）靠它知道是 bot 開的。報不成功只是少一個用途字串。同時 `herdr pane rename` 與
    `tab rename` 用 `<bot herdr 名>-sh-<用途>`（純顯示，不是真相）。
 
 **workspace 歸位**：bot 開的非 agent pane 應該落在自己 project 的 workspace。**但已經跑起來的 service pane 不搬**——

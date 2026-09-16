@@ -40,6 +40,8 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
            bound_project_id TEXT,
            -- 綁過的專案被刪、或擁有它的 bot 被刪（§6.5e 的 `pane_orphaned`）。孤兒不是 scratch 的候選。
            orphaned INTEGER NOT NULL DEFAULT 0,
+           -- 人用 adopt 指定過 owner：掃描不再以環境覆寫它。
+           owner_adopted INTEGER NOT NULL DEFAULT 0,
            PRIMARY KEY (host, pane_id)
          )",
     )
@@ -53,6 +55,7 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
         ("scratch", "ALTER TABLE panes ADD COLUMN scratch INTEGER NOT NULL DEFAULT 0"),
         ("bound_project_id", "ALTER TABLE panes ADD COLUMN bound_project_id TEXT"),
         ("orphaned", "ALTER TABLE panes ADD COLUMN orphaned INTEGER NOT NULL DEFAULT 0"),
+        ("owner_adopted", "ALTER TABLE panes ADD COLUMN owner_adopted INTEGER NOT NULL DEFAULT 0"),
     ] {
         if !crate::db::has_column(pool, "panes", col).await? {
             sqlx::query(ddl).execute(pool).await?;
@@ -369,8 +372,10 @@ pub(crate) async fn record_scan(
              ON CONFLICT(host, pane_id) DO UPDATE SET
                workspace_id=excluded.workspace_id, tab_id=excluded.tab_id, cwd=excluded.cwd, label=excluded.label,
                kind=excluded.kind,
-               -- 人工 adopt 過的 owner／purpose 不被掃描蓋掉（§6.5e）。
-               owner_bot_id=COALESCE(panes.owner_bot_id, excluded.owner_bot_id),
+               -- owner 以讀到的 `AM_BOT_ID` 為準（§6.5e：歸屬永遠由環境決定，shim 回報先到也蓋得過去）；
+               -- 這一輪讀不到就沿用；人工 adopt 指定過的不被掃描蓋掉。
+               owner_bot_id=CASE WHEN panes.owner_adopted=1 THEN panes.owner_bot_id
+                                 ELSE COALESCE(excluded.owner_bot_id, panes.owner_bot_id) END,
                -- 每輪以 env 為準覆寫（§6.5e）：綁定來自 pane 的環境，不是我們記住的舊值。
                project_id=excluded.project_id, bound_project_id=excluded.bound_project_id,
                foreground=excluded.foreground, listen_ports=excluded.listen_ports,
@@ -470,23 +475,26 @@ pub(crate) fn pick_scratch<'a>(cands: &'a [ScratchCandidate], name: &str, name_i
 }
 
 /// shim 回報的用途：pane 還沒被掃到就先建一列（`kind` 先當 shell，下一輪掃描會修正）。
-/// owner 只在這一列還沒有 owner 時才寫——掃描推斷出來的歸屬優先，回報不能改寫別人的 pane。
+/// owner 只在這一列還沒有 owner 時才寫——回報不能改寫別人的 pane；之後掃描讀到的 `AM_BOT_ID` 會蓋過它。
+/// 綁定（`bound_project_id`）同樣只補空的：讀不到那顆 pane 環境的輪次（macOS 閒著的 -zsh）才靠它知道是 bot 開的。
 pub async fn note_purpose(app: &Arc<App>, host: &str, pane_id: &str, bot: &crate::db::Bot, purpose: &str) -> Result<()> {
     if pane_id.trim().is_empty() {
         return Ok(());
     }
     let now = crate::db::now();
     sqlx::query(
-        "INSERT INTO panes (pane_id, host, kind, owner_bot_id, project_id, purpose, last_output_at, first_seen, last_seen)
-         VALUES (?,?,'shell',?,?,?,?,?,?)
+        "INSERT INTO panes (pane_id, host, kind, owner_bot_id, project_id, bound_project_id, purpose, last_output_at, first_seen, last_seen)
+         VALUES (?,?,'shell',?,?,?,?,?,?,?)
          ON CONFLICT(host, pane_id) DO UPDATE SET
            purpose=CASE WHEN excluded.purpose IS NULL OR excluded.purpose='' THEN panes.purpose ELSE excluded.purpose END,
            owner_bot_id=COALESCE(panes.owner_bot_id, excluded.owner_bot_id),
-           project_id=COALESCE(panes.project_id, excluded.project_id)",
+           project_id=COALESCE(panes.project_id, excluded.project_id),
+           bound_project_id=COALESCE(panes.bound_project_id, excluded.bound_project_id)",
     )
     .bind(pane_id)
     .bind(host)
     .bind(&bot.id)
+    .bind(&bot.project_id)
     .bind(&bot.project_id)
     .bind(if purpose.is_empty() { None } else { Some(purpose) })
     .bind(&now)
@@ -1030,6 +1038,48 @@ mod tests {
         std::fs::remove_dir_all(&app.data_dir).ok();
     }
 
+    /// review 2026-09-16 core 10：shim 開完 pane 立刻回報，常常比掃描早到；以前 owner 由第一個寫入者決定，
+    /// 掃描讀到的 `AM_BOT_ID` 永遠蓋不上去。現在環境為準；人用 adopt 指定過的才留著。
+    /// 讀不到環境的輪次（macOS 閒著的 -zsh），回報帶來的綁定讓它仍算 bot 開的。
+    #[tokio::test]
+    async fn the_scanned_owner_wins_over_an_early_report_but_not_over_an_adopt() {
+        let app = app().await;
+        project_and_bot(&app).await;
+        let now = crate::db::now();
+        sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('b2','p1','b2','claude','t',?)")
+            .bind(&now)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let b2 = crate::db::bot(&app.db, "b2").await.unwrap().unwrap();
+        let owner = |app: Arc<App>| async move {
+            sqlx::query_as::<_, (Option<String>, String, Option<String>)>("SELECT owner_bot_id, owned_by, project_id FROM panes WHERE pane_id='w1:pS'")
+                .fetch_one(&app.db)
+                .await
+                .unwrap()
+        };
+        let pane = json!({"pane_id": "w1:pS", "workspace_id": "w1", "tab_id": "t1", "cwd": "/Users/me", "revision": 1});
+
+        note_purpose(&app, "local", "w1:pS", &b2, "build").await.unwrap();
+        // 環境讀不到：回報的綁定讓它仍算 p1 的 bot pane，不掉成沒歸屬。
+        let idle = HashMap::from([("w1:pS".to_string(), Some(Observed { facts: crate::memproc::PaneFacts { pids: vec![1], shell_only: true, ..Default::default() }, ports: vec![] }))]);
+        record_scan(&app, "local", &[pane.clone()], &idle).await.unwrap();
+        assert_eq!(owner(app.clone()).await, (Some("b2".into()), "bot".into(), Some("p1".into())));
+
+        // 環境讀到的是 b1：蓋過回報。
+        let env = HashMap::from([("w1:pS".to_string(), observed(None, Some("b1"), Some("p1"), &[]))]);
+        record_scan(&app, "local", &[pane.clone()], &env).await.unwrap();
+        assert_eq!(owner(app.clone()).await.0.as_deref(), Some("b1"));
+
+        // 人 adopt 指定 b2：之後掃描不再改它。
+        adopt(State(app.clone()), Path("w1:pS".into()), Query(HashMap::new()), Some(Json(AdoptIn { owner_bot_id: Some("b2".into()), purpose: None, allow_gc: false })))
+            .await
+            .unwrap();
+        record_scan(&app, "local", &[pane], &env).await.unwrap();
+        assert_eq!(owner(app.clone()).await.0.as_deref(), Some("b2"));
+        std::fs::remove_dir_all(&app.data_dir).ok();
+    }
+
     /// adopt 不會偷偷把使用者手開的 pane 變成可 GC：要明確帶 allow_gc（§6.5e）。
     #[tokio::test]
     async fn adopt_only_opts_a_user_pane_into_gc_when_asked() {
@@ -1217,12 +1267,14 @@ pub async fn adopt(
     };
     let n = sqlx::query(
         "UPDATE panes SET owner_bot_id=COALESCE(?, owner_bot_id), project_id=COALESCE(?, project_id),
+                          owner_adopted=CASE WHEN ? IS NULL THEN owner_adopted ELSE 1 END,
                           purpose=COALESCE(?, purpose), gc_optin=CASE WHEN ? THEN 1 ELSE gc_optin END,
                           orphan_notified_at=NULL
           WHERE host=? AND pane_id=?",
     )
     .bind(b.owner_bot_id.as_deref())
     .bind(project.as_deref())
+    .bind(b.owner_bot_id.as_deref())
     .bind(b.purpose.as_deref())
     .bind(b.allow_gc)
     .bind(&host)
