@@ -7,6 +7,7 @@ import { enabledIdentities, identitiesOfHost, identityStatusOfHost, toolsOfHost,
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import './mobileQuota.css'
 import { isQuotaDisabled, quotaDisableKey, setQuotaDisabled, useDisabledQuota } from '../store/quotaHide'
+import { quotaBaseKey } from '../store/quotaLookup'
 import { KindIcon, KIND_LABEL } from './KindTag'
 import { QuotaLoginShell } from './QuotaLoginShell'
 import { QuotaLoginSlash } from './QuotaLoginSlash'
@@ -165,21 +166,6 @@ function claudeIdentities(identities: Identity[]): Identity[] {
     })
 }
 
-/** Empty-env identity (typically `cc0`) shares the bare `claude` quota key with no-identity bots. */
-function isDefaultClaudeIdentity(idn: Identity): boolean {
-  return idn.name === 'cc0' || Object.keys(idn.env).length === 0
-}
-
-/** Prefers `claude:<name>`; default/cc0 falls back to bare `claude` when statusline data landed there. */
-function claudeQuotaKey(quota: QuotaMap, idn: Identity, bareClaimed: boolean): { key: string; claimedBare: boolean } {
-  const keyed = `claude:${idn.name}`
-  if (quota[keyed] != null) return { key: keyed, claimedBare: false }
-  if (!bareClaimed && isDefaultClaudeIdentity(idn) && 'claude' in quota) {
-    return { key: 'claude', claimedBare: true }
-  }
-  return { key: keyed, claimedBare: false }
-}
-
 function entryReactKey(entry: Omit<QuotaEntry, 'fullKey'>): string {
   return entry.identity ? `${entry.kind}:${entry.identity}` : entry.key
 }
@@ -199,16 +185,8 @@ function collectEntries(quotaAll: QuotaMap, identities: Identity[], host: string
   }
 
   if (claudeIds.length > 0) {
-    let bareClaimed = false
-    const bareOwner = claudeIds.find((i) => i.name === 'cc0') ?? claudeIds.find(isDefaultClaudeIdentity) ?? null
-    for (const idn of claudeIds) {
-      const useBare = bareOwner !== null && idn.name === bareOwner.name
-      const resolved = useBare
-        ? claudeQuotaKey(quota, idn, bareClaimed)
-        : { key: `claude:${idn.name}`, claimedBare: false }
-      if (resolved.claimedBare) bareClaimed = true
-      push({ key: resolved.key, kind: 'claude', identity: idn.name })
-    }
+    // 落點（含裸 key 的互斥）只有 `store/quotaLookup` 一份規則，側欄的反灰與黃燈查的是同一支。
+    for (const idn of claudeIds) push({ key: quotaBaseKey(quotaAll, host, 'claude', idn.name, claudeIds), kind: 'claude', identity: idn.name })
   } else if ('claude' in quota) {
     push({ key: 'claude', kind: 'claude', identity: null })
   }

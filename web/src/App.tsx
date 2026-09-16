@@ -32,7 +32,7 @@ const DRAWER_STAY =
 
 /** 分頁標題的 `(N)`，以及視窗回到前景時把開著的對話標為已讀（切走再回來才看到回覆的常見情境）。 */
 function useUnread() {
-  const total = useStore((s) => totalUnread(s.botUnread))
+  const total = useStore((s) => totalUnread(s.botUnread, s.hiddenBotIds))
   const screen = useStore(screenTitle)
   const markCurrentRead = useStore((s) => s.markCurrentRead)
   useEffect(() => {
