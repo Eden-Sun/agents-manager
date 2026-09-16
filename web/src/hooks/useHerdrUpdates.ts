@@ -1,32 +1,36 @@
 /**
- * Herdr 版本追蹤的共用狀態。
+ * `store/herdrUpdates.ts` 的 React 外殼：接上真的計時器、真的可見性事件與真的 API。
  *
- * 側欄那顆未讀點與環境設定裡的面板要同一份資料：各自 `useEffect` 抓一次就是兩個請求，而且會互相打臉
- * （一邊已讀、一邊還亮著）。這裡放一份 module-level 狀態 + 單飛的 in-flight promise，訂閱者共用。
+ * 側欄那顆未讀提示與環境設定裡的面板共用同一個 store，所以只有一份請求，而且按掉之後兩邊一起消失。
  */
 import { useEffect, useState } from 'react'
 import type { HerdrUpdates } from '../api/herdrUpdates'
 import { fetchHerdrUpdates, markHerdrUpdateSeen, refreshHerdrUpdates } from '../api/herdrUpdates'
+import { createHerdrUpdatesStore } from '../store/herdrUpdates'
 
-let cached: HerdrUpdates | null = null
-let inflight: Promise<HerdrUpdates> | null = null
-const subscribers = new Set<(u: HerdrUpdates) => void>()
-
-function publish(u: HerdrUpdates) {
-  cached = u
-  for (const cb of subscribers) cb(u)
-}
-
-/** 同時有兩個元件掛上來也只有一個請求。 */
-function load(): Promise<HerdrUpdates> {
-  if (!inflight) {
-    inflight = fetchHerdrUpdates().finally(() => {
-      inflight = null
-    })
-    void inflight.then(publish)
+/** 分頁重新可見、或網路回來：兩者都代表「剛剛那段時間我可能漏看了」。 */
+function onWake(fn: () => void): () => void {
+  const visible = () => {
+    if (document.visibilityState === 'visible') fn()
   }
-  return inflight
+  document.addEventListener('visibilitychange', visible)
+  window.addEventListener('online', fn)
+  return () => {
+    document.removeEventListener('visibilitychange', visible)
+    window.removeEventListener('online', fn)
+  }
 }
+
+const store = createHerdrUpdatesStore({
+  fetchCache: fetchHerdrUpdates,
+  refreshNow: refreshHerdrUpdates,
+  markSeen: markHerdrUpdateSeen,
+  setInterval: (fn, ms) => window.setInterval(fn, ms),
+  clearInterval: (h) => window.clearInterval(h as number),
+  now: () => Date.now(),
+  onWake,
+  isVisible: () => document.visibilityState === 'visible',
+})
 
 export interface HerdrUpdatesState {
   data: HerdrUpdates | null
@@ -38,16 +42,10 @@ export interface HerdrUpdatesState {
 }
 
 export function useHerdrUpdates(): HerdrUpdatesState {
-  const [data, setData] = useState<HerdrUpdates | null>(cached)
+  const [data, setData] = useState<HerdrUpdates | null>(() => store.get())
   const [refreshing, setRefreshing] = useState(false)
 
-  useEffect(() => {
-    subscribers.add(setData)
-    if (!cached) void load()
-    return () => {
-      subscribers.delete(setData)
-    }
-  }, [])
+  useEffect(() => store.subscribe(setData), [])
 
   return {
     data,
@@ -56,14 +54,8 @@ export function useHerdrUpdates(): HerdrUpdatesState {
     refresh: () => {
       if (refreshing) return
       setRefreshing(true)
-      void refreshHerdrUpdates()
-        .then(publish)
-        .finally(() => setRefreshing(false))
+      void store.refresh().finally(() => setRefreshing(false))
     },
-    markSeen: () => {
-      const v = data?.latest.version
-      if (!v) return
-      void markHerdrUpdateSeen(v).then(publish)
-    },
+    markSeen: () => void store.markSeenNow(),
   }
 }
