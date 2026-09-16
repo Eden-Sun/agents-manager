@@ -36,6 +36,7 @@ import { paneReadOnly } from '../lib/shellAccess'
 import { groupByProject, withPane, withoutPane } from '../lib/paneLists'
 import { prependDraft, restoreQueued } from './queuedSend'
 import { missionRequests } from './missionRequests'
+import { MISSION_USER_PAUSE } from '../lib/missionView'
 
 import type { QueuedSend, RestoreResult } from './queuedSend'
 import { laterMark, serverUnread } from './sharedUnread'
@@ -1947,7 +1948,8 @@ export const useStore = create<StoreState>((set, get) => ({
 
   async controlMission(missionId, action) {
     try {
-      const mission = await api.controlMission(missionId, action)
+      // daemon 的 pause 必須帶 `reason`：以前送 `{}`，反序列化就 422，按鈕從上線起沒成功過（review3 c1 M4）。
+      const mission = await api.controlMission(missionId, action, action === 'pause' ? { reason: MISSION_USER_PAUSE } : undefined)
       if (mission) set((s) => ({ missions: mergeMission(s.missions, mission) }))
       await get().loadMission(missionId)
     } catch (e) {

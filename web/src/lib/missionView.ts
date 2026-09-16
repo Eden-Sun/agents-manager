@@ -270,9 +270,17 @@ export function missionView(m: Mission, events: MissionEvent[], assignments: Mis
   }
 }
 
+/**
+ * 任務卡「暫停」按鈕送給 daemon 的 `reason`。daemon 的 `pause` 一定要帶原因（機器碼），
+ * 不帶就是 422——以前送 `{}`，這顆按鈕接真 daemon 從來沒成功過（review3 c1 M4）。
+ */
+export const MISSION_USER_PAUSE = 'user_pause'
+
 /** 停下來問人的原因，講成人話。認不得的機器碼原樣顯示，不要吞掉。 */
 export function pausedLabel(reason: string): string {
   switch (reason) {
+    case MISSION_USER_PAUSE:
+      return '你按了暫停'
     case 'max_rounds':
       return '來回次數用完了'
     case 'no_fable_for_verifier':

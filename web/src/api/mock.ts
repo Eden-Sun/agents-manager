@@ -1711,7 +1711,11 @@ export class MockTransport implements Transport {
     if (!m) throw new ApiError(404, { error: 'not_found' }, 'mission not found')
     if (m.completed_at || m.cancelled_at) throw new ApiError(409, { error: 'already_closed' }, 'closed')
     if (action === 'pause') {
-      m.paused_reason = String(b.reason ?? 'manual')
+      // 照 daemon：`PauseIn.reason` 必填，沒帶是 axum 的 422。mock 以前自己補 'manual'，所以 M4 一直沒被發現。
+      if (typeof b.reason !== 'string' || !b.reason.trim()) {
+        throw new ApiError(422, { error: 'unprocessable', message: 'missing field `reason`' }, 'missing field `reason`')
+      }
+      m.paused_reason = b.reason.trim()
       m.paused_detail = b.detail ? String(b.detail) : null
       this.missionEvent(id, 'paused', m.paused_detail ?? '已暫停', null, 'daemon')
     }

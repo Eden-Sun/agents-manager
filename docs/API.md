@@ -1209,7 +1209,7 @@ body 直接是檔案位元組（**不是** multipart），`Content-Type` 就是�
 - `phase`：`done | cancelled | paused` 同 `status`；其餘看**最新一件還開著的交辦**——`executing`／`reviewing`／`verifying`（依 `role`），
   那件停在 `quota_blocked` 時是 `waiting_quota`；還沒有任何交辦＝`planning`；交辦都結案了但任務還開著＝`awaiting_agm`（輪到 AGM 決定下一步）。
 - `assignments[]`：`{id, role, status, target_bot_id, turn_status, turn_error, follow_up_of, created_at, completed_at}`，舊的在前。
-`paused_reason` 目前會出現：`max_rounds`、`no_fable_for_verifier`、`push_main_failed`、`pr_failed`，或呼叫端自己寫的原因。
+`paused_reason` 目前會出現：`max_rounds`、`no_fable_for_verifier`、`push_main_failed`、`pr_failed`、`user_pause`（任務卡的「暫停」按鈕），或呼叫端自己寫的原因。
 
 ### 交辦掛到任務上（P1b）
 
@@ -1241,7 +1241,7 @@ body 直接是檔案位元組（**不是** multipart），`Content-Type` 就是�
 | GET | `/api/projects/{id}/missions?status=all\|open\|done\|cancelled&limit=` | `{project_id, missions:[…]}`，新的在前。**已完成任務清單＝`status=done`，不含已取消的**；取消的另用 `status=cancelled` 取（UI 若要一起顯示須分開標示，不能混進「已完成」）。 |
 | GET | `/api/missions/{id}` | 任務＋`events[]`＋`revisions[]`（這筆成果的續作，新的在前）＋`parent`（自己是誰的續作；來源被刪掉時是 `{id, missing:true}`）。 |
 | POST | `/api/missions/{id}/events` | `{kind: "report"\|"note"\|"verified", text, relay_from?, payload?}` → 事件。`relay_from` 規則同 `POST /api/bots/{id}/prompt`（不存在的值 400）。**交付前必須有一則 `verified`**。 |
-| POST | `/api/missions/{id}/pause` | `{reason, detail?}` → 任務。 |
+| POST | `/api/missions/{id}/pause` | `{reason, detail?}` → 任務。`reason` **必填**（機器碼；缺了是 422，handler 不會跑）。 |
 | POST | `/api/missions/{id}/resume` | → 任務（清掉 `paused_reason`）。 |
 | POST | `/api/missions/{id}/cancel` | → 任務，多 `temp_bots`（見 complete）。 |
 | POST | `/api/missions/{id}/complete` | `{result_summary, relay_from?}` → 任務（`done`），多 `temp_bots: {deleted:[{bot_id,name}], skipped:[{bot_id,name,reason}]}`：結案時 daemon 自動軟刪這個任務的臨時 bot，條件是「任務某件交辦的目標」＋「名字以 `agm-mission-<任務 id 尾 6 碼（相容 5 碼）>-<角色>` 開頭」＋「沒有進行中的 run」；`reason ∈ not_a_temp_bot \| still_running \| delete_failed`。刪除走 `DELETE /api/bots/{id}` 同一條路（停 pane、軟刪、子 agent 一起收、對話保留），並在任務記一則 `note`。 |
