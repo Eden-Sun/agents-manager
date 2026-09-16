@@ -241,8 +241,9 @@ pub async fn identity_for_host(app: &Arc<App>, host: &str, name: &str) -> Option
 }
 
 /// Deliberately *not* a file check: a claude account can live in the Keychain with no `.credentials.json`.
-/// claude is **not here**: over non-login ssh it can't read the Keychain and says `loggedIn: false`;
-/// it's asked in a pane instead ([`crate::quota_claude`] → [`record_identity_login`]).
+/// claude is **remote-only excluded**: over non-login ssh it can't read the Keychain and says
+/// `loggedIn: false`, so remote claude is still asked in a pane ([`crate::quota_claude`] →
+/// [`record_identity_login`]); locally `auth status --json` is authoritative and per config dir.
 /// grok has no `status` subcommand, so `models` is used.
 pub fn login_status_args(kind: &str) -> Option<&'static [&'static str]> {
     match kind {
@@ -250,6 +251,14 @@ pub fn login_status_args(kind: &str) -> Option<&'static [&'static str]> {
         "grok" => Some(&["models"]),
         _ => None,
     }
+}
+
+/// What the periodic pass may ask on this host. claude only locally (see [`login_status_args`]).
+pub fn login_probe_args(kind: &str, host: &str) -> Option<&'static [&'static str]> {
+    if kind == "claude" {
+        return (host == LOCAL_HOST).then_some(CLAUDE_LOGIN_ARGS);
+    }
+    login_status_args(kind)
 }
 
 pub const CLAUDE_LOGIN_ARGS: &[&str] = &["auth", "status", "--json"];
@@ -405,6 +414,8 @@ pub struct IdentityProbe {
     pub bin: String,
     /// `$HOME` expanded against *this* host's home.
     pub env: BTreeMap<String, String>,
+    /// What to ask this CLI; `None` = this kind's default ([`login_status_args`]).
+    pub args: Option<Vec<&'static str>>,
 }
 
 /// Config is user-written and `export`ed into a script, so invalid names are dropped, not quoted.
@@ -418,7 +429,8 @@ pub(crate) fn valid_env_name(k: &str) -> bool {
 pub fn identity_probe_sh(items: &[IdentityProbe]) -> String {
     let mut s = String::new();
     for it in items {
-        let Some(args) = login_status_args(&it.kind) else { continue };
+        let Some(args) = it.args.clone().or_else(|| login_status_args(&it.kind).map(<[&str]>::to_vec)) else { continue };
+        let args = args.as_slice();
         s.push_str(&format!("printf 'AM_IDENT_BEGIN %s\\n' {}\n", sh_quote(&it.name)));
         s.push('(');
         for (k, v) in it.env.iter().filter(|(k, _)| valid_env_name(k)) {
@@ -578,7 +590,9 @@ async fn detect_identities(
         .map(|(i, src)| {
             let mut info = IdentityInfo::unknown(&i.name, &i.kind, src, dir_of(i));
             info.reason = Some(match tools.get(&i.kind).and_then(|t| t.path.as_ref()) {
-                Some(_) if login_status_args(&i.kind).is_some() => "auth status 尚未取得結果".into(),
+                Some(_) if login_probe_args(&i.kind, host).is_some() => "auth status 尚未取得結果".into(),
+                // 遠端 claude 讀不到 Keychain，只能等 pane 探測（`quota_claude`）。
+                Some(_) if i.kind == "claude" => "遠端 claude 的登入狀態要等 pane 探測".into(),
                 Some(_) => "這個 kind 沒有可用的 auth status 探測".into(),
                 None => format!("{} CLI 不在 PATH", i.kind),
             });
@@ -590,9 +604,7 @@ async fn detect_identities(
     }
     let mut items = Vec::new();
     for (i, _) in &all {
-        if login_status_args(&i.kind).is_none() {
-            continue;
-        }
+        let Some(args) = login_probe_args(&i.kind, host) else { continue };
         let Some(bin) = tools.get(&i.kind).and_then(|t| t.path.clone()) else { continue };
         let env = i
             .env
@@ -600,7 +612,7 @@ async fn detect_identities(
             .filter(|(k, _)| valid_env_name(k))
             .map(|(k, v)| (k.clone(), crate::config::expand_home(v, &home)))
             .collect();
-        items.push(IdentityProbe { name: i.name.clone(), kind: i.kind.clone(), bin, env });
+        items.push(IdentityProbe { name: i.name.clone(), kind: i.kind.clone(), bin, env, args: Some(args.to_vec()) });
     }
     if items.is_empty() {
         return out;
@@ -616,6 +628,9 @@ async fn detect_identities(
             None => Err(anyhow::anyhow!("unknown host `{host}`")),
         }
     };
+    // 重新偵測會整張表重建：這一輪問不到的，沿用上一輪知道的答案，否則每次重探都會把 claude 身分
+    // 打回「未知」，UI 看起來就像帳號自己登出了（2026-09-16 使用者）。
+    let known = app.tools.lock().await.get(host).map(|t| t.identities.clone()).unwrap_or_default();
     match res {
         Ok(o) => {
             for (name, mut info) in parse_identity_probe(&o, &kinds) {
@@ -623,6 +638,7 @@ async fn detect_identities(
                     info.source = prev.source;
                     info.config_dir = prev.config_dir.clone();
                 }
+                carry_over(&mut info, known.get(&name));
                 out.insert(name, info);
             }
         }
@@ -634,7 +650,26 @@ async fn detect_identities(
             tracing::warn!(host, error = %e, "identity login detection failed")
         }
     }
+    for (name, info) in out.iter_mut() {
+        carry_over(info, known.get(name));
+    }
     out
+}
+
+/// Keep the last known answer when this pass could not tell. A fresh `Some(false)` still wins —
+/// that is a real logout; only "問不到" falls back.
+fn carry_over(info: &mut IdentityInfo, prev: Option<&IdentityInfo>) {
+    let Some(prev) = prev else { return };
+    if info.logged_in.is_none() && prev.logged_in.is_some() {
+        info.logged_in = prev.logged_in;
+        info.reason = prev.reason.clone().or_else(|| info.reason.clone());
+    }
+    if info.account.is_none() {
+        info.account = prev.account.clone();
+    }
+    if info.plan.is_none() {
+        info.plan = prev.plan.clone();
+    }
 }
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(40);
@@ -870,7 +905,49 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
             kind: kind.into(),
             bin: format!("/opt/homebrew/bin/{kind}"),
             env: env.iter().map(|(k, v)| ((*k).to_string(), (*v).to_string())).collect(),
+            args: None,
         }
+    }
+
+    /// claude 只在本機問得到（ssh 讀不到 Keychain，會謊報 loggedIn:false）。
+    #[test]
+    fn claude_is_probed_locally_and_left_to_the_pane_when_remote() {
+        assert_eq!(login_probe_args("claude", LOCAL_HOST), Some(CLAUDE_LOGIN_ARGS));
+        assert_eq!(login_probe_args("claude", "m4p"), None);
+        assert_eq!(login_probe_args("codex", "m4p"), Some(&["login", "status"][..]));
+        // 腳本要用帶進來的 args，不是 kind 的預設（claude 的預設是 None，會整段被略過）。
+        let mut it = probe("cc1", "claude", &[("CLAUDE_CONFIG_DIR", "/Users/m4p/.claude-ccompany")]);
+        it.args = Some(CLAUDE_LOGIN_ARGS.to_vec());
+        let sh = identity_probe_sh(&[it]);
+        assert!(sh.contains("AM_IDENT_BEGIN %s\\n' 'cc1'"), "{sh}");
+        assert!(sh.contains("'auth' 'status' '--json'"), "{sh}");
+        assert!(sh.contains("CLAUDE_CONFIG_DIR='/Users/m4p/.claude-ccompany'"), "{sh}");
+    }
+
+    /// 這一輪問不到就沿用上一輪；真的登出（Some(false)）照樣覆蓋。
+    #[test]
+    fn a_pass_that_cannot_tell_keeps_the_last_known_answer() {
+        let known = IdentityInfo {
+            name: "cc1".into(),
+            kind: "claude".into(),
+            logged_in: Some(true),
+            reason: Some("pane 探測".into()),
+            account: Some("a@example.com".into()),
+            plan: Some("team".into()),
+            source: SOURCE_SHELL,
+            config_dir: Some("/Users/m4p/.claude-ccompany".into()),
+        };
+        let mut unknown = IdentityInfo::unknown("cc1", "claude", SOURCE_SHELL, None);
+        unknown.reason = Some("auth status 尚未取得結果".into());
+        carry_over(&mut unknown, Some(&known));
+        assert_eq!(unknown.logged_in, Some(true));
+        assert_eq!(unknown.account.as_deref(), Some("a@example.com"));
+        assert_eq!(unknown.plan.as_deref(), Some("team"));
+
+        let mut logged_out = IdentityInfo::unknown("cc1", "claude", SOURCE_SHELL, None);
+        logged_out.logged_in = Some(false);
+        carry_over(&mut logged_out, Some(&known));
+        assert_eq!(logged_out.logged_in, Some(false), "真的登出不能被舊答案蓋回去");
     }
 
     fn kinds(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
