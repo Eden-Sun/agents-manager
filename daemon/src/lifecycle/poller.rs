@@ -1832,6 +1832,42 @@ mod issue_17_tests {
         assert_eq!(pane.transcript.iter().filter(|l| l.starts_with('❯')).count(), 1);
     }
 
+    /// 沒有證據的那條路，TUI 晚一幀才把貼上的字畫出來：多等一個 settle 再看，照常按 Enter 送出，
+    /// 不是判 `nothing_typed` 把字留在框裡（review2 deliv 上一輪 #2 的副作用）。只貼一次。
+    #[tokio::test]
+    async fn a_late_redraw_on_an_unverified_run_is_still_submitted_not_left_in_the_box() {
+        let f = fixture("grok", "").await;
+        // 第一次讀的時候框還是空的：字「晚一幀」才出現。
+        live(&f, crate::testing::LivePane { boxed: true, swallow_text: true, ..wide() });
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        let (run, bot) = run_and_bot(&f).await;
+        let client = client_for_run(&app, &run).await.unwrap();
+        let (calls, panes) = (f.env.herdr.calls.clone(), f.env.herdr.live.clone());
+        let redraw = tokio::spawn(async move {
+            // 貼上之後的第一次讀畫面過去了，才把字畫進框裡。
+            loop {
+                let m: Vec<String> = calls.lock().unwrap().iter().map(|(m, _)| m.clone()).collect();
+                if let Some(pos) = m.iter().position(|x| x == "pane.send_text") {
+                    if m[pos..].iter().any(|x| x == "pane.read") {
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            let mut live = panes.lock().unwrap();
+            let p = live.get_mut("pane-17").unwrap();
+            p.swallow_text = false;
+            p.composer = vec!["第一行".into(), "第二行".into()];
+        });
+        let out = deliver_prompt(&app, &client, &run, &bot, "第一行\n第二行", false, false).await.unwrap();
+        redraw.await.unwrap();
+        assert_eq!(out, Delivered::Unverified, "晚一幀的字照樣送出");
+        assert_eq!(count(&f, "pane.send_text"), 1, "沒有證據就不重貼");
+        assert!(count(&f, "pane.send_keys") >= 1, "有按 Enter");
+        assert!(f.env.herdr.pane("pane-17").unwrap().composer.is_empty(), "字沒有留在框裡");
+    }
+
     /// 打過字、證不明的 turn 絕不自動重送（`auto_resend = 0`）：它很可能已經被收下了。
     #[tokio::test]
     async fn a_turn_marked_no_auto_resend_is_never_resent() {
