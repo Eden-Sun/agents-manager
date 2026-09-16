@@ -249,8 +249,8 @@ pub struct ConfigFile {
     pub panes: PanesCfg,
 }
 
-/// SPEC §6.5e。閒置門檻可用 `AM_PANE_IDLE_CLOSE_SECS` 覆寫（看不懂／0／負數一律回預設——
-/// 一個手滑的值不該把 GC 變成「立刻關」）。
+/// SPEC §6.5e。閒置門檻可用 `AM_PANE_IDLE_CLOSE_SECS` 覆寫（看不懂／0／負數／低於 10 分鐘一律不採用——
+/// 一個手滑的值不該把 GC 變成「立刻關」；設定檔的值同一條規矩）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PanesCfg {
     #[serde(default = "default_idle_close_secs")]
@@ -285,12 +285,41 @@ fn default_close_log_lines() -> u32 {
     20
 }
 
+/// 閒置門檻的下限。低於這個值不是「GC 關快一點」，是每一輪對帳都把閒著的 shell 關光（review 2026-09-16 core 8：
+/// 以為 0＝停用，結果被當成 1 秒）。
+pub const MIN_IDLE_CLOSE_SECS: u64 = 600;
+
 impl PanesCfg {
-    /// 環境變數覆寫；看不懂、0 或負數一律用設定檔的值。
+    /// 環境變數覆寫；看不懂、0、負數、低於 [`MIN_IDLE_CLOSE_SECS`] 一律不採用。設定檔的值同一條規矩，不採用時回預設。
     pub fn idle_close_secs(&self) -> u64 {
-        match std::env::var("AM_PANE_IDLE_CLOSE_SECS").ok().and_then(|v| v.trim().parse::<u64>().ok()) {
-            Some(n) if n > 0 => n,
-            _ => self.idle_close_secs.max(1),
+        resolve_idle_close_secs(std::env::var("AM_PANE_IDLE_CLOSE_SECS").ok().as_deref(), self.idle_close_secs)
+    }
+}
+
+fn resolve_idle_close_secs(env: Option<&str>, file: u64) -> u64 {
+    let sane = |n: u64| n >= MIN_IDLE_CLOSE_SECS;
+    match env.and_then(|v| v.trim().parse::<u64>().ok()) {
+        Some(n) if sane(n) => n,
+        _ if sane(file) => file,
+        _ => default_idle_close_secs(),
+    }
+}
+
+#[cfg(test)]
+mod panes_cfg_tests {
+    use super::*;
+
+    /// review 2026-09-16 core 8：設定檔寫 0 以前被 `.max(1)` 當成 1 秒，所有可 GC 的閒置 shell 下一輪就被關光。
+    #[test]
+    fn a_zero_or_tiny_idle_threshold_falls_back_to_the_default() {
+        let default = default_idle_close_secs();
+        assert_eq!(resolve_idle_close_secs(None, 0), default, "0 不是停用，也不是 1 秒");
+        assert_eq!(resolve_idle_close_secs(None, 5), default, "低於下限");
+        assert_eq!(resolve_idle_close_secs(None, 3600), 3600);
+        assert_eq!(resolve_idle_close_secs(Some("7200"), 3600), 7200, "環境變數覆寫");
+        for bad in ["0", "-5", "abc", "30", ""] {
+            assert_eq!(resolve_idle_close_secs(Some(bad), 3600), 3600, "{bad:?} 不採用，回設定檔的值");
+            assert_eq!(resolve_idle_close_secs(Some(bad), 0), default, "{bad:?}＋設定檔 0 → 預設");
         }
     }
 }
