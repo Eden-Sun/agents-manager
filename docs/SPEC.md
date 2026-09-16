@@ -1075,6 +1075,10 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
 2. **取得排他窗口**：`POST /api/supervisor/leases/{resource}/acquire`，在同一個 supervisor lock 裡重驗核准與 idle，單一條件式 UPDATE 拿租約；搶同一窗口只有一個成功。
 
 - 核准是紀錄：申請者、purpose、範圍、`target_commit`、有效期、決定者、理由。acquire 逐項核對（purpose 不符、過期、撤銷、commit 不同都拒）；release 時標 `consumed`——一次核准一個窗口。
+- **申請可以帶穩定的 `request_id`**（AGM 裁示 2026-09-16）：2026-09-16 04:05 k8bw2f 對同一顆 `ca7b22d` 送了兩筆一模一樣的 restart 申請（它解析回應時取錯欄位，以為沒送成功），AGM 只能核一筆、駁一筆。
+  現在同一個 supervisor 下同一個 `request_id` 再送回**原本那一筆**（`created:false`），不新增也不重推 inbox；**已經裁示的也回它本人**——重送的人要看到的是「這件事已經有裁示了」。
+  同一個 id 換了 purpose／scope／commit 是兩件事共用一個 id：回 409 `approval_request_mismatch`，不回舊的也不覆寫。`expires_in_secs` 不參與比對。不帶就是舊行為。
+  欄位是 additive 的 `client_request_id`（既有列留白，唯一鍵只約束有值的列），`approval list` 會帶出來對帳。
 - 租約有只增不減的 `fence`；過期被接手後舊 fence 的 renew／release 一律失敗。到期自動釋放。acquire 與 renew 取「要求到期」與「核准到期」較早者，renew 重驗核准狀態。
 - 持有 `restart` 租約期間 **supervisor 的 assignment 派送 hold**（留 `queued`，不算重試）。**只管這一條通道**：`POST /api/bots/{id}/prompt` 沒被 gate。
 - **重啟後無等待期**：窗口在租約 release（API）或 daemon 啟動完成（開始 listen 後自動 release 仍未釋放的 `restart` 租約、consume 核准並記 info log）時就結束，被它 hold 的交辦立刻解除、controller 下一輪（≤10 秒）直接派送，不等 hold 寫的到期時間；controller 每輪派送前發現已沒有 held 的 `restart` 租約（含到期）也會先解除殘留 hold。

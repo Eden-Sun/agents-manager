@@ -1327,7 +1327,7 @@ mod flow_tests {
     #[tokio::test]
     async fn two_roles_approving_the_same_request_decide_it_once() {
         let app = fx::app().await;
-        let a = store::create_approval(&app.db, "w1", "rebuild", "release", Some("abc"), None).await.unwrap();
+        let a = store::create_approval(&app.db, "w1", "rebuild", "release", Some("abc"), None, None).await.unwrap().approval;
         let (x, y) = tokio::join!(
             store::decide_approval_from(&app.db, &a.id, "pending", "approved", "AGM:responder", None, None),
             store::decide_approval_from(&app.db, &a.id, "pending", "denied", "AGM:patrol", None, None),

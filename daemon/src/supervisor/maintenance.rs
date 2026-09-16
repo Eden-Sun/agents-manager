@@ -445,7 +445,7 @@ mod tests {
 
     /// 已核准、還沒用掉的 rebuild 窗口，決定時間往前推 `mins` 分鐘。
     async fn approved_window(app: &Arc<App>, mins: i64) -> String {
-        let a = store::create_approval(&app.db, "bot", "rebuild", "release", None, None).await.unwrap();
+        let a = store::create_approval(&app.db, "bot", "rebuild", "release", None, None, None).await.unwrap().approval;
         store::decide_approval(&app.db, &a.id, "approved", "AGM", None, None).await.unwrap();
         let at = (chrono::Utc::now() - chrono::Duration::minutes(mins)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         sqlx::query("UPDATE supervisor_approvals SET decided_at=? WHERE id=?").bind(&at).bind(&a.id).execute(&app.db).await.unwrap();
@@ -610,6 +610,7 @@ mod tests {
             decided_at: Some("2026-09-12T00:00:00Z".into()),
             reason: None,
             expires_at: expires.map(str::to_string),
+            client_request_id: None,
             created_at: "2026-09-12T00:00:00Z".into(),
             updated_at: "2026-09-12T00:00:00Z".into(),
         }

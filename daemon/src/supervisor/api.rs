@@ -761,6 +761,10 @@ pub struct ApprovalIn {
     pub target_commit: Option<String>,
     #[serde(default)]
     pub expires_in_secs: Option<i64>,
+    /// 穩定的 request id：同一個再送回**原本那一筆**，不新增（2026-09-16 的重複申請事故）。
+    /// 不帶就是舊行為，每次都開一筆新的。
+    #[serde(default)]
+    pub request_id: Option<String>,
 }
 
 fn iso_in(secs: i64) -> String {
@@ -773,30 +777,46 @@ pub async fn post_approval(State(app): State<Arc<App>>, Json(b): Json<ApprovalIn
         return Err(LcError::Bad(format!("purpose must be one of {:?}", super::maintenance::RESOURCES)));
     }
     let expires = b.expires_in_secs.map(iso_in);
-    let a = store::create_approval(
+    let out = store::create_approval(
         &app.db,
         &b.requester,
         &b.purpose,
         &b.scope,
         b.target_commit.as_deref(),
         expires.as_deref(),
+        b.request_id.as_deref(),
     )
     .await
-    .map_err(up)?;
-    // AGM decides these itself (CLAUDE.md, 2026-09-12): the request is put in front of it as an
-    // inbox event rather than sent to the user to relay.
-    let _ = store::push_inbox(
-        &app.db,
-        &format!("approval:{}:requested", a.id),
-        "approval_requested",
-        None,
-        None,
-        None,
-        &a.to_json(),
-    )
-    .await;
-    app.emit("supervisor_changed", json!({"approval": a.to_json()})).await;
-    Ok(Json(a.to_json()))
+    .map_err(|e| match e.downcast::<store::ApprovalRequestMismatch>() {
+        // 同一個 request id 換了內容不是重送，是兩件事共用了一個 id：什麼都不動。
+        Ok(m) => LcError::conflict(
+            "approval_request_mismatch",
+            json!({"reason": "approval_request_mismatch", "message": m.to_string(), "request_id": m.request_id,
+                   "approval_id": m.approval_id, "field": m.field, "existing": m.old, "requested": m.new}),
+        ),
+        Err(e) => up(e),
+    })?;
+    let a = out.approval;
+    // 重送不再叫醒 AGM 一次，也不再推一次事件：它看到的還是同一筆。
+    if out.created {
+        // AGM decides these itself (CLAUDE.md, 2026-09-12): the request is put in front of it as an
+        // inbox event rather than sent to the user to relay.
+        let _ = store::push_inbox(
+            &app.db,
+            &format!("approval:{}:requested", a.id),
+            "approval_requested",
+            None,
+            None,
+            None,
+            &a.to_json(),
+        )
+        .await;
+        app.emit("supervisor_changed", json!({"approval": a.to_json()})).await;
+    }
+    let mut v = a.to_json();
+    // 呼叫端要分得出「這次新開的」與「回你原本那筆」，才不會把重送讀成沒送出去。
+    v["created"] = json!(out.created);
+    Ok(Json(v))
 }
 
 #[derive(Deserialize)]
@@ -1108,11 +1128,51 @@ mod approval_decision_tests {
     }
 
     async fn pending(app: &Arc<App>) -> String {
-        store::create_approval(&app.db, "fixer", "rebuild", "release", Some("abc123"), None).await.unwrap().id
+        store::create_approval(&app.db, "fixer", "rebuild", "release", Some("abc123"), None, None).await.unwrap().approval.id
     }
 
     /// 第一個裁示定案。後到的 deny 不能把 approved 翻成 denied——那會讓同一筆核准有兩個
     /// 「第一次決定」，而執行端可能已經拿著 approved 去建置了。
+    /// HTTP 這一層的契約：重送同一個 request id 回同一筆、`created` 分得出來、
+    /// 不會再推一次 `approval_requested`（AGM 不該為同一件事被叫醒兩次）。
+    #[tokio::test]
+    async fn resending_one_approval_request_id_returns_the_same_row() {
+        let app = app().await;
+        let ask = |rid: Option<&str>, commit: &str| ApprovalIn {
+            requester: "k8bw2f".into(),
+            purpose: "restart".into(),
+            scope: "daemon".into(),
+            target_commit: Some(commit.into()),
+            expires_in_secs: None,
+            request_id: rid.map(str::to_string),
+        };
+        let Json(first) = post_approval(State(app.clone()), Json(ask(Some("restart-ca7b22d"), "ca7b22d"))).await.unwrap();
+        assert_eq!(first["created"], true);
+        let Json(again) = post_approval(State(app.clone()), Json(ask(Some("restart-ca7b22d"), "ca7b22d"))).await.unwrap();
+        assert_eq!(again["created"], false);
+        assert_eq!(again["id"], first["id"]);
+        assert_eq!(store::approvals(&app.db, 10).await.unwrap().len(), 1);
+        let events: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE kind='approval_requested'").fetch_one(&app.db).await.unwrap();
+        assert_eq!(events, 1, "重送不再叫醒 AGM 一次");
+
+        // 同 id 換 commit：409，原本那筆不動。
+        let err = post_approval(State(app.clone()), Json(ask(Some("restart-ca7b22d"), "deadbee"))).await.unwrap_err();
+        let LcError::Conflict(detail) = &err else { panic!("expected 409, got {err:?}") };
+        assert_eq!(detail["reason"], "approval_request_mismatch");
+        assert_eq!(detail["field"], "target_commit");
+        assert_eq!(detail["approval_id"], first["id"]);
+        assert_eq!(store::approvals(&app.db, 10).await.unwrap().len(), 1);
+
+        // 不帶 id 照舊：每次都是新的一筆。
+        let Json(a) = post_approval(State(app.clone()), Json(ask(None, "ca7b22d"))).await.unwrap();
+        let Json(b) = post_approval(State(app.clone()), Json(ask(None, "ca7b22d"))).await.unwrap();
+        assert_ne!(a["id"], b["id"]);
+        assert_eq!(a["client_request_id"], serde_json::Value::Null);
+        app.db.close().await;
+        std::fs::remove_dir_all(&app.data_dir).unwrap();
+    }
+
     #[tokio::test]
     async fn a_second_opposite_decision_is_refused_not_written() {
         let app = app().await;
@@ -1309,7 +1369,7 @@ mod review_boundary_tests {
     #[tokio::test]
     async fn renewal_refuses_missing_and_revoked_approval_without_extending_lease() {
         let app = app().await;
-        let approval = store::create_approval(&app.db, "owner", "rebuild", "test", None, None).await.unwrap();
+        let approval = store::create_approval(&app.db, "owner", "rebuild", "test", None, None, None).await.unwrap().approval;
         store::decide_approval(&app.db, &approval.id, "approved", "AGM", None, None).await.unwrap();
         let lease = store::acquire_lease(&app.db, "rebuild", "owner", Some(&approval.id), None,
             &iso_in(60), &json!({})).await.unwrap().unwrap();

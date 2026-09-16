@@ -173,10 +173,16 @@ CREATE TABLE IF NOT EXISTS supervisor_approvals (
   decided_at TEXT,
   reason TEXT,
   expires_at TEXT,
+  -- 呼叫端自己給的穩定 id：同一個 supervisor 下重送同一個 id 回原本那一筆（冪等）。NULL＝沒帶。
+  client_request_id TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS supervisor_approvals_open ON supervisor_approvals(status, created_at);
+-- 重送同一筆申請不該多開一列（2026-09-16：k8bw2f 對同一顆 commit 送了兩次 restart，
+-- 因為它讀錯回應欄位以為沒送出去）。有帶穩定 request id 的才受這個唯一鍵約束；舊列是 NULL。
+CREATE UNIQUE INDEX IF NOT EXISTS supervisor_approvals_request
+  ON supervisor_approvals(supervisor_id, client_request_id) WHERE client_request_id IS NOT NULL;
 -- One row per resource, ever. Holding it is `released_at IS NULL AND expires_at > now`, so a
 -- holder that died releases by expiry and nothing stays locked forever. `fence` only ever goes
 -- up: an old holder that wakes after its lease expired presents a stale fence and is refused,
@@ -204,6 +210,11 @@ CREATE TABLE IF NOT EXISTS supervisor_notes (
 
 /// Called from `db::migrate` on the same single-connection pool as the rest of the schema.
 pub async fn migrate(pool: &SqlitePool) -> Result<()> {
+    // 先補欄位再跑 DDL：DDL 裡的唯一索引會用到 `client_request_id`，舊庫沒有那一欄就會整段失敗。
+    // 表還不存在時 `has_column` 回 false，ALTER 也會失敗——所以只在表已經在的時候補。
+    if table_exists(pool, "supervisor_approvals").await? && !has_column(pool, "supervisor_approvals", "client_request_id").await? {
+        sqlx::query("ALTER TABLE supervisor_approvals ADD COLUMN client_request_id TEXT").execute(pool).await?;
+    }
     for stmt in DDL.split(";\n") {
         let s = stmt.trim();
         if s.is_empty() {
@@ -331,6 +342,16 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
     // 雙角色（巡檢／協調）的欄位與表，見 roles.rs。
     super::roles::migrate(pool).await?;
     Ok(())
+}
+
+/// 表還沒建出來時 `PRAGMA table_info` 回空集合，跟「有表但沒這一欄」長得一樣，
+/// 所以補欄位之前要先分得出這兩種情況——對著不存在的表 ALTER 會整個 migrate 失敗。
+async fn table_exists(pool: &SqlitePool, table: &str) -> Result<bool> {
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?")
+        .bind(table)
+        .fetch_one(pool)
+        .await?;
+    Ok(n > 0)
 }
 
 pub(super) async fn has_column(pool: &SqlitePool, table: &str, col: &str) -> Result<bool> {
@@ -1925,6 +1946,9 @@ pub struct Approval {
     pub decided_at: Option<String>,
     pub reason: Option<String>,
     pub expires_at: Option<String>,
+    /// 呼叫端給的穩定 id（`--request-id`）。重送同一個回原本那一筆，不新增。
+    #[sqlx(default)]
+    pub client_request_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -1942,6 +1966,7 @@ impl Approval {
             "decided_at": self.decided_at,
             "reason": self.reason,
             "expires_at": self.expires_at,
+            "client_request_id": self.client_request_id,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         })
@@ -1976,6 +2001,25 @@ impl Approval {
     }
 }
 
+/// 同一個 request id 又送來，但這次的 purpose／scope／commit 跟原本那筆不一樣：
+/// 不回舊的、也不覆寫它——那是兩件不同的事共用了一個 id，要呼叫端自己講清楚。
+#[derive(Debug, thiserror::Error)]
+#[error("request id `{request_id}` 已經是另一筆申請（{field}：`{old}` → `{new}`），換一個 id 或沿用原本那筆 {approval_id}")]
+pub struct ApprovalRequestMismatch {
+    pub request_id: String,
+    pub approval_id: String,
+    pub field: &'static str,
+    pub old: String,
+    pub new: String,
+}
+
+/// 建立（或找回）一筆申請。`created=false` ＝ 這個 request id 已經有一筆，回的是原本那筆。
+#[derive(Debug, Clone)]
+pub struct ApprovalOutcome {
+    pub approval: Approval,
+    pub created: bool,
+}
+
 pub async fn create_approval(
     pool: &SqlitePool,
     requester: &str,
@@ -1983,13 +2027,21 @@ pub async fn create_approval(
     scope: &str,
     target_commit: Option<&str>,
     expires_at: Option<&str>,
-) -> Result<Approval> {
+    request_id: Option<&str>,
+) -> Result<ApprovalOutcome> {
+    let request_id = request_id.map(str::trim).filter(|s| !s.is_empty());
+    if let Some(rid) = request_id {
+        if let Some(existing) = approval_by_request(pool, rid).await? {
+            // 已經被裁示的也回它本人：重送的人要看到的是「這件事已經有裁示了」，不是再開一筆。
+            return same_request(existing, rid, purpose, scope, target_commit).map(|a| ApprovalOutcome { approval: a, created: false });
+        }
+    }
     let id = crate::db::ulid();
     let now = crate::db::now();
-    sqlx::query(
+    let insert = sqlx::query(
         "INSERT INTO supervisor_approvals
-           (id, supervisor_id, requester, purpose, scope, target_commit, status, expires_at, created_at, updated_at)
-         VALUES (?,?,?,?,?,?, 'pending', ?, ?, ?)",
+           (id, supervisor_id, requester, purpose, scope, target_commit, status, expires_at, client_request_id, created_at, updated_at)
+         VALUES (?,?,?,?,?,?, 'pending', ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(SUPERVISOR_ID)
@@ -1998,11 +2050,66 @@ pub async fn create_approval(
     .bind(scope)
     .bind(target_commit)
     .bind(expires_at)
+    .bind(request_id)
     .bind(&now)
     .bind(&now)
     .execute(pool)
-    .await?;
-    Ok(approval(pool, &id).await?.expect("just inserted"))
+    .await;
+    match insert {
+        Ok(_) => Ok(ApprovalOutcome { approval: approval(pool, &id).await?.expect("just inserted"), created: true }),
+        // 兩個呼叫同時進來時，先到的那筆已經寫進去了（唯一鍵擋下第二筆）：回先到的那一筆。
+        Err(e) => {
+            let Some(rid) = request_id else { return Err(e.into()) };
+            match approval_by_request(pool, rid).await? {
+                Some(existing) => {
+                    same_request(existing, rid, purpose, scope, target_commit).map(|a| ApprovalOutcome { approval: a, created: false })
+                }
+                None => Err(e.into()),
+            }
+        }
+    }
+}
+
+fn same_request(
+    existing: Approval,
+    request_id: &str,
+    purpose: &str,
+    scope: &str,
+    target_commit: Option<&str>,
+) -> Result<Approval> {
+    let mismatch = |field: &'static str, old: String, new: String| {
+        anyhow::Error::new(ApprovalRequestMismatch {
+            request_id: request_id.to_string(),
+            approval_id: existing.id.clone(),
+            field,
+            old,
+            new,
+        })
+    };
+    if existing.purpose != purpose {
+        return Err(mismatch("purpose", existing.purpose.clone(), purpose.to_string()));
+    }
+    if existing.scope != scope {
+        return Err(mismatch("scope", existing.scope.clone(), scope.to_string()));
+    }
+    if existing.target_commit.as_deref().unwrap_or_default() != target_commit.unwrap_or_default() {
+        return Err(mismatch(
+            "target_commit",
+            existing.target_commit.clone().unwrap_or_default(),
+            target_commit.unwrap_or_default().to_string(),
+        ));
+    }
+    Ok(existing)
+}
+
+pub async fn approval_by_request(pool: &SqlitePool, request_id: &str) -> Result<Option<Approval>> {
+    Ok(sqlx::query_as::<_, Approval>(
+        "SELECT * FROM supervisor_approvals WHERE supervisor_id=? AND client_request_id=?",
+    )
+    .bind(SUPERVISOR_ID)
+    .bind(request_id)
+    .fetch_optional(pool)
+    .await?)
 }
 
 pub async fn approval(pool: &SqlitePool, id: &str) -> Result<Option<Approval>> {
@@ -3254,13 +3361,126 @@ mod tests {
 
     /// The approval is a record, and revoking it takes effect for the next acquire even though
     /// the words "AGM said yes" were true yesterday.
+    /// 起因：2026-09-16 k8bw2f 對同一顆 commit 送了兩筆一樣的 restart 申請（它讀錯回應欄位，
+    /// 以為沒送出去），AGM 只能核一筆、駁一筆。同一個 request id 重送要回原本那一筆。
+    #[tokio::test]
+    async fn one_request_id_is_one_approval() {
+        let p = pool().await;
+        get_or_init(&p).await.unwrap();
+        async fn ask(p: &SqlitePool, rid: Option<&str>) -> ApprovalOutcome {
+            create_approval(p, "k8bw2f", "restart", "daemon", Some("ca7b22d"), None, rid).await.unwrap()
+        }
+        let first = ask(&p, Some("restart-ca7b22d")).await;
+        assert!(first.created);
+        assert_eq!(first.approval.client_request_id.as_deref(), Some("restart-ca7b22d"));
+
+        let again = ask(&p, Some("restart-ca7b22d")).await;
+        assert!(!again.created, "重送不是新的一筆");
+        assert_eq!(again.approval.id, first.approval.id);
+        assert_eq!(approvals(&p, 10).await.unwrap().len(), 1, "DB 裡還是只有一列");
+
+        // 不同 id 就是不同的申請。
+        let other = ask(&p, Some("restart-ca7b22d-retry")).await;
+        assert!(other.created);
+        assert_ne!(other.approval.id, first.approval.id);
+        assert_eq!(approvals(&p, 10).await.unwrap().len(), 2);
+
+        // 沒帶 id 的照舊：每次都開一筆新的（既有腳本不受影響）。
+        let a = ask(&p, None).await;
+        let b = ask(&p, None).await;
+        assert!(a.created && b.created);
+        assert_ne!(a.approval.id, b.approval.id);
+        assert_eq!(approvals(&p, 10).await.unwrap().len(), 4);
+    }
+
+    /// 同一個 id 換了內容不是重送：回 409（`ApprovalRequestMismatch`），原本那筆一個字都不動。
+    #[tokio::test]
+    async fn the_same_request_id_with_different_content_is_refused() {
+        let p = pool().await;
+        get_or_init(&p).await.unwrap();
+        let first = create_approval(&p, "bot", "rebuild", "daemon", Some("abc123"), None, Some("nightly"))
+            .await
+            .unwrap()
+            .approval;
+
+        for (purpose, scope, commit, field) in [
+            ("rebuild", "daemon", Some("def456"), "target_commit"),
+            ("restart", "daemon", Some("abc123"), "purpose"),
+            ("rebuild", "web", Some("abc123"), "scope"),
+        ] {
+            let err = create_approval(&p, "bot", purpose, scope, commit, None, Some("nightly")).await.unwrap_err();
+            let m = err.downcast::<ApprovalRequestMismatch>().expect("回的是內容不符，不是別的錯");
+            assert_eq!(m.field, field);
+            assert_eq!(m.approval_id, first.id, "錯誤訊息要指回原本那筆");
+        }
+        let kept = approval(&p, &first.id).await.unwrap().unwrap();
+        assert_eq!((kept.purpose.as_str(), kept.scope.as_str(), kept.target_commit.as_deref()), ("rebuild", "daemon", Some("abc123")));
+        assert_eq!(approvals(&p, 10).await.unwrap().len(), 1, "被拒絕的那幾次什麼都沒寫進去");
+    }
+
+    /// 已經裁示過的同 id 再送，回的還是它本人——重送的人要看到的是「這件事已經有裁示了」。
+    #[tokio::test]
+    async fn a_decided_request_id_comes_back_as_itself() {
+        let p = pool().await;
+        get_or_init(&p).await.unwrap();
+        for status in ["approved", "denied", "revoked", "consumed"] {
+            let rid = format!("win-{status}");
+            let first = create_approval(&p, "bot", "rebuild", "daemon", Some("abc123"), None, Some(&rid))
+                .await
+                .unwrap()
+                .approval;
+            decide_approval(&p, &first.id, status, "AGM", None, None).await.unwrap();
+            let again = create_approval(&p, "bot", "rebuild", "daemon", Some("abc123"), None, Some(&rid)).await.unwrap();
+            assert!(!again.created, "{status}：不該因為已經決定就再開一筆");
+            assert_eq!(again.approval.id, first.id);
+            assert_eq!(again.approval.status, status, "{status}：回的是它現在的裁示");
+        }
+        assert_eq!(approvals(&p, 10).await.unwrap().len(), 4);
+    }
+
+    /// 舊資料庫（沒有 `client_request_id` 那一欄）升級後照常可讀，既有列留白。
+    #[tokio::test]
+    async fn an_old_database_gains_the_column_without_losing_rows() {
+        let p = SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+        sqlx::query(
+            "CREATE TABLE supervisor_approvals (
+               id TEXT PRIMARY KEY, supervisor_id TEXT NOT NULL, requester TEXT NOT NULL,
+               purpose TEXT NOT NULL, scope TEXT NOT NULL, target_commit TEXT,
+               status TEXT NOT NULL DEFAULT 'pending', decided_by TEXT, decided_at TEXT, reason TEXT,
+               expires_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+        )
+        .execute(&p)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO supervisor_approvals (id, supervisor_id, requester, purpose, scope, status, created_at, updated_at)
+             VALUES ('old-1', 'AGM', 'bot', 'rebuild', 'daemon', 'approved', '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z')",
+        )
+        .execute(&p)
+        .await
+        .unwrap();
+
+        migrate(&p).await.unwrap();
+        migrate(&p).await.unwrap(); // 可重入
+
+        let old = approval(&p, "old-1").await.unwrap().expect("舊列還在");
+        assert_eq!(old.client_request_id, None, "既有列留白");
+        assert_eq!(old.status, "approved");
+        // 新的還是能帶 id 進來，而且不會跟留白的舊列撞唯一鍵。
+        let a = create_approval(&p, "bot", "rebuild", "daemon", None, None, Some("r-1")).await.unwrap();
+        assert!(a.created);
+        assert!(!create_approval(&p, "bot", "rebuild", "daemon", None, None, Some("r-1")).await.unwrap().created);
+        assert_eq!(approvals(&p, 10).await.unwrap().len(), 2);
+    }
+
     #[tokio::test]
     async fn an_approval_is_decided_once_and_revocable() {
         let p = pool().await;
         get_or_init(&p).await.unwrap();
-        let a = create_approval(&p, "bot-a", "rebuild", "daemon/", Some("abc123"), Some("2099-01-01T00:00:00Z"))
+        let a = create_approval(&p, "bot-a", "rebuild", "daemon/", Some("abc123"), Some("2099-01-01T00:00:00Z"), None)
             .await
-            .unwrap();
+            .unwrap()
+            .approval;
         assert_eq!(a.status, "pending");
         assert_eq!(a.refusal("2026-09-12T12:00:00Z", "rebuild", Some("abc123")), Some("approval_not_decided"));
         let a = decide_approval(&p, &a.id, "approved", "AGM", Some("沒有人在跑"), None).await.unwrap().unwrap();

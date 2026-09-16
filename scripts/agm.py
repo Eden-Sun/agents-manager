@@ -621,7 +621,11 @@ def cmd_review(client: Client, cfg: dict, args) -> object:
 
 
 def cmd_approval(client: Client, cfg: dict, args) -> object:
-    """重建／重啟核准。申請寫成紀錄（誰、範圍、哪個 commit、到期），AGM 直接核駁。"""
+    """重建／重啟核准。申請寫成紀錄（誰、範圍、哪個 commit、到期），AGM 直接核駁。
+
+    送出去不確定成不成功時，用**同一個** `--request-id` 重送：回的是原本那一筆（`created=false`），
+    不會變成兩筆讓 AGM 一筆核一筆駁（2026-09-16 的事故）。`list` 的輸出帶 `client_request_id` 可以對帳。
+    """
     if args.op == "list":
         return client.get("/api/supervisor/approvals")
     if args.op == "request":
@@ -632,6 +636,9 @@ def cmd_approval(client: Client, cfg: dict, args) -> object:
             body["target_commit"] = args.commit
         if args.expires_in:
             body["expires_in_secs"] = args.expires_in
+        # 重送同一個 request id 回原本那一筆（回應的 created=false）；換了 purpose／scope／commit 回 409。
+        if args.request_id:
+            body["request_id"] = args.request_id
         return client.post("/api/supervisor/approvals", body)
     if not args.approval_id:
         raise AgmError("bad_args", "approval decide 需要 approval id", 2)
@@ -1058,6 +1065,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--purpose", choices=["rebuild", "restart"], help="request：要做什麼")
     s.add_argument("--scope", help="request：會動到什麼")
     s.add_argument("--commit", help="request：針對哪個 commit（之後 acquire 要對得上）")
+    s.add_argument(
+        "--request-id",
+        dest="request_id",
+        help="request：穩定 id，重送同一個回原本那一筆（回應 created=false）；換了內容回 409。不確定送出去沒有時用它重送，不要換新 id",
+    )
     s.add_argument("--expires-in", type=int, dest="expires_in", metavar="SECS", help="多久之後失效")
     s.add_argument("--decision", choices=["approve", "deny", "revoke"], help="decide：核准／駁回／撤銷")
     s.add_argument("--reason", help="decide：理由")

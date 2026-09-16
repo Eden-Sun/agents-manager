@@ -971,9 +971,13 @@ body 直接是檔案位元組（**不是** multipart），`Content-Type` 就是�
 - `GET /api/supervisor/build-inputs` → `{paths,embedded:[{path,symbol}],note}`：會編進 binary 的路徑（含 `docs/goals/agm-supervisor-persona.md`、`docs/goals/agm-responder-persona.md`、`scripts/agm.py`）。
 
 ### 核准與租約（SPEC §18.10）
-- `GET /api/supervisor/approvals` → `{approvals:[{id,requester,purpose,scope,target_commit,status,decided_by,decided_at,reason,expires_at,decisions:[{from,to,actor,reason,at}],…}]}`。
+- `GET /api/supervisor/approvals` → `{approvals:[{id,requester,purpose,scope,target_commit,status,decided_by,decided_at,reason,expires_at,client_request_id,decisions:[{from,to,actor,reason,at}],…}]}`。
   `decisions` 是 append-only 的決定歷程（那一列只留最後一個狀態）。
-- `POST /api/supervisor/approvals {requester,purpose:"rebuild"|"restart",scope,target_commit?,expires_in_secs?}` → 一筆 `pending`，並推 inbox `approval_requested` 給 AGM。
+- `POST /api/supervisor/approvals {requester,purpose:"rebuild"|"restart",scope,target_commit?,expires_in_secs?,request_id?}` → 一筆 `pending`（回應多一個 `created`），並推 inbox `approval_requested` 給 AGM。
+  帶 `request_id`（穩定 id）時**冪等**：同一個 supervisor 下同一個 id 再送回**原本那一筆**（200、`created:false`），不新增、不重推 inbox；已經被 decide 的也照樣回它本人（狀態就是當時的裁示）。
+  同一個 id 但 `purpose`／`scope`／`target_commit` 不同 → `409 {"reason":"approval_request_mismatch", field, existing, requested, approval_id}`，原本那筆一個字都不動。
+  `expires_in_secs` 不參與比對：原本那筆的到期時間不會被重送改掉。不帶 `request_id` 就是舊行為，每次開一筆新的。
+  CLI：`agm approval request --request-id <id>`（不確定送出去沒有時用同一個 id 重送，不要換新的）。
 - `POST /api/supervisor/approvals/{id}/decide {decision:"approve"|"deny"|"revoke",actor?,reason?,expires_in_secs?}`：同 decision 重送回 `idempotent:true`。
   **第一個裁示定案**：`approve`／`deny` 只從 `pending` 條件寫入；`revoke` 從 `approved` 或 `pending`。寫不進去 → 409
   `{reason:"already_decided"|"decided_concurrently",status,decided_by,allowed_from}`，什麼都沒寫（後到的 deny 不會把 approved 改掉）。
