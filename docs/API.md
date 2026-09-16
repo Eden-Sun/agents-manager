@@ -322,7 +322,7 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
             "last_output_at":"2026-09-16T07:10:00.000Z","first_seen":"…","last_seen":"…","gc_optin":false}] }
 ```
 - `kind`：`service`（有前景程式或 listen port）／`shell`（只有 shell）。agent pane 不在這裡。
-- `owner_bot_id`：從 pane 行程樹的 `AM_BOT_ID` 推斷；`null` = 使用者手開的（永不自動關）。
+- `owner_bot_id`／`owned_by`：`bot`＝從 pane 行程樹的 `AM_BOT_ID` 推斷；`user`＝沒有標記但 cwd 對得到這個專案（列在專案底下，**預設仍不自動關**）；`none`＝連專案都對不到。
 - `listen_ports` 只在本機判斷，遠端一律空陣列。`last_output_at` 由 herdr 的 `revision` 變化推進，不讀畫面內容。
 - Project 不存在 404。
 
@@ -330,6 +330,12 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 `bot_id`／`pane_id`／`purpose`，header `X-AM-Bot-Token`；shim 開完 pane 後自己呼叫（`herdr … --purpose <文字>`）。
 只記用途：pane 還沒被掃到就先建一列，**已經有 owner 的不會被改寫**（歸屬永遠由掃描時的 `AM_BOT_ID` 決定）。
 token 不對 401；其他失敗照樣回 200（`recorded:false`），少一個用途字串不該讓 bot 開 pane 失敗。
+
+### `GET /api/panes?unowned=1`
+全機的非 agent pane；`unowned=1` 只回 `owned_by="none"`（連 cwd 都對不到專案）的那些。
+
+### `POST /api/panes/{id}/focus?host=local`
+把 herdr 的焦點切到那顆 pane，只動焦點。主機沒連上 502。
 
 ### `POST /api/panes/{id}/adopt?host=local`
 `{"owner_bot_id"?, "purpose"?, "allow_gc"?}` → 補歸屬與用途。省略的欄位不動。

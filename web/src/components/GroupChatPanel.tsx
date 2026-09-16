@@ -10,6 +10,7 @@ import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { useComposerFocus } from '../hooks/useComposerFocus'
 import { AttachButton } from './AttachButton'
 import { AttachPicker, AttachTray, DropVeil, useAttachments, useDropTarget } from './Attachments'
+import { ProjectPanes } from './ProjectPanes'
 import { ProjectNameField } from './ProjectNameField'
 import { Bubble, EmptyState, JumpToBottom, KIND_TITLE, LiveReplyBubble, LoadEarlier } from './ChatPanel'
 import { HostBadge } from './HostsPanel'
@@ -637,6 +638,8 @@ export function GroupChatPanel({ projectId, onOpenSidebar }: { projectId: string
           {drop.over ? <DropVeil /> : null}
           <IssuesBar projectId={projectId} draftKey={`group:${projectId}`} inputRef={composerRef} />
           <GroupMessageList projectId={projectId} />
+          {/* §6.5e：這個專案底下不是 agent 的 shell／服務 pane。沒有就整塊不出現。 */}
+          <ProjectPanes projectId={projectId} workspaceId={project.workspace_id ?? null} />
           <MissionsBar projectId={projectId} />
           <GroupComposer projectId={projectId} inputRef={composerRef} files={files} />
         </div>

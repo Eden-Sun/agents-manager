@@ -362,6 +362,12 @@ impl HerdrClient {
         self.call_as("pane.read", json!({"pane_id": pane_id, "source": source, "lines": lines, "format": "ansi"}), "read").await
     }
 
+    /// 把使用者的視窗切到這顆 pane（§6.5e 的「聚焦」按鈕）。只動焦點，不改內容。
+    pub async fn pane_focus(&self, pane_id: &str) -> Result<()> {
+        self.call("pane.focus", json!({"pane_id": pane_id})).await?;
+        Ok(())
+    }
+
     pub async fn pane_rects(&self, workspace_id: &str) -> Result<Vec<(String, u32, u32)>> {
         self.rects(json!({"workspace_id": workspace_id})).await
     }

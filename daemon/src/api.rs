@@ -56,6 +56,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/projects/{id}/panes", get(crate::panes::list_for_project))
         .route("/panes/{id}/adopt", post(crate::panes::adopt))
         .route("/panes/{id}/close", post(crate::panes::close))
+        .route("/panes/{id}/focus", post(crate::panes::focus))
+        .route("/panes", get(crate::panes::list_all))
         .route("/projects/{id}/chat", post(project_chat))
         // 群組任務（docs/goals/agm-missions.md）。
         .route(

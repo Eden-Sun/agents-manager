@@ -1,0 +1,127 @@
+/* components/ProjectPanes.tsx：專案頁的「其他 pane」（SPEC §6.5e）。 */
+
+.project-panes {
+  margin: 10px auto;
+  padding: 8px 12px 10px;
+  width: 100%;
+  max-width: var(--chat-max);
+  box-sizing: border-box;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-sunken);
+}
+
+.project-panes-title {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 650;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.project-panes-note {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-faint);
+}
+
+.project-panes-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.project-pane {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-panel);
+}
+
+/* 服務 pane 左側加一條：關掉它會殺掉裡面在跑的東西。 */
+.project-pane.service {
+  border-left: 3px solid var(--warn);
+}
+
+.project-pane-head,
+.project-pane-meta {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  min-width: 0;
+}
+
+.project-pane-head {
+  flex: 1 1 260px;
+}
+
+.project-pane-meta {
+  flex: 1 1 100%;
+  font-size: 11px;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+}
+
+.pane-kind {
+  flex: none;
+  padding: 0 5px;
+  border-radius: 5px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.pane-kind.service {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
+}
+
+.pane-name {
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.pane-owner,
+.pane-elsewhere {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.pane-elsewhere {
+  color: var(--warn);
+}
+
+.pane-fg {
+  max-width: 34em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-pane-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+}
+
+.pane-close-modal {
+  max-width: 420px;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.pane-close-modal code {
+  overflow-wrap: anywhere;
+}
