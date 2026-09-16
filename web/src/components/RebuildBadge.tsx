@@ -9,10 +9,14 @@ import { fetchRebuildRequests, REBUILD_MAX_WAIT_MIN, REBUILD_THRESHOLD, supervis
 import * as api from '../api'
 import { useStore } from '../store/store'
 import { oldestWaitMinutes, type RebuildRequest } from '../lib/rebuildCount'
+import { rebuildAsker, rebuildAskNotice } from '../lib/rebuildAsk'
 import './rebuildBadge.css'
 
 /** 申請是人在動的，不必跟得比這更緊。 */
 const POLL_MS = 30_000
+
+/** 沒送出就沿用同一個 crid，重按不會變成兩則「現在重建」。 */
+const askAgm = rebuildAsker(api.newClientRequestId)
 
 export function RebuildBadge() {
   const [rows, setRows] = useState<RebuildRequest[] | null>(null)
@@ -108,19 +112,17 @@ export function RebuildBadge() {
                   setAsking(false)
                   return
                 }
-                try {
-                  await api.sendPrompt(
+                const outcome = await askAgm((crid) =>
+                  api.sendPrompt(
                     agm,
                     `使用者要求：現在開始重建 release 並重啟 daemon（還在等的重建申請 ${rows.length} 筆，最早一筆等了 ${waited} 分鐘）。請照既有流程排程，完成後回報。`,
-                    `ui-rebuild-now-${Date.now()}`,
-                  )
-                  notify('info', '已請 AGM 開始重建')
-                  setOpen(false)
-                } catch {
-                  notify('error', '送給 AGM 失敗，請再試一次')
-                } finally {
-                  setAsking(false)
-                }
+                    crid,
+                  ),
+                )
+                const n = rebuildAskNotice(outcome)
+                notify(n.level, n.text)
+                if (n.close) setOpen(false)
+                setAsking(false)
               })()
             }}
           >
