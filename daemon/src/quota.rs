@@ -346,13 +346,34 @@ pub fn quota_from_statusline(payload: &Value, account: Option<&str>) -> Option<Q
 }
 
 /// `base` is the host-less key; stored key and `quota.host` derive from `host`.
+/// 身分偵測完之前寫進分開那一格、現在已經收斂到裸 `kind` 的 key（daemon 重啟那一秒最常見：第一筆 statusline
+/// 比身分偵測先到，[`quota_base_for_host`] 查不到身分就寧可分開）。之後的讀數都寫裸 key，那一格停在啟動當下、
+/// 沒有 Fable，留著就會被讀到（2026-09-16 使用者：「怎麼又看不見 Fable 的剩餘」）。查不到的身分照舊保留。
+async fn stale_split_keys(app: &Arc<App>, host: &str, kind: &str) -> Vec<String> {
+    let prefix = quota_key(host, &format!("{kind}:"));
+    let candidates: Vec<String> = app.quotas.lock().await.keys().filter(|k| k.starts_with(&prefix)).cloned().collect();
+    let mut stale = Vec::new();
+    for key in candidates {
+        if quota_base_for_host(app, host, kind, Some(&key[prefix.len()..])).await == kind {
+            stale.push(key);
+        }
+    }
+    stale
+}
+
 pub async fn set(app: &Arc<App>, host: &str, base: &str, mut q: Quota) {
     q.host = host.to_string();
     let key = quota_key(host, base);
+    let stale = if base.contains(':') { Vec::new() } else { stale_split_keys(app, host, base).await };
     // 撞限校正只看**這份讀數自己帶來的**窗；下面沿用的舊窗不是新證據。
     let brings_its_own_hit = q.limit_hit.is_some();
     let fresh = q.clone();
     let mut quotas = app.quotas.lock().await;
+    for k in &stale {
+        if quotas.remove(k).is_some() {
+            tracing::info!(host, stale = %k, bare = %key, "dropped a split quota key that now resolves to the bare key");
+        }
+    }
     // A window the new reading lacks keeps the previous value: statusLine has no Fable and
     // otherwise wipes the probe's F bar every few seconds.
     if q.fable.is_none() {
@@ -992,6 +1013,51 @@ mod tests {
 
     /// 寫入端與查詢端走同一支：帶 claude 身分（cc1）的 codex bot 寫裸 `codex`、`limit_hit_for_bot` 也從裸
     /// `codex` 讀到；只有 codex 自己的身分（cx2）才寫 `codex:cx2`，而且**不借**裸 `codex` 的數字。
+    /// 回歸（2026-09-16）：重啟那一秒身分還沒偵測完，cc0 的讀數先落在 `claude:cc0`；偵測完之後寫裸 `claude` 時，
+    /// 那一格要清掉。有自己帳號目錄的 cc1、查不到的身分都照舊保留，遠端主機的同名 key 不受本機影響。
+    #[tokio::test]
+    async fn a_split_key_left_from_before_identities_were_known_is_dropped_once_they_are() {
+        let env_ = crate::testing::env().await;
+        let app = env_.app.clone();
+        let reading = |pct: f64| {
+            let mut q = codex_q("statusline", None);
+            q.five_hour = Some(Window { used_pct: pct, resets_at: None });
+            q
+        };
+        // 身分還沒偵測到：cc0 寧可分開。
+        assert_eq!(quota_base_for_host(&app, LOCAL_HOST, "claude", Some("cc0")).await, "claude:cc0");
+        set(&app, LOCAL_HOST, "claude:cc0", reading(1.0)).await;
+        set(&app, LOCAL_HOST, "claude:cc1", reading(40.0)).await;
+        set(&app, LOCAL_HOST, "claude:nobody", reading(50.0)).await;
+        set(&app, "m4p", "claude:cc0", reading(60.0)).await;
+
+        let ident = |name: &str, pairs: &[(&str, &str)]| crate::config::IdentityCfg {
+            name: name.into(),
+            kind: "claude".into(),
+            host: None,
+            env: env(pairs),
+            args: vec![],
+        };
+        app.tools.lock().await.insert(
+            LOCAL_HOST.to_string(),
+            crate::tools::HostTools {
+                tools: Default::default(),
+                identities: Default::default(),
+                shell_identities: vec![ident("cc0", &[]), ident("cc1", &[("CLAUDE_CONFIG_DIR", "$HOME/.claude-cc1")])],
+                checked_at: crate::db::now(),
+            },
+        );
+        // 偵測完：cc0 收斂到裸 key。下一筆讀數寫裸 key 的同時把殘留的那一格清掉。
+        assert_eq!(quota_base_for_host(&app, LOCAL_HOST, "claude", Some("cc0")).await, "claude");
+        set(&app, LOCAL_HOST, "claude", reading(25.0)).await;
+        let q = app.quotas.lock().await;
+        assert!(q.get("claude:cc0").is_none(), "殘留的分開那格清掉");
+        assert_eq!(q.get("claude").and_then(|x| x.five_hour.as_ref()).map(|w| w.used_pct), Some(25.0));
+        assert!(q.get("claude:cc1").is_some(), "有自己帳號目錄的照舊分開");
+        assert!(q.get("claude:nobody").is_some(), "查不到的身分寧可保留");
+        assert!(q.get(&quota_key("m4p", "claude:cc0")).is_some(), "別台主機的不受影響");
+    }
+
     #[tokio::test]
     async fn codex_bots_on_cc1_share_the_bare_key_and_cc2_keeps_its_own() {
         let env_ = crate::testing::env().await;

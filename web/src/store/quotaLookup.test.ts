@@ -31,10 +31,27 @@ test('裸 key 只給一個身分：其他身分查不到自己那格就是沒有
   assert.equal(botQuotaLevel(quota, 'claude', 'cc1', 'local', null, identities), null)
 })
 
-test('有自己那一格就用自己的，不再退回裸 key', () => {
+test('有自己帳號目錄的身分讀自己那一格，不退回裸 key', () => {
   const quota: QuotaMap = { claude: q(10), 'claude:cc0': q(97) }
-  assert.equal(quotaBaseKey(quota, 'local', 'claude', 'cc0', [idn('cc0')]), 'claude:cc0')
-  assert.equal(botQuotaLevel(quota, 'claude', 'cc0', 'local', null, [idn('cc0')])?.level, 'crit')
+  const own = [idn('cc0', { CLAUDE_CONFIG_DIR: '/home/me/.claude-cc0' })]
+  assert.equal(quotaBaseKey(quota, 'local', 'claude', 'cc0', own), 'claude:cc0')
+  assert.equal(botQuotaLevel(quota, 'claude', 'cc0', 'local', null, own)?.level, 'crit')
+})
+
+/**
+ * 回歸（2026-09-16 使用者：「怎麼又看不見 Fable 的剩餘」）：daemon 重啟那一秒身分還沒偵測完，cc0 的 statusline
+ * 先寫進 `claude:cc0`；偵測完之後 daemon 改寫裸 `claude`（有 `/usage` 補的 Fable），分開那格停在啟動當下。
+ * 共用預設帳號的 cc0 要讀裸 key，不因為分開那格碰巧存在就讀到過期、沒有 Fable 的數字。
+ */
+test('共用預設帳號的身分讀裸 key，啟動時殘留的分開那格不蓋過它', () => {
+  const fresh = { five_hour: win(25), seven_day: win(76), fable: win(83) } as unknown as KindQuota
+  const stale = { five_hour: win(1), seven_day: win(70), fable: null } as unknown as KindQuota
+  const quota: QuotaMap = { claude: fresh, 'claude:cc0': stale }
+  const identities = [idn('cc0'), idn('cc1', { CLAUDE_CONFIG_DIR: '/x' })]
+  assert.equal(quotaBaseKey(quota, 'local', 'claude', 'cc0', identities), 'claude')
+  assert.equal(quotaForIdentity(quota, 'local', 'claude', 'cc0', identities)?.fable?.used_pct, 83)
+  // 身分表還沒到的保底規則不變。
+  assert.equal(quotaBaseKey(quota, 'local', 'claude', 'cc0', []), 'claude:cc0')
 })
 
 test('額度按主機分（SPEC §14）：遠端只看它自己那台的數字', () => {

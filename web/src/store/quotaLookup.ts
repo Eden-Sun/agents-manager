@@ -44,7 +44,15 @@ export function bareQuotaOwner(identities: readonly Identity[], kind: BotKind): 
   return sharing[0] ?? null
 }
 
-/** 落點的 key（不含 host 前綴）：有自己那一格就用自己的，否則只有裸 key 的主人退回裸 key。 */
+/**
+ * 落點的 key（不含 host 前綴）。
+ *
+ * 身分表查得到這個身分時，**照 daemon 同一條規則**（`quota::quota_base_for_host`）決定，不看哪一格碰巧有數字：
+ * 共用預設帳號的身分讀裸 key（只給一個主人），有自己 home 變數的讀自己那一格。
+ * 以前是「分開那格存在就用它」——daemon 重啟那一秒身分還沒偵測完，cc0 的 statusline 會先寫進 `claude:cc0`，
+ * 偵測完之後改寫裸 `claude`，那一格就停在啟動當下、沒有 Fable；頂端一直讀它，Fable 就「又不見了」（2026-09-16 使用者回報）。
+ * 身分表還沒到的時候才保底：有自己那一格就用自己的，否則只有裸 key 的主人退回裸 key。
+ */
 export function quotaBaseKey(
   quota: QuotaMap,
   host: string,
@@ -57,6 +65,8 @@ export function quotaBaseKey(
   const own = identities.find((i) => i.name === identity)
   if (own && own.kind !== kind) return kind
   const keyed = `${kind}:${identity}`
+  // `bareQuotaOwner` 只會挑共用預設帳號的身分：有自己帳號目錄的永遠落在自己那一格。
+  if (own) return bareQuotaOwner(identities, kind) === identity ? kind : keyed
   if (quota[quotaKey(host, keyed)] != null) return keyed
   const bare = quotaKey(host, kind)
   return bareQuotaOwner(identities, kind) === identity && bare in quota ? kind : keyed
