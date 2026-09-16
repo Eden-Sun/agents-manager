@@ -495,8 +495,6 @@ function Gauge({
         </span>
         {compact && !entry.identity ? null : (
           <span className={`quota-identity${loggedOut ? ' logged-out' : ''}`} aria-hidden="true">
-            {/* 紅點不用 ⛔：跟 kind 圖示並排像壞掉的圖示（2026-09-13 使用者）。 */}
-            {blocked ? <span className="quota-blocked-ico" aria-hidden="true" /> : null}
             {entry.identity ?? entry.kind}
           </span>
         )}

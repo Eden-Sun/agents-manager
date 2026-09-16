@@ -2,11 +2,13 @@
    credits 用完時仍可滿格；唯一訊號是 CLI 橫幅（daemon 的 `quota.limit_hit`），所以畫成格子狀態。 */
 /* 畫法（2026-09-13 使用者：「目前看來很衝突」）：**一個紅點 + 其餘全部退色**，不整格染紅（綠量表同時說「還很夠」）。
    class 叫 `quota-blocked` 不是 `blocked`：`styles.css` 有裸的 `.blocked`（BlockedPanel 外框），撞上會整片染紅加內距。 */
-/* 沒額度／limit_hit：紅框要留（2026-09-16 使用者）。紅點＋退色不夠，外框才是「這格不能用」。
-   特異度蓋過 `.quota-hp.focused` 的透明框，選取中的擋住格仍是紅。 */
+/* 沒額度／limit_hit：紅框要留、紅點不要（2026-09-16 使用者）。
+   只有這一格用圓角外框，旁邊選取格不再做成第二張卡。 */
 .quota-hp.quota-blocked,
 .quota-hp.focused.quota-blocked {
   border-color: color-mix(in srgb, var(--danger) 55%, var(--border));
+  border-radius: 7px;
+  margin: 0 2px;
 }
 
 /* 灰階而非降透明：留著綠色就還在說「還很夠用」。 */
@@ -17,16 +19,6 @@
 .quota-hp.quota-blocked .quota-compact {
   filter: grayscale(1);
   opacity: 0.5;
-}
-
-/* 唯一的紅：6px 點，不跟 kind 圖示搶形狀，同側欄燈號語彙。 */
-.quota-blocked-ico {
-  flex: none;
-  width: 6px;
-  height: 6px;
-  margin-right: 3px;
-  border-radius: 50%;
-  background: var(--danger);
 }
 
 /* 灰掉的 logo＝帳號收不了工作，是唯一讓 kind logo 失色的狀態（2026-09-13 使用者：有顏色的才是正常的）。
