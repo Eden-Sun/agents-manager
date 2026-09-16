@@ -90,8 +90,9 @@ pub async fn escalation_for(app: &Arc<App>, approval_id: Option<&str>) -> Result
         None => store::oldest_live_window_approval(&app.db, &now).await.map_err(|e| LcError::Upstream(e.to_string()))?,
     };
     let Some(a) = found else { return Ok(None) };
-    let Some(decided) = a.decided_at.as_deref() else { return Ok(None) };
-    let waited = waited_secs(decided, &now);
+    // 同一個申請者換 commit 接續的等待（`wait_since`）也算：main 一動核准就換一筆，計時不能跟著歸零。
+    let Some(since) = a.waiting_since() else { return Ok(None) };
+    let waited = waited_secs(since, &now);
     Ok(Some(Escalation { approval_id: a.id, waited_secs: waited, escalated: waited >= escalate_after_secs() }))
 }
 
@@ -392,6 +393,27 @@ pub async fn acquire(
                    "target_commit": approval.target_commit, "requested_commit": commit}),
         ));
     }
+    // 核准是給申請的那個人的：別人拿著它 acquire，連升級計時都一起借走（review2 sup #5）。
+    if approval.requester != owner {
+        return Err(LcError::conflict(
+            "the approval was granted to someone else",
+            json!({"reason": "approval_owner_mismatch", "approval_id": approval.id, "requester": approval.requester, "owner": owner,
+                   "hint": "acquire 的 --owner 要跟申請時的 --requester 一樣；要自己開窗口就自己申請一筆"}),
+        ));
+    }
+    // 一次核准一個窗口：這張已經開過一個、那個窗口過期沒 release（執行端掛了）時，**同一張**不能再開一次。
+    // 接手過期租約時只消耗「別張」核准（store::acquire_lease），同一張會被放過去（review2 sup #6）。
+    if let Some(l) = store::lease(&app.db, resource).await.map_err(|e| LcError::Upstream(e.to_string()))? {
+        let expired = l.released_at.is_none() && !l.held_at(&crate::db::now());
+        if expired && l.approval_id.as_deref() == Some(approval.id.as_str()) {
+            let _ = store::decide_approval_from(&app.db, &approval.id, "approved", "consumed", "daemon", Some("lease expired"), None).await;
+            return Err(LcError::conflict(
+                "this approval already opened a window that expired without being released",
+                json!({"reason": "approval_already_used", "approval_id": approval.id, "fence": l.fence,
+                       "hint": "那個窗口已經用掉這筆核准；要再開一個窗口請重新申請"}),
+            ));
+        }
+    }
 
     // 放寬與否只看**這一筆**核准等了多久：別人放著沒用的核准不能替它開門。
     // 以 acquire 的 owner 問：自己手上的 rebuild 不擋自己的 restart。
@@ -521,9 +543,9 @@ mod tests {
             .bind(id).bind(id).bind(id).bind(&now).execute(&app.db).await.unwrap();
     }
 
-    /// 已核准、還沒用掉的 rebuild 窗口，決定時間往前推 `mins` 分鐘。
+    /// 已核准、還沒用掉的 rebuild 窗口，決定時間往前推 `mins` 分鐘。申請者是 `ops`（acquire 的 owner 要跟它一樣）。
     async fn approved_window(app: &Arc<App>, mins: i64) -> String {
-        let a = store::create_approval(&app.db, "bot", "rebuild", "release", None, None, None).await.unwrap().approval;
+        let a = store::create_approval(&app.db, "ops", "rebuild", "release", None, None, None).await.unwrap().approval;
         store::decide_approval(&app.db, &a.id, "approved", "AGM", None, None).await.unwrap();
         let at = (chrono::Utc::now() - chrono::Duration::minutes(mins)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         sqlx::query("UPDATE supervisor_approvals SET decided_at=? WHERE id=?").bind(&at).bind(&a.id).execute(&app.db).await.unwrap();
@@ -651,9 +673,9 @@ mod tests {
         assert_eq!(s["held_leases"][0]["owner"], "someone-else");
     }
 
-    /// 已核准、還沒用掉的 restart 窗口（同 [`approved_window`]，只是用途不同）。
+    /// 已核准、還沒用掉的 restart 窗口（同 [`approved_window`]，只是用途不同）。申請者是 `k8bw2f`。
     async fn approved_restart(app: &Arc<App>, mins: i64) -> String {
-        let a = store::create_approval(&app.db, "bot", "restart", "release", None, None, None).await.unwrap().approval;
+        let a = store::create_approval(&app.db, "k8bw2f", "restart", "release", None, None, None).await.unwrap().approval;
         store::decide_approval(&app.db, &a.id, "approved", "AGM", None, None).await.unwrap();
         let at = (chrono::Utc::now() - chrono::Duration::minutes(mins)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         sqlx::query("UPDATE supervisor_approvals SET decided_at=? WHERE id=?").bind(&at).bind(&a.id).execute(&app.db).await.unwrap();
@@ -755,6 +777,101 @@ mod tests {
         assert_eq!(safety(app, &[]).await.unwrap()["safe"], false);
     }
 
+    /// 核准是給申請的那個人的：bot B 拿 bot A 已核准的申請 acquire，不開窗口、也不借走 A 的等待（review2 sup #5）。
+    #[tokio::test]
+    async fn someone_elses_approval_does_not_open_my_window() {
+        let e = crate::testing::env().await;
+        let app = &e.app;
+        let a = approved_window(app, 40).await; // 申請者 ops
+        let refused = acquire(app, "rebuild", "bot-b", &a, None, 300, true, &[]).await.unwrap_err();
+        let LcError::Conflict(detail) = &refused else { panic!("expected a conflict, got {refused:?}") };
+        assert_eq!(detail["reason"], "approval_owner_mismatch");
+        assert!(store::lease(&app.db, "rebuild").await.unwrap().is_none(), "什麼都沒拿到");
+        assert_eq!(store::approval(&app.db, &a).await.unwrap().unwrap().status, "approved", "A 的核准原封不動");
+        acquire(app, "rebuild", "ops", &a, None, 300, true, &[]).await.expect("申請者自己照常拿得到");
+    }
+
+    /// 執行端拿了窗口之後掛掉、租約過期沒 release：用**同一張**核准重試不能再開一個窗口（review2 sup #6）。
+    #[tokio::test]
+    async fn an_approval_whose_window_expired_unreleased_cannot_open_another() {
+        let e = crate::testing::env().await;
+        let app = &e.app;
+        let a = approved_window(app, 0).await;
+        acquire(app, "rebuild", "ops", &a, None, 300, true, &[]).await.unwrap();
+        let decided_at = store::approval(&app.db, &a).await.unwrap().unwrap().decided_at;
+        sqlx::query("UPDATE supervisor_leases SET expires_at='2000-01-01T00:00:00Z' WHERE resource='rebuild'").execute(&app.db).await.unwrap();
+
+        let refused = acquire(app, "rebuild", "ops", &a, None, 300, true, &[]).await.unwrap_err();
+        let LcError::Conflict(detail) = &refused else { panic!("expected a conflict, got {refused:?}") };
+        assert_eq!(detail["reason"], "approval_already_used");
+        let after = store::approval(&app.db, &a).await.unwrap().unwrap();
+        assert_eq!(after.status, "consumed", "那個窗口已經用掉它，當場記下來");
+        assert_eq!(after.decided_at, decided_at, "消耗不是裁示，不覆寫核准時間");
+        assert_eq!(after.decided_by.as_deref(), Some("AGM"));
+        let notes = store::approval_decisions(&app.db).await.unwrap();
+        assert!(notes.get(&a).is_some_and(|v| v.iter().any(|n| n["to"] == "consumed")), "誰在什麼時候消耗的記在歷程裡");
+
+        // 新申請的核准照常能接手那個過期的窗口。
+        let b = approved_window(app, 0).await;
+        acquire(app, "rebuild", "ops", &b, None, 300, true, &[]).await.expect("別張核准照常接手");
+    }
+
+    /// 換 commit 重新申請（supersedes）：舊的標 superseded、它的等待接過來，升級計時不因為 main 動了就歸零（review2 sup 新發現 2）。
+    #[tokio::test]
+    async fn a_new_commit_carries_the_wait_of_the_approval_it_supersedes() {
+        let e = crate::testing::env().await;
+        let (app, pid) = (&e.app, e.project_id.clone());
+        thinking_bot(app, &pid, "user").await;
+        let old = approved_window(app, 40).await;
+        let decided_old = store::approval(&app.db, &old).await.unwrap().unwrap().decided_at.unwrap();
+
+        let out = store::create_approval_superseding(&app.db, "ops", "rebuild", "release", Some("h2"), None, None, Some(&old)).await.unwrap();
+        assert_eq!(out.superseded.as_deref(), Some(old.as_str()));
+        let new = out.approval;
+        assert_eq!(new.wait_since.as_deref(), Some(decided_old.as_str()), "接過來的是舊那筆被核准的時間");
+        let o = store::approval(&app.db, &old).await.unwrap().unwrap();
+        assert_eq!(o.status, "superseded");
+        assert_eq!(o.refusal(&crate::db::now(), "rebuild", None), Some("approval_superseded"));
+        assert_eq!(o.decided_at.as_deref(), Some(decided_old.as_str()), "取代不覆寫核准時間");
+
+        // 新的剛被核准（decided_at = 現在），但等待從 40 分鐘前算：直接升級。
+        store::decide_approval(&app.db, &new.id, "approved", "AGM", None, None).await.unwrap();
+        let s = safety_for(app, &[], Some(&new.id)).await.unwrap();
+        assert_eq!((s["escalated"].as_bool(), s["safe"].as_bool()), (Some(true), Some(true)), "{s}");
+        assert!(s["waited_secs"].as_i64().unwrap() >= 2400);
+
+        // 接力可以一直往下傳；別人的、或用途不同的不能取代。
+        let third = store::create_approval_superseding(&app.db, "ops", "rebuild", "release", Some("h3"), None, None, Some(&new.id)).await.unwrap().approval;
+        assert_eq!(third.wait_since.as_deref(), Some(decided_old.as_str()));
+        for (who, purpose) in [("bot-b", "rebuild"), ("ops", "restart")] {
+            let err = store::create_approval_superseding(&app.db, who, purpose, "release", Some("h4"), None, None, Some(&third.id)).await.unwrap_err();
+            assert!(err.downcast_ref::<store::ApprovalSupersedeRefused>().is_some(), "{who}/{purpose}: {err}");
+        }
+        assert_eq!(store::approval(&app.db, &third.id).await.unwrap().unwrap().status, "pending", "被拒的取代什麼都不動");
+
+        // 舊的已經不能用（被駁）：新的照開，但不接等待。
+        store::decide_approval(&app.db, &third.id, "denied", "AGM", None, None).await.unwrap();
+        let fresh = store::create_approval_superseding(&app.db, "ops", "rebuild", "release", Some("h5"), None, None, Some(&third.id)).await.unwrap();
+        assert_eq!((fresh.superseded, fresh.approval.wait_since), (None, None));
+        assert_eq!(store::approval(&app.db, &third.id).await.unwrap().unwrap().status, "denied");
+    }
+
+    /// 被取代那筆還沒送給協調者的 `approval_requested` 一起收掉，不要叫它醒來裁示一筆作廢的申請。
+    #[tokio::test]
+    async fn superseding_retires_the_old_requests_unsent_inbox_event() {
+        let e = crate::testing::env().await;
+        let app = &e.app;
+        let old = store::create_approval(&app.db, "ops", "rebuild", "release", Some("h1"), None, None).await.unwrap().approval;
+        store::push_inbox(&app.db, &format!("approval:{}:requested", old.id), "approval_requested", None, None, None, &json!({})).await.unwrap();
+        store::create_approval_superseding(&app.db, "ops", "rebuild", "release", Some("h2"), None, None, Some(&old.id)).await.unwrap();
+        let (state, acked): (String, Option<String>) = sqlx::query_as("SELECT state, acked_by FROM supervisor_inbox WHERE event_key=?")
+            .bind(format!("approval:{}:requested", old.id))
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!((state.as_str(), acked.as_deref()), ("handled", Some("daemon")));
+    }
+
     fn approval(status: &str, purpose: &str, commit: Option<&str>, expires: Option<&str>) -> Approval {
         Approval {
             id: "ap1".into(),
@@ -771,6 +888,7 @@ mod tests {
             client_request_id: None,
             created_at: "2026-09-12T00:00:00Z".into(),
             updated_at: "2026-09-12T00:00:00Z".into(),
+            wait_since: None,
         }
     }
 

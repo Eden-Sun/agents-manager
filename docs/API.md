@@ -1062,11 +1062,15 @@ body 直接是檔案位元組（**不是** multipart），`Content-Type` 就是�
 - `GET /api/supervisor/build-inputs` → `{paths,embedded:[{path,symbol}],note}`：會編進 binary 的路徑（含 `docs/goals/agm-supervisor-persona.md`、`docs/goals/agm-responder-persona.md`、`scripts/agm.py`）。
 
 ### 核准與租約（SPEC §18.10）
-- `GET /api/supervisor/approvals` → `{approvals:[{id,requester,purpose,scope,target_commit,status,decided_by,decided_at,reason,expires_at,client_request_id,decisions:[{from,to,actor,reason,at}],…}]}`。
+- `GET /api/supervisor/approvals` → `{approvals:[{id,requester,purpose,scope,target_commit,status,decided_by,decided_at,reason,expires_at,client_request_id,wait_since,decisions:[{from,to,actor,reason,at}],…}]}`。
+  `status`：`pending` | `approved` | `denied` | `revoked` | `consumed` | `superseded`。`consumed`／`superseded` 不覆寫 `decided_at`／`decided_by`（誰、何時核准的留著；誰用掉的在 `decisions`）。
   `decisions` 是 append-only 的決定歷程（那一列只留最後一個狀態）。
-- `POST /api/supervisor/approvals {requester,purpose:"rebuild"|"restart",scope,target_commit?,expires_in_secs?,request_id?}` → 一筆 `pending`（回應多一個 `created`），並推 inbox `approval_requested` 給 AGM。
+- `POST /api/supervisor/approvals {requester,purpose:"rebuild"|"restart",scope,target_commit?,expires_in_secs?,request_id?,supersedes?}` → 一筆 `pending`（回應多 `created`、`superseded`），並推 inbox `approval_requested` 給 AGM。
+  `supersedes=<舊的 approval id>`：**同一個 requester、同一個 purpose** 換 commit 重新申請。舊的還是 `pending`／`approved` 而且沒過期時，同一個 transaction 裡標 `superseded`、
+  它還沒送出的 `approval_requested` 一起收掉（`acked_by:"daemon"`），新的 `wait_since` 接過舊的等待起點（舊的已核准＝它的 `min(wait_since, decided_at)`）；
+  舊的已經不能用就不動它、新的從頭算。requester 或 purpose 不同 → `409 approval_supersede_refused`，什麼都不寫。
   帶 `request_id`（穩定 id）時**冪等**：同一個 supervisor 下同一個 id 再送回**原本那一筆**（200、`created:false`），不新增、不重推 inbox；已經被 decide 的也照樣回它本人（狀態就是當時的裁示）。
-  同一個 id 但 `purpose`／`scope`／`target_commit` 不同 → `409 {"reason":"approval_request_mismatch", field, existing, requested, approval_id}`，原本那筆一個字都不動。
+  同一個 id 但 `requester`／`purpose`／`scope`／`target_commit` 不同 → `409 {"reason":"approval_request_mismatch", field, existing, requested, approval_id}`，原本那筆一個字都不動（另一顆 bot 撞同一個自然 id 拿不回別人的核准）。
   `expires_in_secs` 不參與比對：原本那筆的到期時間不會被重送改掉。不帶 `request_id` 就是舊行為，每次開一筆新的。
   CLI：`agm approval request --request-id <id>`（不確定送出去沒有時用同一個 id 重送，不要換新的）。
 - `POST /api/supervisor/approvals/{id}/decide {decision:"approve"|"deny"|"revoke",actor?,reason?,expires_in_secs?}`：同 decision 重送回 `idempotent:true`。
@@ -1077,7 +1081,7 @@ body 直接是檔案位元組（**不是** multipart），`Content-Type` 就是�
 - `GET /api/supervisor/maintenance/safety?exclude=<id,id>&approval=<id>&owner=<name>` → `{safe,working,in_flight,unreadable,blocked_waiting_for_user,queued_assignments,checked_at,excluded_bot_ids,
   escalated,waited_secs,escalation_approval_id,escalate_after_secs,delivering,held_leases,owner}`。唯讀快照；`blocked` 只回報不阻擋。
   CLI `agm lease safety --exclude-bot <id>` 傳此查詢。
-  `escalated=true`＝最早那筆已核准未消耗的 rebuild／restart 核准等超過 `escalate_after_secs`（預設 1800，`AM_MAINTENANCE_ESCALATE_MINS` 可調），
+  `escalated=true`＝最早那筆已核准未消耗的 rebuild／restart 核准等超過 `escalate_after_secs`（預設 1800，`AM_MAINTENANCE_ESCALATE_MINS` 可調；從 `min(wait_since, decided_at)` 算），
   此時 `safe` 只看 `delivering`（送達臨界區：`queued` 或 `in_flight`＋`delivery='pending'`）、`held_leases`（還握著的租約）與 `unreadable`，`working` 只回報不阻擋（SPEC §18.10）。
   沒有這種核准時 `waited_secs`／`escalation_approval_id` 是 `null`，`safe` 的判準完全照舊。
   `approval=<id>`＝只看**那一筆**核准等了多久（acquire 一律這樣算，用它自己的 `approval_id`）；不帶才退回看最早那筆還活著的。
@@ -1087,7 +1091,10 @@ body 直接是檔案位元組（**不是** multipart），`Content-Type` 就是�
   acquire 一律以自己的 `owner` 問（SPEC §18.10「自己的租約不擋自己」）。
 - `GET /api/supervisor/leases` → `{leases:[{resource,owner,approval_id,fence,target_commit,acquired_at,expires_at,released_at,held}]}`。
 - `POST /api/supervisor/leases/{rebuild|restart}/acquire {owner,approval_id,commit?,ttl_secs?,require_idle=true,exclude_bot_ids?}` → `{lease,lease_token,approval,safety}`；同 lock 內重驗核准與 idle，
-  搶輸 409 `lease_held`。ttl 預設 900、上限 3600。`POST …/renew {owner,fence,ttl_secs?,lease_token}`、`POST …/release {owner,fence,lease_token}`；舊 fence 409 `lease_lost`；release 把核准標 `consumed`。
+  搶輸 409 `lease_held`。`owner` 必須等於核准的 `requester`，否則 409 `approval_owner_mismatch`（別人的核准開不了你的窗口，也借不走它的等待）。
+  這張核准開過的窗口**過期沒 release**（執行端掛了）時，同一張再 acquire → 409 `approval_already_used`，並當場標 `consumed`（note `lease expired`）；要再開就重新申請。
+  ttl 預設 900、上限 3600。`POST …/renew {owner,fence,ttl_secs?,lease_token}`、`POST …/release {owner,fence,lease_token}`；舊 fence 409 `lease_lost`；release 把核准標 `consumed`。
+  **renew 不接受 `force`**（400）：force 只用來收掉持有者已經不在的窗口，不是替別人延長。
   **`lease_token` 只在 acquire 的回應裡出現一次**（`GET /leases`、`GET /api/supervisor`、WS 事件都不含它）。renew／release 不帶或帶錯 → `403 {"reason":"lease_token_required"|"lease_token_mismatch"}`，租約不動。
   強制接管：`{force:true, reason:"…"}`，**只有 AGM 角色**（`X-AM-Bot-Id`＋該 bot 的 hook token）可以；其他呼叫端 403 `lease_force_forbidden`。`reason` 必填（否則 400），不比對 owner／fence，寫進 `supervisor_notes` 的 `lease_force_release`（含 `by_role`）。升級前建立的租約沒有 token，不帶也能 release（見 SPEC §18.10）。
   持有 `restart` 租約期間 assignment 派送 hold（留 `queued`、不算重試）。
