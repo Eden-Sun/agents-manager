@@ -184,6 +184,8 @@ am_forward_with_env() {
     _sub1=$1
     _sub2=$2
     shift 2
+    _purpose=""
+    _has_workspace=0
     _n=$#
     _i=0
     while [ "$_i" -lt "$_n" ]; do
@@ -191,6 +193,20 @@ am_forward_with_env() {
         shift
         _i=$((_i + 1))
         case "$_a" in
+            # 我們自己的旗標（§6.5e 的用途標記），不轉給 herdr。
+            --purpose)
+                if [ "$_i" -lt "$_n" ]; then
+                    _purpose=$1
+                    shift
+                    _i=$((_i + 1))
+                fi
+                continue
+                ;;
+            --purpose=*)
+                _purpose=${_a#--purpose=}
+                continue
+                ;;
+            --workspace | --workspace=*) _has_workspace=1 ;;
             --env)
                 if [ "$_i" -lt "$_n" ]; then
                     case "$1" in
@@ -232,7 +248,12 @@ am_forward_with_env() {
         esac
         set -- "$@" "$_a"
     done
-    for _k in CLAUDE_CONFIG_DIR CODEX_HOME AM_BOT_ID AM_HOOK_TOKEN AM_PORT AM_RUN_ID AM_AGENT_NAME AM_KIND AM_MODEL AM_EFFORT AM_REAL_HERDR PATH; do
+    # §6.5e：`tab create` 沒指定 workspace 時落在**專案自己的** workspace，不要開到別的專案去
+    # （w168 收到 wt 的 dev server 就是這樣來的）。`pane split` 以母 pane 為基準，本來就同 workspace。
+    if [ "$_has_workspace" = 0 ] && [ "$_sub1 $_sub2" = "tab create" ] && [ -n "${AM_WORKSPACE_ID:-}" ]; then
+        set -- "$@" --workspace "$AM_WORKSPACE_ID"
+    fi
+    for _k in CLAUDE_CONFIG_DIR CODEX_HOME AM_BOT_ID AM_HOOK_TOKEN AM_PORT AM_RUN_ID AM_AGENT_NAME AM_KIND AM_MODEL AM_EFFORT AM_PROJECT_ID AM_WORKSPACE_ID AM_REAL_HERDR PATH; do
         eval "_v=\${$_k:-}"
         [ -n "$_v" ] || continue
         case " $_seen " in
@@ -240,6 +261,24 @@ am_forward_with_env() {
         esac
         set -- "$@" --env "$_k=$_v"
     done
+    # §6.5e：開出來的 pane 要能說出「這是誰、為了什麼開的」。歸屬由 daemon 從行程環境推斷（AM_BOT_ID
+    # 一定帶得下去），這裡只補**用途**：`--purpose <文字>` 是我們自己的旗標，轉發前剝掉。
+    # 沒有 curl／沒有 token 就只是少一個字串，pane 照開。
+    if [ -n "$_purpose" ] && [ -n "${AM_BOT_ID:-}" ] && [ -n "${AM_HOOK_TOKEN:-}" ] && [ -n "${AM_PORT:-}" ] && command -v curl >/dev/null 2>&1; then
+        _out=$("$AM_HERDR" "$_sub1" "$_sub2" "$@")
+        _rc=$?
+        printf '%s\n' "$_out"
+        [ "$_rc" -eq 0 ] || exit "$_rc"
+        # 回應裡第一個 pane_id 就是剛開出來的那顆。
+        _pane=$(printf '%s' "$_out" | tr ',' '\n' | sed -n 's/.*"pane_id":"\([^"]*\)".*/\1/p' | head -n 1)
+        [ -n "$_pane" ] || exit 0
+        curl -s -m 2 -X POST "http://127.0.0.1:${AM_PORT}/relay/pane" \
+            -H "X-AM-Bot-Token: ${AM_HOOK_TOKEN}" \
+            --data-urlencode "bot_id=${AM_BOT_ID}" \
+            --data-urlencode "pane_id=${_pane}" \
+            --data-urlencode "purpose=${_purpose}" >/dev/null 2>&1 || true
+        exit 0
+    fi
     exec "$AM_HERDR" "$_sub1" "$_sub2" "$@"
 }
 
@@ -352,6 +391,32 @@ mod tests {
             let stdout = String::from_utf8_lossy(&out.stdout).lines().map(String::from).collect();
             (stdout, String::from_utf8_lossy(&out.stderr).into_owned())
         }
+    }
+
+    /// §6.5e：`--purpose` 是我們自己的旗標，不轉給 herdr；`tab create` 沒指定 workspace 時補專案的。
+    #[test]
+    fn pane_creation_strips_our_purpose_flag_and_defaults_the_workspace() {
+        let s = Sandbox::new();
+        let (out, _) = s.run(
+            &[("AM_WORKSPACE_ID", "w1HJ"), ("AM_PROJECT_ID", "proj-1")],
+            &["tab", "create", "--cwd", "/tmp", "--purpose", "dev-server"],
+        );
+        assert!(!out.iter().any(|a| a == "--purpose" || a == "dev-server"), "herdr 不認得這個旗標：{out:?}");
+        assert!(out.windows(2).any(|w| w[0] == "--workspace" && w[1] == "w1HJ"), "{out:?}");
+        assert!(out.windows(2).any(|w| w[0] == "--env" && w[1] == "AM_PROJECT_ID=proj-1"), "{out:?}");
+
+        // 自己指定 workspace 就尊重，不補第二個。
+        let (out, _) = s.run(
+            &[("AM_WORKSPACE_ID", "w1HJ")],
+            &["tab", "create", "--workspace", "w168", "--purpose=shell"],
+        );
+        assert_eq!(out.iter().filter(|a| *a == "--workspace").count(), 1, "{out:?}");
+        assert!(out.iter().any(|a| a == "w168"), "{out:?}");
+        assert!(!out.iter().any(|a| a.starts_with("--purpose")), "{out:?}");
+
+        // `pane split` 以母 pane 為基準，本來就同 workspace：不補。
+        let (out, _) = s.run(&[("AM_WORKSPACE_ID", "w1HJ")], &["pane", "split", "--pane", "w168:p1"]);
+        assert!(!out.iter().any(|a| a == "--workspace"), "{out:?}");
     }
 
     #[test]

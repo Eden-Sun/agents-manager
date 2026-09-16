@@ -191,6 +191,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/ws", get(ws_handler))
         .route("/hook/{provider}", post(crate::hookrecv::receive))
         .route("/relay/announce", post(relay_announce))
+        // §6.5e：bot 開完 pane 後回報用途（歸屬另外從行程環境推斷）。
+        .route("/relay/pane", post(relay_pane))
         .fallback(get(crate::assets::serve))
         .with_state(app)
 }
@@ -202,6 +204,36 @@ struct RelayAnnounce {
     bot_id: String,
     to_agent: String,
     text: String,
+}
+
+#[derive(Deserialize)]
+struct RelayPane {
+    bot_id: String,
+    pane_id: String,
+    #[serde(default)]
+    purpose: String,
+}
+
+/// `POST /relay/pane`（表單，同 `/relay/announce` 那條路）：記下這顆 pane 是為了什麼開的。
+/// 歸屬不靠這裡——那是掃描時從 pane 行程樹的 `AM_BOT_ID` 推斷的（§6.5e）；報不成功只是少一個用途字串。
+async fn relay_pane(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    axum::extract::Form(body): axum::extract::Form<RelayPane>,
+) -> (StatusCode, Json<Value>) {
+    let token = headers.get("X-AM-Bot-Token").and_then(|v| v.to_str().ok()).unwrap_or("");
+    let bot = match db::bot(&app.db, &body.bot_id).await {
+        Ok(Some(b)) if b.deleted_at.is_none() && !token.is_empty() && token == b.hook_token => b,
+        _ => return (StatusCode::UNAUTHORIZED, Json(json!({"error": "unknown bot or bad token"}))),
+    };
+    let host = db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| crate::config::LOCAL_HOST.to_string());
+    match crate::panes::note_purpose(&app, &host, &body.pane_id, &bot, body.purpose.trim()).await {
+        Ok(()) => (StatusCode::OK, Json(json!({"pane_id": body.pane_id, "purpose": body.purpose}))),
+        Err(e) => {
+            tracing::warn!(pane = %body.pane_id, error = ?e, "could not record a pane purpose");
+            (StatusCode::OK, Json(json!({"pane_id": body.pane_id, "recorded": false})))
+        }
+    }
 }
 
 async fn relay_announce(
