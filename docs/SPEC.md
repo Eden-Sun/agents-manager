@@ -623,8 +623,9 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
   `POST /api/panes/{id}/close` 同樣：有 active run 或 herdr 說裡面有 agent → 403；pane 不在 → 刪列 404；即時的分類是 service、
   或讀不到事實，沒帶 `confirm` 就 409。另外 daemon 每 60 秒重掃一次 pane（只掃不關，GC 與通知仍跟著對帳）：pane 裡開始跑
   dev server 不會產生任何 herdr 事件，對帳也不定期跑。
-- 面板對被 trace 的 pane 不給「結束 shell」：那顆 `DELETE` 只認面板自己開的，按了會是什麼都不做的按鈕；關這種 pane 走
-  `POST /api/panes/{id}/close`（服務 pane 要 `confirm`），自動關照上面的生命週期。
+- 面板對被 trace 的 pane 不給「結束 shell」；關這種 pane 走 `POST /api/panes/{id}/close`（服務 pane 要 `confirm`），自動關照上面的生命週期。
+  面板自己開的 shell 在 daemon 重啟後只剩 `panes` 表認得：`DELETE /api/hosts/{name}/shells/{pane_id}` 跟白名單一樣認兩份，
+  記憶體沒有就照 `panes` 表關（按「結束 shell」時已經問過人，視同 confirm），兩邊都沒有 404——不再回 200 卻什麼都沒關（web review M2）。
 
 **上面幾點已實作**（`db2e3f2` daemon、`f3c5ac8` web，2026-09-16 使用者直接指示先做；打字權限與即時複查是 review 2026-09-16 的修正）。
 

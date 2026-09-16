@@ -1585,7 +1585,7 @@ async fn host_shell_keys(
     Ok((StatusCode::OK, Json(json!({}))).into_response())
 }
 
-/// Idempotent.
+/// 記憶體清單或 `panes` 表認得的才關；兩邊都沒有 404（`shell::close`）。
 async fn close_host_shell(
     State(app): State<Arc<App>>,
     Path((name, pane_id)): Path<(String, String)>,

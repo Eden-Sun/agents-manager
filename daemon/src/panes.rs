@@ -1475,9 +1475,16 @@ pub async fn close(
     Path(pane_id): Path<String>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, LcError> {
+    let host = q.get("host").cloned().unwrap_or_else(|| crate::config::LOCAL_HOST.to_string());
+    let confirmed = q.get("confirm").map(|v| v == "true" || v == "1").unwrap_or(false);
+    close_tracked(&app, &host, &pane_id, confirmed).await.map(Json)
+}
+
+/// [`close`] 的本體；`DELETE /api/hosts/{name}/shells/{pane_id}` 找不到記憶體那份時也走這裡（web review M2）。
+pub(crate) async fn close_tracked(app: &Arc<App>, host: &str, pane_id: &str, confirmed: bool) -> Result<Value, LcError> {
+    let (app, host, pane_id) = (app.clone(), host.to_string(), pane_id.to_string());
     let sql = |e: sqlx::Error| LcError::Upstream(e.to_string());
     let up = |e: anyhow::Error| LcError::Upstream(format!("{e:#}"));
-    let host = q.get("host").cloned().unwrap_or_else(|| crate::config::LOCAL_HOST.to_string());
     let row = sqlx::query("SELECT * FROM panes WHERE host=? AND pane_id=?")
         .bind(&host)
         .bind(&pane_id)
@@ -1523,7 +1530,6 @@ pub async fn close(
         }
         None => true,
     };
-    let confirmed = q.get("confirm").map(|v| v == "true" || v == "1").unwrap_or(false);
     if needs_confirm && !confirmed {
         // 關掉服務 pane 會殺掉裡面在跑的東西：要人看過 port 再點一次。
         return Err(LcError::conflict(
@@ -1546,5 +1552,5 @@ pub async fn close(
         .map_err(sql)?;
     app.pane_live.lock().await.remove(&(host.clone(), pane_id.clone()));
     tracing::info!(host, pane_id, kind = %info["kind"], "pane closed by request");
-    Ok(Json(json!({"closed": true, "pane": info})))
+    Ok(json!({"closed": true, "pane": info}))
 }

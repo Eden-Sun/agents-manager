@@ -518,7 +518,7 @@ Project 可在另一台機器，daemon 透過 SSH 轉發連遠端 herdr。`host`
 | GET | `/api/hosts/{name}/shells/{pane_id}/terminal?source=visible&lines=200` | `{host,pane_id,cwd,source,text,revision,truncated,columns,rows}`；`source`／`lines` 同 §7 |
 | POST | `/api/hosts/{name}/shells/{pane_id}/text` | `{"text","enter"?:true}`；Enter 是另一次 `send_keys(["enter"])`；`{"text":"","enter":true}` = 只按 Enter |
 | POST | `/api/hosts/{name}/shells/{pane_id}/keys` | `{"keys":["ctrl+c"]}` 原樣送 herdr；空陣列 400 |
-| DELETE | `/api/hosts/{name}/shells/{pane_id}` | `pane.close`（分頁空了一起收）；冪等，清單沒有也 200 |
+| DELETE | `/api/hosts/{name}/shells/{pane_id}` | `pane.close`（分頁空了一起收）；記憶體清單沒有就照 `panes` 表關（視同 `confirm=true`，agent／active run 仍 403），兩邊都沒有 404 |
 
 - 建立：先借該主機某 project 的 workspace 開新 tab，借不到才 `workspace.create`（標籤 `shell`，不寫回 `projects.workspace_id`）。回的 `cwd` 是 herdr 實際開起來的目錄。
 - **鍵盤同步**（UI 的「鍵盤同步」開關）沒有新端點：每一下按鍵是一次 `…/keys`（`herdrKeyFromEvent` 譯成 herdr 鍵名），貼上是一次 `…/text` 且 `enter:false`。
@@ -530,7 +530,8 @@ Project 可在另一台機器，daemon 透過 SSH 轉發連遠端 herdr。`host`
   `403 {"error":"read_only_pane","listen_ports":[…],"message":"…"}`；沒 port 的（含跑著 vim 的 `service`）可以打字。
   有 active run 的 pane 一律 `403 {"error":"agent_pane","message":"…"}`（連看都不給）。沒被 trace 的 pane 照舊 404。
   `text`／`keys` 之前即時問 herdr（結果重用 3 秒）：裡面現在有 agent 403 `agent_pane`、pane 不在 404、本機重對到 port 403 `read_only_pane`；問不到退回表上的 port。遠端不算 port。
-  `DELETE` 仍只認這裡開的那幾顆；關被 trace 的 pane 走 `POST /api/panes/{id}/close`。
+  `DELETE` 同樣認兩份（daemon 重啟後面板自己開的 shell 只剩 `panes` 表認得；以前找不到就回 200、什麼都沒關）。
+  一般要關被 trace 的 pane 仍走 `POST /api/panes/{id}/close`（服務 pane 會先 409 要人確認）。
 - `recent` / `recent_unwrapped` 只給**已捲出畫面**的內容：沒捲過的 pane 兩者回 `text:""` + `truncated:true`，前端要說明而不是顯示空白。
 
 ## 身份 identities（SPEC §16）
