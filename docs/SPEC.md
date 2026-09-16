@@ -472,7 +472,8 @@ daemon 每次起 pane 前把 POSIX `sh` 包裝腳本裝到 `<bot 目錄>/bin/her
 
 1. frontmatter `description` 換成 AG Man 版（herdr 原文說「使用者明確提到才用」，對 AG Man 裡的 bot 剛好相反）。
 2. body 最前面插 **AG Man 規則**（`lifecycle::child_agent_rules`）：先 `herdr agent list` 找自己底下閒置的 child 重用、命名、`herdr pane split --pane "$HERDR_PANE_ID"`、
-   不要 `git stash`/`--autostash`、子 agent 會掛在自己底下、帳號與 hook 自動帶進子 pane；瀏覽器一律用 ego lite、一個 bot 最多一個分頁、結束就關。
+   不要 `git stash`/`--autostash`、子 agent 會掛在自己底下、帳號與 hook 自動帶進子 pane；瀏覽器一律用 ego lite、一個 bot 最多一個分頁、結束就關；
+   輸出檔案規則（§6.5f：scratchpad 只放中間產物、給使用者的放 `$AM_OUTBOX`、私鑰／憑證／DB 禁放）。
 
 herdr 的 CLI 說明原樣保留（升級會帶進新文字）。裝不起來只 warning。`child_agent_rules` 是同一份文字來源：claude skill 與三種 kind 的 persona
 （`--append-system-prompt` / `--rules` / `developer_instructions`）都用它。
@@ -635,6 +636,36 @@ listen port 只在本機算（pane 行程樹的 pid 對 `lsof -nP -iTCP -sTCP:LI
   兩邊責任不重疊（登入 pane 有前景程式，daemon 的 GC 只碰行程樹只有 shell 的）。
 - 門檻與「不動使用者手開」寫在 config（`[panes] idle_close_secs` 預設 21600、`scratch_name` 預設 `scratch`、
   `close_log_lines` 預設 20），不寫死。`idle_close_secs` 另外要能用環境變數覆寫（與 §18.8 的保險絲門檻同一套規矩：看不懂／0／負數一律回預設——一個手滑的值不該把 GC 變成「立刻關」）。
+
+### 6.5f 給使用者的輸出檔案：outbox（使用者 2026-09-16 裁示）
+
+2026-09-16 scratchpad 下載功能把 bot scratchpad 裡的私鑰（`.pem`）與正式 DB 複本（`*.sqlite3`、`*.db`）放上網頁可下載。
+根因是 scratchpad 被當成輸出目錄：它是 bot 的工作桌，什麼都有。裁示：**scratchpad 不再作為輸出目錄**，另開 outbox。
+
+#### 契約
+- **路徑**：`<data_dir>/outbox/<bot_id>/`（正式實例＝`~/.config/agents-manager/outbox/<bot_id>/`）。bot id 只收英數才拼進路徑。
+- **env**：本機 bot 啟動時 daemon `mkdir -p` 並注入 `AM_OUTBOX=<絕對路徑>`。跟 `AM_DATA_DIR` 一樣是保留變數：
+  在 identity.env／bot.env 合併**之後**才由 daemon 蓋回去（被改掉的話 bot 寫到別處，使用者看不到）。
+  herdr shim 的轉發清單帶 `AM_OUTBOX`（§6.5b），子 pane 繼承母 bot 的 outbox。**遠端主機不注入**（那台的檔案這台 daemon 拿不到），
+  bot.env 裡的自訂值也清掉。
+- **時效**：檔案保留 1 小時（`outbox::TTL_SECS = 3600`），以 **mtime** 起算。
+- **清理者**：AGM 的 launchd `com.agm.outbox-gc`（`supervisor/AGM/bin/outbox-gc.sh`）每 10 分鐘刪掉 `-mindepth 2` 底下
+  mtime 超過 60 分鐘的檔，並收掉空目錄。**daemon 不清**。空目錄會被收掉，所以 daemon 啟動時建的目錄不保證還在：
+  bot **寫之前一律 `mkdir -p "$AM_OUTBOX"`**。
+- **禁放清單**：私鑰、憑證、DB 一律不得放 scratchpad 或 outbox——`.pem` `.key` `.p12` `.pfx` `.jks` `.keystore` `.ppk` `.kdbx` `.env`、
+  `id_rsa*`／`id_ed25519*`、`*.sqlite*`、`*.db`（含 `-wal`／`-shm`／`.bak`）、DB 複本、瀏覽器 profile。要長期保留的東西進 repo 或 `reports/`。
+- **規則三條**（寫進 `lifecycle::child_agent_rules`，claude skill 與三種 kind 的 persona 共用，所以不在本 repo 的 bot 也讀得到；
+  本 repo 的 CLAUDE.md 另有同一節）：
+  1. scratchpad 只放中間產物，不給使用者，不可放私鑰／憑證／DB 複本。
+  2. 要給使用者的檔案放 `$AM_OUTBOX`，1 小時後由 AGM 清掉；長期保留的進 repo 或 `reports/`。
+  3. 私鑰／憑證／DB 一律不得進 scratchpad 或 outbox。
+
+#### API 與 UI
+- `GET /api/bots/{id}/outbox`、`GET /api/bots/{id}/outbox/file?path=`（API.md）：**只讀 outbox，完全不讀 scratchpad**。
+  列第一層一般檔案（符號連結、子目錄不列），每個帶 `expires_at`／`remaining_secs`；下載路徑解開後必須在該 bot 的 outbox 內，
+  指到 scratchpad 的絕對路徑或符號連結一律 404。禁放清單在 daemon 端再擋一次（檔名＋檔頭：`SQLite format 3`、PEM 私鑰），不列、下載 404。
+- 舊的 `/api/bots/{id}/scratchpad*` 明確 404。
+- 網頁「檔案暫存」下半段「bot 給你的檔案」：每列標剩餘時間（剩不到 10 分鐘用警告色），附件下載（UI-DECISIONS）。
 
 ### 6.5.1 採用使用者的 Herdr `default` session
 

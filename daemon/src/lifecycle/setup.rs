@@ -628,7 +628,15 @@ PATH 上的 herdr 會幫你補，但你自己要寫對。\n\
 - **一個 bot 最多一個分頁**（你和你的子 agent 各自算一個）：用 `openOrReuseTab` 在同一個分頁裡換頁，\
 **禁止**一個網址開一個新分頁；task space 一律重用（`useOrCreateTaskSpace(\"{agent_name}\")`）。\n\
 - **結束就關分頁**：工作做完、或收掉子 agent 之前，**必須先** `closeTab` / `completeTaskSpace(…, {{ keep: false }})`。\
-分頁留著不關，RAM 就是這樣被吃光的。"
+分頁留著不關，RAM 就是這樣被吃光的。\n\
+\n\
+輸出檔案（同樣是硬規則，使用者 2026-09-16 裁示）：\n\
+\n\
+- **scratchpad 只放中間產物**（腳本、log、暫存資料）。scratchpad **不是**給使用者的地方，**禁止**把要交給使用者的檔案放在那裡。\n\
+- **要交給使用者的檔案一律放 `$AM_OUTBOX`**（`~/.config/agents-manager/outbox/<AM_BOT_ID>/`）。寫之前**必須先** `mkdir -p \"$AM_OUTBOX\"`（空目錄會被清掉）。\
+放進去 **1 小時後由 AGM 自動刪除**；要長期保留的放 repo 或 `reports/`。`$AM_OUTBOX` 沒有值（遠端主機）時**禁止**改放 scratchpad，直接在對話裡講清楚檔案在哪台機器的哪個路徑。\n\
+- **私鑰、憑證、DB 一律禁止放進 scratchpad 或 `$AM_OUTBOX`**（`.pem`、`.key`、`.p12`、`.env`、`*.sqlite*`、`*.db`、DB 複本、瀏覽器 profile）。\
+驗證要用 DB 複本時，做完**必須當下刪掉**。"
     )
 }
 
@@ -1005,6 +1013,30 @@ mod model_args_tests {
         assert!(rule.contains("必須"));
         assert!(rule.contains("禁止"));
         assert!(!rule.contains("請"), "no polite softeners in an injected rule");
+    }
+
+    /// §6.5f（使用者 2026-09-16 裁示）：每顆 bot 都讀得到輸出規則——claude 的 skill 與三種 kind 的 persona
+    /// 都用這份文字，所以不在 agents-manager 專案裡的 bot 也拿得到。
+    #[test]
+    fn every_bot_is_told_where_user_files_go_and_what_never_goes_there() {
+        let rule = super::child_agent_rules("proj-abc123");
+        assert!(rule.contains("scratchpad 只放中間產物"), "{rule}");
+        assert!(rule.contains("$AM_OUTBOX"));
+        assert!(rule.contains("mkdir -p \"$AM_OUTBOX\""), "空目錄會被清掉，寫之前要自己建");
+        assert!(rule.contains("1 小時"));
+        assert!(rule.contains("reports/"));
+        for banned in [".pem", ".key", ".sqlite", ".db", "DB 複本"] {
+            assert!(rule.contains(banned), "禁放清單要列出 {banned}");
+        }
+        // 真的送到 bot 手上：三種 kind 的 persona 參數裡有，claude 的 skill 文件裡也有。
+        let mut b = bot("claude", None, None, false);
+        for kind in ["claude", "grok", "codex"] {
+            b.kind = kind.into();
+            let args = super::persona_args(&b, "proj-abc123").join(" ");
+            assert!(args.contains("$AM_OUTBOX"), "{kind}: {args}");
+        }
+        let doc = super::herdr_skill_doc("---\nname: herdr\ndescription: x\n---\n# herdr\n", "proj-abc123");
+        assert!(doc.contains("$AM_OUTBOX"), "{doc}");
     }
 }
 

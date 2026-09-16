@@ -67,8 +67,8 @@ nohup ./target/release/agents-managerd serve >> ~/.config/agents-manager/daemon.
 
 ## 給使用者的檔案：outbox，不是 scratchpad（使用者 2026-09-16）
 - scratchpad 只放中間產物，不再當成給使用者的輸出目錄。
-- 要交給使用者的檔案放 outbox：`~/.config/agents-manager/outbox/<AM_BOT_ID>/`（自己 `mkdir -p`；daemon 之後會注入 `$AM_OUTBOX` 指到同一處）。只保留 1 小時，AGM 每 10 分鐘清掉超過 1 小時的檔；要長期保留的放 repo 或 `reports/`。
-- 私鑰、憑證、DB（含 DB 複本、瀏覽器 profile 這類會帶 cookie／token 的目錄）一律不得放 scratchpad 或 outbox；headless 瀏覽器的 `--user-data-dir` 用完就刪。
+- 要交給使用者的檔案放 outbox：`$AM_OUTBOX`＝`~/.config/agents-manager/outbox/<AM_BOT_ID>/`（本機 bot 啟動時 daemon 注入並建好，子 pane 繼承；沒有這個變數的舊 pane 自己拼同一個路徑）。空目錄會被清理收掉，**寫之前一律 `mkdir -p "$AM_OUTBOX"`**。只保留 1 小時，AGM 的 `com.agm.outbox-gc` 每 10 分鐘清掉超過 1 小時的檔；要長期保留的放 repo 或 `reports/`。網頁「檔案暫存」只列 outbox 的檔案，scratchpad 一律看不到（SPEC §6.5f）。
+- 私鑰、憑證、DB（含 DB 複本、瀏覽器 profile 這類會帶 cookie／token 的目錄）一律不得放 scratchpad 或 outbox；headless 瀏覽器的 `--user-data-dir` 用完就刪。複本 migrate 之類要用 DB 複本的驗證，做完當下刪掉複本。
 
 ## 回報格式
 三到五行：做了什麼（commit hash）、怎麼驗的（數字）、要派工者做的事（例如重啟 daemon）、沒做到的與原因。不要貼整段 diff。
