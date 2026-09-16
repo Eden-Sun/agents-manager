@@ -56,9 +56,25 @@ async fn post_setup(State(app): State<Arc<App>>, body: Option<Json<SetupIn>>) ->
 
 async fn post_start(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
     let _g = super::lock().await;
-    responder::start(&app, None).await?;
+    // 先寫「要它跑」再啟動（review 2026-09-16 c3 M1）：start 失敗的話 desired 還是 0，看門狗不管、
+    // 健康也說 healthy，而 bot 的申請已經排給它——沒有任何人會再試。失敗交給看門狗的有界重試。
     roles::set_desired_running(&app.db, Role::Responder, true).await.map_err(up)?;
+    responder::start(&app, None).await?;
     Ok(Json(responder::status_json(&app).await?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// start 失敗（這裡是 herdr socket 不存在）時「要它跑」已經記下，看門狗會接手重試。
+    #[tokio::test]
+    async fn a_failed_start_still_leaves_the_responder_wanted() {
+        let app = super::super::bot_requests::flow_tests::app().await;
+        super::super::bot_requests::flow_tests::configure_responder(&app).await;
+        assert!(post_start(State(app.clone())).await.is_err(), "測試環境沒有 herdr，start 一定失敗");
+        assert_eq!(roles::get(&app.db, Role::Responder).await.unwrap().desired_running, 1);
+    }
 }
 
 async fn post_stop(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
