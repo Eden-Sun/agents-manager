@@ -626,13 +626,16 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
 - 面板對被 trace 的 pane 不給「結束 shell」：那顆 `DELETE` 只認面板自己開的，按了會是什麼都不做的按鈕；關這種 pane 走
   `POST /api/panes/{id}/close`（服務 pane 要 `confirm`），自動關照上面的生命週期。
 
-**上面四點已實作**（`db2e3f2` daemon、`f3c5ac8` web，2026-09-16 使用者直接指示先做）。以下三點**尚未實作，待巡檢 review**：
+**上面幾點已實作**（`db2e3f2` daemon、`f3c5ac8` web，2026-09-16 使用者直接指示先做；打字權限與即時複查是 review 2026-09-16 的修正）。
 
-- **對不到專案的那顆固定 `scratch` 也要點得到**。它不屬於任何專案，所以不能掛在專案節點底下：放在側欄底部「開 shell」旁，
-  固定一列、名字就是 `[panes] scratch_name`。資料來自 `GET /api/panes?unowned=1`；**哪一顆是 scratch 由 daemon 標**
-  （該列多一個 `scratch: true`，規則同 GC 的「`owned_by='none'` 裡 `first_seen` 最早的那顆」），前端不自己重算——兩邊各算一次
-  遲早會對不上，UI 會把 GC 準備關掉的那顆當成 scratch 顯示。其餘沒歸屬的（本來就不該存在）一起列在同一組、標「多出來的」，
-  點得進去，讓人自己看完決定。**這一行要動 `panes::list_all` 的輸出**，是 k8bw2f 的檔：請裁示由誰加。
+- **對不到專案的那顆固定 `scratch` 也要點得到**（已實作：daemon 的 `scratch` 欄、web 的 `SidebarUnownedPanes`）。它不屬於任何專案，
+  所以不掛在專案節點底下（`GET /api/projects/{id}/panes` 不回沒歸屬的）：放在側欄底部「開 shell」旁，scratch 固定第一列。
+  資料來自 `GET /api/panes?unowned=1`；**哪一顆是 scratch 由 daemon 標**（該列 `scratch: true`，規則見上面「生命週期」），
+  前端不自己重算——兩邊各算一次遲早會對不上，UI 會把 GC 準備關掉的那顆當成 scratch 顯示。其餘沒歸屬的（本來就不該存在）
+  一起列在同一組、標「多出來的」，點得進去，讓人自己看完決定。
+
+以下兩點**尚未實作，待巡檢 review**：
+
 - **`GET /api/hosts/{name}/shells`（`list()`）不能改成「panes 表裡所有 shell」**。這支的用途是「面板自己開的 shell」：
   `openHostShell` 靠它**接回**上一顆（沒帶 cwd 時直接重用最後一顆），`MAX_PER_HOST=8` 也數它。把 bot 開的 shell pane
   一起算進來，按「開 shell」就可能接到某顆 bot 正在用的 build shell，使用者打的字進了別人的 pane；額度也會被 bot 的 pane 吃滿。

@@ -1208,6 +1208,43 @@ mod tests {
         assert_eq!(rescan(app, "local").await.unwrap().panes, 0, "變成 agent pane 就不歸這張表");
     }
 
+    /// web review M4：沒歸屬的 pane（含 scratch）以前掛在同一台**每個**專案底下。現在專案清單只回自己的，
+    /// 沒歸屬的只走 `?unowned=1`，而且標出哪一顆是 scratch。
+    #[tokio::test]
+    async fn unowned_panes_are_listed_on_their_own_with_the_scratch_marked() {
+        let app = app().await;
+        project_and_bot(&app).await;
+        let now = crate::db::now();
+        for (id, project, owned_by, scratch) in
+            [("w1:pMine", Some("p1"), "bot", 0), ("w1:pScratch", None, "none", 1), ("w1:pExtra", None, "none", 0)]
+        {
+            sqlx::query(
+                "INSERT INTO panes (pane_id, host, kind, project_id, owned_by, scratch, last_output_at, first_seen, last_seen)
+                 VALUES (?, 'local', 'shell', ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(id)
+            .bind(project)
+            .bind(owned_by)
+            .bind(scratch)
+            .bind(&now)
+            .bind(&now)
+            .bind(&now)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        }
+        let ids = |v: &Value| v["panes"].as_array().unwrap().iter().map(|p| p["pane_id"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        let project = list_for_project(State(app.clone()), Path("p1".into())).await.unwrap().0;
+        assert_eq!(ids(&project), vec!["w1:pMine".to_string()], "沒歸屬的不掛在專案底下");
+
+        let unowned = list_all(State(app.clone()), Query(HashMap::from([("unowned".to_string(), "1".to_string())]))).await.unwrap().0;
+        assert_eq!(ids(&unowned), vec!["w1:pScratch".to_string(), "w1:pExtra".to_string()], "scratch 排第一");
+        let flags: Vec<(bool, bool)> =
+            unowned["panes"].as_array().unwrap().iter().map(|p| (p["scratch"].as_bool().unwrap(), p["read_only"].as_bool().unwrap())).collect();
+        assert_eq!(flags, vec![(true, false), (false, false)]);
+        std::fs::remove_dir_all(&app.data_dir).ok();
+    }
+
     /// adopt 不會偷偷把使用者手開的 pane 變成可 GC：要明確帶 allow_gc（§6.5e）。
     #[tokio::test]
     async fn adopt_only_opts_a_user_pane_into_gc_when_asked() {
@@ -1318,7 +1355,8 @@ use axum::Json;
 
 use crate::lifecycle::LcError;
 
-/// `GET /api/projects/{id}/panes`：這個專案的非 agent pane，外加**還沒歸屬**的（使用者手開的也要看得到）。
+/// `GET /api/projects/{id}/panes`：這個專案的非 agent pane。**沒歸屬的不在這裡**（SPEC §6.5e：它不屬於任何專案，
+/// 掛在每個專案底下會重複出現、看起來像那個專案的東西）；它們走 `GET /api/panes?unowned=1`。
 pub async fn list_for_project(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
@@ -1327,7 +1365,7 @@ pub async fn list_for_project(
     let sql = |e: sqlx::Error| LcError::Upstream(e.to_string());
     let project = crate::db::project(&app.db, &id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("project".into()))?;
     let rows = sqlx::query(
-        "SELECT * FROM panes WHERE host=? AND (project_id=? OR project_id IS NULL) ORDER BY kind, pane_id",
+        "SELECT * FROM panes WHERE host=? AND project_id=? ORDER BY kind, pane_id",
     )
     .bind(&project.host)
     .bind(&id)
@@ -1348,11 +1386,12 @@ pub struct AdoptIn {
 }
 
 /// `GET /api/panes?unowned=1`：全機的非 agent pane；`unowned=1` 只回「連專案都對不到」的那些（§6.5e）。
+/// 哪一顆是 scratch 由 daemon 標（`scratch`），前端不自己重算。
 pub async fn list_all(State(app): State<Arc<App>>, Query(q): Query<HashMap<String, String>>) -> Result<Json<Value>, LcError> {
     let sql = |e: sqlx::Error| LcError::Upstream(e.to_string());
     let only_unowned = q.get("unowned").map(|v| v == "1" || v == "true").unwrap_or(false);
     let rows = if only_unowned {
-        sqlx::query("SELECT * FROM panes WHERE owned_by='none' ORDER BY host, pane_id").fetch_all(&app.db).await
+        sqlx::query("SELECT * FROM panes WHERE owned_by='none' ORDER BY host, scratch DESC, pane_id").fetch_all(&app.db).await
     } else {
         sqlx::query("SELECT * FROM panes ORDER BY host, kind, pane_id").fetch_all(&app.db).await
     }
