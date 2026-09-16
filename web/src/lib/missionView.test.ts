@@ -153,6 +153,7 @@ test('payload 讀不到就留白，不會壞掉也不會亂猜', () => {
 
 test('沒認出來的暫停原因原樣顯示，不要吞掉', () => {
   assert.equal(pausedLabel('something_new'), 'something_new')
+  assert.equal(pausedLabel('user_pause'), '你按了暫停')
   assert.equal(deliveryLabel('push_main'), '直接推 main')
   assert.equal(deliveryLabel('pr'), '開 PR')
 })

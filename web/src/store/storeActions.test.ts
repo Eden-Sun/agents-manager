@@ -84,6 +84,25 @@ test('重抓一筆已在清單裡的任務：原地換掉，不搬到最前面�
   )
 })
 
+test('任務卡按「暫停」：帶 reason 送出，daemon 收得下（不帶就是 422）', async () => {
+  seed()
+  useStore.setState({ missions: { p1: [{ id: 'm1', project_id: 'p1', status: 'open' } as Mission] } })
+  // 照 daemon 的 `Json<PauseIn>`：`reason` 是必填字串，缺了在 handler 之前就被拒。
+  routeDaemon((r) => {
+    if (r.method === 'POST' && r.path.endsWith('/missions/m1/pause')) {
+      const reason = (r.body as { reason?: unknown } | undefined)?.reason
+      if (typeof reason !== 'string' || !reason) return json({ error: 'unprocessable', message: 'missing field `reason`' }, 422)
+      return json({ id: 'm1', project_id: 'p1', status: 'paused', paused_reason: reason }, 200)
+    }
+    return json({ id: 'm1', project_id: 'p1', status: 'paused', paused_reason: 'user_pause', events: [], assignments: [], revisions: [], parent: null }, 200)
+  })
+  await useStore.getState().controlMission('m1', 'pause')
+  assert.deepEqual(noticeTexts(), [], '不該跳「任務操作失敗」')
+  const post = requests.find((r) => r.method === 'POST')
+  assert.deepEqual(post?.body, { reason: 'user_pause' })
+  assert.equal(useStore.getState().missions.p1[0].paused_reason, 'user_pause')
+})
+
 test('SPA fallback 的 404（body 不是 daemon 的錯誤）仍然當成這台沒有群組任務', async () => {
   seed()
   routeDaemon(() => new Response('<!doctype html>', { status: 404 }))
