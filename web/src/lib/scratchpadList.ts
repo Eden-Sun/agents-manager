@@ -27,8 +27,9 @@ export function modifiedAgo(epochSeconds: number, now = Date.now()): string {
  * 「這顆 bot 沒有可列的檔案」有好幾種原因，而且都**不是錯誤**：講清楚是哪一種，
  * 使用者才不會對著空白區域猜自己是不是按錯了。
  */
-export function emptyReason(reason: string | null, botSelected: boolean): string {
+export function emptyReason(reason: string | null, botSelected: boolean, others = 0): string {
   if (!botSelected) return '先選一顆 bot，這裡會列出它寫在 scratchpad 裡的檔案。'
+  if (others > 0) return '對話裡還沒提到 scratchpad 的檔案。'
   switch (reason) {
     case 'scratchpad_remote':
       return '這顆 bot 在遠端主機上，它的檔案不在這台機器，列不出來。'
@@ -39,6 +40,17 @@ export function emptyReason(reason: string | null, botSelected: boolean): string
     default:
       return 'scratchpad 裡還沒有檔案。bot 寫進去之後按重整就看得到。'
   }
+}
+
+/**
+ * 對話裡提過的一份、其餘一份（順序不變）。scratchpad 是 bot 的工作桌，大部分是它自己跑過的腳本與
+ * 中間產物；使用者要的是 bot 在對話裡交代過的那幾個（使用者 2026-09-16：「沒提到過的檔案怎麼也在這裡面」）。
+ */
+export function splitMentioned(files: ScratchpadFile[]): { mentioned: ScratchpadFile[]; others: ScratchpadFile[] } {
+  const mentioned: ScratchpadFile[] = []
+  const others: ScratchpadFile[] = []
+  for (const f of files) (f.mentioned ? mentioned : others).push(f)
+  return { mentioned, others }
 }
 
 /** 新的排前面；同一秒的依名字排，避免每次重整順序在跳。 */

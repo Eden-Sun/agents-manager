@@ -45,6 +45,14 @@
   color: var(--text-faint);
 }
 
+.sp-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  overflow-y: auto;
+  min-height: 0;
+}
+
 .sp-list {
   list-style: none;
   margin: 0;
@@ -52,8 +60,22 @@
   display: flex;
   flex-direction: column;
   gap: 2px;
-  overflow-y: auto;
-  min-height: 0;
+}
+
+/* 「其他 N 個」：bot 自己的工作檔，收起來是預設。字跟標題列一樣淡，不跟檔名搶。 */
+.sp-others-toggle {
+  align-self: flex-start;
+  padding: 2px 6px;
+  border: 0;
+  background: none;
+  font-size: 11px;
+  color: var(--text-faint);
+  cursor: pointer;
+}
+
+.sp-others-toggle:hover,
+.sp-others-toggle:focus-visible {
+  color: inherit;
 }
 
 .sp-file {

@@ -1203,9 +1203,10 @@ export class MockTransport implements Transport {
       dir: `/private/tmp/claude-501/-Users-me-project/${botId}/scratchpad`,
       session_id: botId,
       files: [
-        { name: 'tracking.tsv', size: 18_432, modified: now - 120 },
-        { name: '出貨追蹤 v2.md', size: 4_096, modified: now - 3_600 },
-        { name: 'run.log', size: 1_204_233, modified: now - 86_400 },
+        { name: 'tracking.tsv', size: 18_432, modified: now - 120, mentioned: true },
+        { name: 'w1.py', size: 2_450, modified: now - 600, mentioned: false },
+        { name: '出貨追蹤 v2.md', size: 4_096, modified: now - 3_600, mentioned: true },
+        { name: 'run.log', size: 1_204_233, modified: now - 86_400, mentioned: false },
       ],
     }
   }

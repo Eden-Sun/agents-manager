@@ -315,15 +315,18 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 
 ```json
 {"dir":"/private/tmp/claude-501/<project-slug>/<session>/scratchpad","session_id":"af70c5a6-…",
- "files":[{"name":"tracking.tsv","size":18432,"modified":1789600000}]}
+ "files":[{"name":"tracking.tsv","size":18432,"modified":1789600000,"mentioned":true}]}
 ```
 
-只列**第一層的一般檔案**（不遞迴、不列目錄與符號連結），最多 300 筆、單檔 ≤ 64 MiB，超過的不列。目錄用該 bot 最後一次 Run 的 `native_session_id` 去掃暫存根目錄找，不自己拼 slug（slug 規則是 claude 的，會變）。
+只列**第一層的一般檔案**（不遞迴、不列目錄與符號連結），最多 300 筆、單檔 ≤ 64 MiB，超過的不列。
+
+- `mentioned`（2026-09-16）：檔名有在**這顆 bot 自己的對話**裡出現過（最近 1000 則 `user`／`assistant` 訊息、最多 2 MiB；`system` 與別顆 bot 的不算）。要像獨立的名字出現：前後不能緊接英數、`_`、`-`（前面也不能是 `.`），中文、空白、標點、`/` 都算邊界；沒有副檔名的名字（`raw`）前面要是 `/` 或反引號。前端預設只顯示 `mentioned: true` 的。
+- **一律不列**（不管有沒有提到）：隱藏檔、資料庫與旁檔（檔名含 `.sqlite`，或 `.db` 結尾／`.db-`／`.db.`）、金鑰與憑證（`.pem` `.key` `.p12` `.pfx` `.jks` `.keystore` `.ppk` `.kdbx` `.env`、`id_rsa*` 等），以及檔頭是 `SQLite format 3` 或 PEM 私鑰的檔案（改了副檔名也擋）。目錄用該 bot 最後一次 Run 的 `native_session_id` 去掃暫存根目錄找，不自己拼 slug（slug 規則是 claude 的，會變）。
 
 列不出來時**不是錯誤**：回 `200 {"dir":"","session_id":null,"files":[],"reason":"…"}`，`reason ∈ scratchpad_remote`（bot 在遠端主機，檔案不在這台機器）`| scratchpad_no_session`（沒跑過或不是 claude）`| scratchpad_missing`（目錄還沒建立）。bot 不存在 404。
 
 ### `GET /api/bots/{id}/scratchpad/file?path=<檔名>`
-下載上面列出的某一個檔案。`path` 解開符號連結後必須仍在該 bot 的 scratchpad 目錄內且是一般檔案，否則 `404 {"what":"file"}`；缺 `path` 400；bot 不存在 404。
+下載上面列出的某一個檔案。`path` 解開符號連結後必須仍在該 bot 的 scratchpad 目錄內且是一般檔案、路徑上沒有隱藏目錄、也不是上面「一律不列」的那幾類，否則 `404 {"what":"file"}`（`mentioned: false` 的照樣可以下載）；缺 `path` 400；bot 不存在 404。
 
 一律 `Content-Disposition: attachment`（檔名走 `filename` + RFC 5987 `filename*`，非 ASCII 檔名也存得對），加 `X-Content-Type-Options: nosniff` 與 `Cache-Control: no-store`。`Content-Type` 只認白名單（文字/JSON/CSV/TSV/PNG/JPEG/GIF/WebP/PDF/zip），其餘一律 `application/octet-stream`——瀏覽器不會把 bot 寫出來的東西當 HTML 執行。只讀，沒有刪除或覆寫的端點。
 ## 非 agent 的 pane（SPEC §6.5e）

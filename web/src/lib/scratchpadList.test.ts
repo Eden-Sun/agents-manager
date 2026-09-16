@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { emptyReason, fileSize, modifiedAgo, orderFiles } from './scratchpadList'
+import { emptyReason, fileSize, modifiedAgo, orderFiles, splitMentioned } from './scratchpadList'
 
 test('檔案大小講的是「下載會多大」，個位數才給小數', () => {
   assert.equal(fileSize(0), '0 B')
@@ -29,12 +29,22 @@ test('沒有檔案的每一種原因都要講清楚，不能只留一片空白',
   assert.match(emptyReason('scratchpad_no_session', true), /還沒跑過/)
   assert.match(emptyReason('scratchpad_missing', true), /還沒建立/)
   assert.match(emptyReason(null, true), /還沒有檔案/)
+  assert.match(emptyReason(null, true, 3), /對話裡還沒提到/, '有檔案但都沒提過，不能說「還沒有檔案」')
+  assert.match(emptyReason(null, false, 3), /先選一顆 bot/)
   // 認不得的原因也要有話講，不能回 undefined。
   assert.ok(emptyReason('something_new', true).length > 0)
 })
 
 test('新的排前面，同一秒的依名字排（順序不要每次重整都在跳）', () => {
-  const f = (name: string, modified: number) => ({ name, size: 1, modified })
+  const f = (name: string, modified: number) => ({ name, size: 1, modified, mentioned: true })
   const out = orderFiles([f('b.txt', 100), f('a.txt', 100), f('newest.txt', 200), f('old.txt', 50)])
   assert.deepEqual(out.map((x) => x.name), ['newest.txt', 'a.txt', 'b.txt', 'old.txt'])
+})
+
+test('對話裡提過的一份、其餘一份，各自保持原本的順序', () => {
+  const f = (name: string, mentioned: boolean) => ({ name, size: 1, modified: 1, mentioned })
+  const { mentioned, others } = splitMentioned([f('tracking.tsv', true), f('w1.py', false), f('報告.md', true), f('run.log', false)])
+  assert.deepEqual(mentioned.map((x) => x.name), ['tracking.tsv', '報告.md'])
+  assert.deepEqual(others.map((x) => x.name), ['w1.py', 'run.log'])
+  assert.deepEqual(splitMentioned([]), { mentioned: [], others: [] })
 })

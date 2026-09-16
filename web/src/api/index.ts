@@ -292,15 +292,22 @@ export async function setIdentityDisabled(host: string, kind: string, name: stri
   })
 }
 
-/** bot 寫在自己 scratchpad 裡的檔案。`reason` 有值＝這顆沒有可列的（遠端／還沒跑過／目錄不在）。 */
-export type ScratchpadFile = { name: string; size: number; modified: number }
+/** bot 寫在自己 scratchpad 裡的檔案。`reason` 有值＝這顆沒有可列的（遠端／還沒跑過／目錄不在）。
+ *  `mentioned`：檔名有在這顆 bot 的對話裡出現過（daemon 判斷）。 */
+export type ScratchpadFile = { name: string; size: number; modified: number; mentioned: boolean }
 
 export async function fetchScratchpad(botId: string): Promise<{ dir: string; reason: string | null; files: ScratchpadFile[] }> {
   const raw = await transport.request('GET', `/bots/${encodeURIComponent(botId)}/scratchpad`)
   const o = isRec(raw) ? raw : {}
   const rows = pick(o, 'files')
   const files = Array.isArray(rows)
-    ? rows.filter(isRec).map((r) => ({ name: str(pick(r, 'name')), size: num(pick(r, 'size')), modified: num(pick(r, 'modified')) }))
+    ? rows.filter(isRec).map((r) => ({
+        name: str(pick(r, 'name')),
+        size: num(pick(r, 'size')),
+        modified: num(pick(r, 'modified')),
+        // 舊 daemon 沒有這個欄位：當成提過，照以前全部列出來。
+        mentioned: pick(r, 'mentioned') !== false,
+      }))
     : []
   return { dir: str(pick(o, 'dir')), reason: optStr(pick(o, 'reason')), files: files.filter((f) => f.name) }
 }
