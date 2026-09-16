@@ -331,15 +331,24 @@ pub async fn send_keys(app: &Arc<App>, host: &str, pane_id: &str, keys: &[String
     client.pane_send_keys(pane_id, &refs).await.map_err(up)
 }
 
-/// `DELETE /api/hosts/:name/shells/:pane_id`。跟 [`registered`] 認同樣兩份白名單（web review M2）：
-/// daemon 重啟後記憶體那份是空的，面板靠 `panes` 表照常顯示自己開的 shell；以前這裡找不到就回 200、什麼都沒關，
-/// 面板卻收掉了。現在記憶體沒有就走 `panes::close_tracked`（按「結束 shell」時已經問過人，所以視同 confirm；
-/// agent／active run 照樣 403），兩邊都沒有才 404。
+/// 關掉這個 daemon 自己開的 shell（登入流程之類的內部呼叫）。記憶體清單沒有時等同**沒確認**的 [`close_confirmed`]。
 pub async fn close(app: &Arc<App>, host: &str, pane_id: &str) -> LcResult<()> {
+    close_confirmed(app, host, pane_id, false).await
+}
+
+/// `DELETE /api/hosts/:name/shells/:pane_id[?confirm=true]`。跟 [`registered`] 認同樣兩份白名單（web review M2）：
+/// daemon 重啟後記憶體那份是空的，面板靠 `panes` 表照常顯示自己開的 shell；以前這裡找不到就回 200、什麼都沒關，
+/// 面板卻收掉了。
+///
+/// - 記憶體清單裡的（這個 daemon 自己開的）：照舊直接關。
+/// - 記憶體沒有、`panes` 表有：走 `panes::close_tracked`，**`confirm` 照呼叫端帶的傳下去**——服務 pane（在 listen、前景有程式）
+///   或讀不到事實時，沒確認就 409 `service_pane`（AGM 2026-09-16 驗收：以前寫死 confirm，確認整個被繞掉）。agent／active run 照樣 403。
+/// - 兩邊都沒有：404。
+pub async fn close_confirmed(app: &Arc<App>, host: &str, pane_id: &str, confirmed: bool) -> LcResult<()> {
     let (client, _) = client_for(app, host).await?;
     let Some(shell) = app.host_shells.lock().await.iter().find(|s| s.host == host && s.pane_id == pane_id).cloned()
     else {
-        return match crate::panes::close_tracked(app, host, pane_id, true).await {
+        return match crate::panes::close_tracked(app, host, pane_id, confirmed).await {
             Err(LcError::NotFound(_)) => Err(LcError::NotFound("shell".into())),
             other => other.map(|_| ()),
         };
@@ -544,34 +553,79 @@ mod tests {
         }
     }
 
-    /// web review M2：daemon 重啟後記憶體那份白名單是空的，「結束 shell」以前回 200 卻什麼都沒關。
-    #[tokio::test]
-    async fn ending_a_shell_after_a_restart_closes_it_through_the_pane_table() {
-        let env = crate::testing::env().await;
+    /// 像剛重啟：記憶體那份白名單是空的，pane 只在 `panes` 表裡。
+    async fn tracked_after_restart(env: &crate::testing::Env, label: &str) -> crate::herdr::PaneInfo {
         let app = &env.app;
-        let (_, pane) = app.herdr.workspace_create("/tmp", "shell", json!({})).await.unwrap();
+        assert!(app.host_shells.lock().await.is_empty(), "像剛重啟");
+        let (_, p) = app.herdr.workspace_create("/tmp", label, json!({})).await.unwrap();
         let now = crate::db::now();
         sqlx::query(
             "INSERT INTO panes (pane_id, host, workspace_id, tab_id, kind, last_output_at, first_seen, last_seen)
              VALUES (?, 'local', ?, ?, 'shell', ?, ?, ?)",
         )
-        .bind(&pane.pane_id)
-        .bind(&pane.workspace_id)
-        .bind(&pane.tab_id)
+        .bind(&p.pane_id)
+        .bind(&p.workspace_id)
+        .bind(&p.tab_id)
         .bind(&now)
         .bind(&now)
         .bind(&now)
         .execute(&app.db)
         .await
         .unwrap();
-        assert!(app.host_shells.lock().await.is_empty(), "像剛重啟");
+        p
+    }
 
-        close(app, "local", &pane.pane_id).await.expect("走 panes 表關掉");
-        assert!(app.herdr.pane_get(&pane.pane_id).await.unwrap().is_none(), "herdr 上真的關了");
-        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM panes").fetch_one(&app.db).await.unwrap();
-        assert_eq!(left, 0);
-        // 兩份都沒有：404，不是假裝成功。
-        assert!(matches!(close(app, "local", &pane.pane_id).await, Err(LcError::NotFound(_))));
+    fn conflict_body(r: LcResult<()>) -> Value {
+        match r {
+            Err(LcError::Conflict(body)) => body,
+            other => panic!("沒確認要被擋：{other:?}"),
+        }
+    }
+
+    /// AGM 2026-09-16 驗收：daemon 重啟後「結束 shell」走 `panes` 表關，confirm 要照呼叫端帶的。
+    /// 在 listen 的服務 pane 沒確認 → 409 service_pane，帶即時的 kind／port（shell pid 用這個測試行程自己，它正 listen）。
+    #[tokio::test]
+    async fn ending_an_unconfirmed_service_pane_after_a_restart_is_refused() {
+        let env = crate::testing::env().await;
+        let dev = tracked_after_restart(&env, "dev").await;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        env.herdr.set_shell_pid(&dev.pane_id, i64::from(std::process::id()));
+        let body = conflict_body(close_confirmed(&env.app, "local", &dev.pane_id, false).await);
+        drop(listener);
+        assert_eq!(body["reason"], "service_pane");
+        assert_eq!(body["unverified"], false);
+        assert_eq!(body["pane"]["kind"], "service");
+        assert_eq!(body["pane"]["read_only"], true);
+        assert!(body["pane"]["listen_ports"].as_array().unwrap().contains(&json!(port)), "{body}");
+        assert!(env.app.herdr.pane_get(&dev.pane_id).await.unwrap().is_some(), "還沒關");
+    }
+
+    /// 讀不到事實（mock 沒報 shell pid）也一樣：沒確認 → 409，標 `unverified: true`。
+    #[tokio::test]
+    async fn ending_an_unconfirmed_pane_whose_state_cannot_be_read_is_refused() {
+        let env = crate::testing::env().await;
+        let p = tracked_after_restart(&env, "shell").await;
+        let body = conflict_body(close_confirmed(&env.app, "local", &p.pane_id, false).await);
+        assert_eq!((body["reason"].as_str(), body["unverified"].as_bool()), (Some("service_pane"), Some(true)));
+        assert!(env.app.herdr.pane_get(&p.pane_id).await.unwrap().is_some(), "還沒關");
+        // 內部呼叫的 `close`（沒有 confirm 可帶）同樣不繞過。
+        assert!(matches!(close(&env.app, "local", &p.pane_id).await, Err(LcError::Conflict(_))));
+    }
+
+    /// 確認過才關（web review M2：以前回 200 卻什麼都沒關）；關完兩份都沒有 → 404。記憶體清單裡自己開的照舊直接關。
+    #[tokio::test]
+    async fn ending_a_confirmed_shell_after_a_restart_closes_it() {
+        let env = crate::testing::env().await;
+        let app = &env.app;
+        let p = tracked_after_restart(&env, "shell").await;
+        close_confirmed(app, "local", &p.pane_id, true).await.expect("確認過就關");
+        assert!(app.herdr.pane_get(&p.pane_id).await.unwrap().is_none(), "herdr 上真的關了");
+        assert!(matches!(close_confirmed(app, "local", &p.pane_id, true).await, Err(LcError::NotFound(_))));
+
+        let opened = open(app, "local", Some("/tmp")).await.unwrap();
+        close(app, "local", &opened.pane_id).await.expect("自己開的直接關，不用確認");
+        assert!(app.herdr.pane_get(&opened.pane_id).await.unwrap().is_none());
     }
 
     /// 選單點得進去的那一批（`panes` 表）：有 listen port 的只可看，其餘可看可打字；表裡不該有的 kind 一律不給。

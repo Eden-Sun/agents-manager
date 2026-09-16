@@ -1618,12 +1618,13 @@ async fn host_shell_keys(
     Ok((StatusCode::OK, Json(json!({}))).into_response())
 }
 
-/// 記憶體清單或 `panes` 表認得的才關；兩邊都沒有 404（`shell::close`）。
+/// 記憶體清單或 `panes` 表認得的才關；兩邊都沒有 404。走 `panes` 表的那條照 `?confirm=` 決定要不要先 409（`shell::close_confirmed`）。
 async fn close_host_shell(
     State(app): State<Arc<App>>,
     Path((name, pane_id)): Path<(String, String)>,
+    Query(q): Query<HashMap<String, String>>,
 ) -> Result<Response, LcError> {
-    shell::close(&app, &name, &pane_id).await?;
+    shell::close_confirmed(&app, &name, &pane_id, flag(&q.get("confirm").cloned())).await?;
     Ok((StatusCode::OK, Json(json!({}))).into_response())
 }
 
