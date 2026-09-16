@@ -13,9 +13,9 @@ import {
   botsOfProject,
   enabledIdentities,
   identitiesOfHost,
-  identityStatusOfHost,
   orderedProjects,
   projectHostName,
+  quotaClaimants,
   toolsOfHost,
   useStore,
 } from '../store/store'
@@ -151,7 +151,7 @@ function BotRow({
       // 額度按主機分（SPEC §14）；身分清單也跟著那台（同名身分在各主機可能是不同帳號）。
       if (!b) return null
       const host = projectHostName(s, b.project_id)
-      return botQuotaWarning(s.quota, b.kind, b.identity, host, identitiesOfHost(s.identities, identityStatusOfHost(s, host), host))
+      return botQuotaWarning(s.quota, b.kind, b.identity, host, quotaClaimants(s, host))
     }),
   )
   // 黃燈（low）；同樣要 useShallow。
@@ -163,7 +163,7 @@ function BotRow({
       const model = run?.status?.model_name ?? (runtimeKnown(run) ? run!.runtime_model : (b?.model ?? null))
       if (!b) return null
       const host = projectHostName(s, b.project_id)
-      return botQuotaLevel(s.quota, b.kind, b.identity, host, model, identitiesOfHost(s.identities, identityStatusOfHost(s, host), host))
+      return botQuotaLevel(s.quota, b.kind, b.identity, host, model, quotaClaimants(s, host))
     }),
   )
   const selected = useStore((s) => s.selectedBotId === botId)

@@ -22,12 +22,16 @@ export function sharesBareQuotaKey(idn: Identity): boolean {
 /**
  * 裸 key 歸誰。只有一個身分能認領，否則兩個身分會顯示同一組數字。
  * 身分清單還沒到（側欄比 `GET /api/state` 早畫）時保底沿用 `cc0` 這條字面規則。
+ *
+ * 不看傳進來的順序：頂端照字母排過、側欄是 config 原順序，兩個都不叫 cc0 的空 env 身分
+ * 以前會各挑到不同人（第二輪 review M1）。
  */
 export function bareQuotaOwner(identities: readonly Identity[], kind: BotKind): string | null {
   const ofKind = identities.filter((i) => i.kind === kind)
   if (ofKind.length === 0) return DEFAULT_IDENTITY
-  const owner = ofKind.find((i) => i.name === DEFAULT_IDENTITY) ?? ofKind.find(sharesBareQuotaKey) ?? null
-  return owner?.name ?? null
+  if (ofKind.some((i) => i.name === DEFAULT_IDENTITY)) return DEFAULT_IDENTITY
+  const sharing = ofKind.filter(sharesBareQuotaKey).map((i) => i.name).sort()
+  return sharing[0] ?? null
 }
 
 /** 落點的 key（不含 host 前綴）：有自己那一格就用自己的，否則只有裸 key 的主人退回裸 key。 */

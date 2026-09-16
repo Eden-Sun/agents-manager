@@ -2746,6 +2746,19 @@ export function enabledIdentities(disabled: string[], host: string, list: Identi
   return list.filter((i) => !disabled.includes(api.identityPrefKey(host, i.kind, i.name)))
 }
 
+/**
+ * 參與「額度落點」（`quotaLookup`，誰認領裸 key）的身分清單：那台主機的全集扣掉停用的。
+ * 頂端額度條與側欄**都**走這一支——以前頂端先濾停用、側欄沒濾，停用 cc0 之後頂端把裸 key 給了
+ * `main` 畫紅燈，側欄的 `main` 卻查 `claude:main` 查不到、不反灰（第二輪 review M1）。
+ */
+export function quotaClaimantsOf(all: Identity[], status: IdentityStatusMap, disabled: string[], host: string): Identity[] {
+  return enabledIdentities(disabled, host, identitiesOfHost(all, status, host))
+}
+
+export function quotaClaimants(state: StoreState, host: string): Identity[] {
+  return quotaClaimantsOf(state.identities, identityStatusOfHost(state, host), state.disabledIdentities, host)
+}
+
 /** 這個身份在這台主機上被停用了嗎（停用是 host＋kind＋name 一組）。 */
 export function identityDisabled(state: StoreState, host: string, kind: string, name: string): boolean {
   return state.disabledIdentities.includes(api.identityPrefKey(host, kind, name))
