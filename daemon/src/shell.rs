@@ -313,13 +313,18 @@ pub async fn send_keys(app: &Arc<App>, host: &str, pane_id: &str, keys: &[String
     client.pane_send_keys(pane_id, &refs).await.map_err(up)
 }
 
-/// `DELETE /api/hosts/:name/shells/:pane_id`. Idempotent: an unregistered pane is success; only an
-/// unresolvable host errors, since then we cannot tell whether anything was left behind.
+/// `DELETE /api/hosts/:name/shells/:pane_id`。跟 [`registered`] 認同樣兩份白名單（web review M2）：
+/// daemon 重啟後記憶體那份是空的，面板靠 `panes` 表照常顯示自己開的 shell；以前這裡找不到就回 200、什麼都沒關，
+/// 面板卻收掉了。現在記憶體沒有就走 `panes::close_tracked`（按「結束 shell」時已經問過人，所以視同 confirm；
+/// agent／active run 照樣 403），兩邊都沒有才 404。
 pub async fn close(app: &Arc<App>, host: &str, pane_id: &str) -> LcResult<()> {
     let (client, _) = client_for(app, host).await?;
     let Some(shell) = app.host_shells.lock().await.iter().find(|s| s.host == host && s.pane_id == pane_id).cloned()
     else {
-        return Ok(());
+        return match crate::panes::close_tracked(app, host, pane_id, true).await {
+            Err(LcError::NotFound(_)) => Err(LcError::NotFound("shell".into())),
+            other => other.map(|_| ()),
+        };
     };
     crate::lifecycle::close_pane_and_tab(&client, Some(&shell.workspace_id), Some(&shell.tab_id), pane_id).await;
     app.host_shells.lock().await.retain(|s| s.host != host || s.pane_id != pane_id);
@@ -469,6 +474,36 @@ mod tests {
         }
         // 只看畫面不需要即時問（面板每 0.25 秒讀一次）。
         assert!(registered(app, "local", &pane.pane_id, Access::View).await.is_ok());
+    }
+
+    /// web review M2：daemon 重啟後記憶體那份白名單是空的，「結束 shell」以前回 200 卻什麼都沒關。
+    #[tokio::test]
+    async fn ending_a_shell_after_a_restart_closes_it_through_the_pane_table() {
+        let env = crate::testing::env().await;
+        let app = &env.app;
+        let (_, pane) = app.herdr.workspace_create("/tmp", "shell", json!({})).await.unwrap();
+        let now = crate::db::now();
+        sqlx::query(
+            "INSERT INTO panes (pane_id, host, workspace_id, tab_id, kind, last_output_at, first_seen, last_seen)
+             VALUES (?, 'local', ?, ?, 'shell', ?, ?, ?)",
+        )
+        .bind(&pane.pane_id)
+        .bind(&pane.workspace_id)
+        .bind(&pane.tab_id)
+        .bind(&now)
+        .bind(&now)
+        .bind(&now)
+        .execute(&app.db)
+        .await
+        .unwrap();
+        assert!(app.host_shells.lock().await.is_empty(), "像剛重啟");
+
+        close(app, "local", &pane.pane_id).await.expect("走 panes 表關掉");
+        assert!(app.herdr.pane_get(&pane.pane_id).await.unwrap().is_none(), "herdr 上真的關了");
+        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM panes").fetch_one(&app.db).await.unwrap();
+        assert_eq!(left, 0);
+        // 兩份都沒有：404，不是假裝成功。
+        assert!(matches!(close(app, "local", &pane.pane_id).await, Err(LcError::NotFound(_))));
     }
 
     /// 選單點得進去的那一批（`panes` 表）：有 listen port 的只可看，其餘可看可打字；表裡不該有的 kind 一律不給。
