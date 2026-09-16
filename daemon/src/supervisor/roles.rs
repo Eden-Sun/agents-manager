@@ -197,7 +197,7 @@ fn known_route(kind: &str, payload: &Value, review_role: Option<&str>) -> Option
         | "mission_identity_switch" => r(Role::Responder, true),
         // 系統層的故障：巡檢收、叫醒。
         "incident_opened" | "watchdog_gave_up" | "responder_watchdog_gave_up" | "responder_bot_missing" | "bot_restart_failed"
-        | "supervisor_restart_retry" | "agm_cli_stale" | "pane_unowned" => r(Role::Patrol, true),
+        | "supervisor_restart_retry" | "agm_cli_stale" | "pane_unowned" | "pane_orphaned" => r(Role::Patrol, true),
         // 恢復不叫醒人：開的那一筆已經叫過，關掉只要記下來。
         "incident_resolved" => r(Role::Patrol, false),
         // 協調者那一半也算：它倒了或在等額度，能發現的只有巡檢（review 2026-09-16 #7）。
@@ -868,6 +868,10 @@ mod tests {
         // 撈取本身要撈得到東西：否則 regex 一壞，這個測試會安靜地變成恆真。
         for must in ["assignment_quota_blocked", "assignment_quota_resumed", "assignment_undeliverable", "assignment_completed", "approval_requested", "bot_request", "incident_opened", "mission_question"] {
             assert!(kinds.contains_key(must), "source scan lost {must}: {kinds:?}");
+        }
+        // 撈不到的寫法（panes.rs 用 tuple 陣列決定 kind）逐一列在這裡，免得新 kind 又從預設路由溜走。
+        for written_via_table in ["pane_orphaned", "pane_unowned"] {
+            assert!(known_route(written_via_table, &json!({}), None).is_some(), "{written_via_table} 沒有明寫的分支");
         }
         let unrouted: Vec<_> = kinds.iter().filter(|(k, _)| known_route(k, &json!({}), None).is_none()).collect();
         assert!(unrouted.is_empty(), "these kinds are written to the inbox but fall through to the default route: {unrouted:?}");
