@@ -672,7 +672,10 @@ async fn resend_lost_prompt(app: &Arc<App>, run_id: &str, turn_id: &str, sent: &
             true
         }
         Ok(Delivered::NotAttempted { reason, .. }) => {
-            tracing::warn!(run_id, turn = %turn_id, reason, "re-delivery was not attempted");
+            // 一個字都沒寫進去（`NotAttempted` 的契約），所以這次不該算進唯一一次重送額度：
+            // 擋下它的原因（框裡剛好有字）通常兩秒後就消失了。
+            db::refund_resend(&app.db, turn_id).await;
+            tracing::warn!(run_id, turn = %turn_id, reason, "re-delivery was not attempted; the resend budget is given back");
             false
         }
         Ok(Delivered::Unproven(why)) => {

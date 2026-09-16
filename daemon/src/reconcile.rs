@@ -39,11 +39,48 @@ pub async fn rearm_progress(app: &Arc<App>) {
     for run in runs {
         if let Ok(Some(turn)) = crate::db::in_flight_turn(&app.db, &run.id).await {
             tracing::info!(run = %run.id, turn = %turn.id, "re-arming progress poller after restart");
+            adopt_orphan_delivery(app, &turn).await;
             crate::lifecycle::arm_progress(app, &run.id, &run.bot_id, &turn.id).await;
+            // 送出後幾秒內被重啟：補 Enter 與「畫面上找不到就重送」這兩層網都只活在上一個行程裡
+            // （review 2026-09-16）。只對**剛送出**的補，不然會把幾小時前的 prompt 重送一次。
+            if turn.delivery == "ok" && fresh_enough(&turn.created_at) {
+                crate::lifecycle::arm_stall(app, &run.id, &run.bot_id, &turn.id).await;
+            }
         }
     }
     // Queued prompts in a backoff lost their timers with the old process (SPEC §4.4a).
     crate::lifecycle::rearm_queue_retries(app).await;
+}
+
+/// 重啟前正在送出的那一筆（`in_flight` 而 `delivery` 還是 `pending`）：它的收尾者只活在上一個行程的
+/// 那個 async 任務裡，重啟後沒有任何人會碰它——`try_fallback` 只處理 `ok`、佇列看到 in-flight 就返回，
+/// 而 AGM 的 safety 會把它讀成「daemon 正在打字」而永遠不給重啟窗口（review 2026-09-16）。
+///
+/// 鍵可能已經按下去了，所以不能當成沒送：標成 `unknown`（＝「按過了，證不出來」）交給既有的
+/// 放棄／人工判斷那條路，UI 也才會顯示「送出狀態不明」而不是一直轉。
+async fn adopt_orphan_delivery(app: &Arc<App>, turn: &db::Turn) {
+    if turn.delivery != "pending" {
+        return;
+    }
+    let n = sqlx::query("UPDATE turns SET delivery='unknown' WHERE id = ? AND status='in_flight' AND delivery='pending'")
+        .bind(&turn.id)
+        .execute(&app.db)
+        .await
+        .map(|r| r.rows_affected())
+        .unwrap_or(0);
+    if n > 0 {
+        tracing::warn!(turn = %turn.id, "a prompt was mid-delivery when the daemon stopped; marked unknown so somebody can decide");
+        crate::lifecycle::emit_turn(app, &turn.id).await;
+    }
+}
+
+/// 剛送出不久才值得補上 stall watchdog：它會在 12 秒後判「畫面上完全沒有這則」並重送一次，
+/// 對一筆幾小時前的 turn 那是把舊訊息又送一次，比不補更糟。
+fn fresh_enough(created_at: &str) -> bool {
+    const MAX_AGE_SECS: i64 = 120;
+    chrono::DateTime::parse_from_rfc3339(created_at)
+        .map(|t| (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_seconds() <= MAX_AGE_SECS)
+        .unwrap_or(false)
 }
 
 /// A possible parent this pass. One bot, one tab: the tab makes descent observable whatever a
@@ -717,6 +754,46 @@ mod compat_tests {
             .fetch_optional(&app.db)
             .await
             .unwrap()
+    }
+
+    /// 重啟時卡在送出途中的那一筆，開機要有人收尾——否則那顆 bot 之後每則 prompt 都 409，
+    /// 而且 AGM 的 safety 會把它讀成「daemon 正在打字」，重啟窗口永遠拿不到。
+    #[tokio::test]
+    async fn a_prompt_caught_mid_delivery_by_a_restart_is_marked_unknown() {
+        let env = tt::env().await;
+        let app = &env.app;
+        let bot = a_bot(&env, "mid-flight").await;
+        let run = db::ulid();
+        sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,started_at) VALUES (?,?,'running','idle',?)")
+            .bind(&run).bind(&bot).bind(db::now()).execute(&app.db).await.unwrap();
+        let conv = db::conversation_id(&app.db, &bot).await.unwrap();
+        let turn = db::ulid();
+        sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,delivery,created_at) VALUES (?,?,?,'web','in_flight','pending',?)")
+            .bind(&turn).bind(&conv).bind(&run).bind(db::now()).execute(&app.db).await.unwrap();
+
+        super::rearm_progress(app).await;
+
+        let t = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(&turn).fetch_one(&app.db).await.unwrap();
+        assert_eq!(t.delivery, "unknown", "鍵可能按下去了，不能當成沒送");
+        assert_eq!(t.status, "in_flight", "收尾的是送達狀態，不是把回合結掉——要留給人決定");
+
+        // 已經證出來送到的那種不要動它。
+        sqlx::query("UPDATE turns SET delivery='ok' WHERE id=?").bind(&turn).execute(&app.db).await.unwrap();
+        super::rearm_progress(app).await;
+        let t = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(&turn).fetch_one(&app.db).await.unwrap();
+        assert_eq!(t.delivery, "ok");
+    }
+
+    /// 補 stall watchdog 只補剛送出的：對幾小時前的 turn 補，等於 12 秒後把舊訊息再送一次。
+    #[test]
+    fn only_a_freshly_sent_turn_gets_its_watchdog_back() {
+        let now = chrono::Utc::now();
+        let iso = |d: chrono::Duration| (now - d).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        assert!(super::fresh_enough(&iso(chrono::Duration::seconds(5))));
+        assert!(super::fresh_enough(&iso(chrono::Duration::seconds(119))));
+        assert!(!super::fresh_enough(&iso(chrono::Duration::seconds(121))));
+        assert!(!super::fresh_enough(&iso(chrono::Duration::hours(3))));
+        assert!(!super::fresh_enough("not-a-time"), "讀不懂時間就不要補");
     }
 
     /// A give-up stop's `stopping` run is healed while herdr lists the agent (review 2026-09-12 #1).

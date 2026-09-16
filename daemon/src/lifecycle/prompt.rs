@@ -112,6 +112,10 @@ async fn retract_unsent_turn(app: &Arc<App>, turn_id: &str, msg_id: &str) -> any
         }
     };
     emit_turn(app, turn_id).await;
+    // 事件模型只有「新增／更新」，沒有「刪除」：`message_added` 與 `turn_updated` 已經廣播出去了，
+    // 每個客戶端都收下了那顆泡泡與那筆進行中的回合，而 `emit_turn` 對已刪除的列是 no-op。
+    // 不補一次重讀的話，畫面會留著一顆送不出去的幽靈泡泡與一個永遠不會結束的回合（review 2026-09-16）。
+    app.emit("resync", json!({"reason": "turn_retracted", "turn_id": turn_id})).await;
     out
 }
 
