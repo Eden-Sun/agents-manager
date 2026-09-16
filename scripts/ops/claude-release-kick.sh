@@ -38,12 +38,19 @@ if [ -z "$DONE_VER" ]; then
 fi
 OLD=$DONE_VER
 
-# 派給 AGM 自己：使用者要的是「AGM 解析完跳通知」，AGM 的回覆就出現在使用者入口。
+# 派給誰：**不能是巡檢自己**——daemon 擋掉「總管對自己下交辦」（supervisor/mod.rs 的
+# `the supervisor cannot assign work to itself`），原本填 manager_bot_id 的版本每一輪都 400。
+# 順序：明指的 AGM_RELEASE_BOT ＞ runtime.json 的 release_bot_id（專用 child）＞ 協調者。
+# 協調者是合法目標（走交接佇列），它解析完照 task 裡的指示把通知交給巡檢，使用者才看得到。
 BOT="${AGM_RELEASE_BOT:-}"
 if [ -z "$BOT" ] && [ -f "$DIR/runtime.json" ]; then
-  BOT=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("manager_bot_id") or "")' "$DIR/runtime.json" 2>/dev/null)
+  BOT=$(python3 -c '
+import json,sys
+d = json.load(open(sys.argv[1]))
+print(d.get("release_bot_id") or d.get("responder_bot_id") or "")
+' "$DIR/runtime.json" 2>/dev/null)
 fi
-[ -n "$BOT" ] || { log "找不到要派給誰（AGM_RELEASE_BOT／runtime.json manager_bot_id），跳過"; exit 0; }
+[ -n "$BOT" ] || { log "找不到要派給誰（AGM_RELEASE_BOT／runtime.json 的 release_bot_id 或 responder_bot_id），跳過"; exit 0; }
 
 BODY=$(mktemp -t agm-claude-release)
 trap 'rm -f "$BODY"; rmdir "$LOCK" 2>/dev/null || true' EXIT
@@ -53,8 +60,10 @@ trap 'rm -f "$BODY"; rmdir "$LOCK" 2>/dev/null || true' EXIT
   printf 'OLD=%s/%s\nNEW=%s/%s\n' "$VERSIONS" "$OLD" "$VERSIONS" "$NEW"
 } > "$BODY"
 
+# 旗標叫 `--request-id`（不是 --client-request-id）：拼錯的話 argparse 直接 exit 2，
+# 而 stub 吃掉未知旗標的測試看不出來（2026-09-16 的事故）。
 if "$AGM" --compact assign --bot "$BOT" --review-by patrol --text-file "$BODY" \
-     --client-request-id "agm-claude-release-$NEW" >> "$LOG" 2>&1; then
+     --request-id "agm-claude-release-$NEW" >> "$LOG" 2>&1; then
   echo "$NEW" > "$STATE"
   log "Claude Code ${OLD} → ${NEW}：已派 AGM 解析"
 else
