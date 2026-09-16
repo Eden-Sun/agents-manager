@@ -155,18 +155,28 @@ pub fn project_for_cwd<'a>(cwd: &str, projects: &'a [(String, String)]) -> Optio
         .map(|(id, _)| id.as_str())
 }
 
+/// 一輪掃描的結果。`complete=false`＝有 pane 的事實這一輪讀不到（行程 dump 或 herdr 失敗）：那幾列的分類與
+/// 歸屬沿用上一輪，呼叫端這一輪不跑 GC 與通知（§6.5e：讀不到不等於是空的）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScanOutcome {
+    pub panes: usize,
+    pub complete: bool,
+}
+
+/// 這一輪對一顆 pane 實際讀到的東西。
+#[derive(Debug, Clone, Default)]
+pub struct Observed {
+    pub facts: crate::memproc::PaneFacts,
+    pub ports: Vec<u16>,
+}
+
 /// 掃一台主機的非 agent pane，寫進 `panes`。`snapshot_panes` 是 `session.snapshot` 的 `panes` 陣列
 /// （已經含 `agent`），所以不用再打一次 RPC。
-pub async fn scan_host(app: &Arc<App>, host: &str, snapshot_panes: &[Value]) -> Result<usize> {
+pub async fn scan_host(app: &Arc<App>, host: &str, snapshot_panes: &[Value]) -> Result<ScanOutcome> {
     let non_agent: Vec<&Value> = snapshot_panes
         .iter()
         .filter(|p| p.get("agent").and_then(Value::as_str).filter(|a| !a.is_empty()).is_none())
         .collect();
-    if non_agent.is_empty() {
-        // 這台沒有非 agent pane：把舊的收乾淨（pane 已經關了）。
-        sqlx::query("DELETE FROM panes WHERE host=?").bind(host).execute(&app.db).await?;
-        return Ok(0);
-    }
     // 環境快照：pane 行程樹的 `AM_BOT_ID` 就是歸屬（§6.5e）。讀不到就這一輪不更新歸屬，不要猜。
     let dump = match crate::memproc::dump(app, host).await {
         Ok(out) => Some(out),
@@ -176,6 +186,35 @@ pub async fn scan_host(app: &Arc<App>, host: &str, snapshot_panes: &[Value]) -> 
         }
     };
     let client = crate::api::shell::client_for(app, host).await.ok().map(|(c, _)| c);
+    let mut observed: HashMap<String, Option<Observed>> = HashMap::new();
+    for p in &non_agent {
+        let Some(pane_id) = p.get("pane_id").and_then(Value::as_str) else { continue };
+        let seen = match read_facts(client.as_ref(), dump.as_deref(), pane_id).await {
+            Some(facts) => {
+                let mut ports: Vec<u16> = listen_ports(host, &facts.pids).await.into_values().flatten().collect();
+                ports.sort_unstable();
+                ports.dedup();
+                Some(Observed { facts, ports })
+            }
+            None => None,
+        };
+        observed.insert(pane_id.to_string(), seen);
+    }
+    record_scan(app, host, &non_agent, &observed).await
+}
+
+/// [`scan_host`] 的寫入那半（可測：事實由呼叫端給）。`observed` 裡沒有、或是 `None` 的 pane＝這一輪讀不到。
+pub(crate) async fn record_scan(
+    app: &Arc<App>,
+    host: &str,
+    non_agent: &[&Value],
+    observed: &HashMap<String, Option<Observed>>,
+) -> Result<ScanOutcome> {
+    if non_agent.is_empty() {
+        // 這台沒有非 agent pane：把舊的收乾淨（pane 已經關了）。
+        sqlx::query("DELETE FROM panes WHERE host=?").bind(host).execute(&app.db).await?;
+        return Ok(ScanOutcome { panes: 0, complete: true });
+    }
     let now = crate::db::now();
     // canonical path 比對用（§6.5e 的 cwd 回退）。
     let project_paths: Vec<(String, String)> = crate::db::live_projects(&app.db)
@@ -185,18 +224,71 @@ pub async fn scan_host(app: &Arc<App>, host: &str, snapshot_panes: &[Value]) -> 
         .map(|p| (p.id, p.path))
         .collect();
     let mut seen = Vec::new();
-    for p in &non_agent {
+    let mut complete = true;
+    for p in non_agent {
         let Some(pane_id) = p.get("pane_id").and_then(Value::as_str) else { continue };
         seen.push(pane_id.to_string());
-        let f = read_facts(client.as_ref(), dump.as_deref(), pane_id).await.unwrap_or_default();
-        let ports: Vec<u16> = {
-            let by_pid = listen_ports(host, &f.pids).await;
-            let mut all: Vec<u16> = by_pid.into_values().flatten().collect();
-            all.sort_unstable();
-            all.dedup();
-            all
+        let revision = p.get("revision").and_then(Value::as_u64).map(|v| v as i64);
+        let prev: Option<(Option<i64>, String, String)> =
+            sqlx::query_as("SELECT last_revision, last_output_at, first_seen FROM panes WHERE host=? AND pane_id=?")
+                .bind(host)
+                .bind(pane_id)
+                .fetch_optional(&app.db)
+                .await?;
+        // revision 變了才算「有輸出」；第一次看到就以 first_seen 當基準（§6.5e）。
+        let (last_output_at, first_seen) = match &prev {
+            Some((old_rev, out_at, first)) => {
+                let moved = revision.is_some() && *old_rev != revision;
+                ((if moved { now.clone() } else { out_at.clone() }), first.clone())
+            }
+            None => (now.clone(), now.clone()),
         };
-        let kind = classify(f.foreground.as_deref(), &ports);
+        let cwd = p.get("foreground_cwd").or_else(|| p.get("cwd")).and_then(Value::as_str).unwrap_or("");
+
+        let Some(Observed { facts: f, ports }) = observed.get(pane_id).and_then(Option::as_ref) else {
+            // 讀不到事實：**不猜**。既有列只更新位置與輸出時間，kind／歸屬／前景／port 沿用上一輪；
+            // 新列先當 service（不自動關、關要確認），歸屬只能靠 cwd（review 2026-09-16 core 3）。
+            complete = false;
+            if prev.is_some() {
+                sqlx::query(
+                    "UPDATE panes SET workspace_id=?, tab_id=?, cwd=?, last_revision=?, last_output_at=?, last_seen=?
+                      WHERE host=? AND pane_id=?",
+                )
+                .bind(p.get("workspace_id").and_then(Value::as_str))
+                .bind(p.get("tab_id").and_then(Value::as_str))
+                .bind(p.get("cwd").and_then(Value::as_str))
+                .bind(revision)
+                .bind(&last_output_at)
+                .bind(&now)
+                .bind(host)
+                .bind(pane_id)
+                .execute(&app.db)
+                .await?;
+            } else {
+                let project = project_for_cwd(cwd, &project_paths);
+                sqlx::query(
+                    "INSERT INTO panes (pane_id, host, workspace_id, tab_id, cwd, kind, project_id, last_revision,
+                                        last_output_at, first_seen, last_seen, owned_by)
+                     VALUES (?,?,?,?,?,'service',?,?,?,?,?,?)",
+                )
+                .bind(pane_id)
+                .bind(host)
+                .bind(p.get("workspace_id").and_then(Value::as_str))
+                .bind(p.get("tab_id").and_then(Value::as_str))
+                .bind(p.get("cwd").and_then(Value::as_str))
+                .bind(project)
+                .bind(revision)
+                .bind(&last_output_at)
+                .bind(&first_seen)
+                .bind(&now)
+                .bind(if project.is_some() { "user" } else { "none" })
+                .execute(&app.db)
+                .await?;
+            }
+            continue;
+        };
+
+        let kind = classify(f.foreground.as_deref(), ports);
         let owner = f.bot_ids.first().cloned();
         // 歸屬順序（§6.5e，使用者 2026-09-16 第 3 條裁示）：
         //   1. `AM_PROJECT_ID`——開 pane 當下就綁好的專案。**bot 被刪也不失效**，否則孤兒 pane 會掉成
@@ -217,7 +309,6 @@ pub async fn scan_host(app: &Arc<App>, host: &str, snapshot_panes: &[Value]) -> 
             }
         }
         if project.is_none() {
-            let cwd = p.get("foreground_cwd").or_else(|| p.get("cwd")).and_then(Value::as_str).unwrap_or("");
             if let Some(id) = project_for_cwd(cwd, &project_paths) {
                 owned_by = if owner.is_some() { "bot" } else { "user" };
                 project = Some(id.to_string());
@@ -230,21 +321,6 @@ pub async fn scan_host(app: &Arc<App>, host: &str, snapshot_panes: &[Value]) -> 
                 owned_by = "none";
             }
         }
-        let revision = p.get("revision").and_then(Value::as_u64).map(|v| v as i64);
-        let prev: Option<(Option<i64>, String, String)> =
-            sqlx::query_as("SELECT last_revision, last_output_at, first_seen FROM panes WHERE host=? AND pane_id=?")
-                .bind(host)
-                .bind(pane_id)
-                .fetch_optional(&app.db)
-                .await?;
-        // revision 變了才算「有輸出」；第一次看到就以 first_seen 當基準（§6.5e）。
-        let (last_output_at, first_seen) = match &prev {
-            Some((old_rev, out_at, first)) => {
-                let moved = revision.is_some() && *old_rev != revision;
-                ((if moved { now.clone() } else { out_at.clone() }), first.clone())
-            }
-            None => (now.clone(), now.clone()),
-        };
         sqlx::query(
             "INSERT INTO panes (pane_id, host, workspace_id, tab_id, cwd, kind, owner_bot_id, project_id,
                                 foreground, listen_ports, last_revision, last_output_at, first_seen, last_seen, owned_by)
@@ -287,7 +363,7 @@ pub async fn scan_host(app: &Arc<App>, host: &str, snapshot_panes: &[Value]) -> 
         .bind(host)
         .execute(&app.db)
         .await?;
-    Ok(seen.len())
+    Ok(ScanOutcome { panes: seen.len(), complete })
 }
 
 /// shim 回報的用途：pane 還沒被掃到就先建一列（`kind` 先當 shell，下一輪掃描會修正）。
@@ -513,7 +589,9 @@ mod tests {
     async fn the_scan_keeps_agent_panes_out_and_tracks_output_by_revision() {
         let app = app().await;
         let panes = vec![pane("w1:pA", Some("claude"), 3), pane("w1:pB", None, 7)];
-        assert_eq!(scan_host(&app, "local", &panes).await.unwrap(), 1, "只收非 agent pane");
+        let scan = scan_host(&app, "local", &panes).await.unwrap();
+        assert_eq!(scan.panes, 1, "只收非 agent pane");
+        assert!(!scan.complete, "測試裡沒有 herdr：讀不到事實，這一輪不能拿來跑 GC");
         let owned: String = sqlx::query_scalar("SELECT owned_by FROM panes WHERE pane_id='w1:pB'")
             .fetch_one(&app.db)
             .await
@@ -524,7 +602,7 @@ mod tests {
                 .fetch_one(&app.db)
                 .await
                 .unwrap();
-        assert_eq!((kind.as_str(), rev), ("shell", Some(7)));
+        assert_eq!((kind.as_str(), rev), ("service", Some(7)), "讀不到事實的新列先當 service");
         assert_eq!(out_at, first, "第一次看到就以 first_seen 當基準");
 
         // revision 沒變：last_output_at 不動。
@@ -546,9 +624,74 @@ mod tests {
         assert!(newer > out_at, "{newer} > {out_at}");
 
         // pane 不見了就從表裡拿掉。
-        assert_eq!(scan_host(&app, "local", &[pane("w1:pA", Some("claude"), 3)]).await.unwrap(), 0);
+        assert_eq!(scan_host(&app, "local", &[pane("w1:pA", Some("claude"), 3)]).await.unwrap().panes, 0);
         let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM panes").fetch_one(&app.db).await.unwrap();
         assert_eq!(left, 0);
+        std::fs::remove_dir_all(&app.data_dir).ok();
+    }
+
+    async fn project_and_bot(app: &Arc<App>) {
+        let now = crate::db::now();
+        sqlx::query("INSERT INTO projects (id,path,label,host,created_at) VALUES ('p1','/tmp/p1','p1','local',?)")
+            .bind(&now)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('b1','p1','b1','claude','t',?)")
+            .bind(&now)
+            .execute(&app.db)
+            .await
+            .unwrap();
+    }
+
+    fn observed(foreground: Option<&str>, bot: Option<&str>, project: Option<&str>, ports: &[u16]) -> Option<Observed> {
+        Some(Observed {
+            facts: crate::memproc::PaneFacts {
+                bot_ids: bot.map(|b| vec![b.to_string()]).unwrap_or_default(),
+                project_ids: project.map(|p| vec![p.to_string()]).unwrap_or_default(),
+                pids: vec![1],
+                shell_only: foreground.is_none(),
+                foreground: foreground.map(String::from),
+            },
+            ports: ports.to_vec(),
+        })
+    }
+
+    type Row = (String, String, Option<String>, Option<String>, Option<String>, Option<String>);
+
+    async fn row(app: &Arc<App>, id: &str) -> Row {
+        sqlx::query_as("SELECT kind, owned_by, project_id, owner_bot_id, foreground, listen_ports FROM panes WHERE pane_id=?")
+            .bind(id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap()
+    }
+
+    /// review 2026-09-16 core 3：遠端 ssh 抖一下、或 herdr 這一輪沒回 process_info，事實就是空的。
+    /// 那一輪不能把 dev server 改寫成 shell（UI 就能對它按 Ctrl-C、關閉不用確認），也不能把 bot 的 pane
+    /// 改成沒歸屬（推一則不實的 pane_unowned、讓 scratch 漂移）。
+    #[tokio::test]
+    async fn a_round_without_facts_keeps_the_last_known_kind_and_owner() {
+        let app = app().await;
+        project_and_bot(&app).await;
+        let dev = json!({"pane_id": "w1:pDev", "workspace_id": "w1", "tab_id": "t1", "cwd": "/elsewhere", "revision": 1});
+        let known = HashMap::from([("w1:pDev".to_string(), observed(Some("next dev"), Some("b1"), Some("p1"), &[3010]))]);
+        let scan = record_scan(&app, "local", &[&dev], &known).await.unwrap();
+        assert!(scan.complete);
+        let before = row(&app, "w1:pDev").await;
+        assert_eq!((before.0.as_str(), before.1.as_str(), before.2.as_deref()), ("service", "bot", Some("p1")));
+
+        // 這一輪讀不到：什麼都不改寫。
+        let moved = json!({"pane_id": "w1:pDev", "workspace_id": "w2", "tab_id": "t9", "cwd": "/elsewhere", "revision": 2});
+        let fresh = json!({"pane_id": "w1:pNew", "workspace_id": "w1", "tab_id": "t1", "cwd": "/elsewhere", "revision": 1});
+        let unknown = HashMap::from([("w1:pDev".to_string(), None)]);
+        let scan = record_scan(&app, "local", &[&moved, &fresh], &unknown).await.unwrap();
+        assert_eq!(scan, ScanOutcome { panes: 2, complete: false });
+        assert_eq!(row(&app, "w1:pDev").await, before, "kind／歸屬／前景／port 沿用上一輪");
+        let ws: String = sqlx::query_scalar("SELECT workspace_id FROM panes WHERE pane_id='w1:pDev'").fetch_one(&app.db).await.unwrap();
+        assert_eq!(ws, "w2", "位置照樣更新");
+        let new_row = row(&app, "w1:pNew").await;
+        assert_eq!((new_row.0.as_str(), new_row.1.as_str()), ("service", "none"), "新列先當 service，不會被 GC 當成閒置 shell");
         std::fs::remove_dir_all(&app.data_dir).ok();
     }
 

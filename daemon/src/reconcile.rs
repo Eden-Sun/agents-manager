@@ -541,8 +541,12 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
     let all_panes: Vec<serde_json::Value> =
         snapshot.get("panes").and_then(|v| v.as_array()).cloned().unwrap_or_default();
     match crate::panes::scan_host(app, host, &all_panes).await {
-        Ok(n) => {
-            tracing::debug!(host, panes = n, "scanned non-agent panes");
+        Ok(scan) if !scan.complete => {
+            // 有 pane 的事實這一輪讀不到：那幾列沿用上一輪，GC 與通知等下一輪讀得到再說（§6.5e）。
+            tracing::info!(host, panes = scan.panes, "pane 事實不完整，這一輪不跑 pane GC 與通知");
+        }
+        Ok(scan) => {
+            tracing::debug!(host, panes = scan.panes, "scanned non-agent panes");
             // 掃完才 GC：同一輪先有最新的歸屬與 last_output_at，再決定關誰（§6.5e）。
             match crate::panes::gc_host(app, host).await {
                 Ok(0) => {}
