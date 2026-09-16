@@ -115,3 +115,37 @@
     display: none;
   }
 }
+
+/* 鍵盤同步：終端本身收鍵盤，所以它要看起來像「可以打字的地方」。
+   焦點在上面時外框亮起來——沒有這個提示，使用者分不出鍵盤現在打進 pane 還是打進空氣。 */
+.shell-pane .shell-term.term-sync {
+  outline: 1px dashed var(--border);
+  outline-offset: -1px;
+  cursor: text;
+}
+
+.shell-pane .shell-term.term-sync-live {
+  outline: 2px solid var(--accent, #4a90d9);
+  outline-offset: -2px;
+}
+
+.shell-pane .shell-term.term-sync:focus-visible {
+  /* 上面那條已經是焦點樣式，不要再疊一圈瀏覽器預設的。 */
+  outline-offset: -2px;
+}
+
+.shell-sync-note {
+  padding: 4px 10px;
+  font-size: 11px;
+  color: var(--text-faint);
+  border-top: 1px solid var(--border);
+}
+
+.shell-sync-note.is-live {
+  color: var(--text);
+}
+
+.mini-btn.on {
+  border-color: var(--accent, #4a90d9);
+  color: var(--accent, #4a90d9);
+}

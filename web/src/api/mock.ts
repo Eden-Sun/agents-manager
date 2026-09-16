@@ -2809,6 +2809,14 @@ export class MockTransport implements Transport {
         this.shellText(host, paneId, '', true)
       } else if (k === 'up' || k === 'down') {
         /* 不模擬歷史 */
+      } else if (k === 'backspace') {
+        s.typed = s.typed.slice(0, -1)
+      } else if (k === 'space') {
+        // herdr 的鍵名：空白要寫 `space`（`usePaneKeys.herdrKeyFromEvent` 實測過）。
+        s.typed += ' '
+      } else if (Array.from(k).length === 1) {
+        // 鍵盤同步模式下每一下按鍵都是一個單字元鍵；不回顯的話 mock 看起來像壞掉。
+        s.typed += k
       }
     }
     return {}

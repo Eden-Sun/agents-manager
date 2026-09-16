@@ -450,6 +450,9 @@ Project 可在另一台機器，daemon 透過 SSH 轉發連遠端 herdr。`host`
 | DELETE | `/api/hosts/{name}/shells/{pane_id}` | `pane.close`（分頁空了一起收）；冪等，清單沒有也 200 |
 
 - 建立：先借該主機某 project 的 workspace 開新 tab，借不到才 `workspace.create`（標籤 `shell`，不寫回 `projects.workspace_id`）。回的 `cwd` 是 herdr 實際開起來的目錄。
+- **鍵盤同步**（UI 的「鍵盤同步」開關）沒有新端點：每一下按鍵是一次 `…/keys`（`herdrKeyFromEvent` 譯成 herdr 鍵名），貼上是一次 `…/text` 且 `enter:false`。
+  兩者共用同一個前端佇列（`web/src/lib/keyQueue.ts`）：**同一時間只有一個請求在路上**，飛的期間按的鍵合成下一批。
+  一鍵一個 POST 會同時在路上、抵達順序不保證——打 `ls` 可能變成 `sl`。貼上不拆成鍵：文字裡的換行會變成 Enter 直接執行。
 - 每台最多 8 個：`409 {"reason":"too_many_shells","host","max":8}`。host 不存在 404；沒連線 502。
 - `recent` / `recent_unwrapped` 只給**已捲出畫面**的內容：沒捲過的 pane 兩者回 `text:""` + `truncated:true`，前端要說明而不是顯示空白。
 
