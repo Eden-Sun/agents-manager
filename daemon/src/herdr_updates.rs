@@ -650,6 +650,16 @@ fn side_fresh(version: Option<&str>, error: Option<&str>, row_fresh: bool) -> bo
     row_fresh && version.is_some() && error.is_none()
 }
 
+/// 跑著的 server 那一側**還要求主機現在是連著的**。
+///
+/// 上一輪成功、下一秒主機斷線，到下一輪（最久 6 小時）之前那筆讀數都還是「這輪沒出錯」，
+/// 於是斷線的主機會一路顯示「已是最新」甚至「待套用」。連線狀態是即時的，拿它當閘門就不會有這個窗口。
+/// 磁碟那一側不綁：`herdr --version` 走 ssh／本機 shell，跟 herdr socket 通不通是兩回事，
+/// 它自己的 `error` 已經說得出探測有沒有成功。
+fn server_fresh(row: &HostRow, connected: bool, row_fresh: bool) -> bool {
+    connected && side_fresh(row.server_version.as_deref(), row.server_error.as_deref(), row_fresh)
+}
+
 /// 一台主機的兩個版本。
 ///
 /// `standing` 是**現在**的判斷，`cached_standing` 是「上次讀到的那個版本對現在已知的最新」。兩者分開的
@@ -657,7 +667,7 @@ fn side_fresh(version: Option<&str>, error: Option<&str>, row_fresh: bool) -> bo
 /// 只要這邊的讀數不是剛確認過的、或官方最新版本身過期／不知道，`standing` 一律 `unknown`。
 fn host_json(row: &HostRow, connected: bool, latest: Option<&str>, latest_fresh: bool) -> Value {
     let row_fresh = !expired(Some(row.checked_at.as_str()), STALE_AFTER);
-    let s_fresh = side_fresh(row.server_version.as_deref(), row.server_error.as_deref(), row_fresh);
+    let s_fresh = server_fresh(row, connected, row_fresh);
     let d_fresh = side_fresh(row.disk_version.as_deref(), row.disk_error.as_deref(), row_fresh);
     let judge = |fresh: bool, v: Option<&str>| if fresh && latest_fresh { standing(v, latest) } else { "unknown" };
     // 磁碟比跑著的新 = 新版已經裝好，換 server 才會生效。兩邊都要是剛確認過的才敢這樣說。
@@ -726,8 +736,10 @@ pub async fn snapshot(app: &Arc<App>) -> Value {
     let manifest = row.body_json.as_deref().and_then(|b| parse_manifest(b).ok());
     let latest = row.version.clone();
     let latest_stale = expired(row.fetched_at.as_deref(), STALE_AFTER);
-    // 十幾個小時沒確認過的「最新版」不能拿來給任何人發綠燈。
-    let latest_fresh = latest.is_some() && !latest_stale;
+    // 十幾個小時沒確認過的「最新版」不能拿來給任何人發綠燈——**最近一次查失敗也一樣**。
+    // 只看 13 小時的話，剛成功、下一輪 503 的那段時間仍會發綠燈，跟「查不到就是沒確認過」互相矛盾。
+    // 值與 release notes 照樣留著（`version` / `cached_standing` / `notes` 都在），只是不當成現況。
+    let latest_fresh = latest.is_some() && !latest_stale && row.error.is_none();
     let cached: HashMap<String, HostRow> = load_hosts(&app.db).await.into_iter().map(|r| (r.host.clone(), r)).collect();
     let mut hosts: Vec<Value> = Vec::new();
     for c in app.hosts.list().await {
@@ -977,6 +989,19 @@ mod tests {
         path.to_string_lossy().to_string()
     }
 
+    /// 這個路徑還有沒有 process 在跑（逾時清理的證據）。給一點寬限讓 `kill -9` 生效。
+    async fn still_running(path: &str) -> bool {
+        for _ in 0..20 {
+            let out = tokio::process::Command::new("/usr/bin/pgrep").arg("-f").arg(path).output().await;
+            let alive = out.map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty()).unwrap_or(false);
+            if !alive {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        true
+    }
+
     fn tmpdir() -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!("am-herdr-cli-{}", crate::db::ulid()));
         std::fs::create_dir_all(&d).unwrap();
@@ -1028,15 +1053,28 @@ mod tests {
         let missing = dir.join("herdr-nope").to_string_lossy().to_string();
         assert!(crate::changelog::version_line(&env.app, "local", &missing, Duration::from_secs(10)).await.is_err());
 
+        // 印了一行像樣的招牌但離開碼非 0：**不能**當成成功。以前最後一段是
+        // `… | head -1 | tr -d '\r'`，管線的離開碼是 tr 的，所以這種 CLI 會被照單全收。
+        let liar = fake_cli(&dir, "herdr-liar", "herdr 0.9.0", 1, 0);
+        let e = crate::changelog::version_line(&env.app, "local", &liar, Duration::from_secs(10)).await.unwrap_err();
+        assert!(format!("{e:#}").contains("離開碼 1"), "要講得出是離開碼：{e:#}");
+        // 同一支 CLI 改成離開碼 0 就過得了，證明擋下來的是離開碼不是那行字。
+        let honest = fake_cli(&dir, "herdr-honest", "herdr 0.9.0", 0, 0);
+        assert_eq!(
+            crate::changelog::version_line(&env.app, "local", &honest, Duration::from_secs(10)).await.unwrap(),
+            "herdr 0.9.0"
+        );
+
         // 印了東西但看不出版本 → 探測本身成功，解析失敗；兩者要分得開。
         let junk = fake_cli(&dir, "herdr-junk", "herdr build unknown", 0, 0);
         let line = crate::changelog::version_line(&env.app, "local", &junk, Duration::from_secs(10)).await.unwrap();
         assert!(Ver::parse(&line).is_none());
 
-        // 卡住不回 → 逾時（真的跑過逾時那條路，不是假裝）。
+        // 卡住不回 → 逾時（真的跑過逾時那條路，不是假裝），而且**不能把 shell 與 CLI 留在背景**。
         let hang = fake_cli(&dir, "herdr-hang", "herdr 0.9.0", 0, 30);
         let e = crate::changelog::version_line(&env.app, "local", &hang, Duration::from_millis(600)).await.unwrap_err();
         assert!(format!("{e:#}").contains("timed out"), "要講得出是逾時：{e:#}");
+        assert!(!still_running(&hang).await, "逾時要連 process group 一起收掉，不能留下探測中的 CLI");
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1270,6 +1308,31 @@ mod tests {
         assert_eq!(unknown_hosts(&[j]), ["local"]);
     }
 
+    /// 上一輪成功、**下一秒**主機斷線：不必等到下一輪（最久 6 小時）才改口。
+    /// 連線狀態是即時的，跑著的 server 那一側立刻變未知，也不能再說「待套用」。
+    #[tokio::test]
+    async fn a_host_that_just_dropped_is_unknown_immediately_not_six_hours_later() {
+        let p = pool().await;
+        save_host(&p, &fresh_probe("box", Some("0.8.2"), Some("0.9.0"))).await.unwrap();
+        let row = load_hosts(&p).await.remove(0);
+
+        // 還連著：一切照常。
+        let up = host_json(&row, true, Some("0.9.0"), true);
+        assert_eq!(up["server"]["standing"], "behind");
+        assert_eq!(up["restart_pending"], true);
+
+        // 同一列資料，只是主機斷了。這一輪的 error 還是空的（下一輪才會寫），所以只能靠 connected。
+        let down = host_json(&row, false, Some("0.9.0"), true);
+        assert_eq!(down["server"]["standing"], "unknown", "斷線就不能再報跑著的版本");
+        assert_eq!(down["server"]["fresh"], false);
+        assert_eq!(down["restart_pending"], false, "不知道跑著的是哪一版，就說不出待套用");
+        assert_eq!(down["server"]["version"], "0.8.2", "歷史值仍看得到");
+        assert_eq!(down["server"]["cached_standing"], "behind");
+        // 磁碟那側不綁連線：`herdr --version` 走 shell／ssh，跟 herdr socket 是兩回事。
+        assert_eq!(down["disk"]["standing"], "latest");
+        assert_eq!(down["disk"]["fresh"], true);
+    }
+
     #[tokio::test]
     async fn a_row_nobody_has_visited_for_hours_is_stale_even_without_an_error() {
         let p = pool().await;
@@ -1281,6 +1344,32 @@ mod tests {
         let j = host_json(&row, true, Some("0.9.0"), true);
         assert_eq!(j["server"]["standing"], "unknown", "沒有錯誤不代表資料還算數");
         assert_eq!(j["fresh"], false);
+    }
+
+    /// 剛查成功、下一輪官方 503：13 小時還沒到，但「這次沒查到」就是沒確認過，不能發綠燈。
+    #[tokio::test]
+    async fn a_latest_whose_last_lookup_failed_stops_handing_out_green_lights() {
+        let env = crate::testing::env().await;
+        let app = &env.app;
+        let m = parse_manifest(FIXTURE).unwrap();
+        save_latest_ok(&app.db, &m, FIXTURE).await.unwrap();
+        save_host(&app.db, &fresh_probe("local", Some("0.9.0"), Some("0.9.0"))).await.unwrap();
+
+        let ok = snapshot(app).await;
+        assert_eq!(ok["hosts"][0]["server"]["standing"], "latest");
+        assert_eq!(ok["latest"]["stale"], false);
+
+        // 下一輪官方站 503：值與 notes 都留著，但狀態退回未知。
+        save_latest_err(&app.db, "抓 latest.json 失敗：HTTP 503").await.unwrap();
+        let after = snapshot(app).await;
+        assert_eq!(after["latest"]["version"], "0.9.0", "舊快取留著");
+        assert!(after["latest"]["error"].is_string());
+        assert_eq!(after["hosts"][0]["server"]["standing"], "unknown", "沒確認過的最新版不能發綠燈");
+        assert_eq!(after["hosts"][0]["disk"]["standing"], "unknown");
+        assert_eq!(after["hosts"][0]["server"]["cached_standing"], "latest", "歷史比較結果仍在");
+        assert_eq!(after["unknown_hosts"], json!(["local"]));
+        // 本機剛好就在 0.9.0，所以本來就沒有版本差距可列；要看的是快取（含 release notes）沒被 503 吃掉。
+        assert_eq!(load_latest(&app.db).await.body_json.as_deref(), Some(FIXTURE), "release notes 不因為一次 503 消失");
     }
 
     #[tokio::test]
