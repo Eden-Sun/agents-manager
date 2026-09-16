@@ -785,6 +785,9 @@ pub struct ApprovalIn {
     /// 不帶就是舊行為，每次都開一筆新的。
     #[serde(default)]
     pub request_id: Option<String>,
+    /// 同一個申請者換 commit 重新申請：舊的那筆標成 `superseded`，等待起點接過來（SPEC §18.10）。
+    #[serde(default)]
+    pub supersedes: Option<String>,
 }
 
 fn iso_in(secs: i64) -> String {
@@ -797,7 +800,7 @@ pub async fn post_approval(State(app): State<Arc<App>>, Json(b): Json<ApprovalIn
         return Err(LcError::Bad(format!("purpose must be one of {:?}", super::maintenance::RESOURCES)));
     }
     let expires = b.expires_in_secs.map(iso_in);
-    let out = store::create_approval(
+    let out = store::create_approval_superseding(
         &app.db,
         &b.requester,
         &b.purpose,
@@ -805,6 +808,7 @@ pub async fn post_approval(State(app): State<Arc<App>>, Json(b): Json<ApprovalIn
         b.target_commit.as_deref(),
         expires.as_deref(),
         b.request_id.as_deref(),
+        b.supersedes.as_deref(),
     )
     .await
     .map_err(|e| match e.downcast::<store::ApprovalRequestMismatch>() {
@@ -814,7 +818,13 @@ pub async fn post_approval(State(app): State<Arc<App>>, Json(b): Json<ApprovalIn
             json!({"reason": "approval_request_mismatch", "message": m.to_string(), "request_id": m.request_id,
                    "approval_id": m.approval_id, "field": m.field, "existing": m.old, "requested": m.new}),
         ),
-        Err(e) => up(e),
+        Err(e) => match e.downcast::<store::ApprovalSupersedeRefused>() {
+            Ok(r) => LcError::conflict(
+                "approval_supersede_refused",
+                json!({"reason": r.reason, "message": r.to_string(), "supersedes": r.approval_id}),
+            ),
+            Err(e) => up(e),
+        },
     })?;
     let a = out.approval;
     // 重送不再叫醒 AGM 一次，也不再推一次事件：它看到的還是同一筆。
@@ -833,9 +843,13 @@ pub async fn post_approval(State(app): State<Arc<App>>, Json(b): Json<ApprovalIn
         .await;
         app.emit("supervisor_changed", json!({"approval": a.to_json()})).await;
     }
+    if let Some(old) = out.superseded.as_deref() {
+        app.emit("supervisor_changed", json!({"approval_superseded": old, "by": a.id})).await;
+    }
     let mut v = a.to_json();
     // 呼叫端要分得出「這次新開的」與「回你原本那筆」，才不會把重送讀成沒送出去。
     v["created"] = json!(out.created);
+    v["superseded"] = json!(out.superseded);
     Ok(Json(v))
 }
 
@@ -1095,6 +1109,11 @@ pub async fn post_lease_renew(
     Json(b): Json<LeaseHolderIn>,
 ) -> Result<Json<Value>, LcError> {
     let actor = super::bot_requests::actor_role(&app, &headers).await;
+    // force 是「持有者已經不在了、收掉它的窗口」，不是「替別人延長」：renew 只認 token。
+    // 以前 AGM 角色帶 force 就能用公開的 owner／fence 延長別人的租約，而且不留 note（review2 sup #5）。
+    if b.force {
+        return Err(LcError::Bad("renew 不接受 force：延長租約要帶 acquire 當下的 lease_token；要接管請 release --force".into()));
+    }
     let _g = super::lock().await;
     let ttl = b.ttl_secs.unwrap_or(super::maintenance::DEFAULT_TTL_SECS).clamp(30, super::maintenance::MAX_TTL_SECS);
     // Renewal re-checks the permission, it does not just extend the clock. An approval that was
@@ -1300,7 +1319,7 @@ mod approval_decision_tests {
 
     /// 巡檢角色的呼叫端：`X-AM-Bot-Id` + 那顆 bot 自己的 hook token（CLI 在角色的 pane 裡跑，
     /// 環境本來就有這兩個值）。模型打出來的字串冒充不了。
-    async fn agm_role_headers(app: &Arc<App>) -> HeaderMap {
+    pub(super) async fn agm_role_headers(app: &Arc<App>) -> HeaderMap {
         let id = crate::db::ulid();
         sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES ('p-agm','/tmp','AGM',?)")
             .bind(crate::db::now())
@@ -1404,6 +1423,7 @@ mod approval_decision_tests {
             target_commit: Some(commit.into()),
             expires_in_secs: None,
             request_id: rid.map(str::to_string),
+            supersedes: None,
         };
         let Json(first) = post_approval(State(app.clone()), Json(ask(Some("restart-ca7b22d"), "ca7b22d"))).await.unwrap();
         assert_eq!(first["created"], true);
@@ -1421,6 +1441,14 @@ mod approval_decision_tests {
         assert_eq!(detail["reason"], "approval_request_mismatch");
         assert_eq!(detail["field"], "target_commit");
         assert_eq!(detail["approval_id"], first["id"]);
+        assert_eq!(store::approvals(&app.db, 10).await.unwrap().len(), 1);
+
+        // 另一顆 bot 撞上同一個自然 id：不能拿回別人的那一筆（review2 sup 沒把握 3）。
+        let mut other = ask(Some("restart-ca7b22d"), "ca7b22d");
+        other.requester = "someone-else".into();
+        let err = post_approval(State(app.clone()), Json(other)).await.unwrap_err();
+        let LcError::Conflict(detail) = &err else { panic!("expected 409, got {err:?}") };
+        assert_eq!((detail["reason"].as_str(), detail["field"].as_str()), (Some("approval_request_mismatch"), Some("requester")));
         assert_eq!(store::approvals(&app.db, 10).await.unwrap().len(), 1);
 
         // 不帶 id 照舊：每次都是新的一筆。
@@ -1621,6 +1649,23 @@ mod review_boundary_tests {
         sqlx::query("UPDATE runs SET state='exited' WHERE id='r'").execute(&app.db).await.unwrap();
         let observed = super::super::incidents::observe(&app, &thresholds).await;
         assert!(observed.seen.iter().any(|o| o.kind == "bot_stopped"));
+        app.db.close().await;
+        std::fs::remove_dir_all(&app.data_dir).unwrap();
+    }
+
+    /// force 只用在收掉持有者已經不在的窗口；AGM 角色也不能拿公開的 owner／fence 替別人延長（review2 sup #5）。
+    #[tokio::test]
+    async fn renew_does_not_take_force_even_from_an_agm_role() {
+        let app = app().await;
+        let approval = store::create_approval(&app.db, "runner", "rebuild", "test", None, None, None).await.unwrap().approval;
+        store::decide_approval(&app.db, &approval.id, "approved", "AGM", None, None).await.unwrap();
+        let lease = store::acquire_lease(&app.db, "rebuild", "runner", Some(&approval.id), None, &iso_in(60), &json!({})).await.unwrap().unwrap();
+        let agm = super::approval_decision_tests::agm_role_headers(&app).await;
+        let input: LeaseHolderIn =
+            serde_json::from_value(json!({"owner": "runner", "fence": lease.fence, "ttl_secs": 3600, "force": true, "reason": "延長一下"})).unwrap();
+        let err = post_lease_renew(State(app.clone()), Path("rebuild".into()), agm, Json(input)).await.unwrap_err();
+        assert!(matches!(err, LcError::Bad(_)), "{err:?}");
+        assert_eq!(store::lease(&app.db, "rebuild").await.unwrap().unwrap().expires_at, lease.expires_at, "一秒都沒延長");
         app.db.close().await;
         std::fs::remove_dir_all(&app.data_dir).unwrap();
     }

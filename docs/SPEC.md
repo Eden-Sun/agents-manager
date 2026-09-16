@@ -1406,6 +1406,9 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
 2. **取得排他窗口**：`POST /api/supervisor/leases/{resource}/acquire`，在同一個 supervisor lock 裡重驗核准與 idle，單一條件式 UPDATE 拿租約；搶同一窗口只有一個成功。
 
 - 核准是紀錄：申請者、purpose、範圍、`target_commit`、有效期、決定者、理由。acquire 逐項核對（purpose 不符、過期、撤銷、commit 不同都拒）；release 時標 `consumed`——一次核准一個窗口。
+  **核准是給申請者的**（review2 2026-09-16）：acquire 的 `owner` 必須等於 `requester`（409 `approval_owner_mismatch`），否則 bot B 能拿 bot A 的核准開窗口、連 A 的升級計時一起借走；
+  `request_id` 的冪等比對也含 `requester`。同一張核准開過的窗口**過期沒 release**時，同一張再 acquire 回 409 `approval_already_used` 並當場消耗——
+  接手過期租約只消耗「別張」核准，執行端掛掉後拿同一張重試原本會在有效期內開出第二個窗口。renew 不接受 `force`（400）。
 - **申請可以帶穩定的 `request_id`**（AGM 裁示 2026-09-16）：2026-09-16 04:05 k8bw2f 對同一顆 `ca7b22d` 送了兩筆一模一樣的 restart 申請（它解析回應時取錯欄位，以為沒送成功），AGM 只能核一筆、駁一筆。
   現在同一個 supervisor 下同一個 `request_id` 再送回**原本那一筆**（`created:false`），不新增也不重推 inbox；**已經裁示的也回它本人**——重送的人要看到的是「這件事已經有裁示了」。
   同一個 id 換了 purpose／scope／commit 是兩件事共用一個 id：回 409 `approval_request_mismatch`，不回舊的也不覆寫。`expires_in_secs` 不參與比對。不帶就是舊行為。
@@ -1421,7 +1424,7 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
 - **重啟後無等待期**：窗口在租約 release（API）或 daemon 啟動完成（開始 listen 後自動 release 仍未釋放的 `restart` 租約、consume 核准並記 info log）時就結束，被它 hold 的交辦立刻解除、controller 下一輪（≤10 秒）直接派送，不等 hold 寫的到期時間；controller 每輪派送前發現已沒有 held 的 `restart` 租約（含到期）也會先解除殘留 hold。
 - 安全窗口 fail closed：讀不到某顆 bot 狀態回 `safe:false` 並列在 `unreadable`。`restart` 不接受 `require_idle=false`。
 - **等太久就縮小封鎖面**（AGM 裁示 2026-09-16）：在這台機器的負載下「任何 bot 在回合中就不換」等同永遠不安全——2026-09-15 那筆核准卡了 11 小時，每 5 分鐘那一輪都撞到有人在講話。
-  所以同一筆**已核准、未消耗**的 `rebuild`／`restart` 申請，從**核准時間**（`decided_at`）起連續等超過門檻（常數 30 分鐘，`AM_MAINTENANCE_ESCALATE_MINS` 可調；0、負數或看不懂的值當沒設）之後，安全窗口改判「縮小封鎖面」：
+  所以同一筆**已核准、未消耗**的 `rebuild`／`restart` 申請，從**核准時間**（`decided_at`；換 commit 接續的見下）起連續等超過門檻（常數 30 分鐘，`AM_MAINTENANCE_ESCALATE_MINS` 可調；0、負數或看不懂的值當沒設）之後，安全窗口改判「縮小封鎖面」：
   - **誰等太久就放寬誰**（AGM 裁示 2026-09-16）：`acquire` 只看**當下這筆核准自己**等了多久，別人放著沒用掉的核准不算數——否則一張被遺忘的核准等於把所有人的窗口都打開。
     唯讀的 `safety` 帶 `?approval=<id>`（CLI `agm lease safety --approval <id>`）時同樣只看那一筆；不帶（純查詢，還不知道會用哪一筆）才退回看最早那筆還活著的核准。回傳的 `escalation_approval_id` 就是這次計時用的那一筆。
     認不得、已消耗、被撤、過期或還沒決定的核准一律不計時（＝不放寬）。
@@ -1437,6 +1440,9 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
   「卡住沒人管」是另一張具名的表（`STALLED_STATES`），刻意不含 `quota_blocked`（在等一個已知時間點）與 `blocked`（在等人回答）。
 - 前一個持有者**過期**而不是 release 時，接手的那次會把舊租約的核准標成 `consumed`（理由 `lease expired`，寫進 `supervisor_notes`）：
   否則同一張「可以」能在有效期內開好幾個窗口，而決定歷程上一筆紀錄都沒有。consume 一律走 `decide_approval_from`（有稽核、不覆寫 `decided_at`，升級判定的計時看的就是那一欄）。
+- **換 commit 接續等待**（review2 2026-09-16）：核准綁 `target_commit`，main 一動就要換一筆；升級計時若只看新那筆的 `decided_at`，忙碌的 repo 上永遠等不滿 30 分鐘。
+  申請帶 `supersedes=<舊 id>`（同 requester、同 purpose）時，舊的還能用就標 `superseded`、它未送出的 `approval_requested` 一起收掉，新的 `wait_since` 接過舊的等待起點；
+  升級計時看 `min(wait_since, decided_at)`。舊的已經不能用（過期、被駁、用掉）就不接。`consumed`／`superseded` 都不覆寫 `decided_at`／`decided_by`。
 - 例行更新腳本的順序是**先取回／申請自己的核准，再問 `lease safety --approval <id>`**：升級是綁在那筆核准等了多久，
   不帶就是用「最早那筆還活著的核准」判斷自己要不要繼續，升級在這條路上等於死碼（review 2026-09-16）。
 - 運維腳本在 `scripts/ops/`，附隔離測試（`scripts/ops/daemon-update-kick_test.sh`，假 CLI + 暫存 repo）。

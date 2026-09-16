@@ -229,6 +229,10 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
         }
         sqlx::query(s).execute(pool).await?;
     }
+    // 換 commit 接續的等待起點（見 `Approval::wait_since`）。表由上面的 DDL 保證存在。
+    if !has_column(pool, "supervisor_approvals", "wait_since").await? {
+        sqlx::query("ALTER TABLE supervisor_approvals ADD COLUMN wait_since TEXT").execute(pool).await?;
+    }
     // Additive columns for databases created before they existed (same pattern as `db::migrate`).
     for (col, ddl) in [
         // 1 once the user has started the manager, 0 after `supervisor-stop`. The watchdog only
@@ -2042,6 +2046,11 @@ pub struct Approval {
     pub client_request_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// 同一個申請者換 commit 重新申請（`supersedes`）時接下來的等待起點：被取代那筆的 `wait_since`，
+    /// 沒有就是它被核准的時間。升級計時（SPEC §18.10）看 `min(wait_since, decided_at)`——
+    /// 核准綁 commit，main 一動就換一筆，計時不能跟著歸零（review2 sup 新發現 2）。
+    #[sqlx(default)]
+    pub wait_since: Option<String>,
 }
 
 impl Approval {
@@ -2058,9 +2067,16 @@ impl Approval {
             "reason": self.reason,
             "expires_at": self.expires_at,
             "client_request_id": self.client_request_id,
+            "wait_since": self.wait_since,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         })
+    }
+
+    /// 升級計時的起點：接續來的 `wait_since` 與自己被核准的時間，取早的那個。還沒核准就沒有。
+    pub fn waiting_since(&self) -> Option<&str> {
+        let decided = self.decided_at.as_deref()?;
+        Some(self.wait_since.as_deref().filter(|w| *w < decided).unwrap_or(decided))
     }
 
     /// Why this approval cannot be used right now, if it cannot. `None` = usable.
@@ -2073,6 +2089,7 @@ impl Approval {
                 "denied" => "approval_denied",
                 "revoked" => "approval_revoked",
                 "consumed" => "approval_already_used",
+                "superseded" => "approval_superseded",
                 _ => "approval_not_usable",
             });
         }
@@ -2109,6 +2126,16 @@ pub struct ApprovalRequestMismatch {
 pub struct ApprovalOutcome {
     pub approval: Approval,
     pub created: bool,
+    /// 這次一併取代掉的舊申請（`supersedes` 有效時）。
+    pub superseded: Option<String>,
+}
+
+/// `supersedes` 指到的不是自己同一種用途的申請：什麼都不寫。
+#[derive(Debug, thiserror::Error)]
+#[error("approval `{approval_id}` 不能被這筆取代：{reason}")]
+pub struct ApprovalSupersedeRefused {
+    pub approval_id: String,
+    pub reason: &'static str,
 }
 
 pub async fn create_approval(
@@ -2120,19 +2147,86 @@ pub async fn create_approval(
     expires_at: Option<&str>,
     request_id: Option<&str>,
 ) -> Result<ApprovalOutcome> {
+    create_approval_superseding(pool, requester, purpose, scope, target_commit, expires_at, request_id, None).await
+}
+
+/// 同上，外加 `supersedes`：**同一個申請者、同一種用途**換 commit 重新申請時，把舊的那筆
+/// （還是 pending／approved、沒過期）在同一個 transaction 裡標成 `superseded`，並把它的等待起點接過來
+/// （`wait_since`）。舊的已經不能用（過期、被駁、用掉）就不動它，新的從頭算。
+#[allow(clippy::too_many_arguments)]
+pub async fn create_approval_superseding(
+    pool: &SqlitePool,
+    requester: &str,
+    purpose: &str,
+    scope: &str,
+    target_commit: Option<&str>,
+    expires_at: Option<&str>,
+    request_id: Option<&str>,
+    supersedes: Option<&str>,
+) -> Result<ApprovalOutcome> {
     let request_id = request_id.map(str::trim).filter(|s| !s.is_empty());
     if let Some(rid) = request_id {
         if let Some(existing) = approval_by_request(pool, rid).await? {
             // 已經被裁示的也回它本人：重送的人要看到的是「這件事已經有裁示了」，不是再開一筆。
-            return same_request(existing, rid, purpose, scope, target_commit).map(|a| ApprovalOutcome { approval: a, created: false });
+            return same_request(existing, rid, requester, purpose, scope, target_commit)
+                .map(|a| ApprovalOutcome { approval: a, created: false, superseded: None });
         }
     }
     let id = crate::db::ulid();
     let now = crate::db::now();
+    let mut tx = pool.begin().await?;
+    let mut wait_since: Option<String> = None;
+    let mut superseded = None;
+    if let Some(old_id) = supersedes.map(str::trim).filter(|s| !s.is_empty()) {
+        let old = sqlx::query_as::<_, Approval>("SELECT * FROM supervisor_approvals WHERE id=?")
+            .bind(old_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let refuse = |reason| anyhow::Error::new(ApprovalSupersedeRefused { approval_id: old_id.to_string(), reason });
+        let Some(old) = old else { return Err(refuse("approval_not_found")) };
+        if old.requester != requester {
+            return Err(refuse("not_the_same_requester"));
+        }
+        if old.purpose != purpose {
+            return Err(refuse("purpose_mismatch"));
+        }
+        let live = matches!(old.status.as_str(), "pending" | "approved") && !old.expires_at.as_deref().is_some_and(|t| t <= now.as_str());
+        if live {
+            sqlx::query("UPDATE supervisor_approvals SET status='superseded', updated_at=? WHERE id=? AND status=?")
+                .bind(&now)
+                .bind(&old.id)
+                .bind(&old.status)
+                .execute(&mut *tx)
+                .await?;
+            // 還沒核准的舊申請沒有等待可接（等的是 AGM，不是安全窗口）；它自己接過來的照樣往下傳。
+            wait_since = if old.status == "approved" { old.waiting_since().map(str::to_string) } else { old.wait_since.clone() };
+            let body = json!({"approval_id": old.id, "from": old.status, "to": "superseded", "actor": requester,
+                              "reason": format!("superseded by {id}")});
+            sqlx::query("INSERT INTO supervisor_notes (id, supervisor_id, kind, body, version, created_at) VALUES (?,?,?,?,1,?)")
+                .bind(crate::db::ulid())
+                .bind(SUPERVISOR_ID)
+                .bind("approval_decision")
+                .bind(body.to_string())
+                .bind(&now)
+                .execute(&mut *tx)
+                .await?;
+            // 還沒送給協調者的那則 `approval_requested` 一起收掉：不要叫它醒來裁示一筆已經作廢的申請。
+            sqlx::query(
+                "UPDATE supervisor_inbox SET state='handled', acked_by='daemon', updated_at=?
+                  WHERE supervisor_id=? AND event_key=? AND state='pending'",
+            )
+            .bind(&now)
+            .bind(SUPERVISOR_ID)
+            .bind(format!("approval:{}:requested", old.id))
+            .execute(&mut *tx)
+            .await?;
+            superseded = Some(old.id.clone());
+        }
+    }
     let insert = sqlx::query(
         "INSERT INTO supervisor_approvals
-           (id, supervisor_id, requester, purpose, scope, target_commit, status, expires_at, client_request_id, created_at, updated_at)
-         VALUES (?,?,?,?,?,?, 'pending', ?, ?, ?, ?)",
+           (id, supervisor_id, requester, purpose, scope, target_commit, status, expires_at, client_request_id, wait_since, created_at, updated_at)
+         VALUES (?,?,?,?,?,?, 'pending', ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(SUPERVISOR_ID)
@@ -2142,19 +2236,23 @@ pub async fn create_approval(
     .bind(target_commit)
     .bind(expires_at)
     .bind(request_id)
+    .bind(&wait_since)
     .bind(&now)
     .bind(&now)
-    .execute(pool)
+    .execute(&mut *tx)
     .await;
     match insert {
-        Ok(_) => Ok(ApprovalOutcome { approval: approval(pool, &id).await?.expect("just inserted"), created: true }),
-        // 兩個呼叫同時進來時，先到的那筆已經寫進去了（唯一鍵擋下第二筆）：回先到的那一筆。
+        Ok(_) => {
+            tx.commit().await?;
+            Ok(ApprovalOutcome { approval: approval(pool, &id).await?.expect("just inserted"), created: true, superseded })
+        }
+        // 兩個呼叫同時進來時，先到的那筆已經寫進去了（唯一鍵擋下第二筆）：回先到的那一筆，這次什麼都不取代。
         Err(e) => {
+            tx.rollback().await?;
             let Some(rid) = request_id else { return Err(e.into()) };
             match approval_by_request(pool, rid).await? {
-                Some(existing) => {
-                    same_request(existing, rid, purpose, scope, target_commit).map(|a| ApprovalOutcome { approval: a, created: false })
-                }
+                Some(existing) => same_request(existing, rid, requester, purpose, scope, target_commit)
+                    .map(|a| ApprovalOutcome { approval: a, created: false, superseded: None }),
                 None => Err(e.into()),
             }
         }
@@ -2164,6 +2262,7 @@ pub async fn create_approval(
 fn same_request(
     existing: Approval,
     request_id: &str,
+    requester: &str,
     purpose: &str,
     scope: &str,
     target_commit: Option<&str>,
@@ -2177,6 +2276,10 @@ fn same_request(
             new,
         })
     };
+    // 申請者也要對得上：兩顆 bot 撞同一個自然 id 時，第二顆不能拿回第一顆的核准（acquire 也驗 owner）。
+    if existing.requester != requester {
+        return Err(mismatch("requester", existing.requester.clone(), requester.to_string()));
+    }
     if existing.purpose != purpose {
         return Err(mismatch("purpose", existing.purpose.clone(), purpose.to_string()));
     }
@@ -2219,7 +2322,7 @@ pub async fn oldest_live_window_approval(pool: &SqlitePool, now: &str) -> Result
         "SELECT * FROM supervisor_approvals
           WHERE supervisor_id=? AND status='approved' AND purpose IN ('rebuild','restart')
             AND decided_at IS NOT NULL AND (expires_at IS NULL OR expires_at > ?)
-          ORDER BY decided_at LIMIT 1",
+          ORDER BY MIN(COALESCE(wait_since, decided_at), decided_at) LIMIT 1",
     )
     .bind(SUPERVISOR_ID)
     .bind(now)
@@ -2270,6 +2373,9 @@ pub async fn decide_approval(
 ///
 /// `Ok(None)` = 狀態已經不是 `from_status`（別人先決定了），什麼都沒寫。
 ///
+/// `consumed`／`superseded` 不是裁示，**不覆寫** `decided_at`／`decided_by`：誰在什麼時候核准的要留著，
+/// 升級計時也從那個時間算；誰、什麼時候用掉的記在 note 裡（review2 sup #6）。
+///
 /// 兩件事綁在一起的理由：歷程是 append-only 的承諾。先 UPDATE 再另外 INSERT 的話，note 寫失敗
 /// 就留下「有決定、沒紀錄」的半套狀態，而呼叫端重試會撞上 `idempotent`（同一個決定）直接回成功
 /// ——那筆 audit 永遠補不回來。
@@ -2286,14 +2392,17 @@ pub async fn decide_approval_from(
     let now = crate::db::now();
     let note_id = crate::db::ulid();
     let mut tx = pool.begin().await?;
+    let keeps_decision = matches!(status, "consumed" | "superseded");
     let res = sqlx::query(
         "UPDATE supervisor_approvals
-            SET status=?, decided_by=?, decided_at=?, reason=COALESCE(?, reason),
-                expires_at=COALESCE(?, expires_at), updated_at=?
+            SET status=?, decided_by=CASE WHEN ? THEN decided_by ELSE ? END, decided_at=CASE WHEN ? THEN decided_at ELSE ? END,
+                reason=COALESCE(?, reason), expires_at=COALESCE(?, expires_at), updated_at=?
           WHERE id=? AND status=?",
     )
     .bind(status)
+    .bind(keeps_decision)
     .bind(actor)
+    .bind(keeps_decision)
     .bind(&now)
     .bind(reason)
     .bind(expires_at)
