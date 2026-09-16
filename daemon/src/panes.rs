@@ -27,6 +27,9 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
            last_output_at TEXT NOT NULL,
            first_seen TEXT NOT NULL, last_seen TEXT NOT NULL,
            orphan_notified_at TEXT,
+           -- `bot`（AM_BOT_ID 推斷）／`user`（沒有標記但 cwd 對得到專案）／`none`（連專案都對不到）。
+           owned_by TEXT NOT NULL DEFAULT 'none',
+           unowned_notified_at TEXT,
            -- 使用者手開的 pane 只有人明確簽名（adopt allow_gc）才可自動關。
            gc_optin INTEGER NOT NULL DEFAULT 0,
            PRIMARY KEY (host, pane_id)
@@ -34,6 +37,15 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
     )
     .execute(pool)
     .await?;
+    // 表可能是上一版建的：欄位 additive 補上（migrate 可重入）。
+    for (col, ddl) in [
+        ("owned_by", "ALTER TABLE panes ADD COLUMN owned_by TEXT NOT NULL DEFAULT 'none'"),
+        ("unowned_notified_at", "ALTER TABLE panes ADD COLUMN unowned_notified_at TEXT"),
+    ] {
+        if !crate::db::has_column(pool, "panes", col).await? {
+            sqlx::query(ddl).execute(pool).await?;
+        }
+    }
     Ok(())
 }
 
@@ -94,6 +106,23 @@ pub fn parse_lsof(out: &str) -> HashMap<i32, Vec<u16>> {
     by_pid
 }
 
+/// cwd 回退歸屬（§6.5e，AGM 2026-09-16 第 1 點）：沒有 `AM_BOT_ID` 時，用 pane 的 cwd 對專案路徑；
+/// 子目錄也算，取**最長**的那個（巢狀專案時才不會歸錯）。回 `None` = 連專案都對不到。
+pub fn project_for_cwd<'a>(cwd: &str, projects: &'a [(String, String)]) -> Option<&'a str> {
+    let cwd = cwd.trim_end_matches('/');
+    if cwd.is_empty() {
+        return None;
+    }
+    projects
+        .iter()
+        .filter(|(_, path)| {
+            let p = path.trim_end_matches('/');
+            !p.is_empty() && (cwd == p || cwd.starts_with(&format!("{p}/")))
+        })
+        .max_by_key(|(_, path)| path.trim_end_matches('/').len())
+        .map(|(id, _)| id.as_str())
+}
+
 /// 掃一台主機的非 agent pane，寫進 `panes`。`snapshot_panes` 是 `session.snapshot` 的 `panes` 陣列
 /// （已經含 `agent`），所以不用再打一次 RPC。
 pub async fn scan_host(app: &Arc<App>, host: &str, snapshot_panes: &[Value]) -> Result<usize> {
@@ -115,6 +144,13 @@ pub async fn scan_host(app: &Arc<App>, host: &str, snapshot_panes: &[Value]) -> 
         }
     };
     let now = crate::db::now();
+    // canonical path 比對用（§6.5e 的 cwd 回退）。
+    let project_paths: Vec<(String, String)> = crate::db::live_projects(&app.db)
+        .await?
+        .into_iter()
+        .filter(|p| p.host == host)
+        .map(|p| (p.id, p.path))
+        .collect();
     let mut seen = Vec::new();
     for p in &non_agent {
         let Some(pane_id) = p.get("pane_id").and_then(Value::as_str) else { continue };
@@ -129,10 +165,22 @@ pub async fn scan_host(app: &Arc<App>, host: &str, snapshot_panes: &[Value]) -> 
         };
         let kind = classify(f.foreground.as_deref(), &ports);
         let owner = f.bot_ids.first().cloned();
-        let project = match &owner {
-            Some(b) => crate::db::bot(&app.db, b).await.ok().flatten().map(|b| b.project_id),
+        // 歸屬三層（§6.5e）：AM_BOT_ID → bot；沒有就用 cwd 對專案（owned_by=user）；再對不到就是 none。
+        let mut owned_by = "none";
+        let mut project = match &owner {
+            Some(b) => {
+                owned_by = "bot";
+                crate::db::bot(&app.db, b).await.ok().flatten().map(|b| b.project_id)
+            }
             None => None,
         };
+        if project.is_none() {
+            let cwd = p.get("foreground_cwd").or_else(|| p.get("cwd")).and_then(Value::as_str).unwrap_or("");
+            if let Some(id) = project_for_cwd(cwd, &project_paths) {
+                owned_by = if owner.is_some() { "bot" } else { "user" };
+                project = Some(id.to_string());
+            }
+        }
         let revision = p.get("revision").and_then(Value::as_u64).map(|v| v as i64);
         let prev: Option<(Option<i64>, String, String)> =
             sqlx::query_as("SELECT last_revision, last_output_at, first_seen FROM panes WHERE host=? AND pane_id=?")
@@ -150,8 +198,8 @@ pub async fn scan_host(app: &Arc<App>, host: &str, snapshot_panes: &[Value]) -> 
         };
         sqlx::query(
             "INSERT INTO panes (pane_id, host, workspace_id, tab_id, cwd, kind, owner_bot_id, project_id,
-                                foreground, listen_ports, last_revision, last_output_at, first_seen, last_seen)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                                foreground, listen_ports, last_revision, last_output_at, first_seen, last_seen, owned_by)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
              ON CONFLICT(host, pane_id) DO UPDATE SET
                workspace_id=excluded.workspace_id, tab_id=excluded.tab_id, cwd=excluded.cwd, kind=excluded.kind,
                -- 人工 adopt 過的 owner／purpose 不被掃描蓋掉（§6.5e）。
@@ -159,6 +207,9 @@ pub async fn scan_host(app: &Arc<App>, host: &str, snapshot_panes: &[Value]) -> 
                project_id=COALESCE(excluded.project_id, panes.project_id),
                foreground=excluded.foreground, listen_ports=excluded.listen_ports,
                last_revision=excluded.last_revision, last_output_at=excluded.last_output_at, last_seen=excluded.last_seen,
+               owned_by=excluded.owned_by,
+               -- 歸屬回來了就把「沒歸屬」的通知標記清掉（去重規則同 orphan）。
+               unowned_notified_at=CASE WHEN excluded.owned_by='none' THEN panes.unowned_notified_at ELSE NULL END,
                -- owner 又對得到 bot 了就把孤兒標記清掉，下次真的變孤兒才會再通知一次。
                orphan_notified_at=CASE WHEN excluded.project_id IS NOT NULL THEN NULL ELSE panes.orphan_notified_at END",
         )
@@ -176,6 +227,7 @@ pub async fn scan_host(app: &Arc<App>, host: &str, snapshot_panes: &[Value]) -> 
         .bind(&last_output_at)
         .bind(&first_seen)
         .bind(&now)
+        .bind(owned_by)
         .execute(&app.db)
         .await?;
     }
@@ -237,6 +289,7 @@ pub fn row_json(r: &sqlx::sqlite::SqliteRow) -> Value {
         "first_seen": r.get::<String, _>("first_seen"),
         "last_seen": r.get::<String, _>("last_seen"),
         "gc_optin": r.get::<i64, _>("gc_optin") != 0,
+        "owned_by": r.get::<String, _>("owned_by"),
     })
 }
 
@@ -282,6 +335,11 @@ mod tests {
         let app = app().await;
         let panes = vec![pane("w1:pA", Some("claude"), 3), pane("w1:pB", None, 7)];
         assert_eq!(scan_host(&app, "local", &panes).await.unwrap(), 1, "只收非 agent pane");
+        let owned: String = sqlx::query_scalar("SELECT owned_by FROM panes WHERE pane_id='w1:pB'")
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(owned, "none", "沒有 AM_BOT_ID、cwd 也對不到專案");
         let (kind, rev, out_at, first): (String, Option<i64>, String, String) =
             sqlx::query_as("SELECT kind, last_revision, last_output_at, first_seen FROM panes WHERE pane_id='w1:pB'")
                 .fetch_one(&app.db)
@@ -313,6 +371,22 @@ mod tests {
         let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM panes").fetch_one(&app.db).await.unwrap();
         assert_eq!(left, 0);
         std::fs::remove_dir_all(&app.data_dir).ok();
+    }
+
+    /// cwd 回退歸屬：子目錄也算，巢狀時取最長的那個；對不到就是 none（§6.5e 第 1 點）。
+    #[test]
+    fn a_pane_without_a_bot_marker_falls_back_to_its_cwd() {
+        let projects = vec![
+            ("p-outer".to_string(), "/Users/m4p/project".to_string()),
+            ("p-am".to_string(), "/Users/m4p/project/agents-manager".to_string()),
+        ];
+        assert_eq!(project_for_cwd("/Users/m4p/project/agents-manager", &projects), Some("p-am"));
+        assert_eq!(project_for_cwd("/Users/m4p/project/agents-manager/web/src", &projects), Some("p-am"), "子目錄算");
+        assert_eq!(project_for_cwd("/Users/m4p/project/other", &projects), Some("p-outer"), "取得到的最長那個");
+        assert_eq!(project_for_cwd("/tmp", &projects), None, "對不到就是沒歸屬");
+        assert_eq!(project_for_cwd("", &projects), None);
+        // 前綴不是路徑邊界：`/Users/m4p/projectX` 不算在 `/Users/m4p/project` 底下。
+        assert_eq!(project_for_cwd("/Users/m4p/projectX", &projects), None);
     }
 
     /// shim 回報的用途：pane 還沒被掃到也先記著；掃描推斷出來的 owner 不會被回報改寫。
@@ -449,6 +523,31 @@ pub struct AdoptIn {
     /// 使用者手開的 pane 只有這個明確帶 true 才會變成可自動關（§6.5e）。
     #[serde(default)]
     pub allow_gc: bool,
+}
+
+/// `GET /api/panes?unowned=1`：全機的非 agent pane；`unowned=1` 只回「連專案都對不到」的那些（§6.5e）。
+pub async fn list_all(State(app): State<Arc<App>>, Query(q): Query<HashMap<String, String>>) -> Result<Json<Value>, LcError> {
+    let sql = |e: sqlx::Error| LcError::Upstream(e.to_string());
+    let only_unowned = q.get("unowned").map(|v| v == "1" || v == "true").unwrap_or(false);
+    let rows = if only_unowned {
+        sqlx::query("SELECT * FROM panes WHERE owned_by='none' ORDER BY host, pane_id").fetch_all(&app.db).await
+    } else {
+        sqlx::query("SELECT * FROM panes ORDER BY host, kind, pane_id").fetch_all(&app.db).await
+    }
+    .map_err(sql)?;
+    Ok(Json(json!({"panes": rows.iter().map(row_json).collect::<Vec<_>>()})))
+}
+
+/// `POST /api/panes/{id}/focus?host=local`：把 herdr 的焦點切到這顆 pane。只動焦點，不改內容。
+pub async fn focus(
+    State(app): State<Arc<App>>,
+    Path(pane_id): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, LcError> {
+    let host = q.get("host").cloned().unwrap_or_else(|| crate::config::LOCAL_HOST.to_string());
+    let (client, _) = crate::api::shell::client_for(&app, &host).await?;
+    client.pane_focus(&pane_id).await.map_err(|e| LcError::Upstream(format!("{e:#}")))?;
+    Ok(Json(json!({"focused": true, "pane_id": pane_id})))
 }
 
 /// `POST /api/panes/{id}/adopt`：補 owner／purpose。不會偷偷讓使用者的 pane 變成可 GC。

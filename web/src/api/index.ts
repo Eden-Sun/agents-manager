@@ -126,6 +126,66 @@ export async function sendGroupChat(
   }
 }
 
+/** SPEC §6.5e：專案底下的非 agent pane（shell／服務）。 */
+export interface ProjectPane {
+  pane_id: string
+  host: string
+  workspace_id: string | null
+  tab_id: string | null
+  cwd: string | null
+  kind: 'shell' | 'service'
+  owned_by: 'bot' | 'user' | 'none'
+  owner_bot_id: string | null
+  project_id: string | null
+  purpose: string | null
+  foreground: string | null
+  listen_ports: number[]
+  last_output_at: string
+  first_seen: string
+  last_seen: string
+  gc_optin: boolean
+}
+
+function toPane(v: unknown): ProjectPane {
+  const r = (v ?? {}) as Record<string, unknown>
+  const str = (x: unknown): string => (typeof x === 'string' ? x : '')
+  const opt = (x: unknown): string | null => (typeof x === 'string' && x ? x : null)
+  return {
+    pane_id: str(r.pane_id),
+    host: str(r.host) || 'local',
+    workspace_id: opt(r.workspace_id),
+    tab_id: opt(r.tab_id),
+    cwd: opt(r.cwd),
+    kind: r.kind === 'service' ? 'service' : 'shell',
+    owned_by: r.owned_by === 'bot' || r.owned_by === 'user' ? r.owned_by : 'none',
+    owner_bot_id: opt(r.owner_bot_id),
+    project_id: opt(r.project_id),
+    purpose: opt(r.purpose),
+    foreground: opt(r.foreground),
+    listen_ports: Array.isArray(r.listen_ports) ? r.listen_ports.filter((p): p is number => typeof p === 'number') : [],
+    last_output_at: str(r.last_output_at),
+    first_seen: str(r.first_seen),
+    last_seen: str(r.last_seen),
+    gc_optin: r.gc_optin === true,
+  }
+}
+
+export async function fetchProjectPanes(projectId: string): Promise<ProjectPane[]> {
+  const raw = await transport.request('GET', `/projects/${encodeURIComponent(projectId)}/panes`)
+  const list = (raw as { panes?: unknown[] })?.panes
+  return Array.isArray(list) ? list.map(toPane) : []
+}
+
+export async function focusPane(paneId: string, host: string): Promise<void> {
+  await transport.request('POST', `/panes/${encodeURIComponent(paneId)}/focus?host=${encodeURIComponent(host)}`)
+}
+
+/** 服務 pane 要 `confirm`（UI 先顯示 port 再問一次）；沒帶會回 409。 */
+export async function closePane(paneId: string, host: string, confirm: boolean): Promise<void> {
+  const q = `host=${encodeURIComponent(host)}${confirm ? '&confirm=true' : ''}`
+  await transport.request('POST', `/panes/${encodeURIComponent(paneId)}/close?${q}`)
+}
+
 export async function fetchTerminal(
   botId: string,
   source: TerminalSource,

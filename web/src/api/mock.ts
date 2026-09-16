@@ -680,6 +680,20 @@ export class MockTransport implements Transport {
     // 前端已樂觀套用排序，mock 收下就好。
     // 跨裝置已讀：mock 只有一個瀏覽器，記下來就好。
     { const m = rawPath.match(/^\/bots\/([^/]+)\/read$/); if (method === 'POST' && m) return { bot_id: decodeURIComponent(m[1]), read_mark: { at: typeof b.at === 'string' ? b.at : new Date().toISOString(), id: typeof b.message_id === 'string' ? b.message_id : '' }, unread: 0 } }
+    // §6.5e：專案底下的非 agent pane。
+    { const m = rawPath.match(/^\/projects\/([^/]+)\/panes$/); if (method === 'GET' && m) return this.projectPanes(decodeURIComponent(m[1])) }
+    { const m = rawPath.match(/^\/panes\/([^/]+)\/(focus|close|adopt)$/); if (method === 'POST' && m) {
+        const pane = decodeURIComponent(m[1])
+        if (m[2] === 'close') {
+          const row = this.panes.find((p) => p.pane_id === pane)
+          if (row?.kind === 'service' && q.get('confirm') !== 'true') {
+            throw new ApiError(409, { error: 'conflict', reason: 'service_pane', pane: row }, 'service pane needs confirm')
+          }
+          this.panes = this.panes.filter((p) => p.pane_id !== pane)
+          return { closed: true }
+        }
+        return { ok: true, pane_id: pane }
+      } }
     if (method === 'POST' && rawPath === '/order') return this.saveOrder(b)
     if (method === 'GET' && rawPath === '/fs/dirs') {
       return this.dirs(q.get('path') ?? '', q.get('host') ?? '', q.get('hidden') === '1')
@@ -953,6 +967,33 @@ export class MockTransport implements Transport {
     }
     this.emit('mem_updated', this.mem())
     return { host, pid, signal: typeof b.signal === 'string' ? b.signal : 'TERM', exe: row.exe, freed_bytes: row.subtree_bytes }
+  }
+
+  /** §6.5e：一顆 bot 開的 dev server（有 port）與一顆使用者自己開的 shell。 */
+  private panes: Array<Record<string, unknown>> = []
+
+  private projectPanes(projectId: string) {
+    if (this.panes.length === 0) {
+      const bot = this.bots[0]
+      const ago = (m: number) => new Date(Date.now() - m * 60000).toISOString()
+      this.panes = [
+        {
+          pane_id: 'w168:p62', host: 'local', workspace_id: 'w168', tab_id: 'w168:t39',
+          cwd: '/Users/me/project/agents-manager', kind: 'service', owned_by: 'bot',
+          owner_bot_id: bot?.id ?? null, project_id: projectId, purpose: 'dev-server',
+          foreground: 'node next dev --port 3010', listen_ports: [3010],
+          last_output_at: ago(1), first_seen: ago(180), last_seen: ago(0), gc_optin: false,
+        },
+        {
+          pane_id: 'w1HJ:p4W', host: 'local', workspace_id: 'w1HJ', tab_id: 'w1HJ:t2K',
+          cwd: '/Users/me/project/agents-manager/web', kind: 'shell', owned_by: 'user',
+          owner_bot_id: null, project_id: projectId, purpose: null,
+          foreground: null, listen_ports: [],
+          last_output_at: ago(420), first_seen: ago(600), last_seen: ago(0), gc_optin: false,
+        },
+      ]
+    }
+    return { project_id: projectId, host: 'local', panes: this.panes }
   }
 
   /** SPEC §15：依執行中 bot 數推算，啟停 bot 時數字才會動。 */
