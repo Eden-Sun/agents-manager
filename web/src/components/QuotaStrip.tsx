@@ -778,7 +778,7 @@ export function QuotaStrip({
   const configured = useStore((s) => s.identities)
   // 身份清單跟著該主機（SPEC §16）：遠端 cc1 可能是不同帳號。
   const idStatus = useStore((s) => identityStatusOfHost(s, host))
-  const identities = useMemo(() => identitiesOfHost(configured, idStatus), [configured, idStatus])
+  const identities = useMemo(() => identitiesOfHost(configured, idStatus, host ?? 'local'), [configured, idStatus, host])
   // 量父節點（標題列）寬而非 window.innerWidth（少算側欄與暫存欄約 500px，2026-09-11 分頁被推出畫面）；
   // 不量 wrap 自己：`.quota-strip` 是 `flex: none`，會來回震盪。
   const [avail, setAvail] = useState<number | null>(null)

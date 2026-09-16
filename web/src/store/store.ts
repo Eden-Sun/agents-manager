@@ -406,7 +406,7 @@ export interface StoreState {
   abandonTurn: (botId: string, turnId: string) => Promise<void>
   addHost: (input: NewHostInput) => Promise<HostResult | null>
   addIdentity: (input: NewIdentityInput) => Promise<boolean>
-  removeIdentity: (name: string) => Promise<void>
+  removeIdentity: (name: string, host?: string) => Promise<void>
   removeHost: (name: string) => Promise<void>
   reconnectHost: (name: string) => Promise<HostResult | null>
   addProject: (input: NewProjectInput) => Promise<boolean>
@@ -1208,9 +1208,9 @@ export const useStore = create<StoreState>((set, get) => ({
     }
   },
 
-  async removeIdentity(name) {
+  async removeIdentity(name, host = 'local') {
     try {
-      await api.deleteIdentity(name)
+      await api.deleteIdentity(name, host)
       await get().refreshState()
       get().notify('info', `已刪除身份 ${name}`)
     } catch (e) {
@@ -2657,8 +2657,11 @@ export function toolsOfHost(state: StoreState, host: string): ToolMap {
  * 是純函式而不是 selector：兩個輸入都是 store 裡的穩定引用，元件端用 `useMemo` 合併，
  * 避免每次 render 都回一個新陣列（React #185）。
  */
-export function identitiesOfHost(all: Identity[], status: IdentityStatusMap): Identity[] {
-  const out = all.slice()
+export function identitiesOfHost(all: Identity[], status: IdentityStatusMap, host = LOCAL_HOST): Identity[] {
+  // config 身分只屬於它自己那一台（沒寫 host 的＝本機，SPEC §16.2）：以前全部鋪上去，
+  // 於是一個全域的 `cc1` 會遮蔽掉 m4p 上那個真正的 `cc1`。
+  const want = host || LOCAL_HOST
+  const out = all.filter((i) => (i.host || LOCAL_HOST) === want)
   for (const st of Object.values(status)) {
     if (st.source !== 'shell' || out.some((i) => i.name === st.name)) continue
     out.push({

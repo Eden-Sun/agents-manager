@@ -247,7 +247,7 @@ mod tests {
         if let Some(d) = dir {
             env.insert(config_dir_var(kind).unwrap().to_string(), d.to_string());
         }
-        IdentityCfg { name: name.into(), kind: kind.into(), env, args: vec![] }
+        IdentityCfg { name: name.into(), kind: kind.into(), host: None, env, args: vec![] }
     }
 
     #[test]

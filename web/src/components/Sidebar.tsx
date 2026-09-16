@@ -150,7 +150,7 @@ function BotRow({
       // 額度按主機分（SPEC §14）；身分清單也跟著那台（同名身分在各主機可能是不同帳號）。
       if (!b) return null
       const host = projectHostName(s, b.project_id)
-      return botQuotaWarning(s.quota, b.kind, b.identity, host, identitiesOfHost(s.identities, identityStatusOfHost(s, host)))
+      return botQuotaWarning(s.quota, b.kind, b.identity, host, identitiesOfHost(s.identities, identityStatusOfHost(s, host), host))
     }),
   )
   // 黃燈（low）；同樣要 useShallow。
@@ -162,7 +162,7 @@ function BotRow({
       const model = run?.status?.model_name ?? (runtimeKnown(run) ? run!.runtime_model : (b?.model ?? null))
       if (!b) return null
       const host = projectHostName(s, b.project_id)
-      return botQuotaLevel(s.quota, b.kind, b.identity, host, model, identitiesOfHost(s.identities, identityStatusOfHost(s, host)))
+      return botQuotaLevel(s.quota, b.kind, b.identity, host, model, identitiesOfHost(s.identities, identityStatusOfHost(s, host), host))
     }),
   )
   const selected = useStore((s) => s.selectedBotId === botId)
@@ -856,7 +856,7 @@ export function Sidebar() {
   const localIdentityStatus = useStore((s) => s.localIdentityStatus)
   const disabledIdentities = useStore((s) => s.disabledIdentities)
   const identityCount = useMemo(
-    () => enabledIdentities(disabledIdentities, 'local', identitiesOfHost(configuredIdentities, localIdentityStatus)).length,
+    () => enabledIdentities(disabledIdentities, 'local', identitiesOfHost(configuredIdentities, localIdentityStatus, 'local')).length,
     [configuredIdentities, localIdentityStatus, disabledIdentities],
   )
   const [deleteProject, setDeleteProject] = useState<{ id: string; label: string } | null>(null)

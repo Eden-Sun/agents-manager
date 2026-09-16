@@ -130,7 +130,7 @@ export function IdentityOptions({
   const disabledList = useStore((s) => s.disabledIdentities)
   // 停用的身份不出現在選單裡（SPEC §16），但**已經綁著的那個**還是要看得見，否則這顆 bot 的設定會像是空的。
   const identities = useMemo(() => {
-    const ofKind = identitiesOfHost(all, status).filter((i) => i.kind === kind)
+    const ofKind = identitiesOfHost(all, status, host).filter((i) => i.kind === kind)
     const live = enabledIdentities(disabledList, host, ofKind)
     // 已經綁著的那一個就算被停用也要留著，否則這顆 bot 的設定看起來像沒選過。
     return ofKind.filter((i) => i.name === value || live.some((l) => l.name === i.name))

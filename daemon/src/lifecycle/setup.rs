@@ -1338,14 +1338,29 @@ mod pane_env_tests {
         env.app
             .cfg
             .update(|cfg| {
-                cfg.identities = vec![crate::config::IdentityCfg {
-                    name: "cc9".into(),
-                    kind: "claude".into(),
-                    env: [("AM_INSTANCE", "forged-by-identity"), ("AM_DATA_DIR", "/identity/dir"), ("ID_ONLY", "kept")]
+                // 這個測試測的是 pane_env 的合併順序，不是身分的 host 範圍：兩台各放一份同名的，
+                // 本機那份不寫 host（＝現行 config.toml 的形狀），遠端那份明寫 host（SPEC §16.2）。
+                let forged = || -> std::collections::BTreeMap<String, String> {
+                    [("AM_INSTANCE", "forged-by-identity"), ("AM_DATA_DIR", "/identity/dir"), ("ID_ONLY", "kept")]
                         .map(|(k, v)| (k.to_string(), v.to_string()))
-                        .into(),
-                    args: vec![],
-                }];
+                        .into()
+                };
+                cfg.identities = vec![
+                    crate::config::IdentityCfg {
+                        name: "cc9".into(),
+                        kind: "claude".into(),
+                        host: None,
+                        env: forged(),
+                        args: vec![],
+                    },
+                    crate::config::IdentityCfg {
+                        name: "cc9".into(),
+                        kind: "claude".into(),
+                        host: Some("box".into()),
+                        env: forged(),
+                        args: vec![],
+                    },
+                ];
                 Ok(())
             })
             .await

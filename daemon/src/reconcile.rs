@@ -1602,6 +1602,7 @@ mod compat_tests {
         crate::config::IdentityCfg {
             name: name.into(),
             kind: "claude".into(),
+            host: None,
             env: claude_env(dir),
             args: vec![],
         }
