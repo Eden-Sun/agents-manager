@@ -1356,8 +1356,9 @@ inbox `assignment_noticed`（`needs_review=false`）。送不出去或回合失�
   daemon 一重啟就全空，只憑「沒有 limit_hit」重送會在開機瞬間把整批還在被擋的交辦倒出去（review 2026-09-16）。
   **唯一的提早放行**：最後一次確認還在擋（park 或順延，看交辦的 `updated_at`）之後，同一把 key 被成功回合清過撞限（`clear_limit_hit` 記下的時刻，只在記憶體）——
   用了重置券或買了 credits，不必再等原本的 `resume_at`。重啟後沒有這份紀錄，照舊等。
-- **開機回填**（`controller::backfill_quota_limits`）：控制器啟動時先用 parked 交辦的 `resume_at` 把該 host＋`quota_base` 的 `limit_hit` 補回記憶體（`quota::seed_limit_hit`，
-  `source=parked-assignment`）。同一把 key 取**最晚**的 `resume_at`，已經過期的不寫；只寫 `limit_hit`，不碰任何量表或 `resets_at`。這樣重啟後 `dispatch` 也照樣看得到「這個帳號還在擋」。
+- **開機回填**（`controller::backfill_quota_limits_once`）：`tools::detect` 寫完**一台主機**的身分表之後，用那台上 parked 交辦的 `resume_at` 把 host＋`quota_base` 的 `limit_hit` 補回記憶體（`quota::seed_limit_hit`，
+  `source=parked-assignment`）。**每台主機每個行程只跑一次**，只收這個行程起來之前就停下的交辦：不綁 controller 的 `spawn`（每次換 generation 都會跑，會把成功回合剛清掉的撞限種回去），
+  也不在身分偵測之前算 key（`cc0` 會落到沒人讀的 `claude:cc0`、遠端還沒連上）（review 2026-09-16）。同一把 key 取**最晚**的 `resume_at`，已經過期的不寫；只寫 `limit_hit`，不碰任何量表或 `resets_at`。這樣重啟後 `dispatch` 也照樣看得到「這個帳號還在擋」。
 - `assignment_quota_blocked` / `assignment_quota_resumed` 各推一則 inbox（`needs_review=false`），不開 incident。到期仍被擋（順延，或重送後又撞到）累計 6 次 → `awaiting_review` + `turn_status=quota_exhausted`（通常是 credits 真的用完）。
   mission 交辦另有 `quota_policy` 與身份切換，見 §18.14。
 
