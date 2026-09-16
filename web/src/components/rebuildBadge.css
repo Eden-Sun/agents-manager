@@ -117,3 +117,8 @@
   margin-top: 6px;
   color: var(--text-faint);
 }
+
+.rebuild-ask {
+  margin-top: 8px;
+  width: 100%;
+}
