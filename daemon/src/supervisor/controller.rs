@@ -164,7 +164,10 @@ pub async fn dispatch(app: &Arc<App>, assignment_id: &str) {
             }
             // `queued` 也記成 delivered（turn 已經存在、id 已經綁定）：回合結束時 queue flush 會送出，
             // 之後的完成事件照舊對得上這筆交辦。等太久沒送出由 `block_stale_queues` 收尾。
-            let _ = store::mark_delivered(&app.db, &a.id, &out.turn_id, &out.delivery).await;
+            // 寫失敗不能吞掉：下一個 tick 會用同一個 crid 重派，冪等回同一個 turn 再記一次。
+            if let Err(e) = store::mark_delivered(&app.db, &a.id, &out.turn_id, &out.delivery).await {
+                tracing::warn!(assignment = %a.id, turn = %out.turn_id, error = ?e, "could not record the delivery; the next tick re-dispatches with the same request id");
+            }
             if out.delivery == "queued" {
                 tracing::info!(assignment = %a.id, bot = %a.target_bot_id, turn = %out.turn_id,
                                "對方回合中：交辦排進佇列，等它回合結束再送");

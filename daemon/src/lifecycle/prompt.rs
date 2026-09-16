@@ -332,7 +332,15 @@ async fn prompt_inner(
             .map_err(up)?
             .unwrap_or_default();
         // The same request asked again reports the same outcome, including "unverified".
-        let delivery = if t.delivery == "ok" && t.delivery_verified == 0 { "unverified".to_string() } else { t.delivery };
+        // 還在排隊的那筆照第一次的回答說 `queued`：它的 `delivery` 欄位是 `pending`，原樣回的話
+        // 重派的交辦會被記成 delivered/pending，從此不歸排隊保險絲管（review2 deliv L1）。
+        let delivery = if t.status == "queued" {
+            "queued".to_string()
+        } else if t.delivery == "ok" && t.delivery_verified == 0 {
+            "unverified".to_string()
+        } else {
+            t.delivery
+        };
         return Ok(PromptOut { turn_id: t.id, message_id: mid, delivery });
     }
 
@@ -567,6 +575,7 @@ mod prompt_tests {
         // 同一筆交辦重試：回原本那一筆，不會疊第二筆。
         let again = prompt_relayed_queueable(&app, &f.bot_id, "AGM 派的工作", "agm-1", Some("agm-bot")).await.unwrap();
         assert_eq!(again.turn_id, out.turn_id);
+        assert_eq!(again.delivery, "queued", "重問一筆還在排隊的，回答跟第一次一樣（不是 turn 欄位上的 pending）");
         // 另一筆交辦想排第二筆：擋下來，照舊 409（每個對話只留一筆 queued）。
         let other = prompt_relayed_queueable(&app, &f.bot_id, "另一件事", "agm-2", Some("agm-bot")).await;
         assert!(matches!(other, Err(LcError::Conflict(_))), "每個對話只留一筆 queued");
