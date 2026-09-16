@@ -505,7 +505,7 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
 |---|---|---|
 | `agent` | herdr `agent.list` 認得（claude／codex／grok） | 既有邏輯，這一段完全不碰（§6.5.1、§6.9 的教訓） |
 | `service` | 前景有非 shell 程式，**或**該 pane 的行程樹有 listen port | 不自動關；只有在「擁有它的 bot 已刪除／專案已移除」時發 `pane_orphaned` 通知，由人決定 |
-| `shell` | 只有 shell（zsh/bash/sh/fish），沒有 listen port，**且行程樹只有 shell 本身** | 歸屬得到的 bot 才受 GC：閒置超過門檻自動關 |
+| `shell` | 只有 shell（zsh/bash/sh/fish），沒有 listen port，**且行程樹只有 shell 本身** | **一律要對到一個專案**（`AM_BOT_ID` → bot → project，退回 cwd）；有歸屬的受 GC，手開的預設只列不關 |
 
 #### 歸屬怎麼來（與交辦計畫 C 的差異，這裡取代原案）
 原案要 shim 用 `herdr pane report-metadata` 帶 owner／project／purpose。**不可行**：`report-metadata` 是 herdr 的
@@ -514,8 +514,11 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
 
 1. **環境推斷（主要來源，不需要新協定）**：bot 的 pane 由 shim 開，`--env` 一定帶 `AM_BOT_ID`／`AM_RUN_ID`（§6.5b），
    子 pane 的 shell 與其行程樹都繼承得到。daemon 用既有的 `memproc` 環境快照（`ps -E` / `/proc/<pid>/environ`，
-   已經在用來算每個專案的 RAM）把 pane 的行程樹對回 `AM_BOT_ID` → bot → project。**沒有 `AM_BOT_ID` 就是使用者手開的**，
-   一律不動：不關、不搬、不改名，只在 UI 列出來（見下）。
+   已經在用來算每個專案的 RAM）把 pane 的行程樹對回 `AM_BOT_ID` → bot → project。
+1b. **cwd 回退（使用者 2026-09-16 裁示：shell 開的 pane 一律要加入專案裡 trace，不是任開任關）**：沒有 `AM_BOT_ID` 時
+   不是就此不管，而是用 pane 的 `foreground_cwd`（沒有才退回 `cwd`）比對既有 project 的 canonical path——**在專案目錄底下
+   （含子目錄）就屬於那個專案**，多個專案都對得到取最長的那一個。這種 pane 仍然標成**使用者手開**（`owner_bot_id` 空、
+   `owned_by='user'`），意思只是「它出現在這個專案的清單裡、看得到是誰的 cwd 在跑什麼」，**不等於可以自動關**（見生命週期）。
 2. **用途標記（次要，只補 purpose 與顯示）**：bot 開 pane 時多帶 `--purpose <文字>`（shim 自己的旗標，轉發前剝掉），
    shim 在 `pane split` / `tab create` / `pane new` / `workspace create` 之後對 daemon
    `POST /relay/pane`（表單 `bot_id`／`pane_id`／`purpose`，header `X-AM-Bot-Token`，與 §6.5d 的 `/relay/announce` 同一條路），
@@ -542,7 +545,16 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
   前景程式、listen ports、最後輸出時間），AGM／人決定。
 - **有歸屬的 `shell` pane，但擁有它的 bot 被刪／專案被移除**：跟 service 一樣推 `pane_orphaned`，但**仍受 GC**——
   通知歸通知，閒置超過門檻照關（AGM 2026-09-16 裁示）。shell pane 沒有跑著的東西，留著它不會比通知更有價值。
-- **使用者手開的（沒有 `AM_BOT_ID`）**：永不自動關，也不通知；只在 UI 顯示，讓人自己決定。
+- **使用者手開的（沒有 `AM_BOT_ID`）但 cwd 對得到專案**：列在那個專案底下（這就是「加入專案 trace」），
+  但**預設永不自動關**——要它可 GC 只有一條路：`adopt` 帶 `allow_gc: true`，等於人簽過名（見下）。
+- **連 cwd 都對不到任何專案的 shell pane：全機只准有一顆**（使用者 2026-09-16 裁示）。那一顆是固定用途的雜事 pane，
+  名字固定為 `[panes] scratch_name`（預設 `scratch`，daemon 開機掃到就 `herdr pane rename` 成這個名字），**永不自動關**。
+  第二顆以後一律視為「該歸屬而沒歸屬」：UI 標示、推一則 inbox `pane_unowned`（去重規則同 `pane_orphaned`），
+  並套用與有歸屬 shell pane **相同**的 GC 規則（同一個閒置門檻與三條守門）。理由是使用者的裁示是「只准一顆」，
+  不是「都不要動」——但關掉的門檻一點都不放寬：行程樹只有 shell、關前留 20 行 log、取值失敗不關。
+- **開與關都要走記錄過的路**：bot 開 pane 一定經過 shim（寫進 `panes`，帶 project／owner／purpose），關 pane 一定留原因
+  （手動關走 `POST /api/panes/{id}/close`，自動關走 GC 並記 log）。agent 不得繞過這條自己開一顆沒人知道的 pane，
+  也不得隨手關掉不是自己開的 pane。
 - daemon 重啟後靠同一輪掃描重建 `panes`，不留記憶體狀態。
 
 #### 「最後輸出」怎麼量（AGM 2026-09-16 補充）
@@ -567,10 +579,12 @@ w168 那四個空 zsh（p61／p4W／p5Y／p64）**很可能是使用者手開的
 由使用者自己決定，不要越權。
 
 #### 資料與 API（§6.5f 實作時展開）
-`panes` 表：`pane_id`、`host`、`workspace_id`、`tab_id`、`cwd`、`kind`、`owner_bot_id`、`project_id`、`purpose`、
+`panes` 表：`pane_id`、`host`、`workspace_id`、`tab_id`、`cwd`、`kind`、`owner_bot_id`、`project_id`、
+`owned_by`（`bot`／`user`——`project_id` 是靠 cwd 對到的就是 `user`，看得出這一列的歸屬有多硬）、`purpose`、
 `foreground`（argv 摘要）、`listen_ports`、`last_revision`、`last_output_at`、`first_seen`、`last_seen`、
-`orphan_notified_at`、`gc_optin`。
+`orphan_notified_at`、`unowned_notified_at`、`gc_optin`。
 `GET /api/projects/{id}/panes`、`POST /api/panes/{id}/close`、`POST /api/panes/{id}/adopt`（補 owner／purpose，人工修正用）。
+`GET /api/panes?unowned=1` 列出對不到專案的那些（那顆固定的 `scratch` 也在裡面，標出來）。
 listen port 只在本機算（pane 行程樹的 pid 對 `lsof -nP -iTCP -sTCP:LISTEN`）；遠端主機這一欄留空並標明「遠端不判斷」，
 不要為了它多開 ssh 往返。
 
