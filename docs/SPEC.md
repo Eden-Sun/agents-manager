@@ -703,6 +703,7 @@ listen port 只在本機算（pane 行程樹的 pid 對 `lsof -nP -iTCP -sTCP:LI
   兩邊責任不重疊（登入 pane 有前景程式，daemon 的 GC 只碰行程樹只有 shell 的）。
 - 門檻與「不動使用者手開」寫在 config（`[panes] idle_close_secs` 預設 21600、`scratch_name` 預設 `scratch`、
   `close_log_lines` 預設 20），不寫死。`idle_close_secs` 另外要能用環境變數覆寫（與 §18.8 的保險絲門檻同一套規矩：看不懂／0／負數一律回預設——一個手滑的值不該把 GC 變成「立刻關」）。
+  **設定檔的值同一條規矩**，另有下限 600 秒：低於下限（含 0——不是「停用」）的環境變數不採用、退回設定檔；設定檔的值低於下限就回預設 21600。
 
 ### 6.5f 給使用者的輸出檔案：outbox（使用者 2026-09-16 裁示）
 
