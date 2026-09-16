@@ -5,7 +5,9 @@
  * 一筆都沒有就整顆不出現——左上角那一列很窄，常態是 0，畫一顆永遠寫 0 的 chip 只是噪音。
  */
 import { useEffect, useRef, useState } from 'react'
-import { fetchRebuildRequests, REBUILD_MAX_WAIT_MIN, REBUILD_THRESHOLD } from '../api/rebuildRequests'
+import { fetchRebuildRequests, REBUILD_MAX_WAIT_MIN, REBUILD_THRESHOLD, supervisorBotId } from '../api/rebuildRequests'
+import * as api from '../api'
+import { useStore } from '../store/store'
 import { oldestWaitMinutes, type RebuildRequest } from '../lib/rebuildCount'
 import './rebuildBadge.css'
 
@@ -15,6 +17,8 @@ const POLL_MS = 30_000
 export function RebuildBadge() {
   const [rows, setRows] = useState<RebuildRequest[] | null>(null)
   const [open, setOpen] = useState(false)
+  const [asking, setAsking] = useState(false)
+  const notify = useStore((s) => s.notify)
   const boxRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
@@ -90,6 +94,38 @@ export function RebuildBadge() {
               </li>
             ))}
           </ul>
+          {/* 一鍵催 AGM（2026-09-16 使用者）：送一則使用者訊息給總管，不自己動 build。 */}
+          <button
+            type="button"
+            className="mini-btn rebuild-ask"
+            disabled={asking}
+            onClick={() => {
+              setAsking(true)
+              void (async () => {
+                const agm = await supervisorBotId()
+                if (!agm) {
+                  notify('error', '找不到 AGM 這顆 bot，沒送出')
+                  setAsking(false)
+                  return
+                }
+                try {
+                  await api.sendPrompt(
+                    agm,
+                    `使用者要求：現在開始重建 release 並重啟 daemon（還在等的重建申請 ${rows.length} 筆，最早一筆等了 ${waited} 分鐘）。請照既有流程排程，完成後回報。`,
+                    `ui-rebuild-now-${Date.now()}`,
+                  )
+                  notify('info', '已請 AGM 開始重建')
+                  setOpen(false)
+                } catch {
+                  notify('error', '送給 AGM 失敗，請再試一次')
+                } finally {
+                  setAsking(false)
+                }
+              })()
+            }}
+          >
+            {asking ? '送出中…' : '請 AGM 現在重建'}
+          </button>
           <div className="rebuild-pop-foot">
             滿 {REBUILD_THRESHOLD} 筆、或最早一筆等滿 {REBUILD_MAX_WAIT_MIN} 分鐘（現在 {waited} 分鐘），AGM 的排程就不等整點安排重建。
           </div>

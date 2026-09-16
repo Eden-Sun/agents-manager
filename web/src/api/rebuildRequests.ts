@@ -47,6 +47,19 @@ async function lastDeployAt(): Promise<string | null> {
   }
 }
 
+/** 總管自己那顆 bot 的 id（`GET /api/supervisor`）；問不到就 `null`。 */
+export async function supervisorBotId(): Promise<string | null> {
+  if (rawTransport.mock) return 'mock-agm'
+  try {
+    const raw = await rawTransport.request('GET', '/supervisor')
+    if (typeof raw !== 'object' || raw === null) return null
+    const id = (raw as Record<string, unknown>).bot_id
+    return typeof id === 'string' && id ? id : null
+  } catch {
+    return null
+  }
+}
+
 export async function fetchRebuildRequests(): Promise<RebuildRequest[] | null> {
   if (rawTransport.mock) return pendingRebuilds(MOCK_ROWS)
   try {
