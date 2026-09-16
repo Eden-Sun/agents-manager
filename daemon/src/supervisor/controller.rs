@@ -514,9 +514,10 @@ async fn backfill_quota_limits(app: &Arc<App>) {
 
 /// 額度回來了就重送：每個 tick 看一次被擋住的那幾件。
 ///
-/// 兩個條件都算數：`resume_at` 到了，或者 CLI 那格 `limit_hit` 已經被清掉（下一回合跑成功、
-/// 或 `until` 過期）。重送走的是同一個 assignment、同一段文字、下一個 `#r<n>` crid，所以
-/// 重跑幾次 tick 都只會有一個新 turn。
+/// 預設要**兩個條件同時成立**才重送：查不到未過期的 `limit_hit`，而且 `resume_at` 到了（SPEC §18.8b）。
+/// 唯一的例外是「park 之後同一個帳號有一回合真的答完、把撞限清掉了」（[`crate::quota::limit_cleared_since`]），
+/// 那是額度回來的直接證據，不必等 `resume_at`。重送走的是同一個 assignment、同一段文字、下一個 `#r<n>` crid，
+/// 所以重跑幾次 tick 都只會有一個新 turn。
 async fn resume_quota_blocked(app: &Arc<App>) {
     let Ok(rows) = store::quota_blocked_all(&app.db).await else { return };
     for a in rows {
@@ -526,18 +527,31 @@ async fn resume_quota_blocked(app: &Arc<App>) {
         match (&still_hit, due) {
             // 還在擋、時間也還沒到：什麼都不做。
             (Some(_), false) => continue,
-            // 還在擋，但我們記的時間已經過了——以 CLI 現在說的為準，把時間往後挪。
+            // 到了預計時間仍被擋：算一次（「重送 N 次仍被擋」的 N），時間照 park 的規則重算——取橫幅與帳號讀數
+            // 最早的、超過 6 小時改 15 分鐘後再問。以前直接抄 `hit.until` 又不算次數：帶日期的橫幅能把交辦壓好幾天，
+            // 沒寫時間的撞限則每 30 分鐘順延一次、永遠到不了 `quota_exhausted`（review 2026-09-16 M1、sup #2）。
             (Some(hit), true) => {
-                let next = hit.until.clone().unwrap_or_else(|| iso_in(QUOTA_BLIND_WAIT_SECS));
-                if Some(next.as_str()) != a.resume_at.as_deref() {
-                    let _ = store::touch_resume_at(&app.db, &a.id, &next).await;
+                if a.quota_retries + 1 < MAX_QUOTA_RETRIES {
+                    let quota_reset = crate::quota::next_reset_for_bot(app, &bot).await;
+                    let next = resume_at_from(chrono::Utc::now(), hit.until.as_deref(), quota_reset.as_deref());
+                    let _ = store::extend_quota_blocked(&app.db, &a.id, &next).await;
+                    continue;
                 }
-                continue;
+                // 次數用完：走重送那條路。`dispatch` 會再查到撞限，交給 `park_quota` 收成 `quota_exhausted`
+                // （`quota_blocked` 不能直接 settle）。
             }
             // 記憶體裡沒有撞限紀錄，但我們自己記的時間還沒到：**不重送**。
             // daemon 一重啟 `app.quotas` 就是空的（純記憶體），「查不到 limit_hit」不等於額度回來了；
             // 持久化的 `resume_at` 才是那段等待唯一的記錄（review 2026-09-16）。
-            (None, false) => continue,
+            // 例外：最後一次確認還在擋（park 或順延，都會寫 `updated_at`）之後，同一個帳號有一回合真的答完——
+            // 用了重置券、買了 credits，不必再等到原本的 `resume_at`（review 2026-09-16 M1）。
+            (None, false) => {
+                let parked_at = chrono::DateTime::parse_from_rfc3339(&a.updated_at).map(|t| t.with_timezone(&chrono::Utc));
+                match parked_at {
+                    Ok(t) if crate::quota::limit_cleared_since(app, &bot, t).await => {}
+                    _ => continue,
+                }
+            }
             // 時間到了、也沒人說還在擋：回到 queued 並馬上試一次。
             (None, true) => {}
         }
@@ -554,7 +568,11 @@ async fn resume_quota_blocked(app: &Arc<App>) {
         let payload = json!({"bot_id": a.target_bot_id, "retries": a.quota_retries + 1, "needs_review": false});
         match store::resume_quota_blocked(&app.db, &a.id, &key, &payload).await {
             Ok(s) if s.moved => {
-                tracing::info!(assignment = %a.id, bot = %a.target_bot_id, "額度回來了，重送 assignment");
+                if still_hit.is_some() {
+                    tracing::info!(assignment = %a.id, bot = %a.target_bot_id, "等額度的次數用完：交回派送路徑收成 quota_exhausted");
+                } else {
+                    tracing::info!(assignment = %a.id, bot = %a.target_bot_id, "額度回來了，重送 assignment");
+                }
                 app.emit("supervisor_changed", json!({"assignment_id": a.id, "status": "queued"})).await;
                 dispatch(app, &a.id).await;
             }
@@ -2112,6 +2130,112 @@ mod quota_restart_tests {
         assert!(q.get("claude:cc1").is_none(), "只剩過期的就什麼都不寫");
         // 量表與重置時間不是這條路該碰的東西。
         assert!(q.get("claude:cc2").is_some_and(|x| x.five_hour.is_none() && x.seven_day.is_none()));
+    }
+
+    fn hit_until(until: Option<&str>) -> crate::quota::LimitHit {
+        crate::quota::LimitHit { message: "You've hit your usage limit.".into(), until: until.map(String::from), at: crate::db::now(), bucket: None }
+    }
+
+    async fn set_hit(app: &Arc<App>, key: &str, until: Option<&str>) {
+        let q = crate::quota::Quota {
+            five_hour: None,
+            seven_day: None,
+            fable: None,
+            reset_credits: None,
+            limit_hit: Some(hit_until(until)),
+            plan: None,
+            updated_at: crate::db::now(),
+            source: "test".into(),
+            account: None,
+            host: "local".into(),
+        };
+        app.quotas.lock().await.insert(key.into(), q);
+    }
+
+    fn secs_from_now(iso: &str) -> i64 {
+        (chrono::DateTime::parse_from_rfc3339(iso).unwrap().with_timezone(&chrono::Utc) - chrono::Utc::now()).num_seconds()
+    }
+
+    /// M1（review 2026-09-16）：park 之後同一個帳號有一回合真的答完、把撞限清掉（用了重置券、買了 credits），
+    /// 不必等到原本的 `resume_at`。但清除要**晚於** park——更早的成功回合什麼都證明不了。
+    #[tokio::test]
+    async fn a_clear_after_parking_releases_the_assignment_early_and_an_older_one_does_not() {
+        let app = app().await;
+        bot(&app, "b1", "cc2").await;
+        let parked_at = (chrono::Utc::now() - chrono::Duration::minutes(10)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let id = parked(&app, "b1", "2999-01-01T00:00:00Z", &parked_at).await;
+
+        // 清除發生在 park 之前（這裡用「改 park 時間到未來」模擬）：不算數，照舊等。
+        crate::quota::clear_limit_hit(&app, "local", "claude:cc2").await;
+        let later = (chrono::Utc::now() + chrono::Duration::minutes(1)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        sqlx::query("UPDATE supervisor_assignments SET updated_at=? WHERE id=?").bind(&later).bind(&id).execute(&app.db).await.unwrap();
+        resume_quota_blocked(&app).await;
+        assert_eq!(status_of(&app, &id).await, ("quota_blocked".into(), 0), "park 之前的成功回合不是額度回來的證據");
+
+        // park 之後才清掉：提早放行。
+        sqlx::query("UPDATE supervisor_assignments SET updated_at=? WHERE id=?").bind(&parked_at).bind(&id).execute(&app.db).await.unwrap();
+        resume_quota_blocked(&app).await;
+        let (status, retries) = status_of(&app, &id).await;
+        assert_ne!(status, "quota_blocked", "清掉撞限的成功回合就是額度回來了");
+        assert_eq!(retries, 1);
+    }
+
+    /// 別的帳號的成功回合不能放行這一件。
+    #[tokio::test]
+    async fn a_clear_on_another_account_does_not_release_it() {
+        let app = app().await;
+        bot(&app, "b1", "cc2").await;
+        let parked_at = (chrono::Utc::now() - chrono::Duration::minutes(10)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let id = parked(&app, "b1", "2999-01-01T00:00:00Z", &parked_at).await;
+        crate::quota::clear_limit_hit(&app, "local", "claude:cc1").await;
+        resume_quota_blocked(&app).await;
+        assert_eq!(status_of(&app, &id).await, ("quota_blocked".into(), 0));
+    }
+
+    /// M1＋sup #2：到期仍被擋就順延，但順延**算一次**，而且時間套 park 的上限——帶日期的橫幅
+    /// （`try again at Sep 20`）不能把交辦壓好幾天。
+    #[tokio::test]
+    async fn a_due_assignment_still_blocked_is_counted_and_its_wait_is_capped() {
+        let app = app().await;
+        bot(&app, "b1", "cc2").await;
+        let id = parked(&app, "b1", "2020-01-01T00:00:00Z", &crate::db::now()).await;
+        let in_three_days = (chrono::Utc::now() + chrono::Duration::days(3)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        set_hit(&app, "claude:cc2", Some(&in_three_days)).await;
+
+        resume_quota_blocked(&app).await;
+
+        let a = store::assignment(&app.db, &id).await.unwrap().unwrap();
+        assert_eq!((a.status.as_str(), a.quota_retries), ("quota_blocked", 1), "還在擋：留著，但算一次");
+        let wait = secs_from_now(a.resume_at.as_deref().unwrap());
+        assert!(wait <= MAX_QUOTA_WAIT_SECS, "三天後的時間要被上限截掉，實際等 {wait} 秒");
+        assert!((QUOTA_RECHECK_SECS - 60..=QUOTA_RECHECK_SECS + 60).contains(&wait), "超過上限改 15 分鐘後再問：{wait}");
+    }
+
+    /// 沒寫時間的撞限（codex credits 用完）以前每 30 分鐘順延、次數不動，永遠到不了 `quota_exhausted`。
+    #[tokio::test]
+    async fn a_timeless_hit_runs_out_of_retries_and_goes_to_review() {
+        let app = app().await;
+        bot(&app, "b1", "cc2").await;
+        let id = parked(&app, "b1", "2020-01-01T00:00:00Z", &crate::db::now()).await;
+        set_hit(&app, "claude:cc2", None).await;
+
+        resume_quota_blocked(&app).await;
+        let a = store::assignment(&app.db, &id).await.unwrap().unwrap();
+        assert_eq!((a.status.as_str(), a.quota_retries), ("quota_blocked", 1));
+        let wait = secs_from_now(a.resume_at.as_deref().unwrap());
+        assert!((QUOTA_BLIND_WAIT_SECS - 60..=QUOTA_BLIND_WAIT_SECS + 60).contains(&wait), "{wait}");
+
+        // 一路順延到最後一次：交給 AGM。
+        sqlx::query("UPDATE supervisor_assignments SET resume_at='2020-01-01T00:00:00Z', quota_retries=? WHERE id=?")
+            .bind(MAX_QUOTA_RETRIES - 1)
+            .bind(&id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        resume_quota_blocked(&app).await;
+        let a = store::assignment(&app.db, &id).await.unwrap().unwrap();
+        assert_eq!(a.status, "awaiting_review", "次數用完不再自己等");
+        assert_eq!(a.turn_status.as_deref(), Some("quota_exhausted"));
     }
 
     /// 回填完再跑一次 resume：兩段合起來就是重啟的真實順序，parked 的交辦要原地不動。
