@@ -190,6 +190,8 @@ pub async fn interrupt_bot(app: &Arc<App>, bot_id: &str) -> LcResult<()> {
     let target = db::run_target(&run, &bot);
     let client = client_for_run(app, &run).await?;
     client.agent_send_keys(&target, &["esc".to_string()]).await.map_err(up)?;
+    // 先記接管，再收 in-flight：`fail_in_flight` 會 emit turn → 觸發 flush，順序反過來排隊的派工就搶進去了。
+    note_user_interrupt(bot_id);
     fail_in_flight(app, &run.id, "interrupted by user").await;
     clear_restored_prompt(&client, &run, &bot).await;
     Ok(())
