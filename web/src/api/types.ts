@@ -483,15 +483,6 @@ export class ApiError extends Error {
   }
 }
 
-/** `POST /api/session/pair-code`（SPEC §7.1a）：拿去給另一台裝置輸入的一次性碼。 */
-export interface PairCode {
-  /** 已經是 `ABC-DEF` 這種好唸的樣子。 */
-  code: string
-  expires_in_secs: number
-  /** RFC3339；daemon 算不出來時是 `null`，倒數就只能靠 `expires_in_secs`。 */
-  expires_at: string | null
-}
-
 export interface NewProjectInput {
   path: string
   label: string

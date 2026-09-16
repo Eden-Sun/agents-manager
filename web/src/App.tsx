@@ -9,7 +9,6 @@ import { GroupChatPanel } from './components/GroupChatPanel'
 import { HostShellPanel } from './components/HostShellPanel'
 import { ImageShelf } from './components/ImageShelf'
 import { MobilePreview } from './components/MobilePreview'
-import { PairScreen } from './components/PairScreen'
 import { Sidebar } from './components/Sidebar'
 import { screenTitle, useDrawerRoute } from './store/routeSync'
 import { useStore } from './store/store'
@@ -141,7 +140,6 @@ function useBotSwitchKeys() {
 export default function App() {
   const ready = useStore((s) => s.ready)
   const bootError = useStore((s) => s.bootError)
-  const needsPairing = useStore((s) => s.needsPairing)
   const bootstrap = useStore((s) => s.bootstrap)
   const groupProjectId = useStore((s) => s.selectedProjectId)
   // 主機 shell 與群組互斥且優先：它是使用者剛按出來的暫時性視圖。
@@ -191,8 +189,6 @@ export default function App() {
   useDialogFocus(drawerOpen, sidebarRef)
 
   if (!ready) {
-    // SPEC §7.1a：沒配對過的裝置要的是一個輸入框，不是「無法連上 daemon」——daemon 其實好好的。
-    if (needsPairing) return <PairScreen />
     return (
       <div className="boot">
         <div className="boot-card">
