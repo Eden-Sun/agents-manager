@@ -456,8 +456,7 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
         }
         // 真的答完一回合＝帳號又能跑了，不必等橫幅寫的重置時間。
         if matches!(&kind, HookKind::TurnComplete { assistant: Some(a), .. } if !a.trim().is_empty()) {
-            let host = crate::db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| "local".to_string());
-            crate::quota::clear_limit_hit(app, &host, "codex").await;
+            crate::quota::clear_limit_hit_for_bot(app, &bot).await;
         }
     }
 
@@ -1529,6 +1528,79 @@ mod resume_tests {
         let (e, bot, run) = fixture().await;
         consume_resume_session(&e.app, &bot, &run, None).await.unwrap();
         assert_eq!(remaining(&e, &run).await.as_deref(), Some("native-expected"));
+    }
+}
+
+/// codex 答完一回合清撞限：清的要是**這顆 bot 自己那把 key**（跟寫入端同一支 `quota_base_for_host`）。
+#[cfg(test)]
+mod codex_limit_clear_tests {
+    use super::*;
+    use crate::quota::{quota_key, LimitHit, Quota};
+
+    fn hit() -> Quota {
+        Quota {
+            five_hour: None,
+            seven_day: None,
+            fable: None,
+            reset_credits: None,
+            limit_hit: Some(LimitHit { message: "You've hit your usage limit.".into(), until: None, at: db::now(), bucket: None }),
+            plan: None,
+            updated_at: db::now(),
+            source: "codex-limit-hit".into(),
+            account: None,
+            host: "local".into(),
+        }
+    }
+
+    /// H1（review 2026-09-16）：`cx2` 有自己的 `CODEX_HOME`，撞限寫在 `codex:cx2`；以前成功回合一律清裸
+    /// `codex`，於是 cx2 的撞限（沒寫時間＝永不過期）卡到重啟，反而把預設帳號**真的**撞限清掉。
+    #[tokio::test]
+    async fn a_codex_turn_clears_the_limit_on_its_own_account_only() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        e.app
+            .cfg
+            .update(|cfg| {
+                cfg.identities = vec![crate::config::IdentityCfg {
+                    name: "cx2".into(),
+                    kind: "codex".into(),
+                    host: None,
+                    env: [("CODEX_HOME".to_string(), "$HOME/.codex-cx2".to_string())].into(),
+                    args: vec![],
+                }];
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let bot = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, identity, args_json, autostart, inject_hooks, hook_token, managed_by, created_at)
+             VALUES (?,?,'cx2-bot','codex','cx2','[]',0,1,'tok','user',?)",
+        )
+        .bind(&bot)
+        .bind(&e.project_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        {
+            let mut q = app.quotas.lock().await;
+            q.insert(quota_key("local", "codex:cx2"), hit());
+            q.insert(quota_key("local", "codex"), hit());
+        }
+        let body = HookBody {
+            bot_id: bot.clone(),
+            provider: "codex".into(),
+            payload: serde_json::json!({"type": "agent-turn-complete", "thread-id": "t", "turn-id": "u",
+                                        "input-messages": ["hi"], "last-assistant-message": "done"}),
+            received_at: None,
+            truncated: false,
+        };
+        let _ = process_locked(&app, &body).await;
+
+        let q = app.quotas.lock().await;
+        assert!(q.get("codex:cx2").unwrap().limit_hit.is_none(), "cx2 自己的撞限要被清掉");
+        assert!(q.get("codex").unwrap().limit_hit.is_some(), "預設帳號的撞限不是 cx2 的回合能證明解除的");
     }
 }
 
