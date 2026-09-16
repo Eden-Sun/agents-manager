@@ -713,9 +713,7 @@ pub async fn detect(app: &Arc<App>, host: &str) -> Result<HostTools> {
     let shell_identities = parse_shell_identities(&out);
     let identities = detect_identities(app, host, &tools, &shell_identities).await;
     let ht = HostTools { tools, identities, shell_identities, checked_at: crate::db::now() };
-    app.tools.lock().await.insert(host.to_string(), ht.clone());
-    // 身分表剛更新：清掉 kind 不符的 identity 與它留下的 quota key（`identity_kind::cleanup_host`）。
-    crate::identity_kind::cleanup_host(app, host).await;
+    install_host_tools(app, host, ht.clone()).await;
     tracing::info!(
         host,
         tools = ?ht.tools.iter().map(|(k, t)| (k.clone(), t.installed, t.logged_in)).collect::<Vec<_>>(),
@@ -723,6 +721,15 @@ pub async fn detect(app: &Arc<App>, host: &str) -> Result<HostTools> {
         "tools detected"
     );
     Ok(ht)
+}
+
+/// 偵測結果寫進 `app.tools`，以及寫完之後一定要跟著做的事（抽出來，測試不必真的跑 shell 探測）。
+pub(crate) async fn install_host_tools(app: &Arc<App>, host: &str, ht: HostTools) {
+    app.tools.lock().await.insert(host.to_string(), ht);
+    // 身分表剛更新：清掉 kind 不符的 identity 與它留下的 quota key（`identity_kind::cleanup_host`）。
+    crate::identity_kind::cleanup_host(app, host).await;
+    // 身分表齊了，重啟前停下的交辦這時才算得出正確的 quota key（每台主機每個行程只跑一次，review 2026-09-16 M3）。
+    crate::supervisor::controller::backfill_quota_limits_once(app, host).await;
 }
 
 pub fn spawn_detect(app: Arc<App>, host: String) {
