@@ -388,7 +388,20 @@ pub async fn post_review(
         if let Some(tid) = updated.turn_id.as_deref() {
             if let Some(why) = crate::lifecycle::withdrawn_assignment_reason(&app, tid).await {
                 match crate::lifecycle::revoke_queued_turn(&app, tid, &why).await {
-                    Ok(true) => revoked_turn = Some(tid.to_string()),
+                    Ok(true) => {
+                        revoked_turn = Some(tid.to_string());
+                        // 決定寫進稽核時還不知道撤不撤得回來；撤回了，「turn 還在跑」那句就不成立。
+                        if still_running.is_some() {
+                            let note = format!("排隊中的 turn {tid} 已撤回，沒有送出");
+                            let amended = match b.evidence.as_deref() {
+                                Some(e) => format!("{e}｜{note}"),
+                                None => note,
+                            };
+                            if let Err(e) = store::amend_review_evidence(&app.db, &decided.review_id, evidence.as_deref(), Some(&amended)).await {
+                                tracing::warn!(assignment = %updated.id, error = %e, "could not correct the audit evidence after revoking the queued turn");
+                            }
+                        }
+                    }
                     Ok(false) => {}
                     Err(e) => tracing::error!(assignment = %updated.id, turn = tid, error = %e, "could not revoke the withdrawn assignment's queued turn"),
                 }
@@ -1619,6 +1632,45 @@ mod review_boundary_tests {
                 ownership: &[], request_id: None })).await;
         assert!(mismatch.is_err(), "the transaction also rejects adopting a different instruction");
         assert_eq!(store::reviews(&app.db, &parent.id).await.unwrap().len(), 1);
+        app.db.close().await;
+        std::fs::remove_dir_all(&app.data_dir).unwrap();
+    }
+
+    /// cancel 撤回了還在排隊的 turn：稽核的 evidence 不能永久寫著「turn 還在跑、取消不會停 bot」，
+    /// 否則之後查歷程的人（或 AGM 下一輪）會以為 bot 還在做而不敢重派（review 2026-09-16 c1 L1）。
+    /// 真的已經送出去的，警告照舊留著。
+    #[tokio::test]
+    async fn a_cancel_that_revoked_the_queued_turn_does_not_leave_a_still_running_warning_in_the_audit() {
+        let app = app().await;
+        let now = crate::db::now();
+        sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES ('p','/tmp','p',?)").bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('bot','p','bot','claude','t',?)")
+            .bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO conversations (id,bot_id,created_at) VALUES ('c1','bot',?)").bind(&now).execute(&app.db).await.unwrap();
+        for (turn, status, delivery) in [("t-queued", "queued", "pending"), ("t-sent", "in_flight", "ok")] {
+            sqlx::query("INSERT INTO turns (id,conversation_id,origin,status,delivery,prompt_text,created_at) VALUES (?,'c1','web',?,?,'x',?)")
+                .bind(turn).bind(status).bind(delivery).bind(&now).execute(&app.db).await.unwrap();
+        }
+        let evidence_after_cancel = |crid: &'static str, turn: &'static str| {
+            let app = app.clone();
+            async move {
+                let a = store::insert_assignment(&app.db, None, "bot", crid, "做 A", &[], None, true).await.unwrap();
+                store::mark_delivered(&app.db, &a.id, turn, if turn == "t-queued" { "queued" } else { "ok" }).await.unwrap();
+                let input: ReviewIn = serde_json::from_value(json!({"decision": "cancel", "evidence": "改派給 w2"})).unwrap();
+                let out = post_review(State(app.clone()), Path(a.id.clone()), HeaderMap::new(), Json(input)).await.unwrap().0;
+                let evidence = store::reviews(&app.db, &a.id).await.unwrap()[0]["evidence"].as_str().unwrap_or("").to_string();
+                (out, evidence)
+            }
+        };
+
+        let (out, evidence) = evidence_after_cancel("cancel-queued", "t-queued").await;
+        assert_eq!(out["revoked_turn_id"], "t-queued");
+        assert!(!evidence.contains("still running"), "撤回了就不是還在跑：{evidence}");
+        assert!(evidence.contains("改派給 w2") && evidence.contains("已撤回"), "{evidence}");
+
+        let (out, evidence) = evidence_after_cancel("cancel-sent", "t-sent").await;
+        assert!(out.get("revoked_turn_id").is_none());
+        assert!(evidence.contains("still running") && evidence.contains("改派給 w2"), "送出去的警告要留著：{evidence}");
         app.db.close().await;
         std::fs::remove_dir_all(&app.data_dir).unwrap();
     }
