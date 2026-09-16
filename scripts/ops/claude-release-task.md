@@ -1,4 +1,7 @@
-AGM 定期交辦：Claude Code 出新版了，請解析這一版有什麼**這個專案用得上**的東西，然後把結論當成通知回給使用者（你這則回覆就是通知，使用者會在 AG Man 入口看到）。
+AGM 定期交辦：Claude Code 出新版了，請解析這一版有什麼**這個專案用得上**的東西，然後把結論送到使用者看得到的地方。
+
+**通知怎麼送**：如果你是巡檢 AGM（使用者入口那顆），你這則回覆就是通知。如果你是協調者或其他 child（使用者看不到你的對話），解析完要用
+`bin/agm assign --notice --bot <巡檢 bot id> --request-id agm-claude-release-<新版號>-notice --text '…'` 把結論交給巡檢，由它出現在使用者入口。
 
 本次版本（由 `bin/claude-release-kick.sh` 填在訊息末尾）：舊版與新版的版本號，以及兩顆 binary 的路徑。
 

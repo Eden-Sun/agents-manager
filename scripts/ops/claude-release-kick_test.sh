@@ -14,10 +14,19 @@ setup() {
   export AGM_DIR="$ROOT/agm" CLAUDE_VERSIONS_DIR="$ROOT/versions"
   mkdir -p "$AGM_DIR/bin" "$CLAUDE_VERSIONS_DIR"
   cp "$HERE/claude-release-task.md" "$AGM_DIR/claude-release-task.md"
-  printf '%s' '{"manager_bot_id":"bot-agm"}' > "$AGM_DIR/runtime.json"
+  # 正式安裝的形狀：巡檢＋協調者。派工目標**不能**是巡檗自己（daemon 會 400）。
+  printf '%s' '{"manager_bot_id":"bot-agm","responder_bot_id":"bot-resp"}' > "$AGM_DIR/runtime.json"
   cat > "$AGM_DIR/bin/agm" <<'STUB'
 #!/bin/bash
 echo "$*" >> "$AGM_DIR/calls.log"
+# 真的 argparse 對認不得的旗標是 exit 2。stub 要照做，否則「--client-request-id」這種
+# 拼錯的旗標在測試裡永遠是綠的（2026-09-16 的事故就是這樣漏掉的）。
+for a in "$@"; do
+  case "$a" in
+    --compact|--bot|--review-by|--text-file|--request-id|--notice|--owns|assign) ;;
+    --*) echo "agm: error: unrecognized arguments: $a" >&2; exit 2 ;;
+  esac
+done
 # 交辦內容也留一份，才驗得到有沒有把新舊版本帶進去。
 for i in $(seq 1 $#); do
   eval "a=\${$i}"
@@ -61,9 +70,11 @@ ver 2.1.272; ver 2.1.273
 bash "$SCRIPT"                      # 記下 2.1.273
 ver 2.1.274
 bash "$SCRIPT"
-check "派給 AGM 自己" "--bot bot-agm" "$AGM_DIR/calls.log"
+check "派給協調者而不是巡檢自己" "--bot bot-resp" "$AGM_DIR/calls.log"
+check_no "不派給巡檢（daemon 會 400）" "--bot bot-agm" "$AGM_DIR/calls.log"
+check "旗標是 --request-id" "--request-id agm-claude-release-2.1.274" "$AGM_DIR/calls.log"
 check "交辦給巡檢驗收" "--review-by patrol" "$AGM_DIR/calls.log"
-check "request id 帶版本" "agm-claude-release-2.1.274" "$AGM_DIR/calls.log"
+
 check "交辦寫出新舊版本" "本次：舊版 2.1.273 → 新版 2.1.274" "$AGM_DIR/assign-body.txt"
 check "交辦帶兩顆 binary 路徑" "NEW=$CLAUDE_VERSIONS_DIR/2.1.274" "$AGM_DIR/assign-body.txt"
 equals "state 更新" "$(cat "$AGM_DIR/claude-release.last")" "2.1.274"
