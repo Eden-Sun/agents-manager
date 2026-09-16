@@ -628,9 +628,9 @@ export class MockTransport implements Transport {
   }
 
   async blobUrl(path: string): Promise<string> {
-    const sp = /^\/bots\/([^/]+)\/scratchpad\/file\?path=(.+)$/.exec(path)
-    if (sp) {
-      const name = decodeURIComponent(sp[2])
+    const out = /^\/bots\/([^/]+)\/outbox\/file\?path=(.+)$/.exec(path)
+    if (out) {
+      const name = decodeURIComponent(out[2])
       return URL.createObjectURL(new Blob([`（mock）${name} 的內容\n`], { type: 'text/plain' }))
     }
     // 對話裡的本機圖片：畫一張標出路徑的示意圖，`missing` 開頭的演 404。
@@ -715,8 +715,8 @@ export class MockTransport implements Transport {
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'tools' && seg[3] === 'refresh') return this.refreshTools(seg[1])
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'identities' && seg[4] === 'login') return this.loginIdentity(seg[1], decodeURIComponent(seg[3]))
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'identities' && seg[4] === 'logout') return this.logoutIdentity(seg[1], decodeURIComponent(seg[3]))
-    if (method === 'GET' && seg[0] === 'bots' && seg[2] === 'scratchpad' && seg.length === 3) {
-      return this.scratchpad(decodeURIComponent(seg[1]))
+    if (method === 'GET' && seg[0] === 'bots' && seg[2] === 'outbox' && seg.length === 3) {
+      return this.outbox(decodeURIComponent(seg[1]))
     }
     if (method === 'GET' && seg[0] === 'identity-prefs') return { disabled: this.disabledIdentities }
     if (method === 'PUT' && seg[0] === 'identities' && seg[2] === 'disabled') {
@@ -1194,20 +1194,23 @@ export class MockTransport implements Transport {
     return { host: host || 'local', kind, identity: name, disabled }
   }
 
-  /** 跟 daemon 同一個形狀：新的排前面，沒得列時回空清單＋原因。 */
-  private scratchpad(botId: string) {
+  /** 跟 daemon 同一個形狀（SPEC §6.5f）：新的排前面，每個檔案帶剩餘秒數；grok 這顆演遠端。 */
+  private outbox(botId: string) {
     const bot = this.bot(botId)
-    if (bot.kind !== 'claude') return { files: [], reason: 'scratchpad_no_session' }
+    const ttl = 3600
+    if (bot.kind === 'grok') return { files: [], ttl_secs: ttl, reason: 'outbox_remote' }
     const now = Math.floor(Date.now() / 1000)
+    const file = (name: string, size: number, age: number) => ({
+      name,
+      size,
+      modified: now - age,
+      expires_at: now - age + ttl,
+      remaining_secs: Math.max(0, ttl - age),
+    })
     return {
-      dir: `/private/tmp/claude-501/-Users-me-project/${botId}/scratchpad`,
-      session_id: botId,
-      files: [
-        { name: 'tracking.tsv', size: 18_432, modified: now - 120, mentioned: true },
-        { name: 'w1.py', size: 2_450, modified: now - 600, mentioned: false },
-        { name: '出貨追蹤 v2.md', size: 4_096, modified: now - 3_600, mentioned: true },
-        { name: 'run.log', size: 1_204_233, modified: now - 86_400, mentioned: false },
-      ],
+      dir: `/Users/me/.config/agents-manager/outbox/${botId}`,
+      ttl_secs: ttl,
+      files: [file('tracking.tsv', 18_432, 120), file('出貨追蹤 v2.md', 4_096, 1_500), file('run.log', 1_204_233, 3_300)],
     }
   }
 

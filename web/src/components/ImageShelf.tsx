@@ -11,7 +11,7 @@ import { FileIcon, formatSize, useDropTarget } from './Attachments'
 import { MAX_BYTES, SHELF_MAX, SHELF_MIME, useShelf } from '../store/shelf'
 import type { ShelfItem } from '../store/shelf'
 import { useStore } from '../store/store'
-import { ScratchpadFiles } from './ScratchpadFiles'
+import { OutboxFiles } from './OutboxFiles'
 import { MobilePreviewButton } from './MobilePreview'
 import './imageShelf.css'
 
@@ -341,7 +341,7 @@ export function ImageShelf() {
             )}
           </div>
           {/* 下半段是**從** bot 拿出來的檔案（唯讀、點了就下載）；上半段是要送進對話的暫存。 */}
-          <ScratchpadFiles />
+          <OutboxFiles />
           {drop.over ? (
             <div className="shelf-veil" aria-hidden="true">
               放開以暫存

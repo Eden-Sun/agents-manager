@@ -310,25 +310,27 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 對話 Markdown 裡的本機圖片（`![](docs/shot.png)`、`/Users/…/x.png`、`file://…`）。相對路徑以該 bot 的**專案目錄**為底；符號連結解開後仍須在專案目錄內，副檔名限 `png/jpg/jpeg/gif/webp`（不含 svg），≤ 20 MiB。回圖片位元組與對應 `Content-Type`。
 專案外、非圖片、不存在、太大、遠端主機的專案一律 `404 {"what":"image"}`；缺 `path` 400；bot 不存在 404。前端讀不到就把路徑寫成文字，不畫破圖。
 
-### `GET /api/bots/{id}/scratchpad`
-這顆 bot 自己的 scratchpad 目錄裡有哪些檔案（2026-09-16）。bot 把整理好的東西寫成檔案（`tracking.tsv`、報告 `.md`、`run.log`）之後，那些檔案只在 daemon 這台機器的暫存目錄裡，使用者在手機上拿不到；這支讓前端的「檔案暫存」列得出來。
+### `GET /api/bots/{id}/outbox`
+這顆 bot 交給使用者的檔案（SPEC §6.5f，2026-09-16 使用者裁示取代 scratchpad）。bot 把要給使用者的檔案放進 `$AM_OUTBOX`（`<data_dir>/outbox/<bot_id>/`），前端「檔案暫存」下半段列出來讓人下載。**不讀 scratchpad。**
 
 ```json
-{"dir":"/private/tmp/claude-501/<project-slug>/<session>/scratchpad","session_id":"af70c5a6-…",
- "files":[{"name":"tracking.tsv","size":18432,"modified":1789600000,"mentioned":true}]}
+{"dir":"/Users/me/.config/agents-manager/outbox/01M1…","ttl_secs":3600,
+ "files":[{"name":"tracking.tsv","size":18432,"modified":1789600000,"expires_at":1789603600,"remaining_secs":2520}]}
 ```
 
-只列**第一層的一般檔案**（不遞迴、不列目錄與符號連結），最多 300 筆、單檔 ≤ 64 MiB，超過的不列。
+- 只列**第一層的一般檔案**（不遞迴；子目錄與符號連結不列），新的排前面，最多 300 筆。
+- `expires_at` = mtime + `ttl_secs`；`remaining_secs` 是回應當下還剩幾秒，到期是 0（AGM 的 `com.agm.outbox-gc` 每 10 分鐘才清一次，0 的檔案還會出現一下）。前端從回應那一刻往下扣，不拿瀏覽器時鐘比 `expires_at`。
+- **一律不列**：隱藏檔、資料庫與旁檔（檔名含 `.sqlite`，或 `.db` 結尾／`.db-`／`.db.`）、金鑰與憑證（`.pem` `.key` `.p12` `.pfx` `.jks` `.keystore` `.ppk` `.kdbx` `.env`、`id_rsa*` 等），以及檔頭是 `SQLite format 3` 或 PEM 私鑰的檔案。規則本來就禁止放這些，這是第二道。
+- 目錄不存在（還沒寫過、被清理收掉）→ `200` 空清單。遠端主機的 bot → `200 {"files":[],"ttl_secs":3600,"reason":"outbox_remote"}`。bot 不存在 404。
 
-- `mentioned`（2026-09-16）：檔名有在**這顆 bot 自己的對話**裡出現過（最近 1000 則 `user`／`assistant` 訊息、最多 2 MiB；`system` 與別顆 bot 的不算）。要像獨立的名字出現：前後不能緊接英數、`_`、`-`（前面也不能是 `.`），中文、空白、標點、`/` 都算邊界；沒有副檔名的名字（`raw`）前面要是 `/` 或反引號。前端預設只顯示 `mentioned: true` 的。
-- **一律不列**（不管有沒有提到）：隱藏檔、資料庫與旁檔（檔名含 `.sqlite`，或 `.db` 結尾／`.db-`／`.db.`）、金鑰與憑證（`.pem` `.key` `.p12` `.pfx` `.jks` `.keystore` `.ppk` `.kdbx` `.env`、`id_rsa*` 等），以及檔頭是 `SQLite format 3` 或 PEM 私鑰的檔案（改了副檔名也擋）。目錄用該 bot 最後一次 Run 的 `native_session_id` 去掃暫存根目錄找，不自己拼 slug（slug 規則是 claude 的，會變）。
+### `GET /api/bots/{id}/outbox/file?path=<檔名>`
+下載 outbox 裡的一個檔案。`path` 解開符號連結後必須仍在該 bot 的 outbox 內、是一般檔案、路徑上沒有隱藏目錄、也不是上面「一律不列」的那幾類，否則 `404 {"what":"file"}`（指到 scratchpad 的絕對路徑或符號連結一樣 404）；缺 `path` 400；bot 不存在 404；遠端主機的 bot 409 `outbox_remote`；大於 64 MiB 409 `file_too_large`。
 
-列不出來時**不是錯誤**：回 `200 {"dir":"","session_id":null,"files":[],"reason":"…"}`，`reason ∈ scratchpad_remote`（bot 在遠端主機，檔案不在這台機器）`| scratchpad_no_session`（沒跑過或不是 claude）`| scratchpad_missing`（目錄還沒建立）。bot 不存在 404。
+一律 `Content-Disposition: attachment`（檔名走 `filename` + RFC 5987 `filename*`），加 `X-Content-Type-Options: nosniff` 與 `Cache-Control: private, no-store`。`Content-Type` 只認白名單（文字/JSON/CSV/TSV/PNG/JPEG/GIF/WebP/PDF），其餘一律 `application/octet-stream`。只讀，沒有刪除或覆寫的端點。
 
-### `GET /api/bots/{id}/scratchpad/file?path=<檔名>`
-下載上面列出的某一個檔案。`path` 解開符號連結後必須仍在該 bot 的 scratchpad 目錄內且是一般檔案、路徑上沒有隱藏目錄、也不是上面「一律不列」的那幾類，否則 `404 {"what":"file"}`（`mentioned: false` 的照樣可以下載）；缺 `path` 400；bot 不存在 404。
+### `GET /api/bots/{id}/scratchpad`、`GET /api/bots/{id}/scratchpad/file`（已移除）
+2026-09-16 起一律 `404 {"what":"scratchpad"}`：scratchpad 不再給使用者（它暴露過私鑰與正式 DB 複本）。明確回 404，不落到 SPA fallback 回 HTML。
 
-一律 `Content-Disposition: attachment`（檔名走 `filename` + RFC 5987 `filename*`，非 ASCII 檔名也存得對），加 `X-Content-Type-Options: nosniff` 與 `Cache-Control: no-store`。`Content-Type` 只認白名單（文字/JSON/CSV/TSV/PNG/JPEG/GIF/WebP/PDF/zip），其餘一律 `application/octet-stream`——瀏覽器不會把 bot 寫出來的東西當 HTML 執行。只讀，沒有刪除或覆寫的端點。
 ## 非 agent 的 pane（SPEC §6.5e）
 
 ### `GET /api/projects/{id}/panes`
