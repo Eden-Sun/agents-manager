@@ -43,6 +43,7 @@ mod quota_claude;
 mod quota_grok;
 mod read_marks;
 mod reconcile;
+mod scratchpad;
 mod state;
 mod supervisor;
 mod supervisor_evidence;

@@ -108,6 +108,9 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/bots/{id}/messages", get(get_messages))
         .route("/bots/{id}/terminal", get(get_terminal))
         .route("/bots/{id}/local-image", get(crate::local_image::get))
+        // bot 寫在自己 scratchpad 裡的檔案（報告、TSV、log）：使用者在瀏覽器點得到、下載得下來。
+        .route("/bots/{id}/scratchpad", get(crate::scratchpad::list))
+        .route("/bots/{id}/scratchpad/file", get(crate::scratchpad::file))
         .route("/bots/{id}/read", post(crate::read_marks::post))
         .route("/turns/{id}/abandon", post(abandon_turn))
         .route("/bots/{id}/abort", post(abort_bot))
