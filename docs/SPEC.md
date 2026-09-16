@@ -619,7 +619,7 @@ w168 那四個空 zsh（p61／p4W／p5Y／p64）**很可能是使用者手開的
 也不該由 bot 代為關閉。F 步要先查它們的行程樹有沒有 `AM_BOT_ID`：有才走 GC／關閉，沒有就只列在 UI 並回報使用者，
 由使用者自己決定，不要越權。
 
-#### 資料與 API（§6.5f 實作時展開）
+#### 資料與 API（§6.5g 實作時展開）
 `panes` 表：`pane_id`、`host`、`workspace_id`、`tab_id`、`cwd`、`kind`、`owner_bot_id`、`project_id`、
 `owned_by`（`bot`／`user`——`project_id` 是靠 cwd 對到的就是 `user`，看得出這一列的歸屬有多硬）、`purpose`、
 `foreground`（argv 摘要）、`listen_ports`、`last_revision`、`last_output_at`、`first_seen`、`last_seen`、
