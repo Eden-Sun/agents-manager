@@ -13,13 +13,13 @@ import {
   botsOfProject,
   enabledIdentities,
   identitiesOfHost,
+  identityStatusOfHost,
   orderedProjects,
   projectHostName,
   toolsOfHost,
   useStore,
 } from '../store/store'
 import type { SocketStatus } from '../store/store'
-import { quotaHiddenBotIds, useDisabledQuota } from '../store/quotaHide'
 import { GearIcon, TerminalIcon } from './Icons'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -146,8 +146,10 @@ function BotRow({
   const quotaWarning = useStore(
     useShallow((s) => {
       const b = s.bots.find((x) => x.id === botId)
-      // 額度按主機分（SPEC §14）。
-      return b ? botQuotaWarning(s.quota, b.kind, b.identity, projectHostName(s, b.project_id)) : null
+      // 額度按主機分（SPEC §14）；身分清單也跟著那台（同名身分在各主機可能是不同帳號）。
+      if (!b) return null
+      const host = projectHostName(s, b.project_id)
+      return botQuotaWarning(s.quota, b.kind, b.identity, host, identitiesOfHost(s.identities, identityStatusOfHost(s, host)))
     }),
   )
   // 黃燈（low）；同樣要 useShallow。
@@ -157,7 +159,9 @@ function BotRow({
       // 同 ModelTag：run 報的模型優先。
       const run = s.runs[botId] ?? null
       const model = run?.status?.model_name ?? (runtimeKnown(run) ? run!.runtime_model : (b?.model ?? null))
-      return b ? botQuotaLevel(s.quota, b.kind, b.identity, projectHostName(s, b.project_id), model) : null
+      if (!b) return null
+      const host = projectHostName(s, b.project_id)
+      return botQuotaLevel(s.quota, b.kind, b.identity, host, model, identitiesOfHost(s.identities, identityStatusOfHost(s, host)))
     }),
   )
   const selected = useStore((s) => s.selectedBotId === botId)
@@ -875,8 +879,8 @@ export function Sidebar() {
   const [drag, setDrag] = useState<DragState>(null)
   const openHostShell = useStore((s) => s.openHostShell)
   /** 額度卡片上暫時停用的身分／kind，其 bot 先收起；reset 時 quotaHide 的 timer 會自動放回。 */
-  const disabledQuota = useDisabledQuota()
-  const hiddenQuotaIds = useStore(useShallow((s) => quotaHiddenBotIds(s, disabledQuota)))
+  // 同一份名單也給鍵盤導覽、晶片列與分頁標題用，所以讀 store 的投影而不是自己再算一次。
+  const hiddenQuotaIds = useStore(useShallow((s) => s.hiddenBotIds))
   const hiddenQuota = useMemo(() => new Set(hiddenQuotaIds), [hiddenQuotaIds])
   const [collapsed, setCollapsed] = useState<Set<string>>(() => {
     try {

@@ -152,10 +152,14 @@ export function pruneMarks(marks: Record<string, ReadMark>, liveBot: (id: string
   )
 }
 
-/** 分頁標題 `(N)` 只加 bot：群組未讀是同一批回覆，相加會一則算兩次。 */
-export function totalUnread(bots: Record<string, number>): number {
+/**
+ * 分頁標題 `(N)` 只加 bot：群組未讀是同一批回覆，相加會一則算兩次。
+ * 側欄收起來的那些不算：使用者看到 `(7)` 卻在側欄數不出七個未讀，只會以為數字壞了。
+ */
+export function totalUnread(bots: Record<string, number>, hidden: readonly string[] = []): number {
+  const skip = new Set(hidden)
   let n = 0
-  for (const v of Object.values(bots)) n += v
+  for (const [id, v] of Object.entries(bots)) if (!skip.has(id)) n += v
   return n
 }
 

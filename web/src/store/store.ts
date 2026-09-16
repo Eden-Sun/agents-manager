@@ -28,6 +28,7 @@ import type { Bot, BotKind, RestartBatch, GroupChatResult, Mission, MissionDetai
 import { dropHostModels, modelsKey, shouldFetchModels, type ModelsCache } from './modelsCache'
 import { MESSAGE_CAP, byId, byTime, capList, insertSorted, pruneTurns } from './lists'
 import { acceptStateSeq, singleFlight } from './singleFlight'
+import { quotaForIdentity } from './quotaLookup'
 import { botStatusConnTarget } from './botStatusConn'
 import { restoreQueued } from './queuedSend'
 import { missionRequests } from './missionRequests'
@@ -57,7 +58,7 @@ import {
   type ReadMark,
 } from './unread'
 import { fetchSupervisor } from '../api/supervisor'
-import { BOT_KINDS, LOCAL_HOST, quotaKey } from '../api/types'
+import { BOT_KINDS, LOCAL_HOST } from '../api/types'
 
 const sendMissionRequest = missionRequests(api.newClientRequestId)
 const missionLoads = new Map<string, () => Promise<void>>()
@@ -304,6 +305,11 @@ export interface StoreState {
   loadingMore: Record<string, boolean>
   /** bot id → 已完成未讀回合數；純前端帳，存 localStorage（`store/unread.ts`）。 */
   botUnread: Record<string, number>
+  /**
+   * 側欄目前收起來的 bot（額度停用，見 `store/quotaHide.ts`）。排序過，寫入端只有 quotaHide；
+   * 放在這裡是為了讓鍵盤導覽、晶片列與分頁標題跟側欄看到同一批 bot。
+   */
+  hiddenBotIds: string[]
   /** Render only while `composerState(...).inFlightTurnId === liveReply.turnId` so a stale entry never shows. */
   liveReply: Record<string, LiveReply>
 
@@ -565,6 +571,7 @@ export const useStore = create<StoreState>((set, get) => ({
   moreMessages: {},
   loadingMore: {},
   botUnread: initialUnread.bots,
+  hiddenBotIds: [],
   liveReply: {},
   queuedSends: {},
 
@@ -2376,12 +2383,10 @@ export function botQuotaWarning(
   kind: BotKind,
   identity: string | null,
   host: string = LOCAL_HOST,
+  /** 落點要跟頂端 QuotaStrip 同一份規則（`quotaLookup`），否則同一顆 bot 兩邊燈號不一樣。 */
+  identities: readonly Identity[] = [],
 ): QuotaWarning | null {
-  // 額度按主機分（SPEC §14）：遠端 bot 只看它自己那台的數字。
-  const scoped = (base: string) => quotaKey(host, base)
-  let q = quota[scoped(identity ? `${kind}:${identity}` : kind)]
-  // cc0／空 env 的預設身份可能沒有自己的 key，額度會落在裸的 kind 上（同 QuotaStrip 的規則）。
-  if (q == null && identity === 'cc0') q = quota[scoped(kind)]
+  const q = quotaForIdentity(quota, host, kind, identity, identities)
   if (!q) return null
   const five = q.five_hour?.critical ? { pct: Math.max(0, Math.round(100 - q.five_hour.used_pct)), window: '5h' as const } : null
   const sevenWindow: QuotaWarningWindow = kind === 'grok' ? '週' : '7d'
@@ -2413,10 +2418,10 @@ export function botQuotaLevel(
   host: string = LOCAL_HOST,
   /** bot 的模型：Fable 週桶只跟跑 fable 的 bot 有關，opus／sonnet 的列不該掛 `F 0%`（2026-09-09 使用者）。 */
   model: string | null = null,
+  /** 同 `botQuotaWarning`：落點只有 `quotaLookup` 一份規則。 */
+  identities: readonly Identity[] = [],
 ): QuotaLevel | null {
-  const scoped = (base: string) => quotaKey(host, base)
-  let q = quota[scoped(identity ? `${kind}:${identity}` : kind)]
-  if (q == null && identity === 'cc0') q = quota[scoped(kind)]
+  const q = quotaForIdentity(quota, host, kind, identity, identities)
   if (!q) return null
   const onFable = (model ?? '').toLowerCase().includes('fable')
   const pick = (w: { used_pct: number; low: boolean; critical: boolean } | null | undefined, name: string) =>
@@ -2468,17 +2473,26 @@ export function orderedBotIds(state: {
   projectOrder: string[]
   bots: Bot[]
   botOrder: Record<string, string[]>
+  hiddenBotIds?: readonly string[]
 }): string[] {
+  // 側欄收起來的不走：⌥↑／⌥↓ 走進一顆畫面上找不到的 bot，使用者只能靠搜尋才回得來。
+  const hidden = new Set(state.hiddenBotIds ?? [])
   const out: string[] = []
-  for (const p of orderedProjects(state)) for (const b of botsOfProject(state, p.id)) out.push(b.id)
+  for (const p of orderedProjects(state)) for (const b of botsOfProject(state, p.id)) if (!hidden.has(b.id)) out.push(b.id)
   // A bot whose project vanished from the list would otherwise be unreachable by keyboard.
-  for (const b of state.bots) if (!out.includes(b.id)) out.push(b.id)
+  for (const b of state.bots) if (!hidden.has(b.id) && !out.includes(b.id)) out.push(b.id)
   return out
 }
 
 /** The neighbour `dir` steps away, wrapping at both ends; null when there is nothing to move to. */
 export function adjacentBotId(
-  state: { projects: Project[]; projectOrder: string[]; bots: Bot[]; botOrder: Record<string, string[]> },
+  state: {
+    projects: Project[]
+    projectOrder: string[]
+    bots: Bot[]
+    botOrder: Record<string, string[]>
+    hiddenBotIds?: readonly string[]
+  },
   from: string | null,
   dir: -1 | 1,
 ): string | null {

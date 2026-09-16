@@ -87,6 +87,8 @@ export function UnreadChip() {
   const botUnread = useStore((s) => s.botUnread)
   const runs = useStore((s) => s.runs)
   const selectedBotId = useStore((s) => s.selectedBotId)
+  // 側欄收起來的 bot 不畫晶片：點下去會選到一顆側欄裡找不到的 bot。
+  const hiddenBotIds = useStore((s) => s.hiddenBotIds)
   const selectBot = useStore((s) => s.selectBot)
   const supervisorProjectId = useStore((s) => s.supervisorProjectId)
   // `selectBot` 會同步清未讀，不記住的話晶片會在手指底下消失。
@@ -98,9 +100,10 @@ export function UnreadChip() {
     const tracked = (b: Bot) => chipTracked(b, supervisorProjectId)
     const waitsKids = (id: string) =>
       bots.some((b) => b.parent_bot_id === id && (runs[b.id]?.agent_status === 'working' || runs[b.id]?.agent_status === 'blocked'))
+    const hidden = new Set(hiddenBotIds)
     const out: ChipItem[] = []
     for (const b of bots) {
-      if (b.pending) continue
+      if (b.pending || hidden.has(b.id)) continue
       // 釘選是使用者自己指定的，不受排除規則影響。
       const pinned = b.primary
       const n = botUnread[b.id] ?? 0
@@ -126,7 +129,7 @@ export function UnreadChip() {
     }
     if (narrow) return out
     return out.map((it, i) => ({ it, i })).sort((a, b) => a.it.rank - b.it.rank || a.i - b.i).map((x) => x.it)
-  }, [supervisorProjectId, botUnread, bots, keptId, narrow, runs, selectBot, selectedBotId])
+  }, [supervisorProjectId, botUnread, bots, hiddenBotIds, keptId, narrow, runs, selectBot, selectedBotId])
 
   const barRef = useRef<HTMLDivElement | null>(null)
   const [expanded, setExpanded] = useState(false)

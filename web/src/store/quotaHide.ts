@@ -5,14 +5,17 @@
 import { useSyncExternalStore } from 'react'
 import { LOCAL_HOST } from '../api/types'
 import type { BotKind } from '../api/types'
-import { projectHostName, type StoreState } from './store'
+import { projectHostName, useStore, type StoreState } from './store'
 
 export const QUOTA_DISABLED_KEY = 'am.disabledQuotaKeys'
 
 /** key → 自動解除的時刻（epoch ms）；null = 那組額度沒有 reset 時間，只能手動解除。 */
 export type DisabledMap = Readonly<Record<string, number | null>>
 
-/** 以 host+kind+identity 記，不用額度 map key：cc0 額度可能落在裸 `claude` 下（`claudeQuotaKey`）。 */
+/**
+ * 以 host+kind+identity 記，刻意不用額度 map 的 key：落點會變（`quotaLookup.quotaBaseKey`——
+ * 共用預設帳號的身分會退回裸 `claude`），拿會變的東西當偏好的鍵，數字一落位偏好就對不回來。
+ */
 export function quotaDisableKey(host: string, kind: BotKind, identity: string | null): string {
   return `${host || LOCAL_HOST}|${kind}|${identity ?? ''}`
 }
@@ -73,6 +76,8 @@ function publish(next: Record<string, number | null>) {
     /* 隱私模式：不記得而已 */
   }
   scheduleExpiry()
+  // 勾停用只動這裡的 map，store 不會自己變，投影要自己推一次。
+  syncHiddenBots()
   for (const fn of listeners) fn()
 }
 
@@ -109,6 +114,8 @@ export function quotaHiddenBotIds(state: StoreState, map: DisabledMap): string[]
   if (Object.keys(map).length === 0) return []
   const hideable = new Set<string>()
   for (const b of state.bots) {
+    // 正在看的那顆永遠留著：主面板還開著它的對話，側欄那一列卻不見了，只能打字搜尋才找得回來。
+    if (b.id === state.selectedBotId) continue
     // 執行中／有未讀的也收：留著的話整批 cc1 有未讀時勾了等於沒反應（見 docs/UI-DECISIONS.md）。
     const key = quotaDisableKey(projectHostName(state, b.project_id), b.kind, b.identity)
     if (isQuotaDisabled(map, key)) hideable.add(b.id)
@@ -120,3 +127,19 @@ export function quotaHiddenBotIds(state: StoreState, map: DisabledMap): string[]
   }
   return [...hideable].filter((id) => !kept.has(id)).sort()
 }
+
+/**
+ * 「側欄看得到哪些 bot」要有單一定義。寫入端仍是這個模組（不進 zustand 就不會被 WS 覆寫），
+ * 但結果要投影進 store：⌥↑／⌥↓ 走的是 `orderedBotIds`、標題列晶片與分頁標題的 `(N)` 走的是
+ * `botUnread`，它們以前都不知道側欄少了一批 bot——點得到卻找不到那一列、數字也對不起來。
+ */
+function syncHiddenBots() {
+  const st = useStore.getState()
+  const next = quotaHiddenBotIds(st, disabled)
+  const cur = st.hiddenBotIds
+  if (next.length === cur.length && next.every((id, i) => id === cur[i])) return
+  useStore.setState({ hiddenBotIds: next })
+}
+
+useStore.subscribe(syncHiddenBots)
+syncHiddenBots()
