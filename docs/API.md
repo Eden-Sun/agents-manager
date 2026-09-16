@@ -5,7 +5,12 @@ daemon 預設 `http://127.0.0.1:7788`（`config.toml` 的 `server.listen`）。�
 
 ## 0. 認證
 
-1. `GET /api/session` 不需 token，但 `Host` 必須是 `127.0.0.1:<port>` / `localhost:<port>` / `[::1]:<port>`，`Origin`（若有）為本機。回 `{"token":"<32 hex>","port":7788}`。
+1. `GET /api/session` 不需 token，但**看的是 TCP peer**（`Host` 是呼叫端自己填的，擋不住）：只有 loopback 直接回 `{"token":"<32 hex>","port":7788}`；
+   `Origin`（若有）須為本機。非 loopback 回 `403 {"error":"pairing_required"}`——那台裝置要走配對（SPEC §7.1a）。
+   - `POST /api/session/pair-code`（要 token、**只收 loopback**）→ `{code:"ABC-DEF", expires_in_secs:300, expires_at}`。CLI：`agm pair-code`。
+   - `POST /api/session/pair {code}`（**不需 token**）→ 成功 `{token, port}`；碼不對／過期／用過一律 `403 {"error":"pairing_failed"}`；
+     同一來源連錯五次 `429 {"error":"pairing_rate_limited", retry_after_secs}`。比對忽略大小寫、空白與連字號。
+   - 已經持有正確 token 的裝置不受影響（`auth()` 只看 token）。
 2. 其餘 `/api/*` 需 header `X-AM-Token`；缺或錯 → `401 {"error":"missing or bad X-AM-Token"}`。
 3. WebSocket：`/ws?token=<token>[&since=<seq>]`。
 4. `/hook/*`、`/relay/announce` 用 per-bot 的 `X-AM-Bot-Token`。
