@@ -53,10 +53,13 @@ fn conflict_backoff_secs(attempts: i64) -> i64 {
     15i64.saturating_mul(1i64 << n).min(cap)
 }
 
-/// 從建立到現在超過門檻就不要再賭了。
-fn conflict_gave_up(created_at: &str, now: chrono::DateTime<chrono::Utc>) -> bool {
+/// 從這一輪第一次撞 409（`conflict_since`）到現在超過門檻就不要再賭了。
+///
+/// 不從 `created_at` 算（review2 sup 新發現 3）：在 `quota_blocked` 等額度、被 restart 窗口 hold 的
+/// 時間是合法的等待，算進去的話，恢復後第一個暫時性 409（例如同一顆 bot 的另一筆剛排進佇列）就直接 blocked。
+fn conflict_gave_up(since: &str, now: chrono::DateTime<chrono::Utc>) -> bool {
     let limit = env_i64(CONFLICT_GIVE_UP_ENV, CONFLICT_GIVE_UP_MINS);
-    match chrono::DateTime::parse_from_rfc3339(created_at) {
+    match chrono::DateTime::parse_from_rfc3339(since) {
         Ok(t) => (now - t.with_timezone(&chrono::Utc)).num_minutes() >= limit,
         // 讀不懂時間就不要放棄：寧可繼續重試，也不要因為一個壞欄位把工作收起來。
         Err(_) => false,
@@ -179,11 +182,13 @@ pub async fn dispatch(app: &Arc<App>, assignment_id: &str) {
         // the assignment queued with the same id.
         Err(LcError::Conflict(v)) => {
             let why = conflict_reason(&v);
-            if conflict_gave_up(&a.created_at, chrono::Utc::now()) {
-                undeliverable(app, &a, &why).await;
-            } else {
-                let wait = conflict_backoff_secs(a.attempts);
-                let _ = store::defer(&app.db, &a.id, &iso_in(wait), &why).await;
+            match a.conflict_since.as_deref() {
+                Some(since) if conflict_gave_up(since, chrono::Utc::now()) => undeliverable(app, &a, since, &why).await,
+                // 第一次撞（或上一輪被 hold／quota_blocked／送達打斷過）：`defer_conflict` 從現在開始計時。
+                _ => {
+                    let wait = conflict_backoff_secs(a.attempts);
+                    let _ = store::defer_conflict(&app.db, &a.id, &iso_in(wait), &why).await;
+                }
             }
         }
         Err(LcError::NotFound(what)) => {
@@ -239,9 +244,10 @@ fn conflict_reason(v: &serde_json::Value) -> String {
 /// user believes is running must not disappear from the list on the daemon's own say-so.
 /// 一直送不進去：標成 `blocked` 並推一則 inbox 事件——**不能只寫 log**，那等於沒人知道。
 /// 不判 `dispatch_failed`：工作沒失敗，是進不去那顆 bot（它一直在回合中），該由 AGM 決定怎麼辦。
-async fn undeliverable(app: &Arc<App>, a: &store::Assignment, why: &str) {
+async fn undeliverable(app: &Arc<App>, a: &store::Assignment, since: &str, why: &str) {
     let mins = env_i64(CONFLICT_GIVE_UP_ENV, CONFLICT_GIVE_UP_MINS);
-    let note = format!("對方一直在回合中，沒有排進佇列（{mins} 分鐘內試了 {} 次，最後一次：{why}）", a.attempts);
+    // 照實寫：原因是最後一次 409 說的那句，不是一律「對方在回合中」；次數是累計的派送嘗試。
+    let note = format!("從 {since} 起超過 {mins} 分鐘一直送不進去（最後一次：{why}；累計派送嘗試 {} 次）", a.attempts);
     if !store::mark_undeliverable(&app.db, &a.id, &note).await.unwrap_or(false) {
         return; // 這一輪已經被別的路徑改掉了（結案、取消…）：不要蓋回去
     }
@@ -254,12 +260,18 @@ async fn undeliverable(app: &Arc<App>, a: &store::Assignment, why: &str) {
         Some(&a.target_bot_id),
         None,
         &json!({"assignment_id": a.id, "target_bot_id": a.target_bot_id, "attempts": a.attempts,
-                "waited_mins": mins, "reason": why, "status": "blocked",
-                "hint": "那顆 bot 一直在回合中。等它空下來再 `assign` 一次（同一個 request id），或改派給別人。"}),
+                "waited_mins": mins, "conflict_since": since, "reason": why, "status": "blocked",
+                // 不能叫人用同一個 request id 再 `assign`：那是冪等查詢，只會拿回這筆 blocked（review2 deliv M1）。
+                "hint": UNDELIVERABLE_HINT}),
     )
     .await;
     app.emit("supervisor_changed", json!({"assignment_id": a.id, "status": "blocked"})).await;
 }
+
+/// `assignment_undeliverable` 給 AGM 的下一步。`blocked` 只剩 review 決定能移走它。
+const UNDELIVERABLE_HINT: &str = "這筆停在 blocked，不會再自己重試。要重派用 `bin/agm review <assignment_id> --decision followup \
+--followup-request-id <新的 id> --followup-text …`（可加 `--followup-bot` 改派給別顆）；不要了就 `--decision cancel`。\
+不要用同一個 request id 再 `assign`——那只會拿回這一筆 blocked，什麼都不會送。";
 
 async fn dispatch_failed(app: &Arc<App>, a: &store::Assignment, why: &str) {
     tracing::warn!(assignment = %a.id, bot = %a.target_bot_id, why, "assignment could not be dispatched");
@@ -1558,6 +1570,121 @@ mod patrol_wake_tests {
     }
 }
 
+/// 409 保險絲從「這一輪第一次撞 409」計時（review2 sup 新發現 3、deliv M1）。
+#[cfg(test)]
+mod conflict_fuse_tests {
+    use super::*;
+
+    /// 一顆沒有 run 的 bot：`dispatch` 每次都拿到真的 409（`bot has no active run`）。
+    async fn app() -> Arc<App> {
+        let dir = std::env::temp_dir().join(format!("agm-conflict-fuse-{}", crate::db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = crate::db::open(&dir.join("test.sqlite")).await.unwrap();
+        let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
+        let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
+        let app = App::new(db, client.clone(), client, cfg, dir.clone(), dir.join("daemon"), 7799, "test".into(), "test".into(), false);
+        store::get_or_init(&app.db).await.unwrap();
+        let now = crate::db::now();
+        sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES ('p','/tmp','p',?)").bind(&now).execute(&app.db).await.unwrap();
+        for id in ["mgr", "b"] {
+            sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES (?,'p',?,'claude',?,?)")
+                .bind(id)
+                .bind(id)
+                .bind(format!("t-{id}"))
+                .bind(&now)
+                .execute(&app.db)
+                .await
+                .unwrap();
+        }
+        store::set_env(&app.db, "mgr", "p", "/tmp").await.unwrap();
+        app
+    }
+
+    fn ago(mins: i64) -> String {
+        (chrono::Utc::now() - chrono::Duration::minutes(mins)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    }
+
+    async fn set(app: &Arc<App>, id: &str, sql: &str, v: &str) {
+        sqlx::query(&format!("UPDATE supervisor_assignments SET {sql} WHERE id=?")).bind(v).bind(id).execute(&app.db).await.unwrap();
+    }
+
+    async fn row(app: &Arc<App>, id: &str) -> store::Assignment {
+        store::assignment(&app.db, id).await.unwrap().unwrap()
+    }
+
+    /// 13:50 建立、在 quota_blocked 等到 19:00、恢復後第一個 409：不能因為「建立已經五小時」就直接 blocked。
+    #[tokio::test]
+    async fn waiting_on_quota_or_a_window_does_not_count_as_failing_to_deliver() {
+        let app = app().await;
+        let a = store::insert_assignment(&app.db, None, "b", "fuse-1", "做 X", &[], None, true).await.unwrap();
+        set(&app, &a.id, "created_at=?", &ago(300)).await;
+
+        dispatch(&app, &a.id).await;
+        let r = row(&app, &a.id).await;
+        assert_eq!(r.status, "queued", "建立很久不等於一直送不進去：{:?}", r.error);
+        assert!(r.conflict_since.is_some(), "第一次撞 409 就開始計時");
+        assert!(r.error.as_deref().is_some_and(|e| e.contains("no active run")), "{:?}", r.error);
+
+        // 這一輪撞了 40 分鐘，然後帳號撞限、等額度、恢復：新的一輪從零算。
+        set(&app, &a.id, "conflict_since=?", &ago(40)).await;
+        store::park_quota_blocked(&app.db, &a.id, &ago(-60), "撞限", "qb:fuse-1", &json!({})).await.unwrap();
+        assert_eq!(row(&app, &a.id).await.conflict_since, None, "進 quota_blocked 就結束這一輪");
+        store::resume_quota_blocked(&app.db, &a.id, "qr:fuse-1", &json!({})).await.unwrap();
+        dispatch(&app, &a.id).await;
+        assert_eq!(row(&app, &a.id).await.status, "queued", "恢復後第一個 409 不是放棄的理由");
+
+        // restart 窗口 hold 也一樣。
+        set(&app, &a.id, "conflict_since=?", &ago(40)).await;
+        store::hold(&app.db, &a.id, &ago(-5), &super::super::maintenance::pause_note(&ago(-5))).await.unwrap();
+        assert_eq!(row(&app, &a.id).await.conflict_since, None, "被窗口 hold 的時間不算送不進去");
+        set(&app, &a.id, "next_attempt_at=NULL, error=?", "x").await;
+        dispatch(&app, &a.id).await;
+        assert_eq!(row(&app, &a.id).await.status, "queued");
+    }
+
+    /// 同一輪真的連續 409 超過門檻：blocked、理由照實寫，hint 不叫人用同一個 request id 重派。
+    #[tokio::test]
+    async fn a_real_streak_still_blows_the_fuse_with_an_honest_note_and_a_usable_hint() {
+        let app = app().await;
+        let a = store::insert_assignment(&app.db, None, "b", "fuse-2", "做 X", &[], None, true).await.unwrap();
+        dispatch(&app, &a.id).await;
+        let since = ago(31);
+        set(&app, &a.id, "conflict_since=?, next_attempt_at=NULL", &since).await;
+
+        dispatch(&app, &a.id).await;
+        let r = row(&app, &a.id).await;
+        assert_eq!(r.status, "blocked");
+        let note = r.error.unwrap_or_default();
+        assert!(note.contains("no active run") && note.contains(&since), "原因與起點照實寫：{note}");
+        assert!(!note.contains("一直在回合中"), "這次不是回合中：{note}");
+
+        let payload: String = sqlx::query_scalar("SELECT payload_json FROM supervisor_inbox WHERE kind='assignment_undeliverable' AND assignment_id=?")
+            .bind(&a.id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        let p: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        let hint = p["hint"].as_str().unwrap();
+        assert!(hint.contains("--decision followup") && hint.contains("新的 id"), "{hint}");
+        assert!(!hint.contains("再 `assign` 一次（同一個 request id）"), "{hint}");
+        assert_eq!(p["conflict_since"], since);
+
+        // hint 說的那條路真的走得通：同一個 crid 再 assign 只拿回 blocked 的那筆。
+        let again = store::assignment_by_crid(&app.db, "fuse-2").await.unwrap().unwrap();
+        assert_eq!((again.id.as_str(), again.status.as_str()), (a.id.as_str(), "blocked"));
+    }
+
+    /// 送達就結束這一輪：之後再撞 409 是新的一輪。
+    #[tokio::test]
+    async fn a_delivery_ends_the_streak() {
+        let app = app().await;
+        let a = store::insert_assignment(&app.db, None, "b", "fuse-3", "做 X", &[], None, true).await.unwrap();
+        set(&app, &a.id, "conflict_since=?", &ago(20)).await;
+        store::mark_delivered(&app.db, &a.id, "t-1", "ok").await.unwrap();
+        assert_eq!(row(&app, &a.id).await.conflict_since, None);
+    }
+}
+
 /// 群組任務的交辦撞到額度時（`mission_quota`）：換手、照原本等待、或停下問人。
 #[cfg(test)]
 mod mission_quota_tests {
@@ -1703,13 +1830,13 @@ mod mission_quota_tests {
             .unwrap();
         let a = store::assignment(&app.db, &a.id).await.unwrap().unwrap();
 
-        undeliverable(&app, &a, "turn_in_flight: a turn is already in flight").await;
+        undeliverable(&app, &a, "2026-09-16T11:00:00Z", "turn_in_flight: a turn is already in flight").await;
 
         let after = store::assignment(&app.db, &a.id).await.unwrap().unwrap();
         assert_eq!(after.status, "blocked", "不是 failed：工作沒失敗，是進不去");
         assert!(after.is_open(), "還是未結案，不會從 ownership 衝突裡消失");
         assert_eq!(after.next_attempt_at, None, "不再每隔幾分鐘賭一次");
-        assert!(after.error.as_deref().is_some_and(|e| e.contains("一直在回合中")), "{:?}", after.error);
+        assert!(after.error.as_deref().is_some_and(|e| e.contains("turn_in_flight") && e.contains("2026-09-16T11:00:00Z")), "{:?}", after.error);
 
         let rows: Vec<(String, Option<String>)> =
             sqlx::query_as("SELECT kind, assignment_id FROM supervisor_inbox").fetch_all(&app.db).await.unwrap();
@@ -1719,7 +1846,7 @@ mod mission_quota_tests {
         );
         // 已經被別的路徑改掉的那一筆不會被蓋回去。
         sqlx::query("UPDATE supervisor_assignments SET status='cancelled' WHERE id=?").bind(&a.id).execute(&app.db).await.unwrap();
-        undeliverable(&app, &a, "again").await;
+        undeliverable(&app, &a, "2026-09-16T11:00:00Z", "again").await;
         assert_eq!(store::assignment(&app.db, &a.id).await.unwrap().unwrap().status, "cancelled");
     }
 
