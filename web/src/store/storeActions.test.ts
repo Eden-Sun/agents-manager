@@ -30,6 +30,7 @@ function seed() {
     missionDetail: {},
     missionLoadErrors: {},
     missionsSupported: true,
+    missionsCapped: {},
     selectedBotId: null,
     selectedProjectId: null,
   })
@@ -101,6 +102,27 @@ test('任務卡按「暫停」：帶 reason 送出，daemon 收得下（不帶�
   const post = requests.find((r) => r.method === 'POST')
   assert.deepEqual(post?.body, { reason: 'user_pause' })
   assert.equal(useStore.getState().missions.p1[0].paused_reason, 'user_pause')
+})
+
+test('等你回答的舊任務不會被 50 筆已完成的新任務擠出清單；已結案那段標成「最近 N 筆」', async () => {
+  seed()
+  const at = (i: number) => `2026-09-${String(10 + Math.floor(i / 1000)).padStart(2, '0')}T00:00:${String(i % 60).padStart(2, '0')}Z`
+  const waiting = { id: 'old-paused', project_id: 'p1', status: 'paused', paused_reason: 'max_rounds', created_at: '2026-09-01T00:00:00Z' }
+  const doneRows = Array.from({ length: 50 }, (_, i) => ({ id: `d${i}`, project_id: 'p1', status: 'done', created_at: at(i + 1) }))
+  // 照 daemon：各狀態分開篩、新的在前、`limit` 截斷。`all` 只回最新 50 筆，那筆等你回答的就不在裡面。
+  routeDaemon((r) => {
+    const q = new URL(r.path, 'http://x').searchParams
+    const limit = Number(q.get('limit') ?? 100)
+    const rows =
+      q.get('status') === 'open' ? [waiting] : q.get('status') === 'done' ? doneRows : q.get('status') === 'cancelled' ? [] : [...doneRows, waiting]
+    return json({ project_id: 'p1', missions: rows.slice(0, limit) }, 200)
+  })
+  await useStore.getState().loadMissions('p1')
+  const s = useStore.getState()
+  assert.ok(s.missions.p1.some((m) => m.id === 'old-paused'), '停著等回答的那筆要在清單裡，否則沒地方回答')
+  assert.equal(s.missions.p1.filter((m) => m.status === 'done').length, 50)
+  assert.deepEqual(s.missionsCapped.p1, { done: true, cancelled: false })
+  assert.equal(s.missions.p1.at(-1)?.id, 'old-paused', '合起來仍是新的在前')
 })
 
 test('SPA fallback 的 404（body 不是 daemon 的錯誤）仍然當成這台沒有群組任務', async () => {

@@ -67,6 +67,14 @@ import { BOT_KINDS, LOCAL_HOST } from '../api/types'
 
 const sendMissionRequest = missionRequests(api.newClientRequestId)
 const missionLoads = new Map<string, () => Promise<void>>()
+const missionListLoads = new Map<string, () => Promise<void>>()
+/**
+ * 已結案（done／cancelled）各抓最近幾筆；進行中的另外抓、不跟它們搶名額。
+ * 以前一次 `status=all&limit=50`：專案又開了 50 筆任務之後，停著等你回答的那筆就掉出清單，卡片跟回答框一起消失（review3 c1 M6）。
+ */
+export const MISSION_CLOSED_LIMIT = 50
+/** 進行中的實際上不設限：daemon 的 `limit` 最多收 500，同一個專案不會同時開著這麼多筆。 */
+const MISSION_OPEN_LIMIT = 500
 
 export type SocketStatus = 'connecting' | 'open' | 'closed'
 export type RightTab = 'chat' | 'terminal'
@@ -359,6 +367,8 @@ export interface StoreState {
   missionLoadErrors: Record<string, string>
   /** false = daemon 沒有 `/api/missions`（舊版）：入口靜默消失。 */
   missionsSupported: boolean
+  /** 已結案那兩段是不是被 `MISSION_CLOSED_LIMIT` 截掉了（標題要說「最近 N 筆」，不能冒充總數）。 */
+  missionsCapped: Record<string, { done: boolean; cancelled: boolean }>
   loadMissions: (projectId: string) => Promise<void>
   loadMission: (missionId: string) => Promise<void>
   startMission: (projectId: string, input: NewMissionInput) => Promise<string | null>
@@ -654,6 +664,7 @@ export const useStore = create<StoreState>((set, get) => ({
   missionLoading: {},
   missionLoadErrors: {},
   missionsSupported: true,
+  missionsCapped: {},
   shellView: initialShellView,
   supervisorProjectId: null,
 
@@ -1862,17 +1873,35 @@ export const useStore = create<StoreState>((set, get) => ({
 
   // 群組任務（mission）
   async loadMissions(projectId) {
-    if (!get().missionsSupported) return
-    try {
-      const list = await api.fetchMissions(projectId)
-      set((s) => ({ missions: { ...s.missions, [projectId]: list } }))
-    } catch (e) {
-      if (api.isMissionsUnsupported(e)) {
-        set({ missionsSupported: false })
-        return
-      }
-      get().notify('error', `載入任務失敗：${errText(e)}`)
+    let run = missionListLoads.get(projectId)
+    if (!run) {
+      // 一次湧進好幾則 `mission_updated` 時只打一輪（外加結尾補一輪），不是每則都三支請求。
+      run = singleFlight(async () => {
+        if (!get().missionsSupported) return
+        try {
+          const [open, done, cancelled] = await Promise.all([
+            api.fetchMissions(projectId, 'open', MISSION_OPEN_LIMIT),
+            api.fetchMissions(projectId, 'done', MISSION_CLOSED_LIMIT),
+            api.fetchMissions(projectId, 'cancelled', MISSION_CLOSED_LIMIT),
+          ])
+          set((s) => ({
+            missions: { ...s.missions, [projectId]: newestFirst([...open, ...done, ...cancelled]) },
+            missionsCapped: {
+              ...s.missionsCapped,
+              [projectId]: { done: done.length >= MISSION_CLOSED_LIMIT, cancelled: cancelled.length >= MISSION_CLOSED_LIMIT },
+            },
+          }))
+        } catch (e) {
+          if (api.isMissionsUnsupported(e)) {
+            set({ missionsSupported: false })
+            return
+          }
+          get().notify('error', `載入任務失敗：${errText(e)}`)
+        }
+      })
+      missionListLoads.set(projectId, run)
     }
+    await run()
   },
 
   async loadMission(missionId) {
@@ -2022,6 +2051,14 @@ function mergeMission(map: Record<string, Mission[]>, mission: Mission): Record<
   const at = list.findIndex((m) => m.id === mission.id)
   const next = at < 0 ? [mission, ...list] : list.map((m, i) => (i === at ? mission : m))
   return { ...map, [mission.project_id]: next }
+}
+
+/** open／done／cancelled 三份合成一份，新的在前；同一筆只留一次。 */
+function newestFirst(list: Mission[]): Mission[] {
+  const seen = new Set<string>()
+  return list
+    .filter((m) => (seen.has(m.id) ? false : (seen.add(m.id), true)))
+    .sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0))
 }
 
 // One subscription instead of a write at every mutation site (covers future ones too).

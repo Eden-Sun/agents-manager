@@ -846,10 +846,11 @@ export function missionRejectReason(e: unknown): string | null {
   return e instanceof ApiError ? (e.body?.error ?? null) : null
 }
 
+/** `open` 含 paused。已結案的要自己帶 `limit`，進行中的別跟它們擠同一個上限（見 store 的 `loadMissions`）。 */
 export async function fetchMissions(
   projectId: string,
-  status: 'all' | 'open' | 'done' | 'cancelled' = 'all',
-  limit = 50,
+  status: 'all' | 'open' | 'done' | 'cancelled',
+  limit: number,
 ): Promise<Mission[]> {
   const qs = new URLSearchParams({ status, limit: String(limit) }).toString()
   return toMissions(await transport.request('GET', `/projects/${encodeURIComponent(projectId)}/missions?${qs}`))
