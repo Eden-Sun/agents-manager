@@ -487,7 +487,7 @@ pub const PARKED_SOURCE: &str = "parked-assignment";
 /// 只寫 `limit_hit`，不動任何量表或重置時間（那是橫幅／app-server／statusLine 的事）。已經過期的
 /// 時間不寫；同一格已經有**更晚**（或沒寫時間＝黏著）的撞限時也不覆蓋，所以呼叫端可以照順序把
 /// 每一張交辦餵進來，最晚的那個自然會留下。回傳有沒有真的寫進去。
-pub async fn seed_limit_hit(app: &Arc<App>, host: &str, base: &str, until: &str, message: &str) -> bool {
+pub async fn seed_limit_hit(app: &Arc<App>, host: &str, base: &str, until: &str, message: &str, bucket: Option<String>) -> bool {
     let parse = |s: &str| chrono::DateTime::parse_from_rfc3339(s).ok().map(|t| t.with_timezone(&chrono::Utc));
     let Some(t) = parse(until) else { return false };
     if t <= chrono::Utc::now() {
@@ -521,7 +521,7 @@ pub async fn seed_limit_hit(app: &Arc<App>, host: &str, base: &str, until: &str,
         host: host.to_string(),
     });
     q.limit_hit =
-        Some(LimitHit { message: message.to_string(), until: Some(until.to_string()), at: now.clone(), bucket: None });
+        Some(LimitHit { message: message.to_string(), until: Some(until.to_string()), at: now.clone(), bucket });
     q.updated_at = now;
     let out = q.clone();
     quotas.insert(key.clone(), q);

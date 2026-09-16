@@ -515,7 +515,9 @@ async fn backfill_quota_limits(app: &Arc<App>, host: &str, parked_before: Option
         }
         let base = crate::quota::quota_base_for_host(app, host, &bot.kind, bot.identity.as_deref()).await;
         let why = format!("重啟前記下的等待：{} 還在等額度", a.id);
-        if crate::quota::seed_limit_hit(app, host, &base, resume_at, &why).await {
+        // 桶名只有 claude 橫幅講得出來；park 時把橫幅寫進了 `error`，從那裡找回來（找不到就 None，照舊用讀數推）。
+        let bucket = if bot.kind == "claude" { a.error.as_deref().and_then(crate::turn_error::banner_bucket) } else { None };
+        if crate::quota::seed_limit_hit(app, host, &base, resume_at, &why, bucket).await {
             seeded += 1;
         }
     }
@@ -2315,6 +2317,23 @@ mod quota_restart_tests {
         crate::quota::clear_limit_hit(&app, "local", "claude:cc2").await;
         backfill_quota_limits_once(&app, "local").await;
         assert!(app.quotas.lock().await.get("claude:cc2").and_then(|q| q.limit_hit.as_ref()).is_none(), "同一台只回填一次");
+    }
+
+    /// M7：回填的格子帶回 park 時那張橫幅的桶名，`mission::pick` 才不會把 5h 的等待判成週窗、把身分換掉。
+    #[tokio::test]
+    async fn the_backfill_keeps_the_banners_bucket() {
+        let app = app().await;
+        bot(&app, "b1", "cc2").await;
+        let id = parked(&app, "b1", "2999-01-01T00:00:00Z", "2026-09-16T00:00:01Z").await;
+        sqlx::query("UPDATE supervisor_assignments SET error=? WHERE id=?")
+            .bind("帳號撞到用量上限（turn）：You've hit your session limit · resets 4pm")
+            .bind(&id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        backfill_quota_limits(&app, "local", None).await;
+        let q = app.quotas.lock().await;
+        assert_eq!(q.get("claude:cc2").and_then(|x| x.limit_hit.as_ref()).and_then(|h| h.bucket.as_deref()), Some("five_hour"));
     }
 
     /// 回填完再跑一次 resume：兩段合起來就是重啟的真實順序，parked 的交辦要原地不動。
