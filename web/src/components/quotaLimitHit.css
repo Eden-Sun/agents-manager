@@ -11,6 +11,16 @@
   margin: 0 2px;
 }
 
+/* 紅框的上下緣就是這格唯一的外框，但量表條釘在 `-1px`（蓋住 1px 邊框畫成「邊框上的刻度」），
+   於是下緣整條被蓋掉，看起來像框沒畫完（2026-09-16 使用者截圖）。這一格把刻度往內縮，讓邊框完整。 */
+.quota-hp.quota-blocked .quota-border-meter.bottom {
+  bottom: 2px;
+}
+
+.quota-hp.quota-blocked .quota-border-meter.top {
+  top: 2px;
+}
+
 /* 灰階而非降透明：留著綠色就還在說「還很夠用」。 */
 .quota-hp.quota-blocked .quota-bar,
 .quota-hp.quota-blocked .quota-bar-wrap,
