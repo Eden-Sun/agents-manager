@@ -1043,6 +1043,8 @@ API：`GET /api/projects/:id/messages`、`POST /api/projects/:id/chat`（`API.md
   `pane.read recent_unwrapped` 等到最後標記（逾時 40 秒）。`-p` 印純文字、不會有 TUI 對話框或信任視窗；同一次探測順便拿到該身份的登入狀態、`account`、`plan`
   （claude 身份不經 ssh 探登入：非登入 ssh 讀不到 Keychain）。沒登入的身份 park 30 分鐘，其他失敗 5 分鐘；失敗後才開始有 statusLine 或 run 的帳號沒登入那段也只等 5 分鐘。
   **裸的預設帳號一樣吃退避**，「有 bot 在講話」只縮短退避、不再蓋過退避——以前兩者都豁免，`/usage` 一壞這些帳號每 60 秒開一個 pane、佔住 `probe_lock`（review 2026-09-16）。
+  只有 **env 整個是空的**身分併進裸 `claude` 那一趟（用空 env 探）；env 不空、卻沒有自己 `CLAUDE_CONFIG_DIR` 的身分（`ANTHROPIC_API_KEY`…）額度仍落在裸 `claude`，
+  但登入答案另開一趟**帶它自己的 env、不跑 `/usage`** 去問，而且登入已知就不再問——以前用空 env 探，預設帳號的 email／方案被記到它名下（review 2026-09-16）。
   `/usage` 先跑 `--output-format stream-json --verbose` 並 `grep -m1 usage_report`：claude 2.1.273 起那一行帶結構化的 `usage_report.rate_limits.limits[]`
   （`kind` = `session`／`weekly_all`／`weekly_scoped`＋`scope.model.display_name`、`percent`、ISO `resets_at`、`severity`），分桶一律看 `kind` 不看顯示字串，重置時間直接用 ISO。
   `grep` 沒抓到（舊 CLI 不認這個旗標或還沒有這個欄位）才跑純文字版，交給既有的文字解析（`parse_claude_usage`）。

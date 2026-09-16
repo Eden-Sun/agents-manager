@@ -357,7 +357,7 @@ pub(crate) struct ProbeOutcome {
 }
 
 /// `env` is spelled out before each call too, so the line is self-contained when read off screen.
-fn probe_command(bin: &str, env: &BTreeMap<String, String>) -> String {
+fn probe_command(bin: &str, env: &BTreeMap<String, String>, with_usage: bool) -> String {
     let mut pfx = String::new();
     for (k, v) in env.iter().filter(|(k, _)| crate::tools::valid_env_name(k)) {
         pfx.push_str(&format!("{k}={} ", crate::hosts::sh_quote(v)));
@@ -366,12 +366,19 @@ fn probe_command(bin: &str, env: &BTreeMap<String, String>) -> String {
     let auth = crate::tools::CLAUDE_LOGIN_ARGS.join(" ");
     // `/usage` 先要結構化版本（claude 2.1.273 起：`usage_report` 帶 kind／percent／ISO resets_at／scope）。
     // `grep -m1` 沒抓到（舊 CLI 不認 `--output-format`、或還沒有這個欄位）才跑純文字版給 [`parse_claude_usage`]。
+    // 只要登入答案的 target（[`Target::login_only`]）不跑 `/usage`：那一格的額度由裸 target 負責，多跑一次是純成本。
+    let usage = if with_usage {
+        format!(
+            "{pfx}{b} -p '/usage' --output-format stream-json --verbose </dev/null 2>/dev/null | grep -m1 usage_report \
+               || {pfx}{b} -p '/usage' </dev/null 2>&1; rc=$?; "
+        )
+    } else {
+        "rc=0; ".to_string()
+    };
     format!(
         "printf '\\nAM_AUTH_%s\\n' BEGIN; {pfx}{b} {auth} </dev/null 2>&1; \
          printf '\\nAM_AUTH_%s\\n' END; \
-         {pfx}{b} -p '/usage' --output-format stream-json --verbose </dev/null 2>/dev/null | grep -m1 usage_report \
-           || {pfx}{b} -p '/usage' </dev/null 2>&1; rc=$?; \
-         printf '\\nAM_USAGE_%s=%s\\n' DONE \"$rc\""
+         {usage}printf '\\nAM_USAGE_%s=%s\\n' DONE \"$rc\""
     )
 }
 
@@ -443,6 +450,7 @@ async fn refresh_claude_account(
     base_key: &str,
     account: Option<&str>,
     env: BTreeMap<String, String>,
+    with_usage: bool,
 ) -> Result<Option<ProbeOutcome>> {
     if !app.tools.lock().await.contains_key(host) {
         crate::tools::detect(app, host).await?;
@@ -467,7 +475,7 @@ async fn refresh_claude_account(
     let (ws, pane) = client.workspace_create(&cwd, &label, env_json).await?;
     let probe = Probe { client: client.clone(), workspace_id: ws.workspace_id.clone(), closed: false };
     let pane_id = pane.pane_id.clone();
-    let cmd = probe_command(&bin, &env);
+    let cmd = probe_command(&bin, &env, with_usage);
 
     // workspace.create can return before the shell takes input; a line typed too early is lost, so retype.
     tokio::time::sleep(Duration::from_millis(700)).await;
@@ -499,6 +507,9 @@ async fn refresh_claude_account(
     };
     let (logged_in, email, plan) = crate::tools::read_login_answer("claude", &auth);
     let mut out = ProbeOutcome { logged_in, email, plan: plan.clone(), quota: None };
+    if !with_usage {
+        return Ok(Some(out));
+    }
     let parsed = parse_claude_usage_report(&usage, account).or_else(|| parse_claude_usage(&usage, Local::now(), account));
     if let Some(mut q) = parsed {
         q.plan = plan;
@@ -643,6 +654,10 @@ struct Target {
     names: Vec<String>,
     /// 裸的預設帳號也有：以前它「永不 park」，`/usage` 一壞就每 60 秒開一個 pane（review 2026-09-16 M4）。
     evidence: ProbeEvidence,
+    /// 只問登入答案、不寫額度：env 不是空的、卻沒有自己 `CLAUDE_CONFIG_DIR` 的身分（`ANTHROPIC_API_KEY`、
+    /// `ANTHROPIC_BASE_URL`…）。額度照規則記在裸 `claude`，但登入答案要帶**它自己的 env** 問——以前併進裸 target
+    /// 用空 env 探，預設帳號的 email／方案被記到它名下（review 2026-09-16 L2）。`key` 是 `claude:<name>`，只給退避用。
+    login_only: bool,
 }
 
 /// 停用又沒有 run 在跑的身份跳過探測。**還在跑的不跳**：那顆 bot 的額度使用者仍然需要看得到，
@@ -705,7 +720,8 @@ fn plan_targets(i: &PlanInput, cooling: impl Fn(&str, bool, bool) -> bool) -> Ve
         // 「這個身分就是預設帳號嗎」只能有一份規則：`env.is_empty()` 會把只帶
         // `ANTHROPIC_BASE_URL`（沒有 CLAUDE_CONFIG_DIR）的身分算成獨立帳號，跟 statusline 那邊
         // 的落點不一致，同一個帳號的數字會分裂在兩格（review 2026-09-16）。
-        if crate::quota::identity_shares_default("claude", &id.env) {
+        let shares_default = crate::quota::identity_shares_default("claude", &id.env);
+        if shares_default && id.env.is_empty() {
             bare_names.push(id.name.clone());
             continue;
         }
@@ -727,7 +743,7 @@ fn plan_targets(i: &PlanInput, cooling: impl Fn(&str, bool, bool) -> bool) -> Ve
             tracing::debug!(host, identity = %id.name, "identity probe is cooling down after a failure; skipping");
             continue;
         }
-        rest.push(Target { key, account: Some(id.name.clone()), env, names: vec![id.name.clone()], evidence });
+        rest.push(Target { key, account: Some(id.name.clone()), env, names: vec![id.name.clone()], evidence, login_only: shares_default });
     }
     if skip_disabled_default(i.off, i.live, &bare_names, i.unnamed_running) {
         tracing::debug!(host, identities = ?bare_names, "the default account's identities are all disabled and idle; skipping its quota probe");
@@ -742,7 +758,7 @@ fn plan_targets(i: &PlanInput, cooling: impl Fn(&str, bool, bool) -> bool) -> Ve
             cooling_down: cooling(&bare_full, reported_statusline, has_live_run),
         };
         if should_probe_identity(evidence) {
-            targets.push(Target { key: "claude".into(), account: bare_names.first().cloned(), env: BTreeMap::new(), names: bare_names, evidence });
+            targets.push(Target { key: "claude".into(), account: bare_names.first().cloned(), env: BTreeMap::new(), names: bare_names, evidence, login_only: false });
         } else {
             tracing::debug!(host, "default-account probe is cooling down after a failure; skipping");
         }
@@ -778,6 +794,9 @@ pub async fn refresh_claude(app: &Arc<App>, host: &str) -> Result<bool> {
         // Fresh statusLine = skip (many `ccN` per host, SPEC §16, would queue probes), unless
         // we've never had a login answer for it — that rides on the probe.
         let login_known = t.names.iter().all(|n| logins.get(n).is_some_and(|i| i.logged_in.is_some()));
+        if t.login_only && login_known {
+            continue;
+        }
         let statusline_fresh = app
             .quotas
             .lock()
@@ -788,13 +807,19 @@ pub async fn refresh_claude(app: &Arc<App>, host: &str) -> Result<bool> {
             any = true;
             continue;
         }
-        match refresh_claude_account(app, host, &t.key, t.account.as_deref(), t.env).await {
+        match refresh_claude_account(app, host, &t.key, t.account.as_deref(), t.env, !t.login_only).await {
             Ok(None) => saw_missing = true,
             Ok(Some(o)) => {
                 for name in &t.names {
                     touched |= crate::tools::record_identity_login(app, host, name, o.logged_in, o.email.clone(), o.plan.clone()).await;
                 }
-                if o.quota.is_some() {
+                if t.login_only {
+                    if o.logged_in.is_some() {
+                        unpark(&full);
+                    } else {
+                        park(&full, false);
+                    }
+                } else if o.quota.is_some() {
                     any = true;
                     unpark(&full);
                     // 這把 key 的 `/usage` 剛答過：接下來十分鐘讓狀態列接手，不用再開 pane。
@@ -1052,7 +1077,7 @@ AM_USAGE_DONE=0
         let mut env = BTreeMap::new();
         env.insert("CLAUDE_CONFIG_DIR".to_string(), "/home/u/.claude-cc1".to_string());
         env.insert("bad name".to_string(), "x".to_string());
-        let cmd = probe_command("/opt/homebrew/bin/claude", &env);
+        let cmd = probe_command("/opt/homebrew/bin/claude", &env, true);
         assert!(cmd.contains("CLAUDE_CONFIG_DIR='/home/u/.claude-cc1'"), "{cmd}");
         assert!(!cmd.contains("bad name"), "{cmd}");
         assert!(cmd.contains("auth status --json"), "{cmd}");
@@ -1062,7 +1087,7 @@ AM_USAGE_DONE=0
 
     #[test]
     fn the_echoed_command_does_not_look_like_the_markers() {
-        let cmd = probe_command("/bin/claude", &BTreeMap::new());
+        let cmd = probe_command("/bin/claude", &BTreeMap::new(), true);
         let screen = format!(
             "u@host ~ % {cmd}\n\n{AUTH_BEGIN}\n{{\"loggedIn\":true,\"email\":\"a@b.c\"}}\n\n{AUTH_END}\n{PLAIN}\n{USAGE_DONE}0\n"
         );
@@ -1153,6 +1178,25 @@ AM_USAGE_DONE=0
         let bare = plan_targets(&input, |_, _, _| false).into_iter().next().unwrap();
         assert_eq!(bare.names, ["cc0"]);
         assert!(bare.evidence.has_live_run && bare.evidence.reported_statusline);
+    }
+
+    /// L2（review 2026-09-16）：`api` 只帶 `ANTHROPIC_API_KEY`、沒有自己的 `CLAUDE_CONFIG_DIR`。額度規則上它跟預設帳號
+    /// 同一格（裸 `claude`），但以前連探測也併進裸 target、用**空 env** 問，預設帳號的 email／方案被記到它名下。
+    #[test]
+    fn an_identity_with_env_but_no_config_dir_is_asked_about_its_login_with_its_own_env() {
+        let identities = vec![ident("cc0", &[]), ident("api", &[("ANTHROPIC_API_KEY", "sk-test")])];
+        let logins = BTreeMap::new();
+        let live = Default::default();
+        let statusline = Default::default();
+        let input = PlanInput { host: "local", home: "/h", identities: &identities, logins: &logins, live: &live, off: &[], unnamed_running: false, statusline_keys: &statusline };
+        let ts = plan_targets(&input, |_, _, _| false);
+        assert_eq!(ts.len(), 2);
+        assert_eq!((ts[0].key.as_str(), ts[0].names.clone(), ts[0].login_only), ("claude", vec!["cc0".to_string()], false), "裸 target 只代表 env 真的是空的身分");
+        assert_eq!((ts[1].key.as_str(), ts[1].login_only), ("claude:api", true));
+        assert_eq!(ts[1].env.get("ANTHROPIC_API_KEY").map(String::as_str), Some("sk-test"), "登入答案要帶它自己的 env 問");
+        let cmd = probe_command("/bin/claude", &ts[1].env, false);
+        assert!(cmd.contains("auth status --json") && !cmd.contains("/usage"), "只問登入，不跑 /usage：{cmd}");
+        assert_eq!(crate::quota::quota_base_default_aware("claude", Some("api"), crate::quota::identity_shares_default("claude", &identities[1].env)), "claude", "額度落點規則不變");
     }
 
     /// L4（review 2026-09-16）：共用預設帳號的身分（cc0）停用了、沒有 run，也沒有不帶身分的 claude bot 在跑，
