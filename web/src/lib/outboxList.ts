@@ -1,5 +1,6 @@
 /** 檔案暫存區裡「bot 給你的檔案」那一段的純邏輯：怎麼講一個檔案、還剩多久、怎麼講「沒得列」。 */
 import type { OutboxFile } from '../api'
+import type { Turn } from '../api/types'
 
 /** `18 KB` / `1.1 MB`：一行要看得懂，個位數才給小數。跟 MemBadge 的 `humanBytes` 不同單位詞：
  *  那邊是一格寬度的 RAM（`1.4G`），這邊是檔案大小，使用者看的是「下載會多大」。 */
@@ -42,4 +43,20 @@ export function emptyReason(reason: string | null, botSelected: boolean): string
 /** 新的排前面；同一秒的依名字排，避免每次重整順序在跳。 */
 export function orderFiles(files: OutboxFile[]): OutboxFile[] {
   return [...files].sort((a, b) => b.modified - a.modified || a.name.localeCompare(b.name))
+}
+
+/**
+ * 這顆 bot 最近一個**已經結束**的回合（`id:completed_at`），沒有就是空字串。
+ *
+ * 清單原本只在換 bot 或按 ↻ 時重讀：bot 回「放好了」的那一刻清單不會動，使用者要切個頁面才看得到
+ * （2026-09-16 使用者：「為何沒有馬上出現／要切換頁面後才看見」）。bot 放檔一定發生在回合裡，
+ * 所以回合一結束就重讀一次——這是事件，不是輪詢，「不每秒掃目錄」那條取捨不變。
+ */
+export function lastSettledTurnKey(turns: Record<string, Pick<Turn, 'id' | 'status' | 'completed_at'>> | undefined): string {
+  let best: { id: string; at: string } | null = null
+  for (const t of Object.values(turns ?? {})) {
+    if (!t.completed_at || t.status === 'in_flight' || t.status === 'queued') continue
+    if (!best || t.completed_at > best.at) best = { id: t.id, at: t.completed_at }
+  }
+  return best ? `${best.id}:${best.at}` : ''
 }

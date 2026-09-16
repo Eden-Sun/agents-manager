@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import * as api from '../api'
 import type { OutboxFile } from '../api'
-import { emptyReason, fileSize, orderFiles, remainingLabel, remainingNow } from '../lib/outboxList'
+import { emptyReason, fileSize, lastSettledTurnKey, orderFiles, remainingLabel, remainingNow } from '../lib/outboxList'
 import { useStore } from '../store/store'
 import './outboxFiles.css'
 
@@ -17,6 +17,8 @@ import './outboxFiles.css'
 export function OutboxFiles() {
   const botId = useStore((s) => s.selectedBotId)
   const notify = useStore((s) => s.notify)
+  // 回合一結束就重讀：bot 說「放好了」的同時清單就該出現，不必切頁或按 ↻（字串比較，回合沒結束不會重跑）。
+  const settledTurn = useStore((s) => (botId ? lastSettledTurnKey(s.turns[botId]) : ''))
   const [files, setFiles] = useState<OutboxFile[]>([])
   const [reason, setReason] = useState<string | null>(null)
   const [dir, setDir] = useState('')
@@ -73,7 +75,7 @@ export function OutboxFiles() {
     return () => {
       alive = false
     }
-  }, [botId, nonce])
+  }, [botId, nonce, settledTurn])
 
   const download = async (name: string) => {
     if (!botId) return

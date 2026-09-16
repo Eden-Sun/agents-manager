@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { emptyReason, fileSize, orderFiles, remainingLabel, remainingNow } from './outboxList'
+import { emptyReason, fileSize, lastSettledTurnKey, orderFiles, remainingLabel, remainingNow } from './outboxList'
 
 const file = (name: string, modified: number, remainingSecs = 3600) => ({ name, size: 1, modified, remainingSecs })
 
@@ -48,4 +48,21 @@ test('outbox 被判不可信時講清楚，不說成還沒有檔案', () => {
   const text = emptyReason('outbox_untrusted', true)
   assert.match(text, /符號連結|擁有者/)
   assert.doesNotMatch(text, /還沒有檔案/)
+})
+
+test('回合一結束清單就該重讀：鍵跟著最近一個結束的回合變，還在跑的不算', () => {
+  const t = (id: string, status: string, completed_at: string | null) => ({ id, status, completed_at }) as never
+  assert.equal(lastSettledTurnKey(undefined), '')
+  assert.equal(lastSettledTurnKey({ a: t('a', 'in_flight', null) }), '', '還在跑：不重讀')
+  const before = lastSettledTurnKey({ a: t('a', 'completed', '2026-09-16T12:28:00Z') })
+  assert.equal(before, 'a:2026-09-16T12:28:00Z')
+  // 下一則送出、還在跑：鍵不變。
+  assert.equal(lastSettledTurnKey({ a: t('a', 'completed', '2026-09-16T12:28:00Z'), b: t('b', 'in_flight', null) }), before)
+  // 跑完了：鍵變了 → 重讀。
+  assert.equal(
+    lastSettledTurnKey({ a: t('a', 'completed', '2026-09-16T12:28:00Z'), b: t('b', 'completed', '2026-09-16T12:36:30Z') }),
+    'b:2026-09-16T12:36:30Z',
+  )
+  // 失敗結束的回合也算（bot 可能放了一半）。
+  assert.equal(lastSettledTurnKey({ c: t('c', 'failed', '2026-09-16T12:40:00Z') }), 'c:2026-09-16T12:40:00Z')
 })
