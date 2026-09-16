@@ -26,6 +26,7 @@ import {
 import { ApiError } from '../api/types'
 import type { Bot, BotKind, RestartBatch, GroupChatResult, Mission, MissionDetail, NewMissionInput, MemSnapshot, GroupMessage, Host, HostResult, HostShell, Identity, IdentityStatusMap, Lamp, Message, ModelInfo, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, PatchBotInput, PatchProjectInput, Project, QuotaMap, Run, TerminalSource, ToolMap, Turn } from '../api/types'
 import type { ProjectPane } from '../api'
+import { joinRunningBatch, restartProgress } from './restartBatch'
 import { dropHostModels, modelsKey, shouldFetchModels, type ModelsCache } from './modelsCache'
 import { MESSAGE_CAP, byId, byTime, capList, insertSorted, pruneTurns } from './lists'
 import { acceptStateSeq, singleFlight } from './singleFlight'
@@ -1443,6 +1444,13 @@ export const useStore = create<StoreState>((set, get) => ({
   async restartIdleBots() {
     await guarded(set, get, 'restart-idle', async () => {
       const plan = await api.restartIdleBots()
+      // 已經有一批在跑（daemon 同時只准一批）：回的是那一批的 id、total 是 0。不能當成「沒有要重啟的」
+      // 把進度蓋掉或跳「沒有閒置的 Bot」——接著看那一批的事件就好。
+      if (plan.already_running) {
+        set({ restartBatch: joinRunningBatch(get().restartBatch, plan.batch_id) })
+        get().notify('info', '已經有一批重啟在跑，這次不另開，進度照那一批顯示')
+        return
+      }
       // 按鈕數字從此用 daemon 的計畫，不用前端估的。
       set({
         restartBatch: {
@@ -2381,21 +2389,9 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
     // SPEC §6.9：批次重啟的進度。一顆一顆來，`index` 是第幾顆（1-based）。
     case 'bots_restart_progress': {
       if (!isRec(data)) return
-      const batchId = str(pick(data, 'batch_id'))
-      const name = str(pick(data, 'name'))
-      const status = str(pick(data, 'status'))
       set((s) => {
-        const b = s.restartBatch
-        if (!b || b.id !== batchId) return {}
-        if (status === 'restarting') return { restartBatch: { ...b, current: name } }
-        if (status === 'ok') {
-          return { restartBatch: { ...b, done: b.done + 1, current: null, ok: [...b.ok, name] } }
-        }
-        if (status === 'failed') {
-          const error = str(pick(data, 'error'), '失敗')
-          return { restartBatch: { ...b, done: b.done + 1, current: null, failed: [...b.failed, { name, error }] } }
-        }
-        return {}
+        const next = s.restartBatch ? restartProgress(s.restartBatch, data) : null
+        return next && next !== s.restartBatch ? { restartBatch: next } : {}
       })
       return
     }

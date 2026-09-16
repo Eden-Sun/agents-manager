@@ -338,3 +338,19 @@ test('還在記憶體清單裡的照舊走 DELETE；pane 表關失敗時面板�
   assert.notEqual(useStore.getState().shellView, null, '沒關掉就不能假裝關掉')
   assert.ok(noticeTexts().length > 0)
 })
+
+/** daemon 同時只准一批：第二次按回 `already_running`、total 0——不能當成「沒有要重啟的」蓋掉進度。 */
+test('已經有一批在跑時再按一鍵重啟：不蓋掉進度，也不說沒有閒置的 bot', async () => {
+  seed()
+  const running = { id: 'batch-1', total: 3, done: 1, current: 'A', ok: ['Z'], failed: [], skipped: [], finished: false }
+  useStore.setState({ restartBatch: running })
+  routeDaemon((req) =>
+    req.path.includes('/bots/restart-idle')
+      ? json({ batch_id: 'batch-1', total: 0, planned: [], skipped: [], already_running: true }, 200)
+      : json({}, 200),
+  )
+  await useStore.getState().restartIdleBots()
+  assert.deepEqual(useStore.getState().restartBatch, running)
+  assert.ok(!noticeTexts().some((t) => t.includes('沒有')), noticeTexts().join('|'))
+  assert.ok(noticeTexts().some((t) => t.includes('已經有一批')))
+})

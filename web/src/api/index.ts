@@ -405,6 +405,7 @@ export async function restartIdleBots(): Promise<RestartPlan> {
       isRec(v) ? [{ bot_id: str(pick(v, 'bot_id')), name: str(pick(v, 'name')) }] : [],
     ),
     skipped: toRestartSkips(pick(o, 'skipped')),
+    already_running: pick(o, 'already_running') === true,
   }
 }
 

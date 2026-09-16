@@ -255,7 +255,7 @@ export interface Run {
 export interface RestartSkip {
   bot_id: string
   name: string
-  /** `working` / `blocked` / `turn_in_flight` / `not_running` / `unknown_status` */
+  /** `working` / `blocked` / `turn_in_flight` / `not_running` / `unknown_status` / `no_longer_pending`（輪到它時狀態變了） */
   reason: string
   /** daemon 寫好的，前端不另編一套 */
   reason_label: string
@@ -267,6 +267,8 @@ export interface RestartPlan {
   total: number
   planned: { bot_id: string; name: string }[]
   skipped: RestartSkip[]
+  /** 已經有一批在跑：`batch_id` 是那一批，其餘欄位是空的，進度看那一批的事件。 */
+  already_running: boolean
 }
 
 /** 前端維護：計畫 + WS 進度。 */
