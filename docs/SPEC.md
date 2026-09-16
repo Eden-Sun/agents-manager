@@ -542,9 +542,31 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
 - **使用者手開的（沒有 `AM_BOT_ID`）**：永不自動關，也不通知；只在 UI 顯示，讓人自己決定。
 - daemon 重啟後靠同一輪掃描重建 `panes`，不留記憶體狀態。
 
+#### 「最後輸出」怎麼量（AGM 2026-09-16 補充）
+herdr 的 `pane.list` 沒有輸出時間戳，**不要讀畫面內容來判斷**（讀 400 行只為了看它有沒有動，成本與誤判都高）。
+用 pane 的 `revision`（沒有就退回 `state_change_seq`）：daemon 每輪掃描與上次記下的值比對，**值變了就把 `last_output_at`
+設成這一輪的時間**；第一次看到這個 pane 時 `last_output_at = first_seen`。值本身也存進 `panes.last_revision`，
+重啟後第一輪只會重新記一次基準，不會把沒動的 pane 誤判成剛動過。
+
+#### adopt 的界線（AGM 2026-09-16 補充）
+`POST /api/panes/{id}/adopt` 只補 owner／purpose，**不是把使用者的 pane 收歸己有的工具**：
+- 正常用途：pane 有 `AM_BOT_ID` 但對不到 bot（bot 已被刪），或人明確要求指定 owner。
+- 對**使用者手開**（沒有 `AM_BOT_ID`）的 pane 做 adopt：只寫 owner／purpose 供顯示與歸類，**不會讓它變成可 GC**；
+  除非請求明確帶 `allow_gc: true`（等於人簽名說「這顆可以自動關」），並記在 `panes.gc_optin` 與 log。
+
+#### `pane_orphaned` 去重（AGM 2026-09-16 補充）
+同一個 pane 只通知一次：發出後寫 `panes.orphan_notified_at`，之後每輪掃描看到同一顆就跳過；擁有它的 bot 重新出現
+（或被 adopt 到別的 bot）就把 `orphan_notified_at` 清掉，下次真的變孤兒時才會再通知一次。
+
+#### 實作時先查現況再動手（F 步的界線）
+w168 那四個空 zsh（p61／p4W／p5Y／p64）**很可能是使用者手開的**：依上面的規則，沒有 `AM_BOT_ID` 就永不自動關，
+也不該由 bot 代為關閉。F 步要先查它們的行程樹有沒有 `AM_BOT_ID`：有才走 GC／關閉，沒有就只列在 UI 並回報使用者，
+由使用者自己決定，不要越權。
+
 #### 資料與 API（§6.5f 實作時展開）
 `panes` 表：`pane_id`、`host`、`workspace_id`、`tab_id`、`cwd`、`kind`、`owner_bot_id`、`project_id`、`purpose`、
-`foreground`（argv 摘要）、`listen_ports`、`last_output_at`、`first_seen`、`last_seen`。
+`foreground`（argv 摘要）、`listen_ports`、`last_revision`、`last_output_at`、`first_seen`、`last_seen`、
+`orphan_notified_at`、`gc_optin`。
 `GET /api/projects/{id}/panes`、`POST /api/panes/{id}/close`、`POST /api/panes/{id}/adopt`（補 owner／purpose，人工修正用）。
 listen port 只在本機算（pane 行程樹的 pid 對 `lsof -nP -iTCP -sTCP:LISTEN`）；遠端主機這一欄留空並標明「遠端不判斷」，
 不要為了它多開 ssh 往返。
