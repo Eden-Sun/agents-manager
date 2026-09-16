@@ -45,6 +45,7 @@ import { QuotaStrip } from './QuotaStrip'
 import { PrimaryStar } from './PrimaryStar'
 import { UnreadChip } from './UnreadChip'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
+import { DELIVERY_HINT_TEXT, DELIVERY_WARN_TEXT, deliveryNotice } from '../lib/deliveryNotice'
 import { markdownComponents } from '../lib/markdownComponents'
 import { TerminalTab } from './TerminalTab'
 import { ToolsHint } from './Tools'
@@ -125,8 +126,9 @@ export const Bubble = memo(function Bubble({
   // 只認開頭 `AGM …：` 或 `[AGM …]`，句中提到不算。
   const quoted = msg.role === 'user' && !msg.relay_from ? quotedFrom(msg.content) : null
   // 打字送出但沒有無損證據（SPEC §4.4a）：留一個看得到的標記讓人核對。
-  const unverified = useStore((s) =>
-    msg.role === 'user' && msg.turn_id && msg.bot_id ? s.turns[msg.bot_id]?.[msg.turn_id]?.unverified === true : false,
+  // 只有「沒有證據**而且**不會自動重送」才是使用者要看到的警示（`deliveryNotice`）。
+  const notice = useStore((s) =>
+    msg.role === 'user' && msg.turn_id && msg.bot_id ? deliveryNotice(s.turns[msg.bot_id]?.[msg.turn_id]) : 'none',
   )
   // 代發與轉述（AGM 交辦、bot 互轉）預設收合成一行（2026-09-14 使用者：「不用全顯示，收合就好」）。
   const preview = msg.role === 'user' && (msg.relay_from || quoted) ? relayPreview(msg.content) : null
@@ -155,8 +157,8 @@ export const Bubble = memo(function Bubble({
             </span>
           ) : null}
           {daemonNotice ? <span className="src-tag daemon" title="daemon 自動通知，不是使用者直接輸入">daemon 通知</span> : null}
-          {unverified ? (
-            <span className="src-tag fallback" title="已打字送出，但這個 bot 沒有可以逐字核對的紀錄（grok、遠端主機、codex 尚未回報 session），請到終端分頁確認它真的收到">
+          {notice === 'warn' ? (
+            <span className="src-tag fallback" title={DELIVERY_WARN_TEXT}>
               未驗證送達
             </span>
           ) : null}
@@ -172,8 +174,13 @@ export const Bubble = memo(function Bubble({
           ) : null}
           {fallback || msg.incomplete ? <span className="meta-warn">可能不完整</span> : null}
         </div>
+        {/* 會自動重送的那種只放 hover：有安全網，不該佔使用者的注意力（AGM 2026-09-16）。 */}
         {system ? null : (
-          <time className="msg-time" dateTime={msg.created_at} title={msg.created_at}>
+          <time
+            className="msg-time"
+            dateTime={msg.created_at}
+            title={notice === 'hint' ? `${msg.created_at}\n${DELIVERY_HINT_TEXT}` : msg.created_at}
+          >
             {timeOf(msg.created_at)}
           </time>
         )}

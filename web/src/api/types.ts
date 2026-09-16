@@ -313,9 +313,11 @@ export interface Turn {
   origin: TurnOrigin
   status: TurnStatus
   delivery: TurnDelivery
-  /** 沒有無損證據可以確認送達（grok／遠端／codex 還沒回報 session 的打字，以及 herdr `agent.prompt` 那條路）；要人工核對。
-   *  `turns.delivery_verified = 0`。這**不代表**不會自動重送——那是 `auto_resend` 的事（SPEC §4.4a）。 */
+  /** 沒有無損證據可以確認送達（grok／遠端／codex 還沒回報 session 的打字，以及 herdr `agent.prompt` 那條路）。
+   *  `turns.delivery_verified = 0`。這**不代表**不會自動重送——那是 `autoResend` 的事（SPEC §4.4a）。 */
   unverified: boolean
+  /** daemon 會不會在畫面證明它沒進去時自動重送這一則（`turns.auto_resend`）。舊 daemon 沒有這一欄 → 當作 true。 */
+  autoResend: boolean
   client_request_id: string | null
   created_at: string
   completed_at: string | null
