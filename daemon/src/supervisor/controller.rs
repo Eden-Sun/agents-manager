@@ -1500,7 +1500,11 @@ mod no_grace_period_tests {
     async fn releasing_the_window_sends_held_work_on_the_next_pass() {
         let app = app().await;
         let (lease, a) = held_window(&app, "held-1").await;
-        let input: LeaseHolderIn = serde_json::from_value(json!({"owner": "owner", "fence": lease.fence})).unwrap();
+        // release 要出示 acquire 當下那把憑證（owner／fence 是公開的，不能當證明）。
+        let input: LeaseHolderIn = serde_json::from_value(
+            json!({"owner": "owner", "fence": lease.fence, "lease_token": lease.lease_token}),
+        )
+        .unwrap();
         post_lease_release(State(app.clone()), Path("restart".into()), Json(input)).await.unwrap();
         let lifted = store::assignment(&app.db, &a.id).await.unwrap().unwrap();
         assert_eq!(lifted.status, "queued");

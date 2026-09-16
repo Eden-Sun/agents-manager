@@ -142,6 +142,7 @@ fn skip_reason(app_err: &LcError) -> (&'static str, String) {
         LcError::Bad(m) => ("bad_request", m.clone()),
         LcError::BadValue(v) => ("bad_request", v.to_string()),
         LcError::Unprocessable(v) => ("unprocessable", v.to_string()),
+        LcError::Forbidden(v) => ("forbidden", v.to_string()),
         LcError::Upstream(m) => ("upstream", m.clone()),
     }
 }

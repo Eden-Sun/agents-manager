@@ -168,8 +168,27 @@ pub async fn window_closed(app: &Arc<App>, why: &str) -> u64 {
 
 /// Release a lease and consume its approval — one yes, one window. When it was a restart
 /// window, the holds it placed are lifted at once.
-pub async fn release(app: &Arc<App>, resource: &str, owner: &str, fence: i64) -> anyhow::Result<bool> {
-    let released = store::release_lease(&app.db, resource, owner, fence).await?;
+pub async fn release(
+    app: &Arc<App>,
+    resource: &str,
+    owner: &str,
+    fence: i64,
+    proof: store::LeaseProof<'_>,
+) -> anyhow::Result<bool> {
+    // 憑證對不對在任何寫入之前決定：`release_lease` 只認 owner＋fence，而那兩個是公開欄位
+    // （`lease status` 就看得到），光憑它們等於誰都能把別人正在換 binary 的窗口收掉。
+    let stored = store::lease_token(&app.db, resource).await?;
+    if !proof.allows(stored.as_deref()) {
+        anyhow::bail!("lease_token_mismatch");
+    }
+    if stored.is_none() {
+        tracing::warn!(resource, owner, "released a lease created before lease tokens existed; no proof was possible");
+    }
+    let released = if proof.is_forced() {
+        store::force_release_lease(&app.db, resource).await?
+    } else {
+        store::release_lease(&app.db, resource, owner, fence).await?
+    };
     if released {
         if let Some(l) = store::lease(&app.db, resource).await? {
             if let Some(ap) = l.approval_id.as_deref() {
@@ -200,7 +219,7 @@ pub async fn release_restart_on_startup(app: &Arc<App>) {
                     .ok()
                     .and_then(|d| d.get("safety").and_then(|s| s.get("escalated")).and_then(Value::as_bool))
                     .unwrap_or(false);
-                match release(app, resource, &owner, l.fence).await {
+                match release(app, resource, &owner, l.fence, store::LeaseProof::Forced).await {
                     Ok(true) => {
                         tracing::info!(resource, owner, fence = l.fence, escalated, "daemon started: released the restart lease left from before the restart");
                         if escalated {
@@ -383,6 +402,7 @@ pub async fn acquire(
     };
     let escalated = safety.get("escalated") == Some(&Value::Bool(true));
     let waited = safety.get("waited_secs").and_then(|v| v.as_i64()).unwrap_or(0);
+    let lease_token = lease.lease_token.clone();
     tracing::info!(resource, owner, fence = lease.fence, escalated, waited, "maintenance lease acquired");
     if escalated {
         // 換版紀錄要看得出這次不是等到全靜止才換的（SPEC §18.10）。整份 safety 也寫在租約 meta 裡。
@@ -394,7 +414,8 @@ pub async fn acquire(
         );
     }
     app.emit("supervisor_changed", json!({"lease": lease.to_json()})).await;
-    Ok(json!({"lease": lease.to_json(), "approval": approval.to_json(), "safety": safety}))
+    // token 只在這裡出現一次：`to_json()`（`lease status`、`/api/supervisor`、事件）永遠不含它。
+    Ok(json!({"lease": lease.to_json(), "lease_token": lease_token, "approval": approval.to_json(), "safety": safety}))
 }
 
 /// The earlier of the requested deadline and the approval's own expiry.

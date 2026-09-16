@@ -458,5 +458,33 @@ check "舊 daemon 照樣派工" "已派工" "$AGM_DIR/daemon-update.log"
 check_no "舊 daemon 不寫升級紀錄" "升級後" "$AGM_DIR/assign-body.txt"
 teardown
 
+echo "----"
+# 26. 租約憑證（SPEC §18.10）：acquire 回的 lease_token 要進派工正文，交還窗口時帶著它。
+setup
+export AGM_TEST_MINUTE="0"
+export STUB_ACQUIRE='{"lease":{"fence":9,"resource":"rebuild"},"lease_token":"tok-abc123"}'
+bash "$SCRIPT"
+check "派工正文帶 lease-token" "--lease-token tok-abc123" "$AGM_DIR/assign-body.txt"
+teardown
+
+# 派工失敗要交還窗口，一樣要出示憑證。
+setup
+export AGM_TEST_MINUTE="0"
+export STUB_ACQUIRE='{"lease":{"fence":9,"resource":"rebuild"},"lease_token":"tok-abc123"}'
+export STUB_ASSIGN_FAIL=1
+bash "$SCRIPT"
+check "交還窗口帶 lease-token" "lease release rebuild --owner .* --fence 9 --lease-token tok-abc123" "$AGM_DIR/calls.log"
+teardown
+
+# 舊 daemon 沒有 lease_token：照舊不帶，不要送出空的旗標。
+setup
+export AGM_TEST_MINUTE="0"
+export STUB_ACQUIRE='{"lease":{"fence":9,"resource":"rebuild"}}'
+export STUB_ASSIGN_FAIL=1
+bash "$SCRIPT"
+check_no "舊 daemon 不帶空旗標" "--lease-token " "$AGM_DIR/calls.log"
+check "舊 daemon 照樣交還窗口" "lease release rebuild --owner" "$AGM_DIR/calls.log"
+teardown
+
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

@@ -61,6 +61,9 @@ pub enum LcError {
     /// 422: the request is well-formed and allowed, but this one can never be carried out as asked
     /// (e.g. a prompt too long to prove delivered). Machine-readable body; callers treat it as final.
     Unprocessable(Value),
+    /// 403：請求本身沒問題，但**你不是可以做這件事的人**（目前只有租約的憑證比對）。
+    /// 跟 409 分開：409 是「狀態不對，等一下再來」，403 重試一百次也一樣。
+    Forbidden(Value),
 }
 
 impl LcError {
