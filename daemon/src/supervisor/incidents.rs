@@ -149,6 +149,29 @@ impl Probed {
     }
 }
 
+/// 上一輪 sweep 跑不起來的探針，依資料目錄分開（同一個行程裡的測試各有自己的 App）。
+///
+/// 探針的 SQL 一直失敗時（例如 schema 漂移），那一類 incident 從此不開也不解；以前只記 warn，
+/// `system_health` 照樣回 healthy，UI 是綠燈——跟「量不到回 unknown」的規則相反（review 2026-09-16 c1 L5）。
+/// 只放記憶體：它描述的是「這個行程最近一次看得到什麼」，重啟後第一輪 sweep 就會重寫。
+fn blind_probes() -> &'static std::sync::Mutex<HashMap<std::path::PathBuf, Vec<&'static str>>> {
+    static BLIND: std::sync::OnceLock<std::sync::Mutex<HashMap<std::path::PathBuf, Vec<&'static str>>>> = std::sync::OnceLock::new();
+    BLIND.get_or_init(Default::default)
+}
+
+pub fn note_blind(app: &Arc<App>, failed: &[&'static str]) {
+    let mut failed = failed.to_vec();
+    failed.sort_unstable();
+    failed.dedup();
+    if let Ok(mut m) = blind_probes().lock() {
+        m.insert(app.data_dir.clone(), failed);
+    }
+}
+
+fn blind_now(app: &Arc<App>) -> Vec<&'static str> {
+    blind_probes().lock().ok().and_then(|m| m.get(&app.data_dir).cloned()).unwrap_or_default()
+}
+
 /// Read every cheap probe. No LLM, no process is killed to find out how it is doing: this runs
 /// on the 30-second health tick and may not cost more than a few queries.
 pub async fn observe(app: &Arc<App>, thresholds: &Thresholds) -> Probed {
@@ -336,6 +359,7 @@ pub async fn sweep(app: &Arc<App>, detector: &mut Detector) {
     if !probed.ok() {
         tracing::warn!(blind = ?probed.failed, "some incident probes could not run; their incidents are left as they are");
     }
+    note_blind(app, &probed.failed);
     let responder_configured = super::roles::responder_configured(&app.db).await.unwrap_or(false);
     let plan = detector.plan(
         &probed.seen,
@@ -408,10 +432,14 @@ pub async fn system_health(app: &Arc<App>) -> Value {
         }
     };
     let severity = open.iter().fold("healthy".to_string(), |acc, i| worst(&acc, &i.severity));
+    // 有探針上一輪沒跑起來：那一類故障看不到，不能說 healthy（真的故障照舊比 unknown 嚴重）。
+    let blind = blind_now(app);
+    let severity = if blind.is_empty() { severity } else { worst(&severity, "unknown") };
     json!({
         "status": severity,
         "open_incidents": open.len(),
         "incidents": open.iter().map(store::Incident::to_json).collect::<Vec<_>>(),
+        "blind_probes": blind,
     })
 }
 
@@ -561,6 +589,23 @@ mod tests {
         assert!(responder.iter().any(|e| e.kind == "watchdog_gave_up" && e.wake == Some(1)));
         let patrol = roles::due_for(&app.db, Role::Patrol, true, "2999-01-01T00:00:00Z", 1_000).await.unwrap();
         assert!(patrol.iter().all(|e| !exhausted(e) && e.kind != "watchdog_gave_up"), "不送回倒下的巡檢");
+    }
+
+    /// 探針查詢失敗：`system_health` 回 unknown 並列出是哪一類看不到；下一輪跑得起來就回 healthy。
+    /// 真的有 degraded 的 incident 時照舊是 degraded（unknown 不蓋過真的故障）。
+    #[tokio::test]
+    async fn a_probe_that_cannot_run_makes_the_system_half_unknown_not_healthy() {
+        let app = super::super::bot_requests::flow_tests::app().await;
+        assert_eq!(system_health(&app).await["status"], "healthy");
+        note_blind(&app, &["bot_stopped", "bot_stopped"]);
+        let h = system_health(&app).await;
+        assert_eq!(h["status"], "unknown", "{h}");
+        assert_eq!(h["blind_probes"], json!(["bot_stopped"]));
+        store::open_incident(&app.db, "host_disconnected", "mac2", "degraded", &json!({})).await.unwrap();
+        assert_eq!(system_health(&app).await["status"], "degraded");
+        note_blind(&app, &[]);
+        let h = system_health(&app).await;
+        assert_eq!((h["status"].as_str(), h["blind_probes"].as_array().map(Vec::len)), (Some("degraded"), Some(0)));
     }
 
     #[test]
