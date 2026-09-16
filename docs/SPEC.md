@@ -102,13 +102,18 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   認法（`tui_prompts::update_notice`）：兩段字都要中，**且只看最下面 6 行非空白**（正文引用這兩句時會誤中）。存在 run 上：重啟（套用更新本身）後的新 run 本來就沒有。
   畫面上讀不到那句時退到版本比對：statusLine 的 `version`（process 在跑的）對 `claude --version`（磁碟上的），磁碟較新才算；磁碟版本每台主機快取 5 分鐘。
 - **Herdr 自己的版本**（`herdr_updates`，與上一條無關：那條追 agent CLI，這條追我們賴以管 pane 的 herdr）：啟動查一次、之後每 6 小時抓官方
-  `https://herdr.dev/latest.json`（來源寫死、body 上限 2 MiB、timeout 20 秒、不執行抓回來的內容）。每台主機分開記三件事——跑著的 herdr server
-  （`ping` 的 `version`/`protocol`）、磁碟上的 `herdr --version`、官方最新 stable；**任一個未知就是未知，不得顯示「已是最新」**。
+  `https://herdr.dev/latest.json`（來源寫死、body 上限 2 MiB、timeout 20 秒、不執行抓回來的內容；手動與排程共用 60 秒最小間隔，併發只打一次）。
+  每台主機分開記三件事——跑著的 herdr server（`ping` 的 `version`/`protocol`）、磁碟上的 `herdr --version`、官方最新 stable；
+  **任一個未知就是未知，不得顯示「已是最新」**。磁碟那邊用這個模組自己的版本解析：`herdr 0.8.2` 的版本不在第一個 token，
+  `changelog::version_string`（claude 的 `2.1.5 (Claude Code)`）吃不下，所以 `changelog::version_line` 只回原始那一行，各家自己解析。
   抓失敗只寫 `checked_at`/`error`，舊快取與 release notes 都留著；離線主機保留上次讀到的值並標示，不拿本機版本冒充。
-  磁碟比 server 新 = 新版已裝好、換 server 才生效（`restart_pending`）。
-  有**已知落後**的主機時推一筆 `herdr_update_available` 進 `supervisor_inbox`（`event_key = herdr_update:<version>`），走既有巡檢路由與 notify 節流；
+  **過期的讀數不得發綠燈**：讀數不是剛確認過的（離線、探測失敗、整列超過 13 小時沒巡過），或官方最新版自己過期時，`standing` 一律 `unknown`，
+  歷史值另放 `cached_standing`。主機清單以設定檔為準，DB 只是快取：移除的主機不再投影，新加的以未知出現。
+  磁碟比 server 新 = 新版已裝好、換 server 才生效（`restart_pending`，兩邊都要是新鮮讀數）。
+  有**已知落後**（新鮮且落後）的主機時推一筆 `herdr_update_available` 進 `supervisor_inbox`（`event_key = herdr_update:<version>`），走既有巡檢路由與 notify 節流；
   該表的唯一索引就是去重標記，所以一個 release 最多一筆合併事件，重啟或一台主機多個 pane 都不會重複叫醒，寫失敗則下一輪重試。沒有更新就不叫醒模型，輪詢不用 LLM。
-  **只追蹤與通知**：沒有下載、`herdr update` 或 `server stop/restart`——0.8→0.9 這種跨 protocol 升級要停 server、會殺掉正在跑的 pane，交給 AGM 走既有運維流程。API 見 `docs/API.md`。
+  **只追蹤與通知**：沒有下載、`herdr update` 或 `server stop/restart`。升級可能影響正在跑的 pane——0.9 起 client 更新可以不動相容的 server 與它底下的 pane，
+  endpoint generation 比 1 舊的 server 需要一次性升級，那次才會動到 pane；是哪一種交給 AGM 看版本相容性決定並安排時間窗。API 見 `docs/API.md`。
 
 ### 3.2 前端
 
