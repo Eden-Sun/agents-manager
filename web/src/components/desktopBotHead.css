@@ -67,8 +67,9 @@
   pointer-events: none;
 }
 
-.quota-hp.focused + .quota-hp::before,
-.quota-hp + .quota-hp.focused::before {
+/* 紅框自己有邊，隔壁再畫分隔線會疊成雙線。 */
+.quota-hp.quota-blocked + .quota-hp::before,
+.quota-hp + .quota-hp.quota-blocked::before {
   display: none;
 }
 

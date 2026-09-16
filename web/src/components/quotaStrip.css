@@ -119,18 +119,19 @@
   border-left-color: var(--border);
 }
 
-/* 目前那格：淡底，不畫整圈 accent 外框。桌機已有 bar＋數字，再加藍框會變成另一張卡片
-   （2026-09-16 實拍 grok）；手機強調靠上下邊框量表（`.quota-framed`）。 */
+/* 目前那格桌機不做成第二張卡片：旁邊若有 limit_hit 紅框，淡底圓角會互打（2026-09-16）。
+   選取只加重名字；手機仍用 `.quota-framed` 的上下邊框量表。 */
 
 .quota-hp.focused {
   border-color: transparent;
-  background: var(--accent-soft);
+  background: transparent;
 }
 
 /* 上邊 5H、下邊 7D 表示剩餘量。2026-09-11 起**只有手機**掛 `.quota-framed`（桌機已有 bar 與數字，重畫是重複）。 */
 
 .quota-hp.focused.quota-framed {
   position: relative;
+  background: var(--accent-soft);
   box-shadow: none;
 }
 
@@ -243,7 +244,7 @@
 }
 
 .quota-hp.focused .quota-identity {
-  color: var(--text-dim);
+  color: var(--text);
 }
 
 .quota-bars {
