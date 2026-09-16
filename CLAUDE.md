@@ -65,5 +65,10 @@ nohup ./target/release/agents-managerd serve >> ~/.config/agents-manager/daemon.
 - `done` 才有答案；`pending/running/waiting_quota` 用 `status <id>` 查原單。`unknown` 要對帳／`collect`，不可換 request ID 重送。不要各自直接操作瀏覽器。
 - 不貼 token／密碼／客戶資料；任何 bot（含 AGM/browser-gc）都不可關「ChatGPT 決策顧問」task space 與分頁或刪登錄資料。啟用與舊對話綁定見 `docs/CHATGPT-CONSULT.md`。
 
+## 給使用者的檔案：outbox，不是 scratchpad（使用者 2026-09-16）
+- scratchpad 只放中間產物，不再當成給使用者的輸出目錄。
+- 要交給使用者的檔案放 outbox：`~/.config/agents-manager/outbox/<AM_BOT_ID>/`（自己 `mkdir -p`；daemon 之後會注入 `$AM_OUTBOX` 指到同一處）。只保留 1 小時，AGM 每 10 分鐘清掉超過 1 小時的檔；要長期保留的放 repo 或 `reports/`。
+- 私鑰、憑證、DB（含 DB 複本、瀏覽器 profile 這類會帶 cookie／token 的目錄）一律不得放 scratchpad 或 outbox；headless 瀏覽器的 `--user-data-dir` 用完就刪。
+
 ## 回報格式
 三到五行：做了什麼（commit hash）、怎麼驗的（數字）、要派工者做的事（例如重啟 daemon）、沒做到的與原因。不要貼整段 diff。
