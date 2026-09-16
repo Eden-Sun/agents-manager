@@ -3,6 +3,7 @@ import { MOCK_MODE } from './api'
 import { useDialogFocus } from './hooks/useDialogFocus'
 import { useViewportPin } from './hooks/useViewportPin'
 import { DRAWER_QUERY, useMediaQuery } from './hooks/useMediaQuery'
+import { useProjectJumpKeys } from './hooks/useProjectJumpKeys'
 import { ChatPanel } from './components/ChatPanel'
 import { GroupChatPanel } from './components/GroupChatPanel'
 import { HostShellPanel } from './components/HostShellPanel'
@@ -158,6 +159,7 @@ export default function App() {
   }, [bootstrap])
 
   useBotSwitchKeys()
+  useProjectJumpKeys()
   useUnread()
   // 抽屜借一格歷史：開著時按上一頁是關抽屜，不是離開這個畫面。
   useDrawerRoute(drawerOpen, () => setDrawer(false))
