@@ -897,6 +897,7 @@ label = "foo@m4p"
    `<local.sock>`、`<ctl>` 放短路徑 `/tmp/agents-manager-<uid>/<host>.sock|.ctl`（macOS AF_UNIX 上限 104 bytes）。
 3. `HerdrClient::new(<local.sock>)` 取得與本機相同的 client，`ping` 成功 → `connected`。
 4. 每 10 秒 `ping`；失敗或 master 退出 → `disconnected`、指數退避（1s→30s）重建 → 成功後對該 host 對帳並重建事件訂閱。
+   autostart（§6.1 第 6 步）只在這台**第一次**對帳成功後跑一次；之後的重連不再跑，使用者停掉的 bot 不會被重開。
 5. daemon 退出時 `ssh -O exit`；遠端 herdr 與 agent 保持存活。
 6. `App.hosts: HashMap<String, HostConn>`，`"local"` 為本機；一律 `app.herdr_for(project.host)`；pane watcher、fallback timer 以 `(host, pane_id)` 為鍵；對帳與全域訂閱逐 host。
 
