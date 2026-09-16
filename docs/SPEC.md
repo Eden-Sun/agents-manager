@@ -365,11 +365,18 @@ marker 列與框的邊之間多出任何一列（含空白列）、marker 後多
 排超過 `[supervisor] assignment_queue_wait_secs`（預設 1800 秒）還沒送出，controller 把交辦停在 `blocked` 並推一則通知；
 daemon 重啟時把所有 `queued` turn（含沒有 `next_flush_at` 的）重新掛上 flush，不留孤兒。送出時機與證據記錄完全沿用下面這套。
 
-**交辦不要了，排著的也撤掉**（AGM 2026-09-16）：交辦變成 `cancelled`／`superseded`／`failed` 時，它名下還是 `queued` 的 turn
+**交辦不要了，排著的也撤掉**（AGM 2026-09-16）：交辦變成 `cancelled`／`superseded`／`failed`，或被排隊保險絲停在 `blocked` 時，它名下還是 `queued` 的 turn
 一併標成 `failed`（`delivery='failed'`、清掉 `next_flush_at`），插一則 system 訊息寫明哪張交辦、怎麼決定、理由，
 這個對話的 queued 名額立刻釋放。**已經 `in_flight` 或送出的不動**——撤不回來的不假裝撤回。兩道：review API 決定 commit 之後馬上撤
 （回應帶 `revoked_turn_id`）；`flush` 送出前也再查一次掛的交辦，已經不要了就撤、不送——繞過 API 改狀態、或 commit 之後還沒撤就重啟，
 都不能讓一則已取消的指令（實例：「請釋放 fence 21」`01M2MRM42CNZ1QZT5QZ8Z2ASFD` 在取消後 10:27 照樣送出）在錯的時機送到。
+保險絲（`assignment_queue_wait_secs`）把交辦停在 `blocked` 時同樣當場撤（inbox payload 帶 `revoked_turn`）：blocked 的交辦不在執行中，
+留著的那筆之後照送、結果沒地方收，AGM 以為沒送出又重派。
+
+**沒有 run 的 queued 一律收掉**：排隊只會發生在「有 running run、正在回合中」的時候，所以 bot 被 stop、或 run 結束
+（`mark_run_exited`：pane 不見、agent 退出）時，它排著的 queued 沒有人會送——當場撤銷（標 `failed`＋system 訊息），
+掛著的交辦照一般流程收到 `failed` 的回合結束，AGM 看得到。還有活著的 run（例如重啟時新的已經起來）就不動。
+定時掃描（每 60 秒，§4.3b 那一支）也收一次「run 早就不在的 queued」，包含這條規則上線前就留下來的。
 
 **排隊中的 prompt 重試**：
 可重試原因（框忙、transcript 還沒回報…）放回 `queued`，退避 15 秒起每次加倍、上限 5 分鐘；次數與
@@ -1365,7 +1372,7 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
   - **誰等太久就放寬誰**（AGM 裁示 2026-09-16）：`acquire` 只看**當下這筆核准自己**等了多久，別人放著沒用掉的核准不算數——否則一張被遺忘的核准等於把所有人的窗口都打開。
     唯讀的 `safety` 帶 `?approval=<id>`（CLI `agm lease safety --approval <id>`）時同樣只看那一筆；不帶（純查詢，還不知道會用哪一筆）才退回看最早那筆還活著的核准。回傳的 `escalation_approval_id` 就是這次計時用的那一筆。
     認不得、已消耗、被撤、過期或還沒決定的核准一律不計時（＝不放寬）。
-  - **仍然擋**：送達臨界區（`turns.status='queued'`，或 `status='in_flight'` 且 `delivery='pending'`——daemon 正在往 pane 打字／送出）、**別人**還握著的租約、讀不到狀態的 bot（`unreadable`）。
+  - **仍然擋**：送達臨界區（`turns.status='queued'` **且那顆 bot 還有活著的 run**——沒有 run 的 queued 沒有人會送，是遺留的，會被撤銷（§4.4a），算進來的話永遠 unsafe；或 `status='in_flight'` 且 `delivery='pending'`——daemon 正在往 pane 打字／送出）、**別人**還握著的租約、讀不到狀態的 bot（`unreadable`）。
   - **自己的租約不擋自己**（AGM 2026-09-16，58d3587 的規格漏洞）：跟這次 acquire **同一個 owner** 握著的租約不算擋。標準換版是同一人先拿 rebuild、build 完再拿 restart；把自己手上的 rebuild 也算成「別人握著窗口」，restart 就會被卡到 rebuild 自己到期為止（09:26Z 實測：k8bw2f 握 rebuild fence 21，restart 的 safety 列出來的就是它自己）。別人的照擋，「窗口一次只給一個人」的語意不變。唯讀 safety 帶 `owner` 時套同一條規則，不帶就維持舊行為（每一把都算擋）；`held_leases` 每一筆都帶 `owner` 與 `own`。全靜止模式本來就不看租約，不受影響。
   - **不再擋**：bot 只是在 `working`／思考（已送達的 `in_flight`）。`blocked` 照舊只回報不擋。`delivery='unknown'` 是停在那裡等人處理的狀態，不算臨界區。
   - AGM 三顆（巡檢、協調者、建置 child）照舊由呼叫端排除，門檻高低都一樣。

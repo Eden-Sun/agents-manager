@@ -246,16 +246,18 @@ async fn defer_queued_turn(
     Ok(Some(delay))
 }
 
-/// 這筆 queued turn 掛的交辦已經不要了（cancelled／superseded／failed）→ 寫進對話的撤銷理由；還要、或沒掛交辦 → `None`。
+/// 這筆 queued turn 掛的交辦已經不要了（cancelled／superseded／failed，或被保險絲停在 blocked）→ 寫進對話的撤銷理由；
+/// 還要、或沒掛交辦 → `None`。blocked 的交辦不在執行中，就算送出去，結果也沒有地方收（AGM 會以為沒送出而重派）。
 pub(crate) async fn withdrawn_assignment_reason(app: &Arc<App>, turn_id: &str) -> Option<String> {
     let a = crate::supervisor::store::assignment_by_turn(&app.db, turn_id).await.ok()??;
-    let what = match a.status.as_str() {
-        "cancelled" => "已取消",
-        "superseded" => "已被後續交辦取代",
-        "failed" => "已判定失敗",
+    let (what, detail) = match a.status.as_str() {
+        "cancelled" => ("已取消", a.review_reason.as_deref()),
+        "superseded" => ("已被後續交辦取代", a.review_reason.as_deref()),
+        "failed" => ("已判定失敗", a.review_reason.as_deref()),
+        "blocked" => ("已停在 blocked", a.error.as_deref()),
         _ => return None,
     };
-    let why = a.review_reason.as_deref().map(str::trim).filter(|r| !r.is_empty()).map(|r| format!("（{r}）")).unwrap_or_default();
+    let why = detail.map(str::trim).filter(|r| !r.is_empty()).map(|r| format!("（{r}）")).unwrap_or_default();
     Some(format!("排隊中的這則沒有送出：交辦 {} {what}{why}，一併撤銷，不會再送。", a.id))
 }
 
@@ -285,6 +287,51 @@ pub(crate) async fn revoke_queued_turn(app: &Arc<App>, turn_id: &str, why: &str)
     emit_message_added(app, &bot_id, message).await;
     emit_turn(app, turn_id).await;
     Ok(true)
+}
+
+/// 這顆 bot 已經沒有活著的 run：它排著的 queued turn 沒有人會送，收掉（AGM 2026-09-16）。
+///
+/// 排隊只會發生在「有 running run、正在回合中」的時候（`prompt_inner`），所以沒有 run 的 queued 一定是遺留的；
+/// 留著的話會一直佔 queued 名額，還讓 restart safety 的 `delivery_critical` 永遠判成臨界區。
+/// 還有活著的 run（例如重啟時新的已經起來）就不動——flush 會送。回傳撤掉的 turn id。
+pub(crate) async fn revoke_orphaned_queued_turns(app: &Arc<App>, bot_id: &str, why: &str) -> Vec<String> {
+    if !matches!(db::active_run(&app.db, bot_id).await, Ok(None)) {
+        return Vec::new();
+    }
+    let ids: Vec<String> = sqlx::query_scalar(
+        "SELECT t.id FROM turns t JOIN conversations c ON c.id = t.conversation_id WHERE c.bot_id = ? AND t.status = 'queued'",
+    )
+    .bind(bot_id)
+    .fetch_all(&app.db)
+    .await
+    .unwrap_or_default();
+    let mut revoked = Vec::new();
+    for id in ids {
+        let text = format!("排隊中的這則沒有送出：{why}，這顆 bot 已經沒有在跑，一併撤銷，不會再送。");
+        match revoke_queued_turn(app, &id, &text).await {
+            Ok(true) => revoked.push(id),
+            Ok(false) => {}
+            Err(e) => tracing::error!(bot = %bot_id, turn = %id, error = %e, "could not revoke an orphaned queued prompt"),
+        }
+    }
+    revoked
+}
+
+/// 全部 bot 掃一次遺留的 queued turn（定時掃描用；也收掉這個版本上線前就留下來的）。
+pub(crate) async fn revoke_all_orphaned_queued_turns(app: &Arc<App>) -> Vec<String> {
+    let bots: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT c.bot_id FROM turns t JOIN conversations c ON c.id = t.conversation_id
+          WHERE t.status = 'queued'
+            AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.bot_id = c.bot_id AND r.state IN ('starting','running','stopping'))",
+    )
+    .fetch_all(&app.db)
+    .await
+    .unwrap_or_default();
+    let mut revoked = Vec::new();
+    for bot in bots {
+        revoked.extend(revoke_orphaned_queued_turns(app, &bot, "它的 run 已經結束").await);
+    }
+    revoked
 }
 
 /// Fail a claimed turn together with the system message that explains it.
@@ -445,6 +492,7 @@ pub async fn mark_run_exited(app: &Arc<App>, run_id: &str, reason: &str) {
         .execute(&app.db)
         .await;
     fail_in_flight(app, run_id, &format!("run ended: {reason}")).await;
+    revoke_orphaned_queued_turns(app, &run.bot_id, &format!("run 已結束（{reason}）")).await;
     if let Some(p) = run.pane_id.as_deref() {
         let host = db::bot_host(&app.db, &run.bot_id).await.unwrap_or_else(|_| LOCAL_HOST.to_string());
         if let Some(session) = app.session_for_run(&run).await {
@@ -646,7 +694,7 @@ mod flush_queue_tests {
     /// 繞過 API 改成 superseded／failed（或決定 commit 之後還沒撤就重啟）：flush 送出前也會撤掉，不送。
     #[tokio::test]
     async fn the_flush_never_sends_a_prompt_whose_assignment_was_withdrawn() {
-        for status in ["superseded", "failed", "cancelled"] {
+        for status in ["superseded", "failed", "cancelled", "blocked"] {
             let f = queued("test").await;
             let app = f.env.app.clone();
             f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
@@ -663,6 +711,55 @@ mod flush_queue_tests {
         queued_assignment(&f).await;
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
         assert_eq!(turn(&app, &f.turn_id).await.status, "in_flight");
+    }
+
+    /// run 結束（pane 不見、agent 退出）：它排著的 queued 收掉、名額釋放，交辦照一般流程變成失敗讓 AGM 看得到。
+    #[tokio::test]
+    async fn a_run_that_ends_takes_its_queued_prompt_with_it() {
+        let f = queued("test").await;
+        let app = f.env.app.clone();
+        let a = queued_assignment(&f).await;
+        let mut events = app.subscribe_turns();
+        mark_run_exited(&app, &f.run_id, "pane exited").await;
+        let t = turn(&app, &f.turn_id).await;
+        assert_eq!((t.status.as_str(), t.delivery.as_str()), ("failed", "failed"));
+        let why: String = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id = ? AND role = 'system'")
+            .bind(&f.turn_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert!(why.contains("pane exited") && why.contains("沒有在跑"), "{why}");
+        let ev = events.try_recv().expect("撤銷有推 turn 事件，交辦才會結案");
+        assert_eq!((ev.turn_id.as_str(), ev.status.as_str()), (f.turn_id.as_str(), "failed"));
+        crate::supervisor::controller::reconcile(&app).await;
+        let row = crate::supervisor::store::assignment(&app.db, &a).await.unwrap().unwrap();
+        assert_ne!(row.status, "delivered", "不留在 delivered 假裝還在路上");
+    }
+
+    /// bot 被停掉：同樣收掉。
+    #[tokio::test]
+    async fn stopping_a_bot_revokes_its_queued_prompt() {
+        let f = queued("test").await;
+        let app = f.env.app.clone();
+        stop_bot(&app, &f.bot_id).await.unwrap();
+        assert_eq!(turn(&app, &f.turn_id).await.status, "failed");
+        assert!(db::active_run(&app.db, &f.bot_id).await.unwrap().is_none());
+    }
+
+    /// 還有活著的 run 就不動（flush 會送）；定時掃描收掉 run 早就不在的遺留（含上線前留下來的）。
+    #[tokio::test]
+    async fn only_a_queued_prompt_with_no_live_run_is_an_orphan() {
+        let f = queued("test").await;
+        let app = f.env.app.clone();
+        assert!(revoke_orphaned_queued_turns(&app, &f.bot_id, "測試").await.is_empty(), "run 還在");
+        assert!(revoke_all_orphaned_queued_turns(&app).await.is_empty());
+        assert_eq!(turn(&app, &f.turn_id).await.status, "queued");
+
+        // 模擬舊版本：run 已經結束，但當時沒有撤銷。
+        sqlx::query("UPDATE runs SET state = 'exited', ended_at = ? WHERE id = ?").bind(db::now()).bind(&f.run_id).execute(&app.db).await.unwrap();
+        assert_eq!(revoke_all_orphaned_queued_turns(&app).await, vec![f.turn_id.clone()]);
+        assert_eq!(turn(&app, &f.turn_id).await.status, "failed");
+        assert!(revoke_all_orphaned_queued_turns(&app).await.is_empty(), "撤過的不再撤");
     }
 
     /// 框裡有字時排隊的 prompt 一個字都不打、放回隊列；框清空後再 flush 就送出去（第七輪 #2）。

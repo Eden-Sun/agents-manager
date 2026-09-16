@@ -123,8 +123,12 @@ async fn held_leases(app: &Arc<App>, owner: Option<&str>) -> Result<Vec<Value>, 
 /// `delivery='unknown'` 不算：那是送完但驗不到、停在那裡等人處理的狀態，跟 `blocked` 一樣可以等很久。
 async fn delivery_critical(pool: &sqlx::SqlitePool, bot_id: &str) -> anyhow::Result<Option<String>> {
     Ok(sqlx::query_scalar::<_, String>(
+        // queued 只在這顆 bot 還有活著的 run 時才算：沒有 run 就沒有人會送它，是遺留下來的（會被撤銷），
+        // 算進來的話 restart safety 永遠判成臨界區，縮小封鎖面之後也 unsafe（AGM 2026-09-16）。
         "SELECT t.id FROM turns t JOIN conversations c ON c.id = t.conversation_id
-          WHERE c.bot_id = ? AND (t.status='queued' OR (t.status='in_flight' AND t.delivery='pending'))
+          WHERE c.bot_id = ?
+            AND ((t.status='queued' AND EXISTS (SELECT 1 FROM runs r WHERE r.bot_id = c.bot_id AND r.state IN ('starting','running','stopping')))
+                 OR (t.status='in_flight' AND t.delivery='pending'))
           LIMIT 1",
     )
     .bind(bot_id)
@@ -473,6 +477,35 @@ mod tests {
         for bad in ["0", "-5", "abc", "", "30m"] {
             assert_eq!(parse_escalate_mins(Some(bad)), 30, "{bad:?} 不該被當成門檻");
         }
+    }
+
+    /// 排著的 queued 只有在 bot 還有活著的 run 時才算送達臨界區；run 沒了的遺留那筆不擋。
+    #[tokio::test]
+    async fn a_queued_turn_without_a_live_run_is_not_a_delivery_in_progress() {
+        let e = crate::testing::env().await;
+        let app = &e.app;
+        let now = crate::db::now();
+        sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('q',?,'q','claude','tok-q',?)")
+            .bind(&e.project_id).bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO conversations (id,bot_id,created_at) VALUES ('cq','q',?)").bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,started_at) VALUES ('rq','q','running','working',?)")
+            .bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO turns (id,conversation_id,origin,status,delivery,prompt_text,created_at) VALUES ('tq','cq','web','queued','pending','x',?)")
+            .bind(&now).execute(&app.db).await.unwrap();
+        assert_eq!(delivery_critical(&app.db, "q").await.unwrap().as_deref(), Some("tq"), "還有 run：真的在等送出");
+
+        sqlx::query("UPDATE runs SET state='stopped', ended_at=? WHERE id='rq'").bind(&now).execute(&app.db).await.unwrap();
+        assert_eq!(delivery_critical(&app.db, "q").await.unwrap(), None, "run 沒了：遺留的那筆不擋");
+        let s = safety(app, &[]).await.unwrap();
+        assert!(s["delivering"].as_array().unwrap().is_empty(), "{s}");
+
+        // in_flight＋pending（打字中）照舊算，不因為這條放寬。（遺留那筆先照 stop 的流程撤掉。）
+        sqlx::query("UPDATE turns SET status='failed', delivery='failed' WHERE id='tq'").execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,started_at) VALUES ('rq2','q','running','idle',?)")
+            .bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,delivery,created_at) VALUES ('tp','cq','rq2','web','in_flight','pending',?)")
+            .bind(&now).execute(&app.db).await.unwrap();
+        assert_eq!(delivery_critical(&app.db, "q").await.unwrap().as_deref(), Some("tp"));
     }
 
     /// 一顆有 active run、正在 working、而且該筆 turn 已經送達的 bot：思考中的樣子。

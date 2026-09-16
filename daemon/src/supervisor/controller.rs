@@ -703,7 +703,15 @@ async fn block_stale_queues(app: &Arc<App>) {
         match store::block_stale_queue(&app.db, &a.id, &why).await {
             Ok(true) => {
                 tracing::warn!(assignment = %a.id, bot = %a.target_bot_id, waited_s = waited, "排隊太久，交辦停在 blocked");
-                let payload = json!({"bot_id": a.target_bot_id, "turn_id": turn_id, "waited_s": waited, "error": why, "needs_review": true});
+                // 排著的那筆一併撤掉：留著的話之後照送、結果沒地方收，AGM 以為沒送出又重派（AGM 2026-09-16）。
+                let revoked = match crate::lifecycle::withdrawn_assignment_reason(app, &turn_id).await {
+                    Some(text) => crate::lifecycle::revoke_queued_turn(app, &turn_id, &text).await.unwrap_or_else(|e| {
+                        tracing::error!(assignment = %a.id, turn = %turn_id, error = %e, "could not revoke a blocked assignment's queued turn");
+                        false
+                    }),
+                    None => false,
+                };
+                let payload = json!({"bot_id": a.target_bot_id, "turn_id": turn_id, "waited_s": waited, "error": why, "needs_review": true, "revoked_turn": revoked});
                 let key = format!("queue_blocked:{}:{}", a.id, turn_id);
                 let _ = store::push_inbox(&app.db, &key, "assignment_failed", Some(&a.id), Some(&a.target_bot_id), Some(&turn_id), &payload).await;
                 app.emit("supervisor_changed", json!({"assignment_id": a.id, "status": "blocked"})).await;
@@ -1883,7 +1891,27 @@ mod queue_dispatch_tests {
         block_stale_queues(&app).await;
         let a = store::assignment(&app.db, &fresh.id).await.unwrap().unwrap();
         assert_eq!(a.status, "blocked");
-        assert!(a.error.unwrap_or_default().contains("排進佇列"), "理由要說得出是排隊排不出去");
+        assert!(a.error.clone().unwrap_or_default().contains("排進佇列"), "理由要說得出是排隊排不出去");
+        // 排著的那筆一併撤掉：不會之後照送、結果掉地上；名額也釋放了。
+        let turn_id = a.turn_id.clone().unwrap();
+        let (status, delivery): (String, String) = sqlx::query_as("SELECT status, delivery FROM turns WHERE id=?")
+            .bind(&turn_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!((status.as_str(), delivery.as_str()), ("failed", "failed"));
+        let why: String = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='system'")
+            .bind(&turn_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert!(why.contains("blocked") && why.contains("排進佇列"), "{why}");
+        let payload: String = sqlx::query_scalar("SELECT payload_json FROM supervisor_inbox WHERE assignment_id=?")
+            .bind(&a.id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert!(payload.contains("\"revoked_turn\":true"), "{payload}");
         let events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE assignment_id=?")
             .bind(&a.id)
             .fetch_one(&app.db)
