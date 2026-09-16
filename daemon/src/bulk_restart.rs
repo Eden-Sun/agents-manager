@@ -227,15 +227,16 @@ async fn run_batch(
         let index = i + 1;
         // 計畫是按下去那一刻的快照，一顆 `stop_bot` 最久十秒，排在後面的要等上一兩分鐘；這段時間裡 AGM 派了工、
         // 使用者打了字，它就在回合中了。硬重啟會把回合連同 in-flight turn 一起砍掉（review 2026-09-16）。
+        let skip_now = |why: Skip| {
+            let row = json!({"bot_id": bot_id, "name": name, "reason": why.code(), "reason_label": why.label()});
+            let ev = json!({"batch_id": batch_id, "index": index, "total": total, "bot_id": bot_id, "name": name,
+                            "status": "skipped", "reason": why.code(), "reason_label": why.label()});
+            (row, ev)
+        };
         if let Some(why) = recheck(app, &bot_id).await {
             tracing::info!(bot = %name, reason = why.code(), "skipped at restart time: its state changed after the plan");
-            let row = json!({"bot_id": bot_id, "name": name, "reason": why.code(), "reason_label": why.label()});
-            app.emit(
-                "bots_restart_progress",
-                json!({"batch_id": batch_id, "index": index, "total": total, "bot_id": bot_id, "name": name,
-                       "status": "skipped", "reason": why.code(), "reason_label": why.label()}),
-            )
-            .await;
+            let (row, ev) = skip_now(why);
+            app.emit("bots_restart_progress", ev).await;
             skipped.push(row);
             continue;
         }
@@ -247,7 +248,15 @@ async fn run_batch(
         .await;
         let res = restart_resuming(app, &bot_id).await;
         match res {
-            Ok(run_id) => {
+            // recheck 之後、拿到 bot 鎖之前它忙起來了：跟上面一樣是跳過，不是失敗——不推 bot_restart_failed、
+            // 也不做失敗收尾（它的 run 沒被動過）。
+            Restarted::Busy(why) => {
+                tracing::info!(bot = %name, reason = why.code(), "skipped under the bot lock: it got busy after the recheck");
+                let (row, ev) = skip_now(why);
+                app.emit("bots_restart_progress", ev).await;
+                skipped.push(row);
+            }
+            Restarted::Ok(run_id) => {
                 tracing::info!(bot = %name, run = %run_id, "restarted for the claude update (resumed)");
                 ok.push(json!({"bot_id": bot_id, "name": name, "run_id": run_id}));
                 app.emit(
@@ -257,7 +266,7 @@ async fn run_batch(
                 )
                 .await;
             }
-            Err(e) => {
+            Restarted::Failed(e) => {
                 let msg = format!("{e:#}");
                 tracing::warn!(bot = %name, error = %msg, "restart for the claude update failed");
                 settle_failed_restart(app, &bot_id).await;
@@ -293,13 +302,43 @@ async fn run_batch(
     .await;
 }
 
-async fn restart_resuming(app: &Arc<App>, bot_id: &str) -> anyhow::Result<String> {
+/// 重啟的結果分三種：鎖內再判一次發現它忙起來了（34d24f0 的 409 `not_idle`）不是失敗，是跳過。
+enum Restarted {
+    Ok(String),
+    Busy(Skip),
+    Failed(anyhow::Error),
+}
+
+async fn restart_resuming(app: &Arc<App>, bot_id: &str) -> Restarted {
     // 子 agent 的 pane 是父 agent 開的：關掉再開等於搬家，所以原地重啟。
-    if db::bot(&app.db, bot_id).await.ok().flatten().is_some_and(|b| b.managed_by == "child") {
-        return lifecycle::restart_child_in_pane_with(app, bot_id, true).await.map_err(why);
+    let res = if db::bot(&app.db, bot_id).await.ok().flatten().is_some_and(|b| b.managed_by == "child") {
+        lifecycle::restart_child_in_pane_with(app, bot_id, true).await
+    } else {
+        // One lock hold for both halves — closes the 2026-09-10 23:02 race (see `restart_bot_with`).
+        lifecycle::restart_bot_with(app, bot_id, StartOpts { resume_native: true, require_idle: true, ..Default::default() }).await
+    };
+    match res {
+        Ok(run_id) => Restarted::Ok(run_id),
+        Err(e) => match busy_skip(&e) {
+            Some(skip) => Restarted::Busy(skip),
+            None => Restarted::Failed(why(e)),
+        },
     }
-    // One lock hold for both halves — closes the 2026-09-10 23:02 race (see `restart_bot_with`).
-    lifecycle::restart_bot_with(app, bot_id, StartOpts { resume_native: true, require_idle: true, ..Default::default() }).await.map_err(why)
+}
+
+/// 鎖內那一次閒置判斷擋下來的（409 `not_idle`），照 `busy` 對回跳過的理由。其他錯誤不是「忙」。
+fn busy_skip(e: &LcError) -> Option<Skip> {
+    let LcError::Conflict(v) = e else { return None };
+    if v.get("reason").and_then(|x| x.as_str()) != Some("not_idle") {
+        return None;
+    }
+    Some(match v.get("busy").and_then(|x| x.as_str()).unwrap_or_default() {
+        "working" => Skip::Working,
+        "blocked" => Skip::Blocked,
+        "turn_in_flight" => Skip::TurnInFlight,
+        "not_running" => Skip::NotRunning,
+        _ => Skip::UnknownStatus,
+    })
 }
 
 /// Read straight off the row: `get_or_init` would create a supervisor the user never asked for.
@@ -568,6 +607,21 @@ mod tests {
         assert_eq!(recheck(&app, &bot.id).await, Some(Skip::Working));
         sqlx::query("UPDATE runs SET update_notice=NULL, agent_status='idle' WHERE bot_id=?").bind(&bot.id).execute(&app.db).await.unwrap();
         assert_eq!(recheck(&app, &bot.id).await, Some(Skip::NoLongerPending));
+    }
+
+    /// 34d24f0 讓 restart 在 bot 鎖內再判一次閒置、不閒置回 409 `not_idle`。那是「輪到它時忙起來了」，
+    /// 要記成跳過（理由照 `busy`），不能落到 `failed`、推 `bot_restart_failed` 去叫醒人。
+    #[test]
+    fn a_not_idle_refusal_under_the_lock_is_a_skip_not_a_failure() {
+        let conflict = |busy: &str| LcError::conflict("not_idle", json!({"bot_id": "b", "busy": busy}));
+        assert_eq!(busy_skip(&conflict("working")), Some(Skip::Working));
+        assert_eq!(busy_skip(&conflict("blocked")), Some(Skip::Blocked));
+        assert_eq!(busy_skip(&conflict("turn_in_flight")), Some(Skip::TurnInFlight));
+        assert_eq!(busy_skip(&conflict("not_running")), Some(Skip::NotRunning));
+        assert_eq!(busy_skip(&conflict("???")), Some(Skip::UnknownStatus));
+        // 其他 409 與其他錯誤照舊是失敗。
+        assert_eq!(busy_skip(&LcError::conflict("default_session", json!({}))), None);
+        assert_eq!(busy_skip(&LcError::Upstream("herdr down".into())), None);
     }
 
     /// 同時只准一批：第二次按下去拿到正在跑的那一批，不另開一份重疊的清單。
