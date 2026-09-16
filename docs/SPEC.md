@@ -687,6 +687,8 @@ herdr 的 `pane.list` 沒有輸出時間戳，**不要讀畫面內容來判斷**
 設成這一輪的時間**；第一次看到這個 pane 時 `last_output_at = first_seen`。值本身也存進 `panes.last_revision`，
 重啟後第一輪只會重新記一次基準，不會把沒動的 pane 誤判成剛動過。
 
+**2026-09-16 實測訊號不可靠，GC 先止血**：herdr 0.8.2 上一顆一直在輸出的 claude pane，`pane.get` 的 `revision` 10 秒內都不變、`pane.read` 的是 0，`last_output_at` 幾乎永遠停在 `first_seen`。照原規則，GC 實際上是「第一次看到超過門檻、此刻剛好停在提示字元」就關，使用者剛在裡面打過指令的 pane 也算。所以 **`last_output_at == first_seen`（訊號從沒動過）一律視為量不到、不自動關**（`panes::gc_skip` 的 `output_unmeasured`），同「讀不到就不關」。代價：真的從來沒用過的空 shell 也不會被 GC，直到有可靠的輸出訊號——要不要改用關前本來就會讀的畫面尾巴做 hash 比對（只對候選、記憶體記最後變化時刻），待 AGM 裁示。
+
 #### adopt 的界線（AGM 2026-09-16 補充）
 `POST /api/panes/{id}/adopt` 只補 owner／purpose，**不是把使用者的 pane 收歸己有的工具**：
 - 正常用途：pane 有 `AM_BOT_ID` 但對不到 bot（bot 已被刪），或人明確要求指定 owner。

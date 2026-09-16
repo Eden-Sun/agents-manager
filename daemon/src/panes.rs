@@ -551,27 +551,19 @@ pub async fn gc_host(app: &Arc<App>, host: &str) -> Result<usize> {
     let cfg = app.cfg.get().await;
     let idle_limit = cfg.panes.idle_close_secs() as i64;
     let log_lines = cfg.panes.close_log_lines;
-    type GcRow = (String, String, Option<String>, Option<String>, String, i64, Option<String>, bool);
+    type GcRow = (String, String, Option<String>, Option<String>, String, String, i64, Option<String>, bool);
     let rows = sqlx::query_as::<_, GcRow>(
-        "SELECT pane_id, kind, workspace_id, tab_id, last_output_at, gc_optin, owned_by, scratch FROM panes WHERE host=?",
+        "SELECT pane_id, kind, workspace_id, tab_id, last_output_at, first_seen, gc_optin, owned_by, scratch FROM panes WHERE host=?",
     )
     .bind(host)
     .fetch_all(&app.db)
     .await?;
     let mut closed = 0;
-    for (pane_id, kind, ws, tab, last_output_at, gc_optin, owned_by, scratch) in rows {
-        if kind != "shell" {
-            continue;
-        }
-        // 那顆固定的 scratch 永不自動關；其餘沒歸屬的才受 GC（使用者「只准一顆」的裁示）。
-        if scratch {
-            continue;
-        }
-        // 使用者手開的（cwd 對得到專案）預設不關，除非 adopt 時簽過名。
-        if owned_by.as_deref() == Some("user") && gc_optin == 0 {
-            continue;
-        }
-        if seconds_since(&last_output_at) < idle_limit {
+    for (pane_id, kind, ws, tab, last_output_at, first_seen, gc_optin, owned_by, scratch) in rows {
+        if let Some(why) = gc_skip(&kind, scratch, owned_by.as_deref(), gc_optin, &last_output_at, &first_seen, idle_limit) {
+            if why == "output_unmeasured" {
+                tracing::debug!(host, pane_id, "pane GC 跳過：輸出訊號從沒動過，量不到閒置多久");
+            }
             continue;
         }
         match close_if_still_idle(app, host, &pane_id, ws.as_deref(), tab.as_deref(), log_lines).await {
@@ -581,6 +573,39 @@ pub async fn gc_host(app: &Arc<App>, host: &str) -> Result<usize> {
         }
     }
     Ok(closed)
+}
+
+/// 這一顆為什麼不是 GC 候選（`None`＝是候選，接著走關前的三條守門）。純函式，規則全在這裡。
+pub(crate) fn gc_skip(
+    kind: &str,
+    scratch: bool,
+    owned_by: Option<&str>,
+    gc_optin: i64,
+    last_output_at: &str,
+    first_seen: &str,
+    idle_limit: i64,
+) -> Option<&'static str> {
+    if kind != "shell" {
+        return Some("not_a_shell");
+    }
+    // 那顆固定的 scratch 永不自動關；其餘沒歸屬的才受 GC（使用者「只准一顆」的裁示）。
+    if scratch {
+        return Some("scratch");
+    }
+    // 使用者手開的（cwd 對得到專案）預設不關，除非 adopt 時簽過名。
+    if owned_by == Some("user") && gc_optin == 0 {
+        return Some("user_pane");
+    }
+    if seconds_since(last_output_at) < idle_limit {
+        return Some("recent_output");
+    }
+    // 輸出訊號從沒動過＝**量不到**，不是「閒置 6 小時」（2026-09-16 實測 herdr 0.8.2：一直在輸出的 claude pane，
+    // `pane.get` 的 revision 10 秒內都不變、`pane.read` 的是 0）。沒有這條，GC 實際上是「第一次看到超過 6 小時、
+    // 此刻剛好停在提示字元」就關——使用者剛在裡面打過指令的 pane 也算。讀不到就不關（同 §6.5e 三條守門）。
+    if last_output_at == first_seen {
+        return Some("output_unmeasured");
+    }
+    None
 }
 
 pub(crate) fn seconds_since(at: &str) -> i64 {
@@ -707,6 +732,23 @@ pub fn row_json(r: &sqlx::sqlite::SqliteRow) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 2026-09-16 實測：herdr 0.8.2 的 revision 對一直在輸出的 pane 也不動。量不到的 pane 不能被當成閒置關掉。
+    #[test]
+    fn a_pane_whose_output_signal_never_moved_is_not_idle_it_is_unmeasured() {
+        let old = "2026-09-01T01:00:00.000Z";
+        let later = "2026-09-01T05:00:00.000Z";
+        let six_h = 21600;
+        assert_eq!(gc_skip("shell", false, Some("bot"), 0, old, old, six_h), Some("output_unmeasured"), "從沒動過：量不到，不關");
+        assert_eq!(gc_skip("shell", false, Some("bot"), 0, later, old, six_h), None, "動過而且閒置夠久才是候選");
+        // 其他規則照舊。
+        assert_eq!(gc_skip("service", false, Some("bot"), 0, later, old, six_h), Some("not_a_shell"));
+        assert_eq!(gc_skip("shell", true, Some("none"), 0, later, old, six_h), Some("scratch"));
+        assert_eq!(gc_skip("shell", false, Some("user"), 0, later, old, six_h), Some("user_pane"));
+        assert_eq!(gc_skip("shell", false, Some("user"), 1, later, old, six_h), None, "簽過名的手開 pane 才算");
+        let now = crate::db::now();
+        assert_eq!(gc_skip("shell", false, Some("bot"), 0, &now, old, six_h), Some("recent_output"));
+    }
 
     /// schema 變更（additive）：上一版的 `panes` 表（沒有 label／scratch／bound_project_id／orphaned／owner_adopted）
     /// 開機 migrate 後補齊，舊列照樣讀得出 pane 列（`row_json` 會讀這幾欄）。
