@@ -42,6 +42,9 @@ const MIN_GAP: Duration = Duration::from_secs(60);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(20);
 /// `herdr --version` 是 process spawn（遠端是 ssh）。
 const DISK_TIMEOUT: Duration = Duration::from_secs(20);
+/// 磁碟上那支 CLI 的名字。參數化只是為了讓測試能餵一支假的執行檔（`command -v` 認絕對路徑），
+/// 正式呼叫端永遠是這個值。
+const HERDR_BIN: &str = "herdr";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// 2026-09-16 實測 latest.json 約 160 KB。留十幾倍餘裕，但不無上限地吃進記憶體。
 const MAX_BODY: usize = 2 * 1024 * 1024;
@@ -534,7 +537,7 @@ fn source_url() -> String {
 }
 
 /// 一台主機的兩個版本。**不會**因為讀不到就填別的東西：讀不到就是 `None` + 一句原因。
-async fn probe_host(app: &Arc<App>, conn: &Arc<crate::hosts::HostConn>) -> HostProbe {
+async fn probe_host(app: &Arc<App>, conn: &Arc<crate::hosts::HostConn>, disk_bin: &str) -> HostProbe {
     let mut p = HostProbe { host: conn.name.clone(), ..Default::default() };
     let connected = if conn.is_local() {
         app.connected.load(std::sync::atomic::Ordering::SeqCst)
@@ -559,9 +562,9 @@ async fn probe_host(app: &Arc<App>, conn: &Arc<crate::hosts::HostConn>) -> HostP
     // `changelog::installed_version` 用的 `version_string` 只認「版本在第一個 token」（claude 的
     // `2.1.5 (Claude Code)`）；herdr 印的是 `herdr 0.8.2`，第一個 token 是名字，套上去永遠回 Err，
     // 磁碟版本會永遠顯示未知。
-    match crate::changelog::version_line(app, &conn.name, "herdr", DISK_TIMEOUT).await {
-        Ok(line) => match Ver::parse(&line) {
-            Some(_) => p.disk_version = Some(version_token(&line).unwrap_or(line)),
+    match crate::changelog::version_line(app, &conn.name, disk_bin, DISK_TIMEOUT).await {
+        Ok(line) => match version_token(&line) {
+            Some(v) => p.disk_version = Some(v),
             None => p.disk_error = Some(format!("`herdr --version` 回了「{line}」，看不出版本")),
         },
         Err(e) => p.disk_error = Some(format!("{e:#}")),
@@ -835,7 +838,7 @@ pub async fn refresh(app: &Arc<App>) {
     let mut probes = tokio::task::JoinSet::new();
     for conn in app.hosts.list().await {
         let app = app.clone();
-        probes.spawn(async move { probe_host(&app, &conn).await });
+        probes.spawn(async move { probe_host(&app, &conn, HERDR_BIN).await });
     }
     while let Some(done) = probes.join_next().await {
         let Ok(p) = done else { continue };
@@ -1034,6 +1037,33 @@ mod tests {
         let hang = fake_cli(&dir, "herdr-hang", "herdr 0.9.0", 0, 30);
         let e = crate::changelog::version_line(&env.app, "local", &hang, Duration::from_millis(600)).await.unwrap_err();
         assert!(format!("{e:#}").contains("timed out"), "要講得出是逾時：{e:#}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 正式那顆 `probe_host` 本身：磁碟那半要真的把 `herdr 0.8.2` 讀成 0.8.2。
+    /// 只測 `Ver::parse` 抓不到這條接線——以前它接的是 `installed_version`，那支永遠回 Err。
+    #[tokio::test]
+    async fn probe_host_reads_the_disk_version_and_says_why_when_the_server_answer_is_unusable() {
+        let env = crate::testing::env().await;
+        let dir = tmpdir();
+        let bin = fake_cli(&dir, "herdr", "herdr 0.8.2", 0, 0);
+        let conn = env.app.hosts.get("local").await.unwrap();
+
+        let p = probe_host(&env.app, &conn, &bin).await;
+        assert_eq!(p.disk_version.as_deref(), Some("0.8.2"), "磁碟版本不能再是未知");
+        assert!(p.disk_error.is_none());
+        // mock herdr 的 ping 回 `version: "mock"`：認不出來就是認不出來，要講原因、不能猜。
+        assert_eq!(p.server_version, None);
+        assert!(p.server_error.as_deref().is_some_and(|e| e.contains("mock")), "{:?}", p.server_error);
+        assert_eq!(p.server_protocol, Some(20), "protocol 還是讀得到");
+
+        // 存進去之後，磁碟那一側是「剛確認過」的，server 那側不是。
+        save_host(&env.app.db, &p).await.unwrap();
+        let row = load_hosts(&env.app.db).await.remove(0);
+        let j = host_json(&row, true, Some("0.9.0"), true);
+        assert_eq!(j["disk"]["standing"], "behind", "0.8.2 對 0.9.0");
+        assert_eq!(j["server"]["standing"], "unknown");
 
         std::fs::remove_dir_all(&dir).ok();
     }
