@@ -23,6 +23,7 @@ import {
   pick,
   arr,
 } from '../api/normalize'
+import { isPairingRequired } from '../lib/pairing'
 import { ApiError } from '../api/types'
 import type { Bot, BotKind, RestartBatch, GroupChatResult, Mission, MissionDetail, NewMissionInput, MemSnapshot, GroupMessage, Host, HostResult, HostShell, Identity, IdentityStatusMap, Lamp, Message, ModelInfo, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, PatchBotInput, PatchProjectInput, Project, QuotaMap, Run, TerminalSource, ToolMap, Turn } from '../api/types'
 import { dropHostModels, modelsKey, shouldFetchModels, type ModelsCache } from './modelsCache'
@@ -261,6 +262,11 @@ export interface ComposerState {
 export interface StoreState {
   ready: boolean
   bootError: string | null
+  /**
+   * 這台裝置還沒配對（SPEC §7.1a）：`GET /api/session` 回 403 `pairing_required`，
+   * 或手上的 token 被打回 401 而重新取得時又被要求配對。畫面換成輸入配對碼，不是「連不上 daemon」。
+   */
+  needsPairing: boolean
   socket: SocketStatus
   /** daemon <-> 本機 herdr link (SPEC §2.2 "連線") */
   connected: boolean
@@ -565,6 +571,7 @@ function resetStateSeq() {
 export const useStore = create<StoreState>((set, get) => ({
   ready: false,
   bootError: null,
+  needsPairing: false,
   socket: 'connecting',
   connected: true,
   defaultConnected: false,
@@ -639,11 +646,18 @@ export const useStore = create<StoreState>((set, get) => ({
       // `refreshState` 永不 throw；首次失敗就 ready 會讓 routeSync 把深連結當成 Bot 不在、改成 `/`。
       if (get().stateStale) throw new Error(lastRefreshError ?? '無法讀取 daemon 狀態')
       await get().restoreShellView()
-      set({ ready: true, bootError: null })
+      set({ ready: true, bootError: null, needsPairing: false })
     } catch (e) {
-      set({ ready: false, bootError: errText(e) })
+      // 沒配對過的裝置不是「連不上 daemon」——那句話在手機上完全幫不上忙，要給輸入配對碼的畫面。
+      if (isPairingRequired(e)) {
+        set({ ready: false, bootError: null, needsPairing: true })
+        return
+      }
+      set({ ready: false, bootError: errText(e), needsPairing: false })
       return
     }
+    // 跑到一半 token 失效又換不回來（例如使用者在本機清了 ui-token）：回到配對畫面，而不是每個請求都彈紅字。
+    api.onPairingRequired(() => set({ ready: false, bootError: null, needsPairing: true }))
     connectSocket(set, get)
     void get().loadQuota()
     void get().loadMem()
