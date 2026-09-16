@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import * as api from '../api'
 import type { ScratchpadFile } from '../api'
-import { emptyReason, fileSize, modifiedAgo, orderFiles } from '../lib/scratchpadList'
+import { emptyReason, fileSize, modifiedAgo, orderFiles, splitMentioned } from '../lib/scratchpadList'
 import { useStore } from '../store/store'
 import './scratchpadFiles.css'
 
@@ -11,6 +11,9 @@ import './scratchpadFiles.css'
  * 手機上根本拿不到（使用者 2026-09-16）。
  *
  * 只讀：這一段不刪檔、不改檔。上面那半（拖進來的暫存）是要**送進**對話的東西，這半是**從** bot 拿出來的。
+ *
+ * 預設只列對話裡提過檔名的；bot 自己的工作檔收在「其他 N 個」底下，要找再展開。
+ * 資料庫與金鑰類 daemon 根本不列（見 `daemon/src/scratchpad.rs` 的 `withheld`）。
  */
 export function ScratchpadFiles() {
   const botId = useStore((s) => s.selectedBotId)
@@ -21,6 +24,7 @@ export function ScratchpadFiles() {
   /** 已經讀完哪一顆的清單。用它而不是 `loading` 旗標：effect 裡同步 setState 會多跑一輪 render。 */
   const [loadedFor, setLoadedFor] = useState<string | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
+  const [showOthers, setShowOthers] = useState(false)
 
   /** 改它就重讀一次（同 HostShellPanel 的 `nonce`）。 */
   const [nonce, setNonce] = useState(0)
@@ -34,6 +38,7 @@ export function ScratchpadFiles() {
     setReason(null)
     setDir('')
     setLoadedFor(null)
+    setShowOthers(false)
   }
 
   useEffect(() => {
@@ -82,13 +87,33 @@ export function ScratchpadFiles() {
     }
   }
 
+  const { mentioned, others } = splitMentioned(files)
+
+  const row = (f: ScratchpadFile) => (
+    <li key={f.name}>
+      <button
+        type="button"
+        className="sp-file"
+        disabled={busy === f.name}
+        title={`下載 ${f.name}`}
+        onClick={() => void download(f.name)}
+      >
+        <span className="sp-name">{f.name}</span>
+        <span className="sp-meta">
+          {fileSize(f.size)} · {modifiedAgo(f.modified)}
+          {busy === f.name ? ' · 下載中…' : ''}
+        </span>
+      </button>
+    </li>
+  )
+
   return (
     <section className="sp-files" aria-label="這顆 bot 的 scratchpad 檔案">
       <div className="sp-head">
         <span className="sp-title" title={dir || undefined}>
           bot 的 scratchpad
         </span>
-        {files.length > 0 ? <span className="sp-count">{files.length}</span> : null}
+        {mentioned.length > 0 ? <span className="sp-count">{mentioned.length}</span> : null}
         <span className="spacer" />
         <button
           type="button"
@@ -105,29 +130,35 @@ export function ScratchpadFiles() {
           ↻
         </button>
       </div>
-      {files.length === 0 ? (
-        <p className="sp-empty">{botId && loadedFor !== botId ? '讀取中…' : emptyReason(reason, Boolean(botId))}</p>
-      ) : (
-        <ul className="sp-list" role="list">
-          {files.map((f) => (
-            <li key={f.name}>
-              <button
-                type="button"
-                className="sp-file"
-                disabled={busy === f.name}
-                title={`下載 ${f.name}`}
-                onClick={() => void download(f.name)}
-              >
-                <span className="sp-name">{f.name}</span>
-                <span className="sp-meta">
-                  {fileSize(f.size)} · {modifiedAgo(f.modified)}
-                  {busy === f.name ? ' · 下載中…' : ''}
-                </span>
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
+      <div className="sp-scroll">
+        {mentioned.length === 0 ? (
+          <p className="sp-empty">
+            {botId && loadedFor !== botId ? '讀取中…' : emptyReason(reason, Boolean(botId), others.length)}
+          </p>
+        ) : (
+          <ul className="sp-list" role="list">
+            {mentioned.map(row)}
+          </ul>
+        )}
+        {others.length > 0 ? (
+          <>
+            <button
+              type="button"
+              className="sp-others-toggle"
+              aria-expanded={showOthers}
+              title="bot 自己的工作檔（腳本、中間產物），對話裡沒提過檔名"
+              onClick={() => setShowOthers((v) => !v)}
+            >
+              {showOthers ? '▾' : '▸'} 其他 {others.length} 個（對話沒提到）
+            </button>
+            {showOthers ? (
+              <ul className="sp-list sp-others" role="list">
+                {others.map(row)}
+              </ul>
+            ) : null}
+          </>
+        ) : null}
+      </div>
     </section>
   )
 }
