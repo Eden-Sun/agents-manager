@@ -400,9 +400,11 @@ pub async fn post_review(
     if let Some(f) = followup {
         out["followup"] = f;
     }
-    if let Some(t) = revoked_turn {
+    if let Some(t) = revoked_turn.as_deref() {
         out["revoked_turn_id"] = json!(t);
     }
+    // 撤掉的是還沒送出的那則：「turn 還在跑」的警告不成立，不要跟 revoked_turn_id 一起回給呼叫端。
+    let still_running = if revoked_turn.is_some() { None } else { still_running };
     if let Some(note) = still_running {
         out["warning"] = json!(note);
         // The transport facts stay readable next to the warning: a cancelled `unknown` keeps

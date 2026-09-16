@@ -1353,18 +1353,25 @@ pub async fn settle_and_notify(
 /// 排進佇列後等太久還沒送出：停在 `blocked` 並留下理由，讓 AGM 看得到（AGM 2026-09-16）。
 /// 只動 `delivered` 的列（就是排隊中的那些），回 true = 這次真的把它擋下了。
 pub async fn block_stale_queue(pool: &SqlitePool, id: &str, why: &str) -> Result<bool> {
-    let moved = sqlx::query(
+    let mut tx = pool.begin().await?;
+    let moved = block_stale_queue_tx(&mut tx, id, why).await?;
+    tx.commit().await?;
+    Ok(moved)
+}
+
+/// [`block_stale_queue`] 的交易內版本：保險絲要「turn 撤成功才標 blocked」，兩個寫入同一個交易。
+pub async fn block_stale_queue_tx(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, id: &str, why: &str) -> Result<bool> {
+    Ok(sqlx::query(
         "UPDATE supervisor_assignments SET status='blocked', error=?, updated_at=?
           WHERE id=? AND status='delivered'",
     )
     .bind(why)
     .bind(crate::db::now())
     .bind(id)
-    .execute(pool)
+    .execute(&mut **tx)
     .await?
     .rows_affected()
-        > 0;
-    Ok(moved)
+        > 0)
 }
 
 pub async fn park_quota_blocked(
