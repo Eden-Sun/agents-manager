@@ -253,6 +253,8 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     if let Err(e) = supervisor::responder::merge_into_manager_project(&app).await {
         tracing::warn!(error = ?e, "AGM 協調者併回巡檢的專案失敗，這一輪維持原樣");
     }
+    // 換版後已安裝的 bin/agm 跟著換（只動 bin/agm；寫不進去記 warn＋inbox，不擋開機，SPEC §18.2a）。
+    supervisor::cli_refresh::refresh_on_startup(&app).await;
     supervisor::controller::respawn(&app).await;
     supervisor::health::spawn(app.clone());
     // Agent titles have no herdr event, so they are polled.
