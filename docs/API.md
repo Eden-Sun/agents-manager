@@ -1272,8 +1272,8 @@ parent＋文字＋四個選項。只比文字的話，一則 `question` 與一�
 
 規則（`daemon/src/mission/pick.rs`，每一條都有測試）：claude 身分固定照 **cc2 → cc1 → cc0**，**用盡才換**——
 `low` 不算用盡；**7d** 用盡（`critical`，或 `limit_hit` 推定為週窗）→ 換下一個；**5h** 用盡 → 照 `on_5h_limit` 等或換；
-**Fable 週桶**用盡 → 執行者／reviewer 同一身分改用 opus，驗證者不能用這個身分。`limit_hit` 本身不帶桶別，
-從當下的桶子讀數推（claude 撞限時 `turn_error.rs` 會把撞到的那個桶標成 100%）；過了 `until` 就不算。
+**Fable 週桶**用盡 → 執行者／reviewer 同一身分改用 opus，驗證者不能用這個身分。`limit_hit.bucket` 有值（claude 橫幅、開機回填從 park 時的 `error` 找回）
+就照它決定是哪一種封鎖，時間取 `until` 與那一桶 `resets_at` 較早者，只有 5h／7d 讀數本身見底時才升級成那一桶；沒有桶名才從當下的桶子讀數推；過了 `until` 就不算。
 讀不到額度視為可以用（未知不等於用盡），但驗證者例外：必須讀得到 Fable 桶且未見底。停用的身分一律跳過。
 
 ### OB 本機 CLI（網頁 GPT）

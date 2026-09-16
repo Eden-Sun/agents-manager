@@ -95,26 +95,49 @@ fn reset_of(w: Option<&Window>) -> Option<String> {
     w.and_then(|w| w.resets_at.clone())
 }
 
-/// `limit_hit` 本身不說是哪個桶，用當下的桶子讀數推：5h 見底就是 5h，否則週窗見底就是週窗；
+/// 兩個重置時間取早的（任一邊沒有就用另一邊）。撞限最晚到那一桶自己重置為止。
+fn sooner(a: Option<String>, b: Option<String>) -> Option<String> {
+    let t = |s: &str| DateTime::parse_from_rfc3339(s).ok().map(|x| x.with_timezone(&Utc));
+    match (a, b) {
+        (Some(x), Some(y)) => match (t(&x), t(&y)) {
+            (Some(tx), Some(ty)) if ty < tx => Some(y),
+            (None, Some(_)) => Some(y),
+            _ => Some(x),
+        },
+        (x, None) => x,
+        (None, y) => y,
+    }
+}
+
+/// 這個身分卡在哪一桶。
+///
+/// 橫幅說了是哪一桶（`hit.bucket`）就**照它決定種類**，不再拿當下的讀數猜：那一桶沒讀數時（剛重啟、
+/// Fable 只有 `/usage` 讀得到）猜出來的一律是週窗，Fable 撞限變成整個身分換掉、session 撞限的 +5h
+/// 保底被丟掉（review 2026-09-16 M7）。唯一的例外是讀數本身說更大的桶也見底了（5h／7d `critical`）。
+/// 時間取 `hit.until` 與那一桶自己的 `resets_at` 較早者。
+///
+/// 沒有桶名（codex、舊資料、開機回填）才用讀數推：5h 見底就是 5h，否則 Fable 見底就是 Fable，
 /// 都看不出來（例如 credits 用完、桶子卻是滿的）就當週窗——等不到，只能換身分。
 fn block_of(q: &Quota, now: DateTime<Utc>) -> Block {
     if let Some(hit) = q.limit_hit.as_ref().filter(|h| hit_active(h, now)) {
-        // `hit.until` 是**橫幅那一桶**的重置時間，只有在算出來的封鎖是同一桶時才能拿來用。
-        // 以前一律拿它：撞 Fable 上限而 5h 剛好也快滿時，「5 小時窗什麼時候回來」會變成下週一，
-        // 整個身分被鎖到下週（review 2026-09-16）。桶名對不上就用那個視窗自己的 resets_at。
-        let until_for = |bucket: &str, own: Option<String>| match hit.bucket.as_deref() {
-            Some(b) if b == bucket => hit.until.clone().or(own),
-            // 舊資料沒有 bucket：維持舊行為（拿 hit.until），否則升級後反而少了時間。
-            None => hit.until.clone().or(own),
-            Some(_) => own,
-        };
-        if exhausted(q.five_hour.as_ref()) && !exhausted(q.seven_day.as_ref()) {
-            return Block::FiveHour(until_for("five_hour", reset_of(q.five_hour.as_ref())));
+        let (five, seven, fable) = (q.five_hour.as_ref(), q.seven_day.as_ref(), q.fable.as_ref());
+        match hit.bucket.as_deref() {
+            Some("seven_day") => return Block::SevenDay(sooner(hit.until.clone(), reset_of(seven))),
+            Some("five_hour") if exhausted(seven) => return Block::SevenDay(reset_of(seven)),
+            Some("five_hour") => return Block::FiveHour(sooner(hit.until.clone(), reset_of(five))),
+            Some("fable") if exhausted(seven) => return Block::SevenDay(reset_of(seven)),
+            // 5h 也見底：先等 5h（時間是 5h 自己的，不是 Fable 的下週）；5h 回來之後 Fable 撞限還在，再換 opus。
+            Some("fable") if exhausted(five) => return Block::FiveHour(reset_of(five)),
+            Some("fable") => return Block::FableOnly(sooner(hit.until.clone(), reset_of(fable))),
+            _ => {}
         }
-        if exhausted(q.fable.as_ref()) && !exhausted(q.seven_day.as_ref()) && !exhausted(q.five_hour.as_ref()) {
-            return Block::FableOnly(until_for("fable", reset_of(q.fable.as_ref())));
+        if exhausted(five) && !exhausted(seven) {
+            return Block::FiveHour(hit.until.clone().or(reset_of(five)));
         }
-        return Block::SevenDay(until_for("seven_day", reset_of(q.seven_day.as_ref())));
+        if exhausted(fable) && !exhausted(seven) && !exhausted(five) {
+            return Block::FableOnly(hit.until.clone().or(reset_of(fable)));
+        }
+        return Block::SevenDay(hit.until.clone().or(reset_of(seven)));
     }
     if exhausted(q.seven_day.as_ref()) {
         return Block::SevenDay(reset_of(q.seven_day.as_ref()));
@@ -291,14 +314,48 @@ mod tests {
         let mut q3 = five_reset("2026-09-16T14:00:00Z");
         q3.limit_hit = Some(hit(Some("fable")));
         assert_eq!(block_of(&q3, now), Block::FiveHour(Some("2026-09-16T14:00:00Z".into())), "5h 的時間才對");
-        // 橫幅就是這一桶：照它的。
+        // 橫幅就是這一桶：種類照它，時間取橫幅與這一桶自己重置較早的那個——撞限不會比它那一桶活得久（M2）。
         let mut q4 = five_reset("2026-09-16T14:00:00Z");
         q4.limit_hit = Some(crate::quota::LimitHit { bucket: Some("five_hour".into()), ..hit(None) });
-        assert_eq!(block_of(&q4, now), Block::FiveHour(Some("2026-09-23T00:00:00Z".into())), "橫幅說的就是 5h");
+        assert_eq!(block_of(&q4, now), Block::FiveHour(Some("2026-09-16T14:00:00Z".into())), "橫幅說的就是 5h");
         // 舊資料沒有 bucket：維持舊行為。
         let mut q5 = five_reset("2026-09-16T14:00:00Z");
         q5.limit_hit = Some(hit(None));
         assert_eq!(block_of(&q5, now), Block::FiveHour(Some("2026-09-23T00:00:00Z".into())), "沒有 bucket 時照舊");
+    }
+
+    /// M7（review 2026-09-16）：橫幅說了是哪一桶，那一桶卻還沒有讀數（剛重啟、Fable 只有 `/usage` 讀得到）。
+    /// 以前照讀數猜，一律猜成週窗：Fable 撞限把整個身分換掉，session 撞限的 +5h 保底被週窗的重置時間蓋掉。
+    #[test]
+    fn a_banner_bucket_without_a_reading_still_decides_the_kind_of_block() {
+        let now = now();
+        let hit = |bucket: &str, until: &str| LimitHit {
+            message: "You've hit your limit".into(),
+            until: Some(until.into()),
+            at: "2026-09-13T11:50:00Z".into(),
+            bucket: Some(bucket.into()),
+        };
+        let mut fable_hit = q(10.0, 20.0, None);
+        fable_hit.limit_hit = Some(hit("fable", "2026-09-20T11:50:00Z"));
+        assert_eq!(block_of(&fable_hit, now), Block::FableOnly(Some("2026-09-20T11:50:00Z".into())));
+        let qs = [("cc2", Some(fable_hit.clone())), ("cc1", Some(q(0.0, 0.0, Some(0.0))))];
+        assert_eq!(used(&pick(Role::Executor, &cands(&qs), On5hLimit::Wait, None, now)), ("cc2", Some("opus")), "Fable 用完是同身分換 opus，不是換身分");
+
+        let mut session = q(10.0, 20.0, Some(10.0));
+        session.five_hour = None;
+        session.limit_hit = Some(hit("five_hour", "2026-09-13T16:50:00Z"));
+        match pick(Role::Executor, &cands(&[("cc2", Some(session))]), On5hLimit::Wait, None, now) {
+            Pick::Wait { identity, until, .. } => {
+                assert_eq!(identity, "cc2");
+                assert_eq!(until.as_deref(), Some("2026-09-13T16:50:00Z"), "保底 +5h，不是週窗的重置時間");
+            }
+            other => panic!("expected Wait, got {other:?}"),
+        }
+
+        // 讀數本身說週窗也見底：那就是週窗，桶名擋不住。
+        let mut week_gone = q(10.0, 100.0, None);
+        week_gone.limit_hit = Some(hit("fable", "2026-09-20T11:50:00Z"));
+        assert_eq!(block_of(&week_gone, now), Block::SevenDay(Some("2026-09-18T06:00:00Z".into())));
     }
 
     #[test]

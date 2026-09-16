@@ -71,6 +71,12 @@ fn bucket_name(lower: &str) -> Option<String> {
     }
 }
 
+/// 一段文字裡的 claude 撞限橫幅說的是哪一桶（[`bucket_name`] 的對外版本）。開機回填用它從 parked 交辦記下的
+/// `error`（`帳號撞到用量上限（…）：<橫幅>`）把桶名找回來，`mission::pick` 才不必把回填的格子一律猜成週窗。
+pub(crate) fn banner_bucket(text: &str) -> Option<String> {
+    bucket_name(&text.to_ascii_lowercase())
+}
+
 fn fallback_until(lower: &str, at: &str) -> Option<String> {
     let hours = match limit_bucket(lower) {
         LimitBucket::Session => 5,
