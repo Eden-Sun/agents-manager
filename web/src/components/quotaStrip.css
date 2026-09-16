@@ -838,3 +838,55 @@
   position: relative;
   z-index: 4;
 }
+
+/* 標題列的額度區吃掉剩下的空白（2026-09-16 使用者：「額度的寬度 flex 以用盡空間」）：
+   自己可長，量表條跟著長，手機的 compact chip 不受影響（見上面 640px 區塊）。 */
+@media (width > 640px) {
+  .main-head > .quota-strip {
+    flex: 1 1 auto;
+    min-width: 0;
+    justify-content: flex-end;
+  }
+
+  .main-head .quota-open {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .main-head .quota-hp {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .main-head .quota-bars-open {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .main-head .quota-bars {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  /* 量表那一欄吃掉剩下的寬度（原本是 auto＝跟著 38px 的條）。 */
+  .main-head .quota-window {
+    grid-template-columns: minmax(16px, auto) 1fr;
+    min-width: 0;
+  }
+
+  .main-head .quota-bar-row {
+    flex: 1 1 auto;
+  }
+
+  /* 條本身可長；上限 120px，再長也讀不出更多。 */
+  .main-head .quota-bar-wrap {
+    flex: 1 1 38px;
+    width: auto;
+    min-width: 38px;
+    max-width: 120px;
+  }
+
+  .main-head .quota-bar {
+    width: 100%;
+  }
+}
