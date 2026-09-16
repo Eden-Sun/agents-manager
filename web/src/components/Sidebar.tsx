@@ -32,6 +32,7 @@ import { Modal } from './Modal'
 import { SupervisorPanel } from './SupervisorPanel'
 import { IdentityOptions, PersonaField, PersonaMark } from './BotSettingsPanel'
 import { HostBadge, HostsPanel } from './HostsPanel'
+import { HerdrUpdateDot, HerdrUpdatesPanel } from './HerdrUpdatesPanel'
 import { BotNameField } from './BotNameField'
 import { ProjectNameField } from './ProjectNameField'
 import { MemBadge } from './MemBadge'
@@ -1339,6 +1340,7 @@ export function Sidebar() {
             {hosts.length === 0 ? '本機' : `本機 + ${hosts.length}`}
             {hostsDown > 0 ? ` ・ ${hostsDown} 未連線` : ''}
             {` ・ 身分 ${identityCount}`}
+            <HerdrUpdateDot />
           </span>
         </button>
       </div>
@@ -1401,6 +1403,10 @@ export function Sidebar() {
           <section className="env-sec">
             <h3>身分</h3>
             <IdentitiesPanel />
+          </section>
+          <section className="env-sec">
+            <h3>Herdr 版本</h3>
+            <HerdrUpdatesPanel />
           </section>
           <section className="env-sec">
             <h3>顯示</h3>

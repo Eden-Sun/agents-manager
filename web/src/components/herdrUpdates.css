@@ -1,0 +1,211 @@
+/* components/HerdrUpdatesPanel.tsx：環境設定裡的「Herdr 版本」卡。
+   手機 390px 是主要目標寬度，所以每一列都能換行、按鈕不小於 32px 高，padding 只給該給的。 */
+
+.hu {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.hu-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+}
+
+.hu-latest {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.hu-actions {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+}
+
+/* `a.mini-btn` 沒有 button 的預設對齊，補齊才不會比旁邊那顆矮一截。 */
+.hu-actions a.mini-btn {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+}
+
+.hu-side-k {
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+.hu-ver {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.hu-when {
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+.hu-tag {
+  padding: 0 5px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-sunken);
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+/* 有新版是提醒，不是錯誤；未知是未知，不能長得像「沒事」。 */
+.hu-tag.hu-behind {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.hu-tag.hu-latest {
+  border-color: var(--status-ok);
+  color: var(--status-ok);
+}
+
+.hu-tag.hu-unknown,
+.hu-tag.hu-ahead {
+  border-style: dashed;
+  color: var(--text-dim);
+}
+
+.hu-tag.hu-pending {
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+
+.hu-ver.hu-unknown {
+  color: var(--text-dim);
+  font-weight: 400;
+}
+
+.hu-head-line {
+  margin: 0;
+  color: var(--text-dim);
+}
+
+.hu-behind-line {
+  color: var(--warn);
+}
+
+.hu-hosts {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.hu-host {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-sunken);
+}
+
+.hu-host-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.hu-host-name {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.hu-side {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  min-width: 0;
+}
+
+.hu-err,
+.hu-err-row,
+.hu-warn {
+  color: var(--danger);
+}
+
+.hu-err {
+  flex-basis: 100%;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.hu-err-row,
+.hu-warn {
+  margin: 0;
+}
+
+.hu-muted,
+.hu-foot,
+.hu-src {
+  margin: 0;
+  color: var(--text-faint);
+}
+
+.hu-notes-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.hu-note h5 {
+  margin: 0 0 2px;
+  color: var(--text);
+  font-size: 12px;
+}
+
+/* release notes 是 markdown 原文（不自己渲染、不摘要）。手機上要能橫向不溢出，所以照原樣換行。 */
+.hu-note pre {
+  margin: 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--code-bg);
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
+.hu-src a {
+  overflow-wrap: anywhere;
+}
+
+/* flex column 會把按鈕拉滿整排；這顆只要貼著自己的字。 */
+.hu-seen {
+  align-self: flex-start;
+}
+
+/* 側欄「環境設定」那一行的未讀提示。只在該行裡，不碰主 header。 */
+.hu-dot {
+  margin-left: 6px;
+  padding: 0 5px;
+  border: 1px solid var(--warn);
+  border-radius: 6px;
+  color: var(--warn);
+  font-size: 11px;
+  white-space: nowrap;
+}
