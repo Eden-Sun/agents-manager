@@ -310,12 +310,16 @@ pub async fn observe(app: &Arc<App>, thresholds: &Thresholds) -> Probed {
 }
 
 /// Incidents whose whole point is that the inbox is not working. Queueing an inbox event for
-/// them is how a stuck notification becomes two stuck notifications: the event cannot be
-/// delivered either, so it exhausts its own retries, which opens another incident, and so on.
-/// They are still written down and still show up in `system_health` and on the UI — what they
-/// do not get is a wake-up down the very channel they are reporting as broken.
-fn notifiable(kind: &str) -> bool {
-    kind != "notify_exhausted"
+/// them *to the same role* is how a stuck notification becomes two stuck notifications: the event
+/// cannot be delivered either, so it exhausts its own retries, which opens another incident, and so on.
+///
+/// `notify_exhausted` only ever describes the patrol's events (the responder's have no attempt cap,
+/// `store::exhausted_inbox`). So when a responder exists, the event goes to *it* — the routing table
+/// sends `incident_*` for this kind to the responder, whose queue never exhausts — and AGM finds out.
+/// Without a responder there is no other channel: it stays on the UI and in `system_health` only
+/// (review 2026-09-16 c1 L4).
+fn notifiable(kind: &str, responder_configured: bool) -> bool {
+    kind != "notify_exhausted" || responder_configured
 }
 
 /// Apply one pass: write what changed, and queue one inbox event per transition.
@@ -332,6 +336,7 @@ pub async fn sweep(app: &Arc<App>, detector: &mut Detector) {
     if !probed.ok() {
         tracing::warn!(blind = ?probed.failed, "some incident probes could not run; their incidents are left as they are");
     }
+    let responder_configured = super::roles::responder_configured(&app.db).await.unwrap_or(false);
     let plan = detector.plan(
         &probed.seen,
         &open_keys,
@@ -351,7 +356,7 @@ pub async fn sweep(app: &Arc<App>, detector: &mut Detector) {
             continue;
         }
         tracing::warn!(kind = %obs.kind, resource = %obs.resource, severity = %obs.severity, "system incident opened");
-        if notifiable(&obs.kind) {
+        if notifiable(&obs.kind, responder_configured) {
             let _ = store::push_inbox(
                 &app.db,
                 &format!("incident:{}:opened", incident.id),
@@ -369,7 +374,7 @@ pub async fn sweep(app: &Arc<App>, detector: &mut Detector) {
     for (kind, resource) in plan.resolve {
         let Ok(Some(incident)) = store::resolve_incident(&app.db, &kind, &resource).await else { continue };
         tracing::info!(kind = %kind, resource = %resource, "system incident resolved");
-        if notifiable(&kind) {
+        if notifiable(&kind, responder_configured) {
             let _ = store::push_inbox(
                 &app.db,
                 &format!("incident:{}:resolved", incident.id),
@@ -524,10 +529,38 @@ mod tests {
     /// The incidents that say "the inbox is broken" must not be announced through the inbox.
     #[test]
     fn the_broken_notification_channel_is_not_used_to_report_itself() {
-        assert!(!notifiable("notify_exhausted"), "this one would retry, exhaust, and open another incident");
+        assert!(!notifiable("notify_exhausted", false), "this one would retry, exhaust, and open another incident");
+        // With a responder there is a second channel whose queue never exhausts: tell it.
+        assert!(notifiable("notify_exhausted", true));
         for kind in ["host_disconnected", "bot_stopped", "assignment_stalled", "assignment_undelivered", "remote_entry"] {
-            assert!(notifiable(kind), "{kind} is safe to wake the manager about");
+            assert!(notifiable(kind, false), "{kind} is safe to wake the manager about");
         }
+    }
+
+    /// 巡檢自己的通知一直送不出去（它倒了）時，`notify_exhausted` 跟巡檢的 `watchdog_gave_up` 都要進
+    /// **協調者**的佇列並叫醒它——送回巡檢等於送進已知壞掉的那條路（review 2026-09-16 c1 M2、L4）。
+    #[tokio::test]
+    async fn when_patrol_cannot_be_reached_the_responder_is_told() {
+        use super::super::bot_requests::flow_tests;
+        use super::super::roles::{self, Role};
+        let app = flow_tests::app().await;
+        flow_tests::configure_responder(&app).await;
+        let max = app.cfg.get().await.supervisor.notify_max_attempts.max(1);
+        let stuck = store::push_inbox(&app.db, "health:x", "health_changed", None, None, None, &json!({})).await.unwrap().unwrap();
+        roles::classify(&app.db).await.unwrap();
+        sqlx::query("UPDATE supervisor_inbox SET notify_attempts=? WHERE id=?").bind(max).bind(&stuck).execute(&app.db).await.unwrap();
+        store::push_inbox(&app.db, "watchdog:gave_up:t", "watchdog_gave_up", None, None, None, &json!({"why": "CLI 起來就死"})).await.unwrap();
+
+        let mut d = Detector::default();
+        sweep(&app, &mut d).await;
+        roles::classify(&app.db).await.unwrap();
+
+        let exhausted = |e: &store::InboxEvent| e.kind == "incident_opened" && e.payload_json.contains("notify_exhausted");
+        let responder = roles::due_for(&app.db, Role::Responder, true, "2999-01-01T00:00:00Z", 0).await.unwrap();
+        assert!(responder.iter().any(|e| exhausted(e) && e.wake == Some(1)), "notify_exhausted 要推給協調者並叫醒它");
+        assert!(responder.iter().any(|e| e.kind == "watchdog_gave_up" && e.wake == Some(1)));
+        let patrol = roles::due_for(&app.db, Role::Patrol, true, "2999-01-01T00:00:00Z", 1_000).await.unwrap();
+        assert!(patrol.iter().all(|e| !exhausted(e) && e.kind != "watchdog_gave_up"), "不送回倒下的巡檢");
     }
 
     #[test]

@@ -1496,6 +1496,7 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
 | `notify_exhausted` | 通知重送用盡 | `notify_max_attempts`（5） |
 
 - 條件持續超過門檻才寫入（計時在記憶體，重啟重算——寧可晚開不重複開）；開啟與恢復各推一則 inbox，中間只更新 `occurrences`；恢復後再壞是新的一筆。
+  例外 `notify_exhausted`：它說的是巡檢的通知送不出去，推給巡檢等於送進壞掉的那條路（事件又會用盡、再開一筆）。協調者建立時推給**協調者**（佇列沒有次數上限，不會遞迴）；沒有協調者就只留在 UI 與 `system_health`，不入 inbox。
 - `assignment_undelivered` 獨立一條：每次重試 `defer` 會推 `updated_at`，stalled 看不到它。被拒的真正理由（`bot has no active run`、`needs_login`）記在 `error`。
 - 不算故障：使用者停掉的 bot、等使用者回答的 blocked、短暫排隊、AGM 自己的 idle/busy。量不到回 `unknown`，不併進 `healthy`。全部走 30 秒 cheap probe。
 
@@ -1683,7 +1684,7 @@ supervisor 相關資料表與欄位都是 additive，`db::migrate` 重跑冪等�
 | 入口 | 使用者 web／手機 Remote Control（**唯一**的 remote） | 沒有 remote；只有 daemon 的通知 |
 | 目錄 | `supervisor/AGM` | `supervisor/AGM-responder`（記在 `bots.cwd`；claude session 以 cwd 為鍵，共用會互相接到對方的 session 與 `persona.md`） |
 | 專案 | 巡檢的專案 | **同一個**（見下）；側欄上兩個角色在同一塊 |
-| 收什麼 | `health_changed`、`incident_*`、`watchdog_gave_up`、`bot_restart_failed`、`supervisor_restart_retry`、`responder_watchdog_gave_up`、`responder_bot_missing`、`agm_cli_stale`、`pane_unowned`、`review_role=patrol` 的交辦回報、不認得的種類 | `bot_request`、`approval_requested`、`mission_*`、其餘交辦回報（含 `assignment_undeliverable`） |
+| 收什麼 | `health_changed`、`incident_*`（`notify_exhausted` 除外）、`bot_restart_failed`、`supervisor_restart_retry`、`responder_watchdog_gave_up`、`responder_bot_missing`、`agm_cli_stale`、`pane_unowned`、`review_role=patrol` 的交辦回報、不認得的種類 | `bot_request`、`approval_requested`、`mission_*`、其餘交辦回報（含 `assignment_undeliverable`）；巡檢自己倒下的 `watchdog_gave_up` 與 `notify_exhausted` 的 `incident_*` |
 | 喚醒節流 | `notify_interval_secs`（600） | 短窗批次 `responder_batch_secs`（15）：最舊的待辦等滿、且距上次喚醒也滿才叫 |
 
 **協調者的健康算進頂層 `status`**（review 2026-09-16）：它是 bot 申請、核准請求與所有 `mission_*` 的唯一收件人，
@@ -1729,7 +1730,8 @@ supervisor 相關資料表與欄位都是 additive，`db::migrate` 重跑冪等�
 - **角色身分**：只認 `X-AM-Bot-Id` + 該 bot 的 hook token（`X-AM-Bot-Token`）。`bin/agm` 在自己的 pane 裡（`AM_BOT_ID` 等於 runtime 的 `self_bot_id`）才帶；
   驗證過的決定記成 `AGM:patrol`／`AGM:responder`，body 自稱的 `actor` 不算。`relay_from` 的 bot 申請沒帶 token 仍收，但標 `sender_verified=false`。
 - **協調者故障不倒回巡檢**：分流只看它**建立過**沒有（`supervisor_roles.responder` 的 `bot_id`），不看它現在活不活著。沒額度（CLI 撞限，或共享 5h／7d critical）→ `status=waiting_quota`、`notify_next_at`＝重置時間與上限取早者，事件留 `pending`、不計重試次數；
-  停著 → 看門狗（同 §18.9 的 30/60/120/300 秒、5 次）；放棄 → 推 `responder_watchdog_gave_up` 給巡檢。送不出去是有界退避（15 秒倍增到 `responder_max_backoff_secs`），**沒有次數上限**，
+  停著 → 看門狗（同 §18.9 的 30/60/120/300 秒、5 次）；放棄 → 推 `responder_watchdog_gave_up` 給巡檢。
+  反方向對稱（review 2026-09-16 c1 M2）：巡檢的看門狗放棄（`watchdog_gave_up`）與巡檢的通知用盡（`notify_exhausted`）路由給**協調者**並叫醒——倒下的就是巡檢，送給它沒有人收；協調者未建立時巡檢的待送查詢照舊撈得到。送不出去是有界退避（15 秒倍增到 `responder_max_backoff_secs`），**沒有次數上限**，
   也不開 `notify_exhausted`。巡檢自己的事件照舊有 `notify_max_attempts`。
   登記的 bot 被刪掉 → `status=missing`（`configured:true`、`bot_present:false`），推一次 `responder_bot_missing` 給巡檢，事件照樣留在協調者的佇列等它被建回來。
 - **舊部署**（協調者未建立）：協調的事件由巡檢照 600 秒節流收，行為與之前相同；建立之後才分流。已送給巡檢的舊事件仍歸巡檢。
