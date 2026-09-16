@@ -1628,6 +1628,23 @@ pub struct Decided {
     pub followup: Option<Assignment>,
 }
 
+/// `followup_request_id` 已經是**另一件**交辦的 client_request_id（不是這個 parent 的同一份續作）。
+/// 具名錯誤，API 才能回 409 `followup_request_id_taken`：以前是 `anyhow::bail!` → 502 upstream，
+/// 看起來像 daemon 壞了，照 5xx 重試同一個 id 永遠 502，看不出該換 id（review 2026-09-16 c1 L2）。
+#[derive(Debug)]
+pub struct FollowupIdTaken {
+    pub client_request_id: String,
+    pub assignment_id: String,
+}
+
+impl std::fmt::Display for FollowupIdTaken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "client_request_id {} already belongs to another assignment ({})", self.client_request_id, self.assignment_id)
+    }
+}
+
+impl std::error::Error for FollowupIdTaken {}
+
 /// Decide an assignment and, for `followup`, create its continuation — **in one transaction**,
 /// guarded on the status we validated against.
 ///
@@ -1693,17 +1710,20 @@ pub async fn review_with_followup(
         let new_id = match existing {
             Some((existing_id, parent, target, text)) => {
                 if parent.as_deref() != Some(id) || target != f.target_bot_id || text != f.text {
-                    anyhow::bail!("client_request_id {} already belongs to another assignment", f.client_request_id);
+                    return Err(FollowupIdTaken { client_request_id: f.client_request_id.to_string(), assignment_id: existing_id }.into());
                 }
                 existing_id
             }
             None => {
                 let new_id = crate::db::ulid();
+                // `expects_review` 抄父交辦：通知（`--notice`）送不出去再 followup 重送，仍然是通知——
+                // 以前這裡用欄位預設 1，續作變回要驗收的工單，兩小時後開 `assignment_stalled`（review 2026-09-16 c1 L6）。
                 sqlx::query(
                     "INSERT INTO supervisor_assignments
                        (id, supervisor_id, request_id, target_bot_id, client_request_id, text, status, attempts,
-                        ownership_json, follow_up_of, created_at, updated_at)
-                     VALUES (?,?,?,?,?,?, 'queued', 0, ?, ?, ?, ?)",
+                        ownership_json, follow_up_of, expects_review, created_at, updated_at)
+                     VALUES (?,?,?,?,?,?, 'queued', 0, ?, ?,
+                             COALESCE((SELECT expects_review FROM supervisor_assignments WHERE id = ?), 1), ?, ?)",
                 )
                 .bind(&new_id)
                 .bind(SUPERVISOR_ID)
@@ -1712,6 +1732,7 @@ pub async fn review_with_followup(
                 .bind(f.client_request_id)
                 .bind(f.text)
                 .bind((!f.ownership.is_empty()).then(|| serde_json::to_string(f.ownership).unwrap_or_default()))
+                .bind(id)
                 .bind(id)
                 .bind(&now)
                 .bind(&now)
@@ -3275,7 +3296,12 @@ mod tests {
             Some(spec("bot1", "taken-crid", "把 A 做完", &[])),
         )
         .await;
-        assert!(err.is_err(), "adopting someone else's request id is refused");
+        let taken = err.as_ref().err().and_then(|e| e.downcast_ref::<FollowupIdTaken>());
+        assert!(
+            taken.is_some_and(|t| t.assignment_id == other.id),
+            "adopting someone else's request id is refused with a named error: {:?}",
+            err.as_ref().err().map(ToString::to_string)
+        );
 
         let parent_now = assignment(&p, &parent.id).await.unwrap().unwrap();
         assert_eq!(parent_now.status, "awaiting_review", "the parent was not superseded");
@@ -3286,6 +3312,23 @@ mod tests {
         assert_eq!(all.len(), 2, "no orphan continuation was left behind");
         assert!(all.iter().all(|a| a.follow_up_of.is_none()));
         assert_eq!(assignment(&p, &other.id).await.unwrap().unwrap().text, "別人的工作", "and the other row is untouched");
+    }
+
+    /// 通知送不出去再 followup：續作仍是通知，不會變回要驗收、兩小時後被當成卡住的工單（review 2026-09-16 c1 L6）。
+    #[tokio::test]
+    async fn a_followup_of_a_notice_is_still_a_notice() {
+        let p = pool().await;
+        get_or_init(&p).await.unwrap();
+        let notice = insert_assignment(&p, None, "bot1", "hello-1", "收到，進 idle", &[], None, false).await.unwrap();
+        let task = insert_assignment(&p, None, "bot1", "task-1", "做 A", &[], None, true).await.unwrap();
+        for (parent, crid) in [(&notice, "hello-1-r"), (&task, "task-1-r")] {
+            let d = review_with_followup(&p, &parent.id, "queued", "followup", "AGM", "cli", None, None, Some(spec("bot1", crid, "再送一次", &[])))
+                .await
+                .unwrap()
+                .unwrap();
+            let child = d.followup.unwrap();
+            assert_eq!(child.expects_review, parent.expects_review, "{crid}");
+        }
     }
 
     /// The transactional outbox: either the assignment moves and the event is queued, or

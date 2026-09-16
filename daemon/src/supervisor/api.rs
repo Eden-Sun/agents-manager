@@ -356,7 +356,13 @@ pub async fn post_review(
         spec,
     )
     .await
-    .map_err(up)?;
+    .map_err(|e| match e.downcast_ref::<store::FollowupIdTaken>() {
+        Some(t) => LcError::conflict(
+            "followup_request_id already belongs to another assignment; pick a new id",
+            json!({"reason": "followup_request_id_taken", "client_request_id": t.client_request_id, "assignment_id": t.assignment_id}),
+        ),
+        None => up(e),
+    })?;
 
     let Some(decided) = decided else {
         // The guard did not match: somebody decided it between our read and our write, and
@@ -1588,6 +1594,26 @@ mod review_boundary_tests {
         }
         assert_eq!(store::list_assignments(&app.db, 20).await.unwrap().len(), 2);
         assert_eq!(store::reviews(&app.db, &parent.id).await.unwrap().len(), 1);
+
+        // 沿用別筆交辦的 request id 當續作 id：409 followup_request_id_taken，不是 502（review 2026-09-16 c1 L2）。
+        let now = crate::db::now();
+        sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES ('p','/tmp','p',?)").bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('bot','p','bot','claude','t',?)")
+            .bind(&now).execute(&app.db).await.unwrap();
+        let other = store::insert_assignment(&app.db, None, "bot", "other-crid", "another", &[], None, true).await.unwrap();
+        store::settle_and_notify(&app.db, &other.id, "completed", true, Some("done"), None, "k-other", "assignment_completed", &json!({}))
+            .await
+            .unwrap();
+        let input: ReviewIn = serde_json::from_value(json!({"decision":"followup",
+            "followup_request_id":"parent","followup_text":"continue again"})).unwrap();
+        let err = post_review(State(app.clone()), Path(other.id.clone()), HeaderMap::new(), Json(input)).await.unwrap_err();
+        match err {
+            LcError::Conflict(v) => {
+                assert_eq!(v["reason"], "followup_request_id_taken", "{v}");
+                assert_eq!(v["assignment_id"], parent.id);
+            }
+            other => panic!("expected 409, got {other:?}"),
+        }
         let mismatch = store::review_with_followup(&app.db, &parent.id, "superseded", "followup", "AGM", "test", None, None,
             Some(store::FollowupSpec { target_bot_id: "bot", client_request_id: "follow-1", text: "different text",
                 ownership: &[], request_id: None })).await;
