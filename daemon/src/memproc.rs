@@ -203,6 +203,9 @@ pub struct PaneFacts {
     pub foreground: Option<String>,
     /// 行程樹只有 shell 自己：沒有前景程式、沒有被 Ctrl-Z 丟到背景的 job、也沒有巢狀 shell。
     pub shell_only: bool,
+    /// 樹裡至少有一個行程讀得到**這顆 pane** 的環境。`false` 時 `bot_ids`／`project_ids` 是空的不代表
+    /// 「沒人開的」：macOS 讀不到 `-zsh` 本身的環境，閒著的 shell 永遠是這樣。
+    pub env_seen: bool,
 }
 
 const SHELLS: &[&str] = &["bash", "zsh", "sh", "fish", "dash", "ksh", "login", "-zsh", "-bash"];
@@ -246,9 +249,10 @@ pub fn pane_facts_for_shell(out: &str, pane_id: &str, shell_pid: i32) -> Option<
             f.foreground = Some(p.argv.clone());
         }
         let Some(blob) = envs.get(pid) else { continue };
-        if env_value(blob, "HERDR_PANE_ID").is_some_and(|id| id != pane_id) {
+        if env_value(blob, "HERDR_PANE_ID").as_deref() != Some(pane_id) {
             continue;
         }
+        f.env_seen = true;
         for (key, into) in [("AM_BOT_ID", &mut f.bot_ids), ("AM_PROJECT_ID", &mut f.project_ids)] {
             if let Some(v) = env_value(blob, key) {
                 if !into.contains(&v) {
