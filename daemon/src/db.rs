@@ -177,6 +177,9 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
         ("turns", "auto_resend", "ALTER TABLE turns ADD COLUMN auto_resend INTEGER NOT NULL DEFAULT 1"),
         ("turns", "rollout_waits", "ALTER TABLE turns ADD COLUMN rollout_waits INTEGER NOT NULL DEFAULT 0"),
         ("turns", "rollout_wait_key", "ALTER TABLE turns ADD COLUMN rollout_wait_key TEXT"),
+        // 第一次記下送達結果的時間（`prompt::mark_delivery`）。排隊的 turn 的 `created_at` 是**排進佇列**的時間，
+        // 重啟補 stall watchdog 要看的是「剛送出」，不是「剛排隊」（review 2026-09-16 deliv L3）。舊列 NULL＝退回 created_at。
+        ("turns", "delivered_at", "ALTER TABLE turns ADD COLUMN delivered_at TEXT"),
     ] {
         if !has_column(pool, table, col).await? {
             sqlx::query(ddl).execute(pool).await.with_context(|| format!("add {table}.{col}"))?;
@@ -432,6 +435,10 @@ pub struct Turn {
     #[sqlx(default)]
     #[serde(skip_serializing)]
     pub rollout_wait_key: Option<String>,
+    /// 第一次記下送達結果的時間；排隊送出的 turn 靠它判「剛送出」（`created_at` 是排隊的時間）。
+    #[sqlx(default)]
+    #[serde(skip_serializing)]
+    pub delivered_at: Option<String>,
 }
 
 #[derive(Debug, Clone, FromRow, serde::Serialize)]
@@ -733,6 +740,32 @@ mod tests {
         refund_resend(&pool, "t").await;
         let n: i64 = sqlx::query_scalar("SELECT resend_count FROM turns WHERE id='t'").fetch_one(&pool).await.unwrap();
         assert_eq!(n, 0, "退還不會退成負數");
+        pool.close().await;
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// schema 變更（additive）`turns.delivered_at`：沒有這一欄的舊 DB 開起來會補上，舊列是 NULL，`SELECT *` 照樣讀得進 `Turn`。
+    #[tokio::test]
+    async fn an_old_database_gains_turns_delivered_at_on_open() {
+        let dir = std::env::temp_dir().join(format!("am-delivered-at-{}", ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("old.sqlite3");
+        {
+            let pool = open(&path).await.unwrap();
+            sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES ('p','/tmp','p',?)").bind(now()).execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('b','p','b','claude','t',?)").bind(now()).execute(&pool).await.unwrap();
+            let conv = conversation_id(&pool, "b").await.unwrap();
+            sqlx::query("INSERT INTO turns (id,conversation_id,origin,status,delivery,created_at) VALUES ('t',?,'web','completed','ok',?)")
+                .bind(&conv).bind(now()).execute(&pool).await.unwrap();
+            // 做成上一版的形狀：這一欄還不存在。
+            sqlx::query("ALTER TABLE turns DROP COLUMN delivered_at").execute(&pool).await.unwrap();
+            assert!(!has_column(&pool, "turns", "delivered_at").await.unwrap());
+            pool.close().await;
+        }
+        let pool = open(&path).await.expect("舊 DB 照常開起來");
+        assert!(has_column(&pool, "turns", "delivered_at").await.unwrap(), "開的時候補上");
+        let t = sqlx::query_as::<_, Turn>("SELECT * FROM turns WHERE id='t'").fetch_one(&pool).await.unwrap();
+        assert_eq!(t.delivered_at, None, "舊列沒有送出時間：重啟補 watchdog 退回看 created_at");
         pool.close().await;
         std::fs::remove_dir_all(&dir).unwrap();
     }

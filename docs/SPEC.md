@@ -410,6 +410,8 @@ abort 之後照常 flush 出去。要取消排隊的派工，走交辦 `cancel`�
 鍵可能已經按下去，所以標成 `unknown`（不是當成沒送，也不是把回合結掉），交給既有的放棄／人工判斷。
 沒收的話那顆 bot 之後每則 prompt 都 409，而且 §18.10 的 safety 會一直把它讀成「正在送達臨界區」而擋住重啟窗口。
 同一輪也會把**兩分鐘內剛送出**（`delivery='ok'`）的 in-flight turn 補回 stall watchdog；更舊的不補，否則 12 秒後會把舊訊息再送一次。
+「剛送出」看 `turns.delivered_at`（`mark_delivery` 第一次記下送達結果的時間，之後不改），不看 `created_at`——排隊的 turn 的
+`created_at` 是排進佇列的時間，flush 可能晚半小時；沒有 `delivered_at` 的舊列才退回 `created_at`（review 2026-09-16 deliv L3）。
 
 **撤回**（一個字都沒送出而刪掉 turn 與訊息）之後推一次 `resync`：事件模型沒有「刪除」，不補的話客戶端會留著一顆送不出去的泡泡與一個永遠不會結束的回合。
 `NotAttempted`（零寫入）的重送要退還 `resend_count`：唯一一次補救機會不該被「框裡剛好有字」這種兩秒後就消失的原因吃掉。

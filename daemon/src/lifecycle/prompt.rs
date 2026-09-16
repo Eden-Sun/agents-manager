@@ -54,9 +54,11 @@ pub(crate) async fn mark_delivery(app: &Arc<App>, turn_id: &str, rec: DeliveryRe
     let auto = i64::from(rec.auto_resend);
     // 不重送的那條路照樣把重送額度用掉：回滾到不認得 `auto_resend` 的舊 binary 時，
     // 它仍然不會把同一則再打一次。
+    // `delivered_at` 只記第一次：之後 poller 補證據再記一次，不能讓一則舊的看起來像剛送出（重啟補 watchdog 看它，deliv L3）。
     let _ = sqlx::query(
         "UPDATE turns SET delivery=?, delivery_verified=?, auto_resend=?,
-                resend_count = CASE WHEN ? = 0 THEN MAX(resend_count, ?) ELSE resend_count END
+                resend_count = CASE WHEN ? = 0 THEN MAX(resend_count, ?) ELSE resend_count END,
+                delivered_at = COALESCE(delivered_at, ?)
           WHERE id=?",
     )
     .bind(rec.stored)
@@ -64,6 +66,7 @@ pub(crate) async fn mark_delivery(app: &Arc<App>, turn_id: &str, rec: DeliveryRe
     .bind(auto)
     .bind(auto)
     .bind(crate::lifecycle::MAX_PROMPT_RESENDS)
+    .bind(crate::db::now())
     .bind(turn_id)
     .execute(&app.db)
     .await;

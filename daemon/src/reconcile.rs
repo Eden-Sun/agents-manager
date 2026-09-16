@@ -88,7 +88,8 @@ pub async fn rearm_progress(app: &Arc<App>) {
             crate::lifecycle::arm_progress(app, &run.id, &run.bot_id, &turn.id).await;
             // 送出後幾秒內被重啟：補 Enter 與「畫面上找不到就重送」這兩層網都只活在上一個行程裡
             // （review 2026-09-16）。只對**剛送出**的補，不然會把幾小時前的 prompt 重送一次。
-            if turn.delivery == "ok" && fresh_enough(&turn.created_at) {
+            // 「剛送出」看送出的時間：排隊的 turn 的 created_at 是排進佇列的時間，flush 可能晚了半小時（deliv L3）。
+            if turn.delivery == "ok" && fresh_enough(turn.delivered_at.as_deref().unwrap_or(&turn.created_at)) {
                 crate::lifecycle::arm_stall(app, &run.id, &run.bot_id, &turn.id).await;
             }
         }
@@ -874,6 +875,52 @@ mod compat_tests {
         super::rearm_progress(app).await;
         let t = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(&turn).fetch_one(&app.db).await.unwrap();
         assert_eq!(t.delivery, "ok");
+    }
+
+    /// review 2026-09-16 deliv L3：排隊半小時、剛剛才 flush 送出就遇上重啟的那一筆，watchdog 要補回來——
+    /// 「剛送出」看 `delivered_at`，不看排隊時的 `created_at`；沒有 `delivered_at` 的舊列照舊看 `created_at`。
+    #[tokio::test]
+    async fn a_queued_turn_sent_just_before_a_restart_gets_its_watchdog_back() {
+        let env = tt::env().await;
+        let app = &env.app;
+        let long_ago = (chrono::Utc::now() - chrono::Duration::minutes(30)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let mut runs = Vec::new();
+        for (name, delivered_at) in [("flushed", Some(db::now())), ("old", None)] {
+            let bot = a_bot(&env, name).await;
+            let run = db::ulid();
+            sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,started_at) VALUES (?,?,'running','idle',?)")
+                .bind(&run).bind(&bot).bind(db::now()).execute(&app.db).await.unwrap();
+            let conv = db::conversation_id(&app.db, &bot).await.unwrap();
+            sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,delivery,created_at,delivered_at) VALUES (?,?,?,'web','in_flight','ok',?,?)")
+                .bind(db::ulid()).bind(&conv).bind(&run).bind(&long_ago).bind(delivered_at).execute(&app.db).await.unwrap();
+            runs.push(run);
+        }
+        super::rearm_progress(app).await;
+        let timers = app.stall_timers.lock().await;
+        assert!(timers.contains_key(&runs[0]), "排隊很久、剛送出：要補");
+        assert!(!timers.contains_key(&runs[1]), "沒有 delivered_at 的舊列照舊看 created_at：半小時前的不補");
+    }
+
+    /// `delivered_at` 由 `mark_delivery` 寫、只記第一次：poller 事後補證據再記一次，不能讓舊的看起來像剛送出。
+    #[tokio::test]
+    async fn the_delivery_time_is_recorded_once() {
+        let env = tt::env().await;
+        let app = &env.app;
+        let bot = a_bot(&env, "sent").await;
+        let conv = db::conversation_id(&app.db, &bot).await.unwrap();
+        let turn = db::ulid();
+        let long_ago = (chrono::Utc::now() - chrono::Duration::minutes(30)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        sqlx::query("INSERT INTO turns (id,conversation_id,origin,status,delivery,created_at) VALUES (?,?,'web','in_flight','pending',?)")
+            .bind(&turn).bind(&conv).bind(&long_ago).execute(&app.db).await.unwrap();
+        let at = |app: Arc<App>, turn: String| async move {
+            sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(turn).fetch_one(&app.db).await.unwrap().delivered_at
+        };
+        crate::lifecycle::mark_delivery(app, &turn, crate::lifecycle::Delivered::Handed.record().unwrap()).await;
+        let first = at(app.clone(), turn.clone()).await.expect("送出時記下");
+        assert!(first > long_ago);
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        crate::lifecycle::mark_delivery(app, &turn, crate::lifecycle::Delivered::Unverified.record().unwrap()).await;
+        assert_eq!(at(app.clone(), turn).await, Some(first), "只記第一次");
     }
 
     /// 補 stall watchdog 只補剛送出的：對幾小時前的 turn 補，等於 12 秒後把舊訊息再送一次。
