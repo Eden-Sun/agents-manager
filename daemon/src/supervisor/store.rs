@@ -1468,9 +1468,10 @@ pub async fn resume_quota_blocked(pool: &SqlitePool, id: &str, event_key: &str, 
     Ok(Settled { moved, event_new })
 }
 
-/// CLI 說的重試時間變了：只改 `resume_at`，不動狀態也不再發一次通知。
-pub async fn touch_resume_at(pool: &SqlitePool, id: &str, resume_at: &str) -> Result<()> {
-    sqlx::query("UPDATE supervisor_assignments SET resume_at=?, updated_at=? WHERE id=? AND status='quota_blocked'")
+/// 到了預計時間仍被擋：順延 `resume_at`，**並算一次** `quota_retries`（「重送 N 次仍被擋」的 N），
+/// 不動狀態也不再發一次通知。以前只改時間不算次數，沒寫時間的撞限永遠到不了 `quota_exhausted`。
+pub async fn extend_quota_blocked(pool: &SqlitePool, id: &str, resume_at: &str) -> Result<()> {
+    sqlx::query("UPDATE supervisor_assignments SET resume_at=?, quota_retries=quota_retries+1, updated_at=? WHERE id=? AND status='quota_blocked'")
         .bind(resume_at)
         .bind(crate::db::now())
         .bind(id)

@@ -399,9 +399,35 @@ pub async fn clear_limit_hit_for_bot(app: &Arc<App>, bot: &crate::db::Bot) {
     clear_limit_hit(app, &host, &base).await;
 }
 
+/// 每把 key 上一次被成功回合清撞限（[`clear_limit_hit`]）的時刻。只在記憶體：重啟後是空的，意思就是
+/// 「這個行程還沒看過任何成功回合」，parked 的交辦照舊等 `resume_at`（AGM 裁示：記憶體空了不等於額度回來）。
+/// 鍵帶 `data_dir`，一個行程裡的多個 `App`（測試）不會互相看到。
+fn cleared_at() -> &'static std::sync::Mutex<HashMap<String, chrono::DateTime<chrono::Utc>>> {
+    static M: std::sync::OnceLock<std::sync::Mutex<HashMap<String, chrono::DateTime<chrono::Utc>>>> =
+        std::sync::OnceLock::new();
+    M.get_or_init(Default::default)
+}
+
+fn cleared_at_key(app: &App, key: &str) -> String {
+    format!("{}\u{0}{key}", app.data_dir.display())
+}
+
+/// 這顆 bot 的帳號在 `since` 之後有沒有被成功回合清過撞限。`resume_quota_blocked` 用它分辨
+/// 「記憶體裡沒有撞限是因為真的被清掉了」與「只是重啟後什麼都不記得」（review 2026-09-16 M1）。
+pub async fn limit_cleared_since(app: &Arc<App>, bot: &crate::db::Bot, since: chrono::DateTime<chrono::Utc>) -> bool {
+    let host = crate::db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| LOCAL_HOST.to_string());
+    let keys = keys_for_bot(app, &host, bot).await;
+    let m = cleared_at().lock().unwrap();
+    keys.iter().any(|k| m.get(&cleared_at_key(app, k)).is_some_and(|t| *t > since))
+}
+
 /// 一回合真的跑完就拿掉「撞上限」，不必等它自己寫的時間。
+///
+/// 不管這一格當下有沒有撞限都記下時刻：成功回合本身就是「這個帳號收得下工作」的證據，
+/// 撞限可能在那之前已經自己過期、或是重啟後根本沒被回填。
 pub async fn clear_limit_hit(app: &Arc<App>, host: &str, base: &str) {
     let key = quota_key(host, base);
+    cleared_at().lock().unwrap().insert(cleared_at_key(app, &key), chrono::Utc::now());
     let mut quotas = app.quotas.lock().await;
     let Some(q) = quotas.get_mut(&key) else { return };
     if q.limit_hit.is_none() {

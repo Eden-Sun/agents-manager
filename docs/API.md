@@ -1100,7 +1100,7 @@ body 直接是檔案位元組（**不是** multipart），`Content-Type` 就是�
     **不是** `dispatch_failed`——工作沒失敗，是進不去（SPEC §18.8）。
   - `turn_status`（回合還在跑時 `null`）：`completed` / `completed_fallback` / `failed` / `dispatch_failed` / `turn_missing` / `quota_exhausted` / `identity_switch`。**回合結束不會自己變 `completed`。**
   - `kind:"notice"`（或 `expects_review:false`，兩者都給時以它為準）：送達且回合正常結束直接 `completed`、inbox `assignment_noticed`；送失敗仍進 `awaiting_review`。CLI `agm assign --notice`。
-  - `quota_blocked`：目標帳號被 CLI 擋著；帶 `resume_at`、`quota_retries`。額度回來後用 `<client_request_id>#r<n>` 自動重送，推 `assignment_quota_blocked` / `assignment_quota_resumed`；超過 6 次 → `awaiting_review` + `quota_exhausted`。
+  - `quota_blocked`：目標帳號被 CLI 擋著；帶 `resume_at`、`quota_retries`。額度回來後用 `<client_request_id>#r<n>` 自動重送，推 `assignment_quota_blocked` / `assignment_quota_resumed`；到期仍被擋時順延（不發通知）也算一次 `quota_retries`，累計 6 次 → `awaiting_review` + `quota_exhausted`。
   - `legacy_closed=true`：驗收狀態出現前就關掉的舊資料，未經驗收。
   - `ownership_conflicts`：前綴重疊的其他未結案交辦，只回報不阻擋。
   - `mission_id` 與 `role` 見「群組任務」。
