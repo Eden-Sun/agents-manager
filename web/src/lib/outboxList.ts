@@ -34,6 +34,8 @@ export function remainingLabel(secs: number): string {
 export function emptyReason(reason: string | null, botSelected: boolean): string {
   if (!botSelected) return '先選一顆 bot，這裡會列出它交給你的檔案。'
   if (reason === 'outbox_remote') return '這顆 bot 在遠端主機上，它的檔案不在這台機器，列不出來。'
+  // daemon 902a85c：outbox 或 bot 那一層是符號連結、擁有者不是資料目錄的使用者——為了安全不列也不給下載，不能說成「還沒有檔案」。
+  if (reason === 'outbox_untrusted') return '這顆 bot 的 outbox 不是一般資料夾（符號連結或擁有者不對），為了安全不列出、也不給下載。'
   return '還沒有檔案。bot 把要給你的檔案放進 $AM_OUTBOX 之後按重整就看得到；放進去 1 小時後會自動清掉。'
 }
 
