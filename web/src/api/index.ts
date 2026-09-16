@@ -144,6 +144,8 @@ export interface ProjectPane {
   first_seen: string
   last_seen: string
   gc_optin: boolean
+  /** daemon 判的「只能看」（有 listen port）。舊 daemon 沒這欄＝`undefined`，呼叫端退回看 port（`lib/shellAccess`）。 */
+  read_only?: boolean
 }
 
 function toPane(v: unknown): ProjectPane {
@@ -167,6 +169,7 @@ function toPane(v: unknown): ProjectPane {
     first_seen: str(r.first_seen),
     last_seen: str(r.last_seen),
     gc_optin: r.gc_optin === true,
+    ...(typeof r.read_only === 'boolean' ? { read_only: r.read_only } : {}),
   }
 }
 
