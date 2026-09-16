@@ -786,9 +786,10 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   刻意保守：批次最不能做的就是砍掉使用者正在等的回合。
   **輪到那一顆真的要重啟前再判斷一次**（`bulk_restart::recheck`，同一張表，外加「已經不是候選」→ `no_longer_pending`）：計畫是按下去那一刻的快照，
   排在後面的要等上一兩分鐘，這段時間 AGM 派了工或使用者打了字，它就在回合中了（review 2026-09-16）。改判跳過的推 `bots_restart_progress` `status:"skipped"`，也列進 `done.skipped`。
-  剩下的空檔是「重看」到 `restart_bot_with` 拿到 bot 鎖之間（毫秒級），要完全關掉得在鎖裡判斷。
+  「重看」到拿到 bot 鎖之間的毫秒級空檔也關掉了：批次帶 `StartOpts.require_idle`，`restart_bot_with`／`restart_child_in_pane_with` **拿到鎖之後、送 ctrl+c 之前**
+  再看一次（沒 run、非 running、working、blocked、非 idle、有 in-flight turn），不閒置回 409 `not_idle`（`busy` 帶上面的代碼），什麼都不動。使用者自己按的單顆重啟不帶這個旗標。
 - **同時只准一批**：已經有一批在跑時再按，回那一批的 `batch_id`（`already_running: true`、`total: 0`），不另開一份重疊的清單。
-- **執行**：序列、一顆一顆，每顆 `lifecycle::restart_bot_with(StartOpts { resume_native: true })`——stop 與 start 在**同一次持有 bot 鎖**裡做完
+- **執行**：序列、一顆一顆，每顆 `lifecycle::restart_bot_with(StartOpts { resume_native: true, require_idle: true })`——stop 與 start 在**同一次持有 bot 鎖**裡做完
   （中間有空檔時，拿鎖前讀了 agent 清單的 reconcile 會搶進來把剛停掉的 agent 收編成新 run，start 就以 `active run already exists` 放棄，bot 從此沒人拉起）。
   start 被一個 pane 已不存在的 run 擋住時先結束那個 run 再試。`stop_bot` 寫上 `ended_at` 後剛結束的 session 成為「上一個 session」，claude 拿到 `--resume <session>`。
   與 `POST /bots/:id/restart` 的差別只有這個旗標（那條是重新開始）。
@@ -1296,6 +1297,7 @@ launchd `com.agm.browser-gc` 跑 `bin/browser-gc-kick.sh`，`StartInterval` 依�
 
 ### 18.5 AGM 派 child 的模型預設
 `cc0/opus/low`。不預設 `fable`、不預設 `high` 以上，任務明確需要才調高並記理由。巡檢自己的模型由 supervisor 控制器切換（`fable` 剩 < 5% 切 `opus`，30 分鐘冷卻內只自動切一次，不自動切回）；
+控制器讀的額度 key 跟寫入端同一條規則（`quota::quota_base_for_host(local, "claude", identity)`），查不到就是沒有讀數（不動），**不借裸 `claude` 那格**——那可能是另一個帳號（review2 quota L3）；
 協調者固定 `cc0/opus/high`，沒有自動切換（§18.15）。
 
 ### 18.5a Claude Code 換版就解析（使用者 2026-09-16）

@@ -11,10 +11,37 @@ async fn identity_args(app: &Arc<App>, bot: &db::Bot, host: &str) -> Vec<String>
 
 /// `resume_native` continues the bot's last native session (batch update restart).
 /// `fork_session`：從這個 native session 分出一個新 session（`POST /bots/:id/fork` 的第一次啟動，SPEC §6.10）。
+/// `require_idle`：restart 在**拿到 bot 鎖之後**再確認一次閒置，不閒置回 409 `not_idle`、什麼都不動（一鍵重啟用）。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StartOpts {
     pub resume_native: bool,
     pub fork_session: Option<String>,
+    pub require_idle: bool,
+}
+
+/// 這顆 bot 現在為什麼不能被重啟；`None` ＝ 閒置。呼叫端持 bot 鎖。理由的代碼與 `bulk_restart::Skip` 一致。
+///
+/// 一鍵重啟在排到這顆時 recheck 過一次，但 recheck 到這裡拿到鎖之間仍有空檔：使用者剛好在那幾毫秒送出一則，
+/// 那一回合會被 ctrl+c 砍掉（review2 quota #5）。鎖內再看一次才真的關掉。
+async fn busy_reason_locked(app: &Arc<App>, bot_id: &str) -> LcResult<Option<&'static str>> {
+    let Some(run) = db::active_run(&app.db, bot_id).await.map_err(up)? else { return Ok(Some("not_running")) };
+    Ok(if run.state != "running" {
+        Some("not_running")
+    } else if run.agent_status == "working" {
+        Some("working")
+    } else if run.agent_status == "blocked" {
+        Some("blocked")
+    } else if run.agent_status != "idle" {
+        Some("unknown_status")
+    } else if db::in_flight_turn(&app.db, &run.id).await.map_err(up)?.is_some() {
+        Some("turn_in_flight")
+    } else {
+        None
+    })
+}
+
+fn not_idle(bot_id: &str, why: &str) -> LcError {
+    LcError::conflict("not_idle", json!({"bot_id": bot_id, "busy": why}))
 }
 
 pub async fn start_bot(app: &Arc<App>, bot_id: &str) -> LcResult<String> {
@@ -589,6 +616,11 @@ pub async fn restart_bot_with(app: &Arc<App>, bot_id: &str, opts: StartOpts) -> 
     // Checked before the stop, or the user's agent gets ctrl+c for nothing.
     let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     refuse_default_session(&bot)?;
+    if opts.require_idle {
+        if let Some(why) = busy_reason_locked(app, bot_id).await? {
+            return Err(not_idle(bot_id, why));
+        }
+    }
     stop_bot_locked(app, bot_id).await?;
     match start_bot_locked_with(app, bot_id, opts.clone()).await {
         Err(LcError::Conflict(v)) if v.get("reason").and_then(|r| r.as_str()) == Some("active run already exists") => {
@@ -612,8 +644,18 @@ pub async fn restart_bot_with(app: &Arc<App>, bot_id: &str, opts: StartOpts) -> 
 /// （`CLAUDE_CONFIG_DIR`、shim）daemon 重建不了。沒注入 hook，回覆照舊走終端快照。
 /// 過程中 pane 不見了就不重開。
 pub async fn restart_child_in_pane(app: &Arc<App>, bot_id: &str) -> LcResult<String> {
+    restart_child_in_pane_with(app, bot_id, false).await
+}
+
+/// 同上；`require_idle` 見 [`StartOpts::require_idle`]。
+pub async fn restart_child_in_pane_with(app: &Arc<App>, bot_id: &str, require_idle: bool) -> LcResult<String> {
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
+    if require_idle {
+        if let Some(why) = busy_reason_locked(app, bot_id).await? {
+            return Err(not_idle(bot_id, why));
+        }
+    }
     let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     if bot.managed_by != "child" {
         return Err(LcError::Bad("這不是 agent spawn 出來的子 agent".into()));
@@ -1247,3 +1289,77 @@ mod tab_tests {
     }
 }
 
+/// 一鍵重啟的鎖內閒置確認（review2 quota #5 的最後一段空檔）。
+#[cfg(test)]
+mod idle_restart_tests {
+    use super::*;
+    use crate::testing as tt;
+
+    async fn bot_with_run(env: &tt::Env, managed_by: &str, agent_status: &str) -> (String, String) {
+        let app = &env.app;
+        let bot_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, managed_by, created_at)
+             VALUES (?,?,?,'claude','[]',0,1,'tok',?,?)",
+        )
+        .bind(&bot_id)
+        .bind(&env.project_id)
+        .bind(format!("busy-{bot_id}"))
+        .bind(managed_by)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let run_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, pane_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running',?,'pane-busy','busy','test',?)",
+        )
+        .bind(&run_id)
+        .bind(&bot_id)
+        .bind(agent_status)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        (bot_id, run_id)
+    }
+
+    fn reason(e: LcError) -> (String, String) {
+        match e {
+            LcError::Conflict(v) => (v["reason"].as_str().unwrap_or_default().into(), v["busy"].as_str().unwrap_or_default().into()),
+            other => panic!("expected 409, got {other:?}"),
+        }
+    }
+
+    /// 排到它的那一刻還閒著、拿到鎖時已經在跑：不送 ctrl+c、run 原封不動。
+    #[tokio::test]
+    async fn a_bot_that_got_busy_before_the_lock_is_not_restarted() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        for (status, want) in [("working", "working"), ("blocked", "blocked")] {
+            let (bot_id, run_id) = bot_with_run(&env, "user", status).await;
+            let opts = StartOpts { resume_native: true, require_idle: true, ..Default::default() };
+            assert_eq!(reason(restart_bot_with(&app, &bot_id, opts).await.unwrap_err()), ("not_idle".into(), want.into()));
+            assert_eq!(db::active_run(&app.db, &bot_id).await.unwrap().map(|r| (r.id, r.state)), Some((run_id, "running".into())));
+        }
+        // 閒著但還有一回合沒收掉，也不動。
+        let (bot_id, run_id) = bot_with_run(&env, "user", "idle").await;
+        let conv = db::conversation_id(&app.db, &bot_id).await.unwrap();
+        sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'web','in_flight','ok',?)")
+            .bind(db::ulid())
+            .bind(&conv)
+            .bind(&run_id)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let opts = StartOpts { resume_native: true, require_idle: true, ..Default::default() };
+        assert_eq!(reason(restart_bot_with(&app, &bot_id, opts).await.unwrap_err()).1, "turn_in_flight");
+        // 子 agent 的原地重啟也一樣。
+        let (kid, _) = bot_with_run(&env, "child", "working").await;
+        assert_eq!(reason(restart_child_in_pane_with(&app, &kid, true).await.unwrap_err()).1, "working");
+        let methods = env.herdr.methods();
+        assert!(!methods.iter().any(|m| m == "agent.send_keys" || m == "pane.close"), "什麼都沒動：{methods:?}");
+    }
+}
