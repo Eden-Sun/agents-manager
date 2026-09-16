@@ -1141,6 +1141,15 @@ AGM 的運維職責以本節為準，不靠任何 bot 的記憶。persona 是同
   期間不要同時觸發 claude 更新批次重啟。
 - 動 migration 的版本：上線前對正式 DB 的副本跑一次 migrate，重建申請附 DB 備份步驟。
 
+### 18.2a 已安裝的 `bin/agm` 跟著換版；ops 腳本仍要手動裝
+
+- `bin/agm` 是 binary 內嵌的 `scripts/agm.py`。**daemon 每次開機**對已設定的巡檢與協調者（有登記 bot 的角色）各自的工作目錄比對 `bin/agm`：
+  相同不寫；不同先把舊檔留成 `bin/agm.bak-<舊內容 FNV-1a 前 12 碼>`（同名已在就不重複留），再 tmp＋rename 原子寫入、權限 0755，記 info log（角色、舊→新雜湊、備份檔名）。
+  角色沒設定、目錄或 `bin/` 不存在就跳過，不代建。
+- **只動 `bin/agm`**：`CLAUDE.md`、`persona.md`、`runtime.json`、身分／model／effort 一律不碰（那些只在 `agm supervisor-setup`／`responder setup` 寫；開機不走 setup）。
+- 寫不進去不擋開機：記 warn，推一則 `agm_cli_stale` inbox（路由給巡檢並喚醒），payload 帶角色、路徑、內嵌版雜湊與錯誤。
+- **`scripts/ops/*.sh`（`daemon-update-kick.sh` 等）與 `*-task.md` 沒有內嵌，不會自動更新**——改了就照 `scripts/ops/README.md` 手動 install，並留備份。
+
 ### 18.3 喚醒 AGM 的節流
 巡檢：`[supervisor] notify_interval_secs`（預設 600），規則見 §5；只有 `wake=1` 的事件會開一次喚醒，送前合併重複（§18.15）。協調者：短窗批次（§18.15）。
 API 端狀態機見 `API.md` 的 `GET /api/supervisor/inbox`。

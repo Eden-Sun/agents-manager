@@ -6,6 +6,7 @@
 
 pub mod api;
 pub mod bot_requests;
+pub mod cli_refresh;
 pub mod controller;
 pub mod health;
 pub mod incidents;
