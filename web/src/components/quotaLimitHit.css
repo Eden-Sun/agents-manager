@@ -8,7 +8,10 @@
 .quota-hp.focused.quota-blocked,
 /* 分隔線規則 `.quota-hp + .quota-hp` 跟這條同特異度，載入順序一翻就把左邊那條染回灰色，看起來像缺一邊
    （2026-09-16 使用者：紅框左側不見了）。多一個 class 的特異度贏過它，不靠檔案順序。 */
-.quota-hp + .quota-hp.quota-blocked {
+.quota-hp + .quota-hp.quota-blocked,
+/* 手機另有一條把格間分隔線設成透明的 `.main-head .quota-hp + .quota-hp`（多一層 .main-head），又把紅框左邊吃掉
+   （2026-09-16 使用者手機截圖）。同樣多帶一層贏過它。 */
+.main-head .quota-hp + .quota-hp.quota-blocked {
   border-color: color-mix(in srgb, var(--danger) 55%, var(--border));
   border-radius: 7px;
   margin: 0 2px;
