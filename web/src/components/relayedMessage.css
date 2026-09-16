@@ -4,7 +4,7 @@
 .msg.user.daemon-notice {
   align-self: flex-start;
   align-items: flex-start;
-  max-width: min(680px, 88%);
+  max-width: 90%;
 }
 
 /* 左槓＋面板底，跟使用者藍底與 bot 回覆（無槓）都分得開；尖角翻到左下。 */
