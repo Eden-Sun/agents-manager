@@ -32,6 +32,7 @@ impl IntoResponse for LcError {
             LcError::Bad(m) => (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_request", "message": m}))).into_response(),
             LcError::BadValue(v) => (StatusCode::BAD_REQUEST, Json(v)).into_response(),
             LcError::Unprocessable(v) => (StatusCode::UNPROCESSABLE_ENTITY, Json(v)).into_response(),
+            LcError::Forbidden(v) => (StatusCode::FORBIDDEN, Json(v)).into_response(),
             LcError::Upstream(m) => {
                 (StatusCode::BAD_GATEWAY, Json(json!({"error": "upstream", "message": m}))).into_response()
             }

@@ -196,6 +196,10 @@ CREATE TABLE IF NOT EXISTS supervisor_leases (
   acquired_at TEXT,
   expires_at TEXT,
   released_at TEXT,
+  -- acquire 當下發的一次性憑證：renew／release 要出示它。owner 與 fence 是公開欄位
+  -- （`lease status` 就看得到），只靠它們等於誰都能把別人正在換 binary 的窗口收掉。
+  -- 只在 acquire 的回應裡出現一次，不進任何唯讀輸出。升級前既有的列是 NULL（見 SPEC §18.10）。
+  lease_token TEXT,
   detail_json TEXT NOT NULL DEFAULT '{}'
 );
 CREATE TABLE IF NOT EXISTS supervisor_notes (
@@ -214,6 +218,9 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
     // 表還不存在時 `has_column` 回 false，ALTER 也會失敗——所以只在表已經在的時候補。
     if table_exists(pool, "supervisor_approvals").await? && !has_column(pool, "supervisor_approvals", "client_request_id").await? {
         sqlx::query("ALTER TABLE supervisor_approvals ADD COLUMN client_request_id TEXT").execute(pool).await?;
+    }
+    if table_exists(pool, "supervisor_leases").await? && !has_column(pool, "supervisor_leases", "lease_token").await? {
+        sqlx::query("ALTER TABLE supervisor_leases ADD COLUMN lease_token TEXT").execute(pool).await?;
     }
     for stmt in DDL.split(";\n") {
         let s = stmt.trim();
@@ -2249,6 +2256,20 @@ pub async fn decide_approval_from(
 }
 
 
+/// 一筆 append-only 的稽核紀錄。強制釋放這種「可以做、但要留下是誰為什麼」的動作走這裡。
+pub async fn add_note(pool: &SqlitePool, kind: &str, body: &Value) -> Result<String> {
+    let id = crate::db::ulid();
+    sqlx::query("INSERT INTO supervisor_notes (id, supervisor_id, kind, body, version, created_at) VALUES (?,?,?,?,1,?)")
+        .bind(&id)
+        .bind(SUPERVISOR_ID)
+        .bind(kind)
+        .bind(body.to_string())
+        .bind(crate::db::now())
+        .execute(pool)
+        .await?;
+    Ok(id)
+}
+
 /// 每筆核准的決定歷程，最舊在前。一次查完再分組：核准筆數不多，但一筆一次查詢會變 N+1。
 pub async fn approval_decisions(pool: &SqlitePool) -> Result<std::collections::HashMap<String, Vec<Value>>> {
     let rows: Vec<(String, String)> = sqlx::query_as(
@@ -2288,6 +2309,9 @@ pub struct Lease {
     pub acquired_at: Option<String>,
     pub expires_at: Option<String>,
     pub released_at: Option<String>,
+    /// **不要**放進 `to_json`：那個形狀會出現在 `lease status`、`/api/supervisor` 與事件裡。
+    #[sqlx(default)]
+    pub lease_token: Option<String>,
     pub detail_json: String,
 }
 
@@ -2355,10 +2379,11 @@ pub async fn acquire_lease(
     .fetch_optional(pool)
     .await?
     .flatten();
+    let token = crate::projection::new_token();
     let taken = sqlx::query(
         "UPDATE supervisor_leases
             SET owner=?, approval_id=?, target_commit=?, fence=fence+1, acquired_at=?, expires_at=?,
-                released_at=NULL, detail_json=?
+                released_at=NULL, lease_token=?, detail_json=?
           WHERE resource=? AND (released_at IS NOT NULL OR expires_at IS NULL OR expires_at <= ?)",
     )
     .bind(owner)
@@ -2366,6 +2391,7 @@ pub async fn acquire_lease(
     .bind(target_commit)
     .bind(&now)
     .bind(expires_at)
+    .bind(&token)
     .bind(detail.to_string())
     .bind(resource)
     .bind(&now)
@@ -2387,6 +2413,48 @@ pub async fn acquire_lease(
 
 /// Extend a lease you still hold. A stale fence, a different owner or an expired lease all fail
 /// — the holder has to find out it lost the window rather than assume it still has it.
+/// 出示的憑證對不對。**唯二**的放行：舊資料（升級前建的租約沒有 token，否則升級當下會卡住一個
+/// 窗口沒人能還）與呼叫端明說的強制釋放。兩者都由呼叫端負責留稽核。
+#[derive(Debug, Clone, Copy)]
+pub enum LeaseProof<'a> {
+    Token(&'a str),
+    /// 呼叫端什麼都沒帶。升級前建立的租約（`lease_token IS NULL`）才放行——否則升級當下
+    /// 握在手上的那個窗口永遠沒人還得了。
+    Absent,
+    /// daemon 啟動時收上一輪殘留的 restart 租約，或 AGM 的 `--force`。
+    Forced,
+}
+
+impl LeaseProof<'_> {
+    /// `stored` 是 DB 裡那一列的 token。
+    pub fn allows(&self, stored: Option<&str>) -> bool {
+        match (self, stored) {
+            (LeaseProof::Forced, _) => true,
+            // 升級前的舊租約：沒有 token 可以對，放行（一次性的過渡，見 SPEC §18.10）。
+            (_, None) => true,
+            (LeaseProof::Absent, Some(_)) => false,
+            (LeaseProof::Token(given), Some(want)) => {
+                // 長度先比，再逐位元組比：不要因為比對提早結束而洩漏前綴。
+                given.len() == want.len() && given.bytes().zip(want.bytes()).fold(0u8, |a, (x, y)| a | (x ^ y)) == 0
+            }
+        }
+    }
+
+    /// 強制釋放不比對持有者：持有者可能已經不在了，那正是要強制的理由。
+    pub fn is_forced(&self) -> bool {
+        matches!(self, LeaseProof::Forced)
+    }
+}
+
+/// 這個 resource 現在那一列的 token（沒有列或沒有 token 就是 `None`）。
+pub async fn lease_token(pool: &SqlitePool, resource: &str) -> Result<Option<String>> {
+    Ok(sqlx::query_scalar::<_, Option<String>>("SELECT lease_token FROM supervisor_leases WHERE resource=?")
+        .bind(resource)
+        .fetch_optional(pool)
+        .await?
+        .flatten())
+}
+
 pub async fn renew_lease(pool: &SqlitePool, resource: &str, owner: &str, fence: i64, expires_at: &str) -> Result<bool> {
     let now = crate::db::now();
     Ok(sqlx::query(
@@ -2417,6 +2485,18 @@ pub async fn release_lease(pool: &SqlitePool, resource: &str, owner: &str, fence
     .execute(pool)
     .await?
     .rows_affected()
+        > 0)
+}
+
+/// 強制釋放：不比對 owner／fence（持有者可能已經不在了，那正是要強制的理由）。
+/// 呼叫端負責留稽核紀錄。
+pub async fn force_release_lease(pool: &SqlitePool, resource: &str) -> Result<bool> {
+    Ok(sqlx::query("UPDATE supervisor_leases SET released_at=? WHERE resource=? AND released_at IS NULL")
+        .bind(crate::db::now())
+        .bind(resource)
+        .execute(pool)
+        .await?
+        .rows_affected()
         > 0)
 }
 

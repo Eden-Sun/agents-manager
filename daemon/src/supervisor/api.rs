@@ -1002,6 +1002,41 @@ pub struct LeaseHolderIn {
     pub fence: i64,
     #[serde(default)]
     pub ttl_secs: Option<i64>,
+    /// `acquire` 當下發的一次性憑證。owner 與 fence 是公開的，只靠它們等於誰都能把別人
+    /// 正在換 binary 的窗口收掉（review 2026-09-16）。
+    #[serde(default)]
+    pub lease_token: Option<String>,
+    /// AGM 的強制釋放（例如持有者已經不在了）。`reason` 必填，會寫進 supervisor_notes。
+    #[serde(default)]
+    pub force: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// 把 body 換成一個憑證。`force` 一定要附理由：強制釋放是可以做的事，但要留下是誰、為什麼。
+fn lease_proof<'a>(b: &'a LeaseHolderIn) -> Result<store::LeaseProof<'a>, LcError> {
+    if b.force {
+        let ok = b.reason.as_deref().map(str::trim).is_some_and(|r| !r.is_empty());
+        if !ok {
+            return Err(LcError::Bad("force 需要 --reason（會寫進稽核紀錄）".into()));
+        }
+        return Ok(store::LeaseProof::Forced);
+    }
+    // 沒帶不是當場拒絕：升級前建立的租約沒有 token 可以帶，那一種由 `allows()` 放行。
+    Ok(match b.lease_token.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        Some(t) => store::LeaseProof::Token(t),
+        None => store::LeaseProof::Absent,
+    })
+}
+
+/// 憑證對不上：一個字都不動。
+fn lease_forbidden(resource: &str, owner: &str, had_token: bool) -> LcError {
+    tracing::warn!(resource, claimed_owner = owner, had_token, "refused a lease renew/release without a matching token");
+    let reason = if had_token { "lease_token_mismatch" } else { "lease_token_required" };
+    LcError::Forbidden(json!({
+        "error": "forbidden", "reason": reason,
+        "message": "renew／release 要帶 acquire 當下拿到的 lease_token（真的要接管請用 force 並附理由）；租約沒有任何變動"
+    }))
 }
 
 pub async fn post_lease_renew(
@@ -1034,6 +1069,11 @@ pub async fn post_lease_renew(
             ));
         }
     }
+    // 憑證在任何寫入之前比對；`renew_lease` 只認 owner＋fence，那兩個是公開欄位。
+    let proof = lease_proof(&b)?;
+    if !proof.allows(store::lease_token(&app.db, &resource).await.map_err(up)?.as_deref()) {
+        return Err(lease_forbidden(&resource, &b.owner, b.lease_token.is_some()));
+    }
     let deadline = super::maintenance::lease_deadline(&iso_in(ttl), approval.as_ref().and_then(|a| a.expires_at.as_deref()));
     if !store::renew_lease(&app.db, &resource, &b.owner, b.fence, &deadline).await.map_err(up)? {
         let held = store::lease(&app.db, &resource).await.map_err(up)?;
@@ -1051,9 +1091,26 @@ pub async fn post_lease_release(
     Path(resource): Path<String>,
     Json(b): Json<LeaseHolderIn>,
 ) -> Result<Json<Value>, LcError> {
+    let proof = lease_proof(&b)?;
     // Consumes the approval (one yes, one window) and, for a restart window, lifts the holds it
     // placed so held assignments go out on the next pass.
-    let released = super::maintenance::release(&app, &resource, &b.owner, b.fence).await.map_err(up)?;
+    let released = super::maintenance::release(&app, &resource, &b.owner, b.fence, proof).await.map_err(|e| {
+        if e.to_string() == "lease_token_mismatch" {
+            lease_forbidden(&resource, &b.owner, b.lease_token.is_some())
+        } else {
+            up(e)
+        }
+    })?;
+    if b.force {
+        let reason = b.reason.clone().unwrap_or_default();
+        tracing::warn!(resource = %resource, owner = %b.owner, reason = %reason, "a maintenance window was force-released");
+        let _ = store::add_note(
+            &app.db,
+            "lease_force_release",
+            &json!({"resource": resource, "owner": b.owner, "fence": b.fence, "reason": reason, "released": released}),
+        )
+        .await;
+    }
     let l = store::lease(&app.db, &resource).await.map_err(up)?.ok_or_else(|| LcError::NotFound("lease".into()))?;
     app.emit("supervisor_changed", json!({"lease": l.to_json()})).await;
     Ok(Json(json!({"released": released, "lease": l.to_json()})))
@@ -1135,6 +1192,110 @@ mod approval_decision_tests {
     /// 「第一次決定」，而執行端可能已經拿著 approved 去建置了。
     /// HTTP 這一層的契約：重送同一個 request id 回同一筆、`created` 分得出來、
     /// 不會再推一次 `approval_requested`（AGM 不該為同一件事被叫醒兩次）。
+    /// owner 與 fence 是公開欄位（`lease status` 就看得到），只靠它們等於誰都能把別人正在換
+    /// binary 的窗口收掉——那一刻正好最不能被打斷（review 2026-09-16）。
+    #[tokio::test]
+    async fn only_the_holder_can_give_a_maintenance_window_back() {
+        let app = app().await;
+        let ap = store::create_approval(&app.db, "runner", "rebuild", "daemon", None, None, None).await.unwrap().approval;
+        store::decide_approval(&app.db, &ap.id, "approved", "AGM", None, None).await.unwrap();
+        let until = iso_in(900);
+        let lease = store::acquire_lease(&app.db, "rebuild", "runner", Some(&ap.id), None, &until, &json!({})).await.unwrap().unwrap();
+        let token = lease.lease_token.clone().expect("acquire 要發一把憑證");
+        let held = || async { store::lease(&app.db, "rebuild").await.unwrap().unwrap() };
+        let body = |v: serde_json::Value| -> LeaseHolderIn { serde_json::from_value(v).unwrap() };
+
+        // 什麼都不帶：403，租約一個字都不動。
+        let err = post_lease_release(State(app.clone()), Path("rebuild".into()), Json(body(json!({"owner": "runner", "fence": lease.fence}))))
+            .await
+            .unwrap_err();
+        let LcError::Forbidden(v) = &err else { panic!("expected 403, got {err:?}") };
+        assert_eq!(v["reason"], "lease_token_required");
+        assert!(held().await.released_at.is_none(), "被擋下來就不該動到租約");
+
+        // 帶錯的：一樣 403。
+        let err = post_lease_release(
+            State(app.clone()),
+            Path("rebuild".into()),
+            Json(body(json!({"owner": "runner", "fence": lease.fence, "lease_token": "0".repeat(token.len())}))),
+        )
+        .await
+        .unwrap_err();
+        let LcError::Forbidden(v) = &err else { panic!("expected 403, got {err:?}") };
+        assert_eq!(v["reason"], "lease_token_mismatch");
+        assert!(held().await.released_at.is_none());
+        assert_eq!(store::approval(&app.db, &ap.id).await.unwrap().unwrap().status, "approved", "核准也不該被消耗");
+
+        // 帶對的：成功。
+        let Json(out) = post_lease_release(
+            State(app.clone()),
+            Path("rebuild".into()),
+            Json(body(json!({"owner": "runner", "fence": lease.fence, "lease_token": token}))),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out["released"], true);
+        assert!(held().await.released_at.is_some());
+        assert_eq!(store::approval(&app.db, &ap.id).await.unwrap().unwrap().status, "consumed");
+        app.db.close().await;
+        std::fs::remove_dir_all(&app.data_dir).unwrap();
+    }
+
+    /// 強制釋放是可以做的事（持有者不在了），但要留下是誰、為什麼；沒理由就不准。
+    #[tokio::test]
+    async fn a_forced_release_needs_a_reason_and_leaves_a_note() {
+        let app = app().await;
+        let ap = store::create_approval(&app.db, "runner", "rebuild", "daemon", None, None, None).await.unwrap().approval;
+        store::decide_approval(&app.db, &ap.id, "approved", "AGM", None, None).await.unwrap();
+        let until = iso_in(900);
+        let lease = store::acquire_lease(&app.db, "rebuild", "runner", Some(&ap.id), None, &until, &json!({})).await.unwrap().unwrap();
+        let body = |v: serde_json::Value| -> LeaseHolderIn { serde_json::from_value(v).unwrap() };
+
+        let err = post_lease_release(
+            State(app.clone()),
+            Path("rebuild".into()),
+            Json(body(json!({"owner": "agm", "fence": lease.fence, "force": true}))),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, LcError::Bad(_)), "force 沒有理由就不准：{err:?}");
+        assert!(store::lease(&app.db, "rebuild").await.unwrap().unwrap().released_at.is_none());
+
+        let Json(out) = post_lease_release(
+            State(app.clone()),
+            Path("rebuild".into()),
+            Json(body(json!({"owner": "agm", "fence": lease.fence, "force": true, "reason": "持有者的 pane 不在了"}))),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out["released"], true);
+        let notes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_notes WHERE kind='lease_force_release'")
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(notes, 1, "強制釋放要留稽核紀錄");
+        app.db.close().await;
+        std::fs::remove_dir_all(&app.data_dir).unwrap();
+    }
+
+    /// 升級當下已經握在手上的舊租約沒有憑證可出示：擋死的話那個窗口永遠沒人還得了。
+    #[tokio::test]
+    async fn a_lease_taken_before_tokens_existed_can_still_be_returned() {
+        let app = app().await;
+        let ap = store::create_approval(&app.db, "runner", "rebuild", "daemon", None, None, None).await.unwrap().approval;
+        store::decide_approval(&app.db, &ap.id, "approved", "AGM", None, None).await.unwrap();
+        let until = iso_in(900);
+        let lease = store::acquire_lease(&app.db, "rebuild", "runner", Some(&ap.id), None, &until, &json!({})).await.unwrap().unwrap();
+        // 升級前的那一列：token 是 NULL。
+        sqlx::query("UPDATE supervisor_leases SET lease_token=NULL WHERE resource='rebuild'").execute(&app.db).await.unwrap();
+
+        let body: LeaseHolderIn = serde_json::from_value(json!({"owner": "runner", "fence": lease.fence})).unwrap();
+        let Json(out) = post_lease_release(State(app.clone()), Path("rebuild".into()), Json(body)).await.unwrap();
+        assert_eq!(out["released"], true, "舊租約要還得了");
+        app.db.close().await;
+        std::fs::remove_dir_all(&app.data_dir).unwrap();
+    }
+
     #[tokio::test]
     async fn resending_one_approval_request_id_returns_the_same_row() {
         let app = app().await;

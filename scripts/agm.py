@@ -685,9 +685,18 @@ def cmd_lease(client: Client, cfg: dict, args) -> object:
         return client.post(path, body)
     if args.fence is None:
         raise AgmError("bad_args", f"lease {args.op} 需要 --fence（acquire 回傳的那個）", 2)
+    # renew／release 要出示 acquire 當下發的一次性憑證：owner 與 fence 是公開欄位
+    # （`lease status` 就看得到），只靠它們等於誰都能把別人正在換 binary 的窗口收掉。
     body = {"owner": args.owner, "fence": args.fence}
     if args.ttl:
         body["ttl_secs"] = args.ttl
+    if args.lease_token:
+        body["lease_token"] = args.lease_token
+    if getattr(args, "force", False):
+        if not args.reason:
+            raise AgmError("bad_args", "lease release --force 需要 --reason（會寫進稽核紀錄）", 2)
+        body["force"] = True
+        body["reason"] = args.reason
     return client.post(path, body)
 
 
@@ -1088,8 +1097,15 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--commit", help="acquire：要處理的 commit，必須符合核准")
     s.add_argument("--ttl", type=int, metavar="SECS", help="租約長度（預設 900，上限 3600）")
     s.add_argument("--fence", type=int, help="renew/release：acquire 回傳的 fence")
+    s.add_argument(
+        "--lease-token",
+        dest="lease_token",
+        help="renew/release：acquire 回應裡的 lease_token（只出現那一次，不會在 lease status 裡）",
+    )
+    s.add_argument("--force", action="store_true", help="release：強制接管（持有者已經不在了），要附 --reason，會留稽核紀錄")
     s.add_argument("--allow-busy", action="store_true", dest="allow_busy", help="acquire：跳過「沒人在跑」的檢查")
     s.add_argument("--exclude-bot", action="append", dest="exclude_bot", metavar="BOT_ID", help="idle 檢查要忽略的 bot")
+    s.add_argument("--reason", help="release --force：為什麼要強制接管")
     s.set_defaults(func=cmd_lease)
 
     s = sub.add_parser("persona", help="人設：show / set / adopt-embedded")

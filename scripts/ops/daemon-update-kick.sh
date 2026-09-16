@@ -296,14 +296,22 @@ if [ "$ESCALATED" = "1" ]; then
   log "安全窗口是升級後才成立的：核准後已等 ${ESC_MINS} 分鐘（縮小封鎖面）"
 fi
 
-LEASE=$("$AGM" --compact lease acquire rebuild --approval "$APPROVAL" --commit "$HEAD_SHA" \
+# acquire 的回應同時帶 fence 與**一次性的 lease_token**：交還窗口要出示它（owner／fence 是公開欄位，
+# 光憑它們誰都能把別人正在換 binary 的窗口收掉）。token 只在這一次回應裡出現，之後查不到。
+ACQUIRED=$("$AGM" --compact lease acquire rebuild --approval "$APPROVAL" --commit "$HEAD_SHA" \
   --owner "$OWNER" --ttl 3600 "${EXCL[@]}" 2>>"$LOG" | python3 -c '
 import json,sys
-print(json.load(sys.stdin).get("lease", {}).get("fence") or "")
-' 2>/dev/null) || LEASE=""
+d = json.load(sys.stdin)
+print("%s|%s" % (d.get("lease", {}).get("fence") or "", d.get("lease_token") or ""))
+' 2>/dev/null) || ACQUIRED=""
+LEASE=${ACQUIRED%%|*}
+LEASE_TOKEN=${ACQUIRED#*|}
 if [ -z "$LEASE" ]; then
   log "拿不到 rebuild 窗口（可能有人正在做或核准對不上），這輪不派"; exit 0
 fi
+# 舊 daemon 還沒有 token（升級前的那一版）：照舊不帶，release 那邊會放行並留 warn。
+TOKEN_ARG=""
+[ -n "$LEASE_TOKEN" ] && TOKEN_ARG=" --lease-token $LEASE_TOKEN"
 log "已取得 rebuild 窗口 fence=$LEASE"
 
 TMP=$(mktemp)
@@ -313,7 +321,8 @@ cat "$DIR/daemon-update-task.md" > "$TMP" 2>/dev/null || true
   printf 'origin/main %s。核准 %s，rebuild 租約 fence %s（owner %s）。\n' "$HEAD_SHA" "$APPROVAL" "$LEASE" "$OWNER"
   [ -n "$ESC_NOTE" ] && printf '%s\n' "$ESC_NOTE"
   # shellcheck disable=SC2016  # 單引號是刻意的：反引號與 %s 都是要原樣印出去的文字
-  printf '做完請回報，並用 `bin/agm lease release rebuild --owner %s --fence %s` 交還窗口；\n' "$OWNER" "$LEASE"
+  printf '做完請回報，並用 `bin/agm lease release rebuild --owner %s --fence %s%s` 交還窗口；\n' "$OWNER" "$LEASE" "$TOKEN_ARG"
+  printf '（lease-token 只在 acquire 那一次出現，查不到第二次；真的拿不到就請 AGM 用 --force 並附理由接管。）\n'
   printf '需要重啟正式 daemon 另外申請 restart 核准與租約，替換前請 AGM 重驗所有使用者與排程回合。\n'
 } >> "$TMP"
 if "$AGM" --compact assign --bot "$BOT" --text-file "$TMP" \
@@ -323,6 +332,7 @@ if "$AGM" --compact assign --bot "$BOT" --text-file "$TMP" \
   log "已派工 agm-daemon-update-$HEAD_SHA"
 else
   log "派工失敗，交還窗口"
-  "$AGM" --compact lease release rebuild --owner "$OWNER" --fence "$LEASE" >> "$LOG" 2>&1 || true
+  # shellcheck disable=SC2086  # TOKEN_ARG 是刻意要拆成兩個參數的（沒有 token 時是空字串）
+  "$AGM" --compact lease release rebuild --owner "$OWNER" --fence "$LEASE" $TOKEN_ARG >> "$LOG" 2>&1 || true
 fi
 rm -f "$TMP"
