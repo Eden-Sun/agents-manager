@@ -59,8 +59,6 @@ struct Raw {
     pane_id: Option<String>,
     socket_path: Option<String>,
     bot_id: Option<String>,
-    /// `AM_PROJECT_ID`：pane 開出來當下綁定的專案（§6.5e）。
-    project_id: Option<String>,
     owner: &'static str,
     subtree_bytes: u64,
     children: u32,
@@ -156,10 +154,8 @@ fn scan(out: &str) -> (Vec<Proc>, Vec<Raw>) {
         let bot_id = blob.and_then(|b| env_value(b, "AM_BOT_ID"));
         let pane_id = blob.and_then(|b| env_value(b, "HERDR_PANE_ID"));
         let socket_path = blob.and_then(|b| env_value(b, "HERDR_SOCKET_PATH"));
-        // §6.5e：pane 開出來時就綁專案（shim 轉發 AM_PROJECT_ID），bot 被刪也不會失去歸屬。
-        let project_id = blob.and_then(|b| env_value(b, "AM_PROJECT_ID"));
         let owner = owner_of(is_herdr(p), bot_id.as_deref(), pane_id.as_deref());
-        raws.push(Raw { p_index: i, pane_id, socket_path, bot_id, project_id, owner, subtree_bytes: bytes, children: kids });
+        raws.push(Raw { p_index: i, pane_id, socket_path, bot_id, owner, subtree_bytes: bytes, children: kids });
     }
     (procs, raws)
 }
@@ -201,48 +197,68 @@ pub struct PaneFacts {
     pub bot_ids: Vec<String>,
     /// pane 行程樹裡看到的 `AM_PROJECT_ID`：開 pane 當下綁的專案，bot 被刪也還在（§6.5e）。
     pub project_ids: Vec<String>,
-    /// 這個 pane 底下所有行程的 pid，用來對 listen port。
+    /// 這個 pane 底下所有行程的 pid（shell 自己在最前面），用來對 listen port。
     pub pids: Vec<i32>,
     /// 最有代表性的前景程式（shell 以外最上層的那個）；只有 shell 時是 `None`。
     pub foreground: Option<String>,
-    /// 行程樹只有 shell 自己：沒有前景程式，也沒有被 Ctrl-Z 丟到背景的 job。
+    /// 行程樹只有 shell 自己：沒有前景程式、沒有被 Ctrl-Z 丟到背景的 job、也沒有巢狀 shell。
     pub shell_only: bool,
 }
 
 const SHELLS: &[&str] = &["bash", "zsh", "sh", "fish", "dash", "ksh", "login", "-zsh", "-bash"];
 
-/// 以 `HERDR_PANE_ID` 把一份環境 dump 切成「每個 pane 在跑什麼」。`AM_BOT_ID` 來自 shim 開 pane 時帶的 `--env`
-/// （§6.5b），所以有這個變數＝這顆 pane 是 bot 開的；沒有＝使用者自己開的，一律不動（§6.5e）。
-pub fn pane_facts_from_dump(out: &str) -> HashMap<String, PaneFacts> {
-    let (procs, raws) = scan(out);
-    let mut by_pane: HashMap<String, PaneFacts> = HashMap::new();
-    for r in &raws {
-        let Some(pane) = r.pane_id.clone() else { continue };
-        let p = &procs[r.p_index];
-        let exe = exe_name(&p.argv);
-        let e = by_pane.entry(pane).or_default();
-        e.pids.push(p.pid);
-        if let Some(b) = &r.bot_id {
-            if !e.bot_ids.contains(b) {
-                e.bot_ids.push(b.clone());
+/// 以 herdr 報的 shell pid 為根，沿 `ps -A` 的 ppid 樹把**全部子孫**算進這顆 pane（§6.5e 的 GC 守門）。
+///
+/// 不靠子孫自己的環境歸屬：`sudo`（euid root）與它底下的 `vim`、`env -i` 起的東西、macOS 上連 `-zsh`
+/// 本身都讀不到環境，以前這些行程在事實裡根本不存在，卡在密碼提示的 pane 於是被當成「只有 shell」關掉。
+/// 子孫裡只要有任何行程（含巢狀 shell、讀不到環境的、非本人的）就不是 `shell_only`。
+///
+/// `AM_*` 只從**這顆 pane** 的行程讀：環境裡的 `HERDR_PANE_ID` 是別的 pane 的（別的 herdr session
+/// 剛好同號，或從別的 pane 繼承下來）就不算。回 `None`＝樹裡找不到這個 pid，呼叫端一律當「判不出來」。
+pub fn pane_facts_for_shell(out: &str, pane_id: &str, shell_pid: i32) -> Option<PaneFacts> {
+    let (tree, env_section) = split_sections(out);
+    let procs = parse_ps(tree);
+    let envs = parse_env(env_section);
+    let by_pid: HashMap<i32, &Proc> = procs.iter().map(|p| (p.pid, p)).collect();
+    let root = by_pid.get(&shell_pid)?;
+    let children = child_index(&procs);
+
+    // 由上往下（BFS），所以第一個非 shell 的就是最上層的前景程式。
+    let mut order = vec![shell_pid];
+    let mut seen: HashSet<i32> = HashSet::from([shell_pid]);
+    let mut at = 0;
+    while at < order.len() {
+        if let Some(kids) = children.get(&order[at]) {
+            let mut kids = kids.clone();
+            kids.sort_unstable();
+            order.extend(kids.into_iter().filter(|k| seen.insert(*k)));
+        }
+        at += 1;
+    }
+
+    let mut f = PaneFacts::default();
+    let root_is_shell = SHELLS.contains(&exe_name(&root.argv));
+    for pid in &order {
+        let Some(p) = by_pid.get(pid) else { continue };
+        f.pids.push(*pid);
+        let is_shell = SHELLS.contains(&exe_name(&p.argv));
+        if f.foreground.is_none() && !is_herdr(p) && !is_shell {
+            f.foreground = Some(p.argv.clone());
+        }
+        let Some(blob) = envs.get(pid) else { continue };
+        if env_value(blob, "HERDR_PANE_ID").is_some_and(|id| id != pane_id) {
+            continue;
+        }
+        for (key, into) in [("AM_BOT_ID", &mut f.bot_ids), ("AM_PROJECT_ID", &mut f.project_ids)] {
+            if let Some(v) = env_value(blob, key) {
+                if !into.contains(&v) {
+                    into.push(v);
+                }
             }
         }
-        if let Some(pid) = &r.project_id {
-            if !e.project_ids.contains(pid) {
-                e.project_ids.push(pid.clone());
-            }
-        }
-        // herdr 自己與 shell 不算前景程式；其餘取第一個（掃描順序是由根往下）。
-        if !is_herdr(p) && !SHELLS.contains(&exe) && e.foreground.is_none() {
-            e.foreground = Some(p.argv.clone());
-        }
     }
-    for f in by_pane.values_mut() {
-        f.shell_only = f.foreground.is_none();
-        f.pids.sort_unstable();
-        f.pids.dedup();
-    }
-    by_pane
+    f.shell_only = root_is_shell && f.pids.len() == 1;
+    Some(f)
 }
 
 /// Resident memory by bot, from one dump: every process in the herdr tree that carries `AM_BOT_ID`
@@ -468,6 +484,41 @@ mod tests {
         let rows = processes_from_dump(DUMP);
         let sizes: Vec<u64> = rows.iter().map(|r| r.subtree_bytes).collect();
         assert!(sizes.windows(2).all(|w| w[0] >= w[1]), "{sizes:?}");
+    }
+
+    /// §6.5e GC 守門：子孫一律算進來，不管讀不讀得到它的環境、是不是 shell。
+    #[test]
+    fn every_descendant_of_the_pane_shell_counts_whatever_its_env() {
+        let dump = "\
+  400     1  48000 /opt/homebrew/bin/herdr --session agents-manager
+  401   400  30000 -zsh
+  402   401  20000 bash deploy.sh
+  403   400  30000 -zsh
+  404   403  20000 env -i /usr/bin/python3 -m http.server
+  405   400  30000 -zsh
+  406   405  20000 node dev.js
+---AM-ENV---
+  402 bash deploy.sh HERDR_PANE_ID=w1:p1 AM_BOT_ID=b1 AM_PROJECT_ID=p1
+  406 node dev.js HERDR_PANE_ID=w9:p9 AM_BOT_ID=someone-else
+";
+        // 巢狀 shell 卡在 `read -p`：它是 shell，但不是「只有 shell 自己」。
+        let nested = pane_facts_for_shell(dump, "w1:p1", 401).unwrap();
+        assert!(!nested.shell_only);
+        assert_eq!(nested.foreground, None, "巢狀 shell 不算前景程式");
+        assert_eq!(nested.pids, vec![401, 402]);
+        assert_eq!((nested.bot_ids.as_slice(), nested.project_ids.as_slice()), (&["b1".to_string()][..], &["p1".to_string()][..]));
+
+        // 讀不到環境的子行程照樣是這顆 pane 的。
+        let no_env = pane_facts_for_shell(dump, "w1:p2", 403).unwrap();
+        assert!(!no_env.shell_only);
+        assert!(no_env.foreground.as_deref().unwrap().contains("http.server"));
+
+        // 環境裡的 pane id 是別人的（別的 herdr session 同號、或繼承來的）：行程算這顆，歸屬不算。
+        let foreign = pane_facts_for_shell(dump, "w1:p3", 405).unwrap();
+        assert!(!foreign.shell_only);
+        assert!(foreign.bot_ids.is_empty(), "{foreign:?}");
+
+        assert_eq!(pane_facts_for_shell(dump, "w1:p4", 999), None, "不在樹裡就判不出來");
     }
 
     #[test]
