@@ -1711,7 +1711,7 @@ supervisor 相關資料表與欄位都是 additive，`db::migrate` 重跑冪等�
 - **巡檢送前合併**：還沒送出的 `health_changed` 只留最新一筆；同一個 incident 在送出前就開了又恢復，兩筆一起結案（`acked_by=daemon`）。
 - **bot 找 AGM**：`POST /api/bots/{巡檢或協調者}/prompt` 帶 `relay_from=<bot>`、或 pane 裡 `herdr agent prompt <AGM>`（shim 先打 `/relay/announce`），
   協調者建立後都**不開回合**：寫成 `bot_request`（202，`routed`），shim 看到 `routed` 就不打進 pane。
-  去重鍵：有 `client_request_id` 用它，沒有就用寄件者＋內容指紋＋十分鐘一格。指紋 = 收件角色＋目標＋正文（逐字，不做空白正規化，縮排差一格就是不同內容）＋附件；
+  去重鍵：有 `client_request_id` 用它，沒有就用寄件者＋內容指紋＋十分鐘一格——後者只擋**還沒結案**的那一筆：前一筆已經 `handled` 之後同一句再送是新的申請，換 `#2`、`#3` 的鍵重新入列（review 2026-09-16 c3 L1）。指紋 = 收件角色＋目標＋正文（逐字，不做空白正規化，縮排差一格就是不同內容）＋附件；
   同一個 id 換了內容不是重播，回 409 `request_mismatch` 且什麼都不寫——否則第二次申請會被讀成「送到了」而靜靜消失。
   一般 bot → 協調者；巡檢 ↔ 協調者互相交接給對方。不攔：使用者（沒有 `relay_from`）、`relay_from=daemon`、目標不是角色 bot、協調者未建立。
 - **角色之間的交接**：`assign` 的目標是另一個角色 bot 時，**不是交辦**——不建交辦列、不開回合，而是走同一條佇列
