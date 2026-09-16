@@ -1043,7 +1043,7 @@ body 直接是檔案位元組（**不是** multipart），`Content-Type` 就是�
 ### 健康與 incident
 - `GET /api/supervisor/health` → `status`（`healthy`／`degraded`／`critical`）、AGM 狀態、bot running/busy/stopped 計數、host 連線、quota、`pending_assignments`（未結案，含 `awaiting_review`／`blocked`）、
   `awaiting_review`、`inbox_open`（三者分開不相加）；`manager_health{status,supervisor_status,daemon_connected}` 與 `system_health{status,open_incidents,incidents}`，頂層 `status` 取兩者較嚴重者。
-  daemon 每 30 秒檢查，指紋變化才推 WS `supervisor_health`；inbox `health_changed` 只在 `status` 或總管狀態（idle/busy 視為 running）真的改變時入列，總管 stopped/starting 期間不入列、恢復後補一則。
+  daemon 每 30 秒檢查，指紋變化才推 WS `supervisor_health`；inbox `health_changed` 只在巡檢或協調者的嚴重度（`manager_health.status`／`responder_health.status`）或總管狀態（idle/busy 視為 running）真的改變時入列，總管 stopped/starting 期間不入列、恢復後補一則。
   `responder_health{status,responder_status,inbox_open,retry_at}` 單獨一格，不併進頂層 `status`。
 - `GET /api/supervisor/incidents?all=0|1` → `{incidents:[{id,kind,resource,severity,status,detail,occurrences,first_seen_at,last_seen_at,resolved_at}],open,all}`。
   `kind`：`host_disconnected` | `bot_stopped` | `assignment_stalled` | `assignment_undelivered` | `notify_exhausted`（SPEC §18.9）。一個 resource 同時只有一筆 open；開啟與恢復各推 inbox `incident_opened` / `incident_resolved`。

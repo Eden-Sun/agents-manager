@@ -200,9 +200,12 @@ fn known_route(kind: &str, payload: &Value, review_role: Option<&str>) -> Option
         | "supervisor_restart_retry" | "agm_cli_stale" | "pane_unowned" => r(Role::Patrol, true),
         // 恢復不叫醒人：開的那一筆已經叫過，關掉只要記下來。
         "incident_resolved" => r(Role::Patrol, false),
+        // 協調者那一半也算：它倒了或在等額度，能發現的只有巡檢（review 2026-09-16 #7）。
+        // 舊 payload 沒有 `responder_health` 就當 healthy。
         "health_changed" => {
             let status = payload.pointer("/manager_health/status").and_then(Value::as_str).unwrap_or("unknown");
-            r(Role::Patrol, status != "healthy")
+            let responder = payload.pointer("/responder_health/status").and_then(Value::as_str).unwrap_or("healthy");
+            r(Role::Patrol, status != "healthy" || responder != "healthy")
         }
         _ => None,
     }
@@ -735,6 +738,9 @@ mod tests {
         assert_eq!(route("incident_resolved", &p, None), Route { role: Role::Patrol, wake: false }, "恢復不叫醒人");
         assert!(!route("health_changed", &json!({"manager_health": {"status": "healthy"}}), None).wake);
         assert!(route("health_changed", &json!({"manager_health": {"status": "degraded"}}), None).wake);
+        let responder = |s: &str| json!({"manager_health": {"status": "healthy"}, "responder_health": {"status": s}});
+        assert_eq!(route("health_changed", &responder("degraded"), None), Route { role: Role::Patrol, wake: true }, "協調者倒了要叫醒巡檢");
+        assert!(!route("health_changed", &responder("healthy"), None).wake);
         assert_eq!(
             route("bot_request", &json!({"to_role": "patrol", "wake": false}), None),
             Route { role: Role::Patrol, wake: false }

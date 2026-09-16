@@ -87,6 +87,18 @@ pub fn inbox_state(supervisor_status: &str) -> &str {
     }
 }
 
+/// What a `health_changed` inbox event is keyed on: the manager's severity **and** the responder's.
+///
+/// The responder is the only recipient of bot requests, approvals and mission events. Keying on the
+/// manager alone meant a responder stuck on `waiting_quota` turned the UI `degraded` while no event
+/// was ever queued and nobody was woken — requests could sit for days (review 2026-09-16 #7).
+/// A snapshot from before `responder_health` existed reads as `healthy` there.
+pub fn inbox_severity(snapshot: &Value) -> String {
+    let manager = snapshot.pointer("/manager_health/status").and_then(Value::as_str).unwrap_or("unknown");
+    let responder = snapshot.pointer("/responder_health/status").and_then(Value::as_str).unwrap_or("healthy");
+    format!("{manager}/{responder}")
+}
+
 /// No one is there to read an event: it is not queued, and whatever changed meanwhile is
 /// folded into the one snapshot sent when the manager is back.
 fn manager_down(inbox_state: &str) -> bool {
@@ -159,15 +171,14 @@ pub fn spawn(app: Arc<App>) {
                 previous = fingerprint;
                 let _ = app.emit("supervisor_health", snapshot.clone()).await;
             }
-            // Keyed on the *manager's* half only. System faults have their own durable
-            // incidents with their own one-event-per-transition rule; letting them move this
+            // Keyed on the manager's and the responder's halves. System faults have their own
+            // durable incidents with their own one-event-per-transition rule; letting them move this
             // key too would tell the manager the same thing twice.
-            let manager_status =
-                snapshot.pointer("/manager_health/status").and_then(Value::as_str).unwrap_or("unknown").to_string();
-            if !debounce.observe(&manager_status, &sup_status) {
+            let severity = inbox_severity(&snapshot);
+            if !debounce.observe(&severity, &sup_status) {
                 continue;
             }
-            let key = format!("health:{manager_status}:{}:{}", inbox_state(&sup_status), chrono::Utc::now().timestamp());
+            let key = format!("health:{severity}:{}:{}", inbox_state(&sup_status), chrono::Utc::now().timestamp());
             let bot_id = snapshot.pointer("/supervisor/bot_id").and_then(Value::as_str);
             let _ = crate::supervisor::store::push_inbox(
                 &app.db, &key, "health_changed", None, bot_id, None, &snapshot,
@@ -204,6 +215,25 @@ mod tests {
         assert!(!d.observe("degraded", "starting"));
         assert!(d.observe("healthy", "idle"), "one snapshot once it is back, even to the same state");
         assert!(!d.observe("healthy", "idle"));
+    }
+
+    /// 協調者卡在 `waiting_quota`（degraded）而巡檢好好的：以前 debounce 只看巡檢那一半，一則事件都不會有。
+    #[test]
+    fn a_responder_going_degraded_is_news_even_when_the_manager_is_fine() {
+        let snap = |m: &str, r: Option<&str>| {
+            let mut v = json!({"manager_health": {"status": m}});
+            if let Some(r) = r {
+                v["responder_health"] = json!({"status": r});
+            }
+            v
+        };
+        let mut d = Debounce::default();
+        assert!(d.observe(&inbox_severity(&snap("healthy", Some("healthy"))), "idle"));
+        assert!(d.observe(&inbox_severity(&snap("healthy", Some("degraded"))), "idle"), "responder waiting_quota must queue an event");
+        assert!(!d.observe(&inbox_severity(&snap("healthy", Some("degraded"))), "busy"));
+        assert!(d.observe(&inbox_severity(&snap("healthy", Some("healthy"))), "idle"), "and its recovery too");
+        // 舊 snapshot 沒有 responder_health：當 healthy，不會憑空多一則。
+        assert_eq!(inbox_severity(&snap("healthy", None)), inbox_severity(&snap("healthy", Some("healthy"))));
     }
 
     #[test]

@@ -1556,7 +1556,8 @@ supervisor 相關資料表與欄位都是 additive，`db::migrate` 重跑冪等�
 
 **協調者的健康算進頂層 `status`**（review 2026-09-16）：它是 bot 申請、核准請求與所有 `mission_*` 的唯一收件人，
 以前 `status` 只取巡檢與系統兩半的較差者，協調者 `waiting_quota` 或倒掉時使用者入口仍顯示 `healthy`、沒有任何人被叫醒，
-申請可以躺好幾天。`responder_health` 那一格照舊分開列。`responder_bot_missing` 的 event_key 也加了小時格，
+申請可以躺好幾天。`responder_health` 那一格照舊分開列。
+`health_changed` 的入列也看這一半：debounce 的鍵是「巡檢嚴重度／協調者嚴重度」，路由表在任一半不是 `healthy` 時叫醒巡檢——只算進頂層而不入列的話，UI 變 degraded 卻沒有人被叫醒。`responder_bot_missing` 的 event_key 也加了小時格，
 不再是「一輩子只提醒一次」（`push_inbox` 是 `INSERT OR IGNORE`）。
 
 **一顆總管、一個專案**（使用者 2026-09-16）：協調者最早自成一個專案，因為一個專案只有一個 path；但側欄上「AGM」與「AGM-responder」分成兩塊看起來像兩顆總管。
@@ -1569,7 +1570,7 @@ supervisor 相關資料表與欄位都是 additive，`db::migrate` 重跑冪等�
 
 - **表上的名字就是寫入端的名字**：每一種寫進 inbox 的 kind 都要有**明寫**的分支（`roles::known_route`），測試從原始碼撈出所有寫入點（`push_inbox`、`settle_and_notify`、SQL 裡寫死的 kind）逐一核對。
   以前表上寫 `quota_blocked`／`quota_resumed`，寫入端寫的卻是 `assignment_quota_*`，每一次撞限與恢復都落到預設、叫醒巡檢（review 2026-09-16）。
-- **只記錄、不叫醒**（`wake=0`）：`assignment_noticed`、`assignment_queued`、`assignment_quota_blocked`／`assignment_quota_resumed`、`incident_resolved`、`manager_health.status=healthy` 的 `health_changed`、
+- **只記錄、不叫醒**（`wake=0`）：`assignment_noticed`、`assignment_queued`、`assignment_quota_blocked`／`assignment_quota_resumed`、`incident_resolved`、巡檢與協調者兩半都 `healthy` 的 `health_changed`、
   bot 對通知型交辦（`--notice`）的回覆、角色之間在同一次喚醒回合裡的回信。它們跟下一次有事的喚醒一起送，自己不開回合。
 - **巡檢送前合併**：還沒送出的 `health_changed` 只留最新一筆；同一個 incident 在送出前就開了又恢復，兩筆一起結案（`acked_by=daemon`）。
 - **bot 找 AGM**：`POST /api/bots/{巡檢或協調者}/prompt` 帶 `relay_from=<bot>`、或 pane 裡 `herdr agent prompt <AGM>`（shim 先打 `/relay/announce`），
