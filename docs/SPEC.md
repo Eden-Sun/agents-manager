@@ -107,8 +107,9 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   **任一個未知就是未知，不得顯示「已是最新」**。磁碟那邊用這個模組自己的版本解析：`herdr 0.8.2` 的版本不在第一個 token，
   `changelog::version_string`（claude 的 `2.1.5 (Claude Code)`）吃不下，所以 `changelog::version_line` 只回原始那一行，各家自己解析。
   抓失敗只寫 `checked_at`/`error`，舊快取與 release notes 都留著；離線主機保留上次讀到的值並標示，不拿本機版本冒充。
-  **過期的讀數不得發綠燈**：讀數不是剛確認過的（離線、探測失敗、整列超過 13 小時沒巡過），或官方最新版自己過期時，`standing` 一律 `unknown`，
-  歷史值另放 `cached_standing`。主機清單以設定檔為準，DB 只是快取：移除的主機不再投影，新加的以未知出現。
+  **過期的讀數不得發綠燈**：讀數不是剛確認過的（主機現在沒連著、探測失敗、整列超過 13 小時沒巡過），或官方最新版自己沒確認過
+  （過期**或最近一次查失敗**）時，`standing` 一律 `unknown`，歷史值另放 `cached_standing`。
+  磁碟版本探測保住 CLI 的離開碼（印了招牌卻非 0 離開不算數，本機與 ssh 一致），逾時走 `hosts::sh_local` 的 process group 清理，不留背景 process。主機清單以設定檔為準，DB 只是快取：移除的主機不再投影，新加的以未知出現。
   磁碟比 server 新 = 新版已裝好、換 server 才生效（`restart_pending`，兩邊都要是新鮮讀數）。
   有**已知落後**（新鮮且落後）的主機時推一筆 `herdr_update_available` 進 `supervisor_inbox`（`event_key = herdr_update:<version>`），走既有巡檢路由與 notify 節流；
   該表的唯一索引就是去重標記，所以一個 release 最多一筆合併事件，重啟或一台主機多個 pane 都不會重複叫醒，寫失敗則下一輪重試。沒有更新就不叫醒模型，輪詢不用 LLM。
