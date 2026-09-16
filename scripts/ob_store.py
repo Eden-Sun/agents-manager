@@ -2,6 +2,7 @@
 import contextlib
 import fcntl
 import json
+import os
 import re
 import sqlite3
 import time
@@ -69,12 +70,40 @@ class Store:
                 UNIQUE(project_id, request_id)
             );
             CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            -- 一個 project 一串對話，但那一串不能無限長：太長之後 GPT 每次都要吃完整段舊脈絡，
+            -- 又慢又容易被不相干的題目帶偏（使用者 2026-09-16）。所以「現在這一串」會輪替，
+            -- 舊的留在這張表裡查得到（`projects.url` 永遠是**目前**那一串）。
+            CREATE TABLE IF NOT EXISTS conversations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id TEXT NOT NULL REFERENCES projects(id),
+                url TEXT UNIQUE,
+                started_at REAL NOT NULL,
+                turns INTEGER NOT NULL DEFAULT 0,
+                retired_at REAL, retired_why TEXT
+            );
+            CREATE INDEX IF NOT EXISTS conversations_live ON conversations(project_id, retired_at);
         """)
         # Binds sends and results to the claim that started them; an orphan of an old claim cannot act for a new one.
         # Check and ALTER in one write transaction: concurrent first runs of a new CLI must not both add it.
         with self.transaction():
-            if "claim_token" not in {r[1] for r in self.db.execute("PRAGMA table_info(requests)")}:
+            cols = {r[1] for r in self.db.execute("PRAGMA table_info(requests)")}
+            if "claim_token" not in cols:
                 self.db.execute("ALTER TABLE requests ADD COLUMN claim_token TEXT")
+            # 這一單是不是「要開新的一串」。存在列上而不是記在記憶體：`remember_url`／`finish` 要靠它
+            # 分辨「輪替換串」與「別的分頁冒充這個 project」——後者仍然一律拒絕。
+            if "rotate" not in cols:
+                self.db.execute("ALTER TABLE requests ADD COLUMN rotate INTEGER NOT NULL DEFAULT 0")
+            # 升級：既有 project 的那一串補一列，turns 用已完成的單數回填，才不會一升級就立刻輪替。
+            for row in self.db.execute("SELECT id, url FROM projects WHERE url IS NOT NULL"):
+                if self.db.execute("SELECT 1 FROM conversations WHERE url=?", (row[1],)).fetchone():
+                    continue
+                stats = self.db.execute(
+                    "SELECT COUNT(*), MIN(created_at) FROM requests WHERE project_id=? AND status='done'", (row[0],)
+                ).fetchone()
+                self.db.execute(
+                    "INSERT INTO conversations(project_id,url,started_at,turns) VALUES (?,?,?,?)",
+                    (row[0], row[1], stats[1] or time.time(), stats[0] or 0),
+                )
 
     @contextlib.contextmanager
     def transaction(self):
@@ -98,6 +127,71 @@ class Store:
         if row is None:
             raise OBError("request_not_found")
         return dict(row)
+
+    #: 一串問滿這麼多題就換下一串。20 題的對話已經夠長到讓 GPT 開始「記得太多」。
+    ROTATE_TURNS = int(os.environ.get("OB_ROTATE_TURNS") or 20)
+    #: 或者放了這麼多天——放久的那一串裡的背景多半已經不是現況了。
+    ROTATE_DAYS = float(os.environ.get("OB_ROTATE_DAYS") or 14)
+
+    def current_conversation(self, pid):
+        row = self.db.execute(
+            "SELECT * FROM conversations WHERE project_id=? AND retired_at IS NULL ORDER BY id DESC LIMIT 1", (pid,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def conversations(self, pid):
+        return [dict(r) for r in self.db.execute("SELECT * FROM conversations WHERE project_id=? ORDER BY id", (pid,))]
+
+    def rotate_due(self, pid, now=None):
+        """該不該換下一串：(要不要, 為什麼)。還沒有任何一串時不算輪替——那是第一次開。"""
+        live = self.current_conversation(pid)
+        if not live or not live["url"]:
+            return False, None
+        if self.ROTATE_TURNS > 0 and live["turns"] >= self.ROTATE_TURNS:
+            return True, f"turns>={self.ROTATE_TURNS}"
+        age_days = ((now or time.time()) - live["started_at"]) / 86400
+        if self.ROTATE_DAYS > 0 and age_days >= self.ROTATE_DAYS:
+            return True, f"age>={self.ROTATE_DAYS}d"
+        return False, None
+
+    def request_rotation(self, pid):
+        """人說「這串夠了」：把目前那一串的 turns 頂到門檻，下一題派送時就會換。
+        現在就開一串空的沒有意義——那會留下一個沒人問過問題的對話。"""
+        project_id(pid)
+        with self.transaction():
+            live = self.current_conversation(pid)
+            if not live or not live["url"]:
+                raise OBError("no_conversation_yet：這個 project 還沒有對話，下一題就是新的一串")
+            self.db.execute("UPDATE conversations SET turns=? WHERE id=?", (max(live["turns"], self.ROTATE_TURNS), live["id"]))
+        return {"project_id": pid, "current": live["url"], "rotate_next": True}
+
+    def mark_rotate(self, ident, on=True):
+        """派送前記下這一單要換新串；沒有這個旗標的單一律不准換對話。"""
+        with self.transaction():
+            job = self.get(ident)
+            if job["status"] not in ("running", "pending"):
+                raise OBError("request_not_running")
+            self.db.execute("UPDATE requests SET rotate=? WHERE id=?", (1 if on else 0, ident))
+
+    def _bind_url(self, job, url, now=None):
+        """把 url 記成這個 project 目前那一串。換串只在這一單有 `rotate` 旗標時才准。"""
+        now = now or time.time()
+        pid = job["project_id"]
+        live = self.current_conversation(pid)
+        if live and live["url"] == url:
+            return
+        if live and live["url"]:
+            if not job["rotate"]:
+                raise OBError("conversation_changed")
+            self.db.execute("UPDATE conversations SET retired_at=?, retired_why=? WHERE id=?", (now, "rotated", live["id"]))
+        owner = self.db.execute("SELECT project_id FROM conversations WHERE url=?", (url,)).fetchone()
+        if owner and owner[0] != pid:
+            raise OBError("conversation_already_owned：其他 project 已使用此對話")
+        if owner:
+            self.db.execute("UPDATE conversations SET retired_at=NULL, retired_why=NULL WHERE url=?", (url,))
+        else:
+            self.db.execute("INSERT INTO conversations(project_id,url,started_at) VALUES (?,?,?)", (pid, url, now))
+        self.db.execute("UPDATE projects SET url=? WHERE id=?", (url, pid))
 
     def project(self, pid):
         row = self.db.execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone()
@@ -130,6 +224,9 @@ class Store:
                 raise OBError("project_busy_or_unknown")
             try:
                 self.db.execute("INSERT INTO projects VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET label=excluded.label,url=excluded.url", (pid, label, url))
+                # 手動接回來的那串也要進輪替計時，否則它永遠不會換。
+                if not self.db.execute("SELECT 1 FROM conversations WHERE url=?", (url,)).fetchone():
+                    self.db.execute("INSERT INTO conversations(project_id,url,started_at) VALUES (?,?,?)", (pid, url, time.time()))
             except sqlite3.IntegrityError:
                 raise OBError("conversation_already_owned：其他 project 已使用此對話")
 
@@ -163,10 +260,8 @@ class Store:
             # running belongs to its claim; only unknown may be finished without one (manual collect).
             if job["status"] == "running" and (not token or job["claim_token"] != token):
                 raise OBError("claim_lost：原單已被重新 claim，不覆寫")
-            current = self.project(job["project_id"])["url"]
-            if current and current != url:
-                raise OBError("conversation_changed")
-            self.db.execute("UPDATE projects SET url=? WHERE id=?", (url, job["project_id"]))
+            self._bind_url(job, url)
+            self.db.execute("UPDATE conversations SET turns=turns+1 WHERE url=?", (url,))
             self.db.execute("UPDATE requests SET status='done',answer=?,url=?,error=NULL,updated_at=? WHERE id=?", (answer, url, time.time(), ident))
             return self.get(ident)
 
@@ -174,10 +269,7 @@ class Store:
         conversation_url(url)
         with self.transaction():
             job = self.get(ident)
-            old = self.project(job["project_id"])["url"]
-            if old and old != url:
-                raise OBError("conversation_changed")
-            self.db.execute("UPDATE projects SET url=? WHERE id=?", (url, job["project_id"]))
+            self._bind_url(job, url)
             self.db.execute("UPDATE requests SET url=? WHERE id=?", (url, ident))
 
     def fail(self, ident, status, error, token=None):
