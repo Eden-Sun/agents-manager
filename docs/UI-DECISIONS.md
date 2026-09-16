@@ -269,7 +269,7 @@ shell 面板本來只有「打一行、Enter 送出」：TUI（`top`、`vim`、�
 - **沒歸屬的不掛在專案底下**：放側欄底部「開 shell」正下方一組。scratch 由 daemon 標（`GET /api/panes?unowned=1` 的 `scratch: true`），固定第一列、標「scratch」；其他標「多出來的」。舊 daemon 沒這欄就全部列、一個都不標——前端不自己猜哪顆是 scratch。
 - **關閉時才發現是服務 pane**：清單讀到時還是 shell、之後才跑起 dev server，daemon 回 409 並附上最新那列；專案頁拿那一列直接跳確認框，不是只顯示「關閉失敗 (409)」。
   mock 實走：`docs/screenshots/side-panes-unowned/`（側欄底部那組、跑 vim 的 pane 打得進去、dev server 唯讀）。
-- **不給「結束 shell」**：面板那顆只認面板自己開的 shell，對被 trace 的 pane 按下去是靜悄悄什麼都不做。關它回專案頁。
+- ~~不給「結束 shell」~~ → **給「關閉 pane」**（2026-09-17 使用者：直接在面板裡關 pane）。當初不給是因為面板那顆只認面板自己開的 shell；後來「結束 shell」不在清單裡會改走 `POST /api/panes/{id}/close`，原因已經不成立。按鈕叫「關閉 pane」（不是這裡開的，叫「結束 shell」會誤導），一樣二次確認；服務 pane 由 daemon 先 409，第二道確認框列出 port；pane 已經不在（例如裡面打了 `exit`）當作關好、面板收起。
 - **重整回得來、唯讀照現況**：`shellView` 連 `readOnly` 一起存；深連結查不到自己開的 shell 就查 daemon 的 pane 表。原本會直接丟回首頁。從 `/` 進來（只走 `restoreShellView`）時一樣照 daemon 當下的 pane 列重算 `readOnly`／`traced`，不沿用 localStorage 的舊值。
 
 ## 「結束 shell」遇到服務 pane 要再問一次（2026-09-16，AGM 驗收 9f05b03）

@@ -135,7 +135,7 @@ export function HostShellPanel({
 }) {
   const closeShellView = useStore((s) => s.closeShellView)
   const endHostShell = useStore((s) => s.endHostShell)
-  // 從選單點進來的 pane（§6.5e）：有 port 的唯讀；不是這個面板開的就不給「結束 shell」。
+  // 從選單點進來的 pane（§6.5e）：有 port 的唯讀；關閉鍵照樣給（叫「關閉 pane」），服務 pane 由 daemon 先 409 再問一次。
   const readOnly = useStore((s) => Boolean(s.shellView?.host === host && s.shellView.paneId === paneId && s.shellView.readOnly))
   const readOnlyReason = useStore((s) =>
     s.shellView?.host === host && s.shellView.paneId === paneId ? (s.shellView.readOnlyReason ?? null) : null,
@@ -373,18 +373,17 @@ export function HostShellPanel({
       <button type="button" className="mini-btn" onClick={closeShellView} title="只關掉這個畫面，shell 留著">
         關閉
       </button>
-      {/* 被 trace 的 pane 不是這裡開的：daemon 的 DELETE 只認自己開的那幾顆，按了會是一顆什麼都不做的按鈕。 */}
-      {traced ? null : (
-        <button
-          type="button"
-          className="mini-btn danger"
-          disabled={ending}
-          onClick={() => setConfirmEnd(true)}
-          title="關掉這個 shell 的 pane"
-        >
-          {ending ? '結束中…' : '結束 shell'}
-        </button>
-      )}
+      {/* 被 trace 的 pane 也給（2026-09-17 使用者：直接在這裡關 pane）：`endHostShell` 不在面板清單裡就走
+          `POST /api/panes/{id}/close`，服務 pane 會先 409、第二道確認框列出 port；pane 已經不在就當作關好了。 */}
+      <button
+        type="button"
+        className="mini-btn danger"
+        disabled={ending}
+        onClick={() => setConfirmEnd(true)}
+        title={traced ? '關掉這顆 pane（裡面跑的東西會一起結束）' : '關掉這個 shell 的 pane'}
+      >
+        {ending ? '關閉中…' : traced ? '關閉 pane' : '結束 shell'}
+      </button>
     </div>
   )
 
@@ -567,14 +566,14 @@ export function HostShellPanel({
 
       <ConfirmDialog
         open={confirmEnd}
-        title="結束 shell"
+        title={traced ? '關閉 pane' : '結束 shell'}
         body={
           <>
-            要關掉 <strong>{host === 'local' ? '本機' : host}</strong> 上這個 shell 嗎？
+            要關掉 <strong>{host === 'local' ? '本機' : host}</strong> 上的 {traced ? <>pane <code>{paneId}</code></> : '這個 shell'} 嗎？
             它的 pane 會被關掉，裡面正在跑的指令也會跟著結束；畫面上的輸出不會留下來。
           </>
         }
-        confirmLabel="結束 shell"
+        confirmLabel={traced ? '關閉 pane' : '結束 shell'}
         danger
         onCancel={() => setConfirmEnd(false)}
         onConfirm={() => {
