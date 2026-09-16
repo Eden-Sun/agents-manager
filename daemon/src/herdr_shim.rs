@@ -250,8 +250,19 @@ am_forward_with_env() {
     done
     # §6.5e：`tab create` 沒指定 workspace 時落在**專案自己的** workspace，不要開到別的專案去
     # （w168 收到 wt 的 dev server 就是這樣來的）。`pane split` 以母 pane 為基準，本來就同 workspace。
-    if [ "$_has_workspace" = 0 ] && [ "$_sub1 $_sub2" = "tab create" ] && [ -n "${AM_WORKSPACE_ID:-}" ]; then
-        set -- "$@" --workspace "$AM_WORKSPACE_ID"
+    # 先問 herdr 母 pane（$HERDR_PANE_ID）**現在**在哪個 workspace，問不到才用 AM_WORKSPACE_ID：daemon 在決定 workspace
+    # **之前**就把它算進 env，第一次啟動或 herdr 重開後根本沒有，舊映射失效改開新 workspace 時還是死掉的 id（review core 7）。
+    if [ "$_has_workspace" = 0 ] && [ "$_sub1 $_sub2" = "tab create" ]; then
+        _ws=""
+        if [ -n "${HERDR_PANE_ID:-}" ]; then
+            _ws=$("$AM_HERDR" pane get "$HERDR_PANE_ID" 2>/dev/null | tr ',' '\n' | sed -n 's/.*"workspace_id" *: *"\([^"]*\)".*/\1/p' | head -n 1)
+        fi
+        [ -n "$_ws" ] || _ws=${AM_WORKSPACE_ID:-}
+        if [ -n "$_ws" ]; then
+            set -- "$@" --workspace "$_ws"
+            # 子 pane 繼承的也是實際落點，不是母 bot 那份可能過期的值。
+            AM_WORKSPACE_ID=$_ws
+        fi
     fi
     for _k in CLAUDE_CONFIG_DIR CODEX_HOME AM_BOT_ID AM_HOOK_TOKEN AM_PORT AM_RUN_ID AM_AGENT_NAME AM_KIND AM_MODEL AM_EFFORT AM_PROJECT_ID AM_WORKSPACE_ID AM_OUTBOX AM_REAL_HERDR PATH; do
         eval "_v=\${$_k:-}"
@@ -269,8 +280,9 @@ am_forward_with_env() {
         _rc=$?
         printf '%s\n' "$_out"
         [ "$_rc" -eq 0 ] || exit "$_rc"
-        # 回應裡第一個 pane_id 就是剛開出來的那顆。
-        _pane=$(printf '%s' "$_out" | tr ',' '\n' | sed -n 's/.*"pane_id":"\([^"]*\)".*/\1/p' | head -n 1)
+        # 回應裡第一個 pane_id 就是剛開出來的那顆（herdr 0.8.2 schema：pane_created 只有 `pane`，tab_created／
+        # workspace_created 只有 `root_pane` 帶 pane_id）。冒號兩邊有沒有空白都認。
+        _pane=$(printf '%s' "$_out" | tr ',' '\n' | sed -n 's/.*"pane_id" *: *"\([^"]*\)".*/\1/p' | head -n 1)
         [ -n "$_pane" ] || exit 0
         curl -s -m 2 -X POST "http://127.0.0.1:${AM_PORT}/relay/pane" \
             -H "X-AM-Bot-Token: ${AM_HOOK_TOKEN}" \
@@ -357,6 +369,11 @@ mod tests {
                   if [ \"$1\" = agent ] && [ \"$2\" = get ]; then\n\
                     case \" ${AM_TEST_AGENTS:-} \" in *\" $3 \"*) exit 0 ;; *) exit 1 ;; esac\n\
                   fi\n\
+                  if [ \"$1\" = pane ] && [ \"$2\" = get ]; then\n\
+                    [ -n \"${AM_TEST_PANE_JSON:-}\" ] || exit 1\n\
+                    printf '%s\\n' \"$AM_TEST_PANE_JSON\"; exit 0\n\
+                  fi\n\
+                  if [ -n \"${AM_TEST_CREATE_JSON:-}\" ]; then printf '%s\\n' \"$AM_TEST_CREATE_JSON\"; exit 0; fi\n\
                   for a in \"$@\"; do printf '%s\\n' \"$a\"; done\n",
             )
             .unwrap();
@@ -381,7 +398,7 @@ mod tests {
             // 在 bot 的 pane 裡跑測試時，AM_BOT_ID／AM_HOOK_TOKEN／AM_PORT 都有值，shim 會真的去打
             // 正在跑的 daemon——而雙角色上線之後，daemon 會把寫給 AGM 的那句攔進佇列、shim 不再轉給
             // herdr，測試就看到空輸出。需要這幾個值的測試自己設。
-            for key in ["AM_MODEL", "AM_EFFORT", "AM_KIND", "AM_BOT_ID", "AM_HOOK_TOKEN", "AM_PORT", "AM_INSTANCE", "AM_DATA_DIR", "AM_OUTBOX"] {
+            for key in ["AM_MODEL", "AM_EFFORT", "AM_KIND", "AM_BOT_ID", "AM_HOOK_TOKEN", "AM_PORT", "AM_INSTANCE", "AM_DATA_DIR", "AM_OUTBOX", "HERDR_PANE_ID", "AM_WORKSPACE_ID"] {
                 cmd.env_remove(key);
             }
             for (k, v) in env {
@@ -417,6 +434,47 @@ mod tests {
         // `pane split` 以母 pane 為基準，本來就同 workspace：不補。
         let (out, _) = s.run(&[("AM_WORKSPACE_ID", "w1HJ")], &["pane", "split", "--pane", "w168:p1"]);
         assert!(!out.iter().any(|a| a == "--workspace"), "{out:?}");
+    }
+
+    /// review 2026-09-16 core 7：AM_WORKSPACE_ID 是 daemon 在決定 workspace 之前算的——第一次啟動／herdr 重開後沒有，
+    /// 舊映射失效時是死掉的 id。`tab create` 先問 herdr 母 pane 現在在哪，問不到才用它；子 pane 繼承實際落點。
+    #[test]
+    fn a_new_tab_lands_in_the_parent_panes_live_workspace() {
+        let s = Sandbox::new();
+        let parent = r#"{"id":"cli:pane:get","result":{"pane":{"agent":"claude","cwd":"/p","pane_id":"w5:p1","tab_id":"w5:t1","workspace_id": "w5"},"type":"pane_info"}}"#;
+        for stale in [&[][..], &[("AM_WORKSPACE_ID", "w1DEAD")][..]] {
+            let mut env = vec![("HERDR_PANE_ID", "w5:p1"), ("AM_TEST_PANE_JSON", parent)];
+            env.extend_from_slice(stale);
+            let (out, _) = s.run(&env, &["tab", "create", "--cwd", "/tmp"]);
+            assert!(out.windows(2).any(|w| w[0] == "--workspace" && w[1] == "w5"), "{stale:?} → {out:?}");
+            assert_eq!(out.iter().filter(|a| *a == "--workspace").count(), 1, "{out:?}");
+            assert_eq!(env_values(&out, "AM_WORKSPACE_ID"), vec!["w5".to_string()], "子 pane 繼承實際落點：{out:?}");
+        }
+        // herdr 問不到（母 pane 不在、舊 herdr）：退回 AM_WORKSPACE_ID。
+        let (out, _) = s.run(&[("HERDR_PANE_ID", "w5:p1"), ("AM_WORKSPACE_ID", "w1HJ")], &["tab", "create"]);
+        assert!(out.windows(2).any(|w| w[0] == "--workspace" && w[1] == "w1HJ"), "{out:?}");
+    }
+
+    /// 沒把握 2（review 2026-09-16）：用途回報取「herdr 輸出裡第一個 pane_id」。herdr 0.8.2 的 tab_created 只有
+    /// `root_pane` 帶 pane_id（TabInfo 沒有），所以第一個就是新開的那顆；冒號後面有空白也要認得。
+    #[test]
+    fn the_purpose_is_reported_for_the_pane_that_was_just_created() {
+        let s = Sandbox::new();
+        let fake_curl = s.dir.join("real").join("curl");
+        let log = s.dir.join("curl.log");
+        std::fs::write(&fake_curl, format!("#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\n", log.display())).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&fake_curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let created = r#"{"id":"cli:tab:create","result":{"root_pane":{"agent":null,"pane_id": "w5:p9","tab_id":"w5:t4","workspace_id":"w5"},"tab":{"label":"sh","tab_id":"w5:t4","workspace_id":"w5"},"type":"tab_created"}}"#;
+        let env = [("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_PORT", "1"), ("AM_TEST_CREATE_JSON", created)];
+        let (out, _) = s.run(&env, &["tab", "create", "--workspace", "w5", "--purpose", "dev-server"]);
+        assert_eq!(out, [created.to_string()], "herdr 的輸出原樣印出");
+        let sent = std::fs::read_to_string(&log).unwrap();
+        assert!(sent.lines().any(|l| l == "pane_id=w5:p9"), "{sent}");
+        assert!(sent.lines().any(|l| l == "purpose=dev-server"), "{sent}");
     }
 
     /// §6.5f：子 pane 寫的檔案也要落在母 bot 的 outbox，使用者才在同一個地方看得到。
