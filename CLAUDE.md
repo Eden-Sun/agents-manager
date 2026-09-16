@@ -55,3 +55,8 @@ nohup ./target/release/agents-managerd serve >> ~/.config/agents-manager/daemon.
 
 ## 回報格式
 三到五行：做了什麼（commit hash）、怎麼驗的（數字）、要派工者做的事（例如重啟 daemon）、沒做到的與原因。不要貼整段 diff。
+
+## scratchpad 與 outbox（使用者 2026-09-16）
+- scratchpad 只放中間產物，不再作為給使用者的輸出目錄，也不可放私鑰／憑證／DB 複本。
+- 要交給使用者的檔案放 outbox：`~/.config/agents-manager/outbox/<你的 AM_BOT_ID>/`（自己 `mkdir -p`；daemon 之後會注入 `$AM_OUTBOX` 指到同一處）。這個目錄只保留 1 小時，AGM 每 10 分鐘清掉超過 1 小時的檔案；要長期保留的放 repo 或 `reports/`。
+- 私鑰／憑證／DB 一律不得放 scratchpad 或 outbox。
