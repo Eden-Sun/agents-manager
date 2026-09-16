@@ -1248,7 +1248,7 @@ export const useStore = create<StoreState>((set, get) => ({
     try {
       await api.deleteIdentity(name, host)
       await get().refreshState()
-      get().notify('info', `已刪除身份 ${name}`)
+      get().notify('info', host && host !== 'local' ? `已刪除 ${host} 的身份 ${name}` : `已刪除身份 ${name}`)
     } catch (e) {
       get().notify('error', errText(e))
     }

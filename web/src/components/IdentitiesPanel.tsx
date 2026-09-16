@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import type { BotKind, IdentityStatus, IdentityStatusMap } from '../api/types'
 import { identityDisabled, useStore } from '../store/store'
+import { findIdentity, hostLabel, identityHost, identityRowKey, identityUseCount, shadowedByConfig } from '../store/identityRows'
 import { ConfirmDialog } from './ConfirmDialog'
 import { KindTag } from './KindTag'
 import './identitiesPanel.css'
@@ -60,13 +61,16 @@ export function IdentityBadge({
 }
 
 /** 身份在每台主機各自的登入狀態（帳號是每台各自登入的）；`null` = 問不到，標「未知」而非「未登入」。 */
-function IdentityHostLogins({ name, kind }: { name: string; kind?: string }) {
+function IdentityHostLogins({ name, kind, only }: { name: string; kind?: string; only?: string }) {
   const localStatus = useStore((s) => s.localIdentityStatus[name])
   const localConnected = useStore((s) => s.connected)
-  const hosts = useStore((s) => s.hosts)
-  const rows: { host: string; label: string; state: boolean | null; account: string | null; reason: string | null; connected: boolean }[] = [
-    { host: 'local', label: '本機', state: localStatus?.logged_in ?? null, account: localStatus?.account ?? null, reason: localStatus?.reason ?? null, connected: localConnected },
-  ]
+  const allHosts = useStore((s) => s.hosts)
+  // 明寫 host 的身分只屬於那一台：別台同名的登入狀態是別的帳號，不能掛在這一列。
+  const pinned = only && only !== 'local' ? only : null
+  const hosts = pinned ? allHosts.filter((h) => h.name === pinned) : allHosts
+  const rows: { host: string; label: string; state: boolean | null; account: string | null; reason: string | null; connected: boolean }[] = pinned
+    ? []
+    : [{ host: 'local', label: '本機', state: localStatus?.logged_in ?? null, account: localStatus?.account ?? null, reason: localStatus?.reason ?? null, connected: localConnected }]
   for (const h of hosts) {
     const st = h.identity_status[name]
     rows.push({ host: h.name, label: h.name, state: h.connected ? (st?.logged_in ?? null) : null, account: st?.account ?? null, reason: h.connected ? st?.reason ?? null : '主機未連線', connected: h.connected })
@@ -111,10 +115,6 @@ function closeEnclosingPopup(from: HTMLElement) {
   from.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
 }
 
-function hostLabelOf(host: string): string {
-  return host === 'local' || !host ? '本機' : host
-}
-
 function IdentityLoginButton({ host, identity, loggedIn }: { host: string; identity: string; loggedIn: boolean }) {
   const loginIdentity = useStore((s) => s.loginIdentity)
   const notify = useStore((s) => s.notify)
@@ -124,7 +124,7 @@ function IdentityLoginButton({ host, identity, loggedIn }: { host: string; ident
       type="button"
       className="mini-btn identity-login-btn"
       disabled={busy}
-      title={`在${hostLabelOf(host)}開臨時 pane，帶著 ${identity} 的設定執行登入`}
+      title={`在${hostLabel(host)}開臨時 pane，帶著 ${identity} 的設定執行登入`}
       onClick={(e) => {
         if (busy) return
         const btn = e.currentTarget
@@ -146,7 +146,7 @@ function IdentityLoginButton({ host, identity, loggedIn }: { host: string; ident
 function IdentityLogoutButton({ host, identity }: { host: string; identity: string }) {
   const logoutIdentity = useStore((s) => s.logoutIdentity)
   const notify = useStore((s) => s.notify)
-  const used = useStore((s) => s.bots.filter((b) => b.identity === identity).length)
+  const used = useStore((s) => identityUseCount(s.bots, s.projects, host, identity))
   const [busy, setBusy] = useState(false)
   const [confirm, setConfirm] = useState(false)
   return (
@@ -155,7 +155,7 @@ function IdentityLogoutButton({ host, identity }: { host: string; identity: stri
         type="button"
         className="mini-btn identity-login-btn"
         disabled={busy}
-        title={`在${hostLabelOf(host)}開臨時 pane，帶著 ${identity} 的設定登出這個帳號`}
+        title={`在${hostLabel(host)}開臨時 pane，帶著 ${identity} 的設定登出這個帳號`}
         onClick={() => setConfirm(true)}
       >
         {busy ? '登出中…' : '登出'}
@@ -165,7 +165,7 @@ function IdentityLogoutButton({ host, identity }: { host: string; identity: stri
         title={`登出 ${identity}`}
         body={
           <>
-            會在{hostLabelOf(host)}開一個臨時 pane，帶著 <strong>{identity}</strong> 的設定目錄執行登出，清掉這個帳號的憑證。
+            會在{hostLabel(host)}開一個臨時 pane，帶著 <strong>{identity}</strong> 的設定目錄執行登出，清掉這個帳號的憑證。
             {used > 0 ? (
               <>
                 <br />
@@ -201,8 +201,8 @@ function IdentityDisableButton({ host, kind, name }: { host: string; kind: strin
       disabled={busy}
       title={
         disabled
-          ? `重新啟用：${name} 會再出現在${hostLabelOf(host)}的身份選單裡`
-          : `標為停用：${name} 不再出現在${hostLabelOf(host)}的身份選單與自動挑選裡，已經在用它的 Bot 不受影響`
+          ? `重新啟用：${name} 會再出現在${hostLabel(host)}的身份選單裡`
+          : `標為停用：${name} 不再出現在${hostLabel(host)}的身份選單與自動挑選裡，已經在用它的 Bot 不受影響`
       }
       onClick={() => void setIdentityDisabled(host, kind, name, !disabled)}
     >
@@ -222,9 +222,9 @@ function DisabledChip({ host, kind, name }: { host: string; kind: string; name: 
   )
 }
 
-function IdentityRow({ name }: { name: string }) {
-  const ident = useStore((s) => s.identities.find((i) => i.name === name))
-  const used = useStore((s) => s.bots.filter((b) => b.identity === name).length)
+function IdentityRow({ host, name }: { host: string; name: string }) {
+  const ident = useStore((s) => findIdentity(s.identities, host, name))
+  const used = useStore((s) => identityUseCount(s.bots, s.projects, host, name))
   const removeIdentity = useStore((s) => s.removeIdentity)
   const [confirmDelete, setConfirmDelete] = useState(false)
   if (!ident) return null
@@ -236,14 +236,14 @@ function IdentityRow({ name }: { name: string }) {
           <IdentityBadge name={ident.name} />
           <KindTag kind={ident.kind} />
           {/* 身分是每台一份（SPEC §16.2）：同名的 cc1 在別台是別的帳號，列上要看得出是哪一台。 */}
-          <span className="host-count">{ident.host || '本機'}</span>
+          <span className="host-count">{hostLabel(host)}</span>
           <span className="host-count">{used > 0 ? `${used} 個 Bot` : '未使用'}</span>
-          <DisabledChip host="local" kind={ident.kind} name={ident.name} />
+          <DisabledChip host={host} kind={ident.kind} name={ident.name} />
         </span>
         <span className="identity-detail" title={envText}>
           {envText ? envText.replace(/\n/g, ' ・ ') : '（無 env）'}
         </span>
-        <IdentityHostLogins name={ident.name} kind={ident.kind} />
+        <IdentityHostLogins name={ident.name} kind={ident.kind} only={host} />
       </span>
       <button
         type="button"
@@ -258,11 +258,11 @@ function IdentityRow({ name }: { name: string }) {
         title="刪除身份"
         body={
           <>
-            要把身份 <strong>{name}</strong> 移除嗎？已經登入的帳號本身不受影響。
+            要把<strong>{hostLabel(host)}</strong>的身份 <strong>{name}</strong> 移除嗎？別台同名的不受影響，已經登入的帳號本身也不受影響。
             {used > 0 ? (
               <>
                 <br />
-                <strong>仍有 {used} 個 Bot 綁著這個身份</strong>，需先把那些 Bot 改用別的身份或移除。
+                <strong>{hostLabel(host)}仍有 {used} 個 Bot 綁著這個身份</strong>，需先把那些 Bot 改用別的身份或移除。
               </>
             ) : (
               ' 目前沒有 Bot 在用它。'
@@ -275,7 +275,7 @@ function IdentityRow({ name }: { name: string }) {
         onCancel={() => setConfirmDelete(false)}
         onConfirm={() => {
           setConfirmDelete(false)
-          void removeIdentity(name, ident.host || 'local')
+          void removeIdentity(name, host)
         }}
       />
     </div>
@@ -361,7 +361,8 @@ function ShellIdentities() {
   const collect = (host: string, label: string, map: IdentityStatusMap) => {
     for (const st of Object.values(map)) {
       if (st.source !== 'shell') continue
-      if (configured.some((i) => i.name === st.name)) continue
+      // 只有同一台的 config 才蓋得掉：本機的 `cc1` 不能把 m4p 認出來的 `cc1`（別的帳號）藏起來。
+      if (shadowedByConfig(configured, host, st.name)) continue
       rows.push({ host, label, st })
     }
   }
@@ -414,7 +415,7 @@ export function IdentitiesPanel() {
     <div className="hosts-panel identities-panel">
       {identities.length === 0 ? <p className="hint">尚未定義任何身份。</p> : null}
       {identities.map((i) => (
-        <IdentityRow key={i.name} name={i.name} />
+        <IdentityRow key={identityRowKey(i)} host={identityHost(i)} name={i.name} />
       ))}
       <ShellIdentities />
       <NewIdentityForm />
