@@ -136,6 +136,16 @@ pub struct ProcessInfo {
     pub pid: Option<i64>,
 }
 
+/// `pane.process_info` 的整份（§6.5e 的 GC 守門）：`shell_pid` 是 herdr 自己記的那顆 shell，
+/// 不靠行程環境——macOS 的 `ps -E` 讀不到 `-zsh` 本身的環境，root 的子行程更讀不到。
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PaneShell {
+    #[serde(default)]
+    pub shell_pid: Option<i64>,
+    #[serde(default)]
+    pub foreground_processes: Option<Vec<ProcessInfo>>,
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error("herdr error {code}: {message}")]
 pub struct HerdrError {
@@ -378,6 +388,12 @@ impl HerdrClient {
         let info = v.get("process_info").unwrap_or(&v);
         let Some(list) = info.get("foreground_processes") else { return Ok(Vec::new()) };
         Ok(serde_json::from_value(list.clone())?)
+    }
+
+    /// Same call as [`Self::pane_process_info`], keeping `shell_pid`.
+    pub async fn pane_shell(&self, pane_id: &str) -> Result<PaneShell> {
+        let v = self.call("pane.process_info", json!({"pane_id": pane_id})).await?;
+        Ok(serde_json::from_value(v.get("process_info").unwrap_or(&v).clone())?)
     }
 
     /// Ask by `pane_id`: `pane.layout` by workspace only covers the active tab, and each bot has

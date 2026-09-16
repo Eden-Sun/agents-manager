@@ -574,7 +574,10 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
   → daemon 在 reconcile 的同一輪關掉。三條守門（AGM 2026-09-16 裁示）：
   - **「閒置」要把停住的工作算進去**：只看前景程式與 listen port 會漏掉 Ctrl-Z 丟到背景的編輯器、背景 job、還沒回答的
     sudo／確認提示——關掉這種 pane 會讓人丟掉沒存的東西。判準是**行程樹只有 shell 本身**（沒有 stopped／background job），
-    才算可關。
+    才算可關。行程樹的量法：以 herdr `pane.process_info` 的 `shell_pid` 為根，沿 `ps -A` 的 ppid 走**全部子孫**，
+    不靠子孫自己的環境——root 的 `sudo`、`env -i` 起的行程、macOS 上連 `-zsh` 本身都讀不到環境（2026-09-16 實機：
+    卡在 `sudo make dev` 的 pane，herdr 回的前景是空的）。子孫有任何一個（含巢狀 shell）、或 herdr 報的前景不是 shell 自己，
+    就不算；herdr 沒報 `shell_pid`、那個 pid 不在樹裡，一律當判不出來、不關。
   - **關之前把畫面最後 20 行記進 log**（連同 pane id、owner、閒置時長）。自動關 pane 不可逆，出事時要說得出「我們關掉的
     是什麼」；事後猜比先記貴太多。
   - **關之前重新取一次前景、port 與行程樹**（避免競態）。那一次取值**失敗就不關**——讀不到不等於是空的。

@@ -67,6 +67,38 @@ pub fn classify(foreground: Option<&str>, ports: &[u16]) -> &'static str {
     }
 }
 
+/// herdr 的 `pane.process_info` ＋ 一份 `ps` dump → 這顆 pane 的事實（§6.5e）。`None`＝判不出來：
+/// herdr 沒報 `shell_pid`、那個 pid 不在樹裡。兩邊誰看到東西都算有：`ps` 的樹抓得到 root 的 `sudo`
+/// （herdr 這時回空的前景），herdr 的前景行程組抓得到樹還來不及出現的那一個。
+pub fn facts_from(shell: &crate::herdr::PaneShell, dump: &str, pane_id: &str) -> Option<crate::memproc::PaneFacts> {
+    let pid = i32::try_from(shell.shell_pid?).ok()?;
+    let mut f = crate::memproc::pane_facts_for_shell(dump, pane_id, pid)?;
+    // 閒著的 shell，herdr 會把 shell 自己列成前景；其他任何一個（含 pid 不明的）都不是「只有 shell」。
+    if let Some(p) = shell.foreground_processes.iter().flatten().find(|p| p.pid != Some(i64::from(pid))) {
+        f.shell_only = false;
+        if f.foreground.is_none() {
+            let argv = if p.argv.is_empty() { p.argv0.clone().unwrap_or_default() } else { p.argv.join(" ") };
+            f.foreground = Some(argv);
+        }
+    }
+    Some(f)
+}
+
+async fn read_facts(
+    client: Option<&crate::herdr::HerdrClient>,
+    dump: Option<&str>,
+    pane_id: &str,
+) -> Option<crate::memproc::PaneFacts> {
+    let (client, dump) = (client?, dump?);
+    match client.pane_shell(pane_id).await {
+        Ok(shell) => facts_from(&shell, dump, pane_id),
+        Err(e) => {
+            tracing::debug!(pane_id, error = %e, "pane.process_info failed");
+            None
+        }
+    }
+}
+
 /// 本機才算 listen port：pane 行程樹的 pid 對 `lsof`。遠端留空（§6.5e：不為了它多開 ssh 往返）。
 pub async fn listen_ports(host: &str, pids: &[i32]) -> HashMap<i32, Vec<u16>> {
     let mut out: HashMap<i32, Vec<u16>> = HashMap::new();
@@ -136,13 +168,14 @@ pub async fn scan_host(app: &Arc<App>, host: &str, snapshot_panes: &[Value]) -> 
         return Ok(0);
     }
     // 環境快照：pane 行程樹的 `AM_BOT_ID` 就是歸屬（§6.5e）。讀不到就這一輪不更新歸屬，不要猜。
-    let facts = match crate::memproc::dump(app, host).await {
-        Ok(out) => crate::memproc::pane_facts_from_dump(&out),
+    let dump = match crate::memproc::dump(app, host).await {
+        Ok(out) => Some(out),
         Err(e) => {
             tracing::warn!(host, error = %e, "讀不到行程環境，這一輪不更新 pane 歸屬");
-            HashMap::new()
+            None
         }
     };
+    let client = crate::api::shell::client_for(app, host).await.ok().map(|(c, _)| c);
     let now = crate::db::now();
     // canonical path 比對用（§6.5e 的 cwd 回退）。
     let project_paths: Vec<(String, String)> = crate::db::live_projects(&app.db)
@@ -155,7 +188,7 @@ pub async fn scan_host(app: &Arc<App>, host: &str, snapshot_panes: &[Value]) -> 
     for p in &non_agent {
         let Some(pane_id) = p.get("pane_id").and_then(Value::as_str) else { continue };
         seen.push(pane_id.to_string());
-        let f = facts.get(pane_id).cloned().unwrap_or_default();
+        let f = read_facts(client.as_ref(), dump.as_deref(), pane_id).await.unwrap_or_default();
         let ports: Vec<u16> = {
             let by_pid = listen_ports(host, &f.pids).await;
             let mut all: Vec<u16> = by_pid.into_values().flatten().collect();
@@ -352,8 +385,8 @@ async fn close_if_still_idle(
 ) -> Result<bool> {
     // 1. 重新取前景／行程樹：**讀不到就不關**（讀不到不等於是空的）。
     let dump = crate::memproc::dump(app, host).await?;
-    let facts = crate::memproc::pane_facts_from_dump(&dump);
-    let Some(f) = facts.get(pane_id) else {
+    let (client, _) = crate::api::shell::client_for(app, host).await.map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    let Some(f) = read_facts(Some(&client), Some(&dump), pane_id).await else {
         tracing::info!(host, pane_id, "GC 前讀不到這顆 pane 的行程樹，這一輪不關");
         return Ok(false);
     };
@@ -364,7 +397,6 @@ async fn close_if_still_idle(
     if !ports.is_empty() {
         return Ok(false);
     }
-    let (client, _) = crate::api::shell::client_for(app, host).await.map_err(|e| anyhow::anyhow!("{e:?}"))?;
     // 2. 關之前把畫面最後幾行記進 log：自動關不可逆，出事要說得出關掉的是什麼。
     let tail = client
         .pane_read(pane_id, "recent_unwrapped", log_lines)
@@ -558,13 +590,13 @@ mod tests {
 ---AM-ENV---
   401 /bin/zsh -l HERDR_PANE_ID=w1:pE AM_BOT_ID=b1 AM_PROJECT_ID=p1
 ";
-        let facts = crate::memproc::pane_facts_from_dump(dump);
-        assert_eq!(facts["w1:pE"].project_ids, vec!["p1".to_string()]);
-        assert_eq!(facts["w1:pE"].bot_ids, vec!["b1".to_string()]);
+        let facts = crate::memproc::pane_facts_for_shell(dump, "w1:pE", 401).unwrap();
+        assert_eq!(facts.project_ids, vec!["p1".to_string()]);
+        assert_eq!(facts.bot_ids, vec!["b1".to_string()]);
 
         // bot 被刪：綁定照舊在（不然這顆會掉成「非專案」，再撞上「只准一顆」）。
         sqlx::query("UPDATE bots SET deleted_at=? WHERE id='b1'").bind(&now).execute(&app.db).await.unwrap();
-        assert_eq!(facts["w1:pE"].project_ids, vec!["p1".to_string()], "env 的綁定與 bot 是否存在無關");
+        assert_eq!(facts.project_ids, vec!["p1".to_string()], "env 的綁定與 bot 是否存在無關");
         std::fs::remove_dir_all(&app.data_dir).ok();
     }
 
@@ -712,6 +744,48 @@ mod tests {
         std::fs::remove_dir_all(&app.data_dir).ok();
     }
 
+    fn herdr_shell(shell_pid: Option<i64>, fg: &[(Option<i64>, &str)]) -> crate::herdr::PaneShell {
+        serde_json::from_value(json!({
+            "pane_id": "w1:p1",
+            "shell_pid": shell_pid,
+            "foreground_processes": fg.iter().map(|(pid, argv)| json!({"pid": pid, "argv": argv.split(' ').collect::<Vec<_>>(), "argv0": argv})).collect::<Vec<_>>(),
+        }))
+        .unwrap()
+    }
+
+    /// 2026-09-16 實機：卡在 `sudo make dev` 的 pane，herdr 回的前景是空的、`ps -E` 也讀不到 root 行程的環境。
+    /// 只有沿 shell pid 的 ppid 樹往下走看得到它——看到了就不是「只有 shell」，GC 不能關。
+    #[test]
+    fn a_pane_waiting_on_sudo_is_not_an_idle_shell() {
+        let dump = "\
+  9413     1  48000 /opt/homebrew/bin/herdr --session agents-manager server
+ 35092  9413   3000 -zsh
+  3822 35092   5000 sudo make -C witsper-ops dev
+ 70323  9413   3000 -zsh
+---AM-ENV---
+ 35092 -zsh
+ 70323 -zsh
+";
+        let sudo = facts_from(&herdr_shell(Some(35092), &[]), dump, "w168:p6C").expect("樹裡有這顆 shell");
+        assert!(!sudo.shell_only, "root 的子行程也算：{sudo:?}");
+        assert_eq!(sudo.foreground.as_deref(), Some("sudo make -C witsper-ops dev"));
+        assert_eq!(classify(sudo.foreground.as_deref(), &[]), "service");
+
+        // 閒著的 shell：herdr 把 shell 自己列成前景，那不算。
+        let idle = facts_from(&herdr_shell(Some(70323), &[(Some(70323), "zsh")]), dump, "w168:p6J").unwrap();
+        assert!(idle.shell_only, "{idle:?}");
+        assert_eq!(idle.pids, vec![70323]);
+
+        // herdr 看到的前景樹還沒出現（剛啟動、或 dump 早一步取的）：也不算只有 shell。
+        let racing = facts_from(&herdr_shell(Some(70323), &[(Some(99999), "vim notes.md")]), dump, "w168:p6J").unwrap();
+        assert!(!racing.shell_only);
+        assert_eq!(racing.foreground.as_deref(), Some("vim notes.md"));
+
+        // 判不出來：herdr 沒報 shell pid、或 pid 不在樹裡。
+        assert_eq!(facts_from(&herdr_shell(None, &[]), dump, "w168:p6J"), None);
+        assert_eq!(facts_from(&herdr_shell(Some(424242), &[]), dump, "w168:p6J"), None);
+    }
+
     /// 歸屬只認 `AM_BOT_ID`：使用者手開的 pane（沒有這個變數）不會被算成誰的（§6.5e）。
     #[test]
     fn ownership_comes_from_the_pane_environment() {
@@ -725,12 +799,11 @@ mod tests {
   402 node HERDR_PANE_ID=w1:p1 AM_BOT_ID=b1
   410 /bin/zsh -l HERDR_PANE_ID=w1:p9
 ";
-        let facts = crate::memproc::pane_facts_from_dump(dump);
-        let owned = &facts["w1:p1"];
+        let owned = &crate::memproc::pane_facts_for_shell(dump, "w1:p1", 401).unwrap();
         assert_eq!(owned.bot_ids, vec!["b1".to_string()]);
         assert!(owned.foreground.as_deref().unwrap().contains("dev-server.js"));
         assert!(!owned.shell_only);
-        let user = &facts["w1:p9"];
+        let user = &crate::memproc::pane_facts_for_shell(dump, "w1:p9", 410).unwrap();
         assert!(user.bot_ids.is_empty(), "使用者手開的不歸任何 bot");
         assert!(user.shell_only, "只有 shell");
         assert_eq!(classify(user.foreground.as_deref(), &[]), "shell");
