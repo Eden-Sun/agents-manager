@@ -1118,6 +1118,8 @@ export function Sidebar() {
             <section
               className={`project${pDragging ? ' dragging' : ''}${pDropEdge ? ` drop-${pDropEdge}` : ''}`}
               key={p.id}
+              /* Control+1…9 要把側欄捲到這個專案（`useProjectJumpKeys`）。 */
+              data-project-id={p.id}
               onDragOver={(e) => {
                 if (!pdrag || pdrag.id === p.id) return
                 e.preventDefault()
