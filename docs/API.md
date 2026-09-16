@@ -1072,7 +1072,7 @@ body 直接是檔案位元組（**不是** multipart），`Content-Type` 就是�
   帶 `request_id`（穩定 id）時**冪等**：同一個 supervisor 下同一個 id 再送回**原本那一筆**（200、`created:false`），不新增、不重推 inbox；已經被 decide 的也照樣回它本人（狀態就是當時的裁示）。
   同一個 id 但 `requester`／`purpose`／`scope`／`target_commit` 不同 → `409 {"reason":"approval_request_mismatch", field, existing, requested, approval_id}`，原本那筆一個字都不動（另一顆 bot 撞同一個自然 id 拿不回別人的核准）。
   `expires_in_secs` 不參與比對：原本那筆的到期時間不會被重送改掉。不帶 `request_id` 就是舊行為，每次開一筆新的。
-  CLI：`agm approval request --request-id <id>`（不確定送出去沒有時用同一個 id 重送，不要換新的）。
+  CLI：`agm approval request --request-id <id>`（不確定送出去沒有時用同一個 id 重送，不要換新的）；`--supersedes <舊 id>` 帶 `supersedes`。
 - `POST /api/supervisor/approvals/{id}/decide {decision:"approve"|"deny"|"revoke",actor?,reason?,expires_in_secs?}`：同 decision 重送回 `idempotent:true`。
   **第一個裁示定案**：`approve`／`deny` 只從 `pending` 條件寫入；`revoke` 從 `approved` 或 `pending`。寫不進去 → 409
   `{reason:"already_decided"|"decided_concurrently",status,decided_by,allowed_from}`，什麼都沒寫（後到的 deny 不會把 approved 改掉）。

@@ -561,6 +561,14 @@ class ApprovalLeaseCommandTest(CliCase):
             ("bot-a", "rebuild", "abc123", 600),
         )
 
+    def test_request_can_supersede_its_own_earlier_request(self):
+        """換 commit 重新申請：帶上舊的 id，daemon 才接得起等待（SPEC §18.10）；不帶就不送這個欄位。"""
+        self.ok("approval", "request", "--requester", "bot-a", "--purpose", "rebuild", "--scope", "daemon/",
+                "--commit", "def456", "--supersedes", "ap-0")
+        self.assertEqual(self._last_body()["supersedes"], "ap-0")
+        self.ok("approval", "request", "--requester", "bot-a", "--purpose", "rebuild", "--scope", "daemon/", "--commit", "def456")
+        self.assertNotIn("supersedes", self._last_body())
+
     def test_request_needs_its_fields(self):
         self.assertEqual(self.bad("approval", "request", "--requester", "bot-a")["error"], "bad_args")
         self.assertEqual([r for r in FakeDaemon.seen if r["method"] == "POST"], [], "缺欄位時不送出請求")

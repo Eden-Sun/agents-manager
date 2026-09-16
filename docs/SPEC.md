@@ -1426,7 +1426,8 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
   例外只有兩條，都留稽核：(a) daemon 啟動時釋放上一輪殘留的 `restart` 租約（現行行為不變）；(b) **AGM 角色**（patrol／responder，`X-AM-Bot-Id`＋該 bot 自己的 hook token 驗出來的）的強制釋放 `--force`：`reason` 必填，寫進 `supervisor_notes` 的 `lease_force_release`（含判定到的角色），log warn，且不比對 owner／fence——持有者可能已經不在了。
   **不是 AGM 角色帶 `force` → 403 `lease_force_forbidden`**，租約一個字都不動：force 是授權問題，不只是稽核問題；只留紀錄而沒有界線，等於誰都能接管別人正在換 binary 的窗口。
   升級過渡：欄位是 additive，升級前建立的租約 `lease_token IS NULL`，這種**不帶 token 也能釋放**（否則升級當下握著的窗口永遠沒人還得了），釋放時留一行 warn。過期自動失效與 fence 只增不減的語意都沒變。
-  ops 腳本把 token 寫進派工正文（執行者要用它交還窗口）：那是一個有效期最多一小時的窗口憑證，不是帳號憑證。
+  ops 腳本**不把 token 寫進派工正文**（review2 2026-09-16）：正文會出現在 `GET /api/supervisor/assignments`、建置 child 的對話紀錄與腳本 log，等於換一個公開位置。
+  token 寫進 AGM 目錄裡權限 600 的 `daemon-update.lease-token`，正文只給 `--lease-token "$(cat <那個檔>)"`。
 - 持有 `restart` 租約期間 **supervisor 的 assignment 派送 hold**（留 `queued`，不算重試）。**只管這一條通道**：`POST /api/bots/{id}/prompt` 沒被 gate。
 - **重啟後無等待期**：窗口在租約 release（API）或 daemon 啟動完成（開始 listen 後自動 release 仍未釋放的 `restart` 租約、consume 核准並記 info log）時就結束，被它 hold 的交辦立刻解除、controller 下一輪（≤10 秒）直接派送，不等 hold 寫的到期時間；controller 每輪派送前發現已沒有 held 的 `restart` 租約（含到期）也會先解除殘留 hold。
 - 安全窗口 fail closed：讀不到某顆 bot 狀態回 `safe:false` 並列在 `unreadable`。`restart` 不接受 `require_idle=false`。
@@ -1450,6 +1451,8 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
 - **換 commit 接續等待**（review2 2026-09-16）：核准綁 `target_commit`，main 一動就要換一筆；升級計時若只看新那筆的 `decided_at`，忙碌的 repo 上永遠等不滿 30 分鐘。
   申請帶 `supersedes=<舊 id>`（同 requester、同 purpose）時，舊的還能用就標 `superseded`、它未送出的 `approval_requested` 一起收掉，新的 `wait_since` 接過舊的等待起點；
   升級計時看 `min(wait_since, decided_at)`。舊的已經不能用（過期、被駁、用掉）就不接。`consumed`／`superseded` 都不覆寫 `decided_at`／`decided_by`。
+- 例行更新腳本計算「別人的重建申請」時排除自己的 requester 與已過期的；自己有還在等的核准時照常每輪往下跑。main 只動到不進 binary 的檔就沿用原核准，
+  動到要建的東西才帶 `supersedes` 重新申請（review2 2026-09-16，細節見 `scripts/ops/README.md`）。
 - 例行更新腳本的順序是**先取回／申請自己的核准，再問 `lease safety --approval <id>`**：升級是綁在那筆核准等了多久，
   不帶就是用「最早那筆還活著的核准」判斷自己要不要繼續，升級在這條路上等於死碼（review 2026-09-16）。
 - 運維腳本在 `scripts/ops/`，附隔離測試（`scripts/ops/daemon-update-kick_test.sh`，假 CLI + 暫存 repo）。
