@@ -1083,7 +1083,7 @@ API：`GET /api/projects/:id/messages`、`POST /api/projects/:id/chat`（`API.md
 
 ### 14.3 輪詢
 codex 5 分、claude 60 秒、grok 30 秒；每輪對 `local` + 每台已連線遠端各跑一次（使用者決定：持續輪詢，不只在檢視時），同輪各主機併發（`JoinSet`，一次探測數十秒）。
-斷線主機跳過。`probe_lock` per host；同一台的多個 identity 一個一個探（共用 pane）。`GET /api/quota?refresh=1` 依序。
+斷線主機跳過。`probe_lock` per host；同一台的多個 identity 一個一個探（共用 pane）。`GET /api/quota?refresh=1` 同樣各主機併發（同一台三個 kind 也併發），最多等 20 秒就回當下的快照，沒跑完的留在背景、跑完推 `quota_updated`（回應 header `X-AM-Quota-Refresh: pending`）。
 
 - claude 跳過條件：該列在 60 秒內剛被 statusLine 更新過、該身份的 `logged_in` 已知（登入答案搭同一次探測回來，還沒答案的仍值得探一次），**而且**上一次成功的 `/usage` 不到 10 分鐘（`USAGE_REFRESH`）。第三條是必要的：statusLine **永遠不含 Fable 週窗與方案名**，而 cc0 這種一直有 bot 在講話的帳號狀態列每 30 秒就刷一次，少了它就每一輪都被跳過——daemon 重啟後那格的 `fable` 再也填不回來（2026-09-16 使用者：「怎麼不 show fable 用量了」；重啟前看得到只是因為 `quota::set` 會沿用舊的 `fable`）。記在記憶體，重啟就當沒問過。
 - grok 同理：沒登入不探；探測失敗後該主機停 5 分鐘再試。`refresh=1` 不受節流，永遠真的探。

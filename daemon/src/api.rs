@@ -1889,7 +1889,17 @@ async fn kill_mem_process(State(app): State<Arc<App>>, Json(body): Json<Value>) 
     }
 }
 
-async fn get_quota(State(app): State<Arc<App>>, Query(q): Query<HashMap<String, String>>) -> Result<Json<Value>, LcError> {
+/// `?refresh=1` 最多等這麼久就回當下的快照。claude 探測一次最久 40 秒、grok 25 秒，而且每台主機各探一次：
+/// 以前依序 await 全部跑完才回，一台慢的 ssh 主機就把 HTTP 請求拖到好幾分鐘（quota 修正 2026-09-16 轉來）。
+const QUOTA_REFRESH_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// 等背景工作最多 `wait`。逾時回 `false`，**工作不會被取消**（丟掉 `JoinHandle` 不會 abort）：探測照樣跑完、寫進 quota、推 WS。
+async fn finished_within(wait: std::time::Duration, job: tokio::task::JoinHandle<()>) -> bool {
+    tokio::time::timeout(wait, job).await.is_ok()
+}
+
+async fn get_quota(State(app): State<Arc<App>>, Query(q): Query<HashMap<String, String>>) -> Result<Response, LcError> {
+    let mut pending = false;
     if flag(&q.get("refresh").cloned()) {
         let hosts = match q.get("host").map(String::as_str).filter(|h| !h.is_empty()) {
             Some(h) => {
@@ -1900,19 +1910,56 @@ async fn get_quota(State(app): State<Arc<App>>, Query(q): Query<HashMap<String, 
             }
             None => crate::quota::pollable_hosts(&app).await,
         };
-        for host in hosts {
-            if let Err(e) = crate::quota::refresh_codex(&app, &host).await {
-                tracing::warn!(host = %host, error = %e, "codex quota refresh failed");
-            }
-            if let Err(e) = crate::quota_claude::refresh_claude(&app, &host).await {
-                tracing::warn!(host = %host, error = %e, "claude quota refresh failed");
-            }
-            if let Err(e) = crate::quota_grok::refresh_grok(&app, &host).await {
-                tracing::warn!(host = %host, error = %e, "grok quota refresh failed");
-            }
-        }
+        // 各主機併發（`quota::for_each_host`，跟背景輪詢同一份），同一台的三個 kind 也併發；各自的 probe_lock 照舊。
+        let app2 = app.clone();
+        let job = tokio::spawn(async move {
+            crate::quota::for_each_host(hosts, move |host| {
+                let app = app2.clone();
+                async move {
+                    let (codex, claude, grok) = tokio::join!(
+                        crate::quota::refresh_codex(&app, &host),
+                        crate::quota_claude::refresh_claude(&app, &host),
+                        crate::quota_grok::refresh_grok(&app, &host),
+                    );
+                    for (kind, res) in [("codex", codex), ("claude", claude), ("grok", grok)] {
+                        if let Err(e) = res {
+                            tracing::warn!(host = %host, kind, error = %e, "quota refresh failed");
+                        }
+                    }
+                }
+            })
+            .await
+        });
+        pending = !finished_within(QUOTA_REFRESH_WAIT, job).await;
     }
-    Ok(Json(crate::quota::snapshot(&app).await))
+    let mut resp = Json(crate::quota::snapshot(&app).await).into_response();
+    if pending {
+        // body 是 quota key 的 map，不能塞旗標進去（前端會把它當成一格額度）：用 header 說「還有探測在背景跑」。
+        resp.headers_mut().insert("x-am-quota-refresh", axum::http::HeaderValue::from_static("pending"));
+    }
+    Ok(resp)
+}
+
+#[cfg(test)]
+mod quota_refresh_tests {
+    /// 逾時就先回，背景的探測不能被取消（它跑完照樣寫進 quota、推 WS）。
+    #[tokio::test]
+    async fn a_slow_refresh_answers_early_and_keeps_running() {
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let d = done.clone();
+        let slow = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            d.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        let started = std::time::Instant::now();
+        assert!(!super::finished_within(std::time::Duration::from_millis(20), slow).await);
+        assert!(started.elapsed() < std::time::Duration::from_millis(250), "不等慢的那一個");
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert!(done.load(std::sync::atomic::Ordering::SeqCst), "逾時後背景照樣跑完");
+
+        let quick = tokio::spawn(async {});
+        assert!(super::finished_within(std::time::Duration::from_secs(5), quick).await);
+    }
 }
 
 #[derive(Deserialize)]

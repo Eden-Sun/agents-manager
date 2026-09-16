@@ -866,7 +866,8 @@ Project 底下所有存活 bot 的訊息合併，以插入順序（`rowid`）倒
   遇到那一桶的新讀數會校正：窗是撞限之後才開的就清掉，否則 `until` 取與該窗 `resets_at` 較早者。寫進該 bot 身份的 key。UI 標「被擋」並壓灰量表。
 - `low` / `critical`：daemon 算好的門檻（`quota.rs` 的 `LOW_REMAINING_PCT = 30`、`CRITICAL_REMAINING_PCT = 5`，以剩餘 % 判斷）。**前端只讀旗標，不寫死百分比。**
   `low` → 顯示剩餘數字；`critical` → 側欄 bot 列提示。
-- `?refresh=1`：立刻重讀 `local` + 每台已連線遠端（依序；claude 探測最久 40 秒、grok 25 秒）；`&host=` 只重讀那台（不存在 404）。
+- `?refresh=1`：立刻重讀 `local` + 每台已連線遠端（各主機併發、同一台三個 kind 也併發；claude 探測最久 40 秒、grok 25 秒）；`&host=` 只重讀那台（不存在 404）。
+  最多等 20 秒就回當下的快照；還沒跑完的探測留在背景（跑完照樣推 `quota_updated`），回應帶 header `X-AM-Quota-Refresh: pending`。
 - 背景輪詢：codex 5 分、claude 60 秒、grok 30 秒，每輪各主機併發。
 - `source`：
   - `codex-app-server`：每 5 分鐘 `account/rateLimits/read`（遠端 ssh）。
