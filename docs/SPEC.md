@@ -512,6 +512,12 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
 **display-only** 介面（只有 `--title`／`--display-agent` 之類），不保存自訂欄位，也不會回到 `pane.list`／`pane.get`，
 拿它當歸屬的真相會在 herdr 重啟或改版後靜靜消失。改成兩條，真相在 daemon：
 
+0. **開 pane 當下就綁專案（使用者 2026-09-16 第 3 條裁示）**：shim 轉發 `AM_PROJECT_ID`（`setup.rs` 注入），
+   掃描時**它最優先**。這樣一來 **bot 被刪也不會失去歸屬**——否則那顆 pane 會掉成「非專案」，
+   再撞上「只准一顆」的規則，被當成多餘的那一顆處理。`panes.project_id` 每輪掃描都以 env 為準覆寫，
+   不留記憶體狀態；專案本身被刪掉時綁定才失效（回到沒歸屬，孤兒通知另計）。
+   歸屬順序：`AM_PROJECT_ID` → `AM_BOT_ID`（只補 owner 與顯示，它的專案僅在前者缺席時採用）→ cwd 比對 → 沒歸屬。
+
 1. **環境推斷（主要來源，不需要新協定）**：bot 的 pane 由 shim 開，`--env` 一定帶 `AM_BOT_ID`／`AM_RUN_ID`（§6.5b），
    子 pane 的 shell 與其行程樹都繼承得到。daemon 用既有的 `memproc` 環境快照（`ps -E` / `/proc/<pid>/environ`，
    已經在用來算每個專案的 RAM）把 pane 的行程樹對回 `AM_BOT_ID` → bot → project。
@@ -590,8 +596,11 @@ listen port 只在本機算（pane 行程樹的 pid 對 `lsof -nP -iTCP -sTCP:LI
 
 #### 邊界
 - 不動 agent pane 的 reconcile／run 配對／孤兒清掃（§6.9 附註的 09-11 教訓）。
-- GC 規則從 `bin/pane-gc.sh` 搬進 daemon 之後，該腳本只留互動式登入 pane 那條或退役（§18.4 同批處理）。
-- 門檻與「不動使用者手開」寫在 config，不寫死。`idle_close_secs` 另外要能用環境變數覆寫（與 §18.8 的保險絲門檻同一套規矩：看不懂／0／負數一律回預設——一個手滑的值不該把 GC 變成「立刻關」）。
+- GC 已經搬進 daemon（`panes::gc_host`，跟著 reconcile 每輪跑）。`bin/pane-gc.sh` **只留互動式登入 pane 那條**——
+  它本來就只關「卡住超過 24 小時的 claude/gcloud/codex 登入」，閒置 zsh 一律不動，所以不必改；
+  兩邊責任不重疊（登入 pane 有前景程式，daemon 的 GC 只碰行程樹只有 shell 的）。
+- 門檻與「不動使用者手開」寫在 config（`[panes] idle_close_secs` 預設 21600、`scratch_name` 預設 `scratch`、
+  `close_log_lines` 預設 20），不寫死。`idle_close_secs` 另外要能用環境變數覆寫（與 §18.8 的保險絲門檻同一套規矩：看不懂／0／負數一律回預設——一個手滑的值不該把 GC 變成「立刻關」）。
 
 ### 6.5.1 採用使用者的 Herdr `default` session
 

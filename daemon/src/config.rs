@@ -243,6 +243,55 @@ pub struct ConfigFile {
     pub hosts: Vec<HostCfg>,
     #[serde(default)]
     pub projects: Vec<ProjectCfg>,
+    /// §6.5e：非 agent pane 的 GC 門檻與例外。
+    #[serde(default)]
+    pub panes: PanesCfg,
+}
+
+/// SPEC §6.5e。閒置門檻可用 `AM_PANE_IDLE_CLOSE_SECS` 覆寫（看不懂／0／負數一律回預設——
+/// 一個手滑的值不該把 GC 變成「立刻關」）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PanesCfg {
+    #[serde(default = "default_idle_close_secs")]
+    pub idle_close_secs: u64,
+    /// 連專案都對不到的那唯一一顆 shell pane 的固定名字；它永不自動關。
+    #[serde(default = "default_scratch_name")]
+    pub scratch_name: String,
+    /// 關掉之前先記下畫面最後幾行（自動關不可逆，出事要說得出關掉的是什麼）。
+    #[serde(default = "default_close_log_lines")]
+    pub close_log_lines: u32,
+}
+
+impl Default for PanesCfg {
+    fn default() -> Self {
+        Self {
+            idle_close_secs: default_idle_close_secs(),
+            scratch_name: default_scratch_name(),
+            close_log_lines: default_close_log_lines(),
+        }
+    }
+}
+
+fn default_idle_close_secs() -> u64 {
+    21600
+}
+
+fn default_scratch_name() -> String {
+    "scratch".into()
+}
+
+fn default_close_log_lines() -> u32 {
+    20
+}
+
+impl PanesCfg {
+    /// 環境變數覆寫；看不懂、0 或負數一律用設定檔的值。
+    pub fn idle_close_secs(&self) -> u64 {
+        match std::env::var("AM_PANE_IDLE_CLOSE_SECS").ok().and_then(|v| v.trim().parse::<u64>().ok()) {
+            Some(n) if n > 0 => n,
+            _ => self.idle_close_secs.max(1),
+        }
+    }
 }
 
 /// Host / identity names end up in file paths and launchd labels.
