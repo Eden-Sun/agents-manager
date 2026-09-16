@@ -285,6 +285,24 @@ export async function setIdentityDisabled(host: string, kind: string, name: stri
   })
 }
 
+/** bot 寫在自己 scratchpad 裡的檔案。`reason` 有值＝這顆沒有可列的（遠端／還沒跑過／目錄不在）。 */
+export type ScratchpadFile = { name: string; size: number; modified: number }
+
+export async function fetchScratchpad(botId: string): Promise<{ dir: string; reason: string | null; files: ScratchpadFile[] }> {
+  const raw = await transport.request('GET', `/bots/${encodeURIComponent(botId)}/scratchpad`)
+  const o = isRec(raw) ? raw : {}
+  const rows = pick(o, 'files')
+  const files = Array.isArray(rows)
+    ? rows.filter(isRec).map((r) => ({ name: str(pick(r, 'name')), size: num(pick(r, 'size')), modified: num(pick(r, 'modified')) }))
+    : []
+  return { dir: str(pick(o, 'dir')), reason: optStr(pick(o, 'reason')), files: files.filter((f) => f.name) }
+}
+
+/** 下載要帶 token，`<a href>` 帶不了——所以跟附件走同一條 blob URL。 */
+export function scratchpadFileUrl(botId: string, name: string): Promise<string> {
+  return transport.blobUrl(`/bots/${encodeURIComponent(botId)}/scratchpad/file?path=${encodeURIComponent(name)}`)
+}
+
 export async function deleteProject(projectId: string): Promise<void> {
   await transport.request('DELETE', `/projects/${encodeURIComponent(projectId)}`)
 }

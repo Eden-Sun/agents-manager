@@ -1,0 +1,83 @@
+/* 檔案暫存區下半段：從 bot 拿出來的檔案。跟上半段（要送進對話的暫存）之間畫一條線分開——
+   兩者的方向相反，混在一起使用者會拖錯。 */
+.sp-files {
+  border-top: 1px solid var(--border);
+  padding: 6px 8px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 0;
+}
+
+.sp-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.sp-title {
+  font-weight: 600;
+}
+
+.sp-count {
+  padding: 0 5px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+}
+
+.sp-empty {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-faint);
+}
+
+.sp-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-y: auto;
+}
+
+.sp-file {
+  width: 100%;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px 6px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: none;
+  cursor: pointer;
+  color: inherit;
+}
+
+.sp-file:hover,
+.sp-file:focus-visible {
+  border-color: var(--border);
+  background: var(--bg-sunken, rgba(127, 127, 127, 0.08));
+}
+
+.sp-file:disabled {
+  cursor: progress;
+  opacity: 0.6;
+}
+
+.sp-name {
+  font-size: 12px;
+  /* 檔名會很長（`出貨追蹤 v2.tsv`、`run-2026-09-16.log`）：截尾比折行好認。 */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sp-meta {
+  font-size: 10px;
+  color: var(--text-faint);
+}

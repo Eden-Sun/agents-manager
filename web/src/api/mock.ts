@@ -628,6 +628,11 @@ export class MockTransport implements Transport {
   }
 
   async blobUrl(path: string): Promise<string> {
+    const sp = /^\/bots\/([^/]+)\/scratchpad\/file\?path=(.+)$/.exec(path)
+    if (sp) {
+      const name = decodeURIComponent(sp[2])
+      return URL.createObjectURL(new Blob([`（mock）${name} 的內容\n`], { type: 'text/plain' }))
+    }
     // 對話裡的本機圖片：畫一張標出路徑的示意圖，`missing` 開頭的演 404。
     const local = path.match(/^\/bots\/[^/]+\/local-image\?path=(.*)$/)
     if (local) {
@@ -708,6 +713,9 @@ export class MockTransport implements Transport {
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'tools' && seg[3] === 'refresh') return this.refreshTools(seg[1])
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'identities' && seg[4] === 'login') return this.loginIdentity(seg[1], decodeURIComponent(seg[3]))
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'identities' && seg[4] === 'logout') return this.logoutIdentity(seg[1], decodeURIComponent(seg[3]))
+    if (method === 'GET' && seg[0] === 'bots' && seg[2] === 'scratchpad' && seg.length === 3) {
+      return this.scratchpad(decodeURIComponent(seg[1]))
+    }
     if (method === 'GET' && seg[0] === 'identity-prefs') return { disabled: this.disabledIdentities }
     if (method === 'PUT' && seg[0] === 'identities' && seg[2] === 'disabled') {
       return this.setIdentityDisabled(decodeURIComponent(seg[1]), String(b.kind ?? ''), Boolean(b.disabled), String(b.host ?? 'local'))
@@ -1182,6 +1190,22 @@ export class MockTransport implements Transport {
       : this.disabledIdentities.filter((k) => k !== key)
     this.emit('identity_prefs_changed', { host: host || 'local', kind, identity: name, disabled })
     return { host: host || 'local', kind, identity: name, disabled }
+  }
+
+  /** 跟 daemon 同一個形狀：新的排前面，沒得列時回空清單＋原因。 */
+  private scratchpad(botId: string) {
+    const bot = this.bot(botId)
+    if (bot.kind !== 'claude') return { files: [], reason: 'scratchpad_no_session' }
+    const now = Math.floor(Date.now() / 1000)
+    return {
+      dir: `/private/tmp/claude-501/-Users-me-project/${botId}/scratchpad`,
+      session_id: botId,
+      files: [
+        { name: 'tracking.tsv', size: 18_432, modified: now - 120 },
+        { name: '出貨追蹤 v2.md', size: 4_096, modified: now - 3_600 },
+        { name: 'run.log', size: 1_204_233, modified: now - 86_400 },
+      ],
+    }
   }
 
   private ghKey(name: string): string {

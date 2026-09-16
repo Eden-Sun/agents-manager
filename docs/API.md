@@ -310,6 +310,22 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 對話 Markdown 裡的本機圖片（`![](docs/shot.png)`、`/Users/…/x.png`、`file://…`）。相對路徑以該 bot 的**專案目錄**為底；符號連結解開後仍須在專案目錄內，副檔名限 `png/jpg/jpeg/gif/webp`（不含 svg），≤ 20 MiB。回圖片位元組與對應 `Content-Type`。
 專案外、非圖片、不存在、太大、遠端主機的專案一律 `404 {"what":"image"}`；缺 `path` 400；bot 不存在 404。前端讀不到就把路徑寫成文字，不畫破圖。
 
+### `GET /api/bots/{id}/scratchpad`
+這顆 bot 自己的 scratchpad 目錄裡有哪些檔案（2026-09-16）。bot 把整理好的東西寫成檔案（`tracking.tsv`、報告 `.md`、`run.log`）之後，那些檔案只在 daemon 這台機器的暫存目錄裡，使用者在手機上拿不到；這支讓前端的「檔案暫存」列得出來。
+
+```json
+{"dir":"/private/tmp/claude-501/<project-slug>/<session>/scratchpad","session_id":"af70c5a6-…",
+ "files":[{"name":"tracking.tsv","size":18432,"modified":1789600000}]}
+```
+
+只列**第一層的一般檔案**（不遞迴、不列目錄與符號連結），最多 300 筆、單檔 ≤ 64 MiB，超過的不列。目錄用該 bot 最後一次 Run 的 `native_session_id` 去掃暫存根目錄找，不自己拼 slug（slug 規則是 claude 的，會變）。
+
+列不出來時**不是錯誤**：回 `200 {"dir":"","session_id":null,"files":[],"reason":"…"}`，`reason ∈ scratchpad_remote`（bot 在遠端主機，檔案不在這台機器）`| scratchpad_no_session`（沒跑過或不是 claude）`| scratchpad_missing`（目錄還沒建立）。bot 不存在 404。
+
+### `GET /api/bots/{id}/scratchpad/file?name=<檔名>`
+下載上面列出的某一個檔案。`name` 解開符號連結後必須仍在該 bot 的 scratchpad 目錄內且是一般檔案，否則 `404 {"what":"file"}`；缺 `name` 400；bot 不存在 404。
+
+一律 `Content-Disposition: attachment`（檔名走 `filename` + RFC 5987 `filename*`，非 ASCII 檔名也存得對），加 `X-Content-Type-Options: nosniff` 與 `Cache-Control: no-store`。`Content-Type` 只認白名單（文字/JSON/CSV/TSV/PNG/JPEG/GIF/WebP/PDF/zip），其餘一律 `application/octet-stream`——瀏覽器不會把 bot 寫出來的東西當 HTML 執行。只讀，沒有刪除或覆寫的端點。
 ## 非 agent 的 pane（SPEC §6.5e）
 
 ### `GET /api/projects/{id}/panes`
