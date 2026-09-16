@@ -596,6 +596,9 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
   （手動關走 `POST /api/panes/{id}/close`，自動關走 GC 並記 log）。agent 不得繞過這條自己開一顆沒人知道的 pane，
   也不得隨手關掉不是自己開的 pane。
 - daemon 重啟後靠同一輪掃描重建 `panes`，不留記憶體狀態。
+- **讀不到事實的那一輪不猜**（行程 dump 失敗、遠端 ssh 抖一下、herdr 沒回 `process_info`）：那顆 pane 的既有列只更新
+  workspace／tab／cwd／revision／`last_seen`，`kind`／歸屬／前景／port 沿用上一輪；新列先當 `service`、歸屬只靠 cwd。
+  只要有一顆讀不到，這一輪就**不跑 GC 與通知**——不然 dev server 會被改寫成 shell、bot 的 pane 會收到不實的 `pane_unowned`。
 
 #### 側欄進入與權限（G 步；使用者 2026-09-16：「這 shell pane 要在 menu 可點選進入」）
 - 側欄（手機是選單抽屜）每個專案的 Bot 清單底下列該專案被 trace 的 pane（`SidebarPanes`，資料同 `GET /api/projects/{id}/panes`），
