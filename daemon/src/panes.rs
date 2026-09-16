@@ -708,6 +708,40 @@ pub fn row_json(r: &sqlx::sqlite::SqliteRow) -> Value {
 mod tests {
     use super::*;
 
+    /// schema 變更（additive）：上一版的 `panes` 表（沒有 label／scratch／bound_project_id／orphaned／owner_adopted）
+    /// 開機 migrate 後補齊，舊列照樣讀得出 pane 列（`row_json` 會讀這幾欄）。
+    #[tokio::test]
+    async fn an_old_panes_table_gains_the_new_columns_on_migrate() {
+        let dir = std::env::temp_dir().join(format!("am-panes-old-{}", crate::db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}?mode=rwc", dir.join("old.sqlite3").display())).await.unwrap();
+        sqlx::query(
+            "CREATE TABLE panes (
+               pane_id TEXT NOT NULL, host TEXT NOT NULL, workspace_id TEXT, tab_id TEXT, cwd TEXT, kind TEXT NOT NULL,
+               owner_bot_id TEXT, project_id TEXT, purpose TEXT, foreground TEXT, listen_ports TEXT, last_revision INTEGER,
+               last_output_at TEXT NOT NULL, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, orphan_notified_at TEXT,
+               owned_by TEXT NOT NULL DEFAULT 'none', unowned_notified_at TEXT, gc_optin INTEGER NOT NULL DEFAULT 0,
+               PRIMARY KEY (host, pane_id))",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO panes (pane_id, host, kind, listen_ports, last_output_at, first_seen, last_seen) VALUES ('w1:p1','local','service','3010','t','t','t')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        migrate(&pool).await.expect("舊表補欄位");
+        migrate(&pool).await.expect("可重入");
+        for col in ["label", "scratch", "bound_project_id", "orphaned", "owner_adopted"] {
+            assert!(crate::db::has_column(&pool, "panes", col).await.unwrap(), "{col}");
+        }
+        let row = sqlx::query("SELECT * FROM panes").fetch_one(&pool).await.unwrap();
+        let v = row_json(&row);
+        assert_eq!((v["scratch"].as_bool(), v["orphaned"].as_bool(), v["read_only"].as_bool()), (Some(false), Some(false), Some(true)));
+        pool.close().await;
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn a_pane_with_a_foreground_program_or_a_port_is_a_service() {
         assert_eq!(classify(None, &[]), "shell");
