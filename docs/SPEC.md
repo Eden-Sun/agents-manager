@@ -563,7 +563,7 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
   也不得隨手關掉不是自己開的 pane。
 - daemon 重啟後靠同一輪掃描重建 `panes`，不留記憶體狀態。
 
-#### 選單點得進去（使用者 2026-09-16：「這 shell pane 要在 menu 可點選進入」）
+#### 側欄進入與權限（G 步；使用者 2026-09-16：「這 shell pane 要在 menu 可點選進入」）
 - 側欄（手機是選單抽屜）每個專案的 Bot 清單底下列該專案被 trace 的 pane（`SidebarPanes`，資料同 `GET /api/projects/{id}/panes`），
   **點一下在這個 app 裡打開那顆 pane**——沿用主機 shell 面板，手機上也進得去。專案頁「其他 pane」區塊的「聚焦」是 herdr
   `pane.focus`，只動得了那台機器的 TUI，兩者不互相取代。重整／深連結（`/hosts/<host>/shells/<pane>`）先查面板自己開的 shell，
@@ -574,6 +574,28 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
   認出來的空檔把 bot 的 pane 記成 shell，那一刻也不能讓按鍵繞過回合那條線（§6.5.1／§6.9 的教訓）。
 - 面板對被 trace 的 pane 不給「結束 shell」：那顆 `DELETE` 只認面板自己開的，按了會是什麼都不做的按鈕；關這種 pane 走
   `POST /api/panes/{id}/close`（服務 pane 要 `confirm`），自動關照上面的生命週期。
+
+**上面四點已實作**（`db2e3f2` daemon、`f3c5ac8` web，2026-09-16 使用者直接指示先做）。以下三點**尚未實作，待巡檢 review**：
+
+- **對不到專案的那顆固定 `scratch` 也要點得到**。它不屬於任何專案，所以不能掛在專案節點底下：放在側欄底部「開 shell」旁，
+  固定一列、名字就是 `[panes] scratch_name`。資料來自 `GET /api/panes?unowned=1`；**哪一顆是 scratch 由 daemon 標**
+  （該列多一個 `scratch: true`，規則同 GC 的「`owned_by='none'` 裡 `first_seen` 最早的那顆」），前端不自己重算——兩邊各算一次
+  遲早會對不上，UI 會把 GC 準備關掉的那顆當成 scratch 顯示。其餘沒歸屬的（本來就不該存在）一起列在同一組、標「多出來的」，
+  點得進去，讓人自己看完決定。**這一行要動 `panes::list_all` 的輸出**，是 k8bw2f 的檔：請裁示由誰加。
+- **`GET /api/hosts/{name}/shells`（`list()`）不能改成「panes 表裡所有 shell」**。這支的用途是「面板自己開的 shell」：
+  `openHostShell` 靠它**接回**上一顆（沒帶 cwd 時直接重用最後一顆），`MAX_PER_HOST=8` 也數它。把 bot 開的 shell pane
+  一起算進來，按「開 shell」就可能接到某顆 bot 正在用的 build shell，使用者打的字進了別人的 pane；額度也會被 bot 的 pane 吃滿。
+  要解的真正問題是「面板自己開的重啟就忘了」，建議：`open()` 開完在 `panes` 表寫一列 `purpose='host-shell'`
+  （掃描下一輪照常補上 kind／歸屬，`purpose` 已有「回報不改寫 owner」的規矩），`list()` 回
+  `app.host_shells ∪ panes WHERE purpose='host-shell' AND host=?`，`close()` 同樣認這兩份。寫那一列需要 `panes.rs` 開一支小 helper
+  （或沿用 `note_purpose`），同樣請裁示。
+- **跟 E 步 GC 的交界**：面板開的 shell 沒有 `AM_*` 環境。`default_cwd` 有專案就開在專案目錄 → 掃描標 `owned_by='user'`，
+  列進專案、不會被自動關，沒問題。但**主機上一個專案都沒有**時開在 `$HOME` → `owned_by='none'`：第一顆成了 scratch，
+  **第二顆起會收到 `pane_unowned` 並在閒置 6 小時後被 GC**。這符合「非屬專案只准一顆」，但使用者按「開 shell」開出來的東西
+  會被自動關掉，應該在面板開第二顆時就講清楚（或那台沒專案時「開 shell」直接接回 scratch）。請裁示哪一種。
+
+**實拍**：5173 對真 daemon 的截圖要等 `db2e3f2`（白名單）重建上線；目前 7788 的 `GET /api/panes` 回 0 列、也還不認被 trace 的 pane，
+現在拍只會是空清單。mock 的實走截圖在 `docs/screenshots/project-panes/menu-*.png`。
 
 #### 「最後輸出」怎麼量（AGM 2026-09-16 補充）
 herdr 的 `pane.list` 沒有輸出時間戳，**不要讀畫面內容來判斷**（讀 400 行只為了看它有沒有動，成本與誤判都高）。
