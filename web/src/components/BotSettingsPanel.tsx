@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { BotKind, IdentityStatus, PatchBotInput } from '../api/types'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { useDialogFocus } from '../hooks/useDialogFocus'
+import { identityPrefKey } from '../api'
 import { identitiesOfHost, identityStatusOfHost, projectHostName, useStore } from '../store/store'
 import { canLoginInSession } from '../lib/quotaLogin'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -127,7 +128,15 @@ export function IdentityOptions({
   const refreshTools = useStore((s) => s.refreshTools)
   const busy = useStore((s) => s.busy[`tools:${host || 'local'}`] === true)
   // config 身份＋主機 shell 的 `ccN`（SPEC §16），依 kind 過濾（codex／grok 身份也要指派得到）。
-  const identities = useMemo(() => identitiesOfHost(all, status).filter((i) => i.kind === kind), [all, status, kind])
+  const disabledList = useStore((s) => s.disabledIdentities)
+  // 停用的身份不出現在選單裡（SPEC §16），但**已經綁著的那個**還是要看得見，否則這顆 bot 的設定會像是空的。
+  const identities = useMemo(
+    () =>
+      identitiesOfHost(all, status)
+        .filter((i) => i.kind === kind)
+        .filter((i) => i.name === value || !disabledList.includes(identityPrefKey(host, kind, i.name))),
+    [all, status, kind, disabledList, host, value],
+  )
   if (identities.length === 0) return null
   const hostLabel = !host || host === 'local' ? '本機' : host
   const selectedStatus = value ? status[value] : undefined

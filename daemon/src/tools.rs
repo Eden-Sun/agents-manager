@@ -272,15 +272,32 @@ pub fn identity_login_command(kind: &str, env: &BTreeMap<String, String>) -> Opt
         "grok" => "grok login",
         _ => return None,
     };
+    Some(with_identity_env(login, env))
+}
+
+/// 登出，跟 [`identity_login_command`] 對稱：claude 沒有 `logout` 子命令，用 REPL 的斜線指令
+/// （`/login` 也是這樣帶），codex／grok 有自己的子命令。帳號的認證資料在那個身份的設定目錄裡，
+/// 所以環境變數前綴跟登入完全一樣——少帶一個就會去登出**別的**帳號。
+pub fn identity_logout_command(kind: &str, env: &BTreeMap<String, String>) -> Option<String> {
+    let logout = match kind {
+        "claude" => "claude /logout",
+        "codex" => "codex logout",
+        "grok" => "grok logout",
+        _ => return None,
+    };
+    Some(with_identity_env(logout, env))
+}
+
+fn with_identity_env(cmd: &str, env: &BTreeMap<String, String>) -> String {
     let prefix = env
         .iter()
         .filter(|(k, _)| valid_env_name(k))
         .map(|(k, v)| format!("{k}={}", sh_quote(v)))
         .collect::<Vec<_>>();
     if prefix.is_empty() {
-        Some(login.into())
+        cmd.to_string()
     } else {
-        Some(format!("env {} {login}", prefix.join(" ")))
+        format!("env {} {cmd}", prefix.join(" "))
     }
 }
 
@@ -1058,5 +1075,21 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
         assert_eq!(identity_login_command("codex", &BTreeMap::new()).as_deref(), Some("codex login"));
         assert_eq!(identity_login_command("grok", &BTreeMap::new()).as_deref(), Some("grok login"));
         assert!(identity_login_command("other", &BTreeMap::new()).is_none());
+    }
+
+    /// 登出要帶跟登入一模一樣的環境前綴，否則按下 cc2 的登出會把 cc0 登掉。
+    #[test]
+    fn identity_logout_commands_carry_the_same_config_dir() {
+        let mut env = BTreeMap::new();
+        env.insert("CLAUDE_CONFIG_DIR".to_string(), "/tmp/cc one".to_string());
+        assert_eq!(identity_logout_command("claude", &env).as_deref(), Some("env CLAUDE_CONFIG_DIR='/tmp/cc one' claude /logout"));
+        assert_eq!(identity_logout_command("codex", &BTreeMap::new()).as_deref(), Some("codex logout"));
+        assert_eq!(identity_logout_command("grok", &BTreeMap::new()).as_deref(), Some("grok logout"));
+        assert!(identity_logout_command("other", &BTreeMap::new()).is_none());
+        // 兩邊的前綴是同一段程式算出來的，不會有一邊漏掉。
+        assert_eq!(
+            identity_login_command("claude", &env).unwrap().rsplit_once(' ').unwrap().0,
+            identity_logout_command("claude", &env).unwrap().rsplit_once(' ').unwrap().0
+        );
     }
 }

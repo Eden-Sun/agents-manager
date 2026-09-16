@@ -1,7 +1,7 @@
 import { ApiError } from './types'
 import type { ApiErrorBody } from './types'
 
-export type HttpMethod = 'GET' | 'POST' | 'PATCH' | 'DELETE'
+export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
 
 export interface SocketHandlers {
   onFrame: (frame: { seq?: number; type: string; data?: unknown }) => void

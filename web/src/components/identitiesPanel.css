@@ -82,3 +82,18 @@
   align-items: center;
   gap: 4px;
 }
+
+/* 停用：列上一枚灰晶片，按鈕本身淡一階，跟「登入／切換／登出」區分開。 */
+.identity-disabled-chip {
+  font-size: 11px;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-faint);
+  background: var(--bg-sunken, transparent);
+  white-space: nowrap;
+}
+
+.identity-login-btn.is-off {
+  color: var(--text-faint);
+}

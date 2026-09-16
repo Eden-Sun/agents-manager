@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import type { BotKind, IdentityStatus, IdentityStatusMap } from '../api/types'
-import { useStore } from '../store/store'
+import { identityDisabled, useStore } from '../store/store'
 import { ConfirmDialog } from './ConfirmDialog'
 import { KindTag } from './KindTag'
 import './identitiesPanel.css'
@@ -60,7 +60,7 @@ export function IdentityBadge({
 }
 
 /** 身份在每台主機各自的登入狀態（帳號是每台各自登入的）；`null` = 問不到，標「未知」而非「未登入」。 */
-function IdentityHostLogins({ name }: { name: string }) {
+function IdentityHostLogins({ name, kind }: { name: string; kind?: string }) {
   const localStatus = useStore((s) => s.localIdentityStatus[name])
   const localConnected = useStore((s) => s.connected)
   const hosts = useStore((s) => s.hosts)
@@ -92,7 +92,13 @@ function IdentityHostLogins({ name }: { name: string }) {
         return (
           <span key={r.host} className="identity-login-wrap">
             {chip}
-            {r.connected ? <IdentityLoginButton host={r.host} identity={name} loggedIn={r.state === true} /> : null}
+            {r.connected ? (
+              <>
+                <IdentityLoginButton host={r.host} identity={name} loggedIn={r.state === true} />
+                {r.state === true ? <IdentityLogoutButton host={r.host} identity={name} /> : null}
+                {kind ? <IdentityDisableButton host={r.host} kind={kind} name={name} /> : null}
+              </>
+            ) : null}
           </span>
         )
       })}
@@ -105,6 +111,10 @@ function closeEnclosingPopup(from: HTMLElement) {
   from.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
 }
 
+function hostLabelOf(host: string): string {
+  return host === 'local' || !host ? '本機' : host
+}
+
 function IdentityLoginButton({ host, identity, loggedIn }: { host: string; identity: string; loggedIn: boolean }) {
   const loginIdentity = useStore((s) => s.loginIdentity)
   const notify = useStore((s) => s.notify)
@@ -114,7 +124,7 @@ function IdentityLoginButton({ host, identity, loggedIn }: { host: string; ident
       type="button"
       className="mini-btn identity-login-btn"
       disabled={busy}
-      title={`在${host === 'local' ? '本機' : host}開臨時 pane，帶著 ${identity} 的設定執行登入`}
+      title={`在${hostLabelOf(host)}開臨時 pane，帶著 ${identity} 的設定執行登入`}
       onClick={(e) => {
         if (busy) return
         const btn = e.currentTarget
@@ -132,6 +142,86 @@ function IdentityLoginButton({ host, identity, loggedIn }: { host: string; ident
   )
 }
 
+/** 登出走跟登入同一條路（臨時 pane），但會清掉那個帳號的憑證，所以先問一次。 */
+function IdentityLogoutButton({ host, identity }: { host: string; identity: string }) {
+  const logoutIdentity = useStore((s) => s.logoutIdentity)
+  const notify = useStore((s) => s.notify)
+  const used = useStore((s) => s.bots.filter((b) => b.identity === identity).length)
+  const [busy, setBusy] = useState(false)
+  const [confirm, setConfirm] = useState(false)
+  return (
+    <>
+      <button
+        type="button"
+        className="mini-btn identity-login-btn"
+        disabled={busy}
+        title={`在${hostLabelOf(host)}開臨時 pane，帶著 ${identity} 的設定登出這個帳號`}
+        onClick={() => setConfirm(true)}
+      >
+        {busy ? '登出中…' : '登出'}
+      </button>
+      <ConfirmDialog
+        open={confirm}
+        title={`登出 ${identity}`}
+        body={
+          <>
+            會在{hostLabelOf(host)}開一個臨時 pane，帶著 <strong>{identity}</strong> 的設定目錄執行登出，清掉這個帳號的憑證。
+            {used > 0 ? (
+              <>
+                <br />
+                <strong>目前有 {used} 顆 Bot 用這個身份</strong>：正在跑的不受影響，但之後重新啟動會停在登入畫面。
+              </>
+            ) : null}
+          </>
+        }
+        confirmLabel="登出"
+        danger
+        onCancel={() => setConfirm(false)}
+        onConfirm={() => {
+          setConfirm(false)
+          setBusy(true)
+          void logoutIdentity(host, identity)
+            .catch((err) => notify('error', err instanceof Error ? err.message : String(err)))
+            .finally(() => setBusy(false))
+        }}
+      />
+    </>
+  )
+}
+
+/** 停用＝之後挑身份時看不到它（daemon 記在 `identity_prefs`），已經綁著它的 Bot 不動。 */
+function IdentityDisableButton({ host, kind, name }: { host: string; kind: string; name: string }) {
+  const disabled = useStore((s) => identityDisabled(s, host, kind, name))
+  const setIdentityDisabled = useStore((s) => s.setIdentityDisabled)
+  const busy = useStore((s) => s.busy[`identity-disabled:${host || 'local'}|${kind}|${name}`] === true)
+  return (
+    <button
+      type="button"
+      className={`mini-btn identity-login-btn${disabled ? ' is-off' : ''}`}
+      disabled={busy}
+      title={
+        disabled
+          ? `重新啟用：${name} 會再出現在${hostLabelOf(host)}的身份選單裡`
+          : `標為停用：${name} 不再出現在${hostLabelOf(host)}的身份選單與自動挑選裡，已經在用它的 Bot 不受影響`
+      }
+      onClick={() => void setIdentityDisabled(host, kind, name, !disabled)}
+    >
+      {disabled ? '啟用' : '停用'}
+    </button>
+  )
+}
+
+/** 停用中的身份在列表上要一眼看得出來。 */
+function DisabledChip({ host, kind, name }: { host: string; kind: string; name: string }) {
+  const disabled = useStore((s) => identityDisabled(s, host, kind, name))
+  if (!disabled) return null
+  return (
+    <span className="identity-disabled-chip" title={`${name} 已停用：挑身份時不會出現，已經在用它的 Bot 不受影響`}>
+      停用
+    </span>
+  )
+}
+
 function IdentityRow({ name }: { name: string }) {
   const ident = useStore((s) => s.identities.find((i) => i.name === name))
   const used = useStore((s) => s.bots.filter((b) => b.identity === name).length)
@@ -146,11 +236,12 @@ function IdentityRow({ name }: { name: string }) {
           <IdentityBadge name={ident.name} />
           <KindTag kind={ident.kind} />
           <span className="host-count">{used > 0 ? `${used} 個 Bot` : '未使用'}</span>
+          <DisabledChip host="local" kind={ident.kind} name={ident.name} />
         </span>
         <span className="identity-detail" title={envText}>
           {envText ? envText.replace(/\n/g, ' ・ ') : '（無 env）'}
         </span>
-        <IdentityHostLogins name={ident.name} />
+        <IdentityHostLogins name={ident.name} kind={ident.kind} />
       </span>
       <button
         type="button"
@@ -280,6 +371,7 @@ function ShellIdentities() {
       <p className="hint">
         以下是從各主機登入 shell 的 <code>ccN</code> alias 認出來的身份（<code>~/.zshrc</code> 等），
         可以直接指派給 Bot；要改就改那台主機的 alias。
+        「停用」只是把它從身份選單與自動挑選裡拿掉（alias 還在），已經在用它的 Bot 不受影響。
       </p>
       {rows.map(({ host, label, st }) => (
         <div className="identity-row is-shell" key={`${host}:${st.name}`}>
@@ -288,6 +380,7 @@ function ShellIdentities() {
               <IdentityBadge name={st.name} />
               <KindTag kind={st.kind} />
               <span className="host-count">{label}</span>
+              <DisabledChip host={host} kind={st.kind} name={st.name} />
             </span>
             <span className="identity-detail" title={st.config_dir ?? '預設帳號（無 CLAUDE_CONFIG_DIR）'}>
               {st.config_dir ? `CLAUDE_CONFIG_DIR=${st.config_dir}` : '（預設帳號）'}
@@ -302,6 +395,8 @@ function ShellIdentities() {
                   {label} {st.logged_in === true ? '已登入' : st.logged_in === false ? '未登入' : '未知'}
                 </span>
                 <IdentityLoginButton host={host} identity={st.name} loggedIn={st.logged_in === true} />
+                {st.logged_in === true ? <IdentityLogoutButton host={host} identity={st.name} /> : null}
+                <IdentityDisableButton host={host} kind={st.kind} name={st.name} />
               </span>
             </span>
           </span>

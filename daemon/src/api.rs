@@ -110,6 +110,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/hosts/{name}/tools/refresh", post(refresh_tools))
         .route("/hosts/{name}/tools/install", post(install_tool))
         .route("/hosts/{name}/identities/{identity}/login", post(login_identity))
+        .route("/hosts/{name}/identities/{identity}/logout", post(logout_identity))
         .route("/hosts/{name}/gh", get(get_gh_status))
         .route("/hosts/{name}/gh/login", post(login_gh))
         .route("/hosts/{name}/gh/cancel", post(cancel_gh))
@@ -1382,6 +1383,19 @@ async fn login_identity(
     State(app): State<Arc<App>>,
     Path((name, identity)): Path<(String, String)>,
 ) -> Result<Response, LcError> {
+    identity_auth(app, name, identity, false).await
+}
+
+/// 登出走同一條路：開臨時 pane、帶同一組環境變數下指令、等 CLI 結束再重驗登入狀態。
+/// 分開的只有指令本身——共用一條才不會有一邊忘了帶 `CLAUDE_CONFIG_DIR` 而動到別的帳號。
+async fn logout_identity(
+    State(app): State<Arc<App>>,
+    Path((name, identity)): Path<(String, String)>,
+) -> Result<Response, LcError> {
+    identity_auth(app, name, identity, true).await
+}
+
+async fn identity_auth(app: Arc<App>, name: String, identity: String, logout: bool) -> Result<Response, LcError> {
     let idn = crate::tools::identity_for_host(&app, &name, &identity)
         .await
         .ok_or_else(|| LcError::NotFound("identity".into()))?;
@@ -1398,8 +1412,13 @@ async fn login_identity(
         .filter(|(k, _)| crate::tools::valid_env_name(k))
         .map(|(k, v)| (k.clone(), crate::config::expand_home(v, &home)))
         .collect::<BTreeMap<_, _>>();
-    let command = crate::tools::identity_login_command(&idn.kind, &env)
-        .ok_or_else(|| LcError::Bad(format!("kind {} 沒有登入指令", idn.kind)))?;
+    let command = if logout {
+        crate::tools::identity_logout_command(&idn.kind, &env)
+            .ok_or_else(|| LcError::Bad(format!("kind {} 沒有登出指令", idn.kind)))?
+    } else {
+        crate::tools::identity_login_command(&idn.kind, &env)
+            .ok_or_else(|| LcError::Bad(format!("kind {} 沒有登入指令", idn.kind)))?
+    };
     let shell = shell::open(&app, &name, None).await?;
     if let Err(e) = shell::send_text(&app, &name, &shell.pane_id, &command, true).await {
         let _ = shell::close(&app, &name, &shell.pane_id).await;

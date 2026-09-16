@@ -522,6 +522,11 @@ env 值的 `$HOME`、`${HOME}` 與開頭 `~` 展開成**該 host 的 home**。id
 | 該 kind 的 CLI 不在偵測到的 PATH | `409 {"reason":"identity_login_unavailable"}` |
 | host 不存在 / 未連線 / pane 建立失敗 | 404 / 502 |
 
+### `POST /api/hosts/{name}/identities/{identity}/logout`
+同一條路、同一組 env，只是指令換成 `claude /logout` / `codex logout` / `grok logout`（回應與錯誤與 login 相同）。
+env 前綴跟登入是同一段程式算出來的——少帶 `CLAUDE_CONFIG_DIR` 會登出**別的**帳號。
+清掉的是該身份設定目錄裡的憑證：正在跑的 bot 不受影響，之後重新啟動會停在登入畫面。
+
 ## 10. Bot 欄位、編輯、重啟、刪除
 
 ### 10.1 bot 欄位
@@ -1112,7 +1117,7 @@ body 直接是檔案位元組（**不是** multipart），`Content-Type` 就是�
 | POST | `/api/missions/{id}/round` | 用掉一輪（review 退回或驗證失敗）→ 任務。已達 `max_rounds` → 任務停在 `max_rounds` 並回 409 `max_rounds`。 |
 | GET | `/api/missions/{id}/pick?role=executor\|reviewer\|verifier&exclude=<identity>` | 照任務設定挑身分，見下。`role=verifier` 回 `ask_user` 時會把任務停在 `no_fable_for_verifier`。 |
 | POST | `/api/missions/{id}/deliver` | `{worktree(本機絕對路徑), title?, body?, relay_from?}`。`push_main`：fetch → `origin/main` 必須是 HEAD 的祖先 → `git push origin HEAD:main`（fast-forward only，不 force）；`pr`：推 `mission/<id>` 分支並 `gh pr create`。成功記 `delivered` 事件並回 `{mode, sha}` 或 `{mode, branch, url}`。沒有 `verified` 事件 → 409 `not_verified`；其餘失敗一律**停下來問人**（`push_main_failed`／`pr_failed`）並回 409，`reason` 是機器碼：`dirty_worktree`、`fetch_failed`、`not_fast_forward`、`nothing_to_deliver`、`push_failed`、`pr_failed`。 |
-| PUT | `/api/identities/{name}/disabled` | `{kind, disabled, host?}` → 同一份。身分停用搬進 daemon（原本只在瀏覽器 localStorage），挑身分時才看得到；WS `identity_prefs_changed`。 |
+| PUT | `/api/identities/{name}/disabled` | `{kind, disabled, host?}` → 同一份。身分停用搬進 daemon（原本只在瀏覽器 localStorage）；WS `identity_prefs_changed`。停用＝群組任務挑身分與**環境設定／Bot 設定的身份選單**都看不到它（已經綁著它的 bot 仍看得到自己那一個），不影響執行中的 bot，也不動主機上的 alias。 |
 | GET | `/api/identity-prefs` | `{disabled:[{host, kind, identity}]}`。 |
 
 已結案（`done`／`cancelled`）的任務對任何**狀態變更**回 409 `already_closed`；`question` 與 AGM 的 `answer`

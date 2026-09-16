@@ -202,6 +202,29 @@ export async function patchProject(projectId: string, input: PatchProjectInput):
   await transport.request('PATCH', `/projects/${encodeURIComponent(projectId)}`, input)
 }
 
+/** 停用名單的鍵：身份是每台主機、每個 kind 各一份（cc1 在別台是別的帳號）。 */
+export function identityPrefKey(host: string, kind: string, name: string): string {
+  return `${host || 'local'}|${kind}|${name}`
+}
+
+/** 目前被標為停用的身份。停用只影響「還挑不挑得到它」，不會動已經綁著它的 bot。 */
+export async function fetchDisabledIdentities(): Promise<string[]> {
+  const raw = await transport.request('GET', '/identity-prefs')
+  const rows = isRec(raw) ? pick(raw, 'disabled') : null
+  if (!Array.isArray(rows)) return []
+  return rows
+    .filter(isRec)
+    .map((r) => identityPrefKey(str(pick(r, 'host')), str(pick(r, 'kind')), str(pick(r, 'identity'))))
+}
+
+export async function setIdentityDisabled(host: string, kind: string, name: string, disabled: boolean): Promise<void> {
+  await transport.request('PUT', `/identities/${encodeURIComponent(name)}/disabled`, {
+    kind,
+    disabled,
+    host: host || 'local',
+  })
+}
+
 export async function deleteProject(projectId: string): Promise<void> {
   await transport.request('DELETE', `/projects/${encodeURIComponent(projectId)}`)
 }
@@ -446,10 +469,19 @@ export async function refreshTools(host: string): Promise<{ tools: ToolMap; iden
 
 /** 開臨時 pane 做該身份的登入。 */
 export async function loginIdentity(host: string, identity: string): Promise<HostShell> {
+  return identityAuth(host, identity, 'login')
+}
+
+/** 同一條路的登出：帶著這個身份自己的設定目錄下指令，不會動到別的帳號。 */
+export async function logoutIdentity(host: string, identity: string): Promise<HostShell> {
+  return identityAuth(host, identity, 'logout')
+}
+
+async function identityAuth(host: string, identity: string, op: 'login' | 'logout'): Promise<HostShell> {
   const name = host || 'local'
   const raw = await transport.request(
     'POST',
-    `/hosts/${encodeURIComponent(name)}/identities/${encodeURIComponent(identity)}/login`,
+    `/hosts/${encodeURIComponent(name)}/identities/${encodeURIComponent(identity)}/${op}`,
   )
   return toHostShell(raw, name)
 }

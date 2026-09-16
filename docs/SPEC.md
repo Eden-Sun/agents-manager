@@ -857,6 +857,14 @@ printf '%s\n' "$al" | grep -E "(^|[[:space:]])(alias[[:space:]]+)?cc[0-6]="
 `POST /api/hosts/{name}/identities/{identity}/login`：在該主機 manager session 開臨時 host-shell pane，identity env 以該主機 `$HOME` 展開後執行 `claude /login`、`codex login` 或 `grok login`。
 pane 的終端快照是 UI 顯示 device code / URL 的唯一通道；這些內容不進 daemon log 或 WS 事件。CLI 結束（成功或失敗）後重新探測該身份再關 pane；建立或登入失敗走同一條清理路徑。
 
+`POST …/logout` 走同一條路（同一個臨時 pane、同一組 env 前綴），指令換成 `claude /logout`、`codex logout` 或 `grok logout`。
+環境前綴與登入共用同一段程式：少帶 `CLAUDE_CONFIG_DIR` 就會登出別的帳號。清掉的是那個身份設定目錄裡的憑證——執行中的 bot 不受影響，下次啟動才會停在登入畫面，所以 UI 先問一次並說明有幾顆 bot 綁著它。
+
+### 16.3b 停用一個身份（使用者 2026-09-16）
+`PUT /api/identities/{name}/disabled {kind, disabled, host?}`（daemon 的 `identity_prefs`，不是瀏覽器 localStorage）。
+停用是**挑不挑得到**的問題，不是能不能跑：群組任務挑身分、環境設定與 Bot 設定的身份選單都不再出現它；已經綁著它的 bot 照跑，那顆 bot 的設定裡仍看得到自己選的那一個（否則設定看起來會像空的）。
+主機上的 alias 不動、登入狀態不動，隨時可以按「啟用」放回來。偵測到但不打算用的 `ccN`（例如只是 zshrc 裡留著）就用這個標掉。
+
 ### 16.5 alias 定期重讀
 每 60 秒對每台可達主機只跑 alias 那半段 probe（一個登入 shell，不碰 CLI），與快取的 `shell_identities` 比對；**名單或 `CLAUDE_CONFIG_DIR` 變了**才做完整偵測（含登入探測）並推 `host_changed`。
 還沒做過第一次偵測的主機不在此列。
