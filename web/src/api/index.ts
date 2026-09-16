@@ -1,6 +1,6 @@
 import { MockTransport } from './mock'
 import { toMission, toMissionDetail, toMissionEvent, toMissions, toGroupMessagesPage, toHostShell, toHostShells, toInstallResult, toIssueDetail, toIssues, toMessagesPage, toMemProcesses, toMemSnapshot, toModels, toQuota, toState, toTerminal, toToolMap, toIdentityStatusMap, num, str, isRec, optStr, pick, arr, toSubmodules } from './normalize'
-import { HttpTransport } from './transport'
+import { HttpTransport, pairWithCode } from './transport'
 import { ApiError } from './types'
 import type { SocketHandlers, Transport } from './transport'
 import type {
@@ -32,6 +32,7 @@ import type {
   MessagesPage,
   NewBotInput,
   NewProjectInput,
+  PairCode,
   PatchProjectInput,
   PatchBotInput,
   PatchBotResult,
@@ -57,6 +58,30 @@ export const rawTransport: Pick<Transport, 'request' | 'mock'> = transport
 
 export function session(): Promise<string> {
   return transport.session()
+}
+
+/**
+ * SPEC §7.1a：在本機產一個一次性配對碼給另一台裝置輸入。
+ * 只有 loopback 產得出來（否則 403 `loopback_only`）——把權限交出去的人得站在這台機器前面。
+ */
+export async function issuePairCode(): Promise<PairCode> {
+  const raw = await transport.request('POST', '/session/pair-code')
+  const o = isRec(raw) ? raw : {}
+  return {
+    code: str(pick(o, 'code')),
+    expires_in_secs: num(pick(o, 'expires_in_secs'), 300),
+    expires_at: optStr(pick(o, 'expires_at')),
+  }
+}
+
+/** 拿配對碼換 token 並存在這台裝置上。失敗丟 `ApiError`，文案交給 `lib/pairing`。 */
+export function pairDevice(code: string): Promise<void> {
+  return pairWithCode(transport, code)
+}
+
+/** token 失效又需要重新配對時回呼（store 據此把畫面換回配對畫面）。 */
+export function onPairingRequired(cb: (() => void) | null): void {
+  transport.setPairingListener(cb)
 }
 
 export function openSocket(handlers: SocketHandlers): () => void {
