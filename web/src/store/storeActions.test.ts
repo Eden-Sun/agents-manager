@@ -290,3 +290,40 @@ test('重讀 pane：依 project_id 分組，沒歸屬的只進底部那一組', 
   assert.deepEqual(Object.keys(s.sidePanes), ['p1'])
   assert.deepEqual(s.unownedPanes.map((p) => [p.pane_id, p.scratch]), [['w1:pS', true]])
 })
+
+test('daemon 重啟後結束面板自己開的 shell：不在記憶體清單裡就走 pane 表關，不是回 200 什麼都沒關', async () => {
+  seed()
+  useStore.setState({ shellView: { host: 'local', paneId: 'w9:s1', cwd: '/p' } })
+  routeDaemon((req) => {
+    if (req.method === 'GET' && req.path.includes('/hosts/local/shells')) return json({ host: 'local', shells: [] }, 200)
+    if (req.method === 'POST' && req.path.includes('/panes/w9%3As1/close')) return json({ closed: true }, 200)
+    return json({}, 200)
+  })
+  await useStore.getState().endHostShell('local', 'w9:s1')
+  const calls = requests.map((r) => `${r.method} ${r.path}`)
+  assert.ok(calls.some((c) => c.startsWith('POST') && c.includes('/panes/w9%3As1/close') && c.includes('confirm=true')), calls.join('\n'))
+  assert.ok(!calls.some((c) => c.startsWith('DELETE')), '那支 DELETE 在重啟後什麼都不做')
+  assert.equal(useStore.getState().shellView, null)
+})
+
+test('還在記憶體清單裡的照舊走 DELETE；pane 表關失敗時面板留著並跳通知', async () => {
+  seed()
+  useStore.setState({ shellView: { host: 'local', paneId: 'w9:s1', cwd: '/p' } })
+  routeDaemon((req) => {
+    if (req.method === 'GET') return json({ host: 'local', shells: [{ host: 'local', pane_id: 'w9:s1', cwd: '/p' }] }, 200)
+    return json({}, 200)
+  })
+  await useStore.getState().endHostShell('local', 'w9:s1')
+  assert.ok(requests.some((r) => r.method === 'DELETE'))
+  assert.equal(useStore.getState().shellView, null)
+
+  seed()
+  useStore.setState({ shellView: { host: 'local', paneId: 'w9:s1', cwd: '/p' } })
+  routeDaemon((req) => {
+    if (req.method === 'GET') return json({ host: 'local', shells: [] }, 200)
+    return json({ error: 'upstream', message: 'herdr unreachable' }, 502)
+  })
+  await useStore.getState().endHostShell('local', 'w9:s1')
+  assert.notEqual(useStore.getState().shellView, null, '沒關掉就不能假裝關掉')
+  assert.ok(noticeTexts().length > 0)
+})
