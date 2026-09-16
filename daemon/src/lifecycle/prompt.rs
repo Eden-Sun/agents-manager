@@ -263,6 +263,32 @@ pub(crate) async fn pane_ready_for_prompt(app: &Arc<App>, bot: &db::Bot, run: &d
             }
         }
     }
+    // grok 1.0.34 在沒信任過的目錄開「Do you trust the contents of this directory?」，herdr 不認得，
+    // prompt 會被吃掉（2026-09-17）。bot 的 cwd 本來就預先信任（claude／codex 同一套），所以寫入信任紀錄、
+    // 替它按 `y`；還在就講清楚。
+    if bot.kind == "grok" {
+        if let Some(pane) = run.pane_id.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+            if let Ok(client) = client_for_run(app, run).await {
+                if let Ok(r) = client.pane_read(pane, "visible", 60).await {
+                    if crate::tui_prompts::is_grok_trust_dialog(&r.text) {
+                        for w in crate::trust::pretrust_bots(app, std::slice::from_ref(bot)).await {
+                            tracing::warn!(bot = %bot.name, warning = %w, "could not record grok folder trust");
+                        }
+                        let _ = client.pane_send_keys(pane, &["y"]).await;
+                        tokio::time::sleep(Duration::from_millis(1200)).await;
+                        let still = matches!(client.pane_read(pane, "visible", 60).await,
+                            Ok(r2) if crate::tui_prompts::is_grok_trust_dialog(&r2.text));
+                        if still {
+                            let hint = "grok 在問「要不要信任這個目錄」，自動按 y 沒有關掉。請到「終端」分頁按 y 再送一次。";
+                            let _ = insert_message(app, conv, None, "system", hint, "system", false, None).await;
+                            return Err(LcError::conflict("dialog_open", json!({"run_id": run.id, "message": hint})));
+                        }
+                        tracing::info!(run = %run.id, "answered grok's folder-trust dialog before delivering a prompt");
+                    }
+                }
+            }
+        }
+    }
     // codex `/model` 選單開著時，prompt 會變成選單操作、Enter 換掉模型（2026-09-10 實測）。先關掉，關不掉就講清楚。
     if bot.kind == "codex" {
         if let Some(pane) = run.pane_id.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
