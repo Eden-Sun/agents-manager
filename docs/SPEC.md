@@ -1551,7 +1551,7 @@ supervisor 相關資料表與欄位都是 additive，`db::migrate` 重跑冪等�
 | 入口 | 使用者 web／手機 Remote Control（**唯一**的 remote） | 沒有 remote；只有 daemon 的通知 |
 | 目錄 | `supervisor/AGM` | `supervisor/AGM-responder`（記在 `bots.cwd`；claude session 以 cwd 為鍵，共用會互相接到對方的 session 與 `persona.md`） |
 | 專案 | 巡檢的專案 | **同一個**（見下）；側欄上兩個角色在同一塊 |
-| 收什麼 | `health_changed`、`incident_*`、`watchdog_gave_up`、`bot_restart_failed`、`supervisor_restart_retry`、`responder_watchdog_gave_up`、`review_role=patrol` 的交辦回報、不認得的種類 | `bot_request`、`approval_requested`、`mission_*`、其餘交辦回報 |
+| 收什麼 | `health_changed`、`incident_*`、`watchdog_gave_up`、`bot_restart_failed`、`supervisor_restart_retry`、`responder_watchdog_gave_up`、`responder_bot_missing`、`agm_cli_stale`、`pane_unowned`、`review_role=patrol` 的交辦回報、不認得的種類 | `bot_request`、`approval_requested`、`mission_*`、其餘交辦回報（含 `assignment_undeliverable`） |
 | 喚醒節流 | `notify_interval_secs`（600） | 短窗批次 `responder_batch_secs`（15）：最舊的待辦等滿、且距上次喚醒也滿才叫 |
 
 **協調者的健康算進頂層 `status`**（review 2026-09-16）：它是 bot 申請、核准請求與所有 `mission_*` 的唯一收件人，
@@ -1567,7 +1567,9 @@ supervisor 相關資料表與欄位都是 additive，`db::migrate` 重跑冪等�
 **路由由 daemon 決定**（`supervisor/roles.rs::route`，純函式），只看事件種類、payload 明寫的欄位與交辦的 `review_role`，不問模型、不比對名字；
 不先叫醒巡檢再請它轉交。每筆 inbox 事件記 `role`、`wake`、`claimed_by`、`acked_by`、`merged_into`。
 
-- **只記錄、不叫醒**（`wake=0`）：`assignment_noticed`、`quota_blocked`／`quota_resumed`、`incident_resolved`、`manager_health.status=healthy` 的 `health_changed`、
+- **表上的名字就是寫入端的名字**：每一種寫進 inbox 的 kind 都要有**明寫**的分支（`roles::known_route`），測試從原始碼撈出所有寫入點（`push_inbox`、`settle_and_notify`、SQL 裡寫死的 kind）逐一核對。
+  以前表上寫 `quota_blocked`／`quota_resumed`，寫入端寫的卻是 `assignment_quota_*`，每一次撞限與恢復都落到預設、叫醒巡檢（review 2026-09-16）。
+- **只記錄、不叫醒**（`wake=0`）：`assignment_noticed`、`assignment_queued`、`assignment_quota_blocked`／`assignment_quota_resumed`、`incident_resolved`、`manager_health.status=healthy` 的 `health_changed`、
   bot 對通知型交辦（`--notice`）的回覆、角色之間在同一次喚醒回合裡的回信。它們跟下一次有事的喚醒一起送，自己不開回合。
 - **巡檢送前合併**：還沒送出的 `health_changed` 只留最新一筆；同一個 incident 在送出前就開了又恢復，兩筆一起結案（`acked_by=daemon`）。
 - **bot 找 AGM**：`POST /api/bots/{巡檢或協調者}/prompt` 帶 `relay_from=<bot>`、或 pane 裡 `herdr agent prompt <AGM>`（shim 先打 `/relay/announce`），

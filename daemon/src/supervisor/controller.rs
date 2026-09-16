@@ -1524,7 +1524,7 @@ mod patrol_wake_tests {
         let app = fx::app().await;
         seed(&app, "incident:I1:resolved", "incident_resolved", json!({})).await;
         seed(&app, "health:ok", "health_changed", json!({"manager_health": {"status": "healthy"}})).await;
-        seed(&app, "qb:a1:0", "quota_blocked", json!({"needs_review": false})).await;
+        seed(&app, "qb:a1:0", "assignment_quota_blocked", json!({"needs_review": false})).await;
         roles::classify(&app.db).await.unwrap();
 
         notify(&app).await;
