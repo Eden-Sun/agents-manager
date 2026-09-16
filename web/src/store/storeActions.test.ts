@@ -81,6 +81,17 @@ test('交給 AGM 的回應在路上斷掉：再按一次沿用同一個 crid，�
   assert.equal(crids[0], crids[1], '重送必須是同一個 crid，daemon 才回同一筆')
 })
 
+test('交給 AGM 失敗後改了執行者再送：是另一個要求，不能沿用舊 crid 拿回舊的那筆', async () => {
+  seed()
+  const input = { text: '幫我修 型別', delivery_mode: 'push_main', executor_kind: 'claude', on_5h_limit: 'wait' } as const
+  routeDaemon(() => json({ error: 'upstream', message: 'connection dropped' }, 502))
+  assert.equal(await useStore.getState().startMission('p1', { ...input }), null)
+  await useStore.getState().startMission('p1', { ...input, executor_kind: 'codex' })
+  const crids = requests.filter((r) => r.method === 'POST').map((r) => (r.body as { client_request_id?: string }).client_request_id)
+  assert.equal(crids.length, 2)
+  assert.notEqual(crids[0], crids[1])
+})
+
 test('排序沒存起來：通知說回到原本的順序，畫面就真的要回去', async () => {
   seed()
   routeDaemon(() => json({ error: 'upstream', message: 'daemon rebuilding' }, 502))
