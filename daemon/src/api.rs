@@ -179,12 +179,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/identities", post(create_identity))
         .route("/identities/{name}", delete(delete_identity))
         .route("/fs/dirs", get(list_dirs))
-        // 產生配對碼要有 token（而且只從 loopback）：把權限交出去的人必須已經站在這台機器前面。
-        .route("/session/pair-code", post(post_session_pair_code))
         .layer(axum::middleware::from_fn_with_state(app.clone(), auth))
-        .route("/session", get(get_session))
-        // 換 token 的那一支不能在 auth 後面：還沒有 token 的裝置才需要它。
-        .route("/session/pair", post(post_session_pair));
+        .route("/session", get(get_session));
 
     Router::new()
         .nest("/api", api)
@@ -230,8 +226,19 @@ async fn relay_announce(
     (StatusCode::OK, Json(json!({})))
 }
 
-// TCP peer 的判斷搬到 `crate::pairing::is_loopback`：它**不吃 `allow_lan`**。
-// 以前這裡是「allow_lan 就一律放行」，於是 `/api/session` 對整個區網無條件發 token（SPEC §7.1a）。
+/// TCP peer address, **not** `Host`: the header is caller-chosen, so on 0.0.0.0 anyone on the LAN
+/// could fetch the UI token with `curl -H 'Host: localhost:…'`. Needs connect_info (main.rs).
+/// `allow_lan` is the explicit dev-only opt-in (off in the packaged app, `main.rs::dev_lan_default`);
+/// no range allowlist because "LAN" includes overlays like Tailscale (100.64.0.0/10).
+fn peer_is_local(peer: &std::net::SocketAddr, allow_lan: bool) -> bool {
+    if allow_lan {
+        return true;
+    }
+    match peer.ip() {
+        std::net::IpAddr::V4(v4) => v4.is_loopback(),
+        std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.to_ipv4_mapped().is_some_and(|m| m.is_loopback()),
+    }
+}
 
 /// A5: compare the **host** exactly — `starts_with` let `http://localhost.attacker.com` through.
 /// Port not pinned: the Vite dev proxy forwards Origin verbatim; cross-origin reads still need the token.
@@ -265,92 +272,15 @@ async fn auth(State(app): State<Arc<App>>, req: axum::extract::Request, next: Ne
     next.run(req).await
 }
 
-/// **只有 loopback 拿得到 token**（SPEC §7.1a）。`allow_lan` 打開時 daemon 綁 0.0.0.0，而這一支不需要
-/// token——以前同網段（含 Tailscale）任何裝置一個 `curl` 就拿到整把鑰匙，而那把鑰匙過得了 `auth()`
-/// ＝整個 API。非 loopback 改成出示一次性配對碼（`POST /session/pair`）。
-/// 已經拿到 token 的裝置不受影響：`auth()` 只看 token。
 async fn get_session(
     State(app): State<Arc<App>>,
     ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
 ) -> Response {
-    if !origin_is_local(&headers, app.port, app.allow_lan) {
+    if !peer_is_local(&peer, app.allow_lan) || !origin_is_local(&headers, app.port, app.allow_lan) {
         return (StatusCode::FORBIDDEN, Json(json!({"error": "non-local request"}))).into_response();
     }
-    if !crate::pairing::is_loopback(&peer) {
-        tracing::warn!(
-            peer = %peer,
-            origin = headers.get("origin").and_then(|v| v.to_str().ok()).unwrap_or(""),
-            "refused to hand the UI token to a non-loopback peer; pairing required"
-        );
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({"error": "pairing_required",
-                        "message": "這台裝置還沒配對：在本機的環境設定按「產生配對碼」（或 `bin/agm pair-code`），再把碼輸入這裡。"})),
-        )
-            .into_response();
-    }
     Json(json!({"token": app.ui_token, "port": app.port})).into_response()
-}
-
-#[derive(Deserialize)]
-struct PairIn {
-    code: String,
-}
-
-/// 用一次性配對碼換 token。**不在 `auth()` 後面**——還沒有 token 的裝置才需要它。
-/// 猜錯會被限流；成功與失敗都留一行（peer、時間）。
-async fn post_session_pair(
-    State(app): State<Arc<App>>,
-    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
-    Json(b): Json<PairIn>,
-) -> Response {
-    let now = chrono::Utc::now().timestamp();
-    let outcome = app.pairing.lock().await.redeem(&b.code, peer.ip(), now);
-    match outcome {
-        crate::pairing::Redeem::Ok => {
-            tracing::info!(peer = %peer, "a device paired with a one-time code");
-            Json(json!({"token": app.ui_token, "port": app.port})).into_response()
-        }
-        crate::pairing::Redeem::RateLimited { retry_after_secs } => {
-            tracing::warn!(peer = %peer, retry_after_secs, "pairing is rate-limited for this peer");
-            (
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(json!({"error": "pairing_rate_limited", "retry_after_secs": retry_after_secs,
-                            "message": "猜太多次了，請稍後再試。"})),
-            )
-                .into_response()
-        }
-        // 碼不對、過期、用過——對外同一種回答，不透露是哪一種。
-        crate::pairing::Redeem::Bad => {
-            tracing::warn!(peer = %peer, "a pairing attempt was refused");
-            (
-                StatusCode::FORBIDDEN,
-                Json(json!({"error": "pairing_failed", "message": "配對碼不正確或已失效，請重新產生一個。"})),
-            )
-                .into_response()
-        }
-    }
-}
-
-/// 產生配對碼。**只有 loopback**（而且在 `auth()` 後面，所以還要有 token）：碼是用來把權限交出去的，
-/// 產生它的人必須已經站在這台機器前面。
-async fn post_session_pair_code(
-    State(app): State<Arc<App>>,
-    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
-) -> Response {
-    if !crate::pairing::is_loopback(&peer) {
-        return (StatusCode::FORBIDDEN, Json(json!({"error": "loopback_only"}))).into_response();
-    }
-    let now = chrono::Utc::now().timestamp();
-    let (code, expires) = app.pairing.lock().await.issue(now);
-    tracing::info!(peer = %peer, "issued a one-time pairing code");
-    Json(json!({
-        "code": crate::pairing::format_code(&code),
-        "expires_in_secs": expires - now,
-        "expires_at": chrono::DateTime::from_timestamp(expires, 0).map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
-    }))
-    .into_response()
 }
 
 fn lamp(connected: bool, run: Option<&db::Run>) -> &'static str {
@@ -3065,81 +2995,6 @@ mod prompt_route_tests {
         let status = resp.status();
         let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
         (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
-    }
-
-    /// `/api/session` 是**不需要 token** 的端點，而那把 token 過得了整個 API。`allow_lan` 打開時
-    /// daemon 綁 0.0.0.0，所以以前同網段任何裝置一個 curl 就拿到整把鑰匙（2026-09-16 實測）。
-    /// 現在只有 loopback 直接拿得到，其他人要出示一次性配對碼。
-    #[tokio::test]
-    async fn the_ui_token_only_leaves_this_machine_through_a_pairing_code() {
-        let e = crate::testing::env().await;
-        let app = &e.app;
-        let peer = |s: &str| ConnectInfo(s.parse::<std::net::SocketAddr>().unwrap());
-        let read = |r: Response| async move {
-            let status = r.status();
-            let bytes = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
-            (status, serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null))
-        };
-
-        // 本機：照舊直接拿得到。
-        let (status, body) = read(get_session(State(app.clone()), peer("127.0.0.1:51000"), HeaderMap::new()).await).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["token"], json!(app.ui_token));
-
-        // 區網：拿不到，而且回的是「要配對」而不是含糊的拒絕。
-        let (status, body) = read(get_session(State(app.clone()), peer("192.168.1.9:51000"), HeaderMap::new()).await).await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
-        assert_eq!(body["error"], "pairing_required");
-
-        // 配對碼只有 loopback 產得出來：把權限交出去的人必須站在這台機器前面。
-        let (status, _) = read(post_session_pair_code(State(app.clone()), peer("192.168.1.9:51000")).await).await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
-        let (status, code) = read(post_session_pair_code(State(app.clone()), peer("127.0.0.1:51000")).await).await;
-        assert_eq!(status, StatusCode::OK);
-        let code = code["code"].as_str().unwrap().to_string();
-        assert!(code.contains('-'), "碼要好唸：{code}");
-
-        // 手機帶碼換 token。
-        let pair = |c: &str, from: &'static str| {
-            let (app, c) = (app.clone(), c.to_string());
-            async move { post_session_pair(State(app), peer(from), Json(PairIn { code: c })).await }
-        };
-        let (status, body) = read(pair(&code, "192.168.1.9:51001").await).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["token"], json!(app.ui_token));
-
-        // 同一個碼不能再用一次。
-        let (status, body) = read(pair(&code, "192.168.1.9:51002").await).await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
-        assert_eq!(body["error"], "pairing_failed");
-
-        // 猜太多次就被擋（下一個真的碼也進不來）。
-        for _ in 0..5 {
-            let _ = pair("ZZZ-ZZZ", "192.168.1.9:51003").await;
-        }
-        let (_, fresh) = read(post_session_pair_code(State(app.clone()), peer("127.0.0.1:51000")).await).await;
-        let fresh = fresh["code"].as_str().unwrap().to_string();
-        let (status, body) = read(pair(&fresh, "192.168.1.9:51003").await).await;
-        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
-        assert!(body["retry_after_secs"].as_i64().unwrap() > 0);
-        // 別的裝置不受影響。
-        let (status, _) = read(pair(&fresh, "192.168.1.22:51004").await).await;
-        assert_eq!(status, StatusCode::OK);
-    }
-
-    /// `allow_lan` 關著時（打包版）行為完全不變：peer 本來就只可能是 loopback，這條路徑一個字沒動。
-    #[tokio::test]
-    async fn with_lan_off_nothing_changes_for_the_local_browser() {
-        let e = crate::testing::env().await;
-        let app = &e.app;
-        assert!(!app.allow_lan, "測試環境本來就是關的");
-        let r = get_session(
-            State(app.clone()),
-            ConnectInfo("127.0.0.1:51000".parse().unwrap()),
-            HeaderMap::new(),
-        )
-        .await;
-        assert_eq!(r.status(), StatusCode::OK);
     }
 
     /// 不可能照原樣送出的 prompt 是真的 HTTP 422，body 說清楚原因（sol 第八輪 #1）。

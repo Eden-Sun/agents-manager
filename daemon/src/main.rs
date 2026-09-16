@@ -33,7 +33,6 @@ mod lifecycle;
 mod local_image;
 mod memproc;
 mod memstat;
-mod pairing;
 mod mission;
 mod models;
 mod pane_identity;
