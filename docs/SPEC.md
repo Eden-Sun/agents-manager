@@ -298,6 +298,8 @@ pane 上回過 ok 卻沒送進去（wits-c1-op-xh 14:24、15:33，第二次距 s
   `agent.prompt` 同樣沒有證據，但沒送進去才會走到重送，所以是 1。重送閘門看 `auto_resend`，不看 `delivery_verified`。
 - 欄位 additive、migrate 可重入；既有列 `auto_resend` 預設 1，行為與拆開前相同（舊的 unverified 列當時已把
   `resend_count` 頂到上限，照樣不會被重送）。
+- **UI 只標沒人補救的那一種**（2026-09-16）：turn JSON 同時帶 `delivery_verified` 與 `auto_resend`；
+  無證據＋會重送 → 只在 hover 說明，無證據＋不重送 → 畫「未驗證送達」。理由與實作見 UI-DECISIONS 與 `web/src/lib/deliveryNotice.ts`。
 
 **結果五種，對呼叫端意義不同**：
 - `Submitted`：打字進 pane，而且有無損證據證明送出。verified=1、可重送。

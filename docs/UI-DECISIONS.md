@@ -19,6 +19,9 @@
   `useDialogFocus`（Tab 循環、關閉還原觸發元件；確認框先 focus 輸入欄或「取消」）。Bot 設定在桌機是**非模態** popover（背景可點、可拖圖），
   手機是全螢幕 sheet。
 - 對話寬度：對話欄 `--chat-max: max(1000px, 90%)`；**每則訊息也吃到 90%**（2026-09-16 使用者：欄放寬了但訊息還卡在 680px，寬螢幕等於沒放寬）。自己打的那一側留 `min(900px, 82%)`，左右分邊還看得出來。
+- 「未驗證送達」標記**只給沒人補救的那一種**（2026-09-16 AGM 裁示）：這個標記對使用者的意思是「可能悄悄沒送到，而且沒有人會再試一次」。
+  無證據但 `auto_resend=1`（herdr `agent.prompt`）有自動重送的安全網，只放在時間的 hover 說明，不佔注意力——claude 多數 prompt 走這條，全標會讓真正該看的那筆被淹掉；
+  無證據且 `auto_resend=0`（打過字、證不明，例如 grok 多行）才畫「未驗證送達」。判斷集中在 `lib/deliveryNotice.ts`，不要在元件裡各自判。
 - Composer 只在首次掛載／切換對象時還原選取；自動 focus 前 `activeElement` 必須是 `body` 或同一個 composer 內，手機一律不自動 focus（不彈鍵盤）。
 - 每個畫面有自己的 URL（`lib/routes.ts` 純函式 + `store/routeSync.ts`）。網址是 store 的投影：入口照舊走 store，不改成 `<a href>`。
   對話↔終端用 `replaceState`；設定浮窗與手機抽屜用 `pushState`（上一頁＝關掉）。壞連結回首頁並提示；`?token=` 不留在網址上。
