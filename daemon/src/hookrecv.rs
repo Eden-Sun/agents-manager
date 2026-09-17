@@ -2125,6 +2125,148 @@ mod external_claim_tests {
         assert_eq!(turns, 1, "and no external turn was opened for the dropped payload");
     }
 
+    /// #76 item 3/8：使用者 interrupt 跟 reconcile 判定 run 已消失，最終都靠 `fail_in_flight`
+    /// 把 in-flight 回合標 failed——這是兩條呼叫端共用的那支函式。這支測的是標完之後的窄窗：
+    /// 舊 session 的 Stop hook 才姍姍來遲。`in_flight_turn` 只認 `status='in_flight'`，所以已經
+    /// failed 的回合救不回來；遲到的回覆改記成一筆新的 external turn，不會憑空消失、也不會接到
+    /// 已經結案的回合上（跟 review 2026-09-12 #5 同一個 CAS 精神，這裡換一個把回合收掉的呼叫端）。
+    #[tokio::test]
+    async fn a_late_stop_hook_does_not_resurrect_a_turn_that_interrupt_already_failed() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "interrupt-race").await;
+        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        let run_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','idle','ws-1','pane-1','agent','test',?)",
+        )
+        .bind(&run_id)
+        .bind(&bot.id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let turn_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at)
+             VALUES (?,?,?,'web','in_flight','ok',?)",
+        )
+        .bind(&turn_id)
+        .bind(&conv)
+        .bind(&run_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        // `interrupt_bot` 本身要碰 herdr pane；直接呼叫它跟 `mark_run_exited` 共用的那支收尾函式，
+        // 單獨驗證 DB 這一段的不變量（herdr 那半邊 `interrupt_bot`/`abort_turns` 自己的測試已經蓋到）。
+        lifecycle::fail_in_flight(&app, &run_id, "interrupted by user").await;
+        let before = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(before.status, "failed");
+
+        process(
+            &app,
+            &HookBody {
+                bot_id: bot.id.clone(),
+                provider: "claude".into(),
+                payload: json!({
+                    "hook_event_name": "Stop",
+                    "session_id": "native-session",
+                    "prompt_id": "native-turn",
+                    "last_assistant_message": "遲到的回覆",
+                }),
+                received_at: None,
+                truncated: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let turn = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(turn.status, "failed", "已經被 fail_in_flight 收掉的回合不能被遲到的 hook 救回來");
+        let replies: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='assistant'")
+            .bind(&turn_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(replies, 0, "遲到的回覆不會接到已經結案的回合上");
+        let external: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE conversation_id=? AND origin='external'")
+            .bind(&conv)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(external, 1, "回覆不會憑空消失，改記成一筆外部回合");
+    }
+
+    /// 同一個不變量，換 reconcile 判定 run 已消失那條路（`mark_run_exited`）：run 整個轉成
+    /// `exited`，之後 `db::active_run` 找不到它，process_locked 的 `run` 變 `None`——跟上一支
+    /// 是不同的程式分支，要分開測。
+    #[tokio::test]
+    async fn a_late_stop_hook_does_not_resurrect_a_turn_whose_run_reconcile_already_exited() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "reconcile-race").await;
+        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        let run_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','idle','ws-1','pane-1','agent','test',?)",
+        )
+        .bind(&run_id)
+        .bind(&bot.id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let turn_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at)
+             VALUES (?,?,?,'web','in_flight','ok',?)",
+        )
+        .bind(&turn_id)
+        .bind(&conv)
+        .bind(&run_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        lifecycle::mark_run_exited(&app, &run_id, "agent not found during reconcile").await;
+        let run = sqlx::query_as::<_, db::Run>("SELECT * FROM runs WHERE id=?").bind(&run_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(run.state, "exited");
+        let before = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(before.status, "failed");
+
+        process(
+            &app,
+            &HookBody {
+                bot_id: bot.id.clone(),
+                provider: "claude".into(),
+                payload: json!({
+                    "hook_event_name": "Stop",
+                    "session_id": "native-session",
+                    "prompt_id": "native-turn",
+                    "last_assistant_message": "遲到的回覆",
+                }),
+                received_at: None,
+                truncated: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let turn = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(turn.status, "failed", "run 已經 exited，舊 session 的 hook 不能把它的回合救回來");
+        let replies: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='assistant'")
+            .bind(&turn_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(replies, 0, "遲到的回覆不會接到已經結案的回合上");
+    }
+
     /// Step 4 must find the `external` turn, or step 5 inserts a duplicate.
     #[tokio::test]
     async fn stop_hook_finds_the_open_external_turn() {

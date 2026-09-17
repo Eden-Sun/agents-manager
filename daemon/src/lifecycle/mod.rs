@@ -24,6 +24,7 @@ mod screen;
 mod limit_banner;
 mod stuck_turns;
 mod interrupt_grace;
+mod transitions;
 
 /// Runs the daemon has typed into during **this** boot. `runs.pane_typed` is the durable record;
 /// this is the conservative in-process copy, so a row that later becomes unreadable cannot send a
