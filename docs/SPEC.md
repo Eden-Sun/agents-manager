@@ -64,6 +64,9 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
 - axum + tokio + serde；SQLite 用 sqlx（每條連線 `foreign_keys=ON`、`journal_mode=WAL`）。
 - **DB schema 只支援現行版本**：`db::migrate` 只跑 `CREATE … IF NOT EXISTS`（加上 supervisor／mission 各自的 migration），不升級更舊的檔案；
   已移除功能留下的表與欄位（`teams`、`team_*`、`bots.team_id`…）在既有檔案裡原樣保留、不讀。
+  `db::migrate` 自己的 SCHEMA／additive ALTER 包在一個 transaction 裡，中途失敗（例如舊資料違反新加的 UNIQUE INDEX）整批回滾，
+  不留半套 schema；重跑冪等。子模組各自的 migration（`supervisor::store`、`read_marks`、`panes`、`herdr_maintenance`、
+  `mission::store`）不在這個 transaction 裡，各自維護自己那張表，風險最高的「加欄＋回填」已經各自包了自己的 transaction。
 - **權威劃分**：TOML 是 Project／Bot 期望設定的唯一權威；SQLite 存 Run／Turn／Message／Conversation／hook token／workspace 映射。啟動與每次寫回 TOML 後做 TOML→SQLite 投影（依 id upsert；TOML 移除的 bot 標 `deleted_at`，保留歷史）。
 - **投影不得大量軟刪**（2026-09-14 事故）：一次要軟刪的 bot／專案超過 3 列、或超過現有的 30%（兩列以上才算），或 config 裡一個專案都沒有而 DB 還有列 → **在任何寫入之前**拒絕整次投影並記 `error`，daemon 不啟動。
   啟動與 runtime 的**每一次**重投都走閘門：`ConfigStore::update` 會在磁碟 mtime 變了時重讀，「外面把 TOML 換掉／清空，再由 API 或總管觸發重投」是同一條事故路徑。
