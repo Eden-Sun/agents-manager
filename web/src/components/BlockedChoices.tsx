@@ -9,8 +9,10 @@ import {
   isTypeSomething,
   keysToMove,
   keysToSelect,
+  MULTI_TYPE_HINT,
   parseChoiceMenu,
   sameChoices,
+  typedAnswerHere,
   type TuiChoiceMenu,
   type WalkTarget,
 } from '../lib/tuiChoices'
@@ -200,7 +202,12 @@ export function BlockedChoices({
     })
 
   const activate = (i: number) => {
-    if (isTypeSomething(menu.choices[i])) {
+    // 複選頁：不貼字、不按 Enter（可能直接交卷），也不勾一個空白的自訂答案（review3 c1 M8）。
+    if (menu.multi && isTypeSomething(menu.choices[i]) && !menu.choices[i].checked) {
+      setNote(MULTI_TYPE_HINT)
+      return
+    }
+    if (typedAnswerHere(menu, menu.choices[i])) {
       setTypeFor(i)
       setNote(null)
       return
@@ -331,7 +338,7 @@ export function BlockedChoices({
       >
         {menu.choices.map((c, i) => {
           const shown = open.includes(i)
-          const typeOpen = typeFor === i && isTypeSomething(c)
+          const typeOpen = typeFor === i && typedAnswerHere(menu, c)
           return (
           <li key={`${c.number}-${c.title}`} className={`bc-row${c.detail ? ' bc-row-more' : ''}`}>
             <button

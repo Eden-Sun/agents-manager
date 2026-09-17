@@ -5,7 +5,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { commit, pageNeedsCommit, preload, wantOf, type Draft, type Io } from '../lib/choiceDraft'
 import { acquirePreload, restartPreload } from '../lib/draftPreload'
-import { isTypeSomething, parseChoiceMenu, type TuiChoiceMenu } from '../lib/tuiChoices'
+import { isTypeSomething, MULTI_TYPE_HINT, parseChoiceMenu, typedAnswerHere, type TuiChoiceMenu } from '../lib/tuiChoices'
 import { useStore } from '../store/store'
 import { BlockedChoices } from './BlockedChoices'
 import { TypeAnswerField } from './TypeAnswerField'
@@ -122,6 +122,8 @@ export function BlockedDraft({
   const pick = (page: number, idx: number) => {
     const p = draft.pages[page]
     if (p.multi && p.choices[idx]?.checked === null) return
+    // 複選頁的 Type something 只准取消（終端上已經打好的），不准在這裡勾起來。
+    if (p.multi && isTypeSomething(p.choices[idx] ?? { title: '' }) && !want[page]?.[idx]) return
     setWant((v) =>
       v.map((row, i) => {
         if (i !== page) return row
@@ -137,7 +139,7 @@ export function BlockedDraft({
     setStep({ done: 0, total: 0 })
     const typedEmpty = draft.pages.some((p, i) => {
       const idx = (want[i] ?? []).findIndex(Boolean)
-      return idx >= 0 && isTypeSomething(p.choices[idx] ?? { title: '' }) && !(custom[p.tab] ?? '').trim()
+      return idx >= 0 && typedAnswerHere(p, p.choices[idx] ?? { title: '' }) && !(custom[p.tab] ?? '').trim()
     })
     if (typedEmpty) {
       setErr('選了「Type something.」的題請先打字，或改選別項。')
@@ -157,7 +159,7 @@ export function BlockedDraft({
     const p = draft.pages[page]
     const idx = (want[page] ?? []).findIndex(Boolean)
     if (idx < 0) return ''
-    if (isTypeSomething(p.choices[idx] ?? { title: '' })) return (custom[p.tab] ?? '').trim()
+    if (typedAnswerHere(p, p.choices[idx] ?? { title: '' })) return (custom[p.tab] ?? '').trim()
     return p.choices.filter((_, j) => Boolean(want[page]?.[j])).map((c) => c.title).join('、')
   }
 
@@ -218,20 +220,23 @@ export function BlockedDraft({
                   const shown = open.includes(key)
                   const action = page.multi && c.checked === null
                   const picked = Boolean(want[i]?.[j])
-                  const typeRow = isTypeSomething(c)
+                  const typeRow = typedAnswerHere(page, c)
+                  const typeLocked = page.multi && isTypeSomething(c) && !picked
                   return (
                     <li key={key} className={`bc-row${c.detail ? ' bc-row-more' : ''}`}>
                       <button
                         type="button"
                         role={page.multi ? undefined : 'radio'}
                         className={`bc-item${picked ? ' bc-checked' : ''}${shown ? ' bc-open' : ''}`}
-                        disabled={busy || action}
+                        disabled={busy || action || typeLocked}
                         aria-checked={page.multi ? undefined : picked}
                         aria-pressed={page.multi && !action ? picked : undefined}
                         title={
                           action
                             ? '這一列是動作不是勾選，要用它請先關掉這個畫面回終端'
-                            : page.multi
+                            : typeLocked
+                              ? MULTI_TYPE_HINT
+                              : page.multi
                               ? picked
                                 ? '取消勾選（只改這裡，還沒送出）'
                                 : '勾選（只改這裡，還沒送出）'
