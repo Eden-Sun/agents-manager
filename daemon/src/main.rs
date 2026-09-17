@@ -49,6 +49,7 @@ mod quota;
 mod quota_claude;
 mod quota_grok;
 mod read_marks;
+mod remote_cargo;
 mod reconcile;
 mod spawn_hints;
 mod state;
@@ -139,6 +140,17 @@ enum Cmd {
         #[arg(long, default_value = "", hide = true)]
         data_dir: String,
     },
+    /// issue #104：cargo shim 的本機 helper；讀設定／密碼後把 verification 整個丟到外部 SSH 主機。
+    RemoteCargo {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        data_dir: PathBuf,
+        #[arg(long)]
+        cwd: PathBuf,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        cargo_args: Vec<String>,
+    },
 }
 
 fn main() {
@@ -152,6 +164,9 @@ fn main() {
         Cmd::Statusline { bot, token, port, data_dir: _ } => {
             statusline_cmd::run(statusline_cmd::StatuslineArgs { bot, token, port });
             std::process::exit(0);
+        }
+        Cmd::RemoteCargo { config, data_dir, cwd, cargo_args } => {
+            std::process::exit(remote_cargo::run_cli(&config, &data_dir, &cwd, &cargo_args));
         }
         Cmd::HerdrUpdateCheck { installed, latest, changelog_file, last_notified } => {
             let md = std::fs::read_to_string(&changelog_file).unwrap_or_else(|e| {
