@@ -1036,6 +1036,10 @@ const DELIVERY_PAUSES: [&str; 2] = ["push_main_failed", "pr_failed"];
 ///   rebase、補改過之後要重新驗證，舊的 `verified` 不算數（review3 c1 M9）。
 ///
 /// 過了關卡之後的失敗才把任務停下來問人（D8），回 409 帶機器碼。成功會解除先前的交付失敗暫停。
+///
+/// **冪等**（review3 c1 M11）：同一個 commit 已經交付過就回原本那一筆（`replayed`）。動手之前先記一則
+/// `delivery_attempt`，所以「push 成功但回應斷在路上」的重試認得出來——HEAD 已經在 main 裡是成功，
+/// 不是 `nothing_to_deliver`；PR 模式先問 `gh pr view`，不會被「已經有一個 PR」判成 `pr_failed`。
 pub async fn post_deliver(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b): Json<DeliverIn>) -> Result<Json<Value>, LcError> {
     let m = load(&app, &id).await?;
     ensure_open(&m)?;
@@ -1070,18 +1074,47 @@ pub async fn post_deliver(State(app): State<Arc<App>>, Path(id): Path<String>, J
                    "hint": "工作樹的 HEAD 不是驗證過的那個 commit（rebase 或又改過）：回到驗證那一步重驗這個 commit，再交付"}),
         ));
     }
+    // 這個 commit 已經交付過了：回原本那一筆，不要再推一次、也不要把它報成失敗。
+    if let Some(done) = events.iter().rev().find(|e| e.kind == "delivered" && delivered_sha(e).as_deref() == Some(head.as_str())) {
+        let mut out: Value = serde_json::from_str(&done.payload_json).unwrap_or_else(|_| json!({}));
+        out["replayed"] = true.into();
+        out["delivered_at"] = done.created_at.clone().into();
+        return Ok(Json(out));
+    }
+    // 動手之前先記一筆：push／PR 成功但回應（或 CLI 的 30 秒逾時）斷在路上時，重試才分得出
+    // 「上一次其實成功了」與「執行者根本沒 commit」。
+    let attempted_before = events.iter().any(|e| attempt_sha(e).as_deref() == Some(head.as_str()));
+    if !attempted_before {
+        let _ = store::add_event(
+            &app.db,
+            &id,
+            "note",
+            &format!("開始交付 {}（{}）", &head[..12.min(head.len())], m.delivery_mode),
+            Some(crate::agent_relay::DAEMON_SENDER),
+            &json!({"delivery_attempt": {"sha": head, "mode": m.delivery_mode}}),
+        )
+        .await;
+    }
     let result = if m.delivery_mode == "push_main" {
-        deliver::push_main(&dir, "origin", "main").await.map(|sha| json!({"mode": "push_main", "sha": sha}))
+        deliver::push_main(&dir, "origin", "main", attempted_before)
+            .await
+            .map(|p| json!({"mode": "push_main", "sha": p.sha, "already_in_base": p.already_in_base}))
     } else {
         let branch = format!("mission/{}", m.id.to_lowercase());
         let title = b.title.clone().unwrap_or_else(|| m.text.chars().take(72).collect());
         let body = b.body.clone().unwrap_or_else(|| format!("群組任務 {}\n\n{}", m.id, m.text));
-        deliver::open_pr(&dir, "origin", "main", &branch, &title, &body).await.map(|url| json!({"mode": "pr", "branch": branch, "url": url}))
+        deliver::open_pr(&dir, "origin", "main", &branch, &title, &body)
+            .await
+            .map(|o| json!({"mode": "pr", "branch": branch, "url": o.url, "sha": o.sha, "existing_pr": o.existing}))
     };
     match result {
         Ok(out) => {
-            let text = match out["mode"].as_str() {
-                Some("push_main") => format!("已推上 main：{}", out["sha"].as_str().unwrap_or_default()),
+            let sha = out["sha"].as_str().unwrap_or_default();
+            let text = match (out["mode"].as_str(), out["already_in_base"] == json!(true), out["existing_pr"] == json!(true)) {
+                // 重試時才會看到的兩種：先前那次其實做完了，只是沒記下來。
+                (Some("push_main"), true, _) => format!("已在 main 上：{sha}（先前那次交付其實成功了，這次只補記）"),
+                (Some("push_main"), false, _) => format!("已推上 main：{sha}"),
+                (_, _, true) => format!("PR 早就開著了：{}", out["url"].as_str().unwrap_or_default()),
                 _ => format!("已開 PR：{}", out["url"].as_str().unwrap_or_default()),
             };
             store::add_event(&app.db, &id, "delivered", &text, from.as_deref(), &out).await.map_err(up)?;
@@ -1104,6 +1137,16 @@ pub async fn post_deliver(State(app): State<Arc<App>>, Path(id): Path<String>, J
             Err(LcError::conflict(f.code, json!({"mission_id": id, "detail": f.detail})))
         }
     }
+}
+
+/// 一則 `delivered` 事件交的是哪個 commit（舊事件沒記就是 `None`，永遠不會被當成重放）。
+fn delivered_sha(e: &store::MissionEvent) -> Option<String> {
+    serde_json::from_str::<Value>(&e.payload_json).ok()?.get("sha")?.as_str().map(str::to_string)
+}
+
+/// 一則 `note` 記的「開始交付」是哪個 commit。
+fn attempt_sha(e: &store::MissionEvent) -> Option<String> {
+    serde_json::from_str::<Value>(&e.payload_json).ok()?.pointer("/delivery_attempt/sha")?.as_str().map(str::to_string)
 }
 
 #[derive(Deserialize)]
@@ -1729,6 +1772,37 @@ mod tests {
         store::add_event(&app.db, &id, "verified", "舊版記的", Some("daemon"), &json!({})).await.unwrap();
         let err = post_deliver(State(app.clone()), Path(id.clone()), Json(deliver_from(&env.repo))).await.unwrap_err();
         assert_eq!(conflict_reason(err), "verified_without_sha");
+    }
+
+    /// 同一個 commit 交付兩次要冪等：回原本那一筆；連 `delivered` 事件都沒寫成的那種（CLI 逾時、502）
+    /// 也要看得出「其實已經在 main 上」，不能報成交付失敗（review3 c1 M11）。
+    #[tokio::test]
+    async fn delivering_the_same_commit_twice_does_not_report_a_failure() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (origin, wt) = with_origin(&env);
+        let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("twice", "push_main"))).await.unwrap();
+        let id = m["id"].as_str().unwrap().to_string();
+        let sha = commit_file(&wt, "a.txt");
+        let _ = post_event(State(app.clone()), Path(id.clone()), Json(verified(Some(&wt), None))).await.unwrap();
+
+        let Json(first) = post_deliver(State(app.clone()), Path(id.clone()), Json(deliver_from(&wt))).await.unwrap();
+        assert_eq!((first["sha"].as_str(), first["already_in_base"].as_bool()), (Some(sha.as_str()), Some(false)));
+        assert_eq!(git(&origin, &["rev-parse", "main"]), sha);
+
+        // 再呼叫一次（AGM 重試、或使用者連點）：回原本那一筆。
+        let Json(again) = post_deliver(State(app.clone()), Path(id.clone()), Json(deliver_from(&wt))).await.unwrap();
+        assert_eq!((again["replayed"].as_bool(), again["sha"].as_str()), (Some(true), Some(sha.as_str())));
+
+        // push 成功但 `delivered` 事件沒寫成（agm.py 30 秒逾時、add_event 回 502）：重試要認出來。
+        sqlx::query("DELETE FROM mission_events WHERE mission_id = ? AND kind = 'delivered'").bind(&id).execute(&app.db).await.unwrap();
+        let Json(recovered) = post_deliver(State(app.clone()), Path(id.clone()), Json(deliver_from(&wt))).await.unwrap();
+        assert_eq!((recovered["sha"].as_str(), recovered["already_in_base"].as_bool()), (Some(sha.as_str()), Some(true)));
+        let m = load(&app, &id).await.unwrap();
+        assert_eq!(m.status(), "open", "已經在 main 上的交付不能被報成失敗、把任務停下來");
+        let events = store::events(&app.db, &id).await.unwrap();
+        assert!(events.iter().any(|e| e.kind == "delivered" && e.text.contains("已在 main 上")), "補記一則 delivered");
+        assert_eq!(events.iter().filter(|e| e.text.contains("開始交付")).count(), 1, "同一個 commit 只記一次 delivery_attempt");
     }
 
     /// 使用者取消任務：AGM 被叫醒，底下還開著的交辦一併取消（等額度那件不會幾小時後自己重送）。
