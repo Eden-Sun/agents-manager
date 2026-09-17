@@ -25,11 +25,17 @@ const MASTER_UP_TIMEOUT: Duration = Duration::from_secs(20);
 const SSH_EXEC_TIMEOUT: Duration = Duration::from_secs(30);
 const SSH_PUT_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Short on purpose: AF_UNIX path limit.
-pub fn short_dir() -> PathBuf {
+/// Short on purpose: AF_UNIX path limit. Namespaced by daemon instance (`startup::instance_slug`)
+/// so an isolated/alt-data-dir daemon managing the same remote host name never shares this
+/// production daemon's SSH master control socket or forwarded herdr socket (issue #85) —
+/// otherwise one instance's explicit reconnect or shutdown kills the other's tunnel.
+pub fn short_dir(instance: Option<&str>) -> PathBuf {
     use std::os::unix::fs::MetadataExt;
     let uid = dirs::home_dir().and_then(|h| std::fs::metadata(h).ok()).map(|m| m.uid()).unwrap_or(0);
-    PathBuf::from(format!("/tmp/agents-manager-{uid}"))
+    match instance {
+        Some(slug) => PathBuf::from(format!("/tmp/agents-manager-{uid}-{slug}")),
+        None => PathBuf::from(format!("/tmp/agents-manager-{uid}")),
+    }
 }
 
 pub fn sh_quote(s: &str) -> String {
@@ -94,6 +100,9 @@ pub struct HostConn {
     supervisor: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Bumped on every explicit reconnect so a stale supervisor exits.
     generation: std::sync::atomic::AtomicU64,
+    /// This daemon's instance slug at the time this host was (re)configured — namespaces the
+    /// ctl/sock paths (issue #85). Unused for `local` (never spawns an SSH master).
+    instance: Option<String>,
 }
 
 impl HostConn {
@@ -108,11 +117,12 @@ impl HostConn {
             master: Mutex::new(None),
             supervisor: Mutex::new(None),
             generation: std::sync::atomic::AtomicU64::new(0),
+            instance: None,
         })
     }
 
-    fn remote(cfg: HostCfg) -> Arc<Self> {
-        let sock = short_dir().join(format!("{}.sock", cfg.name));
+    fn remote(cfg: HostCfg, instance: Option<String>) -> Arc<Self> {
+        let sock = short_dir(instance.as_deref()).join(format!("{}.sock", cfg.name));
         Arc::new(Self {
             name: cfg.name.clone(),
             client: HerdrClient::new(sock),
@@ -123,6 +133,7 @@ impl HostConn {
             master: Mutex::new(None),
             supervisor: Mutex::new(None),
             generation: std::sync::atomic::AtomicU64::new(0),
+            instance,
         })
     }
 
@@ -139,7 +150,7 @@ impl HostConn {
     }
 
     fn ctl_path(&self) -> PathBuf {
-        short_dir().join(format!("{}.ctl", self.name))
+        short_dir(self.instance.as_deref()).join(format!("{}.ctl", self.name))
     }
 
     fn ssh_args(&self) -> Vec<String> {
@@ -383,10 +394,10 @@ herdr session list 2>&1 | sed 's/^/AM_LIST /'
     /// SPEC §11.3.2.
     async fn start_master(&self, remote_sock: &str) -> Result<()> {
         let cfg = self.cfg.as_ref().unwrap();
-        let dir = short_dir();
+        let dir = short_dir(self.instance.as_deref());
         std::fs::create_dir_all(&dir).ok();
         let ctl = self.ctl_path();
-        let local_sock = short_dir().join(format!("{}.sock", self.name));
+        let local_sock = short_dir(self.instance.as_deref()).join(format!("{}.sock", self.name));
         if local_sock.to_string_lossy().len() > 100 {
             bail!("forwarded socket path is too long for AF_UNIX: {}", local_sock.display());
         }
@@ -461,7 +472,7 @@ herdr session list 2>&1 | sed 's/^/AM_LIST /'
             let _ = child.wait().await;
         }
         let _ = std::fs::remove_file(&ctl);
-        let _ = std::fs::remove_file(short_dir().join(format!("{}.sock", self.name)));
+        let _ = std::fs::remove_file(short_dir(self.instance.as_deref()).join(format!("{}.sock", self.name)));
     }
 }
 
@@ -613,7 +624,7 @@ impl HostManager {
                 }
                 c.kill_master().await;
             }
-            let conn = HostConn::remote(h.clone());
+            let conn = HostConn::remote(h.clone(), app.instance());
             self.conns.lock().await.insert(h.name.clone(), conn.clone());
             let gen = conn.generation.load(Ordering::SeqCst);
             let t = spawn_supervisor(app.clone(), conn.clone(), gen);
@@ -792,6 +803,33 @@ mod tests {
         assert_eq!(p, "export PATH='/Users/me/my tools/bin;$(touch /tmp/pwned)':\"$PATH\"\n");
     }
 
+    /// 兩個 daemon 實例（正式＋隔離，或兩個資料目錄不同的隔離實例）以前共用同一個
+    /// `/tmp/agents-manager-<uid>`：管同一台遠端主機時會撞同一個 ctl／sock，一邊
+    /// `kill_master`／explicit reconnect 會把另一邊的隧道也斷掉（issue #85）。
+    #[test]
+    fn short_dir_is_namespaced_by_instance() {
+        let production = short_dir(None);
+        let iso_a = short_dir(Some("a1b2c3d4e5f6a7b8"));
+        let iso_b = short_dir(Some("00112233445566ff"));
+        assert_ne!(production, iso_a, "正式實例跟隔離實例不能共用同一個目錄");
+        assert_ne!(iso_a, iso_b, "兩個不同的隔離實例不能撞同一個目錄");
+        assert_eq!(short_dir(Some("a1b2c3d4e5f6a7b8")), iso_a, "同一個實例重複呼叫要拿到同一條路徑");
+    }
+
+    /// `instance_slug()` 固定 16 個 hex 字元、host name 上限 32（`config::valid_host_name`）；
+    /// 兩者疊到 `short_dir` 之後仍要留在 macOS AF_UNIX 的長度上限內——`start_master` 對
+    /// forwarded socket 路徑超過 100 bytes 會直接 bail，不是等 ssh 自己失敗。
+    #[test]
+    fn a_max_length_host_name_with_an_instance_slug_still_fits_af_unix() {
+        let slug = "0123456789abcdef";
+        let host_name = "a".repeat(32);
+        let dir = short_dir(Some(slug));
+        for suffix in ["ctl", "sock"] {
+            let p = dir.join(format!("{host_name}.{suffix}"));
+            assert!(p.to_string_lossy().len() <= 100, "{suffix} 路徑超過 AF_UNIX 上限：{}", p.display());
+        }
+    }
+
     #[tokio::test]
     async fn sh_local_timeout_kills_the_child() {
         let marker = format!("am-sh-local-{}", crate::db::ulid());
@@ -841,7 +879,7 @@ mod tests {
         host_cfg.ssh = "127.0.0.1".into();
         host_cfg.ssh_port = port;
         host_cfg.ssh_opts = vec!["-o".into(), "ConnectTimeout=2".into()];
-        let conn = HostConn::remote(host_cfg);
+        let conn = HostConn::remote(host_cfg, env.app.instance());
         *conn.error.lock().await = Some("previous error".into());
         env.app.hosts.conns.lock().await.insert(conn.name.clone(), conn.clone());
 
