@@ -9,7 +9,15 @@
 //! 網頁「檔案暫存」下半段的列表與下載**只讀這裡**，完全不碰 scratchpad。下載一律當附件
 //! （`Content-Disposition: attachment` + `nosniff`，白名單外 `application/octet-stream`），
 //! 路徑解開符號連結後必須仍在這顆 bot 的 outbox 裡；私鑰／憑證／DB／隱藏檔照樣不列不給（[`withheld`]）。
+//!
+//! **下載（`file()`）用 [`crate::trusted_open`]**：從 `data_dir` 開始逐層 `openat(O_NOFOLLOW)` 一路開到
+//! 要的檔案（`outbox` 與 `<bot_id>` 兩段的符號連結／擁有者檢查、隱藏路徑、下面任一段被換成符號連結，全部
+//! 是同一次系統呼叫鏈擋下來），拿到的 fd 直接拿去 `fstat`／讀內容，不再用路徑名字重新 open（issue #89）。
+//! `list()` 的目錄可信檢查（[`dir_is_trusted`]）也改用同一個 primitive 的 fd／`fstat`，但列出檔名那步仍是
+//! 按路徑 `read_dir`——**刻意留下的範圍**：清單只回檔名／大小，不回內容，真正下載的內容路徑已經完全
+//! fd-bound，這裡的殘餘窗口最多讓清單暫時看到界線外的檔名，讀不到內容（docs/SPEC.md §6.5f）。
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -20,6 +28,7 @@ use serde_json::json;
 
 use crate::lifecycle::LcError;
 use crate::state::App;
+use crate::trusted_open;
 
 /// 檔案在 outbox 裡保留多久（AGM 清理的門檻，跟 `outbox-gc.sh` 的 `MAX_AGE_MIN=60` 同一個數）。
 pub(crate) const TTL_SECS: u64 = 3600;
@@ -45,25 +54,24 @@ pub(crate) fn ensure(data_dir: &Path, bot_id: &str) -> Option<PathBuf> {
     Some(dir)
 }
 
-/// 這顆 bot 的 outbox 這條路本身能不能信：`outbox` 與 `<bot_id>` 兩段都不能是符號連結，擁有者要跟資料目錄同一個 uid。
-/// [`resolve`] 以**解開後**的目錄當界線：bot 把自己的 outbox 換成指向 `~/.codex` 的連結，界線就整個搬過去，
-/// `auth.json` 列得出來、載得下來（review 2026-09-16 core 11 洞 1——原本在 scratchpad，換成 outbox 之後同一個形狀還在）。
-/// 還不存在的段落不算不安全（還沒寫過、被清理收掉）。
+/// 這顆 bot 的 outbox 這條路本身能不能信：`outbox` 與 `<bot_id>` 兩段都不能是符號連結，擁有者要跟資料目錄
+/// 同一個 uid。用 [`trusted_open::open_bound_dir`] 逐層 `openat(O_NOFOLLOW)`＋`fstat` 查，不是分開
+/// `stat` 每一段再指望名字不變：bot 把自己的 outbox 換成指向 `~/.codex` 的連結，界線就整個搬過去，
+/// `auth.json` 列得出來、載得下來（review 2026-09-16 core 11 洞 1——原本在 scratchpad，換成 outbox 之後
+/// 同一個形狀還在）。還不存在的段落不算不安全（還沒寫過、被清理收掉）。
 pub(crate) fn dir_is_trusted(data_dir: &Path, dir: &Path) -> bool {
     use std::os::unix::fs::MetadataExt as _;
     let Ok(owner) = std::fs::metadata(data_dir).map(|m| m.uid()) else { return false };
     let Ok(rel) = dir.strip_prefix(data_dir) else { return false };
-    let mut at = data_dir.to_path_buf();
-    for part in rel.components() {
-        at.push(part);
-        match std::fs::symlink_metadata(&at) {
-            Ok(m) if m.file_type().is_symlink() || !m.is_dir() || m.uid() != owner => return false,
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return true,
-            Err(_) => return false,
-        }
+    if rel.as_os_str().is_empty() {
+        return true;
     }
-    true
+    let Some(components) = trusted_open::safe_relative_components(rel) else { return false };
+    match trusted_open::open_bound_dir(data_dir, &components, Some(owner)) {
+        Ok(_) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+        Err(_) => false,
+    }
 }
 
 /// 不列、不給下載的檔案（2a96096 的黑名單，在 outbox 上保留當第二道：規則本來就禁止放這些，放了也拿不走）。
@@ -90,43 +98,62 @@ fn withheld_name(name: &str) -> bool {
         || ["id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"].iter().any(|k| name.starts_with(k))
 }
 
+/// 按路徑開一次讀檔頭——只有 [`scan`]（列表用，不回內容）在用。真正要下載的內容一律走
+/// [`content_is_withheld`]，讀已經開好的那個 fd，不重新用路徑名字 open。
 fn withheld_content(path: &Path) -> bool {
     use std::io::Read;
     let mut head = [0u8; 64];
     let Ok(mut f) = std::fs::File::open(path) else { return false };
     let n = f.read(&mut head).unwrap_or(0);
-    let head = &head[..n];
+    content_is_withheld(&head[..n])
+}
+
+/// [`withheld_content`] 的內容判斷本體，吃已經讀進來的位元組（下載那條路用，見 [`open_outbox_entry`]
+/// 的呼叫端）。
+fn content_is_withheld(head: &[u8]) -> bool {
+    let head = &head[..head.len().min(64)];
     if head.starts_with(b"SQLite format 3\0") {
         return true;
     }
     head.starts_with(b"-----BEGIN") && head.windows(11).any(|w| w == b"PRIVATE KEY")
 }
 
-/// 純路徑判斷（可測）：`requested` 以 `root` 為底解開、canonicalize 之後必須仍在 `root` 裡的一般檔案。
-pub(crate) fn resolve(root: &Path, requested: &str) -> Option<PathBuf> {
+/// `requested` 解成安全的相對 component 鏈：絕對路徑必須落在 `root` 底下（字串比對，不 canonicalize——
+/// 這裡不對攻擊者能控制的輸入解符號連結，真正的界線檢查交給後面的 fd-bound open），相對路徑直接拆；
+/// `..`、隱藏目錄／檔名一律拒絕。回傳最後一段的檔名（給 `withheld_name`／`mime_of`／回應檔名用）與完整的
+/// component 鏈。
+fn safe_outbox_path<'a>(root: &Path, requested: &'a str) -> Option<(String, Vec<&'a OsStr>)> {
     let requested = requested.trim();
     if requested.is_empty() {
         return None;
     }
-    let root = std::fs::canonicalize(root).ok()?;
     let p = Path::new(requested);
-    let candidate = if p.is_absolute() { p.to_path_buf() } else { root.join(p) };
-    let real = std::fs::canonicalize(&candidate).ok()?;
-    if !real.starts_with(&root) || !real.is_file() {
+    let rel = if p.is_absolute() { p.strip_prefix(root).ok()? } else { p };
+    let components = trusted_open::safe_relative_components(rel)?;
+    if components.iter().any(|c| c.to_string_lossy().starts_with('.')) {
+        return None; // 隱藏目錄／檔名——withheld_name 只查最後一段，中間的目錄這裡先擋。
+    }
+    let name = components.last()?.to_string_lossy().into_owned();
+    if withheld_name(&name.to_ascii_lowercase()) {
         return None;
     }
-    Some(real)
+    Some((name, components))
 }
 
-/// 下載放行哪個檔案：[`resolve`] 的界線之外，路徑上不能有隱藏目錄，檔案本身也不能是 [`withheld`]。
-pub(crate) fn servable(root: &Path, requested: &str) -> Option<PathBuf> {
-    let real = resolve(root, requested)?;
-    let root = std::fs::canonicalize(root).ok()?;
-    let rel = real.strip_prefix(&root).ok()?;
-    if rel.components().any(|c| c.as_os_str().to_string_lossy().starts_with('.')) || withheld(&real) {
-        return None;
-    }
-    Some(real)
+/// 下載放行哪個檔案：從 `base` 開始逐層 `openat(O_NOFOLLOW)` 走到 `requested`，`prefix` 是 `base` 到
+/// 這顆 bot 的 outbox 之間固定要先走的那幾段（正式路徑是 `data_dir` → `outbox` → `<bot_id>`；單元測試
+/// 直接把 `prefix` 給空、`base` 當成 outbox 本身）。回傳打開好的檔案與檔名；內容判斷
+/// （[`content_is_withheld`]）與大小上限由呼叫端用同一個 fd 做，這裡不重複讀。
+fn open_outbox_entry(base: &Path, prefix: &[&OsStr], requested: &str, owner_uid: Option<u32>) -> Option<(std::fs::File, String)> {
+    let root = prefix.iter().fold(base.to_path_buf(), |mut p, part| {
+        p.push(part);
+        p
+    });
+    let (name, rel) = safe_outbox_path(&root, requested)?;
+    let mut components: Vec<&OsStr> = prefix.to_vec();
+    components.extend(rel);
+    let file = trusted_open::open_bound_file(base, &components, owner_uid).ok()?;
+    Some((file, name))
 }
 
 /// 下載時的 content type。白名單以外一律 octet-stream：使用者自己的 HTML 不該在這個 origin 跑起來
@@ -217,39 +244,64 @@ pub async fn list(State(app): State<Arc<App>>, UrlPath(id): UrlPath<String>) -> 
         }
         Err(e) => return Err(e),
     };
-    if !dir_is_trusted(&app.data_dir, &dir) {
+    // 可信檢查跟 read_dir 擺進同一個 blocking closure：中間沒有 `.await`，兩者之間可以被換掉的窗口只剩
+    // 系統呼叫等級的縫隙（不像先前隔著一次 async 排程，attacker 有整段排隊時間可以動手）。
+    let data_dir = app.data_dir.clone();
+    let scan_dir = dir.clone();
+    let (trusted, files) = tokio::task::spawn_blocking(move || {
+        let trusted = dir_is_trusted(&data_dir, &scan_dir);
+        let files = if trusted { scan(&scan_dir, now_secs()) } else { Vec::new() };
+        (trusted, files)
+    })
+    .await
+    .unwrap_or((false, Vec::new()));
+    if !trusted {
         tracing::warn!(bot = %id, dir = %dir.display(), "outbox path is a symlink or not ours; not listing it");
         return Ok((StatusCode::OK, axum::Json(json!({"files": [], "ttl_secs": TTL_SECS, "reason": "outbox_untrusted"}))).into_response());
     }
-    // 讀目錄、讀檔頭是同步的：別卡在 async worker 上。目錄不在（還沒寫過、被清理收掉）就是空清單。
-    let scan_dir = dir.clone();
-    let files = tokio::task::spawn_blocking(move || scan(&scan_dir, now_secs())).await.unwrap_or_default();
     Ok((StatusCode::OK, axum::Json(json!({"dir": dir.to_string_lossy(), "ttl_secs": TTL_SECS, "files": files}))).into_response())
 }
 
-/// `GET /api/bots/{id}/outbox/file?path=…` — 一律當附件下載。
+/// `GET /api/bots/{id}/outbox/file?path=…` — 一律當附件下載。整段路徑驗證＋open＋fstat＋讀內容都走
+/// [`open_outbox_entry`] 那條 fd-bound 的鏈，不再分開「驗證路徑」與「用路徑重新讀」兩步（issue #89）。
 pub async fn file(
     State(app): State<Arc<App>>,
     UrlPath(id): UrlPath<String>,
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Response, LcError> {
+    use std::os::unix::fs::MetadataExt as _;
     let not_found = || LcError::NotFound("file".into());
-    let requested = q.get("path").ok_or_else(|| LcError::Bad("path required".into()))?;
-    let dir = outbox_of(&app, &id).await?;
-    if !dir_is_trusted(&app.data_dir, &dir) {
-        return Err(not_found());
-    }
-    let path = servable(&dir, requested).ok_or_else(not_found)?;
-    let meta = tokio::fs::metadata(&path).await.map_err(|_| not_found())?;
+    let requested = q.get("path").ok_or_else(|| LcError::Bad("path required".into()))?.clone();
+    outbox_of(&app, &id).await?; // 確認本機、bot 存在；拿到的路徑只是拿來確認，不再用它重新 open。
+    let data_dir = app.data_dir.clone();
+    let bot_id = id.clone();
+    let opened = tokio::task::spawn_blocking(move || {
+        let owner = std::fs::metadata(&data_dir).ok()?.uid();
+        open_outbox_entry(&data_dir, &[OsStr::new("outbox"), OsStr::new(&bot_id)], &requested, Some(owner))
+    })
+    .await
+    .ok()
+    .flatten();
+    let Some((mut f, name)) = opened else { return Err(not_found()) };
+    let meta = f.metadata().map_err(|_| not_found())?;
     if meta.len() > MAX_BYTES {
         return Err(LcError::conflict("file_too_large", json!({"reason": "file_too_large", "size": meta.len(), "max": MAX_BYTES})));
     }
-    let data = tokio::fs::read(&path).await.map_err(|_| not_found())?;
-    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file".into());
+    let data = tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+        let mut buf = Vec::with_capacity(meta.len() as usize);
+        f.read_to_end(&mut buf).map(|_| buf)
+    })
+    .await
+    .map_err(|_| not_found())?
+    .map_err(|_| not_found())?;
+    if content_is_withheld(&data) {
+        return Err(not_found());
+    }
     Ok((
         StatusCode::OK,
         [
-            (header::CONTENT_TYPE, mime_of(&path).to_string()),
+            (header::CONTENT_TYPE, mime_of(Path::new(&name)).to_string()),
             (header::CONTENT_DISPOSITION, content_disposition(&name)),
             (header::CACHE_CONTROL, "private, no-store".to_string()),
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
@@ -282,6 +334,19 @@ mod tests {
         let base = std::env::temp_dir().join(format!("am-outbox-{tag}-{}", crate::db::ulid()));
         std::fs::create_dir_all(&base).unwrap();
         std::fs::canonicalize(base).unwrap()
+    }
+
+    /// 舊 `servable(root, requested) -> Option<PathBuf>` 的測試替身：現在整條路徑驗證＋open 都是
+    /// fd-bound（[`open_outbox_entry`]），沒有中間的 `PathBuf` 可以比對，所以直接回讀出來的內容。
+    fn servable(root: &Path, requested: &str) -> Option<Vec<u8>> {
+        let (mut file, _name) = open_outbox_entry(root, &[], requested, None)?;
+        use std::io::Read;
+        let mut data = Vec::new();
+        file.read_to_end(&mut data).ok()?;
+        if content_is_withheld(&data) {
+            return None;
+        }
+        Some(data)
     }
 
     /// outbox 裡的檔案（相對或絕對）放行；`..`、指到外面的符號連結、目錄、不存在都擋。
@@ -446,6 +511,30 @@ mod tests {
         assert!(dir_is_trusted(&env.app.data_dir, &outbox), "還沒建");
         ensure(&env.app.data_dir, &bot.id).unwrap();
         assert!(dir_is_trusted(&env.app.data_dir, &outbox));
+    }
+
+    /// issue #89：舊實作是「查完路徑安全 → 再用路徑名字重新 open 一次」，兩次 open 之間，這顆 bot 自己
+    /// 就能把驗證通過的檔案換成指到界線外的符號連結。現在整條鏈是 fd-bound（[`open_outbox_entry`]），
+    /// 驗證用的就是真正拿去讀的那個 fd——這裡重現「先下載成功一次、換成符號連結、再下載」這個時序，
+    /// 第二次一定拿不到界線外的內容。
+    #[tokio::test]
+    async fn a_file_swapped_for_a_symlink_between_downloads_never_leaks_the_target() {
+        let env = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&env.app, &env.project_id, "alfa").await;
+        let outbox = ensure(&env.app.data_dir, &bot.id).unwrap();
+        std::fs::write(outbox.join("report.md"), b"# safe").unwrap();
+
+        let (status, bytes) = get_file(&env.app, &bot.id, "report.md").await;
+        assert_eq!((status, bytes.as_slice()), (StatusCode::OK, &b"# safe"[..]), "第一次下載，正常檔案");
+
+        let secret = env.dir.join("host-secret.txt");
+        std::fs::write(&secret, b"host secret").unwrap();
+        std::fs::remove_file(outbox.join("report.md")).unwrap();
+        std::os::unix::fs::symlink(&secret, outbox.join("report.md")).unwrap();
+
+        let (status, bytes) = get_file(&env.app, &bot.id, "report.md").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "換成符號連結之後不能再拿到任何內容");
+        assert_ne!(bytes, b"host secret".to_vec());
     }
 
     /// 遠端主機的 bot：清單回空＋原因，下載不給。
