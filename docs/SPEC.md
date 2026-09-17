@@ -440,6 +440,8 @@ abort 之後照常 flush 出去（但先照下一段等寬限）。要取消排�
 
 stall watchdog 的自動補送走同一條驗證路徑，次數記在 `turns.resend_count`（每個 turn 上限 1，UPDATE 認領
 即是鎖，queue flush 與 watchdog 不會各送一次，daemon 重啟也不會多一次額度）。
+- **補送的字與比對的字**都讀 `turns.prompt_text`＝當初**實際送出**的字（群組去掉 @mention、附件路徑展開；直接送與排隊都寫），
+  不讀訊息泡泡的原文——泡泡帶著 @mention，拿去搜畫面一定找不到、重送還會把路由語法打進 pane（review3 c3 M4）。沒有 `prompt_text` 的舊列才從訊息重算。
 
 ### 6.1 daemon 啟動
 0. 決定資料目錄（§3.1：`data_dir` > `--config` 所在目錄 > `AM_DATA_DIR` > 預設）、對它拿 `daemon.lock`；

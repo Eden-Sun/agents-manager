@@ -238,19 +238,34 @@ pub(crate) fn idle_threshold(said_something: bool, agent_status: &str) -> u32 {
 /// Every form of what we sent, for echo matching: image prompts were delivered with
 /// `attach::deliver_text`'s appendix, which came back stored as an answer
 /// (`01M1XSVME9SKEG1NZXG51HFP73`, 2026-09-07). Delivered form first so the longer text strips first.
+///
+/// 第一個是 `turns.prompt_text`——**實際打給 agent 的字**。訊息泡泡存的是使用者看到的原文：群組訊息帶著 @mention，
+/// 拿它去搜畫面一定找不到、重送時還把路由語法打進 pane（review3 c3 M4）。沒有 `prompt_text` 的舊列才退回從訊息重算。
 pub(crate) async fn turn_echo_texts(app: &Arc<App>, turn_id: &str) -> Vec<String> {
     let rows = db::turn_user_messages_with_attachments(&app.db, turn_id).await.unwrap_or_default();
     let mut out = Vec::new();
+    let delivered: Option<String> = sqlx::query_scalar("SELECT prompt_text FROM turns WHERE id = ?")
+        .bind(turn_id)
+        .fetch_optional(&app.db)
+        .await
+        .ok()
+        .flatten()
+        .flatten();
+    if let Some(p) = delivered.filter(|p| !p.trim().is_empty()) {
+        out.push(p);
+    }
     for (content, attachments) in rows {
         if let Some(json) = attachments.as_deref() {
             if let Ok(items) = serde_json::from_str::<Vec<crate::attach::Attachment>>(json) {
                 let delivered = crate::attach::deliver_text(&content, &items);
-                if delivered != content {
+                if delivered != content && !out.contains(&delivered) {
                     out.push(delivered);
                 }
             }
         }
-        out.push(content);
+        if !out.contains(&content) {
+            out.push(content);
+        }
     }
     out
 }
@@ -673,7 +688,8 @@ async fn resend_lost_prompt(app: &Arc<App>, run_id: &str, turn_id: &str, sent: &
     if !prompt_never_reached_screen(&bot.kind, &read.text, sent) {
         return Resend::Skipped;
     }
-    // `sent[0]` is the delivered form (attachment paths included), exactly what was sent before.
+    // `sent[0]` is the delivered form (`turns.prompt_text`: mentions stripped, attachment paths
+    // included), exactly what was sent before.
     let Some(text) = sent.first() else { return Resend::Skipped };
     // The claim is the lock and it lives in the DB: a queue flush and this watchdog cannot both
     // resend, and a daemon restart does not hand the same turn a fresh budget (sol review #3).
@@ -2224,6 +2240,49 @@ mod issue_17_tests {
         let pane = f.env.herdr.pane("pane-17").unwrap();
         assert_eq!(pane.transcript.iter().filter(|l| l.contains("Reply with PONG")).count(), 1);
         assert!(!db::claim_resend(&app.db, &f.turn_id, MAX_PROMPT_RESENDS).await);
+    }
+
+    /// 群組訊息的泡泡帶著 @mention，實際送給 bot 的是去掉 mention 的字（`turns.prompt_text`）。
+    async fn group_turn(f: &Fixture, bubble: &str, delivered: &str) {
+        let app = &f.env.app;
+        sqlx::query("UPDATE messages SET content = ? WHERE turn_id = ? AND role = 'user'")
+            .bind(bubble)
+            .bind(&f.turn_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE turns SET prompt_text = ? WHERE id = ?").bind(delivered).bind(&f.turn_id).execute(&app.db).await.unwrap();
+    }
+
+    /// review3 c3 M4：畫面上已經有實際送出的那句（沒有 @mention）時，不能因為拿泡泡原文去搜找不到就重送。
+    #[tokio::test]
+    async fn a_group_prompt_on_screen_without_its_mentions_is_not_resent() {
+        let f = fixture("claude", "").await;
+        live(&f, crate::testing::LivePane { transcript: vec!["❯ 請跑一次完整的測試並回報".into()], ..wide() });
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        group_turn(&f, "@AM-2-M @AM-3-X 請跑一次完整的測試並回報", "請跑一次完整的測試並回報").await;
+
+        let sent = turn_echo_texts(&app, &f.turn_id).await;
+        assert_eq!(sent.first().map(String::as_str), Some("請跑一次完整的測試並回報"), "實際送出的字排第一：{sent:?}");
+        assert_eq!(resend_lost_prompt(&app, &f.run_id, &f.turn_id, &sent).await, Resend::Skipped);
+        assert_eq!(count(&f, "pane.send_text"), 0, "已經到了，不重送");
+    }
+
+    /// 真的沒到時，重送打的是當初實際送出的字，不是帶著路由語法的泡泡原文。
+    #[tokio::test]
+    async fn a_lost_group_prompt_is_resent_as_delivered_without_its_mentions() {
+        let f = fixture("claude", "").await;
+        live(&f, crate::testing::LivePane { transcript: vec!["⏺ 先前的回覆".into()], ..wide() });
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        group_turn(&f, "@AM-2-M @AM-3-X 請跑一次完整的測試並回報", "請跑一次完整的測試並回報").await;
+
+        let sent = turn_echo_texts(&app, &f.turn_id).await;
+        assert!(resend_lost_prompt(&app, &f.run_id, &f.turn_id, &sent).await.sent());
+        let pane = f.env.herdr.pane("pane-17").unwrap();
+        assert!(pane.transcript.iter().any(|l| l == "❯ 請跑一次完整的測試並回報"), "{:?}", pane.transcript);
+        assert!(!pane.transcript.iter().any(|l| l.contains("@AM-2-M")), "路由語法不能打進 pane：{:?}", pane.transcript);
     }
 
     /// 重送在打字前被擋下（證據檔一時讀不到）：額度退回，watchdog 隔一下用退回的額度再試一次，這次送出去
