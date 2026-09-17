@@ -152,6 +152,12 @@ pub fn router(app: Arc<App>) -> Router {
         // issue #90：build scheduler 的唯讀現況（UI 用一般 X-AM-Token）。acquire／renew／release 見下方
         // 的 `/build-slots/*`（不在 `/api` 底下：bot 的 pane 只有自己的 hook token，拿不到這個）。
         .route("/build-slots", get(crate::build_scheduler::get_status))
+        // issue #104：開發者專用外部 Cargo worker 設定。密碼只進 data-dir 的 0600 secret file。
+        .route(
+            "/build/remote",
+            get(crate::remote_cargo::get_settings).put(crate::remote_cargo::put_settings),
+        )
+        .route("/build/remote/test", post(crate::remote_cargo::test_settings))
         .route("/mem", get(get_mem))
         .route("/mem/processes", get(get_mem_processes))
         .route("/mem/processes/kill", post(kill_mem_process))
