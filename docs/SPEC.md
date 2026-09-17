@@ -1232,6 +1232,8 @@ pane 的終端快照是 UI 顯示 device code / URL 的唯一通道；這些內�
 
 `POST …/logout` 走同一條路（同一個臨時 pane、同一組 env 前綴），指令換成 `claude /logout`、`codex logout` 或 `grok logout`。
 環境前綴與登入共用同一段程式：少帶 `CLAUDE_CONFIG_DIR` 就會登出別的帳號。清掉的是那個身份設定目錄裡的憑證——執行中的 bot 不受影響，下次啟動才會停在登入畫面，所以 UI 先問一次並說明有幾顆 bot 綁著它。
+CLI 結束後重驗一次登入狀態並寫回快取：**登出**的 pane 在重驗問不出來時（遠端 claude 一律問不出來）直接記未登入並清掉 `account`／`plan`，不然列上會一直顯示「已登入」、登出鈕也還按得下去。
+重驗說「還登著」就照實記（登出沒成功）。
 
 ### 16.3b 停用一個身份（使用者 2026-09-16）
 `PUT /api/identities/{name}/disabled {kind, disabled, host?}`（daemon 的 `identity_prefs`，不是瀏覽器 localStorage）。
