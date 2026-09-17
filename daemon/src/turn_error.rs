@@ -36,20 +36,28 @@ fn is_quota_limit_lower(lower: &str) -> bool {
     reached || hit
 }
 
-/// 橫幅說的是哪一桶。CLI 的字：`session limit`（5h）、`weekly limit`、`Opus limit`／`Sonnet limit`（每週的
-/// 模型桶，daemon 只有 7d 可放）、`Fable limit`。
+/// 橫幅說的是哪一桶。CLI 2.1.273 的字串表就是這幾種 rate limit：
+/// `five_hour`→`session limit`、`seven_day`→`weekly limit`、`seven_day_opus`→`Opus limit`、
+/// `seven_day_sonnet`→`Sonnet limit`、`seven_day_overage_included`→`Fable limit`。
+/// Opus／Sonnet 跟 Fable 一樣是**模型自己的**週桶，不是整個身分的 7d（review3 c4 M1）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LimitBucket {
     Session,
     Weekly,
     Fable,
+    /// 模型專屬的週桶（`Opus limit`／`Sonnet limit`）：只擋跑那個模型的 bot。
+    Model(&'static str),
     Unknown,
 }
 
 fn limit_bucket(lower: &str) -> LimitBucket {
     if lower.contains("fable") {
         LimitBucket::Fable
-    } else if lower.contains("weekly") || lower.contains("opus limit") || lower.contains("sonnet limit") {
+    } else if lower.contains("opus limit") {
+        LimitBucket::Model("opus")
+    } else if lower.contains("sonnet limit") {
+        LimitBucket::Model("sonnet")
+    } else if lower.contains("weekly") {
         LimitBucket::Weekly
     } else if lower.contains("session limit") || lower.contains("5-hour") || lower.contains("five-hour") {
         LimitBucket::Session
@@ -67,6 +75,7 @@ fn bucket_name(lower: &str) -> Option<String> {
         LimitBucket::Session => Some("five_hour".into()),
         LimitBucket::Weekly => Some("seven_day".into()),
         LimitBucket::Fable => Some("fable".into()),
+        LimitBucket::Model(m) => Some(m.to_string()),
         LimitBucket::Unknown => None,
     }
 }
@@ -80,7 +89,7 @@ pub(crate) fn banner_bucket(text: &str) -> Option<String> {
 fn fallback_until(lower: &str, at: &str) -> Option<String> {
     let hours = match limit_bucket(lower) {
         LimitBucket::Session => 5,
-        LimitBucket::Weekly | LimitBucket::Fable => 24 * 7,
+        LimitBucket::Weekly | LimitBucket::Fable | LimitBucket::Model(_) => 24 * 7,
         // 認不出是哪一桶：用最短的那個，寧可早一點放行讓它再撞一次。
         LimitBucket::Unknown => 5,
     };
@@ -89,6 +98,9 @@ fn fallback_until(lower: &str, at: &str) -> Option<String> {
 }
 
 /// 把橫幅說的那一桶標成 100%，回傳它的重置時間（撞限到那時才解除）。認不出是哪一桶時照舊先 5h 再 7d。
+///
+/// Opus／Sonnet 的週桶 daemon 沒有量表可放：**一格都不標**（標 7d 會讓同身分所有 bot 看起來週額度用光），
+/// 重置時間借 7d 那格——`/usage` 的 `weekly_scoped` 列跟 `weekly_all` 同一個重置週期（review3 c4 M1）。
 fn saturate_bucket(q: &mut crate::quota::Quota, lower: &str) -> Option<String> {
     let full = |w: &mut Option<crate::quota::Window>| {
         w.as_mut().map(|w| {
@@ -98,6 +110,7 @@ fn saturate_bucket(q: &mut crate::quota::Quota, lower: &str) -> Option<String> {
     };
     match limit_bucket(lower) {
         LimitBucket::Fable => full(&mut q.fable).flatten(),
+        LimitBucket::Model(_) => q.seven_day.as_ref().and_then(|w| w.resets_at.clone()),
         LimitBucket::Weekly => full(&mut q.seven_day).flatten(),
         LimitBucket::Session => full(&mut q.five_hour).flatten(),
         LimitBucket::Unknown => match full(&mut q.five_hour) {
@@ -430,15 +443,14 @@ mod quota_limit_tests {
         assert_eq!(until.as_deref(), Some("2026-09-16T12:00:00Z"));
     }
 
-    /// 前綴與桶名取自 2.1.271 binary 的字串表（`You've hit your`／`You've reached your`、`session limit`、`weekly limit`、
-    /// `Opus limit`、`Fable limit`）；`· resets …` 那段是示意，判斷不看它。
-    /// 以前非 Fable 一律記 5h——撞週額度卻把 5h 釘成 100%、而且等 5h 重置就當成解除了。
+    /// 前綴與桶名取自 2.1.273 binary 的字串表：`{five_hour:"session limit", seven_day:"weekly limit",
+    /// seven_day_opus:"Opus limit", seven_day_sonnet:"Sonnet limit", seven_day_overage_included:"Fable limit"}`；
+    /// `· resets …` 那段是示意，判斷不看它。以前非 Fable 一律記 5h——撞週額度卻把 5h 釘成 100%、而且等 5h 重置就當成解除了。
     #[test]
     fn each_banner_saturates_its_own_bucket() {
         for (line, bucket, until) in [
             ("You've hit your session limit · resets 4pm (Asia/Taipei)", "5h", "5h-reset"),
             ("You've hit your weekly limit · resets Sep 18", "7d", "7d-reset"),
-            ("You've hit your Opus limit · resets Sep 18", "7d", "7d-reset"),
             ("You've reached your Fable limit. Run /usage-credits to continue", "fable", "fable-reset"),
         ] {
             assert!(is_quota_limit(line), "{line}");
@@ -450,6 +462,33 @@ mod quota_limit_tests {
                 assert_eq!(p == 100.0, name == bucket, "{line}: {name}={p}");
             }
         }
+    }
+
+    /// review3 c4 M1：`Opus limit`／`Sonnet limit`（CLI 的 `seven_day_opus`／`seven_day_sonnet`）是模型自己的週桶。
+    /// 以前記成 `seven_day` 並把 7d 量表釘成 100%：同帳號所有 claude bot 停派到週重置，群組任務換掉整個身分。
+    #[test]
+    fn a_model_limit_is_its_own_bucket_and_saturates_no_bar() {
+        for (line, bucket) in [
+            ("You've hit your Opus limit · resets Sep 18", "opus"),
+            ("You've hit your Sonnet limit · resets Sep 18", "sonnet"),
+        ] {
+            let lower = line.to_ascii_lowercase();
+            assert!(is_quota_limit(line), "{line}");
+            assert_eq!(bucket_name(&lower).as_deref(), Some(bucket), "{line}");
+            let mut q = quota();
+            // 重置時間借 7d 那格（`/usage` 的 weekly_scoped 與 weekly_all 同一個週期），但一格量表都不標。
+            assert_eq!(saturate_bucket(&mut q, &lower).as_deref(), Some("7d-reset"), "{line}");
+            let pct = |w: &Option<crate::quota::Window>| w.as_ref().unwrap().used_pct;
+            assert_eq!((pct(&q.five_hour), pct(&q.seven_day), pct(&q.fable)), (40.0, 60.0, 10.0), "{line}：量表不動");
+            // 那一桶連 7d 都還沒有讀數時照舊給保底（一週），不會留下 until=None。
+            let mut empty = quota();
+            empty.seven_day = None;
+            let at = "2026-09-16T10:00:00Z";
+            let until = saturate_bucket(&mut empty, &lower).or_else(|| fallback_until(&lower, at));
+            assert_eq!(until.as_deref(), Some("2026-09-23T10:00:00Z"), "{line}");
+        }
+        // 「weekly limit」仍然是整個身分的 7d。
+        assert_eq!(bucket_name("you've hit your weekly limit").as_deref(), Some("seven_day"));
     }
 
     /// 花費上限、fast 上限、團隊預算不是速率桶用完，不當撞限（否則量表被釘成 100%）。

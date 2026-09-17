@@ -107,9 +107,14 @@ pub fn model_family(model: &str) -> Option<&'static str> {
 }
 
 /// 這一桶是某個模型專屬的（撞了只擋跑那個模型的 bot）就回那個模型；5h、7d、沒有桶名的是整個帳號共用，回 `None`。
+///
+/// claude 的模型週桶：`Fable limit`（`seven_day_overage_included`）、`Opus limit`（`seven_day_opus`）、
+/// `Sonnet limit`（`seven_day_sonnet`）——CLI 2.1.273 的字串表把它們跟 `weekly limit` 分開列（review3 c4 M1）。
 fn model_of_bucket(bucket: &str) -> Option<&'static str> {
     match bucket {
         "fable" => Some("fable"),
+        "opus" => Some("opus"),
+        "sonnet" => Some("sonnet"),
         _ => None,
     }
 }
@@ -484,6 +489,9 @@ fn recalibrate_limit_hit(mut hit: LimitHit, fresh: &Quota) -> Option<LimitHit> {
         Some("five_hour") => (fresh.five_hour.as_ref(), chrono::Duration::hours(5)),
         Some("seven_day") => (fresh.seven_day.as_ref(), chrono::Duration::days(7)),
         Some("fable") => (fresh.fable.as_ref(), chrono::Duration::days(7)),
+        // Opus／Sonnet 的週桶沒有自己的量表，但跟 7d 同一個週期重置（`/usage` 的 `weekly_scoped` 列與
+        // `weekly_all` 同一個 `resets_at`）：拿 7d 的窗來校正時間，不看它的百分比。
+        Some("opus") | Some("sonnet") => (fresh.seven_day.as_ref(), chrono::Duration::days(7)),
         _ => return Some(hit),
     };
     let Some(resets) = window.and_then(|w| w.resets_at.as_deref()).and_then(parse_utc) else { return Some(hit) };
@@ -1279,6 +1287,14 @@ mod tests {
             (Some("fable"), Some("sonnet"), false),
             (Some("fable"), None, true),
             (Some("fable"), Some("default"), true),
+            // Opus／Sonnet 的週桶同理（review3 c4 M1）。
+            (Some("opus"), Some("opus"), true),
+            (Some("opus"), Some("claude-opus-5"), true),
+            (Some("opus"), Some("fable"), false),
+            (Some("opus"), Some("sonnet"), false),
+            (Some("sonnet"), Some("sonnet"), true),
+            (Some("sonnet"), Some("opus"), false),
+            (Some("opus"), None, true),
             (Some("five_hour"), Some("opus"), true),
             (Some("seven_day"), Some("opus"), true),
             (None, Some("opus"), true),
