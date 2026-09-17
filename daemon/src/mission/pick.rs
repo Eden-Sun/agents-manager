@@ -427,6 +427,23 @@ mod tests {
         assert_eq!(block_of(&week_gone, now), Block::SevenDay(Some("2026-09-18T06:00:00Z".into())));
     }
 
+    /// review3 c1 L11：撞限換手挑 reviewer 時要排除執行者的身分，不然換完 reviewer 跟執行者同一個帳號。
+    #[test]
+    fn a_reviewer_never_lands_on_the_executors_identity() {
+        let now = now();
+        let qs = [("cc2", Some(q(10.0, 20.0, Some(10.0)))), ("cc1", Some(q(10.0, 20.0, Some(10.0))))];
+        // 沒有排除：挑到順序上的第一個，可能正是執行者。
+        assert_eq!(used(&pick(Role::Reviewer, &cands(&qs), On5hLimit::Wait, None, now)), ("cc2", None));
+        // 排除執行者：挑另一個身分。
+        assert_eq!(used(&pick(Role::Reviewer, &cands(&qs), On5hLimit::Wait, Some("cc2"), now)), ("cc1", None));
+        // 只剩執行者自己：寧可回「沒有獨立 reviewer」，也不要偷偷用同一個帳號。
+        let only = [("cc2", Some(q(10.0, 20.0, Some(10.0))))];
+        assert!(matches!(
+            pick(Role::Reviewer, &cands(&only), On5hLimit::Wait, Some("cc2"), now),
+            Pick::NoIndependentReviewer { .. }
+        ));
+    }
+
     #[test]
     fn keeps_using_the_first_identity_until_it_is_exhausted_not_merely_low() {
         let qs = [("cc2", Some(q(80.0, 90.0, Some(90.0)))), ("cc1", Some(q(0.0, 0.0, Some(0.0))))];

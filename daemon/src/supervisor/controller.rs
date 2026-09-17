@@ -413,7 +413,11 @@ async fn mission_quota(app: &Arc<App>, a: &store::Assignment, mission_id: &str, 
     let raw = crate::mission::candidates(app, &host, kind).await;
     let cands: Vec<pick::Candidate> = raw.iter().map(|(n, d, q)| pick::Candidate { name: n, disabled: *d, quota: q.as_ref() }).collect();
     let on_5h = if m.on_5h_limit == "switch" { pick::On5hLimit::Switch } else { pick::On5hLimit::Wait };
-    let decision = pick::pick(role, &cands, on_5h, None, chrono::Utc::now());
+    // reviewer 換手時要排除執行者的身分（runbook 第 3 步的 `--exclude`）：以前固定傳 None，撞限換手挑出來的
+    // 可能就是執行者自己那個帳號，「reviewer 必須是另一個身分」被悄悄打破（review3 c1 L11）。挑不到別的身分時
+    // `pick` 回 `NoIndependentReviewer`，`quota_policy` 當成 Wait——原地等，不會退而求其次用同一個身分。
+    let exclude = if role == pick::Role::Reviewer { executor_identity(app, mission_id).await } else { None };
+    let decision = pick::pick(role, &cands, on_5h, exclude.as_deref(), chrono::Utc::now());
     let current = bot.identity.clone().unwrap_or_default();
     match pick::quota_policy(&current, bot.model.as_deref(), &decision) {
         pick::QuotaPolicy::Wait => false,
@@ -558,6 +562,14 @@ pub async fn backfill_quota_limits_once(app: &Arc<App>, host: &str) {
     }
     let started = chrono::DateTime::parse_from_rfc3339(&crate::build_info::started_at()).ok().map(|t| t.with_timezone(&chrono::Utc));
     backfill_quota_limits(app, host, started).await;
+}
+
+/// 這個任務的執行者現在掛在哪個身分上（最新一筆 executor 交辦的 bot）。挑 reviewer 時要排除它。
+async fn executor_identity(app: &Arc<App>, mission_id: &str) -> Option<String> {
+    let rows = store::mission_assignments(&app.db, mission_id).await.ok()?;
+    let executor = rows.iter().rev().find(|x| x.mission_role.as_deref() == Some("executor"))?;
+    let bot = crate::db::bot(&app.db, &executor.target_bot_id).await.ok().flatten()?;
+    bot.identity.filter(|s| !s.trim().is_empty())
 }
 
 /// 這件交辦屬於一個**還開著、但被暫停**的任務。
@@ -2204,6 +2216,35 @@ mod mission_quota_tests {
         assert_eq!(payload["to_identity"], "cc1");
         let notes = mstore::events(&app.db, &mid).await.unwrap();
         assert!(notes.iter().any(|e| e.kind == "note" && e.text.contains("cc1")));
+    }
+
+    /// review3 c1 L11：reviewer 撞限換手時要排除**執行者現在的身分**。以前固定傳 `exclude=None`：
+    /// 挑出來的常常就是執行者自己那個帳號，「reviewer 必須是另一個身分」被悄悄打破。
+    #[tokio::test]
+    async fn a_reviewer_handover_excludes_the_executors_identity() {
+        let app = app().await;
+        bot(&app, "b-cc2", "cc2", Some("fable")).await;
+        bot(&app, "b-cc1", "cc1", Some("fable")).await;
+        let mid = mission(&app, "wait").await;
+        // 執行者掛在 cc2；reviewer 是 cc1，而 cc1 的週窗用盡。
+        let _executor = assignment(&app, "b-cc2", &mid, "executor").await;
+        let reviewer = assignment(&app, "b-cc1", &mid, "reviewer").await;
+        {
+            let mut q = app.quotas.lock().await;
+            q.insert("claude:cc2".into(), quota(10.0, 10.0, 10.0)); // 額度很夠，但它是執行者
+            q.insert("claude:cc1".into(), quota(10.0, 100.0, 10.0));
+            q.insert("claude:cc0".into(), quota(10.0, 100.0, 10.0)); // 其他身分都用盡：唯一「還能跑」的就是執行者
+        }
+
+        park_quota(&app, &reviewer, &hit(), "turn").await;
+
+        let row = store::assignment(&app.db, &reviewer.id).await.unwrap().unwrap();
+        assert_eq!(row.status, "quota_blocked", "沒有別的身分可挑就原地等，不換到執行者身上");
+        assert!(
+            !inbox_kinds(&app).await.contains(&"mission_identity_switch".to_string()),
+            "不能換手到執行者自己的帳號"
+        );
+        assert_eq!(executor_identity(&app, &mid).await.as_deref(), Some("cc2"));
     }
 
     #[tokio::test]
