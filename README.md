@@ -197,6 +197,7 @@ VITE_MOCK=1 bun run dev
 | [`docs/API.md`](docs/API.md) | HTTP / WebSocket 契約（前端以此為準） |
 | [`docs/FRONTEND.md`](docs/FRONTEND.md) | 前端結構、驗證指令、讀程式看不出來的約定 |
 | [`docs/HOOK.md`](docs/HOOK.md) | hook 子命令契約與時序測試 |
+| [`docs/BUILD-CACHE.md`](docs/BUILD-CACHE.md) | 跨 worktree 共用的 sccache 編譯快取：怎麼接上去、大小上限、遠端主機、工具鏈升級的影響 |
 | [`docs/PACKAGING.md`](docs/PACKAGING.md) | 打包成 macOS `.dmg`（Apple Silicon、ad-hoc 簽章）|
 | [`docs/UI-DECISIONS.md`](docs/UI-DECISIONS.md) | 已定案的 UI 取捨 |
 | [`docs/goals/agm-supervisor-persona.md`](docs/goals/agm-supervisor-persona.md) | AGM 人設的內嵌來源（`include_str!` 編進 daemon） |
