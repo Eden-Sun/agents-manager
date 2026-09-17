@@ -866,11 +866,19 @@ class MissionCommandTest(CliCase):
 
     def test_event_is_attributed_to_the_manager_by_default(self):
         FakeDaemon.routes["POST /api/missions/m1/events"] = (200, {"id": "e1"})
-        self.ok("mission", "event", "m1", "--kind", "verified", "--text", "cargo test 644 passed")
+        self.ok("mission", "event", "m1", "--kind", "verified", "--text", "cargo test 644 passed", "--sha", "abc1234")
         body = self.posts("/api/missions/m1/events")[0]["body"]
-        self.assertEqual(body, {"kind": "verified", "text": "cargo test 644 passed", "relay_from": "bot-agm"})
+        self.assertEqual(body, {"kind": "verified", "text": "cargo test 644 passed", "sha": "abc1234", "relay_from": "bot-agm"})
         self.ok("mission", "event", "m1", "--kind", "note", "--text", "排程", "--as-daemon")
         self.assertEqual(self.posts("/api/missions/m1/events")[1]["body"]["relay_from"], "daemon")
+
+    def test_verified_names_the_commit_it_verified(self):
+        """交付只放行驗過的那個 commit：verified 沒帶 --worktree／--sha 就不送（review3 c1 M9）。"""
+        FakeDaemon.routes["POST /api/missions/m1/events"] = (200, {"id": "e1"})
+        self.assertEqual(self.bad("mission", "event", "m1", "--kind", "verified", "--text", "全過")["error"], "bad_args")
+        self.assertEqual(self.posts("/api/missions/m1/events"), [], "缺 commit 時什麼都不送")
+        self.ok("mission", "event", "m1", "--kind", "verified", "--text", "全過", "--worktree", "/tmp/wt-exec")
+        self.assertEqual(self.posts("/api/missions/m1/events")[0]["body"]["worktree"], "/tmp/wt-exec")
 
     def test_question_answer_revise_need_an_idempotency_key(self):
         """三支都會改變狀態，沒有穩定的 request id 就不要送——重送會變成第二個問題／第二輪續作。"""

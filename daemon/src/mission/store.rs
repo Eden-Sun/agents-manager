@@ -738,6 +738,27 @@ pub async fn resume(pool: &SqlitePool, id: &str) -> Result<bool> {
     Ok(n == 1)
 }
 
+/// 只在任務正停在 `reasons` 其中之一時解除暫停，回傳被解除的那個原因。別的原因的暫停（使用者按的、
+/// 等人回答的）不動——解除它們要走 resume／answer。
+pub async fn clear_pause_if(pool: &SqlitePool, id: &str, reasons: &[&str]) -> Result<Option<String>> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let current: Option<Option<String>> = sqlx::query_scalar(
+        "SELECT paused_reason FROM missions WHERE id = ? AND completed_at IS NULL AND cancelled_at IS NULL",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(reason) = current.flatten().filter(|r| reasons.contains(&r.as_str())) else { return Ok(None) };
+    sqlx::query("UPDATE missions SET paused_reason = NULL, paused_detail = NULL, updated_at = ? WHERE id = ? AND paused_reason = ?")
+        .bind(crate::db::now())
+        .bind(id)
+        .bind(&reason)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(Some(reason))
+}
+
 pub async fn cancel(pool: &SqlitePool, id: &str) -> Result<bool> {
     let now = crate::db::now();
     let n = sqlx::query("UPDATE missions SET cancelled_at = ?, updated_at = ? WHERE id = ? AND completed_at IS NULL AND cancelled_at IS NULL")

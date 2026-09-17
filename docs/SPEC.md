@@ -1597,10 +1597,13 @@ supervisor 相關資料表與欄位都是 additive，`db::migrate` 重跑冪等�
    → 對執行者那件 `review followup`，文字帶 findings。
 4. **驗證者**：`mission pick --role verifier`；`ask_user` 時任務已停在 `no_fable_for_verifier`，在群組問使用者要等哪個身分
    或改用非 Fable，**不自行降級**。`use` → 臨時 bot 在乾淨 worktree 跑 repo 規定的驗證（本 repo：`cargo test`、
-   `tsc -p tsconfig.app.json`、oxlint、build、UI 截圖），回 `am-verify`；通過 → `mission event --kind verified`（帶數字與截圖路徑）；
+   `tsc -p tsconfig.app.json`、oxlint、build、UI 截圖），回 `am-verify`；通過 → `mission event --kind verified --worktree <驗過的工作樹>`
+   （或 `--sha <驗過的 commit>`；帶數字與截圖路徑）——daemon 記下**驗的是哪個 commit**，沒帶就 400；
    失敗 → `mission round` → followup 退回執行者。
-5. **交付**：`mission deliver --worktree <執行者 worktree>`。409 `not_verified` 代表流程漏了第 4 步；其餘 409 任務已
-   `paused`（`push_main_failed`／`pr_failed`，`reason` 是機器碼），在群組貼原因問人，**不 force、不自己 rebase 後硬推**。
+5. **交付**：`mission deliver --worktree <執行者 worktree>`。工作樹必須是這個專案的 repo，**HEAD 必須就是最新一則 `verified` 記的 commit**。
+   409 `not_verified`／`verified_without_sha`／`head_not_verified` 代表流程漏了第 4 步（或驗完又改過），任務**不會**停下來，回第 4 步重驗這個 commit；
+   其餘 409 任務已 `paused`（`push_main_failed`／`pr_failed`，`reason` 是機器碼），在群組貼原因問人，**不 force、不自己 rebase 後硬推**。
+   之後交付成功，daemon 會自動解除這兩種暫停（記一則 `resumed`）。
    交付含 daemon／agm.py／persona 改動時，正式 daemon 照 §18.2 例行更新，不另開重啟。
 6. **回報與收尾**：`mission complete <id> --text …`（或 `--text-file`；內容是結果摘要：commit／PR、驗證證據、輪數），
    群組時間軸由 daemon 記 `completed`。daemon 在 complete／cancel 時會**自動軟刪**這個任務的臨時 bot——條件是它是任務某件交辦的
@@ -1617,7 +1620,8 @@ supervisor 相關資料表與欄位都是 additive，`db::migrate` 重跑冪等�
 10. **實跑教訓（2026-09-13 兩個任務）**：
    - 驗證者的截圖**不要放在執行者的 worktree**（deliver 會 409 `dirty_worktree`）；放 AGM 的 scratchpad 或另一個目錄，路徑寫進 `verified` 事件。
    - `not_fast_forward` 不算「停下問人」：對執行者**新開**一件 `assign --mission --role executor`（已結案的交辦不能 `followup`）
-     要它 `git rebase origin/main` 並重跑 tsc／build／test；rebase 乾淨就直接再 `deliver`，**有衝突才**停下問人。
+     要它 `git rebase origin/main`；rebase 乾淨就**重走第 4 步**（rebase 產生新的 commit，舊的 `verified` 對它無效，
+     daemon 會回 `head_not_verified`），驗過再 `deliver`；**有衝突才**停下問人。
    - `mission complete` 只會自動刪「沒有 run」的臨時 bot；idle 但 run 還活著的會被 `still_running` 跳過，收尾照第 6 步先 `bot stop` 再 `bot delete`。
 11. **完成之後的追問與追加修改（2026-09-13，AGM 裁示 01M2D18PQZSJ4Z5BJC21TF9Q77）**：交付完不是句點，使用者還會
     問問題、還會想再改一點。兩條路刻意分開，因為後果不同：
