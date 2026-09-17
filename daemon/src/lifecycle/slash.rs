@@ -417,6 +417,7 @@ mod login_slash_tests {
             ended_at: None,
             resume_session_id: None,
             agent_status_since: None,
+            subagent_json: None,
         }
     }
 
