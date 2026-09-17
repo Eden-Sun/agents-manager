@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { oldestWaitMinutes, pendingRebuilds, type RebuildRequest } from './rebuildCount.ts'
+import { KICK_REQUESTER, oldestWaitMinutes, pendingRebuilds, type RebuildRequest } from './rebuildCount.ts'
 
 const row = (o: Partial<RebuildRequest>): RebuildRequest => ({
   id: 'x',
@@ -61,4 +61,20 @@ test('最早那筆等了幾分鐘：看最舊的，壞時間不算，未來時�
   assert.equal(oldestWaitMinutes(rows, now), 45)
   assert.equal(oldestWaitMinutes([], now), 0)
   assert.equal(oldestWaitMinutes([row({ created_at: '2026-09-15T02:00:00.000Z' })], now), 0)
+})
+
+test('過期的申請不算：daemon 不會把過期的核准改狀態，chip 不能拿它說「馬上要重建」', () => {
+  const now = Date.parse('2026-09-16T12:00:00.000Z')
+  const rows = [
+    row({ id: 'expired', expires_at: '2026-09-16T11:00:00.000Z' }),
+    row({ id: 'live', requester: 'bot-2', expires_at: '2026-09-16T13:00:00.000Z' }),
+    row({ id: 'forever', requester: 'bot-3' }),
+    row({ id: 'bad-expiry', requester: 'bot-4', expires_at: 'not-a-date' }),
+  ]
+  assert.deepEqual(pendingRebuilds(rows, null, now).map((r) => r.id), ['expired', 'live', 'forever', 'bad-expiry'].filter((id) => id !== 'expired'))
+})
+
+test('腳本自己提的那筆不算（跟 kick 腳本同一條規則）', () => {
+  const rows = [row({ id: 'mine', requester: KICK_REQUESTER }), row({ id: 'bot', requester: 'bot-9' })]
+  assert.deepEqual(pendingRebuilds(rows).map((r) => r.id), ['bot'])
 })

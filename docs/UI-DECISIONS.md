@@ -211,7 +211,8 @@ AGM 的重建排程原本只在整點檢查；使用者要它**集滿門檻筆�
   到門檻時邊框與數字轉警示色：那一刻的意思是「下一輪檢查就會重建」，使用者該看得出來。
 - **點開**：列出申請者、commit、待裁示／已核准、scope 一句話，底下寫明滿幾筆會提前重建。
 - **資料**：唯讀的 `GET /api/supervisor/approvals`，計數規則在 `web/src/lib/rebuildCount.ts`，
-  與 `scripts/ops/daemon-update-kick.sh` 同一套：`purpose=rebuild`、狀態 `pending`／`approved`，
+  與 `scripts/ops/daemon-update-kick.sh` 同一套：`purpose=rebuild`、狀態 `pending`／`approved`、
+  **`expires_at` 還沒到**（daemon 不會把過期的核准改狀態）、**不算腳本自己提的那筆**（requester `daemon-update-kick`），
   同一個 requester 對同一個 commit 算一筆。每 30 秒重讀一次（申請是人在動的）。
 - **上次上線之前的申請不算**：時間取 `GET /api/supervisor` 的 `last_deploy.at`（daemon 960ba06 起，
   SPEC §18.15）＝這顆 binary 第一次上線的時間，跟腳本讀 `daemon-update.built` mtime 是同一個意思
