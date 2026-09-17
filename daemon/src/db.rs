@@ -110,6 +110,10 @@ CREATE TABLE IF NOT EXISTS attachments (
   -- Absolute path on the bot's host; this is what the agent is told to read.
   agent_path TEXT NOT NULL, host TEXT NOT NULL,
   message_id TEXT REFERENCES messages(id),
+  -- 'staging'：row 先落地、位元組還在寫；'ready'：可以 resolve/bind/read；'failed'：save() 自己標的，
+  -- best-effort cleanup 可能沒清乾淨。只有 'ready' 能被 resolve/bind/read；'staging'／'failed' 由
+  -- `attach::reconcile_orphans`（開機跑一次）收掉（issue #88）。
+  state TEXT NOT NULL DEFAULT 'ready' CHECK (state IN ('staging','ready','failed')),
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS attachments_msg ON attachments(message_id);
@@ -191,6 +195,13 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
         // 第一次記下送達結果的時間（`prompt::mark_delivery`）。排隊的 turn 的 `created_at` 是**排進佇列**的時間，
         // 重啟補 stall watchdog 要看的是「剛送出」，不是「剛排隊」（review 2026-09-16 deliv L3）。舊列 NULL＝退回 created_at。
         ("turns", "delivered_at", "ALTER TABLE turns ADD COLUMN delivered_at TEXT"),
+        // 舊庫裡的每一列都是舊流程「先寫檔、DB insert 最後做」留下來的——insert 成功就代表檔案已經寫完，
+        // 一律當 'ready'（issue #88）。
+        (
+            "attachments",
+            "state",
+            "ALTER TABLE attachments ADD COLUMN state TEXT NOT NULL DEFAULT 'ready' CHECK (state IN ('staging','ready','failed'))",
+        ),
     ] {
         if !has_column(&mut *tx, table, col).await? {
             sqlx::query(ddl).execute(&mut *tx).await.with_context(|| format!("add {table}.{col}"))?;
@@ -760,6 +771,43 @@ mod tests {
         refund_resend(&pool, "t").await;
         let n: i64 = sqlx::query_scalar("SELECT resend_count FROM turns WHERE id='t'").fetch_one(&pool).await.unwrap();
         assert_eq!(n, 0, "退還不會退成負數");
+        pool.close().await;
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// issue #88：`attachments.state` 是後補的欄位，舊 DB（沒有這一欄）打開時要補上，而且舊列（都是
+    /// 舊流程「檔案寫完才 insert」留下來的，insert 成功就代表已經完整）一律回填成 `'ready'`，不能變成
+    /// `NULL` 或別的預設值被 `resolve`/`read`/`bind` 擋掉。
+    #[tokio::test]
+    async fn an_old_database_gains_attachments_state_and_backfills_ready() {
+        let dir = std::env::temp_dir().join(format!("am-attach-state-{}", ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("old.sqlite3");
+        {
+            let pool = open(&path).await.unwrap();
+            sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES ('p','/tmp','p',?)").bind(now()).execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('b','p','b','claude','t',?)")
+                .bind(now())
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO attachments (id,bot_id,name,mime,size,local_path,agent_path,host,created_at)
+                 VALUES ('a','b','n','image/png',1,'/l','/r','local',?)",
+            )
+            .bind(now())
+            .execute(&pool)
+            .await
+            .unwrap();
+            // 做成上一版的形狀：這一欄還不存在。
+            sqlx::query("ALTER TABLE attachments DROP COLUMN state").execute(&pool).await.unwrap();
+            assert!(!has_column(&pool, "attachments", "state").await.unwrap());
+            pool.close().await;
+        }
+        let pool = open(&path).await.expect("舊 DB 照常開起來");
+        assert!(has_column(&pool, "attachments", "state").await.unwrap(), "開的時候補上");
+        let state: String = sqlx::query_scalar("SELECT state FROM attachments WHERE id='a'").fetch_one(&pool).await.unwrap();
+        assert_eq!(state, "ready", "舊流程 insert 成功就代表檔案已經寫完，回填成 ready 而不是留白");
         pool.close().await;
         std::fs::remove_dir_all(&dir).unwrap();
     }
