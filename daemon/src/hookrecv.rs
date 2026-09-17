@@ -666,6 +666,7 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             }
 
             // §4.3: a late hook must not overwrite a fallback-claimed turn.
+            let mut user = user;
             if let Some(r) = &run {
                 // Fixed-width RFC3339 UTC, so lexicographic comparison is chronological.
                 let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(120))
@@ -679,8 +680,21 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                 .fetch_optional(&app.db)
                 .await?;
                 if let Some(t) = late {
-                    fill_or_drop_late_hook(app, &t, &body_text, &session_id, &turn_id).await?;
-                    return Ok(());
+                    // 跟上面 unknown 那條同一個判斷（review3 c1 L13）：hook 帶來的使用者訊息若是**別句**
+                    // （使用者改到 pane 裡直接打、herdr 卡 working 沒開外部回合），答案屬於那一句，不能補進 T1、
+                    // 更不能把 T1 標成 completed。對不上就往下記成外部回合；看不到使用者訊息時照舊補。
+                    let seen = hook_user_text(user.as_deref(), transcript_path.as_deref()).await;
+                    let prompt = match t.prompt_text.clone().filter(|p| !p.trim().is_empty()) {
+                        Some(p) => Some(p),
+                        None => db::turn_user_messages(&app.db, &t.id).await?.into_iter().next(),
+                    };
+                    if answers_another_prompt(prompt.as_deref(), seen.as_deref()) {
+                        tracing::info!(turn = %t.id, bot = %bot.id, "遲到 hook 的使用者訊息不是這一筆備援回合的 prompt：不補，記成外部回合");
+                        user = user.or(seen);
+                    } else {
+                        fill_or_drop_late_hook(app, &t, &body_text, &session_id, &turn_id).await?;
+                        return Ok(());
+                    }
                 }
             }
 
@@ -1388,6 +1402,107 @@ mod external_claim_tests {
 
         let turn = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
         assert_eq!((turn.status.as_str(), turn.delivery.as_str()), ("completed", "ok"));
+    }
+
+    /// 備援剛把回合關掉、沒存回覆（這個 run 已經沒有 in-flight 回合）。
+    async fn fallback_closed_turn(app: &Arc<App>, project_id: &str, prompt: &str) -> (String, String, String) {
+        let (bot_id, conv, turn_id) = unknown_turn(app, project_id, "codex", prompt).await;
+        sqlx::query("UPDATE turns SET status='completed_fallback', delivery='ok', completed_at=? WHERE id=?")
+            .bind(db::now())
+            .bind(&turn_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        (bot_id, conv, turn_id)
+    }
+
+    /// review3 c1 L13：沒有 in-flight 回合時，遲到 hook 帶來的是**別句**的答案（使用者改到 pane 裡直接打）——
+    /// 不能補進 120 秒內那筆備援回合、更不能把它標成 completed，答案記在外部回合上。
+    #[tokio::test]
+    async fn a_late_hook_answering_another_prompt_does_not_fill_the_fallback_turn() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, conv, turn_id) = fallback_closed_turn(&app, &env.project_id, "跑一次測試").await;
+
+        process(&app, &codex_done(&bot_id, "順便看一下 lint")).await.unwrap();
+
+        let turn = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(turn.status, "completed_fallback", "T1 原封不動");
+        let replies: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='assistant'")
+            .bind(&turn_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(replies, 0, "別句的答案不能寫成 T1 的回覆");
+        let external: Vec<String> = sqlx::query_scalar(
+            "SELECT m.content FROM turns t JOIN messages m ON m.turn_id=t.id
+              WHERE t.conversation_id=? AND t.origin='external' ORDER BY m.role DESC",
+        )
+        .bind(&conv)
+        .fetch_all(&app.db)
+        .await
+        .unwrap();
+        assert_eq!(external, vec!["順便看一下 lint".to_string(), "hook reply".to_string()], "答案跟它的問題一起記在外部回合");
+    }
+
+    /// 同一句就照舊補進去（2026-09-13 GROK 那種）。
+    #[tokio::test]
+    async fn a_late_hook_answering_the_same_prompt_still_fills_the_fallback_turn() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, _conv, turn_id) = fallback_closed_turn(&app, &env.project_id, "跑一次   測試").await;
+
+        process(&app, &codex_done(&bot_id, "跑一次 測試")).await.unwrap();
+
+        let turn = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(turn.status, "completed");
+        let replies: Vec<String> = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='assistant'")
+            .bind(&turn_id)
+            .fetch_all(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(replies, vec!["hook reply".to_string()]);
+    }
+
+    /// review3 c1 M3：交辦先帶著「沒有回覆」結算（備援關掉回合），遲到 hook 補上回覆之後，回覆要寫回交辦並通知驗收者。
+    #[tokio::test]
+    async fn a_late_hook_reply_reaches_the_assignment_it_answers() {
+        use crate::supervisor::{controller, store};
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, _conv, turn_id) = fallback_closed_turn(&app, &env.project_id, "跑一次測試").await;
+        store::get_or_init(&app.db).await.unwrap();
+        let a = store::insert_assignment(&app.db, None, &bot_id, "crid-late", "跑一次測試", &[], None, true).await.unwrap();
+        store::mark_delivered(&app.db, &a.id, &turn_id, "ok").await.unwrap();
+        // controller 在備援收掉回合時的結算：沒有回覆、證據不完整。
+        store::settle_and_notify(&app.db, &a.id, "completed_fallback", false, None, None, "k-fallback", "assignment_completed", &json!({}))
+            .await
+            .unwrap();
+
+        process(&app, &codex_done(&bot_id, "跑一次測試")).await.unwrap();
+        // 補寫會推 turn_updated（completed）；controller 的事件迴圈收到後呼叫這一支。
+        controller::late_reply_for_turn(&app, &turn_id, "completed").await;
+
+        let row = store::assignment(&app.db, &a.id).await.unwrap().unwrap();
+        assert_eq!(row.status, "awaiting_review", "還是等驗收，只是結果到了");
+        assert_eq!(row.result.as_deref(), Some("hook reply"));
+        assert_eq!(row.turn_status.as_deref(), Some("completed"));
+        assert_eq!(row.evidence_complete, Some(1));
+        let events: Vec<(String, String)> =
+            sqlx::query_as("SELECT kind, payload_json FROM supervisor_inbox WHERE assignment_id=? AND event_key LIKE 'assignment_late_reply:%'")
+                .bind(&a.id)
+                .fetch_all(&app.db)
+                .await
+                .unwrap();
+        assert_eq!(events.len(), 1, "{events:?}");
+        let p: Value = serde_json::from_str(&events[0].1).unwrap();
+        assert_eq!(events[0].0, "assignment_completed");
+        assert_eq!((p["result"].as_str(), p["late_reply"].as_bool(), p["needs_review"].as_bool()), (Some("hook reply"), Some(true), Some(true)));
+
+        // 同一個事件再來一次（重播、reconcile）：不再推第二則。
+        controller::late_reply_for_turn(&app, &turn_id, "completed").await;
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE assignment_id=?").bind(&a.id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(n, 2, "結算那則＋結果到了那則");
     }
 
     /// claude 的 Stop 沒帶使用者訊息：從 transcript 尾巴讀。對不上一樣不認領；讀不到（沒有 transcript）就照舊認領。
