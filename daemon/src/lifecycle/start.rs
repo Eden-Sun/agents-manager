@@ -235,12 +235,11 @@ pub(crate) async fn native_resume_plan(
     }
     // No transcript = cannot resume: `--resume` prints "No conversation found" and exits
     // right after a "successful" restart (2026-09-11 restart-idle repro). Also stages the file
-    // into the current identity's config dir when it moved.
+    // into the current identity's config dir when it moved — local and remote both (issue #95:
+    // remote used to skip this entirely and just hope `--resume` found the file on its own).
     if let Some(transcript) = transcript.filter(|t| !t.trim().is_empty()) {
-        if host == LOCAL_HOST {
-            if let Err(why) = stage_cross_identity_transcript(app, bot, host, &transcript).await {
-                return Ok(Err(why));
-            }
+        if let Err(why) = stage_cross_identity_transcript(app, bot, host, &transcript).await {
+            return Ok(Err(why));
         }
     }
     Ok(resume_args_by_kind(&bot.kind, &session_id).map(|a| (session_id, a)))
@@ -258,17 +257,28 @@ async fn identity_config_dir(app: &Arc<App>, host: &str, identity: Option<&str>)
     dir.unwrap_or_else(|| format!("{home}/.claude"))
 }
 
-/// Local only：把 `transcript` 複製到目前身分的 `projects/<同一個 cwd 目錄名>/` 下，讓 `--resume` 在
-/// 那個身分底下找得到。兩邊 `projects/`（canonicalize 後）本來就是同一份（例如 symlink）時什麼都不做。
-/// 來源檔不在了，或建目錄／複製失敗，都回傳 `transcript_missing` 讓呼叫端退回開新對話，不 panic、不硬擋重啟。
+/// 把 `transcript` 複製到目前身分的 `projects/<同一個 cwd 目錄名>/` 下，讓 `--resume` 在那個身分
+/// 底下找得到。本機與遠端分開實作：遠端主機上舊/新 `projects/` 都在**那台機器**上，是同機複製，
+/// 透過 ssh 執行一段 shell script，不是本機↔遠端搬檔（issue #95：以前只做本機這半，遠端完全跳過，
+/// 換身分後 `--resume` 在遠端主機上一樣找不到檔案，只是要等 CLI 真的跑起來才會發現）。
 async fn stage_cross_identity_transcript(app: &Arc<App>, bot: &db::Bot, host: &str, transcript: &str) -> Result<(), &'static str> {
+    if host == LOCAL_HOST {
+        stage_cross_identity_transcript_local(app, bot, transcript).await
+    } else {
+        stage_cross_identity_transcript_remote(app, bot, host, transcript).await
+    }
+}
+
+/// 兩邊 `projects/`（canonicalize 後）本來就是同一份（例如 symlink）時什麼都不做。來源檔不在了，
+/// 或建目錄／複製失敗，都回傳 `transcript_missing` 讓呼叫端退回開新對話，不 panic、不硬擋重啟。
+async fn stage_cross_identity_transcript_local(app: &Arc<App>, bot: &db::Bot, transcript: &str) -> Result<(), &'static str> {
     let src = std::path::Path::new(transcript);
     if !src.exists() {
         return Err("transcript_missing");
     }
     let (Some(cwd_dir), Some(fname)) = (src.parent(), src.file_name()) else { return Err("transcript_missing") };
     let Some(old_projects) = cwd_dir.parent() else { return Err("transcript_missing") };
-    let new_dir = identity_config_dir(app, host, bot.identity.as_deref()).await;
+    let new_dir = identity_config_dir(app, LOCAL_HOST, bot.identity.as_deref()).await;
     let new_projects = std::path::Path::new(&new_dir).join("projects");
     let same = match (std::fs::canonicalize(old_projects), std::fs::canonicalize(&new_projects)) {
         (Ok(a), Ok(b)) => a == b,
@@ -299,6 +309,92 @@ async fn stage_cross_identity_transcript(app: &Arc<App>, bot: &db::Bot, host: &s
     }
     tracing::info!(bot = %bot.name, from = %src.display(), to = %dest_file.display(), "identity switch：session 檔已搬到新身分的 projects 目錄，可以接回對話");
     Ok(())
+}
+
+/// 跟 local 版做同一件事，但舊／新 `projects/` 都在**那台遠端主機**上：是同機複製，透過 ssh
+/// 執行一段 shell script，不是本機↔遠端搬檔。主機沒連線／ssh 指令本身失敗都回 `transcript_missing`
+/// ——連不上就假裝已經搬過去，比直接開新對話更糟（會讓 `--resume` 帶著錯的期待送出去）。
+async fn stage_cross_identity_transcript_remote(app: &Arc<App>, bot: &db::Bot, host: &str, transcript: &str) -> Result<(), &'static str> {
+    let src = std::path::Path::new(transcript);
+    let (Some(cwd_dir), Some(fname)) = (src.parent(), src.file_name()) else { return Err("transcript_missing") };
+    let Some(old_projects) = cwd_dir.parent() else { return Err("transcript_missing") };
+    let Some(cwd_key) = cwd_dir.file_name() else { return Err("transcript_missing") };
+    let Some(conn) = app.hosts.get(host).await else {
+        tracing::warn!(bot = %bot.name, host, "identity switch：主機沒連線，改開新對話");
+        return Err("transcript_missing");
+    };
+    let new_dir = identity_config_dir(app, host, bot.identity.as_deref()).await;
+    let new_projects = std::path::Path::new(&new_dir).join("projects");
+    let script = remote_stage_script(
+        &old_projects.to_string_lossy(),
+        &new_projects.to_string_lossy(),
+        &cwd_key.to_string_lossy(),
+        &fname.to_string_lossy(),
+        src.file_stem().map(|s| s.to_string_lossy().into_owned()).as_deref(),
+    );
+    let out = match conn.ssh_exec(&script).await {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::warn!(bot = %bot.name, host, error = %e, "identity switch：搬遠端 session 檔的 ssh 指令失敗，改開新對話");
+            return Err("transcript_missing");
+        }
+    };
+    match parse_stage_output(&out) {
+        Ok(()) => {
+            tracing::info!(bot = %bot.name, host, "identity switch：遠端 session 檔已搬到新身分的 projects 目錄，可以接回對話");
+            Ok(())
+        }
+        Err(why) => {
+            tracing::warn!(bot = %bot.name, host, output = %out.trim(), "identity switch：遠端搬 session 檔失敗，改開新對話");
+            Err(why)
+        }
+    }
+}
+
+/// 純函式：組出「在同一台遠端主機上把 session 檔從舊身分的 projects/ 搬到新身分」的 shell script。
+/// 每個路徑各自 `sh_quote` 過再組合，不把 `cwd_key`／`fname` 未加引號地黏進雙引號字串裡——這兩個
+/// 值來自 session id／專案路徑衍生的目錄名，理論上不含特殊字元，但構造 remote shell 指令本來就該
+/// 每一段都當危險字串處理。`ssh_exec` 只回 stdout（沒有 exit code），靠印出的 `AM_*` 標記讓呼叫端
+/// 判斷結果，跟 `install_remote_hook` 那類既有遠端安裝腳本「檢查確認字串有沒有出現」是同一套做法。
+fn remote_stage_script(old_projects: &str, new_projects: &str, cwd_key: &str, fname: &str, stem: Option<&str>) -> String {
+    let old_cwd_dir = format!("{old_projects}/{cwd_key}");
+    let new_cwd_dir = format!("{new_projects}/{cwd_key}");
+    let src = format!("{old_cwd_dir}/{fname}");
+    let dest = format!("{new_cwd_dir}/{fname}");
+    let companion = stem
+        .map(|s| {
+            let from = format!("{old_cwd_dir}/{s}");
+            format!(
+                "if [ -d {from} ]; then cp -a {from} {to} 2>/dev/null || true; fi\n",
+                from = sh_quote(&from),
+                to = sh_quote(&format!("{new_cwd_dir}/"))
+            )
+        })
+        .unwrap_or_default();
+    format!(
+        "set -e\n\
+         if [ \"$(readlink -f {old} 2>/dev/null || printf '%s' {old})\" = \"$(readlink -f {new} 2>/dev/null || printf '%s' {new})\" ]; then printf 'AM_SAME\\n'; exit 0; fi\n\
+         [ -f {src} ] || {{ printf 'AM_MISSING\\n'; exit 0; }}\n\
+         mkdir -p {new_cwd_dir} || {{ printf 'AM_MKDIR_FAILED\\n'; exit 0; }}\n\
+         cp {src} {dest} || {{ printf 'AM_COPY_FAILED\\n'; exit 0; }}\n\
+         {companion}printf 'AM_STAGED\\n'\n",
+        old = sh_quote(old_projects),
+        new = sh_quote(new_projects),
+        src = sh_quote(&src),
+        new_cwd_dir = sh_quote(&new_cwd_dir),
+        dest = sh_quote(&dest),
+    )
+}
+
+/// 純函式：解析 `remote_stage_script` 印出的標記。`AM_SAME`／`AM_STAGED` 是成功；`AM_MISSING`／
+/// `AM_MKDIR_FAILED`／`AM_COPY_FAILED`，或任何看不懂的輸出（腳本本身炸掉、ssh 只回了部分內容），
+/// 一律當失敗——寧可多退回開新對話，也不要在沒把握的情況下宣稱搬成功。
+fn parse_stage_output(out: &str) -> Result<(), &'static str> {
+    if out.contains("AM_SAME") || out.contains("AM_STAGED") {
+        Ok(())
+    } else {
+        Err("transcript_missing")
+    }
 }
 
 fn copy_dir_recursive(src: &std::path::Path, dest: &std::path::Path) -> std::io::Result<()> {
@@ -1288,6 +1384,204 @@ mod resume_args_tests {
             let bot = db::bot(&e.app.db, &pm.id).await.unwrap().unwrap();
             let plan = native_resume_plan(&e.app, &bot, LOCAL_HOST, false).await.unwrap();
             assert_eq!(plan, Err("transcript_missing"));
+        }
+    }
+
+    /// issue #95：換身分後 transcript 只搬本機，遠端主機的對話接不回來。這裡測遠端那條路：純函式
+    /// 部分（組 script、解析輸出）直接驗內容；連線失敗時的 fail-closed 用一個刻意連不上的假 host
+    /// 驗證（沒有可重用的 live-SSH 測試環境，這是能不碰任何真實遠端主機驗到的最大範圍）。
+    mod remote_cross_identity_transcript_tests {
+        use super::*;
+        use crate::lifecycle::native_resume_plan;
+        use crate::lifecycle::start::{parse_stage_output, remote_stage_script};
+        use std::time::Duration;
+
+        /// `remote_stage_script` 只是拼字串，真正的守衛（`[ -f ... ]`／`mkdir -p ... ||`／
+        /// `cp ... ||`）活在產生出來的 shell 語法裡——只驗「文字裡有沒有出現某個標記」測不到
+        /// 那些守衛是不是真的接對了地方（q4queue／is5859 今晚踩到同一類問題：trigger 測得到欄位
+        /// 變化，測不到 WHERE 子句擋不擋得住）。這裡直接把腳本丟給本機 `/bin/sh` 跑：語法跟
+        /// `ssh_exec` 遠端執行的是同一顆直譯器，用本機暫存目錄冒充「舊／新身分的 projects/」，
+        /// 不連任何真實遠端主機。
+        fn run_script_locally(script: &str) -> String {
+            let out = std::process::Command::new("/bin/sh").arg("-c").arg(script).output().expect("run script locally");
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        }
+
+        fn tmp() -> std::path::PathBuf {
+            let dir = std::env::temp_dir().join(format!("am-remote-stage-{}", db::ulid()));
+            std::fs::create_dir_all(&dir).unwrap();
+            dir
+        }
+
+        #[test]
+        fn symlinked_projects_dirs_report_same_and_copy_nothing() {
+            let base = tmp();
+            let old = base.join("old-projects");
+            std::fs::create_dir_all(old.join("cwd-key")).unwrap();
+            std::fs::write(old.join("cwd-key").join("sid.jsonl"), "orig").unwrap();
+            let new = base.join("new-projects");
+            std::os::unix::fs::symlink(&old, &new).unwrap();
+
+            let script = remote_stage_script(&old.to_string_lossy(), &new.to_string_lossy(), "cwd-key", "sid.jsonl", None);
+            let out = run_script_locally(&script);
+            assert!(out.contains("AM_SAME"), "{out}");
+
+            let _ = std::fs::remove_dir_all(&base);
+        }
+
+        #[test]
+        fn different_dirs_copy_the_transcript_and_its_companion() {
+            let base = tmp();
+            let old = base.join("old-projects");
+            std::fs::create_dir_all(old.join("cwd-key")).unwrap();
+            std::fs::write(old.join("cwd-key").join("sid.jsonl"), "hello").unwrap();
+            std::fs::create_dir_all(old.join("cwd-key").join("sid")).unwrap();
+            std::fs::write(old.join("cwd-key").join("sid").join("extra.txt"), "companion").unwrap();
+            let new = base.join("new-projects"); // 還不存在，要靠 mkdir -p 建出來
+
+            let script = remote_stage_script(&old.to_string_lossy(), &new.to_string_lossy(), "cwd-key", "sid.jsonl", Some("sid"));
+            let out = run_script_locally(&script);
+            assert!(out.contains("AM_STAGED"), "{out}");
+            assert_eq!(std::fs::read_to_string(new.join("cwd-key").join("sid.jsonl")).unwrap(), "hello");
+            assert_eq!(std::fs::read_to_string(new.join("cwd-key").join("sid").join("extra.txt")).unwrap(), "companion");
+
+            let _ = std::fs::remove_dir_all(&base);
+        }
+
+        /// `[ -f "$SRC" ]` 那道守衛真的擋住了：來源檔不存在時不會往下跑 `mkdir`／`cp`，
+        /// 只印 `AM_MISSING`，也不會建出目的目錄。
+        #[test]
+        fn a_missing_source_file_reports_missing_and_creates_nothing() {
+            let base = tmp();
+            let old = base.join("old-projects"); // 連目錄都沒建，模擬來源徹底不存在
+            let new = base.join("new-projects");
+
+            let script = remote_stage_script(&old.to_string_lossy(), &new.to_string_lossy(), "cwd-key", "sid.jsonl", None);
+            let out = run_script_locally(&script);
+            assert!(out.contains("AM_MISSING"), "{out}");
+            assert!(!new.exists(), "沒東西好搬，不該建出目的目錄：{}", new.display());
+
+            let _ = std::fs::remove_dir_all(&base);
+        }
+
+        /// `mkdir -p ... ||` 那道守衛真的擋住了：目的路徑的上一層其實是一個檔案（不是目錄），
+        /// `mkdir -p` 一定失敗，腳本要印 `AM_MKDIR_FAILED`，不能繼續往下跑 `cp` 假裝成功。
+        #[test]
+        fn an_unmakeable_destination_reports_mkdir_failed() {
+            let base = tmp();
+            let old = base.join("old-projects");
+            std::fs::create_dir_all(old.join("cwd-key")).unwrap();
+            std::fs::write(old.join("cwd-key").join("sid.jsonl"), "hello").unwrap();
+            let blocker = base.join("blocker");
+            std::fs::write(&blocker, "this is a file, not a directory").unwrap();
+            let new = blocker.join("projects"); // 上一層是檔案，底下建不出任何東西
+
+            let script = remote_stage_script(&old.to_string_lossy(), &new.to_string_lossy(), "cwd-key", "sid.jsonl", None);
+            let out = run_script_locally(&script);
+            assert!(out.contains("AM_MKDIR_FAILED"), "{out}");
+
+            let _ = std::fs::remove_dir_all(&base);
+        }
+
+        /// 目錄名帶著 shell 特殊字元（`$(...)`、單引號）不能被當成指令執行——每段路徑各自
+        /// `sh_quote`，不是把值原樣黏進雙引號字串裡。用一個會在展開時建出檔案的 `$(...)` 當
+        /// canary：quoting 對了就不會被展開，那個檔案就不會出現。
+        #[test]
+        fn shell_metacharacters_in_a_directory_name_are_not_executed() {
+            let base = tmp();
+            let canary = base.join("pwned-if-expanded");
+            let weird_cwd = format!("it's-$(touch {})-cwd", canary.display());
+            let old = base.join("old-projects");
+            std::fs::create_dir_all(old.join(&weird_cwd)).unwrap();
+            std::fs::write(old.join(&weird_cwd).join("sid.jsonl"), "hello").unwrap();
+            let new = base.join("new-projects");
+
+            let script = remote_stage_script(&old.to_string_lossy(), &new.to_string_lossy(), &weird_cwd, "sid.jsonl", None);
+            let out = run_script_locally(&script);
+            assert!(out.contains("AM_STAGED"), "{out}");
+            assert_eq!(std::fs::read_to_string(new.join(&weird_cwd).join("sid.jsonl")).unwrap(), "hello");
+            assert!(!canary.exists(), "$(...) 被當成指令展開執行了，quoting 沒有真的把它擋住");
+
+            let _ = std::fs::remove_dir_all(&base);
+        }
+
+        #[test]
+        fn parse_stage_output_only_trusts_the_success_markers() {
+            assert_eq!(parse_stage_output("AM_SAME\n"), Ok(()));
+            assert_eq!(parse_stage_output("AM_STAGED\n"), Ok(()));
+            assert_eq!(parse_stage_output("AM_MISSING\n"), Err("transcript_missing"));
+            assert_eq!(parse_stage_output("AM_MKDIR_FAILED\n"), Err("transcript_missing"));
+            assert_eq!(parse_stage_output("AM_COPY_FAILED\n"), Err("transcript_missing"));
+            assert_eq!(parse_stage_output(""), Err("transcript_missing"), "ssh 連上了但腳本什麼都沒印，不能當成功");
+            assert_eq!(parse_stage_output("Permission denied (publickey)\n"), Err("transcript_missing"), "ssh 本身報錯的輸出，不能被誤判成任何一個 AM_* 標記");
+        }
+
+        /// 主機根本沒連線（`app.hosts` 裡沒有這個名字）：連 ssh 都沒機會跑，直接 fail closed。
+        #[tokio::test]
+        async fn an_unconfigured_host_fails_closed_without_touching_ssh() {
+            let e = env().await;
+            let pm = claude_bot(&e.app, &e.project_id, "pm").await;
+            let transcript = e.dir.join("remote-pm.jsonl");
+            std::fs::write(&transcript, "{}\n").unwrap();
+            sqlx::query(
+                "INSERT INTO runs (id, bot_id, state, agent_status, native_session_id, transcript_path, started_at, ended_at)
+                 VALUES (?,?,'stopped','idle','sid-remote-1',?,'2026-09-01T00:00:00Z','2026-09-01T00:01:00Z')",
+            )
+            .bind(db::ulid())
+            .bind(&pm.id)
+            .bind(transcript.to_str().unwrap())
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+
+            let bot = db::bot(&e.app.db, &pm.id).await.unwrap().unwrap();
+            let plan = native_resume_plan(&e.app, &bot, "no-such-host", false).await.unwrap();
+            assert_eq!(plan, Err("transcript_missing"));
+        }
+
+        /// 主機有設定，但連不上（沒有東西在聽那個 port，connection refused）：ssh_exec 真的失敗，
+        /// 一樣要 fail closed，不能假裝已經搬過去——這是能不碰真實遠端主機驗到的最大範圍
+        /// （issue #95 明講：沒有可重用的 live-SSH 測試環境時，用刻意連不上的假 host 驗證）。
+        #[tokio::test]
+        async fn an_unreachable_host_fails_closed_instead_of_pretending_to_stage() {
+            let e = env().await;
+            let pm = claude_bot(&e.app, &e.project_id, "pm").await;
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            drop(listener); // 沒有人在聽這個 port 了：接下來連過去是 connection refused，快速失敗。
+
+            let host_cfg = crate::config::HostCfg {
+                name: "unreachable-box".into(),
+                ssh: "127.0.0.1".into(),
+                ssh_port: port,
+                ssh_opts: vec!["-o".into(), "ConnectTimeout=2".into()],
+                herdr_session: "agents-manager".into(),
+                remote_path: String::new(),
+            };
+            e.app.hosts.apply_config(&e.app, &[host_cfg]).await;
+
+            let transcript = e.dir.join("remote-pm-2.jsonl");
+            std::fs::write(&transcript, "{}\n").unwrap();
+            sqlx::query(
+                "INSERT INTO runs (id, bot_id, state, agent_status, native_session_id, transcript_path, started_at, ended_at)
+                 VALUES (?,?,'stopped','idle','sid-remote-2',?,'2026-09-01T00:00:00Z','2026-09-01T00:01:00Z')",
+            )
+            .bind(db::ulid())
+            .bind(&pm.id)
+            .bind(transcript.to_str().unwrap())
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+
+            let bot = db::bot(&e.app.db, &pm.id).await.unwrap().unwrap();
+            let plan = tokio::time::timeout(Duration::from_secs(20), native_resume_plan(&e.app, &bot, "unreachable-box", false))
+                .await
+                .expect("連不上要快速失敗，不能卡住整個重啟流程")
+                .unwrap();
+            assert_eq!(plan, Err("transcript_missing"), "連不上遠端主機，不能假裝已經搬過去");
+
+            e.app.hosts.remove(&e.app, "unreachable-box").await;
         }
     }
 
