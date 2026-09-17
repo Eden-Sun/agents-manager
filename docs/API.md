@@ -398,6 +398,45 @@ adopt 之後孤兒通知標記會清掉。pane 不存在 404、`owner_bot_id` �
   `pane` 的 `kind`／`foreground`／`listen_ports`／`read_only` 換成即時值（`unverified:true`＝讀不到，沿用表上的）——UI 要先把 port 顯示給人看再問一次。
 - 表裡沒有這顆 404；主機沒連上 502。
 
+## Build scheduler（全機 cargo/rustc 併發，SPEC §6.5g，issue #90）
+
+不在 `/api` 底下的三支（`acquire`／`renew`／`release`）：bot 的 pane 只有自己的 hook token，拿不到一般 UI token。
+
+### `POST /build-slots/acquire`（表單）
+`{holder, bot_id?, purpose?, host?}`。header 二選一：`X-AM-Bot-Token`＋body 的 `bot_id`（驗證那顆 bot 的
+`hook_token`），或 `X-AM-Token`（人工 host shell）。都沒有／都不對 → 403。`holder` 空字串 400。
+
+- 拿到：`200 {"granted":true,"token","expires_at","cargo_jobs","lease_ttl_secs"}`。同一個 `holder` 對已經握著、
+  沒過期的名額重 call 是幂等的，回同一份憑證。
+- 額滿：`200 {"granted":false,"active","max_concurrent","since","retry_after_secs"}`——**這是正常的等待狀態，
+  不是錯誤**，回 200 不是 4xx／5xx；呼叫端照 `retry_after_secs` 再問一次。
+
+### `POST /build-slots/renew`（表單）
+`{holder, token}`。**不驗 bot／UI token**，`token` 本身就是憑證。只有還在 `held` 且沒過期的名額能續：
+`200 {"renewed":true,"expires_at"}`；找不到這一列（沒拿過／已過期被收回）→ `404`；`token` 不對 → `403 {"error":"token_mismatch"}`。
+
+### `POST /build-slots/release`（表單）
+`{holder, token}`。一律幂等，永遠 `200 {"released":true}`（找不到、已過期、token 不對都當作「已經不是你的事了」）。
+
+### `GET /api/build-slots`
+一般 `X-AM-Token`。現況（UI／人工查用）：
+
+```json
+{
+  "max_concurrent": 2,
+  "cargo_jobs": 2,
+  "lease_ttl_secs": 180,
+  "active": 1,
+  "slots": [
+    {"holder": "proj-abc-review:12345", "status": "held", "bot_id": "01M...", "purpose": "test -p agents-managerd",
+     "host": "local", "since": "2026-09-18T03:00:00.000Z", "last_seen": "2026-09-18T03:01:00.000Z",
+     "expires_at": "2026-09-18T03:04:00.000Z"},
+    {"holder": "manual:host:987", "status": "waiting", "bot_id": null, "purpose": "build",
+     "host": "local", "since": "2026-09-18T03:00:30.000Z", "last_seen": "2026-09-18T03:00:55.000Z", "expires_at": null}
+  ]
+}
+```
+
 ## 記憶體
 
 ### `GET /api/mem`

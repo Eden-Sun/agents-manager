@@ -906,6 +906,70 @@ listen port 只在本機算（pane 行程樹的 pid 對 `lsof -nP -iTCP -sTCP:LI
 - 舊的 `/api/bots/{id}/scratchpad*` 明確 404。
 - 網頁「檔案暫存」下半段「bot 給你的檔案」：每列標剩餘時間（剩不到 10 分鐘用警告色），附件下載（UI-DECISIONS）。
 
+### 6.5g build scheduler：全機 cargo/rustc 併發（issue #90）
+
+**問題**：多顆 agent 各自跑 `cargo build`/`check`/`test`/`clippy` 會讓 rustc 併發數乘起來，就算單一指令的資源用量合理，
+機器的 RAM／CPU 還是會被榨乾。目前是人工用一支腳本（`cargo-slot.sh`）＋兩個全機名額硬擋，每次派工都要複製一份給子 agent，
+不是 daemon 提供的機制，跨 worktree／跨 agent／跨 herdr session 沒有共同的真相來源。
+
+**方向**：把「一個受管的 cargo 指令」變成 daemon 發的**租約型名額**（跟 §18.10 的 `restart`/`rebuild` 租約同一個道理，
+但輕量很多——搶不到的後果只是「慢一點」，不需要核准流程與 fence）。`cargo` PATH shim（跟 `herdr` shim 裝在同一個
+`bin/` 目錄，同一次 PATH prepend 生效，`build_scheduler.rs`／`cargo_shim.rs`）在 exec 真的 `cargo` 之前先跟 daemon
+要一個名額，拿到才跑；`build`/`check`/`test`/`clippy`/`bench`/`run`/`doc`/`install` 才會經過排程，`--version`／
+`metadata`／`fmt` 這類不編譯的子指令直接放行，不多繞一次 HTTP。
+
+#### 名額的形狀
+- `build_slots` 表，**一個持有者一列**（`holder` 是主鍵，PRIMARY KEY 天然去重；呼叫端自己保證 `holder` 唯一，
+  shim 用 `<agent 名>:<pid>`）：`status` 是 `held`（真的佔了一個名額）或 `waiting`（額滿，記一列給 `GET /build-slots`
+  看，不是排隊佇列，沒有先來後到保證）。
+- **名額是 TTL 租的，不是等建置跑完才還**：拿到之後 shim 背景續約（間隔取 TTL 的 1/3），跑多久都行，只要續約還在動；
+  停止續約（持有者掛了、pane 被砍、行程被殺）超過 TTL 就被下一次 acquire 或背景 sweep 收回——不用去猜「這個 pid 還活著嗎」
+  （這個 codebase 本來就沒有 PID liveness 檢查，見 `pane_identity.rs` 讀的是帳號不是死活；TTL 到期是唯一的死活判準）。
+- **daemon 重啟不會留下永久卡住的名額**：`build_slots` 表本身活在 SQLite 裡（cargo 行程不是 daemon 的子行程，daemon
+  重啟不代表建置真的停了，硬把表清空反而讓重啟後的名額數失真）；真正的保證是 TTL——沒人續約，名額最多卡 `lease_ttl_secs`
+  就被收回，不會無限期卡死。
+- 等待中的列也要能觀察（issue 要求 `waiting_for_build_slot`／`building` 可查）：`last_seen` 是「還在 poll 嗎」，
+  `since` 是「排隊排多久了」，兩者分開存——不然一個排很久但一直在 poll 的呼叫者，會被誤判成早就死掉的呼叫者。
+
+#### API（不在 `/api` 底下的三支：bot 的 pane 只有自己的 hook token，拿不到一般 UI token）
+- `POST /build-slots/acquire {holder, bot_id?, purpose?, host?}`：`X-AM-Bot-Token`＋body 的 `bot_id`（驗證同一顆 bot
+  的 `hook_token`），或人工 host shell 用 `X-AM-Token`（一般 UI token，讀 `~/.config/agents-manager/ui-token`）。
+  兩者都沒有 → 401。回 `{granted:true, token, expires_at, cargo_jobs, lease_ttl_secs}` 或
+  `{granted:false, active, max_concurrent, since, retry_after_secs}`——**額滿是正常的執行期狀態，不是失敗**，回 200 不是 4xx。
+  同一個 holder 對已經握著、還沒過期的名額重 call 是幂等的（回同一份憑證），逾時後重問一次是安全的。
+- `POST /build-slots/renew {holder, token}`、`POST /build-slots/release {holder, token}`：**不另外驗 bot／UI
+  token**，`token` 本身就是憑證（跟 `lease_token` 同一個道理）——知道 acquire 發的那個值就等於是那個持有者。
+  `release` 一律幂等（找不到、已過期、token 不對都當作「已經不是你的事了」回成功），呼叫端的 `trap ... EXIT` 才能
+  放心呼叫，不用先判斷還握不握著。`renew` 只有還在 `held` 且沒過期的列能續，過期了要求重新 `acquire`（不做「其實已經
+  被別人拿走了」這種模糊地帶）。
+- `GET /api/build-slots`（在 `/api` 底下，一般 `X-AM-Token`）：`{max_concurrent, cargo_jobs, lease_ttl_secs, active, slots:[...]}`，
+  UI／人工查現況用。
+
+#### `cargo` shim（issue 建議的 PATH wrapper；`cargo_shim.rs`，跟 `herdr_shim.rs` 同一種寫法）
+- 沒有 bot token 也沒有 UI token 檔可讀：直接不排程，印一行 stderr 說明，直接跑（issue 要求「明講的 bypass 路徑」）。
+- daemon 連不上（curl 失敗）、回應看不懂：一律不排程，直接跑——**shim 不能因為排程器出問題就讓建置卡死或失敗**，
+  跟 `herdr_shim.rs` 的哲學一樣：「a shim that aborts is worse than one that forwards」。
+- `CARGO_BUILD_JOBS` 由 daemon 的 acquire 回應決定（`build.cargo_jobs`，預設 2），不吃 cargo 自己抓核心數的預設值。
+- 建置跑完（不管成功失敗）都會 release；`trap ... EXIT INT TERM` 保證中斷／被砍也會放。
+
+#### 設定（`config.toml` 的 `[build]`，`config::BuildCfg`）
+- `max_concurrent`（預設 2，`AM_BUILD_MAX_CONCURRENT` 可覆寫，0／看不懂一律回預設——0 不是「停用排程」，是「誰都拿不到
+  名額」，整台機器的受管建置會卡死，跟 `panes.idle_close_secs` 同一條防呆規矩）、`cargo_jobs`（預設 2）、
+  `lease_ttl_secs`（預設 180，續約間隔取它的 1/3）。
+
+#### 跟 `cargo-slot.sh` 並存（issue #90 交辦時的現況）
+這支手動腳本目前還有其他子 agent 在用，**這次改動不動它**。新機制透過 `lifecycle::setup.rs::install_shim` 在**下一次
+daemon 換版並重啟後**才會裝進新起的 bot pane（跟 herdr shim 一樣，裝的時機是 bot 啟動時，不是熱更新），對現有已經在跑的
+pane 沒有立即影響。等這套機制在正式環境跑穩，`cargo-slot.sh` 可以退場，但那是後續的事，不在這次改動範圍。
+
+#### 沒做的（issue 的 Non-goals／留給以後）
+- **不是真的排隊佇列**：`waiting` 只是一列狀態，額滿時誰先 acquire 到誰先拿到，沒有先來後到保證——用量夠低（全機
+  就兩三個名額）時公平性不是急迫問題，真的要 FIFO 得另外設計搶號機制。
+- **RAM／記憶體壓力沒有影響准駁**：純靜態的名額數上限。這台機器已經有 `memstat.rs` 每 15 秒取樣的可用記憶體快照，
+  未來要做「記憶體緊張時降名額數」可以直接接那個快照，這裡先留著介面（`acquire` 只吃 `max_concurrent` 一個門檻，
+  換成讀記憶體不需要動呼叫端）。
+- **沒有 UI 面板**：現況只到 `GET /api/build-slots` 這個 API，前端顯示留給下一步。
+
 ### 6.5.1 採用使用者的 Herdr `default` session
 
 daemon 另外唯讀觀察本機 Herdr `default` session（`~/.config/herdr/herdr.sock`），不替它啟動 server。啟動、事件重連與定期輪詢時：

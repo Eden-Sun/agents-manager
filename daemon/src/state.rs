@@ -122,6 +122,9 @@ pub struct App {
     pub hook_inbox_wake: tokio::sync::Notify,
     /// `serve` 起在非預設資料目錄時的實例名（`startup::instance`）。測試裡預設 `None`（正式實例）。
     instance: std::sync::RwLock<Option<String>>,
+    /// issue #90：build scheduler 的「數名額、發／收名額」critical section。SQLite 本身也序列化寫入，
+    /// 但這裡要的是「先數後寫」一起做完，不靠 SQL 的原子性猜實作細節。
+    pub build_slot_lock: Mutex<()>,
 }
 
 impl App {
@@ -180,6 +183,7 @@ impl App {
             pane_live: Default::default(),
             autostarted_hosts: Default::default(),
             hook_inbox_wake: tokio::sync::Notify::new(),
+            build_slot_lock: Mutex::new(()),
         })
     }
 
