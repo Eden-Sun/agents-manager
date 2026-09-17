@@ -1448,6 +1448,9 @@ inbox `assignment_noticed`（`needs_review=false`）。送不出去或回合失�
   只擋**正在跑那個模型**的 bot——看 run 的 `runtime_model`，沒有才看設定值，兩個都沒有就保守地照擋。`limit_hit_for_bot` 與協調者的額度判讀（§18.15）走同一條。
   以前不分桶：巡檢（cc0、fable）撞 Fable 上限，同帳號跑 opus 的協調者與交辦都被擋到 Fable 週窗重置（review3 c3 H2）。
   park 時記在 `error` 的橫幅是模型桶、而 bot 現在跑的不是那個模型（修好之前停進來的、或之後 `/model` 換掉了）：`resume_at` 沒到也立刻重送。
+- **回合結束只有「這一回合被撞限打斷」才 park**：run 記下這回合的 `turn_error` 就照它（撞限橫幅才算，斷線不算；那格屬於同 run 上最晚開始的回合）；
+  沒有的話，`completed`／`completed_fallback` 而且有回覆、回覆本身不是撞限橫幅＝正常答完，照常結案、回覆進 `result`——帳號上的撞限可能是同身分別的 bot 撞的
+  （review3 c1 H1：以前做完的工作被停進 `quota_blocked`，之後重送再做一次或被報成 `quota_exhausted`）。其餘（失敗、沒回覆、回覆就是橫幅）照舊 park。
 - **`resume_at` 取橫幅與 app-server 讀數中最早且仍在未來的**（橫幅會舊，`five_hour.resets_at` 會延遲）。防線：橫幅時間只過去 ≤ 15 分鐘視為舊橫幅，改 5 分鐘後再問，不滾到隔天；
   算出等待 > 6 小時改 15 分鐘後重試；兩邊都沒有時間退回 +30 分鐘。
 - **上限橫幅三條規則**：① 寫進該 bot 身份的 key——寫入、查詢（`limit_hit_for_bot`）、清除（`clear_limit_hit_for_bot`）三端都走 `quota::quota_base_for_host`，有自己 `CODEX_HOME` 的 `cx2` 成功回合清的是 `codex:cx2`，不是裸 `codex`；
