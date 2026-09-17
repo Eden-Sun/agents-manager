@@ -49,6 +49,7 @@ import { UnreadChip } from './UnreadChip'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
 import { DELIVERY_HINT_TEXT, DELIVERY_WARN_TEXT, deliveryNotice } from '../lib/deliveryNotice'
 import { markdownComponents } from '../lib/markdownComponents'
+import { markdownUrlTransform } from '../lib/markdownUrl'
 import { TerminalTab } from './TerminalTab'
 import { ToolsHint } from './Tools'
 import './chatPanel.css'
@@ -195,7 +196,9 @@ export const Bubble = memo(function Bubble({
         {!msg.content ? (
           <em style={{ opacity: 0.6 }}>（空白訊息）</em>
         ) : msg.role === 'assistant' && !fallback ? (
-          <Markdown remarkPlugins={[remarkGfm]} components={markdownComponents(msg.bot_id)}>{msg.content}</Markdown>
+          <Markdown remarkPlugins={[remarkGfm]} components={markdownComponents(msg.bot_id)} urlTransform={markdownUrlTransform}>
+            {msg.content}
+          </Markdown>
         ) : folded && preview ? (
           preview.text
         ) : (

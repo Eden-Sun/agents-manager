@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import * as api from '../api'
+import { readableImagePath } from '../lib/markdownUrl'
 import './markdownImage.css'
 
 /** 網址型的圖片照常用 `<img>`；其他（`docs/x.png`、`/Users/…/x.png`、`file://…`）當成 bot 專案裡的檔案。 */
@@ -43,7 +44,7 @@ export function MarkdownImage({ botId, src, alt }: { botId: string | null | unde
     return (
       <span className="md-image-missing" title="圖片不在這個專案目錄裡、不是圖片檔，或檔案不存在">
         🖼 {alt ? `${alt}：` : ''}
-        <code>{raw}</code>
+        <code>{readableImagePath(raw)}</code>
       </span>
     )
   }
