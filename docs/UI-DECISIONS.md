@@ -214,7 +214,8 @@ AGM 的重建排程原本只在整點檢查；使用者要它**集滿門檻筆�
   與 `scripts/ops/daemon-update-kick.sh` 同一套：`purpose=rebuild`、狀態 `pending`／`approved`，
   同一個 requester 對同一個 commit 算一筆。每 30 秒重讀一次（申請是人在動的）。
 - **上次上線之前的申請不算**：時間取 `GET /api/supervisor` 的 `last_deploy.at`（daemon 960ba06 起，
-  SPEC §18.15），跟腳本讀 `daemon-update.built` mtime 是同一個意思。舊 daemon 沒有這個欄位就不濾
+  SPEC §18.15）＝這顆 binary 第一次上線的時間，跟腳本讀 `daemon-update.built` mtime 是同一個意思
+  （binary 沒換的重啟不會把它往前推，review 2026-09-16 c3 L3）。舊 daemon 沒有這個欄位就不濾
   時間——寧可多算一筆，也不要把真的在等的申請藏起來。
 - **門檻**：腳本吃 `AGM_REBUILD_THRESHOLD`（預設 3）；daemon 沒有這個欄位，所以前端是常數 3
   （`web/src/api/rebuildRequests.ts`）。兩邊要一起改。

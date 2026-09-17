@@ -248,8 +248,8 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     hookrecv::replay_host(&app, config::LOCAL_HOST).await;
 
     tools::spawn_detect(app.clone(), config::LOCAL_HOST.to_string());
-    // 這顆 binary 是哪一版、什麼時候起來的（`GET /api/supervisor` 的 `last_deploy`）。
-    build_info::mark_started();
+    // 這顆 binary 是哪一版、什麼時候**上線**的（`GET /api/supervisor` 的 `last_deploy`）。
+    build_info::mark_started(&app.data_dir);
     tools::spawn_alias_poller(app.clone());
     quota::spawn_codex_poller(app.clone());
     memstat::spawn_poller(app.clone());
