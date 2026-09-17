@@ -59,6 +59,7 @@ mod statusline_cmd;
 mod testing;
 mod tools;
 mod trust;
+mod trusted_open;
 mod tui_prompts;
 mod turn_error;
 mod update_watch;
