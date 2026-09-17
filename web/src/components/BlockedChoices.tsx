@@ -352,11 +352,13 @@ export function BlockedChoices({
               aria-checked={menu.multi ? undefined : c.current}
               aria-pressed={c.checked === null ? undefined : c.checked}
               title={
-                c.checked === null
-                  ? '選這一項（游標移過去再按 Enter）'
-                  : c.checked
-                    ? '取消勾選（游標移過去再按 space）'
-                    : '勾選這一項（游標移過去再按 space），勾完按下面的「送出」'
+                menu.multi && isTypeSomething(c) && !c.checked
+                  ? MULTI_TYPE_HINT
+                  : c.checked === null
+                    ? '選這一項（游標移過去再按 Enter）'
+                    : c.checked
+                      ? '取消勾選（游標移過去再按 space）'
+                      : '勾選這一項（游標移過去再按 space），勾完按下面的「送出」'
               }
               onClick={() => void activate(i)}
             >
