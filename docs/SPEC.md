@@ -482,11 +482,15 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run
 ### 6.3 送訊息（per-bot 鎖內，單一 DB 交易）
 1. 冪等：先查 `client_request_id`，已存在 → 回同一 `turn_id`（200），不做後續檢查（即使已有新 Turn 在飛）。
 2. 前置檢查：Run `running`；agent ≠ `blocked`；無 `in_flight` Turn；無 `delivery=unknown` Turn → 否則 409（body 含原因與既有 `turn_id`）。
-3. `INSERT turns (in_flight, pending, web)` + user Message；commit；推 WS。
-4. 鎖內 `agent.prompt {target, text}`（逾時 10 秒）：成功 → `delivery=ok`；`agent_blocked` → `delivery=failed`、`status=failed`；逾時／連線錯誤 → `unknown`（不重送）。
+3. **先規劃再建 turn**（本章開頭「送 prompt 的路徑」）：路徑（`agent.prompt` 或打字）、證據、空框。`NotAttempted` 不建 turn：可重試的 409、不可能的 422。
+   規劃通過才 `INSERT turns (in_flight, pending, web, prompt_text = 實際送出的字)` + user Message（泡泡原文）；commit；推 WS。
+4. 鎖內照規劃送出，結果五種見本章開頭：`Submitted`／`Handed`／`Unverified` → `delivery=ok`（證據與能否重送分開記）；
+   打第一個字之前才出現的 `NotAttempted` → 撤回 turn 與訊息回 409；`Unproven` 與打字後的錯誤 → `unknown`（不重送）；`agent_blocked` → `failed`。
 5. 完成靠 hook（§6.7）或備援（§4.3）。Turn 在送 prompt 之前已 `in_flight`，所以 hook 早於 RPC 回應也配得到。
 6. `interrupt`（送 `esc`）／`stop` 把 in-flight Turn 標 `failed` 並加 system Message。
-7. **stall watchdog**：`delivery = ok` 後 12 秒內沒收到 `working`／`blocked` 且仍 idle/unknown → 讀 `visible` 快照 → Turn `failed` + system Message，
+7. **stall watchdog**：`delivery = ok` 後 12 秒內沒收到 `working`／`blocked` 且仍 idle/unknown → 先看字是不是還在框裡（在就補按 Enter、給寬限）；
+   不在框裡、畫面上也找不到 → `auto_resend=1` 的自動重送一次（本章開頭：讀 `prompt_text`、打字前被擋退還額度再試一次、按過鍵證明不了記 `unknown`）；
+   都沒用才讀 `visible` 快照 → Turn `failed` + system Message，
    中性敘述並原樣引用含 `Not logged in`／`/login`／`unlock-keychain`／`usage limit`／`limit` 的行（提示 ssh 下 macOS Keychain 可能讀不到）。
 8. 請求可帶 `relay_from`（bot id 或 `"daemon"`），記下這則是誰轉述的，UI 據此不把它算成使用者發言。
 
