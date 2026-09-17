@@ -13,7 +13,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-#[derive(Debug, Clone, Deserialize)]
+// `Serialize` 是給 `hook_inbox` 用的：整個 body 要原封不動存進收件匣再讀回來走 §6.7。
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct HookBody {
     pub bot_id: String,
     #[serde(default)]
@@ -26,7 +27,13 @@ pub struct HookBody {
     pub truncated: bool,
 }
 
-/// Validate the per-bot token, enqueue, answer 200 immediately (SPEC §3.1).
+/// 驗 per-bot token → **寫進耐久收件匣並 commit** → 才回 200（SPEC §3.1、issue #70）。
+///
+/// `200` 的意思是「這則事件已經寫進 `hook_events`」，不是「已經處理完」。寫不進去就回 503：
+/// 送端（`hook_cmd::inner`）看到非 2xx 會把同一份 body 追加到 `hook-spool.jsonl`，replay 會補回來。
+/// 回 200 再掉事件是無聲的資料遺失，回 503 只是讓那則事件多繞一趟 spool。
+///
+/// StatusLine 例外，照舊 fire-and-forget（理由見 [`crate::hook_inbox`]）。
 pub async fn receive(
     State(app): State<Arc<App>>,
     Path(provider): Path<String>,
@@ -48,15 +55,31 @@ pub async fn receive(
         return (StatusCode::UNAUTHORIZED, Json(json!({"error": "bad token"})));
     }
     let provider = if body.provider.is_empty() { provider } else { body.provider.clone() };
-    let app2 = app.clone();
     let mut b = body;
     b.provider = provider;
-    tokio::spawn(async move {
-        if let Err(e) = process(&app2, &b).await {
-            tracing::error!(error = ?e, "hook processing failed");
+
+    // 單槽、最新的贏的訊號：不進佇列，掉一格只是晚一次重繪（`hook_inbox` 模組說明）。
+    if matches!(classify(&b.provider, &b.payload), HookKind::StatusLine) {
+        let app2 = app.clone();
+        tokio::spawn(async move {
+            if let Err(e) = process(&app2, &b).await {
+                tracing::error!(error = ?e, "statusline processing failed");
+            }
+        });
+        return (StatusCode::OK, Json(json!({})));
+    }
+
+    match crate::hook_inbox::accept(&app.db, &b, crate::hook_inbox::Source::Http).await {
+        Ok(accepted) => {
+            // commit 之後才叫醒 worker：醒來一定看得到那一列。
+            app.hook_inbox_wake.notify_one();
+            (StatusCode::OK, Json(json!({"stored": accepted.is_new()})))
         }
-    });
-    (StatusCode::OK, Json(json!({})))
+        Err(e) => {
+            tracing::error!(error = ?e, bot = %b.bot_id, "hook not persisted; telling the sender to spool it");
+            (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": "not persisted"})))
+        }
+    }
 }
 
 /// 這句 prompt 回音是別的 agent 打進來的嗎？（見 SPEC §6.5d）
@@ -767,7 +790,8 @@ pub async fn drain_remote(app: &Arc<App>, host: &str, bot_id: &str) -> Result<us
         return Ok(0);
     }
     let root = crate::startup::remote_root_for(app.instance().as_deref());
-    let text = conn.ssh_exec(&drain_script(bot_id, &root)?).await?;
+    // 第一趟：claim（`mv` 成 `.replaying` 再 `cat`），**不刪**。遠端那份是唯一的副本。
+    let text = conn.ssh_exec(&claim_script(bot_id, &root)?).await?;
     let (lines, status) = parse_drain_output(&text);
     let mut n = 0usize;
     for line in lines {
@@ -777,15 +801,19 @@ pub async fn drain_remote(app: &Arc<App>, host: &str, bot_id: &str) -> Result<us
                     tracing::warn!("remote spool line for a different bot; skipped");
                     continue;
                 }
-                if let Err(e) = process_locked(app, &b).await {
-                    tracing::error!(error = ?e, "remote spool replay line failed");
-                } else {
-                    n += 1;
-                }
+                // 收不下就整個放棄這一輪：`.replaying` 留在遠端，下一次 claim 會再讀到它。
+                // 重讀不會變成兩筆——`hook_inbox` 的 dedupe_key 擋掉（issue #70 的去重規則）。
+                crate::hook_inbox::accept(&app.db, &b, crate::hook_inbox::Source::Remote).await?;
+                n += 1;
             }
-            // A4: already removed from the remote spool, so this is a drop, not a retry.
+            // A4: 解不開的行再 claim 幾次也一樣，留著只會擋住 ack；記一筆丟掉。
             Err(e) => tracing::warn!(error = %e, line, "unparseable remote spool line; dropped"),
         }
+    }
+    // 第二趟：本機已經 commit 了，才准刪遠端那份。ack 失敗＝`.replaying` 還在，下一輪重來。
+    conn.ssh_exec(&ack_script(bot_id, &root)?).await?;
+    if n > 0 {
+        app.hook_inbox_wake.notify_one();
     }
     if let Some(raw) = status {
         match status_body(bot_id, &raw) {
@@ -803,22 +831,38 @@ pub async fn drain_remote(app: &Arc<App>, host: &str, bot_id: &str) -> Result<us
     Ok(n)
 }
 
-/// §11.4.5.
-fn drain_script(bot_id: &str, root: &str) -> Result<String> {
+fn bots_dir(bot_id: &str, root: &str) -> Result<String> {
     if !valid_id(bot_id) {
         anyhow::bail!("invalid bot id `{bot_id}` (must match {ID_RE})");
     }
-    let dir = format!("\"$HOME/{root}/bots/\"{}", sh_quote(bot_id));
+    Ok(format!("\"$HOME/{root}/bots/\"{}", sh_quote(bot_id)))
+}
+
+/// §11.4.5 第一趟：把 spool 收攏成 `.replaying` 並讀出來，**不刪**（issue #70）。
+///
+/// 以前這裡是 `cat` 完就 `rm`：遠端那份唯一的副本在位元組寫進本機任何地方之前就沒了，
+/// 中間掉線或 daemon 掛掉，事件就永遠不見。刪的動作移到 [`ack_script`]，在本機 commit 之後。
+///
+/// `hook-status.json` 是例外，照舊讀完就刪：它是單槽、最新的贏的訊號（不是佇列），
+/// 掉一格只是晚一次重繪——理由與本機 StatusLine 不進收件匣是同一個（[`crate::hook_inbox`]）。
+fn claim_script(bot_id: &str, root: &str) -> Result<String> {
+    let dir = bots_dir(bot_id, root)?;
     Ok(format!(
         "d={dir}\n\
          f=\"$d/hook-spool.jsonl\"\n\
          if [ -f \"$f.replaying\" ]; then cat \"$f\" >> \"$f.replaying\" 2>/dev/null; rm -f \"$f\"; \
          elif [ -f \"$f\" ]; then mv \"$f\" \"$f.replaying\"; fi\n\
-         if [ -f \"$f.replaying\" ]; then cat \"$f.replaying\"; rm -f \"$f.replaying\"; fi\n\
+         if [ -f \"$f.replaying\" ]; then cat \"$f.replaying\"; fi\n\
          s=\"$d/hook-status.json\"\n\
          if [ -f \"$s\" ]; then printf '\\n{marker}\\n'; cat \"$s\"; rm -f \"$s\"; fi\n",
         marker = STATUS_MARKER
     ))
+}
+
+/// 第二趟：本機已經把那些行 commit 進 `hook_events` 了，這時候才准刪遠端那份。
+fn ack_script(bot_id: &str, root: &str) -> Result<String> {
+    let dir = bots_dir(bot_id, root)?;
+    Ok(format!("d={dir}\nrm -f \"$d/hook-spool.jsonl.replaying\"\n"))
 }
 
 fn status_body(bot_id: &str, raw: &str) -> Option<HookBody> {
@@ -984,18 +1028,19 @@ pub async fn replay_spool(app: &Arc<App>, bot_id: &str) -> Result<usize> {
                     tracing::warn!("spool line for a different bot; skipped");
                     continue;
                 }
-                if let Err(e) = process_locked(app, &b).await {
-                    tracing::error!(error = ?e, "spool replay line failed");
-                } else {
-                    n += 1;
-                }
+                // 同遠端：收進收件匣、commit 成功才算數。失敗就整個放棄這一輪，`.replaying`
+                // 留在檔案系統上（上面那段會把它併回來），下一次重放再讀一次；dedupe 擋重複。
+                crate::hook_inbox::accept(&app.db, &b, crate::hook_inbox::Source::Spool).await?;
+                n += 1;
             }
             Err(e) => tracing::warn!(error = %e, line, "unparseable spool line"),
         }
     }
+    // 只有在上面每一行都 commit 進 hook_events 之後，才刪掉這份唯一的副本。
     std::fs::remove_file(&staging).ok();
     if n > 0 {
-        tracing::info!(bot_id, replayed = n, "hook spool replayed");
+        app.hook_inbox_wake.notify_one();
+        tracing::info!(bot_id, accepted = n, "hook spool accepted into the inbox");
     }
     Ok(n)
 }
@@ -1070,13 +1115,13 @@ mod drain_tests {
     }
 
     #[test]
-    fn the_drain_script_takes_the_spool_and_the_status_slot() {
-        let s = drain_script("botX", crate::startup::REMOTE_ROOT).unwrap();
+    fn the_claim_script_takes_the_spool_and_the_status_slot() {
+        let s = claim_script("botX", crate::startup::REMOTE_ROOT).unwrap();
         assert!(s.contains("bots/\"'botX'"));
         // 遠端根目錄跟著實例走：兩顆 daemon 管同一台遠端時 spool 不能共用。
         assert!(s.contains("\"$HOME/.config/agents-manager/bots/\""), "正式實例路徑不變：{s}");
         let iso = crate::startup::remote_root_for(Some("a1b2"));
-        assert!(drain_script("botX", &iso).unwrap().contains("\"$HOME/.config/agents-manager/instances/a1b2/bots/\""));
+        assert!(claim_script("botX", &iso).unwrap().contains("\"$HOME/.config/agents-manager/instances/a1b2/bots/\""));
         assert!(scan_script(crate::startup::REMOTE_ROOT).contains("\"$HOME/.config/agents-manager/bots\"/*/"));
         assert!(scan_script(&iso).contains("\"$HOME/.config/agents-manager/instances/a1b2/bots\"/*/"));
         assert_eq!(crate::startup::remote_root_for(None), crate::startup::REMOTE_ROOT);
@@ -1086,10 +1131,26 @@ mod drain_tests {
         assert!(s.contains(STATUS_MARKER));
     }
 
+    /// issue #70 的核心不變式，釘在腳本這一層：**claim 不准刪 spool**。
+    /// 遠端那份是唯一的副本，刪它的唯一時機是本機 commit 之後（`ack_script`）。
     #[test]
-    fn the_drain_script_rejects_unsafe_ids() {
+    fn the_claim_script_never_deletes_the_spool_it_just_read() {
+        let s = claim_script("botX", crate::startup::REMOTE_ROOT).unwrap();
+        assert!(s.contains("cat \"$f.replaying\""), "要讀出來：{s}");
+        assert!(!s.contains("rm -f \"$f.replaying\""), "claim 階段不可以刪 .replaying：{s}");
+        // 單槽的 status 是例外（最新的贏，不是佇列），照舊讀完就刪。
+        assert!(s.contains("rm -f \"$s\""), "status 仍是讀完就刪：{s}");
+
+        let ack = ack_script("botX", crate::startup::REMOTE_ROOT).unwrap();
+        assert!(ack.contains("rm -f \"$d/hook-spool.jsonl.replaying\""), "ack 才刪：{ack}");
+        assert!(!ack.contains("cat "), "ack 不再讀任何東西：{ack}");
+    }
+
+    #[test]
+    fn the_drain_scripts_reject_unsafe_ids() {
         for id in ["../..", "x/y", r"..\..", "", "x\";id"] {
-            assert!(drain_script(id, crate::startup::REMOTE_ROOT).is_err(), "unsafe id was accepted: {id:?}");
+            assert!(claim_script(id, crate::startup::REMOTE_ROOT).is_err(), "unsafe id was accepted: {id:?}");
+            assert!(ack_script(id, crate::startup::REMOTE_ROOT).is_err(), "unsafe id was accepted: {id:?}");
         }
     }
 }
@@ -1774,6 +1835,176 @@ mod external_claim_tests {
         assert_eq!(have, vec!["echo 1".to_string()]);
         assert!(!hook_user_is_new(&have, "echo 1"));
         assert!(hook_user_is_new(&have, "echo 2"));
+    }
+}
+
+/// issue #70：`200` 必須代表「已經耐久收下」。
+#[cfg(test)]
+mod durable_handoff_tests {
+    use super::*;
+    use crate::testing::{claude_bot, env, fake_run, restart_app, Env};
+
+    fn stop_body(bot_id: &str, prompt_id: &str) -> HookBody {
+        HookBody {
+            bot_id: bot_id.into(),
+            provider: "claude".into(),
+            payload: json!({
+                "hook_event_name": "Stop",
+                "session_id": "sess-1",
+                "prompt_id": prompt_id,
+                "last_assistant_message": "做完了",
+            }),
+            received_at: Some("2026-09-17T12:00:00.000Z".into()),
+            truncated: false,
+        }
+    }
+
+    fn headers(token: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert("X-AM-Bot-Token", token.parse().unwrap());
+        h
+    }
+
+    async fn inbox_rows(e: &Env) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM hook_events").fetch_one(&e.app.db).await.unwrap()
+    }
+
+    /// 寫不進收件匣就**不准回 200**。回 200 再掉事件是無聲的資料遺失；回 503 送端會把同一份 body
+    /// 寫進 hook-spool.jsonl，replay 補得回來。
+    #[tokio::test]
+    async fn a_hook_that_cannot_be_persisted_is_not_answered_with_200() {
+        let e = env().await;
+        let bot = claude_bot(&e.app, &e.project_id, "hooky").await;
+        // 收件匣壞掉（磁碟滿、schema 沒跟上……都是同一種下場）。
+        sqlx::query("DROP TABLE hook_events").execute(&e.app.db).await.unwrap();
+
+        let (code, _) = receive(
+            State(e.app.clone()),
+            Path("claude".into()),
+            headers("tok"),
+            Json(stop_body(&bot.id, "p1")),
+        )
+        .await;
+        assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE, "寫不進去就不是 200");
+        assert!(!code.is_success(), "送端要看得出來該 spool");
+    }
+
+    /// 收下了才 200；而且 200 的當下那一列已經在 DB 裡（不是「待會背景寫」）。
+    #[tokio::test]
+    async fn a_persisted_hook_is_in_the_database_before_the_200_comes_back() {
+        let e = env().await;
+        let bot = claude_bot(&e.app, &e.project_id, "hooky").await;
+        let (code, _) =
+            receive(State(e.app.clone()), Path("claude".into()), headers("tok"), Json(stop_body(&bot.id, "p1"))).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(inbox_rows(&e).await, 1, "200 回來的時候列已經在了");
+        let pending = crate::hook_inbox::pending(&e.app.db, &db::now(), 10).await.unwrap();
+        assert_eq!(pending.len(), 1, "還沒處理，但已經耐久收下");
+    }
+
+    /// 重送同一則 hook 不會變成兩列、也不會變成第二次完成。
+    #[tokio::test]
+    async fn the_same_hook_sent_twice_does_not_become_two_events() {
+        let e = env().await;
+        let bot = claude_bot(&e.app, &e.project_id, "hooky").await;
+        for _ in 0..3 {
+            let (code, _) = receive(
+                State(e.app.clone()),
+                Path("claude".into()),
+                headers("tok"),
+                Json(stop_body(&bot.id, "p1")),
+            )
+            .await;
+            assert_eq!(code, StatusCode::OK, "重送照樣是 200：那則事件的確已經收下了");
+        }
+        assert_eq!(inbox_rows(&e).await, 1, "三次重送只有一列");
+
+        // 處理過一輪之後再重送，也不會多出一列（去重看的是事件身分，不是有沒有處理過）。
+        crate::hook_inbox::drain_once(&e.app).await.unwrap();
+        let (code, _) =
+            receive(State(e.app.clone()), Path("claude".into()), headers("tok"), Json(stop_body(&bot.id, "p1"))).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(inbox_rows(&e).await, 1, "處理完之後重送還是同一列");
+    }
+
+    /// 兩則**不同**的 hook 不會被去重吃掉。
+    #[tokio::test]
+    async fn two_different_hooks_are_both_accepted() {
+        let e = env().await;
+        let bot = claude_bot(&e.app, &e.project_id, "hooky").await;
+        for pid in ["p1", "p2"] {
+            let (code, _) = receive(
+                State(e.app.clone()),
+                Path("claude".into()),
+                headers("tok"),
+                Json(stop_body(&bot.id, pid)),
+            )
+            .await;
+            assert_eq!(code, StatusCode::OK);
+        }
+        assert_eq!(inbox_rows(&e).await, 2);
+    }
+
+    /// ACK 之後、處理之前 daemon 掛掉：重啟仍然處理得到那則事件（驗收第 2、4 條）。
+    ///
+    /// 「重啟」在這裡就是 `restart_app`（同一個資料目錄開一顆新的 App）＋ worker 開工做的第一件事
+    /// （`drain_once`）——正式路徑上 `spawn_worker` 也是先 drain 再等。
+    #[tokio::test]
+    async fn an_accepted_hook_survives_a_restart_before_it_is_processed() {
+        let e = env().await;
+        let bot = claude_bot(&e.app, &e.project_id, "hooky").await;
+        let run = fake_run(&e.app, &bot.id).await;
+
+        let (code, _) =
+            receive(State(e.app.clone()), Path("claude".into()), headers("tok"), Json(stop_body(&bot.id, "p1"))).await;
+        assert_eq!(code, StatusCode::OK);
+        // 沒有人處理它就「掛掉」了。
+        assert_eq!(crate::hook_inbox::pending(&e.app.db, &db::now(), 10).await.unwrap().len(), 1);
+
+        let restarted = restart_app(&e).await;
+        let done = crate::hook_inbox::drain_once(&restarted).await.unwrap();
+        assert_eq!(done, 1, "重啟後補處理");
+        assert!(
+            crate::hook_inbox::pending(&restarted.db, &db::now(), 10).await.unwrap().is_empty(),
+            "處理完就不在待辦裡了"
+        );
+        // 事件真的走到了 §6.7（session id 回填到 run 上）。
+        let sid: Option<String> =
+            sqlx::query_scalar("SELECT native_session_id FROM runs WHERE id=?").bind(&run).fetch_one(&restarted.db).await.unwrap();
+        assert_eq!(sid.as_deref(), Some("sess-1"), "hook 真的被處理了，不是只被標成完成");
+    }
+
+    /// StatusLine 是單槽訊號，刻意不進收件匣（掉一格只是晚一次重繪）。
+    #[tokio::test]
+    async fn statusline_stays_fire_and_forget() {
+        let e = env().await;
+        let bot = claude_bot(&e.app, &e.project_id, "hooky").await;
+        let body = HookBody {
+            bot_id: bot.id.clone(),
+            provider: "claude".into(),
+            payload: json!({"hook_event_name": "StatusLine", "status_line": "…"}),
+            received_at: Some("2026-09-17T12:00:00.000Z".into()),
+            truncated: false,
+        };
+        let (code, _) = receive(State(e.app.clone()), Path("claude".into()), headers("tok"), Json(body)).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(inbox_rows(&e).await, 0, "重繪訊號不佔佇列");
+    }
+
+    /// 壞 token / 已刪除的 bot 在收下之前就被擋掉：收件匣不會被沒有身分的事件灌爆。
+    #[tokio::test]
+    async fn a_rejected_hook_never_reaches_the_inbox() {
+        let e = env().await;
+        let bot = claude_bot(&e.app, &e.project_id, "hooky").await;
+        let (code, _) = receive(
+            State(e.app.clone()),
+            Path("claude".into()),
+            headers("wrong"),
+            Json(stop_body(&bot.id, "p1")),
+        )
+        .await;
+        assert_eq!(code, StatusCode::UNAUTHORIZED);
+        assert_eq!(inbox_rows(&e).await, 0);
     }
 }
 

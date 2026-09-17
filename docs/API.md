@@ -741,7 +741,11 @@ WS：每顆兩次 `bots_restart_progress`（`restarting`，然後 `ok` / `failed
 daemon 記在行程內（5 分鐘、認領一次就用掉），該句回音進對話時帶上 `relay_from`（SPEC §6.5d）。
 
 ### 10.6 hook 端點 `POST /hook/{claude|codex|grok}`
-body `{bot_id, provider, payload, received_at, truncated?}`，header `X-AM-Bot-Token`；入佇列立即回 200。grok 的 `payload` 是 stdin JSON（`hookEventName`、`sessionId`、`promptId`、
+body `{bot_id, provider, payload, received_at, truncated?}`，header `X-AM-Bot-Token`。
+**`200` ＝ 事件已經寫進 `hook_events` 並 commit**（不是「已經處理完」，配對由 worker 背景做；SPEC §4.4b）；
+回 `{"stored": true|false}`，`false` ＝同一則之前就收過了（重送，靠 `dedupe_key` 去重，不會變成第二筆）。
+寫不進收件匣回 **503**，送端必須把同一份 body spool 起來稍後重送（SPEC §4.4 第 4 點）；`401` 壞 token、`410` bot 已刪除。
+StatusLine 例外：不進收件匣，照舊 fire-and-forget 回 200。grok 的 `payload` 是 stdin JSON（`hookEventName`、`sessionId`、`promptId`、
 `transcriptPath`、`lastAssistantMessage`、`reason`、`stopHookActive`）；`reason ≠ end_turn` 與 `session_end` 忽略，`session_start` 只回填 `native_session_id`（SPEC §12.3）。
 
 ## 11. 專案群組聊天（SPEC §13）
