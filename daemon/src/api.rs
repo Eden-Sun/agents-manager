@@ -284,6 +284,8 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
     let connected = app.connected.load(Ordering::SeqCst);
     let projects = db::live_projects(&app.db).await.map_err(any_err)?;
     let bots = db::live_bots(&app.db).await.map_err(any_err)?;
+    // §6.10：AGM 因為閒置收起來的那些。一次讀完，免得每顆 bot 再問一次資料庫。
+    let asleep = crate::supervisor::idle_sleep::all_asleep(app).await;
     let mut out = Vec::new();
     for p in projects {
         let mut bl = Vec::new();
@@ -317,6 +319,9 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
                 // herdr agent name: the live run's, else what the next start will use.
                 "agent_name": run.as_ref().and_then(|r| r.agent_name.clone()).unwrap_or_else(|| crate::config::agent_name(&p.label, &b.id)),
                 "run": run,
+                // §6.10：停著是因為 AGM 收起來省 RAM，不是壞掉也不是使用者關的；下次要用會自動
+                // 用 `--resume` 叫醒。`null` = 不是這種停。
+                "asleep": asleep.get(&b.id).map(|(at, mins)| json!({"since": at, "idle_minutes": mins})),
                 // The queued web prompt is durable in SQLite; the UI only renders this state.
                 "queued_turn": queued_turn,
                 "lamp": lamp(bot_connected, run.as_ref()),
@@ -2061,6 +2066,15 @@ async fn delete_identity(State(app): State<Arc<App>>, Path(name): Path<String>) 
 // ---------------------------------------------------------------- run control
 
 async fn start_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
+    // 被 AGM 因為閒置收起來的（§6.10）走續接那條路：使用者按的是「啟動」，心裡想的是把剛剛那顆
+    // 帶著對話的 bot 叫回來，不是開一段新的空白對話。
+    if crate::supervisor::idle_sleep::wake(&app, &id, "使用者按了啟動")
+        .await
+        .map_err(|e| LcError::Upstream(e.to_string()))?
+    {
+        let run = db::active_run(&app.db, &id).await.map_err(any_err)?;
+        return Ok((StatusCode::OK, Json(json!({"run_id": run.map(|r| r.id), "resumed": true}))).into_response());
+    }
     let run_id = lifecycle::start_bot(&app, &id).await?;
     Ok((StatusCode::OK, Json(json!({"run_id": run_id}))).into_response())
 }
