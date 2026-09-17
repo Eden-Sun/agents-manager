@@ -169,8 +169,17 @@ pub async fn dispatch(app: &Arc<App>, assignment_id: &str) {
             // `queued` 也記成 delivered（turn 已經存在、id 已經綁定）：回合結束時 queue flush 會送出，
             // 之後的完成事件照舊對得上這筆交辦。等太久沒送出由 `block_stale_queues` 收尾。
             // 寫失敗不能吞掉：下一個 tick 會用同一個 crid 重派，冪等回同一個 turn 再記一次。
-            if let Err(e) = store::mark_delivered(&app.db, &a.id, &out.turn_id, &out.delivery).await {
-                tracing::warn!(assignment = %a.id, turn = %out.turn_id, error = ?e, "could not record the delivery; the next tick re-dispatches with the same request id");
+            match store::mark_delivered(&app.db, &a.id, &out.turn_id, &out.delivery).await {
+                // 派送途中這筆被裁示掉了（取消／擋下）：**不要**把它寫回在途（issue #71）。
+                // 話已經送進 pane 收不回來了，但狀態要照裁示走，不然 AGM 看到的是一筆早就結案的
+                // 工作又活了過來；回合結束時 `settle` 的 CAS 也只認在途那三個，會一起放它過去。
+                Ok(false) => {
+                    tracing::warn!(assignment = %a.id, turn = %out.turn_id,
+                                   "交辦在派送途中已被裁示，不記成送達；送出去的那則訊息留在對話裡");
+                    return;
+                }
+                Ok(true) => {}
+                Err(e) => tracing::warn!(assignment = %a.id, turn = %out.turn_id, error = ?e, "could not record the delivery; the next tick re-dispatches with the same request id"),
             }
             if out.delivery == "queued" {
                 tracing::info!(assignment = %a.id, bot = %a.target_bot_id, turn = %out.turn_id,

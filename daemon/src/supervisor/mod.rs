@@ -5,6 +5,7 @@
 //! The model understands and decides. The daemon persists, retries, watches and switches.
 
 pub mod api;
+pub mod assignment_state;
 pub mod bot_requests;
 pub mod cli_refresh;
 pub mod controller;

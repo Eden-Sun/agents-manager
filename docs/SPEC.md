@@ -1590,6 +1590,18 @@ launchd `com.agm.claude-release` 每 30 分鐘跑 `bin/claude-release-kick.sh`�
 | 已決定 | `completed` / `failed` / `cancelled` / `superseded` | AGM |
 | 還在等 | `blocked`、`quota_blocked` | AGM／daemon，**仍算未結案** |
 
+合法的轉移集中在 `supervisor::assignment_state`（issue #71），SQL 的守衛（`… WHERE status IN (…)`）
+由 `sources_for()` 從那張表算出來，不再各自抄一份清單：
+
+- **已決定的四個是終局，沒有任何出邊。** `completed → delivered`、`cancelled → awaiting_review` 這種
+  「把結案的工作弄活過來」一律擋掉。這不是理論問題：`dispatch` 從讀到 `queued` 到送完中間有好幾個 await，
+  那段時間裡交辦被取消是做得到的，而 `mark_delivered` 以前是無條件 `WHERE id=?`。
+- 在途三個（`queued`/`delivered`/`unknown`）之間可以再記一次送達（同一個 crid 重派是冪等的）；
+  在途 → `awaiting_review`／`completed`（通知當場結案）／`quota_blocked`；`quota_blocked → queued`（額度回來）。
+- AGM 的裁示（`completed`/`failed`/`cancelled`/`superseded`/`blocked`）可以從任何**還沒結案**的狀態下達。
+- 表以外的一律不合法（預設關閉）。`mark_undeliverable`（只從 `queued`）與 `block_stale_queue`（只從 `delivered`）
+  的守衛比表更窄，那是各自的用途決定的，刻意保留。
+
 - 回合原始事實各自留欄：`delivery`、`turn_status`（`completed` / `completed_fallback` / `failed` / `dispatch_failed` / `turn_missing` / `quota_exhausted` / `identity_switch`）、`evidence_complete`。
   終端備援不會因為「跑完了」就被驗收。派不出去的交辦也進 `awaiting_review`（`dispatch_failed`）。
 - **遲到的回覆**（review3 c1 M3）：交辦已經帶著 `completed_fallback`（沒有回覆）結算，之後遲到的 hook 把回覆補進回合（§4.3 例外）時，
