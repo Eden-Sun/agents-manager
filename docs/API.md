@@ -1240,7 +1240,7 @@ body 直接是檔案位元組（**不是** multipart），`Content-Type` 就是�
 | POST | `/api/projects/{id}/missions` | `{text, client_request_id?, delivery_mode, executor_kind, on_5h_limit, max_rounds?(0..=10，預設 2)}` → 任務＋`created`。同一個 `client_request_id` 回同一筆（`created:false`）。建立時記一則 `instruction` 事件，並往 AGM inbox 放一則 `mission_created`（event_key `mission:<id>:created`，payload 含 `mission_id/project_id/project/cwd/text` 與三個選項）；任務列、`instruction` 與 inbox 是**同一個交易**。重送（`created:false`）也補推一次 `mission_created`（同一個 event_key，已經有就不多一筆），寫一半的舊列靠它補回通知。遠端專案回 400 `{"error":"remote_not_supported","host":…}`。 |
 | GET | `/api/projects/{id}/missions?status=all\|open\|done\|cancelled&limit=` | `{project_id, missions:[…]}`，新的在前。**已完成任務清單＝`status=done`，不含已取消的**；取消的另用 `status=cancelled` 取（UI 若要一起顯示須分開標示，不能混進「已完成」）。 |
 | GET | `/api/missions/{id}` | 任務＋`events[]`＋`revisions[]`（這筆成果的續作，新的在前）＋`parent`（自己是誰的續作；來源被刪掉時是 `{id, missing:true}`）。 |
-| POST | `/api/missions/{id}/events` | `{kind: "report"\|"note"\|"verified", text, relay_from?, payload?}` → 事件。`relay_from` 規則同 `POST /api/bots/{id}/prompt`（不存在的值 400）。**交付前必須有一則 `verified`**。 |
+| POST | `/api/missions/{id}/events` | `{kind: "report"\|"note"\|"verified", text, relay_from?, payload?, worktree?, sha?}` → 事件。`relay_from` 規則同 `POST /api/bots/{id}/prompt`（不存在的值 400）。**交付前必須有一則 `verified`**，而且 `verified` 要說驗的是哪個 commit：`worktree`（本專案 repo 的工作樹，daemon 讀它的 HEAD）或 `sha`（可縮寫，必須是本專案 repo 裡的 commit），兩個都給時必須一致；daemon 把完整 sha 寫進 `payload.sha`。都沒給、工作樹不是本專案的 repo、sha 找不到 → 400。 |
 | POST | `/api/missions/{id}/pause` | `{reason, detail?}` → 任務。`reason` **必填**（機器碼；缺了是 422，handler 不會跑）。 |
 | POST | `/api/missions/{id}/resume` | → 任務（清掉 `paused_reason`）。 |
 | POST | `/api/missions/{id}/cancel` | → 任務，多 `temp_bots`（見 complete）。 |
@@ -1250,7 +1250,7 @@ body 直接是檔案位元組（**不是** multipart），`Content-Type` 就是�
 | POST | `/api/missions/{id}/revise` | `{text, client_request_id, relay_from?, delivery_mode?, executor_kind?, on_5h_limit?, max_rounds?}` → **新的一筆任務**（`parent_mission_id` 指回來，`created`）。原成果完全不動。沒指定的選項沿用原任務，**有指定就照 `POST /projects/{id}/missions` 同一套驗證**（enum 與 `max_rounds` 0..=10，專案還要存在且是本機）。新任務、它的 `instruction`、原成果那邊的 `note`、以及 inbox 是**同一個交易**：中途失敗不會留下沒人知道的續作。新任務的 `instruction` 事件與 inbox `mission_created` 帶快照（原指示／結果摘要／commit 或 PR／`verified` 摘要／新要求／`runbook_start_step: 2`），所以原本的臨時 bot 被清掉也不影響續作——快照是**參考，不是證據**，新任務仍要自己的 `verified` 才能交付。只有 `done` 能續作（進行中或已取消 → 409 `not_completed`）；同一個 parent 同時只能有一筆未結案的續作（第二筆 → 409 `revision_in_progress`，附既存那筆的 id），由 partial unique index 擋，並發也只會成立一筆。 |
 | POST | `/api/missions/{id}/round` | 用掉一輪（review 退回或驗證失敗）→ 任務。已達 `max_rounds` → 任務停在 `max_rounds` 並回 409 `max_rounds`。 |
 | GET | `/api/missions/{id}/pick?role=executor\|reviewer\|verifier&exclude=<identity>` | 照任務設定挑身分，見下。`role=verifier` 回 `ask_user` 時會把任務停在 `no_fable_for_verifier`。 |
-| POST | `/api/missions/{id}/deliver` | `{worktree(本機絕對路徑), title?, body?, relay_from?}`。`push_main`：fetch → `origin/main` 必須是 HEAD 的祖先 → `git push origin HEAD:main`（fast-forward only，不 force）；`pr`：推 `mission/<id>` 分支並 `gh pr create`。成功記 `delivered` 事件並回 `{mode, sha}` 或 `{mode, branch, url}`。沒有 `verified` 事件 → 409 `not_verified`；其餘失敗一律**停下來問人**（`push_main_failed`／`pr_failed`）並回 409，`reason` 是機器碼：`dirty_worktree`、`fetch_failed`、`not_fast_forward`、`nothing_to_deliver`、`push_failed`、`pr_failed`。 |
+| POST | `/api/missions/{id}/deliver` | `{worktree(本機絕對路徑), title?, body?, relay_from?}`。`push_main`：fetch → `origin/main` 必須是 HEAD 的祖先 → `git push origin HEAD:main`（fast-forward only，不 force）；`pr`：推 `mission/<id>` 分支並 `gh pr create`。成功記 `delivered` 事件並回 `{mode, sha}` 或 `{mode, branch, url}`；任務若停在 `push_main_failed`／`pr_failed`，成功時自動解除（記 `resumed`）。**關卡**（不改任務狀態）：`worktree` 必須是本專案 repo 的工作樹（否則 400）；沒有 `verified` 事件 → 409 `not_verified`；最新一則 `verified` 沒記 commit → 409 `verified_without_sha`；工作樹 HEAD 不是那個 commit（rebase、又改過、指到主樹）→ 409 `head_not_verified`（`verified_sha`、`head`）。過了關卡之後的失敗一律**停下來問人**（`push_main_failed`／`pr_failed`）並回 409，`reason` 是機器碼：`dirty_worktree`、`fetch_failed`、`not_fast_forward`、`nothing_to_deliver`、`push_failed`、`pr_failed`。 |
 | PUT | `/api/identities/{name}/disabled` | `{kind, disabled, host?}` → 同一份。身分停用搬進 daemon（原本只在瀏覽器 localStorage）；WS `identity_prefs_changed`。停用＝群組任務挑身分與**環境設定／Bot 設定的身份選單**都看不到它（已經綁著它的 bot 仍看得到自己那一個），不影響執行中的 bot，也不動主機上的 alias。 |
 | GET | `/api/identity-prefs` | `{disabled:[{host, kind, identity}]}`。 |
 
@@ -1278,7 +1278,7 @@ parent＋文字＋四個選項。只比文字的話，一則 `question` 與一�
 | `agm mission list --project <id> [--status all\|open\|done\|cancelled] [--limit N]` | `GET /api/projects/{id}/missions` |
 | `agm mission get <mission>` | `GET /api/missions/{id}` |
 | `agm mission events <mission>` | 同上，只取 `events[]` |
-| `agm mission event <mission> --kind report\|note\|verified --text …（或 --text-file）[--as-daemon]` | `POST /api/missions/{id}/events` |
+| `agm mission event <mission> --kind report\|note\|verified --text …（或 --text-file）[--worktree <驗過的工作樹> \| --sha <commit>] [--as-daemon]` | `POST /api/missions/{id}/events`（`verified` 沒給 `--worktree`／`--sha` 在送出前擋下） |
 | `agm mission pause <mission> --reason <碼> [--detail …]` | `POST /api/missions/{id}/pause` |
 | `agm mission resume\|cancel\|round <mission>` | `POST /api/missions/{id}/resume`／`cancel`／`round` |
 | `agm mission complete <mission> --text …（或 --text-file）[--as-daemon]` | `POST /api/missions/{id}/complete` |

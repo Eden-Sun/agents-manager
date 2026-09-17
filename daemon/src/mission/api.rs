@@ -419,9 +419,69 @@ pub struct EventIn {
     relay_from: Option<String>,
     #[serde(default)]
     payload: Option<Value>,
+    /// `verified` 驗的是哪個 commit（可縮寫）。跟 `worktree` 至少給一個。
+    #[serde(default)]
+    sha: Option<String>,
+    /// `verified`：驗證者驗的那個工作樹，daemon 自己讀它的 HEAD。
+    #[serde(default)]
+    worktree: Option<String>,
 }
 
-/// AGM／bot 往群組時間軸回報（`report`、`note`），或記下驗證通過（`verified`，交付前必須有）。
+/// 這個專案的本機路徑（交付與驗證都只收同一個 repo 的工作樹）。
+async fn project_repo(app: &Arc<App>, m: &store::Mission) -> Result<std::path::PathBuf, LcError> {
+    let p = crate::db::project(&app.db, &m.project_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("project".into()))?;
+    Ok(std::path::PathBuf::from(p.path))
+}
+
+/// 呼叫端給的工作樹：本機絕對路徑、存在、而且跟任務的專案是同一個 repo。
+async fn mission_worktree(app: &Arc<App>, m: &store::Mission, raw: &str) -> Result<std::path::PathBuf, LcError> {
+    let dir = std::path::PathBuf::from(raw.trim());
+    if !dir.is_absolute() || !dir.is_dir() {
+        return Err(LcError::Bad("worktree must be an existing absolute path".into()));
+    }
+    let repo = project_repo(app, m).await?;
+    if !deliver::same_repo(&dir, &repo).await {
+        return Err(LcError::Bad(format!("worktree is not a checkout of this mission's project ({})", repo.display())));
+    }
+    Ok(dir)
+}
+
+/// `verified` 一定要說清楚驗的是哪個 commit，交付時才比得出「推上去的就是驗過的那一個」（review3 c1 M9）。
+///
+/// 以前只要有任何一則 `verified` 就放行：驗證者在 A 上驗過，執行者 rebase 成 B（可能含衝突解法），
+/// B 沒經過驗證者就被推上 main。回傳完整 sha。
+async fn verified_commit(app: &Arc<App>, m: &store::Mission, b: &EventIn) -> Result<String, LcError> {
+    let given = b
+        .sha
+        .as_deref()
+        .or_else(|| b.payload.as_ref().and_then(|p| p.get("sha")).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let from_worktree = match b.worktree.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(w) => {
+            let dir = mission_worktree(app, m, w).await?;
+            Some(deliver::head_sha(&dir).await.ok_or_else(|| LcError::Bad("could not read the worktree's HEAD".into()))?)
+        }
+        None => None,
+    };
+    let repo = project_repo(app, m).await?;
+    let from_sha = match given {
+        Some(sha) => Some(
+            deliver::resolve_commit(&repo, sha)
+                .await
+                .ok_or_else(|| LcError::Bad(format!("sha `{sha}` is not a commit in this project's repo")))?,
+        ),
+        None => None,
+    };
+    match (from_worktree, from_sha) {
+        (Some(head), Some(sha)) if head != sha => Err(LcError::Bad(format!("sha {sha} is not the worktree's HEAD ({head})"))),
+        (Some(head), _) => Ok(head),
+        (None, Some(sha)) => Ok(sha),
+        (None, None) => Err(LcError::Bad("a verified event needs the commit it verified: `worktree` (its HEAD) or `sha`".into())),
+    }
+}
+
+/// AGM／bot 往群組時間軸回報（`report`、`note`），或記下驗證通過（`verified`，交付前必須有，而且要帶 commit）。
 pub async fn post_event(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b): Json<EventIn>) -> Result<Json<Value>, LcError> {
     one_of("kind", &b.kind, &["report", "note", "verified"])?;
     if b.text.trim().is_empty() {
@@ -430,7 +490,13 @@ pub async fn post_event(State(app): State<Arc<App>>, Path(id): Path<String>, Jso
     let m = load(&app, &id).await?;
     ensure_open(&m)?;
     let from = check_relay_from(&app, b.relay_from.as_deref()).await?;
-    let ev = store::add_event(&app.db, &id, &b.kind, b.text.trim(), from.as_deref(), &b.payload.unwrap_or_else(|| json!({})))
+    let mut payload = b.payload.clone().unwrap_or_else(|| json!({}));
+    if b.kind == "verified" {
+        let sha = verified_commit(&app, &m, &b).await?;
+        let Some(obj) = payload.as_object_mut() else { return Err(LcError::Bad("payload must be an object".into())) };
+        obj.insert("sha".into(), sha.into());
+    }
+    let ev = store::add_event(&app.db, &id, &b.kind, b.text.trim(), from.as_deref(), &payload)
         .await
         .map_err(up)?;
     emit(&app, &load(&app, &id).await?).await;
@@ -847,18 +913,43 @@ pub struct DeliverIn {
     relay_from: Option<String>,
 }
 
-/// 依任務的 `delivery_mode` 推 main（fast-forward only）或開 PR。必須先有 `verified` 事件。
-/// 任何失敗都把任務停下來問人（D8），回 409 帶機器碼。
+/// 交付失敗停下來的那兩種：交付成功就不再是事實，自動解除（不然卡片還寫著「等你決定」）。
+const DELIVERY_PAUSES: [&str; 2] = ["push_main_failed", "pr_failed"];
+
+/// 依任務的 `delivery_mode` 推 main（fast-forward only）或開 PR。
+///
+/// 關卡（都不改任務狀態，是呼叫端流程漏了，不是交付失敗）：
+/// - 最新一則 `verified` 必須帶 commit（`not_verified`／`verified_without_sha`）；
+/// - 工作樹必須是這個專案的 repo，而且 HEAD 就是驗過的那個 commit（`head_not_verified`）——
+///   rebase、補改過之後要重新驗證，舊的 `verified` 不算數（review3 c1 M9）。
+///
+/// 過了關卡之後的失敗才把任務停下來問人（D8），回 409 帶機器碼。成功會解除先前的交付失敗暫停。
 pub async fn post_deliver(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b): Json<DeliverIn>) -> Result<Json<Value>, LcError> {
     let m = load(&app, &id).await?;
     ensure_open(&m)?;
     let from = check_relay_from(&app, b.relay_from.as_deref()).await?;
-    if !store::has_event(&app.db, &id, "verified").await.map_err(up)? {
+    let events = store::events(&app.db, &id).await.map_err(up)?;
+    let Some(verified) = events.iter().rev().find(|e| e.kind == "verified") else {
         return Err(LcError::conflict("not_verified", json!({"mission_id": id})));
-    }
-    let dir = std::path::PathBuf::from(&b.worktree);
-    if !dir.is_absolute() || !dir.is_dir() {
-        return Err(LcError::Bad("worktree must be an existing absolute path".into()));
+    };
+    let verified_sha = serde_json::from_str::<Value>(&verified.payload_json)
+        .ok()
+        .and_then(|p| p.get("sha").and_then(Value::as_str).map(str::to_string));
+    let Some(verified_sha) = verified_sha else {
+        return Err(LcError::conflict(
+            "verified_without_sha",
+            json!({"mission_id": id, "event_id": verified.id,
+                   "hint": "這則 verified 沒記是哪個 commit：請驗證者重驗後用 `mission event --kind verified --worktree <驗過的工作樹>` 重記"}),
+        ));
+    };
+    let dir = mission_worktree(&app, &m, &b.worktree).await?;
+    let head = deliver::head_sha(&dir).await.ok_or_else(|| LcError::Bad("could not read the worktree's HEAD".into()))?;
+    if head != verified_sha {
+        return Err(LcError::conflict(
+            "head_not_verified",
+            json!({"mission_id": id, "verified_sha": verified_sha, "head": head,
+                   "hint": "工作樹的 HEAD 不是驗證過的那個 commit（rebase 或又改過）：回到驗證那一步重驗這個 commit，再交付"}),
+        ));
     }
     let result = if m.delivery_mode == "push_main" {
         deliver::push_main(&dir, "origin", "main").await.map(|sha| json!({"mode": "push_main", "sha": sha}))
@@ -875,6 +966,12 @@ pub async fn post_deliver(State(app): State<Arc<App>>, Path(id): Path<String>, J
                 _ => format!("已開 PR：{}", out["url"].as_str().unwrap_or_default()),
             };
             store::add_event(&app.db, &id, "delivered", &text, from.as_deref(), &out).await.map_err(up)?;
+            // 先前那次交付失敗停下來的：現在交付成功了，那個暫停的理由已經不存在。
+            if let Some(reason) = store::clear_pause_if(&app.db, &id, &DELIVERY_PAUSES).await.map_err(up)? {
+                store::add_event(&app.db, &id, "resumed", &format!("交付成功，解除「{reason}」暫停"), Some(crate::agent_relay::DAEMON_SENDER), &json!({"was_paused_for": reason}))
+                    .await
+                    .map_err(up)?;
+            }
             emit(&app, &load(&app, &id).await?).await;
             Ok(Json(out))
         }
@@ -1172,6 +1269,8 @@ mod tests {
             text: "cargo test 全過".into(),
             relay_from: Some("daemon".into()),
             payload: Some(json!({"shots": ["/tmp/a.png"]})),
+            sha: None,
+            worktree: Some(env.repo.to_string_lossy().to_string()),
         };
         let _ = post_event(State(app.clone()), Path(id.clone()), Json(ev)).await.unwrap();
         let _ = post_complete(State(app.clone()), Path(id.clone()), Json(CompleteIn { result_summary: "第一版".into(), relay_from: None }))
@@ -1339,9 +1438,10 @@ mod tests {
         assert_eq!(conflict_reason(err), "not_verified");
 
         // 來源不能冒名；daemon 哨符可以。
-        let bogus = EventIn { kind: "verified".into(), text: "ok".into(), relay_from: Some("no-such-bot".into()), payload: None };
+        let repo = Some(env.repo.to_string_lossy().to_string());
+        let bogus = EventIn { kind: "verified".into(), text: "ok".into(), relay_from: Some("no-such-bot".into()), payload: None, sha: None, worktree: repo.clone() };
         assert!(matches!(post_event(State(app.clone()), Path(id.clone()), Json(bogus)).await, Err(LcError::Bad(_))));
-        let ok = EventIn { kind: "verified".into(), text: "cargo test 全過".into(), relay_from: Some("daemon".into()), payload: None };
+        let ok = EventIn { kind: "verified".into(), text: "cargo test 全過".into(), relay_from: Some("daemon".into()), payload: None, sha: None, worktree: repo };
         let _ = post_event(State(app.clone()), Path(id.clone()), Json(ok)).await.unwrap();
 
         // 測試 repo 沒有 origin：交付失敗 → 停下來問人（D8），不是靜靜吞掉。
@@ -1363,6 +1463,153 @@ mod tests {
         assert!(kinds.contains(&"verified") && kinds.contains(&"completed"));
         let instruction = &full["events"][0];
         assert!(instruction["relay_from"].is_null(), "使用者下的指示不帶來源標");
+    }
+
+    fn git(dir: &std::path::Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn commit_file(dir: &std::path::Path, name: &str) -> String {
+        std::fs::write(dir.join(name), name).unwrap();
+        git(dir, &["add", name]);
+        git(dir, &["commit", "-q", "-m", name]);
+        git(dir, &["rev-parse", "HEAD"])
+    }
+
+    /// 測試專案接上一個 bare origin（main 就是目前的 base），再開一個執行者的 worktree。
+    fn with_origin(env: &crate::testing::Env) -> (std::path::PathBuf, std::path::PathBuf) {
+        let origin = env.dir.join("origin.git");
+        std::fs::create_dir_all(&origin).unwrap();
+        git(&origin, &["init", "-q", "--bare", "-b", "main"]);
+        git(&env.repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
+        git(&env.repo, &["push", "-q", "origin", "main"]);
+        git(&env.repo, &["fetch", "-q", "origin"]);
+        let wt = env.dir.join("exec-wt");
+        git(&env.repo, &["worktree", "add", "-q", "-b", "task", wt.to_str().unwrap()]);
+        (origin, wt)
+    }
+
+    fn verified(worktree: Option<&std::path::Path>, sha: Option<&str>) -> EventIn {
+        EventIn {
+            kind: "verified".into(),
+            text: "cargo test 全過".into(),
+            relay_from: Some("daemon".into()),
+            payload: None,
+            sha: sha.map(String::from),
+            worktree: worktree.map(|w| w.to_string_lossy().to_string()),
+        }
+    }
+
+    fn deliver_from(dir: &std::path::Path) -> DeliverIn {
+        DeliverIn { worktree: dir.to_string_lossy().to_string(), title: None, body: None, relay_from: None }
+    }
+
+    fn bad_text(e: LcError) -> String {
+        match e {
+            LcError::Bad(t) => t,
+            other => panic!("expected a 400, got {other:?}"),
+        }
+    }
+
+    /// 交付關卡綁 commit：驗過 A、rebase 成 B，B 沒重驗就推不上去；從專案主樹或別的 repo 交付也不行（review3 c1 M9）。
+    #[tokio::test]
+    async fn only_the_verified_commit_can_be_delivered() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (origin, wt) = with_origin(&env);
+        let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("gate", "push_main"))).await.unwrap();
+        let id = m["id"].as_str().unwrap().to_string();
+
+        // verified 一定要說驗的是哪個 commit。
+        let err = post_event(State(app.clone()), Path(id.clone()), Json(verified(None, None))).await.unwrap_err();
+        assert!(bad_text(err).contains("commit it verified"));
+        let elsewhere = env.dir.join("other-repo");
+        crate::testing::git::init_repo(&elsewhere);
+        let err = post_event(State(app.clone()), Path(id.clone()), Json(verified(Some(&elsewhere), None))).await.unwrap_err();
+        assert!(bad_text(err).contains("not a checkout of this mission's project"), "別的 repo 的工作樹不算");
+
+        let a = commit_file(&wt, "a.txt");
+        let Json(ev) = post_event(State(app.clone()), Path(id.clone()), Json(verified(Some(&wt), None))).await.unwrap();
+        let payload: Value = serde_json::from_str(ev["payload_json"].as_str().unwrap()).unwrap();
+        assert_eq!(payload["sha"], json!(a), "daemon 自己讀 HEAD 記下完整 sha");
+        // 縮寫 sha 也行，跟工作樹對不上就是 400。
+        let err = post_event(State(app.clone()), Path(id.clone()), Json(verified(Some(&wt), Some("0123456789ab")))).await.unwrap_err();
+        assert!(matches!(err, LcError::Bad(_)));
+
+        // 執行者驗完又改（rebase／補一刀）：B 沒驗過，交付擋下來，而且**不**把任務停成交付失敗。
+        let b = commit_file(&wt, "b.txt");
+        let err = post_deliver(State(app.clone()), Path(id.clone()), Json(deliver_from(&wt))).await.unwrap_err();
+        let LcError::Conflict(v) = err else { panic!("expected 409") };
+        assert_eq!((v["reason"].as_str(), v["verified_sha"].as_str(), v["head"].as_str()), (Some("head_not_verified"), Some(a.as_str()), Some(b.as_str())));
+        // 專案主樹的 HEAD 也不是驗過的那個（主樹上可能有別人還沒 review 的 commit）。
+        let err = post_deliver(State(app.clone()), Path(id.clone()), Json(deliver_from(&env.repo))).await.unwrap_err();
+        assert_eq!(conflict_reason(err), "head_not_verified");
+        let Json(cur) = get_mission(State(app.clone()), Path(id.clone())).await.unwrap();
+        assert_eq!(cur["status"], "open", "流程漏了一步不是交付失敗");
+        assert_eq!(git(&origin, &["rev-parse", "main"]), git(&env.repo, &["rev-parse", "main"]), "什麼都沒推");
+
+        // 重驗 B（用縮寫 sha 記）之後才推得上去，推上去的就是 B。
+        let _ = post_event(State(app.clone()), Path(id.clone()), Json(verified(None, Some(&b[..12])))).await.unwrap();
+        let Json(out) = post_deliver(State(app.clone()), Path(id.clone()), Json(deliver_from(&wt))).await.unwrap();
+        assert_eq!(out["sha"], json!(b));
+        assert_eq!(git(&origin, &["rev-parse", "main"]), b);
+    }
+
+    /// 交付失敗停下來之後，rebase 並重驗、再交付成功：「推 main 失敗」的暫停自動解除，卡片不再寫著等你決定（review3 c1 M9）。
+    #[tokio::test]
+    async fn a_successful_retry_clears_the_delivery_failure_pause() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (origin, wt) = with_origin(&env);
+        let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("retry", "push_main"))).await.unwrap();
+        let id = m["id"].as_str().unwrap().to_string();
+        commit_file(&wt, "mine.txt");
+        let _ = post_event(State(app.clone()), Path(id.clone()), Json(verified(Some(&wt), None))).await.unwrap();
+
+        // 別人先推了一個 commit：不是 fast-forward，任務停下來。
+        let other = env.dir.join("other-clone");
+        std::process::Command::new("git").args(["clone", "-q", origin.to_str().unwrap(), other.to_str().unwrap()]).status().unwrap();
+        commit_file(&other, "theirs.txt");
+        git(&other, &["push", "-q", "origin", "HEAD:main"]);
+        let err = post_deliver(State(app.clone()), Path(id.clone()), Json(deliver_from(&wt))).await.unwrap_err();
+        assert_eq!(conflict_reason(err), "not_fast_forward");
+        assert_eq!(load(&app, &id).await.unwrap().paused_reason.as_deref(), Some("push_main_failed"));
+
+        // rebase 之後 HEAD 變了：舊的 verified 不算，要重驗。
+        git(&wt, &["fetch", "-q", "origin"]);
+        git(&wt, &["rebase", "-q", "origin/main"]);
+        assert_eq!(conflict_reason(post_deliver(State(app.clone()), Path(id.clone()), Json(deliver_from(&wt))).await.unwrap_err()), "head_not_verified");
+        let _ = post_event(State(app.clone()), Path(id.clone()), Json(verified(Some(&wt), None))).await.unwrap();
+        let Json(out) = post_deliver(State(app.clone()), Path(id.clone()), Json(deliver_from(&wt))).await.unwrap();
+        assert_eq!(out["sha"], json!(git(&wt, &["rev-parse", "HEAD"])));
+
+        let m = load(&app, &id).await.unwrap();
+        assert_eq!(m.status(), "open", "交付成功就不再停在 push_main_failed");
+        let events = store::events(&app.db, &id).await.unwrap();
+        assert!(events.iter().any(|e| e.kind == "resumed" && e.text.contains("push_main_failed")));
+    }
+
+    /// 這個版本以前記的 `verified` 沒有 sha：不能拿來放行交付，要講清楚怎麼補。
+    #[tokio::test]
+    async fn a_legacy_verified_without_a_commit_does_not_open_the_gate() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("legacy", "pr"))).await.unwrap();
+        let id = m["id"].as_str().unwrap().to_string();
+        store::add_event(&app.db, &id, "verified", "舊版記的", Some("daemon"), &json!({})).await.unwrap();
+        let err = post_deliver(State(app.clone()), Path(id.clone()), Json(deliver_from(&env.repo))).await.unwrap_err();
+        assert_eq!(conflict_reason(err), "verified_without_sha");
     }
 
     #[test]

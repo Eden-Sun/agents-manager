@@ -861,6 +861,13 @@ def cmd_mission(client: Client, cfg: dict, args) -> object:
         if not args.kind or not (args.text or args.text_file):
             raise AgmError("bad_args", "mission event 需要 --kind（report / note / verified）與 --text 或 --text-file", 2)
         body: dict = {"kind": args.kind, "text": _mission_text(args)}
+        # verified 要說驗的是哪個 commit：交付時 daemon 只放行 HEAD 等於它的工作樹（review3 c1 M9）。
+        if args.kind == "verified" and not (args.worktree or args.sha):
+            raise AgmError("bad_args", "mission event --kind verified 需要 --worktree（驗過的工作樹）或 --sha（驗過的 commit）", 2)
+        if args.worktree:
+            body["worktree"] = str(Path(args.worktree).expanduser())
+        if args.sha:
+            body["sha"] = args.sha
         _with_relay(body, cfg, args)
         return client.post(f"{base}/events", body)
     if op == "pause":
@@ -1204,7 +1211,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--detail", help="pause：補充說明")
     s.add_argument("--role", choices=["executor", "reviewer", "verifier"], help="pick：要挑哪個角色的身分")
     s.add_argument("--exclude", help="pick：排除的身分（reviewer 排除執行者的身分）")
-    s.add_argument("--worktree", help="deliver：要交付的 worktree（本機絕對路徑）")
+    s.add_argument("--worktree", help="deliver：要交付的 worktree；event --kind verified：驗過的 worktree（daemon 記下它的 HEAD）")
+    s.add_argument("--sha", help="event --kind verified：驗過的 commit（沒有 --worktree 時必給）")
     s.add_argument("--request-id", dest="request_id", help="question/answer/revise：穩定的冪等鍵，重送沿用同一個")
     s.add_argument("--reply-to", dest="reply_to", help="answer：回的是哪一則 question 的事件 id")
     s.add_argument("--as-user", action="store_true", help="answer：依使用者明確指示代送暫停回答（不帶 relay_from）")

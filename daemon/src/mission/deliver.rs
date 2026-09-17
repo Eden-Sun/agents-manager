@@ -40,6 +40,46 @@ async fn git(dir: &Path, args: &[&str]) -> Result<(bool, String), Failure> {
     Ok((out.status.success(), text))
 }
 
+/// 這個目錄現在的 HEAD（完整 sha）。不是 git 工作樹就回 `None`。
+pub async fn head_sha(dir: &Path) -> Option<String> {
+    match git(dir, &["rev-parse", "--verify", "HEAD"]).await {
+        Ok((true, out)) => out.lines().next().map(str::trim).filter(|s| is_full_sha(s)).map(str::to_string),
+        _ => None,
+    }
+}
+
+/// 在 `dir` 這個 repo 裡把一個（可能是縮寫的）sha 解成完整的 commit sha。找不到或不是 commit 回 `None`。
+pub async fn resolve_commit(dir: &Path, sha: &str) -> Option<String> {
+    if !(7..=40).contains(&sha.len()) || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let spec = format!("{}^{{commit}}", sha.to_ascii_lowercase());
+    match git(dir, &["rev-parse", "--verify", "--quiet", &spec]).await {
+        Ok((true, out)) => out.lines().next().map(str::trim).filter(|s| is_full_sha(s)).map(str::to_string),
+        _ => None,
+    }
+}
+
+fn is_full_sha(s: &str) -> bool {
+    s.len() == 40 && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// 兩個目錄是不是同一個 repo（主工作樹與它的 `git worktree` 共用一份 common dir）。
+///
+/// 交付只收這個任務所屬專案的工作樹：隨便指一個存在的絕對路徑就放行的話，別的 repo 的 HEAD
+/// 也能被推上這個專案的 origin（review3 c1 M9）。任一邊讀不到就當不是。
+pub async fn same_repo(a: &Path, b: &Path) -> bool {
+    async fn common(dir: &Path) -> Option<std::path::PathBuf> {
+        let (ok, out) = git(dir, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).await.ok()?;
+        let line = out.lines().next().map(str::trim).filter(|l| ok && !l.is_empty())?;
+        std::fs::canonicalize(line).ok()
+    }
+    match (common(a).await, common(b).await) {
+        (Some(x), Some(y)) => x == y,
+        _ => false,
+    }
+}
+
 /// 共同的前置檢查：工作樹乾淨、fetch 得到、真的有東西要交。回傳 (HEAD sha, origin/<base> sha)。
 async fn preflight(dir: &Path, remote: &str, base: &str) -> Result<(String, String), Failure> {
     let (_, porcelain) = git(dir, &["status", "--porcelain"]).await?;
@@ -174,6 +214,25 @@ mod tests {
         let (_, remote) = git(&work, &["ls-remote", "origin", "refs/heads/main"]).await.unwrap();
         let (_, mine) = git(&work, &["rev-parse", "HEAD"]).await.unwrap();
         assert!(!remote.starts_with(&mine), "不能被推上去");
+    }
+
+    /// 交付關卡用的 git 事實：HEAD、縮寫 sha 解成完整的、兩個目錄是不是同一個 repo（review3 c1 M9）。
+    #[tokio::test]
+    async fn the_gate_can_tell_which_commit_and_which_repo() {
+        let (root, seed, work) = fixture();
+        commit(&work, "b");
+        let head = head_sha(&work).await.expect("HEAD");
+        assert_eq!(head.len(), 40);
+        assert_eq!(resolve_commit(&work, &head[..10]).await.as_deref(), Some(head.as_str()));
+        assert_eq!(resolve_commit(&work, "not-a-sha").await, None);
+        assert_eq!(resolve_commit(&work, "0000000000").await, None, "不存在的 commit");
+        assert!(head_sha(root.path()).await.is_none(), "不是 git 工作樹");
+
+        let wt = root.path().join("wt");
+        sh(&work, &["worktree", "add", "-q", "--detach", wt.to_str().unwrap()]);
+        assert!(same_repo(&work, &wt).await, "worktree 跟主工作樹是同一個 repo");
+        assert!(!same_repo(&work, &seed).await, "同一個 origin 的另一份 clone 不算");
+        assert!(!same_repo(&work, root.path()).await);
     }
 
     #[tokio::test]
