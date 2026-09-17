@@ -201,6 +201,9 @@ prompt 改成打字進 pane 並以無損證據確認。**一個字都沒打時�
 | 409 | `{"reason":"composer_busy"|"composer_unreadable"|"transcript_not_ready"|"transcript_unreadable"|"codex_log_not_ready"|"no_pane_to_type_into","retryable":true,"sent":false,"run_id"}` | 暫時送不了（輸入框有字、claude 還沒回報 session…）。同一個 `client_request_id` 稍後重送即可；AGM 交辦維持 queued 退避重試。 |
 | 422 | `{"error":"delivery_unprovable","reason":"prompt_too_long_to_prove","sent":false,"run_id"}` | 超過 20 萬字，不打。 |
 
+turn 已經建好、還沒打第一個字時 run 就結束（`mark_run_exited` 把它標 failed 並插「run ended」說明）：撤回撤不掉，這時
+**不刪任何東西**，回 `200` 那筆 turn 的現況（訊息與說明都留著），跟用同一個 `client_request_id` 重送拿到的回應一致，不回可重試的 409。
+
 沒有無損證據可用的 run（grok、遠端主機、codex 還沒回報 session 的多行 prompt…，矩陣見 SPEC §4.4a）**照樣送出**，回
 `200 {"delivery":"unverified"}`：已打字、框收下並在 Enter 後清空，但無法逐字核對。走 herdr `agent.prompt` 的那條路同樣回
 `unverified`——它回 ok 但不保證字進得去，沒有證據就是沒有證據。turn JSON 帶 `delivery:"ok"` 與 `delivery_verified:0`，UI 標「未驗證送達」。

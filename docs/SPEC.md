@@ -439,6 +439,10 @@ abort 之後照常 flush 出去（但先照下一段等寬限）。要取消排�
 `created_at` 是排進佇列的時間，flush 可能晚半小時；沒有 `delivered_at` 的舊列才退回 `created_at`（review 2026-09-16 deliv L3）。
 
 **撤回**（一個字都沒送出而刪掉 turn 與訊息）之後推一次 `resync`：事件模型沒有「刪除」，不補的話客戶端會留著一顆送不出去的泡泡與一個永遠不會結束的回合。
+撤回只在 turn **還是 `in_flight`** 時算數，而且跟刪訊息在同一個交易裡（`DELETE turns … AND status='in_flight'` 刪不到就整個 rollback）：
+`fail_in_flight` 不拿 per-bot 鎖，會在這個窄窗裡把 turn 標 failed 並插「run ended」說明；撤不掉時**一個字都不刪**、不推 `resync`，
+照 turn 現況回 `200`，跟同一個 `client_request_id` 重送拿到的答案走同一段程式，**不回可重試的 409**——否則使用者的訊息與那則說明被
+一起刪掉，只留一個空的 failed 回合，呼叫端重送又只拿得到那筆失敗（review3 L4）。
 `NotAttempted`（零寫入）的重送要退還 `resend_count`：唯一一次補救機會不該被「框裡剛好有字」這種兩秒後就消失的原因吃掉。
 退還之後 watchdog 隔 3 秒用那份額度**再試一次**（可重試的原因才試；review2 2026-09-16：以前退了額度卻當場判失敗，沒有任何路徑用得到它）；
 兩次都被擋就照樣判失敗，但系統訊息寫明「試著自動重送時被擋下（原因），一個字都沒打」，不是只說 agent 沒反應。
@@ -489,7 +493,8 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run
 3. **先規劃再建 turn**（本章開頭「送 prompt 的路徑」）：路徑（`agent.prompt` 或打字）、證據、空框。`NotAttempted` 不建 turn：可重試的 409、不可能的 422。
    規劃通過才 `INSERT turns (in_flight, pending, web, prompt_text = 實際送出的字)` + user Message（泡泡原文）；commit；推 WS。
 4. 鎖內照規劃送出，結果五種見本章開頭：`Submitted`／`Handed`／`Unverified` → `delivery=ok`（證據與能否重送分開記）；
-   打第一個字之前才出現的 `NotAttempted` → 撤回 turn 與訊息回 409；`Unproven` 與打字後的錯誤 → `unknown`（不重送）；`agent_blocked` → `failed`。
+   打第一個字之前才出現的 `NotAttempted` → 撤回 turn 與訊息回 409（turn 已被別的路徑收掉時不刪、照現況回 200，見 §4.4a）；
+   `Unproven` 與打字後的錯誤 → `unknown`（不重送）；`agent_blocked` → `failed`。
 5. 完成靠 hook（§6.7）或備援（§4.3）。Turn 在送 prompt 之前已 `in_flight`，所以 hook 早於 RPC 回應也配得到。
 6. `interrupt`（送 `esc`）／`stop` 把 in-flight Turn 標 `failed` 並加 system Message。
 7. **stall watchdog**：`delivery = ok` 後 12 秒內沒收到 `working`／`blocked` 且仍 idle/unknown → 先看字是不是還在框裡（在就補按 Enter、給寬限）；
