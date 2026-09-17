@@ -118,6 +118,28 @@ export interface HostResult {
   error: string | null
 }
 
+/** issue #104：開發者專用外部 Cargo verification worker。密碼永遠不從 API 回傳。 */
+export interface RemoteCargoSettings {
+  enabled: boolean
+  host: string
+  user: string
+  ssh_port: number
+  remote_root: string
+  cargo_jobs: number
+  password_set: boolean
+}
+
+export interface RemoteCargoInput {
+  enabled: boolean
+  host: string
+  user: string
+  ssh_port: number
+  remote_root: string
+  cargo_jobs: number
+  /** undefined = 保留既有密碼；空字串 = 清除改用 key/agent auth。 */
+  password?: string
+}
+
 /** `GET|POST /api/hosts/:name/gh` */
 export interface GhAccount {
   login: string
