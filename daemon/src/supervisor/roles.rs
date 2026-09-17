@@ -529,6 +529,9 @@ const OWNER: &str = "COALESCE(claimed_by, role)";
 /// * 巡檢：自己擁有的；協調者**還沒建立**時（舊部署）連協調的一起收。
 /// * 協調：只有自己擁有的。沒有重試上限——送不出去是有界退避（見 `responder::notify`），
 ///   事件一直留著。巡檢的事件照舊有 `max_attempts`。
+///
+/// 第二鍵用 `rowid`（寫入順序），不是 `id`（issue #100，同 a4605b2 的根因）：`created_at` 只到
+/// 毫秒，AGM 短時間連續寫進來的事件常擠在同一格，而 `id` 是 ULID、同一毫秒內的亂數段不保證遞增。
 pub async fn due_for(
     pool: &SqlitePool,
     role: Role,
@@ -548,7 +551,7 @@ pub async fn due_for(
     let sql = format!(
         "SELECT * FROM supervisor_inbox WHERE supervisor_id=?2 AND state='pending' AND {owned}
            AND (notify_next_at IS NULL OR notify_next_at <= ?3) AND {cap}
-         ORDER BY created_at ASC, id ASC"
+         ORDER BY created_at ASC, rowid ASC"
     );
     Ok(sqlx::query_as::<_, super::store::InboxEvent>(&sql)
         .bind(max_attempts)
@@ -565,8 +568,9 @@ pub async fn list_for(pool: &SqlitePool, role: Option<Role>, all: bool, limit: i
         Some(r) => format!("AND {OWNER}='{}'", r.as_str()),
         None => String::new(),
     };
-    // 稽核視圖（`all`）最新在前；工作視圖只列沒結案的、最舊在前，照順序 ack 才清得掉。
-    let (state, order) = if all { ("", "created_at DESC, id DESC") } else { ("AND state!='handled'", "created_at ASC, id ASC") };
+    // 稽核視圖（`all`）最新在前；工作視圖只列沒結案的、最舊在前，照順序 ack 才清得掉。第二鍵用
+    // `rowid`（寫入順序），不是 `id`（issue #100，理由同 `due_for`：同一毫秒內 ULID 的亂數段不保證遞增）。
+    let (state, order) = if all { ("", "created_at DESC, rowid DESC") } else { ("AND state!='handled'", "created_at ASC, rowid ASC") };
     let sql = format!(
         "SELECT * FROM supervisor_inbox WHERE supervisor_id=? {state} {owned} ORDER BY {order} LIMIT ?"
     );
@@ -660,12 +664,15 @@ pub async fn ack(pool: &SqlitePool, id: &str, actor: Option<Role>, responder_con
 /// 2. 同一個 incident 開了又在送出前就恢復：兩筆一起結案，不叫醒任何人（抖動）。
 ///
 /// 被合併的列 `state='handled'`、`acked_by='daemon'`、`merged_into` 指向留下來的那筆，稽核看得到。
+///
+/// 「留最新一筆」的第二鍵用 `rowid`（寫入順序），不是 `id`（issue #100，理由同 `due_for`）：健康狀態
+/// 短時間內連續變化時常擠進同一毫秒，字典序挑到的若不是真的最新一筆，留下來的反而是舊狀態。
 pub async fn coalesce_patrol(pool: &SqlitePool) -> Result<usize> {
     let now = crate::db::now();
     let mut merged = 0usize;
     let health: Vec<(String,)> = sqlx::query_as(
         "SELECT id FROM supervisor_inbox WHERE state='pending' AND kind='health_changed'
-          ORDER BY created_at DESC, id DESC",
+          ORDER BY created_at DESC, rowid DESC",
     )
     .fetch_all(pool)
     .await?;
@@ -1137,5 +1144,73 @@ mod tests {
         assert_eq!(keys, vec!["health:2", "incident:I2:opened"]);
         assert_eq!(get(&p, Role::Patrol).await.unwrap().merged, 4);
         assert_eq!(coalesce_patrol(&p).await.unwrap(), 0, "再跑一次不會重複合併");
+    }
+
+    /// issue #100（同 a4605b2 的根因）：AGM 短時間連續寫進 inbox 的兩筆事件常擠進同一毫秒。`due_for`／
+    /// `list_for` 排序要看寫入順序（`rowid`），不是 ULID 字典序——故意讓先寫進去的那筆用字典序比較大
+    /// 的假 ULID，證明兩支函式的三種排序（送達、工作視圖、稽核視圖）都不會被字典序騙過去。
+    #[tokio::test]
+    async fn inbox_events_written_in_the_same_millisecond_keep_their_order() {
+        let p = pool().await;
+        let at = "2026-09-18T00:00:00.000Z";
+        for (id, key) in [("01ZZZZZZZZZZZZZZZZZZZZZZZZ", "first"), ("01AAAAAAAAAAAAAAAAAAAAAAAA", "second")] {
+            sqlx::query(
+                "INSERT INTO supervisor_inbox (id, supervisor_id, event_key, kind, state, role, created_at, updated_at)
+                 VALUES (?,?,?,'ops_alert','pending','patrol',?,?)",
+            )
+            .bind(id)
+            .bind(super::super::store::SUPERVISOR_ID)
+            .bind(key)
+            .bind(at)
+            .bind(at)
+            .execute(&p)
+            .await
+            .unwrap();
+        }
+        let due = due_for(&p, Role::Patrol, true, at, 5).await.unwrap();
+        assert_eq!(due.iter().map(|e| e.event_key.as_str()).collect::<Vec<_>>(), vec!["first", "second"], "due_for 照寫入順序，不是照 ULID");
+
+        let working = list_for(&p, Some(Role::Patrol), false, 10).await.unwrap();
+        assert_eq!(
+            working.iter().map(|e| e.event_key.as_str()).collect::<Vec<_>>(),
+            vec!["first", "second"],
+            "list_for（工作視圖，最舊在前）照寫入順序"
+        );
+
+        let audit = list_for(&p, Some(Role::Patrol), true, 10).await.unwrap();
+        assert_eq!(
+            audit.iter().map(|e| e.event_key.as_str()).collect::<Vec<_>>(),
+            vec!["second", "first"],
+            "list_for（稽核視圖，最新在前）照寫入順序的反序"
+        );
+    }
+
+    /// issue #100：`health_changed` 合併要留「寫入順序最新」的那筆，不是 ULID 字典序最大的那筆——故意
+    /// 讓先寫入的（真正比較舊的健康狀態）用字典序比較大的假 ULID。留錯了的話，讀的人看到的是舊狀態。
+    #[tokio::test]
+    async fn coalesce_patrol_keeps_the_row_written_last_even_if_its_ulid_sorts_first() {
+        let p = pool().await;
+        let at = "2026-09-18T00:00:00.000Z";
+        for (id, key) in [("01ZZZZZZZZZZZZZZZZZZZZZZZZ", "health:old"), ("01AAAAAAAAAAAAAAAAAAAAAAAA", "health:new")] {
+            sqlx::query(
+                "INSERT INTO supervisor_inbox (id, supervisor_id, event_key, kind, state, role, created_at, updated_at)
+                 VALUES (?,?,?,'health_changed','pending','patrol',?,?)",
+            )
+            .bind(id)
+            .bind(super::super::store::SUPERVISOR_ID)
+            .bind(key)
+            .bind(at)
+            .bind(at)
+            .execute(&p)
+            .await
+            .unwrap();
+        }
+        assert_eq!(coalesce_patrol(&p).await.unwrap(), 1, "留一筆、合併一筆");
+        let kept: String = sqlx::query_scalar("SELECT event_key FROM supervisor_inbox WHERE state='pending'").fetch_one(&p).await.unwrap();
+        assert_eq!(kept, "health:new", "留下來的該是真正後寫入的那筆，不是字典序比較小的那筆");
+        let (merged_state, merged_into): (String, Option<String>) =
+            sqlx::query_as("SELECT state, merged_into FROM supervisor_inbox WHERE event_key='health:old'").fetch_one(&p).await.unwrap();
+        assert_eq!(merged_state, "handled");
+        assert_eq!(merged_into.as_deref(), Some("01AAAAAAAAAAAAAAAAAAAAAAAA"));
     }
 }
