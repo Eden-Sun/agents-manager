@@ -1096,9 +1096,14 @@ pub async fn set_turn_error(pool: &SqlitePool, id: &str, turn_error: &str) -> Re
 }
 
 /// 一個群組任務底下的所有交辦，舊的在前。
+///
+/// 同一毫秒派出去的兩件照**寫入順序**排（`rowid`）：`created_at` 只到毫秒，AGM 背靠背派下一個角色時
+/// 兩件常擠在同一格，而 `id` 是 ULID、同一毫秒內的亂數段不保證遞增。這裡排錯不只是清單難看——
+/// `mission::api::phase` 取的是「最後一件還開著的交辦」（`.iter().rev().find(..)`），順序一翻，
+/// 任務卡上的階段就會在 executing／verifying／reviewing 之間跳掉（同 a4605b2 的根因）。
 pub async fn mission_assignments(pool: &SqlitePool, mission_id: &str) -> Result<Vec<Assignment>> {
     Ok(sqlx::query_as::<_, Assignment>(
-        "SELECT * FROM supervisor_assignments WHERE mission_id = ? ORDER BY created_at, id",
+        "SELECT * FROM supervisor_assignments WHERE mission_id = ? ORDER BY created_at, rowid",
     )
     .bind(mission_id)
     .fetch_all(pool)
@@ -3909,6 +3914,37 @@ mod tests {
         let history = approval_decisions(&p).await.unwrap();
         let order: Vec<&str> = history["ap"].iter().map(|d| d["to"].as_str().unwrap()).collect();
         assert_eq!(order, vec!["approved", "revoked"]);
+    }
+
+    /// AGM 背靠背派出的兩件交辦（同一毫秒）照寫入順序排，不看 ULID 的亂數段。
+    ///
+    /// 這條守的是 `mission::api::phase`：它取「最後一件還開著的交辦」的角色當任務階段，
+    /// 順序一翻，任務卡就會顯示成 verifying 而不是 executing。
+    #[tokio::test]
+    async fn mission_assignments_written_in_the_same_millisecond_keep_their_order() {
+        let p = pool().await;
+        let at = "2026-09-17T12:00:00.000Z";
+        // id 故意跟寫入順序相反：舊的 `ORDER BY created_at, id` 會把這兩件倒過來。
+        for (id, role) in [("01ZZZZZZZZZZZZZZZZZZZZZZZZ", "executor"), ("01AAAAAAAAAAAAAAAAAAAAAAAA", "verifier")] {
+            sqlx::query(
+                "INSERT INTO supervisor_assignments
+                   (id, supervisor_id, target_bot_id, client_request_id, text, status, attempts,
+                    mission_id, mission_role, created_at, updated_at)
+                 VALUES (?,?, 'bot1', ?, 'x', 'queued', 0, 'm1', ?, ?, ?)",
+            )
+            .bind(id)
+            .bind(SUPERVISOR_ID)
+            .bind(format!("crid-{id}"))
+            .bind(role)
+            .bind(at)
+            .bind(at)
+            .execute(&p)
+            .await
+            .unwrap();
+        }
+        let rows = mission_assignments(&p, "m1").await.unwrap();
+        let roles: Vec<&str> = rows.iter().filter_map(|a| a.mission_role.as_deref()).collect();
+        assert_eq!(roles, vec!["executor", "verifier"], "同一毫秒照寫入順序，不是照 ULID");
     }
 
     #[tokio::test]
