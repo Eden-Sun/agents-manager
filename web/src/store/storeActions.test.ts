@@ -125,6 +125,26 @@ test('等你回答的舊任務不會被 50 筆已完成的新任務擠出清單�
   assert.equal(s.missions.p1.at(-1)?.id, 'old-paused', '合起來仍是新的在前')
 })
 
+test('重連之後已載入的任務清單與卡片全部重抓（斷線期間的 mission_updated 收不到）', async () => {
+  seed()
+  useStore.setState({
+    missions: { p1: [{ id: 'm1', project_id: 'p1', status: 'open' } as Mission] },
+    missionDetail: { m1: { id: 'm1', project_id: 'p1' } as MissionDetail },
+  })
+  routeDaemon((r) =>
+    r.path.includes('/missions/m1')
+      ? json({ id: 'm1', project_id: 'p1', status: 'paused', paused_reason: 'max_rounds', events: [], assignments: [], revisions: [], parent: null }, 200)
+      : json({ project_id: 'p1', missions: [] }, 200),
+  )
+  await useStore.getState().refreshLoadedMissions()
+  assert.ok(
+    requests.some((r) => r.path.includes('/projects/p1/missions')),
+    '清單要重抓',
+  )
+  assert.ok(requests.some((r) => r.path.includes('/missions/m1')), '卡片的細節也要重抓')
+  assert.equal(useStore.getState().missionDetail.m1?.paused_reason, 'max_rounds')
+})
+
 test('SPA fallback 的 404（body 不是 daemon 的錯誤）仍然當成這台沒有群組任務', async () => {
   seed()
   routeDaemon(() => new Response('<!doctype html>', { status: 404 }))

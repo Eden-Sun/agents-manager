@@ -7,6 +7,7 @@
 pub mod api;
 pub mod deliver;
 pub mod pick;
+pub mod relay;
 pub mod store;
 
 use crate::state::App;
