@@ -91,6 +91,18 @@ pub async fn put_settings(
     if input.enabled && (host.is_empty() || user.is_empty()) {
         return Err(LcError::Bad("remote Cargo 啟用時 host 與 user 都必填".into()));
     }
+    let safe_host = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':');
+    let safe_user = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_');
+    let safe_root = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '/');
+    if !host.chars().all(safe_host) || host.starts_with('-') {
+        return Err(LcError::Bad("remote Cargo host 含不支援的字元".into()));
+    }
+    if !user.chars().all(safe_user) || user.starts_with('-') {
+        return Err(LcError::Bad("remote Cargo user 含不支援的字元".into()));
+    }
+    if !remote_root.is_empty() && (!remote_root.chars().all(safe_root) || remote_root.contains("..")) {
+        return Err(LcError::Bad("remote_root 只能使用英數、._-/，且不可含 ..".into()));
+    }
     if input.ssh_port == 0 {
         return Err(LcError::Bad("ssh_port must be 1..65535".into()));
     }
@@ -138,17 +150,14 @@ pub async fn test_settings(State(app): State<Arc<App>>) -> Result<Json<Value>, L
 }
 
 fn has_program(name: &str) -> bool {
-    Command::new("sh")
-        .args(["-c", &format!("command -v {} >/dev/null 2>&1", sh_quote(name))])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    let script = format!("command -v {} >/dev/null 2>&1", sh_quote(name));
+    Command::new("sh").arg("-c").arg(script).status().map(|s| s.success()).unwrap_or(false)
 }
 
 fn secret(data_dir: &Path) -> anyhow::Result<Option<String>> {
     match std::fs::read_to_string(password_path(data_dir)) {
         Ok(s) => {
-            let s = s.trim_end_matches(['\r', '\n']).to_string();
+            let s = s.trim_end_matches(|c| c == '\r' || c == '\n').to_string();
             Ok((!s.is_empty()).then_some(s))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
