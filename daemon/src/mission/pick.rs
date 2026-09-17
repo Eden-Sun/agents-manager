@@ -75,8 +75,21 @@ enum Block {
     None,
     FiveHour(Option<String>),
     SevenDay(Option<String>),
-    /// 只有 Fable 週桶用盡：opus 還能跑。
-    FableOnly(Option<String>),
+    /// 只有某個模型的週桶用盡（Fable／Opus／Sonnet）：同一身分換別的模型還能跑。
+    ModelOut { model: String, until: Option<String> },
+}
+
+/// 那個模型的週桶用盡時，同一身分改用哪個模型。Fable 用盡→opus（7d 共用桶沒見底才會走到這裡）；
+/// Opus 用盡→確定還有 Fable 額度就用 Fable，否則 sonnet；Sonnet 用盡→opus。
+fn fallback_model(out: &str, q: &Quota) -> Option<&'static str> {
+    let fable_ok = q.fable.as_ref().is_some_and(|w| !w.critical());
+    match out {
+        "fable" => Some("opus"),
+        "opus" if fable_ok => Some("fable"),
+        "opus" => Some("sonnet"),
+        "sonnet" => Some("opus"),
+        _ => None,
+    }
 }
 
 fn hit_active(hit: &LimitHit, now: DateTime<Utc>) -> bool {
@@ -121,21 +134,26 @@ fn sooner(a: Option<String>, b: Option<String>) -> Option<String> {
 fn block_of(q: &Quota, now: DateTime<Utc>) -> Block {
     if let Some(hit) = q.limit_hit.as_ref().filter(|h| hit_active(h, now)) {
         let (five, seven, fable) = (q.five_hour.as_ref(), q.seven_day.as_ref(), q.fable.as_ref());
+        let model_bucket = matches!(hit.bucket.as_deref(), Some("fable") | Some("opus") | Some("sonnet"));
         match hit.bucket.as_deref() {
             Some("seven_day") => return Block::SevenDay(sooner(hit.until.clone(), reset_of(seven))),
             Some("five_hour") if exhausted(seven) => return Block::SevenDay(reset_of(seven)),
             Some("five_hour") => return Block::FiveHour(sooner(hit.until.clone(), reset_of(five))),
-            Some("fable") if exhausted(seven) => return Block::SevenDay(reset_of(seven)),
-            // 5h 也見底：先等 5h（時間是 5h 自己的，不是 Fable 的下週）；5h 回來之後 Fable 撞限還在，再換 opus。
-            Some("fable") if exhausted(five) => return Block::FiveHour(reset_of(five)),
-            Some("fable") => return Block::FableOnly(sooner(hit.until.clone(), reset_of(fable))),
+            Some(_) if model_bucket && exhausted(seven) => return Block::SevenDay(reset_of(seven)),
+            // 5h 也見底：先等 5h（時間是 5h 自己的，不是模型週桶的下週）；5h 回來之後撞限還在，再換模型。
+            Some(_) if model_bucket && exhausted(five) => return Block::FiveHour(reset_of(five)),
+            // Opus／Sonnet 的週桶沒有自己的量表，時間借 7d 那格（同一個重置週期）。
+            Some(m) if model_bucket => {
+                let own = if m == "fable" { reset_of(fable) } else { reset_of(seven) };
+                return Block::ModelOut { model: m.to_string(), until: sooner(hit.until.clone(), own) };
+            }
             _ => {}
         }
         if exhausted(five) && !exhausted(seven) {
             return Block::FiveHour(hit.until.clone().or(reset_of(five)));
         }
         if exhausted(fable) && !exhausted(seven) && !exhausted(five) {
-            return Block::FableOnly(hit.until.clone().or(reset_of(fable)));
+            return Block::ModelOut { model: "fable".into(), until: hit.until.clone().or(reset_of(fable)) };
         }
         return Block::SevenDay(hit.until.clone().or(reset_of(seven)));
     }
@@ -146,7 +164,7 @@ fn block_of(q: &Quota, now: DateTime<Utc>) -> Block {
         return Block::FiveHour(reset_of(q.five_hour.as_ref()));
     }
     if exhausted(q.fable.as_ref()) {
-        return Block::FableOnly(reset_of(q.fable.as_ref()));
+        return Block::ModelOut { model: "fable".into(), until: reset_of(q.fable.as_ref()) };
     }
     Block::None
 }
@@ -181,13 +199,17 @@ fn pick_worker(role: Role, candidates: &[Candidate], on_5h: On5hLimit, exclude: 
             Block::None => {
                 return Pick::Use { identity: c.name.into(), model: None, reason: "額度可用".into() };
             }
-            Block::FableOnly(_) => {
-                return Pick::Use {
-                    identity: c.name.into(),
-                    model: Some("opus".into()),
-                    reason: "Fable 週桶已用盡，同一身分改用 opus".into(),
-                };
-            }
+            Block::ModelOut { model, until } => match c.quota.and_then(|q| fallback_model(&model, q)) {
+                Some(alt) => {
+                    return Pick::Use {
+                        identity: c.name.into(),
+                        model: Some(alt.into()),
+                        reason: format!("{model} 週桶已用盡，同一身分改用 {alt}"),
+                    };
+                }
+                // 換不到別的模型：這個身分這一輪用不了，跟週窗用盡一樣往下一個身分找。
+                None => exhausted_resets.push((c.name.into(), until)),
+            },
             Block::FiveHour(until) => match on_5h {
                 On5hLimit::Wait => {
                     return Pick::Wait { identity: c.name.into(), until, reason: "5 小時窗撞限，依任務設定原地等重置".into() };
@@ -221,6 +243,10 @@ fn pick_verifier(candidates: &[Candidate], on_5h: On5hLimit, now: DateTime<Utc>)
         let fable_ok = q.fable.as_ref().is_some_and(|w| !w.critical());
         match block_of(q, now) {
             Block::None if fable_ok => {
+                return Pick::Use { identity: c.name.into(), model: Some("fable".into()), reason: "Fable 週桶有額度".into() };
+            }
+            // 別的模型的週桶用盡跟驗證者無關：它只跑 Fable。
+            Block::ModelOut { ref model, .. } if model != "fable" && fable_ok => {
                 return Pick::Use { identity: c.name.into(), model: Some("fable".into()), reason: "Fable 週桶有額度".into() };
             }
             Block::FiveHour(until) if fable_ok && on_5h == On5hLimit::Wait => {
@@ -337,7 +363,7 @@ mod tests {
         };
         let mut fable_hit = q(10.0, 20.0, None);
         fable_hit.limit_hit = Some(hit("fable", "2026-09-20T11:50:00Z"));
-        assert_eq!(block_of(&fable_hit, now), Block::FableOnly(Some("2026-09-20T11:50:00Z".into())));
+        assert_eq!(block_of(&fable_hit, now), Block::ModelOut { model: "fable".into(), until: Some("2026-09-20T11:50:00Z".into()) });
         let qs = [("cc2", Some(fable_hit.clone())), ("cc1", Some(q(0.0, 0.0, Some(0.0))))];
         assert_eq!(used(&pick(Role::Executor, &cands(&qs), On5hLimit::Wait, None, now)), ("cc2", Some("opus")), "Fable 用完是同身分換 opus，不是換身分");
 
@@ -355,6 +381,49 @@ mod tests {
         // 讀數本身說週窗也見底：那就是週窗，桶名擋不住。
         let mut week_gone = q(10.0, 100.0, None);
         week_gone.limit_hit = Some(hit("fable", "2026-09-20T11:50:00Z"));
+        assert_eq!(block_of(&week_gone, now), Block::SevenDay(Some("2026-09-18T06:00:00Z".into())));
+    }
+
+    /// review3 c4 M1：`Opus limit`／`Sonnet limit` 是模型自己的週桶，不是整個身分的 7d。
+    /// 以前被記成 `seven_day`：同身分所有 claude bot 停派、群組任務把整個身分換掉，一路到週重置。
+    #[test]
+    fn a_model_week_bucket_switches_models_instead_of_dropping_the_identity() {
+        let now = now();
+        let hit = |bucket: &str| LimitHit {
+            message: format!("You've hit your {bucket} limit · resets Sep 18"),
+            until: Some("2026-09-18T06:00:00Z".into()),
+            at: "2026-09-13T11:50:00Z".into(),
+            bucket: Some(bucket.into()),
+        };
+        // Opus 週桶用盡、Fable 還有：同一身分改用 fable，不換身分。
+        let mut opus_out = q(10.0, 20.0, Some(10.0));
+        opus_out.limit_hit = Some(hit("opus"));
+        assert_eq!(
+            block_of(&opus_out, now),
+            Block::ModelOut { model: "opus".into(), until: Some("2026-09-18T06:00:00Z".into()) },
+            "時間借 7d 那格（同一個重置週期）"
+        );
+        let qs = [("cc2", Some(opus_out.clone())), ("cc1", Some(q(0.0, 0.0, Some(0.0))))];
+        assert_eq!(used(&pick(Role::Executor, &cands(&qs), On5hLimit::Wait, None, now)), ("cc2", Some("fable")));
+
+        // Fable 那格也見底（或根本沒讀數）：退而求其次用 sonnet，仍然是同一個身分。
+        let mut both = q(10.0, 20.0, Some(100.0));
+        both.limit_hit = Some(hit("opus"));
+        assert_eq!(used(&pick(Role::Executor, &cands(&[("cc2", Some(both))]), On5hLimit::Wait, None, now)), ("cc2", Some("sonnet")));
+
+        // Sonnet 週桶用盡：換 opus。
+        let mut sonnet_out = q(10.0, 20.0, Some(10.0));
+        sonnet_out.limit_hit = Some(hit("sonnet"));
+        assert_eq!(used(&pick(Role::Executor, &cands(&[("cc2", Some(sonnet_out))]), On5hLimit::Wait, None, now)), ("cc2", Some("opus")));
+
+        // 驗證者只跑 Fable：別的模型的週桶用盡跟它無關。
+        let mut opus_out_v = q(10.0, 20.0, Some(10.0));
+        opus_out_v.limit_hit = Some(hit("opus"));
+        assert_eq!(used(&pick(Role::Verifier, &cands(&[("cc2", Some(opus_out_v))]), On5hLimit::Wait, None, now)), ("cc2", Some("fable")));
+
+        // 讀數本身說 7d 也見底：那就是整個身分用盡，桶名擋不住。
+        let mut week_gone = q(10.0, 100.0, Some(10.0));
+        week_gone.limit_hit = Some(hit("opus"));
         assert_eq!(block_of(&week_gone, now), Block::SevenDay(Some("2026-09-18T06:00:00Z".into())));
     }
 

@@ -185,7 +185,9 @@ claude 連線在回應中途掉了時，pane 只多一行 `⏺ API Error: Connec
 - **判定**（`turn_error.rs`）：從畫面底部往上最多 30 行，剝框線與前導記號後，第一個非 chrome 行以 `API error`（不分大小寫）開頭，
   或是額度拒絕（`You've reached your Fable limit. Run /usage-credits …`）就命中。chrome = `is_noise`／`is_activity_shape` + 空輸入框列 + 更新通知行。
   額度拒絕認兩種前綴（CLI 2.1.271 的橫幅前綴表同時有 `You've hit your` 與 `You've reached your`）：`reached your … limit` 照舊；`hit your … limit` 只認速率桶。
-  標成用完的桶照字面分：`session limit`→5h、`weekly`／`Opus limit`／`Sonnet limit`→7d、`Fable`→Fable 桶，認不出才先 5h 再 7d。
+  標成用完的桶照字面分（CLI 2.1.273 的字串表）：`session limit`→5h、`weekly limit`→7d、`Opus limit`／`Sonnet limit`→**模型自己的週桶**（`opus`／`sonnet`）、
+  `Fable limit`→Fable 桶，認不出才先 5h 再 7d。模型桶不標任何量表（daemon 沒有那格），重置時間借 7d 那格——`/usage` 的 `weekly_scoped` 跟 `weekly_all` 同一個週期；
+  它們只擋跑那個模型的 bot（§18.8b），以前記成 7d 會讓同帳號所有 claude bot 停派到週重置、群組任務換掉整個身分（review3 c4 M1）。
   `hit your monthly spend limit`、`fast limit`、團隊預算不是速率桶用完，不當撞限（2026-09-15；以前非 Fable 一律記 5h，撞週額度會把 5h 釘滿、等 5h 重置就當成解除）。
   關鍵是「最後一件事」：`API error · Retrying…` 之後又把答案講完的是重試成功，不算。
 - **記錄**：原文寫 `runs.turn_error`（屬於這個 CLI 程序，重啟即清），對話補一則釘在該回合的 `system` 訊息（`incomplete = 1`、附快照）；
@@ -1444,7 +1446,7 @@ inbox `assignment_noticed`（`needs_review=false`）。送不出去或回合失�
 
 - **派送前**（`controller::dispatch`）與**回合結束後**（`on_turn_done`）各查一次 `quota::limit_hit_for_bot`，撞到就停在 `quota_blocked`。
   回合結束那次的「回覆」是系統錯誤，記進 `error`，不寫 `result`、不算 `completed`。
-- **撞限看桶與模型**（`quota::bucket_blocks_model`）：5h、7d 與沒有桶名的撞限（codex、開機回填）擋整個帳號；模型專屬的桶（`fable`）
+- **撞限看桶與模型**（`quota::bucket_blocks_model`）：5h、7d 與沒有桶名的撞限（codex、開機回填）擋整個帳號；模型專屬的桶（`fable`／`opus`／`sonnet`）
   只擋**正在跑那個模型**的 bot——看 run 的 `runtime_model`，沒有才看設定值，兩個都沒有就保守地照擋。`limit_hit_for_bot` 與協調者的額度判讀（§18.15）走同一條。
   以前不分桶：巡檢（cc0、fable）撞 Fable 上限，同帳號跑 opus 的協調者與交辦都被擋到 Fable 週窗重置（review3 c3 H2）。
   park 時記在 `error` 的橫幅是模型桶、而 bot 現在跑的不是那個模型（修好之前停進來的、或之後 `/model` 換掉了）：`resume_at` 沒到也立刻重送。
