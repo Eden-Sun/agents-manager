@@ -560,6 +560,17 @@ pub async fn backfill_quota_limits_once(app: &Arc<App>, host: &str) {
     backfill_quota_limits(app, host, started).await;
 }
 
+/// 這件交辦 park 時撞的是模型專屬的桶（`error` 裡記的 claude 橫幅，例如 Fable），而這顆 bot 現在跑的模型
+/// 不歸那一桶管（[`crate::quota::bucket_blocks_model`]）。5h／7d／認不出桶名的一律 `false`。
+async fn parked_on_another_models_bucket(app: &Arc<App>, a: &store::Assignment, bot: &crate::db::Bot) -> bool {
+    if bot.kind != "claude" {
+        return false;
+    }
+    let Some(bucket) = a.error.as_deref().and_then(crate::turn_error::banner_bucket) else { return false };
+    let model = crate::quota::running_model(app, bot).await;
+    !crate::quota::bucket_blocks_model(Some(&bucket), model.as_deref())
+}
+
 /// 額度回來了就重送：每個 tick 看一次被擋住的那幾件。
 ///
 /// 預設要**兩個條件同時成立**才重送：查不到未過期的 `limit_hit`，而且 `resume_at` 到了（SPEC §18.8b）。
@@ -593,11 +604,15 @@ async fn resume_quota_blocked(app: &Arc<App>) {
             // 持久化的 `resume_at` 才是那段等待唯一的記錄（review 2026-09-16）。
             // 例外：最後一次確認還在擋（park 或順延，都會寫 `updated_at`）之後，同一個帳號有一回合真的答完——
             // 用了重置券、買了 credits，不必再等到原本的 `resume_at`（review 2026-09-16 M1）。
+            // 另一個例外：park 時記下的橫幅是模型專屬的桶（Fable），而這顆 bot 現在跑的不是那個模型——那段等待
+            // 從來不是它的（review3 c3 H2 修掉之前停進來的、或之後 `/model` 換掉了）。
             (None, false) => {
                 let parked_at = chrono::DateTime::parse_from_rfc3339(&a.updated_at).map(|t| t.with_timezone(&chrono::Utc));
-                match parked_at {
-                    Ok(t) if crate::quota::limit_cleared_since(app, &bot, t).await => {}
-                    _ => continue,
+                if !parked_on_another_models_bucket(app, &a, &bot).await {
+                    match parked_at {
+                        Ok(t) if crate::quota::limit_cleared_since(app, &bot, t).await => {}
+                        _ => continue,
+                    }
                 }
             }
             // 時間到了、也沒人說還在擋：回到 queued 並馬上試一次。
@@ -2616,6 +2631,75 @@ mod quota_restart_tests {
         backfill_quota_limits(&app, "local", None).await;
         let q = app.quotas.lock().await;
         assert_eq!(q.get("claude:cc2").and_then(|x| x.limit_hit.as_ref()).and_then(|h| h.bucket.as_deref()), Some("five_hour"));
+    }
+
+    async fn bot_on(app: &Arc<App>, id: &str, identity: &str, model: &str) {
+        bot(app, id, identity).await;
+        sqlx::query("UPDATE bots SET model=? WHERE id=?").bind(model).bind(id).execute(&app.db).await.unwrap();
+    }
+
+    const FABLE_BANNER: &str = "You've reached your Fable limit. Run /usage-credits to continue or switch models with /model.";
+
+    async fn set_bucket_hit(app: &Arc<App>, key: &str, bucket: &str) {
+        set_hit(app, key, Some("2999-01-01T00:00:00Z")).await;
+        let mut q = app.quotas.lock().await;
+        let hit = q.get_mut(key).and_then(|x| x.limit_hit.as_mut()).unwrap();
+        hit.bucket = Some(bucket.into());
+        hit.message = FABLE_BANNER.into();
+    }
+
+    /// review3 c3 H2：同一個帳號撞 Fable 上限，只擋跑 Fable 的 bot。看的是 run 實際在跑的模型，沒有才看設定值；
+    /// 5h 撞限是整個帳號的，照舊全擋。
+    #[tokio::test]
+    async fn a_fable_hit_blocks_only_the_bots_running_fable() {
+        let app = app().await;
+        bot_on(&app, "b-fable", "cc2", "fable").await;
+        bot_on(&app, "b-opus", "cc2", "opus").await;
+        set_bucket_hit(&app, "claude:cc2", "fable").await;
+        let get = |id: &'static str| {
+            let app = app.clone();
+            async move { crate::db::bot(&app.db, id).await.unwrap().unwrap() }
+        };
+
+        assert!(crate::quota::limit_hit_for_bot(&app, &get("b-fable").await).await.is_some(), "跑 Fable 的被擋");
+        assert!(crate::quota::limit_hit_for_bot(&app, &get("b-opus").await).await.is_none(), "跑 opus 的不歸 Fable 桶管");
+
+        // 設定是 opus，但 run 上 `/model` 換成了 fable：以實際在跑的為準。
+        sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,runtime_model,started_at) VALUES ('run-o','b-opus','running','idle','fable',?)")
+            .bind(crate::db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        assert!(crate::quota::limit_hit_for_bot(&app, &get("b-opus").await).await.is_some(), "實際在跑 fable");
+
+        // 5h 撞限：兩顆都擋。
+        sqlx::query("UPDATE runs SET runtime_model='opus' WHERE id='run-o'").execute(&app.db).await.unwrap();
+        set_bucket_hit(&app, "claude:cc2", "five_hour").await;
+        assert!(crate::quota::limit_hit_for_bot(&app, &get("b-opus").await).await.is_some(), "5h 是整個帳號的");
+    }
+
+    /// review3 c3 H2：修好之前被 Fable 撞限停進來的 opus 交辦，`resume_at` 在 Fable 週窗重置（好幾天後）。park 時記的橫幅是
+    /// Fable 桶、這顆跑的是 opus：不必等，現在就放行。跑 Fable 的那件照舊等。
+    #[tokio::test]
+    async fn an_opus_assignment_parked_on_a_fable_banner_is_released() {
+        let app = app().await;
+        bot_on(&app, "b-fable", "cc2", "fable").await;
+        bot_on(&app, "b-opus", "cc2", "opus").await;
+        let opus = parked(&app, "b-opus", "2999-01-01T00:00:00Z", &crate::db::now()).await;
+        let fable = parked(&app, "b-fable", "2999-01-01T00:00:00Z", &crate::db::now()).await;
+        sqlx::query("UPDATE supervisor_assignments SET error=?")
+            .bind(format!("帳號撞到用量上限（turn）：{FABLE_BANNER}"))
+            .execute(&app.db)
+            .await
+            .unwrap();
+        set_bucket_hit(&app, "claude:cc2", "fable").await;
+
+        resume_quota_blocked(&app).await;
+
+        let (status, retries) = status_of(&app, &opus).await;
+        assert_ne!(status, "quota_blocked", "Fable 桶的等待不是跑 opus 的這件的");
+        assert_eq!(retries, 1);
+        assert_eq!(status_of(&app, &fable).await, ("quota_blocked".into(), 0), "跑 Fable 的照舊等");
     }
 
     /// 回填完再跑一次 resume：兩段合起來就是重啟的真實順序，parked 的交辦要原地不動。

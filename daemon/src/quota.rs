@@ -100,13 +100,54 @@ async fn keys_for_bot(app: &Arc<App>, host: &str, bot: &crate::db::Bot) -> Vec<S
     vec![quota_key(host, &base)]
 }
 
+/// CLI 的模型字屬於哪一家（`fable`、`claude-fable-5-1`、`Fable 5.1`、`opus[1m]` 都認得）。認不出來回 `None`。
+pub fn model_family(model: &str) -> Option<&'static str> {
+    let m = model.to_ascii_lowercase();
+    ["fable", "opus", "sonnet", "haiku"].into_iter().find(|f| m.contains(f))
+}
+
+/// 這一桶是某個模型專屬的（撞了只擋跑那個模型的 bot）就回那個模型；5h、7d、沒有桶名的是整個帳號共用，回 `None`。
+fn model_of_bucket(bucket: &str) -> Option<&'static str> {
+    match bucket {
+        "fable" => Some("fable"),
+        _ => None,
+    }
+}
+
+/// 撞了 `bucket` 那一桶，擋不擋一顆跑 `model` 的 bot（`None` = 不知道它在跑什麼）。
+///
+/// 5h／7d 與沒有桶名的撞限（codex、開機回填）是整個帳號的，照舊擋所有 bot。模型專屬的桶只擋跑那個模型的
+/// bot：以前不分桶，巡檢（cc0、fable）一撞 Fable 上限，同是 cc0、跑 opus 的協調者與交辦就一路被擋到
+/// Fable 週窗重置（review3 c3 H2）。不知道 bot 在跑什麼模型時保守地照舊擋。
+/// `limit_hit_for_bot`（派工、回合結束、重送）與協調者的 `quota_state` 都走這一條。
+pub fn bucket_blocks_model(bucket: Option<&str>, model: Option<&str>) -> bool {
+    let Some(only) = bucket.and_then(model_of_bucket) else { return true };
+    match model.and_then(model_family) {
+        Some(family) => family == only,
+        None => true,
+    }
+}
+
+/// [`bucket_blocks_model`]，吃整筆撞限。
+pub fn limit_hit_blocks_model(hit: &LimitHit, model: Option<&str>) -> bool {
+    bucket_blocks_model(hit.bucket.as_deref(), model)
+}
+
+/// 這顆 bot 現在實際在跑的模型：run 的 `runtime_model`（啟動 argv 與 `/model` 會更新它），沒有就用設定值。
+pub async fn running_model(app: &Arc<App>, bot: &crate::db::Bot) -> Option<String> {
+    let runtime = crate::db::active_run(&app.db, &bot.id).await.ok().flatten().and_then(|r| r.runtime_model);
+    runtime.or_else(|| bot.model.clone()).filter(|m| !m.trim().is_empty())
+}
+
+/// 擋住這顆 bot 的撞限：沒過期、而且撞的那一桶管得到它在跑的模型（[`bucket_blocks_model`]）。
 pub async fn limit_hit_for_bot(app: &Arc<App>, bot: &crate::db::Bot) -> Option<LimitHit> {
     let host = crate::db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| LOCAL_HOST.to_string());
     let keys = keys_for_bot(app, &host, bot).await;
+    let model = running_model(app, bot).await;
     let q = app.quotas.lock().await;
     for k in keys {
         if let Some(hit) = q.get(&k).and_then(|x| x.limit_hit.clone()) {
-            if !limit_hit_expired(Some(&hit)) {
+            if !limit_hit_expired(Some(&hit)) && limit_hit_blocks_model(&hit, model.as_deref()) {
                 return Some(hit);
             }
         }
@@ -1225,6 +1266,27 @@ mod tests {
     }
 
     use super::*;
+
+    /// review3 c3 H2：Fable 桶只擋跑 Fable 的 bot；5h／7d／沒有桶名的擋整個帳號；不知道 bot 在跑什麼模型時保守地擋。
+    #[test]
+    fn a_model_bucket_only_blocks_bots_on_that_model() {
+        for (bucket, model, blocks) in [
+            (Some("fable"), Some("fable"), true),
+            (Some("fable"), Some("claude-fable-5-1"), true),
+            (Some("fable"), Some("Fable 5.1"), true),
+            (Some("fable"), Some("opus"), false),
+            (Some("fable"), Some("opus[1m]"), false),
+            (Some("fable"), Some("sonnet"), false),
+            (Some("fable"), None, true),
+            (Some("fable"), Some("default"), true),
+            (Some("five_hour"), Some("opus"), true),
+            (Some("seven_day"), Some("opus"), true),
+            (None, Some("opus"), true),
+            (None, Some("gpt-5.6-sol"), true),
+        ] {
+            assert_eq!(bucket_blocks_model(bucket, model), blocks, "{bucket:?} × {model:?}");
+        }
+    }
 
     fn codex_q(source: &str, limit_hit: Option<LimitHit>) -> Quota {
         Quota {
