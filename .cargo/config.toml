@@ -1,3 +1,10 @@
 [alias]
 dev = "run -q -p xtask --bin xtask -- dev"
 down = "run -q -p xtask --bin xtask -- down"
+
+[build]
+# 跨 managed worktree 共用編譯快取（issue #91）；沒裝 sccache 的機器由 wrapper 自己退回原生
+# rustc，不是硬性依賴。指到 wrapper 而不是直接指 `sccache`，理由與快取目錄/大小上限見
+# scripts/sccache-wrapper.sh。cargo 把這個相對路徑當成相對於這個 config 檔的專案根目錄解讀，
+# 跟目前的 CARGO_TARGET_DIR（每個 worktree 各自一份，這個設定完全不動它）無關。
+rustc-wrapper = "scripts/sccache-wrapper.sh"
