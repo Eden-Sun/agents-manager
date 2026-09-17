@@ -7,6 +7,11 @@
  * 量表旁邊的刻度已經說了），所以門檻設在三小時內——那是「等一下就回來、值得等」的範圍。
  */
 export const RESET_SOON_MS = 3 * 60 * 60 * 1000
+/**
+ * 週窗口（7d／週／Fable）改成 24 小時內就寫倒數（2026-09-17 使用者：「7d 是 < 24hr 就出倒數字」）：
+ * 週額度用完要等的是天，「三小時內」幾乎碰不到；剩不到一天就已經是「明天就回來、值得等」的範圍。
+ */
+export const RESET_SOON_WEEKLY_MS = 24 * 60 * 60 * 1000
 
 /**
  * `2h42` / `0h42`——使用者 2026-09-14：「不要 m」。一律 `<小時>h<分>`，不到一小時寫 `0h42`
@@ -23,12 +28,17 @@ function short(ms: number): string {
  * 回 `null` 的情況：還有額度、沒有重置時間、時間讀不出來、或重置在三小時之外。已經過了重置時刻
  * （下一次輪詢還沒把數字更新回來）也回 `null`：那時候該說的是「回來了」，不是倒數負數。
  */
-export function resetBadge(remainingPct: number | null | undefined, resetsAt: string | null | undefined, now: number): string | null {
+export function resetBadge(
+  remainingPct: number | null | undefined,
+  resetsAt: string | null | undefined,
+  now: number,
+  soonMs: number = RESET_SOON_MS,
+): string | null {
   if (remainingPct === null || remainingPct === undefined || remainingPct > 0) return null
   if (!resetsAt) return null
   const t = new Date(resetsAt).getTime()
   if (Number.isNaN(t)) return null
   const left = t - now
-  if (left <= 0 || left > RESET_SOON_MS) return null
+  if (left <= 0 || left > soonMs) return null
   return short(left)
 }

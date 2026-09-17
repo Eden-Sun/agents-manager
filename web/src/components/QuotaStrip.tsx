@@ -12,7 +12,7 @@ import { KindIcon, KIND_LABEL } from './KindTag'
 import { QuotaLoginShell } from './QuotaLoginShell'
 import { QuotaLoginSlash } from './QuotaLoginSlash'
 import { UpdateQuotaChip } from './UpdateQuotaChip'
-import { resetBadge } from '../lib/quotaReset'
+import { RESET_SOON_MS, RESET_SOON_WEEKLY_MS, resetBadge } from '../lib/quotaReset'
 import { cliLoginCommand, identityEnv } from '../lib/quotaLogin'
 import './quotaLimitHit.css'
 import './quotaStrip.css'
@@ -260,6 +260,11 @@ function fmtLeftLong(ms: number): string {
   return `${m} 分`
 }
 
+/** 用完的窗口多早開始寫倒數：5h 三小時內、週窗口（7d／週／Fable）24 小時內（2026-09-17 使用者）。 */
+function resetSoonMs(name: WindowName): number {
+  return name === '5h' ? RESET_SOON_MS : RESET_SOON_WEEKLY_MS
+}
+
 /** 5h 不到一小時就重置時窗口名換成剩幾分（`12m`），讓使用者提早準備（2026-09-09）；只做 5h。 */
 function soonLabel(name: WindowName, resetsAt: string | null, now: number): string | null {
   if (name !== '5h' || !resetsAt) return null
@@ -492,8 +497,8 @@ function Gauge({
         <span className="quota-compact">
           {windows.map((w) => {
             const soon = soonLabel(w.name, w.resetsAt, now)
-            // 歸零且三小時內就回來：把用不到的「0%」換成重置時刻與倒數（2026-09-14 使用者）。
-            const back = resetBadge(w.pct, w.resetsAt, now)
+            // 歸零且快回來了（5h 三小時內、週窗口 24 小時內）：把用不到的「0%」換成倒數（2026-09-14／09-17 使用者）。
+            const back = resetBadge(w.pct, w.resetsAt, now, resetSoonMs(w.name))
             return (
             <span key={w.name} className={`quota-compact-win ${levelOf(w)}`}>
               <span className={`quota-window-name${soon ? ' soon' : ''}`} title={soon ? `5h 還有 ${soon} 重置` : undefined}>{soon ?? w.name}</span>
@@ -515,7 +520,7 @@ function Gauge({
           const mark = resetMark(w.resetsAt, span, now)
           const left = w.resetsAt ? new Date(w.resetsAt).getTime() - now : null
           const soon = soonLabel(w.name, w.resetsAt, now)
-          const back = resetBadge(w.pct, w.resetsAt, now)
+          const back = resetBadge(w.pct, w.resetsAt, now, resetSoonMs(w.name))
           return (
             <span key={w.name} className="quota-window">
               <span className={`quota-window-name${soon ? ' soon' : ''}`} title={soon ? `5h 還有 ${soon} 重置` : undefined}>
