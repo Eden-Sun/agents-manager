@@ -87,21 +87,45 @@ pub(crate) fn not_attempted_error(run_id: &str, not: Delivered) -> LcError {
     }
 }
 
+/// 撤回一筆沒送出的 turn 的結果。
+#[derive(Debug, PartialEq, Eq)]
+enum Retraction {
+    /// turn 與它的訊息都撤掉了：同一個 `client_request_id` 可以原樣重送。
+    Withdrawn,
+    /// turn 已經不是 `in_flight`——窄窗裡別的路徑（`mark_run_exited` → `fail_in_flight`）先把它收掉了。
+    /// 一個字都沒刪，照 turn 現在的樣子回答呼叫端。
+    AlreadySettled,
+}
+
 /// Remove a turn and its user message that never reached the agent. They were committed before the
 /// delivery so an early hook could match; nothing was typed, so nothing can match them now.
-async fn retract_unsent_turn(app: &Arc<App>, turn_id: &str, msg_id: &str) -> anyhow::Result<()> {
+///
+/// 刪之前先確認 turn 還是 `in_flight`，而且跟刪訊息在同一個交易裡：`fail_in_flight` 不拿 per-bot 鎖，
+/// 會在「turn 已 commit、第一個字還沒打」這個窄窗裡把它標成 failed 並插一則「run ended」說明。訊息那句
+/// 原本不帶條件，於是使用者那顆泡泡跟那則說明被一起刪掉，只留下一個空的 failed 回合（review3 L4）。
+async fn retract_unsent_turn(app: &Arc<App>, turn_id: &str, msg_id: &str) -> anyhow::Result<Retraction> {
     let res = async {
         let mut tx = app.db.begin().await?;
+        // 訊息要先刪（`messages.turn_id` 指著 turns，反過來會踩到外鍵），turn 那句才是把關的：
+        // 刪不到就 rollback，連訊息那句一起退掉——效果就是「turn 不是 in_flight 時一個字都不刪」。
         sqlx::query("DELETE FROM messages WHERE id = ? OR turn_id = ?").bind(msg_id).bind(turn_id).execute(&mut *tx).await?;
-        sqlx::query("DELETE FROM turns WHERE id = ? AND status = 'in_flight'").bind(turn_id).execute(&mut *tx).await?;
+        let gone = sqlx::query("DELETE FROM turns WHERE id = ? AND status = 'in_flight'").bind(turn_id).execute(&mut *tx).await?;
+        if gone.rows_affected() == 0 {
+            tx.rollback().await?;
+            return anyhow::Ok(Retraction::AlreadySettled);
+        }
         tx.commit().await?;
-        anyhow::Ok(())
+        anyhow::Ok(Retraction::Withdrawn)
     }
     .await;
     let out = match res {
-        Ok(()) => {
+        Ok(Retraction::Withdrawn) => {
             tracing::info!(turn = turn_id, "retracted a prompt that was never typed into the pane");
-            Ok(())
+            Ok(Retraction::Withdrawn)
+        }
+        Ok(Retraction::AlreadySettled) => {
+            tracing::warn!(turn = turn_id, "an unsent turn had already been closed by another path; left as it is");
+            Ok(Retraction::AlreadySettled)
         }
         Err(e) => {
             tracing::error!(turn = turn_id, error = %e, "could not retract an unsent turn; failing it instead");
@@ -114,11 +138,47 @@ async fn retract_unsent_turn(app: &Arc<App>, turn_id: &str, msg_id: &str) -> any
         }
     };
     emit_turn(app, turn_id).await;
-    // 事件模型只有「新增／更新」，沒有「刪除」：`message_added` 與 `turn_updated` 已經廣播出去了，
-    // 每個客戶端都收下了那顆泡泡與那筆進行中的回合，而 `emit_turn` 對已刪除的列是 no-op。
-    // 不補一次重讀的話，畫面會留著一顆送不出去的幽靈泡泡與一個永遠不會結束的回合（review 2026-09-16）。
-    app.emit("resync", json!({"reason": "turn_retracted", "turn_id": turn_id})).await;
+    if out.as_ref().map(|r| *r == Retraction::Withdrawn).unwrap_or(false) {
+        // 事件模型只有「新增／更新」，沒有「刪除」：`message_added` 與 `turn_updated` 已經廣播出去了，
+        // 每個客戶端都收下了那顆泡泡與那筆進行中的回合，而 `emit_turn` 對已刪除的列是 no-op。
+        // 不補一次重讀的話，畫面會留著一顆送不出去的幽靈泡泡與一個永遠不會結束的回合（review 2026-09-16）。
+        // 沒刪成的兩條路沒有幽靈列要收，`emit_turn` 就夠了。
+        app.emit("resync", json!({"reason": "turn_retracted", "turn_id": turn_id})).await;
+    }
     out
+}
+
+/// 這筆 turn 現在的樣子，換成給呼叫端的答覆。冪等重送（同一個 `client_request_id`）與「撤回時發現
+/// turn 已經被別的路徑收掉」都走這裡，同一筆 turn 才不會因為問法不同而拿到兩種答案（review3 L4）。
+async fn answer_for_turn(app: &Arc<App>, t: &db::Turn) -> LcResult<PromptOut> {
+    let message_id = sqlx::query_scalar::<_, String>("SELECT id FROM messages WHERE turn_id=? AND role='user' LIMIT 1")
+        .bind(&t.id)
+        .fetch_optional(&app.db)
+        .await
+        .map_err(up)?
+        .unwrap_or_default();
+    // The same request asked again reports the same outcome, including "unverified".
+    // 還在排隊的那筆照第一次的回答說 `queued`：它的 `delivery` 欄位是 `pending`，原樣回的話
+    // 重派的交辦會被記成 delivered/pending，從此不歸排隊保險絲管（review2 deliv L1）。
+    let delivery = if t.status == "queued" {
+        "queued".to_string()
+    } else if t.delivery == "ok" && t.delivery_verified == 0 {
+        "unverified".to_string()
+    } else {
+        t.delivery.clone()
+    };
+    Ok(PromptOut { turn_id: t.id.clone(), message_id, delivery })
+}
+
+/// [`answer_for_turn`]，但 turn 要先從 id 讀回來（撤回撤不掉時，手上只有 id）。
+async fn answer_for_turn_id(app: &Arc<App>, turn_id: &str) -> LcResult<PromptOut> {
+    let t = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id = ?")
+        .bind(turn_id)
+        .fetch_optional(&app.db)
+        .await
+        .map_err(up)?
+        .ok_or_else(|| LcError::Upstream("the prompt was not sent and its turn is gone".into()))?;
+    answer_for_turn(app, &t).await
 }
 
 #[derive(serde::Serialize)]
@@ -354,23 +414,7 @@ async fn prompt_inner(
         .await
         .map_err(up)?
     {
-        let mid = sqlx::query_scalar::<_, String>("SELECT id FROM messages WHERE turn_id=? AND role='user' LIMIT 1")
-            .bind(&t.id)
-            .fetch_optional(&app.db)
-            .await
-            .map_err(up)?
-            .unwrap_or_default();
-        // The same request asked again reports the same outcome, including "unverified".
-        // 還在排隊的那筆照第一次的回答說 `queued`：它的 `delivery` 欄位是 `pending`，原樣回的話
-        // 重派的交辦會被記成 delivered/pending，從此不歸排隊保險絲管（review2 deliv L1）。
-        let delivery = if t.status == "queued" {
-            "queued".to_string()
-        } else if t.delivery == "ok" && t.delivery_verified == 0 {
-            "unverified".to_string()
-        } else {
-            t.delivery
-        };
-        return Ok(PromptOut { turn_id: t.id, message_id: mid, delivery });
+        return answer_for_turn(app, &t).await;
     }
 
     // 1. preconditions
@@ -481,12 +525,18 @@ async fn prompt_inner(
         // The box filled between the plan and the first keystroke: nothing was sent. Take the turn
         // back out so the same request id can be sent again, and answer 409 like the plan would.
         Ok(not @ Delivered::NotAttempted { .. }) => {
-            // If the turn cannot be taken back, the same request id would only ever find a failed
-            // turn: answer 5xx (final for this id), not a retryable 409.
-            if let Err(e) = retract_unsent_turn(app, &turn_id, &msg_id).await {
-                return Err(LcError::Upstream(format!("prompt was not sent and its turn could not be withdrawn: {e}")));
+            match retract_unsent_turn(app, &turn_id, &msg_id).await {
+                // 撤掉了：同一個 request id 原樣重送會重來一次，照計畫階段的答案回 409／422。
+                Ok(Retraction::Withdrawn) => return Err(not_attempted_error(&run.id, not)),
+                // 窄窗裡別的路徑（`mark_run_exited` → `fail_in_flight`）已經把這筆收掉並插了說明：
+                // 一個字都沒刪，照 turn 現況回。回可重試的 409 只會叫呼叫端用同一個 request id 重送，
+                // 而重送從冪等分支拿到的就是這一筆收掉的回合——兩次答案不一致，交辦還被記成送達失敗
+                // （review3 L4）。
+                Ok(Retraction::AlreadySettled) => return answer_for_turn_id(app, &turn_id).await,
+                // If the turn cannot be taken back, the same request id would only ever find a failed
+                // turn: answer 5xx (final for this id), not a retryable 409.
+                Err(e) => return Err(LcError::Upstream(format!("prompt was not sent and its turn could not be withdrawn: {e}"))),
             }
-            return Err(not_attempted_error(&run.id, not));
         }
         // Keys were sent and the result cannot be proven: that is what `unknown` means (§6.3).
         Ok(Delivered::Unproven(why)) => {
@@ -676,6 +726,65 @@ mod prompt_tests {
             .unwrap();
         assert_eq!(turns, 0, "沒送出的 turn 被撤回，不是留成 unknown");
         assert_eq!(f.env.herdr.methods().iter().filter(|m| *m == "pane.send_text").count(), 0, "一個字都沒打");
+    }
+
+    /// 窄窗：turn 已經 commit、第一個字還沒打的時候 pane 死掉，事件路徑 `mark_run_exited` →
+    /// `fail_in_flight`（不拿 per-bot 鎖）把這筆標 failed 並插了「run ended」說明。撤回這時候
+    /// 一個字都不能刪——訊息那句原本不帶條件，會把使用者的泡泡跟那則說明一起刪掉，只留一個空的
+    /// failed 回合，還回可重試的 409 叫呼叫端重送，重送又從冪等分支拿到那筆失敗的回合（review3 L4）。
+    ///
+    /// `BEFORE UPDATE OF pane_typed` 的 trigger 正好落在那個窗裡：`RAISE(FAIL)` 只中止外層那句
+    /// UPDATE，trigger 自己先做的兩筆寫入留著，等於另一條路徑插進來的效果。
+    #[tokio::test]
+    async fn a_turn_the_run_end_already_failed_is_left_alone_and_answered_like_a_resend() {
+        let f = fixture("claude", "test").await;
+        let app = f.env.app.clone();
+        sqlx::query("UPDATE runs SET pane_id = 'pane-prompt-test', pane_typed = 1 WHERE id = ?")
+            .bind(&f.run_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        f.env.herdr.live_pane("pane-prompt-test", tt::LivePane { width: Some(120), ..Default::default() });
+        sqlx::query(
+            "CREATE TRIGGER the_run_ends_mid_delivery BEFORE UPDATE OF pane_typed ON runs
+             BEGIN
+               INSERT INTO messages (id, conversation_id, turn_id, role, content, source, created_at)
+                 SELECT 'msg-run-ended', t.conversation_id, t.id, 'system', 'run ended: pane died', 'system', datetime('now')
+                   FROM turns t WHERE t.run_id = NEW.id AND t.status = 'in_flight';
+               UPDATE turns SET status = 'failed', completed_at = datetime('now')
+                 WHERE run_id = NEW.id AND status = 'in_flight';
+               SELECT RAISE(FAIL, 'run ended mid-delivery');
+             END",
+        )
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        let out = prompt(&app, &f.bot_id, "Reply with PONG please", "prompt-raced").await.expect("不是可重試的 409");
+
+        // 那一筆回合留著，使用者的訊息與「run ended」說明都在。
+        let t: db::Turn = sqlx::query_as("SELECT * FROM turns WHERE id = ?").bind(&out.turn_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(t.status, "failed", "收掉它的是 run 結束那條路，不是撤回");
+        let msgs: Vec<(String, String)> = sqlx::query_as("SELECT role, content FROM messages WHERE turn_id = ? ORDER BY role")
+            .bind(&out.turn_id)
+            .fetch_all(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(
+            msgs,
+            vec![("system".to_string(), "run ended: pane died".to_string()), ("user".to_string(), "Reply with PONG please".to_string())],
+            "使用者的泡泡與那則說明都不該被刪掉",
+        );
+        assert!(!out.message_id.is_empty(), "回的是那顆還在的泡泡");
+        assert_eq!(f.env.herdr.methods().iter().filter(|m| *m == "pane.send_text").count(), 0, "一個字都沒打");
+
+        // 同一個 request id 重送：走冪等分支，答案必須跟剛剛那次一模一樣。
+        let again = prompt(&app, &f.bot_id, "Reply with PONG please", "prompt-raced").await.unwrap();
+        assert_eq!(
+            (again.turn_id, again.message_id, again.delivery),
+            (out.turn_id, out.message_id, out.delivery),
+            "撤不掉時的回答要跟同一個 request id 重送拿到的一致",
+        );
     }
 
     /// A missing run session is rejected before writing, so a retry reports the same upstream problem.
