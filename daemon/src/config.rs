@@ -531,10 +531,8 @@ impl ConfigStore {
         //
         // 不論這次改了什麼都驗整份：一來每個 mutation 走的都是這支，規則只有一份；二來 config 已經壞掉時
         // 本來就不該再往上疊寫。
-        // 原因留在最前面（呼叫端與測試都在看它），後面才補「所以什麼都沒動」——這就是 recovery path：
-        // 不必回頭收拾，改個合法的值再送一次就好。
-        crate::projection::validate(&next)
-            .map_err(|e| anyhow::anyhow!("{e:#}（config.toml 未變更）"))?;
+        // 失敗是 `ConfigInvalid`：原因留在最前面（呼叫端與測試都在看它），型別讓 API 分得出這不是上游壞掉。
+        crate::projection::validate(&next)?;
         // A serde rewrite drops comments / unknown keys: no-op updates must not write (issue #38).
         if next != g.cfg {
             write_atomic(&self.path, &next)?;
