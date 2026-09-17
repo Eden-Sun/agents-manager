@@ -96,6 +96,29 @@ pub struct Opened {
     pub existing: bool,
 }
 
+/// 這個 repo 的預設分支（交付的 base）。
+///
+/// 以前寫死 `main`：預設分支叫 `master`／`trunk` 的專案一定 `fetch_failed`，任務停在交付失敗
+/// （review3 c1「沒把握、需要實測」）。先看 `origin/HEAD` 指到哪，沒設就問遠端一次，都問不到才退回 `main`。
+pub async fn base_branch(dir: &Path, remote: &str) -> String {
+    let head_ref = format!("refs/remotes/{remote}/HEAD");
+    if let Ok((true, out)) = git(dir, &["symbolic-ref", "--quiet", "--short", &head_ref]).await {
+        if let Some(b) = out.lines().next().map(str::trim).and_then(|l| l.strip_prefix(&format!("{remote}/"))).filter(|b| !b.is_empty()) {
+            return b.to_string();
+        }
+    }
+    if let Ok((true, out)) = git(dir, &["ls-remote", "--symref", remote, "HEAD"]).await {
+        for line in out.lines() {
+            if let Some(rest) = line.trim().strip_prefix("ref: refs/heads/") {
+                if let Some(b) = rest.split_whitespace().next().filter(|b| !b.is_empty()) {
+                    return b.to_string();
+                }
+            }
+        }
+    }
+    "main".into()
+}
+
 /// `a` 是不是 `b` 的祖先（`a` 已經在 `b` 裡）。
 async fn is_ancestor(dir: &Path, a: &str, b: &str) -> bool {
     matches!(git(dir, &["merge-base", "--is-ancestor", a, b]).await, Ok((true, _)))
@@ -313,6 +336,32 @@ mod tests {
         assert_eq!((first.url.as_str(), first.existing), ("https://example.invalid/pull/7", false));
         let again = open("重試").await.expect("重試要回原本那條 PR");
         assert_eq!((again.url.as_str(), again.existing), ("https://example.invalid/pull/7", true));
+    }
+
+    /// 預設分支不叫 main 的專案也交得出去（以前寫死 main，一定 `fetch_failed`）。
+    #[tokio::test]
+    async fn the_base_branch_comes_from_the_repo_not_from_a_hardcoded_name() {
+        let root = Tmp(std::env::temp_dir().join(format!("am-mission-base-{}", crate::db::ulid())));
+        std::fs::create_dir_all(root.path()).unwrap();
+        let origin = root.path().join("origin.git");
+        let seed = root.path().join("seed");
+        StdCommand::new("git").args(["init", "-q", "--bare", "-b", "trunk"]).arg(&origin).status().unwrap();
+        StdCommand::new("git").args(["clone", "-q"]).arg(&origin).arg(&seed).status().unwrap();
+        sh(&seed, &["checkout", "-q", "-b", "trunk"]);
+        commit(&seed, "a");
+        sh(&seed, &["push", "-q", "origin", "trunk"]);
+        let work = root.path().join("work");
+        StdCommand::new("git").args(["clone", "-q"]).arg(&origin).arg(&work).status().unwrap();
+
+        let base = base_branch(&work, "origin").await;
+        assert_eq!(base, "trunk");
+        commit(&work, "b");
+        let out = push_main(&work, "origin", &base, false).await.expect("推得上 trunk");
+        let (_, remote) = git(&work, &["ls-remote", "origin", "refs/heads/trunk"]).await.unwrap();
+        assert!(remote.starts_with(&out.sha));
+        // origin/HEAD 被刪掉（clone 之後常見）也還問得到遠端。
+        sh(&work, &["remote", "set-head", "origin", "--delete"]);
+        assert_eq!(base_branch(&work, "origin").await, "trunk");
     }
 
     #[tokio::test]
