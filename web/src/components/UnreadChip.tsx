@@ -57,10 +57,16 @@ function Chip({ it }: { it: ChipItem }) {
  * 「已完成放下一排，方便我點選」），不必先把主力捲過去才點得到剛跑完的那顆。
  */
 function ScrollRow({ items, label, selectedBotId }: { items: ChipItem[]; label: string; selectedBotId: string | null }) {
+  // 空的那排整個不掛：捲動 hook 的 effect 只在掛載時讀 `barRef`，空著掛上去讀到 null 就再也不接
+  // scroll／wheel／ResizeObserver——之後晶片出現、溢出了也沒有 ◂ ▸（review3 c5 L1）。
+  if (items.length === 0) return null
+  return <ScrollRowBar items={items} label={label} selectedBotId={selectedBotId} />
+}
+
+function ScrollRowBar({ items, label, selectedBotId }: { items: ChipItem[]; label: string; selectedBotId: string | null }) {
   const barRef = useRef<HTMLDivElement | null>(null)
   const scroll = useHorizontalScroll(barRef, true)
   useScrollCurrentIntoView(barRef, `${selectedBotId}/${items.length}`)
-  if (items.length === 0) return null
   return (
     <div className={`unread-bar-wrap row${scroll.left ? ' can-left' : ''}${scroll.right ? ' can-right' : ''}`}>
       {scroll.left ? (
