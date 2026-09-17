@@ -125,6 +125,14 @@ CREATE TABLE IF NOT EXISTS attachments (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS attachments_msg ON attachments(message_id);
+-- issue #94：一顆 bot 自己的 Bash 工具跑 `herdr pane split`／`agent start`，那條指令的 stdout 就是
+-- herdr 自己回的 JSON——直接告訴 daemon「這個 pane_id 是我剛剛開的」，比 §6.5a 的同 tab／名字前綴推斷
+-- 更早、更精確。`reconcile::adopt_child` 認領前先查這裡；查不到才退回原本的血緣／前綴推斷（見
+-- `daemon/src/spawn_hints.rs`）。`pane_id` 在同一個 herdr session 裡唯一，一顆 pane 只會被合法建立一次。
+CREATE TABLE IF NOT EXISTS spawn_hints (
+  pane_id TEXT PRIMARY KEY, host TEXT NOT NULL, bot_id TEXT NOT NULL REFERENCES bots(id),
+  created_at TEXT NOT NULL
+);
 "#;
 
 /// 這個 binary 認得的 schema 版本，存在 SQLite 內建的 `PRAGMA user_version`（跟資料庫檔案綁在一起，

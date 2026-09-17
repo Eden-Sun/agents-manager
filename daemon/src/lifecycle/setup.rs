@@ -469,7 +469,13 @@ fn claude_settings(hook_cmd: &str, statusline: &str, wants_remote: bool) -> Valu
             // 的 pane；AGM 的 child bot（`herdr pane split` 開出來的獨立 pane）本來就沒有 hook（§4.3），
             // 這兩個鍵永遠不會替 child bot 觸發，也就不可能影響哪個 pane 歸誰。
             "SubagentStart": [{"hooks": [{"type": "command", "command": hook_cmd}]}],
-            "SubagentStop": [{"hooks": [{"type": "command", "command": hook_cmd}]}]
+            "SubagentStop": [{"hooks": [{"type": "command", "command": hook_cmd}]}],
+            // issue #94：這顆 bot 自己的 Bash 工具跑 `herdr pane split`／`agent start` 時，那條指令的
+            // stdout 就是 herdr 自己回的 JSON（`{"id":"cli:pane:split"/"cli:agent:start",
+            // "result":{...,"pane_id":...}}`），daemon 讀得到「這個 pane 是我剛剛開的」這個事實，
+            // 比 §6.5a 的同 tab／名字前綴推斷更早、更精確（`spawn_hints.rs`）。`matcher: "Bash"` 只在
+            // 跑 shell 指令時觸發，不是每個工具呼叫都送一次。
+            "PostToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": hook_cmd}]}]
         },
         "statusLine": {"type": "command", "command": statusline},
         // Trial: shorter replies scrape cleaner from the terminal (§4.3) and read better in 對話.
@@ -890,8 +896,12 @@ mod hook_cmd_parts_tests {
         let hooks = v.get("hooks").and_then(|h| h.as_object()).expect("hooks");
         let mut names: Vec<&String> = hooks.keys().collect();
         names.sort();
-        assert_eq!(names, vec!["SessionStart", "Stop", "StopFailure", "SubagentStart", "SubagentStop"], "{hooks:?}");
-        for name in ["SessionStart", "Stop", "StopFailure", "SubagentStart", "SubagentStop"] {
+        assert_eq!(
+            names,
+            vec!["PostToolUse", "SessionStart", "Stop", "StopFailure", "SubagentStart", "SubagentStop"],
+            "{hooks:?}"
+        );
+        for name in ["SessionStart", "Stop", "StopFailure", "SubagentStart", "SubagentStop", "PostToolUse"] {
             let cmd = hooks[name][0]["hooks"][0]["command"].as_str().unwrap_or_default();
             assert!(cmd.contains("hook claude"), "{name} 要指向同一支 hook 指令：{cmd}");
         }
@@ -1574,5 +1584,14 @@ mod claude_settings_tests {
         for event in ["SubagentStart", "SubagentStop"] {
             assert_eq!(v["hooks"][event][0]["hooks"][0]["command"], "hook", "{event}");
         }
+    }
+
+    /// issue #94：`PostToolUse` 只在 Bash 工具觸發（`matcher`），不是每個工具呼叫都送一次——那樣會把
+    /// Read／Edit／Grep 這些跟子 pane 完全無關的呼叫也送進 daemon，白白增加流量。
+    #[test]
+    fn post_tool_use_only_matches_the_bash_tool() {
+        let v = claude_settings("hook", "sl", false);
+        assert_eq!(v["hooks"]["PostToolUse"][0]["matcher"], json!("Bash"));
+        assert_eq!(v["hooks"]["PostToolUse"][0]["hooks"][0]["command"], "hook");
     }
 }

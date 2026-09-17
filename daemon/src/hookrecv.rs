@@ -120,6 +120,10 @@ enum HookKind {
         agent_type: Option<String>,
         transcript_path: Option<String>,
     },
+    /// issue #94：`PostToolUse` on the Bash tool whose stdout was herdr's own `pane:split` /
+    /// `agent:start` response — this bot's own tool call just created `pane_id`. Recorded as a
+    /// spawn hint for `reconcile::adopt_child`; never touches a Turn.
+    SpawnHint { pane_id: String },
     Ignore(String),
 }
 
@@ -334,6 +338,12 @@ fn classify(provider: &str, p: &Value) -> HookKind {
                     agent_id: s("agent_id"),
                     agent_type: s("agent_type"),
                     transcript_path: s("agent_transcript_path"),
+                },
+                // issue #94：`matcher: "Bash"` already scopes this to shell commands; the actual
+                // "was this herdr creating a pane" decision is `crate::spawn_hints::extract_pane_id`.
+                "PostToolUse" => match crate::spawn_hints::extract_pane_id(p) {
+                    Some(pane_id) => HookKind::SpawnHint { pane_id },
+                    None => HookKind::Ignore("PostToolUse (not a herdr spawn)".into()),
                 },
                 other => HookKind::Ignore(other.to_string()),
             }
@@ -805,6 +815,13 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                     .execute(&app.db)
                     .await?;
             }
+            Ok(())
+        }
+        // issue #94：這顆 bot 自己剛剛用 `herdr pane split`／`agent start` 開出 `pane_id`——記下來給
+        // `reconcile::adopt_child` 當比同 tab 更早、更精確的線索。純粹記錄一個事實，不查任何 bot／pane
+        // 現在的狀態，也不需要活著的 run（這是這顆 bot 自己的行程剛做的事，不是它的 Turn 的事）。
+        HookKind::SpawnHint { pane_id } => {
+            crate::spawn_hints::record(app, &bot.id, &pane_id).await?;
             Ok(())
         }
         HookKind::Identity { session_id, transcript_path } => {
@@ -2224,6 +2241,57 @@ mod external_claim_tests {
         process(&env.app, &stop_failure(&bot.id, json!({"hook_event_name": "SubagentStart", "agent_id": "a1"}))).await.unwrap();
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE bot_id = ?").bind(&bot.id).fetch_one(&env.app.db).await.unwrap();
         assert_eq!(n, 0, "沒有 run 就沒有地方寫，也不該無中生有");
+    }
+
+    /// issue #94：`PostToolUse` 的 Bash 輸出剛好是 `herdr agent start` 的 JSON 回應時分類成
+    /// `SpawnHint`；一般指令的輸出（不是 herdr 的 JSON 信封）照舊被 `Ignore`。
+    #[test]
+    fn post_tool_use_classifies_a_herdr_spawn_as_a_hint() {
+        let v = json!({
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "herdr agent start kid --kind claude --pane w1:p2"},
+            "tool_response": {"stdout": r#"{"id":"cli:agent:start","result":{"agent":{"pane_id":"w1:p2"}}}"#, "stderr": ""},
+        });
+        match classify("claude", &v) {
+            HookKind::SpawnHint { pane_id } => assert_eq!(pane_id, "w1:p2"),
+            other => panic!("expected SpawnHint, got {other:?}"),
+        }
+
+        let ls = json!({
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls -la"},
+            "tool_response": {"stdout": "total 0\n", "stderr": ""},
+        });
+        assert!(matches!(classify("claude", &ls), HookKind::Ignore(_)));
+    }
+
+    /// issue #94：`process` 把偵測到的 `pane_id` 記進 `spawn_hints`，指到送這則 hook 的那顆 bot；
+    /// 不需要活著的 run（這是這顆 bot 自己剛做的事，不是它的 Turn 的事），也不動任何 Turn。
+    #[tokio::test]
+    async fn a_spawn_hint_is_recorded_against_the_bot_that_sent_it() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "alfa").await;
+
+        process(
+            &env.app,
+            &stop_failure(
+                &bot.id,
+                json!({
+                    "hook_event_name": "PostToolUse",
+                    "tool_name": "Bash",
+                    "tool_input": {"command": "herdr agent start kid --kind claude --pane w1:p2"},
+                    "tool_response": {"stdout": r#"{"id":"cli:agent:start","result":{"agent":{"pane_id":"w1:p2"}}}"#, "stderr": ""},
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+
+        let recorded: Option<String> =
+            sqlx::query_scalar("SELECT bot_id FROM spawn_hints WHERE pane_id = 'w1:p2'").fetch_optional(&env.app.db).await.unwrap();
+        assert_eq!(recorded.as_deref(), Some(bot.id.as_str()));
     }
 
     /// claude 的 Stop 沒帶使用者訊息：從 transcript 尾巴讀。對不上一樣不認領；讀不到（沒有 transcript）就照舊認領。

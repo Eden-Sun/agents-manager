@@ -490,19 +490,30 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
     // Spawned children. **Descent first**: an unclaimed agent in a bot's tab is its child — the
     // `<parent>-<suffix>` naming is only a request agents forget. Prefix match covers other tabs;
     // in a tab the longest prefix wins (grandchild under child), no prefix → the tab's own bot.
+    //
+    // issue #94：一顆 parent 一次在**新** tab 裡開好幾顆子代理時，「同 tab」這條線索會在第一顆被認領
+    // 之後把它自己也變成那個 tab 的候選 parent，後面幾顆因此一顆掛一顆串成鏈、還可能因為短名字被占用
+    // 而另外建出重複 bot（2026-09-17 使用者實戰）。`spawn_hints`（一顆 bot 自己的 `PostToolUse` 事件流
+    // 看到 `herdr pane split`／`agent start` 的 stdout）給的是「這個 pane_id 就是我剛開的」這個事實，
+    // 比同 tab／名字前綴更早也更精確，排最前面；查不到（CLI 版本太舊、這顆 bot 沒有 hook——典型是
+    // child 自己開孫代，§4.3 一律沒有 hook——或根本不是這樣開的）就照舊退回血緣／前綴推斷，那條路一個
+    // 位元組都沒動，也是唯一在 CLI 不發 hook 時能依靠的線索。
+    crate::spawn_hints::prune_stale(app).await;
+    let hints = crate::spawn_hints::for_host(app, host).await.unwrap_or_default();
     let mut new_children = 0usize;
     for agent in agents.iter() {
         let Some(name) = agent.name.as_deref() else { continue };
         if claimed.contains(name) {
             continue;
         }
+        let by_hint = hints.get(&agent.pane_id).and_then(|bid| parents.iter().find(|p| &p.bot.id == bid));
         let by_tab = parents
             .iter()
             .filter(|p| p.tab_id.as_deref() == Some(agent.tab_id.as_str()))
             .max_by_key(|p| (prefix_score(&p.agent_name, name), u8::from(p.bot.managed_by != "child")));
         let by_prefix =
             parents.iter().filter(|p| prefix_score(&p.agent_name, name) > 0).max_by_key(|p| p.agent_name.len());
-        let Some(entry) = by_tab.or(by_prefix) else { continue };
+        let Some(entry) = by_hint.or(by_tab).or(by_prefix) else { continue };
         let (parent_name, parent) = (&entry.agent_name, &entry.bot);
         let child_name = match prefix_score(parent_name, name) {
             0 => child_name_from_agent(name),
@@ -521,11 +532,14 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
         match adopt_child(app, host, &client, &session, agent, name, parent, &child_name, &kind).await {
             Ok(bot_id) => {
                 claimed.insert(name.to_string());
+                if by_hint.is_some() {
+                    crate::spawn_hints::consume(app, &agent.pane_id).await;
+                }
                 app.emit("bot_changed", json!({"bot_id": bot_id})).await;
                 app.emit_bot_status(&bot_id).await;
                 new_children += 1;
                 tracing::info!(host, parent = %parent.name, child = %child_name, agent = %name, pane = %agent.pane_id,
-                               "reconcile: adopted a spawned child agent");
+                               hinted = by_hint.is_some(), "reconcile: adopted a spawned child agent");
             }
             Err(e) => {
                 tracing::warn!(host, parent = %parent.name, agent = %name, pane = %agent.pane_id, error = ?e,
@@ -2052,6 +2066,128 @@ mod compat_tests {
             let s: Option<String> = sqlx::query_scalar("SELECT subagent_json FROM runs WHERE bot_id = ?").bind(id).fetch_one(&app.db).await.unwrap();
             assert_eq!(s, None, "child 沒有 hook，不該憑空冒出快照");
         }
+    }
+
+    /// 2026-09-17 使用者實戰重現（issue #94）：父 agent 開一個**新** tab（不是自己那個），連續在裡面
+    /// 開三顆子代理。每一顆開出來時，父 agent 自己的 `PostToolUse` 都送回這個 pane 是它剛開的——這正是
+    /// `spawn_hints` 要餵給 `adopt_child` 的線索。三顆都應該直接掛在父 bot 底下，不會一顆掛一顆串成鏈，
+    /// 也不會多長出重複 bot；重複跑一次 reconcile（這次沒有新 hint 可用）也不該有任何變化。
+    #[tokio::test]
+    async fn spawn_hints_keep_a_new_tab_full_of_children_from_chaining_or_duplicating() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+
+        let parent = a_bot(&env, "alfa").await;
+        let parent_agent = crate::config::agent_name("proj", &parent);
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, tab_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','idle',?,?,?,?,'test',?)",
+        )
+        .bind(db::ulid())
+        .bind(&parent)
+        .bind(&ws.workspace_id)
+        .bind(&root.pane_id)
+        .bind(&root.tab_id)
+        .bind(&parent_agent)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        // 一個全新的 tab（不是父自己的），裡面連續開三顆——今晚實戰的形狀。
+        let p1 = client.tab_create(&ws.workspace_id, "/tmp/p", "kids", json!({})).await.unwrap();
+        let p2 = client.pane_split(&p1.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
+        let p3 = client.pane_split(&p2.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
+        assert_eq!((p2.tab_id.as_str(), p3.tab_id.as_str()), (p1.tab_id.as_str(), p1.tab_id.as_str()), "三個 pane 同一個新 tab");
+
+        let agent_json = |name: &str, pane: &crate::herdr::PaneInfo| {
+            json!({"name": name, "agent": "claude", "agent_status": "idle",
+                   "workspace_id": ws.workspace_id, "tab_id": pane.tab_id, "pane_id": pane.pane_id, "cwd": "/tmp/p"})
+        };
+        let (name1, name2, name3) = (format!("{parent_agent}-k1"), format!("{parent_agent}-k2"), format!("{parent_agent}-k3"));
+
+        // 三次分開的 reconcile pass，模擬三次 `agent start` 之間真的會有的時間差——正是今晚串成鏈的時序。
+        // 父 agent 自己全程還活著（它自己的 pane 一路都在清單裡）。
+        crate::spawn_hints::record(&app, &parent, &p1.pane_id).await.unwrap();
+        *env.herdr.agents.lock().unwrap() = vec![agent_json(&parent_agent, &root), agent_json(&name1, &p1)];
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+
+        crate::spawn_hints::record(&app, &parent, &p2.pane_id).await.unwrap();
+        env.herdr.agents.lock().unwrap().push(agent_json(&name2, &p2));
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+
+        crate::spawn_hints::record(&app, &parent, &p3.pane_id).await.unwrap();
+        env.herdr.agents.lock().unwrap().push(agent_json(&name3, &p3));
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+
+        let children: Vec<db::Bot> =
+            sqlx::query_as("SELECT * FROM bots WHERE parent_bot_id IS NOT NULL ORDER BY name").fetch_all(&app.db).await.unwrap();
+        assert_eq!(children.len(), 3, "剛好三顆，沒有多長出重複 bot：{children:?}");
+        for c in &children {
+            assert_eq!(c.parent_bot_id.as_deref(), Some(parent.as_str()), "{} 要掛在真正的父 bot 底下，不是前一顆子代理", c.name);
+        }
+
+        // 用過的 hint 已經被消耗掉；再跑一次（這次沒有新 hint）靠既有的血緣配對，不該長出任何東西。
+        assert!(crate::spawn_hints::for_host(&app, crate::config::LOCAL_HOST).await.unwrap().is_empty(), "hint 用完就該被消耗掉");
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bots WHERE parent_bot_id IS NOT NULL").fetch_one(&app.db).await.unwrap();
+        assert_eq!(n, 3, "重跑一次不該重複建立");
+    }
+
+    /// 對照組（issue #94）：跟上面完全同樣的場景，但**不送任何 hint**——證明 hook 缺席時，舊的（有缺陷
+    /// 的）血緣推斷完全原樣保留，這是 CLI 不發事件時唯一能依靠的路徑，這張 issue 沒有拿掉它。第二、
+    /// 三顆確實串到前一顆底下，正是 2026-09-17 實際發生的現象。
+    #[tokio::test]
+    async fn without_spawn_hints_a_new_tab_full_of_children_still_chains_like_before() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+
+        let parent = a_bot(&env, "alfa").await;
+        let parent_agent = crate::config::agent_name("proj", &parent);
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, tab_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','idle',?,?,?,?,'test',?)",
+        )
+        .bind(db::ulid())
+        .bind(&parent)
+        .bind(&ws.workspace_id)
+        .bind(&root.pane_id)
+        .bind(&root.tab_id)
+        .bind(&parent_agent)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        let p1 = client.tab_create(&ws.workspace_id, "/tmp/p", "kids", json!({})).await.unwrap();
+        let p2 = client.pane_split(&p1.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
+        let p3 = client.pane_split(&p2.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
+
+        let agent_json = |name: &str, pane: &crate::herdr::PaneInfo| {
+            json!({"name": name, "agent": "claude", "agent_status": "idle",
+                   "workspace_id": ws.workspace_id, "tab_id": pane.tab_id, "pane_id": pane.pane_id, "cwd": "/tmp/p"})
+        };
+        let (name1, name2, name3) = (format!("{parent_agent}-k1"), format!("{parent_agent}-k2"), format!("{parent_agent}-k3"));
+
+        // 父 agent 自己全程還活著（它自己的 pane 一路都在清單裡）。
+        *env.herdr.agents.lock().unwrap() = vec![agent_json(&parent_agent, &root), agent_json(&name1, &p1)];
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+        env.herdr.agents.lock().unwrap().push(agent_json(&name2, &p2));
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+        env.herdr.agents.lock().unwrap().push(agent_json(&name3, &p3));
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+
+        let k1 = sqlx::query_as::<_, db::Bot>("SELECT * FROM bots WHERE name = 'k1'").fetch_one(&app.db).await.unwrap();
+        assert_eq!(k1.parent_bot_id.as_deref(), Some(parent.as_str()), "第一顆本來就對，靠名字前綴");
+        // 第二顆被同一個 tab 誤認成第一顆的小孩：`prefix_score` 對錯的那個 parent（k1）算出來是 0，
+        // `adopt_child` 因此連短名字都取不到，退而用完整 herdr agent name 建 bot——這正是 issue 裡
+        // 「短名字被占用後另外建出重複 bot」那個現象的根：不是名字被搶走，是 parent 從一開始就選錯了。
+        let k2 = sqlx::query_as::<_, db::Bot>("SELECT * FROM bots WHERE name = ?").bind(&name2).fetch_one(&app.db).await.unwrap();
+        assert_eq!(k2.parent_bot_id.as_deref(), Some(k1.id.as_str()), "沒有 hint 時，第二顆確實串到第一顆底下（既有行為原樣保留）");
     }
 
     /// A run whose agent herdr no longer lists still exits, tab or not.
