@@ -127,6 +127,18 @@ CREATE TABLE IF NOT EXISTS attachments (
 CREATE INDEX IF NOT EXISTS attachments_msg ON attachments(message_id);
 "#;
 
+/// 這個 binary 認得的 schema 版本，存在 SQLite 內建的 `PRAGMA user_version`（跟資料庫檔案綁在一起，
+/// 讀寫都在同一個交易裡，不像 `journal_mode` 那類 pragma 有「不能包進交易」的限制）。
+///
+/// 這不是「照順序跑第 N 號 migration」的版本號——`SCHEMA`／下面的 additive ALTER 名單本來就是
+/// `CREATE TABLE IF NOT EXISTS`／`has_column` 檢查過的冪等操作，天生可重入，這次刻意不推翻
+/// （issue #72 的調查結論，見 `migrate` 上面的說明）。這個數字只解決一件事：**擋住舊 binary 開到
+/// 新 schema**——目前完全偵測不到這種情況，`daemon-update-kick.sh` 那類滾動升級如果有一顆卡在舊
+/// binary 卻碰到剛被新版升級過的 DB，會拿著過期的欄位假設去讀一個它不認識的資料庫。每次在 `SCHEMA`
+/// 或 ALTER 名單裡加東西，這個數字要跟著 +1；忘記加只會讓 `check_schema_drift` 照樣抓到欄位對不上
+/// （那個檢查看的是實際欄位，不看這個數字），不會讓資料庫壞掉，但舊 binary 就少了這一層提早攔截。
+pub const SCHEMA_VERSION: i64 = 1;
+
 pub async fn open(path: &Path) -> Result<SqlitePool> {
     let url = format!("sqlite://{}", path.display());
     let opts = SqliteConnectOptions::from_str(&url)?
@@ -164,8 +176,19 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
 /// 風險最高的「加欄＋回填」已經各自包了自己的 transaction（見 `read_marks::migrate`、
 /// `supervisor::roles::migrate` 的 `claimed_by`），要把全部子模組併進同一個跨檔案交易得先把
 /// 它們的 `&SqlitePool` 簽名都換成共用的連線／交易 handle，範圍超出這張 issue，先不動。
+///
+/// 進交易之前先比對 [`SCHEMA_VERSION`]：資料庫記的版本比這顆 binary 認得的還新，代表有更新版的
+/// binary 已經動過這個檔案——直接拒絕，一個 SCHEMA／ALTER 都不碰，不要拿舊的欄位假設去讀一個看
+/// 不懂的資料庫（issue #72）。版本比較與最後的版本戳記都在同一個交易裡：SCHEMA／ALTER 失敗時
+/// 版本號要跟著回滾，不能宣稱「已經是這個版本」卻沒有真的套用成功。
 async fn migrate(pool: &SqlitePool) -> Result<()> {
     let mut tx = pool.begin().await?;
+    let stored_version: i64 = sqlx::query_scalar("PRAGMA user_version").fetch_one(&mut *tx).await?;
+    anyhow::ensure!(
+        stored_version <= SCHEMA_VERSION,
+        "資料庫的 schema 版本是 {stored_version}，這顆 daemon 只認得到 {SCHEMA_VERSION}（比較舊）。\
+         代表已經有更新版的 daemon 動過這個檔案；請先把這顆升級到那個版本以上，不要用舊版繼續開它。"
+    );
     for stmt in SCHEMA.split(";\n") {
         let s = stmt.trim();
         if s.is_empty() {
@@ -233,6 +256,11 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
     .execute(&mut *tx)
     .await
     .context("create runs_agent_status_since trigger")?;
+    if stored_version < SCHEMA_VERSION {
+        // `user_version` 不接受 bind 參數（跟 `table_info` 那個 PRAGMA 一樣），但這裡的值是編譯期常數，
+        // 不是外部輸入，直接內嵌沒有注入風險。
+        sqlx::query(&format!("PRAGMA user_version = {SCHEMA_VERSION}")).execute(&mut *tx).await.context("stamp schema version")?;
+    }
     tx.commit().await?;
     crate::supervisor::store::migrate(pool).await?;
     crate::read_marks::migrate(pool).await?;
@@ -972,17 +1000,75 @@ mod tests {
                 .unwrap();
             assert_eq!(n, 0, "{table} 在失敗的這次呼叫裡新建，沒有 transaction 的話會留下來；有了就該跟著回滾");
         }
+        let v: i64 = sqlx::query_scalar("PRAGMA user_version").fetch_one(&pool).await.unwrap();
+        assert_eq!(v, 0, "schema 沒套用成功，版本戳記要跟著回滾，不能宣稱已經是這個版本");
 
         // 修好衝突，重跑：可重入，這次要乾淨地跑完，並且通過完整性檢查。
         sqlx::query("DROP TABLE runs_pane").execute(&pool).await.unwrap();
         migrate(&pool).await.expect("修好之後重跑要成功");
         let integrity: String = sqlx::query_scalar("PRAGMA integrity_check").fetch_one(&pool).await.unwrap();
         assert_eq!(integrity, "ok");
+        let v: i64 = sqlx::query_scalar("PRAGMA user_version").fetch_one(&pool).await.unwrap();
+        assert_eq!(v, SCHEMA_VERSION, "這次真的套用成功了，版本戳記要跟著更新");
 
         // 再跑一次：可重入，結果要一樣（不會因為東西都已經在了就出錯，也不會重複建東西）。
         let cols_before = columns(&pool, "bots").await;
         migrate(&pool).await.expect("再跑一次也要成功（可重入）");
         assert_eq!(columns(&pool, "bots").await, cols_before);
+
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// issue #72：舊 binary 開到被更新版動過的 DB 要拒絕啟動，不能拿舊的欄位假設去讀一個看不懂
+    /// 的資料庫——這是目前 `CREATE TABLE IF NOT EXISTS` 完全偵測不到的一種壞情況。
+    #[tokio::test]
+    async fn a_db_stamped_by_a_newer_binary_refuses_an_older_one() {
+        let dir = tmp_dir();
+        let path = dir.join("db.sqlite3");
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&format!("sqlite://{}?mode=rwc", path.display()))
+            .await
+            .unwrap();
+        migrate(&pool).await.unwrap();
+        // 假裝這個檔案被一顆懂得更多欄位的未來版 binary 動過。
+        let future = SCHEMA_VERSION + 1;
+        sqlx::query(&format!("PRAGMA user_version = {future}")).execute(&pool).await.unwrap();
+
+        let err = migrate(&pool).await.expect_err("DB 比這顆 binary 認得的新，要拒絕啟動");
+        assert!(err.to_string().contains(&future.to_string()) && err.to_string().contains(&SCHEMA_VERSION.to_string()), "錯誤要講清楚兩個版本號：{err}");
+
+        // 拒絕啟動不能順便把版本號改回來，也不能動任何 schema。
+        let v: i64 = sqlx::query_scalar("PRAGMA user_version").fetch_one(&pool).await.unwrap();
+        assert_eq!(v, future);
+
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 版本號功能上線前建立的舊資料庫（`user_version` 從沒被設過，SQLite 預設 0）一樣要能升上來，
+    /// 而且升級之後可重入：同一版重跑版本號不變、不報錯（issue #72 驗收項）。
+    #[tokio::test]
+    async fn an_old_unversioned_db_upgrades_and_stays_reentrant() {
+        let dir = tmp_dir();
+        let path = dir.join("db.sqlite3");
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&format!("sqlite://{}?mode=rwc", path.display()))
+            .await
+            .unwrap();
+        let before: i64 = sqlx::query_scalar("PRAGMA user_version").fetch_one(&pool).await.unwrap();
+        assert_eq!(before, 0, "全新檔案／版本號功能上線前的舊 DB，SQLite 預設就是 0");
+
+        migrate(&pool).await.unwrap();
+        let after: i64 = sqlx::query_scalar("PRAGMA user_version").fetch_one(&pool).await.unwrap();
+        assert_eq!(after, SCHEMA_VERSION);
+
+        // 可重入：同一版再跑一次不報錯、版本號不變。
+        migrate(&pool).await.expect("同一版重跑不該失敗");
+        let again: i64 = sqlx::query_scalar("PRAGMA user_version").fetch_one(&pool).await.unwrap();
+        assert_eq!(again, SCHEMA_VERSION);
 
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
