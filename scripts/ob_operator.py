@@ -16,6 +16,9 @@ from ob_store import OBError, Store, exclusive
 BROWSER_LOCK_WAIT = 720
 # 等不到時的記號：`operate` 認得它就把請求放回佇列重排，不標 failed。
 BUSY_MARK = "browser_busy"
+# ego lite 根本沒在跑（GH #65）：跟 `BUSY_MARK` 同一招——`operate` 從 Sonnet 的最終輸出裡認這個字，
+# 分出「瀏覽器沒開」跟其他失敗，訊息才講得出下一步。
+BROWSER_NOT_RUNNING_MARK = "browser_not_running"
 
 HERE = Path(__file__).resolve().parent
 SYSTEM = """你是 OB 的 Sonnet 操作員。你只有本筆專案請求的 context。
@@ -54,6 +57,19 @@ def run_process(argv, *, cwd, env, timeout, stdin=None, new_session=True):
                 pass
             proc.communicate()
         raise
+
+
+def ego_lite_running():
+    """ego lite 這個 app 有沒有在跑（GH #65）：查行程表，不去猜 `ego-browser` 連不上時印出的字——那是
+    第三方 CLI 的訊息，會換版本、換語言。比對片段跟 daemon 的 `memstat` 分 app 用同一段
+    （`ego lite.app/`），一台機器只認一種規則。查不出來（沒有 `ps`、逾時…）就當作在跑，照舊往下試，
+    讓真正的錯誤浮出來，不要因為查詢本身失敗就誤報「沒開」。
+    """
+    try:
+        out = subprocess.run(["ps", "-axo", "command"], capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return True
+    return "ego lite.app/" in out
 
 
 def journal_for(store, ident):
@@ -128,15 +144,23 @@ def browser_consult(store, ident, config, collect=False, token=None):
                     previous_url=project["url"] if rotating else None,
                     journal=str(journal_for(store, ident)), collect=collect,
                     timeout_ms=600000)
+        # 還沒送出任何東西：查得出瀏覽器根本沒開就直接講清楚，不要讓 ego-browser 自己去撞一個連不上的
+        # 連線錯誤（那段訊息會被 stderr 丟掉，呼叫端只看到含糊的 browser_failed_or_interrupted）。
+        if not ego_lite_running():
+            raise OBError(f"{BROWSER_NOT_RUNNING_MARK}：ego lite 沒有在跑，請先開啟 ego lite 再重試")
         script = "globalThis.CONSULT_ARGS = " + json.dumps(args, ensure_ascii=False) + ";\n"
         script += (HERE / "chatgpt-consult.mjs").read_text()
-        code, out, _ = run_process([config["ego_binary"], "nodejs"], cwd=store.root,
-                                   env=clean_env(config), timeout=720, stdin=script, new_session=False)
+        code, out, err = run_process([config["ego_binary"], "nodejs"], cwd=store.root,
+                                     env=clean_env(config), timeout=720, stdin=script, new_session=False)
         progress = journal_state(store, ident)
         if progress and progress.get("phase") == "done":
             return store.finish(ident, progress["answer"], progress["url"], token)
-        # Never trust Sonnet's prose as the answer: only the browser journal is evidence.
-        raise OBError("browser_failed_or_interrupted" if code else "browser_no_receipt")
+        # Never trust Sonnet's prose as the answer: only the browser journal is evidence. 非 0 才帶
+        # stderr 最後一行：以前整段丟掉，呼叫端看到的永遠只有 code 而已（GH #65 初步線索）。
+        if not code:
+            raise OBError("browser_no_receipt")
+        detail = next((line for line in reversed((err or "").strip().splitlines()) if line.strip()), "")
+        raise OBError(f"browser_failed_or_interrupted：{detail[:200]}" if detail else "browser_failed_or_interrupted")
 
 
 def mcp_server(root, ident, token=None):
@@ -224,6 +248,9 @@ def operate(store, job, config):
         elif BUSY_MARK in (out or ""):
             # 瀏覽器被 collect／resolve 佔著，連送都沒送出：放回佇列重排，不要叫人去查登入（review3 c4 L6）。
             store.requeue(ident, "瀏覽器正被另一筆請求佔用，已放回佇列重排", token)
+        elif BROWSER_NOT_RUNNING_MARK in (out or ""):
+            # 沒有 journal：連送都沒送出，留在可重試的 failed，不能算 unknown（GH #65）。
+            store.fail(ident, "failed", f"{BROWSER_NOT_RUNNING_MARK}：ego lite 沒有在跑，請先開啟 ego lite 再重試", token)
         else:
             store.fail(ident, "failed", "Sonnet 未取得瀏覽器收據；檢查登入、CLI 與 MCP，再 retry", token)
     except Exception as e:
