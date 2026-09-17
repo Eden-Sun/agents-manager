@@ -104,7 +104,9 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   - 連上先 `ping`；`protocol != 20` 只警告。未知欄位與事件容忍；`docs/herdr-schema.json` 為契約參考。
 - **session 管理**：socket 連不上就 spawn `herdr --session <name> server`（detached），輪詢最多 10 秒。daemon 退出不停 herdr。
 - **per-bot 鎖**：每個 `bot_id` 一把 `tokio::sync::Mutex`；start／stop／prompt／hook 配對／spool 重放／對帳都在鎖內。
-- **hook receiver**：`POST /hook/claude|codex|grok`，驗 per-bot token → 入佇列立即回 200 → 背景配對（§6.7）。
+- **hook receiver**：`POST /hook/claude|codex|grok`，驗 per-bot token → **寫進 `hook_events` 並 commit** → 才回 200 →
+  worker 照寫入順序配對（§6.7）。`200` ＝「已經耐久收下」，不是「已經處理完」；寫不進去回 **503**，送端照 §4.4 第 4 點 spool。
+  StatusLine 例外：單槽、最新的贏的重繪訊號，不進佇列（§4.4b）。
 - **自動關滿意度問卷**：Claude Code 的 `How is Claude doing this session?` 會讓 agent 停下來等人，與工作無關 → 認出畫面一律送 `0`
   （`tui_prompts`）。進 `blocked` 當下看一次，另每 10 秒巡 `blocked`／`idle` 的 Run；額度探測 pane 也用同一套（那裡的 Enter 會變成替使用者評分）。
   其他等人回答的畫面一概不動。
@@ -204,10 +206,29 @@ claude 連線在回應中途掉了時，pane 只多一行 `⏺ API Error: Connec
 2. stdin（claude、grok）上限 1 MiB，超過截斷標 `truncated`；codex 取 argv 最後一個。
 3. POST `http://127.0.0.1:<port>/hook/<provider>`（寫死 IPv4 loopback、`NO_PROXY=127.0.0.1`、連線逾時 300 ms、總逾時 2 秒），header `X-AM-Bot-Token`，
    body `{bot_id, provider, payload, received_at}`。
-4. 失敗 → `O_APPEND` 追加一行到 `~/.config/agents-manager/bots/<bot_id>/hook-spool.jsonl`；寫失敗只記 `hook.log`，仍 exit 0。
+4. 失敗（連不上、逾時，或**任何非 2xx**，含 daemon 寫不進收件匣時的 503）→ `O_APPEND` 追加一行到
+   `~/.config/agents-manager/bots/<bot_id>/hook-spool.jsonl`；寫失敗只記 `hook.log`，仍 exit 0。這就是 hook 的重試路徑。
 5. `--port` 取自 command 列；env `AM_PORT` 為備援。
-6. daemon 重放 spool：拿 per-bot 鎖 → rename 成 `.replaying` → 逐行照 §6.7 → 刪檔 → 放鎖。
+6. daemon 重放 spool：拿 per-bot 鎖 → rename 成 `.replaying` → 逐行**寫進 `hook_events` 並 commit** → 刪檔 → 放鎖；
+   §6.7 的配對交給 worker。順序不能顛倒：先刪檔再處理，中間掛掉就等於事件沒發生過。
 7. **遠端 bot 不走 HTTP**：改成「寫 spool + `herdr pane report-agent`」，spool 是唯一內容通道，重放由 herdr 狀態事件觸發（§11.4）。
+
+### 4.4b hook 耐久收件匣 `hook_events`
+
+`200` 之前事件一定已經 commit；遠端 spool 那份唯一的副本被刪掉之前，本機一定已經 commit。**耐久收下**與
+**語意處理**是兩件事，`process_locked()` 失敗不等於事件消失。
+
+| 欄位 | 意思 |
+|---|---|
+| `dedupe_key` | 事件身分＝`provider\|received_at\|事件名\|session\|turn`。同一則重送得到同一把鑰匙，`(bot_id, dedupe_key)` 是 partial unique index。`received_at` 是**送端**蓋的：用收到的時間當鑰匙，重送永遠是新的一列，去重會失效。認不出時間的 body 不參加去重（寧可多一列，也不要把兩則不同的事件併掉）。 |
+| `processed_at` | NULL ＝還沒處理完。daemon 重啟後就是靠它把上一輪沒做完的補回來。 |
+| `attempts` / `last_error` / `next_attempt_at` | 處理失敗時列留著、記原因、退避 1s→2s→4s…上限 256 秒後再試。解不開的 body 記下原因收掉（再試也一樣），不無限佔住佇列。 |
+
+- **出列順序**：`ORDER BY rowid`（寫入順序）。不用 `id`：ULID 同一毫秒內的亂數段不保證遞增。
+- **消費者只有一個**（`hook_inbox::spawn_worker`）：收下的一方 commit 完只負責叫醒它，不自己處理，因此不必為「同一列被兩邊同時處理」另加 claim 欄位。
+- **延遲**：本機 hook 的關鍵路徑多一次 INSERT＋COMMIT（本機 SQLite，遠小於 §4.4 的 2 秒 HTTP 預算）；處理仍是背景的，送端不會被配對邏輯卡住。worker 靠 notify 叫醒，正常情況下延遲與以前的「spawn 立刻處理」同級，另有 5 秒輪詢當保險。
+- **保留**：處理完的列留 24 小時供查「這則到底進來過沒有」，之後由 worker 順手刪掉。
+- **StatusLine 不進來**：它是單槽、最新的贏的重繪訊號（遠端就是寫 `hook-status.json`，不是 spool 佇列），送端 `statusline_cmd` fire-and-forget 不看回應也不重送。每次重繪寫一列只換來大量寫入，換不到任何保證；掉一格的代價就是晚一次重繪。
 
 ### 4.4a 模型／強度／fast：runtime 與設定
 
@@ -1005,10 +1026,16 @@ label = "foo@m4p"
 #### 11.4.3 daemon 端：狀態事件 → 讀 spool → 重放
 `events::handle_status` 在遠端 run 上多一步（per-bot 鎖內，與 HTTP hook 同一把）：
 1. 照舊更新 `agent_status`、推 WS。
-2. host ≠ local 且（`working → idle` 或 `→ blocked`）→ **drain**（`hookrecv::replay_spool_remote`）：一段 ssh sh 把 `hook-spool.jsonl` `mv` 成 `.replaying`
-   （已存在就把新的接在後面）→ `cat` → `rm`；daemon 逐行解析走 §6.7。
+2. host ≠ local 且（`working → idle` 或 `→ blocked`）→ **drain**，**兩趟 ssh**：
+   - **claim**：把 `hook-spool.jsonl` `mv` 成 `.replaying`（已存在就把新的接在後面）→ `cat`。**不刪**。
+   - daemon 逐行寫進 `hook_events` 並 commit（§4.4b）。
+   - **ack**：`rm -f .replaying`。
+   遠端那份是唯一的副本，所以刪它的唯一時機是本機已經 commit 之後；以前 `cat` 完就 `rm`，位元組還沒落地就沒了。
+   ack 失敗（或中間掉線）＝`.replaying` 留在遠端，下一輪 claim 會再讀到它，靠 `dedupe_key` 擋重複。§6.7 的配對交給 worker。
+   `hook-status.json` 仍是讀完就刪：單槽訊號不是佇列（§4.4b）。
 3. drain 是 await 的（預算 4 秒），成功後才 `arm_fallback`——終端備援只在 hook 真的沒來時才贏；失敗或逾時照舊 arm，CAS 保證不雙寫。
-4. 冪等：rename 是遠端原子操作；重放再靠 `(native_session_id, native_turn_id)` 去重。drain 全程持鎖。
+4. 冪等三層：rename 是遠端原子操作；收件匣靠 `dedupe_key` 擋同一則重送（§4.4b）；配對再靠
+   `(native_session_id, native_turn_id)` 去重。claim→commit→ack 全程持鎖。
 
 #### 11.4.4 遲到、重複與遺失
 - **重複事件**：同一 bot 的 drain 有 1 秒合併窗，窗內第二次觸發只記「還要再跑一次」。
@@ -1016,6 +1043,7 @@ label = "foo@m4p"
 - **事件整個遺失**：每台已連線 host 每 30 秒掃「有 in-flight Turn 或 spool 檔存在」的 bot 做 drain（一台一次 ssh，腳本內迴圈所有 bot 目錄）；host 重連與啟動對帳對每個 bot drain 一次（`replay_host`）。
 - **遲到的 hook**：對應 Turn 已 `completed_fallback` → 依 §4.3：已有回覆才丟棄只 log，一則都沒有就補上。
 - **bot 已刪除**：`process_locked` 擋 `deleted_at`；遠端 bot 目錄在刪除時 `rm -rf`。
+- **收下了但沒處理完**：列留在 `hook_events`（`processed_at IS NULL`），daemon 重啟後 worker 第一件事就是把它們補做完（§4.4b）。
 - **host 斷線期間**：hook 照寫本機檔，重連後 `replay_host` 補進來。
 
 #### 11.4.5 statusLine（額度）

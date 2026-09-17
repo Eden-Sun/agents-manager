@@ -28,6 +28,7 @@ mod herdr;
 mod herdr_shim;
 mod herdr_maintenance;
 mod hook_cmd;
+mod hook_inbox;
 mod hookrecv;
 mod hosts;
 mod lifecycle;
@@ -272,6 +273,7 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     lifecycle::spawn_stuck_turn_sweeper(app.clone());
     update_watch::spawn_update_watcher(app.clone());
     // SPEC §11.4.4: remote hook spools whose status event never arrived (one ssh per host, 30s).
+    hook_inbox::spawn_worker(app.clone());
     hookrecv::spawn_spool_scanner(app.clone());
     // §6.5e：pane 裡開始跑 dev server 沒有任何 herdr 事件，對帳又不定期跑；表上的 kind／port 靠這個跟上。
     panes::spawn_scanner(app.clone());
