@@ -1254,7 +1254,10 @@ mod tests {
     }
 
     async fn inbox_keys(app: &Arc<App>, like: &str) -> Vec<String> {
-        sqlx::query_scalar("SELECT event_key FROM supervisor_inbox WHERE event_key LIKE ? ORDER BY created_at")
+        // `rowid` 當第二鍵的理由同 a4605b2：`created_at` 只到毫秒，`id` 是 ULID（同毫秒內亂數段不保證
+        // 遞增）。今天每個呼叫點都只看筆數或單筆，順序翻了也不會紅——正因為如此，這裡更要寫對：
+        // 下一個照抄這段的人多半會直接比整串。
+        sqlx::query_scalar("SELECT event_key FROM supervisor_inbox WHERE event_key LIKE ? ORDER BY created_at, rowid")
             .bind(like)
             .fetch_all(&app.db)
             .await
@@ -1385,7 +1388,7 @@ mod tests {
         assert_eq!(out["resumed"], true);
         assert_eq!(out["mission"]["status"], "open", "放行了");
         assert_eq!(inbox_keys(&app, &format!("mission:{id}:answer:%")).await, [format!("mission:{id}:answer:a1")]);
-        let kinds: Vec<String> = sqlx::query_scalar("SELECT kind FROM mission_events WHERE mission_id = ? ORDER BY created_at")
+        let kinds: Vec<String> = sqlx::query_scalar("SELECT kind FROM mission_events WHERE mission_id = ? ORDER BY created_at, rowid")
             .bind(&id)
             .fetch_all(&app.db)
             .await
