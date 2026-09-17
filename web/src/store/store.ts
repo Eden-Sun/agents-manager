@@ -438,7 +438,8 @@ export interface StoreState {
   /** 回傳 `needs_restart`；null = 失敗（原因已跳通知）。 */
   patchBot: (botId: string, input: PatchBotInput) => Promise<boolean | null>
   patchProject: (projectId: string, input: PatchProjectInput) => Promise<boolean>
-  restartBot: (botId: string) => Promise<boolean>
+  /** `resumeNative`：換身分後重啟要接回原對話（`?resume=native`），接不回自動退回不帶旗標重送一次。 */
+  restartBot: (botId: string, resumeNative?: boolean) => Promise<boolean>
   /** SPEC §6.9：閒置的 claude bot 全部 exit + resume；忙的跳過。 */
   restartIdleBots: () => Promise<void>
   /** null = 沒有批次在跑，也沒有摘要要看。 */
@@ -1438,10 +1439,20 @@ export const useStore = create<StoreState>((set, get) => ({
     return needsRestart
   },
 
-  async restartBot(botId) {
+  async restartBot(botId, resumeNative) {
     let ok = false
     await guarded(set, get, `restart:${botId}`, async () => {
-      await api.restartBot(botId)
+      try {
+        await api.restartBot(botId, resumeNative)
+      } catch (e: unknown) {
+        // 接不回原對話（`cannot_resume`）：daemon 不會啟動，退回不帶 `resume=native` 重送一次，
+        // 好過使用者按了「立即重啟」卻什麼都沒發生。
+        if (resumeNative && e instanceof ApiError && e.body.reason === 'cannot_resume') {
+          await api.restartBot(botId)
+        } else {
+          throw e
+        }
+      }
       await get().refreshState()
       ok = true
     })
