@@ -541,6 +541,17 @@ function errText(e: unknown): string {
   return String(e)
 }
 
+/**
+ * 明確指定的 identity 確認沒登入（GH #83）：daemon 的 409 已經把身分／主機／怎麼登入寫成人話放在
+ * `hint`，直接顯示它，不要漏成原始的 `identity_not_logged_in` 代碼。
+ */
+function startErrText(e: unknown): string {
+  if (e instanceof ApiError && e.body.reason === 'identity_not_logged_in' && typeof e.body.hint === 'string' && e.body.hint) {
+    return e.body.hint
+  }
+  return errText(e)
+}
+
 /** daemon 回穩定的機器 key，文案留在前端。 */
 function loginErrText(e: unknown): string {
   if (!(e instanceof ApiError)) return errText(e)
@@ -1097,10 +1108,16 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   async startBot(botId) {
-    await guarded(set, get, `start:${botId}`, async () => {
-      await api.startBot(botId)
-      await get().refreshState()
-    })
+    await guarded(
+      set,
+      get,
+      `start:${botId}`,
+      async () => {
+        await api.startBot(botId)
+        await get().refreshState()
+      },
+      startErrText,
+    )
   },
 
   async stopBot(botId) {
@@ -2113,13 +2130,13 @@ function reportStateRefreshError(set: SetFn, get: GetFn, e: unknown) {
   get().notify('error', text)
 }
 
-async function guarded(set: SetFn, get: GetFn, key: string, fn: () => Promise<void>) {
+async function guarded(set: SetFn, get: GetFn, key: string, fn: () => Promise<void>, toText: (e: unknown) => string = errText) {
   if (get().busy[key]) return
   set((s) => ({ busy: { ...s.busy, [key]: true } }))
   try {
     await fn()
   } catch (e) {
-    get().notify('error', errText(e))
+    get().notify('error', toText(e))
   } finally {
     set((s) => {
       const busy = { ...s.busy }

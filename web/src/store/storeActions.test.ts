@@ -471,3 +471,35 @@ for (const [label, body, route] of [
     assert.equal(useStore.getState().shellView, null)
   })
 }
+
+/** GH #83：明確 identity 確認沒登入時啟動失敗，toast 要顯示 daemon 給的 `hint`（身分／主機／怎麼登入），不是原始 reason 代碼。 */
+test('啟動撞到明確 identity 沒登入：toast 顯示 hint，不是 identity_not_logged_in 代碼', async () => {
+  seed()
+  routeDaemon(() =>
+    json(
+      {
+        error: 'conflict',
+        reason: 'identity_not_logged_in',
+        identity: 'cc-lock',
+        host: 'local',
+        login_required: true,
+        hint: '身份 `cc-lock` 在 local 沒有登入；先在該主機用 `cc-lock` 登入（例如 claude 的 `/login`），再重試啟動。',
+      },
+      409,
+    ),
+  )
+  await useStore.getState().startBot('b1')
+  const texts = noticeTexts()
+  assert.equal(texts.length, 1)
+  assert.match(texts[0], /cc-lock/)
+  assert.match(texts[0], /登入/)
+  assert.doesNotMatch(texts[0], /identity_not_logged_in/)
+})
+
+/** 其他 409（例如一般的 not_idle）沒有專屬文案時，照舊走 `errText` 的通用格式。 */
+test('啟動撞到其他 409：沒有專屬文案時照舊顯示 reason（HTTP 碼）', async () => {
+  seed()
+  routeDaemon(() => json({ error: 'conflict', reason: 'not_idle', bot_id: 'b1', busy: 'working' }, 409))
+  await useStore.getState().startBot('b1')
+  assert.deepEqual(noticeTexts(), ['not_idle（HTTP 409）'])
+})
