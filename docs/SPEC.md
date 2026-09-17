@@ -1180,6 +1180,9 @@ API：`GET /api/projects/:id/messages`、`POST /api/projects/:id/chat`（`API.md
   `/usage` 先跑 `--output-format stream-json --verbose` 並 `grep -m1 usage_report`：claude 2.1.273 起那一行帶結構化的 `usage_report.rate_limits.limits[]`
   （`kind` = `session`／`weekly_all`／`weekly_scoped`＋`scope.model.display_name`、`percent`、ISO `resets_at`、`severity`），分桶一律看 `kind` 不看顯示字串，重置時間直接用 ISO；Fable 列認 `display_name` 的第一個字（`Fable`、`Fable 5.1` 都算）。
   `grep` 沒抓到（舊 CLI 不認這個旗標或還沒有這個欄位）才跑純文字版，交給既有的文字解析（`parse_claude_usage`）。
+  這支 pane 打的每一段命令都帶 `CLAUDE_CODE_MCP_STARTUP_WAIT_MS=0`（claude 2.1.274 起認得）：探測只問登入狀態跟 `/usage`，
+  從不用工具，不該被 MCP server 起得慢或掛掉拖住甚至拖到 timeout；舊版 CLI 當成一般環境變數忽略，行為不變、安全。
+  只在這支 throwaway probe 的命令列加，一般 managed bot 的啟動指令是完全分開的路徑（`lifecycle/start.rs`），工具可用性不受影響。
 - **grok `/usage` 探測**：§12.6 的 TUI 流程。
 - 兩者本機開在專屬 `am-quota` session；遠端借 **daemon 在那台的 named session**（遠端只有一條轉發 socket，再開 session 要多一條轉發）。
   label 是 `am-quota-claude*` / `am-quota-grok`、agent 名 `amquota<6碼>`（不在 DB）；`sweep_stale()` 掃本機 `am-quota` 與每台已連線主機的 session。
