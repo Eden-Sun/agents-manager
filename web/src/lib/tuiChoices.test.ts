@@ -295,6 +295,19 @@ test('貼上之後標題被取代、換行進說明；customAnswerShown 認得�
   assert.equal(customAnswerShown(menu.choices[2], '第一行\n第二行中文'), true)
 })
 
+test('窄 pane 把長答案折行（中文折在字中間）也算出現過，不會卡住不按 Enter', () => {
+  const wrapped = { number: 3, title: '要一個能讓非工程師自己發文章的後', detail: '台，順便把舊文章一起搬過去', checked: null, current: true }
+  assert.equal(customAnswerShown(wrapped, '要一個能讓非工程師自己發文章的後台，順便把舊文章一起搬過去'), true)
+  // 英文折在空格上，照樣認得。
+  const latin = { number: 3, title: 'let editors publish posts', detail: 'without touching markdown', checked: null, current: true }
+  assert.equal(customAnswerShown(latin, 'let editors publish posts without touching markdown'), true)
+  // 完全不同的字仍然不算（不能因為比較寬鬆就亂認）。
+  assert.equal(customAnswerShown(wrapped, '換一個完全不同的答案'), false)
+  assert.equal(customAnswerShown(wrapped, '   '), false)
+  // 答完會多一個 ✔，照舊要認得。
+  assert.equal(customAnswerShown({ ...wrapped, title: '要一個能讓非工程師自己發文章的後 ✔' }, '要一個能讓非工程師自己發文章的後台，順便把舊文章一起搬過去'), true)
+})
+
 test('答完進 review：自訂答案（含換行）讀得出來', () => {
   const menu = parseChoiceMenu(TYPE_REVIEW)
   assert.ok(menu)
