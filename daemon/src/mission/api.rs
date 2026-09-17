@@ -1099,25 +1099,28 @@ pub async fn post_deliver(State(app): State<Arc<App>>, Path(id): Path<String>, J
         )
         .await;
     }
+    // 交付的 base 從 repo 問（`origin/HEAD`），不是寫死 main：預設分支叫 master／trunk 的專案
+    // 以前一定 `fetch_failed`。
+    let base = deliver::base_branch(&dir, "origin").await;
     let result = if m.delivery_mode == "push_main" {
-        deliver::push_main(&dir, "origin", "main", attempted_before)
+        deliver::push_main(&dir, "origin", &base, attempted_before)
             .await
-            .map(|p| json!({"mode": "push_main", "sha": p.sha, "already_in_base": p.already_in_base}))
+            .map(|p| json!({"mode": "push_main", "sha": p.sha, "base": base, "already_in_base": p.already_in_base}))
     } else {
         let branch = format!("mission/{}", m.id.to_lowercase());
         let title = b.title.clone().unwrap_or_else(|| m.text.chars().take(72).collect());
         let body = b.body.clone().unwrap_or_else(|| format!("群組任務 {}\n\n{}", m.id, m.text));
-        deliver::open_pr(&dir, "origin", "main", &branch, &title, &body)
+        deliver::open_pr(&dir, "origin", &base, &branch, &title, &body)
             .await
-            .map(|o| json!({"mode": "pr", "branch": branch, "url": o.url, "sha": o.sha, "existing_pr": o.existing}))
+            .map(|o| json!({"mode": "pr", "branch": branch, "base": base, "url": o.url, "sha": o.sha, "existing_pr": o.existing}))
     };
     match result {
         Ok(out) => {
             let sha = out["sha"].as_str().unwrap_or_default();
             let text = match (out["mode"].as_str(), out["already_in_base"] == json!(true), out["existing_pr"] == json!(true)) {
                 // 重試時才會看到的兩種：先前那次其實做完了，只是沒記下來。
-                (Some("push_main"), true, _) => format!("已在 main 上：{sha}（先前那次交付其實成功了，這次只補記）"),
-                (Some("push_main"), false, _) => format!("已推上 main：{sha}"),
+                (Some("push_main"), true, _) => format!("已在 {base} 上：{sha}（先前那次交付其實成功了，這次只補記）"),
+                (Some("push_main"), false, _) => format!("已推上 {base}：{sha}"),
                 (_, _, true) => format!("PR 早就開著了：{}", out["url"].as_str().unwrap_or_default()),
                 _ => format!("已開 PR：{}", out["url"].as_str().unwrap_or_default()),
             };
