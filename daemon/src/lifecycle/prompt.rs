@@ -624,6 +624,38 @@ mod prompt_tests {
         assert_eq!(queued, 1);
     }
 
+    /// 打字前 `runs.pane_typed` 寫不進去（SQLite 鎖逾時、磁碟滿）：一個字都沒打，所以是 409＋撤回 turn，
+    /// 不能留一筆 `unknown` 的 in_flight 擋住之後每一則、5 分鐘後又被收成 completed_fallback（review3 c4 L5）。
+    #[tokio::test]
+    async fn a_pane_typed_marker_that_cannot_be_written_is_a_retryable_409_with_no_turn_left() {
+        let f = fixture("claude", "test").await;
+        let app = f.env.app.clone();
+        sqlx::query("UPDATE runs SET pane_id = 'pane-prompt-test', pane_typed = 1 WHERE id = ?")
+            .bind(&f.run_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        f.env.herdr.live_pane("pane-prompt-test", tt::LivePane { width: Some(120), ..Default::default() });
+        sqlx::query(
+            "CREATE TRIGGER pane_typed_unwritable BEFORE UPDATE OF pane_typed ON runs
+             BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END",
+        )
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        let out = prompt(&app, &f.bot_id, "Reply with PONG please", "prompt-pane-typed").await;
+        let Err(LcError::Conflict(body)) = out else { panic!("expected a retryable 409, got {:?}", out.map(|o| o.delivery)) };
+        assert_eq!(body["reason"], "pane_typed_unwritable", "{body}");
+        let turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE conversation_id=?")
+            .bind(&f.conv)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(turns, 0, "沒送出的 turn 被撤回，不是留成 unknown");
+        assert_eq!(f.env.herdr.methods().iter().filter(|m| *m == "pane.send_text").count(), 0, "一個字都沒打");
+    }
+
     /// A missing run session is rejected before writing, so a retry reports the same upstream problem.
     #[tokio::test]
     async fn an_unavailable_run_session_does_not_create_a_turn() {

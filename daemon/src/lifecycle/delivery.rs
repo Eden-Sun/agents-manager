@@ -769,8 +769,12 @@ pub(crate) async fn execute_delivery(
     };
     // Persist "this pane gets typed into" before the first keystroke (sol review round three #2).
     crate::lifecycle::remember_pane_typed(&run.id);
+    // 寫不進去時一個字都還沒打：跟其他「打第一個字之前」的失敗一樣是可重試的 NotAttempted。以前回 `Err`，
+    // 直接送與排隊都被記成 `delivery='unknown'`，5 分鐘後被 stuck_turns 收成 completed_fallback——工作根本沒送出去
+    // （review3 c4 L5）。
     if let Err(e) = db::set_pane_typed(&app.db, &run.id).await {
-        anyhow::bail!("could not record runs.pane_typed for {} before typing into its pane: {e}", run.id);
+        tracing::warn!(run = %run.id, error = %e, "could not record runs.pane_typed before typing; nothing was typed");
+        return Ok(Delivered::NotAttempted { reason: "pane_typed_unwritable", retry: true });
     }
     // Styled read when herdr can (`box_state` needs the dim flag); echo evidence strips the styling.
     let read = || read_composer(client, &pane);
