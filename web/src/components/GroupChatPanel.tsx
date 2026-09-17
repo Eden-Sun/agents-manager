@@ -10,6 +10,7 @@ import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { useComposerFocus } from '../hooks/useComposerFocus'
 import { AttachButton } from './AttachButton'
 import { AttachPicker, AttachTray, DropVeil, useAttachments, useDropTarget } from './Attachments'
+import { agmAttachmentBlock } from '../lib/agmAttachments'
 import { ProjectPanes } from './ProjectPanes'
 import { ProjectNameField } from './ProjectNameField'
 import { Bubble, EmptyState, JumpToBottom, KIND_TITLE, LiveReplyBubble, LoadEarlier } from './ChatPanel'
@@ -333,6 +334,11 @@ function GroupComposer({
     // 交給 AGM：建一個任務，不送給任何一顆 bot（AGM 不是專案成員，見設計 §9）。
     if (toAgm) {
       if (sending) return
+      const blocked = agmAttachmentBlock(toAgm, files.items.length)
+      if (blocked) {
+        notify('error', blocked)
+        return
+      }
       setSending(true)
       // crid 由 store 的 `missionRequests` 給：同一段草稿重送回同一筆任務，手滑連按兩下不會開兩個。
       void startMission(projectId, { text: body, ...missionOpts }).then((id) => {
@@ -419,7 +425,7 @@ function GroupComposer({
       </div>
       <AttachTray items={files.items} onRemove={files.remove} disabled={sending} />
       <div className="composer-box">
-        <AttachPicker onFiles={files.add} disabled={state.disabled || sending} />
+        <AttachPicker onFiles={files.add} disabled={state.disabled || sending || toAgm} />
         {showPop ? (
           <ul className="mention-pop" role="listbox" aria-label="選擇收件 Bot">
             {candidates.map((c, i) => (
@@ -509,7 +515,7 @@ function GroupComposer({
           }
           title={
             toAgm
-              ? '建一個任務交給 AGM'
+              ? (agmAttachmentBlock(toAgm, files.items.length) ?? '建一個任務交給 AGM')
               : files.uploading
                 ? '附件上傳中…'
                 : targets.length === 0
@@ -521,7 +527,13 @@ function GroupComposer({
           {sending ? '送出中…' : files.uploading ? '上傳中…' : toAgm ? '交給 AGM' : '送出'}
         </button>
       </div>
-      {toAgm ? null : text.trim() && targets.length === 0 ? (
+      {toAgm ? (
+        agmAttachmentBlock(toAgm, files.items.length) ? (
+          <div className="composer-hint group-hint">
+            <span className="mention-warn">{agmAttachmentBlock(toAgm, files.items.length)}</span>
+          </div>
+        ) : null
+      ) : text.trim() && targets.length === 0 ? (
         <div className="composer-hint group-hint">
           <span className="mention-warn">請選擇上方收件者，或以 @&lt;bot 名稱&gt; / @all 指定</span>
         </div>
