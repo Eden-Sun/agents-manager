@@ -534,6 +534,9 @@ pub fn spawn(app: Arc<App>, generation: i64) {
                     drain_queue(&app).await;
                     notify(&app).await;
                     super::watchdog::tick(&app).await;
+                    // 閒置太久的 bot 收起來省 RAM（§6.10）。巡邏自己節流成每分鐘一次，
+                    // 而且丟到背景跑——停一顆最久要等 agent 十秒，不能卡住這條迴圈。
+                    super::idle_sleep::tick(&app);
                 }
             }
         }

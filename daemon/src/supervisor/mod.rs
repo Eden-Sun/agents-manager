@@ -7,6 +7,7 @@
 pub mod api;
 pub mod controller;
 pub mod health;
+pub mod idle_sleep;
 pub mod policy;
 pub mod setup;
 pub mod store;
@@ -284,6 +285,8 @@ pub async fn sanitized_state(app: &Arc<App>) -> Result<Value, LcError> {
             connected.insert(h.clone());
         }
     }
+    // §6.10：這一輪被收起來省 RAM 的是哪幾顆。總管看得到才不會把「睡著」當成「掛了」。
+    let asleep = idle_sleep::all_asleep(app).await;
     let mut out = Vec::new();
     for b in &bots {
         let run = crate::db::active_run(&app.db, &b.id).await.map_err(up)?;
@@ -313,6 +316,8 @@ pub async fn sanitized_state(app: &Arc<App>) -> Result<Value, LcError> {
             "host": hosts.get(&b.project_id).cloned(),
             "host_connected": hosts.get(&b.project_id).map(|h| connected.contains(h)),
             "queued_turns": queued,
+            // 停著但可以叫醒：派工照送就好，`lifecycle::prompt` 會先把它 `--resume` 回來。
+            "asleep": asleep.get(&b.id).map(|(at, mins)| json!({"since": at, "idle_minutes": mins})),
             "run": run.as_ref().map(|r| json!({
                 "id": r.id,
                 "state": r.state,

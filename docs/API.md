@@ -140,6 +140,7 @@ daemon 預設 `http://127.0.0.1:7788`（`config.toml` 的 `server.listen`）。�
     "auto_approve": true,
           "primary": false,
           "run": null,
+          "asleep": null,
           "lamp": "offline",
           "unread": 0
         }
@@ -162,6 +163,19 @@ daemon 預設 `http://127.0.0.1:7788`（`config.toml` 的 `server.listen`）。�
   "started_at": "2026-09-05T15:30:00.000Z", "ended_at": null
 }
 ```
+
+### `asleep`（2026-09-17 新增，SPEC §6.10）
+
+`null` = 一般狀態。有值 = 這顆是 **AGM 因為閒置超過 90 分鐘收起來省 RAM 的**，不是壞掉、也不是
+使用者關的：
+
+```json
+{"since": "2026-09-17T04:10:00.000Z", "idle_minutes": 93}
+```
+
+它的 `run` 是 `null`、`lamp` 是 `offline`，但下次要用時會自動用 `--resume` 接回原本那段對話——
+送訊息（`POST /api/bots/{id}/messages`）或按啟動（`POST /api/bots/{id}/start`）都會叫醒它，
+前端不必先自己啟動。`GET /api/supervisor/state` 的 bot 物件有同一個欄位。
 
 ### `lamp`（合成燈號，SPEC §2.2；前端直接用即可）
 
@@ -1022,6 +1036,18 @@ body（所有欄位皆可省略；`model` 與 `identity` 可傳 `null` 清除）
 - `identity` 指向不存在的 identity → `404 {"error":"not_found","what":"identity"}`；kind 與 bot 不符 → `400`。
 - `env` 傳整個物件即為**取代**（不 merge）；`identity` / `model` 傳 `null` 或 `""` 即為清除。
 - 成功後推 WS `bot_changed {bot_id}`。
+
+### 10.2a `POST /api/bots/{id}/start` 對睡著的 bot（2026-09-17，SPEC §6.10）
+
+這顆是 AGM 因為閒置收起來的（`asleep` 不是 `null`）時，start 走的是**續接**那條路
+（`--resume <上一個 session>`），回應多一個 `resumed`：
+
+```json
+200 {"run_id":"01M1…","resumed":true}
+```
+
+一般的 bot 行為不變（`200 {"run_id":"…"}`）。使用者按「啟動」想要的是把剛剛那顆帶著對話的 bot
+叫回來，不是開一段新的空白對話。
 
 ### 10.3 `POST /api/bots/{id}/restart`
 
