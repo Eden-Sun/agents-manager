@@ -50,6 +50,7 @@ mod quota_claude;
 mod quota_grok;
 mod read_marks;
 mod reconcile;
+mod spawn_hints;
 mod state;
 mod supervisor;
 mod supervisor_evidence;

@@ -675,15 +675,33 @@ herdr server 重啟會讓**所有** pane 同時消失。照 §6.5 的規則，�
 5. herdr 自己的 `[session] resume_agents_on_restore` 要關掉：它會在 pane 裡打不帶 daemon 參數（`--settings`、權限旗標、帳號環境）的 `claude --resume`，
    跟 daemon 的接回撞成兩份。子 agent 仍由父 agent 重開（`start` 對子 agent 一律拒絕，§6.5a）。
 
-### 6.5a 子 agent 認領（血緣優先）
+### 6.5a 子 agent 認領（提示優先，其次血緣）
 
-一個 bot 一個 tab。對帳的逐 bot 迴圈走完後，`agent.list` 裡**沒有 bot 認領**的 agent 依序試兩條線索：
+一個 bot 一個 tab。對帳的逐 bot 迴圈走完後，`agent.list` 裡**沒有 bot 認領**的 agent 依序試三條線索：
 
-1. **血緣（優先）**：它的 `tab_id` 等於某 bot 活動 run 的 `tab_id` → 那顆 bot 的子 agent（子 pane 從父 pane split 出來，必然在父的 tab 裡，不需要 agent 配合）。
+1. **spawn hint（issue #94，最優先）**：`spawn_hints` 表裡 `pane_id` 對得上的那筆 → hint 記的那顆 bot（見下方）。
+2. **血緣**：它的 `tab_id` 等於某 bot 活動 run 的 `tab_id` → 那顆 bot 的子 agent（子 pane 從父 pane split 出來，必然在父的 tab 裡，不需要 agent 配合）。
    同一 tab 有多顆 bot（父 + 已認領的子）時取名字前綴最長者，平手取非 `child`——孫代因此掛在子代下面。
-2. **名字前綴**：`<某 bot 的 agent 名>-<字尾>`，取最長匹配。跨 tab 只有這條。
+3. **名字前綴**：`<某 bot 的 agent 名>-<字尾>`，取最長匹配。跨 tab 只有這條。
 
-兩條都中以血緣為準。認領：`managed_by='child'`、`parent_bot_id`、`adopted=1` 的 run；同一父 bot 底下同名的 live child 直接重用。
+**hint 優先於血緣的理由（2026-09-17 使用者實戰）**：一顆 parent 一次在**新** tab 裡連續開好幾顆子代理時，「血緣」這條線索
+會在第一顆被認領之後，把它自己也變成那個 tab 的候選 parent（規則 2 完全不看 `prefix_score` 高低，同一 tab 只要有候選就贏）——
+第二顆因此掛在第一顆底下、第三顆掛在第二顆底下，一顆掛一顆串成鏈；短名字被前一顆占用時 `child_name` 的 `prefix_score` 對錯的那個
+parent 算出來是 0，連字尾都取不到，退而用完整 herdr agent name 建 bot，於是又多長出重複 bot。`spawn_hints` 直接把「這個 pane_id 是
+哪顆 bot 剛開的」這個事實排在血緣前面，繞過整個「同 tab 就算」的推斷，從根本上不讓鏈條長出來。三條都沒中就跳過。
+
+**spawn hint 從哪來**：頂層 bot 自己的 `PostToolUse` hook（`matcher: "Bash"`，issue #94）——它自己的 Bash 工具跑
+`herdr pane split`／`agent start` 時，那條指令的 stdout 就是 herdr 自己回的 JSON-RPC 回應（`{"id":"cli:pane:split",
+"result":{"pane":{"pane_id":...}}}` 或 `{"id":"cli:agent:start","result":{"agent":{"pane_id":...}}}`，`daemon/src/spawn_hints.rs`
+對照真的 herdr 0.8.2 驗過）。**只信這兩個 `id`**：`pane:get`／`pane:current`／`pane:list` 回的是同一種 `{"pane":{...}}` 形狀，
+只看 `type` 會把「看一眼」也當成「剛創造」。記進 `spawn_hints(pane_id 唯一, host, bot_id, created_at)`，10 分鐘沒被用到就當
+過期（`prune_stale`，每次 `reconcile_host` 開頭跑一次）；被拿去認領成功就刪掉，重複跑不會重複建立。這條**只影響「這個 pane
+歸誰」，不影響「pane 裡到底有沒有 agent」**——`adopt_child` 認領前仍然要求那個 pane_id 在 `agent.list` 裡真的有一個沒被認領的
+agent，hint 錯了或指到不存在的 agent，最多就是這一顆這一輪沒被認領，不會憑空冒出 bot。
+**child 沒有這條路**：`managed_by='child'` 的 bot 一律沒有 hook（§4.3），沒有 Bash 工具事件流可看，子代自己開孫代時完全沒有
+hint 可用，退回規則 2／3——這條沒有、也不打算改掉子代 hookless 這件事。
+
+三條都沒中的照舊只退回血緣／前綴（規則 2、3）。認領：`managed_by='child'`、`parent_bot_id`、`adopted=1` 的 run；同一父 bot 底下同名的 live child 直接重用。
 子 bot `name`：有前綴取字尾，否則用 herdr agent 名（去空白與 `@,:;`、截 32 字）。字尾在專案裡已被別人用掉時改存完整 herdr agent 名（herdr 保證唯一）。
 每顆認領各自成敗：失敗只 log 跳過，不中止整台主機的對帳。
 
