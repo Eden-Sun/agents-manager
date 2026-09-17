@@ -399,8 +399,12 @@ pub async fn list(pool: &SqlitePool, project_id: &str, status: &str, limit: i64)
     .await?)
 }
 
+/// 群組時間軸，最舊在前。同一毫秒的兩筆照**寫入順序**排：`created_at` 只到毫秒，一輪來回
+/// （round → round → paused → resumed）常常擠在同一格，而 `id` 是 ULID，同一毫秒內的亂數段不保證
+/// 遞增，以前用 `id` 當第二鍵，使用者看到的事件順序會偶爾倒過來（`a_mission_runs_through_its_gates_end_to_end`
+/// 因此 8 次紅 1 次）。`rowid` 就是寫入順序，不必加欄位。
 pub async fn events(pool: &SqlitePool, mission_id: &str) -> Result<Vec<MissionEvent>> {
-    Ok(sqlx::query_as::<_, MissionEvent>("SELECT * FROM mission_events WHERE mission_id = ? ORDER BY created_at, id")
+    Ok(sqlx::query_as::<_, MissionEvent>("SELECT * FROM mission_events WHERE mission_id = ? ORDER BY created_at, rowid")
         .bind(mission_id)
         .fetch_all(pool)
         .await?)
@@ -1167,6 +1171,28 @@ mod tests {
     }
 
     /// 舊資料庫升級：1715872 當時的 DDL 建的表 + 一筆資料，migrate 要能跑完且不動到那筆資料。
+    /// 同一毫秒寫進去的兩筆事件，讀出來的順序＝寫入順序（不看 ULID 的亂數段）。
+    ///
+    /// `id` 故意跟寫入順序相反：舊的 `ORDER BY created_at, id` 會把它們倒過來。
+    #[tokio::test]
+    async fn events_written_in_the_same_millisecond_keep_their_order() {
+        let p = pool().await;
+        let at = "2026-09-17T12:00:00.000Z";
+        for (id, kind) in [("01ZZZZZZZZZZZZZZZZZZZZZZZZ", "round"), ("01AAAAAAAAAAAAAAAAAAAAAAAA", "paused")] {
+            sqlx::query("INSERT INTO mission_events (id, mission_id, kind, text, payload_json, created_at) VALUES (?,?,?,'','{}',?)")
+                .bind(id)
+                .bind("m1")
+                .bind(kind)
+                .bind(at)
+                .execute(&p)
+                .await
+                .unwrap();
+        }
+        let evs = events(&p, "m1").await.unwrap();
+        let kinds: Vec<&str> = evs.iter().map(|e| e.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["round", "paused"], "同一毫秒照寫入順序，不是照 ULID");
+    }
+
     #[tokio::test]
     async fn an_old_database_upgrades_without_losing_anything() {
         let pool = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
