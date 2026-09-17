@@ -609,11 +609,17 @@ async fn strict_bot_host(pool: &sqlx::SqlitePool, bot_id: &str) -> Option<String
 
 pub async fn quota_state(app: &Arc<App>, bot: &crate::db::Bot) -> QuotaState {
     let Some(key) = quota_key_for(app, bot).await else { return QuotaState::Unknown };
+    let model = crate::quota::running_model(app, bot).await;
     let now = chrono::Utc::now();
     let q = app.quotas.lock().await;
     let Some(quota) = q.get(&key) else { return QuotaState::Unknown };
-    // CLI 明說被擋住（還沒過期）：等它說的時間，沒說就等最近的視窗重置。
-    if let Some(hit) = quota.limit_hit.clone().filter(|h| !crate::quota::limit_hit_expired(Some(h))) {
+    // CLI 明說被擋住（還沒過期）：等它說的時間，沒說就等最近的視窗重置。撞的是模型專屬的桶（Fable）而協調者
+    // 跑的是別的模型，就不是它的撞限——跟 `limit_hit_for_bot` 同一條規則（review3 c3 H2）。
+    if let Some(hit) = quota
+        .limit_hit
+        .clone()
+        .filter(|h| !crate::quota::limit_hit_expired(Some(h)) && crate::quota::limit_hit_blocks_model(h, model.as_deref()))
+    {
         let soonest = [&quota.five_hour, &quota.seven_day, &quota.fable]
             .into_iter()
             .flatten()
@@ -1143,6 +1149,38 @@ mod flow_tests {
         app.quotas.lock().await.insert("claude:cc1".into(), blocked());
         notify(&app).await;
         assert_eq!(roles::get(&app.db, Role::Responder).await.unwrap().status, "waiting_quota");
+    }
+
+    /// review3 c3 H2：預設部署下巡檢（cc0、fable）撞 Fable 上限，同是 cc0、跑 opus 的協調者不能跟著等到 Fable 週窗重置。
+    /// 看的是協調者實際在跑的模型：`/model` 換成 fable 了，那就是它的撞限。
+    #[tokio::test]
+    async fn a_fable_hit_does_not_park_a_responder_running_opus() {
+        let app = fx::app().await;
+        fx::configure_responder(&app).await;
+        sqlx::query("UPDATE bots SET model='opus' WHERE id='resp'").execute(&app.db).await.unwrap();
+        bot_requests::intercept(&app, "patrol", "w1", "請核准重建", Some("r1"), &[], true, "api").await.unwrap().unwrap();
+        age_everything(&app).await;
+        sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,started_at) VALUES ('run-r','resp','running','idle',?)")
+            .bind(crate::db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let mut q = available();
+        q.limit_hit = Some(LimitHit {
+            message: "You've reached your Fable limit. Run /usage-credits to continue or switch models with /model.".into(),
+            until: Some("2999-01-01T05:00:00Z".into()),
+            at: crate::db::now(),
+            bucket: Some("fable".into()),
+        });
+        app.quotas.lock().await.insert("claude:cc0".into(), q);
+        let bot = roles::responder_bot(&app.db).await.unwrap().unwrap();
+
+        assert_eq!(quota_state(&app, &bot).await, QuotaState::Available, "Fable 桶不管跑 opus 的協調者");
+        notify(&app).await;
+        assert_ne!(roles::get(&app.db, Role::Responder).await.unwrap().status, "waiting_quota");
+
+        sqlx::query("UPDATE runs SET runtime_model='fable' WHERE id='run-r'").execute(&app.db).await.unwrap();
+        assert!(matches!(quota_state(&app, &bot).await, QuotaState::Blocked(_)), "實際在跑 fable 就是它的撞限");
     }
 
     /// 空的、不完整的讀數都不是「可以用」：少的那一格可能正是見底的那一格。

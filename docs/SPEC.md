@@ -1444,6 +1444,10 @@ inbox `assignment_noticed`（`needs_review=false`）。送不出去或回合失�
 
 - **派送前**（`controller::dispatch`）與**回合結束後**（`on_turn_done`）各查一次 `quota::limit_hit_for_bot`，撞到就停在 `quota_blocked`。
   回合結束那次的「回覆」是系統錯誤，記進 `error`，不寫 `result`、不算 `completed`。
+- **撞限看桶與模型**（`quota::bucket_blocks_model`）：5h、7d 與沒有桶名的撞限（codex、開機回填）擋整個帳號；模型專屬的桶（`fable`）
+  只擋**正在跑那個模型**的 bot——看 run 的 `runtime_model`，沒有才看設定值，兩個都沒有就保守地照擋。`limit_hit_for_bot` 與協調者的額度判讀（§18.15）走同一條。
+  以前不分桶：巡檢（cc0、fable）撞 Fable 上限，同帳號跑 opus 的協調者與交辦都被擋到 Fable 週窗重置（review3 c3 H2）。
+  park 時記在 `error` 的橫幅是模型桶、而 bot 現在跑的不是那個模型（修好之前停進來的、或之後 `/model` 換掉了）：`resume_at` 沒到也立刻重送。
 - **`resume_at` 取橫幅與 app-server 讀數中最早且仍在未來的**（橫幅會舊，`five_hour.resets_at` 會延遲）。防線：橫幅時間只過去 ≤ 15 分鐘視為舊橫幅，改 5 分鐘後再問，不滾到隔天；
   算出等待 > 6 小時改 15 分鐘後重試；兩邊都沒有時間退回 +30 分鐘。
 - **上限橫幅三條規則**：① 寫進該 bot 身份的 key——寫入、查詢（`limit_hit_for_bot`）、清除（`clear_limit_hit_for_bot`）三端都走 `quota::quota_base_for_host`，有自己 `CODEX_HOME` 的 `cx2` 成功回合清的是 `codex:cx2`，不是裸 `codex`；
@@ -1713,7 +1717,7 @@ supervisor 相關資料表與欄位都是 additive，`db::migrate` 重跑冪等�
 - **協調者的額度只看自己的帳號，而且分三態**：key 走 `quota_base_for_host`（`cc0` 這種 env 空的身分讀裸 `claude`，
   有自己 env 的 cc1／cc2 只讀自己那把），主機要確定——查不到專案或主機欄讀不出來就當不知道，不退回本機借數字。
   狀態是 Unknown／Available／Blocked：`Available` 要 5 小時與 7 天兩格都有讀數、都沒見底、也沒撞限；空的或不完整的讀數
-  是 Unknown。已知的 `waiting_quota` 只有兩種證據能解除：可信的 Available 讀數，或協調者在**開始等待之後**答完了一個
+  是 Unknown。撞限照 §18.8b 看桶與模型：協調者跑 opus 時，同帳號的 Fable 撞限不算它的（review3 c3 H2）。已知的 `waiting_quota` 只有兩種證據能解除：可信的 Available 讀數，或協調者在**開始等待之後**答完了一個
   沒留 `turn_error` 的回合（`supervisor_roles.waiting_since`）。prompt 送達（`ok`／`unknown`）**不算**——那只代表字進了
   pane 或佇列，CLI 可能下一刻才報撞限；等待期間送出後只把下一次重試推到有界間隔之後。額度狀態每個 tick 重算，
   撞限期間沒有新讀數不改 `notify_next_at`，也不重寫 DB、不推事件。
