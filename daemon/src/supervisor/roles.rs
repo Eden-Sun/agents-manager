@@ -199,6 +199,11 @@ fn known_route(kind: &str, payload: &Value, review_role: Option<&str>) -> Option
         // 送進已知壞掉的那條路——活著的協調者才收得到（review 2026-09-16 c1 M2、L4）。反方向對稱：
         // 協調者倒了是 `responder_watchdog_gave_up` 給巡檢。協調者沒建立時巡檢的 `due_for` 照樣撈得到。
         "watchdog_gave_up" => r(Role::Responder, true),
+        // 一則通知補送到放棄：交給**另一個**角色看（寫入時就決定好了，`controller::give_up_on`）。
+        "inbox_gave_up" => r(
+            payload.get("to_role").and_then(Value::as_str).and_then(Role::parse).unwrap_or(Role::Patrol),
+            true,
+        ),
         "incident_opened" | "incident_resolved" if payload.pointer("/incident/kind").and_then(Value::as_str) == Some("notify_exhausted") => {
             r(Role::Responder, kind == "incident_opened")
         }
