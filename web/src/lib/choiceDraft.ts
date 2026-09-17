@@ -9,6 +9,7 @@ import {
   customAnswerShown,
   isTypeSomething,
   keysToMove,
+  MULTI_TYPE_HINT,
   parseChoiceMenu,
   type TuiChoiceMenu,
   type WalkTarget,
@@ -213,6 +214,10 @@ export async function commit(
   const todo = draft.pages.map((p, i) => ({ p, i })).filter(({ p, i }) => pageNeedsCommit(p, want[i]))
 
   for (const { p, i } of todo) {
+    // 複選頁要把 `Type something` 勾起來：字送不出去，只會交出一個空白的自訂答案（review3 c1 M8）。
+    if (p.multi && (want[i] ?? []).some((on, j) => on && !p.choices[j]?.checked && isTypeSomething(p.choices[j] ?? { title: '' }))) {
+      return { ok: false, error: `第 ${p.tab + 1} 題：${MULTI_TYPE_HINT}什麼都沒送出。`, at: i }
+    }
     const idx = radioPick(want[i])
     if (!p.multi && idx >= 0 && isTypeSomething(p.choices[idx] ?? { title: '' })) {
       if (!(custom[p.tab] ?? '').trim()) {

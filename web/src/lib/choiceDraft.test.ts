@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { commit, pageNeedsCommit, preload, radioPick, samePage, togglesFor, wantOf, type Io } from './choiceDraft.ts'
-import { parseChoiceMenu } from './tuiChoices.ts'
+import { parseChoiceMenu, typedAnswerHere } from './tuiChoices.ts'
 
 /**
  * 假的 claude 問卷 TUI（兩題複選＋送出頁），版型照抄 `carbis-multiselect.txt`。
@@ -20,6 +20,9 @@ class FakeTui {
   submitted = false
   /** 每頁按過自己的 Submit 沒有。 */
   pageDone = [false, false]
+  /** 每頁的 `[ ] Type something` 勾了沒；`typeRowToggles` 時 space 翻得動它（真機沒驗過，當成最壞情況）。 */
+  typeChecked = [false, false]
+  typeRowToggles = false
 
   private readonly pages = [
     { label: '編輯方式', q: '文章是誰寫、怎麼上稿？', opts: ['非工程師要能自己發', '工程師改 Markdown', '兩種都要'] },
@@ -55,7 +58,7 @@ class FakeTui {
     const p = this.pages[this.tab]
     out.push(p.q, '')
     p.opts.forEach((o, i) => out.push(`${mark(i)}${i + 1}. [${this.checked[this.tab][i] ? 'x' : ' '}] ${o}`))
-    out.push(`${mark(p.opts.length)}${p.opts.length + 1}. [ ] Type something`)
+    out.push(`${mark(p.opts.length)}${p.opts.length + 1}. [${this.typeChecked[this.tab] ? 'x' : ' '}] Type something`)
     out.push(`${this.cursor === p.opts.length + 1 ? '❯ ' : '     '}Submit`)
     out.push('', 'Enter to select · Tab/Arrow keys to navigate · Esc to cancel')
     return out.join('\n')
@@ -90,6 +93,10 @@ class FakeTui {
       return
     }
     const opts = this.pages[this.tab].opts.length
+    if (k === 'space' && this.typeRowToggles && this.cursor === opts) {
+      this.typeChecked[this.tab] = !this.typeChecked[this.tab]
+      return
+    }
     if (k === 'space' && this.cursor < opts) {
       this.checked[this.tab][this.cursor] = !this.checked[this.tab][this.cursor]
       return
@@ -465,4 +472,45 @@ test('wantOf 拿讀到當下的勾選當預設；samePage 只比題目與選項�
   const now = parseChoiceMenu(tui.screen())
   assert.ok(now)
   assert.equal(samePage(draft.pages[0], now), true)
+})
+
+test('複選頁勾 Type something：整批不送，不交出一個空白的自訂答案（review3 c1 M8）', async () => {
+  const tui = new FakeTui()
+  tui.typeRowToggles = true
+  const start = parseChoiceMenu(tui.screen())
+  assert.ok(start)
+  const draft = await preload(tui.io(), start)
+  assert.ok(draft)
+  assert.equal(typedAnswerHere(draft.pages[1], draft.pages[1].choices[3]), false, '複選頁不給打字框')
+  // 第 2 頁勾「站內搜尋」與「Type something」、打「另外要 RSS」。
+  tui.sent = []
+  const res = await commit(tui.io(), draft, [[], [true, false, false, true], []], undefined, ['', '另外要 RSS', ''])
+  assert.equal(res.ok, false)
+  assert.match(res.error ?? '', /終端打字/)
+  assert.deepEqual(tui.sent, [], '一顆鍵都沒送')
+  assert.deepEqual(tui.typeChecked, [false, false])
+  assert.equal(tui.submitted, false)
+})
+
+test('複選頁的 Type something 已經在終端勾好：照舊留著，也准取消', async () => {
+  const tui = new FakeTui()
+  tui.typeRowToggles = true
+  tui.typeChecked[1] = true
+  tui.tab = 0
+  const start = parseChoiceMenu(tui.screen())
+  assert.ok(start)
+  const draft = await preload(tui.io(), start)
+  assert.ok(draft)
+  assert.deepEqual(wantOf(draft.pages[1]), [false, false, false, true])
+  const kept = await commit(tui.io(), draft, [[], [true, false, false, true], []])
+  assert.equal(kept.ok, true, kept.error)
+  assert.deepEqual(tui.typeChecked, [false, true])
+})
+
+test('單選頁的 Type something 照舊可以打字', () => {
+  const menu = parseChoiceMenu(new FakeRadioTui().screen())
+  assert.ok(menu)
+  const row = menu.choices.find((c) => /type something/i.test(c.title))
+  assert.ok(row)
+  assert.equal(typedAnswerHere(menu, row), true)
 })

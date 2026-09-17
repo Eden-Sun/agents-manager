@@ -335,6 +335,18 @@ export function isTypeSomething(c: Pick<TuiChoice, 'title'>): boolean {
   return /^type something\.?$/i.test(c.title.trim())
 }
 
+/**
+ * 這一列能不能在面板裡打字作答。只有**單選頁**真機驗過（走到 → 貼字 → 對帳 → Enter）；複選頁的
+ * `[ ] Type something` 怎麼輸入沒驗過，而且在複選頁按 Enter 可能直接交卷——以前面板照樣給打字框，
+ * 送出時只勾了空白的那一列、字完全沒送（review3 c1 M8）。複選頁的自訂文字請到終端打。
+ */
+export function typedAnswerHere(menu: { multi: boolean }, c: Pick<TuiChoice, 'title'>): boolean {
+  return isTypeSomething(c) && !menu.multi
+}
+
+/** 複選頁的 `Type something` 在面板裡勾不起來（勾了也送不出字），要到終端打。 */
+export const MULTI_TYPE_HINT = '複選題的「Type something」要在終端打字（按「展開全畫面」或「終端原文與更多按鍵」），這裡勾了也送不出文字。'
+
 /** 貼上後那列是否已長出這段字：換行貼上時第一行在標題、其餘在說明；答完會多 `✔`。 */
 export function customAnswerShown(choice: TuiChoice, text: string): boolean {
   const want = text.replace(/\s+/g, ' ').trim()
