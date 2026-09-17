@@ -19,10 +19,17 @@
   min-width: 0;
 }
 
-/* 兩行高：晶片 20px + 行距 6px。 */
-.unread-bar.clipped {
-  max-height: 46px;
-  overflow: hidden;
+/* 桌機：★ 主力一組、其餘一組，各自換行各自裁切（2026-09-15 使用者；`lib/chipOverflow.ts`）。收合時兩組都在就各佔一行，
+   只有一組時最多兩行——整列一起裁兩行的話，主力占滿兩行就把沒釘的「要你回答」擠進 `+N`（review3 c4 L2）。
+   裁切高度由 `UnreadChip.tsx` 量出來寫在 style 上（寫死 px 在晶片加了星號與徽章變高之後會切一半，541afe7）。
+   四周留 1px：`current` 的綠外框是 box-shadow，貼齊裁切邊會被切掉。 */
+.unread-group {
+  display: flex;
+  flex-basis: 100%;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+  padding: 1px;
 }
 
 /* 展開時給上限自己捲，免得 30 顆 bot 壓掉對話區。 */
@@ -369,18 +376,5 @@
     padding: 0;
     font-size: 22px;
     line-height: 1;
-  }
-}
-
-/* 主力 ★ 一排，其餘（在跑、剛跑完）換到下一排（2026-09-15 使用者）。零高度、撐滿一整行的 flex 子元素
-   就是換行；手機是單行橫捲，不能插滿寬元素，所以在那裡不佔位。 */
-.unread-row-break {
-  flex-basis: 100%;
-  height: 0;
-}
-
-@media (max-width: 720px) {
-  .unread-row-break {
-    display: none;
   }
 }

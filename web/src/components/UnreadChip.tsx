@@ -6,14 +6,16 @@
  * 手機不排序（2026-09-13 使用者：「手機版星號列不要任意改變順序」）：單行橫捲靠位置肌肉記憶。
  * 版面（同日）：桌機換行最多兩行、`+N` 展開；手機單行橫捲要看得出能捲（陰影＋◂ ▸、滾輪映射、scroll-snap）。
  * 兩排（2026-09-15 使用者：「非標主力之現執行中與剛完成的 bot 要出現在主力的下一排」）：★ 主力一排，
- * 沒釘的（在跑、剛跑完、要回答）一定換到下一排；各排裡照上面的排序。手機單行橫捲放不下兩排，照同樣分組
+ * 沒釘的（在跑、剛跑完、要回答）一定換到下一排；各排裡照上面的排序。桌機收合時兩組都在就各佔一行，
+ * 主力再多也擠不掉沒釘的「要你回答」（`lib/chipOverflow.ts`）。手機單行橫捲放不下兩排，照同樣分組
  * 分成上下兩排，各自橫捲（2026-09-16 使用者：「已完成放下一排，方便我點選」）。
  * 排除（2026-09-10 使用者）：AGM 總管專案不算（例行 loop 會洗版），但 ★ 釘選不受影響；
  * 認 `GET /api/supervisor` 的 `project_id` 不認名字（2026-09-13 已從 `AGM` 改名 `AGM-DM-GRUP`）。
  */
-import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react'
 import type { Bot } from '../api/types'
 import { useMediaQuery } from '../hooks/useMediaQuery'
+import { clipAfterRows, lineBudget, moreTitle } from '../lib/chipOverflow'
 import { chipTracked } from '../lib/supervisorProject'
 import { useStore } from '../store/store'
 import './unreadChip.css'
@@ -22,6 +24,13 @@ import './unreadChip.css'
 const NARROW_QUERY = '(max-width: 720px)'
 
 const RANK = { needsReply: 0, unread: 1, waitsKids: 2, current: 3, rest: 4 } as const
+
+/** 桌機的兩組：★ 主力一組、其餘（在跑、剛跑完、要回答）一組，各自換行、各自裁切。 */
+type GroupName = 'pinned' | 'others'
+const GROUPS: { name: GroupName; pinned: boolean }[] = [
+  { name: 'pinned', pinned: true },
+  { name: 'others', pinned: false },
+]
 
 interface ChipItem {
   id: string
@@ -137,9 +146,13 @@ export function UnreadChip() {
     return out.map((it, i) => ({ it, i })).sort((a, b) => a.it.rank - b.it.rank || a.i - b.i).map((x) => x.it)
   }, [supervisorProjectId, botUnread, bots, hiddenBotIds, keptId, narrow, runs, selectBot, selectedBotId])
 
+  const pinnedItems = useMemo(() => items.filter((it) => it.pinned), [items])
+  const otherItems = useMemo(() => items.filter((it) => !it.pinned), [items])
+  const ordered = useMemo(() => [...pinnedItems, ...otherItems], [pinnedItems, otherItems])
   const barRef = useRef<HTMLDivElement | null>(null)
   const [expanded, setExpanded] = useState(false)
-  const { hidden, clipPx } = useOverflowRows(barRef, !narrow && !expanded, items.length)
+  const { hiddenItems, clipPx } = useOverflowChips(barRef, !narrow && !expanded, ordered)
+  const hidden = hiddenItems.length
 
   if (items.length === 0) return null
   if (narrow) {
@@ -150,30 +163,34 @@ export function UnreadChip() {
       </>
     )
   }
-  const clipped = !expanded && hidden > 0
+  // 主力一組、其餘一組，各自換行、各自裁切；收合時兩組都在就各佔一行，只有一組時最多兩行（`lib/chipOverflow.ts`）。
   return (
     <div className="unread-bar-wrap">
-      <div
-        className={`unread-bar${clipped ? ' clipped' : ''}${expanded ? ' expanded' : ''}`}
-        style={clipped && clipPx > 0 ? { maxHeight: clipPx } : undefined}
-        ref={barRef}
-        role="status"
-        aria-live="polite"
-      >
-        {[...items.filter((it) => it.pinned), ...items.filter((it) => !it.pinned)].map((it, i, all) => (
-          <Fragment key={it.id}>
-            {/* 主力與非主力之間強制換排。 */}
-            {!it.pinned && i > 0 && all[i - 1].pinned ? <span className="unread-row-break" aria-hidden="true" /> : null}
-            <Chip it={it} />
-          </Fragment>
-        ))}
+      <div className={`unread-bar${expanded ? ' expanded' : ''}`} ref={barRef} role="status" aria-live="polite">
+        {GROUPS.map(({ name, pinned }) => {
+          const group = pinned ? pinnedItems : otherItems
+          if (group.length === 0) return null
+          return (
+            <div
+              key={name}
+              className="unread-group"
+              data-group={name}
+              /* 裁切高度用量的，不寫死 px：晶片加了星號與徽章就會變高，寫死會把最後一行切一半（541afe7）。 */
+              style={!expanded && clipPx[name] > 0 ? { maxHeight: clipPx[name], overflow: 'hidden' } : undefined}
+            >
+              {group.map((it) => (
+                <Chip key={it.id} it={it} />
+              ))}
+            </div>
+          )
+        })}
       </div>
       {hidden > 0 || expanded ? (
         <button
           type="button"
           className="unread-bar-more"
           aria-expanded={expanded}
-          title={expanded ? '收合成兩行' : `還有 ${hidden} 顆沒顯示（都是比較不急的）。點一下展開`}
+          title={expanded ? '收合成兩行' : moreTitle(hiddenItems)}
           onClick={() => setExpanded((v) => !v)}
         >
           {expanded ? '收合' : `+${hidden}`}
@@ -198,35 +215,49 @@ function botTitle(name: string, pinned: boolean, n: number, needsReply: boolean,
 }
 
 /**
- * 兩行裝不下的顆數（依 `offsetTop` 分行），以及裁在第二行底下的高度。永遠全畫、CSS 裁切，不切陣列——render 依賴測量會震盪。
- * 裁切高度用量的：寫死 46px 在晶片加了星號與徽章變高之後，第二行被切一半（2026-09-16 使用者截圖）。
+ * 收合時被裁掉的晶片，以及每一組的裁切高度（分行規則見 `lib/chipOverflow.ts`）。永遠全畫、CSS 裁切，不切陣列——
+ * render 依賴測量會震盪。裁切高度用量的：寫死 px 在晶片加了星號與徽章變高之後會把最後一行切一半
+ * （2026-09-16 使用者截圖）；裁切改變的是那一組自己的高、不影響晶片在組內的位置，所以量得穩。
+ * `ordered` 要跟 DOM 裡晶片的順序一致（主力組在前）。
  */
-function useOverflowRows(barRef: RefObject<HTMLDivElement | null>, active: boolean, count: number): { hidden: number; clipPx: number } {
-  const [hidden, setHidden] = useState(0)
-  const [clipPx, setClipPx] = useState(0)
+function useOverflowChips(
+  barRef: RefObject<HTMLDivElement | null>,
+  active: boolean,
+  ordered: ChipItem[],
+): { hiddenItems: ChipItem[]; clipPx: Record<GroupName, number> } {
+  // 一份 state：兩份分開寫的話，同一次量測會寫兩次 state（oxlint `set-state-in-effect`），畫面也可能中間有一幀不一致。
+  const [cut, setCut] = useState({ ids: '', clip: '0 0' })
   const measure = useCallback(() => {
     const bar = barRef.current
     if (!bar || !active) {
-      setHidden((prev) => (prev === 0 ? prev : 0))
+      setCut((prev) => (prev.ids === '' && prev.clip === '0 0' ? prev : { ids: '', clip: '0 0' }))
       return
     }
-    const chips = [...bar.querySelectorAll<HTMLElement>('.unread-chip')]
-    const rows: number[] = []
-    for (const c of chips) if (!rows.includes(c.offsetTop)) rows.push(c.offsetTop)
-    const cut = rows[1]
-    // 值沒變就不寫 state，否則 layout effect 每幀重繪。
-    const n = rows.length <= 2 ? 0 : chips.filter((c) => c.offsetTop > cut).length
-    setHidden((prev) => (prev === n ? prev : n))
-    // 第二行最低那顆的底緣＋下內距：裁切改變的是 bar 自己的高，不影響晶片的 offsetTop，所以量得穩。
-    let px = 0
-    if (n > 0) {
-      const top = bar.getBoundingClientRect().top
-      const bottom = Math.max(...chips.filter((c) => c.offsetTop <= cut).map((c) => c.getBoundingClientRect().bottom))
-      px = Math.ceil(bottom - top + parseFloat(getComputedStyle(bar).paddingBottom || '0'))
+    const groups = [...bar.querySelectorAll<HTMLElement>('.unread-group')]
+    const has = (name: GroupName) => groups.some((g) => g.dataset.group === name)
+    const budget = lineBudget(has('pinned'), has('others'))
+    const ids: string[] = []
+    const px: Record<string, number> = { pinned: 0, others: 0 }
+    let at = 0
+    for (const g of groups) {
+      const chips = [...g.querySelectorAll<HTMLElement>('.unread-chip')]
+      const top = g.getBoundingClientRect().top
+      const boxes = chips.map((c) => {
+        const r = c.getBoundingClientRect()
+        return { top: Math.round(r.top - top), bottom: r.bottom - top }
+      })
+      const cut = clipAfterRows(boxes, budget)
+      for (const i of cut.hidden) ids.push(ordered[at + i]?.id ?? '')
+      if (cut.hidden.length > 0) {
+        px[g.dataset.group ?? 'others'] = Math.ceil(cut.visibleBottom + parseFloat(getComputedStyle(g).paddingBottom || '0'))
+      }
+      at += chips.length
     }
-    setClipPx((prev) => (prev === px ? prev : px))
-  }, [active, barRef])
-  useLayoutEffect(measure, [measure, count])
+    const next = { ids: ids.filter(Boolean).join(' '), clip: `${px.pinned} ${px.others}` }
+    // 值沒變就不寫 state，否則 layout effect 每幀重繪。
+    setCut((prev) => (prev.ids === next.ids && prev.clip === next.clip ? prev : next))
+  }, [active, barRef, ordered])
+  useLayoutEffect(measure, [measure])
   useEffect(() => {
     const bar = barRef.current
     if (!bar || typeof ResizeObserver === 'undefined') return
@@ -234,7 +265,15 @@ function useOverflowRows(barRef: RefObject<HTMLDivElement | null>, active: boole
     ro.observe(bar)
     return () => ro.disconnect()
   }, [barRef, measure])
-  return { hidden, clipPx }
+  const hiddenItems = useMemo(() => {
+    const ids = new Set(cut.ids.split(' '))
+    return ordered.filter((it) => ids.has(it.id))
+  }, [cut.ids, ordered])
+  const clipPx = useMemo(() => {
+    const [pinned, others] = cut.clip.split(' ').map(Number)
+    return { pinned, others }
+  }, [cut.clip])
+  return { hiddenItems, clipPx }
 }
 
 /** 手機橫捲：滾輪映射成橫捲；只在真的捲得動時 `preventDefault`，否則整頁被鎖住。 */
