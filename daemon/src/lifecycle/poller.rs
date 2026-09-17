@@ -1900,6 +1900,21 @@ mod issue_17_tests {
         assert_eq!(count(&f, "pane.send_text") + count(&f, "pane.send_keys"), 0);
     }
 
+    /// 有無損證據證明已經送進 session 的 turn，畫面上找不到回音（長段貼上被摺起來）也不自動重送（review3 c3 M4）。
+    #[tokio::test]
+    async fn a_delivery_proven_by_evidence_is_never_resent_even_if_the_screen_lost_its_echo() {
+        let f = fixture("claude", "").await;
+        live(&f, crate::testing::LivePane { transcript: vec!["❯ [Pasted text #1 +20 lines]".into()], ..wide() });
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        mark_delivery(&app, &f.turn_id, Delivered::Submitted.record().unwrap()).await;
+
+        let sent = vec!["Reply with PONG".to_string()];
+        assert!(prompt_never_reached_screen("claude", &f.env.herdr.pane("pane-17").unwrap().render(), &sent), "畫面上真的找不到");
+        assert!(!resend_lost_prompt(&app, &f.run_id, &f.turn_id, &sent).await.sent());
+        assert_eq!(count(&f, "pane.send_text") + count(&f, "pane.send_keys"), 0, "有證據就不再打一次");
+    }
+
     /// 沒有證據不等於不能重送（AGM 2026-09-16）：`agent.prompt` 那條路記成未驗證，但畫面證明它沒進去時照樣重送。
     #[tokio::test]
     async fn an_unverified_but_resendable_turn_is_still_resent() {

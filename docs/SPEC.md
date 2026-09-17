@@ -317,7 +317,7 @@ pane 上回過 ok 卻沒送進去（wits-c1-op-xh 14:24、15:33，第二次距 s
 
 **「有沒有證據」與「能不能自動重送」是兩件事**（AGM 2026-09-16 裁示）：
 - `turns.delivery_verified` 只講**證據**：有沒有無損證據證明它進了對方的輸入框／session。
-- `turns.auto_resend` 只講**能不能自動重送**：打過字但證不明的那條路重送會重複派工，所以是 0；
+- `turns.auto_resend` 只講**能不能自動重送**：打過字但證不明的那條路重送會重複派工，所以是 0；有證據的已經送進去，也是 0；
   `agent.prompt` 同樣沒有證據，但沒送進去才會走到重送，所以是 1。重送閘門看 `auto_resend`，不看 `delivery_verified`。
 - 欄位 additive、migrate 可重入；既有列 `auto_resend` 預設 1，行為與拆開前相同（舊的 unverified 列當時已把
   `resend_count` 頂到上限，照樣不會被重送）。
@@ -325,7 +325,8 @@ pane 上回過 ok 卻沒送進去（wits-c1-op-xh 14:24、15:33，第二次距 s
   無證據＋會重送 → 只在 hover 說明，無證據＋不重送 → 畫「未驗證送達」。理由與實作見 UI-DECISIONS 與 `web/src/lib/deliveryNotice.ts`。
 
 **結果五種，對呼叫端意義不同**：
-- `Submitted`：打字進 pane，而且有無損證據證明送出。verified=1、可重送。
+- `Submitted`：打字進 pane，而且有無損證據證明送出。verified=1、**不**自動重送：證據就是「已經進了 session」，
+  stall 時畫面上找不到回音（長段貼上被 TUI 摺成 `[Pasted text …]`）再打一次只會做兩次（review3 c3 M4）。
 - `Handed`：交給 herdr `agent.prompt`。它回 ok 卻不保證字進得去（2026-09-14 wits-c1-op-xh 實例），
   所以**沒有證據**：verified=0、API 回 `"delivery":"unverified"`；重送照舊允許，所以 UI **不**標「未驗證送達」（只在 hover 說明，見上）。
 - `Unverified`：沒有無損證據可用，照樣打字送出；框收下貼上、Enter 後清空，就回報成送出，但標成「要人工核對」。
