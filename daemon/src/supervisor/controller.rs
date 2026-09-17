@@ -767,30 +767,79 @@ async fn on_turn_done(app: &Arc<App>, turn_id: &str, status: &str) {
     }
     // 回合結束時 run 上記的錯誤原因（撞限、API 錯誤…）抄進交辦：`turn_status` 只說成敗，
     // 換手與驗收要看的是為什麼。
-    if let Ok(Some(err)) = sqlx::query_scalar::<_, Option<String>>(
-        "SELECT r.turn_error FROM turns t JOIN runs r ON r.id = t.run_id WHERE t.id = ?",
+    let turn_error = turn_error_of(app, turn_id).await;
+    if let Some(err) = turn_error.as_deref() {
+        let _ = store::set_turn_error(&app.db, &a.id, err).await;
+    }
+    let reply = last_reply(app, turn_id).await;
+    // 回合「結束」了，但 CLI 其實是回了一句「你的用量上限到了」——那不是工作的結果。
+    // 這種回合跟正常的 completed 分開處理：assignment 進 `quota_blocked` 等重送，
+    // 那句系統訊息記在 `error`（不是 `result`），免得 AGM 把它讀成 bot 的回覆。
+    // 只有**這一回合**被撞限打斷才算：帳號上有撞限、這顆卻正常答完（同身分別的 bot 撞的），照常結案（review3 c1 H1）。
+    let end = TurnEnd { status, reply: reply.as_deref(), turn_error: turn_error.as_deref() };
+    if let Ok(Some(bot)) = crate::db::bot(&app.db, &a.target_bot_id).await {
+        if let Some(hit) = crate::quota::limit_hit_for_bot(app, &bot).await {
+            if end.cut_by_limit() {
+                park_quota(app, &a, &hit, "turn").await;
+                return;
+            }
+        }
+    }
+    let ok = status == "completed" || status == "completed_fallback";
+    settle(app, &a, status, status != "completed_fallback", reply.as_deref(), (!ok).then_some(status)).await;
+}
+
+/// run 上記的中斷原因，**只在它屬於這一回合時**才回：`runs.turn_error` 是整個 run 一格，下一回合開始才清，
+/// 所以同一個 run 上已經有更晚開始的回合（不是還在排隊的）時，那格講的是別的回合。
+async fn turn_error_of(app: &Arc<App>, turn_id: &str) -> Option<String> {
+    sqlx::query_scalar::<_, Option<String>>(
+        "SELECT r.turn_error FROM turns t JOIN runs r ON r.id = t.run_id
+          WHERE t.id = ?
+            AND NOT EXISTS (SELECT 1 FROM turns n WHERE n.run_id = t.run_id AND n.id <> t.id
+                              AND n.created_at > t.created_at AND n.status <> 'queued')",
     )
     .bind(turn_id)
     .fetch_optional(&app.db)
     .await
-    .map(Option::flatten)
-    {
-        if !err.trim().is_empty() {
-            let _ = store::set_turn_error(&app.db, &a.id, &err).await;
+    .ok()
+    .flatten()
+    .flatten()
+    .filter(|e| !e.trim().is_empty())
+}
+
+/// 回合結束時手上的證據，判斷它是不是被撞限打斷的。
+struct TurnEnd<'a> {
+    status: &'a str,
+    reply: Option<&'a str>,
+    /// 這一回合的中斷原因（[`turn_error_of`]）。
+    turn_error: Option<&'a str>,
+}
+
+/// 這段文字就是 CLI 的撞限橫幅（claude 的 `You've hit/reached your … limit`、codex 的 `hit your usage limit`）。
+/// 只看短短一兩行的：回覆裡**談到**撞限的長文不是橫幅。
+fn is_limit_banner(text: &str) -> bool {
+    let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    lines.len() <= 2
+        && lines.iter().any(|l| crate::turn_error::is_quota_limit(l) || crate::lifecycle::codex_limit_hit_line(l).is_some())
+}
+
+impl TurnEnd<'_> {
+    /// 帳號正被擋著時，這一回合是不是被撞限打斷的。
+    ///
+    /// - run 記下了這回合的中斷原因：是撞限橫幅才算；斷線之類別的錯誤不算。
+    /// - 正常答完（`completed`／`completed_fallback`，有回覆、回覆本身不是撞限橫幅）：不算。帳號上的撞限可能是
+    ///   同身分另一顆 bot 撞的，這顆的工作已經做完——以前照樣 park，結果沒進 `result`，之後重送再做一次，
+    ///   或重送用完被報成 `quota_exhausted`（review3 c1 H1）。
+    /// - 其餘（失敗、沒有回覆、回覆就是橫幅）：算。codex 對排隊送進去的回合回同一張橫幅時，撞限的 `at` 不會更新，
+    ///   所以不拿「撞限晚於回合開始」當必要條件。
+    fn cut_by_limit(&self) -> bool {
+        if let Some(err) = self.turn_error {
+            return is_limit_banner(err);
         }
+        let answered = matches!(self.status, "completed" | "completed_fallback")
+            && self.reply.map(str::trim).is_some_and(|r| !r.is_empty() && !is_limit_banner(r));
+        !answered
     }
-    // 回合「結束」了，但 CLI 其實是回了一句「你的用量上限到了」——那不是工作的結果。
-    // 這種回合跟正常的 completed 分開處理：assignment 進 `quota_blocked` 等重送，
-    // 那句系統訊息記在 `error`（不是 `result`），免得 AGM 把它讀成 bot 的回覆。
-    if let Ok(Some(bot)) = crate::db::bot(&app.db, &a.target_bot_id).await {
-        if let Some(hit) = crate::quota::limit_hit_for_bot(app, &bot).await {
-            park_quota(app, &a, &hit, "turn").await;
-            return;
-        }
-    }
-    let ok = status == "completed" || status == "completed_fallback";
-    let reply = last_reply(app, turn_id).await;
-    settle(app, &a, status, status != "completed_fallback", reply.as_deref(), (!ok).then_some(status)).await;
 }
 
 /// Reconcile every open assignment against what the database actually says about its turn.
@@ -2833,5 +2882,169 @@ mod late_reply_tests {
         let events = inbox(&app, &a.id).await;
         assert_eq!(events.len(), 2, "結算＋結果到了，重跑不會多推：{events:?}");
         assert_eq!(events[1].1["result"].as_str(), Some("真正的回覆"));
+    }
+}
+
+/// 回合結束時帳號上有撞限（`on_turn_done`）：只有這一回合被撞限打斷才停進 `quota_blocked`（review3 c1 H1）。
+#[cfg(test)]
+mod turn_done_quota_tests {
+    use super::*;
+
+    const SESSION_BANNER: &str = "You've hit your session limit · resets 4pm (Asia/Taipei)";
+
+    #[test]
+    fn only_a_turn_the_limit_cut_short_counts() {
+        let end = |status, reply, turn_error| TurnEnd { status, reply, turn_error };
+        // 正常答完：帳號上的撞限是別的 bot 撞的，這回合的結果要照常交出去。
+        assert!(!end("completed", Some("改好了，測試也過了。"), None).cut_by_limit());
+        assert!(!end("completed_fallback", Some("改好了"), None).cut_by_limit());
+        // 回覆裡**談到**撞限的長文不是橫幅。
+        let prose = "查過了：\nYou've hit your session limit 是 CLI 的橫幅\n我改成先看 bucket 再決定要不要停";
+        assert!(!end("completed", Some(prose), None).cut_by_limit());
+        // 回覆就是橫幅、沒有回覆、回合失敗：被撞限打斷。
+        assert!(end("completed", Some(SESSION_BANNER), None).cut_by_limit());
+        assert!(end("completed", Some("ERROR: You've hit your usage limit. Upgrade to Pro or try again at 5:07 AM."), None).cut_by_limit());
+        assert!(end("completed", None, None).cut_by_limit());
+        assert!(end("completed", Some("  "), None).cut_by_limit());
+        assert!(end("failed", None, None).cut_by_limit());
+        // run 記下的原因最直接：撞限橫幅算（就算 Stop hook 帶回一段半截回覆），斷線不算。
+        assert!(end("completed", Some("我先看一下"), Some(SESSION_BANNER)).cut_by_limit());
+        assert!(!end("failed", None, Some("API Error: Connection lost mid-response.")).cut_by_limit());
+    }
+
+    async fn app() -> Arc<App> {
+        let dir = std::env::temp_dir().join(format!("agm-turn-done-quota-{}", crate::db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = crate::db::open(&dir.join("test.sqlite")).await.unwrap();
+        let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
+        let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
+        let app = App::new(db, client.clone(), client, cfg, dir.clone(), dir.join("daemon"), 7799, "test".into(), "test".into(), false);
+        store::get_or_init(&app.db).await.unwrap();
+        let now = crate::db::now();
+        sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES ('p','/tmp','p',?)").bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO bots (id,project_id,name,kind,identity,model,hook_token,created_at) VALUES ('b','p','b','claude','cc1','opus','t',?)")
+            .bind(&now)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,started_at) VALUES ('run-b','b','running','idle',?)")
+            .bind(&now)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        app
+    }
+
+    /// 派出去、回合結束：turn 的狀態與回覆照參數寫好，交辦記成 delivered。
+    async fn finished(app: &Arc<App>, status: &str, reply: Option<&str>) -> store::Assignment {
+        let a = store::insert_assignment(&app.db, None, "b", &crate::db::ulid(), "做 T", &[], None, true).await.unwrap();
+        let conv = crate::db::conversation_id(&app.db, "b").await.unwrap();
+        let turn_id = crate::db::ulid();
+        let started = (chrono::Utc::now() - chrono::Duration::minutes(40)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,delivery,created_at,completed_at) VALUES (?,?,'run-b','web',?,'ok',?,?)")
+            .bind(&turn_id)
+            .bind(&conv)
+            .bind(status)
+            .bind(&started)
+            .bind(crate::db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        if let Some(r) = reply {
+            sqlx::query("INSERT INTO messages (id,conversation_id,turn_id,role,content,source,created_at) VALUES (?,?,?,'assistant',?,'hook',?)")
+                .bind(crate::db::ulid())
+                .bind(&conv)
+                .bind(&turn_id)
+                .bind(r)
+                .bind(crate::db::now())
+                .execute(&app.db)
+                .await
+                .unwrap();
+        }
+        store::mark_delivered(&app.db, &a.id, &turn_id, "ok").await.unwrap();
+        store::assignment(&app.db, &a.id).await.unwrap().unwrap()
+    }
+
+    /// 同身分另一顆 bot 在這回合跑到一半時撞了 5h 上限（`at` 晚於回合開始、擋整個帳號）。
+    async fn account_hit(app: &Arc<App>) {
+        let q = crate::quota::Quota {
+            five_hour: None,
+            seven_day: None,
+            fable: None,
+            reset_credits: None,
+            limit_hit: Some(crate::quota::LimitHit {
+                message: SESSION_BANNER.into(),
+                until: Some("2999-01-01T00:00:00Z".into()),
+                at: crate::db::now(),
+                bucket: Some("five_hour".into()),
+            }),
+            plan: None,
+            updated_at: crate::db::now(),
+            source: "test".into(),
+            account: None,
+            host: "local".into(),
+        };
+        app.quotas.lock().await.insert("claude:cc1".into(), q);
+    }
+
+    /// H1：帳號上有撞限，這顆卻正常答完——結果要進 `result` 交給 AGM 驗收，不能停進 `quota_blocked` 等重做。
+    #[tokio::test]
+    async fn a_turn_that_answered_is_settled_even_while_the_account_is_blocked() {
+        let app = app().await;
+        account_hit(&app).await;
+        let a = finished(&app, "completed", Some("改好了，測試也過了。")).await;
+
+        on_turn_done(&app, a.turn_id.as_deref().unwrap(), "completed").await;
+
+        let row = store::assignment(&app.db, &a.id).await.unwrap().unwrap();
+        assert_eq!(row.status, "awaiting_review", "做完的工作照常交出去");
+        assert_eq!(row.result.as_deref(), Some("改好了，測試也過了。"));
+        assert_eq!(row.quota_retries, 0);
+        let parked: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE kind='assignment_quota_blocked'")
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(parked, 0);
+    }
+
+    /// 真的被撞限打斷的回合照舊停下等重送：回合失敗、或回覆就是那張橫幅、或 run 記下的原因是橫幅。
+    #[tokio::test]
+    async fn a_turn_the_limit_cut_short_still_waits_for_quota() {
+        for (status, reply, turn_error) in [
+            ("failed", None, None),
+            ("completed", Some(SESSION_BANNER), None),
+            ("completed", Some("我先看一下"), Some(SESSION_BANNER)),
+        ] {
+            let app = app().await;
+            account_hit(&app).await;
+            sqlx::query("UPDATE runs SET turn_error=? WHERE id='run-b'").bind(turn_error).execute(&app.db).await.unwrap();
+            let a = finished(&app, status, reply).await;
+
+            on_turn_done(&app, a.turn_id.as_deref().unwrap(), status).await;
+
+            let row = store::assignment(&app.db, &a.id).await.unwrap().unwrap();
+            assert_eq!(row.status, "quota_blocked", "{status} / {reply:?} / {turn_error:?}");
+            assert!(row.result.is_none(), "橫幅不是工作的結果");
+        }
+    }
+
+    /// run 上那格 `turn_error` 屬於更晚開始的回合時，不是這一回合的原因。
+    #[tokio::test]
+    async fn a_newer_turns_error_is_not_this_turns() {
+        let app = app().await;
+        let a = finished(&app, "completed", Some("改好了")).await;
+        let conv = crate::db::conversation_id(&app.db, "b").await.unwrap();
+        sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,delivery,created_at) VALUES ('t-next',?,'run-b','web','in_flight','ok',?)")
+            .bind(&conv)
+            .bind(crate::db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE runs SET turn_error=? WHERE id='run-b'").bind(SESSION_BANNER).execute(&app.db).await.unwrap();
+        assert_eq!(turn_error_of(&app, a.turn_id.as_deref().unwrap()).await, None);
+        assert_eq!(turn_error_of(&app, "t-next").await.as_deref(), Some(SESSION_BANNER));
+        // 還在排隊的回合沒開始，不算「更晚開始」。
+        sqlx::query("UPDATE turns SET status='queued' WHERE id='t-next'").execute(&app.db).await.unwrap();
+        assert_eq!(turn_error_of(&app, a.turn_id.as_deref().unwrap()).await.as_deref(), Some(SESSION_BANNER));
     }
 }
