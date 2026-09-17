@@ -1728,7 +1728,8 @@ supervisor 相關資料表與欄位都是 additive，`db::migrate` 重跑冪等�
   兩個角色的待送查詢、`ack` 的守衛與 UI 過濾都用這一條，所以雙角色剛啟用時、先前由巡檢收走（`claimed_by='patrol'`）
   而被 recover 放回 pending 的協調事件仍歸巡檢，不會被協調者撈去送、卻又寫不進 delivered（每個 tick 重送一次）。
   送出時以 `claimed_by` 條件更新；`ack` 的守衛跟寫入在同一句 SQL（先讀後寫之間 claim 會變），帶角色 bot token 時只能結自己收的（另一個角色的回 409 `claimed_by_other_role`），UI／使用者照舊全能結。
-  核准決定改為條件寫入（`WHERE status=<讀到的狀態>`），兩個角色同時決定只有一個成功（409 `decided_concurrently`）；交辦驗收本來就是條件寫入。
+  核准決定是條件寫入，但條件寫死在 SQL 裡（approve／deny 只從 `pending`、revoke 從 `approved`／`pending`），不是「先讀到什麼就寫什麼」：
+  兩個角色同時決定只有一個成功，後到的回 409 `already_decided`（對方已經寫進去了）或 `decided_concurrently`（還是 pending，但這一句沒寫到）；交辦驗收本來就是條件寫入。
 - **角色身分**：只認 `X-AM-Bot-Id` + 該 bot 的 hook token（`X-AM-Bot-Token`）。`bin/agm` 在自己的 pane 裡（`AM_BOT_ID` 等於 runtime 的 `self_bot_id`）才帶；
   驗證過的決定記成 `AGM:patrol`／`AGM:responder`，body 自稱的 `actor` 不算。`relay_from` 的 bot 申請沒帶 token 仍收，但標 `sender_verified=false`。
 - **協調者故障不倒回巡檢**：分流只看它**建立過**沒有（`supervisor_roles.responder` 的 `bot_id`），不看它現在活不活著。沒額度（CLI 撞限，或共享 5h／7d critical）→ `status=waiting_quota`、`notify_next_at`＝重置時間與上限取早者，事件留 `pending`、不計重試次數；
@@ -1769,7 +1770,7 @@ supervisor 相關資料表與欄位都是 additive，`db::migrate` 重跑冪等�
   以前這種狀態只要 `desired_running=0` 就算 healthy，申請、核准、mission 事件無限期累積而沒有人被叫醒（review 2026-09-16 c3 M1）。
   `responder start` 先記 `desired_running=1` 再啟動，失敗交給看門狗重試。
 - **限制**：bot 繞過 shim 直接用真的 herdr 打進巡檢 pane、或 daemon 不在時 shim 退回直送，daemon 看到的是外部回合（當成使用者），會吃巡檢一回合。
-  協調者在自己的專案，web 的「剛跑完」晶片列目前只排除 `GET /api/supervisor` 的 `project_id`（巡檢專案），協調者會出現在那一列。
+  協調者已經併回巡檢的專案（見上方「一顆總管、一個專案」），所以 web 的「剛跑完」晶片列排除 `GET /api/supervisor` 的 `project_id` 時兩個角色一起排除。
 - **部署**（合入 main 後由 AGM 安排，不在程式裡自動做）：`agm responder setup` → 同步兩份 persona（§18.11，協調者走 `PUT /api/supervisor/responder/persona`）→
   `agm responder start`。回滾到舊 binary：新欄位是 additive，舊 binary 忽略 `role`／`wake`，所有事件回到巡檢收；先停協調者。
 
