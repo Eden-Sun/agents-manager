@@ -3563,6 +3563,38 @@ mod tests {
         assert!(settled_without_event(&p, 10).await.unwrap().is_empty(), "once queued it is not swept again");
     }
 
+    /// #76：AGM 的 cancel 決定跟遲到的回合收尾（`settle_and_notify`）撞在一起——AGM 在回合結束的
+    /// 通知還沒送達前就決定 cancel（`review_with_followup` 先落地，是真正的 CAS 寫入，不是模擬），
+    /// 之後 `settle_and_notify` 才因為某個延遲的事件被呼叫。它自己的 guard
+    /// （`WHERE status IN ('queued','delivered','unknown')`）要擋下這一列，不能把已經 cancel
+    /// 的交辦蓋回 awaiting_review。用真的循序呼叫，不是 trigger：這裡要測的正是那句 guard 本身
+    /// 有沒有咬住，trigger 換掉的是「哪個值贏」，不是「guard 擋不擋得住」，兩者不一樣。
+    #[tokio::test]
+    async fn a_cancelled_assignment_is_not_resurrected_by_a_late_settle() {
+        let p = pool().await;
+        get_or_init(&p).await.unwrap();
+        let a = insert_assignment(&p, None, "bot1", "req-race", "做 A", &[], None, true).await.unwrap();
+        mark_delivered(&p, &a.id, "turn-race", "ok").await.unwrap();
+        assert_eq!(assignment(&p, &a.id).await.unwrap().unwrap().status, "delivered");
+
+        let cancelled = review_with_followup(&p, &a.id, "delivered", "cancel", "AGM", "cli", Some("改主意"), None, None)
+            .await
+            .unwrap()
+            .expect("cancel 先落地");
+        assert_eq!(cancelled.updated.status, "cancelled");
+
+        // 遲到的回合收尾這時候才進來：它讀到的還是 dispatch 當下那顆舊的 assignment（`delivered`），
+        // 但 `settle_and_notify` 自己會用當下 DB 裡的值當 guard，不是呼叫端傳的參數。
+        let settled = settle_and_notify(&p, &a.id, "completed", true, Some("完成"), None, "k-race", "assignment_completed", &json!({}))
+            .await
+            .unwrap();
+        assert!(!settled.moved, "guard 要擋下：這一列已經不是 queued/delivered/unknown");
+
+        let row = assignment(&p, &a.id).await.unwrap().unwrap();
+        assert_eq!(row.status, "cancelled", "已經取消的交辦不會被遲到的收尾救回 awaiting_review");
+        assert_eq!(row.review_decision.as_deref(), Some("cancel"), "取消當時寫下的裁示紀錄原封不動，沒被收尾蓋掉");
+    }
+
     /// `unknown` delivery is its own state precisely so the controller reconciles it instead
     /// of sending the same job a second time.
     #[tokio::test]

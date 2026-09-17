@@ -5,10 +5,11 @@
 //! 這張表過時了就改表，不要改程式碼去配合表。每條邊後面的 `file:line` 指到實際下手的那一句，
 //! 遇到疑點自己去核對。
 //!
-//! `supervisor_assignments.status` 沒有 DB 層的 CHECK 約束（純字串），它的合法值與轉移規則
-//! 集中在 `daemon/src/supervisor/store.rs` 的 `decide()`（accept/fail/cancel/block/followup 對應
-//! completed/failed/cancelled/blocked/superseded）與 `EXECUTING_STATES`/`STALLED_STATES` 常數，
-//! 這裡不重複列——那份本來就是唯一權威，另外抄一份只會兩邊漂移。
+//! `supervisor_assignments.status` 沒有 DB 層的 CHECK 約束（純字串）。決定合法值與 AGM 裁示轉移的
+//! 是 `daemon/src/supervisor/store.rs` 的 `decision_status()`（accept/fail/cancel/block/followup 對應
+//! completed/failed/cancelled/blocked/superseded）、`review_with_followup()`（CAS 寫入）與
+//! `EXECUTING_STATES`/`OPEN_STATES`/`STALLED_STATES` 三個常數——這裡的 `ASSIGNMENT_STATUS_EDGES`
+//! 是把它們**逐條讀出來**的快照，不是另一份定義，過時了改這張表就好，別去動那三個常數。
 //!
 //! 目前只有這個檔案自己的測試在讀這些表（`cargo clippy` 不編 `#[cfg(test)]`，所以看起來是
 //! death code）；`#[allow(dead_code)]` 是因為它們的價值是「給人看、給以後可能出現的
@@ -55,6 +56,60 @@ pub const TURN_STATUS_EDGES: &[(&str, &str, &str)] = &[
     ("completed_fallback", "completed", "hookrecv.rs:452 fill_or_drop_late_hook：備援關掉但還沒有回覆的回合，遲到的 hook 把答案補上；guard 是「還沒有 assistant 訊息」（Rust 層），不是 SQL 的 status guard"),
 ];
 
+/// `supervisor_assignments.status` 沒有 CHECK 約束，合法值集合抄自
+/// `store.rs::OPEN_STATES`／`EXECUTING_STATES`（開放中的 6 種）＋ 4 種終態。
+pub const ASSIGNMENT_STATUSES: [&str; 10] =
+    ["queued", "delivered", "unknown", "awaiting_review", "blocked", "quota_blocked", "completed", "failed", "cancelled", "superseded"];
+
+/// 觀察到的 `supervisor_assignments.status` 合法邊。四個終態（completed/failed/cancelled/superseded）
+/// 沒有出邊：`api.rs:258 post_review` 一開始就擋「`!a.is_open()` → 409 already_closed」，唯一的出路是
+/// `followup` 開一件新的續作，不是原地轉移。
+///
+/// **這裡也記兩個看起來會發生、但明顯不對的縫（已回報 AGM，故意沒有寫測試去釘成「正確行為」）：**
+/// 1. `store.rs::mark_delivered`（約 1197 行）完全沒有 SQL 狀態 guard（`WHERE id=?`，不檢查現在的
+///    status）。`controller.rs::dispatch`（約 90 行）只在**進入時**讀一次 `a.status != "queued"`，
+///    中間經過好幾個 await 點（含實際送 prompt 進 pane），若 AGM 這段時間內對同一筆下了 `cancel`
+///    （`post_review` 容許 cancel 在 executing 狀態下生效），`mark_delivered` 最後仍會把
+///    `status` 蓋回 `delivered`／`unknown`，且不會動到已經寫下的 `review_decision='cancel'` 等欄位
+///    ——結果是一列 `status` 說「還在跑」但審查欄位說「已經取消」的自相矛盾列。
+/// 2. `store.rs::settle_and_notify`（約 1316 行）本身的 `status` 欄位有正確 guard（見下面
+///    `queued|delivered|unknown → awaiting_review` 那條的 CAS），但它「送通知」那句
+///    `INSERT OR IGNORE INTO supervisor_inbox` 不看 `moved`，guard 沒擋下（`moved=false`，例如
+///    這一列已經被 cancel）時照樣排一則 `assignment_completed`／`needs_review:true` 的通知——
+///    已經關掉的交辦還會讓 AGM 收到「請驗收」的訊息。
+pub const ASSIGNMENT_STATUS_EDGES: &[(&str, &str, &str)] = &[
+    ("(insert)", "queued", "supervisor/mod.rs::assign() 建交辦的初始值"),
+    ("queued", "delivered", "store.rs:1200 mark_delivered（delivery != 'unknown' 時）；UPDATE 沒有 SQL 狀態 guard，見上面「看起來會發生但不對」第 1 點"),
+    ("queued", "unknown", "同上，delivery == 'unknown' 時"),
+    ("delivered", "blocked", "store.rs:1409 block_stale_queue_tx，CAS guard `AND status='delivered'`（排隊送出去太久沒消息的保險絲）"),
+    ("queued", "quota_blocked", "store.rs:1433 park_quota_blocked，CAS guard `AND status IN ('queued','delivered','unknown')`"),
+    ("delivered", "quota_blocked", "同上"),
+    ("unknown", "quota_blocked", "同上"),
+    ("quota_blocked", "queued", "store.rs:1481 resume_quota_blocked，CAS guard `AND status='quota_blocked'`（額度回來了，重新排隊）"),
+    ("queued", "awaiting_review", "store.rs:1338 settle_and_notify，CAS guard `AND status IN ('queued','delivered','unknown')`（回合結束、還要驗收）"),
+    ("delivered", "awaiting_review", "同上"),
+    ("unknown", "awaiting_review", "同上；見 `a_cancelled_assignment_is_not_resurrected_by_a_late_settle` 測試"),
+    ("queued", "completed", "同一句 settle_and_notify：`expects_review=0`（notice）且回合正常結束時 `CASE WHEN` 直接落地 completed，不經過 awaiting_review"),
+    ("delivered", "completed", "同上"),
+    ("unknown", "completed", "同上"),
+    ("awaiting_review", "completed", "api.rs:351 post_review → store.rs:1693 review_with_followup（guarded UPDATE at 1695），decision=accept，CAS guard `AND status=<呼叫端讀到的舊值>`"),
+    ("awaiting_review", "failed", "同上，decision=fail"),
+    ("awaiting_review", "blocked", "同上，decision=block"),
+    ("awaiting_review", "superseded", "同上，decision=followup（同時在同一交易建續作，見 `a_follow_up_is_a_new_assignment_linked_to_the_old_one`）"),
+    ("blocked", "completed", "同上；`blocked` 是 OPEN 但不是 EXECUTING，accept/fail/block/followup 都容許"),
+    ("blocked", "failed", "同上"),
+    ("blocked", "superseded", "同上"),
+    ("quota_blocked", "completed", "同上；`quota_blocked` 一樣是 OPEN 非 EXECUTING"),
+    ("quota_blocked", "failed", "同上"),
+    ("quota_blocked", "superseded", "同上"),
+    ("queued", "cancelled", "api.rs:272 post_review 對 executing 狀態只放行 cancel → review_with_followup，CAS guard"),
+    ("delivered", "cancelled", "同上"),
+    ("unknown", "cancelled", "同上"),
+    ("awaiting_review", "cancelled", "同上（非 executing 狀態的 cancel 走一般路徑）"),
+    ("blocked", "cancelled", "同上"),
+    ("quota_blocked", "cancelled", "同上"),
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -69,6 +124,21 @@ mod tests {
         for (from, to, why) in TURN_STATUS_EDGES {
             assert!(*from == "(insert)" || TURN_STATUSES.contains(from), "{from} 不是合法的 turns.status：{why}");
             assert!(TURN_STATUSES.contains(to), "{to} 不是合法的 turns.status：{why}");
+        }
+        for (from, to, why) in ASSIGNMENT_STATUS_EDGES {
+            assert!(*from == "(insert)" || ASSIGNMENT_STATUSES.contains(from), "{from} 不是合法的 assignment status：{why}");
+            assert!(ASSIGNMENT_STATUSES.contains(to), "{to} 不是合法的 assignment status：{why}");
+        }
+    }
+
+    /// 四個終態沒有出邊：表上一旦出現以它們當起點的邊就是這張表自己錯了——程式行為的等價測試
+    /// 是 `store.rs::post_review` 對 `!is_open()` 一律回 409（`already_closed`），已經有既有覆蓋
+    /// （`a_follow_up_is_a_new_assignment_linked_to_the_old_one` 等）。
+    #[test]
+    fn closed_assignment_statuses_have_no_outgoing_edge_in_the_table() {
+        const CLOSED: [&str; 4] = ["completed", "failed", "cancelled", "superseded"];
+        for (from, _, why) in ASSIGNMENT_STATUS_EDGES {
+            assert!(!CLOSED.contains(from), "{from} 是終態，不該有出邊：{why}");
         }
     }
 
