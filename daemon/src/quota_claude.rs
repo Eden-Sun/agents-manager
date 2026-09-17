@@ -92,6 +92,8 @@ fn parse_ampm_time(tok: &str) -> Option<(u32, u32)> {
 }
 
 /// `Resets 1:20pm (Asia/Taipei)` / `Resets Sep 11 at 2pm (Asia/Taipei)` → RFC3339 UTC.
+/// 括號裡的時區標註一定要看得懂（IANA 名稱），才據此換算；daemon host 常常跟橫幅標的時區不同
+/// （代管別台機器上的 bot），認不出來就回 `None`，不要靜靜套用本機時區猜一個可能錯的時間（issue #59）。
 pub fn parse_claude_reset(line: &str, now: DateTime<Local>) -> Option<String> {
     let rest = line
         .trim()
@@ -100,8 +102,11 @@ pub fn parse_claude_reset(line: &str, now: DateTime<Local>) -> Option<String> {
         .trim()
         .trim_start_matches(':')
         .trim();
-    // Drop the timezone parenthetical — we interpret wall time in *local* (daemon host).
-    let rest = rest.split('(').next()?.trim();
+    let (rest, tz_name) = rest.split_once('(')?;
+    let tz_name = tz_name.trim().trim_end_matches(')').trim();
+    let tz: chrono_tz::Tz = tz_name.parse().ok()?;
+    let rest = rest.trim();
+    let now = now.with_timezone(&tz);
 
     let mut month = None;
     let mut day = None;
@@ -130,9 +135,9 @@ pub fn parse_claude_reset(line: &str, now: DateTime<Local>) -> Option<String> {
     let (h, m) = hm?;
     let dt = match (month, day) {
         (Some(month), Some(day)) => {
-            let build = |y: i32| -> Option<DateTime<Local>> {
+            let build = |y: i32| -> Option<DateTime<chrono_tz::Tz>> {
                 let d = NaiveDate::from_ymd_opt(y, month, day)?.and_hms_opt(h, m, 0)?;
-                Local.from_local_datetime(&d).earliest()
+                tz.from_local_datetime(&d).earliest()
             };
             let this = build(now.year())?;
             if this < now - chrono::Duration::days(1) {
@@ -142,9 +147,9 @@ pub fn parse_claude_reset(line: &str, now: DateTime<Local>) -> Option<String> {
             }
         }
         _ => {
-            // Time-only: today, or tomorrow if that time already passed.
+            // Time-only: today, or tomorrow if that time already passed (both in `tz`, not host local).
             let today = now.date_naive().and_hms_opt(h, m, 0)?;
-            let mut dt = Local.from_local_datetime(&today).earliest()?;
+            let mut dt = tz.from_local_datetime(&today).earliest()?;
             if dt <= now {
                 dt += chrono::Duration::days(1);
             }
@@ -1063,6 +1068,26 @@ AM_USAGE_DONE=0
     fn month_day_reset_parses() {
         let r = parse_claude_reset("Resets Sep 11 at 2pm (Asia/Taipei)", at("2026-09-06T10:00:00+08:00")).unwrap();
         assert!(r.starts_with("2026-09-11T06:00:00") || r.starts_with("2026-09-11T14:00:00"), "{r}");
+    }
+
+    /// #59：橫幅標的時區（America/New_York，9 月是 EDT -04:00）跟本機時區（sandbox 是 Asia/Taipei
+    /// +08:00）不一樣時，一定要照橫幅標的時區換算，不能悄悄套用本機時區——那會整整差 12 小時。
+    #[test]
+    fn reset_timezone_differs_from_host_local() {
+        let r = parse_claude_reset("Resets 3:00pm (America/New_York)", at("2026-09-06T10:00:00+08:00")).unwrap();
+        assert_eq!(r, "2026-09-06T19:00:00.000Z", "{r}");
+    }
+
+    /// 認不出來的時區要有明確的退路：回 `None`，不要拿本機時區頂上去湊一個看似合理、其實可能錯的時間。
+    #[test]
+    fn unrecognized_timezone_returns_none_instead_of_guessing() {
+        assert!(parse_claude_reset("Resets 3:00pm (Mars/OlympusMons)", at("2026-09-06T10:00:00+08:00")).is_none());
+    }
+
+    /// 橫幅裡完全沒有時區括號（不是目前 CLI 會產生的格式，但要防呆）：同樣不猜，回 `None`。
+    #[test]
+    fn missing_timezone_parenthetical_returns_none() {
+        assert!(parse_claude_reset("Resets 3:00pm", at("2026-09-06T10:00:00+08:00")).is_none());
     }
 
     #[test]
