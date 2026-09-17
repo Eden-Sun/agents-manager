@@ -443,6 +443,8 @@ stall watchdog 的自動補送走同一條驗證路徑，次數記在 `turns.res
 即是鎖，queue flush 與 watchdog 不會各送一次，daemon 重啟也不會多一次額度）。
 - **補送的字與比對的字**都讀 `turns.prompt_text`＝當初**實際送出**的字（群組去掉 @mention、附件路徑展開；直接送與排隊都寫），
   不讀訊息泡泡的原文——泡泡帶著 @mention，拿去搜畫面一定找不到、重送還會把路由語法打進 pane（review3 c3 M4）。沒有 `prompt_text` 的舊列才從訊息重算。
+- **補送按過鍵卻證明不了**（`Unproven`，或打字之後出錯）：不是「agent 沒反應」，turn 改記 `delivery='unknown'`（不判 `failed`），
+  插一則 system 訊息說明「已重打一次、證明不了，字可能還在框裡或已被收下」。hook 來了照 §6.7 認領；沒人收由 §4.3b 收尾（review3 c3 M5）。
 
 ### 6.1 daemon 啟動
 0. 決定資料目錄（§3.1：`data_dir` > `--config` 所在目錄 > `AM_DATA_DIR` > 預設）、對它拿 `daemon.lock`；
