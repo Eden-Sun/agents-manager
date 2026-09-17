@@ -580,11 +580,6 @@ pub(crate) async fn pane_env(
         // issue #104：cargo shim 只拿到 helper/config 的位置與是否啟用；SSH 密碼永遠不進 pane env。
         env.insert("AM_DAEMON_EXE".into(), json!(app.exe.to_string_lossy()));
         env.insert("AM_CONFIG_PATH".into(), json!(app.cfg.path.to_string_lossy()));
-        if app.cfg.get().await.build.remote.enabled {
-            env.insert("AM_REMOTE_CARGO_ENABLED".into(), json!("1"));
-        } else {
-            env.remove("AM_REMOTE_CARGO_ENABLED");
-        }
     }
     // Hook token rides in the pane env for every kind: grok's dispatcher learns the bot only here
     // (SPEC §12), and local hooks read it so it never shows in `ps` (issue #43).
