@@ -167,6 +167,65 @@ fn removals(
     (bots, projects)
 }
 
+/// 投影的乾跑：**這份 config 投出去會不會被擋？** 純函式，不碰 DB、不碰檔案。
+///
+/// `ConfigStore::update` 在 `write_atomic` 之前對「改完之後」的整份 config 跑這支（issue #73）。
+/// 以前只在投影當下查，而投影是在 config 已經落盤之後才跑的：一筆會被擋下的修改先把 TOML 改壞，
+/// API 回錯誤，現場卻已經變了，daemon 下次啟動才爆（`project_inner` 裡那句「而那時 config 已經落盤、
+/// 之後 daemon 起不來」講的就是這個）。搬到落盤前，錯誤照樣回，但檔案一個字都不會動。
+///
+/// 只查**投影自己會擋**的事。需要 DB 才判得出來的安全閘（大量軟刪）不在這裡：那條路是刪除
+/// （`delete_from_config`），它本來就是先在記憶體算出 `next`、對著 DB 快照驗過才 `*cfg = next`。
+pub fn validate(cfg: &crate::config::ConfigFile) -> Result<()> {
+    for i in &cfg.identities {
+        if !crate::config::valid_identity_name(&i.name) {
+            bail!("invalid identity name `{}` (must match {})", i.name, crate::config::SLUG_NAME_RE);
+        }
+        if !crate::config::valid_kind(&i.kind) {
+            bail!("invalid identity kind `{}` (must be {})", i.kind, crate::config::kinds_list());
+        }
+    }
+    for p in &cfg.projects {
+        if let Some(id) = p.id.as_deref() {
+            if !valid_id(id) {
+                bail!("invalid project id `{id}` for project `{}` (must match {})", p.label, ID_RE);
+            }
+        }
+        for b in &p.bots {
+            if let Some(id) = b.id.as_deref() {
+                if !valid_id(id) {
+                    bail!("invalid bot id `{id}` for bot `{}` in project `{}` (must match {})", b.name, p.label, ID_RE);
+                }
+            }
+            if !valid_bot_name(&b.name) {
+                bail!("invalid bot name `{}` ({})", b.name, crate::config::BOT_NAME_RE);
+            }
+            if !crate::config::valid_kind(&b.kind) {
+                bail!("invalid bot kind `{}` (must be {})", b.kind, crate::config::kinds_list());
+            }
+            if let Some(idn) = b.identity.as_deref().filter(|s| !s.is_empty()) {
+                // A host's shell `ccN` alias is a legal binding too (API.md §10.2: the
+                // identity list is `[[identities]]` ∪ that host's `ccN`); the config never
+                // owns those, so an unknown name is only an error outside that set.
+                // 身份以 `(host, name)` 為鍵（`26a14c2`）：本機的 `work`（claude）與 m4p 的 `work`（codex）可以並存，
+                // 只看名字會拿到第一筆同名的、判成 kind 不符。規則跟 API 的 `tools::identity_for_host`
+                // 同一份（`merge_identities`）。這裡拿不到那台偵測到的 `ccN`，所以傳 `None`：沒寫 host 的
+                // `ccN` 在遠端先不給，落到「shell alias 本來就合法」那條。
+                let merged = crate::tools::merge_identities(&cfg.identities, &p.host, None);
+                match merged.iter().map(|(i, _)| i).find(|i| i.name == idn) {
+                    None if crate::tools::SHELL_IDENTITY_NAMES.contains(&idn) => {}
+                    None => bail!("bot `{}` references unknown identity `{idn}`", b.name),
+                    Some(i) if i.kind != b.kind => {
+                        bail!("identity `{idn}` is for {} but bot `{}` is {}", i.kind, b.name, b.kind)
+                    }
+                    Some(_) => {}
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn project_inner(
     store: &ConfigStore,
     pool: &SqlitePool,
@@ -174,27 +233,15 @@ async fn project_inner(
     allow_bulk: bool,
 ) -> Result<()> {
     // 1. fill in ids / canonicalize paths, write back only if something changed.
+    //    合法性不在這裡查：`ConfigStore::update` 落盤前會對**改完之後**的整份 config 跑 `validate`
+    //    （issue #73），所以這個 closure 只負責補值。
     let changed = store
         .update(|cfg| {
             let mut dirty = false;
-            let identities = cfg.identities.clone();
-            for i in &identities {
-                if !crate::config::valid_identity_name(&i.name) {
-                    bail!("invalid identity name `{}` (must match {})", i.name, crate::config::SLUG_NAME_RE);
-                }
-                if !crate::config::valid_kind(&i.kind) {
-                    bail!("invalid identity kind `{}` (must be {})", i.kind, crate::config::kinds_list());
-                }
-            }
             for p in cfg.projects.iter_mut() {
                 if p.id.is_none() {
                     p.id = Some(db::ulid());
                     dirty = true;
-                }
-                if let Some(id) = p.id.as_deref() {
-                    if !valid_id(id) {
-                        bail!("invalid project id `{id}` for project `{}` (must match {})", p.label, ID_RE);
-                    }
                 }
                 // Only local paths can be canonicalized here; a remote path was already
                 // canonicalized on its host when the project was created (SPEC §11.6).
@@ -210,40 +257,6 @@ async fn project_inner(
                     if b.id.is_none() {
                         b.id = Some(db::ulid());
                         dirty = true;
-                    }
-                    if let Some(id) = b.id.as_deref() {
-                        if !valid_id(id) {
-                            bail!(
-                                "invalid bot id `{id}` for bot `{}` in project `{}` (must match {})",
-                                b.name,
-                                p.label,
-                                ID_RE
-                            );
-                        }
-                    }
-                    if !valid_bot_name(&b.name) {
-                        bail!("invalid bot name `{}` ({})", b.name, crate::config::BOT_NAME_RE);
-                    }
-                    if !crate::config::valid_kind(&b.kind) {
-                        bail!("invalid bot kind `{}` (must be {})", b.kind, crate::config::kinds_list());
-                    }
-                    if let Some(idn) = b.identity.as_deref().filter(|s| !s.is_empty()) {
-                        // A host's shell `ccN` alias is a legal binding too (API.md §10.2: the
-                        // identity list is `[[identities]]` ∪ that host's `ccN`); the config never
-                        // owns those, so an unknown name is only an error outside that set.
-                        // 身份以 `(host, name)` 為鍵（`26a14c2`）：本機的 `work`（claude）與 m4p 的 `work`（codex）可以並存，
-                        // 只看名字會拿到第一筆同名的、判成 kind 不符，而那時 config 已經落盤、之後 daemon 起不來（review core 6）。
-                        // 規則跟 API 的 `tools::identity_for_host` 同一份（`merge_identities`）。這裡拿不到那台偵測到的 `ccN`，
-                        // 所以傳 `None`：沒寫 host 的 `ccN` 在遠端先不給，落到下面「shell alias 本來就合法」那條。
-                        let merged = crate::tools::merge_identities(&identities, &p.host, None);
-                        match merged.iter().map(|(i, _)| i).find(|i| i.name == idn) {
-                            None if crate::tools::SHELL_IDENTITY_NAMES.contains(&idn) => {}
-                            None => bail!("bot `{}` references unknown identity `{idn}`", b.name),
-                            Some(i) if i.kind != b.kind => {
-                                bail!("identity `{idn}` is for {} but bot `{}` is {}", i.kind, b.name, b.kind)
-                            }
-                            Some(_) => {}
-                        }
                     }
                 }
             }
@@ -447,6 +460,76 @@ mod tests {
         pool.close().await;
         std::fs::remove_dir_all(&dir).unwrap();
         error
+    }
+
+    /// issue #73：會被投影擋下的修改，**連 config.toml 都不准動**。
+    ///
+    /// 以前的順序是「寫檔 → 投影 → 投影拒絕 → 回錯誤」：API 是回了錯沒錯，但現場已經被改掉，
+    /// daemon 下次啟動才爆，而且爆在一個使用者沒同意過的狀態上。
+    #[tokio::test]
+    async fn a_mutation_the_projection_would_reject_leaves_the_file_and_the_db_untouched() {
+        let dir = std::env::temp_dir().join(format!("am-cfg-validate-{}", db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            "[server]\nlisten = '127.0.0.1:7788'\n\n             [[identities]]\nname = 'work'\nkind = 'claude'\n\n             [[projects]]\nid = 'p1'\npath = '/tmp'\nlabel = 'demo'\nhost = 'remote'\n\n             [[projects.bots]]\nid = 'b1'\nname = 'worker'\nkind = 'claude'\nidentity = 'work'\n",
+        )
+        .unwrap();
+        let store = ConfigStore::load(path.clone()).await.unwrap();
+        let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
+        project_config(&store, &pool).await.unwrap();
+
+        let before_text = std::fs::read_to_string(&path).unwrap();
+        let before_cfg = store.get().await;
+        let before_bots: Vec<(String, String)> =
+            sqlx::query_as("SELECT id, kind FROM bots ORDER BY rowid").fetch_all(&pool).await.unwrap();
+        assert_eq!(before_bots.len(), 1, "投影過了，DB 有那顆 bot");
+
+        // 三種投影一定會擋的修改，每一種都不可以留下痕跡。
+        let cases: Vec<(&str, Box<dyn Fn(&mut crate::config::ConfigFile)>)> = vec![
+            (
+                "unknown identity",
+                Box::new(|cfg: &mut crate::config::ConfigFile| {
+                    cfg.projects[0].bots[0].identity = Some("nobody".into());
+                }),
+            ),
+            (
+                "kind mismatch",
+                Box::new(|cfg: &mut crate::config::ConfigFile| {
+                    cfg.projects[0].bots[0].kind = "codex".into();
+                }),
+            ),
+            (
+                "invalid bot name",
+                Box::new(|cfg: &mut crate::config::ConfigFile| {
+                    cfg.projects[0].bots[0].name = "not a valid name!".into();
+                }),
+            ),
+        ];
+        for (what, mutate) in cases {
+            let err = store
+                .update(|cfg| {
+                    mutate(cfg);
+                    Ok(())
+                })
+                .await
+                .expect_err(&format!("{what} 應該被擋下來"))
+                .to_string();
+            assert!(err.contains("config.toml 未變更"), "{what}: 錯誤要說清楚什麼都沒動：{err}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), before_text, "{what}: 檔案被動過了");
+            assert_eq!(store.get().await, before_cfg, "{what}: 記憶體裡那份也不能變");
+        }
+
+        // DB 同樣沒被碰過，而且合法的修改照樣走得通（不是把整條路堵死）。
+        let after_bots: Vec<(String, String)> =
+            sqlx::query_as("SELECT id, kind FROM bots ORDER BY rowid").fetch_all(&pool).await.unwrap();
+        assert_eq!(after_bots, before_bots, "DB 不該被動到");
+        store.update(|cfg| { cfg.projects[0].label = "renamed".into(); Ok(()) }).await.expect("合法的改動要過");
+        assert!(std::fs::read_to_string(&path).unwrap().contains("renamed"), "合法的改動要真的落盤");
+
+        pool.close().await;
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     fn config_text(bots: &[&str]) -> String {

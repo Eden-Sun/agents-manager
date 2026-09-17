@@ -525,6 +525,16 @@ impl ConfigStore {
         }
         let mut next = g.cfg.clone();
         let out = f(&mut next)?;
+        // issue #73：**落盤之前**先問「改完之後這份 config 投影出去會不會被擋」。以前是先寫檔再投影，
+        // 一筆會被擋下的修改等於把 TOML 改壞了才回錯誤——現場已經變了，daemon 下次啟動才爆。
+        // 這裡失敗就直接 `?` 出去：`next` 被丟掉，`g.cfg` 沒動，檔案一個字都沒寫。
+        //
+        // 不論這次改了什麼都驗整份：一來每個 mutation 走的都是這支，規則只有一份；二來 config 已經壞掉時
+        // 本來就不該再往上疊寫。
+        // 原因留在最前面（呼叫端與測試都在看它），後面才補「所以什麼都沒動」——這就是 recovery path：
+        // 不必回頭收拾，改個合法的值再送一次就好。
+        crate::projection::validate(&next)
+            .map_err(|e| anyhow::anyhow!("{e:#}（config.toml 未變更）"))?;
         // A serde rewrite drops comments / unknown keys: no-op updates must not write (issue #38).
         if next != g.cfg {
             write_atomic(&self.path, &next)?;
