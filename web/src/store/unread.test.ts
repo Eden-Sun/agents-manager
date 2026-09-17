@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import type { Message } from '../api/types.ts'
-import { clearHookCompletion, completionKey, countUnreadTurns, idleEdgeCompletionKey, isUnread, loadCounts, loadMarks, markHookCompletion, markOfMessages, resetIdleEdges, resetTurnCompletions, saveCounts, saveMarks, takeTurnCompletion, totalUnread } from './unread.ts'
+import { clearHookCompletion, completionKey, countUnreadTurns, idleEdgeCompletionKey, isUnread, loadCounts, loadMarks, markHookCompletion, markOfMessages, resetIdleEdges, resetTurnCompletions, saveCounts, saveMarks, takeTurnCompletion, titleUnread, totalUnread, unreadShown } from './unread.ts'
 
 /** node 沒有 localStorage；這裡只要 get/set 兩支。 */
 function stubStorage() {
@@ -172,4 +172,20 @@ test('idle 邊緣：新回合開始會清掉上一輪的 hook 標記', () => {
   markHookCompletion('b1')
   clearHookCompletion('b1')
   assert.equal(idleEdgeCompletionKey('b1', 'r1', null), 'run:r1:1')
+})
+
+test('分頁標題不算總管專案的未讀：側欄不顯示的，標題也不能掛著點不掉的 (N)（review3 c5 L2）', () => {
+  const bots = [
+    { id: 'agm', project_id: 'p-agm' },
+    { id: 'agm-kid', project_id: 'p-agm' },
+    { id: 'work', project_id: 'p1' },
+    { id: 'folded', project_id: 'p1' },
+  ]
+  const s = { bots, botUnread: { agm: 40, 'agm-kid': 3, work: 2, folded: 1 }, hiddenBotIds: ['folded'], supervisorProjectId: 'p-agm' }
+  assert.equal(titleUnread(s), 2)
+  assert.equal(unreadShown(bots[0], 'p-agm'), false)
+  assert.equal(unreadShown(bots[2], 'p-agm'), true)
+  // 還不知道總管專案是哪個（`GET /api/supervisor` 讀不到）：不排除。
+  assert.equal(titleUnread({ ...s, supervisorProjectId: null }), 45)
+  assert.equal(unreadShown(undefined, 'p-agm'), true)
 })

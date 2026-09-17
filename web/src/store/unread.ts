@@ -163,6 +163,25 @@ export function totalUnread(bots: Record<string, number>, hidden: readonly strin
   return n
 }
 
+/**
+ * 側欄顯不顯示這顆 bot 的未讀：總管專案裡的往來是 AGM 的內部事務，不顯示（2026-09-16 使用者）。
+ * 側欄與分頁標題共用這一條——標題照算的話，AGM 例行回合讓 `(N)` 長期掛著，側欄卻找不到一筆點得掉（review3 c5 L2）。
+ */
+export function unreadShown(bot: { project_id: string } | undefined, supervisorProjectId: string | null): boolean {
+  return !(bot && supervisorProjectId && bot.project_id === supervisorProjectId)
+}
+
+/** 分頁標題的 `(N)`：側欄收起來的與總管專案的都不算。 */
+export function titleUnread(s: {
+  botUnread: Record<string, number>
+  hiddenBotIds: readonly string[]
+  bots: readonly { id: string; project_id: string }[]
+  supervisorProjectId: string | null
+}): number {
+  const agm = s.bots.filter((b) => !unreadShown(b, s.supervisorProjectId)).map((b) => b.id)
+  return totalUnread(s.botUnread, agm.length === 0 ? s.hiddenBotIds : [...s.hiddenBotIds, ...agm])
+}
+
 /** `message_added` 與 `turn_updated` 都代表完成，去重避免一回合跳兩下；只留最近 500 筆。 */
 const counted = new Set<string>()
 const COUNTED_CAP = 500
