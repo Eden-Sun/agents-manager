@@ -168,7 +168,7 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     // 資料目錄跟著設定檔走，而且**在建立或寫入任何檔案之前**先拿鎖：只換 --config 與 port 的
     // 「隔離測試」曾經打到正式 DB，連 ConfigStore::load 都會先寫一份預設 config（startup.rs）。
     let startup::Instance { dir, cfg_path, store, pool, lock, slug } =
-        startup::open_instance(config_path, startup::LOCK_WAIT).await?;
+        startup::open_instance(config_path, startup::env_dir()?, startup::LOCK_WAIT).await?;
     let _dir_lock = lock;
     startup::set_instance(slug.clone());
     let cfg = store.get().await;
