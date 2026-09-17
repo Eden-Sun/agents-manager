@@ -1035,7 +1035,7 @@ body 直接是檔案位元組（**不是** multipart），`Content-Type` 就是�
 ### 狀態、啟停、模型切換
 - `GET /api/supervisor` → `{configured,bot_id,project_id,model:"fable"|"opus",model_arg,identity:"cc0",effort:"low",status,status_detail,generation,cwd,quota_reset_at,remote:{…},pending_count,assignments:[]}`。
   `status`：`not_configured` | `stopped` | `starting` | `idle` | `busy` | `waiting_quota` | `failed`。`pending_count` = 未結案 assignment + 未 ack inbox。`remote` 同 `GET /api/supervisor/remote`。
-  另有 `last_deploy:{sha,at}`＝現在跑的這顆 binary 的 commit（建置時編進去，拿不到 git 是 `unknown`）與它起來的時間；
+  另有 `last_deploy:{sha,at}`＝現在跑的這顆 binary 的 commit（建置時編進去，拿不到 git 是 `unknown`）與**這顆 binary 第一次上線**的時間（記在 `<data_dir>/last-deploy.json`；binary 沒換的重啟不會把它往前推）；
   前端用它排除上次上線以前的舊重建申請。
   頂層欄位都是**巡檢**（SPEC §18.15）；另有 `role:"patrol"`、`remote_provider:"patrol"`、`stats:{wakes,events_delivered,duplicates,merged,last_wake_at,last_wake_reason,last_notify_at,notify_next_at}`、
   `responder`（同 `GET /api/supervisor/responder`）。

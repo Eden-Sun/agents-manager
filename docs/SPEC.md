@@ -1739,7 +1739,11 @@ supervisor 相關資料表與欄位都是 additive，`db::migrate` 重跑冪等�
   登記的 bot 被刪掉 → `status=missing`（`configured:true`、`bot_present:false`），推一次 `responder_bot_missing` 給巡檢，事件照樣留在協調者的佇列等它被建回來。
 - **舊部署**（協調者未建立）：協調的事件由巡檢照 600 秒節流收，行為與之前相同；建立之後才分流。已送給巡檢的舊事件仍歸巡檢。
 - **上次成功上線**：`GET /api/supervisor` 的 `last_deploy{sha,at}`——sha 由 `daemon/build.rs` 在建置時編進 binary，
-  `at` 是這個 process 起來的時間。origin/main 動了不等於上線了，這一格說的是「現在跑的是哪一版」。
+  `at` 是**這顆 sha 第一次跑起來**的時間，存在 `<data_dir>/last-deploy.json`（sha 跟檔裡一樣就沿用檔裡的時間）。
+  origin/main 動了不等於上線了，這一格說的是「現在跑的是哪一版、什麼時候換上去的」。
+  以前 `at` 是 process 起來的時間，binary 沒換的重啟（launchd 拉回、restart 窗口、手動重啟）也會把它往前推，
+  上線前提出的重建申請就從 chip 與清單上消失，而腳本照 `daemon-update.built` 的 mtime 仍然數得到（review 2026-09-16 c3 L3）。
+  沒有 git 的建置（sha `unknown`）分不出版本，仍用 process 的時間。
 - **交辦的來源綁呼叫者**：`POST /supervisor/assignments` 記的「使用者原話」只認**呼叫的那個角色自己**的回合
   （`X-AM-Bot-Id`+token 驗過）。兩個角色同時在回合中時，照固定順序先撿巡檢的回合，會把協調者派的工記成
   「使用者對巡檢說的另一句話」，授權與稽核從此對不上人。明講 `source_turn_id` 也只能指自己的回合；
