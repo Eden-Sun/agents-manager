@@ -266,16 +266,23 @@ pub async fn abort_turns(app: &Arc<App>, bot_id: &str) -> LcResult<Value> {
         if aborted.contains(&t.id) && t.delivery != "unknown" {
             continue;
         }
-        sqlx::query(
-            "UPDATE turns SET status='failed',
-             delivery = CASE WHEN delivery='unknown' THEN 'failed' ELSE delivery END,
-             completed_at=? WHERE id=?",
-        )
-        .bind(db::now())
-        .bind(&t.id)
-        .execute(&app.db)
-        .await
-        .map_err(up)?;
+        // 上面那句 SELECT 撈的是「in_flight **或** delivery='unknown'」，所以這裡拿到的不一定還在飛：
+        // §4.3 的備援關掉的回合（`completed_fallback`）不會動 `delivery`，所以它可以是已經收好、
+        // 但 `delivery` 還停在 `unknown` 的狀態。那種的**只清掉 `unknown` 這個停車位**（它是擋住下一則
+        // prompt 的東西，見 `prompt_inner` 的前置檢查），不改它的 status——回合已經收好了，
+        // 把它改寫成 failed 會讓使用者看到一筆「失敗」的回合，而它其實答完了。
+        // （`turn_controller` 的轉移表也沒有 `completed_fallback -> failed` 這條邊，issue #68。）
+        if t.status == "in_flight" {
+            super::turn_controller::fail(&app.db, &t.id, super::turn_controller::DeliveryOnFail::FailedIfUnknown, "使用者強制中止")
+                .await
+                .map_err(up)?;
+        } else if t.delivery == "unknown" {
+            sqlx::query("UPDATE turns SET delivery='failed' WHERE id=? AND delivery='unknown'")
+                .bind(&t.id)
+                .execute(&app.db)
+                .await
+                .map_err(up)?;
+        }
         if !aborted.contains(&t.id) {
             let _ = insert_message(app, &t.conversation_id, Some(&t.id), "system", "回合已由使用者強制中止", "system", false, None).await;
             aborted.push(t.id.clone());
@@ -378,11 +385,24 @@ mod abort_tests {
             .bind(&t_flight).bind(&cid).bind(&rid).bind(&now).execute(&app.db).await.unwrap();
         sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'web','failed','unknown',?)")
             .bind(&t_unknown).bind(&cid).bind(&rid).bind(&now).execute(&app.db).await.unwrap();
+        // §4.3 的備援關掉的回合不會動 `delivery`：這種「已經收好、但 delivery 停在 unknown」的
+        // 一樣擋住下一則 prompt，也一樣要被解開——但它的 status 不可以被改寫成 failed
+        // （回合其實答完了，而且 `completed_fallback -> failed` 不是合法邊，issue #68）。
+        let t_fallback = db::ulid();
+        sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, completed_at, created_at) VALUES (?,?,?,'web','completed_fallback','unknown',?,?)")
+            .bind(&t_fallback).bind(&cid).bind(&rid).bind(&now).bind(&now).execute(&app.db).await.unwrap();
 
         let out = abort_turns(&app, &bid).await.expect("abort must not fail just because the keys did");
         assert_eq!(out["keys_sent"], false, "no herdr behind the socket");
         let aborted = out["aborted"].as_array().unwrap();
-        assert_eq!(aborted.len(), 2, "both the in-flight and the unknown-delivery turn: {out}");
+        assert_eq!(aborted.len(), 3, "in-flight、unknown-delivery 與備援關掉的那一筆: {out}");
+        let fallback: (String, String) = sqlx::query_as("SELECT status, delivery FROM turns WHERE id=?")
+            .bind(&t_fallback).fetch_one(&app.db).await.unwrap();
+        assert_eq!(
+            fallback,
+            ("completed_fallback".into(), "failed".into()),
+            "只解開擋住下一則 prompt 的 unknown，不把一筆已經收好的回合改寫成 failed",
+        );
 
         let flight: (String, String) = sqlx::query_as("SELECT status, delivery FROM turns WHERE id=?")
             .bind(&t_flight).fetch_one(&app.db).await.unwrap();

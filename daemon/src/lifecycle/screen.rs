@@ -81,14 +81,8 @@ pub async fn capture_codex_usage_notices(app: &Arc<App>, bot_id: &str, expected_
             apply_codex_limit_hit_quota(app, &host, bot.identity.as_deref(), &notice).await;
             // Unlock the composer: a limit hit is a failed turn, not a silent idle.
             if let Some(turn) = in_flight {
-                let res = sqlx::query(
-                    "UPDATE turns SET status='failed', completed_at=? WHERE id=? AND status='in_flight'",
-                )
-                .bind(db::now())
-                .bind(&turn.id)
-                .execute(&app.db)
-                .await?;
-                if res.rows_affected() > 0 {
+                let res = super::turn_controller::fail(&app.db, &turn.id, super::turn_controller::DeliveryOnFail::Keep, "撞限橫幅").await?;
+                if res == super::turn_controller::Outcome::Applied {
                     emit_turn(app, &turn.id).await;
                 }
             }

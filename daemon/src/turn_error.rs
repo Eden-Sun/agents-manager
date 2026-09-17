@@ -213,12 +213,14 @@ pub async fn capture(app: &Arc<App>, bot_id: &str, expected_run_id: &str) -> Res
     // 不收掉 in_flight 的話輸入框會一直鎖著。
     if let Some(t) = turn {
         if t.status == "in_flight" {
-            let res = sqlx::query("UPDATE turns SET status='failed', completed_at=? WHERE id=? AND status='in_flight'")
-                .bind(db::now())
-                .bind(&t.id)
-                .execute(&app.db)
-                .await?;
-            if res.rows_affected() > 0 {
+            let res = crate::lifecycle::turn_controller::fail(
+                &app.db,
+                &t.id,
+                crate::lifecycle::turn_controller::DeliveryOnFail::Keep,
+                "CLI 回報這一回合出錯",
+            )
+            .await?;
+            if res == crate::lifecycle::turn_controller::Outcome::Applied {
                 lifecycle::emit_turn(app, &t.id).await;
             }
         }

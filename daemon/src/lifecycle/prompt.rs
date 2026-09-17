@@ -5,21 +5,14 @@ use super::*;
 /// Close a prompt whose local setup failed after its turn was committed; `pending` must never
 /// be the last state the frontend sees.
 async fn fail_prompt_delivery(app: &Arc<App>, conversation_id: &str, turn_id: &str, reason: &str) {
-    let updated = match sqlx::query(
-        "UPDATE turns SET delivery='failed', status='failed', completed_at=? WHERE id=? AND status='in_flight'",
-    )
-    .bind(db::now())
-    .bind(turn_id)
-    .execute(&app.db)
-    .await
-    {
+    let updated = match super::turn_controller::fail(&app.db, turn_id, super::turn_controller::DeliveryOnFail::Failed, reason).await {
         Ok(result) => result,
         Err(e) => {
             tracing::error!(turn = %turn_id, error = %e, "could not fail prompt delivery");
             return;
         }
     };
-    if updated.rows_affected() == 0 {
+    if updated != super::turn_controller::Outcome::Applied {
         return;
     }
     let _ = insert_message(
@@ -129,11 +122,7 @@ async fn retract_unsent_turn(app: &Arc<App>, turn_id: &str, msg_id: &str) -> any
         }
         Err(e) => {
             tracing::error!(turn = turn_id, error = %e, "could not retract an unsent turn; failing it instead");
-            let _ = sqlx::query("UPDATE turns SET status='failed', delivery='failed', completed_at=? WHERE id=? AND status='in_flight'")
-                .bind(db::now())
-                .bind(turn_id)
-                .execute(&app.db)
-                .await;
+            let _ = super::turn_controller::fail(&app.db, turn_id, super::turn_controller::DeliveryOnFail::Failed, "撤回失敗，改標成 failed").await;
             Err(e)
         }
     };
@@ -600,11 +589,7 @@ async fn prompt_inner(
         Err(e) => {
             let blocked = e.downcast_ref::<HerdrError>().map(|h| h.code == "agent_blocked").unwrap_or(false);
             if blocked {
-                let _ = sqlx::query("UPDATE turns SET delivery='failed', status='failed', completed_at=? WHERE id=?")
-                    .bind(db::now())
-                    .bind(&turn_id)
-                    .execute(&app.db)
-                    .await;
+                let _ = super::turn_controller::fail(&app.db, &turn_id, super::turn_controller::DeliveryOnFail::Failed, "agent_blocked").await;
                 let _ = insert_message(app, &conv, Some(&turn_id), "system", &format!("delivery failed: {e}"), "system", false, None).await;
                 emit_turn(app, &turn_id).await;
                 return Ok(PromptOut { turn_id, message_id: msg_id, delivery: "failed".into() });
