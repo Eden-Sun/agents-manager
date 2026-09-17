@@ -207,7 +207,7 @@ fn probe(remote: &BuildRemoteCfg, data_dir: &Path) -> anyhow::Result<Value> {
 /// Only these commands are safe/useful to offload cross-platform in V1.
 /// `build` stays local because Linux/x86_64 artifacts are not macOS/aarch64 artifacts.
 pub fn eligible(args: &[String]) -> bool {
-    matches!(args.first().map(String::as_str), Some("check" | "test" | "clippy"))
+    matches!(args.first().map(String::as_str), Some("c" | "check" | "t" | "test" | "clippy"))
 }
 
 fn fnv1a64(s: &str) -> u64 {
@@ -229,7 +229,9 @@ pub fn sh_quote(s: &str) -> String {
 
 fn remote_dir(cfg: &BuildRemoteCfg, cwd: &Path) -> String {
     let root = cfg.remote_root.trim_end_matches('/');
-    format!("{root}/{:016x}", fnv1a64(&cwd.to_string_lossy()))
+    // Job-specific leaf prevents two agents verifying the same worktree from racing the same rsync/target tree.
+    // Cache reuse is intentionally delegated to sccache (#91) rather than sharing a mutable target directory.
+    format!("{root}/{:016x}/{}", fnv1a64(&cwd.to_string_lossy()), std::process::id())
 }
 
 fn run_status(mut cmd: Command, what: &str) -> anyhow::Result<ExitStatus> {
@@ -341,7 +343,7 @@ mod tests {
 
     #[test]
     fn only_cross_platform_verification_commands_are_offloaded() {
-        for cmd in ["check", "test", "clippy"] {
+        for cmd in ["c", "check", "t", "test", "clippy"] {
             assert!(eligible(&[cmd.into()]), "{cmd}");
         }
         for cmd in ["build", "run", "bench", "doc", "install", "metadata"] {
