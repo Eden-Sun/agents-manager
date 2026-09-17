@@ -1069,6 +1069,9 @@ body 直接是檔案位元組（**不是** multipart），`Content-Type` 就是�
   daemon 每 30 秒檢查，指紋變化才推 WS `supervisor_health`；inbox `health_changed` 只在巡檢或協調者的嚴重度（`manager_health.status`／`responder_health.status`）或總管狀態（idle/busy 視為 running）真的改變時入列，總管 stopped/starting 期間不入列、恢復後補一則。
   `responder_health{status,responder_status,inbox_open,wake_pending,retry_at}` 單獨一格，**也併進**頂層 `status`（取較嚴重者）。
   協調者 `waiting_quota`、`desired_running` 卻沒在跑、或沒在跑（stopped／missing）而 `wake_pending>0` → `degraded`。
+- `POST /api/supervisor/ops-alerts {source,reason,detail?}` → `{queued,inbox_event_id,event_key}`。排程腳本（`scripts/ops/*`）卡住、自己解不開時喊人：
+  寫一則 inbox `ops_alert`（路由給巡檢、叫醒）。`source`／`reason` 各 1–64 字的 `[A-Za-z0-9._-]`（不合格 400），`detail` 截到 2000 字。
+  event_key 帶小時格：同 `source`+`reason` 每小時最多一則（`queued:false` = 這小時已經有了）。
 - `GET /api/supervisor/incidents?all=0|1` → `{incidents:[{id,kind,resource,severity,status,detail,occurrences,first_seen_at,last_seen_at,resolved_at}],open,all}`。
   `kind`：`host_disconnected` | `bot_stopped` | `assignment_stalled` | `assignment_undelivered` | `notify_exhausted`（SPEC §18.9）。一個 resource 同時只有一筆 open；開啟與恢復各推 inbox `incident_opened` / `incident_resolved`。
   `notify_exhausted` 例外：協調者建立時推（路由給協調者，開啟叫醒、恢復只記錄）；沒有協調者不入 inbox，只在這支與 `system_health` 看得到。
@@ -1087,6 +1090,7 @@ body 直接是檔案位元組（**不是** multipart），`Content-Type` 就是�
 - `GET /api/supervisor/build-inputs` → `{paths,embedded:[{path,symbol}],note}`：會編進 binary 的路徑（含 `docs/goals/agm-supervisor-persona.md`、`docs/goals/agm-responder-persona.md`、`scripts/agm.py`）。
 
 ### 核准與租約（SPEC §18.10）
+- `GET /api/supervisor/approvals?id=<id>`：只回那一筆（清單本身只有最新 100 筆，排程腳本要確認的舊核准會被擠出去）。
 - `GET /api/supervisor/approvals` → `{approvals:[{id,requester,purpose,scope,target_commit,status,decided_by,decided_at,reason,expires_at,client_request_id,wait_since,decisions:[{from,to,actor,reason,at}],…}]}`。
   `status`：`pending` | `approved` | `denied` | `revoked` | `consumed` | `superseded`。`consumed`／`superseded` 不覆寫 `decided_at`／`decided_by`（誰、何時核准的留著；誰用掉的在 `decisions`）。
   `decisions` 是 append-only 的決定歷程（那一列只留最後一個狀態）。

@@ -38,11 +38,59 @@ log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
 [ -x "$AGM" ] || { log "agm CLI 不在 ${AGM}，跳過"; exit 0; }
 [ -n "$BOT" ] || { log "沒設 AGM_BUILD_BOT，跳過（不改派給別的 bot）"; exit 0; }
 
-# A second runner must not create another approval or hand off the same lease. A killed runner
-# leaves this directory behind: fail closed until AGM verifies no runner remains and removes it.
+# 卡住了、自己解不開時喊人：一則 durable inbox 事件（同 source+reason 每小時一則，daemon 去重）。
+# 只寫 log 的話，正式 daemon 從此不再自動換版而沒有任何人知道（review 2026-09-16 c1 M1）。
+alert() { # alert <reason> <detail>
+  log "ALERT ${1}：${2}"
+  "$AGM" --compact ops-alert --source "$OWNER" --reason "$1" --detail "$2" >> "$LOG" 2>&1 ||
+    log "推 ops-alert 失敗（舊 CLI 或 daemon 不在），只留在這份 log"
+}
+
+# A second runner must not create another approval or hand off the same lease. 鎖裡寫 pid 與時間：
+# 被強制關機、斷電、SIGKILL 的那一輪 EXIT trap 沒跑，鎖會留在磁碟上，重開機也還在——以前每 5 分鐘
+# 只記一行「已有執行者或殘留鎖」就 exit 0，換版流程永久、靜默地停住（review 2026-09-16 c1 M1）。
 LOCK="$DIR/daemon-update.lock"
-mkdir "$LOCK" 2>/dev/null || { log "更新檢查已有執行者或殘留鎖，交 AGM 檢查"; exit 0; }
-trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
+LOCK_STALE_SECS=${AGM_LOCK_STALE_SECS:-120}    # 沒有 pid 可查時，超過這麼久就算殘留
+LOCK_HUNG_SECS=${AGM_LOCK_HUNG_SECS:-3600}     # 執行者還活著但卡了這麼久：喊人
+lock_age() { # lock_age → 鎖建立到現在幾秒（讀不到就當 0）
+  _born=$(python3 -c '
+import os,sys
+try:
+    print(int(os.path.getmtime(sys.argv[1])))
+except OSError:
+    print(0)
+' "$LOCK" 2>/dev/null) || _born=0
+  case "$_born" in ''|*[!0-9]*) _born=0 ;; esac
+  [ "$_born" = 0 ] && { echo 0; return; }
+  echo $(( $(date +%s) - _born ))
+}
+take_lock() { mkdir "$LOCK" 2>/dev/null && { echo "$$ $(date +%s)" > "$LOCK/owner"; trap 'rm -rf "$LOCK" 2>/dev/null || true' EXIT; return 0; }; return 1; }
+if ! take_lock; then
+  _pid=$(cut -d' ' -f1 "$LOCK/owner" 2>/dev/null)
+  _age=$(lock_age)
+  # 還活著的執行者（pid 在，而且真的是這支腳本）：正常重疊就安靜跳過；卡太久才喊人。
+  if [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null && ps -o command= -p "$_pid" 2>/dev/null | grep -q 'daemon-update-kick'; then
+    if [ "$_age" -ge "$LOCK_HUNG_SECS" ]; then
+      alert runner_hung "上一輪（pid ${_pid}）已經跑了 ${_age} 秒還沒結束，例行更新停住。請確認它在做什麼，必要時結束它並移除 ${LOCK}"
+    else
+      log "更新檢查已有執行者（pid ${_pid}，${_age} 秒），這輪跳過"
+    fi
+    exit 0
+  fi
+  # 執行者不在了：pid 查不到、或根本沒有 owner 檔（舊格式的鎖）。等一小段時間再回收，避開
+  # 「別人剛 mkdir、還沒寫 owner」的那幾毫秒。
+  if [ "$_age" -lt "$LOCK_STALE_SECS" ]; then
+    log "鎖剛建立（${_age} 秒）但讀不到執行者，這輪跳過"
+    exit 0
+  fi
+  rm -rf "$LOCK" 2>/dev/null
+  if take_lock; then
+    log "清掉殘留鎖（執行者 ${_pid:-未知} 已不在，鎖存在 ${_age} 秒）並接手這一輪"
+  else
+    alert stale_lock "殘留鎖 ${LOCK} 清不掉（執行者 ${_pid:-未知} 已不在），例行更新停住。請人工確認沒有執行者後移除它"
+    exit 0
+  fi
+fi
 log "== check"
 
 # 觸發條件有三個：整點的例行檢查、**累積夠多重建申請**（使用者 2026-09-14），或**最早一筆申請已經等太久**
@@ -221,7 +269,8 @@ if d["owner"] == sys.argv[2]:
     if not isinstance(d["id"], str) or not d["id"] or not isinstance(d["commit"], str) or not d["commit"]: sys.exit(1)
     print(d["id"], d["commit"])
 ' "$APPROVAL_STATE" "$OWNER" 2>/dev/null) || {
-    log "核准狀態檔損毀，交 AGM 檢查，這輪不派"; exit 0;
+    alert state_corrupt "核准狀態檔 ${APPROVAL_STATE} 讀不出 id／commit，例行更新停住。請人工看過內容後修好或刪掉它"
+    exit 0;
   }
   if [ -n "$STATE_LINE" ]; then
     OLD_ID=${STATE_LINE%% *}
@@ -277,7 +326,8 @@ os.replace(path+".tmp",path)
   SUP_ARGS=()
 fi
 
-STATUS=$("$AGM" --compact approval list 2>/dev/null | APPROVAL="$APPROVAL" python3 -c '
+# 先用 `--id` 查（清單只回最新 100 筆，舊的那筆會被擠出去）；舊的 CLI 不認得就退回整份清單。
+STATUS=$("$AGM" --compact approval list --id "$APPROVAL" 2>/dev/null | APPROVAL="$APPROVAL" python3 -c '
 import datetime,json,os,sys
 rows=json.load(sys.stdin)["approvals"]
 if not isinstance(rows,list): sys.exit(1)
@@ -288,7 +338,25 @@ if a.get("expires_at") and status in ("pending","approved"):
     expiry=datetime.datetime.fromisoformat(a["expires_at"].replace("Z","+00:00"))
     if expiry <= datetime.datetime.now(datetime.timezone.utc): status="expired"
 print(status)
-' 2>/dev/null) || { log "無法確認核准 ${APPROVAL}，這輪不派"; exit 0; }
+' 2>/dev/null) || STATUS=""
+if [ -z "$STATUS" ]; then
+  STATUS=$("$AGM" --compact approval list 2>/dev/null | APPROVAL="$APPROVAL" python3 -c '
+import datetime,json,os,sys
+rows=json.load(sys.stdin)["approvals"]
+if not isinstance(rows,list): sys.exit(1)
+a=next((a for a in rows if a["id"]==os.environ["APPROVAL"]),None)
+if a is None: sys.exit(1)
+status=a["status"]
+if a.get("expires_at") and status in ("pending","approved"):
+    expiry=datetime.datetime.fromisoformat(a["expires_at"].replace("Z","+00:00"))
+    if expiry <= datetime.datetime.now(datetime.timezone.utc): status="expired"
+print(status)
+' 2>/dev/null) || STATUS=""
+fi
+if [ -z "$STATUS" ]; then
+  alert approval_missing "查不到核准 ${APPROVAL}（狀態檔 ${APPROVAL_STATE} 指著它），例行更新停住。請確認那筆核准還在不在，不在就刪掉狀態檔讓它重新申請"
+  exit 0
+fi
 case "$STATUS" in
   expired|consumed|superseded)
     rm -f "$APPROVAL_STATE"

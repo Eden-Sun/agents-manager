@@ -1498,6 +1498,10 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
 - 條件持續超過門檻才寫入（計時在記憶體，重啟重算——寧可晚開不重複開）；開啟與恢復各推一則 inbox，中間只更新 `occurrences`；恢復後再壞是新的一筆。
   例外 `notify_exhausted`：它說的是巡檢的通知送不出去，推給巡檢等於送進壞掉的那條路（事件又會用盡、再開一筆）。協調者建立時推給**協調者**（佇列沒有次數上限，不會遞迴）；沒有協調者就只留在 UI 與 `system_health`，不入 inbox。
 - `assignment_undelivered` 獨立一條：每次重試 `defer` 會推 `updated_at`，stalled 看不到它。被拒的真正理由（`bot has no active run`、`needs_login`）記在 `error`。
+- **排程腳本卡住**：`scripts/ops/*` 停住而且自己解不開時走 `POST /api/supervisor/ops-alerts`，寫一則 inbox `ops_alert`（巡檢收、叫醒），
+  同 `source`+`reason` 每小時最多一則。以前那幾支只寫自己的 log 就 `exit 0`——正式 daemon 從此不再自動換版而沒有任何人知道（review 2026-09-16 c1 M1）。
+  `daemon-update-kick.sh` 的鎖改成帶 pid 與時間：執行者不在了（強制關機、SIGKILL）就回收並接手這一輪；還活著但卡超過 `AGM_LOCK_HUNG_SECS`（3600 秒）才喊人。
+  核准 ID 先用 `approval list --id` 查（清單只回最新 100 筆），查不到與狀態檔壞掉都喊人。
 - 不算故障：使用者停掉的 bot（最後一個 run 是 `stopped`）、等使用者回答的 blocked、短暫排隊、AGM 自己的 idle/busy。
   一鍵重啟停掉了 bot 卻沒能開回來（start 在前置檢查就失敗、沒建新 run）時，剛停掉的 run 改記 `exited`，不算使用者停的。量不到回 `unknown`，不併進 `healthy`。全部走 30 秒 cheap probe。
   探針的查詢出錯（例如 schema 漂移）時，它那一類 incident 不開也不解，`system_health` 回 `unknown` 並列 `blind_probes`（上一輪沒跑起來的探針；真的有 degraded／critical 時照舊取較嚴重者）。
