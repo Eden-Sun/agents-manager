@@ -567,6 +567,48 @@ pub async fn get_sanitized_state(State(app): State<Arc<App>>) -> Result<Json<Val
     Ok(Json(super::sanitized_state(&app).await?))
 }
 
+#[derive(Deserialize)]
+pub struct OpsAlertIn {
+    /// 哪一支排程腳本（`daemon-update-kick` 之類）。
+    pub source: String,
+    /// 卡在什麼上（`stale_lock`、`approval_missing`、`state_corrupt`…）。
+    pub reason: String,
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
+/// 例行維運腳本**停住了**，而且它自己解不開：寫一則 durable inbox 事件。
+///
+/// 那幾支 kick 腳本遇到殘留鎖、狀態檔壞掉、核准 ID 查不到時只能寫進自己的 log 然後 `exit 0`——
+/// 沒有 inbox 事件、沒有 incident、health 也不變，正式 daemon 從此不再自動換版而沒有人知道
+/// （review 2026-09-16 c1 M1）。這支就是它們喊人的入口：巡檢收、叫醒。
+///
+/// event_key 帶小時格：每小時最多一則（`push_inbox` 是 INSERT OR IGNORE），五分鐘一輪的腳本
+/// 不會把同一件事灌滿 inbox；換一個 reason 就是另一則。
+pub async fn post_ops_alert(State(app): State<Arc<App>>, Json(b): Json<OpsAlertIn>) -> Result<Json<Value>, LcError> {
+    let slug = |s: &str| -> Option<String> {
+        let s = s.trim();
+        (!s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))).then(|| s.to_string())
+    };
+    let source = slug(&b.source).ok_or_else(|| LcError::Bad("source must be 1-64 chars of [A-Za-z0-9._-]".into()))?;
+    let reason = slug(&b.reason).ok_or_else(|| LcError::Bad("reason must be 1-64 chars of [A-Za-z0-9._-]".into()))?;
+    let detail: String = b.detail.unwrap_or_default().trim().chars().take(2000).collect();
+    let hour = crate::db::now().get(..13).unwrap_or_default().to_string();
+    let key = format!("ops_alert:{source}:{reason}:{hour}");
+    let payload = json!({
+        "source": source,
+        "reason": reason,
+        "detail": detail,
+        "action": "這支排程腳本已經停住，自己解不開：照 detail 處理（例如確認沒有執行者後移除殘留鎖），處理完 ack",
+    });
+    let id = store::push_inbox(&app.db, &key, "ops_alert", None, None, None, &payload).await.map_err(up)?;
+    if id.is_some() {
+        tracing::warn!(source, reason, detail, "a scheduled ops script reported that it is stuck");
+        app.emit("supervisor_changed", json!({"ops_alert": key})).await;
+    }
+    Ok(Json(json!({"queued": id.is_some(), "inbox_event_id": id, "event_key": key})))
+}
+
 // ------------------------------------------------------------------------- remote
 
 /// The phone entry point: what is claimed, on what evidence, and when it stops counting.
@@ -964,8 +1006,19 @@ pub async fn post_approval_decision(
     Ok(Json(out))
 }
 
-pub async fn get_approvals(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
-    let rows = store::approvals(&app.db, 100).await.map_err(up)?;
+#[derive(Deserialize, Default)]
+pub struct ApprovalQuery {
+    /// 只查這一筆。清單本身只回最新 100 筆，被擠出去之後排程腳本就查不到自己那筆核准，
+    /// 每一輪都停在「無法確認核准」（review 2026-09-16 c1 M1）。
+    #[serde(default)]
+    pub id: Option<String>,
+}
+
+pub async fn get_approvals(State(app): State<Arc<App>>, Query(q): Query<ApprovalQuery>) -> Result<Json<Value>, LcError> {
+    let rows = match q.id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(id) => store::approval(&app.db, id).await.map_err(up)?.into_iter().collect(),
+        None => store::approvals(&app.db, 100).await.map_err(up)?,
+    };
     // 決定歷程跟著回：核准列只有最後一個狀態，「誰核准的、後來被誰撤銷」要查得到。
     let mut history = store::approval_decisions(&app.db).await.map_err(up)?;
     let out: Vec<Value> = rows
@@ -1525,7 +1578,7 @@ mod approval_decision_tests {
         let out = decide(&app, &id, "revoke", "AGM:patrol").await.unwrap().0;
         assert_eq!(out["status"], "revoked");
         assert_eq!(out["decided_from"], "approved");
-        let listed = get_approvals(State(app.clone())).await.unwrap().0;
+        let listed = get_approvals(State(app.clone()), Query(ApprovalQuery::default())).await.unwrap().0;
         let decisions = listed["approvals"][0]["decisions"].as_array().cloned().unwrap_or_default();
         let pairs: Vec<(String, String)> = decisions
             .iter()
@@ -1569,7 +1622,7 @@ mod approval_decision_tests {
         decide(&app, &id, "deny", "AGM:patrol").await.unwrap();
         let again = decide(&app, &id, "deny", "AGM:patrol").await.unwrap().0;
         assert_eq!(again["idempotent"], json!(true));
-        let listed = get_approvals(State(app.clone())).await.unwrap().0;
+        let listed = get_approvals(State(app.clone()), Query(ApprovalQuery::default())).await.unwrap().0;
         assert_eq!(listed["approvals"][0]["decisions"].as_array().unwrap().len(), 1, "重試不留第二筆歷程");
     }
 }

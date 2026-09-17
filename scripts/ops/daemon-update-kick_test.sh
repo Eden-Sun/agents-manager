@@ -194,7 +194,9 @@ bash "$SCRIPT"
 : > "$AGM_DIR/calls.log"
 export STUB_APPROVAL_LIST='{"approvals":null}'
 bash "$SCRIPT"
-check "核准讀取失敗會停住" "無法確認核准" "$AGM_DIR/daemon-update.log"
+check "核准讀取失敗會停住" "ALERT approval_missing" "$AGM_DIR/daemon-update.log"
+# 只寫 log 會永久靜默停住（review 2026-09-16 c1 M1）：要推一則 durable 事件給 AGM。
+check "核准查不到會喊人" "ops-alert --source test-owner --reason approval_missing" "$AGM_DIR/calls.log"
 check_no "不拿新申請繞過讀取錯誤" "approval request" "$AGM_DIR/calls.log"
 check_no "讀取錯誤不取租約" "lease acquire" "$AGM_DIR/calls.log"
 teardown
@@ -202,9 +204,39 @@ teardown
 # 13. Overlapping invocations stop before making any API mutations.
 setup
 mkdir "$AGM_DIR/daemon-update.lock"
+printf '%s %s\n' "$$" "$(date +%s)" > "$AGM_DIR/daemon-update.lock/owner"   # $$ = 這支測試，command 含 daemon-update-kick
 bash "$SCRIPT"
-check "重疊執行停止" "已有執行者或殘留鎖" "$AGM_DIR/daemon-update.log"
+check "重疊執行停止" "已有執行者" "$AGM_DIR/daemon-update.log"
 check_no "重疊執行不申請" "approval request" "$AGM_DIR/calls.log"
+check_no "重疊執行不喊人" "ops-alert" "$AGM_DIR/calls.log"
+teardown
+
+# 13b. 殘留鎖（執行者已經不在：強制關機、SIGKILL）：回收後照常做這一輪，不再永久停住。
+setup
+mkdir "$AGM_DIR/daemon-update.lock"
+printf '%s %s\n' 999999 "$(date +%s)" > "$AGM_DIR/daemon-update.lock/owner"   # 不存在的 pid
+touch -t 202601010000 "$AGM_DIR/daemon-update.lock"                           # 而且已經放很久
+bash "$SCRIPT"
+check "殘留鎖被回收" "清掉殘留鎖" "$AGM_DIR/daemon-update.log"
+check "回收後照常派工" "已派工" "$AGM_DIR/daemon-update.log"
+teardown
+
+# 13c. 執行者還活著但卡了太久：不搶它的鎖，改喊人。
+setup
+mkdir "$AGM_DIR/daemon-update.lock"
+printf '%s %s\n' "$$" "$(date +%s)" > "$AGM_DIR/daemon-update.lock/owner"
+touch -t 202601010000 "$AGM_DIR/daemon-update.lock"
+AGM_LOCK_HUNG_SECS=60 bash "$SCRIPT"
+check "卡住的執行者會喊人" "ops-alert --source test-owner --reason runner_hung" "$AGM_DIR/calls.log"
+check_no "卡住時不搶鎖" "approval request" "$AGM_DIR/calls.log"
+teardown
+
+# 13d. 核准狀態檔壞掉：一樣喊人，不自己繞過。
+setup
+printf '%s' 'not json' > "$AGM_DIR/daemon-update.approval.json"
+bash "$SCRIPT"
+check "狀態檔壞掉會喊人" "ops-alert --source test-owner --reason state_corrupt" "$AGM_DIR/calls.log"
+check_no "狀態檔壞掉不申請" "approval request" "$AGM_DIR/calls.log"
 teardown
 
 # 14. The daemon filtered AGM and builder activity; consume its result and forward both IDs.

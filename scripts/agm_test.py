@@ -734,6 +734,19 @@ class MiscCommandTest(CliCase):
         self.assertEqual(self.ok("inbox")["events"][0]["id"], "e1")
         self.assertTrue(self.ok("ack", "e1")["ok"])
 
+    def test_ops_alert_and_approval_lookup_by_id(self):
+        """排程腳本卡住時喊得到人，而且查得到被清單擠掉的那筆核准（review 2026-09-16 c1 M1）。"""
+        FakeDaemon.routes["POST /api/supervisor/ops-alerts"] = (200, {"queued": True, "inbox_event_id": "e9"})
+        out = self.ok("ops-alert", "--source", "daemon-update-kick", "--reason", "stale_lock", "--detail", "鎖清不掉")
+        self.assertEqual(out["inbox_event_id"], "e9")
+        body = [r["body"] for r in FakeDaemon.seen if r["method"] == "POST"][-1]
+        self.assertEqual((body["source"], body["reason"], body["detail"]), ("daemon-update-kick", "stale_lock", "鎖清不掉"))
+
+        # 清單只回最新 100 筆，舊的那筆要用 `--id` 查（query string 走在同一支端點上）。
+        FakeDaemon.routes["GET /api/supervisor/approvals"] = (200, {"approvals": [{"id": "ap-1", "status": "approved"}]})
+        self.assertEqual(self.ok("approval", "list", "--id", "ap-1")["approvals"][0]["status"], "approved")
+        self.assertEqual([r["path"] for r in FakeDaemon.seen if r["method"] == "GET"][-1], "/api/supervisor/approvals?id=ap-1")
+
     def test_supervisor_actions(self):
         for act in ("setup", "start", "stop", "fallback"):
             FakeDaemon.routes[f"POST /api/supervisor/{act}"] = (200, {"status": act})

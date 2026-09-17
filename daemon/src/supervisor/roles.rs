@@ -202,8 +202,8 @@ fn known_route(kind: &str, payload: &Value, review_role: Option<&str>) -> Option
         "incident_opened" | "incident_resolved" if payload.pointer("/incident/kind").and_then(Value::as_str) == Some("notify_exhausted") => {
             r(Role::Responder, kind == "incident_opened")
         }
-        // 系統層的故障：巡檢收、叫醒。
-        "incident_opened" | "responder_watchdog_gave_up" | "responder_bot_missing" | "bot_restart_failed"
+        // 系統層的故障：巡檢收、叫醒。`ops_alert` 是排程腳本自己喊的（例行更新卡住），也是巡檢的事。
+        "ops_alert" | "incident_opened" | "responder_watchdog_gave_up" | "responder_bot_missing" | "bot_restart_failed"
         | "supervisor_restart_retry" | "agm_cli_stale" | "pane_unowned" | "pane_orphaned" => r(Role::Patrol, true),
         // 恢復不叫醒人：開的那一筆已經叫過，關掉只要記下來。
         "incident_resolved" => r(Role::Patrol, false),
@@ -739,7 +739,7 @@ mod tests {
         }
         assert_eq!(route("assignment_undeliverable", &p, None), Route { role: Role::Responder, wake: true }, "送不進去要驗收角色決定");
         assert_eq!(route("assignment_undeliverable", &p, Some("patrol")), Route { role: Role::Patrol, wake: true });
-        for kind in ["incident_opened", "bot_restart_failed", "supervisor_restart_retry", "responder_watchdog_gave_up", "brand_new_kind"] {
+        for kind in ["incident_opened", "bot_restart_failed", "supervisor_restart_retry", "responder_watchdog_gave_up", "ops_alert", "brand_new_kind"] {
             assert_eq!(route(kind, &p, None), Route { role: Role::Patrol, wake: true }, "{kind}");
         }
         // 巡檢自己倒了：送給巡檢等於沒送。活著的協調者收（review 2026-09-16 c1 M2、L4）。

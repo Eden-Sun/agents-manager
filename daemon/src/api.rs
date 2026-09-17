@@ -184,6 +184,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/supervisor/inbox", get(crate::supervisor::api::get_inbox))
         .route("/supervisor/inbox/{id}/ack", post(crate::supervisor::api::post_inbox_ack))
         .route("/supervisor/state", get(crate::supervisor::api::get_sanitized_state))
+        // 排程腳本卡住時喊人（SPEC §18.9）：只寫一則 durable inbox 事件。
+        .route("/supervisor/ops-alerts", post(crate::supervisor::api::post_ops_alert))
         .route("/supervisor/evidence", get(crate::supervisor_evidence::search))
         .merge(crate::supervisor::responder_api::routes())
         .route("/bots/{id}/restore", post(restore_bot))

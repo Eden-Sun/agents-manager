@@ -632,6 +632,9 @@ def cmd_approval(client: Client, cfg: dict, args) -> object:
     不會變成兩筆讓 AGM 一筆核一筆駁（2026-09-16 的事故）。`list` 的輸出帶 `client_request_id` 可以對帳。
     """
     if args.op == "list":
+        # `--id`：清單只回最新 100 筆，排程腳本要確認的那筆可能早就被擠出去了。
+        if getattr(args, "id", None):
+            return client.get("/api/supervisor/approvals", {"id": args.id})
         return client.get("/api/supervisor/approvals")
     if args.op == "request":
         if not (args.requester and args.purpose and args.scope):
@@ -827,6 +830,18 @@ def cmd_responder(client: Client, cfg: dict, args) -> object:
 
 def cmd_ack(client: Client, cfg: dict, args) -> object:
     return client.post(f"/api/supervisor/inbox/{urllib.parse.quote(args.event_id)}/ack", {})
+
+
+def cmd_ops_alert(client: Client, cfg: dict, args) -> object:
+    """排程腳本卡住了、自己解不開：推一則 durable 通知給 AGM 巡檢。
+
+    只給 `scripts/ops/` 那幾支 kick 腳本用。同一個 (source, reason) 每小時最多一則，
+    所以五分鐘一輪的腳本每輪照喊也不會灌滿 inbox。
+    """
+    body = {"source": args.source, "reason": args.reason}
+    if args.detail:
+        body["detail"] = args.detail
+    return client.post("/api/supervisor/ops-alerts", body)
 
 
 def cmd_handoff(client: Client, cfg: dict, args) -> object:
@@ -1102,6 +1117,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("approval", help="重建／重啟核准：request / decide / list")
     s.add_argument("op", choices=["request", "decide", "list"])
     s.add_argument("approval_id", nargs="?", help="decide 的目標")
+    s.add_argument("--id", help="list：只查這一筆（清單只回最新 100 筆，舊的要用這個查）")
     s.add_argument("--requester", help="request：申請者（bot id 或名字）")
     s.add_argument("--purpose", choices=["rebuild", "restart"], help="request：要做什麼")
     s.add_argument("--scope", help="request：會動到什麼")
@@ -1194,6 +1210,12 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("ack", help="確認已處理一則通知（帶角色 token 時只能 ack 自己角色收的）")
     s.add_argument("event_id")
     s.set_defaults(func=cmd_ack)
+
+    s = sub.add_parser("ops-alert", help="排程腳本卡住時喊人：推一則 durable 通知給巡檢（同 source+reason 每小時一則）")
+    s.add_argument("--source", required=True, help="哪一支腳本（例如 daemon-update-kick）")
+    s.add_argument("--reason", required=True, help="卡在什麼上（例如 stale_lock、approval_missing）")
+    s.add_argument("--detail", help="人看得懂的細節：要怎麼處理")
+    s.set_defaults(func=cmd_ops_alert)
 
     s = sub.add_parser("handoff", help="讀管理摘要；帶 --summary/--summary-file 就是寫入")
     s.add_argument("--summary")

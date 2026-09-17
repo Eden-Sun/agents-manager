@@ -36,6 +36,8 @@ approval，所以 approval 表就是唯一真相。數不出來（端點壞了�
 | `AGM_REBUILD_THRESHOLD` | `3` | 累積幾個重建申請就不等整點，立刻檢查 |
 | `AGM_REBUILD_MAX_WAIT_MIN` | `30` | 最早一筆重建申請等超過幾分鐘就不等整點（申請沒湊滿也一樣） |
 | `AM_MAINTENANCE_ESCALATE_MINS`（daemon 端） | `30` | 已核准的窗口等超過幾分鐘，daemon 就縮小封鎖面：思考中的 bot 不再擋，只擋送達臨界區／租約／讀不到畫面（SPEC §18.10）。設在 daemon 的環境，不是這支腳本 |
+| `AGM_LOCK_STALE_SECS` | `120` | 鎖沒有可查的執行者時，超過這麼久就當殘留回收 |
+| `AGM_LOCK_HUNG_SECS` | `3600` | 執行者還活著但卡了這麼久：推 `ops_alert` 喊人（不搶鎖） |
 | `AGM_TEST_MINUTE` | （無） | 只給隔離測試用：假裝現在是第幾分鐘 |
 
 跟 2026-09-12 之前那份的差別：
@@ -50,7 +52,10 @@ approval，所以 approval 表就是唯一真相。數不出來（端點壞了�
    `origin/main` 動了但 `build-inputs` 路徑沒變（docs-only）：沿用原核准，acquire 的 `--commit` 用核准那一顆，不為了建出一樣的東西再叫醒協調者。
    真的動到要建的東西：新申請帶 `--supersedes <舊 id>`，daemon 把舊的標 `superseded`、等待時間接過去（升級計時不因為 main 動了就歸零，SPEC §18.10）；舊的 `bin/agm` 不認得這個旗標時照舊開新的一筆。
 7. `lease_token` **不進派工正文**：寫進 `daemon-update.lease-token`（權限 600），正文只給 `--lease-token "$(cat …)"`。正文會出現在 assignments API、建置 child 的對話紀錄與這份 log。
-5. `daemon-update.lock` 防止腳本重疊執行。若程序被強制終止留下鎖，由 AGM 確認沒有執行者後移除。核准狀態檔損毀或 ID 不在查詢結果中也交 AGM 檢查，不自動繞過。
+5. `daemon-update.lock` 防止腳本重疊執行，鎖裡寫 pid 與時間。執行者已經不在（強制關機、斷電、SIGKILL）就**自己回收**並接手這一輪；
+   還活著但卡超過 `AGM_LOCK_HUNG_SECS`（預設 3600 秒）不搶它的鎖，改推一則 `ops_alert` 給 AGM。核准狀態檔損毀、或核准 ID 查不到
+   （先用 `approval list --id` 查，清單只回最新 100 筆）一樣停住並推 `ops_alert`，不自動繞過——以前這些只寫 log 就 `exit 0`，
+   換版流程永久、靜默地停住（review3 c1 M1）。
 6. AGM 雙角色（SPEC §18.15）：idle 檢查另外排除協調者（`agm responder show` 有 `bot_id` 時）；runtime.json 有 `role` 才帶 `assign --review-by <role>`
    （巡檢目錄＝`patrol`，更新結果回巡檢驗收）。舊部署兩者都沒有，行為照舊。
 
