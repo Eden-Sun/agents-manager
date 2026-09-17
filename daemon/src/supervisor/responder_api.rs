@@ -54,12 +54,12 @@ async fn post_setup(State(app): State<Arc<App>>, body: Option<Json<SetupIn>>) ->
     Ok(Json(out))
 }
 
+/// 先寫「要它跑」再啟動（review 2026-09-16 c3 M1）：start 失敗的話 desired 還是 0，看門狗不管、
+/// 健康也說 healthy，而 bot 的申請已經排給它——沒有任何人會再試。失敗交給看門狗的有界重試。
+/// 順序與「寫不進去就什麼都不做」住在 `responder::start_requested`，不由這裡維護（issue #84）。
 async fn post_start(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
     let _g = super::lock().await;
-    // 先寫「要它跑」再啟動（review 2026-09-16 c3 M1）：start 失敗的話 desired 還是 0，看門狗不管、
-    // 健康也說 healthy，而 bot 的申請已經排給它——沒有任何人會再試。失敗交給看門狗的有界重試。
-    roles::set_desired_running(&app.db, Role::Responder, true).await.map_err(up)?;
-    responder::start(&app, None).await?;
+    responder::start_requested(&app).await?;
     Ok(Json(responder::status_json(&app).await?))
 }
 
@@ -74,6 +74,39 @@ mod tests {
         super::super::bot_requests::flow_tests::configure_responder(&app).await;
         assert!(post_start(State(app.clone())).await.is_err(), "測試環境沒有 herdr，start 一定失敗");
         assert_eq!(roles::get(&app.db, Role::Responder).await.unwrap().desired_running, 1);
+    }
+
+    /// 還沒 setup 就 start：回 not_configured，不留下一個沒有 bot 可以對應的「要它跑」（issue #84）。
+    #[tokio::test]
+    async fn a_start_without_a_configured_responder_leaves_no_dangling_intent() {
+        let app = super::super::bot_requests::flow_tests::app().await;
+        let err = post_start(State(app.clone())).await.unwrap_err();
+        assert!(format!("{err:?}").contains("responder_not_configured"), "{err:?}");
+        assert_eq!(roles::get(&app.db, Role::Responder).await.unwrap().desired_running, 0);
+    }
+
+    /// stop：意圖寫不進去就**不要停**，也不要回成功——停了也會被看門狗拉回來（issue #84）。
+    #[tokio::test]
+    async fn a_stop_whose_intent_write_fails_neither_stops_nor_reports_success() {
+        let app = super::super::bot_requests::flow_tests::app().await;
+        super::super::bot_requests::flow_tests::configure_responder(&app).await;
+        roles::set_desired_running(&app.db, Role::Responder, true).await.unwrap();
+        sqlx::query(
+            "CREATE TRIGGER role_desired_running_unwritable BEFORE UPDATE OF desired_running ON supervisor_roles
+             BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END",
+        )
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        let err = post_stop(State(app.clone())).await.unwrap_err();
+
+        assert!(format!("{err:?}").contains("could not persist desired_running"), "{err:?}");
+        assert_eq!(
+            roles::get(&app.db, Role::Responder).await.unwrap().desired_running,
+            1,
+            "意圖沒動：看門狗讀到的還是使用者上一次的決定",
+        );
     }
 }
 

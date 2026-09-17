@@ -45,32 +45,17 @@ pub async fn post_setup(State(app): State<Arc<App>>) -> Result<Json<Value>, LcEr
     Ok(Json(out))
 }
 
+/// 啟停的順序（意圖先寫、寫失敗就不做副作用）住在 `super::start_requested` /
+/// `super::stop_requested`，不由每個呼叫端各自維護（issue #84）。
 pub async fn post_start(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
     let _g = super::lock().await;
-    // Choose the configured fallback before launching the CLI, so a low Fable bucket starts
-    // directly on Opus instead of briefly opening the wrong session.
-    if let Err(e) = controller::apply_quota_policy(&app).await {
-        tracing::warn!(error = ?e, "quota policy during start failed");
-    }
-    super::start_manager(&app, None).await?;
-    // From here on the manager is *supposed* to be up: if it dies, the watchdog brings it back.
-    let _ = store::set_desired_running(&app.db, true).await;
+    super::start_requested(&app).await?;
     Ok(Json(super::status_json(&app).await?))
 }
 
 pub async fn post_stop(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
     let _g = super::lock().await;
-    let bot = super::manager_bot(&app)
-        .await?
-        .ok_or_else(|| LcError::conflict("supervisor is not set up", json!({"reason": "not_configured"})))?;
-    // Written *before* the stop: a watchdog tick between the two must not read "wanted, but
-    // stopped" and start it straight back up.
-    let _ = store::set_desired_running(&app.db, false).await;
-    crate::lifecycle::stop_bot(&app, &bot.id).await?;
-    // A stopped CLI takes its Remote Control session with it; claiming otherwise would send
-    // the user to a dead URL on their phone.
-    let _ = store::set_remote(&app.db, "unknown", None).await;
-    app.emit("supervisor_changed", json!({"stopped": true})).await;
+    super::stop_requested(&app).await?;
     Ok(Json(super::status_json(&app).await?))
 }
 
@@ -1857,5 +1842,97 @@ mod review_boundary_tests {
         }
         app.db.close().await;
         std::fs::remove_dir_all(&app.data_dir).unwrap();
+    }
+}
+
+/// issue #84：`desired_running` 是看門狗跨重啟唯一的憑據，所以它的寫入是 start／stop 的前置條件，
+/// 不是順手做的副作用。寫不進去就什麼都不做並回明確的錯誤，不能回 200 讓使用者以為停好了。
+#[cfg(test)]
+mod desired_running_tests {
+    use super::*;
+    use crate::supervisor::bot_requests::flow_tests;
+
+    /// `UPDATE supervisors SET desired_running=…` 一律失敗（磁碟滿、SQLite 鎖逾時）。
+    async fn break_intent_writes(app: &Arc<App>) {
+        sqlx::query(
+            "CREATE TRIGGER desired_running_unwritable BEFORE UPDATE OF desired_running ON supervisors
+             BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END",
+        )
+        .execute(&app.db)
+        .await
+        .unwrap();
+    }
+
+    async fn wanted(app: &Arc<App>) -> i64 {
+        store::get_or_init(&app.db).await.unwrap().desired_running
+    }
+
+    /// Stop：意圖寫不進去就**不要停**。舊行為是吞掉錯誤照樣停、回 200，看門狗下一個 tick 讀到的還是
+    /// 「要它跑」，於是使用者剛停掉的東西自己活回來。
+    #[tokio::test]
+    async fn a_stop_whose_intent_write_fails_neither_stops_nor_reports_success() {
+        let app = flow_tests::app().await;
+        store::set_desired_running(&app.db, true).await.unwrap();
+        // 停掉時會被改寫成 `unknown`：拿它當「副作用有沒有跑過」的探針。
+        sqlx::query("UPDATE supervisors SET remote_status='requested' WHERE id=?")
+            .bind(store::SUPERVISOR_ID)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        break_intent_writes(&app).await;
+
+        let err = post_stop(State(app.clone())).await.unwrap_err();
+
+        let msg = format!("{err:?}");
+        assert!(msg.contains("could not persist desired_running"), "錯誤要講清楚是哪一步壞了：{msg}");
+        assert_eq!(wanted(&app).await, 1, "意圖沒動：看門狗讀到的還是使用者上一次的決定");
+        let remote: String = sqlx::query_scalar("SELECT remote_status FROM supervisors WHERE id=?")
+            .bind(store::SUPERVISOR_ID)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(remote, "requested", "停的那段副作用一步都沒跑，原樣重試是安全的");
+    }
+
+    /// Start：意圖**先寫**。啟動本身失敗（這裡是測試環境沒有 herdr）時 `desired_running` 照樣留著，
+    /// 看門狗會接手重試、健康那格也看得到；舊行為是啟動成功才寫，於是失敗的 start 留下「沒人要它跑」。
+    #[tokio::test]
+    async fn a_start_records_the_intent_before_launching_so_a_failed_start_is_still_wanted() {
+        let app = flow_tests::app().await;
+        assert_eq!(wanted(&app).await, 0);
+
+        assert!(post_start(State(app.clone())).await.is_err(), "測試環境沒有 herdr，啟動一定失敗");
+
+        assert_eq!(wanted(&app).await, 1, "意圖在啟動之前就寫下去了，看門狗接得下去");
+    }
+
+    /// Start：意圖寫不進去就一個 pane 都不開，並且說清楚是持久化失敗，不是「AGM 起不來」。
+    #[tokio::test]
+    async fn a_start_whose_intent_write_fails_launches_nothing() {
+        let app = flow_tests::app().await;
+        break_intent_writes(&app).await;
+
+        let err = post_start(State(app.clone())).await.unwrap_err();
+
+        let msg = format!("{err:?}");
+        assert!(msg.contains("could not persist desired_running"), "{msg}");
+        assert_eq!(wanted(&app).await, 0);
+        assert!(crate::db::active_run(&app.db, "patrol").await.unwrap().is_none(), "什麼都沒啟動");
+    }
+
+    /// 還沒 setup 就 start：回 not_configured，不要留下一個沒有 bot 可以對應的「要它跑」。
+    #[tokio::test]
+    async fn a_start_without_a_configured_manager_leaves_no_dangling_intent() {
+        let app = flow_tests::app().await;
+        sqlx::query("UPDATE supervisors SET bot_id=NULL WHERE id=?")
+            .bind(store::SUPERVISOR_ID)
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        let err = post_start(State(app.clone())).await.unwrap_err();
+
+        assert!(format!("{err:?}").contains("not_configured"), "{err:?}");
+        assert_eq!(wanted(&app).await, 0);
     }
 }

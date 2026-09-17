@@ -341,10 +341,12 @@ pub async fn set_runtime(pool: &SqlitePool, role: Role, identity: &str, model: &
     Ok(())
 }
 
+/// `Ok(())` means the watchdog will read this intent after a restart — nothing else does，
+/// 所以沒寫到任何列一樣是失敗（issue #84，跟 [`crate::supervisor::store::set_desired_running`] 同一個約定）。
 pub async fn set_desired_running(pool: &SqlitePool, role: Role, wanted: bool) -> Result<()> {
     get(pool, role).await?;
     // 人手啟動就是新的一輪：前一次 watchdog 放棄的紀錄與計數一起清掉。
-    sqlx::query(
+    let wrote = sqlx::query(
         "UPDATE supervisor_roles SET desired_running=?, watchdog_attempts=0, watchdog_next_at=NULL,
                 watchdog_gave_up_at=NULL, watchdog_last_error=NULL, updated_at=? WHERE role=?",
     )
@@ -353,6 +355,9 @@ pub async fn set_desired_running(pool: &SqlitePool, role: Role, wanted: bool) ->
     .bind(role.as_str())
     .execute(pool)
     .await?;
+    if wrote.rows_affected() == 0 {
+        anyhow::bail!("desired_running={wanted} matched no {} role row", role.as_str());
+    }
     Ok(())
 }
 

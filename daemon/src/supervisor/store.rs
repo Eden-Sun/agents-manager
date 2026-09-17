@@ -716,8 +716,12 @@ pub async fn set_status_detail(pool: &SqlitePool, detail: Option<&str>) -> Resul
 
 /// `start` → true, `stop` → false. Either one is a fresh decision by the user, so the
 /// watchdog's failure count starts over with it.
+///
+/// `Ok(())` means the watchdog will read this intent after a restart — nothing else does.
+/// 沒有匹配到任何列也算失敗：呼叫端會照這個 `Ok` 去做啟停的副作用，而看門狗讀到的還是舊的意圖
+/// （issue #84）。
 pub async fn set_desired_running(pool: &SqlitePool, wanted: bool) -> Result<()> {
-    sqlx::query(
+    let wrote = sqlx::query(
         "UPDATE supervisors SET desired_running=?, watchdog_attempts=0, watchdog_next_at=NULL,
            watchdog_gave_up_at=NULL, watchdog_last_error=NULL, updated_at=? WHERE id=?",
     )
@@ -726,6 +730,9 @@ pub async fn set_desired_running(pool: &SqlitePool, wanted: bool) -> Result<()> 
     .bind(SUPERVISOR_ID)
     .execute(pool)
     .await?;
+    if wrote.rows_affected() == 0 {
+        anyhow::bail!("desired_running={wanted} matched no supervisor row ({SUPERVISOR_ID})");
+    }
     Ok(())
 }
 
@@ -3077,6 +3084,19 @@ mod tests {
         assert_eq!(done.status, "completed");
         assert_eq!(done.result.as_deref(), Some("done"));
         assert_eq!(open_assignment_count(&p).await.unwrap(), 0, "accepted work leaves the open list");
+    }
+
+    /// 意圖沒寫到任何列一樣是失敗（issue #84）：呼叫端會照這個回傳去做啟停的副作用，而看門狗讀到的
+    /// 還是舊的意圖。`Ok` 的意思必須是「重啟之後看門狗看得到這個決定」。
+    #[tokio::test]
+    async fn an_intent_write_that_matches_no_row_is_an_error_not_a_silent_success() {
+        let p = pool().await;
+        get_or_init(&p).await.unwrap();
+        set_desired_running(&p, true).await.unwrap();
+
+        sqlx::query("DELETE FROM supervisors WHERE id=?").bind(SUPERVISOR_ID).execute(&p).await.unwrap();
+        let err = set_desired_running(&p, false).await.unwrap_err();
+        assert!(format!("{err}").contains("matched no supervisor row"), "{err}");
     }
 
     /// Giving up is reported once, not once per tick (review #31), and a recovery re-arms it so
