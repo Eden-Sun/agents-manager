@@ -325,6 +325,47 @@ class OperatorTests(unittest.TestCase):
         with exclusive(self.s.root / "worker.lock"), contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(ob.cli(["--data-dir", self.tmp.name, "work", "--once"]), 0)
 
+    def test_ego_lite_running_reads_the_process_list_not_a_cli_error_string(self):
+        """GH #65：用行程表跟 daemon 的 memstat 同一段比對，不去猜第三方 CLI 的連線錯誤字串。"""
+        with patch.object(operator.subprocess, "run") as run:
+            run.return_value = subprocess.CompletedProcess([], 0, stdout="1 1 1 /Applications/ego lite.app/Contents/MacOS/ego lite\n", stderr="")
+            self.assertTrue(operator.ego_lite_running())
+            run.return_value = subprocess.CompletedProcess([], 0, stdout="1 1 1 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome\n", stderr="")
+            self.assertFalse(operator.ego_lite_running())
+        with patch.object(operator.subprocess, "run", side_effect=OSError("no ps")):
+            self.assertTrue(operator.ego_lite_running(), "查不出來就別誤擋，照舊往下試")
+
+    def test_browser_not_running_is_reported_before_anything_is_sent(self):
+        """瀏覽器沒開：連 `ego-browser` 都不叫，這筆狀態不變（GH #65：連送都沒送出）。"""
+        self.ask()
+        job = self.s.claim()
+        with patch.object(operator, "ego_lite_running", return_value=False), patch.object(operator, "run_process") as proc:
+            with self.assertRaisesRegex(OBError, operator.BROWSER_NOT_RUNNING_MARK):
+                operator.browser_consult(self.s, job["id"], self.config(), token=job["claim_token"])
+        proc.assert_not_called()
+        self.assertEqual(self.s.get(job["id"])["status"], "running")
+
+    def test_operate_marks_browser_not_running_as_retryable_failed_not_unknown(self):
+        """未送出的單不能被誤判成 `unknown`（那會擋住同 project 的後續單、還得靠 collect 才能解開）。"""
+        self.ask()
+        job = self.s.claim()
+        out = json.dumps({"is_error": True, "result": f"consult 失敗：{operator.BROWSER_NOT_RUNNING_MARK}：ego lite 沒有在跑，請先開啟 ego lite 再重試"})
+        with patch.object(operator, "run_process", return_value=(1, out, "")):
+            operator.operate(self.s, job, self.config())
+        row = self.s.get(job["id"])
+        self.assertEqual(row["status"], "failed", "沒送出的單要能直接 retry，不是走 unknown/collect")
+        self.assertIn("ego lite", row["error"])
+        self.assertIn("開啟", row["error"], "訊息要講得出下一步，不是只有代碼")
+
+    def test_browser_failure_detail_from_stderr_is_not_swallowed(self):
+        """GH #65 初步線索：stderr 以前被丟掉，呼叫端只看得到 code 高不高，分不出到底錯在哪。"""
+        self.ask()
+        job = self.s.claim()
+        with patch.object(operator, "ego_lite_running", return_value=True), \
+                patch.object(operator, "run_process", return_value=(1, "", "Error: connect ECONNREFUSED 127.0.0.1:9333\n")):
+            with self.assertRaisesRegex(OBError, "ECONNREFUSED"):
+                operator.browser_consult(self.s, job["id"], self.config(), token=job["claim_token"])
+
     def test_sonnet_fabricated_answer_is_not_accepted(self):
         self.ask()
         job = self.s.claim()
