@@ -55,6 +55,8 @@ pub(crate) enum Delivered {
 /// * `verified` 只講**證據**——有沒有無損證據證明它進了對方的輸入框／session。
 /// * `auto_resend` 只講**能不能自動重送**——打過字但證不明的那條路重送會重複派工，所以關掉；
 ///   `agent.prompt` 沒有證據但重送是安全的（沒進去才會重送），所以開著。
+///   有證據的（`Submitted`）也關掉：證據就是「它已經進了 session」，stall watchdog 在畫面上找不到它
+///   （長段貼上被 TUI 摺成 `[Pasted text …]`）時再打一次，只會讓 agent 做兩次（review3 c3 M4）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DeliveryRecord {
     /// 寫進 `turns.delivery`（CHECK 只認 pending/ok/unknown/failed）。
@@ -67,7 +69,7 @@ impl Delivered {
     /// `None` = 這個結果不會寫 delivery（`NotAttempted` 的 turn 會被撤回）。
     pub(crate) fn record(&self) -> Option<DeliveryRecord> {
         match self {
-            Delivered::Submitted => Some(DeliveryRecord { stored: "ok", verified: true, auto_resend: true }),
+            Delivered::Submitted => Some(DeliveryRecord { stored: "ok", verified: true, auto_resend: false }),
             Delivered::Handed => Some(DeliveryRecord { stored: "ok", verified: false, auto_resend: true }),
             Delivered::Unverified => Some(DeliveryRecord { stored: "ok", verified: false, auto_resend: false }),
             // unknown 不會被重送（閘門要 delivery=ok），所以不動重送額度。
@@ -1428,8 +1430,8 @@ mod api_tests {
     #[test]
     fn evidence_and_auto_resend_are_recorded_separately() {
         let r = |d: Delivered| d.record().expect("a delivered outcome records something");
-        // 打字＋無損證據：有證據、可重送。
-        assert_eq!(r(Delivered::Submitted), DeliveryRecord { stored: "ok", verified: true, auto_resend: true });
+        // 打字＋無損證據：有證據，而且證據就是「已經進了 session」，重送只會做兩次（review3 c3 M4）。
+        assert_eq!(r(Delivered::Submitted), DeliveryRecord { stored: "ok", verified: true, auto_resend: false });
         // agent.prompt：沒有證據（它回 ok 卻沒送進去過），但沒送到才會重送，所以重送安全。
         assert_eq!(r(Delivered::Handed), DeliveryRecord { stored: "ok", verified: false, auto_resend: true });
         // 打過字、證不明：重送會重複派工，關掉。
