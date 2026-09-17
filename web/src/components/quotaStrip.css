@@ -915,5 +915,7 @@
    倒數（「22h18」）靠右對齊到跟其他列的百分比同一欄。 */
 .quota-bar-row.countdown {
   justify-content: flex-end;
-  min-width: 0;
+  gap: 4px;
+  /* 倒數＋百分比比 38px 的條寬：讓這一列撐開欄寬，不要往左蓋到窗口名（7d／43m）。 */
+  min-width: max-content;
 }
