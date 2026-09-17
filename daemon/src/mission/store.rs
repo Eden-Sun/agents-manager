@@ -383,6 +383,10 @@ pub async fn get(pool: &SqlitePool, id: &str) -> Result<Option<Mission>> {
 }
 
 /// `status`：`open`（含 paused）| `done` | `cancelled` | `all`。新的在前。
+///
+/// 同一毫秒建立的兩筆照**寫入順序**的反序排（`rowid DESC`）：`created_at` 只到毫秒，而 `id` 是 ULID、
+/// 同一毫秒內的亂數段不保證遞增，只用 `created_at DESC` 會讓那兩筆在清單上的前後位置每次重整都可能對調
+/// （同 a4605b2 的事件順序問題）。
 pub async fn list(pool: &SqlitePool, project_id: &str, status: &str, limit: i64) -> Result<Vec<Mission>> {
     let filter = match status {
         "done" => "AND completed_at IS NOT NULL AND cancelled_at IS NULL",
@@ -391,7 +395,7 @@ pub async fn list(pool: &SqlitePool, project_id: &str, status: &str, limit: i64)
         _ => "",
     };
     Ok(sqlx::query_as::<_, Mission>(&format!(
-        "SELECT * FROM missions WHERE project_id = ? {filter} ORDER BY created_at DESC LIMIT ?"
+        "SELECT * FROM missions WHERE project_id = ? {filter} ORDER BY created_at DESC, rowid DESC LIMIT ?"
     ))
     .bind(project_id)
     .bind(limit.clamp(1, 500))
@@ -473,9 +477,9 @@ async fn insert_event(
     Ok(ev)
 }
 
-/// 這個任務的續作（新的在前）。
+/// 這個任務的續作（新的在前）。同一毫秒的兩筆照寫入順序的反序排，理由同 `list`。
 pub async fn children(pool: &SqlitePool, mission_id: &str) -> Result<Vec<Mission>> {
-    Ok(sqlx::query_as::<_, Mission>("SELECT * FROM missions WHERE parent_mission_id = ? ORDER BY created_at DESC")
+    Ok(sqlx::query_as::<_, Mission>("SELECT * FROM missions WHERE parent_mission_id = ? ORDER BY created_at DESC, rowid DESC")
         .bind(mission_id)
         .fetch_all(pool)
         .await?)
@@ -1171,6 +1175,59 @@ mod tests {
     }
 
     /// 舊資料庫升級：1715872 當時的 DDL 建的表 + 一筆資料，migrate 要能跑完且不動到那筆資料。
+    /// 直接塞一列任務，`id`／`crid`／`created_at` 都由呼叫端決定（要造出「同一毫秒、ULID 反序」）。
+    /// 兩筆都先結案，否則同一個 parent 的第二筆會撞到 `missions_one_open_child`。
+    async fn insert_mission_at(pool: &SqlitePool, id: &str, crid: &str, parent: Option<&str>, text: &str, at: &str) {
+        sqlx::query(
+            "INSERT INTO missions (id, project_id, client_request_id, text, delivery_mode, executor_kind, on_5h_limit,
+                                   max_rounds, parent_mission_id, created_at, updated_at, completed_at)
+             VALUES (?,'p1',?,?,'pr','claude','wait',2,?,?,?,?)",
+        )
+        .bind(id)
+        .bind(crid)
+        .bind(text)
+        .bind(parent)
+        .bind(at)
+        .bind(at)
+        .bind(at)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// 同一毫秒建立的兩筆任務，清單上的前後＝寫入順序的反序（新的在前），不看 ULID 的亂數段。
+    ///
+    /// 這裡**故意先拿掉 `missions_project`**：留著它的時候 SQLite 會反向掃那個索引，而索引裡
+    /// `(project_id, created_at)` 相同的項目本來就照 rowid 排，於是沒有第二鍵也「剛好」是對的——
+    /// 那是選到那個計畫的副作用，不是 SQL 給的保證。換一種計畫（這裡改走 `missions_crid`）就原形畢露。
+    /// 所以這條測的是「順序由 SQL 決定，不是由 planner 挑到哪個索引決定」。
+    #[tokio::test]
+    async fn missions_written_in_the_same_millisecond_keep_their_order() {
+        let p = pool().await;
+        sqlx::query("DROP INDEX missions_project").execute(&p).await.unwrap();
+        let at = "2026-09-17T12:00:00.000Z";
+        // crid 照寫入順序遞增（改走 crid 索引之後，掃描順序＝寫入順序）；id 則故意跟寫入順序相反。
+        for (id, crid, text) in
+            [("01ZZZZZZZZZZZZZZZZZZZZZZZZ", "a", "先寫的"), ("01AAAAAAAAAAAAAAAAAAAAAAAA", "b", "後寫的")]
+        {
+            insert_mission_at(&p, id, crid, None, text, at).await;
+        }
+        let listed: Vec<String> = list(&p, "p1", "all", 50).await.unwrap().into_iter().map(|m| m.text).collect();
+        assert_eq!(listed, vec!["後寫的", "先寫的"], "新的在前＝寫入順序的反序，不是照 ULID 或掃描順序");
+    }
+
+    /// 續作清單同理：同一個 parent、同一毫秒開出來的兩筆，新的在前。
+    #[tokio::test]
+    async fn children_written_in_the_same_millisecond_keep_their_order() {
+        let p = pool().await;
+        let at = "2026-09-17T12:00:00.000Z";
+        for (id, text) in [("01ZZZZZZZZZZZZZZZZZZZZZZZZ", "先寫的"), ("01AAAAAAAAAAAAAAAAAAAAAAAA", "後寫的")] {
+            insert_mission_at(&p, id, id, Some("parent"), text, at).await;
+        }
+        let kids: Vec<String> = children(&p, "parent").await.unwrap().into_iter().map(|m| m.text).collect();
+        assert_eq!(kids, vec!["後寫的", "先寫的"], "新的在前＝寫入順序的反序，不是照 ULID");
+    }
+
     /// 同一毫秒寫進去的兩筆事件，讀出來的順序＝寫入順序（不看 ULID 的亂數段）。
     ///
     /// `id` 故意跟寫入順序相反：舊的 `ORDER BY created_at, id` 會把它們倒過來。
