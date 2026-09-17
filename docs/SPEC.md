@@ -68,6 +68,14 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   不留半套 schema；重跑冪等。子模組各自的 migration（`supervisor::store`、`read_marks`、`panes`、`herdr_maintenance`、
   `mission::store`）不在這個 transaction 裡，各自維護自己那張表，風險最高的「加欄＋回填」已經各自包了自己的 transaction。
 - **權威劃分**：TOML 是 Project／Bot 期望設定的唯一權威；SQLite 存 Run／Turn／Message／Conversation／hook token／workspace 映射。啟動與每次寫回 TOML 後做 TOML→SQLite 投影（依 id upsert；TOML 移除的 bot 標 `deleted_at`，保留歷史）。
+- **落盤前先驗投影**（issue #73）：`ConfigStore::update` 的順序是「重讀（mtime 變了）→ 在記憶體套用修改 →
+  `projection::validate` 乾跑 → 原子寫入（暫存檔 + `rename`）」。驗不過就直接回錯誤，**config.toml 一個字都不動**，
+  記憶體裡那份也不變；錯誤訊息保留原因並附「（config.toml 未變更）」，recovery path 就是改個合法的值再送一次。
+  以前只在投影當下驗，而投影跑在 config 已經落盤之後：一筆會被擋的修改先把 TOML 改壞，API 回了錯，現場卻已經變了，
+  daemon 下次啟動才爆。`validate` 是純函式（bot／專案 id 格式、bot 名字、kind、identity 綁定與 kind 相符、identity 名字與 kind），
+  不碰 DB；每個 mutation 都走同一支，規則只有一份。
+  **需要 DB 才判得出來的大量軟刪閘門不在這支裡**：那條路是刪除 API（`delete_from_config`），它本來就先在記憶體算出結果、
+  對著 DB 快照驗過才寫檔。非刪除的 mutation 若踩到那個閘門，仍是先落盤才被擋（`config_written: true`，見下）。
 - **投影不得大量軟刪**（2026-09-14 事故）：一次要軟刪的 bot／專案超過 3 列、或超過現有的 30%（兩列以上才算），或 config 裡一個專案都沒有而 DB 還有列 → **在任何寫入之前**拒絕整次投影並記 `error`，daemon 不啟動。
   啟動與 runtime 的**每一次**重投都走閘門：`ConfigStore::update` 會在磁碟 mtime 變了時重讀，「外面把 TOML 換掉／清空，再由 API 或總管觸發重投」是同一條事故路徑。
   DB 的活列＝上一次投影的結果，所以「config 空了但 DB 還有列」必然是拿錯 config／被換掉的檔案。

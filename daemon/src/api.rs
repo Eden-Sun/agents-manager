@@ -454,7 +454,12 @@ async fn get_state(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> 
     Ok(Json(state_json(&app).await?))
 }
 
-/// 每個呼叫端都是**先** `app.cfg.update` 落盤、**再**投影：被擋下時這次的變更已經在 config.toml 裡了。
+/// 每個呼叫端都是**先** `app.cfg.update` 落盤、**再**投影，所以走到這裡被擋下時，這次的變更已經在
+/// config.toml 裡了（`config_written: true`）。
+///
+/// 會被 `projection::validate` 擋的那一類（bot kind、identity 綁定、id／名字格式）**到不了這裡**：
+/// `ConfigStore::update` 在落盤前就先驗過並直接回錯誤，檔案一個字都沒動（issue #73）。剩在這裡的是
+/// 需要 DB 才判得出來的大量軟刪閘門。
 async fn reproject(app: &Arc<App>) -> Result<(), LcError> {
     crate::projection::project_config(&app.cfg, &app.db).await.map_err(|e| {
         // 閘門擋下來是**狀態不對**，不是上游壞掉：502 會讓呼叫端以為 herdr／DB 出問題，
