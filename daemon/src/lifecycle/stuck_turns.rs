@@ -63,6 +63,34 @@ pub(crate) fn idle_for(run_id: &str, now: Instant) -> Option<Duration> {
     m.get(run_id).map(|since| now.saturating_duration_since(*since))
 }
 
+/// 這筆 turn 從**送達**（沒有 `delivered_at` 的舊列看建立時間）到 `now_wall` 過了多久；時間讀不懂就是 `None`。
+fn turn_age(turn: &db::Turn, now_wall: chrono::DateTime<chrono::Utc>) -> Option<Duration> {
+    let at = turn.delivered_at.as_deref().unwrap_or(&turn.created_at);
+    let at = chrono::DateTime::parse_from_rfc3339(at).ok()?.with_timezone(&chrono::Utc);
+    (now_wall - at).to_std().ok().or(Some(Duration::ZERO))
+}
+
+/// 這筆 turn 真的「送出之後一直沒動」多久：run 閒置多久，與這筆送達多久，**取短的**。
+///
+/// idle 計時是以 run 為單位、從第一次看到 idle 起算的。一顆已經閒置 15 分鐘的 bot 收到新 prompt，agent 還沒
+/// 轉成 working 的那幾秒（貼上的圖片路徑正在轉成 `[Image #n]`、TUI 還沒重畫）run 仍是 idle——只看 run 的話，
+/// 下一輪掃描就把**剛送出 9 秒**的回合當卡住收掉，連幫它補按 Enter 的 watchdog 都沒機會跑
+/// （2026-09-16 13:17，AM-2-M turn `01M2N5T4R7Z4P9ARQWC4C27MEF`：`idle_mins=15`，建立 13:17:01、收掉 13:17:10）。
+/// 時間讀不懂就當剛送出：寧可晚收，不要誤收。
+pub(crate) fn stuck_for(run_idle: Duration, since_sent: Option<Duration>) -> Duration {
+    run_idle.min(since_sent.unwrap_or(Duration::ZERO))
+}
+
+/// 把測試用的 `now: Instant` 換成同一刻的牆上時間（正式呼叫 `now` 就是 `Instant::now()`，差值是 0）。
+fn wall_at(now: Instant) -> chrono::DateTime<chrono::Utc> {
+    let real = Instant::now();
+    let wall = chrono::Utc::now();
+    match now.checked_duration_since(real) {
+        Some(ahead) => wall + chrono::Duration::from_std(ahead).unwrap_or_default(),
+        None => wall - chrono::Duration::from_std(real.saturating_duration_since(now)).unwrap_or_default(),
+    }
+}
+
 /// 每 [`SWEEP_EVERY`] 掃一次所有主機。
 pub fn spawn_stuck_turn_sweeper(app: Arc<App>) {
     tokio::spawn(async move {
@@ -120,7 +148,12 @@ pub(crate) async fn sweep_at(app: &Arc<App>, host: Option<&str>, now: Instant, t
         if turn.id != turn_id {
             continue;
         }
-        match close_locked(app, &run, &turn, idle).await {
+        // run 閒置夠久還不算：這筆也要送出夠久（見 [`stuck_for`]）。
+        let stuck = stuck_for(idle, turn_age(&turn, wall_at(now)));
+        if stuck < threshold {
+            continue;
+        }
+        match close_locked(app, &run, &turn, stuck).await {
             Ok(true) => {
                 closed.push(turn.id.clone());
                 // 卡住的就是排在後面的那一筆：同一把鎖裡馬上送，不等下一次喚醒。
@@ -431,6 +464,41 @@ mod tests {
 
         // 已經收掉的不會再收一次。
         assert!(sweep_at(&app, None, t0 + 20 * MIN, 5 * MIN).await.is_empty());
+    }
+
+    /// 2026-09-16 13:17 實況：AM-2-M 從 13:01 就閒置，13:17:01 收到新 prompt（貼上的圖片轉成 `[Image #33]` 時 Enter 被吃掉，
+    /// agent 一直沒轉成 working），13:17:10 的掃描看到「run 閒置 15 分鐘」就把剛送出 9 秒的回合收成 completed_fallback。
+    /// 閒置要從**這筆送達之後**才算。
+    #[tokio::test]
+    async fn a_prompt_just_sent_to_a_long_idle_bot_is_not_mistaken_for_a_stuck_turn() {
+        let f = stuck("ui issue?").await;
+        let app = f.env.app.clone();
+        let t0 = Instant::now();
+        observe_at(&f.run_id, "idle", t0);
+        // 這筆在「掃描那一刻」前 9 秒才送達；bot 本身已經閒置 15 分鐘。
+        let sent = (chrono::Utc::now() + chrono::Duration::minutes(15) - chrono::Duration::seconds(9))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        sqlx::query("UPDATE turns SET created_at = ?, delivered_at = ? WHERE id = ?")
+            .bind(&sent)
+            .bind(&sent)
+            .bind(&f.turn_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        assert!(sweep_at(&app, None, t0 + 15 * MIN, 5 * MIN).await.is_empty(), "剛送出 9 秒，不是卡住");
+        assert_eq!(turn(&app, &f.turn_id).await.status, "in_flight");
+        // 送出之後真的過了門檻（6 分鐘）才收，理由寫的是這筆送出後的時間，不是 run 閒置的 21 分鐘。
+        assert_eq!(sweep_at(&app, None, t0 + 21 * MIN, 5 * MIN).await, vec![f.turn_id.clone()]);
+        let why = messages(&app, &f.turn_id).await.into_iter().find(|m| m.0 == "system").expect("理由寫進對話");
+        assert!(why.2.contains("閒置 6 分鐘"), "{why:?}");
+    }
+
+    #[test]
+    fn a_turn_is_stuck_only_as_long_as_both_the_run_and_the_turn_have_been_quiet() {
+        assert_eq!(stuck_for(15 * MIN, Some(Duration::from_secs(9))), Duration::from_secs(9));
+        assert_eq!(stuck_for(6 * MIN, Some(20 * MIN)), 6 * MIN, "turn 早就送出、run 最近才閒置：看 run");
+        assert_eq!(stuck_for(15 * MIN, None), Duration::ZERO, "時間讀不懂就當剛送出，不收");
     }
 
     /// transcript 證得出完整回覆 → completed，回覆補進對話。
