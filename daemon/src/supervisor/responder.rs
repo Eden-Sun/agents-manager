@@ -452,10 +452,18 @@ pub async fn watchdog_tick(app: &Arc<App>) {
         return;
     };
     let liveness = super::manager_liveness(app, &bot.id).await.unwrap_or("stopped");
+    // 等額度時看門狗不把它拉起來——除非我們其實**不知道**額度狀態（Unknown），而且排定的重試時間已經到了：
+    // 那一次重試要有一個活著的協調者才發生得了。協調者在 `waiting_quota` 時 pane 掛掉或主機重開，而這個身分
+    // 一直拿不到 5h＋7d 兩格讀數（探測壞掉、身分被停用、帳號本來就沒有那兩個窗）時，以前看門狗不重啟、
+    // `notify` 因為它沒在跑不送、`answered_since` 要它答完一個回合——三個條件互相等，永遠卡住（review3 c3 M3）。
+    // 有可信證據說被擋（撞限或見底讀數）時照舊不啟動。
+    let retry_due = row.notify_next_at.as_deref().is_none_or(watchdog::past);
+    let parked_on_quota = row.status == "waiting_quota"
+        && !(retry_due && quota_state(app, &bot).await == QuotaState::Unknown);
     let w = watchdog::Watched {
         configured: true,
         wanted: row.desired_running != 0,
-        waiting_quota: row.status == "waiting_quota",
+        waiting_quota: parked_on_quota,
         attempts: row.watchdog_attempts,
         next_at: row.watchdog_next_at.as_deref(),
     };
@@ -645,15 +653,29 @@ pub async fn quota_state(app: &Arc<App>, bot: &crate::db::Bot) -> QuotaState {
     }
 }
 
+/// 擷取（`turn_error::capture`）在 `working → idle` 之後約 5 秒才讀 pane、寫錯誤。回合剛收掉的那幾秒
+/// 看起來一定是乾淨的，所以要等過了這段才能把它當證據（review3 c3 L2）。
+const CAPTURE_SETTLE_SECS: i64 = 15;
+
 /// 協調者真的**答完**了一個回合，而且那個回合沒有以錯誤結束——這是讀不到額度時唯一可信的
 /// 「帳號答得動」證據。
 ///
 /// 只看「送達」不行：`prompt` 成功（含 `delivery=unknown`）只代表字進了 pane 或排進佇列，CLI 可能
-/// 下一刻才印出撞限。所以要回合**結束**（`completed`／`completed_fallback`），且 run 上沒有留下
-/// `turn_error`，並且這個回合比開始等待的時間晚。
+/// 下一刻才印出撞限。所以要回合**結束**（`completed`／`completed_fallback`）、比開始等待的時間晚，而且：
+///
+/// * 那一回合上沒有 capture 釘上去的系統訊息（撞限橫幅、`API Error:` 都釘在回合上）；
+/// * `runs.turn_error` 是整個 run 一格、下一回合開始就清掉，所以只在它**還屬於這一回合**時才看它
+///   （同 run 上已經有更晚開始的回合時，那格講的是別人的）；
+/// * 回合結束已經超過 [`CAPTURE_SETTLE_SECS`]——不然擷取還沒來得及寫，撞限收場的回合會被讀成「答得動」，
+///   於是對人宣告「額度已恢復」，下一刻又撞限，`responder_health` 在 degraded／healthy 之間來回跳
+///   （review3 c3 L2）。
 async fn answered_since(app: &Arc<App>, bot_id: &str, since: Option<&str>) -> bool {
-    let row: Option<(String, Option<String>)> = sqlx::query_as(
-        "SELECT t.status, r.turn_error FROM turns t
+    let row: Option<(String, String, Option<String>, i64, i64)> = sqlx::query_as(
+        "SELECT t.status, t.completed_at, r.turn_error,
+                EXISTS(SELECT 1 FROM turns n WHERE n.run_id = t.run_id AND n.id <> t.id
+                         AND n.created_at > t.created_at AND n.status <> 'queued') AS newer,
+                EXISTS(SELECT 1 FROM messages m WHERE m.turn_id = t.id AND m.role = 'system') AS noted
+           FROM turns t
            JOIN conversations c ON c.id = t.conversation_id
            LEFT JOIN runs r ON r.id = t.run_id
           WHERE c.bot_id = ? AND t.completed_at IS NOT NULL AND (? IS NULL OR t.completed_at > ?)
@@ -666,8 +688,19 @@ async fn answered_since(app: &Arc<App>, bot_id: &str, since: Option<&str>) -> bo
     .await
     .ok()
     .flatten();
-    matches!(row, Some((status, err)) if matches!(status.as_str(), "completed" | "completed_fallback")
-        && err.as_deref().is_none_or(|e| e.trim().is_empty()))
+    let Some((status, completed_at, turn_error, newer, noted)) = row else { return false };
+    if !matches!(status.as_str(), "completed" | "completed_fallback") || noted != 0 {
+        return false;
+    }
+    // `turn_error` 只有在還屬於這一回合時才算它的。
+    if newer == 0 && turn_error.is_some_and(|e| !e.trim().is_empty()) {
+        return false;
+    }
+    match chrono::DateTime::parse_from_rfc3339(&completed_at) {
+        Ok(t) => (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_seconds() >= CAPTURE_SETTLE_SECS,
+        // 時間讀不懂：不要憑它宣告恢復。
+        Err(_) => false,
+    }
 }
 
 fn digest(events: &[store::InboxEvent]) -> String {
@@ -1188,6 +1221,37 @@ mod flow_tests {
         assert!(matches!(quota_state(&app, &bot).await, QuotaState::Blocked(_)), "實際在跑 fable 就是它的撞限");
     }
 
+    /// review3 c3 M3：協調者在 `waiting_quota` 時停掉、而額度讀數一直是 Unknown（探測壞了、帳號沒有那兩個窗），
+    /// 以前三個條件互相等：看門狗不重啟、`notify` 因為它沒在跑不送、`answered_since` 要它答完一個回合。
+    /// 到期的那一次重試要有活著的協調者才發生得了，所以 Unknown＋時間到就照常啟動；明說被擋的照舊不動。
+    #[tokio::test]
+    async fn a_responder_waiting_on_an_unknown_quota_is_restarted_when_its_retry_is_due() {
+        let app = fx::app().await;
+        fx::configure_responder(&app).await;
+        roles::set_desired_running(&app.db, Role::Responder, true).await.unwrap();
+        roles::set_status(&app.db, Role::Responder, "waiting_quota", Some("撞限"), None).await.unwrap();
+        // 重試時間還沒到：看門狗完全不介入（連下一次嘗試都不排）。
+        roles::set_notify_next(&app.db, Role::Responder, Some("2999-01-01T00:00:00Z")).await.unwrap();
+        watchdog_tick(&app).await;
+        let row = roles::get(&app.db, Role::Responder).await.unwrap();
+        assert_eq!((row.watchdog_attempts, row.watchdog_next_at), (0, None), "時間沒到就不管它");
+
+        // 時間到了，而且讀不到額度：先排一次嘗試，時間到就真的啟動（測試環境起不來，但要試過一次）。
+        roles::set_notify_next(&app.db, Role::Responder, Some("2020-01-01T00:00:00Z")).await.unwrap();
+        watchdog_tick(&app).await;
+        assert!(roles::get(&app.db, Role::Responder).await.unwrap().watchdog_next_at.is_some(), "排下一次嘗試");
+        roles::set_watchdog(&app.db, Role::Responder, 0, Some("2020-01-01T00:00:00Z"), None).await.unwrap();
+        watchdog_tick(&app).await;
+        assert_eq!(roles::get(&app.db, Role::Responder).await.unwrap().watchdog_attempts, 1, "Unknown＋到期要試一次");
+
+        // 明說被擋（未過期的撞限）：照舊不動，等重置。
+        roles::set_watchdog(&app.db, Role::Responder, 0, None, None).await.unwrap();
+        app.quotas.lock().await.insert("claude:cc0".into(), blocked());
+        watchdog_tick(&app).await;
+        let row = roles::get(&app.db, Role::Responder).await.unwrap();
+        assert_eq!((row.watchdog_attempts, row.watchdog_next_at), (0, None), "有可信證據說被擋就別開");
+    }
+
     /// 空的、不完整的讀數都不是「可以用」：少的那一格可能正是見底的那一格。
     #[tokio::test]
     async fn empty_or_partial_readings_are_unknown_not_available() {
@@ -1247,7 +1311,9 @@ mod flow_tests {
         }
 
         // 回合結束了，但是以撞限錯誤收場：仍然不算。
-        sqlx::query("UPDATE turns SET status='completed', completed_at='2999-01-01T00:00:00Z' WHERE id='t-ok'").execute(&app.db).await.unwrap();
+        // 結束時間要落在「開始等待之後、擷取的延遲之前」：未來的時間戳不算答完（見 `CAPTURE_SETTLE_SECS`）。
+        let a_minute_ago = (chrono::Utc::now() - chrono::Duration::seconds(60)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        sqlx::query("UPDATE turns SET status='completed', completed_at=? WHERE id='t-ok'").bind(&a_minute_ago).execute(&app.db).await.unwrap();
         sqlx::query("UPDATE runs SET turn_error=? WHERE id='run-r'").bind("You've hit your usage limit").execute(&app.db).await.unwrap();
         notify(&app).await;
         assert_eq!(roles::get(&app.db, Role::Responder).await.unwrap().status, "waiting_quota", "撞限收場的回合不是答得動");
@@ -1259,6 +1325,41 @@ mod flow_tests {
         assert_eq!(row.status, "");
         assert_eq!(row.status_detail.as_deref(), Some("額度已恢復（協調者完成了一個回合）"));
         assert_eq!(row.waiting_since, None);
+    }
+
+    /// review3 c3 L2：撞限收場的回合被算成「答得動」。`runs.turn_error` 是整個 run 一格、下一回合開始就清掉，
+    /// 而擷取要等回合收掉約 5 秒才寫得進去——剛好落在這幾秒的 tick 會宣告「額度已恢復」，下一刻又撞限。
+    #[tokio::test]
+    async fn a_turn_that_just_ended_is_not_yet_proof_and_a_noted_error_never_is() {
+        let app = fx::app().await;
+        fx::configure_responder(&app).await;
+        let now = crate::db::now();
+        sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,started_at) VALUES ('run-r','resp','running','idle',?)")
+            .bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO conversations (id,bot_id,created_at) VALUES ('c-r','resp',?)").bind(&now).execute(&app.db).await.unwrap();
+        let ago = |secs: i64| (chrono::Utc::now() - chrono::Duration::seconds(secs)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,created_at,completed_at) VALUES ('t1','c-r','run-r','web','completed',?,?)")
+            .bind(ago(120)).bind(ago(1)).execute(&app.db).await.unwrap();
+
+        // 才剛收掉：擷取可能還沒寫進來，先不算證據。
+        assert!(!answered_since(&app, "resp", None).await, "回合剛結束的那幾秒不能當證據");
+
+        // 過了擷取的延遲、run 上也沒有錯誤：這才算答得動。
+        sqlx::query("UPDATE turns SET completed_at=? WHERE id='t1'").bind(ago(60)).execute(&app.db).await.unwrap();
+        assert!(answered_since(&app, "resp", None).await);
+
+        // 擷取把橫幅釘在這一回合上：就算 `turn_error` 已經被下一回合清掉，也不算答得動。
+        sqlx::query("INSERT INTO messages (id,conversation_id,turn_id,role,content,source,incomplete,created_at) VALUES ('m1','c-r','t1','system','You''ve hit your session limit','system',1,?)")
+            .bind(&now).execute(&app.db).await.unwrap();
+        assert!(!answered_since(&app, "resp", None).await, "撞限收場的回合不是答得動");
+
+        // `turn_error` 屬於同 run 上更晚開始的回合時，不能算在這一回合頭上。
+        sqlx::query("DELETE FROM messages WHERE id='m1'").execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET turn_error='You''ve hit your session limit' WHERE id='run-r'").execute(&app.db).await.unwrap();
+        assert!(!answered_since(&app, "resp", None).await, "那格還是這一回合的");
+        sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,created_at) VALUES ('t2','c-r','run-r','web','in_flight',?)")
+            .bind(crate::db::now()).execute(&app.db).await.unwrap();
+        assert!(answered_since(&app, "resp", None).await, "更晚開始的回合才是那格的主人");
     }
 
     /// 查不到協調者屬於哪台主機（專案列不見了）時，不能退回本機、拿本機帳號的數字來判斷。

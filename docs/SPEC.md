@@ -1769,7 +1769,10 @@ supervisor 相關資料表與欄位都是 additive，`db::migrate` 重跑冪等�
   有自己 env 的 cc1／cc2 只讀自己那把），主機要確定——查不到專案或主機欄讀不出來就當不知道，不退回本機借數字。
   狀態是 Unknown／Available／Blocked：`Available` 要 5 小時與 7 天兩格都有讀數、都沒見底、也沒撞限；空的或不完整的讀數
   是 Unknown。撞限照 §18.8b 看桶與模型：協調者跑 opus 時，同帳號的 Fable 撞限不算它的（review3 c3 H2）。已知的 `waiting_quota` 只有兩種證據能解除：可信的 Available 讀數，或協調者在**開始等待之後**答完了一個
-  沒留 `turn_error` 的回合（`supervisor_roles.waiting_since`）。prompt 送達（`ok`／`unknown`）**不算**——那只代表字進了
+  乾淨的回合（`supervisor_roles.waiting_since`）。「乾淨」綁在那一回合上：沒有 capture 釘上去的系統訊息、`runs.turn_error` 還屬於它（同 run 上沒有更晚開始的回合），
+  而且結束已經超過 15 秒——capture 要等 `working → idle` 後約 5 秒才寫得進去，剛收掉的那幾秒看起來一定乾淨，會謊報「額度已恢復」再馬上撞限（review3 c3 L2）。
+  **看門狗**在 `waiting_quota` 時不重啟它，但讀數是 Unknown 而且排定的重試時間已經到了就照常啟動：那一次重試要有活著的協調者才發生得了，
+  不然 pane 掛掉又永遠拿不到讀數時三個條件互相等，只能等人手動 `agm responder start`（review3 c3 M3）。prompt 送達（`ok`／`unknown`）**不算**——那只代表字進了
   pane 或佇列，CLI 可能下一刻才報撞限；等待期間送出後只把下一次重試推到有界間隔之後。額度狀態每個 tick 重算，
   撞限期間沒有新讀數不改 `notify_next_at`，也不重寫 DB、不推事件。
 - **Remote Control 明講在每顆 bot 的設定檔**：`claude-settings.json` 一律寫 `remoteControlAtStartup`，值就是
