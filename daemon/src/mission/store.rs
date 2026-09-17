@@ -488,6 +488,15 @@ pub async fn event_by_crid(pool: &SqlitePool, mission_id: &str, crid: &str) -> R
     .await?)
 }
 
+/// 使用者放行「來回次數用完」的任務時順手加一輪，回傳新的上限。
+///
+/// `max_rounds` 用完之後任務停在 `max_rounds` 問人，使用者回答「再改一輪」卻沒有路可走：AGM 一呼叫
+/// `round` 又是 409、任務再停一次，只能一直問同一個問題（review3 c1 M13）。放行＝**允許**再走一輪，
+/// 不是強迫走；別的原因停下來的放行不動上限。
+fn extra_round_for(m: &Mission) -> Option<i64> {
+    (m.paused_reason.as_deref() == Some("max_rounds") && m.max_rounds <= m.rounds_used).then_some(m.rounds_used + 1)
+}
+
 /// 一次寫入的結果。
 #[derive(Debug)]
 pub struct Written {
@@ -629,10 +638,12 @@ pub async fn write_reply(
 
     let mut resumed = false;
     if resume_mission {
+        let extra = extra_round_for(&m);
         resumed = sqlx::query(
-            "UPDATE missions SET paused_reason = NULL, paused_detail = NULL, updated_at = ?
+            "UPDATE missions SET paused_reason = NULL, paused_detail = NULL, max_rounds = ?, updated_at = ?
              WHERE id = ? AND paused_reason IS NOT NULL AND completed_at IS NULL AND cancelled_at IS NULL",
         )
+        .bind(extra.unwrap_or(m.max_rounds))
         .bind(&ev.created_at)
         .bind(mission_id)
         .execute(&mut *tx)
@@ -640,8 +651,8 @@ pub async fn write_reply(
         .rows_affected()
             == 1;
         if resumed {
-            insert_event(&mut tx, mission_id, "resumed", "繼續", Some(crate::agent_relay::DAEMON_SENDER), &serde_json::json!({}), None, None)
-                .await?;
+            let (text, payload) = resumed_note(extra);
+            insert_event(&mut tx, mission_id, "resumed", &text, Some(crate::agent_relay::DAEMON_SENDER), &payload, None, None).await?;
         }
     }
     if let Some((key, ikind, payload)) = inbox {
@@ -680,17 +691,29 @@ async fn push_inbox_tx(
     Ok(())
 }
 
+/// 放行時記的那一則。多給一輪要說出來，不然使用者看不出「再改一輪」被接受了。
+fn resumed_note(extra: Option<i64>) -> (String, serde_json::Value) {
+    match extra {
+        Some(n) => (format!("繼續（來回上限加一輪：{n}）"), serde_json::json!({"max_rounds": n})),
+        None => ("繼續".into(), serde_json::json!({})),
+    }
+}
+
 /// 「不回答直接繼續」：放行、記事件、叫醒 AGM，一次交易。
 ///
 /// 回傳 `false` = 這次沒有發生 `paused → open`（本來就沒停著），那就什麼都不寫，也不通知——
 /// AGM 自己呼叫 resume 因此不會把自己叫醒。
 pub async fn resume_and_wake(pool: &SqlitePool, mission_id: &str, payload_of: impl Fn(&str) -> serde_json::Value) -> Result<bool> {
     let now = crate::db::now();
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let m: Option<Mission> = sqlx::query_as::<_, Mission>("SELECT * FROM missions WHERE id = ?").bind(mission_id).fetch_optional(&mut *tx).await?;
+    let Some(m) = m else { return Ok(false) };
+    let extra = extra_round_for(&m);
     let resumed = sqlx::query(
-        "UPDATE missions SET paused_reason = NULL, paused_detail = NULL, updated_at = ?
+        "UPDATE missions SET paused_reason = NULL, paused_detail = NULL, max_rounds = ?, updated_at = ?
          WHERE id = ? AND paused_reason IS NOT NULL AND completed_at IS NULL AND cancelled_at IS NULL",
     )
+    .bind(extra.unwrap_or(m.max_rounds))
     .bind(&now)
     .bind(mission_id)
     .execute(&mut *tx)
@@ -700,7 +723,8 @@ pub async fn resume_and_wake(pool: &SqlitePool, mission_id: &str, payload_of: im
     if !resumed {
         return Ok(false);
     }
-    let ev = insert_event(&mut tx, mission_id, "resumed", "繼續", Some(crate::agent_relay::DAEMON_SENDER), &serde_json::json!({}), None, None).await?;
+    let (text, note) = resumed_note(extra);
+    let ev = insert_event(&mut tx, mission_id, "resumed", &text, Some(crate::agent_relay::DAEMON_SENDER), &note, None, None).await?;
     let payload = payload_of(&ev.id);
     push_inbox_tx(&mut tx, &format!("mission:{mission_id}:resumed:{}", ev.id), "mission_resumed", &payload, &now).await?;
     tx.commit().await?;

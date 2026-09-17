@@ -979,7 +979,11 @@ pub async fn post_round(State(app): State<Arc<App>>, Path(id): Path<String>) -> 
                 .await
                 .map_err(up)?;
             emit(&app, &load(&app, &id).await?).await;
-            Err(LcError::conflict("max_rounds", json!({"mission_id": id, "rounds_used": used, "max_rounds": m.max_rounds})))
+            Err(LcError::conflict(
+                "max_rounds",
+                json!({"mission_id": id, "rounds_used": used, "max_rounds": m.max_rounds,
+                       "hint": "任務已停下來問使用者；使用者放行（answer／resume）就會多給一輪，那時再呼叫一次 round"}),
+            ))
         }
     }
 }
@@ -1772,6 +1776,40 @@ mod tests {
         store::add_event(&app.db, &id, "verified", "舊版記的", Some("daemon"), &json!({})).await.unwrap();
         let err = post_deliver(State(app.clone()), Path(id.clone()), Json(deliver_from(&env.repo))).await.unwrap_err();
         assert_eq!(conflict_reason(err), "verified_without_sha");
+    }
+
+    /// 來回次數用完、使用者說「再改一輪」：放行時多給一輪，AGM 才有路可走（review3 c1 M13）。
+    #[tokio::test]
+    async fn releasing_a_mission_that_used_up_its_rounds_grants_one_more() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("rounds", "pr"))).await.unwrap();
+        let id = m["id"].as_str().unwrap().to_string();
+        let round = || post_round(State(app.clone()), Path(id.clone()));
+        let _ = round().await.unwrap();
+        let _ = round().await.unwrap();
+        assert_eq!(conflict_reason(round().await.unwrap_err()), "max_rounds");
+        let m = load(&app, &id).await.unwrap();
+        assert_eq!((m.paused_reason.as_deref(), m.rounds_used, m.max_rounds), (Some("max_rounds"), 2, 2));
+
+        // 使用者回答「再給一輪」：放行＋上限加一，AGM 的下一次 round 走得通。
+        let Json(out) = post_answer(State(app.clone()), Path(id.clone()), Json(ans("再改一輪：把標題也換掉", "a1"))).await.unwrap();
+        assert_eq!(out["resumed"], true);
+        assert_eq!(load(&app, &id).await.unwrap().max_rounds, 3);
+        let Json(third) = round().await.unwrap();
+        assert_eq!((third["rounds_used"].as_i64(), third["status"].as_str()), (Some(3), Some("open")));
+        assert_eq!(conflict_reason(round().await.unwrap_err()), "max_rounds", "加的是一輪，不是無上限");
+
+        // 「不回答直接繼續」也算放行，一樣多給一輪；事件說得出來。
+        let _ = post_resume(State(app.clone()), Path(id.clone())).await.unwrap();
+        assert_eq!(load(&app, &id).await.unwrap().max_rounds, 4);
+        let events = store::events(&app.db, &id).await.unwrap();
+        assert!(events.iter().any(|e| e.kind == "resumed" && e.text.contains("加一輪")));
+
+        // 別的原因停下來的放行不會偷偷加額度。
+        let _ = post_pause(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(PauseIn { reason: "clarify".into(), detail: None })).await.unwrap();
+        let _ = post_resume(State(app.clone()), Path(id.clone())).await.unwrap();
+        assert_eq!(load(&app, &id).await.unwrap().max_rounds, 4);
     }
 
     /// 同一個 commit 交付兩次要冪等：回原本那一筆；連 `delivered` 事件都沒寫成的那種（CLI 逾時、502）

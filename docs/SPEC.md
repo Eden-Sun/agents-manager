@@ -1615,6 +1615,8 @@ supervisor 相關資料表與欄位都是 additive，`db::migrate` 重跑冪等�
    followup 會沿用 `mission_id`／`role`。同身分同模型的 `wait` 由 daemon 自己重送，AGM 不介入。
 8. **停下問人的統一原則**：`paused_reason ∈ max_rounds | no_fable_for_verifier | push_main_failed | pr_failed | clarify`
    都是問使用者一個具體問題，得到答案後 `mission resume` 再從對應步驟接續；使用者取消 → `mission cancel`。
+   停在 `max_rounds` 的任務被放行（`answer`／`resume`）時 daemon 會把上限加一輪，所以「再改一輪」是走得通的：
+   放行後照第 3 步 `mission round` 再 followup 一次（加的是一輪，用完又會停下來問人）。
    **使用者自己按暫停／取消**（web 的任務卡，或別人代按）daemon 會叫醒你：
    - `mission_paused`（payload 帶 `reason`、`open_assignments[]`）：不要再派新交辦、不要交付——`deliver` 會回
      409 `mission_paused`（交付失敗那兩種暫停例外，那是重試的路）。已經在跑的回合 daemon 不中止，回合結束照常驗收，
