@@ -112,12 +112,13 @@ pub async fn start_manager(app: &Arc<App>, detail: Option<&str>) -> Result<(), L
     // id prevents a restart from creating another greeting turn.
     // The handshake is the daemon's, not the user's: marked as such so AGM's own conversation
     // keeps showing which lines a person actually typed.
-    if let Err(e) = crate::lifecycle::prompt_relayed(
+    // 控制面自己的送入：維護窗口不擋它，否則「把 AGM 重新起來」這件事會被自己開的窗口鎖在門外
+    // （issue #86）。
+    if let Err(e) = crate::lifecycle::prompt_control_plane(
         app,
         &bot.id,
         BOOTSTRAP_PROMPT,
         BOOTSTRAP_REQUEST_ID,
-        &[],
         Some(crate::agent_relay::DAEMON_SENDER),
     )
     .await

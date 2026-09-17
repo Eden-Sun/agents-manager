@@ -46,6 +46,17 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
         return Ok(());
     }
     let Some(bot) = db::bot(&app.db, bot_id).await? else { return Ok(()) };
+    // 維護窗口握著：排隊的這一筆**留在佇列**，不要送進一個正要被重啟的 session（issue #86）。
+    // 不算重試、不動 `flush_retries`——擋住它的不是 bot 的狀態，是我們自己開的窗口，不該花掉它的額度。
+    // 掛一個到窗口到期為止的 timer：窗口提早 release 時 `drain_queue` 會叫醒 flush，沒有人來收的話
+    // 這個 timer 就是底線（租約到期即自動失效，不會鎖死）。
+    if let Some(w) = crate::supervisor::maintenance::window_held(app).await {
+        let left = w.retry_after_secs(&db::now()).max(1) as u64;
+        tracing::info!(bot = %bot_id, turn = %turn.id, until = %w.expires_at, holder = %w.owner,
+                       "維護窗口開著：排隊的 prompt 等窗口關掉再送");
+        schedule_flush_retry(app, bot_id, std::time::Duration::from_secs(left));
+        return Ok(());
+    }
     // 使用者剛按了 interrupt：讓他先拿回輸入框（§4.4a）。判斷放在這裡（而不是觸發端）是因為 flush 不只一個呼叫端
     // （`stuck_turns` 在同一把鎖裡直接呼叫）；排在撤銷檢查之後，不要的派工照樣當場撤。閒著的 bot 不會再有
     // `working -> idle` 邊叫醒它，所以要掛 timer 到寬限結束。
@@ -722,6 +733,37 @@ mod flush_queue_tests {
         let t = turn(&app, &f.turn_id).await;
         assert!(t.flush_retries > 0 || t.status != "queued", "寬限過了要真的去送：{} retries={}", t.status, t.flush_retries);
         assert!(!super::super::interrupt_grace::is_held(&f.bot_id), "等完就收掉標記");
+    }
+
+    /// issue #86：維護窗口握著的時候，排隊的 prompt **留在佇列**，不進 pane。擋住它的是我們自己開的
+    /// 窗口、不是 bot 的狀態，所以不算一次重試；窗口到期為止掛一個 timer，窗口提早關掉時
+    /// `drain_queue` 會叫醒 flush，這個 timer 只是底線。
+    #[tokio::test]
+    async fn a_queued_prompt_waits_out_a_maintenance_window_instead_of_going_into_the_pane() {
+        let f = queued("test").await;
+        let app = f.env.app.clone();
+        let until = (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        crate::supervisor::store::acquire_lease(&app.db, "restart", "k8bw2f", None, None, &until, false, &json!({}))
+            .await
+            .unwrap()
+            .unwrap();
+        forget_queue_retry_timer(&f.bot_id);
+
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+
+        let t = turn(&app, &f.turn_id).await;
+        assert_eq!((t.status.as_str(), t.flush_retries), ("queued", 0), "留在佇列，而且不花它的重試額度");
+        assert_eq!(t.run_id, None, "沒有被 claim");
+        assert!(!f.env.herdr.methods().iter().any(|m| m == "pane.send_text"), "一個字都沒打");
+        assert!(queue_retry_timer_armed(&f.bot_id), "掛了 timer，窗口關掉之後有人會回來送");
+
+        // 窗口過期（沒有人 release）就自動恢復：閘門看 `held_at`，不會鎖死。
+        let past = (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        sqlx::query("UPDATE supervisor_leases SET expires_at=? WHERE resource='restart'").bind(&past).execute(&app.db).await.unwrap();
+        forget_queue_retry_timer(&f.bot_id);
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+        let t = turn(&app, &f.turn_id).await;
+        assert!(t.status != "queued" || t.flush_retries > 0, "窗口過期就照常往下送：{} retries={}", t.status, t.flush_retries);
     }
 
     /// 中斷寬限的 timer 比 `next_flush_at` 早燒：flush 看到退避還沒到就早退，這一刻起沒有任何 timer。

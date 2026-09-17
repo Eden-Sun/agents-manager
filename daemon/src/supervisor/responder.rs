@@ -429,7 +429,8 @@ pub async fn start(app: &Arc<App>, detail: Option<&str>) -> Result<(), LcError> 
         lifecycle::start_bot(app, &bot.id).await?;
     }
     if let Err(e) =
-        lifecycle::prompt_relayed(app, &bot.id, BOOTSTRAP_PROMPT, BOOTSTRAP_REQUEST_ID, &[], Some(crate::agent_relay::DAEMON_SENDER)).await
+        // 同 `super::start_manager`：控制面的握手不受維護窗口的閘門管（issue #86）。
+        lifecycle::prompt_control_plane(app, &bot.id, BOOTSTRAP_PROMPT, BOOTSTRAP_REQUEST_ID, Some(crate::agent_relay::DAEMON_SENDER)).await
     {
         tracing::warn!(error = ?e, "AGM responder bootstrap prompt was not delivered");
     }

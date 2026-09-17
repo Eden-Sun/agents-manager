@@ -118,11 +118,15 @@ pub async fn dispatch(app: &Arc<App>, assignment_id: &str) {
         return;
     }
     // A restart window is being held: the point of the window is that nothing new starts inside
-    // it. The assignment stays queued (nothing is lost or refused) until the window closes —
-    // this is the half a one-off "is anything working?" snapshot could never cover.
-    if let Some(until) = super::maintenance::dispatch_paused(app).await {
+    // it. The assignment stays queued (nothing is lost or refused) until the window closes.
+    // 同一個閘門（`maintenance::window_held`）也擋使用者的 prompt 與排隊 prompt 的 flush，
+    // 三條入口一份定義，不再是「交辦有擋、打字進 pane 的兩條沒擋」（issue #86）。
+    // 交辦這條選**排隊**不是拒絕：它是有自己重試與驗收的持久工作項，窗口關掉就照常送出去，
+    // 不會遺失也不會重送（`dispatch_crid` 冪等）。
+    if let Some(w) = super::maintenance::window_held(app).await {
+        let until = w.expires_at.clone();
         let _ = store::hold(&app.db, &a.id, &until, &super::maintenance::pause_note(&until)).await;
-        tracing::info!(assignment = %a.id, until, "assignment held: a restart window is open");
+        tracing::info!(assignment = %a.id, until, holder = %w.owner, "assignment held: a restart window is open");
         return;
     }
 
@@ -2383,7 +2387,7 @@ mod no_grace_period_tests {
         let ap = store::create_approval(&app.db, "owner", "restart", "daemon", None, None, None).await.unwrap().approval;
         store::decide_approval(&app.db, &ap.id, "approved", "AGM", None, None).await.unwrap();
         let until = iso_in(900);
-        let lease = store::acquire_lease(&app.db, "restart", "owner", Some(&ap.id), None, &until, &json!({})).await.unwrap().unwrap();
+        let lease = store::acquire_lease(&app.db, "restart", "owner", Some(&ap.id), None, &until, false, &json!({})).await.unwrap().unwrap();
         let a = store::insert_assignment(&app.db, None, "gone-bot", crid, "do it", &[], None, true).await.unwrap();
         let paused = super::super::maintenance::dispatch_paused(app).await.expect("window is held");
         store::hold(&app.db, &a.id, &paused, &super::super::maintenance::pause_note(&paused)).await.unwrap();
