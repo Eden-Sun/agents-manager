@@ -367,6 +367,13 @@ fn probe_command(bin: &str, env: &BTreeMap<String, String>, with_usage: bool) ->
     for (k, v) in env.iter().filter(|(k, _)| crate::tools::valid_env_name(k)) {
         pfx.push_str(&format!("{k}={} ", crate::hosts::sh_quote(v)));
     }
+    // claude 2.1.274 起認得這個變數：`0` 讓第一個 non-interactive turn 不等 MCP server 連線。
+    // 這支只問登入狀態跟 `/usage`，從不用到工具，MCP 起得慢或掛掉不該拖慢額度探測、甚至把探測
+    // 拖到 timeout（issue #80）。只在這支 throwaway probe 命令裡加；一般 managed bot 的啟動指令
+    // 是完全分開的路徑（`lifecycle/start.rs`），不會被這裡影響到，工具可用性維持原樣。放在
+    // identity 自己的 env 之後：就算某個身分自己也設了同名變數，probe 要的 `0` 一律蓋過去。
+    // 舊版 CLI（2.1.274 之前）不認得這個變數，當成一般環境變數忽略，行為跟現在一樣，安全。
+    pfx.push_str("CLAUDE_CODE_MCP_STARTUP_WAIT_MS=0 ");
     let b = crate::hosts::sh_quote(bin);
     let auth = crate::tools::CLAUDE_LOGIN_ARGS.join(" ");
     // `/usage` 先要結構化版本（claude 2.1.273 起：`usage_report` 帶 kind／percent／ISO resets_at／scope）。
@@ -1126,6 +1133,20 @@ AM_USAGE_DONE=0
         assert!(cmd.contains("auth status --json"), "{cmd}");
         assert!(cmd.contains("-p '/usage'"), "{cmd}");
         assert!(!cmd.contains(AUTH_BEGIN) && !cmd.contains(AUTH_END) && !cmd.contains(USAGE_DONE), "{cmd}");
+    }
+
+    /// #80：quota probe 只問登入狀態跟 `/usage`，從不用工具，MCP server 起得慢或掛掉不該拖慢探測、
+    /// 甚至把探測拖到 timeout。claude 2.1.274 起 `CLAUDE_CODE_MCP_STARTUP_WAIT_MS=0` 讓第一個
+    /// non-interactive turn 跳過等 MCP 連線；三個會跑 `claude` 的地方（auth status、結構化
+    /// `/usage`、退回的純文字 `/usage`）都要吃得到，因為它跟身分自己的 env 一樣放進共用的 `pfx`。
+    #[test]
+    fn the_probe_command_skips_mcp_startup_wait() {
+        let cmd = probe_command("/bin/claude", &BTreeMap::new(), true);
+        assert_eq!(cmd.matches("CLAUDE_CODE_MCP_STARTUP_WAIT_MS=0").count(), 3, "{cmd}");
+
+        // login-only target（不跑 /usage）：登入探測一樣不該被 MCP 拖住。
+        let login_only = probe_command("/bin/claude", &BTreeMap::new(), false);
+        assert_eq!(login_only.matches("CLAUDE_CODE_MCP_STARTUP_WAIT_MS=0").count(), 1, "{login_only}");
     }
 
     #[test]
