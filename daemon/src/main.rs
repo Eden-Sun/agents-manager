@@ -28,6 +28,7 @@ mod group;
 mod herdr;
 mod herdr_shim;
 mod herdr_maintenance;
+mod herdr_update;
 mod hook_cmd;
 mod hook_inbox;
 mod hookrecv;
@@ -101,6 +102,24 @@ enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         payload: Vec<String>,
     },
+    /// herdr 有沒有新版、對我們有沒有影響（issue #66）：純函式，不碰網路、不執行任何指令，也不會
+    /// 觸發升級。三個輸入都由呼叫端（`scripts/ops/herdr-update-kick.sh`）自己去問；這裡只保證版本
+    /// 比較是數值比較（不是字串比較，`457dd14` 那個 `0.9.0` 判成比 `0.10.0` 新的坑），CHANGELOG
+    /// 段落擷取沒抓漏。JSON 印到 stdout；exit code：0＝比較成功（不論有沒有更新），2＝版本號看不懂。
+    HerdrUpdateCheck {
+        /// `herdr --version` 讀到的本機版本。
+        #[arg(long)]
+        installed: String,
+        /// GitHub release／Homebrew 查到的最新穩定版。
+        #[arg(long)]
+        latest: String,
+        /// herdr 的 CHANGELOG 全文所在檔案。
+        #[arg(long)]
+        changelog_file: PathBuf,
+        /// 上次真的派過工的版本（`herdr-update.last` 記的那個），沒有就省略。
+        #[arg(long)]
+        last_notified: Option<String>,
+    },
     /// Claude Code statusLine command for daemon-started claude bots (v4.0): reports the
     /// rate limits to the daemon, then runs the user's own statusLine command. Always exits 0.
     Statusline {
@@ -128,6 +147,29 @@ fn main() {
         }
         Cmd::Statusline { bot, token, port, data_dir: _ } => {
             statusline_cmd::run(statusline_cmd::StatuslineArgs { bot, token, port });
+            std::process::exit(0);
+        }
+        Cmd::HerdrUpdateCheck { installed, latest, changelog_file, last_notified } => {
+            let md = std::fs::read_to_string(&changelog_file).unwrap_or_else(|e| {
+                eprintln!("讀不了 {}: {e}", changelog_file.display());
+                std::process::exit(2);
+            });
+            let Some(report) = herdr_update::build_report(&installed, &latest, &md) else {
+                eprintln!("看不懂版本號：installed=`{installed}` latest=`{latest}`");
+                std::process::exit(2);
+            };
+            let should_notify = herdr_update::should_notify(&report, last_notified.as_deref());
+            let brief = should_notify.then(|| herdr_update::render_agm_brief(&report));
+            println!(
+                "{}",
+                serde_json::json!({
+                    "installed_version": report.installed_version,
+                    "latest_version": report.latest_version,
+                    "has_update": report.has_update,
+                    "should_notify": should_notify,
+                    "brief": brief,
+                })
+            );
             std::process::exit(0);
         }
         Cmd::Serve { config, dev_watch_all_panes } => {
