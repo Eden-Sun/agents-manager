@@ -23,6 +23,7 @@ mod poller;
 mod screen;
 mod limit_banner;
 mod stuck_turns;
+pub(crate) mod fence;
 mod interrupt_grace;
 mod transitions;
 
