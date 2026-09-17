@@ -988,13 +988,24 @@ body 直接是檔案位元組（**不是** multipart），`Content-Type` 就是�
 - 遠端專案經 ssh（`hosts.rs::ssh_put`）寫到遠端同路徑，daemon 另存本機副本供縮圖。
 - 不看 mime（2026-09-14 前只收 `image/*`）。空 body、超過 12 MB 或其他輸入錯誤 400；超過 12 MB + 4 KiB 由 body limit 回 413（無 JSON）；bot／project 不存在 404。
 
+#### 落地是 staging-first（issue #88，2026-09-18）
+`attachments.state`：`staging` → `ready`／`failed`。`save()` 先用 `state='staging'` 插入一筆**帶著意圖路徑**的
+row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔／ssh 送出；成功轉 `ready`，寫檔失敗轉 `failed`
+並 best-effort 刪掉可能已經寫出去的一半。只有 `ready` 能被 `resolve`／`GET /api/attachments/{id}`／
+`prompt` 的 `attachments` 綁定；daemon 啟動時 `attach::reconcile_orphans` 把還停在 `staging`（上一輪寫到一半就
+死掉）或 `failed`（best-effort cleanup 可能沒清乾淨）的 row 全部當孤兒——刪本機檔、best-effort ssh 刪遠端檔、
+刪 row，可重複執行。舊資料庫的既有列（都是舊流程「檔案寫完才 insert」留下來的）打開時一律回填 `ready`。
+
 ### `GET /api/attachments/{id}`
-回原始位元組（原 MIME）。要 `X-AM-Token`，UI 用 fetch 轉 object URL，不能直接放 `<img src>`。
+回原始位元組（原 MIME）。要 `X-AM-Token`，UI 用 fetch 轉 object URL，不能直接放 `<img src>`。只有 `state='ready'`
+的附件讀得到，`staging`／`failed` 一律 404。
 
 ### prompt / 群組聊天帶附件
 `POST /api/bots/{id}/prompt` 與 `POST /api/projects/{id}/chat` 可帶 `"attachments": ["01M1…"]`：
-- id 以 **project** 為範圍（群組一次上傳、每個收件 bot 拿同一路徑）；跨專案 `400 unknown attachment`。
+- id 以 **project** 為範圍（群組一次上傳、每個收件 bot 拿同一路徑）；跨專案或還沒 `ready` 一律 `400 unknown attachment`。
 - agent 收到「文字 + 附加圖片／附加檔案（請讀取這些檔案來查看）：<絕對路徑>」（全是圖片才說「圖片」）；時間軸存使用者原本打的字，並把附件物件陣列記在該則 user message 的 `attachments`。
+- 綁定（`attach::bind`，把 `messages.attachments_json` 與每筆 `attachments.message_id` 一起寫）是單一 SQLite
+  transaction：任何一步失敗（含 `UPDATE` 沒打中任何 row）整批 rollback，不會有 message 指向沒綁成功的附件。
 
 ## run 的附加欄位（`GET /api/state` 的 `bots[].run` 與 `bot_status` 事件）
 

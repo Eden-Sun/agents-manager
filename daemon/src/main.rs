@@ -226,6 +226,8 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     reconcile::rearm_progress(&app).await;
     // #61: directories of bots deleted before every deletion path purged them.
     lifecycle::purge_deleted_bot_dirs(&app).await;
+    // #88: attachments whose save() died mid-write or mid-finalize before this restart.
+    attach::reconcile_orphans(&app).await;
     events::spawn_global(app.clone()).await;
 
     // The daemon never spawns the user's default session; watching it is best-effort.
