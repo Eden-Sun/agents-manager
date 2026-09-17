@@ -262,6 +262,8 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     supervisor::cli_refresh::refresh_on_startup(&app).await;
     supervisor::controller::respawn(&app).await;
     supervisor::health::spawn(app.clone());
+    // 交辦改狀態時補推 mission_updated，任務卡才跟得上（review3 c1 M5）。
+    mission::relay::spawn(app.clone());
     // Agent titles have no herdr event, so they are polled.
     events::spawn_title_poller(app.clone());
     tui_prompts::spawn_survey_watcher(app.clone());

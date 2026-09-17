@@ -370,6 +370,8 @@ export interface StoreState {
   /** 已結案那兩段是不是被 `MISSION_CLOSED_LIMIT` 截掉了（標題要說「最近 N 筆」，不能冒充總數）。 */
   missionsCapped: Record<string, { done: boolean; cancelled: boolean }>
   loadMissions: (projectId: string) => Promise<void>
+  /** 重連／resync 之後把已經載過的清單與任務重抓一次：斷線期間的 `mission_updated` 收不到。 */
+  refreshLoadedMissions: () => Promise<void>
   loadMission: (missionId: string) => Promise<void>
   startMission: (projectId: string, input: NewMissionInput) => Promise<string | null>
   controlMission: (missionId: string, action: 'pause' | 'resume' | 'cancel') => Promise<void>
@@ -1904,6 +1906,16 @@ export const useStore = create<StoreState>((set, get) => ({
     await run()
   },
 
+  async refreshLoadedMissions() {
+    const s = get()
+    if (!s.missionsSupported) return
+    // 斷線期間交辦可能已經換了好幾個階段：卡片會一直停在舊的那一格，直到使用者重整（review3 c1 M5）。
+    await Promise.all([
+      ...Object.keys(s.missions).map((pid) => s.loadMissions(pid)),
+      ...Object.keys(s.missionDetail).map((id) => s.loadMission(id)),
+    ])
+  },
+
   async loadMission(missionId) {
     let run = missionLoads.get(missionId)
     if (!run) {
@@ -2131,6 +2143,7 @@ function connectSocket(set: SetFn, get: GetFn) {
         // Re-fetch on every open: a failed frame already advanced lastSeq; the snapshot repairs the gap.
         set({ socket, stateStale: false })
         void get().refreshState()
+        void get().refreshLoadedMissions()
         flushUnsentReads()
         // 額度也整份重抓（取代，不合併）：WS 只會推「某個 key 更新了」，daemon 刪掉的 key 永遠不會
         // 通知。2026-09-14 daemon 重啟清掉 `codex:cc1` 之後，開著的分頁標題列仍一直顯示它。
@@ -2198,6 +2211,7 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
           for (const botId of loadedBotIds) await get().loadMessages(botId)
           const proj = get().selectedProjectId
           if (proj) await get().loadGroupMessages(proj)
+          await get().refreshLoadedMissions()
         } catch (e) {
           reportStateRefreshError(set, get, e)
         } finally {
