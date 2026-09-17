@@ -249,6 +249,8 @@ export interface Run {
   transcript_path: string | null
   started_at: string
   ended_at: string | null
+  /** `agent_status` 最後一次真的改變的時間（daemon 觀察到的，不是這頁看到的）；issue #93。 */
+  agent_status_since: string | null
 }
 
 /** `POST /api/bots/restart-idle`，SPEC §6.9。 */

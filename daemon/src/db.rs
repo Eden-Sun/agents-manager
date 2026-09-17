@@ -62,7 +62,11 @@ CREATE TABLE IF NOT EXISTS runs (
   -- The agent's terminal title, its statusLine output / payload, a pending claude update and
   -- the error that cut the last turn short. All belong to this CLI process, so a restart
   -- starts from NULL.
-  agent_title TEXT, status_line TEXT, status_json TEXT, update_notice TEXT, turn_error TEXT
+  agent_title TEXT, status_line TEXT, status_json TEXT, update_notice TEXT, turn_error TEXT,
+  -- `agent_status` 最後一次**真的改變**的時間（下面的 trigger 蓋；同值重寫不算改變）。前端拿它算
+  -- 「跑了多久」，不再自己用本地時鐘瞎猜起點（issue #93）。NULL＝這個 run 還沒真的變過狀態，或是
+  -- 升級前的舊列——那種前端退回自己觀察到的時間，並標成「不是 daemon 的紀錄」。
+  agent_status_since TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS runs_one_active ON runs(bot_id) WHERE state IN ('starting','running','stopping');
 CREATE INDEX IF NOT EXISTS runs_pane ON runs(pane_id);
@@ -202,11 +206,27 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
             "state",
             "ALTER TABLE attachments ADD COLUMN state TEXT NOT NULL DEFAULT 'ready' CHECK (state IN ('staging','ready','failed'))",
         ),
+        // `agent_status` 最後一次真的改變的時間；見下面 `runs_agent_status_since` trigger 與 issue #93。
+        ("runs", "agent_status_since", "ALTER TABLE runs ADD COLUMN agent_status_since TEXT"),
     ] {
         if !has_column(&mut *tx, table, col).await? {
             sqlx::query(ddl).execute(&mut *tx).await.with_context(|| format!("add {table}.{col}"))?;
         }
     }
+    // 建在這裡（column 一定已經存在之後），不是跟著上面的 SCHEMA 一起用 `;\n` 切開來送：這句 trigger
+    // body 自己就帶了分號，切开來就會斷成兩句送不出去。寫 `agent_status` 的地方有好幾處（events／
+    // reconcile／default session／bulk_restart／stuck_turns…），用 trigger 而不是在每一處補一行：
+    // 漏掉一處就會讓「起點」在那條路徑上悄悄跟丟（issue #93）。
+    sqlx::query(
+        "CREATE TRIGGER IF NOT EXISTS runs_agent_status_since AFTER UPDATE OF agent_status ON runs
+           WHEN OLD.agent_status IS NOT NEW.agent_status
+         BEGIN
+           UPDATE runs SET agent_status_since = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = NEW.id;
+         END",
+    )
+    .execute(&mut *tx)
+    .await
+    .context("create runs_agent_status_since trigger")?;
     tx.commit().await?;
     crate::supervisor::store::migrate(pool).await?;
     crate::read_marks::migrate(pool).await?;
@@ -427,6 +447,9 @@ pub struct Run {
     pub ended_at: Option<String>,
     /// Consumed by the first identity hook (Claude) or first completed turn hook (Codex/Grok).
     pub resume_session_id: Option<String>,
+    /// `agent_status` 最後一次真的改變的時間（trigger 蓋，issue #93）；前端算「跑了多久」的起點。
+    /// `None` = 還沒真的變過，或升級前的舊列。
+    pub agent_status_since: Option<String>,
 }
 
 #[derive(Debug, Clone, FromRow, serde::Serialize)]
@@ -775,6 +798,39 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// issue #93：前端算「跑了多久」的起點要用這一欄，不能自己用瀏覽器時鐘瞎猜。重複寫同一個值
+    /// （pane 又印了一行一樣的狀態）不能推遲起點；真的變了（包含繞了一圈回到原值）才推進。
+    #[tokio::test]
+    async fn agent_status_since_only_moves_when_the_status_actually_changes() {
+        let dir = tmp_dir();
+        let pool = open(&dir.join("t.sqlite3")).await.unwrap();
+        sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES ('p','/tmp','p',?)").bind(now()).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('b','p','b','claude','t',?)").bind(now()).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO runs (id,bot_id,state,started_at) VALUES ('r','b','running',?)").bind(now()).execute(&pool).await.unwrap();
+        let since0: Option<String> = sqlx::query_scalar("SELECT agent_status_since FROM runs WHERE id='r'").fetch_one(&pool).await.unwrap();
+        assert_eq!(since0, None, "剛建的 run 還沒真的變過狀態");
+
+        sqlx::query("UPDATE runs SET agent_status='working' WHERE id='r'").execute(&pool).await.unwrap();
+        let since1: String = sqlx::query_scalar("SELECT agent_status_since FROM runs WHERE id='r'").fetch_one(&pool).await.unwrap();
+        assert!(!since1.is_empty());
+
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        sqlx::query("UPDATE runs SET agent_status='working' WHERE id='r'").execute(&pool).await.unwrap();
+        let since2: String = sqlx::query_scalar("SELECT agent_status_since FROM runs WHERE id='r'").fetch_one(&pool).await.unwrap();
+        assert_eq!(since1, since2, "同值重寫（重複的 pane 狀態行）不算改變，起點不動");
+
+        sqlx::query("UPDATE runs SET agent_status='idle' WHERE id='r'").execute(&pool).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        sqlx::query("UPDATE runs SET agent_status='working' WHERE id='r'").execute(&pool).await.unwrap();
+        let since3: String = sqlx::query_scalar("SELECT agent_status_since FROM runs WHERE id='r'").fetch_one(&pool).await.unwrap();
+        assert_ne!(since1, since3, "又轉回 working：這是新的一段連續 working，起點要跟著換");
+
+        let r = sqlx::query_as::<_, Run>("SELECT * FROM runs WHERE id='r'").fetch_one(&pool).await.unwrap();
+        assert_eq!(r.agent_status_since.as_deref(), Some(since3.as_str()), "FromRow 讀得到新欄位");
+        pool.close().await;
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// issue #88：`attachments.state` 是後補的欄位，舊 DB（沒有這一欄）打開時要補上，而且舊列（都是
     /// 舊流程「檔案寫完才 insert」留下來的，insert 成功就代表已經完整）一律回填成 `'ready'`，不能變成
     /// `NULL` 或別的預設值被 `resolve`/`read`/`bind` 擋掉。
@@ -808,6 +864,33 @@ mod tests {
         assert!(has_column(&pool, "attachments", "state").await.unwrap(), "開的時候補上");
         let state: String = sqlx::query_scalar("SELECT state FROM attachments WHERE id='a'").fetch_one(&pool).await.unwrap();
         assert_eq!(state, "ready", "舊流程 insert 成功就代表檔案已經寫完，回填成 ready 而不是留白");
+        pool.close().await;
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 升級路徑：trigger 是在 ALTER 名單補完欄位之後才建的，不能反過來（trigger body 引用一個舊
+    /// DB 當下還沒有的欄位）。
+    #[tokio::test]
+    async fn an_old_database_without_the_column_still_gets_a_working_trigger() {
+        let dir = std::env::temp_dir().join(format!("am-status-since-upgrade-{}", ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("old.sqlite3");
+        {
+            let pool = open(&path).await.unwrap();
+            sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES ('p','/tmp','p',?)").bind(now()).execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('b','p','b','claude','t',?)").bind(now()).execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO runs (id,bot_id,state,started_at) VALUES ('r','b','running',?)").bind(now()).execute(&pool).await.unwrap();
+            // 做成上一版的形狀：欄位跟 trigger 都還不存在。
+            sqlx::query("DROP TRIGGER IF EXISTS runs_agent_status_since").execute(&pool).await.unwrap();
+            sqlx::query("ALTER TABLE runs DROP COLUMN agent_status_since").execute(&pool).await.unwrap();
+            assert!(!has_column(&pool, "runs", "agent_status_since").await.unwrap());
+            pool.close().await;
+        }
+        let pool = open(&path).await.expect("舊 DB（缺欄位也缺 trigger）照常開起來");
+        assert!(has_column(&pool, "runs", "agent_status_since").await.unwrap(), "開的時候補上欄位");
+        sqlx::query("UPDATE runs SET agent_status='working' WHERE id='r'").execute(&pool).await.unwrap();
+        let since: Option<String> = sqlx::query_scalar("SELECT agent_status_since FROM runs WHERE id='r'").fetch_one(&pool).await.unwrap();
+        assert!(since.is_some(), "trigger 也補上了，不是只有欄位");
         pool.close().await;
         std::fs::remove_dir_all(&dir).unwrap();
     }

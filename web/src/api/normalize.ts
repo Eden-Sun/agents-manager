@@ -348,6 +348,7 @@ export function toRun(v: unknown, botId?: string): Run | null {
     transcript_path: optStr(v.transcript_path),
     started_at: str(v.started_at),
     ended_at: optStr(v.ended_at),
+    agent_status_since: optStr(pick(v, 'agent_status_since')),
   }
 }
 

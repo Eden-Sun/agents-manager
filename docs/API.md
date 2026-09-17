@@ -88,9 +88,15 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
   "workspace_id": "w1", "pane_id": "w1:p2", "adopted": 0,
   "native_session_id": null, "transcript_path": null,
   "last_read_revision": null, "last_read_tail_hash": null,
-  "started_at": "2026-09-05T15:30:00.000Z", "ended_at": null
+  "started_at": "2026-09-05T15:30:00.000Z", "ended_at": null,
+  "agent_status_since": "2026-09-05T15:31:20.000Z"
 }
 ```
+
+- `agent_status_since`：`agent_status` 最後一次**真的改變**的時間（同值重寫不算），daemon 觀察到的，
+  不是任何一個前端看到的時間。`null` = 這個 run 還沒真的變過狀態，或升級前的舊列。前端算「跑了
+  多久」（SPEC §2.2）以這欄為準，只有它是 `null` 時才退回這回合最早那筆 in_flight turn 的
+  `created_at`，兩個都沒有才用網頁自己的觀察時間墊底。
 
 ### `lamp`（SPEC §2.2）
 

@@ -1,21 +1,18 @@
 import { useEffect, useState } from 'react'
 import { botLamp, useStore } from '../store/store'
-import { fmtElapsed } from '../lib/elapsed'
+import { activityStartedAt, fmtElapsed } from '../lib/elapsed'
 import './runElapsed.css'
 
 
 /** 跑多久了（2026-09-16 使用者：子 agent 執行中要有小字說已 run 幾分；同日改成只寫時間、放燈號下方）。只在 working 時出現。 */
-/** 這一頁看到某顆 bot「開始在跑」的時刻；daemon 沒有 turn 紀錄時（多半是別人派的回合）拿來墊底。 */
+/** 這一頁看到某顆 bot「開始在跑」的時刻；daemon 兩種紀錄都沒有時（升級前的舊列、或別人派的回合還沒
+ * 建出 turn）才拿來墊底——issue #93：起點要以 daemon 觀察到的為準，這只是最後一道防線。 */
 const seenWorkingAt = new Map<string, number>()
 
 export function RunElapsed({ botId }: { botId: string }) {
   const startedAt = useStore((s) => {
     if (botLamp(s, botId) !== 'working') return null
-    let start: string | null = null
-    for (const t of Object.values(s.turns[botId] ?? {})) {
-      if (t.status === 'in_flight' && (!start || t.created_at < start)) start = t.created_at
-    }
-    return start
+    return activityStartedAt(s.runs[botId]?.agent_status_since, Object.values(s.turns[botId] ?? {}))
   })
   const working = useStore((s) => botLamp(s, botId) === 'working')
   // 每秒上數；沒在跑時不開計時器。
@@ -37,7 +34,7 @@ export function RunElapsed({ botId }: { botId: string }) {
   return (
     <span
       className="run-elapsed"
-      title={startedAt ? `這一回合從 ${new Date(startedAt).toLocaleTimeString()} 開始跑` : '從這個網頁看到它開始跑算起（daemon 沒有這一回合的紀錄）'}
+      title={startedAt ? `從 ${new Date(startedAt).toLocaleTimeString()} 開始一直在跑（daemon 觀察到的時間）` : '從這個網頁看到它開始跑算起（daemon 還沒有這筆紀錄）'}
     >
       {fmtElapsed(ms)}
     </span>
