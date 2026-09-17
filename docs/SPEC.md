@@ -1613,7 +1613,8 @@ supervisor 相關資料表與欄位都是 additive，`db::migrate` 重跑冪等�
    `no_independent_reviewer` → 跳過 reviewer、記 `note`「執行者自審＋驗證者把關」。reviewer 只讀 diff，回 `am-review`
    （`approve|changes`＋findings）。`changes` → `mission round`（409 `max_rounds` 就停，任務已 `paused`，在群組問人）
    → 對執行者那件 `review followup`，文字帶 findings。
-4. **驗證者**：`mission pick --role verifier`；`ask_user` 時任務已停在 `no_fable_for_verifier`，在群組問使用者要等哪個身分
+4. **驗證者**：`mission pick --role verifier`；Fable 還有額度、只是 5h 窗撞限時回 `wait`（時間是 5h 的，不是 Fable 的下週），
+   `ask_user` 只留給真的沒有 Fable 額度的情況（review3 c1 L12）。`ask_user` 時任務已停在 `no_fable_for_verifier`，在群組問使用者要等哪個身分
    或改用非 Fable，**不自行降級**。`use` → 臨時 bot 在乾淨 worktree 跑 repo 規定的驗證（本 repo：`cargo test`、
    `tsc -p tsconfig.app.json`、oxlint、build、UI 截圖），回 `am-verify`；通過 → `mission event --kind verified --worktree <驗過的工作樹>`
    （或 `--sha <驗過的 commit>`；帶數字與截圖路徑）——daemon 記下**驗的是哪個 commit**，沒帶就 400；
