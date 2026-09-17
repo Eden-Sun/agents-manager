@@ -1357,7 +1357,7 @@ mod approval_decision_tests {
         let ap = store::create_approval(&app.db, "runner", "rebuild", "daemon", None, None, None).await.unwrap().approval;
         store::decide_approval(&app.db, &ap.id, "approved", "AGM", None, None).await.unwrap();
         let until = iso_in(900);
-        let lease = store::acquire_lease(&app.db, "rebuild", "runner", Some(&ap.id), None, &until, &json!({})).await.unwrap().unwrap();
+        let lease = store::acquire_lease(&app.db, "rebuild", "runner", Some(&ap.id), None, &until, false, &json!({})).await.unwrap().unwrap();
         let token = lease.lease_token.clone().expect("acquire 要發一把憑證");
         let held = || async { store::lease(&app.db, "rebuild").await.unwrap().unwrap() };
         let body = |v: serde_json::Value| -> LeaseHolderIn { serde_json::from_value(v).unwrap() };
@@ -1430,7 +1430,7 @@ mod approval_decision_tests {
         let ap = store::create_approval(&app.db, "runner", "rebuild", "daemon", None, None, None).await.unwrap().approval;
         store::decide_approval(&app.db, &ap.id, "approved", "AGM", None, None).await.unwrap();
         let until = iso_in(900);
-        let lease = store::acquire_lease(&app.db, "rebuild", "runner", Some(&ap.id), None, &until, &json!({})).await.unwrap().unwrap();
+        let lease = store::acquire_lease(&app.db, "rebuild", "runner", Some(&ap.id), None, &until, false, &json!({})).await.unwrap().unwrap();
         let body = |v: serde_json::Value| -> LeaseHolderIn { serde_json::from_value(v).unwrap() };
 
         // 一般呼叫端（沒有角色）就算附了理由也不能接管：force 是授權問題，不只是稽核問題。
@@ -1485,7 +1485,7 @@ mod approval_decision_tests {
         let ap = store::create_approval(&app.db, "runner", "rebuild", "daemon", None, None, None).await.unwrap().approval;
         store::decide_approval(&app.db, &ap.id, "approved", "AGM", None, None).await.unwrap();
         let until = iso_in(900);
-        let lease = store::acquire_lease(&app.db, "rebuild", "runner", Some(&ap.id), None, &until, &json!({})).await.unwrap().unwrap();
+        let lease = store::acquire_lease(&app.db, "rebuild", "runner", Some(&ap.id), None, &until, false, &json!({})).await.unwrap().unwrap();
         // 升級前的那一列：token 是 NULL。
         sqlx::query("UPDATE supervisor_leases SET lease_token=NULL WHERE resource='rebuild'").execute(&app.db).await.unwrap();
 
@@ -1814,7 +1814,7 @@ mod review_boundary_tests {
         let app = app().await;
         let approval = store::create_approval(&app.db, "runner", "rebuild", "test", None, None, None).await.unwrap().approval;
         store::decide_approval(&app.db, &approval.id, "approved", "AGM", None, None).await.unwrap();
-        let lease = store::acquire_lease(&app.db, "rebuild", "runner", Some(&approval.id), None, &iso_in(60), &json!({})).await.unwrap().unwrap();
+        let lease = store::acquire_lease(&app.db, "rebuild", "runner", Some(&approval.id), None, &iso_in(60), false, &json!({})).await.unwrap().unwrap();
         let agm = super::approval_decision_tests::agm_role_headers(&app).await;
         let input: LeaseHolderIn =
             serde_json::from_value(json!({"owner": "runner", "fence": lease.fence, "ttl_secs": 3600, "force": true, "reason": "延長一下"})).unwrap();
@@ -1831,7 +1831,7 @@ mod review_boundary_tests {
         let approval = store::create_approval(&app.db, "owner", "rebuild", "test", None, None, None).await.unwrap().approval;
         store::decide_approval(&app.db, &approval.id, "approved", "AGM", None, None).await.unwrap();
         let lease = store::acquire_lease(&app.db, "rebuild", "owner", Some(&approval.id), None,
-            &iso_in(60), &json!({})).await.unwrap().unwrap();
+            &iso_in(60), false, &json!({})).await.unwrap().unwrap();
         store::decide_approval(&app.db, &approval.id, "revoked", "AGM", None, None).await.unwrap();
         for expected in ["approval_revoked", "approval_missing"] {
             let input: LeaseHolderIn = serde_json::from_value(json!({"owner":"owner","fence":lease.fence,"ttl_secs":3600})).unwrap();

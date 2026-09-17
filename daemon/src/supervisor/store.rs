@@ -2593,12 +2593,50 @@ pub async fn leases(pool: &SqlitePool) -> Result<Vec<Lease>> {
     Ok(sqlx::query_as::<_, Lease>("SELECT * FROM supervisor_leases ORDER BY resource").fetch_all(pool).await?)
 }
 
+/// **送達臨界區的唯一定義**（SPEC §18.10）：這一筆 turn 此刻是不是「daemon 正要把字送進 pane，
+/// 中途被打斷會掉東西」。兩種：
+/// - `queued` 而且這顆 bot 還有活著、不在 `blocked` 的 run（有人會來送它）；
+/// - `in_flight` 而 `delivery` 還是 `pending`（正在打字／送出）。
+///
+/// 安全檢查（`maintenance::safety`）、`acquire_lease` 的條件式寫入與入場閘門都讀這一份，
+/// 才不會養出兩套會漂移的規則（issue #86）。用的別名固定是 `t`（turns）與 `c`（conversations）。
+pub const DELIVERY_CRITICAL_PREDICATE: &str = "(t.status='queued' AND EXISTS (SELECT 1 FROM runs r WHERE r.bot_id = c.bot_id
+                       AND r.state IN ('starting','running','stopping') AND r.agent_status <> 'blocked'))
+      OR (t.status='in_flight' AND t.delivery='pending')";
+
+/// 上面那份條件套在「任何一顆 bot」上，給 `NOT EXISTS (…)` 用。沒有 bind 參數。
+pub fn delivery_critical_anywhere_sql() -> String {
+    format!(
+        "SELECT 1 FROM turns t JOIN conversations c ON c.id = t.conversation_id WHERE {DELIVERY_CRITICAL_PREDICATE} LIMIT 1"
+    )
+}
+
+/// 上面那份條件限定一顆 bot，回傳擋住的那一筆 turn id。
+pub fn delivery_critical_for_bot_sql() -> String {
+    format!(
+        "SELECT t.id FROM turns t JOIN conversations c ON c.id = t.conversation_id
+          WHERE c.bot_id = ? AND ({DELIVERY_CRITICAL_PREDICATE}) LIMIT 1"
+    )
+}
+
+/// 這一刻有沒有**任何**一顆 bot 在送達臨界區。只給「拿不到租約時要說清楚是哪一種輸法」用；
+/// 真正把關的是 [`acquire_lease`] 那一句 UPDATE 自己帶的條件。
+pub async fn delivery_critical_anywhere(pool: &SqlitePool) -> Result<bool> {
+    Ok(sqlx::query_scalar::<_, i64>(&delivery_critical_anywhere_sql()).fetch_optional(pool).await?.is_some())
+}
+
 /// Take the lease on `resource`, if nobody holds it.
 ///
 /// One conditional UPDATE does the whole thing, so two callers racing for the same window
 /// cannot both win: the loser's `rows_affected` is 0. `fence` is bumped on every successful
 /// acquire and every operation afterwards has to present the current one — that is what stops a
 /// holder that stalled past its expiry from carrying on as if it still had the window.
+///
+/// `quiet_delivery` 再加一個條件：**寫下去的那一刻**沒有任何 bot 在送達臨界區
+/// （[`DELIVERY_CRITICAL_PREDICATE`]）。安全檢查是在這之前讀的，中間那一瞬有 prompt 把 turn
+/// commit 進來的話，光靠那個讀不出來——窗口就會在「有人正在打字」的情況下被拿走（issue #86 的
+/// TOCTOU）。兩邊都是單句寫入，SQLite 自己會排序，所以先 commit 的那個贏：
+/// prompt 先 → 這裡 0 rows；這裡先 → prompt 在第一個字之前看到租約，撤回自己那一筆。
 pub async fn acquire_lease(
     pool: &SqlitePool,
     resource: &str,
@@ -2606,6 +2644,7 @@ pub async fn acquire_lease(
     approval_id: Option<&str>,
     target_commit: Option<&str>,
     expires_at: &str,
+    quiet_delivery: bool,
     detail: &Value,
 ) -> Result<Option<Lease>> {
     let now = crate::db::now();
@@ -2627,12 +2666,13 @@ pub async fn acquire_lease(
     .await?
     .flatten();
     let token = crate::projection::new_token();
-    let taken = sqlx::query(
+    let quiet = if quiet_delivery { format!(" AND NOT EXISTS ({})", delivery_critical_anywhere_sql()) } else { String::new() };
+    let taken = sqlx::query(&format!(
         "UPDATE supervisor_leases
             SET owner=?, approval_id=?, target_commit=?, fence=fence+1, acquired_at=?, expires_at=?,
                 released_at=NULL, lease_token=?, detail_json=?
-          WHERE resource=? AND (released_at IS NOT NULL OR expires_at IS NULL OR expires_at <= ?)",
-    )
+          WHERE resource=? AND (released_at IS NOT NULL OR expires_at IS NULL OR expires_at <= ?){quiet}"
+    ))
     .bind(owner)
     .bind(approval_id)
     .bind(target_commit)
@@ -3710,8 +3750,8 @@ mod tests {
         let p = pool().await;
         get_or_init(&p).await.unwrap();
         let soon = "2099-01-01T00:00:00Z";
-        let first = acquire_lease(&p, "rebuild", "bot-a", Some("ap1"), Some("abc"), soon, &json!({})).await.unwrap();
-        let second = acquire_lease(&p, "rebuild", "bot-b", Some("ap2"), Some("abc"), soon, &json!({})).await.unwrap();
+        let first = acquire_lease(&p, "rebuild", "bot-a", Some("ap1"), Some("abc"), soon, false, &json!({})).await.unwrap();
+        let second = acquire_lease(&p, "rebuild", "bot-b", Some("ap2"), Some("abc"), soon, false, &json!({})).await.unwrap();
         let first = first.expect("first acquire wins");
         assert!(second.is_none(), "the second executor is refused while the window is held");
         assert_eq!(first.owner.as_deref(), Some("bot-a"));
@@ -3725,7 +3765,7 @@ mod tests {
         // Released: the next executor gets it, with a higher fence.
         assert!(release_lease(&p, "rebuild", "bot-a", first.fence).await.unwrap());
         assert!(!release_lease(&p, "rebuild", "bot-a", first.fence).await.unwrap(), "releasing twice is a no-op");
-        let second = acquire_lease(&p, "rebuild", "bot-b", Some("ap2"), Some("abc"), soon, &json!({}))
+        let second = acquire_lease(&p, "rebuild", "bot-b", Some("ap2"), Some("abc"), soon, false, &json!({}))
             .await
             .unwrap()
             .expect("free again");
@@ -3738,12 +3778,12 @@ mod tests {
     async fn an_expired_lease_is_taken_over_and_the_old_token_stops_working() {
         let p = pool().await;
         get_or_init(&p).await.unwrap();
-        let dead = acquire_lease(&p, "restart", "bot-a", None, None, "2000-01-01T00:00:00Z", &json!({}))
+        let dead = acquire_lease(&p, "restart", "bot-a", None, None, "2000-01-01T00:00:00Z", false, &json!({}))
             .await
             .unwrap()
             .unwrap();
         assert!(!dead.held_at(&crate::db::now()), "already expired");
-        let next = acquire_lease(&p, "restart", "bot-b", None, None, "2099-01-01T00:00:00Z", &json!({}))
+        let next = acquire_lease(&p, "restart", "bot-b", None, None, "2099-01-01T00:00:00Z", false, &json!({}))
             .await
             .unwrap()
             .expect("an expired lease does not block the next window");
@@ -3898,14 +3938,14 @@ mod tests {
         let first = create_approval(&p, "bot-a", "restart", "daemon", None, None, None).await.unwrap().approval;
         decide_approval(&p, &first.id, "approved", "AGM", None, None).await.unwrap();
         let past = (chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        acquire_lease(&p, "restart", "runner-1", Some(&first.id), None, &past, &json!({})).await.unwrap().unwrap();
+        acquire_lease(&p, "restart", "runner-1", Some(&first.id), None, &past, false, &json!({})).await.unwrap().unwrap();
         assert_eq!(approval(&p, &first.id).await.unwrap().unwrap().status, "approved");
 
         // 沒有人 release，租約自己過期，下一個人接手。
         let second = create_approval(&p, "bot-a", "restart", "daemon", None, None, None).await.unwrap().approval;
         decide_approval(&p, &second.id, "approved", "AGM", None, None).await.unwrap();
         let later = (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        acquire_lease(&p, "restart", "runner-2", Some(&second.id), None, &later, &json!({})).await.unwrap().unwrap();
+        acquire_lease(&p, "restart", "runner-2", Some(&second.id), None, &later, false, &json!({})).await.unwrap().unwrap();
 
         assert_eq!(approval(&p, &first.id).await.unwrap().unwrap().status, "consumed", "過期沒 release 的那張要被消耗掉");
         assert_eq!(approval(&p, &second.id).await.unwrap().unwrap().status, "approved", "接手的這張還在用");

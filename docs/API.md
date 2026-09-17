@@ -200,6 +200,7 @@ prompt 改成打字進 pane 並以無損證據確認。**一個字都沒打時�
 |---|---|---|
 | 409 | `{"reason":"composer_busy"|"composer_unreadable"|"transcript_not_ready"|"transcript_unreadable"|"codex_log_not_ready"|"no_pane_to_type_into","retryable":true,"sent":false,"run_id"}` | 暫時送不了（輸入框有字、claude 還沒回報 session…）。同一個 `client_request_id` 稍後重送即可；AGM 交辦維持 queued 退避重試。 |
 | 422 | `{"error":"delivery_unprovable","reason":"prompt_too_long_to_prove","sent":false,"run_id"}` | 超過 20 萬字，不打。 |
+| 409 | `{"reason":"maintenance_window","resource":"restart","held_by","fence","expires_at","retry_after_secs","retryable":true,"sent":false,"message"}` | 有人握著會中斷 pane 的維護窗口（SPEC §18.10），daemon 這一側不送新的 prompt，連 turn 都不建。窗口 release 或到期就自動恢復，同一個 `client_request_id` 原樣重送即可。AGM 派工不走這個 409——它在 `controller::dispatch` 就被 hold 在佇列裡。 |
 
 turn 已經建好、還沒打第一個字時 run 就結束（`mark_run_exited` 把它標 failed 並插「run ended」說明）：撤回撤不掉，這時
 **不刪任何東西**，回 `200` 那筆 turn 的現況（訊息與說明都留著），跟用同一個 `client_request_id` 重送拿到的回應一致，不回可重試的 409。

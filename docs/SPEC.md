@@ -1584,7 +1584,19 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
   升級過渡：欄位是 additive，升級前建立的租約 `lease_token IS NULL`，這種**不帶 token 也能釋放**（否則升級當下握著的窗口永遠沒人還得了），釋放時留一行 warn。過期自動失效與 fence 只增不減的語意都沒變。
   ops 腳本**不把 token 寫進派工正文**（review2 2026-09-16）：正文會出現在 `GET /api/supervisor/assignments`、建置 child 的對話紀錄與腳本 log，等於換一個公開位置。
   token 寫進 AGM 目錄裡權限 600 的 `daemon-update.lease-token`，正文只給 `--lease-token "$(cat <那個檔>)"`。
-- 持有 `restart` 租約期間 **supervisor 的 assignment 派送 hold**（留 `queued`，不算重試）。**只管這一條通道**：`POST /api/bots/{id}/prompt` 沒被 gate。
+- **持有 `restart` 租約＝daemon 全域的 prompt 入場閘門**（issue #86）。`maintenance::window_held` 是唯一的定義，三個入口都讀它：
+  - `controller::dispatch`：交辦 **hold**（留 `queued`，不算重試）——它是有自己重試與驗收的持久工作項，窗口關掉照常送出去，不遺失也不重送（`dispatch_crid` 冪等）。
+  - `lifecycle::prompt`（使用者、web、群組、工具、AGM 派工都走它）：**409 `maintenance_window`**，body 帶 `held_by`／`resource`／`expires_at`／`retry_after_secs`／`retryable:true`。
+    擋在建 turn **之前**，所以連一列都不建、也不廣播 `message_added`——建完再撤的話使用者會看到一顆泡泡冒出來又消失。
+    使用者的 prompt **不排隊**：`turns_one_queued` 每個對話只留一筆 queued，而且窗口最長一小時（預設 15 分鐘），一則訊息默默躺著幾分鐘之後才出現在 pane，比當場說「正在維護、還要等 N 秒」更糟。這跟「回合中的使用者 prompt 回 409」是同一條既有裁示（§6）。
+  - `lifecycle::queue::flush_queued_locked`：排隊的 prompt **留在佇列**，掛一個到窗口到期為止的 timer，不算重試（擋它的是我們自己開的窗口，不是 bot 的狀態）。
+    沒有這一條的話，acquire 當下停在 `blocked`（不算臨界區）的 bot 一旦離開 blocked，排在後面的那筆就會在窗口中途打進 pane。
+  **不在閘門內**：使用者自己在 pane 裡打字（不經過 daemon，不是我們攔得住也不該攔的）；以及 daemon 自己的控制面 prompt——AGM／協調者啟動時那一則握手走 `prompt_control_plane`，不受閘門管，否則窗口會把「把東西停下來再起來」這件事本身鎖在門外。
+- **過期不會鎖死**：閘門判斷走 `Lease::held_at`（`released_at IS NULL` 且 `expires_at > now`），時間一到自動不再擋，不需要任何人收尾；TTL 上限一小時、預設 15 分鐘。daemon 重啟時 `release_restart_on_startup` 再收一次。
+- **閘門與 acquire 用同一份「送達臨界區」定義**（`store::DELIVERY_CRITICAL_PREDICATE`），而且 `acquire_lease` 那一句條件式 UPDATE **自己也帶這份條件**：
+  safety 是在拿租約之前讀的，讀完到寫入之間仍可能有一則 prompt 把 turn commit 進來（TOCTOU）。兩邊各是一句單句寫入、由 SQLite 排序，先 commit 的贏——
+  prompt 先 → acquire 0 rows，回 409 `not_idle` 且 `raced:true`（跟「被別人搶走窗口」的 `lease_held` 分得開）；acquire 先 → prompt 在第一個字之前複查到租約，**撤回自己剛 commit 的那一筆**再回 409。
+  兩邊加起來才是「acquire 回 Ok 之後不會有任何一個字進 pane」。`rebuild` 不中斷任何人，不帶這個條件。
 - **重啟後無等待期**：窗口在租約 release（API）或 daemon 啟動完成（開始 listen 後自動 release 仍未釋放的 `restart` 租約、consume 核准並記 info log）時就結束，被它 hold 的交辦立刻解除、controller 下一輪（≤10 秒）直接派送，不等 hold 寫的到期時間；controller 每輪派送前發現已沒有 held 的 `restart` 租約（含到期）也會先解除殘留 hold。
 - 安全窗口 fail closed：讀不到某顆 bot 狀態回 `safe:false` 並列在 `unreadable`。`restart` 不接受 `require_idle=false`。
 - **等太久就縮小封鎖面**（AGM 裁示 2026-09-16）：在這台機器的負載下「任何 bot 在回合中就不換」等同永遠不安全——2026-09-15 那筆核准卡了 11 小時，每 5 分鐘那一輪都撞到有人在講話。
@@ -1645,7 +1657,7 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
 supervisor 相關資料表與欄位都是 additive，`db::migrate` 重跑冪等。往回滾到較舊的 binary 時：
 - 舊 binary 不認得 `awaiting_review`／`blocked`／`superseded`／`quota_blocked`，這些交辦會從它的未結案清單消失（資料不刪）；回滾前先逐筆決定掉。
 - 舊的 `on_turn_done` 會把跑完的交辦直接寫成 `completed`，且不會標 `legacy_closed`。
-- 舊 binary 不看租約（restart 窗口不 hold 派工）；舊的 `ensure_env` 會用內嵌版覆寫人設——回滾前先確認內嵌版就是要的那份。
+- 舊 binary 不看租約（restart 窗口不 hold 派工，也沒有 prompt 入場閘門）；舊的 `ensure_env` 會用內嵌版覆寫人設——回滾前先確認內嵌版就是要的那份。
 
 ### 18.14 群組任務（mission）的 AGM runbook（2026-09-13）
 

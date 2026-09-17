@@ -188,6 +188,26 @@ pub struct PromptOut {
     pub delivery: String,
 }
 
+/// 這一則 prompt 在維護窗口（`restart` 租約）前面算哪一類（issue #86）。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Admission {
+    /// 一般送入（使用者、web、群組、工具、AGM 派工）：窗口持有期間擋下，回 409 `maintenance_window`。
+    Gated,
+    /// 控制面自己的送入：AGM／協調者啟動時那一則握手。**不擋**——窗口就是為了「把東西停下來再起來」
+    /// 而開的，連起來時的握手都擋掉就會把控制面鎖死在自己的閘門外（issue #86 驗收第三條）。
+    /// 只有 daemon 自己呼叫得到，沒有從 HTTP 進得來的路。
+    ControlPlane,
+}
+
+/// 窗口握著就回 `Some(那個 409)`。`ControlPlane` 一律放行。
+async fn maintenance_refusal(app: &Arc<App>, admission: Admission) -> Option<LcError> {
+    if admission == Admission::ControlPlane {
+        return None;
+    }
+    let w = crate::supervisor::maintenance::window_held(app).await?;
+    Some(w.refusal())
+}
+
 pub async fn prompt(app: &Arc<App>, bot_id: &str, text: &str, client_request_id: &str) -> LcResult<PromptOut> {
     prompt_grouped(app, bot_id, text, client_request_id, None, None, &[], None).await
 }
@@ -228,7 +248,7 @@ pub async fn prompt_relayed_queueable(
     client_request_id: &str,
     relay_from: Option<&str>,
 ) -> LcResult<PromptOut> {
-    prompt_inner(app, bot_id, text, client_request_id, None, None, &[], relay_from, true).await
+    prompt_inner(app, bot_id, text, client_request_id, None, None, &[], relay_from, true, Admission::Gated).await
 }
 
 /// 排一筆 `queued` turn 等下一回合（只有 AGM 派工走這裡）。
@@ -374,7 +394,19 @@ pub async fn prompt_grouped(
     attachment_ids: &[String],
     relay_from: Option<&str>,
 ) -> LcResult<PromptOut> {
-    prompt_inner(app, bot_id, text, client_request_id, group_id, deliver, attachment_ids, relay_from, false).await
+    prompt_inner(app, bot_id, text, client_request_id, group_id, deliver, attachment_ids, relay_from, false, Admission::Gated).await
+}
+
+/// daemon 自己的控制面 prompt（AGM／協調者啟動時的握手）：不受維護窗口的入場閘門管（issue #86）。
+/// 只有 `supervisor` 那兩條啟動路徑用得到；一般送入一律走 [`prompt_relayed`]。
+pub async fn prompt_control_plane(
+    app: &Arc<App>,
+    bot_id: &str,
+    text: &str,
+    client_request_id: &str,
+    relay_from: Option<&str>,
+) -> LcResult<PromptOut> {
+    prompt_inner(app, bot_id, text, client_request_id, None, None, &[], relay_from, false, Admission::ControlPlane).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -390,6 +422,8 @@ async fn prompt_inner(
     relay_from: Option<&str>,
     // 對方回合中時排隊而不是 409。只有 AGM 派工會給 true。
     queue_if_busy: bool,
+    // 維護窗口的入場閘門要不要管這一則（issue #86）。
+    admission: Admission,
 ) -> LcResult<PromptOut> {
     let deliver = deliver.unwrap_or(text);
     let lock = app.bot_lock(bot_id).await;
@@ -415,6 +449,13 @@ async fn prompt_inner(
         .map_err(up)?
     {
         return answer_for_turn(app, &t).await;
+    }
+
+    // 維護窗口的入場閘門（issue #86）：`restart` 租約握著的時候，daemon 這一側不再開新回合。
+    // 擋在規劃與 turn 之前，所以連一列都不會建，同一個 `client_request_id` 之後原樣重送是乾淨的。
+    // 冪等那一段在上面：已經送出去的那一筆照舊回它自己的結果，不會因為窗口開著就改口。
+    if let Some(refusal) = maintenance_refusal(app, admission).await {
+        return Err(refusal);
     }
 
     // 1. preconditions
@@ -504,6 +545,19 @@ async fn prompt_inner(
     }
     emit_prompt_message(app, bot_id, &msg_id).await;
     emit_turn(app, &turn_id).await;
+
+    // 窄窗：閘門讀完之後、這一筆 commit 之前，窗口才被拿走。一個字都還沒打，所以撤回這一筆再回 409。
+    // 另一邊（`store::acquire_lease`）的條件式寫入保證它看不到已經 commit 的 turn，兩句都是單句寫入、
+    // 由 SQLite 排序，所以先 commit 的那個贏：這裡贏 → acquire 拿不到；acquire 贏 → 這裡撤回。
+    // 兩邊加起來才是「acquire 回 Ok 之後不會有任何一個字進 pane」（issue #86）。
+    if let Some(refusal) = maintenance_refusal(app, admission).await {
+        match retract_unsent_turn(app, &turn_id, &msg_id).await {
+            Ok(Retraction::Withdrawn) => return Err(refusal),
+            // 這筆已經被別的路徑收掉了：照它現在的樣子回，跟同一個 request id 重送一致（review3 L4）。
+            Ok(Retraction::AlreadySettled) => return answer_for_turn_id(app, &turn_id).await,
+            Err(e) => return Err(LcError::Upstream(format!("a maintenance window opened and the turn could not be withdrawn: {e}"))),
+        }
+    }
 
     // 4. deliver
     let res = execute_delivery(app, &client, &run, &bot, &deliver, plan).await;
@@ -836,6 +890,127 @@ mod prompt_tests {
             from(app.db.clone(), &relayed.message_id).await,
             Some(crate::agent_relay::DAEMON_SENDER.to_string())
         );
+    }
+
+    /// 握住一個 `restart` 維護窗口（`mins` 為負＝已經過期）。
+    async fn hold_restart_window(app: &Arc<App>, owner: &str, mins: i64) {
+        let until = (chrono::Utc::now() + chrono::Duration::minutes(mins)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        crate::supervisor::store::acquire_lease(&app.db, "restart", owner, None, None, &until, false, &json!({}))
+            .await
+            .unwrap()
+            .expect("沒有人握著，一定拿得到");
+    }
+
+    async fn turn_count(app: &Arc<App>, conv: &str) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE conversation_id=?").bind(conv).fetch_one(&app.db).await.unwrap()
+    }
+
+    /// issue #86：`restart` 租約握著的期間，daemon 這一側不再開新回合。擋下來要講清楚**誰**握著、
+    /// 到**什麼時候**——只說「送不出去」的話呼叫端只會一直重送。連一列都不建，所以同一個
+    /// `client_request_id` 之後原樣重送是乾淨的。
+    ///
+    /// 這一支跟 `maintenance` 那邊的 `a_window_is_not_taken_while_a_prompt_is_in_the_delivery_critical_section`
+    /// 是一對：租約先到就擋 prompt，prompt 先到就擋租約，兩個不會同時進送達臨界區。
+    #[tokio::test]
+    async fn a_held_restart_window_refuses_new_prompts_and_says_who_holds_it() {
+        let f = fixture("codex", "test").await;
+        let app = f.env.app.clone();
+        hold_restart_window(&app, "k8bw2f", 5).await;
+        let mut events = app.subscribe();
+
+        let out = prompt(&app, &f.bot_id, "Reply with PONG please", "prompt-in-window").await;
+
+        let Err(LcError::Conflict(body)) = out else { panic!("expected 409, got {:?}", out.map(|o| o.delivery)) };
+        assert_eq!(body["reason"], "maintenance_window", "{body}");
+        assert_eq!(body["held_by"], "k8bw2f", "{body}");
+        assert_eq!(body["resource"], "restart", "{body}");
+        assert_eq!(body["retryable"], true, "{body}");
+        assert!(body["expires_at"].as_str().is_some_and(|s| !s.is_empty()), "要講到什麼時候：{body}");
+        assert!(body["retry_after_secs"].as_i64().unwrap_or(0) > 0, "要講還要等多久：{body}");
+        assert_eq!(turn_count(&app, &f.conv).await, 0, "連 turn 都沒建");
+        assert_eq!(f.env.herdr.methods().iter().filter(|m| *m == "pane.send_text").count(), 0, "一個字都沒打");
+        // 擋在 turn 之前，不是建完再撤：撤回那條路會先廣播 `message_added` 再補一次 `resync`，
+        // 使用者看到的是一顆泡泡冒出來又消失。窗口開著時每一則 prompt 都這樣閃一下是不行的。
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), events.recv()).await.is_err(),
+            "一則都不該廣播：沒有泡泡冒出來又消失",
+        );
+    }
+
+    /// 窗口 release 之後自動恢復：同一個 `client_request_id` 原樣重送就真的送出去（前一次沒留下任何列）。
+    #[tokio::test]
+    async fn a_released_window_lets_the_same_request_id_through_again() {
+        let f = fixture("codex", "test").await;
+        let app = f.env.app.clone();
+        hold_restart_window(&app, "k8bw2f", 5).await;
+        assert!(prompt(&app, &f.bot_id, "Reply with PONG please", "prompt-retry").await.is_err());
+
+        let l = crate::supervisor::store::lease(&app.db, "restart").await.unwrap().unwrap();
+        assert!(crate::supervisor::store::release_lease(&app.db, "restart", "k8bw2f", l.fence).await.unwrap());
+
+        let out = prompt(&app, &f.bot_id, "Reply with PONG please", "prompt-retry").await.expect("窗口關了就照常送");
+        assert_ne!(out.delivery, "failed", "{out:?}", out = out.delivery);
+        assert_eq!(turn_count(&app, &f.conv).await, 1);
+    }
+
+    /// 過期沒 release 的租約**不會**把 daemon 鎖死：閘門看 `held_at`，`expires_at` 一到就自動不再擋，
+    /// 不需要任何人來收尾（租約 TTL 上限一小時）。
+    #[tokio::test]
+    async fn an_expired_window_fences_nothing() {
+        let f = fixture("codex", "test").await;
+        let app = f.env.app.clone();
+        hold_restart_window(&app, "k8bw2f", -1).await;
+        let l = crate::supervisor::store::lease(&app.db, "restart").await.unwrap().unwrap();
+        assert!(l.released_at.is_none(), "沒有人 release，它只是過期了");
+
+        prompt(&app, &f.bot_id, "Reply with PONG please", "prompt-after-expiry").await.expect("過期的窗口不擋");
+    }
+
+    /// 控制面自己的送入（AGM／協調者啟動時的握手）不受閘門管：窗口就是為了「停下來再起來」而開的，
+    /// 連起來時的握手都擋掉，控制面就被自己的閘門鎖在門外（issue #86 驗收第三條）。
+    #[tokio::test]
+    async fn the_control_plane_handshake_is_not_fenced() {
+        let f = fixture("codex", "test").await;
+        let app = f.env.app.clone();
+        hold_restart_window(&app, "k8bw2f", 5).await;
+
+        assert!(prompt(&app, &f.bot_id, "使用者的", "prompt-user").await.is_err(), "一般送入照擋");
+        prompt_control_plane(&app, &f.bot_id, "AGM 啟動握手", "agm-bootstrap-v1", Some(crate::agent_relay::DAEMON_SENDER))
+            .await
+            .expect("控制面的握手照樣進得去");
+    }
+
+    /// 窄窗：閘門讀完之後、這一筆 turn commit 之前，窗口才被拿走。一個字都還沒打，所以這一筆要被
+    /// 撤回再回 409——留著的話它就是一筆 `in_flight`＋`pending`，正好是窗口承諾「裡面沒有」的那種。
+    /// 用 `AFTER INSERT ON turns` 的 trigger 精準插進那個時點。
+    #[tokio::test]
+    async fn a_window_that_opens_while_the_turn_commits_takes_the_turn_back_out() {
+        let f = fixture("codex", "test").await;
+        let app = f.env.app.clone();
+        // 這一刻還沒有人握著（`released_at` 有值）：閘門的第一次讀會放行。
+        sqlx::query("INSERT INTO supervisor_leases (resource, owner, fence, released_at) VALUES ('restart','k8bw2f',7,?)")
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER a_window_opens_mid_commit AFTER INSERT ON turns
+             BEGIN
+               UPDATE supervisor_leases SET expires_at='2099-01-01T00:00:00Z', acquired_at='2026-01-01T00:00:00Z',
+                      released_at=NULL WHERE resource='restart';
+             END",
+        )
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        let out = prompt(&app, &f.bot_id, "Reply with PONG please", "prompt-raced-window").await;
+
+        let Err(LcError::Conflict(body)) = out else { panic!("expected 409, got {:?}", out.map(|o| o.delivery)) };
+        assert_eq!(body["reason"], "maintenance_window", "{body}");
+        assert_eq!(body["held_by"], "k8bw2f", "{body}");
+        assert_eq!(turn_count(&app, &f.conv).await, 0, "搶進來的那一筆被撤回，不是留成 in_flight+pending");
+        assert_eq!(f.env.herdr.methods().iter().filter(|m| *m == "pane.send_text").count(), 0, "一個字都沒打");
     }
 
     /// Binding can fail after the turn commits; the UI must still get a terminal turn event.

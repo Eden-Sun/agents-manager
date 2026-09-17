@@ -14,12 +14,19 @@
 //!    lease is held new assignments are not dispatched (they stay queued), which is the half
 //!    the snapshot approach could never do.
 //!
-//! **What the pause actually covers, stated narrowly because the gap matters:** holding a
-//! `restart` lease stops *supervisor assignment dispatch* — `controller::dispatch`, the path
-//! AGM's own work goes out through. It does **not** gate `POST /api/bots/{id}/prompt`; a user
-//! typing into a bot still goes through during the window. So the lease makes the window quiet on the one channel
-//! the supervisor controls, not on the whole daemon. Closing that gap means a check inside
-//! `lifecycle::prompt` itself, which reaches well outside this module and is not attempted here.
+//! **What the pause covers (issue #86):** holding a `restart` lease is a **daemon-wide prompt
+//! admission fence** — [`window_held`] is the one definition, and all three entrances read it:
+//! `controller::dispatch` (assignments stay queued), `lifecycle::prompt` (new turns are refused
+//! with 409 `maintenance_window`) and `lifecycle::queue::flush_queued_locked` (a queued prompt
+//! waits instead of going into the pane). It used to gate assignment dispatch only, so the very
+//! thing the window promises — nothing new starts in here — was true on one channel and false on
+//! the two that actually type into panes.
+//!
+//! **What it deliberately does not cover**: the user's own keyboard. The fence is on daemon-side
+//! admission; somebody typing into a pane in their terminal is not going through this daemon and
+//! is not ours to block. Nor are the daemon's own control-plane prompts (the AGM / responder
+//! start handshakes): a window that blocked those would lock the box out of the very operation it
+//! was opened for.
 //!
 //! The other honest limit, for the same reason: an arbitrary shell on this machine can still
 //! `kill` the daemon without asking anybody. The lease binds the paths that go through this API
@@ -36,10 +43,10 @@ use super::store;
 /// a private lock that protects nothing.
 pub const RESOURCES: [&str; 2] = ["rebuild", "restart"];
 
-/// Holding this one pauses **supervisor assignment dispatch**. A rebuild does not interrupt
+/// Holding one of these is the daemon-wide admission fence ([`window_held`]): assignment
+/// dispatch, new prompts and queued-prompt flushes all stop. A rebuild does not interrupt
 /// anybody; a restart does, and handing a bot new work while waiting to kill its session is the
-/// race this closes — for assignments. Ordinary prompts are not gated (see
-/// the module docs); do not read a held restart lease as "nothing can reach any bot".
+/// race this closes.
 pub const EXCLUSIVE: [&str; 1] = ["restart"];
 
 /// 等太久就縮小封鎖面（SPEC §18.10）：一筆已核准、還沒用掉的窗口從**核准時間**起等超過這麼多分鐘，
@@ -122,23 +129,17 @@ async fn held_leases(app: &Arc<App>, owner: Option<&str>) -> Result<Vec<Value>, 
 /// 打字／送出（`in_flight` 而 `delivery` 還是 `pending`）。回傳擋住的那一筆 turn id。
 ///
 /// `delivery='unknown'` 不算：那是送完但驗不到、停在那裡等人處理的狀態，跟 `blocked` 一樣可以等很久。
+/// queued 只在這顆 bot 還有活著的 run 時才算：沒有 run 就沒有人會送它，是遺留下來的（會被撤銷），
+/// 算進來的話 restart safety 永遠判成臨界區，縮小封鎖面之後也 unsafe（AGM 2026-09-16）。
+/// run 此刻停在 `blocked`（等使用者回答）也不算：flush 在 blocked 時不會開始打字，queued 跨 daemon 重啟保得住；
+/// 不放行的話「有人在等使用者」就讓整台機器不能換版（AGM 裁示 2026-09-16）。一離開 blocked 就立刻回到臨界區——
+/// 讀的是 runs 的即時狀態，acquire 在鎖內重判一次、而且**寫的那一句**也帶同一個條件；
+/// 已經開始送的 in_flight＋pending 不管 blocked 與否照算。條件本身在 [`store::DELIVERY_CRITICAL_PREDICATE`]。
 async fn delivery_critical(pool: &sqlx::SqlitePool, bot_id: &str) -> anyhow::Result<Option<String>> {
-    Ok(sqlx::query_scalar::<_, String>(
-        // queued 只在這顆 bot 還有活著的 run 時才算：沒有 run 就沒有人會送它，是遺留下來的（會被撤銷），
-        // 算進來的話 restart safety 永遠判成臨界區，縮小封鎖面之後也 unsafe（AGM 2026-09-16）。
-        // run 此刻停在 `blocked`（等使用者回答）也不算：flush 在 blocked 時不會開始打字，queued 跨 daemon 重啟保得住；
-        // 不放行的話「有人在等使用者」就讓整台機器不能換版（AGM 裁示 2026-09-16）。一離開 blocked 就立刻回到臨界區——
-        // 讀的是 runs 的即時狀態，acquire 在鎖內重判一次；已經開始送的 in_flight＋pending 不管 blocked 與否照算。
-        "SELECT t.id FROM turns t JOIN conversations c ON c.id = t.conversation_id
-          WHERE c.bot_id = ?
-            AND ((t.status='queued' AND EXISTS (SELECT 1 FROM runs r WHERE r.bot_id = c.bot_id
-                                                AND r.state IN ('starting','running','stopping') AND r.agent_status <> 'blocked'))
-                 OR (t.status='in_flight' AND t.delivery='pending'))
-          LIMIT 1",
-    )
-    .bind(bot_id)
-    .fetch_optional(pool)
-    .await?)
+    Ok(sqlx::query_scalar::<_, String>(&store::delivery_critical_for_bot_sql())
+        .bind(bot_id)
+        .fetch_optional(pool)
+        .await?)
 }
 
 /// Default and maximum lease lifetime. Long enough for a release build and a restart, short
@@ -150,16 +151,71 @@ fn iso_in(secs: i64) -> String {
     (chrono::Utc::now() + chrono::Duration::seconds(secs)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
-/// Is a restart window currently held by someone? Used by the dispatcher to hold work back.
-pub async fn dispatch_paused(app: &Arc<App>) -> Option<String> {
+/// 一個還握著的維護窗口，照入場閘門要講給呼叫端聽的樣子。
+#[derive(Debug, Clone)]
+pub struct WindowHeld {
+    pub resource: &'static str,
+    pub owner: String,
+    pub fence: i64,
+    pub expires_at: String,
+}
+
+impl WindowHeld {
+    /// 409 的 body：**誰**握著、到**什麼時候**，以及還要等幾秒。擋下來而不說清楚這兩件事，
+    /// 使用者只會看到「送不出去」然後一直重送（issue #86）。
+    pub fn detail(&self) -> Value {
+        json!({
+            "reason": "maintenance_window",
+            "resource": self.resource,
+            "held_by": self.owner,
+            "fence": self.fence,
+            "expires_at": self.expires_at,
+            "retry_after_secs": self.retry_after_secs(&crate::db::now()),
+            "retryable": true,
+            "sent": false,
+            "message": format!("{} 正在進行維護（{} 窗口），到 {} 為止不送新的 prompt；窗口關閉或過期就自動恢復。",
+                               self.owner, self.resource, self.expires_at),
+        })
+    }
+
+    /// 還要等幾秒才會自動恢復。看不懂的時間回 0——不知道要等多久就不要叫人等。
+    pub fn retry_after_secs(&self, now: &str) -> i64 {
+        waited_secs(now, &self.expires_at)
+    }
+
+    pub fn refusal(&self) -> LcError {
+        LcError::Conflict(self.detail())
+    }
+}
+
+/// **入場閘門**：現在有沒有人握著會中斷 pane 的維護窗口。
+///
+/// 這是唯一的定義，三個入口都讀它——`controller::dispatch`（交辦留在佇列）、`lifecycle::prompt`
+/// （新回合 409）、`lifecycle::queue::flush_queued_locked`（排隊的 prompt 等窗口關掉再送）。
+/// 以前只有第一個有擋，於是窗口承諾的「裡面不會有新東西開始」在另外兩條路上是假的（issue #86）。
+///
+/// **過期不會鎖死**：判斷走 `held_at`，`expires_at` 一到就自動不再擋，不需要任何人來收尾
+/// （租約本身 TTL 上限 1 小時，預設 15 分鐘）；daemon 重啟時 `release_restart_on_startup` 再收一次。
+pub async fn window_held(app: &Arc<App>) -> Option<WindowHeld> {
+    let now = crate::db::now();
     for resource in EXCLUSIVE {
         if let Ok(Some(l)) = store::lease(&app.db, resource).await {
-            if l.held_at(&crate::db::now()) {
-                return l.expires_at;
+            if l.held_at(&now) {
+                return Some(WindowHeld {
+                    resource,
+                    owner: l.owner.clone().unwrap_or_default(),
+                    fence: l.fence,
+                    expires_at: l.expires_at.clone().unwrap_or_default(),
+                });
             }
         }
     }
     None
+}
+
+/// Is a restart window currently held by someone? Used by the dispatcher to hold work back.
+pub async fn dispatch_paused(app: &Arc<App>) -> Option<String> {
+    window_held(app).await.map(|w| w.expires_at)
 }
 
 /// A restart window is over: lift the holds it put on queued assignments so the next controller
@@ -437,6 +493,9 @@ pub async fn acquire(
     // quietly becomes "holding the box until 14:45", which is a different promise than the one
     // anybody agreed to.
     let expires_at = lease_deadline(&iso_in(ttl), approval.expires_at.as_deref());
+    // 會中斷 pane 的窗口，連**寫下去的那一刻**都要沒有人在送達臨界區：safety 是上面讀的，
+    // 讀完到寫入之間還是有可能有一則 prompt 把 turn commit 進來（issue #86 的 TOCTOU）。
+    let quiet_delivery = EXCLUSIVE.contains(&resource);
     let taken = store::acquire_lease(
         &app.db,
         resource,
@@ -444,6 +503,7 @@ pub async fn acquire(
         Some(&approval.id),
         commit,
         &expires_at,
+        quiet_delivery,
         &json!({"require_idle": require_idle, "safety": safety}),
     )
     .await
@@ -451,6 +511,19 @@ pub async fn acquire(
 
     let Some(lease) = taken else {
         let held = store::lease(&app.db, resource).await.map_err(|e| LcError::Upstream(e.to_string()))?;
+        // 分得出是哪一種輸法：窗口被別人搶走，還是「就在這一瞬有 prompt 進了送達臨界區」。
+        // 後者說成 `lease_held` 的話，呼叫端會去找一個根本不存在的持有者。
+        if held.as_ref().is_none_or(|l| !l.held_at(&crate::db::now())) {
+            let now = crate::db::now();
+            let racing = store::delivery_critical_anywhere(&app.db).await.unwrap_or(true);
+            if racing {
+                return Err(LcError::conflict(
+                    "a prompt entered the delivery critical section while this window was being taken",
+                    json!({"reason": "not_idle", "raced": true, "checked_at": now,
+                           "hint": "safety 讀完到拿租約之間有一則 prompt 進來了；再問一次 safety 然後重試"}),
+                ));
+            }
+        }
         return Err(LcError::conflict(
             "someone else holds this window",
             json!({"reason": "lease_held", "lease": held.map(|l| l.to_json())}),
@@ -760,11 +833,67 @@ mod tests {
         sqlx::query("DELETE FROM turns WHERE id='q'").execute(&app.db).await.unwrap();
         assert_eq!(safety(app, &[]).await.unwrap()["safe"], true);
         store::acquire_lease(&app.db, "rebuild", "someone-else", None, None,
-            &(chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true), &json!({}))
+            &(chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true), false, &json!({}))
             .await.unwrap().unwrap();
         let s = safety(app, &[]).await.unwrap();
         assert_eq!(s["safe"], false, "窗口一次只給一個人");
         assert_eq!(s["held_leases"][0]["owner"], "someone-else");
+    }
+
+    /// issue #86 的 TOCTOU：safety 是在拿租約**之前**讀的，中間還是可能有一則 prompt 把 turn
+    /// commit 進來。`acquire_lease` 那一句 UPDATE 自己帶了同一份送達臨界區條件，所以寫下去的那一刻
+    /// 有人在打字就拿不到——跟 `lifecycle::prompt` 那邊的
+    /// `a_held_restart_window_refuses_new_prompts_and_says_who_holds_it` 是一對：兩句都是單句寫入、
+    /// 由 SQLite 排序，先 commit 的那個贏，兩個不會同時進送達臨界區。
+    #[tokio::test]
+    async fn a_window_is_not_taken_while_a_prompt_is_in_the_delivery_critical_section() {
+        let e = crate::testing::env().await;
+        let app = &e.app;
+        let now = crate::db::now();
+        sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('tb',?,'tb','claude','tok-tb',?)")
+            .bind(&e.project_id).bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO conversations (id,bot_id,created_at) VALUES ('ct','tb',?)").bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,started_at) VALUES ('rt','tb','running','idle',?)")
+            .bind(&now).execute(&app.db).await.unwrap();
+        let until = (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+
+        // 就在拿租約之前，一則 prompt commit 了它的 turn（in_flight＋pending＝正在送）。
+        sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,delivery,created_at) VALUES ('tt','ct','rt','web','in_flight','pending',?)")
+            .bind(&now).execute(&app.db).await.unwrap();
+        assert!(store::delivery_critical_anywhere(&app.db).await.unwrap());
+        let taken = store::acquire_lease(&app.db, "restart", "k8bw2f", None, None, &until, true, &json!({})).await.unwrap();
+        assert!(taken.is_none(), "有人在送達臨界區：窗口拿不走");
+        assert!(window_held(app).await.is_none(), "沒拿到就不該有閘門");
+
+        // 那一則送完了（`delivery` 不再是 pending）：窗口就拿得到。
+        sqlx::query("UPDATE turns SET delivery='ok' WHERE id='tt'").execute(&app.db).await.unwrap();
+        assert!(!store::delivery_critical_anywhere(&app.db).await.unwrap());
+        let taken = store::acquire_lease(&app.db, "restart", "k8bw2f", None, None, &until, true, &json!({})).await.unwrap();
+        assert!(taken.is_some(), "沒有人在送達臨界區：拿得到");
+        let w = window_held(app).await.expect("拿到了就有閘門");
+        assert_eq!((w.resource, w.owner.as_str()), ("restart", "k8bw2f"));
+        assert!(w.retry_after_secs(&crate::db::now()) > 0);
+
+        // `rebuild` 不中斷任何人，不帶這個條件（`acquire` 只對 EXCLUSIVE 帶）。
+        sqlx::query("UPDATE turns SET delivery='pending' WHERE id='tt'").execute(&app.db).await.unwrap();
+        let rebuild = store::acquire_lease(&app.db, "rebuild", "k8bw2f", None, None, &until, false, &json!({})).await.unwrap();
+        assert!(rebuild.is_some(), "rebuild 不看送達臨界區");
+    }
+
+    /// 過期沒 release 的窗口不再是閘門：`held_at` 看 `expires_at`，不需要任何人來收尾（issue #86）。
+    #[tokio::test]
+    async fn an_expired_window_stops_fencing_by_itself() {
+        let e = crate::testing::env().await;
+        let app = &e.app;
+        let soon = (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        store::acquire_lease(&app.db, "restart", "k8bw2f", None, None, &soon, true, &json!({})).await.unwrap().unwrap();
+        assert!(window_held(app).await.is_some());
+
+        let past = (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        sqlx::query("UPDATE supervisor_leases SET expires_at=? WHERE resource='restart'").bind(&past).execute(&app.db).await.unwrap();
+        assert!(store::lease(&app.db, "restart").await.unwrap().unwrap().released_at.is_none(), "沒有人 release");
+        assert!(window_held(app).await.is_none(), "過期就自動不再擋");
+        assert!(dispatch_paused(app).await.is_none(), "派工那條讀的是同一份");
     }
 
     /// 已核准、還沒用掉的 restart 窗口（同 [`approved_window`]，只是用途不同）。申請者是 `k8bw2f`。
@@ -778,7 +907,7 @@ mod tests {
 
     async fn hold_rebuild(app: &Arc<App>, owner: &str) {
         store::acquire_lease(&app.db, "rebuild", owner, None, None,
-            &(chrono::Utc::now() + chrono::Duration::minutes(50)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true), &json!({}))
+            &(chrono::Utc::now() + chrono::Duration::minutes(50)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true), false, &json!({}))
             .await.unwrap().unwrap();
     }
 
