@@ -811,6 +811,14 @@ listen port 只在本機算（pane 行程樹的 pid 對 `lsof -nP -iTCP -sTCP:LI
   指到 scratchpad 的絕對路徑或符號連結一律 404。禁放清單在 daemon 端再擋一次（檔名＋檔頭：`SQLite format 3`、PEM 私鑰），不列、下載 404。
 - 舊的 `/api/bots/{id}/scratchpad*` 明確 404。
 - 網頁「檔案暫存」下半段「bot 給你的檔案」：每列標剩餘時間（剩不到 10 分鐘用警告色），附件下載（UI-DECISIONS）。
+- **驗證跟真正讀檔是同一個 fd（issue #89，2026-09-17）**：下載（`outbox::file`）與 `GET /api/bots/{id}/local-image`
+  以前都是「驗證路徑（canonicalize＋containment＋metadata）」與「用路徑名字重新 open 讀內容」分開兩步，寫得到那個目錄的
+  process（bot 自己）能在兩步之間把驗證通過的路徑換成指到界線外的符號連結。現在共用 `trusted_open`（`daemon/src/trusted_open.rs`）：
+  從信任邊界（outbox 是 `data_dir`，local-image 是專案目錄）開始逐層 `openat(2)` 帶 `O_NOFOLLOW`，是不是符號連結、打開的是哪個
+  inode 由同一個系統呼叫決定；拿到的 `File` 之後所有判斷（是不是一般檔案、outbox 的擁有者邊界、大小、內容開頭）都讀同一個 fd，
+  不再用路徑名字重新 open。`outbox::list()` 的目錄可信檢查也改用同一個 primitive 的 fd／`fstat`，但列出檔名那步仍是按路徑
+  `read_dir`——**刻意留下的範圍**：清單只回檔名／大小，不回內容，真正下載的內容路徑已經完全 fd-bound，這裡的殘餘窗口最多讓
+  清單暫時看到界線外的檔名，讀不到內容。
 
 ### 6.5.1 採用使用者的 Herdr `default` session
 
