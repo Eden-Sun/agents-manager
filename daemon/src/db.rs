@@ -142,13 +142,24 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
 
 /// Only the current schema is supported: older databases are not upgraded. Leftover tables of
 /// removed features (`teams`, `team_*`) may exist; nothing reads them.
+///
+/// SCHEMA 與下面的 additive ALTER 包在同一個 transaction 裡：中途失敗（例如舊庫留下的資料
+/// 違反新加的 UNIQUE INDEX）要整批回滾，不留半套 schema，重跑才會從乾淨的起點重新開始
+/// （issue #58）。裡面全是 SQLite 認得在交易內執行的 DDL（`CREATE TABLE`／`CREATE INDEX`／
+/// `ALTER TABLE ADD COLUMN`），沒有 `VACUUM`／`ATTACH`／`PRAGMA journal_mode` 這類定義上就
+/// 不能包進交易的動作。下面各子模組自己的 `migrate`（`supervisor::store`、`read_marks`、
+/// `panes`、`herdr_maintenance`、`mission::store`）不在這個交易裡：它們各自維護自己那張表，
+/// 風險最高的「加欄＋回填」已經各自包了自己的 transaction（見 `read_marks::migrate`、
+/// `supervisor::roles::migrate` 的 `claimed_by`），要把全部子模組併進同一個跨檔案交易得先把
+/// 它們的 `&SqlitePool` 簽名都換成共用的連線／交易 handle，範圍超出這張 issue，先不動。
 async fn migrate(pool: &SqlitePool) -> Result<()> {
+    let mut tx = pool.begin().await?;
     for stmt in SCHEMA.split(";\n") {
         let s = stmt.trim();
         if s.is_empty() {
             continue;
         }
-        sqlx::query(s).execute(pool).await.with_context(|| format!("apply schema: {s}"))?;
+        sqlx::query(s).execute(&mut *tx).await.with_context(|| format!("apply schema: {s}"))?;
     }
     // Additive columns for databases created before they existed.
     for (table, col, ddl) in [
@@ -181,10 +192,11 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
         // 重啟補 stall watchdog 要看的是「剛送出」，不是「剛排隊」（review 2026-09-16 deliv L3）。舊列 NULL＝退回 created_at。
         ("turns", "delivered_at", "ALTER TABLE turns ADD COLUMN delivered_at TEXT"),
     ] {
-        if !has_column(pool, table, col).await? {
-            sqlx::query(ddl).execute(pool).await.with_context(|| format!("add {table}.{col}"))?;
+        if !has_column(&mut *tx, table, col).await? {
+            sqlx::query(ddl).execute(&mut *tx).await.with_context(|| format!("add {table}.{col}"))?;
         }
     }
+    tx.commit().await?;
     crate::supervisor::store::migrate(pool).await?;
     crate::read_marks::migrate(pool).await?;
     crate::panes::migrate(pool).await?;
@@ -248,9 +260,15 @@ fn declared_columns(schema: &str) -> Vec<(String, Vec<String>)> {
     out
 }
 
-pub async fn has_column(pool: &SqlitePool, table: &str, col: &str) -> Result<bool> {
+/// 泛型 executor：`db::migrate` 要在自己的 transaction 裡查（`&mut *tx`），一般呼叫端仍然直接
+/// 給 `&SqlitePool`（single-connection 的 migrate pool 同一時間只有一個實體連線，`tx` 開著時
+/// 傳 `pool` 進來會卡住等一個永遠不會釋出的連線）。
+pub async fn has_column<'e, E>(executor: E, table: &str, col: &str) -> Result<bool>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
     let cols: Vec<(i64, String, String, i64, Option<String>, i64)> =
-        sqlx::query_as(&format!("PRAGMA table_info({table})")).fetch_all(pool).await?;
+        sqlx::query_as(&format!("PRAGMA table_info({table})")).fetch_all(executor).await?;
     Ok(cols.iter().any(|c| c.1 == col))
 }
 
@@ -781,6 +799,50 @@ mod tests {
         let p2 = open(&file).await.unwrap();
         assert_eq!(columns(&p2, "bots").await, before);
         p2.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #58：SCHEMA／additive ALTER 中途失敗要整批回滾，不能留下「有些表建了、有些沒有」的半套
+    /// schema——不然重跑會在同一個位置一直卡住，中途也不該讓任何讀者看到不一致的畫面。
+    #[tokio::test]
+    async fn a_failed_schema_migration_rolls_back_instead_of_leaving_half_a_schema() {
+        let dir = tmp_dir();
+        let path = dir.join("db.sqlite3");
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&format!("sqlite://{}?mode=rwc", path.display()))
+            .await
+            .unwrap();
+        // 故障注入：`runs_pane` 這個名字先被一張普通表占走。索引與表共用同一個命名空間，
+        // SCHEMA 跑到 `CREATE INDEX IF NOT EXISTS runs_pane ON runs(pane_id)` 會因為名字已經
+        // 是一張表而報錯——這一步落在 `projects`／`bots`／`runs` 都已經在這次呼叫裡新建、
+        // `runs_one_active` 也建完之後，剛好測得到「前面明明成功的東西」有沒有跟著回滾。
+        sqlx::query("CREATE TABLE runs_pane (x INTEGER)").execute(&pool).await.unwrap();
+
+        let err = migrate(&pool).await.expect_err("撞到命名衝突要失敗，不能靜靜吞掉");
+        assert!(err.to_string().contains("runs_pane"), "錯誤要指名是哪句 DDL：{err}");
+
+        for table in ["projects", "bots", "runs"] {
+            let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?")
+                .bind(table)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(n, 0, "{table} 在失敗的這次呼叫裡新建，沒有 transaction 的話會留下來；有了就該跟著回滾");
+        }
+
+        // 修好衝突，重跑：可重入，這次要乾淨地跑完，並且通過完整性檢查。
+        sqlx::query("DROP TABLE runs_pane").execute(&pool).await.unwrap();
+        migrate(&pool).await.expect("修好之後重跑要成功");
+        let integrity: String = sqlx::query_scalar("PRAGMA integrity_check").fetch_one(&pool).await.unwrap();
+        assert_eq!(integrity, "ok");
+
+        // 再跑一次：可重入，結果要一樣（不會因為東西都已經在了就出錯，也不會重複建東西）。
+        let cols_before = columns(&pool, "bots").await;
+        migrate(&pool).await.expect("再跑一次也要成功（可重入）");
+        assert_eq!(columns(&pool, "bots").await, cols_before);
+
+        pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     }
 
