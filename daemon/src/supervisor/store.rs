@@ -1362,41 +1362,49 @@ pub async fn settle_and_notify(
     .await?
     .rows_affected()
         > 0;
-    let (bot_id, turn_id, expects_review, status): (String, Option<String>, i64, String) =
-        sqlx::query_as("SELECT target_bot_id, turn_id, expects_review, status FROM supervisor_assignments WHERE id=?")
-            .bind(id)
-            .fetch_one(&mut *tx)
-            .await?;
-    // 通知結案了就不要再叫 AGM 來看：inbox 事件改成 `assignment_noticed`，digest 與
-    // `needs_review` 都不會把它算成待辦。失敗的通知照舊走原本那條（它真的需要有人看）。
-    let kind = if expects_review == 0 && status == "completed" { "assignment_noticed" } else { kind };
-    let payload = if expects_review == 0 && status == "completed" {
-        let mut p = payload.clone();
-        p["needs_review"] = Value::Bool(false);
-        p["kind"] = Value::String("notice".into());
-        p
+    // `moved=false`：guard 沒讓這次真的轉移（例如這一列已經被 AGM cancel 掉，或別的呼叫已經
+    // settle 過）。這次呼叫沒有造成任何新事實，不該無條件排一則「請驗收」的通知——已經關掉的
+    // 交辦不能讓 AGM 收到「這件做完了、請驗收」的訊息（issue #99）。這一列現在合不合法一律問
+    // `assignment_state`（上面 `from` 那句已經問過），這裡不另外設一套判斷。
+    let event_new = if moved {
+        let (bot_id, turn_id, expects_review, status): (String, Option<String>, i64, String) =
+            sqlx::query_as("SELECT target_bot_id, turn_id, expects_review, status FROM supervisor_assignments WHERE id=?")
+                .bind(id)
+                .fetch_one(&mut *tx)
+                .await?;
+        // 通知結案了就不要再叫 AGM 來看：inbox 事件改成 `assignment_noticed`，digest 與
+        // `needs_review` 都不會把它算成待辦。失敗的通知照舊走原本那條（它真的需要有人看）。
+        let kind = if expects_review == 0 && status == "completed" { "assignment_noticed" } else { kind };
+        let payload = if expects_review == 0 && status == "completed" {
+            let mut p = payload.clone();
+            p["needs_review"] = Value::Bool(false);
+            p["kind"] = Value::String("notice".into());
+            p
+        } else {
+            payload.clone()
+        };
+        sqlx::query(
+            "INSERT OR IGNORE INTO supervisor_inbox
+               (id, supervisor_id, event_key, assignment_id, bot_id, turn_id, kind, payload_json, state, created_at, updated_at)
+             VALUES (?,?,?,?,?,?,?,?, 'pending', ?, ?)",
+        )
+        .bind(crate::db::ulid())
+        .bind(SUPERVISOR_ID)
+        .bind(event_key)
+        .bind(id)
+        .bind(&bot_id)
+        .bind(&turn_id)
+        .bind(kind)
+        .bind(payload.to_string())
+        .bind(&now)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+            > 0
     } else {
-        payload.clone()
+        false
     };
-    let event_new = sqlx::query(
-        "INSERT OR IGNORE INTO supervisor_inbox
-           (id, supervisor_id, event_key, assignment_id, bot_id, turn_id, kind, payload_json, state, created_at, updated_at)
-         VALUES (?,?,?,?,?,?,?,?, 'pending', ?, ?)",
-    )
-    .bind(crate::db::ulid())
-    .bind(SUPERVISOR_ID)
-    .bind(event_key)
-    .bind(id)
-    .bind(&bot_id)
-    .bind(&turn_id)
-    .bind(kind)
-    .bind(payload.to_string())
-    .bind(&now)
-    .bind(&now)
-    .execute(&mut *tx)
-    .await?
-    .rows_affected()
-        > 0;
     tx.commit().await?;
     Ok(Settled { moved, event_new })
 }
@@ -3593,6 +3601,37 @@ mod tests {
         let row = assignment(&p, &a.id).await.unwrap().unwrap();
         assert_eq!(row.status, "cancelled", "已經取消的交辦不會被遲到的收尾救回 awaiting_review");
         assert_eq!(row.review_decision.as_deref(), Some("cancel"), "取消當時寫下的裁示紀錄原封不動，沒被收尾蓋掉");
+    }
+
+    /// #99：上一支測試釘住「不會復活」，這支釘「不會發出過期通知」——`moved=false` 時
+    /// `settle_and_notify` 以前照樣會排一則 `assignment_completed`／`needs_review:true` 的通知，
+    /// 已經取消的交辦讓 AGM 收到「這件做完了、請驗收」的訊息。
+    #[tokio::test]
+    async fn a_cancelled_assignment_gets_no_stale_completion_notification() {
+        let p = pool().await;
+        get_or_init(&p).await.unwrap();
+        let a = insert_assignment(&p, None, "bot1", "req-race2", "做 A", &[], None, true).await.unwrap();
+        mark_delivered(&p, &a.id, "turn-race2", "ok").await.unwrap();
+        review_with_followup(&p, &a.id, "delivered", "cancel", "AGM", "cli", Some("改主意"), None, None)
+            .await
+            .unwrap()
+            .expect("cancel 先落地");
+
+        let settled = settle_and_notify(
+            &p, &a.id, "completed", true, Some("完成"), None, "k-race2", "assignment_completed",
+            &json!({"needs_review": true}),
+        )
+        .await
+        .unwrap();
+        assert!(!settled.moved, "guard 要擋下：這一列已經不是 queued/delivered/unknown");
+        assert!(!settled.event_new, "沒有真的轉移，不該生出一則新事件");
+
+        let events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE assignment_id=?")
+            .bind(&a.id)
+            .fetch_one(&p)
+            .await
+            .unwrap();
+        assert_eq!(events, 0, "已經取消的交辦不該讓 AGM 收到「這件做完了、請驗收」的通知");
     }
 
     /// `unknown` delivery is its own state precisely so the controller reconciles it instead
