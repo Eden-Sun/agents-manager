@@ -972,9 +972,13 @@ listen port 只在本機算（pane 行程樹的 pid 對 `lsof -nP -iTCP -sTCP:LI
   process（bot 自己）能在兩步之間把驗證通過的路徑換成指到界線外的符號連結。現在共用 `trusted_open`（`daemon/src/trusted_open.rs`）：
   從信任邊界（outbox 是 `data_dir`，local-image 是專案目錄）開始逐層 `openat(2)` 帶 `O_NOFOLLOW`，是不是符號連結、打開的是哪個
   inode 由同一個系統呼叫決定；拿到的 `File` 之後所有判斷（是不是一般檔案、outbox 的擁有者邊界、大小、內容開頭）都讀同一個 fd，
-  不再用路徑名字重新 open。`outbox::list()` 的目錄可信檢查也改用同一個 primitive 的 fd／`fstat`，但列出檔名那步仍是按路徑
-  `read_dir`——**刻意留下的範圍**：清單只回檔名／大小，不回內容，真正下載的內容路徑已經完全 fd-bound，這裡的殘餘窗口最多讓
-  清單暫時看到界線外的檔名，讀不到內容。
+  不再用路徑名字重新 open。
+- **列舉也是同一個 fd（issue #96，2026-09-18）**：`outbox::list()` 舊實作是「目錄可信檢查（fd-bound）→ 之後再用路徑
+  `read_dir` 重新列一次」，檢查通過之後、真正列舉之前，這顆 bot 自己能把整個目錄換成指到界線外的符號連結，讓清單改列出
+  界線外的檔名／大小（跟 #89 是同一個形狀，只是發生在列舉而不是下載）。現在 `outbox::open_trusted_dir` 拿到的目錄 fd
+  直接交給 `trusted_open::read_dir_bound`（`fdopendir`／`readdir`／`fstatat`），連內容判斷（`content_is_withheld`）也用
+  同一個 fd 底下的 `trusted_open::open_entry_in` 打開；可信檢查跟真正列舉是同一次 `list()` 呼叫裡同一個 `spawn_blocking`
+  用的同一個 fd，全程不再用任何路徑重新解析，沒有殘餘窗口。
 
 ### 6.5g build scheduler：全機 cargo/rustc 併發（issue #90）
 
