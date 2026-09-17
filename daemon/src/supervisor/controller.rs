@@ -560,6 +560,15 @@ pub async fn backfill_quota_limits_once(app: &Arc<App>, host: &str) {
     backfill_quota_limits(app, host, started).await;
 }
 
+/// 這件交辦屬於一個**還開著、但被暫停**的任務。
+async fn mission_paused(app: &Arc<App>, a: &store::Assignment) -> bool {
+    let Some(mission_id) = a.mission_id.as_deref() else { return false };
+    matches!(
+        crate::mission::store::get(&app.db, mission_id).await,
+        Ok(Some(m)) if m.paused_reason.is_some() && m.completed_at.is_none() && m.cancelled_at.is_none()
+    )
+}
+
 /// 這件交辦 park 時撞的是模型專屬的桶（`error` 裡記的 claude 橫幅，例如 Fable），而這顆 bot 現在跑的模型
 /// 不歸那一桶管（[`crate::quota::bucket_blocks_model`]）。5h／7d／認不出桶名的一律 `false`。
 async fn parked_on_another_models_bucket(app: &Arc<App>, a: &store::Assignment, bot: &crate::db::Bot) -> bool {
@@ -580,6 +589,12 @@ async fn parked_on_another_models_bucket(app: &Arc<App>, a: &store::Assignment, 
 async fn resume_quota_blocked(app: &Arc<App>) {
     let Ok(rows) = store::quota_blocked_all(&app.db).await else { return };
     for a in rows {
+        // 使用者（或 AGM）把這件交辦的任務暫停了：暫停不收交辦，所以要在這裡擋——不然額度一回來，
+        // 背景就把它重送出去，暫停等於沒按（取消那條路 mission 自己會把交辦收成 cancelled）。
+        // 任務解除暫停後，下一個 tick 照常重送。
+        if mission_paused(app, &a).await {
+            continue;
+        }
         let Ok(Some(bot)) = crate::db::bot(&app.db, &a.target_bot_id).await else { continue };
         let still_hit = crate::quota::limit_hit_for_bot(app, &bot).await;
         let due = a.resume_at.as_deref().map(past).unwrap_or(true);
@@ -2794,6 +2809,43 @@ mod quota_restart_tests {
         assert_ne!(status, "quota_blocked", "Fable 桶的等待不是跑 opus 的這件的");
         assert_eq!(retries, 1);
         assert_eq!(status_of(&app, &fable).await, ("quota_blocked".into(), 0), "跑 Fable 的照舊等");
+    }
+
+    /// 任務被暫停時，等額度的交辦不要在背景自己重送（mission3 2026-09-17 點名）：暫停不收交辦，
+    /// 額度一回來就重送的話，使用者按的暫停等於沒按。解除暫停後照常重送。
+    #[tokio::test]
+    async fn a_paused_mission_does_not_resend_its_parked_assignment() {
+        use crate::mission::store as mstore;
+        let app = app().await;
+        bot(&app, "b1", "cc2").await;
+        let (m, _) = mstore::create(
+            &app.db,
+            &mstore::NewMission {
+                project_id: "p",
+                client_request_id: &crate::db::ulid(),
+                text: "做 X",
+                delivery_mode: "pr",
+                executor_kind: "claude",
+                on_5h_limit: "wait",
+                max_rounds: 2,
+                parent_mission_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        let id = parked(&app, "b1", "2020-01-01T00:00:00Z", &crate::db::now()).await;
+        store::set_mission_link(&app.db, &id, &m.id, "executor").await.unwrap();
+        assert!(mstore::pause(&app.db, &m.id, "user_pause", None).await.unwrap());
+
+        resume_quota_blocked(&app).await;
+        assert_eq!(status_of(&app, &id).await, ("quota_blocked".into(), 0), "暫停中不重送，也不燒重試次數");
+
+        // 解除暫停：時間早就到了，照常重送。
+        mstore::resume(&app.db, &m.id).await.unwrap();
+        resume_quota_blocked(&app).await;
+        let (status, retries) = status_of(&app, &id).await;
+        assert_ne!(status, "quota_blocked", "解除暫停就放行");
+        assert_eq!(retries, 1);
     }
 
     /// 回填完再跑一次 resume：兩段合起來就是重啟的真實順序，parked 的交辦要原地不動。
