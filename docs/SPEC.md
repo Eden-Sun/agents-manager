@@ -94,7 +94,11 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   協調者補送 `supervisor_inbox.notify_next_at`、總管看門狗 `supervisors.watchdog_next_at`、hook 事件 `hook_events.next_attempt_at`。
   記憶體 timer 只是加速：重啟後由 `reconcile::rearm_progress`（含 `rearm_queue_retries`）、總管 tick、
   `herdr_maintenance::arm_on_startup` 與 `hook_inbox` 的 worker 依 DB 重掛或掃回來，重掛是冪等的（同一顆 bot 只會有一個 timer）。
-  `GET /api/supervisor/health` 的 `due_actions` 把這六處讀成同一份摘要，供觀測 pending／failing。
+  `GET /api/supervisor/health` 的 `due_actions` 把這六處讀成同一份摘要，供觀測 pending／failing（數字是 SQL 聚合算的，
+  不吃列表上限；`items` 是有界的樣本，`items_truncated` 說有沒有列完）。
+  **執行端刻意不統一**（issue #97）：三個執行者對應三種延遲與鎖的需求——總管 tick 10 秒輪詢（交辦重送／等額度／
+  協調者補送／看門狗，序列化是刻意的）、排隊 prompt 的重試要在**那顆 bot 的鎖**裡準時燒、hook 收件匣靠 notify
+  立刻處理（改成輪詢等於每個回合收尾都慢）。收成一個迴圈只會在裡面重新長出同樣三套政策。
 - **權威劃分**：TOML 是 Project／Bot 期望設定的唯一權威；SQLite 存 Run／Turn／Message／Conversation／hook token／workspace 映射。啟動與每次寫回 TOML 後做 TOML→SQLite 投影（依 id upsert；TOML 移除的 bot 標 `deleted_at`，保留歷史）。
 - **落盤前先驗投影**（issue #73）：`ConfigStore::update` 的順序是「重讀（mtime 變了）→ 在記憶體套用修改 →
   `projection::validate` 乾跑 → 原子寫入（暫存檔 + `rename`）」。驗不過就直接回錯誤，**config.toml 一個字都不動**，
