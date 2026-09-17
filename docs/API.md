@@ -1131,6 +1131,7 @@ body 直接是檔案位元組（**不是** multipart），`Content-Type` 就是�
     （payload 帶 `conflict_since`、`reason`、`hint`；重派走 `review --decision followup` 配新的 `followup_request_id`，同一個 request id 再 assign 只會拿回這筆），
     **不是** `dispatch_failed`——工作沒失敗，是進不去（SPEC §18.8）。
   - `turn_status`（回合還在跑時 `null`）：`completed` / `completed_fallback` / `failed` / `dispatch_failed` / `turn_missing` / `quota_exhausted` / `identity_switch`。**回合結束不會自己變 `completed`。**
+    `completed_fallback`（沒有回覆）結算之後遲到的 hook 補上回覆：`turn_status` 升成 `completed`、`evidence_complete=true`、`result` 補上，並推 `payload.late_reply=true` 的 `assignment_completed`（通知型是 `assignment_noticed`）（SPEC §18.8）。
   - `kind:"notice"`（或 `expects_review:false`，兩者都給時以它為準）：送達且回合正常結束直接 `completed`、inbox `assignment_noticed`；送失敗仍進 `awaiting_review`。CLI `agm assign --notice`。
   - `quota_blocked`：目標帳號被 CLI 擋著；帶 `resume_at`、`quota_retries`。額度回來後用 `<client_request_id>#r<n>` 自動重送，推 `assignment_quota_blocked` / `assignment_quota_resumed`；到期仍被擋時順延（不發通知）也算一次 `quota_retries`，累計 6 次 → `awaiting_review` + `quota_exhausted`。
   - `legacy_closed=true`：驗收狀態出現前就關掉的舊資料，未經驗收。

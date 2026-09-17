@@ -147,6 +147,9 @@ pane env 的 `AM_RUN_ID` 只供診斷。
 - 存成 assistant Message `source = terminal_fallback`、`incomplete = 1`。**晚到的 hook 不覆蓋**（去重丟棄並 log），避免跨回合錯配。
   **例外**：那筆 Turn 若一則 assistant Message 都沒有，晚到的 hook 是唯一答案 → 寫進去並把 Turn 改 `completed`（grok 思考時畫面就是空的 `❯`，
   備援會先收掉回合）。已有回覆的照舊丟；空 payload 不改狀態。
+  hook 看得到使用者訊息（codex `input-messages`、claude transcript 最後一則）而且跟那筆 Turn 的 prompt（`turns.prompt_text`，舊列退回 user 訊息）
+  怎麼比都對不上時**不補**，記成外部回合——那是使用者在 pane 裡另打的一句（跟 §6.7 的 `unknown` 同一個判斷）。
+  補上之後，掛在那筆 Turn 上、已經帶著「沒有回覆」結算的交辦也要拿到回覆，見 §18.8「遲到的回覆」。
 - **第二個觸發點**：`turn_progress` 輪詢器（狀態沒翻時的安全網：空輸入列且畫面沒變）。herdr 說 idle 且這回合**印過東西後停住** → 14 秒；
   herdr 說 working、或這回合**什麼都沒印過** → 63 秒（working 可能真的在想，等不夠的代價是吃掉使用者的問題）。grok 常駐 telemetry 橫幅不算內容。
   它也在 bot 鎖內呼叫同一支 `try_fallback`（在鎖外會與 hook 交錯成一回合兩則 assistant）；沒收成就繼續盯，Turn 被任一方收掉時迴圈自然結束。
@@ -820,7 +823,10 @@ default Bot 的 prompt／keys／terminal 讀取依 Run 的 session 回到 defaul
    - 有 → CAS `… WHERE status='in_flight'`，**成功**才建 assistant Message（`source=hook`）、Turn `completed`、寫 native ids。
      CAS 輸了且 Turn 已 `completed_fallback` → 把 native ids 蓋上；已有 assistant Message 就丟 payload，一則都沒有就用 hook 的回覆補上並改 `completed`。
      被其他原因收掉的（stop／failed）照舊保留回覆。
-   - 無 → 第 5 點。
+     `delivery=unknown` 的 Turn：hook 的使用者訊息對不上它的 `prompt_text` → 不認領，第 5 點。
+   - 無 → 120 秒內有備援關掉、還沒 native id 的 Turn：hook 的使用者訊息對得上（或看不到）才照上一條補上回覆；對不上 → 第 5 點（§4.3 例外）。
+     補上之後交辦拿回覆的規則見 §18.8。
+   - 都沒有 → 第 5 點。
 5. external：建 Turn（`origin=external`、`completed`）+ user Message（Codex 取 `input-messages`；Claude 沒有就省略）+ assistant Message。
 6. 推 WS `message_added` / `turn_updated`。
 
@@ -990,7 +996,7 @@ label = "foo@m4p"
 - **重複事件**：同一 bot 的 drain 有 1 秒合併窗，窗內第二次觸發只記「還要再跑一次」。
 - **事件先到、spool 後寫**：拿不到 → T+2 秒再 drain 一次（早於 5 秒的終端備援），仍沒有就讓備援接手。
 - **事件整個遺失**：每台已連線 host 每 30 秒掃「有 in-flight Turn 或 spool 檔存在」的 bot 做 drain（一台一次 ssh，腳本內迴圈所有 bot 目錄）；host 重連與啟動對帳對每個 bot drain 一次（`replay_host`）。
-- **遲到的 hook**：對應 Turn 已 `completed_fallback` → 依 §4.3 丟棄只 log。
+- **遲到的 hook**：對應 Turn 已 `completed_fallback` → 依 §4.3：已有回覆才丟棄只 log，一則都沒有就補上。
 - **bot 已刪除**：`process_locked` 擋 `deleted_at`；遠端 bot 目錄在刪除時 `rm -rf`。
 - **host 斷線期間**：hook 照寫本機檔，重連後 `replay_host` 補進來。
 
@@ -1398,6 +1404,11 @@ launchd `com.agm.claude-release` 每 30 分鐘跑 `bin/claude-release-kick.sh`�
 
 - 回合原始事實各自留欄：`delivery`、`turn_status`（`completed` / `completed_fallback` / `failed` / `dispatch_failed` / `turn_missing` / `quota_exhausted` / `identity_switch`）、`evidence_complete`。
   終端備援不會因為「跑完了」就被驗收。派不出去的交辦也進 `awaiting_review`（`dispatch_failed`）。
+- **遲到的回覆**（review3 c1 M3）：交辦已經帶著 `completed_fallback`（沒有回覆）結算，之後遲到的 hook 把回覆補進回合（§4.3 例外）時，
+  controller（回合事件＋每輪 reconcile）把 `turn_status` 升成 `completed`、`evidence_complete=1`、`result` 補上；原本沒有 `result` 的另推一則
+  inbox（事件鍵 `assignment_late_reply:<assignment>:<turn>`，payload `late_reply:true`、`assignment_status`、`note`）：一般交辦 `assignment_completed`（叫醒驗收者，
+  已經依「沒有回覆」followup／改派的要知道結果其實到了），已自動結案的通知 `assignment_noticed`（只記錄）。`quota_blocked` 不動。
+  hook 先補、controller 才結算時，結算當下就讀到回覆，這裡只升 `turn_status`、不再推。
 - **送不進去的保險絲**（AGM 裁示 2026-09-16）：對方正在回合中會回 409，那是暫時的——但「暫時」要有盡頭。
   409 這條分支有自己的退避梯（15 秒起加倍，上限 `AM_DISPATCH_CONFLICT_BACKOFF_SECS`，預設 **900 秒**，要大於典型回合長度；其他分支的梯子不變），
   而且**有時間上限**：從**這一輪第一次撞 409**（`conflict_since`）起超過 `AM_DISPATCH_CONFLICT_GIVE_UP_MINS`（預設 30 分鐘）還送不進去，就把交辦標成 **`blocked`**（不是 `dispatch_failed`——工作沒失敗，是進不去），

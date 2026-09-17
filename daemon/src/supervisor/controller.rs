@@ -643,6 +643,102 @@ async fn last_reply(app: &Arc<App>, turn_id: &str) -> Option<String> {
     .flatten()
 }
 
+/// 備援先把回合關成 `completed_fallback`、交辦已經帶著「沒有回覆」結算，之後遲到的 hook 才把真正的回覆補進回合
+/// （`hookrecv::fill_or_drop_late_hook`，回合改成 `completed`）。那時交辦早就不在執行中，[`on_turn_done`] 直接 return，
+/// 回覆永遠到不了交辦——AGM 看到的是 `result:null`、`evidence_complete:false`，會 followup 或改派，
+/// bot 把做完的工作再做一次（review3 c1 M3）。
+///
+/// 這裡把回覆寫回去：`turn_status` 升成 `completed`、`evidence_complete=1`、`result` 補上；交辦原本沒有 result 的
+/// 才另推一則事件告訴驗收者「結果到了」（同一個交易，事件鍵每筆交辦＋回合一次，重跑不會再推）。
+/// 兩種順序都收得到：hook 先補、controller 才結算的話，結算時 `last_reply` 已經讀到回覆，這裡只升 `turn_status`，不再推。
+pub(crate) async fn late_reply_for_turn(app: &Arc<App>, turn_id: &str, status: &str) {
+    if !matches!(status, "completed" | "completed_fallback") {
+        return;
+    }
+    let Ok(Some(a)) = store::assignment_by_turn(&app.db, turn_id).await else { return };
+    late_reply(app, &a, turn_id).await;
+}
+
+async fn late_reply(app: &Arc<App>, a: &store::Assignment, turn_id: &str) {
+    // `quota_blocked` 會自己重送，不是「結算過、回覆沒到」的那種（撞限收場歸 park_quota 管）。
+    if a.is_executing() || a.status == "quota_blocked" || a.turn_status.as_deref() != Some("completed_fallback") {
+        return;
+    }
+    let now_status: Option<String> =
+        sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(turn_id).fetch_optional(&app.db).await.ok().flatten();
+    if now_status.as_deref() != Some("completed") {
+        return;
+    }
+    let Some(reply) = last_reply(app, turn_id).await.filter(|r| !r.trim().is_empty()) else { return };
+    let res = async {
+        let now = crate::db::now();
+        let mut tx = app.db.begin().await?;
+        let (had_result, status, expects_review): (Option<String>, String, i64) =
+            sqlx::query_as("SELECT result, status, expects_review FROM supervisor_assignments WHERE id=?")
+                .bind(&a.id)
+                .fetch_one(&mut *tx)
+                .await?;
+        let moved = sqlx::query(
+            "UPDATE supervisor_assignments SET turn_status='completed', evidence_complete=1, result=COALESCE(result, ?), updated_at=?
+              WHERE id=? AND turn_status='completed_fallback'",
+        )
+        .bind(&reply)
+        .bind(&now)
+        .bind(&a.id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+            > 0;
+        let mut pushed = false;
+        if moved && had_result.as_deref().is_none_or(|r| r.trim().is_empty()) {
+            // 已經自動結案的通知只記錄；其他（等驗收、或驗收者已經依「沒有回覆」做了決定）都要叫醒驗收者。
+            let noticed = expects_review == 0 && status == "completed";
+            let kind = if noticed { "assignment_noticed" } else { "assignment_completed" };
+            let payload = json!({
+                "bot_id": a.target_bot_id,
+                "turn_status": "completed",
+                "evidence_complete": true,
+                "result": reply,
+                "error": null,
+                "needs_review": !noticed,
+                "late_reply": true,
+                "assignment_status": status,
+                "note": "這筆交辦先前以「沒有留下回覆」（completed_fallback）通知過；這是 hook 晚到補上的真正回覆。已經 followup／改派的話，先確認那一筆還需不需要。",
+            });
+            pushed = sqlx::query(
+                "INSERT OR IGNORE INTO supervisor_inbox
+                   (id, supervisor_id, event_key, assignment_id, bot_id, turn_id, kind, payload_json, state, created_at, updated_at)
+                 VALUES (?,?,?,?,?,?,?,?, 'pending', ?, ?)",
+            )
+            .bind(crate::db::ulid())
+            .bind(store::SUPERVISOR_ID)
+            .bind(format!("assignment_late_reply:{}:{}", a.id, turn_id))
+            .bind(&a.id)
+            .bind(&a.target_bot_id)
+            .bind(turn_id)
+            .bind(kind)
+            .bind(payload.to_string())
+            .bind(&now)
+            .bind(&now)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+                > 0;
+        }
+        tx.commit().await?;
+        anyhow::Ok((moved, pushed))
+    }
+    .await;
+    match res {
+        Ok((true, pushed)) => {
+            tracing::info!(assignment = %a.id, turn = %turn_id, pushed, "late hook reply written back to its assignment");
+            app.emit("supervisor_changed", json!({"assignment_id": a.id, "status": a.status})).await;
+        }
+        Ok((false, _)) => {}
+        Err(e) => tracing::warn!(error = ?e, assignment = %a.id, "could not write a late reply back to its assignment"),
+    }
+}
+
 /// A tracked turn finished. That ends the *execution*, not the job: the assignment moves to
 /// `awaiting_review` and waits for an explicit decision (docs/SPEC.md §18.3).
 async fn on_turn_done(app: &Arc<App>, turn_id: &str, status: &str) {
@@ -707,6 +803,27 @@ pub async fn reconcile(app: &Arc<App>) {
         }
     }
     sweep_missing_events(app).await;
+    sweep_late_replies(app).await;
+}
+
+/// 已經結算過、但回合後來被遲到的 hook 補上回覆的交辦（`open_assignments` 只列執行中的，掃不到它們）。
+/// 事件漏掉（Lagged）、daemon 在 hook 與事件之間重啟時，這裡補做 [`late_reply`]；寫回之後 `turn_status`
+/// 就是 `completed`，下一輪不會再撈到。
+async fn sweep_late_replies(app: &Arc<App>) {
+    let rows = sqlx::query_as::<_, store::Assignment>(
+        "SELECT a.* FROM supervisor_assignments a JOIN turns t ON t.id = a.turn_id
+          WHERE a.supervisor_id=? AND a.turn_status='completed_fallback' AND t.status='completed'
+            AND a.status NOT IN ('queued','delivered','unknown','quota_blocked')
+          ORDER BY a.updated_at DESC LIMIT 50",
+    )
+    .bind(store::SUPERVISOR_ID)
+    .fetch_all(&app.db)
+    .await;
+    let Ok(rows) = rows else { return };
+    for a in rows {
+        let Some(turn_id) = a.turn_id.clone() else { continue };
+        late_reply(app, &a, &turn_id).await;
+    }
 }
 
 /// A settled assignment whose completion event is not in the inbox.
@@ -1228,6 +1345,7 @@ pub fn spawn(app: Arc<App>, generation: i64) {
                             // reply is how you build an agent that talks to itself forever.
                             if !is_manager(&app, &ev.bot_id).await {
                                 on_turn_done(&app, &ev.turn_id, &ev.status).await;
+                                late_reply_for_turn(&app, &ev.turn_id, &ev.status).await;
                             }
                         }
                     }
@@ -2516,5 +2634,120 @@ mod quota_restart_tests {
             q.get("claude:cc2").and_then(|x| x.limit_hit.as_ref()).and_then(|h| h.until.clone()).as_deref(),
             Some("2999-01-01T00:00:00Z")
         );
+    }
+}
+
+/// 遲到 hook 補上的回覆寫回交辦（review3 c1 M3）。端到端（hook → 交辦）在 `hookrecv` 的測試；這裡釘結算與補寫的先後順序。
+#[cfg(test)]
+mod late_reply_tests {
+    use super::*;
+
+    async fn app() -> Arc<App> {
+        let dir = std::env::temp_dir().join(format!("agm-late-reply-{}", crate::db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = crate::db::open(&dir.join("test.sqlite")).await.unwrap();
+        let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
+        let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
+        let app = App::new(db, client.clone(), client, cfg, dir.clone(), dir.join("daemon"), 7799, "test".into(), "test".into(), false);
+        store::get_or_init(&app.db).await.unwrap();
+        let now = crate::db::now();
+        sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES ('p','/tmp','p',?)").bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('b','p','b','grok','t',?)")
+            .bind(&now)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        app
+    }
+
+    /// 送出、備援收成 `completed_fallback`、還沒有回覆的回合與它的交辦。
+    async fn fallback_assignment(app: &Arc<App>, expects_review: bool) -> (store::Assignment, String) {
+        let a = store::insert_assignment(&app.db, None, "b", "crid-late", "做這件事", &[], None, expects_review).await.unwrap();
+        let conv = crate::db::conversation_id(&app.db, "b").await.unwrap();
+        let turn_id = crate::db::ulid();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, origin, status, delivery, created_at, completed_at)
+             VALUES (?,?,'web','completed_fallback','ok',?,?)",
+        )
+        .bind(&turn_id)
+        .bind(&conv)
+        .bind(crate::db::now())
+        .bind(crate::db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        store::mark_delivered(&app.db, &a.id, &turn_id, "ok").await.unwrap();
+        (store::assignment(&app.db, &a.id).await.unwrap().unwrap(), turn_id)
+    }
+
+    /// `hookrecv::fill_or_drop_late_hook` 做的事：寫回覆、回合改 completed。
+    async fn late_hook_fills(app: &Arc<App>, turn_id: &str, reply: &str) {
+        let conv: String = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id=?").bind(turn_id).fetch_one(&app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET status='completed' WHERE id=?").bind(turn_id).execute(&app.db).await.unwrap();
+        lifecycle::insert_message(app, &conv, Some(turn_id), "assistant", reply, "hook", false, None).await.unwrap();
+    }
+
+    async fn inbox(app: &Arc<App>, id: &str) -> Vec<(String, serde_json::Value)> {
+        let rows: Vec<(String, String)> = sqlx::query_as("SELECT kind, payload_json FROM supervisor_inbox WHERE assignment_id=? ORDER BY created_at, id")
+            .bind(id)
+            .fetch_all(&app.db)
+            .await
+            .unwrap();
+        rows.into_iter().map(|(k, p)| (k, serde_json::from_str(&p).unwrap())).collect()
+    }
+
+    /// hook 先補、controller 才處理備援那個事件：結算時已經讀到回覆，補寫只把 `turn_status` 升上去，不推第二則。
+    #[tokio::test]
+    async fn a_hook_that_fills_before_the_settle_upgrades_the_status_without_a_second_event() {
+        let app = app().await;
+        let (a, turn_id) = fallback_assignment(&app, true).await;
+        late_hook_fills(&app, &turn_id, "做完了，abc123 已推").await;
+
+        // 事件迴圈的順序：先 on_turn_done，再 late_reply_for_turn（同一個 completed_fallback 事件）。
+        on_turn_done(&app, &turn_id, "completed_fallback").await;
+        late_reply_for_turn(&app, &turn_id, "completed_fallback").await;
+
+        let row = store::assignment(&app.db, &a.id).await.unwrap().unwrap();
+        assert_eq!((row.result.as_deref(), row.turn_status.as_deref(), row.evidence_complete), (Some("做完了，abc123 已推"), Some("completed"), Some(1)));
+        assert_eq!(inbox(&app, &a.id).await.len(), 1, "回覆已經跟著結算那則出去了");
+    }
+
+    /// 通知型交辦已經自動結案：回覆照樣寫回去，事件只記錄（`assignment_noticed`、不需驗收）。
+    #[tokio::test]
+    async fn a_closed_notice_gets_its_late_reply_recorded_without_waking_anyone() {
+        let app = app().await;
+        let (a, turn_id) = fallback_assignment(&app, false).await;
+        on_turn_done(&app, &turn_id, "completed_fallback").await;
+        assert_eq!(store::assignment(&app.db, &a.id).await.unwrap().unwrap().status, "completed");
+
+        late_hook_fills(&app, &turn_id, "收到").await;
+        late_reply_for_turn(&app, &turn_id, "completed").await;
+
+        let row = store::assignment(&app.db, &a.id).await.unwrap().unwrap();
+        assert_eq!(row.result.as_deref(), Some("收到"));
+        let events = inbox(&app, &a.id).await;
+        let (kind, p) = events.last().unwrap();
+        assert_eq!((kind.as_str(), p["late_reply"].as_bool(), p["needs_review"].as_bool()), ("assignment_noticed", Some(true), Some(false)));
+        let route = crate::supervisor::roles::route(kind, p, None);
+        assert!(!route.wake, "通知的遲到回覆不叫醒人");
+    }
+
+    /// 事件漏掉（Lagged）或重啟：每輪 reconcile 也會把等驗收交辦的遲到回覆寫回去。
+    #[tokio::test]
+    async fn reconcile_writes_back_a_late_reply_whose_event_was_missed() {
+        let app = app().await;
+        let (a, turn_id) = fallback_assignment(&app, true).await;
+        on_turn_done(&app, &turn_id, "completed_fallback").await;
+        assert!(store::assignment(&app.db, &a.id).await.unwrap().unwrap().result.is_none());
+
+        late_hook_fills(&app, &turn_id, "真正的回覆").await;
+        reconcile(&app).await;
+        reconcile(&app).await;
+
+        let row = store::assignment(&app.db, &a.id).await.unwrap().unwrap();
+        assert_eq!((row.status.as_str(), row.result.as_deref()), ("awaiting_review", Some("真正的回覆")));
+        let events = inbox(&app, &a.id).await;
+        assert_eq!(events.len(), 2, "結算＋結果到了，重跑不會多推：{events:?}");
+        assert_eq!(events[1].1["result"].as_str(), Some("真正的回覆"));
     }
 }
