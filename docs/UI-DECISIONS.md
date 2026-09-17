@@ -109,6 +109,9 @@
   「已完成任務」只算 `done`，取消的另一段；不重複印指示；舊 daemon 沒有 `/api/missions` 就整個入口不出現。
   清單分三支抓：進行中（含 paused）不限筆數，已完成／已取消各抓最近 50 筆，被截斷時標題寫「最近 N 筆」而不是冒充總數——
   一次抓 `all` 50 筆會把停著等回答的舊任務擠出去，卡片與回答框一起消失（review3 c1 M6）。
+  卡片只讀 **daemon 真的寫出來的** payload 鍵名（換手 `from_identity`／`to_identity`／`model`、暫停的 `decision.resets`、
+  `decision.decision`）；進度格連交辦的 `role` 一起看，等 AGM／等額度時不倒退；「等額度」的說明照任務的
+  `on_5h_limit` 與 kind 講，並顯示交辦的 `resume_at`。自編一套只存在 mock 裡的欄位＝接上真 daemon 就全部留白（review3 c1 L9）。
 
 ## 其他元件
 
