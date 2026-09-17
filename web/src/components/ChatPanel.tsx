@@ -13,6 +13,7 @@ import { useTapCopy } from '../hooks/useTapCopy'
 import { cleanLiveActivity, cleanLiveText } from '../store/liveText'
 import { typeAlongside } from '../store/alongside'
 import { queueFromComposer, settleComposerSend } from '../store/queuedSend'
+import { herdrJumpCommand } from '../lib/herdrJump'
 import { anchorOf, botLamp, composerState, inFlightTurn, liveReplyOf, projectHostName, toolsOfHost, useStore } from '../store/store'
 import { AttachPicker, AttachTray, DropVeil, MessageAttachments, useAttachments, useDropTarget } from './Attachments'
 import { BlockedBadge } from './BlockedBadge'
@@ -530,6 +531,7 @@ export function AbandonTurnAction({ botId }: { botId: string }) {
 function RunDebugBar({ botId }: { botId: string }) {
   const run = useStore((s) => s.runs[botId] ?? null)
   const agentName = useStore((s) => s.bots.find((b) => b.id === botId)?.agent_name ?? null)
+  const isLocal = useStore((s) => projectHostName(s, s.bots.find((b) => b.id === botId)?.project_id ?? null) === 'local')
   if (!run) return null
   return (
     <div className="run-debug" role="group" aria-label="Run 識別資訊">
@@ -539,6 +541,15 @@ function RunDebugBar({ botId }: { botId: string }) {
       <CopyChip label="session" value={run.herdr_session ?? ''} title="pane 所屬的 herdr session" />
       <CopyChip label="workspace" value={run.workspace_id ?? ''} title="herdr workspace id" />
       <CopyChip label="run" value={run.id} title="daemon DB 的 run id：turn 與 message 都掛在它底下" />
+      {/* 一行跳進 herdr 並落在這顆 pane（2026-09-17 使用者）；遠端主機要先 ssh，這裡組不出保證對的指令，不給。 */}
+      {isLocal ? (
+        <CopyChip
+          className="copy-chip-full"
+          label="進 herdr"
+          value={herdrJumpCommand(run.herdr_session, run.pane_id)}
+          title="貼到終端機：先把 herdr 的焦點移到這顆 pane，再打開 herdr（接回 session），一進去就是它"
+        />
+      ) : null}
     </div>
   )
 }
