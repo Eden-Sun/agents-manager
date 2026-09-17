@@ -158,8 +158,7 @@ am_cargo() {
     # 外部 Cargo worker：helper 本身讀 config + 0600 secret file，pane 不會拿到 SSH 密碼。
     # 125 = 設定在 pane 啟動後被關掉／這個指令不適合 offload，退回本機 cargo；
     # 其他非 0 = 遠端驗證真的失敗，原樣回報，不能偷偷改成本機成功。
-    if [ "${AM_REMOTE_CARGO_ENABLED:-}" = "1" ] \
-        && am_remote_cargo_eligible "${1:-}" \
+    if am_remote_cargo_eligible "${1:-}" \
         && [ -n "${AM_DAEMON_EXE:-}" ] && [ -x "$AM_DAEMON_EXE" ] \
         && [ -n "${AM_CONFIG_PATH:-}" ] && [ -n "${AM_DATA_DIR:-}" ]; then
         "$AM_DAEMON_EXE" remote-cargo --config "$AM_CONFIG_PATH" --data-dir "$AM_DATA_DIR" --cwd "$PWD" -- "$@"
