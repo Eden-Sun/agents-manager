@@ -93,7 +93,10 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   grok 的 dispatcher 也按實例分址（`<根>/grok-hook.sh`），hooks 檔名是 `agents-manager[-<slug>].json`（grok 會合併整個 hooks 目錄）；每支 dispatcher 只接自己實例的 pane：隔離實例的 pane env 帶 `AM_INSTANCE=<slug>`，正式實例不帶（升級前開的舊 pane 也沒有，照舊歸正式）。
   `AM_INSTANCE` 與 `AM_DATA_DIR` 是**保留變數**：identity.env、bot.env 合併之後才由 daemon 蓋回去（隔離實例設 slug／正式實例移除；本機設資料目錄／遠端移除），自訂 env 寫了也不算。
   child 建立線同樣保留：herdr shim 在會建 pane 的 `pane split`／`tab create`／`workspace create`（及 `pane new`）剝掉呼叫者自帶的 `--env AM_INSTANCE=…`／`--env AM_DATA_DIR=…`（含 `--env=` 寫法），再照母 pane 的實際值補，母 pane 沒有就不帶。
-  `agent start` **只剝不補**：herdr 0.8.2 的 `agent start` 沒有 `--env`（它在既有 pane 裡開 agent，env 在建 pane 時已注入），補上去就是未知旗標；`--` 之後是 agent CLI 自己的參數，原樣保留。
+  `agent start` 的 argv **只剝不補**：herdr 0.8.2 的 `agent start` 沒有 `--env`，補上去就是未知旗標；`--` 之後是 agent CLI 自己的參數，原樣保留。
+  但它假設「目標 `--pane` 是 `pane split` 剛開的、帳號早注入了」——漏了那一步或重用一顆沒走過那條路的舊 pane 時，子 agent 會默默吃到預設帳號（issue #57）。
+  所以 `agent start` 前另外對 `--pane` 指到的 pane `pane send-text` 一行 `export KEY='value'; …`（含 `AM_INSTANCE`／`AM_DATA_DIR`），
+  補的是母 pane 目前的實際值，跟 `agent.start` 前補 PATH（`start_inner`）同一招：pty 會緩衝，pane 還沒起殻也不怕；pane 早有正確值時只是重覆設一次。
   `worktree create/open` 也會開 workspace，但沒有 `--env`：那個 root pane 由 herdr server 開、拿不到任何 `AM_*`，hook 不會觸發（dispatcher 要 `AM_BOT_ID`＋`AM_HOOK_TOKEN`），所以不會送錯實例，只是不被追蹤。
 - **路徑解析不猜**：`normalize` 逐段 canonicalize，只有「這一段真的不存在」才當成還沒建立的尾巴；dangling symlink、symlink 迴圈等解析失敗一律拒絕啟動，不會被下一個 `..` pop 掉而錯映到別的目錄。
 - **herdr client**：
@@ -585,8 +588,12 @@ daemon 每次起 pane 前把 POSIX `sh` 包裝腳本裝到 `<bot 目錄>/bin/her
 - `herdr agent start <name> …`：`<name>` 不以 `$AM_AGENT_NAME-` 開頭就補前綴（截到 32 字）並在 stderr 說明。旗標可在名字前面，`--kind`/`--pane`/`--timeout` 的值不誤認，`--` 之後原封不動。
   **模型沿用**：`--` 之後沒有 `--model` 且 `--kind` 與母 bot 相同（或沒寫）時補 `-- --model $AM_MODEL`，claude 再補 `--effort $AM_EFFORT`；
   子 agent 自己寫的一律尊重（`--model`、codex/grok 的 `-m`、codex 的 `-c model=` / `-c model_reasoning_effort=`）。
+  **帳號／hook 補救（issue #57）**：`agent start` 沒有 `--env`，只能假設 `--pane` 指到的 pane 是 `pane split` 剛開的、帳號早注入了；
+  這假設一旦不成立（漏了 pane split、重用一顆沒走過那條路的舊 pane），子 agent 就默默吃到預設帳號。`exec` 真的 `agent start` 之前，
+  先對那個 `--pane` `pane send-text` 一行 `export KEY='value'; …`（與下面 `pane split` 同一份保留清單，含 `AM_INSTANCE`／`AM_DATA_DIR`），
+  補的是這個母 pane 目前的實際值；pane 早有正確值時只是重覆設一次，無害。
 - `herdr pane split` / `pane new` / `tab create`：原樣轉發並補 `--env`，帶下 `CLAUDE_CONFIG_DIR`、`CODEX_HOME`、`AM_BOT_ID`、`AM_HOOK_TOKEN`、`AM_PORT`、`AM_RUN_ID`、
-  `AM_AGENT_NAME`、`AM_KIND`、`AM_MODEL`、`AM_EFFORT`、`PATH`——herdr 的 pane 是 **server** 生的、不繼承呼叫端 shell，沒這段子 pane 會用預設帳號起來、拿不到 hook token。
+  `AM_AGENT_NAME`、`AM_KIND`、`AM_MODEL`、`AM_EFFORT`、`AM_PROJECT_ID`、`AM_WORKSPACE_ID`、`AM_OUTBOX`、`AM_REAL_HERDR`、`PATH`——herdr 的 pane 是 **server** 生的、不繼承呼叫端 shell，沒這段子 pane 會用預設帳號起來、拿不到 hook token。
   呼叫端自己給的同名 `--env` 不動。
 - `herdr agent prompt`：見 §6.5d。其他子指令 `exec` 真正的 herdr（`$AM_REAL_HERDR`，否則 `PATH` 上第一個不是自己的）。
 
