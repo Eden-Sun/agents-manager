@@ -25,7 +25,20 @@ static PROJECTION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// 時重讀，所以「外面把 TOML 換掉／清空，再由 API 或總管觸發重投」也是事故路徑，不能只擋啟動。
 pub async fn project_config(store: &ConfigStore, pool: &SqlitePool) -> Result<()> {
     let _g = PROJECTION.lock().await;
-    project_inner(store, pool, None).await
+    project_inner(store, pool, None, false).await
+}
+
+/// 啟動時那一次投影。`allow_bulk`＝使用者帶 `AM_ALLOW_BULK_DELETE=1` 重啟 daemon（`serve` 啟動時讀一次 env）：
+/// **只放行這一次**。之後 runtime 的每次重投都不吃這個 env——閘門下沉到每次投影之後，env 一直留在行程裡，
+/// 「放行一次」就變成整個行程期間放行，config 再被外部換掉時只記 warn 就照刪（review3 c3 L7）。
+pub async fn project_config_at_startup(store: &ConfigStore, pool: &SqlitePool, allow_bulk: bool) -> Result<()> {
+    let _g = PROJECTION.lock().await;
+    project_inner(store, pool, None, allow_bulk).await
+}
+
+/// `serve` 啟動時讀一次；其他地方不讀。
+pub fn bulk_delete_allowed_by_env() -> bool {
+    std::env::var(ALLOW_BULK_ENV).is_ok_and(|v| v == "1")
 }
 
 /// 刪除 API 這一次**實際從 config.toml 拿掉**的 id。只由 `delete_from_config` 在臨界區內從當下的 TOML 算出來，
@@ -121,7 +134,7 @@ pub async fn delete_from_config(store: &ConfigStore, pool: &SqlitePool, target: 
             Ok(allow)
         })
         .await?;
-    project_inner(store, pool, Some(&allow)).await?;
+    project_inner(store, pool, Some(&allow), false).await?;
     Ok(allow)
 }
 
@@ -154,7 +167,12 @@ fn removals(
     (bots, projects)
 }
 
-async fn project_inner(store: &ConfigStore, pool: &SqlitePool, allow: Option<&Deleting>) -> Result<()> {
+async fn project_inner(
+    store: &ConfigStore,
+    pool: &SqlitePool,
+    allow: Option<&Deleting>,
+    allow_bulk: bool,
+) -> Result<()> {
     // 1. fill in ids / canonicalize paths, write back only if something changed.
     let changed = store
         .update(|cfg| {
@@ -243,7 +261,7 @@ async fn project_inner(store: &ConfigStore, pool: &SqlitePool, allow: Option<&De
         cfg.projects.iter().flat_map(|p| p.bots.iter()).filter_map(|b| b.id.clone()).collect();
 
     // 任何寫入之前先擋：投錯 DB／被換掉的 config 長得就像「config 裡什麼都沒有」。
-    guard_removals(pool, &live_projects, &live_bots, allow).await?;
+    guard_removals(pool, &live_projects, &live_bots, allow, allow_bulk).await?;
 
     for (p_at, p) in cfg.projects.iter().enumerate() {
         let pid = p.id.clone().unwrap();
@@ -324,7 +342,7 @@ async fn project_inner(store: &ConfigStore, pool: &SqlitePool, allow: Option<&De
 const MAX_REMOVED: usize = 3;
 /// 或是一口氣少掉三成以上；兩顆以上才算，免得「三顆刪一顆」這種正常操作被擋。
 const MAX_REMOVED_RATIO: f64 = 0.30;
-/// 真的要刪這麼多（人已確認）時，用這個 env 放行一次。
+/// 真的要刪這麼多（人已確認）時，帶這個 env 重啟 daemon：只放行啟動那一次投影。
 pub const ALLOW_BULK_ENV: &str = "AM_ALLOW_BULK_DELETE";
 
 fn too_many(gone: usize, total: usize) -> bool {
@@ -349,6 +367,7 @@ async fn guard_removals(
     live_projects: &HashSet<String>,
     live_bots: &HashSet<String>,
     allow: Option<&Deleting>,
+    allow_bulk: bool,
 ) -> Result<()> {
     // `child` bot 本來就不在 config.toml 裡，不算「少掉」。
     let db_bots: Vec<db::Bot> =
@@ -388,7 +407,7 @@ async fn guard_removals(
         gone_projects.len(),
         some_names(&gone_projects),
     );
-    if std::env::var(ALLOW_BULK_ENV).map(|v| v == "1").unwrap_or(false) {
+    if allow_bulk {
         tracing::warn!("{ALLOW_BULK_ENV}=1：照使用者確認的做大量軟刪（{detail}）");
         return Ok(());
     }
@@ -397,7 +416,8 @@ async fn guard_removals(
         detail: format!(
             "拒絕投影 config.toml：{detail}。\
              這通常是 daemon 開錯資料目錄（同一顆 DB 被另一份 config 投影），不是有人刪了 bot；\
-             先確認 --config 與資料目錄（見 startup.rs）。確認過真的要刪就用 {ALLOW_BULK_ENV}=1 放行一次。"
+             先確認 --config 與資料目錄（見 startup.rs）。確認過真的要刪，就帶 {ALLOW_BULK_ENV}=1 重啟 daemon\
+             （只放行啟動時那一次投影，之後的重投照樣擋）。"
         ),
         bots: gone_bots,
         projects: gone_projects,
@@ -495,13 +515,46 @@ mod tests {
         assert_eq!(db::live_bots(&pool).await.unwrap().len(), 4, "拒絕投影時一列都不能動");
         assert_eq!(db::live_projects(&pool).await.unwrap().len(), 1);
 
-        // 人確認過就放行一次。
-        std::env::set_var(ALLOW_BULK_ENV, "1");
-        let out = project_text(&path, &pool, "[server]\nlisten = '127.0.0.1:7788'\n").await;
-        std::env::remove_var(ALLOW_BULK_ENV);
-        out.unwrap();
+        // 人確認過、帶 env 重啟：啟動那一次投影放行。
+        project_config_at_startup(&ConfigStore::load(path.clone()).await.unwrap(), &pool, true).await.unwrap();
         assert_eq!(db::live_bots(&pool).await.unwrap().len(), 0);
         assert_eq!(db::live_projects(&pool).await.unwrap().len(), 0);
+
+        pool.close().await;
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `AM_ALLOW_BULK_DELETE=1` 只放行啟動那一次（review3 c3 L7）：env 留在行程裡，之後 config 被外部換掉、
+    /// 再由 API／總管觸發的重投照樣要擋，不能只記 warn 就照刪。
+    #[tokio::test]
+    async fn the_bulk_allowance_does_not_outlive_the_startup_projection() {
+        let _env = BULK_ENV.lock().await;
+        let dir = std::env::temp_dir().join(format!("am-projection-once-{}", db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
+        std::fs::write(&path, config_text(&["b1", "b2", "b3", "b4", "b5"])).unwrap();
+        let store = ConfigStore::load(path.clone()).await.unwrap();
+        project_config(&store, &pool).await.unwrap();
+
+        // 使用者手改 config 刪掉 4 顆，帶 env 重啟：啟動投影放行。
+        std::fs::write(&path, config_text(&["b1"])).unwrap();
+        let store = ConfigStore::load(path.clone()).await.unwrap();
+        std::env::set_var(ALLOW_BULK_ENV, "1");
+        assert!(bulk_delete_allowed_by_env());
+        let started = project_config_at_startup(&store, &pool, bulk_delete_allowed_by_env()).await;
+        started.unwrap();
+        assert_eq!(db::live_bots(&pool).await.unwrap().len(), 1);
+
+        // 同一個行程、env 還在：config 被外面換成空的，runtime 重投照樣拒絕。
+        std::fs::write(&path, "[server]\nlisten = '127.0.0.1:7788'\n").unwrap();
+        store.update(|_| Ok(())).await.unwrap();
+        let out = project_config(&store, &pool).await;
+        std::env::remove_var(ALLOW_BULK_ENV);
+        let err = out.unwrap_err().to_string();
+        assert!(err.contains("拒絕投影") && err.contains("重啟 daemon"), "{err}");
+        assert_eq!(db::live_projects(&pool).await.unwrap().len(), 1, "一列都不能動");
+        assert_eq!(db::live_bots(&pool).await.unwrap().len(), 1, "一列都不能動");
 
         pool.close().await;
         std::fs::remove_dir_all(&dir).unwrap();
