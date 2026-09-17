@@ -13,6 +13,24 @@ test('real daemon question/answer kinds and reply_to survive normalization', () 
   assert.equal(answer?.relay_from, 'agm')
 })
 
+/**
+ * The daemon already returns mission events in write order (`ORDER BY created_at, rowid`). Re-sorting
+ * them here on `(created_at, id)` used to undo that: `created_at` is millisecond-resolution and the
+ * ids are ULIDs, whose random section is not monotonic inside one millisecond.
+ */
+test('same-millisecond events keep the order the daemon sent them in', () => {
+  const at = '2026-09-17T12:00:00.000Z'
+  // The ids run backwards on purpose: sorting on them would flip this pair.
+  const detail = toMissionDetail({
+    id: 'm', project_id: 'p',
+    events: [
+      { id: '01ZZZZZZZZZZZZZZZZZZZZZZZZ', kind: 'round', text: '', mission_id: 'm', created_at: at },
+      { id: '01AAAAAAAAAAAAAAAAAAAAAAAA', kind: 'paused', text: '', mission_id: 'm', created_at: at },
+    ],
+  })
+  assert.deepEqual(detail?.events.map((e) => e.kind), ['round', 'paused'])
+})
+
 test('parent and child references are retained, malformed collections cannot hide the card', () => {
   const detail = toMissionDetail({
     id: 'm', project_id: 'p', parent_mission_id: 'parent',

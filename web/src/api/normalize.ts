@@ -452,6 +452,18 @@ export function sortByTime<T extends { created_at: string; id: string }>(items: 
   })
 }
 
+/**
+ * Same, but same-millisecond items keep the order the daemon sent them in.
+ *
+ * Mission events already come back in write order (`ORDER BY created_at, rowid`); `created_at` only
+ * has millisecond resolution and the ids are ULIDs, whose random section is not monotonic inside one
+ * millisecond, so tie-breaking on `id` here would scramble a round/paused/resumed burst all over again.
+ * `Array.prototype.sort` is stable, so returning 0 for a tie keeps the incoming order.
+ */
+export function sortByTimeStable<T extends { created_at: string }>(items: T[]): T[] {
+  return [...items].sort((a, b) => a.created_at.localeCompare(b.created_at))
+}
+
 export function toState(raw: unknown): AppState {
   const root = isRec(raw) ? raw : {}
   const hosts: Host[] = []
@@ -1014,5 +1026,5 @@ export function toMissionDetail(raw: unknown): MissionDetail | null {
       }
     }
   }
-  return { ...base, events: sortByTime(events), assignments, revisions, parent }
+  return { ...base, events: sortByTimeStable(events), assignments, revisions, parent }
 }
