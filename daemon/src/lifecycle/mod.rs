@@ -50,7 +50,7 @@ pub(crate) use slash::*;
 pub(crate) use delivery::*;
 pub(crate) use start::*;
 pub(crate) use stop::*;
-pub(crate) use interrupt_grace::note_user_interrupt;
+pub(crate) use interrupt_grace::{is_held as user_interrupt_held, note_user_interrupt};
 pub(crate) use stuck_turns::{observe as observe_agent_status, spawn_stuck_turn_sweeper, sweep as sweep_stuck_turns};
 
 #[derive(Debug)]

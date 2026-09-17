@@ -100,9 +100,83 @@ enum HookKind {
         assistant: Option<String>,
         user: Option<String>,
     },
+    /// claude 的 `StopFailure`：這一回合是**失敗**收尾的（API／auth／額度…），不是答完（issue #79）。
+    TurnFailed {
+        session_id: Option<String>,
+        turn_id: Option<String>,
+        transcript_path: Option<String>,
+        reason: FailureReason,
+        /// 原文，寫進系統訊息讓人看得出來為什麼失敗。
+        detail: Option<String>,
+    },
     /// Claude Code statusLine input — never a Turn.
     StatusLine,
     Ignore(String),
+}
+
+/// `StopFailure` 說的是哪一種失敗。分得出來就留著（`rate limit` 跟其他錯誤要分得開），
+/// 分不出來是 `Unknown`——「回合失敗了」本身就是一級訊號，不必等分類到位才收回合。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FailureReason {
+    RateLimit,
+    Auth,
+    Api,
+    /// 使用者自己中斷。**不是** provider 失敗，一個字都不動：claude 把 Esc 也走 `StopFailure` 時，
+    /// 記成失敗會讓「我自己按停的」看起來像系統壞了，也會蓋掉 `interrupted by user` 那條既有路徑。
+    Interrupted,
+    Unknown,
+}
+
+impl FailureReason {
+    fn label(self) -> &'static str {
+        match self {
+            FailureReason::RateLimit => "額度或速率限制",
+            FailureReason::Auth => "帳號或授權",
+            FailureReason::Api => "API 錯誤",
+            FailureReason::Interrupted => "使用者中斷",
+            FailureReason::Unknown => "未分類",
+        }
+    }
+}
+
+/// 從 `StopFailure` 的 payload 裡撈出講得出口的原因。鍵名故意給一整排：這個 hook 的欄位名還在動，
+/// 撈不到就退回 `None`（照樣收回合，只是說不出原因），絕不因為欄位對不上就當作沒發生。
+fn failure_detail(p: &Value) -> Option<String> {
+    const KEYS: [&str; 9] =
+        ["reason", "failure_reason", "stop_reason", "error_type", "errorType", "subtype", "error", "message", "detail"];
+    for k in KEYS {
+        match p.get(k) {
+            Some(Value::String(s)) if !s.trim().is_empty() => return Some(s.trim().to_string()),
+            // `error: {type, message}` 之類的巢狀形狀。
+            Some(Value::Object(o)) => {
+                for inner in ["message", "type", "code"] {
+                    if let Some(s) = o.get(inner).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+                        return Some(s.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// 原因文字歸到哪一類。中斷排在最前面：寧可把一次真的失敗說成「使用者中斷」而少收一次，
+/// 也不要把使用者自己按的停說成系統失敗（AGM 交辦 2026-09-18）。
+pub(crate) fn classify_failure(detail: Option<&str>) -> FailureReason {
+    let t = detail.unwrap_or("").to_ascii_lowercase();
+    let has = |needles: &[&str]| needles.iter().any(|n| t.contains(n));
+    if has(&["interrupt", "cancel", "abort", "user_stop", "user stop", "esc"]) {
+        FailureReason::Interrupted
+    } else if has(&["rate limit", "rate_limit", "ratelimit", "usage limit", "usage_limit", "quota", "429", "overloaded"]) {
+        FailureReason::RateLimit
+    } else if has(&["auth", "401", "403", "credential", "unauthorized", "forbidden", "login", "api key", "api_key"]) {
+        FailureReason::Auth
+    } else if t.trim().is_empty() {
+        FailureReason::Unknown
+    } else {
+        FailureReason::Api
+    }
 }
 
 const DEFAULT_CLAUDE_IDENTITY: &str = "cc0";
@@ -205,6 +279,18 @@ fn classify(provider: &str, p: &Value) -> HookKind {
             match ev.as_str() {
                 "StatusLine" => HookKind::StatusLine,
                 "SessionStart" => HookKind::Identity { session_id: s("session_id"), transcript_path: s("transcript_path") },
+                // 回合失敗收尾的原生訊號（issue #79）：以前只有 `Stop`，失敗的回合要等 §4.3 備援或
+                // stuck watchdog 才被發現，中間一直掛在 in_flight。
+                "StopFailure" => {
+                    let detail = failure_detail(p);
+                    HookKind::TurnFailed {
+                        session_id: s("session_id"),
+                        turn_id: s("prompt_id"),
+                        transcript_path: s("transcript_path"),
+                        reason: classify_failure(detail.as_deref()),
+                        detail,
+                    }
+                }
                 "Stop" => {
                     if p.get("stop_hook_active").and_then(|v| v.as_bool()).unwrap_or(false) {
                         return HookKind::Ignore("stop_hook_active".into());
@@ -519,6 +605,72 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
     match kind {
         HookKind::Ignore(reason) => {
             tracing::debug!(reason, "hook ignored");
+            Ok(())
+        }
+        // issue #79：回合失敗是一級訊號。收掉那一筆 in-flight turn 並把原因寫進對話，
+        // 而不是讓它掛著等 §4.3 備援（兩分鐘）或 stuck watchdog（五分鐘）來猜。
+        HookKind::TurnFailed { session_id, turn_id, transcript_path, reason, detail } => {
+            // 使用者自己中斷不是失敗。兩道都要：payload 說得出是中斷時照它說的；說不出來時看
+            // daemon 自己的紀錄——`interrupt_bot` 會先 `note_user_interrupt` 再收 in-flight turn，
+            // 所以這個窗口裡到的 StopFailure 就是那一次 Esc 的回聲（AGM 交辦 2026-09-18）。
+            if reason == FailureReason::Interrupted || lifecycle::user_interrupt_held(&bot.id) {
+                tracing::info!(bot = %bot.name, ?reason, detail, "StopFailure 是使用者中斷的回聲：不算失敗，什麼都不動");
+                return Ok(());
+            }
+            if let Some(r) = &run {
+                sqlx::query(
+                    "UPDATE runs SET native_session_id = COALESCE(native_session_id, ?),
+                     transcript_path = COALESCE(?, transcript_path) WHERE id = ?",
+                )
+                .bind(&session_id)
+                .bind(&transcript_path)
+                .bind(&r.id)
+                .execute(&app.db)
+                .await?;
+            }
+            // 同一筆送兩次（重試、spool 重播）不再收第二次——跟 `TurnComplete` 同一把鎖。
+            if let (Some(sid), Some(tid)) = (&session_id, &turn_id) {
+                let dup: Option<String> =
+                    sqlx::query_scalar("SELECT id FROM turns WHERE native_session_id=? AND native_turn_id=?")
+                        .bind(sid)
+                        .bind(tid)
+                        .fetch_optional(&app.db)
+                        .await?;
+                if let Some(existing) = dup {
+                    tracing::info!(turn = %existing, "duplicate StopFailure ignored");
+                    return Ok(());
+                }
+            }
+            let Some(r) = &run else {
+                tracing::info!(bot = %bot.name, ?reason, "StopFailure 但這顆 bot 沒有活著的 run：沒有回合可收");
+                return Ok(());
+            };
+            let Some(t) = db::in_flight_turn(&app.db, &r.id).await? else {
+                tracing::info!(bot = %bot.name, ?reason, detail, "StopFailure 但沒有 in-flight turn：後到的訊號，不開新回合");
+                return Ok(());
+            };
+            // CAS 在 `status='in_flight'` 上：後到的 Stop／§4.3 備援若已經把它收掉，這裡就什麼都不做，
+            // 不會變成第二次收尾（issue #79 驗收第二條）。`delivery` 不動——字是送出去了，失敗的是回合。
+            let claimed = sqlx::query(
+                "UPDATE turns SET status='failed', completed_at=?, native_session_id=?, native_turn_id=? WHERE id=? AND status='in_flight'",
+            )
+            .bind(db::now())
+            .bind(&session_id)
+            .bind(&turn_id)
+            .bind(&t.id)
+            .execute(&app.db)
+            .await?;
+            if claimed.rows_affected() == 0 {
+                tracing::info!(turn = %t.id, "StopFailure 來晚了：這一筆已經被別的路徑收掉，不重複收尾");
+                return Ok(());
+            }
+            let note = match detail.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
+                Some(d) => format!("這一回合失敗收尾（{}）：{d}", reason.label()),
+                None => format!("這一回合失敗收尾（{}）：agent 沒有給原因。", reason.label()),
+            };
+            lifecycle::insert_message(app, &conv, Some(&t.id), "system", &note, "hook", false, None).await?;
+            lifecycle::emit_turn(app, &t.id).await;
+            tracing::warn!(bot = %bot.name, turn = %t.id, ?reason, detail, "StopFailure：回合收成失敗");
             Ok(())
         }
         HookKind::StatusLine => {
@@ -1564,6 +1716,204 @@ mod external_claim_tests {
         controller::late_reply_for_turn(&app, &turn_id, "completed").await;
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE assignment_id=?").bind(&a.id).fetch_one(&app.db).await.unwrap();
         assert_eq!(n, 2, "結算那則＋結果到了那則");
+    }
+
+    /// 一顆 claude bot＋一筆已經送達（`delivery='ok'`）、還在飛的回合。StopFailure 要收的就是這種。
+    async fn delivered_turn(app: &Arc<App>, project_id: &str) -> (String, String, String) {
+        let bot_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, created_at)
+             VALUES (?,?,?,'claude','[]',0,1,'tok',?)",
+        )
+        .bind(&bot_id)
+        .bind(project_id)
+        // ULID 的前段是時間戳：同一毫秒建的兩顆 bot 前六碼一樣，撞 `bots.project_id, bots.name`。取尾段。
+        .bind(format!("hook-{}", &bot_id[bot_id.len() - 8..]))
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let conversation_id = db::conversation_id(&app.db, &bot_id).await.unwrap();
+        let run_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','working','ws-1','pane-1','agent','test',?)",
+        )
+        .bind(&run_id)
+        .bind(&bot_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let turn_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, prompt_text, created_at)
+             VALUES (?,?,?,'web','in_flight','ok','跑一次測試',?)",
+        )
+        .bind(&turn_id)
+        .bind(&conversation_id)
+        .bind(&run_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        (bot_id, conversation_id, turn_id)
+    }
+
+    fn stop_failure(bot_id: &str, payload: Value) -> HookBody {
+        HookBody { bot_id: bot_id.to_string(), provider: "claude".into(), payload, received_at: None, truncated: false }
+    }
+
+    async fn turn_row(app: &Arc<App>, id: &str) -> db::Turn {
+        sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(id).fetch_one(&app.db).await.unwrap()
+    }
+
+    async fn system_notes(app: &Arc<App>, turn_id: &str) -> Vec<String> {
+        sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='system'")
+            .bind(turn_id)
+            .fetch_all(&app.db)
+            .await
+            .unwrap()
+    }
+
+    /// issue #79：`StopFailure` 一到就把回合收成失敗，而且看得出為什麼——以前要等 §4.3 備援或
+    /// stuck watchdog 才發現，中間一直掛在 in_flight。`delivery` 不動：字是送出去了，失敗的是回合。
+    #[tokio::test]
+    async fn a_stop_failure_closes_the_turn_as_failed_with_a_readable_reason() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, _conv, turn_id) = delivered_turn(&app, &env.project_id).await;
+
+        process(
+            &app,
+            &stop_failure(
+                &bot_id,
+                json!({"hook_event_name": "StopFailure", "session_id": "s1", "prompt_id": "p1",
+                       "reason": "API Error: 429 rate_limit_error"}),
+            ),
+        )
+        .await
+        .unwrap();
+
+        let t = turn_row(&app, &turn_id).await;
+        assert_eq!(t.status, "failed", "回合當場收成失敗，不必等 watchdog");
+        assert_eq!(t.delivery, "ok", "送達與回合成敗是兩件事");
+        assert!(t.completed_at.is_some());
+        assert_eq!((t.native_session_id.as_deref(), t.native_turn_id.as_deref()), (Some("s1"), Some("p1")), "認得出是哪一回合");
+        let notes = system_notes(&app, &turn_id).await;
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("額度或速率限制"), "分類要看得出來：{notes:?}");
+        assert!(notes[0].contains("429 rate_limit_error"), "原文也要留著：{notes:?}");
+    }
+
+    /// 使用者自己按停不是 provider 失敗。兩條路都要擋：payload 說得出是中斷時照它說的；
+    /// 說不出來時看 daemon 自己的紀錄（`interrupt_bot` 先 `note_user_interrupt` 才收 turn）。
+    #[tokio::test]
+    async fn a_user_interrupt_is_never_recorded_as_a_provider_failure() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+
+        // (a) payload 自己說是中斷。
+        let (bot_a, _c, turn_a) = delivered_turn(&app, &env.project_id).await;
+        process(
+            &app,
+            &stop_failure(
+                &bot_a,
+                json!({"hook_event_name": "StopFailure", "session_id": "sa", "prompt_id": "pa",
+                       "reason": "[Request interrupted by user]"}),
+            ),
+        )
+        .await
+        .unwrap();
+        let t = turn_row(&app, &turn_a).await;
+        assert_eq!(t.status, "in_flight", "使用者中斷不由這條路收尾");
+        assert!(system_notes(&app, &turn_a).await.is_empty(), "也不寫「失敗」的說明");
+
+        // (b) payload 說不出原因，但 daemon 記得使用者剛按了停。
+        let (bot_b, _c, turn_b) = delivered_turn(&app, &env.project_id).await;
+        lifecycle::note_user_interrupt(&bot_b);
+        process(&app, &stop_failure(&bot_b, json!({"hook_event_name": "StopFailure", "session_id": "sb", "prompt_id": "pb"})))
+            .await
+            .unwrap();
+        let t = turn_row(&app, &turn_b).await;
+        assert_eq!(t.status, "in_flight", "剛按過停：這則 StopFailure 是那次 Esc 的回聲");
+        assert!(system_notes(&app, &turn_b).await.is_empty());
+    }
+
+    /// 後到的 StopFailure 不會把已經收好的回合再收一次，重播的同一則也不會（issue #79 驗收第二條）。
+    #[tokio::test]
+    async fn a_late_or_replayed_stop_failure_does_not_close_a_turn_twice() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, _conv, turn_id) = delivered_turn(&app, &env.project_id).await;
+        // Stop 先到，回合已經答完。
+        sqlx::query("UPDATE turns SET status='completed', completed_at=? WHERE id=?")
+            .bind(db::now())
+            .bind(&turn_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        let ev = stop_failure(
+            &bot_id,
+            json!({"hook_event_name": "StopFailure", "session_id": "s9", "prompt_id": "p9", "reason": "API Error: 500"}),
+        );
+        process(&app, &ev).await.unwrap();
+
+        let t = turn_row(&app, &turn_id).await;
+        assert_eq!(t.status, "completed", "已經收好的不再被改成 failed");
+        assert!(system_notes(&app, &turn_id).await.is_empty(), "也不補一則失敗說明");
+
+        // 同一則重播（spool 重送）：照樣什麼都不動。
+        process(&app, &ev).await.unwrap();
+        assert_eq!(turn_row(&app, &turn_id).await.status, "completed");
+        assert!(system_notes(&app, &turn_id).await.is_empty());
+    }
+
+    /// 分類：rate limit 跟其他錯誤要分得開，中斷排在最前面（寧可少收一次也不要把使用者按的停說成失敗）。
+    #[test]
+    fn the_failure_classifier_keeps_rate_limit_auth_and_interrupts_apart() {
+        use FailureReason::*;
+        assert_eq!(classify_failure(Some("API Error: 429 rate_limit_error")), RateLimit);
+        assert_eq!(classify_failure(Some("You've hit your usage limit")), RateLimit);
+        assert_eq!(classify_failure(Some("overloaded_error")), RateLimit);
+        assert_eq!(classify_failure(Some("401 Unauthorized: invalid api key")), Auth);
+        assert_eq!(classify_failure(Some("OAuth token expired; please login")), Auth);
+        assert_eq!(classify_failure(Some("API Error: 500 Internal Server Error")), Api);
+        assert_eq!(classify_failure(Some("[Request interrupted by user]")), Interrupted);
+        assert_eq!(classify_failure(Some("cancelled")), Interrupted);
+        assert_eq!(classify_failure(None), Unknown);
+        assert_eq!(classify_failure(Some("   ")), Unknown);
+    }
+
+    /// payload 的欄位名還在動：撈得到就留原文，撈不到也照樣收回合（只是說不出原因）。
+    #[test]
+    fn the_failure_detail_is_read_from_whichever_field_carries_it() {
+        assert_eq!(failure_detail(&json!({"reason": "rate_limit_error"})).as_deref(), Some("rate_limit_error"));
+        assert_eq!(failure_detail(&json!({"error": {"type": "overloaded_error"}})).as_deref(), Some("overloaded_error"));
+        assert_eq!(
+            failure_detail(&json!({"error": {"message": "Internal server error", "type": "api_error"}})).as_deref(),
+            Some("Internal server error"),
+        );
+        assert_eq!(failure_detail(&json!({"hook_event_name": "StopFailure", "session_id": "s"})), None);
+        assert_eq!(failure_detail(&json!({"reason": "  "})), None, "空白不算原因");
+    }
+
+    /// 分類本身：`StopFailure` 走 `TurnFailed`，一般 `Stop` 不受影響。
+    #[test]
+    fn stop_failure_classifies_as_a_failed_turn_and_plain_stop_is_untouched() {
+        let v = json!({"hook_event_name": "StopFailure", "session_id": "s1", "prompt_id": "p1", "reason": "429 rate_limit"});
+        match classify("claude", &v) {
+            HookKind::TurnFailed { session_id, turn_id, reason, detail, .. } => {
+                assert_eq!(session_id.as_deref(), Some("s1"));
+                assert_eq!(turn_id.as_deref(), Some("p1"));
+                assert_eq!(reason, FailureReason::RateLimit);
+                assert_eq!(detail.as_deref(), Some("429 rate_limit"));
+            }
+            other => panic!("expected TurnFailed, got {other:?}"),
+        }
+        let v = json!({"hook_event_name": "Stop", "session_id": "s1", "prompt_id": "p1"});
+        assert!(matches!(classify("claude", &v), HookKind::TurnComplete { .. }), "一般 Stop 照舊");
     }
 
     /// claude 的 Stop 沒帶使用者訊息：從 transcript 尾巴讀。對不上一樣不認領；讀不到（沒有 transcript）就照舊認領。
