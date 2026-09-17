@@ -225,13 +225,15 @@ pane env 的 `AM_RUN_ID` 只供診斷。
 **世代圍籬**（issue #69，`lifecycle::fence`）：只認 bot 不夠。使用者 interrupt 之後 bot 重啟，新的 run 已經開了新回合，
 舊 CLI session 的 `Stop` 這時候才抵達——按「這顆 bot 的 hook」處理的話，它會去收新回合的尾、把上一代的回覆貼進去。
 所以每一則 hook 在進到語意處理**之前**先判一次歸屬，規則只住在 `fence` 一個地方（散在 hook／reconcile／fallback 各判一次遲早會漂成三套）：
-- **世代就是 `runs` 那一列本身**。`runs.id` 是 ULID（毫秒時間序），同一顆 bot 的兩個 run 不會落在同一毫秒，
-  所以 `id` 的字典序就是單調遞增的世代序。不另外養計數器欄位——`INSERT INTO runs` 有七十幾處，
-  半populated 的欄位只會給出假的保證。
+- **世代就是 `runs` 那一列本身**，先後看**寫入順序**（SQLite 的隱式 `rowid`）。不另外養計數器欄位——
+  `INSERT INTO runs` 有七十幾處，半populated 的欄位只會給出假的保證，而 `rowid` 每一列本來就有。
+  **不可以拿 `runs.id`（ULID）的字典序當世代序**：ULID 只有毫秒精度的時間戳，同一毫秒內的隨機段不保證
+  單調，兩個 run 巧合落在同一毫秒時，先寫進去的那個字典序反而可能比較大（issue #98；同源的還有
+  `a4605b2` 的 `mission_events` 排序與 §6.5 佇列的 `ORDER BY rowid`）。
 - **`Current`**（照常處理）：事件指名的就是這個 run；或它帶的 native session 等於這個 run 的 `native_session_id`
   或 `resume_session_id`（`resume_native` 起的 run 在第一則 hook 把 session 收進來之前的那個窗口）。
-- **`Stale`**（只記錄，一個欄位都不准改）：事件指名了別的 run；或它帶的 session 在這顆 bot **`id` 比現在這代小**的
-  某個 run 上找得到。丟棄時記一行 warn 並推一則 `hook_fenced` 事件（帶 bot／run／prior_run／session／why），
+- **`Stale`**（只記錄，一個欄位都不准改）：事件指名了別的 run；或它帶的 session 在這顆 bot **比現在這代更早
+  寫進去**（`rowid` 較小）的某個 run 上找得到。丟棄時記一行 warn 並推一則 `hook_fenced` 事件（帶 bot／run／prior_run／session／why），
   重播同一則會走到同一個分支，仍然什麼都不改。
 - **`Unproven`**（照既有規則走，不靠時序猜）：事件沒帶 session；run 還沒回報過 session；或那個 session
   不屬於任何更早的 run。**最後一種是刻意放行的**：claude 在同一個 CLI 裡 `/clear` 會換一個 session id 而 run 沒變，
