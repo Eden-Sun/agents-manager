@@ -256,6 +256,11 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
     .execute(&mut *tx)
     .await
     .context("create runs_agent_status_since trigger")?;
+    // Turn 狀態轉移的單一權威（issue #68）：合法邊只定義在 `lifecycle::turn_controller::LEGAL_EDGES`，
+    // trigger 由它生成。二十來處 `UPDATE turns SET status` 各自帶的 CAS guard 照舊，這是它們的下限，
+    // 而且未來新寫的路徑繞不過去——終局的回合不可能被改回進行中。
+    crate::lifecycle::turn_controller::install_guard(&mut tx).await.context("create turns_status_transition trigger")?;
+    // 版本戳記放最後：所有 DDL 都成功了才蓋，中途失敗整批回滾、下次從乾淨的起點重來。
     if stored_version < SCHEMA_VERSION {
         // `user_version` 不接受 bind 參數（跟 `table_info` 那個 PRAGMA 一樣），但這裡的值是編譯期常數，
         // 不是外部輸入，直接內嵌沒有注入風險。

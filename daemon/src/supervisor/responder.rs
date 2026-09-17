@@ -1334,7 +1334,14 @@ mod flow_tests {
         // 回合結束了，但是以撞限錯誤收場：仍然不算。
         // 結束時間要落在「開始等待之後、擷取的延遲之前」：未來的時間戳不算答完（見 `CAPTURE_SETTLE_SECS`）。
         let a_minute_ago = (chrono::Utc::now() - chrono::Duration::seconds(60)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        sqlx::query("UPDATE turns SET status='completed', completed_at=? WHERE id='t-ok'").bind(&a_minute_ago).execute(&app.db).await.unwrap();
+        // 收尾的是**還在飛的**那一筆（`t-ok` 早先被停在 queued 讓出 in-flight 名額，而 queued 的回合
+        // 不可能直接變成 completed——生產路徑沒有那條邊，`turn_controller` 的 trigger 也會擋，issue #68）。
+        // `answered_since` 取的是「最近一筆有 completed_at 的」，換成哪一筆結果一樣。
+        sqlx::query("UPDATE turns SET status='completed', completed_at=? WHERE id='t-unknown'")
+            .bind(&a_minute_ago)
+            .execute(&app.db)
+            .await
+            .unwrap();
         sqlx::query("UPDATE runs SET turn_error=? WHERE id='run-r'").bind("You've hit your usage limit").execute(&app.db).await.unwrap();
         notify(&app).await;
         assert_eq!(roles::get(&app.db, Role::Responder).await.unwrap().status, "waiting_quota", "撞限收場的回合不是答得動");

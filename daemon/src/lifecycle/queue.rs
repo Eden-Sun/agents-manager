@@ -569,16 +569,31 @@ pub async fn mark_run_exited(app: &Arc<App>, run_id: &str, reason: &str) {
     app.emit_bot_status(&run.bot_id).await;
 }
 
+/// 收掉這個 run 還在飛的那一筆（interrupt、run 結束、reconcile 判定 run 不見了都走這裡）。
+///
+/// 走 `turn_controller::set_status`（issue #68）：以前 guard 只在上面那句 `in_flight_turn()` 的 SELECT，
+/// UPDATE 本身是 `WHERE id=?`——兩者之間 hook 或 §4.3 備援把那一筆收掉的話，這裡會把一筆已經
+/// **完成**的回合改寫成 failed，還補一則「run ended」說明上去（#76 的現況表把這一處標成唯一
+/// 「Rust 層 guard」的邊）。現在 CAS 在 UPDATE 自己身上，而且**輸掉就不寫那則說明**。
+///
+/// 那個窗口是真的：`mark_run_exited` 這條路**不拿 per-bot 鎖**（`events.rs` 的 pane-exit、
+/// `reconcile.rs` 都直接呼叫），而 hook 處理拿著同一顆鎖在另一邊跑。但它**沒有對應的單元測試**：
+/// SELECT 與 UPDATE 之間沒有任何可以掛 trigger 的第三方寫入，單執行緒測不出那一瞬。
+/// 擋下來的那一步由 `turn_controller::set_status_reports_why_a_transition_did_not_happen` 與
+/// trigger 的 `the_guard_refuses_to_resurrect_a_finished_turn` 間接釘住。
 pub async fn fail_in_flight(app: &Arc<App>, run_id: &str, note: &str) {
-    if let Ok(Some(t)) = db::in_flight_turn(&app.db, run_id).await {
-        let _ = sqlx::query("UPDATE turns SET status = 'failed', completed_at = ? WHERE id = ?")
-            .bind(db::now())
-            .bind(&t.id)
-            .execute(&app.db)
-            .await;
-        let _ = insert_message(app, &t.conversation_id, Some(&t.id), "system", note, "system", false, None).await;
-        emit_turn(app, &t.id).await;
+    let Ok(Some(t)) = db::in_flight_turn(&app.db, run_id).await else { return };
+    let applied = super::turn_controller::set_status(&app.db, &t.id, "in_flight", "failed", note).await;
+    match applied {
+        Ok(super::turn_controller::Outcome::Applied) => {
+            let _ = insert_message(app, &t.conversation_id, Some(&t.id), "system", note, "system", false, None).await;
+        }
+        Ok(other) => {
+            tracing::info!(turn = %t.id, run = run_id, ?other, note, "這一筆已經被別的路徑收掉了：不改狀態也不補說明");
+        }
+        Err(e) => tracing::warn!(turn = %t.id, run = run_id, error = %e, "收掉 in-flight 回合失敗"),
     }
+    emit_turn(app, &t.id).await;
 }
 
 
