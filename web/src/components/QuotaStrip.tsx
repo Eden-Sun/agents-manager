@@ -297,11 +297,20 @@ function Bar({
   mark: number | null
   markTitle?: string
   /** 快回來的那條：右邊的百分比換成倒數（2026-09-14 使用者）；這時**量表條也不畫**（2026-09-17 使用者：
-   *  剩不到 10% 的條又短又細，看不出東西，只要數字）。 */
+   *  剩不到 10% 的條又短又細，看不出東西，只要數字），百分比照樣印。 */
   instead?: ReactNode
 }) {
   const lv = levelOf({ low, critical })
-  if (instead) return <span className="quota-bar-row countdown">{instead}</span>
+  // 條拿掉、數字留著（同日使用者：「雖然除去條，但也要數字」）：倒數在前，百分比照舊留在最右那一欄。
+  if (instead)
+    return (
+      <span className="quota-bar-row countdown">
+        {instead}
+        <span className={`quota-bar-pct ${lv}${pct === null ? ' nodata' : ''}`} aria-hidden="true">
+          {pct === null ? '—' : fmtPct(pct)}
+        </span>
+      </span>
+    )
   return (
     <span className="quota-bar-row">
       <span className="quota-bar-wrap">
@@ -521,8 +530,9 @@ function Gauge({
           const span = WINDOW_MS[w.name]
           const mark = resetMark(w.resetsAt, span, now)
           const left = w.resetsAt ? new Date(w.resetsAt).getTime() - now : null
-          const soon = soonLabel(w.name, w.resetsAt, now)
           const back = resetBadge(w.pct, w.resetsAt, now, resetRule(w.name))
+          // 那一列已經寫倒數了，窗口名就別再換成剩幾分——同一個時間寫兩次，還會擠在一起。
+          const soon = back ? null : soonLabel(w.name, w.resetsAt, now)
           return (
             <span key={w.name} className="quota-window">
               <span className={`quota-window-name${soon ? ' soon' : ''}`} title={soon ? `5h 還有 ${soon} 重置` : undefined}>
