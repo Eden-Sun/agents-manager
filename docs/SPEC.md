@@ -1166,6 +1166,58 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
 - 之後兩顆各走各的：新 bot 的下一次重啟用它自己的新 session（照 §6.9 的 resume）。分叉前的訊息不複製到新 bot 的對話紀錄（CLI 裡有），改在新 bot 對話放一則系統訊息指回來源。
 - 跟「開同類分身並啟動」的差別只在脈絡：分身是全新對話。
 
+### 6.11 閒置太久就收起來，只留 resume（AGM 巡檢，2026-09-17）
+
+> 使用者：「讓 AGM 巡超過 90 分鐘未動作的 bot 主動下 exit，只留下 resume 以節省 RAM 使用，下次要用再叫醒。」
+
+一顆閒置的 claude 佔的記憶體跟一顆正在跑的一樣多，但它什麼都沒做。機器上同時開著二十幾顆、其中
+絕大多數已經幾小時沒動時，那些 RAM 是白押的。
+
+- **誰在巡**：AGM 的控制迴圈（`supervisor/controller.rs` 每 10 秒一拍）叫
+  `supervisor::idle_sleep::tick`。巡邏本身**最多每分鐘一次**，而且丟到背景跑——停一顆最久要等
+  agent 十秒，二十顆就三分多鐘，同步做完會連 dispatch／notify 一起卡住。AGM 這顆 bot 本身沒被
+  prompt，不花額度；巡的是 daemon，模型不參與。
+- **門檻**：90 分鐘，`AM_IDLE_SLEEP_MINUTES` 可覆寫，**設 0 整個關掉**（這個功能會在使用者沒看著
+  的時候動他的 bot，要留一個不必改程式的退場方式）。
+- **「沒動作」怎麼算**：該 bot 的 turn（`created_at` / `completed_at`）、對話裡的訊息
+  （`messages.created_at`，終端快照補回來的回覆也算）、以及這個 run 自己的 `started_at`，三者取
+  最大值到現在。用 `started_at` 墊底是因為剛起來還沒被講過話的 bot 不該立刻被當成閒置很久。
+- **挑選**（`daemon/src/supervisor/idle_sleep.rs::decide`，純函式、有單元測試）。順序就是理由的
+  順序，第一個中的就是理由：
+
+  | 條件 | `reason` | 為什麼 |
+  |---|---|---|
+  | 是總管自己那幾顆（`supervisors.bot_id` 或 `supervisor_roles` 的 patrol／responder） | `supervisor` | 巡邏的人不收自己，watchdog 反正會把它們拉回來 |
+  | `managed_by = 'team'` | `team_member` | 成員的 run 由 team 排程記著 |
+  | `managed_by = 'child'` | `child` | pane 是父 agent 開的，daemon 起不回來（§6.5a），收掉就真的沒了 |
+  | `runs.state != 'running'` | `not_running` | 還在啟動或關閉中 |
+  | `agent_status = 'working'` / `'blocked'` / 其他 | `working` / `blocked` / `unknown_status` | 不能把使用者正在等的那一回合砍掉；`unknown` 一樣跳過 |
+  | 還有 `in_flight` Turn | `turn_in_flight` | 同上 |
+  | 還有排隊中的 web prompt | `queued_turn` | 收掉等於把它永遠留在隊列裡 |
+  | AGM 還有沒結案的 assignment 指著它 | `open_assignment` | 那顆正要被派工 |
+  | 沒有可續接的 session | `no_resume` | 沒 `native_session_id`、本機 transcript 不在、或 kind 不支援 `--resume`（grok）。收起來等於把對話丟掉，那不是省 RAM，是刪資料 |
+  | 還沒閒置到門檻 | `still_warm` | — |
+
+- **怎麼收**：`bot_sleeps` 先寫一列（**先寫再停**：中間死掉留下的是「它應該是睡著的」，叫醒那條路
+  會處理；反過來死在中間就變成一顆沒人知道要 `--resume` 的 bot），再走既有的
+  `lifecycle::stop_bot`——ctrl+c ×2 收 agent、關 pane，等於在 pane 裡下 exit。停失敗就把那一列
+  收回去，這顆仍是醒著的。收完在它自己的對話裡留一則 system 訊息說為什麼。
+- **怎麼叫醒**（`idle_sleep::wake`）：用 `StartOpts { resume_native: true, resume_required: true }`
+  起回來，claude 拿到的是 `--resume <上一個 session>`，跟 §6.9 的批次是同一條路。`resume_required`
+  是重點：接不回原本那段對話時**不默默開新的**——「只留下 resume」是這個功能的全部前提，悄悄換成
+  空白對話等於把脈絡弄丟還不說。真的接不回（session／transcript 在睡眠期間被清掉）就退回開新對話，
+  但在那顆 bot 自己的對話裡寫明「原本那段接不回來（原因）」。三個入口：
+  1. `lifecycle::prompt`（拿 bot 鎖**之前**）——使用者送訊息、AGM 派 assignment、group chat、
+     team relay 全走這裡，所以「下次要用」自動就叫醒了。**不是睡著的 bot 只多一次索引查詢。**
+  2. `POST /api/bots/{id}/start`——使用者按「啟動」想要的是把剛剛那顆帶著對話的 bot 叫回來，
+     不是開一段新的空白對話。
+  3. 已經有 active run 卻還標著睡著（stop 其實沒成功、或使用者自己起回來了）：只把標記清掉，
+     不拿一次 start 去撞正在跑的 run。
+- **看得出來**：`GET /api/state` 的每顆 bot 多一個 `asleep`（`{"since","idle_minutes"}` 或 `null`），
+  `GET /api/supervisor/state` 的 bot 也有同一個欄位——總管才不會把「睡著」當成「掛了」。
+- **記憶體**：一顆 claude 的常駐大約在數百 MB 級別，這條規則的價值就是把「幾小時沒人理」的那幾顆
+  從 RSS 裡拿掉，而使用者下次打字時看不出差別（多的只有 resume 起來那幾秒）。
+
 ## 7. API
 
 完整契約在 `API.md`；這裡只記存取控制與 WS 語意。

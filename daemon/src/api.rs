@@ -417,6 +417,8 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
     let bots = db::live_bots(&app.db).await.map_err(any_err)?;
     let unread = crate::read_marks::unread_counts(&app.db).await.map_err(any_err)?;
     let read_marks = crate::read_marks::marks(&app.db).await.map_err(any_err)?;
+    // §6.11：AGM 因為閒置收起來的那些。一次讀完，免得每顆 bot 再問一次資料庫。
+    let asleep = crate::supervisor::idle_sleep::all_asleep(app).await;
     let mut out = Vec::new();
     for p in projects {
         let mut bl = Vec::new();
@@ -447,6 +449,9 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
                 "cwd": b.cwd,
                 "agent_name": run.as_ref().and_then(|r| r.agent_name.clone()).unwrap_or_else(|| crate::config::agent_name(&p.label, &b.id)),
                 "run": run,
+                // §6.11：停著是因為 AGM 收起來省 RAM，不是壞掉也不是使用者關的；下次要用會自動
+                // 用 `--resume` 叫醒。`null` = 不是這種停。
+                "asleep": asleep.get(&b.id).map(|(at, mins)| json!({"since": at, "idle_minutes": mins})),
                 "queued_turn": queued_turn,
                 "lamp": lamp(bot_connected, run.as_ref()),
                 // 跨裝置共用的未讀回合數與已讀標記（read_marks.rs）。
@@ -2249,6 +2254,15 @@ async fn started_json(app: &Arc<App>, run_id: &str, opts: &lifecycle::StartOpts)
 }
 
 async fn start_bot(State(app): State<Arc<App>>, Path(id): Path<String>, Query(q): Query<StartQuery>) -> Result<Response, LcError> {
+    // 被 AGM 因為閒置收起來的（§6.11）一律走續接：使用者按「啟動」要的是把剛剛那顆帶著對話的
+    // bot 叫回來，不是開一段新的空白對話。
+    if crate::supervisor::idle_sleep::wake(&app, &id, "使用者按了啟動")
+        .await
+        .map_err(|e| LcError::Upstream(e.to_string()))?
+    {
+        let run = db::active_run(&app.db, &id).await.map_err(any_err)?;
+        return Ok((StatusCode::OK, Json(json!({"run_id": run.map(|r| r.id), "resumed": true}))).into_response());
+    }
     let opts = resume_opts(&q)?;
     let run_id = lifecycle::start_bot_with(&app, &id, opts.clone()).await?;
     Ok((StatusCode::OK, Json(started_json(&app, &run_id, &opts).await?)).into_response())
