@@ -54,3 +54,18 @@
   flex: none;
   color: var(--danger);
 }
+
+/* 整行指令（「進 herdr」）要看得到全文才知道會跑什麼（2026-09-17 使用者）：不截斷、寬度夠就一行，放不下才折行。
+   `styles.css` 的 `.run-debug .copy-chip { max-width: 280px }` 同特異度又載入得晚，多帶一層 class 才蓋得過。 */
+.run-debug .copy-chip.copy-chip-full,
+.copy-chip.copy-chip-full.copy-chip-full {
+  max-width: 100%;
+}
+
+.copy-chip.copy-chip-full .copy-chip-value {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
