@@ -1615,6 +1615,13 @@ supervisor 相關資料表與欄位都是 additive，`db::migrate` 重跑冪等�
    followup 會沿用 `mission_id`／`role`。同身分同模型的 `wait` 由 daemon 自己重送，AGM 不介入。
 8. **停下問人的統一原則**：`paused_reason ∈ max_rounds | no_fable_for_verifier | push_main_failed | pr_failed | clarify`
    都是問使用者一個具體問題，得到答案後 `mission resume` 再從對應步驟接續；使用者取消 → `mission cancel`。
+   **使用者自己按暫停／取消**（web 的任務卡，或別人代按）daemon 會叫醒你：
+   - `mission_paused`（payload 帶 `reason`、`open_assignments[]`）：不要再派新交辦、不要交付——`deliver` 會回
+     409 `mission_paused`（交付失敗那兩種暫停例外，那是重試的路）。已經在跑的回合 daemon 不中止，回合結束照常驗收，
+     下一步等 `mission_resumed`／`mission_answered`。
+   - `mission_cancelled`：daemon 已經把底下未結案的交辦逐件 `cancel`（排隊中的 turn 撤回、等額度的不再自動重送），
+     還在跑的回合不會被中止——`mission get` 的 note 與回應的 `temp_bots.skipped` 列出還活著的臨時 bot，
+     照第 6 步 `bot stop` 再 `bot delete`。你自己呼叫 pause／cancel 不會產生通知。
 9. **不做的事**：不代使用者回答問卷；不在一個任務裡同時開兩件交辦；不用 `/loop` 輪詢任務（`mission_updated` 與 inbox
    事件會來）；臨時 bot 不開 remote。
 10. **實跑教訓（2026-09-13 兩個任務）**：

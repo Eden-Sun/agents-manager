@@ -194,7 +194,7 @@ fn known_route(kind: &str, payload: &Value, review_role: Option<&str>) -> Option
         // 排隊中（`assignment_queued`）同理：它還在路上，等回合結束自己會送出。
         "assignment_noticed" | "assignment_queued" | "assignment_quota_blocked" | "assignment_quota_resumed" => r(reviewer, false),
         "approval_requested" | "mission_created" | "mission_question" | "mission_answered" | "mission_resumed"
-        | "mission_identity_switch" => r(Role::Responder, true),
+        | "mission_identity_switch" | "mission_paused" | "mission_cancelled" => r(Role::Responder, true),
         // 系統層的故障：巡檢收、叫醒。
         "incident_opened" | "watchdog_gave_up" | "responder_watchdog_gave_up" | "responder_bot_missing" | "bot_restart_failed"
         | "supervisor_restart_retry" | "agm_cli_stale" | "pane_unowned" | "pane_orphaned" => r(Role::Patrol, true),
@@ -720,7 +720,7 @@ mod tests {
     #[test]
     fn the_routing_table_sends_bot_business_to_the_responder_and_system_faults_to_patrol() {
         let p = json!({});
-        for kind in ["approval_requested", "mission_question", "mission_created", "mission_answered", "mission_resumed", "mission_identity_switch"] {
+        for kind in ["approval_requested", "mission_question", "mission_created", "mission_answered", "mission_resumed", "mission_identity_switch", "mission_paused", "mission_cancelled"] {
             assert_eq!(route(kind, &p, None), Route { role: Role::Responder, wake: true }, "{kind}");
         }
         assert_eq!(route("assignment_completed", &json!({"needs_review": true}), None), Route { role: Role::Responder, wake: true });

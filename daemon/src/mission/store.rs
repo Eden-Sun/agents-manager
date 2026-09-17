@@ -759,6 +759,72 @@ pub async fn clear_pause_if(pool: &SqlitePool, id: &str, reasons: &[&str]) -> Re
     Ok(Some(reason))
 }
 
+/// 暫停（或取消）時一起寫的 inbox 通知。`None` = 呼叫的就是收件的 AGM 自己，不叫醒自己。
+pub struct Announce<'a> {
+    pub event_key_prefix: &'a str,
+    pub kind: &'a str,
+    pub payload: serde_json::Value,
+}
+
+/// 暫停＋`paused` 事件＋（需要時）叫醒 AGM，一次交易（review3 c1 M10）。
+///
+/// 以前 `pause` 只改任務列、另外補一則事件，AGM 完全不知道：使用者按了暫停，AGM 照 runbook 繼續
+/// review → verify → deliver，改動照樣推上 main。回傳 `false` = 任務已結案，什麼都沒寫。
+pub async fn pause_announced(
+    pool: &SqlitePool,
+    id: &str,
+    reason: &str,
+    detail: Option<&str>,
+    text: &str,
+    announce: Option<Announce<'_>>,
+) -> Result<bool> {
+    let now = crate::db::now();
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let n = sqlx::query(
+        "UPDATE missions SET paused_reason = ?, paused_detail = ?, updated_at = ?
+         WHERE id = ? AND completed_at IS NULL AND cancelled_at IS NULL",
+    )
+    .bind(reason)
+    .bind(detail)
+    .bind(&now)
+    .bind(id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if n != 1 {
+        return Ok(false);
+    }
+    let ev = insert_event(&mut tx, id, "paused", text, Some(crate::agent_relay::DAEMON_SENDER), &serde_json::json!({"reason": reason}), None, None).await?;
+    if let Some(a) = announce {
+        push_inbox_tx(&mut tx, &format!("{}:{}", a.event_key_prefix, ev.id), a.kind, &a.payload, &now).await?;
+    }
+    tx.commit().await?;
+    Ok(true)
+}
+
+/// 取消＋`cancelled` 事件＋（需要時）叫醒 AGM，一次交易（review3 c1 M10）。回傳 `false` = 已結案。
+/// 底下還開著的交辦由呼叫端接著走 supervisor 的 cancel 收掉（不在這裡直接改交辦）。
+pub async fn cancel_announced(pool: &SqlitePool, id: &str, announce: Option<Announce<'_>>) -> Result<bool> {
+    let now = crate::db::now();
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let n = sqlx::query("UPDATE missions SET cancelled_at = ?, updated_at = ? WHERE id = ? AND completed_at IS NULL AND cancelled_at IS NULL")
+        .bind(&now)
+        .bind(&now)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    if n != 1 {
+        return Ok(false);
+    }
+    let ev = insert_event(&mut tx, id, "cancelled", "已取消", Some(crate::agent_relay::DAEMON_SENDER), &serde_json::json!({}), None, None).await?;
+    if let Some(a) = announce {
+        push_inbox_tx(&mut tx, &format!("{}:{}", a.event_key_prefix, ev.id), a.kind, &a.payload, &now).await?;
+    }
+    tx.commit().await?;
+    Ok(true)
+}
+
 pub async fn cancel(pool: &SqlitePool, id: &str) -> Result<bool> {
     let now = crate::db::now();
     let n = sqlx::query("UPDATE missions SET cancelled_at = ?, updated_at = ? WHERE id = ? AND completed_at IS NULL AND cancelled_at IS NULL")
