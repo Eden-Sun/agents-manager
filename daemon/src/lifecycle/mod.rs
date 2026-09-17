@@ -26,6 +26,10 @@ mod stuck_turns;
 pub(crate) mod fence;
 mod interrupt_grace;
 mod transitions;
+/// issue #81 探索用的原型；`#[cfg(test)]` 整個檔案只在 `cargo test` 底下編，不進正式二進位
+/// （見檔案頂端的說明與 docs/CLAUDE-NATIVE-TRANSPORT.md）。
+#[cfg(test)]
+mod native_transport_prototype;
 
 /// Runs the daemon has typed into during **this** boot. `runs.pane_typed` is the durable record;
 /// this is the conservative in-process copy, so a row that later becomes unreadable cannot send a
