@@ -12,7 +12,7 @@ import { MobilePreview } from './components/MobilePreview'
 import { Sidebar } from './components/Sidebar'
 import { screenTitle, useDrawerRoute } from './store/routeSync'
 import { useStore } from './store/store'
-import { totalUnread } from './store/unread'
+import { titleUnread } from './store/unread'
 import './components/relayedMessage.css'
 
 /** 掛 `(N)` 前的原始標題；先剝掉既有 `(N)`，HMR／同址導覽下才不會疊成 `(1) (2) …`。 */
@@ -32,7 +32,7 @@ const DRAWER_STAY =
 
 /** 分頁標題的 `(N)`，以及視窗回到前景時把開著的對話標為已讀（切走再回來才看到回覆的常見情境）。 */
 function useUnread() {
-  const total = useStore((s) => totalUnread(s.botUnread, s.hiddenBotIds))
+  const total = useStore(titleUnread)
   const screen = useStore(screenTitle)
   const markCurrentRead = useStore((s) => s.markCurrentRead)
   useEffect(() => {

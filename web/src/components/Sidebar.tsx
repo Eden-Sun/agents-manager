@@ -20,6 +20,7 @@ import {
   useStore,
 } from '../store/store'
 import type { SocketStatus } from '../store/store'
+import { unreadShown } from '../store/unread'
 import { GearIcon, TerminalIcon } from './Icons'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -169,9 +170,7 @@ function BotRow({
   const selected = useStore((s) => s.selectedBotId === botId)
   // 總管專案裡的往來是 AGM 的內部事務，使用者不會想知道，未讀回合數不顯示（2026-09-16 使用者）。
   const unread = useStore((s) => {
-    const b = s.bots.find((x) => x.id === botId)
-    if (b && s.supervisorProjectId && b.project_id === s.supervisorProjectId) return 0
-    return s.botUnread[botId] ?? 0
+    return unreadShown(s.bots.find((x) => x.id === botId), s.supervisorProjectId) ? (s.botUnread[botId] ?? 0) : 0
   })
   const selectBot = useStore((s) => s.selectBot)
   const agentTitle = useStore((s) => {
@@ -741,7 +740,7 @@ function ProjectTitle({
       ? s.bots.reduce((n, b) => {
           if (b.project_id !== projectId) return n
           // 同上：總管專案的未讀不進群組加總。
-          if (s.supervisorProjectId && b.project_id === s.supervisorProjectId) return n
+          if (!unreadShown(b, s.supervisorProjectId)) return n
           return n + (s.botUnread[b.id] ?? 0)
         }, 0)
       : 0,
