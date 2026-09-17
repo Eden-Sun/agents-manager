@@ -1455,10 +1455,12 @@ inbox `assignment_noticed`（`needs_review=false`）。送不出去或回合失�
 - **回合結束只有「這一回合被撞限打斷」才 park**：run 記下這回合的 `turn_error` 就照它（撞限橫幅才算，斷線不算；那格屬於同 run 上最晚開始的回合）；
   沒有的話，`completed`／`completed_fallback` 而且有回覆、回覆本身不是撞限橫幅＝正常答完，照常結案、回覆進 `result`——帳號上的撞限可能是同身分別的 bot 撞的
   （review3 c1 H1：以前做完的工作被停進 `quota_blocked`，之後重送再做一次或被報成 `quota_exhausted`）。其餘（失敗、沒回覆、回覆就是橫幅）照舊 park。
-- **`resume_at` 取橫幅與 app-server 讀數中最早且仍在未來的**（橫幅會舊，`five_hour.resets_at` 會延遲）。防線：橫幅時間只過去 ≤ 15 分鐘視為舊橫幅，改 5 分鐘後再問，不滾到隔天；
-  算出等待 > 6 小時改 15 分鐘後重試；兩邊都沒有時間退回 +30 分鐘。
+- **`resume_at` 取橫幅與 app-server 讀數中最早且仍在未來的**（橫幅會舊，`five_hour.resets_at` 會延遲）。防線：
+  codex 只在重置落在**同一個當地日期**時省略日期，所以沒有日期的鐘點一律當「今天」——已經過去（不管多久）就是畫面上留著的舊橫幅，改 5 分鐘後再問、不滾到隔天；
+  還在未來就照字面，**不設上限**（以前「裸鐘點最多 6 小時」把今天 23:40 才重置的週窗／credits 改成 5 分鐘後再問，真的撞限只擋 5 分鐘就一直重送，review3 c2 M1）。
+  帶月日、沒有年份的橫幅維持舊規則（過去 ≤ 15 分鐘＝舊橫幅，更久才滾到明年）。算出等待 > 6 小時改 15 分鐘後重試；兩邊都沒有時間退回 +30 分鐘。
 - **上限橫幅三條規則**：① 寫進該 bot 身份的 key——寫入、查詢（`limit_hit_for_bot`）、清除（`clear_limit_hit_for_bot`）三端都走 `quota::quota_base_for_host`，有自己 `CODEX_HOME` 的 `cx2` 成功回合清的是 `codex:cx2`，不是裸 `codex`；
-  ② 只設 `limit_hit`（含 `until`）與「量表用完」，**不**把時間寫進窗口 `resets_at`；③ 同一張橫幅再掃到不算新證據（時間戳不前推）。
+  ② 只設 `limit_hit`（含 `until`）與「量表用完」，**不**把時間寫進窗口 `resets_at`；③ 同一張橫幅再掃到不算新證據（時間戳不前推）——但**那張已經過期**時不適用：重送後 CLI 回同一句就是又被擋一次，要重新記上（review3 c2 M1）。
   **後到的結構化讀數不會清掉橫幅**（2026-09-13 晚改回）：codex 的 credits 用完時 5h／7d 這兩條**速率**視窗可以是滿的、app-server 也照實回報 0% 已用，
   唯一講出「現在收不下工作」的就是橫幅——那正是 `limit_hit` 這一格存在的理由。清掉它只有兩條路：`until` 到了，或下一回合真的跑完（`clear_limit_hit`，**只有 codex 走這條**：claude 的 Fable 用完換 opus 照樣能跑，成功回合不算解除）。
   所以 claude 這一側 `until` 是唯一的出口：橫幅指的那一桶還沒有讀數（daemon 剛重啟、statusLine 還沒進來）時，改用桶別的保底長度（session 5h、weekly／Fable 7d、認不出 5h）從撞上限的時刻起算，

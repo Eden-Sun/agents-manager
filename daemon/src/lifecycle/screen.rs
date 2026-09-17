@@ -467,13 +467,14 @@ fn parse_codex_try_again(notice: &str) -> Option<String> {
 const STALE_BANNER_GRACE_MINS: i64 = 15;
 const STALE_BANNER_RETRY_MINS: i64 = 5;
 
-/// 只寫鐘點（沒有日期）的橫幅最多能指向多久以後。
+/// codex 只在「重置就在**同一個當地日期**」時省略日期（0.154.0：同日 `%-I:%M %p`，跨日
+/// `%b %-d<th>, %Y %-I:%M %p`）。所以裸鐘點永遠是「今天的那個時刻」：
 ///
-/// codex 只在「今天之內就會回來」時寫裸的鐘點——那幾乎都是 5 小時視窗；真的要等到某一天會連
-/// 日期一起寫。所以一個鐘點解出來若在半天之外，那不是「明天的那個時刻」，而是**畫面上留著的舊
-/// 橫幅**（2026-09-14 使用者：08:53 讀到寫著 `3:22 AM` 的舊橫幅，被滾成隔天 03:22，等於平白鎖
-/// 24 小時，而 app-server 當時說 5h 還剩 79%）。這種一律改成「幾分鐘後再問」。
-const MAX_CLOCK_AHEAD_HOURS: i64 = 6;
+/// * 已經過去（不管多久）＝畫面上留著的舊橫幅，改成幾分鐘後再問（2026-09-14 使用者：08:53 讀到
+///   寫著 `3:22 AM` 的舊橫幅，被滾成隔天 03:22，平白鎖 24 小時）。
+/// * 還在未來就照字面，**不設上限**：今天稍晚才重置的週窗或 credits（`11:40 PM`）以前被 6 小時
+///   上限改寫成「5 分鐘後再問」，真的撞限只擋 5 分鐘，然後每 5 分鐘重送一次直到 quota_exhausted
+///   （review3 c2 M1）。
 
 /// 可測版本：`now` 由呼叫端給。
 fn parse_codex_try_again_at(notice: &str, now: chrono::DateTime<chrono::Local>) -> Option<String> {
@@ -545,23 +546,19 @@ fn parse_codex_try_again_at(notice: &str, now: chrono::DateTime<chrono::Local>) 
         _ => (today, true),
     };
     let mut naive = date.and_hms_opt(hour, minute, 0)?;
+    let bare_clock = month.is_none() || day.is_none();
     if roll && naive <= now.naive_local() {
-        // 剛過去幾分鐘＝舊橫幅：晚點再問，不等一整輪。
-        let behind = now.naive_local().signed_duration_since(naive);
-        if behind <= chrono::Duration::minutes(STALE_BANNER_GRACE_MINS) {
+        if bare_clock {
+            // 裸鐘點只會是「今天」（見上面的說明）：已經過去就是舊橫幅，晚點再問，不滾到明天。
             naive = now.naive_local() + chrono::Duration::minutes(STALE_BANNER_RETRY_MINS);
         } else {
-            naive = match (month, day) {
-                (Some(_), Some(_)) => naive.with_year(naive.year() + 1)?,
-                _ => naive + chrono::Duration::days(1),
+            // 帶月日、沒有年份：剛過去幾分鐘＝舊橫幅，晚點再問；過很久才是去年的同一天，滾到明年。
+            let behind = now.naive_local().signed_duration_since(naive);
+            naive = if behind <= chrono::Duration::minutes(STALE_BANNER_GRACE_MINS) {
+                now.naive_local() + chrono::Duration::minutes(STALE_BANNER_RETRY_MINS)
+            } else {
+                naive.with_year(naive.year() + 1)?
             };
-        }
-    }
-    // 裸鐘點指到半天之外＝畫面上留著的舊橫幅，不是「明天的那個時刻」（見 `MAX_CLOCK_AHEAD_HOURS`）。
-    if month.is_none() || day.is_none() {
-        let ahead = naive.signed_duration_since(now.naive_local());
-        if ahead > chrono::Duration::hours(MAX_CLOCK_AHEAD_HOURS) {
-            naive = now.naive_local() + chrono::Duration::minutes(STALE_BANNER_RETRY_MINS);
         }
     }
     let dt = Local.from_local_datetime(&naive).earliest()?;
@@ -593,7 +590,9 @@ pub(crate) async fn apply_codex_limit_hit_quota(app: &Arc<App>, host: &str, iden
             host: host.to_string(),
         });
     // 同一張橫幅再看到不是新證據（2026-09-13：掃到 22:15 的舊橫幅卻把 `at` 蓋成現在、量表打回 100%）。
-    if q.limit_hit.as_ref().is_some_and(|h| h.message == notice) {
+    // 但**已經過期**的那張不算數：`until` 到了、交辦重送、CLI 回同一句橫幅——這是真的又被擋一次，
+    // 略過的話 `on_turn_done` 查不到撞限，交辦會被結成 failed 送去驗收（review3 c2 M1）。
+    if q.limit_hit.as_ref().is_some_and(|h| h.message == notice && !crate::quota::limit_hit_expired(Some(h))) {
         return;
     }
     // 量表標成用完，但重置時間不從橫幅寫：橫幅時間會舊會歪（同日解析成隔天，交辦等 24 小時）。
@@ -908,9 +907,9 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
     }
 
 
-    /// Codex writes a bare clock time when the reset is later today, with no date at all.
+    /// 裸鐘點永遠是「今天的那個時刻」：今天稍晚就照字面（不設上限），已經過去就是舊橫幅、幾分鐘後再問。
     #[test]
-    fn codex_try_again_without_a_date_is_the_next_time_that_clock_comes_round() {
+    fn codex_try_again_without_a_date_is_always_today() {
         use chrono::{Datelike, Local, TimeZone, Timelike};
         let now = Local::now();
         let at = |h: u32| {
@@ -919,31 +918,19 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
                 if h < 12 { "AM" } else { "PM" })
         };
         for h in 0..24u32 {
-            // 15 分鐘寬限內的鐘點另有規則（見 `a_banner_that_just_went_stale_does_not_roll_to_tomorrow`）。
-            let candidate = now.date_naive().and_hms_opt(h, 7, 0).unwrap();
-            let behind = now.naive_local().signed_duration_since(candidate);
-            if behind >= chrono::Duration::zero() && behind <= chrono::Duration::minutes(STALE_BANNER_GRACE_MINS) {
-                continue;
-            }
-            // 已經過去的鐘點現在一律當舊橫幅（見 `a_clock_time_long_past_is_a_stale_banner_not_tomorrow`），
-            // 這個迴圈只管「今天稍晚、而且在半天之內」的那幾個鐘點。
-            let ahead = candidate.signed_duration_since(now.naive_local());
-            if ahead <= chrono::Duration::zero() || ahead > chrono::Duration::hours(MAX_CLOCK_AHEAD_HOURS) {
-                continue;
-            }
             // 同一個 `now` 解析：各讀各的時鐘時跨過邊界會偶發紅燈（2026-09-13）。
+            let candidate = now.date_naive().and_hms_opt(h, 7, 0).unwrap();
             let parsed = parse_codex_try_again_at(&at(h), now).unwrap_or_else(|| panic!("hour {h} did not parse"));
             let dt = chrono::DateTime::parse_from_rfc3339(&parsed).unwrap().with_timezone(&Local);
-            assert_eq!(dt.hour(), h, "{parsed}");
-            assert_eq!(dt.minute(), 7);
-            assert!(dt > now, "a reset is always ahead of us: {parsed}");
-            assert!(
-                dt.signed_duration_since(now) <= chrono::Duration::hours(MAX_CLOCK_AHEAD_HOURS),
-                "裸鐘點最多指到半天之外：{parsed}"
-            );
-            // Today or tomorrow, never some other date.
-            let day = dt.date_naive();
-            assert!(day == now.date_naive() || day == now.date_naive() + chrono::Duration::days(1));
+            if candidate > now.naive_local() {
+                // 今天稍晚：照字面，離現在多久都一樣（週窗、credits 可能是今天 23:40 才回來）。
+                assert_eq!((dt.hour(), dt.minute()), (h, 7), "{parsed}");
+                assert_eq!(dt.date_naive(), now.date_naive(), "今天，不是明天：{parsed}");
+            } else {
+                // 已經過去＝畫面上留著的舊橫幅：幾分鐘後再問，不滾到明天。
+                let mins = dt.signed_duration_since(now).num_minutes();
+                assert!((4..=6).contains(&mins), "hour {h} 應該是幾分鐘後再問：{parsed}（{mins} 分）");
+            }
         }
         // A month/day with no year still lands on a real date.
         let r = parse_codex_try_again_at("try again at Aug 8th 1:47 PM.", now).unwrap();
@@ -952,6 +939,23 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         assert!(dt > now);
         let _ = Local.timestamp_opt(0, 0);
         let _ = now.year();
+    }
+
+    /// review3 c2 M1：codex 的週額度／credits 今天稍晚才重置（`11:40 PM`）。以前「裸鐘點最多指到 6 小時之外」
+    /// 把它改寫成「5 分鐘後再問」：真的撞限只擋 5 分鐘，接著每 5 分鐘重送一次，約半小時就燒完重試次數變成
+    /// `quota_exhausted`。
+    #[test]
+    fn a_reset_later_today_that_is_far_away_is_still_taken_at_face_value() {
+        use chrono::{Local, TimeZone, Timelike};
+        let now = Local.with_ymd_and_hms(2026, 9, 16, 9, 0, 0).unwrap();
+        let got = parse_codex_try_again_at(
+            "ERROR: You've hit your usage limit. Upgrade to Pro, or try again at 11:40 PM.",
+            now,
+        )
+        .expect("讀得到時間");
+        let dt = chrono::DateTime::parse_from_rfc3339(&got).unwrap().with_timezone(&Local);
+        assert_eq!((dt.hour(), dt.minute()), (23, 40), "{got}");
+        assert_eq!(dt.date_naive(), now.date_naive(), "今天，不是 5 分鐘後：{got}");
     }
 
     #[test]
@@ -1635,3 +1639,48 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
     }
 }
 
+
+/// 撞限橫幅寫進額度那一格（`apply_codex_limit_hit_quota`）的去重規則。
+#[cfg(test)]
+mod limit_hit_quota_tests {
+    use super::*;
+    use crate::testing as tt;
+
+    const NOTICE: &str = "ERROR: You've hit your usage limit, or try again at 10:15 PM.";
+
+    /// review3 c2 M1：`until` 到了、交辦重送、CLI 回同一句橫幅——這是真的又被擋一次，不是重掃舊字。
+    /// 以前同文就直接略過，記憶體裡只剩那張過期的，`on_turn_done` 查不到撞限，交辦被結成 failed 送去驗收。
+    #[tokio::test]
+    async fn the_same_banner_after_the_old_one_expired_is_a_fresh_hit() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        apply_codex_limit_hit_quota(&app, LOCAL_HOST, None, NOTICE).await;
+        // 改成已經過期，模擬「等到重置時間、重送一次，又撞到同一句」。
+        {
+            let mut q = app.quotas.lock().await;
+            let hit = q.get_mut("codex").unwrap().limit_hit.as_mut().unwrap();
+            hit.until = Some("2020-01-01T00:00:00Z".into());
+            hit.at = "2020-01-01T00:00:00Z".into();
+        }
+
+        apply_codex_limit_hit_quota(&app, LOCAL_HOST, None, NOTICE).await;
+
+        let hit = app.quotas.lock().await.get("codex").unwrap().limit_hit.clone().expect("又被擋一次要重新記上");
+        assert!(!crate::quota::limit_hit_expired(Some(&hit)), "新的那張不該是過期的：{hit:?}");
+        assert_ne!(hit.at, "2020-01-01T00:00:00Z", "時間戳要更新成這一次");
+    }
+
+    /// 還沒過期的同一張橫幅照舊不算新證據（2026-09-13：22:21 掃到 22:15 的舊橫幅，把 `at` 蓋成現在）。
+    #[tokio::test]
+    async fn an_unexpired_banner_seen_again_is_still_not_new_evidence() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        apply_codex_limit_hit_quota(&app, LOCAL_HOST, None, NOTICE).await;
+        let first = app.quotas.lock().await.get("codex").unwrap().limit_hit.clone().unwrap();
+
+        apply_codex_limit_hit_quota(&app, LOCAL_HOST, None, NOTICE).await;
+
+        let again = app.quotas.lock().await.get("codex").unwrap().limit_hit.clone().unwrap();
+        assert_eq!((first.at, first.until), (again.at, again.until));
+    }
+}
