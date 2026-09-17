@@ -910,3 +910,18 @@
     max-width: none;
   }
 }
+
+/* 倒數比百分比寬（「22h18」對「8」，2026-09-17 週額度剩不到 10% 也寫倒數）：那一列讓量表條縮，
+   不然五個帳號擠在一起時倒數會蓋到隔壁帳號。只動有倒數的那一列，其他列的條照舊。 */
+.main-head .quota-bar-row:has(.quota-reset-at) {
+  min-width: 0;
+}
+
+.main-head .quota-bar-row:has(.quota-reset-at) .quota-bar-wrap {
+  flex: 1 1 12px;
+  min-width: 12px;
+}
+
+.main-head .quota-bar-row:has(.quota-reset-at) .quota-bar {
+  width: 100%;
+}

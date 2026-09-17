@@ -12,6 +12,17 @@ export const RESET_SOON_MS = 3 * 60 * 60 * 1000
  * 週額度用完要等的是天，「三小時內」幾乎碰不到；剩不到一天就已經是「明天就回來、值得等」的範圍。
  */
 export const RESET_SOON_WEEKLY_MS = 24 * 60 * 60 * 1000
+/** 週窗口不必等到 0%：剩不到 10% 就寫倒數（同日使用者：「低於 10% 也 show」）——快見底時要看的也是還要撐多久。 */
+export const LOW_WEEKLY_PCT = 10
+
+/** 各窗口的倒數規則：5h 用完且三小時內；週窗口剩不到 10% 且 24 小時內。 */
+export interface ResetRule {
+  soonMs: number
+  /** 剩餘百分比嚴格小於這個值才寫倒數；`0` 以下（含）才算＝用完才寫。 */
+  belowPct: number | null
+}
+export const RULE_5H: ResetRule = { soonMs: RESET_SOON_MS, belowPct: null }
+export const RULE_WEEKLY: ResetRule = { soonMs: RESET_SOON_WEEKLY_MS, belowPct: LOW_WEEKLY_PCT }
 
 /**
  * `2h42` / `0h42`——使用者 2026-09-14：「不要 m」。一律 `<小時>h<分>`，不到一小時寫 `0h42`
@@ -32,13 +43,14 @@ export function resetBadge(
   remainingPct: number | null | undefined,
   resetsAt: string | null | undefined,
   now: number,
-  soonMs: number = RESET_SOON_MS,
+  rule: ResetRule = RULE_5H,
 ): string | null {
-  if (remainingPct === null || remainingPct === undefined || remainingPct > 0) return null
+  if (remainingPct === null || remainingPct === undefined) return null
+  if (rule.belowPct === null ? remainingPct > 0 : remainingPct >= rule.belowPct) return null
   if (!resetsAt) return null
   const t = new Date(resetsAt).getTime()
   if (Number.isNaN(t)) return null
   const left = t - now
-  if (left <= 0 || left > soonMs) return null
+  if (left <= 0 || left > rule.soonMs) return null
   return short(left)
 }

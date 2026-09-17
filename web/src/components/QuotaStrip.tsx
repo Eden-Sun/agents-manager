@@ -12,7 +12,7 @@ import { KindIcon, KIND_LABEL } from './KindTag'
 import { QuotaLoginShell } from './QuotaLoginShell'
 import { QuotaLoginSlash } from './QuotaLoginSlash'
 import { UpdateQuotaChip } from './UpdateQuotaChip'
-import { RESET_SOON_MS, RESET_SOON_WEEKLY_MS, resetBadge } from '../lib/quotaReset'
+import { RULE_5H, RULE_WEEKLY, resetBadge } from '../lib/quotaReset'
 import { cliLoginCommand, identityEnv } from '../lib/quotaLogin'
 import './quotaLimitHit.css'
 import './quotaStrip.css'
@@ -260,9 +260,9 @@ function fmtLeftLong(ms: number): string {
   return `${m} 分`
 }
 
-/** 用完的窗口多早開始寫倒數：5h 三小時內、週窗口（7d／週／Fable）24 小時內（2026-09-17 使用者）。 */
-function resetSoonMs(name: WindowName): number {
-  return name === '5h' ? RESET_SOON_MS : RESET_SOON_WEEKLY_MS
+/** 什麼時候把百分比換成倒數：5h 用完且三小時內；週窗口（7d／週／Fable）剩不到 10% 且 24 小時內（2026-09-17 使用者）。 */
+function resetRule(name: WindowName) {
+  return name === '5h' ? RULE_5H : RULE_WEEKLY
 }
 
 /** 5h 不到一小時就重置時窗口名換成剩幾分（`12m`），讓使用者提早準備（2026-09-09）；只做 5h。 */
@@ -497,13 +497,13 @@ function Gauge({
         <span className="quota-compact">
           {windows.map((w) => {
             const soon = soonLabel(w.name, w.resetsAt, now)
-            // 歸零且快回來了（5h 三小時內、週窗口 24 小時內）：把用不到的「0%」換成倒數（2026-09-14／09-17 使用者）。
-            const back = resetBadge(w.pct, w.resetsAt, now, resetSoonMs(w.name))
+            // 快回來了就寫倒數（2026-09-14／09-17 使用者）：5h 用完且三小時內；週窗口剩不到 10% 且 24 小時內。
+            const back = resetBadge(w.pct, w.resetsAt, now, resetRule(w.name))
             return (
             <span key={w.name} className={`quota-compact-win ${levelOf(w)}`}>
               <span className={`quota-window-name${soon ? ' soon' : ''}`} title={soon ? `5h 還有 ${soon} 重置` : undefined}>{soon ?? w.name}</span>
               {back ? (
-                <span className="quota-reset-at" title={`用完了，還有 ${back} 重置`}>
+                <span className="quota-reset-at" title={`${w.pct !== null && w.pct > 0 ? `剩 ${fmtPct(w.pct)}%` : '用完了'}，還有 ${back} 重置`}>
                   {back}
                 </span>
               ) : (
@@ -520,7 +520,7 @@ function Gauge({
           const mark = resetMark(w.resetsAt, span, now)
           const left = w.resetsAt ? new Date(w.resetsAt).getTime() - now : null
           const soon = soonLabel(w.name, w.resetsAt, now)
-          const back = resetBadge(w.pct, w.resetsAt, now, resetSoonMs(w.name))
+          const back = resetBadge(w.pct, w.resetsAt, now, resetRule(w.name))
           return (
             <span key={w.name} className="quota-window">
               <span className={`quota-window-name${soon ? ' soon' : ''}`} title={soon ? `5h 還有 ${soon} 重置` : undefined}>
@@ -534,7 +534,7 @@ function Gauge({
                 markTitle={left === null ? undefined : `${w.name} 還有 ${fmtLeft(left)} 重置`}
                 instead={
                   back ? (
-                    <span className="quota-reset-at" title={`用完了，還有 ${back} 重置`}>
+                    <span className="quota-reset-at" title={`${w.pct !== null && w.pct > 0 ? `剩 ${fmtPct(w.pct)}%` : '用完了'}，還有 ${back} 重置`}>
                       {back}
                     </span>
                   ) : undefined
