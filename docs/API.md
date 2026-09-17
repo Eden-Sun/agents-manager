@@ -1153,6 +1153,7 @@ body 直接是檔案位元組（**不是** multipart），`Content-Type` 就是�
   - `source_turn_id` 只能是**呼叫的那個角色自己**的回合（帶 bot token 時）；沒帶 token 的呼叫端可以指兩個角色之一的回合。
     省略時只認呼叫者自己在跑的回合，認不出呼叫者就記 `assignment_text_fallback`（不猜另一個角色的回合）。
 - `GET /api/supervisor/assignments/{id}` → 單筆加 `reviews:[{id,decision,from_status,to_status,actor,source,reason,evidence,followup_assignment_id,created_at}]`。
+  `mission_id` 指到的任務被**使用者**暫停時 409 `mission_paused`（daemon 自己設的暫停——`max_rounds`、`no_fable_for_verifier`、`push_main_failed`／`pr_failed`、`clarify`——不擋，runbook 要 AGM 在那些狀態下繼續處理）。
 - `POST /api/supervisor/assignments/{id}/review {decision,actor?,source?,reason?,evidence?,followup_text?,followup_request_id?,followup_bot_id?,ownership?}` → 更新後的 assignment（`followup` 時另含 `followup`）。
   帶角色 bot token 時 `actor` 以 token 為準（`AGM:<role>`）。
   **唯一的結案路徑**。`accept`→`completed`、`fail`→`failed`、`cancel`→`cancelled`、`block`→`blocked`、`followup`→原本 `superseded` 並以 `followup_request_id` 另開 `follow_up_of` 的新交辦（不改寫已送出的 text）。

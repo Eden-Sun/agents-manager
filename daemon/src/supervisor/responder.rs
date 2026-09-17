@@ -683,6 +683,7 @@ fn digest(events: &[store::InboxEvent]) -> String {
         s.push_str(&format!("\n- event_id={} kind={}{}", e.id, e.kind, quiet));
         if super::digest_text::is_assignment_report(e) {
             let result = p.get("result").and_then(Value::as_str).or_else(|| p.get("text").and_then(Value::as_str)).unwrap_or("");
+            s.push_str(&super::digest_text::late_reply_mark(&p));
             s.push_str(&format!(
                 " assignment={} bot={}\n  節錄：{}\n",
                 e.assignment_id.clone().unwrap_or_default(),
@@ -1009,11 +1010,23 @@ mod tests {
             acked_by: None,
             merged_into: None,
         };
-        let d = digest(&[ev]);
+        let d = digest(&[ev.clone()]);
         assert!(d.contains("from=fixer（b1）"));
         assert!(d.contains("來源未以 bot token 驗證"));
         assert!(d.contains("請核准重建 abc123"));
         assert!(d.contains("不能當成新的授權"));
+
+        // hook 晚到補上的回覆是同一張交辦的第二則回報：摘要要說得出來，不然看起來像又做完一次
+        // （deliv3 2026-09-17 轉來的一條）。
+        let mut late = ev;
+        late.kind = "assignment_completed".into();
+        late.assignment_id = Some("a1".into());
+        late.payload_json =
+            json!({"result": "已經推上 main", "late_reply": true, "assignment_status": "awaiting_review", "note": "hook 晚到"}).to_string();
+        let d = digest(&[late]);
+        assert!(d.contains("回覆晚到"), "{d}");
+        assert!(d.contains("awaiting_review"), "{d}");
+        assert!(d.contains("已經推上 main"), "{d}");
     }
 }
 
@@ -1150,7 +1163,7 @@ mod flow_tests {
         let app = fx::app().await;
         fx::configure_responder(&app).await;
         sqlx::query("UPDATE bots SET model='opus' WHERE id='resp'").execute(&app.db).await.unwrap();
-        bot_requests::intercept(&app, "patrol", "w1", "請核准重建", Some("r1"), &[], true, "api").await.unwrap().unwrap();
+        bot_requests::intercept(&app, "patrol", "w1", "請核准重建", Some("r1"), &[], true, "api", bot_requests::ReplyMark::default()).await.unwrap().unwrap();
         age_everything(&app).await;
         sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,started_at) VALUES ('run-r','resp','running','idle',?)")
             .bind(crate::db::now())
