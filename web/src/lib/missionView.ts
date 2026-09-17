@@ -5,8 +5,9 @@
  * assignments 推導，不另存一份狀態」），所以五段進度、誰是執行者／reviewer／驗證者、撞限換了
  * 幾次手，都是在這裡算的。
  *
- * 事件 payload 的欄位名在 P1b（assignment 加 `mission_id/role/turn_error`）落地前還沒定死，
- * 所以每一個讀取都是**寬鬆**的：讀得到就顯示，讀不到就留白，絕不讓卡片因此壞掉或說謊。
+ * 讀的是 **daemon 真的寫出來的形狀**（鍵名與出處寫在各讀取點旁），讀不到就留白，絕不讓卡片因此壞掉或說謊。
+ * 以前讀的 `handoff`／`from`／`to`／頂層 `resets` 只存在 mock 與單元測試裡，接真 daemon 時換手一律「? → ?」、
+ * 重置時間是空的、「無獨立 reviewer」永遠不出現（review3 c1 L9）。
  */
 import type { Mission, MissionAssignment, MissionEvent, MissionQna, MissionRole } from '../api/types'
 
@@ -63,7 +64,9 @@ export interface MissionActor {
 export interface MissionHandoff {
   from: string | null
   to: string | null
-  /** `limit_hit` / `5h` / 事件自己寫的原因。 */
+  /** 接手要換成的模型（Fable 用盡改 opus）；同模型為 null。 */
+  model: string | null
+  /** `pick` 寫的原因（中文），或交辦上的 `turn_error`。 */
   reason: string
   at: string
 }
@@ -122,9 +125,13 @@ function roleOf(e: MissionEvent): MissionRole | null {
   return r === 'executor' || r === 'reviewer' || r === 'verifier' ? r : null
 }
 
-/** `paused` 事件帶的 `resets:[{identity, resets_at}]`（驗證者找不到 Fable 額度時）。 */
+/**
+ * 驗證者找不到 Fable 額度時各身分的重置時間。daemon 的 `GET /missions/{id}/pick` 停下任務時記的 `paused`
+ * 事件是 `{reason:"no_fable_for_verifier", decision:{decision:"ask_user", reason, resets:[{identity, resets_at}]}}`
+ * （`mission/api.rs::get_pick`）——`resets` 包在 `decision` 裡。
+ */
 function resetsOf(payload: Record<string, unknown>): { identity: string; resets_at: string }[] {
-  const raw = payload.resets
+  const raw = rec(payload.decision).resets
   if (!Array.isArray(raw)) return []
   const out: { identity: string; resets_at: string }[] = []
   for (const r of raw) {
@@ -141,21 +148,42 @@ function resetsOf(payload: Record<string, unknown>): { identity: string; resets_
  * 只看「有沒有發生過」而不是「現在在做什麼」——事件是往前推進的流水帳，最遠走到哪一段就是
  * 哪一段。`verified` 之後就等交付，所以算進 `delivering`。
  */
-function progressOf(m: Mission, events: MissionEvent[]): MissionPhase {
+function progressOf(m: Mission, events: MissionEvent[], assignments: MissionAssignment[]): MissionPhase {
   if (m.completed_at) return 'done'
   let far: MissionPhase = 'planning'
   const reach = (p: MissionPhase) => {
     if (MISSION_PHASES.indexOf(p) > MISSION_PHASES.indexOf(far)) far = p
   }
-  for (const e of events) {
-    if (e.kind === 'delivered' || e.kind === 'completed') reach('delivering')
-    if (e.kind === 'verified') reach('delivering')
-    const role = roleOf(e)
+  const reachRole = (role: MissionRole | null) => {
     if (role === 'verifier') reach('verifying')
     if (role === 'reviewer') reach('reviewing')
     if (role === 'executor') reach('executing')
   }
+  for (const e of events) {
+    if (e.kind === 'delivered' || e.kind === 'completed') reach('delivering')
+    if (e.kind === 'verified') reach('delivering')
+    reachRole(roleOf(e))
+  }
+  // daemon 寫的事件幾乎不帶 `role`，派過哪個角色要看交辦：執行者驗收之後 daemon 說 `awaiting_agm`（不在五段裡），
+  // 只看事件的話進度點會從「執行」退回「規劃」（review3 c1 L9）。
+  for (const a of assignments) reachRole(a.role)
   return far
+}
+
+/**
+ * daemon 的撞限換手 note（`supervisor/controller.rs::mission_quota`）：
+ * `{mission_id, assignment_id, role, bot_id, from_identity, to_identity, model, reason, message, needs_review}`。
+ */
+function handoffOf(p: Record<string, unknown>): { from: string | null; to: string | null; model: string | null; reason: string; assignment: string | null } | null {
+  const from = text(p.from_identity)
+  const to = text(p.to_identity)
+  if (from === null && to === null) return null
+  return { from, to, model: text(p.model), reason: text(p.reason) ?? 'limit_hit', assignment: text(p.assignment_id) }
+}
+
+/** daemon 在 `pick --role reviewer` 找不到第二個身分時記的 note：`{decision:{decision:"no_independent_reviewer", reason}}`。 */
+function noIndependentReviewer(p: Record<string, unknown>): boolean {
+  return text(rec(p.decision).decision) === 'no_independent_reviewer'
 }
 
 /**
@@ -167,7 +195,9 @@ function progressOf(m: Mission, events: MissionEvent[]): MissionPhase {
 export function missionView(m: Mission, events: MissionEvent[], assignments: MissionAssignment[] = []): MissionView {
   const byRole = new Map<MissionRole, MissionActor>()
   const handoffs: MissionHandoff[] = []
-  let soloReview = false
+  /** 事件已經記過的換手，對應到撞限的那件交辦——交辦那邊推出來的就不要再算一次。 */
+  const handedOff = new Set<string>()
+  let soloSince: string | null = null
   let verified: MissionEvent | null = null
   let delivered: MissionDelivered | null = null
   let latest: MissionEvent | null = null
@@ -175,8 +205,14 @@ export function missionView(m: Mission, events: MissionEvent[], assignments: Mis
 
   for (const e of events) {
     const p = rec(e.payload)
+    const handoff = handoffOf(p)
+    if (handoff) {
+      handoffs.push({ from: handoff.from, to: handoff.to, model: handoff.model, reason: handoff.reason, at: e.created_at })
+      if (handoff.assignment) handedOff.add(handoff.assignment)
+    }
     const role = roleOf(e)
-    if (role) {
+    // 換手 note 也帶 `role`，但它是 daemon 記的、不是那個角色的 bot 在說話：拿它當「誰在跑」會把角色寫成 daemon。
+    if (role && !handoff) {
       // 同一個角色換過人就顯示最新的那一位（撞限換手之後卡片要指向現在在跑的那顆）。
       byRole.set(role, {
         role,
@@ -186,15 +222,7 @@ export function missionView(m: Mission, events: MissionEvent[], assignments: Mis
         at: e.created_at,
       })
     }
-    if (p.handoff === true || text(p.reason) === 'limit_hit') {
-      handoffs.push({
-        from: text(p.from) ?? text(p.from_identity),
-        to: text(p.to) ?? text(p.to_identity),
-        reason: text(p.reason) ?? 'limit_hit',
-        at: e.created_at,
-      })
-    }
-    if (p.no_independent_reviewer === true || text(p.decision) === 'no_independent_reviewer') soloReview = true
+    if (noIndependentReviewer(p)) soloSince = e.created_at
     if (e.kind === 'verified') verified = e
     if (e.kind === 'delivered') {
       delivered = {
@@ -220,17 +248,19 @@ export function missionView(m: Mission, events: MissionEvent[], assignments: Mis
       model: from?.model ?? null,
       at: a.created_at || (from?.at ?? ''),
     })
-    // 撞限換手在交辦上是「follow-up ＋ 上一件帶著 turn_error」，事件沒帶也認得出來。
-    if (a.follow_up_of && !handoffs.some((h) => h.at === a.created_at)) {
+    // 撞限換手在交辦上是「follow-up ＋ 上一件停在 identity_switch」。事件串讀不到（舊資料）才用它，
+    // 讀得到的那一次已經有身分，不要再多一行「? → ?」。
+    if (a.follow_up_of && !handedOff.has(a.follow_up_of)) {
       const parent = assignments.find((x) => x.id === a.follow_up_of)
-      const err = parent?.turn_error ?? null
-      if (err || parent?.turn_status === 'identity_switch') {
-        handoffs.push({ from: null, to: null, reason: err ?? 'identity_switch', at: a.created_at })
+      if (parent?.turn_status === 'identity_switch') {
+        handoffs.push({ from: null, to: null, model: null, reason: parent.turn_error ?? 'identity_switch', at: a.created_at })
       }
     }
   }
+  // 之後又真的派出 reviewer（下一輪挑到了第二個身分）就不再是「無獨立 reviewer」。
+  const soloReview = soloSince !== null && !assignments.some((a) => a.role === 'reviewer' && a.created_at > (soloSince ?? ''))
 
-  const progress = progressOf(m, events)
+  const progress = progressOf(m, events, assignments)
   // daemon 給了 `phase` 就用它（它看得到交辦，比事件準）；沒給才用事件推的。
   const server = m.phase
   const phase: MissionViewPhase = m.cancelled_at
@@ -275,6 +305,25 @@ export function missionView(m: Mission, events: MissionEvent[], assignments: Mis
  * 不帶就是 422——以前送 `{}`，這顆按鈕接真 daemon 從來沒成功過（review3 c1 M4）。
  */
 export const MISSION_USER_PAUSE = 'user_pause'
+
+/**
+ * 「等額度」說明框的字。要照任務的 `on_5h_limit` 講：選了「換身分」的任務也會等（所有身分都見底、
+ * 或 codex／grok 只有一把額度），那時候說「這是你選了等重置的結果」就是錯的（review3 c1 L9）。
+ */
+export function quotaWaitText(
+  m: Pick<Mission, 'on_5h_limit' | 'executor_kind'>,
+  a: MissionAssignment | null,
+  fmt: (iso: string) => string = (iso) => iso,
+): string {
+  const at = a?.resume_at ? fmt(a.resume_at) : ''
+  const when = at ? `，預計 ${at} 之後自動重送` : '，額度回來會自動重送'
+  if (m.on_5h_limit === 'switch') {
+    return m.executor_kind === 'claude'
+      ? `可以接手的身分額度都用完了，正在等最早回來的那一個${when}。`
+      : `${m.executor_kind} 只有一把額度，沒有別的身分可以換，正在等它重置${when}。`
+  }
+  return `這個身分的額度用完了，照開任務時選的「等重置」原地等${when}。要換身分接手，下一個任務把 5h 撞限改成「換身分」。`
+}
 
 /** 停下來問人的原因，講成人話。認不得的機器碼原樣顯示，不要吞掉。 */
 export function pausedLabel(reason: string): string {

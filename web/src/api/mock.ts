@@ -375,6 +375,7 @@ interface MockMissionAssignment {
   turn_status: string | null
   turn_error: string | null
   follow_up_of: string | null
+  resume_at: string | null
   created_at: string
   completed_at: string | null
 }
@@ -1532,6 +1533,7 @@ export class MockTransport implements Transport {
       turn_status: null,
       turn_error: null,
       follow_up_of: null,
+      resume_at: null,
       created_at: now(),
       completed_at: now(),
       ...over,
@@ -1734,7 +1736,11 @@ export class MockTransport implements Transport {
     return { mission: this.missionJson(m) }
   }
 
-  /** 跑到一半／停下來問人／已完成各一；角色與撞限換手照 API.md 塞進事件 payload（P1b 前）。 */
+  /**
+   * 跑到一半／停下來問人／已完成各一。payload 一律照 daemon 真的寫的形狀：AGM 用 `agm mission event` 回報
+   * 不帶 payload（CLI 沒有這個參數），角色與 bot 看交辦；換手 note、驗證者沒 Fable 的暫停、`verified` 的 sha
+   * 都是 daemon 寫的（出處見 `lib/missionView.ts`）。以前這裡自編的 `handoff/from/to`、頂層 `resets` 真 daemon 從來不寫（review3 c1 L9）。
+   */
   private seedMissions(projectId: string) {
     const mk = (over: Partial<MockMission>): MockMission => ({
       id: ulid('mis'),
@@ -1760,11 +1766,7 @@ export class MockTransport implements Transport {
     const running = mk({ text: '把設定頁的錯字修掉，順便補一個 tsc 的 CI 檢查', delivery_mode: 'push_main', rounds_used: 1 })
     this.missions.push(running)
     this.missionEvent(running.id, 'instruction', running.text)
-    this.missionEvent(running.id, 'report', '拆成兩塊：錯字（4 處）與 CI workflow', { role: 'executor', bot: 'mission-exec', identity: 'cc2', model: 'opus' }, 'bot_exec')
-    this.missionEvent(running.id, 'note', 'cc2 的 5h 桶撞限，換 cc1 接手（同一個 worktree、新 session）', { handoff: true, reason: 'limit_hit', from: 'cc2', to: 'cc1' }, 'daemon')
-    this.missionEvent(running.id, 'report', '錯字改好了，CI workflow 還在寫', { role: 'executor', bot: 'mission-exec-2', identity: 'cc1', model: 'opus' }, 'bot_exec2')
-    this.missionEvent(running.id, 'report', 'changes：workflow 少了 bun install 的快取', { role: 'reviewer', bot: 'mission-rev', identity: 'cc0' }, 'bot_rev')
-    this.missionEvent(running.id, 'round', 'reviewer 退回一次', null, 'daemon')
+    this.missionEvent(running.id, 'report', '拆成兩塊：錯字（4 處）與 CI workflow', null, 'bot-agm')
     const first = this.missionAssignment(running.id, {
       role: 'executor',
       target_bot_id: 'mission-exec',
@@ -1772,6 +1774,21 @@ export class MockTransport implements Transport {
       turn_status: 'identity_switch',
       turn_error: "You've hit your usage limit",
     })
+    this.missionEvent(running.id, 'note', 'cc2 撞到用量上限，換 cc1 接手', {
+      mission_id: running.id,
+      assignment_id: first.id,
+      role: 'executor',
+      bot_id: 'mission-exec',
+      from_identity: 'cc2',
+      to_identity: 'cc1',
+      model: null,
+      reason: 'cc2 的週額度用完，換下一個身分',
+      message: "You've hit your usage limit",
+      needs_review: true,
+    }, 'daemon')
+    this.missionEvent(running.id, 'report', '錯字改好了，CI workflow 還在寫', null, 'bot-agm')
+    this.missionEvent(running.id, 'report', 'changes：workflow 少了 bun install 的快取', null, 'bot-agm')
+    this.missionEvent(running.id, 'round', '第 1 輪退回（上限 2）', { rounds_used: 1 }, 'daemon')
     this.missionAssignment(running.id, { role: 'executor', target_bot_id: 'mission-exec-2', follow_up_of: first.id })
     this.missionAssignment(running.id, {
       role: 'reviewer',
@@ -1787,12 +1804,19 @@ export class MockTransport implements Transport {
     })
     this.missions.push(asking)
     this.missionEvent(asking.id, 'instruction', asking.text)
-    this.missionEvent(asking.id, 'report', '補了 12 個測試，tsc 與 lint 都過', { role: 'executor', bot: 'mission-exec-3', identity: 'cc2', model: 'opus' }, 'bot_exec3')
+    this.missionEvent(asking.id, 'report', '補了 12 個測試，tsc 與 lint 都過', null, 'bot-agm')
     this.missionEvent(
       asking.id,
       'paused',
-      '沒有身分的 Fable 額度可以當驗證者。要等額度回來，還是這次先不跑獨立驗證？',
-      { resets: [{ identity: 'cc2', resets_at: inHours(9) }, { identity: 'cc1', resets_at: inHours(31) }] },
+      '暫停：三個身分的 Fable 週桶都見底了，等使用者決定',
+      {
+        reason: 'no_fable_for_verifier',
+        decision: {
+          decision: 'ask_user',
+          reason: '三個身分的 Fable 週桶都見底了',
+          resets: [{ identity: 'cc2', resets_at: inHours(9) }, { identity: 'cc1', resets_at: inHours(31) }],
+        },
+      },
       'daemon',
     )
     this.missionAssignment(asking.id, { role: 'executor', target_bot_id: 'mission-exec-3' })
@@ -1801,8 +1825,15 @@ export class MockTransport implements Transport {
     const idle = mk({ text: '把群組未讀數改成只算 bot 的回覆', delivery_mode: 'push_main' })
     this.missions.push(idle)
     this.missionEvent(idle.id, 'instruction', idle.text)
-    this.missionEvent(idle.id, 'report', '第一版做完，等 AGM 派 reviewer', { role: 'executor', bot: 'mission-exec-5', identity: 'cc2', model: 'opus' }, 'bot_exec5')
+    this.missionEvent(idle.id, 'report', '第一版做完，等 AGM 派 reviewer', null, 'bot-agm')
     this.missionAssignment(idle.id, { role: 'executor', target_bot_id: 'mission-exec-5' })
+    this.missionEvent(
+      idle.id,
+      'note',
+      '找不到跟執行者不同的身分當 reviewer：改走執行者自審＋驗證者把關',
+      { decision: { decision: 'no_independent_reviewer', reason: '只有 cc2 還有額度' } },
+      'daemon',
+    )
 
     // 等額度：交辦停在 quota_blocked。
     const quota = mk({ text: '把 hosts 面板的錯誤訊息翻成中文', on_5h_limit: 'wait' })
@@ -1812,6 +1843,7 @@ export class MockTransport implements Transport {
       role: 'executor',
       target_bot_id: 'mission-exec-6',
       status: 'quota_blocked',
+      resume_at: inHours(2),
       completed_at: null,
     })
 
@@ -1822,9 +1854,9 @@ export class MockTransport implements Transport {
     })
     this.missions.push(done)
     this.missionEvent(done.id, 'instruction', done.text)
-    this.missionEvent(done.id, 'report', '改好了', { role: 'executor', bot: 'mission-exec-4', identity: 'cc2', model: 'opus' }, 'bot_exec4')
-    this.missionEvent(done.id, 'report', 'approve', { role: 'reviewer', bot: 'mission-rev-2', identity: 'cc1' }, 'bot_rev2')
-    this.missionEvent(done.id, 'verified', 'tsc 0 錯、oxlint 0 新警告、build 過、390px 截圖 2 張', { role: 'verifier', bot: 'mission-ver', identity: 'cc0', model: 'fable' }, 'bot_ver')
+    this.missionEvent(done.id, 'report', '改好了', null, 'bot-agm')
+    this.missionEvent(done.id, 'report', 'approve', null, 'bot-agm')
+    this.missionEvent(done.id, 'verified', 'tsc 0 錯、oxlint 0 新警告、build 過、390px 截圖 2 張', { sha: '3f2a9c1d0b7e4a5f6c8d9e0a1b2c3d4e5f6a7b8c' }, 'bot-agm')
     this.missionEvent(done.id, 'delivered', '已開 PR', { mode: 'pr', branch: 'mission/demo', url: 'https://github.com/edansun/agents-manager/pull/42' }, 'daemon')
     this.missionEvent(done.id, 'completed', done.result_summary ?? '', null, 'daemon')
     this.missionAssignment(done.id, { role: 'executor', target_bot_id: 'mission-exec-4' })

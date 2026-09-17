@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { assignmentLabel, assignmentOpen, deliveryLabel, missionQna, missionView, pausedLabel, phaseLabel, MISSION_PHASES } from './missionView.ts'
+import { assignmentLabel, assignmentOpen, deliveryLabel, missionQna, missionView, pausedLabel, phaseLabel, quotaWaitText, MISSION_PHASES } from './missionView.ts'
 import type { Mission, MissionEvent, MissionEventKind } from '../api/types.ts'
 
 function mission(over: Partial<Mission> = {}): Mission {
@@ -82,22 +82,42 @@ test('進度只看「最遠走到哪」，回頭的事件不會把它拉回去',
   assert.deepEqual(v.rounds, { used: 1, max: 2 })
 })
 
-test('撞限換手讀得出來，而且角色指向現在在跑的那一顆', () => {
-  const v = missionView(mission(), [
-    ev('report', '開工', { role: 'executor', bot: 'exec-a', identity: 'cc2' }),
-    ev('note', 'cc2 撞限，換 cc1 接手', { handoff: true, reason: 'limit_hit', from: 'cc2', to: 'cc1' }),
-    ev('report', '接手繼續', { role: 'executor', bot: 'exec-b', identity: 'cc1' }),
-  ])
-  assert.deepEqual(v.handoffs, [
-    { from: 'cc2', to: 'cc1', reason: 'limit_hit', at: v.handoffs[0].at },
-  ])
-  assert.equal(v.actors[0].identity, 'cc1')
-  assert.equal(v.actors[0].bot, 'exec-b')
+/**
+ * daemon 真的寫出來的換手 note（`supervisor/controller.rs::mission_quota`，鍵名一字不改）。
+ * 以前測試用自編的 `{handoff, from, to}`，真 daemon 從來不寫，卡片接上去一律「? → ?」（review3 c1 L9）。
+ */
+function switchNote(assignmentId: string, from: string, to: string, model: string | null = null) {
+  return ev('note', `${from} 撞到用量上限，換 ${to} 接手`, {
+    mission_id: '01M1',
+    assignment_id: assignmentId,
+    role: 'executor',
+    bot_id: 'bot-exec',
+    from_identity: from,
+    to_identity: to,
+    model,
+    reason: '週額度用完，換下一個身分',
+    message: "You've hit your usage limit",
+    needs_review: true,
+  })
+}
+
+test('撞限換手讀 daemon 的 from_identity／to_identity，而且 note 不會被當成「誰在跑」', () => {
+  const parent = asg({ id: 'a-first', target_bot_id: 'exec-a', status: 'awaiting_review', turn_status: 'identity_switch', turn_error: 'usage limit' })
+  const child = asg({ follow_up_of: 'a-first', target_bot_id: 'exec-b' })
+  const v = missionView(mission({ phase: 'executing' }), [switchNote('a-first', 'cc2', 'cc1', 'opus')], [parent, child])
+  assert.deepEqual(
+    v.handoffs.map((h) => [h.from, h.to, h.model, h.reason]),
+    [['cc2', 'cc1', 'opus', '週額度用完，換下一個身分']],
+    '同一次換手只算一行（交辦那邊推得出來的不再多一行「? → ?」）',
+  )
+  assert.equal(v.actors[0].bot, 'exec-b', '角色指向接手的那一顆，不是 daemon')
 })
 
-test('沒有第二個身分當 reviewer：標成「無獨立 reviewer」', () => {
-  const v = missionView(mission(), [ev('note', '只有一個可用身分', { decision: 'no_independent_reviewer' })])
-  assert.equal(v.soloReview, true)
+test('沒有第二個身分當 reviewer：讀 daemon 記的 decision，之後真的派出 reviewer 就撤掉標記', () => {
+  const note = ev('note', '改走執行者自審＋驗證者把關', { decision: { decision: 'no_independent_reviewer', reason: '只有 cc2 有額度' } })
+  assert.equal(missionView(mission(), [note], [asg({ role: 'executor' })]).soloReview, true)
+  const later = asg({ role: 'reviewer', created_at: '2026-09-13T09:00:00Z' })
+  assert.equal(missionView(mission(), [note], [asg({ role: 'executor' }), later]).soloReview, false)
 })
 
 test('停下來問人：原因、細節、問句、各身分的 Fable 重置時間都在卡片上', () => {
@@ -108,11 +128,17 @@ test('停下來問人：原因、細節、問句、各身分的 Fable 重置時�
   })
   const v = missionView(m, [
     ev('report', '改好了', { role: 'executor', identity: 'cc2' }),
+    // `mission/api.rs::get_pick` 停下任務時記的形狀：resets 包在 decision 裡。
     ev('paused', '要等 Fable 額度回來，還是這次先不跑驗證？', {
-      resets: [
-        { identity: 'cc2', resets_at: '2026-09-14T00:00:00Z' },
-        { identity: 'cc1', resets_at: '2026-09-15T00:00:00Z' },
-      ],
+      reason: 'no_fable_for_verifier',
+      decision: {
+        decision: 'ask_user',
+        reason: '三個身分的 Fable 週桶都見底了',
+        resets: [
+          { identity: 'cc2', resets_at: '2026-09-14T00:00:00Z' },
+          { identity: 'cc1', resets_at: '2026-09-15T00:00:00Z' },
+        ],
+      },
     }),
   ])
   assert.equal(v.phase, 'paused')
@@ -170,6 +196,7 @@ function asg(over: Partial<import('../api/types.ts').MissionAssignment> = {}) {
     turn_status: null,
     turn_error: null,
     follow_up_of: null,
+    resume_at: null,
     created_at: `2026-09-13T02:${String(seq).padStart(2, '0')}:00Z`,
     completed_at: null,
     ...over,
@@ -192,7 +219,7 @@ test('角色以交辦為準：bot 用 target_bot_id，身分／模型補事件�
   assert.equal(v.phase, 'reviewing')
 })
 
-test('撞限換手：事件沒帶也認得出來（follow-up ＋ 上一件的 turn_error）', () => {
+test('撞限換手：事件沒帶也認得出來（follow-up ＋ 上一件停在 identity_switch）', () => {
   const parent = asg({ id: 'a-parent', turn_status: 'identity_switch', turn_error: 'usage limit reached' })
   const child = asg({ follow_up_of: 'a-parent', target_bot_id: 'mission-exec-2' })
   const v = missionView(mission(), [], [parent, child])
@@ -281,4 +308,27 @@ test('沒有 reply_to 的 answer 不會被硬配給某個追問', () => {
 
 test('沒有追問時就沒有問答串', () => {
   assert.deepEqual(missionQna([ev('report', '做完了'), ev('completed', 'ok')]), [])
+})
+
+test('執行者驗收後輪到 AGM：daemon 的事件不帶 role，進度點仍停在「執行」，不退回「規劃」', () => {
+  // 真 daemon 的事件：instruction、AGM 用 CLI 回報（沒有 payload）。角色只在交辦上。
+  const v = missionView(
+    mission({ phase: 'awaiting_agm' }),
+    [ev('instruction', '把設定頁的錯字修掉'), ev('report', '執行者做完了，派 reviewer 中')],
+    [asg({ role: 'executor', status: 'completed', completed_at: '2026-09-13T03:00:00Z' })],
+  )
+  assert.equal(v.phase, 'awaiting_agm')
+  assert.equal(v.step, MISSION_PHASES.indexOf('executing'))
+})
+
+test('等額度說明照任務的 5h 撞限選項講，看得到預計重送時間', () => {
+  const blocked = asg({ status: 'quota_blocked', resume_at: '2026-09-13T08:00:00Z' })
+  const fmt = (iso: string) => `<${iso}>`
+  const wait = quotaWaitText({ on_5h_limit: 'wait', executor_kind: 'claude' }, blocked, fmt)
+  assert.match(wait, /等重置/)
+  assert.match(wait, /<2026-09-13T08:00:00Z>/)
+  const sw = quotaWaitText({ on_5h_limit: 'switch', executor_kind: 'claude' }, blocked, fmt)
+  assert.doesNotMatch(sw, /選的「等重置」/, '選了換身分的任務不能說是自己選了等')
+  assert.match(sw, /身分額度都用完/)
+  assert.match(quotaWaitText({ on_5h_limit: 'switch', executor_kind: 'codex' }, null), /codex 只有一把額度/)
 })
