@@ -1775,9 +1775,10 @@ mod external_claim_tests {
         .await
         .unwrap();
 
-        // 這一代：重啟起來的新 run，已經開了新回合，還在跑。
+        // 這一代：重啟起來的新 run，已經開了新回合，還在跑。世代圍籬（`lifecycle::fence`）認的是
+        // **寫入順序**（rowid），不是這裡的 ULID 字典序（issue #98：兩者不保證一致，這行以前斷言
+        // `new_run > old_run` 會在同一毫秒巧合下偶爾紅——跟這支測試實際要驗的東西無關，拿掉）。
         let new_run = db::ulid();
-        assert!(new_run > old_run, "ULID 是時間序，新的一定比較大");
         sqlx::query(
             "INSERT INTO runs (id, bot_id, state, agent_status, pane_id, started_at)
              VALUES (?,?,'running','working','pane-new',?)",
