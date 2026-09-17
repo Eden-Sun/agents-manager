@@ -333,8 +333,33 @@ pub(crate) fn fork_args_by_kind(kind: &str, session_id: &str) -> Result<Vec<Stri
 }
 
 /// The last native session could not be continued, so this start opens a new conversation.
-pub(crate) async fn context_lost(_app: &Arc<App>, bot: &db::Bot, why: &str) -> LcResult<()> {
-    tracing::info!(bot = %bot.name, why, "native session continuation unavailable; starting a new conversation");
+///
+/// 這件事一定要在聊天室裡看得見：以前只寫一行 `tracing::info!`，使用者（或 AGM）看到的是
+/// 一顆重啟成功、狀態正常的 bot，實際上脈絡已經悄悄斷了，要等到回覆內容不對勁才會發現
+/// （issue #92：換身分接不回原對話那次，靠人工翻 log 才查到；`resume_mismatch`——hook 回報的
+/// session 跟預期的不是同一個——更隱蔽，CLI 自己開了新對話卻沒有任何錯誤）。插一則系統訊息，
+/// 跟别的系統通知（例如 CLI 沒裝）走同一條 `insert_message` 路，前端不用另外加邏輯就看得到。
+pub(crate) async fn context_lost(app: &Arc<App>, bot: &db::Bot, why: &str) -> LcResult<()> {
+    tracing::warn!(bot = %bot.name, why, "native session continuation unavailable; starting a new conversation");
+    let reason = match why {
+        "no_session_id" => "沒有記到上一段對話的 session id",
+        "transcript_missing" => "上一段對話的紀錄檔不見了（換身分時可能沒搬過去，或檔案被清掉）",
+        "resume_mismatch" => "接回去之後，實際回報的對話跟原本要接的不是同一個",
+        "unsupported_kind" => "這個 CLI 種類不支援接續原生對話",
+        other => other,
+    };
+    let conv = db::conversation_id(&app.db, &bot.id).await.map_err(up)?;
+    let _ = insert_message(
+        app,
+        &conv,
+        None,
+        "system",
+        &format!("⚠️ 接不回原本的對話（{reason}），已經開了新的對話——前面的脈絡沒有帶過來。"),
+        "system",
+        false,
+        None,
+    )
+    .await;
     Ok(())
 }
 
@@ -1023,6 +1048,28 @@ mod resume_args_tests {
         let args = started_args(&e).pop().unwrap();
         assert!(!args.contains(&"--resume".into()));
         stop_bot(&e.app, &pm.id).await.unwrap();
+    }
+
+    /// `resume_native` 沒要求一定要接（`resume_required=false`）、接不回時照舊退回開新對話——但這件
+    /// 事以前只寫一行 log，聊天室裡看不出來，使用者會以為 bot 正常重啟了，其實脈絡已經斷了
+    /// （issue #92）。現在要在對話裡留一則看得到的系統訊息。
+    #[tokio::test]
+    async fn a_silent_fallback_to_a_new_conversation_leaves_a_visible_note() {
+        let e = env().await;
+        let pm = claude_bot(&e.app, &e.project_id, "pm").await;
+        // 沒有任何上一段原生對話：native_resume_plan 判定 no_session_id，退回開新對話。
+        start_bot_with(&e.app, &pm.id, StartOpts { resume_native: true, ..Default::default() }).await.unwrap();
+        assert!(!started_args(&e).pop().unwrap().contains(&"--resume".into()), "沒有上一段對話，不該帶 --resume");
+
+        let conv = db::conversation_id(&e.app.db, &pm.id).await.unwrap();
+        let note: String = sqlx::query_scalar(
+            "SELECT content FROM messages WHERE conversation_id=? AND role='system' ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(&conv)
+        .fetch_one(&e.app.db)
+        .await
+        .unwrap();
+        assert!(note.contains("接不回"), "{note}");
     }
 
     /// `?resume=native`（resume_required）：接不回就**整個不啟動**，回 `resumed:false`＋原因，不默默開新對話；

@@ -2048,6 +2048,23 @@ mod resume_tests {
         assert_eq!(remaining(&e, &run).await, None);
     }
 
+    /// hook 回報的 session 跟預期的不是同一個：CLI 自己默默開了新對話，`--resume` 沒有報任何錯——
+    /// 這是最容易被忽略的一種（issue #92）。以前 `context_lost` 只寫 log，這裡要看得到系統訊息。
+    #[tokio::test]
+    async fn a_session_mismatch_leaves_a_visible_note_not_just_a_log_line() {
+        let (e, bot, run) = fixture().await;
+        consume_resume_session(&e.app, &bot, &run, Some("native-other")).await.unwrap();
+        let conv = db::conversation_id(&e.app.db, &bot.id).await.unwrap();
+        let note: String = sqlx::query_scalar(
+            "SELECT content FROM messages WHERE conversation_id=? AND role='system' ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(&conv)
+        .fetch_one(&e.app.db)
+        .await
+        .unwrap();
+        assert!(note.contains("不是同一個"), "{note}");
+    }
+
     #[tokio::test]
     async fn a_hook_without_a_session_id_leaves_the_request_pending() {
         let (e, bot, run) = fixture().await;
