@@ -435,7 +435,8 @@ abort 之後照常 flush 出去（但先照下一段等寬限）。要取消排�
 退還之後 watchdog 隔 3 秒用那份額度**再試一次**（可重試的原因才試；review2 2026-09-16：以前退了額度卻當場判失敗，沒有任何路徑用得到它）；
 兩次都被擋就照樣判失敗，但系統訊息寫明「試著自動重送時被擋下（原因），一個字都沒打」，不是只說 agent 沒反應。
 框在 Enter 後仍有字就再按一次並繼續驗。任何讀取失敗都是錯誤，不是空畫面。`runs.pane_typed` 要先寫成功才碰 pane
-（slash 與 prompt 都是），寫不進去就中止；行程內另有保守記號，讀不出來時當成「要打字」，不退回 `agent.prompt`。
+（slash 與 prompt 都是），寫不進去就中止——prompt 這邊一個字都還沒打，是可重試的 `NotAttempted(pane_typed_unwritable)`
+（直接送撤回 turn 回 409、排隊的放回），不是 unknown；行程內另有保守記號，讀不出來時當成「要打字」，不退回 `agent.prompt`。
 
 stall watchdog 的自動補送走同一條驗證路徑，次數記在 `turns.resend_count`（每個 turn 上限 1，UPDATE 認領
 即是鎖，queue flush 與 watchdog 不會各送一次，daemon 重啟也不會多一次額度）。

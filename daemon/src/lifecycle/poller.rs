@@ -2151,6 +2151,7 @@ mod issue_17_tests {
         assert_eq!(count(&f, "pane.send_text"), 0);
     }
 
+    /// `runs.pane_typed` 寫不進去時一個字都還沒打：可重試的 NotAttempted，不是 `Err`（→ unknown，review3 c4 L5）。
     #[tokio::test]
     async fn nothing_is_typed_when_the_pane_typed_marker_cannot_be_stored() {
         let f = fixture("claude", "").await;
@@ -2162,7 +2163,10 @@ mod issue_17_tests {
         sqlx::query("ALTER TABLE runs RENAME TO runs_real").execute(&app.db).await.unwrap();
         sqlx::query("CREATE VIEW runs AS SELECT * FROM runs_real").execute(&app.db).await.unwrap();
 
-        assert!(deliver_prompt(&app, &client, &run, &bot, "Reply with PONG please", false, false).await.is_err());
+        assert_eq!(
+            deliver_prompt(&app, &client, &run, &bot, "Reply with PONG please", false, false).await.unwrap(),
+            not("pane_typed_unwritable", true),
+        );
         assert_eq!(count(&f, "pane.send_text"), 0);
         assert_eq!(count(&f, "agent.prompt"), 0);
     }
