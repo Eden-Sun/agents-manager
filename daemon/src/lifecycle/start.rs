@@ -89,7 +89,9 @@ pub async fn start_bot_locked_with(app: &Arc<App>, bot_id: &str, opts: StartOpts
         .await
         .ok_or_else(|| LcError::Upstream(format!("host `{}` is not configured", project.host)))?;
     // An unknown identity would silently run as the host's default login (m4p: `cc1` bot answered
-    // as cc0). Refuse; not-logged-in only gets a system message so the user can `/login` inside.
+    // as cc0). Refuse; a confirmed-logged-out explicit identity fails closed the same way instead of
+    // falling back to the host's default account (GH #83: it used to just warn and start anyway,
+    // which quietly billed usage to the wrong account).
     if let Some(idn) = bot.identity.as_deref().filter(|s| !s.is_empty()) {
         if crate::tools::identity_for_host(app, &project.host, idn).await.is_none() {
             return Err(LcError::conflict(
@@ -106,14 +108,40 @@ pub async fn start_bot_locked_with(app: &Arc<App>, bot_id: &str, opts: StartOpts
             .and_then(|t| t.identities.get(idn))
             .map(|i| i.logged_in == Some(false))
             .unwrap_or(false);
-    // The cache can be ~30 min stale after a login; ask the CLI before saying not logged in.
+        // The cache can be ~30 min stale after a login; ask the CLI before saying not logged in.
         if not_logged_in {
             if let Some(fresh) = crate::tools::recheck_identity_login(app, &project.host, idn).await {
                 not_logged_in = !fresh;
             }
         }
+        if not_logged_in {
+            tracing::warn!(bot = %bot.name, identity = idn, host = %project.host, "explicit identity not logged in on host; refusing to start (fail closed)");
+            if let Ok(conv) = db::conversation_id(&app.db, bot_id).await {
+                let _ = insert_message(
+                    app,
+                    &conv,
+                    None,
+                    "system",
+                    &format!(
+                        "身份 `{idn}` 在 {} 沒有登入，不啟動（不會退回這台機器的預設帳號）。請到 {} 用 `{idn}` 登入後再啟動這顆 bot。",
+                        project.host, project.host
+                    ),
+                    "system",
+                    false,
+                    None,
+                )
+                .await;
+            }
+            return Err(LcError::conflict(
+                "identity_not_logged_in",
+                json!({
+                    "identity": idn, "host": project.host, "login_required": true,
+                    "hint": format!("身份 `{idn}` 在 {} 沒有登入；先在該主機用 `{idn}` 登入（例如 claude 的 `/login`），再重試啟動。", project.host),
+                }),
+            ));
+        }
         // Logged in headlessly but never onboarded: the TUI would open on the login menu.
-        if !not_logged_in && bot.kind == "claude" && project.host == crate::config::LOCAL_HOST {
+        if bot.kind == "claude" && project.host == crate::config::LOCAL_HOST {
             if let Some(i) = crate::tools::identity_for_host(app, &project.host, idn).await {
                 let home = dirs::home_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
                 let dir = i
@@ -123,27 +151,6 @@ pub async fn start_bot_locked_with(app: &Arc<App>, bot_id: &str, opts: StartOpts
                     .unwrap_or_else(|| format!("{home}/.claude"));
                 if crate::tools::ensure_claude_onboarded(std::path::Path::new(&dir)) {
                     tracing::info!(bot = %bot.name, identity = idn, dir, "marked claude onboarding complete so the TUI skips the login menu");
-                }
-            }
-        }
-        if not_logged_in {
-            tracing::warn!(bot = %bot.name, identity = idn, host = %project.host, "identity not logged in on host; the CLI will use the machine's default login");
-            match db::conversation_id(&app.db, bot_id).await {
-                Ok(conv) => {
-                    let _ = insert_message(
-                        app,
-                        &conv,
-                        None,
-                        "system",
-                        &format!("身份 `{idn}` 在 {} 沒有登入：claude 會退回這台機器預設（cc0）的帳號執行。啟動後請按「登入 / 切換帳號」登入 `{idn}`。", project.host),
-                        "system",
-                        false,
-                        None,
-                    )
-                    .await;
-                }
-                Err(error) => {
-                    tracing::warn!(error = ?error, bot = %bot_id, "could not get conversation for identity warning");
                 }
             }
         }
@@ -1278,6 +1285,111 @@ mod resume_args_tests {
             .await
             .unwrap();
         assert_eq!(live, 1, "exactly one live run");
+    }
+}
+
+/// GH #83: an explicit identity confirmed logged out must fail closed, not fall back to the host's
+/// default account.
+#[cfg(test)]
+mod identity_login_gate_tests {
+    use super::*;
+    use crate::config::IdentityCfg;
+    use crate::testing as tt;
+    use crate::tools::{HostTools, IdentityInfo, ToolInfo, SOURCE_CONFIG};
+    use std::os::unix::fs::PermissionsExt;
+
+    /// Registers `name` as a known local `claude` identity whose cache says logged out, and points
+    /// its CLI at a fake script (never the real `claude`) that answers `{"loggedIn": fresh_logged_in}`
+    /// when `start_bot` rechecks — so the test never depends on what is actually installed or logged
+    /// in on the machine running it.
+    async fn identity_with_recheck_answer(app: &Arc<App>, dir: &std::path::Path, name: &str, fresh_logged_in: bool) {
+        let config_dir = dir.join(format!("{name}-config"));
+        app.cfg
+            .update(|c| {
+                c.identities.push(IdentityCfg {
+                    name: name.into(),
+                    kind: "claude".into(),
+                    host: None,
+                    env: [("CLAUDE_CONFIG_DIR".to_string(), config_dir.to_string_lossy().to_string())].into(),
+                    args: vec![],
+                });
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let script = dir.join(format!("fake-cli-{name}.sh"));
+        std::fs::write(&script, format!("#!/bin/sh\nprintf '{{\"loggedIn\": {fresh_logged_in}}}'\n")).unwrap();
+        let mut perm = std::fs::metadata(&script).unwrap().permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&script, perm).unwrap();
+        app.tools.lock().await.insert(
+            crate::config::LOCAL_HOST.to_string(),
+            HostTools {
+                tools: [("claude".to_string(), ToolInfo { installed: true, path: Some(script.to_string_lossy().to_string()), version: None, logged_in: None })].into(),
+                identities: [(
+                    name.to_string(),
+                    IdentityInfo {
+                        name: name.to_string(),
+                        kind: "claude".to_string(),
+                        logged_in: Some(false),
+                        reason: None,
+                        account: None,
+                        plan: None,
+                        source: SOURCE_CONFIG,
+                        config_dir: None,
+                    },
+                )]
+                .into(),
+                shell_identities: vec![],
+                checked_at: db::now(),
+            },
+        );
+    }
+
+    fn conflict(e: LcError) -> Value {
+        match e {
+            LcError::Conflict(v) => v,
+            other => panic!("expected a 409 conflict, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_explicit_logged_out_identity_fails_closed_instead_of_falling_back() {
+        let e = tt::env().await;
+        let bot = tt::claude_bot(&e.app, &e.project_id, "cc-lock").await;
+        sqlx::query("UPDATE bots SET identity='cc-lock' WHERE id=?").bind(&bot.id).execute(&e.app.db).await.unwrap();
+        identity_with_recheck_answer(&e.app, &e.dir, "cc-lock", false).await;
+
+        let err = start_bot(&e.app, &bot.id).await.expect_err("身分確認未登入：不能啟動");
+        let body = conflict(err);
+        assert_eq!(body["reason"], "identity_not_logged_in");
+        assert_eq!(body["identity"], "cc-lock");
+        assert_eq!(body["host"], "local");
+
+        assert!(db::active_run(&e.app.db, &bot.id).await.unwrap().is_none(), "沒有 run 被建起來");
+        assert!(e.herdr.methods().is_empty(), "沒有碰 herdr，CLI 沒被啟動：{:?}", e.herdr.methods());
+
+        let conv = db::conversation_id(&e.app.db, &bot.id).await.unwrap();
+        let note: String = sqlx::query_scalar(
+            "SELECT content FROM messages WHERE conversation_id=? AND role='system' ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(&conv)
+        .fetch_one(&e.app.db)
+        .await
+        .unwrap();
+        assert!(note.contains("cc-lock") && note.contains("沒有登入"), "{note}");
+    }
+
+    /// 快取覺得沒登入，但 CLI 重驗說有登入（例如剛登入、30 分鐘的快取還沒更新）：照樣啟動，不擋。
+    #[tokio::test]
+    async fn a_stale_logged_out_cache_does_not_block_a_start_the_cli_confirms() {
+        let e = tt::env().await;
+        let bot = tt::claude_bot(&e.app, &e.project_id, "cc-fresh").await;
+        sqlx::query("UPDATE bots SET identity='cc-fresh' WHERE id=?").bind(&bot.id).execute(&e.app.db).await.unwrap();
+        identity_with_recheck_answer(&e.app, &e.dir, "cc-fresh", true).await;
+
+        start_bot(&e.app, &bot.id).await.expect("CLI 重驗說有登入：照常啟動");
+        assert!(db::active_run(&e.app.db, &bot.id).await.unwrap().is_some());
     }
 }
 
