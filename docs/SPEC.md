@@ -973,7 +973,7 @@ label = "foo@m4p"
 - 狀態上報與 herdr 的終端偵測並存；相同狀態不再發事件，所以「偵測先報 idle、hook 才寫 spool」是真實競態（§11.4.4 補）。
 
 #### 11.4.2 遠端 `hook.sh`
-路徑 `~/.config/agents-manager/bots/<bot_id>/hook.sh`，每次啟動 Run（與 reconcile 修 hook 時）覆寫。argv `hook.sh <provider> <bot_id> <token-slot>`：
+路徑 `~/.config/agents-manager/bots/<bot_id>/hook.sh`，每次啟動 Run 時覆寫（對帳不再重寫：`refresh_remote_hook` 已刪）——改了 `REMOTE_HOOK_SH_TEMPLATE` 之後，**正在跑的 run 要等那顆 bot 自己重啟才會換腳本**，重啟 daemon 或跑一次對帳都不會推過去。argv `hook.sh <provider> <bot_id> <token-slot>`：
 第 3 個參數 daemon 填 `-`、腳本不讀——codex 的 notify argv 在 `ps` 對全機使用者可見，而 hook token 同時是本機 `/hook/*` 與 `/relay/announce` 的鑰匙。
 
 | provider | payload 來源 | 上報狀態 | 寫 spool |
