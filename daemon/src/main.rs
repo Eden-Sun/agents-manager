@@ -5,6 +5,8 @@
 //!   hook claude|codex ...       the tiny process agent CLIs invoke; always exits 0
 
 mod build_info;
+mod build_scheduler;
+mod cargo_shim;
 mod agent_relay;
 mod api;
 mod identity_kind;
@@ -322,6 +324,8 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     hookrecv::spawn_spool_scanner(app.clone());
     // §6.5e：pane 裡開始跑 dev server 沒有任何 herdr 事件，對帳又不定期跑；表上的 kind／port 靠這個跟上。
     panes::spawn_scanner(app.clone());
+    // issue #90：名額持有者沒續約（掛了、被砍）就收回，不必等下一個人來要才發現。
+    build_scheduler::spawn_sweeper(app.clone());
 
     {
         // 這一輪只起本機：遠端一律由 `hosts.rs` 在那台連上並對帳成功之後跑（§6.1 第 6 步沒有「遠端除外」這個但書）。

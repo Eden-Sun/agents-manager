@@ -149,6 +149,9 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/models", get(get_models))
         .route("/changelog", get(get_changelog))
         .route("/quota", get(get_quota))
+        // issue #90：build scheduler 的唯讀現況（UI 用一般 X-AM-Token）。acquire／renew／release 見下方
+        // 的 `/build-slots/*`（不在 `/api` 底下：bot 的 pane 只有自己的 hook token，拿不到這個）。
+        .route("/build-slots", get(crate::build_scheduler::get_status))
         .route("/mem", get(get_mem))
         .route("/mem/processes", get(get_mem_processes))
         .route("/mem/processes/kill", post(kill_mem_process))
@@ -221,6 +224,10 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/relay/announce", post(relay_announce))
         // §6.5e：bot 開完 pane 後回報用途（歸屬另外從行程環境推斷）。
         .route("/relay/pane", post(relay_pane))
+        // issue #90：cargo shim 用（bot 的 hook token，或人工 host shell 的一般 X-AM-Token）。
+        .route("/build-slots/acquire", post(crate::build_scheduler::post_acquire))
+        .route("/build-slots/renew", post(crate::build_scheduler::post_renew))
+        .route("/build-slots/release", post(crate::build_scheduler::post_release))
         .fallback(get(crate::assets::serve))
         .with_state(app)
 }

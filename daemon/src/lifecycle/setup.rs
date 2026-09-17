@@ -336,17 +336,32 @@ async fn install_remote_hook(conn: &HostConn, bot: &db::Bot, instance: Option<&s
 
 /// Put the `herdr` shim (SPEC §6.5b) where this bot's pane can reach it; returns the PATH dir.
 /// An unwritable host does not block the start: reconcile's descent match still tracks children.
+///
+/// The `cargo` build-scheduler shim (issue #90) rides along into the **same** dir — one PATH
+/// prepend covers both. Its own install is best-effort and never blocks the bot on failure: a bot
+/// that cannot get a scheduled `cargo` still gets a working `herdr`, which is what actually gates
+/// starting at all.
 pub(crate) async fn install_shim(app: &Arc<App>, bot: &db::Bot, project: &db::Project) -> Option<String> {
     let installed = if project.host == LOCAL_HOST {
         app.bot_dir(&bot.id).and_then(|dir| {
-            crate::herdr_shim::install_local(&dir)
-                .map(|d| d.to_string_lossy().into_owned())
-                .map_err(anyhow::Error::from)
+            let bin = crate::herdr_shim::install_local(&dir)?;
+            if let Err(e) = crate::cargo_shim::install_local(&dir) {
+                tracing::warn!(bot = %bot.name, error = ?e, "could not install the cargo build-slot shim");
+            }
+            Ok::<_, anyhow::Error>(bin.to_string_lossy().into_owned())
         })
     } else {
         match app.hosts.get(&project.host).await {
             Some(conn) => match remote_bot_dir_for(&conn, &bot.id, app.instance().as_deref()).await {
-                Ok(p) => crate::herdr_shim::install_remote(&conn, &p.dir).await,
+                Ok(p) => {
+                    let dir = crate::herdr_shim::install_remote(&conn, &p.dir).await;
+                    if dir.is_ok() {
+                        if let Err(e) = crate::cargo_shim::install_remote(&conn, &p.dir).await {
+                            tracing::warn!(bot = %bot.name, host = %project.host, error = ?e, "could not install the remote cargo build-slot shim");
+                        }
+                    }
+                    dir
+                }
                 Err(e) => Err(e),
             },
             None => Err(anyhow::anyhow!("unknown host `{}`", project.host)),

@@ -247,6 +247,82 @@ pub struct ConfigFile {
     /// §6.5e：非 agent pane 的 GC 門檻與例外。
     #[serde(default)]
     pub panes: PanesCfg,
+    /// issue #90：全機 cargo/rustc 併發的排程設定。
+    #[serde(default)]
+    pub build: BuildCfg,
+}
+
+/// issue #90：build scheduler 的門檻。名額的存活期（`lease_ttl_secs`）是「持有者多久沒續約就當它死了」，
+/// 不是建置本身的時限——建置跑多久都行，只要背景續約還在動。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BuildCfg {
+    /// 全機同時最多幾個受管的 cargo 佔用（`cargo-slot.sh` 現行手動限制是 2）。
+    #[serde(default = "default_build_max_concurrent")]
+    pub max_concurrent: usize,
+    /// 每個佔用的 `CARGO_BUILD_JOBS`：不吃 cargo 預設的「核心數」，避免兩個佔用各自吃滿全機。
+    #[serde(default = "default_build_cargo_jobs")]
+    pub cargo_jobs: usize,
+    /// 名額 TTL（秒）：拿到之後這麼久沒 renew 就視為持有者已死，下一次 acquire 收回。
+    #[serde(default = "default_build_lease_ttl_secs")]
+    pub lease_ttl_secs: u64,
+}
+
+impl Default for BuildCfg {
+    fn default() -> Self {
+        Self {
+            max_concurrent: default_build_max_concurrent(),
+            cargo_jobs: default_build_cargo_jobs(),
+            lease_ttl_secs: default_build_lease_ttl_secs(),
+        }
+    }
+}
+
+fn default_build_max_concurrent() -> usize {
+    2
+}
+
+fn default_build_cargo_jobs() -> usize {
+    2
+}
+
+fn default_build_lease_ttl_secs() -> u64 {
+    180
+}
+
+/// 併發上限的下限：0 不是「停用排程」，是「誰都拿不到名額」，整台機器的受管建置會全部卡死。
+pub const MIN_BUILD_MAX_CONCURRENT: usize = 1;
+
+impl BuildCfg {
+    /// 環境變數覆寫（`AM_BUILD_MAX_CONCURRENT`）；看不懂、0 一律不採用，回設定檔的值，設定檔也離譜才回預設。
+    pub fn max_concurrent(&self) -> usize {
+        resolve_build_max_concurrent(std::env::var("AM_BUILD_MAX_CONCURRENT").ok().as_deref(), self.max_concurrent)
+    }
+}
+
+fn resolve_build_max_concurrent(env: Option<&str>, file: usize) -> usize {
+    let sane = |n: usize| n >= MIN_BUILD_MAX_CONCURRENT;
+    match env.and_then(|v| v.trim().parse::<usize>().ok()) {
+        Some(n) if sane(n) => n,
+        _ if sane(file) => file,
+        _ => default_build_max_concurrent(),
+    }
+}
+
+#[cfg(test)]
+mod build_cfg_tests {
+    use super::*;
+
+    /// 0 不是「停用排程」，是「誰都拿不到名額」——跟 `idle_close_secs` 同一條規矩：離譜的值回預設，不照單全收。
+    #[test]
+    fn a_zero_or_unreadable_override_falls_back_instead_of_locking_everyone_out() {
+        let default = default_build_max_concurrent();
+        assert_eq!(resolve_build_max_concurrent(None, 3), 3);
+        assert_eq!(resolve_build_max_concurrent(Some("5"), 3), 5, "環境變數覆寫");
+        for bad in ["0", "-1", "abc", ""] {
+            assert_eq!(resolve_build_max_concurrent(Some(bad), 3), 3, "{bad:?} 不採用，回設定檔的值");
+            assert_eq!(resolve_build_max_concurrent(Some(bad), 0), default, "{bad:?}＋設定檔 0 → 預設");
+        }
+    }
 }
 
 /// SPEC §6.5e。閒置門檻可用 `AM_PANE_IDLE_CLOSE_SECS` 覆寫（看不懂／0／負數／低於 10 分鐘一律不採用——
