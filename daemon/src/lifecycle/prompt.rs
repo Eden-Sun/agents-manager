@@ -442,6 +442,12 @@ async fn prompt_inner(
     want_send_now: bool,
 ) -> LcResult<PromptOut> {
     let deliver = deliver.unwrap_or(text);
+    // 這顆如果是 AGM 因為閒置收起來的（§6.11），先用 `--resume` 把它叫醒再送——「下次要用再叫醒」
+    // 的那個「下次要用」就是這裡。**在拿 bot 鎖之前**做：`wake` 自己要拿同一把鎖。不是睡著的
+    // bot 只多一次索引查詢，路徑照舊。
+    if let Err(e) = crate::supervisor::idle_sleep::wake(app, bot_id, "有新的訊息要送進來").await {
+        tracing::warn!(bot = %bot_id, error = %e, "could not wake a sleeping bot for a prompt");
+    }
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
 

@@ -203,6 +203,18 @@ CREATE TABLE IF NOT EXISTS supervisor_leases (
   lease_token TEXT,
   detail_json TEXT NOT NULL DEFAULT '{}'
 );
+-- §6.11：被 AGM 因為閒置收起來的 bot。有這一列 = 它不是壞掉也不是使用者關的，是睡著的，
+-- 下次要用時得用 `--resume <native_session_id>` 接回原本那段對話。叫醒成功就把列刪掉。
+CREATE TABLE IF NOT EXISTS bot_sleeps (
+  bot_id TEXT PRIMARY KEY,
+  -- 收起來的那一刻它跑在哪一段 native session（真正續接時仍以 `last_native_session` 為準，
+  -- 這裡留著是為了讓「為什麼這顆是睡著的」看得出來）。
+  native_session_id TEXT,
+  -- 收起來時已經閒置幾分鐘。
+  idle_minutes INTEGER NOT NULL DEFAULT 0,
+  reason TEXT NOT NULL DEFAULT 'idle',
+  slept_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS supervisor_notes (
   id TEXT PRIMARY KEY,
   supervisor_id TEXT NOT NULL,

@@ -64,6 +64,7 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
           "auto_approve": true,
           "primary": false,
           "run": null,
+          "asleep": null,
           "lamp": "offline",
           "unread": 0, "read_mark": {"at": "2026-09-15T08:00:00.000Z", "id": "01M…"},
           "queued_turn": null
@@ -97,6 +98,19 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
   不是任何一個前端看到的時間。`null` = 這個 run 還沒真的變過狀態，或升級前的舊列。前端算「跑了
   多久」（SPEC §2.2）以這欄為準，只有它是 `null` 時才退回這回合最早那筆 in_flight turn 的
   `created_at`，兩個都沒有才用網頁自己的觀察時間墊底。
+
+### `asleep`（2026-09-17 新增，SPEC §6.11）
+
+`null` = 一般狀態。有值 = 這顆是 **AGM 因為閒置超過 90 分鐘收起來省 RAM 的**，不是壞掉、也不是
+使用者關的：
+
+```json
+{"since": "2026-09-17T04:10:00.000Z", "idle_minutes": 93}
+```
+
+它的 `run` 是 `null`、`lamp` 是 `offline`，但下次要用時會自動用 `--resume` 接回原本那段對話——
+送訊息（`POST /api/bots/{id}/prompt`）或按啟動（`POST /api/bots/{id}/start`）都會叫醒它，
+前端不必先自己啟動。`GET /api/supervisor/state` 的 bot 物件有同一個欄位。
 
 ### `lamp`（SPEC §2.2）
 
@@ -748,6 +762,18 @@ readback_model_mismatch|readback_effort_mismatch|readback_fast_mismatch>`。以�
   - claude `effort` → `/effort <level>`（副作用：claude 存成該帳號新 session 的預設）。
   - codex `model` / `effort` / `fast` → 操作 `/model` 兩層選單與 `/fast` 開關（可一起改，只改 `fast` 也走這條），回讀狀態列確認，`run.runtime_*` 存讀回的值（副作用：寫進 `~/.codex/config.toml`）。
 - `identity` 不存在 404；kind 不符 400。
+
+### 10.2a `POST /api/bots/{id}/start` 對睡著的 bot（2026-09-17，SPEC §6.11）
+
+這顆是 AGM 因為閒置收起來的（`asleep` 不是 `null`）時，start 走的是**續接**那條路
+（`--resume <上一個 session>`），回應多一個 `resumed`：
+
+```json
+200 {"run_id":"01M1…","resumed":true}
+```
+
+一般的 bot 行為不變（`200 {"run_id":"…"}`）。使用者按「啟動」想要的是把剛剛那顆帶著對話的 bot
+叫回來，不是開一段新的空白對話。
 
 ### 10.3 `POST /api/bots/{id}/restart`
 有 Run 先 stop（ctrl+c ×2、逾時關 pane）再 start → `200 {"run_id"}`（新 Run）。沒有 Run 也可呼叫（= start）。錯誤同 start。過程推 `bot_status`。
