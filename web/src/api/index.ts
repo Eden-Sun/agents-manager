@@ -404,8 +404,13 @@ export async function forkBot(botId: string, name?: string): Promise<ForkResult>
   return { id: str(pick(o, 'bot_id')), name: str(pick(o, 'name')), start_error: typeof err === 'string' && err ? err : null }
 }
 
-export async function restartBot(botId: string): Promise<string> {
-  const raw = await transport.request('POST', `/bots/${encodeURIComponent(botId)}/restart`)
+/**
+ * `resumeNative`：帶 `?resume=native` 接回 DB 記的原生對話（換身分後重啟要接續，SPEC §6.5.2）。
+ * 接不回時 daemon 回 409 `cannot_resume`——呼叫端（`store.restartBot`）決定要不要改成不帶這個旗標重送。
+ */
+export async function restartBot(botId: string, resumeNative?: boolean): Promise<string> {
+  const qs = resumeNative ? '?resume=native' : ''
+  const raw = await transport.request('POST', `/bots/${encodeURIComponent(botId)}/restart${qs}`)
   return isRec(raw) ? str(pick(raw, 'run_id')) : ''
 }
 

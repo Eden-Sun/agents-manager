@@ -422,7 +422,10 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
             disabled={restarting}
             onClick={() => {
               setRestarting(true)
-              void restartBot(botId).then((ok) => {
+              // 換過身分：重啟要接回原對話，不然對話就斷了（2026-09-17 AGM 手動搶救過兩顆）。
+              // 用 `saved`（送出當下記的 patch），不是這次 render 重算的 `patch`——存完 touched 已清空，
+              // 這裡再算會看不出剛剛動過 identity。
+              void restartBot(botId, 'identity' in saved).then((ok) => {
                 setRestarting(false)
                 if (ok) {
                   setBanner(null)

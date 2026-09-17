@@ -199,6 +199,11 @@ fn resume_args_by_kind(kind: &str, session_id: &str) -> Result<Vec<String>, &'st
 /// 這顆 bot 接得回哪一段原生對話：`Ok((session id, argv))`，接不回就是原因代碼
 /// （`no_session_id`／`transcript_missing`／`unsupported_kind`）。`include_active`：重啟前查——
 /// 那時現在這一個 run 還沒結束，它的 session 才是要接的那段。
+///
+/// 換身分（`PATCH /bots/:id` 改 `identity`）後 `bot.identity` 已經是新的，但上一段對話的 jsonl
+/// 還躺在**舊**身分的 `CLAUDE_CONFIG_DIR/projects/…` 下；兩個目錄不是同一份（symlink 除外）時
+/// `--resume` 在新身分下找不到檔案。先把檔案複製過去再放行，複製不了就回退開新對話，不硬失敗
+/// （2026-09-17 AGM 手動搶救的兩顆 bot：`resume_session_id` 一直是空的）。
 pub(crate) async fn native_resume_plan(
     app: &Arc<App>,
     bot: &db::Bot,
@@ -217,15 +222,90 @@ pub(crate) async fn native_resume_plan(
     } else {
         db::last_native_session(&app.db, &bot.id).await.map_err(up)?
     };
-    Ok(match last {
-        // No transcript = cannot resume: `--resume` prints "No conversation found" and exits
-        // right after a "successful" restart (2026-09-11 restart-idle repro).
-        Some((_, Some(transcript))) if host == LOCAL_HOST && !transcript.trim().is_empty() && !std::path::Path::new(&transcript).exists() => {
-            Err("transcript_missing")
+    let Some((session_id, transcript)) = last else { return Ok(Err("no_session_id")) };
+    if session_id.trim().is_empty() {
+        return Ok(Err("no_session_id"));
+    }
+    // No transcript = cannot resume: `--resume` prints "No conversation found" and exits
+    // right after a "successful" restart (2026-09-11 restart-idle repro). Also stages the file
+    // into the current identity's config dir when it moved.
+    if let Some(transcript) = transcript.filter(|t| !t.trim().is_empty()) {
+        if host == LOCAL_HOST {
+            if let Err(why) = stage_cross_identity_transcript(app, bot, host, &transcript).await {
+                return Ok(Err(why));
+            }
         }
-        Some((session_id, _)) if !session_id.trim().is_empty() => resume_args_by_kind(&bot.kind, &session_id).map(|a| (session_id, a)),
-        _ => Err("no_session_id"),
-    })
+    }
+    Ok(resume_args_by_kind(&bot.kind, &session_id).map(|a| (session_id, a)))
+}
+
+/// 這個身分實際用的 `CLAUDE_CONFIG_DIR`（沒設、或身分未知都算預設帳號 `~/.claude`）。
+async fn identity_config_dir(app: &Arc<App>, host: &str, identity: Option<&str>) -> String {
+    let home = crate::tools::host_home(app, host).await;
+    let dir = match identity.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(name) => crate::tools::identity_for_host(app, host, name)
+            .await
+            .and_then(|i| i.env.get("CLAUDE_CONFIG_DIR").map(|v| crate::config::expand_home(v, &home))),
+        None => None,
+    };
+    dir.unwrap_or_else(|| format!("{home}/.claude"))
+}
+
+/// Local only：把 `transcript` 複製到目前身分的 `projects/<同一個 cwd 目錄名>/` 下，讓 `--resume` 在
+/// 那個身分底下找得到。兩邊 `projects/`（canonicalize 後）本來就是同一份（例如 symlink）時什麼都不做。
+/// 來源檔不在了，或建目錄／複製失敗，都回傳 `transcript_missing` 讓呼叫端退回開新對話，不 panic、不硬擋重啟。
+async fn stage_cross_identity_transcript(app: &Arc<App>, bot: &db::Bot, host: &str, transcript: &str) -> Result<(), &'static str> {
+    let src = std::path::Path::new(transcript);
+    if !src.exists() {
+        return Err("transcript_missing");
+    }
+    let (Some(cwd_dir), Some(fname)) = (src.parent(), src.file_name()) else { return Err("transcript_missing") };
+    let Some(old_projects) = cwd_dir.parent() else { return Err("transcript_missing") };
+    let new_dir = identity_config_dir(app, host, bot.identity.as_deref()).await;
+    let new_projects = std::path::Path::new(&new_dir).join("projects");
+    let same = match (std::fs::canonicalize(old_projects), std::fs::canonicalize(&new_projects)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => old_projects == new_projects.as_path(),
+    };
+    if same {
+        return Ok(());
+    }
+    let Some(cwd_key) = cwd_dir.file_name() else { return Err("transcript_missing") };
+    let dest_dir = new_projects.join(cwd_key);
+    if let Err(e) = std::fs::create_dir_all(&dest_dir) {
+        tracing::warn!(bot = %bot.name, dest = %dest_dir.display(), error = %e, "identity switch：建不出新身分的 projects 目錄，改開新對話");
+        return Err("transcript_missing");
+    }
+    let dest_file = dest_dir.join(fname);
+    if let Err(e) = std::fs::copy(src, &dest_file) {
+        tracing::warn!(bot = %bot.name, from = %src.display(), to = %dest_file.display(), error = %e, "identity switch：複製 session 檔到新身分失敗，改開新對話");
+        return Err("transcript_missing");
+    }
+    // 檔名同名的附屬目錄（有些 CLI 版本會在 jsonl 旁邊放一份）一起搬，搬不動不影響主對話。
+    if let Some(stem) = src.file_stem() {
+        let companion_src = cwd_dir.join(stem);
+        if companion_src.is_dir() {
+            if let Err(e) = copy_dir_recursive(&companion_src, &dest_dir.join(stem)) {
+                tracing::warn!(bot = %bot.name, error = %e, "identity switch：session 附屬目錄複製失敗（不影響主對話檔）");
+            }
+        }
+    }
+    tracing::info!(bot = %bot.name, from = %src.display(), to = %dest_file.display(), "identity switch：session 檔已搬到新身分的 projects 目錄，可以接回對話");
+    Ok(())
+}
+
+fn copy_dir_recursive(src: &std::path::Path, dest: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dest)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let to = dest.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&entry.path(), &to)?;
+        } else {
+            std::fs::copy(entry.path(), to)?;
+        }
+    }
+    Ok(())
 }
 
 fn cannot_resume(bot_id: &str, why: &str) -> LcError {
@@ -1021,6 +1101,140 @@ mod resume_args_tests {
         let args = started_args(&e).pop().unwrap();
         assert!(args.windows(2).any(|w| w == ["--resume", "sid-written"]), "{args:?}");
         stop_bot(&e.app, &pm.id).await.unwrap();
+    }
+
+    /// 換身分後重啟要接得回原對話：新舊身分的 `CLAUDE_CONFIG_DIR` 是同一份（symlink）就不用搬檔，
+    /// 不是同一份就要把 jsonl 複製過去。兩顆都用 `native_resume_plan` 直接驗，不用真的啟動一次 CLI。
+    mod cross_identity_transcript_tests {
+        use super::*;
+        use crate::config::LOCAL_HOST;
+        use crate::lifecycle::native_resume_plan;
+        use std::os::unix::fs::MetadataExt;
+
+        fn write_jsonl(dir: &std::path::Path, cwd_key: &str, sid: &str) -> std::path::PathBuf {
+            let cwd_dir = dir.join("projects").join(cwd_key);
+            std::fs::create_dir_all(&cwd_dir).unwrap();
+            let f = cwd_dir.join(format!("{sid}.jsonl"));
+            std::fs::write(&f, "{}\n").unwrap();
+            f
+        }
+
+        async fn set_identity_dir(app: &std::sync::Arc<crate::state::App>, name: &str, dir: &std::path::Path) {
+            app.cfg
+                .update(|c| {
+                    c.identities.push(crate::config::IdentityCfg {
+                        name: name.into(),
+                        kind: "claude".into(),
+                        host: None,
+                        env: [("CLAUDE_CONFIG_DIR".to_string(), dir.to_str().unwrap().to_string())].into(),
+                        args: vec![],
+                    });
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+
+        /// (a) 新身分的 `projects/` 是舊身分那份的 symlink → 不搬檔，直接接得回。
+        #[tokio::test]
+        async fn symlinked_projects_dir_needs_no_copy() {
+            let e = env().await;
+            let pm = claude_bot(&e.app, &e.project_id, "pm").await;
+
+            let old_dir = e.dir.join("cc-old");
+            let transcript = write_jsonl(&old_dir, "-Users-m4p-project-x", "sid-same");
+
+            // 新身分：自己的目錄下 `projects` 是指到舊身分那份 `projects` 的 symlink（同一份東西）。
+            let new_dir = e.dir.join("cc-symlinked");
+            std::fs::create_dir_all(&new_dir).unwrap();
+            std::os::unix::fs::symlink(old_dir.join("projects"), new_dir.join("projects")).unwrap();
+            set_identity_dir(&e.app, "cc-sym", &new_dir).await;
+            sqlx::query("UPDATE bots SET identity='cc-sym' WHERE id=?").bind(&pm.id).execute(&e.app.db).await.unwrap();
+
+            sqlx::query(
+                "INSERT INTO runs (id, bot_id, state, agent_status, native_session_id, transcript_path, started_at, ended_at)
+                 VALUES (?,?,'stopped','idle','sid-same',?,'2026-09-17T00:00:00Z','2026-09-17T00:01:00Z')",
+            )
+            .bind(db::ulid())
+            .bind(&pm.id)
+            .bind(transcript.to_str().unwrap())
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+
+            let bot = db::bot(&e.app.db, &pm.id).await.unwrap().unwrap();
+            let plan = native_resume_plan(&e.app, &bot, LOCAL_HOST, false).await.unwrap();
+            let (sid, args) = plan.expect("resumable");
+            assert_eq!(sid, "sid-same");
+            assert!(args.windows(2).any(|w| w == ["--resume", "sid-same"]));
+
+            // 沒有另外複製出一份：透過 symlink 看到的還是原本那個 inode。
+            let via_new = new_dir.join("projects").join("-Users-m4p-project-x").join("sid-same.jsonl");
+            assert_eq!(std::fs::metadata(&via_new).unwrap().ino(), std::fs::metadata(&transcript).unwrap().ino());
+            assert_eq!(std::fs::read_dir(old_dir.join("projects").join("-Users-m4p-project-x")).unwrap().count(), 1, "沒有多出檔案");
+        }
+
+        /// (b) 新舊身分的 `projects/` 是不相干的兩個目錄 → 接回前先把 jsonl 複製過去，複製出的是獨立的檔案。
+        #[tokio::test]
+        async fn different_config_dirs_copy_the_transcript_before_resuming() {
+            let e = env().await;
+            let pm = claude_bot(&e.app, &e.project_id, "pm").await;
+
+            let old_dir = e.dir.join("cc-old2");
+            let transcript = write_jsonl(&old_dir, "-Users-m4p-project-y", "sid-move");
+
+            let new_dir = e.dir.join("cc2-new");
+            set_identity_dir(&e.app, "cc2", &new_dir).await;
+            sqlx::query("UPDATE bots SET identity='cc2' WHERE id=?").bind(&pm.id).execute(&e.app.db).await.unwrap();
+
+            sqlx::query(
+                "INSERT INTO runs (id, bot_id, state, agent_status, native_session_id, transcript_path, started_at, ended_at)
+                 VALUES (?,?,'stopped','idle','sid-move',?,'2026-09-17T00:00:00Z','2026-09-17T00:01:00Z')",
+            )
+            .bind(db::ulid())
+            .bind(&pm.id)
+            .bind(transcript.to_str().unwrap())
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+
+            let bot = db::bot(&e.app.db, &pm.id).await.unwrap().unwrap();
+            let plan = native_resume_plan(&e.app, &bot, LOCAL_HOST, false).await.unwrap();
+            let (sid, args) = plan.expect("resumable after copy");
+            assert_eq!(sid, "sid-move");
+            assert!(args.windows(2).any(|w| w == ["--resume", "sid-move"]));
+
+            let dest = new_dir.join("projects").join("-Users-m4p-project-y").join("sid-move.jsonl");
+            assert!(dest.exists(), "jsonl 沒有被複製到新身分的 projects 目錄");
+            assert_eq!(std::fs::read_to_string(&dest).unwrap(), std::fs::read_to_string(&transcript).unwrap());
+            assert_ne!(std::fs::metadata(&dest).unwrap().ino(), std::fs::metadata(&transcript).unwrap().ino(), "應該是獨立複製出的檔案，不是同一個 inode");
+        }
+
+        /// 來源檔不見了：不硬擋，退回開新對話（跟原本沒換身分時「transcript_missing」一致）。
+        #[tokio::test]
+        async fn missing_source_falls_back_to_a_new_conversation() {
+            let e = env().await;
+            let pm = claude_bot(&e.app, &e.project_id, "pm").await;
+            let new_dir = e.dir.join("cc3-new");
+            set_identity_dir(&e.app, "cc3", &new_dir).await;
+            sqlx::query("UPDATE bots SET identity='cc3' WHERE id=?").bind(&pm.id).execute(&e.app.db).await.unwrap();
+
+            let gone = e.dir.join("cc-old3/projects/-Users-m4p-project-z/sid-gone.jsonl");
+            sqlx::query(
+                "INSERT INTO runs (id, bot_id, state, agent_status, native_session_id, transcript_path, started_at, ended_at)
+                 VALUES (?,?,'stopped','idle','sid-gone',?,'2026-09-17T00:00:00Z','2026-09-17T00:01:00Z')",
+            )
+            .bind(db::ulid())
+            .bind(&pm.id)
+            .bind(gone.to_str().unwrap())
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+
+            let bot = db::bot(&e.app.db, &pm.id).await.unwrap().unwrap();
+            let plan = native_resume_plan(&e.app, &bot, LOCAL_HOST, false).await.unwrap();
+            assert_eq!(plan, Err("transcript_missing"));
+        }
     }
 
     /// 2026-09-10 23:02: restart repeatedly beside a tight reconcile loop; every restart must
