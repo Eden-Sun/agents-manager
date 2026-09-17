@@ -166,7 +166,13 @@ def main(argv=None):
         result = {"stop_requested": True, "note": "當前請求完成後停止；status 的 worker_running=false 才可更新／configure"}
     elif args.command == "work":
         from ob_operator import work
-        work(store, args.once)
+        try:
+            work(store, args.once)
+        except OBError as e:
+            if str(e) != "busy":
+                raise
+            # 已經有一顆 worker 在跑：被 kick 出來的重複 worker 安靜退場，這是正常狀況（只有 `work` 這樣）。
+            print(json.dumps({"busy": True, "note": "另一顆 worker 正在跑"}, ensure_ascii=False), file=sys.stderr)
         return 0
     elif args.command == "retry":
         result = store.retry(args.id)
@@ -193,11 +199,17 @@ def main(argv=None):
     return 0
 
 
-if __name__ == "__main__":
+def cli(argv=None):
+    """`main` 加上結束碼。`busy` 只有 `work` 算正常（那條自己吞掉並回 0）：其他子命令撞到忙碌時 stdout
+    是空的，再回 0 的話，用退出碼判斷的呼叫端會以為對帳成功（review3 c4 L6）。"""
     try:
-        sys.exit(main())
+        return main(argv)
     except KeyboardInterrupt:
-        sys.exit(130)
+        return 130
     except Exception as e:
         print(json.dumps({"error": str(e)}, ensure_ascii=False), file=sys.stderr)
-        sys.exit(0 if str(e) == "busy" else 1)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(cli())

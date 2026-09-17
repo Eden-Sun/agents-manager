@@ -281,6 +281,13 @@ class Store:
             if status == "waiting_quota" and changed:
                 self.set_setting("retry_after", time.time() + 1800)
 
+    def requeue(self, ident, error, token=None):
+        """暫時性狀況（瀏覽器被別人佔住）：放回佇列等下一輪，不算失敗——`failed` 會叫人去查登入，
+        而這筆根本沒送出去（review3 c4 L6）。"""
+        with self.transaction():
+            self.db.execute("UPDATE requests SET status='pending',error=?,updated_at=? WHERE id=? AND status='running' AND claim_token=?",
+                            (error, time.time(), ident, token))
+
     def retry(self, ident):
         with self.transaction():
             job = self.get(ident)

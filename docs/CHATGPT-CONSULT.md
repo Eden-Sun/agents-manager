@@ -22,6 +22,8 @@
 - 共用一個 worker（不是每個 project 一顆常駐模型）。每筆呼叫 `claude --print --model sonnet --effort low`，不 resume、不保存模型 session；在新的空目錄中只帶本筆問題，不載入 caller 的 hooks、MCP、CLAUDE.md 或其他專案 context。
 - Sonnet 只有綁定本筆 project/request 的 `consult` MCP tool，不能改收件專案、正文或自行回覆。tool 收據的網頁原文才是 `answer`，不採用 Sonnet 的轉述當原文。
 - 請求、結果與 project→URL 對應在 `~/.config/agents-manager/ob/ob.sqlite3`。SQLite 交易、唯一鍵與 OS worker/browser lock 防止重複派送、跨專案 JSON 覆蓋與同時操作網頁。
+- `browser.lock` 會**等**（最多 720 秒，跟瀏覽器逾時同級）：`collect`／`resolve` 正在操作瀏覽器時，worker 的請求排隊等，等不到就**放回佇列**（`pending`）下一輪重排，不標 `failed`（那筆連送都沒送出去）。
+- 結束碼：只有 `work` 撞到「已經有一顆 worker」時回 0（被 kick 出來的重複 worker 安靜退場）；其他子命令撞到忙碌一律非 0，stdout 是空的——用退出碼判斷的呼叫端不會把它當成對帳成功。
 
 ## bot 怎麼問
 

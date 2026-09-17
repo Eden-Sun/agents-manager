@@ -1,4 +1,5 @@
 """Single Sonnet operator; MCP exposes only the current request's browser action."""
+import contextlib
 import json
 import os
 import signal
@@ -9,6 +10,12 @@ import time
 from pathlib import Path
 
 from ob_store import OBError, Store, exclusive
+
+# 等瀏覽器空出來最多這麼久：`collect` 最長佔住 720 秒，不等的話 worker 一撞上就把請求判成失敗
+# （訊息還叫人去查登入），而那筆其實連送都沒送出去（review3 c4 L6）。
+BROWSER_LOCK_WAIT = 720
+# 等不到時的記號：`operate` 認得它就把請求放回佇列重排，不標 failed。
+BUSY_MARK = "browser_busy"
 
 HERE = Path(__file__).resolve().parent
 SYSTEM = """你是 OB 的 Sonnet 操作員。你只有本筆專案請求的 context。
@@ -64,13 +71,32 @@ def journal_state(store, ident):
         return None
 
 
+@contextlib.contextmanager
+def browser_lock(store):
+    """瀏覽器一次只給一筆請求用。等不到就回 `browser_busy`——這是「稍後再排」，不是「操作失敗」。"""
+    holder = exclusive(store.root / "browser.lock", wait=BROWSER_LOCK_WAIT)
+    try:
+        fd = holder.__enter__()
+    except OBError as e:
+        if str(e) == "busy":
+            raise OBError(f"{BUSY_MARK}：瀏覽器正被另一筆請求佔用（collect／resolve 或另一顆 worker），這次什麼都沒送出") from e
+        raise
+    try:
+        yield fd
+    except BaseException:
+        holder.__exit__(*sys.exc_info())
+        raise
+    else:
+        holder.__exit__(None, None, None)
+
+
 def browser_consult(store, ident, config, collect=False, token=None):
     job = store.get(ident)
     if job["status"] == "done":
         return job
     if job["status"] != ("unknown" if collect else "running"):
         raise OBError("request_not_claimed")
-    with exclusive(store.root / "browser.lock"):
+    with browser_lock(store):
         # Re-check under browser.lock: resolve/re-claim may have run since, and an orphaned operator
         # of a dead worker must not send or finish for a later claim.
         job = store.get(ident)
@@ -195,6 +221,9 @@ def operate(store, job, config):
                 store.fail(ident, "unknown", "可能已送出；用 collect 取回，不可重送", token)
         elif quota_error(out):
             store.fail(ident, "waiting_quota", "Sonnet 額度不足；30 分鐘後重試，不換帳號或模型", token)
+        elif BUSY_MARK in (out or ""):
+            # 瀏覽器被 collect／resolve 佔著，連送都沒送出：放回佇列重排，不要叫人去查登入（review3 c4 L6）。
+            store.requeue(ident, "瀏覽器正被另一筆請求佔用，已放回佇列重排", token)
         else:
             store.fail(ident, "failed", "Sonnet 未取得瀏覽器收據；檢查登入、CLI 與 MCP，再 retry", token)
     except Exception as e:
