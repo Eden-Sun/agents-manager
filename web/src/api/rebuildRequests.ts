@@ -23,7 +23,16 @@ function toRow(v: unknown): RebuildRequest | null {
   const s = (k: string): string => (typeof o[k] === 'string' ? (o[k] as string) : '')
   const id = s('id')
   if (!id) return null
-  return { id, requester: s('requester'), target_commit: s('target_commit'), scope: s('scope'), status: s('status'), created_at: s('created_at') }
+  return {
+    id,
+    requester: s('requester'),
+    target_commit: s('target_commit'),
+    scope: s('scope'),
+    status: s('status'),
+    created_at: s('created_at'),
+    // daemon 不會把過期的核准改狀態，所以要自己看這一欄（跟 kick 腳本同一條規則）。
+    expires_at: s('expires_at') || null,
+  }
 }
 
 /** mock 的假資料：`VITE_MOCK=1` 下要看得到 chip 與清單長什麼樣，不然只能對真 daemon 看。 */
