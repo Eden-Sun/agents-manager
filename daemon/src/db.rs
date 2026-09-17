@@ -66,7 +66,11 @@ CREATE TABLE IF NOT EXISTS runs (
   -- `agent_status` 最後一次**真的改變**的時間（下面的 trigger 蓋；同值重寫不算改變）。前端拿它算
   -- 「跑了多久」，不再自己用本地時鐘瞎猜起點（issue #93）。NULL＝這個 run 還沒真的變過狀態，或是
   -- 升級前的舊列——那種前端退回自己觀察到的時間，並標成「不是 daemon 的紀錄」。
-  agent_status_since TEXT
+  agent_status_since TEXT,
+  -- claude 原生 SubagentStart／SubagentStop 的最後一筆快照（issue #82）：純輔助可見性，不影響
+  -- §6.5a 的血緣認領——child 本來就沒有 hook（§4.3），這一欄只會有頂層 bot 自己（in-process
+  -- Task 工具）的紀錄。`{"event","agent_id","agent_type","transcript_path","at"}`，一律整筆覆蓋。
+  subagent_json TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS runs_one_active ON runs(bot_id) WHERE state IN ('starting','running','stopping');
 CREATE INDEX IF NOT EXISTS runs_pane ON runs(pane_id);
@@ -208,6 +212,8 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
         ),
         // `agent_status` 最後一次真的改變的時間；見下面 `runs_agent_status_since` trigger 與 issue #93。
         ("runs", "agent_status_since", "ALTER TABLE runs ADD COLUMN agent_status_since TEXT"),
+        // claude 原生 SubagentStart／SubagentStop 的最後一筆快照，純輔助可見性（issue #82）。
+        ("runs", "subagent_json", "ALTER TABLE runs ADD COLUMN subagent_json TEXT"),
     ] {
         if !has_column(&mut *tx, table, col).await? {
             sqlx::query(ddl).execute(&mut *tx).await.with_context(|| format!("add {table}.{col}"))?;
@@ -451,6 +457,9 @@ pub struct Run {
     /// `agent_status` 最後一次真的改變的時間（trigger 蓋，issue #93）；前端算「跑了多久」的起點。
     /// `None` = 還沒真的變過，或升級前的舊列。
     pub agent_status_since: Option<String>,
+    /// claude 原生 SubagentStart／SubagentStop 的最後一筆快照（issue #82）。純可見性，`hookrecv` 是
+    /// 唯一寫入者；不影響 §6.5a 的血緣認領。
+    pub subagent_json: Option<String>,
 }
 
 #[derive(Debug, Clone, FromRow, serde::Serialize)]

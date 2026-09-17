@@ -1970,6 +1970,90 @@ mod compat_tests {
         assert_eq!(grand.parent_bot_id.as_deref(), Some(kid.id.as_str()), "under the child, not the top bot");
     }
 
+    /// issue #82：native `SubagentStart`／`SubagentStop`（頂層 bot 自己行程內的 Task 工具呼叫，跟
+    /// §6.5a 血緣認領的子 pane 完全是兩回事）不能改變、也不會改變誰認領誰。父 bot 收到一則
+    /// `SubagentStart`（`runs.subagent_json` 因此被寫入）之後，同一個 tab 底下的孫代仍然照血緣掛在
+    /// 子代下面——跟沒有這則 hook 時一模一樣：hookless 的 child／grandchild pane 完全不受影響。
+    #[tokio::test]
+    async fn a_native_subagent_hook_on_the_parent_does_not_disturb_pane_based_adoption() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let kid_pane = client.pane_split(&root.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
+        let grand_pane = client.pane_split(&kid_pane.pane_id, "down", "/tmp/p", json!({})).await.unwrap();
+
+        let parent = a_bot(&env, "alfa").await;
+        let parent_agent = crate::config::agent_name("proj", &parent);
+        let kid_agent = format!("{parent_agent}-lastq");
+        let parent_run = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, tab_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','idle',?,?,?,?,'test',?)",
+        )
+        .bind(&parent_run)
+        .bind(&parent)
+        .bind(&ws.workspace_id)
+        .bind(&root.pane_id)
+        .bind(&root.tab_id)
+        .bind(&parent_agent)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        // 父 bot 自己觸發一個 in-process Task 工具子代理：純可見性，不建立任何 pane。
+        crate::hookrecv::process(
+            &app,
+            &crate::hookrecv::HookBody {
+                bot_id: parent.clone(),
+                provider: "claude".into(),
+                payload: json!({"hook_event_name": "SubagentStart", "agent_id": "a1", "agent_type": "general-purpose"}),
+                received_at: None,
+                truncated: false,
+            },
+        )
+        .await
+        .unwrap();
+        let snap: Option<String> =
+            sqlx::query_scalar("SELECT subagent_json FROM runs WHERE id = ?").bind(&parent_run).fetch_one(&app.db).await.unwrap();
+        assert!(snap.is_some(), "hook 有正常寫進這顆 run");
+
+        let agent_json = |name: &str, pane: &str, tab: &str| {
+            json!({"name": name, "agent": "claude", "agent_status": "idle",
+                   "workspace_id": ws.workspace_id, "tab_id": tab, "pane_id": pane, "cwd": "/tmp/p"})
+        };
+        *env.herdr.agents.lock().unwrap() = vec![
+            agent_json(&parent_agent, &root.pane_id, &root.tab_id),
+            agent_json(&kid_agent, &kid_pane.pane_id, &kid_pane.tab_id),
+        ];
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+        let kid = sqlx::query_as::<_, db::Bot>("SELECT * FROM bots WHERE parent_bot_id = ?")
+            .bind(&parent)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+
+        env.herdr.agents.lock().unwrap().push(agent_json(
+            &format!("{kid_agent}-deep"),
+            &grand_pane.pane_id,
+            &grand_pane.tab_id,
+        ));
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+
+        let grand = sqlx::query_as::<_, db::Bot>("SELECT * FROM bots WHERE name = 'deep'")
+            .fetch_one(&app.db)
+            .await
+            .expect("the grandchild was adopted exactly like without the hook");
+        assert_eq!(grand.parent_bot_id.as_deref(), Some(kid.id.as_str()), "血緣認領完全不看 subagent_json");
+
+        // hookless：child／grandchild 自己一路都沒收過任何 hook，`subagent_json` 仍是 NULL。
+        for id in [&kid.id, &grand.id] {
+            let s: Option<String> = sqlx::query_scalar("SELECT subagent_json FROM runs WHERE bot_id = ?").bind(id).fetch_one(&app.db).await.unwrap();
+            assert_eq!(s, None, "child 沒有 hook，不該憑空冒出快照");
+        }
+    }
+
     /// A run whose agent herdr no longer lists still exits, tab or not.
     #[tokio::test]
     async fn a_run_whose_agent_is_gone_still_exits() {

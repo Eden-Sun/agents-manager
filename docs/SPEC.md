@@ -152,8 +152,9 @@ Vite + React + TypeScript + Zustand，只做 daemon 狀態的投影；正式版 
 
 ### 4.1 主要來源：hooks / notify（每次啟動注入，不改使用者全域設定）
 
-**Claude Code**：`--settings <abs>`，檔案 `~/.config/agents-manager/bots/<bot_id>/claude-settings.json`，註冊 `SessionStart`、`Stop` 與 `StopFailure` 三個 hook，
-command 為 `/abs/agents-managerd hook claude --bot <bot_id> --token <t> --port <port>`（三個指向同一支，分類在 daemon 的 `hookrecv::classify` 裡做）。
+**Claude Code**：`--settings <abs>`，檔案 `~/.config/agents-manager/bots/<bot_id>/claude-settings.json`，註冊 `SessionStart`、`Stop`、`StopFailure`、
+`SubagentStart`、`SubagentStop` 五個 hook，command 為 `/abs/agents-managerd hook claude --bot <bot_id> --token <t> --port <port>`
+（五個指向同一支，分類在 daemon 的 `hookrecv::classify` 裡做——`hook_cmd.rs` 是通用轉發，不看事件名字）。
 `stop_hook_active = true` 的 Stop 忽略。
 stdin：SessionStart 含 `session_id`、`transcript_path`、`cwd`；Stop 另含 `prompt_id`、`last_assistant_message`、`stop_hook_active`。
 
@@ -172,6 +173,23 @@ daemon 收到就**當場**把那一筆 in-flight turn 收成 `status='failed'`�
   沒有 in-flight turn 時**不開新回合**：後到的訊號沒有回合可收就算了。
 - 遠端走 `hook.sh` 的那條路一樣認 `StopFailure`，向 herdr 報 `idle`（失敗收尾的回合也不再是 working）。
 - 終端 banner 那條 fallback **保留不動**（issue #79 明訂），這條只是把「失敗」從用猜的變成收得到的事件。
+
+**`SubagentStart`／`SubagentStop`＝純可見性的第二訊號，跟 §6.5a 的血緣認領無關**（issue #82）：查過 claude 2.1.274 的 bundle，
+這兩個 hook 是**同一行程內** Task 工具呼叫（`subagent_type` 那種，例如這份文件裡的 `Explore`／`general-purpose`）的生命週期事件，
+payload 帶 `agent_id`／`agent_type`（`SubagentStop` 另外帶 `agent_transcript_path`），**不是**另開一個 pane。
+AGM 的 child bot 是 `herdr pane split` 開出來的獨立 pane，一律 `inject_hooks = 0`（§4.3「沒有 hook 的 run」），
+從來就收不到任何 claude hook——這兩個鍵永遠只會替**頂層、正常 `start_bot` 起來的** bot 觸發，跟哪個 pane 歸哪個 bot 完全無關。
+- 收到就整筆覆蓋這顆 run 的 `runs.subagent_json`（`{"event":"start"|"stop","agent_id","agent_type","transcript_path","at"}`），
+  不建立、不查重複、也不動任何 Turn——跟 `StatusLine` 一樣，最新的贏，沒有活著的 run 就安靜丟掉。
+- **precedence／conflicting evidence**：這一路訊號只被拿來**寫 `runs.subagent_json` 這一欄**，`reconcile::adopt_child`
+  （§6.5a 的血緣＋名字前綴）完全不讀它，也永遠不會因為它去建立、搬動或撤銷 `bots.parent_bot_id`。stale／衝突的
+  `agent_id`（例如同一個 run 連續收到兩個不同 `agent_id` 的 `SubagentStart` 卻沒收到中間那個的 `SubagentStop`）
+  就是單純覆蓋成最後一筆，沒有特殊處理的必要——反正沒有任何邏輯依賴它做決定。herdr pane 掃描＋對帳（§6.5／§6.5a）
+  仍是**唯一**決定「這個 pane／bot 屬於誰」的來源，這兩個 hook 缺席（CLI 版本太舊、bot 沒開 Task 工具）時，
+  對既有的 reconcile／血緣認領完全沒有影響。
+- 若之後想真的用原生訊號輔助 §6.5a 的血緣判斷，正確的切入點是**頂層 bot 自己的** `PreToolUse`／`PostToolUse`
+  （Bash 工具、比對 `herdr agent start`／`pane split`），不是 `SubagentStart`／`SubagentStop`：後者不對應「開一個新 pane」
+  這件事。這是後續 issue 的範圍，這裡沒有動 `reconcile.rs` 的認領邏輯。
 同一個設定檔另外固定寫：`outputStyle: Concise`、`skipDangerousModePermissionPrompt`、`remoteControlAtStartup`（§18），以及 `timeFormat: "24-hour"`＋`timeZone: "Asia/Taipei"`
 （使用者 2026-09-15：CLI 畫面裡的時間一律台北時間 24 小時制；claude 2.1.257 起才認，本機與遠端同一份），還有 `autoContinueAtUsageLimit: false`
 （issue #78：撞到用量上限，claude 自己排一個「continuing automatically at HH:MM」，daemon 不知道；那個自動續跑被取消時

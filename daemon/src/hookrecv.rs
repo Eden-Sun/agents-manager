@@ -111,6 +111,15 @@ enum HookKind {
     },
     /// Claude Code statusLine input — never a Turn.
     StatusLine,
+    /// claude 原生 `SubagentStart`／`SubagentStop`（issue #82）：純可見性快照，從不建立或動 Turn，
+    /// 也從不影響 §6.5a 的血緣認領——只覆蓋這顆 run 的 `subagent_json`。`event` 是 `"start"` 或
+    /// `"stop"`；`SubagentStart` 沒有 transcript path，`SubagentStop` 才有。
+    SubagentEvent {
+        event: &'static str,
+        agent_id: Option<String>,
+        agent_type: Option<String>,
+        transcript_path: Option<String>,
+    },
     Ignore(String),
 }
 
@@ -312,6 +321,20 @@ fn classify(provider: &str, p: &Value) -> HookKind {
                         user: None,
                     }
                 }
+                // issue #82：純可見性，見 `HookKind::SubagentEvent` 的說明——這裡不建立、不動任何
+                // Turn，`agent_id`／`agent_type` 兩個事件都有，`agent_transcript_path` 只有 Stop 帶。
+                "SubagentStart" => HookKind::SubagentEvent {
+                    event: "start",
+                    agent_id: s("agent_id"),
+                    agent_type: s("agent_type"),
+                    transcript_path: None,
+                },
+                "SubagentStop" => HookKind::SubagentEvent {
+                    event: "stop",
+                    agent_id: s("agent_id"),
+                    agent_type: s("agent_type"),
+                    transcript_path: s("agent_transcript_path"),
+                },
                 other => HookKind::Ignore(other.to_string()),
             }
         }
@@ -760,6 +783,27 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                     .bind(&r.id)
                     .execute(&app.db)
                     .await;
+            }
+            Ok(())
+        }
+        // issue #82：純可見性快照，整筆覆蓋 `runs.subagent_json`，不建立、不動任何 Turn，不查重複
+        // （跟 `StatusLine` 一樣，最新的贏），也不碰 `bots`／`parent_bot_id`——那是 §6.5a 血緣認領的事，
+        // 這裡的 `agent_id` 是同一行程內 Task 工具呼叫的 id，不是哪個 pane 的身分。沒有活著的 run
+        // 就沒地方寫，直接丟（跟 `HookKind::Identity` 一樣）。
+        HookKind::SubagentEvent { event, agent_id, agent_type, transcript_path } => {
+            if let Some(r) = &run {
+                let snapshot = json!({
+                    "event": event,
+                    "agent_id": agent_id,
+                    "agent_type": agent_type,
+                    "transcript_path": transcript_path,
+                    "at": db::now(),
+                });
+                sqlx::query("UPDATE runs SET subagent_json = ? WHERE id = ?")
+                    .bind(snapshot.to_string())
+                    .bind(&r.id)
+                    .execute(&app.db)
+                    .await?;
             }
             Ok(())
         }
@@ -2105,6 +2149,81 @@ mod external_claim_tests {
         }
         let v = json!({"hook_event_name": "Stop", "session_id": "s1", "prompt_id": "p1"});
         assert!(matches!(classify("claude", &v), HookKind::TurnComplete { .. }), "一般 Stop 照舊");
+    }
+
+    /// issue #82：`SubagentStart`／`SubagentStop` 分類成 `SubagentEvent`，帶得到 `agent_id`／
+    /// `agent_type`；只有 `SubagentStop` 帶 `agent_transcript_path`（`SubagentStart` 的原生 payload
+    /// 本來就沒有這個欄位）。不認得的事件名字（例如 claude 才有的 `TeammateIdle`）照舊被 `Ignore`，
+    /// 不會意外冒出一種新的 Turn 副作用。
+    #[test]
+    fn subagent_start_and_stop_classify_as_a_pure_snapshot() {
+        let start = json!({"hook_event_name": "SubagentStart", "session_id": "s1", "agent_id": "a1", "agent_type": "general-purpose"});
+        match classify("claude", &start) {
+            HookKind::SubagentEvent { event, agent_id, agent_type, transcript_path } => {
+                assert_eq!(event, "start");
+                assert_eq!(agent_id.as_deref(), Some("a1"));
+                assert_eq!(agent_type.as_deref(), Some("general-purpose"));
+                assert_eq!(transcript_path, None);
+            }
+            other => panic!("expected SubagentEvent, got {other:?}"),
+        }
+        let stop = json!({"hook_event_name": "SubagentStop", "agent_id": "a1", "agent_type": "general-purpose",
+                           "agent_transcript_path": "/tmp/a1.jsonl"});
+        match classify("claude", &stop) {
+            HookKind::SubagentEvent { event, transcript_path, .. } => {
+                assert_eq!(event, "stop");
+                assert_eq!(transcript_path.as_deref(), Some("/tmp/a1.jsonl"));
+            }
+            other => panic!("expected SubagentEvent, got {other:?}"),
+        }
+        assert!(matches!(classify("claude", &json!({"hook_event_name": "TeammateIdle"})), HookKind::Ignore(_)));
+    }
+
+    /// issue #82：`process` 把 `SubagentStart`／`SubagentStop` 整筆寫進這顆 run 的 `subagent_json`，
+    /// 不建立、不動任何 Turn（跟 turn 完全脫鉤）；沒有活著的 run 就安靜丟掉，不報錯。
+    #[tokio::test]
+    async fn subagent_events_update_the_runs_snapshot_without_touching_any_turn() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, _conv, turn_id) = delivered_turn(&app, &env.project_id).await;
+
+        process(&app, &stop_failure(&bot_id, json!({"hook_event_name": "SubagentStart", "agent_id": "a1", "agent_type": "Explore"})))
+            .await
+            .unwrap();
+        let snap: Option<String> = sqlx::query_scalar("SELECT subagent_json FROM runs WHERE bot_id = ?").bind(&bot_id).fetch_one(&app.db).await.unwrap();
+        let snap: Value = serde_json::from_str(&snap.expect("snapshot written")).unwrap();
+        assert_eq!(snap["event"], json!("start"));
+        assert_eq!(snap["agent_id"], json!("a1"));
+        assert_eq!(snap["agent_type"], json!("Explore"));
+        assert_eq!(snap["transcript_path"], Value::Null);
+
+        process(
+            &app,
+            &stop_failure(
+                &bot_id,
+                json!({"hook_event_name": "SubagentStop", "agent_id": "a1", "agent_type": "Explore", "agent_transcript_path": "/tmp/a1.jsonl"}),
+            ),
+        )
+        .await
+        .unwrap();
+        let snap: Option<String> = sqlx::query_scalar("SELECT subagent_json FROM runs WHERE bot_id = ?").bind(&bot_id).fetch_one(&app.db).await.unwrap();
+        let snap: Value = serde_json::from_str(&snap.unwrap()).unwrap();
+        assert_eq!(snap["event"], json!("stop"), "後到的 stop 蓋掉 start，只留最新的快照");
+        assert_eq!(snap["transcript_path"], json!("/tmp/a1.jsonl"));
+
+        // 完全脫鉤：這顆 run 底下的 turn 沒有被碰過。
+        let t = turn_row(&app, &turn_id).await;
+        assert_eq!(t.status, "in_flight", "subagent 事件不該動到任何 turn");
+    }
+
+    /// 沒有活著的 run（例如 bot 剛好在重啟中間）：安靜丟掉，不報錯、也不憑空造一列。
+    #[tokio::test]
+    async fn a_subagent_event_with_no_active_run_is_a_quiet_no_op() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "alfa").await;
+        process(&env.app, &stop_failure(&bot.id, json!({"hook_event_name": "SubagentStart", "agent_id": "a1"}))).await.unwrap();
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE bot_id = ?").bind(&bot.id).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(n, 0, "沒有 run 就沒有地方寫，也不該無中生有");
     }
 
     /// claude 的 Stop 沒帶使用者訊息：從 transcript 尾巴讀。對不上一樣不認領；讀不到（沒有 transcript）就照舊認領。

@@ -462,7 +462,14 @@ fn claude_settings(hook_cmd: &str, statusline: &str, wants_remote: bool) -> Valu
             // 回合**失敗**收尾（API／auth／額度…）也是一級訊號，不是只有答完才算結束（issue #79）。
             // 沒有它的話，失敗的回合要等 §4.3 備援或 stuck watchdog 才被發現，中間一直掛在 in_flight。
             // 舊版 claude 不認得這個鍵就忽略它，不影響既有兩個 hook。
-            "StopFailure": [{"hooks": [{"type": "command", "command": hook_cmd}]}]
+            "StopFailure": [{"hooks": [{"type": "command", "command": hook_cmd}]}],
+            // issue #82：claude 原生的 in-process Task 工具子代理的第二路訊號（`agent_id`／
+            // `agent_type`／`agent_transcript_path`），純可見性，寫進 `runs.subagent_json`——**不是**
+            // §6.5a 血緣認領要的那種子 agent：這裡的「子代理」是同一個行程裡的 Task 工具呼叫，沒有自己
+            // 的 pane；AGM 的 child bot（`herdr pane split` 開出來的獨立 pane）本來就沒有 hook（§4.3），
+            // 這兩個鍵永遠不會替 child bot 觸發，也就不可能影響哪個 pane 歸誰。
+            "SubagentStart": [{"hooks": [{"type": "command", "command": hook_cmd}]}],
+            "SubagentStop": [{"hooks": [{"type": "command", "command": hook_cmd}]}]
         },
         "statusLine": {"type": "command", "command": statusline},
         // Trial: shorter replies scrape cleaner from the terminal (§4.3) and read better in 對話.
@@ -883,8 +890,8 @@ mod hook_cmd_parts_tests {
         let hooks = v.get("hooks").and_then(|h| h.as_object()).expect("hooks");
         let mut names: Vec<&String> = hooks.keys().collect();
         names.sort();
-        assert_eq!(names, vec!["SessionStart", "Stop", "StopFailure"], "{hooks:?}");
-        for name in ["SessionStart", "Stop", "StopFailure"] {
+        assert_eq!(names, vec!["SessionStart", "Stop", "StopFailure", "SubagentStart", "SubagentStop"], "{hooks:?}");
+        for name in ["SessionStart", "Stop", "StopFailure", "SubagentStart", "SubagentStop"] {
             let cmd = hooks[name][0]["hooks"][0]["command"].as_str().unwrap_or_default();
             assert!(cmd.contains("hook claude"), "{name} 要指向同一支 hook 指令：{cmd}");
         }
@@ -1556,6 +1563,16 @@ mod claude_settings_tests {
         for wants_remote in [false, true] {
             let v = claude_settings("hook", "sl", wants_remote);
             assert_eq!(v["autoContinueAtUsageLimit"], json!(false), "wants_remote={wants_remote}");
+        }
+    }
+
+    /// issue #82：native `SubagentStart`／`SubagentStop` 走同一支 hook 指令，跟 `SessionStart`／`Stop`
+    /// 一樣——`hook_cmd.rs` 是通用轉發，不分事件名字（`payload comes from stdin`），不需要另外的旗標。
+    #[test]
+    fn subagent_lifecycle_hooks_are_registered_on_the_same_command() {
+        let v = claude_settings("hook", "sl", false);
+        for event in ["SubagentStart", "SubagentStop"] {
+            assert_eq!(v["hooks"][event][0]["hooks"][0]["command"], "hook", "{event}");
         }
     }
 }
