@@ -11,6 +11,7 @@ import tempfile
 import threading
 import time
 import unittest
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
@@ -288,6 +289,41 @@ class OperatorTests(unittest.TestCase):
             operator.operate(self.s, job, self.config())
         self.assertEqual(self.s.get(job["id"])["status"], "waiting_quota")
         self.assertEqual(proc.call_count, 1)
+
+    def test_a_busy_browser_waits_then_requeues_instead_of_failing(self):
+        """`collect` 佔著瀏覽器時，worker 的請求不該被判成 failed 並叫人去查登入（review3 c4 L6）。"""
+        self.ask()
+        job = self.s.claim()
+        with exclusive(self.s.root / "browser.lock"), patch.object(operator, "BROWSER_LOCK_WAIT", 0.05):
+            with self.assertRaisesRegex(OBError, operator.BUSY_MARK):
+                operator.browser_consult(self.s, job["id"], self.config(), token=job["claim_token"])
+            self.assertEqual(self.s.get(job["id"])["status"], "running", "只是等不到鎖，不動這筆的狀態")
+            # Sonnet 停在工具錯誤上、沒有收據：放回佇列重排，不是 failed。
+            with patch.object(operator, "run_process", return_value=(1, json.dumps({"is_error": True, "result": operator.BUSY_MARK}), "")):
+                operator.operate(self.s, job, self.config())
+        row = self.s.get(job["id"])
+        self.assertEqual(row["status"], "pending")
+        self.assertIn("放回佇列", row["error"])
+        self.assertNotIn("檢查登入", row["error"])
+        self.assertIsNotNone(self.s.claim(), "下一輪還撿得到它")
+
+    def test_busy_exit_code_is_zero_only_for_work(self):
+        """`collect`／`resolve` 撞到忙碌時 stdout 是空的，再回 0 會被當成對帳成功（review3 c4 L6）。"""
+        self.ask()
+        self.s.set_setting("operator", self.config())
+        job = self.s.claim()
+        self.s.fail(job["id"], "unknown", "可能已送出；用 collect 取回", job["claim_token"])
+        # `ob.cli` 每次自己開一份 Store（就是真的命令列行為），這裡只驗結束碼，不管它留下的連線。
+        warnings.simplefilter("ignore", ResourceWarning)
+        with exclusive(self.s.root / "browser.lock"), patch.object(operator, "BROWSER_LOCK_WAIT", 0.05), \
+                contextlib.redirect_stderr(io.StringIO()) as err, contextlib.redirect_stdout(io.StringIO()) as out:
+            code = ob.cli(["--data-dir", self.tmp.name, "collect", job["id"]])
+        self.assertIn(operator.BUSY_MARK, err.getvalue(), "撞到的要是瀏覽器忙碌，不是別的錯")
+        self.assertEqual(code, 1)
+        self.assertEqual(out.getvalue().strip(), "")
+        # 被 kick 出來的第二顆 worker 照舊安靜退場（0）。
+        with exclusive(self.s.root / "worker.lock"), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(ob.cli(["--data-dir", self.tmp.name, "work", "--once"]), 0)
 
     def test_sonnet_fabricated_answer_is_not_accepted(self):
         self.ask()
