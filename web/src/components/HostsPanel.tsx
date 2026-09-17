@@ -346,7 +346,7 @@ function RemoteCargoPanel() {
   const [host, setHost] = useState('')
   const [user, setUser] = useState('')
   const [port, setPort] = useState('22')
-  const [root, setRoot] = useState('~/.cache/agents-manager/remote-cargo')
+  const [root, setRoot] = useState('.cache/agents-manager/remote-cargo')
   const [jobs, setJobs] = useState('4')
   const [password, setPassword] = useState('')
   const [passwordSet, setPasswordSet] = useState(false)
@@ -389,7 +389,7 @@ function RemoteCargoPanel() {
         host: host.trim(),
         user: user.trim(),
         ssh_port: Number(port) || 22,
-        remote_root: root.trim() || '~/.cache/agents-manager/remote-cargo',
+        remote_root: root.trim() || '.cache/agents-manager/remote-cargo',
         cargo_jobs: Math.max(1, Number(jobs) || 4),
         ...(password ? { password } : clearPassword ? { password: '' } : {}),
       })
