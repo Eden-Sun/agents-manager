@@ -300,7 +300,7 @@ impl Default for BuildRemoteCfg {
 }
 
 pub fn default_remote_build_root() -> String {
-    "~/.cache/agents-manager/remote-cargo".into()
+    ".cache/agents-manager/remote-cargo".into()
 }
 
 fn default_remote_build_jobs() -> usize {
