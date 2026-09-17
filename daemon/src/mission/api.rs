@@ -5,6 +5,7 @@ use super::{deliver, pick, store};
 use crate::lifecycle::LcError;
 use crate::state::App;
 use axum::extract::{Path, Query, State};
+use axum::http::HeaderMap;
 use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -510,20 +511,69 @@ pub struct PauseIn {
     detail: Option<String>,
 }
 
-pub async fn post_pause(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b): Json<PauseIn>) -> Result<Json<Value>, LcError> {
-    if b.reason.trim().is_empty() {
+/// 呼叫的是不是**收 mission 事件的那個 AGM 角色**自己（bot token 驗過）。是的話就不推 inbox——
+/// 自己叫醒自己只是多一個空回合（同 `resume` 的防線）。有協調者時收件人是協調者；只有巡檢時是巡檢。
+/// 使用者（web）、巡檢代使用者操作時都要叫醒協調者。
+async fn called_by_mission_manager(app: &Arc<App>, headers: &HeaderMap) -> bool {
+    use crate::supervisor::roles::{self, Role};
+    match crate::supervisor::bot_requests::actor_role(app, headers).await {
+        Some(Role::Responder) => true,
+        Some(Role::Patrol) => !roles::responder_configured(&app.db).await.unwrap_or(true),
+        None => false,
+    }
+}
+
+/// 這個任務底下還開著的交辦（`supervisor::store::OPEN_STATES`），給 AGM 看的精簡形狀。
+async fn open_assignments(app: &Arc<App>, mission_id: &str) -> Result<Vec<crate::supervisor::store::Assignment>, LcError> {
+    Ok(crate::supervisor::store::mission_assignments(&app.db, mission_id).await.map_err(up)?.into_iter().filter(|a| a.is_open()).collect())
+}
+
+fn assignment_brief(a: &crate::supervisor::store::Assignment) -> Value {
+    json!({"id": a.id, "role": a.mission_role, "status": a.status, "target_bot_id": a.target_bot_id, "turn_id": a.turn_id})
+}
+
+/// 暫停任務。使用者（或巡檢代為）按下時**同一個交易**叫醒協調者（`mission_paused`），review3 c1 M10：
+/// 以前只改任務列，AGM 照 runbook 繼續 review → verify → deliver，暫停形同虛設。
+///
+/// 暫停不中止已經在跑的回合（daemon 不中止回合），也不取消交辦；它要 AGM 別再派新的、別交付
+/// （`deliver` 在使用者暫停時回 409 `mission_paused`）。
+pub async fn post_pause(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(b): Json<PauseIn>,
+) -> Result<Json<Value>, LcError> {
+    let reason = b.reason.trim();
+    if reason.is_empty() {
         return Err(LcError::Bad("reason is empty".into()));
     }
     let m = load(&app, &id).await?;
     ensure_open(&m)?;
-    store::pause(&app.db, &id, b.reason.trim(), b.detail.as_deref()).await.map_err(up)?;
     let text = match b.detail.as_deref() {
-        Some(d) => format!("暫停：{}（{}）", b.reason.trim(), d),
-        None => format!("暫停：{}", b.reason.trim()),
+        Some(d) => format!("暫停：{reason}（{d}）"),
+        None => format!("暫停：{reason}"),
     };
-    store::add_event(&app.db, &id, "paused", &text, Some(crate::agent_relay::DAEMON_SENDER), &json!({"reason": b.reason}))
-        .await
-        .map_err(up)?;
+    let paused_key = format!("mission:{id}:paused");
+    let announce = if called_by_mission_manager(&app, &headers).await {
+        None
+    } else {
+        let open = open_assignments(&app, &id).await?;
+        Some(store::Announce {
+            event_key_prefix: &paused_key,
+            kind: "mission_paused",
+            payload: json!({
+                "mission_id": id,
+                "project_id": m.project_id,
+                "reason": reason,
+                "detail": b.detail,
+                "open_assignments": open.iter().map(assignment_brief).collect::<Vec<_>>(),
+                "note": "任務被暫停：不要再派新交辦、不要交付（deliver 會 409 mission_paused）。已經在跑的回合不會被中止；等 mission_resumed／mission_answered 再從對應步驟接續。",
+            }),
+        })
+    };
+    if !store::pause_announced(&app.db, &id, reason, b.detail.as_deref(), &text, announce).await.map_err(up)? {
+        return Err(ensure_open(&load(&app, &id).await?).err().unwrap_or_else(|| LcError::conflict("already_closed", json!({"mission_id": id}))));
+    }
     let m = load(&app, &id).await?;
     emit(&app, &m).await;
     Ok(Json(m.json()))
@@ -749,16 +799,78 @@ pub async fn post_revise(
     Ok(Json(out))
 }
 
-pub async fn post_cancel(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Json<Value>, LcError> {
+/// 取消任務（review3 c1 M10）：
+/// 1. 任務列、`cancelled` 事件、叫醒協調者（`mission_cancelled`；AGM 自己取消時不推）同一個交易；
+/// 2. 底下還開著的交辦逐件走 supervisor 的 `cancel` 決定（同 `POST /supervisor/assignments/{id}/review`）：
+///    排隊中的 turn 撤回、`quota_blocked` 不再被 controller 自動重送。以前原封不動，幾小時後額度回來，
+///    已取消的工作又被送進臨時 bot 開始做；
+/// 3. 收掉臨時 bot（還在跑的留著，AGM `bot stop` 再 `bot delete`）。
+///
+/// 已經在跑的回合 daemon 不會中止，回應的 `assignments[].may_still_be_running` 照實講。
+pub async fn post_cancel(State(app): State<Arc<App>>, Path(id): Path<String>, headers: HeaderMap) -> Result<Json<Value>, LcError> {
     let m = load(&app, &id).await?;
     ensure_open(&m)?;
-    store::cancel(&app.db, &id).await.map_err(up)?;
-    store::add_event(&app.db, &id, "cancelled", "已取消", Some(crate::agent_relay::DAEMON_SENDER), &json!({})).await.map_err(up)?;
+    let by_manager = called_by_mission_manager(&app, &headers).await;
+    let before = open_assignments(&app, &id).await?;
+    let announce = (!by_manager).then(|| store::Announce {
+        event_key_prefix: "",
+        kind: "mission_cancelled",
+        payload: json!({
+            "mission_id": id,
+            "project_id": m.project_id,
+            "cancelled_assignments": before.iter().map(assignment_brief).collect::<Vec<_>>(),
+            "note": "使用者取消了任務：daemon 已把底下未結案的交辦取消（排隊中的撤回、等額度的不再重送）。還在跑的回合不會被中止——回應／note 裡 still_running 的臨時 bot 請 bot stop 再 bot delete。不要再派工或交付。",
+        }),
+    });
+    let key = format!("mission:{id}:cancelled");
+    let announce = announce.map(|a| store::Announce { event_key_prefix: &key, ..a });
+    if !store::cancel_announced(&app.db, &id, announce).await.map_err(up)? {
+        return Err(LcError::conflict("already_closed", json!({"mission_id": id})));
+    }
+    // 取消之後才重讀：這中間新開的交辦會被 `assign --mission` 的 mission_closed 擋掉，不會漏。
+    let mut withdrawn = Vec::new();
+    for a in open_assignments(&app, &id).await? {
+        let review = crate::supervisor::api::ReviewIn {
+            decision: "cancel".into(),
+            actor: Some(if by_manager { "agm".into() } else { "user".into() }),
+            source: Some("mission_cancel".into()),
+            reason: Some(format!("群組任務 {id} 已取消")),
+            evidence: None,
+            followup_text: None,
+            followup_request_id: None,
+            followup_bot_id: None,
+            ownership: Vec::new(),
+        };
+        let mut row = assignment_brief(&a);
+        match crate::supervisor::api::post_review(State(app.clone()), Path(a.id.clone()), headers.clone(), Json(review)).await {
+            Ok(Json(v)) => {
+                row["cancelled"] = true.into();
+                row["revoked_turn_id"] = v.get("revoked_turn_id").cloned().unwrap_or(Value::Null);
+                row["may_still_be_running"] = v.get("may_still_be_running").cloned().unwrap_or(false.into());
+            }
+            Err(e) => {
+                tracing::warn!(mission = %id, assignment = %a.id, error = ?e, "could not cancel a cancelled mission's assignment");
+                row["cancelled"] = false.into();
+                row["error"] = format!("{e:?}").into();
+            }
+        }
+        withdrawn.push(row);
+    }
+    if !withdrawn.is_empty() {
+        let n = withdrawn.iter().filter(|r| r["cancelled"] == true).count();
+        let running = withdrawn.iter().filter(|r| r["may_still_be_running"] == true).count();
+        let mut text = format!("已取消底下 {n} 件未結案的交辦");
+        if running > 0 {
+            text.push_str(&format!("（其中 {running} 件的回合可能還在跑，daemon 不會中止它）"));
+        }
+        let _ = store::add_event(&app.db, &id, "note", &text, Some(crate::agent_relay::DAEMON_SENDER), &json!({"assignments": withdrawn})).await;
+    }
     let m = load(&app, &id).await?;
     let temp = cleanup_temp_bots(&app, &m).await;
     emit(&app, &m).await;
     let mut out = m.json();
     out["temp_bots"] = temp;
+    out["assignments"] = json!(withdrawn);
     Ok(Json(out))
 }
 
@@ -927,6 +1039,13 @@ const DELIVERY_PAUSES: [&str; 2] = ["push_main_failed", "pr_failed"];
 pub async fn post_deliver(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b): Json<DeliverIn>) -> Result<Json<Value>, LcError> {
     let m = load(&app, &id).await?;
     ensure_open(&m)?;
+    // 任務停著（使用者按了暫停、等人回答、輪數用完…）就不交付。只有先前那次交付失敗停下的可以重試（review3 c1 M10）。
+    if let Some(reason) = m.paused_reason.as_deref().filter(|r| !DELIVERY_PAUSES.contains(r)) {
+        return Err(LcError::conflict(
+            "mission_paused",
+            json!({"mission_id": id, "paused_reason": reason, "hint": "任務停著：等使用者回答或 resume 之後再交付"}),
+        ));
+    }
     let from = check_relay_from(&app, b.relay_from.as_deref()).await?;
     let events = store::events(&app.db, &id).await.map_err(up)?;
     let Some(verified) = events.iter().rev().find(|e| e.kind == "verified") else {
@@ -1207,7 +1326,7 @@ mod tests {
         let pid = env.project_id.clone();
         let Json(m) = post_mission(State(app.clone()), Path(pid.clone()), Json(new_mission("r1", "pr"))).await.unwrap();
         let id = m["id"].as_str().unwrap().to_string();
-        let _ = post_pause(State(app.clone()), Path(id.clone()), Json(PauseIn { reason: "max_rounds".into(), detail: None }))
+        let _ = post_pause(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(PauseIn { reason: "max_rounds".into(), detail: None }))
             .await
             .unwrap();
 
@@ -1243,7 +1362,7 @@ mod tests {
         let pid = env.project_id.clone();
         let Json(m) = post_mission(State(app.clone()), Path(pid.clone()), Json(new_mission("r1", "pr"))).await.unwrap();
         let id = m["id"].as_str().unwrap().to_string();
-        let _ = post_pause(State(app.clone()), Path(id.clone()), Json(PauseIn { reason: "waiting_quota".into(), detail: None }))
+        let _ = post_pause(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(PauseIn { reason: "waiting_quota".into(), detail: None }))
             .await
             .unwrap();
 
@@ -1371,7 +1490,7 @@ mod tests {
         let err = post_revise(State(app.clone()), Path(id.clone()), Json(rev("改這個", "rev1"))).await.unwrap_err();
         assert_eq!(conflict_reason(err), "not_completed");
 
-        let _ = post_cancel(State(app.clone()), Path(id.clone())).await.unwrap();
+        let _ = post_cancel(State(app.clone()), Path(id.clone()), HeaderMap::new()).await.unwrap();
         let err = post_revise(State(app.clone()), Path(id.clone()), Json(rev("改這個", "rev2"))).await.unwrap_err();
         assert_eq!(conflict_reason(err), "not_completed");
     }
@@ -1452,7 +1571,7 @@ mod tests {
 
         // 完成之後就關起來；已完成任務清單查得到。
         let _ = post_complete(State(app.clone()), Path(id.clone()), Json(CompleteIn { result_summary: "修好了".into(), relay_from: None })).await.unwrap();
-        let err = post_pause(State(app.clone()), Path(id.clone()), Json(PauseIn { reason: "late".into(), detail: None })).await.unwrap_err();
+        let err = post_pause(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(PauseIn { reason: "late".into(), detail: None })).await.unwrap_err();
         assert_eq!(conflict_reason(err), "already_closed");
         let Json(done) = get_missions(State(app.clone()), Path(pid.clone()), Query(ListQuery { status: Some("done".into()), limit: None })).await.unwrap();
         assert_eq!(done["missions"].as_array().unwrap().len(), 1);
@@ -1610,6 +1729,69 @@ mod tests {
         store::add_event(&app.db, &id, "verified", "舊版記的", Some("daemon"), &json!({})).await.unwrap();
         let err = post_deliver(State(app.clone()), Path(id.clone()), Json(deliver_from(&env.repo))).await.unwrap_err();
         assert_eq!(conflict_reason(err), "verified_without_sha");
+    }
+
+    /// 使用者取消任務：AGM 被叫醒，底下還開著的交辦一併取消（等額度那件不會幾小時後自己重送）。
+    #[tokio::test]
+    async fn cancelling_a_mission_wakes_the_manager_and_withdraws_its_open_assignments() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        crate::supervisor::store::get_or_init(&app.db).await.unwrap();
+        let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("cancel", "pr"))).await.unwrap();
+        let id = m["id"].as_str().unwrap().to_string();
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "exec").await;
+        let a = crate::supervisor::store::insert_assignment(&app.db, None, &bot.id, "crid-exec", "做 X", &[], None, true).await.unwrap();
+        crate::supervisor::store::set_mission_link(&app.db, &a.id, &id, "executor").await.unwrap();
+        // 撞到 5h 停在 quota_blocked：controller 會在額度回來時自己重送——除非它已經被取消。
+        crate::supervisor::store::park_quota_blocked(&app.db, &a.id, "2999-01-01T00:00:00Z", "撞限", "quota_blocked:test", &json!({}))
+            .await
+            .unwrap();
+
+        let Json(out) = post_cancel(State(app.clone()), Path(id.clone()), HeaderMap::new()).await.unwrap();
+        assert_eq!(out["status"], "cancelled");
+        let after = crate::supervisor::store::assignment(&app.db, &a.id).await.unwrap().unwrap();
+        assert_eq!(after.status, "cancelled", "取消任務要一併收掉還開著的交辦");
+        assert!(crate::supervisor::store::quota_blocked_all(&app.db).await.unwrap().is_empty(), "不會再被自動重送");
+        assert_eq!(out["assignments"][0]["id"], json!(a.id));
+        assert_eq!(inbox_keys(&app, &format!("mission:{id}:cancelled%")).await.len(), 1, "AGM 要被叫醒");
+        let payload: String = sqlx::query_scalar("SELECT payload_json FROM supervisor_inbox WHERE kind='mission_cancelled'")
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert!(payload.contains(&a.id), "通知裡帶著要收掉的交辦：{payload}");
+        let events = store::events(&app.db, &id).await.unwrap();
+        assert!(events.iter().any(|e| e.kind == "note" && e.text.contains("已取消底下 1 件")));
+    }
+
+    /// 暫停要叫醒 AGM，而且暫停期間不給交付；AGM 自己暫停不會叫醒它自己。
+    #[tokio::test]
+    async fn pausing_tells_the_manager_and_closes_the_delivery_gate() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        crate::supervisor::store::get_or_init(&app.db).await.unwrap();
+        let (_origin, wt) = with_origin(&env);
+        let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("pause", "push_main"))).await.unwrap();
+        let id = m["id"].as_str().unwrap().to_string();
+        commit_file(&wt, "done.txt");
+        let _ = post_event(State(app.clone()), Path(id.clone()), Json(verified(Some(&wt), None))).await.unwrap();
+
+        let pause = |reason: &str| PauseIn { reason: reason.into(), detail: Some("使用者按了暫停".into()) };
+        let _ = post_pause(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(pause("user_pause"))).await.unwrap();
+        assert_eq!(inbox_keys(&app, &format!("mission:{id}:paused%")).await.len(), 1, "AGM 要知道任務停了");
+        let kind: String = sqlx::query_scalar("SELECT kind FROM supervisor_inbox WHERE event_key LIKE ?")
+            .bind(format!("mission:{id}:paused%"))
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(kind, "mission_paused");
+
+        let err = post_deliver(State(app.clone()), Path(id.clone()), Json(deliver_from(&wt))).await.unwrap_err();
+        assert_eq!(conflict_reason(err), "mission_paused", "停著的任務不交付");
+
+        // 放行之後就交得出去；交付失敗停下來的那種不算「停著」，可以重試。
+        let _ = post_resume(State(app.clone()), Path(id.clone())).await.unwrap();
+        let Json(out) = post_deliver(State(app.clone()), Path(id.clone()), Json(deliver_from(&wt))).await.unwrap();
+        assert_eq!(out["mode"], "push_main");
     }
 
     #[test]
