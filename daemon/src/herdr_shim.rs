@@ -36,6 +36,10 @@ am_real_herdr() {
     }
 }
 
+# 帳號／hook 的保留清單：pane split／tab create／workspace create 補 `--env` 用（am_forward_with_env），
+# agent start 沒有 `--env` 時補 export 用（am_reexport_env_before_start，issue #57）。單一清單，兩邊不會走鐘。
+AM_RESERVED_ENV_KEYS="CLAUDE_CONFIG_DIR CODEX_HOME AM_BOT_ID AM_HOOK_TOKEN AM_PORT AM_RUN_ID AM_AGENT_NAME AM_KIND AM_MODEL AM_EFFORT AM_PROJECT_ID AM_WORKSPACE_ID AM_OUTBOX AM_REAL_HERDR PATH"
+
 # `<name>` → `<AM_AGENT_NAME>-<name>`, unless it already carries the prefix. herdr agent names
 # are `[a-z][a-z0-9_-]{0,31}`, so the result is cut to 32.
 am_child_name() {
@@ -66,6 +70,7 @@ am_agent_start() {
     _stop=0
     _prev=""
     _kind=""
+    _pane=""
     _has_model=0
     _has_effort=0
     while [ "$_i" -lt "$_n" ]; do
@@ -93,6 +98,7 @@ am_agent_start() {
             esac
         fi
         if [ "$_prev" = "--kind" ]; then _kind=$_a; fi
+        if [ "$_prev" = "--pane" ]; then _pane=$_a; fi
         if [ "$_stop" = 1 ]; then
             # codex / grok spell it `-m`, codex also `-c model=…`: all of them are "the child
             # picked its own model" and must not be overridden with the parent's.
@@ -135,7 +141,27 @@ am_agent_start() {
         fi
         printf 'agents-manager: 子 agent 沒指定模型，沿用母 bot 的 `%s`\n' "$AM_MODEL" >&2
     fi
+    am_reexport_env_before_start "$_pane"
     exec "$AM_HERDR" agent start "$@"
+}
+
+# issue #57：`agent start` 沒有 `--env`，全靠假設「目標 pane 是 pane split 剛開的、帳號早就注入了」——
+# 漏了那一步、或重用一顆沒走過那條路的舊 pane 時，子 agent 就默默吃到預設帳號（cc0）的額度。
+# 補送一行 export 到 `--pane` 指到的目標，跟 agent.start 前補 PATH（`start_inner`）用同一招：
+# pty 會緩衝這行輸入，pane 還沒起殻也不怕；pane 早有正確值時只是重覆設一次，無害。
+am_reexport_env_before_start() {
+    _pane=$1
+    [ -n "$_pane" ] || return 0
+    _line=""
+    for _k in $AM_RESERVED_ENV_KEYS AM_INSTANCE AM_DATA_DIR; do
+        eval "_v=\${$_k:-}"
+        [ -n "$_v" ] || continue
+        _esc=$(printf '%s' "$_v" | sed "s/'/'\\\\''/g")
+        _line="${_line}export $_k='$_esc'; "
+    done
+    [ -n "$_line" ] || return 0
+    "$AM_HERDR" pane send-text "$_pane" "$_line
+" >/dev/null 2>&1
 }
 
 am_agent_prompt() {
@@ -326,7 +352,7 @@ am_forward_with_env() {
             AM_WORKSPACE_ID=$_ws
         fi
     fi
-    for _k in CLAUDE_CONFIG_DIR CODEX_HOME AM_BOT_ID AM_HOOK_TOKEN AM_PORT AM_RUN_ID AM_AGENT_NAME AM_KIND AM_MODEL AM_EFFORT AM_PROJECT_ID AM_WORKSPACE_ID AM_OUTBOX AM_REAL_HERDR PATH; do
+    for _k in $AM_RESERVED_ENV_KEYS; do
         eval "_v=\${$_k:-}"
         [ -n "$_v" ] || continue
         case " $_seen " in
@@ -436,6 +462,10 @@ mod tests {
                     printf '%s\\n' \"$AM_TEST_PANE_JSON\"; exit 0\n\
                   fi\n\
                   if [ -n \"${AM_TEST_CREATE_JSON:-}\" ]; then printf '%s\\n' \"$AM_TEST_CREATE_JSON\"; exit 0; fi\n\
+                  if [ \"$1\" = pane ] && [ \"$2\" = send-text ]; then\n\
+                    { for a in \"$@\"; do printf '%s\\n' \"$a\"; done; printf -- '---\\n'; } >> \"${AM_TEST_SENDTEXT_LOG:-/dev/null}\"\n\
+                    exit 0\n\
+                  fi\n\
                   for a in \"$@\"; do printf '%s\\n' \"$a\"; done\n",
             )
             .unwrap();
@@ -858,6 +888,61 @@ mod tests {
             assert!(!out[..head].iter().any(|a| a == "--env" || a.starts_with("--env=")), "`--` 之前不能有 --env：{case}");
             assert_eq!(&out[head..], ["--", "--env", "AM_INSTANCE=agent-cli-own"], "agent CLI 自己的參數原樣：{case}");
         }
+    }
+
+    /// issue #57：`agent start` 沒有 `--env`，全靠假設「`--pane` 指到的是 `pane split` 剛開的、帳號早
+    /// 注入了」——這個假設一旦不成立（漏了 pane split、重用一顆沒走過那條路的舊 pane），子 agent 就
+    /// 默默吃到預設帳號的額度。`exec` 真的 `agent start` 前，先對那個 `--pane` 補一行 export，不再只靠假設。
+    #[test]
+    fn agent_start_reexports_the_parents_account_env_into_the_target_pane_first() {
+        let s = Sandbox::new();
+        let log = s.dir.join("sendtext.log");
+        let env = [
+            ("AM_AGENT_NAME", "p-1"),
+            ("AM_BOT_ID", "b1"),
+            ("AM_HOOK_TOKEN", "tok"),
+            ("AM_PORT", "7788"),
+            ("CLAUDE_CONFIG_DIR", "/home/u/.claude-cc2"),
+            ("AM_INSTANCE", "a1b2"),
+            ("AM_DATA_DIR", "/data/iso"),
+            ("AM_TEST_SENDTEXT_LOG", log.to_str().unwrap()),
+        ];
+        let (out, _) = s.run(&env, &["agent", "start", "kid", "--kind", "claude", "--pane", "w1:p9"]);
+        assert_eq!(out, ["agent", "start", "p-1-kid", "--kind", "claude", "--pane", "w1:p9"], "agent start 的 argv 不變（herdr 沒有 --env）");
+        let sent = std::fs::read_to_string(&log).unwrap();
+        let calls: Vec<&str> = sent.split("---\n").filter(|c| !c.trim().is_empty()).collect();
+        assert_eq!(calls.len(), 1, "只補一次：{sent}");
+        let lines: Vec<&str> = calls[0].lines().collect();
+        assert_eq!(&lines[..3], ["pane", "send-text", "w1:p9"], "補的是 --pane 指到的目標：{lines:?}");
+        let text = lines[3..].join("\n");
+        assert!(text.contains("export CLAUDE_CONFIG_DIR='/home/u/.claude-cc2'"), "{text}");
+        assert!(text.contains("export AM_BOT_ID='b1'"), "{text}");
+        assert!(text.contains("export AM_HOOK_TOKEN='tok'"), "{text}");
+        assert!(text.contains("export AM_INSTANCE='a1b2'"), "隔離實例的保留變數也補：{text}");
+        assert!(text.contains("export AM_DATA_DIR='/data/iso'"), "{text}");
+        assert!(text.ends_with('\n'), "trailing newline 讓 pty 送出這行：{text:?}");
+    }
+
+    /// 值裡有單引號要逃脫，不然那個 export 的邊界會斷在半路。
+    #[test]
+    fn agent_start_reexport_escapes_single_quotes_in_values() {
+        let s = Sandbox::new();
+        let log = s.dir.join("sendtext.log");
+        let env = [("AM_AGENT_NAME", "p-1"), ("AM_OUTBOX", "/data/o'tbox"), ("AM_TEST_SENDTEXT_LOG", log.to_str().unwrap())];
+        s.run(&env, &["agent", "start", "kid", "--kind", "claude", "--pane", "w1:p9"]);
+        let sent = std::fs::read_to_string(&log).unwrap();
+        assert!(sent.contains(r"export AM_OUTBOX='/data/o'\''tbox'"), "{sent}");
+    }
+
+    /// `--pane` 沒給（herdr 自己會因為缺必要旗標報錯）：shim 沒有目標可補，不猜、不炸。
+    #[test]
+    fn agent_start_without_a_pane_does_not_reexport_anything() {
+        let s = Sandbox::new();
+        let log = s.dir.join("sendtext.log");
+        let env = [("AM_AGENT_NAME", "p-1"), ("CLAUDE_CONFIG_DIR", "/home/u/.claude-cc2"), ("AM_TEST_SENDTEXT_LOG", log.to_str().unwrap())];
+        let (out, _) = s.run(&env, &["agent", "start", "kid", "--kind", "claude"]);
+        assert_eq!(out, ["agent", "start", "p-1-kid", "--kind", "claude"]);
+        assert!(!log.exists() || std::fs::read_to_string(&log).unwrap().trim().is_empty(), "沒有目標 pane，不猜著補");
     }
 
     /// 真的 herdr 在的話，把 shim 產生的 argv 丟給它的 parser：在最後（`--` 之前）放一個假旗標，
