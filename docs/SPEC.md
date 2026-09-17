@@ -948,8 +948,13 @@ listen port 只在本機算（pane 行程樹的 pid 對 `lsof -nP -iTCP -sTCP:LI
 
 #### 名額的形狀
 - `build_slots` 表，**一個持有者一列**（`holder` 是主鍵，PRIMARY KEY 天然去重；呼叫端自己保證 `holder` 唯一，
-  shim 用 `<agent 名>:<pid>`）：`status` 是 `held`（真的佔了一個名額）或 `waiting`（額滿，記一列給 `GET /build-slots`
-  看，不是排隊佇列，沒有先來後到保證）。
+  shim 用 `<agent 名>:<pid>`）：`status` 是 `held`（真的佔了一個名額）或 `waiting`（額滿或還沒輪到，記一列給
+  `GET /build-slots` 看）。
+- **FIFO（2026-09-18 使用者交辦，實測手工 `cargo-slot.sh` 舊版每個等待者各自搶會餓死——有一個等了 74 分鐘還沒輪到）**：
+  名額空出來時，只有排隊排最早的那個 holder 拿得到，其他人這一刻剛好也在問、名額也剛好空著一樣要等。
+  佇列順序＝`(since, holder)` 字典序，`since` 是這個 holder**第一次**排進 waiting 的時間（重試不會歸零）；
+  `since` 相同（毫秒級撞期）時比 `holder` 當穩定的第二排序鍵。跟 `cargo-slot.sh` 的號碼牌是同一個道理，只是這裡
+  拿 `build_slots.since` 當號碼牌，不必另開一張表——`acquire` 額滿或前面有人排隊都會先確保自己有一列 `waiting`。
 - **名額是 TTL 租的，不是等建置跑完才還**：拿到之後 shim 背景續約（間隔取 TTL 的 1/3），跑多久都行，只要續約還在動；
   停止續約（持有者掛了、pane 被砍、行程被殺）超過 TTL 就被下一次 acquire 或背景 sweep 收回——不用去猜「這個 pid 還活著嗎」
   （這個 codebase 本來就沒有 PID liveness 檢查，見 `pane_identity.rs` 讀的是帳號不是死活；TTL 到期是唯一的死活判準）。
@@ -991,8 +996,6 @@ daemon 換版並重啟後**才會裝進新起的 bot pane（跟 herdr shim 一�
 pane 沒有立即影響。等這套機制在正式環境跑穩，`cargo-slot.sh` 可以退場，但那是後續的事，不在這次改動範圍。
 
 #### 沒做的（issue 的 Non-goals／留給以後）
-- **不是真的排隊佇列**：`waiting` 只是一列狀態，額滿時誰先 acquire 到誰先拿到，沒有先來後到保證——用量夠低（全機
-  就兩三個名額）時公平性不是急迫問題，真的要 FIFO 得另外設計搶號機制。
 - **RAM／記憶體壓力沒有影響准駁**：純靜態的名額數上限。這台機器已經有 `memstat.rs` 每 15 秒取樣的可用記憶體快照，
   未來要做「記憶體緊張時降名額數」可以直接接那個快照，這裡先留著介面（`acquire` 只吃 `max_concurrent` 一個門檻，
   換成讀記憶體不需要動呼叫端）。

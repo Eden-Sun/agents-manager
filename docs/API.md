@@ -408,8 +408,9 @@ adopt 之後孤兒通知標記會清掉。pane 不存在 404、`owner_bot_id` �
 
 - 拿到：`200 {"granted":true,"token","expires_at","cargo_jobs","lease_ttl_secs"}`。同一個 `holder` 對已經握著、
   沒過期的名額重 call 是幂等的，回同一份憑證。
-- 額滿：`200 {"granted":false,"active","max_concurrent","since","retry_after_secs"}`——**這是正常的等待狀態，
-  不是錯誤**，回 200 不是 4xx／5xx；呼叫端照 `retry_after_secs` 再問一次。
+- 額滿或還沒輪到：`200 {"granted":false,"active","max_concurrent","since","retry_after_secs"}`——**這是正常的等待
+  狀態，不是錯誤**，回 200 不是 4xx／5xx；呼叫端照 `retry_after_secs` 再問一次。**FIFO**（SPEC §6.5g）：名額空出
+  來時只給排隊排最早的 holder（`since` 最早，同值比 `holder`），就算這一刻剛好也在問、名額也剛好空著一樣要等。
 
 ### `POST /build-slots/renew`（表單）
 `{holder, token}`。**不驗 bot／UI token**，`token` 本身就是憑證。只有還在 `held` 且沒過期的名額能續：
