@@ -421,17 +421,20 @@ async fn prompt_inner(
     };
 
     // 3. turn + user message committed BEFORE the RPC, so an early hook can match.
+    // `prompt_text` 存**實際送出**的字（群組去掉 @mention、附件路徑展開後），跟排隊那條同一欄：
+    // stall 重送、畫面比對、hook 對 prompt 都讀它，不讀泡泡原文（review3 c3 M4）。
     let turn_id = db::ulid();
     let mut tx = app.db.begin().await.map_err(up)?;
     sqlx::query(
-        "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, client_request_id, created_at)
-         VALUES (?,?,?,'web','in_flight','pending',?,?)",
+        "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, client_request_id, created_at, prompt_text)
+         VALUES (?,?,?,'web','in_flight','pending',?,?,?)",
     )
     .bind(&turn_id)
     .bind(&conv)
     .bind(&run.id)
     .bind(client_request_id)
     .bind(db::now())
+    .bind(&deliver)
     .execute(&mut *tx)
     .await
     .map_err(up)?;
@@ -622,6 +625,25 @@ mod prompt_tests {
             .await
             .unwrap();
         assert_eq!(queued, 1);
+    }
+
+    /// 群組訊息：泡泡留原文（含 @mention），turn 上記實際送出的字，stall 重送與畫面比對讀它（review3 c3 M4）。
+    #[tokio::test]
+    async fn a_direct_prompt_records_the_text_actually_delivered_on_its_turn() {
+        let f = fixture("codex", "test").await;
+        let app = f.env.app.clone();
+        let out = prompt_grouped(&app, &f.bot_id, "@prompt-test 跑一次測試", "group-1:b", Some("group-1"), Some("跑一次測試"), &[], None)
+            .await
+            .unwrap();
+        let (bubble, delivered): (String, Option<String>) = sqlx::query_as(
+            "SELECT m.content, t.prompt_text FROM turns t JOIN messages m ON m.turn_id = t.id AND m.role = 'user' WHERE t.id = ?",
+        )
+        .bind(&out.turn_id)
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+        assert_eq!(bubble, "@prompt-test 跑一次測試", "泡泡照使用者打的");
+        assert_eq!(delivered.as_deref(), Some("跑一次測試"), "turn 記的是送給 bot 的字");
     }
 
     /// 打字前 `runs.pane_typed` 寫不進去（SQLite 鎖逾時、磁碟滿）：一個字都沒打，所以是 409＋撤回 turn，
