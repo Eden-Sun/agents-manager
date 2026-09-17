@@ -1047,7 +1047,7 @@ body 直接是檔案位元組（**不是** multipart），`Content-Type` 就是�
   `configured` 是「登記過」，`bot_present` 才是「那顆 bot 還在」：路由只看前者。`model`／`effort` 是設定值，
   `runtime{model,effort,started_at}` 是它現在實際跑的（`/model` 換過就會不一樣）。
   `setup` 會驗 `model`（`[a-z0-9][a-z0-9._-]{0,39}`）與 `effort`（`config::normalize_effort`），不合格 400——這兩個值會直接變成 CLI 的 argv。
-- `POST /api/supervisor/responder/setup {identity?,model?,effort?}` → 同上加 `deployed`。冪等、只建立不啟動；預設沿用已存的（第一次 `cc0/opus/high`）。自己的專案與 cwd `supervisor/AGM-responder`
+- `POST /api/supervisor/responder/setup {identity?,model?,effort?}` → 同上加 `deployed`。冪等、只建立不啟動；預設沿用已存的（第一次 `cc0/opus/high`）。掛在**巡檢的專案**底下，cwd 是自己的 `supervisor/AGM-responder`（記在 `bots.cwd`）
   （`CLAUDE.md`、`persona.md`、`runtime.json{role:"responder",self_bot_id,responder_bot_id,manager_bot_id}`、`bin/agm`、`handoff.md`），args 空（rc off）。身分不存在 409 `identity_missing`。
 - `POST /api/supervisor/responder/start {}` / `stop {}` → 同 GET。`start` 標應該在跑（看門狗會拉起），`stop` 先標不要再停。
 - `GET /api/supervisor/responder/persona`、`PUT {text,expected_version?}` → 同巡檢的 persona 形狀加 `role:"responder"`；內嵌種子 `docs/goals/agm-responder-persona.md`。
