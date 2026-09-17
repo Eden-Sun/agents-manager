@@ -1169,9 +1169,11 @@ body 直接是檔案位元組（**不是** multipart），`Content-Type` 就是�
   `POST /api/supervisor/inbox/{id}/ack` → `{}`；已結過 `{already_handled:true}`；帶角色 bot token 而事件歸另一個角色 → 409 `claimed_by_other_role`。
   - `role`／`wake`：SPEC §18.15 的路由表。`wake=false` 的事件不會自己開一次喚醒；`merged_into` 非空 = 被 daemon 合併掉（`acked_by:"daemon"`）。
   - `kind:"bot_request"`（`payload{to_role,wake,quiet_reason,from_bot_id,from_name,from_role,target_bot_id,text,client_request_id,attachments,sender_verified,via}`）：見下方「bot 寫給 AGM」。
-  - `state`：`pending` → `delivered`（已送通知）→ `handled`（總管 ack）。送達看 `delivery`：`failed` 留 pending 退避；`unknown` 綁 `notify.turn_id` 對帳不重送。
+  - `state`：`pending` → `delivered`（已送通知）→ `handled`（總管 ack）；另有 `gave_up`＝補送用盡、已停手（仍算未處理，ack 得掉，見下）。送達看 `delivery`：`failed` 留 pending 退避；`unknown` 綁 `notify.turn_id` 對帳不重送。
     delivered 但通知回合失敗／消失，或超過 `notify_ack_deadline_secs`（1800）沒 ack → 放回 pending；重送上限 `notify_max_attempts`（5，只算巡檢的事件），用完開 `notify_exhausted` incident（事件仍留著）。ack 單向。
-    協調者的事件沒有次數上限：15 秒倍增退避到 `responder_max_backoff_secs`（300）；等額度時不計次。
+    協調者**送不出去**的事件沒有次數上限：15 秒倍增退避到 `responder_max_backoff_secs`（300）；等額度時不計次。
+    **送到了卻沒人 ack** 的補送兩邊都有上限（SPEC §18.15）：送達 5 次、或開著超過 6 小時且送達 ≥3 次 → `state='gave_up'`、不再補送，
+    改推一則 `inbox_gave_up`（`payload{to_role,event_id,event_kind,owner_role,deliveries,open_secs,waiting_for,why,action}`）給**另一個角色**並叫醒它。
   - assignment 狀態遷移與完成事件同一個 transaction；啟動時補掃一次。
   - pending → delivered 的推送節流成每 `notify_interval_secs`（600）最多一次，一次併成一則通知；入庫不受影響。
   - `kind` 另有 `bot_restart_failed`（`batch_id,bot_id,name,error`）、`supervisor_restart_retry`（`batch_id,bot_id,name,ok,error`）、`approval_requested`、mission 相關事件（見群組任務）。

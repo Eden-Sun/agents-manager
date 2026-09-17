@@ -1184,6 +1184,24 @@ fn notify_backoff(attempts: i64) -> Duration {
 /// (the manager saw it and moved on, or it did not — re-offer after the deadline), and the
 /// delivery was `unknown` (look at the turn before doing anything). In all three the *original*
 /// turn is consulted first; nothing is ever re-sent on the strength of a missing ack alone.
+/// 補送到第幾次就停手。跟看門狗的 `MAX_ATTEMPTS`、巡檢的 `notify_max_attempts` 同一個數字：
+/// 送了五次都沒人 ack，第六次也不會有人。
+pub const RECOVER_MAX_DELIVERIES: i64 = 5;
+/// 事件開著超過這麼久、而且已經補送過（≥3 次送達）還是沒人 ack，也停手。
+/// 6 小時 ＝ 12 個 `notify_ack_deadline_secs`（1800 秒）；照 deadline 的節奏五次補送約 2.5 小時，
+/// 所以正常情況是次數先到，這個時窗只收「慢慢滴」的那種。
+pub const RECOVER_WINDOW_SECS: i64 = 6 * 3600;
+/// 時窗那條至少要送過這麼多次才算數：只送過一次（例如協調者一直在等額度）的永遠不放棄。
+pub const RECOVER_WINDOW_MIN_DELIVERIES: i64 = 3;
+
+/// 這一則還要不要再補送。純函式，`age_secs` = 事件建立到現在幾秒。
+pub fn keep_recovering(deliveries: i64, age_secs: i64) -> bool {
+    if deliveries >= RECOVER_MAX_DELIVERIES {
+        return false;
+    }
+    !(age_secs >= RECOVER_WINDOW_SECS && deliveries >= RECOVER_WINDOW_MIN_DELIVERIES)
+}
+
 async fn recover_unacked(app: &Arc<App>) {
     let cfg = app.cfg.get().await;
     let deadline = cfg.supervisor.notify_ack_deadline_secs as i64;
@@ -1216,10 +1234,71 @@ async fn recover_unacked(app: &Arc<App>) {
             }
         };
         let Some(why) = why else { continue };
+        // 補送不是無限的（使用者 2026-09-17 裁示）：送了五次沒人 ack、或開著超過六小時又已經補送過，
+        // 就停手並喊人。以前這裡沒有上限，協調者漏 ack 一則就每 30 分鐘被叫醒一次，而沒有任何人知道。
+        let age = age_secs(&e.created_at);
+        if !keep_recovering(e.notify_attempts, age) {
+            give_up_on(app, &e, why, age).await;
+            continue;
+        }
         if store::requeue_inbox(&app.db, &e.id, why).await.unwrap_or(false) {
             tracing::warn!(event = %e.id, attempts = e.notify_attempts, why, "re-queueing an unanswered notification");
         }
     }
+}
+
+fn age_secs(iso: &str) -> i64 {
+    chrono::DateTime::parse_from_rfc3339(iso)
+        .map(|t| chrono::Utc::now().signed_duration_since(t.with_timezone(&chrono::Utc)).num_seconds())
+        .unwrap_or(0)
+}
+
+/// 停止自動補送，並把「誰在等哪一則」交給**另一個角色**（倒下／沒在讀的就是原本那一個）。
+///
+/// 三個管道，跟看門狗放棄時同一套：事件本身改成 `gave_up`（不再補送、但仍算未處理，人照樣 ack 得掉）、
+/// 一則 durable inbox 事件叫醒另一個角色、一行 error log。`event_key` 綁事件 id，所以只會喊一次。
+async fn give_up_on(app: &Arc<App>, e: &store::InboxEvent, why: &str, age: i64) {
+    if !store::give_up_inbox(&app.db, &e.id, why).await.unwrap_or(false) {
+        return;
+    }
+    let owner = e.claimed_by.clone().or_else(|| e.role.clone()).unwrap_or_else(|| "patrol".into());
+    let to = match super::roles::Role::parse(&owner) {
+        Some(super::roles::Role::Responder) => super::roles::Role::Patrol,
+        _ => super::roles::Role::Responder,
+    };
+    let payload: serde_json::Value = serde_json::from_str(&e.payload_json).unwrap_or_else(|_| json!({}));
+    let waiting = payload
+        .get("from_name")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .or_else(|| payload.get("from_bot_id").and_then(serde_json::Value::as_str).map(str::to_string))
+        .or_else(|| e.bot_id.clone());
+    tracing::error!(event = %e.id, kind = %e.kind, owner = %owner, attempts = e.notify_attempts, why,
+                    "giving up on re-delivering an unacknowledged notification; asking the other role to look");
+    let _ = store::push_inbox(
+        &app.db,
+        &format!("inbox_gave_up:{}", e.id),
+        "inbox_gave_up",
+        e.assignment_id.as_deref(),
+        e.bot_id.as_deref(),
+        None,
+        &json!({
+            "to_role": to.as_str(),
+            "event_id": e.id,
+            "event_kind": e.kind,
+            "owner_role": owner,
+            "deliveries": e.notify_attempts,
+            "open_secs": age,
+            "waiting_for": waiting,
+            "why": format!("送了 {} 次都沒有人 ack（最後一次：{why}），已停止自動補送", e.notify_attempts),
+            "action": format!(
+                "`bin/agm inbox --all` 找 event_id={}：確認 {owner} 是不是還在讀得到通知（沒在跑就拉起來），處理完直接 ack 那一則",
+                e.id
+            ),
+        }),
+    )
+    .await;
+    app.emit("supervisor_changed", json!({"inbox_gave_up": e.id, "to_role": to.as_str()})).await;
 }
 
 // ---------------------------------------------------------------- candidate switching
@@ -1661,6 +1740,72 @@ mod tests {
         assert!(d.contains("AGM-responder"), "{d}");
         assert!(d.contains("identity_missing") && d.contains("responder-start"), "{d}");
         assert!(!d.contains("沒有留下回覆"), "{d}");
+    }
+
+    /// 補送不是無限的（使用者 2026-09-17 裁示）：五次沒人 ack 就停手；開著超過六小時又已經補送過也停手。
+    /// 只送過一次的（協調者在等額度、還沒讀到）永遠不放棄。
+    #[test]
+    fn re_offering_an_unacked_notification_is_bounded() {
+        let hour = 3600;
+        assert!(keep_recovering(1, 0), "剛送出去，還沒到期");
+        assert!(keep_recovering(4, 2 * hour), "第五次還可以送");
+        assert!(!keep_recovering(5, 2 * hour), "送了五次沒人 ack 就停手");
+        assert!(!keep_recovering(9, 0));
+        // 時窗那條：要送過至少三次才算數。
+        assert!(keep_recovering(1, 30 * hour), "只送過一次（例如一直在等額度）不放棄");
+        assert!(keep_recovering(2, 30 * hour));
+        assert!(!keep_recovering(3, RECOVER_WINDOW_SECS));
+        assert!(keep_recovering(3, RECOVER_WINDOW_SECS - 1), "還沒滿六小時就繼續補送");
+    }
+
+    /// 停手時要有人被叫醒：事件標成 `gave_up`（不再補送、但還算未處理），另一個角色收到一則
+    /// `inbox_gave_up`，寫得出誰在等哪一則、補送幾次、最後的錯誤。
+    #[tokio::test]
+    async fn giving_up_on_a_notification_wakes_the_other_role() {
+        use super::super::bot_requests::flow_tests;
+        use super::super::roles::{self, Role};
+        let app = flow_tests::app().await;
+        flow_tests::configure_responder(&app).await;
+        let id = store::push_inbox(&app.db, "bot_request:w1:x", "bot_request", None, Some("w1"), None,
+                                   &json!({"to_role": "responder", "wake": true, "from_bot_id": "w1", "from_name": "fixer", "text": "請核准重建"}))
+            .await
+            .unwrap()
+            .unwrap();
+        roles::classify(&app.db).await.unwrap();
+        // 協調者收下五次都沒 ack，而且通知回合早就結束了。
+        let now = crate::db::now();
+        sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,started_at) VALUES ('r-n','resp','running','idle',?)")
+            .bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO conversations (id,bot_id,created_at) VALUES ('c-n','resp',?)")
+            .bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,created_at,completed_at) VALUES ('t-n','c-n','r-n','web','completed',?,?)")
+            .bind(&now).bind(&now).execute(&app.db).await.unwrap();
+        roles::mark_delivered(&app.db, &[id.clone()], Role::Responder, "t-n", "ok").await.unwrap();
+        sqlx::query("UPDATE supervisor_inbox SET notify_attempts=5, delivered_at='2020-01-01T00:00:00Z' WHERE id=?")
+            .bind(&id).execute(&app.db).await.unwrap();
+
+        recover_unacked(&app).await;
+
+        let (state, err): (String, Option<String>) =
+            sqlx::query_as("SELECT state, notify_error FROM supervisor_inbox WHERE id=?").bind(&id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(state, "gave_up", "不再補送");
+        assert!(err.is_some_and(|e| e.contains("never acknowledged")), "最後一次的原因留著");
+        // 還算未處理：UI、inbox_open 與 ack 都還看得到它。
+        assert_eq!(store::open_inbox_count(&app.db).await.unwrap(), 2, "放棄的那則加上喊人的那則");
+        assert_eq!(roles::ack(&app.db, &id, None, true).await.unwrap(), roles::AckOutcome::Acked, "人照樣 ack 得掉");
+
+        roles::classify(&app.db).await.unwrap(); // tick 裡 recover_unacked 之後就是這一步
+        let patrol = roles::due_for(&app.db, Role::Patrol, true, "2999-01-01T00:00:00Z", 5).await.unwrap();
+        let told = patrol.iter().find(|e| e.kind == "inbox_gave_up").expect("另一個角色要被叫醒");
+        assert_eq!(told.wake, Some(1));
+        let p: serde_json::Value = serde_json::from_str(&told.payload_json).unwrap();
+        assert_eq!((p["deliveries"].as_i64(), p["owner_role"].as_str(), p["waiting_for"].as_str()), (Some(5), Some("responder"), Some("fixer")));
+        assert!(p["why"].as_str().is_some_and(|w| w.contains("5 次")), "{p}");
+
+        // 再跑一次不會重複喊，也不會又把它放回 pending。
+        recover_unacked(&app).await;
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE kind='inbox_gave_up'").fetch_one(&app.db).await.unwrap();
+        assert_eq!(n, 1);
     }
 
     /// 遲到 hook 補上的回覆（`late_reply`）：巡檢的摘要也要標出來，不然同一張交辦看起來像又完成了一次。

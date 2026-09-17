@@ -1740,8 +1740,15 @@ supervisor 相關資料表與欄位都是 additive，`db::migrate` 重跑冪等�
   驗證過的決定記成 `AGM:patrol`／`AGM:responder`，body 自稱的 `actor` 不算。`relay_from` 的 bot 申請沒帶 token 仍收，但標 `sender_verified=false`。
 - **協調者故障不倒回巡檢**：分流只看它**建立過**沒有（`supervisor_roles.responder` 的 `bot_id`），不看它現在活不活著。沒額度（CLI 撞限，或共享 5h／7d critical）→ `status=waiting_quota`、`notify_next_at`＝重置時間與上限取早者，事件留 `pending`、不計重試次數；
   停著 → 看門狗（同 §18.9 的 30/60/120/300 秒、5 次）；放棄 → 推 `responder_watchdog_gave_up` 給巡檢。
-  反方向對稱（review 2026-09-16 c1 M2）：巡檢的看門狗放棄（`watchdog_gave_up`）與巡檢的通知用盡（`notify_exhausted`）路由給**協調者**並叫醒——倒下的就是巡檢，送給它沒有人收；協調者未建立時巡檢的待送查詢照舊撈得到。送不出去是有界退避（15 秒倍增到 `responder_max_backoff_secs`），**沒有次數上限**，
-  也不開 `notify_exhausted`。巡檢自己的事件照舊有 `notify_max_attempts`。
+  反方向對稱（review 2026-09-16 c1 M2）：巡檢的看門狗放棄（`watchdog_gave_up`）與巡檢的通知用盡（`notify_exhausted`）路由給**協調者**並叫醒——倒下的就是巡檢，送給它沒有人收；協調者未建立時巡檢的待送查詢照舊撈得到。**送不出去**（還沒送達）是有界退避（15 秒倍增到 `responder_max_backoff_secs`），沒有次數上限，
+  也不開 `notify_exhausted`——事件是 bot 在等的答覆，不能因為協調者在等額度就被丟掉。巡檢自己的事件照舊有 `notify_max_attempts`。
+- **送到了卻沒人 ack 的補送有上限**（使用者 2026-09-17 裁示，取代先前「刻意不設上限」）：`recover_unacked` 把 delivered 而沒 ack 的事件放回 pending，
+  以前沒有次數上限——協調者漏 ack 一則，opus-high 就每 `notify_ack_deadline_secs`（1800 秒）被叫醒一次，而且沒有任何人知道。
+  現在送達 **5 次**（同看門狗的 `MAX_ATTEMPTS` 與巡檢的 `notify_max_attempts`：送五次沒人 ack，第六次也不會有人），
+  或**事件開著超過 6 小時而且已經送達 ≥3 次**（6 小時 ＝ 12 個 ack deadline；照 deadline 的節奏五次補送約 2.5 小時，所以正常是次數先到，時窗只收「慢慢滴」的那種；
+  要求 ≥3 次是為了不放棄「只送過一次、協調者還在等額度」的事件）就**停手**：
+  事件改成 `state='gave_up'`（不再補送，但仍算未處理：`inbox_open`、UI、`ack` 都還看得到），並推一則 `inbox_gave_up` 給**另一個角色**並叫醒它，
+  payload 寫明誰在等哪一則、送了幾次、最後一次的錯誤。代價講明白：極端情況下那顆 bot 要等人處理，所以喊人這段一定要在。
   登記的 bot 被刪掉 → `status=missing`（`configured:true`、`bot_present:false`），推一次 `responder_bot_missing` 給巡檢，事件照樣留在協調者的佇列等它被建回來。
 - **舊部署**（協調者未建立）：協調的事件由巡檢照 600 秒節流收，行為與之前相同；建立之後才分流。已送給巡檢的舊事件仍歸巡檢。
 - **上次成功上線**：`GET /api/supervisor` 的 `last_deploy{sha,at}`——sha 由 `daemon/build.rs` 在建置時編進 binary，
