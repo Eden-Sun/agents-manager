@@ -17,7 +17,8 @@
 #   ERR_MODULE_NOT_FOUND。
 # - daemon 用 rust-embed 把 web/dist 編進二進位，所以 web 要先 build。
 # - daemon 的測試會讀 AM_MODEL / AM_EFFORT（herdr shim 的沿用邏輯），在 bot 的 pane
-#   裡跑時這兩個有值會讓測試結果不同，這裡一律清掉。
+#   裡跑時這兩個有值會讓測試結果不同，這裡一律清掉。AM_DATA_DIR 也一樣：本機 bot 的 pane
+#   都被注入正式資料目錄，測試（hook spool 的預設目錄等）不該吃到它。
 # - 只做檢查，不改任何檔案（fmt 用 --check）。
 set -euo pipefail
 
@@ -45,7 +46,7 @@ check_daemon() {
         exit 1
     fi
     step "daemon: cargo test -p agents-managerd"
-    env -u AM_MODEL -u AM_EFFORT cargo test -p agents-managerd --locked
+    env -u AM_MODEL -u AM_EFFORT -u AM_DATA_DIR cargo test -p agents-managerd --locked
 }
 
 check_ob() {

@@ -117,16 +117,19 @@ pub struct Prepared {
     pub dir: PathBuf,
     /// 拿在手上，`serve` 期間不能放掉。
     pub lock: DirLock,
+    /// 解析時用的 `AM_DATA_DIR`：拿鎖之後的確認要跟同一份比，不再讀一次行程 env。
+    env_dir: Option<PathBuf>,
 }
 
-pub fn prepare(config_arg: Option<PathBuf>, wait: std::time::Duration) -> Result<Prepared> {
-    let env_dir = env_dir()?;
+/// `env_dir` 由呼叫端傳（`serve` 傳 [`env_dir()`]）：本機 bot 的 pane 都被注入 `AM_DATA_DIR`，
+/// 測試若自己讀行程 env，在 pane 裡跑 `cargo test` 就會被「AM_DATA_DIR 不一致」擋掉（review3 c3 L8）。
+pub fn prepare(config_arg: Option<PathBuf>, env_dir: Option<PathBuf>, wait: std::time::Duration) -> Result<Prepared> {
     let config_given = config_arg.is_some();
     let cfg_path = config_path(config_arg, env_dir.clone())?;
-    let dir = data_dir(&cfg_path, config_given, peek_data_dir(&cfg_path).as_deref(), env_dir)?;
+    let dir = data_dir(&cfg_path, config_given, peek_data_dir(&cfg_path).as_deref(), env_dir.clone())?;
     std::fs::create_dir_all(&dir).with_context(|| format!("create data dir {}", dir.display()))?;
     let lock = lock_dir(&dir, wait)?;
-    Ok(Prepared { cfg_path, dir, lock })
+    Ok(Prepared { cfg_path, dir, lock, env_dir })
 }
 
 /// `serve` 的前半段，原封不動：prepare（唯讀解析 → 建資料目錄 → 拿鎖）→ 載入設定 → 確認 →
@@ -141,23 +144,27 @@ pub struct Instance {
     pub slug: Option<String>,
 }
 
-pub async fn open_instance(config_arg: Option<PathBuf>, wait: std::time::Duration) -> Result<Instance> {
+pub async fn open_instance(
+    config_arg: Option<PathBuf>,
+    env_dir: Option<PathBuf>,
+    wait: std::time::Duration,
+) -> Result<Instance> {
     let config_given = config_arg.is_some();
-    let prepared = prepare(config_arg, wait)?;
+    let prepared = prepare(config_arg, env_dir, wait)?;
     let store = crate::config::ConfigStore::load(prepared.cfg_path.clone()).await?;
     let data_dir_in_cfg = store.get().await.server.data_dir;
     confirm_data_dir(&prepared, data_dir_in_cfg.as_deref(), config_given)?;
     // 只算不設：行程層級的 `set_instance` 由 `serve` 自己叫（測試不該汙染整個行程）。
     let slug = instance_slug(&prepared.dir)?;
     let pool = crate::db::open(&prepared.dir.join("agents-manager.sqlite3")).await?;
-    let Prepared { cfg_path, dir, lock } = prepared;
+    let Prepared { cfg_path, dir, lock, .. } = prepared;
     Ok(Instance { dir, cfg_path, store, pool, lock, slug })
 }
 
 /// 拿鎖之後載入的設定，`data_dir` 必須跟當初唯讀看到的同一個——不同就是有人在這中間改了檔案，
 /// 這時繼續跑等於拿著 A 的鎖寫 B 的 DB。
 pub fn confirm_data_dir(prepared: &Prepared, loaded: Option<&str>, config_given: bool) -> Result<()> {
-    let again = data_dir(&prepared.cfg_path, config_given, loaded, env_dir()?)?;
+    let again = data_dir(&prepared.cfg_path, config_given, loaded, prepared.env_dir.clone())?;
     if !same_dir(&again, &prepared.dir)? {
         bail!(
             "設定檔 {} 在拿鎖之後把資料目錄從 {} 改成 {}：拒絕啟動，請重跑。",
@@ -383,7 +390,7 @@ mod tests {
         let cfg = dir.join("config.toml");
         let held = lock_dir(&dir, std::time::Duration::ZERO).unwrap();
 
-        let err = prepare(Some(cfg.clone()), std::time::Duration::ZERO).unwrap_err().to_string();
+        let err = prepare(Some(cfg.clone()), None, std::time::Duration::ZERO).unwrap_err().to_string();
         assert!(err.contains("已經有一顆 daemon"), "{err}");
         assert!(!cfg.exists(), "拒絕啟動時不該寫出預設 config");
         let left: Vec<String> =
@@ -391,7 +398,7 @@ mod tests {
         assert_eq!(left, vec!["daemon.lock".to_string()], "除了鎖檔什麼都不該產生");
 
         drop(held);
-        let ready = prepare(Some(cfg.clone()), std::time::Duration::ZERO).unwrap();
+        let ready = prepare(Some(cfg.clone()), None, std::time::Duration::ZERO).unwrap();
         assert!(same(&ready.dir, &dir), "{} != {}", ready.dir.display(), dir.display());
         assert!(!cfg.exists(), "prepare 自己也不寫 config，那是拿鎖之後的事");
         // 設定檔在拿鎖之後把 data_dir 改掉 → 拒絕（拿著 A 的鎖寫 B 的 DB）。
@@ -487,7 +494,7 @@ mod tests {
         let cfg = dir.join("config.toml");
         let held = lock_dir(&dir, std::time::Duration::ZERO).unwrap();
 
-        let err = match open_instance(Some(cfg.clone()), std::time::Duration::ZERO).await {
+        let err = match open_instance(Some(cfg.clone()), None, std::time::Duration::ZERO).await {
             Err(e) => e.to_string(),
             Ok(_) => panic!("鎖被別人拿著時不該開得起來"),
         };
@@ -497,7 +504,7 @@ mod tests {
         assert_eq!(left, vec!["daemon.lock".to_string()], "config、sqlite、ui-token 都不該生出來");
 
         drop(held);
-        let inst = open_instance(Some(cfg.clone()), std::time::Duration::ZERO).await.unwrap();
+        let inst = open_instance(Some(cfg.clone()), None, std::time::Duration::ZERO).await.unwrap();
         assert!(same(&inst.dir, &dir));
         assert!(dir.join("agents-manager.sqlite3").exists(), "DB 開在設定檔旁邊");
         assert!(!default_dir().join("agents-manager.sqlite3").starts_with(&dir));
@@ -511,6 +518,25 @@ mod tests {
         inst.pool.close().await;
         drop(inst.lock);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `AM_DATA_DIR` 是參數，不是行程 env：拿鎖前的解析與拿鎖後的確認用**同一份**。
+    /// 行程 env 帶著 pane 注入的 `AM_DATA_DIR` 時，上面兩支測試照樣綠（review3 c3 L8）。
+    #[test]
+    fn prepare_uses_the_env_dir_it_was_given() {
+        let dir = tmp("envarg");
+        let cfg = dir.join("config.toml");
+        let other = tmp("envarg-other");
+        let err = prepare(Some(cfg.clone()), Some(other.clone()), std::time::Duration::ZERO).unwrap_err().to_string();
+        assert!(err.contains("AM_DATA_DIR") && err.contains("拒絕啟動"), "{err}");
+        assert!(!dir.join("daemon.lock").exists(), "不一致時連鎖檔都不該建");
+
+        let ready = prepare(Some(cfg.clone()), Some(dir.clone()), std::time::Duration::ZERO).unwrap();
+        assert!(same(&ready.dir, &dir));
+        confirm_data_dir(&ready, None, true).expect("確認沿用傳進來的那份 AM_DATA_DIR");
+        drop(ready);
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&other).ok();
     }
 
     #[test]
