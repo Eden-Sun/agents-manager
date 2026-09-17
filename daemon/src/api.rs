@@ -770,11 +770,15 @@ async fn delete_project(State(app): State<Arc<App>>, Path(id): Path<String>) -> 
     // 鎖還在手上，順手比照 delete_bot 收掉。
     let host = db::project(&app.db, &id).await.ok().flatten().map(|p| p.host).unwrap_or_else(|| crate::config::LOCAL_HOST.to_string());
     for bot in in_project.iter().filter(|b| b.managed_by != "user") {
-        let _ = sqlx::query("UPDATE bots SET deleted_at=? WHERE id=? AND deleted_at IS NULL")
+        // 這個 UPDATE 以前用 `let _ =` 忽略結果：DB 寫不進去也照樣往下 purge，變成
+        // 「DB 說它還活著、runtime 目錄卻已經被砍光」，事後救不回來（issue #87）。失敗就整支
+        // API 一起失敗，purge 只能發生在 DB 已經確定寫成 deleted 之後。
+        sqlx::query("UPDATE bots SET deleted_at=? WHERE id=? AND deleted_at IS NULL")
             .bind(db::now())
             .bind(&bot.id)
             .execute(&app.db)
-            .await;
+            .await
+            .map_err(any_err)?;
         lifecycle::purge_bot_dir(&app, &bot.id, &host).await;
         tracing::info!(bot = %bot.name, project = %id, "project deleted; its child bot went with it");
     }
@@ -3026,6 +3030,35 @@ mod delete_bot_tests {
             assert_eq!(started, running, "round {round}");
             assert_eq!(deleted.is_ok(), bot_gone, "round {round}: {deleted:?}");
         }
+    }
+
+    /// child 的軟刪 DB 寫入失敗時，不能繼續砍它的 runtime 目錄：以前那個 `UPDATE` 的結果被
+    /// `let _ =` 吃掉，寫不進去也照樣 purge，變成「DB 說它還活著、檔案已經被砍光」，事後救不回來
+    /// （issue #87）。整支 API 要跟著失敗，DB 那一列也要維持 `deleted_at IS NULL`。
+    #[tokio::test]
+    async fn a_child_whose_soft_delete_write_fails_keeps_its_runtime_dir() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let b1 = a_bot(&e, "alfa", "user").await;
+        in_config(&e, &[(&b1, "alfa")]).await;
+        let child = a_bot(&e, "alfa-kid", "child").await;
+
+        let dir = app.bot_dir(&child).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("marker"), b"keep me").unwrap();
+
+        // 故障注入：只讓這顆 child 的軟刪 UPDATE 失敗，其他查詢不受影響。
+        sqlx::query(&format!(
+            "CREATE TRIGGER am_test_fail_child_delete BEFORE UPDATE OF deleted_at ON bots
+             WHEN NEW.id = '{child}' BEGIN SELECT RAISE(ABORT, 'boom'); END"
+        ))
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        assert!(delete_project(State(app.clone()), Path(e.project_id.clone())).await.is_err(), "DB 寫不進去，API 不能回成功");
+        assert!(dir.join("marker").exists(), "DB 寫不進去卻把 runtime 目錄砍了");
+        assert!(db::bot(&app.db, &child).await.unwrap().unwrap().deleted_at.is_none(), "DB 沒寫成功，不該說它已經刪除");
     }
 
     /// 死鎖回歸（sol 五輪）：child id 字典序**小於** parent。舊寫法 delete_bot 先持 parent、定案後才拿 child，
