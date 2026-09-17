@@ -80,7 +80,7 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   `DELETE /api/projects/:id` 依 id 排序拿齊專案內每顆 bot 的 per-bot 鎖，**在鎖內**重驗都已停止再定案；TOML 裡多出沒鎖住的 bot（剛建立、可能正要啟動）就 409 `delete_refused`。
   **鎖順序**：刪除是唯一會同時持多把 per-bot 鎖的路徑，兩支 DELETE 都「依 id 排序、一次拿齊」（`DELETE /api/bots/:id` 拿 parent＋所有 descendants，拿鎖途中若認領了新 child 就全放掉重來，三次後 409 `children_changed`），再用 locked 版停機；持一把再補拿另一把會與另一支互等成死鎖（ULID 不保證 parent 比 child 小）。
   其他情況真的要刪這麼多就 `AM_ALLOW_BULK_DELETE=1` 放行一次。
-- **資料目錄隔離**：資料目錄依序取 `[server] data_dir` > `--config` 所在目錄 > `AM_DATA_DIR` > `~/.config/agents-manager`。非預設的 `--config` **一定**把 SQLite／`ui-token`／spool 帶到設定檔旁邊，不沿用預設目錄；`AM_DATA_DIR` 與算出來的不一致就拒絕啟動並說明。
+- **資料目錄隔離**：資料目錄依序取 `[server] data_dir` > `--config` 所在目錄 > `AM_DATA_DIR` > `~/.config/agents-manager`。非預設的 `--config` **一定**把 SQLite／`ui-token`／spool 帶到設定檔旁邊，不沿用預設目錄；「旁邊」是 `--config` 字面所在的目錄（目錄段照常展開 symlink），`config.toml` 本身是 symlink 時**不**跟到目標目錄（否則指到 dotfiles 的設定檔會悄悄開一顆空 DB）；`AM_DATA_DIR` 與算出來的不一致就拒絕啟動並說明。
 - **同一資料目錄只准一顆 daemon**：啟動時對 `<資料目錄>/daemon.lock` 拿 `flock(LOCK_EX|LOCK_NB)`（拿到才寫自己的 pid 進去），拿不到就拒絕啟動、**不做任何寫入**（重啟時前一顆還在收攤，最多等 5 秒再判定失敗）；鎖綁在 fd 上，行程死掉自動放開（`startup.rs`）。
   順序是**唯讀解析設定 → 建立資料目錄 → 拿鎖 → 才允許建立目錄／寫檔**：`ConfigStore::load` 在設定檔不存在時會寫一份預設 config，那是共用設定，還沒拿到鎖的程序不能碰。拿鎖後重讀的設定若把 `data_dir` 改掉也拒絕啟動（拿著 A 的鎖寫 B 的 DB）。
 - **資料目錄要跟著 bot 與 hook 走**：`hook.sh`／statusLine／grok dispatcher 的 argv 一律寫死 `--data-dir <解析後的資料目錄>`，本機 pane env 另外注入 `AM_DATA_DIR`（`pane_env`），herdr shim 也往子 agent 傳。
