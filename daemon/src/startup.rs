@@ -25,9 +25,27 @@ pub fn env_dir() -> Result<Option<PathBuf>> {
 /// 設定檔位置：`--config` 給了就用它，否則是資料目錄底下那一份。
 pub fn config_path(config_arg: Option<PathBuf>, env_dir: Option<PathBuf>) -> Result<PathBuf> {
     match config_arg {
-        Some(p) => normalize(&p).context("--config"),
+        Some(p) => normalize_config_file(&p).context("--config"),
         None => Ok(env_dir.unwrap_or_else(default_dir).join("config.toml")),
     }
+}
+
+/// `--config` 只解析**所在目錄**，檔名本身不跟 symlink：`config.toml` 常是指到 dotfiles 的 symlink，
+/// 連最後一段都 canonicalize 的話，資料目錄會搬到 symlink 目標那個目錄——開出空 DB 與新的 ui-token、
+/// 被當成隔離實例，而且什麼錯都不報（review3 c3 L6）。目錄段照舊逐段展開（`/tmp` 別名、`..`）。
+/// 解析不了的 symlink（dangling、迴圈）照舊拒絕：`ConfigStore::load` 看不到檔案會寫一份預設 config 蓋掉它。
+fn normalize_config_file(p: &Path) -> Result<PathBuf> {
+    let (Some(parent), Some(name)) = (p.parent(), p.file_name()) else {
+        return normalize(p);
+    };
+    let parent = if parent.as_os_str().is_empty() { Path::new(".") } else { parent };
+    let file = normalize(parent)?.join(name);
+    if std::fs::symlink_metadata(&file).is_ok() {
+        if let Err(e) = std::fs::canonicalize(&file) {
+            bail!("{} 是解析不了的 symlink（{e}）：拒絕把它當成設定檔", file.display());
+        }
+    }
+    Ok(file)
 }
 
 /// 資料目錄：`[server] data_dir` > `--config` 所在目錄 > `AM_DATA_DIR` > 預設。
@@ -381,6 +399,36 @@ mod tests {
         assert!(err.contains("拿鎖之後"), "{err}");
         confirm_data_dir(&ready, None, true).unwrap();
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `~/.config/agents-manager/config.toml` 是指到 dotfiles 的 symlink，launchd 用 `--config` 指著它啟動：
+    /// 資料目錄還是 symlink 所在的目錄，不能搬到 symlink 目標那邊開一顆空 DB（review3 c3 L6）。
+    #[test]
+    fn a_symlinked_config_file_keeps_the_data_dir_where_the_link_is() {
+        let root = tmp("cfglink");
+        let home = root.join("home");
+        let dotfiles = root.join("dotfiles");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&dotfiles).unwrap();
+        std::fs::write(dotfiles.join("config.toml"), "[server]\nlisten = '127.0.0.1:7799'\n").unwrap();
+        std::os::unix::fs::symlink(dotfiles.join("config.toml"), home.join("config.toml")).unwrap();
+
+        let cfg = config_path(Some(home.join("config.toml")), None).unwrap();
+        assert!(same(cfg.parent().unwrap(), &home), "設定檔路徑留在 symlink 那邊：{}", cfg.display());
+        let dir = data_dir(&cfg, true, peek_data_dir(&cfg).as_deref(), None).unwrap();
+        assert!(same(&dir, &home), "資料目錄 {} 應該是 symlink 所在的目錄", dir.display());
+        assert!(!same(&dir, &dotfiles), "不能搬到 symlink 目標的目錄");
+        // AM_DATA_DIR 寫的是 symlink 所在的目錄（pane env 注入的就是它）：一致，不拒絕。
+        data_dir(&cfg, true, None, Some(home.clone())).unwrap();
+        // 目錄段的 symlink 照舊展開：目錄別名是同一個目錄。
+        std::os::unix::fs::symlink(&home, root.join("home-alias")).unwrap();
+        let aliased = config_path(Some(root.join("home-alias/config.toml")), None).unwrap();
+        assert!(same(&data_dir(&aliased, true, None, None).unwrap(), &home));
+        // 解析不了的設定檔 symlink 照舊拒絕（不讓 ConfigStore::load 寫預設 config 蓋掉它）。
+        std::os::unix::fs::symlink(root.join("nowhere.toml"), home.join("dangling.toml")).unwrap();
+        let err = config_path(Some(home.join("dangling.toml")), None).unwrap_err();
+        assert!(format!("{err:#}").contains("symlink"), "{err:#}");
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// 先在字面上消 `..` 會錯解 symlink：`/a/link/../state`（link → `/b/c`）真正是 `/b/state`。
