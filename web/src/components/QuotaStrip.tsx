@@ -296,10 +296,12 @@ function Bar({
   critical: boolean
   mark: number | null
   markTitle?: string
-  /** 用完的那條：把右邊那個不會再動的「0」換成重置時刻與倒數（2026-09-14 使用者）。 */
+  /** 快回來的那條：右邊的百分比換成倒數（2026-09-14 使用者）；這時**量表條也不畫**（2026-09-17 使用者：
+   *  剩不到 10% 的條又短又細，看不出東西，只要數字）。 */
   instead?: ReactNode
 }) {
   const lv = levelOf({ low, critical })
+  if (instead) return <span className="quota-bar-row countdown">{instead}</span>
   return (
     <span className="quota-bar-row">
       <span className="quota-bar-wrap">
