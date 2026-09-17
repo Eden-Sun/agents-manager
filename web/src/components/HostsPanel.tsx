@@ -339,6 +339,155 @@ function LocalHostRow() {
   )
 }
 
+
+function RemoteCargoPanel() {
+  const [loaded, setLoaded] = useState(false)
+  const [enabled, setEnabled] = useState(false)
+  const [host, setHost] = useState('')
+  const [user, setUser] = useState('')
+  const [port, setPort] = useState('22')
+  const [root, setRoot] = useState('~/.cache/agents-manager/remote-cargo')
+  const [jobs, setJobs] = useState('4')
+  const [password, setPassword] = useState('')
+  const [passwordSet, setPasswordSet] = useState(false)
+  const [clearPassword, setClearPassword] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [message, setMessage] = useState('')
+
+  useEffect(() => {
+    let alive = true
+    void api.fetchRemoteCargoSettings().then(
+      (cfg) => {
+        if (!alive) return
+        setEnabled(cfg.enabled)
+        setHost(cfg.host)
+        setUser(cfg.user)
+        setPort(String(cfg.ssh_port))
+        setRoot(cfg.remote_root)
+        setJobs(String(cfg.cargo_jobs))
+        setPasswordSet(cfg.password_set)
+        setLoaded(true)
+      },
+      (e) => {
+        if (alive) {
+          setMessage(`讀取外部 Cargo 設定失敗：${e instanceof Error ? e.message : String(e)}`)
+          setLoaded(true)
+        }
+      },
+    )
+    return () => {
+      alive = false
+    }
+  }, [])
+
+  const save = async () => {
+    setBusy(true)
+    setMessage('')
+    try {
+      const cfg = await api.saveRemoteCargoSettings({
+        enabled,
+        host: host.trim(),
+        user: user.trim(),
+        ssh_port: Number(port) || 22,
+        remote_root: root.trim() || '~/.cache/agents-manager/remote-cargo',
+        cargo_jobs: Math.max(1, Number(jobs) || 4),
+        ...(password ? { password } : clearPassword ? { password: '' } : {}),
+      })
+      setPassword('')
+      setClearPassword(false)
+      setPasswordSet(cfg.password_set)
+      setMessage('✓ 已儲存。新啟動的本機 Bot 會自動使用外部 Cargo verification。')
+    } catch (e) {
+      setMessage(`儲存失敗：${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const test = async () => {
+    setBusy(true)
+    setMessage('')
+    try {
+      // 未儲存的新密碼先寫入，避免「測試」其實測到舊 credential。
+      if (password || clearPassword) await save()
+      const r = await api.testRemoteCargo()
+      setMessage(`✓ SSH/Cargo 可用（${r.password_auth ? '密碼' : 'SSH key/agent'}）：\n${r.output}`)
+    } catch (e) {
+      setMessage(`測試失敗：${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (!loaded) return <p className="hint">讀取外部 Cargo 設定…</p>
+
+  return (
+    <section className="remote-cargo-settings">
+      <div className="settings-subhead">
+        <strong>外部 Cargo 主機</strong>
+        <span className="hint">開發者功能：把 check/test/clippy 移到另一台 SSH 主機，build 仍留本機。</span>
+      </div>
+      <label className="field checkbox-field">
+        <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
+        <span>啟用外部 Cargo verification</span>
+      </label>
+      <div className="remote-cargo-grid">
+        <label className="field">
+          <span>主機 / IP</span>
+          <input value={host} placeholder="192.168.1.20" spellCheck={false} onChange={(e) => setHost(e.target.value)} />
+        </label>
+        <label className="field">
+          <span>SSH 帳號</span>
+          <input value={user} placeholder="builder" spellCheck={false} onChange={(e) => setUser(e.target.value)} />
+        </label>
+        <label className="field">
+          <span>SSH port</span>
+          <input value={port} spellCheck={false} onChange={(e) => setPort(e.target.value)} />
+        </label>
+        <label className="field">
+          <span>遠端 cargo jobs</span>
+          <input value={jobs} spellCheck={false} onChange={(e) => setJobs(e.target.value)} />
+        </label>
+      </div>
+      <label className="field">
+        <span>遠端工作目錄</span>
+        <input value={root} spellCheck={false} onChange={(e) => setRoot(e.target.value)} />
+      </label>
+      <label className="field">
+        <span>SSH 密碼（可留空使用 key / ssh-agent）</span>
+        <input
+          type="password"
+          value={password}
+          autoComplete="new-password"
+          placeholder={passwordSet ? '已安全儲存；留空不變' : '未設定'}
+          onChange={(e) => {
+            setPassword(e.target.value)
+            if (e.target.value) setClearPassword(false)
+          }}
+        />
+        <span className="hint">
+          密碼不寫入 config.toml、不回傳前端；daemon 只存 0600 secret file。密碼模式需要本機有 sshpass。
+        </span>
+      </label>
+      {passwordSet ? (
+        <label className="field checkbox-field">
+          <input type="checkbox" checked={clearPassword} onChange={(e) => setClearPassword(e.target.checked)} />
+          <span>清除已存密碼，改用 SSH key / agent</span>
+        </label>
+      ) : null}
+      <div className="form-actions">
+        <button type="button" className="btn" disabled={busy || !host.trim() || !user.trim()} onClick={() => void test()}>
+          測試連線
+        </button>
+        <button type="button" className="btn primary" disabled={busy || (enabled && (!host.trim() || !user.trim()))} onClick={() => void save()}>
+          {busy ? '處理中…' : '儲存'}
+        </button>
+      </div>
+      {message ? <pre className="host-result">{message}</pre> : null}
+    </section>
+  )
+}
+
 export function HostsPanel() {
   const hosts = useStore((s) => s.hosts)
   const [result, setResult] = useState<HostResult | null>(null)
@@ -365,6 +514,7 @@ export function HostsPanel() {
         </div>
       ) : null}
       <NewHostForm onResult={setResult} />
+      <RemoteCargoPanel />
     </div>
   )
 }
