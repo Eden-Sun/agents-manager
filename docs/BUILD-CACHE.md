@@ -6,9 +6,12 @@
 編譯常常是整條產線的瓶頸。
 
 sccache 理論上補的是這一塊：它快取「rustc 這一次呼叫的輸出」，用內容雜湊當 key，跟輸出放在哪個
-`target/` 目錄無關。**這份文件也誠實記錄了目前量到的結果：接上去之後，這個 repo 實測的命中率
-還是接近 0%**——原因與已排除、未排除的可能性見下面「現況與量到的數字」。已經確定有效、值得先合進
-main 的是「wrapper 骨架＋不硬性依賴」這件事本身（見「怎麼接上去的」），命中率的問題留給下一輪。
+`target/` 目錄無關。**第二輪（見下面「第二輪：root cause」）已經把命中率接近 0% 的原因查到底
+了——結論是負面的**：sccache 0.18.0 的 Rust 快取路徑跟這個專案「每個 worktree 各自
+`CARGO_TARGET_DIR`」的架構本質衝突，不是設定沒調對，官方文件建議的解法（`SCCACHE_BASEDIRS`）
+在 Rust 這條路徑上也沒有實作，換 target dir 之後不太可能拿到跨 worktree 的命中。已經確定有效、
+值得先合進 main 的是「wrapper 骨架＋不硬性依賴」這件事本身（見「怎麼接上去的」）——這部分完全
+不受這個結論影響，繼續留著當安全網。
 
 ## 怎麼接上去的
 
@@ -86,6 +89,83 @@ sccache 命中率接近 0%，還沒有拿到「兩個 worktree 共用快取」�
 
 **建議**：下一輪先用 `SCCACHE_LOG=debug SCCACHE_ERROR_LOG=/tmp/sccache.log` 重跑一次 cold／warm
 兩輪，直接看 sccache 自己記錄的 hash 輸入，而不是像這一輪一樣用排除法猜。
+
+## 第二輪：root cause 確認（2026-09-18）
+
+**结論先講：查到底了，是負面結論**——sccache 0.18.0 對 Rust 的快取路徑跟「每個 worktree 各自
+`CARGO_TARGET_DIR`」這個架構前提衝突，不是這個 repo 設定沒調好，官方文件建議的正規化解法在
+Rust 這條路徑上也沒有實作。第一輪「不是 `--out-dir`／`-L dependency=` 本身」那條排除，**這一輪
+推翻**：第一輪的最小重現手寫了一個簡化過的 `sccache rustc` 呼叫，形狀跟 cargo 真正產生的呼叫
+對不起來，才會誤判成「有正規化」。
+
+**方法**：不再對整個 `agents-managerd` 重跑 cold／warm（吃 cargo 名額，量測雜訊也大），改用一顆
+兩個檔案、零依賴風險的最小 crate（`oncetest`，只依賴 `once_cell = "=1.21.4"`，跟 `Cargo.lock`
+釘的版本一致，沒有 `build.rs`），接上這個 repo 真正的 `scripts/sccache-wrapper.sh`，透過
+`SCCACHE_SERVER_PORT` 開一個獨立的 sccache server／`SCCACHE_DIR`（不影響其他 agent 正在用的那個
+共用 server），`SCCACHE_LOG=debug SCCACHE_ERROR_LOG=...` 直接看 sccache 記錄的 hash key 與參數。
+真正吃 cargo 名額的呼叫一樣全部走 `cargo-slot.sh`。
+
+**查到的第一個坑（測試方法論，不是 sccache 的問題）**：一開始用 `--manifest-path` 指到
+`oncetest/Cargo.toml`、但從別的目錄呼叫 `cargo-slot.sh`，wrapper 完全沒被呼叫到（`sccache
+--show-stats` 掛的請求數是 0）。原因：**cargo 找 `.cargo/config.toml` 是照「呼叫當下的目前工作
+目錄」往上找，不是照 `--manifest-path` 所在的目錄**——這個坑也可能影響到過去派工指令裡「沒有先
+`cd` 進 worktree、只給 `CARGO_TARGET_DIR` 就直接呼叫 `cargo-slot.sh`」的呼叫，值得所有子 agent
+往後留意：呼叫 `cargo-slot.sh` 前先 `cd` 進那個 worktree 的目錄，不要只給 `--manifest-path`。
+改成先 `cd` 進 crate 目錄之後，wrapper 才真正被呼叫、sccache 才真的介入。
+
+**核心證據**：修好呼叫方式之後，`once_cell`（零依賴、沒有 `build.rs`）這種最單純的情況：
+- **同一個 `CARGO_TARGET_DIR` 重編一次**（其他都不動）→ **命中**（2/2）。
+- **换成另一個 `CARGO_TARGET_DIR` 重編一次**（原始碼、`SCCACHE_DIR`、sccache server session
+  都不動，只換 target dir）→ **完全沒中**（0/2）。
+
+直接比對 `SCCACHE_LOG=debug` 印出來的兩次 `once_cell` `Hash key:`，兩把 key 不一樣，而 cargo
+產生的完整 rustc 參數列表裡，兩次唯一的差異就是 `--out-dir`／`-L dependency=`（值跟著
+`CARGO_TARGET_DIR` 走）——`-C metadata=`／`-C extra-filename=` 兩次完全一樣（跟第一輪的排除
+結果一致）。這證明：**只要 `CARGO_TARGET_DIR` 换掉，這個 sccache 版本對 Rust 編譯的雜湊鍵就會
+換，不需要任何 `build.rs`／`OUT_DIR` 涉入就會發生**——第一輪懷疑的「有 `build.rs` 的 crate 才會
+不命中」不是主要原因，連最單純的葉節點依賴都不命中。
+
+**追查機制、但沒有完全對上**：查了 sccache 上游原始碼（`src/compiler/rust.rs`，
+`generate_hash_key`）。原始碼註解明講 `-L`／`--extern`／`--out-dir` 這幾個旗標**本身**會被排除在
+雜湊之外（換句話說，官方設計是「不管路徑字串，只雜湊路徑指到的檔案內容」），但同一段
+`generate_hash_key` 也明講會把**「這次編譯的 cwd」**放進雜湊（原文大意：cwd 會跑進編出來的
+rlib 裡）。這一輪的重現裡，`once_cell` 是從 `~/.cargo/registry` 讀出來編的、`oncetest` 是從固定
+的 crate 目錄編的，兩次呼叫的作業系統層級 cwd 照理說不會因為换了 `CARGO_TARGET_DIR` 而變──但
+實際命中率就是變了。**這一輪沒能在剩下的時間內把「原始碼講的排除清單」跟「實測觀察到的雜湊鍵
+變化」完全對上**，可能是這個雜湊還吃了什麼還沒找到的間接輸入（例如 dep-info 裡記的路徑、或
+`--out-dir`／`-L dependency=` 雖然字串本身被排除、但透過某個間接管道還是讓 hash 內容跟著變）。
+**誠實記錄這個沒對上的地方，不假裝已經完全弄懂內部機制**——但下面這個事實已經用直接對照
+`Hash key:` 與可重複的 A/B 測試釘住，不受這個機制細節影響。
+
+**官方建議的解法測過了，沒用**：sccache 文件建議用 `SCCACHE_BASEDIRS`（`:` 分隔的絕對路徑清單，
+把落在清單裡任一目錄底下的路徑，雜湊前先換算成相對路徑，讓不同機器/不同目錄結構的建置也能對上
+同一把 key）解決這類問題。這一輪測過：
+1. `strings` 直接查已安裝的 `sccache` 執行檔，確認 `SCCACHE_BASEDIRS` 這個字串真的在二進位裡
+   （不是編譯掉的功能）。
+2. 重啟一份獨立的 debug sccache server（不影響其他 agent 正在用的共用 server），啟動時就把
+   `oncetest` 用到的兩個 `CARGO_TARGET_DIR` 都塞進 `SCCACHE_BASEDIRS`（環境變數是伺服器啟動時
+   讀的設定，不是每個請求各自帶的，這裡有先重開伺服器確保設定生效）。
+3. 結果：**還是 0 命中**，跟沒設 `SCCACHE_BASEDIRS` 一樣。
+
+再查 `sccache` 二進位裡 `SCCACHE_BASEDIRS` 附近的字串，找到關鍵字：`"Stripping basedirs from
+preprocessor output with length "`——**這個正規化是接在「preprocessor 快取模式」（C/C++ 那條路）
+上的，不是 Rust 這條完全不同的雜湊路徑**。直接抓 sccache 上游 `src/compiler/rust.rs` 原始碼比對
+過，裡面完全沒有任何 `basedir` 相關的呼叫。這就是「照文件設定了，卻沒有效果」的原因：**這個版本
+的 sccache 對 Rust 編譯根本沒有實作 basedir 正規化**，不是我們設定錯。
+
+**結論（可以拿去用的部分）**：
+- 這個 repo「每個 worktree 各自 `CARGO_TARGET_DIR`」的架構要求，跟 sccache 0.18.0 對 Rust 編譯
+  的雜湊鍵設計互斥——換 target dir 幾乎保證雜湊鍵跟著換，不管專案多大、有沒有 `build.rs`，連
+  最單純的零依賴葉節點都一樣。這不是「調參數就能修好」的問題，是這個版本的 sccache 對 Rust 的
+  已知限制（官方的路徑正規化解法只覆蓋 C/C++ 路徑）。
+- issue #91 的驗收條件之一「兩個管理中的 worktree 編相同未改動依賴能拿到快取命中」**在目前的
+  sccache 版本、目前的架構要求下判定為做不到**，不是還沒查出來，建議把這條標成「已知不可行」
+  而不是繼續調參數重跑量測。
+- Wrapper 骨架（`.cargo/config.toml` 指到 `scripts/sccache-wrapper.sh`、沒裝 sccache 就原生
+  退化、濾掉 `-C incremental=`）本身正確、安全、零成本退化，這個結論不影響它繼續留著；只是
+  「跨 worktree 命中」這個目標效果，不建議再花時間追。
+- 沒有評估過、也不在這次範圍內的下一步（如果之後還要追這個目標）：換一個對 Rust 有實作
+  basedir/路徑正規化的編譯快取工具、或重新考慮「每個 worktree 各自 target dir」這個前提本身。
 
 ## 快取位置與大小上限
 
