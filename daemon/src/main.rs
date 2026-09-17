@@ -173,7 +173,9 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     startup::set_instance(slug.clone());
     let cfg = store.get().await;
     tracing::info!(config = %cfg_path.display(), data_dir = %dir.display(), instance = slug.as_deref().unwrap_or("default"), listen = %cfg.server.listen, session = %cfg.server.herdr_session, "starting agents-managerd");
-    projection::project_config(&store, &pool).await.context("project config into sqlite")?;
+    projection::project_config_at_startup(&store, &pool, projection::bulk_delete_allowed_by_env())
+        .await
+        .context("project config into sqlite")?;
 
     let herdr_client = state::ensure_session(&cfg.server.herdr_session, &dir).await?;
     let pong = herdr_client.ping().await?;

@@ -26,7 +26,7 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
 
 寫設定的 API（建專案／建 bot／改設定／排序／還原）在投影被大量軟刪閘門擋下來時回
 `409 {"reason":"projection_refused", message, config_written:true, bots, projects, allow_env}`——不是 502：那代表 config.toml 看起來被外部改過，
-要做的事是去把那幾列補回來（或用 `AM_ALLOW_BULK_DELETE=1` 放行一次），不是去查 herdr。
+要做的事是去把那幾列補回來（或帶 `AM_ALLOW_BULK_DELETE=1` 重啟 daemon，只放行啟動那一次投影），不是去查 herdr。
 `config_written:true`：閘門在**寫檔之後**才判，這次的變更已經在 config.toml 裡、只是還沒套用。**不要重試同一個請求**
 （例如建專案會撞 `409 project path already registered`）；補回被擋的那幾列後，下一次任何寫設定或重啟就會套用。
 
