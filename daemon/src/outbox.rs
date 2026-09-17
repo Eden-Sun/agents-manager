@@ -10,12 +10,15 @@
 //! （`Content-Disposition: attachment` + `nosniff`，白名單外 `application/octet-stream`），
 //! 路徑解開符號連結後必須仍在這顆 bot 的 outbox 裡；私鑰／憑證／DB／隱藏檔照樣不列不給（[`withheld`]）。
 //!
-//! **下載（`file()`）用 [`crate::trusted_open`]**：從 `data_dir` 開始逐層 `openat(O_NOFOLLOW)` 一路開到
-//! 要的檔案（`outbox` 與 `<bot_id>` 兩段的符號連結／擁有者檢查、隱藏路徑、下面任一段被換成符號連結，全部
-//! 是同一次系統呼叫鏈擋下來），拿到的 fd 直接拿去 `fstat`／讀內容，不再用路徑名字重新 open（issue #89）。
-//! `list()` 的目錄可信檢查（[`dir_is_trusted`]）也改用同一個 primitive 的 fd／`fstat`，但列出檔名那步仍是
-//! 按路徑 `read_dir`——**刻意留下的範圍**：清單只回檔名／大小，不回內容，真正下載的內容路徑已經完全
-//! fd-bound，這裡的殘餘窗口最多讓清單暫時看到界線外的檔名，讀不到內容（docs/SPEC.md §6.5f）。
+//! **下載（`file()`）與列表（`list()`）都用 [`crate::trusted_open`]**：從 `data_dir` 開始逐層
+//! `openat(O_NOFOLLOW)` 一路開到要的檔案／目錄（`outbox` 與 `<bot_id>` 兩段的符號連結／擁有者檢查、
+//! 隱藏路徑、下面任一段被換成符號連結，全部是同一次系統呼叫鏈擋下來），拿到的 fd 直接拿去
+//! `fstat`／讀內容，不再用路徑名字重新 open（issue #89）。`list()`（[`scan`]）過去只有「這個目錄
+//! 可不可信」的檢查是 fd-bound，真正列舉那一步仍是路徑 `read_dir`——檢查通過之後、列舉之前，這顆
+//! bot 自己能把整個目錄換成指到界線外的符號連結，讓清單改列出界線外的檔名／大小。現在改成
+//! `open_trusted_dir` 拿到的目錄 fd 直接交給 [`trusted_open::read_dir_bound`]（`fdopendir`／
+//! `readdir`／`fstatat`），連內容判斷（[`content_is_withheld`]）也用同一個 fd 底下的
+//! `trusted_open::open_entry_in` 打開，全程不再用任何路徑重新解析（issue #96，docs/SPEC.md §6.5f）。
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -54,33 +57,32 @@ pub(crate) fn ensure(data_dir: &Path, bot_id: &str) -> Option<PathBuf> {
     Some(dir)
 }
 
-/// 這顆 bot 的 outbox 這條路本身能不能信：`outbox` 與 `<bot_id>` 兩段都不能是符號連結，擁有者要跟資料目錄
-/// 同一個 uid。用 [`trusted_open::open_bound_dir`] 逐層 `openat(O_NOFOLLOW)`＋`fstat` 查，不是分開
-/// `stat` 每一段再指望名字不變：bot 把自己的 outbox 換成指向 `~/.codex` 的連結，界線就整個搬過去，
-/// `auth.json` 列得出來、載得下來（review 2026-09-16 core 11 洞 1——原本在 scratchpad，換成 outbox 之後
-/// 同一個形狀還在）。還不存在的段落不算不安全（還沒寫過、被清理收掉）。
-pub(crate) fn dir_is_trusted(data_dir: &Path, dir: &Path) -> bool {
+/// 這顆 bot 的 outbox 這條路本身能不能信，順便把已經驗證過的目錄 fd 一併回傳：`outbox` 與 `<bot_id>`
+/// 兩段都不能是符號連結，擁有者要跟資料目錄同一個 uid。用 [`trusted_open::open_bound_dir`] 逐層
+/// `openat(O_NOFOLLOW)`＋`fstat` 查，不是分開 `stat` 每一段再指望名字不變：bot 把自己的 outbox 換成
+/// 指向 `~/.codex` 的連結，界線就整個搬過去，`auth.json` 列得出來、載得下來（review 2026-09-16 core 11
+/// 洞 1——原本在 scratchpad，換成 outbox 之後同一個形狀還在）。`list()` 直接拿這裡回傳的 fd 交給
+/// [`trusted_open::read_dir_bound`]，可信檢查跟列舉共用同一次 `openat` 鏈開出來的同一個 fd，不是
+/// 「查完路徑安全 → 再用路徑名字重新 open 一次去列」（issue #96，跟 #89 是同一個形狀）。
+/// `Ok(None)`：這一段還沒建過，不算不安全（還沒寫過、被清理收掉）。`Err(())`：符號連結或不是同一個 owner。
+fn open_trusted_dir(data_dir: &Path, dir: &Path) -> Result<Option<std::fs::File>, ()> {
     use std::os::unix::fs::MetadataExt as _;
-    let Ok(owner) = std::fs::metadata(data_dir).map(|m| m.uid()) else { return false };
-    let Ok(rel) = dir.strip_prefix(data_dir) else { return false };
+    let owner = std::fs::metadata(data_dir).map(|m| m.uid()).map_err(|_| ())?;
+    let rel = dir.strip_prefix(data_dir).map_err(|_| ())?;
     if rel.as_os_str().is_empty() {
-        return true;
+        return trusted_open::open_bound_dir(data_dir, &[], Some(owner)).map(Some).map_err(|_| ());
     }
-    let Some(components) = trusted_open::safe_relative_components(rel) else { return false };
+    let components = trusted_open::safe_relative_components(rel).ok_or(())?;
     match trusted_open::open_bound_dir(data_dir, &components, Some(owner)) {
-        Ok(_) => true,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
-        Err(_) => false,
+        Ok(f) => Ok(Some(f)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(()),
     }
 }
 
 /// 不列、不給下載的檔案（2a96096 的黑名單，在 outbox 上保留當第二道：規則本來就禁止放這些，放了也拿不走）。
-/// 先看名字（隱藏檔、資料庫與它的旁檔、金鑰與憑證），名字看不出來的再看開頭幾個位元組（改過副檔名的 SQLite、PEM 私鑰）。
-pub(crate) fn withheld(path: &Path) -> bool {
-    let name = path.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
-    withheld_name(&name) || withheld_content(path)
-}
-
+/// 先看名字（隱藏檔、資料庫與它的旁檔、金鑰與憑證），名字看不出來的再看開頭幾個位元組（改過副檔名的 SQLite、PEM 私鑰，
+/// 見 [`content_is_withheld`]，[`scan`] 與 [`file`] 都是讀已經開好的 fd，不重新用路徑名字 open）。
 fn withheld_name(name: &str) -> bool {
     if name.starts_with('.') {
         return true;
@@ -98,18 +100,8 @@ fn withheld_name(name: &str) -> bool {
         || ["id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"].iter().any(|k| name.starts_with(k))
 }
 
-/// 按路徑開一次讀檔頭——只有 [`scan`]（列表用，不回內容）在用。真正要下載的內容一律走
-/// [`content_is_withheld`]，讀已經開好的那個 fd，不重新用路徑名字 open。
-fn withheld_content(path: &Path) -> bool {
-    use std::io::Read;
-    let mut head = [0u8; 64];
-    let Ok(mut f) = std::fs::File::open(path) else { return false };
-    let n = f.read(&mut head).unwrap_or(0);
-    content_is_withheld(&head[..n])
-}
-
-/// [`withheld_content`] 的內容判斷本體，吃已經讀進來的位元組（下載那條路用，見 [`open_outbox_entry`]
-/// 的呼叫端）。
+/// 內容判斷本體，吃已經讀進來的位元組：[`scan`]（列表，開 [`trusted_open::open_entry_in`] 讀檔頭）與
+/// [`file`]（下載，見 [`open_outbox_entry`] 的呼叫端）都用同一個 fd 讀出來的內容餵這裡，不重新用路徑名字 open。
 fn content_is_withheld(head: &[u8]) -> bool {
     let head = &head[..head.len().min(64)];
     if head.starts_with(b"SQLite format 3\0") {
@@ -189,24 +181,38 @@ fn content_disposition(name: &str) -> String {
     format!("attachment; filename=\"{safe}\"; filename*=UTF-8''{encoded}")
 }
 
-/// 目錄裡可以列出來的檔案：第一層的一般檔案（符號連結、子目錄不列），不是 [`withheld`]，新的排前面。
-/// 每個帶 `expires_at`（mtime + [`TTL_SECS`]，AGM 清理看的也是 mtime）與 `remaining_secs`（到期了是 0，
-/// 清理每 10 分鐘才跑一次，所以 0 的檔案還會在清單上待一下）。
-pub(crate) fn scan(dir: &Path, now: u64) -> Vec<serde_json::Value> {
+/// 目錄裡可以列出來的檔案：第一層的一般檔案（符號連結、子目錄不列），名字與內容都不是黑名單
+/// （[`withheld_name`]／[`content_is_withheld`]），新的排前面。每個帶 `expires_at`（mtime + [`TTL_SECS`]，
+/// AGM 清理看的也是 mtime）與 `remaining_secs`（到期了是 0，清理每 10 分鐘才跑一次，所以 0 的檔案還會在
+/// 清單上待一下）。`dir` 是呼叫端已經驗證過（[`open_trusted_dir`]）拿到的目錄 fd：列舉
+/// （[`trusted_open::read_dir_bound`]）與逐一開檔看內容（[`trusted_open::open_entry_in`]）全程都掛在
+/// 這個 fd 底下，不再用任何路徑名字重新解析——檢查通過之後這個目錄被整個換成符號連結也不影響列出來的內容
+/// （issue #96）。
+pub(crate) fn scan(dir: &std::fs::File, now: u64) -> Vec<serde_json::Value> {
     let mut files = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for e in entries.flatten() {
-            let Ok(meta) = e.metadata() else { continue };
-            if !meta.is_file() || withheld(&e.path()) {
+    if let Ok(entries) = trusted_open::read_dir_bound(dir) {
+        for e in entries {
+            if !e.is_file {
                 continue;
             }
-            let modified = meta
-                .modified()
+            let name = e.name.to_string_lossy().into_owned();
+            if withheld_name(&name.to_ascii_lowercase()) {
+                continue;
+            }
+            let is_withheld = trusted_open::open_entry_in(dir, &e.name)
                 .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            files.push((e.file_name().to_string_lossy().into_owned(), meta.len(), modified));
+                .map(|mut f| {
+                    use std::io::Read;
+                    let mut head = [0u8; 64];
+                    let n = f.read(&mut head).unwrap_or(0);
+                    content_is_withheld(&head[..n])
+                })
+                .unwrap_or(true); // 開不起來（例如列舉之後又被換掉）就當作要擋，不列。
+            if is_withheld {
+                continue;
+            }
+            let modified = e.modified.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            files.push((name, e.size, modified));
         }
     }
     files.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
@@ -244,21 +250,26 @@ pub async fn list(State(app): State<Arc<App>>, UrlPath(id): UrlPath<String>) -> 
         }
         Err(e) => return Err(e),
     };
-    // 可信檢查跟 read_dir 擺進同一個 blocking closure：中間沒有 `.await`，兩者之間可以被換掉的窗口只剩
-    // 系統呼叫等級的縫隙（不像先前隔著一次 async 排程，attacker 有整段排隊時間可以動手）。
+    // 可信檢查（拿到目錄 fd）跟真正列舉擺進同一個 blocking closure、共用同一個 fd：中間沒有
+    // `.await`，也沒有「查完路徑 → 之後再用路徑重新 open 去列」這一步，這顆 bot 自己把目錄整個換成
+    // 符號連結也換不掉已經拿在手上的 fd（issue #96）。
     let data_dir = app.data_dir.clone();
     let scan_dir = dir.clone();
-    let (trusted, files) = tokio::task::spawn_blocking(move || {
-        let trusted = dir_is_trusted(&data_dir, &scan_dir);
-        let files = if trusted { scan(&scan_dir, now_secs()) } else { Vec::new() };
-        (trusted, files)
+    let now = now_secs();
+    let outcome = tokio::task::spawn_blocking(move || match open_trusted_dir(&data_dir, &scan_dir) {
+        Ok(Some(fd)) => Ok(scan(&fd, now)),
+        Ok(None) => Ok(Vec::new()),
+        Err(()) => Err(()),
     })
     .await
-    .unwrap_or((false, Vec::new()));
-    if !trusted {
-        tracing::warn!(bot = %id, dir = %dir.display(), "outbox path is a symlink or not ours; not listing it");
-        return Ok((StatusCode::OK, axum::Json(json!({"files": [], "ttl_secs": TTL_SECS, "reason": "outbox_untrusted"}))).into_response());
-    }
+    .unwrap_or(Err(()));
+    let files = match outcome {
+        Ok(files) => files,
+        Err(()) => {
+            tracing::warn!(bot = %id, dir = %dir.display(), "outbox path is a symlink or not ours; not listing it");
+            return Ok((StatusCode::OK, axum::Json(json!({"files": [], "ttl_secs": TTL_SECS, "reason": "outbox_untrusted"}))).into_response());
+        }
+    };
     Ok((StatusCode::OK, axum::Json(json!({"dir": dir.to_string_lossy(), "ttl_secs": TTL_SECS, "files": files}))).into_response())
 }
 
@@ -397,7 +408,8 @@ mod tests {
         put("gh.token", b"abc");
         std::fs::write(root.join(".secret/plain.txt"), b"hi").unwrap();
 
-        let listed: Vec<String> = scan(&root, 0).iter().map(|f| f["name"].as_str().unwrap().to_string()).collect();
+        let fd = trusted_open::open_bound_dir(&root, &[], None).unwrap();
+        let listed: Vec<String> = scan(&fd, 0).iter().map(|f| f["name"].as_str().unwrap().to_string()).collect();
         assert_eq!(listed, vec!["report.md".to_string()], "只剩一般檔案");
         assert!(servable(&root, "report.md").is_some());
         for p in ["migrate-check.sqlite3", "bak1644.db", "bak1644.db-wal", "agents-manager.sqlite3.bak-20260916", "innocent.bin", "server.pem", "notes.txt", "id_ed25519", "prod.env", ".env", ".secret/plain.txt", "auth.json", "application_default_credentials.json", "hosts.yml", "ui-token", "gh.token"] {
@@ -412,13 +424,14 @@ mod tests {
         let base = scratch("ttl");
         std::fs::write(base.join("fresh.txt"), b"x").unwrap();
         std::fs::create_dir_all(base.join("folder")).unwrap();
-        let files = scan(&base, 0);
+        let fd = trusted_open::open_bound_dir(&base, &[], None).unwrap();
+        let files = scan(&fd, 0);
         assert_eq!(files.len(), 1, "子目錄不列：{files:?}");
         let modified = files[0]["modified"].as_u64().unwrap();
         assert!(modified > 0);
         assert_eq!(files[0]["expires_at"], json!(modified + TTL_SECS));
-        assert_eq!(scan(&base, modified + 600)[0]["remaining_secs"], json!(TTL_SECS - 600), "放了十分鐘剩五十分鐘");
-        assert_eq!(scan(&base, modified + TTL_SECS + 1)[0]["remaining_secs"], json!(0), "過期是 0，等清理");
+        assert_eq!(scan(&fd, modified + 600)[0]["remaining_secs"], json!(TTL_SECS - 600), "放了十分鐘剩五十分鐘");
+        assert_eq!(scan(&fd, modified + TTL_SECS + 1)[0]["remaining_secs"], json!(0), "過期是 0，等清理");
         std::fs::remove_dir_all(&base).unwrap();
     }
 
@@ -499,7 +512,7 @@ mod tests {
         std::fs::create_dir_all(outbox.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(&elsewhere, &outbox).unwrap();
 
-        assert!(!dir_is_trusted(&env.app.data_dir, &outbox));
+        assert!(matches!(open_trusted_dir(&env.app.data_dir, &outbox), Err(())));
         let (status, bytes) = body(list(State(env.app.clone()), UrlPath(bot.id.clone())).await.unwrap()).await;
         assert_eq!(status, StatusCode::OK);
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -508,9 +521,38 @@ mod tests {
 
         // 真的目錄照常；還沒建也不算不安全。
         std::fs::remove_file(&outbox).unwrap();
-        assert!(dir_is_trusted(&env.app.data_dir, &outbox), "還沒建");
+        assert!(matches!(open_trusted_dir(&env.app.data_dir, &outbox), Ok(None)), "還沒建");
         ensure(&env.app.data_dir, &bot.id).unwrap();
-        assert!(dir_is_trusted(&env.app.data_dir, &outbox));
+        assert!(matches!(open_trusted_dir(&env.app.data_dir, &outbox), Ok(Some(_))));
+    }
+
+    /// issue #96：`list()` 舊實作是「可信檢查（[`open_trusted_dir`]，fd-bound）→ 之後再用路徑 `read_dir`
+    /// 重新列一次」，檢查通過之後、真正列舉之前，這顆 bot 自己能把整個目錄換成指到界線外的符號連結，讓
+    /// 清單改列出界線外的檔名／大小。現在 [`open_trusted_dir`] 拿到的目錄 fd 直接交給 [`scan`]，兩者是
+    /// 同一次 [`list`] 呼叫裡同一個 `spawn_blocking` 用的同一個 fd——這裡重現「檢查通過拿到 fd 之後、
+    /// 真正列舉之前，把路徑換掉」這個時序：列出來的還是拿到 fd 當下那個目錄的內容，不是換過去的目標。
+    #[test]
+    fn listing_follows_the_fd_from_the_trust_check_not_a_path_swapped_afterward() {
+        let base = scratch("list-race");
+        let data_dir = base.join("data");
+        let outbox_dir = data_dir.join("outbox").join("BOT01");
+        std::fs::create_dir_all(&outbox_dir).unwrap();
+        std::fs::write(outbox_dir.join("report.md"), b"# safe").unwrap();
+
+        // list() 的第一步：可信檢查，拿到已經打開的目錄 fd。
+        let fd = open_trusted_dir(&data_dir, &outbox_dir).unwrap().expect("目錄存在，該給 fd");
+
+        // 檢查通過之後、真正列舉之前：整個目錄搬到旁邊（內容不動），原本的名字換成指到界線外的符號連結。
+        std::fs::rename(&outbox_dir, data_dir.join("outbox").join("moved-aside")).unwrap();
+        let elsewhere = base.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("secret.txt"), b"host secret").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &outbox_dir).unwrap();
+
+        // list() 的第二步：拿著同一個 fd 去列，不重新解一次路徑。
+        let listed: Vec<String> = scan(&fd, 0).into_iter().map(|f| f["name"].as_str().unwrap().to_string()).collect();
+        assert_eq!(listed, vec!["report.md".to_string()], "列到的是拿到 fd 當下那個目錄，不是換過去的 elsewhere");
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     /// issue #89：舊實作是「查完路徑安全 → 再用路徑名字重新 open 一次」，兩次 open 之間，這顆 bot 自己

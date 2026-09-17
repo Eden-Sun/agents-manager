@@ -13,13 +13,14 @@
 //!
 //! 只支援 Unix（`libc::openat`／`O_NOFOLLOW`）——這個 daemon 只在 macOS 上跑，沒有另外做 Windows 的路。
 
-use std::ffi::{CString, OsStr};
+use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fs::File;
 use std::io;
-use std::os::unix::ffi::OsStrExt as _;
+use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::os::unix::fs::MetadataExt as _;
 use std::os::unix::io::{AsRawFd, FromRawFd as _};
 use std::path::{Component, Path};
+use std::time::{Duration, SystemTime};
 
 fn cstr(part: &OsStr) -> io::Result<CString> {
     CString::new(part.as_bytes()).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path component has an embedded NUL"))
@@ -88,11 +89,86 @@ pub(crate) fn open_bound_file(base: &Path, components: &[&OsStr], owner_uid: Opt
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty path"));
     };
     let dir = open_bound_dir(base, dirs, owner_uid)?;
+    open_entry_in(&dir, name)
+}
+
+/// 打開 `dir`（呼叫端已經驗證、開好的目錄 fd，例如 [`read_dir_bound`] 列出來的一筆）底下的 `name`：
+/// `O_NOFOLLOW`，並確認是一般檔案。跟 [`open_bound_file`] 的差別是這裡不重新從某個 `base` 逐層解一次
+/// 路徑到 `dir`——呼叫端手上已經有驗證過的目錄 fd，只是要打開它底下**這一個**項目而已（issue #96：
+/// `outbox::scan()` 判斷一個檔案要不要列出來得看內容開頭幾個位元組，這個判斷也要在同一個已驗證的
+/// 目錄 fd 底下做，不能又用路徑重新 open 一次那個檔名）。
+pub(crate) fn open_entry_in(dir: &File, name: &OsStr) -> io::Result<File> {
     let file = openat_raw(dir.as_raw_fd(), name, libc::O_RDONLY | libc::O_NOFOLLOW)?;
     if !file.metadata()?.is_file() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a regular file"));
     }
     Ok(file)
+}
+
+/// 一個目錄項目：名字、是不是一般檔案（符號連結／目錄／其他都是 `false`）、大小、mtime。
+pub(crate) struct BoundEntry {
+    pub name: OsString,
+    pub is_file: bool,
+    pub size: u64,
+    pub modified: SystemTime,
+}
+
+/// 列舉 `dir`（已經是 [`open_bound_dir`] 驗證、打開好的目錄 fd）裡的項目，全程只用這一個 fd：
+/// `fdopendir`／`readdir` 取檔名，`fstatat(dirfd, name, AT_SYMLINK_NOFOLLOW)` 取種類／大小／mtime——
+/// 不符號連結、不重新用路徑解析這個目錄本身，也不對任何一個項目重新用路徑 open（issue #96：
+/// 過去只有「這個目錄可不可信」的檢查是 fd-bound，列舉本身仍是路徑 `read_dir`，兩者中間有縫隙——
+/// 雖然只到檔名／大小外洩，讀不到內容，這裡把那道縫隙也封掉）。
+///
+/// `fdopendir` 要接管一個獨立的 fd，不能直接把 `dir.as_raw_fd()` 或它的 `dup()` 交給它：`dup` 出來的
+/// fd 跟原本的 fd 共用同一份 open file description，**含目錄的讀取位置**——讀到底再 `closedir`
+/// 之後，呼叫端手上的 `dir` 也會被推到跟著到底，下一次再列什麼都讀不到（這裡曾經這樣寫，被
+/// [`tests::the_directory_fd_stays_usable_after_listing`] 抓到）。改成對 `dir` 自己
+/// `openat(dir, ".", O_DIRECTORY)`：對同一個已經驗證過的目錄 fd 重新開一次「自己」，拿到的是完全
+/// 獨立的 open file description（位置各自獨立），`dir` 本身不管列幾次都不受影響；`"."` 是固定的
+/// 自我參照，不是外部可控、可以被換掉的名字，這一步沒有引入新的路徑解析風險。
+pub(crate) fn read_dir_bound(dir: &File) -> io::Result<Vec<BoundEntry>> {
+    let reopened = openat_raw(dir.as_raw_fd(), OsStr::new("."), libc::O_RDONLY | libc::O_DIRECTORY)?;
+    let raw = reopened.as_raw_fd();
+    let dp = unsafe { libc::fdopendir(raw) };
+    if dp.is_null() {
+        return Err(io::Error::last_os_error()); // `reopened` 掉出作用域時正常關掉這個 fd，不會外洩。
+    }
+    // fdopendir 成功之後這個 fd 的關閉交給 closedir；`reopened` 不用再自己關一次。
+    std::mem::forget(reopened);
+    struct DirGuard(*mut libc::DIR);
+    impl Drop for DirGuard {
+        fn drop(&mut self) {
+            unsafe { libc::closedir(self.0) };
+        }
+    }
+    let _guard = DirGuard(dp);
+
+    let mut out = Vec::new();
+    loop {
+        // 這個 DIR* 只有這個函式自己用（剛從 fdopendir 拿到，沒有分享給別的執行緒），單純的
+        // `readdir`（不是 `readdir_r`）沒有資料競爭的疑慮。
+        let entry = unsafe { libc::readdir(dp) };
+        if entry.is_null() {
+            break; // 到底了；讀不出更多東西一律當作到底，跟 `std::fs::read_dir` 出錯時 `.flatten()` 跳過一樣寧可少列不要出錯。
+        }
+        let name_bytes = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+        if name_bytes == b"." || name_bytes == b".." {
+            continue;
+        }
+        let name = OsString::from_vec(name_bytes.to_vec());
+        let Ok(name_c) = cstr(&name) else { continue };
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        // AT_SYMLINK_NOFOLLOW：查符號連結本身，不跟著它走——符號連結不列是既有規則，這裡沿用，
+        // 不會因為連結指到一個大檔案就把假的大小/mtime 交出去。
+        let rc = unsafe { libc::fstatat(dir.as_raw_fd(), name_c.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) };
+        if rc != 0 {
+            continue; // 讀到名字之後、fstat 之前又被刪掉：跳過，不是錯誤。
+        }
+        let is_file = (st.st_mode & libc::S_IFMT) == libc::S_IFREG;
+        let modified = SystemTime::UNIX_EPOCH + Duration::new(st.st_mtime.max(0) as u64, st.st_mtime_nsec.clamp(0, 999_999_999) as u32);
+        out.push(BoundEntry { name, is_file, size: st.st_size.max(0) as u64, modified });
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -178,6 +254,97 @@ mod tests {
         let base = scratch("dir-as-file");
         std::fs::create_dir_all(base.join("sub")).unwrap();
         assert!(open_bound_file(&base, &[OsStr::new("sub")], None).is_err());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    fn names_of(entries: &[BoundEntry]) -> Vec<String> {
+        let mut v: Vec<String> = entries.iter().map(|e| e.name.to_string_lossy().into_owned()).collect();
+        v.sort();
+        v
+    }
+
+    /// 一般檔案、目錄、指到界線外的符號連結混在一起：只有一般檔案 `is_file=true`，目錄與符號連結
+    /// 都要列出來（呼叫端自己決定要不要顯示），但 `is_file` 要分得出來——outbox 的 `scan()` 靠這個
+    /// 欄位把符號連結／子目錄濾掉。
+    #[test]
+    fn lists_regular_files_directories_and_symlinks_with_correct_kind() {
+        let base = scratch("list-kinds");
+        std::fs::create_dir_all(base.join("root/sub")).unwrap();
+        std::fs::write(base.join("root/a.txt"), b"hello").unwrap();
+        std::fs::write(base.join("outside.txt"), b"secret").unwrap();
+        std::os::unix::fs::symlink(base.join("outside.txt"), base.join("root/link.txt")).unwrap();
+        let dir = open_bound_dir(&base, &[OsStr::new("root")], None).unwrap();
+
+        let entries = read_dir_bound(&dir).unwrap();
+        assert_eq!(names_of(&entries), vec!["a.txt", "link.txt", "sub"]);
+        let file = entries.iter().find(|e| e.name == "a.txt").unwrap();
+        assert!(file.is_file);
+        assert_eq!(file.size, 5);
+        assert!(file.modified > SystemTime::UNIX_EPOCH);
+        let link = entries.iter().find(|e| e.name == "link.txt").unwrap();
+        assert!(!link.is_file, "符號連結不是一般檔案，就算它指到的是一般檔案");
+        let sub = entries.iter().find(|e| e.name == "sub").unwrap();
+        assert!(!sub.is_file);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// issue #96：先前只有「這個目錄可不可信」的檢查是 fd-bound，真正列舉那一步仍是路徑
+    /// `read_dir`——檢查通過之後、列舉之前，這顆 bot 自己可以把整個目錄換成指到界線外的符號連結，
+    /// 讓清單改列出界線外的檔名／大小（讀不到內容，但檔名本身就外洩了）。這裡重現那個窗口：先用
+    /// `open_bound_dir`（模擬「檢查通過」那一刻）拿到 fd，然後把 `root` 這個名字換掉（原本那個目錄
+    /// 整個改名挪走，`root` 這個名字改指到界線外——原本的目錄本身、裡面的 `a.txt` 完全沒被動過，
+    /// 只是換了個名字掛著），確認 `read_dir_bound` 讀到的還是原本那個 fd 綁的內容，不會跟著
+    /// 「`root` 現在指到哪裡」這個新狀態走。
+    #[test]
+    fn listing_follows_the_already_opened_fd_not_the_path_swapped_afterward() {
+        let base = scratch("list-swap");
+        std::fs::create_dir_all(base.join("root")).unwrap();
+        std::fs::write(base.join("root/a.txt"), b"hi").unwrap();
+        let dir = open_bound_dir(&base, &[OsStr::new("root")], None).unwrap();
+
+        // 檢查通過之後、真正列舉之前：原本的目錄改名挪到旁邊（內容原封不動），`root` 這個名字
+        // 讓給一個指到界線外的符號連結。
+        std::fs::rename(base.join("root"), base.join("root-moved-aside")).unwrap();
+        std::fs::create_dir_all(base.join("elsewhere")).unwrap();
+        std::fs::write(base.join("elsewhere/secret.txt"), b"nope").unwrap();
+        std::os::unix::fs::symlink(base.join("elsewhere"), base.join("root")).unwrap();
+
+        let entries = read_dir_bound(&dir).unwrap();
+        assert_eq!(names_of(&entries), vec!["a.txt"], "拿到的是原本那個 fd 綁的目錄，不是換過去的 elsewhere");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// 讀完一輪之後 fd 還能再讀一次（沒有被 `fdopendir` 弄壞、也沒有把呼叫端的 fd 關掉）。
+    #[test]
+    fn the_directory_fd_stays_usable_after_listing() {
+        let base = scratch("list-reuse");
+        std::fs::create_dir_all(base.join("root")).unwrap();
+        std::fs::write(base.join("root/a.txt"), b"hi").unwrap();
+        let dir = open_bound_dir(&base, &[OsStr::new("root")], None).unwrap();
+        assert_eq!(names_of(&read_dir_bound(&dir).unwrap()), vec!["a.txt"]);
+        std::fs::write(base.join("root/b.txt"), b"there").unwrap();
+        assert_eq!(names_of(&read_dir_bound(&dir).unwrap()), vec!["a.txt", "b.txt"], "同一個 fd 可以再列一次，看得到後來新增的檔案");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// `open_entry_in` 只認已經打開的目錄 fd 底下那一個項目：一般檔案放行，符號連結（就算指到界線外的
+    /// 一般檔案）跟目錄都拒絕，不會重新用路徑解析 `dir` 本身。
+    #[test]
+    fn open_entry_in_only_opens_a_regular_file_directly_under_the_given_fd() {
+        let base = scratch("entry-in");
+        std::fs::create_dir_all(base.join("root/sub")).unwrap();
+        std::fs::write(base.join("root/a.txt"), b"hi").unwrap();
+        std::fs::write(base.join("outside.txt"), b"secret").unwrap();
+        std::os::unix::fs::symlink(base.join("outside.txt"), base.join("root/link.txt")).unwrap();
+        let dir = open_bound_dir(&base, &[OsStr::new("root")], None).unwrap();
+
+        let mut f = open_entry_in(&dir, OsStr::new("a.txt")).unwrap();
+        let mut got = String::new();
+        std::io::Read::read_to_string(&mut f, &mut got).unwrap();
+        assert_eq!(got, "hi");
+        assert!(open_entry_in(&dir, OsStr::new("link.txt")).is_err(), "符號連結不能開");
+        assert!(open_entry_in(&dir, OsStr::new("sub")).is_err(), "目錄不是一般檔案");
+        assert!(open_entry_in(&dir, OsStr::new("missing.txt")).is_err());
         std::fs::remove_dir_all(&base).unwrap();
     }
 
