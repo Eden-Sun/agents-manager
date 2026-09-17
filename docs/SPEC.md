@@ -1589,7 +1589,9 @@ supervisor 相關資料表與欄位都是 additive，`db::migrate` 重跑冪等�
    ＋ `mission pause --reason clarify`），不猜。與其他未結案交辦的 ownership 重疊 → 先排隊，在任務記 `note`。
 2. **執行者**：`mission pick --role executor` → `use` 就用該身分（`model` 有值要換模型）開臨時 bot（乾淨 worktree，命名
    `agm-mission-<id 尾 6 碼>-exec`），`assign --mission <id> --role executor`，文字含：指示原文、cwd、ownership、完成條件、
-   「推 origin/main 由 AGM 交付，執行者只推 task branch」。`wait` → 什麼都不做，controller 會依 `quota_blocked` 續派；
+   「推 origin/main 由 AGM 交付，執行者只推 task branch」。`wait` → **照樣**用 `pick` 回的那個身分開臨時 bot 並 `assign --mission`：派送時 daemon 查到撞限，
+   交辦停在 `quota_blocked`，額度回來 controller 自己重送（`assignment_quota_resumed`）。不要「什麼都不做」——
+   那時候還沒有任何交辦，額度回來也沒有東西會叫醒你，任務會永遠停在「等 AGM 接手…」（review3 c1 M12）。
    `ask_user` 只會出現在驗證者。
 3. **reviewer**：執行者回合結束並 `review accept` 後，`mission pick --role reviewer --exclude <執行者身分>`；
    `no_independent_reviewer` → 跳過 reviewer、記 `note`「執行者自審＋驗證者把關」。reviewer 只讀 diff，回 `am-review`

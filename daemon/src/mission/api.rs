@@ -1191,6 +1191,7 @@ mod tests {
     use super::*;
     use crate::quota::{Quota, Window};
 
+
     fn new_mission(crid: &str, mode: &str) -> NewMissionIn {
         NewMissionIn {
             text: "把設定頁的錯字修掉".into(),
@@ -1776,6 +1777,49 @@ mod tests {
         store::add_event(&app.db, &id, "verified", "舊版記的", Some("daemon"), &json!({})).await.unwrap();
         let err = post_deliver(State(app.clone()), Path(id.clone()), Json(deliver_from(&env.repo))).await.unwrap_err();
         assert_eq!(conflict_reason(err), "verified_without_sha");
+    }
+
+    /// runbook 第 2 步：`pick` 回 `wait` 時照樣開 bot 並 `assign --mission`——派送時 daemon 查到撞限，
+    /// 交辦停在 `quota_blocked`，額度回來 controller 自己重送。什麼都不做的話沒有任何東西會叫醒 AGM，
+    /// 任務永遠停在「等 AGM 接手…」（review3 c1 M12）。
+    #[tokio::test]
+    async fn assigning_on_a_wait_pick_parks_the_work_on_quota_instead_of_stalling_the_mission() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        crate::supervisor::store::get_or_init(&app.db).await.unwrap();
+        let agm = crate::testing::claude_bot(&app, &env.project_id, "AGM").await;
+        crate::supervisor::store::set_env(&app.db, &agm.id, &env.project_id, "/tmp").await.unwrap();
+        let exec = crate::testing::claude_bot(&app, &env.project_id, "agm-mission-exec").await;
+        sqlx::query("UPDATE bots SET identity = 'cc2' WHERE id = ?").bind(&exec.id).execute(&app.db).await.unwrap();
+
+        let mut input = new_mission("wait-pick", "pr");
+        input.on_5h_limit = "wait".into();
+        let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(input)).await.unwrap();
+        let id = m["id"].as_str().unwrap().to_string();
+        // cc2 的 5h 窗撞限（橫幅講明是 5h），任務選了「等重置」。
+        {
+            let mut q = quota(10.0);
+            q.five_hour = Some(Window { used_pct: 100.0, resets_at: Some("2999-01-01T05:00:00Z".into()) });
+            q.limit_hit = Some(crate::quota::LimitHit {
+                message: "You've hit your 5-hour limit".into(),
+                until: Some("2999-01-01T05:00:00Z".into()),
+                at: crate::db::now(),
+                bucket: Some("five_hour".into()),
+            });
+            app.quotas.lock().await.insert("claude:cc2".into(), q);
+        }
+        let Json(p) = get_pick(State(app.clone()), Path(id.clone()), Query(HashMap::from([("role".to_string(), "executor".to_string())]))).await.unwrap();
+        assert_eq!((p["pick"]["decision"].as_str(), p["pick"]["identity"].as_str()), (Some("wait"), Some("cc2")));
+
+        // runbook 第 2 步：照樣派。
+        let out = crate::supervisor::assign(&app, &exec.id, "做 X", "crid-wait", None, &[], None, true, Some((&id, "executor")), None, None)
+            .await
+            .unwrap();
+        let a = crate::supervisor::store::assignment(&app.db, out["id"].as_str().unwrap()).await.unwrap().unwrap();
+        assert_eq!(a.status, "quota_blocked", "派送時查到撞限就停在這裡，額度回來 controller 自己重送");
+        assert!(a.resume_at.is_some(), "有預計重送的時間");
+        let Json(card) = get_mission(State(app.clone()), Path(id.clone())).await.unwrap();
+        assert_eq!(card["phase"], "waiting_quota", "卡片說得出在等額度，不是「等 AGM 接手」");
     }
 
     /// 來回次數用完、使用者說「再改一輪」：放行時多給一輪，AGM 才有路可走（review3 c1 M13）。
