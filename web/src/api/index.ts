@@ -21,6 +21,8 @@ import type {
   GroupSkipReason,
   HostResult,
   HostShell,
+  RemoteCargoInput,
+  RemoteCargoSettings,
   IdentityStatusMap,
   InstallToolResult,
   Issue,
@@ -611,6 +613,33 @@ export async function refreshTools(host: string): Promise<{ tools: ToolMap; iden
   const raw = await transport.request('POST', `/hosts/${encodeURIComponent(host || 'local')}/tools/refresh`)
   const rec = isRec(raw) ? raw : {}
   return { tools: toToolMap(rec.tools), identity_status: toIdentityStatusMap(rec.identities) }
+}
+
+function toRemoteCargoSettings(raw: unknown): RemoteCargoSettings {
+  const o = isRec(raw) ? raw : {}
+  return {
+    enabled: o.enabled === true,
+    host: str(o.host),
+    user: str(o.user),
+    ssh_port: num(o.ssh_port, 22),
+    remote_root: str(o.remote_root, '~/.cache/agents-manager/remote-cargo'),
+    cargo_jobs: num(o.cargo_jobs, 4),
+    password_set: o.password_set === true,
+  }
+}
+
+export async function fetchRemoteCargoSettings(): Promise<RemoteCargoSettings> {
+  return toRemoteCargoSettings(await transport.request('GET', '/build/remote'))
+}
+
+export async function saveRemoteCargoSettings(input: RemoteCargoInput): Promise<RemoteCargoSettings> {
+  return toRemoteCargoSettings(await transport.request('PUT', '/build/remote', input))
+}
+
+export async function testRemoteCargo(): Promise<{ ok: boolean; output: string; password_auth: boolean }> {
+  const raw = await transport.request('POST', '/build/remote/test', {})
+  const o = isRec(raw) ? raw : {}
+  return { ok: o.ok === true, output: str(o.output), password_auth: o.password_auth === true }
 }
 
 /** 開臨時 pane 做該身份的登入。 */
