@@ -63,6 +63,7 @@ import {
   type ReadMark,
 } from './unread'
 import { fetchSupervisor } from '../api/supervisor'
+import { writeShared } from './mobilePreview'
 import { BOT_KINDS, LOCAL_HOST } from '../api/types'
 
 const sendMissionRequest = missionRequests(api.newClientRequestId)
@@ -117,7 +118,7 @@ function readSelection(): Selection {
 
 function writeSelection(sel: Selection) {
   try {
-    localStorage.setItem(SELECTION_KEY, JSON.stringify(sel))
+    writeShared(() => localStorage.setItem(SELECTION_KEY, JSON.stringify(sel)))
   } catch {
     /* storage unavailable: the selection still holds for this page */
   }
@@ -163,8 +164,7 @@ function readShellView(): ShellView | null {
 
 function writeShellView(v: ShellView | null) {
   try {
-    if (v) localStorage.setItem(SHELL_VIEW_KEY, JSON.stringify(v))
-    else localStorage.removeItem(SHELL_VIEW_KEY)
+    writeShared(() => (v ? localStorage.setItem(SHELL_VIEW_KEY, JSON.stringify(v)) : localStorage.removeItem(SHELL_VIEW_KEY)))
   } catch {
     /* storage unavailable */
   }
@@ -195,7 +195,7 @@ function readDrafts(): Record<string, string> {
 
 function writeDrafts(drafts: Record<string, string>) {
   try {
-    localStorage.setItem(DRAFTS_KEY, JSON.stringify(drafts))
+    writeShared(() => localStorage.setItem(DRAFTS_KEY, JSON.stringify(drafts)))
   } catch {
     /* storage unavailable: drafts still live for this page */
   }
@@ -223,7 +223,7 @@ function readDraftCursors(): Record<string, DraftCursor> {
 
 function writeDraftCursors(cursors: Record<string, DraftCursor>) {
   try {
-    localStorage.setItem(DRAFT_CURSORS_KEY, JSON.stringify(cursors))
+    writeShared(() => localStorage.setItem(DRAFT_CURSORS_KEY, JSON.stringify(cursors)))
   } catch {
     /* storage unavailable: cursors still live for this page */
   }

@@ -4,6 +4,7 @@
  */
 
 import type { Message } from '../api/types'
+import { writeShared } from './mobilePreview'
 
 const MARKS_KEY = 'am.readMarks'
 const COUNTS_KEY = 'am.unread'
@@ -44,7 +45,7 @@ export function loadMarks(): Record<string, ReadMark> {
 
 export function saveMarks(marks: Record<string, ReadMark>) {
   try {
-    localStorage.setItem(MARKS_KEY, JSON.stringify(marks))
+    writeShared(() => localStorage.setItem(MARKS_KEY, JSON.stringify(marks)))
   } catch {
     /* 無痕／禁用儲存：只是不跨重整 */
   }
@@ -77,7 +78,7 @@ export function saveCounts(counts: UnreadCounts) {
   for (const [id, n] of Object.entries(counts.bots)) if (n > 0) flat[botKey(id)] = n
   for (const [id, n] of Object.entries(counts.groups)) if (n > 0) flat[groupKey(id)] = n
   try {
-    localStorage.setItem(COUNTS_KEY, JSON.stringify(flat))
+    writeShared(() => localStorage.setItem(COUNTS_KEY, JSON.stringify(flat)))
   } catch {
     /* 同上 */
   }

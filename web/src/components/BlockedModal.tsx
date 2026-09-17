@@ -7,6 +7,7 @@ import { useDialogFocus } from '../hooks/useDialogFocus'
 import { useStore } from '../store/store'
 import { BlockedChoices, BlockedExtrasBar } from './BlockedChoices'
 import { isSurvey } from '../lib/choiceDraft'
+import { surveyDraftAllowed } from '../store/mobilePreview'
 import { BlockedDraft } from './BlockedDraft'
 import { CodexUpdateHint } from './CodexUpdateHint'
 
@@ -112,7 +113,7 @@ export function BlockedModal({ botId, onClose }: { botId: string; onClose: () =>
         {/* 選單模式只有一條主捲軸，問題行釘在上緣：兩塊各自捲在手機上分不清（2026-09-12 第二輪回饋第 4 點）。 */}
         {menu ? (
           <div className="blocked-modal-body">
-            {isSurvey(menu) ? (
+            {surveyDraftAllowed(isSurvey(menu)) ? (
             <BlockedDraft botId={botId} menu={menu} onAnswered={refresh} />
           ) : (
             <BlockedChoices botId={botId} menu={menu} onAnswered={refresh} />

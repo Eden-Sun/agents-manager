@@ -4,6 +4,7 @@ import { KEYPAD, usePaneKeys } from '../hooks/usePaneKeys'
 import { useTerminalSnapshot } from '../hooks/useTerminalSnapshot'
 import { BlockedChoices, BlockedExtrasBar } from './BlockedChoices'
 import { isSurvey } from '../lib/choiceDraft'
+import { surveyDraftAllowed } from '../store/mobilePreview'
 import { BlockedDraft } from './BlockedDraft'
 import { CodexUpdateHint } from './CodexUpdateHint'
 import { linkifyTerm } from './TermLinks'
@@ -67,7 +68,7 @@ export function BlockedPanel({
       <CodexUpdateHint botId={botId} text={snap?.text} onAnswered={refresh} />
       {menu ? (
         <>
-          {isSurvey(menu) ? (
+          {surveyDraftAllowed(isSurvey(menu)) ? (
             <BlockedDraft botId={botId} menu={menu} onAnswered={refresh} />
           ) : (
             <BlockedChoices botId={botId} menu={menu} onAnswered={refresh} />
