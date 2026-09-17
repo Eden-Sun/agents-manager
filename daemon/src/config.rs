@@ -265,6 +265,46 @@ pub struct BuildCfg {
     /// 名額 TTL（秒）：拿到之後這麼久沒 renew 就視為持有者已死，下一次 acquire 收回。
     #[serde(default = "default_build_lease_ttl_secs")]
     pub lease_ttl_secs: u64,
+    /// issue #104：開發者專用的外部 Cargo verification worker。密碼不在這裡，另存 data-dir/remote-cargo-password。
+    #[serde(default)]
+    pub remote: BuildRemoteCfg,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BuildRemoteCfg {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub host: String,
+    #[serde(default)]
+    pub user: String,
+    #[serde(default = "default_ssh_port")]
+    pub ssh_port: u16,
+    #[serde(default = "default_remote_build_root")]
+    pub remote_root: String,
+    #[serde(default = "default_remote_build_jobs")]
+    pub cargo_jobs: usize,
+}
+
+impl Default for BuildRemoteCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            host: String::new(),
+            user: String::new(),
+            ssh_port: default_ssh_port(),
+            remote_root: default_remote_build_root(),
+            cargo_jobs: default_remote_build_jobs(),
+        }
+    }
+}
+
+pub fn default_remote_build_root() -> String {
+    "~/.cache/agents-manager/remote-cargo".into()
+}
+
+fn default_remote_build_jobs() -> usize {
+    4
 }
 
 impl Default for BuildCfg {
@@ -273,6 +313,7 @@ impl Default for BuildCfg {
             max_concurrent: default_build_max_concurrent(),
             cargo_jobs: default_build_cargo_jobs(),
             lease_ttl_secs: default_build_lease_ttl_secs(),
+            remote: BuildRemoteCfg::default(),
         }
     }
 }
