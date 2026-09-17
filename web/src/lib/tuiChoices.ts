@@ -349,12 +349,16 @@ export const MULTI_TYPE_HINT = '複選題的「Type something」要在終端打�
 
 /** 貼上後那列是否已長出這段字：換行貼上時第一行在標題、其餘在說明；答完會多 `✔`。 */
 export function customAnswerShown(choice: TuiChoice, text: string): boolean {
-  const want = text.replace(/\s+/g, ' ').trim()
+  // 空白全部拿掉再比：窄 pane 會把長答案硬折行（中文沒有空格，折在字中間），折出來的斷點在
+  // 標題與說明之間變成一個空格，照原樣比就永遠對不上——會判成「沒出現」而不按 Enter，重送又變成
+  // 「選項跟讀進來時不一樣」（review3 c1 f19e855 的疑點）。英文折在空格上，去掉空白照樣對得上。
+  const squash = (s: string) => s.replace(/\s+/g, '')
+  const want = squash(text)
   if (!want) return false
-  const first = text.split('\n')[0]?.trim() ?? ''
-  const title = choice.title.replace(/\s*✔\s*$/, '').trim()
-  const blob = `${title} ${choice.detail}`.replace(/\s+/g, ' ').trim()
-  return title === first || blob.includes(want) || blob.includes(first)
+  const title = choice.title.replace(/\s*✔\s*$/, '')
+  const blob = squash(`${title} ${choice.detail ?? ''}`)
+  const first = squash(text.split('\n')[0] ?? '')
+  return blob.includes(want) || (first !== '' && blob.includes(first))
 }
 
 /** 送鍵前確認選單還是同一份（↓ 次數是相對的）。不比勾選與游標：那是我們自己按出來的。 */
