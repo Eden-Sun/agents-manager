@@ -231,6 +231,9 @@ fn pick_worker(role: Role, candidates: &[Candidate], on_5h: On5hLimit, exclude: 
 
 fn pick_verifier(candidates: &[Candidate], on_5h: On5hLimit, now: DateTime<Utc>) -> Pick {
     let mut resets = Vec::new();
+    // Fable 還有額度、只是 5h 窗撞限的身分（任務選 `switch` 時會先看下一個身分）。全部看完都沒有能馬上用的，
+    // 就等這裡面最早重置的那一個——這是「1～2 小時後就回來」，不是 D6 的「沒有 Fable 額度」（review3 c1 L12）。
+    let mut five_hour_waits: Vec<(String, Option<String>)> = Vec::new();
     for c in candidates {
         if c.disabled {
             continue;
@@ -252,8 +255,17 @@ fn pick_verifier(candidates: &[Candidate], on_5h: On5hLimit, now: DateTime<Utc>)
             Block::FiveHour(until) if fable_ok && on_5h == On5hLimit::Wait => {
                 return Pick::Wait { identity: c.name.into(), until, reason: "驗證者的 5 小時窗撞限，依任務設定原地等重置".into() };
             }
+            Block::FiveHour(until) if fable_ok => {
+                five_hour_waits.push((c.name.into(), until));
+                resets.push(Reset { identity: c.name.into(), resets_at: reset_of(q.fable.as_ref()) });
+            }
             _ => resets.push(Reset { identity: c.name.into(), resets_at: reset_of(q.fable.as_ref()) }),
         }
+    }
+    // 有 Fable 額度、只卡 5h：等最早重置的那個，不要停下來問人——以前這種情況回 `AskUser`，說的是「沒有 Fable 額度」，
+    // 給的重置時間還是 Fable 的（好幾天後），使用者可能因此同意降級成 opus 驗證（review3 c1 L12）。
+    if let Some((identity, until)) = earliest(five_hour_waits.into_iter()) {
+        return Pick::Wait { identity, until, reason: "驗證者的 Fable 還有額度，只是 5 小時窗撞限，等最早重置的那一個".into() };
     }
     Pick::AskUser { reason: "沒有任何身分的 Fable 週桶有有效額度，驗證者必須用 Fable".into(), resets }
 }
@@ -444,6 +456,38 @@ mod tests {
         ));
     }
 
+    /// review3 c1 L12：三個身分的 Fable 都還有額度、只是 5h 全撞限（任務選 `switch`）。以前回 `AskUser`
+    /// 「沒有 Fable 額度」、時間給的是 Fable 的下週，使用者可能因此同意降級成 opus 驗證——其實 1～2 小時就回來。
+    #[test]
+    fn a_verifier_blocked_only_by_the_five_hour_window_waits_instead_of_asking() {
+        let now = now();
+        let five_hit = |resets: &str| {
+            let mut x = q(100.0, 20.0, Some(10.0));
+            x.five_hour = w(100.0, resets);
+            x.limit_hit = Some(LimitHit {
+                message: "You've hit your session limit".into(),
+                until: Some(resets.into()),
+                at: "2026-09-13T11:50:00Z".into(),
+                bucket: Some("five_hour".into()),
+            });
+            x
+        };
+        let qs = [("cc2", Some(five_hit("2026-09-13T15:00:00Z"))), ("cc1", Some(five_hit("2026-09-13T13:30:00Z")))];
+        match pick(Role::Verifier, &cands(&qs), On5hLimit::Switch, None, now) {
+            Pick::Wait { identity, until, .. } => {
+                assert_eq!(identity, "cc1", "等最早重置的那一個");
+                assert_eq!(until.as_deref(), Some("2026-09-13T13:30:00Z"), "給的是 5h 的重置時間，不是 Fable 的下週");
+            }
+            other => panic!("expected Wait, got {other:?}"),
+        }
+        // 真的沒有 Fable 額度時照舊停下來問人。
+        let no_fable = [("cc2", Some(q(10.0, 20.0, Some(100.0))))];
+        assert!(matches!(
+            pick(Role::Verifier, &cands(&no_fable), On5hLimit::Switch, None, now),
+            Pick::AskUser { .. }
+        ));
+    }
+
     #[test]
     fn keeps_using_the_first_identity_until_it_is_exhausted_not_merely_low() {
         let qs = [("cc2", Some(q(80.0, 90.0, Some(90.0)))), ("cc1", Some(q(0.0, 0.0, Some(0.0))))];
@@ -544,7 +588,15 @@ mod tests {
     fn a_verifier_on_a_five_hour_hit_waits_only_when_the_mission_chose_to() {
         let qs = [("cc2", Some(hit(q(100.0, 10.0, Some(10.0)), Some("2026-09-13T15:00:00Z"))))];
         assert!(matches!(pick(Role::Verifier, &cands(&qs), On5hLimit::Wait, None, now()), Pick::Wait { .. }));
-        assert!(matches!(pick(Role::Verifier, &cands(&qs), On5hLimit::Switch, None, now()), Pick::AskUser { .. }));
+        // `switch` 時先看別的身分；只有這一個而且它的 Fable 還有額度，就等 5h 重置——
+        // 不是 D6 的「沒有 Fable 額度」（review3 c1 L12）。
+        match pick(Role::Verifier, &cands(&qs), On5hLimit::Switch, None, now()) {
+            Pick::Wait { identity, until, .. } => {
+                assert_eq!(identity, "cc2");
+                assert_eq!(until.as_deref(), Some("2026-09-13T15:00:00Z"), "5h 的重置時間");
+            }
+            other => panic!("expected Wait, got {other:?}"),
+        }
     }
 }
 
