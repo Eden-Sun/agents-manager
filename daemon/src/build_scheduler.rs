@@ -92,56 +92,19 @@ async fn reap_expired_held(pool: &SqlitePool, now: &str) -> Result<u64> {
         .rows_affected())
 }
 
-/// 要一個名額；額滿就記一列 `waiting`（用來給 `GET /build-slots` 看，不是佇列——沒有排隊順序保證，
-/// 誰先被下一個 acquire 看到誰先拿到）。全程在 `app.build_slot_lock` 底下，先數後寫是同一個臨界區。
-pub async fn acquire(app: &Arc<App>, holder: &str, bot_id: Option<&str>, purpose: &str, host: &str) -> Result<Acquired> {
-    let _g = app.build_slot_lock.lock().await;
-    let cfg = app.cfg.get().await.build;
-    let max = cfg.max_concurrent();
-    let now = now_str();
-    reap_expired_held(&app.db, &now).await?;
+/// 收掉太久沒刷新 `last_seen` 的 waiting 列（停止 poll：行程被砍、pane 消失）。acquire 自己也要呼叫這個
+/// （不只等背景 sweep）：死掉的號碼牌卡在佇列最前面會擋住後面活著的人，FIFO 判斷不能讓它拖到下一輪 sweep。
+async fn reap_stale_waiting(pool: &SqlitePool) -> Result<u64> {
+    let cutoff = (chrono::Utc::now() - chrono::Duration::from_std(STALE_WAITING).unwrap()).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    Ok(sqlx::query("DELETE FROM build_slots WHERE status = 'waiting' AND last_seen <= ?")
+        .bind(&cutoff)
+        .execute(pool)
+        .await?
+        .rows_affected())
+}
 
-    let existing: Option<SlotRow> = sqlx::query_as("SELECT token, status, since, expires_at FROM build_slots WHERE holder = ?")
-        .bind(holder)
-        .fetch_optional(&app.db)
-        .await?;
-    // 已經握著且沒過期：把同一份憑證還回去，重call（例如逾時後重問一次）安全。
-    if let Some(row) = &existing {
-        if row.status == "held" {
-            if let Some(exp) = &row.expires_at {
-                if exp.as_str() > now.as_str() {
-                    return Ok(Acquired::Granted { token: row.token.clone(), expires_at: exp.clone() });
-                }
-            }
-        }
-    }
-
-    let held: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM build_slots WHERE status = 'held'").fetch_one(&app.db).await?;
-    if (held as usize) < max {
-        let token = crate::db::ulid();
-        let expires_at = expires_at_after(&cfg);
-        sqlx::query(
-            "INSERT INTO build_slots (holder, token, bot_id, purpose, host, status, since, last_seen, expires_at)
-             VALUES (?,?,?,?,?, 'held', ?, ?, ?)
-             ON CONFLICT(holder) DO UPDATE SET
-               token = excluded.token, bot_id = excluded.bot_id, purpose = excluded.purpose, host = excluded.host,
-               status = 'held', since = excluded.since, last_seen = excluded.last_seen, expires_at = excluded.expires_at",
-        )
-        .bind(holder)
-        .bind(&token)
-        .bind(bot_id)
-        .bind(purpose)
-        .bind(host)
-        .bind(&now)
-        .bind(&now)
-        .bind(&expires_at)
-        .execute(&app.db)
-        .await?;
-        return Ok(Acquired::Granted { token, expires_at });
-    }
-
-    // 額滿：記一列 waiting。已經在等的人保留原本的 `since`（排隊起點不該因為重試就歸零）。
-    let since = existing.as_ref().filter(|r| r.status == "waiting").map(|r| r.since.clone()).unwrap_or_else(|| now.clone());
+/// 插一列（或覆寫既有的同名列）成 `waiting`；`since` 是排隊起點，呼叫端負責決定（保留舊的、還是這一刻）。
+async fn mark_waiting(app: &Arc<App>, holder: &str, bot_id: Option<&str>, purpose: &str, host: &str, since: &str, now: &str) -> Result<()> {
     sqlx::query(
         "INSERT INTO build_slots (holder, token, bot_id, purpose, host, status, since, last_seen, expires_at)
          VALUES (?,'',?,?,?, 'waiting', ?, ?, NULL)
@@ -153,11 +116,82 @@ pub async fn acquire(app: &Arc<App>, holder: &str, bot_id: Option<&str>, purpose
     .bind(bot_id)
     .bind(purpose)
     .bind(host)
-    .bind(&since)
-    .bind(&now)
+    .bind(since)
+    .bind(now)
     .execute(&app.db)
     .await?;
-    Ok(Acquired::Waiting { active: held as usize, since })
+    Ok(())
+}
+
+/// 要一個名額；額滿（或有人排得比自己前面）就記一列 `waiting`，`GET /build-slots` 看得到。全程在
+/// `app.build_slot_lock` 底下，先數後寫、FIFO 判斷都在同一個臨界區裡完成。
+///
+/// **FIFO**（2026-09-18 使用者交辦；手工 `cargo-slot.sh` 的舊版每個等待者各自搶，實測有人餓死 74 分鐘）：
+/// 名額空出來時，只有排隊排最早的那個 holder 可以真的拿到，其他人就算這一刻也在問、名額也空著，一樣要等——
+/// 跟 `cargo-slot.sh` 的號碼牌是同一個道理，只是這裡用 `build_slots.since` 當號碼牌，不需要另開一張表。
+/// 佇列順序＝`(since, holder)` 字典序（`since` 相同——理論上毫秒級撞期——用 `holder` 當穩定的第二排序鍵）。
+pub async fn acquire(app: &Arc<App>, holder: &str, bot_id: Option<&str>, purpose: &str, host: &str) -> Result<Acquired> {
+    let _g = app.build_slot_lock.lock().await;
+    let cfg = app.cfg.get().await.build;
+    let max = cfg.max_concurrent();
+    let now = now_str();
+    reap_expired_held(&app.db, &now).await?;
+    reap_stale_waiting(&app.db).await?;
+
+    let existing: Option<SlotRow> = sqlx::query_as("SELECT token, status, since, expires_at FROM build_slots WHERE holder = ?")
+        .bind(holder)
+        .fetch_optional(&app.db)
+        .await?;
+    // 已經握著且沒過期：把同一份憑證還回去，重call（例如逾時後重問一次）安全。FIFO 不擋自己已經有的名額。
+    if let Some(row) = &existing {
+        if row.status == "held" {
+            if let Some(exp) = &row.expires_at {
+                if exp.as_str() > now.as_str() {
+                    return Ok(Acquired::Granted { token: row.token.clone(), expires_at: exp.clone() });
+                }
+            }
+        }
+    }
+
+    let held: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM build_slots WHERE status = 'held'").fetch_one(&app.db).await?;
+    // 排隊起點：已經在等的人保留原本的 `since`（重試不該讓排隊起點歸零），第一次來的人以「現在」當自己的號碼牌。
+    let my_since = existing.as_ref().filter(|r| r.status == "waiting").map(|r| r.since.clone()).unwrap_or_else(|| now.clone());
+
+    if (held as usize) < max {
+        // 名額空著，但要先看看排在自己前面的人（排除自己那一列）——有更早的號碼牌就不能插隊，
+        // 即使這一刻剛好是自己在問、名額也剛好空著。
+        let ahead: Option<(String, String)> =
+            sqlx::query_as("SELECT since, holder FROM build_slots WHERE status = 'waiting' AND holder != ? ORDER BY since, holder LIMIT 1")
+                .bind(holder)
+                .fetch_optional(&app.db)
+                .await?;
+        let someone_is_ahead = ahead.is_some_and(|(ahead_since, ahead_holder)| (ahead_since.as_str(), ahead_holder.as_str()) < (my_since.as_str(), holder));
+        if !someone_is_ahead {
+            let token = crate::db::ulid();
+            let expires_at = expires_at_after(&cfg);
+            sqlx::query(
+                "INSERT INTO build_slots (holder, token, bot_id, purpose, host, status, since, last_seen, expires_at)
+                 VALUES (?,?,?,?,?, 'held', ?, ?, ?)
+                 ON CONFLICT(holder) DO UPDATE SET
+                   token = excluded.token, bot_id = excluded.bot_id, purpose = excluded.purpose, host = excluded.host,
+                   status = 'held', since = excluded.since, last_seen = excluded.last_seen, expires_at = excluded.expires_at",
+            )
+            .bind(holder)
+            .bind(&token)
+            .bind(bot_id)
+            .bind(purpose)
+            .bind(host)
+            .bind(&now)
+            .bind(&now)
+            .bind(&expires_at)
+            .execute(&app.db)
+            .await?;
+            return Ok(Acquired::Granted { token, expires_at });
+        }
+    }
+
+    mark_waiting(app, holder, bot_id, purpose, host, &my_since, &now).await?;
+    Ok(Acquired::Waiting { active: held as usize, since: my_since })
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -212,13 +246,7 @@ pub async fn sweep(app: &Arc<App>) -> (u64, u64) {
     let _g = app.build_slot_lock.lock().await;
     let now = now_str();
     let held = reap_expired_held(&app.db, &now).await.unwrap_or(0);
-    let stale_before = (chrono::Utc::now() - chrono::Duration::from_std(STALE_WAITING).unwrap()).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    let waiting = sqlx::query("DELETE FROM build_slots WHERE status = 'waiting' AND last_seen <= ?")
-        .bind(&stale_before)
-        .execute(&app.db)
-        .await
-        .map(|r| r.rows_affected())
-        .unwrap_or(0);
+    let waiting = reap_stale_waiting(&app.db).await.unwrap_or(0);
     (held, waiting)
 }
 
@@ -498,6 +526,59 @@ mod tests {
         let s = status(&app).await.unwrap();
         let holders: Vec<String> = s["slots"].as_array().unwrap().iter().map(|v| v["holder"].as_str().unwrap().to_string()).collect();
         assert_eq!(holders, vec!["live-waiter".to_string()], "holder 過期收掉、dead-waiter 太久沒 poll 收掉，live-waiter 還在排隊沒被誤收");
+    }
+
+    /// FIFO（使用者 2026-09-18 交辦）：名額空出來時只有排最前面的拿得到，就算別人這一刻剛好也在問、
+    /// 名額也剛好空著。用「後進場的先發問」故意打亂 poll 順序，證明放行順序看的是**進場順序**不是**發問順序**。
+    #[tokio::test]
+    async fn waiters_are_granted_in_the_order_they_first_queued_not_the_order_they_poll_in() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        set_max_concurrent(&app, 1).await;
+
+        let Acquired::Granted { token: first_token, .. } = acquire(&app, "first", None, "t", "local").await.unwrap() else { panic!() };
+        // 進場順序：a, b, c（每個之間睡一下，確保 since 的毫秒級排序穩定）。
+        let Acquired::Waiting { .. } = acquire(&app, "a", None, "t", "local").await.unwrap() else { panic!() };
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let Acquired::Waiting { .. } = acquire(&app, "b", None, "t", "local").await.unwrap() else { panic!() };
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let Acquired::Waiting { .. } = acquire(&app, "c", None, "t", "local").await.unwrap() else { panic!() };
+
+        release(&app, "first", &first_token).await;
+
+        // 發問順序刻意倒過來：c 先問、b 再問、a 最後問——沒有一個排在 a 前面拿得到。
+        let Acquired::Waiting { .. } = acquire(&app, "c", None, "t", "local").await.unwrap() else { panic!("c 排最後，不該搶到") };
+        let Acquired::Waiting { .. } = acquire(&app, "b", None, "t", "local").await.unwrap() else { panic!("b 前面還有 a，不該搶到") };
+        let Acquired::Granted { token: a_token, .. } = acquire(&app, "a", None, "t", "local").await.unwrap() else { panic!("a 排最早，該輪到它") };
+
+        release(&app, "a", &a_token).await;
+        let Acquired::Waiting { .. } = acquire(&app, "c", None, "t", "local").await.unwrap() else { panic!("c 還是排最後") };
+        let Acquired::Granted { .. } = acquire(&app, "b", None, "t", "local").await.unwrap() else { panic!("該輪到 b 了") };
+    }
+
+    /// 排最前面的號碼牌死了（不再 poll）：不能永遠擋住後面活著的人（使用者實測手工腳本的舊版本會餓死 74 分鐘）。
+    #[tokio::test]
+    async fn a_dead_waiter_at_the_front_of_the_queue_does_not_block_the_ones_behind_it() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        set_max_concurrent(&app, 1).await;
+
+        let Acquired::Granted { token, .. } = acquire(&app, "first", None, "t", "local").await.unwrap() else { panic!() };
+        let Acquired::Waiting { .. } = acquire(&app, "dead-front", None, "t", "local").await.unwrap() else { panic!() };
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let Acquired::Waiting { .. } = acquire(&app, "alive-second", None, "t", "local").await.unwrap() else { panic!() };
+
+        // dead-front 排最前面，但早就不再 poll 了。
+        sqlx::query("UPDATE build_slots SET last_seen = '2020-01-01T00:00:00.000Z' WHERE holder = 'dead-front'").execute(&app.db).await.unwrap();
+        release(&app, "first", &token).await;
+
+        let Acquired::Granted { .. } = acquire(&app, "alive-second", None, "t", "local").await.unwrap() else {
+            panic!("死掉的號碼牌不該永遠擋住後面活著的人")
+        };
+        // dead-front 的列也該一併被清掉，不是留著佔 GET /build-slots 的版面。
+        let s = status(&app).await.unwrap();
+        let holders: Vec<String> = s["slots"].as_array().unwrap().iter().map(|v| v["holder"].as_str().unwrap().to_string()).collect();
+        assert!(!holders.contains(&"dead-front".to_string()), "{holders:?}");
     }
 
     fn auth_headers(bot_token: Option<&str>, ui_token: Option<&str>) -> HeaderMap {
