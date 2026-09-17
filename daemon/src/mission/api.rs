@@ -1815,7 +1815,10 @@ mod tests {
         assert_eq!((p["pick"]["decision"].as_str(), p["pick"]["identity"].as_str()), (Some("wait"), Some("cc2")));
 
         // runbook 第 2 步：照樣派。
-        let out = crate::supervisor::assign(&app, &exec.id, "做 X", "crid-wait", None, &[], None, true, Some((&id, "executor")), None, None)
+        let out = crate::supervisor::assign(
+            &app, &exec.id, "做 X", "crid-wait", None, &[], None, true, Some((&id, "executor")), None, None,
+            crate::supervisor::bot_requests::ReplyMark::default(),
+        )
             .await
             .unwrap();
         let a = crate::supervisor::store::assignment(&app.db, out["id"].as_str().unwrap()).await.unwrap().unwrap();
