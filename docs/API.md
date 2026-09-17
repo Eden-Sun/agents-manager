@@ -311,7 +311,8 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 `GET /api/state` 每顆 bot 帶 `unread`（標記之後的 assistant 訊息依回合去重的數目；沒有標記＝全部）與 `read_mark`（`{at,id}` 或 `null`）。升級建表時既有 bot 的標記設為當下，舊訊息不算未讀。
 
 ### `GET /api/bots/{id}/local-image?path=<路徑>`
-對話 Markdown 裡的本機圖片（`![](docs/shot.png)`、`/Users/…/x.png`、`file://…`）。相對路徑以該 bot 的**專案目錄**為底；符號連結解開後仍須在專案目錄內，副檔名限 `png/jpg/jpeg/gif/webp`（不含 svg），≤ 20 MiB。回圖片位元組與對應 `Content-Type`。
+對話 Markdown 裡的本機圖片（`![](docs/shot.png)`、`/Users/…/x.png`、`file://…`）。相對路徑先以該 bot 的工作目錄（`bots.cwd`，child 的 worktree）為底、那裡沒有再退回**專案目錄**；
+字面路徑讀不到時再試 `%XX` 解碼後的（Markdown 渲染會把中文檔名、空白編碼）。**允許範圍一律是專案目錄**：符號連結解開後仍須在專案目錄內，副檔名限 `png/jpg/jpeg/gif/webp`（不含 svg），≤ 20 MiB。回圖片位元組與對應 `Content-Type`。
 專案外、非圖片、不存在、太大、遠端主機的專案一律 `404 {"what":"image"}`；缺 `path` 400；bot 不存在 404。前端讀不到就把路徑寫成文字，不畫破圖。
 
 ### `GET /api/bots/{id}/outbox`
