@@ -44,6 +44,21 @@ fn any_err<E: std::fmt::Display>(e: E) -> LcError {
     LcError::Upstream(e.to_string())
 }
 
+/// 寫設定的路徑專用：`ConfigStore::update` 在落盤前驗不過時回 **400 `config_invalid`**，而不是 502。
+///
+/// 502 的定義是「herdr／DB 出錯」（SPEC §3.1）；設定不合法是**請求的問題**，混成同一個碼，呼叫端分不出
+/// 「你的設定有問題、改一下再送」跟「ssh 斷了、等一下重試」。`config_written: false` 是關鍵的一半：
+/// 跟 `projection_refused` 的 `config_written: true` 相反，這次什麼都沒寫，直接重送修正後的請求就好。
+fn cfg_err(e: anyhow::Error) -> LcError {
+    match e.downcast_ref::<crate::projection::ConfigInvalid>() {
+        // `to_string()` 而不是 `c.0`：Display 才帶著「（config.toml 未變更）」，那句是給人看的 recovery path。
+        Some(c) => LcError::BadValue(
+            json!({"error": "config_invalid", "message": c.to_string(), "config_written": false}),
+        ),
+        None => any_err(e),
+    }
+}
+
 pub fn router(app: Arc<App>) -> Router {
     let api = Router::new()
         .route("/state", get(get_state))
@@ -475,7 +490,8 @@ async fn reproject(app: &Arc<App>) -> Result<(), LcError> {
                        "bots": r.bots, "projects": r.projects,
                        "allow_env": crate::projection::ALLOW_BULK_ENV}),
             ),
-            None => any_err(e),
+            // 外面把 config.toml 換成一份不合法的檔案，投影當下才讀到：一樣是設定的問題，不是上游壞掉。
+            None => cfg_err(e),
         }
     })
 }
@@ -504,6 +520,42 @@ mod reproject_tests {
                 assert!(body["message"].as_str().unwrap().contains("已經寫進 config.toml"), "{body}");
             }
             other => panic!("{:?}", other.err().map(|e| format!("{e:?}"))),
+        }
+    }
+
+    /// issue #73：設定不合法是**請求的問題**，回 400 `config_invalid` 並講明什麼都沒寫。
+    ///
+    /// 混進 502（「herdr／DB 出錯」）的話，呼叫端分不出「改一下再送」跟「ssh 斷了、等一下重試」。
+    /// 觸發路徑是真的會發生的那條：外面把 config.toml 換成不合法的檔案，下一次寫設定時
+    /// `ConfigStore::update` 比 mtime 重讀、套用、驗不過。
+    #[tokio::test]
+    async fn an_invalid_config_is_a_400_that_says_nothing_was_written() {
+        let env = crate::testing::env().await;
+        let app = &env.app;
+        // `kind = 'nope'` 不是合法的 kind：投影一定擋。
+        let broken = "[server]\nlisten = '127.0.0.1:7788'\n\n                      [[projects]]\nid = 'p1'\npath = '/tmp'\nlabel = 'demo'\nhost = 'remote'\n\n                      [[projects.bots]]\nid = 'b1'\nname = 'worker'\nkind = 'nope'\n";
+        std::fs::write(&app.cfg.path, broken).unwrap();
+
+        let err = app.cfg.update(|cfg| { cfg.projects[0].label = "renamed".into(); Ok(()) }).await.unwrap_err();
+        match super::cfg_err(err) {
+            crate::lifecycle::LcError::BadValue(body) => {
+                assert_eq!(body["error"], "config_invalid");
+                assert_eq!(body["config_written"], false, "跟 projection_refused 相反：這次什麼都沒寫");
+                let msg = body["message"].as_str().unwrap();
+                assert!(msg.contains("invalid bot kind"), "原因要留著：{msg}");
+                assert!(msg.contains("config.toml 未變更"), "{msg}");
+            }
+            other => panic!("要是 400 config_invalid，不是 {other:?}"),
+        }
+        assert_eq!(std::fs::read_to_string(&app.cfg.path).unwrap(), broken, "檔案一個字都不該動");
+    }
+
+    /// 真正的上游錯誤仍然是 502：`cfg_err` 只認 `ConfigInvalid`，不是把所有錯誤都降成 400。
+    #[test]
+    fn other_errors_are_still_upstream() {
+        match super::cfg_err(anyhow::anyhow!("herdr socket gone")) {
+            crate::lifecycle::LcError::Upstream(m) => assert!(m.contains("herdr socket gone")),
+            other => panic!("{other:?}"),
         }
     }
 }
@@ -630,7 +682,7 @@ async fn create_project(State(app): State<Arc<App>>, Json(b): Json<NewProject>) 
         Err(e) if e.to_string() == "duplicate" => {
             return Err(LcError::conflict("project path already registered", json!({"path": path})))
         }
-        Err(e) => return Err(any_err(e)),
+        Err(e) => return Err(cfg_err(e)),
     }
     reproject(&app).await?;
     if let Ok(Some(p)) = db::project(&app.db, &id).await {
@@ -748,7 +800,7 @@ async fn patch_project(
             Ok(())
         })
         .await
-        .map_err(|e| if e.to_string() == "no-project" { LcError::NotFound("project".into()) } else { any_err(e) })?;
+        .map_err(|e| if e.to_string() == "no-project" { LcError::NotFound("project".into()) } else { cfg_err(e) })?;
     reproject(&app).await?;
     app.emit("project_changed", json!({"project_id": id})).await;
     Ok((StatusCode::OK, Json(json!({"project_id": id, "needs_restart": false}))).into_response())
@@ -900,7 +952,7 @@ async fn create_bot(
             return Err(LcError::conflict("bot name already in use", json!({"name": b.name})))
         }
         Err(e) if e.to_string() == "no-project" => return Err(LcError::NotFound("project".into())),
-        Err(e) => return Err(any_err(e)),
+        Err(e) => return Err(cfg_err(e)),
     }
     reproject(&app).await?;
     app.emit("bot_changed", json!({"bot_id": id})).await;
@@ -969,7 +1021,7 @@ async fn set_order(State(app): State<Arc<App>>, Json(b): Json<SetOrder>) -> Resu
             Ok(())
         })
         .await
-        .map_err(any_err)?;
+        .map_err(cfg_err)?;
     reproject(&app).await?;
     app.emit("project_changed", json!({"reason": "order"})).await;
     Ok((StatusCode::OK, Json(json!({"ok": true}))).into_response())
@@ -1169,7 +1221,7 @@ async fn patch_bot(
             Ok(())
         })
         .await
-        .map_err(|e| if e.to_string() == "no-bot" { LcError::NotFound("bot".into()) } else { any_err(e) })?;
+        .map_err(|e| if e.to_string() == "no-bot" { LcError::NotFound("bot".into()) } else { cfg_err(e) })?;
     reproject(&app).await?;
     }
     app.emit("bot_changed", json!({"bot_id": id})).await;

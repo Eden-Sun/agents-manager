@@ -30,6 +30,11 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
 `config_written:true`：閘門在**寫檔之後**才判，這次的變更已經在 config.toml 裡、只是還沒套用。**不要重試同一個請求**
 （例如建專案會撞 `409 project path already registered`）；補回被擋的那幾列後，下一次任何寫設定或重啟就會套用。
 
+設定本身不合法（bot kind、identity 綁定與 kind 不符、id／名字格式）則回
+`400 {"error":"config_invalid", message, config_written:false}`——同樣不是 502。這一類在**落盤之前**就被擋下來
+（SPEC §3.1），所以 `config_written:false`：config.toml 與 SQLite 都沒被動過，recovery path 就是改個合法的值
+**直接重送**，不必先回頭收拾。`message` 保留原因並附「（config.toml 未變更）」。
+
 ## 2. `GET /api/state`
 
 一次取回整棵樹。前端啟動、收到 `resync`、`project_changed` / `bot_changed` 時重拉。

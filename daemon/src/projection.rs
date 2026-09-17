@@ -177,6 +177,16 @@ fn removals(
 /// 只查**投影自己會擋**的事。需要 DB 才判得出來的安全閘（大量軟刪）不在這裡：那條路是刪除
 /// （`delete_from_config`），它本來就是先在記憶體算出 `next`、對著 DB 快照驗過才 `*cfg = next`。
 pub fn validate(cfg: &crate::config::ConfigFile) -> Result<()> {
+    // 包成具名型別，呼叫端才分得出「你的設定有問題」與「上游壞掉」（api.rs 的 `cfg_err`）。
+    check(cfg).map_err(|e| anyhow::Error::new(ConfigInvalid(format!("{e:#}"))))
+}
+
+/// 設定本身不合法。**看到它就代表 config.toml 沒有被動過**（`ConfigStore::update` 在落盤前擋下來）。
+#[derive(Debug, thiserror::Error)]
+#[error("{0}（config.toml 未變更）")]
+pub struct ConfigInvalid(pub String);
+
+fn check(cfg: &crate::config::ConfigFile) -> Result<()> {
     for i in &cfg.identities {
         if !crate::config::valid_identity_name(&i.name) {
             bail!("invalid identity name `{}` (must match {})", i.name, crate::config::SLUG_NAME_RE);
