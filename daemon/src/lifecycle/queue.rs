@@ -25,7 +25,13 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
     }
     // Put back with a backoff: other wake-ups must not spend its retries early. Its timer brings it back.
     if let Some(at) = turn.next_flush_at.as_deref().and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok()) {
-        if at > chrono::Utc::now() {
+        let left = at.with_timezone(&chrono::Utc) - chrono::Utc::now();
+        if left > chrono::Duration::zero() {
+            // 這次叫醒比退避早（例如中斷寬限的 timer 比 `next_flush_at` 先燒）：不動這一筆，但要留下一個
+            // 到期才燒的 timer。燒掉的那個已經把自己從表上拿掉了，不補的話這顆 bot 一個 timer 都沒有，
+            // 閒著也不會再有 `working -> idle` 邊，排隊的派工要等 30 分鐘保險絲才被撤掉（review3 L1）。
+            // `arm_queue_retry` 本來就會去重，所以重複叫醒不會疊 timer。
+            schedule_flush_retry(app, bot_id, left.to_std().unwrap_or_default());
             return Ok(());
         }
     }
@@ -374,32 +380,47 @@ async fn fail_queued_turn(app: &Arc<App>, conv: &str, turn_id: &str, hint: &str)
     Ok(())
 }
 
-/// One pending retry timer per bot. The value is the timer's generation, so only the timer that is
-/// still registered fires.
-static QUEUE_RETRY_TIMERS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, u64>>> = std::sync::OnceLock::new();
+/// One pending retry timer per bot: its generation (only the timer still registered fires) and when
+/// it goes off (so a sooner retry can take its place).
+static QUEUE_RETRY_TIMERS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, (u64, tokio::time::Instant)>>> =
+    std::sync::OnceLock::new();
 static QUEUE_RETRY_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-/// Arm `fire` after `delay`, unless this bot already has a retry timer waiting — extra wake-ups
-/// must not pile up timers. `false` = one was already armed.
+/// How much sooner a new retry has to be before it replaces the timer already armed. Re-computing
+/// the same `next_flush_at` (every startup re-arm does) lands a hair either side of the old
+/// deadline; without the slack that would swap the timer out on every pass for nothing.
+const QUEUE_RETRY_SOONER_SLACK: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Arm `fire` after `delay`, unless this bot already has a retry timer that goes off by then —
+/// extra wake-ups must not pile up timers. `false` = the one already armed is good enough.
+///
+/// A **sooner** retry does replace it. Refusing one used to mean the earlier timer (the interrupt
+/// grace, say) burned first, found `next_flush_at` still in the future and left the bot with no
+/// timer at all: an idle bot has no `working -> idle` edge left either, so the queued dispatch sat
+/// there until the 30-minute fuse revoked it (review3 L1).
 pub(crate) fn arm_queue_retry<F>(bot_id: &str, delay: std::time::Duration, fire: F) -> bool
 where
     F: FnOnce() + Send + 'static,
 {
     let timers = QUEUE_RETRY_TIMERS.get_or_init(Default::default);
+    let deadline = tokio::time::Instant::now() + delay;
     let generation = {
         let Ok(mut map) = timers.lock() else { return false };
-        if map.contains_key(bot_id) {
-            return false;
+        if let Some((_, armed)) = map.get(bot_id) {
+            if deadline + QUEUE_RETRY_SOONER_SLACK >= *armed {
+                return false;
+            }
         }
         let g = QUEUE_RETRY_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        map.insert(bot_id.to_string(), g);
+        // The timer being replaced stays asleep; its generation no longer matches, so it does nothing.
+        map.insert(bot_id.to_string(), (g, deadline));
         g
     };
     let bot_id = bot_id.to_string();
     tokio::spawn(async move {
         tokio::time::sleep(delay).await;
         let mine = timers.lock().map(|mut map| {
-            if map.get(&bot_id) == Some(&generation) {
+            if map.get(&bot_id).map(|(g, _)| *g) == Some(generation) {
                 map.remove(&bot_id);
                 true
             } else {
@@ -470,6 +491,14 @@ pub async fn rearm_queue_retries(app: &Arc<App>) -> usize {
 #[cfg(test)]
 pub(crate) fn queue_retry_timer_armed(bot_id: &str) -> bool {
     QUEUE_RETRY_TIMERS.get_or_init(Default::default).lock().map(|m| m.contains_key(bot_id)).unwrap_or(false)
+}
+
+/// Test hook: how long this bot's retry timer still has to run.
+#[cfg(test)]
+pub(crate) fn queue_retry_timer_left(bot_id: &str) -> Option<std::time::Duration> {
+    let now = tokio::time::Instant::now();
+    let (_, at) = *QUEUE_RETRY_TIMERS.get_or_init(Default::default).lock().ok()?.get(bot_id)?;
+    Some(at.saturating_duration_since(now))
 }
 
 /// Test hook: what a process restart does to the in-memory timers.
@@ -693,6 +722,33 @@ mod flush_queue_tests {
         let t = turn(&app, &f.turn_id).await;
         assert!(t.flush_retries > 0 || t.status != "queued", "寬限過了要真的去送：{} retries={}", t.status, t.flush_retries);
         assert!(!super::super::interrupt_grace::is_held(&f.bot_id), "等完就收掉標記");
+    }
+
+    /// 中斷寬限的 timer 比 `next_flush_at` 早燒：flush 看到退避還沒到就早退，這一刻起沒有任何 timer。
+    /// 早退時一定要補一個到期才燒的 timer，否則閒著的 bot 再也不會有人來送，排隊的派工要等 30 分鐘
+    /// 保險絲才被撤掉（review3 L1）。
+    #[tokio::test]
+    async fn an_early_wake_up_leaves_a_timer_for_when_the_backoff_is_actually_up() {
+        let f = queued("test").await;
+        let app = f.env.app.clone();
+        // 這一筆已經被放回來過，下一次嘗試在 5 秒後。
+        let next = (chrono::Utc::now() + chrono::Duration::seconds(5)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        sqlx::query("UPDATE turns SET next_flush_at = ?, flush_retries = 1 WHERE id = ?")
+            .bind(&next)
+            .bind(&f.turn_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        // 寬限的 timer 剛剛燒掉並把自己從表上收走：現在這顆 bot 一個 timer 都沒有。
+        forget_queue_retry_timer(&f.bot_id);
+
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+
+        let t = turn(&app, &f.turn_id).await;
+        assert_eq!((t.status.as_str(), t.flush_retries), ("queued", 1), "退避還沒到：不動它、不花重試");
+        assert!(queue_retry_timer_armed(&f.bot_id), "早退也要留下一個 timer，否則沒有人會再來送");
+        let left = queue_retry_timer_left(&f.bot_id).expect("timer 掛著");
+        assert!(left <= std::time::Duration::from_secs(5), "掛的是剩下的退避時間，不是整輪重來：{left:?}");
     }
 
     async fn turn(app: &Arc<App>, id: &str) -> db::Turn {
@@ -1088,7 +1144,7 @@ mod flush_queue_tests {
         };
         assert!(arm_queue_retry(&bot, std::time::Duration::from_secs(15), hit(&fired)));
         assert!(!arm_queue_retry(&bot, std::time::Duration::from_secs(15), hit(&fired)), "second wake-up does not add a timer");
-        assert!(!arm_queue_retry(&bot, std::time::Duration::from_secs(1), hit(&fired)), "not even a sooner one");
+        assert!(!arm_queue_retry(&bot, std::time::Duration::from_secs(600), hit(&fired)), "nor does a later one");
         let other = format!("timer-bot-{}", db::ulid());
         assert!(arm_queue_retry(&other, std::time::Duration::from_secs(15), hit(&fired)), "another bot has its own");
 
@@ -1105,6 +1161,37 @@ mod flush_queue_tests {
         tokio::task::yield_now().await;
         assert_eq!(fired.load(Ordering::SeqCst), 2, "and never again on its own");
         assert!(arm_queue_retry(&bot, std::time::Duration::from_secs(30), hit(&fired)), "after firing, the next retry can be armed");
+    }
+
+    /// 更早的重試要換掉已經掛著的 timer。不換的話（舊行為），早到的那個先燒、發現退避還沒到就走人，
+    /// 這顆 bot 從此一個 timer 都沒有，排隊的派工卡到 30 分鐘保險絲才被撤掉（review3 L1）。
+    #[tokio::test(start_paused = true)]
+    async fn a_sooner_retry_replaces_the_timer_already_armed() {
+        let bot = format!("timer-bot-{}", db::ulid());
+        let fired: Arc<std::sync::Mutex<Vec<u64>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mark = |fired: &Arc<std::sync::Mutex<Vec<u64>>>, secs: u64| {
+            let fired = fired.clone();
+            move || fired.lock().unwrap().push(secs)
+        };
+        // 中斷寬限掛的 60 秒 timer，接著排隊的派工被放回來，只要等 15 秒。
+        assert!(arm_queue_retry(&bot, std::time::Duration::from_secs(60), mark(&fired, 60)));
+        assert!(arm_queue_retry(&bot, std::time::Duration::from_secs(15), mark(&fired, 15)), "更早的換掉舊的");
+        assert_eq!(queue_retry_timer_left(&bot), Some(std::time::Duration::from_secs(15)), "掛著的是新的那個");
+
+        tokio::time::sleep(std::time::Duration::from_secs(16)).await;
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(fired.lock().unwrap().as_slice(), &[15], "換上去的那個照自己的時間燒");
+        assert!(!queue_retry_timer_armed(&bot), "燒完就把自己收掉");
+
+        // 被換掉的那個還睡著：醒來發現 generation 不是自己的，什麼都不做。
+        tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(fired.lock().unwrap().as_slice(), &[15], "被換掉的舊 timer 不會再燒一次");
+        assert!(arm_queue_retry(&bot, std::time::Duration::from_secs(30), mark(&fired, 30)), "之後照樣可以再掛");
     }
 
     /// 框永遠有字：每次放回都記次數與下次時間，額度用完就明確失敗並留說明（同一個 transaction）。

@@ -418,7 +418,9 @@ abort 之後照常 flush 出去（但先照下一段等寬限）。要取消排�
 **排隊中的 prompt 重試**：
 可重試原因（框忙、transcript 還沒回報、畫面檢查擋下〔選單／登入畫面〕、拿不到 herdr client…）放回 `queued` **並掛重試 timer**
 （閒著的 bot 不會再有 `working → idle` 邊來叫醒它，review 2 L2），退避 15 秒起每次加倍、上限 5 分鐘；次數與
-下次時間存在 `turns.flush_retries`／`turns.next_flush_at`，時間未到的其他喚醒不動它；每顆 bot 同時只有一個重試 timer；放回
+下次時間存在 `turns.flush_retries`／`turns.next_flush_at`，時間未到的其他喚醒不動它，但**要補掛一個到期才燒的 timer**
+（叫醒它的那個 timer 燒掉後就不在了，不補的話這顆 bot 一個 timer 都沒有，排隊的派工要等 30 分鐘保險絲，review3 L1）；
+每顆 bot 同時只有一個重試 timer，**更早的會換掉已經掛著的**（差 1 秒以內算同一個，不換）；放回
 12 次仍送不出就標 failed 並插說明（同一個 transaction）。daemon 重啟（`reconcile::rearm_progress`）時掃描**所有** queued turn
 （沒有 `next_flush_at` 的當作現在到期），以 `max(now, next_flush_at)` 為每顆 bot 重建唯一的 timer。直接送出的 409 回應則由呼叫端（或 AGM
 交辦的既有退避）重試。
