@@ -4,8 +4,14 @@
 //! 這裡只放行「這顆 bot 所屬專案目錄底下的圖片檔」：相對路徑先以 bot 的工作目錄（`bots.cwd`，child 在
 //! worktree 裡跑）為底、再退回專案目錄，符號連結解開後仍須在專案裡；副檔名白名單、大小上限，其他一律 404。
 //! 只支援本機專案（遠端主機的檔案不在這台）。
+//!
+//! **跟 [`crate::outbox`] 共用 [`crate::trusted_open`]**：從專案目錄開始逐層 `openat(O_NOFOLLOW)` 一路開
+//! 到要的檔案，拿到的 fd 直接 `fstat`／讀內容，不再先驗證路徑、再用路徑名字重新 open 一次（issue #89——
+//! 舊實作 canonicalize 完確認在界線內之後，`metadata`／`read` 是分開的兩次路徑操作，中間有機會被換成
+//! 指到界線外的符號連結）。
 
-use std::path::{Path, PathBuf};
+use std::ffi::OsStr;
+use std::path::Path;
 use std::sync::Arc;
 
 use axum::extract::{Path as UrlPath, Query, State};
@@ -14,6 +20,7 @@ use axum::response::{IntoResponse, Response};
 
 use crate::lifecycle::LcError;
 use crate::state::App;
+use crate::trusted_open;
 
 /// 截圖等級的圖片就夠了；太大的檔不該塞進一則對話。
 const MAX_BYTES: u64 = 20 * 1024 * 1024;
@@ -54,34 +61,53 @@ fn percent_decode(s: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
-/// 純路徑判斷（可測）：`requested` 解開、canonicalize 後必須仍在 `root` 裡且是圖片檔。
+/// 純路徑判斷（可測）：`requested` 解開之後，逐個候選（`cwd` 為底、`root` 為底）拆成相對於 `root` 的
+/// component 鏈，再用 [`trusted_open::open_bound_file`] 逐層 `openat(O_NOFOLLOW)` 打開；成功、是圖片
+/// 副檔名的第一個候選就是答案。字面路徑打不開時再試 `%XX` 解碼後的路徑（檔名真的含 `%20` 的照樣讀得到）。
+/// 回傳的 [`std::fs::File`] 綁在真正打開當下的那個 inode，呼叫端之後的 `fstat`／讀內容都要用它，不能再用
+/// 路徑名字重新 open（issue #89）。
 ///
-/// 相對路徑先以 `cwd`（bot 的工作目錄）為底、找不到再退回 `root`：child 在 `.claude/worktrees/<名>` 裡截圖、
-/// 回覆寫 `![](docs/shots/a.png)`，只看專案根目錄會讀到主樹的同名舊圖（review3 c4 L3）。
-/// 字面路徑讀不到時再試 `%XX` 解碼後的路徑（檔名真的含 `%20` 的照樣讀得到）。
-pub(crate) fn resolve(root: &Path, cwd: Option<&Path>, requested: &str) -> Option<(PathBuf, &'static str)> {
+/// `root`／`cwd` 各自 canonicalize 一次——這兩個不是每個請求都能換的攻擊面（`root` 是專案路徑，`cwd` 是
+/// `bots.cwd`，都是 daemon 自己維護的），用來算「`cwd` 相對 `root` 是哪串 component」；**`requested`
+/// 本身完全不 canonicalize**，純粹拆 component（[`trusted_open::safe_relative_components`]），是不是
+/// 符號連結、要打開哪個 inode 全部留給 `open_bound_file` 的 `O_NOFOLLOW` walk 決定——不會有「查的時候還
+/// 安全、開的時候已經被換掉」的中間步驟。
+///
+/// 相對路徑先以 `cwd`（bot 的工作目錄）為底、找不到再退回 `root`：child 在 `.claude/worktrees/<名>` 裡
+/// 截圖、回覆寫 `![](docs/shots/a.png)`，只看專案根目錄會讀到主樹的同名舊圖（review3 c4 L3）。
+pub(crate) fn resolve(root: &Path, cwd: Option<&Path>, requested: &str) -> Option<(std::fs::File, &'static str)> {
     let requested = requested.trim();
     let requested = requested.strip_prefix("file://").unwrap_or(requested);
     if requested.is_empty() {
         return None;
     }
     let root = std::fs::canonicalize(root).ok()?;
+    let cwd = cwd.and_then(|c| std::fs::canonicalize(c).ok());
+
     let mut spellings = vec![requested.to_string()];
     spellings.extend(percent_decode(requested).filter(|d| d != requested));
     for spelled in &spellings {
         let p = Path::new(spelled);
-        let candidates: Vec<PathBuf> = if p.is_absolute() {
-            vec![p.to_path_buf()]
+        let chains: Vec<Vec<&OsStr>> = if p.is_absolute() {
+            p.strip_prefix(&root).ok().and_then(trusted_open::safe_relative_components).into_iter().collect()
         } else {
-            cwd.map(|c| c.join(p)).into_iter().chain([root.join(p)]).collect()
-        };
-        for candidate in candidates {
-            let Ok(real) = std::fs::canonicalize(&candidate) else { continue };
-            if !real.starts_with(&root) || !real.is_file() {
-                continue;
+            let Some(own) = trusted_open::safe_relative_components(p) else { continue };
+            let mut chains = Vec::new();
+            if let Some(cwd_rel) =
+                cwd.as_deref().and_then(|c| c.strip_prefix(&root).ok()).and_then(trusted_open::safe_relative_components)
+            {
+                let mut chain = cwd_rel;
+                chain.extend(own.iter().copied());
+                chains.push(chain);
             }
-            if let Some(mime) = mime_of(&real) {
-                return Some((real, mime));
+            chains.push(own);
+            chains
+        };
+        for chain in chains {
+            let Some(last) = chain.last() else { continue };
+            let Some(mime) = mime_of(Path::new(*last)) else { continue };
+            if let Ok(file) = trusted_open::open_bound_file(&root, &chain, None) {
+                return Some((file, mime));
             }
         }
     }
@@ -101,23 +127,46 @@ pub async fn get(
         return Err(not_found());
     }
     let cwd = bot.cwd.as_deref().map(str::trim).filter(|c| !c.is_empty()).map(Path::new);
-    let (path, mime) = resolve(Path::new(&project.path), cwd, requested).ok_or_else(not_found)?;
-    let meta = tokio::fs::metadata(&path).await.map_err(|_| not_found())?;
+    let (mut file, mime) = resolve(Path::new(&project.path), cwd, requested).ok_or_else(not_found)?;
+    let meta = file.metadata().map_err(|_| not_found())?;
     if meta.len() > MAX_BYTES {
         return Err(not_found());
     }
-    let data = tokio::fs::read(&path).await.map_err(|_| not_found())?;
+    let data = tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+        let mut buf = Vec::with_capacity(meta.len() as usize);
+        file.read_to_end(&mut buf).map(|_| buf)
+    })
+    .await
+    .map_err(|_| not_found())?
+    .map_err(|_| not_found())?;
     Ok((StatusCode::OK, [(header::CONTENT_TYPE, mime), (header::CACHE_CONTROL, "private, no-cache")], data).into_response())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    fn read_all(f: &mut std::fs::File) -> Vec<u8> {
+        let mut v = Vec::new();
+        std::io::Read::read_to_end(f, &mut v).unwrap();
+        v
+    }
+
+    /// 先建、再 canonicalize：macOS 的 `$TMPDIR` 本身經過符號連結（`/var` → `/private/var`），`resolve()`
+    /// 只 canonicalize 一次 `root`／`cwd`，這裡先把測試自己的 `base` 也校正成同一種拼法，兩邊字串比對才會
+    /// 一致（跟 `outbox.rs` 的 `scratch()` 同一個理由）。
+    fn scratch(tag: &str) -> PathBuf {
+        let base = std::env::temp_dir().join(format!("am-local-image-{tag}-{}", crate::db::ulid()));
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::canonicalize(base).unwrap()
+    }
 
     /// 專案裡的圖片（相對或絕對）放行；`..` 逃出去、符號連結指到外面、非圖片、不存在都擋。
     #[test]
     fn only_images_inside_the_project_resolve() {
-        let base = std::env::temp_dir().join(format!("am-local-image-{}", crate::db::ulid()));
+        let base = scratch("resolve");
         let root = base.join("proj");
         std::fs::create_dir_all(root.join("docs/shots")).unwrap();
         std::fs::write(root.join("docs/shots/a.png"), b"png").unwrap();
@@ -144,7 +193,7 @@ mod tests {
     /// worktree 裡沒有才退回專案根目錄。bot 的工作目錄在專案外時照樣不放行。
     #[test]
     fn relative_paths_start_from_the_bots_working_dir() {
-        let base = std::env::temp_dir().join(format!("am-local-image-cwd-{}", crate::db::ulid()));
+        let base = scratch("cwd");
         let root = base.join("proj");
         let wt = root.join(".claude/worktrees/child");
         std::fs::create_dir_all(root.join("docs")).unwrap();
@@ -156,12 +205,12 @@ mod tests {
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::write(outside.join("b.png"), b"png").unwrap();
 
-        let (got, _) = resolve(&root, Some(&wt), "docs/a.png").expect("worktree copy");
-        assert_eq!(std::fs::read(&got).unwrap(), b"new", "讀到的是 {}", got.display());
-        let (got, _) = resolve(&root, None, "docs/a.png").unwrap();
-        assert_eq!(std::fs::read(&got).unwrap(), b"old", "沒有 cwd 就是專案根目錄");
-        let (got, _) = resolve(&root, Some(&wt), "docs/only-root.png").expect("falls back to the project root");
-        assert_eq!(std::fs::read(&got).unwrap(), b"root");
+        let (mut got, _) = resolve(&root, Some(&wt), "docs/a.png").expect("worktree copy");
+        assert_eq!(read_all(&mut got), b"new", "讀到的是 worktree 那份");
+        let (mut got, _) = resolve(&root, None, "docs/a.png").unwrap();
+        assert_eq!(read_all(&mut got), b"old", "沒有 cwd 就是專案根目錄");
+        let (mut got, _) = resolve(&root, Some(&wt), "docs/only-root.png").expect("falls back to the project root");
+        assert_eq!(read_all(&mut got), b"root");
         assert!(resolve(&root, Some(&outside), "b.png").is_none(), "工作目錄在專案外：範圍仍是專案目錄");
         std::fs::remove_dir_all(&base).unwrap();
     }
@@ -169,7 +218,7 @@ mod tests {
     /// Markdown 渲染把網址編過：中文檔名、空白、`file://` 網址都是 `%XX`。
     #[test]
     fn percent_encoded_paths_resolve() {
-        let base = std::env::temp_dir().join(format!("am-local-image-pct-{}", crate::db::ulid()));
+        let base = scratch("pct");
         let root = base.join("proj");
         std::fs::create_dir_all(root.join("docs")).unwrap();
         std::fs::write(root.join("docs/截圖.png"), b"png").unwrap();
@@ -180,10 +229,31 @@ mod tests {
         assert!(resolve(&root, None, "docs/my%20shot.png").is_some(), "空白");
         let abs = std::fs::canonicalize(root.join("docs")).unwrap().join("%E6%88%AA%E5%9C%96.png");
         assert!(resolve(&root, None, &format!("file://{}", abs.display())).is_some(), "file:// 網址");
-        let (got, _) = resolve(&root, None, "docs/100%20.png").expect("字面檔名先試");
-        assert_eq!(std::fs::read(&got).unwrap(), b"literal");
+        let (mut got, _) = resolve(&root, None, "docs/100%20.png").expect("字面檔名先試");
+        assert_eq!(read_all(&mut got), b"literal");
         assert_eq!(percent_decode("a%2"), Some("a%2".into()), "不完整的 % 原樣保留");
         assert_eq!(percent_decode("%FF.png"), None, "不是 UTF-8 就放棄");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// issue #89：跟 outbox 同一個形狀——先讀一次成功，把同一個檔名換成指到界線外的符號連結，再讀一次
+    /// 必須拿不到界線外的內容（一定是 `None`，不會安靜地跟著連結走）。
+    #[test]
+    fn a_file_swapped_for_a_symlink_after_being_read_once_is_refused_next_time() {
+        let base = scratch("race");
+        let root = base.join("proj");
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs/a.png"), b"safe image").unwrap();
+
+        let (mut got, _) = resolve(&root, None, "docs/a.png").expect("第一次正常讀到");
+        assert_eq!(read_all(&mut got), b"safe image");
+
+        let secret = base.join("host-secret.png");
+        std::fs::write(&secret, b"host secret").unwrap();
+        std::fs::remove_file(root.join("docs/a.png")).unwrap();
+        std::os::unix::fs::symlink(&secret, root.join("docs/a.png")).unwrap();
+
+        assert!(resolve(&root, None, "docs/a.png").is_none(), "換成符號連結之後不能再讀到任何內容");
         std::fs::remove_dir_all(&base).unwrap();
     }
 }
