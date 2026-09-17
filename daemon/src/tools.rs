@@ -371,8 +371,40 @@ pub async fn record_identity_login(
     before != (info.logged_in, info.account.clone(), info.plan.clone())
 }
 
+/// 這次重驗的答案要不要寫回快取。遠端讀到「未登入」只有 **claude** 不可信（ssh 沒有 GUI session、
+/// 讀不到 Keychain）；codex／grok 的 `login status` 在遠端照樣準——一律丟掉的話，在遠端主機按「登出」
+/// 之後列上還是「已登入」、登出鈕也還在，要等手動重新偵測或 daemon 重啟（review3 c5 L3）。
+pub(crate) fn login_answer_to_cache(local: bool, kind: &str, logged_in: bool) -> Option<bool> {
+    if !local && !logged_in && kind == "claude" {
+        return None;
+    }
+    Some(logged_in)
+}
+
+/// 登出的 pane 收尾時要往快取寫什麼：重驗說還登著就照實（登出沒成功），問不出來就記未登入——
+/// 剛剛才親手下過登出指令，寧可顯示未登入也不要留一個按不完的登出鈕（review3 c5 L3）。
+pub(crate) fn logout_result(recheck: Option<bool>) -> Option<bool> {
+    match recheck {
+        Some(true) => Some(true),
+        _ => Some(false),
+    }
+}
+
+/// 記下「這個身分已登出」：`account`／`plan` 一起清掉，否則列上會是「未登入」配著上一個帳號。
+pub async fn record_identity_logged_out(app: &Arc<App>, host: &str, name: &str, reason: &str) -> bool {
+    let mut all = app.tools.lock().await;
+    let Some(ht) = all.get_mut(host) else { return false };
+    let Some(info) = ht.identities.get_mut(name) else { return false };
+    let before = (info.logged_in, info.account.clone(), info.plan.clone());
+    info.logged_in = Some(false);
+    info.account = None;
+    info.plan = None;
+    info.reason = Some(reason.to_string());
+    before != (info.logged_in, info.account.clone(), info.plan.clone())
+}
+
 /// The poller parks a logged-out identity for 30 min, so after a login the cache stays stale;
-/// `start_bot` rechecks before warning. A remote `false` is **not** written back (no Keychain over ssh).
+/// `start_bot` rechecks before warning.
 pub async fn recheck_identity_login(app: &Arc<App>, host: &str, name: &str) -> Option<bool> {
     let idn = identity_for_host(app, host, name).await?;
     let args: Vec<&str> = match idn.kind.as_str() {
@@ -395,10 +427,8 @@ pub async fn recheck_identity_login(app: &Arc<App>, host: &str, name: &str) -> O
     };
     let (logged_in, account, plan) = read_login_answer(&idn.kind, &out);
     let logged_in = logged_in?;
-    if host != LOCAL_HOST && !logged_in {
-        return None;
-    }
-    if record_identity_login(app, host, name, Some(logged_in), account, plan).await {
+    let to_cache = login_answer_to_cache(host == LOCAL_HOST, &idn.kind, logged_in)?;
+    if record_identity_login(app, host, name, Some(to_cache), account, plan).await {
         app.emit("host_changed", serde_json::json!({"host": host})).await;
     }
     if logged_in && idn.kind == "claude" {
@@ -408,7 +438,17 @@ pub async fn recheck_identity_login(app: &Arc<App>, host: &str, name: &str) -> O
 }
 
 /// Never copies the login pane's terminal output anywhere else.
-pub fn spawn_identity_login_watch(app: Arc<App>, host: String, pane_id: String, name: String, kind: String) {
+///
+/// `logout`＝這個 pane 下的是登出指令：CLI 跑完之後重驗問不出來（遠端 claude 一律問不出來）就直接記未登入，
+/// 不然列上會一直顯示「已登入」、登出鈕也還按得下去（review3 c5 L3）。
+pub fn spawn_identity_login_watch(
+    app: Arc<App>,
+    host: String,
+    pane_id: String,
+    name: String,
+    kind: String,
+    logout: bool,
+) {
     tokio::spawn(async move {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(15 * 60);
         let startup_deadline = tokio::time::Instant::now() + Duration::from_secs(12);
@@ -430,7 +470,14 @@ pub fn spawn_identity_login_watch(app: Arc<App>, host: String, pane_id: String, 
             });
             saw_cli |= cli_active;
             if (saw_cli && !cli_active) || (!saw_cli && tokio::time::Instant::now() >= startup_deadline) {
-                let _ = recheck_identity_login(&app, &host, &name).await;
+                let after = recheck_identity_login(&app, &host, &name).await;
+                if logout && logout_result(after) == Some(false) {
+                    let changed =
+                        record_identity_logged_out(&app, &host, &name, "剛剛在這台主機登出（重驗問不出來時照登出算）").await;
+                    if changed {
+                        app.emit("host_changed", serde_json::json!({"host": host})).await;
+                    }
+                }
                 let _ = crate::api::shell::close(&app, &host, &pane_id).await;
                 return;
             }
@@ -1192,6 +1239,29 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
         assert_eq!(identity_login_command("codex", &BTreeMap::new()).as_deref(), Some("codex login"));
         assert_eq!(identity_login_command("grok", &BTreeMap::new()).as_deref(), Some("grok login"));
         assert!(identity_login_command("other", &BTreeMap::new()).is_none());
+    }
+
+    /// 遠端讀到「未登入」只有 claude 不可信（ssh 讀不到 Keychain）：codex／grok 照樣寫回快取，
+    /// 否則在遠端按了登出，列上還是「已登入」、登出鈕也還在（review3 c5 L3）。
+    #[test]
+    fn a_remote_logged_out_answer_is_only_distrusted_for_claude() {
+        for kind in ["codex", "grok"] {
+            assert_eq!(login_answer_to_cache(false, kind, false), Some(false), "{kind}");
+            assert_eq!(login_answer_to_cache(false, kind, true), Some(true), "{kind}");
+        }
+        assert_eq!(login_answer_to_cache(false, "claude", false), None, "遠端 claude 讀不到 Keychain");
+        assert_eq!(login_answer_to_cache(false, "claude", true), Some(true));
+        // 本機一律照實寫（包含 claude 的未登入）。
+        assert_eq!(login_answer_to_cache(true, "claude", false), Some(false));
+        assert_eq!(login_answer_to_cache(true, "codex", false), Some(false));
+    }
+
+    /// 登出的 pane 收尾：重驗說還登著就照實，問不出來（遠端 claude 一律問不出來）就記未登入。
+    #[test]
+    fn a_logout_pane_writes_logged_out_when_the_recheck_cannot_tell() {
+        assert_eq!(logout_result(None), Some(false));
+        assert_eq!(logout_result(Some(false)), Some(false));
+        assert_eq!(logout_result(Some(true)), Some(true), "登出沒成功就照實，不要騙人說登出了");
     }
 
     /// 登出要帶跟登入一模一樣的環境前綴，否則按下 cc2 的登出會把 cc0 登掉。

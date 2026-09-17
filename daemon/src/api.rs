@@ -1532,7 +1532,7 @@ async fn identity_auth(app: Arc<App>, name: String, identity: String, logout: bo
         let _ = shell::close(&app, &name, &shell.pane_id).await;
         return Err(e);
     }
-    crate::tools::spawn_identity_login_watch(app, name, shell.pane_id.clone(), identity, idn.kind);
+    crate::tools::spawn_identity_login_watch(app, name, shell.pane_id.clone(), identity, idn.kind, logout);
     Ok((StatusCode::OK, Json(json!(shell))).into_response())
 }
 

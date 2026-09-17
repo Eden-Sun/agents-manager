@@ -915,7 +915,7 @@ Project 底下所有存活 bot 的訊息合併，以插入順序（`rowid`）倒
 
 - `installed`：`"$SHELL" -lic 'command -v <kind>'` 找得到；`path`/`version` 是 `command -v` 與 `--version` 第一行。
 - `logged_in`：`true|false|null`；claude 看 `~/.claude/.credentials.json`（或 Keychain `Claude Code-credentials`），codex `~/.codex/auth.json`，grok `~/.grok/` 的 auth 檔。
-- `hosts[].identities.<name>` 的 `logged_in`/`account`/`plan` 另一條路：codex、grok 走 ssh（`codex login status` / `grok models`）；**claude 不走 ssh**（讀不到 Keychain 會誤答 false），
+- `hosts[].identities.<name>` 的 `logged_in`/`account`/`plan` 另一條路：codex、grok 走 ssh（`codex login status` / `grok models`，遠端回「未登入」照樣寫回快取）；**claude 不走 ssh**（讀不到 Keychain 會誤答 false，遠端讀到的 false 一律丟掉），
   搭 §12.4 的 `claude-usage` 探測拿，所以第一輪額度輪詢（≤ 60 秒）後才從 `null` 變真答案，變了推 `host_changed`。
 - 尚未偵測時 `tools`、`tools_checked_at` 為 `null`。
 - `POST /api/hosts/{name}/tools/refresh` → 立即重新偵測 `200 {"name","tools","tools_checked_at"}`（host 不存在 404、ssh 失敗 502），並推 `host_changed`。
