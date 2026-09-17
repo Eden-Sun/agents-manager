@@ -380,7 +380,7 @@ function RemoteCargoPanel() {
     }
   }, [])
 
-  const save = async () => {
+  const save = async (): Promise<boolean> => {
     setBusy(true)
     setMessage('')
     try {
@@ -397,8 +397,10 @@ function RemoteCargoPanel() {
       setClearPassword(false)
       setPasswordSet(cfg.password_set)
       setMessage('✓ 已儲存。新啟動的本機 Bot 會自動使用外部 Cargo verification。')
+      return true
     } catch (e) {
       setMessage(`儲存失敗：${e instanceof Error ? e.message : String(e)}`)
+      return false
     } finally {
       setBusy(false)
     }
@@ -409,7 +411,7 @@ function RemoteCargoPanel() {
     setMessage('')
     try {
       // 未儲存的新密碼先寫入，避免「測試」其實測到舊 credential。
-      if (password || clearPassword) await save()
+      if ((password || clearPassword) && !(await save())) return
       const r = await api.testRemoteCargo()
       setMessage(`✓ SSH/Cargo 可用（${r.password_auth ? '密碼' : 'SSH key/agent'}）：\n${r.output}`)
     } catch (e) {
