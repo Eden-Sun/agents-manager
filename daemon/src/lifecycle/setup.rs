@@ -134,6 +134,8 @@ START=0
 case "$PROVIDER" in
   claude)
     case "$PAYLOAD" in *'"hook_event_name":"Stop"'*|*'"hook_event_name": "Stop"'*) STATE=idle ;; esac
+    # 失敗收尾的回合一樣不再是 working（issue #79）。`"Stop"` 那個 pattern 帶了收尾的引號，配不到 StopFailure。
+    case "$PAYLOAD" in *'"hook_event_name":"StopFailure"'*|*'"hook_event_name": "StopFailure"'*) STATE=idle ;; esac
     case "$PAYLOAD" in *'"stop_hook_active":true'*|*'"stop_hook_active": true'*) STATE="" ;; esac
     case "$PAYLOAD" in *'"hook_event_name":"SessionStart"'*|*'"hook_event_name": "SessionStart"'*) START=1 ;; esac
     ;;
@@ -441,7 +443,11 @@ fn claude_settings(hook_cmd: &str, statusline: &str, wants_remote: bool) -> Valu
         "remoteControlAtStartup": wants_remote,
         "hooks": {
             "SessionStart": [{"hooks": [{"type": "command", "command": hook_cmd}]}],
-            "Stop": [{"hooks": [{"type": "command", "command": hook_cmd}]}]
+            "Stop": [{"hooks": [{"type": "command", "command": hook_cmd}]}],
+            // 回合**失敗**收尾（API／auth／額度…）也是一級訊號，不是只有答完才算結束（issue #79）。
+            // 沒有它的話，失敗的回合要等 §4.3 備援或 stuck watchdog 才被發現，中間一直掛在 in_flight。
+            // 舊版 claude 不認得這個鍵就忽略它，不影響既有兩個 hook。
+            "StopFailure": [{"hooks": [{"type": "command", "command": hook_cmd}]}]
         },
         "statusLine": {"type": "command", "command": statusline},
         // Trial: shorter replies scrape cleaner from the terminal (§4.3) and read better in 對話.
@@ -840,7 +846,32 @@ pub(crate) fn model_args(bot: &db::Bot) -> Vec<String> {
 
 #[cfg(test)]
 mod hook_cmd_parts_tests {
-    use super::{hook_cmd_parts_for, write_private};
+    use super::{claude_settings, hook_cmd_parts_for, write_private};
+
+    /// issue #79：claude 的 `--settings` 要訂 `StopFailure`，daemon 才收得到「回合失敗收尾」的原生訊號；
+    /// 既有的兩個 hook 一個都不能掉，三個都指向同一支 hook 指令（分類在 daemon 裡做）。
+    #[test]
+    fn a_claude_bot_subscribes_to_stop_failure_as_well_as_stop() {
+        let v = claude_settings("/usr/bin/agents-managerd hook claude --bot b1", "/usr/bin/agents-managerd statusline", false);
+        let hooks = v.get("hooks").and_then(|h| h.as_object()).expect("hooks");
+        let mut names: Vec<&String> = hooks.keys().collect();
+        names.sort();
+        assert_eq!(names, vec!["SessionStart", "Stop", "StopFailure"], "{hooks:?}");
+        for name in ["SessionStart", "Stop", "StopFailure"] {
+            let cmd = hooks[name][0]["hooks"][0]["command"].as_str().unwrap_or_default();
+            assert!(cmd.contains("hook claude"), "{name} 要指向同一支 hook 指令：{cmd}");
+        }
+    }
+
+    /// 遠端走 `hook.sh`：失敗收尾的回合一樣不再是 working，要向 herdr 報 idle（`"Stop"` 那個
+    /// pattern 帶了收尾的引號，配不到 `StopFailure`）。
+    #[test]
+    fn the_remote_dispatcher_reports_idle_for_a_failed_turn_too() {
+        assert!(
+            super::REMOTE_HOOK_SH_TEMPLATE.contains(r#"*'"hook_event_name":"StopFailure"'*"#),
+            "hook.sh 少了 StopFailure 那一條",
+        );
+    }
 
     /// Issue #43: the hook / statusLine command line must not carry the token.
     #[test]

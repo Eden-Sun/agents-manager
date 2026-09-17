@@ -134,9 +134,26 @@ Vite + React + TypeScript + Zustand，只做 daemon 狀態的投影；正式版 
 
 ### 4.1 主要來源：hooks / notify（每次啟動注入，不改使用者全域設定）
 
-**Claude Code**：`--settings <abs>`，檔案 `~/.config/agents-manager/bots/<bot_id>/claude-settings.json`，註冊 `SessionStart` 與 `Stop` 兩個 hook，
-command 為 `/abs/agents-managerd hook claude --bot <bot_id> --token <t> --port <port>`。`stop_hook_active = true` 的 Stop 忽略。
+**Claude Code**：`--settings <abs>`，檔案 `~/.config/agents-manager/bots/<bot_id>/claude-settings.json`，註冊 `SessionStart`、`Stop` 與 `StopFailure` 三個 hook，
+command 為 `/abs/agents-managerd hook claude --bot <bot_id> --token <t> --port <port>`（三個指向同一支，分類在 daemon 的 `hookrecv::classify` 裡做）。
+`stop_hook_active = true` 的 Stop 忽略。
 stdin：SessionStart 含 `session_id`、`transcript_path`、`cwd`；Stop 另含 `prompt_id`、`last_assistant_message`、`stop_hook_active`。
+
+**`StopFailure`＝一級的回合失敗訊號**（issue #79）：回合因 API／auth／額度等失敗收尾時 claude 自己會送，
+daemon 收到就**當場**把那一筆 in-flight turn 收成 `status='failed'`、把原因寫成一則系統訊息。
+以前沒訂這個 hook，失敗的回合要等 §4.3 備援（`working → idle` 後 5 秒）或 stuck watchdog 才被發現，中間一直掛在 `in_flight`。
+- **`delivery` 不動**：字是送出去了，失敗的是回合。送達與回合成敗是兩件事（§4.4a）。
+- **原因分類**（`hookrecv::classify_failure`）：`rate limit`／`usage limit`／`429`／`overloaded` → 額度或速率限制；
+  `auth`／`401`／`403`／`credential`／`login` → 帳號或授權；其他有字的 → API 錯誤；撈不到原因 → 未分類（**照樣收回合**，只是說不出原因）。
+  原因從 `reason`／`failure_reason`／`stop_reason`／`error_type`／`subtype`／`error`（含 `{type,message}` 巢狀）／`message`／`detail` 依序找，
+  欄位名還在動，撈不到不等於沒發生。分類只寫進那則系統訊息，**不碰 quota 狀態**——撞限的判定仍由既有的橫幅／statusLine 那條路負責，這條不介入也就不會讓它回歸。
+- **使用者自己按停不是失敗**，兩道防護：payload 的原因看起來是中斷（`interrupt`／`cancel`／`abort`…，分類時排在最前面）就不動；
+  payload 說不出原因時看 daemon 自己的紀錄——`interrupt_bot` 先 `note_user_interrupt` 再收 in-flight turn，所以那個寬限窗口裡到的 StopFailure 就是同一次 Esc 的回聲。
+- **不會重複收尾**：先在 `(native_session_id, native_turn_id)` 上去重（重播、spool 重送），再用
+  `UPDATE … WHERE id=? AND status='in_flight'` 的 CAS——後到的 Stop 或 §4.3 備援已經收掉時這裡 0 rows，什麼都不做。
+  沒有 in-flight turn 時**不開新回合**：後到的訊號沒有回合可收就算了。
+- 遠端走 `hook.sh` 的那條路一樣認 `StopFailure`，向 herdr 報 `idle`（失敗收尾的回合也不再是 working）。
+- 終端 banner 那條 fallback **保留不動**（issue #79 明訂），這條只是把「失敗」從用猜的變成收得到的事件。
 同一個設定檔另外固定寫：`outputStyle: Concise`、`skipDangerousModePermissionPrompt`、`remoteControlAtStartup`（§18），以及 `timeFormat: "24-hour"`＋`timeZone: "Asia/Taipei"`
 （使用者 2026-09-15：CLI 畫面裡的時間一律台北時間 24 小時制；claude 2.1.257 起才認，本機與遠端同一份）。
 

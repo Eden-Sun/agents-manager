@@ -55,8 +55,8 @@ pub(crate) fn note_user_interrupt_at(bot_id: &str, at: DateTime<Utc>) {
     interrupt_holds().lock().unwrap_or_else(|e| e.into_inner()).insert(bot_id.to_string(), at);
 }
 
-/// 測試用：這顆 bot 現在還有沒有接管標記。
-#[cfg(test)]
+/// 這顆 bot 現在還有沒有接管標記。`StopFailure` 用它分辨「provider 真的失敗」與「使用者剛按了停」
+/// （issue #79）；測試也讀它。
 pub(crate) fn is_held(bot_id: &str) -> bool {
     hold_of(bot_id).is_some()
 }
