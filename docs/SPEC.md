@@ -79,6 +79,16 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   `db::migrate` 自己的 SCHEMA／additive ALTER 包在一個 transaction 裡，中途失敗（例如舊資料違反新加的 UNIQUE INDEX）整批回滾，
   不留半套 schema；重跑冪等。子模組各自的 migration（`supervisor::store`、`read_marks`、`panes`、`herdr_maintenance`、
   `mission::store`）不在這個 transaction 裡，各自維護自己那張表，風險最高的「加欄＋回填」已經各自包了自己的 transaction。
+  - **schema 版本戳記**（issue #72）：`db::SCHEMA_VERSION` 存進 SQLite 內建的 `PRAGMA user_version`，跟上面那個
+    transaction 一起 commit／rollback。`migrate` 一開始先比對：DB 記的版本比這顆 binary 認得的還新（代表已經有更新版
+    daemon 動過這個檔案）就直接拒絕啟動，一個 SCHEMA／ALTER 都不碰；版本較舊或沒設過（既有 DB 的 `user_version` 預設
+    0）一律照舊往下跑，成功後才蓋上這顆 binary 的版本號。**這不是「照順序執行第 N 號 migration」的機制**——`SCHEMA`／
+    additive ALTER 名單本身已經是 `CREATE TABLE IF NOT EXISTS`／`has_column` 檢查過的冪等操作，天生可重入；拆成
+    `001_xxx.sql`／`002_xxx.sql` 這種按版本編號執行的檔案清單，是刻意評估後放棄的方向：現有機制的「單一事實來源＝實際
+    schema，且每次開機自我核對」（`check_schema_drift`）比「另外維護一份『哪些 migration 跑過』的帳本」更難跟實際狀態
+    脫鉤，跨檔案改寫全部子模組簽名的風險也不成比例於「舊 binary 開到新 schema」這個唯一還沒被擋住的漏洞。往回滾到較
+    舊 binary：只要那顆 binary 的 `SCHEMA_VERSION` 沒有比 DB 記的更舊，就能正常開；比較舊就會在啟動時直接報錯退出
+    （不會把資料庫改壞，也不會用不懂的欄位硬跑）。
 - **到期動作不靠行程內的 timer 當唯一真相**（issue #75）：每一種「等一下再做」的到期時間都**存在 DB 的擁有者那一列**上——
   排隊 prompt 的重試 `turns.next_flush_at`、交辦重送 `supervisor_assignments.next_attempt_at`、等額度 `…resume_at`、
   協調者補送 `supervisor_inbox.notify_next_at`、總管看門狗 `supervisors.watchdog_next_at`、hook 事件 `hook_events.next_attempt_at`。
