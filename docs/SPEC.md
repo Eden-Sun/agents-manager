@@ -167,7 +167,14 @@ daemon 收到就**當場**把那一筆 in-flight turn 收成 `status='failed'`�
 - 遠端走 `hook.sh` 的那條路一樣認 `StopFailure`，向 herdr 報 `idle`（失敗收尾的回合也不再是 working）。
 - 終端 banner 那條 fallback **保留不動**（issue #79 明訂），這條只是把「失敗」從用猜的變成收得到的事件。
 同一個設定檔另外固定寫：`outputStyle: Concise`、`skipDangerousModePermissionPrompt`、`remoteControlAtStartup`（§18），以及 `timeFormat: "24-hour"`＋`timeZone: "Asia/Taipei"`
-（使用者 2026-09-15：CLI 畫面裡的時間一律台北時間 24 小時制；claude 2.1.257 起才認，本機與遠端同一份）。
+（使用者 2026-09-15：CLI 畫面裡的時間一律台北時間 24 小時制；claude 2.1.257 起才認，本機與遠端同一份），還有 `autoContinueAtUsageLimit: false`
+（issue #78：撞到用量上限，claude 自己排一個「continuing automatically at HH:MM」，daemon 不知道；那個自動續跑被取消時
+（`Automatic continue cancelled`）沒人接手，卡死到有人手動 `/rate-limit-options`。managed pane 的 Turn 該由誰接回去是 daemon 的
+resend／排隊機制決定（`stuck_turns.rs`），不讓 CLI 自己另開一條線。**不是**用 issue 原本建議的 `CLAUDE_CODE_RESUME_INTERRUPTED_TURN`
+環境變數——查過 claude 2.1.274 的 bundle，那個變數是 cloud/remote worker epoch 之間搬 session 用的（字串表裡跟
+`host_draining`／`container_recreated`／`checkpoint_restore` 同一組），跟本機 pane 的用量上限自動續跑是兩回事，關了也不影響它。
+真正管這個行為的是 `/config` 的「Continue automatically at usage limit」，對應 settings.json 的 `autoContinueAtUsageLimit`
+（claude 2.1.234 起存在；`--settings` 對不認得這個鍵的舊版本一律靜靜忽略，不會讓啟動失敗）。
 
 **Codex**：`-c notify=["/abs/agents-managerd","hook","codex","--bot",…,"--token",…,"--port",…]`；argv 最後一個參數是 JSON
 `{"type":"agent-turn-complete","thread-id","turn-id","cwd","input-messages","last-assistant-message"}`。使用者原本的 `notify` 在此實例被覆蓋。

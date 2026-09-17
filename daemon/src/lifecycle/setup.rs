@@ -457,7 +457,19 @@ fn claude_settings(hook_cmd: &str, statusline: &str, wants_remote: bool) -> Valu
         "skipDangerousModePermissionPrompt": true,
         // 使用者 2026-09-15：每顆 bot 的 CLI 時間統一台北時間 24 小時制（claude 2.1.257 起的設定；本機、遠端都一樣）。
         "timeFormat": "24-hour",
-        "timeZone": "Asia/Taipei"
+        "timeZone": "Asia/Taipei",
+        // issue #78：撞到用量上限時 claude 自己排一個「continuing automatically at HH:MM」，daemon 完全
+        // 不知道，而且那個自動續跑被取消時（畫面變 `Automatic continue cancelled`）沒有人接手，整顆卡死
+        // 到有人手動 `/rate-limit-options` 重新掛上。managed pane 的 Turn 該由誰接回去是 daemon 的
+        // resend／排隊機制（`stuck_turns.rs`、queue timer）決定，不該讓 CLI 自己另開一條線。
+        //
+        // 這不是 `CLAUDE_CODE_RESUME_INTERRUPTED_TURN`（那是完全不同的子系統：cloud/remote worker
+        // epoch 之間搬 session 用的環境變數，字串表裡緊跟著 `host_draining`／`container_recreated`／
+        // `checkpoint_restore`，跟本機 pane 的用量上限自動續跑無關，關了也不會影響這裡）。真正管這個
+        // 行為的是 settings.json 的 `autoContinueAtUsageLimit`（`/config` 裡的「Continue automatically
+        // at usage limit」，claude 2.1.234 起存在），關掉之後撞到上限會停下來、把「等」變成使用者自己選
+        // 的選項，不會自己續跑。
+        "autoContinueAtUsageLimit": false
     })
 }
 
@@ -1517,6 +1529,18 @@ mod claude_settings_tests {
             assert_eq!(v["skipDangerousModePermissionPrompt"], json!(true));
             assert_eq!(v["timeFormat"], "24-hour");
             assert_eq!(v["timeZone"], "Asia/Taipei");
+        }
+    }
+
+    /// issue #78：managed pane 不讓 claude 自己排「撞到用量上限就自動續跑」——那條線改由 daemon 的
+    /// resend／排隊機制接手（`stuck_turns.rs`）。這一個鍵是 `/config` 裡「Continue automatically at
+    /// usage limit」的設定檔對應（`autoContinueAtUsageLimit`，claude 2.1.234 起存在），不是
+    /// `CLAUDE_CODE_RESUME_INTERRUPTED_TURN`（那是不相干的 cloud worker 續傳環境變數）。
+    #[test]
+    fn managed_panes_do_not_let_claude_auto_continue_past_a_usage_limit() {
+        for wants_remote in [false, true] {
+            let v = claude_settings("hook", "sl", wants_remote);
+            assert_eq!(v["autoContinueAtUsageLimit"], json!(false), "wants_remote={wants_remote}");
         }
     }
 }
