@@ -1059,6 +1059,9 @@ body 直接是檔案位元組（**不是** multipart），`Content-Type` 就是�
   總管認持久化的 `bot_id`，改名不會多開一個。
 - `POST /api/supervisor/start {}` / `stop {}` → 同 GET。`start` 後 `remote.status` 是 `requested`。`start` 標「應該在跑」、`stop` 標「使用者要它停」：不是經 `stop` 停掉的
   （被殺、崩潰、更新重啟沒回來），watchdog 自動再 `start`（30 秒，之後 60／120／300 秒退避，連續 5 次失敗寫進 `status_detail` 並停止）。`waiting_quota` 期間與 setup 後沒 start 過的不拉起。
+  兩支都**先寫意圖再做副作用**，寫不進去就整個失敗、一步都不做，回 `502 could not persist desired_running (…)`，不會靜靜吞掉（issue #84，協調者的 start／stop 同規則）：
+  這個旗標是 watchdog 唯一的憑據，回 200 卻沒寫進去的話，使用者停掉的 AGM 下一個 tick 就自己活回來。**啟動本身**失敗不撤銷意圖（回錯誤，交給 watchdog 重試）；
+  還沒 setup 就 start 回 409 `not_configured`，不留下沒有 bot 可以對應的意圖。
 - `POST /api/supervisor/fallback {}` → 同 status 加 `switched:bool`。在 cc0 的 `fable`／`opus` 之間切換，冷卻窗 30 分內最多自動切一次。只在總管 idle 且無 in-flight turn（或沒在跑）時切，
   回合中 409 `busy`。`/model` 走 `send_slash_line`（答「Switch model?」框）；live 套用不成而仍 idle 時改重啟套用。自動判斷（controller 每 10 秒，`supervisor/policy.rs`）：
   1. 5h 或 7d 任一 `critical` → `waiting_quota`，`quota_reset_at` = 最近的 `resets_at`；窗恢復即解除。

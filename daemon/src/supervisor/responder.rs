@@ -402,7 +402,24 @@ pub async fn apply_persona(app: &Arc<App>, text: &str) -> Result<(), LcError> {
     Ok(())
 }
 
-/// 啟動協調者。呼叫端持有 [`super::lock`]。
+/// 使用者按下 start：**先把「要它跑」寫進去，寫成功才啟動**。呼叫端持有 [`super::lock`]。
+///
+/// 跟巡檢那條（`super::start_requested`）同一個規則，理由也一樣：`desired_running` 是看門狗唯一的
+/// 憑據，寫不進去就整個失敗、什麼都不動，不留下「跑著但沒人要它跑」（issue #84）。start 本身失敗時
+/// 意圖留著，交給看門狗的有界重試（999480e）。
+pub async fn start_requested(app: &Arc<App>) -> Result<(), LcError> {
+    // 沒設定好就回 not_configured，不要先留下一個沒有 bot 可以對應的「要它跑」。
+    if roles::responder_bot(&app.db).await.map_err(up)?.is_none() {
+        return Err(LcError::conflict("responder is not set up", json!({"reason": "responder_not_configured"})));
+    }
+    roles::set_desired_running(&app.db, Role::Responder, true)
+        .await
+        .map_err(|e| LcError::Upstream(format!("could not persist desired_running (nothing was started): {e}")))?;
+    start(app, None).await
+}
+
+/// 啟動協調者。呼叫端持有 [`super::lock`]。使用者按的 start 走 [`start_requested`]；這裡**不動**
+/// `desired_running`，看門狗也走這條，寫意圖會把它的重試次數歸零、有界重試就變成永遠重試。
 pub async fn start(app: &Arc<App>, detail: Option<&str>) -> Result<(), LcError> {
     let bot = roles::responder_bot(&app.db)
         .await
@@ -431,8 +448,11 @@ pub async fn stop(app: &Arc<App>) -> Result<(), LcError> {
         .await
         .map_err(up)?
         .ok_or_else(|| LcError::conflict("responder is not set up", json!({"reason": "responder_not_configured"})))?;
-    // 先寫「不要它跑」，看門狗才不會在兩步之間把它拉回來。
-    roles::set_desired_running(&app.db, Role::Responder, false).await.map_err(up)?;
+    // 先寫「不要它跑」，看門狗才不會在兩步之間把它拉回來；寫不進去就不要停——停了也會被拉回來，
+    // 而使用者拿到的是 200（issue #84）。
+    roles::set_desired_running(&app.db, Role::Responder, false)
+        .await
+        .map_err(|e| LcError::Upstream(format!("could not persist desired_running (nothing was stopped): {e}")))?;
     lifecycle::stop_bot(app, &bot.id).await?;
     app.emit("supervisor_changed", json!({"responder": "stopped"})).await;
     Ok(())

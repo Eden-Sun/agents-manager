@@ -1512,6 +1512,13 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
   同 `source`+`reason` 每小時最多一則。以前那幾支只寫自己的 log 就 `exit 0`——正式 daemon 從此不再自動換版而沒有任何人知道（review 2026-09-16 c1 M1）。
   `daemon-update-kick.sh` 的鎖改成帶 pid 與時間：執行者不在了（強制關機、SIGKILL）就回收並接手這一輪；還活著但卡超過 `AGM_LOCK_HUNG_SECS`（3600 秒）才喊人。
   核准 ID 先用 `approval list --id` 查（清單只回最新 100 筆），查不到與狀態檔壞掉都喊人。
+- **`desired_running` 是 watchdog 唯一的憑據，而且要跨重啟活著**，所以巡檢與協調者的 start／stop 都把它的寫入當**前置條件**，不是順手做的副作用（issue #84）：
+  start 先寫「要它跑」再啟動、stop 先寫「不要它跑」再停，**寫不進去就整個失敗、一步副作用都不做**（呼叫端拿到 502，說明是持久化失敗，原樣重試是安全的）。
+  以前兩支都是 `let _ = …`：stop 吞掉錯誤照樣停並回 200，watchdog 讀到的還是「要它跑」，使用者剛停掉的 AGM 下一個 tick 自己活回來；
+  start 則是啟動成功才寫，寫失敗就留下「跑著但沒人要它跑」，重啟後不會照使用者期待回來。`UPDATE` 沒有匹配到任何列也算失敗（回 `Ok` 等於假裝寫進去了）。
+  **啟動本身**失敗時意圖留著不撤銷：交給 watchdog 的有界重試，健康那格也會因為「要它跑卻停著」變成 degraded。還沒 setup 就 start 回 `not_configured`，不留下沒有 bot 可以對應的意圖。
+  這個順序住在 `supervisor::start_requested` / `stop_requested`（協調者是 `responder::start_requested` / `responder::stop`），不由每個 API handler 各自維護；
+  watchdog 與換模型重啟走的 `start_manager` / `responder::start` **不動**這個旗標——寫它的語意是「人做了新決定」，會把 watchdog 的重試次數歸零，有界重試就變成永遠重試。
 - 不算故障：使用者停掉的 bot（最後一個 run 是 `stopped`）、等使用者回答的 blocked、短暫排隊、AGM 自己的 idle/busy。
   一鍵重啟停掉了 bot 卻沒能開回來（start 在前置檢查就失敗、沒建新 run）時，剛停掉的 run 改記 `exited`，不算使用者停的。量不到回 `unknown`，不併進 `healthy`。全部走 30 秒 cheap probe。
   探針的查詢出錯（例如 schema 漂移）時，它那一類 incident 不開也不解，`system_health` 回 `unknown` 並列 `blind_probes`（上一輪沒跑起來的探針；真的有 degraded／critical 時照舊取較嚴重者）。

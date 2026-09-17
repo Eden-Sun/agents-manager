@@ -48,9 +48,58 @@ const BOOTSTRAP_PROMPT: &str = r#"這是 AGM 啟動握手，不是新的工作�
 
 請用繁體中文回覆一段簡短的「AGM 已就緒」訊息，說明使用者可以直接提出問題、要求尋找相關 bot，或說「交給你推薦的 bot」。不要自行建立工作，也不要把這段握手當成待辦。"#;
 
-/// Bring the manager up. The one start path, shared by `POST /supervisor/start` and the
+/// 使用者按下 start：**先把「要它跑」寫進去，寫成功才啟動**。呼叫端持有 [`lock`]。
+///
+/// `desired_running` 是看門狗唯一的憑據，而且要跨重啟活著，所以它的寫入是這條路徑的前置條件，
+/// 不是順手做的副作用（issue #84）。寫不進去就整個失敗、一個 pane 都不開：呼叫端拿到的錯誤是真的，
+/// 而且什麼都還沒動，原樣重試是安全的。反過來（先啟動再寫）失敗時會留下「跑著但沒人要它跑」——
+/// 看門狗不管、健康說 healthy，重啟之後就不會照使用者期待回來。
+///
+/// 啟動本身失敗時意圖照樣留著：交給看門狗的有界重試，健康那格也會因為「要它跑卻停著」變成 degraded
+/// （999480e 對協調者的決定，這裡跟它一致）。
+pub async fn start_requested(app: &Arc<App>) -> Result<(), LcError> {
+    // Choose the configured fallback before launching the CLI, so a low Fable bucket starts
+    // directly on Opus instead of briefly opening the wrong session.
+    if let Err(e) = controller::apply_quota_policy(app).await {
+        tracing::warn!(error = ?e, "quota policy during start failed");
+    }
+    // `manager_bot` 建好那一列（`get_or_init`）之後才寫得進去，而且沒設定好就該回 not_configured，
+    // 不是留下一個沒有 bot 的「要它跑」。
+    if manager_bot(app).await?.is_none() {
+        return Err(LcError::conflict("supervisor is not set up", json!({"reason": "not_configured"})));
+    }
+    store::set_desired_running(&app.db, true).await.map_err(persist_intent_failed)?;
+    start_manager(app, None).await
+}
+
+/// 使用者按下 stop：**先把「不要它跑」寫進去，寫成功才停**。呼叫端持有 [`lock`]。
+///
+/// 順序本來就對，但寫入失敗被吞掉，於是「停好了」會回 200，而看門狗讀到的還是「要它跑」，
+/// 下一個 tick 就把它拉回來——使用者看到的是自己停過的東西自己活過來（issue #84）。
+pub async fn stop_requested(app: &Arc<App>) -> Result<(), LcError> {
+    let bot = manager_bot(app)
+        .await?
+        .ok_or_else(|| LcError::conflict("supervisor is not set up", json!({"reason": "not_configured"})))?;
+    store::set_desired_running(&app.db, false).await.map_err(persist_intent_failed)?;
+    crate::lifecycle::stop_bot(app, &bot.id).await?;
+    // A stopped CLI takes its Remote Control session with it; claiming otherwise would send
+    // the user to a dead URL on their phone.
+    let _ = store::set_remote(&app.db, "unknown", None).await;
+    app.emit("supervisor_changed", json!({"stopped": true})).await;
+    Ok(())
+}
+
+/// 意圖寫不進去：講清楚是哪一步壞了，呼叫端才知道「什麼都沒發生、可以原樣重試」。
+fn persist_intent_failed<E: std::fmt::Display>(e: E) -> LcError {
+    LcError::Upstream(format!("could not persist desired_running (nothing was started or stopped): {e}"))
+}
+
+/// Bring the manager up. The one start path, shared by [`start_requested`] and the
 /// watchdog; the caller holds [`lock`]. `detail` is what `status_detail` should say afterwards
 /// (the watchdog writes why it did this; the API clears it).
+///
+/// 這裡**不動** `desired_running`：看門狗與換模型重啟都走這條，寫意圖會把看門狗的重試次數歸零
+/// （`set_desired_running` 的語意是「人做了新決定」），有界重試就變成永遠重試。
 pub async fn start_manager(app: &Arc<App>, detail: Option<&str>) -> Result<(), LcError> {
     let bot = manager_bot(app)
         .await?
