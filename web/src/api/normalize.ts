@@ -931,6 +931,7 @@ export function toMissionAssignment(v: unknown): MissionAssignment | null {
     turn_status: optStr(pick(v, 'turn_status')),
     turn_error: optStr(pick(v, 'turn_error')),
     follow_up_of: optStr(pick(v, 'follow_up_of')),
+    resume_at: optStr(pick(v, 'resume_at')),
     created_at: str(pick(v, 'created_at')),
     completed_at: optStr(pick(v, 'completed_at')),
   }

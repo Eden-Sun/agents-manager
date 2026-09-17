@@ -16,6 +16,7 @@ import {
   missionView,
   pausedLabel,
   phaseLabel,
+  quotaWaitText,
   MISSION_PHASES,
   PHASE_LABEL,
   ROLE_LABEL,
@@ -469,6 +470,7 @@ function MissionCard({ mission, onNavigate }: { mission: Mission; onNavigate: Na
             <li key={`${h.at}-${i}`}>
               <span className="mission-tag warn">撞限換手</span>
               {h.from ?? '?'} → {h.to ?? '?'}
+              {h.model ? ` · ${h.model}` : ''}
               {h.reason && h.reason !== 'limit_hit' ? `（${h.reason}）` : ''}
             </li>
           ))}
@@ -525,7 +527,7 @@ function MissionCard({ mission, onNavigate }: { mission: Mission; onNavigate: Na
           <strong>{view.phase === 'waiting_quota' ? '等額度重置' : '等 AGM 決定下一步'}</strong>
           <span>
             {view.phase === 'waiting_quota'
-              ? '這個身分的額度用完了，正在等它重置——這是開任務時選「等重置」的結果。要換身分接手，下一個任務把 5h 撞限改成「不等」。'
+              ? quotaWaitText(mission, [...view.assignments].reverse().find((a) => a.status === 'quota_blocked') ?? null, shortTime)
               : '這一輪的交辦都結案了，AGM 還沒派下一件。它醒來就會接著跑，不需要你動手。'}
           </span>
           {view.latest?.text ? <span className="mission-wait-last">最後一則：{view.latest.text}</span> : null}

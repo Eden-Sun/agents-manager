@@ -846,6 +846,8 @@ export interface MissionAssignment {
   turn_error: string | null
   /** 撞限換手時接手的來源 */
   follow_up_of: string | null
+  /** `quota_blocked` 時 controller 預計重送的時間；舊 daemon 沒給為 null */
+  resume_at: string | null
   created_at: string
   completed_at: string | null
 }
