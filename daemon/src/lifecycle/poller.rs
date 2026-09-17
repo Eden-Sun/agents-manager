@@ -923,12 +923,8 @@ async fn fail_stalled_turn(
         reason.push_str(&format!("\n（畫面上完全沒有這則訊息；試著自動重送時被擋下（{why}），一個字都沒打，所以沒有送出。清掉擋住的東西後請重送。）"));
     }
     let mut tx = app.db.begin().await?;
-    let res = sqlx::query("UPDATE turns SET status='failed', completed_at=? WHERE id=? AND status='in_flight'")
-        .bind(db::now())
-        .bind(turn_id)
-        .execute(&mut *tx)
-        .await?;
-    if res.rows_affected() == 0 {
+    let res = super::turn_controller::fail_on(&mut tx, turn_id, super::turn_controller::DeliveryOnFail::Keep, "重送用盡").await?;
+    if res != super::turn_controller::Outcome::Applied {
         return Ok(());
     }
     let message = insert_message_tx(
@@ -1007,16 +1003,10 @@ pub async fn abandon_turn(app: &Arc<App>, turn_id: &str) -> LcResult<()> {
     if t.status != "in_flight" {
         return Err(LcError::conflict("turn is neither in-flight nor of unknown delivery", json!({"turn_id": t.id})));
     }
-    let res = sqlx::query(
-        "UPDATE turns SET status='failed', delivery = CASE WHEN delivery='unknown' THEN 'failed' ELSE delivery END, completed_at=?
-         WHERE id=? AND status='in_flight'",
-    )
-        .bind(db::now())
-        .bind(turn_id)
-        .execute(&app.db)
+    let res = super::turn_controller::fail(&app.db, turn_id, super::turn_controller::DeliveryOnFail::FailedIfUnknown, "使用者放棄這一回合")
         .await
         .map_err(up)?;
-    if res.rows_affected() == 0 {
+    if res != super::turn_controller::Outcome::Applied {
         return Err(LcError::conflict("turn is neither in-flight nor of unknown delivery", json!({"turn_id": t.id})));
     }
     let _ = insert_message(app, &t.conversation_id, Some(turn_id), "system", "turn abandoned by user", "system", false, None).await;

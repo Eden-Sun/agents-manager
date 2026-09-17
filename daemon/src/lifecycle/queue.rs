@@ -158,11 +158,7 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
         Err(e) => {
             let blocked = e.downcast_ref::<HerdrError>().map(|h| h.code == "agent_blocked").unwrap_or(false);
             if blocked {
-                let _ = sqlx::query("UPDATE turns SET delivery='failed', status='failed', completed_at=? WHERE id=?")
-                    .bind(db::now())
-                    .bind(&turn.id)
-                    .execute(&app.db)
-                    .await;
+                let _ = super::turn_controller::fail(&app.db, &turn.id, super::turn_controller::DeliveryOnFail::Failed, "agent_blocked").await;
                 let _ = insert_message(app, &conv, Some(&turn.id), "system", &format!("delivery failed: {e}"), "system", false, None).await;
                 emit_turn(app, &turn.id).await;
                 return Ok(());
@@ -229,11 +225,7 @@ async fn defer_queued_turn(
     let mut tx = app.db.begin().await?;
     let retries: i64 = sqlx::query_scalar("SELECT flush_retries FROM turns WHERE id = ?").bind(turn_id).fetch_one(&mut *tx).await?;
     if retries >= QUEUE_RETRY_LIMIT {
-        sqlx::query("UPDATE turns SET status='failed', delivery='failed', completed_at=? WHERE id=? AND status='in_flight'")
-            .bind(db::now())
-            .bind(turn_id)
-            .execute(&mut *tx)
-            .await?;
+        super::turn_controller::fail_on(&mut tx, turn_id, super::turn_controller::DeliveryOnFail::Failed, "退避次數用完").await?;
         let hint = format!("沒有送出：試了 {QUEUE_RETRY_LIMIT} 次都沒辦法打字（最後一次是 {reason}），已停止自動重試。請清空輸入框後重送。");
         insert_message_tx(&mut tx, conv, Some(turn_id), "system", &hint, "system", false, None).await?;
         tx.commit().await?;
@@ -381,11 +373,7 @@ pub(crate) async fn revoke_all_orphaned_queued_turns(app: &Arc<App>) -> Vec<Stri
 /// Fail a claimed turn together with the system message that explains it.
 async fn fail_queued_turn(app: &Arc<App>, conv: &str, turn_id: &str, hint: &str) -> anyhow::Result<()> {
     let mut tx = app.db.begin().await?;
-    sqlx::query("UPDATE turns SET delivery='failed', status='failed', completed_at=? WHERE id=? AND status='in_flight'")
-        .bind(db::now())
-        .bind(turn_id)
-        .execute(&mut *tx)
-        .await?;
+    super::turn_controller::fail_on(&mut tx, turn_id, super::turn_controller::DeliveryOnFail::Failed, "這一則在這個 bot 上送不出去").await?;
     insert_message_tx(&mut tx, conv, Some(turn_id), "system", hint, "system", false, None).await?;
     tx.commit().await?;
     Ok(())

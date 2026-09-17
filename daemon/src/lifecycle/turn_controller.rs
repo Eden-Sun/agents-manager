@@ -92,10 +92,54 @@ pub enum Outcome {
     Missing,
 }
 
+/// 收掉一筆回合時，`delivery` 要不要跟著動。送達與回合成敗是兩件事（§4.4a），所以要講明。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliveryOnFail {
+    /// 不動：字送出去了，失敗的是回合（stuck watchdog、畫面判定、turn_error…）。
+    Keep,
+    /// 一起標成 `failed`：一個字都沒送出去，或 CLI 自己說送不出去。
+    Failed,
+    /// 只有原本「證不明」（`unknown`）的才改成 failed；已經確定送達的不動。
+    FailedIfUnknown,
+}
+
+impl DeliveryOnFail {
+    fn sql(self) -> &'static str {
+        match self {
+            DeliveryOnFail::Keep => "delivery",
+            DeliveryOnFail::Failed => "'failed'",
+            DeliveryOnFail::FailedIfUnknown => "CASE WHEN delivery='unknown' THEN 'failed' ELSE delivery END",
+        }
+    }
+}
+
+/// **把一筆還在飛的回合收成 failed。** `in_flight -> failed` 這條邊在生產路徑上出現十來次
+/// （interrupt、abort、run 結束、stuck watchdog、畫面判定、送達失敗、退避用盡…），
+/// 以前每一處各自抄一句 SQL：guard 帶不帶、`delivery` 動不動、`completed_at` 蓋不蓋都要重想一次，
+/// 而且**有四處沒有帶 guard**——它們會把一筆別人已經收好的回合覆蓋成 failed。
+///
+/// 現在只有這一句，CAS 固定帶上，`delivery` 的三種寫法由 [`DeliveryOnFail`] 講明。
+pub async fn fail(pool: &SqlitePool, turn_id: &str, delivery: DeliveryOnFail, why: &str) -> Result<Outcome> {
+    let mut conn = pool.acquire().await?;
+    fail_on(&mut conn, turn_id, delivery, why).await
+}
+
+/// [`fail`] 的交易內版本：要跟系統訊息綁在同一個交易裡時用。
+pub async fn fail_on(conn: &mut sqlx::SqliteConnection, turn_id: &str, delivery: DeliveryOnFail, why: &str) -> Result<Outcome> {
+    let sql = format!(
+        "UPDATE turns SET status='failed', delivery={}, completed_at=? WHERE id=? AND status='in_flight'",
+        delivery.sql()
+    );
+    let done = sqlx::query(&sql).bind(crate::db::now()).bind(turn_id).execute(&mut *conn).await?;
+    if done.rows_affected() > 0 {
+        return Ok(Outcome::Applied);
+    }
+    settled(&mut *conn, turn_id, "in_flight", "failed", why).await
+}
+
 /// **新的 lifecycle 路徑改 turn 狀態走這裡。** 帶 CAS、擋非法邊、轉移沒發生時講得出為什麼。
 ///
-/// 既有那二十來處保留原樣（它們的 guard 已經在自己的 SQL 裡，而且各自還要寫不同的欄位）；
-/// 這道門是給新程式碼與「原本沒有 guard」的那幾處用的。
+/// 形狀固定的那幾條（收成 failed）走 [`fail`]；這支是通用的那道門。
 pub async fn set_status(pool: &SqlitePool, turn_id: &str, from: &str, to: &str, why: &str) -> Result<Outcome> {
     if !is_legal(from, to) {
         anyhow::bail!("illegal turn status transition {from} -> {to} ({why})");
@@ -111,7 +155,13 @@ pub async fn set_status(pool: &SqlitePool, turn_id: &str, from: &str, to: &str, 
     if done.rows_affected() > 0 {
         return Ok(Outcome::Applied);
     }
-    let now: Option<String> = sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(turn_id).fetch_optional(pool).await?;
+    let mut conn = pool.acquire().await?;
+    settled(&mut conn, turn_id, from, to, why).await
+}
+
+/// CAS 沒打中：那一筆現在是什麼？講出來，不要讓呼叫端把「0 rows」當成「成功」。
+async fn settled(conn: &mut sqlx::SqliteConnection, turn_id: &str, from: &str, to: &str, why: &str) -> Result<Outcome> {
+    let now: Option<String> = sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(turn_id).fetch_optional(&mut *conn).await?;
     match now {
         Some(now) => {
             tracing::info!(turn = turn_id, %from, %to, %now, why, "turn 轉移沒發生：它已經不是預期的起點了");
