@@ -308,17 +308,29 @@ pub(crate) async fn close_pane_and_tab(
 
 /// One bot, one tab. Splitting one tab shrank panes below ~31 columns, where TUIs reflow without
 /// spaces (`is_shredded`); tabs don't share width. `focus` is false so starting a bot doesn't
-/// yank the user's tab; `fresh_root` (a just-created workspace's pane) is used as-is.
+/// yank the user's tab; `fresh_root` (a just-created workspace's pane, opened in `root_cwd`) is used
+/// as-is only when the bot's own `cwd` is that same directory.
+///
+/// A bot with a directory of its own (`bots.cwd`, e.g. the AGM responder living in the patrol's
+/// project) must not inherit a root pane opened in the project path: the CLI would start in the other
+/// role's directory, read its CLAUDE.md/persona and miss its own `--resume` session (review 2026-09-16
+/// c5 M1). It gets its own tab in its own directory, and the root pane is closed *after* that tab
+/// exists, so the workspace is never left empty.
 async fn acquire_run_pane(
     client: &crate::herdr::HerdrClient,
     workspace_id: &str,
     cwd: &str,
     label: &str,
     env: &Value,
-    fresh_root: Option<crate::herdr::PaneInfo>,
+    fresh_root: Option<(crate::herdr::PaneInfo, &str)>,
 ) -> anyhow::Result<crate::herdr::PaneInfo> {
     match fresh_root {
-        Some(p) => Ok(p),
+        Some((p, root_cwd)) if root_cwd == cwd => Ok(p),
+        Some((p, _)) => {
+            let pane = client.tab_create(workspace_id, cwd, label, env.clone()).await?;
+            close_pane_and_tab(client, Some(workspace_id), Some(&p.tab_id), &p.pane_id).await;
+            Ok(pane)
+        }
         None => client.tab_create(workspace_id, cwd, label, env.clone()).await,
     }
 }
@@ -450,7 +462,8 @@ async fn start_inner(
     }
 
     // 2. workspace
-    let mut fresh_root: Option<crate::herdr::PaneInfo> = None;
+    // `(root pane, 它開在哪個目錄)`：bot 有自己的 cwd 時不能沿用開在專案目錄的 root（見 `acquire_run_pane`）。
+    let mut fresh_root: Option<(crate::herdr::PaneInfo, &str)> = None;
     // `projects.workspace_id` is the configured session's; an imported bot in `default` must not
     // overwrite it (the next reconcile would clear it).
     let workspace_id = match (session.as_str() != "default", project.workspace_id.as_deref()) {
@@ -465,7 +478,7 @@ async fn start_inner(
                     .await
                     .map_err(up)?;
             }
-            fresh_root = Some(root);
+            fresh_root = Some((root, project.path.as_str()));
             ws.workspace_id
         }
     };
@@ -1150,6 +1163,37 @@ mod tab_tests {
         id
     }
 
+    /// 協調者（`bots.cwd` 是自己的目錄）比巡檢先開 workspace：root pane 開在專案目錄，不能拿來跑它——
+    /// 要在自己的目錄開 tab，再把 root 關掉（review 2026-09-16 c5 M1）。沒有自己目錄的 bot 照舊直接用 root。
+    #[tokio::test]
+    async fn a_bot_with_its_own_directory_does_not_run_in_a_fresh_workspace_root_opened_elsewhere() {
+        let env = tt::env().await;
+        let own = env.dir.join("AGM-responder");
+        std::fs::create_dir_all(&own).unwrap();
+        let own = own.to_string_lossy().to_string();
+        let resp = a_bot(&env, "responder").await;
+        sqlx::query("UPDATE bots SET cwd=? WHERE id=?").bind(&own).bind(&resp).execute(&env.app.db).await.unwrap();
+
+        start_bot(&env.app, &resp).await.unwrap();
+        let root = env.herdr.first_call("workspace.create").expect("the workspace did not exist yet");
+        assert_ne!(root["cwd"].as_str(), Some(own.as_str()), "workspace 仍以專案目錄建立");
+        let run = db::active_run(&env.app.db, &resp).await.unwrap().unwrap();
+        let tab_create = env.herdr.first_call("tab.create").expect("a tab in the bot's own directory");
+        assert_eq!(tab_create["cwd"].as_str(), Some(own.as_str()));
+        let ws = run.workspace_id.clone().unwrap();
+        let tabs = env.herdr.tabs_in(&ws);
+        assert_eq!(tabs.len(), 1, "root 的 tab 關掉了，只剩協調者自己的：{tabs:?}");
+        assert!(tabs[0].panes.contains(run.pane_id.as_ref().unwrap()));
+        assert!(env.herdr.methods().contains(&"pane.close".into()));
+
+        // 沒有自己目錄的 bot：新 workspace 的 root 就是它的 pane，不多開 tab。
+        let env2 = tt::env().await;
+        let plain = a_bot(&env2, "plain").await;
+        start_bot(&env2.app, &plain).await.unwrap();
+        assert!(env2.herdr.first_call("tab.create").is_none());
+        assert!(!env2.herdr.methods().contains(&"pane.close".into()));
+    }
+
     /// A DB failure after `workspace.create` must still remove the root pane and its tab (trigger-injected).
     #[tokio::test]
     async fn a_run_mapping_failure_closes_the_new_pane_and_tab() {
@@ -1267,7 +1311,7 @@ mod tab_tests {
         let (ws, root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
 
         let got =
-            acquire_run_pane(&client, &ws.workspace_id, "/tmp/p", "alfa", &json!({}), Some(root.clone())).await.unwrap();
+            acquire_run_pane(&client, &ws.workspace_id, "/tmp/p", "alfa", &json!({}), Some((root.clone(), "/tmp/p"))).await.unwrap();
 
         assert_eq!(got.pane_id, root.pane_id);
         assert_eq!(got.tab_id, root.tab_id);
