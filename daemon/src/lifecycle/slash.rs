@@ -416,6 +416,7 @@ mod login_slash_tests {
             started_at: "2026-01-01T00:00:00Z".into(),
             ended_at: None,
             resume_session_id: None,
+            agent_status_since: None,
         }
     }
 

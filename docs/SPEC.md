@@ -50,6 +50,18 @@ origin:   web | external                     （external = 非本系統送出、
 
 燈號：disconnected 灰；stopped/exited 離線；starting 黃閃；stopping 黃；running+idle 綠；+working 藍動畫；+blocked 紅；+unknown 灰黃。
 
+**「跑了多久」的起點（issue #93）**：`runs.agent_status_since`，`agent_status` 真的改變時由 DB trigger
+（`runs_agent_status_since`）蓋成當下時間，同值重寫（同一行 pane 狀態重複出現）不算改變。取捨：
+沒有另外做一套獨立的 pane 文字解析（`✻ Cooked for …`）當權威來源——`agent_status` 本身已經是
+claude／codex／grok 三種 pane 統一之後的結果（hook、poller、terminal fallback 都在寫它），另開一條
+平行的「activity」狀態機只會多一份可能跟它分岔的真相。挑 trigger 而不是在每個寫入點各補一行：
+寫入點分散在 `events`／`reconcile`／`default_session`／`bulk_restart`／`stuck_turns` 好幾個檔，
+漏一處就會讓某條路徑的起點跟丟。前端（`RunElapsed`／`lib/elapsed.ts` 的 `activityStartedAt`）
+優先讀這一欄；沒有時（升級前的舊列、或這個 run 還沒有任何一次真的狀態轉換）才退回這個回合最早
+一筆 `in_flight` turn 的 `created_at`；兩者都沒有才用這個網頁自己第一次看到 `working` 的時間墊底，
+且不宣稱那是 daemon 的紀錄。daemon 重啟不清這一欄，所以「跑了多久」在重整理／換裝置／daemon 重啟
+之間是同一個數字，不會因為前端重新觀察而歸零。
+
 ## 3. 架構
 
 ```

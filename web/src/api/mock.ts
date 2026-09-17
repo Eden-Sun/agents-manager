@@ -51,6 +51,15 @@ interface MockRun {
   runtime_fast: boolean
   started_at: string
   ended_at: string | null
+  /** `agent_status` 最後一次真的改變的時間，只有 `setAgentStatus` 會動它（issue #93）。 */
+  agent_status_since: string | null
+}
+
+/** 同值重寫不算改變：mock 也要跟 daemon 的 trigger 同一套規則，不然本地開發永遠測不到「跑了多久」。 */
+function setAgentStatus(run: MockRun, status: MockRun['agent_status']) {
+  if (run.agent_status === status) return
+  run.agent_status = status
+  run.agent_status_since = now()
 }
 
 /** Real-session values so the status bar is exercised at a realistic width. */
@@ -2254,7 +2263,7 @@ export class MockTransport implements Transport {
       const inFlight = this.turns.find((t) => t.run_id === run.id && t.status === 'in_flight')
       if (inFlight) this.updateTurn(inFlight, { status: 'failed', completed_at: now() })
       run.state = 'stopped'
-      run.agent_status = 'unknown'
+      setAgentStatus(run, 'unknown')
       run.ended_at = now()
       this.emitBotStatus(botId)
       this.addMessage({
@@ -2326,7 +2335,7 @@ export class MockTransport implements Transport {
       const inFlight = this.turns.find((t) => t.run_id === run.id && t.status === 'in_flight')
       if (inFlight) this.updateTurn(inFlight, { status: 'failed', completed_at: now() })
       run.state = 'stopped'
-      run.agent_status = 'unknown'
+      setAgentStatus(run, 'unknown')
       run.ended_at = now()
       this.emitBotStatus(id)
     }
@@ -2366,6 +2375,7 @@ export class MockTransport implements Transport {
       runtime_model: bot.model,
       runtime_effort: bot.effort,
       runtime_fast: bot.fast === 1,
+      agent_status_since: now(),
       started_at: now(),
       ended_at: null,
     }
@@ -2374,7 +2384,7 @@ export class MockTransport implements Transport {
     setTimeout(() => {
       if (run.state !== 'starting') return
       run.state = 'running'
-      run.agent_status = 'idle'
+      setAgentStatus(run, 'idle')
       run.native_session_id = ulid('sess')
       // Only claude ships a statusLine hook; ChatPanel rebuilds others' from the store.
       if (this.bot(botId).kind === 'claude') {
@@ -2385,7 +2395,7 @@ export class MockTransport implements Transport {
         // 這顆在忙，批次重啟會跳過（SPEC §6.9）。
         if (this.bot(botId).name === 'am-claude-2') {
           run.update_notice = 'Update installed · Restart to update'
-          run.agent_status = 'working'
+          setAgentStatus(run, 'working')
         }
         // 帶 turn_error，演 TurnErrorBadge。
         if (this.bot(botId).name === 'am-claude') {
@@ -2415,7 +2425,7 @@ export class MockTransport implements Transport {
     if (inFlight) this.updateTurn(inFlight, { status: 'failed', completed_at: now() })
     setTimeout(() => {
       run.state = 'stopped'
-      run.agent_status = 'unknown'
+      setAgentStatus(run, 'unknown')
       run.ended_at = now()
       this.emitBotStatus(botId)
       this.addMessage({
@@ -2436,7 +2446,7 @@ export class MockTransport implements Transport {
     if (!run) throw new ApiError(409, { reason: 'Bot 未在執行中' }, 'conflict')
     const inFlight = this.turns.find((t) => t.run_id === run.id && t.status === 'in_flight')
     if (inFlight) this.updateTurn(inFlight, { status: 'failed', completed_at: now() })
-    run.agent_status = 'idle'
+    setAgentStatus(run, 'idle')
     this.emitBotStatus(botId)
     this.addMessage({
       conversation_id: this.conv(botId),
@@ -2471,7 +2481,7 @@ export class MockTransport implements Transport {
       })
     }
     if (run) {
-      run.agent_status = 'idle'
+      setAgentStatus(run, 'idle')
       this.emitBotStatus(botId)
     }
     return { aborted: stuck.map((t) => t.id), keys_sent: Boolean(run), key_error: run ? null : 'no active run' }
@@ -2573,7 +2583,7 @@ export class MockTransport implements Transport {
         : null,
     })
     this.updateTurn(turn, { delivery: 'ok' })
-    run.agent_status = 'working'
+    setAgentStatus(run, 'working')
     this.emitBotStatus(botId)
 
     const lowered = text.toLowerCase()
@@ -2671,7 +2681,7 @@ export class MockTransport implements Transport {
       incomplete: source === 'terminal_fallback' ? 1 : 0,
     })
     if (run) {
-      run.agent_status = 'idle'
+      setAgentStatus(run, 'idle')
       this.emitBotStatus(botId)
     }
   }
@@ -2680,7 +2690,7 @@ export class MockTransport implements Transport {
   enterBlocked(botId: string) {
     const run = this.activeRun(botId)
     if (!run) return
-    run.agent_status = 'blocked'
+    setAgentStatus(run, 'blocked')
     this.emitBotStatus(botId)
   }
 
@@ -2695,7 +2705,7 @@ export class MockTransport implements Transport {
     if (run.agent_status === 'blocked') {
       const affirm = keys.some((k) => ['y', 'enter', 'Enter'].includes(k))
       if (affirm) {
-        run.agent_status = 'working'
+        setAgentStatus(run, 'working')
         this.emitBotStatus(botId)
         const turn = this.turns.find((t) => t.run_id === run.id && t.status === 'in_flight')
         if (turn) setTimeout(() => this.finishTurn(botId, turn, 'hook'), 1500)
@@ -2723,7 +2733,7 @@ export class MockTransport implements Transport {
   private setIdle(botId: string) {
     const run = this.activeRun(botId)
     if (!run) return
-    run.agent_status = 'idle'
+    setAgentStatus(run, 'idle')
     this.emitBotStatus(botId)
   }
 
