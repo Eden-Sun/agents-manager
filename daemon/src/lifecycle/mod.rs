@@ -31,6 +31,10 @@ mod transitions;
 /// （見檔案頂端的說明與 docs/CLAUDE-NATIVE-TRANSPORT.md）。
 #[cfg(test)]
 mod native_transport_prototype;
+/// issue #77 探索用的原型，同一個做法：`#[cfg(test)]` 整個檔案只在 `cargo test` 底下編，
+/// 不進正式二進位（見檔案頂端的說明與 docs/ACTOR-RUNTIME-EVAL.md）。
+#[cfg(test)]
+mod actor_runtime_eval_prototype;
 
 /// Runs the daemon has typed into during **this** boot. `runs.pane_typed` is the durable record;
 /// this is the conservative in-process copy, so a row that later becomes unreadable cannot send a
