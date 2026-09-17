@@ -203,8 +203,12 @@ pub async fn observe(app: &Arc<App>, thresholds: &Thresholds) -> Probed {
                         // autostart is a launch preference, not a perpetual desired-state flag.
                         // stop_bot records `stopped` and leaves autostart unchanged, so an
                         // intentional stop must not become an outage after the debounce.
+                        //
+                        // 第二鍵用 `rowid`（寫入順序），不是 `id`（issue #100，同 fence.rs／a4605b2 的根因）：
+                        // 一顆 bot 快速重啟時兩個 run 可能擠進同一毫秒，ULID 的亂數段不保證遞增，字典序
+                        // 挑到的若不是真的最後一個 run，使用者主動停的（`stopped`）會被誤判成 outage。
                         let last = sqlx::query_scalar::<_, String>(
-                            "SELECT state FROM runs WHERE bot_id=? ORDER BY started_at DESC, id DESC LIMIT 1",
+                            "SELECT state FROM runs WHERE bot_id=? ORDER BY started_at DESC, rowid DESC LIMIT 1",
                         ).bind(&bot.id).fetch_optional(&app.db).await;
                         match last {
                             Ok(Some(state)) if state == "stopped" => {}
@@ -614,5 +618,43 @@ mod tests {
         assert_eq!(worst("unknown", "degraded"), "degraded");
         assert_eq!(worst("critical", "degraded"), "critical");
         assert_eq!(worst("healthy", "healthy"), "healthy");
+    }
+
+    /// issue #100（同 fence.rs／a4605b2 的根因）：一顆 bot 快速重啟時兩個 run 可能擠進同一毫秒。
+    /// 「最後一個 run 是不是使用者自己停的」要看**寫入順序**（`rowid`），不是 ULID 字典序——故意讓
+    /// 真正較舊的那個 run 用字典序比較大的假 ULID，證明不會把使用者主動停的（`stopped`）誤判成 outage。
+    #[tokio::test]
+    async fn a_bots_last_run_is_found_by_insertion_order_not_ulid_when_deciding_bot_stopped() {
+        let app = super::super::bot_requests::flow_tests::app().await;
+        let bot_id = "watched";
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, created_at)
+             VALUES (?,'p','watched','claude','[]',1,1,'tok-watched',?)",
+        )
+        .bind(bot_id)
+        .bind(crate::db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        let at = crate::db::now();
+        // 真正較舊（先寫入）的用字典序比較大的假 ULID；真正最新（後寫入、使用者主動停的）用比較小的。
+        for (id, state) in [("01ZZZZZZZZZZZZZZZZZZZZZZZZ", "exited"), ("01AAAAAAAAAAAAAAAAAAAAAAAA", "stopped")] {
+            sqlx::query("INSERT INTO runs (id, bot_id, state, agent_status, started_at) VALUES (?,?,?,'unknown',?)")
+                .bind(id)
+                .bind(bot_id)
+                .bind(state)
+                .bind(&at)
+                .execute(&app.db)
+                .await
+                .unwrap();
+        }
+
+        let probed = observe(&app, &thresholds()).await;
+        assert!(
+            probed.seen.iter().all(|o| !(o.kind == "bot_stopped" && o.resource == bot_id)),
+            "最後一個 run（寫入順序）其實是使用者主動停的，不該被誤判成 outage：{:?}",
+            probed.seen
+        );
     }
 }
