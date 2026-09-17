@@ -9,6 +9,7 @@ pub mod deliver;
 pub mod pick;
 pub mod relay;
 pub mod store;
+pub mod workflow;
 
 use crate::state::App;
 use std::sync::Arc;

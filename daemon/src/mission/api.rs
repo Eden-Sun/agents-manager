@@ -948,6 +948,9 @@ pub async fn post_complete(State(app): State<Arc<App>>, Path(id): Path<String>, 
     }
     let m = load(&app, &id).await?;
     ensure_open(&m)?;
+    // 底下還有開著的交辦就不結案（issue #74）：那顆 bot 會繼續做一件已經關掉的任務，
+    // 回合結束還會為它推一則沒有人要的 `assignment_completed`。取消那條路本來就會逐件收乾淨。
+    crate::mission::workflow::ensure_can_complete(&app, &id).await?;
     let from = check_relay_from(&app, b.relay_from.as_deref()).await?;
     store::complete(&app.db, &id, b.result_summary.trim()).await.map_err(up)?;
     store::add_event(&app.db, &id, "completed", b.result_summary.trim(), from.as_deref(), &json!({})).await.map_err(up)?;
@@ -1831,6 +1834,60 @@ mod tests {
         assert_eq!(card["phase"], "waiting_quota", "卡片說得出在等額度，不是「等 AGM 接手」");
     }
 
+    /// issue #74：兩道閘門**真的接在入口上**，不只是模組裡有那支函式。
+    ///
+    /// 模組自己的測試（`mission::workflow`）證明規則對；這一條證明 `assign` 與 `mission complete`
+    /// 真的會去問它——少接一邊的話，規則寫得再對也沒用。
+    #[tokio::test]
+    async fn the_deterministic_gates_are_wired_into_both_entry_points() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        crate::supervisor::store::get_or_init(&app.db).await.unwrap();
+        let agm = crate::testing::claude_bot(&app, &env.project_id, "AGM").await;
+        crate::supervisor::store::set_env(&app.db, &agm.id, &env.project_id, "/tmp").await.unwrap();
+        let exec = crate::testing::claude_bot(&app, &env.project_id, "exec").await;
+        let other = crate::testing::claude_bot(&app, &env.project_id, "other").await;
+        let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("gates", "pr"))).await.unwrap();
+        let id = m["id"].as_str().unwrap().to_string();
+
+        let assign = |bot: String, crid: &'static str, role: &'static str| {
+            let app = app.clone();
+            let id = id.clone();
+            async move {
+                crate::supervisor::assign(
+                    &app, &bot, "做 X", crid, None, &[], None, true, Some((&id, role)), None, None,
+                    crate::supervisor::bot_requests::ReplyMark::default(),
+                )
+                .await
+            }
+        };
+        let first = assign(exec.id.clone(), "crid-exec", "executor").await.expect("第一件派得出去");
+        let first_id = first["id"].as_str().unwrap().to_string();
+
+        // 入口一：任務已經有一件開著，第二件要被擋。
+        let err = assign(other.id.clone(), "crid-review", "reviewer").await.unwrap_err();
+        assert_eq!(conflict_reason(err), "mission_busy", "assign 沒接上閘門");
+
+        // 入口二：同一個狀態，結案也要被擋。
+        let complete = || post_complete(State(app.clone()), Path(id.clone()), Json(CompleteIn { result_summary: "完成".into(), relay_from: None }));
+        assert_eq!(conflict_reason(complete().await.unwrap_err()), "assignments_open", "complete 沒接上閘門");
+
+        // 收乾淨之後兩邊都放行——閘門不是把路堵死。
+        sqlx::query("UPDATE supervisor_assignments SET status='completed' WHERE id=?")
+            .bind(&first_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        assign(other.id.clone(), "crid-review", "reviewer").await.expect("前一件結案後派得出去");
+        sqlx::query("UPDATE supervisor_assignments SET status='completed' WHERE mission_id=?")
+            .bind(&id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let Json(done) = complete().await.expect("全部結案後才結得了案");
+        assert_eq!(status(&done), "done");
+    }
+
     /// 來回次數用完、使用者說「再改一輪」：放行時多給一輪，AGM 才有路可走（review3 c1 M13）。
     #[tokio::test]
     async fn releasing_a_mission_that_used_up_its_rounds_grants_one_more() {
@@ -2005,6 +2062,14 @@ mod tests {
             }
             let a = crate::supervisor::store::insert_assignment(&app.db, None, bid, &format!("crid-{bid}"), "做 X", &[], None, true).await.unwrap();
             crate::supervisor::store::set_mission_link(&app.db, &a.id, &id, "executor").await.unwrap();
+            // 這些交辦只是用來把臨時 bot 掛到任務上（這條測的是收尾刪哪幾顆 bot）。收尾時它們一定
+            // 已經結案了：三件同時開著本來就違反「一個任務同時只有一件開著的交辦」（SPEC §18.14），
+            // 而 `post_complete` 現在會擋（issue #74）。
+            sqlx::query("UPDATE supervisor_assignments SET status='completed' WHERE id=?")
+                .bind(&a.id)
+                .execute(&app.db)
+                .await
+                .unwrap();
         }
 
         let Json(done) = post_complete(State(app.clone()), Path(id.clone()), Json(CompleteIn { result_summary: "完成".into(), relay_from: None }))

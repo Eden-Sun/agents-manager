@@ -323,6 +323,12 @@ pub async fn assign(
         .await
         .map_err(up)?;
 
+    // 一個任務同時只有一件開著的交辦（SPEC §18.14，issue #74）。跟下面的 ownership 衝突不同：
+    // 那個是猜的（字串比對），這個是查得到的事實，所以這個擋、那個只回報。
+    if let Some((mission_id, role)) = mission {
+        crate::mission::workflow::ensure_can_assign(app, mission_id, role).await?;
+    }
+
     // Who else is already holding these files. Reported, never enforced: the daemon cannot
     // know that two modules are really independent, so this goes to AGM to arbitrate rather
     // than refusing work on a string match (SPEC §18.4).

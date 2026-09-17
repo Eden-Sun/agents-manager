@@ -1854,8 +1854,21 @@ supervisor 相關資料表與欄位都是 additive，`db::migrate` 重跑冪等�
 ### 18.14 群組任務（mission）的 AGM runbook（2026-09-13）
 
 使用者決策見本節末的 D1–D8，API 契約 `docs/API.md`「群組任務」。daemon 只做確定性的部分（任務／事件持久化、
-身分挑選、輪數上限、fast-forward 交付）；下面是 AGM 這一側的步驟，每一步都用 `bin/agm mission …`／`bin/agm assign --mission`，
+身分挑選、輪數上限、fast-forward 交付、**下面兩道閘門**）；下面是 AGM 這一側的步驟，每一步都用 `bin/agm mission …`／`bin/agm assign --mission`，
 不拼 curl。一個任務同時只有一件開著的交辦；`phase` 由交辦推導，AGM 不另存狀態。
+
+**這兩條由 daemon 擋，不再只是 AGM 要記得的規矩（issue #74，`mission::workflow`）：**
+
+- `assign --mission` 時任務已經有一件開著的交辦 → 409 `mission_busy`（附上那一件）。`phase` 是「取最後一件
+  還開著的交辦的角色」，同時開兩件時它就不是一個定義良好的答案——任務卡、`mission get` 與 AGM 的下一步
+  讀同一個函式卻可能得到不同結果。退回／換手走 `review followup` 不受影響：那條在同一個交易裡把原件標成
+  `superseded` 再開新的，任何一刻都只有一件開著。
+- `mission complete` 時底下還有開著的交辦 → 409 `assignments_open`。以前 `complete` 除了「任務還開著」
+  什麼都不查：那顆 bot 會繼續做一件已經關掉的任務，回合結束還會推一則沒有人要的 `assignment_completed`。
+  先 `review accept`／`fail`／`cancel` 收乾淨，或走 `mission cancel`（那條本來就會逐件取消）。
+
+需要人判斷的（`ask_user`、`no_independent_reviewer`、findings、要不要再一輪）仍然在 AGM 這一側，daemon 不碰。
+與 ownership 衝突的差別：那個是字串比對猜出來的，所以只回報不強制（§18.4）；這兩條是查得到的事實。
 
 1. **收到 `mission_created`**（inbox）：讀 `mission get`。指示不清或範圍太大 → 在群組問使用者（`mission event --kind note`
    ＋ `mission pause --reason clarify`），不猜。與其他未結案交辦的 ownership 重疊 → 先排隊，在任務記 `note`。
