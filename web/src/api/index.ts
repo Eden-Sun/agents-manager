@@ -617,7 +617,7 @@ function toRemoteCargoSettings(raw: unknown): RemoteCargoSettings {
     host: str(o.host),
     user: str(o.user),
     ssh_port: num(o.ssh_port, 22),
-    remote_root: str(o.remote_root, '~/.cache/agents-manager/remote-cargo'),
+    remote_root: str(o.remote_root, '.cache/agents-manager/remote-cargo'),
     cargo_jobs: num(o.cargo_jobs, 4),
     password_set: o.password_set === true,
   }
