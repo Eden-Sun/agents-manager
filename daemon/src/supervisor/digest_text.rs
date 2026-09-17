@@ -8,6 +8,19 @@ use serde_json::Value;
 
 use super::store::InboxEvent;
 
+/// hook 晚到補上的回覆（`late_reply:true`）：同一張交辦的**第二則**回報，帶的是真正的回覆。
+/// 摘要只印 kind 與 result 的話，AGM 只會看到同一張交辦又完成了一次，看不出這是補上來的
+/// （deliv3 2026-09-17 轉來的一條）。
+pub fn late_reply_mark(p: &Value) -> String {
+    if p.get("late_reply").and_then(Value::as_bool) != Some(true) {
+        return String::new();
+    }
+    match p.get("assignment_status").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+        Some(s) => format!("（回覆晚到：先前那則「沒有留下回覆」的補件，交辦現在是 {s}）"),
+        None => "（回覆晚到：先前那則「沒有留下回覆」的補件）".to_string(),
+    }
+}
+
 /// 交辦回報那一型（`assignment_*`）：讀 `result`，由各自的 digest 照舊呈現。
 pub fn is_assignment_report(e: &InboxEvent) -> bool {
     e.kind.starts_with("assignment_")

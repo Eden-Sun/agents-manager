@@ -131,6 +131,16 @@ impl AssignIn {
     }
 }
 
+/// 這筆任務的暫停是**人**設的（web 的暫停鈕、`agm mission pause`）嗎？
+///
+/// daemon 自己設的暫停有固定幾種 reason，它們的意思是「等 AGM 處理」，不是「停手」：輪數用完
+/// （`max_rounds`）、驗證者沒有 Fable（`no_fable_for_verifier`）、交付失敗（`push_main_failed`／`pr_failed`）、
+/// 要澄清（`clarify`）。其餘的 reason 只會從 `POST /api/missions/{id}/pause` 進來，那就是人按的。
+fn user_pause_reason(paused_reason: Option<&str>) -> Option<&str> {
+    const DAEMON_SET: [&str; 5] = ["max_rounds", "no_fable_for_verifier", "push_main_failed", "pr_failed", "clarify"];
+    paused_reason.map(str::trim).filter(|r| !r.is_empty() && !DAEMON_SET.contains(r))
+}
+
 pub async fn post_assignment(
     State(app): State<Arc<App>>,
     headers: HeaderMap,
@@ -148,6 +158,15 @@ pub async fn post_assignment(
             let m = crate::mission::store::get(&app.db, mid).await.map_err(up)?.ok_or_else(|| LcError::NotFound("mission".into()))?;
             if m.completed_at.is_some() || m.cancelled_at.is_some() {
                 return Err(LcError::conflict("mission is closed", json!({"reason": "mission_closed", "mission_id": mid})));
+            }
+            // 使用者按了暫停就是要它停下來：再派一棒等於當作沒看到（mission3 2026-09-17 轉來的一條）。
+            // daemon 自己設的那幾種暫停（輪數用完、驗證者沒 Fable、交付失敗）不擋——runbook 要 AGM
+            // 在那些狀態下繼續處理（例如請執行者 rebase 再交付）。
+            if let Some(why) = user_pause_reason(m.paused_reason.as_deref()) {
+                return Err(LcError::conflict(
+                    "mission is paused by the user; resume it before handing out more work",
+                    json!({"reason": "mission_paused", "mission_id": mid, "paused_reason": why, "hint": "使用者決定之後用 `agm mission resume` 再派"}),
+                ));
             }
             Some((mid.to_string(), role.to_string()))
         }
@@ -1726,6 +1745,19 @@ mod review_boundary_tests {
         assert!(evidence.contains("still running") && evidence.contains("改派給 w2"), "送出去的警告要留著：{evidence}");
         app.db.close().await;
         std::fs::remove_dir_all(&app.data_dir).unwrap();
+    }
+
+    /// 使用者按的暫停要擋住 `assign --mission`；daemon 自己設的那幾種不擋——runbook 要 AGM 在那些
+    /// 狀態下繼續處理（交付失敗就請執行者 rebase 再交付）。
+    #[test]
+    fn only_a_pause_a_person_set_stops_more_work() {
+        assert_eq!(user_pause_reason(Some("user_pause")), Some("user_pause"));
+        assert_eq!(user_pause_reason(Some("manual")), Some("manual"));
+        assert_eq!(user_pause_reason(None), None, "沒暫停就不擋");
+        assert_eq!(user_pause_reason(Some("  ")), None);
+        for daemon_set in ["max_rounds", "no_fable_for_verifier", "push_main_failed", "pr_failed", "clarify"] {
+            assert_eq!(user_pause_reason(Some(daemon_set)), None, "{daemon_set} 是 daemon 自己設的，不擋");
+        }
     }
 
     #[tokio::test]

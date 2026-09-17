@@ -1030,9 +1030,10 @@ fn digest(events: &[store::InboxEvent]) -> String {
         let result = p.get("result").and_then(|v| v.as_str()).unwrap_or("");
         let complete = p.get("evidence_complete").and_then(serde_json::Value::as_bool).unwrap_or(true);
         s.push_str(&format!(
-            "\n- event_id={} kind={} assignment={} bot={} turn={}{}\n  回覆節錄：{}\n",
+            "\n- event_id={} kind={}{} assignment={} bot={} turn={}{}\n  回覆節錄：{}\n",
             e.id,
             e.kind,
+            super::digest_text::late_reply_mark(&p),
             e.assignment_id.clone().unwrap_or_default(),
             e.bot_id.clone().unwrap_or_default(),
             e.turn_id.clone().unwrap_or_default(),
@@ -1645,6 +1646,22 @@ mod tests {
         assert!(d.contains("AGM-responder"), "{d}");
         assert!(d.contains("identity_missing") && d.contains("responder-start"), "{d}");
         assert!(!d.contains("沒有留下回覆"), "{d}");
+    }
+
+    /// 遲到 hook 補上的回覆（`late_reply`）：巡檢的摘要也要標出來，不然同一張交辦看起來像又完成了一次。
+    #[test]
+    fn a_late_reply_is_marked_as_one() {
+        let mut late = ev("l1");
+        late.kind = "assignment_completed".into();
+        late.payload_json = json!({"result": "已經推上 main", "late_reply": true, "assignment_status": "completed"}).to_string();
+        let d = digest(&[late]);
+        assert!(d.contains("回覆晚到") && d.contains("completed"), "{d}");
+        assert!(d.contains("已經推上 main"), "{d}");
+        // 一般的完成回報不多那句。
+        let mut normal = ev("n1");
+        normal.kind = "assignment_completed".into();
+        normal.payload_json = json!({"result": "done"}).to_string();
+        assert!(!digest(&[normal]).contains("回覆晚到"));
     }
 
     fn ev(id: &str) -> store::InboxEvent {
