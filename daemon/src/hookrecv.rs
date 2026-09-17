@@ -267,6 +267,15 @@ mod account_tests {
     }
 }
 
+/// 這一則事件的 native session id，三家 provider 的鍵名都認（世代圍籬用它證明歸屬）。
+fn hook_session_id(p: &Value) -> Option<&str> {
+    ["session_id", "sessionId", "thread-id"]
+        .iter()
+        .find_map(|k| p.get(*k).and_then(|v| v.as_str()))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
 fn classify(provider: &str, p: &Value) -> HookKind {
     let s = |k: &str| p.get(k).and_then(|v| v.as_str()).map(String::from);
     match provider {
@@ -589,6 +598,36 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
         tracing::debug!(bot = %bot.name, "statusline received");
     } else {
         tracing::info!(bot = %bot.name, provider = %body.provider, ?kind, "hook received");
+    }
+
+    // 世代圍籬（issue #69）：這一則屬於哪一代。只在這裡問一次，`fence` 是唯一的規則所在地——
+    // 散在 hook／reconcile／fallback 各判一次，遲早會漂成三套。舊世代的事件只記錄，一個欄位都不改。
+    if let Some(r) = &run {
+        let ev = crate::lifecycle::fence::EventIdentity { run_id: None, session_id: hook_session_id(&body.payload) };
+        let owner = crate::lifecycle::fence::classify(&app.db, &bot.id, r, ev).await;
+        if !owner.may_mutate() {
+            let (prior_run_id, why) = match &owner {
+                crate::lifecycle::fence::Ownership::Stale { prior_run_id, why } => (prior_run_id.as_str(), *why),
+                // `may_mutate()` 只有 `Stale` 會是 false；留著這一支是為了日後多一種歸屬時編譯器會提醒。
+                _ => ("", "unknown"),
+            };
+            tracing::warn!(
+                bot = %bot.name, provider = %body.provider, ?kind, run = %r.id, prior_run = %prior_run_id,
+                session = hook_session_id(&body.payload), why,
+                "上一代的 hook：丟棄，不讓它改到這一代的狀態（issue #69）",
+            );
+            // 看得見：丟掉一則事件不可以只活在這個函式裡。重跑同一則會走到同一個分支，仍然什麼都不改。
+            app.emit(
+                "hook_fenced",
+                json!({"bot_id": bot.id, "provider": body.provider, "run_id": r.id,
+                       "prior_run_id": prior_run_id, "session_id": hook_session_id(&body.payload), "why": why}),
+            )
+            .await;
+            return Ok(());
+        }
+        if let crate::lifecycle::fence::Ownership::Unproven(why) = &owner {
+            tracing::debug!(bot = %bot.name, run = %r.id, why, "這一則證不出世代歸屬：照既有規則處理");
+        }
     }
 
     // Codex's usage-reset hint is a TUI row, not in the payload; give the pane a moment to render it.
@@ -1627,6 +1666,158 @@ mod external_claim_tests {
             .await
             .unwrap();
         (bot_id, conv, turn_id)
+    }
+
+    /// issue #69 的 race，整條走一遍：使用者 interrupt → bot 重啟（舊 run 收掉、新 run 起來並開了新回合）
+    /// → 舊 CLI session 的 Stop 這時候才到。它是上一代的，一個欄位都不准動新回合。
+    #[tokio::test]
+    async fn a_late_stop_from_the_previous_run_cannot_touch_the_new_runs_turn() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, created_at)
+             VALUES (?,?,'fenced','claude','[]',0,1,'tok',?)",
+        )
+        .bind(&bot_id)
+        .bind(&env.project_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let conv = db::conversation_id(&app.db, &bot_id).await.unwrap();
+
+        // 上一代：跑在 `s-old` 上，使用者 interrupt 之後收掉（回合標 failed），run 結束。
+        let old_run = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, pane_id, native_session_id, started_at, ended_at)
+             VALUES (?,?,'exited','unknown','pane-old','s-old',?,?)",
+        )
+        .bind(&old_run)
+        .bind(&bot_id)
+        .bind(db::now())
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let old_turn = db::ulid();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, prompt_text, completed_at, created_at)
+             VALUES (?,?,?,'web','failed','ok','上一代問的',?,?)",
+        )
+        .bind(&old_turn)
+        .bind(&conv)
+        .bind(&old_run)
+        .bind(db::now())
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        // 這一代：重啟起來的新 run，已經開了新回合，還在跑。
+        let new_run = db::ulid();
+        assert!(new_run > old_run, "ULID 是時間序，新的一定比較大");
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, pane_id, started_at)
+             VALUES (?,?,'running','working','pane-new',?)",
+        )
+        .bind(&new_run)
+        .bind(&bot_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let new_turn = db::ulid();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, prompt_text, created_at)
+             VALUES (?,?,?,'web','in_flight','ok','這一代問的',?)",
+        )
+        .bind(&new_turn)
+        .bind(&conv)
+        .bind(&new_run)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        let mut events = app.subscribe();
+        // 舊 session 的 Stop 現在才抵達。
+        process(
+            &app,
+            &HookBody {
+                bot_id: bot_id.clone(),
+                provider: "claude".into(),
+                payload: json!({"hook_event_name": "Stop", "session_id": "s-old", "prompt_id": "p-old",
+                                "last_assistant_message": "上一代的回覆"}),
+                received_at: None,
+                truncated: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let t = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(&new_turn).fetch_one(&app.db).await.unwrap();
+        assert_eq!(t.status, "in_flight", "上一代的 Stop 不准收這一代的回合");
+        assert_eq!(t.native_session_id, None, "也不准把舊 session 蓋到新回合上");
+        let replies: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE role='assistant'")
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(replies, 0, "上一代的回覆不能貼進這一代的對話");
+        let run_session: Option<String> =
+            sqlx::query_scalar("SELECT native_session_id FROM runs WHERE id=?").bind(&new_run).fetch_one(&app.db).await.unwrap();
+        assert_eq!(run_session, None, "新 run 的 session 不能被舊事件寫進去");
+
+        // 丟掉一則事件要看得見，不是只活在函式裡。
+        let ev = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv()).await.unwrap().unwrap();
+        assert_eq!(ev.kind, "hook_fenced");
+        assert_eq!(ev.data["prior_run_id"], serde_json::json!(old_run));
+        assert_eq!(ev.data["session_id"], "s-old");
+
+        // 重播同一則：還是什麼都不改（idempotent）。
+        process(
+            &app,
+            &HookBody {
+                bot_id: bot_id.clone(),
+                provider: "claude".into(),
+                payload: json!({"hook_event_name": "StopFailure", "session_id": "s-old", "prompt_id": "p-old",
+                                "reason": "API Error: 500"}),
+                received_at: None,
+                truncated: false,
+            },
+        )
+        .await
+        .unwrap();
+        let t = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(&new_turn).fetch_one(&app.db).await.unwrap();
+        assert_eq!(t.status, "in_flight", "上一代的 StopFailure 也不准把這一代標成失敗");
+    }
+
+    /// 反過來的那一半：**這一代自己**的遲到 hook 照舊生效（`4fac036` 特意保留的行為）。
+    /// 圍籬只擋證明得出來是舊世代的，不是「遲到就丟」。
+    #[tokio::test]
+    async fn a_late_hook_from_this_same_run_still_fills_its_fallback_turn() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, _conv, turn_id) = fallback_closed_turn(&app, &env.project_id, "跑一次測試").await;
+        // 這個 run 已經回報過自己的 session：hook 帶同一個，就是這一代自己的。
+        sqlx::query("UPDATE runs SET native_session_id='s-live' WHERE bot_id=?")
+            .bind(&bot_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        let mut body = codex_done(&bot_id, "跑一次測試");
+        body.payload["thread-id"] = json!("s-live");
+        process(&app, &body).await.unwrap();
+
+        let turn = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(turn.status, "completed", "同一代的遲到 hook 照舊補得進去");
+        let replies: Vec<String> = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='assistant'")
+            .bind(&turn_id)
+            .fetch_all(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(replies, vec!["hook reply".to_string()]);
     }
 
     /// review3 c1 L13：沒有 in-flight 回合時，遲到 hook 帶來的是**別句**的答案（使用者改到 pane 裡直接打）——

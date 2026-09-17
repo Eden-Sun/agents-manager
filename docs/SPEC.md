@@ -190,6 +190,22 @@ resend／排隊機制決定（`stuck_turns.rs`），不讓 CLI 自己另開一�
 hook 身分是 **per-bot**（`bot_id` + `bots.hook_token`），daemon 解析該 bot 目前的 active Run：對帳收養會產生新 `run_id`，但存活的 agent 仍持有啟動時的參數。
 pane env 的 `AM_RUN_ID` 只供診斷。
 
+**世代圍籬**（issue #69，`lifecycle::fence`）：只認 bot 不夠。使用者 interrupt 之後 bot 重啟，新的 run 已經開了新回合，
+舊 CLI session 的 `Stop` 這時候才抵達——按「這顆 bot 的 hook」處理的話，它會去收新回合的尾、把上一代的回覆貼進去。
+所以每一則 hook 在進到語意處理**之前**先判一次歸屬，規則只住在 `fence` 一個地方（散在 hook／reconcile／fallback 各判一次遲早會漂成三套）：
+- **世代就是 `runs` 那一列本身**。`runs.id` 是 ULID（毫秒時間序），同一顆 bot 的兩個 run 不會落在同一毫秒，
+  所以 `id` 的字典序就是單調遞增的世代序。不另外養計數器欄位——`INSERT INTO runs` 有七十幾處，
+  半populated 的欄位只會給出假的保證。
+- **`Current`**（照常處理）：事件指名的就是這個 run；或它帶的 native session 等於這個 run 的 `native_session_id`
+  或 `resume_session_id`（`resume_native` 起的 run 在第一則 hook 把 session 收進來之前的那個窗口）。
+- **`Stale`**（只記錄，一個欄位都不准改）：事件指名了別的 run；或它帶的 session 在這顆 bot **`id` 比現在這代小**的
+  某個 run 上找得到。丟棄時記一行 warn 並推一則 `hook_fenced` 事件（帶 bot／run／prior_run／session／why），
+  重播同一則會走到同一個分支，仍然什麼都不改。
+- **`Unproven`**（照既有規則走，不靠時序猜）：事件沒帶 session；run 還沒回報過 session；或那個 session
+  不屬於任何更早的 run。**最後一種是刻意放行的**：claude 在同一個 CLI 裡 `/clear` 會換一個 session id 而 run 沒變，
+  若改成「session 不一樣就丟」，`/clear` 之後每一則 Stop 都會被殺掉、回合再也不會完成。
+  圍籬擋的是**證明得出來是舊世代**的事件，不是「遲到就丟」——§4.3 那條遲到 hook 補回覆的行為（`4fac036`）原樣保留。
+
 `runs.transcript_path` 由 SessionStart 回填；`messages.source` 保留 `transcript` 值（尚未實作回補）。
 
 ### 4.3 備援來源：終端快照
