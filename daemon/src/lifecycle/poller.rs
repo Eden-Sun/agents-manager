@@ -657,6 +657,9 @@ enum Resend {
     Skipped,
     /// Refused before a single byte was typed (`Delivered::NotAttempted`); the budget was given back.
     Blocked { reason: &'static str, retry: bool },
+    /// 重送按過鍵卻證明不了（`Unproven`，或打字之後出錯）：turn 已改記 `delivery='unknown'`，不能判失敗
+    /// （review3 c3 M5）。`fail_stalled_turn` 只收 `delivery='ok'`，所以接下來那一步自然不動它。
+    Unproven,
 }
 
 impl Resend {
@@ -717,12 +720,52 @@ async fn resend_lost_prompt(app: &Arc<App>, run_id: &str, turn_id: &str, sent: &
         }
         Ok(Delivered::Unproven(why)) => {
             tracing::warn!(run_id, turn = %turn_id, reason = why, "re-delivery could not be proven either");
-            Resend::Skipped
+            mark_resend_unproven(app, &bot.id, turn_id, why).await;
+            Resend::Unproven
         }
+        // `execute_delivery` 在打第一個字之前的失敗都是 `NotAttempted`，走到 `Err` 就是鍵可能已經送出去了。
         Err(e) => {
-            tracing::warn!(run_id, turn = %turn_id, error = %e, "re-delivering a lost prompt failed");
-            Resend::Skipped
+            tracing::warn!(run_id, turn = %turn_id, error = %e, "re-delivering a lost prompt failed after typing started");
+            mark_resend_unproven(app, &bot.id, turn_id, "resend_error").await;
+            Resend::Unproven
         }
+    }
+}
+
+/// 重送已經打了字卻證明不了：字可能還在框裡（claude compact 時吞 Enter），也可能已經被收下、排在後面。
+/// 兩種都不是「agent 沒反應」，判 failed 會讓交辦跟著失敗、AGM 重派同一件事（review3 c3 M5）。
+/// 照 §6「Unproven 才會變成 unknown」記成 `delivery='unknown'`，並留一則說明；hook 來了照樣認領，
+/// 真的沒人收由 §4.3b 收尾。
+async fn mark_resend_unproven(app: &Arc<App>, bot_id: &str, turn_id: &str, why: &str) {
+    let text = format!(
+        "（畫面上完全沒有這則訊息，已自動重打一次，但證明不了有送出（{why}）：字可能還留在輸入框裡，也可能已經被收下、排在後面。\
+         這一則先記成「送達不明」，不判失敗。請到終端看一下——還在框裡就按 Enter 或清掉；已經在跑就等它回完。）"
+    );
+    let res = async {
+        let mut tx = app.db.begin().await?;
+        let moved = sqlx::query(
+            "UPDATE turns SET delivery='unknown', delivery_verified=0 WHERE id=? AND status='in_flight' AND delivery='ok'",
+        )
+        .bind(turn_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if moved == 0 {
+            return anyhow::Ok(None);
+        }
+        let conv: String = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id=?").bind(turn_id).fetch_one(&mut *tx).await?;
+        let m = insert_message_tx(&mut tx, &conv, Some(turn_id), "system", &text, "system", false, None).await?;
+        tx.commit().await?;
+        anyhow::Ok(Some(m))
+    }
+    .await;
+    match res {
+        Ok(Some(m)) => {
+            emit_message_added(app, bot_id, m).await;
+            emit_turn(app, turn_id).await;
+        }
+        Ok(None) => {}
+        Err(e) => tracing::warn!(turn = %turn_id, error = ?e, "could not record an unproven resend as unknown delivery"),
     }
 }
 
@@ -752,7 +795,7 @@ async fn resend_with_retry(
         }
         match resend_lost_prompt(app, run_id, turn_id, sent).await {
             Resend::Sent => return Some((true, None)),
-            Resend::Skipped => return Some((false, blocked)),
+            Resend::Skipped | Resend::Unproven => return Some((false, blocked)),
             Resend::Blocked { reason, retry } => {
                 blocked = Some(reason);
                 if !retry {
@@ -2326,6 +2369,33 @@ mod issue_17_tests {
         assert_eq!(out, Some((true, None)), "第二次用退回的額度送出去");
         assert_eq!(count(&f, "pane.send_text"), 1, "只送了一次");
         assert!(!db::claim_resend(&app.db, &f.turn_id, MAX_PROMPT_RESENDS).await, "額度這次真的用掉了");
+    }
+
+    /// review3 c3 M5：重送打了字、Enter 被吞，字還在框裡（`Unproven("still_in_box")`）——不是「agent 沒反應」。
+    /// turn 記成 unknown＋說明，接下來的 `fail_stalled_turn` 不能把它判 failed。
+    #[tokio::test]
+    async fn an_unproven_resend_leaves_the_turn_unknown_not_failed() {
+        let f = fixture("claude", "").await;
+        live(&f, crate::testing::LivePane { transcript: vec!["⏺ 先前的回覆".into()], swallow_enter: true, ..wide() });
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        app.stall_timers.lock().await.insert(f.run_id.clone(), 11);
+        let sent = vec!["Reply with PONG please".to_string()];
+
+        let out = resend_with_retry(&app, &f.run_id, &f.bot_id, &f.turn_id, &sent, 11, Duration::from_millis(1)).await;
+        assert_eq!(out, Some((false, None)));
+        assert_eq!(count(&f, "pane.send_text"), 1, "打過一次字");
+        let t = turn(&app, &f.turn_id).await;
+        assert_eq!((t.status.as_str(), t.delivery.as_str()), ("in_flight", "unknown"));
+        let msg: String = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='system'")
+            .bind(&f.turn_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert!(msg.contains("證明不了有送出") && msg.contains("still_in_box") && msg.contains("輸入框"), "{msg}");
+
+        fail_stalled_turn(&app, &f.run_id, &f.bot_id, &f.turn_id, false, false, None).await.unwrap();
+        assert_eq!(turn(&app, &f.turn_id).await.status, "in_flight", "送達不明的不判失敗");
     }
 
     /// 兩次都被擋：回合照樣判失敗，但訊息說出試過重送、被什麼擋下，不是「agent 沒反應」。
