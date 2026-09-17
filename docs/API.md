@@ -1102,6 +1102,10 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
   daemon 每 30 秒檢查，指紋變化才推 WS `supervisor_health`；inbox `health_changed` 只在巡檢或協調者的嚴重度（`manager_health.status`／`responder_health.status`）或總管狀態（idle/busy 視為 running）真的改變時入列，總管 stopped/starting 期間不入列、恢復後補一則。
   `responder_health{status,responder_status,inbox_open,wake_pending,retry_at}` 單獨一格，**也併進**頂層 `status`（取較嚴重者）。
   協調者 `waiting_quota`、`desired_running` 卻沒在跑、或沒在跑（stopped／missing）而 `wake_pending>0` → `degraded`。
+  `due_actions{pending,overdue,failing,by_kind,soonest,items}`＝「daemon 接下來要做什麼、什麼一直做不成」（issue #75）：
+  把六處**本來就存在 DB 裡**的到期時間讀出來擺在一起（排隊 prompt 的重試、交辦重送、等額度、協調者補送、總管看門狗、hook 事件），
+  只讀不寫、不是新的排程器。`overdue`＝到期了還在名單上（掃描還沒輪到，或一直失敗）；`failing`＝`attempts >= 3`；
+  `items` 只列 failing 的那些（最多 20 筆，帶 `last_error`）。讀不到時整段是 `null`——觀測不該變成新的故障點。
 - `POST /api/supervisor/ops-alerts {source,reason,detail?}` → `{queued,inbox_event_id,event_key}`。排程腳本（`scripts/ops/*`）卡住、自己解不開時喊人：
   寫一則 inbox `ops_alert`（路由給巡檢、叫醒）。`source`／`reason` 各 1–64 字的 `[A-Za-z0-9._-]`（不合格 400），`detail` 截到 2000 字。
   event_key 帶小時格：同 `source`+`reason` 每小時最多一則（`queued:false` = 這小時已經有了）。

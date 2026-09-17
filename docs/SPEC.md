@@ -79,6 +79,12 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   `db::migrate` 自己的 SCHEMA／additive ALTER 包在一個 transaction 裡，中途失敗（例如舊資料違反新加的 UNIQUE INDEX）整批回滾，
   不留半套 schema；重跑冪等。子模組各自的 migration（`supervisor::store`、`read_marks`、`panes`、`herdr_maintenance`、
   `mission::store`）不在這個 transaction 裡，各自維護自己那張表，風險最高的「加欄＋回填」已經各自包了自己的 transaction。
+- **到期動作不靠行程內的 timer 當唯一真相**（issue #75）：每一種「等一下再做」的到期時間都**存在 DB 的擁有者那一列**上——
+  排隊 prompt 的重試 `turns.next_flush_at`、交辦重送 `supervisor_assignments.next_attempt_at`、等額度 `…resume_at`、
+  協調者補送 `supervisor_inbox.notify_next_at`、總管看門狗 `supervisors.watchdog_next_at`、hook 事件 `hook_events.next_attempt_at`。
+  記憶體 timer 只是加速：重啟後由 `reconcile::rearm_progress`（含 `rearm_queue_retries`）、總管 tick、
+  `herdr_maintenance::arm_on_startup` 與 `hook_inbox` 的 worker 依 DB 重掛或掃回來，重掛是冪等的（同一顆 bot 只會有一個 timer）。
+  `GET /api/supervisor/health` 的 `due_actions` 把這六處讀成同一份摘要，供觀測 pending／failing。
 - **權威劃分**：TOML 是 Project／Bot 期望設定的唯一權威；SQLite 存 Run／Turn／Message／Conversation／hook token／workspace 映射。啟動與每次寫回 TOML 後做 TOML→SQLite 投影（依 id upsert；TOML 移除的 bot 標 `deleted_at`，保留歷史）。
 - **落盤前先驗投影**（issue #73）：`ConfigStore::update` 的順序是「重讀（mtime 變了）→ 在記憶體套用修改 →
   `projection::validate` 乾跑 → 原子寫入（暫存檔 + `rename`）」。驗不過就直接回錯誤，**config.toml 一個字都不動**，

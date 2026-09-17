@@ -483,7 +483,7 @@ pub const OPEN_STATES: [&str; 6] =
 /// `'a','b',…` 給 SQL 的 `IN (…)` 用。以前四個查詢各自把清單硬寫進字串，三種答案：
 /// `quota_blocked` 因此從 ownership 衝突與未結案計數裡消失——AGM 查過衝突、回報「沒有人握著這塊」，
 /// 然後把同一個模組派給第二顆 bot（review 2026-09-16）。清單只准有一份。
-fn sql_list(states: &[&str]) -> String {
+pub(crate) fn sql_list(states: &[&str]) -> String {
     states.iter().map(|s| format!("'{s}'")).collect::<Vec<_>>().join(",")
 }
 

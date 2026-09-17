@@ -65,6 +65,9 @@ pub async fn snapshot(app: &Arc<App>) -> Result<Value, LcError> {
         "supervisor": supervisor,
         "bots": {"total": bots.len(), "running": running, "busy": busy, "stopped": stopped},
         "quota": crate::quota::snapshot(app).await,
+        // 「接下來要做什麼、什麼一直做不成」。到期動作本來就都落在 DB 上（各自掛在自己那張表），
+        // 只是以前要看得翻六張表；issue #75 驗收第 5 條。
+        "due_actions": crate::due_actions::snapshot(app).await,
         // Two numbers, not one sum: an assignment still running and a notification nobody
         // acked are different kinds of "owed", and adding them hid a 464-event backlog.
         "pending_assignments": crate::supervisor::store::open_assignment_count(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?,
