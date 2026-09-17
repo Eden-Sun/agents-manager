@@ -4,6 +4,7 @@
 //! in these tables, so a daemon restart, a model switch or a lost session never loses an
 //! assignment or replays one twice.
 
+use super::assignment_state;
 use anyhow::Result;
 use serde_json::{json, Value};
 use sqlx::{FromRow, SqlitePool};
@@ -1194,22 +1195,32 @@ pub async fn assignments_idle_since(pool: &SqlitePool, cutoff: &str) -> Result<V
     .await?)
 }
 
-pub async fn mark_delivered(pool: &SqlitePool, id: &str, turn_id: &str, delivery: &str) -> Result<()> {
+/// 記下派出去的結果。回 `false` ＝ 這筆交辦已經不在途中（多半是派送途中被取消／裁示掉了），什麼都沒寫。
+///
+/// **這裡的 `WHERE` 就是 issue #71 的守衛。** 以前是 `WHERE id=?`：`dispatch` 從讀到這筆 `queued`
+/// 交辦、到 `prompt_relayed_queueable` 送完回來中間有好幾個 await，那段時間裡 AGM 或使用者把它取消掉
+/// （`review_with_followup` 走 CAS 寫進 `cancelled`）是完全做得到的；接著這一句無條件把它寫回
+/// `delivered`，一筆已經結案的工作就這樣活過來，AGM 看到的是「還在跑」。
+/// 合法的來源只有在途那三個（[`assignment_state::IN_FLIGHT`]）——`delivered`／`unknown` 也算，
+/// 因為同一個 crid 重派本來就是冪等的，會再記一次。
+pub async fn mark_delivered(pool: &SqlitePool, id: &str, turn_id: &str, delivery: &str) -> Result<bool> {
     // `unknown` delivery is its own state: the prompt may or may not have landed, so the
     // controller reconciles it against the turn instead of sending the work a second time.
     let status = if delivery == "unknown" { "unknown" } else { "delivered" };
-    sqlx::query(
+    let from = sql_list(&assignment_state::sources_for(status));
+    Ok(sqlx::query(&format!(
         "UPDATE supervisor_assignments SET turn_id=?, delivery=?, status=?, attempts=attempts+1,
-           next_attempt_at=NULL, conflict_since=NULL, updated_at=? WHERE id=?",
-    )
+           next_attempt_at=NULL, conflict_since=NULL, updated_at=? WHERE id=? AND status IN ({from})"
+    ))
     .bind(turn_id)
     .bind(delivery)
     .bind(status)
     .bind(crate::db::now())
     .bind(id)
     .execute(pool)
-    .await?;
-    Ok(())
+    .await?
+    .rows_affected()
+        > 0)
 }
 
 /// Hold a queued assignment until `until` **without** spending an attempt.
@@ -1331,11 +1342,14 @@ pub async fn settle_and_notify(
     // 它自己回頭 review，沒 review 就被當成卡住的工作。
     let ok_turn = turn_status == "completed" || turn_status == "completed_fallback";
     let land_on = if ok_turn { "CASE WHEN expects_review=0 THEN 'completed' ELSE 'awaiting_review' END" } else { "'awaiting_review'" };
+    // 守衛從轉移表算出來，不再自己抄一份 `('queued','delivered','unknown')`（issue #71）。
+    // `completed` 那一支（通知當場結案）的來源跟 `awaiting_review` 相同，用同一份即可。
+    let from = sql_list(&assignment_state::sources_for("awaiting_review"));
     let moved = sqlx::query(&format!(
         "UPDATE supervisor_assignments
             SET status={land_on}, turn_status=?, evidence_complete=?,
                 result=COALESCE(?, result), error=COALESCE(?, error), completed_at=?, updated_at=?
-          WHERE id=? AND status IN ('queued','delivered','unknown')",
+          WHERE id=? AND status IN ({from})",
     ))
     .bind(turn_status)
     .bind(i64::from(evidence_complete))
@@ -1427,11 +1441,12 @@ pub async fn park_quota_blocked(
 ) -> Result<Settled> {
     let now = crate::db::now();
     let mut tx = pool.begin().await?;
-    let moved = sqlx::query(
+    let from = sql_list(&assignment_state::sources_for("quota_blocked"));
+    let moved = sqlx::query(&format!(
         "UPDATE supervisor_assignments
             SET status='quota_blocked', resume_at=?, error=?, conflict_since=NULL, updated_at=?
-          WHERE id=? AND status IN ('queued','delivered','unknown')",
-    )
+          WHERE id=? AND status IN ({from})"
+    ))
     .bind(resume_at)
     .bind(why)
     .bind(&now)
@@ -1563,7 +1578,9 @@ pub fn decision_status(decision: &str) -> Option<&'static str> {
     }
 }
 
-/// Record an acceptance decision. The caller has already checked that the transition is legal.
+/// Record an acceptance decision. 轉移合法性在這裡自己查一次（issue #71）：以前註解寫「呼叫端已經
+/// 檢查過了」，但那是一個沒有人保證得了的約定——結案的交辦再被裁示一次就會把 `reviewed_at` 覆蓋掉。
+/// 不合法就回 `Ok(None)`，跟「找不到這筆」同一個出口。
 ///
 /// Idempotent by construction at the API layer: re-deciding the same way is answered from the
 /// row without writing a second audit entry.
@@ -1580,6 +1597,9 @@ pub async fn review(
 ) -> Result<Option<Assignment>> {
     let Some(to_status) = decision_status(decision) else { return Ok(None) };
     let Some(before) = assignment(pool, id).await? else { return Ok(None) };
+    if !assignment_state::allowed(&before.status, to_status) {
+        return Ok(None);
+    }
     let now = crate::db::now();
     let mut tx = pool.begin().await?;
     sqlx::query(
@@ -2962,6 +2982,60 @@ mod tests {
         assert!(get_or_init(&p).await.unwrap().last_notify_at.is_none(), "never woken yet");
         set_last_notify(&p, "2026-09-12T10:00:00Z").await.unwrap();
         assert_eq!(get_or_init(&p).await.unwrap().last_notify_at.as_deref(), Some("2026-09-12T10:00:00Z"));
+    }
+
+    /// issue #71：派送途中被裁示掉的交辦，不可以被那次派送的結果弄活過來。
+    ///
+    /// `dispatch` 讀到一筆 `queued`，中間 `prompt_relayed_queueable` 有好幾個 await；那段時間裡
+    /// AGM 或使用者取消它是做得到的。以前 `mark_delivered` 是 `WHERE id=?`，會無條件把
+    /// `cancelled` 蓋回 `delivered`——結案的工作看起來又在跑了。
+    #[tokio::test]
+    async fn a_decided_assignment_is_not_revived_by_a_late_delivery() {
+        let p = pool().await;
+        get_or_init(&p).await.unwrap();
+        for (decided, label) in [("cancelled", "取消"), ("completed", "驗收通過"), ("failed", "判定失敗"), ("superseded", "被接續取代")] {
+            let a = insert_assignment(&p, None, "bot1", &format!("req-{decided}"), "x", &[], None, true).await.unwrap();
+            sqlx::query("UPDATE supervisor_assignments SET status=? WHERE id=?")
+                .bind(decided)
+                .bind(&a.id)
+                .execute(&p)
+                .await
+                .unwrap();
+
+            let moved = mark_delivered(&p, &a.id, "t-late", "ok").await.unwrap();
+            assert!(!moved, "{label}：遲到的送達不該寫進去");
+            let after = assignment(&p, &a.id).await.unwrap().unwrap();
+            assert_eq!(after.status, decided, "{label}：狀態要留在裁示的結果");
+            assert!(after.turn_id.is_none(), "{label}：也不該把 turn 綁上去");
+        }
+    }
+
+    /// 在途的三個狀態照樣記得下去——重派同一個 crid 本來就是冪等的，會再記一次。
+    #[tokio::test]
+    async fn an_assignment_still_in_flight_records_its_delivery() {
+        let p = pool().await;
+        get_or_init(&p).await.unwrap();
+        for from in super::assignment_state::IN_FLIGHT {
+            let a = insert_assignment(&p, None, "bot1", &format!("req-{from}"), "x", &[], None, true).await.unwrap();
+            sqlx::query("UPDATE supervisor_assignments SET status=? WHERE id=?").bind(from).bind(&a.id).execute(&p).await.unwrap();
+            assert!(mark_delivered(&p, &a.id, "t-1", "ok").await.unwrap(), "{from} 要記得下去");
+            assert_eq!(assignment(&p, &a.id).await.unwrap().unwrap().status, "delivered");
+        }
+    }
+
+    /// 結案之後再裁示一次不會覆蓋原本的裁示（`review` 自己查轉移表）。
+    #[tokio::test]
+    async fn a_second_decision_on_a_settled_assignment_is_refused() {
+        let p = pool().await;
+        get_or_init(&p).await.unwrap();
+        let a = insert_assignment(&p, None, "bot1", "req-twice", "x", &[], None, true).await.unwrap();
+        let first = review(&p, &a.id, "accept", "AGM", "cli", Some("好了"), None, None).await.unwrap();
+        assert!(first.is_some(), "第一次裁示成立");
+        let again = review(&p, &a.id, "fail", "AGM", "cli", Some("反悔"), None, None).await.unwrap();
+        assert!(again.is_none(), "已經結案，第二次裁示要被擋下來");
+        let after = assignment(&p, &a.id).await.unwrap().unwrap();
+        assert_eq!(after.status, "completed", "留在第一次的結果");
+        assert_eq!(after.review_reason.as_deref(), Some("好了"), "理由也不該被蓋掉");
     }
 
     /// The whole point of the client_request_id: a retry after a crash is the same assignment.
