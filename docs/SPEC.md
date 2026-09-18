@@ -1247,6 +1247,12 @@ listen port 只在本機算（pane 行程樹的 pid 對 `lsof -nP -iTCP -sTCP:LI
     shim 退 **75**（可重試），stderr 講明原因，名額放掉（冪等）、暫存狀態目錄清掉；
   - cargo 維持**前景**執行（背景會讓非互動 shell 忽略 SIGINT、換掉 stdin），pid 由 `exec` 包裝寫給守衛。建不出暫存目錄（沒地方放 pid 與失效標記）就不拿名額、放回去不排程直接跑；
   - `remote-cargo` helper 與本機 cargo 同一套守衛；名額在兩段之間失效就不起本機 cargo。
+- **shim 不留孤兒行程（issue #151）**：行程數是全機共用的資源（曾被塞到 2661／2666，其他 bot 的 `fork` 全失敗）。三件事：
+  等名額的迴圈每輪確認呼叫端（`$PPID`）還在，不在了就自己印一行退出，不留永遠在等的孤兒；續約守衛的 `sleep` 放背景、用 `wait` 等，
+  收到 TERM 先殺掉手上的 sleep 再結束（否則每次 cargo 都留一顆 `sleep 60` 的孤兒，最久 TTL/3 秒）；shim 自己被 `SIGKILL`（`trap` 沒機會跑）時，
+  續約迴圈發現 shim 不在了——cargo 還活著就繼續續約（它還在用容量），cargo 也沒了就放名額、收狀態目錄、自己結束，不會永遠佔著名額。
+  測試端：`cargo_shim` 的 `Sandbox` 把每次 shim 放進自己的 process group，有 120 秒上限，結束後斷言組內一個行程都不剩（含 sleep、等名額的迴圈、假編譯器），
+  `Drop`（含 panic）整組終止。
 
 #### 設定（`config.toml` 的 `[build]`，`config::BuildCfg`）
 - `max_concurrent`（預設 2，`AM_BUILD_MAX_CONCURRENT` 可覆寫，0／看不懂一律回預設——0 不是「停用排程」，是「誰都拿不到

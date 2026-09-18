@@ -194,6 +194,15 @@ am_lease_lost() {
     return 0
 }
 
+# 可以被 TERM 打斷的 `sleep`：`_release` 殺守衛（子 shell）時，它手上的 `sleep N` 不會變成孤兒（行程數是全機共用的資源，
+# 每次 cargo 都留一顆 `sleep 60` 的孤兒，很快就把機器的行程表塞滿——issue #151）。
+am_lease_sleep() {
+    sleep "$1" &
+    _ls_pid=$!
+    wait "$_ls_pid"
+    _ls_pid=""
+}
+
 # 背景執行：續約，並判斷租約還在不在。
 #
 # * daemon 明確說沒有這個名額（`not_found`）或 token 對不上（`token_mismatch`）：名額已經不是我們的，立刻停。
@@ -203,12 +212,26 @@ am_lease_lost() {
 #   下一次重試（隔 `_renew_every`、最久再加 curl 逾時）會落在 deadline 之後就現在停。
 # * 讀不到時間（`date +%s` 壞掉）：沒有依據可以等，第一次失敗就停。
 am_lease_watch() {
+    _lw_shim=$$
+    _ls_pid=""
+    trap '[ -z "$_ls_pid" ] || kill "$_ls_pid" 2>/dev/null; exit 0' TERM
     # 續約請求的逾時：隔多久續一次的一半，夾在 1～5 秒（正常的 TTL 下就是 5 秒）。
     _lw_m=$((_renew_every / 2))
     [ "$_lw_m" -ge 1 ] || _lw_m=1
     [ "$_lw_m" -le 5 ] || _lw_m=5
     while :; do
-        sleep "$_renew_every"
+        am_lease_sleep "$_renew_every"
+        # shim 本身死了（被 SIGKILL，`trap` 沒機會跑）：沒有人會來放名額。cargo 還在跑就繼續續約
+        # （它還在用容量，租約不能先掉）；cargo 也沒了就把名額放掉、收掉狀態目錄、自己結束——
+        # 不然這個迴圈會永遠續下去，把名額佔到重開機。
+        if ! kill -0 "$_lw_shim" 2>/dev/null; then
+            _lw_c=$(cat "$_state/pid" 2>/dev/null)
+            if [ -z "$_lw_c" ] || ! kill -0 "$_lw_c" 2>/dev/null; then
+                curl -s -m 5 -X POST "${_url}/release" --data-urlencode "holder=${_holder}" --data-urlencode "token=${_token}" >/dev/null 2>&1
+                rm -rf "$_state" 2>/dev/null
+                return 0
+            fi
+        fi
         _lw_sent=$(am_epoch)
         _lw_resp=$(curl -s -m "$_lw_m" -X POST "${_url}/renew" --data-urlencode "holder=${_holder}" --data-urlencode "token=${_token}" 2>/dev/null)
         if [ "$(am_json_field renewed "$_lw_resp")" = "true" ]; then
@@ -240,6 +263,7 @@ am_cargo() {
     # 兩份 shim 會互相把對方當成真 cargo 一路 fork 下去。寧可大聲失敗，也不要 fork 到機器躺平。
     AM_SHIM_DEPTH=$((${AM_SHIM_DEPTH:-0} + 1))
     export AM_SHIM_DEPTH
+    _parent=$PPID
     if [ "$AM_SHIM_DEPTH" -gt 4 ]; then
         printf 'agents-manager: cargo shim 遞迴 %s 層——PATH 上有多份 shim 而且認不出來。把真 cargo 放進 AM_REAL_CARGO 再跑一次。\n' "$AM_SHIM_DEPTH" >&2
         exit 127
@@ -288,6 +312,11 @@ am_cargo() {
                 _attempt=$((_attempt + 1))
                 if [ "$_attempt" = 1 ]; then
                     printf 'agents-manager: 全機的 cargo 名額滿了，等一個空出來（waiting_for_build_slot）……\n' >&2
+                fi
+                # 呼叫端（叫我們的 shell／agent）已經不在了：沒有人在等這次建置，不要留一個永遠在等名額的孤兒。
+                if ! kill -0 "$_parent" 2>/dev/null; then
+                    printf 'agents-manager: 呼叫端已經結束，不再等 cargo 名額\n' >&2
+                    exit 1
                 fi
                 _retry=$(am_json_field retry_after_secs "$_resp")
                 case "$_retry" in *[!0-9]* | '') _retry=5 ;; esac
@@ -442,6 +471,23 @@ mod tests {
 
     struct Sandbox {
         dir: std::path::PathBuf,
+        /// 這個沙盒起過的每一次 shim 的 process group（issue #151）：Drop（含測試 panic）時整組終止。
+        groups: std::sync::Mutex<Vec<i32>>,
+    }
+
+    /// 這個 process group 裡還活著的行程（`pid`、指令），殭屍不算。
+    fn group_members(pgid: i32) -> Vec<(i32, String)> {
+        let out = Command::new("ps").args(["-A", "-o", "pid=,pgid=,stat=,command="]).output().unwrap();
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|l| {
+                let mut it = l.split_whitespace();
+                let pid: i32 = it.next()?.parse().ok()?;
+                let g: i32 = it.next()?.parse().ok()?;
+                let stat = it.next()?;
+                (g == pgid && !stat.starts_with('Z')).then(|| (pid, it.collect::<Vec<_>>().join(" ")))
+            })
+            .collect()
     }
 
     impl Drop for Sandbox {
@@ -454,6 +500,9 @@ mod tests {
             }
             for pid in self.spawned() {
                 unsafe { libc::kill(pid, libc::SIGKILL) };
+            }
+            for g in self.groups.lock().unwrap().iter() {
+                unsafe { libc::killpg(*g, libc::SIGKILL) };
             }
             let _ = std::fs::remove_dir_all(&self.dir);
         }
@@ -482,7 +531,7 @@ mod tests {
                 use std::os::unix::fs::PermissionsExt as _;
                 std::fs::set_permissions(fake.join("cargo"), std::fs::Permissions::from_mode(0o755)).unwrap();
             }
-            Sandbox { dir }
+            Sandbox { dir, groups: Default::default() }
         }
 
         /// `AM_TEST_CURL_SCRIPT` is the fake curl's own body (appended after the shebang); tests write
@@ -534,7 +583,7 @@ mod tests {
         fn install_slow_cargo(&self, secs: u32) {
             let d = self.dir.display();
             let body = format!(
-                "#!/bin/sh\necho $$ > '{d}/cargo.pid'\n( exec /bin/sleep 300 ) >/dev/null 2>&1 &\necho $! > '{d}/rustc.pid'\ntouch '{d}/cargo.ready'\n/bin/sleep {secs}\necho done > '{d}/cargo.done'\nexit 0\n"
+                "#!/bin/sh\necho $$ > '{d}/cargo.pid'\n( exec /bin/sleep 300 ) >/dev/null 2>&1 &\necho $! > '{d}/rustc.pid'\ntouch '{d}/cargo.ready'\n/bin/sleep {secs}\nkill $(cat '{d}/rustc.pid') 2>/dev/null\necho done > '{d}/cargo.done'\nexit 0\n"
             );
             let path = self.dir.join("real/cargo");
             std::fs::write(&path, body).unwrap();
@@ -640,6 +689,66 @@ esac"#
             self.pid(file).is_some_and(|p| unsafe { libc::kill(p, 0) } == 0)
         }
 
+        /// 起一個 shim，放進**自己的 process group**（issue #151）並登記：Drop（含測試 panic）時整組終止。
+        /// stdout／stderr 寫進沙盒裡的檔案（不是 pipe：假 cargo 的子行程握著 pipe 會讓讀取端等到它結束）。
+        fn start_group(&self, cmd: &mut Command, stdin: bool) -> (std::process::Child, std::path::PathBuf, std::path::PathBuf) {
+            use std::os::unix::process::CommandExt as _;
+            let tag = crate::db::ulid();
+            let (out, err) = (self.dir.join(format!("out-{tag}")), self.dir.join(format!("err-{tag}")));
+            cmd.process_group(0)
+                .stdout(std::fs::File::create(&out).unwrap())
+                .stderr(std::fs::File::create(&err).unwrap())
+                .stdin(if stdin { std::process::Stdio::piped() } else { std::process::Stdio::null() });
+            let child = spawn_retrying(cmd);
+            self.groups.lock().unwrap().push(child.id() as i32);
+            (child, out, err)
+        }
+
+        /// 跑一個 shim 並保證**不留行程**（issue #151）：有時間上限（卡住就整組殺掉並報錯，不是永遠等下去）、
+        /// 結束後斷言組內一個行程都不剩（`sleep`、等名額的迴圈、假編譯器都算）。
+        fn run_group(&self, mut cmd: Command, stdin: Option<&[u8]>) -> (String, String, i32) {
+            let (mut child, out_path, err_path) = self.start_group(&mut cmd, stdin.is_some());
+            let pgid = child.id() as i32;
+            if let Some(data) = stdin {
+                child.stdin.take().unwrap().write_all(data).unwrap();
+            }
+            let started = std::time::Instant::now();
+            let status = loop {
+                if let Some(st) = child.try_wait().unwrap() {
+                    break st;
+                }
+                if started.elapsed() > std::time::Duration::from_secs(120) {
+                    unsafe { libc::killpg(pgid, libc::SIGKILL) };
+                    panic!("shim 跑了 120 秒還沒結束（卡在等名額？）：{}", std::fs::read_to_string(&err_path).unwrap_or_default());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            };
+            self.assert_group_gone(pgid);
+            (
+                std::fs::read_to_string(&out_path).unwrap_or_default(),
+                std::fs::read_to_string(&err_path).unwrap_or_default(),
+                status.code().unwrap_or(-1),
+            )
+        }
+
+        /// 這個 process group 在幾秒內要一個行程都不剩；剩下的補殺並讓測試失敗（issue #151 的回歸）。
+        fn assert_group_gone(&self, pgid: i32) {
+            // 正常情況下一兩個 50ms 就空了；上限放寬到 40 秒是因為本機常常同時有很多人在編譯（行程表塞滿時 fork 都會失敗），
+            // 只有真的留下行程的失敗路徑才會等滿（壓測 40 個並行 shim，最慢的要 7 秒才起來）。
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(40);
+            loop {
+                let left = group_members(pgid);
+                if left.is_empty() {
+                    return;
+                }
+                if std::time::Instant::now() > deadline {
+                    unsafe { libc::killpg(pgid, libc::SIGKILL) };
+                    panic!("shim 結束後還留下行程（孤兒）：{left:?}");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+
         fn run(&self, env: &[(&str, &str)], args: &[&str]) -> (String, String, i32) {
             self.run_in(None, env, args)
         }
@@ -657,8 +766,7 @@ esac"#
             for (k, v) in env {
                 cmd.env(k, v);
             }
-            let out = output_retrying(&mut cmd);
-            (String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned(), out.status.code().unwrap_or(-1))
+            self.run_group(cmd, None)
         }
     }
 
@@ -919,6 +1027,99 @@ esac
         assert!(s.virtual_secs() > 3 * 180, "{}s", s.virtual_secs());
     }
 
+    /// issue #151：呼叫 shim 的那一端（agent 的 shell、被砍的測試行程）不在了，等名額的迴圈不能變成永遠在等的孤兒。
+    /// 假的排程器永遠說額滿（`retry_after_secs=0`，等同忙等）；shim 的呼叫者是一個馬上結束的 `sh -c`。
+    /// 以前這顆 shim 會一直轉下去，一輪全套就留下一批，多顆 agent 反覆跑就把機器的行程表塞滿。
+    #[test]
+    fn a_shim_whose_caller_is_gone_stops_waiting_for_a_slot() {
+        let s = Sandbox::new();
+        s.install_fake_curl(
+            r#"case "$*" in
+  *acquire*) printf '{"granted":false,"active":2,"retry_after_secs":0}' ;;
+  *) printf '{}' ;;
+esac"#,
+        );
+        let env = lease_env(&s);
+        // 外層是 `sh -c`（不是 shim 本身），所以不走 `s.command()`——但同樣清掉呼叫端所有的 `AM_*`。
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg(format!("'{}' build & echo $! > '{}'", s.dir.join("bin/cargo").display(), s.dir.join("shim.pid").display()))
+            .env("PATH", format!("{}:{}:/usr/bin:/bin", s.dir.join("bin").display(), s.dir.join("real").display()))
+            .env("HOME", s.dir.join("fake-home"));
+        for (key, _) in std::env::vars() {
+            if key.starts_with("AM_") {
+                cmd.env_remove(key);
+            }
+        }
+        for (k, v) in &env {
+            cmd.env(k, v);
+        }
+        // 外層 `sh -c` 起完 shim 就結束：shim 的 `$PPID` 指到一個已經不在的行程。
+        let (mut outer, _, err_path) = s.start_group(&mut cmd, false);
+        let group = outer.id() as i32;
+        assert!(outer.wait().unwrap().success());
+        // 整組（含 shim）要自己收掉；卡住的話補殺並讓測試失敗，訊息附上 shim 講過的話。
+        let waited = std::time::Instant::now();
+        while !group_members(group).is_empty() && waited.elapsed() < std::time::Duration::from_secs(40) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let left = group_members(group);
+        unsafe { libc::killpg(group, libc::SIGKILL) };
+        let said = std::fs::read_to_string(&err_path).unwrap_or_default();
+        assert!(left.is_empty(), "呼叫端不在了，shim 還在等名額：{left:?}\n{said}");
+        // 光看「行程消失了」不夠（機器上可能有別的東西在清孤兒）：shim 要**自己**講一句並退出，才是它自己發現的。
+        assert!(said.contains("呼叫端已經結束"), "shim 要自己發現呼叫端不在了，而不是被別人殺掉：{said}");
+    }
+
+    /// issue #151（也是 #128 的延伸）：shim 自己被 `SIGKILL`（`trap` 沒機會跑、名額沒人放）時，背景的續約迴圈
+    /// 不能永遠續下去把名額佔到重開機。cargo 還活著就繼續續約（它還在用容量，租約不能先掉）；
+    /// cargo 也沒了，就把名額放掉、收掉狀態目錄、自己結束。
+    #[test]
+    fn a_renew_loop_whose_shim_was_killed_stops_once_cargo_is_gone_and_releases_the_slot() {
+        let s = Sandbox::new();
+        s.install_virtual_clock();
+        s.install_lease_curl(180);
+        s.install_slow_cargo(120);
+        let env = lease_env(&s);
+        let mut cmd = s.command(&format!("{}:{}:/usr/bin:/bin", s.dir.join("bin").display(), s.dir.join("real").display()));
+        cmd.args(["check"]);
+        for (k, v) in &env {
+            cmd.env(k, v);
+        }
+        let (mut shim, _, _) = s.start_group(&mut cmd, false);
+        let group = shim.id() as i32;
+        let up = std::time::Instant::now();
+        while !s.dir.join("cargo.ready").exists() {
+            assert!(up.elapsed() < std::time::Duration::from_secs(30), "cargo 沒起來");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        // shim 被 SIGKILL：續約迴圈與 cargo 都成了孤兒。
+        unsafe { libc::kill(shim.id() as i32, libc::SIGKILL) };
+        let _ = shim.wait();
+        let renews = || std::fs::read_to_string(s.dir.join("curl.log")).unwrap().matches("/renew").count();
+        let before = renews();
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        assert!(renews() > before, "cargo 還活著：續約要繼續（它還在用容量）");
+        assert!(!group_members(group).is_empty(), "續約迴圈還在");
+
+        // cargo 也沒了（連它前景那顆 `sleep 120` 一起收掉）：迴圈放掉名額、收掉狀態目錄、自己結束。
+        for f in ["cargo.pid", "rustc.pid"] {
+            if let Some(p) = s.pid(f) {
+                unsafe { libc::kill(p, libc::SIGKILL) };
+            }
+        }
+        for (pid, cmd) in group_members(group) {
+            if cmd.contains("sleep 120") {
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+            }
+        }
+        s.assert_group_gone(group);
+        let calls = std::fs::read_to_string(s.dir.join("curl.log")).unwrap();
+        assert!(calls.contains("/release"), "名額要放掉：{calls}");
+        let leftovers: Vec<_> = std::fs::read_dir(s.dir.join("tmp")).unwrap().flatten().collect();
+        assert!(leftovers.is_empty(), "狀態目錄要清掉：{leftovers:?}");
+    }
+
     /// 前景執行的語意不能因為多了守衛而變：stdin 照樣接得到 cargo（`cargo run` 起來的程式要讀輸入）。
     #[test]
     fn the_guard_keeps_stdin_flowing_to_cargo() {
@@ -933,13 +1134,12 @@ esac
         }
         let env = lease_env(&s);
         let mut cmd = s.command(&format!("{}:{}:/usr/bin:/bin", s.dir.join("bin").display(), s.dir.join("real").display()));
-        cmd.args(["run"]).stdin(std::process::Stdio::piped());
+        cmd.args(["run"]);
         for (k, v) in &env {
             cmd.env(k, v);
         }
-        let mut child = spawn_retrying(&mut cmd);
-        child.stdin.take().unwrap().write_all(b"hello-from-the-terminal").unwrap();
-        assert!(child.wait().unwrap().success());
+        let (_, err, rc) = s.run_group(cmd, Some(b"hello-from-the-terminal"));
+        assert_eq!(rc, 0, "{err}");
         assert_eq!(std::fs::read_to_string(&sink).unwrap(), "hello-from-the-terminal");
     }
 
@@ -986,16 +1186,15 @@ esac
         let mut cmd = s.command(&format!("{}:{}:/usr/bin:/bin", s.dir.join("bin").display(), s.dir.join("real").display()));
         cmd.env("AM_PORT", port.to_string())
             .env("TMPDIR", s.dir.join("tmp"))
-            .args(["check", "-p", "agents-managerd"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::fs::File::create(s.dir.join("shim.err")).unwrap());
+            .args(["check", "-p", "agents-managerd"]);
         std::fs::create_dir_all(s.dir.join("tmp")).unwrap();
-        let mut a = spawn_retrying(&mut cmd);
+        let (mut a, _, shim_err) = s.start_group(&mut cmd, false);
+        let a_group = a.id() as i32;
 
         // A 拿到名額、cargo 真的起來了。
         let up = Instant::now();
         while crate::build_scheduler::status(&env.app).await.unwrap()["active"] != 1 || s.pid("rustc.pid").is_none() {
-            assert!(up.elapsed() < Duration::from_secs(10), "A 沒拿到名額：{}", std::fs::read_to_string(s.dir.join("shim.err")).unwrap_or_default());
+            assert!(up.elapsed() < Duration::from_secs(30), "A 沒拿到名額：{}", std::fs::read_to_string(&shim_err).unwrap_or_default());
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         assert!(s.alive("cargo.pid") && s.alive("rustc.pid"));
@@ -1005,7 +1204,7 @@ esac
         server.abort();
         let mut a_dead_at: Option<Duration> = None;
         let granted_at = loop {
-            assert!(outage.elapsed() < Duration::from_secs(20), "B 一直拿不到名額（名額表卡死了？）");
+            assert!(outage.elapsed() < Duration::from_secs(60), "B 一直拿不到名額（名額表卡死了？）");
             if a_dead_at.is_none() && a.try_wait().unwrap().is_some() && !s.alive("cargo.pid") && !s.alive("rustc.pid") {
                 a_dead_at = Some(outage.elapsed());
             }
@@ -1016,8 +1215,9 @@ esac
         };
         let dead = a_dead_at.unwrap_or_else(|| panic!("B 拿到名額（{granted_at:?}）的時候，A 的 cargo／rustc 還活著——兩個編譯同時在跑，max_concurrent=1 被突破"));
         assert!(dead <= granted_at, "A 要先死（{dead:?}）B 才拿得到名額（{granted_at:?}）");
-        assert_eq!(a.wait().unwrap().code(), Some(75), "被停掉的 A 退 75（可重試）：{}", std::fs::read_to_string(s.dir.join("shim.err")).unwrap_or_default());
+        assert_eq!(a.wait().unwrap().code(), Some(75), "被停掉的 A 退 75（可重試）：{}", std::fs::read_to_string(&shim_err).unwrap_or_default());
         assert!(!s.dir.join("cargo.done").exists(), "A 不能跑完");
+        s.assert_group_gone(a_group);
 
         // daemon 回來（新的 App 開同一個資料庫）：B 持有的名額正常，名額表沒有卡死。
         let app2 = crate::testing::restart_app(&env).await;
@@ -1062,9 +1262,9 @@ esac
         );
         let mut cmd = s.command(&path);
         cmd.env("AM_BOT_ID", "b1").env("AM_HOOK_TOKEN", "tok").env("AM_TEST_FAKE_CARGO_LOG", cargo_log.to_str().unwrap());
-        let out = output_retrying(cmd.args(["check", "-p", "agents-managerd"]));
-        let err = String::from_utf8_lossy(&out.stderr).into_owned();
-        assert_eq!(out.status.code(), Some(0), "{err}");
+        cmd.args(["check", "-p", "agents-managerd"]);
+        let (_, err, rc) = s.run_group(cmd, None);
+        assert_eq!(rc, 0, "{err}");
         // 真 cargo 真的跑到了（不是卡在等名額），而且整趟只拿一個名額。
         assert!(std::fs::read_to_string(&cargo_log).unwrap().contains("agents-managerd"), "{err}");
         let calls = std::fs::read_to_string(&call_log).unwrap();
@@ -1114,9 +1314,9 @@ esac
         );
         let mut cmd = s.command(&path);
         cmd.env("AM_BOT_ID", "b1").env("AM_HOOK_TOKEN", "tok").env("AM_TEST_FAKE_CARGO_LOG", cargo_log.to_str().unwrap());
-        let out = output_retrying(cmd.args(["build", "--release"]));
-        let err = String::from_utf8_lossy(&out.stderr).into_owned();
-        assert_eq!(out.status.code(), Some(0), "{err}");
+        cmd.args(["build", "--release"]);
+        let (_, err, rc) = s.run_group(cmd, None);
+        assert_eq!(rc, 0, "{err}");
         assert!(std::fs::read_to_string(&cargo_log).unwrap().contains("--release"), "真 cargo 沒跑到：{err}");
         let calls = std::fs::read_to_string(&call_log).unwrap();
         assert_eq!(calls.matches("acquire").count(), 1, "一層一個名額就是死結：{calls}");
