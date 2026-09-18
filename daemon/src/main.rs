@@ -36,6 +36,7 @@ mod hook_cmd;
 mod hook_inbox;
 mod hookrecv;
 mod hosts;
+mod kind_probe;
 mod lifecycle;
 mod local_image;
 mod memproc;

@@ -70,6 +70,9 @@ pub struct App {
     /// How "which account is this pid running under" gets answered (SPEC §16.6). Empty in a
     /// real daemon, which means `ps`; a test installs its own reader.
     pub proc_env: crate::pane_identity::ProcEnvHook,
+    /// start_bot 的 preflight「這台主機上有沒有 agent 執行檔」怎麼去問。正式 daemon 是 `command -v`；
+    /// 測試 build 預設答「有」，不吃跑測試那台機器的 PATH（issue #139）。
+    pub kind_probe: crate::kind_probe::KindProbeHook,
 
     locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     bus: broadcast::Sender<WsEvent>,
@@ -161,6 +164,7 @@ impl App {
             connected: std::sync::atomic::AtomicBool::new(false),
             default_connected: std::sync::atomic::AtomicBool::new(false),
             proc_env: Default::default(),
+            kind_probe: Default::default(),
             locks: Mutex::new(HashMap::new()),
             bus,
             turn_bus,
