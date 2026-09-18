@@ -57,6 +57,14 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
         schedule_flush_retry(app, bot_id, std::time::Duration::from_secs(left));
         return Ok(());
     }
+    // `--resume` 接回之後還沒證明接回的是原本那段對話（issue #92）：留在佇列，不算重試，掛 timer 到期再來。
+    // `SessionStart` 一到，`hookrecv` 那邊會叫醒這裡；到期沒來就由閘門自己走刻意的退路（`resume_gate`）。
+    if let super::resume_gate::Gate::Waiting { expected, left } = super::resume_gate::check(app, &bot, &run, &conv).await {
+        tracing::info!(bot = %bot_id, turn = %turn.id, session = %expected, wait_s = left.as_secs(),
+                       "resume 還沒驗證：排隊的 prompt 等 claude 回報 session 再送");
+        schedule_flush_retry(app, bot_id, left);
+        return Ok(());
+    }
     // 使用者剛按了 interrupt：讓他先拿回輸入框（§4.4a）。判斷放在這裡（而不是觸發端）是因為 flush 不只一個呼叫端
     // （`stuck_turns` 在同一把鎖裡直接呼叫）；排在撤銷檢查之後，不要的派工照樣當場撤。閒著的 bot 不會再有
     // `working -> idle` 邊叫醒它，所以要掛 timer 到寬限結束。

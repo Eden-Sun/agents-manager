@@ -718,6 +718,16 @@ herdr server 重啟會讓**所有** pane 同時消失。照 §6.5 的規則，�
 4. **接回對話**：`POST /api/bots/{id}/start?resume=native`（或 `restart?resume=native`）用 DB 記的 native session 啟動；
    接不回就回 `409 cannot_resume`、**不開新對話**。argv：claude `--resume <sid>`、grok `--resume <sid>`、codex `resume <sid>`（子命令排最前）。
    `GET /api/capabilities` 宣告 `resume_native_start`。
+   **接回之後、驗證之前不送 prompt**（issue #92，`lifecycle::resume_gate`）：`--resume` 帶出去不等於接回了——要等 CLI 自己
+   回報 session。claude 的 `SessionStart` hook 帶的 session 跟 `runs.resume_session_id` 一樣記 `runs.resume_outcome='verified'`，
+   不一樣記 `mismatch` 並插 `context_lost` 說明（CLI 默默開了新對話）；兩者都是結論，排隊的 prompt 隨即放行（hook 處理完就叫醒 flush）。
+   還沒結論時：排隊的 flush 留在佇列（不花重試額度、掛 timer 到期再來）；直接送入的 AGM 派工排進佇列，其他送入回
+   `409 resume_unverified`（API §5）。最多等 120 秒（`VERIFY_WINDOW`，從 `runs.started_at` 算，涵蓋遠端 hook 走 spool 的 30 秒掃描）；
+   到期是**刻意的退路**：記 `unverified`、對話插一則「確認不了接回的是不是同一段」、放行——hook 壞掉的 bot 不能永遠收不到訊息，
+   也不假裝驗過了；之後才到的回報照樣比對，對不上一樣插 `context_lost`。到期時間存在 DB（`started_at`），daemon 重啟後不另外接：
+   `rearm_queue_retries` 本來就把每一筆 queued 叫醒一次，flush 走到閘門照原本的到期時間重掛 timer。
+   只有 claude＋`inject_hooks` 的 run 等：codex／grok 要等第一個回合結束才回報 session（`hookrecv`），在這裡等只會死結；
+   沒有 hook 的 bot 沒有驗證來源。遲到的舊行程 hook 不會拿同一個 session 冒充新行程：見 §4.1 世代圍籬的 `run_id`。
 5. herdr 自己的 `[session] resume_agents_on_restore` 要關掉：它會在 pane 裡打不帶 daemon 參數（`--settings`、權限旗標、帳號環境）的 `claude --resume`，
    跟 daemon 的接回撞成兩份。子 agent 仍由父 agent 重開（`start` 對子 agent 一律拒絕，§6.5a）。
 

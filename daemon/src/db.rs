@@ -59,6 +59,9 @@ CREATE TABLE IF NOT EXISTS runs (
   runtime_model TEXT, runtime_effort TEXT, runtime_fast INTEGER,
   -- Native session requested by a `resume_native` start. Cleared by the first identity/turn hook.
   resume_session_id TEXT,
+  -- 那一次 `resume_native` 的結論（issue #92）：`verified`（回報的就是要接的那段）、`mismatch`（CLI 開了
+  -- 新對話）、`unverified`（等滿 `resume_gate::VERIFY_WINDOW` 都沒回報，刻意放行）。NULL＝沒要求接回、或還在等。
+  resume_outcome TEXT,
   -- The agent's terminal title, its statusLine output / payload, a pending claude update and
   -- the error that cut the last turn short. All belong to this CLI process, so a restart
   -- starts from NULL.
@@ -145,7 +148,7 @@ CREATE TABLE IF NOT EXISTS spawn_hints (
 /// binary 卻碰到剛被新版升級過的 DB，會拿著過期的欄位假設去讀一個它不認識的資料庫。每次在 `SCHEMA`
 /// 或 ALTER 名單裡加東西，這個數字要跟著 +1；忘記加只會讓 `check_schema_drift` 照樣抓到欄位對不上
 /// （那個檢查看的是實際欄位，不看這個數字），不會讓資料庫壞掉，但舊 binary 就少了這一層提早攔截。
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 pub async fn open(path: &Path) -> Result<SqlitePool> {
     let url = format!("sqlite://{}", path.display());
@@ -245,6 +248,8 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
         ("runs", "agent_status_since", "ALTER TABLE runs ADD COLUMN agent_status_since TEXT"),
         // claude 原生 SubagentStart／SubagentStop 的最後一筆快照，純輔助可見性（issue #82）。
         ("runs", "subagent_json", "ALTER TABLE runs ADD COLUMN subagent_json TEXT"),
+        // `resume_native` 的結論（issue #92）；見 SCHEMA 那一欄的說明與 `lifecycle::resume_gate`。
+        ("runs", "resume_outcome", "ALTER TABLE runs ADD COLUMN resume_outcome TEXT"),
     ] {
         if !has_column(&mut *tx, table, col).await? {
             sqlx::query(ddl).execute(&mut *tx).await.with_context(|| format!("add {table}.{col}"))?;
@@ -516,6 +521,8 @@ pub struct Run {
     pub ended_at: Option<String>,
     /// Consumed by the first identity hook (Claude) or first completed turn hook (Codex/Grok).
     pub resume_session_id: Option<String>,
+    /// 那一次 `resume_native` 的結論：`verified`／`mismatch`／`unverified`（issue #92，`lifecycle::resume_gate`）。
+    pub resume_outcome: Option<String>,
     /// `agent_status` 最後一次真的改變的時間（trigger 蓋，issue #93）；前端算「跑了多久」的起點。
     /// `None` = 還沒真的變過，或升級前的舊列。
     pub agent_status_since: Option<String>,

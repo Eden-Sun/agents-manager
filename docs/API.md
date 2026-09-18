@@ -92,12 +92,17 @@ DB-backed 閘門結構上碰不到。擋下來時回 `409 {"reason":"projection_
   "agent_status": "idle" | "working" | "blocked" | "unknown",
   "workspace_id": "w1", "pane_id": "w1:p2", "adopted": 0,
   "native_session_id": null, "transcript_path": null,
+  "resume_session_id": null, "resume_outcome": null,
   "last_read_revision": null, "last_read_tail_hash": null,
   "started_at": "2026-09-05T15:30:00.000Z", "ended_at": null,
   "agent_status_since": "2026-09-05T15:31:20.000Z"
 }
 ```
 
+- `resume_session_id`／`resume_outcome`：`?resume=native` 起的 run 要接回哪個 session，與接回的結論（issue #92）。
+  `resume_session_id` 在 CLI 回報 session 之後清成 `null`；`resume_outcome` 是 `"verified"`（回報的就是那段）、
+  `"mismatch"`（CLI 開了新對話，對話裡有 system 說明）、`"unverified"`（claude 等滿 120 秒都沒回報，刻意放行並插說明；
+  之後才到的回報會把它改成前兩者之一），沒要求接回或還在等是 `null`。還在等的 claude run 不收 prompt（SPEC §6.5.2 第 4 點）。
 - `agent_status_since`：`agent_status` 最後一次**真的改變**的時間（同值重寫不算），daemon 觀察到的，
   不是任何一個前端看到的時間。`null` = 這個 run 還沒真的變過狀態，或升級前的舊列。前端算「跑了
   多久」（SPEC §2.2）以這欄為準，只有它是 `null` 時才退回這回合最早那筆 in_flight turn 的
@@ -250,6 +255,7 @@ prompt 改成打字進 pane 並以無損證據確認。**一個字都沒打時�
 | 409 | `{"reason":"composer_busy"|"composer_unreadable"|"transcript_not_ready"|"transcript_unreadable"|"codex_log_not_ready"|"no_pane_to_type_into","retryable":true,"sent":false,"run_id"}` | 暫時送不了（輸入框有字、claude 還沒回報 session…）。同一個 `client_request_id` 稍後重送即可；AGM 交辦維持 queued 退避重試。 |
 | 422 | `{"error":"delivery_unprovable","reason":"prompt_too_long_to_prove","sent":false,"run_id"}` | 超過 20 萬字，不打。 |
 | 409 | `{"reason":"maintenance_window","resource":"restart","held_by","fence","expires_at","retry_after_secs","retryable":true,"sent":false,"message"}` | 有人握著會中斷 pane 的維護窗口（SPEC §18.10），daemon 這一側不送新的 prompt，連 turn 都不建。窗口 release 或到期就自動恢復，同一個 `client_request_id` 原樣重送即可。AGM 派工不走這個 409——它在 `controller::dispatch` 就被 hold 在佇列裡。 |
+| 409 | `{"reason":"resume_unverified","run_id","session_id","retry_after_s"}` | 這個 run 是 `--resume` 接回來的 claude，還沒收到它回報 session（SessionStart hook），不知道接回的是不是原本那段對話（issue #92，SPEC §6.5.2 第 4 點）。連 turn 都不建；回報一到、或等滿 120 秒（刻意放行並在對話插說明）就恢復，同一個 `client_request_id` 原樣重送即可。AGM 派工不回這個 409——排進佇列等驗證。 |
 
 turn 已經建好、還沒打第一個字時 run 就結束（`mark_run_exited` 把它標 failed 並插「run ended」說明）：撤回撤不掉，這時
 **不刪任何東西**，回 `200` 那筆 turn 的現況（訊息與說明都留著），跟用同一個 `client_request_id` 重送拿到的回應一致，不回可重試的 409。
