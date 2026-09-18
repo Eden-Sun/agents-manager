@@ -1,12 +1,16 @@
-//! 「打斷一個回合」是一個分散式操作（#147）：外面的一顆鍵（網頁 Esc、強制中止的 `esc`），加上 DB 裡把被打斷的
-//! 回合收成 `failed`。兩半不在同一個交易裡，所以：
+//! 「打斷一個回合」是一個分散式操作（#147、#120）：外面的一顆鍵（網頁 Esc、強制中止的 `esc`、插隊送出的
+//! `ctrl+x ctrl+s`），加上 DB 裡把被打斷的回合收成 `failed`。兩半不在同一個交易裡，所以：
 //!
 //! - **鍵的結果分三種**（[`KeyFate`]）：herdr 回錯誤或根本連不上＝**沒做**；回 ok＝**做了**；送出去之後逾時、
 //!   連線斷了沒回＝**不知道**（[`crate::herdr::never_applied`]）。
 //! - **沒做**：什麼都不動，那一筆照舊 in_flight。
 //! - **做了**：DB 那一半跟著寫（收成 failed 與說明同一個交易）。寫不進去就**記成欠著**，呼叫端不回普通的成功。
-//! - **不知道**：不假定打斷——那一筆留在 in_flight，**記成待證**；之後的證據（那次 Esc 的 `StopFailure` 回聲）
-//!   說鍵生效了才收。那一筆自己正常收尾了（Stop hook）就作廢。
+//! - **不知道**：不假定打斷——那一筆留在 in_flight，**記成待證**；之後的證據（那次 Esc 的 `StopFailure` 回聲；
+//!   插隊那一句出現在 transcript 裡）說鍵生效了才收。那一筆自己正常收尾了（Stop hook）就作廢。
+//!
+//! 插隊送出多一件事：新的那一則在送出鍵生效**之前**已經寫進 DB（維護窗口的閘門與冪等靠它），但還不能佔 run 的
+//! in-flight 名額（`turns_one_in_flight`，舊的那一筆還在跑）——所以它先以 `run_id = NULL` 的 in_flight 存在，
+//! 送出鍵生效時跟收掉舊的那一筆**同一個交易**掛上 run。鍵沒生效或不知道時，新的那一則收成 failed，不佔名額。
 //!
 //! 欠著／待證的帳由 [`settle_locked`] 結清：只認記下的那一筆（CAS 在 `id` 與 `status='in_flight'` 上），
 //! **從不再按鍵**。會去結清的路：這顆 bot 的下一則回合 hook（Esc 的回聲就是其中一則）、下一則 prompt、同一次中斷的
@@ -70,6 +74,16 @@ struct Pending {
     /// 收掉時寫進對話的說明。
     note: String,
     stage: Stage,
+    /// 插隊送出（#120）：跟收掉舊的那一筆同一個交易掛上 run 的那一則，與它的送達結果（已經知道的話）。
+    new_turn: Option<NewTurn>,
+    /// 待證的插隊送出：之後看得到那一則進了 transcript，就是送出鍵生效了。
+    proof: Option<SentProof>,
+}
+
+#[derive(Debug, Clone)]
+struct NewTurn {
+    id: String,
+    delivery: Option<DeliveryRecord>,
 }
 
 /// bot → 這顆 bot 欠著／待證的那一次打斷。同一顆 bot 同時最多一筆在飛，所以一次也最多一筆。
@@ -107,14 +121,47 @@ pub(crate) fn owed_turn(bot_id: &str) -> Option<String> {
 /// 鍵做了：把 `turn_id` 收成被打斷的 failed（跟說明同一個交易）。寫不進去就記成欠著、排定時重試，回 `Err`——
 /// 呼叫端**不能**回普通的成功。
 pub(crate) async fn interrupted(app: &Arc<App>, bot_id: &str, run_id: &str, turn_id: &str, note: &str) -> anyhow::Result<()> {
-    let p = Pending { run_id: run_id.to_string(), turn_id: turn_id.to_string(), note: note.to_string(), stage: Stage::Owed };
+    let p = Pending {
+        run_id: run_id.to_string(),
+        turn_id: turn_id.to_string(),
+        note: note.to_string(),
+        stage: Stage::Owed,
+        new_turn: None,
+        proof: None,
+    };
+    owe(app, bot_id, p).await
+}
+
+/// 插隊送出的送出鍵生效了：收掉被插隊的那一筆，同一個交易把新的那一則掛上 run（#120）。其餘同 [`interrupted`]。
+pub(crate) async fn send_now_interrupted(app: &Arc<App>, bot_id: &str, run_id: &str, turn_id: &str, new_turn: &str) -> anyhow::Result<()> {
+    let p = Pending {
+        run_id: run_id.to_string(),
+        turn_id: turn_id.to_string(),
+        note: SEND_NOW_NOTE.to_string(),
+        stage: Stage::Owed,
+        new_turn: Some(NewTurn { id: new_turn.to_string(), delivery: None }),
+        proof: None,
+    };
+    owe(app, bot_id, p).await
+}
+
+/// 欠著的插隊送出，新那一則的送達結果後來才知道：記在帳上，補的時候一起寫。
+pub(crate) fn owe_delivery(bot_id: &str, new_turn: &str, delivery: Option<DeliveryRecord>) {
+    let mut m = ledger().lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(n) = m.get_mut(bot_id).and_then(|p| p.new_turn.as_mut()).filter(|n| n.id == new_turn) {
+        n.delivery = delivery;
+    }
+}
+
+async fn owe(app: &Arc<App>, bot_id: &str, p: Pending) -> anyhow::Result<()> {
+    let turn_id = p.turn_id.clone();
     match close(app, bot_id, &p).await {
         Ok(()) => {
-            forget(bot_id, turn_id);
+            forget(bot_id, &turn_id);
             Ok(())
         }
         Err(e) => {
-            tracing::warn!(bot = bot_id, turn = turn_id, error = %e, "鍵已經生效，回合卻沒收成：記成欠著，之後補");
+            tracing::warn!(bot = bot_id, turn = %turn_id, error = %e, "鍵已經生效，回合卻沒收成：記成欠著，之後補");
             record(bot_id, p);
             schedule_retry(app, bot_id);
             Err(e)
@@ -127,7 +174,31 @@ pub(crate) fn unconfirmed(bot_id: &str, run_id: &str, turn_id: &str, note: &str)
     tracing::warn!(bot = bot_id, turn = turn_id, "不知道打斷的鍵有沒有進 pane：回合留在 in_flight，等證據");
     record(
         bot_id,
-        Pending { run_id: run_id.to_string(), turn_id: turn_id.to_string(), note: note.to_string(), stage: Stage::Unconfirmed },
+        Pending {
+            run_id: run_id.to_string(),
+            turn_id: turn_id.to_string(),
+            note: note.to_string(),
+            stage: Stage::Unconfirmed,
+            new_turn: None,
+            proof: None,
+        },
+    );
+}
+
+/// 插隊送出的送出鍵不知道生效了沒有（#120）：被插隊的那一筆留在 in_flight，記成待證。`proof` 在的話，之後
+/// transcript 裡出現那一則就是證據；Esc 式的回聲（claude 說那一回合被使用者中斷）也算。
+pub(crate) fn unconfirmed_send_now(bot_id: &str, run_id: &str, turn_id: &str, proof: Option<SentProof>) {
+    tracing::warn!(bot = bot_id, turn = turn_id, "不知道插隊送出的鍵有沒有生效：被插隊的那一筆留在 in_flight，等證據");
+    record(
+        bot_id,
+        Pending {
+            run_id: run_id.to_string(),
+            turn_id: turn_id.to_string(),
+            note: SEND_NOW_NOTE.to_string(),
+            stage: Stage::Unconfirmed,
+            new_turn: None,
+            proof,
+        },
     );
 }
 
@@ -136,15 +207,25 @@ pub(crate) async fn settle_locked(app: &Arc<App>, bot_id: &str, evidence: Eviden
     let Some(p) = pending(bot_id) else { return Ok(()) };
     let now: Option<(String, Option<String>)> =
         sqlx::query_as("SELECT status, run_id FROM turns WHERE id=?").bind(&p.turn_id).fetch_optional(&app.db).await?;
+    let old_in_flight = matches!(&now, Some((status, run)) if status == "in_flight" && run.as_deref() == Some(p.run_id.as_str()));
+    // 插隊送出那一則還沒掛上 run：舊的那一筆就算已經被別的路收掉，它也還要有個結果。
+    let new_unbound = match &p.new_turn {
+        Some(n) => sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM turns WHERE id=? AND status='in_flight' AND run_id IS NULL")
+            .bind(&n.id)
+            .fetch_one(&app.db)
+            .await?
+            > 0,
+        None => false,
+    };
     // 那一筆已經被別的路收掉（或不是這一代的了）：這筆帳作廢。
-    if !matches!(&now, Some((status, run)) if status == "in_flight" && run.as_deref() == Some(p.run_id.as_str())) {
+    if !old_in_flight && !new_unbound {
         tracing::info!(bot = bot_id, turn = %p.turn_id, ?now, "打斷的帳作廢：那一筆已經不在飛了");
         forget(bot_id, &p.turn_id);
         return Ok(());
     }
     let proven = match p.stage {
         Stage::Owed => true,
-        Stage::Unconfirmed => evidence == Evidence::Echo,
+        Stage::Unconfirmed => evidence == Evidence::Echo || shows(p.proof.clone()).await,
     };
     if !proven {
         return Ok(());
@@ -162,7 +243,14 @@ async fn settle(app: &Arc<App>, bot_id: &str) -> anyhow::Result<()> {
     settle_locked(app, bot_id, Evidence::Nothing).await
 }
 
+/// 待證的插隊送出：那一則現在出現在 transcript 裡了嗎？（讀檔，放到 blocking 執行緒）
+async fn shows(proof: Option<SentProof>) -> bool {
+    let Some(proof) = proof else { return false };
+    tokio::task::spawn_blocking(move || proof.shows()).await.unwrap_or(false)
+}
+
 /// 收掉那一筆：CAS 在 `status='in_flight'`；贏了才寫說明，兩句同一個交易（說明寫不進去就整筆回滾，下次再試）。
+/// 插隊送出的話，同一個交易把新的那一則掛上 run；掛不上（run 已經不在、另有回合在飛）就把它收成 failed。
 async fn close(app: &Arc<App>, bot_id: &str, p: &Pending) -> anyhow::Result<()> {
     let mut tx = app.db.begin().await?;
     let outcome = super::turn_controller::fail_on(&mut tx, &p.turn_id, super::turn_controller::DeliveryOnFail::Keep, &p.note).await?;
@@ -172,13 +260,91 @@ async fn close(app: &Arc<App>, bot_id: &str, p: &Pending) -> anyhow::Result<()> 
     } else {
         None
     };
+    let mut notes = Vec::from_iter(note);
+    let mut bound = false;
+    if let Some(n) = &p.new_turn {
+        bound = sqlx::query(
+            "UPDATE turns SET run_id=? WHERE id=? AND run_id IS NULL AND status='in_flight'
+                AND NOT EXISTS (SELECT 1 FROM turns WHERE run_id=? AND status='in_flight')
+                AND EXISTS (SELECT 1 FROM runs WHERE id=? AND state='running')",
+        )
+        .bind(&p.run_id)
+        .bind(&n.id)
+        .bind(&p.run_id)
+        .bind(&p.run_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+            > 0;
+        if !bound {
+            let why = "插隊送出的鍵生效了，但這個 run 已經不在（或另有回合在飛），這一則接不上去。";
+            if super::turn_controller::fail_on(&mut tx, &n.id, super::turn_controller::DeliveryOnFail::Keep, why).await?
+                == super::turn_controller::Outcome::Applied
+            {
+                let conv: String = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id=?").bind(&n.id).fetch_one(&mut *tx).await?;
+                notes.push(insert_message_tx(&mut tx, &conv, Some(&n.id), "system", why, "system", false, None).await?);
+            }
+        }
+    }
     tx.commit().await?;
-    if let Some(m) = note {
+    for m in notes {
         emit_message_added(app, bot_id, m).await;
+    }
+    if let Some(n) = &p.new_turn {
+        if let (true, Some(rec)) = (bound, n.delivery) {
+            mark_delivery(app, &n.id, rec).await;
+        }
+        emit_turn(app, &n.id).await;
     }
     // 推回合結束：排著的派工由它叫醒（`fail_in_flight` 一樣靠這個）。
     emit_turn(app, &p.turn_id).await;
     Ok(())
+}
+
+/// 重啟前正在插隊送出、還沒掛上 run 的那一則（`in_flight`、`run_id IS NULL`）：送出鍵有沒有生效沒有人知道，
+/// 收它的那個 async 任務也跟著上一個行程走了。收成 failed、送達記成 unknown，不留一筆沒有 run 的 in_flight
+/// （它會一直佔著維護窗口的閘門）。被插隊的那一筆照舊在它的 run 上，由 hook 或 watchdog 收。
+pub(crate) async fn adopt_unbound_send_nows(app: &Arc<App>) {
+    let rows: Vec<(String, String, String)> = match sqlx::query_as(
+        "SELECT t.id, t.conversation_id, c.bot_id FROM turns t JOIN conversations c ON c.id = t.conversation_id
+          WHERE t.status = 'in_flight' AND t.run_id IS NULL",
+    )
+    .fetch_all(&app.db)
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not look for send-now turns left unbound by a restart");
+            return;
+        }
+    };
+    let why = "插隊送出途中 daemon 停了：送出鍵有沒有生效不知道。正在跑的那一回合沒有被收掉；這一句若真的送出去了，回覆會以外部回合出現。";
+    for (turn, conv, bot) in rows {
+        let lock = app.bot_lock(&bot).await;
+        let _g = lock.lock().await;
+        let res: anyhow::Result<Option<db::Message>> = async {
+            let mut tx = app.db.begin().await?;
+            if super::turn_controller::fail_on(&mut tx, &turn, super::turn_controller::DeliveryOnFail::Keep, why).await?
+                != super::turn_controller::Outcome::Applied
+            {
+                return Ok(None);
+            }
+            sqlx::query("UPDATE turns SET delivery='unknown' WHERE id=?").bind(&turn).execute(&mut *tx).await?;
+            let m = insert_message_tx(&mut tx, &conv, Some(&turn), "system", why, "system", false, None).await?;
+            tx.commit().await?;
+            Ok(Some(m))
+        }
+        .await;
+        match res {
+            Ok(Some(m)) => {
+                tracing::warn!(turn = %turn, bot = %bot, "a send-now was mid-delivery when the daemon stopped; closed it as unknown");
+                emit_message_added(app, &bot, m).await;
+                emit_turn(app, &turn).await;
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!(turn = %turn, error = %e, "could not close a send-now left unbound by a restart"),
+        }
+    }
 }
 
 /// 欠著的帳沒有 hook 也要補上：DB 一時寫不進去多半很快就好。只補欠著的（待證的要證據，不是時間）。
@@ -535,6 +701,35 @@ mod tests {
         assert_eq!(escs(&b.env), 1);
         assert!(pending(&b.bot.id).is_none());
         assert!(crate::lifecycle::interrupt_grace::pending_echo(&b.bot.id).is_some(), "照舊等回聲（#117）");
+    }
+
+    /// #120：插隊送出途中 daemon 停了——還沒掛上 run 的那一則（`run_id = NULL` 的 in_flight）沒有人會收，而且它會一直
+    /// 擋住維護窗口的閘門。重啟時收成 failed、送達 unknown、寫明原因；被插隊的那一筆照舊在它的 run 上，由 hook／watchdog 收。
+    #[tokio::test]
+    async fn a_send_now_cut_off_by_a_restart_is_closed_as_unknown() {
+        let b = busy("send-now-restart").await;
+        let app = b.env.app.clone();
+        let conv = db::conversation_id(&app.db, &b.bot.id).await.unwrap();
+        let orphan = db::ulid();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at, prompt_text)
+             VALUES (?,?,NULL,'web','in_flight','pending',?,'先看這句')",
+        )
+        .bind(&orphan)
+        .bind(&conv)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        let fresh = tt::restart_app(&b.env).await;
+        crate::reconcile::rearm_progress(&fresh).await;
+
+        let (status, delivery): (String, String) =
+            sqlx::query_as("SELECT status, delivery FROM turns WHERE id=?").bind(&orphan).fetch_one(&app.db).await.unwrap();
+        assert_eq!((status.as_str(), delivery.as_str()), ("failed", "unknown"));
+        assert!(system_notes(&app, &orphan).await.iter().any(|n| n.contains("daemon 停了")));
+        assert_eq!(status_of(&app, &b.turn).await, "in_flight", "被插隊的那一筆不動");
     }
 
     /// #147 驗收五：寫失敗之後 hook 一直沒來（claude 對 Esc 不一定送 `StopFailure`）——下一則 prompt 不能

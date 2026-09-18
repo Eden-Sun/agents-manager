@@ -183,7 +183,7 @@ pub struct PromptOut {
 }
 
 /// 插隊送出成功時，被打斷的那一回合會收到的系統說明。
-const SEND_NOW_NOTE: &str = "被插隊送出打斷（claude send-now）";
+pub(crate) const SEND_NOW_NOTE: &str = "被插隊送出打斷（claude send-now）";
 
 /// 這一則 prompt 在維護窗口（`restart` 租約）前面算哪一類（issue #86）。
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -579,19 +579,10 @@ async fn prompt_inner(
         Err(not) => return Err(not_attempted_error(&run.id, not)),
     };
 
-    // 按鍵前的準備（`prepare_delivery`）也做完了才收掉被打斷的那一筆（#120）：準備階段被擋下是一個鍵都沒按，
-    // 先收的話 claude 其實還在跑，對話裡卻多一筆假的「被插隊打斷」。`turns_one_in_flight`（每個 run 最多一筆
-    // in-flight）要求舊的先離開，新的才進得去——這也就是「同一顆 bot 連續兩次 send-now 不會產生兩個 in_flight」
-    // 的保證：兩次都在同一顆 per-bot 鎖裡排隊，第二次看到第一次那筆，照樣先收再送。
-    let (mut plan, mut ready) = (Some(plan), None);
-    if let Some(t) = interrupted.as_ref() {
-        match prepare_delivery(app, &client, &run, &bot, &deliver, plan.take().expect("plan is still here")).await {
-            Ok(r) => ready = Some(r),
-            Err(not) => return Err(not_attempted_error(&run.id, not)),
-        }
-        tracing::info!(bot = %bot_id, turn = %t.id, "插隊送出：先收掉被打斷的回合，再把新的那句打進 pane");
-        super::fail_in_flight(app, &run.id, SEND_NOW_NOTE).await;
-    }
+    // 插隊送出：被打斷的那一筆**現在不收**，要等送出鍵確定生效（#120，`send_now::deliver`）。新的那一則照樣先寫進 DB
+    // （維護窗口的閘門、冪等都靠它），但 `run_id` 先留空：舊的那一筆還佔著 run 的 in-flight 名額
+    // （`turns_one_in_flight`），送出鍵生效時跟收掉舊的同一個交易掛上去。連續兩次插隊送出也因此不會有兩個 in_flight：
+    // 兩次都在同一顆 per-bot 鎖裡排隊，第二次打斷的是第一次掛上去的那一則。
 
     // 3. turn + user message committed BEFORE the RPC, so an early hook can match.
     // `prompt_text` 存**實際送出**的字（群組去掉 @mention、附件路徑展開後），跟排隊那條同一欄：
@@ -604,7 +595,7 @@ async fn prompt_inner(
     )
     .bind(&turn_id)
     .bind(&conv)
-    .bind(&run.id)
+    .bind(interrupted.is_none().then_some(run.id.as_str()))
     .bind(client_request_id)
     .bind(db::now())
     .bind(&deliver)
@@ -647,11 +638,27 @@ async fn prompt_inner(
         }
     }
 
+    // 打第一個字之前的那一瞬：人在終端裡打字、CLI 跳出新框，都不受 bot 鎖管（#120 測試插在這裡）。
+    #[cfg(test)]
+    super::race_point::hit("prompt_before_typing", bot_id).await;
+
     // 4. deliver
-    let res = match (ready, plan) {
-        (Some(r), _) => type_prepared(app, &client, &run, &bot, &deliver, r).await,
-        (None, Some(p)) => execute_delivery(app, &client, &run, &bot, &deliver, p).await,
-        (None, None) => unreachable!("the plan is only taken once it is prepared"),
+    let res = match interrupted.as_ref() {
+        None => execute_delivery(app, &client, &run, &bot, &deliver, plan).await,
+        Some(old) => match super::send_now::deliver(app, &client, &run, &bot, &deliver, plan, old, &turn_id).await {
+            super::send_now::Outcome::Interrupted(res) => res,
+            super::send_now::Outcome::NotAttempted(not) => Ok(not),
+            super::send_now::Outcome::NotSent(why) => return send_now_fell_through(app, &conv, &turn_id, &msg_id, why, false).await,
+            super::send_now::Outcome::Unknown(why) => return send_now_fell_through(app, &conv, &turn_id, &msg_id, why, true).await,
+            // 送出鍵生效了、狀態沒寫成：503，跟 interrupt／start／stop 的 `*_state_uncommitted` 同一種（#147）。
+            super::send_now::Outcome::Uncommitted(e) => {
+                return Err(LcError::Uncommitted(json!({
+                    "error": "send_now_state_uncommitted", "run_id": run.id, "turn_id": turn_id, "interrupted_turn_id": old.id,
+                    "sent": true, "retryable": true, "detail": format!("{e:#}"),
+                    "message": "送出鍵已經生效了，但回合的狀態還沒寫成；daemon 會自己補上，用同一個 client_request_id 重送會拿到這一則、不會再打一次。",
+                })));
+            }
+        },
     };
     // `delivery` 是回給呼叫端／UI 的字；`rec` 是要寫進 DB 的兩個欄位（證據、能不能重送）。
     let mut rec = DeliveryRecord { stored: "unknown", verified: false, auto_resend: true };
@@ -708,6 +715,57 @@ async fn prompt_inner(
         arm_progress(app, &run.id, bot_id, &turn_id).await;
     }
     Ok(PromptOut { turn_id, message_id: msg_id, delivery: delivery.into(), send_now })
+}
+
+/// 插隊送出沒有打斷任何東西（#120）：送出鍵沒生效（`unknown = false`）或不知道生效了沒有（`true`）。
+/// 正在跑的那一回合原封不動；新的那一則收成 failed（不佔 run 的 in-flight 名額），送達記成 `failed`／`unknown`，
+/// 並說清楚字可能還留在輸入框裡。
+async fn send_now_fell_through(
+    app: &Arc<App>,
+    conv: &str,
+    turn_id: &str,
+    msg_id: &str,
+    why: &'static str,
+    unknown: bool,
+) -> LcResult<PromptOut> {
+    let note = if unknown {
+        format!(
+            "插隊送出的結果不明（{why}）：送出鍵送出去了但 herdr 沒有回，不知道有沒有生效。正在跑的那一回合先不收；\
+             若這一句其實送出去了，它的回覆會以外部回合出現。這一句也可能還留在終端的輸入框裡。"
+        )
+    } else {
+        format!("插隊送出沒有送出（{why}）：送出鍵沒有生效，正在跑的那一回合照常進行。這一句可能還留在終端的輸入框裡。")
+    };
+    let delivery = if unknown { "unknown" } else { "failed" };
+    let written: anyhow::Result<Option<db::Message>> = async {
+        let mut tx = app.db.begin().await?;
+        if super::turn_controller::fail_on(&mut tx, turn_id, super::turn_controller::DeliveryOnFail::Keep, why).await?
+            != super::turn_controller::Outcome::Applied
+        {
+            return Ok(None);
+        }
+        sqlx::query("UPDATE turns SET delivery=? WHERE id=?").bind(delivery).bind(turn_id).execute(&mut *tx).await?;
+        let m = insert_message_tx(&mut tx, conv, Some(turn_id), "system", &note, "system", false, None).await?;
+        tx.commit().await?;
+        Ok(Some(m))
+    }
+    .await;
+    match written {
+        Ok(Some(m)) => {
+            let bot_id: String = sqlx::query_scalar("SELECT bot_id FROM conversations WHERE id=?").bind(conv).fetch_one(&app.db).await.map_err(up)?;
+            emit_message_added(app, &bot_id, m).await;
+        }
+        // 別的路徑先收掉了：照它現在的樣子回。
+        Ok(None) => return answer_for_turn_id(app, turn_id).await,
+        Err(e) => return Err(LcError::Upstream(format!("插隊送出沒有送出，那一則卻收不成：{e:#}"))),
+    }
+    emit_turn(app, turn_id).await;
+    Ok(PromptOut {
+        turn_id: turn_id.to_string(),
+        message_id: msg_id.to_string(),
+        delivery: delivery.into(),
+        send_now: Some(if unknown { "unknown" } else { "not_sent" }),
+    })
 }
 
 #[cfg(test)]
@@ -1372,6 +1430,298 @@ mod send_now_tests {
         assert_eq!(in_flight_count(&f).await, 1);
         let turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE conversation_id=?").bind(&f.conv).fetch_one(&app.db).await.unwrap();
         assert_eq!(turns, 1, "新的那一則沒有留下任何列，同一個 request id 可以原樣重送");
+    }
+
+    async fn transcript_of(f: &Fixture) -> String {
+        let path: String =
+            sqlx::query_scalar("SELECT transcript_path FROM runs WHERE id=?").bind(&f.run_id).fetch_one(&f.env.app.db).await.unwrap();
+        std::fs::read_to_string(path).unwrap_or_default()
+    }
+
+    async fn delivery_of(f: &Fixture, turn_id: &str) -> String {
+        sqlx::query_scalar::<_, String>("SELECT delivery FROM turns WHERE id=?").bind(turn_id).fetch_one(&f.env.app.db).await.unwrap()
+    }
+
+    async fn notes_on(f: &Fixture, turn_id: &str) -> Vec<String> {
+        sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='system' ORDER BY created_at")
+            .bind(turn_id)
+            .fetch_all(&f.env.app.db)
+            .await
+            .unwrap()
+    }
+
+    fn send_now_presses(f: &Fixture) -> usize {
+        keys_sent(f).iter().filter(|k| k.contains("ctrl+s")).count()
+    }
+
+    /// #120 重開 regression 1：準備全過、第一個 `pane.send_text` 被 herdr **明確拒絕**（side effect 沒發生）。
+    /// 一個字都沒進 pane：舊回合還在跑，不能被記成「被插隊打斷」；新的那一則撤掉，同一個 request id 可以重送。
+    #[tokio::test]
+    async fn a_send_now_whose_text_herdr_refused_leaves_the_running_turn_alone() {
+        let f = fixture("claude", Some("2.1.275")).await;
+        let app = f.env.app.clone();
+        let running = busy(&f).await;
+        f.env.herdr.fail_next("pane.send_text", tt::Fault::Refuse);
+
+        let err = prompt_send_now(&app, &f.bot_id, "先看這句", "sn-refused", &[], None).await.unwrap_err();
+        let LcError::Conflict(body) = err else { panic!("herdr 拒收＝什麼都沒發生，是可重試的 409：{err:?}") };
+        assert_eq!(body["sent"], false, "{body}");
+        assert_eq!(body["retryable"], true, "{body}");
+        assert!(keys_sent(&f).is_empty(), "一個鍵都沒按");
+
+        assert_eq!(status_of(&f, &running).await, "in_flight", "字沒進去就沒有打斷：舊回合還在跑");
+        assert!(notes_on(&f, &running).await.is_empty(), "不留「被插隊打斷」的說明");
+        let turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE conversation_id=?").bind(&f.conv).fetch_one(&app.db).await.unwrap();
+        assert_eq!(turns, 1, "新的那一則沒有留下任何列");
+    }
+
+    /// 同一條，但這次 `pane.send_text` 的結果**不知道**（送出去之後連線斷了、沒回）。打字從來不會打斷 claude，
+    /// 送出鍵也沒有按——舊回合照樣還在跑；新的那一則沒送出（字可能還留在框裡），說清楚、不按鍵。
+    #[tokio::test]
+    async fn a_send_now_whose_typing_went_unanswered_does_not_press_the_key_or_close_the_running_turn() {
+        let f = fixture("claude", Some("2.1.275")).await;
+        let app = f.env.app.clone();
+        let running = busy(&f).await;
+        f.env.herdr.fail_next("pane.send_text", tt::Fault::DropAfter);
+
+        let out = prompt_send_now(&app, &f.bot_id, "先看這句", "sn-typing-unknown", &[], None).await.unwrap();
+        assert_eq!(out.send_now, Some("not_sent"), "{out:?}");
+        assert_eq!(out.delivery, "failed", "{out:?}");
+        assert_eq!(send_now_presses(&f), 0, "不知道框裡是什麼就不按送出鍵");
+
+        assert_eq!(status_of(&f, &running).await, "in_flight", "沒按送出鍵就沒有打斷");
+        assert!(notes_on(&f, &running).await.is_empty());
+        assert_eq!(status_of(&f, &out.turn_id).await, "failed");
+        assert!(notes_on(&f, &out.turn_id).await.iter().any(|n| n.contains("輸入框")), "告訴人字可能還留在輸入框");
+        assert_eq!(in_flight_count(&f).await, 1);
+    }
+
+    /// #120 重開 regression 2：準備做完之後、打第一個字之前，有人在終端裡打了字（不受 bot 鎖管）。
+    /// 不能把兩段字接在一起送出——再看一次框、看到有字就放手。
+    #[tokio::test]
+    async fn someone_typing_after_the_send_now_was_prepared_never_gets_merged_into_it() {
+        let f = fixture("claude", Some("2.1.275")).await;
+        let app = f.env.app.clone();
+        let running = busy(&f).await;
+        let herdr = f.env.herdr.live.clone();
+        super::super::race_point::arm("prompt_before_typing", &f.bot_id, move || async move {
+            herdr.lock().unwrap().get_mut("pane-sn").unwrap().composer.push("我自己的草稿".into());
+        });
+
+        let err = prompt_send_now(&app, &f.bot_id, "先看這句", "sn-draft", &[], None).await.unwrap_err();
+        let LcError::Conflict(body) = err else { panic!("框裡有別人的字：不送，可重試：{err:?}") };
+        assert_eq!(body["reason"], "composer_busy", "{body}");
+        assert_eq!(body["sent"], false, "{body}");
+        assert_eq!(send_now_presses(&f), 0, "沒有按送出鍵");
+        assert!(!transcript_of(&f).await.contains("先看這句"), "兩段字沒有被接在一起送出去：{}", transcript_of(&f).await);
+        let box_rows = f.env.herdr.pane("pane-sn").unwrap().composer;
+        assert_eq!(box_rows, vec!["我自己的草稿".to_string()], "別人的草稿原封不動，沒被接上我們的字");
+        assert_eq!(status_of(&f, &running).await, "in_flight");
+    }
+
+    /// 送出鍵被 herdr **明確拒絕**：字在框裡、鍵沒按下去，claude 還在跑舊回合。不能記成被打斷。
+    #[tokio::test]
+    async fn a_send_now_key_that_herdr_refused_does_not_count_as_an_interruption() {
+        let f = fixture("claude", Some("2.1.275")).await;
+        let app = f.env.app.clone();
+        let running = busy(&f).await;
+        f.env.herdr.fail_next("pane.send_keys", tt::Fault::Refuse);
+
+        let out = prompt_send_now(&app, &f.bot_id, "先看這句", "sn-key-refused", &[], None).await.unwrap();
+        assert_eq!(out.send_now, Some("not_sent"), "{out:?}");
+        assert_eq!(out.delivery, "failed", "{out:?}");
+        assert_eq!(status_of(&f, &running).await, "in_flight", "鍵沒按下去：舊回合照常");
+        assert!(notes_on(&f, &running).await.is_empty());
+        assert!(!transcript_of(&f).await.contains("先看這句"), "沒送出");
+        assert_eq!(in_flight_count(&f).await, 1);
+    }
+
+    /// #120 重開 regression 3：送出鍵**確定被 herdr 收下**之後，後面才失敗（這裡是 TUI 吃掉了那顆鍵、字一直留在框裡）。
+    /// 第一個會打斷的 side effect 已經成立：舊回合照被插隊打斷收掉，新的那一則是「送出狀態不明」。
+    #[tokio::test]
+    async fn a_failure_after_the_send_now_key_was_accepted_still_closes_the_interrupted_turn() {
+        let f = fixture("claude", Some("2.1.275")).await;
+        let app = f.env.app.clone();
+        let running = busy(&f).await;
+        f.env.herdr.live.lock().unwrap().get_mut("pane-sn").unwrap().swallow_enter = true;
+
+        let out = prompt_send_now(&app, &f.bot_id, "先看這句", "sn-after-key", &[], None).await.unwrap();
+        assert_eq!(out.send_now, Some("interrupted"), "{out:?}");
+        assert_eq!(out.delivery, "unknown", "{out:?}");
+        assert_eq!(status_of(&f, &running).await, "failed");
+        assert_eq!(notes_on(&f, &running).await, vec![SEND_NOW_NOTE.to_string()]);
+        assert_eq!(status_of(&f, &out.turn_id).await, "in_flight");
+        assert_eq!(in_flight_count(&f).await, 1);
+    }
+
+    /// 送出鍵的 RPC 沒有回（herdr 其實按下去了）：看證據——transcript 裡有這一則，就是送出去了、舊回合被打斷。
+    #[tokio::test]
+    async fn an_unanswered_send_now_key_that_did_land_is_proven_by_the_transcript() {
+        let f = fixture("claude", Some("2.1.275")).await;
+        let app = f.env.app.clone();
+        let running = busy(&f).await;
+        f.env.herdr.fail_next("pane.send_keys", tt::Fault::DropAfter);
+
+        let out = prompt_send_now(&app, &f.bot_id, "先看這句", "sn-key-landed", &[], None).await.unwrap();
+        assert_eq!(out.send_now, Some("interrupted"), "{out:?}");
+        assert_eq!(out.delivery, "ok", "transcript 證明送出了：{out:?}");
+        assert_eq!(status_of(&f, &running).await, "failed");
+        assert_eq!(notes_on(&f, &running).await, vec![SEND_NOW_NOTE.to_string()]);
+        assert_eq!(send_now_presses(&f), 1, "證據已經說送出了，不再按");
+    }
+
+    /// 送出鍵的 RPC 沒有回、字還整個在框裡（鍵沒按下去）：再按一次，這次 herdr 收下了——照常插隊送出。
+    #[tokio::test]
+    async fn an_unanswered_send_now_key_that_did_not_land_is_pressed_once_more() {
+        let f = fixture("claude", Some("2.1.275")).await;
+        let app = f.env.app.clone();
+        let running = busy(&f).await;
+        f.env.herdr.fail_next("pane.send_keys", tt::Fault::DropBefore);
+
+        let out = prompt_send_now(&app, &f.bot_id, "先看這句", "sn-key-again", &[], None).await.unwrap();
+        assert_eq!(out.send_now, Some("interrupted"), "{out:?}");
+        assert_eq!(out.delivery, "ok", "{out:?}");
+        assert_eq!(send_now_presses(&f), 2, "第一次沒進去，再按一次");
+        assert_eq!(status_of(&f, &running).await, "failed");
+        assert_eq!(notes_on(&f, &running).await, vec![SEND_NOW_NOTE.to_string()]);
+    }
+
+    /// 送出鍵的 RPC 沒有回、而且真的沒按下去（兩次都是）：字一直在框裡、transcript 沒有這一則——鍵沒生效，
+    /// 舊回合照常。不假定打斷了。
+    #[tokio::test]
+    async fn an_unanswered_send_now_key_that_never_landed_leaves_the_running_turn_alone() {
+        let f = fixture("claude", Some("2.1.275")).await;
+        let app = f.env.app.clone();
+        let running = busy(&f).await;
+        f.env.herdr.fail_next("pane.send_keys", tt::Fault::DropBefore);
+        f.env.herdr.fail_next("pane.send_keys", tt::Fault::DropBefore);
+
+        let out = prompt_send_now(&app, &f.bot_id, "先看這句", "sn-key-lost", &[], None).await.unwrap();
+        assert_eq!(out.send_now, Some("not_sent"), "{out:?}");
+        assert_eq!(status_of(&f, &running).await, "in_flight", "證據說沒送出：舊回合照常");
+        assert!(notes_on(&f, &running).await.is_empty());
+        assert_eq!(status_of(&f, &out.turn_id).await, "failed");
+        assert!(!transcript_of(&f).await.contains("先看這句"));
+    }
+
+    /// 送出鍵的結果**真的不知道**：RPC 沒回、之後連 pane 都讀不到。不能假定打斷了——舊回合留在 in_flight，
+    /// 新的那一則標成「結果不明」。之後的證據（transcript 裡確實有這一則）到的時候，hook 先把「被插隊打斷」補上，
+    /// 回覆才不會掛到舊回合上。
+    #[tokio::test]
+    async fn an_unknown_send_now_is_settled_by_the_evidence_that_arrives_later() {
+        let f = fixture("claude", Some("2.1.275")).await;
+        let app = f.env.app.clone();
+        let running = busy(&f).await;
+        f.env.herdr.fail_next("pane.send_keys", tt::Fault::DropAfter);
+        let transcript = f.env.herdr.pane("pane-sn").and_then(|p| p.transcript_file).unwrap();
+        let hidden = transcript.with_extension("hidden");
+        let (herdr_live, herdr_screens) = (f.env.herdr.live.clone(), f.env.herdr.screens.clone());
+        let (from, to) = (transcript.clone(), hidden.clone());
+        super::super::race_point::arm("send_now_after_key", &f.bot_id, move || async move {
+            // 鍵送出去之後什麼都看不到了：pane 讀不到、transcript 也暫時讀不到。
+            herdr_live.lock().unwrap().remove("pane-sn");
+            herdr_screens.lock().unwrap().insert("pane-sn".into(), "__READ_ERROR__".into());
+            std::fs::rename(&from, &to).unwrap();
+        });
+
+        let out = prompt_send_now(&app, &f.bot_id, "先看這句", "sn-unknown", &[], None).await.unwrap();
+        assert_eq!(out.send_now, Some("unknown"), "{out:?}");
+        assert_eq!(status_of(&f, &running).await, "in_flight", "結果不明＝不假定打斷");
+        assert!(notes_on(&f, &running).await.is_empty());
+        assert_eq!(status_of(&f, &out.turn_id).await, "failed", "新的那一則不佔 in_flight");
+        assert_eq!(delivery_of(&f, &out.turn_id).await, "unknown");
+
+        // transcript 又讀得到了，而新那一則的 user entry 確實在裡面；它的 Stop 到了：先補「被插隊打斷」，
+        // 回覆才不會接到舊回合上。
+        std::fs::rename(&hidden, &transcript).unwrap();
+        let stop = crate::hookrecv::HookBody {
+            bot_id: f.bot_id.clone(),
+            provider: "claude".into(),
+            payload: json!({"hook_event_name": "Stop", "session_id": "sess-1", "prompt_id": "p-new",
+                            "last_assistant_message": "看到了"}),
+            received_at: None,
+            truncated: false,
+            run_id: None,
+        };
+        crate::hookrecv::process(&app, &stop).await.unwrap();
+        assert_eq!(status_of(&f, &running).await, "failed", "證據到了：舊回合確實被插隊打斷");
+        assert_eq!(notes_on(&f, &running).await, vec![SEND_NOW_NOTE.to_string()]);
+        let replies_on_old: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='assistant'")
+            .bind(&running)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(replies_on_old, 0, "新那一則的回覆不掛到被打斷的回合上");
+        let answered: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM messages m JOIN turns t ON t.id = m.turn_id
+              WHERE t.conversation_id=? AND m.role='assistant' AND m.content='看到了'",
+        )
+        .bind(&f.conv)
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+        assert_eq!(answered, 1, "回覆有地方放");
+    }
+
+    /// 送出鍵確定生效，但 DB 那一半（收舊回合、把新的那一則掛上 run）寫不進去：跟 #147 同一個模型——
+    /// 不回普通成功，欠著的收尾之後補上，而且不再按鍵。
+    #[tokio::test]
+    async fn a_send_now_whose_bookkeeping_could_not_be_written_is_settled_later_without_pressing_again() {
+        let f = fixture("claude", Some("2.1.275")).await;
+        let app = f.env.app.clone();
+        let running = busy(&f).await;
+        sqlx::query(&format!(
+            "CREATE TRIGGER lost_close BEFORE UPDATE OF status ON turns WHEN OLD.id = '{running}' BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END"
+        ))
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        let err = prompt_send_now(&app, &f.bot_id, "先看這句", "sn-owed", &[], None).await.unwrap_err();
+        let LcError::Uncommitted(body) = err else { panic!("不能是普通的成功或 502：{err:?}") };
+        assert_eq!(body["error"], "send_now_state_uncommitted", "{body}");
+        assert_eq!(body["sent"], true, "{body}");
+        assert_eq!(body["interrupted_turn_id"], running.as_str(), "{body}");
+        assert_eq!(send_now_presses(&f), 1);
+        assert!(transcript_of(&f).await.contains("先看這句"), "鍵確實生效了");
+
+        sqlx::query("DROP TRIGGER lost_close").execute(&app.db).await.unwrap();
+        // 同一個 request id 重送：先補欠著的那一半，回的是那一則，不重打。
+        let again = prompt_send_now(&app, &f.bot_id, "先看這句", "sn-owed", &[], None).await.unwrap();
+        assert_eq!(status_of(&f, &running).await, "failed");
+        assert_eq!(notes_on(&f, &running).await, vec![SEND_NOW_NOTE.to_string()]);
+        assert_eq!(status_of(&f, &again.turn_id).await, "in_flight");
+        assert_eq!(in_flight_count(&f).await, 1);
+        assert_eq!(send_now_presses(&f), 1, "補收尾不按鍵");
+        let bound: Option<String> = sqlx::query_scalar("SELECT run_id FROM turns WHERE id=?").bind(&again.turn_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(bound.as_deref(), Some(f.run_id.as_str()), "新的那一則掛回 run 上");
+    }
+
+    /// 同一條，但 DB 只是一時寫不進去（送達證據等完時已經好了）：當場補上，回普通的成功，不必等重試。
+    #[tokio::test]
+    async fn a_send_now_whose_bookkeeping_failed_only_for_a_moment_is_settled_on_the_spot() {
+        let f = fixture("claude", Some("2.1.275")).await;
+        let app = f.env.app.clone();
+        let running = busy(&f).await;
+        sqlx::query(&format!(
+            "CREATE TRIGGER lost_close BEFORE UPDATE OF status ON turns WHEN OLD.id = '{running}' BEGIN SELECT RAISE(ABORT, 'database is locked'); END"
+        ))
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let db = app.db.clone();
+        super::super::race_point::arm("send_now_owed", &f.bot_id, move || async move {
+            sqlx::query("DROP TRIGGER lost_close").execute(&db).await.unwrap();
+        });
+
+        let out = prompt_send_now(&app, &f.bot_id, "先看這句", "sn-owed-briefly", &[], None).await.unwrap();
+        assert_eq!(out.send_now, Some("interrupted"), "{out:?}");
+        assert_eq!(out.delivery, "ok", "{out:?}");
+        assert_eq!(status_of(&f, &running).await, "failed");
+        assert_eq!(status_of(&f, &out.turn_id).await, "in_flight");
+        let bound: Option<String> = sqlx::query_scalar("SELECT run_id FROM turns WHERE id=?").bind(&out.turn_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(bound.as_deref(), Some(f.run_id.as_str()));
+        assert_eq!(send_now_presses(&f), 1);
     }
 
     /// 驗收二：連續兩次插隊送出不會產生兩個 `in_flight`——第二次同樣先收掉第一次那筆。

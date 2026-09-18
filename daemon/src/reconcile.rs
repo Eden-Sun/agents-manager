@@ -98,6 +98,8 @@ pub async fn rearm_progress(app: &Arc<App>) {
     }
     // Queued prompts in a backoff lost their timers with the old process (SPEC §4.4a).
     crate::lifecycle::rearm_queue_retries(app).await;
+    // 插隊送出途中停掉、還沒掛上 run 的那一則（#120）。
+    crate::lifecycle::adopt_unbound_send_nows(app).await;
 }
 
 /// 重啟前正在送出的那一筆（`in_flight` 而 `delivery` 還是 `pending`）：它的收尾者只活在上一個行程的

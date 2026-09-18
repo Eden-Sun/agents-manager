@@ -215,13 +215,19 @@ config.toml 裡沒有的 id（child、已刪）忽略。成功推 `project_chang
 判斷送達看回應有沒有 `message_id`：409 的 body 也可能帶 `turn_id`。
 
 **插隊送出 `send_now: true`**（issue #103，SPEC §6.3 第 9 點）：對方回合中時打斷它，而不是回 409。daemon 照舊寫 turn／訊息，
-但不等 idle——打字進 pane 之後按 claude 2.1.275 的 send-now 鍵（`ctrl+x ctrl+s`），並把被打斷的那一回合收成 `failed`
-（加一則 system 訊息「被插隊送出打斷（claude send-now）」），不留永遠 `in_flight` 的回合。成功的 200 多一個欄位：
+但不等 idle——打字進 pane 之後按 claude 2.1.275 的 send-now 鍵（`ctrl+x ctrl+s`），**那顆鍵確定生效之後**才把被打斷的那一回合收成 `failed`
+（加一則 system 訊息「被插隊送出打斷（claude send-now）」），不留永遠 `in_flight` 的回合，也不在鍵沒生效時假裝打斷了。200 多一個欄位：
 
 | `send_now` | 意思 |
 |---|---|
-| `"interrupted"` | 真的打斷了一個進行中的回合並按了那顆鍵 |
+| `"interrupted"` | 真的打斷了一個進行中的回合：send-now 鍵確定生效（herdr 收下，或 transcript 證明送出了） |
 | `"idle"` | 當下沒有回合在飛，照一般 Enter 送出（不需要插隊，也不檢查版本） |
+| `"not_sent"` | send-now 鍵沒有生效（打字沒回應、打完框是空的、herdr 拒收那顆鍵）：進行中的回合照常，這一則 `delivery:"failed"`，字可能還留在終端的輸入框 |
+| `"unknown"` | 不知道 send-now 鍵有沒有生效：進行中的回合**不收**、等證據，這一則 `delivery:"unknown"`（turn 本身是 failed，不佔 in-flight） |
+
+送出鍵之前就被擋下（框裡有字、讀不到、herdr 拒收打字 `pane_send_refused`）→ 可重試的 `409 {"sent":false}`、不留任何列，進行中的回合不動。
+送出鍵生效但狀態寫不進去 → `503 {"error":"send_now_state_uncommitted","turn_id","interrupted_turn_id","sent":true,"retryable":true}`：
+daemon 自己補，用同一個 `client_request_id` 重送拿到的是這一則、不會再打一次。見 SPEC §6.3 第 9 點。
 
 **前提**：`kind = claude` 且這個 run **跑著的** claude ≥ 2.1.275（`runs.status_json.version`，statusLine 回報的；磁碟上已更新但還沒重啟
 不算）。不合格時 daemon **一個鍵都不按**，照原本的路走——AGM 派工排隊、使用者 409——409 的 body 多兩個欄位說明為什麼沒插隊：

@@ -877,12 +877,46 @@ pub(crate) async fn type_prepared(
     text: &str,
     ready: Ready,
 ) -> anyhow::Result<Delivered> {
+    match type_text(client, run, bot, text, ready).await? {
+        Typing::Done(d) => Ok(d),
+        Typing::Ready(t) => {
+            press_submit(client, &t).await?;
+            confirm_submitted(app, client, run, bot, text, &t).await
+        }
+    }
+}
+
+/// 字已經在框裡，下一步就是送出鍵。
+pub(crate) struct Typed {
+    pane: String,
+    proof: Proof,
+    submit: Submit,
+    offset: u64,
+    baseline: usize,
+}
+
+/// [`type_text`] 停下來的地方。
+pub(crate) enum Typing {
+    /// 字在框裡，接下來是送出鍵。
+    Ready(Typed),
+    /// 送出鍵之前就有了結論（`Handed`；證據已經長出來＝`Submitted`；框是空的／讀不到＝`Unproven`）。
+    Done(Delivered),
+}
+
+/// 打字、看框（必要時重貼一次），停在送出鍵之前。插隊送出要在送出鍵上判斷有沒有打斷（#120），所以跟按鍵分開。
+pub(crate) async fn type_text(
+    client: &HerdrClient,
+    run: &db::Run,
+    bot: &db::Bot,
+    text: &str,
+    ready: Ready,
+) -> anyhow::Result<Typing> {
     let (pane, proof, submit, offset, baseline) = match ready {
         Ready::AgentPrompt { target } => {
             client
                 .call_timeout("agent.prompt", json!({"target": target, "text": text}), Duration::from_secs(10))
                 .await?;
-            return Ok(Delivered::Handed);
+            return Ok(Typing::Done(Delivered::Handed));
         }
         Ready::Type { pane, proof, submit, offset, baseline } => (pane, proof, submit, offset, baseline),
     };
@@ -909,35 +943,54 @@ pub(crate) async fn type_prepared(
     match box_state(&bot.kind, &seen) {
         BoxState::NonEmpty => {}
         BoxState::Empty if proof != Proof::Unverified && evidence(&bot.kind, &proof, offset, &seen, text)? > baseline => {
-            return Ok(Delivered::Submitted);
+            return Ok(Typing::Done(Delivered::Submitted));
         }
-        BoxState::Empty => return Ok(Delivered::Unproven("nothing_typed")),
-        BoxState::Unready => return Ok(Delivered::Unproven("composer_unreadable")),
+        BoxState::Empty => return Ok(Typing::Done(Delivered::Unproven("nothing_typed"))),
+        BoxState::Unready => return Ok(Typing::Done(Delivered::Unproven("composer_unreadable"))),
     }
+    Ok(Typing::Ready(Typed { pane, proof, submit, offset, baseline }))
+}
 
-    client.pane_send_keys(&pane, submit.keys()).await?;
+/// 按送出鍵。插隊送出時，會打斷正在跑的那一回合的是**這一顆鍵**，不是上面打的字——claude 忙的時候框裡照樣可以打字，
+/// 回合照跑（#120）。
+pub(crate) async fn press_submit(client: &HerdrClient, t: &Typed) -> anyhow::Result<()> {
+    client.pane_send_keys(&t.pane, t.submit.keys()).await
+}
+
+/// 送出鍵按下去之後：等證據，字還留在框裡就再按一次。
+pub(crate) async fn confirm_submitted(
+    app: &Arc<App>,
+    client: &HerdrClient,
+    run: &db::Run,
+    bot: &db::Bot,
+    text: &str,
+    t: &Typed,
+) -> anyhow::Result<Delivered> {
+    let Typed { pane, proof, submit, offset, baseline } = t;
+    let (offset, baseline) = (*offset, *baseline);
+    let read = || read_composer(client, pane);
     let mut pressed_again = false;
     for _ in 0..SUBMIT_CHECKS {
         tokio::time::sleep(Duration::from_millis(SUBMIT_SETTLE_MS)).await;
         let now = read().await?;
-        if !same_session(app, &run.id, &proof).await {
+        if !same_session(app, &run.id, proof).await {
             tracing::warn!(run = %run.id, bot = %bot.name, "the session changed while delivering; the transcript proof no longer applies");
             return Ok(Delivered::Unproven("session_changed"));
         }
         match box_state(&bot.kind, &now) {
             // No evidence to wait for: the box took the paste and emptied on Enter. That is all
             // that can be said, and it is said as `Unverified`, not as a proven delivery.
-            BoxState::Empty if proof == Proof::Unverified => {
+            BoxState::Empty if *proof == Proof::Unverified => {
                 tracing::warn!(run = %run.id, bot = %bot.name, "prompt typed and submitted; no lossless evidence on this run");
                 return Ok(Delivered::Unverified);
             }
-            BoxState::Empty if evidence(&bot.kind, &proof, offset, &now, text)? > baseline => {
+            BoxState::Empty if evidence(&bot.kind, proof, offset, &now, text)? > baseline => {
                 tracing::info!(run = %run.id, bot = %bot.name, proof = ?proof, "prompt typed into the pane and proven submitted");
                 return Ok(Delivered::Submitted);
             }
             BoxState::NonEmpty if !pressed_again => {
                 tracing::warn!(run = %run.id, bot = %bot.name, ?submit, "prompt still in the composer after the submit key; pressing it again");
-                client.pane_send_keys(&pane, submit.keys()).await?;
+                client.pane_send_keys(pane, submit.keys()).await?;
                 pressed_again = true;
             }
             _ => {}
@@ -950,6 +1003,67 @@ pub(crate) async fn type_prepared(
     };
     tracing::warn!(run = %run.id, bot = %bot.name, reason = why, "could not prove the prompt was submitted");
     Ok(Delivered::Unproven(why))
+}
+
+/// 送出鍵的 RPC 沒有回、不知道 herdr 按了沒有時，看它到底生效了沒有。
+#[derive(Debug)]
+pub(crate) enum Landed {
+    /// 證據說送出去了。
+    Yes(Delivered),
+    /// 字還整個留在框裡：鍵沒生效。
+    No,
+    /// 看不出來（框空了但沒有證據、讀不到）。
+    Unknown,
+}
+
+/// [`Landed`]：只看、**不按任何鍵**。transcript 是無損證據，出現這一則就是送出去了，不必看畫面。
+pub(crate) async fn submit_landed(app: &Arc<App>, client: &HerdrClient, run: &db::Run, bot: &db::Bot, text: &str, t: &Typed) -> Landed {
+    for _ in 0..SUBMIT_CHECKS {
+        tokio::time::sleep(Duration::from_millis(SUBMIT_SETTLE_MS)).await;
+        if matches!(t.proof, Proof::Transcript { .. })
+            && same_session(app, &run.id, &t.proof).await
+            && evidence(&bot.kind, &t.proof, t.offset, "", text).is_ok_and(|n| n > t.baseline)
+        {
+            return Landed::Yes(Delivered::Submitted);
+        }
+        let Ok(now) = read_composer(client, &t.pane).await else { continue };
+        match box_state(&bot.kind, &now) {
+            BoxState::NonEmpty => return Landed::No,
+            BoxState::Empty if t.proof == Proof::Unverified => return Landed::Yes(Delivered::Unverified),
+            BoxState::Empty if t.proof == Proof::EchoRow && evidence(&bot.kind, &t.proof, t.offset, &now, text).is_ok_and(|n| n > t.baseline) => {
+                return Landed::Yes(Delivered::Submitted);
+            }
+            _ => {}
+        }
+    }
+    Landed::Unknown
+}
+
+/// 之後還能拿來證明「這一則送出去了」的無損證據：本機 claude／codex 的 session log 在基準之後出現這一則。
+/// 只有 transcript 那種證據事後還讀得到；畫面上的回音一捲就沒了。
+#[derive(Debug, Clone)]
+pub(crate) struct SentProof {
+    format: LogFormat,
+    path: std::path::PathBuf,
+    offset: u64,
+    baseline: usize,
+    text: String,
+}
+
+impl SentProof {
+    pub(crate) fn of(t: &Typed, text: &str) -> Option<SentProof> {
+        match &t.proof {
+            Proof::Transcript { format, path, .. } => {
+                Some(SentProof { format: *format, path: path.clone(), offset: t.offset, baseline: t.baseline, text: text.to_string() })
+            }
+            Proof::EchoRow | Proof::Unverified => None,
+        }
+    }
+
+    /// 現在看得到這一則了嗎？讀不到當成看不到。
+    pub(crate) fn shows(&self) -> bool {
+        log_hits_since(self.format, &self.path, self.offset, &self.text).is_ok_and(|n| n > self.baseline)
+    }
 }
 
 /// Plan and execute in one go, for callers that have no turn to hold back (queue flush, resend).
