@@ -55,10 +55,23 @@ pub(crate) fn note_user_interrupt_at(bot_id: &str, at: DateTime<Utc>) {
     interrupt_holds().lock().unwrap_or_else(|e| e.into_inner()).insert(bot_id.to_string(), at);
 }
 
-/// 這顆 bot 現在還有沒有接管標記。`StopFailure` 用它分辨「provider 真的失敗」與「使用者剛按了停」
-/// （issue #79）；測試也讀它。
+/// Esc 的回聲（那一回合的 `StopFailure`）最晚多久會到：本機 hook 幾秒內；遠端寫在那台的 spool，
+/// 要等 30 秒一輪的掃描（SPEC §11.4.4）或下一次 drain 撈回來。
+pub(crate) const ECHO_WINDOW: Duration = Duration::from_secs(120);
+
+/// 使用者是不是**剛**按了停（[`ECHO_WINDOW`] 內）。`StopFailure` 用它分辨「provider 真的失敗」與
+/// 「使用者剛按了停」（issue #79）；測試也讀它。
+///
+/// 只看標記在不在是錯的（#117）：標記要等排隊的派工問 [`hold`] 才會清，使用者按完 Esc 自己繼續用
+/// （沒有派工）就永遠不清，之後真的失敗（撞額度）全被當成回聲丟掉。排隊寬限照舊用標記本身
+/// （[`hold_at`]，最久 [`INTERRUPT_HOLD_MAX`]），不受這個窗口影響。
 pub(crate) fn is_held(bot_id: &str) -> bool {
-    hold_of(bot_id).is_some()
+    is_held_at(bot_id, Utc::now())
+}
+
+fn is_held_at(bot_id: &str, now: DateTime<Utc>) -> bool {
+    // 標記在未來（時鐘被往回撥）：當成剛按的。
+    hold_of(bot_id).is_some_and(|at| (now - at).to_std().map_or(true, |age| age <= ECHO_WINDOW))
 }
 
 fn hold_of(bot_id: &str) -> Option<DateTime<Utc>> {
@@ -254,6 +267,56 @@ mod tests {
         assert_eq!(claude_interrupted_at(&[user("跑測試"), interrupted(at), user("我自己來")].join("\n")), None, "中斷後使用者又送了一則");
         assert_eq!(claude_interrupted_at(&[user("跑測試"), interrupted(at), end_turn()].join("\n")), None, "之後回完了一回合");
         assert_eq!(claude_interrupted_at(&[user("跑測試"), end_turn()].join("\n")), None, "一般結束");
+    }
+
+    /// 接管標記是「剛按了停」，不是「這顆 bot 按過停」。以前標記只有在排隊的派工問 `hold()` 時才清：
+    /// 使用者按一次 Esc、之後自己繼續用這顆（沒有派工），標記就一直留著，之後真的 `StopFailure`（撞額度、
+    /// API 錯誤）全被當成那次 Esc 的回聲丟掉——回合不收、撞限也不記（#79／#108 的收尾都失效）。
+    #[tokio::test]
+    async fn a_stop_failure_long_after_an_interrupt_is_a_real_failure() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "esc-then-work").await;
+        let run = crate::testing::fake_run(&app, &bot.id).await;
+        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        // 十分鐘前按過一次 Esc；之後使用者自己送了一則，現在在跑。
+        note_user_interrupt_at(&bot.id, Utc::now() - chrono::Duration::minutes(10));
+        let turn = db::ulid();
+        sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'web','in_flight','ok',?)")
+            .bind(&turn)
+            .bind(&conv)
+            .bind(&run)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        let ev = crate::hookrecv::HookBody {
+            bot_id: bot.id.clone(),
+            provider: "claude".into(),
+            payload: json!({"hook_event_name": "StopFailure", "session_id": "s-esc", "prompt_id": "p-esc",
+                            "error": "You've hit your session limit · resets 3pm (Asia/Taipei)"}),
+            received_at: None,
+            truncated: false,
+            run_id: None,
+        };
+        crate::hookrecv::process(&app, &ev).await.unwrap();
+
+        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(&turn).fetch_one(&app.db).await.unwrap();
+        assert_eq!(status, "failed", "十分鐘前的 Esc 不是這則 StopFailure 的來源");
+        assert!(!is_held(&bot.id), "過了回聲的窗口就不算剛按了停");
+    }
+
+    /// 回聲窗口內算剛按了停，過了就不算；排隊寬限用的標記本身不因此被收掉。
+    #[test]
+    fn only_a_fresh_interrupt_counts_as_the_echo_of_an_esc() {
+        let id = format!("echo-{}", db::ulid());
+        let at = Utc::now();
+        note_user_interrupt_at(&id, at);
+        assert!(is_held_at(&id, at + chrono::Duration::seconds(5)));
+        assert!(is_held_at(&id, at + chrono::Duration::from_std(ECHO_WINDOW).unwrap()));
+        assert!(!is_held_at(&id, at + chrono::Duration::from_std(ECHO_WINDOW).unwrap() + chrono::Duration::seconds(1)));
+        assert_eq!(hold_of(&id), Some(at), "排隊寬限照舊看得到這次接管");
     }
 
     #[test]
