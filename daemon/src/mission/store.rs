@@ -898,52 +898,136 @@ pub async fn cancel(pool: &SqlitePool, id: &str) -> Result<bool> {
     Ok(n == 1)
 }
 
-/// 結案：任務列＋`completed` 事件，**一次交易**。回 `None` ＝ 任務已經結案（完成或取消）或不存在，
-/// 什麼都沒寫——呼叫端要照實回 409，不能再補一則 `completed`（issue #116：以前 bool 沒人看，
-/// 結案途中被取消的任務照樣多一則「完成」，兩個同時結案也會各留一則說法不同的 `completed`）。
-pub async fn complete(
+/// 在寫入交易裡讀到的任務：`BEGIN IMMEDIATE` 之後才讀，commit 之前別的 writer 插不進來，所以拿它做的判斷
+/// 就是寫入落地那一刻的事實（issue #74 重開）。
+///
+/// 任務流程的判斷（第幾代、驗證算不算數、交付了沒、還有沒有交辦開著）都從交辦與事件推（`flow`），而退回（`round`）、
+/// 驗證（`verified`）這些改變「代」的寫入不走 supervisor 鎖：在鎖外、交易外算好的判斷，寫下去的時候可能已經過期。
+/// 判斷與寫入要在同一個 commit boundary 裡，就在這個交易裡重讀、重判。
+pub struct Snapshot {
+    pub mission: Mission,
+    /// 順序同 `supervisor::store::mission_assignments`（寫入順序），`flow` 靠它。
+    pub assignments: Vec<crate::supervisor::store::Assignment>,
+    /// 順序同 [`events`]。
+    pub events: Vec<MissionEvent>,
+}
+
+/// 寫入交易裡先判定、放行才寫的結果。後兩種什麼都沒寫。
+pub enum Guarded<T, E> {
+    Written(T),
+    /// 任務不存在或已結案。
+    Closed,
+    /// 判定對落地那一刻的樣子說不。
+    Refused(E),
+}
+
+/// 開寫入交易、讀出**還開著**的任務與它的交辦、事件。任務不存在或已結案回 `None`（交易直接丟掉）。
+async fn open_snapshot(pool: &SqlitePool, id: &str) -> Result<Option<(sqlx::Transaction<'static, sqlx::Sqlite>, Snapshot)>> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let mission: Option<Mission> = sqlx::query_as("SELECT * FROM missions WHERE id = ?").bind(id).fetch_optional(&mut *tx).await?;
+    let Some(mission) = mission.filter(|m| m.completed_at.is_none() && m.cancelled_at.is_none()) else { return Ok(None) };
+    let assignments = sqlx::query_as::<_, crate::supervisor::store::Assignment>(
+        "SELECT * FROM supervisor_assignments WHERE mission_id = ? ORDER BY created_at, rowid",
+    )
+    .bind(id)
+    .fetch_all(&mut *tx)
+    .await?;
+    let events = sqlx::query_as::<_, MissionEvent>("SELECT * FROM mission_events WHERE mission_id = ? ORDER BY created_at, rowid")
+        .bind(id)
+        .fetch_all(&mut *tx)
+        .await?;
+    Ok(Some((tx, Snapshot { mission, assignments, events })))
+}
+
+/// 寫一則事件，前提是任務還開著、而且 `check` 對寫入那一刻的樣子放行（issue #74 重開）。
+///
+/// [`add_event`] 不看任務：呼叫端開頭的 `ensure_open`、`verified` 算的「屬於第幾代」都在交易外，
+/// 中間任務可能被關掉或退回——已取消的任務會多一則驗證，上一代的驗證會排在 `round` 後面被算成新一代的。
+pub async fn add_event_checked<E>(
+    pool: &SqlitePool,
+    mission_id: &str,
+    kind: &str,
+    text: &str,
+    relay_from: Option<&str>,
+    payload: &serde_json::Value,
+    check: impl FnOnce(&Snapshot) -> std::result::Result<(), E>,
+) -> Result<Guarded<MissionEvent, E>> {
+    let Some((mut tx, s)) = open_snapshot(pool, mission_id).await? else { return Ok(Guarded::Closed) };
+    if let Err(e) = check(&s) {
+        return Ok(Guarded::Refused(e));
+    }
+    let ev = insert_event(&mut tx, mission_id, kind, text, relay_from, payload, None, None).await?;
+    tx.commit().await?;
+    Ok(Guarded::Written(ev))
+}
+
+/// 結案：任務列＋`completed` 事件，**一次交易**（issue #116：以前 bool 沒人看，結案途中被取消的任務照樣多一則
+/// 「完成」，兩個同時結案也會各留一則說法不同的 `completed`）。任務已經結案或不存在回 `Closed`，什麼都沒寫——
+/// 呼叫端要照實回 409，不能再補一則 `completed`。
+///
+/// 結案的判定也在**同一個交易**裡重做（issue #74 重開）：`decide` 看的是 commit 當下的交辦與事件，放行才關任務，
+/// 它回的 payload 寫進 `completed` 事件。呼叫端在鎖外算好的交付判定到這裡可能已經過期——那段時間任務可能被
+/// 退回、記了驗證、派了工又接受，而這些寫入都不走 supervisor 鎖。
+pub async fn complete_checked<E>(
     pool: &SqlitePool,
     id: &str,
     summary: &str,
     relay_from: Option<&str>,
-    payload: &serde_json::Value,
-) -> Result<Option<MissionEvent>> {
+    decide: impl FnOnce(&Snapshot) -> std::result::Result<serde_json::Value, E>,
+) -> Result<Guarded<MissionEvent, E>> {
+    let Some((mut tx, s)) = open_snapshot(pool, id).await? else { return Ok(Guarded::Closed) };
+    let payload = match decide(&s) {
+        Ok(p) => p,
+        Err(e) => return Ok(Guarded::Refused(e)),
+    };
     let now = crate::db::now();
-    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    let n = sqlx::query(
+    sqlx::query(
         "UPDATE missions SET completed_at = ?, result_summary = ?, paused_reason = NULL, paused_detail = NULL, updated_at = ?
-         WHERE id = ? AND completed_at IS NULL AND cancelled_at IS NULL",
+         WHERE id = ?",
     )
     .bind(&now)
     .bind(summary)
     .bind(&now)
     .bind(id)
     .execute(&mut *tx)
-    .await?
-    .rows_affected();
-    if n != 1 {
-        return Ok(None);
-    }
-    let ev = insert_event(&mut tx, id, "completed", summary, relay_from, payload, None, None).await?;
+    .await?;
+    let ev = insert_event(&mut tx, id, "completed", summary, relay_from, &payload, None, None).await?;
     tx.commit().await?;
-    Ok(Some(ev))
+    Ok(Guarded::Written(ev))
 }
 
-/// 用掉一輪（review 退回或驗證失敗）。回傳用掉之後的輪數；超過上限時**不**加、回 `Err(used)`，
-/// 呼叫端負責把任務停下來問人。
-pub async fn use_round(pool: &SqlitePool, id: &str) -> Result<Result<i64, i64>> {
-    let now = crate::db::now();
-    let n = sqlx::query(
-        "UPDATE missions SET rounds_used = rounds_used + 1, updated_at = ?
-         WHERE id = ? AND rounds_used < max_rounds AND completed_at IS NULL AND cancelled_at IS NULL",
-    )
-    .bind(&now)
-    .bind(id)
-    .execute(pool)
-    .await?
-    .rows_affected();
-    let used: i64 = sqlx::query_scalar("SELECT rounds_used FROM missions WHERE id = ?").bind(id).fetch_one(pool).await?;
-    Ok(if n == 1 { Ok(used) } else { Err(used) })
+/// [`spend_round`] 的結果。後兩種什麼都沒寫。
+#[derive(Debug)]
+pub enum Round {
+    /// 用掉了一輪，`round` 事件同一個交易寫下。
+    Spent,
+    /// 已經到上限：呼叫端把任務停下來問人。
+    AtLimit { used: i64, max: i64 },
+    /// 任務不存在或已結案。
+    Closed,
+}
+
+/// 用掉一輪（review 退回或驗證失敗）＋`round` 事件，**一次交易**（issue #74 重開）。
+///
+/// 以前是兩次：`rounds_used` 先加、事件另外寫。中間任務被關掉，已取消的任務多一則 `round`、還回 200；
+/// 事件寫不進去，輪數用掉了、代卻沒換（`flow` 的代只看事件），上一代的驗證照樣放行。
+/// 錨點（[`super::flow::ANCHOR`]）也在這個交易裡取：寫下那一刻最後一件交辦。
+pub async fn spend_round(pool: &SqlitePool, id: &str) -> Result<Round> {
+    let Some((mut tx, s)) = open_snapshot(pool, id).await? else { return Ok(Round::Closed) };
+    let (used, max) = (s.mission.rounds_used + 1, s.mission.max_rounds);
+    if used > max {
+        return Ok(Round::AtLimit { used: s.mission.rounds_used, max });
+    }
+    sqlx::query("UPDATE missions SET rounds_used = ?, updated_at = ? WHERE id = ?")
+        .bind(used)
+        .bind(crate::db::now())
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    let payload = serde_json::json!({"rounds_used": used, super::flow::ANCHOR: s.assignments.last().map(|a| a.id.clone())});
+    insert_event(&mut tx, id, "round", &format!("第 {used} 輪退回（上限 {max}）"), Some(crate::agent_relay::DAEMON_SENDER), &payload, None, None).await?;
+    tx.commit().await?;
+    Ok(Round::Spent)
 }
 
 pub async fn has_event(pool: &SqlitePool, mission_id: &str, kind: &str) -> Result<bool> {
@@ -1022,7 +1106,8 @@ mod tests {
 
     async fn done_parent(pool: &SqlitePool, crid: &str) -> Mission {
         let (m, _) = create(pool, &new(crid)).await.unwrap();
-        complete(pool, &m.id, "第一版", None, &json!({})).await.unwrap().expect("剛建的任務一定結得了案");
+        let closed = complete_checked(pool, &m.id, "第一版", None, |_| Ok::<_, ()>(json!({}))).await.unwrap();
+        assert!(matches!(closed, Guarded::Written(_)), "剛建的任務一定結得了案");
         get(pool, &m.id).await.unwrap().unwrap()
     }
 
@@ -1369,15 +1454,21 @@ mod tests {
     async fn rounds_stop_at_the_cap_and_closed_missions_do_not_change() {
         let pool = pool().await;
         let (m, _) = create(&pool, &new("r1")).await.unwrap();
-        assert_eq!(use_round(&pool, &m.id).await.unwrap(), Ok(1));
-        assert_eq!(use_round(&pool, &m.id).await.unwrap(), Ok(2));
-        assert_eq!(use_round(&pool, &m.id).await.unwrap(), Err(2), "上限到了不能再加");
+        let spend = || async { spend_round(&pool, &m.id).await.unwrap() };
+        assert!(matches!(spend().await, Round::Spent));
+        assert!(matches!(spend().await, Round::Spent));
+        assert!(matches!(spend().await, Round::AtLimit { used: 2, max: 2 }), "上限到了不能再加");
+        assert_eq!(get(&pool, &m.id).await.unwrap().unwrap().rounds_used, 2);
+        assert_eq!(events(&pool, &m.id).await.unwrap().iter().filter(|e| e.kind == "round").count(), 2, "用掉幾輪就記幾則退回");
 
         assert!(pause(&pool, &m.id, "max_rounds", None).await.unwrap());
         assert_eq!(get(&pool, &m.id).await.unwrap().unwrap().status(), "paused");
         assert!(resume(&pool, &m.id).await.unwrap());
-        assert!(complete(&pool, &m.id, "ok", None, &json!({})).await.unwrap().is_some());
+        let close = || complete_checked(&pool, &m.id, "ok", None, |_| Ok::<_, ()>(json!({})));
+        assert!(matches!(close().await.unwrap(), Guarded::Written(_)));
         assert_eq!(get(&pool, &m.id).await.unwrap().unwrap().status(), "done");
+        assert!(matches!(close().await.unwrap(), Guarded::Closed), "已完成的任務不能再結一次案");
+        assert!(matches!(spend().await, Round::Closed), "已完成的任務不用掉輪數");
         assert!(!pause(&pool, &m.id, "late", None).await.unwrap(), "已完成的任務不能再暫停");
         assert!(!cancel(&pool, &m.id).await.unwrap());
         assert_eq!(list(&pool, "p1", "done", 10).await.unwrap().len(), 1);

@@ -92,6 +92,14 @@ fn ensure_open(m: &store::Mission) -> Result<(), LcError> {
     Ok(())
 }
 
+/// 寫入交易發現任務已經關了（`store::Guarded::Closed`／`store::Round::Closed`）：照實回它現在的樣子。
+async fn closed_now(app: &Arc<App>, id: &str) -> LcError {
+    match load(app, id).await {
+        Ok(m) => ensure_open(&m).err().unwrap_or_else(|| LcError::conflict("already_closed", json!({"mission_id": id}))),
+        Err(e) => e,
+    }
+}
+
 /// `relay_from` 跟 `POST /api/bots/{id}/prompt` 同一套：省略＝使用者本人，否則必須是存在中的 bot 或 `daemon`。
 async fn check_relay_from(app: &Arc<App>, relay_from: Option<&str>) -> Result<Option<String>, LcError> {
     match relay_from.map(str::trim).filter(|s| !s.is_empty()) {
@@ -508,6 +516,7 @@ pub async fn post_event(State(app): State<Arc<App>>, Path(id): Path<String>, Jso
     ensure_open(&m)?;
     let from = check_relay_from(&app, b.relay_from.as_deref()).await?;
     let mut payload = b.payload.clone().unwrap_or_else(|| json!({}));
+    let mut generation = None;
     if b.kind == "verified" {
         let (sha, worktree) = verified_commit(&app, &m, &b).await?;
         // 這則驗證屬於哪一代、寫下時最後一件交辦是誰（`flow::ANCHOR`）：之後退回或再派執行者，它就不算數了。
@@ -515,14 +524,28 @@ pub async fn post_event(State(app): State<Arc<App>>, Path(id): Path<String>, Jso
         let Some(obj) = payload.as_object_mut() else { return Err(LcError::Bad("payload must be an object".into())) };
         obj.insert("sha".into(), sha.into());
         obj.insert(flow::ANCHOR.into(), json!(assignments.last().map(|a| a.id.clone())));
-        obj.insert("generation".into(), json!(events.iter().filter(|e| e.kind == "round").count()));
+        let g = flow::generation(&events);
+        obj.insert("generation".into(), json!(g));
         if let Some(w) = worktree {
             obj.insert("worktree".into(), w.into());
         }
+        generation = Some(g);
     }
-    let ev = store::add_event(&app.db, &id, &b.kind, b.text.trim(), from.as_deref(), &payload)
-        .await
-        .map_err(up)?;
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("mission_event_before_write", &id).await;
+    // 上面的 `ensure_open`、驗 commit、算代都在交易外（git 不進交易）：寫入那一刻再確認任務還開著、`verified` 還在
+    // 它驗的那一代（issue #74 重開）。
+    let written = store::add_event_checked(&app.db, &id, &b.kind, b.text.trim(), from.as_deref(), &payload, |s| match generation {
+        Some(g) => super::workflow::ensure_same_generation(s, g),
+        None => Ok(()),
+    })
+    .await
+    .map_err(up)?;
+    let ev = match written {
+        store::Guarded::Written(ev) => ev,
+        store::Guarded::Closed => return Err(closed_now(&app, &id).await),
+        store::Guarded::Refused(e) => return Err(e),
+    };
     emit(&app, &load(&app, &id).await?).await;
     Ok(Json(json!(ev)))
 }
@@ -999,6 +1022,7 @@ pub async fn post_complete(State(app): State<Arc<App>>, Path(id): Path<String>, 
     // 回合結束還會為它推一則沒有人要的 `assignment_completed`。取消那條路本來就會逐件收乾淨。
     crate::mission::workflow::ensure_can_complete(&app, &id).await?;
     let (mut delivery, needs_proof) = crate::mission::workflow::delivery_record(&app, &id, waiver).await?;
+    let decided = (delivery.clone(), needs_proof);
     if needs_proof {
         // 派過執行者卻說「沒有改東西」：拿執行者的工作樹來看，不靠一句話。
         let Some(raw) = b.worktree.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
@@ -1021,15 +1045,25 @@ pub async fn post_complete(State(app): State<Arc<App>>, Path(id): Path<String>, 
         }
     }
     let from = check_relay_from(&app, b.relay_from.as_deref()).await?;
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("mission_complete_after_snapshot", &id).await;
     {
-        // 關任務這一步跟派工拿同一把 supervisor 鎖，並在鎖裡重看「底下沒有開著的交辦」（issue #119）：
-        // 上面的關卡（可能跑 git）是在鎖外做的，那段時間排隊的派工可能已經建了交辦。
+        // 關任務這一步跟派工拿同一把 supervisor 鎖（issue #119）：上面的關卡（可能跑 git）是在鎖外做的，那段時間
+        // 排隊的派工可能已經建了交辦。
         let _g = crate::supervisor::lock().await;
-        crate::mission::workflow::ensure_can_complete(&app, &id).await?;
-        // 任務列與 `completed` 事件一次交易，而且只在這一次真的把任務從開著關掉時才寫（issue #116）：
-        // 上面的關卡跑完之前任務可能已經被取消、或另一個結案先落地——那就照實 409，不補一則「完成」。
-        if store::complete(&app.db, &id, b.result_summary.trim(), from.as_deref(), &json!({"delivery": delivery})).await.map_err(up)?.is_none() {
-            return Err(ensure_open(&load(&app, &id).await?).err().unwrap_or_else(|| LcError::conflict("already_closed", json!({"mission_id": id}))));
+        // 但退回、驗證這些改變「代」的寫入不走這把鎖，所以結案的判定要在**寫入交易裡**重做（issue #74 重開）：
+        // 開著的交辦與交付的要求都照 commit 當下的樣子重判，跟上面判的不是同一件事就不結（`recheck_complete`）。
+        // 任務列與 `completed` 事件一次交易，任務已經被取消、或另一個結案先落地 → 照實 409，不補一則「完成」（issue #116）。
+        let payload = json!({"delivery": delivery});
+        let closed = store::complete_checked(&app.db, &id, b.result_summary.trim(), from.as_deref(), |s| {
+            crate::mission::workflow::recheck_complete(s, waiver, &decided).map(|()| payload)
+        })
+        .await
+        .map_err(up)?;
+        match closed {
+            store::Guarded::Written(_) => {}
+            store::Guarded::Closed => return Err(closed_now(&app, &id).await),
+            store::Guarded::Refused(e) => return Err(e),
         }
     }
     let m = load(&app, &id).await?;
@@ -1044,34 +1078,33 @@ pub async fn post_complete(State(app): State<Arc<App>>, Path(id): Path<String>, 
 /// 用掉一輪（review 退回或驗證失敗）。到上限就把任務停下來（`max_rounds`）並回 409。
 ///
 /// 退回＝新的一代（`flow`）：事件記下當時最後一件交辦（`flow::ANCHOR`），之後派的才算這一代，
-/// 之前的驗證與交付都不再放行。
+/// 之前的驗證與交付都不再放行。用掉一輪與 `round` 事件是同一個交易（`store::spend_round`，issue #74 重開）。
 pub async fn post_round(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Json<Value>, LcError> {
     let m = load(&app, &id).await?;
     ensure_open(&m)?;
-    let last = crate::supervisor::store::mission_assignments(&app.db, &id).await.map_err(up)?.last().map(|a| a.id.clone());
-    match store::use_round(&app.db, &id).await.map_err(up)? {
-        Ok(used) => {
-            store::add_event(&app.db, &id, "round", &format!("第 {used} 輪退回（上限 {}）", m.max_rounds), Some(crate::agent_relay::DAEMON_SENDER), &json!({"rounds_used": used, flow::ANCHOR: last}))
-                .await
-                .map_err(up)?;
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("mission_round_before_write", &id).await;
+    match store::spend_round(&app.db, &id).await.map_err(up)? {
+        store::Round::Spent => {
             let m = load(&app, &id).await?;
             emit(&app, &m).await;
             Ok(Json(m.json()))
         }
-        Err(used) => {
-            let detail = format!("review／驗證已退回 {used} 輪，達到上限 {}", m.max_rounds);
-            // `use_round` 在任務已經被關掉時也不加（它的 WHERE 帶「還開著」）：那不是輪數用完，停不下來就照實說
-            // 任務已經關了，不要記一則「等使用者決定」、也不要回 max_rounds（issue #130）。
+        // 請求途中任務被關掉了：那不是輪數用完，照實說任務已經關了（issue #130）。
+        store::Round::Closed => Err(closed_now(&app, &id).await),
+        store::Round::AtLimit { used, max } => {
+            let detail = format!("review／驗證已退回 {used} 輪，達到上限 {max}");
+            // 停不下來＝這中間任務被關掉了：不要記一則「等使用者決定」、也不要回 max_rounds（issue #130）。
             if !store::pause_with_event(&app.db, &id, "max_rounds", Some(&detail), &format!("暫停：{detail}，等使用者決定"), &json!({"reason": "max_rounds"}))
                 .await
                 .map_err(up)?
             {
-                return Err(ensure_open(&load(&app, &id).await?).err().unwrap_or_else(|| LcError::conflict("already_closed", json!({"mission_id": id}))));
+                return Err(closed_now(&app, &id).await);
             }
             emit(&app, &load(&app, &id).await?).await;
             Err(LcError::conflict(
                 "max_rounds",
-                json!({"mission_id": id, "rounds_used": used, "max_rounds": m.max_rounds,
+                json!({"mission_id": id, "rounds_used": used, "max_rounds": max,
                        "hint": "任務已停下來問使用者；使用者放行（answer／resume）就會多給一輪，那時再呼叫一次 round"}),
             ))
         }
@@ -1688,6 +1721,154 @@ mod tests {
             let expect = if close == "cancel" { "cancelled" } else { "done" };
             assert_eq!(store::get(&app.db, &id).await.unwrap().unwrap().status(), expect);
         }
+    }
+
+    fn events_of(kind: &'static str, app: &Arc<App>, id: &str) -> impl std::future::Future<Output = i64> {
+        let (app, id) = (app.clone(), id.to_string());
+        async move {
+            sqlx::query_scalar("SELECT COUNT(*) FROM mission_events WHERE mission_id=? AND kind=?")
+                .bind(&id)
+                .bind(kind)
+                .fetch_one(&app.db)
+                .await
+                .unwrap()
+        }
+    }
+
+    /// 結案在鎖外算好的交付判定，寫下之前任務被推進了（issue #74 重開）：結案要照**落地那一刻**的樣子重判，
+    /// 不能拿舊的 snapshot 關任務。
+    ///
+    /// `post_complete` 的交付判定（`no_changes` 還要跑 git）在鎖外算；`round`／`verified` 這些改變「代」的寫入
+    /// 不走 supervisor 鎖，鎖裡以前只重查開著的交辦。插進來的三種寫入各自讓舊判定失效：
+    /// - `round`：第 N 代的驗證與交付不再算數（新一輪不沿用舊一輪的）→ `not_delivered`；
+    /// - `verified`：`no_changes` 說的「從來沒驗過東西」不再是事實 → `has_verified_changes`；
+    /// - 派過執行者（已接受）：`no_changes` 從「不必附工作樹」變成要附，舊判定沒有那份證明 → `mission_changed`。
+    #[tokio::test]
+    async fn a_complete_decided_on_an_old_snapshot_is_refused_when_the_mission_moved_on() {
+        let mut problems = Vec::new();
+        for (cut_in, expect) in [("round", "not_delivered"), ("verified", "has_verified_changes"), ("executor", "mission_changed")] {
+            let env = crate::testing::env().await;
+            let app = env.app.clone();
+            let (_origin, wt) = with_origin(&env);
+            let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission(&format!("moved-{cut_in}"), "push_main"))).await.unwrap();
+            let id = m["id"].as_str().unwrap().to_string();
+            let body = if cut_in == "round" {
+                // 第 0 代驗過、交付過：鎖外的判定是「已交付，可以結案」。
+                commit_file(&wt, "a.txt");
+                let _ = post_event(State(app.clone()), Path(id.clone()), Json(verified(Some(&wt), None))).await.unwrap();
+                let _ = post_deliver(State(app.clone()), Path(id.clone()), Json(deliver_from(&wt))).await.unwrap();
+                done("完成", None, None)
+            } else {
+                // 沒派過執行者、沒驗過東西：鎖外的判定是「no_changes 成立，不必附工作樹」。
+                done("完成", Some("no_changes"), None)
+            };
+            let (app2, id2, wt2) = (app.clone(), id.clone(), wt.clone());
+            crate::lifecycle::race_point::arm("mission_complete_after_snapshot", &id, move || async move {
+                match cut_in {
+                    "round" => {
+                        let _ = post_round(State(app2), Path(id2)).await.expect("退回要成功");
+                    }
+                    "verified" => {
+                        let _ = post_event(State(app2), Path(id2), Json(verified(Some(&wt2), None))).await.expect("驗證要記得下來");
+                    }
+                    _ => {
+                        let _ = mission_assignment(&app2, &id2, "late-exec", "executor", "completed").await;
+                    }
+                }
+            });
+            let res = post_complete(State(app.clone()), Path(id.clone()), Json(body)).await;
+
+            let (completed, status) = (events_of("completed", &app, &id).await, store::get(&app.db, &id).await.unwrap().unwrap().status());
+            let reason = match res {
+                Err(e) => conflict_reason(e),
+                Ok(Json(v)) => format!("200 {}", v["delivery"]),
+            };
+            if (completed, status, reason.as_str()) != (0, "open", expect) {
+                problems.push(format!("{cut_in}：completed 事件 {completed} 則、任務 {status}、回 {reason}（該是 409 {expect}，任務照舊開著）"));
+            }
+        }
+        assert!(problems.is_empty(), "任務已經被推進了，卻用舊的判定結案：\n{}", problems.join("\n"));
+    }
+
+    /// `verified` 驗完 commit、算好它屬於哪一代之後，寫下之前任務被取消或被退回（issue #74 重開）：
+    /// - 取消：已取消的任務不能再長出一則 `verified` → 409 `already_closed`；
+    /// - 退回：這則驗的是上一代的成果，落地時卻排在 `round` 後面、被算成新一代的驗證——被退回的那一份不必重做
+    ///   就能交付。→ 409 `verification_stale`（`stale_because: round`），什麼都不寫。
+    #[tokio::test]
+    async fn a_verification_that_loses_the_race_to_a_cancel_or_a_round_is_not_recorded() {
+        let mut problems = Vec::new();
+        for (cut_in, expect) in [("cancel", "already_closed"), ("round", "verification_stale")] {
+            let env = crate::testing::env().await;
+            let app = env.app.clone();
+            let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission(&format!("late-verified-{cut_in}"), "pr"))).await.unwrap();
+            let id = m["id"].as_str().unwrap().to_string();
+            let (app2, id2) = (app.clone(), id.clone());
+            crate::lifecycle::race_point::arm("mission_event_before_write", &id, move || async move {
+                if cut_in == "cancel" {
+                    let _ = post_cancel(State(app2), Path(id2), HeaderMap::new()).await.expect("取消要成功");
+                } else {
+                    let _ = post_round(State(app2), Path(id2)).await.expect("退回要成功");
+                }
+            });
+            let res = post_event(State(app.clone()), Path(id.clone()), Json(verified(Some(&env.repo), None))).await;
+
+            let recorded = events_of("verified", &app, &id).await;
+            let reason = match res {
+                Err(e) => conflict_reason(e),
+                Ok(_) => "200".into(),
+            };
+            if (recorded, reason.as_str()) != (0, expect) {
+                problems.push(format!("{cut_in}：留下 {recorded} 則 verified、回 {reason}（該是 409 {expect}，什麼都不寫）"));
+            }
+        }
+        assert!(problems.is_empty(), "驗證落在取消／退回之後：\n{}", problems.join("\n"));
+    }
+
+    /// 用掉一輪（`rounds_used`）與 `round` 事件是**同一個寫入**（issue #74 重開）。以前是兩次交易：
+    /// - 中間任務被取消：已取消的任務多一則 `round`、`rounds_used` 也加了，還回 200；
+    /// - 事件寫不進去（中途失敗）：`rounds_used` 已經加了卻沒有 `round` 事件——輪數用掉了、代卻沒換
+    ///   （`flow` 的代只看事件），上一代的驗證照樣放行。
+    #[tokio::test]
+    async fn spending_a_round_and_recording_it_happen_together_or_not_at_all() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let rounds_used = |id: String| {
+            let app = app.clone();
+            async move { store::get(&app.db, &id).await.unwrap().unwrap().rounds_used }
+        };
+
+        let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("round-vs-cancel", "pr"))).await.unwrap();
+        let id = m["id"].as_str().unwrap().to_string();
+        let (app2, id2) = (app.clone(), id.clone());
+        crate::lifecycle::race_point::arm("mission_round_before_write", &id, move || async move {
+            let _ = post_cancel(State(app2), Path(id2), HeaderMap::new()).await.expect("取消要成功");
+        });
+        let res = post_round(State(app.clone()), Path(id.clone())).await;
+        let mut problems = Vec::new();
+        let written = (events_of("round", &app, &id).await, rounds_used(id.clone()).await);
+        let reason = match res {
+            Err(e) => conflict_reason(e),
+            Ok(_) => "200".into(),
+        };
+        if (written, reason.as_str()) != ((0, 0), "already_closed") {
+            problems.push(format!("中途被取消：(round 事件, rounds_used) = {written:?}、回 {reason}（該是 (0, 0)、409 already_closed）"));
+        }
+
+        let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("round-half-written", "pr"))).await.unwrap();
+        let id = m["id"].as_str().unwrap().to_string();
+        sqlx::query("CREATE TRIGGER test_round_event_fails BEFORE INSERT ON mission_events WHEN NEW.kind = 'round' BEGIN SELECT RAISE(ABORT, 'round event failed'); END")
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let failed = post_round(State(app.clone()), Path(id.clone())).await.is_err();
+        sqlx::query("DROP TRIGGER test_round_event_fails").execute(&app.db).await.unwrap();
+        let written = (events_of("round", &app, &id).await, rounds_used(id.clone()).await);
+        if !failed || written != (0, 0) {
+            problems.push(format!("事件寫不進去：回 {}、(round 事件, rounds_used) = {written:?}（該是錯誤、(0, 0)）", if failed { "錯誤" } else { "200" }));
+        }
+        assert!(problems.is_empty(), "用掉一輪與記下退回不是同一個寫入：\n{}", problems.join("\n"));
+        let _ = post_round(State(app.clone()), Path(id.clone())).await.expect("重試要成功");
+        assert_eq!((events_of("round", &app, &id).await, rounds_used(id.clone()).await), (1, 1), "重試只算一輪");
     }
 
     /// 完成的任務可以被追問，而追問**不能**改變任何交付事實。這是「已完成清單不可覆寫」的底線。

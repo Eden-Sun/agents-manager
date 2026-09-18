@@ -123,6 +123,11 @@ pub fn delivered_sha(e: &MissionEvent) -> Option<String> {
     payload(e).get("sha")?.as_str().map(str::to_string)
 }
 
+/// 目前是第幾代：事件串裡 `round` 的次數。
+pub fn generation(events: &[MissionEvent]) -> usize {
+    events.iter().filter(|e| e.kind == "round").count()
+}
+
 /// 從任務的交辦與事件推導流程。兩個清單都要是寫入順序（`mission_assignments`／`store::events` 給的就是）。
 pub fn derive<'a>(assignments: &'a [Assignment], events: &'a [MissionEvent]) -> Flow<'a> {
     // 每一則 round：在事件串裡的位置、寫下時已經有幾件交辦。

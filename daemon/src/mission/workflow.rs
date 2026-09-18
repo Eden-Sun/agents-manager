@@ -119,13 +119,18 @@ pub async fn ensure_can_assign(app: &Arc<App>, mission_id: &str, role: &str) -> 
 /// 取消那條路本來就會把底下的交辦逐件 `cancel`（§18.14 第 8 條），結案卻不會；這裡把兩邊對齊成
 /// 「要嘛先收乾淨，要嘛走取消」。
 pub async fn ensure_can_complete(app: &Arc<App>, mission_id: &str) -> Result<(), LcError> {
-    let open = open_assignments(app, mission_id).await?;
+    none_open(mission_id, &open_assignments(app, mission_id).await?)
+}
+
+/// [`ensure_can_complete`] 的規則本身：鎖外的預判與結案交易裡的重判（[`recheck_complete`]）共用。
+fn none_open(mission_id: &str, assignments: &[Assignment]) -> Result<(), LcError> {
+    let open: Vec<&Assignment> = assignments.iter().filter(|a| a.is_open()).collect();
     if !open.is_empty() {
         return Err(LcError::conflict(
             "assignments_open",
             json!({
                 "mission_id": mission_id,
-                "open_assignments": open.iter().map(brief).collect::<Vec<_>>(),
+                "open_assignments": open.iter().copied().map(brief).collect::<Vec<_>>(),
                 "hint": "底下還有開著的交辦：先 `review accept`／`fail`／`cancel` 收乾淨再結案，或用 `mission cancel`（那條會自動逐件取消）",
             }),
         ));
@@ -137,15 +142,71 @@ pub async fn ensure_can_complete(app: &Arc<App>, mission_id: &str) -> Result<(),
 /// `no_changes` 要不要再附執行者的工作樹來證明（git 的檢查在 api 那一側做，這裡只判事件）。
 pub async fn delivery_record(app: &Arc<App>, mission_id: &str, waiver: Option<flow::Waiver>) -> Result<(Value, bool), LcError> {
     let (assignments, events) = inputs(app, mission_id).await?;
-    let f = flow::derive(&assignments, &events);
-    let record = flow::delivery_requirement(&f, &events, waiver).map_err(|(reason, detail)| {
+    delivery_record_of(mission_id, &assignments, &events, waiver)
+}
+
+fn delivery_record_of(mission_id: &str, assignments: &[Assignment], events: &[MissionEvent], waiver: Option<flow::Waiver>) -> Result<(Value, bool), LcError> {
+    let f = flow::derive(assignments, events);
+    let record = flow::delivery_requirement(&f, events, waiver).map_err(|(reason, detail)| {
         let mut body = detail;
         body["mission_id"] = mission_id.into();
         body["next"] = json!(f.step());
         LcError::conflict(reason, body)
     })?;
-    let needs_proof = record["reason"] == "no_changes" && flow::needs_worktree_proof(&assignments);
+    let needs_proof = record["reason"] == "no_changes" && flow::needs_worktree_proof(assignments);
     Ok((record, needs_proof))
+}
+
+/// 結案落地那一刻的判定：在 `store::complete_checked` 的寫入交易裡跑，看的是 commit 當下的交辦與事件（issue #74 重開）。
+///
+/// `post_complete` 在鎖外判過一次（[`ensure_can_complete`]、[`delivery_record`]，`no_changes` 還跑了 git），但那段時間
+/// 任務可能被退回、記了驗證、派了工又接受——`round`／`verified` 不走 supervisor 鎖，鎖裡以前只重查開著的交辦，
+/// 結果拿第 N 代的交付結了一個已經進到第 N+1 代的任務。這裡用同一套規則重判：
+/// 1. 底下還有開著的交辦 → `assignments_open`；
+/// 2. 對交付的要求現在不成立 → 那個理由（`not_delivered`／`has_verified_changes`／`user_not_asked`，附 `next`）；
+/// 3. 現在也成立、但跟鎖外判的不是同一件事（交付的是另一則 `delivered`、`no_changes` 現在要附工作樹而當時沒要）→
+///    `mission_changed`：要寫進 `completed` 的記錄、做過的證明都是照舊樣子算的，不能拿去結案。
+pub fn recheck_complete(s: &crate::mission::store::Snapshot, waiver: Option<flow::Waiver>, decided: &(Value, bool)) -> Result<(), LcError> {
+    let id = s.mission.id.as_str();
+    none_open(id, &s.assignments)?;
+    let now = delivery_record_of(id, &s.assignments, &s.events, waiver)?;
+    if now != *decided {
+        return Err(LcError::conflict(
+            "mission_changed",
+            json!({
+                "mission_id": id,
+                "decided": decided.0,
+                "now": now.0,
+                "needs_worktree_proof": now.1,
+                "next": flow::derive(&s.assignments, &s.events).step(),
+                "hint": "結案判定之後任務有了新的進展（退回、驗證、交付或派工）：重新 `mission get` 看 next，照現在的樣子再結案",
+            }),
+        ));
+    }
+    Ok(())
+}
+
+/// 一則 `verified` 寫下那一刻，任務還在它驗的那一代（issue #74 重開）。
+///
+/// 驗 commit、算「屬於第幾代」都在交易外做；中間插進一則 `round` 的話，這則驗證驗的是被退回的那一份，落地卻會排在
+/// `round` 後面、被 `flow` 算成新一代的驗證——被退回的成果不必重做就放得行交付。只比代：這中間新派的交辦由
+/// 事件的錨點（算代時就取好）處理，之後的執行者照樣讓它過期（`Stale::NewExecutor`）。
+pub fn ensure_same_generation(s: &crate::mission::store::Snapshot, verified_generation: usize) -> Result<(), LcError> {
+    let generation = flow::generation(&s.events);
+    if generation == verified_generation {
+        return Ok(());
+    }
+    Err(LcError::conflict(
+        "verification_stale",
+        json!({
+            "mission_id": s.mission.id,
+            "stale_because": flow::Stale::Round,
+            "verified_generation": verified_generation,
+            "generation": generation,
+            "next": flow::derive(&s.assignments, &s.events).step(),
+            "hint": "驗證記下之前任務被退回了（round）：驗的是上一代的成果，執行者重做之後再驗",
+        }),
+    ))
 }
 
 /// 任務停在「輪到 AGM」多久沒動靜就叫醒它。
