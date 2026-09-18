@@ -744,7 +744,9 @@ async fn start_inner(
     // `path_helper` + `brew shellenv`), so the shim prepend is typed into the shell before
     // `agent.start`; the pty buffers it if the shell isn't up yet.
     if let Some(dir) = shim_dir.as_deref() {
-        let line = format!(" export PATH={}:\"$PATH\"\n", sh_quote(dir));
+        // 先把繼承來的 shim 目錄清掉再接自己的：子 agent 的 pane 是 `pane split` 出來的，父 pane 的
+        // shim 原封不動跟著進來（`shim_path`，2026-09-18 的巢狀死鎖）。
+        let line = crate::shim_path::pane_export_line(&sh_quote(dir));
         if let Err(e) = client.pane_send_text(&pane_id, &line).await {
             tracing::warn!(bot = %bot.name, pane = %pane_id, error = %e, "could not prepend the herdr shim to the pane PATH");
         }

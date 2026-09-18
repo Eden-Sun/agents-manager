@@ -571,8 +571,10 @@ pub(crate) async fn pane_env(
     if let Some(dir) = shim_dir {
     // Best effort only: the login shell's profile (`path_helper`, `brew shellenv`) pushes us back;
     // `start_inner` re-prepends in the pane's shell, which is what actually wins.
+        // 別顆 bot 的 shim 目錄先清掉再接自己的（`shim_path`）：daemon 常常是從某顆 bot 的 pane
+        // 裡啟動的，它的 `PATH` 前面就掛著那顆 bot 的 shim，照抄進來就是 2026-09-18 的巢狀死鎖。
         let path = match std::env::var("PATH") {
-            Ok(p) if host == LOCAL_HOST => format!("{dir}:{p}"),
+            Ok(p) if host == LOCAL_HOST => crate::shim_path::prepend_own_shim_dir(&p, dir),
             _ => format!("{dir}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"),
         };
         env.insert("PATH".into(), json!(path));

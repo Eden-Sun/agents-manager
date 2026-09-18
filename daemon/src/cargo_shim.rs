@@ -21,6 +21,18 @@ am_is_shim() {
     head -n 12 "$1" 2>/dev/null | grep -q 'AM_SHIM_MARKER' 2>/dev/null
 }
 
+# 這個目錄是不是某顆 bot 的 shim 目錄（`…/bots/<id>/bin`，見 daemon 的 `shim_path`）。
+#
+# 檔頭認不出來時的第二道：**舊版的 shim 沒有 `AM_SHIM_MARKER`**。換版期間 PATH 上同時有新舊兩份
+# 是常態（shim 是 bot 啟動時才寫的），舊的那份對新的 shim 來說就是「一個普通的 cargo」——2026-09-18
+# 18:40 那次就是這樣，一條呼叫鏈上 5 個 shim 互等名額。整個目錄跳掉就不必看內容。
+am_is_bot_bin_dir() {
+    case "${1%/}" in
+        */bots/*/bin) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # The real cargo: `$AM_REAL_CARGO` if set, else the first `cargo` on PATH that is not a copy of this
 # shim.
 #
@@ -29,7 +41,8 @@ am_is_shim() {
 # 「cargo」就是同一支 shim，於是 shim → shim → shim 一層一層都去拿名額：`max_concurrent=2` 被自己
 # 的外層佔滿，最內層那個永遠等不到，整台機器明明是空的卻卡死（w168:p91 卡了 17 分鐘）。
 am_real_cargo() {
-    if [ -n "${AM_REAL_CARGO:-}" ] && [ -x "$AM_REAL_CARGO" ] && ! am_is_shim "$AM_REAL_CARGO"; then
+    if [ -n "${AM_REAL_CARGO:-}" ] && [ -x "$AM_REAL_CARGO" ] && ! am_is_shim "$AM_REAL_CARGO" \
+        && ! am_is_bot_bin_dir "$(dirname "$AM_REAL_CARGO")"; then
         printf '%s\n' "$AM_REAL_CARGO"
         return 0
     fi
@@ -39,6 +52,7 @@ am_real_cargo() {
             [ -n "$_d" ] || _d=.
             _abs=$(cd "$_d" 2>/dev/null && pwd) || continue
             [ "$_abs" = "$_self" ] && continue
+            am_is_bot_bin_dir "$_abs" && continue
             if [ -x "$_abs/cargo" ] && ! am_is_shim "$_abs/cargo"; then
                 printf '%s\n' "$_abs/cargo"
                 break
@@ -424,6 +438,64 @@ esac
         assert_eq!(out.status.code(), Some(0), "{err}");
         // 真 cargo 真的跑到了（不是卡在等名額），而且整趟只拿一個名額。
         assert!(std::fs::read_to_string(&cargo_log).unwrap().contains("agents-managerd"), "{err}");
+        let calls = std::fs::read_to_string(&call_log).unwrap();
+        assert_eq!(calls.matches("acquire").count(), 1, "一層一個名額就是死結：{calls}");
+    }
+
+    /// 2026-09-18 兩次死鎖的可重現版：PATH 上兩層 shim（其中一層是**舊版**、沒有
+    /// `AM_SHIM_MARKER`，換版期間就是這樣混著），排程器只有兩個名額而且**不會**再多給。
+    ///
+    /// 舊的行為：每一層各拿一個名額，第三層永遠等——`cargo` 一次都沒跑到。現在只有最外層排隊，
+    /// 真 cargo 一定跑得到，而且整趟只吃一個名額。
+    #[test]
+    fn two_layers_of_shims_with_only_two_slots_do_not_deadlock() {
+        let s = Sandbox::new();
+        // 第二層：別顆 bot 的 bin，而且是**舊版** shim（沒有 marker），只認得出檔頭的話會漏掉它。
+        let other = s.dir.join("bots").join("OTHER").join("bin");
+        std::fs::create_dir_all(&other).unwrap();
+        let old_shim = super::SHIM_SH.replace("AM_SHIM_MARKER", "(舊版沒有這一行)");
+        std::fs::write(other.join("cargo"), &old_shim).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(other.join("cargo"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        // 名額上限 2，而且拿滿就不再給——真的死鎖時這個測試會停在這裡（fake curl 不會 sleep，
+        // shim 的 retry_after_secs=0，所以是一個忙等的迴圈，不是 10 分鐘的假等待）。
+        let call_log = s.dir.join("curl-calls.log");
+        s.install_fake_curl(&format!(
+            r#"echo "$@" >> '{log}'
+case "$*" in
+  *acquire*)
+    n=$(grep -c acquire '{log}')
+    if [ "$n" -le 2 ]; then printf '{{"granted":true,"token":"tok-$n","cargo_jobs":2,"lease_ttl_secs":30}}';
+    else printf '{{"granted":false,"active":2,"retry_after_secs":0}}'; fi
+    ;;
+  *) printf '{{}}' ;;
+esac
+"#,
+            log = call_log.display()
+        ));
+        let cargo_log = s.dir.join("cargo.log");
+        let mut cmd = std::process::Command::new(s.dir.join("bin/cargo"));
+        cmd.env(
+            "PATH",
+            format!(
+                "{}:{}:{}:/usr/bin:/bin",
+                s.dir.join("bin").display(),
+                other.display(),
+                s.dir.join("real").display()
+            ),
+        );
+        for key in ["AM_BOT_ID", "AM_HOOK_TOKEN", "AM_PORT", "AM_AGENT_NAME", "AM_REAL_CARGO", "AM_BUILD_SLOT_HELD", "AM_SHIM_DEPTH", "HOME"] {
+            cmd.env_remove(key);
+        }
+        cmd.env("HOME", s.dir.join("fake-home"));
+        cmd.env("AM_BOT_ID", "b1").env("AM_HOOK_TOKEN", "tok").env("AM_TEST_FAKE_CARGO_LOG", cargo_log.to_str().unwrap());
+        let out = cmd.args(["build", "--release"]).output().unwrap();
+        let err = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert_eq!(out.status.code(), Some(0), "{err}");
+        assert!(std::fs::read_to_string(&cargo_log).unwrap().contains("--release"), "真 cargo 沒跑到：{err}");
         let calls = std::fs::read_to_string(&call_log).unwrap();
         assert_eq!(calls.matches("acquire").count(), 1, "一層一個名額就是死結：{calls}");
     }
