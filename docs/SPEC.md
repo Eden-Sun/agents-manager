@@ -1299,6 +1299,12 @@ listen port 只在本機算（pane 行程樹的 pid 對 `lsof -nP -iTCP -sTCP:LI
   等名額的迴圈每輪確認呼叫端（`$PPID`）還在，不在了就自己印一行退出，不留永遠在等的孤兒；續約守衛的 `sleep` 放背景、用 `wait` 等，
   收到 TERM 先殺掉手上的 sleep 再結束（否則每次 cargo 都留一顆 `sleep 60` 的孤兒，最久 TTL/3 秒）；shim 自己被 `SIGKILL`（`trap` 沒機會跑）時，
   續約迴圈發現 shim 不在了——cargo 還活著就繼續續約（它還在用容量），cargo 也沒了就放名額、收狀態目錄、自己結束，不會永遠佔著名額。
+  **租約狀態目錄的回收（issue #154）**：每次租約在 `${TMPDIR:-/tmp}` 底下建 `am-cargo-lease.<shim 的 pid>.<隨機>`（放 cargo 的 pid、失效標記）；
+  正常結束、租約失效、shim 被單獨 `SIGKILL`（守衛接手收尾）都會清，但**整個 pane 被關**（process group 一起被 `SIGKILL`）時 `trap` 與守衛都沒機會跑，目錄會一直留著。
+  所以每次 shim 走到排程那一步（bot／管理員身分與 `AM_PORT` 都在之後、外部編譯與 acquire 之前）先 `am_sweep_stale_leases`，只動**自己名下、名字是 `am-cargo-lease.*` 的目錄**
+  （不碰符號連結、檔案、別人的），「沒人在用」＝建它的 shim（名字裡的 pid）與前景 cargo（`pid` 檔）**都不在了**——
+  只有 shim 死、cargo 還活著的不能清（守衛與 cargo 會接手收尾）；只剩續約守衛活著時清掉無妨（它發現 shim 與 cargo 都不在，只是放名額、收目錄）。舊版 shim 留下的沒有 pid 的目錄，看裡面記的 pid，再要求一小時內沒動過才收（年輕的可能正在被建）。
+  pid 被別的行程借用只會讓目錄多留一陣子、不會誤刪。只掃這個 shim 自己的 `$TMPDIR`：pane 換過 `TMPDIR` 又再也沒跑過 cargo 的，那個目錄沒人掃（daemon 不知道各 pane 的 `TMPDIR`，這裡不做開機掃描）。
   測試端：`cargo_shim` 的 `Sandbox` 把每次 shim 放進自己的 process group，有 120 秒上限，結束後斷言組內一個行程都不剩（含 sleep、等名額的迴圈、假編譯器），
   `Drop`（含 panic）整組終止。
 

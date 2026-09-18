@@ -264,6 +264,49 @@ am_lease_watch() {
     done
 }
 
+# ── 租約狀態目錄的回收（issue #154）───────────────────────────────────────────────────────
+#
+# 每次租約在 `${TMPDIR:-/tmp}` 底下建一個 `am-cargo-lease.<shim 的 pid>.<隨機>` 目錄放 cargo 的 pid 與失效標記。正常結束、
+# 租約失效、shim 被單獨 SIGKILL（續約守衛會接手收尾，見 am_lease_watch）都會清；但**整個 pane 被關**（process
+# group 一起被 SIGKILL）時 trap 與守衛都沒機會跑，目錄就一直留著。所以每次 shim 啟動時順手收掉「沒人在用」的。
+
+# 這個租約狀態目錄還有人在用嗎（`$1` 是目錄）。建它的 shim（名字裡的 pid）或前景的 cargo（`pid` 檔）任何一個還活著就是在用——
+# shim 自己被 SIGKILL 時守衛與 cargo 還在跑，cargo 的目錄不能在它腳下刪掉。只剩續約守衛活著時清掉無妨：它發現 shim 與 cargo 都不在了，
+# 就只是放名額、收目錄（目錄已經沒了照樣收得完）。pid 被別的行程借用（回收重用）只會讓目錄多留一陣子，不會誤刪；判斷不出來一律當成在用。
+#
+# 舊版 shim 的目錄名字裡沒有 pid（`am-cargo-lease.<隨機>`）：只能看裡面記的 pid，再加上「放夠久」——年輕的可能正在被建起來。
+am_lease_dir_in_use() {
+    _u_rest=${1##*/}
+    _u_rest=${_u_rest#am-cargo-lease.}
+    _u_owner=""
+    case "$_u_rest" in
+        [0-9]*.*) _u_owner=${_u_rest%%.*} ;;
+    esac
+    case "$_u_owner" in *[!0-9]*) _u_owner="" ;; esac
+    for _u_pid in "$_u_owner" "$(cat "$1/pid" 2>/dev/null)"; do
+        case "$_u_pid" in '' | *[!0-9]*) continue ;; esac
+        kill -0 "$_u_pid" 2>/dev/null && return 0
+    done
+    if [ -z "$_u_owner" ]; then
+        # 舊格式：一小時內動過的就不碰。`find` 出錯（不支援 -mmin）也當成在用。
+        _u_young=$(find "$1" -maxdepth 0 -mmin -60 2>/dev/null) || return 0
+        [ -z "$_u_young" ] || return 0
+    fi
+    return 1
+}
+
+# 收掉 `${TMPDIR:-/tmp}` 底下沒人在用的 `am-cargo-lease.*`。只動自己名下的**目錄**（不碰符號連結、檔案、別人的）。
+am_sweep_stale_leases() {
+    _sw_base="${TMPDIR:-/tmp}"
+    _sw_base="${_sw_base%/}"
+    for _sw_d in "$_sw_base"/am-cargo-lease.*; do
+        [ -d "$_sw_d" ] && [ ! -L "$_sw_d" ] && [ -O "$_sw_d" ] || continue
+        am_lease_dir_in_use "$_sw_d" && continue
+        rm -rf "$_sw_d" 2>/dev/null
+    done
+    return 0
+}
+
 # 前景跑指令的包裝：先把自己的 pid 寫給守衛，再 `exec` 成那個指令（pid 不變，所以記下來的就是 cargo 本人）。
 # 前景執行不能換成背景：非互動 shell 的背景指令會忽略 SIGINT／SIGQUIT（Ctrl-C 就停不下 cargo，
 # `cargo run` 起來的程式也繼承到「忽略 SIGINT」），stdin 也會被換成 /dev/null。
@@ -304,6 +347,8 @@ am_cargo() {
         printf 'agents-manager: 這個 pane 有 bot 身分卻沒有 AM_PORT（遠端主機連不到 daemon，或環境變數沒帶進來），不知道 daemon 在哪、不會去猜 127.0.0.1，這次 cargo 不排程，直接跑\n' >&2
         exec "$_real" "$@"
     }
+    # 順手收掉沒人在用的租約狀態目錄（issue #154）：被 SIGKILL 的 shim 沒機會自己清。
+    am_sweep_stale_leases
     _holder="${AM_AGENT_NAME:-manual}:$$"
     _bot_id="${AM_BOT_ID:-}"
     _purpose=$(printf '%s' "$*" | cut -c1-200)
@@ -389,7 +434,7 @@ am_cargo() {
 
     # 守衛要有地方留 pid 與「租約失效」標記；建不起來就沒辦法在租約失效時停掉 cargo，
     # 那就別拿名額（放回去、不排程直接跑），不要拿了名額卻不受它管。
-    _state=$(mktemp -d "${TMPDIR:-/tmp}/am-cargo-lease.XXXXXX" 2>/dev/null)
+    _state=$(mktemp -d "${TMPDIR:-/tmp}/am-cargo-lease.$$.XXXXXX" 2>/dev/null)
     if [ -z "$_state" ] || [ ! -d "$_state" ]; then
         curl -s -m 5 -X POST "${_url}/release" --data-urlencode "holder=${_holder}" --data-urlencode "token=${_token}" >/dev/null 2>&1
         printf 'agents-manager: 建不出暫存目錄，沒辦法在名額失效時停掉 cargo，這次不排程，直接跑\n' >&2
@@ -594,7 +639,7 @@ mod tests {
         fn install_slow_cargo(&self, secs: u32) {
             let d = self.dir.display();
             let body = format!(
-                "#!/bin/sh\necho $$ > '{d}/cargo.pid'\n( exec /bin/sleep 300 ) >/dev/null 2>&1 &\necho $! > '{d}/rustc.pid'\ntouch '{d}/cargo.ready'\n/bin/sleep {secs}\nkill $(cat '{d}/rustc.pid') 2>/dev/null\necho done > '{d}/cargo.done'\nexit 0\n"
+                "#!/bin/sh\n[ -z \"${{AM_TEST_FAST:-}}\" ] || exit 0\necho $$ > '{d}/cargo.pid'\n( exec /bin/sleep 300 ) >/dev/null 2>&1 &\necho $! > '{d}/rustc.pid'\ntouch '{d}/cargo.ready'\n/bin/sleep {secs}\nkill $(cat '{d}/rustc.pid') 2>/dev/null\necho done > '{d}/cargo.done'\nexit 0\n"
             );
             let path = self.dir.join("real/cargo");
             std::fs::write(&path, body).unwrap();
@@ -712,6 +757,29 @@ esac"#
                 use std::os::unix::fs::PermissionsExt as _;
                 std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
             }
+        }
+
+        /// PATH：沙盒的 shim、假的真 cargo／curl，再來才是系統的。
+        fn path(&self) -> String {
+            format!("{}:{}:/usr/bin:/bin", self.dir.join("bin").display(), self.dir.join("real").display())
+        }
+
+        /// 假 cargo 起來了（`cargo.ready` 出現）才往下；30 秒沒起來就讓測試失敗。
+        fn wait_cargo_ready(&self) {
+            let up = std::time::Instant::now();
+            while !self.dir.join("cargo.ready").exists() {
+                assert!(up.elapsed() < std::time::Duration::from_secs(30), "cargo 沒起來");
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+
+        /// 沙盒 `tmp/` 底下現有的租約狀態目錄（`am-cargo-lease.*`），排序過的名字。
+        fn lease_dirs(&self) -> Vec<String> {
+            let mut v: Vec<String> = std::fs::read_dir(self.dir.join("tmp"))
+                .map(|d| d.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with("am-cargo-lease.")).collect())
+                .unwrap_or_default();
+            v.sort();
+            v
         }
 
         /// `spawned.pids` 記下的所有 pid。
@@ -1396,6 +1464,148 @@ esac"#,
         assert!(calls.contains("/release"), "名額要放掉：{calls}");
         let leftovers: Vec<_> = std::fs::read_dir(s.dir.join("tmp")).unwrap().flatten().collect();
         assert!(leftovers.is_empty(), "狀態目錄要清掉：{leftovers:?}");
+    }
+
+    /// 起一顆 shim（慢的假 cargo）放進自己的 process group，等 cargo 起來；回傳它與 group id。
+    fn start_slow_shim(s: &Sandbox) -> (std::process::Child, i32) {
+        let mut cmd = s.command(&s.path());
+        cmd.args(["check"]);
+        for (k, v) in &lease_env(s) {
+            cmd.env(k, v);
+        }
+        let (shim, _, _) = s.start_group(&mut cmd, false);
+        s.wait_cargo_ready();
+        let group = shim.id() as i32;
+        (shim, group)
+    }
+
+    /// 「下一次呼叫」：一個很快跑完的 shim（`AM_TEST_FAST` 讓假 cargo 立刻退 0），它啟動時要把沒人在用的租約狀態目錄收掉。
+    fn run_the_next_shim(s: &Sandbox) {
+        let mut env = lease_env(s);
+        env.push(("AM_TEST_FAST", "1".into()));
+        let (_, err, rc) = s.run(&as_refs(&env), &["check"]);
+        assert_eq!(rc, 0, "{err}");
+    }
+
+    /// issue #154：pane 被關（整個 process group 被 SIGKILL）時，shim 的 `trap` 與續約守衛都沒機會清，
+    /// `am-cargo-lease.*` 暫存目錄就一直留著。下一次 shim 啟動時要把「擁有者已不存在」的收掉。
+    /// 先確認目錄真的被留下來（問題本身），再確認下一次呼叫之後不見了（連同它自己的也放乾淨）。
+    #[test]
+    fn a_lease_directory_left_by_a_killed_shim_is_reclaimed_by_the_next_run() {
+        let s = Sandbox::new();
+        s.install_lease_curl(180);
+        s.install_slow_cargo(120);
+        let (mut shim, group) = start_slow_shim(&s);
+        assert_eq!(s.lease_dirs().len(), 1, "跑到一半應該有一個租約狀態目錄：{:?}", s.lease_dirs());
+        // 整個 pane 被關：shim、續約守衛、cargo 都沒機會收尾。
+        unsafe { libc::killpg(group, libc::SIGKILL) };
+        let _ = shim.wait();
+        s.assert_group_gone(group);
+        assert_eq!(s.lease_dirs().len(), 1, "被 SIGKILL 的 shim 沒機會清目錄（這就是要修的問題）：{:?}", s.lease_dirs());
+
+        run_the_next_shim(&s);
+        assert!(s.lease_dirs().is_empty(), "擁有者已不在的目錄要被下一次呼叫收掉：{:?}", s.lease_dirs());
+    }
+
+    /// 正在用的不能被清：A 還在編（shim、守衛、cargo 都活著），另一顆 shim 啟動並清了一輪，A 的目錄照舊；
+    /// A 自己正常收尾時再自己清掉。
+    #[test]
+    fn a_lease_directory_in_use_is_left_alone_by_another_shims_sweep() {
+        let s = Sandbox::new();
+        s.install_lease_curl(180);
+        s.install_slow_cargo(4);
+        let (mut a, group) = start_slow_shim(&s);
+        let mine = s.lease_dirs();
+        assert_eq!(mine.len(), 1, "{mine:?}");
+
+        run_the_next_shim(&s);
+        assert_eq!(s.lease_dirs(), mine, "A 還在跑，別人不能把它的目錄清掉");
+
+        assert!(a.wait().unwrap().success(), "A 正常跑完");
+        s.assert_group_gone(group);
+        assert!(s.lease_dirs().is_empty(), "A 自己收尾要清掉：{:?}", s.lease_dirs());
+    }
+
+    /// 擁有者「不完全死」的情況：只有 shim 被 SIGKILL，cargo 與續約守衛還活著（#151：它們會接手收尾）——cargo 還在用這個目錄，
+    /// 不能被清；等整組都死了才算沒人在用、才收得掉。
+    #[test]
+    fn a_directory_is_in_use_while_cargo_outlives_the_shim() {
+        let s = Sandbox::new();
+        s.install_lease_curl(180);
+        s.install_slow_cargo(120);
+        let (mut shim, group) = start_slow_shim(&s);
+        let mine = s.lease_dirs();
+        assert_eq!(mine.len(), 1, "{mine:?}");
+        // 只殺 shim 本人：守衛（背景）與 cargo 成了孤兒、還在跑。
+        unsafe { libc::kill(shim.id() as i32, libc::SIGKILL) };
+        let _ = shim.wait();
+        assert!(!group_members(group).is_empty(), "守衛與 cargo 還活著");
+
+        run_the_next_shim(&s);
+        assert_eq!(s.lease_dirs(), mine, "cargo 還在用這個目錄，不能清");
+
+        // 整組都沒了：沒人在用了，下一次呼叫才收得掉。
+        unsafe { libc::killpg(group, libc::SIGKILL) };
+        s.assert_group_gone(group);
+        run_the_next_shim(&s);
+        assert!(s.lease_dirs().is_empty(), "{:?}", s.lease_dirs());
+    }
+
+    /// 清的範圍與判斷：只動自己名下、名字是 `am-cargo-lease.*` 的**目錄**（不是符號連結、不是檔案）；
+    /// 名字裡帶 pid 的（現行格式）看那個 pid 死活；沒有 pid 的（舊版 shim 留下的）看裡面記的 pid，
+    /// 再來要放夠久（一小時）才收——年輕的可能正在被建起來。
+    #[test]
+    fn the_sweep_only_takes_directories_nobody_owns_any_more() {
+        let s = Sandbox::new();
+        s.install_lease_curl(180);
+        s.install_slow_cargo(1);
+        let tmp = s.dir.join("tmp");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut dead = std::process::Command::new("sh").args(["-c", "exit 0"]).spawn().unwrap();
+        let dead_pid = dead.id();
+        dead.wait().unwrap();
+        let live_pid = std::process::id();
+        let mkdir = |name: &str, pid_file: Option<u32>, old: bool| {
+            let d = tmp.join(name);
+            std::fs::create_dir_all(&d).unwrap();
+            if let Some(p) = pid_file {
+                std::fs::write(d.join("pid"), p.to_string()).unwrap();
+            }
+            if old {
+                assert!(std::process::Command::new("touch").args(["-t", "202001010000"]).arg(&d).status().unwrap().success());
+            }
+        };
+        // 該收的：擁有者（名字裡的 pid）已死；舊格式、放很久、裡面記的 pid 也死了／沒有。
+        mkdir(&format!("am-cargo-lease.{dead_pid}.aaaaaa"), None, false);
+        mkdir("am-cargo-lease.OldDead", Some(dead_pid), true);
+        mkdir("am-cargo-lease.OldNoPid", None, true);
+        // 不該收的：擁有者還活著；舊格式但裡面記的 pid 還活著；舊格式很年輕（可能正在建）；不是目錄；符號連結；別的東西。
+        mkdir(&format!("am-cargo-lease.{live_pid}.bbbbbb"), None, false);
+        mkdir("am-cargo-lease.OldLive", Some(live_pid), true);
+        mkdir("am-cargo-lease.Young1", None, false);
+        std::fs::write(tmp.join("am-cargo-lease.afile"), "x").unwrap();
+        let elsewhere = s.dir.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("keep"), "x").unwrap();
+        // 名字是「擁有者已死」的格式：不是符號連結的話這個會被收掉，所以「還在」證明的是符號連結被放過。
+        let link_name = format!("am-cargo-lease.{dead_pid}.cccccc");
+        std::os::unix::fs::symlink(&elsewhere, tmp.join(&link_name)).unwrap();
+        mkdir("unrelated-dir", None, true);
+
+        run_the_next_shim(&s);
+        let mut left: Vec<String> = std::fs::read_dir(&tmp).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        left.sort();
+        let mut want = vec![
+            format!("am-cargo-lease.{live_pid}.bbbbbb"),
+            "am-cargo-lease.OldLive".to_string(),
+            "am-cargo-lease.Young1".to_string(),
+            "am-cargo-lease.afile".to_string(),
+            link_name,
+            "unrelated-dir".to_string(),
+        ];
+        want.sort();
+        assert_eq!(left, want, "只該收掉擁有者已不在的目錄");
+        assert!(elsewhere.join("keep").exists(), "符號連結指到的地方不能動");
     }
 
     /// 前景執行的語意不能因為多了守衛而變：stdin 照樣接得到 cargo（`cargo run` 起來的程式要讀輸入）。
