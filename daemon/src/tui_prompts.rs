@@ -60,6 +60,27 @@ fn survey_options(line: &str) -> [bool; 4] {
     ]
 }
 
+/// 單獨一行壓成好比對的樣子：框線字元當空白、行首的游標／項目符號（`❯`、`>`、`•`…）丟掉，
+/// 其餘小寫、空白收成一個。
+///
+/// 對話框要**逐行**認，不能把整段畫面壓成一串再 `contains`：只要三段字都出現在最底幾行就中，
+/// agent 自己在回報裡引了「switch model?」「yes, switch to」「no, go back」也會被當成框開著，
+/// 之後每則 prompt 都被擋成 409 `dialog_open`（2026-09-18 實測）。真的框一定是標題、`1. …`、
+/// `2. …` 各自成行，正文引文則在句子中間。
+fn norm_line(line: &str) -> String {
+    let spaced: String = line
+        .chars()
+        .map(|c| if c.is_whitespace() || "│┌┐└┘─├┤┬┴┼╭╮╯╰▎▔".contains(c) { ' ' } else { c.to_ascii_lowercase() })
+        .collect();
+    let joined = spaced.split_whitespace().collect::<Vec<_>>().join(" ");
+    joined.trim_start_matches(|c| "❯›»>*●•⏺⎿✻-— ".contains(c)).trim().to_string()
+}
+
+/// 有沒有哪一行（照 [`norm_line`] 正規化後）以這段字開頭。
+fn line_starts_with(lines: &[String], prefix: &str) -> bool {
+    lines.iter().any(|l| l.starts_with(prefix))
+}
+
 /// 問句要由 `●` / `>` 開頭且相鄰幾行內有至少三個選項，避免 agent 引用這些字串時誤認。
 pub fn is_feedback_survey(screen: &str) -> bool {
     let lines: Vec<String> = screen
@@ -97,8 +118,11 @@ pub fn is_feedback_survey(screen: &str) -> bool {
 /// Claude Code 開場登入選單（`CLAUDE_CONFIG_DIR` 未登入）。herdr 看起來是活的，prompt 卻只打在
 /// 選單上、回合永遠掛著，所以 [`crate::lifecycle`] 送前先看，中了回 409 `needs_login`。
 pub fn is_login_menu(screen: &str) -> bool {
-    let t = flatten(screen);
-    t.contains("select login method") && (t.contains("claude account with subscription") || t.contains("anthropic console account"))
+    // 標題允許窄 pane 折行（`Select login` / ` method:`），但選項一定要自己成行——句子裡提到
+    // 「select login method」的正文不算（[`norm_line`]）。
+    let lines: Vec<String> = screen.lines().map(norm_line).collect();
+    flatten(screen).contains("select login method")
+        && (line_starts_with(&lines, "1. claude account with subscription") || line_starts_with(&lines, "2. anthropic console account"))
 }
 
 /// claude 狀態列靠右的 `✔ Update installed · Restart to update`。回固定字而非整行：左半是每回合
@@ -123,18 +147,19 @@ pub const UPDATE_NOTICE: &str = "Update installed · Restart to update";
 /// 漏掉哪一個，那個框就留在畫面上吃掉下一則 prompt。
 pub fn is_switch_model_dialog(screen: &str) -> bool {
     let lines: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
-    let tail = lines[lines.len().saturating_sub(DIALOG_TAIL_LINES)..].join("\n");
-    let t = flatten(&tail);
-    (t.contains("switch model?") || t.contains("change effort level?"))
-        && t.contains("yes, switch to")
-        && t.contains("no, go back")
+    let tail: Vec<String> = lines[lines.len().saturating_sub(DIALOG_TAIL_LINES)..].iter().map(|l| norm_line(l)).collect();
+    let titled = tail.iter().any(|l| l.starts_with("switch model?") || l.starts_with("change effort level?"));
+    titled && line_starts_with(&tail, "1. yes, switch to") && line_starts_with(&tail, "2. no, go back")
 }
 
 /// grok 1.0.34 開在沒信任過的目錄時跳「Do you trust the contents of this directory?」（y／n），
 /// herdr 看不出是對話框，prompt 打進去會被吃掉（2026-09-17 使用者截圖，報 composer_unreadable）。
 pub fn is_grok_trust_dialog(screen: &str) -> bool {
-    let t = flatten(screen);
-    t.contains("do you trust the contents of this directory") && t.contains("yes, proceed") && t.contains("no, quit")
+    // 同 [`is_switch_model_dialog`]：標題與兩個選項各自成行，句子裡提到不算。
+    let lines: Vec<String> = screen.lines().map(norm_line).collect();
+    line_starts_with(&lines, "do you trust the contents of this directory")
+        && line_starts_with(&lines, "yes, proceed")
+        && line_starts_with(&lines, "no, quit")
 }
 
 /// 確認框連同框線與 statusLine 的最大高度；再往上是正文。
@@ -271,6 +296,29 @@ mod tests {
         // 同樣不能被正文裡的引文帶偏。
         let quoted = format!("{}\n{}\n─────\n❯\n─────\n  tony. | agents-manager | Opus 5 | 5h:96%\n", CHANGE_EFFORT, "⏺ Bash(cargo test)\n  ⎿  ok\n".repeat(8));
         assert!(!is_switch_model_dialog(&quoted));
+    }
+
+    /// 這顆 bot 回報完上面那個修正之後的真畫面尾段（2026-09-18，w168:p91）：畫面上沒有框，只是
+    /// 正文引了框裡的三段字，舊的整段 `contains` 就中了——之後每則 prompt 都被擋成 409
+    /// `dialog_open`，只能用 herdr 直送才進得來。
+    const QUOTED_REPORT: &str = "\
+  ⏺ 原因：claude 2.1.x 的 /effort 跳的是跟 /model 同一種確認框，但標題是「Change effort level?」。
+  - 改動：daemon/src/tui_prompts.rs 的偵測改成 \"switch model?\" || \"change effort level?\"，另兩個條件（yes, switch to / no, go back）不變；加了一條用截圖真畫面的測試。
+  - 驗證：cargo test -p agents-managerd tui_prompts → 8 passed 0 failed。
+  - 沒動 lifecycle.rs（有別人未提交的改動），所以函式名仍是 is_switch_model_dialog、提示字仍寫「Switch model?」。
+  - 要生效需重建 release 並重啟 daemon，這要 AGM 核准，我沒有執行。
+────────────────────
+❯
+────────────────────
+  15m2dg | agents-manager | Opus 5 31% | 5h:96%
+  ⏵⏵ bypass permissions on
+";
+
+    #[test]
+    fn a_report_quoting_the_dialog_is_not_a_dialog() {
+        assert!(!is_switch_model_dialog(QUOTED_REPORT));
+        // 這份原始碼本身也引了那幾段字。
+        assert!(!is_switch_model_dialog(include_str!("tui_prompts.rs")));
     }
 
     #[test]
