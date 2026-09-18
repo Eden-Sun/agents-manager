@@ -286,6 +286,8 @@ export interface ComposerState {
   queued: boolean
   inFlightTurnId: string | null
   unknownTurnId: string | null
+  /** Bot 沒在跑：送出＝排隊＋自動啟動，起來後再送（2026-09-18 使用者：不要先擋著）。 */
+  autoStart?: boolean
 }
 
 export interface StoreState {
@@ -1116,6 +1118,7 @@ export const useStore = create<StoreState>((set, get) => ({
       async () => {
         await api.startBot(botId)
         await get().refreshState()
+        if (get().queuedSends[botId]) flushQueued(botId)
       },
       startErrText,
     )
@@ -2343,6 +2346,8 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
           ? { hosts: mergeHosts(s.hosts, [{ name: target.host, connected: target.connected }]) }
           : {}),
       }))
+      // 自動啟動排隊的訊息：bot 起來、閒著就送（flushQueued 會再檢查一次能不能送）。
+      if (run?.state === 'running' && run.agent_status === 'idle' && get().queuedSends[botId]) flushQueued(botId)
       // working → idle 也算回合完成：終端直接對話或沒裝 hook 時不會有 message/turn frame。
       if (!wasWorking && run?.agent_status === 'working') clearHookCompletion(botId)
       if (wasWorking && run?.agent_status === 'idle') {
@@ -2875,7 +2880,9 @@ export function composerState(state: StoreState, botId: string | null): Composer
     return { ...base, reason: 'daemon 與 herdr 的連線中斷，無法送出訊息' }
   }
   const run = state.runs[botId]
-  if (!run) return { ...base, reason: 'Bot 尚未啟動，請先按「啟動」' }
+  if (!run) {
+    return { ...base, disabled: false, queued: true, autoStart: true, reason: 'Bot 沒在跑：送出會先啟動它，起來後自動送出' }
+  }
   if (run.state !== 'running') return { ...base, reason: `Run 狀態為 ${run.state}，尚無法送出訊息` }
   if (run.agent_status === 'blocked') {
     return { ...base, reason: 'agent 正在等待終端回應，請在上方面板按鍵處理' }
