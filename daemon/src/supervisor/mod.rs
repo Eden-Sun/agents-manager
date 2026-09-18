@@ -335,7 +335,9 @@ pub async fn assign(
     // than refusing work on a string match (SPEC §18.4).
     let conflicts = ownership_conflicts(app, ownership, None).await?;
 
-    let a = store::insert_assignment(
+    // 任務連結與驗收角色跟列**同一句 INSERT**（issue #136）：派送當下撞到額度時 controller 要看得到這件屬於哪個
+    // 任務、什麼角色，派工訊息標成哪個角色送的也看這一欄——分開寫的話，後一句失敗會留下一件沒掛任務、照樣被派出去的交辦。
+    let a = store::insert_assignment_linked(
         &app.db,
         Some(&request_id),
         target_bot_id,
@@ -344,19 +346,13 @@ pub async fn assign(
         ownership,
         follow_up_of,
         expects_review,
+        mission,
+        review_role.map(roles::Role::as_str),
     )
     .await
     .map_err(up)?;
     if let Some(parent) = follow_up_of {
         let _ = store::link_followup(&app.db, parent, &a.id).await;
-    }
-    // 派送之前就要掛上任務：派送當下撞到額度時，controller 要看得到這件屬於哪個任務、什麼角色。
-    if let Some((mission_id, role)) = mission {
-        store::set_mission_link(&app.db, &a.id, mission_id, role).await.map_err(up)?;
-    }
-    // 同樣要在派送之前：派工訊息標成哪個角色送的，看的就是這一欄。
-    if let Some(r) = review_role {
-        store::set_review_role(&app.db, &a.id, r.as_str()).await.map_err(up)?;
     }
     // Best effort: a failure here leaves the row queued, which is the recoverable state.
     controller::dispatch(app, &a.id).await;
