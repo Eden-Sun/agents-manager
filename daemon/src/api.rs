@@ -37,6 +37,7 @@ impl IntoResponse for LcError {
                 let retry = v.get("retry_after_secs").and_then(Value::as_i64).unwrap_or(10).max(1);
                 (StatusCode::SERVICE_UNAVAILABLE, [(axum::http::header::RETRY_AFTER, retry.to_string())], Json(v)).into_response()
             }
+            LcError::Uncommitted(v) => (StatusCode::SERVICE_UNAVAILABLE, Json(v)).into_response(),
             LcError::Upstream(m) => {
                 (StatusCode::BAD_GATEWAY, Json(json!({"error": "upstream", "message": m}))).into_response()
             }

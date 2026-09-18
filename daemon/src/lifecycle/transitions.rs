@@ -38,13 +38,13 @@ pub const TURN_DELIVERIES: [&str; 4] = ["pending", "ok", "unknown", "failed"];
 /// UPDATE；一顆 run 進了 `exited` 就是這輩子結束了，要再跑得開一顆新 run。
 pub const RUN_STATE_EDGES: &[(&str, &str, &str)] = &[
     ("(insert)", "starting", "lifecycle/start.rs:161 新開一顆 run"),
-    ("starting", "running", "reconcile.rs:344,390 CASE WHEN…THEN 'running'（在對應的 herdr agent 裡看到了）；lifecycle/start.rs:731 set_run（agent_status 探測回來）"),
+    ("starting", "running", "reconcile.rs:344,390 CASE WHEN…THEN 'running'（在對應的 herdr agent 裡看到了）；lifecycle/start.rs start_inner（CAS `run_state::transition`，agent_status 探測回來；寫不進去回 503、排對帳重試，#145）"),
     ("stopping", "running", "reconcile.rs:344,390 同一條 CASE WHEN；lifecycle/start.rs:870 guarded UPDATE（停止被打斷，bot 又動了）"),
     ("starting", "stopping", "lifecycle/start.rs:841、lifecycle/stop.rs:36（使用者主動停止；SQL 本身沒有 guard 限定 FROM，呼叫端只在該轉的時候才呼叫）"),
     ("running", "stopping", "同上"),
     ("stopping", "stopped", "lifecycle/start.rs:877、lifecycle/stop.rs:72"),
     ("stopped", "exited", "lifecycle/start.rs:781（唯一在 SQL 本身就 guard `AND state='stopped'` 的一條）"),
-    ("starting", "exited", "lifecycle/queue.rs mark_run_exited（CAS guard `AND state IN ('starting','running','stopping')`，#131 之前只有 Rust 層的 SELECT；寫不進去就不收尾、排對帳重試，#135）；lifecycle/start.rs:182（啟動失敗）"),
+    ("starting", "exited", "lifecycle/queue.rs mark_run_exited（CAS guard `AND state IN ('starting','running','stopping')`，#131 之前只有 Rust 層的 SELECT；寫不進去就不收尾、排對帳重試，#135）；lifecycle/start.rs start_bot_locked_with 啟動失敗（CAS from starting；寫不進去排對帳重試，#145）"),
     ("running", "exited", "同上"),
     ("stopping", "exited", "同上"),
 ];
