@@ -497,7 +497,16 @@ fn claude_settings(hook_cmd: &str, statusline: &str, wants_remote: bool) -> Valu
         // 行為的是 settings.json 的 `autoContinueAtUsageLimit`（`/config` 裡的「Continue automatically
         // at usage limit」，claude 2.1.234 起存在），關掉之後撞到上限會停下來、把「等」變成使用者自己選
         // 的選項，不會自己續跑。
-        "autoContinueAtUsageLimit": false
+        "autoContinueAtUsageLimit": false,
+        // issue #102：claude 2.1.275 起會把「你 claude.ai 帳號上開啟的 skills／plugins」同步進用同一個帳號
+        // 登入的終端 session。managed pane 的工具集必須由 daemon 決定，理由跟上面那條同一條：
+        //   1. 同步進來的東西 daemon 不知情，同一顆 bot 在不同時間會跑出不同行為，出事無從重現；
+        //   2. skills 會吃 context，而 §4.4a 的 context／額度判斷都假設環境是 daemon 決定的；
+        //   3. 帳號是共用的（cc0／cc1／cc2…），一個人在 claude.ai 上開一個 skill 會同時改掉所有用那個帳號的 bot。
+        // 只寫進 daemon 注入的 `--settings` 檔，使用者自己終端的 `~/.claude*/settings.json` 不受影響；
+        // 2.1.275 以前的 claude 不認得這兩個鍵，一律靜靜忽略。
+        "syncClaudeAiSkills": false,
+        "syncClaudeAiPlugins": false
     })
 }
 
@@ -1573,6 +1582,18 @@ mod claude_settings_tests {
         for wants_remote in [false, true] {
             let v = claude_settings("hook", "sl", wants_remote);
             assert_eq!(v["autoContinueAtUsageLimit"], json!(false), "wants_remote={wants_remote}");
+        }
+    }
+
+    /// issue #102：claude 2.1.275 把 claude.ai 帳號上啟用的 skills／plugins 同步進終端 session。managed
+    /// pane 的工具集由 daemon 決定，不讓 CLI 接一條我們看不到的線——帳號是共用的，一個人在網站上開一個
+    /// skill 會同時改掉所有用那個帳號的 bot，而且同步進來的 skills 會吃掉 §4.4a 在算的 context。
+    #[test]
+    fn managed_panes_do_not_sync_skills_or_plugins_from_the_claude_ai_account() {
+        for wants_remote in [false, true] {
+            let v = claude_settings("hook", "sl", wants_remote);
+            assert_eq!(v["syncClaudeAiSkills"], json!(false), "wants_remote={wants_remote}");
+            assert_eq!(v["syncClaudeAiPlugins"], json!(false), "wants_remote={wants_remote}");
         }
     }
 
