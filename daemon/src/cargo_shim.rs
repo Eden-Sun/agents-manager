@@ -293,6 +293,25 @@ am_cargo() {
     _purpose=$(printf '%s' "$*" | cut -c1-200)
     _url="http://127.0.0.1:${_port}/build-slots"
 
+    # 外部 Cargo worker（issue #104）：會轉到遠端的指令**不佔本機的建置名額**（issue #155）——名額管的是本機的
+    # RAM／CPU，遠端編譯不吃它；以前先拿名額再決定轉不轉，`max_concurrent=2` 時全部走遠端也只能同時跑 2 個。
+    # helper 本身讀 config + 0600 secret file，pane 不會拿到 SSH 密碼。
+    # 125 = 設定在 pane 啟動後被關掉／這個指令不適合 offload（**還沒有**在遠端動手），退回本機：
+    # 這時才落到下面去拿本機名額；其他非 0 = 遠端驗證真的失敗，原樣回報，不能偷偷改成本機成功。
+    #
+    # pane 缺 helper／config 的位置時**不能靜默退回本機**（issue #138）：整批子 agent 因此在本機排隊，
+    # 而沒有人知道外部編譯根本沒生效。缺哪個就講哪個。
+    if am_remote_cargo_eligible "${1:-}"; then
+        _remote_missing=$(am_remote_cargo_missing)
+        if [ -n "$_remote_missing" ]; then
+            printf 'agents-manager: 外部編譯沒有啟用：這個 pane 缺 %s（沒設，或指到的檔案不能執行），這次 %s 在本機跑\n' "$_remote_missing" "${1:-cargo}" >&2
+        else
+            "$AM_DAEMON_EXE" remote-cargo --config "$AM_CONFIG_PATH" --data-dir "$AM_DATA_DIR" --cwd "$PWD" -- "$@"
+            _remote_rc=$?
+            [ "$_remote_rc" -eq 125 ] || exit "$_remote_rc"
+        fi
+    fi
+
     _attempt=0
     while :; do
         _acq_at=$(am_epoch)
@@ -364,7 +383,7 @@ am_cargo() {
     _renew_pid=$!
     trap '_release' EXIT INT TERM
 
-    # 租約已經失效（前景那個被我們停掉，或是在兩段指令之間失效）：收尾、告訴使用者為什麼、退 75（可重試）。
+    # 租約已經失效（前景那個被我們停掉，或是在 cargo 起來之前就失效）：收尾、告訴使用者為什麼、退 75（可重試）。
     # 等背景那個把行程樹收乾淨才放手（它還在等 TERM 之後的兩秒寬限，之後才補 KILL）。
     am_lease_lost_exit() {
         wait "$_renew_pid" 2>/dev/null
@@ -379,31 +398,7 @@ am_cargo() {
         [ -s "$_state/lost" ] && [ "$1" -ne 0 ]
     }
 
-    # 外部 Cargo worker：helper 本身讀 config + 0600 secret file，pane 不會拿到 SSH 密碼。
-    # 125 = 設定在 pane 啟動後被關掉／這個指令不適合 offload，退回本機 cargo；
-    # 其他非 0 = 遠端驗證真的失敗，原樣回報，不能偷偷改成本機成功。
-    #
-    # pane 缺 helper／config 的位置時**不能靜默退回本機**（issue #138）：整批子 agent 因此在本機排隊，
-    # 而沒有人知道外部編譯根本沒生效。缺哪個就講哪個。
-    if am_remote_cargo_eligible "${1:-}"; then
-        _remote_missing=$(am_remote_cargo_missing)
-        if [ -n "$_remote_missing" ]; then
-            printf 'agents-manager: 外部編譯沒有啟用：這個 pane 缺 %s（沒設，或指到的檔案不能執行），這次 %s 在本機跑\n' "$_remote_missing" "${1:-cargo}" >&2
-        else
-            sh -c "$_guard_sh" am-guarded "$_state/pid" "$AM_DAEMON_EXE" remote-cargo --config "$AM_CONFIG_PATH" --data-dir "$AM_DATA_DIR" --cwd "$PWD" -- "$@"
-            _remote_rc=$?
-            if am_lease_lost_now "$_remote_rc"; then
-                am_lease_lost_exit
-            fi
-            if [ "$_remote_rc" -ne 125 ]; then
-                _release
-                trap - EXIT INT TERM
-                exit "$_remote_rc"
-            fi
-        fi
-    fi
-
-    # 沒有名額就不起本機 cargo（例如 remote-cargo 途中租約失效、helper 又剛好回 125）。
+    # 沒有名額就不起本機 cargo（租約在起 cargo 之前就失效了：守衛那時還沒有 pid 可以停）。
     if [ -s "$_state/lost" ]; then
         am_lease_lost_exit
     fi
@@ -675,6 +670,34 @@ esac"#
             }
         }
 
+        /// 假的 `remote-cargo` helper（`AM_DAEMON_EXE`）：先把收到的 argv 記進 `helper.log`，再照 `body` 跑。
+        /// 回傳 pane 環境裡要帶的三個變數（`AM_DAEMON_EXE`／`AM_CONFIG_PATH`／`AM_DATA_DIR`——缺哪個 shim 都不會轉遠端）。
+        fn install_fake_helper(&self, body: &str) -> Vec<(&'static str, String)> {
+            let helper = self.dir.join("fake-helper");
+            std::fs::write(&helper, format!("#!/bin/sh\necho \"$*\" >> '{}/helper.log'\n{body}\n", self.dir.display())).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            vec![("AM_DAEMON_EXE", helper.display().to_string()), ("AM_CONFIG_PATH", "/tmp/c.toml".into()), ("AM_DATA_DIR", "/tmp".into())]
+        }
+
+        /// 會數「現在有幾顆同時在跑」的假 cargo：起來就留一個記號、把當下的數量記進 `peak.log`，睡一秒才收掉記號。
+        fn install_counting_cargo(&self) {
+            let d = self.dir.display();
+            let body = format!(
+                "#!/bin/sh\nmkdir -p '{d}/running'\n: > '{d}/running/'$$\nls '{d}/running' | wc -l | tr -d ' ' >> '{d}/peak.log'\n/bin/sleep 1\nrm -f '{d}/running/'$$\nexit 0\n"
+            );
+            let path = self.dir.join("real/cargo");
+            std::fs::write(&path, body).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+
         /// `spawned.pids` 記下的所有 pid。
         fn spawned(&self) -> Vec<i32> {
             std::fs::read_to_string(self.dir.join("spawned.pids")).unwrap_or_default().lines().filter_map(|l| l.trim().parse().ok()).collect()
@@ -893,6 +916,189 @@ esac
         );
         assert_eq!(rc, 0, "{err}");
         assert!(!err.contains("外部編譯沒有啟用"), "齊全就不提示：{err}");
+    }
+
+    /// issue #155：會轉到外部編譯主機的 check／test／clippy **不佔本機的建置名額**——本機名額管的是本機的 RAM，
+    /// 遠端編譯不吃它。以前 shim 先拿名額、再決定轉遠端，`max_concurrent=2` 時就算全部走遠端也只能同時跑 2 個，
+    /// 其餘的子 agent 在本機排隊。排程器在這裡一律回 granted（額滿的話舊 shim 會忙等到測試逾時），
+    /// 所以斷言的是「**根本沒去問**」；helper 的結束碼原樣帶出去、不會再偷偷在本機重跑。
+    #[test]
+    fn a_command_that_goes_to_the_remote_host_never_asks_for_a_local_slot() {
+        let cases: Vec<(&str, &str, i32)> = shells()
+            .into_iter()
+            .flat_map(|sh| ["check", "test", "clippy"].into_iter().map(move |sub| (sh, sub)))
+            .flat_map(|(sh, sub)| [0, 101, 126].into_iter().map(move |rc| (sh, sub, rc)))
+            .collect();
+        for (sh, sub, helper_rc) in cases {
+            let s = Sandbox::new();
+            s.install_fake_curl(&format!(
+                "echo \"$*\" >> '{d}/curl.log'\nprintf '{{\"granted\":true,\"token\":\"tok-1\",\"cargo_jobs\":2,\"lease_ttl_secs\":30}}'\n",
+                d = s.dir.display()
+            ));
+            let remote = s.install_fake_helper(&format!("exit {helper_rc}"));
+            let cargo_log = s.dir.join("cargo.log");
+            let mut env = lease_env(&s);
+            env.extend(remote);
+            env.push(("AM_PORT", "1".into()));
+            env.push(("AM_TEST_FAKE_CARGO_LOG", cargo_log.display().to_string()));
+            let (_, err, rc) = s.run_in(Some(sh), &as_refs(&env), &[sub, "-p", "agents-managerd"]);
+            let why = format!("{sh} {sub}／helper 退 {helper_rc}：{err}");
+            assert_eq!(rc, helper_rc, "遠端的結果原樣帶出去：{why}");
+            let helper_log = std::fs::read_to_string(s.dir.join("helper.log")).unwrap_or_default();
+            assert!(helper_log.contains("remote-cargo") && helper_log.contains(sub), "helper 要被叫到：{why}\n{helper_log}");
+            let curl_log = std::fs::read_to_string(s.dir.join("curl.log")).unwrap_or_default();
+            assert!(curl_log.is_empty(), "遠端編譯不該跟本機排程器要名額：{why}\n{curl_log}");
+            assert!(!cargo_log.exists(), "轉到遠端的不該再在本機跑一次：{why}");
+        }
+    }
+
+    /// 同一件事的另一面：helper 回 125（設定被關掉、不適合 offload）＝**沒有**在遠端跑，這時才真的落在本機——
+    /// 也才去拿本機名額。順序是 helper → acquire → 本機 cargo → release。
+    #[test]
+    fn the_local_slot_is_only_taken_after_the_remote_host_declines() {
+        let s = Sandbox::new();
+        let order = s.dir.join("order.log");
+        s.install_fake_curl(&format!(
+            "case \"$*\" in\n  *acquire*) echo acquire >> '{o}'; printf '{{\"granted\":true,\"token\":\"tok-1\",\"cargo_jobs\":3,\"lease_ttl_secs\":30}}' ;;\n  *release*) echo release >> '{o}'; printf '{{}}' ;;\n  *) printf '{{}}' ;;\nesac\n",
+            o = order.display()
+        ));
+        let remote = s.install_fake_helper(&format!("echo helper >> '{}'\nexit 125", order.display()));
+        let mut env = lease_env(&s);
+        env.extend(remote);
+        env.push(("AM_PORT", "1".into()));
+        env.push(("AM_TEST_FAKE_CARGO_LOG", order.display().to_string()));
+        let (_, err, rc) = s.run(&as_refs(&env), &["test", "-p", "agents-managerd"]);
+        assert_eq!(rc, 0, "{err}");
+        let lines: Vec<String> = std::fs::read_to_string(&order).unwrap().lines().map(str::to_string).collect();
+        let pos = |what: &str| lines.iter().position(|l| l == what).unwrap_or_else(|| panic!("順序紀錄裡沒有 {what}：{lines:?}"));
+        assert!(pos("helper") < pos("acquire"), "先問遠端、沒接才去拿本機名額：{lines:?}");
+        assert!(pos("acquire") < pos("CARGO_BUILD_JOBS=3"), "拿到名額才在本機跑（jobs 數照名額回應）：{lines:?}");
+        assert!(pos("CARGO_BUILD_JOBS=3") < pos("release"), "跑完才放：{lines:?}");
+    }
+
+    /// 真的 router（跟 daemon 同一份），回傳它的 port 與 server 的 handle。
+    fn serve_router(app: std::sync::Arc<crate::state::App>) -> (u16, tokio::task::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        listener.set_nonblocking(true).unwrap();
+        let router = crate::api::router(app);
+        let server = tokio::spawn(async move {
+            let l = tokio::net::TcpListener::from_std(listener).unwrap();
+            let _ = axum::serve(l, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await;
+        });
+        (port, server)
+    }
+
+    /// 跑 `n` 顆 shim（同一個沙盒、同一個真的 router）：回傳它們的 process group 與 stderr 檔。
+    fn start_shims(s: &Sandbox, port: u16, n: usize, extra: &[(&str, String)]) -> Vec<(std::process::Child, std::path::PathBuf)> {
+        let home = s.dir.join("fake-home/.config/agents-manager");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("ui-token"), "test-token").unwrap();
+        std::fs::create_dir_all(s.dir.join("tmp")).unwrap();
+        (0..n)
+            .map(|_| {
+                let mut cmd = s.command(&format!("{}:{}:/usr/bin:/bin", s.dir.join("bin").display(), s.dir.join("real").display()));
+                cmd.env("AM_PORT", port.to_string()).env("TMPDIR", s.dir.join("tmp")).args(["test", "-p", "agents-managerd"]);
+                for (k, v) in extra {
+                    cmd.env(k, v);
+                }
+                let (child, _, err) = s.start_group(&mut cmd, false);
+                (child, err)
+            })
+            .collect()
+    }
+
+    /// 等這批 shim 全部結束，回傳各自的結束碼與 stderr；一律確認整組行程都收乾淨。
+    async fn finish_shims(s: &Sandbox, shims: Vec<(std::process::Child, std::path::PathBuf)>) -> Vec<(i32, String)> {
+        let mut out = Vec::new();
+        for (mut child, err) in shims {
+            let started = std::time::Instant::now();
+            let status = loop {
+                if let Some(st) = child.try_wait().unwrap() {
+                    break st;
+                }
+                assert!(started.elapsed() < std::time::Duration::from_secs(120), "shim 跑了 120 秒還沒結束：{}", std::fs::read_to_string(&err).unwrap_or_default());
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            };
+            s.assert_group_gone(child.id() as i32);
+            out.push((status.code().unwrap_or(-1), std::fs::read_to_string(&err).unwrap_or_default()));
+        }
+        out
+    }
+
+    /// issue #155 的驗收：本機名額 `max_concurrent=2`，同時進來 4 個會轉遠端的 test——**四個都要同時在遠端跑**，
+    /// 名額表上一列都沒有（沒佔、也沒在排隊）。**真的** router＋**真的** curl＋**真的** shim。
+    /// helper 起來就留記號、等測試說 go 才結束（等不到就退 3）：以前只有 2 個拿得到本機名額，另外 2 個 helper 根本沒被叫起來，
+    /// 測試在「同時起來的只有 2 個」這一步就紅。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn many_remote_tests_at_once_are_not_limited_by_the_local_slots() {
+        use std::time::{Duration, Instant};
+        const N: usize = 4;
+        let env = crate::testing::env().await;
+        env.app
+            .cfg
+            .update(|c| {
+                c.build.max_concurrent = 2;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let (port, server) = serve_router(env.app.clone());
+
+        let s = Sandbox::new();
+        let d = s.dir.display().to_string();
+        let remote = s.install_fake_helper(&format!(
+            "touch '{d}/started.'$$\ni=0\nwhile [ ! -e '{d}/go' ] && [ $i -lt 600 ]; do /bin/sleep 0.05; i=$((i + 1)); done\n[ -e '{d}/go' ] || exit 3\nexit 0"
+        ));
+        let extra: Vec<(&str, String)> = remote.iter().map(|(k, v)| (*k, v.clone())).collect();
+        let shims = start_shims(&s, port, N, &extra);
+
+        // 四個 helper 同時在跑。
+        let started = || std::fs::read_dir(&s.dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("started.")).count();
+        let up = Instant::now();
+        while started() < N && up.elapsed() < Duration::from_secs(15) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let running = started();
+        let st = crate::build_scheduler::status(&env.app).await.unwrap();
+        std::fs::write(s.dir.join("go"), "").unwrap();
+        let results = finish_shims(&s, shims).await;
+        server.abort();
+        assert_eq!(running, N, "本機名額只有 2 個，遠端編譯卻該同時跑 {N} 個（只起來 {running} 個）：{st}\n{results:?}");
+        assert_eq!(st["active"], 0, "遠端編譯不該佔本機名額：{st}");
+        assert!(st["slots"].as_array().unwrap().is_empty(), "也不該在本機排隊：{st}");
+        for (rc, err) in &results {
+            assert_eq!(*rc, 0, "{err}");
+        }
+    }
+
+    /// 反面：遠端全都回 125（沒有轉成）時，4 個 test 才真的落在本機——本機名額照樣把**本機**同時在跑的編譯壓在 `max_concurrent=2`。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tests_that_end_up_on_this_machine_still_respect_the_local_slots() {
+        let env = crate::testing::env().await;
+        env.app
+            .cfg
+            .update(|c| {
+                c.build.max_concurrent = 2;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let (port, server) = serve_router(env.app.clone());
+
+        let s = Sandbox::new();
+        s.install_counting_cargo();
+        let remote = s.install_fake_helper("exit 125");
+        let extra: Vec<(&str, String)> = remote.iter().map(|(k, v)| (*k, v.clone())).collect();
+        let shims = start_shims(&s, port, 4, &extra);
+        let results = finish_shims(&s, shims).await;
+        server.abort();
+        for (rc, err) in &results {
+            assert_eq!(*rc, 0, "{err}");
+        }
+        let peaks: Vec<u32> = std::fs::read_to_string(s.dir.join("peak.log")).unwrap().lines().filter_map(|l| l.trim().parse().ok()).collect();
+        assert_eq!(peaks.len(), 4, "四個都要跑完：{peaks:?}");
+        assert_eq!(peaks.iter().max(), Some(&2), "本機同時在跑的編譯要剛好壓在 2（不是 1＝排太嚴、也不是 3+＝名額沒管到）：{peaks:?}");
     }
 
     /// 這台機器上有的 shell（沒有的略過）。macOS 的 `/bin/sh`／`/bin/bash` 是 3.2——腳本改動要在那個版本也驗。
