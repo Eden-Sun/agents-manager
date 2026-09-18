@@ -34,18 +34,23 @@ pub const TURN_STATUSES: [&str; 5] = ["queued", "in_flight", "completed", "compl
 /// `daemon/src/db.rs` SCHEMA 的 `turns.delivery` CHECK 約束。
 pub const TURN_DELIVERIES: [&str; 4] = ["pending", "ok", "unknown", "failed"];
 
-/// 觀察到的 `runs.state` 合法邊。`exited` 沒有出邊——生產路徑裡找不到任何從 `exited` 轉出去的
-/// UPDATE；一顆 run 進了 `exited` 就是這輩子結束了，要再跑得開一顆新 run。
+/// 觀察到的 `runs.state` 合法邊。`exited` 不會回到 active（`starting`／`running`／`stopping`）——一顆 run 進了
+/// `exited` 就是這輩子結束了，要再跑得開一顆新 run。唯一從它出去的邊是改標成另一個終態 `stopped`（見下）。
+///
+/// #135／#145／#146 之後，lifecycle 裡的轉移都走 `lifecycle/run_state.rs` 的 `transition`：SQL 本身帶
+/// `AND state IN (來源)` 的 CAS，寫入失敗與 CAS 輸了分開回報。`reconcile.rs` 的 CASE WHEN 是另一條（照 herdr 的證據）。
 pub const RUN_STATE_EDGES: &[(&str, &str, &str)] = &[
-    ("(insert)", "starting", "lifecycle/start.rs:161 新開一顆 run"),
-    ("starting", "running", "reconcile.rs:344,390 CASE WHEN…THEN 'running'（在對應的 herdr agent 裡看到了）；lifecycle/start.rs start_inner（CAS `run_state::transition`，agent_status 探測回來；寫不進去回 503、排對帳重試，#145）"),
-    ("stopping", "running", "reconcile.rs:344,390 同一條 CASE WHEN；lifecycle/start.rs:870 guarded UPDATE（停止被打斷，bot 又動了）"),
-    ("starting", "stopping", "lifecycle/start.rs:841、lifecycle/stop.rs:36（使用者主動停止；SQL 本身沒有 guard 限定 FROM，呼叫端只在該轉的時候才呼叫）"),
+    ("(insert)", "starting", "lifecycle/start.rs start_bot_locked_with 新開一顆 run；restart_child_in_pane_with 寫新 run"),
+    ("starting", "running", "reconcile.rs CASE WHEN…THEN 'running'（在對應的 herdr agent 裡看到了）；lifecycle/start.rs start_inner 與 restart_child_in_pane_with（CAS；寫不進去回 503、排對帳重試，#145）"),
+    ("stopping", "running", "reconcile.rs 同一條 CASE WHEN；lifecycle/stop.rs back_to_running（CAS；stop 或子 agent 重啟停不下來，agent 還在，#146）"),
+    ("starting", "stopping", "lifecycle/stop.rs stop_locked、lifecycle/start.rs restart_child_in_pane_with（CAS from active；寫不進去就一個副作用都不做，#146）"),
     ("running", "stopping", "同上"),
-    ("stopping", "stopped", "lifecycle/start.rs:877、lifecycle/stop.rs:72"),
-    ("stopped", "exited", "lifecycle/start.rs:781（唯一在 SQL 本身就 guard `AND state='stopped'` 的一條）"),
-    ("starting", "exited", "lifecycle/queue.rs mark_run_exited（CAS guard `AND state IN ('starting','running','stopping')`，#131 之前只有 Rust 層的 SELECT；寫不進去就不收尾、排對帳重試，#135）；lifecycle/start.rs start_bot_locked_with 啟動失敗（CAS from starting；寫不進去排對帳重試，#145）"),
-    ("running", "exited", "同上"),
+    ("stopping", "stopping", "同上：來源含 stopping，上一次沒停成的 stop 可以原樣再按一次"),
+    ("stopping", "stopped", "lifecycle/stop.rs commit_stopped、lifecycle/start.rs restart_child_in_pane_with（CAS；寫進去之後才撤佇列、拆 watcher、寫新 run，#146）"),
+    ("exited", "stopped", "lifecycle/stop.rs commit_stopped：stop 自己關的 pane 觸發的 pane-exit 事件搶先寫了 exited，改標成使用者要的 stopped（兩個都是終態、不復活；收尾那條路做過了，不做第二份，#146）"),
+    ("stopped", "exited", "lifecycle/start.rs left_down_by_restart（SQL 本身 guard `AND state='stopped'`）"),
+    ("starting", "exited", "lifecycle/queue.rs mark_run_exited（CAS from active，#131；寫不進去就不收尾、排對帳重試，#135）；lifecycle/start.rs start_bot_locked_with 啟動失敗（CAS from starting；寫不進去排對帳重試，#145）"),
+    ("running", "exited", "lifecycle/queue.rs mark_run_exited（同上）"),
     ("stopping", "exited", "同上"),
 ];
 
@@ -87,11 +92,13 @@ mod tests {
         }
     }
 
-    /// `exited` 是終態：表上不該有任何一條從它出發的邊。這條測試釘住「這張表本身」的這個宣告，
-    /// 不是程式行為——程式行為的等價測試在 `hookrecv.rs`（一顆 exited run 底下的回合不會被
-    /// 遲到的 hook 救回來）。
+    /// `exited` 是終態：表上不該有任何一條把它帶回 active 的邊（改標成另一個終態 `stopped` 不算復活）。
+    /// 這條測試釘住「這張表本身」的這個宣告，不是程式行為——程式行為的等價測試在 `hookrecv.rs`（一顆
+    /// exited run 底下的回合不會被遲到的 hook 救回來）與 `run_state.rs`（終態不會被 CAS 拉回 active）。
     #[test]
-    fn exited_has_no_outgoing_edge_in_the_table() {
-        assert!(!RUN_STATE_EDGES.iter().any(|(from, _, _)| *from == "exited"));
+    fn exited_never_goes_back_to_a_live_state_in_the_table() {
+        let live = ["starting", "running", "stopping"];
+        assert!(!RUN_STATE_EDGES.iter().any(|(from, to, _)| *from == "exited" && live.contains(to)));
+        assert!(RUN_STATE_EDGES.iter().filter(|(from, _, _)| *from == "exited").all(|(_, to, _)| *to == "stopped"));
     }
 }

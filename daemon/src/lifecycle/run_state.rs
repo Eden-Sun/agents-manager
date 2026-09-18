@@ -52,6 +52,11 @@ pub(crate) enum Settle {
     /// 交給對帳照 herdr 的證據收：agent 還在就 `running`，不在就 `exited`。`stuck` 是寫不過去時的狀態，
     /// run 離開它就算收斂。
     Reconcile { stuck: String },
+    /// 使用者的 stop 在外面已經做完（agent 確定沒了）：補記 `stopping → stopped` 與它之後的收尾
+    /// （`stop::finish_stop`）。被 pane-exit 事件先收成 `exited` 的也改標回 `stopped`。
+    FinishStop,
+    /// 停不下來（agent 還活著）：`stopping → running` 放回去。
+    BackToRunning,
 }
 
 impl Settle {
@@ -59,12 +64,16 @@ impl Settle {
     fn pending(&self, state: &str) -> bool {
         match self {
             Settle::Reconcile { stuck } => state == stuck,
+            Settle::FinishStop => matches!(state, "stopping" | "exited"),
+            Settle::BackToRunning => state == "stopping",
         }
     }
 
     fn name(&self) -> &'static str {
         match self {
             Settle::Reconcile { .. } => "reconcile",
+            Settle::FinishStop => "finish_stop",
+            Settle::BackToRunning => "back_to_running",
         }
     }
 }
@@ -120,6 +129,14 @@ pub(crate) async fn settle_once(app: &Arc<App>, run_id: &str, how: &Settle) -> b
             let Ok(host) = db::bot_host(&app.db, &run.bot_id).await else { return false };
             if let Err(e) = crate::reconcile::reconcile_host(app, &host).await {
                 tracing::warn!(run = run_id, host, error = %e, "reconcile retry failed");
+            }
+        }
+        Settle::FinishStop => super::finish_stop(app, run_id).await,
+        Settle::BackToRunning => {
+            let lock = app.bot_lock(&run.bot_id).await;
+            let _g = lock.lock().await;
+            if transition(&app.db, run_id, &["stopping"], "running", None).await.is_ok() {
+                app.emit_bot_status(&run.bot_id).await;
             }
         }
     }

@@ -23,7 +23,7 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
 | 404 | `{"error":"not_found","what":"bot"\|"project"\|"run"\|"pane"\|"turn"}` | 找不到 |
 | 409 | `{"error":"conflict","reason":"<人類可讀>", ...extra}` | 狀態機衝突；extra 視情況含 `run_id` / `turn_id` / `bot_id` / `name` / `path` / `state` |
 | 502 | `{"error":"upstream","message":"..."}` | herdr / DB 出錯 |
-| 503 | `{"error":"start_state_uncommitted","run_id","retryable":true,"message","detail"}` | 外面的副作用已經做了（agent 起來了），run 的狀態卻寫不進 DB；daemon 已排重試，run 會照 herdr 的證據收斂（SPEC §6.2）。不是「沒做」也不是「做好了」：看 bot 狀態，或稍後重送 |
+| 503 | `{"error":"start_state_uncommitted"\|"stop_state_uncommitted","run_id","retryable":true,"message","detail"}` | 外面的副作用已經做了（agent 起來了／停了），run 的狀態卻寫不進 DB；daemon 已排重試，run 會照 herdr 的證據收斂（SPEC §6.2、§6.4）。不是「沒做」也不是「做好了」：看 bot 狀態，或稍後重送。另一種 503 是「讀不到狀態所以一步都沒做」（`sent:false`，帶 `Retry-After`，例如 prompt 的 `maintenance_state_unavailable`），兩者 body 分得開 |
 
 所有寫 config.toml 的 API（建/改專案、建/改 bot、排序、還原、建/刪身分）套用、驗證、DB-backed 大量軟刪
 閘門都在**落盤之前**做完（issue #73，統一 commit boundary：全部走 `projection::update_and_project`），
@@ -157,7 +157,7 @@ config.toml 裡沒有的 id（child、已刪）忽略。成功推 `project_chang
 |---|---|---|---|
 | POST | `/api/bots/{id}/start` | — | `200 {"run_id"}`；已有 active Run → `409 {"reason":"active run already exists","run_id"}`；`herdr_session = "default"` 的 bot（SPEC §6.5.1）→ `409 {"reason":"default_session"}`；herdr 失敗 502；agent 起來了但 `running` 寫不進去 → `503 start_state_uncommitted`（SPEC §6.2 第 7 步） |
 | POST | `/api/bots/{id}/start?resume=native` | — | 接回 DB 記的原生對話（SPEC §6.5.2）：`200 {"run_id","resumed","session_id","resume_outcome"}`（`resumed` 照 `runs.resume_outcome` 說：`verified`→`true`＋回報的 session；`mismatch`→`false`、`session_id:null`；還沒回報或 `unverified`→`true`＋帶出去的 session；這次沒帶 `--resume`→`false`。不看 SessionStart 一到就清掉的 `resume_session_id`，issue #107）；接不回**不啟動**、不開新對話 → `409 {"reason":"cannot_resume","resumed":false,"resume_reason":"no_session_id"|"transcript_missing"|"unsupported_kind","bot_id"}`，由呼叫端決定要不要改成不帶 `resume` 重送。`resume` 只認 `native`，其他值 400 |
-| POST | `/api/bots/{id}/stop` | — | `200 {}`；沒有 Run → `204`。default session 的 bot 只送 ctrl+c、不關 pane |
+| POST | `/api/bots/{id}/stop` | — | `200 {}`；沒有 Run（或讀完之後已被 pane-exit 收掉）→ `204`。default session 的 bot 只送 ctrl+c、不關 pane。`stopping` 寫不進去 → 502，什麼都沒動；agent 沒停下來或問不到 herdr → `502`，message 以 `stop_not_confirmed` 開頭，run 不記成停止（還活著就放回 running）；停了但 `stopped` 寫不進去 → `503 stop_state_uncommitted`（SPEC §6.4） |
 | POST | `/api/bots/{id}/interrupt` | — | `200 {}`（送 `esc`，in-flight Turn 標 failed）；`esc` 送不出 → 502，Turn 維持 in-flight |
 | POST | `/api/bots/{id}/abort` | — | `200 {"aborted":["<turn_id>",…],"keys_sent":true,"key_error":null}`，見 §4.2 |
 | POST | `/api/bots/{id}/keys` | `{"keys":["y"],"expect_run_id"?}` | `200 {}`；`expect_run_id` 不符 409 |
@@ -838,7 +838,7 @@ readback_model_mismatch|readback_effort_mismatch|readback_fast_mismatch>`。以�
 叫回來，不是開一段新的空白對話。
 
 ### 10.3 `POST /api/bots/{id}/restart`
-有 Run 先 stop（ctrl+c ×2、逾時關 pane）再 start → `200 {"run_id"}`（新 Run）。沒有 Run 也可呼叫（= start）。錯誤同 start。過程推 `bot_status`。
+有 Run 先 stop（ctrl+c ×2、逾時關 pane）再 start → `200 {"run_id"}`（新 Run）。沒有 Run 也可呼叫（= start）。錯誤同 start，另加 stop 那一半的錯誤（同 `POST /stop`）。過程推 `bot_status`。
 子 agent 在原 pane 重開（SPEC §6.9）。
 `?resume=native`：同 start 的語意，**停之前**就判斷接不接得回（看現在這個 Run 的 session）；接不回回 `409 cannot_resume`，原本的 agent 不會被停。預設（不帶）行為不變。
 重啟期間這顆 bot 排著的 queued（AGM 派工）**不撤**，留給新的 Run 送；重啟沒能把 bot 開回來才撤（SPEC §4.4a「重啟不是停」，issue #106）。
