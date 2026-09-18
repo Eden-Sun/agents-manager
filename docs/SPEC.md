@@ -2235,6 +2235,13 @@ supervisor 相關資料表與欄位都是 additive，`db::migrate` 重跑冪等�
   本地 ref 舊了只會更嚴）；`user_declined`＝最近一次暫停之後使用者本人回答過（`answer` 事件、`relay_from` 空）。
   對不上 → 409 `not_delivered`／`has_verified_changes`／`worktree_has_changes`／`user_not_asked`。以前 `complete` 什麼都不查：驗過卻沒交付、
   或根本沒驗就結案，成果卡寫著「完成」，main 上什麼都沒有。
+- **判定與寫入在同一個 commit boundary**（issue #74 重開）：`round`／`verified` 這些改變「代」的寫入不走 supervisor 鎖，
+  鎖外算好的判定寫下去時可能已經過期。所以三個寫入都在 `BEGIN IMMEDIATE` 交易裡重讀任務、交辦與事件再判（`mission::store::Snapshot`）：
+  `round` 的 `rounds_used` 與 `round` 事件同一個交易；`verified` 落地時任務要還開著、還在它驗的那一代（否則 `already_closed`／`verification_stale`）；
+  `complete` 照 commit 當下的樣子重判開著的交辦與交付要求，跟鎖外判的不是同一件事就 409 `mission_changed`。
+  git 不進交易：先在交易外算證據，交易裡只確認「算證據時看到的那一代還是同一代」。`deliver` 的 push 是對外的副作用，擋不回來，
+  它的 `delivered` 照實記；但 `delivered` 只有在它的 commit 就是**這一代**驗過的那一個時才算數（`flow`），所以 push 途中被退回的話，
+  那一則放行不了新一代的結案。
 
 需要人判斷的（`ask_user`、`no_independent_reviewer`、findings、要不要再一輪）仍然在 AGM 這一側，daemon 不碰。
 與 ownership 衝突的差別：那個是字串比對猜出來的，所以只回報不強制（§18.4）；這兩條是查得到的事實。
