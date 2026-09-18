@@ -188,10 +188,10 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
         Err(e) => {
             let blocked = e.downcast_ref::<HerdrError>().map(|h| h.code == "agent_blocked").unwrap_or(false);
             if blocked {
-                let _ = super::turn_controller::fail(&app.db, &turn.id, super::turn_controller::DeliveryOnFail::Failed, "agent_blocked").await;
-                let _ = insert_message(app, &conv, Some(&turn.id), "system", &format!("delivery failed: {e}"), "system", false, None).await;
-                emit_turn(app, &turn.id).await;
-                return Ok(());
+                // 收成 failed 寫不進去就記成欠著、之後補（#149），不留一筆永久 in_flight＋pending。
+                return super::owed_delivery::refused(app, bot_id, &turn.id, &format!("delivery failed: {e}"))
+                    .await
+                    .map_err(|e| e.context("herdr 拒收了排隊的 prompt，回合卻收不成 failed（記成欠著）"));
             }
             // Not requeued: the agent may have taken it, so a retry could deliver twice.
             // `delivery='unknown'` is the designed user-visible parking state (§6.3).
@@ -199,13 +199,13 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
             "unknown"
         }
     };
-    mark_delivery(app, &turn.id, rec).await;
-    emit_turn(app, &turn.id).await;
+    // 寫回（寫成才推 `turn_updated`）；寫不進去就記成欠著、之後補（#149），不回普通的成功。watchdog 照樣掛（字真的送出去了）。
+    let written = super::owed_delivery::delivered(app, bot_id, &turn.id, rec).await;
     if delivery == "ok" || delivery == "unverified" {
         arm_stall(app, &run.id, bot_id, &turn.id).await;
         arm_progress(app, &run.id, bot_id, &turn.id).await;
     }
-    Ok(())
+    written.map_err(|e| e.context("排隊的 prompt 送出去了，送達結果卻寫不進去（記成欠著）"))
 }
 
 /// Undo a `queued -> in_flight` claim that never became a delivery, and arm a retry timer for it —

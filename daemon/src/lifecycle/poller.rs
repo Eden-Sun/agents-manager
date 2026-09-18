@@ -1936,7 +1936,7 @@ mod issue_17_tests {
         live(&f, crate::testing::LivePane { transcript: vec!["❯ [Pasted text #1 +20 lines]".into()], ..wide() });
         let app = f.env.app.clone();
         db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
-        mark_delivery(&app, &f.turn_id, Delivered::Submitted.record().unwrap()).await;
+        mark_delivery(&app, &f.turn_id, Delivered::Submitted.record().unwrap(), &db::now()).await.unwrap();
 
         let sent = vec!["Reply with PONG".to_string()];
         assert!(prompt_never_reached_screen("claude", &f.env.herdr.pane("pane-17").unwrap().render(), &sent), "畫面上真的找不到");
@@ -2120,7 +2120,7 @@ mod issue_17_tests {
         // mock 不實作 agent.prompt，這裡只驗那條路的結果怎麼記。
         let f = fixture("claude", "").await;
         let app = f.env.app.clone();
-        crate::lifecycle::prompt::mark_delivery(&app, &f.turn_id, Delivered::Handed.record().unwrap()).await;
+        crate::lifecycle::prompt::mark_delivery(&app, &f.turn_id, Delivered::Handed.record().unwrap(), &db::now()).await.unwrap();
         let (delivery, verified, auto, resends): (String, i64, i64, i64) =
             sqlx::query_as("SELECT delivery, delivery_verified, auto_resend, resend_count FROM turns WHERE id = ?")
                 .bind(&f.turn_id)
@@ -2136,7 +2136,7 @@ mod issue_17_tests {
     async fn a_typed_but_unprovable_prompt_is_recorded_without_auto_resend() {
         let f = fixture("grok", "").await;
         let app = f.env.app.clone();
-        crate::lifecycle::prompt::mark_delivery(&app, &f.turn_id, Delivered::Unverified.record().unwrap()).await;
+        crate::lifecycle::prompt::mark_delivery(&app, &f.turn_id, Delivered::Unverified.record().unwrap(), &db::now()).await.unwrap();
         let (delivery, verified, auto, resends): (String, i64, i64, i64) =
             sqlx::query_as("SELECT delivery, delivery_verified, auto_resend, resend_count FROM turns WHERE id = ?")
                 .bind(&f.turn_id)

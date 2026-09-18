@@ -268,10 +268,13 @@ pub async fn fail_with_native_evidence(
 /// 世代前提：那個 run **此刻還在跑**。flush 讀完 run 到認領之間，run 可能被不拿 bot 鎖的路徑收掉
 /// （`mark_run_exited`：pane 死掉、reconcile）；重啟中那一段孤兒撤銷又刻意不撤，這時認領下去，
 /// 回合就掛在一個死掉的 run 上、字打進不存在的 pane。沒認領到的留在佇列給下一個 run。
+///
+/// 同一句把 `auto_resend` 關掉：認領＝接著要打字了，送出之後結果寫不回來時（#149）這一筆也不會變成可以自動重送；
+/// 送達結果寫回時照證據打開。
 pub async fn claim_queued(conn: &mut sqlx::SqliteConnection, turn_id: &str, run_id: &str) -> Result<Outcome> {
     edge("queued", "in_flight", "認領排隊")?;
     let done = sqlx::query(
-        "UPDATE turns SET status='in_flight', run_id=?
+        "UPDATE turns SET status='in_flight', run_id=?, auto_resend=0
           WHERE id=? AND status='queued' AND EXISTS (SELECT 1 FROM runs WHERE id=? AND state='running')",
     )
     .bind(run_id)

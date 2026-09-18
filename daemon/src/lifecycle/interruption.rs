@@ -325,7 +325,8 @@ async fn close(app: &Arc<App>, bot_id: &str, p: &Pending) -> anyhow::Result<()> 
     }
     if let Some(n) = &p.new_turn {
         if let (true, Some(rec)) = (bound, n.delivery) {
-            mark_delivery(app, &n.id, rec).await;
+            // 寫不進去就記在送達結果的帳上（#149，`owed_delivery` 自己重試）：這個交易已經 commit，打斷這一半不重來。
+            let _ = super::owed_delivery::delivered(app, bot_id, &n.id, rec).await;
         }
         emit_turn(app, &n.id).await;
     }
