@@ -184,7 +184,11 @@ fn failure_detail(p: &Value) -> Option<String> {
 pub(crate) fn classify_failure(detail: Option<&str>) -> FailureReason {
     let t = detail.unwrap_or("").to_ascii_lowercase();
     let has = |needles: &[&str]| needles.iter().any(|n| t.contains(n));
-    if has(&["interrupt", "cancel", "abort", "user_stop", "user stop", "esc"]) {
+    // `esc` 太短，直接 `contains` 會連「unescaped」「description」這種普通英文字都算中——那樣一來
+    // 真正的失敗（API／額度）會被這條擋在最前面的分支攔走，回合被當成使用者中斷、一個字都不動，
+    // #79／#108 想防的「卡在 in_flight、額度沒記下來」又繞了回來。只認被非英數字元包住的獨立字。
+    let esc_word = t.split(|c: char| !c.is_ascii_alphanumeric() && c != '_').any(|w| w == "esc");
+    if esc_word || has(&["interrupt", "cancel", "abort", "user_stop", "user stop"]) {
         FailureReason::Interrupted
     } else if crate::turn_error::is_quota_exhaustion(&t)
         || has(&["rate limit", "rate_limit", "ratelimit", "usage limit", "usage_limit", "quota", "429", "overloaded"])
@@ -2436,6 +2440,28 @@ mod external_claim_tests {
         assert_eq!(classify_failure(Some("cancelled")), Interrupted);
         assert_eq!(classify_failure(None), Unknown);
         assert_eq!(classify_failure(Some("   ")), Unknown);
+    }
+
+    /// `esc` 這個 needle 是用純字串 `contains` 比對的：`unescaped`／`description`／`prescribed`
+    /// 這種一般英文字都含著 `esc` 三個字母，不該被誤判成使用者按了 Esc——那樣一來真正的失敗（API／
+    /// 額度）會走進「中斷」那條回傳早退，回合永遠卡在 in_flight，額度也不會被記下來（issue #79／#108
+    /// 想防的正是這件事，「esc」子字串比對把它繞回去了）。
+    #[test]
+    fn a_generic_word_that_merely_contains_esc_is_not_a_user_interrupt() {
+        use FailureReason::*;
+        assert_eq!(
+            classify_failure(Some("invalid_request_error: unescaped control character in string")),
+            Api,
+            "「unescaped」含 esc，但這是一個 API 驗證錯誤，不是使用者按了 Esc"
+        );
+        assert_eq!(
+            classify_failure(Some("A description of the rate limit reached for this account")),
+            RateLimit,
+            "「description」含 esc，不該蓋掉後面真正的 rate limit 分類"
+        );
+        // 真的是 Esc 觸發的中斷（獨立一個字，前後被非英數字元包住）照樣要抓到。
+        assert_eq!(classify_failure(Some("Cancelled (Esc)")), Interrupted);
+        assert_eq!(classify_failure(Some("esc")), Interrupted);
     }
 
     /// payload 的欄位名還在動：撈得到就留原文，撈不到也照樣收回合（只是說不出原因）。
