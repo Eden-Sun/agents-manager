@@ -690,6 +690,7 @@ function Composer({
   const abortBot = useStore((s) => s.abortBot)
   const aborting = useStore((s) => Boolean(s.busy[`abort:${botId}`]))
   const queueSend = useStore((s) => s.queueSend)
+  const startBot = useStore((s) => s.startBot)
   const cancelQueuedSend = useStore((s) => s.cancelQueuedSend)
   const restoreQueuedSend = useStore((s) => s.restoreQueuedSend)
   const unqueueToDraft = useStore((s) => s.unqueueToDraft)
@@ -728,6 +729,8 @@ function Composer({
     // Turn still running: queue instead of eating a 409.
     if (state.queued) {
       queueFromComposer({ setText, clearFiles: files.clear, queueSend }, botId, body, files.ids)
+      // 沒在跑的 bot：排好隊就直接啟動，起來後 store 會把它送出去。
+      if (state.autoStart) void startBot(botId)
       return
     }
     setSending(true)
@@ -800,7 +803,7 @@ function Composer({
     <div className="composer bot-composer">
       {queued ? (
         <div className="composer-queued" role="status">
-          <span className="composer-queued-label">已排隊，這回合結束後送出：</span>
+          <span className="composer-queued-label">{state.autoStart ? '啟動中，起來後自動送出：' : '已排隊，這回合結束後送出：'}</span>
           <span className="composer-queued-text" title={queued.text}>
             {queued.text || `（${queued.attachments.length} 個附件）`}
           </span>
