@@ -2351,12 +2351,14 @@ mod mission_quota_tests {
         bot(&app, "b-cc1", "cc1", None).await;
         let mid = mission(&app, "switch").await;
         let a = assignment(&app, "b-cc2", &mid, "executor").await;
-        park_quota(&app, &a, &hit(), "turn").await; // 沒有額度讀數 → 照原本等待
-        let _ = sqlx::query("UPDATE supervisor_assignments SET status='awaiting_review' WHERE id=?").bind(&a.id).execute(&app.db).await.unwrap();
+        park_quota(&app, &a, &hit(), "turn").await; // 沒有額度讀數 → 照原本等待，status='quota_blocked'
+        // `quota_blocked -> awaiting_review` 在生產路徑上不存在（沒有 turn 在跑，settle 不會碰它）；
+        // issue #71 的 trigger 把它擋下來了，所以這裡改成從 quota_blocked 直接裁示——決定可以從任何
+        // 未結案的狀態下達，跟這個測試原本要驗的（followup 沿用同一個任務／角色）無關。
         store::review_with_followup(
             &app.db,
             &a.id,
-            "awaiting_review",
+            "quota_blocked",
             "followup",
             "AGM",
             "test",
