@@ -46,12 +46,16 @@ pub struct ChangelogReply {
 }
 
 pub fn parse_version(s: &str) -> Option<Vec<u64>> {
-    let tok = s.split_whitespace().next()?.trim_start_matches('v');
+    // `[0.9.0] - 2026-09-07`（herdr 的 CHANGELOG 用 Keep a Changelog 的 `## [x.y.z] - date` 標題，
+    // 不是 Claude Code 那種裸 `## x.y.z`）：先取第一個空白分隔的 token 再拆掉包住版本號的中括號，
+    // 日期本來就在下一個 token，split_whitespace 早就丟掉了。
+    let tok = s.split_whitespace().next()?;
+    let tok = tok.trim_start_matches('[').trim_end_matches(']').trim_start_matches('v');
     let parts: Vec<u64> = tok.split('.').map(|p| p.parse::<u64>().ok()).collect::<Option<Vec<_>>>()?;
     (!parts.is_empty()).then_some(parts)
 }
 
-/// `2.1.269 (Claude Code)` → `2.1.269`。
+/// `2.1.269 (Claude Code)` → `2.1.269`；`[0.9.0] - 2026-09-07` → `0.9.0`。
 pub fn version_string(s: &str) -> Option<String> {
     parse_version(s).map(|v| v.iter().map(|n| n.to_string()).collect::<Vec<_>>().join("."))
 }
@@ -273,5 +277,21 @@ mod tests {
         assert_eq!(parse_version("2.1.0 (Claude Code)"), Some(vec![2, 1, 0]));
         assert_eq!(parse_version("v1.0"), Some(vec![1, 0]));
         assert_eq!(parse_version("nope"), None);
+    }
+
+    /// herdr 的 CHANGELOG 是 Keep a Changelog 格式：`## [x.y.z] - date`，不是 Claude Code 那種
+    /// 裸 `## x.y.z`。issue #66 整理 herdr 版本差異要吃得下這個格式，不然段落永遠抓不到。
+    const HERDR_MD: &str = "# Changelog\n\n\
+        ## Unreleased\n\n## [0.9.1] - 2026-09-16\n\n### Added\n- machine 遠端指令轉發\n\n\
+        ## [0.9.0] - 2026-09-07\n\n### Changed\n- endpoint generation 1\n\n\
+        ## [0.8.2] - 2026-08-01\n\n- 基準版\n";
+
+    #[test]
+    fn parses_keep_a_changelog_bracket_headings() {
+        let s = parse_changelog(HERDR_MD);
+        assert_eq!(s.iter().map(|x| x.version.as_str()).collect::<Vec<_>>(), ["0.9.1", "0.9.0", "0.8.2"], "帶中括號與日期的標題要能解析出版本號");
+        assert!(s[0].body.contains("machine 遠端指令轉發"));
+        let p = pick_sections(&s, Some("0.8.2"), "0.9.1");
+        assert_eq!(p.iter().map(|x| x.version.as_str()).collect::<Vec<_>>(), ["0.9.1", "0.9.0"]);
     }
 }
