@@ -561,11 +561,25 @@ pub async fn mark_run_exited(app: &Arc<App>, run_id: &str, reason: &str) {
     if !matches!(run.state.as_str(), "starting" | "running" | "stopping") {
         return;
     }
-    let _ = sqlx::query("UPDATE runs SET state = 'exited', ended_at = ? WHERE id = ?")
-        .bind(db::now())
-        .bind(run_id)
-        .execute(&app.db)
-        .await;
+    // 讀完狀態、還沒寫 exited 的那一瞬（測試在這裡插進使用者 stop 的收尾寫入）。
+    #[cfg(test)]
+    {
+        super::race_point::hit("mark_run_exited_after_read", run_id).await;
+    }
+    // CAS 在 UPDATE 自己身上（#131）：這支不拿 bot 鎖，上面讀完之後使用者的 stop 可能剛寫下 `stopped`，
+    // 無條件寫 `exited` 會把「使用者要它停」蓋掉。沒寫到就是別的路徑先收掉了，後續由那條路負責。
+    match sqlx::query(
+        "UPDATE runs SET state = 'exited', ended_at = ? WHERE id = ? AND state IN ('starting','running','stopping')",
+    )
+    .bind(db::now())
+    .bind(run_id)
+    .execute(&app.db)
+    .await
+    {
+        Ok(r) if r.rows_affected() == 0 => return,
+        Ok(_) => {}
+        Err(e) => tracing::warn!(run = run_id, error = %e, "could not record the run as exited"),
+    }
     fail_in_flight(app, run_id, &format!("run ended: {reason}")).await;
     revoke_orphaned_queued_turns(app, &run.bot_id, &format!("run 已結束（{reason}）")).await;
     if let Some(p) = run.pane_id.as_deref() {
@@ -604,6 +618,48 @@ pub async fn fail_in_flight(app: &Arc<App>, run_id: &str, note: &str) {
     emit_turn(app, &t.id).await;
 }
 
+
+#[cfg(test)]
+mod run_exit_race_tests {
+    use super::*;
+    use crate::testing as tt;
+
+    /// 使用者 stop 一顆 bot：`stop_bot_locked` 自己關 pane，pane-exit 事件的 `mark_run_exited` 讀到的 run 還是
+    /// `stopping`；stop 這時寫下 `stopped`，事件那邊接著寫 `exited` 的話就把「使用者要它停」蓋掉了——
+    /// autostart 的 bot 會被 incident 探針（看最後一個 run 是不是 `stopped`）報成 `bot_stopped`。
+    #[tokio::test]
+    async fn a_pane_exit_that_read_the_run_before_the_user_stop_finished_does_not_overwrite_it() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "stopped-on-purpose").await;
+        let run = tt::fake_run(&app, &bot.id).await;
+        sqlx::query("UPDATE runs SET state='stopping' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
+
+        let (app2, run2) = (app.clone(), run.clone());
+        super::super::race_point::arm("mark_run_exited_after_read", &run, move || async move {
+            // `stop_bot_locked` 的最後一步。
+            sqlx::query("UPDATE runs SET state='stopped', ended_at=? WHERE id=?").bind(db::now()).bind(&run2).execute(&app2.db).await.unwrap();
+        });
+        mark_run_exited(&app, &run, "pane exited").await;
+
+        let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(&run).fetch_one(&app.db).await.unwrap();
+        assert_eq!(state, "stopped", "使用者停的就是停的，不是 pane 自己死掉");
+    }
+
+    /// 沒有人搶的時候照舊：還活著的 run 碰到 pane-exit 就是 `exited`。
+    #[tokio::test]
+    async fn a_pane_exit_on_a_live_run_still_ends_it_as_exited() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "died").await;
+        let run = tt::fake_run(&app, &bot.id).await;
+        mark_run_exited(&app, &run, "pane exited").await;
+        let (state, ended): (String, Option<String>) =
+            sqlx::query_as("SELECT state, ended_at FROM runs WHERE id=?").bind(&run).fetch_one(&app.db).await.unwrap();
+        assert_eq!(state, "exited");
+        assert!(ended.is_some());
+    }
+}
 
 #[cfg(test)]
 mod flush_queue_tests {
