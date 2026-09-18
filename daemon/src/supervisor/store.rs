@@ -1306,18 +1306,28 @@ pub async fn defer_conflict(pool: &SqlitePool, id: &str, next_attempt_at: &str, 
 
 /// 一直送不進去：標成 `blocked` 而**不是** `dispatch_failed`——工作沒有失敗，是進不去那顆 bot。
 /// `blocked` 仍在 `OPEN_STATES` 裡（不會從未結案與 ownership 衝突裡消失），但不再每隔幾分鐘重試。
+///
+/// 只從 `queued` 動手——比表上「哪些狀態能走到 `blocked`」窄（那張表容許任何未結案狀態，因為
+/// `blocked` 也是一種裁示），是刻意的：`mark_undeliverable` 講的是「這一次派送就是進不去」，
+/// `delivered`／`unknown` 已經送出去了，進不去的保險絲是 [`block_stale_queue`] 的事，兩者不能共用
+/// 同一個更寬的 guard。guard 跟 CAS 走 [`assignment_state::set_status_on`]（issue #71 第二刀），
+/// 這裡自己只管 `queued → blocked` 以外的欄位。
 pub async fn mark_undeliverable(pool: &SqlitePool, id: &str, why: &str) -> Result<bool> {
-    Ok(sqlx::query(
-        "UPDATE supervisor_assignments SET status='blocked', error=?, next_attempt_at=NULL, updated_at=?
-          WHERE id=? AND status='queued'",
-    )
-    .bind(why)
-    .bind(crate::db::now())
-    .bind(id)
-    .execute(pool)
-    .await?
-    .rows_affected()
-        > 0)
+    let mut tx = pool.begin().await?;
+    let moved = matches!(
+        assignment_state::set_status_on(&mut tx, id, assignment_state::AssignmentState::Queued, assignment_state::AssignmentState::Blocked, why).await?,
+        assignment_state::Outcome::Applied
+    );
+    if moved {
+        sqlx::query("UPDATE supervisor_assignments SET error=?, next_attempt_at=NULL, updated_at=? WHERE id=?")
+            .bind(why)
+            .bind(crate::db::now())
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(moved)
 }
 
 /// What one execution outcome did to the world.
@@ -1441,18 +1451,24 @@ pub async fn block_stale_queue(pool: &SqlitePool, id: &str, why: &str) -> Result
 }
 
 /// [`block_stale_queue`] 的交易內版本：保險絲要「turn 撤成功才標 blocked」，兩個寫入同一個交易。
+///
+/// 只從 `delivered` 動手——比表上的一般 guard 窄，理由跟 [`mark_undeliverable`] 同一種：這支管的
+/// 是「排太久沒送出」的那條保險絲，不是任何一種裁示。guard 跟 CAS 走
+/// [`assignment_state::set_status_on`]（issue #71 第二刀）。
 pub async fn block_stale_queue_tx(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, id: &str, why: &str) -> Result<bool> {
-    Ok(sqlx::query(
-        "UPDATE supervisor_assignments SET status='blocked', error=?, updated_at=?
-          WHERE id=? AND status='delivered'",
-    )
-    .bind(why)
-    .bind(crate::db::now())
-    .bind(id)
-    .execute(&mut **tx)
-    .await?
-    .rows_affected()
-        > 0)
+    let moved = matches!(
+        assignment_state::set_status_on(tx, id, assignment_state::AssignmentState::Delivered, assignment_state::AssignmentState::Blocked, why).await?,
+        assignment_state::Outcome::Applied
+    );
+    if moved {
+        sqlx::query("UPDATE supervisor_assignments SET error=?, updated_at=? WHERE id=?")
+            .bind(why)
+            .bind(crate::db::now())
+            .bind(id)
+            .execute(&mut **tx)
+            .await?;
+    }
+    Ok(moved)
 }
 
 pub async fn park_quota_blocked(
@@ -1510,42 +1526,53 @@ pub async fn park_quota_blocked(
 ///
 /// `turn_id` 一併清掉：下一次是新的 turn（見 [`Assignment::dispatch_crid`]），留著舊的會讓
 /// `assignment_by_turn` 把新舊兩回合混在一起。
+///
+/// 只有真的轉移了才推通知（issue #71 第二刀時發現：這裡以前不看 guard 有沒有擋下，被別的路徑
+/// 先裁示掉的交辦還是會排一則「額度回來、重新排隊」的通知——跟 `settle_and_notify` 那條 issue #99
+/// 修過的縫是同一種形狀，只是換了一個通知種類）。guard 跟 CAS 走
+/// [`assignment_state::set_status_on`]。
 pub async fn resume_quota_blocked(pool: &SqlitePool, id: &str, event_key: &str, payload: &Value) -> Result<Settled> {
     let now = crate::db::now();
     let mut tx = pool.begin().await?;
-    let moved = sqlx::query(
-        "UPDATE supervisor_assignments
-            SET status='queued', quota_retries=quota_retries+1, resume_at=NULL, turn_id=NULL,
-                delivery=NULL, next_attempt_at=NULL, attempts=0, updated_at=?
-          WHERE id=? AND status='quota_blocked'",
-    )
-    .bind(&now)
-    .bind(id)
-    .execute(&mut *tx)
-    .await?
-    .rows_affected()
-        > 0;
-    let (bot_id,): (String,) = sqlx::query_as("SELECT target_bot_id FROM supervisor_assignments WHERE id=?")
+    let moved = matches!(
+        assignment_state::set_status_on(&mut tx, id, assignment_state::AssignmentState::QuotaBlocked, assignment_state::AssignmentState::Queued, "額度回來，重新排隊").await?,
+        assignment_state::Outcome::Applied
+    );
+    let event_new = if moved {
+        sqlx::query(
+            "UPDATE supervisor_assignments
+                SET quota_retries=quota_retries+1, resume_at=NULL, turn_id=NULL, delivery=NULL,
+                    next_attempt_at=NULL, attempts=0, updated_at=?
+              WHERE id=?",
+        )
+        .bind(&now)
         .bind(id)
-        .fetch_one(&mut *tx)
+        .execute(&mut *tx)
         .await?;
-    let event_new = sqlx::query(
-        "INSERT OR IGNORE INTO supervisor_inbox
-           (id, supervisor_id, event_key, assignment_id, bot_id, kind, payload_json, state, created_at, updated_at)
-         VALUES (?,?,?,?,?, 'assignment_quota_resumed', ?, 'pending', ?, ?)",
-    )
-    .bind(crate::db::ulid())
-    .bind(SUPERVISOR_ID)
-    .bind(event_key)
-    .bind(id)
-    .bind(&bot_id)
-    .bind(payload.to_string())
-    .bind(&now)
-    .bind(&now)
-    .execute(&mut *tx)
-    .await?
-    .rows_affected()
-        > 0;
+        let (bot_id,): (String,) = sqlx::query_as("SELECT target_bot_id FROM supervisor_assignments WHERE id=?")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?;
+        sqlx::query(
+            "INSERT OR IGNORE INTO supervisor_inbox
+               (id, supervisor_id, event_key, assignment_id, bot_id, kind, payload_json, state, created_at, updated_at)
+             VALUES (?,?,?,?,?, 'assignment_quota_resumed', ?, 'pending', ?, ?)",
+        )
+        .bind(crate::db::ulid())
+        .bind(SUPERVISOR_ID)
+        .bind(event_key)
+        .bind(id)
+        .bind(&bot_id)
+        .bind(payload.to_string())
+        .bind(&now)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+            > 0
+    } else {
+        false
+    };
     tx.commit().await?;
     Ok(Settled { moved, event_new })
 }
@@ -1602,9 +1629,14 @@ pub fn decision_status(decision: &str) -> Option<&'static str> {
     }
 }
 
-/// Record an acceptance decision. 轉移合法性在這裡自己查一次（issue #71）：以前註解寫「呼叫端已經
-/// 檢查過了」，但那是一個沒有人保證得了的約定——結案的交辦再被裁示一次就會把 `reviewed_at` 覆蓋掉。
-/// 不合法就回 `Ok(None)`，跟「找不到這筆」同一個出口。
+/// Record an acceptance decision. 轉移合不合法問 [`assignment_state::allowed`]（issue #71）：以前
+/// 註解寫「呼叫端已經檢查過了」，但那是一個沒有人保證得了的約定——結案的交辦再被裁示一次就會把
+/// `reviewed_at` 覆蓋掉。不合法就回 `Ok(None)`，跟「找不到這筆」同一個出口。
+///
+/// **status 這一欄本身的寫入走 [`assignment_state::set_status_on`]**（issue #71 第二刀）：以前是
+/// `WHERE id=?`，讀完 `before` 到這句 UPDATE 之間別的路徑先動手也不會被擋——只有測試在用這支，
+/// 真的撞上的機率低，但既然要收成單一入口，這裡不該是唯一一處還在自己下裸的 SQL。CAS 綁的就是
+/// 剛讀到的 `before.status`：別人先動了手，`set_status_on` 回 `Raced`，這裡跟著回 `Ok(None)`。
 ///
 /// Idempotent by construction at the API layer: re-deciding the same way is answered from the
 /// row without writing a second audit entry.
@@ -1624,15 +1656,22 @@ pub async fn review(
     if !assignment_state::allowed(&before.status, to_status) {
         return Ok(None);
     }
+    // 表已經說這一步合法，字串一定解得回去這兩個 enum——但用 `let...else` 不 panic：壞資料
+    // 不該把整個請求打死，而是照「沒有這個轉移」處理。
+    let (Some(from), Some(to)) = (assignment_state::AssignmentState::parse(&before.status), assignment_state::AssignmentState::parse(to_status)) else {
+        return Ok(None);
+    };
     let now = crate::db::now();
     let mut tx = pool.begin().await?;
+    if !matches!(assignment_state::set_status_on(&mut tx, id, from, to, "review").await?, assignment_state::Outcome::Applied) {
+        return Ok(None);
+    }
     sqlx::query(
         "UPDATE supervisor_assignments
-            SET status=?, review_decision=?, reviewed_by=?, reviewed_at=?, review_reason=?,
+            SET review_decision=?, reviewed_by=?, reviewed_at=?, review_reason=?,
                 followup_assignment_id=COALESCE(?, followup_assignment_id), updated_at=?
           WHERE id=?",
     )
-    .bind(to_status)
     .bind(decision)
     .bind(actor)
     .bind(&now)
@@ -3157,6 +3196,30 @@ mod tests {
         let kinds: Vec<String> = pending_inbox(&p).await.unwrap().into_iter().map(|e| e.kind).collect();
         assert!(kinds.contains(&"assignment_quota_blocked".to_string()));
         assert!(kinds.contains(&"assignment_quota_resumed".to_string()));
+    }
+
+    /// issue #71 第二刀時發現：額度回來重送前，AGM 已經先把這筆交辦取消掉了——guard 擋下這次
+    /// 轉移是對的，但以前不看 `moved` 就照樣推一則「額度回來、重新排隊」的通知，跟
+    /// `a_cancelled_assignment_gets_no_stale_completion_notification` 是同一種形狀的縫。
+    #[tokio::test]
+    async fn a_decided_assignment_gets_no_stale_quota_resume_notification() {
+        let p = pool().await;
+        get_or_init(&p).await.unwrap();
+        let a = insert_assignment(&p, None, "bot1", "req-race3", "做 A", &[], None, true).await.unwrap();
+        mark_delivered(&p, &a.id, "turn-race3", "ok").await.unwrap();
+        park_quota_blocked(&p, &a.id, "2026-09-13T01:00:00Z", "撞到上限", "qb:race3", &json!({})).await.unwrap();
+        review_with_followup(&p, &a.id, "quota_blocked", "cancel", "AGM", "cli", Some("改主意"), None, None)
+            .await
+            .unwrap()
+            .expect("cancel 先落地");
+
+        let resumed = resume_quota_blocked(&p, &a.id, "qr:race3", &json!({})).await.unwrap();
+        assert!(!resumed.moved, "guard 要擋下：這一列已經不是 quota_blocked");
+        assert!(!resumed.event_new, "沒有真的轉移，不該生出一則新事件");
+        assert_eq!(assignment(&p, &a.id).await.unwrap().unwrap().status, "cancelled", "guard 擋下的不會被蓋回 queued");
+
+        let kinds: Vec<String> = pending_inbox(&p).await.unwrap().into_iter().map(|e| e.kind).collect();
+        assert!(!kinds.contains(&"assignment_quota_resumed".to_string()), "已經取消的交辦不該讓 AGM 收到「重新排隊」的通知");
     }
 
     /// 同一次擋下重放幾遍只會有一則通知（event_key 帶重送次數）。
