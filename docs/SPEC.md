@@ -823,7 +823,9 @@ daemon 每次起 pane 前把 POSIX `sh` 包裝腳本裝到 `<bot 目錄>/bin/her
 在新版 daemon 上線之後手上還是舊 shim——`ee98f6cf` 上線當天，AGM 那顆的 `bin/cargo` 還是幾小時前的舊版，照樣踩到 shim 巢狀死鎖。
 daemon 啟動時掃 `<data_dir>/bots/*/bin`，把**已經存在**的 `herdr`／`cargo` 換成這顆 binary 帶的版本：shim 只是檔案，
 換掉不必重啟 pane（下一次在 pane 裡打 `cargo` 就是新版）。寫入一律暫存檔 + rename（同目錄、原子），
-正在執行的舊 shim 沿用舊 inode 不受影響；**內容一樣就不動**，免得每次重啟把 mtime 洗掉、看不出哪些真的換過版。
+正在執行的舊 shim 沿用舊 inode 不受影響；**內容一樣就不重寫**，免得每次重啟把 mtime 洗掉、看不出哪些真的換過版。
+內容與權限**分開判**（issue #126）：內容已是現行版、但權限掉了（舊版 `install_local` 寫完才 chmod，中間死掉會留下 0644，
+pane 打 `cargo` 就 permission denied）時，只 chmod 回 0755，不重寫內容；內容與權限都對才是真的 no-op。
 沒有 `bin/` 或本來就沒有那支 shim 的 bot 不會被生出新檔案（那是啟動時 `install_shim` 的事）。
 
 - `herdr agent start <name> …`：`<name>` 不以 `$AM_AGENT_NAME-` 開頭就補前綴（截到 32 字）並在 stderr 說明。旗標可在名字前面，`--kind`/`--pane`/`--timeout` 的值不誤認，`--` 之後原封不動。
