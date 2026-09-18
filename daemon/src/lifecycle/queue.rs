@@ -68,11 +68,7 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
     let text = turn.prompt_text.clone().unwrap_or_default();
     if text.trim().is_empty() {
         // Nothing deliverable: drop it rather than leave the queue permanently blocked.
-        let _ = sqlx::query("UPDATE turns SET status='failed', completed_at=? WHERE id=? AND status='queued'")
-            .bind(db::now())
-            .bind(&turn.id)
-            .execute(&app.db)
-            .await;
+        let _ = super::turn_controller::set_status(&app.db, &turn.id, "queued", "failed", "prompt 是空的，送不出去").await;
         emit_turn(app, &turn.id).await;
         return Ok(());
     }

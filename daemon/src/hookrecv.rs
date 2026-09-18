@@ -577,11 +577,13 @@ async fn fill_or_drop_late_hook(
         tracing::info!(turn = %turn.id, has_reply, "late hook dropped; turn already completed via terminal fallback");
         return Ok(());
     }
-    sqlx::query("UPDATE turns SET status='completed', completed_at=COALESCE(completed_at, ?) WHERE id=?")
-        .bind(db::now())
-        .bind(&turn.id)
-        .execute(&app.db)
-        .await?;
+    // 這一筆是備援關掉的（`completed_fallback`），遲到的 hook 把回覆補上才升級成 `completed`。
+    // 以前這句沒有 guard（`WHERE id=?`）：中間若有別的路徑動過它，這裡會無聲蓋過去（issue #68）。
+    if lifecycle::turn_controller::set_status(&app.db, &turn.id, "completed_fallback", "completed", "遲到的 hook 補上回覆").await?
+        != lifecycle::turn_controller::Outcome::Applied
+    {
+        return Ok(());
+    }
     lifecycle::insert_message(app, &turn.conversation_id, Some(&turn.id), "assistant", body_text, "hook", false, None)
         .await?;
     tracing::info!(turn = %turn.id, "late hook filled a fallback-closed turn that had no reply");
