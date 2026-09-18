@@ -294,3 +294,12 @@
   font-size: 11px;
   letter-spacing: 0.03em;
 }
+
+/* 標題列的 pane 晶片縮成跟名字同一行高的小字（2026-09-18 使用者：「pane 晶片太大」）。 */
+.bs-head .bs-idents .copy-chip {
+  min-height: 0;
+  padding: 1px 6px;
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 1.4;
+}
