@@ -304,19 +304,90 @@ async fn relay_announce(
         return (StatusCode::UNAUTHORIZED, Json(json!({"error": "unknown bot or bad token"})));
     }
     // 寫給 AGM 的：協調者存在時排進它的佇列，shim 看到 `routed` 就不再打進 pane（SPEC §18.15）。
-    if let Ok(Some(target)) = crate::supervisor::bot_requests::role_bot_by_agent(&app, &body.to_agent).await {
-        let mark = crate::supervisor::bot_requests::ReplyMark {
-            ack: matches!(body.ack.as_deref().map(str::trim), Some("1" | "true")),
-            reply_to: body.reply_to.as_deref(),
-        };
-        match crate::supervisor::bot_requests::intercept(&app, &target, &body.bot_id, &body.text, None, &[], true, "herdr_shim", mark).await {
-            Ok(Some(v)) => return (StatusCode::OK, Json(v)),
-            Ok(None) => {}
-            Err(e) => tracing::warn!(error = ?e, "could not queue a bot request for AGM; falling back to the pane"),
+    // 路由狀態**不知道**不等於「不是 AGM」（issue #143）：查不出目標是不是 AGM、或確定是 AGM 卻寫不進佇列，
+    // 都回 503 `routing_unavailable`，shim 看到就明確失敗、不直送——直送會繞過 durable inbox、去重與 wake／ack 語意。
+    let unavailable = |why: String| {
+        tracing::warn!(to = %body.to_agent, error = %why, "could not route a bot request for AGM; refusing instead of falling back to the pane");
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "routing_unavailable", "routing_unavailable": true, "retryable": true, "detail": why,
+                        "message": "這則可能是寫給 AGM 的，但現在排不進協調佇列：沒有送出，也不會直接打進它的 pane，請稍後重試"})),
+        )
+    };
+    match crate::supervisor::bot_requests::role_bot_by_agent(&app, &body.to_agent).await {
+        Ok(Some(target)) => {
+            let mark = crate::supervisor::bot_requests::ReplyMark {
+                ack: matches!(body.ack.as_deref().map(str::trim), Some("1" | "true")),
+                reply_to: body.reply_to.as_deref(),
+            };
+            match crate::supervisor::bot_requests::intercept(&app, &target, &body.bot_id, &body.text, None, &[], true, "herdr_shim", mark).await {
+                Ok(Some(v)) => return (StatusCode::OK, Json(v)),
+                // 協調者還沒建立（舊部署）或角色對自己：本來就不攔，照舊直送。
+                Ok(None) => {}
+                Err(e) => return unavailable(format!("{e:?}")),
+            }
         }
+        Ok(None) => {}
+        Err(e) => return unavailable(format!("{e:?}")),
     }
     crate::agent_relay::announce(&body.bot_id, &body.to_agent, &body.text);
     (StatusCode::OK, Json(json!({})))
+}
+
+/// issue #143：寫給 AGM 的申請，路由狀態**不知道**不等於「不是 AGM」。
+#[cfg(test)]
+mod relay_announce_tests {
+    use super::*;
+    use crate::supervisor::bot_requests::flow_tests;
+
+    async fn announce(app: &Arc<App>, to: &str, text: &str) -> (StatusCode, Value) {
+        let mut headers = HeaderMap::new();
+        headers.insert("X-AM-Bot-Token", "tok-w1".parse().unwrap());
+        let body = RelayAnnounce { bot_id: "w1".into(), to_agent: to.into(), text: text.into(), ack: None, reply_to: None };
+        let (code, Json(v)) = relay_announce(State(app.clone()), headers, axum::extract::Form(body)).await;
+        (code, v)
+    }
+
+    async fn bot_requests(app: &Arc<App>) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE kind='bot_request'").fetch_one(&app.db).await.unwrap()
+    }
+
+    /// 目標確定是 AGM、協調佇列卻寫不進去：以前 log 一句就 fallback，回 200 `{}`，shim 照原本流程把申請直接打進
+    /// AGM 的 pane——繞過 durable inbox、去重、wake／ack 語意，控制面也不知道走了旁路。要回 5xx，而且不 announce。
+    /// 查不出目標是不是 AGM（DB 讀失敗）也一樣。真的不是 AGM 的目標照舊直送。
+    #[tokio::test]
+    async fn a_request_for_agm_that_cannot_be_queued_is_not_sent_to_the_pane() {
+        let app = flow_tests::app().await;
+        flow_tests::configure_responder(&app).await;
+
+        // 一般 bot：不是 AGM，照舊 announce、回 200 `{}`（shim 接著直送）。
+        let (code, v) = announce(&app, "builder", "幫我看一下 relay-143-plain").await;
+        assert_eq!((code, v), (StatusCode::OK, json!({})));
+        assert!(crate::agent_relay::claim("builder", "幫我看一下 relay-143-plain").is_some(), "一般目標照舊記下直送");
+
+        // 目標是 AGM，但協調佇列寫不進去。
+        sqlx::query("CREATE TRIGGER test_inbox_down BEFORE INSERT ON supervisor_inbox BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END")
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let (code, v) = announce(&app, "AGM", "請核准重建 relay-143-queue").await;
+        assert!(code.is_server_error(), "寫不進佇列不能假裝成「不是 AGM」：{code} {v}");
+        assert_eq!(v["routing_unavailable"], true, "{v}");
+        assert!(crate::agent_relay::claim("AGM", "請核准重建 relay-143-queue").is_none(), "不能退回直接打進 pane");
+
+        // DB 恢復後重試：只有一筆 durable 申請。
+        sqlx::query("DROP TRIGGER test_inbox_down").execute(&app.db).await.unwrap();
+        let (code, v) = announce(&app, "AGM", "請核准重建 relay-143-queue").await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(v["routed"], "responder", "{v}");
+        assert_eq!(bot_requests(&app).await, 1);
+
+        // 連「目標是不是 AGM」都查不出來（角色表讀不到）：一樣不能當成「不是」。
+        sqlx::query("DROP TABLE supervisor_roles").execute(&app.db).await.unwrap();
+        let (code, v) = announce(&app, "AGM-responder", "請核准重啟 relay-143-lookup").await;
+        assert!(code.is_server_error(), "{code} {v}");
+        assert!(crate::agent_relay::claim("AGM-responder", "請核准重啟 relay-143-lookup").is_none());
+    }
 }
 
 /// TCP peer address, **not** `Host`: the header is caller-chosen, so on 0.0.0.0 anyone on the LAN
