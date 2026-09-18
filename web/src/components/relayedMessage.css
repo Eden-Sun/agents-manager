@@ -1,0 +1,38 @@
+/*
+ * 右邊那一欄只屬於使用者（2026-09-12 使用者：「訊息右方就只能有我的，agm 代發的特別標」）。
+ *
+ * 對話裡靠右的泡泡一直被讀成「我說的話」。但 user 這個 role 底下混了兩種來源：使用者自己打的，
+ * 以及別的 agent／daemon 代發的——總管的裁示（`messages.relay_from`，SPEC §6.5d）與 daemon 的
+ * 自動通知（`[AG Man 通知]` 開頭）。它們靠右擺就是在冒名。
+ *
+ * 判斷不另外寫一套：代發的那一則本來就會畫出 `.msg-targets.relay` 這顆來源標，daemon 通知也早有
+ * `.daemon-notice`，所以這裡用 `:has()` 認那兩個記號，把它們移到左邊、換一套外觀。
+ */
+.msg.user:has(.msg-targets.relay),
+.msg.user.daemon-notice {
+  align-self: flex-start;
+  align-items: flex-start;
+  max-width: min(680px, 88%);
+}
+
+/* 不是使用者的藍底：左邊一條槓 + 面板底色，跟 bot 的回覆也分得開（那個沒有槓）。
+   圓角也翻過來——尖角在左下，跟左側對齊的方向一致。 */
+.msg.user:has(.msg-targets.relay) .bubble {
+  background: color-mix(in srgb, var(--accent-ink) 7%, var(--bg-panel));
+  color: var(--text);
+  border-left: 3px solid var(--accent-ink);
+  border-bottom-right-radius: 14px;
+  border-bottom-left-radius: 4px;
+}
+
+/* daemon 通知已經有自己的黃槓（`styles.css`），這裡只把它從右邊搬過來，顏色不動。 */
+.msg.user.daemon-notice .bubble {
+  border-bottom-right-radius: 14px;
+  border-bottom-left-radius: 4px;
+}
+
+/* 來源標在左上角，讀的人先看到「這是誰送的」再看內容。 */
+.msg.user:has(.msg-targets.relay) .msg-meta-above,
+.msg.user.daemon-notice .msg-meta-above {
+  justify-content: flex-start;
+}

@@ -1,0 +1,42 @@
+/*
+ * 「這個帳號現在被 CLI 擋住」的畫法（2026-09-12 使用者：codex 量表全滿，送出去卻一直回
+ * `You've hit your usage limit`）。
+ *
+ * 為什麼量表本身不夠：5h／7d 是**速率**視窗，codex 的 credits 用完時那兩條可以是 0% 已用，
+ * app-server 也照實回報滿格。唯一講出這件事的是 CLI 自己印的橫幅，daemon 收在
+ * `quota.limit_hit`，所以這裡把它畫成格子上的一個狀態，而不是只寫在 popover 裡。
+ */
+.quota-hp.blocked {
+  border-color: color-mix(in srgb, var(--danger) 55%, transparent);
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+}
+
+/* 量表是滿的但帳號收不了工作——把條子壓灰，才不會讀成「還很夠用」。 */
+.quota-hp.blocked .quota-bar,
+.quota-hp.blocked .quota-border-meter {
+  opacity: 0.45;
+}
+
+.quota-blocked-ico {
+  margin-right: 2px;
+  font-size: 10px;
+  line-height: 1;
+}
+
+.quota-hp.blocked .quota-identity {
+  color: var(--danger);
+}
+
+/* popover 裡那一行：跟「重置券」同一種排版，左邊是標籤欄，右邊是內容。 */
+.quota-pop-line.limit-hit .quota-limit-hit {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  color: var(--danger);
+  font-weight: 650;
+}
+
+.quota-limit-hit-why {
+  color: var(--text-faint);
+  font-weight: 400;
+}
