@@ -89,10 +89,21 @@ am_remote_cargo_missing() {
     printf '%s' "${_miss# }"
 }
 
-# `http://127.0.0.1:$AM_PORT` — bots always have `AM_PORT`; a manual host shell defaults to the
-# documented port (SPEC: daemon 在 127.0.0.1:7788)。
+# `http://127.0.0.1:$AM_PORT` 的埠。**本機** bot 的 pane 一定有 `AM_PORT`（daemon 注入）；人工 host shell 沒有，
+# 用文件寫的預設埠（SPEC：daemon 在 127.0.0.1:7788）。
+#
+# 有 bot 身分（`AM_BOT_ID`／`AM_HOOK_TOKEN`）卻沒有 `AM_PORT` 的 pane 不能猜預設值（issue #153）：**遠端主機**上的 bot
+# 就是這樣——遠端沒有 daemon、也不開反向埠（SPEC §11.4），127.0.0.1 是那台機器自己，猜 7788 打到的是不知道什麼東西
+# （那台剛好也跑一份 agents-manager 的話，會把名額要求送給別顆 daemon）。回失敗，由呼叫端明講並直接跑。
 am_build_port() {
-    printf '%s' "${AM_PORT:-7788}"
+    if [ -n "${AM_PORT:-}" ]; then
+        printf '%s' "$AM_PORT"
+        return 0
+    fi
+    if [ -n "${AM_BOT_ID:-}" ] || [ -n "${AM_HOOK_TOKEN:-}" ]; then
+        return 1
+    fi
+    printf '7788'
 }
 
 # 認證：bot 用自己的 hook token（pane 裡本來就有），人工 host shell 用一般 UI token（讀
@@ -287,7 +298,12 @@ am_cargo() {
         printf 'agents-manager: 沒有 bot／管理員身分，這次 cargo 不經過排程器，直接跑\n' >&2
         exec "$_real" "$@"
     }
-    _port=$(am_build_port)
+    # 不知道 daemon 在哪（遠端 bot 的 pane）：不猜位址、一通 curl 都不打，明講原因、直接跑。遠端那台的編譯本來就
+    # 不受這台 daemon 的名額管；外部編譯（`remote-cargo`）也用不上——那是本機 pane 的事，遠端 pane 沒有 helper 的環境變數。
+    _port=$(am_build_port) || {
+        printf 'agents-manager: 這個 pane 有 bot 身分卻沒有 AM_PORT（遠端主機連不到 daemon，或環境變數沒帶進來），不知道 daemon 在哪、不會去猜 127.0.0.1，這次 cargo 不排程，直接跑\n' >&2
+        exec "$_real" "$@"
+    }
     _holder="${AM_AGENT_NAME:-manual}:$$"
     _bot_id="${AM_BOT_ID:-}"
     _purpose=$(printf '%s' "$*" | cut -c1-200)
@@ -824,12 +840,70 @@ esac"#
         s.install_fake_curl("exit 7\n"); // curl 的「連不上」退出碼
         let log = s.dir.join("cargo.log");
         let (_, err, rc) = s.run(
-            &[("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_TEST_FAKE_CARGO_LOG", log.to_str().unwrap())],
+            &[("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_PORT", "1"), ("AM_TEST_FAKE_CARGO_LOG", log.to_str().unwrap())],
             &["test", "-p", "agents-managerd"],
         );
         assert_eq!(rc, 0, "{err}");
         assert!(err.contains("連不上"), "{err}");
         assert!(std::fs::read_to_string(&log).unwrap().contains("agents-managerd"));
+    }
+
+    /// issue #153：遠端主機上的 bot pane 沒有 `AM_PORT`（遠端沒有 daemon，也不開反向埠，SPEC §11.4；daemon 不注入），
+    /// 但有 `AM_BOT_ID`／`AM_HOOK_TOKEN`。以前 shim 在 `AM_PORT` 缺席時預設打 `127.0.0.1:7788`——在遠端那是**那台機器自己**，
+    /// 名額要求打到不知道是誰的東西上（那台剛好也跑一份 agents-manager 的話，還會打到別顆 daemon）。
+    /// 現在有 bot 身分卻沒有 `AM_PORT` 就是「不知道 daemon 在哪」：一通 curl 都不打，stderr 明講缺 `AM_PORT`，cargo 直接跑
+    /// （遠端那台的編譯本來就不受這台 daemon 的名額管）。每一種 shell 都驗（含 macOS 的 bash 3.2）。
+    #[test]
+    fn a_bot_pane_without_am_port_never_talks_to_loopback_7788() {
+        for sh in shells() {
+            for sub in ["build", "check", "test"] {
+                let s = Sandbox::new();
+                s.install_fake_curl(&format!(
+                    "echo \"$*\" >> '{d}/curl.log'\nprintf '{{\"granted\":true,\"token\":\"tok-1\",\"cargo_jobs\":2,\"lease_ttl_secs\":30}}'\n",
+                    d = s.dir.display()
+                ));
+                let cargo_log = s.dir.join("cargo.log");
+                let env = [("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_TEST_FAKE_CARGO_LOG", cargo_log.to_str().unwrap())];
+                let (_, err, rc) = s.run_in(Some(sh), &env, &[sub, "-p", "agents-managerd"]);
+                let why = format!("{sh} {sub}: {err}");
+                assert_eq!(rc, 0, "{why}");
+                assert!(!s.dir.join("curl.log").exists(), "不知道 daemon 在哪，就一通 curl 都不能打（尤其不是 127.0.0.1:7788）：{why}");
+                assert!(err.contains("AM_PORT"), "要明講缺什麼：{why}");
+                assert!(std::fs::read_to_string(&cargo_log).unwrap().contains("agents-managerd"), "cargo 照跑：{why}");
+                assert!(!err.contains("外部編譯沒有啟用"), "這個 pane 連 daemon 都沒有，不必再吵外部編譯：{why}");
+            }
+        }
+    }
+
+    /// 反面：預設 7788 只留給**人工 host shell**（沒有 bot 身分、用 `~/.config/agents-manager/ui-token`，SPEC 寫明的預設埠）；
+    /// 有 `AM_PORT` 的（本機 bot）照它走。
+    #[test]
+    fn a_manual_shell_keeps_the_documented_default_port_and_a_set_am_port_wins() {
+        let s = Sandbox::new();
+        s.install_fake_curl(&format!(
+            "echo \"$*\" >> '{d}/curl.log'\nprintf '{{\"granted\":true,\"token\":\"tok-1\",\"cargo_jobs\":2,\"lease_ttl_secs\":30}}'\n",
+            d = s.dir.display()
+        ));
+        let home = s.dir.join("fake-home/.config/agents-manager");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("ui-token"), "test-token").unwrap();
+        let curl_log = s.dir.join("curl.log");
+        let acquire_url = || {
+            let log = std::fs::read_to_string(&curl_log).unwrap_or_default();
+            let _ = std::fs::remove_file(&curl_log);
+            log.lines().find(|l| l.contains("/acquire")).map(str::to_string).unwrap_or_default()
+        };
+        let (_, err, rc) = s.run(&[], &["build"]);
+        assert_eq!(rc, 0, "{err}");
+        let url = acquire_url();
+        assert!(url.contains("http://127.0.0.1:7788/build-slots/acquire"), "人工 shell 沒有 AM_PORT：照文件寫的預設埠：{url}");
+        let (_, err, rc) = s.run(&[("AM_PORT", "4242")], &["build"]);
+        assert_eq!(rc, 0, "{err}");
+        let url = acquire_url();
+        assert!(url.contains("http://127.0.0.1:4242/build-slots/acquire"), "有 AM_PORT 就照它：{url}");
+        let (_, err, rc) = s.run(&[("AM_PORT", "4243"), ("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok")], &["build"]);
+        assert_eq!(rc, 0, "{err}");
+        assert!(acquire_url().contains("http://127.0.0.1:4243/"), "本機 bot 照 AM_PORT");
     }
 
     /// 名額滿了先等，daemon 說 granted 才跑；granted 帶的 `cargo_jobs` 要真的傳進 CARGO_BUILD_JOBS。
@@ -851,7 +925,7 @@ esac
         ));
         let cargo_log = s.dir.join("cargo.log");
         let (_, err, rc) = s.run(
-            &[("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_TEST_FAKE_CARGO_LOG", cargo_log.to_str().unwrap())],
+            &[("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_PORT", "1"), ("AM_TEST_FAKE_CARGO_LOG", cargo_log.to_str().unwrap())],
             &["check", "-p", "agents-managerd"],
         );
         assert_eq!(rc, 0, "{err}");
@@ -879,7 +953,7 @@ esac
         let cargo_log = s.dir.join("cargo.log");
         let log = cargo_log.to_str().unwrap();
         fn base<'a>(log: &'a str, extra: &[(&'a str, &'a str)]) -> Vec<(&'a str, &'a str)> {
-            let mut env = vec![("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_TEST_FAKE_CARGO_LOG", log)];
+            let mut env = vec![("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_PORT", "1"), ("AM_TEST_FAKE_CARGO_LOG", log)];
             env.extend_from_slice(extra);
             env
         }
@@ -939,7 +1013,6 @@ esac
             let cargo_log = s.dir.join("cargo.log");
             let mut env = lease_env(&s);
             env.extend(remote);
-            env.push(("AM_PORT", "1".into()));
             env.push(("AM_TEST_FAKE_CARGO_LOG", cargo_log.display().to_string()));
             let (_, err, rc) = s.run_in(Some(sh), &as_refs(&env), &[sub, "-p", "agents-managerd"]);
             let why = format!("{sh} {sub}／helper 退 {helper_rc}：{err}");
@@ -965,7 +1038,6 @@ esac
         let remote = s.install_fake_helper(&format!("echo helper >> '{}'\nexit 125", order.display()));
         let mut env = lease_env(&s);
         env.extend(remote);
-        env.push(("AM_PORT", "1".into()));
         env.push(("AM_TEST_FAKE_CARGO_LOG", order.display().to_string()));
         let (_, err, rc) = s.run(&as_refs(&env), &["test", "-p", "agents-managerd"]);
         assert_eq!(rc, 0, "{err}");
@@ -1110,7 +1182,7 @@ esac
     fn lease_env(s: &Sandbox) -> Vec<(&'static str, String)> {
         let tmp = s.dir.join("tmp");
         std::fs::create_dir_all(&tmp).unwrap();
-        vec![("AM_BOT_ID", "b1".into()), ("AM_HOOK_TOKEN", "tok".into()), ("TMPDIR", tmp.display().to_string())]
+        vec![("AM_BOT_ID", "b1".into()), ("AM_HOOK_TOKEN", "tok".into()), ("AM_PORT", "1".into()), ("TMPDIR", tmp.display().to_string())]
     }
 
     fn as_refs<'a>(v: &'a [(&'static str, String)]) -> Vec<(&'a str, &'a str)> {
@@ -1467,7 +1539,7 @@ esac
             s.dir.join("real").display()
         );
         let mut cmd = s.command(&path);
-        cmd.env("AM_BOT_ID", "b1").env("AM_HOOK_TOKEN", "tok").env("AM_TEST_FAKE_CARGO_LOG", cargo_log.to_str().unwrap());
+        cmd.env("AM_BOT_ID", "b1").env("AM_HOOK_TOKEN", "tok").env("AM_PORT", "1").env("AM_TEST_FAKE_CARGO_LOG", cargo_log.to_str().unwrap());
         cmd.args(["check", "-p", "agents-managerd"]);
         let (_, err, rc) = s.run_group(cmd, None);
         assert_eq!(rc, 0, "{err}");
@@ -1519,7 +1591,7 @@ esac
             s.dir.join("real").display()
         );
         let mut cmd = s.command(&path);
-        cmd.env("AM_BOT_ID", "b1").env("AM_HOOK_TOKEN", "tok").env("AM_TEST_FAKE_CARGO_LOG", cargo_log.to_str().unwrap());
+        cmd.env("AM_BOT_ID", "b1").env("AM_HOOK_TOKEN", "tok").env("AM_PORT", "1").env("AM_TEST_FAKE_CARGO_LOG", cargo_log.to_str().unwrap());
         cmd.args(["build", "--release"]);
         let (_, err, rc) = s.run_group(cmd, None);
         assert_eq!(rc, 0, "{err}");
@@ -1569,6 +1641,7 @@ esac
             &[
                 ("AM_BOT_ID", "b1"),
                 ("AM_HOOK_TOKEN", "tok"),
+                ("AM_PORT", "1"),
                 ("AM_TEST_FAKE_CARGO_LOG", cargo_log.to_str().unwrap()),
                 ("AM_TEST_FAKE_CARGO_EXIT", "101"),
             ],

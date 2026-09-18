@@ -1267,6 +1267,10 @@ listen port 只在本機算（pane 行程樹的 pid 對 `lsof -nP -iTCP -sTCP:LI
 - 沒有 bot token 也沒有 UI token 檔可讀：直接不排程，印一行 stderr 說明，直接跑（issue 要求「明講的 bypass 路徑」）。
 - daemon 連不上（curl 失敗）、回應看不懂：一律不排程，直接跑——**shim 不能因為排程器出問題就讓建置卡死或失敗**，
   跟 `herdr_shim.rs` 的哲學一樣：「a shim that aborts is worse than one that forwards」。
+- **不猜 daemon 的位址（issue #153）**：埠只認 `AM_PORT`。沒有 `AM_PORT` 時，只有**沒有 bot 身分**的人工 host shell 用文件寫的預設 7788；
+  有 bot 身分（`AM_BOT_ID`／`AM_HOOK_TOKEN`）卻沒有 `AM_PORT` 的 pane——**遠端主機**上的 bot 就是（遠端沒有 daemon、不開反向埠，§11.4，
+  daemon 也不注入 `AM_PORT`）——一通 curl 都不打（127.0.0.1 在遠端是那台機器自己，可能是別顆 daemon），stderr 講明缺 `AM_PORT`，cargo 照跑：
+  遠端那台的編譯本來就不受這台 daemon 的名額管。不把位址寫進遠端 shim：daemon 只聽本機 127.0.0.1，遠端連不到，寫了也是假的。
 - **轉到外部編譯主機的指令不佔本機名額（issue #155，使用者 2026-09-19 決定）**：本機名額管的是本機的 RAM／CPU。`check`／`test`／`clippy`
   （#104 的 verification 三個）在 pane 有 `AM_DAEMON_EXE`／`AM_CONFIG_PATH`／`AM_DATA_DIR` 時，shim **先**叫 `remote-cargo` helper，
   **不先 acquire**：遠端有空就同時跑多少個都行，不受 `max_concurrent` 限制（遠端自己的容量靠 `cargo_jobs` 與那台機器；沒有另設遠端上限）。
