@@ -13,10 +13,23 @@ pub const SHIM_SH: &str = r##"#!/bin/sh
 #
 # POSIX sh only, no `set -e`: a shim that aborts a build because ITS OWN scheduling call failed is
 # worse than one that just runs the build unscheduled (SPEC herdr_shim.rs 的同一條原則)。
+#
+# AM_SHIM_MARKER: 這行讓 shim 認得出「PATH 上那個 cargo 其實是我自己」（am_is_shim）。不要刪。
 
-# The real cargo: `$AM_REAL_CARGO` if set, else the first `cargo` on PATH that is not this directory.
+# 這個檔案是不是這支 shim 的另一份拷貝。`AM_SHIM_MARKER` 只出現在 shim 自己的檔頭。
+am_is_shim() {
+    head -n 12 "$1" 2>/dev/null | grep -q 'AM_SHIM_MARKER' 2>/dev/null
+}
+
+# The real cargo: `$AM_REAL_CARGO` if set, else the first `cargo` on PATH that is not a copy of this
+# shim.
+#
+# **不能只跳過自己那個目錄**：一顆 bot 的 pane 會繼承祖先 pane 的 PATH，同一條 PATH 上常常掛著
+# 好幾顆 bot 的 `bots/<id>/bin`（2026-09-18 實測有 6 個）。只比對自己的目錄時，下一個目錄裡的
+# 「cargo」就是同一支 shim，於是 shim → shim → shim 一層一層都去拿名額：`max_concurrent=2` 被自己
+# 的外層佔滿，最內層那個永遠等不到，整台機器明明是空的卻卡死（w168:p91 卡了 17 分鐘）。
 am_real_cargo() {
-    if [ -n "${AM_REAL_CARGO:-}" ] && [ -x "$AM_REAL_CARGO" ]; then
+    if [ -n "${AM_REAL_CARGO:-}" ] && [ -x "$AM_REAL_CARGO" ] && ! am_is_shim "$AM_REAL_CARGO"; then
         printf '%s\n' "$AM_REAL_CARGO"
         return 0
     fi
@@ -26,7 +39,7 @@ am_real_cargo() {
             [ -n "$_d" ] || _d=.
             _abs=$(cd "$_d" 2>/dev/null && pwd) || continue
             [ "$_abs" = "$_self" ] && continue
-            if [ -x "$_abs/cargo" ]; then
+            if [ -x "$_abs/cargo" ] && ! am_is_shim "$_abs/cargo"; then
                 printf '%s\n' "$_abs/cargo"
                 break
             fi
@@ -83,12 +96,27 @@ am_json_field() {
 }
 
 am_cargo() {
+    # 遞迴保險絲：萬一 `am_is_shim` 認不出某一份 shim（被改過檔頭、或別的專案裝了同名 wrapper），
+    # 兩份 shim 會互相把對方當成真 cargo 一路 fork 下去。寧可大聲失敗，也不要 fork 到機器躺平。
+    AM_SHIM_DEPTH=$((${AM_SHIM_DEPTH:-0} + 1))
+    export AM_SHIM_DEPTH
+    if [ "$AM_SHIM_DEPTH" -gt 4 ]; then
+        printf 'agents-manager: cargo shim 遞迴 %s 層——PATH 上有多份 shim 而且認不出來。把真 cargo 放進 AM_REAL_CARGO 再跑一次。\n' "$AM_SHIM_DEPTH" >&2
+        exit 127
+    fi
     _real=$(am_real_cargo | head -n 1)
     if [ -z "$_real" ]; then
         printf 'agents-manager: 找不到真正的 cargo（把它的路徑放進 AM_REAL_CARGO）\n' >&2
         exit 127
     fi
     if ! am_cargo_is_heavy "${1:-}" || ! command -v curl >/dev/null 2>&1; then
+        exec "$_real" "$@"
+    fi
+    # 這條進程鏈上已經有人拿著名額（build script 或 xtask 再叫一次 cargo）：直接跑，不要再排一次。
+    # 內層等的名額只會等到外層結束才空出來，而外層在等內層——就是上面那個死結。
+    if [ -n "${AM_BUILD_SLOT_HELD:-}" ]; then
+        AM_REAL_CARGO="$_real"
+        export AM_REAL_CARGO
         exec "$_real" "$@"
     fi
     _auth=$(am_build_auth_header) || {
@@ -170,7 +198,7 @@ am_cargo() {
         fi
     fi
 
-    CARGO_BUILD_JOBS="$_jobs" "$_real" "$@"
+    AM_BUILD_SLOT_HELD=1 AM_REAL_CARGO="$_real" CARGO_BUILD_JOBS="$_jobs" "$_real" "$@"
     _cargo_rc=$?
     _release
     trap - EXIT INT TERM
@@ -271,7 +299,9 @@ mod tests {
                 self.dir.join("real").display()
             );
             cmd.env("PATH", path).args(args);
-            for key in ["AM_BOT_ID", "AM_HOOK_TOKEN", "AM_PORT", "AM_AGENT_NAME", "HOME"] {
+            // `AM_REAL_CARGO` / `AM_BUILD_SLOT_HELD` 也要清掉：開發機的 shell 裡常設著（繞過 shim 跑
+            // 測試時就會設），留著會讓 shim 改用真的 cargo，六條測試一起假紅。
+            for key in ["AM_BOT_ID", "AM_HOOK_TOKEN", "AM_PORT", "AM_AGENT_NAME", "AM_REAL_CARGO", "AM_BUILD_SLOT_HELD", "AM_SHIM_DEPTH", "HOME"] {
                 cmd.env_remove(key);
             }
             // 假的 $HOME：不能真的去讀開發機自己的 ui-token（會讓測試偷偷通過或偷偷失敗）。
@@ -352,6 +382,72 @@ esac
         let calls = std::fs::read_to_string(&call_log).unwrap();
         assert!(calls.matches("acquire").count() >= 2, "第一次滿了，第二次才拿到：{calls}");
         assert!(calls.contains("release"), "結束要放：{calls}");
+    }
+
+    /// PATH 上還掛著**別顆 bot 的同一支 shim**（祖先 pane 繼承下來的，2026-09-18 實測有 6 個）：
+    /// 真 cargo 要往後找，不能把另一份 shim 當成真 cargo——那會 shim → shim 一層層各拿一個名額，
+    /// `max_concurrent` 被自己的外層佔滿，最內層永遠等不到（w168:p91 卡死 17 分鐘）。
+    #[test]
+    fn another_bots_shim_on_path_is_not_mistaken_for_the_real_cargo() {
+        let s = Sandbox::new();
+        // 另一顆 bot 的 bin 目錄，插在自己的 bin 與真 cargo 之間。
+        let other = s.dir.join("other-bot");
+        super::install_local(&other).unwrap();
+        let call_log = s.dir.join("curl-calls.log");
+        s.install_fake_curl(&format!(
+            r#"echo "$@" >> '{log}'
+case "$*" in
+  *acquire*) printf '{{"granted":true,"token":"tok-1","cargo_jobs":2,"lease_ttl_secs":30}}' ;;
+  *) printf '{{}}' ;;
+esac
+"#,
+            log = call_log.display()
+        ));
+        let cargo_log = s.dir.join("cargo.log");
+        let mut cmd = std::process::Command::new(s.dir.join("bin/cargo"));
+        cmd.env(
+            "PATH",
+            format!(
+                "{}:{}:{}:/usr/bin:/bin",
+                s.dir.join("bin").display(),
+                other.join("bin").display(),
+                s.dir.join("real").display()
+            ),
+        );
+        for key in ["AM_BOT_ID", "AM_HOOK_TOKEN", "AM_PORT", "AM_AGENT_NAME", "AM_REAL_CARGO", "AM_BUILD_SLOT_HELD", "AM_SHIM_DEPTH", "HOME"] {
+            cmd.env_remove(key);
+        }
+        cmd.env("HOME", s.dir.join("fake-home"));
+        cmd.env("AM_BOT_ID", "b1").env("AM_HOOK_TOKEN", "tok").env("AM_TEST_FAKE_CARGO_LOG", cargo_log.to_str().unwrap());
+        let out = cmd.args(["check", "-p", "agents-managerd"]).output().unwrap();
+        let err = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert_eq!(out.status.code(), Some(0), "{err}");
+        // 真 cargo 真的跑到了（不是卡在等名額），而且整趟只拿一個名額。
+        assert!(std::fs::read_to_string(&cargo_log).unwrap().contains("agents-managerd"), "{err}");
+        let calls = std::fs::read_to_string(&call_log).unwrap();
+        assert_eq!(calls.matches("acquire").count(), 1, "一層一個名額就是死結：{calls}");
+    }
+
+    /// build script／xtask 在拿著名額的 cargo 裡再叫一次 cargo：直接跑，不再排一次
+    /// （內層等的名額要等外層結束才空，而外層在等內層）。
+    #[test]
+    fn a_nested_cargo_inside_a_held_slot_does_not_queue_again() {
+        let s = Sandbox::new();
+        let call_log = s.dir.join("curl-calls.log");
+        s.install_fake_curl(&format!("echo \"$@\" >> '{log}'\nprintf '{{}}'\n", log = call_log.display()));
+        let cargo_log = s.dir.join("cargo.log");
+        let (_, err, rc) = s.run(
+            &[
+                ("AM_BOT_ID", "b1"),
+                ("AM_HOOK_TOKEN", "tok"),
+                ("AM_BUILD_SLOT_HELD", "1"),
+                ("AM_TEST_FAKE_CARGO_LOG", cargo_log.to_str().unwrap()),
+            ],
+            &["build"],
+        );
+        assert_eq!(rc, 0, "{err}");
+        assert!(std::fs::read_to_string(&cargo_log).unwrap().contains("build"), "{err}");
+        assert!(!s.dir.join("curl-calls.log").exists() || !std::fs::read_to_string(&call_log).unwrap().contains("acquire"), "不該再排一次");
     }
 
     /// 真的 cargo 跑失敗：shim 仍然要放掉名額（不能因為建置失敗就卡住別人），並把 cargo 的結束碼原樣帶出去。
