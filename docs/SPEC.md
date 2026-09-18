@@ -214,6 +214,8 @@ daemon 收到就**當場**把那一筆 in-flight turn 收成 `status='failed'`�
   此刻在飛的就是被中斷那一筆 → 是；都證不出來時看**送端蓋的擷取時間**（`received_at`）：Esc 之後 `ECHO_CAPTURE_SLACK`（3 秒，
   涵蓋遠端 `hook.sh` 只蓋到秒與兩台時鐘的小誤差）內擷取、且早於此刻在飛的新回合開始的才是；沒有擷取時間的一律不是。
   認成回聲就結清那筆（排隊寬限的接管標記另外算，不受影響）；不是回聲的照真的失敗收，那筆留著等回聲。
+  回聲（兩道任一道認出來的）就是 Esc 生效的證據：結清標記**之前**先把那次打斷欠著／待證的收尾補上（§6.4，#147）——
+  回合照 Esc 的說明收，不算 provider／額度失敗；補不上就讓這一則 hook 失敗、由收件匣重試，標記留著，重試時照樣認得。
   比的是擷取時間不是收到時間：遠端 spool 放 30 秒以上才撈回來也認得出來，而 Esc 之後新開的回合失敗不會被吞掉
   （#117：上一版只記「這顆 bot 什麼時候按過停」並在收到後 120 秒內一律當回聲，Esc 之後馬上開的新回合撞額度就被吞掉、撞限也不記）。
 - **不會重複收尾**：先在 `(native_session_id, native_turn_id)` 上去重（重播、spool 重送），再用
@@ -778,6 +780,18 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run
 ### 6.4 停止／刪除 Bot（per-bot 鎖內）
 - `interrupt`：`agent.send_keys [esc]`，Run 狀態不變。
   **按了 interrupt 之後，這顆 bot 排著的 queued 不立刻送**：先讓使用者拿回輸入框，規則見 §4.4a「使用者中斷之後，先讓使用者拿回輸入框」。
+  - **Esc 與「把回合收成 failed」是兩半**（issue #147，`lifecycle::interruption`），中間不是同一個交易。鍵的結果分三種：
+    herdr 回錯誤或連不上（`herdr::never_applied`）＝**沒做**：502，回合照舊在飛、不記任何帳；回 ok＝**做了**：同一個交易裡收成
+    `failed`＋說明「interrupted by user」；送出去之後逾時／斷線沒回＝**不知道**：**不假定打斷**，回合留在 in_flight，回
+    `409 interrupt_unconfirmed`，等那次 Esc 的 `StopFailure` 回聲（§6.7）證明它進去了才收；回合自己答完（Stop）就照答完收。
+  - **做了但 DB 寫不進去**：不回普通成功，回 `503 interrupt_state_uncommitted`（跟 start／stop 的 `*_state_uncommitted` 同一種；帶 `run_id`／`turn_id`、`esc_sent: true`），
+    那一筆記成**欠著**。欠著的在這些時候補上（CAS 在那一筆的 `id` 與 `status='in_flight'`，**從不再按鍵**）：
+    這顆 bot 的下一則回合 hook（先補再對回合——Esc 的回聲不再被吞、下一句的回覆不會掛到被中斷的那一筆上；
+    補不上就讓那一則 hook 失敗、由收件匣重試）、下一則 prompt、同一次中斷的重試、強制中止、定時重試（1 秒起、約四分鐘）。
+    那一筆已經被別的路收掉就作廢。帳只在記憶體：daemon 重啟後還在飛的那一筆照舊由 hook 或閒置 watchdog 收。
+  - **重試不按第二次 Esc**：欠著的那一筆還在飛時，重試只補收尾；這一次重試剛好把它補上就直接回 200。請求可帶
+    `{"turn_id"}` 綁定要打斷的那一筆：它已經不在飛（被收掉、下一回合已開始）就不按 Esc、回 `409 turn_not_in_flight`，
+    不會誤傷下一回合。強制中止（`abort`）的 in-flight 那一筆走同一套：收不掉就不是 `200 aborted`。
 - `stop`：Run `stopping` → in-flight Turn 標 `failed` → `ctrl+c` ×2（間隔 500 ms）→ 等 `pane.exited` 或 agent 消失最多 10 秒 → 否則 `pane.close` → `stopped` → 關訂閱。
   run 狀態與破壞性的副作用不是兩條平行線（#146）：
   - `stopping` 以 CAS（from `starting`／`running`／`stopping`，上次沒停成的可以再按）寫入，**寫不進去就一步都不做**（不收 in-flight、

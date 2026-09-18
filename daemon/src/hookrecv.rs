@@ -715,6 +715,12 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
         }
     }
 
+    // 上一次打斷欠著的收尾先補（#147）：鍵已經生效、DB 那一半沒寫成的那一筆，要在這一則被對到任何回合之前收掉。
+    // 寫不進去就讓這一則失敗、由收件匣重試，順序不亂。
+    if matches!(kind, HookKind::TurnComplete { .. } | HookKind::TurnFailed { .. }) {
+        lifecycle::settle_interruption(app, &bot.id, lifecycle::InterruptEvidence::Nothing).await?;
+    }
+
     match kind {
         HookKind::Ignore(reason) => {
             tracing::debug!(reason, "hook ignored");
@@ -728,7 +734,9 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             // 對得上那一回合的 StopFailure 才是那一次 Esc 的回聲（AGM 交辦 2026-09-18）。只看「剛按過停」
             // 的話，Esc 之後馬上開的新回合撞額度也會被吞掉（#117）。
             if reason == FailureReason::Interrupted {
-                tracing::info!(bot = %bot.name, ?reason, detail, "StopFailure 是使用者中斷的回聲：不算失敗，什麼都不動");
+                // 回聲證明打斷的鍵生效了：還在等證據的那一筆在這裡收（#147）。
+                lifecycle::settle_interruption(app, &bot.id, lifecycle::InterruptEvidence::Echo).await?;
+                tracing::info!(bot = %bot.name, ?reason, detail, "StopFailure 是使用者中斷的回聲：不算失敗");
                 return Ok(());
             }
             // 同一筆送兩次（重試、spool 重播）：已經收過的那一回合。
@@ -760,8 +768,8 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                         .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
                         .map(|t| t.with_timezone(&chrono::Utc)),
                 };
-                if lifecycle::settle_interrupt_echo(&bot.id, &r.id, &ev, in_flight.as_ref()) {
-                    tracing::info!(bot = %bot.name, ?reason, detail, "StopFailure 是被中斷那一回合的回聲：不算失敗，什麼都不動");
+                if lifecycle::settle_interrupt_echo(app, &bot.id, &r.id, &ev, in_flight.as_ref()).await? {
+                    tracing::info!(bot = %bot.name, ?reason, detail, "StopFailure 是被中斷那一回合的回聲：不算失敗");
                     return Ok(());
                 }
             }

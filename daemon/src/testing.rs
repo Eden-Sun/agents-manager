@@ -43,7 +43,21 @@ pub struct MockHerdr {
     pub ignore_ansi: Arc<std::sync::atomic::AtomicBool>,
     /// What `agent.list` and `agent.get` answer with.
     pub agents: Arc<StdMutex<Vec<Value>>>,
+    /// 下一次（或下幾次）呼叫某個方法時要出的狀況，見 [`MockHerdr::fail_next`]。
+    faults: Arc<StdMutex<Vec<(String, Fault)>>>,
     handle: tokio::task::JoinHandle<()>,
+}
+
+/// 一次 RPC 可以怎麼壞（#120／#147）：三種壞法對呼叫端意思不同——
+/// herdr 明確拒絕＝什麼都沒做；連線斷了沒回＝不知道做了沒有，而且真的可能兩種都有。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fault {
+    /// herdr 回錯誤，什麼都不做（像 `pane_not_found`）。
+    Refuse,
+    /// 收到請求就斷線，什麼都沒做、也沒回。
+    DropBefore,
+    /// 照做了（字進框、鍵按下去）才斷線，沒回。
+    DropAfter,
 }
 
 impl Drop for MockHerdr {
@@ -167,6 +181,7 @@ struct MockState {
     argvs: Arc<StdMutex<BTreeMap<String, Vec<String>>>>,
     pids: Arc<StdMutex<BTreeMap<String, i64>>>,
     shell_pids: Arc<StdMutex<BTreeMap<String, i64>>>,
+    faults: Arc<StdMutex<Vec<(String, Fault)>>>,
     seq: Arc<std::sync::atomic::AtomicU64>,
 }
 
@@ -227,6 +242,7 @@ impl MockHerdr {
             argvs: Default::default(),
             pids: Default::default(),
             shell_pids: Default::default(),
+            faults: Default::default(),
             seq: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         };
         let (workspaces, tabs, calls, agents) =
@@ -235,6 +251,7 @@ impl MockHerdr {
         let live = state.live.clone();
         let reject_ansi = state.reject_ansi.clone();
         let ignore_ansi = state.ignore_ansi.clone();
+        let faults = state.faults.clone();
         let handle = tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
                 let st = state.clone();
@@ -250,6 +267,22 @@ impl MockHerdr {
                     let method = req.get("method").and_then(Value::as_str).unwrap_or("").to_string();
                     let params = req.get("params").cloned().unwrap_or(json!({}));
                     st.calls.lock().unwrap().push((method.clone(), params.clone()));
+                    let fault = {
+                        let mut f = st.faults.lock().unwrap();
+                        f.iter().position(|(m, _)| *m == method).map(|i| f.remove(i).1)
+                    };
+                    match fault {
+                        Some(Fault::DropBefore) => return,
+                        Some(Fault::Refuse) => {
+                            let out = json!({"id": id, "error": {"code": "injected_refusal", "message": format!("mock herdr refused {method}")}});
+                            let mut bytes = serde_json::to_vec(&out).unwrap();
+                            bytes.push(b'\n');
+                            let _ = w.write_all(&bytes).await;
+                            let _ = w.flush().await;
+                            return;
+                        }
+                        Some(Fault::DropAfter) | None => {}
+                    }
                     let wid_of = |k: &str| params.get(k).and_then(Value::as_str).unwrap_or("").to_string();
                     let out = match method.as_str() {
                         "ping" => json!({"id": id, "result": {"version": "mock", "protocol": 20}}),
@@ -595,6 +628,9 @@ impl MockHerdr {
                         other => json!({"id": id, "error": {"code": "unsupported",
                                         "message": format!("mock herdr does not implement {other}")}}),
                     };
+                    if fault == Some(Fault::DropAfter) {
+                        return;
+                    }
                     let mut bytes = serde_json::to_vec(&out).unwrap();
                     bytes.push(b'\n');
                     let _ = w.write_all(&bytes).await;
@@ -602,7 +638,12 @@ impl MockHerdr {
                 });
             }
         });
-        MockHerdr { workspaces, tabs, calls, agents, screens, live, reject_ansi, ignore_ansi, argvs, pids, shell_pids, handle }
+        MockHerdr { workspaces, tabs, calls, agents, screens, live, reject_ansi, ignore_ansi, argvs, pids, shell_pids, faults, handle }
+    }
+
+    /// 接下來第一次呼叫 `method` 時照 `fault` 壞一次（排幾次就壞幾次，依序）。呼叫一樣記在 `calls` 裡。
+    pub fn fail_next(&self, method: &str, fault: Fault) {
+        self.faults.lock().unwrap().push((method.to_string(), fault));
     }
 
     pub fn methods(&self) -> Vec<String> {

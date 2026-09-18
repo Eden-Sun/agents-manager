@@ -189,23 +189,42 @@ pub(crate) fn echo_verdict(
     EchoVerdict::Echo("在 Esc 當下擷取")
 }
 
-/// `StopFailure` 問這一支：是那次中斷的回聲就結清標記並回 `true`（呼叫端什麼都不動）。
-pub(crate) fn settle_interrupt_echo(bot_id: &str, run_id: &str, ev: &FailureEvidence, in_flight: Option<&db::Turn>) -> bool {
-    let mut m = pending_echoes().lock().unwrap_or_else(|e| e.into_inner());
-    let Some(pending) = m.get(bot_id) else { return false };
-    let began = in_flight.and_then(|t| DateTime::parse_from_rfc3339(&t.created_at).ok()).map(|t| t.with_timezone(&Utc));
-    let verdict = echo_verdict(pending, run_id, ev, in_flight.map(|t| (t.id.as_str(), began)));
-    tracing::info!(bot = bot_id, ?verdict, interrupted = ?pending.turn_id, "StopFailure 對上 Esc 標記");
+/// `StopFailure` 問這一支：是那次中斷的回聲就結清標記並回 `true`（呼叫端不把它當失敗）。
+///
+/// 回聲就是 Esc 已經生效的證據：那次打斷欠著／待證的收尾（`interruption`，#147）在這裡補上，**補上了才結清標記**——
+/// 寫不進去時回 `Err`，這一則 hook 由收件匣重試，重試時標記還在、還認得它是回聲，不會被當成真的失敗收掉。
+pub(crate) async fn settle_interrupt_echo(
+    app: &Arc<App>,
+    bot_id: &str,
+    run_id: &str,
+    ev: &FailureEvidence<'_>,
+    in_flight: Option<&db::Turn>,
+) -> anyhow::Result<bool> {
+    let (pending, verdict) = {
+        let m = pending_echoes().lock().unwrap_or_else(|e| e.into_inner());
+        let Some(pending) = m.get(bot_id).cloned() else { return Ok(false) };
+        let began = in_flight.and_then(|t| DateTime::parse_from_rfc3339(&t.created_at).ok()).map(|t| t.with_timezone(&Utc));
+        let verdict = echo_verdict(&pending, run_id, ev, in_flight.map(|t| (t.id.as_str(), began)));
+        tracing::info!(bot = bot_id, ?verdict, interrupted = ?pending.turn_id, "StopFailure 對上 Esc 標記");
+        (pending, verdict)
+    };
+    let forget = || {
+        let mut m = pending_echoes().lock().unwrap_or_else(|e| e.into_inner());
+        if m.get(bot_id) == Some(&pending) {
+            m.remove(bot_id);
+        }
+    };
     match verdict {
         EchoVerdict::Echo(_) => {
-            m.remove(bot_id);
-            true
+            super::interruption::settle_locked(app, bot_id, super::interruption::Evidence::Echo).await?;
+            forget();
+            Ok(true)
         }
         EchoVerdict::Superseded => {
-            m.remove(bot_id);
-            false
+            forget();
+            Ok(false)
         }
-        EchoVerdict::NotEcho(_) => false,
+        EchoVerdict::NotEcho(_) => Ok(false),
     }
 }
 

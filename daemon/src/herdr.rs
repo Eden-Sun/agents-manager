@@ -153,6 +153,22 @@ pub struct HerdrError {
     pub message: String,
 }
 
+/// 連不上 herdr 的 socket：請求一個 byte 都沒送出去。跟 [`HerdrError`] 一樣是「herdr 確定沒做」，
+/// 見 [`never_applied`]。
+#[derive(Debug, thiserror::Error)]
+#[error("connect herdr socket {socket}")]
+pub struct HerdrUnreachable {
+    pub socket: String,
+    #[source]
+    pub source: std::io::Error,
+}
+
+/// herdr **確定沒有執行**這個請求：它自己回了錯誤（herdr 先驗參數、找 pane，失敗就不動 pane），或根本連不上。
+/// 其餘的失敗——逾時、送出後連線斷了沒回、回應讀不懂——都是**不知道**它做了沒有（#120、#147）。
+pub fn never_applied(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<HerdrError>().is_some() || e.downcast_ref::<HerdrUnreachable>().is_some()
+}
+
 #[derive(Debug, Deserialize)]
 struct RawError {
     code: String,
@@ -257,7 +273,7 @@ impl HerdrClient {
         let fut = async {
             let mut stream = UnixStream::connect(&self.socket)
                 .await
-                .with_context(|| format!("connect herdr socket {}", self.socket.display()))?;
+                .map_err(|source| HerdrUnreachable { socket: self.socket.display().to_string(), source })?;
             let mut line = serde_json::to_vec(&req)?;
             line.push(b'\n');
             stream.write_all(&line).await?;

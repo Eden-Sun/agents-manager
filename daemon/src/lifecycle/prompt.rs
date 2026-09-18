@@ -457,6 +457,11 @@ async fn prompt_inner(
     if let Err(e) = crate::supervisor::idle_sleep::wake_locked(app, bot_id, "有新的訊息要送進來").await {
         tracing::warn!(bot = %bot_id, error = %e, "could not wake a sleeping bot for a prompt");
     }
+    // 上一次打斷欠著的收尾先補（#147）：不然那筆已經被 Esc 停掉、只是狀態沒寫成的回合，會把這一則擋成
+    // 「a turn is already in flight」直到 watchdog。
+    if let Err(e) = super::interruption::settle_locked(app, bot_id, super::interruption::Evidence::Nothing).await {
+        tracing::warn!(bot = %bot_id, error = %e, "上一次打斷欠著的收尾還是寫不進去");
+    }
 
     if client_request_id.trim().is_empty() {
         return Err(LcError::Bad("client_request_id must not be empty".into()));
