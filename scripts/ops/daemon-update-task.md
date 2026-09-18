@@ -43,7 +43,8 @@ AGM 定期交辦：正式 daemon（`target/release/agents-managerd serve`，監�
 
 ## 3b. 上線前對真 herdr 驗（2026-09-14 起，使用者要求）
 - build 前 `git -C <checkout> log -1 --format=%h` 必須等於本次要上的 commit；不等就重 fetch 再 build。
-- 重啟前用新 binary 對真 herdr 跑 `herdr pane read <任一 pane> --source recent_unwrapped --format ansi`，並對 build bot 自己送一則短 prompt 要 200／delivery ok；任何 409／invalid_request 都不准重啟。
+- 重啟前用新 binary 對真 herdr 跑 `herdr pane read <任一 pane> --source recent_unwrapped --format ansi`，並送一則短自測 prompt 要 200／delivery ok；任何 409／invalid_request 都不准重啟。
+  **自測對象**（2026-09-18 AGM 裁示）：照 3-0 在回合內部署時，對自己送一定回 409 `a turn is already in flight`，那是結構性的、不算數；改送給 AGM 的 browser-gc child（bot `01M248GA4H1TAHJCZRKVR73S3C`），內容一句「[build 自測，回 ok 即可，不要做任何事]」。它剛好在跑例行回合而回 `a turn is already in flight` 就等它結束再送一次；其他 409 照舊不准重啟。
 - 重啟後立刻 `bin/agm lease status`：restart 必須 released（daemon 啟動會自動 release）；仍 held 就手動 release，不留保護期。
   **交還窗口要出示 `--lease-token`**（SPEC §18.10）：那把 token 只在 `lease acquire` 的回應裡出現一次，這則交辦的末尾也會附上；
   `lease status` 查不到它。真的拿不到（例如持有者的 pane 已經不在）就**回報請 AGM 代為 force**——`--force` 只有 AGM 角色做得到（你會拿到 403 `lease_force_forbidden`），AGM 做的時候會留稽核紀錄。
@@ -55,7 +56,8 @@ AGM 定期交辦：正式 daemon（`target/release/agents-managerd serve`，監�
 - rebuild 的 lease-token 不再寫在正文，kick 會放在 `~/.config/agents-manager/supervisor/AGM/daemon-update.lease-token`（600 權限）。
 - 執行順序固定：
   1. build＋驗證完成後，**先交還 rebuild**：`bin/agm lease release rebuild --owner <owner> --fence <fence> --lease-token "$(cat ~/.config/agents-manager/supervisor/AGM/daemon-update.lease-token)"`。
-  2. 再申請 restart 核准：`bin/agm approval request --requester <同一個 owner> --purpose restart --scope daemon --commit <sha>`，等 AGM 裁示。
-  3. 核准後 `bin/agm lease safety --approval <restart 核准> --owner <owner>` 等窗口，再 `bin/agm lease acquire restart --approval <restart 核准> --commit <sha> --owner <同一個 owner>`；換 binary 前一刻照 3a 再查一次。
+  2. 再申請 restart 核准：`bin/agm approval request --requester <你自己的 bot id> --purpose restart --scope daemon --commit <sha>`，**不要結束回合**，每 20 秒輪詢最多 10 分鐘等 AGM 裁示。
+     （2026-09-18 AGM 裁示：restart 的 requester／owner 一律用**你自己的 bot id**，不是 kick 的腳本字串——3-0 的 `--exclude-bot` 只放過「核准申請者那顆 bot」，腳本身分對不到 bot 會 409 `exclude_not_requester`。rebuild 那段仍用 kick 的 owner。）
+  3. 核准後 `bin/agm lease safety --approval <restart 核准> --owner <你的 bot id> --exclude-bot <你的 bot id>` 等窗口，再 `bin/agm lease acquire restart --approval <restart 核准> --commit <sha> --owner <你的 bot id> --exclude-bot <你的 bot id>`；換 binary 前一刻照 3a 再查一次。
   4. 重啟後 daemon 會自動 release restart；仍 held 就用 acquire 回的 token 手動 release（3b）。
 - token 檔用完不要刪、不要貼進回報或對話；拿不到就照 3b 請 AGM force 並附理由。
