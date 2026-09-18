@@ -700,9 +700,10 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run
      把使用者的字打進不知道什麼地方。
    - **一定走打字那條路**（`force_pane`）：herdr 的 `agent.prompt` 沒有鍵可以按，按不到 send-now 就只是把字排進 CLI 自己的
      佇列，等於沒插隊。送出鍵用 `ctrl+x ctrl+s`，不用 `ctrl+enter`：終端對後者的支援不一致。
-   - **順序**：先規劃（第 3 步）→ 規劃成立才 `fail_in_flight` 收掉被打斷的那一筆（`failed` ＋ 一則 system 說明
-     「被插隊送出打斷（claude send-now）」）→ 再 insert 新 turn → 打字＋按鍵。規劃失敗（框裡有字、證據讀不到）時一個鍵都還沒按，
-     不能先把人家的回合收掉。`turns_one_in_flight` 要求舊的先離開新的才進得去，這也就是「同一顆 bot 連續兩次 send-now
+   - **順序**：先規劃（第 3 步）→ 做完按鍵前的準備（`delivery::prepare_delivery`：記 `pane_typed`、重看一次框、取證據基準）
+     → 兩者都成立才 `fail_in_flight` 收掉被打斷的那一筆（`failed` ＋ 一則 system 說明「被插隊送出打斷（claude send-now）」）
+     → 再 insert 新 turn → 打字＋按鍵（`type_prepared`）。規劃或準備被擋下（框裡有字、證據讀不到、`pane_typed` 寫不進去）時
+     一個鍵都還沒按，回可重試的 409、不留任何列，也不能先把人家的回合收掉（#120）。`turns_one_in_flight` 要求舊的先離開新的才進得去，這也就是「同一顆 bot 連續兩次 send-now
      不會產生兩個 `in_flight`」的保證：兩次都在同一顆 per-bot 鎖裡排隊。
    - **當下沒有回合在飛**：不按那顆鍵，照一般 Enter 送出（回應 `send_now: "idle"`），不替這條路多綁一個版本前提。
    - 灰字（sent／queued 到模型收到之前）是 CLI 自己畫的，daemon 與前端都不模擬。

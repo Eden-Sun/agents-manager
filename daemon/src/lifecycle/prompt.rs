@@ -567,10 +567,16 @@ async fn prompt_inner(
         Err(not) => return Err(not_attempted_error(&run.id, not)),
     };
 
-    // 計畫成立了才收掉被打斷的那一筆。`turns_one_in_flight`（每個 run 最多一筆 in-flight）要求舊的先離開，
-    // 新的才進得去——這也就是「同一顆 bot 連續兩次 send-now 不會產生兩個 in_flight」的保證：
-    // 兩次都在同一顆 per-bot 鎖裡排隊，第二次看到第一次那筆，照樣先收再送。
+    // 按鍵前的準備（`prepare_delivery`）也做完了才收掉被打斷的那一筆（#120）：準備階段被擋下是一個鍵都沒按，
+    // 先收的話 claude 其實還在跑，對話裡卻多一筆假的「被插隊打斷」。`turns_one_in_flight`（每個 run 最多一筆
+    // in-flight）要求舊的先離開，新的才進得去——這也就是「同一顆 bot 連續兩次 send-now 不會產生兩個 in_flight」
+    // 的保證：兩次都在同一顆 per-bot 鎖裡排隊，第二次看到第一次那筆，照樣先收再送。
+    let (mut plan, mut ready) = (Some(plan), None);
     if let Some(t) = interrupted.as_ref() {
+        match prepare_delivery(app, &client, &run, &bot, &deliver, plan.take().expect("plan is still here")).await {
+            Ok(r) => ready = Some(r),
+            Err(not) => return Err(not_attempted_error(&run.id, not)),
+        }
         tracing::info!(bot = %bot_id, turn = %t.id, "插隊送出：先收掉被打斷的回合，再把新的那句打進 pane");
         super::fail_in_flight(app, &run.id, SEND_NOW_NOTE).await;
     }
@@ -630,7 +636,11 @@ async fn prompt_inner(
     }
 
     // 4. deliver
-    let res = execute_delivery(app, &client, &run, &bot, &deliver, plan).await;
+    let res = match (ready, plan) {
+        (Some(r), _) => type_prepared(app, &client, &run, &bot, &deliver, r).await,
+        (None, Some(p)) => execute_delivery(app, &client, &run, &bot, &deliver, p).await,
+        (None, None) => unreachable!("the plan is only taken once it is prepared"),
+    };
     // `delivery` 是回給呼叫端／UI 的字；`rec` 是要寫進 DB 的兩個欄位（證據、能不能重送）。
     let mut rec = DeliveryRecord { stored: "unknown", verified: false, auto_resend: true };
     let delivery = match res {
@@ -1260,6 +1270,36 @@ mod send_now_tests {
             .unwrap();
         assert_eq!(note, 1, "對話裡看得到它是被插隊打斷的");
         assert_eq!(keys_sent(&f), vec![r#"["ctrl+x","ctrl+s"]"#.to_string()], "按的是 send-now 鍵，不是 Enter");
+    }
+
+    /// #120：插隊送出在**按任何鍵之前**就被擋下（這裡讓 `set_pane_typed` 寫不進去，`NotAttempted`）時，
+    /// 什麼都沒打斷——正在跑的回合不能被收成「被插隊打斷」的 failed。以前計畫一成立就先收掉它，
+    /// claude 其實還在跑，回覆之後變成一筆外部回合，重送還會退化成一般 Enter 打進忙碌的 pane。
+    #[tokio::test]
+    async fn a_send_now_refused_before_any_key_leaves_the_running_turn_alone() {
+        let f = fixture("claude", Some("2.1.275")).await;
+        let app = f.env.app.clone();
+        let running = busy(&f).await;
+        sqlx::query("CREATE TRIGGER no_pane_typed BEFORE UPDATE OF pane_typed ON runs BEGIN SELECT RAISE(ABORT, 'disk hiccup'); END")
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        let err = prompt_send_now(&app, &f.bot_id, "先看這句", "sn-x", &[], None).await.unwrap_err();
+        let LcError::Conflict(body) = err else { panic!("按鍵前被擋是可重試的 409：{err:?}") };
+        assert_eq!(body["sent"], false, "{body}");
+        assert!(keys_sent(&f).is_empty(), "一個鍵都沒按");
+
+        assert_eq!(status_of(&f, &running).await, "in_flight", "沒按鍵就沒有打斷：舊回合還在跑");
+        let notes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='system'")
+            .bind(&running)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(notes, 0, "也不留「被插隊打斷」的說明");
+        assert_eq!(in_flight_count(&f).await, 1);
+        let turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE conversation_id=?").bind(&f.conv).fetch_one(&app.db).await.unwrap();
+        assert_eq!(turns, 1, "新的那一則沒有留下任何列，同一個 request id 可以原樣重送");
     }
 
     /// 驗收二：連續兩次插隊送出不會產生兩個 `in_flight`——第二次同樣先收掉第一次那筆。
