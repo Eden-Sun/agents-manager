@@ -155,7 +155,7 @@ config.toml 裡沒有的 id（child、已刪）忽略。成功推 `project_chang
 | 方法 | 路徑 | body | 回應 |
 |---|---|---|---|
 | POST | `/api/bots/{id}/start` | — | `200 {"run_id"}`；已有 active Run → `409 {"reason":"active run already exists","run_id"}`；`herdr_session = "default"` 的 bot（SPEC §6.5.1）→ `409 {"reason":"default_session"}`；herdr 失敗 502 |
-| POST | `/api/bots/{id}/start?resume=native` | — | 接回 DB 記的原生對話（SPEC §6.5.2）：`200 {"run_id","resumed":true,"session_id"}`；接不回**不啟動**、不開新對話 → `409 {"reason":"cannot_resume","resumed":false,"resume_reason":"no_session_id"|"transcript_missing"|"unsupported_kind","bot_id"}`，由呼叫端決定要不要改成不帶 `resume` 重送。`resume` 只認 `native`，其他值 400 |
+| POST | `/api/bots/{id}/start?resume=native` | — | 接回 DB 記的原生對話（SPEC §6.5.2）：`200 {"run_id","resumed","session_id","resume_outcome"}`（`resumed` 照 `runs.resume_outcome` 說：`verified`→`true`＋回報的 session；`mismatch`→`false`、`session_id:null`；還沒回報或 `unverified`→`true`＋帶出去的 session；這次沒帶 `--resume`→`false`。不看 SessionStart 一到就清掉的 `resume_session_id`，issue #107）；接不回**不啟動**、不開新對話 → `409 {"reason":"cannot_resume","resumed":false,"resume_reason":"no_session_id"|"transcript_missing"|"unsupported_kind","bot_id"}`，由呼叫端決定要不要改成不帶 `resume` 重送。`resume` 只認 `native`，其他值 400 |
 | POST | `/api/bots/{id}/stop` | — | `200 {}`；沒有 Run → `204`。default session 的 bot 只送 ctrl+c、不關 pane |
 | POST | `/api/bots/{id}/interrupt` | — | `200 {}`（送 `esc`，in-flight Turn 標 failed）；`esc` 送不出 → 502，Turn 維持 in-flight |
 | POST | `/api/bots/{id}/abort` | — | `200 {"aborted":["<turn_id>",…],"keys_sent":true,"key_error":null}`，見 §4.2 |
@@ -779,9 +779,10 @@ readback_model_mismatch|readback_effort_mismatch|readback_fast_mismatch>`。以�
 （`--resume <上一個 session>`），回應多一個 `resumed`：
 
 ```json
-200 {"run_id":"01M1…","resumed":true}
+200 {"run_id":"01M1…","resumed":true,"session_id":"…","resume_outcome":null}
 ```
 
+欄位語意同 `?resume=native`（§ 上表）：叫醒時接不回會退回開新對話，這時回 `resumed:false`，不寫死 `true`（issue #107）。
 一般的 bot 行為不變（`200 {"run_id":"…"}`）。使用者按「啟動」想要的是把剛剛那顆帶著對話的 bot
 叫回來，不是開一段新的空白對話。
 
