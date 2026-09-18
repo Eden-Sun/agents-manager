@@ -1627,6 +1627,43 @@ mod tests {
         }
     }
 
+    /// 交辦列與它的任務連結（`mission_id`／`role`）、驗收角色要**同一次寫入**。以前是 insert 先 commit、再各自
+    /// UPDATE：後面那句失敗（例如過了 busy_timeout 的 SQLITE_BUSY）時請求回錯，但那列已經以 `queued` 留下、沒掛
+    /// 任務——下一個 tick 被 `drain_queue` 派出去，AGM 用同一個 request id 重試時冪等路徑把它原樣回 200，
+    /// 任務從此看不到自己的執行者、驗收也回到預設角色。
+    #[tokio::test]
+    async fn an_assignment_is_never_left_behind_without_its_mission_link() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        crate::supervisor::store::get_or_init(&app.db).await.unwrap();
+        let agm = crate::testing::claude_bot(&app, &env.project_id, "AGM").await;
+        crate::supervisor::store::set_env(&app.db, &agm.id, &env.project_id, "/tmp").await.unwrap();
+        let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("link", "pr"))).await.unwrap();
+        let id = m["id"].as_str().unwrap().to_string();
+        let worker = crate::testing::claude_bot(&app, &env.project_id, "worker").await;
+        let assign = || {
+            crate::supervisor::assign(
+                &app, &worker.id, "做 X", "link-exec", None, &[], None, true, Some((&id, "executor")),
+                Some(crate::supervisor::roles::Role::Patrol), None, crate::supervisor::bot_requests::ReplyMark::default(),
+            )
+        };
+
+        // 「掛上任務」那一步寫不進去。
+        sqlx::query("CREATE TRIGGER test_link_fails BEFORE UPDATE OF mission_id ON supervisor_assignments BEGIN SELECT RAISE(ABORT, 'link failed'); END")
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let _ = assign().await;
+        sqlx::query("DROP TRIGGER test_link_fails").execute(&app.db).await.unwrap();
+
+        // 不管第一次成不成功，同一個 request id 的那件交辦都必須掛在任務上、帶著它的驗收角色。
+        let out = assign().await.expect("重試要成功");
+        assert_eq!((out["mission_id"].as_str(), out["role"].as_str()), (Some(id.as_str()), Some("executor")), "{out}");
+        assert_eq!(out["review_role"], "patrol");
+        let linked = crate::supervisor::store::mission_assignments(&app.db, &id).await.unwrap();
+        assert_eq!(linked.len(), 1, "任務看得到它的執行者");
+    }
+
     /// 上一條的另一半：派工在 supervisor 鎖裡查完「任務還開著」到寫下交辦之間還有好幾個 await，關任務的那一步
     /// 如果不拿同一把鎖，就能落在那中間（查的時候開著、寫的時候已經關了，而取消的重讀又還看不到那件）。
     /// 所以取消／結案落地的那一刻必須排在鎖後面：鎖被握著時，任務不能先關掉。

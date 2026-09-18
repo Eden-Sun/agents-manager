@@ -1063,6 +1063,9 @@ pub async fn assignment_by_turn(pool: &SqlitePool, turn_id: &str) -> Result<Opti
 
 /// Write the assignment down *before* anything is sent. A crash between here and the prompt
 /// leaves a `queued` row the controller picks up again with the same client_request_id.
+///
+/// 測試夾具用；正式路徑一律走 [`insert_assignment_linked`]（連結跟列一起寫，issue #136）。
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub async fn insert_assignment(
     pool: &SqlitePool,
@@ -1074,12 +1077,33 @@ pub async fn insert_assignment(
     follow_up_of: Option<&str>,
     expects_review: bool,
 ) -> Result<Assignment> {
+    insert_assignment_linked(pool, request_id, target_bot_id, client_request_id, text, ownership, follow_up_of, expects_review, None, None).await
+}
+
+/// 同 [`insert_assignment`]，連同任務連結（`(mission_id, role)`）與驗收角色**同一句 INSERT** 寫下去（issue #136）。
+///
+/// 以前是先 insert（commit）、再各自 UPDATE：後面那句失敗時那列已經以 `queued` 留下、沒掛任務，下一個 tick
+/// 就被派出去；用同一個 request id 重試又被冪等路徑原樣回成功——任務從此看不到自己的執行者。派送當下就可能
+/// 撞額度，那時 controller 要看得到任務設定，所以連結也一定要在派送之前、跟列一起存在。
+#[allow(clippy::too_many_arguments)]
+pub async fn insert_assignment_linked(
+    pool: &SqlitePool,
+    request_id: Option<&str>,
+    target_bot_id: &str,
+    client_request_id: &str,
+    text: &str,
+    ownership: &[String],
+    follow_up_of: Option<&str>,
+    expects_review: bool,
+    mission: Option<(&str, &str)>,
+    review_role: Option<&str>,
+) -> Result<Assignment> {
     let now = crate::db::now();
     sqlx::query(
         "INSERT INTO supervisor_assignments
            (id, supervisor_id, request_id, target_bot_id, client_request_id, text, status, attempts,
-            ownership_json, follow_up_of, expects_review, created_at, updated_at)
-         VALUES (?,?,?,?,?,?, 'queued', 0, ?, ?, ?, ?, ?)",
+            ownership_json, follow_up_of, expects_review, mission_id, mission_role, review_role, created_at, updated_at)
+         VALUES (?,?,?,?,?,?, 'queued', 0, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(crate::db::ulid())
     .bind(SUPERVISOR_ID)
@@ -1090,6 +1114,9 @@ pub async fn insert_assignment(
     .bind((!ownership.is_empty()).then(|| serde_json::to_string(ownership).unwrap_or_default()))
     .bind(follow_up_of)
     .bind(i64::from(expects_review))
+    .bind(mission.map(|(m, _)| m))
+    .bind(mission.map(|(_, r)| r))
+    .bind(review_role)
     .bind(&now)
     .bind(&now)
     .execute(pool)
@@ -1097,7 +1124,8 @@ pub async fn insert_assignment(
     Ok(assignment_by_crid(pool, client_request_id).await?.expect("just inserted"))
 }
 
-/// 把一件交辦掛到群組任務上。必須在 dispatch 之前寫：派送當下就可能撞額度，那時要看得到任務設定。
+/// 把一件交辦掛到群組任務上（測試夾具用；正式路徑在 [`insert_assignment_linked`] 裡跟列一起寫）。
+#[cfg(test)]
 pub async fn set_mission_link(pool: &SqlitePool, id: &str, mission_id: &str, role: &str) -> Result<()> {
     sqlx::query("UPDATE supervisor_assignments SET mission_id = ?, mission_role = ?, updated_at = ? WHERE id = ?")
         .bind(mission_id)
@@ -2622,15 +2650,6 @@ pub async fn approval_decisions(pool: &SqlitePool) -> Result<std::collections::H
         out.entry(id).or_default().push(v);
     }
     Ok(out)
-}
-
-pub async fn set_review_role(pool: &SqlitePool, id: &str, role: &str) -> Result<()> {
-    sqlx::query("UPDATE supervisor_assignments SET review_role=? WHERE id=?")
-        .bind(role)
-        .bind(id)
-        .execute(pool)
-        .await?;
-    Ok(())
 }
 
 /// Mirrors the row.
