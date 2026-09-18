@@ -584,11 +584,32 @@ pub fn schedule_flush_queued(app: &Arc<App>, bot_id: &str) {
 }
 
 
+/// [`mark_run_exited`] 做成了什麼。呼叫端多半不看，但「寫不進去」與「別的路徑先收了」要分得開（#135）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunExit {
+    /// 記成 `exited`，收尾（in-flight、孤兒佇列、watcher）做完了。
+    Recorded,
+    /// 這顆 run 已經不是 active（讀到時就不是，或 CAS 輸給先收掉它的路徑）：收尾歸那條路，這裡一樣都不做。
+    AlreadyEnded,
+    /// DB 讀寫失敗：什麼都沒動，run 照舊是 active；寫入失敗的排了對帳重試。
+    NotRecorded,
+}
+
 /// Terminate a run: state `exited`, fail its in-flight turn, drop the pane watcher.
-pub async fn mark_run_exited(app: &Arc<App>, run_id: &str, reason: &str) {
-    let Ok(Some(run)) = db::run(&app.db, run_id).await else { return };
-    if !matches!(run.state.as_str(), "starting" | "running" | "stopping") {
-        return;
+///
+/// `exited` 的 durable commit 是後面每一步的前提（#135）：寫不進去就不能當它已經結束——
+/// 收 in-flight、撤佇列、拆 watcher 都留到寫進去之後（重試或下一個 pane 事件）。
+pub async fn mark_run_exited(app: &Arc<App>, run_id: &str, reason: &str) -> RunExit {
+    let run = match db::run(&app.db, run_id).await {
+        Ok(Some(run)) => run,
+        Ok(None) => return RunExit::AlreadyEnded,
+        Err(e) => {
+            tracing::warn!(run = run_id, reason, error = %e, "run exit not recorded: could not read the run; nothing torn down");
+            return RunExit::NotRecorded;
+        }
+    };
+    if !super::run_state::LIVE.contains(&run.state.as_str()) {
+        return RunExit::AlreadyEnded;
     }
     // 讀完狀態、還沒寫 exited 的那一瞬（測試在這裡插進使用者 stop 的收尾寫入）。
     #[cfg(test)]
@@ -597,17 +618,18 @@ pub async fn mark_run_exited(app: &Arc<App>, run_id: &str, reason: &str) {
     }
     // CAS 在 UPDATE 自己身上（#131）：這支不拿 bot 鎖，上面讀完之後使用者的 stop 可能剛寫下 `stopped`，
     // 無條件寫 `exited` 會把「使用者要它停」蓋掉。沒寫到就是別的路徑先收掉了，後續由那條路負責。
-    match sqlx::query(
-        "UPDATE runs SET state = 'exited', ended_at = ? WHERE id = ? AND state IN ('starting','running','stopping')",
-    )
-    .bind(db::now())
-    .bind(run_id)
-    .execute(&app.db)
-    .await
-    {
-        Ok(r) if r.rows_affected() == 0 => return,
-        Ok(_) => {}
-        Err(e) => tracing::warn!(run = run_id, error = %e, "could not record the run as exited"),
+    match super::run_state::transition(&app.db, run_id, super::run_state::LIVE, "exited", None).await {
+        Ok(super::run_state::Moved::Applied) => {}
+        Ok(super::run_state::Moved::Lost) => {
+            tracing::info!(run = run_id, reason, "run exit: another path ended the run first (CAS lost); its cleanup is that path's");
+            return RunExit::AlreadyEnded;
+        }
+        Err(e) => {
+            tracing::warn!(run = run_id, reason, error = %e,
+                "run exit not recorded (DB write failed); in-flight turn, queue and watcher left as they are");
+            super::run_state::schedule_settle(app, run_id, super::run_state::Settle::Reconcile { stuck: run.state.clone() });
+            return RunExit::NotRecorded;
+        }
     }
     fail_in_flight(app, run_id, &format!("run ended: {reason}")).await;
     revoke_orphaned_queued_turns(app, &run.bot_id, &format!("run 已結束（{reason}）")).await;
@@ -618,6 +640,7 @@ pub async fn mark_run_exited(app: &Arc<App>, run_id: &str, reason: &str) {
         }
     }
     app.emit_bot_status(&run.bot_id).await;
+    RunExit::Recorded
 }
 
 /// 收掉這個 run 還在飛的那一筆（interrupt、run 結束、reconcile 判定 run 不見了都走這裡）。
@@ -651,6 +674,7 @@ pub async fn fail_in_flight(app: &Arc<App>, run_id: &str, note: &str) {
 #[cfg(test)]
 mod run_exit_race_tests {
     use super::*;
+    use super::super::run_state as rs;
     use crate::testing as tt;
 
     /// 使用者 stop 一顆 bot：`stop_bot_locked` 自己關 pane，pane-exit 事件的 `mark_run_exited` 讀到的 run 還是
@@ -687,6 +711,63 @@ mod run_exit_race_tests {
             sqlx::query_as("SELECT state, ended_at FROM runs WHERE id=?").bind(&run).fetch_one(&app.db).await.unwrap();
         assert_eq!(state, "exited");
         assert!(ended.is_some());
+    }
+
+    async fn run_state(app: &Arc<App>, run: &str) -> String {
+        db::run(&app.db, run).await.unwrap().unwrap().state
+    }
+
+    /// #135：`exited` 寫不進去（SQLite I/O／busy）就還不是 exited——依附這顆 run 的東西一樣都不能先動：
+    /// in-flight 不收、排著的不撤、watcher 不拆。DB 恢復後再收一次，收尾照常、只做一次。
+    #[tokio::test]
+    async fn a_run_exit_that_cannot_be_recorded_leaves_the_run_and_its_work_alone() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "db-hiccup").await;
+        let run = tt::fake_run(&app, &bot.id).await;
+        let in_flight = rs::a_turn(&app, &bot.id, Some(&run), "in_flight").await;
+        let queued = rs::a_turn(&app, &bot.id, None, "queued").await;
+        let watcher = rs::watch_run_pane(&app, &run).await;
+
+        rs::refuse_run_state(&app, "exited").await;
+        assert_eq!(mark_run_exited(&app, &run, "pane exited").await, RunExit::NotRecorded, "跟「別的路徑先收了」分得開");
+        assert_eq!(run_state(&app, &run).await, "running", "寫不進去就還是 running");
+        assert_eq!(rs::turn_status(&app, &in_flight).await, "in_flight", "run 還沒結束，in-flight 不能先被收成 failed");
+        assert_eq!(rs::turn_status(&app, &queued).await, "queued", "run 還沒結束，排著的不能先被撤");
+        assert!(rs::watched(&app, &watcher).await, "watcher 不能先拆");
+        assert_eq!(rs::scheduled(&run), vec![rs::Settle::Reconcile { stuck: "running".into() }], "排了對帳重試，不是只留一行 warning");
+
+        rs::accept_run_state(&app, "exited").await;
+        assert_eq!(mark_run_exited(&app, &run, "pane exited").await, RunExit::Recorded);
+        assert_eq!(run_state(&app, &run).await, "exited");
+        assert_eq!(rs::turn_status(&app, &in_flight).await, "failed");
+        assert_eq!(rs::turn_status(&app, &queued).await, "failed");
+        assert_eq!((rs::system_notes(&app, &in_flight).await, rs::system_notes(&app, &queued).await), (1, 1), "各收一次");
+        assert!(!rs::watched(&app, &watcher).await);
+    }
+
+    /// #135 驗收第三條：CAS 輸給使用者的 stop 時照 #131——不覆寫 `stopped`，也不做第二份收尾（那是 stop 的）。
+    #[tokio::test]
+    async fn a_pane_exit_that_lost_the_race_to_a_user_stop_leaves_the_cleanup_to_the_stop() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "stopping").await;
+        let run = tt::fake_run(&app, &bot.id).await;
+        let in_flight = rs::a_turn(&app, &bot.id, Some(&run), "in_flight").await;
+        let queued = rs::a_turn(&app, &bot.id, None, "queued").await;
+        let watcher = rs::watch_run_pane(&app, &run).await;
+        sqlx::query("UPDATE runs SET state='stopping' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
+        let (app2, run2) = (app.clone(), run.clone());
+        super::super::race_point::arm("mark_run_exited_after_read", &run, move || async move {
+            sqlx::query("UPDATE runs SET state='stopped', ended_at=? WHERE id=?").bind(db::now()).bind(&run2).execute(&app2.db).await.unwrap();
+        });
+
+        assert_eq!(mark_run_exited(&app, &run, "pane exited").await, RunExit::AlreadyEnded, "CAS 輸了");
+        assert_eq!(run_state(&app, &run).await, "stopped");
+        assert_eq!(rs::turn_status(&app, &in_flight).await, "in_flight", "不是這條路的收尾");
+        assert_eq!(rs::turn_status(&app, &queued).await, "queued");
+        assert!(rs::watched(&app, &watcher).await);
+        assert!(rs::scheduled(&run).is_empty(), "CAS 輸了不是寫入失敗，不排重試");
     }
 }
 

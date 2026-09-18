@@ -726,6 +726,11 @@ stall watchdog 的自動補送走同一條驗證路徑，次數記在 `turns.res
 7. `agent.wait {until:[idle,done,blocked], timeout_ms: 60000}`：idle/done → running+idle；blocked → running+blocked（例如 trust 提示）；
    timeout/error → 不關 pane，`agent.get` 有 agent → running+unknown，沒有 → `exited` + 關 pane。
 
+**run 狀態的寫法**（#135 起，`lifecycle::run_state`）：生命週期裡的 `runs.state` 轉移走 SQL 帶來源狀態的 CAS，
+三種結果分開——轉過去了才做後續的副作用；CAS 輸了表示別的路徑先收掉了，收尾歸那條路；DB 寫不進去就不做後續不可逆的動作、
+錯誤往上傳。外面的事已經發生而狀態沒寫進去時，背景重試（2／5／15／30／60／120 秒，同一顆 run 同一種只排一條）交給對帳
+照 herdr 的證據收；daemon 在那之前重啟，開機的對帳照同一份證據收。重試只管節流，不是狀態的權威。
+
 **tab 生命週期**：停止與 orphan 回收共用 `close_pane_and_tab`：先 `pane.close`，再 `tab.list` 確認該 tab `pane_count == 0` 才 `tab.close`；共享 tab 不動，
 tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run 只關 pane。
 `POST /api/bots/{id}/pane/move-to-tab`（`move_pane_to_own_tab`）把非獨占的 pane 搬到新 tab 並更新 `tab_id`；pane id、訂閱、進行中 Turn 不變，不重啟 agent。
@@ -1232,6 +1237,9 @@ default Bot 的 prompt／keys／terminal 讀取依 Run 的 session 回到 defaul
 ### 6.6 事件處理
 - `pane.agent_status_changed`：更新 `agent_status`；`working→idle` 啟動備援計時（§4.3）；推 WS。遠端 run 先 drain 一次該 bot 的 spool（§11.4.3）。
 - `pane.exited` / `pane.closed`：Run → `exited`，in-flight Turn → `failed`。
+  `exited` 寫進 DB **之後**才收 in-flight、撤孤兒佇列、拆 watcher（`mark_run_exited`，#135）：寫不進去（SQLite I/O／busy）就一樣都不動、
+  run 照舊是 active，排背景對帳重試（2／5／15／30／60／120 秒，§6.2 的「run 狀態的寫法」）照 herdr 的證據收；CAS 輸給先收掉它的路徑
+  （使用者的 stop 已寫 `stopped`，#131）也不做第二份收尾。log 分得開兩者（`run exit not recorded` 是 warn，CAS 輸了是 info）。
 - `workspace.closed`：`projects.workspace_id = NULL`，其下 Run → `exited`。
 - `pane.agent_detected`：只 log。
 
