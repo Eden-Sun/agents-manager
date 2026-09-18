@@ -255,6 +255,12 @@ am_agent_prompt() {
         # 寫給 AGM 的申請 daemon 已經排進協調者的佇列（SPEC §18.15）：不再打進 AGM 的 pane，
         # 否則同一句話會先燒一輪巡檢的回合。daemon 沒回應時照舊送（寧可多一回合，不能掉訊息）。
         case "$_resp" in
+            # 寫給 AGM、但 daemon 現在排不進協調佇列（issue #143）：不直送，明確失敗讓寄件端重試。
+            # 直送會繞過 durable inbox 與去重，控制面也不知道這則走了旁路。
+            *'"routing_unavailable":'*)
+                printf 'agents-manager: 寫給 %s 的訊息現在排不進 AGM 協調佇列，沒有送出、也不直接打進它的 pane；請稍後重試：%s\n' "$_name" "$_resp" >&2
+                exit 75
+                ;;
             *'"routed":'*)
                 printf 'agents-manager: 已排入 AGM 協調佇列，不直接打進 %s 的 pane：%s\n' "$_name" "$_resp" >&2
                 exit 0
@@ -716,6 +722,25 @@ mod tests {
         env.push(("AM_TEST_CURL_REPLY", "{}"));
         let (out, _) = s.run(&env, &["agent", "prompt", "agm-pxf2pv", "請准我重啟 daemon"]);
         assert_eq!(out, ["agent", "prompt", "agm-pxf2pv", "請准我重啟 daemon"]);
+    }
+
+    /// daemon 說「這是寫給 AGM 的，但現在排不進佇列」（issue #143，5xx＋`routing_unavailable`）：不能照舊直送——
+    /// 那會繞過協調佇列、打進 AGM 的 pane。明確失敗，讓寄件的 bot 自己重試。
+    #[test]
+    fn a_request_the_daemon_could_not_route_is_not_typed_into_the_pane() {
+        let s = Sandbox::new();
+        let fake_curl = s.dir.join("real").join("curl");
+        std::fs::write(&fake_curl, "#!/bin/sh\nprintf '%s' \"${AM_TEST_CURL_REPLY:-}\"\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&fake_curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut env = vec![("AM_AGENT_NAME", "proj-abc123"), ("AM_TEST_AGENTS", "agm-pxf2pv"), ("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_PORT", "1")];
+        env.push(("AM_TEST_CURL_REPLY", r#"{"error":"routing_unavailable","routing_unavailable":true,"retryable":true}"#));
+        let (out, err) = s.run(&env, &["agent", "prompt", "agm-pxf2pv", "請准我重啟 daemon"]);
+        assert!(out.is_empty(), "排不進協調佇列不能退回直送：{out:?}");
+        assert!(err.contains("routing_unavailable") || err.contains("稍後重試"), "{err}");
     }
 
     /// `--ack`／`--reply-to` 是我們的旗標（review 2026-09-16 H1：寄件端明講才算回覆）：送給 daemon、不給真的
