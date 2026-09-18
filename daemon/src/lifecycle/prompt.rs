@@ -156,7 +156,7 @@ async fn answer_for_turn(app: &Arc<App>, t: &db::Turn) -> LcResult<PromptOut> {
     } else {
         t.delivery.clone()
     };
-    Ok(PromptOut { turn_id: t.id.clone(), message_id, delivery })
+    Ok(PromptOut { turn_id: t.id.clone(), message_id, delivery, send_now: None })
 }
 
 /// [`answer_for_turn`]，但 turn 要先從 id 讀回來（撤回撤不掉時，手上只有 id）。
@@ -170,12 +170,20 @@ async fn answer_for_turn_id(app: &Arc<App>, turn_id: &str) -> LcResult<PromptOut
     answer_for_turn(app, &t).await
 }
 
-#[derive(serde::Serialize)]
+#[derive(Debug, serde::Serialize)]
 pub struct PromptOut {
     pub turn_id: String,
     pub message_id: String,
     pub delivery: String,
+    /// 只有請求帶 `send_now` 時才有（issue #103）。`"interrupted"`＝真的打斷了一個進行中的回合並按了
+    /// send-now 鍵；`"idle"`＝當下沒有回合在飛，照一般 Enter 送出，不需要插隊；其他值是
+    /// [`send_now::Refusal::code`]，也就是**沒有**插隊的原因。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub send_now: Option<&'static str>,
 }
+
+/// 插隊送出成功時，被打斷的那一回合會收到的系統說明。
+const SEND_NOW_NOTE: &str = "被插隊送出打斷（claude send-now）";
 
 /// 這一則 prompt 在維護窗口（`restart` 租約）前面算哪一類（issue #86）。
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -237,7 +245,7 @@ pub async fn prompt_relayed_queueable(
     client_request_id: &str,
     relay_from: Option<&str>,
 ) -> LcResult<PromptOut> {
-    prompt_inner(app, bot_id, text, client_request_id, None, None, &[], relay_from, true, Admission::Gated).await
+    prompt_inner(app, bot_id, text, client_request_id, None, None, &[], relay_from, true, Admission::Gated, false).await
 }
 
 /// 排一筆 `queued` turn 等下一回合（只有 AGM 派工走這裡）。
@@ -292,7 +300,7 @@ async fn queue_for_next_turn(
     emit_prompt_message(app, bot_id, &msg_id).await;
     emit_turn(app, &turn_id).await;
     tracing::info!(bot = %bot_id, turn = %turn_id, "對方回合中：prompt 排進佇列，等回合結束再送");
-    Ok(PromptOut { turn_id, message_id: msg_id, delivery: "queued".into() })
+    Ok(PromptOut { turn_id, message_id: msg_id, delivery: "queued".into(), send_now: None })
 }
 
 /// The screen checks every prompt passes before text enters the pane — shared with the queue
@@ -383,7 +391,24 @@ pub async fn prompt_grouped(
     attachment_ids: &[String],
     relay_from: Option<&str>,
 ) -> LcResult<PromptOut> {
-    prompt_inner(app, bot_id, text, client_request_id, group_id, deliver, attachment_ids, relay_from, false, Admission::Gated).await
+    prompt_inner(app, bot_id, text, client_request_id, group_id, deliver, attachment_ids, relay_from, false, Admission::Gated, false).await
+}
+
+/// 插隊送出（issue #103）：照舊寫 turn／訊息進資料庫，但**不等 idle**——對 pane 送 claude 2.1.275 的
+/// send-now 鍵（`ctrl+x ctrl+s`），由 CLI 自己收掉當下那一回合，daemon 這一側把被打斷的那一筆收成
+/// `failed`（`fail_in_flight`），不留一個永遠 `in_flight` 的回合。
+///
+/// 不合資格（不是 claude、CLI 比 2.1.275 舊、版本還不知道）時**不插隊**：照原本的路走，忙的話一樣
+/// 回 409，只是 body 多帶 `send_now_refused` 說清楚為什麼沒插隊。
+pub async fn prompt_send_now(
+    app: &Arc<App>,
+    bot_id: &str,
+    text: &str,
+    client_request_id: &str,
+    attachment_ids: &[String],
+    relay_from: Option<&str>,
+) -> LcResult<PromptOut> {
+    prompt_inner(app, bot_id, text, client_request_id, None, None, attachment_ids, relay_from, false, Admission::Gated, true).await
 }
 
 /// daemon 自己的控制面 prompt（AGM／協調者啟動時的握手）：不受維護窗口的入場閘門管（issue #86）。
@@ -395,7 +420,7 @@ pub async fn prompt_control_plane(
     client_request_id: &str,
     relay_from: Option<&str>,
 ) -> LcResult<PromptOut> {
-    prompt_inner(app, bot_id, text, client_request_id, None, None, &[], relay_from, false, Admission::ControlPlane).await
+    prompt_inner(app, bot_id, text, client_request_id, None, None, &[], relay_from, false, Admission::ControlPlane, false).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -413,6 +438,8 @@ async fn prompt_inner(
     queue_if_busy: bool,
     // 維護窗口的入場閘門要不要管這一則（issue #86）。
     admission: Admission,
+    // 插隊送出（issue #103）：對方回合中時打斷它，而不是 409。只有使用者按「立刻送出」會給 true。
+    want_send_now: bool,
 ) -> LcResult<PromptOut> {
     let deliver = deliver.unwrap_or(text);
     let lock = app.bot_lock(bot_id).await;
@@ -457,12 +484,36 @@ async fn prompt_inner(
     if run.agent_status == "blocked" {
         return Err(LcError::conflict("agent is blocked; answer the prompt first", json!({"run_id": run.id})));
     }
-    if let Some(t) = db::in_flight_turn(&app.db, &run.id).await.map_err(up)? {
-        if queue_if_busy {
-            return queue_for_next_turn(app, &conv, bot_id, text, &deliver, client_request_id, group_id, relay_from).await;
+    // issue #103：插隊送出。先問這顆 run 認不認得 send-now 鍵，**再**決定要不要打斷——不合資格時
+    // 一個鍵都不按，照原本的路回 409，只是把原因一起講出來。
+    let refused = want_send_now.then(|| send_now::supported(&bot.kind, run.status_json.as_deref()).err()).flatten();
+    let send_now_ok = want_send_now && refused.is_none();
+    // 打斷哪一筆。**現在不收**：計畫失敗（框裡有字、證據讀不到）時一個鍵都還沒按，不該先把人家的回合收掉。
+    let interrupted = match db::in_flight_turn(&app.db, &run.id).await.map_err(up)? {
+        Some(t) if send_now_ok => Some(t),
+        Some(t) => {
+            if queue_if_busy {
+                return queue_for_next_turn(app, &conv, bot_id, text, &deliver, client_request_id, group_id, relay_from).await;
+            }
+            let mut detail = json!({"turn_id": t.id});
+            if let Some(r) = refused {
+                detail["send_now_refused"] = json!(r.code());
+                detail["send_now_message"] = json!(r.message());
+            }
+            return Err(LcError::conflict("a turn is already in flight", detail));
         }
-        return Err(LcError::conflict("a turn is already in flight", json!({"turn_id": t.id})));
-    }
+        None => None,
+    };
+    // 真的要按那顆鍵，只有在**有東西可以打斷**的時候。閒著的 bot 照一般 Enter 送出：按 send-now
+    // 什麼回合都沒打斷，卻把這條路多綁一個版本前提上去。
+    let send_now_active = send_now_ok && interrupted.is_some();
+    // 回給呼叫端的那個字：真的插了隊、當下本來就閒著、或沒插隊的原因。
+    let send_now = match (want_send_now, refused, interrupted.is_some()) {
+        (false, _, _) => None,
+        (true, Some(r), _) => Some(r.code()),
+        (true, None, true) => Some("interrupted"),
+        (true, None, false) => Some("idle"),
+    };
     // AGM 派工遇到「使用者剛按 Esc」：一樣先讓使用者拿回輸入框——排進佇列，寬限到了才送（§4.4a）。
     if queue_if_busy {
         if let Some(wait) = super::interrupt_grace::hold(app, &bot, &run, &conv).await {
@@ -489,10 +540,21 @@ async fn prompt_inner(
     // (sol review round seven #2). A 409 keeps a supervisor assignment queued with backoff.
     // A direct prompt never waits inside the request: a missing codex rollout answers 409 and the
     // caller (or AGM's backoff) asks again.
-    let plan = match plan_delivery(app, &client, &run, &bot, &deliver, false, false).await.map_err(up)? {
+    // 插隊送出一定要走打字那條路（`force_pane`）：herdr 的 `agent.prompt` 沒有鍵可以按，
+    // 按不到 send-now 就只是把字排進 CLI 自己的佇列，等於沒插隊。
+    let plan = match plan_delivery(app, &client, &run, &bot, &deliver, send_now_active, false).await.map_err(up)? {
+        Ok(plan) if send_now_active => plan.submitting_with(Submit::SendNow),
         Ok(plan) => plan,
         Err(not) => return Err(not_attempted_error(&run.id, not)),
     };
+
+    // 計畫成立了才收掉被打斷的那一筆。`turns_one_in_flight`（每個 run 最多一筆 in-flight）要求舊的先離開，
+    // 新的才進得去——這也就是「同一顆 bot 連續兩次 send-now 不會產生兩個 in_flight」的保證：
+    // 兩次都在同一顆 per-bot 鎖裡排隊，第二次看到第一次那筆，照樣先收再送。
+    if let Some(t) = interrupted.as_ref() {
+        tracing::info!(bot = %bot_id, turn = %t.id, "插隊送出：先收掉被打斷的回合，再把新的那句打進 pane");
+        super::fail_in_flight(app, &run.id, SEND_NOW_NOTE).await;
+    }
 
     // 3. turn + user message committed BEFORE the RPC, so an early hook can match.
     // `prompt_text` 存**實際送出**的字（群組去掉 @mention、附件路徑展開後），跟排隊那條同一欄：
@@ -530,7 +592,7 @@ async fn prompt_inner(
     if let Err(e) = crate::attach::bind(app, &msg_id, &files).await {
         emit_prompt_message(app, bot_id, &msg_id).await;
         fail_prompt_delivery(app, &conv, &turn_id, &format!("attachment binding failed: {e}")).await;
-        return Ok(PromptOut { turn_id, message_id: msg_id, delivery: "failed".into() });
+        return Ok(PromptOut { turn_id, message_id: msg_id, delivery: "failed".into(), send_now });
     }
     emit_prompt_message(app, bot_id, &msg_id).await;
     emit_turn(app, &turn_id).await;
@@ -592,7 +654,7 @@ async fn prompt_inner(
                 let _ = super::turn_controller::fail(&app.db, &turn_id, super::turn_controller::DeliveryOnFail::Failed, "agent_blocked").await;
                 let _ = insert_message(app, &conv, Some(&turn_id), "system", &format!("delivery failed: {e}"), "system", false, None).await;
                 emit_turn(app, &turn_id).await;
-                return Ok(PromptOut { turn_id, message_id: msg_id, delivery: "failed".into() });
+                return Ok(PromptOut { turn_id, message_id: msg_id, delivery: "failed".into(), send_now });
             }
             tracing::warn!(error = %e, "agent.prompt delivery unknown");
             "unknown"
@@ -604,7 +666,7 @@ async fn prompt_inner(
         arm_stall(app, &run.id, bot_id, &turn_id).await;
         arm_progress(app, &run.id, bot_id, &turn_id).await;
     }
-    Ok(PromptOut { turn_id, message_id: msg_id, delivery: delivery.into() })
+    Ok(PromptOut { turn_id, message_id: msg_id, delivery: delivery.into(), send_now })
 }
 
 #[cfg(test)]
@@ -1058,5 +1120,181 @@ mod prompt_tests {
             .unwrap();
         assert_eq!(event.turn_id, out.turn_id);
         assert_eq!((event.status.as_str(), event.delivery.as_str()), ("failed", "failed"));
+    }
+}
+
+#[cfg(test)]
+mod send_now_tests {
+    //! 插隊送出（issue #103）：daemon 這一側的記帳。端到端（pane 真的跑 2.1.275、CLI 真的收到）要等
+    //! §6.9 批次升級之後才能驗，這裡釘的是「哪些 run 可以插隊」與「被打斷的回合怎麼收」。
+    use super::*;
+    use crate::testing as tt;
+
+    struct Fixture {
+        env: tt::Env,
+        bot_id: String,
+        conv: String,
+        run_id: String,
+    }
+
+    /// 一顆會回話的 claude pane：`status_json` 帶 statusLine 回報的版本，transcript 檔就是送達證據。
+    async fn fixture(kind: &str, version: Option<&str>) -> Fixture {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, created_at)
+             VALUES (?,?,'send-now-test',?,'[]',0,1,'tok',?)",
+        )
+        .bind(&bot_id)
+        .bind(&env.project_id)
+        .bind(kind)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let conv = db::conversation_id(&app.db, &bot_id).await.unwrap();
+        let run_id = db::ulid();
+        let transcript = env.dir.join(format!("session-{}.jsonl", db::ulid()));
+        std::fs::write(&transcript, "").unwrap();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, pane_id, herdr_session, native_session_id, transcript_path, status_json, started_at)
+             VALUES (?,?,'running','working','pane-sn','test','sess-1',?,?,?)",
+        )
+        .bind(&run_id)
+        .bind(&bot_id)
+        .bind(transcript.to_str().unwrap())
+        .bind(version.map(|v| format!(r#"{{"version":"{v} (Claude Code)","model_name":"Opus"}}"#)))
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        env.herdr.live_pane(
+            "pane-sn",
+            tt::LivePane { width: Some(120), transcript_file: Some(transcript), ..Default::default() },
+        );
+        Fixture { env, bot_id, conv, run_id }
+    }
+
+    /// 佔住一個回合，回傳那筆 turn 的 id。
+    async fn busy(f: &Fixture) -> String {
+        let id = db::ulid();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at)
+             VALUES (?,?,?,'web','in_flight','ok',?)",
+        )
+        .bind(&id)
+        .bind(&f.conv)
+        .bind(&f.run_id)
+        .bind(db::now())
+        .execute(&f.env.app.db)
+        .await
+        .unwrap();
+        id
+    }
+
+    async fn status_of(f: &Fixture, turn_id: &str) -> String {
+        sqlx::query_scalar::<_, String>("SELECT status FROM turns WHERE id=?")
+            .bind(turn_id)
+            .fetch_one(&f.env.app.db)
+            .await
+            .unwrap()
+    }
+
+    async fn in_flight_count(f: &Fixture) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE conversation_id=? AND status='in_flight'")
+            .bind(&f.conv)
+            .fetch_one(&f.env.app.db)
+            .await
+            .unwrap()
+    }
+
+    fn keys_sent(f: &Fixture) -> Vec<String> {
+        f.env
+            .herdr
+            .calls_to("pane.send_keys")
+            .iter()
+            .filter_map(|p| p.get("keys").and_then(|k| serde_json::to_string(k).ok()))
+            .collect()
+    }
+
+    /// 驗收一：bot 正在跑時插隊送出——那句話進了對話，鍵真的按下去了，被打斷的回合收成 `failed`
+    /// 並留下一則說明，不是卡在進行中。
+    #[tokio::test]
+    async fn a_send_now_closes_the_turn_it_interrupted_and_delivers_the_new_one() {
+        let f = fixture("claude", Some("2.1.275")).await;
+        let app = f.env.app.clone();
+        let interrupted = busy(&f).await;
+
+        let out = prompt_send_now(&app, &f.bot_id, "先看這句", "sn-1", &[], None).await.unwrap();
+        assert_eq!(out.send_now, Some("interrupted"));
+        assert_eq!(out.delivery, "ok", "打字進 pane 並由 transcript 證明送出");
+
+        assert_eq!(status_of(&f, &interrupted).await, "failed", "被打斷的回合不能留在 in_flight");
+        assert_eq!(status_of(&f, &out.turn_id).await, "in_flight", "新的那一筆才是在飛的");
+        assert_eq!(in_flight_count(&f).await, 1);
+        let note: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='system' AND content=?")
+            .bind(&interrupted)
+            .bind(SEND_NOW_NOTE)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(note, 1, "對話裡看得到它是被插隊打斷的");
+        assert_eq!(keys_sent(&f), vec![r#"["ctrl+x","ctrl+s"]"#.to_string()], "按的是 send-now 鍵，不是 Enter");
+    }
+
+    /// 驗收二：連續兩次插隊送出不會產生兩個 `in_flight`——第二次同樣先收掉第一次那筆。
+    #[tokio::test]
+    async fn two_send_nows_in_a_row_never_leave_two_in_flight_turns() {
+        let f = fixture("claude", Some("2.1.275")).await;
+        let app = f.env.app.clone();
+        busy(&f).await;
+
+        let first = prompt_send_now(&app, &f.bot_id, "第一句", "sn-1", &[], None).await.unwrap();
+        let second = prompt_send_now(&app, &f.bot_id, "第二句", "sn-2", &[], None).await.unwrap();
+
+        assert_eq!(second.send_now, Some("interrupted"));
+        assert_eq!(status_of(&f, &first.turn_id).await, "failed");
+        assert_eq!(status_of(&f, &second.turn_id).await, "in_flight");
+        assert_eq!(in_flight_count(&f).await, 1);
+    }
+
+    /// 驗收三：舊版 claude 與其他 kind 走原本的路——照樣 409、一個鍵都不按、在飛的那筆原封不動，
+    /// 只是 body 多說一句為什麼沒插隊。
+    #[tokio::test]
+    async fn an_old_claude_or_another_kind_keeps_the_existing_behaviour() {
+        for (kind, version, code) in [
+            ("claude", Some("2.1.274"), "send_now_cli_too_old"),
+            ("claude", None, "send_now_version_unknown"),
+            ("codex", Some("2.1.275"), "send_now_unsupported_kind"),
+            ("grok", Some("2.1.275"), "send_now_unsupported_kind"),
+        ] {
+            let f = fixture(kind, version).await;
+            let app = f.env.app.clone();
+            let interrupted = busy(&f).await;
+
+            let err = prompt_send_now(&app, &f.bot_id, "插不進去", "sn-1", &[], None).await.unwrap_err();
+            let LcError::Conflict(body) = err else { panic!("{kind}/{version:?} 應該照舊回 409") };
+            assert_eq!(body["reason"], "a turn is already in flight", "{kind}/{version:?}");
+            assert_eq!(body["send_now_refused"], code, "{kind}/{version:?}");
+            assert!(body["send_now_message"].as_str().is_some_and(|m| !m.is_empty()), "{kind}/{version:?}");
+
+            assert_eq!(status_of(&f, &interrupted).await, "in_flight", "{kind}/{version:?}：沒插隊就不准動人家的回合");
+            assert_eq!(in_flight_count(&f).await, 1, "{kind}/{version:?}");
+            assert!(keys_sent(&f).is_empty(), "{kind}/{version:?}：一個鍵都不該按");
+        }
+    }
+
+    /// 閒著的 bot 帶 `send_now` 送出：沒有回合可以打斷，就照一般 Enter 送，不多綁一個版本前提。
+    #[tokio::test]
+    async fn a_send_now_with_nothing_in_flight_is_an_ordinary_send() {
+        let f = fixture("claude", Some("2.1.275")).await;
+        let app = f.env.app.clone();
+        sqlx::query("UPDATE runs SET agent_status='idle' WHERE id=?").bind(&f.run_id).execute(&app.db).await.unwrap();
+
+        let out = prompt_send_now(&app, &f.bot_id, "現在有空嗎", "sn-1", &[], None).await.unwrap();
+        assert_eq!(out.send_now, Some("idle"));
+        assert_eq!(in_flight_count(&f).await, 1);
+        assert!(!keys_sent(&f).iter().any(|k| k.contains("ctrl+s")), "沒有回合可以打斷就不按那顆鍵");
     }
 }

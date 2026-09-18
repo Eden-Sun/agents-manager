@@ -101,11 +101,45 @@ pub(crate) enum Proof {
     Unverified,
 }
 
+/// 把框裡那句送出去的鍵。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Submit {
+    /// 一般送出：框是空的、agent 閒著，Enter 就是送出。
+    Enter,
+    /// 插隊送出（issue #103）：claude 2.1.275 的 send-now 鍵，打斷目前這一回合並把排著的訊息一次送出。
+    /// 用 `ctrl+x ctrl+s` 不用 `ctrl+enter`——終端對 `ctrl+enter` 的支援不一致（issue #103 的建議）。
+    ///
+    /// 鍵名對 herdr 0.8.2 實測過（2026-09-18，隔離的 scratch pane 跑 `stty -ixon && cat -v`）：
+    /// `pane.send_keys ["ctrl+x","ctrl+s"]` 進到 tty 是 `^X^S`（0x18 0x13）。預設的 `cat -v` 只看到 `^X^X`，
+    /// 那是 tty 的 IXON 把 `ctrl+s` 當成 XOFF 吃掉——claude 的 TUI 是 raw mode，沒有這層。
+    SendNow,
+}
+
+impl Submit {
+    pub(crate) fn keys(self) -> &'static [&'static str] {
+        match self {
+            Submit::Enter => &["Enter"],
+            Submit::SendNow => &["ctrl+x", "ctrl+s"],
+        }
+    }
+}
+
 /// How the prompt will be delivered, decided before anything is written.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Plan {
     AgentPrompt { target: String },
-    Type { pane: String, proof: Proof },
+    Type { pane: String, proof: Proof, submit: Submit },
+}
+
+impl Plan {
+    /// 換掉送出鍵（issue #103）。`AgentPrompt` 那條路沒有鍵可以按——插隊送出一律帶 `force_pane`，
+    /// 所以計畫必然是 `Type`；真的拿到 `AgentPrompt` 時原樣回傳，讓它走一般送出而不是悄悄插隊。
+    pub(crate) fn submitting_with(self, submit: Submit) -> Self {
+        match self {
+            Plan::Type { pane, proof, .. } => Plan::Type { pane, proof, submit },
+            other => other,
+        }
+    }
 }
 
 const TYPE_SETTLE_MS: u64 = 700;
@@ -704,7 +738,7 @@ pub(crate) async fn plan_delivery(
         }
     };
     match box_state(&bot.kind, &screen) {
-        BoxState::Empty => Ok(Ok(Plan::Type { pane, proof })),
+        BoxState::Empty => Ok(Ok(Plan::Type { pane, proof, submit: Submit::Enter })),
         BoxState::NonEmpty => Ok(Err(Delivered::NotAttempted { reason: "composer_busy", retry: true })),
         BoxState::Unready => Ok(Err(Delivered::NotAttempted { reason: "composer_unreadable", retry: true })),
     }
@@ -760,14 +794,14 @@ pub(crate) async fn execute_delivery(
     text: &str,
     plan: Plan,
 ) -> anyhow::Result<Delivered> {
-    let (pane, proof) = match plan {
+    let (pane, proof, submit) = match plan {
         Plan::AgentPrompt { target } => {
             client
                 .call_timeout("agent.prompt", json!({"target": target, "text": text}), Duration::from_secs(10))
                 .await?;
             return Ok(Delivered::Handed);
         }
-        Plan::Type { pane, proof } => (pane, proof),
+        Plan::Type { pane, proof, submit } => (pane, proof, submit),
     };
     // Persist "this pane gets typed into" before the first keystroke (sol review round three #2).
     crate::lifecycle::remember_pane_typed(&run.id);
@@ -842,7 +876,7 @@ pub(crate) async fn execute_delivery(
         BoxState::Unready => return Ok(Delivered::Unproven("composer_unreadable")),
     }
 
-    client.pane_send_keys(&pane, &["Enter"]).await?;
+    client.pane_send_keys(&pane, submit.keys()).await?;
     let mut pressed_again = false;
     for _ in 0..SUBMIT_CHECKS {
         tokio::time::sleep(Duration::from_millis(SUBMIT_SETTLE_MS)).await;
@@ -863,8 +897,8 @@ pub(crate) async fn execute_delivery(
                 return Ok(Delivered::Submitted);
             }
             BoxState::NonEmpty if !pressed_again => {
-                tracing::warn!(run = %run.id, bot = %bot.name, "prompt still in the composer after Enter; pressing Enter again");
-                client.pane_send_keys(&pane, &["Enter"]).await?;
+                tracing::warn!(run = %run.id, bot = %bot.name, ?submit, "prompt still in the composer after the submit key; pressing it again");
+                client.pane_send_keys(&pane, submit.keys()).await?;
                 pressed_again = true;
             }
             _ => {}

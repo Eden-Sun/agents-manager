@@ -2536,7 +2536,31 @@ export class MockTransport implements Transport {
       if (dup) return { turn_id: dup.id, message_id: null, delivery: dup.delivery }
     }
     const busy = this.turns.find((t) => t.run_id === run.id && t.status === 'in_flight')
-    if (busy) throw new ApiError(409, { error: 'conflict', reason: 'a turn is already in flight', turn_id: busy.id }, 'conflict')
+    // 插隊送出（issue #103）：只有 claude 有那顆鍵，其他 kind 照舊 409 並說明為什麼沒插隊。
+    // mock 不模擬版本閘門（沒有 statusLine），只分 kind——版本那條由 daemon 的單元測試把關。
+    const wantSendNow = b.send_now === true
+    const canSendNow = wantSendNow && this.bot(botId)?.kind === 'claude'
+    if (busy && !canSendNow) {
+      const why = wantSendNow
+        ? {
+            send_now_refused: 'send_now_unsupported_kind',
+            send_now_message: '插隊送出只有 claude 有（2.1.275 的 send-now 鍵）；這顆 bot 照舊排隊。',
+          }
+        : {}
+      throw new ApiError(409, { error: 'conflict', reason: 'a turn is already in flight', turn_id: busy.id, ...why }, 'conflict')
+    }
+    if (busy) {
+      this.updateTurn(busy, { status: 'failed', completed_at: now() })
+      this.addMessage({
+        conversation_id: busy.conversation_id,
+        turn_id: busy.id,
+        bot_id: botId,
+        role: 'system',
+        content: '被插隊送出打斷（claude send-now）',
+        source: 'system',
+        incomplete: 0,
+      })
+    }
     const unknown = this.turns.find((t) => t.run_id === run.id && t.delivery === 'unknown')
     if (unknown) {
       throw new ApiError(

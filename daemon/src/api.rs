@@ -2328,6 +2328,10 @@ struct PromptIn {
     ack: bool,
     #[serde(default)]
     reply_to: Option<String>,
+    /// 插隊送出（issue #103）：對方回合中時打斷它，而不是回 409。只有 claude ≥ 2.1.275 的 run 認得
+    /// 那顆鍵；其他情況照舊排隊／409，body 會帶 `send_now_refused` 說明為什麼沒插隊。
+    #[serde(default)]
+    send_now: bool,
 }
 
 async fn prompt_bot(
@@ -2357,7 +2361,11 @@ async fn prompt_bot(
             return Ok((StatusCode::ACCEPTED, Json(v)).into_response());
         }
     }
-    let out = lifecycle::prompt_relayed(&app, &id, &b.text, &crid, &b.attachments, relay_from.as_deref()).await?;
+    let out = if b.send_now {
+        lifecycle::prompt_send_now(&app, &id, &b.text, &crid, &b.attachments, relay_from.as_deref()).await?
+    } else {
+        lifecycle::prompt_relayed(&app, &id, &b.text, &crid, &b.attachments, relay_from.as_deref()).await?
+    };
     Ok((StatusCode::OK, Json(out)).into_response())
 }
 
@@ -3384,7 +3392,7 @@ mod prompt_route_tests {
     }
 
     async fn call(e: &crate::testing::Env, bot: &str, text: String, crid: &str) -> (StatusCode, Value) {
-        let body = PromptIn { text, client_request_id: Some(crid.into()), attachments: vec![], relay_from: None, ack: false, reply_to: None };
+        let body = PromptIn { text, client_request_id: Some(crid.into()), attachments: vec![], relay_from: None, ack: false, reply_to: None, send_now: false };
         let resp = match prompt_bot(State(e.app.clone()), Path(bot.to_string()), HeaderMap::new(), Json(body)).await {
             Ok(r) => r,
             Err(err) => err.into_response(),

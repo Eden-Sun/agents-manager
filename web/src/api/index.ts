@@ -479,16 +479,20 @@ export async function loginBot(botId: string): Promise<{ command: string; kind: 
   return { command: str(pick(o, 'command'), '/login'), kind: str(pick(o, 'kind')) }
 }
 
+/** `sendNow`＝插隊送出（issue #103）：對方回合中時打斷它，而不是回 409。只有 claude ≥ 2.1.275
+ *  的 run 認得那顆鍵，其他情況 daemon 照舊 409，body 帶 `send_now_refused`。 */
 export async function sendPrompt(
   botId: string,
   text: string,
   clientRequestId: string,
   attachments: string[] = [],
+  sendNow = false,
 ): Promise<PromptResult> {
   const raw = await transport.request('POST', `/bots/${encodeURIComponent(botId)}/prompt`, {
     text,
     client_request_id: clientRequestId,
     ...(attachments.length ? { attachments } : {}),
+    ...(sendNow ? { send_now: true } : {}),
   })
   const o = isRec(raw) ? raw : {}
   const delivery = str(pick(o, 'delivery'), 'pending') as TurnDelivery
@@ -496,6 +500,7 @@ export async function sendPrompt(
     turn_id: str(pick(o, 'turn_id')),
     message_id: str(pick(o, 'message_id')) || null,
     delivery,
+    send_now: str(pick(o, 'send_now')) || null,
   }
 }
 

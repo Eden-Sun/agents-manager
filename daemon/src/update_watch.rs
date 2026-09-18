@@ -34,8 +34,9 @@ async fn disk_version(app: &Arc<App>, host: &str) -> Option<String> {
     v
 }
 
-/// statusLine 回報的 process 版本（`runs.status_json.version`）。
-fn running_version(status_json: Option<&str>) -> Option<String> {
+/// statusLine 回報的 process 版本（`runs.status_json.version`）。**跑著的**版本，不是磁碟上的；
+/// 插隊送出的版本閘門（issue #103，`lifecycle::send_now`）也讀這一支。
+pub(crate) fn running_version(status_json: Option<&str>) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(status_json?).ok()?;
     crate::changelog::version_string(v.get("version")?.as_str()?)
 }

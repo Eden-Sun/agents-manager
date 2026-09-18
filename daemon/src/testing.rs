@@ -75,6 +75,25 @@ pub struct LivePane {
     pub suggestion: Option<String>,
 }
 
+/// 框裡的字送出去：進 transcript，有 transcript 檔就照 claude 的格式補一筆 user entry。
+/// Enter 與 send-now 和弦（issue #103）共用這一段——兩顆鍵對框的效果一樣。
+fn submit_composer(p: &mut LivePane) {
+    let rows: Vec<String> = p.composer.drain(..).collect();
+    if let (Some(path), false) = (&p.transcript_file, rows.is_empty()) {
+        use std::io::Write as _;
+        let entry = json!({"type": "user", "message": {"role": "user", "content": rows.join("\n")}});
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(f, "{entry}");
+        }
+    }
+    if let Some((first, rest)) = rows.split_first() {
+        p.transcript.push(format!("❯ {first}"));
+        for r in rest {
+            p.transcript.push(format!("  {r}"));
+        }
+    }
+}
+
 impl LivePane {
     pub fn render(&self) -> String {
         let mut out = String::new();
@@ -458,27 +477,18 @@ impl MockHerdr {
                                 .map(|a| a.iter().filter_map(Value::as_str).map(|k| k.to_ascii_lowercase()).collect())
                                 .unwrap_or_default();
                             if let Some(p) = st.live.lock().unwrap().get_mut(&pid) {
+                                let mut prev = String::new();
                                 for k in &keys {
+                                    // claude 2.1.275 的 send-now 和弦（issue #103）：`ctrl+x ctrl+s` 跟 Enter
+                                    // 一樣把框裡的字送出去，差別在真的 CLI 那邊會順便打斷當下那一回合。
+                                    let send_now = k == "ctrl+s" && prev == "ctrl+x";
                                     match k.as_str() {
-                                        "enter" if !p.swallow_enter => {
-                                            let rows: Vec<String> = p.composer.drain(..).collect();
-                                            if let (Some(path), false) = (&p.transcript_file, rows.is_empty()) {
-                                                use std::io::Write as _;
-                                                let entry = json!({"type": "user", "message": {"role": "user", "content": rows.join("\n")}});
-                                                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-                                                    let _ = writeln!(f, "{entry}");
-                                                }
-                                            }
-                                            if let Some((first, rest)) = rows.split_first() {
-                                                p.transcript.push(format!("❯ {first}"));
-                                                for r in rest {
-                                                    p.transcript.push(format!("  {r}"));
-                                                }
-                                            }
-                                        }
+                                        "enter" if !p.swallow_enter => submit_composer(p),
+                                        _ if send_now && !p.swallow_enter => submit_composer(p),
                                         "ctrl+c" => p.composer.clear(),
                                         _ => {}
                                     }
+                                    prev.clone_from(k);
                                 }
                             }
                             json!({"id": id, "result": {"type": "ok"}})
@@ -596,6 +606,12 @@ impl MockHerdr {
 
     pub fn methods(&self) -> Vec<String> {
         self.calls.lock().unwrap().iter().map(|(m, _)| m.clone()).collect()
+    }
+
+    /// 這支方法收到的每一次參數，依序。`first_call` 只看得到第一次；要驗「按了哪些鍵、按了幾次」
+    /// 得看全部（issue #103）。
+    pub fn calls_to(&self, method: &str) -> Vec<Value> {
+        self.calls.lock().unwrap().iter().filter(|(m, _)| m == method).map(|(_, p)| p.clone()).collect()
     }
 
     pub fn first_call(&self, method: &str) -> Option<Value> {
