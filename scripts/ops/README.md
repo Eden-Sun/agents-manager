@@ -76,7 +76,11 @@ cat /tmp/am-ops-test/supervisor/AGM/daemon-update.log
 
 ```sh
 install -m 755 scripts/ops/daemon-update-kick.sh ~/.config/agents-manager/supervisor/AGM/bin/
+install -m 644 scripts/ops/daemon-update-task.md ~/.config/agents-manager/supervisor/AGM/
 ```
+
+任務內容在 `daemon-update-task.md`（kick 會把它當成派工正文的開頭，末尾再補這一輪的 sha／核准／租約）。
+這份是**來源檔**：改規則改這裡再 install，不要只改 AGM 目錄裡那份，否則下次有人從 repo 安裝就把規則改回去了。
 
 launchd：`com.agm.daemon-update` 改成每 5 分鐘跑一次（`StartInterval 300`），由腳本自己判斷
 「整點、集滿門檻，或等太久」；`AGM_BUILD_BOT`（必要）與 `AGM_REBUILD_THRESHOLD`／`AGM_REBUILD_MAX_WAIT_MIN`（可選）放 `EnvironmentVariables`。
