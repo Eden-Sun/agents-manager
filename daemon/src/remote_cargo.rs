@@ -402,6 +402,10 @@ pub fn sh_quote(s: &str) -> String {
 // 看到 EOF——**清理不靠本機活著做完**（2026-09-19 實測：本機 ssh 被 kill -9，遠端 shell 照樣讀到 EOF 跑完）。
 // 沒有 pty 的 ssh 斷線後遠端 cargo 不會收到訊號、會繼續跑（同日實測），所以 run 的那條 ssh 先把自己的
 // process group 寫下來（`<dir>.pgid-<token>`），守門清理時整組收掉再刪目錄。
+//
+// 租約身分（issue #148）是本機每次呼叫新產生的 [`LeaseToken`]（128 位元隨機），不是遠端 shell 的 `$$`：
+// PID 會被回收重用，「值一樣」不等於「同一次租約」。守門只把 `$$` 拿來做行程簿記（自己的 process group、
+// `/proc/$$/fd`），`.owner`、`.pgid-<token>` 與交給 run 的 token 全都用這個。
 
 /// 沒有鎖、也沒有行程的 cwd 在裡面，放這麼久就當孤兒刪（守門被 kill 在遠端那頭、舊版留下的 `<pid>/`）。
 const ORPHAN_IDLE_SECS: u64 = 10 * 60;
@@ -410,26 +414,51 @@ const SHARED_IDLE_SECS: u64 = 3 * 3600;
 /// 遠端磁碟剩不到這個比例時，閒置的 `shared/` 也照孤兒的門檻收（#141：一小時塞滿 97G）。
 const LOW_DISK_FREE_PCT: u64 = 25;
 
+/// 一次租約的身分（fencing token）：本機產生的 128 位元隨機數，固定 32 個小寫 hex。
+///
+/// 只能由 [`LeaseToken::new`]（隨機）得到（測試另有驗過格式的 `parse`），所以直接嵌進遠端 shell 與
+/// 檔名（`<dir>.owner` 的內容、`<dir>.pgid-<token>`）都不會變成 command injection 或路徑穿越。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeaseToken(String);
+
+impl LeaseToken {
+    pub fn new() -> Self {
+        Self(format!("{:032x}", rand::random::<u128>()))
+    }
+
+    /// 正式碼只用 [`LeaseToken::new`]；`parse` 是測試拿固定值、以及釘住「什麼樣的字串算合法」用的。
+    #[cfg(test)]
+    pub fn parse(s: &str) -> Option<Self> {
+        (s.len() == 32 && s.bytes().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'))).then(|| Self(s.to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// 守門連線在遠端跑的腳本（POSIX sh；遠端要是有 flock 與 /proc 的 Linux）。
 ///
-/// stdout 協定：`ROOT\t<絕對路徑>`、`DIR\t<這次的工作目錄>\t<token>`、每個候選目錄一行
+/// stdout 協定：`ROOT\t<絕對路徑>`、`DIR\t<這次的工作目錄>\t<token，原樣回>`、每個候選目錄一行
 /// `D\t<路徑>\t<鎖被持有>\t<有行程 cwd 在裡面>\t<閒置秒數>`、`F\t<剩餘 KB>\t<總 KB>`，最後 `END`。
 /// 之後 stdin 每行 `rm <路徑>` 是要它回收的孤兒（它自己拿鎖、重看一次有沒有人在用才刪），EOF＝這次結束。
-fn guard_script(root: &str, hash: &str, job: &str) -> String {
+fn guard_script(root: &str, hash: &str, job: &str, token: &LeaseToken) -> String {
     GUARD_SH
         .replace("@ROOT@", &sh_quote(root))
         .replace("@HASH@", &sh_quote(hash))
         .replace("@JOB@", &sh_quote(job))
+        .replace("@TOKEN@", &sh_quote(token.as_str()))
         .replace("@HEX16@", &"[0-9a-f]".repeat(16))
 }
 
 const GUARD_SH: &str = r#"set -u
 trap '' HUP PIPE
-root=@ROOT@; hash=@HASH@; job=@JOB@
+root=@ROOT@; hash=@HASH@; job=@JOB@; token=@TOKEN@
 if ! command -v flock >/dev/null 2>&1 || [ ! -r /proc/self/stat ]; then
   echo 'agents-manager: remote Cargo 的遠端要有 flock（util-linux）與 /proc（Linux）' >&2; exit 2
 fi
 mkdir -p "$root" && cd "$root" && root=$(pwd -P) || exit 2
+# `$$` 只做行程簿記（自己的 process group 不能被收、`/proc/$$/fd`）；租約身分是本機給的 $token，PID 會被回收重用。
 me=$(ps -o pgid= -p $$ | tr -d ' ')
 # 只碰自己命名規則的目錄：remote_root 設錯（例如設成家目錄）也不會去刪別人的東西。
 ours() {
@@ -470,7 +499,7 @@ gc_rm() {
   return 0
 }
 reap() {
-  f="$1.pgid-$$"
+  f="$1.pgid-$token"
   [ -s "$f" ] || return 0
   g=$(cat "$f"); rm -f "$f"
   case "$g" in ''|*[!0-9]*) return 0 ;; esac
@@ -486,8 +515,8 @@ reap() {
 hold() {
   flock -n 8 || return 75
   same "$1.lock" 8 || return 76
-  mkdir -p "$1" && touch "$1.lock" && printf '%s\n' "$$" > "$1.owner" || return 2
-  printf 'ROOT\t%s\nDIR\t%s\t%s\n' "$root" "$1" "$$"
+  mkdir -p "$1" && touch "$1.lock" && printf '%s\n' "$token" > "$1.owner" || return 2
+  printf 'ROOT\t%s\nDIR\t%s\t%s\n' "$root" "$1" "$token"
   inventory "$1"
   echo END
   # 本機隨時可能已經斷線：之後再寫 stdout/stderr 會 EPIPE，清理不能因此半途而廢。
@@ -522,7 +551,7 @@ pub struct RemoteDir {
     pub idle_secs: u64,
 }
 
-/// 守門連線交回來的：這次用哪個目錄、token，以及順手看到的回收候選。
+/// 守門連線交回來的：這次用哪個目錄、原樣回的 token，以及順手看到的回收候選。
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Handshake {
     pub root: String,
@@ -607,17 +636,23 @@ struct Lease {
     /// 留著不關：守門寫 stdout 時讀端要還在，免得它被 SIGPIPE 打斷。
     stdout: Option<BufReader<ChildStdout>>,
     hs: Handshake,
+    /// 這次租約的身分（本機產生、守門原樣回；[`run_script`] 用它核對 `.owner`）。
+    token: LeaseToken,
 }
 
 impl Lease {
-    fn start(mut cmd: Command) -> anyhow::Result<Self> {
+    /// `cmd` 跑的守門腳本要是用 `token` 產生的；它交回來的 token 對不上就當守門出事、不當成拿到目錄。
+    fn start(mut cmd: Command, token: LeaseToken) -> anyhow::Result<Self> {
         cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit());
         let mut child = cmd.spawn().map_err(|e| anyhow::anyhow!("remote workdir guard: {e}"))?;
         let stdin = child.stdin.take();
         let stdout = child.stdout.take().map(BufReader::new);
-        let mut lease = Lease { child, stdin, stdout, hs: Handshake::default() };
+        let mut lease = Lease { child, stdin, stdout, hs: Handshake::default(), token };
         let reader = lease.stdout.as_mut().ok_or_else(|| anyhow::anyhow!("remote workdir guard: no stdout"))?;
         lease.hs = read_handshake(reader)?;
+        if lease.hs.token != lease.token.as_str() {
+            anyhow::bail!("remote workdir guard answered with a lease token that is not the one it was given");
+        }
         Ok(lease)
     }
 
@@ -652,9 +687,9 @@ impl Drop for Lease {
 
 /// 遠端跑 cargo 的那一行。先記下自己的 process group、再確認目錄還是這次租的（owner＝token），順序不能反：
 /// 守門清理是「先撤 owner、再讀 pgid」，所以通過檢查的 run 一定會被收到。
-fn run_script(dir: &str, token: &str, jobs: usize, args: &[String]) -> String {
+fn run_script(dir: &str, token: &LeaseToken, jobs: usize, args: &[String]) -> String {
     let argv = args.iter().map(|a| sh_quote(a)).collect::<Vec<_>>().join(" ");
-    let tok = sh_quote(token);
+    let tok = token.as_str();
     // `~/.cargo/bin` 要自己接：rustup 只改 shell profile，ssh 的非互動 shell 不讀（同 `PROBE_SH`）。
     format!(
         "d={dir}; g=$(ps -o pgid= -p $$ | tr -d ' ') && printf '%s\\n' \"$g\" > \"$d.pgid-{tok}\" \
@@ -683,9 +718,10 @@ fn open_lease(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path) -> anyhow::R
         .unwrap_or(0);
     let job = format!("job-{}-{millis}", std::process::id());
     let pw = secret(data_dir)?;
+    let token = LeaseToken::new();
     let mut cmd = ssh_base(remote, pw.as_deref(), data_dir)?;
-    cmd.arg(format!("sh -c {}", sh_quote(&guard_script(&root, &hash, &job))));
-    Lease::start(cmd)
+    cmd.arg(format!("sh -c {}", sh_quote(&guard_script(&root, &hash, &job, &token))));
+    Lease::start(cmd, token)
 }
 
 fn sync_source(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, dir: &str) -> anyhow::Result<()> {
@@ -735,10 +771,10 @@ fn sync_source(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, dir: &str) 
     Ok(())
 }
 
-fn run_remote(remote: &BuildRemoteCfg, data_dir: &Path, hs: &Handshake, args: &[String]) -> anyhow::Result<i32> {
+fn run_remote(remote: &BuildRemoteCfg, data_dir: &Path, lease: &Lease, args: &[String]) -> anyhow::Result<i32> {
     let pw = secret(data_dir)?;
     let mut cmd = ssh_base(remote, pw.as_deref(), data_dir)?;
-    cmd.arg(run_script(&hs.dir, &hs.token, remote.cargo_jobs, args));
+    cmd.arg(run_script(&lease.hs.dir, &lease.token, remote.cargo_jobs, args));
     let status = run_status(cmd, "remote cargo")?;
     Ok(status.code().unwrap_or(1))
 }
@@ -770,7 +806,7 @@ pub fn run_cli(config_path: &Path, data_dir: &Path, cwd: &Path, args: &[String])
         let mut lease = open_lease(&remote, data_dir, cwd)?;
         lease.collect(&select_gc(&lease.hs));
         sync_source(&remote, data_dir, cwd, &lease.hs.dir)?;
-        let code = run_remote(&remote, data_dir, &lease.hs, args)?;
+        let code = run_remote(&remote, data_dir, &lease, args)?;
         lease.finish();
         Ok(code)
     })();
@@ -911,7 +947,7 @@ mod tests {
         Handshake {
             root: ROOT.into(),
             dir: format!("{ROOT}/0123456789abcdef/shared"),
-            token: "4242".into(),
+            token: "0123456789abcdef0123456789abcdef".into(),
             dirs,
             disk,
         }
@@ -984,13 +1020,13 @@ mod tests {
 
     #[test]
     fn the_handshake_skips_login_noise_and_fails_if_the_guard_dies_first() {
-        let out = "Welcome!\nROOT\t/r\nDIR\t/r/0123456789abcdef/shared\t77\n\
+        let out = "Welcome!\nROOT\t/r\nDIR\t/r/0123456789abcdef/shared\tfeedfacefeedfacefeedfacefeedface\n\
                    D\t/r/00000000000000aa/111\t0\t1\t-3\nD\t/r/00000000000000aa/222\t1\t0\t900\n\
                    F\t500\t1000\nEND\nD\t/late\t0\t0\t9\n";
         let h = read_handshake(&mut std::io::Cursor::new(out)).unwrap();
         assert_eq!(h.root, "/r");
         assert_eq!(h.dir, "/r/0123456789abcdef/shared");
-        assert_eq!(h.token, "77");
+        assert_eq!(h.token, "feedfacefeedfacefeedfacefeedface");
         assert_eq!(h.disk, Some((500, 1000)));
         assert_eq!(
             h.dirs,
@@ -1007,14 +1043,53 @@ mod tests {
     /// run 要先記 pgid、再核 owner、最後才跑 cargo：守門清理是「先撤 owner 再讀 pgid」，順序反了會漏收。
     #[test]
     fn the_remote_run_records_its_group_before_checking_the_lease() {
-        let s = run_script("/r/0123456789abcdef/shared", "77", 4, &["test".into(), "-p".into(), "x; rm -rf ~".into()]);
-        let pgid = s.find("> \"$d.pgid-77\"").expect(&s);
+        let tok = LeaseToken::parse("0123456789abcdef0123456789abcdef").unwrap();
+        let s = run_script("/r/0123456789abcdef/shared", &tok, 4, &["test".into(), "-p".into(), "x; rm -rf ~".into()]);
+        let pgid = s.find("> \"$d.pgid-0123456789abcdef0123456789abcdef\"").expect(&s);
         let owner = s.find("\"$d.owner\"").expect(&s);
         let cargo = s.find("cargo test").expect(&s);
         assert!(pgid < owner && owner < cargo, "{s}");
         assert!(s.contains("exit 126"), "{s}");
         assert!(s.contains("'x; rm -rf ~'"), "{s}");
         assert!(s.contains("PATH=\"$HOME/.cargo/bin:$PATH\" CARGO_BUILD_JOBS=4"), "{s}");
+    }
+
+    /// #148：租約身分固定格式（32 個小寫 hex），嵌進遠端 shell 與檔名都不會變成 injection；
+    /// 每次都是新的——不是 PID、不是時間，撞不到。
+    #[test]
+    fn a_lease_token_is_fixed_format_random_and_never_repeats() {
+        let a = LeaseToken::new();
+        assert_eq!(a.as_str().len(), 32);
+        assert!(a.as_str().bytes().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f')), "{a:?}");
+        assert_eq!(LeaseToken::parse(a.as_str()), Some(a.clone()));
+        let seen: std::collections::HashSet<String> = (0..2000).map(|_| LeaseToken::new().as_str().to_string()).collect();
+        assert_eq!(seen.len(), 2000, "隨機 token 不能重複");
+
+        for bad in [
+            "",
+            "4242",                                     // 舊版的 `$$`
+            "0123456789ABCDEF0123456789ABCDEF",         // 大寫
+            "0123456789abcdef0123456789abcde",          // 少一個
+            "0123456789abcdef0123456789abcdef0",        // 多一個
+            "0123456789abcdef0123456789abcde;",         // shell 字元
+            "../../../../../../../../../../etc/passwd", // 路徑穿越
+            "0123456789abcdef0123456789abcd\n",         // 換行
+            "0123456789abcdef0123456789abcd'x",         // 引號
+        ] {
+            assert!(LeaseToken::parse(bad).is_none(), "{bad:?}");
+        }
+        let script = guard_script("/r", "0123456789abcdef", "job-1-1", &a);
+        assert!(script.contains(&format!("token={}", a.as_str())), "token 要原樣、不帶引號地進腳本");
+        assert!(!script.contains("@TOKEN@"), "沒替換乾淨");
+    }
+
+    /// 守門交回來的 token 不是我們給的那個＝出事了，不能當成拿到目錄（不然後面 run 會拿錯身分去核 owner）。
+    #[test]
+    fn a_guard_that_answers_with_another_token_is_not_a_lease() {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("printf 'ROOT\\t/r\\nDIR\\t/r/0123456789abcdef/shared\\tfeedfacefeedfacefeedfacefeedface\\nEND\\n'; cat >/dev/null");
+        let err = Lease::start(cmd, LeaseToken::new()).err().expect("token mismatch must fail").to_string();
+        assert!(err.contains("lease token"), "{err}");
     }
 
     #[test]
@@ -1052,9 +1127,10 @@ mod guard_tests {
     }
 
     fn guard(base: &Path, hash: &str, job: &str) -> Lease {
+        let token = LeaseToken::new();
         let mut cmd = Command::new("sh");
-        cmd.arg("-c").arg(guard_script("rc", hash, job)).current_dir(base);
-        Lease::start(cmd).expect("guard should hand out a directory")
+        cmd.arg("-c").arg(guard_script("rc", hash, job, &token)).current_dir(base);
+        Lease::start(cmd, token).expect("guard should hand out a directory")
     }
 
     fn wait_until(what: &str, f: impl Fn() -> bool) {
@@ -1077,11 +1153,11 @@ mod guard_tests {
         home
     }
 
-    fn spawn_run(base: &Path, home: &Path, hs: &Handshake) -> Child {
+    fn spawn_run(base: &Path, home: &Path, dir: &str, token: &LeaseToken) -> Child {
         // 遠端每條 ssh 都是自己的 session（sshd setsid）；這裡用獨立的 process group 模擬，收 pgid 才不會打到測試本身。
         Command::new("sh")
             .arg("-c")
-            .arg(run_script(&hs.dir, &hs.token, 1, &["test".into()]))
+            .arg(run_script(dir, token, 1, &["test".into()]))
             .env("HOME", home)
             .current_dir(base)
             .process_group(0)
@@ -1131,7 +1207,7 @@ mod guard_tests {
         let mut holder = guard(&base, HASH, "job-1-1"); // 佔住 shared，讓下一個拿 job 目錄
         let mut lease = guard(&base, HASH, "job-2-2");
         let dir = lease.hs.dir.clone();
-        let mut run = spawn_run(&base, &home, &lease.hs);
+        let mut run = spawn_run(&base, &home, &dir, &lease.token);
         wait_until("fake cargo to start", || started(&dir));
 
         drop(lease.stdin.take()); // 本機那端沒了
@@ -1159,11 +1235,89 @@ mod guard_tests {
         let base = base();
         let home = fake_home(&base);
         let mut lease = guard(&base, HASH, "job-1-1");
-        let hs = lease.hs.clone();
+        let (dir, token) = (lease.hs.dir.clone(), lease.token.clone());
         lease.finish();
-        let status = spawn_run(&base, &home, &hs).wait().unwrap();
+        let status = spawn_run(&base, &home, &dir, &token).wait().unwrap();
         assert_eq!(status.code(), Some(126));
-        assert!(!started(&hs.dir));
+        assert!(!started(&dir));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    fn wait_run(run: &mut Child) -> ExitStatus {
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            if let Some(st) = run.try_wait().unwrap() {
+                return st;
+            }
+            if Instant::now() > deadline {
+                let _ = unsafe { libc::kill(-(run.id() as i32), libc::SIGKILL) };
+                let _ = run.wait();
+                panic!("the stale run went on to start cargo");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// #148：租約身分不能是遠端 PID。上一代結束、下一代租到同一個 shared 之後，姍姍來遲的舊 run
+    /// （帶的是上一代的 token）不能通過 owner 檢查；下一代自己的 run 照常跑。
+    /// 修正前 token 是守門的 `$$`，兩代剛好同一個 remote PID 時 `.owner` 又變回舊值、舊 run 誤通過
+    /// （當時用把 `$$` 釘成同一個數字模擬，紅在「the stale run went on to start cargo」）。
+    #[test]
+    fn a_stale_run_is_refused_after_the_next_lease_takes_over_the_same_dir() {
+        let base = base();
+        let home = fake_home(&base);
+        let mut a = guard(&base, HASH, "job-1-1");
+        let (dir, stale) = (a.hs.dir.clone(), a.token.clone());
+        a.finish();
+        let mut b = guard(&base, HASH, "job-2-2");
+        assert_eq!(b.hs.dir, dir, "b 要租到同一個 shared");
+        assert_ne!(b.token, stale, "每一代都要有新的 token");
+
+        let status = wait_run(&mut spawn_run(&base, &home, &dir, &stale));
+        assert_eq!(status.code(), Some(126), "{status:?}");
+        assert!(!started(&dir), "舊 run 不能在下一代的目錄裡跑 cargo");
+
+        // 同一次租約的 run 照常跑。
+        let mut run = spawn_run(&base, &home, &dir, &b.token);
+        wait_until("the current lease's cargo to start", || started(&dir));
+        assert!(b.finish().unwrap().success());
+        wait_run(&mut run);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// `.owner`、pgid sidecar 與交給 run 的 token 都是本機給的那個，不是守門 shell 的 PID；
+    /// 下一代結束時只收自己那一代的 sidecar，舊 run 留下的別人的 sidecar 不當成自己的去殺。
+    #[test]
+    fn the_lease_identity_is_the_callers_token_and_cleanup_only_reaps_its_own_generation() {
+        let base = base();
+        let home = fake_home(&base);
+        let mut a = guard(&base, HASH, "job-1-1");
+        let (dir, stale) = (a.hs.dir.clone(), a.token.clone());
+        assert_eq!(a.hs.token, stale.as_str(), "守門要把 token 原樣交回來");
+        assert_eq!(std::fs::read_to_string(format!("{dir}.owner")).unwrap().trim(), stale.as_str());
+        assert_ne!(stale.as_str(), a.child.id().to_string(), "身分不能是守門 shell 的 PID");
+        a.finish();
+
+        let mut b = guard(&base, HASH, "job-2-2");
+        assert_eq!(std::fs::read_to_string(format!("{dir}.owner")).unwrap().trim(), b.token.as_str());
+        // 舊 run 被拒之前已經寫下的 sidecar（指向一個不屬於這一代的 process group）。
+        let mut decoy = Command::new("sleep").arg("60").process_group(0).spawn().unwrap();
+        std::fs::write(format!("{dir}.pgid-{}", stale.as_str()), format!("{}\n", decoy.id())).unwrap();
+        let mut run = spawn_run(&base, &home, &dir, &b.token);
+        wait_until("the current lease's cargo to start", || started(&dir));
+        assert!(Path::new(&format!("{dir}.pgid-{}", b.token.as_str())).is_file(), "sidecar 用 token 命名");
+
+        assert!(b.finish().unwrap().success());
+        wait_run(&mut run);
+        assert!(decoy.try_wait().unwrap().is_none(), "別人那一代的 sidecar 指到的行程不能被收");
+        let _ = decoy.kill();
+        let _ = decoy.wait();
+        let left: Vec<_> = std::fs::read_dir(Path::new(&dir).parent().unwrap())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains(".pgid-"))
+            .collect();
+        assert!(left.is_empty(), "結束後 sidecar 要清乾淨：{left:?}");
         let _ = std::fs::remove_dir_all(base);
     }
 
