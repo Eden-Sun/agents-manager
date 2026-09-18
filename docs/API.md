@@ -466,6 +466,10 @@ shim 轉遠端要 pane 裡有 `AM_DAEMON_EXE`、`AM_CONFIG_PATH`、`AM_DATA_DIR`
   `job-<pid>-<ms>/`，冷編譯、結束就刪，stderr 會講。
 - 每次呼叫先開一條守門 ssh 拿鎖，再 rsync、再跑 cargo；守門讀 stdin 等到 EOF 才清理，所以 helper 成功、失敗、
   被 Ctrl-C／SIGTERM／kill -9 都會清（遠端還在跑的 cargo 按 process group 收掉，`job-*` 刪掉，`shared` 解鎖）。
+- 租約身分（fencing token，issue #148）是本機每次呼叫新產生的 128 位元隨機數（32 個小寫 hex），不是遠端 shell 的 PID
+  （PID 會被回收重用：值一樣不等於同一次租約）。守門把它寫進 `<dir>.owner`、原樣回給 helper，run 帶著它核對 owner
+  （對不上＝晚到的舊 run，exit 126 不跑 cargo）；`<dir>.pgid-<token>` 也以它命名，守門只收自己那一代的 process group。
+  token 只有固定格式，不可能夾帶 shell 字元或路徑。
 - 守門順手回收孤兒：沒鎖被持有、沒有行程的 cwd 在裡面、閒置超過 10 分鐘的 `job-*`／舊版 `<pid>/`；閒置超過
   3 小時的 `shared/`（遠端磁碟剩不到 25% 時也降到 10 分鐘）。只碰 `<16 位 hex>/<shared｜job-*｜數字>` 這種名字。
 - 遠端要是有 `flock`（util-linux）與 `/proc` 的 Linux，沒有就直接報錯、不跑。
