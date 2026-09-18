@@ -201,7 +201,7 @@ daemon 收到就**當場**把那一筆 in-flight turn 收成 `status='failed'`�
   原因從 `reason`／`failure_reason`／`stop_reason`／`error_type`／`subtype`／`error`（含 `{type,message}` 巢狀）／`message`／`detail` 依序找，
   欄位名還在動，撈不到不等於沒發生。分類只寫進那則系統訊息，**不碰 quota 狀態**——撞限的判定仍由既有的橫幅／statusLine 那條路負責，這條不介入也就不會讓它回歸。
 - **使用者自己按停不是失敗**，兩道防護：payload 的原因看起來是中斷（`interrupt`／`cancel`／`abort`…，分類時排在最前面）就不動；
-  payload 說不出原因時看 daemon 自己的紀錄——`interrupt_bot` 先 `note_user_interrupt` 再收 in-flight turn，所以那個寬限窗口裡到的 StopFailure 就是同一次 Esc 的回聲。
+  payload 說不出原因時看 daemon 自己的紀錄——`interrupt_bot` 先 `note_user_interrupt` 再收 in-flight turn，所以按停之後 `ECHO_WINDOW`（120 秒，本機 hook 幾秒、遠端 spool 一兩輪掃描）內到的 StopFailure 就是同一次 Esc 的回聲；過了窗口就照真的失敗收（#117：接管標記要等排隊的派工問過才會清，拿「標記在不在」當判準的話，按過一次 Esc 的 bot 之後的撞額度全被吞掉）。
 - **不會重複收尾**：先在 `(native_session_id, native_turn_id)` 上去重（重播、spool 重送），再用
   `UPDATE … WHERE id=? AND status='in_flight'` 的 CAS——後到的 Stop 或 §4.3 備援已經收掉時這裡 0 rows，什麼都不做。
   沒有 in-flight turn 時**不開新回合**：後到的訊號沒有回合可收就算了。
