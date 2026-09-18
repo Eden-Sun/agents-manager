@@ -179,7 +179,7 @@ pub async fn next_reset_for_bot(app: &Arc<App>, bot: &crate::db::Bot) -> Option<
             entry.seven_day.as_ref().and_then(|w| future(&w.resets_at)),
         ];
         if let Some(t) = candidates.into_iter().flatten().min() {
-            return Some(t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+            return Some(crate::db::iso_at(t));
         }
     }
     None
@@ -500,7 +500,7 @@ fn recalibrate_limit_hit(mut hit: LimitHit, fresh: &Quota) -> Option<LimitHit> {
         return None;
     }
     if hit.until.as_deref().and_then(parse_utc).map_or(true, |u| resets < u) {
-        hit.until = Some(resets.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+        hit.until = Some(crate::db::iso_at(resets));
     }
     Some(hit)
 }
@@ -1347,7 +1347,8 @@ mod tests {
     }
 
     fn iso(t: chrono::DateTime<chrono::Utc>) -> String {
-        t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        // 跟生產端同一支：格式只有一種（issue #101）。
+        crate::db::iso_at(t)
     }
 
     /// M2（review 2026-09-16）：Fable 撞限時那一桶還沒讀數，保底 7 天；之後 `/usage` 的真讀數要能把它縮短，

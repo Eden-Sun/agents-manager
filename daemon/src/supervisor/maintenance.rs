@@ -148,7 +148,7 @@ pub const DEFAULT_TTL_SECS: i64 = 900;
 pub const MAX_TTL_SECS: i64 = 3600;
 
 fn iso_in(secs: i64) -> String {
-    (chrono::Utc::now() + chrono::Duration::seconds(secs)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    crate::db::iso_in(secs)
 }
 
 /// 一個還握著的維護窗口，照入場閘門要講給呼叫端聽的樣子。

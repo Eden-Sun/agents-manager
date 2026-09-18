@@ -404,7 +404,7 @@ pub fn parse_claude_usage_report(segment: &str, account: Option<&str>) -> Option
     let limits = v.pointer("/usage_report/rate_limits/limits")?.as_array()?;
     let iso = |row: &Value| -> Option<String> {
         let s = row.get("resets_at")?.as_str()?;
-        DateTime::parse_from_rfc3339(s).ok().map(|t| t.to_utc().to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        DateTime::parse_from_rfc3339(s).ok().map(|t| crate::db::iso_at(t.to_utc()))
     };
     let win = |row: &Value| -> Option<Window> {
         Some(Window { used_pct: row.get("percent")?.as_f64()?.clamp(0.0, 100.0), resets_at: iso(row) })
@@ -957,10 +957,11 @@ AM_USAGE_DONE=0
 ", line.replace('\n', " "));
         let q = parse_claude_usage_report(&screen, Some("cc1")).expect("structured report");
         assert_eq!(q.five_hour.as_ref().unwrap().used_pct, 30.0);
-        assert_eq!(q.five_hour.as_ref().unwrap().resets_at.as_deref(), Some("2026-09-15T23:50:00Z"));
+        // 毫秒不再被截掉：以前 `Secs` 會把 `.594` 無條件捨去（總是往**早**的方向偏）。
+        assert_eq!(q.five_hour.as_ref().unwrap().resets_at.as_deref(), Some("2026-09-15T23:50:00.594Z"));
         assert_eq!(q.seven_day.as_ref().unwrap().used_pct, 66.0);
         assert_eq!(q.fable.as_ref().unwrap().used_pct, 24.0, "weekly_scoped 的 Fable 列");
-        assert_eq!(q.fable.as_ref().unwrap().resets_at.as_deref(), Some("2026-09-21T03:59:59Z"));
+        assert_eq!(q.fable.as_ref().unwrap().resets_at.as_deref(), Some("2026-09-21T03:59:59.595Z"));
         assert_eq!(q.account.as_deref(), Some("cc1"));
         assert_eq!(q.source, "claude-usage");
     }

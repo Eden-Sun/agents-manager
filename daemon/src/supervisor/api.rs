@@ -863,7 +863,7 @@ pub struct ApprovalIn {
 }
 
 fn iso_in(secs: i64) -> String {
-    (chrono::Utc::now() + chrono::Duration::seconds(secs)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    crate::db::iso_in(secs)
 }
 
 /// Ask for a rebuild / restart window. Creates a `pending` record; AGM decides it.

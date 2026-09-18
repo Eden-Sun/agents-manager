@@ -84,8 +84,7 @@ pub fn plan_for(w: Watched<'_>, liveness: &str, now_past: impl Fn(&str) -> bool)
 }
 
 pub(super) fn iso_in(secs: u64) -> String {
-    (chrono::Utc::now() + chrono::Duration::seconds(secs as i64))
-        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    crate::db::iso_in(secs as i64)
 }
 
 pub(super) fn past(iso: &str) -> bool {

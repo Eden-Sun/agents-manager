@@ -320,7 +320,7 @@ pub async fn processes(app: &Arc<App>, host: &str) -> anyhow::Result<Value> {
     }
     Ok(json!({
         "host": host,
-        "sampled_at": chrono::Utc::now().to_rfc3339(),
+        "sampled_at": crate::db::now(),
         "processes": rows,
     }))
 }
