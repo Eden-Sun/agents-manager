@@ -884,11 +884,20 @@ pub async fn restart_bot_with(app: &Arc<App>, bot_id: &str, opts: StartOpts) -> 
         }
     }
     let stopping = db::active_run(&app.db, bot_id).await.map_err(up)?.map(|r| r.id);
+    // 停到起之間沒有 active run，但 bot 馬上就回來：排著的派工不是孤兒（issue #106，`restart_hold`）。
+    let restarting = super::restart_hold::begin(bot_id);
     stop_bot_locked(app, bot_id).await?;
     let started = restart_start(app, bot_id, opts).await;
-    if started.is_err() {
-        if let Some(run_id) = stopping.as_deref() {
-            left_down_by_restart(app, bot_id, run_id).await;
+    drop(restarting);
+    match &started {
+        // 排著的交給新的 run：`--resume` 起的 claude 由 `resume_gate` 等驗證，其他照常送。
+        Ok(_) => schedule_flush_queued(app, bot_id),
+        Err(_) => {
+            if let Some(run_id) = stopping.as_deref() {
+                left_down_by_restart(app, bot_id, run_id).await;
+            }
+            // 沒開回來：這下排著的才真的沒有人會送。
+            revoke_orphaned_queued_turns(app, bot_id, "重啟之後沒能把 bot 開回來").await;
         }
     }
     started

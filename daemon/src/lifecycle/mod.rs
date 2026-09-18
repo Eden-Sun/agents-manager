@@ -27,6 +27,7 @@ pub(crate) mod fence;
 pub(crate) mod turn_controller;
 mod interrupt_grace;
 pub(crate) mod resume_gate;
+mod restart_hold;
 mod send_now;
 mod transitions;
 /// issue #81 探索用的原型；`#[cfg(test)]` 整個檔案只在 `cargo test` 底下編，不進正式二進位

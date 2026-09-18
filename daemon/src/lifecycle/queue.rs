@@ -338,6 +338,12 @@ pub(crate) async fn revoke_orphaned_queued_turns(app: &Arc<App>, bot_id: &str, w
     if !matches!(db::active_run(&app.db, bot_id).await, Ok(None)) {
         return Vec::new();
     }
+    // 重啟的 stop 與 start 之間（issue #106）：沒有 active run 是暫時的，排著的派工留給新的 run 送。
+    // 重啟沒能把 bot 開回來時，`restart_bot_with` 結束重啟之後會自己再呼叫這支。
+    if super::restart_hold::in_progress(bot_id) {
+        tracing::info!(bot = %bot_id, why, "重啟中：排著的 prompt 留給新的 run，不當孤兒撤掉");
+        return Vec::new();
+    }
     let ids: Vec<String> = sqlx::query_scalar(
         "SELECT t.id FROM turns t JOIN conversations c ON c.id = t.conversation_id WHERE c.bot_id = ? AND t.status = 'queued'",
     )
