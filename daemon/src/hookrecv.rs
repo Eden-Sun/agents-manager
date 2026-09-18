@@ -186,7 +186,10 @@ pub(crate) fn classify_failure(detail: Option<&str>) -> FailureReason {
     let has = |needles: &[&str]| needles.iter().any(|n| t.contains(n));
     if has(&["interrupt", "cancel", "abort", "user_stop", "user stop", "esc"]) {
         FailureReason::Interrupted
-    } else if has(&["rate limit", "rate_limit", "ratelimit", "usage limit", "usage_limit", "quota", "429", "overloaded"]) {
+    } else if crate::turn_error::is_quota_exhaustion(&t)
+        || has(&["rate limit", "rate_limit", "ratelimit", "usage limit", "usage_limit", "quota", "429", "overloaded"])
+    {
+        // 第一支是 claude 撞額度的橫幅（`You've hit your session limit` 之類，沒有 rate/usage 字樣，issue #108）。
         FailureReason::RateLimit
     } else if has(&["auth", "401", "403", "credential", "unauthorized", "forbidden", "login", "api key", "api_key"]) {
         FailureReason::Auth
@@ -752,6 +755,14 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             if claimed.rows_affected() == 0 {
                 tracing::info!(turn = %t.id, "StopFailure 來晚了：這一筆已經被別的路徑收掉，不重複收尾");
                 return Ok(());
+            }
+            // 撞的是帳號額度（issue #108）：先把撞限記下來，**再**推回合結束——那個事件會叫醒 queue flush，
+            // 排在後面的派工要看得到這個身分還沒額度，不然會被立刻送進去再撞一次。畫面那條路
+            // （`turn_error::capture`）要等讀 pane 才記得到，常常比 flush 晚。
+            if bot.kind == "claude" {
+                if let Some(d) = detail.as_deref().filter(|d| crate::turn_error::is_quota_exhaustion(d)) {
+                    crate::turn_error::mark_claude_limit_hit(app, &bot.id, d).await;
+                }
             }
             let note = match detail.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
                 Some(d) => format!("這一回合失敗收尾（{}）：{d}", reason.label()),
@@ -2231,12 +2242,42 @@ mod external_claim_tests {
         assert!(system_notes(&app, &turn_id).await.is_empty());
     }
 
+    /// issue #108：撞額度的 StopFailure 在推回合結束**之前**就把撞限記下來——那個事件會叫醒 queue flush，
+    /// flush 要看得到這個身分沒額度。一下就好的限流（overloaded）不記：記了會把派工壓上好幾個小時。
+    #[tokio::test]
+    async fn a_quota_stop_failure_records_the_limit_before_the_turn_ends() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, _conv, turn_id) = delivered_turn(&app, &env.project_id).await;
+        let bot = db::bot(&app.db, &bot_id).await.unwrap().unwrap();
+        process(&app, &stop_failure(&bot_id, json!({"hook_event_name": "StopFailure", "session_id": "s1", "prompt_id": "p1",
+                                                    "reason": "API Error: 529 overloaded_error"})))
+            .await
+            .unwrap();
+        assert_eq!(turn_row(&app, &turn_id).await.status, "failed");
+        assert!(crate::quota::limit_hit_for_bot(&app, &bot).await.is_none(), "過載不是額度用完");
+
+        let (bot_id, _conv, turn_id) = delivered_turn(&app, &env.project_id).await;
+        let bot = db::bot(&app.db, &bot_id).await.unwrap().unwrap();
+        process(&app, &stop_failure(&bot_id, json!({"hook_event_name": "StopFailure", "session_id": "s2", "prompt_id": "p2",
+                                                    "reason": "You've hit your session limit · resets 5pm"})))
+            .await
+            .unwrap();
+        assert_eq!(turn_row(&app, &turn_id).await.status, "failed");
+        let hit = crate::quota::limit_hit_for_bot(&app, &bot).await.expect("撞限記下來了");
+        assert_eq!(hit.bucket.as_deref(), Some("five_hour"));
+        assert!(hit.until.is_some(), "有期限，不會永遠擋著");
+    }
+
     /// 分類：rate limit 跟其他錯誤要分得開，中斷排在最前面（寧可少收一次也不要把使用者按的停說成失敗）。
     #[test]
     fn the_failure_classifier_keeps_rate_limit_auth_and_interrupts_apart() {
         use FailureReason::*;
         assert_eq!(classify_failure(Some("API Error: 429 rate_limit_error")), RateLimit);
         assert_eq!(classify_failure(Some("You've hit your usage limit")), RateLimit);
+        // claude 真正的撞額度橫幅沒有 rate／usage 字樣（issue #108）：以前被分成「API 錯誤」。
+        assert_eq!(classify_failure(Some("You've hit your session limit · resets 5pm")), RateLimit);
+        assert_eq!(classify_failure(Some("API Error: You've hit your weekly limit")), RateLimit);
         assert_eq!(classify_failure(Some("overloaded_error")), RateLimit);
         assert_eq!(classify_failure(Some("401 Unauthorized: invalid api key")), Auth);
         assert_eq!(classify_failure(Some("OAuth token expired; please login")), Auth);

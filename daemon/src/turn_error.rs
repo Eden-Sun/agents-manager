@@ -27,6 +27,19 @@ pub fn is_quota_limit(body: &str) -> bool {
     is_quota_limit_lower(&body.to_ascii_lowercase())
 }
 
+/// `StopFailure` 帶的原因是不是「這個帳號的額度用完了」（issue #108）。比 `hookrecv::classify_failure` 的
+/// rate limit 窄：那一類還包含 `overloaded`／一般 429 這種一下就好的限流，記成撞限會把排著的派工與之後的
+/// 派送壓上好幾個小時。認的是跟畫面同一套的橫幅（前面可能多了 `API Error:` 之類的字）與 `usage limit`；
+/// 月度花費上限那類照 [`is_quota_limit`] 的規則不算。
+pub(crate) fn is_quota_exhaustion(detail: &str) -> bool {
+    let lower = detail.to_ascii_lowercase();
+    lower.contains("usage limit")
+        || lower.contains("usage_limit")
+        || ["you've hit your", "you've reached your"]
+            .iter()
+            .any(|p| lower.find(p).is_some_and(|i| is_quota_limit_lower(&lower[i..])))
+}
+
 fn is_quota_limit_lower(lower: &str) -> bool {
     let reached = lower.starts_with("you've reached your") && lower.contains("limit");
     // 2.1.271 起速率上限也會寫成「You've hit your session／weekly／Opus limit」（CLI 的橫幅前綴清單同時有
@@ -348,7 +361,7 @@ mod tests {
 
 /// 跟 codex 不同，**不**在下一回合成功時清掉：Fable 用盡後換 opus 照樣能跑，不代表 Fable 恢復；
 /// 只靠 `until`（該桶子的 `resets_at`）到期解除。
-async fn mark_claude_limit_hit(app: &Arc<App>, bot_id: &str, line: &str) {
+pub(crate) async fn mark_claude_limit_hit(app: &Arc<App>, bot_id: &str, line: &str) {
     let Ok(Some(bot)) = db::bot(&app.db, bot_id).await else { return };
     if bot.kind != "claude" {
         return;
@@ -385,6 +398,23 @@ async fn mark_claude_limit_hit(app: &Arc<App>, bot_id: &str, line: &str) {
 #[cfg(test)]
 mod quota_limit_tests {
     use super::*;
+
+    /// issue #108：`StopFailure` 的原因哪些算「帳號額度用完」。一下就好的限流不算——記成撞限會壓住派工好幾個小時。
+    #[test]
+    fn only_an_exhausted_account_counts_as_a_quota_stop_failure() {
+        for yes in [
+            "You've hit your session limit · resets 5pm",
+            "API Error: You've hit your weekly limit · resets Sep 20",
+            "You've reached your usage limit",
+            "usage_limit_exceeded",
+            "Claude usage limit reached. Your limit will reset at 5pm",
+        ] {
+            assert!(is_quota_exhaustion(yes), "{yes}");
+        }
+        for no in ["429 rate_limit", "overloaded_error", "API Error: 529 Overloaded", "You've hit your monthly spend limit", "API Error: 500"] {
+            assert!(!is_quota_exhaustion(no), "{no}");
+        }
+    }
 
     #[test]
     fn the_token_count_trailer_does_not_hide_the_limit_banner() {

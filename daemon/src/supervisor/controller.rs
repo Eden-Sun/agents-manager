@@ -995,7 +995,24 @@ async fn block_stale_queues(app: &Arc<App>) {
         if waited < limit {
             continue;
         }
-        let why = format!("排進佇列等了 {} 分鐘，對方一直沒有回合結束的空檔，沒有送出", waited / 60);
+        // 被 flush 的額度閘門刻意留在佇列（issue #108，`lifecycle::quota_hold`）：撞限在上限內會到期、或 flush
+        // 剛放掉擋、下一次重看就會送——這時候撤掉等於把馬上要送的派工丟掉。看不到盡頭的才照舊撤，理由寫額度。
+        let hit = match crate::db::bot(&app.db, &a.target_bot_id).await {
+            Ok(Some(bot)) => crate::quota::limit_hit_for_bot(app, &bot).await,
+            _ => None,
+        };
+        let now = chrono::Utc::now();
+        let holding = match &hit {
+            Some(h) => crate::lifecycle::quota_hold::bounded(h, now, chrono::Duration::seconds(MAX_QUOTA_WAIT_SECS)),
+            None => crate::lifecycle::quota_hold::recently_held(&a.target_bot_id),
+        };
+        if holding {
+            continue;
+        }
+        let why = match &hit {
+            Some(h) => format!("排進佇列等了 {} 分鐘：目標身分沒有額度（{}），看不到什麼時候回來，沒有送出", waited / 60, h.message.trim()),
+            None => format!("排進佇列等了 {} 分鐘，對方一直沒有回合結束的空檔，沒有送出", waited / 60),
+        };
         let text = format!("排隊中的這則沒有送出：交辦 {} {why}，已停在 blocked，一併撤回，不會再送。", a.id);
         // 先撤 turn、撤成功才標 blocked，同一個交易（AGM 2026-09-16，review 2 H1）：
         // - 只標 blocked 不撤：之後照送、結果沒地方收（blocked 不在執行中），AGM 以為沒送出又重派。
@@ -2616,6 +2633,60 @@ mod queue_dispatch_tests {
             .await
             .unwrap();
         assert_eq!(again, 1);
+    }
+
+    /// issue #108：派工被 flush 的額度閘門刻意留在佇列（目標身分沒額度）。保險絲只在「看不到盡頭」時撤，
+    /// 理由寫額度，不寫「對方沒有回合結束的空檔」；撞限剛解除、flush 下一次重看就會送的那一段也不撤。
+    #[tokio::test]
+    async fn the_fuse_leaves_a_dispatch_held_for_quota_alone_while_the_hold_has_an_end() {
+        use crate::lifecycle::quota_hold;
+        let app = app().await;
+        // 自己一顆 bot：`quota_hold` 記「剛擋過」是全域的，不跟別的測試共用 `b`。
+        let bot = format!("q{}", crate::db::ulid());
+        sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES (?,'p',?,'claude','t',?)")
+            .bind(&bot)
+            .bind(&bot)
+            .bind(crate::db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let a = store::insert_assignment(&app.db, None, &bot, "crid-quota", "做這件事", &[], None, true).await.unwrap();
+        let conv = crate::db::conversation_id(&app.db, &bot).await.unwrap();
+        let turn_id = crate::db::ulid();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, client_request_id, created_at, prompt_text)
+             VALUES (?,?,NULL,'web','queued','pending','crid-quota',?,'做這件事')",
+        )
+        .bind(&turn_id)
+        .bind(&conv)
+        .bind(crate::db::iso_at(chrono::Utc::now() - chrono::Duration::minutes(45)))
+        .execute(&app.db)
+        .await
+        .unwrap();
+        store::mark_delivered(&app.db, &a.id, &turn_id, "queued").await.unwrap();
+        let status = |app: Arc<App>, id: String| async move { store::assignment(&app.db, &id).await.unwrap().unwrap() };
+
+        // 5 小時窗兩小時後重置：flush 等得到，不撤。
+        let soon = crate::db::iso_at(chrono::Utc::now() + chrono::Duration::hours(2));
+        assert!(crate::quota::seed_limit_hit(&app, crate::config::LOCAL_HOST, "claude", &soon, "You've hit your session limit", Some("five_hour".into())).await);
+        block_stale_queues(&app).await;
+        assert_eq!(status(app.clone(), a.id.clone()).await.status, "delivered", "撞限有盡頭：留給 flush");
+
+        // 撞限剛被新讀數作廢、flush 剛擋過：下一次重看就會送，也不撤。
+        crate::quota::clear_limit_hit(&app, crate::config::LOCAL_HOST, "claude").await;
+        quota_hold::note_held(&bot);
+        block_stale_queues(&app).await;
+        assert_eq!(status(app.clone(), a.id.clone()).await.status, "delivered", "馬上要送的不撤");
+
+        // 週窗（遠超過 supervisor 自己的等待上限）：看不到盡頭，照舊撤，理由寫額度。
+        quota_hold::forget_held(&bot);
+        let week = crate::db::iso_at(chrono::Utc::now() + chrono::Duration::days(6));
+        assert!(crate::quota::seed_limit_hit(&app, crate::config::LOCAL_HOST, "claude", &week, "You've hit your weekly limit", Some("seven_day".into())).await);
+        block_stale_queues(&app).await;
+        let row = status(app.clone(), a.id.clone()).await;
+        assert_eq!(row.status, "blocked");
+        let why = row.error.unwrap_or_default();
+        assert!(why.contains("排進佇列") && why.contains("沒有額度") && !why.contains("空檔"), "{why}");
     }
 
     /// 讀完 turn 還是 queued、要擋的那一刻 flush 剛好把它領走：撤不到就不標 blocked，交辦維持 delivered。

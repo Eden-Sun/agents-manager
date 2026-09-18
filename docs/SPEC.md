@@ -574,6 +574,17 @@ cancel 撤掉的是還沒送出的那則時，review 回應不再帶「turn 還�
 （`--resume` 起的 claude 由 §6.5.2 的閘門等驗證完才送）。重啟沒能把 bot 開回來才當孤兒撤（說明寫「重啟之後沒能把 bot 開回來」）。
 只放行程記憶體：daemon 在重啟途中掛掉，開機後那顆沒有 run、標記也不在，照舊收掉。子 agent 的原地重啟（§6.9）不走這條。
 
+**目標身分沒額度就不送**（issue #108，`lifecycle::quota_hold`）：撞額度的回合被 `StopFailure` 收掉之後，回合結束的事件照例叫醒 flush，
+排在後面的派工以前會立刻被送進**同一個還沒額度的身分**、再撞一次。flush 在 claim 之前問跟派送前（`controller::dispatch`）同一支
+`quota::limit_hit_for_bot`——看這顆 bot **現在**的身分那把 key、撞的桶管不管得到它正在跑的模型。還在擋就留在佇列、不 claim、不花重試，
+掛 timer 到撞限到期、最多 5 分鐘再看一次（新讀數可能提早作廢撞限）；換身分重啟（上一段）、換模型、撞限到期或被校正掉就放行，
+始終只有排著的那一則、走原本的 CAS claim，只送一次。為了讓 flush 看得到：`StopFailure` 的原因是帳號額度用完（跟畫面同一套橫幅或
+`usage limit`，`turn_error::is_quota_exhaustion`；`overloaded`／一般 429 不算）時，**先**記撞限（`mark_claude_limit_hit`）再推回合結束；
+`classify_failure` 也把 `You've hit your session limit` 這類橫幅歸成額度（以前沒有 rate／usage 字樣會被當成 API 錯誤）。
+排隊保險絲（`assignment_queue_wait_secs`）對這種刻意留在佇列的派工：撞限寫了到期時間、而且在 supervisor 的等待上限（6 小時）內，
+或 flush 剛放掉擋、下一次重看就會送的那 6 分鐘內，**不撤**；看不到盡頭的（沒寫時間、週窗）照舊撤成 `blocked`，理由寫「目標身分沒有額度」
+而不是「沒有回合結束的空檔」。已知限制同 §12.4：撞限只在記憶體，daemon 重啟後這裡跟派送前一樣看不到。
+
 **abort 不動 queued**（AGM 裁示 2026-09-16）：`POST /api/bots/{id}/abort` 的語意是「停掉這一回合」，排在後面的是 AGM 正當的派工，
 abort 之後照常 flush 出去（但先照下一段等寬限）。要取消排隊的派工，走交辦 `cancel`（上面那條會一併撤 queued）。這不是漏撤，不要當成 bug 修。
 
