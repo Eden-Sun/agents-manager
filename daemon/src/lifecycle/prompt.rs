@@ -1793,4 +1793,74 @@ mod send_now_tests {
         assert_eq!(in_flight_count(&f).await, 1);
         assert!(!keys_sent(&f).iter().any(|k| k.contains("ctrl+s")), "沒有回合可以打斷就不按那顆鍵");
     }
+    /// #157 的前半：送出鍵生效了，收舊回合那一半寫不進去（欠著），確認送出（`confirm_submitted`）又出錯——這裡讓它第一次
+    /// 讀畫面就被 herdr 拒絕。回的是 `send_now_state_uncommitted`；帳上要記著新的那一則「鍵按過、證不出來」。
+    async fn a_send_now_owed_while_its_confirmation_failed(f: &Fixture, crid: &str) -> (String, String, String) {
+        let app = f.env.app.clone();
+        let running = busy(f).await;
+        sqlx::query(&format!(
+            "CREATE TRIGGER lost_close BEFORE UPDATE OF status ON turns WHEN OLD.id = '{running}' BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END"
+        ))
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let fail = f.env.herdr.fail_later();
+        super::super::race_point::arm("send_now_after_key", &f.bot_id, move || async move {
+            fail("pane.read", tt::Fault::Refuse);
+        });
+
+        let err = prompt_send_now(&app, &f.bot_id, "先看這句", crid, &[], None).await.unwrap_err();
+        let LcError::Uncommitted(body) = err else { panic!("鍵生效、收尾沒寫成：{err:?}") };
+        assert_eq!(body["error"], "send_now_state_uncommitted", "{body}");
+        let sent_by = db::now();
+        assert_eq!(send_now_presses(f), 1);
+        assert!(transcript_of(f).await.contains("先看這句"), "鍵確實生效了");
+        sqlx::query("DROP TRIGGER lost_close").execute(&app.db).await.unwrap();
+        (running, body["turn_id"].as_str().unwrap().to_string(), sent_by)
+    }
+
+    /// #157：確認送出出錯時，帳上以前記的是「沒有送達結果」——補收尾把新的那一則掛上 run 之後沒東西可寫，它停在
+    /// in_flight＋pending 直到重啟，同一個 request id 重問只拿得到 503（#149）。要記成 `unknown`（鍵按過、證不出來），
+    /// 送達時間是送出的那一刻；補的時候絕不再按鍵、不再打字。
+    #[tokio::test]
+    async fn a_send_now_whose_confirmation_failed_while_owed_is_settled_as_unknown_without_resending() {
+        let f = fixture("claude", Some("2.1.275")).await;
+        let app = f.env.app.clone();
+        let (running, new_turn, sent_by) = a_send_now_owed_while_its_confirmation_failed(&f, "sn-unconfirmed").await;
+
+        let again = prompt_send_now(&app, &f.bot_id, "先看這句", "sn-unconfirmed", &[], None).await.expect("補上了：同一個 request id 拿到這一則");
+        assert_eq!((again.turn_id.as_str(), again.delivery.as_str()), (new_turn.as_str(), "unknown"), "鍵按過、證不出來");
+        assert_eq!(status_of(&f, &running).await, "failed");
+        assert_eq!(status_of(&f, &new_turn).await, "in_flight");
+        let t: db::Turn = sqlx::query_as("SELECT * FROM turns WHERE id=?").bind(&new_turn).fetch_one(&app.db).await.unwrap();
+        assert!(t.delivered_at.as_deref().is_some_and(|at| at <= sent_by.as_str()), "送出的那一刻，不是補寫的時候：{:?}", t.delivered_at);
+        assert_eq!(send_now_presses(&f), 1, "補的時候不再按鍵");
+        assert_eq!(f.env.herdr.calls_to("pane.send_text").len(), 1, "也不再打字");
+        assert_eq!(transcript_of(&f).await.matches("先看這句").count(), 1, "只送了一次");
+    }
+
+    /// #157 同一個洞走 hook 那條：回覆到了，hook 先把欠著的收尾補上、新的那一則掛上 run，再認領它答完——
+    /// 送達要跟著收成 `ok`（有回覆就是送到了），不是一筆已經完成、送達卻永遠 pending 的回合。
+    #[tokio::test]
+    async fn a_send_now_whose_confirmation_failed_while_owed_is_settled_by_the_reply_hook() {
+        let f = fixture("claude", Some("2.1.275")).await;
+        let app = f.env.app.clone();
+        let (running, new_turn, _) = a_send_now_owed_while_its_confirmation_failed(&f, "sn-unconfirmed-hook").await;
+
+        let stop = crate::hookrecv::HookBody {
+            bot_id: f.bot_id.clone(),
+            provider: "claude".into(),
+            payload: json!({"hook_event_name": "Stop", "session_id": "sess-1", "prompt_id": "p-sn", "last_assistant_message": "看到了"}),
+            received_at: None,
+            truncated: false,
+            run_id: None,
+        };
+        crate::hookrecv::process(&app, &stop).await.unwrap();
+
+        assert_eq!(status_of(&f, &running).await, "failed");
+        assert_eq!(status_of(&f, &new_turn).await, "completed");
+        assert_eq!(delivery_of(&f, &new_turn).await, "ok", "答完了：送達不留 pending");
+        assert_eq!(send_now_presses(&f), 1);
+        assert_eq!(f.env.herdr.calls_to("pane.send_text").len(), 1);
+    }
 }

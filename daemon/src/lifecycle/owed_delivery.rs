@@ -83,7 +83,12 @@ fn owed_answer(turn_id: &str) -> Option<&'static str> {
 
 /// 送達之後寫回結果（`at` 取此刻）。寫不進去就記成欠著、排定時重試，回 `Err`——呼叫端**不能**回普通的成功，也不能重送。
 pub(crate) async fn delivered(app: &Arc<App>, bot_id: &str, turn_id: &str, rec: DeliveryRecord) -> anyhow::Result<()> {
-    owe(app, bot_id, Owed { turn_id: turn_id.to_string(), write: Write::Delivered { rec, at: db::now() } }).await
+    delivered_at(app, bot_id, turn_id, rec, &db::now()).await
+}
+
+/// [`delivered`]，但送出的那一刻早就過了：插隊送出欠著的那一則，補收尾時才寫（#157）。
+pub(crate) async fn delivered_at(app: &Arc<App>, bot_id: &str, turn_id: &str, rec: DeliveryRecord, at: &str) -> anyhow::Result<()> {
+    owe(app, bot_id, Owed { turn_id: turn_id.to_string(), write: Write::Delivered { rec, at: at.to_string() } }).await
 }
 
 /// herdr 明確拒收（`agent_blocked`）：收成 failed＋說明。寫不進去同 [`delivered`]。
