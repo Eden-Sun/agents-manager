@@ -794,13 +794,31 @@ pub(crate) async fn execute_delivery(
     text: &str,
     plan: Plan,
 ) -> anyhow::Result<Delivered> {
+    match prepare_delivery(app, client, run, bot, text, plan).await {
+        Ok(ready) => type_prepared(app, client, run, bot, text, ready).await,
+        Err(not) => Ok(not),
+    }
+}
+
+/// 按鍵前的準備都做完了：下一步就是第一個按鍵。
+pub(crate) enum Ready {
+    AgentPrompt { target: String },
+    Type { pane: String, proof: Proof, submit: Submit, offset: u64, baseline: usize },
+}
+
+/// [`execute_delivery`] 打第一個字之前的那一段：記下「這個 pane 要打字」、重看一次框、取證據基準。
+/// 每一種放棄都是 `NotAttempted`（一個鍵都還沒按）。拆出來是給插隊送出用的（#120）：它要在這一段
+/// 成功之後才收掉被打斷的那一回合——先收再被擋下的話，claude 其實還在跑，對話裡卻多一筆假的「被打斷」。
+pub(crate) async fn prepare_delivery(
+    app: &Arc<App>,
+    client: &HerdrClient,
+    run: &db::Run,
+    bot: &db::Bot,
+    text: &str,
+    plan: Plan,
+) -> Result<Ready, Delivered> {
     let (pane, proof, submit) = match plan {
-        Plan::AgentPrompt { target } => {
-            client
-                .call_timeout("agent.prompt", json!({"target": target, "text": text}), Duration::from_secs(10))
-                .await?;
-            return Ok(Delivered::Handed);
-        }
+        Plan::AgentPrompt { target } => return Ok(Ready::AgentPrompt { target }),
         Plan::Type { pane, proof, submit } => (pane, proof, submit),
     };
     // Persist "this pane gets typed into" before the first keystroke (sol review round three #2).
@@ -810,24 +828,22 @@ pub(crate) async fn execute_delivery(
     // （review3 c4 L5）。
     if let Err(e) = db::set_pane_typed(&app.db, &run.id).await {
         tracing::warn!(run = %run.id, error = %e, "could not record runs.pane_typed before typing; nothing was typed");
-        return Ok(Delivered::NotAttempted { reason: "pane_typed_unwritable", retry: true });
+        return Err(Delivered::NotAttempted { reason: "pane_typed_unwritable", retry: true });
     }
-    // Styled read when herdr can (`box_state` needs the dim flag); echo evidence strips the styling.
-    let read = || read_composer(client, &pane);
 
     // The box may have changed since the plan (someone typing in the terminal): look again. Still
     // before the first keystroke, so a failed read is "not attempted".
-    let before = match read().await {
+    let before = match read_composer(client, &pane).await {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(run = %run.id, error = %e, "could not read the pane before typing");
-            return Ok(Delivered::NotAttempted { reason: "composer_unreadable", retry: true });
+            return Err(Delivered::NotAttempted { reason: "composer_unreadable", retry: true });
         }
     };
     match box_state(&bot.kind, &before) {
         BoxState::Empty => {}
-        BoxState::NonEmpty => return Ok(Delivered::NotAttempted { reason: "composer_busy", retry: true }),
-        BoxState::Unready => return Ok(Delivered::NotAttempted { reason: "composer_unreadable", retry: true }),
+        BoxState::NonEmpty => return Err(Delivered::NotAttempted { reason: "composer_busy", retry: true }),
+        BoxState::Unready => return Err(Delivered::NotAttempted { reason: "composer_unreadable", retry: true }),
     }
     // The baseline is still before the first keystroke: an evidence file that vanished, was swapped
     // or became unreadable since the plan means "not attempted", never an unknown delivery
@@ -837,7 +853,7 @@ pub(crate) async fn execute_delivery(
             Ok(n) => n,
             Err(e) => {
                 tracing::warn!(run = %run.id, path = %path.display(), error = %e, "evidence file unreadable before typing");
-                return Ok(Delivered::NotAttempted { reason: "transcript_unreadable", retry: true });
+                return Err(Delivered::NotAttempted { reason: "transcript_unreadable", retry: true });
             }
         },
         Proof::EchoRow | Proof::Unverified => 0,
@@ -846,9 +862,32 @@ pub(crate) async fn execute_delivery(
         Ok(n) => n,
         Err(e) => {
             tracing::warn!(run = %run.id, error = %e, "could not take the evidence baseline before typing");
-            return Ok(Delivered::NotAttempted { reason: "transcript_unreadable", retry: true });
+            return Err(Delivered::NotAttempted { reason: "transcript_unreadable", retry: true });
         }
     };
+    Ok(Ready::Type { pane, proof, submit, offset, baseline })
+}
+
+/// [`execute_delivery`] 從第一個按鍵開始的那一段。這裡之後的放棄都是 `Unproven`／錯誤，不再是 `NotAttempted`。
+pub(crate) async fn type_prepared(
+    app: &Arc<App>,
+    client: &HerdrClient,
+    run: &db::Run,
+    bot: &db::Bot,
+    text: &str,
+    ready: Ready,
+) -> anyhow::Result<Delivered> {
+    let (pane, proof, submit, offset, baseline) = match ready {
+        Ready::AgentPrompt { target } => {
+            client
+                .call_timeout("agent.prompt", json!({"target": target, "text": text}), Duration::from_secs(10))
+                .await?;
+            return Ok(Delivered::Handed);
+        }
+        Ready::Type { pane, proof, submit, offset, baseline } => (pane, proof, submit, offset, baseline),
+    };
+    // Styled read when herdr can (`box_state` needs the dim flag); echo evidence strips the styling.
+    let read = || read_composer(client, &pane);
 
     client.pane_send_text(&pane, text).await?;
     tokio::time::sleep(Duration::from_millis(TYPE_SETTLE_MS)).await;
