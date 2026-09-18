@@ -237,38 +237,35 @@ async fn ensure_imported_bot(
     }
 
     let bot_id = db::ulid();
-    let name = app
-        .cfg
-        .update(|cfg| {
-            let p = cfg
-                .projects
-                .iter_mut()
-                .find(|p| p.id.as_deref() == Some(project.id.as_str()))
-                .ok_or_else(|| anyhow::anyhow!("project disappeared from config.toml"))?;
-            let used: HashSet<String> = p.bots.iter().map(|b| b.name.clone()).collect();
-            let name = imported_name(agent_name, &used);
-            p.bots.push(config::BotCfg {
-                id: Some(bot_id.clone()),
-                name: name.clone(),
-                kind: kind.to_string(),
-                model: None,
-                effort: None,
-                fast: false,
-                persona: None,
-                args: vec![],
-                autostart: false,
-                // The agent already owns its process/config; do not rewrite its hooks when a
-                // default-session pane is merely adopted.
-                inject_hooks: false,
-                auto_approve: false,
-                identity: None,
-                env: Default::default(),
-                herdr_session: Some(SESSION.to_string()),
-            });
-            Ok(name)
-        })
-        .await?;
-    crate::projection::project_config(&app.cfg, &app.db).await?;
+    let name = crate::projection::update_and_project(&app.cfg, &app.db, |cfg| {
+        let p = cfg
+            .projects
+            .iter_mut()
+            .find(|p| p.id.as_deref() == Some(project.id.as_str()))
+            .ok_or_else(|| anyhow::anyhow!("project disappeared from config.toml"))?;
+        let used: HashSet<String> = p.bots.iter().map(|b| b.name.clone()).collect();
+        let name = imported_name(agent_name, &used);
+        p.bots.push(config::BotCfg {
+            id: Some(bot_id.clone()),
+            name: name.clone(),
+            kind: kind.to_string(),
+            model: None,
+            effort: None,
+            fast: false,
+            persona: None,
+            args: vec![],
+            autostart: false,
+            // The agent already owns its process/config; do not rewrite its hooks when a
+            // default-session pane is merely adopted.
+            inject_hooks: false,
+            auto_approve: false,
+            identity: None,
+            env: Default::default(),
+            herdr_session: Some(SESSION.to_string()),
+        });
+        Ok(name)
+    })
+    .await?;
     let bot = db::bot(&app.db, &bot_id).await?.ok_or_else(|| anyhow::anyhow!("imported bot was not projected"))?;
     tracing::debug!(bot = %name, agent = agent_name, "default-session bot config created");
     Ok((bot, true))

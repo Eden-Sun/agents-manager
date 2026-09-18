@@ -1385,24 +1385,24 @@ pub async fn switch_candidate(
     let next = if next == "opus" { "opus" } else { "fable" };
     let model = setup::model_arg(next).to_string();
     // Config first, so a restart comes up on the new candidate even if the live switch fails.
+    // 這步失敗（極罕見：這個 closure 只改既有 bot 的 model／effort，從不刪列，guard 結構上碰不到）
+    // 一律吞掉不中斷這次自動切換，下一輪 watchdog tick 還會再試——跟以前投影那半段是同一個容錯精神，
+    // 現在寫檔與投影併成一支，容錯範圍跟著涵蓋寫檔那半。
     let bid = bot_id.clone();
     let m2 = model.clone();
     let effort = sup.effort.clone();
-    app.cfg
-        .update(move |cfg| {
-            for p in cfg.projects.iter_mut() {
-                if let Some(b) = p.bots.iter_mut().find(|b| b.id.as_deref() == Some(bid.as_str())) {
-                    b.model = Some(m2.clone());
-                    // Effort is re-asserted with every switch: `low` is fixed by the plan, and
-                    // a model change is exactly where it would otherwise be forgotten.
-                    b.effort = Some(effort.clone());
-                }
+    let _ = crate::projection::update_and_project(&app.cfg, &app.db, move |cfg| {
+        for p in cfg.projects.iter_mut() {
+            if let Some(b) = p.bots.iter_mut().find(|b| b.id.as_deref() == Some(bid.as_str())) {
+                b.model = Some(m2.clone());
+                // Effort is re-asserted with every switch: `low` is fixed by the plan, and
+                // a model change is exactly where it would otherwise be forgotten.
+                b.effort = Some(effort.clone());
             }
-            Ok(())
-        })
-        .await
-        .map_err(|e| LcError::Upstream(e.to_string()))?;
-    let _ = crate::projection::project_config(&app.cfg, &app.db).await;
+        }
+        Ok(())
+    })
+    .await;
 
     // Apply it to the session that is already running, if there is one. `send_slash_line`
     // answers claude's "Switch model?" confirmation and backs out (Err → false) if it will

@@ -96,30 +96,28 @@ pub async fn fork_bot(
     }
     let new_id = db::ulid();
     let used_name = std::sync::Mutex::new(wanted.clone());
-    let res = app
-        .cfg
-        .update(|cfg| {
-            let p = cfg
-                .projects
-                .iter_mut()
-                .find(|p| p.id.as_deref() == Some(source.project_id.as_str()))
-                .ok_or_else(|| anyhow::anyhow!("not-in-config"))?;
-            let at = p
-                .bots
-                .iter()
-                .position(|b| b.id.as_deref() == Some(source.id.as_str()))
-                .ok_or_else(|| anyhow::anyhow!("not-in-config"))?;
-            let src: BotCfg = p.bots[at].clone();
-            let taken = |n: &str| p.bots.iter().any(|x| x.name == n);
-            let name = if taken(&wanted) { crate::api::next_free_name(&wanted, &taken) } else { wanted.clone() };
-            *used_name.lock().unwrap() = name.clone();
-            // 設定照抄（模型、強度、身份、env、人設、args）：同一個帳號目錄才找得到那段對話。
-            // autostart 不抄——fork 是一次性的分岔，不該每次開 daemon 都多一顆。
-            // 插在來源正下方（陣列位置＝側欄順序）：分出來的那顆要看得出是誰分的，不是掉到專案最底下（使用者 2026-09-15）。
-            p.bots.insert(at + 1, BotCfg { id: Some(new_id.clone()), name, autostart: false, herdr_session: None, ..src });
-            Ok(())
-        })
-        .await;
+    let res = crate::projection::update_and_project(&app.cfg, &app.db, |cfg| {
+        let p = cfg
+            .projects
+            .iter_mut()
+            .find(|p| p.id.as_deref() == Some(source.project_id.as_str()))
+            .ok_or_else(|| anyhow::anyhow!("not-in-config"))?;
+        let at = p
+            .bots
+            .iter()
+            .position(|b| b.id.as_deref() == Some(source.id.as_str()))
+            .ok_or_else(|| anyhow::anyhow!("not-in-config"))?;
+        let src: BotCfg = p.bots[at].clone();
+        let taken = |n: &str| p.bots.iter().any(|x| x.name == n);
+        let name = if taken(&wanted) { crate::api::next_free_name(&wanted, &taken) } else { wanted.clone() };
+        *used_name.lock().unwrap() = name.clone();
+        // 設定照抄（模型、強度、身份、env、人設、args）：同一個帳號目錄才找得到那段對話。
+        // autostart 不抄——fork 是一次性的分岔，不該每次開 daemon 都多一顆。
+        // 插在來源正下方（陣列位置＝側欄順序）：分出來的那顆要看得出是誰分的，不是掉到專案最底下（使用者 2026-09-15）。
+        p.bots.insert(at + 1, BotCfg { id: Some(new_id.clone()), name, autostart: false, herdr_session: None, ..src });
+        Ok(())
+    })
+    .await;
     match res {
         Ok(()) => {}
         Err(e) if e.to_string() == "not-in-config" => {
@@ -127,7 +125,6 @@ pub async fn fork_bot(
         }
         Err(e) => return Err(up(e)),
     }
-    crate::projection::project_config(&app.cfg, &app.db).await.map_err(up)?;
     app.emit("bot_changed", json!({"bot_id": new_id})).await;
     let name = used_name.into_inner().unwrap_or_default();
 

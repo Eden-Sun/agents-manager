@@ -219,9 +219,7 @@ pub async fn ensure_env(app: &Arc<App>) -> Result<(String, String, Deployed), Lc
     let identity = sup.identity.clone();
     let p2 = path.clone();
 
-    let (project_id, bot_id) = app
-        .cfg
-        .update(move |cfg| {
+    let (project_id, bot_id) = crate::projection::update_and_project(&app.cfg, &app.db, move |cfg| {
             // Project: persisted id first, then the directory, then a new one.
             let pidx = cfg
                 .projects
@@ -292,21 +290,19 @@ pub async fn ensure_env(app: &Arc<App>) -> Result<(String, String, Deployed), Lc
             // Verified by hand before it is allowed to come back by itself.
             bot.autostart = false;
             bot.inject_hooks = true;
-            Ok((project_id, bot.id.clone().expect("set above")))
-        })
-        .await
-        .map_err(|e| {
-            if e.to_string() == "name-taken" {
-                LcError::conflict(
-                    "a different bot is already called AGM in the supervisor project",
-                    json!({"reason": "name_taken", "name": BOT_NAME}),
-                )
-            } else {
-                LcError::Upstream(e.to_string())
-            }
-        })?;
-
-    crate::projection::project_config(&app.cfg, &app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?;
+        Ok((project_id, bot.id.clone().expect("set above")))
+    })
+    .await
+    .map_err(|e| {
+        if e.to_string() == "name-taken" {
+            LcError::conflict(
+                "a different bot is already called AGM in the supervisor project",
+                json!({"reason": "name_taken", "name": BOT_NAME}),
+            )
+        } else {
+            LcError::Upstream(e.to_string())
+        }
+    })?;
 
     let responder = super::roles::responder_bot(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?.map(|b| b.id);
     let deployed = deploy_files(app, &bot_id, responder.as_deref(), &persona).map_err(|e| LcError::Upstream(e.to_string()))?;
