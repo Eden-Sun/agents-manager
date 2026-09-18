@@ -514,6 +514,8 @@ secret file，不進 config、不回前端）與 `clear_password`。`host`／`us
 ### `POST /build-slots/renew`（表單）
 `{holder, token}`。**不驗 bot／UI token**，`token` 本身就是憑證。只有還在 `held` 且沒過期的名額能續：
 `200 {"renewed":true,"expires_at"}`；找不到這一列（沒拿過／已過期被收回）→ `404`；`token` 不對 → `403 {"error":"token_mismatch"}`。
+cargo shim 把這兩個明確的拒絕（`not_found`／`token_mismatch`）視為**名額已失去**，立刻停掉前景的 cargo 行程樹、退 75（issue #128，SPEC §6.5g）；
+其他失敗（連不上、5xx）在到期前一直重試，撐到保守估的 deadline 仍續不上也停。
 
 ### `POST /build-slots/release`（表單）
 `{holder, token}`。一律幂等，永遠 `200 {"released":true}`（找不到、已過期、token 不對都當作「已經不是你的事了」）。
