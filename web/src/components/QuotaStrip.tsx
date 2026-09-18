@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import type { BotKind, Identity, KindQuota, QuotaMap, QuotaResetCredits, QuotaWindow } from '../api/types'
+import type { BotKind, Identity, KindQuota, QuotaLimitHit, QuotaMap, QuotaResetCredits, QuotaWindow } from '../api/types'
 import { LOCAL_HOST, quotaKey } from '../api/types'
 import { identitiesOfHost, identityStatusOfHost, toolsOfHost, useStore } from '../store/store'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
@@ -9,6 +9,7 @@ import { QuotaLoginShell } from './QuotaLoginShell'
 import { QuotaLoginSlash } from './QuotaLoginSlash'
 import { UpdateQuotaChip } from './UpdateQuotaChip'
 import { cliLoginCommand, identityEnv } from '../lib/quotaLogin'
+import './quotaLimitHit.css'
 
 /**
  * Remaining quota per kind (`GET /api/quota` + WS `quota_updated`).
@@ -398,6 +399,17 @@ function Bar({
 
 type WindowBar = { name: WindowName; pct: number | null; resetsAt: string | null; low: boolean; critical: boolean }
 
+/**
+ * 手機一格只放得下一個數字，所以要挑「誰比較急」：先看 daemon 的旗標（critical > low > 一般），
+ * 同一級才比剩得少的。**平手時留著現任**——常駐的 7d 不會因為另一個窗口剛好同分就換掉，
+ * 那樣格子上的數字會在兩個窗口之間跳來跳去。門檻一律吃 daemon 的旗標，前端不另外寫死 pct。
+ */
+function moreUrgent(w: WindowBar, best: WindowBar): boolean {
+  const rank = (x: WindowBar) => (x.critical ? 2 : x.low ? 1 : 0)
+  if (rank(w) !== rank(best)) return rank(w) > rank(best)
+  return (w.pct ?? 100) < (best.pct ?? 100)
+}
+
 /** grok only reports a weekly window (stored in seven_day) — never call it 7d. */
 function weekLabel(kind: BotKind): '7d' | '週' {
   return kind === 'grok' ? '週' : '7d'
@@ -438,24 +450,27 @@ function Gauge({
   const disabledMap = useDisabledQuota()
   // Named windows so 5h stays above 7d/週; collapsed shows only the worst.
   let windows: WindowBar[]
-  // 手機：**7d 常駐**（grok 是「週」）＋任何一個在警戒中的其他窗口。
+  // 手機：一格**只寫一個**窗口（2026-09-12 使用者，推翻同日稍早的「7d 常駐＋追加警戒窗口」）。
   //
-  // 7d 是決定「今天還能不能開工」的數字，5h 兩三個小時就回來了，所以它固定在同一個位置、
-  // 不會被別的窗口擠掉；但「5h 只剩 3%」是現在就會擋住你的事，不能等到點開才知道。所以是
-  // 常駐一個＋例外才追加，而不是收成最差的一個（7d 會被蓋掉）或三個全列（一排捲不完）。
+  // 追加的那一個本來往下排，於是 `7d 19% / F 0%`、`7d 42% / 3m 0%` 這種格子變成兩行，整條
+  // 額度列跟著長高；而 390px 一次要放五格（cc0/cc1/cc2/codex/grok），沒有那個高度可以給。
+  //
+  // 保留的仍然是 7d（grok 是「週」）——它決定「今天還能不能開工」，5h 兩三個小時就回來了。
+  // 只有另一個窗口被 daemon 標成 low／critical **而且比 7d 更急**時才**取代**它，不並列：
+  // 「5h 只剩 3%」是現在就會擋住你的事，那時候 7d 還剩多少已經不是重點。
+  // 三個窗口的完整數字照舊在 tooltip 與點開的底部 sheet 裡，一個都沒有少。
   if (compact && seven !== null) {
-    windows = [
-      {
-        name: weekLabel(entry.kind),
-        pct: seven,
-        resetsAt: q?.seven_day?.resets_at ?? null,
-        low: q?.seven_day?.low ?? false,
-        critical: q?.seven_day?.critical ?? false,
-      },
-    ]
-    // 5h / Fable 只有在 daemon 標成 low／critical 時才佔位（門檻見 docs/API.md §12.4）。
+    const shown: WindowBar = {
+      name: weekLabel(entry.kind),
+      pct: seven,
+      resetsAt: q?.seven_day?.resets_at ?? null,
+      low: q?.seven_day?.low ?? false,
+      critical: q?.seven_day?.critical ?? false,
+    }
+    // 5h / Fable 只有在 daemon 標成 low／critical 時才有資格搶這一格（門檻見 docs/API.md §12.4）。
+    const rivals: WindowBar[] = []
     if (five !== null && (q?.five_hour?.low || q?.five_hour?.critical)) {
-      windows.push({
+      rivals.push({
         name: '5h',
         pct: five,
         resetsAt: q?.five_hour?.resets_at ?? null,
@@ -464,7 +479,7 @@ function Gauge({
       })
     }
     if (fable !== null && (q?.fable?.low || q?.fable?.critical)) {
-      windows.push({
+      rivals.push({
         name: 'F',
         pct: fable,
         resetsAt: q?.fable?.resets_at ?? null,
@@ -472,6 +487,7 @@ function Gauge({
         critical: q?.fable?.critical ?? false,
       })
     }
+    windows = [rivals.reduce((best, w) => (moreUrgent(w, best) ? w : best), shown)]
   } else if (collapsed) {
     const w = worstWindow(q)
     const src = w.name === '5h' ? q?.five_hour : w.name === 'F' ? q?.fable : q?.seven_day
@@ -522,14 +538,17 @@ function Gauge({
   // 停用中的那一格在條上也要看得出來，不然得先點開 popover 才知道側欄少了誰。
   const off = isQuotaDisabled(disabledMap, quotaDisableKey(host, entry.kind, entry.identity))
   const withOff = off ? `${title}（已暫時停用，底下的 Bot 收在側欄外）` : title
+  // CLI 說這個帳號現在收不下工作。量表是速率視窗，codex 的 credits 用完時它們照樣是滿的
+  // （2026-09-12 使用者：滿格卻一直 hit limit），所以這件事要畫在格子上，不是只寫在 popover。
+  const blocked = q?.limit_hit ?? null
   const accessibleTitle = focused
     ? `目前選取的 ${withOff}${borderWindows.map((w) => `；${w.edge === 'top' ? '上' : '下'}邊框：${w.label} 剩餘 ${fmtPct(w.pct!)}%`).join('')}`
     : withOff
 
   return (
     <span
-      className={`quota-hp ${entry.kind} ${worst(q)}${focused ? ' focused' : ''}${borderWindows.length ? ' quota-framed' : ''}${off ? ' off' : ''}`}
-      title={accessibleTitle}
+      className={`quota-hp ${entry.kind} ${worst(q)}${focused ? ' focused' : ''}${borderWindows.length ? ' quota-framed' : ''}${off ? ' off' : ''}${blocked ? ' blocked' : ''}`}
+      title={blocked ? `${accessibleTitle}\n\n${blockedLine(blocked)}` : accessibleTitle}
       aria-current={focused ? 'true' : undefined}
       // 整格可點開 popover。從停用方塊或量表按鈕發出的點擊放行——量表那顆自己會處理，
       // 不放行就會一次開一次關。
@@ -559,6 +578,7 @@ function Gauge({
             因此都是「圖示 / 名稱 / 開關」三層，開關一律貼在名稱正下方，不會有一格歪掉。 */}
         {compact && !entry.identity ? null : (
           <span className={`quota-identity${loggedOut ? ' logged-out' : ''}`} aria-hidden="true">
+            {blocked ? <span className="quota-blocked-ico">⛔</span> : null}
             {entry.identity ?? entry.kind}
           </span>
         )}
@@ -706,6 +726,33 @@ function CodexShellLogin({ host, identity }: { host: string; identity: string | 
  * 那張什麼時候過期」。額度歸零的當下那是唯一還能做的動作，所以它跟桶子並排、不是藏在別處。
  * daemon 只讀不用：真的要用還是在 codex 那邊（`/status` → `Reset usage`），這裡不代按。
  */
+/** 「⛔ 額度被擋 · 19:07 恢復」——橫幅沒寫時間就只說要等它下一次跑得動。 */
+function blockedLine(hit: QuotaLimitHit): string {
+  const when = hit.until ? new Date(hit.until) : null
+  const back = when && !Number.isNaN(when.getTime())
+    ? `${when.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} 才會恢復`
+    : '恢復時間 CLI 沒寫，要等它下一回合跑得動'
+  return `⛔ CLI 說這個帳號現在被擋住：${back}\n${hit.message}`
+}
+
+function PopLimitHit({ hit }: { hit: QuotaLimitHit | null | undefined }) {
+  if (!hit) return null
+  return (
+    <div className="quota-pop-line limit-hit">
+      <span className="quota-win">
+        <span className="quota-ico" aria-hidden="true">
+          ⛔
+        </span>
+        被擋
+      </span>
+      <span className="quota-limit-hit" title={hit.message}>
+        {hit.until ? `${new Date(hit.until).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} 恢復` : '等下一回合跑得動'}
+        <span className="quota-limit-hit-why">CLI 回報額度上限，量表是速率視窗，看不到這件事</span>
+      </span>
+    </div>
+  )
+}
+
 function PopResetCredits({ credits, now }: { credits: QuotaResetCredits | null | undefined; now: number }) {
   if (!credits || credits.available <= 0) return null
   const left = credits.expires_at ? new Date(credits.expires_at).getTime() - now : null
@@ -832,6 +879,7 @@ function PopRow({ entry, host }: { entry: QuotaEntry; host: string }) {
           <PopWindow icon="⏱" name="5h" win="5h" w={q?.five_hour} now={now} />
           <PopWindow icon="📅" name={weekLabel(entry.kind)} win="7d" w={q?.seven_day} now={now} />
           <PopWindow icon="✦" name="Fable" win="F" w={q?.fable} now={now} />
+          <PopLimitHit hit={q?.limit_hit} />
           <PopResetCredits credits={q?.reset_credits} now={now} />
         </>
       )}

@@ -152,8 +152,41 @@ pub fn router(app: Arc<App>) -> Router {
         .nest("/api", api)
         .route("/ws", get(ws_handler))
         .route("/hook/{provider}", post(crate::hookrecv::receive))
+        .route("/relay/announce", post(relay_announce))
         .fallback(get(crate::assets::serve))
         .with_state(app)
+}
+
+/// `POST /relay/announce` — PATH 上的 herdr shim 在把 `agent prompt` 轉給真的 herdr 之前先報一聲
+/// 「我要送這段字給那個 agent」（SPEC §6.5d）。daemon 記著，等那句話的 prompt 回音從 hook 回來時
+/// 補上 `messages.relay_from`，總管的裁示才不會在對話裡長得跟使用者自己打的一樣。
+///
+/// 驗證跟 hook 同一把鑰匙（該 bot 的 `hook_token`，走 `X-AM-Bot-Token`）：pane 裡本來就有它，
+/// 而且它只證明「我是那顆 bot」——這個端點也只用來說明來源。
+#[derive(serde::Deserialize)]
+struct RelayAnnounce {
+    bot_id: String,
+    to_agent: String,
+    text: String,
+}
+
+async fn relay_announce(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    // 表單而不是 JSON：送出這一報的是 pane 裡的 POSIX sh shim，`--data-urlencode` 對任意
+    // prompt 內容（引號、換行、`&`）都安全，不必在 sh 裡拼 JSON。
+    axum::extract::Form(body): axum::extract::Form<RelayAnnounce>,
+) -> (StatusCode, Json<Value>) {
+    let token = headers.get("X-AM-Bot-Token").and_then(|v| v.to_str().ok()).unwrap_or("");
+    let ok = match db::bot(&app.db, &body.bot_id).await {
+        Ok(Some(b)) if b.deleted_at.is_none() => !token.is_empty() && token == b.hook_token,
+        _ => false,
+    };
+    if !ok {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "unknown bot or bad token"})));
+    }
+    crate::agent_relay::announce(&body.bot_id, &body.to_agent, &body.text);
+    (StatusCode::OK, Json(json!({})))
 }
 
 // ---------------------------------------------------------------- auth
@@ -2089,7 +2122,11 @@ async fn restart_idle_bots(State(app): State<Arc<App>>) -> Result<Response, LcEr
 }
 
 async fn restart_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
-    let run_id = lifecycle::restart_bot(&app, &id).await?;
+    // 子 agent 的 pane 是父 agent 開的，一般的 stop + start 會拒絕（SPEC §6.5a）：改成在它
+    // 自己那個 pane 裡 exit + resume，套用 claude 更新的入口對子 agent 才是通的。
+    let child = db::bot(&app.db, &id).await.map_err(any_err)?.is_some_and(|b| b.managed_by == "child");
+    let run_id =
+        if child { lifecycle::restart_child_in_pane(&app, &id).await? } else { lifecycle::restart_bot(&app, &id).await? };
     app.emit("bot_changed", json!({"bot_id": id})).await;
     Ok((StatusCode::OK, Json(json!({"run_id": run_id}))).into_response())
 }

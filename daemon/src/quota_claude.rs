@@ -275,6 +275,7 @@ pub fn parse_claude_usage(screen: &str, now: DateTime<Local>, account: Option<&s
         seven_day: seven,
         fable,
         reset_credits: None,
+        limit_hit: None,
         plan: None,
         updated_at: crate::db::now(),
         source: "claude-usage".into(),

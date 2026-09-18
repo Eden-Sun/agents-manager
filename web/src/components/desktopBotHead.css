@@ -50,3 +50,85 @@
 .quota-hp {
   padding: 3px 5px;
 }
+
+/*
+ * 額度列四周與格內的留白再收一次（2026-09-11 使用者截圖：「額度 box 左邊、周圍的邊界都留
+ * 太大了」）。1500px 量到的浪費，由左到右：
+ *
+ * - `.bot-head > .spacer`：名字那叢已經 `flex-grow: 1`，spacer 永遠是 0px 寬，但它還是
+ *   `.main-head` 裡的一個 flex item，白白吃掉一個 10px 的 gap。拿掉。
+ * - `.quota-open` 左右 2px 內距 + 更新 chevron 左 8px／右 7px 的外距：chevron 到第一格之間
+ *   17px。收成 0 / 4px / 5px。
+ * - `.quota-head` 固定 3.2em（45px）：定案是「固定寬度＝最寬的標籤（codex）」，但 codex 量
+ *   到只有 33px，多出來的 12px 每一格都在付。改 2.5em（35px），仍然放得下 codex，五格省 50px。
+ * - `.quota-hp` 水平內距 5px → 4px，五格再省 10px。
+ *
+ * 合計約 80px，全部回到名字／pane id 身上（同檔上面那條 `flex: 1 1 auto`）。
+ */
+.bot-head > .spacer {
+  display: none;
+}
+
+.quota-open {
+  padding: 4px 0;
+}
+
+.quota-update {
+  margin-left: 4px;
+  margin-right: 5px;
+}
+
+.quota-head {
+  width: 2.5em;
+}
+
+.quota-hp {
+  padding: 3px 4px;
+}
+
+/* 上面收回來的寬度讓名字那叢長回 249px 之後，分頁「終端」被推出右緣（1500px 量到
+   `.main-head` scrollWidth 1023 > clientWidth 1004）。原因是 styles.css 給 `.bot-head .main-title`
+   的 `flex: 1 0.25 auto`：flex 規範規定 shrink 因子**總和小於 1** 時，只吸收那個比例的溢位
+   ——它是唯一會縮的項目，卻永遠只讓 25%，其餘 75% 直接溢出。改回 1；「mem badge 那些先讓」
+   的順序靠它們的 1000 維持，不需要把名字壓到 1 以下。 */
+.bot-head .main-title {
+  flex-shrink: 1;
+}
+
+/* 格與格之間的分隔線本來是「把左邊那條 1px 外框染色」，但外框有 7px 圓角，染出來的是一段
+   彎的「(」，看起來像多了一個框（2026-09-11 使用者截圖）。改成 `::before` 畫一條直的 1px
+   細線，上下各縮 6px；選取那格自己有整圈 accent 外框，線就不畫。 */
+.quota-hp + .quota-hp {
+  position: relative;
+  border-left-color: transparent;
+}
+
+.quota-hp + .quota-hp::before {
+  content: '';
+  position: absolute;
+  left: -1px;
+  top: 6px;
+  bottom: 6px;
+  width: 1px;
+  background: var(--border);
+  pointer-events: none;
+}
+
+.quota-hp.focused + .quota-hp::before,
+.quota-hp + .quota-hp.focused::before {
+  display: none;
+}
+
+/* 手機的額度列格與格之間有 5px gap，不畫線（見 styles.css ≤640 那條）。 */
+@media (width <= 640px) {
+  .quota-hp + .quota-hp::before {
+    display: none;
+  }
+}
+
+/* 上面那條 `.quota-hp + .quota-hp { border-left-color: transparent }` 跟 `.quota-hp.focused`
+   同權重又排在後面，把選取那格的左邊框也吃掉了（2026-09-11 使用者截圖：藍框左邊缺一段）。
+   選取那格整圈都要是 accent。 */
+.quota-hp + .quota-hp.focused {
+  border-left-color: var(--accent);
+}

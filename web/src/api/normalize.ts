@@ -56,6 +56,7 @@ import type {
   Message,
   ModelInfo,
   QuotaMap,
+  QuotaLimitHit,
   QuotaResetCredits,
   ToolMap,
   ToolStatus,
@@ -775,6 +776,13 @@ function toResetCredits(v: unknown): QuotaResetCredits | null {
   return { available, title: optStr(pick(v, 'title')), expires_at: optStr(pick(v, 'expires_at')) }
 }
 
+function toLimitHit(v: unknown): QuotaLimitHit | null {
+  if (!isRec(v)) return null
+  const message = str(pick(v, 'message'))
+  if (!message) return null
+  return { message, until: optStr(pick(v, 'until')), at: str(pick(v, 'at')) }
+}
+
 export function toKindQuota(v: unknown, key?: string): KindQuota | null {
   if (!isRec(v)) return null
   return {
@@ -784,6 +792,8 @@ export function toKindQuota(v: unknown, key?: string): KindQuota | null {
     fable: toQuotaWindow(pick(v, 'fable')),
     // 舊 daemon（與 claude / grok）沒有這個欄位 → null，UI 不畫那顆券。
     reset_credits: toResetCredits(pick(v, 'reset_credits')),
+    // 舊 daemon 沒有這個欄位 → null，格子就不會標成「被擋」。
+    limit_hit: toLimitHit(pick(v, 'limit_hit')),
     plan: optStr(pick(v, 'plan')),
     updated_at: str(pick(v, 'updated_at')),
     host: str(pick(v, 'host'), hostOfQuotaKey(key ?? '')),
