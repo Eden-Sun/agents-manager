@@ -990,7 +990,10 @@ pub async fn restart_child_in_pane_with(app: &Arc<App>, bot_id: &str, require_id
         }
     }
     app.emit_bot_status(bot_id).await;
-    fail_in_flight(app, &run.id, "restarted to apply the CLI update").await;
+    // 在飛的那一筆先收，收不成就不送 ctrl+c、不重開（#156，跟 stop 同一套）。
+    if let Err(e) = fail_in_flight(app, &run.id, "restarted to apply the CLI update").await {
+        return Err(super::turn_unwritable(app, bot_id, &run.id, "重啟", e).await);
+    }
 
     let target = db::run_target(&run, &bot);
     for _ in 0..2 {

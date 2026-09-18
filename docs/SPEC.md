@@ -815,6 +815,9 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run
   run 狀態與破壞性的副作用不是兩條平行線（#146）：
   - `stopping` 以 CAS（from `starting`／`running`／`stopping`，上次沒停成的可以再按）寫入，**寫不進去就一步都不做**（不收 in-flight、
     不送 ctrl+c、不關 pane、不撤佇列），回 502。讀完 active run 之後已經被 pane-exit 事件收掉（CAS 輸了）→ 什麼都不做，回 `204`。
+  - in-flight 那一筆收成 `failed`（跟說明同一個交易，`fail_in_flight`）也在動外面**之前**：寫不進去就一步都不做——這時 agent 還沒被打斷、
+    那一回合真的還在跑——run 放回 `running`，回 `503 turn_state_unwritable`（可重試，#156）。以前寫失敗只記 warning，照樣 ctrl+c、記 `stopped`，
+    DB 裡那一筆卻永遠在飛。
   - 「agent 不在」只認 herdr 明確說不在；RPC 失敗不算。結果分成自己退出／pane 被強制關掉並確認不在／還活著／問不到。
     後兩種不能記 `stopped`、不撤佇列，回 `502 stop_not_confirmed`：還活著（default session 的 pane 不能關，§6.5.1）就放回 `running`，
     問不到就留 `stopping` 排對帳。
@@ -1330,6 +1333,9 @@ default Bot 的 prompt／keys／terminal 讀取依 Run 的 session 回到 defaul
 ### 6.6 事件處理
 - `pane.agent_status_changed`：更新 `agent_status`；`working→idle` 啟動備援計時（§4.3）；推 WS。遠端 run 先 drain 一次該 bot 的 spool（§11.4.3）。
 - `pane.exited` / `pane.closed`：Run → `exited`，in-flight Turn → `failed`。
+  in-flight 那一筆收不成（寫不進 `failed`，#156）：pane 已經沒了、不能不做，所以記成**欠著的收尾**（`interruption` 的帳，跟 #147 同一套），
+  由定時重試、這顆 bot 的下一則 hook／prompt 補上；回傳 `RunExit::TurnOwed`，不說「收尾做完了」。撤孤兒佇列與拆 watcher 是 run 結束的事，照做。
+  帳只在記憶體：補上之前 daemon 重啟的話，`reconcile::rearm_progress` 把「run 已結束、回合還 in_flight」的收成 `failed` 並寫明原因。
   `exited` 寫進 DB **之後**才收 in-flight、撤孤兒佇列、拆 watcher（`mark_run_exited`，#135）：寫不進去（SQLite I/O／busy）就一樣都不動、
   run 照舊是 active，排背景對帳重試（2／5／15／30／60／120 秒，§6.2 的「run 狀態的寫法」）照 herdr 的證據收；CAS 輸給先收掉它的路徑
   （使用者的 stop 已寫 `stopped`，#131）也不做第二份收尾。log 分得開兩者（`run exit not recorded` 是 warn，CAS 輸了是 info）。
@@ -1386,6 +1392,7 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
     帶 `--resume <上一個 session>`、bots 上的模型／強度與 `auto_approve` 旗標（pane shell 裡的帳號與 shim 不變）。過程中 pane 不見 → run 標 exited 不重開。
     agent 10 秒內沒退出 → 回 502、不動 pane，run 從 `stopping` **放回 `running`**（agent 還在）。單顆 `POST /api/bots/{id}/restart` 對子 agent 走同一條路。
     舊 run 的 `running → stopping → stopped` 與新 run 的 `starting → running` 走 §6.4 stop 同一套 CAS（#146）：`stopping` 寫不進去就不動子 agent；
+    舊 run 的 in-flight 收不成也不動（放回 `running`，`503 turn_state_unwritable`，#156）；
     舊 run 的 `stopped` 寫進去之前不寫新 run、不 `agent.start`（寫不進去回 `503 stop_state_uncommitted`，憑證隨之放掉，對帳把舊 run 收成
     `exited` 後排著的派工照 #129 撤）；新 run 的 `running` 寫不進去回 `503 start_state_uncommitted` 並排對帳重試。
   - 序列而非並行：per-bot 鎖與 pane 版面都假設一次一顆，並行的錯誤也分不出是誰的。

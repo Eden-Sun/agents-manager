@@ -2468,7 +2468,7 @@ mod external_claim_tests {
             &bot_a,
             lifecycle::InterruptedTurn { run_id: run_a.clone(), turn_id: Some(turn_a.clone()), session_id: None, prompt_id: Some("p-esc".into()), at: chrono::Utc::now() },
         );
-        lifecycle::fail_in_flight(&app, &run_a, "user interrupt").await;
+        lifecycle::fail_in_flight(&app, &run_a, "user interrupt").await.unwrap();
         let closed = turn_row(&app, &turn_a).await;
         process(&app, &stop_failure(&bot_a, json!({"hook_event_name": "StopFailure", "session_id": "sa", "prompt_id": "p-late", "reason": LIMIT})))
             .await
@@ -2976,7 +2976,7 @@ mod external_claim_tests {
 
         // `interrupt_bot` 本身要碰 herdr pane；直接呼叫它跟 `mark_run_exited` 共用的那支收尾函式，
         // 單獨驗證 DB 這一段的不變量（herdr 那半邊 `interrupt_bot`/`abort_turns` 自己的測試已經蓋到）。
-        lifecycle::fail_in_flight(&app, &run_id, "interrupted by user").await;
+        lifecycle::fail_in_flight(&app, &run_id, "interrupted by user").await.unwrap();
         let before = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
         assert_eq!(before.status, "failed");
 

@@ -178,6 +178,25 @@ pub(crate) async fn accept_run_state(app: &Arc<App>, state: &str) {
     sqlx::query(&format!("DROP TRIGGER refuse_run_state_{state}")).execute(&app.db).await.unwrap();
 }
 
+/// 測試用的故障注入（#156）：之後改這一筆回合 `status` 的 UPDATE 一律失敗，直到 [`accept_turn_close`]。
+/// 只擋這一筆：同一顆 bot 其他回合（排著的那些）照常寫得進去。
+#[cfg(test)]
+pub(crate) async fn refuse_turn_close(app: &Arc<App>, turn_id: &str) {
+    sqlx::query(&format!(
+        "CREATE TRIGGER refuse_turn_close BEFORE UPDATE OF status ON turns WHEN OLD.id = '{turn_id}'
+         BEGIN SELECT RAISE(ABORT, 'injected: cannot write turns.status'); END"
+    ))
+    .execute(&app.db)
+    .await
+    .unwrap();
+}
+
+/// 測試用：DB 恢復。
+#[cfg(test)]
+pub(crate) async fn accept_turn_close(app: &Arc<App>) {
+    sqlx::query("DROP TRIGGER refuse_turn_close").execute(&app.db).await.unwrap();
+}
+
 /// 測試用：這顆 bot 的對話裡放一筆回合；`in_flight` 的掛在 `run_id` 底下。
 #[cfg(test)]
 pub(crate) async fn a_turn(app: &Arc<App>, bot_id: &str, run_id: Option<&str>, status: &str) -> String {

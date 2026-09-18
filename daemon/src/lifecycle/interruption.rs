@@ -86,25 +86,33 @@ struct NewTurn {
     delivery: Option<DeliveryRecord>,
 }
 
-/// bot → 這顆 bot 欠著／待證的那一次打斷。同一顆 bot 同時最多一筆在飛，所以一次也最多一筆。
-fn ledger() -> &'static Mutex<HashMap<String, Pending>> {
-    static M: OnceLock<Mutex<HashMap<String, Pending>>> = OnceLock::new();
+/// bot → 這顆 bot 欠著／待證的收尾，一筆回合一條。同一個 run 同時最多一筆在飛，但 DB 一直寫不進去時，上一個 run
+/// 欠著的那一筆還沒補上、新的 run 又欠一筆是可能的（#156）——後來的不能蓋掉先前的。
+fn ledger() -> &'static Mutex<HashMap<String, Vec<Pending>>> {
+    static M: OnceLock<Mutex<HashMap<String, Vec<Pending>>>> = OnceLock::new();
     M.get_or_init(Default::default)
 }
 
-fn pending(bot_id: &str) -> Option<Pending> {
-    ledger().lock().unwrap_or_else(|e| e.into_inner()).get(bot_id).cloned()
+fn pending(bot_id: &str) -> Vec<Pending> {
+    ledger().lock().unwrap_or_else(|e| e.into_inner()).get(bot_id).cloned().unwrap_or_default()
 }
 
+/// 同一筆回合只留最新的一條。
 fn record(bot_id: &str, p: Pending) {
-    ledger().lock().unwrap_or_else(|e| e.into_inner()).insert(bot_id.to_string(), p);
+    let mut m = ledger().lock().unwrap_or_else(|e| e.into_inner());
+    let list = m.entry(bot_id.to_string()).or_default();
+    list.retain(|x| x.turn_id != p.turn_id);
+    list.push(p);
 }
 
-/// 只結清同一筆：等的時候有人記了新的一筆（下一次打斷），留給它。
+/// 只結清那一筆。
 fn forget(bot_id: &str, turn_id: &str) {
     let mut m = ledger().lock().unwrap_or_else(|e| e.into_inner());
-    if m.get(bot_id).is_some_and(|p| p.turn_id == turn_id) {
-        m.remove(bot_id);
+    if let Some(list) = m.get_mut(bot_id) {
+        list.retain(|x| x.turn_id != turn_id);
+        if list.is_empty() {
+            m.remove(bot_id);
+        }
     }
 }
 
@@ -113,9 +121,9 @@ pub(crate) fn owes(bot_id: &str, turn_id: &str) -> bool {
     owed_turn(bot_id).as_deref() == Some(turn_id)
 }
 
-/// 這顆 bot 欠著收尾的是哪一筆（鍵已經生效的那種；待證的不算）。
+/// 這顆 bot 最近一筆欠著收尾的回合（鍵已經生效的那種；待證的不算）。
 pub(crate) fn owed_turn(bot_id: &str) -> Option<String> {
-    pending(bot_id).filter(|p| p.stage == Stage::Owed).map(|p| p.turn_id)
+    pending(bot_id).into_iter().rev().find(|p| p.stage == Stage::Owed).map(|p| p.turn_id)
 }
 
 /// 鍵做了：把 `turn_id` 收成被打斷的 failed（跟說明同一個交易）。寫不進去就記成欠著、排定時重試，回 `Err`——
@@ -148,7 +156,8 @@ pub(crate) async fn send_now_interrupted(app: &Arc<App>, bot_id: &str, run_id: &
 /// 欠著的插隊送出，新那一則的送達結果後來才知道：記在帳上，補的時候一起寫。
 pub(crate) fn owe_delivery(bot_id: &str, new_turn: &str, delivery: Option<DeliveryRecord>) {
     let mut m = ledger().lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(n) = m.get_mut(bot_id).and_then(|p| p.new_turn.as_mut()).filter(|n| n.id == new_turn) {
+    let list = m.get_mut(bot_id).into_iter().flatten();
+    if let Some(n) = list.filter_map(|p| p.new_turn.as_mut()).find(|n| n.id == new_turn) {
         n.delivery = delivery;
     }
 }
@@ -202,9 +211,19 @@ pub(crate) fn unconfirmed_send_now(bot_id: &str, run_id: &str, turn_id: &str, pr
     );
 }
 
-/// 結清這顆 bot 欠著／待證的那一筆。呼叫端握著 bot 鎖。`Err`：DB 還是寫不進去，帳留著。
+/// 結清這顆 bot 欠著／待證的收尾。呼叫端握著 bot 鎖。`Err`：有一筆 DB 還是寫不進去，那一筆的帳留著（其他的照樣結清）。
 pub(crate) async fn settle_locked(app: &Arc<App>, bot_id: &str, evidence: Evidence) -> anyhow::Result<()> {
-    let Some(p) = pending(bot_id) else { return Ok(()) };
+    let mut failed = None;
+    for p in pending(bot_id) {
+        if let Err(e) = settle_one(app, bot_id, &p, evidence).await {
+            tracing::warn!(bot = bot_id, turn = %p.turn_id, error = %e, "欠著的收尾還是寫不進去");
+            failed.get_or_insert(e);
+        }
+    }
+    failed.map_or(Ok(()), Err)
+}
+
+async fn settle_one(app: &Arc<App>, bot_id: &str, p: &Pending, evidence: Evidence) -> anyhow::Result<()> {
     let now: Option<(String, Option<String>)> =
         sqlx::query_as("SELECT status, run_id FROM turns WHERE id=?").bind(&p.turn_id).fetch_optional(&app.db).await?;
     let old_in_flight = matches!(&now, Some((status, run)) if status == "in_flight" && run.as_deref() == Some(p.run_id.as_str()));
@@ -230,7 +249,7 @@ pub(crate) async fn settle_locked(app: &Arc<App>, bot_id: &str, evidence: Eviden
     if !proven {
         return Ok(());
     }
-    close(app, bot_id, &p).await?;
+    close(app, bot_id, p).await?;
     tracing::info!(bot = bot_id, turn = %p.turn_id, stage = ?p.stage, "補上了打斷的收尾");
     forget(bot_id, &p.turn_id);
     Ok(())
@@ -241,6 +260,20 @@ async fn settle(app: &Arc<App>, bot_id: &str) -> anyhow::Result<()> {
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
     settle_locked(app, bot_id, Evidence::Nothing).await
+}
+
+/// 收掉一筆回合（failed＋說明同一個交易，CAS 在 in_flight），**不記帳**：寫不進去就回 `Err`，由呼叫端決定——
+/// 還沒動外面的（stop、重啟）就不動，已經發生的（run 結束）改用 [`interrupted`] 記成欠著（#156）。
+pub(crate) async fn close_turn(app: &Arc<App>, bot_id: &str, run_id: &str, turn_id: &str, note: &str) -> anyhow::Result<()> {
+    let p = Pending {
+        run_id: run_id.to_string(),
+        turn_id: turn_id.to_string(),
+        note: note.to_string(),
+        stage: Stage::Owed,
+        new_turn: None,
+        proof: None,
+    };
+    close(app, bot_id, &p).await
 }
 
 /// 待證的插隊送出：那一則現在出現在 transcript 裡了嗎？（讀檔，放到 blocking 執行緒）
@@ -301,6 +334,35 @@ async fn close(app: &Arc<App>, bot_id: &str, p: &Pending) -> anyhow::Result<()> 
     Ok(())
 }
 
+/// run 已經結束（不是 starting／running／stopping）、回合卻還 in_flight（#156）：欠著的收尾只記在記憶體，daemon 在補上
+/// 之前重啟就沒人會收——那個 run 不會再有 hook，閒置 watchdog 也只看活著的 run。重啟時補收成 failed，寫明原因。
+pub(crate) async fn adopt_turns_of_ended_runs(app: &Arc<App>) {
+    let rows: Vec<(String, String, String, String)> = match sqlx::query_as(
+        "SELECT t.id, t.run_id, c.bot_id, r.state FROM turns t
+           JOIN runs r ON r.id = t.run_id
+           JOIN conversations c ON c.id = t.conversation_id
+          WHERE t.status = 'in_flight' AND r.state NOT IN ('starting','running','stopping')",
+    )
+    .fetch_all(&app.db)
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not look for in-flight turns left on ended runs");
+            return;
+        }
+    };
+    for (turn, run, bot, state) in rows {
+        let lock = app.bot_lock(&bot).await;
+        let _g = lock.lock().await;
+        let note = format!("這一回合的 run 已經結束（{state}），當時沒能把回合收掉；daemon 重啟時補收。");
+        match close_turn(app, &bot, &run, &turn, &note).await {
+            Ok(()) => tracing::warn!(turn = %turn, run = %run, %state, "closed a turn left in flight on an ended run"),
+            Err(e) => tracing::warn!(turn = %turn, error = %e, "could not close a turn left in flight on an ended run"),
+        }
+    }
+}
+
 /// 重啟前正在插隊送出、還沒掛上 run 的那一則（`in_flight`、`run_id IS NULL`）：送出鍵有沒有生效沒有人知道，
 /// 收它的那個 async 任務也跟著上一個行程走了。收成 failed、送達記成 unknown，不留一筆沒有 run 的 in_flight
 /// （它會一直佔著維護窗口的閘門）。被插隊的那一筆照舊在它的 run 上，由 hook 或 watchdog 收。
@@ -357,7 +419,7 @@ pub(crate) fn schedule_retry(app: &Arc<App>, bot_id: &str) {
     tokio::spawn(async move {
         for secs in RETRY_DELAYS_SECS {
             tokio::time::sleep(Duration::from_secs(secs)).await;
-            if !pending(&bot_id).is_some_and(|p| p.stage == Stage::Owed) {
+            if !pending(&bot_id).iter().any(|p| p.stage == Stage::Owed) {
                 return;
             }
             if let Err(e) = settle(&app, &bot_id).await {
@@ -566,7 +628,7 @@ mod tests {
         let err = interrupt_bot(&app, &b.bot.id).await.expect_err("Esc 沒進去");
         assert!(matches!(err, LcError::Upstream(_)), "{err:?}");
         assert_eq!(status_of(&app, &b.turn).await, "in_flight");
-        assert!(pending(&b.bot.id).is_none(), "沒有欠著、也沒有待證");
+        assert!(pending(&b.bot.id).is_empty(), "沒有欠著、也沒有待證");
         assert!(crate::lifecycle::interrupt_grace::pending_echo(&b.bot.id).is_none(), "也不等回聲");
     }
 
@@ -589,7 +651,7 @@ mod tests {
         crate::hookrecv::process(&app, &echo(&b.bot.id, None)).await.unwrap();
         assert_eq!(status_of(&app, &b.turn).await, "failed", "回聲證明 Esc 進去了");
         assert_eq!(system_notes(&app, &b.turn).await, vec![INTERRUPT_NOTE.to_string()]);
-        assert!(pending(&b.bot.id).is_none());
+        assert!(pending(&b.bot.id).is_empty());
 
         // 另一種結局：Esc 其實沒進去，回合自己答完了。
         let c = busy("esc-unknown-finished").await;
@@ -608,7 +670,7 @@ mod tests {
         assert_eq!(status_of(&app, &c.turn).await, "completed", "Esc 沒進去：照答完收");
         assert!(system_notes(&app, &c.turn).await.is_empty(), "不補「被中斷」");
         settle(&app, &c.bot.id).await.unwrap();
-        assert!(pending(&c.bot.id).is_none(), "那一筆不在飛了：帳作廢");
+        assert!(pending(&c.bot.id).is_empty(), "那一筆不在飛了：帳作廢");
     }
 
     /// 寫失敗之後，使用者直接在 pane 裡打了下一句、它的 Stop 先到：被 Esc 停掉的那一筆要先收掉（hook 一進來先補帳），
@@ -699,7 +761,7 @@ mod tests {
         assert_eq!(status_of(&app, &b.turn).await, "failed");
         assert_eq!(system_notes(&app, &b.turn).await, vec![INTERRUPT_NOTE.to_string()]);
         assert_eq!(escs(&b.env), 1);
-        assert!(pending(&b.bot.id).is_none());
+        assert!(pending(&b.bot.id).is_empty());
         assert!(crate::lifecycle::interrupt_grace::pending_echo(&b.bot.id).is_some(), "照舊等回聲（#117）");
     }
 
@@ -730,6 +792,50 @@ mod tests {
         assert_eq!((status.as_str(), delivery.as_str()), ("failed", "unknown"));
         assert!(system_notes(&app, &orphan).await.iter().any(|n| n.contains("daemon 停了")));
         assert_eq!(status_of(&app, &b.turn).await, "in_flight", "被插隊的那一筆不動");
+    }
+
+    /// #156：欠著的帳只在記憶體。run 已經結束（`exited`／`stopped`）、那一筆卻還 in_flight，而 daemon 在補上之前重啟了——
+    /// 沒有 hook 會來（run 不在了），閒置 watchdog 也只看活著的 run。重啟時補收成 failed，寫明原因。
+    #[tokio::test]
+    async fn a_turn_left_in_flight_on_an_ended_run_is_closed_after_a_restart() {
+        let b = busy("ended-run-turn").await;
+        let app = b.env.app.clone();
+        sqlx::query("UPDATE runs SET state='exited', ended_at=? WHERE id=?").bind(db::now()).bind(&b.run).execute(&app.db).await.unwrap();
+
+        let fresh = tt::restart_app(&b.env).await;
+        crate::reconcile::rearm_progress(&fresh).await;
+
+        assert_eq!(status_of(&app, &b.turn).await, "failed");
+        assert!(system_notes(&app, &b.turn).await.iter().any(|n| n.contains("已經結束")), "{:?}", system_notes(&app, &b.turn).await);
+    }
+
+    /// #156：DB 一直寫不進去時，上一個 run 欠著的那一筆還沒補上、新的 run 又欠一筆——後來的不能蓋掉先前的，兩筆都要補上
+    /// （舊 run 已經結束，那一筆不會再有 hook，也不歸閒置 watchdog 管，帳一丟就永遠在飛）。
+    #[tokio::test]
+    async fn two_owed_closes_for_one_bot_are_both_settled() {
+        let b = busy("two-owed").await;
+        let app = b.env.app.clone();
+        lose_turn_writes(&app).await;
+        assert_eq!(mark_run_exited(&app, &b.run, "pane exited").await, RunExit::TurnOwed);
+
+        let second_run = tt::fake_run(&app, &b.bot.id).await;
+        let conv = db::conversation_id(&app.db, &b.bot.id).await.unwrap();
+        let second = db::ulid();
+        sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'web','in_flight','ok',?)")
+            .bind(&second)
+            .bind(&conv)
+            .bind(&second_run)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(mark_run_exited(&app, &second_run, "pane exited").await, RunExit::TurnOwed);
+
+        heal_turn_writes(&app).await;
+        settle(&app, &b.bot.id).await.unwrap();
+        assert_eq!(status_of(&app, &b.turn).await, "failed", "先欠的那一筆沒被蓋掉");
+        assert_eq!(status_of(&app, &second).await, "failed");
+        assert!(pending(&b.bot.id).is_empty());
     }
 
     /// #147 驗收五：寫失敗之後 hook 一直沒來（claude 對 Esc 不一定送 `StopFailure`）——下一則 prompt 不能

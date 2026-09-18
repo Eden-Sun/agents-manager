@@ -593,6 +593,9 @@ pub enum RunExit {
     AlreadyEnded,
     /// DB 讀寫失敗：什麼都沒動，run 照舊是 active；寫入失敗的排了對帳重試。
     NotRecorded,
+    /// 記成 `exited`、孤兒佇列與 watcher 收了，但 in-flight 那一筆寫不進 failed（#156）：記成欠著的收尾，之後補上
+    /// （`interruption` 的帳：定時重試、這顆 bot 的下一則 hook／prompt；daemon 重啟則由 `rearm_progress` 補收）。
+    TurnOwed,
 }
 
 /// Terminate a run: state `exited`, fail its in-flight turn, drop the pane watcher.
@@ -631,7 +634,15 @@ pub async fn mark_run_exited(app: &Arc<App>, run_id: &str, reason: &str) -> RunE
             return RunExit::NotRecorded;
         }
     }
-    fail_in_flight(app, run_id, &format!("run ended: {reason}")).await;
+    // pane 已經沒了，這不是我們能不做的事：回合收不成就記成欠著、之後補（#156），不當成已經收掉。
+    // 撤佇列與拆 watcher 是 run 結束的事，跟回合收不收得成無關，照做。
+    let turn_owed = match fail_in_flight_or_owe(app, run_id, &format!("run ended: {reason}")).await {
+        Ok(()) => false,
+        Err(e) => {
+            tracing::warn!(run = run_id, reason, error = %e, "run exited but its in-flight turn could not be closed; owed, will be settled later");
+            true
+        }
+    };
     revoke_orphaned_queued_turns(app, &run.bot_id, &format!("run 已結束（{reason}）")).await;
     if let Some(p) = run.pane_id.as_deref() {
         let host = db::bot_host(&app.db, &run.bot_id).await.unwrap_or_else(|_| LOCAL_HOST.to_string());
@@ -640,34 +651,41 @@ pub async fn mark_run_exited(app: &Arc<App>, run_id: &str, reason: &str) -> RunE
         }
     }
     app.emit_bot_status(&run.bot_id).await;
-    RunExit::Recorded
+    if turn_owed {
+        RunExit::TurnOwed
+    } else {
+        RunExit::Recorded
+    }
 }
 
-/// 收掉這個 run 還在飛的那一筆（interrupt、run 結束、reconcile 判定 run 不見了都走這裡）。
+/// 收掉這個 run 還在飛的那一筆（failed＋說明同一個交易，CAS 在 `status='in_flight'`，輸了就不寫說明）。
 ///
-/// 走 `turn_controller::set_status`（issue #68）：以前 guard 只在上面那句 `in_flight_turn()` 的 SELECT，
-/// UPDATE 本身是 `WHERE id=?`——兩者之間 hook 或 §4.3 備援把那一筆收掉的話，這裡會把一筆已經
-/// **完成**的回合改寫成 failed，還補一則「run ended」說明上去（#76 的現況表把這一處標成唯一
-/// 「Rust 層 guard」的邊）。現在 CAS 在 UPDATE 自己身上，而且**輸掉就不寫那則說明**。
+/// **寫不進去回 `Err`，不假裝收掉了**（#156）：以前只記一行 warning，stop／重啟／run 結束接著照「回合已經收掉」做下去，
+/// DB 裡那一筆卻還在飛。呼叫端各自決定：還沒動外面的（stop、子 agent 重啟）就不動、放回 running；
+/// 外面已經發生的（run 結束）改用 [`fail_in_flight_or_owe`] 記成欠著、之後補。
 ///
-/// 那個窗口是真的：`mark_run_exited` 這條路**不拿 per-bot 鎖**（`events.rs` 的 pane-exit、
-/// `reconcile.rs` 都直接呼叫），而 hook 處理拿著同一顆鎖在另一邊跑。但它**沒有對應的單元測試**：
-/// SELECT 與 UPDATE 之間沒有任何可以掛 trigger 的第三方寫入，單執行緒測不出那一瞬。
-/// 擋下來的那一步由 `turn_controller::set_status_reports_why_a_transition_did_not_happen` 與
-/// trigger 的 `the_guard_refuses_to_resurrect_a_finished_turn` 間接釘住。
-pub async fn fail_in_flight(app: &Arc<App>, run_id: &str, note: &str) {
-    let Ok(Some(t)) = db::in_flight_turn(&app.db, run_id).await else { return };
-    let applied = super::turn_controller::set_status(&app.db, &t.id, "in_flight", "failed", note).await;
-    match applied {
-        Ok(super::turn_controller::Outcome::Applied) => {
-            let _ = insert_message(app, &t.conversation_id, Some(&t.id), "system", note, "system", false, None).await;
-        }
-        Ok(other) => {
-            tracing::info!(turn = %t.id, run = run_id, ?other, note, "這一筆已經被別的路徑收掉了：不改狀態也不補說明");
-        }
-        Err(e) => tracing::warn!(turn = %t.id, run = run_id, error = %e, "收掉 in-flight 回合失敗"),
-    }
-    emit_turn(app, &t.id).await;
+/// CAS 在 UPDATE 自己身上（issue #68）：`mark_run_exited` 不拿 per-bot 鎖，SELECT 與 UPDATE 之間 hook 或 §4.3 備援
+/// 把那一筆收掉的話，這裡什麼都不寫（`the_guard_refuses_to_resurrect_a_finished_turn` 與 turn_controller 的測試釘住）。
+pub async fn fail_in_flight(app: &Arc<App>, run_id: &str, note: &str) -> anyhow::Result<()> {
+    let Some((turn, bot)) = in_flight_of(app, run_id).await? else { return Ok(()) };
+    super::interruption::close_turn(app, &bot, run_id, &turn, note).await
+}
+
+/// [`fail_in_flight`]，寫不進去時記成欠著的收尾（`interruption` 的帳），之後由定時重試、這顆 bot 的下一則 hook／prompt
+/// 補上；`Err` 照樣回給呼叫端，讓它不回「收尾做完了」。只給外面已經發生、不能不做的那種（run 結束）。
+pub async fn fail_in_flight_or_owe(app: &Arc<App>, run_id: &str, note: &str) -> anyhow::Result<()> {
+    let Some((turn, bot)) = in_flight_of(app, run_id).await? else { return Ok(()) };
+    super::interruption::interrupted(app, &bot, run_id, &turn, note).await
+}
+
+/// 這個 run 在飛的那一筆與它的 bot。讀不到是錯誤，不是「沒有」。
+async fn in_flight_of(app: &Arc<App>, run_id: &str) -> anyhow::Result<Option<(String, String)>> {
+    Ok(sqlx::query_as(
+        "SELECT t.id, c.bot_id FROM turns t JOIN conversations c ON c.id = t.conversation_id WHERE t.run_id = ? AND t.status = 'in_flight'",
+    )
+    .bind(run_id)
+    .fetch_optional(&app.db)
+    .await?)
 }
 
 
@@ -744,6 +762,36 @@ mod run_exit_race_tests {
         assert_eq!(rs::turn_status(&app, &queued).await, "failed");
         assert_eq!((rs::system_notes(&app, &in_flight).await, rs::system_notes(&app, &queued).await), (1, 1), "各收一次");
         assert!(!rs::watched(&app, &watcher).await);
+    }
+
+    /// #156：`exited` 記下了，in-flight 那一筆卻收不成。pane 已經沒了（這不是我們能不做的事），所以不回
+    /// 「收尾做完了」：記成欠著的收尾、之後補上；佇列與 watcher 照樣收（那是 run 結束的事，跟回合收不收得成無關）。
+    #[tokio::test]
+    async fn a_run_exit_whose_in_flight_turn_cannot_be_closed_owes_it_and_settles_it_later() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "exit-turn-owed").await;
+        let run = tt::fake_run(&app, &bot.id).await;
+        let in_flight = rs::a_turn(&app, &bot.id, Some(&run), "in_flight").await;
+        let queued = rs::a_turn(&app, &bot.id, None, "queued").await;
+        let watcher = rs::watch_run_pane(&app, &run).await;
+        rs::refuse_turn_close(&app, &in_flight).await;
+
+        let exit = mark_run_exited(&app, &run, "pane exited").await;
+        assert_ne!(exit, RunExit::Recorded, "回合沒收掉，不能說收尾做完了");
+        assert_eq!(exit, RunExit::TurnOwed);
+        assert_eq!(run_state(&app, &run).await, "exited");
+        assert_eq!(rs::turn_status(&app, &in_flight).await, "in_flight", "寫不進去就是還沒收");
+        assert_eq!(rs::turn_status(&app, &queued).await, "failed", "run 結束了，排著的照撤");
+        assert!(!rs::watched(&app, &watcher).await);
+
+        rs::accept_turn_close(&app).await;
+        // 定時重試那一輪（沒有 hook、沒有 prompt）。
+        super::super::interruption::settle_locked(&app, &bot.id, super::super::interruption::Evidence::Nothing).await.unwrap();
+        assert_eq!(rs::turn_status(&app, &in_flight).await, "failed", "欠著的收尾補上了");
+        assert_eq!(rs::system_notes(&app, &in_flight).await, 1);
+        let note: String = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='system'").bind(&in_flight).fetch_one(&app.db).await.unwrap();
+        assert_eq!(note, "run ended: pane exited");
     }
 
     /// #135 驗收第三條：CAS 輸給使用者的 stop 時照 #131——不覆寫 `stopped`，也不做第二份收尾（那是 stop 的）。

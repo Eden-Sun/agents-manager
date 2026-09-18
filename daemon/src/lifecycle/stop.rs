@@ -94,7 +94,10 @@ async fn stop_locked(app: &Arc<App>, bot_id: &str, for_restart: bool, only_if_id
         }
     }
     app.emit_bot_status(bot_id).await;
-    fail_in_flight(app, &run.id, "run stopped by user").await;
+    // 在飛的那一筆先收，收不成就一步都不動外面（#156）：這時 agent 還沒被打斷，那一回合真的還在跑。
+    if let Err(e) = fail_in_flight(app, &run.id, "run stopped by user").await {
+        return Err(turn_unwritable(app, bot_id, &run.id, "停", e).await);
+    }
 
     let target = db::run_target(&run, &bot);
     for _ in 0..2 {
@@ -245,6 +248,20 @@ async fn after_stop(app: &Arc<App>, bot_id: &str, run: &db::Run, host: &str) {
 
 /// 停不下來（agent 還在）：`stopping → running` 放回去。留在 `stopping` 會讓 prompt 409、start 拒絕，
 /// default session 的 run 連對帳都不救（2026-09-12 review #1）。寫不進去就排重試。
+/// 停（或原地重啟）之前，在飛的那一筆收不成（#156）：外面還一步都沒動——agent 沒被打斷、那一回合真的還在跑。
+/// run 放回 running，回 503 可重試。不是 `Uncommitted`：那是「外面已經做了、DB 沒寫成」，這裡外面什麼都還沒做。
+pub(crate) async fn turn_unwritable(app: &Arc<App>, bot_id: &str, run_id: &str, what: &str, e: anyhow::Error) -> LcError {
+    tracing::warn!(bot = bot_id, run = run_id, error = %e, "the in-flight turn could not be closed; not touching the agent");
+    back_to_running(app, run_id).await;
+    app.emit_bot_status(bot_id).await;
+    let turn = db::in_flight_turn(&app.db, run_id).await.ok().flatten().map(|t| t.id);
+    LcError::Unavailable(json!({
+        "error": "turn_state_unwritable", "run_id": run_id, "turn_id": turn, "retryable": true, "retry_after_secs": 5,
+        "message": format!("在飛的那一回合寫不進 DB，沒有{what}：agent 照常在跑（那一回合也還在跑），稍後再試。"),
+        "detail": format!("{e:#}"),
+    }))
+}
+
 pub(crate) async fn back_to_running(app: &Arc<App>, run_id: &str) {
     if let Err(e) = super::run_state::transition(&app.db, run_id, &["stopping"], "running", None).await {
         tracing::warn!(run = run_id, error = %e, "could not put a run that did not stop back to running");
@@ -1009,6 +1026,58 @@ mod stop_commit_tests {
             "name": "proj-alfa-ui", "agent": "claude", "agent_status": "idle",
             "workspace_id": ws.workspace_id, "tab_id": pane.tab_id, "pane_id": pane.pane_id, "cwd": "/tmp/p"})];
         (kid, run, pane)
+    }
+
+    /// #156：in-flight 那一筆收不成（寫不進去）就不停——這時 agent 還沒被打斷、那一回合真的還在跑。不送 ctrl+c、
+    /// 不關 pane、不撤佇列，run 放回 running，回 503（不是普通的成功，也不假裝回合收掉了）。DB 好了再按一次照常停，
+    /// 收尾各只做一次。
+    #[tokio::test]
+    async fn a_stop_whose_in_flight_turn_cannot_be_closed_does_not_touch_the_agent() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot, run) = running_bot(&env).await;
+        let in_flight = rs::a_turn(&app, &bot, Some(&run), "in_flight").await;
+        let queued = rs::a_turn(&app, &bot, None, "queued").await;
+        let watcher = rs::watch_run_pane(&app, &run).await;
+        rs::refuse_turn_close(&app, &in_flight).await;
+        let n = env.herdr.methods().len();
+
+        let err = stop_bot(&app, &bot).await.expect_err("回合收不成就沒有停");
+        let LcError::Unavailable(body) = &err else { panic!("要 503、可重試：{err:?}") };
+        assert_eq!(body["error"], "turn_state_unwritable", "{body}");
+        assert_eq!(body["turn_id"], in_flight.as_str(), "{body}");
+        let calls = since(&env, n);
+        assert!(!calls.iter().any(|m| m == "agent.send_keys" || m == "pane.close"), "{calls:?}");
+        assert_eq!(state(&app, &run).await, "running", "沒停就還是 running");
+        assert_eq!(rs::turn_status(&app, &in_flight).await, "in_flight");
+        assert_eq!(rs::system_notes(&app, &in_flight).await, 0);
+        assert_eq!(rs::turn_status(&app, &queued).await, "queued", "沒停就不撤");
+        assert!(rs::watched(&app, &watcher).await);
+
+        rs::accept_turn_close(&app).await;
+        assert!(stop_bot(&app, &bot).await.expect("DB 好了照常停"));
+        assert_eq!(state(&app, &run).await, "stopped");
+        assert_eq!((rs::turn_status(&app, &in_flight).await, rs::system_notes(&app, &in_flight).await), ("failed".to_string(), 1));
+        assert_eq!(rs::turn_status(&app, &queued).await, "failed");
+    }
+
+    /// #156：子 agent 原地重啟一樣——舊 run 的 in-flight 收不成就不送 ctrl+c、不重開，run 放回 running。
+    #[tokio::test]
+    async fn a_child_restart_whose_in_flight_turn_cannot_be_closed_does_not_touch_the_child() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (kid, run, _pane) = a_child(&env).await;
+        let in_flight = rs::a_turn(&app, &kid, Some(&run), "in_flight").await;
+        rs::refuse_turn_close(&app, &in_flight).await;
+        let n = env.herdr.methods().len();
+
+        let err = restart_child_in_pane(&app, &kid).await.expect_err("回合收不成就不重啟");
+        let LcError::Unavailable(body) = &err else { panic!("要 503、可重試：{err:?}") };
+        assert_eq!(body["error"], "turn_state_unwritable", "{body}");
+        let calls = since(&env, n);
+        assert!(!calls.iter().any(|m| m == "agent.send_keys" || m == "agent.start"), "{calls:?}");
+        assert_eq!(state(&app, &run).await, "running");
+        assert_eq!(rs::turn_status(&app, &in_flight).await, "in_flight");
     }
 
     /// #146 留言：子 agent 原地重啟的舊 run 走同一套——`stopping` 記不下來就不收 in-flight、不送 ctrl+c。
