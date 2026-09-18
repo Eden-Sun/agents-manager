@@ -229,3 +229,115 @@ async fn quota_on_identity_a_then_switching_to_b_resumes_the_exact_same_session(
     forget_queue_retry_timer(&bot.id);
     stop_bot(&app, &bot.id).await.unwrap();
 }
+
+/// issue #106：換身分**之前**就排著的 AGM 派工，重啟之後還在，接回驗證完才送，而且只送一次。
+/// 以前 `stop_bot_locked` 在新 run 建立前就 `revoke_orphaned_queued_turns`，那一刻沒有 active run，
+/// 派工被當成孤兒撤掉——`resume_gate` 再完美也沒有東西可以放行。
+///
+/// 情境：A 撞額度的那一回合還掛著（StopFailure 還在遠端 spool 裡沒到），AGM 的派工排在它後面；
+/// 這時候換身分重啟，重啟收掉那一回合、派工留下來給 B。
+#[tokio::test]
+async fn a_dispatch_queued_before_the_switch_survives_the_restart_and_goes_out_exactly_once() {
+    let e = tt::env().await;
+    let app = e.app.clone();
+    let dir_a = e.dir.join("cc-a");
+    let dir_b = e.dir.join("cc-b");
+    add_identity(&app, "cc-a", &dir_a).await;
+    add_identity(&app, "cc-b", &dir_b).await;
+    let bot = tt::claude_bot(&app, &e.project_id, "queued-switch").await;
+    sqlx::query("UPDATE bots SET identity='cc-a' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
+    let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+    let turn = |id: String| {
+        let app = app.clone();
+        async move { sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(id).fetch_one(&app.db).await.unwrap() }
+    };
+
+    let run_a = start_bot(&app, &bot.id).await.unwrap();
+    let transcript_a = dir_a.join("projects").join(CWD_KEY).join(format!("{S}.jsonl"));
+    std::fs::create_dir_all(transcript_a.parent().unwrap()).unwrap();
+    std::fs::write(&transcript_a, "{\"type\":\"user\",\"message\":\"先做 X\"}\n").unwrap();
+    crate::hookrecv::process(
+        &app,
+        &hook(&bot.id, &run_a, json!({"hook_event_name": "SessionStart", "session_id": S, "source": "startup",
+                                      "transcript_path": transcript_a.to_string_lossy()})),
+    )
+    .await
+    .unwrap();
+    let quota_turn = db::ulid();
+    sqlx::query(
+        "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, prompt_text, created_at)
+         VALUES (?,?,?,'web','in_flight','ok','先做 X（撞額度的那一句）',?)",
+    )
+    .bind(&quota_turn)
+    .bind(&conv)
+    .bind(&run_a)
+    .bind(db::now())
+    .execute(&app.db)
+    .await
+    .unwrap();
+    // A 還在回合中：AGM 的派工排在後面。
+    let dispatch = prompt_relayed_queueable(&app, &bot.id, "撞額度之前就排好的派工", "agm-before-switch", Some(crate::agent_relay::DAEMON_SENDER))
+        .await
+        .unwrap();
+    assert_eq!(dispatch.delivery, "queued");
+
+    // ---- 換身分重啟（回合中）：撞額度那一回合被收掉，派工留下來
+    sqlx::query("UPDATE bots SET identity='cc-b' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
+    let strict = StartOpts { resume_native: true, resume_required: true, ..Default::default() };
+    let run_b = restart_bot_with(&app, &bot.id, strict).await.unwrap();
+    assert_eq!(turn(quota_turn.clone()).await.status, "failed", "被重啟打斷的那一回合收成失敗，不會被重送");
+    let t = turn(dispatch.turn_id.clone()).await;
+    assert_eq!((t.status.as_str(), t.run_id.as_deref()), ("queued", None), "派工不是孤兒：重啟之後還排著");
+    let revoked: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='system'")
+        .bind(&dispatch.turn_id)
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+    assert_eq!(revoked, 0, "沒有「一併撤銷」的說明");
+
+    // ---- 新 run 接回、驗證完才送
+    let transcript_b = dir_b.join("projects").join(CWD_KEY).join(format!("{S}.jsonl"));
+    let pane_b: String = sqlx::query_scalar("SELECT pane_id FROM runs WHERE id=?").bind(&run_b).fetch_one(&app.db).await.unwrap();
+    e.herdr.live_pane(&pane_b, tt::LivePane { width: Some(120), transcript_file: Some(transcript_b.clone()), ..Default::default() });
+    db::set_pane_typed(&app.db, &run_b).await.unwrap();
+    // 真的送進 B 的 pane 幾次（mock 的 pane 只在字被送出時記一筆）。
+    let sent = || e.herdr.pane(&pane_b).map_or(0, |p| p.transcript.iter().filter(|l| l.contains("撞額度之前就排好的派工")).count());
+    forget_queue_retry_timer(&bot.id);
+    flush_queued_locked(&app, &bot.id).await.unwrap();
+    let t = turn(dispatch.turn_id.clone()).await;
+    assert_eq!((t.status.as_str(), t.flush_retries), ("queued", 0), "還沒驗證：等");
+    assert_eq!(sent(), 0);
+
+    crate::hookrecv::process(
+        &app,
+        &hook(&bot.id, &run_b, json!({"hook_event_name": "SessionStart", "session_id": S, "source": "resume",
+                                      "transcript_path": transcript_b.to_string_lossy()})),
+    )
+    .await
+    .unwrap();
+    forget_queue_retry_timer(&bot.id);
+    flush_queued_locked(&app, &bot.id).await.unwrap();
+    let t = turn(dispatch.turn_id.clone()).await;
+    assert_eq!((t.status.as_str(), t.delivery.as_str(), t.run_id.as_deref()), ("in_flight", "ok", Some(run_b.as_str())));
+    assert_eq!(sent(), 1);
+
+    // 多叫醒幾次、A 遲到的撞額度也到了、B 答完——都不會再送一次。
+    flush_queued_locked(&app, &bot.id).await.unwrap();
+    let late = json!({"hook_event_name": "StopFailure", "session_id": S, "prompt_id": "p-a",
+                      "reason": "You've hit your usage limit · resets 5pm"});
+    crate::hookrecv::process(&app, &hook(&bot.id, &run_a, late)).await.unwrap();
+    assert_eq!(turn(dispatch.turn_id.clone()).await.status, "in_flight");
+    let done = json!({"hook_event_name": "Stop", "session_id": S, "prompt_id": "p-b", "last_assistant_message": "派工做完了"});
+    crate::hookrecv::process(&app, &hook(&bot.id, &run_b, done)).await.unwrap();
+    assert_eq!(turn(dispatch.turn_id.clone()).await.status, "completed");
+    flush_queued_locked(&app, &bot.id).await.unwrap();
+    assert_eq!(sent(), 1, "只送一次");
+    let copies: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE prompt_text = '撞額度之前就排好的派工'")
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+    assert_eq!(copies, 1);
+    assert!(typed(&e).iter().all(|s| !s.contains("撞額度的那一句")));
+    forget_queue_retry_timer(&bot.id);
+    stop_bot(&app, &bot.id).await.unwrap();
+}

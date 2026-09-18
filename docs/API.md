@@ -789,6 +789,7 @@ readback_model_mismatch|readback_effort_mismatch|readback_fast_mismatch>`。以�
 有 Run 先 stop（ctrl+c ×2、逾時關 pane）再 start → `200 {"run_id"}`（新 Run）。沒有 Run 也可呼叫（= start）。錯誤同 start。過程推 `bot_status`。
 子 agent 在原 pane 重開（SPEC §6.9）。
 `?resume=native`：同 start 的語意，**停之前**就判斷接不接得回（看現在這個 Run 的 session）；接不回回 `409 cannot_resume`，原本的 agent 不會被停。預設（不帶）行為不變。
+重啟期間這顆 bot 排著的 queued（AGM 派工）**不撤**，留給新的 Run 送；重啟沒能把 bot 開回來才撤（SPEC §4.4a「重啟不是停」，issue #106）。
 
 ### 10.3c `GET /api/capabilities`
 `200 {"capabilities":["resume_native_start","herdr_maintenance"]}`。會停 herdr server 的腳本先確認這裡有 `resume_native_start` 才動手。

@@ -561,8 +561,13 @@ cancel 撤掉的是還沒送出的那則時，review 回應不再帶「turn 還�
 
 **沒有 run 的 queued 一律收掉**：排隊只會發生在「有 running run、正在回合中」的時候，所以 bot 被 stop、或 run 結束
 （`mark_run_exited`：pane 不見、agent 退出）時，它排著的 queued 沒有人會送——當場撤銷（標 `failed`＋system 訊息），
-掛著的交辦照一般流程收到 `failed` 的回合結束，AGM 看得到。還有活著的 run（例如重啟時新的已經起來）就不動。
+掛著的交辦照一般流程收到 `failed` 的回合結束，AGM 看得到。還有活著的 run 就不動。
 定時掃描（每 60 秒，§4.3b 那一支）也收一次「run 早就不在的 queued」，包含這條規則上線前就留下來的。
+**重啟不是停**（issue #106，`lifecycle::restart_hold`）：`restart_bot_with`（換身分、`?resume=native`、一鍵重啟）先停舊 run 再起新 run，
+中間那一段沒有 active run，但 bot 馬上就回來。重啟在 bot 鎖裡宣告「進行中」，這段期間任何撤孤兒的路徑——stop 自己、
+`restart_start` 收掉擋路 run 的 `mark_run_exited`、不拿 bot 鎖的 pane-exit 事件、定時掃描——都不撤；新 run 起來就叫醒 flush
+（`--resume` 起的 claude 由 §6.5.2 的閘門等驗證完才送）。重啟沒能把 bot 開回來才當孤兒撤（說明寫「重啟之後沒能把 bot 開回來」）。
+只放行程記憶體：daemon 在重啟途中掛掉，開機後那顆沒有 run、標記也不在，照舊收掉。子 agent 的原地重啟（§6.9）不走這條。
 
 **abort 不動 queued**（AGM 裁示 2026-09-16）：`POST /api/bots/{id}/abort` 的語意是「停掉這一回合」，排在後面的是 AGM 正當的派工，
 abort 之後照常 flush 出去（但先照下一段等寬限）。要取消排隊的派工，走交辦 `cancel`（上面那條會一併撤 queued）。這不是漏撤，不要當成 bug 修。
