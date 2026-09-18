@@ -1232,6 +1232,7 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   | 條件 | `reason` | 為什麼 |
   |---|---|---|
   | 是總管自己那幾顆（`supervisors.bot_id` 或 `supervisor_roles` 的 patrol／responder） | `supervisor` | 巡邏的人不收自己，watchdog 反正會把它們拉回來 |
+  | 主力 bot（`bots.is_primary`，側欄打星號的） | `primary` | 2026-09-18 使用者：「主力 bot 超時也不先 kill」。主力是隨時會切回去的那幾顆，叫醒要等 `--resume`，比省下的 RAM 更貴 |
   | `managed_by = 'team'` | `team_member` | 成員的 run 由 team 排程記著 |
   | `managed_by = 'child'` | `child` | pane 是父 agent 開的，daemon 起不回來（§6.5a），收掉就真的沒了 |
   | `runs.state != 'running'` | `not_running` | 還在啟動或關閉中 |
