@@ -1127,18 +1127,18 @@ async fn try_fallback(app: &Arc<App>, run_id: &str) -> anyhow::Result<bool> {
 
     // CAS claim + reply in one transaction, so a completed turn never lacks its reply.
     let mut tx = app.db.begin().await?;
-    let res = super::turn_controller::set_status_on(&mut tx, &turn.id, "in_flight", "completed_fallback", "§4.3 終端快照備援").await?;
+    // 撞限直接 `in_flight -> failed`：先落在 `completed_fallback` 再改 failed 不是合法邊，trigger 會把整個交易擋掉（#109）。
+    let res = if codex_hit.is_some() {
+        super::turn_controller::fail_on(&mut tx, &turn.id, super::turn_controller::DeliveryOnFail::Keep, "§4.3 備援看到撞限橫幅").await?
+    } else {
+        super::turn_controller::set_status_on(&mut tx, &turn.id, "in_flight", "completed_fallback", "§4.3 終端快照備援").await?
+    };
     if res != super::turn_controller::Outcome::Applied {
         return Ok(false);
     }
     tracing::info!(turn = %turn.id, "terminal fallback engaged");
 
     if let Some(hit) = codex_hit {
-        sqlx::query("UPDATE turns SET status='failed', completed_at=? WHERE id=?")
-            .bind(db::now())
-            .bind(&turn.id)
-            .execute(&mut *tx)
-            .await?;
         let message = insert_message_tx(
             &mut tx,
             &turn.conversation_id,
@@ -2435,6 +2435,26 @@ mod issue_17_tests {
         assert_eq!(turn(&app, &f.turn_id).await.status, "failed");
         let kinds = event_kinds(rx).await;
         assert_eq!(kinds, vec!["message_added", "turn_updated"]);
+    }
+
+    /// codex 撞限時終端備援要把回合收成 failed 並說明原因。以前先改成 `completed_fallback` 再改 `failed`，
+    /// 而 turn 的轉移 trigger 沒有 `completed_fallback -> failed` 這條邊：整個交易被擋掉，回合留在
+    /// in_flight 直到 stuck watchdog，撞限的說明也沒寫進對話。
+    #[tokio::test]
+    async fn a_codex_limit_banner_fails_the_turn_through_the_fallback() {
+        let banner = "■ You've hit your usage limit. Upgrade to Pro, or try again at Sep 19th, 2026 6:43 PM.";
+        let f = fixture("codex", &format!("› Reply with PONG\n\n{banner}\n\n› \n")).await;
+        let app = f.env.app.clone();
+
+        assert!(try_fallback(&app, &f.run_id).await.expect("備援不能因為轉移被擋而失敗"), "回合要被收掉");
+
+        assert_eq!(turn(&app, &f.turn_id).await.status, "failed");
+        let notes: Vec<String> = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='system'")
+            .bind(&f.turn_id)
+            .fetch_all(&app.db)
+            .await
+            .unwrap();
+        assert!(notes.iter().any(|n| n.contains("hit your usage limit")), "{notes:?}");
     }
 }
 
