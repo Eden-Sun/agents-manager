@@ -28,11 +28,27 @@ pub(crate) async fn insert_message_tx(
     incomplete: bool,
     snapshot: Option<&str>,
 ) -> anyhow::Result<db::Message> {
+    insert_message_relayed_tx(tx, conversation_id, turn_id, role, content, source, incomplete, snapshot, None).await
+}
+
+/// [`insert_message_tx`] 外加 `relay_from`（見 [`insert_message_full`]）。
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn insert_message_relayed_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    conversation_id: &str,
+    turn_id: Option<&str>,
+    role: &str,
+    content: &str,
+    source: &str,
+    incomplete: bool,
+    snapshot: Option<&str>,
+    relay_from: Option<&str>,
+) -> anyhow::Result<db::Message> {
     let id = db::ulid();
     let now = db::now();
     sqlx::query(
-        "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, incomplete, terminal_snapshot, created_at)
-         VALUES (?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, incomplete, terminal_snapshot, relay_from, created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?)",
     )
     .bind(&id)
     .bind(conversation_id)
@@ -42,6 +58,7 @@ pub(crate) async fn insert_message_tx(
     .bind(source)
     .bind(incomplete as i64)
     .bind(snapshot)
+    .bind(relay_from)
     .bind(&now)
     .execute(&mut **tx)
     .await?;
