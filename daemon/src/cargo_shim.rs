@@ -224,15 +224,11 @@ am_cargo "$@"
 
 /// Rewritten every start, same as the herdr shim: an upgraded daemon never leaves an old one behind.
 pub fn install_local(bot_dir: &Path) -> std::io::Result<PathBuf> {
-    let dir = bot_dir.join("bin");
+    let dir = crate::shim_refresh::bin_dir(bot_dir);
     std::fs::create_dir_all(&dir)?;
-    let path = dir.join("cargo");
-    std::fs::write(&path, SHIM_SH)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
-    }
+    // 暫存檔 + rename：直接覆寫的話，正在跑的那支 shim 會讀到寫到一半的內容，而且中途死掉會留下
+    // 一個不能執行的檔案（`shim_refresh::write_atomic`）。內容一樣就不動。
+    crate::shim_refresh::write_atomic(&dir.join("cargo"), SHIM_SH)?;
     Ok(dir)
 }
 
