@@ -275,7 +275,7 @@ pub async fn unwatch_pane_on_session(app: &Arc<App>, host: &str, session: &str, 
     }
 }
 
-async fn handle_status(app: &Arc<App>, host: &str, session: &str, ev: &crate::herdr::Event) {
+pub(crate) async fn handle_status(app: &Arc<App>, host: &str, session: &str, ev: &crate::herdr::Event) {
     let name = norm(&ev.event);
     if name != "pane_agent_status_changed" {
         tracing::trace!(event = %ev.event, "unhandled pane event");
@@ -299,12 +299,17 @@ async fn handle_status(app: &Arc<App>, host: &str, session: &str, ev: &crate::he
     let prev = run.agent_status.clone();
     // 卡住的 turn 要「持續」idle 才收：每個狀態事件都記，閃一下 working 就重算。
     crate::lifecycle::observe_agent_status(&run.id, &status);
+    // 閒置回收收機前會對這一份（issue #144）：DB 寫不進去時，DB 的 idle 不能被當成閒著的證據。
+    crate::supervisor::idle_sleep::observe_status(&run.id, &status);
     if prev != status {
-        let _ = sqlx::query("UPDATE runs SET agent_status = ? WHERE id = ?")
+        if let Err(e) = sqlx::query("UPDATE runs SET agent_status = ? WHERE id = ?")
             .bind(&status)
             .bind(&run.id)
             .execute(&app.db)
-            .await;
+            .await
+        {
+            tracing::warn!(run = %run.id, status = %status, error = ?e, "could not persist the agent status");
+        }
     }
     app.emit_bot_status(&run.bot_id).await;
 

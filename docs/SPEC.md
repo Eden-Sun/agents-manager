@@ -1427,7 +1427,13 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   turn／訊息，鎖裡重讀的 in-flight、排隊、交辦、最後動作時間看得到；一個剛開始又結束的回合會把「最後動作」推到現在。
   過了才 `bot_sleeps` 先寫一列（**先寫再停**：中間死掉留下的是
   「它應該是睡著的」，叫醒那條路會處理；反過來死在中間就變成一顆沒人知道要 `--resume` 的 bot），再走
-  `lifecycle::stop_bot_locked`——ctrl+c ×2 收 agent、關 pane，等於在 pane 裡下 exit。停失敗就把那一列
+  `lifecycle::stop_bot_locked_if_idle`——ctrl+c ×2 收 agent、關 pane，等於在 pane 裡下 exit。
+  **收機許可**（issue #144）：bot 鎖擋不住使用者直接在 pane 裡打字——那條路是 `events::handle_status`，不拿鎖就寫
+  `agent_status`。所以停機記 `stopping` 的那一句 UPDATE 同時帶「`agent_status` 還是 idle、沒有 in-flight／排隊回合」，
+  跟那一句寫入由 SQLite 排序：它先落地就 0 rows、不停（回 409 `no_longer_idle`，標記收回）；許可先落地，run 已經是
+  `stopping`，`begin_external_turn`（鎖裡看 `state == running`）不會替正在關的 pane 開回合。另外 `handle_status` 在寫 DB
+  **之前**把看到的狀態記在記憶體（`idle_sleep::observe_status`），DB 寫不進去（現在會記 warn，不再默默吞掉）時 DB 的
+  idle 不算閒著的證據：事件流說它不是 idle 就不收。停失敗就把那一列
   收回去，這顆仍是醒著的。收完在它自己的對話裡留一則 system 訊息說為什麼。
 - **怎麼叫醒**（`idle_sleep::wake`／`wake_locked`）：用 `StartOpts { resume_native: true, resume_required: true }`
   起回來，claude 拿到的是 `--resume <上一個 session>`，跟 §6.9 的批次是同一條路。`resume_required`
