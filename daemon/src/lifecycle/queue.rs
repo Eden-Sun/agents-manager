@@ -65,6 +65,16 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
         schedule_flush_retry(app, bot_id, left);
         return Ok(());
     }
+    // 目標身分還沒有額度（issue #108，`quota_hold`）：送進去只會再撞一次、派工白白燒掉。留在佇列、不花重試，
+    // 掛 timer 到撞限到期（最多五分鐘再看一次）；換身分重啟（#106）會叫醒這裡。
+    if let Some(hit) = super::quota_hold::blocking_hit(app, &bot).await {
+        let wait = super::quota_hold::recheck_in(hit.until.as_deref(), chrono::Utc::now());
+        super::quota_hold::note_held(bot_id);
+        tracing::info!(bot = %bot_id, turn = %turn.id, until = ?hit.until, wait_s = wait.as_secs(),
+                       "目標身分還沒有額度：排隊的 prompt 等額度回來或換身分再送");
+        schedule_flush_retry(app, bot_id, wait);
+        return Ok(());
+    }
     // 使用者剛按了 interrupt：讓他先拿回輸入框（§4.4a）。判斷放在這裡（而不是觸發端）是因為 flush 不只一個呼叫端
     // （`stuck_turns` 在同一把鎖裡直接呼叫）；排在撤銷檢查之後，不要的派工照樣當場撤。閒著的 bot 不會再有
     // `working -> idle` 邊叫醒它，所以要掛 timer 到寬限結束。
