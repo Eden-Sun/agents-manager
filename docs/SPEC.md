@@ -213,6 +213,12 @@ resend／排隊機制決定（`stuck_turns.rs`），不讓 CLI 自己另開一�
 `host_draining`／`container_recreated`／`checkpoint_restore` 同一組），跟本機 pane 的用量上限自動續跑是兩回事，關了也不影響它。
 真正管這個行為的是 `/config` 的「Continue automatically at usage limit」，對應 settings.json 的 `autoContinueAtUsageLimit`
 （claude 2.1.234 起存在；`--settings` 對不認得這個鍵的舊版本一律靜靜忽略，不會讓啟動失敗）。
+還有 `syncClaudeAiSkills: false` ＋ `syncClaudeAiPlugins: false`（issue #102，claude **2.1.275** 起才有這兩個鍵）：
+2.1.275 開始，CLI 會把「你 claude.ai 帳號上啟用的 skills／plugins」同步進用同一個帳號登入的終端 session。managed pane 的
+工具集必須由 daemon 決定——同步進來的東西 daemon 不知情，同一顆 bot 在不同時間會跑出不同行為；那些 skills 會吃 context，
+而 §4.4a 的 context／額度判斷都假設環境由 daemon 決定；而且帳號是共用的（cc0／cc1／cc2…），一個人在網站上開一個 skill 會
+同時改掉所有用那個帳號的 bot。這只寫進 daemon 注入的 `--settings`，使用者自己終端的 `~/.claude*/settings.json` 不受影響；
+子 agent（`managed_by='child'`）目前沒有 `--settings`，管不到，那是另一個題目。
 
 **Codex**：`-c notify=["/abs/agents-managerd","hook","codex","--bot",…,"--token",…,"--port",…]`；argv 最後一個參數是 JSON
 `{"type":"agent-turn-complete","thread-id","turn-id","cwd","input-messages","last-assistant-message"}`。使用者原本的 `notify` 在此實例被覆蓋。
