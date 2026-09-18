@@ -28,6 +28,8 @@ pub(crate) mod turn_controller;
 mod interrupt_grace;
 pub(crate) mod resume_gate;
 mod restart_hold;
+/// `runs.state` 轉移的唯一寫法，與寫不進去之後的重試（#135／#145／#146）。
+mod run_state;
 pub(crate) mod quota_hold;
 pub(crate) mod start_send;
 mod send_now;

@@ -44,7 +44,7 @@ pub const RUN_STATE_EDGES: &[(&str, &str, &str)] = &[
     ("running", "stopping", "同上"),
     ("stopping", "stopped", "lifecycle/start.rs:877、lifecycle/stop.rs:72"),
     ("stopped", "exited", "lifecycle/start.rs:781（唯一在 SQL 本身就 guard `AND state='stopped'` 的一條）"),
-    ("starting", "exited", "lifecycle/queue.rs mark_run_exited（CAS guard `AND state IN ('starting','running','stopping')`，#131 之前只有 Rust 層的 SELECT）；lifecycle/start.rs:182（啟動失敗）"),
+    ("starting", "exited", "lifecycle/queue.rs mark_run_exited（CAS guard `AND state IN ('starting','running','stopping')`，#131 之前只有 Rust 層的 SELECT；寫不進去就不收尾、排對帳重試，#135）；lifecycle/start.rs:182（啟動失敗）"),
     ("running", "exited", "同上"),
     ("stopping", "exited", "同上"),
 ];
