@@ -1073,10 +1073,20 @@ mod tests {
         late.assignment_id = Some("a1".into());
         late.payload_json =
             json!({"result": "已經推上 main", "late_reply": true, "assignment_status": "awaiting_review", "note": "hook 晚到"}).to_string();
-        let d = digest(&[late]);
+        let d = digest(&[late.clone()]);
         assert!(d.contains("回覆晚到"), "{d}");
         assert!(d.contains("awaiting_review"), "{d}");
         assert!(d.contains("已經推上 main"), "{d}");
+
+        // 送不進去的交辦：要看得到為什麼進不去、下一步怎麼做（`reason`／`hint`），不是「（空）」。
+        let mut stuck = late;
+        stuck.kind = "assignment_undeliverable".into();
+        stuck.payload_json = json!({"assignment_id": "a1", "reason": "排進佇列等了 31 分鐘，對方一直沒有回合結束的空檔",
+                                    "status": "blocked", "hint": "等那顆 bot 空下來再派一次（followup），或改派給別人。"}).to_string();
+        let d = digest(&[stuck]);
+        assert!(d.contains("排進佇列等了 31 分鐘"), "{d}");
+        assert!(d.contains("followup"), "{d}");
+        assert!(!d.contains("節錄：（空）"), "{d}");
     }
 }
 
