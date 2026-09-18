@@ -819,21 +819,19 @@ async fn apply_persona(app: &Arc<App>, text: &str) -> Result<(), LcError> {
     let Some(bot_id) = sup.bot_id.clone() else { return Ok(()) };
     let t = text.to_string();
     let bid = bot_id.clone();
-    app.cfg
-        .update(move |cfg| {
-            let mut found = false;
-            for p in cfg.projects.iter_mut() {
-                if let Some(b) = p.bots.iter_mut().find(|b| b.id.as_deref() == Some(bid.as_str())) {
-                    b.persona = Some(t.clone());
-                    found = true;
-                }
+    crate::projection::update_and_project(&app.cfg, &app.db, move |cfg| {
+        let mut found = false;
+        for p in cfg.projects.iter_mut() {
+            if let Some(b) = p.bots.iter_mut().find(|b| b.id.as_deref() == Some(bid.as_str())) {
+                b.persona = Some(t.clone());
+                found = true;
             }
-            anyhow::ensure!(found, "manager bot is missing from config");
-            Ok(())
-        })
-        .await
-        .map_err(up)?;
-    crate::projection::project_config(&app.cfg, &app.db).await.map_err(up)?;
+        }
+        anyhow::ensure!(found, "manager bot is missing from config");
+        Ok(())
+    })
+    .await
+    .map_err(up)?;
     std::fs::write(setup::agm_dir(app).join("persona.md"), text).map_err(up)?;
     Ok(())
 }

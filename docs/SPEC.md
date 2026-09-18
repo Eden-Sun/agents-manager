@@ -114,20 +114,25 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   daemon 下次啟動才爆。`validate` 是純函式（bot／專案 id 格式、bot 名字、kind、identity 綁定與 kind 相符、identity 名字與 kind），
   不碰 DB；每個 mutation 都走同一支，規則只有一份。
   **需要 DB 才判得出來的大量軟刪閘門不在這支裡**（純函式不碰 DB）：刪除 API（`delete_from_config`）本來就先在記憶體算出結果、
-  對著 DB 快照驗過才寫檔；issue #73 reopen 之後，Project／Bot 的寫設定 API（建/改專案、建/改 bot、排序、還原）也改走
-  `projection::update_and_project`——同一個 `PROJECTION` 臨界區內先查一次 DB 快照，交給 `ConfigStore::update_guarded` 的
-  `guard` 在純驗證之後、寫檔之前做同步比對，全部過了才寫檔、才投影，取代「先 `ConfigStore::update` 落盤、再另外呼叫
-  `project_config` 投影」那個兩段式（中間那個縫隙會讓一筆會被閘門擋下的修改先把 TOML 改壞、`config_written: true`，
-  DB 卻沒套用）。擋下來時 config.toml 與 SQLite 都不動（`config_written: false`，見下）。
-  身分的寫設定 API（建/刪身分）沒有跟著搬：改的是 `identities`，不影響 Project／Bot 的活列，這個閘門結構上碰不到，
-  仍是舊的兩段式（`api.rs::reproject`）。
+  對著 DB 快照驗過才寫檔；issue #73 之後，daemon 裡**所有**寫 config.toml 的 mutation（Project／Bot 的建/改/排序/還原，
+  以及身分的建/刪）都改走 `projection::update_and_project`——同一個 `PROJECTION` 臨界區內先查一次 DB 快照，交給
+  `ConfigStore::update_guarded` 的 `guard` 在純驗證之後、寫檔之前做同步比對，全部過了才寫檔、才投影，取代「先
+  `ConfigStore::update` 落盤、再另外呼叫 `project_config` 投影」那個兩段式（中間那個縫隙會讓一筆會被閘門擋下的修改先把
+  TOML 改壞、`config_written: true`，DB 卻沒套用）。擋下來時 config.toml 與 SQLite 都不動（`config_written: false`，見下）。
+  這條路徑涵蓋 API（`api.rs`）與內部系統觸發的 mutation（`fork.rs` 分身、`default_session.rs` 收編、
+  `supervisor/{responder,setup,controller,api}.rs` 設定/搬移 AGM／協調者、切模型、改人設）——issue 重開時列的「目前碰不到
+  閘門不是保留兩段式的理由」，因為閘門規則之後會變，而不是每個呼叫端都要自己重新判斷一次。
+  身分（`identities`）不影響 Project／Bot 的活列，這個閘門結構上永遠碰不到，但仍走同一支函式：commit boundary 只有一份，
+  不必為「這次會不會踩到」另外分岔。
+  沒有伴隨 mutation 的重投（daemon 啟動的 `project_config_at_startup`、supervisor 背景巡邏定期把既有 config 套進 DB）
+  不算 mutation，繼續用 `project_config`：那是把既有 config 重新套進 DB，不是「這次要不要寫」的判斷。
 - **投影不得大量軟刪**（2026-09-14 事故）：一次要軟刪的 bot／專案超過 3 列、或超過現有的 30%（兩列以上才算），或 config 裡一個專案都沒有而 DB 還有列 → **在任何寫入之前**拒絕整次投影並記 `error`，daemon 不啟動。
   啟動與 runtime 的**每一次**重投都走閘門：`ConfigStore::update` 會在磁碟 mtime 變了時重讀，「外面把 TOML 換掉／清空，再由 API 或總管觸發重投」是同一條事故路徑。
   DB 的活列＝上一次投影的結果，所以「config 空了但 DB 還有列」必然是拿錯 config／被換掉的檔案。
-  Project／Bot 的寫設定 API 閘門擋下來時回 **409 `projection_refused`**（帶會被軟刪的 bot／專案名字，與 `config_written: false`
-  ——寫檔前就被擋，這次的變更沒有進 config.toml，改一下範圍或處理完 DB 落差直接重送同一個請求即可），不是 502。
-  身分 API、啟動、與背景重投仍是舊行為：`config_written: true`（帶 `AM_ALLOW_BULK_DELETE` 提示）——被擋時變更已經在
-  config.toml 裡，重試同一個請求只會撞「已存在」。
+  經過 `update_and_project` 的 mutation 閘門擋下來時回 **409 `projection_refused`**（帶會被軟刪的 bot／專案名字，與
+  `config_written: false`——寫檔前就被擋，這次的變更沒有進 config.toml，改一下範圍或處理完 DB 落差直接重送同一個請求即可），
+  不是 502。啟動與背景重投（沒有伴隨使用者 mutation 的那類）仍是舊行為：`config_written: true`（帶
+  `AM_ALLOW_BULK_DELETE` 提示）——被擋時變更（如果有的話）已經在 config.toml 裡，重試同一個請求只會撞「已存在」。
   502 的定義是「herdr／DB 出錯」，呼叫端分不出「你的設定沒被套用」跟「ssh 斷了」，而且之後每一次寫設定都會再撞一次（review 2026-09-16）。
   唯一的例外是明確的刪除 API（`DELETE /api/bots/:id`、`DELETE /api/projects/:id`），走 `projection::delete_from_config` 的單一臨界區：
   **重讀 config → 確認目標此刻在 TOML（不在就 409 `not_in_config`）→ 從當下的 TOML 算出實際要拿掉的 id → 閘門（寫檔前）→ 寫 config → 投影**。

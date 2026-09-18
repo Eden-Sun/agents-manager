@@ -487,37 +487,12 @@ async fn get_state(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> 
     Ok(Json(state_json(&app).await?))
 }
 
-/// 給仍是「先 `app.cfg.update` 落盤、再投影」兩段式的呼叫端用（`create_identity`／`delete_identity`：
-/// 改的是 `identities`，不影響 Project／Bot 的活列，DB-backed 閘門結構上碰不到，沒有跟著搬到
-/// `projection::update_and_project`）。走到這裡被擋下時，這次的變更已經在 config.toml 裡了
-/// （`config_written: true`）。Project／Bot mutation 用 `projection_err`（見下）：那條的閘門在落盤前就擋，
-/// `config_written` 相反。
-async fn reproject(app: &Arc<App>) -> Result<(), LcError> {
-    crate::projection::project_config(&app.cfg, &app.db).await.map_err(|e| {
-        // 閘門擋下來是**狀態不對**，不是上游壞掉：502 會讓呼叫端以為 herdr／DB 出問題，
-        // 而真正要做的事（去 config.toml 把那幾列補回來）沒有任何線索（review 2026-09-16）。
-        match e.downcast_ref::<crate::projection::ProjectionRefused>() {
-            // `config_written`：照提示補完 config 再**重試同一個請求**會撞「已存在」（例如 409 project path already
-            // registered）而 UI／DB 都還看不到它——要做的是補回被擋的那幾列，讓下一次投影把它帶進來（review 2026-09-16 驗證 2）。
-            Some(r) => LcError::conflict(
-                "projection_refused",
-                json!({"reason": "projection_refused",
-                       "message": format!("{}（這次的變更已經寫進 config.toml，只是還沒套用；不要重試同一個請求，補回上面那幾列後任何一次寫設定或重啟都會套用）", r.detail),
-                       "config_written": true,
-                       "bots": r.bots, "projects": r.projects,
-                       "allow_env": crate::projection::ALLOW_BULK_ENV}),
-            ),
-            // 外面把 config.toml 換成一份不合法的檔案，投影當下才讀到：一樣是設定的問題，不是上游壞掉。
-            None => cfg_err(e),
-        }
-    })
-}
-
-/// `create_project`／`patch_project`／`create_bot`／`set_order`／`patch_bot`／`restore_bot` 用：
-/// 套用、純驗證、DB-backed 大量軟刪閘門都在 `projection::update_and_project` 裡、寫入 TOML **之前**
-/// 做完（issue #73 reopen，統一 commit boundary），取代「先 `app.cfg.update` 落盤、再 `reproject`」
-/// 那個兩段式。跟 `reproject` 的差別只在這裡：閘門擋下來時 config.toml 這次**沒有**被動過，
-/// 所以是 `config_written: false`——呼叫端改一下再送同一個請求就好，不必先去 config.toml 補列。
+/// issue #73 reopen：daemon 裡所有寫 config.toml 的 mutation（Project／Bot／identity）都走
+/// `projection::update_and_project`——套用、純驗證、DB-backed 大量軟刪閘門都在**寫入 TOML 之前**
+/// 做完，取代「先 `ConfigStore::update` 落盤、再另外呼叫 `project_config` 投影」的兩段式。
+/// 閘門擋下來時 config.toml **沒有**被動過，`config_written: false`：呼叫端改一下再送同一個請求就好，
+/// 不必先去 config.toml 補列（跟啟動投影／背景重投那類沒有伴隨 mutation 的 `project_config` 呼叫端不同，
+/// 那些仍是 `config_written: true`，見 `projection::guard_removals`）。
 fn projection_err(e: anyhow::Error) -> LcError {
     match e.downcast_ref::<crate::projection::ProjectionRefused>() {
         Some(r) => LcError::conflict(
@@ -532,32 +507,7 @@ fn projection_err(e: anyhow::Error) -> LcError {
 }
 
 #[cfg(test)]
-mod reproject_tests {
-    /// review 2026-09-16 驗證 2：閘門在落盤之後才判，409 要講明變更已經寫進 config.toml。
-    #[tokio::test]
-    async fn a_refused_projection_says_the_change_is_already_in_the_config() {
-        let _env = crate::projection::BULK_ENV.lock().await;
-        let env = crate::testing::env().await;
-        let app = &env.app;
-        let mut text = String::from("[server]\nlisten = '127.0.0.1:7788'\n\n[[projects]]\nid = 'p1'\npath = '/tmp'\nlabel = 'demo'\nhost = 'remote'\n");
-        for b in ["b1", "b2", "b3", "b4"] {
-            text.push_str(&format!("\n[[projects.bots]]\nid = '{b}'\nname = '{b}'\nkind = 'claude'\n"));
-        }
-        std::fs::write(&app.cfg.path, text).unwrap();
-        app.cfg.update(|_| Ok(())).await.unwrap();
-        super::reproject(app).await.expect("第一次投影");
-        std::fs::write(&app.cfg.path, "[server]\nlisten = '127.0.0.1:7788'\n").unwrap();
-        app.cfg.update(|_| Ok(())).await.unwrap();
-        match super::reproject(app).await {
-            Err(crate::lifecycle::LcError::Conflict(body)) => {
-                assert_eq!(body["reason"], "projection_refused");
-                assert_eq!(body["config_written"], true);
-                assert!(body["message"].as_str().unwrap().contains("已經寫進 config.toml"), "{body}");
-            }
-            other => panic!("{:?}", other.err().map(|e| format!("{e:?}"))),
-        }
-    }
-
+mod cfg_err_tests {
     /// issue #73：設定不合法是**請求的問題**，回 400 `config_invalid` 並講明什麼都沒寫。
     ///
     /// 混進 502（「herdr／DB 出錯」）的話，呼叫端分不出「改一下再送」跟「ssh 斷了、等一下重試」。
@@ -590,6 +540,26 @@ mod reproject_tests {
     fn other_errors_are_still_upstream() {
         match super::cfg_err(anyhow::anyhow!("herdr socket gone")) {
             crate::lifecycle::LcError::Upstream(m) => assert!(m.contains("herdr socket gone")),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// issue #73 reopen：`projection_err` 把 `ProjectionRefused` 對應到 409、`config_written: false`——
+    /// 新的 commit boundary 下，閘門一律在落盤前就擋，不會再出現舊 `reproject`（已刪）那種
+    /// `config_written: true`（已經寫進 config.toml）的狀況。
+    #[test]
+    fn projection_err_says_the_change_was_not_written() {
+        let refused = crate::projection::ProjectionRefused {
+            detail: "test detail".into(),
+            bots: vec!["b1".into()],
+            projects: vec![],
+        };
+        match super::projection_err(anyhow::Error::new(refused)) {
+            crate::lifecycle::LcError::Conflict(body) => {
+                assert_eq!(body["reason"], "projection_refused");
+                assert_eq!(body["config_written"], false);
+                assert_eq!(body["bots"], serde_json::json!(["b1"]));
+            }
             other => panic!("{other:?}"),
         }
     }
@@ -1454,7 +1424,7 @@ async fn restore_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Res
             Ok(())
         })
         .await
-        .map_err(any_err)?;
+        .map_err(projection_err)?;
     }
     app.emit("bot_changed", json!({"bot_id": id})).await;
     app.emit("project_changed", json!({"project_id": bot.project_id})).await;
@@ -2213,25 +2183,22 @@ async fn create_identity(State(app): State<Arc<App>>, Json(b): Json<NewIdentity>
         }
     }
     let cfg = IdentityCfg { name: b.name.clone(), kind: b.kind.clone(), host, env: b.env.clone(), args: b.args.clone() };
-    let res = app
-        .cfg
-        .update(move |f| {
-            // 鍵是 `(host, name)`：同一個名字可以在不同主機各有一份（同名不同帳號正是 §16.2 的前提）。
-            if f.identities.iter().any(|i| i.name == cfg.name && i.host_or_local() == cfg.host_or_local()) {
-                anyhow::bail!("duplicate");
-            }
-            f.identities.push(cfg);
-            Ok(())
-        })
-        .await;
+    let res = crate::projection::update_and_project(&app.cfg, &app.db, move |f| {
+        // 鍵是 `(host, name)`：同一個名字可以在不同主機各有一份（同名不同帳號正是 §16.2 的前提）。
+        if f.identities.iter().any(|i| i.name == cfg.name && i.host_or_local() == cfg.host_or_local()) {
+            anyhow::bail!("duplicate");
+        }
+        f.identities.push(cfg);
+        Ok(())
+    })
+    .await;
     match res {
         Ok(()) => {}
         Err(e) if e.to_string() == "duplicate" => {
             return Err(LcError::conflict("identity name already in use", json!({"name": b.name})))
         }
-        Err(e) => return Err(any_err(e)),
+        Err(e) => return Err(projection_err(e)),
     }
-    reproject(&app).await?;
     app.emit("identities_changed", json!({})).await;
     for c in app.hosts.list().await {
         crate::tools::spawn_detect(app.clone(), c.name.clone());
@@ -2285,13 +2252,12 @@ async fn delete_identity(
         }
     }
     let (n2, h2) = (name.clone(), host.clone());
-    app.cfg
-        .update(move |f| {
-            f.identities.retain(|i| !(i.name == n2 && i.host_or_local() == h2));
-            Ok(())
-        })
-        .await
-        .map_err(any_err)?;
+    crate::projection::update_and_project(&app.cfg, &app.db, move |f| {
+        f.identities.retain(|i| !(i.name == n2 && i.host_or_local() == h2));
+        Ok(())
+    })
+    .await
+    .map_err(projection_err)?;
     // A same-named `ccN` alias is a different entry (SPEC §16) and is put back from `shell_identities`.
     for ht in app.tools.lock().await.values_mut() {
         ht.identities.remove(&name);
@@ -2300,7 +2266,6 @@ async fn delete_identity(
             ht.identities.insert(name.clone(), crate::tools::IdentityInfo::shell(&i.name, &i.kind, dir));
         }
     }
-    reproject(&app).await?;
     app.emit("identities_changed", json!({})).await;
     Ok((StatusCode::OK, Json(json!({}))).into_response())
 }

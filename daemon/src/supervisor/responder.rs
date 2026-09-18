@@ -214,9 +214,7 @@ pub async fn ensure_env(
     let fresh_project = crate::db::ulid();
     let fresh_bot = crate::db::ulid();
     let (m2, e2, i2, p2, persona2) = (model.clone(), effort.clone(), identity.clone(), path.clone(), persona.clone());
-    let (project_id, bot_id) = app
-        .cfg
-        .update(move |cfg| {
+    let (project_id, bot_id) = crate::projection::update_and_project(&app.cfg, &app.db, move |cfg| {
             // 巡檢的專案優先：協調者是同一顆總管的另一個角色，側欄不該分成兩個專案（使用者 2026-09-16）。
             let pidx = cfg
                 .projects
@@ -281,20 +279,19 @@ pub async fn ensure_env(
             bot.args = vec![];
             bot.autostart = false;
             bot.inject_hooks = true;
-            Ok((project_id, bot.id.clone().expect("set above")))
-        })
-        .await
-        .map_err(|e| {
-            if e.to_string() == "name-taken" {
-                LcError::conflict(
-                    "a different bot is already called AGM-responder in the responder project",
-                    json!({"reason": "name_taken", "name": BOT_NAME}),
-                )
-            } else {
-                up(e)
-            }
-        })?;
-    crate::projection::project_config(&app.cfg, &app.db).await.map_err(up)?;
+        Ok((project_id, bot.id.clone().expect("set above")))
+    })
+    .await
+    .map_err(|e| {
+        if e.to_string() == "name-taken" {
+            LcError::conflict(
+                "a different bot is already called AGM-responder in the responder project",
+                json!({"reason": "name_taken", "name": BOT_NAME}),
+            )
+        } else {
+            up(e)
+        }
+    })?;
     // 專案只有一個 path，所以跟巡檢同專案之後，協調者自己的目錄改由 bot 記住。
     set_cwd(app, &bot_id, &path).await?;
     let deployed = deploy_files(app, &bot_id, manager_id.as_deref(), &persona).map_err(up)?;
@@ -338,38 +335,33 @@ async fn adopt_into_manager_project(app: &Arc<App>, bot_id: &str) -> Result<Opti
     let d = dir(app);
     let cwd = crate::config::canonical_path(&d.to_string_lossy()).unwrap_or_else(|_| d.to_string_lossy().into_owned());
     let (mp, bid, c2) = (manager_project.clone(), bot_id.to_string(), cwd.clone());
-    let moved = app
-        .cfg
-        .update(move |cfg| {
-            let Some(from) = cfg.projects.iter().position(|p| p.bots.iter().any(|b| b.id.as_deref() == Some(bid.as_str()))) else {
-                anyhow::bail!("missing");
-            };
-            if cfg.projects[from].id.as_deref() == Some(mp.as_str()) {
-                return Ok(false);
-            }
-            let Some(to) = cfg.projects.iter().position(|p| p.id.as_deref() == Some(mp.as_str())) else {
-                anyhow::bail!("missing");
-            };
-            let at = cfg.projects[from].bots.iter().position(|b| b.id.as_deref() == Some(bid.as_str())).expect("found above");
-            let bot = cfg.projects[from].bots.remove(at);
-            cfg.projects[to].bots.push(bot);
-            // 舊專案只是「協調者的目錄」那層殼，空了就拿掉，不然側欄會留一個空專案。
-            // 只拿掉路徑對得上的那一個：別人的專案就算空了也不是這裡能刪的。
-            if cfg.projects[from].bots.is_empty() && cfg.projects[from].path == c2 {
-                cfg.projects.remove(from);
-            }
-            Ok(true)
-        })
-        .await;
+    let moved = crate::projection::update_and_project(&app.cfg, &app.db, move |cfg| {
+        let Some(from) = cfg.projects.iter().position(|p| p.bots.iter().any(|b| b.id.as_deref() == Some(bid.as_str()))) else {
+            anyhow::bail!("missing");
+        };
+        if cfg.projects[from].id.as_deref() == Some(mp.as_str()) {
+            return Ok(false);
+        }
+        let Some(to) = cfg.projects.iter().position(|p| p.id.as_deref() == Some(mp.as_str())) else {
+            anyhow::bail!("missing");
+        };
+        let at = cfg.projects[from].bots.iter().position(|b| b.id.as_deref() == Some(bid.as_str())).expect("found above");
+        let bot = cfg.projects[from].bots.remove(at);
+        cfg.projects[to].bots.push(bot);
+        // 舊專案只是「協調者的目錄」那層殼，空了就拿掉，不然側欄會留一個空專案。
+        // 只拿掉路徑對得上的那一個：別人的專案就算空了也不是這裡能刪的。
+        if cfg.projects[from].bots.is_empty() && cfg.projects[from].path == c2 {
+            cfg.projects.remove(from);
+        }
+        Ok(true)
+    })
+    .await;
     let moved = match moved {
         Ok(m) => m,
         // 協調者不在 config.toml（被手改過），或巡檢的專案不見了：交給 setup 重建，不在這裡猜。
         Err(e) if e.to_string() == "missing" => return Ok(None),
         Err(e) => return Err(up(e)),
     };
-    if moved {
-        crate::projection::project_config(&app.cfg, &app.db).await.map_err(up)?;
-    }
     set_cwd(app, bot_id, &cwd).await?;
     roles::set_env(&app.db, Role::Responder, bot_id, &manager_project, &cwd).await.map_err(up)?;
     if moved {
@@ -383,21 +375,19 @@ async fn adopt_into_manager_project(app: &Arc<App>, bot_id: &str) -> Result<Opti
 pub async fn apply_persona(app: &Arc<App>, text: &str) -> Result<(), LcError> {
     let Some(bot_id) = roles::get(&app.db, Role::Responder).await.map_err(up)?.bot_id else { return Ok(()) };
     let t = text.to_string();
-    app.cfg
-        .update(move |cfg| {
-            let mut found = false;
-            for p in cfg.projects.iter_mut() {
-                if let Some(b) = p.bots.iter_mut().find(|b| b.id.as_deref() == Some(bot_id.as_str())) {
-                    b.persona = Some(t.clone());
-                    found = true;
-                }
+    crate::projection::update_and_project(&app.cfg, &app.db, move |cfg| {
+        let mut found = false;
+        for p in cfg.projects.iter_mut() {
+            if let Some(b) = p.bots.iter_mut().find(|b| b.id.as_deref() == Some(bot_id.as_str())) {
+                b.persona = Some(t.clone());
+                found = true;
             }
-            anyhow::ensure!(found, "responder bot is missing from config");
-            Ok(())
-        })
-        .await
-        .map_err(up)?;
-    crate::projection::project_config(&app.cfg, &app.db).await.map_err(up)?;
+        }
+        anyhow::ensure!(found, "responder bot is missing from config");
+        Ok(())
+    })
+    .await
+    .map_err(up)?;
     std::fs::write(dir(app).join("persona.md"), text).map_err(up)?;
     Ok(())
 }
