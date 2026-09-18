@@ -94,7 +94,7 @@ fn fallback_until(lower: &str, at: &str) -> Option<String> {
         LimitBucket::Unknown => 5,
     };
     let base = chrono::DateTime::parse_from_rfc3339(at).ok()?.with_timezone(&chrono::Utc);
-    Some((base + chrono::Duration::hours(hours)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+    Some(crate::db::iso_at(base + chrono::Duration::hours(hours)))
 }
 
 /// 把橫幅說的那一桶標成 100%，回傳它的重置時間（撞限到那時才解除）。認不出是哪一桶時照舊先 5h 再 7d。
@@ -425,10 +425,10 @@ mod quota_limit_tests {
     fn a_banner_with_no_window_reading_still_expires() {
         let at = "2026-09-16T10:00:00Z";
         for (line, want) in [
-            ("You've hit your session limit", "2026-09-16T15:00:00Z"),
-            ("You've hit your weekly limit", "2026-09-23T10:00:00Z"),
-            ("You've hit your Fable limit", "2026-09-23T10:00:00Z"),
-            ("You've hit your limit", "2026-09-16T15:00:00Z"),
+            ("You've hit your session limit", "2026-09-16T15:00:00.000Z"),
+            ("You've hit your weekly limit", "2026-09-23T10:00:00.000Z"),
+            ("You've hit your Fable limit", "2026-09-23T10:00:00.000Z"),
+            ("You've hit your limit", "2026-09-16T15:00:00.000Z"),
         ] {
             assert_eq!(fallback_until(&line.to_ascii_lowercase(), at).as_deref(), Some(want), "{line}");
         }
@@ -487,7 +487,7 @@ mod quota_limit_tests {
             empty.seven_day = None;
             let at = "2026-09-16T10:00:00Z";
             let until = saturate_bucket(&mut empty, &lower).or_else(|| fallback_until(&lower, at));
-            assert_eq!(until.as_deref(), Some("2026-09-23T10:00:00Z"), "{line}");
+            assert_eq!(until.as_deref(), Some("2026-09-23T10:00:00.000Z"), "{line}");
         }
         // 「weekly limit」仍然是整個身分的 7d。
         assert_eq!(bucket_name("you've hit your weekly limit").as_deref(), Some("seven_day"));

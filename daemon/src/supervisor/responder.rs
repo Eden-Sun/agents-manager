@@ -839,7 +839,7 @@ pub async fn notify(app: &Arc<App>) {
     let crid = if attempt == 0 { format!("agm-responder-inbox-{last}") } else { format!("agm-responder-inbox-{last}-r{attempt}") };
     let defer = |why: String| async move {
         let wait = backoff_secs(attempt, cap) as i64;
-        let next = (chrono::Utc::now() + chrono::Duration::seconds(wait)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let next = crate::db::iso_in(wait);
         let _ = store::defer_notify(&app.db, &ids, &next, &why).await;
     };
     match lifecycle::prompt_relayed(app, &bot.id, &digest(&due), &crid, &[], Some(crate::agent_relay::DAEMON_SENDER)).await {

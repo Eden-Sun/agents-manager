@@ -99,6 +99,13 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   **執行端刻意不統一**（issue #97）：三個執行者對應三種延遲與鎖的需求——總管 tick 10 秒輪詢（交辦重送／等額度／
   協調者補送／看門狗，序列化是刻意的）、排隊 prompt 的重試要在**那顆 bot 的鎖**裡準時燒、hook 收件匣靠 notify
   立刻處理（改成輪詢等於每個回合收尾都慢）。收成一個迴圈只會在裡面重新長出同樣三套政策。
+- **時間戳只有一種格式**（issue #101）：RFC3339、UTC、固定到毫秒、以 `Z` 結尾（`2026-09-18T07:00:00.000Z`），
+  一律由 `db::now()` / `db::iso_in()` / `db::iso_at()` 產生，生產程式碼不自己 `to_rfc3339_opts`（有測試掃原始碼擋著）。
+  這不是風格問題：很多到期判斷是拿這些字串**在 SQL 裡直接比大小**（`… WHERE notify_next_at <= ?`），
+  同一種格式下字典序才等於時間序。寬度一混（秒 vs 毫秒）同一秒內就會判錯；格式若變成帶位移（`+08:00`）
+  會差到**幾小時**。Rust 這一側的 `past()` 都是 parse 之後比 `DateTime`，本來就不受格式影響。
+  **既有資料不改寫**：到期時間是短命的（送出或放棄就清掉），舊的秒格式在一個退避週期內就被新的蓋過去；
+  唯一的殘留影響是那段期間內「同一秒內」的舊列會晚一次 tick，而 tick 是 10 秒、退避 15 秒起跳。
 - **權威劃分**：TOML 是 Project／Bot 期望設定的唯一權威；SQLite 存 Run／Turn／Message／Conversation／hook token／workspace 映射。啟動與每次寫回 TOML 後做 TOML→SQLite 投影（依 id upsert；TOML 移除的 bot 標 `deleted_at`，保留歷史）。
 - **落盤前先驗投影**（issue #73）：`ConfigStore::update` 的順序是「重讀（mtime 變了）→ 在記憶體套用修改 →
   `projection::validate` 乾跑 → 原子寫入（暫存檔 + `rename`）」。驗不過就直接回錯誤，**config.toml 一個字都不動**，

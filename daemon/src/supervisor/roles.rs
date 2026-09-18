@@ -734,6 +734,59 @@ mod tests {
     use super::*;
     use sqlx::sqlite::SqlitePoolOptions;
 
+    /// issue #101：**遷移期間新舊格式會並存**，混存時判斷仍要正確。
+    ///
+    /// `notify_next_at` 以前由 `defer_notify` 寫到**秒**（`…T07:00:00Z`），而 `due_for` 是拿
+    /// `db::now()`（毫秒）在 SQL 裡直接比字串。現在寫入端統一成毫秒了，但**既有的列還是秒**，
+    /// 所以這條測的就是那個混存狀態。
+    ///
+    /// 結論（也是我們接受的界線）：差一秒以上時兩種格式都判得對；**只有同一秒內**舊格式會被
+    /// 多壓一次 tick——`Z`(0x5A) 比 `.`(0x2E) 大，所以 `'…:05Z' <= '…:05.500Z'` 是 false。
+    /// 退避本身是 15 秒起跳、tick 10 秒，所以那不到一秒看不出來；而且到期時間是短命的，
+    /// 舊格式的列在一個退避週期內就被新的蓋掉了，不需要改寫既有資料。
+    #[tokio::test]
+    async fn a_legacy_second_precision_deadline_is_still_judged_correctly() {
+        let p = pool().await;
+        let due_ids = |rows: Vec<super::super::store::InboxEvent>| {
+            rows.into_iter().map(|e| e.event_key).collect::<Vec<_>>()
+        };
+        let mut pending: Vec<(&str, &str)> = Vec::new();
+        for (key, next_at) in [
+            // 舊格式（秒），早就過了 → 該出來。
+            ("legacy-past", "2026-09-18T07:00:00Z"),
+            // 新格式（毫秒），早就過了 → 該出來。
+            ("new-past", "2026-09-18T07:00:00.000Z"),
+            // 舊格式，還沒到 → 不該出來。
+            ("legacy-future", "2026-09-18T07:10:00Z"),
+            // 新格式，還沒到 → 不該出來。
+            ("new-future", "2026-09-18T07:10:00.000Z"),
+        ] {
+            super::super::store::push_inbox(&p, key, "approval_requested", None, None, None, &json!({})).await.unwrap();
+            pending.push((key, next_at));
+        }
+        // 先分類（決定歸誰），再蓋上到期時間：`due_for` 只看有主人的那些。
+        classify(&p).await.unwrap();
+        for (key, next_at) in pending {
+            sqlx::query("UPDATE supervisor_inbox SET notify_next_at=? WHERE event_key=?")
+                .bind(next_at)
+                .bind(key)
+                .execute(&p)
+                .await
+                .unwrap();
+        }
+        // 「現在」是毫秒格式，跟兩種到期時間都差超過一秒。
+        let now = "2026-09-18T07:05:00.000Z";
+        let mut got = due_ids(due_for(&p, Role::Patrol, false, now, 5).await.unwrap());
+        got.sort();
+        assert_eq!(got, vec!["legacy-past".to_string(), "new-past".to_string()], "新舊格式混存時要一起判對");
+
+        // 界線寫明白：同一秒內舊格式會被多壓一次 tick（下一次 tick 就過了）。
+        let same_second = "2026-09-18T07:00:00.500Z";
+        let got = due_ids(due_for(&p, Role::Patrol, false, same_second, 5).await.unwrap());
+        assert!(got.contains(&"new-past".to_string()), "新格式同一秒內判得對");
+        assert!(!got.contains(&"legacy-past".to_string()), "舊格式同一秒內晚一拍——這是我們接受的界線");
+    }
+
     async fn pool() -> SqlitePool {
         let p = SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
         super::super::store::migrate(&p).await.unwrap();

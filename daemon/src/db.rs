@@ -391,8 +391,29 @@ pub async fn refund_resend(pool: &SqlitePool, turn_id: &str) {
         .await;
 }
 
+/// 時間戳的**唯一**格式：RFC3339、UTC、固定到毫秒、以 `Z` 結尾（`2026-09-18T07:00:00.000Z`）。
+///
+/// 固定寬度而且以 `Z` 結尾這件事不是美觀問題——很多地方是拿這些字串**在 SQL 裡直接比大小**的
+/// （`... WHERE next_attempt_at <= ?`）。同一種格式下字典序就等於時間序；一旦混進別種寬度，
+/// 比較就會失準：`'…T07:00:00Z'` 與 `'…T07:00:00.000Z'` 在字串上不相等，`Z`(0x5A) 還大於 `.`(0x2E)。
+/// 真正危險的是帶時區位移的格式（`+08:00`／`-05:00`）——那會讓字典序跟時間序差到**幾小時**。
+/// 所以所有時間戳一律走 [`now`] 或 [`iso_in`]，不要各自 `to_rfc3339_opts`（issue #101）。
 pub fn now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+/// 現在起 `secs` 秒後的時間戳，格式同 [`now`]。
+///
+/// 到期時間（`next_attempt_at`／`resume_at`／`notify_next_at`／`watchdog_next_at`／維護窗口）全部走這支。
+/// 以前總管、看門狗、維護、API 各有一份一模一樣、卻寫到**秒**的 `iso_in`，於是
+/// `notify_next_at`（秒）跟 `db::now()`（毫秒）在 SQL 裡比大小會差不到一秒（issue #101）。
+pub fn iso_in(secs: i64) -> String {
+    iso_at(chrono::Utc::now() + chrono::Duration::seconds(secs))
+}
+
+/// 把一個時刻寫成 [`now`] 的格式。外面來的時間（CLI 橫幅的重置時刻等）先 parse 再用這支正規化。
+pub fn iso_at(t: chrono::DateTime<chrono::Utc>) -> String {
+    t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
 pub fn ulid() -> String {
@@ -772,6 +793,86 @@ pub async fn queued_turn_for_bot(pool: &SqlitePool, bot_id: &str) -> Result<Opti
 
 #[cfg(test)]
 mod tests {
+    /// issue #101：時間戳只有**一種**格式，而且那個格式必須讓「字典序＝時間序」。
+    ///
+    /// 很多判斷是拿這些字串在 SQL 裡直接比大小的，所以這不是風格問題：
+    /// 寬度一變（秒 vs 毫秒）同一秒內就會比錯，格式一變成帶位移（`+08:00`）會差到**幾小時**。
+    #[test]
+    fn every_timestamp_has_the_one_canonical_shape() {
+        let samples = [now(), iso_in(0), iso_in(60), iso_in(-60), iso_at(chrono::Utc::now())];
+        for s in &samples {
+            assert_eq!(s.len(), 24, "固定寬度才能比字串：{s}");
+            assert!(s.ends_with('Z'), "一律 UTC 的 Z，不可以是 +08:00 這種：{s}");
+            assert_eq!(&s[10..11], "T", "{s}");
+            assert_eq!(&s[19..20], ".", "到毫秒：{s}");
+            // 真的是這個時間，不是長得像而已。
+            chrono::DateTime::parse_from_rfc3339(s).unwrap_or_else(|e| panic!("{s} 解不開：{e}"));
+        }
+    }
+
+    /// 生產程式碼**只准**在 `db.rs` 決定時間戳格式（issue #101）。
+    ///
+    /// 上面兩條只證明 `db::` 這幾支對；要是別的模組自己 `to_rfc3339_opts(Secs)`，那兩條照樣綠。
+    /// 這一條掃原始碼把那條路堵死——今晚的教訓：守衛沒被測到，跟沒有守衛是一樣的。
+    /// `#[cfg(test)]` 之後的不算：測試本來就要造舊格式的資料（`roles.rs` 那條混存測試就是）。
+    #[test]
+    fn only_db_rs_decides_the_timestamp_format() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    out.push(p);
+                }
+            }
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        walk(&root, &mut files);
+        let mut strays: Vec<String> = Vec::new();
+        for f in files {
+            let at = f.strip_prefix(&root).unwrap().display().to_string();
+            if at == "db.rs" {
+                continue; // 格式就是在這裡定義的
+            }
+            let src = std::fs::read_to_string(&f).unwrap();
+            // 測試區塊以後不管：測試要造舊格式的列才測得到混存。
+            let prod = src.split("#[cfg(test)]").next().unwrap_or("");
+            for (i, line) in prod.lines().enumerate() {
+                // 只擋真的會出事的兩種：
+                //  - `Secs`：寬度跟毫秒不一樣，同一秒內字串比就會判錯（本 issue 的病灶）。
+                //  - 裸的 `to_rfc3339()`：產出 `+00:00` 而不是 `Z`，字典序跟時間序會差到**幾小時**。
+                // 直接寫 `Millis` 的雖然該改用 `db::` 的三支，但寬度是對的、不會判錯，先不擋。
+                let bad = line.contains("SecondsFormat::Secs")
+                    || (line.contains("to_rfc3339()") && !line.contains("to_rfc3339_opts"));
+                if bad {
+                    strays.push(format!("{at}:{}: {}", i + 1, line.trim()));
+                }
+            }
+        }
+        assert!(
+            strays.is_empty(),
+            "時間戳一律用 db::now()／db::iso_in()／db::iso_at()（固定寬度、以 Z 結尾）。\n\
+             `SecondsFormat::Secs` 同一秒內會判錯；裸的 `to_rfc3339()` 產出 +00:00，字典序會差到幾小時：\n{}",
+            strays.join("\n")
+        );
+    }
+
+    /// 字典序要等於時間序——這是所有 `WHERE ... <= ?` 成立的前提。
+    #[test]
+    fn lexicographic_order_is_chronological_order() {
+        let base = chrono::DateTime::parse_from_rfc3339("2026-09-18T07:00:00Z").unwrap().with_timezone(&chrono::Utc);
+        let mut prev = iso_at(base - chrono::Duration::days(400));
+        for ms in [1i64, 999, 1_000, 60_000, 3_600_000, 86_400_000] {
+            let cur = iso_at(base + chrono::Duration::milliseconds(ms));
+            assert!(prev < cur, "{prev} 應該排在 {cur} 前面");
+            prev = cur;
+        }
+        // 跨年、跨月也要成立（補零）。
+        assert!(iso_at(base) < iso_at(base + chrono::Duration::days(200)));
+    }
+
     use super::*;
 
     fn tmp_dir() -> std::path::PathBuf {

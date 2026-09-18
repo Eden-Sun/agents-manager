@@ -72,7 +72,7 @@ fn backoff_for(attempts: i64) -> Duration {
 }
 
 fn iso_in(secs: i64) -> String {
-    (chrono::Utc::now() + chrono::Duration::seconds(secs)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    crate::db::iso_in(secs)
 }
 
 fn past(iso: &str) -> bool {
@@ -378,7 +378,7 @@ const QUOTA_RECHECK_SECS: i64 = 15 * 60;
 /// 再加一道上限：算出來超過 [`MAX_QUOTA_WAIT_SECS`] 就改成 15 分鐘後再問。晚一點重送的代價，
 /// 遠小於一個錯的時間把工作壓一整天。
 fn resume_at_from(now: chrono::DateTime<chrono::Utc>, banner: Option<&str>, quota_reset: Option<&str>) -> String {
-    let iso = |t: chrono::DateTime<chrono::Utc>| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let iso = crate::db::iso_at;
     let parse = |s: Option<&str>| {
         s.map(str::trim)
             .filter(|x| !x.is_empty())
@@ -1632,32 +1632,33 @@ mod tests {
         // 橫幅被解析成隔天（舊的判讀），app-server 說五分鐘後：取五分鐘後那個。
         assert_eq!(
             resume_at_from(now, Some("2026-09-14T14:15:00Z"), Some("2026-09-13T14:20:00Z")),
-            "2026-09-13T14:20:00Z"
+            // 一律毫秒（`db::iso_at`）：時間戳只有一種格式，字典序才等於時間序（issue #101）。
+            "2026-09-13T14:20:00.000Z"
         );
         // 反過來也一樣：橫幅比較早就聽橫幅。
         assert_eq!(
             resume_at_from(now, Some("2026-09-13T14:18:00Z"), Some("2026-09-13T14:20:00Z")),
-            "2026-09-13T14:18:00Z"
+            "2026-09-13T14:18:00.000Z"
         );
         // 已經過去的一律不算（那是舊讀數，不是預約）。
         assert_eq!(
             resume_at_from(now, Some("2026-09-13T14:15:00Z"), Some("2026-09-13T14:20:00Z")),
-            "2026-09-13T14:20:00Z"
+            "2026-09-13T14:20:00.000Z"
         );
         // 兩邊都沒有 → 固定等一段時間再問。
-        assert_eq!(resume_at_from(now, None, None), "2026-09-13T14:45:22Z");
-        assert_eq!(resume_at_from(now, Some(" "), Some("2020-01-01T00:00:00Z")), "2026-09-13T14:45:22Z");
+        assert_eq!(resume_at_from(now, None, None), "2026-09-13T14:45:22.000Z");
+        assert_eq!(resume_at_from(now, Some(" "), Some("2020-01-01T00:00:00Z")), "2026-09-13T14:45:22.000Z");
     }
 
     /// 單一個錯的時間不該把工作壓一整天：超過 6 小時就改成 15 分鐘後再問一次。
     #[test]
     fn an_absurdly_far_reset_is_rechecked_instead_of_waited_out() {
         let now = chrono::DateTime::parse_from_rfc3339("2026-09-13T14:15:22Z").unwrap().with_timezone(&chrono::Utc);
-        assert_eq!(resume_at_from(now, Some("2026-09-14T14:15:00Z"), None), "2026-09-13T14:30:22Z");
+        assert_eq!(resume_at_from(now, Some("2026-09-14T14:15:00Z"), None), "2026-09-13T14:30:22.000Z");
         // 剛好在上限內的照用。
         assert_eq!(
             resume_at_from(now, Some("2026-09-13T20:00:00Z"), None),
-            "2026-09-13T20:00:00Z"
+            "2026-09-13T20:00:00.000Z"
         );
     }
 
