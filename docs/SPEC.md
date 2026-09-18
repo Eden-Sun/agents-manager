@@ -201,7 +201,15 @@ daemon 收到就**當場**把那一筆 in-flight turn 收成 `status='failed'`�
   原因從 `reason`／`failure_reason`／`stop_reason`／`error_type`／`subtype`／`error`（含 `{type,message}` 巢狀）／`message`／`detail` 依序找，
   欄位名還在動，撈不到不等於沒發生。分類只寫進那則系統訊息，**不碰 quota 狀態**——撞限的判定仍由既有的橫幅／statusLine 那條路負責，這條不介入也就不會讓它回歸。
 - **使用者自己按停不是失敗**，兩道防護：payload 的原因看起來是中斷（`interrupt`／`cancel`／`abort`…，分類時排在最前面）就不動；
-  payload 說不出原因時看 daemon 自己的紀錄——`interrupt_bot` 先 `note_user_interrupt` 再收 in-flight turn，所以按停之後 `ECHO_WINDOW`（120 秒，本機 hook 幾秒、遠端 spool 一兩輪掃描）內到的 StopFailure 就是同一次 Esc 的回聲；過了窗口就照真的失敗收（#117：接管標記要等排隊的派工問過才會清，拿「標記在不在」當判準的話，按過一次 Esc 的 bot 之後的撞額度全被吞掉）。
+  payload 說不出原因時看 daemon 自己的紀錄——`interrupt_bot`／`abort_turns` 送完 Esc、收 in-flight turn **之前**記下**被中斷的是哪一回合**
+  （`interrupt_grace::InterruptedTurn`：run、當下在飛的 turn、run 的 native session、本機 claude transcript 尾端最後一個 `promptId`——
+  跟 hook 的 `prompt_id` 是同一個值）。`StopFailure` 只有對得上那一回合才算回聲（`echo_verdict`，證據由強到弱）：
+  不是那個 run → 標記作廢；session 兩邊都有且不同 → 不是；prompt id 兩邊都有 → 同一則才是（擷取再晚都是，不同則擷取再早都不是）；
+  此刻在飛的就是被中斷那一筆 → 是；都證不出來時看**送端蓋的擷取時間**（`received_at`）：Esc 之後 `ECHO_CAPTURE_SLACK`（3 秒，
+  涵蓋遠端 `hook.sh` 只蓋到秒與兩台時鐘的小誤差）內擷取、且早於此刻在飛的新回合開始的才是；沒有擷取時間的一律不是。
+  認成回聲就結清那筆（排隊寬限的接管標記另外算，不受影響）；不是回聲的照真的失敗收，那筆留著等回聲。
+  比的是擷取時間不是收到時間：遠端 spool 放 30 秒以上才撈回來也認得出來，而 Esc 之後新開的回合失敗不會被吞掉
+  （#117：上一版只記「這顆 bot 什麼時候按過停」並在收到後 120 秒內一律當回聲，Esc 之後馬上開的新回合撞額度就被吞掉、撞限也不記）。
 - **不會重複收尾**：先在 `(native_session_id, native_turn_id)` 上去重（重播、spool 重送），再用
   `UPDATE … WHERE id=? AND status='in_flight'` 的 CAS——後到的 Stop 或 §4.3 備援已經收掉時這裡 0 rows，什麼都不做。
   沒有 in-flight turn 時**不開新回合**：後到的訊號沒有回合可收就算了。
