@@ -651,6 +651,20 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run
    都沒用才讀 `visible` 快照 → Turn `failed` + system Message，
    中性敘述並原樣引用含 `Not logged in`／`/login`／`unlock-keychain`／`usage limit`／`limit` 的行（提示 ssh 下 macOS Keychain 可能讀不到）。
 8. 請求可帶 `relay_from`（bot id 或 `"daemon"`），記下這則是誰轉述的，UI 據此不把它算成使用者發言。
+9. **插隊送出**（issue #103，請求帶 `send_now: true`）：對方回合中時**打斷它**，而不是回 409。前提是這一顆 run 認得
+   claude 2.1.275 的 send-now 鍵——CLI 自己決定怎麼收掉當下那一回合，比 daemon 從外面送 `esc` 再貼字準。
+   - **閘門**（`lifecycle::send_now::supported`）：`kind = claude`，且 `runs.status_json.version`（statusLine 回報的**跑著的**
+     版本，不是磁碟上的）≥ `2.1.275`。不合格就**一個鍵都不按**，照第 2 步原本的路（AGM 派工排隊、使用者 409），
+     409 的 body 多帶 `send_now_refused`／`send_now_message` 說清楚為什麼沒插隊。版本還不知道時一律不插——按錯鍵的代價是
+     把使用者的字打進不知道什麼地方。
+   - **一定走打字那條路**（`force_pane`）：herdr 的 `agent.prompt` 沒有鍵可以按，按不到 send-now 就只是把字排進 CLI 自己的
+     佇列，等於沒插隊。送出鍵用 `ctrl+x ctrl+s`，不用 `ctrl+enter`：終端對後者的支援不一致。
+   - **順序**：先規劃（第 3 步）→ 規劃成立才 `fail_in_flight` 收掉被打斷的那一筆（`failed` ＋ 一則 system 說明
+     「被插隊送出打斷（claude send-now）」）→ 再 insert 新 turn → 打字＋按鍵。規劃失敗（框裡有字、證據讀不到）時一個鍵都還沒按，
+     不能先把人家的回合收掉。`turns_one_in_flight` 要求舊的先離開新的才進得去，這也就是「同一顆 bot 連續兩次 send-now
+     不會產生兩個 `in_flight`」的保證：兩次都在同一顆 per-bot 鎖裡排隊。
+   - **當下沒有回合在飛**：不按那顆鍵，照一般 Enter 送出（回應 `send_now: "idle"`），不替這條路多綁一個版本前提。
+   - 灰字（sent／queued 到模型收到之前）是 CLI 自己畫的，daemon 與前端都不模擬。
 
 ### 6.4 停止／刪除 Bot（per-bot 鎖內）
 - `interrupt`：`agent.send_keys [esc]`，Run 狀態不變。

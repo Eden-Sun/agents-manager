@@ -174,7 +174,7 @@ config.toml 裡沒有的 id（child、已刪）忽略。成功推 `project_chang
 `POST /api/bots/{id}/prompt`
 
 ```json
-{ "text": "Reply with exactly PONG", "client_request_id": "<前端產生的唯一字串>", "relay_from": "<bot id> | \"daemon\"", "attachments"?: ["<attachment id>"] }
+{ "text": "Reply with exactly PONG", "client_request_id": "<前端產生的唯一字串>", "relay_from": "<bot id> | \"daemon\"", "attachments"?: ["<attachment id>"], "send_now"?: true }
 ```
 
 - `relay_from` 省略 = **使用者自己打的**。其他來源一定要帶：另一顆 bot 帶它的 `bot_id`，launchd 腳本與 daemon 的自動通知帶 `"daemon"`。不是存在中的 bot 也不是 `daemon` → 400。
@@ -188,6 +188,26 @@ config.toml 裡沒有的 id（child、已刪）忽略。成功推 `project_chang
 - `failed`：agent 當下 blocked 或附件綁定失敗；Turn 直接 failed，並推 `message_added`（system）與 `turn_updated`。
 
 判斷送達看回應有沒有 `message_id`：409 的 body 也可能帶 `turn_id`。
+
+**插隊送出 `send_now: true`**（issue #103，SPEC §6.3 第 9 點）：對方回合中時打斷它，而不是回 409。daemon 照舊寫 turn／訊息，
+但不等 idle——打字進 pane 之後按 claude 2.1.275 的 send-now 鍵（`ctrl+x ctrl+s`），並把被打斷的那一回合收成 `failed`
+（加一則 system 訊息「被插隊送出打斷（claude send-now）」），不留永遠 `in_flight` 的回合。成功的 200 多一個欄位：
+
+| `send_now` | 意思 |
+|---|---|
+| `"interrupted"` | 真的打斷了一個進行中的回合並按了那顆鍵 |
+| `"idle"` | 當下沒有回合在飛，照一般 Enter 送出（不需要插隊，也不檢查版本） |
+
+**前提**：`kind = claude` 且這個 run **跑著的** claude ≥ 2.1.275（`runs.status_json.version`，statusLine 回報的；磁碟上已更新但還沒重啟
+不算）。不合格時 daemon **一個鍵都不按**，照原本的路走——AGM 派工排隊、使用者 409——409 的 body 多兩個欄位說明為什麼沒插隊：
+
+| `send_now_refused` | 意思 |
+|---|---|
+| `send_now_unsupported_kind` | 只有 claude 有這顆鍵；codex／grok 照舊排隊 |
+| `send_now_cli_too_old` | 這個 run 跑的 claude 比 2.1.275 舊，重啟套用新版後才能插隊 |
+| `send_now_version_unknown` | statusLine 還沒回報版本，不賭那顆鍵 |
+
+`send_now_message` 是同一件事的中文說明，前端直接顯示。灰字（sent／queued 到模型收到之前）由 CLI 自己畫，daemon 不模擬。
 active Run 的 herdr session 已不可用 → 寫入 Turn 前回 502，不留 Turn 或 user message。
 排隊中的 prompt 是 `status = "queued"` 的 Turn（每個對話最多一筆，`state.bots[].queued_turn`），daemon 在前一回合結束後送出。
 **只有 AGM 的派工會排隊**（2026-09-16）：`supervisor` 派工遇到 in-flight 會建一筆 queued（交辦記成 `delivery="queued"`；同一個 `client_request_id` 重問一筆還在排隊的，回應照樣是 `delivery:"queued"`，不是 turn 欄位上的 `pending`），排超過

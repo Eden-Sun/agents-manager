@@ -433,7 +433,8 @@ export interface StoreState {
   /** 送 `/login` 進 TUI；false = 沒送出，原因已跳通知。 */
   loginBot: (botId: string) => Promise<boolean>
   /** `attachments` 是 `POST /bots/:id/attachments` 回傳的 id。 */
-  sendPrompt: (botId: string, text: string, attachments?: string[]) => Promise<boolean>
+  /** `sendNow`＝插隊送出（issue #103）：對方回合中時打斷它，而不是排隊／409。 */
+  sendPrompt: (botId: string, text: string, attachments?: string[], sendNow?: boolean) => Promise<boolean>
   sendKeys: (botId: string, keys: string[]) => Promise<void>
   /** 多行內容要走這裡：`sendKeys` 吃鍵名，`\n` 不是鍵名（見 `store/alongside.ts`）。 */
   sendText: (botId: string, text: string, enter: boolean) => Promise<boolean>
@@ -1207,10 +1208,14 @@ export const useStore = create<StoreState>((set, get) => ({
     }
   },
 
-  async sendPrompt(botId, text, attachments = []) {
+  async sendPrompt(botId, text, attachments = [], sendNow = false) {
     const crid = api.newClientRequestId()
     try {
-      const res = await api.sendPrompt(botId, text, crid, attachments)
+      const res = await api.sendPrompt(botId, text, crid, attachments, sendNow)
+      // 沒插成隊時 daemon 照舊送出（閒著的 bot）；為什麼沒插隊要講出來，不然使用者以為打斷了。
+      if (sendNow && res.send_now && res.send_now !== 'interrupted' && res.send_now !== 'idle') {
+        get().notify('info', '沒有插隊：這顆 bot 的 claude 還沒有 send-now 鍵（2.1.275 起），訊息照一般方式送出。')
+      }
       if (res.delivery === 'unknown') {
         get().notify('error', '訊息已送出但送達狀態未知（delivery=unknown），需先放棄該回合才能再送。')
       }
@@ -1253,6 +1258,11 @@ export const useStore = create<StoreState>((set, get) => ({
       // claude 停在登入選單：通知講白，不要只給「HTTP 409」。
       if (e instanceof ApiError && e.status === 409 && e.body.reason === 'needs_login') {
         get().notify('error', typeof e.body.message === 'string' ? e.body.message : '這個 claude 還沒登入，先到「終端」分頁完成登入。')
+        return false
+      }
+      // 插不了隊（不是 claude、CLI 比 2.1.275 舊、版本還不知道）：daemon 已經說了原因，照抄比「HTTP 409」有用。
+      if (e instanceof ApiError && e.status === 409 && typeof e.body.send_now_message === 'string') {
+        get().notify('error', e.body.send_now_message)
         return false
       }
       get().notify('error', errText(e))

@@ -443,6 +443,9 @@ export interface PromptResult {
   turn_id: string
   message_id: string | null
   delivery: TurnDelivery
+  /** 只有請求帶 `send_now` 時才有（issue #103）：`interrupted`＝打斷了一個回合，`idle`＝當下沒回合在飛，
+   *  其他值（`send_now_*`）是**沒有**插隊的原因。 */
+  send_now: string | null
 }
 
 export interface MessagesPage {

@@ -758,6 +758,20 @@ function Composer({
     settleComposerSend({ setText, clearFiles: files.clear, restoreQueuedSend }, botId, wasQueued, ok)
   }
 
+  // 插隊送出（issue #103）：照舊建一個新回合，但由 CLI 自己的 send-now 鍵打斷當下那一輪。
+  // 跟「中止並取代」的差別是不必先等中止確認——CLI 自己決定怎麼收掉那一回合，比我們從外面送 esc 再貼字準。
+  const sendNow = async () => {
+    const body = pending.trim()
+    const ids = queued ? queued.attachments : files.ids
+    if (!body && ids.length === 0) return
+    const wasQueued = queued
+    if (wasQueued) cancelQueuedSend(botId)
+    setSending(true)
+    const ok = await sendPrompt(botId, body, ids, true)
+    setSending(false)
+    settleComposerSend({ setText, clearFiles: files.clear, restoreQueuedSend }, botId, wasQueued, ok)
+  }
+
   // 直接打進 pane、不建新回合：回覆併在目前這一輪。
   const sendAlongside = async () => {
     const body = pending.trim()
@@ -823,6 +837,18 @@ function Composer({
                 onClick={() => void abortAndSend()}
               >
                 中止並取代
+              </button>
+              {/* 插隊＝CLI 自己的 send-now 鍵（claude 2.1.275 起）：它打斷目前那一輪、收掉它，再收下這句。
+                  不是 claude 或 CLI 太舊時 daemon 回 409 並說原因，這裡照原樣顯示。 */}
+              <button
+                type="button"
+                className="mini-btn"
+                disabled={aborting || sending}
+                title={`打斷目前這一輪並立刻送出（需要 claude 2.1.275 以上）：${pending.slice(0, 40)}${pending.length > 40 ? '…' : ''}`}
+                onClick={() => void sendNow()}
+              >
+                {/* 手機的鎖條剛好塞滿一行（390px）；多一顆四個字就換行，短標籤留在一行內。 */}
+                {phone ? '插隊' : '立刻送出'}
               </button>
               {/* 併行＝直接打進 pane，不是第二輪：daemon 一次只認一個 turn（SPEC §2）。 */}
               <button
