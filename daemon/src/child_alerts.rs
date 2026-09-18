@@ -41,6 +41,19 @@ fn spoken() -> &'static Mutex<Spoken> {
     V.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// 這一次 blocked 的身分（`bot_id -> episode id`，issue #134）。第一次需要時產生，`forget`（離開 blocked）時清掉：
+/// 同一次 blocked 裡的重試、8 秒任務重跑拿到同一個 id（通知的冪等鍵不變，不會多送），解除之後再卡住就是新的 id
+/// （同一個問題也會再講一次）。以前冪等鍵只有「child＋問題指紋」，第二次卡在同一個問題時 `prompt` 的冪等把第一次那筆
+/// 還回來，parent 再也收不到。存在記憶體，理由同 [`Spoken`]：daemon 重啟後最多重講一次。
+fn episodes() -> &'static Mutex<HashMap<String, String>> {
+    static V: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    V.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn episode_for(bot_id: &str) -> String {
+    episodes().lock().unwrap().entry(bot_id.to_string()).or_insert_with(db::ulid).clone()
+}
+
 /// 這一則現在該不該送：指紋一樣就不送（同一個問題），指紋不同但還在節流窗內也不送。
 ///
 /// 純函式，時間從外面給，所以節流測得到。
@@ -55,18 +68,26 @@ pub fn may_speak(prev: Option<(u64, std::time::Instant)>, fp: u64, now: std::tim
 /// 認法是那則訊息自己（`relay_from` ＝某顆 bot、內容帶這個標記），不是猜血緣（協調者 2026-09-18）。
 pub const ALERT_MARK: &str = "[daemon 自動通知，不是 bot_request]";
 
-/// 這顆 bot 的對話裡，最後一則進來的訊息是不是我們自己發的 child 通知。
+/// 這顆 bot **現在停著的那一回合**，是不是讀了我們的 child 通知才開始的。
+///
+/// 只認已經送達的回合（不是 `queued`），而且先看還在跑的那一回合（issue #134）：以前看的是對話裡最後一則 user
+/// message，排在佇列裡、還沒讀到的通知也算——mid 其實是被自己的回合卡住，top 卻收不到它的提問。
 async fn last_inbound_is_our_alert(app: &Arc<App>, bot_id: &str) -> bool {
     let Ok(conv) = db::conversation_id(&app.db, bot_id).await else { return false };
-    let last: Option<String> = sqlx::query_scalar(
-        "SELECT content FROM messages WHERE conversation_id = ? AND role = 'user' ORDER BY created_at DESC, rowid DESC LIMIT 1",
+    let started_by: Option<String> = sqlx::query_scalar(
+        "SELECT (SELECT m.content FROM messages m WHERE m.turn_id = t.id AND m.role = 'user' ORDER BY m.created_at, m.rowid LIMIT 1)
+           FROM turns t
+          WHERE t.conversation_id = ? AND t.status <> 'queued'
+          ORDER BY (t.status = 'in_flight') DESC, t.created_at DESC, t.rowid DESC
+          LIMIT 1",
     )
     .bind(&conv)
     .fetch_optional(&app.db)
     .await
     .ok()
+    .flatten()
     .flatten();
-    last.is_some_and(|c| c.starts_with(ALERT_MARK))
+    started_by.is_some_and(|c| c.starts_with(ALERT_MARK))
 }
 
 /// 畫面尾段壓成「它在問什麼」。
@@ -237,6 +258,7 @@ async fn tell_parent(app: &Arc<App>, run: &db::Run) -> anyhow::Result<()> {
 /// child 不再 blocked 時把指紋忘掉：同一個問題**再次**出現（例如它又問一次）才會再講一次。
 pub fn forget(bot_id: &str) {
     spoken().lock().unwrap().remove(bot_id);
+    episodes().lock().unwrap().remove(bot_id);
 }
 
 /// 把通知送給 parent（`prompt_relayed_queueable`：parent 在回合中就排隊，不插隊、不打斷）。
@@ -248,7 +270,8 @@ pub async fn deliver(
     child_name: &str,
     question: &str,
 ) -> crate::lifecycle::LcResult<crate::lifecycle::PromptOut> {
-    let crid = format!("child-blocked:{child_id}:{:x}", fingerprint(question));
+    // 冪等鍵＝這一次 blocked（episode）＋問題：同一次的重試不 fan-out，解除後再卡住是新的一則（issue #134）。
+    let crid = format!("child-blocked:{child_id}:{}:{:x}", episode_for(child_id), fingerprint(question));
     crate::lifecycle::prompt_relayed_queueable(app, parent_id, &message_for(child_name, question), &crid, Some(child_id)).await
 }
 
@@ -397,13 +420,21 @@ mod tests {
              VALUES ('mid',?,'mid','claude','[]',0,1,'tok-mid',?)",
         )
         .bind(&e.project_id).bind(&now).execute(&app.db).await.unwrap();
-        crate::testing::fake_run(&app, "mid").await;
+        let mid_run = crate::testing::fake_run(&app, "mid").await;
         let conv = db::conversation_id(&app.db, "mid").await.unwrap();
         assert!(!last_inbound_is_our_alert(&app, "mid").await, "還沒收到通知");
 
-        sqlx::query("INSERT INTO messages (id, conversation_id, role, content, source, created_at) VALUES (?,?, 'user', ?, 'web', ?)")
-            .bind(db::ulid()).bind(&conv).bind(message_for("kid", "要不要繼續？")).bind(db::now())
-            .execute(&app.db).await.unwrap();
+        // 通知已經送達：mid 正在跑的那一回合就是它開的（issue #134：排隊中、還沒讀到的不算，另一條測試）。
+        let turn = |id: &'static str, status: &'static str, content: String| {
+            let (app, conv, run) = (app.clone(), conv.clone(), mid_run.clone());
+            async move {
+                sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,delivery,created_at) VALUES (?,?,?,'web',?,'ok',?)")
+                    .bind(id).bind(&conv).bind(&run).bind(status).bind(db::now()).execute(&app.db).await.unwrap();
+                sqlx::query("INSERT INTO messages (id, conversation_id, turn_id, role, content, source, created_at) VALUES (?,?,?, 'user', ?, 'web', ?)")
+                    .bind(db::ulid()).bind(&conv).bind(id).bind(content).bind(db::now()).execute(&app.db).await.unwrap();
+            }
+        };
+        turn("t-alert", "in_flight", message_for("kid", "要不要繼續？")).await;
         assert!(last_inbound_is_our_alert(&app, "mid").await, "它現在停著是因為讀了那則通知——不要再往上轉");
         // 走真正的入口再確認一次：它是一顆有父、blocked 的 child，唯一擋下來的理由就是「不串接」。
         sqlx::query("UPDATE bots SET managed_by='child', parent_bot_id='top' WHERE id='mid'").execute(&app.db).await.unwrap();
@@ -413,9 +444,78 @@ mod tests {
         sqlx::query("UPDATE runs SET agent_status='blocked' WHERE bot_id='mid'").execute(&app.db).await.unwrap();
         assert!(parent_to_tell(&app, "mid").await.unwrap().is_none(), "通知不該一層層往上串");
 
-        sqlx::query("INSERT INTO messages (id, conversation_id, role, content, source, created_at) VALUES (?,?, 'user', '使用者自己問的', 'web', ?)")
-            .bind(db::ulid()).bind(&conv).bind(db::now()).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET status='completed' WHERE id='t-alert'").execute(&app.db).await.unwrap();
+        turn("t-user", "in_flight", "使用者自己問的".to_string()).await;
         assert!(!last_inbound_is_our_alert(&app, "mid").await, "使用者自己講話之後就不是那種情況了");
+    }
+
+    /// issue #134：冪等鍵要代表「這一次 blocked」，不是「child＋問題文字」。以前 crid 只有指紋：child 第二次卡在
+    /// **同一個**問題（權限確認、`Do you want to proceed?` 常常一再出現）時，`forget` 清掉的只有記憶體裡的去重，
+    /// `prompt` 的冪等照樣把第一次那筆 Turn 還回來——parent 再也收不到提醒。同一次 blocked 的重試仍要冪等。
+    #[tokio::test]
+    async fn blocking_again_on_the_same_question_is_a_new_notice_but_a_retry_is_not() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let parent = crate::testing::claude_bot(&app, &e.project_id, "p-episode").await.id;
+        let run = crate::testing::fake_run(&app, &parent).await;
+        // parent 正在回合中：通知排隊（跟 `a_parent_mid_turn_gets_the_alert_queued_not_shoved_in` 同一個情境）。
+        let conv = db::conversation_id(&app.db, &parent).await.unwrap();
+        sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,delivery,created_at) VALUES ('t-busy',?,?,'web','in_flight','ok',?)")
+            .bind(&conv).bind(&run).bind(db::now()).execute(&app.db).await.unwrap();
+        let q = "Do you want to proceed?";
+
+        let first = deliver(&app, &parent, "kid-episode", "kid-episode", q).await.unwrap();
+        let retry = deliver(&app, &parent, "kid-episode", "kid-episode", q).await.unwrap();
+        assert_eq!(first.turn_id, retry.turn_id, "同一次 blocked 的重試不能變成兩則");
+
+        // parent 讀完了那一則；child 被回答、離開 blocked。
+        for st in ["in_flight", "completed"] {
+            sqlx::query("UPDATE turns SET status=?, completed_at=? WHERE id=?").bind(st).bind(db::now()).bind(&first.turn_id).execute(&app.db).await.unwrap();
+        }
+        forget("kid-episode");
+        let again = deliver(&app, &parent, "kid-episode", "kid-episode", q).await.unwrap();
+        assert_ne!(again.turn_id, first.turn_id, "解除之後同一個問題再卡住，是新的一次，parent 要再收到一則");
+        let alerts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE conversation_id=? AND role='user' AND content LIKE ?")
+            .bind(&conv)
+            .bind(format!("{ALERT_MARK}%"))
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(alerts, 2);
+    }
+
+    /// issue #134 的第二種錯判（票上留言）：「不往祖父母串」只能認 mid **正在讀的那一回合**就是我們的通知。
+    /// 以前只看對話裡最後一則 user message：mid 還在跑自己的回合 X、kid 的通知排在它後面（還沒讀到），mid 因為 X
+    /// 自己卡住時，排隊中的那則被當成「它是讀了通知才停的」，top 就收不到 mid 的提問。
+    #[tokio::test]
+    async fn a_queued_alert_mid_has_not_read_does_not_silence_its_own_question() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let now = db::now();
+        for (id, managed, parent) in [("top-q", "user", None), ("mid-q", "child", Some("top-q"))] {
+            sqlx::query(
+                "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, managed_by, parent_bot_id, created_at)
+                 VALUES (?,?,?,'claude','[]',0,1,?,?,?,?)",
+            )
+            .bind(id).bind(&e.project_id).bind(id).bind(format!("tok-{id}")).bind(managed).bind(parent).bind(&now)
+            .execute(&app.db).await.unwrap();
+        }
+        crate::testing::fake_run(&app, "top-q").await;
+        let mid_run = crate::testing::fake_run(&app, "mid-q").await;
+        // mid 正在跑自己的回合 X。
+        let conv = db::conversation_id(&app.db, "mid-q").await.unwrap();
+        sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,delivery,created_at) VALUES ('t-x',?,?,'web','in_flight','ok',?)")
+            .bind(&conv).bind(&mid_run).bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO messages (id, conversation_id, turn_id, role, content, source, created_at) VALUES (?,?, 't-x', 'user', '把 X 做完', 'web', ?)")
+            .bind(db::ulid()).bind(&conv).bind(&now).execute(&app.db).await.unwrap();
+        // kid 卡住，通知排進 mid 的佇列（mid 在回合中，還沒讀到）。
+        let out = deliver(&app, "mid-q", "kid-q", "kid-q", "要不要繼續？").await.unwrap();
+        assert_eq!(out.delivery, "queued");
+        // mid 因為 X 自己卡住了。
+        sqlx::query("UPDATE runs SET agent_status='blocked' WHERE bot_id='mid-q'").execute(&app.db).await.unwrap();
+
+        let told = parent_to_tell(&app, "mid-q").await.unwrap();
+        assert_eq!(told.map(|(p, _)| p).as_deref(), Some("top-q"), "mid 是被自己的回合 X 卡住，不是讀了那則通知：top 要收到");
     }
 
     /// 解除 blocked 之後**再**卡住同一個問題：要重新送（`forget` 把指紋清掉）。
