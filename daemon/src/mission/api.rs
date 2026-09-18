@@ -849,10 +849,17 @@ pub async fn post_cancel(State(app): State<Arc<App>>, Path(id): Path<String>, he
     });
     let key = format!("mission:{id}:cancelled");
     let announce = announce.map(|a| store::Announce { event_key_prefix: &key, ..a });
-    if !store::cancel_announced(&app.db, &id, announce).await.map_err(up)? {
+    // 關任務這一步跟派工（`supervisor::assign`、followup）拿同一把 supervisor 鎖（issue #119）：派工在鎖裡
+    // 重看任務關了沒，所以要嘛它先建好交辦、下面重讀收得到，要嘛它拿到鎖時任務已經關了、回 mission_closed。
+    // 鎖只包這一步：底下逐件取消走 `post_review`，它自己會拿同一把鎖。
+    let cancelled = {
+        let _g = crate::supervisor::lock().await;
+        store::cancel_announced(&app.db, &id, announce).await.map_err(up)?
+    };
+    if !cancelled {
         return Err(LcError::conflict("already_closed", json!({"mission_id": id})));
     }
-    // 取消之後才重讀：這中間新開的交辦會被 `assign --mission` 的 mission_closed 擋掉，不會漏。
+    // 取消之後才重讀：鎖外排隊的派工拿到鎖時會看到任務已關，不會在這之後冒出新的交辦。
     let mut withdrawn = Vec::new();
     for a in open_assignments(&app, &id).await? {
         let review = crate::supervisor::api::ReviewIn {
@@ -1014,10 +1021,16 @@ pub async fn post_complete(State(app): State<Arc<App>>, Path(id): Path<String>, 
         }
     }
     let from = check_relay_from(&app, b.relay_from.as_deref()).await?;
-    // 任務列與 `completed` 事件一次交易，而且只在這一次真的把任務從開著關掉時才寫（issue #116）：
-    // 上面的關卡跑完之前任務可能已經被取消、或另一個結案先落地——那就照實 409，不補一則「完成」。
-    if store::complete(&app.db, &id, b.result_summary.trim(), from.as_deref(), &json!({"delivery": delivery})).await.map_err(up)?.is_none() {
-        return Err(ensure_open(&load(&app, &id).await?).err().unwrap_or_else(|| LcError::conflict("already_closed", json!({"mission_id": id}))));
+    {
+        // 關任務這一步跟派工拿同一把 supervisor 鎖，並在鎖裡重看「底下沒有開著的交辦」（issue #119）：
+        // 上面的關卡（可能跑 git）是在鎖外做的，那段時間排隊的派工可能已經建了交辦。
+        let _g = crate::supervisor::lock().await;
+        crate::mission::workflow::ensure_can_complete(&app, &id).await?;
+        // 任務列與 `completed` 事件一次交易，而且只在這一次真的把任務從開著關掉時才寫（issue #116）：
+        // 上面的關卡跑完之前任務可能已經被取消、或另一個結案先落地——那就照實 409，不補一則「完成」。
+        if store::complete(&app.db, &id, b.result_summary.trim(), from.as_deref(), &json!({"delivery": delivery})).await.map_err(up)?.is_none() {
+            return Err(ensure_open(&load(&app, &id).await?).err().unwrap_or_else(|| LcError::conflict("already_closed", json!({"mission_id": id}))));
+        }
     }
     let m = load(&app, &id).await?;
     let temp = cleanup_temp_bots(&app, &m).await;
@@ -1440,6 +1453,124 @@ mod tests {
         match res {
             Err(e) => assert_eq!(conflict_reason(e), "already_closed", "呼叫端要知道自己沒有結到案"),
             Ok(Json(v)) => panic!("結案沒有成立卻回了 200：{v}"),
+        }
+    }
+
+    /// 派工排在 supervisor 鎖後面等（別的派送／裁示正握著它）的時候，任務被取消或結案了：
+    /// 關掉的任務底下不能冒出一件開著的交辦（issue #119）。
+    ///
+    /// `post_assignment` 查「任務關了沒」是在拿鎖**之前**，而 `mission cancel`／`complete` 根本不拿這把鎖；
+    /// 以前的順序是：派工讀到任務還開著 → 排隊等鎖 → 取消（或結案）落地、當下底下沒有交辦可收 → 派工拿到鎖、
+    /// 照樣建交辦並派進臨時 bot。取消那條的註解說「這中間新開的交辦會被 mission_closed 擋掉」，擋的那一下在鎖外，擋不到。
+    /// 兩種先後都要成立（先排隊的是派工、或先排隊的是關任務），followup 也會開新交辦，一樣要擋。
+    #[tokio::test]
+    async fn a_mission_closed_while_an_assignment_waits_for_the_lock_gets_no_new_work() {
+        for (new_work, close) in [("assign", "cancel"), ("assign", "complete"), ("cancel", "assign"), ("complete", "assign"), ("followup", "cancel"), ("cancel", "followup")] {
+            let label = format!("{new_work}→{close}");
+            let env = crate::testing::env().await;
+            let app = env.app.clone();
+            crate::supervisor::store::get_or_init(&app.db).await.unwrap();
+            let agm = crate::testing::claude_bot(&app, &env.project_id, "AGM").await;
+            crate::supervisor::store::set_env(&app.db, &agm.id, &env.project_id, "/tmp").await.unwrap();
+            let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission(&format!("lock-{new_work}-{close}"), "pr"))).await.unwrap();
+            let id = m["id"].as_str().unwrap().to_string();
+            let worker = crate::testing::claude_bot(&app, &env.project_id, "worker").await;
+            // followup 要有一件等裁示的原件可以接。
+            let parent = if new_work == "followup" || close == "followup" {
+                let out = crate::supervisor::assign(
+                    &app, &worker.id, "做 X", "lock-parent", None, &[], None, true, Some((&id, "executor")), None, None,
+                    crate::supervisor::bot_requests::ReplyMark::default(),
+                )
+                .await
+                .unwrap();
+                let pid = out["id"].as_str().unwrap().to_string();
+                sqlx::query("UPDATE supervisor_assignments SET status='awaiting_review' WHERE id=?").bind(&pid).execute(&app.db).await.unwrap();
+                Some(pid)
+            } else {
+                None
+            };
+            let spawn_step = |step: &str| {
+                let (app, id, worker_id, parent) = (app.clone(), id.clone(), worker.id.clone(), parent.clone());
+                match step {
+                    "assign" => tokio::spawn(async move {
+                        crate::supervisor::api::post_assignment(
+                            State(app),
+                            HeaderMap::new(),
+                            Json(crate::supervisor::api::AssignIn {
+                                target_bot_id: worker_id,
+                                text: "做 X".into(),
+                                client_request_id: "lock-exec".into(),
+                                source_turn_id: None,
+                                ownership: Vec::new(),
+                                kind: None,
+                                expects_review: None,
+                                review_role: None,
+                                mission_id: Some(id),
+                                role: Some("executor".into()),
+                                ack: false,
+                                reply_to: None,
+                            }),
+                        )
+                        .await
+                    }),
+                    "followup" => tokio::spawn(async move {
+                        let review = crate::supervisor::api::ReviewIn {
+                            decision: "followup".into(),
+                            followup_text: Some("接著做".into()),
+                            followup_request_id: Some("lock-followup".into()),
+                            ..accept()
+                        };
+                        crate::supervisor::api::post_review(State(app), Path(parent.unwrap()), HeaderMap::new(), Json(review)).await
+                    }),
+                    "cancel" => tokio::spawn(async move { post_cancel(State(app), Path(id), HeaderMap::new()).await }),
+                    _ => tokio::spawn(async move { post_complete(State(app), Path(id), Json(done("完成", Some("no_changes"), None))).await }),
+                }
+            };
+
+            // 別的 supervisor 操作正握著鎖（派送一則 prompt 要走 herdr，握上幾秒很平常）。先送的那一步排到鎖後面，
+            // 再送第二步，然後放鎖。
+            let held = crate::supervisor::lock().await;
+            let first = spawn_step(new_work);
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            let second = spawn_step(close);
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            drop(held);
+            let _ = first.await.unwrap();
+            let _ = second.await.unwrap();
+
+            let after = store::get(&app.db, &id).await.unwrap().unwrap();
+            let open: Vec<String> = crate::mission::workflow::open_assignments(&app, &id).await.unwrap().into_iter().map(|a| a.status).collect();
+            assert!(
+                after.completed_at.is_none() && after.cancelled_at.is_none() || open.is_empty(),
+                "{label}：任務已經是 {}，底下卻還有開著的交辦 {open:?}",
+                after.status()
+            );
+        }
+    }
+
+    /// 上一條的另一半：派工在 supervisor 鎖裡查完「任務還開著」到寫下交辦之間還有好幾個 await，關任務的那一步
+    /// 如果不拿同一把鎖，就能落在那中間（查的時候開著、寫的時候已經關了，而取消的重讀又還看不到那件）。
+    /// 所以取消／結案落地的那一刻必須排在鎖後面：鎖被握著時，任務不能先關掉。
+    #[tokio::test]
+    async fn closing_a_mission_waits_for_the_supervisor_lock() {
+        for close in ["cancel", "complete"] {
+            let env = crate::testing::env().await;
+            let app = env.app.clone();
+            let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission(&format!("wait-{close}"), "pr"))).await.unwrap();
+            let id = m["id"].as_str().unwrap().to_string();
+
+            let held = crate::supervisor::lock().await;
+            let closing = if close == "cancel" {
+                tokio::spawn(post_cancel(State(app.clone()), Path(id.clone()), HeaderMap::new()))
+            } else {
+                tokio::spawn(post_complete(State(app.clone()), Path(id.clone()), Json(done("完成", Some("no_changes"), None))))
+            };
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            assert_eq!(store::get(&app.db, &id).await.unwrap().unwrap().status(), "open", "{close}：鎖還被握著，任務不能先關掉");
+            drop(held);
+            let _ = closing.await.unwrap().unwrap_or_else(|e| panic!("{close}：放鎖之後要照常關掉：{e:?}"));
+            let expect = if close == "cancel" { "cancelled" } else { "done" };
+            assert_eq!(store::get(&app.db, &id).await.unwrap().unwrap().status(), expect);
         }
     }
 

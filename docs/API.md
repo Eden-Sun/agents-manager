@@ -1409,7 +1409,9 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
 
 `POST /api/supervisor/assignments` 多收 `mission_id` 與 `role`（`executor | reviewer | verifier`），**兩個一起給或都不給**；
 任務不存在 404、已結案 409 `mission_closed`。連結在派送**之前**寫入。follow-up（`review` 的 `followup`）自動沿用父交辦的
-`mission_id`／`role`——撞限換手的接手工作就是靠這個接回同一個任務。assignment 物件多 `mission_id`、`role`、`turn_error`
+`mission_id`／`role`——撞限換手的接手工作就是靠這個接回同一個任務；任務已結案時 followup 一樣 409 `mission_closed`。
+「任務還收不收新交辦」在 supervisor 鎖**裡**判定，`mission cancel`／`complete` 關任務那一步也拿同一把鎖：排隊等鎖的派工
+不會在任務關掉之後冒出來（issue #119）。assignment 物件多 `mission_id`、`role`、`turn_error`
 （回合結束時 run 上記的錯誤原因，例如撞限橫幅；`turn_status` 只說成敗）。
 
 **任務裡的交辦撞到額度**時，controller 先照 `pick` 的規則判斷，再決定要不要走 §18.8b 的 `quota_blocked`：

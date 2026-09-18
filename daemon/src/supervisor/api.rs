@@ -126,6 +126,27 @@ fn user_pause_reason(paused_reason: Option<&str>) -> Option<&str> {
     paused_reason.map(str::trim).filter(|r| !r.is_empty() && !DAEMON_SET.contains(r))
 }
 
+/// 這個任務現在收不收新交辦：已結案（完成／取消）或被使用者暫停就不收。
+///
+/// `post_assignment` 在鎖外先擋一次（錯的 mission_id 早點回），**算數的是**
+/// `mission::workflow::ensure_can_assign` 在 supervisor 鎖裡的那一次：鎖外查完到拿到鎖之間，任務可能已經被
+/// 取消或結案（issue #119）。
+pub(crate) fn mission_gate(m: &crate::mission::store::Mission) -> Result<(), LcError> {
+    if m.completed_at.is_some() || m.cancelled_at.is_some() {
+        return Err(LcError::conflict("mission is closed", json!({"reason": "mission_closed", "mission_id": m.id})));
+    }
+    // 使用者按了暫停就是要它停下來：再派一棒等於當作沒看到（mission3 2026-09-17 轉來的一條）。
+    // daemon 自己設的那幾種暫停（輪數用完、驗證者沒 Fable、交付失敗）不擋——runbook 要 AGM
+    // 在那些狀態下繼續處理（例如請執行者 rebase 再交付）。
+    if let Some(why) = user_pause_reason(m.paused_reason.as_deref()) {
+        return Err(LcError::conflict(
+            "mission is paused by the user; resume it before handing out more work",
+            json!({"reason": "mission_paused", "mission_id": m.id, "paused_reason": why, "hint": "使用者決定之後用 `agm mission resume` 再派"}),
+        ));
+    }
+    Ok(())
+}
+
 pub async fn post_assignment(
     State(app): State<Arc<App>>,
     headers: HeaderMap,
@@ -141,18 +162,7 @@ pub async fn post_assignment(
         (None, None | Some("")) => None,
         (Some(mid), Some(role)) if crate::mission::pick::Role::parse(role).is_some() => {
             let m = crate::mission::store::get(&app.db, mid).await.map_err(up)?.ok_or_else(|| LcError::NotFound("mission".into()))?;
-            if m.completed_at.is_some() || m.cancelled_at.is_some() {
-                return Err(LcError::conflict("mission is closed", json!({"reason": "mission_closed", "mission_id": mid})));
-            }
-            // 使用者按了暫停就是要它停下來：再派一棒等於當作沒看到（mission3 2026-09-17 轉來的一條）。
-            // daemon 自己設的那幾種暫停（輪數用完、驗證者沒 Fable、交付失敗）不擋——runbook 要 AGM
-            // 在那些狀態下繼續處理（例如請執行者 rebase 再交付）。
-            if let Some(why) = user_pause_reason(m.paused_reason.as_deref()) {
-                return Err(LcError::conflict(
-                    "mission is paused by the user; resume it before handing out more work",
-                    json!({"reason": "mission_paused", "mission_id": mid, "paused_reason": why, "hint": "使用者決定之後用 `agm mission resume` 再派"}),
-                ));
-            }
+            mission_gate(&m)?;
             Some((mid.to_string(), role.to_string()))
         }
         _ => return Err(LcError::Bad("mission_id and role (executor | reviewer | verifier) go together".into())),
@@ -327,6 +337,16 @@ pub async fn post_review(
         // Validate the target before the transaction: a read, and a 400 for a bot that cannot
         // take work is more useful than a rolled-back transaction.
         super::check_assignable(&app, &target).await?;
+        // 續作會掛在同一個任務上開一件新的交辦：任務已經結案（完成／取消）就不能再開（issue #119）。這裡在
+        // supervisor 鎖裡，跟 `mission cancel`／`complete` 關任務的那一步序列化。暫停不在這裡擋——那是既有的語意，
+        // 換手的 followup 在 daemon 設的暫停底下本來就要走得通。
+        if let Some(mid) = a.mission_id.as_deref() {
+            if let Some(m) = crate::mission::store::get(&app.db, mid).await.map_err(up)? {
+                if m.completed_at.is_some() || m.cancelled_at.is_some() {
+                    return Err(LcError::conflict("mission is closed", json!({"reason": "mission_closed", "mission_id": mid})));
+                }
+            }
+        }
         Some((target, crid.to_string(), text.to_string()))
     } else {
         None

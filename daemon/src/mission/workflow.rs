@@ -67,7 +67,13 @@ fn brief(a: &Assignment) -> serde_json::Value {
 /// 角色排不上回 409 `out_of_order`，附上 `next`。
 /// **followup 不走這裡**：`review_with_followup` 在同一個交易裡把原件標成 `superseded`（終局）
 /// 再開新的，任何一刻都只有一件開著，所以換手／退回那條路不受影響；角色沿用原件，也不改變流程走到哪。
+///
+/// 呼叫端（`supervisor::assign`）握著 supervisor 鎖，所以這裡也是「任務還收不收新交辦」算數的那一次
+/// （[`crate::supervisor::api::mission_gate`]）：`post_assignment` 在鎖外查過，但排隊等鎖的時候任務可能已經被
+/// 取消或結案——`mission cancel`／`complete` 關任務那一步也拿同一把鎖（issue #119）。
 pub async fn ensure_can_assign(app: &Arc<App>, mission_id: &str, role: &str) -> Result<(), LcError> {
+    let m = crate::mission::store::get(&app.db, mission_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("mission".into()))?;
+    crate::supervisor::api::mission_gate(&m)?;
     let (assignments, events) = inputs(app, mission_id).await?;
     let open: Vec<&Assignment> = assignments.iter().filter(|a| a.is_open()).collect();
     if let Some(a) = open.first() {
