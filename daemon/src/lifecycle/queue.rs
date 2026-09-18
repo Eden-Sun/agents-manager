@@ -76,8 +76,8 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
         return Ok(());
     }
     // 目標身分還沒有額度（issue #108，`quota_hold`）：送進去只會再撞一次、派工白白燒掉。留在佇列、不花重試，
-    // 掛 timer 到撞限到期（最多五分鐘再看一次）；換身分重啟（#106）會叫醒這裡。
-    if let Some(hit) = super::quota_hold::blocking_hit(app, &bot).await {
+    // 掛 timer 到撞限到期（最多五分鐘再看一次）；換身分重啟（#106）會叫醒這裡。撞限記在這一列上，重啟後照樣擋。
+    if let Some(hit) = super::quota_hold::blocking_hit(app, &bot, &turn.id).await {
         let wait = super::quota_hold::recheck_in(hit.until.as_deref(), chrono::Utc::now());
         super::quota_hold::note_held(bot_id);
         tracing::info!(bot = %bot_id, turn = %turn.id, until = ?hit.until, wait_s = wait.as_secs(),
