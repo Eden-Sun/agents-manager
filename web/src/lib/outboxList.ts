@@ -60,3 +60,31 @@ export function lastSettledTurnKey(turns: Record<string, Pick<Turn, 'id' | 'stat
   }
   return best ? `${best.id}:${best.at}` : ''
 }
+
+/**
+ * 滑過去就預覽的圖檔（使用者 2026-09-18：「圖檔我要可以 hover preview」）。
+ * 只認 daemon 下載白名單裡的點陣圖（PNG/JPEG/GIF/WebP，API.md）；SVG 會被當 octet-stream，`<img>` 畫不出來，不列。
+ */
+export function isPreviewableImage(name: string): boolean {
+  return /\.(png|jpe?g|gif|webp)$/i.test(name)
+}
+
+/**
+ * 預覽框放在滑過的那一列**左邊**（清單貼著右側欄，右邊沒地方），上下夾在視窗內。
+ * 左邊放不下（窄視窗）就改放在那一列下方。回傳 `left`/`top`，單位 px，給 `position: fixed` 用。
+ */
+export function previewPlacement(
+  anchor: { left: number; top: number; bottom: number },
+  box: { width: number; height: number },
+  viewport: { width: number; height: number },
+  gap = 8,
+): { left: number; top: number } {
+  const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(v, Math.max(lo, hi)))
+  if (anchor.left - gap - box.width >= gap) {
+    return { left: anchor.left - gap - box.width, top: clamp(anchor.top, gap, viewport.height - gap - box.height) }
+  }
+  return {
+    left: clamp(anchor.left, gap, viewport.width - gap - box.width),
+    top: clamp(anchor.bottom + gap, gap, viewport.height - gap - box.height),
+  }
+}

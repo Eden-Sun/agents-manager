@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { emptyReason, fileSize, lastSettledTurnKey, orderFiles, remainingLabel, remainingNow } from './outboxList'
+import { emptyReason, fileSize, isPreviewableImage, lastSettledTurnKey, orderFiles, previewPlacement, remainingLabel, remainingNow } from './outboxList'
 
 const file = (name: string, modified: number, remainingSecs = 3600) => ({ name, size: 1, modified, remainingSecs })
 
@@ -65,4 +65,19 @@ test('回合一結束清單就該重讀：鍵跟著最近一個結束的回合�
   )
   // 失敗結束的回合也算（bot 可能放了一半）。
   assert.equal(lastSettledTurnKey({ c: t('c', 'failed', '2026-09-16T12:40:00Z') }), 'c:2026-09-16T12:40:00Z')
+})
+
+test('只有瀏覽器畫得出來、daemon 也肯給 image/* 的圖檔才預覽', () => {
+  for (const n of ['a.png', 'B.PNG', 'c.jpg', 'd.jpeg', 'e.gif', 'f.webp']) assert.equal(isPreviewableImage(n), true, n)
+  for (const n of ['a.svg', 'png', 'a.png.txt', 'report.md', 'x.log']) assert.equal(isPreviewableImage(n), false, n)
+})
+
+test('預覽框放在那一列左邊、夾在視窗內；左邊放不下改放下方', () => {
+  const vp = { width: 1600, height: 1000 }
+  const box = { width: 360, height: 300 }
+  assert.deepEqual(previewPlacement({ left: 1250, top: 600, bottom: 660 }, box, vp), { left: 882, top: 600 })
+  // 靠近底部：往上推，不能超出視窗
+  assert.deepEqual(previewPlacement({ left: 1250, top: 900, bottom: 960 }, box, vp), { left: 882, top: 692 })
+  // 窄視窗（手機）：左邊不夠 → 放下方，左緣夾在視窗內
+  assert.deepEqual(previewPlacement({ left: 100, top: 100, bottom: 150 }, box, { width: 390, height: 800 }), { left: 22, top: 158 })
 })

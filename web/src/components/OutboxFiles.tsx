@@ -1,7 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import * as api from '../api'
 import type { OutboxFile } from '../api'
-import { emptyReason, fileSize, lastSettledTurnKey, orderFiles, remainingLabel, remainingNow } from '../lib/outboxList'
+import { emptyReason, fileSize, isPreviewableImage, lastSettledTurnKey, orderFiles, remainingLabel, remainingNow } from '../lib/outboxList'
+import { clearOutboxPreviews } from '../lib/outboxPreviewCache'
+import { OutboxImagePreview } from './OutboxImagePreview'
 import { useStore } from '../store/store'
 import './outboxFiles.css'
 
@@ -33,6 +35,21 @@ export function OutboxFiles() {
   /** 改它就重讀一次（同 HostShellPanel 的 `nonce`）。 */
   const [nonce, setNonce] = useState(0)
 
+  /** 滑過（或鍵盤聚焦）的圖檔：浮出預覽。 */
+  const [peek, setPeek] = useState<{ name: string; modified: number; anchor: DOMRect } | null>(null)
+  const peekTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const showPeek = (f: OutboxFile, el: HTMLElement) => {
+    if (!isPreviewableImage(f.name)) return
+    if (peekTimer.current) clearTimeout(peekTimer.current)
+    // 滑鼠只是劃過清單不該每張都抓一次：停 150ms 才算要看。
+    peekTimer.current = setTimeout(() => setPeek({ name: f.name, modified: f.modified, anchor: el.getBoundingClientRect() }), 150)
+  }
+  const hidePeek = () => {
+    if (peekTimer.current) clearTimeout(peekTimer.current)
+    peekTimer.current = null
+    setPeek(null)
+  }
+
   // 換 bot 在 render 當下清畫面（同 HostShellPanel）：走 effect 的話會多跑一輪 render，
   // 中間那一格會先畫出上一顆 bot 的檔名。
   const [lastBot, setLastBot] = useState(botId)
@@ -42,7 +59,17 @@ export function OutboxFiles() {
     setReason(null)
     setDir('')
     setLoadedFor(null)
+    setPeek(null)
   }
+
+  // 換 bot／離開時放掉抓過的預覽圖，不然 blob 一直佔記憶體。
+  useEffect(
+    () => () => {
+      if (peekTimer.current) clearTimeout(peekTimer.current)
+      clearOutboxPreviews()
+    },
+    [botId],
+  )
 
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 30_000)
@@ -134,6 +161,10 @@ export function OutboxFiles() {
                   disabled={busy === f.name}
                   title={`下載 ${f.name}`}
                   onClick={() => void download(f.name)}
+                  onMouseEnter={(e) => showPeek(f, e.currentTarget)}
+                  onMouseLeave={hidePeek}
+                  onFocus={(e) => showPeek(f, e.currentTarget)}
+                  onBlur={hidePeek}
                 >
                   <span className="outbox-name">{f.name}</span>
                   <span className={`outbox-meta${left <= 600 ? ' soon' : ''}`}>
@@ -146,6 +177,7 @@ export function OutboxFiles() {
           })}
         </ul>
       )}
+      {peek && botId ? <OutboxImagePreview botId={botId} name={peek.name} modified={peek.modified} anchor={peek.anchor} /> : null}
     </section>
   )
 }
