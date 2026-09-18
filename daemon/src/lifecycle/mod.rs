@@ -37,6 +37,9 @@ mod native_transport_prototype;
 /// 不進正式二進位（見檔案頂端的說明與 docs/ACTOR-RUNTIME-EVAL.md）。
 #[cfg(test)]
 mod actor_runtime_eval_prototype;
+/// issue #92 的端到端情境：撞額度 → 換身分 → `--resume` 接回同一段 session（只在 `cargo test` 底下編）。
+#[cfg(test)]
+mod identity_switch_tests;
 
 /// Runs the daemon has typed into during **this** boot. `runs.pane_typed` is the durable record;
 /// this is the conservative in-process copy, so a row that later becomes unreadable cannot send a
