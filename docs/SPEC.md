@@ -1234,6 +1234,19 @@ listen port 只在本機算（pane 行程樹的 pid 對 `lsof -nP -iTCP -sTCP:LI
   跟 `herdr_shim.rs` 的哲學一樣：「a shim that aborts is worse than one that forwards」。
 - `CARGO_BUILD_JOBS` 由 daemon 的 acquire 回應決定（`build.cargo_jobs`，預設 2），不吃 cargo 自己抓核心數的預設值。
 - 建置跑完（不管成功失敗）都會 release；`trap ... EXIT INT TERM` 保證中斷／被砍也會放。
+- **租約失效就停（issue #128）**：TTL 租約有兩件事必須同時成立——daemon 能在持有者死掉時收回容量，**而且活著但租約已失效的持有者
+  必須停止使用容量**。以前續約迴圈把失敗全吞掉，daemon 暫時連不上超過 TTL、名額被收回後 B 拿到同一個名額，A 卻還在編：
+  `max_concurrent` 被突破。現在 shim 的續約守衛（`am_lease_watch`，背景執行）：
+  - daemon **明確**回 `not_found`／`token_mismatch`：名額已不是我們的，立刻停；
+  - 其他失敗（連不上、逾時、5xx、看不懂）先當暫時的，續約還有機會就繼續試；但**不等到 daemon 的到期時間之後才動手**——
+    保守估一個 deadline（＝續約成功那個請求**送出**的時間＋TTL，daemon 記的到期一定不早於它），
+    下一次重試（`TTL/3` 之後、最久再加 curl 逾時）會落在 deadline 之後就現在停。TTL 180 時：續約失敗兩次（約兩分鐘）就停，
+    離 daemon 收回名額還有一分鐘；單次失敗、下一次成功不會誤殺，每次成功都把 deadline 往後延；
+  - 「停」＝把前景的 cargo **整棵行程樹**（含 rustc）停掉：先 `SIGSTOP` 凍住並重拍快照直到不再長新的行程（cargo 在快照與送訊號之間
+    還會生 rustc，父親一死就被 init 收養、追不到），再 `TERM`＋`CONT`，最多兩秒後補 `KILL`；只殺確定還是 shim 直接子行程的 pid（不殺被回收的 pid）。
+    shim 退 **75**（可重試），stderr 講明原因，名額放掉（冪等）、暫存狀態目錄清掉；
+  - cargo 維持**前景**執行（背景會讓非互動 shell 忽略 SIGINT、換掉 stdin），pid 由 `exec` 包裝寫給守衛。建不出暫存目錄（沒地方放 pid 與失效標記）就不拿名額、放回去不排程直接跑；
+  - `remote-cargo` helper 與本機 cargo 同一套守衛；名額在兩段之間失效就不起本機 cargo。
 
 #### 設定（`config.toml` 的 `[build]`，`config::BuildCfg`）
 - `max_concurrent`（預設 2，`AM_BUILD_MAX_CONCURRENT` 可覆寫，0／看不懂一律回預設——0 不是「停用排程」，是「誰都拿不到

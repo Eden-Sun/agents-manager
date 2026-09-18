@@ -119,6 +119,122 @@ am_json_field() {
     printf '%s' "$2" | tr ',' '\n' | sed -n 's/.*"'"$1"'" *: *"\{0,1\}\([^",}]*\)"\{0,1\}.*/\1/p' | head -n 1
 }
 
+# ── 名額租約的守衛（issue #128）──────────────────────────────────────────────────────────
+#
+# 名額是 TTL 租的：daemon 端在停止續約超過 TTL 之後會把它收回、讓別人拿。所以持有者有兩件事必須同時成立
+# ——daemon 能收回死掉的持有者的容量，**而且活著但租約已失效的持有者必須停止使用容量**。少了後半，
+# 續約一斷（daemon 重啟、暫時連不上、名額被收）前景的 cargo 照跑，別人拿到同一個名額也開始編，
+# `max_concurrent` 就被突破。
+
+# 現在的 epoch 秒；`date +%s` 讀不出整數就回失敗（呼叫端要往保守方向走）。
+am_epoch() {
+    _e=$(date +%s 2>/dev/null)
+    case "$_e" in '' | *[!0-9]*) return 1 ;; esac
+    printf '%s' "$_e"
+}
+
+# `$1` 底下所有後代的 pid（同一份 ps 快照、不含 `$1` 自己），一行一個。
+am_descendants() {
+    ps -A -o pid= -o ppid= 2>/dev/null | awk -v root="$1" '
+        { kids[$2] = kids[$2] " " $1 }
+        END {
+            n = 1; q[1] = root
+            for (h = 1; h <= n; h++) {
+                c = split(kids[q[h]], k, " ")
+                for (i = 1; i <= c; i++) { q[++n] = k[i]; print k[i] }
+            }
+        }'
+}
+
+# 把 `$1`（必須還是這支 shim 的直接子行程）整棵行程樹停掉，一顆 rustc 都不留。
+#
+# 先 SIGSTOP 凍住整棵、重拍快照直到不再長新的：cargo 在「拍快照」與「送訊號」之間還會生出新的 rustc，
+# 而它的父親一死就被 init 收養、從此按父子關係追不到（＝孤兒編譯器，正是最不能留的東西）。
+# 凍住之後再 TERM＋CONT 讓它們正常收尾，兩秒後還活著的補 KILL。
+am_kill_tree() {
+    _kt_ppid=$(ps -o ppid= -p "$1" 2>/dev/null | tr -d ' ')
+    # 已經退出（pid 可能被別的行程用掉了）就不要亂殺。
+    [ "$_kt_ppid" = "$$" ] || return 0
+    _kt_set="$1 $(am_descendants "$1" | tr '\n' ' ')"
+    _kt_round=0
+    while [ "$_kt_round" -lt 5 ]; do
+        kill -STOP $_kt_set 2>/dev/null
+        _kt_grew=""
+        for _kt_p in $(am_descendants "$1"); do
+            case " $_kt_set " in
+                *" $_kt_p "*) ;;
+                *) _kt_set="$_kt_set $_kt_p"; _kt_grew=1 ;;
+            esac
+        done
+        [ -n "$_kt_grew" ] || break
+        _kt_round=$((_kt_round + 1))
+    done
+    kill -TERM $_kt_set 2>/dev/null
+    kill -CONT $_kt_set 2>/dev/null
+    # 寬限最多兩秒：TERM 之後一秒內都死光了就不必多等，還活著的才補 KILL。
+    _kt_wait=0
+    while [ "$_kt_wait" -lt 2 ]; do
+        sleep 1
+        _kt_alive=""
+        for _kt_p in $_kt_set; do
+            kill -0 "$_kt_p" 2>/dev/null && _kt_alive="$_kt_alive $_kt_p"
+        done
+        [ -n "$_kt_alive" ] || return 0
+        _kt_wait=$((_kt_wait + 1))
+    done
+    kill -KILL $_kt_alive 2>/dev/null
+    return 0
+}
+
+# 租約失效：先留下標記（前景那邊靠它分辨「被我們停的」與「自己失敗的」），再停掉前景的行程樹。
+am_lease_lost() {
+    printf '%s\n' "$1" > "$_state/lost"
+    _lost_pid=$(cat "$_state/pid" 2>/dev/null)
+    [ -z "$_lost_pid" ] || am_kill_tree "$_lost_pid"
+    return 0
+}
+
+# 背景執行：續約，並判斷租約還在不在。
+#
+# * daemon 明確說沒有這個名額（`not_found`）或 token 對不上（`token_mismatch`）：名額已經不是我們的，立刻停。
+# * 其他一切失敗（連不上、逾時、5xx、看不懂的回應）：先當暫時的，續約還有機會就繼續試；
+#   但**不能等到 daemon 的到期時間之後才動手**——那時別人可能已經拿到同一個名額。所以估一個保守的
+#   deadline（＝續約成功那個請求**送出**的時間 ＋ TTL，daemon 記的到期一定不早於它），
+#   下一次重試（隔 `_renew_every`、最久再加 curl 逾時）會落在 deadline 之後就現在停。
+# * 讀不到時間（`date +%s` 壞掉）：沒有依據可以等，第一次失敗就停。
+am_lease_watch() {
+    # 續約請求的逾時：隔多久續一次的一半，夾在 1～5 秒（正常的 TTL 下就是 5 秒）。
+    _lw_m=$((_renew_every / 2))
+    [ "$_lw_m" -ge 1 ] || _lw_m=1
+    [ "$_lw_m" -le 5 ] || _lw_m=5
+    while :; do
+        sleep "$_renew_every"
+        _lw_sent=$(am_epoch)
+        _lw_resp=$(curl -s -m "$_lw_m" -X POST "${_url}/renew" --data-urlencode "holder=${_holder}" --data-urlencode "token=${_token}" 2>/dev/null)
+        if [ "$(am_json_field renewed "$_lw_resp")" = "true" ]; then
+            [ -z "$_lw_sent" ] || _deadline=$((_lw_sent + _ttl))
+            continue
+        fi
+        _lw_err=$(am_json_field error "$_lw_resp")
+        case "$_lw_err" in
+            not_found | token_mismatch)
+                am_lease_lost "daemon 已不承認這個名額（${_lw_err}）"
+                return 0
+                ;;
+        esac
+        _lw_now=$(am_epoch)
+        if [ -z "$_lw_now" ] || [ -z "$_deadline" ] || [ $((_deadline - _lw_now)) -le $((_renew_every + _lw_m)) ]; then
+            am_lease_lost "續約一直失敗，名額快到期了"
+            return 0
+        fi
+    done
+}
+
+# 前景跑指令的包裝：先把自己的 pid 寫給守衛，再 `exec` 成那個指令（pid 不變，所以記下來的就是 cargo 本人）。
+# 前景執行不能換成背景：非互動 shell 的背景指令會忽略 SIGINT／SIGQUIT（Ctrl-C 就停不下 cargo，
+# `cargo run` 起來的程式也繼承到「忽略 SIGINT」），stdin 也會被換成 /dev/null。
+_guard_sh='printf "%s" "$$" > "$1" 2>/dev/null; shift; exec "$@"'
+
 am_cargo() {
     # 遞迴保險絲：萬一 `am_is_shim` 認不出某一份 shim（被改過檔頭、或別的專案裝了同名 wrapper），
     # 兩份 shim 會互相把對方當成真 cargo 一路 fork 下去。寧可大聲失敗，也不要 fork 到機器躺平。
@@ -155,6 +271,7 @@ am_cargo() {
 
     _attempt=0
     while :; do
+        _acq_at=$(am_epoch)
         _resp=$(curl -s -m 5 -X POST "${_url}/acquire" \
             -H "$_auth" \
             --data-urlencode "holder=${_holder}" \
@@ -191,21 +308,47 @@ am_cargo() {
     case "$_ttl" in *[!0-9]* | '') _ttl=180 ;; esac
     # 續約間隔取 TTL 的三分之一：daemon 端的 sweep 也是等好幾個間隔才收，一次沒續到不會立刻掉名額。
     _renew_every=$((_ttl / 3))
-    [ "$_renew_every" -ge 5 ] || _renew_every=5
+    [ "$_renew_every" -ge 1 ] || _renew_every=1
+    # 保守的到期時間：daemon 記的到期是「收到請求那一刻 ＋ TTL」，一定不早於「送出請求那一刻 ＋ TTL」。
+    _deadline=""
+    [ -z "$_acq_at" ] || _deadline=$((_acq_at + _ttl))
 
-    (
-        while :; do
-            sleep "$_renew_every"
-            curl -s -m 5 -X POST "${_url}/renew" --data-urlencode "holder=${_holder}" --data-urlencode "token=${_token}" >/dev/null 2>&1
-        done
-    ) &
-    _renew_pid=$!
+    _released=""
     _release() {
+        [ -z "$_released" ] || return 0
+        _released=1
         kill "$_renew_pid" 2>/dev/null
         curl -s -m 5 -X POST "${_url}/release" --data-urlencode "holder=${_holder}" --data-urlencode "token=${_token}" >/dev/null 2>&1
+        rm -rf "$_state" 2>/dev/null
         return 0
     }
+
+    # 守衛要有地方留 pid 與「租約失效」標記；建不起來就沒辦法在租約失效時停掉 cargo，
+    # 那就別拿名額（放回去、不排程直接跑），不要拿了名額卻不受它管。
+    _state=$(mktemp -d "${TMPDIR:-/tmp}/am-cargo-lease.XXXXXX" 2>/dev/null)
+    if [ -z "$_state" ] || [ ! -d "$_state" ]; then
+        curl -s -m 5 -X POST "${_url}/release" --data-urlencode "holder=${_holder}" --data-urlencode "token=${_token}" >/dev/null 2>&1
+        printf 'agents-manager: 建不出暫存目錄，沒辦法在名額失效時停掉 cargo，這次不排程，直接跑\n' >&2
+        exec "$_real" "$@"
+    fi
+    am_lease_watch &
+    _renew_pid=$!
     trap '_release' EXIT INT TERM
+
+    # 租約已經失效（前景那個被我們停掉，或是在兩段指令之間失效）：收尾、告訴使用者為什麼、退 75（可重試）。
+    # 等背景那個把行程樹收乾淨才放手（它還在等 TERM 之後的兩秒寬限，之後才補 KILL）。
+    am_lease_lost_exit() {
+        wait "$_renew_pid" 2>/dev/null
+        _why=$(cat "$_state/lost" 2>/dev/null)
+        _release
+        trap - EXIT INT TERM
+        printf 'agents-manager: cargo 的建置名額租約失效了（%s），已經把這次建置與它底下所有行程停掉；重跑一次就會重新排隊。\n' "$_why" >&2
+        exit 75
+    }
+    # 前景指令結束後：只有「標記在、而且它是被砍掉的（非 0）」才算租約失效；標記在但它已經正常跑完就照它的結果。
+    am_lease_lost_now() {
+        [ -s "$_state/lost" ] && [ "$1" -ne 0 ]
+    }
 
     # 外部 Cargo worker：helper 本身讀 config + 0600 secret file，pane 不會拿到 SSH 密碼。
     # 125 = 設定在 pane 啟動後被關掉／這個指令不適合 offload，退回本機 cargo；
@@ -218,8 +361,11 @@ am_cargo() {
         if [ -n "$_remote_missing" ]; then
             printf 'agents-manager: 外部編譯沒有啟用：這個 pane 缺 %s（沒設，或指到的檔案不能執行），這次 %s 在本機跑\n' "$_remote_missing" "${1:-cargo}" >&2
         else
-            "$AM_DAEMON_EXE" remote-cargo --config "$AM_CONFIG_PATH" --data-dir "$AM_DATA_DIR" --cwd "$PWD" -- "$@"
+            sh -c "$_guard_sh" am-guarded "$_state/pid" "$AM_DAEMON_EXE" remote-cargo --config "$AM_CONFIG_PATH" --data-dir "$AM_DATA_DIR" --cwd "$PWD" -- "$@"
             _remote_rc=$?
+            if am_lease_lost_now "$_remote_rc"; then
+                am_lease_lost_exit
+            fi
             if [ "$_remote_rc" -ne 125 ]; then
                 _release
                 trap - EXIT INT TERM
@@ -228,8 +374,17 @@ am_cargo() {
         fi
     fi
 
-    AM_BUILD_SLOT_HELD=1 AM_REAL_CARGO="$_real" CARGO_BUILD_JOBS="$_jobs" "$_real" "$@"
+    # 沒有名額就不起本機 cargo（例如 remote-cargo 途中租約失效、helper 又剛好回 125）。
+    if [ -s "$_state/lost" ]; then
+        am_lease_lost_exit
+    fi
+
+    env AM_BUILD_SLOT_HELD=1 AM_REAL_CARGO="$_real" CARGO_BUILD_JOBS="$_jobs" \
+        sh -c "$_guard_sh" am-guarded "$_state/pid" "$_real" "$@"
     _cargo_rc=$?
+    if am_lease_lost_now "$_cargo_rc"; then
+        am_lease_lost_exit
+    fi
     _release
     trap - EXIT INT TERM
     exit "$_cargo_rc"
@@ -263,12 +418,43 @@ mod tests {
     use std::io::Write as _;
     use std::process::Command;
 
+    /// 剛寫好的腳本立刻 `exec`，可能撞上 `ETXTBSY`（Text file busy）：並行的測試在別的執行緒 `fork`，
+    /// 短暫繼承了那個檔案的寫入 fd，直到它自己 `exec`。這不是被測程式的問題，重試就好。
+    fn output_retrying(cmd: &mut Command) -> std::process::Output {
+        for _ in 0..200 {
+            match cmd.output() {
+                Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) => std::thread::sleep(std::time::Duration::from_millis(25)),
+                r => return r.unwrap(),
+            }
+        }
+        cmd.output().unwrap()
+    }
+
+    fn spawn_retrying(cmd: &mut Command) -> std::process::Child {
+        for _ in 0..200 {
+            match cmd.spawn() {
+                Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) => std::thread::sleep(std::time::Duration::from_millis(25)),
+                r => return r.unwrap(),
+            }
+        }
+        cmd.spawn().unwrap()
+    }
+
     struct Sandbox {
         dir: std::path::PathBuf,
     }
 
     impl Drop for Sandbox {
         fn drop(&mut self) {
+            // 修正前的 shim 不會停掉它們：別讓失敗的測試留下五分鐘的孤兒 sleep。
+            for f in ["cargo.pid", "rustc.pid"] {
+                if let Some(pid) = self.pid(f) {
+                    unsafe { libc::kill(pid, libc::SIGKILL) };
+                }
+            }
+            for pid in self.spawned() {
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+            }
             let _ = std::fs::remove_dir_all(&self.dir);
         }
     }
@@ -317,7 +503,19 @@ mod tests {
         /// 失敗，或讓 check 真的被 offload 到遠端主機（2026-09-19 build child 部署時兩種都中）。
         /// 名單永遠會漏，字首才不會；需要值的測試自己設。
         fn command(&self, path: &str) -> Command {
-            let mut cmd = Command::new(self.dir.join("bin/cargo"));
+            self.command_in(None, path)
+        }
+
+        /// 同上，可以指定用哪個 shell 跑 shim（macOS 的 `/bin/sh`、`/bin/bash` 是 3.2，另有 `/bin/dash`）；`None` 照 shebang。
+        fn command_in(&self, shell: Option<&str>, path: &str) -> Command {
+            let mut cmd = match shell {
+                Some(sh) => {
+                    let mut c = Command::new(sh);
+                    c.arg(self.dir.join("bin/cargo"));
+                    c
+                }
+                None => Command::new(self.dir.join("bin/cargo")),
+            };
             cmd.env("PATH", path);
             for (key, _) in std::env::vars() {
                 if key.starts_with("AM_") {
@@ -329,18 +527,137 @@ mod tests {
             cmd
         }
 
+
+        /// 假 cargo 把自己與它的「rustc」子行程的 pid 寫在沙盒裡，跑到 `secs` 秒才寫 `cargo.done` 並正常結束。
+        /// 子行程是一顆獨立的 `sleep 300`：cargo 死了它也不會自己結束，正好用來抓「留下孤兒編譯器」。
+        /// 它的 stdout／stderr 導去 /dev/null——不然它握著測試捕捉輸出的 pipe，cargo 正常跑完時 `.output()` 會等到它結束。
+        fn install_slow_cargo(&self, secs: u32) {
+            let d = self.dir.display();
+            let body = format!(
+                "#!/bin/sh\necho $$ > '{d}/cargo.pid'\n( exec /bin/sleep 300 ) >/dev/null 2>&1 &\necho $! > '{d}/rustc.pid'\ntouch '{d}/cargo.ready'\n/bin/sleep {secs}\necho done > '{d}/cargo.done'\nexit 0\n"
+            );
+            let path = self.dir.join("real/cargo");
+            std::fs::write(&path, body).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+
+        /// 名額租約的假 daemon：acquire 一律 granted（TTL 由參數給），renew 依 `renew-mode` 檔決定：
+        /// `ok`＝續約成功、`notfound`／`mismatch`＝明確拒絕、`down`＝連不上（curl 退 7）、
+        /// `once_down`＝第一次連不上、之後都成功，`alternate`＝一次失敗、一次成功、交替下去。每一通都記在 `curl.log`。
+        fn install_lease_curl(&self, ttl: u32) {
+            let d = self.dir.display();
+            self.install_fake_curl(&format!(
+                r#"echo "$*" >> '{d}/curl.log'
+case "$*" in
+  *acquire*) printf '{{"granted":true,"token":"tok-1","cargo_jobs":2,"lease_ttl_secs":{ttl}}}' ;;
+  *renew*)
+    case "$(cat '{d}/renew-mode')" in
+      ok) printf '{{"renewed":true,"expires_at":"x"}}' ;;
+      notfound) printf '{{"error":"not_found","what":"build_slot"}}' ;;
+      mismatch) printf '{{"error":"token_mismatch"}}' ;;
+      down) exit 7 ;;
+      once_down) if [ -f '{d}/once' ]; then printf '{{"renewed":true,"expires_at":"x"}}'; else touch '{d}/once'; exit 7; fi ;;
+      alternate) if [ -f '{d}/flip' ]; then rm -f '{d}/flip'; printf '{{"renewed":true,"expires_at":"x"}}'; else touch '{d}/flip'; exit 7; fi ;;
+    esac ;;
+  *) printf '{{}}' ;;
+esac"#
+            ));
+            self.set_renew_mode("ok");
+        }
+
+        /// 虛擬時鐘：把 PATH 上的 `sleep`／`date` 換成假的。`sleep N` 只把時鐘往前撥 N 秒（真的只睡 50ms，讓別的行程有機會跑），
+        /// `date +%s` 讀這個時鐘。租約守衛的決定（要不要停）只看這兩個，所以測試**不吃機器負載**、不用真的等 TTL——
+        /// 用真時鐘＋幾秒的 TTL 時，餘裕只有一兩秒，本機同時有人在編譯就會誤判。
+        /// 只有背景的守衛在睡覺，時鐘只有一個寫入者。
+        fn install_virtual_clock(&self) {
+            let d = self.dir.display();
+            std::fs::write(self.dir.join("clock"), "1000000").unwrap();
+            let files = [
+                (
+                    "sleep",
+                    // 等假 cargo 發出 ready 才撥時鐘：不然守衛在 cargo 還沒起來時就先判完了，殺樹的測試會空過。
+                    format!(
+                        "#!/bin/sh\ni=0\nwhile [ ! -e '{d}/cargo.ready' ] && [ $i -lt 500 ]; do /bin/sleep 0.02; i=$((i + 1)); done\nn=$(cat '{d}/clock')\necho $((n + ${{1%%.*}})) > '{d}/clock'\nexec /bin/sleep 0.05\n"
+                    ),
+                ),
+                ("date", format!("#!/bin/sh\ncase \"$*\" in '+%s') cat '{d}/clock' ;; *) exec /bin/date \"$@\" ;; esac\n")),
+            ];
+            for (name, body) in files {
+                let path = self.dir.join("real").join(name);
+                std::fs::write(&path, body).unwrap();
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt as _;
+                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+                }
+            }
+        }
+
+        /// 虛擬時鐘走了幾秒。
+        fn virtual_secs(&self) -> i64 {
+            std::fs::read_to_string(self.dir.join("clock")).unwrap().trim().parse::<i64>().unwrap() - 1_000_000
+        }
+
+        fn set_renew_mode(&self, mode: &str) {
+            std::fs::write(self.dir.join("renew-mode"), mode).unwrap();
+        }
+
+        /// 一顆一直在生新「編譯器」的 cargo：兩個背景迴圈不停 fork 出 `sleep`（一個直接生、一個包一層子 shell），
+        /// 每生一顆就把 pid 記進 `spawned.pids`。抓的是 cargo 在「拍行程快照」與「送訊號」之間又生出新行程的競態——
+        /// 生出來的行程父親一死就被 init 收養，事後按父子關係再也追不到。
+        fn install_spawning_cargo(&self) {
+            let d = self.dir.display();
+            let body = format!(
+                "#!/bin/sh\necho $$ > '{d}/cargo.pid'\n\
+                 ( while :; do /bin/sleep 300 >/dev/null 2>&1 & echo $! >> '{d}/spawned.pids'; /bin/sleep 0.02; done ) &\n\
+                 ( while :; do ( /bin/sleep 302 >/dev/null 2>&1 & echo $! >> '{d}/spawned.pids'; wait ) & /bin/sleep 0.03; done ) &\n\
+                 touch '{d}/cargo.ready'\n/bin/sleep 120\necho done > '{d}/cargo.done'\n"
+            );
+            let path = self.dir.join("real/cargo");
+            std::fs::write(&path, body).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+
+        /// `spawned.pids` 記下的所有 pid。
+        fn spawned(&self) -> Vec<i32> {
+            std::fs::read_to_string(self.dir.join("spawned.pids")).unwrap_or_default().lines().filter_map(|l| l.trim().parse().ok()).collect()
+        }
+
+        fn pid(&self, file: &str) -> Option<i32> {
+            std::fs::read_to_string(self.dir.join(file)).ok()?.trim().parse().ok()
+        }
+
+        /// 這顆 pid 還活著嗎（`kill -0`）。
+        fn alive(&self, file: &str) -> bool {
+            self.pid(file).is_some_and(|p| unsafe { libc::kill(p, 0) } == 0)
+        }
+
         fn run(&self, env: &[(&str, &str)], args: &[&str]) -> (String, String, i32) {
+            self.run_in(None, env, args)
+        }
+
+        /// 指定用哪個 shell 跑 shim（macOS 內建 `/bin/sh` 與 `/bin/bash` 是 3.2、另有 `/bin/dash`）；
+        /// `None` 就照 shebang。
+        fn run_in(&self, shell: Option<&str>, env: &[(&str, &str)], args: &[&str]) -> (String, String, i32) {
             let path = format!(
                 "{}:{}:/usr/bin:/bin",
                 self.dir.join("bin").display(),
                 self.dir.join("real").display()
             );
-            let mut cmd = self.command(&path);
+            let mut cmd = self.command_in(shell, &path);
             cmd.args(args);
             for (k, v) in env {
                 cmd.env(k, v);
             }
-            let out = cmd.output().unwrap();
+            let out = output_retrying(&mut cmd);
             (String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned(), out.status.code().unwrap_or(-1))
         }
     }
@@ -470,6 +787,253 @@ esac
         assert!(!err.contains("外部編譯沒有啟用"), "齊全就不提示：{err}");
     }
 
+    /// 這台機器上有的 shell（沒有的略過）。macOS 的 `/bin/sh`／`/bin/bash` 是 3.2——腳本改動要在那個版本也驗。
+    fn shells() -> Vec<&'static str> {
+        ["/bin/sh", "/bin/bash", "/bin/dash"].into_iter().filter(|p| std::path::Path::new(p).exists()).collect()
+    }
+
+    /// 租約守衛用的環境：有 bot 身分、暫存目錄指到沙盒裡（才看得出有沒有留下狀態目錄）。
+    fn lease_env(s: &Sandbox) -> Vec<(&'static str, String)> {
+        let tmp = s.dir.join("tmp");
+        std::fs::create_dir_all(&tmp).unwrap();
+        vec![("AM_BOT_ID", "b1".into()), ("AM_HOOK_TOKEN", "tok".into()), ("TMPDIR", tmp.display().to_string())]
+    }
+
+    fn as_refs<'a>(v: &'a [(&'static str, String)]) -> Vec<(&'a str, &'a str)> {
+        v.iter().map(|(k, val)| (*k, val.as_str())).collect()
+    }
+
+    /// issue #128：名額是 TTL 租的，daemon 端停止續約超過 TTL 就把它收回、讓別人拿。持有者**活著但租約已失效**時
+    /// 必須停止使用容量——以前續約迴圈把失敗全吞掉，前景的 cargo 照跑，於是 A 還在編、B 拿到同一個名額也開始編，
+    /// `max_concurrent` 被突破。daemon **明確**說沒有這個名額（`not_found`）或 token 對不上（`token_mismatch`）：
+    /// 名額已經不是我們的，整棵 cargo／rustc 行程樹一起停、退 75（可重試）、名額放掉、狀態目錄清乾淨。
+    /// 每一種 shell 都驗（含 macOS 的 bash 3.2）。用虛擬時鐘（TTL 180 秒，第一次續約在 60 秒）。
+    #[test]
+    fn an_explicit_renew_refusal_stops_cargo_and_every_compiler_under_it() {
+        let cases: Vec<(&str, &str)> = shells().into_iter().map(|sh| (sh, "notfound")).chain([("/bin/sh", "mismatch")]).collect();
+        std::thread::scope(|scope| {
+            for (sh, mode) in cases {
+                scope.spawn(move || {
+                    let s = Sandbox::new();
+                    s.install_virtual_clock();
+                    s.install_lease_curl(180);
+                    s.install_slow_cargo(120);
+                    s.set_renew_mode(mode);
+                    let env = lease_env(&s);
+                    let (_, err, rc) = s.run_in(Some(sh), &as_refs(&env), &["check", "-p", "agents-managerd"]);
+                    let why = format!("{sh} {mode}: {err}");
+                    assert_eq!(rc, 75, "被我們停掉的一律退 75（可重試）：{why}");
+                    assert!(s.pid("cargo.pid").is_some() && s.pid("rustc.pid").is_some(), "cargo 得真的起來過，不然這條測試是空過：{why}");
+                    assert!(err.contains("名額租約失效"), "要告訴使用者為什麼：{why}");
+                    assert!(!s.dir.join("cargo.done").exists(), "cargo 不能跑完：{why}");
+                    assert!(s.virtual_secs() < 90, "第一次續約（60 秒）就該停，不是等到 TTL：{}s {why}", s.virtual_secs());
+                    assert!(!s.alive("cargo.pid"), "cargo 還活著：{why}");
+                    assert!(!s.alive("rustc.pid"), "cargo 底下的編譯器還活著（孤兒）：{why}");
+                    let calls = std::fs::read_to_string(s.dir.join("curl.log")).unwrap();
+                    assert!(calls.contains("/release"), "名額要放掉：{calls}");
+                    let leftovers: Vec<_> = std::fs::read_dir(s.dir.join("tmp")).unwrap().flatten().collect();
+                    assert!(leftovers.is_empty(), "狀態目錄要清掉：{leftovers:?}");
+                });
+            }
+        });
+    }
+
+    /// 停的是**整棵**行程樹，而且是「凍住再殺」：cargo 一直在生新的 rustc（兩個迴圈不停 fork），如果只是拍一張快照、
+    /// 對快照裡的 pid 送訊號，快照之後才生出來的行程父親一死就被 init 收養、再也追不到——一顆孤兒編譯器。
+    /// 先 `SIGSTOP` 凍住、重拍到不再長新的，才 `TERM`。每一種 shell 都驗；活著的一個都不能剩。
+    #[test]
+    fn a_cargo_that_keeps_spawning_compilers_is_stopped_without_orphans() {
+        std::thread::scope(|scope| {
+            for sh in shells() {
+                scope.spawn(move || {
+                    let s = Sandbox::new();
+                    s.install_virtual_clock();
+                    s.install_lease_curl(180);
+                    s.install_spawning_cargo();
+                    s.set_renew_mode("notfound");
+                    let env = lease_env(&s);
+                    let (_, err, rc) = s.run_in(Some(sh), &as_refs(&env), &["build"]);
+                    assert_eq!(rc, 75, "{sh}: {err}");
+                    let spawned = s.spawned();
+                    assert!(spawned.len() >= 2, "{sh}: 假 cargo 應該已經生出一批行程：{spawned:?}");
+                    let alive: Vec<i32> = spawned.iter().copied().filter(|p| unsafe { libc::kill(*p, 0) } == 0).collect();
+                    assert!(alive.is_empty(), "{sh}: 孤兒編譯器還活著：{alive:?}（共生出 {}）", spawned.len());
+                    assert!(!s.alive("cargo.pid"), "{sh}: cargo 還活著");
+                });
+            }
+        });
+    }
+
+    /// 續約**一直**失敗（daemon 連不上）：不能等到 daemon 端的到期時間之後才動手——那時 B 可能已經拿到同一個名額。
+    /// TTL 180 秒：在它到期**之前**就要把 A 停掉（續約在 60、120 秒失敗，第二次失敗時離到期只剩一分鐘、
+    /// 已經趕不及再試一次，就現在停），而且行程樹一起停。
+    #[test]
+    fn a_renew_that_keeps_failing_stops_cargo_before_the_lease_can_be_reclaimed() {
+        let s = Sandbox::new();
+        s.install_virtual_clock();
+        s.install_lease_curl(180);
+        s.install_slow_cargo(120);
+        s.set_renew_mode("down");
+        let env = lease_env(&s);
+        let (_, err, rc) = s.run(&as_refs(&env), &["test"]);
+        assert_eq!(rc, 75, "{err}");
+        assert!(s.pid("cargo.pid").is_some() && s.pid("rustc.pid").is_some(), "cargo 得真的起來過，不然這條測試是空過：{err}");
+        let at = s.virtual_secs();
+        assert!(at < 180, "daemon 在 180 秒收回名額——A 必須在那之前就停：{at}s\n{err}");
+        assert!(at >= 120, "第一次失敗不是死刑（還有機會再試一次）：{at}s");
+        assert!(!s.dir.join("cargo.done").exists());
+        assert!(!s.alive("cargo.pid") && !s.alive("rustc.pid"), "cargo 與它的編譯器都要停");
+    }
+
+    /// 短暫的一次續約失敗、在到期之前下一次就成功：建置不能被誤殺；而且續約真的把租約往後延——
+    /// 這一趟的虛擬時間走過好幾個 TTL，照樣跑完、退 0。
+    #[test]
+    fn one_failed_renew_before_expiry_does_not_kill_a_build_that_outlives_the_ttl() {
+        let s = Sandbox::new();
+        s.install_virtual_clock();
+        s.install_lease_curl(180);
+        s.install_slow_cargo(3);
+        s.set_renew_mode("once_down");
+        let env = lease_env(&s);
+        let (_, err, rc) = s.run(&as_refs(&env), &["check"]);
+        assert_eq!(rc, 0, "{err}");
+        assert!(!err.contains("名額租約失效"), "{err}");
+        assert!(s.dir.join("cargo.done").exists(), "應該正常跑完");
+        assert!(s.virtual_secs() > 3 * 180, "虛擬時間要走過好幾個 TTL 才算數：{}s", s.virtual_secs());
+    }
+
+    /// 交替失敗（一次連不上、一次成功……）的租約是健康的：每次成功都把 deadline 往後延，所以永遠撐得到下一次成功。
+    /// deadline 沒有隨續約成功往後延的話，第二次失敗就會照最早那個 deadline 判死。
+    #[test]
+    fn alternating_renew_failures_never_kill_a_lease_that_keeps_getting_renewed() {
+        let s = Sandbox::new();
+        s.install_virtual_clock();
+        s.install_lease_curl(180);
+        s.install_slow_cargo(3);
+        s.set_renew_mode("alternate");
+        let env = lease_env(&s);
+        let (_, err, rc) = s.run(&as_refs(&env), &["test"]);
+        assert_eq!(rc, 0, "{err}");
+        assert!(!err.contains("名額租約失效"), "{err}");
+        assert!(s.dir.join("cargo.done").exists(), "應該正常跑完");
+        assert!(s.virtual_secs() > 3 * 180, "{}s", s.virtual_secs());
+    }
+
+    /// 前景執行的語意不能因為多了守衛而變：stdin 照樣接得到 cargo（`cargo run` 起來的程式要讀輸入）。
+    #[test]
+    fn the_guard_keeps_stdin_flowing_to_cargo() {
+        let s = Sandbox::new();
+        s.install_lease_curl(30);
+        let sink = s.dir.join("stdin.got");
+        std::fs::write(s.dir.join("real/cargo"), format!("#!/bin/sh\ncat > '{}'\nexit 0\n", sink.display())).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(s.dir.join("real/cargo"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let env = lease_env(&s);
+        let mut cmd = s.command(&format!("{}:{}:/usr/bin:/bin", s.dir.join("bin").display(), s.dir.join("real").display()));
+        cmd.args(["run"]).stdin(std::process::Stdio::piped());
+        for (k, v) in &env {
+            cmd.env(k, v);
+        }
+        let mut child = spawn_retrying(&mut cmd);
+        child.stdin.take().unwrap().write_all(b"hello-from-the-terminal").unwrap();
+        assert!(child.wait().unwrap().success());
+        assert_eq!(std::fs::read_to_string(&sink).unwrap(), "hello-from-the-terminal");
+    }
+
+    /// issue #128 的整合驗收：**真的** router＋**真的** curl＋**真的** shim＋真時鐘（`max_concurrent=1`、TTL 21 秒：續約在 7、14 秒，
+    /// 第二次失敗時離到期還有 7 秒、趕不及再試就停，餘裕夠大，機器忙也不會誤判）。
+    /// A 拿到唯一的名額、開始「編譯」；daemon 中斷（server 整個關掉）超過 TTL。B 在同一段時間裡一直在問名額。
+    /// 不變式：**任何時刻，活著的編譯器不超過設定的名額**——B 一拿到名額的那一刻，A 的 cargo 與它底下的
+    /// 編譯器必須已經死了（以前續約失敗被吞掉、A 照跑，daemon 到期收回名額後 B 拿到、兩個同時編）。
+    /// 之後 daemon 回來（新的 App 開同一個資料庫，就像重啟）：名額表還在、B 的持有正常、沒有卡死。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_daemon_outage_longer_than_the_lease_never_leaves_two_compilers_alive() {
+        use crate::build_scheduler::{acquire, Acquired};
+        use std::time::{Duration, Instant};
+
+        let env = crate::testing::env().await;
+        env.app
+            .cfg
+            .update(|c| {
+                c.build.max_concurrent = 1;
+                c.build.lease_ttl_secs = 21;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let bind = || std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = bind();
+        let port = listener.local_addr().unwrap().port();
+        listener.set_nonblocking(true).unwrap();
+        let serve = |app: std::sync::Arc<crate::state::App>, listener: std::net::TcpListener| {
+            let router = crate::api::router(app);
+            tokio::spawn(async move {
+                let l = tokio::net::TcpListener::from_std(listener).unwrap();
+                let _ = axum::serve(l, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await;
+            })
+        };
+        let server = serve(env.app.clone(), listener);
+
+        // 沙盒：真的 shim、假 cargo（25 秒，會生一顆 300 秒的「rustc」）、真的 curl（PATH 上 /usr/bin/curl）。
+        let s = Sandbox::new();
+        s.install_slow_cargo(25);
+        let home = s.dir.join("fake-home/.config/agents-manager");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("ui-token"), "test-token").unwrap();
+        let mut cmd = s.command(&format!("{}:{}:/usr/bin:/bin", s.dir.join("bin").display(), s.dir.join("real").display()));
+        cmd.env("AM_PORT", port.to_string())
+            .env("TMPDIR", s.dir.join("tmp"))
+            .args(["check", "-p", "agents-managerd"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::fs::File::create(s.dir.join("shim.err")).unwrap());
+        std::fs::create_dir_all(s.dir.join("tmp")).unwrap();
+        let mut a = spawn_retrying(&mut cmd);
+
+        // A 拿到名額、cargo 真的起來了。
+        let up = Instant::now();
+        while crate::build_scheduler::status(&env.app).await.unwrap()["active"] != 1 || s.pid("rustc.pid").is_none() {
+            assert!(up.elapsed() < Duration::from_secs(10), "A 沒拿到名額：{}", std::fs::read_to_string(s.dir.join("shim.err")).unwrap_or_default());
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(s.alive("cargo.pid") && s.alive("rustc.pid"));
+
+        // daemon 中斷（server 整個關掉）。B 從這一刻起每 100ms 問一次名額，直到拿到。
+        let outage = Instant::now();
+        server.abort();
+        let mut a_dead_at: Option<Duration> = None;
+        let granted_at = loop {
+            assert!(outage.elapsed() < Duration::from_secs(20), "B 一直拿不到名額（名額表卡死了？）");
+            if a_dead_at.is_none() && a.try_wait().unwrap().is_some() && !s.alive("cargo.pid") && !s.alive("rustc.pid") {
+                a_dead_at = Some(outage.elapsed());
+            }
+            if let Acquired::Granted { .. } = acquire(&env.app, "B:1", None, "check", "local").await.unwrap() {
+                break outage.elapsed();
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+        let dead = a_dead_at.unwrap_or_else(|| panic!("B 拿到名額（{granted_at:?}）的時候，A 的 cargo／rustc 還活著——兩個編譯同時在跑，max_concurrent=1 被突破"));
+        assert!(dead <= granted_at, "A 要先死（{dead:?}）B 才拿得到名額（{granted_at:?}）");
+        assert_eq!(a.wait().unwrap().code(), Some(75), "被停掉的 A 退 75（可重試）：{}", std::fs::read_to_string(s.dir.join("shim.err")).unwrap_or_default());
+        assert!(!s.dir.join("cargo.done").exists(), "A 不能跑完");
+
+        // daemon 回來（新的 App 開同一個資料庫）：B 持有的名額正常，名額表沒有卡死。
+        let app2 = crate::testing::restart_app(&env).await;
+        let server2 = serve(app2.clone(), bind_on(port));
+        let st = crate::build_scheduler::status(&app2).await.unwrap();
+        assert_eq!(st["active"], 1, "只有 B 一個：{st}");
+        server2.abort();
+    }
+
+    /// 在指定的 port 上重開一個 listener（daemon 重啟後回到同一個位址）。
+    fn bind_on(port: u16) -> std::net::TcpListener {
+        let l = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+        l.set_nonblocking(true).unwrap();
+        l
+    }
+
     /// PATH 上還掛著**別顆 bot 的同一支 shim**（祖先 pane 繼承下來的，2026-09-18 實測有 6 個）：
     /// 真 cargo 要往後找，不能把另一份 shim 當成真 cargo——那會 shim → shim 一層層各拿一個名額，
     /// `max_concurrent` 被自己的外層佔滿，最內層永遠等不到（w168:p91 卡死 17 分鐘）。
@@ -498,7 +1062,7 @@ esac
         );
         let mut cmd = s.command(&path);
         cmd.env("AM_BOT_ID", "b1").env("AM_HOOK_TOKEN", "tok").env("AM_TEST_FAKE_CARGO_LOG", cargo_log.to_str().unwrap());
-        let out = cmd.args(["check", "-p", "agents-managerd"]).output().unwrap();
+        let out = output_retrying(cmd.args(["check", "-p", "agents-managerd"]));
         let err = String::from_utf8_lossy(&out.stderr).into_owned();
         assert_eq!(out.status.code(), Some(0), "{err}");
         // 真 cargo 真的跑到了（不是卡在等名額），而且整趟只拿一個名額。
@@ -550,7 +1114,7 @@ esac
         );
         let mut cmd = s.command(&path);
         cmd.env("AM_BOT_ID", "b1").env("AM_HOOK_TOKEN", "tok").env("AM_TEST_FAKE_CARGO_LOG", cargo_log.to_str().unwrap());
-        let out = cmd.args(["build", "--release"]).output().unwrap();
+        let out = output_retrying(cmd.args(["build", "--release"]));
         let err = String::from_utf8_lossy(&out.stderr).into_owned();
         assert_eq!(out.status.code(), Some(0), "{err}");
         assert!(std::fs::read_to_string(&cargo_log).unwrap().contains("--release"), "真 cargo 沒跑到：{err}");
