@@ -194,26 +194,92 @@ pub(crate) async fn start_for_waiting(app: &Arc<App>, bot_id: &str) {
 async fn start_with(app: &Arc<App>, bot_id: &str, mark: Starting) {
     set_start_error(app, bot_id, None, false).await;
     let res = match crate::supervisor::idle_sleep::wake(app, bot_id, "有一則訊息等著它起來送").await {
-        Ok(true) => Ok(()),
+        Ok(true) => Started::Yes,
         Ok(false) => match start_bot(app, bot_id).await {
-            Ok(_) => Ok(()),
+            Ok(_) => Started::Yes,
             // 別人（使用者按了啟動、AGM）剛好先起了：一樣是「起來了」。
-            Err(LcError::Conflict(v)) if v.get("reason").and_then(|r| r.as_str()) == Some("active run already exists") => Ok(()),
-            Err(e) => Err(failure_text(&e)),
+            Err(LcError::Conflict(v)) if v.get("reason").and_then(|r| r.as_str()) == Some("active run already exists") => Started::Yes,
+            // agent 起來了、只差 `running` 沒記下（#152）：不是沒能啟動。
+            Err(LcError::Uncommitted(v)) => match v.get("run_id").and_then(|r| r.as_str()) {
+                Some(run_id) => Started::NotRecorded(run_id.to_string()),
+                None => Started::Yes,
+            },
+            Err(e) => Started::Failed(failure_text(&e)),
         },
-        Err(e) => Err(format!("{e:#}")),
+        // 叫醒（`--resume`）的錯誤是字串，分不出是哪一種：這顆已經有一個 `starting` 的 run 留著，就是 agent 起來了、
+        // 狀態沒記下（真的起不來時 start 會把 run 收成 `exited`）。
+        Err(e) => match db::active_run(&app.db, bot_id).await {
+            Ok(Some(r)) if r.state == "starting" => Started::NotRecorded(r.id),
+            _ => Started::Failed(format!("{e:#}")),
+        },
     };
     drop(mark);
     match res {
-        Ok(()) => {
+        Started::Yes => {
             tracing::info!(bot = %bot_id, "替等著送的訊息把 bot 起來了：起來、閒下來就由佇列送出");
             schedule_flush_queued(app, bot_id);
         }
-        Err(why) => {
+        Started::NotRecorded(run_id) => flush_once_running(app, bot_id, &run_id),
+        Started::Failed(why) => {
             tracing::warn!(bot = %bot_id, error = %why, "替等著送的訊息啟動 bot 失敗：訊息留在佇列");
             set_start_error(app, bot_id, Some(&why), false).await;
         }
     }
+}
+
+enum Started {
+    Yes,
+    /// agent 起來了，run 停在 `starting`（`running` 寫不進 DB，對帳重試會收斂）。
+    NotRecorded(String),
+    Failed(String),
+}
+
+/// 替它起的 agent 已經起來、`running` 卻沒寫進 DB（`Uncommitted`，#152）：對帳重試會照 herdr 的證據把 run 收成
+/// `running`，但那條路不會叫 flush——排著的這一則就沒人送。這裡在背景等它收斂：`running` 就叫醒 flush；run 不在了
+/// （收成 `exited`）就停，撤孤兒那條路會記原因。測試裡不開背景 task，只記下排了誰（[`watching_for_running`]），
+/// 由測試自己呼叫 [`flush_if_running`]。
+fn flush_once_running(app: &Arc<App>, bot_id: &str, run_id: &str) {
+    tracing::warn!(bot = %bot_id, run = %run_id, "agent 起來了、running 還沒記下：等對帳收斂後再叫 flush");
+    if cfg!(test) {
+        #[cfg(test)]
+        watch_log().lock().unwrap().push(run_id.to_string());
+        return;
+    }
+    let (app, bot_id, run_id) = (app.clone(), bot_id.to_string(), run_id.to_string());
+    tokio::spawn(async move {
+        for secs in [2u64, 5, 15, 30, 60, 120, 300] {
+            tokio::time::sleep(Duration::from_secs(secs)).await;
+            if flush_if_running(&app, &bot_id, &run_id).await {
+                return;
+            }
+        }
+        tracing::warn!(bot = %bot_id, run = %run_id, "run 還沒收成 running；之後的 idle 邊或重啟接回會叫 flush");
+    });
+}
+
+/// 看一次：`true`＝不必再等（收成 `running` 已叫 flush，或 run 已經不在）。
+pub(crate) async fn flush_if_running(app: &Arc<App>, bot_id: &str, run_id: &str) -> bool {
+    match db::run(&app.db, run_id).await {
+        Ok(Some(r)) if r.state == "running" => {
+            schedule_flush_queued(app, bot_id);
+            true
+        }
+        Ok(Some(r)) if r.state == "starting" => false,
+        Ok(_) => true,
+        Err(_) => false,
+    }
+}
+
+#[cfg(test)]
+fn watch_log() -> &'static Mutex<Vec<String>> {
+    static L: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+    L.get_or_init(Default::default)
+}
+
+/// 測試用：有沒有替這顆 run 排「收成 running 就叫 flush」。
+#[cfg(test)]
+pub(crate) fn watching_for_running(run_id: &str) -> bool {
+    watch_log().lock().unwrap().iter().any(|r| r == run_id)
 }
 
 /// 啟動失敗講人話：409／400 的 body 優先用 `hint`／`message`，再退回 `reason`。
@@ -506,6 +572,68 @@ mod tests {
         assert_eq!(bound.as_deref(), Some(out.message_id.as_str()), "附件綁在這一則上");
         let t = turn_of(&app, "crid-att").await;
         assert!(t.prompt_text.as_deref().is_some_and(|p| p.contains("/tmp/shot.png")), "起來後送的字帶著附件路徑");
+    }
+
+    /// issue #152（start_send 那一半）：替等著送的訊息啟動時 agent 真的起來了，`running` 卻寫不進 DB（`Uncommitted`）——
+    /// 那不是「沒能啟動」：不寫 `start_error`。對帳重試把 run 收成 `running` 不會叫 flush，所以這裡要自己等到它收斂再叫；
+    /// 收斂之後那一則送出去，只送一次。會真的 `start_bot`，要有 claude（遠端編譯主機沒有）。
+    #[tokio::test]
+    async fn a_start_that_came_up_but_could_not_record_running_still_sends_once_it_settles() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let bot = tt::claude_bot(&app, &e.project_id, "uncommitted").await;
+        prompt_starting(&app, &bot.id, TEXT, "crid-u", &[], None).await.unwrap();
+        super::super::run_state::refuse_run_state(&app, "running").await;
+        start_for_waiting(&app, &bot.id).await;
+        let t = turn_of(&app, "crid-u").await;
+        assert_eq!((t.status.as_str(), t.start_error.as_deref()), ("queued", None), "agent 起來了：不是沒能啟動");
+        let run = db::active_run(&app.db, &bot.id).await.unwrap().expect("run 停在 starting，沒被收掉");
+        assert_eq!(run.state, "starting");
+        assert!(watching_for_running(&run.id), "排了「收成 running 就叫 flush」");
+        assert!(!flush_if_running(&app, &bot.id, &run.id).await, "還在 starting：繼續等");
+
+        // DB 恢復，對帳照 herdr 的證據收成 running。
+        super::super::run_state::accept_run_state(&app, "running").await;
+        let stuck = super::super::run_state::Settle::Reconcile { stuck: "starting".into() };
+        assert!(super::super::run_state::settle_once(&app, &run.id, &stuck).await);
+        assert!(flush_if_running(&app, &bot.id, &run.id).await, "收成 running：叫 flush，不再等");
+        let pane = db::run(&app.db, &run.id).await.unwrap().unwrap().pane_id.unwrap();
+        e.herdr.live_pane(&pane, tt::LivePane { width: Some(120), ..Default::default() });
+        db::set_pane_typed(&app.db, &run.id).await.unwrap();
+        for _ in 0..3 {
+            forget_queue_retry_timer(&bot.id);
+            flush_queued_locked(&app, &bot.id).await.unwrap();
+        }
+        let t = turn_of(&app, "crid-u").await;
+        assert_eq!((t.status.as_str(), t.run_id.as_deref(), t.start_error.as_deref()), ("in_flight", Some(run.id.as_str()), None));
+        let sent = e.herdr.pane(&pane).map_or(0, |p| p.transcript.iter().filter(|l| l.contains(TEXT)).count());
+        assert_eq!(sent, 1, "送出，只送一次");
+        forget_queue_retry_timer(&bot.id);
+        stop_bot(&app, &bot.id).await.unwrap();
+    }
+
+    /// 同上，走睡著的 bot（`idle_sleep::wake` 用 `--resume` 叫醒，回的是字串錯誤）：留下一個 `starting` 的 run 就是
+    /// agent 起來了、狀態沒記下，一樣不寫 `start_error`、等收斂再叫 flush。會真的 `start_bot`，要有 claude。
+    #[tokio::test]
+    async fn a_sleeping_bot_woken_for_a_send_that_could_not_record_running_is_not_a_failed_start() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let bot = tt::claude_bot(&app, &e.project_id, "asleep-uncommitted").await;
+        sqlx::query("INSERT INTO bot_sleeps (bot_id, idle_minutes, reason, slept_at) VALUES (?, 30, 'idle', ?)")
+            .bind(&bot.id)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        prompt_starting(&app, &bot.id, TEXT, "crid-sleep", &[], None).await.unwrap();
+        super::super::run_state::refuse_run_state(&app, "running").await;
+        start_for_waiting(&app, &bot.id).await;
+        assert_eq!(turn_of(&app, "crid-sleep").await.start_error, None, "叫醒時 agent 起來了：不是沒能啟動");
+        let run = db::active_run(&app.db, &bot.id).await.unwrap().expect("run 停在 starting");
+        assert!(watching_for_running(&run.id));
+        super::super::run_state::accept_run_state(&app, "running").await;
+        forget_queue_retry_timer(&bot.id);
+        stop_bot(&app, &bot.id).await.unwrap();
     }
 
     /// 整條：沒在跑 → 收下 → daemon 重啟（啟動還沒發生）→ 開機替它啟動 → 起來、閒下來 → 佇列送出，只送一次；
