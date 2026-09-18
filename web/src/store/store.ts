@@ -1572,7 +1572,6 @@ export const useStore = create<StoreState>((set, get) => ({
       if (next === null && get().selectedBotId !== null && !get().bots.some((b) => b.id === botId)) {
         set({ selectedBotId: null })
       }
-      get().notify('info', `已刪除 Bot ${bot?.name ?? botId}`)
     } catch (e) {
       get().notify('error', errText(e))
     }
