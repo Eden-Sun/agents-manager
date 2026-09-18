@@ -638,10 +638,43 @@ export async function saveRemoteCargoSettings(input: RemoteCargoInput): Promise<
   return toRemoteCargoSettings(await transport.request('PUT', '/build/remote', input))
 }
 
-export async function testRemoteCargo(): Promise<{ ok: boolean; output: string; password_auth: boolean }> {
+export async function testRemoteCargo(): Promise<{
+  ok: boolean
+  output: string
+  password_auth: boolean
+  cargo_missing: boolean
+  cargo_version: string
+  os: string
+  arch: string
+}> {
   const raw = await transport.request('POST', '/build/remote/test', {})
   const o = isRec(raw) ? raw : {}
-  return { ok: o.ok === true, output: str(o.output), password_auth: o.password_auth === true }
+  return {
+    ok: o.ok === true,
+    output: str(o.output),
+    password_auth: o.password_auth === true,
+    cargo_missing: o.cargo_missing === true,
+    cargo_version: str(o.cargo_version),
+    os: str(o.os),
+    arch: str(o.arch),
+  }
+}
+
+/** 在遠端裝 Rust 工具鏈（rustup minimal）。已經有就只回現有版本。 */
+export async function installRemoteCargoToolchain(): Promise<{
+  already_installed: boolean
+  cargo_version: string
+  cc_missing: boolean
+  output: string
+}> {
+  const raw = await transport.request('POST', '/build/remote/install-toolchain', {})
+  const o = isRec(raw) ? raw : {}
+  return {
+    already_installed: o.already_installed === true,
+    cargo_version: str(o.cargo_version),
+    cc_missing: o.cc_missing === true,
+    output: str(o.output),
+  }
 }
 
 /** 開臨時 pane 做該身份的登入。 */

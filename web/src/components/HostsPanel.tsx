@@ -355,6 +355,7 @@ function RemoteCargoPanel() {
   const [user, setUser] = useState('')
   const [port, setPort] = useState('22')
   const [root, setRoot] = useState('.cache/agents-manager/remote-cargo')
+  const [needsToolchain, setNeedsToolchain] = useState(false)
   const [jobs, setJobs] = useState('4')
   const [password, setPassword] = useState('')
   const [passwordSet, setPasswordSet] = useState(false)
@@ -421,9 +422,33 @@ function RemoteCargoPanel() {
       // 未儲存的新密碼先寫入，避免「測試」其實測到舊 credential。
       if ((password || clearPassword) && !(await save())) return
       const r = await api.testRemoteCargo()
-      setMessage(`✓ SSH/Cargo 可用（${r.password_auth ? '密碼' : 'SSH key/agent'}）：\n${r.output}`)
+      const how = r.password_auth ? '密碼' : 'SSH key/agent'
+      // 連得上但沒有 cargo 是最常見的下一關：講清楚並給一顆按鈕，不要只丟原始輸出（使用者 2026-09-18）。
+      setNeedsToolchain(r.cargo_missing)
+      setMessage(
+        r.cargo_missing
+          ? `✓ SSH 連得上（${how}），但這台還沒有 Rust 工具鏈（${r.os || '?'}/${r.arch || '?'}）。按下面「安裝 Rust 工具鏈」由 daemon 用 rustup 裝（minimal，不會改遠端的 shell profile）。`
+          : `✓ SSH/Cargo 可用（${how}）：\n${r.output}`
+      )
     } catch (e) {
+      setNeedsToolchain(false)
       setMessage(`測試失敗：${remoteCargoErr(e)}`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const installToolchain = async () => {
+    setBusy(true)
+    setMessage('安裝中…（rustup minimal，第一次大約要一兩分鐘）')
+    try {
+      const r = await api.installRemoteCargoToolchain()
+      setNeedsToolchain(false)
+      const head = r.already_installed ? `✓ 這台本來就有了：${r.cargo_version}` : `✓ 已安裝：${r.cargo_version}`
+      // rustup 不裝 linker；少了 cc，cargo test 會在連結那一步才爆掉。
+      setMessage(r.cc_missing ? `${head}\n⚠ 這台沒有 C 編譯器（cc／gcc），cargo test 連結會失敗。請在遠端裝 build-essential（Debian/Ubuntu）或 gcc。` : head)
+    } catch (e) {
+      setMessage(`安裝失敗：${remoteCargoErr(e)}`)
     } finally {
       setBusy(false)
     }
@@ -476,7 +501,7 @@ function RemoteCargoPanel() {
           }}
         />
         <span className="hint">
-          密碼不寫入 config.toml、不回傳前端；daemon 只存 0600 secret file。密碼模式需要本機有 sshpass。
+          密碼不寫入 config.toml、不回傳前端；daemon 只存 0600 secret file。密碼模式優先用 sshpass，沒有就走 ssh 自己的 askpass（OpenSSH 8.4+）。
         </span>
       </label>
       {passwordSet ? (
@@ -492,6 +517,11 @@ function RemoteCargoPanel() {
         <button type="button" className="btn primary" disabled={busy || (enabled && (!host.trim() || !user.trim()))} onClick={() => void save()}>
           {busy ? '處理中…' : '儲存'}
         </button>
+        {needsToolchain ? (
+          <button type="button" className="btn" disabled={busy} onClick={() => void installToolchain()}>
+            安裝 Rust 工具鏈
+          </button>
+        ) : null}
       </div>
       {message ? <pre className="host-result">{message}</pre> : null}
     </section>
