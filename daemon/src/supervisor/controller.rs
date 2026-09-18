@@ -305,6 +305,9 @@ fn event_key(kind: &str, a: &store::Assignment) -> String {
 /// Nothing here decides the work is done: `turn_status` and `evidence_complete` are recorded as
 /// observed, and AGM has to accept, block, ask for a follow-up or fail it explicitly
 /// (`POST /api/supervisor/assignments/{id}/review`).
+///
+/// 回 `true` ＝ 這一次真的把交辦從在途收掉了。`false`（別的路徑先裁示／收掉，或寫入失敗）時，
+/// 呼叫端接在收成後面的副作用（換手通知、暫停任務…）一律不做（issue #110）。
 async fn settle(
     app: &Arc<App>,
     a: &store::Assignment,
@@ -343,7 +346,7 @@ async fn settle(
             if s.moved {
                 app.emit("supervisor_changed", json!({"assignment_id": a.id, "status": "awaiting_review"})).await;
             }
-            s.event_new
+            s.moved
         }
         Err(e) => {
             tracing::warn!(error = ?e, assignment = %a.id, "could not settle the assignment; it stays open");
@@ -440,7 +443,10 @@ async fn mission_quota(app: &Arc<App>, a: &store::Assignment, mission_id: &str, 
                 None => identity.clone(),
             };
             let why = format!("帳號撞到用量上限（{where_seen}）：{}｜依任務規則換手：{} → {}（{}）", hit.message.trim(), current, to, reason);
-            settle(app, a, "identity_switch", true, None, Some(&why)).await;
+            // 交辦已經不在途中（讀完之後被裁示掉）：沒有換手可言，下面的通知與時間軸一句都不寫（issue #110）。
+            if !settle(app, a, "identity_switch", true, None, Some(&why)).await {
+                return true;
+            }
             let payload = json!({
                 "mission_id": mission_id,
                 "assignment_id": a.id,
@@ -461,7 +467,10 @@ async fn mission_quota(app: &Arc<App>, a: &store::Assignment, mission_id: &str, 
             true
         }
         pick::QuotaPolicy::AskUser { reason } => {
-            settle(app, a, "quota_exhausted", true, None, Some(&reason)).await;
+            // 同上：交辦已經被裁示掉，就不為它把任務停下來問人。
+            if !settle(app, a, "quota_exhausted", true, None, Some(&reason)).await {
+                return true;
+            }
             if mstore::pause(&app.db, mission_id, "no_fable_for_verifier", Some(&reason)).await.unwrap_or(false) {
                 let _ = mstore::add_event(&app.db, mission_id, "paused", &format!("暫停：{reason}，等使用者決定"), Some(crate::agent_relay::DAEMON_SENDER), &json!({"reason": "no_fable_for_verifier", "assignment_id": a.id})).await;
             }
@@ -2281,6 +2290,62 @@ mod mission_quota_tests {
             "不能換手到執行者自己的帳號"
         );
         assert_eq!(executor_identity(&app, &mid).await.as_deref(), Some("cc2"));
+    }
+
+    /// 撞限換手的判斷用的是呼叫端手上那份交辦（`on_turn_done`／`dispatch` 讀的）；讀完到收成之間 AGM
+    /// 已經把它取消掉的話，`settle` 的 guard 會擋下轉移——但換手通知、任務時間軸那句「換 cc1 接手」
+    /// 照樣寫出去，AGM 被叫去對一件已經取消的交辦開新 bot、下 followup。
+    #[tokio::test]
+    async fn a_handover_is_not_announced_for_an_assignment_decided_meanwhile() {
+        let app = app().await;
+        bot(&app, "b-cc2", "cc2", Some("fable")).await;
+        let mid = mission(&app, "wait").await;
+        let stale = assignment(&app, "b-cc2", &mid, "executor").await;
+        {
+            let mut q = app.quotas.lock().await;
+            q.insert("claude:cc2".into(), quota(10.0, 100.0, 10.0));
+            q.insert("claude:cc1".into(), quota(0.0, 0.0, 0.0));
+        }
+        store::review_with_followup(&app.db, &stale.id, "queued", "cancel", "AGM", "test", Some("不要了"), None, None)
+            .await
+            .unwrap()
+            .expect("cancel 先落地");
+
+        park_quota(&app, &stale, &hit(), "dispatch").await;
+
+        assert_eq!(store::assignment(&app.db, &stale.id).await.unwrap().unwrap().status, "cancelled");
+        let kinds = inbox_kinds(&app).await;
+        assert!(!kinds.contains(&"mission_identity_switch".to_string()), "取消掉的交辦不該叫 AGM 換手：{kinds:?}");
+        assert!(!kinds.contains(&"assignment_quota_blocked".to_string()), "也不該退回去說它在等額度：{kinds:?}");
+        let notes = mstore::events(&app.db, &mid).await.unwrap();
+        assert!(!notes.iter().any(|e| e.kind == "note" && e.text.contains("接手")), "任務時間軸不該多一句沒發生的換手");
+    }
+
+    /// 同一種縫的另一個分支：驗證者撞限、又挑不到 Fable——交辦已經被取消了，任務卻被停成
+    /// `no_fable_for_verifier` 去問使用者一個已經不存在的問題。
+    #[tokio::test]
+    async fn a_mission_is_not_paused_for_a_verifier_decided_meanwhile() {
+        let app = app().await;
+        bot(&app, "b-v", "cc1", Some("fable")).await;
+        let mid = mission(&app, "switch").await;
+        let stale = assignment(&app, "b-v", &mid, "verifier").await;
+        {
+            let mut q = app.quotas.lock().await;
+            for id in ["cc2", "cc1"] {
+                q.insert(format!("claude:{id}"), quota(0.0, 0.0, 100.0));
+            }
+        }
+        store::review_with_followup(&app.db, &stale.id, "queued", "cancel", "AGM", "test", Some("不要了"), None, None)
+            .await
+            .unwrap()
+            .expect("cancel 先落地");
+
+        park_quota(&app, &stale, &hit(), "dispatch").await;
+
+        assert_eq!(store::assignment(&app.db, &stale.id).await.unwrap().unwrap().status, "cancelled");
+        let m = mstore::get(&app.db, &mid).await.unwrap().unwrap();
+        assert_eq!(m.paused_reason, None, "取消掉的驗證者不該把任務停下來問人");
+        assert!(!mstore::events(&app.db, &mid).await.unwrap().iter().any(|e| e.kind == "paused"));
     }
 
     #[tokio::test]

@@ -1929,7 +1929,8 @@ inbox `assignment_noticed`（`needs_review=false`）。送不出去或回合失�
   也不在身分偵測之前算 key（`cc0` 會落到沒人讀的 `claude:cc0`、遠端還沒連上）（review 2026-09-16）。同一把 key 取**最晚**的 `resume_at`，已經過期的不寫；只寫 `limit_hit`，不碰任何量表或 `resets_at`。這樣重啟後 `dispatch` 也照樣看得到「這個帳號還在擋」。
 - **任務被暫停時不自動重送**：交辦屬於一個還開著、但 `paused_reason` 有值的任務時，`resume_quota_blocked` 整件跳過（也不算重試次數）——
   暫停不收交辦（取消才收），額度一回來就重送的話使用者按的暫停等於沒按；解除暫停後下一個 tick 照常重送。
-- `assignment_quota_blocked` / `assignment_quota_resumed` 各推一則 inbox（`needs_review=false`），不開 incident。到期仍被擋（順延，或重送後又撞到）累計 6 次 → `awaiting_review` + `turn_status=quota_exhausted`（通常是 credits 真的用完）。
+- `assignment_quota_blocked` / `assignment_quota_resumed` 各推一則 inbox（`needs_review=false`），不開 incident；只在交辦**真的**轉進／轉出 `quota_blocked` 時推——
+  讀完之後已被裁示掉（取消等）的不推，mission 的換手通知（`mission_identity_switch`）與 `no_fable_for_verifier` 暫停也一樣（issue #110）。到期仍被擋（順延，或重送後又撞到）累計 6 次 → `awaiting_review` + `turn_status=quota_exhausted`（通常是 credits 真的用完）。
   mission 交辦另有 `quota_policy` 與身份切換，見 §18.14。撞限換手挑 reviewer 時 daemon 自己帶上 `exclude`＝該任務執行者現在的身分，
   挑不到別的身分就回 `no_independent_reviewer`（＝原地等），不會偷偷讓 reviewer 跟執行者同一個帳號（review3 c1 L11）。
 

@@ -1495,6 +1495,12 @@ pub async fn park_quota_blocked(
     .await?
     .rows_affected()
         > 0;
+    // guard 擋下（這一列已經被裁示掉、或別的路徑先 park 過）就沒有新事實：不推「在等額度」的通知
+    // （issue #110，跟 `settle_and_notify`／`resume_quota_blocked` 同一條規則）。
+    if !moved {
+        tx.commit().await?;
+        return Ok(Settled { moved, event_new: false });
+    }
     let (bot_id, turn_id): (String, Option<String>) =
         sqlx::query_as("SELECT target_bot_id, turn_id FROM supervisor_assignments WHERE id=?")
             .bind(id)
@@ -3242,6 +3248,28 @@ mod tests {
 
         let kinds: Vec<String> = pending_inbox(&p).await.unwrap().into_iter().map(|e| e.kind).collect();
         assert!(!kinds.contains(&"assignment_quota_resumed".to_string()), "已經取消的交辦不該讓 AGM 收到「重新排隊」的通知");
+    }
+
+    /// 撞額度收成的那一刻，AGM 已經先把這筆交辦取消掉了：guard 擋下 `quota_blocked` 是對的，
+    /// 但通知也不能照推——「這件在等額度、時間到自己重送」講的是一件已經結案、不會再重送的工作
+    /// （跟 `a_decided_assignment_gets_no_stale_quota_resume_notification` 同一種縫，換成 park 這一頭）。
+    #[tokio::test]
+    async fn a_decided_assignment_gets_no_stale_quota_blocked_notification() {
+        let p = pool().await;
+        get_or_init(&p).await.unwrap();
+        let a = insert_assignment(&p, None, "bot1", "req-park-race", "做 A", &[], None, true).await.unwrap();
+        mark_delivered(&p, &a.id, "turn-park-race", "ok").await.unwrap();
+        review_with_followup(&p, &a.id, "delivered", "cancel", "AGM", "cli", Some("改主意"), None, None)
+            .await
+            .unwrap()
+            .expect("cancel 先落地");
+
+        let parked = park_quota_blocked(&p, &a.id, "2026-09-13T01:00:00Z", "撞到上限", "qb:park-race", &json!({})).await.unwrap();
+        assert!(!parked.moved, "guard 要擋下：這一列已經不是在途");
+        assert!(!parked.event_new, "沒有真的轉移，不該生出一則新事件");
+        assert_eq!(assignment(&p, &a.id).await.unwrap().unwrap().status, "cancelled");
+        let kinds: Vec<String> = pending_inbox(&p).await.unwrap().into_iter().map(|e| e.kind).collect();
+        assert!(!kinds.contains(&"assignment_quota_blocked".to_string()), "已經取消的交辦不該讓 AGM 收到「在等額度」的通知：{kinds:?}");
     }
 
     /// 同一次擋下重放幾遍只會有一則通知（event_key 帶重送次數）。
