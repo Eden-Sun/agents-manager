@@ -2025,6 +2025,7 @@ mod compat_tests {
                 payload: json!({"hook_event_name": "SubagentStart", "agent_id": "a1", "agent_type": "general-purpose"}),
                 received_at: None,
                 truncated: false,
+                run_id: None,
             },
         )
         .await

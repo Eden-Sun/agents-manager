@@ -843,7 +843,8 @@ WS：每顆兩次 `bots_restart_progress`（`restarting`，然後 `ok` / `failed
 daemon 記在行程內（5 分鐘、認領一次就用掉），該句回音進對話時帶上 `relay_from`（SPEC §6.5d）。
 
 ### 10.6 hook 端點 `POST /hook/{claude|codex|grok}`
-body `{bot_id, provider, payload, received_at, truncated?}`，header `X-AM-Bot-Token`。
+body `{bot_id, provider, payload, received_at, truncated?, run_id?}`，header `X-AM-Bot-Token`。`run_id` 是送出這則 hook 的 CLI 行程
+啟動時的 `AM_RUN_ID`；只用來判世代（`--resume` 前後兩個行程回報同一個 session，SPEC「世代圍籬」），缺了就只看 session。
 **`200` ＝ 事件已經寫進 `hook_events` 並 commit**（不是「已經處理完」，配對由 worker 背景做；SPEC §4.4b）；
 回 `{"stored": true|false}`，`false` ＝同一則之前就收過了（重送，靠 `dedupe_key` 去重，不會變成第二筆）。
 寫不進收件匣回 **503**，送端必須把同一份 body spool 起來稍後重送（SPEC §4.4 第 4 點）；`401` 壞 token、`410` bot 已刪除。

@@ -22,7 +22,8 @@ use crate::db;
 /// 一則事件自己說得出來的身分。
 #[derive(Debug, Clone, Copy, Default)]
 pub struct EventIdentity<'a> {
-    /// 事件指名的 run（目前沒有 provider 會帶；留著給日後自己帶 run id 的事件用）。
+    /// 送出這則事件的 CLI 行程是替哪個 run 起的（hook body 的 `run_id`＝那個行程 pane env 的
+    /// `AM_RUN_ID`，issue #92）。舊行程、遠端舊版 `hook.sh` 沒有。
     pub run_id: Option<&'a str>,
     /// provider 的 native session id（claude `session_id`、grok `sessionId`、codex `thread-id`）。
     pub session_id: Option<&'a str>,
@@ -36,6 +37,10 @@ pub struct Generation<'a> {
     /// `resume_native` 起的 run 要接回的原對話：那也算這一代自己的 session（第一則 hook 之後會被
     /// 收進 `native_session_id`，這裡是收進去之前的那個窗口）。
     pub resume_session_id: Option<&'a str>,
+    /// 這個 run 是收編來的（`runs.adopted`：對帳、預設 session、子 agent 原地重啟）。它的行程是在
+    /// **別的** run 底下起的，pane env 的 `AM_RUN_ID` 是那個 run——事件指名別的 run 在這裡證明不了什麼。
+    /// daemon 自己 `start_bot` 起的 run（`adopted=0`）才保證行程帶的就是這個 run 的 id。
+    pub adopted: bool,
 }
 
 /// 事件的 session 在哪一個**確實更早寫進去**的 run 上找到——呼叫端（`classify`）必須已經用 rowid
@@ -69,12 +74,16 @@ pub fn decide(now: &Generation, ev: &EventIdentity, prior: Option<&PriorRun>) ->
         s.map(str::trim).filter(|v| !v.is_empty())
     }
     // 事件自己指名 run 時最直接：不是這一代就是別代，不必再看 session。
+    // 這是 `--resume` 唯一分得開的證據（issue #92）：接回同一段對話時新舊行程回報**同一個** session id，
+    // 換身分前那個行程遲到的 `StopFailure`（撞額度）只看 session 會被認成這一代的，收掉新行程的回合。
+    // 收編來的 run 例外：它的行程帶的是起它的那個 run 的 id，對不上是正常的，交給下面的 session 規則。
     if let Some(rid) = trimmed(ev.run_id) {
-        return if rid == now.run_id {
-            Ownership::Current
-        } else {
-            Ownership::Stale { prior_run_id: rid.to_string(), why: "事件指名的是另一個 run" }
-        };
+        if rid == now.run_id {
+            return Ownership::Current;
+        }
+        if !now.adopted {
+            return Ownership::Stale { prior_run_id: rid.to_string(), why: "事件是另一個 run 的行程送的" };
+        }
     }
     let Some(sid) = trimmed(ev.session_id) else {
         return Ownership::Unproven("事件沒帶 session id");
@@ -99,6 +108,7 @@ pub async fn classify(pool: &sqlx::SqlitePool, bot_id: &str, run: &db::Run, ev: 
         run_id: &run.id,
         session_id: run.native_session_id.as_deref(),
         resume_session_id: run.resume_session_id.as_deref(),
+        adopted: run.adopted != 0,
     };
     // 先用純規則問一次：能當場判定的（指名 run、session 就是這一代的、根本沒帶 session）不必查 DB。
     let quick = decide(&now, &ev, None);
@@ -135,7 +145,7 @@ mod tests {
     use super::*;
 
     fn gen<'a>(run_id: &'a str, session: Option<&'a str>) -> Generation<'a> {
-        Generation { run_id, session_id: session, resume_session_id: None }
+        Generation { run_id, session_id: session, resume_session_id: None, adopted: false }
     }
 
     /// 這一代自己的事件照常處理。
@@ -145,7 +155,7 @@ mod tests {
         assert_eq!(decide(&now, &EventIdentity { run_id: None, session_id: Some("s-new") }, None), Ownership::Current);
         assert_eq!(decide(&now, &EventIdentity { run_id: Some("01RUN-B"), session_id: None }, None), Ownership::Current);
         // `resume_native` 起的 run：第一則 hook 把 session 收進 `native_session_id` 之前的窗口。
-        let resuming = Generation { run_id: "01RUN-B", session_id: None, resume_session_id: Some("s-old") };
+        let resuming = Generation { run_id: "01RUN-B", session_id: None, resume_session_id: Some("s-old"), adopted: false };
         assert_eq!(decide(&resuming, &EventIdentity { run_id: None, session_id: Some("s-old") }, None), Ownership::Current);
     }
 
@@ -160,6 +170,30 @@ mod tests {
         // 指名別的 run 也一樣。
         let named = decide(&now, &EventIdentity { run_id: Some("01RUN-A"), session_id: None }, None);
         assert!(!named.may_mutate(), "{named:?}");
+    }
+
+    /// issue #92：`--resume` 接回同一段對話，新舊兩個行程回報**同一個** session。換身分前那個行程
+    /// 遲到的事件只看 session 是「這一代的」——它自己帶的 run id 才分得開。
+    #[test]
+    fn a_resumed_session_is_told_apart_by_the_run_its_process_was_started_for() {
+        let resumed = Generation { run_id: "01RUN-B", session_id: Some("s-same"), resume_session_id: Some("s-same"), adopted: false };
+        let old_process = decide(&resumed, &EventIdentity { run_id: Some("01RUN-A"), session_id: Some("s-same") }, None);
+        assert!(matches!(&old_process, Ownership::Stale { prior_run_id, .. } if prior_run_id == "01RUN-A"), "{old_process:?}");
+        assert_eq!(decide(&resumed, &EventIdentity { run_id: Some("01RUN-B"), session_id: Some("s-same") }, None), Ownership::Current);
+        // 沒帶 run id（舊行程、舊版 hook.sh）：只剩 session 可看，照舊當成這一代的。
+        assert_eq!(decide(&resumed, &EventIdentity { run_id: None, session_id: Some("s-same") }, None), Ownership::Current);
+    }
+
+    /// 收編來的 run：它的行程是在別的 run 底下起的，帶的 run id 本來就對不上——不能因此把它自己的
+    /// 事件全部丟掉，交給 session 規則。
+    #[test]
+    fn an_adopted_run_does_not_trust_the_run_id_its_process_carries() {
+        let adopted = Generation { run_id: "01RUN-ADOPTED", session_id: Some("s-live"), resume_session_id: None, adopted: true };
+        let own = decide(&adopted, &EventIdentity { run_id: Some("01RUN-STARTED"), session_id: Some("s-live") }, None);
+        assert_eq!(own, Ownership::Current, "session 是這一代的：照常處理");
+        // session 能證明是舊的時候照樣擋。
+        let old = decide(&adopted, &EventIdentity { run_id: Some("01RUN-STARTED"), session_id: Some("s-old") }, Some(&PriorRun { run_id: "01RUN-OLD" }));
+        assert!(!old.may_mutate(), "{old:?}");
     }
 
     /// 證不出來就放行——不靠時序猜。最重要的是 claude 在同一個 CLI 裡 `/clear` 換 session 的情況：

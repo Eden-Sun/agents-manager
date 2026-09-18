@@ -95,7 +95,11 @@ case "$PAYLOAD" in
      PAYLOAD=$(printf '{"raw":"%s"}' "$ESC") ;;
 esac
 NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-BODY=$(printf '{"bot_id":"%s","provider":"%s","payload":%s,"received_at":"%s","truncated":%s}' "$BOT" "$PROVIDER" "$PAYLOAD" "$NOW" "$TRUNC")
+# The run this CLI process was started for: `--resume` makes an old and a new process report the
+# same session, so this is how the daemon tells their late hooks apart (issue #92). Only id-safe
+# characters survive, so an odd value can never break the JSON line.
+RUN=$(printf '%s' "${AM_RUN_ID:-}" | tr -cd 'A-Za-z0-9_-')
+BODY=$(printf '{"bot_id":"%s","provider":"%s","payload":%s,"received_at":"%s","truncated":%s,"run_id":"%s"}' "$BOT" "$PROVIDER" "$PAYLOAD" "$NOW" "$TRUNC" "$RUN")
 # Spool FIRST: the daemon reads this file the moment it sees the state change below, so the
 # line has to be there before herdr is told anything.
 printf '%s\n' "$BODY" >> "$DIR/hook-spool.jsonl"
@@ -1194,6 +1198,11 @@ mod remote_hook_tests {
 
         /// Runs `hook.sh <argv…>` with `stdin`, answering `(stdout, exit_ok)`.
         fn run(&self, argv: &[&str], stdin: &str) -> (String, bool) {
+            self.run_with_env(argv, stdin, &[])
+        }
+
+        /// Same, with extra pane env on top of the fixed test environment.
+        fn run_with_env(&self, argv: &[&str], stdin: &str, extra: &[(&str, &str)]) -> (String, bool) {
             let mut cmd = Command::new("/bin/sh");
             cmd.arg(self.dir.join("hook.sh"));
             cmd.args(argv);
@@ -1206,6 +1215,9 @@ mod remote_hook_tests {
             let herdr = self.dir.join("herdr");
             if herdr.exists() {
                 cmd.env("AM_REAL_HERDR", &herdr);
+            }
+            for (k, v) in extra {
+                cmd.env(k, v);
             }
             cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
             let mut ch = cmd.spawn().unwrap();
@@ -1271,6 +1283,26 @@ mod remote_hook_tests {
         assert_eq!(super::grok_hooks_file(None), super::GROK_HOOKS_FILE, "正式實例檔名不變");
         assert_eq!(super::grok_hooks_file(Some("a1b2")), "agents-manager-a1b2.json");
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// issue #92：遠端的 hook 也要帶這個行程自己的 run id（pane env 的 `AM_RUN_ID`），daemon 才分得出
+    /// `--resume` 前後兩個行程送的同一個 session。怪字元一律濾掉：spool 裡一行壞掉的 JSON 會永遠卡在那裡。
+    #[test]
+    fn the_remote_hook_names_the_run_its_process_was_started_for() {
+        let parse = |line: &str| -> crate::hookrecv::HookBody { serde_json::from_str(line).unwrap_or_else(|e| panic!("{e}: {line}")) };
+        let sb = Sandbox::new(false);
+        let (_, ok) = sb.run_with_env(&["claude", &sb.bot, "tok"], STOP, &[("AM_RUN_ID", "01RUNREMOTE")]);
+        assert!(ok);
+        let (_, ok) = sb.run_with_env(&["claude", &sb.bot, "tok"], STOP, &[("AM_RUN_ID", "01RUN\"$(touch pwned)\\x")]);
+        assert!(ok);
+        let (_, ok) = sb.run(&["claude", &sb.bot, "tok"], STOP);
+        assert!(ok);
+        let spool = sb.read("hook-spool.jsonl");
+        let lines: Vec<&str> = spool.lines().collect();
+        assert_eq!(lines.len(), 3, "{spool}");
+        assert_eq!(parse(lines[0]).run_id.as_deref(), Some("01RUNREMOTE"));
+        assert_eq!(parse(lines[1]).run_id.as_deref(), Some("01RUNtouchpwnedx"), "引號、反斜線、括號都被濾掉，JSON 還是好的");
+        assert_eq!(parse(lines[2]).run_id.as_deref().map(str::trim), Some(""), "沒有 AM_RUN_ID：空字串，圍籬當成沒帶");
     }
 
     #[test]

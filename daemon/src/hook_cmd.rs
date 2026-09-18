@@ -71,13 +71,8 @@ fn inner(args: HookArgs) {
     };
 
     let payload = parse_payload(&text);
-    let body = serde_json::json!({
-        "bot_id": args.bot,
-        "provider": args.provider,
-        "payload": payload,
-        "received_at": now_rfc3339(),
-        "truncated": truncated,
-    });
+    let run_id = std::env::var("AM_RUN_ID").ok();
+    let body = hook_body(&args.bot, &args.provider, payload, &now_rfc3339(), truncated, run_id.as_deref());
 
     let port = if args.port != 0 {
         args.port
@@ -95,6 +90,32 @@ fn inner(args: HookArgs) {
             spool_to(&data_dir, &args.bot, &body);
         }
     }
+}
+
+/// 送給 daemon 的那一份 body（POST 與 spool 同一份）。
+///
+/// `run_id` 是這個 CLI 行程啟動時 pane env 的 `AM_RUN_ID`：`--resume` 接回同一段對話時，新舊兩個行程
+/// 回報的是**同一個** session id，只看 session 分不出一則遲到的 hook 是哪個行程送的（issue #92）。
+/// 沒有值就不帶這個鍵——daemon 照舊只看 session（舊行程、手動跑的 hook）。
+fn hook_body(
+    bot: &str,
+    provider: &str,
+    payload: serde_json::Value,
+    received_at: &str,
+    truncated: bool,
+    run_id: Option<&str>,
+) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "bot_id": bot,
+        "provider": provider,
+        "payload": payload,
+        "received_at": received_at,
+        "truncated": truncated,
+    });
+    if let Some(rid) = run_id.map(str::trim).filter(|r| !r.is_empty()) {
+        body["run_id"] = serde_json::json!(rid);
+    }
+    body
 }
 
 /// Non-object → `{"raw": "<text>"}` so the daemon still sees something.
@@ -280,6 +301,21 @@ mod tests {
         // Env-dependent, so only the empty branch is asserted deterministically.
         let from_env = std::env::var("AM_HOOK_TOKEN").unwrap_or_default();
         assert_eq!(hook_token(""), from_env);
+    }
+
+    /// issue #92：body 帶上這個行程自己的 run id，daemon 才分得出「同一個 session、不同行程」的遲到 hook。
+    /// 沒有值（舊 pane、手動跑）就整個不帶，不送一個空字串進去。
+    #[test]
+    fn the_body_names_the_run_its_process_was_started_for() {
+        let with = hook_body("b1", "claude", serde_json::json!({"a": 1}), "2026-09-18T00:00:00.000Z", false, Some("01RUN"));
+        assert_eq!(with["run_id"], "01RUN");
+        assert_eq!((with["bot_id"].as_str(), with["payload"]["a"].as_i64()), (Some("b1"), Some(1)));
+        let parsed: crate::hookrecv::HookBody = serde_json::from_value(with).unwrap();
+        assert_eq!(parsed.run_id.as_deref(), Some("01RUN"), "daemon 那一側讀得回來");
+        for none in [None, Some(""), Some("  ")] {
+            let without = hook_body("b1", "claude", serde_json::json!({}), "t", false, none);
+            assert!(without.get("run_id").is_none(), "{none:?} → {without}");
+        }
     }
 
     #[test]

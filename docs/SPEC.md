@@ -241,7 +241,8 @@ resend／排隊機制決定（`stuck_turns.rs`），不讓 CLI 自己另開一�
 **grok**：沒有每次啟動的注入旗標，改用全域 hooks 檔 + env 分派，見 §12.2。
 
 hook 身分是 **per-bot**（`bot_id` + `bots.hook_token`），daemon 解析該 bot 目前的 active Run：對帳收養會產生新 `run_id`，但存活的 agent 仍持有啟動時的參數。
-pane env 的 `AM_RUN_ID` 只供診斷。
+hook body 另外帶 `run_id`＝這個 CLI 行程 pane env 的 `AM_RUN_ID`（本機 `hook_cmd`、遠端 `hook.sh` 都帶；沒有就不帶／空字串），
+**只給世代圍籬用**（下面），不拿來找 run。
 
 **世代圍籬**（issue #69，`lifecycle::fence`）：只認 bot 不夠。使用者 interrupt 之後 bot 重啟，新的 run 已經開了新回合，
 舊 CLI session 的 `Stop` 這時候才抵達——按「這顆 bot 的 hook」處理的話，它會去收新回合的尾、把上一代的回覆貼進去。
@@ -253,8 +254,12 @@ pane env 的 `AM_RUN_ID` 只供診斷。
   `a4605b2` 的 `mission_events` 排序與 §6.5 佇列的 `ORDER BY rowid`）。
 - **`Current`**（照常處理）：事件指名的就是這個 run；或它帶的 native session 等於這個 run 的 `native_session_id`
   或 `resume_session_id`（`resume_native` 起的 run 在第一則 hook 把 session 收進來之前的那個窗口）。
-- **`Stale`**（只記錄，一個欄位都不准改）：事件指名了別的 run；或它帶的 session 在這顆 bot **比現在這代更早
-  寫進去**（`rowid` 較小）的某個 run 上找得到。丟棄時記一行 warn 並推一則 `hook_fenced` 事件（帶 bot／run／prior_run／session／why），
+- **`Stale`**（只記錄，一個欄位都不准改）：事件指名了別的 run，而這個 run 是 daemon 自己起的（`adopted=0`）；或它帶的
+  session 在這顆 bot **比現在這代更早寫進去**（`rowid` 較小）的某個 run 上找得到。
+  「指名別的 run」是 `--resume` 唯一分得開的證據（issue #92）：接回同一段對話時新舊兩個行程回報**同一個** session，
+  換身分前那個行程遲到的 `StopFailure`（撞額度）只看 session 會被認成這一代的，收掉換身分之後剛送出的回合。
+  收編來的 run（`adopted=1`：對帳、預設 session、子 agent 原地重啟）不看這條——它的行程是在別的 run 底下起的，
+  帶的 id 本來就對不上，交給 session 規則。丟棄時記一行 warn 並推一則 `hook_fenced` 事件（帶 bot／run／prior_run／session／why），
   重播同一則會走到同一個分支，仍然什麼都不改。
 - **`Unproven`**（照既有規則走，不靠時序猜）：事件沒帶 session；run 還沒回報過 session；或那個 session
   不屬於任何更早的 run。**最後一種是刻意放行的**：claude 在同一個 CLI 裡 `/clear` 會換一個 session id 而 run 沒變，
@@ -345,7 +350,7 @@ claude 連線在回應中途掉了時，pane 只多一行 `⏺ API Error: Connec
 1. wall-clock ≤ 3 秒；**永遠 exit 0、永遠空 stdout**。
 2. stdin（claude、grok）上限 1 MiB，超過截斷標 `truncated`；codex 取 argv 最後一個。
 3. POST `http://127.0.0.1:<port>/hook/<provider>`（寫死 IPv4 loopback、`NO_PROXY=127.0.0.1`、連線逾時 300 ms、總逾時 2 秒），header `X-AM-Bot-Token`，
-   body `{bot_id, provider, payload, received_at}`。
+   body `{bot_id, provider, payload, received_at, run_id?}`（`run_id`＝行程 env 的 `AM_RUN_ID`，只給 §4.1 的世代圍籬用）。
 4. 失敗（連不上、逾時，或**任何非 2xx**，含 daemon 寫不進收件匣時的 503）→ `O_APPEND` 追加一行到
    `~/.config/agents-manager/bots/<bot_id>/hook-spool.jsonl`；寫失敗只記 `hook.log`，仍 exit 0。這就是 hook 的重試路徑。
 5. `--port` 取自 command 列；env `AM_PORT` 為備援。
@@ -1324,7 +1329,7 @@ label = "foo@m4p"
 | `statusline` | stdin | 不報 | 不進 spool（§11.4.5） |
 
 - **腳本不做語意判斷**：只用最粗的字串比對決定要不要報 idle，其餘照寫 spool，分類只在 `hookrecv::classify`。遠端腳本沒有測試；漏報最多晚一點被掃到，錯分類會吃掉訊息。
-- **先寫 spool，再 `report-agent`**（反過來 daemon 收到事件時 spool 還沒那行）。spool 行格式同 §4.4（`{bot_id, provider, payload, received_at, truncated}`），`O_APPEND`。
+- **先寫 spool，再 `report-agent`**（反過來 daemon 收到事件時 spool 還沒那行）。spool 行格式同 §4.4（`{bot_id, provider, payload, received_at, truncated, run_id}`；`run_id` 取 `AM_RUN_ID`、只留 `[A-Za-z0-9_-]`，沒有就是空字串），`O_APPEND`。
 - `report-agent` 欄位：`$HERDR_PANE_ID`（沒有就跳過上報）；`--source agents-manager:<bot_id>`；`--agent <kind>`；`--state` 只送 `idle`（`working` 交給終端偵測，硬報會互蓋）；
   `--seq` 有 `python3` 用 `time.time_ns()`，否則 `date +%s`×1000 + `$DIR/hook-seq` 計數；`--agent-session-id`／`--agent-session-path` 有才帶；`--message` 不填。
 - 找 herdr：`${AM_REAL_HERDR:-}` → `command -v herdr`；都沒有就只寫 spool、記 `hook.log`、exit 0（30 秒掃描會補）。`HERDR_SESSION` 有值時帶 `--session`。
