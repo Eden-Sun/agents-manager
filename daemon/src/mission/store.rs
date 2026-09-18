@@ -820,6 +820,25 @@ pub async fn pause_announced(
     text: &str,
     announce: Option<Announce<'_>>,
 ) -> Result<bool> {
+    pause_tx(pool, id, reason, detail, text, &serde_json::json!({"reason": reason}), announce).await
+}
+
+/// daemon 自己把任務停下來問人（輪數用完、驗證者沒 Fable、交付失敗）：暫停＋`paused` 事件一次交易，
+/// 事件帶呼叫端的 payload。回 `false` ＝ 任務已結案，**什麼都沒寫**——呼叫端要照實說任務已經關了，
+/// 不能再補一則「等使用者決定」（issue #130：以前 `pause` 的 bool 沒人看）。
+pub async fn pause_with_event(pool: &SqlitePool, id: &str, reason: &str, detail: Option<&str>, text: &str, payload: &serde_json::Value) -> Result<bool> {
+    pause_tx(pool, id, reason, detail, text, payload, None).await
+}
+
+async fn pause_tx(
+    pool: &SqlitePool,
+    id: &str,
+    reason: &str,
+    detail: Option<&str>,
+    text: &str,
+    payload: &serde_json::Value,
+    announce: Option<Announce<'_>>,
+) -> Result<bool> {
     let now = crate::db::now();
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let n = sqlx::query(
@@ -836,7 +855,7 @@ pub async fn pause_announced(
     if n != 1 {
         return Ok(false);
     }
-    let ev = insert_event(&mut tx, id, "paused", text, Some(crate::agent_relay::DAEMON_SENDER), &serde_json::json!({"reason": reason}), None, None).await?;
+    let ev = insert_event(&mut tx, id, "paused", text, Some(crate::agent_relay::DAEMON_SENDER), payload, None, None).await?;
     if let Some(a) = announce {
         push_inbox_tx(&mut tx, &format!("{}:{}", a.event_key_prefix, ev.id), a.kind, &a.payload, &now).await?;
     }
