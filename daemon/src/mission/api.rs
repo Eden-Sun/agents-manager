@@ -1060,10 +1060,14 @@ pub async fn post_round(State(app): State<Arc<App>>, Path(id): Path<String>) -> 
         }
         Err(used) => {
             let detail = format!("review／驗證已退回 {used} 輪，達到上限 {}", m.max_rounds);
-            store::pause(&app.db, &id, "max_rounds", Some(&detail)).await.map_err(up)?;
-            store::add_event(&app.db, &id, "paused", &format!("暫停：{detail}，等使用者決定"), Some(crate::agent_relay::DAEMON_SENDER), &json!({"reason": "max_rounds"}))
+            // `use_round` 在任務已經被關掉時也不加（它的 WHERE 帶「還開著」）：那不是輪數用完，停不下來就照實說
+            // 任務已經關了，不要記一則「等使用者決定」、也不要回 max_rounds（issue #130）。
+            if !store::pause_with_event(&app.db, &id, "max_rounds", Some(&detail), &format!("暫停：{detail}，等使用者決定"), &json!({"reason": "max_rounds"}))
                 .await
-                .map_err(up)?;
+                .map_err(up)?
+            {
+                return Err(ensure_open(&load(&app, &id).await?).err().unwrap_or_else(|| LcError::conflict("already_closed", json!({"mission_id": id}))));
+            }
             emit(&app, &load(&app, &id).await?).await;
             Err(LcError::conflict(
                 "max_rounds",
@@ -1091,11 +1095,19 @@ pub async fn get_pick(
     let decision = pick::pick(role, &cands, on_5h, q.get("exclude").map(String::as_str), chrono::Utc::now());
     if role == pick::Role::Verifier && m.completed_at.is_none() && m.cancelled_at.is_none() {
         if let pick::Pick::AskUser { reason, .. } = &decision {
-            if m.paused_reason.as_deref() != Some("no_fable_for_verifier") {
-                store::pause(&app.db, &id, "no_fable_for_verifier", Some(reason)).await.map_err(up)?;
-                store::add_event(&app.db, &id, "paused", &format!("暫停：{reason}，等使用者決定"), Some(crate::agent_relay::DAEMON_SENDER), &json!({"reason": "no_fable_for_verifier", "decision": decision}))
-                    .await
-                    .map_err(up)?;
+            // 停不下來（這中間任務被關掉了）就什麼都不記（issue #130）。
+            if m.paused_reason.as_deref() != Some("no_fable_for_verifier")
+                && store::pause_with_event(
+                    &app.db,
+                    &id,
+                    "no_fable_for_verifier",
+                    Some(reason),
+                    &format!("暫停：{reason}，等使用者決定"),
+                    &json!({"reason": "no_fable_for_verifier", "decision": decision}),
+                )
+                .await
+                .map_err(up)?
+            {
                 emit(&app, &load(&app, &id).await?).await;
             }
         }
@@ -1233,10 +1245,14 @@ pub async fn post_deliver(State(app): State<Arc<App>>, Path(id): Path<String>, J
         }
         Err(f) => {
             let reason = if m.delivery_mode == "push_main" { "push_main_failed" } else { "pr_failed" };
-            store::pause(&app.db, &id, reason, Some(&format!("{}：{}", f.code, f.detail))).await.map_err(up)?;
-            store::add_event(&app.db, &id, "paused", &format!("交付失敗（{}），等使用者決定：{}", f.code, f.detail), Some(crate::agent_relay::DAEMON_SENDER), &json!({"reason": reason, "code": f.code}))
+            let text = format!("交付失敗（{}），等使用者決定：{}", f.code, f.detail);
+            let paused = store::pause_with_event(&app.db, &id, reason, Some(&format!("{}：{}", f.code, f.detail)), &text, &json!({"reason": reason, "code": f.code}))
                 .await
                 .map_err(up)?;
+            if !paused {
+                // 交付途中任務被關掉了：沒有東西在等使用者決定，照實說任務已經關了，失敗原因一併附上（issue #130）。
+                return Err(LcError::conflict("already_closed", json!({"mission_id": id, "delivery_failed": f.code, "detail": f.detail})));
+            }
             emit(&app, &load(&app, &id).await?).await;
             Err(LcError::conflict(f.code, json!({"mission_id": id, "detail": f.detail})))
         }
@@ -1545,6 +1561,69 @@ mod tests {
                 "{label}：任務已經是 {}，底下卻還有開著的交辦 {open:?}",
                 after.status()
             );
+        }
+    }
+
+    /// 請求跑到一半任務被取消了：之後的「停下來問人」不能再寫進去（`store::pause` 的 `false` 以前沒人看）。
+    ///
+    /// 三個地方都一樣：退回（輪數用完的那一支）、挑驗證者挑不到 Fable、交付失敗。`round` 還多一層：任務被關掉時
+    /// `use_round` 也回 `Err`（它的 WHERE 帶著「還開著」），以前一律當成輪數用完，回 409 `max_rounds`——
+    /// 呼叫端被叫去問使用者要不要再給一輪，而任務早就取消了。
+    ///
+    /// 重現同 `a_complete_that_loses_the_race_to_a_cancel_does_not_close_anything`：測試先拿寫入鎖並把任務標成
+    /// 取消（未 commit），請求讀到「還開著」、卡在第一個寫入；放鎖後它面對的是已取消的任務。
+    #[tokio::test]
+    async fn a_mission_cancelled_mid_request_is_not_paused_afterwards() {
+        for path in ["round", "pick", "deliver"] {
+            let env = crate::testing::env().await;
+            let app = env.app.clone();
+            let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission(&format!("late-{path}"), "push_main"))).await.unwrap();
+            let id = m["id"].as_str().unwrap().to_string();
+            if path == "deliver" {
+                // 驗過 env.repo 的 HEAD；那個 repo 沒有 origin，交付一定失敗。
+                let repo = Some(env.repo.to_string_lossy().to_string());
+                let ok = EventIn { kind: "verified".into(), text: "ok".into(), relay_from: None, payload: None, sha: None, worktree: repo };
+                let _ = post_event(State(app.clone()), Path(id.clone()), Json(ok)).await.unwrap();
+            }
+
+            let mut writer = app.db.acquire().await.unwrap();
+            sqlx::query("BEGIN IMMEDIATE").execute(&mut *writer).await.unwrap();
+            sqlx::query("UPDATE missions SET cancelled_at=?, updated_at=? WHERE id=?")
+                .bind(crate::db::now())
+                .bind(crate::db::now())
+                .bind(&id)
+                .execute(&mut *writer)
+                .await
+                .unwrap();
+            let pending = match path {
+                "round" => tokio::spawn(post_round(State(app.clone()), Path(id.clone()))),
+                "pick" => {
+                    let q = HashMap::from([("role".to_string(), "verifier".to_string())]);
+                    tokio::spawn(get_pick(State(app.clone()), Path(id.clone()), Query(q)))
+                }
+                _ => {
+                    let d = DeliverIn { worktree: env.repo.to_string_lossy().to_string(), title: None, body: None, relay_from: None };
+                    tokio::spawn(post_deliver(State(app.clone()), Path(id.clone()), Json(d)))
+                }
+            };
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            sqlx::query("COMMIT").execute(&mut *writer).await.unwrap();
+            drop(writer);
+            let res = pending.await.unwrap();
+
+            let paused: Vec<String> = sqlx::query_scalar("SELECT text FROM mission_events WHERE mission_id=? AND kind='paused'")
+                .bind(&id)
+                .fetch_all(&app.db)
+                .await
+                .unwrap();
+            assert!(paused.is_empty(), "{path}：已取消的任務不該再記一則「暫停」：{paused:?}");
+            assert_eq!(store::get(&app.db, &id).await.unwrap().unwrap().status(), "cancelled");
+            if path != "pick" {
+                match res {
+                    Err(e) => assert_eq!(conflict_reason(e), "already_closed", "{path}：要照實說任務已經關了"),
+                    Ok(Json(v)) => panic!("{path}：任務已取消卻回 200：{v}"),
+                }
+            }
         }
     }
 
