@@ -154,6 +154,64 @@ fn has_program(name: &str) -> bool {
     Command::new("sh").arg("-c").arg(script).status().map(|s| s.success()).unwrap_or(false)
 }
 
+/// ssh 問密碼時由這支回答。密碼**只走環境變數**（`AM_SSH_PASSWORD`），不進 argv——`ps` 看得到
+/// 別人的 argv，看不到別人的環境。
+///
+/// 2026-09-18：這台機器沒有 `sshpass`（macOS 的 homebrew core 也沒有這個 formula），設了密碼的
+/// 遠端 Cargo 一按「測試」就整個擋下來。OpenSSH 8.4 起有 `SSH_ASKPASS_REQUIRE=force`，不需要
+/// 終端機也不需要 `DISPLAY`，這條路不必再多裝一個東西。
+const ASKPASS_FILE: &str = "remote-cargo-askpass.sh";
+const ASKPASS_SH: &str = "#!/bin/sh\n# agents-manager: ssh/rsync 問密碼時回答它；密碼只從環境變數來。\nprintf '%s\\n' \"$AM_SSH_PASSWORD\"\n";
+
+fn askpass_helper(data_dir: &Path) -> anyhow::Result<PathBuf> {
+    let path = data_dir.join(ASKPASS_FILE);
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(ASKPASS_SH) {
+        std::fs::write(&path, ASKPASS_SH)?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(path)
+}
+
+/// 這台機器的 ssh 有沒有 `SSH_ASKPASS_REQUIRE`（OpenSSH 8.4+）。`ssh -V` 印在 stderr。
+fn ssh_supports_askpass_require() -> bool {
+    let Ok(out) = Command::new("ssh").arg("-V").output() else { return false };
+    let v = String::from_utf8_lossy(&out.stderr);
+    let Some(rest) = v.split("OpenSSH_").nth(1) else { return false };
+    openssh_at_least_8_4(rest)
+}
+
+/// `9.8p1 …` / `8.4p1` / `10.3p1` → 夠不夠新。字串比大小會說 10 < 8，所以拆成數字比。
+pub fn openssh_at_least_8_4(rest: &str) -> bool {
+    let head: String = rest.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+    let mut it = head.split('.');
+    let (Some(Ok(major)), minor) = (it.next().map(str::parse::<u32>), it.next().and_then(|m| m.parse::<u32>().ok())) else {
+        return false;
+    };
+    major > 8 || (major == 8 && minor.unwrap_or(0) >= 4)
+}
+
+/// 密碼要怎麼餵給 ssh／rsync：有 `sshpass` 就照舊，沒有就走 askpass。兩條都不行才報錯。
+enum PwMode {
+    Sshpass,
+    Askpass(PathBuf),
+}
+
+fn password_mode(data_dir: &Path) -> anyhow::Result<PwMode> {
+    if has_program("sshpass") {
+        return Ok(PwMode::Sshpass);
+    }
+    if ssh_supports_askpass_require() {
+        return Ok(PwMode::Askpass(askpass_helper(data_dir)?));
+    }
+    anyhow::bail!(
+        "這台機器沒有 `sshpass`，ssh 也太舊（OpenSSH 8.4 以下沒有 SSH_ASKPASS_REQUIRE）。裝 sshpass、升級 ssh，或把密碼清掉改用 SSH 金鑰／agent"
+    )
+}
+
 fn secret(data_dir: &Path) -> anyhow::Result<Option<String>> {
     match std::fs::read_to_string(password_path(data_dir)) {
         Ok(s) => {
@@ -165,19 +223,38 @@ fn secret(data_dir: &Path) -> anyhow::Result<Option<String>> {
     }
 }
 
-fn ssh_base(remote: &BuildRemoteCfg, password: Option<&str>) -> anyhow::Result<Command> {
-    if password.is_some() && !has_program("sshpass") {
-        anyhow::bail!("password auth requires `sshpass` on the daemon host; install it or clear the password and use an SSH key/agent");
-    }
-    let mut cmd = if password.is_some() {
-        let mut c = Command::new("sshpass");
-        c.arg("-e").arg("ssh");
-        c
-    } else {
-        Command::new("ssh")
+fn ssh_base(remote: &BuildRemoteCfg, password: Option<&str>, data_dir: &Path) -> anyhow::Result<Command> {
+    let mode = match password {
+        Some(_) => Some(password_mode(data_dir)?),
+        None => None,
     };
-    if let Some(pw) = password {
-        cmd.env("SSHPASS", pw);
+    Ok(ssh_cmd(remote, password, mode.as_ref()))
+}
+
+/// [`ssh_base`] 的純組裝部分（`mode` 已經決定好），好讓「密碼怎麼餵進去」測得到。
+fn ssh_cmd(remote: &BuildRemoteCfg, password: Option<&str>, mode: Option<&PwMode>) -> Command {
+    let mut cmd = match &mode {
+        Some(PwMode::Sshpass) => {
+            let mut c = Command::new("sshpass");
+            c.arg("-e").arg("ssh");
+            c
+        }
+        _ => Command::new("ssh"),
+    };
+    if let (Some(pw), Some(m)) = (password, mode) {
+        match m {
+            PwMode::Sshpass => {
+                cmd.env("SSHPASS", pw);
+            }
+            PwMode::Askpass(helper) => {
+                cmd.env("AM_SSH_PASSWORD", pw)
+                    .env("SSH_ASKPASS", helper)
+                    .env("SSH_ASKPASS_REQUIRE", "force")
+                    // 只問一次：密碼錯的話要當場失敗，不要卡在互動提示上。
+                    .arg("-o")
+                    .arg("NumberOfPasswordPrompts=1");
+            }
+        }
     }
     cmd.arg("-p")
         .arg(remote.ssh_port.to_string())
@@ -186,12 +263,12 @@ fn ssh_base(remote: &BuildRemoteCfg, password: Option<&str>) -> anyhow::Result<C
         .arg("-o")
         .arg(if password.is_some() { "BatchMode=no" } else { "BatchMode=yes" })
         .arg(format!("{}@{}", remote.user, remote.host));
-    Ok(cmd)
+    cmd
 }
 
 fn probe(remote: &BuildRemoteCfg, data_dir: &Path) -> anyhow::Result<Value> {
     let pw = secret(data_dir)?;
-    let mut cmd = ssh_base(remote, pw.as_deref())?;
+    let mut cmd = ssh_base(remote, pw.as_deref(), data_dir)?;
     cmd.arg("printf 'OS='; uname -s; printf 'ARCH='; uname -m; printf 'CARGO='; command -v cargo || true; cargo --version 2>/dev/null || true");
     let out = cmd.output()?;
     if !out.status.success() {
@@ -241,7 +318,7 @@ fn run_status(mut cmd: Command, what: &str) -> anyhow::Result<ExitStatus> {
 
 fn ensure_remote_dir(remote: &BuildRemoteCfg, data_dir: &Path, dir: &str) -> anyhow::Result<()> {
     let pw = secret(data_dir)?;
-    let mut cmd = ssh_base(remote, pw.as_deref())?;
+    let mut cmd = ssh_base(remote, pw.as_deref(), data_dir)?;
     cmd.arg(format!("mkdir -p {}", sh_quote(dir)));
     let status = run_status(cmd, "ssh mkdir")?;
     if !status.success() {
@@ -255,23 +332,35 @@ fn sync_source(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, dir: &str) 
         anyhow::bail!("remote Cargo requires `rsync` on the daemon host");
     }
     let pw = secret(data_dir)?;
-    if pw.is_some() && !has_program("sshpass") {
-        anyhow::bail!("password auth requires `sshpass` on the daemon host");
-    }
-    let ssh = format!(
+    let mode = match pw {
+        Some(_) => Some(password_mode(data_dir)?),
+        None => None,
+    };
+    let mut ssh = format!(
         "ssh -p {} -o StrictHostKeyChecking=accept-new -o {}",
         remote.ssh_port,
         if pw.is_some() { "BatchMode=no" } else { "BatchMode=yes" }
     );
-    let mut cmd = if pw.is_some() {
-        let mut c = Command::new("sshpass");
-        c.arg("-e").arg("rsync");
-        c
-    } else {
-        Command::new("rsync")
+    if matches!(mode, Some(PwMode::Askpass(_))) {
+        ssh.push_str(" -o NumberOfPasswordPrompts=1");
+    }
+    let mut cmd = match &mode {
+        Some(PwMode::Sshpass) => {
+            let mut c = Command::new("sshpass");
+            c.arg("-e").arg("rsync");
+            c
+        }
+        _ => Command::new("rsync"),
     };
-    if let Some(pw) = pw.as_deref() {
-        cmd.env("SSHPASS", pw);
+    if let (Some(pw), Some(m)) = (pw.as_deref(), &mode) {
+        match m {
+            PwMode::Sshpass => {
+                cmd.env("SSHPASS", pw);
+            }
+            PwMode::Askpass(helper) => {
+                cmd.env("AM_SSH_PASSWORD", pw).env("SSH_ASKPASS", helper).env("SSH_ASKPASS_REQUIRE", "force");
+            }
+        }
     }
     let source = format!("{}/", cwd.to_string_lossy().trim_end_matches('/'));
     let dest = format!("{}@{}:{}/", remote.user, remote.host, dir.trim_end_matches('/'));
@@ -287,7 +376,7 @@ fn sync_source(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, dir: &str) 
 
 fn run_remote(remote: &BuildRemoteCfg, data_dir: &Path, dir: &str, args: &[String]) -> anyhow::Result<i32> {
     let pw = secret(data_dir)?;
-    let mut cmd = ssh_base(remote, pw.as_deref())?;
+    let mut cmd = ssh_base(remote, pw.as_deref(), data_dir)?;
     let argv = args.iter().map(|a| sh_quote(a)).collect::<Vec<_>>().join(" ");
     let remote_cmd = format!(
         "cd {} && CARGO_BUILD_JOBS={} cargo {}",
@@ -340,6 +429,74 @@ pub fn run_cli(config_path: &Path, data_dir: &Path, cwd: &Path, args: &[String])
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn remote() -> BuildRemoteCfg {
+        BuildRemoteCfg { host: "build-host".into(), user: "me".into(), ssh_port: 2222, ..Default::default() }
+    }
+
+    fn envs(cmd: &Command) -> std::collections::HashMap<String, String> {
+        cmd.get_envs()
+            .filter_map(|(k, v)| Some((k.to_string_lossy().into_owned(), v?.to_string_lossy().into_owned())))
+            .collect()
+    }
+
+    /// 沒有 `sshpass` 也要連得上：改用 ssh 自己的 askpass（OpenSSH 8.4+），密碼只走環境變數。
+    /// 2026-09-18：這台機器沒有 sshpass（homebrew core 沒有這個 formula），一按「測試」就被擋。
+    #[test]
+    fn without_sshpass_the_password_goes_through_ssh_askpass() {
+        let helper = PathBuf::from("/d/remote-cargo-askpass.sh");
+        let cmd = ssh_cmd(&remote(), Some("hunter2"), Some(&PwMode::Askpass(helper.clone())));
+        assert_eq!(cmd.get_program(), "ssh");
+        let e = envs(&cmd);
+        assert_eq!(e.get("SSH_ASKPASS").map(String::as_str), Some("/d/remote-cargo-askpass.sh"));
+        assert_eq!(e.get("SSH_ASKPASS_REQUIRE").map(String::as_str), Some("force"));
+        assert_eq!(e.get("AM_SSH_PASSWORD").map(String::as_str), Some("hunter2"));
+        let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert!(args.iter().any(|a| a == "NumberOfPasswordPrompts=1"), "密碼錯要當場失敗，不能卡在提示上：{args:?}");
+        // 密碼不進 argv——`ps` 看得到別人的 argv。
+        assert!(!args.iter().any(|a| a.contains("hunter2")), "{args:?}");
+
+        // 有 sshpass 的機器照舊。
+        let cmd = ssh_cmd(&remote(), Some("hunter2"), Some(&PwMode::Sshpass));
+        assert_eq!(cmd.get_program(), "sshpass");
+        assert_eq!(envs(&cmd).get("SSHPASS").map(String::as_str), Some("hunter2"));
+
+        // 沒有密碼的一律不碰這些環境變數。
+        let cmd = ssh_cmd(&remote(), None, None);
+        assert_eq!(cmd.get_program(), "ssh");
+        assert!(envs(&cmd).is_empty(), "{:?}", envs(&cmd));
+    }
+
+    /// `ssh -V` 的版本要照數字比：字串比會說 `10.3` 比 `8.4` 小。
+    #[test]
+    fn the_openssh_version_gate_compares_numbers_not_strings() {
+        assert!(openssh_at_least_8_4("10.3p1, LibreSSL 3.3.6"));
+        assert!(openssh_at_least_8_4("9.0p1"));
+        assert!(openssh_at_least_8_4("8.4p1"));
+        assert!(!openssh_at_least_8_4("8.3p1"));
+        assert!(!openssh_at_least_8_4("7.9p1"));
+        assert!(!openssh_at_least_8_4("not a version"));
+    }
+
+    /// askpass 腳本要是 0700、內容正確，而且重複呼叫不會一直重寫。
+    #[test]
+    fn the_askpass_helper_is_written_once_and_is_not_world_readable() {
+        let dir = std::env::temp_dir().join(format!("am-askpass-{}", crate::db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = askpass_helper(&dir).unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.starts_with("#!/bin/sh"), "{body}");
+        assert!(body.contains("$AM_SSH_PASSWORD"), "{body}");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o700);
+            assert_eq!(askpass_helper(&dir).unwrap(), path);
+            assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), before, "內容沒變就不要重寫");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn only_cross_platform_verification_commands_are_offloaded() {
