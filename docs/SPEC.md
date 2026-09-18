@@ -850,7 +850,9 @@ pane 打 `cargo` 就 permission denied）時，只 chmod 回 0755，不重寫內
   先對那個 `--pane` `pane send-text` 一行 `export KEY='value'; …`（與下面 `pane split` 同一份保留清單，含 `AM_INSTANCE`／`AM_DATA_DIR`），
   補的是這個母 pane 目前的實際值；pane 早有正確值時只是重覆設一次，無害。
 - `herdr pane split` / `pane new` / `tab create`：原樣轉發並補 `--env`，帶下 `CLAUDE_CONFIG_DIR`、`CODEX_HOME`、`AM_BOT_ID`、`AM_HOOK_TOKEN`、`AM_PORT`、`AM_RUN_ID`、
-  `AM_AGENT_NAME`、`AM_KIND`、`AM_MODEL`、`AM_EFFORT`、`AM_PROJECT_ID`、`AM_WORKSPACE_ID`、`AM_OUTBOX`、`AM_REAL_HERDR`、`PATH`——herdr 的 pane 是 **server** 生的、不繼承呼叫端 shell，沒這段子 pane 會用預設帳號起來、拿不到 hook token。
+  `AM_AGENT_NAME`、`AM_KIND`、`AM_MODEL`、`AM_EFFORT`、`AM_PROJECT_ID`、`AM_WORKSPACE_ID`、`AM_OUTBOX`、`AM_DAEMON_EXE`、`AM_CONFIG_PATH`、`AM_REAL_HERDR`、`PATH`——herdr 的 pane 是 **server** 生的、不繼承呼叫端 shell，沒這段子 pane 會用預設帳號起來、拿不到 hook token。
+  `AM_DAEMON_EXE`／`AM_CONFIG_PATH`（issue #138）是 cargo shim 把 check／test／clippy 轉到外部編譯主機（#104）的前提：漏了它們，每個子 agent 的 cargo 都靜默留在本機。
+  傳遞清單（`AM_RESERVED_ENV_KEYS`）與 daemon 注入端（`lifecycle/setup.rs` 的 `env.insert`）綁了一條測試：daemon 注入的每個 key 要嘛在清單裡、要嘛明列成「刻意不傳」。
   呼叫端自己給的同名 `--env` 不動。
 - `herdr agent prompt`：見 §6.5d。其他子指令 `exec` 真正的 herdr（`$AM_REAL_HERDR`，否則 `PATH` 上第一個不是自己的）。
 
