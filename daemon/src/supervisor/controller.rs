@@ -2421,7 +2421,7 @@ mod no_grace_period_tests {
         let ap = store::create_approval(&app.db, "owner", "restart", "daemon", None, None, None).await.unwrap().approval;
         store::decide_approval(&app.db, &ap.id, "approved", "AGM", None, None).await.unwrap();
         let until = iso_in(900);
-        let lease = store::acquire_lease(&app.db, "restart", "owner", Some(&ap.id), None, &until, false, &json!({})).await.unwrap().unwrap();
+        let lease = store::acquire_lease(&app.db, "restart", "owner", Some(&ap.id), None, &until, false, None, &json!({})).await.unwrap().unwrap();
         let a = store::insert_assignment(&app.db, None, "gone-bot", crid, "do it", &[], None, true).await.unwrap();
         let paused = super::super::maintenance::dispatch_paused(app).await.expect("window is held");
         store::hold(&app.db, &a.id, &paused, &super::super::maintenance::pause_note(&paused)).await.unwrap();

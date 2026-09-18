@@ -9,6 +9,10 @@ AGM 定期交辦：正式 daemon（`target/release/agents-managerd serve`，監�
    算數，**`blocked` 不算**（那是在等使用者回答、可能好幾小時，而重啟不動 pane，原 pane 重啟本來就跳過 blocked）。
    不要用 `bin/agm health` 的 `bots.busy`——那個數字把 blocked 也算進去。有人在 working 就等，最多等 30 分鐘，
    超過回報「延後」不要硬重啟。
+3-0. **restart 窗口可以在回合內拿**（2026-09-18 起）：`lease acquire restart` 放過申請者自己那顆 bot 的送達臨界區，
+   所以不必為了拿窗口把建置或部署腳本丟到背景再結束回合（那違反 6a）。條件：`--owner` ＝核准的 `--requester`，
+   `--exclude-bot` 只帶**自己這顆 bot 的 id**；帶別顆會 409 `exclude_not_requester`。別的 bot 還在送達臨界區時照樣拿不到，等它。
+
 3a. **視窗判定與換 binary 要是同一個原子步驟**：輪詢判定「沒人 working」之後，換 binary 前一刻**再查一次**
    `run.agent_status`，仍成立才動手；不成立就回到等待。2026-09-12 22:41 那輪就是判定完到動手的幾秒間有 bot 翻回 working，
    結果在授權範圍外多一顆 bot 在跑時重啟（沒有損失，但那是流程缺陷）。

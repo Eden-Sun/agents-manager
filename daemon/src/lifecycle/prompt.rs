@@ -961,7 +961,7 @@ mod prompt_tests {
     /// 握住一個 `restart` 維護窗口（`mins` 為負＝已經過期）。
     async fn hold_restart_window(app: &Arc<App>, owner: &str, mins: i64) {
         let until = (chrono::Utc::now() + chrono::Duration::minutes(mins)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        crate::supervisor::store::acquire_lease(&app.db, "restart", owner, None, None, &until, false, &json!({}))
+        crate::supervisor::store::acquire_lease(&app.db, "restart", owner, None, None, &until, false, None, &json!({}))
             .await
             .unwrap()
             .expect("沒有人握著，一定拿得到");

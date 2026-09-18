@@ -2694,6 +2694,18 @@ pub fn delivery_critical_anywhere_sql() -> String {
     )
 }
 
+/// 同一份條件，但**放過一顆 bot**（bind 一個 bot id）。
+///
+/// 給 `acquire_lease` 的 `exclude_bot` 用：申請窗口的那顆 bot，自己的回合不該把自己擋在門外
+/// （2026-09-18：AM-m3 在自己的回合裡 30 次都拿不到 restart，因為 quiet_delivery 不吃排除）。
+/// 只放過**一顆**，而且呼叫端已經驗過它就是核准的 requester；其他 bot 的臨界區照擋。
+pub fn delivery_critical_except_sql() -> String {
+    format!(
+        "SELECT 1 FROM turns t JOIN conversations c ON c.id = t.conversation_id
+          WHERE c.bot_id <> ? AND ({DELIVERY_CRITICAL_PREDICATE}) LIMIT 1"
+    )
+}
+
 /// 上面那份條件限定一顆 bot，回傳擋住的那一筆 turn id。
 pub fn delivery_critical_for_bot_sql() -> String {
     format!(
@@ -2728,6 +2740,7 @@ pub async fn acquire_lease(
     target_commit: Option<&str>,
     expires_at: &str,
     quiet_delivery: bool,
+    exclude_bot: Option<&str>,
     detail: &Value,
 ) -> Result<Option<Lease>> {
     let now = crate::db::now();
@@ -2749,13 +2762,20 @@ pub async fn acquire_lease(
     .await?
     .flatten();
     let token = crate::projection::new_token();
-    let quiet = if quiet_delivery { format!(" AND NOT EXISTS ({})", delivery_critical_anywhere_sql()) } else { String::new() };
-    let taken = sqlx::query(&format!(
+    // 排除那顆 bot 時走帶 bind 的變體；`exclude_bot` 是呼叫端驗過的 requester 自己那顆
+    // （`maintenance::acquire`），不是隨便一個 id。
+    let quiet = match (quiet_delivery, exclude_bot) {
+        (false, _) => String::new(),
+        (true, Some(_)) => format!(" AND NOT EXISTS ({})", delivery_critical_except_sql()),
+        (true, None) => format!(" AND NOT EXISTS ({})", delivery_critical_anywhere_sql()),
+    };
+    let sql = format!(
         "UPDATE supervisor_leases
             SET owner=?, approval_id=?, target_commit=?, fence=fence+1, acquired_at=?, expires_at=?,
                 released_at=NULL, lease_token=?, detail_json=?
           WHERE resource=? AND (released_at IS NOT NULL OR expires_at IS NULL OR expires_at <= ?){quiet}"
-    ))
+    );
+    let mut q = sqlx::query(&sql)
     .bind(owner)
     .bind(approval_id)
     .bind(target_commit)
@@ -2764,11 +2784,13 @@ pub async fn acquire_lease(
     .bind(&token)
     .bind(detail.to_string())
     .bind(resource)
-    .bind(&now)
-    .execute(pool)
-    .await?
-    .rows_affected()
-        > 0;
+    .bind(&now);
+    if quiet_delivery {
+        if let Some(bot) = exclude_bot {
+            q = q.bind(bot);
+        }
+    }
+    let taken = q.execute(pool).await?.rows_affected() > 0;
     if !taken {
         return Ok(None);
     }
@@ -3974,8 +3996,8 @@ mod tests {
         let p = pool().await;
         get_or_init(&p).await.unwrap();
         let soon = "2099-01-01T00:00:00Z";
-        let first = acquire_lease(&p, "rebuild", "bot-a", Some("ap1"), Some("abc"), soon, false, &json!({})).await.unwrap();
-        let second = acquire_lease(&p, "rebuild", "bot-b", Some("ap2"), Some("abc"), soon, false, &json!({})).await.unwrap();
+        let first = acquire_lease(&p, "rebuild", "bot-a", Some("ap1"), Some("abc"), soon, false, None, &json!({})).await.unwrap();
+        let second = acquire_lease(&p, "rebuild", "bot-b", Some("ap2"), Some("abc"), soon, false, None, &json!({})).await.unwrap();
         let first = first.expect("first acquire wins");
         assert!(second.is_none(), "the second executor is refused while the window is held");
         assert_eq!(first.owner.as_deref(), Some("bot-a"));
@@ -3989,7 +4011,7 @@ mod tests {
         // Released: the next executor gets it, with a higher fence.
         assert!(release_lease(&p, "rebuild", "bot-a", first.fence).await.unwrap());
         assert!(!release_lease(&p, "rebuild", "bot-a", first.fence).await.unwrap(), "releasing twice is a no-op");
-        let second = acquire_lease(&p, "rebuild", "bot-b", Some("ap2"), Some("abc"), soon, false, &json!({}))
+        let second = acquire_lease(&p, "rebuild", "bot-b", Some("ap2"), Some("abc"), soon, false, None, &json!({}))
             .await
             .unwrap()
             .expect("free again");
@@ -4002,12 +4024,12 @@ mod tests {
     async fn an_expired_lease_is_taken_over_and_the_old_token_stops_working() {
         let p = pool().await;
         get_or_init(&p).await.unwrap();
-        let dead = acquire_lease(&p, "restart", "bot-a", None, None, "2000-01-01T00:00:00Z", false, &json!({}))
+        let dead = acquire_lease(&p, "restart", "bot-a", None, None, "2000-01-01T00:00:00Z", false, None, &json!({}))
             .await
             .unwrap()
             .unwrap();
         assert!(!dead.held_at(&crate::db::now()), "already expired");
-        let next = acquire_lease(&p, "restart", "bot-b", None, None, "2099-01-01T00:00:00Z", false, &json!({}))
+        let next = acquire_lease(&p, "restart", "bot-b", None, None, "2099-01-01T00:00:00Z", false, None, &json!({}))
             .await
             .unwrap()
             .expect("an expired lease does not block the next window");
@@ -4162,14 +4184,14 @@ mod tests {
         let first = create_approval(&p, "bot-a", "restart", "daemon", None, None, None).await.unwrap().approval;
         decide_approval(&p, &first.id, "approved", "AGM", None, None).await.unwrap();
         let past = (chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        acquire_lease(&p, "restart", "runner-1", Some(&first.id), None, &past, false, &json!({})).await.unwrap().unwrap();
+        acquire_lease(&p, "restart", "runner-1", Some(&first.id), None, &past, false, None, &json!({})).await.unwrap().unwrap();
         assert_eq!(approval(&p, &first.id).await.unwrap().unwrap().status, "approved");
 
         // 沒有人 release，租約自己過期，下一個人接手。
         let second = create_approval(&p, "bot-a", "restart", "daemon", None, None, None).await.unwrap().approval;
         decide_approval(&p, &second.id, "approved", "AGM", None, None).await.unwrap();
         let later = (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        acquire_lease(&p, "restart", "runner-2", Some(&second.id), None, &later, false, &json!({})).await.unwrap().unwrap();
+        acquire_lease(&p, "restart", "runner-2", Some(&second.id), None, &later, false, None, &json!({})).await.unwrap().unwrap();
 
         assert_eq!(approval(&p, &first.id).await.unwrap().unwrap().status, "consumed", "過期沒 release 的那張要被消耗掉");
         assert_eq!(approval(&p, &second.id).await.unwrap().unwrap().status, "approved", "接手的這張還在用");

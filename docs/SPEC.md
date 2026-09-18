@@ -1993,6 +1993,13 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
   safety 是在拿租約之前讀的，讀完到寫入之間仍可能有一則 prompt 把 turn commit 進來（TOCTOU）。兩邊各是一句單句寫入、由 SQLite 排序，先 commit 的贏——
   prompt 先 → acquire 0 rows，回 409 `not_idle` 且 `raced:true`（跟「被別人搶走窗口」的 `lease_held` 分得開）；acquire 先 → prompt 在第一個字之前複查到租約，**撤回自己剛 commit 的那一筆**再回 409。
   兩邊加起來才是「acquire 回 Ok 之後不會有任何一個字進 pane」。`rebuild` 不中斷任何人，不帶這個條件。
+- **申請者自己那一回合不算臨界區**（巡檢 2026-09-18）：`acquire` 的條件式 UPDATE 放過**一顆** bot——申請這筆核准的那顆（`store::delivery_critical_except_sql`），
+  其他 bot 的臨界區照擋。沒有這一條的話，任何 bot 在自己的回合裡都拿不到 `restart`：它自己的 in-flight 回合與排給它的 queued 交辦要等 acquire 回來才會結束，
+  `lease safety --owner X --exclude-bot X` 明明回 `safe:true`，`acquire` 卻一路 409 `not_idle` / `raced:true`（2026-09-18 AM-m3 連試 30 次），
+  只剩「把部署腳本丟背景、回合先結束」一條路——那正是 `daemon-update-task.md` 規則 6a 禁止的。
+  放過的那顆綁核准的 `requester`（＝租約 `owner`，兩者本來就必須一致）並且要出現在 `--exclude-bot` 裡；
+  `restart` 的 `--exclude-bot` 指到**別顆** bot 直接 409 `exclude_not_requester`——否則等於拿自己的核准把別人正在打字的 pane 算成閒置。
+  `rebuild` 不帶這個條件，排除清單維持原本用法（kick 會排掉 AGM 三顆）。
 - **重啟後無等待期**：窗口在租約 release（API）或 daemon 啟動完成（開始 listen 後自動 release 仍未釋放的 `restart` 租約、consume 核准並記 info log）時就結束，被它 hold 的交辦立刻解除、controller 下一輪（≤10 秒）直接派送，不等 hold 寫的到期時間；controller 每輪派送前發現已沒有 held 的 `restart` 租約（含到期）也會先解除殘留 hold。
 - 安全窗口 fail closed：讀不到某顆 bot 狀態回 `safe:false` 並列在 `unreadable`。`restart` 不接受 `require_idle=false`。
 - **等太久就縮小封鎖面**（AGM 裁示 2026-09-16）：在這台機器的負載下「任何 bot 在回合中就不換」等同永遠不安全——2026-09-15 那筆核准卡了 11 小時，每 5 分鐘那一輪都撞到有人在講話。
