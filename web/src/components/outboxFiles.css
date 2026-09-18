@@ -98,3 +98,30 @@
 .outbox-meta.soon {
   color: var(--warn);
 }
+
+/* 圖檔滑過去浮出的預覽（使用者 2026-09-18）：掛在 body 上，fixed 定位由 JS 算，不擋滑鼠。 */
+.outbox-preview {
+  position: fixed;
+  z-index: 1000;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.outbox-preview img {
+  display: block;
+  object-fit: contain;
+}
+
+.outbox-preview-note {
+  padding: 8px 12px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
