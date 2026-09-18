@@ -607,7 +607,15 @@ cancel 撤掉的是還沒送出的那則時，review 回應不再帶「turn 還�
 `classify_failure` 也把 `You've hit your session limit` 這類橫幅歸成額度（以前沒有 rate／usage 字樣會被當成 API 錯誤）。
 排隊保險絲（`assignment_queue_wait_secs`）對這種刻意留在佇列的派工：撞限寫了到期時間、而且在 supervisor 的等待上限（6 小時）內，
 或 flush 剛放掉擋、下一次重看就會送的那 6 分鐘內，**不撤**；看不到盡頭的（沒寫時間、週窗）照舊撤成 `blocked`，理由寫「目標身分沒有額度」
-而不是「沒有回合結束的空檔」。已知限制同 §12.4：撞限只在記憶體，daemon 重啟後這裡跟派送前一樣看不到。
+而不是「沒有回合結束的空檔」。
+**活過重啟**（#108 重開）：`app.quotas` 只在記憶體，而開機的 `rearm_queue_retries` 在身分偵測之前就叫醒 flush——只看記憶體的話，
+重啟後第一個 flush 會把它送進同一個還沒額度的身分。所以跟交辦的 `resume_at` 同一個做法，**等著的那一列自己帶憑據**：擋下時把那筆撞限
+（身分、桶、撞限時刻、到期、原因、寫下的時刻與開機代號 `App::boot_id`）寫進 `turns.quota_hold`，閘門放行就清掉。**上一輪開機**寫的憑據，
+在那台主機的開機回填跑完之前（身分表還沒進來，`cc0` 這類 key 算不準）flush 直接看它：身分沒換、撞的桶管得到現在的模型、還沒到期、
+寫下之後同一把 key 沒被成功回合清過（`quota::limit_cleared_since`），就擋。回填（`quota_hold::backfill_once`，跟 §18 的交辦回填同一個點：
+`tools::install_host_tools` 之後，每台主機每一輪開機一次）用那台 bot 現在的身分算 key，原樣種回記憶體（`quota::restore_limit_hit`：
+保留撞限時刻與桶名、沒寫時間的照樣黏著、回填前已經進來的讀數當場校正），之後只看記憶體——新讀數、換身分、換模型、成功回合照舊校正或清掉它。
+這一輪自己寫的憑據記憶體本來就有，不另外看。
 
 **abort 不動 queued**（AGM 裁示 2026-09-16）：`POST /api/bots/{id}/abort` 的語意是「停掉這一回合」，排在後面的是 AGM 正當的派工，
 abort 之後照常 flush 出去（但先照下一段等寬限）。要取消排隊的派工，走交辦 `cancel`（上面那條會一併撤 queued）。這不是漏撤，不要當成 bug 修。
@@ -2000,6 +2008,7 @@ inbox `assignment_noticed`（`needs_review=false`）。送不出去或回合失�
 - **開機回填**（`controller::backfill_quota_limits_once`）：`tools::detect` 寫完**一台主機**的身分表之後，用那台上 parked 交辦的 `resume_at` 把 host＋`quota_base` 的 `limit_hit` 補回記憶體（`quota::seed_limit_hit`，
   `source=parked-assignment`）。**每台主機每個行程只跑一次**，只收這個行程起來之前就停下的交辦：不綁 controller 的 `spawn`（每次換 generation 都會跑，會把成功回合剛清掉的撞限種回去），
   也不在身分偵測之前算 key（`cc0` 會落到沒人讀的 `claude:cc0`、遠端還沒連上）（review 2026-09-16）。同一把 key 取**最晚**的 `resume_at`，已經過期的不寫；只寫 `limit_hit`，不碰任何量表或 `resets_at`。這樣重啟後 `dispatch` 也照樣看得到「這個帳號還在擋」。
+  沒有 `quota_blocked` 交辦、只有排著的 prompt 被額度閘擋下的（AGM 派到回合中 bot 的 `delivered`＋queued turn、AGM 的通知），憑據在 `turns.quota_hold`，同一個時機由 `quota_hold::backfill_once` 種回（§6「目標身分沒額度就不送」）。
 - **任務被使用者暫停時不自動重送**：交辦屬於一個還開著、被**使用者**暫停的任務時，`resume_quota_blocked` 整件跳過（也不算重試次數）——
   暫停不收交辦（取消才收），額度一回來就重送的話使用者按的暫停等於沒按；解除暫停後下一個 tick 照常重送。daemon 自己設的暫停
   （`push_main_failed`／`pr_failed`／`max_rounds`／`no_fable_for_verifier`／`clarify`）照常重送：那些是「等 AGM 處理」，派工的閘門也不擋，

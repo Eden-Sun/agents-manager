@@ -477,3 +477,114 @@ async fn a_dispatch_held_for_quota_goes_out_once_when_identity_a_gets_its_quota_
     forget_queue_retry_timer(&bot.id);
     stop_bot(&app, &bot.id).await.unwrap();
 }
+
+/// daemon 重啟：行程內的東西（`app.quotas`、重看的 timer、`recently_held`）全沒了，DB 與活著的 pane 還在。
+async fn restarted(e: &tt::Env, bot_id: &str) -> Arc<App> {
+    forget_queue_retry_timer(bot_id);
+    super::quota_hold::forget_held(bot_id);
+    tt::restart_app(e).await
+}
+
+/// 開機後那台主機的身分偵測寫完（`tools::detect` → `install_host_tools`，回填掛在這之後）。
+async fn identities_detected(app: &Arc<App>) {
+    let ht = crate::tools::HostTools { tools: Default::default(), identities: Default::default(), shell_identities: vec![], checked_at: db::now() };
+    crate::tools::install_host_tools(app, LOCAL_HOST, ht).await;
+}
+
+fn held(t: &db::Turn) -> (&str, i64, Option<&str>) {
+    (t.status.as_str(), t.flush_retries, t.run_id.as_deref())
+}
+
+async fn turn_row(app: &Arc<App>, id: &str) -> db::Turn {
+    sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(id).fetch_one(&app.db).await.unwrap()
+}
+
+/// issue #108 重開（縮小範圍那則）：只有 queued Turn、**沒有** `quota_blocked` 交辦，撞限只在記憶體。
+/// A 撞限 → 派工被擋 → daemon 重啟 → 開機叫醒 flush：不能送進 A（身分偵測還沒完成也一樣）；偵測完的回填
+/// 把撞限種回記憶體，派送前也看得到 → 換 B → 送出，只送一次，A 一次都沒有。
+#[tokio::test]
+async fn a_quota_hold_survives_a_daemon_restart_then_goes_to_identity_b_exactly_once() {
+    let e = tt::env().await;
+    let (bot, _run_a, pane_a, dispatch) = quota_hit_with_a_dispatch_queued(&e, "quota-restart-b").await;
+    let app = restarted(&e, &bot.id).await;
+    assert!(crate::quota::limit_hit_for_bot(&app, &bot).await.is_none(), "前提：新行程的記憶體是空的");
+
+    // 開機的 `rearm_queue_retries` 立刻叫醒 flush（測試裡 `schedule_flush_queued` 是 no-op，直接叫）——這時身分偵測還沒完成。
+    flush_queued_locked(&app, &bot.id).await.unwrap();
+    assert_eq!(held(&turn_row(&app, &dispatch).await), ("queued", 0, None), "重啟後仍擋：不 claim、不花重試");
+    assert_eq!(sent_to(&e, &pane_a), 0, "沒有送進還沒額度的 A");
+    assert!(queue_retry_timer_armed(&bot.id), "掛了 timer 回來再看");
+
+    identities_detected(&app).await;
+    assert!(crate::quota::limit_hit_for_bot(&app, &bot).await.is_some(), "回填：記憶體又知道 A 還在擋（派送前、額度列都讀這裡）");
+    forget_queue_retry_timer(&bot.id);
+    flush_queued_locked(&app, &bot.id).await.unwrap();
+    assert_eq!(held(&turn_row(&app, &dispatch).await), ("queued", 0, None), "回填之後照樣擋");
+    assert_eq!(sent_to(&e, &pane_a), 0);
+
+    // 換到 B：接回驗證完就送。
+    sqlx::query("UPDATE bots SET identity='cc-b' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
+    let strict = StartOpts { resume_native: true, resume_required: true, ..Default::default() };
+    let run_b = restart_bot_with(&app, &bot.id, strict).await.unwrap();
+    let bot = db::bot(&app.db, &bot.id).await.unwrap().unwrap();
+    assert!(crate::quota::limit_hit_for_bot(&app, &bot).await.is_none(), "B 這個身分沒有撞限");
+    let transcript_b = e.dir.join("cc-b").join("projects").join(CWD_KEY).join(format!("{S}.jsonl"));
+    let pane_b: String = sqlx::query_scalar("SELECT pane_id FROM runs WHERE id=?").bind(&run_b).fetch_one(&app.db).await.unwrap();
+    e.herdr.live_pane(&pane_b, tt::LivePane { width: Some(120), transcript_file: Some(transcript_b.clone()), ..Default::default() });
+    db::set_pane_typed(&app.db, &run_b).await.unwrap();
+    crate::hookrecv::process(
+        &app,
+        &hook(&bot.id, &run_b, json!({"hook_event_name": "SessionStart", "session_id": S, "source": "resume",
+                                      "transcript_path": transcript_b.to_string_lossy()})),
+    )
+    .await
+    .unwrap();
+    for _ in 0..3 {
+        forget_queue_retry_timer(&bot.id);
+        flush_queued_locked(&app, &bot.id).await.unwrap();
+    }
+    let t = turn_row(&app, &dispatch).await;
+    assert_eq!((t.status.as_str(), t.delivery.as_str(), t.run_id.as_deref()), ("in_flight", "ok", Some(run_b.as_str())));
+    assert_eq!((sent_to(&e, &pane_b), sent_to(&e, &pane_a)), (1, 0), "送進 B、只送一次；A 一次都沒有");
+    forget_queue_retry_timer(&bot.id);
+    stop_bot(&app, &bot.id).await.unwrap();
+}
+
+/// 同上，但額度回來的那條：重啟、回填之後，A 的新讀數顯示 5 小時窗在撞限之後重開了（撞限被校正作廢）→ 送出一次。
+#[tokio::test]
+async fn a_quota_hold_survives_a_daemon_restart_then_goes_out_once_when_a_new_reading_clears_it() {
+    let e = tt::env().await;
+    let (bot, run_a, pane_a, dispatch) = quota_hit_with_a_dispatch_queued(&e, "quota-restart-back").await;
+    let app = restarted(&e, &bot.id).await;
+    flush_queued_locked(&app, &bot.id).await.unwrap();
+    assert_eq!(held(&turn_row(&app, &dispatch).await), ("queued", 0, None), "重啟後仍擋");
+    identities_detected(&app).await;
+    forget_queue_retry_timer(&bot.id);
+    flush_queued_locked(&app, &bot.id).await.unwrap();
+    assert_eq!((held(&turn_row(&app, &dispatch).await), sent_to(&e, &pane_a)), (("queued", 0, None), 0), "回填之後照樣擋");
+
+    let base = crate::quota::quota_base_for_host(&app, LOCAL_HOST, "claude", Some("cc-a")).await;
+    let reopened = crate::quota::Quota {
+        five_hour: Some(crate::quota::Window { used_pct: 3.0, resets_at: Some(db::iso_at(chrono::Utc::now() + chrono::Duration::hours(5) + chrono::Duration::seconds(5))) }),
+        seven_day: None,
+        fable: None,
+        reset_credits: None,
+        limit_hit: None,
+        plan: None,
+        updated_at: db::now(),
+        source: "statusline".into(),
+        account: Some("cc-a".into()),
+        host: LOCAL_HOST.into(),
+    };
+    crate::quota::set(&app, LOCAL_HOST, &base, reopened).await;
+    assert!(crate::quota::limit_hit_for_bot(&app, &bot).await.is_none(), "前提：新讀數把回填的撞限校正掉了");
+    for _ in 0..3 {
+        forget_queue_retry_timer(&bot.id);
+        flush_queued_locked(&app, &bot.id).await.unwrap();
+    }
+    let t = turn_row(&app, &dispatch).await;
+    assert_eq!((t.status.as_str(), t.delivery.as_str(), t.run_id.as_deref()), ("in_flight", "ok", Some(run_a.as_str())));
+    assert_eq!(sent_to(&e, &pane_a), 1, "只送一次");
+    forget_queue_retry_timer(&bot.id);
+    stop_bot(&app, &bot.id).await.unwrap();
+}

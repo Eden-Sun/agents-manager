@@ -125,6 +125,8 @@ pub struct App {
     /// issue #90：build scheduler 的「數名額、發／收名額」critical section。SQLite 本身也序列化寫入，
     /// 但這裡要的是「先數後寫」一起做完，不靠 SQL 的原子性猜實作細節。
     pub build_slot_lock: Mutex<()>,
+    /// 這一輪開機的代號：寫進 DB 的東西（`lifecycle::quota_hold`）靠它分辨是不是這個行程自己寫的。
+    pub boot_id: String,
 }
 
 impl App {
@@ -143,6 +145,7 @@ impl App {
         let (bus, _) = broadcast::channel(1024);
         let (turn_bus, _) = broadcast::channel(1024);
         Arc::new(Self {
+            boot_id: crate::db::ulid(),
             instance: std::sync::RwLock::new(crate::startup::instance()),
             db,
             hosts: HostManager::new(herdr.clone()),

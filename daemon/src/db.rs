@@ -148,7 +148,7 @@ CREATE TABLE IF NOT EXISTS spawn_hints (
 /// binary 卻碰到剛被新版升級過的 DB，會拿著過期的欄位假設去讀一個它不認識的資料庫。每次在 `SCHEMA`
 /// 或 ALTER 名單裡加東西，這個數字要跟著 +1；忘記加只會讓 `check_schema_drift` 照樣抓到欄位對不上
 /// （那個檢查看的是實際欄位，不看這個數字），不會讓資料庫壞掉，但舊 binary 就少了這一層提早攔截。
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 pub async fn open(path: &Path) -> Result<SqlitePool> {
     let url = format!("sqlite://{}", path.display());
@@ -237,6 +237,9 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
         // 第一次記下送達結果的時間（`prompt::mark_delivery`）。排隊的 turn 的 `created_at` 是**排進佇列**的時間，
         // 重啟補 stall watchdog 要看的是「剛送出」，不是「剛排隊」（review 2026-09-16 deliv L3）。舊列 NULL＝退回 created_at。
         ("turns", "delivered_at", "ALTER TABLE turns ADD COLUMN delivered_at TEXT"),
+        // 排著的這一則被 flush 的額度閘擋下時看到的撞限（issue #108，`lifecycle::quota_hold`，JSON）。
+        // `app.quotas` 只在記憶體：沒有這一欄，重啟後開機叫醒的 flush 會把它送進同一個還沒額度的身分。
+        ("turns", "quota_hold", "ALTER TABLE turns ADD COLUMN quota_hold TEXT"),
         // 舊庫裡的每一列都是舊流程「先寫檔、DB insert 最後做」留下來的——insert 成功就代表檔案已經寫完，
         // 一律當 'ready'（issue #88）。
         (

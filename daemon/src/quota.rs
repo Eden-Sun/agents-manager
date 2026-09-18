@@ -565,6 +565,8 @@ pub async fn clear_limit_hit(app: &Arc<App>, host: &str, base: &str) {
 
 /// 重啟後的回填來源：這一格的撞限是從「還在等額度的交辦」推回來的，不是誰真的看到橫幅。
 pub const PARKED_SOURCE: &str = "parked-assignment";
+/// 同上，但來源是排著的 prompt 自己記下的撞限（[`restore_limit_hit`]）。
+pub const HELD_SOURCE: &str = "queued-prompt-hold";
 
 /// 重啟後把「還在等額度」這件事補回記憶體。
 ///
@@ -610,6 +612,57 @@ pub async fn seed_limit_hit(app: &Arc<App>, host: &str, base: &str, until: &str,
     });
     q.limit_hit =
         Some(LimitHit { message: message.to_string(), until: Some(until.to_string()), at: now.clone(), bucket });
+    q.updated_at = now;
+    let out = q.clone();
+    quotas.insert(key.clone(), q);
+    drop(quotas);
+    app.emit("quota_updated", json!({"kind": key, "host": host, "quota": out})).await;
+    true
+}
+
+/// [`seed_limit_hit`] 的另一個來源：排著的 prompt 被擋下時自己記下的那筆撞限（`lifecycle::quota_hold`），
+/// 重啟後**原樣**種回來——`at` 是當初撞限的時刻、帶著桶名，沒寫時間的（codex credits）照樣黏著。
+///
+/// `at` 要是原本那一刻，讀數才校正得準（[`recalibrate_limit_hit`] 靠它判斷窗是不是撞限之後才開的）；
+/// 重啟之後、回填之前已經有新讀數進來的話，當場校正一次，不必等下一份。已經過期、被校正作廢、或這一格
+/// 已有更晚（或黏著）的撞限時不寫。回傳有沒有真的寫進去。
+pub async fn restore_limit_hit(app: &Arc<App>, host: &str, base: &str, hit: LimitHit) -> bool {
+    if limit_hit_expired(Some(&hit)) {
+        return false;
+    }
+    let key = quota_key(host, base);
+    let mut quotas = app.quotas.lock().await;
+    let hit = match quotas.get(&key) {
+        Some(q) => match recalibrate_limit_hit(hit, q) {
+            Some(h) => h,
+            None => return false,
+        },
+        None => hit,
+    };
+    if let Some(prev) = quotas.get(&key).and_then(|q| q.limit_hit.as_ref()).filter(|h| !limit_hit_expired(Some(h))) {
+        let keep = match (prev.until.as_deref().and_then(parse_utc), hit.until.as_deref().and_then(parse_utc)) {
+            (None, _) => true,
+            (Some(_), None) => false,
+            (Some(p), Some(n)) => p >= n,
+        };
+        if keep {
+            return false;
+        }
+    }
+    let now = crate::db::now();
+    let mut q = quotas.get(&key).cloned().unwrap_or_else(|| Quota {
+        five_hour: None,
+        seven_day: None,
+        fable: None,
+        reset_credits: None,
+        limit_hit: None,
+        plan: None,
+        updated_at: now.clone(),
+        source: HELD_SOURCE.into(),
+        account: None,
+        host: host.to_string(),
+    });
+    q.limit_hit = Some(hit);
     q.updated_at = now;
     let out = q.clone();
     quotas.insert(key.clone(), q);
@@ -1553,5 +1606,56 @@ mod tests {
         let q = quota_from_statusline(&p, None).unwrap();
         assert_eq!(q.seven_day.unwrap().used_pct, 22.0);
         assert_eq!(q.fable.unwrap().used_pct, 61.0);
+    }
+
+    /// issue #108：排著的 prompt 記下的撞限重啟後原樣種回——撞限時刻、桶名、沒寫時間的黏著都留著；
+    /// 回填之前已經進來的讀數當場校正；過期的、這一格已有更晚（或黏著）的不寫。
+    #[tokio::test]
+    async fn a_restored_limit_hit_keeps_its_moment_and_bucket_and_meets_the_reading_already_in() {
+        let env_ = crate::testing::env().await;
+        let app = env_.app.clone();
+        let t = |mins: i64| crate::db::iso_at(chrono::Utc::now() + chrono::Duration::minutes(mins));
+        let hit = |at: &str, until: Option<String>, bucket: Option<&str>| LimitHit {
+            message: "You've hit your session limit".into(),
+            until,
+            at: at.into(),
+            bucket: bucket.map(String::from),
+        };
+        let got = |key: &'static str| {
+            let app = app.clone();
+            async move { app.quotas.lock().await.get(key).and_then(|q| q.limit_hit.clone()) }
+        };
+
+        let original = hit(&t(-90), Some(t(120)), Some("five_hour"));
+        assert!(restore_limit_hit(&app, LOCAL_HOST, "claude:r1", original.clone()).await);
+        assert_eq!(got("claude:r1").await, Some(original.clone()), "原樣，不是「現在」撞的");
+        assert_eq!(app.quotas.lock().await["claude:r1"].source, HELD_SOURCE);
+        assert!(!restore_limit_hit(&app, LOCAL_HOST, "claude:r1", hit(&t(-90), Some(t(60)), None)).await, "已有更晚的：不蓋");
+        assert!(restore_limit_hit(&app, LOCAL_HOST, "claude:r1", hit(&t(-90), None, None)).await, "黏著的比任何時間都晚");
+        assert!(!restore_limit_hit(&app, LOCAL_HOST, "claude:r1", hit(&t(-90), Some(t(600)), None)).await, "已經黏著：不蓋");
+        assert!(!restore_limit_hit(&app, LOCAL_HOST, "claude:r2", hit(&t(-90), Some(t(-1)), None)).await, "過期的不種");
+
+        // 重啟後、回填前就進來的讀數：5 小時窗是撞限之後才開的——撞限作廢，不種。
+        let reading = |resets: String| Quota {
+            five_hour: Some(Window { used_pct: 3.0, resets_at: Some(resets) }),
+            seven_day: None,
+            fable: None,
+            reset_credits: None,
+            limit_hit: None,
+            plan: None,
+            updated_at: crate::db::now(),
+            source: "statusline".into(),
+            account: None,
+            host: LOCAL_HOST.into(),
+        };
+        set(&app, LOCAL_HOST, "claude:r3", reading(t(5 * 60 - 1))).await;
+        assert!(!restore_limit_hit(&app, LOCAL_HOST, "claude:r3", hit(&t(-90), Some(t(120)), Some("five_hour"))).await);
+        assert_eq!(got("claude:r3").await, None);
+        // 窗在撞限之前就開了：照種，但到期時間收斂到那個窗的重置。
+        let resets = t(30);
+        set(&app, LOCAL_HOST, "claude:r4", reading(resets.clone())).await;
+        assert!(restore_limit_hit(&app, LOCAL_HOST, "claude:r4", hit(&t(-90), Some(t(120)), Some("five_hour"))).await);
+        assert_eq!(got("claude:r4").await.and_then(|h| h.until), Some(resets));
+        assert_eq!(app.quotas.lock().await["claude:r4"].five_hour.as_ref().map(|w| w.used_pct), Some(3.0), "讀數不動");
     }
 }
