@@ -441,6 +441,10 @@ pub async fn post_review(
         // its `delivery` and `turn_id` precisely so nobody has to guess afterwards.
         out["may_still_be_running"] = json!(true);
     }
+    // 群組任務的交辦：裁示之後任務的下一步由 daemon 推導（issue #74，`mission::flow`），一併回給裁示的人。
+    if let Some(mid) = updated.mission_id.as_deref() {
+        out["mission_next"] = crate::mission::workflow::next_json(&app, mid).await;
+    }
     Ok(Json(out))
 }
 

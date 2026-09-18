@@ -917,6 +917,11 @@ def cmd_mission(client: Client, cfg: dict, args) -> object:
         if not (args.text or args.text_file):
             raise AgmError("bad_args", "mission complete 需要 --text 或 --text-file（結果摘要）", 2)
         body = {"result_summary": _mission_text(args)}
+        # 沒交付就結案要明講理由（issue #74）；no_changes 派過執行者時 daemon 會要 --worktree 來查。
+        if args.no_delivery:
+            body["no_delivery"] = args.no_delivery
+        if args.worktree:
+            body["worktree"] = str(Path(args.worktree).expanduser())
         _with_relay(body, cfg, args)
         return client.post(f"{base}/complete", body)
     if op == "pick":
@@ -1249,7 +1254,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--detail", help="pause：補充說明")
     s.add_argument("--role", choices=["executor", "reviewer", "verifier"], help="pick：要挑哪個角色的身分")
     s.add_argument("--exclude", help="pick：排除的身分（reviewer 排除執行者的身分）")
-    s.add_argument("--worktree", help="deliver：要交付的 worktree；event --kind verified：驗過的 worktree（daemon 記下它的 HEAD）")
+    s.add_argument("--worktree", help="deliver：要交付的 worktree；event --kind verified：驗過的 worktree（daemon 記下它的 HEAD）；complete --no-delivery no_changes：執行者的 worktree（daemon 查它沒有改動）")
+    s.add_argument(
+        "--no-delivery",
+        dest="no_delivery",
+        choices=["no_changes", "user_declined"],
+        help="complete：沒交付就結案的理由（no_changes＝沒有改東西；user_declined＝使用者回答過不要交付）",
+    )
     s.add_argument("--sha", help="event --kind verified：驗過的 commit（沒有 --worktree 時必給）")
     s.add_argument("--request-id", dest="request_id", help="question/answer/revise：穩定的冪等鍵，重送沿用同一個")
     s.add_argument("--reply-to", dest="reply_to", help="answer：回的是哪一則 question 的事件 id")

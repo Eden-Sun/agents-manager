@@ -980,6 +980,19 @@ class MissionCommandTest(CliCase):
         body = self.posts("/api/missions/m1/complete")[0]["body"]
         self.assertEqual(body, {"result_summary": "修好了，commit abc123", "relay_from": "bot-agm"})
 
+    def test_complete_without_delivery_states_the_reason(self):
+        FakeDaemon.routes["POST /api/missions/m1/complete"] = (200, {"status": "done"})
+        self.ok("mission", "complete", "m1", "--text", "只查了原因", "--no-delivery", "no_changes", "--worktree", "/tmp/wt")
+        body = self.posts("/api/missions/m1/complete")[0]["body"]
+        self.assertEqual(
+            body,
+            {"result_summary": "只查了原因", "no_delivery": "no_changes", "worktree": "/tmp/wt", "relay_from": "bot-agm"},
+        )
+        # 理由只收兩種，打錯字在 CLI 就擋下來，不送出一個 daemon 看不懂的值。
+        code, _, _ = self.run_cli("mission", "complete", "m1", "--text", "x", "--no-delivery", "later")
+        self.assertEqual(code, 2)
+        self.assertEqual(len(self.posts("/api/missions/m1/complete")), 1, "打錯的那次沒有送出")
+
     def test_pick_passes_role_and_exclude(self):
         self.assertEqual(self.bad("mission", "pick", "m1")["error"], "bad_args")
         FakeDaemon.routes["GET /api/missions/m1/pick"] = (200, {"pick": {"decision": "use", "identity": "cc1"}})
