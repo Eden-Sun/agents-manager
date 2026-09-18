@@ -33,6 +33,7 @@ mod run_state;
 pub(crate) mod quota_hold;
 pub(crate) mod start_send;
 mod send_now;
+mod interruption;
 mod transitions;
 /// issue #81 探索用的原型；`#[cfg(test)]` 整個檔案只在 `cargo test` 底下編，不進正式二進位
 /// （見檔案頂端的說明與 docs/CLAUDE-NATIVE-TRANSPORT.md）。
@@ -76,6 +77,7 @@ pub(crate) use start::*;
 pub(crate) use start_send::{prompt_starting, withdraw_turn};
 pub(crate) use stop::*;
 pub(crate) use interrupt_grace::{note_user_interrupt_of, settle_interrupt_echo, FailureEvidence as InterruptFailureEvidence};
+pub(crate) use interruption::{settle_locked as settle_interruption, Evidence as InterruptEvidence};
 #[cfg(test)]
 pub(crate) use interrupt_grace::{expect_interrupt_echo, note_user_interrupt, InterruptedTurn};
 pub(crate) use stuck_turns::{observe as observe_agent_status, spawn_stuck_turn_sweeper, sweep as sweep_stuck_turns};

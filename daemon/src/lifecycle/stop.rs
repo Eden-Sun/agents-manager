@@ -330,19 +330,76 @@ mod bot_dir_safety_tests {
     }
 }
 
+/// [`interrupt_turn`] 不綁哪一筆（測試用；API 走 `interrupt_turn`）。
+#[cfg(test)]
 pub async fn interrupt_bot(app: &Arc<App>, bot_id: &str) -> LcResult<()> {
+    interrupt_turn(app, bot_id, None).await
+}
+
+/// 送 Esc 打斷這顆 bot 正在跑的回合。`expect_turn` 給了就只打斷那一筆：它已經不在飛（別的路收掉了、下一回合已經開始）就不按 Esc，
+/// 回 409 `turn_not_in_flight`。重試上一次中斷時帶上它，才不會誤傷下一回合（#147）。
+///
+/// Esc 與「把回合收成 failed」是兩半（見 `interruption`）：Esc 沒進 pane 就什麼都不動；進了而 DB 寫不進去，
+/// 回 503 `interrupt_state_uncommitted`（不是普通的成功），欠著的收尾之後補——同一筆的重試**不再按** Esc；
+/// 不知道 Esc 進了沒有，回合留在 in_flight，等它的回聲。
+pub async fn interrupt_turn(app: &Arc<App>, bot_id: &str, expect_turn: Option<&str>) -> LcResult<()> {
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
     let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     let run = db::active_run(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("run".into()))?;
+    // 上一次打斷欠著的收尾先補：補完之後還在飛的，才是真的還在跑的那一筆。
+    let owed = super::interruption::owed_turn(bot_id);
+    let settled = super::interruption::settle_locked(app, bot_id, super::interruption::Evidence::Nothing).await;
+    let in_flight = db::in_flight_turn(&app.db, &run.id).await.map_err(up)?;
+    // 欠著的那一筆剛剛補上（或已經被別的路收掉）：這一次就是上一次中斷的重試，中斷已經完成——不再按 Esc。
+    if let Some(t) = owed.as_deref() {
+        let done = settled.is_ok() && in_flight.as_ref().map(|x| x.id.as_str()) != Some(t);
+        if done && (expect_turn.is_none() || expect_turn == Some(t)) {
+            return Ok(());
+        }
+    }
+    if let Some(want) = expect_turn {
+        if in_flight.as_ref().map(|t| t.id.as_str()) != Some(want) {
+            return Err(LcError::conflict(
+                "turn_not_in_flight",
+                json!({"turn_id": want, "in_flight_turn_id": in_flight.as_ref().map(|t| t.id.clone()), "esc_sent": false}),
+            ));
+        }
+    }
+    // 這一筆的 Esc 已經生效、只是狀態還沒寫成：不再按（claude 閒著時連按兩次 Esc 會跳 rewind 選單）。
+    if let Some(t) = in_flight.as_ref().filter(|t| super::interruption::owes(bot_id, &t.id)) {
+        return Err(super::interruption::uncommitted(&run.id, &t.id, settled.as_ref().err()));
+    }
     let target = db::run_target(&run, &bot);
     let client = client_for_run(app, &run).await?;
-    client.agent_send_keys(&target, &["esc".to_string()]).await.map_err(up)?;
-    // 先記接管，再收 in-flight：`fail_in_flight` 會 emit turn → 觸發 flush，順序反過來排隊的派工就搶進去了。
+    let sent = client.agent_send_keys(&target, &["esc".to_string()]).await;
+    let fate = super::interruption::key_fate(&sent);
+    if fate == super::interruption::KeyFate::NotApplied {
+        // herdr 沒收下：什麼都沒發生，回合照舊在飛。
+        return Err(up(sent.err().map(|e| format!("{e:#}")).unwrap_or_default()));
+    }
+    // 先記接管，再收 in-flight：收掉會 emit turn → 觸發 flush，順序反過來排隊的派工就搶進去了。
     // 同時記下被中斷的是哪一回合：它的 `StopFailure` 回聲才認得出來，新回合的失敗不會被當成回聲（#117）。
-    let in_flight = db::in_flight_turn(&app.db, &run.id).await.ok().flatten();
     note_user_interrupt_of(app, &bot, &run, in_flight.as_ref()).await;
-    fail_in_flight(app, &run.id, "interrupted by user").await;
+    if fate == super::interruption::KeyFate::Unknown {
+        // 不知道 Esc 進了沒有：不假定打斷。回合留在 in_flight，等那次 Esc 的回聲來證明。
+        if let Some(t) = in_flight.as_ref() {
+            super::interruption::unconfirmed(bot_id, &run.id, &t.id, super::interruption::INTERRUPT_NOTE);
+        }
+        return Err(LcError::conflict(
+            "interrupt_unconfirmed",
+            json!({"run_id": run.id, "turn_id": in_flight.as_ref().map(|t| t.id.clone()), "esc_sent": "unknown", "retryable": true,
+                   "error": sent.err().map(|e| format!("{e:#}")),
+                   "message": "Esc 送出去了但 herdr 沒有回，不知道進了沒有；回合先不收，等它的回聲或自己結束。"}),
+        ));
+    }
+    if let Some(t) = in_flight.as_ref() {
+        if let Err(e) = super::interruption::interrupted(app, bot_id, &run.id, &t.id, super::interruption::INTERRUPT_NOTE).await {
+            // Esc 確實進去了：框照樣要清。
+            clear_restored_prompt(&client, &run, &bot).await;
+            return Err(super::interruption::uncommitted(&run.id, &t.id, Some(&e)));
+        }
+    }
     clear_restored_prompt(&client, &run, &bot).await;
     Ok(())
 }
@@ -365,7 +422,7 @@ async fn clear_restored_prompt(client: &HerdrClient, run: &db::Run, bot: &db::Bo
     }
 }
 
-/// 強制結束目前回合（`POST /api/bots/:id/abort`）。和 [`interrupt_bot`] 相反，先保證 DB 解開、
+/// 強制結束目前回合（`POST /api/bots/:id/abort`）。和 [`interrupt_turn`] 相反，先保證 DB 解開、
 /// 送 `esc` 只是盡力（`keys_sent`）：in-flight 標 failed、`delivery = unknown` 也一併收（§6.3，
 /// 同樣鎖輸入框）。沒有 active run 不算錯——那正是最需要這支的情況。
 pub async fn abort_turns(app: &Arc<App>, bot_id: &str) -> LcResult<Value> {
@@ -373,6 +430,10 @@ pub async fn abort_turns(app: &Arc<App>, bot_id: &str) -> LcResult<Value> {
     let _g = lock.lock().await;
     let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     let run = db::active_run(&app.db, bot_id).await.map_err(up)?;
+    // 上一次打斷欠著的先補（#147）；補不上也照樣往下收——強制中止本來就是先保證 DB 解開。
+    if let Err(e) = super::interruption::settle_locked(app, bot_id, super::interruption::Evidence::Nothing).await {
+        tracing::warn!(bot = %bot.name, error = %e, "上一次打斷欠著的收尾還是寫不進去");
+    }
 
     let mut keys_sent = false;
     let mut key_error: Option<String> = None;
@@ -399,7 +460,13 @@ pub async fn abort_turns(app: &Arc<App>, bot_id: &str) -> LcResult<Value> {
         }
         // 強制中止也是使用者要接手：排著的派工照樣不撤，只是先讓使用者拿回輸入框（§4.4a）。
         note_user_interrupt_of(app, &bot, r, in_flight.as_ref()).await;
-        fail_in_flight(app, &r.id, "回合已由使用者強制中止").await;
+        // 收不掉就不是成功（#147）：以前 `fail_in_flight` 把錯吞掉，下面的迴圈又因為它在 `aborted` 裡而跳過它，
+        // 回 200 `aborted:[它]`、它卻還在飛。記成欠著，之後補。
+        if let Some(t) = &in_flight {
+            if let Err(e) = super::interruption::interrupted(app, bot_id, &r.id, &t.id, "回合已由使用者強制中止").await {
+                return Err(LcError::Upstream(format!("回合 {} 沒收成（稍後自動補上）：{e:#}", t.id)));
+            }
+        }
         if let Some(c) = client.as_ref() {
             clear_restored_prompt(c, r, &bot).await;
         }

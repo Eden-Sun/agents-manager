@@ -2450,8 +2450,19 @@ async fn stop_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result
     }
 }
 
-async fn interrupt_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
-    lifecycle::interrupt_bot(&app, &id).await?;
+/// `turn_id`（選填）：只打斷這一筆。重試上一次中斷時帶上它，那一筆已經不在飛就不按 Esc（#147）。
+#[derive(Default, Deserialize)]
+struct InterruptBody {
+    turn_id: Option<String>,
+}
+
+async fn interrupt_bot(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    body: Option<Json<InterruptBody>>,
+) -> Result<Response, LcError> {
+    let turn_id = body.and_then(|Json(b)| b.turn_id);
+    lifecycle::interrupt_turn(&app, &id, turn_id.as_deref()).await?;
     Ok((StatusCode::OK, Json(json!({}))).into_response())
 }
 
