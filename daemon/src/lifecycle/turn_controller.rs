@@ -126,8 +126,10 @@ pub async fn fail(pool: &SqlitePool, turn_id: &str, delivery: DeliveryOnFail, wh
 
 /// [`fail`] 的交易內版本：要跟系統訊息綁在同一個交易裡時用。
 pub async fn fail_on(conn: &mut sqlx::SqliteConnection, turn_id: &str, delivery: DeliveryOnFail, why: &str) -> Result<Outcome> {
+    // `completed_at` 用 COALESCE：收尾時間只記第一次。這一條路的起點永遠是 `in_flight`（還沒收尾、
+    // 欄位是 NULL），所以行為跟直接蓋一樣；但規則跟 `set_status` 一致，之後不會有人各寫各的。
     let sql = format!(
-        "UPDATE turns SET status='failed', delivery={}, completed_at=? WHERE id=? AND status='in_flight'",
+        "UPDATE turns SET status='failed', delivery={}, completed_at=COALESCE(completed_at, ?) WHERE id=? AND status='in_flight'",
         delivery.sql()
     );
     let done = sqlx::query(&sql).bind(crate::db::now()).bind(turn_id).execute(&mut *conn).await?;
@@ -141,22 +143,39 @@ pub async fn fail_on(conn: &mut sqlx::SqliteConnection, turn_id: &str, delivery:
 ///
 /// 形狀固定的那幾條（收成 failed）走 [`fail`]；這支是通用的那道門。
 pub async fn set_status(pool: &SqlitePool, turn_id: &str, from: &str, to: &str, why: &str) -> Result<Outcome> {
+    let mut conn = pool.acquire().await?;
+    set_status_on(&mut conn, turn_id, from, to, why).await
+}
+
+/// [`set_status`] 的交易內版本：要跟同一個交易裡的其他寫入綁在一起時用。
+///
+/// `completed_at` 一律 `COALESCE(completed_at, ?)`——收尾時間**只記第一次**。遲到的 hook 把備援
+/// 關掉的那一筆升級成 `completed` 時，回合真正結束的時間是備援那一刻，不是 hook 到達的這一刻。
+pub async fn set_status_on(
+    conn: &mut sqlx::SqliteConnection,
+    turn_id: &str,
+    from: &str,
+    to: &str,
+    why: &str,
+) -> Result<Outcome> {
     if !is_legal(from, to) {
         anyhow::bail!("illegal turn status transition {from} -> {to} ({why})");
     }
-    let done = sqlx::query("UPDATE turns SET status=?, completed_at=CASE WHEN ? THEN ? ELSE completed_at END WHERE id=? AND status=?")
-        .bind(to)
-        .bind(is_terminal(to))
-        .bind(crate::db::now())
-        .bind(turn_id)
-        .bind(from)
-        .execute(pool)
-        .await?;
+    let done = sqlx::query(
+        "UPDATE turns SET status=?, completed_at=CASE WHEN ? THEN COALESCE(completed_at, ?) ELSE completed_at END
+          WHERE id=? AND status=?",
+    )
+    .bind(to)
+    .bind(is_terminal(to))
+    .bind(crate::db::now())
+    .bind(turn_id)
+    .bind(from)
+    .execute(&mut *conn)
+    .await?;
     if done.rows_affected() > 0 {
         return Ok(Outcome::Applied);
     }
-    let mut conn = pool.acquire().await?;
-    settled(&mut conn, turn_id, from, to, why).await
+    settled(&mut *conn, turn_id, from, to, why).await
 }
 
 /// CAS 沒打中：那一筆現在是什麼？講出來，不要讓呼叫端把「0 rows」當成「成功」。

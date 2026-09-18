@@ -1127,12 +1127,8 @@ async fn try_fallback(app: &Arc<App>, run_id: &str) -> anyhow::Result<bool> {
 
     // CAS claim + reply in one transaction, so a completed turn never lacks its reply.
     let mut tx = app.db.begin().await?;
-    let res = sqlx::query("UPDATE turns SET status='completed_fallback', completed_at=? WHERE id=? AND status='in_flight'")
-        .bind(db::now())
-        .bind(&turn.id)
-        .execute(&mut *tx)
-        .await?;
-    if res.rows_affected() == 0 {
+    let res = super::turn_controller::set_status_on(&mut tx, &turn.id, "in_flight", "completed_fallback", "§4.3 終端快照備援").await?;
+    if res != super::turn_controller::Outcome::Applied {
         return Ok(false);
     }
     tracing::info!(turn = %turn.id, "terminal fallback engaged");
