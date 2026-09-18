@@ -13,6 +13,7 @@ import { useTapCopy } from '../hooks/useTapCopy'
 import { cleanLiveActivity, cleanLiveText } from '../store/liveText'
 import { typeAlongside } from '../store/alongside'
 import { queueFromComposer, settleComposerSend } from '../store/queuedSend'
+import { startingSend, startingSendLabel } from '../store/startingSend'
 import { herdrJumpCommand } from '../lib/herdrJump'
 import { anchorOf, botLamp, composerState, inFlightTurn, liveReplyOf, projectHostName, toolsOfHost, useStore } from '../store/store'
 import { AttachPicker, AttachTray, DropVeil, MessageAttachments, useAttachments, useDropTarget } from './Attachments'
@@ -697,6 +698,11 @@ function Composer({
   const sendText = useStore((s) => s.sendText)
   const notify = useStore((s) => s.notify)
   const queued = useStore((s) => s.queuedSends[botId] ?? null)
+  // issue #122：交給 daemon、在等 bot 起來的那一則（重整之後也還在）。
+  const starting = useStore(useShallow((s) => startingSend(s.turns[botId], s.messages[botId])))
+  const cancelStartingSend = useStore((s) => s.cancelStartingSend)
+  const startingBot = useStore((s) => Boolean(s.busy[`start:${botId}`]))
+  const hasRun = useStore((s) => Boolean(s.runs[botId]))
   // Draft lives in the store (localStorage) so switching / reload keep it; cleared only on send.
   const draftKey = `bot:${botId}` as const
   const phone = useMediaQuery(PHONE_QUERY)
@@ -727,14 +733,14 @@ function Composer({
     }
     if (sending || files.uploading) return
     // Turn still running: queue instead of eating a 409.
-    if (state.queued) {
+    if (state.queued && !state.autoStart) {
       queueFromComposer({ setText, clearFiles: files.clear, queueSend }, botId, body, files.ids)
-      // 沒在跑的 bot：排好隊就直接啟動，起來後 store 會把它送出去。
-      if (state.autoStart) void startBot(botId)
       return
     }
     setSending(true)
-    void sendPrompt(botId, body, files.ids).then((ok) => {
+    // 沒在跑的 bot（issue #122）：交給 daemon 先收下、它自己啟動 bot，起來後由它送出。
+    // 瀏覽器不再留一份等著送——重整、關分頁都不會丟，也不會兩邊各送一次。
+    void sendPrompt(botId, body, files.ids, false, Boolean(state.autoStart)).then((ok) => {
       setSending(false)
       if (ok) {
         setText('')
@@ -801,9 +807,30 @@ function Composer({
 
   return (
     <div className="composer bot-composer">
+      {starting ? (
+        <div className="composer-queued" role="status">
+          <span className="composer-queued-label">{startingSendLabel(starting, hasRun)}</span>
+          <span className="composer-queued-text" title={starting.text}>
+            {starting.text || `（${starting.attachments} 個附件）`}
+          </span>
+          {starting.startError && !hasRun ? (
+            <button type="button" className="mini-btn" disabled={startingBot} title="再啟動一次，起來後照樣自動送出" onClick={() => void startBot(botId)}>
+              重新啟動
+            </button>
+          ) : null}
+          <button
+            type="button"
+            className="mini-btn"
+            title="不送了，把訊息放回輸入框"
+            onClick={() => void cancelStartingSend(botId)}
+          >
+            取消
+          </button>
+        </div>
+      ) : null}
       {queued ? (
         <div className="composer-queued" role="status">
-          <span className="composer-queued-label">{state.autoStart ? '啟動中，起來後自動送出：' : '已排隊，這回合結束後送出：'}</span>
+          <span className="composer-queued-label">已排隊，這回合結束後送出：</span>
           <span className="composer-queued-text" title={queued.text}>
             {queued.text || `（${queued.attachments.length} 個附件）`}
           </span>
@@ -893,7 +920,7 @@ function Composer({
             state.disabled
               ? `${state.reason || '目前無法送出訊息'}${phone ? '' : '——可以先打，恢復後再送'}`
               : state.queued
-                ? (phone ? '下一則訊息…' : '這回合還在跑，先打下一則…（送出會排隊）')
+                ? (phone ? '下一則訊息…' : starting ? '先打下一則…（bot 起來、前一則送出後才輪到它）' : '這回合還在跑，先打下一則…（送出會排隊）')
                 : `輸入訊息…${phone ? '' : '（檔案可直接拖放或貼上）'}`
           }
           title="Enter 送出，Shift+Enter 換行；檔案可拖放或貼上"
@@ -1147,6 +1174,8 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   const messagesLoaded = useStore((s) => (botId ? Boolean(s.loadedBots[botId]) : false))
   const chatEmpty = messagesLoaded && (messages?.length ?? 0) === 0
   const composerReason = useStore((s) => (botId ? composerState(s, botId).reason : ''))
+  // issue #122：有一則交給 daemon、在等 bot 起來——輸入框上方那一條已經講了狀態、給了重新啟動／取消，這裡不再重複一條「啟動」。
+  const waitingForStart = useStore((s) => (botId ? startingSend(s.turns[botId], s.messages[botId]) !== null : false))
 
   /**
    * 目前看的 bot blocked 時自動彈全畫面終端（要看完整對話框）；關掉後（`dismissed`）要離開 blocked
@@ -1424,7 +1453,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             />
           ) : null}
           <MessageList botId={botId} />
-          {!active ? (
+          {!active && !waitingForStart ? (
             <div className="bot-stopped-bar" role="status">
               <span>{composerReason || 'Bot 未在執行中，無法送出訊息'}</span>
               <button

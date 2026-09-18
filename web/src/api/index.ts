@@ -482,22 +482,25 @@ export async function loginBot(botId: string): Promise<{ command: string; kind: 
 }
 
 /** `sendNow`＝插隊送出（issue #103）：對方回合中時打斷它，而不是回 409。只有 claude ≥ 2.1.275
- *  的 run 認得那顆鍵，其他情況 daemon 照舊 409，body 帶 `send_now_refused`。 */
+ *  的 run 認得那顆鍵，其他情況 daemon 照舊 409，body 帶 `send_now_refused`。
+ *  `startIfStopped`＝bot 沒在跑時 daemon 先收下（`delivery: queued`）再自己啟動它（issue #122）。 */
 export async function sendPrompt(
   botId: string,
   text: string,
   clientRequestId: string,
   attachments: string[] = [],
   sendNow = false,
+  startIfStopped = false,
 ): Promise<PromptResult> {
   const raw = await transport.request('POST', `/bots/${encodeURIComponent(botId)}/prompt`, {
     text,
     client_request_id: clientRequestId,
     ...(attachments.length ? { attachments } : {}),
     ...(sendNow ? { send_now: true } : {}),
+    ...(startIfStopped ? { start_if_stopped: true } : {}),
   })
   const o = isRec(raw) ? raw : {}
-  const delivery = str(pick(o, 'delivery'), 'pending') as TurnDelivery
+  const delivery = str(pick(o, 'delivery'), 'pending') as PromptResult['delivery']
   return {
     turn_id: str(pick(o, 'turn_id')),
     message_id: str(pick(o, 'message_id')) || null,
@@ -524,6 +527,11 @@ export async function sendText(botId: string, text: string, enter: boolean, expe
 
 export async function abandonTurn(turnId: string): Promise<void> {
   await transport.request('POST', `/turns/${encodeURIComponent(turnId)}/abandon`)
+}
+
+/** issue #122：撤回一則 bot 沒在跑時送、還在等它起來的訊息。已經送出去的 daemon 回 409。 */
+export async function withdrawTurn(turnId: string): Promise<void> {
+  await transport.request('POST', `/turns/${encodeURIComponent(turnId)}/withdraw`)
 }
 
 export async function uploadAttachment(botId: string, file: File): Promise<Attachment> {

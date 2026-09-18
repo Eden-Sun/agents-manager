@@ -29,7 +29,7 @@ async fn fail_prompt_delivery(app: &Arc<App>, conversation_id: &str, turn_id: &s
     emit_turn(app, turn_id).await;
 }
 
-async fn emit_prompt_message(app: &Arc<App>, bot_id: &str, message_id: &str) {
+pub(super) async fn emit_prompt_message(app: &Arc<App>, bot_id: &str, message_id: &str) {
     if let Ok(Some(m)) = sqlx::query_as::<_, db::Message>("SELECT * FROM messages WHERE id=?")
         .bind(message_id)
         .fetch_optional(&app.db)
@@ -139,7 +139,7 @@ async fn retract_unsent_turn(app: &Arc<App>, turn_id: &str, msg_id: &str) -> any
 
 /// 這筆 turn 現在的樣子，換成給呼叫端的答覆。冪等重送（同一個 `client_request_id`）與「撤回時發現
 /// turn 已經被別的路徑收掉」都走這裡，同一筆 turn 才不會因為問法不同而拿到兩種答案（review3 L4）。
-async fn answer_for_turn(app: &Arc<App>, t: &db::Turn) -> LcResult<PromptOut> {
+pub(super) async fn answer_for_turn(app: &Arc<App>, t: &db::Turn) -> LcResult<PromptOut> {
     let message_id = sqlx::query_scalar::<_, String>("SELECT id FROM messages WHERE turn_id=? AND role='user' LIMIT 1")
         .bind(&t.id)
         .fetch_optional(&app.db)
@@ -198,7 +198,7 @@ pub(crate) enum Admission {
 
 /// 窗口握著就回 `Some(那個 409)`；**讀不到窗口狀態也擋**，回 503 `maintenance_state_unavailable`（issue #127：
 /// 觀測不到租約不等於沒有租約）。`ControlPlane` 一律放行。
-async fn maintenance_refusal(app: &Arc<App>, admission: Admission) -> Option<LcError> {
+pub(super) async fn maintenance_refusal(app: &Arc<App>, admission: Admission) -> Option<LcError> {
     if admission == Admission::ControlPlane {
         return None;
     }

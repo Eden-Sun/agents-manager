@@ -368,6 +368,8 @@ export function toTurn(v: unknown, botId?: string): Turn | null {
     unverified: v.delivery_verified === 0,
     // 舊 daemon 沒有這一欄：當作會重送，才不會把每一則都標成「沒人會再試」。
     autoResend: v.auto_resend !== 0,
+    awaitsStart: v.awaits_start === 1 || v.awaits_start === true,
+    startError: optStr(v.start_error),
     client_request_id: optStr(v.client_request_id),
     created_at: str(v.created_at),
     completed_at: optStr(v.completed_at),

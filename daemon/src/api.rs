@@ -134,6 +134,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/bots/{id}/scratchpad/file", get(crate::outbox::scratchpad_gone))
         .route("/bots/{id}/read", post(crate::read_marks::post))
         .route("/turns/{id}/abandon", post(abandon_turn))
+        .route("/turns/{id}/withdraw", post(withdraw_turn))
         .route("/bots/{id}/abort", post(abort_bot))
         .route("/hosts", post(create_host))
         .route("/hosts/{name}", delete(delete_host))
@@ -2421,6 +2422,10 @@ struct PromptIn {
     /// 那顆鍵；其他情況照舊排隊／409，body 會帶 `send_now_refused` 說明為什麼沒插隊。
     #[serde(default)]
     send_now: bool,
+    /// bot 沒在跑時：daemon 先把這一則收下（`delivery: "queued"`）、再替它啟動，起來後由佇列送出（issue #122）。
+    /// bot 在跑就跟沒帶一樣。
+    #[serde(default)]
+    start_if_stopped: bool,
 }
 
 async fn prompt_bot(
@@ -2452,6 +2457,8 @@ async fn prompt_bot(
     }
     let out = if b.send_now {
         lifecycle::prompt_send_now(&app, &id, &b.text, &crid, &b.attachments, relay_from.as_deref()).await?
+    } else if b.start_if_stopped {
+        lifecycle::prompt_starting(&app, &id, &b.text, &crid, &b.attachments, relay_from.as_deref()).await?
     } else {
         lifecycle::prompt_relayed(&app, &id, &b.text, &crid, &b.attachments, relay_from.as_deref()).await?
     };
@@ -2538,6 +2545,12 @@ struct TextIn {
 
 async fn text_bot(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b): Json<TextIn>) -> Result<Response, LcError> {
     lifecycle::send_text(&app, &id, &b.text, b.enter.unwrap_or(true), b.expect_run_id).await?;
+    Ok((StatusCode::OK, Json(json!({}))).into_response())
+}
+
+/// issue #122：撤回一則 bot 沒在跑時送、還在等它起來的訊息。已經送出去的撤不回來（409）。
+async fn withdraw_turn(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
+    lifecycle::withdraw_turn(&app, &id).await?;
     Ok((StatusCode::OK, Json(json!({}))).into_response())
 }
 
@@ -3505,7 +3518,7 @@ mod prompt_route_tests {
     }
 
     async fn call(e: &crate::testing::Env, bot: &str, text: String, crid: &str) -> (StatusCode, Value) {
-        let body = PromptIn { text, client_request_id: Some(crid.into()), attachments: vec![], relay_from: None, ack: false, reply_to: None, send_now: false };
+        let body = PromptIn { text, client_request_id: Some(crid.into()), attachments: vec![], relay_from: None, ack: false, reply_to: None, send_now: false, start_if_stopped: false };
         let resp = match prompt_bot(State(e.app.clone()), Path(bot.to_string()), HeaderMap::new(), Json(body)).await {
             Ok(r) => r,
             Err(err) => err.into_response(),

@@ -350,6 +350,10 @@ async fn handle_status(app: &Arc<App>, host: &str, session: &str, ev: &crate::he
         crate::lifecycle::arm_fallback(app, &run.id, &run.bot_id).await;
         // A prompt queued while the agent was still working waits for exactly this edge.
         crate::lifecycle::schedule_flush_queued(app, &run.bot_id);
+    } else if prev != "idle" && status == "idle" {
+        // 剛起來（`unknown`）或對話框剛關掉（`blocked`）就閒下來：排著的也該送了——bot 沒在跑時收下的那一則
+        // （issue #122）正是等這一刻，不然要等退避的 timer（最少 15 秒）。flush 自己的閘門照舊把關。
+        crate::lifecycle::schedule_flush_queued(app, &run.bot_id);
     }
 }
 

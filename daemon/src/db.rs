@@ -148,7 +148,7 @@ CREATE TABLE IF NOT EXISTS spawn_hints (
 /// binary 卻碰到剛被新版升級過的 DB，會拿著過期的欄位假設去讀一個它不認識的資料庫。每次在 `SCHEMA`
 /// 或 ALTER 名單裡加東西，這個數字要跟著 +1；忘記加只會讓 `check_schema_drift` 照樣抓到欄位對不上
 /// （那個檢查看的是實際欄位，不看這個數字），不會讓資料庫壞掉，但舊 binary 就少了這一層提早攔截。
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 pub async fn open(path: &Path) -> Result<SqlitePool> {
     let url = format!("sqlite://{}", path.display());
@@ -240,6 +240,10 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
         // 排著的這一則被 flush 的額度閘擋下時看到的撞限（issue #108，`lifecycle::quota_hold`，JSON）。
         // `app.quotas` 只在記憶體：沒有這一欄，重啟後開機叫醒的 flush 會把它送進同一個還沒額度的身分。
         ("turns", "quota_hold", "ALTER TABLE turns ADD COLUMN quota_hold TEXT"),
+        // 送出時 bot 沒在跑、daemon 先收下再替它啟動的那一則（issue #122，`lifecycle::start_send`）：
+        // 沒有 run 也不當孤兒撤，啟動失敗只記原因（`start_error`），等使用者重新啟動或取消。
+        ("turns", "awaits_start", "ALTER TABLE turns ADD COLUMN awaits_start INTEGER NOT NULL DEFAULT 0"),
+        ("turns", "start_error", "ALTER TABLE turns ADD COLUMN start_error TEXT"),
         // 舊庫裡的每一列都是舊流程「先寫檔、DB insert 最後做」留下來的——insert 成功就代表檔案已經寫完，
         // 一律當 'ready'（issue #88）。
         (
@@ -618,6 +622,12 @@ pub struct Turn {
     #[sqlx(default)]
     #[serde(skip_serializing)]
     pub delivered_at: Option<String>,
+    /// 1 = 送出時 bot 沒在跑，daemon 先收下、再替它啟動（issue #122）。只對 `queued` 有意義。
+    #[sqlx(default)]
+    pub awaits_start: i64,
+    /// 上一次替這一則啟動 bot 失敗（或 run 起來後又結束）的原因；`None`＝沒失敗過或正在重試。
+    #[sqlx(default)]
+    pub start_error: Option<String>,
 }
 
 #[derive(Debug, Clone, FromRow, serde::Serialize)]

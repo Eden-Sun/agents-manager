@@ -256,3 +256,20 @@ test('整合：72c332a 已寫過 v2 標記、群組又讀回 99+ 的分頁，升
   assert.deepEqual(second.groupUnread, {})
   assert.deepEqual(second.botUnread, { B1: 3 })
 })
+
+/** issue #122：排隊中的 turn（起 bot 中、啟動失敗原因更新）推來的 `turn_updated` 不是「回合完成」——
+ *  算進去的話未讀先多一，之後真正完成那一次又被同一個 turn id 去重吃掉。 */
+test('整合：queued 的 turn_updated 不算完成，之後真正完成才記一次未讀', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'am-group-unread-'))
+  const storage = join(dir, 'storage.json')
+  writeFileSync(storage, JSON.stringify({ 'am.selection': JSON.stringify({ botId: 'O1', projectId: null }), 'am.groupUnread.v3': '1' }))
+  const state = { daemon_seq: 1, projects: [{ id: 'P1', path: '/p1', bots: [bot('B3'), bot('O1')] }] }
+  const queuedOnly = [
+    { seq: 2, type: 'turn_updated', data: { bot_id: 'B3', turn: turn('t-q', 'web-q', 'queued') } },
+    { seq: 3, type: 'turn_updated', data: { bot_id: 'B3', turn: { ...turn('t-q', 'web-q', 'queued'), start_error: '找不到 claude' } } },
+  ]
+  assert.deepEqual(boot(storage, { state, frames: queuedOnly }).botUnread, {}, '還沒開始的不算完成')
+  writeFileSync(storage, JSON.stringify({ 'am.selection': JSON.stringify({ botId: 'O1', projectId: null }), 'am.groupUnread.v3': '1' }))
+  const done = [...queuedOnly, { seq: 4, type: 'turn_updated', data: { bot_id: 'B3', turn: turn('t-q', 'web-q', 'completed') } }]
+  assert.deepEqual(boot(storage, { state, frames: done }).botUnread, { B3: 1 }, '真正完成那一次照樣記')
+})

@@ -79,7 +79,7 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
 }
 ```
 
-- `queued_turn`：排在下一個要送的 Turn（`status = "queued"`，§5），沒有就 `null`；前端據此把輸入框畫成「已排隊」。**生產者只有 AGM 派工**（2026-09-16）：對方回合中時 AGM 的派工會排一筆 queued，使用者的 `/prompt` 仍是 409，見 SPEC §4.4a。
+- `queued_turn`：排在下一個要送的 Turn（`status = "queued"`，§5），沒有就 `null`；前端據此把輸入框畫成「已排隊」。**生產者兩個**：對方回合中時 AGM 的派工（2026-09-16），與 bot 沒在跑時帶 `start_if_stopped` 的送出（issue #122，turn 帶 `awaits_start:1`）。使用者對**回合中**的 bot 送 `/prompt` 仍是 409，見 SPEC §4.4a。
 - `unread` 固定 `0`（未讀由前端算）。
 - 其他欄位（hosts、identities、bot 的 model/effort/fast/persona/identity/managed_by/parent_bot_id、run 的 runtime_* 等）見各節。
 
@@ -162,6 +162,7 @@ config.toml 裡沒有的 id（child、已刪）忽略。成功推 `project_chang
 | POST | `/api/bots/{id}/keys` | `{"keys":["y"],"expect_run_id"?}` | `200 {}`；`expect_run_id` 不符 409 |
 | POST | `/api/bots/{id}/text` | `{"text":"多行\n也可以","enter"?:true,"expect_run_id"?}` | `200 {}`；沒有 pane 404；`expect_run_id` 不符 409 |
 | POST | `/api/turns/{id}/abandon` | — | `200 {}`；只有 `in_flight`（含 `delivery=unknown`）可放棄，其餘在 per-bot lock 內 CAS 判定為 `409 {"reason":"turn is neither in-flight nor of unknown delivery","turn_id"}`（不新增 system message） |
+| POST | `/api/turns/{id}/withdraw` | — | `200 {}`；issue #122：撤回一則 bot 沒在跑時送、還在等它起來的 `queued`（`awaits_start:1`）——標 `failed`＋一則 system 說明，不送。其他狀態（已被佇列領走、AGM 的派工…）一律 `409 {"reason":"turn is not waiting for its bot to start","turn_id","status"}`、原樣不動（已經打進去的不能假裝沒送） |
 | POST | `/api/bots/{id}/login` | — | `200 {"run_id","kind","command":"/login"}`，見 §4.1 |
 
 - `keys` 的鍵名由 herdr 驗證，常用 `enter`、`esc`、`y`、`n`、`up`、`down`、`ctrl+c`。
@@ -197,7 +198,7 @@ config.toml 裡沒有的 id（child、已刪）忽略。成功推 `project_chang
 `POST /api/bots/{id}/prompt`
 
 ```json
-{ "text": "Reply with exactly PONG", "client_request_id": "<前端產生的唯一字串>", "relay_from": "<bot id> | \"daemon\"", "attachments"?: ["<attachment id>"], "send_now"?: true }
+{ "text": "Reply with exactly PONG", "client_request_id": "<前端產生的唯一字串>", "relay_from": "<bot id> | \"daemon\"", "attachments"?: ["<attachment id>"], "send_now"?: true, "start_if_stopped"?: true }
 ```
 
 - `relay_from` 省略 = **使用者自己打的**。其他來源一定要帶：另一顆 bot 帶它的 `bot_id`，launchd 腳本與 daemon 的自動通知帶 `"daemon"`。不是存在中的 bot 也不是 `daemon` → 400。
@@ -231,9 +232,17 @@ config.toml 裡沒有的 id（child、已刪）忽略。成功推 `project_chang
 | `send_now_version_unknown` | statusLine 還沒回報版本，不賭那顆鍵 |
 
 `send_now_message` 是同一件事的中文說明，前端直接顯示。灰字（sent／queued 到模型收到之前）由 CLI 自己畫，daemon 不模擬。
+
+**bot 沒在跑時送出 `start_if_stopped: true`**（issue #122，SPEC §4.4a「bot 沒在跑時送出」）：沒有 active run（或 run 還在 `starting`）時，
+daemon 在 bot 鎖裡把 queued turn（`awaits_start:1`）＋user 訊息＋附件綁定寫進同一個交易，commit 就回 `200 {"delivery":"queued"}`，
+之後才在背景替它啟動（睡著的走 `--resume` 叫醒），起來、閒下來由佇列送出。同一個 `client_request_id` 再送回同一筆（還在等、沒人在起它時順便再起一次）。
+bot 在跑就跟沒帶一樣。維護窗口開著時 409 `maintenance_window`、什麼都不寫；已經有一筆在排 → 409 `a turn is already queued for this bot`；
+子 agent 不歸 daemon 啟動，照一般的路回 409 `bot has no active run`。啟動失敗或 run 起來後又結束：turn 留在佇列，`start_error` 寫原因（見下）；
+使用者自己按停止才撤回。取消用 `POST /api/turns/{id}/withdraw`（已經送出去的回 409）。
 active Run 的 herdr session 已不可用 → 寫入 Turn 前回 502，不留 Turn 或 user message。
-排隊中的 prompt 是 `status = "queued"` 的 Turn（每個對話最多一筆，`state.bots[].queued_turn`），daemon 在前一回合結束後送出。
-**只有 AGM 的派工會排隊**（2026-09-16）：`supervisor` 派工遇到 in-flight 會建一筆 queued（交辦記成 `delivery="queued"`；同一個 `client_request_id` 重問一筆還在排隊的，回應照樣是 `delivery:"queued"`，不是 turn 欄位上的 `pending`），排超過
+排隊中的 prompt 是 `status = "queued"` 的 Turn（每個對話最多一筆，`state.bots[].queued_turn`），daemon 在前一回合結束後（或 bot 起來、閒下來時）送出。
+turn JSON 帶 `awaits_start`（1＝bot 沒在跑時收下、在等它起來，issue #122）與 `start_error`（上一次替它啟動失敗、或 run 起來後又結束的原因；`null`＝沒有或正在重試）。
+**回合中會排隊的只有 AGM 的派工**（2026-09-16）：`supervisor` 派工遇到 in-flight 會建一筆 queued（交辦記成 `delivery="queued"`；同一個 `client_request_id` 重問一筆還在排隊的，回應照樣是 `delivery:"queued"`，不是 turn 欄位上的 `pending`），排超過
 `[supervisor] assignment_queue_wait_secs`（預設 30 分鐘）沒送出就撤回那則 queued、把交辦停在 `blocked`，inbox 推 `assignment_undeliverable`（payload 帶 `revoked_turn_id`）。目標身分沒有額度時（`quota::limit_hit_for_bot`）排著的不送、留在佇列，換身分或額度回來才送；這種撞限在 6 小時內會到期的，保險絲不撤（SPEC §4.4a「目標身分沒額度就不送」，issue #108）。**使用者與 web 的 `POST /api/bots/{id}/prompt` 遇到 in-flight 仍回 409**，由呼叫端重試，daemon 不會替你排隊。
 
 409 `reason`：`bot has no active run`、`run is not running`、`agent is blocked; answer the prompt first`、`a turn is already in flight`、

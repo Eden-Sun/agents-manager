@@ -35,6 +35,7 @@ import { botStatusConnTarget } from './botStatusConn'
 import { paneReadOnly } from '../lib/shellAccess'
 import { groupByProject, withPane, withoutPane } from '../lib/paneLists'
 import { prependDraft, restoreQueued } from './queuedSend'
+import { noteQueuedTurn, startingSend, startingSendLabel } from './startingSend'
 import { missionRequests } from './missionRequests'
 import { MISSION_USER_PAUSE } from '../lib/missionView'
 
@@ -286,7 +287,7 @@ export interface ComposerState {
   queued: boolean
   inFlightTurnId: string | null
   unknownTurnId: string | null
-  /** Bot 沒在跑：送出＝排隊＋自動啟動，起來後再送（2026-09-18 使用者：不要先擋著）。 */
+  /** Bot 沒在跑：送出＝交給 daemon 先收下、它自己啟動 bot，起來後再送（2026-09-18 使用者：不要先擋著；issue #122）。 */
   autoStart?: boolean
 }
 
@@ -436,7 +437,8 @@ export interface StoreState {
   loginBot: (botId: string) => Promise<boolean>
   /** `attachments` 是 `POST /bots/:id/attachments` 回傳的 id。 */
   /** `sendNow`＝插隊送出（issue #103）：對方回合中時打斷它，而不是排隊／409。 */
-  sendPrompt: (botId: string, text: string, attachments?: string[], sendNow?: boolean) => Promise<boolean>
+  /** `startIfStopped`：bot 沒在跑時交給 daemon 先收下再啟動（issue #122），不經瀏覽器佇列。 */
+  sendPrompt: (botId: string, text: string, attachments?: string[], sendNow?: boolean, startIfStopped?: boolean) => Promise<boolean>
   sendKeys: (botId: string, keys: string[]) => Promise<void>
   /** 多行內容要走這裡：`sendKeys` 吃鍵名，`\n` 不是鍵名（見 `store/alongside.ts`）。 */
   sendText: (botId: string, text: string, enter: boolean) => Promise<boolean>
@@ -515,6 +517,8 @@ export interface StoreState {
   unqueueToDraft: (botId: string) => void
   /** 送失敗時放回佇列或輸入框；三個送出入口共用，免得 409 把字吃掉。 */
   restoreQueuedSend: (botId: string, pending: QueuedSend) => void
+  /** issue #122：撤回 daemon 那一則「等 bot 起來」的訊息，文字接回輸入框最前面。 */
+  cancelStartingSend: (botId: string) => Promise<void>
 }
 
 let noticeSeq = 0
@@ -1211,10 +1215,28 @@ export const useStore = create<StoreState>((set, get) => ({
     }
   },
 
-  async sendPrompt(botId, text, attachments = [], sendNow = false) {
+  async cancelStartingSend(botId) {
+    const pending = startingSend(get().turns[botId], get().messages[botId])
+    if (!pending) return
+    try {
+      await api.withdrawTurn(pending.turnId)
+    } catch (e) {
+      // 409：已經被佇列送出去了，撤不回來。
+      get().notify('error', `撤不回來（可能已經送出）：${errText(e)}`)
+      await get().loadMessages(botId)
+      return
+    }
+    const key = `bot:${botId}` as const
+    get().setDraft(key, prependDraft(pending.text, get().drafts[key] ?? ''))
+    get().setDraftCursor(key, pending.text.length)
+    if (pending.attachments > 0) get().notify('error', `訊息已放回輸入框，但 ${pending.attachments} 個附件要重新加`)
+    await get().loadMessages(botId)
+  },
+
+  async sendPrompt(botId, text, attachments = [], sendNow = false, startIfStopped = false) {
     const crid = api.newClientRequestId()
     try {
-      const res = await api.sendPrompt(botId, text, crid, attachments, sendNow)
+      const res = await api.sendPrompt(botId, text, crid, attachments, sendNow, startIfStopped)
       // 沒插成隊時 daemon 照舊送出（閒著的 bot）；為什麼沒插隊要講出來，不然使用者以為打斷了。
       if (sendNow && res.send_now && res.send_now !== 'interrupted' && res.send_now !== 'idle') {
         get().notify('info', '沒有插隊：這顆 bot 的 claude 還沒有 send-now 鍵（2.1.275 起），訊息照一般方式送出。')
@@ -1228,6 +1250,12 @@ export const useStore = create<StoreState>((set, get) => ({
         void get().loadMessages(botId)
         return false
       }
+      // daemon 收下了、還沒送（issue #122：它會自己啟動 bot）：先記成排隊中，輸入框馬上換成「啟動中」那一條。
+      if (res.delivery === 'queued') {
+        set((s) => noteQueuedTurn(s, botId, res.turn_id, crid, startIfStopped))
+        return true
+      }
+      const delivery = res.delivery
       // Patch the turn map so the composer locks even if the socket frame is slow.
       set((s) => {
         // `turn_updated(completed)` 可能先到：終態不能被 HTTP 的 delivery 蓋回（completed+unknown 殘影）。
@@ -1250,7 +1278,7 @@ export const useStore = create<StoreState>((set, get) => ({
                 created_at: new Date().toISOString(),
                 completed_at: null,
               }),
-              delivery: res.delivery,
+              delivery,
             },
           },
         },
@@ -2422,7 +2450,8 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
           turn.status !== 'in_flight' && s.liveReply[botId]?.turnId === turn.id ? withoutKey(s.liveReply, botId) : s.liveReply,
       }))
       // The turn that was blocking the composer is over: send whatever was queued behind it.
-      if (turn.status !== 'in_flight') {
+      // `queued` 還沒開始（issue #122：啟動失敗的原因更新也推這一幀）——算成完成會吃掉之後真正的那一次（`takeTurnCompletion` 依 id 去重）。
+      if (turn.status !== 'in_flight' && turn.status !== 'queued') {
         flushQueued(botId)
         // 沒有 assistant 訊息的回合（中止、只有終端輸出）也要算完成。
         markHookCompletion(botId)
@@ -2879,6 +2908,11 @@ export function composerState(state: StoreState, botId: string | null): Composer
     return { ...base, reason: 'daemon 與 herdr 的連線中斷，無法送出訊息' }
   }
   const run = state.runs[botId]
+  // issue #122：已經有一則交給 daemon、在等 bot 起來——再送就排在它後面，不再觸發一次啟動。
+  const starting = startingSend(state.turns[botId], state.messages[botId])
+  if (!run && starting) {
+    return { ...base, disabled: false, queued: true, reason: startingSendLabel(starting).replace(/：$/, '') }
+  }
   if (!run) {
     return { ...base, disabled: false, queued: true, autoStart: true, reason: 'Bot 沒在跑：送出會先啟動它，起來後自動送出' }
   }

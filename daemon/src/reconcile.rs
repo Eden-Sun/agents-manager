@@ -68,6 +68,8 @@ pub async fn autostart_after_reconcile(app: &Arc<App>, host: &str, reconciled: b
         return false;
     }
     autostart_connected(app, Some(host)).await;
+    // bot 沒在跑時收下、還在等它起來的訊息（issue #122）：重啟前那次啟動可能沒做完，這裡再替它起一次。
+    crate::lifecycle::start_send::resume_after_boot(app, host).await;
     true
 }
 

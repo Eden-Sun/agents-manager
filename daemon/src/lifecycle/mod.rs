@@ -29,6 +29,7 @@ mod interrupt_grace;
 pub(crate) mod resume_gate;
 mod restart_hold;
 pub(crate) mod quota_hold;
+pub(crate) mod start_send;
 mod send_now;
 mod transitions;
 /// issue #81 探索用的原型；`#[cfg(test)]` 整個檔案只在 `cargo test` 底下編，不進正式二進位
@@ -70,6 +71,7 @@ pub(crate) use setup::*;
 pub(crate) use slash::*;
 pub(crate) use delivery::*;
 pub(crate) use start::*;
+pub(crate) use start_send::{prompt_starting, withdraw_turn};
 pub(crate) use stop::*;
 pub(crate) use interrupt_grace::{note_user_interrupt_of, settle_interrupt_echo, FailureEvidence as InterruptFailureEvidence};
 #[cfg(test)]

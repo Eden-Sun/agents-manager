@@ -346,6 +346,10 @@ export interface Turn {
   unverified: boolean
   /** daemon 會不會在畫面證明它沒進去時自動重送這一則（`turns.auto_resend`）。舊 daemon 沒有這一欄 → 當作 true。 */
   autoResend: boolean
+  /** issue #122：送出時 bot 沒在跑，daemon 先收下再啟動它（`turns.awaits_start`）。只對 `queued` 有意義。 */
+  awaitsStart: boolean
+  /** 上一次替它啟動 bot 失敗的原因（`turns.start_error`）；`null`＝沒失敗過。 */
+  startError: string | null
   client_request_id: string | null
   created_at: string
   completed_at: string | null
@@ -464,7 +468,8 @@ export interface HostShell {
 export interface PromptResult {
   turn_id: string
   message_id: string | null
-  delivery: TurnDelivery
+  /** `queued`＝daemon 收下了、還沒送（對方回合中的派工，或 issue #122 的「先收下再啟動」）。 */
+  delivery: TurnDelivery | 'queued'
   /** 只有請求帶 `send_now` 時才有（issue #103）：`interrupted`＝打斷了一個回合，`idle`＝當下沒回合在飛，
    *  其他值（`send_now_*`）是**沒有**插隊的原因。 */
   send_now: string | null

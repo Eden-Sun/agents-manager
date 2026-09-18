@@ -87,11 +87,14 @@ interface MockTurn {
   run_id: string
   bot_id: string
   origin: 'web' | 'external'
-  status: 'in_flight' | 'completed' | 'completed_fallback' | 'failed'
+  status: 'queued' | 'in_flight' | 'completed' | 'completed_fallback' | 'failed'
   delivery: 'pending' | 'ok' | 'unknown' | 'failed'
   client_request_id: string | null
   created_at: string
   completed_at: string | null
+  /** issue #122：bot 沒在跑時收下、等它起來的那一則。 */
+  awaits_start?: number
+  start_error?: string | null
 }
 
 interface MockMessage {
@@ -801,7 +804,11 @@ export class MockTransport implements Transport {
         return this.terminal(botId, q.get('source') ?? 'visible', Number(q.get('lines') ?? 40))
       }
       if (method === 'POST') {
-        if (action === 'start') return this.start(botId)
+        if (action === 'start') {
+          const r = this.start(botId)
+          this.flushWaiting(botId)
+          return r
+        }
         if (action === 'stop') return this.stop(botId)
         if (action === 'restart') return this.restart(botId)
         if (action === 'fork') return this.fork(botId, b)
@@ -816,6 +823,7 @@ export class MockTransport implements Transport {
     }
 
     if (method === 'POST' && seg[0] === 'turns' && seg[2] === 'abandon') return this.abandon(seg[1])
+    if (method === 'POST' && seg[0] === 'turns' && seg[2] === 'withdraw') return this.withdraw(seg[1])
 
     throw new ApiError(404, { reason: `mock: no route for ${method} ${rawPath}` }, 'not found')
   }
@@ -2523,6 +2531,7 @@ export class MockTransport implements Transport {
 
   private prompt(botId: string, b: Rec, groupId: string | null = null, replyOverride: string | null = null) {
     const run = this.activeRun(botId)
+    if (!run && b.start_if_stopped === true) return this.promptStarting(botId, b)
     if (!run) throw new ApiError(409, { error: 'conflict', reason: 'bot has no active run' }, 'conflict')
     if (run.state !== 'running') {
       throw new ApiError(409, { error: 'conflict', reason: 'run is not running', state: run.state }, 'conflict')
@@ -2684,6 +2693,75 @@ export class MockTransport implements Transport {
     return { turn_id: turn.id, message_id: userMsg.id, delivery: 'ok' }
   }
 
+  /**
+   * Mirrors `daemon/src/lifecycle/start_send.rs`（issue #122）：bot 沒在跑時先收下（`queued`＋`awaits_start`），
+   * 再替它啟動，起來、閒下來才送。文字含「起不來」演啟動失敗：原因寫在 turn 上，按「重新啟動」（`POST /start`）照樣會送。
+   */
+  private promptStarting(botId: string, b: Rec) {
+    const clientRequestId = typeof b.client_request_id === 'string' ? b.client_request_id : null
+    const dup = clientRequestId ? this.turns.find((t) => t.client_request_id === clientRequestId) : undefined
+    if (dup) return { turn_id: dup.id, message_id: null, delivery: dup.status === 'queued' ? 'queued' : dup.delivery }
+    if (this.turns.some((t) => t.bot_id === botId && t.status === 'queued')) {
+      throw new ApiError(409, { error: 'conflict', reason: 'a turn is already queued for this bot' }, 'conflict')
+    }
+    const text = String(b.text ?? '')
+    const turn: MockTurn = {
+      id: ulid('turn'),
+      conversation_id: this.conv(botId),
+      run_id: '',
+      bot_id: botId,
+      origin: 'web',
+      status: 'queued',
+      delivery: 'pending',
+      client_request_id: clientRequestId,
+      created_at: now(),
+      completed_at: null,
+      awaits_start: 1,
+      start_error: null,
+    }
+    this.turns.push(turn)
+    const msg = this.addMessage({
+      conversation_id: turn.conversation_id,
+      turn_id: turn.id,
+      bot_id: botId,
+      role: 'user',
+      content: text,
+      source: 'web',
+      incomplete: 0,
+    })
+    this.emit('turn_updated', { bot_id: botId, turn })
+    setTimeout(() => {
+      if (turn.status !== 'queued') return
+      if (text.includes('起不來')) {
+        this.updateTurn(turn, { start_error: '本機上找不到 `claude` 執行檔（mock 演啟動失敗）' })
+        return
+      }
+      try {
+        this.start(botId)
+      } catch {
+        // 別人先起了：一樣是起來了。
+      }
+      this.flushWaiting(botId)
+    }, 600)
+    return { turn_id: turn.id, message_id: msg.id, delivery: 'queued' }
+  }
+
+  /** 起來、閒下來就把等著的那一則送出（daemon 的佇列 flush）。 */
+  private flushWaiting(botId: string) {
+    const turn = this.turns.find((t) => t.bot_id === botId && t.status === 'queued' && t.awaits_start === 1)
+    if (!turn) return
+    const run = this.activeRun(botId)
+    if (!run) return
+    if (run.state !== 'running' || run.agent_status !== 'idle') {
+      setTimeout(() => this.flushWaiting(botId), 300)
+      return
+    }
+    this.updateTurn(turn, { status: 'in_flight', run_id: run.id, delivery: 'ok', start_error: null })
+    setAgentStatus(run, 'working')
+    this.emitBotStatus(botId)
+    setTimeout(() => this.finishTurn(botId, turn, 'hook'), 1500)
+  }
+
   private nextReply(): string {
     return REPLIES[this.replyIndex++ % REPLIES.length]
   }
@@ -2759,6 +2837,26 @@ export class MockTransport implements Transport {
     if (!run) return
     setAgentStatus(run, 'idle')
     this.emitBotStatus(botId)
+  }
+
+  /** Mirrors `start_send::withdraw_turn`：只撤還在等 bot 起來的那一則，其他 409。 */
+  private withdraw(turnId: string) {
+    const turn = this.turns.find((t) => t.id === turnId)
+    if (!turn) throw new ApiError(404, { reason: 'turn not found' }, 'not found')
+    if (turn.status !== 'queued' || turn.awaits_start !== 1) {
+      throw new ApiError(409, { error: 'conflict', reason: 'turn is not waiting for its bot to start', turn_id: turnId, status: turn.status }, 'conflict')
+    }
+    this.updateTurn(turn, { status: 'failed', delivery: 'failed', completed_at: now() })
+    this.addMessage({
+      conversation_id: turn.conversation_id,
+      turn_id: turn.id,
+      bot_id: turn.bot_id,
+      role: 'system',
+      content: '使用者取消了這一則：它是 bot 沒在跑時送的，還在等 bot 起來，沒有送出，不會再送。',
+      source: 'system',
+      incomplete: 0,
+    })
+    return { ok: true }
   }
 
   private abandon(turnId: string) {

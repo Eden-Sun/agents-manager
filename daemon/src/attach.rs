@@ -262,12 +262,22 @@ pub async fn bind(app: &Arc<App>, message_id: &str, items: &[Attachment]) -> Res
     if items.is_empty() {
         return Ok(());
     }
-    let payload = serde_json::to_string(items)?;
     let mut tx = app.db.begin().await?;
+    bind_tx(&mut tx, message_id, items).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// [`bind`] 放進呼叫端的交易：訊息、turn 與附件要一起成立或一起不算（issue #122 先收下再啟動）。
+pub async fn bind_tx(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, message_id: &str, items: &[Attachment]) -> Result<()> {
+    if items.is_empty() {
+        return Ok(());
+    }
+    let payload = serde_json::to_string(items)?;
     let msg = sqlx::query("UPDATE messages SET attachments_json = ? WHERE id = ?")
         .bind(&payload)
         .bind(message_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     if msg.rows_affected() != 1 {
         bail!("message `{message_id}` does not exist");
@@ -278,13 +288,12 @@ pub async fn bind(app: &Arc<App>, message_id: &str, items: &[Attachment]) -> Res
         let res = sqlx::query("UPDATE attachments SET message_id = ? WHERE id = ? AND state = 'ready'")
             .bind(message_id)
             .bind(&a.id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
         if res.rows_affected() != 1 {
             bail!("attachment `{}` is missing or not ready", a.id);
         }
     }
-    tx.commit().await?;
     Ok(())
 }
 

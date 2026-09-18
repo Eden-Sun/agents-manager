@@ -381,8 +381,10 @@ pub(crate) async fn revoke_orphaned_queued_turns(app: &Arc<App>, bot_id: &str, w
         tracing::info!(bot = %bot_id, why, "重啟中：排著的 prompt 留給新的 run，不當孤兒撤掉");
         return Vec::new();
     }
+    // bot 沒在跑時使用者送的（issue #122，`start_send`）不撤：留在佇列等重新啟動或取消，只記下原因。
+    super::start_send::note_run_gone(app, bot_id, why).await;
     let ids: Vec<String> = sqlx::query_scalar(
-        "SELECT t.id FROM turns t JOIN conversations c ON c.id = t.conversation_id WHERE c.bot_id = ? AND t.status = 'queued'",
+        "SELECT t.id FROM turns t JOIN conversations c ON c.id = t.conversation_id WHERE c.bot_id = ? AND t.status = 'queued' AND t.awaits_start = 0",
     )
     .bind(bot_id)
     .fetch_all(&app.db)
