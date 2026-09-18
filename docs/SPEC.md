@@ -564,8 +564,9 @@ herdr 回錯且訊息明確提到 `format`（舊版或遠端不認得這個參�
 marker 列與框的邊之間多出任何一列（含空白列）、marker 後多打一格（沒有框的輸入框）、dim 提示後面多了非 dim 的字、跟要送的一模一樣的字
 ——都是非空，一律不代送、零寫入。認不出框的畫面是 `Unready`。
 
-**誰會建 `queued` turn**（2026-09-16 AGM 裁示）：**只有 AGM 的派工／通知**這條路
-（`supervisor::controller::dispatch` → `lifecycle::prompt::prompt_relayed_queueable`）。對方回合中時它排一筆 `queued`
+**誰會建 `queued` turn**（2026-09-16 AGM 裁示）：對方**回合中**時，**只有 AGM 的派工／通知**這條路
+（`supervisor::controller::dispatch` → `lifecycle::prompt::prompt_relayed_queueable`）；另外 bot **沒在跑**時帶 `start_if_stopped` 的送出
+也會建一筆（下面「bot 沒在跑時送出」，issue #122）。對方回合中時它排一筆 `queued`
 而不是 409——一顆回合 10～20 分鐘的 bot，用退避重試等於每五分鐘賭一次它剛好在兩個回合之間（實例：交辦
 01M2MC8CB2AGDKPB86XDW1FB0Q 重試 12 次、42 分鐘都沒送出）。**使用者與 web 的 `POST /api/bots/{id}/prompt`
 維持 409**，那條路的語意變更要單獨評估，不要照這段設計「送一次就好，daemon 會排隊」的使用者流程。
@@ -587,10 +588,30 @@ daemon 重啟時把所有 `queued` turn（含沒有 `next_flush_at` 的）重新
 （清掉之後它就對不回交辦，會佔名額、之後照送變成做兩次）。
 cancel 撤掉的是還沒送出的那則時，review 回應不再帶「turn 還在跑」的 `warning`／`may_still_be_running`。
 
-**沒有 run 的 queued 一律收掉**：排隊只會發生在「有 running run、正在回合中」的時候，所以 bot 被 stop、或 run 結束
+**沒有 run 的 queued 一律收掉**：AGM 的排隊只會發生在「有 running run、正在回合中」的時候，所以 bot 被 stop、或 run 結束
 （`mark_run_exited`：pane 不見、agent 退出）時，它排著的 queued 沒有人會送——當場撤銷（標 `failed`＋system 訊息），
 掛著的交辦照一般流程收到 `failed` 的回合結束，AGM 看得到。還有活著的 run 就不動。
 定時掃描（每 60 秒，§4.3b 那一支）也收一次「run 早就不在的 queued」，包含這條規則上線前就留下來的。
+**例外**：`awaits_start=1` 的（下一段）本來就是在沒有 run 的時候收下的，這幾條路都不撤它，只在 `start_error` 記原因（已有原因不蓋）；
+只有使用者自己按停止（`stop_bot`，重啟那一段不算）才撤。
+
+**bot 沒在跑時送出**（issue #122，`lifecycle::start_send`）：web 對沒在跑的 bot 按送出，以前是把訊息放在瀏覽器記憶體、自己按啟動、
+等起來再 `POST /prompt`——在那之前 daemon 不知道這則存在，重整、關分頁、換裝置、啟動失敗就沒了。現在 web 送 `POST /prompt` 帶
+`start_if_stopped`，而 bot 沒有 active run（或還在 `starting`）時：
+1. 在 bot 鎖裡把 queued turn（`awaits_start=1`、要送的 `prompt_text`）＋user 訊息＋附件綁定（`attach::bind_tx`）寫進**同一個交易**，
+   commit 才回 `delivery:"queued"`。同一個 `client_request_id` 再送回同一筆（還在等、沒人在起它時順便再起一次）。
+   bot 在跑就走一般的路（回合中照舊 409）；子 agent 不歸 daemon 起，照一般的路 409；維護窗口開著 409、什麼都不寫。
+2. 啟動是之後的背景副作用：睡著的（§6.11）走 `idle_sleep::wake` 接回原 session，其他 `start_bot`。成功就叫醒 flush；
+   失敗只寫 `start_error`（turn 留在佇列）。bot 從 `unknown`／`blocked` 變 `idle` 也叫醒 flush（不必等退避 timer）。
+3. 送出完全走既有的 flush：CAS claim 保證只送一次，resume／額度／維護窗口的閘門照舊。瀏覽器不留一份，WS 幀、重整、重按啟動都不會變成第二次送出。
+4. 取消：`POST /api/turns/{id}/withdraw` 只撤還在等的那一則（`failed`＋說明）；已被佇列領走的回 409——不能拿 abandon 頂替，
+   那會把已經送出的回合收成失敗，web 又把文字放回輸入框，再按一次就送兩次。
+5. daemon 重啟：開機對帳完成、autostart 那一步（`reconcile::autostart_after_reconcile` → `start_send::resume_after_boot`），
+   還在等、沒有 run 的再替它起一次（重啟前那次可能沒做完）。每次開機最多一次。
+前端（`store/startingSend.ts`）只從 daemon 給的 turn 與訊息推出「有一則在等 bot 起來」：輸入框上方一條「啟動中，起來後自動送出」，
+失敗時「沒能啟動（原因），還沒送出」＋重新啟動（`POST /start`，起來後照樣由 flush 送）／取消；有這一條時不再另外顯示「啟動」列。
+`queued` 的 `turn_updated` 不算回合完成（不然未讀先多一，真正完成那次又被同一個 turn id 去重吃掉）。
+**回合中**的 bot 仍由瀏覽器暫存下一則（`queuedSends`），那條的語意沒有改（使用者對回合中的 bot `POST /prompt` 仍 409）。
 **重啟不是停**（issue #106，`lifecycle::restart_hold`）：`restart_bot_with`（換身分、`?resume=native`、一鍵重啟）先停舊 run 再起新 run，
 中間那一段沒有 active run，但 bot 馬上就回來。重啟在 bot 鎖裡宣告「進行中」，這段期間任何撤孤兒的路徑——stop 自己、
 `restart_start` 收掉擋路 run 的 `mark_run_exited`、不拿 bot 鎖的 pane-exit 事件、定時掃描——都不撤；新 run 起來就叫醒 flush

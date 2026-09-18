@@ -514,3 +514,49 @@ test('刪 Bot 成功：只跳一張帶「復原」的通知，不重複跳第二
   assert.match(notices[0].text, /已刪除/)
   assert.ok(notices[0].action, '這張通知要帶「復原」')
 })
+
+/** issue #122：沒在跑的 bot 按送出——交給 daemon 先收下，瀏覽器不留一份、自己也不去按啟動。 */
+test('沒在跑的 bot 送出：帶 start_if_stopped 交給 daemon，瀏覽器不排隊也不自己啟動', async () => {
+  seed()
+  useStore.setState({ runs: {}, turns: {}, messages: {} })
+  routeDaemon(() => json({ turn_id: 't9', message_id: 'm9', delivery: 'queued' }, 200))
+  const ok = await useStore.getState().sendPrompt('b1', '起來後幫我跑測試', [], false, true)
+  assert.equal(ok, true)
+  assert.equal(requests.length, 1, '只有一個請求：沒有另外 POST /start')
+  assert.equal(requests[0].path.endsWith('/bots/b1/prompt'), true)
+  assert.equal((requests[0].body as Record<string, unknown>).start_if_stopped, true)
+  const s = useStore.getState()
+  assert.equal(s.queuedSends.b1, undefined, '瀏覽器記憶體不是那一份')
+  assert.equal(s.turns.b1.t9.status, 'queued')
+  assert.equal(s.turns.b1.t9.awaitsStart, true)
+})
+
+test('取消等 bot 起來的那一則：daemon 撤回，文字接回輸入框最前面', async () => {
+  seed()
+  useStore.setState({
+    runs: {},
+    turns: { b1: { t9: { id: 't9', status: 'queued', awaitsStart: true, startError: null } as never } },
+    messages: { b1: [{ id: 'm9', turn_id: 't9', role: 'user', content: '起來後幫我跑測試', attachments: [] } as never] },
+    drafts: { 'bot:b1': '打到一半' },
+  })
+  routeDaemon((req) => (req.path.includes('/messages') ? json({ messages: [], turns: [], has_more: false }, 200) : json({}, 200)))
+  await useStore.getState().cancelStartingSend('b1')
+  assert.ok(requests.some((r) => r.method === 'POST' && r.path.endsWith('/turns/t9/withdraw')))
+  assert.equal(useStore.getState().drafts['bot:b1'], '起來後幫我跑測試\n打到一半')
+})
+
+test('取消時已經送出去了（409）：不把文字塞回輸入框，講清楚撤不回來', async () => {
+  seed()
+  useStore.setState({
+    runs: {},
+    turns: { b1: { t9: { id: 't9', status: 'queued', awaitsStart: true, startError: null } as never } },
+    messages: { b1: [{ id: 'm9', turn_id: 't9', role: 'user', content: '起來後幫我跑測試', attachments: [] } as never] },
+    drafts: {},
+  })
+  routeDaemon((req) =>
+    req.path.endsWith('/withdraw') ? json({ error: 'conflict', reason: 'turn is not waiting for its bot to start' }, 409) : json({ messages: [], turns: [], has_more: false }, 200),
+  )
+  await useStore.getState().cancelStartingSend('b1')
+  assert.equal(useStore.getState().drafts['bot:b1'], undefined, '送出去的那則不會又出現在輸入框')
+  assert.ok(noticeTexts().some((t) => t.includes('撤不回來')))
+})

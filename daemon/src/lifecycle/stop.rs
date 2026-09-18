@@ -76,6 +76,7 @@ pub async fn stop_bot_locked(app: &Arc<App>, bot_id: &str) -> LcResult<bool> {
         .await;
     // 停掉之後沒有人會送它排著的 queued：收掉，不留著佔名額、擋 restart safety（AGM 2026-09-16）。
     revoke_orphaned_queued_turns(app, bot_id, "bot 已被停止").await;
+    super::start_send::withdraw_on_stop(app, bot_id).await;
     if let Some(p) = run.pane_id.as_deref() {
         if let Some(session) = app.session_for_run(&run).await {
             crate::events::unwatch_pane_on_session(app, &host, &session, p).await;
