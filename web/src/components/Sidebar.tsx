@@ -1403,7 +1403,7 @@ export function Sidebar() {
         <SupervisorPanel onOpenChat={() => setOpen(null)} />
       </Modal>
 
-      <Modal open={open === 'env'} title="環境設定" width={560} onClose={() => setOpen(null)}>
+      <Modal open={open === 'env'} title="環境設定" width={720} onClose={() => setOpen(null)}>
         <div className="env-panel">
           <section className="env-sec">
             <h3>主機</h3>
