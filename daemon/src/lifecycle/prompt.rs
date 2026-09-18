@@ -196,13 +196,17 @@ pub(crate) enum Admission {
     ControlPlane,
 }
 
-/// 窗口握著就回 `Some(那個 409)`。`ControlPlane` 一律放行。
+/// 窗口握著就回 `Some(那個 409)`；**讀不到窗口狀態也擋**，回 503 `maintenance_state_unavailable`（issue #127：
+/// 觀測不到租約不等於沒有租約）。`ControlPlane` 一律放行。
 async fn maintenance_refusal(app: &Arc<App>, admission: Admission) -> Option<LcError> {
     if admission == Admission::ControlPlane {
         return None;
     }
-    let w = crate::supervisor::maintenance::window_held(app).await?;
-    Some(w.refusal())
+    match crate::supervisor::maintenance::window_held(app).await {
+        Ok(None) => None,
+        Ok(Some(w)) => Some(w.refusal()),
+        Err(unreadable) => Some(unreadable.refusal()),
+    }
 }
 
 pub async fn prompt(app: &Arc<App>, bot_id: &str, text: &str, client_request_id: &str) -> LcResult<PromptOut> {
@@ -1090,6 +1094,66 @@ mod prompt_tests {
         assert_eq!(body["held_by"], "k8bw2f", "{body}");
         assert_eq!(turn_count(&app, &f.conv).await, 0, "搶進來的那一筆被撤回，不是留成 in_flight+pending");
         assert_eq!(f.env.herdr.methods().iter().filter(|m| *m == "pane.send_text").count(), 0, "一個字都沒打");
+    }
+
+    /// issue #127：讀不到 `restart` 租約 **不等於** 沒有窗口。窗口明明握著、只是那一刻 SELECT 失敗——
+    /// 以前 `window_held` 把錯誤當成「沒有窗口」，新的 prompt 就在維護期間進了 pane。現在照窗口處理：
+    /// 一個字都不送、連 turn 都不建；讀取恢復之後重新判斷，窗口還在就是「真的有窗口」的 409，
+    /// 窗口收了就照常送（不會永久卡住）。
+    #[tokio::test]
+    async fn a_restart_lease_that_cannot_be_read_refuses_the_prompt_instead_of_letting_it_through() {
+        let f = fixture("codex", "test").await;
+        let app = f.env.app.clone();
+        hold_restart_window(&app, "k8bw2f", 5).await;
+        crate::supervisor::maintenance::fault::break_lease_reads(&app.db).await;
+
+        let out = prompt(&app, &f.bot_id, "Reply with PONG please", "prompt-unreadable").await;
+
+        assert!(out.is_err(), "讀不到窗口狀態就不能放行：{:?}", out.as_ref().map(|o| &o.delivery));
+        assert_eq!(turn_count(&app, &f.conv).await, 0, "連 turn 都沒建");
+        assert_eq!(f.env.herdr.methods().iter().filter(|m| *m == "pane.send_text" || *m == "agent.prompt").count(), 0, "一個字都沒送");
+
+        // 讀取恢復、窗口還握著：現在是「真的有窗口」的 409，跟上面「讀不到」分得開。
+        crate::supervisor::maintenance::fault::restore_lease_reads(&app.db).await;
+        let Err(LcError::Conflict(body)) = prompt(&app, &f.bot_id, "Reply with PONG please", "prompt-unreadable").await else {
+            panic!("窗口還握著，要是 409")
+        };
+        assert_eq!(body["reason"], "maintenance_window", "{body}");
+
+        // 窗口收了：同一個 request id 原樣重送就送得進去。
+        let l = crate::supervisor::store::lease(&app.db, "restart").await.unwrap().unwrap();
+        assert!(crate::supervisor::store::release_lease(&app.db, "restart", "k8bw2f", l.fence).await.unwrap());
+        prompt(&app, &f.bot_id, "Reply with PONG please", "prompt-unreadable").await.expect("恢復＋窗口收了：照常送");
+    }
+
+    /// 同一條 fence 的第二道：第一次讀時窗口不在，turn commit 之後複查的那一刻才讀壞。這一筆已經 commit、
+    /// 一個字都還沒打，所以要被撤回（不是留成 `in_flight`＋`pending`）再回錯誤——跟窗口在複查時
+    /// 剛好被拿走是同一條路（`a_window_that_opens_while_the_turn_commits_takes_the_turn_back_out`）。
+    #[tokio::test]
+    async fn a_lease_that_becomes_unreadable_while_the_turn_commits_takes_the_turn_back_out() {
+        let f = fixture("codex", "test").await;
+        let app = f.env.app.clone();
+        sqlx::query("INSERT INTO supervisor_leases (resource, owner, fence, released_at) VALUES ('restart','k8bw2f',7,?)")
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        // turn 一 commit，那一列就變成解不開的樣子（第一次讀已經過了）。
+        sqlx::query(
+            "CREATE TRIGGER the_lease_goes_bad_mid_commit AFTER INSERT ON turns
+             BEGIN
+               UPDATE supervisor_leases SET fence='corrupt' WHERE resource='restart';
+             END",
+        )
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        let out = prompt(&app, &f.bot_id, "Reply with PONG please", "prompt-lease-goes-bad").await;
+
+        assert!(out.is_err(), "複查讀不到就不能放行：{:?}", out.as_ref().map(|o| &o.delivery));
+        assert_eq!(turn_count(&app, &f.conv).await, 0, "已經 commit 的那一筆要撤回，不是留成 in_flight+pending");
+        assert_eq!(f.env.herdr.methods().iter().filter(|m| *m == "pane.send_text" || *m == "agent.prompt").count(), 0, "一個字都沒送");
     }
 
     /// Binding can fail after the turn commits; the UI must still get a terminal turn event.

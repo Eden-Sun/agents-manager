@@ -2071,6 +2071,11 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
     使用者的 prompt **不排隊**：`turns_one_queued` 每個對話只留一筆 queued，而且窗口最長一小時（預設 15 分鐘），一則訊息默默躺著幾分鐘之後才出現在 pane，比當場說「正在維護、還要等 N 秒」更糟。這跟「回合中的使用者 prompt 回 409」是同一條既有裁示（§6）。
   - `lifecycle::queue::flush_queued_locked`：排隊的 prompt **留在佇列**，掛一個到窗口到期為止的 timer，不算重試（擋它的是我們自己開的窗口，不是 bot 的狀態）。
     沒有這一條的話，acquire 當下停在 `blocked`（不算臨界區）的 bot 一旦離開 blocked，排在後面的那筆就會在窗口中途打進 pane。
+  **三態，讀不到也擋（issue #127）**：`window_held` 回 `Ok(Some)`＝確定有窗口、`Ok(None)`＝確定沒有、`Err(WindowUnreadable)`＝**讀不到**（SELECT 出錯、那一列解不開、沒放掉卻沒有讀得懂的到期時間）。
+  觀測不到 durable 的租約狀態不等於已證明沒有租約——以前 SELECT 失敗被當成「沒有窗口」，窗口明明握著卻放新工作進 pane。現在三個入口一律 fail closed：
+  `lifecycle::prompt` 回 **503 `maintenance_state_unavailable`**（`retryable:true`、`sent:false`，不送字；第二道複查讀不到時撤回剛 commit 的那一筆）；
+  `flush_queued_locked` 留在佇列、不 claim、不花重試、10 秒後再判斷；`controller::dispatch` 留 `queued`（`hold`，不花 attempts；原因**不**寫成窗口的 `pause_note`，免得窗口收掉時被一併放行）。
+  `drain_queue` 與 `release` 只在**確定**沒有窗口時才解除 hold。錯誤留一行 `error` 等級的結構化 log，不偽裝成一個假的長 TTL 租約；DB 恢復後重新判斷，不會永久卡住。
   **不在閘門內**：使用者自己在 pane 裡打字（不經過 daemon，不是我們攔得住也不該攔的）；以及 daemon 自己的控制面 prompt——AGM／協調者啟動時那一則握手走 `prompt_control_plane`，不受閘門管，否則窗口會把「把東西停下來再起來」這件事本身鎖在門外。
 - **過期不會鎖死**：閘門判斷走 `Lease::held_at`（`released_at IS NULL` 且 `expires_at > now`），時間一到自動不再擋，不需要任何人收尾；TTL 上限一小時、預設 15 分鐘。daemon 重啟時 `release_restart_on_startup` 再收一次。
 - **閘門與 acquire 用同一份「送達臨界區」定義**（`store::DELIVERY_CRITICAL_PREDICATE`），而且 `acquire_lease` 那一句條件式 UPDATE **自己也帶這份條件**：

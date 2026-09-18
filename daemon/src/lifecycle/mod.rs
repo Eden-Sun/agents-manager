@@ -91,6 +91,9 @@ pub enum LcError {
     /// 403：請求本身沒問題，但**你不是可以做這件事的人**（目前只有租約的憑證比對）。
     /// 跟 409 分開：409 是「狀態不對，等一下再來」，403 重試一百次也一樣。
     Forbidden(Value),
+    /// 503：我們自己需要的一份狀態暫時讀不到（目前只有維護窗口的租約，issue #127），所以**不敢**往下做——
+    /// 不是「herdr／DB 出錯」的統稱 502。body 是機器可讀的，帶 `retryable:true`、`sent:false`（一個字都沒送）。
+    Unavailable(Value),
 }
 
 impl LcError {

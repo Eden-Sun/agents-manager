@@ -50,12 +50,22 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
     // 不算重試、不動 `flush_retries`——擋住它的不是 bot 的狀態，是我們自己開的窗口，不該花掉它的額度。
     // 掛一個到窗口到期為止的 timer：窗口提早 release 時 `drain_queue` 會叫醒 flush，沒有人來收的話
     // 這個 timer 就是底線（租約到期即自動失效，不會鎖死）。
-    if let Some(w) = crate::supervisor::maintenance::window_held(app).await {
-        let left = w.retry_after_secs(&db::now()).max(1) as u64;
-        tracing::info!(bot = %bot_id, turn = %turn.id, until = %w.expires_at, holder = %w.owner,
-                       "維護窗口開著：排隊的 prompt 等窗口關掉再送");
-        schedule_flush_retry(app, bot_id, std::time::Duration::from_secs(left));
-        return Ok(());
+    // 讀不到窗口狀態也一樣留在佇列（issue #127）：觀測不到租約不等於沒有租約，這一筆不 claim、不花重試，
+    // 過幾秒再判斷一次；DB 一恢復就照常往下走，不會永久卡住。
+    match crate::supervisor::maintenance::window_held(app).await {
+        Ok(None) => {}
+        Ok(Some(w)) => {
+            let left = w.retry_after_secs(&db::now()).max(1) as u64;
+            tracing::info!(bot = %bot_id, turn = %turn.id, until = %w.expires_at, holder = %w.owner,
+                           "維護窗口開著：排隊的 prompt 等窗口關掉再送");
+            schedule_flush_retry(app, bot_id, std::time::Duration::from_secs(left));
+            return Ok(());
+        }
+        Err(_) => {
+            tracing::warn!(bot = %bot_id, turn = %turn.id, "維護窗口狀態讀不到：排隊的 prompt 留在佇列，稍後重新判斷");
+            schedule_flush_retry(app, bot_id, std::time::Duration::from_secs(crate::supervisor::maintenance::UNREADABLE_RETRY_SECS as u64));
+            return Ok(());
+        }
     }
     // `--resume` 接回之後還沒證明接回的是原本那段對話（issue #92）：留在佇列，不算重試，掛 timer 到期再來。
     // `SessionStart` 一到，`hookrecv` 那邊會叫醒這裡；到期沒來就由閘門自己走刻意的退路（`resume_gate`）。
@@ -860,6 +870,38 @@ mod flush_queue_tests {
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
         let t = turn(&app, &f.turn_id).await;
         assert!(t.status != "queued" || t.flush_retries > 0, "窗口過期就照常往下送：{} retries={}", t.status, t.flush_retries);
+    }
+
+    /// issue #127：窗口握著、但讀不到它——排隊的這一筆要**留在佇列**，不 claim、不花重試、一個字都不送，
+    /// 掛 timer 等下一輪重新判斷。跟窗口明確握著是同一個結果；讀取恢復、窗口過期之後才往下送。
+    #[tokio::test]
+    async fn a_queued_prompt_stays_queued_while_the_restart_lease_cannot_be_read() {
+        let f = queued("test").await;
+        let app = f.env.app.clone();
+        let until = (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        crate::supervisor::store::acquire_lease(&app.db, "restart", "k8bw2f", None, None, &until, false, None, &json!({}))
+            .await
+            .unwrap()
+            .unwrap();
+        crate::supervisor::maintenance::fault::break_lease_reads(&app.db).await;
+        forget_queue_retry_timer(&f.bot_id);
+
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+
+        let t = turn(&app, &f.turn_id).await;
+        assert_eq!((t.status.as_str(), t.flush_retries), ("queued", 0), "留在佇列，而且不花它的重試額度");
+        assert_eq!(t.run_id, None, "沒有被 claim");
+        assert!(!f.env.herdr.methods().iter().any(|m| m == "pane.send_text" || m == "agent.prompt"), "一個字都沒送");
+        assert!(queue_retry_timer_armed(&f.bot_id), "掛了 timer，下一輪重新判斷；不然這筆會一直躺著");
+
+        // 讀取恢復、窗口過期（沒有人 release）：照常往下送，不會永久卡住。
+        crate::supervisor::maintenance::fault::restore_lease_reads(&app.db).await;
+        let past = (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        sqlx::query("UPDATE supervisor_leases SET expires_at=? WHERE resource='restart'").bind(&past).execute(&app.db).await.unwrap();
+        forget_queue_retry_timer(&f.bot_id);
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+        let t = turn(&app, &f.turn_id).await;
+        assert!(t.status != "queued" || t.flush_retries > 0, "恢復後照常往下送：{} retries={}", t.status, t.flush_retries);
     }
 
     /// 中斷寬限的 timer 比 `next_flush_at` 早燒：flush 看到退避還沒到就早退，這一刻起沒有任何 timer。
