@@ -113,13 +113,21 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   以前只在投影當下驗，而投影跑在 config 已經落盤之後：一筆會被擋的修改先把 TOML 改壞，API 回了錯，現場卻已經變了，
   daemon 下次啟動才爆。`validate` 是純函式（bot／專案 id 格式、bot 名字、kind、identity 綁定與 kind 相符、identity 名字與 kind），
   不碰 DB；每個 mutation 都走同一支，規則只有一份。
-  **需要 DB 才判得出來的大量軟刪閘門不在這支裡**：那條路是刪除 API（`delete_from_config`），它本來就先在記憶體算出結果、
-  對著 DB 快照驗過才寫檔。非刪除的 mutation 若踩到那個閘門，仍是先落盤才被擋（`config_written: true`，見下）。
+  **需要 DB 才判得出來的大量軟刪閘門不在這支裡**（純函式不碰 DB）：刪除 API（`delete_from_config`）本來就先在記憶體算出結果、
+  對著 DB 快照驗過才寫檔；issue #73 reopen 之後，Project／Bot 的寫設定 API（建/改專案、建/改 bot、排序、還原）也改走
+  `projection::update_and_project`——同一個 `PROJECTION` 臨界區內先查一次 DB 快照，交給 `ConfigStore::update_guarded` 的
+  `guard` 在純驗證之後、寫檔之前做同步比對，全部過了才寫檔、才投影，取代「先 `ConfigStore::update` 落盤、再另外呼叫
+  `project_config` 投影」那個兩段式（中間那個縫隙會讓一筆會被閘門擋下的修改先把 TOML 改壞、`config_written: true`，
+  DB 卻沒套用）。擋下來時 config.toml 與 SQLite 都不動（`config_written: false`，見下）。
+  身分的寫設定 API（建/刪身分）沒有跟著搬：改的是 `identities`，不影響 Project／Bot 的活列，這個閘門結構上碰不到，
+  仍是舊的兩段式（`api.rs::reproject`）。
 - **投影不得大量軟刪**（2026-09-14 事故）：一次要軟刪的 bot／專案超過 3 列、或超過現有的 30%（兩列以上才算），或 config 裡一個專案都沒有而 DB 還有列 → **在任何寫入之前**拒絕整次投影並記 `error`，daemon 不啟動。
   啟動與 runtime 的**每一次**重投都走閘門：`ConfigStore::update` 會在磁碟 mtime 變了時重讀，「外面把 TOML 換掉／清空，再由 API 或總管觸發重投」是同一條事故路徑。
   DB 的活列＝上一次投影的結果，所以「config 空了但 DB 還有列」必然是拿錯 config／被換掉的檔案。
-  閘門擋下來時 API 回 **409 `projection_refused`**（帶會被軟刪的 bot／專案名字、`AM_ALLOW_BULK_DELETE` 提示，與 `config_written: true`
-  ——寫設定的 API 都是先落盤再投影，被擋時變更已經在 config.toml 裡，重試同一個請求只會撞「已存在」），不是 502——
+  Project／Bot 的寫設定 API 閘門擋下來時回 **409 `projection_refused`**（帶會被軟刪的 bot／專案名字，與 `config_written: false`
+  ——寫檔前就被擋，這次的變更沒有進 config.toml，改一下範圍或處理完 DB 落差直接重送同一個請求即可），不是 502。
+  身分 API、啟動、與背景重投仍是舊行為：`config_written: true`（帶 `AM_ALLOW_BULK_DELETE` 提示）——被擋時變更已經在
+  config.toml 裡，重試同一個請求只會撞「已存在」。
   502 的定義是「herdr／DB 出錯」，呼叫端分不出「你的設定沒被套用」跟「ssh 斷了」，而且之後每一次寫設定都會再撞一次（review 2026-09-16）。
   唯一的例外是明確的刪除 API（`DELETE /api/bots/:id`、`DELETE /api/projects/:id`），走 `projection::delete_from_config` 的單一臨界區：
   **重讀 config → 確認目標此刻在 TOML（不在就 409 `not_in_config`）→ 從當下的 TOML 算出實際要拿掉的 id → 閘門（寫檔前）→ 寫 config → 投影**。

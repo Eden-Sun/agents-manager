@@ -236,6 +236,39 @@ fn check(cfg: &crate::config::ConfigFile) -> Result<()> {
     Ok(())
 }
 
+/// 統一 commit boundary（issue #73 reopen）：mutation 的「套用 → 純驗證 → DB-backed 大量軟刪閘門」在
+/// **同一個 `PROJECTION` 臨界區內、寫入 TOML 之前**做完，全部過了才寫檔、才投影進 SQLite。
+///
+/// 取代「呼叫端先 `ConfigStore::update` 落盤、再另外呼叫 `project_config` 投影」那個兩段式：中間那個縫隙
+/// 會讓一筆會被大量軟刪閘門擋下的修改先把 TOML 改壞（`config_written: true`），DB 卻沒套用——閘門本身
+/// 需要 DB 快照才判得出來，以前只能等寫完檔、真正投影時才問。這裡在寫檔前用同一把 `PROJECTION` 鎖把
+/// DB 快照查出來，交給 [`ConfigStore::update_guarded`] 的 `guard` 做同步比對；驗不過就直接回錯誤，
+/// `next` 被丟掉、檔案與 DB 都不動。
+///
+/// 只給「這次呼叫本身就是一筆 mutation」的呼叫端用（目前是 API 的 Project／Bot 寫入端點）。
+/// 沒有伴隨 mutation 的重投（啟動時的 `project_config_at_startup`、背景巡邏的定期 reproject）不走這裡：
+/// 那些是把既有 config 套進 DB，不是「這次要不要寫」的判斷，繼續用 `project_config`。
+pub async fn update_and_project<F, T>(store: &ConfigStore, pool: &SqlitePool, f: F) -> Result<T>
+where
+    F: FnOnce(&mut crate::config::ConfigFile) -> Result<T>,
+{
+    let _g = PROJECTION.lock().await;
+    let db_bots: Vec<db::Bot> =
+        db::live_bots(pool).await?.into_iter().filter(|b| b.managed_by == "user").collect();
+    let db_projects = db::live_projects(pool).await?;
+    let out = store
+        .update_guarded(f, |next| {
+            let (live_projects, live_bots) = live_ids(next);
+            bulk_removal_check(&db_bots, &db_projects, &live_projects, &live_bots).map_err(anyhow::Error::new)
+        })
+        .await?;
+    // 寫檔已經過了同一份閘門，這裡是投影（`delete_from_config` 也是同一個形狀：拿著 `_g` 直接叫
+    // `project_inner`，不重新拿鎖）。DB 沒被別人動過（還在臨界區內），所以 `project_inner` 自己那次
+    // `guard_removals` 一定過，純粹是既有流程（補 id、upsert、soft-delete）的重用。
+    project_inner(store, pool, None, false).await?;
+    Ok(out)
+}
+
 async fn project_inner(
     store: &ConfigStore,
     pool: &SqlitePool,
@@ -381,6 +414,40 @@ fn some_names(names: &[String]) -> String {
     }
 }
 
+/// 大量軟刪閘門的純判斷（2026-09-14 事故）：`next` 的活列相對於 DB 快照，是不是「config 空了但 DB 還有列」
+/// 或「一次少掉太多列」。不碰 DB／檔案，只比對兩份已經算好的集合——commit 前（`update_and_project`）與
+/// 投影當下（`guard_removals`）共用同一份規則，兩邊差在「什麼時候問」，不是「怎麼判」。
+fn bulk_removal_check(
+    db_bots: &[db::Bot],
+    db_projects: &[db::Project],
+    live_projects: &HashSet<String>,
+    live_bots: &HashSet<String>,
+) -> Result<(), ProjectionRefused> {
+    let (gone_bots, gone_projects) = removals(db_bots, db_projects, live_projects, live_bots, None);
+    if gone_bots.is_empty() && gone_projects.is_empty() {
+        return Ok(());
+    }
+    let empty_config = live_projects.is_empty();
+    let bulk = too_many(gone_bots.len(), db_bots.len()) || too_many(gone_projects.len(), db_projects.len());
+    if !empty_config && !bulk {
+        return Ok(());
+    }
+    let why = if empty_config { "config.toml 沒有任何專案" } else { "一次少掉太多列" };
+    Err(ProjectionRefused {
+        detail: format!(
+            "{why}，但 DB 裡有 {} 顆 bot／{} 個專案：會軟刪 {} 顆 bot（{}）與 {} 個專案（{}）",
+            db_bots.len(),
+            db_projects.len(),
+            gone_bots.len(),
+            some_names(&gone_bots),
+            gone_projects.len(),
+            some_names(&gone_projects),
+        ),
+        bots: gone_bots,
+        projects: gone_projects,
+    })
+}
+
 /// 大量軟刪的閘門（2026-09-14 事故）：第二顆 daemon 用 /tmp 的空 config 開到正式 DB，
 /// 8 秒內把 15 顆 bot、6 個專案標成 `deleted_at`。DB 的活列＝上一次投影的結果，所以
 /// 「config 空了但 DB 還有列」必然是拿錯 config／被換掉的檔案，不是使用者剛刪完——
@@ -396,13 +463,14 @@ async fn guard_removals(
     let db_bots: Vec<db::Bot> =
         db::live_bots(pool).await?.into_iter().filter(|b| b.managed_by == "user").collect();
     let db_projects = db::live_projects(pool).await?;
-    let (gone_bots, gone_projects) = removals(&db_bots, &db_projects, live_projects, live_bots, allow);
-    if gone_bots.is_empty() && gone_projects.is_empty() {
-        return Ok(());
-    }
+
     // 刪除模式：授權名單以外只要還有一列會不見就拒絕，不看門檻、也不吃 env 放行
     // （`delete_from_config` 在寫檔前已經擋過一次，這裡是投影當下的最後一道）。
-    if allow.is_some() {
+    if let Some(allow) = allow {
+        let (gone_bots, gone_projects) = removals(&db_bots, &db_projects, live_projects, live_bots, Some(allow));
+        if gone_bots.is_empty() && gone_projects.is_empty() {
+            return Ok(());
+        }
         let detail = format!(
             "投影時發現授權以外的 removals：{} 顆 bot（{}）與 {} 個專案（{}）",
             gone_bots.len(),
@@ -414,37 +482,27 @@ async fn guard_removals(
         return Err(anyhow::Error::new(DeleteRefused(detail)));
     }
 
-    let empty_config = live_projects.is_empty();
-    let bulk = too_many(gone_bots.len(), db_bots.len()) || too_many(gone_projects.len(), db_projects.len());
-    if !empty_config && !bulk {
-        return Ok(());
+    match bulk_removal_check(&db_bots, &db_projects, live_projects, live_bots) {
+        Ok(()) => Ok(()),
+        Err(refused) if allow_bulk => {
+            tracing::warn!("{ALLOW_BULK_ENV}=1：照使用者確認的做大量軟刪（{}）", refused.detail);
+            Ok(())
+        }
+        Err(refused) => {
+            tracing::error!("拒絕投影 config.toml：{}", refused.detail);
+            Err(anyhow::Error::new(ProjectionRefused {
+                detail: format!(
+                    "拒絕投影 config.toml：{}。\
+                     這通常是 daemon 開錯資料目錄（同一顆 DB 被另一份 config 投影），不是有人刪了 bot；\
+                     先確認 --config 與資料目錄（見 startup.rs）。確認過真的要刪，就帶 {ALLOW_BULK_ENV}=1 重啟 daemon\
+                     （只放行啟動時那一次投影，之後的重投照樣擋）。",
+                    refused.detail
+                ),
+                bots: refused.bots,
+                projects: refused.projects,
+            }))
+        }
     }
-
-    let why = if empty_config { "config.toml 沒有任何專案" } else { "一次少掉太多列" };
-    let detail = format!(
-        "{why}，但 DB 裡有 {} 顆 bot／{} 個專案：會軟刪 {} 顆 bot（{}）與 {} 個專案（{}）",
-        db_bots.len(),
-        db_projects.len(),
-        gone_bots.len(),
-        some_names(&gone_bots),
-        gone_projects.len(),
-        some_names(&gone_projects),
-    );
-    if allow_bulk {
-        tracing::warn!("{ALLOW_BULK_ENV}=1：照使用者確認的做大量軟刪（{detail}）");
-        return Ok(());
-    }
-    tracing::error!("拒絕投影 config.toml：{detail}");
-    return Err(anyhow::Error::new(ProjectionRefused {
-        detail: format!(
-            "拒絕投影 config.toml：{detail}。\
-             這通常是 daemon 開錯資料目錄（同一顆 DB 被另一份 config 投影），不是有人刪了 bot；\
-             先確認 --config 與資料目錄（見 startup.rs）。確認過真的要刪，就帶 {ALLOW_BULK_ENV}=1 重啟 daemon\
-             （只放行啟動時那一次投影，之後的重投照樣擋）。"
-        ),
-        bots: gone_bots,
-        projects: gone_projects,
-    }));
 }
 
 /// `AM_ALLOW_BULK_DELETE` 是整個行程共用的環境變數：設它的測試與「期待被擋下」的測試平行跑時，
@@ -678,6 +736,60 @@ mod tests {
         let err = delete_from_config(&store, &pool, DeleteTarget::Bot("b1")).await.unwrap_err();
         assert!(err.downcast_ref::<NotInConfig>().is_some(), "{err}");
         assert_eq!(db::live_bots(&pool).await.unwrap().len(), 4, "一列都不能動");
+
+        pool.close().await;
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// issue #73 reopen：`update_and_project` 把 DB-backed 的大量軟刪閘門搬到落盤之前。以前只有
+    /// `project_inner`（投影當下）會問，這裡驗的是「commit 之前就先問」這件事本身——`f` 只是把 bot 列表
+    /// 換成一份會踩到閘門的（相對 DB 少了 3 顆），不代表任何一支真的存在的 API：目的是釘住
+    /// `ConfigStore::update_guarded` 的 `guard` 真的接在寫檔前，不是形式上傳進去卻沒生效。
+    #[tokio::test]
+    async fn update_and_project_refuses_a_bulk_removal_before_writing() {
+        let dir = std::env::temp_dir().join(format!("am-uap-refuse-{}", db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
+        project_text(&path, &pool, &config_text(&["b1", "b2", "b3", "b4"])).await.unwrap();
+        let store = ConfigStore::load(path.clone()).await.unwrap();
+
+        let before_text = std::fs::read_to_string(&path).unwrap();
+        let err = update_and_project(&store, &pool, |cfg| {
+            cfg.projects[0].bots.truncate(1);
+            Ok(())
+        })
+        .await
+        .unwrap_err();
+        assert!(err.downcast_ref::<ProjectionRefused>().is_some(), "{err}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before_text, "TOML 一個字都不能動");
+        assert_eq!(store.get().await.projects[0].bots.len(), 4, "記憶體裡那份也不能變");
+        assert_eq!(db::live_bots(&pool).await.unwrap().len(), 4, "DB 不該被動到");
+
+        pool.close().await;
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 正常路徑不變：小改動一樣寫檔、一樣投影（`update_and_project` 不是把 Project／Bot mutation
+    /// 整條路堵死，只是把 guard 提前到落盤前）。
+    #[tokio::test]
+    async fn update_and_project_writes_and_projects_a_legitimate_change() {
+        let dir = std::env::temp_dir().join(format!("am-uap-ok-{}", db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
+        project_text(&path, &pool, &config_text(&["b1", "b2"])).await.unwrap();
+        let store = ConfigStore::load(path.clone()).await.unwrap();
+
+        update_and_project(&store, &pool, |cfg| {
+            cfg.projects[0].label = "renamed".into();
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains("renamed"), "合法的改動要真的落盤");
+        let projects = db::live_projects(&pool).await.unwrap();
+        assert_eq!(projects[0].label, "renamed", "也要真的投影進 DB");
 
         pool.close().await;
         std::fs::remove_dir_all(&dir).unwrap();
