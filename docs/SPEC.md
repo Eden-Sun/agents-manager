@@ -287,20 +287,29 @@ hook body 另外帶 `run_id`＝這個 CLI 行程 pane env 的 `AM_RUN_ID`（本�
 
 `runs.transcript_path` 由 SessionStart 回填；`messages.source` 保留 `transcript` 值（尚未實作回補）。
 
-**Turn 狀態轉移的單一權威**（issue #68，`lifecycle::turn_controller`）：合法邊只定義在 `LEGAL_EDGES` 一處，
-並由它**生成一句 SQLite trigger**（`turns_status_transition`）裝在 `turns` 上。二十來處
-`UPDATE turns SET status=…` 各自帶的 `AND status='<from>'` CAS guard 照舊——trigger 是它們的**下限**，
-而且走哪條路徑都繞不過去：HTTP、hook、timer、reconcile、scheduler，以及未來新寫的路徑。
+**Turn 狀態轉移的單一權威**（issue #68、#125，`lifecycle::turn_controller`）：合法邊只定義在 `LEGAL_EDGES` 一處，
+並由它**生成一句 SQLite trigger**（`turns_status_transition`）裝在 `turns` 上。生產路徑上的
+`UPDATE turns SET status=…` 只出現在 `turn_controller` 裡；trigger 是**最後一道防線**，
+走哪條路徑都繞不過去：HTTP、hook、timer、reconcile、scheduler，以及未來新寫的路徑。
 （跟 `runs_agent_status_since` 用 trigger 而不是「在每一處補一行」是同一個理由：漏掉一處就會在那條路徑上悄悄跟丟。）
 - 合法邊：`queued → in_flight|failed`、`in_flight → queued|completed|completed_fallback|failed`、
   `completed_fallback → completed`。值沒變的寫入一律放行（重播、冪等重寫）。
 - **終局不回進行中**：`completed`／`failed` 沒有任何出邊；`completed_fallback` 只有往 `completed` 一條
   （遲到的 hook 補上回覆，§4.3）。違反就是 `RAISE(ABORT, 'illegal turn status transition')`——
   **明確的錯誤**，不是「0 rows，沒人發現」。
-- `turn_controller::set_status` 是給新 lifecycle 路徑的那道門：帶 CAS、擋非法邊、轉移沒發生時回
-  `Raced { now }`／`Missing` 並記一行，而不是默默 0 rows。既有路徑不一次改寫（1000 多支測試釘著的
-  lifecycle，全面改寫只會製造回歸）；目前只有 `queue::fail_in_flight` 搬過來——它是唯一一處 guard 不在
-  自己 UPDATE 的 WHERE 裡的邊。
+- 入口：`set_status(_on)`（通用的那道門）、`fail(_on)`（`in_flight → failed`，`DeliveryOnFail` 講明 `delivery` 怎麼動），
+  以及 status 要跟別的欄位**同一句**寫的五種專用形狀（#125；拆成兩句會把原子寫入變成兩步，所以不包進通用 mutator，
+  每一支自己擁有整句 UPDATE）：
+  - `complete_with_native_evidence`（hook 收尾：`in_flight → completed`＋native id＋`unknown` 送達升 `ok`）、
+    `fail_with_native_evidence`（`StopFailure`：`in_flight → failed`＋native id，`delivery` 不動）。兩支都要
+    `fence::Admitted`（只有 `Ownership::admit` 做得出來，沒問過世代圍籬就不能呼叫），而且 CAS 帶 `run_id` = 放行的那一代。
+  - `claim_queued`（`queued → in_flight`＋掛上 run）：只認領到**此刻還在跑**的 run。flush 讀完 run 到認領之間，
+    不拿 bot 鎖的 `mark_run_exited` 可能已經把它收掉（重啟中孤兒撤銷刻意不撤），認領下去會掛在死掉的 run 上。
+  - `return_to_queue`（`in_flight → queued`＋拔 run、`flush_retries+1`、`next_flush_at`）、
+    `retract_queued`（`queued → failed`＋`delivery='failed'`、清 `next_flush_at`）。
+  每一支都先對 `LEGAL_EDGES` 檢查自己那條邊；收尾時間一律 `COALESCE`（只記第一次）。轉移沒發生時回
+  `Raced { now }`／`Missing`／`Fenced(why)`（還在起點、但世代前提不成立），不是默默 0 rows——
+  放回佇列輸給 run 結束時不再謊報「放回去了」、也不掛 retry timer。
 - `lifecycle::transitions`（issue #76）是同一批資料的**描述性**快照，兩者對不上以 `turn_controller` 為準。
 
 ### 4.3 備援來源：終端快照

@@ -66,6 +66,29 @@ impl Ownership {
     pub fn may_mutate(&self) -> bool {
         !matches!(self, Ownership::Stale { .. })
     }
+
+    /// 放行的證明：只有這裡做得出來。hook 改 Turn 的那兩支（`turn_controller` 的
+    /// `*_with_native_evidence`）要它——沒問過圍籬就沒辦法呼叫（issue #125）。
+    pub fn admit(&self, run_id: &str) -> Option<Admitted> {
+        self.may_mutate().then(|| Admitted { run_id: run_id.to_string() })
+    }
+}
+
+/// 圍籬放行了這一代（`run_id`）的事件。欄位私有：只能由 [`Ownership::admit`] 做出來。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Admitted {
+    run_id: String,
+}
+
+impl Admitted {
+    pub fn run_id(&self) -> &str {
+        &self.run_id
+    }
+
+    #[cfg(test)]
+    pub fn for_test(run_id: &str) -> Self {
+        Admitted { run_id: run_id.to_string() }
+    }
 }
 
 /// 純函式版本：所有查詢都由呼叫端做完再餵進來，規則本身測得到。

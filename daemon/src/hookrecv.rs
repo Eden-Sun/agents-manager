@@ -673,6 +673,8 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
 
     // 世代圍籬（issue #69）：這一則屬於哪一代。只在這裡問一次，`fence` 是唯一的規則所在地——
     // 散在 hook／reconcile／fallback 各判一次，遲早會漂成三套。舊世代的事件只記錄，一個欄位都不改。
+    // 放行的證明（`admitted`）是 hook 改 Turn 的前提：`turn_controller` 那兩支沒有它就不能呼叫（issue #125）。
+    let mut admitted = None;
     if let Some(r) = &run {
         let ev = crate::lifecycle::fence::EventIdentity { run_id: body.run_id.as_deref(), session_id: hook_session_id(&body.payload) };
         let owner = crate::lifecycle::fence::classify(&app.db, &bot.id, r, ev).await;
@@ -699,6 +701,7 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
         if let crate::lifecycle::fence::Ownership::Unproven(why) = &owner {
             tracing::debug!(bot = %bot.name, run = %r.id, why, "這一則證不出世代歸屬：照既有規則處理");
         }
+        admitted = owner.admit(&r.id);
     }
 
     // Codex's usage-reset hint is a TUI row, not in the payload; give the pane a moment to render it.
@@ -768,7 +771,7 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                     return Ok(());
                 }
             }
-            let Some(r) = &run else {
+            let (Some(r), Some(admitted)) = (&run, &admitted) else {
                 tracing::info!(bot = %bot.name, ?reason, "StopFailure 但這顆 bot 沒有活著的 run：沒有回合可收");
                 return Ok(());
             };
@@ -781,17 +784,10 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             // 收尾（連同當作去重鑰匙的 native id）與說明同一個交易（#115）：說明寫不進去時整筆回滾，
             // 收件匣的重試才不會被去重擋掉、留下一筆沒有原因的失敗回合。
             let mut tx = app.db.begin().await?;
-            let claimed = sqlx::query(
-                "UPDATE turns SET status='failed', completed_at=?, native_session_id=?, native_turn_id=? WHERE id=? AND status='in_flight'",
-            )
-            .bind(db::now())
-            .bind(&session_id)
-            .bind(&turn_id)
-            .bind(&t.id)
-            .execute(&mut *tx)
-            .await?;
-            if claimed.rows_affected() == 0 {
-                tracing::info!(turn = %t.id, "StopFailure 來晚了：這一筆已經被別的路徑收掉，不重複收尾");
+            let native = lifecycle::turn_controller::NativeEvidence { session_id: session_id.as_deref(), turn_id: turn_id.as_deref() };
+            let claimed = lifecycle::turn_controller::fail_with_native_evidence(&mut tx, &t.id, admitted, native).await?;
+            if claimed != lifecycle::turn_controller::Outcome::Applied {
+                tracing::info!(turn = %t.id, ?claimed, "StopFailure 來晚了：這一筆已經被別的路徑收掉，不重複收尾");
                 return Ok(());
             }
             let note = match detail.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
@@ -965,33 +961,28 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             };
             let body_text = assistant.clone().unwrap_or_default();
 
-            if let Some(t) = target {
+            if let (Some(t), Some(admitted)) = (target, &admitted) {
                 // 收尾（連同當作去重鑰匙的 native id）與訊息同一個交易（#115）：訊息寫不進去時整筆回滾，
                 // 收件匣重試時才不會被去重擋掉、留下一筆沒有回覆的 completed 回合。
                 let mut tx = app.db.begin().await?;
-                let claimed = sqlx::query(
-                    "UPDATE turns SET status='completed', delivery=CASE WHEN delivery='unknown' THEN 'ok' ELSE delivery END,
-                     completed_at=?, native_session_id=?, native_turn_id=? WHERE id=? AND status='in_flight'",
-                )
-                .bind(db::now())
-                .bind(&session_id)
-                .bind(&turn_id)
-                .bind(&t.id)
-                .execute(&mut *tx)
-                .await?;
-                // Lost the CAS to the §4.3 fallback: adding the hook's copy made two replies
-                // (review 2026-09-12 #5). Stopped/failed turns still keep the reply.
-                if claimed.rows_affected() == 0 {
-                    let now_t = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?")
-                        .bind(&t.id)
-                        .fetch_optional(&mut *tx)
-                        .await?;
-                    if let Some(closed) = now_t.filter(|c| c.status == "completed_fallback") {
-                        // 這個交易沒寫到東西；先結束它，`fill_or_drop_late_hook` 自己開一個。
-                        tx.commit().await?;
-                        fill_or_drop_late_hook(app, &closed, &body_text, &session_id, &turn_id).await?;
+                let native = lifecycle::turn_controller::NativeEvidence { session_id: session_id.as_deref(), turn_id: turn_id.as_deref() };
+                let claimed = lifecycle::turn_controller::complete_with_native_evidence(&mut tx, &t.id, admitted, native).await?;
+                match &claimed {
+                    lifecycle::turn_controller::Outcome::Applied => {}
+                    // 不是圍籬放行那一代的回合：一個字都不掛上去。
+                    lifecycle::turn_controller::Outcome::Fenced(why) => {
+                        tracing::warn!(turn = %t.id, why, "hook 收尾：回合不屬於放行的那一代，不動");
                         return Ok(());
                     }
+                    // Lost the CAS to the §4.3 fallback: adding the hook's copy made two replies
+                    // (review 2026-09-12 #5). Stopped/failed turns still keep the reply.
+                    lifecycle::turn_controller::Outcome::Raced { now } if now == "completed_fallback" => {
+                        // 這個交易沒寫到東西；先結束它，`fill_or_drop_late_hook` 自己開一個。
+                        tx.commit().await?;
+                        fill_or_drop_late_hook(app, &t, &body_text, &session_id, &turn_id).await?;
+                        return Ok(());
+                    }
+                    _ => {}
                 }
                 let mut added = Vec::new();
                 // `begin_external_turn` already stored the scraped echo; add the hook's copy only if different.

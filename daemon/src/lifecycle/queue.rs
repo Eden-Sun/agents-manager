@@ -91,14 +91,19 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
         return Ok(());
     }
 
+    // 讀完 run、還沒認領的那一瞬（測試在這裡插進不拿 bot 鎖的 run 結束，issue #125）。
+    #[cfg(test)]
+    {
+        super::race_point::hit("flush_before_claim", bot_id).await;
+    }
     // Claim it first. If the CAS loses, another flush got there and this one has nothing to do.
-    let claimed = sqlx::query("UPDATE turns SET status='in_flight', run_id=? WHERE id=? AND status='queued'")
-        .bind(&run.id)
-        .bind(&turn.id)
-        .execute(&app.db)
-        .await?;
-    if claimed.rows_affected() == 0 {
-        return Ok(());
+    // 認領只認領到此刻還在跑的 run（issue #125）：讀完 run 之後它被收掉的話，這一筆留在佇列給下一個 run。
+    match super::turn_controller::claim_queued(&mut *app.db.acquire().await?, &turn.id, &run.id).await? {
+        super::turn_controller::Outcome::Applied => {}
+        other => {
+            tracing::info!(bot = %bot_id, turn = %turn.id, run = %run.id, ?other, "排隊的 prompt 沒認領到：留在佇列");
+            return Ok(());
+        }
     }
     emit_turn(app, &turn.id).await;
 
@@ -148,8 +153,9 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
         // box produces no `working -> idle` edge to wake the flush (sol review round seven #2).
         Ok(Delivered::NotAttempted { reason, retry: true }) => {
             match defer_queued_turn(app, &conv, &turn.id, reason, &wait_key).await {
-                Ok(Some(delay)) => schedule_flush_retry(app, bot_id, delay),
-                Ok(None) => tracing::warn!(bot = %bot_id, turn = %turn.id, reason, "queued prompt gave up after its retry limit"),
+                Ok(Deferred::Requeued(delay)) => schedule_flush_retry(app, bot_id, delay),
+                Ok(Deferred::GaveUp) => tracing::warn!(bot = %bot_id, turn = %turn.id, reason, "queued prompt gave up after its retry limit"),
+                Ok(Deferred::Settled(now)) => tracing::info!(bot = %bot_id, turn = %turn.id, reason, ?now, "要放回佇列時已經被別的路徑收掉"),
                 Err(e) => tracing::error!(bot = %bot_id, turn = %turn.id, error = %e, "could not put a queued prompt back"),
             }
             emit_turn(app, &turn.id).await;
@@ -197,11 +203,14 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
 /// only for a turn this flush claimed, so `turns_one_queued` cannot be violated.
 async fn put_back_with_retry(app: &Arc<App>, conv: &str, turn_id: &str, bot_id: &str, reason: &str, wait_key: &str) {
     match defer_queued_turn(app, conv, turn_id, reason, wait_key).await {
-        Ok(Some(delay)) => {
+        Ok(Deferred::Requeued(delay)) => {
             tracing::warn!(bot = %bot_id, turn = %turn_id, %reason, retry_in_s = delay.as_secs(), "queued prompt put back on the queue");
             schedule_flush_retry(app, bot_id, delay);
         }
-        Ok(None) => tracing::warn!(bot = %bot_id, turn = %turn_id, %reason, "queued prompt gave up after its retry limit"),
+        Ok(Deferred::GaveUp) => tracing::warn!(bot = %bot_id, turn = %turn_id, %reason, "queued prompt gave up after its retry limit"),
+        Ok(Deferred::Settled(now)) => {
+            tracing::info!(bot = %bot_id, turn = %turn_id, %reason, ?now, "要放回佇列時已經被別的路徑收掉：不重試")
+        }
         Err(e) => tracing::error!(bot = %bot_id, turn = %turn_id, %reason, error = %e, "could not put a claimed prompt back on the queue"),
     }
     emit_turn(app, turn_id).await;
@@ -227,34 +236,49 @@ pub(crate) fn queue_retry_delay(retries: i64) -> std::time::Duration {
     std::time::Duration::from_secs(QUEUE_RETRY_BASE_SECS.saturating_mul(1u64 << shift).min(QUEUE_RETRY_MAX_SECS))
 }
 
+/// [`defer_queued_turn`] 做了什麼。
+enum Deferred {
+    /// 放回佇列了，這麼久之後再試。
+    Requeued(std::time::Duration),
+    /// 重試用完，收成 failed 並寫了說明。
+    GaveUp,
+    /// 放回之前已經被別的路徑收掉（不拿 bot 鎖的 run 結束之類）：什麼都沒寫，不重試（issue #125）。
+    Settled(super::turn_controller::Outcome),
+}
+
 /// Put a claimed turn back on the queue with its retry count and next attempt time, or — past the
-/// limit — fail it with an explanation. One transaction either way. `Some(delay)` = requeued.
+/// limit — fail it with an explanation. One transaction either way.
 async fn defer_queued_turn(
     app: &Arc<App>,
     conv: &str,
     turn_id: &str,
     reason: &str,
     wait_key: &str,
-) -> anyhow::Result<Option<std::time::Duration>> {
+) -> anyhow::Result<Deferred> {
+    // 認領之後、放回之前的那一瞬（測試在這裡插進不拿 bot 鎖的 run 結束，issue #125）。
+    #[cfg(test)]
+    {
+        super::race_point::hit("defer_before_return", turn_id).await;
+    }
     let mut tx = app.db.begin().await?;
     let retries: i64 = sqlx::query_scalar("SELECT flush_retries FROM turns WHERE id = ?").bind(turn_id).fetch_one(&mut *tx).await?;
     if retries >= QUEUE_RETRY_LIMIT {
-        super::turn_controller::fail_on(&mut tx, turn_id, super::turn_controller::DeliveryOnFail::Failed, "退避次數用完").await?;
+        let out = super::turn_controller::fail_on(&mut tx, turn_id, super::turn_controller::DeliveryOnFail::Failed, "退避次數用完").await?;
+        // 沒收到的（別的路徑先收掉了）不補「試了 N 次」的說明：那不是它結束的原因。
+        if out != super::turn_controller::Outcome::Applied {
+            return Ok(Deferred::Settled(out));
+        }
         let hint = format!("沒有送出：試了 {QUEUE_RETRY_LIMIT} 次都沒辦法打字（最後一次是 {reason}），已停止自動重試。請清空輸入框後重送。");
         insert_message_tx(&mut tx, conv, Some(turn_id), "system", &hint, "system", false, None).await?;
         tx.commit().await?;
-        return Ok(None);
+        return Ok(Deferred::GaveUp);
     }
     let delay = queue_retry_delay(retries);
     let next = (chrono::Utc::now() + chrono::Duration::from_std(delay)?).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    sqlx::query(
-        "UPDATE turns SET status='queued', run_id=NULL, flush_retries=flush_retries+1, next_flush_at=?
-          WHERE id=? AND status='in_flight'",
-    )
-    .bind(&next)
-    .bind(turn_id)
-    .execute(&mut *tx)
-    .await?;
+    let out = super::turn_controller::return_to_queue(&mut tx, turn_id, &next).await?;
+    if out != super::turn_controller::Outcome::Applied {
+        return Ok(Deferred::Settled(out));
+    }
     if reason == "codex_log_not_ready" {
         // Only this reason spends the rollout wait, and a different run or session starts over.
         sqlx::query(
@@ -270,7 +294,7 @@ async fn defer_queued_turn(
     }
     tx.commit().await?;
     tracing::info!(turn = turn_id, reason, attempt = retries + 1, retry_in_s = delay.as_secs(), "queued prompt not sent yet; put back");
-    Ok(Some(delay))
+    Ok(Deferred::Requeued(delay))
 }
 
 /// 這筆 queued turn 掛的交辦已經不要了（cancelled／superseded／failed，或被保險絲停在 blocked）→ 寫進對話的撤銷理由；
@@ -313,14 +337,7 @@ pub(crate) async fn revoke_queued_turn_tx(
     turn_id: &str,
     why: &str,
 ) -> anyhow::Result<Option<Revoked>> {
-    let revoked = sqlx::query(
-        "UPDATE turns SET status='failed', delivery='failed', completed_at=?, next_flush_at=NULL WHERE id=? AND status='queued'",
-    )
-    .bind(db::now())
-    .bind(turn_id)
-    .execute(&mut **tx)
-    .await?;
-    if revoked.rows_affected() == 0 {
+    if super::turn_controller::retract_queued(tx, turn_id).await? != super::turn_controller::Outcome::Applied {
         return Ok(None);
     }
     let (conv, bot_id): (String, String) = sqlx::query_as(
@@ -1650,6 +1667,51 @@ mod flush_queue_tests {
         let t = turn(&app, &f.turn_id).await;
         assert_eq!(t.status, "in_flight", "the retry got to claim it");
         assert_eq!(t.run_id.as_deref(), Some(f.run_id.as_str()));
+    }
+
+    /// issue #125：flush 讀完 run 到認領之間，run 被不拿 bot 鎖的路徑收掉（`mark_run_exited`：pane 死掉、
+    /// reconcile）。重啟中那一段孤兒撤銷刻意不撤排著的派工；這時認領下去，回合掛在死掉的 run 上、
+    /// 字打進不存在的 pane。認領只認領到此刻還在跑的 run，沒認領到的留在佇列給下一個 run。
+    #[tokio::test]
+    async fn a_queued_prompt_is_not_claimed_onto_a_run_that_ended_mid_flush() {
+        let f = queued("test").await;
+        let app = f.env.app.clone();
+        f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
+        sqlx::query("UPDATE turns SET prompt_text = '給舊 run 的派工' WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        let (app2, run2) = (app.clone(), f.run_id.clone());
+        super::super::race_point::arm("flush_before_claim", &f.bot_id, move || async move {
+            // `mark_run_exited` 的第一句寫入。
+            sqlx::query("UPDATE runs SET state='exited', ended_at=? WHERE id=?").bind(db::now()).bind(&run2).execute(&app2.db).await.unwrap();
+        });
+
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+
+        let t = turn(&app, &f.turn_id).await;
+        assert_eq!((t.status.as_str(), t.run_id.as_deref()), ("queued", None), "留在佇列，不掛到死掉的 run 上");
+        assert_eq!(typed(&f, "給舊 run 的派工"), 0, "一個字都沒打進舊 pane");
+        assert_eq!(t.flush_retries, 0, "不是這一筆送不出去，不花它的重試");
+    }
+
+    /// issue #125：放回佇列之前，這一筆已經被不拿 bot 鎖的路徑收掉（run 結束的 `fail_in_flight`）。
+    /// 以前 `defer_queued_turn` 不看 CAS 有沒有打中，照樣回報「放回去了」並掛 retry timer、記一行 put back。
+    #[tokio::test]
+    async fn a_put_back_that_loses_to_a_run_exit_does_not_pretend_it_requeued() {
+        let f = queued("no-such-session").await;
+        let app = f.env.app.clone();
+        forget_queue_retry_timer(&f.bot_id);
+        let (app2, turn2) = (app.clone(), f.turn_id.clone());
+        super::super::race_point::arm("defer_before_return", &f.turn_id, move || async move {
+            super::super::turn_controller::fail(&app2.db, &turn2, super::super::turn_controller::DeliveryOnFail::Keep, "run ended")
+                .await
+                .unwrap();
+        });
+
+        flush_queued_locked(&app, &f.bot_id).await.expect("the flush itself does not error");
+
+        let t = turn(&app, &f.turn_id).await;
+        assert_eq!(t.status, "failed", "別的路徑收掉的就是收掉了");
+        assert_eq!((t.flush_retries, t.next_flush_at.clone()), (0, None), "沒有放回去，就不記一次重試");
+        assert!(!queue_retry_timer_armed(&f.bot_id), "沒有東西在排隊，不掛 retry timer");
     }
 
     /// Once the RPC went out, a failure is not requeued (could deliver twice); `delivery='unknown'`
