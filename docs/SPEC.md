@@ -790,6 +790,13 @@ herdr 還列著這個 agent（pane 被搬走）的不算，會被重新收編。
 
 daemon 每次起 pane 前把 POSIX `sh` 包裝腳本裝到 `<bot 目錄>/bin/herdr`（遠端走 ssh），並放到 pane `PATH` 最前面。
 
+**開機時就地換版**（`shim_refresh`，2026-09-18）：shim 以前只在 bot 啟動時寫，所以長跑的 bot（AGM、協調者、使用者的專案 bot）
+在新版 daemon 上線之後手上還是舊 shim——`ee98f6cf` 上線當天，AGM 那顆的 `bin/cargo` 還是幾小時前的舊版，照樣踩到 shim 巢狀死鎖。
+daemon 啟動時掃 `<data_dir>/bots/*/bin`，把**已經存在**的 `herdr`／`cargo` 換成這顆 binary 帶的版本：shim 只是檔案，
+換掉不必重啟 pane（下一次在 pane 裡打 `cargo` 就是新版）。寫入一律暫存檔 + rename（同目錄、原子），
+正在執行的舊 shim 沿用舊 inode 不受影響；**內容一樣就不動**，免得每次重啟把 mtime 洗掉、看不出哪些真的換過版。
+沒有 `bin/` 或本來就沒有那支 shim 的 bot 不會被生出新檔案（那是啟動時 `install_shim` 的事）。
+
 - `herdr agent start <name> …`：`<name>` 不以 `$AM_AGENT_NAME-` 開頭就補前綴（截到 32 字）並在 stderr 說明。旗標可在名字前面，`--kind`/`--pane`/`--timeout` 的值不誤認，`--` 之後原封不動。
   **模型沿用**：`--` 之後沒有 `--model` 且 `--kind` 與母 bot 相同（或沒寫）時補 `-- --model $AM_MODEL`，claude 再補 `--effort $AM_EFFORT`；
   子 agent 自己寫的一律尊重（`--model`、codex/grok 的 `-m`、codex 的 `-c model=` / `-c model_reasoning_effort=`）。
