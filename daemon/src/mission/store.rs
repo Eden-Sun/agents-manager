@@ -879,8 +879,18 @@ pub async fn cancel(pool: &SqlitePool, id: &str) -> Result<bool> {
     Ok(n == 1)
 }
 
-pub async fn complete(pool: &SqlitePool, id: &str, summary: &str) -> Result<bool> {
+/// 結案：任務列＋`completed` 事件，**一次交易**。回 `None` ＝ 任務已經結案（完成或取消）或不存在，
+/// 什麼都沒寫——呼叫端要照實回 409，不能再補一則 `completed`（issue #116：以前 bool 沒人看，
+/// 結案途中被取消的任務照樣多一則「完成」，兩個同時結案也會各留一則說法不同的 `completed`）。
+pub async fn complete(
+    pool: &SqlitePool,
+    id: &str,
+    summary: &str,
+    relay_from: Option<&str>,
+    payload: &serde_json::Value,
+) -> Result<Option<MissionEvent>> {
     let now = crate::db::now();
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let n = sqlx::query(
         "UPDATE missions SET completed_at = ?, result_summary = ?, paused_reason = NULL, paused_detail = NULL, updated_at = ?
          WHERE id = ? AND completed_at IS NULL AND cancelled_at IS NULL",
@@ -889,10 +899,15 @@ pub async fn complete(pool: &SqlitePool, id: &str, summary: &str) -> Result<bool
     .bind(summary)
     .bind(&now)
     .bind(id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?
     .rows_affected();
-    Ok(n == 1)
+    if n != 1 {
+        return Ok(None);
+    }
+    let ev = insert_event(&mut tx, id, "completed", summary, relay_from, payload, None, None).await?;
+    tx.commit().await?;
+    Ok(Some(ev))
 }
 
 /// 用掉一輪（review 退回或驗證失敗）。回傳用掉之後的輪數；超過上限時**不**加、回 `Err(used)`，
@@ -988,7 +1003,7 @@ mod tests {
 
     async fn done_parent(pool: &SqlitePool, crid: &str) -> Mission {
         let (m, _) = create(pool, &new(crid)).await.unwrap();
-        complete(pool, &m.id, "第一版").await.unwrap();
+        complete(pool, &m.id, "第一版", None, &json!({})).await.unwrap().expect("剛建的任務一定結得了案");
         get(pool, &m.id).await.unwrap().unwrap()
     }
 
@@ -1342,7 +1357,7 @@ mod tests {
         assert!(pause(&pool, &m.id, "max_rounds", None).await.unwrap());
         assert_eq!(get(&pool, &m.id).await.unwrap().unwrap().status(), "paused");
         assert!(resume(&pool, &m.id).await.unwrap());
-        assert!(complete(&pool, &m.id, "ok").await.unwrap());
+        assert!(complete(&pool, &m.id, "ok", None, &json!({})).await.unwrap().is_some());
         assert_eq!(get(&pool, &m.id).await.unwrap().unwrap().status(), "done");
         assert!(!pause(&pool, &m.id, "late", None).await.unwrap(), "已完成的任務不能再暫停");
         assert!(!cancel(&pool, &m.id).await.unwrap());

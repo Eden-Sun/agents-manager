@@ -1014,8 +1014,11 @@ pub async fn post_complete(State(app): State<Arc<App>>, Path(id): Path<String>, 
         }
     }
     let from = check_relay_from(&app, b.relay_from.as_deref()).await?;
-    store::complete(&app.db, &id, b.result_summary.trim()).await.map_err(up)?;
-    store::add_event(&app.db, &id, "completed", b.result_summary.trim(), from.as_deref(), &json!({"delivery": delivery})).await.map_err(up)?;
+    // 任務列與 `completed` 事件一次交易，而且只在這一次真的把任務從開著關掉時才寫（issue #116）：
+    // 上面的關卡跑完之前任務可能已經被取消、或另一個結案先落地——那就照實 409，不補一則「完成」。
+    if store::complete(&app.db, &id, b.result_summary.trim(), from.as_deref(), &json!({"delivery": delivery})).await.map_err(up)?.is_none() {
+        return Err(ensure_open(&load(&app, &id).await?).err().unwrap_or_else(|| LcError::conflict("already_closed", json!({"mission_id": id}))));
+    }
     let m = load(&app, &id).await?;
     let temp = cleanup_temp_bots(&app, &m).await;
     emit(&app, &m).await;
@@ -1393,6 +1396,51 @@ mod tests {
             .await
             .unwrap();
         assert!(payload.contains("寫一半的任務"), "通知帶的是那筆任務自己的內容：{payload}");
+    }
+
+    /// 結案請求跑關卡的途中任務被別人關掉了（使用者按了取消、或另一個結案先落地）：這一次結案必須不成立。
+    ///
+    /// `post_complete` 先 `ensure_open`、中間跑完交付關卡（`no_changes` 時還要 git）才寫 `store::complete`。
+    /// 以前不看 `complete` 回的 `false`：照樣補一則 `completed` 事件、清臨時 bot、回 200——時間軸上同時有
+    /// 「已取消」與「完成」，或兩則說法不同的「完成」，呼叫端還以為自己結了案。
+    ///
+    /// 重現是確定性的：測試自己先拿寫入鎖（`BEGIN IMMEDIATE`）並把任務標成取消（還沒 commit）。結案請求的
+    /// 讀取在 WAL 下照舊看到「還開著」、一路過關，卡在寫入那一步；放鎖之後它面對的就是一筆已取消的任務。
+    #[tokio::test]
+    async fn a_complete_that_loses_the_race_to_a_cancel_does_not_close_anything() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("complete-race", "pr"))).await.unwrap();
+        let id = m["id"].as_str().unwrap().to_string();
+
+        let mut writer = app.db.acquire().await.unwrap();
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *writer).await.unwrap();
+        sqlx::query("UPDATE missions SET cancelled_at=?, updated_at=? WHERE id=?")
+            .bind(crate::db::now())
+            .bind(crate::db::now())
+            .bind(&id)
+            .execute(&mut *writer)
+            .await
+            .unwrap();
+        let pending = tokio::spawn(post_complete(State(app.clone()), Path(id.clone()), Json(done("做完了", Some("no_changes"), None))));
+        // 讓結案請求把讀取與關卡都跑完、卡在寫入（busy_timeout 10 秒，這裡遠小於它）。
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        sqlx::query("COMMIT").execute(&mut *writer).await.unwrap();
+        drop(writer);
+
+        let res = pending.await.unwrap();
+        let completed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mission_events WHERE mission_id=? AND kind='completed'")
+            .bind(&id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(completed, 0, "已取消的任務不該多一則「完成」");
+        let after = store::get(&app.db, &id).await.unwrap().unwrap();
+        assert_eq!((after.status(), after.result_summary.as_deref()), ("cancelled", None));
+        match res {
+            Err(e) => assert_eq!(conflict_reason(e), "already_closed", "呼叫端要知道自己沒有結到案"),
+            Ok(Json(v)) => panic!("結案沒有成立卻回了 200：{v}"),
+        }
     }
 
     /// 完成的任務可以被追問，而追問**不能**改變任何交付事實。這是「已完成清單不可覆寫」的底線。
