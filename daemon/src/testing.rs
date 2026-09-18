@@ -7,8 +7,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 
-/// Mock herdr on a real unix socket, one newline-JSON request per connection. Hook injection and
-/// `ensure_kind_installed` probing are deliberately left to a live agent.
+/// Mock herdr on a real unix socket, one newline-JSON request per connection. Hook injection is
+/// deliberately left to a live agent. `ensure_kind_installed` 不看機器的 PATH：測試 build 的
+/// `App.kind_probe` 預設答「有」（`kind_probe.rs`；要走真的探測就自己 `set` 一個 runner）。
 ///
 /// Knowingly differs from herdr 0.8.2: closing a tab's last pane does **not** reap the tab, so tests
 /// can show the daemon tidies the tab up itself.

@@ -834,15 +834,16 @@ async fn start_inner(
 }
 
 /// Find the kind's executable via the user's login shell (`$SHELL -lic`), else PATH. Returns a
-/// user-facing reason when missing; a lookup that itself fails passes.
+/// user-facing reason when missing; a lookup that itself fails passes. 「怎麼去問」測試可以換掉
+/// （`App.kind_probe`，見 `kind_probe.rs`）；指令與判讀是同一份。
 async fn ensure_kind_installed(app: &Arc<App>, host: &str, kind: &str) -> Result<(), String> {
     if !crate::config::valid_kind(kind) {
         return Err(format!("未知的 bot kind `{kind}`"));
     }
-    let probe = format!(
-        "( \"${{SHELL:-/bin/sh}}\" -lic 'command -v {kind}' 2>/dev/null || command -v {kind} 2>/dev/null ) | tail -1"
-    );
-    let found: Option<String> = if host == LOCAL_HOST {
+    let probe = crate::kind_probe::probe_command(kind);
+    let found: Option<String> = if let Some(run) = app.kind_probe.get() {
+        run(host, kind, &probe)
+    } else if host == LOCAL_HOST {
         let out = tokio::time::timeout(
             Duration::from_secs(10),
             tokio::process::Command::new("/bin/sh").arg("-c").arg(&probe).output(),
@@ -864,19 +865,7 @@ async fn ensure_kind_installed(app: &Arc<App>, host: &str, kind: &str) -> Result
             None => None,
         }
     };
-    match found {
-        Some(path) if path.is_empty() => {
-            let where_ = if host == LOCAL_HOST { "本機".to_string() } else { format!("主機 {host}") };
-            Err(format!(
-                "{where_}上找不到 `{kind}` 執行檔（用登入 shell 檢查 `command -v {kind}` 沒有結果）。請先在該主機安裝 {kind}，或確認它在登入 shell 的 PATH 中；遠端主機也可在主機設定的 remote_path 補上路徑。"
-            ))
-        }
-        Some(path) => {
-            tracing::debug!(host, kind, %path, "kind preflight ok");
-            Ok(())
-        }
-        None => Ok(()),
-    }
+    crate::kind_probe::verdict(host, kind, found)
 }
 
 
@@ -2066,12 +2055,15 @@ mod tab_tests {
     #[tokio::test]
     async fn a_fresh_working_directory_is_trusted_before_the_agent_starts() {
         let dir = std::env::temp_dir().join(format!("am-trust-start-{}", crate::db::ulid()));
-        let repo = dir.join("repo");
+        // 工作目錄是經過符號連結進去的（macOS 的 `/tmp` 就是）；自己造一個，不靠這台機器的 tmp 剛好是不是連結
+        // ——Linux 的 `/tmp` 不是，原本的 `!starts_with("/tmp/")` 在那邊必紅（#139，遠端編譯主機）。
+        let repo = dir.join("real/repo");
         std::fs::create_dir_all(&repo).unwrap();
+        std::os::unix::fs::symlink(dir.join("real"), dir.join("link")).unwrap();
         let store = dir.join(".claude.json");
         std::fs::write(&store, "{\"numStartups\":7}").unwrap();
 
-        let cwd = repo.to_string_lossy().to_string();
+        let cwd = dir.join("link/repo").to_string_lossy().to_string();
         let wrote = crate::trust::mark_trusted("claude", &store, &[crate::trust::canonical(&cwd)]).unwrap();
         assert!(wrote, "a directory the CLI has not seen is recorded");
 
@@ -2079,8 +2071,9 @@ mod tab_tests {
         assert_eq!(v["numStartups"], 7, "the CLI's own state survives the merge");
         let key = crate::trust::canonical(&cwd);
         assert_eq!(v["projects"][&key]["hasTrustDialogAccepted"], true);
-        // Resolved path: macOS `/tmp` is a symlink and the CLI compares its `getcwd()`.
-        assert!(!key.starts_with("/tmp/"), "the recorded path is canonical, got {key}");
+        // Resolved path: the CLI compares its `getcwd()`, which never contains the symlink.
+        assert!(!key.contains("/link/"), "the recorded path is canonical, got {key}");
+        assert_eq!(key, std::fs::canonicalize(&repo).unwrap().to_string_lossy(), "resolved to the real directory");
 
         assert!(!crate::trust::mark_trusted("claude", &store, &[key]).unwrap(), "already trusted: left alone");
         let _ = std::fs::remove_dir_all(&dir);
