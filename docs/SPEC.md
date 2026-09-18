@@ -769,11 +769,30 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run
      把使用者的字打進不知道什麼地方。
    - **一定走打字那條路**（`force_pane`）：herdr 的 `agent.prompt` 沒有鍵可以按，按不到 send-now 就只是把字排進 CLI 自己的
      佇列，等於沒插隊。送出鍵用 `ctrl+x ctrl+s`，不用 `ctrl+enter`：終端對後者的支援不一致。
-   - **順序**：先規劃（第 3 步）→ 做完按鍵前的準備（`delivery::prepare_delivery`：記 `pane_typed`、重看一次框、取證據基準）
-     → 兩者都成立才 `fail_in_flight` 收掉被打斷的那一筆（`failed` ＋ 一則 system 說明「被插隊送出打斷（claude send-now）」）
-     → 再 insert 新 turn → 打字＋按鍵（`type_prepared`）。規劃或準備被擋下（框裡有字、證據讀不到、`pane_typed` 寫不進去）時
-     一個鍵都還沒按，回可重試的 409、不留任何列，也不能先把人家的回合收掉（#120）。`turns_one_in_flight` 要求舊的先離開新的才進得去，這也就是「同一顆 bot 連續兩次 send-now
-     不會產生兩個 `in_flight`」的保證：兩次都在同一顆 per-bot 鎖裡排隊。
+   - **會打斷的是送出鍵，不是打字**（#120，`send_now::deliver`）：claude 忙的時候框裡照樣可以打字、回合照跑，所以被打斷的那一筆
+     只在送出鍵**確定生效**之後才收（`failed` ＋ 一則 system 說明「被插隊送出打斷（claude send-now）」）。順序：
+     規劃（第 3 步）→ insert 新 turn（`run_id` 先留空，見下）＋ user Message → 準備（`delivery::prepare_delivery`：記 `pane_typed`、
+     **重看一次框**、取證據基準）→ 打字（`type_text`）→ 送出鍵（`press_submit`）→ 生效就在**同一個交易**裡收掉舊的、把新的掛上 run
+     （`interruption::send_now_interrupted`）→ 等送達證據（`confirm_submitted`）。
+   - **新的那一則先不佔 run**：它要在打字前就寫進 DB（維護窗口的閘門看得到它、同一個 `client_request_id` 冪等），但舊的那一筆還在跑、
+     還佔著 `turns_one_in_flight` 的名額，所以先以 `run_id = NULL` 的 in_flight 存在，送出鍵生效時才掛上去。這也是「連續兩次 send-now
+     不會有兩個 `in_flight`」的保證：兩次都在同一顆 per-bot 鎖裡排隊，第二次打斷的是第一次掛上去的那一則。
+     重啟時還沒掛上的那一則（送到一半 daemon 停了）由 `reconcile::rearm_progress` 收成 `failed`、送達 `unknown`，並寫明原因。
+   - **送出鍵之前的每一種放棄都不動舊回合**：準備被擋（框裡有字、證據讀不到、`pane_typed` 寫不進去）或 herdr 拒收打字
+     → 撤回新的那一則、回可重試的 409（`sent:false`、不留任何列，同一個 request id 可重送）；打字沒有回應、打完框是空的／讀不到、
+     herdr 拒收送出鍵 → 新的那一則收成 `failed`（送達 `failed`，說明「字可能還留在終端的輸入框」），回 `200 send_now:"not_sent"`。
+   - **準備緊接在打字前面**，中間沒有任何 DB 寫入：重看一次框就是對「人在終端裡打字、CLI 跳出新框」（不受 bot 鎖管）的圍籬——
+     框裡有字就不打（409 `composer_busy`），不會把兩段字接在一起送出去。herdr 沒有「框是空的才打字」的原子操作，
+     最後一次讀框到打字之間的空檔跟一般送出一樣短。
+   - **送出鍵的結果**（`interruption::key_fate`）：herdr 回 ok＝生效；回錯誤或連不上＝沒生效（見上，舊回合照常）；
+     送出去之後逾時／斷線沒回＝**不知道**，先看證據、不按鍵（`delivery::submit_landed`）：transcript 出現這一則＝生效；
+     字還整個在框裡＝沒生效，再按一次（最多兩次，之後當沒生效）；都看不出來＝**不知道**：不假定打斷——舊回合留在 in_flight、
+     記成待證（`interruption::unconfirmed_send_now`，帶著「transcript 裡出現這一則」這個之後還讀得到的證據），新的那一則收成
+     `failed`、送達 `unknown`，回 `200 send_now:"unknown"`。之後這顆 bot 的回合 hook 一進來先看證據：出現了就把舊回合補收成
+     被插隊打斷（回覆才不會掛到它身上，而是以外部回合出現）；舊回合自己答完了就作廢。
+   - **送出鍵生效之後才失敗的**（證據證不出來、TUI 吃掉了鍵）：舊回合照被插隊打斷收，新的那一則是一般的 `unknown` 送達。
+   - **生效了但 DB 那一半寫不進去**：跟 interrupt 同一套（§6.4，#147）——回 `503 send_now_state_uncommitted`（`sent:true`、
+     帶新舊兩筆的 id），記成欠著，之後補（hook、下一則 prompt、同一個 request id 的重送、定時重試），補的時候不再按鍵。
    - **當下沒有回合在飛**：不按那顆鍵，照一般 Enter 送出（回應 `send_now: "idle"`），不替這條路多綁一個版本前提。
    - 灰字（sent／queued 到模型收到之前）是 CLI 自己畫的，daemon 與前端都不模擬。
 

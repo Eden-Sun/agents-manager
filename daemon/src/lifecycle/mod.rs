@@ -77,7 +77,7 @@ pub(crate) use start::*;
 pub(crate) use start_send::{prompt_starting, withdraw_turn};
 pub(crate) use stop::*;
 pub(crate) use interrupt_grace::{note_user_interrupt_of, settle_interrupt_echo, FailureEvidence as InterruptFailureEvidence};
-pub(crate) use interruption::{settle_locked as settle_interruption, Evidence as InterruptEvidence};
+pub(crate) use interruption::{adopt_unbound_send_nows, settle_locked as settle_interruption, Evidence as InterruptEvidence};
 #[cfg(test)]
 pub(crate) use interrupt_grace::{expect_interrupt_echo, note_user_interrupt, InterruptedTurn};
 pub(crate) use stuck_turns::{observe as observe_agent_status, spawn_stuck_turn_sweeper, sweep as sweep_stuck_turns};

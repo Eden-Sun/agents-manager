@@ -6,7 +6,10 @@
 //!
 //! 2.1.275 起 CLI 自己有一顆鍵把這兩步併成一步——它自己決定怎麼收掉當下那一回合，比我們從外面送
 //! `ctrl+c` 再貼字準。daemon 這一側要做的只有兩件事：**打字前**確認這顆 run 真的認得那顆鍵，
-//! **打字後**把被打斷的那一回合收成 `failed`，不能留一個永遠 `in_flight` 的回合。
+//! **那顆鍵確定生效之後**把被打斷的那一回合收成 `failed`（見 [`deliver`]，#120）——不能留一個永遠 `in_flight`
+//! 的回合，也不能在鍵沒生效時假裝打斷了。
+
+use super::*;
 
 /// 有 send-now 鍵的最低 claude 版本。低於它的 run 照舊排隊／409。
 pub(crate) const MIN_VERSION: &str = "2.1.275";
@@ -56,6 +59,110 @@ pub(crate) fn supported(kind: &str, status_json: Option<&str>) -> Result<(), Ref
         return Err(Refusal::CliTooOld);
     }
     Ok(())
+}
+
+/// 插隊送出一句話的結果（#120）。
+pub(crate) enum Outcome {
+    /// 送出鍵確定生效（herdr 收下了，或證據證明送出去了）：被插隊的那一回合已經收成「被插隊打斷」，新的那一則
+    /// 掛上 run。裡面是新那一則的送達結果。
+    Interrupted(anyhow::Result<Delivered>),
+    /// 一個字都沒進 pane（準備被擋、herdr 拒收打字）：撤回新的那一則、回可重試的 409。
+    NotAttempted(Delivered),
+    /// 送出鍵沒有生效：正在跑的那一回合照常，新的那一則沒送出（字可能還留在輸入框）。
+    NotSent(&'static str),
+    /// 不知道送出鍵有沒有生效：不假定打斷——正在跑的那一回合留在 in_flight，記成待證。
+    Unknown(&'static str),
+    /// 送出鍵生效了，DB 那一半（收舊的、掛新的）寫不進去：記成欠著，之後補。
+    Uncommitted(anyhow::Error),
+}
+
+/// 插隊送出（#120）。**會打斷正在跑的那一回合的是送出鍵**，不是打字：claude 忙的時候框裡照樣可以打字，回合照跑。
+/// 所以被插隊的那一筆只在送出鍵**確定生效**之後才收，而且跟新的那一則掛上 run 是同一個交易（`interruption`）：
+/// - 送出鍵之前的任何放棄——準備被擋、herdr 拒收打字、打字沒回、打完框是空的——舊回合原封不動。
+/// - 送出鍵：herdr 回 ok＝生效；回錯誤＝沒生效；沒回＝看證據（transcript 出現這一則＝生效；字還整個在框裡＝沒生效，
+///   再按一次；都看不出來＝不知道）。
+///
+/// 準備（`prepare_delivery`）緊接在打字前面，中間沒有任何 DB 寫入：它重看一次框就是對「人在終端裡打字」的圍籬——
+/// 框裡有字就不打，不會把兩段字接在一起送出去。herdr 沒有「框是空的才打字」的原子操作，最後那一次讀到打字之間的
+/// 空檔跟一般送出一樣短。
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn deliver(
+    app: &Arc<App>,
+    client: &HerdrClient,
+    run: &db::Run,
+    bot: &db::Bot,
+    text: &str,
+    plan: Plan,
+    interrupted: &db::Turn,
+    new_turn: &str,
+) -> Outcome {
+    use super::interruption::{key_fate, KeyFate};
+    let ready = match prepare_delivery(app, client, run, bot, text, plan).await {
+        Ok(r) => r,
+        Err(not) => return Outcome::NotAttempted(not),
+    };
+    let typed = match type_text(client, run, bot, text, ready).await {
+        Ok(Typing::Ready(t)) => t,
+        Ok(Typing::Done(not @ Delivered::NotAttempted { .. })) => return Outcome::NotAttempted(not),
+        // 證據在按送出鍵之前就長出來了：不是我們按的鍵送的，舊回合怎樣了不知道。
+        Ok(Typing::Done(Delivered::Submitted)) => return unknown(bot, run, interrupted, None, "submitted_before_key"),
+        // 打完框是空的或讀不到：送出鍵沒按。
+        Ok(Typing::Done(_)) => return Outcome::NotSent("typed_but_not_in_box"),
+        Err(e) if crate::herdr::never_applied(&e) => {
+            tracing::warn!(bot = %bot.name, error = %e, "插隊送出：herdr 拒收打字，一個字都沒進去");
+            return Outcome::NotAttempted(Delivered::NotAttempted { reason: "pane_send_refused", retry: true });
+        }
+        Err(e) => {
+            tracing::warn!(bot = %bot.name, error = %e, "插隊送出：打字沒有回應，不按送出鍵");
+            return Outcome::NotSent("typing_unanswered");
+        }
+    };
+    let mut fate = key_fate(&press_submit(client, &typed).await);
+    #[cfg(test)]
+    super::race_point::hit("send_now_after_key", &bot.id).await;
+    let mut presses = 1;
+    let proven = loop {
+        match fate {
+            KeyFate::Applied => break None,
+            KeyFate::NotApplied => return Outcome::NotSent("herdr_refused_key"),
+            KeyFate::Unknown => match submit_landed(app, client, run, bot, text, &typed).await {
+                Landed::Yes(d) => break Some(d),
+                Landed::No if presses < 2 => {
+                    tracing::warn!(bot = %bot.name, "插隊送出：送出鍵沒有回、字還在框裡——鍵沒生效，再按一次");
+                    fate = key_fate(&press_submit(client, &typed).await);
+                    presses += 1;
+                }
+                Landed::No => return Outcome::NotSent("key_did_not_land"),
+                Landed::Unknown => return unknown(bot, run, interrupted, SentProof::of(&typed, text), "key_unanswered"),
+            },
+        }
+    };
+    // 送出鍵生效了：從這一刻起舊回合才算被插隊打斷。
+    let committed = super::interruption::send_now_interrupted(app, &bot.id, &run.id, &interrupted.id, new_turn).await;
+    let delivered = match proven {
+        Some(d) => Ok(d),
+        None => confirm_submitted(app, client, run, bot, text, &typed).await,
+    };
+    match committed {
+        Ok(()) => Outcome::Interrupted(delivered),
+        Err(e) => {
+            // 送達結果先記在帳上，補的時候跟掛上 run 一起寫。DB 一時寫不進去多半已經好了：當場再補一次。
+            super::interruption::owe_delivery(&bot.id, new_turn, delivered.as_ref().ok().and_then(Delivered::record));
+            #[cfg(test)]
+            super::race_point::hit("send_now_owed", &bot.id).await;
+            let settled = super::interruption::settle_locked(app, &bot.id, super::interruption::Evidence::Nothing).await;
+            if settled.is_ok() && !super::interruption::owes(&bot.id, &interrupted.id) {
+                Outcome::Interrupted(delivered)
+            } else {
+                Outcome::Uncommitted(e)
+            }
+        }
+    }
+}
+
+fn unknown(bot: &db::Bot, run: &db::Run, interrupted: &db::Turn, proof: Option<SentProof>, why: &'static str) -> Outcome {
+    super::interruption::unconfirmed_send_now(&bot.id, &run.id, &interrupted.id, proof);
+    Outcome::Unknown(why)
 }
 
 #[cfg(test)]
