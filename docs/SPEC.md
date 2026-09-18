@@ -603,6 +603,8 @@ cancel 撤掉的是還沒送出的那則時，review 回應不再帶「turn 還�
    bot 在跑就走一般的路（回合中照舊 409）；子 agent 不歸 daemon 起，照一般的路 409；維護窗口開著 409、什麼都不寫。
 2. 啟動是之後的背景副作用：睡著的（§6.11）走 `idle_sleep::wake` 接回原 session，其他 `start_bot`。成功就叫醒 flush；
    失敗只寫 `start_error`（turn 留在佇列）。bot 從 `unknown`／`blocked` 變 `idle` 也叫醒 flush（不必等退避 timer）。
+   agent 起來了、只是 `running` 寫不進 DB（`start_state_uncommitted`，#152；叫醒那條回的是字串，看有沒有留下 `starting` 的 run）
+   **不是**沒能啟動：不寫 `start_error`，在背景等對帳把 run 收成 `running` 再叫 flush（對帳那條不會叫 flush）；run 不在了就交給撤孤兒那條記原因。
 3. 送出完全走既有的 flush：CAS claim 保證只送一次，resume／額度／維護窗口的閘門照舊。瀏覽器不留一份，WS 幀、重整、重按啟動都不會變成第二次送出。
 4. 取消：`POST /api/turns/{id}/withdraw` 只撤還在等的那一則（`failed`＋說明）；已被佇列領走的回 409——不能拿 abandon 頂替，
    那會把已經送出的回合收成失敗，web 又把文字放回輸入框，再按一次就送兩次。
