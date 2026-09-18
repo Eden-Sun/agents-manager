@@ -28,13 +28,24 @@ pub(crate) fn refuse_default_session(bot: &db::Bot) -> LcResult<()> {
 
 /// [`stop_bot`] with the lock already held, so a restart stops and starts under one guard.
 pub async fn stop_bot_locked(app: &Arc<App>, bot_id: &str) -> LcResult<bool> {
-    stop_locked(app, bot_id, false).await
+    stop_locked(app, bot_id, false, false).await
+}
+
+/// 閒置回收用的 [`stop_bot_locked`]：記 `stopping` 的那一步同時是**收機許可**（issue #144）——`agent_status` 還是
+/// `idle`、這個 run 沒有 in-flight 回合、這顆 bot 沒有排隊中的回合，才准停；否則什麼都不動，回 409 `no_longer_idle`。
+///
+/// bot 鎖擋得住經 daemon 進來的新工作，擋不住使用者直接在 pane 裡打字：那條路是 `events::handle_status`，不拿鎖就寫
+/// `agent_status`。巡邏在鎖裡最後一次讀到 idle 之後、停機之前被那一句插進來的話，以前照樣 ctrl+c、關 pane。條件寫在
+/// 同一句 UPDATE 裡，跟那一句寫入由 SQLite 排序：它先落地，這裡 0 rows 不停；這裡先落地，run 已經是 `stopping`，
+/// `begin_external_turn`（在鎖裡看 `state == running`）就不會替一個正在關的 pane 開回合。
+pub async fn stop_bot_locked_if_idle(app: &Arc<App>, bot_id: &str) -> LcResult<bool> {
+    stop_locked(app, bot_id, false, true).await
 }
 
 /// 重啟那一半的 stop。差別只在 `stopped` 寫不進去之後的重試：重啟沒把 bot 開回來不是「使用者要它停」
 /// （同 `left_down_by_restart`），所以交給對帳照證據收成 `exited`，不補記 `stopped`。
 pub(crate) async fn stop_for_restart_locked(app: &Arc<App>, bot_id: &str) -> LcResult<bool> {
-    stop_locked(app, bot_id, true).await
+    stop_locked(app, bot_id, true, false).await
 }
 
 /// ctrl+c（必要時關 pane）之後，外面的 agent 到底怎麼了（#146）。只有前兩種能記成 `stopped`。
@@ -50,7 +61,7 @@ enum StopOutcome {
     Unknown,
 }
 
-async fn stop_locked(app: &Arc<App>, bot_id: &str, for_restart: bool) -> LcResult<bool> {
+async fn stop_locked(app: &Arc<App>, bot_id: &str, for_restart: bool, only_if_idle: bool) -> LcResult<bool> {
     let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     let Some(run) = db::active_run(&app.db, bot_id).await.map_err(up)? else { return Ok(false) };
     let host = db::bot_host(&app.db, bot_id).await.map_err(up)?;
@@ -64,8 +75,18 @@ async fn stop_locked(app: &Arc<App>, bot_id: &str, for_restart: bool) -> LcResul
     // 先把「正在停」記下來，才有權動外面（#146）：記不下來就一步都不做——不收 in-flight、不送 ctrl+c、
     // 不關 pane、不撤佇列。讀完 active run 之後被不拿鎖的 pane-exit 事件先收掉的話（CAS 輸了），收尾歸那條路。
     // 來源含 `stopping`：上一次沒停成（寫不進 `stopped`、agent 沒退出）的 stop 可以原樣再按一次。
-    match super::run_state::transition(&app.db, &run.id, super::run_state::LIVE, "stopping", None).await.map_err(up)? {
+    let moved = if only_if_idle {
+        admit_idle_stop(&app.db, &run.id, bot_id).await.map_err(up)?
+    } else {
+        super::run_state::transition(&app.db, &run.id, super::run_state::LIVE, "stopping", None).await.map_err(up)?
+    };
+    match moved {
         super::run_state::Moved::Applied => {}
+        // 閒置回收的許可沒過：它不再閒著（或已經被別的路停掉）。外面一步都沒動。
+        super::run_state::Moved::Lost if only_if_idle => {
+            app.emit_bot_status(bot_id).await;
+            return Err(LcError::conflict("no_longer_idle", json!({"bot_id": bot_id, "run_id": run.id})));
+        }
         super::run_state::Moved::Lost => {
             tracing::info!(bot = %bot.name, run = %run.id, "stop: another path ended the run first; nothing left to stop");
             app.emit_bot_status(bot_id).await;
@@ -180,6 +201,22 @@ enum StopCommit {
 /// `stopping → stopped`。CAS 輸了而且是被不拿 bot 鎖的 pane-exit 事件收成 `exited`（多半是 stop 自己關的 pane
 /// 觸發的）：改標成 `stopped`——兩個都是終態、不復活任何東西，但 `stopped` 才是「使用者要它停」的紀錄（#131，
 /// incident 探針靠它分辨）。
+/// [`stop_bot_locked_if_idle`] 的許可：跟 `transition(LIVE → stopping)` 同一步，多三個條件，都在同一句 UPDATE 裡。
+async fn admit_idle_stop(db: &sqlx::SqlitePool, run_id: &str, bot_id: &str) -> Result<super::run_state::Moved, sqlx::Error> {
+    let r = sqlx::query(
+        "UPDATE runs SET state = 'stopping'
+          WHERE id = ? AND state = 'running' AND agent_status = 'idle'
+            AND NOT EXISTS (SELECT 1 FROM turns t WHERE t.run_id = runs.id AND t.status = 'in_flight')
+            AND NOT EXISTS (SELECT 1 FROM turns t JOIN conversations c ON c.id = t.conversation_id
+                             WHERE c.bot_id = ? AND t.status = 'queued')",
+    )
+    .bind(run_id)
+    .bind(bot_id)
+    .execute(db)
+    .await?;
+    Ok(if r.rows_affected() == 0 { super::run_state::Moved::Lost } else { super::run_state::Moved::Applied })
+}
+
 async fn commit_stopped(app: &Arc<App>, run_id: &str) -> Result<StopCommit, sqlx::Error> {
     match super::run_state::transition(&app.db, run_id, &["stopping"], "stopped", None).await? {
         super::run_state::Moved::Applied => Ok(StopCommit::Applied),

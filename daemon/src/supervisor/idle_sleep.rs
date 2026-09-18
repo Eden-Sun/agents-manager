@@ -482,6 +482,25 @@ async fn say(app: &Arc<App>, bot_id: &str, text: &str) {
     let _ = lifecycle::insert_message(app, &conv, None, "system", text, "system", false, None).await;
 }
 
+/// 事件流最後一次說這個 run 在做什麼（`run_id -> agent_status`），`events::handle_status` 在寫 DB **之前**記（issue #144）。
+///
+/// DB 的 `agent_status` 寫不進去（以前 `let _ =` 吞掉）時，DB 會一直說 idle——那不是「閒著」的證據。收機前拿這份
+/// 對一下：事件流說它不是 idle 就不收。存在記憶體：daemon 重啟後是空的，那時照 DB 判（跟以前一樣）。
+fn observed() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
+    static V: OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> = OnceLock::new();
+    V.get_or_init(Default::default)
+}
+
+/// `events::handle_status` 每收到一次狀態事件就記一次（在寫 DB 之前）。
+pub fn observe_status(run_id: &str, status: &str) {
+    observed().lock().unwrap_or_else(|e| e.into_inner()).insert(run_id.to_string(), status.to_string());
+}
+
+/// 事件流最後說它不是 idle（working／blocked／unknown…）。沒看過就是 `false`，照 DB 判。
+fn observed_busy(run_id: &str) -> bool {
+    observed().lock().unwrap_or_else(|e| e.into_inner()).get(run_id).is_some_and(|s| s != "idle")
+}
+
 /// 鎖裡重讀證據時某一項讀不到：不收、不留標記，下一輪重試。
 fn unreadable(c: &Cand, what: &str, e: &anyhow::Error) {
     tracing::warn!(bot = %c.name, what, error = %format!("{e:#}"), "idle sweep: could not re-read the evidence right before stopping; keeping the bot warm and retrying next round");
@@ -522,6 +541,10 @@ async fn sleep_one(app: &Arc<App>, c: &Cand, session: Option<String>, threshold:
         tracing::info!(bot = %c.name, why = why.code(), "idle sweep: the bot is no longer idle; leaving it running");
         return;
     }
+    if observed_busy(&run.id) {
+        tracing::info!(bot = %c.name, "idle sweep: the last status event said the bot is busy even though the DB says idle; leaving it running");
+        return;
+    }
     if let Err(e) = mark_asleep(app, &fresh, session.as_deref()).await {
         tracing::warn!(bot = %c.name, error = %e, "could not record the sleep; leaving the bot running");
         return;
@@ -529,7 +552,14 @@ async fn sleep_one(app: &Arc<App>, c: &Cand, session: Option<String>, threshold:
     // 測試專用的競態點：「已標記、還沒停」的那一瞬，另一條路（叫醒／prompt）剛好落在這裡。
     #[cfg(test)]
     crate::lifecycle::race_point::hit("idle_sleep.marked", &c.bot_id).await;
-    match lifecycle::stop_bot_locked(app, &c.bot_id).await {
+    // 寫完標記到停機之間，事件流可能剛說它開始忙（handle_status 不拿鎖）：再問一次記憶體，再由停機那一步的許可
+    // （`stop_bot_locked_if_idle`，DB 裡同一句 UPDATE）做最後的排序（issue #144）。
+    if observed_busy(&run.id) {
+        tracing::info!(bot = %c.name, "idle sweep: the bot started working right before the stop; leaving it running");
+        clear_asleep(app, &c.bot_id).await;
+        return;
+    }
+    match lifecycle::stop_bot_locked_if_idle(app, &c.bot_id).await {
         Ok(_) => {
             tracing::info!(bot = %c.name, idle_minutes = c.idle_minutes, "idle bot put to sleep; only its resumable session is kept");
             say(
@@ -1082,6 +1112,73 @@ mod tests {
         sleep_one(&app, &stale, Some("sid-1".into()), 90).await;
         assert!(asleep(&app, &bot).await.is_some(), "閒著的照樣收起來");
         assert!(db::active_run(&app.db, &bot).await.unwrap().is_none());
+    }
+
+    /// 一顆閒置 120 分鐘、可續接的 bot（`the_idle_clock_starts_at_the_last_thing_that_happened` 同一個情境）。
+    async fn idle_bot_with_session(app: &Arc<App>, project: &str, name: &str) -> (String, String) {
+        let bot = crate::testing::claude_bot(app, project, name).await.id;
+        let run = crate::testing::fake_run(app, &bot).await;
+        sqlx::query("UPDATE runs SET started_at=?, native_session_id='sid-1' WHERE id=?")
+            .bind((chrono::Utc::now() - chrono::Duration::minutes(120)).to_rfc3339())
+            .bind(&run)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        (bot, run)
+    }
+
+    /// issue #144：使用者直接在 pane 裡打字不經過 daemon 的 prompt，herdr 報 `working` 之後 `events::handle_status`
+    /// **不拿 bot 鎖**就寫 `agent_status`。巡邏在鎖裡最後一次讀到 idle 之後、停機之前被這一句插進來時，以前照樣停——
+    /// 使用者剛開始的那一回合被 ctrl+c、pane 被關。停機前要有一道跟那一句寫入互相排序的許可：還是 idle 才准停。
+    #[tokio::test]
+    async fn a_status_change_that_lands_after_the_last_check_keeps_the_bot_awake() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (bot, run) = idle_bot_with_session(&app, &env.project_id, "delta").await;
+        let stale = candidates(&app).await.unwrap().into_iter().find(|c| c.bot_id == bot).unwrap();
+        assert_eq!(decide(&stale, 90), Ok(()));
+
+        // 「已標記、還沒停」那一瞬：handle_status 不等鎖，把 working 寫進去。
+        let (db2, run2) = (app.db.clone(), run.clone());
+        crate::lifecycle::race_point::arm("idle_sleep.marked", &bot, move || async move {
+            sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&run2).execute(&db2).await.unwrap();
+        });
+        sleep_one(&app, &stale, Some("sid-1".into()), 90).await;
+
+        let now = db::active_run(&app.db, &bot).await.unwrap().expect("使用者剛開始打字的 bot 不能被停掉");
+        assert_eq!(now.state, "running");
+        assert!(asleep(&app, &bot).await.is_none(), "沒收就不該留下睡著的標記");
+    }
+
+    /// issue #144 驗收三：`working` 寫不進 DB（`let _ =` 吞掉）時，DB 仍說 idle——那不能當成「閒著」的證據。
+    /// 事件流看到的狀態要記在 daemon 手上，巡邏收之前一併問它。
+    #[tokio::test]
+    async fn a_working_status_that_could_not_be_written_is_not_read_as_idle() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (bot, run) = idle_bot_with_session(&app, &env.project_id, "echo").await;
+        // DB 正在出狀況：狀態與 external turn 都寫不進去。
+        for ddl in [
+            "CREATE TRIGGER test_status_down BEFORE UPDATE OF agent_status ON runs BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END",
+            "CREATE TRIGGER test_turns_down BEFORE INSERT ON turns BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END",
+        ] {
+            sqlx::query(ddl).execute(&app.db).await.unwrap();
+        }
+        let ev = crate::herdr::Event {
+            event: "pane_agent_status_changed".into(),
+            data: json!({"pane_id": format!("pane-{bot}"), "agent_status": "working"}),
+        };
+        crate::events::handle_status(&app, crate::config::LOCAL_HOST, "test", &ev).await;
+        for t in ["test_status_down", "test_turns_down"] {
+            sqlx::query(&format!("DROP TRIGGER {t}")).execute(&app.db).await.unwrap();
+        }
+        let stored: String = sqlx::query_scalar("SELECT agent_status FROM runs WHERE id=?").bind(&run).fetch_one(&app.db).await.unwrap();
+        assert_eq!(stored, "idle", "前提：working 真的沒寫進去");
+
+        let c = candidates(&app).await.unwrap().into_iter().find(|c| c.bot_id == bot).unwrap();
+        sleep_one(&app, &c, Some("sid-1".into()), 90).await;
+        assert!(db::active_run(&app.db, &bot).await.unwrap().is_some(), "事件流說它在工作，DB 寫不進去不代表它閒著");
+        assert!(asleep(&app, &bot).await.is_none());
     }
 
     /// 標成睡著、實際上還活著（stop 沒成功、或使用者自己又把它起回來）：`wake` 只把標記清掉，
