@@ -11,8 +11,9 @@ use axum::extract::State;
 use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::io::{BufRead, BufReader, Write as _};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::Arc;
 
 const PASSWORD_FILE: &str = "remote-cargo-password";
@@ -389,11 +390,280 @@ pub fn sh_quote(s: &str) -> String {
     }
 }
 
-fn remote_dir(cfg: &BuildRemoteCfg, cwd: &Path) -> String {
-    let root = cfg.remote_root.trim_end_matches('/');
-    // Job-specific leaf prevents two agents verifying the same worktree from racing the same rsync/target tree.
-    // Cache reuse is intentionally delegated to sccache (#91) rather than sharing a mutable target directory.
-    format!("{root}/{:016x}/{}", fnv1a64(&cwd.to_string_lossy()), std::process::id())
+// ── 遠端工作目錄（issue #141）──────────────────────────────────────────────────────────────
+//
+// 版面：`<remote_root>/<worktree 路徑的 fnv1a64>/`
+//   - `shared/`＋`shared.lock`：同一棵 worktree 共用的原始碼＋`target/`，跨呼叫保留（增量編譯）。
+//   - `job-<pid>-<ms>/`＋`.lock`：`shared` 正被另一次呼叫用著時的退路，冷編譯，結束就刪。
+//   - 純數字的 `<pid>/`：#141 之前的版本留下的，沒有鎖，只能靠「沒行程在用＋放很久」回收。
+//
+// 每次呼叫先開一條「守門」ssh（[`guard_script`]）：它在遠端拿 flock、把目錄交給這次呼叫，然後讀 stdin
+// 等到 EOF 才清理。helper 正常結束、失敗、被 Ctrl-C／SIGTERM／kill -9，本機這端的 pipe 都會關掉，遠端就
+// 看到 EOF——**清理不靠本機活著做完**（2026-09-19 實測：本機 ssh 被 kill -9，遠端 shell 照樣讀到 EOF 跑完）。
+// 沒有 pty 的 ssh 斷線後遠端 cargo 不會收到訊號、會繼續跑（同日實測），所以 run 的那條 ssh 先把自己的
+// process group 寫下來（`<dir>.pgid-<token>`），守門清理時整組收掉再刪目錄。
+
+/// 沒有鎖、也沒有行程的 cwd 在裡面，放這麼久就當孤兒刪（守門被 kill 在遠端那頭、舊版留下的 `<pid>/`）。
+const ORPHAN_IDLE_SECS: u64 = 10 * 60;
+/// `shared/` 是快取不是垃圾：閒置這麼久才收（worktree 早就合併刪掉的那些）。
+const SHARED_IDLE_SECS: u64 = 3 * 3600;
+/// 遠端磁碟剩不到這個比例時，閒置的 `shared/` 也照孤兒的門檻收（#141：一小時塞滿 97G）。
+const LOW_DISK_FREE_PCT: u64 = 25;
+
+/// 守門連線在遠端跑的腳本（POSIX sh；遠端要是有 flock 與 /proc 的 Linux）。
+///
+/// stdout 協定：`ROOT\t<絕對路徑>`、`DIR\t<這次的工作目錄>\t<token>`、每個候選目錄一行
+/// `D\t<路徑>\t<鎖被持有>\t<有行程 cwd 在裡面>\t<閒置秒數>`、`F\t<剩餘 KB>\t<總 KB>`，最後 `END`。
+/// 之後 stdin 每行 `rm <路徑>` 是要它回收的孤兒（它自己拿鎖、重看一次有沒有人在用才刪），EOF＝這次結束。
+fn guard_script(root: &str, hash: &str, job: &str) -> String {
+    GUARD_SH
+        .replace("@ROOT@", &sh_quote(root))
+        .replace("@HASH@", &sh_quote(hash))
+        .replace("@JOB@", &sh_quote(job))
+        .replace("@HEX16@", &"[0-9a-f]".repeat(16))
+}
+
+const GUARD_SH: &str = r#"set -u
+trap '' HUP PIPE
+root=@ROOT@; hash=@HASH@; job=@JOB@
+if ! command -v flock >/dev/null 2>&1 || [ ! -r /proc/self/stat ]; then
+  echo 'agents-manager: remote Cargo 的遠端要有 flock（util-linux）與 /proc（Linux）' >&2; exit 2
+fi
+mkdir -p "$root" && cd "$root" && root=$(pwd -P) || exit 2
+me=$(ps -o pgid= -p $$ | tr -d ' ')
+# 只碰自己命名規則的目錄：remote_root 設錯（例如設成家目錄）也不會去刪別人的東西。
+ours() {
+  r=${1#"$root"/}
+  [ "$r" != "$1" ] || return 1
+  case "$r" in */*/*) return 1 ;; */*) ;; *) return 1 ;; esac
+  case "${r%/*}" in @HEX16@) ;; *) return 1 ;; esac
+  x=${r#*/}
+  case "$x" in
+    shared) return 0 ;;
+    job-*) x=${x#job-}; case "$x" in ''|*[!0-9-]*) return 1 ;; esac; return 0 ;;
+  esac
+  case "$x" in ''|*[!0-9]*) return 1 ;; esac
+  return 0
+}
+cwds() { for p in /proc/[0-9]*; do readlink "$p/cwd"; done 2>/dev/null | sed 's|$|/|'; }
+# 鎖檔在 open 與 flock 之間被回收刪掉的話，鎖到的是一個沒有名字的 inode：要確認路徑還指著自己鎖的那個。
+same() { a=$(stat -L -c %d:%i "$1" 2>/dev/null) && [ -n "$a" ] && [ "$a" = "$(stat -L -c %d:%i "/proc/$$/fd/$2" 2>/dev/null)" ]; }
+inventory() {
+  C=$(cwds); now=$(date +%s)
+  for d in "$root"/*/*; do
+    [ -d "$d" ] && [ ! -L "$d" ] && [ "$d" != "$1" ] && ours "$d" || continue
+    t=$(stat -c %Z "$d" 2>/dev/null) || continue
+    k=0; b=0
+    if [ -e "$d.lock" ]; then
+      m=$(stat -c %Y "$d.lock" 2>/dev/null) && [ "$m" -gt "$t" ] && t=$m
+      flock -n "$d.lock" true || k=1
+    fi
+    printf '%s\n' "$C" | grep -qF "$d/" && b=1
+    printf 'D\t%s\t%s\t%s\t%s\n' "$d" "$k" "$b" "$((now - t))"
+  done
+  df -Pk "$root" | awk 'NR == 2 { printf "F\t%s\t%s\n", $4, $2 }'
+}
+gc_rm() {
+  [ "$1" != "$2" ] && ours "$1" && [ -d "$1" ] && [ ! -L "$1" ] || return 0
+  { flock -n 9 && same "$1.lock" 9 && ! cwds | grep -qF "$1/" && rm -rf "$1" && rm -f "$1.owner" "$1".pgid-* "$1.lock"; } 9>>"$1.lock"
+  rmdir "${1%/*}" 2>/dev/null
+  return 0
+}
+reap() {
+  f="$1.pgid-$$"
+  [ -s "$f" ] || return 0
+  g=$(cat "$f"); rm -f "$f"
+  case "$g" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$g" -gt 1 ] && [ "$g" != "$me" ] || return 0
+  kill -TERM -"$g" 2>/dev/null || return 0
+  i=0
+  while kill -0 -"$g" 2>/dev/null; do
+    i=$((i + 1)); [ $i -ge 50 ] && { kill -KILL -"$g" 2>/dev/null; break; }; sleep 0.1
+  done
+  i=0
+  while kill -0 -"$g" 2>/dev/null && [ $i -lt 50 ]; do i=$((i + 1)); sleep 0.1; done
+}
+hold() {
+  flock -n 8 || return 75
+  same "$1.lock" 8 || return 76
+  mkdir -p "$1" && touch "$1.lock" && printf '%s\n' "$$" > "$1.owner" || return 2
+  printf 'ROOT\t%s\nDIR\t%s\t%s\n' "$root" "$1" "$$"
+  inventory "$1"
+  echo END
+  # 本機隨時可能已經斷線：之後再寫 stdout/stderr 會 EPIPE，清理不能因此半途而廢。
+  exec >/dev/null 2>&1
+  while read -r op p; do [ "$op" = rm ] && gc_rm "$p" "$1"; done
+  # 先撤 owner 再收 pgid：晚到的 run 若通過了 owner 檢查，它的 pgid 一定已經寫好了。
+  rm -f "$1.owner"
+  reap "$1"
+  rm -f "$1".pgid-*
+  if [ "${1##*/}" = shared ]; then touch "$1.lock"; else rm -rf "$1"; rm -f "$1.lock"; fi
+  return 0
+}
+n=0
+while :; do
+  mkdir -p "$root/$hash" || exit 2
+  hold "$root/$hash/shared" 8>>"$root/$hash/shared.lock"; rc=$?
+  case $rc in
+    0) exit 0 ;;
+    75) break ;;
+  esac
+  n=$((n + 1)); [ $n -lt 5 ] || exit $rc
+done
+echo 'agents-manager: 這棵 worktree 的共用遠端 target 正被另一次呼叫使用，這次改用獨立目錄（冷編譯，結束就刪）' >&2
+hold "$root/$hash/$job" 8>>"$root/$hash/$job.lock"
+"#;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RemoteDir {
+    pub path: String,
+    pub locked: bool,
+    pub busy: bool,
+    pub idle_secs: u64,
+}
+
+/// 守門連線交回來的：這次用哪個目錄、token，以及順手看到的回收候選。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Handshake {
+    pub root: String,
+    pub dir: String,
+    pub token: String,
+    pub dirs: Vec<RemoteDir>,
+    /// (剩餘 KB, 總 KB)
+    pub disk: Option<(u64, u64)>,
+}
+
+/// 讀到 `END` 為止。登入 shell 的雜訊行略過；還沒拿到 `DIR` 就 EOF＝守門失敗（原因在它的 stderr）。
+pub fn read_handshake(r: &mut impl BufRead) -> anyhow::Result<Handshake> {
+    let mut hs = Handshake::default();
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if r.read_line(&mut line)? == 0 {
+            anyhow::bail!("remote workdir guard exited before handing out a directory");
+        }
+        let f: Vec<&str> = line.trim_end_matches(['\r', '\n']).split('\t').collect();
+        match f.as_slice() {
+            ["END"] if !hs.dir.is_empty() => return Ok(hs),
+            ["ROOT", root] => hs.root = root.to_string(),
+            ["DIR", dir, token] => {
+                hs.dir = dir.to_string();
+                hs.token = token.to_string();
+            }
+            ["D", path, k, b, idle] => hs.dirs.push(RemoteDir {
+                path: path.to_string(),
+                locked: *k == "1",
+                busy: *b == "1",
+                idle_secs: idle.parse::<i64>().unwrap_or(0).max(0) as u64,
+            }),
+            ["F", free, total] => hs.disk = free.parse().ok().zip(total.parse().ok()),
+            _ => {}
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum LeafKind {
+    Shared,
+    Job,
+}
+
+/// `<root>/<16 hex>/<shared｜job-<pid>-<ms>｜<pid>>` 才是自己的；其他一律不碰（同守門的 `ours`）。
+fn leaf_kind(root: &str, path: &str) -> Option<LeafKind> {
+    let rel = path.strip_prefix(root)?.strip_prefix('/')?;
+    let (hash, leaf) = rel.split_once('/')?;
+    if hash.len() != 16 || !hash.bytes().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f')) {
+        return None;
+    }
+    if leaf == "shared" {
+        return Some(LeafKind::Shared);
+    }
+    let digits = leaf.strip_prefix("job-").unwrap_or(leaf);
+    let ok = !digits.is_empty()
+        && digits.bytes().all(|c| c.is_ascii_digit() || (c == b'-' && leaf.starts_with("job-")));
+    ok.then_some(LeafKind::Job)
+}
+
+/// 這次要請守門回收哪些目錄。有鎖被持有、有行程 cwd 在裡面、或就是自己這次的目錄，一律不動；
+/// 其餘照種類看閒置多久。守門刪之前會自己再拿鎖、再看一次行程，這裡是第一道篩選。
+pub fn select_gc(hs: &Handshake) -> Vec<String> {
+    let low_disk = matches!(hs.disk, Some((free, total)) if total > 0 && free * 100 < total * LOW_DISK_FREE_PCT);
+    hs.dirs
+        .iter()
+        .filter(|d| !d.locked && !d.busy && d.path != hs.dir)
+        .filter(|d| match leaf_kind(&hs.root, &d.path) {
+            Some(LeafKind::Shared) if !low_disk => d.idle_secs >= SHARED_IDLE_SECS,
+            Some(_) => d.idle_secs >= ORPHAN_IDLE_SECS,
+            None => false,
+        })
+        .map(|d| d.path.clone())
+        .collect()
+}
+
+/// 守門連線。活著＝遠端目錄是這次呼叫的；關掉 stdin（[`Lease::finish`]、drop、或這個行程死掉）＝還回去。
+struct Lease {
+    child: Child,
+    stdin: Option<ChildStdin>,
+    /// 留著不關：守門寫 stdout 時讀端要還在，免得它被 SIGPIPE 打斷。
+    stdout: Option<BufReader<ChildStdout>>,
+    hs: Handshake,
+}
+
+impl Lease {
+    fn start(mut cmd: Command) -> anyhow::Result<Self> {
+        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit());
+        let mut child = cmd.spawn().map_err(|e| anyhow::anyhow!("remote workdir guard: {e}"))?;
+        let stdin = child.stdin.take();
+        let stdout = child.stdout.take().map(BufReader::new);
+        let mut lease = Lease { child, stdin, stdout, hs: Handshake::default() };
+        let reader = lease.stdout.as_mut().ok_or_else(|| anyhow::anyhow!("remote workdir guard: no stdout"))?;
+        lease.hs = read_handshake(reader)?;
+        Ok(lease)
+    }
+
+    /// 請守門回收這些孤兒；寫不進去（守門已經死了）就算了，下次呼叫還會再看到。
+    fn collect(&mut self, paths: &[String]) {
+        if let Some(w) = self.stdin.as_mut() {
+            for p in paths {
+                if writeln!(w, "rm {p}").is_err() {
+                    break;
+                }
+            }
+            let _ = w.flush();
+        }
+    }
+
+    /// 還回目錄並等遠端清完（`job-*` 刪掉、`shared` 留著、還在跑的遠端 cargo 整組收掉）。
+    fn finish(&mut self) -> Option<ExitStatus> {
+        drop(self.stdin.take());
+        let status = self.child.wait().ok();
+        self.stdout.take();
+        status
+    }
+}
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        if self.stdin.is_some() {
+            self.finish();
+        }
+    }
+}
+
+/// 遠端跑 cargo 的那一行。先記下自己的 process group、再確認目錄還是這次租的（owner＝token），順序不能反：
+/// 守門清理是「先撤 owner、再讀 pgid」，所以通過檢查的 run 一定會被收到。
+fn run_script(dir: &str, token: &str, jobs: usize, args: &[String]) -> String {
+    let argv = args.iter().map(|a| sh_quote(a)).collect::<Vec<_>>().join(" ");
+    let tok = sh_quote(token);
+    // `~/.cargo/bin` 要自己接：rustup 只改 shell profile，ssh 的非互動 shell 不讀（同 `PROBE_SH`）。
+    format!(
+        "d={dir}; g=$(ps -o pgid= -p $$ | tr -d ' ') && printf '%s\\n' \"$g\" > \"$d.pgid-{tok}\" \
+         && [ \"$(cat \"$d.owner\" 2>/dev/null)\" = {tok} ] \
+         || {{ echo 'agents-manager: 遠端工作目錄已經還回去了（helper 中途被砍？），不跑 cargo' >&2; exit 126; }}; \
+         cd \"$d\" && PATH=\"$HOME/.cargo/bin:$PATH\" CARGO_BUILD_JOBS={jobs} cargo {argv}",
+        dir = sh_quote(dir),
+        jobs = jobs.max(1),
+    )
 }
 
 fn run_status(mut cmd: Command, what: &str) -> anyhow::Result<ExitStatus> {
@@ -401,15 +671,21 @@ fn run_status(mut cmd: Command, what: &str) -> anyhow::Result<ExitStatus> {
     cmd.status().map_err(|e| anyhow::anyhow!("{what}: {e}"))
 }
 
-fn ensure_remote_dir(remote: &BuildRemoteCfg, data_dir: &Path, dir: &str) -> anyhow::Result<()> {
+fn open_lease(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path) -> anyhow::Result<Lease> {
+    let root = match remote.remote_root.trim().trim_end_matches('/') {
+        "" => crate::config::default_remote_build_root(),
+        r => r.to_string(),
+    };
+    let hash = format!("{:016x}", fnv1a64(&cwd.to_string_lossy()));
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let job = format!("job-{}-{millis}", std::process::id());
     let pw = secret(data_dir)?;
     let mut cmd = ssh_base(remote, pw.as_deref(), data_dir)?;
-    cmd.arg(format!("mkdir -p {}", sh_quote(dir)));
-    let status = run_status(cmd, "ssh mkdir")?;
-    if !status.success() {
-        anyhow::bail!("remote mkdir failed with exit {:?}", status.code());
-    }
-    Ok(())
+    cmd.arg(format!("sh -c {}", sh_quote(&guard_script(&root, &hash, &job))));
+    Lease::start(cmd)
 }
 
 fn sync_source(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, dir: &str) -> anyhow::Result<()> {
@@ -459,18 +735,10 @@ fn sync_source(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, dir: &str) 
     Ok(())
 }
 
-fn run_remote(remote: &BuildRemoteCfg, data_dir: &Path, dir: &str, args: &[String]) -> anyhow::Result<i32> {
+fn run_remote(remote: &BuildRemoteCfg, data_dir: &Path, hs: &Handshake, args: &[String]) -> anyhow::Result<i32> {
     let pw = secret(data_dir)?;
     let mut cmd = ssh_base(remote, pw.as_deref(), data_dir)?;
-    let argv = args.iter().map(|a| sh_quote(a)).collect::<Vec<_>>().join(" ");
-    // `~/.cargo/bin` 要自己接：rustup 只改 shell profile，ssh 的非互動 shell 不讀（同 `PROBE_SH`）。
-    let remote_cmd = format!(
-        "cd {} && PATH=\"$HOME/.cargo/bin:$PATH\" CARGO_BUILD_JOBS={} cargo {}",
-        sh_quote(dir),
-        remote.cargo_jobs.max(1),
-        argv
-    );
-    cmd.arg(remote_cmd);
+    cmd.arg(run_script(&hs.dir, &hs.token, remote.cargo_jobs, args));
     let status = run_status(cmd, "remote cargo")?;
     Ok(status.code().unwrap_or(1))
 }
@@ -497,11 +765,14 @@ pub fn run_cli(config_path: &Path, data_dir: &Path, cwd: &Path, args: &[String])
         "agents-manager: remote Cargo → {}@{}:{} ({})",
         remote.user, remote.host, remote.ssh_port, args.first().map(String::as_str).unwrap_or("")
     );
-    let dir = remote_dir(&remote, cwd);
     let result = (|| -> anyhow::Result<i32> {
-        ensure_remote_dir(&remote, data_dir, &dir)?;
-        sync_source(&remote, data_dir, cwd, &dir)?;
-        run_remote(&remote, data_dir, &dir, args)
+        // 從這裡起不管怎麼離開（`?`、panic、被殺），守門都會收到 EOF 把目錄還回去。
+        let mut lease = open_lease(&remote, data_dir, cwd)?;
+        lease.collect(&select_gc(&lease.hs));
+        sync_source(&remote, data_dir, cwd, &lease.hs.dir)?;
+        let code = run_remote(&remote, data_dir, &lease.hs, args)?;
+        lease.finish();
+        Ok(code)
     })();
     match result {
         Ok(code) => code,
@@ -630,6 +901,122 @@ mod tests {
         assert_eq!(sh_quote("a'b"), "'a'\\''b'");
     }
 
+    const ROOT: &str = "/home/u/.cache/agents-manager/remote-cargo";
+
+    fn rdir(leaf: &str, locked: bool, busy: bool, idle_secs: u64) -> RemoteDir {
+        RemoteDir { path: format!("{ROOT}/{leaf}"), locked, busy, idle_secs }
+    }
+
+    fn hs(dirs: Vec<RemoteDir>, disk: Option<(u64, u64)>) -> Handshake {
+        Handshake {
+            root: ROOT.into(),
+            dir: format!("{ROOT}/0123456789abcdef/shared"),
+            token: "4242".into(),
+            dirs,
+            disk,
+        }
+    }
+
+    /// #141：孤兒（沒鎖、沒行程、放超過 10 分鐘）要收；有人在用的——鎖被持有、有行程 cwd 在裡面——
+    /// 放多久都不能碰；自己這次的目錄也不能碰。
+    #[test]
+    fn gc_picks_idle_orphans_and_never_touches_a_directory_in_use() {
+        let old = ORPHAN_IDLE_SECS + 1;
+        let h = hs(
+            vec![
+                rdir("00000000000000aa/111", false, false, old),         // 舊版留下的 <pid>，閒置 → 收
+                rdir("00000000000000aa/job-9-1", false, false, old),     // 守門死在遠端的 job → 收
+                rdir("00000000000000aa/222", false, true, old * 50),     // 有行程在裡面 → 不收
+                rdir("00000000000000aa/job-9-2", true, false, old * 50), // 鎖被持有 → 不收
+                rdir("00000000000000aa/333", false, false, ORPHAN_IDLE_SECS - 1), // 剛動過 → 不收
+                rdir("0123456789abcdef/shared", false, false, old * 50), // 自己這次的 → 不收
+            ],
+            Some((80, 100)),
+        );
+        assert_eq!(
+            select_gc(&h),
+            vec![format!("{ROOT}/00000000000000aa/111"), format!("{ROOT}/00000000000000aa/job-9-1")]
+        );
+    }
+
+    /// `shared/` 是快取：平常閒置 3 小時才收；磁碟剩不到 25% 時照孤兒的 10 分鐘收（#141 塞滿 97G）。
+    #[test]
+    fn a_shared_target_is_kept_as_cache_unless_the_disk_is_running_out() {
+        let dirs = vec![
+            rdir("00000000000000aa/shared", false, false, ORPHAN_IDLE_SECS + 1),
+            rdir("00000000000000bb/shared", false, false, SHARED_IDLE_SECS + 1),
+            rdir("00000000000000cc/shared", true, false, SHARED_IDLE_SECS * 10),
+        ];
+        let roomy = select_gc(&hs(dirs.clone(), Some((50, 100))));
+        assert_eq!(roomy, vec![format!("{ROOT}/00000000000000bb/shared")]);
+        let full = select_gc(&hs(dirs, Some((10, 100))));
+        assert_eq!(
+            full,
+            vec![format!("{ROOT}/00000000000000aa/shared"), format!("{ROOT}/00000000000000bb/shared")],
+            "磁碟緊時，被持有的 shared 還是不能收"
+        );
+    }
+
+    /// remote_root 設錯（例如設成家目錄）也只碰自己命名規則的目錄。
+    #[test]
+    fn gc_only_ever_names_directories_in_its_own_layout() {
+        let old = SHARED_IDLE_SECS * 10;
+        let foreign = [
+            "/etc/00000000000000aa/111".to_string(),
+            format!("{ROOT}-other/00000000000000aa/111"),
+            format!("{ROOT}/nothex/111"),
+            format!("{ROOT}/00000000000000AA/111"),
+            format!("{ROOT}/00000000000000aa/src"),
+            format!("{ROOT}/00000000000000aa/12-3"),
+            format!("{ROOT}/00000000000000aa/job-"),
+            format!("{ROOT}/00000000000000aa/111/nested"),
+            format!("{ROOT}/00000000000000aa/.."),
+        ];
+        let dirs = foreign
+            .iter()
+            .map(|p| RemoteDir { path: p.clone(), locked: false, busy: false, idle_secs: old })
+            .collect();
+        assert!(select_gc(&hs(dirs, Some((1, 100)))).is_empty());
+        assert_eq!(leaf_kind(ROOT, &format!("{ROOT}/00000000000000aa/shared")), Some(LeafKind::Shared));
+        assert_eq!(leaf_kind(ROOT, &format!("{ROOT}/00000000000000aa/job-12-34")), Some(LeafKind::Job));
+        assert_eq!(leaf_kind(ROOT, &format!("{ROOT}/00000000000000aa/4711")), Some(LeafKind::Job));
+    }
+
+    #[test]
+    fn the_handshake_skips_login_noise_and_fails_if_the_guard_dies_first() {
+        let out = "Welcome!\nROOT\t/r\nDIR\t/r/0123456789abcdef/shared\t77\n\
+                   D\t/r/00000000000000aa/111\t0\t1\t-3\nD\t/r/00000000000000aa/222\t1\t0\t900\n\
+                   F\t500\t1000\nEND\nD\t/late\t0\t0\t9\n";
+        let h = read_handshake(&mut std::io::Cursor::new(out)).unwrap();
+        assert_eq!(h.root, "/r");
+        assert_eq!(h.dir, "/r/0123456789abcdef/shared");
+        assert_eq!(h.token, "77");
+        assert_eq!(h.disk, Some((500, 1000)));
+        assert_eq!(
+            h.dirs,
+            vec![
+                RemoteDir { path: "/r/00000000000000aa/111".into(), locked: false, busy: true, idle_secs: 0 },
+                RemoteDir { path: "/r/00000000000000aa/222".into(), locked: true, busy: false, idle_secs: 900 },
+            ]
+        );
+        // 守門在交出目錄前就死了（沒 flock、磁碟滿…）：不能當成拿到目錄。
+        assert!(read_handshake(&mut std::io::Cursor::new("ROOT\t/r\nEND\n")).is_err());
+        assert!(read_handshake(&mut std::io::Cursor::new("")).is_err());
+    }
+
+    /// run 要先記 pgid、再核 owner、最後才跑 cargo：守門清理是「先撤 owner 再讀 pgid」，順序反了會漏收。
+    #[test]
+    fn the_remote_run_records_its_group_before_checking_the_lease() {
+        let s = run_script("/r/0123456789abcdef/shared", "77", 4, &["test".into(), "-p".into(), "x; rm -rf ~".into()]);
+        let pgid = s.find("> \"$d.pgid-77\"").expect(&s);
+        let owner = s.find("\"$d.owner\"").expect(&s);
+        let cargo = s.find("cargo test").expect(&s);
+        assert!(pgid < owner && owner < cargo, "{s}");
+        assert!(s.contains("exit 126"), "{s}");
+        assert!(s.contains("'x; rm -rf ~'"), "{s}");
+        assert!(s.contains("PATH=\"$HOME/.cargo/bin:$PATH\" CARGO_BUILD_JOBS=4"), "{s}");
+    }
+
     #[test]
     fn password_file_is_private_and_metadata_does_not_echo_the_secret() {
         let dir = std::env::temp_dir().join(format!("am-remote-cargo-{}", crate::db::ulid()));
@@ -645,5 +1032,197 @@ mod tests {
         assert_eq!(v["password_set"], true);
         assert!(!v.to_string().contains("super-secret"));
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+/// 守門腳本的真實行為（#141）。要 flock 與 /proc，只在 Linux 跑——remote Cargo 本身就是把測試丟到
+/// Linux 主機執行，所以這組在那台會真的跑到；不走 ssh，直接 `sh -c` 同一份腳本。
+#[cfg(all(test, target_os = "linux"))]
+mod guard_tests {
+    use super::*;
+    use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
+    use std::time::{Duration, Instant};
+
+    const HASH: &str = "0123456789abcdef";
+
+    fn base() -> PathBuf {
+        let d = std::env::temp_dir().join(format!("am-r141-{}", crate::db::ulid()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn guard(base: &Path, hash: &str, job: &str) -> Lease {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(guard_script("rc", hash, job)).current_dir(base);
+        Lease::start(cmd).expect("guard should hand out a directory")
+    }
+
+    fn wait_until(what: &str, f: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !f() {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// 假 cargo：記一筆「跑起來了」，然後一直跑（像一個還在編的遠端 cargo）。
+    fn fake_home(base: &Path) -> PathBuf {
+        let home = base.join("home");
+        let bin = home.join(".cargo/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let cargo = bin.join("cargo");
+        std::fs::write(&cargo, "#!/bin/sh\ntouch \"$PWD/../cargo-started-$$\"\nexec sleep 60\n").unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
+        home
+    }
+
+    fn spawn_run(base: &Path, home: &Path, hs: &Handshake) -> Child {
+        // 遠端每條 ssh 都是自己的 session（sshd setsid）；這裡用獨立的 process group 模擬，收 pgid 才不會打到測試本身。
+        Command::new("sh")
+            .arg("-c")
+            .arg(run_script(&hs.dir, &hs.token, 1, &["test".into()]))
+            .env("HOME", home)
+            .current_dir(base)
+            .process_group(0)
+            .spawn()
+            .unwrap()
+    }
+
+    fn started(dir: &str) -> bool {
+        let parent = Path::new(dir).parent().unwrap();
+        std::fs::read_dir(parent)
+            .map(|rd| rd.flatten().any(|e| e.file_name().to_string_lossy().starts_with("cargo-started-")))
+            .unwrap_or(false)
+    }
+
+    /// 結束後自己的 job 目錄不在了；shared 留著給下一次（target 還在），而且被佔用時第二個呼叫拿不到它。
+    #[test]
+    fn a_finished_call_removes_its_private_dir_and_keeps_the_shared_target() {
+        let base = base();
+        let mut a = guard(&base, HASH, "job-1-1");
+        assert!(a.hs.dir.ends_with(&format!("/{HASH}/shared")), "{:?}", a.hs);
+        std::fs::create_dir_all(Path::new(&a.hs.dir).join("target")).unwrap();
+        std::fs::write(Path::new(&a.hs.dir).join("target/marker"), "x").unwrap();
+
+        let mut b = guard(&base, HASH, "job-2-2");
+        assert!(b.hs.dir.ends_with(&format!("/{HASH}/job-2-2")), "shared 被 a 佔著，b 要退回自己的目錄：{:?}", b.hs);
+        let bdir = b.hs.dir.clone();
+        assert!(Path::new(&bdir).is_dir());
+        assert!(b.finish().unwrap().success());
+        assert!(!Path::new(&bdir).exists(), "job 目錄結束後要刪掉");
+        assert!(!Path::new(&format!("{bdir}.lock")).exists());
+
+        let adir = a.hs.dir.clone();
+        assert!(a.finish().unwrap().success());
+        assert!(Path::new(&adir).join("target/marker").is_file(), "shared 的 target 要留給下一次");
+
+        let mut c = guard(&base, HASH, "job-3-3");
+        assert_eq!(c.hs.dir, adir, "shared 還回去之後，下一次要重用它");
+        c.finish();
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// 被中斷（helper／ssh 死掉，遠端只看到 stdin EOF）：還在跑的遠端 cargo 整組收掉，目錄刪掉。
+    #[test]
+    fn an_interrupted_call_stops_the_remote_cargo_and_removes_its_dir() {
+        let base = base();
+        let home = fake_home(&base);
+        let mut holder = guard(&base, HASH, "job-1-1"); // 佔住 shared，讓下一個拿 job 目錄
+        let mut lease = guard(&base, HASH, "job-2-2");
+        let dir = lease.hs.dir.clone();
+        let mut run = spawn_run(&base, &home, &lease.hs);
+        wait_until("fake cargo to start", || started(&dir));
+
+        drop(lease.stdin.take()); // 本機那端沒了
+        assert!(lease.finish().unwrap().success());
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let status = loop {
+            if let Some(st) = run.try_wait().unwrap() {
+                break st;
+            }
+            if Instant::now() > deadline {
+                let _ = run.kill();
+                panic!("remote cargo still running after its lease ended");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        assert!(status.signal().is_some() || !status.success(), "{status:?}");
+        assert!(!Path::new(&dir).exists(), "中斷也要刪目錄");
+        holder.finish();
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// helper 已經死了、目錄也還回去了，才姍姍來遲的 run（孤兒 ssh）不能在別人的目錄裡跑 cargo。
+    #[test]
+    fn a_late_run_after_the_lease_ended_does_not_start_cargo() {
+        let base = base();
+        let home = fake_home(&base);
+        let mut lease = guard(&base, HASH, "job-1-1");
+        let hs = lease.hs.clone();
+        lease.finish();
+        let status = spawn_run(&base, &home, &hs).wait().unwrap();
+        assert_eq!(status.code(), Some(126));
+        assert!(!started(&hs.dir));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// 回收只刪沒人在用的孤兒：有行程 cwd 在裡面、鎖被持有、不是自己命名規則的、根目錄外的、
+    /// 自己這次的，就算被點名也不刪（守門自己再看一次，不只相信 helper 的篩選）。
+    #[test]
+    fn gc_removes_orphans_but_never_a_dir_in_use_or_outside_its_layout() {
+        let base = base();
+        let rc = base.join("rc");
+        let (h, h2) = ("00000000000000aa", "00000000000000bb");
+        for d in [format!("{h}/111"), format!("{h}/222"), format!("{h}/333"), format!("{h}/src"), format!("{h2}/444"), "nothex/555".into()] {
+            std::fs::create_dir_all(rc.join(d)).unwrap();
+        }
+        std::fs::create_dir_all(base.join("outside")).unwrap();
+        let mut busy = Command::new("sleep").arg("60").current_dir(rc.join(h).join("222")).spawn().unwrap();
+        let lock = rc.join(h).join("333.lock");
+        let mut locker = Command::new("flock").arg(&lock).arg("sleep").arg("60").spawn().unwrap();
+        wait_until("the lock to be held", || {
+            !Command::new("flock").arg("-n").arg(&lock).arg("true").status().unwrap().success()
+        });
+
+        let mut g = guard(&base, HASH, "job-9-9");
+        let root = g.hs.root.clone();
+        let find = |leaf: &str| g.hs.dirs.iter().find(|d| d.path == format!("{root}/{leaf}")).cloned();
+        let orphan = find(&format!("{h}/111")).expect("orphan listed");
+        assert!(!orphan.locked && !orphan.busy, "{orphan:?}");
+        assert!(find(&format!("{h}/222")).unwrap().busy);
+        assert!(find(&format!("{h}/333")).unwrap().locked);
+        assert!(find(&format!("{h}/src")).is_none() && find("nothex/555").is_none(), "{:?}", g.hs.dirs);
+        assert!(select_gc(&g.hs).is_empty(), "剛建的目錄還沒到閒置門檻：{:?}", g.hs.dirs);
+
+        let own = g.hs.dir.clone();
+        let named: Vec<String> = [
+            format!("{root}/{h}/111"),
+            format!("{root}/{h}/222"),
+            format!("{root}/{h}/333"),
+            format!("{root}/{h}/src"),
+            format!("{root}/{h2}/444"),
+            format!("{root}/nothex/555"),
+            format!("{root}/{h}/../{h2}"),
+            base.join("outside").to_string_lossy().into_owned(),
+            own.clone(),
+        ]
+        .into();
+        g.collect(&named);
+        assert!(g.finish().unwrap().success());
+
+        assert!(!rc.join(h).join("111").exists(), "閒置孤兒要收");
+        assert!(!rc.join(h2).exists(), "收完變空的 hash 目錄一起收");
+        assert!(rc.join(h).join("222").is_dir(), "有行程在用的不能刪");
+        assert!(rc.join(h).join("333").is_dir(), "鎖被持有的不能刪");
+        assert!(rc.join(h).join("src").is_dir() && rc.join("nothex/555").is_dir(), "不是自己命名的不能刪");
+        assert!(base.join("outside").is_dir(), "根目錄外的不能刪");
+        assert!(Path::new(&own).is_dir(), "自己這次的 shared 不能被自己回收");
+
+        let _ = busy.kill();
+        let _ = locker.kill();
+        let _ = busy.wait();
+        let _ = locker.wait();
+        let _ = std::fs::remove_dir_all(base);
     }
 }

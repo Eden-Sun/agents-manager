@@ -449,6 +449,16 @@ adopt 之後孤兒通知標記會清掉。pane 不存在 404、`owner_bot_id` �
 shim 轉遠端要 pane 裡有 `AM_DAEMON_EXE`、`AM_CONFIG_PATH`、`AM_DATA_DIR`（`AM_DAEMON_EXE` 指到的檔案還要能執行）。缺任何一個時
 **不再靜默退回本機**：stderr 印一行 `外部編譯沒有啟用：這個 pane 缺 <名字>……這次 <子指令> 在本機跑`，缺哪個講哪個。
 
+遠端工作目錄（issue #141，`remote_cargo.rs`）：`<remote_root>/<worktree 路徑的 fnv1a64>/` 底下，
+- `shared/`：同一棵 worktree 共用的原始碼＋`target/`，用完保留，下次 rsync 只傳差異、cargo 增量編譯。旁邊的
+  `shared.lock` 是 flock，同一時間只給一次呼叫；搶不到（同一棵 worktree 同時兩個 `cargo test`）就改用
+  `job-<pid>-<ms>/`，冷編譯、結束就刪，stderr 會講。
+- 每次呼叫先開一條守門 ssh 拿鎖，再 rsync、再跑 cargo；守門讀 stdin 等到 EOF 才清理，所以 helper 成功、失敗、
+  被 Ctrl-C／SIGTERM／kill -9 都會清（遠端還在跑的 cargo 按 process group 收掉，`job-*` 刪掉，`shared` 解鎖）。
+- 守門順手回收孤兒：沒鎖被持有、沒有行程的 cwd 在裡面、閒置超過 10 分鐘的 `job-*`／舊版 `<pid>/`；閒置超過
+  3 小時的 `shared/`（遠端磁碟剩不到 25% 時也降到 10 分鐘）。只碰 `<16 位 hex>/<shared｜job-*｜數字>` 這種名字。
+- 遠端要是有 `flock`（util-linux）與 `/proc` 的 Linux，沒有就直接報錯、不跑。
+
 ### `GET /api/build/remote` / `PUT /api/build/remote`
 `{enabled, host, user, ssh_port, remote_root, cargo_jobs, password_set}`。PUT 另收 `password`（寫進 0600 的
 secret file，不進 config、不回前端）與 `clear_password`。`host`／`user` 空字串又要 `enabled` → 400。
