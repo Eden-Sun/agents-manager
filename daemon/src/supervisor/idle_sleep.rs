@@ -16,7 +16,9 @@
 //! * 子 agent（`managed_by = 'child'`）——它的 pane 是父 agent 開的，daemon 起不回來（§6.5a），
 //!   收掉就真的沒了。子 agent 的去留歸父 agent 與 AGM 的清理規則管，不歸這裡；
 //! * 總管自己那幾顆（`supervisors.bot_id` 與 `supervisor_roles` 的 patrol／responder）——巡邏的人
-//!   不收自己，而且 watchdog 反正會把它們拉回來。
+//!   不收自己，而且 watchdog 反正會把它們拉回來；
+//! * 主力 bot（`bots.is_primary`，側欄打星號的那幾顆）——2026-09-18 使用者：「主力 bot 超時也不先 kill」。
+//!   主力是使用者隨時會切回去的那幾顆，叫醒要等 `--resume` 起來，比省下的 RAM 更貴。
 
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
@@ -51,6 +53,8 @@ pub struct Cand {
     pub managed_by: String,
     /// 這顆是不是總管自己。
     pub is_supervisor: bool,
+    /// 主力 bot（`bots.is_primary`）。
+    pub is_primary: bool,
     /// `runs.state`。
     pub state: String,
     /// `runs.agent_status`：`idle` / `working` / `blocked` / `unknown`。
@@ -75,6 +79,7 @@ pub struct Cand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Skip {
     Supervisor,
+    Primary,
     TeamMember,
     Child,
     NotRunning,
@@ -93,6 +98,7 @@ impl Skip {
     pub fn code(self) -> &'static str {
         match self {
             Skip::Supervisor => "supervisor",
+            Skip::Primary => "primary",
             Skip::TeamMember => "team_member",
             Skip::Child => "child",
             Skip::NotRunning => "not_running",
@@ -111,6 +117,7 @@ impl Skip {
     pub fn label(self) -> &'static str {
         match self {
             Skip::Supervisor => "總管自己，巡邏的人不收自己",
+            Skip::Primary => "主力 bot，使用者指定閒置再久也不收",
             Skip::TeamMember => "是 team 的成員，由 team 排程管",
             Skip::Child => "是子 agent，pane 歸父 agent 管，daemon 起不回來",
             Skip::NotRunning => "還在啟動或關閉中",
@@ -131,6 +138,9 @@ impl Skip {
 pub fn decide(c: &Cand, threshold: i64) -> Result<(), Skip> {
     if c.is_supervisor {
         return Err(Skip::Supervisor);
+    }
+    if c.is_primary {
+        return Err(Skip::Primary);
     }
     match c.managed_by.as_str() {
         "team" => return Err(Skip::TeamMember),
@@ -263,6 +273,7 @@ async fn cand_for(app: &Arc<App>, run: &db::Run, sup: &std::collections::HashSet
         name: bot.name.clone(),
         managed_by: bot.managed_by.clone(),
         is_supervisor: sup.contains(&bot.id),
+        is_primary: bot.is_primary != 0,
         state: run.state.clone(),
         agent_status: run.agent_status.clone(),
         turn_in_flight: db::in_flight_turn(&app.db, &run.id).await?.is_some(),
@@ -566,6 +577,7 @@ mod tests {
             name: "worker".into(),
             managed_by: "user".into(),
             is_supervisor: false,
+            is_primary: false,
             state: "running".into(),
             agent_status: "idle".into(),
             turn_in_flight: false,
@@ -597,6 +609,18 @@ mod tests {
         let mut c = cand();
         c.open_assignment = true;
         assert_eq!(decide(&c, 90), Err(Skip::OpenAssignment));
+    }
+
+    /// 主力 bot 閒置再久也不收（2026-09-18 使用者：「主力 bot 超時也不先 kill」）；
+    /// 反向：同一顆取消主力就照常收。
+    #[test]
+    fn a_primary_bot_is_never_put_to_sleep() {
+        let mut c = cand();
+        c.is_primary = true;
+        c.idle_minutes = 10_000;
+        assert_eq!(decide(&c, 90), Err(Skip::Primary));
+        c.is_primary = false;
+        assert_eq!(decide(&c, 90), Ok(()));
     }
 
     /// 回合結束不等於工作結束：pane 底下還有背景 shell／建置在跑就不收。
