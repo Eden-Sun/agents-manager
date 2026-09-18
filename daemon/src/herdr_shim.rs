@@ -418,19 +418,14 @@ pub fn install_local(bot_dir: &Path) -> std::io::Result<PathBuf> {
     Ok(dir)
 }
 
-/// Same ssh path as `hook.sh` (SPEC §11.4).
+/// Same ssh path as `hook.sh` (SPEC §11.4). 暫存檔＋chmod＋rename（原子），內容一樣就不重寫——
+/// 跟本機、跟重連後的補版（`shim_refresh::sync_remote`）是同一支腳本（issue #124）。
 pub async fn install_remote(conn: &crate::hosts::HostConn, remote_bot_dir: &str) -> anyhow::Result<String> {
-    let dir = format!("{remote_bot_dir}/bin");
-    let script = format!(
-        "set -e\nD={dir}\nmkdir -p \"$D\"\ncat > \"$D/herdr\" <<'AM_SHIM_EOF'\n{shim}AM_SHIM_EOF\nchmod +x \"$D/herdr\"\nprintf 'AM_SHIM_INSTALLED\\n'\n",
-        dir = crate::hosts::sh_quote(&dir),
-        shim = SHIM_SH,
-    );
-    let out = conn.ssh_exec(&script).await?;
-    if !out.contains("AM_SHIM_INSTALLED") {
-        anyhow::bail!("remote herdr shim install did not confirm:\n{}", out.trim());
+    let r = crate::shim_refresh::sync_remote(conn, &[remote_bot_dir.to_string()], &["herdr"], true).await?;
+    if !r.failed.is_empty() {
+        anyhow::bail!("remote herdr shim install failed: {:?}", r.failed);
     }
-    Ok(dir)
+    Ok(format!("{remote_bot_dir}/bin"))
 }
 
 #[cfg(test)]

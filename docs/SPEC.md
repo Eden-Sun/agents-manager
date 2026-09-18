@@ -901,6 +901,19 @@ daemon 啟動時掃 `<data_dir>/bots/*/bin`，把**已經存在**的 `herdr`／`
 pane 打 `cargo` 就 permission denied）時，只 chmod 回 0755，不重寫內容；內容與權限都對才是真的 no-op。
 沒有 `bin/` 或本來就沒有那支 shim 的 bot 不會被生出新檔案（那是啟動時 `install_shim` 的事）。
 
+**遠端 bot 一樣就地換版**（issue #124）：長跑的遠端 bot 也可以跨好幾個 daemon 版本不重啟 pane，手上是舊 shim。host supervisor 每次連上
+（含重連）就在背景（`shim_refresh::spawn_remote_refresh`，不擋連線、不擋 daemon 啟動）盤點這台的 `live_bots_on_host`，用一次 ssh 跑
+`remote_sync_script`（POSIX sh，走 `sh -s`）：
+
+- **內容來源與本機是同一份**（`shim_refresh::shims()`）——本機開機掃描與遠端同步不會各改各的、飄成兩套；
+- 逐支 `cmp -s` 比對：**內容一樣不重寫**（不洗 mtime，只確保權限 0755）；內容不同才「暫存檔（同目錄）＋chmod＋`mv -f`」——rename 是原子的，
+  正在跑的舊 shim 沿用舊 inode，下一次打 `cargo`／`herdr` 才拿到新版；
+- **SSH 中途斷線不會留下半支可執行檔**：內容先寫進遠端暫存目錄並核對位元組數，複合命令（迴圈）要整段收到才會執行，複製失敗就刪暫存檔、
+  舊檔不動；斷線當下寫了一半的暫存檔沒有可執行位，超過 10 分鐘的殘留下一次會被掃掉；輸出沒有結尾標記（`AM_SHIM_SYNC_DONE`）就不當成功；
+- **只補已經有的**（`create_missing=false`）：沒有 `bin/` 或沒有那支 shim 的 bot 不生出新檔案；bot 啟動時的 `install_remote`（`create_missing=true`）
+  也走同一支原子腳本（以前是 `cat > $D/herdr` 就地截斷，再 chmod）；
+- host 連不上時只 defer，不影響任何事：失敗（ssh 抖了）背景重試兩次（20、60 秒後），host 已掉線就放棄，下次連上再補（冪等）。
+
 - `herdr agent start <name> …`：`<name>` 不以 `$AM_AGENT_NAME-` 開頭就補前綴（截到 32 字）並在 stderr 說明。旗標可在名字前面，`--kind`/`--pane`/`--timeout` 的值不誤認，`--` 之後原封不動。
   **模型沿用**：`--` 之後沒有 `--model` 且 `--kind` 與母 bot 相同（或沒寫）時補 `-- --model $AM_MODEL`，claude 再補 `--effort $AM_EFFORT`；
   子 agent 自己寫的一律尊重（`--model`、codex/grok 的 `-m`、codex 的 `-c model=` / `-c model_reasoning_effort=`）。

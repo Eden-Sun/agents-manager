@@ -248,19 +248,13 @@ pub fn install_local(bot_dir: &Path) -> std::io::Result<PathBuf> {
     Ok(dir)
 }
 
-/// Same ssh path as the herdr shim (SPEC §11.4).
+/// Same ssh path as the herdr shim (SPEC §11.4)，同一支原子同步腳本（issue #124）。
 pub async fn install_remote(conn: &crate::hosts::HostConn, remote_bot_dir: &str) -> anyhow::Result<String> {
-    let dir = format!("{remote_bot_dir}/bin");
-    let script = format!(
-        "set -e\nD={dir}\nmkdir -p \"$D\"\ncat > \"$D/cargo\" <<'AM_SHIM_EOF'\n{shim}AM_SHIM_EOF\nchmod +x \"$D/cargo\"\nprintf 'AM_SHIM_INSTALLED\\n'\n",
-        dir = crate::hosts::sh_quote(&dir),
-        shim = SHIM_SH,
-    );
-    let out = conn.ssh_exec(&script).await?;
-    if !out.contains("AM_SHIM_INSTALLED") {
-        anyhow::bail!("remote cargo shim install did not confirm:\n{}", out.trim());
+    let r = crate::shim_refresh::sync_remote(conn, &[remote_bot_dir.to_string()], &["cargo"], true).await?;
+    if !r.failed.is_empty() {
+        anyhow::bail!("remote cargo shim install failed: {:?}", r.failed);
     }
-    Ok(dir)
+    Ok(format!("{remote_bot_dir}/bin"))
 }
 
 #[cfg(test)]
