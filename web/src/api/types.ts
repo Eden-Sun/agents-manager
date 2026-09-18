@@ -504,8 +504,11 @@ export class ApiError extends Error {
   status: number
   body: ApiErrorBody
   constructor(status: number, body: ApiErrorBody, fallback: string) {
-    // daemon: `reason` (conflict) / `message` (bad request, upstream) / `what` (not found)
-    super(String(body.reason ?? body.message ?? body.what ?? body.error ?? fallback))
+    // daemon: `reason` (conflict) / `message` (bad request, upstream) / `what` (not found)。
+    // 舊 daemon 對新路徑會回 405／404 且 body 是空的，欄位在但字串是空的；直接用會變「儲存失敗：」後面沒字，
+    // 所以空字串一律退回帶狀態碼的 fallback。
+    const detail = String(body.reason ?? body.message ?? body.what ?? body.error ?? '').trim()
+    super(detail || fallback)
     this.name = 'ApiError'
     this.status = status
     this.body = body

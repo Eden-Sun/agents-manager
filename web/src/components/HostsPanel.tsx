@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import * as api from '../api'
 import type { HostResult, HostShell } from '../api/types'
-import { HOST_DEFAULTS } from '../api/types'
+import { ApiError, HOST_DEFAULTS } from '../api/types'
 import { useStore } from '../store/store'
 import { AttachButton } from './AttachButton'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -340,6 +340,14 @@ function LocalHostRow() {
 }
 
 
+/** 線上 daemon 比前端舊時這條路徑根本不存在，回的是 404／405 空 body；照原樣顯示只會看到空白理由。 */
+function remoteCargoErr(e: unknown): string {
+  if (e instanceof ApiError && (e.status === 404 || e.status === 405)) {
+    return `這顆 daemon 還沒有 /api/build/remote（HTTP ${e.status}），二進位比前端舊；要 cargo build --release 後重啟 daemon 才會有這個 API。`
+  }
+  return e instanceof Error ? e.message : String(e)
+}
+
 function RemoteCargoPanel() {
   const [loaded, setLoaded] = useState(false)
   const [enabled, setEnabled] = useState(false)
@@ -370,7 +378,7 @@ function RemoteCargoPanel() {
       },
       (e) => {
         if (alive) {
-          setMessage(`讀取外部 Cargo 設定失敗：${e instanceof Error ? e.message : String(e)}`)
+          setMessage(`讀取外部 Cargo 設定失敗：${remoteCargoErr(e)}`)
           setLoaded(true)
         }
       },
@@ -399,7 +407,7 @@ function RemoteCargoPanel() {
       setMessage('✓ 已儲存。新啟動的本機 Bot 會自動使用外部 Cargo verification。')
       return true
     } catch (e) {
-      setMessage(`儲存失敗：${e instanceof Error ? e.message : String(e)}`)
+      setMessage(`儲存失敗：${remoteCargoErr(e)}`)
       return false
     } finally {
       setBusy(false)
@@ -415,7 +423,7 @@ function RemoteCargoPanel() {
       const r = await api.testRemoteCargo()
       setMessage(`✓ SSH/Cargo 可用（${r.password_auth ? '密碼' : 'SSH key/agent'}）：\n${r.output}`)
     } catch (e) {
-      setMessage(`測試失敗：${e instanceof Error ? e.message : String(e)}`)
+      setMessage(`測試失敗：${remoteCargoErr(e)}`)
     } finally {
       setBusy(false)
     }
