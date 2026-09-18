@@ -1969,8 +1969,10 @@ inbox `assignment_noticed`（`needs_review=false`）。送不出去或回合失�
 - **開機回填**（`controller::backfill_quota_limits_once`）：`tools::detect` 寫完**一台主機**的身分表之後，用那台上 parked 交辦的 `resume_at` 把 host＋`quota_base` 的 `limit_hit` 補回記憶體（`quota::seed_limit_hit`，
   `source=parked-assignment`）。**每台主機每個行程只跑一次**，只收這個行程起來之前就停下的交辦：不綁 controller 的 `spawn`（每次換 generation 都會跑，會把成功回合剛清掉的撞限種回去），
   也不在身分偵測之前算 key（`cc0` 會落到沒人讀的 `claude:cc0`、遠端還沒連上）（review 2026-09-16）。同一把 key 取**最晚**的 `resume_at`，已經過期的不寫；只寫 `limit_hit`，不碰任何量表或 `resets_at`。這樣重啟後 `dispatch` 也照樣看得到「這個帳號還在擋」。
-- **任務被暫停時不自動重送**：交辦屬於一個還開著、但 `paused_reason` 有值的任務時，`resume_quota_blocked` 整件跳過（也不算重試次數）——
-  暫停不收交辦（取消才收），額度一回來就重送的話使用者按的暫停等於沒按；解除暫停後下一個 tick 照常重送。
+- **任務被使用者暫停時不自動重送**：交辦屬於一個還開著、被**使用者**暫停的任務時，`resume_quota_blocked` 整件跳過（也不算重試次數）——
+  暫停不收交辦（取消才收），額度一回來就重送的話使用者按的暫停等於沒按；解除暫停後下一個 tick 照常重送。daemon 自己設的暫停
+  （`push_main_failed`／`pr_failed`／`max_rounds`／`no_fable_for_verifier`／`clarify`）照常重送：那些是「等 AGM 處理」，派工的閘門也不擋，
+  交付失敗之後 AGM 派的 rebase 若因此不重送，交付永遠不會成功、暫停也永遠解不開（issue #137，兩道閘門共用 `api::user_pause_reason`）。
 - `assignment_quota_blocked` / `assignment_quota_resumed` 各推一則 inbox（`needs_review=false`），不開 incident；只在交辦**真的**轉進／轉出 `quota_blocked` 時推——
   讀完之後已被裁示掉（取消等）的不推，mission 的換手通知（`mission_identity_switch`）與 `no_fable_for_verifier` 暫停也一樣（issue #110）。到期仍被擋（順延，或重送後又撞到）累計 6 次 → `awaiting_review` + `turn_status=quota_exhausted`（通常是 credits 真的用完）。
   mission 交辦另有 `quota_policy` 與身份切換，見 §18.14。撞限換手挑 reviewer 時 daemon 自己帶上 `exclude`＝該任務執行者現在的身分，
