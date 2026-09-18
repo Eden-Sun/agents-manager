@@ -533,12 +533,13 @@ fn hook_user_is_new(existing: &[String], incoming: &str) -> bool {
 }
 
 /// 只在既有那則是原文的（去空白）前綴且較短時才覆蓋；不是前綴就是另一句話，不能動。
-async fn upgrade_clipped_user_message(app: &Arc<App>, turn_id: &str, full: &str) -> Result<()> {
+/// 交易內：跟回合的收尾寫在同一個交易裡（#115）。
+async fn upgrade_clipped_user_message(conn: &mut sqlx::SqliteConnection, turn_id: &str, full: &str) -> Result<()> {
     let full_sq = squash_ws(full);
     let rows: Vec<(String, String)> =
         sqlx::query_as("SELECT id, content FROM messages WHERE turn_id = ? AND role = 'user' ORDER BY id")
             .bind(turn_id)
-            .fetch_all(&app.db)
+            .fetch_all(&mut *conn)
             .await?;
     for (id, content) in rows {
         let have = squash_ws(&content);
@@ -549,7 +550,7 @@ async fn upgrade_clipped_user_message(app: &Arc<App>, turn_id: &str, full: &str)
             .bind(full)
             .bind(db::now())
             .bind(&id)
-            .execute(&app.db)
+            .execute(&mut *conn)
             .await?;
         tracing::info!(turn = %turn_id, msg = %id, "prompt 回音被截斷，用 hook 的原文補完");
         return Ok(());
@@ -560,6 +561,9 @@ async fn upgrade_clipped_user_message(app: &Arc<App>, turn_id: &str, full: &str)
 /// 遲到的 hook 撞上備援關掉的回合：沒有 assistant 訊息就用 hook 的回覆補上並改 `completed`，
 /// 已有回覆才丟（防一回合兩則）。2026-09-13 GROK 備援 15 秒就關回合、36 秒後的真回覆被丟。
 /// 不會重開 c1526f7 的洞：`try_fallback` 認領與寫回覆同一交易、同一把 bot lock，讀到零則就真的是零則。
+///
+/// native id、升級、回覆寫在同一個交易裡（#115）：native id 是去重的鑰匙，先寫它再寫回覆的話，
+/// 回覆那句失敗時收件匣的重試會被去重擋掉，回覆就永遠補不上了。
 async fn fill_or_drop_late_hook(
     app: &Arc<App>,
     turn: &db::Turn,
@@ -567,6 +571,7 @@ async fn fill_or_drop_late_hook(
     session_id: &Option<String>,
     native_turn_id: &Option<String>,
 ) -> Result<()> {
+    let mut tx = app.db.begin().await?;
     sqlx::query(
         "UPDATE turns SET native_session_id=COALESCE(?, native_session_id),
                           native_turn_id=COALESCE(?, native_turn_id) WHERE id=?",
@@ -574,26 +579,35 @@ async fn fill_or_drop_late_hook(
     .bind(session_id)
     .bind(native_turn_id)
     .bind(&turn.id)
-    .execute(&app.db)
+    .execute(&mut *tx)
     .await?;
     let has_reply: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='assistant'")
             .bind(&turn.id)
-            .fetch_one(&app.db)
+            .fetch_one(&mut *tx)
             .await?;
     if body_text.trim().is_empty() || has_reply > 0 {
+        tx.commit().await?;
         tracing::info!(turn = %turn.id, has_reply, "late hook dropped; turn already completed via terminal fallback");
         return Ok(());
     }
     // 這一筆是備援關掉的（`completed_fallback`），遲到的 hook 把回覆補上才升級成 `completed`。
     // 以前這句沒有 guard（`WHERE id=?`）：中間若有別的路徑動過它，這裡會無聲蓋過去（issue #68）。
-    if lifecycle::turn_controller::set_status(&app.db, &turn.id, "completed_fallback", "completed", "遲到的 hook 補上回覆").await?
+    if lifecycle::turn_controller::set_status_on(&mut tx, &turn.id, "completed_fallback", "completed", "遲到的 hook 補上回覆").await?
         != lifecycle::turn_controller::Outcome::Applied
     {
+        tx.commit().await?;
         return Ok(());
     }
-    lifecycle::insert_message(app, &turn.conversation_id, Some(&turn.id), "assistant", body_text, "hook", false, None)
-        .await?;
+    let message =
+        lifecycle::insert_message_tx(&mut tx, &turn.conversation_id, Some(&turn.id), "assistant", body_text, "hook", false, None).await?;
+    tx.commit().await?;
+    let bot_id = sqlx::query_scalar::<_, String>("SELECT bot_id FROM conversations WHERE id = ?")
+        .bind(&turn.conversation_id)
+        .fetch_one(&app.db)
+        .await
+        .unwrap_or_default();
+    lifecycle::emit_message_added(app, &bot_id, message).await;
     tracing::info!(turn = %turn.id, "late hook filled a fallback-closed turn that had no reply");
     lifecycle::emit_turn(app, &turn.id).await;
     Ok(())
@@ -743,6 +757,9 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             };
             // CAS 在 `status='in_flight'` 上：後到的 Stop／§4.3 備援若已經把它收掉，這裡就什麼都不做，
             // 不會變成第二次收尾（issue #79 驗收第二條）。`delivery` 不動——字是送出去了，失敗的是回合。
+            // 收尾（連同當作去重鑰匙的 native id）與說明同一個交易（#115）：說明寫不進去時整筆回滾，
+            // 收件匣的重試才不會被去重擋掉、留下一筆沒有原因的失敗回合。
+            let mut tx = app.db.begin().await?;
             let claimed = sqlx::query(
                 "UPDATE turns SET status='failed', completed_at=?, native_session_id=?, native_turn_id=? WHERE id=? AND status='in_flight'",
             )
@@ -750,12 +767,18 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             .bind(&session_id)
             .bind(&turn_id)
             .bind(&t.id)
-            .execute(&app.db)
+            .execute(&mut *tx)
             .await?;
             if claimed.rows_affected() == 0 {
                 tracing::info!(turn = %t.id, "StopFailure 來晚了：這一筆已經被別的路徑收掉，不重複收尾");
                 return Ok(());
             }
+            let note = match detail.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
+                Some(d) => format!("這一回合失敗收尾（{}）：{d}", reason.label()),
+                None => format!("這一回合失敗收尾（{}）：agent 沒有給原因。", reason.label()),
+            };
+            let message = lifecycle::insert_message_tx(&mut tx, &conv, Some(&t.id), "system", &note, "hook", false, None).await?;
+            tx.commit().await?;
             // 撞的是帳號額度（issue #108）：先把撞限記下來，**再**推回合結束——那個事件會叫醒 queue flush，
             // 排在後面的派工要看得到這個身分還沒額度，不然會被立刻送進去再撞一次。畫面那條路
             // （`turn_error::capture`）要等讀 pane 才記得到，常常比 flush 晚。
@@ -764,11 +787,7 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                     crate::turn_error::mark_claude_limit_hit(app, &bot.id, d).await;
                 }
             }
-            let note = match detail.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
-                Some(d) => format!("這一回合失敗收尾（{}）：{d}", reason.label()),
-                None => format!("這一回合失敗收尾（{}）：agent 沒有給原因。", reason.label()),
-            };
-            lifecycle::insert_message(app, &conv, Some(&t.id), "system", &note, "hook", false, None).await?;
+            lifecycle::emit_message_added(app, &bot.id, message).await;
             lifecycle::emit_turn(app, &t.id).await;
             tracing::warn!(bot = %bot.name, turn = %t.id, ?reason, detail, "StopFailure：回合收成失敗");
             Ok(())
@@ -926,6 +945,9 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             let body_text = assistant.clone().unwrap_or_default();
 
             if let Some(t) = target {
+                // 收尾（連同當作去重鑰匙的 native id）與訊息同一個交易（#115）：訊息寫不進去時整筆回滾，
+                // 收件匣重試時才不會被去重擋掉、留下一筆沒有回覆的 completed 回合。
+                let mut tx = app.db.begin().await?;
                 let claimed = sqlx::query(
                     "UPDATE turns SET status='completed', delivery=CASE WHEN delivery='unknown' THEN 'ok' ELSE delivery END,
                      completed_at=?, native_session_id=?, native_turn_id=? WHERE id=? AND status='in_flight'",
@@ -934,35 +956,49 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                 .bind(&session_id)
                 .bind(&turn_id)
                 .bind(&t.id)
-                .execute(&app.db)
+                .execute(&mut *tx)
                 .await?;
                 // Lost the CAS to the §4.3 fallback: adding the hook's copy made two replies
                 // (review 2026-09-12 #5). Stopped/failed turns still keep the reply.
                 if claimed.rows_affected() == 0 {
                     let now_t = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?")
                         .bind(&t.id)
-                        .fetch_optional(&app.db)
+                        .fetch_optional(&mut *tx)
                         .await?;
                     if let Some(closed) = now_t.filter(|c| c.status == "completed_fallback") {
+                        // 這個交易沒寫到東西；先結束它，`fill_or_drop_late_hook` 自己開一個。
+                        tx.commit().await?;
                         fill_or_drop_late_hook(app, &closed, &body_text, &session_id, &turn_id).await?;
                         return Ok(());
                     }
                 }
+                let mut added = Vec::new();
                 // `begin_external_turn` already stored the scraped echo; add the hook's copy only if different.
                 if t.origin == "external" {
                     if let Some(u) = user.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-                        let have = db::turn_user_messages(&app.db, &t.id).await?;
+                        let have: Vec<String> =
+                            sqlx::query_scalar("SELECT content FROM messages WHERE turn_id = ? AND role = 'user' ORDER BY created_at")
+                                .bind(&t.id)
+                                .fetch_all(&mut *tx)
+                                .await?;
                         if hook_user_is_new(&have, u) {
                             let from = relay_source(run.as_ref(), u);
-                            lifecycle::insert_message_full(app, &conv, Some(&t.id), "user", u, "hook", false, None, None, from.as_deref()).await?;
+                            added.push(
+                                lifecycle::insert_message_relayed_tx(&mut tx, &conv, Some(&t.id), "user", u, "hook", false, None, from.as_deref())
+                                    .await?,
+                            );
                         } else {
                             // 刮下來的回音可能被折行截斷；hook 的原文較可信，補完下半截。
-                            upgrade_clipped_user_message(app, &t.id, u).await?;
+                            upgrade_clipped_user_message(&mut tx, &t.id, u).await?;
                         }
                     }
                 }
                 if !body_text.is_empty() {
-                    lifecycle::insert_message(app, &conv, Some(&t.id), "assistant", &body_text, "hook", false, None).await?;
+                    added.push(lifecycle::insert_message_tx(&mut tx, &conv, Some(&t.id), "assistant", &body_text, "hook", false, None).await?);
+                }
+                tx.commit().await?;
+                for m in added {
+                    lifecycle::emit_message_added(app, &bot.id, m).await;
                 }
                 lifecycle::emit_turn(app, &t.id).await;
                 return Ok(());
@@ -1001,8 +1037,9 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                 }
             }
 
-            // 5. external turn
+            // 5. external turn：回合（帶去重用的 native id）與它的訊息同一個交易（#115）。
             let tid = db::ulid();
+            let mut tx = app.db.begin().await?;
             sqlx::query(
                 "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, native_session_id, native_turn_id, created_at, completed_at)
                  VALUES (?,?,?,'external','completed','ok',?,?,?,?)",
@@ -1014,14 +1051,21 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             .bind(&turn_id)
             .bind(db::now())
             .bind(db::now())
-            .execute(&app.db)
+            .execute(&mut *tx)
             .await?;
+            let mut added = Vec::new();
             if let Some(u) = user.filter(|s| !s.is_empty()) {
                 let from = relay_source(run.as_ref(), &u);
-                lifecycle::insert_message_full(app, &conv, Some(&tid), "user", &u, "hook", false, None, None, from.as_deref()).await?;
+                added.push(
+                    lifecycle::insert_message_relayed_tx(&mut tx, &conv, Some(&tid), "user", &u, "hook", false, None, from.as_deref()).await?,
+                );
             }
             if !body_text.is_empty() {
-                lifecycle::insert_message(app, &conv, Some(&tid), "assistant", &body_text, "hook", false, None).await?;
+                added.push(lifecycle::insert_message_tx(&mut tx, &conv, Some(&tid), "assistant", &body_text, "hook", false, None).await?);
+            }
+            tx.commit().await?;
+            for m in added {
+                lifecycle::emit_message_added(app, &bot.id, m).await;
             }
             lifecycle::emit_turn(app, &tid).await;
             Ok(())
@@ -1630,7 +1674,7 @@ mod external_claim_tests {
             .await
             .unwrap();
 
-        upgrade_clipped_user_message(&app, &turn_id, full).await.unwrap();
+        upgrade_clipped_user_message(&mut app.db.acquire().await.unwrap(), &turn_id, full).await.unwrap();
 
         let rows: Vec<(String, String)> =
             sqlx::query_as("SELECT content, source FROM messages WHERE turn_id=? AND role='user'")
@@ -1643,7 +1687,7 @@ mod external_claim_tests {
         assert_eq!(rows[0].1, "hook");
 
         // 不是前綴的就別動：那是另一句話。
-        upgrade_clipped_user_message(&app, &turn_id, "完全不同的一句").await.unwrap();
+        upgrade_clipped_user_message(&mut app.db.acquire().await.unwrap(), &turn_id, "完全不同的一句").await.unwrap();
         let after: String = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='user'")
             .bind(&turn_id)
             .fetch_one(&app.db)
@@ -2240,6 +2284,112 @@ mod external_claim_tests {
         process(&app, &ev).await.unwrap();
         assert_eq!(turn_row(&app, &turn_id).await.status, "completed");
         assert!(system_notes(&app, &turn_id).await.is_empty());
+    }
+
+    /// 收件匣的重試（issue #70）要能補回第一次只做了一半的處理。第一次認領回合、寫下 native id 之後，
+    /// 回覆那句 insert 失敗（這裡用 trigger 模擬）：重試時同一組 native id 會被去重擋掉——認領跟回覆
+    /// 不在同一個交易裡的話，這則回覆就永遠不見了，回合卻已經是 completed。
+    async fn fail_next_insert(app: &Arc<App>, role: &str) {
+        sqlx::query(&format!(
+            "CREATE TRIGGER flaky_insert BEFORE INSERT ON messages WHEN NEW.role='{role}'
+             BEGIN SELECT RAISE(ABORT, 'disk hiccup'); END"
+        ))
+        .execute(&app.db)
+        .await
+        .unwrap();
+    }
+
+    async fn heal(app: &Arc<App>) {
+        sqlx::query("DROP TRIGGER flaky_insert").execute(&app.db).await.unwrap();
+    }
+
+    async fn replies(app: &Arc<App>, conv: &str) -> Vec<(Option<String>, String)> {
+        sqlx::query_as("SELECT turn_id, content FROM messages WHERE conversation_id=? AND role='assistant'")
+            .bind(conv)
+            .fetch_all(&app.db)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_reply_whose_first_attempt_failed_halfway_survives_the_retry() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, conv, turn_id) = delivered_turn(&app, &env.project_id).await;
+        let ev = stop_failure(
+            &bot_id,
+            json!({"hook_event_name": "Stop", "session_id": "s-r", "prompt_id": "p-r", "last_assistant_message": "測試全綠"}),
+        );
+
+        fail_next_insert(&app, "assistant").await;
+        assert!(process(&app, &ev).await.is_err(), "第一次寫不進回覆：錯誤要往上傳，收件匣才會重試");
+        heal(&app).await;
+        process(&app, &ev).await.expect("重試");
+
+        assert_eq!(turn_row(&app, &turn_id).await.status, "completed");
+        assert_eq!(replies(&app, &conv).await, vec![(Some(turn_id), "測試全綠".to_string())], "回覆不能在重試時被去重吃掉");
+    }
+
+    /// 同一件事，外部回合那條路（沒有 in-flight 的回合，hook 自己開一筆 completed 的）。
+    #[tokio::test]
+    async fn an_external_reply_whose_first_attempt_failed_halfway_survives_the_retry() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, conv, turn_id) = delivered_turn(&app, &env.project_id).await;
+        sqlx::query("UPDATE turns SET status='completed', completed_at=? WHERE id=?").bind(db::now()).bind(&turn_id).execute(&app.db).await.unwrap();
+        let ev = stop_failure(
+            &bot_id,
+            json!({"hook_event_name": "Stop", "session_id": "s-x", "prompt_id": "p-x", "last_assistant_message": "終端手打那句的回答"}),
+        );
+
+        fail_next_insert(&app, "assistant").await;
+        assert!(process(&app, &ev).await.is_err());
+        heal(&app).await;
+        process(&app, &ev).await.expect("重試");
+
+        let got = replies(&app, &conv).await;
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].1, "終端手打那句的回答");
+    }
+
+    /// 同一件事，`StopFailure`：回合收成 failed 之後說明寫不進去，重試不能只剩一筆沒有原因的失敗回合。
+    #[tokio::test]
+    async fn a_stop_failure_note_whose_first_attempt_failed_survives_the_retry() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, _conv, turn_id) = delivered_turn(&app, &env.project_id).await;
+        let ev = stop_failure(
+            &bot_id,
+            json!({"hook_event_name": "StopFailure", "session_id": "s-f", "prompt_id": "p-f", "reason": "API Error: 500"}),
+        );
+
+        fail_next_insert(&app, "system").await;
+        assert!(process(&app, &ev).await.is_err());
+        heal(&app).await;
+        process(&app, &ev).await.expect("重試");
+
+        assert_eq!(turn_row(&app, &turn_id).await.status, "failed");
+        let notes = system_notes(&app, &turn_id).await;
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("API Error: 500"), "{notes:?}");
+    }
+
+    /// 同一件事，遲到的 hook 補備援關掉的回合（`fill_or_drop_late_hook`）：先寫 native id 再補回覆的話，
+    /// 回覆失敗後重試被去重擋掉，回合還被升級成 completed、卻沒有回覆。
+    #[tokio::test]
+    async fn a_late_fill_whose_first_attempt_failed_survives_the_retry() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, conv, turn_id) = fallback_closed_turn(&app, &env.project_id, "跑一次 測試").await;
+        let ev = codex_done(&bot_id, "跑一次 測試");
+
+        fail_next_insert(&app, "assistant").await;
+        assert!(process(&app, &ev).await.is_err());
+        heal(&app).await;
+        process(&app, &ev).await.expect("重試");
+
+        assert_eq!(turn_row(&app, &turn_id).await.status, "completed");
+        assert_eq!(replies(&app, &conv).await, vec![(Some(turn_id), "hook reply".to_string())]);
     }
 
     /// issue #108：撞額度的 StopFailure 在推回合結束**之前**就把撞限記下來——那個事件會叫醒 queue flush，
