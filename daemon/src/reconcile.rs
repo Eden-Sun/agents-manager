@@ -109,17 +109,22 @@ pub async fn rearm_progress(app: &Arc<App>) {
 /// 而 AGM 的 safety 會把它讀成「daemon 正在打字」而永遠不給重啟窗口（review 2026-09-16）。
 ///
 /// 鍵可能已經按下去了，所以不能當成沒送：標成 `unknown`（＝「按過了，證不出來」）交給既有的
-/// 放棄／人工判斷那條路，UI 也才會顯示「送出狀態不明」而不是一直轉。
+/// 放棄／人工判斷那條路，UI 也才會顯示「送出狀態不明」而不是一直轉。送達結果寫不回去、帳在重啟時丟了的那一筆
+/// 也走這裡（#149）：不自動重送，送出時間最晚就是現在——閒置 watchdog 才不會把剛送出的看成排隊那時一樣老。
 async fn adopt_orphan_delivery(app: &Arc<App>, turn: &db::Turn) {
     if turn.delivery != "pending" {
         return;
     }
-    let n = sqlx::query("UPDATE turns SET delivery='unknown' WHERE id = ? AND status='in_flight' AND delivery='pending'")
-        .bind(&turn.id)
-        .execute(&app.db)
-        .await
-        .map(|r| r.rows_affected())
-        .unwrap_or(0);
+    let n = sqlx::query(
+        "UPDATE turns SET delivery='unknown', auto_resend=0, delivered_at=COALESCE(delivered_at, ?)
+          WHERE id = ? AND status='in_flight' AND delivery='pending'",
+    )
+    .bind(crate::db::now())
+    .bind(&turn.id)
+    .execute(&app.db)
+    .await
+    .map(|r| r.rows_affected())
+    .unwrap_or(0);
     if n > 0 {
         tracing::warn!(turn = %turn.id, "a prompt was mid-delivery when the daemon stopped; marked unknown so somebody can decide");
         crate::lifecycle::emit_turn(app, &turn.id).await;
@@ -896,6 +901,8 @@ mod compat_tests {
         let t = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(&turn).fetch_one(&app.db).await.unwrap();
         assert_eq!(t.delivery, "unknown", "鍵可能按下去了，不能當成沒送");
         assert_eq!(t.status, "in_flight", "收尾的是送達狀態，不是把回合結掉——要留給人決定");
+        assert_eq!(t.auto_resend, 0, "鍵可能按過了：舊版本留下的可重送預設也關掉（#149）");
+        assert!(t.delivered_at.is_some(), "送出最晚就是重啟那一刻：不退回 created_at（#149）");
 
         // 已經證出來送到的那種不要動它。
         sqlx::query("UPDATE turns SET delivery='ok' WHERE id=?").bind(&turn).execute(&app.db).await.unwrap();
@@ -942,11 +949,11 @@ mod compat_tests {
         let at = |app: Arc<App>, turn: String| async move {
             sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(turn).fetch_one(&app.db).await.unwrap().delivered_at
         };
-        crate::lifecycle::mark_delivery(app, &turn, crate::lifecycle::Delivered::Handed.record().unwrap()).await;
+        crate::lifecycle::mark_delivery(app, &turn, crate::lifecycle::Delivered::Handed.record().unwrap(), &db::now()).await.unwrap();
         let first = at(app.clone(), turn.clone()).await.expect("送出時記下");
         assert!(first > long_ago);
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        crate::lifecycle::mark_delivery(app, &turn, crate::lifecycle::Delivered::Unverified.record().unwrap()).await;
+        crate::lifecycle::mark_delivery(app, &turn, crate::lifecycle::Delivered::Unverified.record().unwrap(), &db::now()).await.unwrap();
         assert_eq!(at(app.clone(), turn).await, Some(first), "只記第一次");
     }
 

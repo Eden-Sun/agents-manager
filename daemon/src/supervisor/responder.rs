@@ -838,7 +838,8 @@ pub async fn notify(app: &Arc<App>) {
         let next = crate::db::iso_in(wait);
         let _ = store::defer_notify(&app.db, &ids, &next, &why).await;
     };
-    match lifecycle::prompt_relayed(app, &bot.id, &digest(&due), &crid, &[], Some(crate::agent_relay::DAEMON_SENDER)).await {
+    // 送出去了、結果還沒寫進 DB（#149）照 `unknown` 綁在那一筆回合上：換新的 crid 重送會讓協調者收到兩份。
+    match lifecycle::owed_as_unknown(lifecycle::prompt_relayed(app, &bot.id, &digest(&due), &crid, &[], Some(crate::agent_relay::DAEMON_SENDER)).await) {
         Ok(out) if out.delivery == "failed" => defer("delivery failed".into()).await,
         Ok(out) => {
             let n = roles::mark_delivered(&app.db, &due.iter().map(|e| e.id.clone()).collect::<Vec<_>>(), Role::Responder, &out.turn_id, &out.delivery)

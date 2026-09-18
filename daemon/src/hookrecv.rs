@@ -719,6 +719,8 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
     // 寫不進去就讓這一則失敗、由收件匣重試，順序不亂。
     if matches!(kind, HookKind::TurnComplete { .. } | HookKind::TurnFailed { .. }) {
         lifecycle::settle_interruption(app, &bot.id, lifecycle::InterruptEvidence::Nothing).await?;
+        // 送達結果欠著的同理（#149）：herdr 拒收、還沒收成 failed 的那一筆不能被這一則的回覆認領。
+        lifecycle::settle_owed_deliveries(app, &bot.id).await?;
     }
 
     match kind {

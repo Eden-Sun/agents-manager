@@ -38,6 +38,8 @@ const MAX_QUOTA_RETRIES: i64 = 6;
 const CONFLICT_BACKOFF_CAP_SECS: i64 = 900;
 /// 送不進去多久之後放棄重試、改成讓人看得見。**不判 fail**：工作沒失敗，是進不去。
 const CONFLICT_GIVE_UP_MINS: i64 = 30;
+/// 交辦送出去了、結果還沒寫進 DB（#149）時多久再問一次同一個 crid。daemon 自己的補寫從 1 秒起重試。
+const UNCOMMITTED_RECHECK_SECS: i64 = 15;
 pub const CONFLICT_BACKOFF_ENV: &str = "AM_DISPATCH_CONFLICT_BACKOFF_SECS";
 pub const CONFLICT_GIVE_UP_ENV: &str = "AM_DISPATCH_CONFLICT_GIVE_UP_MINS";
 
@@ -228,6 +230,13 @@ pub async fn dispatch(app: &Arc<App>, assignment_id: &str) {
         Err(LcError::BadValue(v)) => dispatch_failed(app, &a, &v.to_string()).await,
         // 422: this prompt can never be delivered as asked; retrying the same text changes nothing.
         Err(LcError::Unprocessable(v)) => dispatch_failed(app, &a, &v.to_string()).await,
+        // 送出去了（或 herdr 已經拒收），只是結果還沒寫進 DB（#149）：不記成送達（DB 還沒說），也不花重試、不判
+        // dispatch_failed（工作可能已經在跑）。過一下用同一個 crid 再問，冪等那條路回寫好的結果。
+        Err(LcError::Uncommitted(v)) => {
+            let why = format!("{}: delivery={}", v["error"].as_str().unwrap_or("uncommitted"), v["delivery"].as_str().unwrap_or("?"));
+            let _ = store::hold(&app.db, &a.id, &iso_in(UNCOMMITTED_RECHECK_SECS), &why).await;
+            tracing::warn!(assignment = %a.id, turn = ?v["turn_id"].as_str(), %why, "交辦送出去了，結果還沒寫進 DB：等一下用同一個 crid 再問");
+        }
         Err(e) => {
             // Upstream / bad-request: retry a bounded number of times, then give up loudly
             // rather than silently holding work the user thinks is running.
@@ -1202,16 +1211,10 @@ async fn notify(app: &Arc<App>) {
     };
     // The digest is the daemon talking, not the user. Without the sentinel it lands in AGM's
     // conversation as a blue bubble indistinguishable from an instruction somebody typed.
-    match lifecycle::prompt_relayed(
-        app,
-        &manager,
-        &digest(&pending),
-        &crid,
-        &[],
-        Some(crate::agent_relay::DAEMON_SENDER),
-    )
-    .await
-    {
+    // 送出去了、結果還沒寫進 DB（#149）照 `unknown` 綁在那一筆回合上：換新的 crid 重送會讓 AGM 收到兩份。
+    match lifecycle::owed_as_unknown(
+        lifecycle::prompt_relayed(app, &manager, &digest(&pending), &crid, &[], Some(crate::agent_relay::DAEMON_SENDER)).await,
+    ) {
         // A prompt call that returns Ok is not a prompt that arrived. `failed` is the CLI
         // telling us it did not land; treating that as delivered is exactly how a result went
         // missing with the row saying it had been handed over.
@@ -2054,6 +2057,55 @@ mod patrol_wake_tests {
             sqlx::query_as("SELECT state, notify_attempts FROM supervisor_inbox").fetch_all(&app.db).await.unwrap();
         assert!(rows.iter().all(|(s, n)| s == "pending" && *n == 0), "{rows:?}");
         assert!(store::get_or_init(&app.db).await.unwrap().last_notify_at.is_none());
+    }
+}
+
+/// #149：巡檢的摘要送出去了，送達結果卻寫不進 DB（`delivery_state_uncommitted`）。
+#[cfg(test)]
+mod owed_digest_tests {
+    use super::*;
+    use crate::testing as tt;
+
+    /// 那一批綁在那一筆回合上、記成 `unknown`——不能照一般錯誤 `defer_notify`：那會把 `notify_attempts` 加一，下一次換
+    /// `-r1` 的新 crid，同一份摘要再送一次。
+    #[tokio::test]
+    async fn a_digest_whose_delivery_write_was_lost_is_bound_to_its_turn_not_sent_again() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let mgr = tt::claude_bot(&app, &env.project_id, "owed-agm").await;
+        // 摘要是多行：hooks 關著才照「沒有證據照樣打字」送出（開著的話要等 transcript，這裡會先 409）。
+        sqlx::query("UPDATE bots SET inject_hooks=0 WHERE id=?").bind(&mgr.id).execute(&app.db).await.unwrap();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, pane_typed, started_at)
+             VALUES (?,?,'running','idle','ws-1','pane-agm','owed-agm','test',1,?)",
+        )
+        .bind(crate::db::ulid())
+        .bind(&mgr.id)
+        .bind(crate::db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        env.herdr.live_pane("pane-agm", tt::LivePane { width: Some(120), ..Default::default() });
+        store::get_or_init(&app.db).await.unwrap();
+        store::set_env(&app.db, &mgr.id, &env.project_id, "/tmp").await.unwrap();
+        store::push_inbox(&app.db, "incident:I9:opened", "incident_opened", None, None, None, &json!({})).await.unwrap();
+        super::super::roles::classify(&app.db).await.unwrap();
+        sqlx::query("CREATE TRIGGER lost_delivery_write BEFORE UPDATE OF delivery ON turns BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END")
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        notify(&app).await;
+
+        let (state, turn, delivery, attempts): (String, Option<String>, Option<String>, i64) =
+            sqlx::query_as("SELECT state, notify_turn_id, notify_delivery, notify_attempts FROM supervisor_inbox WHERE event_key='incident:I9:opened'")
+                .fetch_one(&app.db)
+                .await
+                .unwrap();
+        assert_eq!((state.as_str(), delivery.as_deref(), attempts), ("delivered", Some("unknown"), 1), "綁在送出去的那一筆上");
+        let sent: String = sqlx::query_scalar("SELECT id FROM turns").fetch_one(&app.db).await.unwrap();
+        assert_eq!(turn.as_deref(), Some(sent.as_str()));
+        assert_eq!(env.herdr.methods().iter().filter(|m| *m == "pane.send_text").count(), 1, "只送一份");
     }
 }
 

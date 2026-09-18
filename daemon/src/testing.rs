@@ -54,6 +54,8 @@ pub struct MockHerdr {
 pub enum Fault {
     /// herdr 回錯誤，什麼都不做（像 `pane_not_found`）。
     Refuse,
+    /// 同 `Refuse`，但錯誤碼是指定的那個（像 `agent_blocked`，#149）。
+    RefuseWith(&'static str),
     /// 收到請求就斷線，什麼都沒做、也沒回。
     DropBefore,
     /// 照做了（字進框、鍵按下去）才斷線，沒回。
@@ -273,8 +275,9 @@ impl MockHerdr {
                     };
                     match fault {
                         Some(Fault::DropBefore) => return,
-                        Some(Fault::Refuse) => {
-                            let out = json!({"id": id, "error": {"code": "injected_refusal", "message": format!("mock herdr refused {method}")}});
+                        Some(f @ (Fault::Refuse | Fault::RefuseWith(_))) => {
+                            let code = if let Fault::RefuseWith(c) = f { c } else { "injected_refusal" };
+                            let out = json!({"id": id, "error": {"code": code, "message": format!("mock herdr refused {method}")}});
                             let mut bytes = serde_json::to_vec(&out).unwrap();
                             bytes.push(b'\n');
                             let _ = w.write_all(&bytes).await;

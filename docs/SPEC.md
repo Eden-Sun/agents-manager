@@ -684,8 +684,23 @@ abort 之後照常 flush 出去（但先照下一段等寬限）。要取消排�
 鍵可能已經按下去，所以標成 `unknown`（不是當成沒送，也不是把回合結掉），交給既有的放棄／人工判斷。
 沒收的話那顆 bot 之後每則 prompt 都 409，而且 §18.10 的 safety 會一直把它讀成「正在送達臨界區」而擋住重啟窗口。
 同一輪也會把**兩分鐘內剛送出**（`delivery='ok'`）的 in-flight turn 補回 stall watchdog；更舊的不補，否則 12 秒後會把舊訊息再送一次。
-「剛送出」看 `turns.delivered_at`（`mark_delivery` 第一次記下送達結果的時間，之後不改），不看 `created_at`——排隊的 turn 的
+「剛送出」看 `turns.delivered_at`（送出的那一刻；`mark_delivery` 只記第一次，之後不改），不看 `created_at`——排隊的 turn 的
 `created_at` 是排進佇列的時間，flush 可能晚半小時；沒有 `delivered_at` 的舊列才退回 `created_at`（review 2026-09-16 deliv L3）。
+
+**送出之後結果寫不回去**（#149）：prompt 的副作用做完——打字送出、交給 `agent.prompt`、或 herdr 明確拒收（`agent_blocked`）——之後，
+把結果寫回那一筆回合（`mark_delivery`；拒收是收成 failed＋說明，同一個交易）是唯一的一步，寫不進去**不吞**。跟打斷、run 結束欠著的收尾（#147／#156）同一套，
+在 `lifecycle::owed_delivery`：
+- 不重送、也不回普通的成功：記成欠著、排定時重試（1 秒起、約四分鐘），直接送的回 `503 delivery_state_uncommitted`（`delivery` 是看到的結果、
+  `sent` 講字有沒有進去），排隊的 flush 回錯誤。watchdog 照樣掛（字真的送出去了，它們每一步都重讀 DB）。
+- 結清的路：這顆 bot 的下一則 prompt（同一個 `client_request_id` 的重試也是——冪等那條路因此拿到寫好的結果；還沒寫成就再回同一個 503，
+  不回 `pending`）、下一則回合 hook（先補再對回合，拒收的那一筆不會被別句的回覆認領）、定時重試。只寫記下的那一筆、從不再送，
+  `delivered_at` 記當初送出的那一刻，不是補寫的那一刻。
+- 「不自動重送」在打字之前就寫死：直接送建 turn、排隊認領（`claim_queued`）時 `auto_resend=0`，寫回送達結果時才照證據打開——
+  帳丟了也不會變成可以重送。
+- 帳只在記憶體：補上之前重啟，那一筆由上面「重啟時卡在送出途中」收成 `unknown`，同一句補 `auto_resend=0`、`delivered_at`＝重啟那一刻
+  （送出最晚就是那時，閒置 watchdog 不會把剛送出的看成排隊那時一樣老）。
+- 呼叫端：AGM 交辦遇到這個 503 不記成送達、不花 attempts、不判 `dispatch_failed`，`hold` 15 秒後用同一個 crid 再問，拿到寫好的結果才記（§18.8）；
+  巡檢／協調者的收件匣通知照 `unknown` 把那一批綁在那一筆回合上，不換 `-r<n>` 的新 crid 再送一份。
 
 **撤回**（一個字都沒送出而刪掉 turn 與訊息）之後推一次 `resync`：事件模型沒有「刪除」，不補的話客戶端會留著一顆送不出去的泡泡與一個永遠不會結束的回合。
 撤回只在 turn **還是 `in_flight`** 時算數，而且跟刪訊息在同一個交易裡（`DELETE turns … AND status='in_flight'` 刪不到就整個 rollback）：
@@ -2111,6 +2126,9 @@ MissionController）用的單一入口：帶 CAS、擋非法邊、轉移沒發�
   壞掉的環境變數（看不懂、0、負數）一律回預設；讀不懂 `conflict_since` 就繼續重試，不因為一個壞欄位把工作收起來。
   這條保險絲跟「派送真的排進佇列」是兩件事：後者（§4.4a 的 `queued` 生產者）上線之後，這條仍然有效——排進去也送不出來時一樣要看得見。
   2026-09-16 的實況：一張交辦對一顆回合 10～20 分鐘的 bot 重試 12 次、42 分鐘，狀態一直是 `queued`，最後由人手動取消——沒有任何地方會自己說「這件事沒送出去」。
+- **送出去了、結果還沒寫進 DB**（#149，§6 送達那段）：`dispatch` 拿到 `503 delivery_state_uncommitted` 時交辦**留在 `queued`**——
+  不記成送達（DB 那一筆還是 pending，記了就是兩邊說的不一樣）、不花 attempts、不判 `dispatch_failed`（工作可能已經在跑）；
+  `hold` 15 秒後用同一個 crid 再問，冪等那條路回寫好的結果才照一般規則記。
 - 驗收走 `POST /api/supervisor/assignments/{id}/review`，記 actor、來源、理由、證據（`supervisor_reviews`），同 decision 重送冪等。回合還在跑時只接受 `cancel`（不中止回合，之後的回覆不再記到這筆）；
   `block` 要等回合結束。
 - 「要求續作」是新開一筆 `follow_up_of` 指回原本的交辦（原本變 `superseded`），用 `followup_request_id` 去重——不改寫已送出的文字。續作繼承 mission 連結。

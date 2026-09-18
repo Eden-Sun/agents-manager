@@ -41,14 +41,15 @@ pub(super) async fn emit_prompt_message(app: &Arc<App>, bot_id: &str, message_id
 
 
 /// 記下一則送達：`delivery`（CHECK 只認四種）＋ `delivery_verified`（有沒有證據）＋ `auto_resend`
-/// （能不能自動重送）。後兩者是兩件事，見 [`crate::lifecycle::delivery::DeliveryRecord`]。
-pub(crate) async fn mark_delivery(app: &Arc<App>, turn_id: &str, rec: DeliveryRecord) {
+/// （能不能自動重送）。後兩者是兩件事，見 [`crate::lifecycle::delivery::DeliveryRecord`]。`at` 是送出的那一刻。
+/// 寫不進去回 `Err`，不吞（#149）：送出之後的呼叫端走 [`super::owed_delivery`]，記成欠著、不回普通的成功。
+pub(crate) async fn mark_delivery(app: &Arc<App>, turn_id: &str, rec: DeliveryRecord, at: &str) -> anyhow::Result<()> {
     let verified = i64::from(rec.verified);
     let auto = i64::from(rec.auto_resend);
     // 不重送的那條路照樣把重送額度用掉：回滾到不認得 `auto_resend` 的舊 binary 時，
     // 它仍然不會把同一則再打一次。
     // `delivered_at` 只記第一次：之後 poller 補證據再記一次，不能讓一則舊的看起來像剛送出（重啟補 watchdog 看它，deliv L3）。
-    let _ = sqlx::query(
+    sqlx::query(
         "UPDATE turns SET delivery=?, delivery_verified=?, auto_resend=?,
                 resend_count = CASE WHEN ? = 0 THEN MAX(resend_count, ?) ELSE resend_count END,
                 delivered_at = COALESCE(delivered_at, ?)
@@ -59,10 +60,11 @@ pub(crate) async fn mark_delivery(app: &Arc<App>, turn_id: &str, rec: DeliveryRe
     .bind(auto)
     .bind(auto)
     .bind(crate::lifecycle::MAX_PROMPT_RESENDS)
-    .bind(crate::db::now())
+    .bind(at)
     .bind(turn_id)
     .execute(&app.db)
-    .await;
+    .await?;
+    Ok(())
 }
 
 /// The API answer for a prompt that was not sent. `retry` → 409 (temporary: a busy box, a
@@ -146,6 +148,9 @@ pub(super) async fn answer_for_turn(app: &Arc<App>, t: &db::Turn) -> LcResult<Pr
         .await
         .map_err(up)?
         .unwrap_or_default();
+    if let Some(e) = super::owed_delivery::uncommitted_answer(t, &message_id) {
+        return Err(e);
+    }
     // The same request asked again reports the same outcome, including "unverified".
     // 還在排隊的那筆照第一次的回答說 `queued`：它的 `delivery` 欄位是 `pending`，原樣回的話
     // 重派的交辦會被記成 delivered/pending，從此不歸排隊保險絲管（review2 deliv L1）。
@@ -462,6 +467,11 @@ async fn prompt_inner(
     if let Err(e) = super::interruption::settle_locked(app, bot_id, super::interruption::Evidence::Nothing).await {
         tracing::warn!(bot = %bot_id, error = %e, "上一次打斷欠著的收尾還是寫不進去");
     }
+    // 送達結果欠著的也先補（#149）：同一個 request id 的重試因此拿到寫好的結果，herdr 拒收、還沒收成 failed 的那一筆
+    // 也不會把這一則擋成「a turn is already in flight」。
+    if let Err(e) = super::owed_delivery::settle_locked(app, bot_id).await {
+        tracing::warn!(bot = %bot_id, error = %e, "欠著的送達結果還是寫不進去");
+    }
 
     if client_request_id.trim().is_empty() {
         return Err(LcError::Bad("client_request_id must not be empty".into()));
@@ -587,11 +597,12 @@ async fn prompt_inner(
     // 3. turn + user message committed BEFORE the RPC, so an early hook can match.
     // `prompt_text` 存**實際送出**的字（群組去掉 @mention、附件路徑展開後），跟排隊那條同一欄：
     // stall 重送、畫面比對、hook 對 prompt 都讀它，不讀泡泡原文（review3 c3 M4）。
+    // `auto_resend=0` 在打字之前寫死：送出之後結果寫不回來（#149），這一筆也不會變成可以自動重送；寫回時照證據打開。
     let turn_id = db::ulid();
     let mut tx = app.db.begin().await.map_err(up)?;
     sqlx::query(
-        "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, client_request_id, created_at, prompt_text)
-         VALUES (?,?,?,'web','in_flight','pending',?,?,?)",
+        "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, client_request_id, created_at, prompt_text, auto_resend)
+         VALUES (?,?,?,'web','in_flight','pending',?,?,?,0)",
     )
     .bind(&turn_id)
     .bind(&conv)
@@ -699,20 +710,24 @@ async fn prompt_inner(
         Err(e) => {
             let blocked = e.downcast_ref::<HerdrError>().map(|h| h.code == "agent_blocked").unwrap_or(false);
             if blocked {
-                let _ = super::turn_controller::fail(&app.db, &turn_id, super::turn_controller::DeliveryOnFail::Failed, "agent_blocked").await;
-                let _ = insert_message(app, &conv, Some(&turn_id), "system", &format!("delivery failed: {e}"), "system", false, None).await;
-                emit_turn(app, &turn_id).await;
+                // 收成 failed 寫不進去就記成欠著（#149）：DB 還是 in_flight＋pending 時不回普通的 `failed`。
+                if let Err(err) = super::owed_delivery::refused(app, bot_id, &turn_id, &format!("delivery failed: {e}")).await {
+                    return Err(super::owed_delivery::uncommitted(Some(&run.id), &turn_id, &msg_id, "failed", Some(&err)));
+                }
                 return Ok(PromptOut { turn_id, message_id: msg_id, delivery: "failed".into(), send_now });
             }
             tracing::warn!(error = %e, "agent.prompt delivery unknown");
             "unknown"
         }
     };
-    mark_delivery(app, &turn_id, rec).await;
-    emit_turn(app, &turn_id).await;
+    // 寫回（寫成才推 `turn_updated`）；寫不進去就記成欠著、回 503（#149）。watchdog 照樣掛——字真的送出去了，它們每一步都重讀 DB。
+    let written = super::owed_delivery::delivered(app, bot_id, &turn_id, rec).await;
     if delivery == "ok" || delivery == "unverified" {
         arm_stall(app, &run.id, bot_id, &turn_id).await;
         arm_progress(app, &run.id, bot_id, &turn_id).await;
+    }
+    if let Err(e) = written {
+        return Err(super::owed_delivery::uncommitted(Some(&run.id), &turn_id, &msg_id, delivery, Some(&e)));
     }
     Ok(PromptOut { turn_id, message_id: msg_id, delivery: delivery.into(), send_now })
 }
