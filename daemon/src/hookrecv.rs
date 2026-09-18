@@ -731,6 +731,24 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                 tracing::info!(bot = %bot.name, ?reason, detail, "StopFailure 是使用者中斷的回聲：不算失敗，什麼都不動");
                 return Ok(());
             }
+            // 同一筆送兩次（重試、spool 重播）：已經收過的那一回合。
+            let seen = match (&session_id, &turn_id) {
+                (Some(sid), Some(tid)) => sqlx::query_scalar::<_, String>("SELECT id FROM turns WHERE native_session_id=? AND native_turn_id=?")
+                    .bind(sid)
+                    .bind(tid)
+                    .fetch_optional(&app.db)
+                    .await?,
+                _ => None,
+            };
+            // 撞的是帳號額度（#108、#150）：先記撞限，**再**推回合結束——那個事件會叫醒 queue flush，排著的派工要看得到
+            // 這個身分沒額度。撞額度是帳號的事實，跟這一則還有沒有回合可收無關：Esc 收掉回合之後才到、對上中斷的回聲、
+            // 回合已被別的路收掉，都一樣要記，不然下一件派工會被送進沒額度的身分。只記這一代 run 送來的（`admitted`：
+            // 上一代的在圍籬就丟了；沒有 run 時說不準是哪個身分）；已經收過的同一則不再記，免得把撞限時刻往後推。
+            if bot.kind == "claude" && admitted.is_some() && seen.is_none() {
+                if let Some(d) = detail.as_deref().filter(|d| crate::turn_error::is_quota_exhaustion(d)) {
+                    crate::turn_error::mark_claude_limit_hit(app, &bot.id, d).await;
+                }
+            }
             if let Some(r) = &run {
                 let in_flight = db::in_flight_turn(&app.db, &r.id).await?;
                 let ev = lifecycle::InterruptFailureEvidence {
@@ -759,17 +777,9 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                 .await?;
             }
             // 同一筆送兩次（重試、spool 重播）不再收第二次——跟 `TurnComplete` 同一把鎖。
-            if let (Some(sid), Some(tid)) = (&session_id, &turn_id) {
-                let dup: Option<String> =
-                    sqlx::query_scalar("SELECT id FROM turns WHERE native_session_id=? AND native_turn_id=?")
-                        .bind(sid)
-                        .bind(tid)
-                        .fetch_optional(&app.db)
-                        .await?;
-                if let Some(existing) = dup {
-                    tracing::info!(turn = %existing, "duplicate StopFailure ignored");
-                    return Ok(());
-                }
+            if let Some(existing) = seen {
+                tracing::info!(turn = %existing, "duplicate StopFailure ignored");
+                return Ok(());
             }
             let (Some(r), Some(admitted)) = (&run, &admitted) else {
                 tracing::info!(bot = %bot.name, ?reason, "StopFailure 但這顆 bot 沒有活著的 run：沒有回合可收");
@@ -796,14 +806,7 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             };
             let message = lifecycle::insert_message_tx(&mut tx, &conv, Some(&t.id), "system", &note, "hook", false, None).await?;
             tx.commit().await?;
-            // 撞的是帳號額度（issue #108）：先把撞限記下來，**再**推回合結束——那個事件會叫醒 queue flush，
-            // 排在後面的派工要看得到這個身分還沒額度，不然會被立刻送進去再撞一次。畫面那條路
-            // （`turn_error::capture`）要等讀 pane 才記得到，常常比 flush 晚。
-            if bot.kind == "claude" {
-                if let Some(d) = detail.as_deref().filter(|d| crate::turn_error::is_quota_exhaustion(d)) {
-                    crate::turn_error::mark_claude_limit_hit(app, &bot.id, d).await;
-                }
-            }
+            // 撞限在上面（進這一支之前）就記好了：畫面那條路（`turn_error::capture`）要等讀 pane 才記得到，常常比 flush 晚。
             lifecycle::emit_message_added(app, &bot.id, message).await;
             lifecycle::emit_turn(app, &t.id).await;
             tracing::warn!(bot = %bot.name, turn = %t.id, ?reason, detail, "StopFailure：回合收成失敗");
@@ -2439,6 +2442,84 @@ mod external_claim_tests {
         let hit = crate::quota::limit_hit_for_bot(&app, &bot).await.expect("撞限記下來了");
         assert_eq!(hit.bucket.as_deref(), Some("five_hour"));
         assert!(hit.until.is_some(), "有期限，不會永遠擋著");
+    }
+
+    /// issue #150：撞額度是帳號的事實，跟這一則還有沒有回合可收無關。Esc 把回合收掉之後，同一個身分晚到的真撞額度
+    /// （對不上中斷的那一則、或就是被中斷那一則的回聲）都要記下撞限，下一件派工才不會送進沒額度的身分；
+    /// 回合本身一個欄位都不改。沒有 run（說不準是哪個身分）與已經收過的同一則（重播）不記。
+    #[tokio::test]
+    async fn a_quota_stop_failure_after_an_esc_still_records_the_limit() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        const LIMIT: &str = "You've hit your session limit · resets 5pm";
+
+        // (a) Esc 已經把回合收掉（`fail_in_flight`），晚到的撞額度對不上被中斷的那一則：沒有 in-flight 回合可掛。
+        let (bot_a, conv_a, turn_a) = delivered_turn(&app, &env.project_id).await;
+        let run_a = turn_row(&app, &turn_a).await.run_id.unwrap();
+        lifecycle::expect_interrupt_echo(
+            &bot_a,
+            lifecycle::InterruptedTurn { run_id: run_a.clone(), turn_id: Some(turn_a.clone()), session_id: None, prompt_id: Some("p-esc".into()), at: chrono::Utc::now() },
+        );
+        lifecycle::fail_in_flight(&app, &run_a, "user interrupt").await;
+        let closed = turn_row(&app, &turn_a).await;
+        process(&app, &stop_failure(&bot_a, json!({"hook_event_name": "StopFailure", "session_id": "sa", "prompt_id": "p-late", "reason": LIMIT})))
+            .await
+            .unwrap();
+        let bot = db::bot(&app.db, &bot_a).await.unwrap().unwrap();
+        assert!(crate::quota::limit_hit_for_bot(&app, &bot).await.is_some(), "沒有回合可掛，撞限照樣記下");
+        let after = turn_row(&app, &turn_a).await;
+        assert_eq!((after.status, after.completed_at), (closed.status, closed.completed_at), "已經收掉的回合不改");
+        // 下一件派工：排在佇列的那一則不會被送進 A。
+        let queued = db::ulid();
+        sqlx::query("UPDATE runs SET agent_status='idle' WHERE id=?").bind(&run_a).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, delivery, prompt_text, created_at) VALUES (?,?,'web','queued','pending','下一件派工',?)")
+            .bind(&queued)
+            .bind(&conv_a)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        lifecycle::forget_queue_retry_timer(&bot_a);
+        lifecycle::flush_queued_locked(&app, &bot_a).await.unwrap();
+        let q = turn_row(&app, &queued).await;
+        assert_eq!((q.status.as_str(), q.flush_retries, q.run_id.as_deref()), ("queued", 0, None), "派工沒有送進沒額度的 A");
+        lifecycle::forget_queue_retry_timer(&bot_a);
+
+        // (b) 就是被中斷那一則的回聲（同一個 prompt id）：回合照舊一個欄位都不動，撞限一樣記。
+        let (bot_b, _c, turn_b) = delivered_turn(&app, &env.project_id).await;
+        let run_b = turn_row(&app, &turn_b).await.run_id.unwrap();
+        lifecycle::expect_interrupt_echo(
+            &bot_b,
+            lifecycle::InterruptedTurn { run_id: run_b, turn_id: Some(turn_b.clone()), session_id: None, prompt_id: Some("p-b".into()), at: chrono::Utc::now() },
+        );
+        process(&app, &stop_failure(&bot_b, json!({"hook_event_name": "StopFailure", "session_id": "sb", "prompt_id": "p-b", "reason": LIMIT})))
+            .await
+            .unwrap();
+        assert_eq!(turn_row(&app, &turn_b).await.status, "in_flight", "回聲：回合不動");
+        let bot = db::bot(&app.db, &bot_b).await.unwrap().unwrap();
+        assert!(crate::quota::limit_hit_for_bot(&app, &bot).await.is_some(), "回聲裡的撞額度也是真的");
+
+        // (c) 沒有 run：說不準是哪個身分送的（停機後可能換過身分），不記。
+        let (bot_c, _c, turn_c) = delivered_turn(&app, &env.project_id).await;
+        let run_c = turn_row(&app, &turn_c).await.run_id.unwrap();
+        sqlx::query("UPDATE runs SET state='stopped' WHERE id=?").bind(&run_c).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET identity='cc9' WHERE id=?").bind(&bot_c).execute(&app.db).await.unwrap();
+        process(&app, &stop_failure(&bot_c, json!({"hook_event_name": "StopFailure", "session_id": "sc", "prompt_id": "p-c", "reason": LIMIT})))
+            .await
+            .unwrap();
+        let bot = db::bot(&app.db, &bot_c).await.unwrap().unwrap();
+        assert!(crate::quota::limit_hit_for_bot(&app, &bot).await.is_none(), "沒有 run 的不記到現在的身分上");
+
+        // (d) 已經收過的同一則重播：不再記一次（不把撞限時刻往後推）。
+        let (bot_d, _c, turn_d) = delivered_turn(&app, &env.project_id).await;
+        let ev = stop_failure(&bot_d, json!({"hook_event_name": "StopFailure", "session_id": "sd", "prompt_id": "p-d", "reason": LIMIT}));
+        process(&app, &ev).await.unwrap();
+        assert_eq!(turn_row(&app, &turn_d).await.status, "failed");
+        let bot = db::bot(&app.db, &bot_d).await.unwrap().unwrap();
+        let first = crate::quota::limit_hit_for_bot(&app, &bot).await.expect("第一次記下");
+        crate::quota::clear_limit_hit_for_bot(&app, &bot).await;
+        process(&app, &ev).await.unwrap();
+        assert!(crate::quota::limit_hit_for_bot(&app, &bot).await.is_none(), "重播不再記：{first:?}");
     }
 
     /// 分類：rate limit 跟其他錯誤要分得開，中斷排在最前面（寧可少收一次也不要把使用者按的停說成失敗）。
