@@ -1248,6 +1248,12 @@ listen port 只在本機算（pane 行程樹的 pid 對 `lsof -nP -iTCP -sTCP:LI
 - 沒有 bot token 也沒有 UI token 檔可讀：直接不排程，印一行 stderr 說明，直接跑（issue 要求「明講的 bypass 路徑」）。
 - daemon 連不上（curl 失敗）、回應看不懂：一律不排程，直接跑——**shim 不能因為排程器出問題就讓建置卡死或失敗**，
   跟 `herdr_shim.rs` 的哲學一樣：「a shim that aborts is worse than one that forwards」。
+- **轉到外部編譯主機的指令不佔本機名額（issue #155，使用者 2026-09-19 決定）**：本機名額管的是本機的 RAM／CPU。`check`／`test`／`clippy`
+  （#104 的 verification 三個）在 pane 有 `AM_DAEMON_EXE`／`AM_CONFIG_PATH`／`AM_DATA_DIR` 時，shim **先**叫 `remote-cargo` helper，
+  **不先 acquire**：遠端有空就同時跑多少個都行，不受 `max_concurrent` 限制（遠端自己的容量靠 `cargo_jobs` 與那台機器；沒有另設遠端上限）。
+  helper 結束碼原樣帶出（非 125 一律 `exit`，不會偷偷在本機重跑）；只有 **125＝根本沒有在遠端動手**（設定被關掉、不適合 offload）才落到下面，
+  這時才去 acquire、才受本機名額管。缺環境變數而沒轉成的（issue #138）也是落到本機、照本機名額排。`build`／`run`／…本來就不轉，照舊排。
+  daemon 連不上時遠端編譯照樣能跑（它不需要 daemon）。
 - `CARGO_BUILD_JOBS` 由 daemon 的 acquire 回應決定（`build.cargo_jobs`，預設 2），不吃 cargo 自己抓核心數的預設值。
 - 建置跑完（不管成功失敗）都會 release；`trap ... EXIT INT TERM` 保證中斷／被砍也會放。
 - **租約失效就停（issue #128）**：TTL 租約有兩件事必須同時成立——daemon 能在持有者死掉時收回容量，**而且活著但租約已失效的持有者
@@ -1262,7 +1268,7 @@ listen port 只在本機算（pane 行程樹的 pid 對 `lsof -nP -iTCP -sTCP:LI
     還會生 rustc，父親一死就被 init 收養、追不到），再 `TERM`＋`CONT`，最多兩秒後補 `KILL`；只殺確定還是 shim 直接子行程的 pid（不殺被回收的 pid）。
     shim 退 **75**（可重試），stderr 講明原因，名額放掉（冪等）、暫存狀態目錄清掉；
   - cargo 維持**前景**執行（背景會讓非互動 shell 忽略 SIGINT、換掉 stdin），pid 由 `exec` 包裝寫給守衛。建不出暫存目錄（沒地方放 pid 與失效標記）就不拿名額、放回去不排程直接跑；
-  - `remote-cargo` helper 與本機 cargo 同一套守衛；名額在兩段之間失效就不起本機 cargo。
+  - 守衛只罩**本機**的 cargo（名額是本機的）；名額在 cargo 起來之前就失效，就不起它。
 - **shim 不留孤兒行程（issue #151）**：行程數是全機共用的資源（曾被塞到 2661／2666，其他 bot 的 `fork` 全失敗）。三件事：
   等名額的迴圈每輪確認呼叫端（`$PPID`）還在，不在了就自己印一行退出，不留永遠在等的孤兒；續約守衛的 `sleep` 放背景、用 `wait` 等，
   收到 TERM 先殺掉手上的 sleep 再結束（否則每次 cargo 都留一顆 `sleep 60` 的孤兒，最久 TTL/3 秒）；shim 自己被 `SIGKILL`（`trap` 沒機會跑）時，
