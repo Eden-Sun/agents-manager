@@ -1678,6 +1678,42 @@ AGM 的運維職責以本節為準，不靠任何 bot 的記憶。persona 是同
 - 寫不進去不擋開機：記 warn，推一則 `agm_cli_stale` inbox（路由給巡檢並喚醒），payload 帶角色、路徑、內嵌版雜湊與錯誤。
 - **`scripts/ops/*.sh`（`daemon-update-kick.sh` 等）與 `*-task.md` 沒有內嵌，不會自動更新**——改了就照 `scripts/ops/README.md` 手動 install，並留備份。
 
+### 18.2b herdr 升級流程：偵測與交辦（issue #66）
+
+herdr 有新版時自動發現、整理出「對我們有沒有用、會不會壞」，交給 AGM 排程處理，不再靠人手動翻 CHANGELOG。
+**只做到「偵測＋交辦」**：真的升級、重啟 herdr server 一律要 AGM 核准後手動做，這支腳本不會、也不能觸發。
+
+1. **偵測**：`scripts/ops/herdr-update-kick.sh`，launchd `com.agm.herdr-update` 每天跑一次。
+   本機版本問 `herdr --version`；最新穩定版問 `gh release list -R herdrdev/herdr --exclude-pre-releases -L 1`
+   （Homebrew 的 `herdr`跟這台機器實際在跑的那份不一定同步——bot 目錄有自己的私有拷貝、PATH shadow 掉 Homebrew 連結的那份，
+   release 清單是兩邊最後都會對齊的真相來源）；CHANGELOG 全文抓 `https://raw.githubusercontent.com/herdrdev/herdr/master/CHANGELOG.md`。
+   三個字串丟給 `agents-managerd herdr-update-check --installed --latest --changelog-file [--last-notified]`
+   （`daemon/src/herdr_update.rs`）：版本比較（數值比較，`457dd14` 的 `0.9.0` 判成比 `0.10.0` 新那個坑不會再踩）、
+   CHANGELOG 段落擷取（`installed` 不含到 `latest` 含）、同版去重全部交給 Rust，腳本只照印出來的 JSON
+   （`has_update`／`should_notify`／`brief`）決定要不要派工，不在 bash 裡重比一次版本。
+2. **CHANGELOG 格式**：herdr 用 Keep a Changelog 的 `## [x.y.z] - date` 標題，跟 Claude Code 那種裸
+   `## x.y.z`（`daemon/src/changelog.rs` 原本唯一認得的格式）不一樣。`changelog::parse_version` 已經改成
+   先剝掉中括號、日期本來就在下一個空白 token、split_whitespace 早就丟掉了；`changelog.rs`／`herdr_update.rs`
+   兩邊測試都用真的 herdr CHANGELOG 格式釘住（`gh api repos/herdrdev/herdr/contents/CHANGELOG.md` 2026-09-18 驗過）。
+3. **整理**：`render_agm_brief` 產生的交辦內文已經包含版本差異、原始 CHANGELOG 段落，以及「要判斷哪些條目有用／可能弄壞什麼／哪些繞路仍要保留、驗證通過才能申請升級窗口」的要求——
+   這份文字本身就是任務說明，不需要另外的 `-task.md` 模板（跟 `claude-release-kick.sh` 不同，那邊的「解析新版」沒有現成的結構化輸出可用）。
+4. **交辦（既有機制，沒有新通道）**：`agm assign --bot <目標> --review-by patrol --text-file <brief> --request-id agm-herdr-update-<latest_version>`，
+   同 `daemon-update-kick.sh`／`claude-release-kick.sh` 用的那支 CLI。目標 bot 依序：`AGM_HERDR_UPDATE_BOT` 環境變數 ＞
+   `runtime.json` 的 `herdr_update_bot_id`（專用 child，選用欄位）＞ `release_bot_id`（跟 Claude Code 換版通知同一顆分析型 child 也合理）＞
+   `responder_bot_id`（協調者兜底）。**不能派給巡檢自己**（daemon 擋「總管對自己下交辦」）。查不到任何一個就跳過，不亂派給使用者的專案 bot。
+5. **同版不重派**：`herdr-update.last` 記上次真的派過工的版本，`should_notify` 比對這個字串；派工失敗不寫，下一輪重試同一版。
+   跟殘留鎖（`herdr-update.lock`）處理方式同 `claude-release-kick.sh`：另一個執行者在跑就安靜跳過，交 AGM 判斷要不要清。
+6. **上線**：驗證通過、AGM 核准後，走既有的 herdr 維護模式（§6.5.2）：`POST /api/supervisor/herdr-maintenance/open`
+   關維護窗、換 binary、重啟、`resume=native` 接回所有子 agent——這條路已經因為 0.9.0 那次真的升級失敗自動回滾而建好，
+   herdr-update-kick.sh 不重造它。
+7. **相容性驗證沙箱（issue #66 做法 §3）：明確不做，理由寫在這裡**。獨立 herdr session／socket 起一顆新命名的 server、
+   跑 `pane.read`／`agent.prompt`／`events.subscribe` 等真呼叫，聽起來像加一個 `herdr --socket <私有路徑>` 的隔離環境就好，
+   但真正的成本在**驗證跑的東西要多接近正式環境才有意義**：daemon 的 herdr 整合測試預期一顆真的 herdr server、真的 pane、
+   真的 agent 行程，隔離出來的沙箱要嘛只驗協定形狀（跟 2026-09-17 那次「schema 對得上、實際行為不對」的教訓一樣沒抓到問題），
+   要嘛要重建一整份「pane 裡真的跑著 claude/codex」的環境，跟正式環境的差異本身就可能是漏洞來源。
+   這件事留給 AGM 收到交辦、看過 CHANGELOG 差異之後，依那一版實際改了什麼決定要不要花這個成本，而不是每次偵測到新版
+   都先跑一次不確定驗不驗得到問題的固定沙箱。
+
 ### 18.3 喚醒 AGM 的節流
 巡檢：`[supervisor] notify_interval_secs`（預設 600），規則見 §5；只有 `wake=1` 的事件會開一次喚醒，送前合併重複（§18.15）。協調者：短窗批次（§18.15）。
 API 端狀態機見 `API.md` 的 `GET /api/supervisor/inbox`。

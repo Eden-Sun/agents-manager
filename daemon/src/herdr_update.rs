@@ -82,6 +82,22 @@ mod tests {
         ## 0.8.3\n\n- 小修\n\n\
         ## 0.8.2\n\n- 基準版\n";
 
+    /// herdr 實際的 CHANGELOG 格式（`gh api repos/herdrdev/herdr/contents/CHANGELOG.md` 2026-09-18
+    /// 驗過）：Keep a Changelog 的 `## [x.y.z] - date`，帶 `## Unreleased`。跟上面那份 Claude Code
+    /// 格式的 `MD` 不一樣，兩種都要能被 `build_report` 吃下去。
+    const HERDR_MD: &str = "# Changelog\n\n## Unreleased\n\n\
+        ## [0.9.1] - 2026-09-16\n\n### Added\n- machine 遠端指令轉發\n\n\
+        ## [0.9.0] - 2026-09-07\n\n### Changed\n- endpoint generation 1，升級要停一次 server\n\n\
+        ## [0.8.2] - 2026-08-01\n\n- 基準版\n";
+
+    #[test]
+    fn build_report_parses_herdrs_real_bracket_and_date_changelog_format() {
+        let r = build_report("0.8.2", "0.9.1", HERDR_MD).unwrap();
+        assert!(r.has_update);
+        assert_eq!(r.sections.iter().map(|s| s.version.as_str()).collect::<Vec<_>>(), ["0.9.1", "0.9.0"]);
+        assert!(r.sections[1].body.contains("endpoint generation 1"));
+    }
+
     #[test]
     fn a_newer_stable_release_has_an_update_with_the_range_between() {
         let r = build_report("0.8.2", "0.9.0", MD).unwrap();
