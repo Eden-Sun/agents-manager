@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import * as api from '../api'
 import type { HostResult, HostShell } from '../api/types'
 import { ApiError, HOST_DEFAULTS } from '../api/types'
+import { nestableBusy } from '../lib/nestableBusy'
 import { useStore } from '../store/store'
 import { AttachButton } from './AttachButton'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -362,6 +363,8 @@ function RemoteCargoPanel() {
   const [clearPassword, setClearPassword] = useState(false)
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
+  // `test()` 內部借用 `save`：兩者共用同一個參照計數鎖，裡層 `save` 做完不會提早把 busy 撥回 false。
+  const lock = useRef(nestableBusy(setBusy)).current
 
   useEffect(() => {
     let alive = true
@@ -389,8 +392,9 @@ function RemoteCargoPanel() {
     }
   }, [])
 
-  const save = async (): Promise<boolean> => {
-    setBusy(true)
+  // `test()` 借用這段來先存密碼；busy 全程由呼叫端（`save` 或 `test`）自己用 `lock` 包一次，
+  // 這裡不碰 busy，才不會在 `test()` 還沒做完時就把旗標撥回 false（見 `lib/nestableBusy.ts`）。
+  const persist = async (): Promise<boolean> => {
     setMessage('')
     try {
       const cfg = await api.saveRemoteCargoSettings({
@@ -410,17 +414,24 @@ function RemoteCargoPanel() {
     } catch (e) {
       setMessage(`儲存失敗：${remoteCargoErr(e)}`)
       return false
+    }
+  }
+
+  const save = async (): Promise<boolean> => {
+    lock.begin()
+    try {
+      return await persist()
     } finally {
-      setBusy(false)
+      lock.end()
     }
   }
 
   const test = async () => {
-    setBusy(true)
+    lock.begin()
     setMessage('')
     try {
       // 未儲存的新密碼先寫入，避免「測試」其實測到舊 credential。
-      if ((password || clearPassword) && !(await save())) return
+      if ((password || clearPassword) && !(await persist())) return
       const r = await api.testRemoteCargo()
       const how = r.password_auth ? '密碼' : 'SSH key/agent'
       // 連得上但沒有 cargo 是最常見的下一關：講清楚並給一顆按鈕，不要只丟原始輸出（使用者 2026-09-18）。
@@ -434,7 +445,7 @@ function RemoteCargoPanel() {
       setNeedsToolchain(false)
       setMessage(`測試失敗：${remoteCargoErr(e)}`)
     } finally {
-      setBusy(false)
+      lock.end()
     }
   }
 
