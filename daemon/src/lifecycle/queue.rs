@@ -766,7 +766,7 @@ mod flush_queue_tests {
         let f = queued("test").await;
         let app = f.env.app.clone();
         let until = (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        crate::supervisor::store::acquire_lease(&app.db, "restart", "k8bw2f", None, None, &until, false, &json!({}))
+        crate::supervisor::store::acquire_lease(&app.db, "restart", "k8bw2f", None, None, &until, false, None, &json!({}))
             .await
             .unwrap()
             .unwrap();

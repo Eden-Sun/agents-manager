@@ -422,6 +422,32 @@ pub async fn safety_as(
 }
 
 /// Take a window: approval checked, safety re-checked and the lease taken, all under the
+/// 這個 owner／requester 是哪一顆 bot（沒有對應的 bot——例如 `daemon-update-kick` 這種腳本
+/// 身分——就是 `None`）。先當成 bot id 查，查不到再用名字對。
+async fn requester_bot_id(app: &Arc<App>, owner: &str) -> Option<String> {
+    let owner = owner.trim();
+    if owner.is_empty() {
+        return None;
+    }
+    if matches!(crate::db::bot(&app.db, owner).await, Ok(Some(_))) {
+        return Some(owner.to_string());
+    }
+    crate::db::live_bots(&app.db)
+        .await
+        .ok()?
+        .into_iter()
+        .find(|b| b.name == owner)
+        .map(|b| b.id)
+}
+
+/// 送達臨界區真正要放過的那一顆：申請者自己，而且它確實出現在 `--exclude-bot` 裡。
+///
+/// 沒有指定就不放過任何人（維持原本的行為）；指定了別人上面已經擋掉，所以這裡看到的只會是自己。
+fn exclude_from_quiet(exclude: &[String], self_bot: Option<&str>) -> Option<String> {
+    let me = self_bot?;
+    exclude.iter().any(|id| id == me).then(|| me.to_string())
+}
+
 /// supervisor lock so nothing changes between the check and the hold.
 pub async fn acquire(
     app: &Arc<App>,
@@ -479,6 +505,19 @@ pub async fn acquire(
         }
     }
 
+    // 排除對象綁**這筆核准的申請者**（上面已驗過 `requester == owner`）：申請人自己那顆 bot。
+    // 別顆 bot 一律不能被排除掉——那等於拿一張自己的核准，把別人正在打字的 pane 也算成閒置。
+    let self_bot = requester_bot_id(app, owner).await;
+    if EXCLUSIVE.contains(&resource) {
+        if let Some(bad) = exclude.iter().find(|id| Some(id.as_str()) != self_bot.as_deref()) {
+            return Err(LcError::conflict(
+                "a restart window may only ignore the requester's own bot",
+                json!({"reason": "exclude_not_requester", "excluded": bad, "requester": approval.requester,
+                       "requester_bot_id": self_bot,
+                       "hint": "--exclude-bot 只能指到申請這筆核准的那顆 bot；別顆 bot 正在跑就等它，不要把它排掉"}),
+            ));
+        }
+    }
     // 放寬與否只看**這一筆**核准等了多久：別人放著沒用的核准不能替它開門。
     // 以 acquire 的 owner 問：自己手上的 rebuild 不擋自己的 restart。
     let safety = safety_as(app, exclude, Some(&approval.id), Some(owner)).await?;
@@ -496,6 +535,10 @@ pub async fn acquire(
     // 會中斷 pane 的窗口，連**寫下去的那一刻**都要沒有人在送達臨界區：safety 是上面讀的，
     // 讀完到寫入之間還是有可能有一則 prompt 把 turn commit 進來（issue #86 的 TOCTOU）。
     let quiet_delivery = EXCLUSIVE.contains(&resource);
+    // 申請者自己這一回合不算「有人在送達臨界區」：它就是來換版的那個人，而它的回合要等 acquire
+    // 回來才會結束。不放過它的話，任何 bot 在自己的回合裡都拿不到 restart 窗口，只剩「把腳本丟
+    // 背景再結束回合」一條路——那正是規則 6a 禁止的（2026-09-18 AM-m3 連試 30 次都 raced=true）。
+    let exclude_self = quiet_delivery.then(|| exclude_from_quiet(exclude, self_bot.as_deref())).flatten();
     let taken = store::acquire_lease(
         &app.db,
         resource,
@@ -504,7 +547,8 @@ pub async fn acquire(
         commit,
         &expires_at,
         quiet_delivery,
-        &json!({"require_idle": require_idle, "safety": safety}),
+        exclude_self.as_deref(),
+        &json!({"require_idle": require_idle, "safety": safety, "excluded_self": exclude_self}),
     )
     .await
     .map_err(|e| LcError::Upstream(e.to_string()))?;
@@ -833,7 +877,7 @@ mod tests {
         sqlx::query("DELETE FROM turns WHERE id='q'").execute(&app.db).await.unwrap();
         assert_eq!(safety(app, &[]).await.unwrap()["safe"], true);
         store::acquire_lease(&app.db, "rebuild", "someone-else", None, None,
-            &(chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true), false, &json!({}))
+            &(chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true), false, None, &json!({}))
             .await.unwrap().unwrap();
         let s = safety(app, &[]).await.unwrap();
         assert_eq!(s["safe"], false, "窗口一次只給一個人");
@@ -861,14 +905,14 @@ mod tests {
         sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,delivery,created_at) VALUES ('tt','ct','rt','web','in_flight','pending',?)")
             .bind(&now).execute(&app.db).await.unwrap();
         assert!(store::delivery_critical_anywhere(&app.db).await.unwrap());
-        let taken = store::acquire_lease(&app.db, "restart", "k8bw2f", None, None, &until, true, &json!({})).await.unwrap();
+        let taken = store::acquire_lease(&app.db, "restart", "k8bw2f", None, None, &until, true, None, &json!({})).await.unwrap();
         assert!(taken.is_none(), "有人在送達臨界區：窗口拿不走");
         assert!(window_held(app).await.is_none(), "沒拿到就不該有閘門");
 
         // 那一則送完了（`delivery` 不再是 pending）：窗口就拿得到。
         sqlx::query("UPDATE turns SET delivery='ok' WHERE id='tt'").execute(&app.db).await.unwrap();
         assert!(!store::delivery_critical_anywhere(&app.db).await.unwrap());
-        let taken = store::acquire_lease(&app.db, "restart", "k8bw2f", None, None, &until, true, &json!({})).await.unwrap();
+        let taken = store::acquire_lease(&app.db, "restart", "k8bw2f", None, None, &until, true, None, &json!({})).await.unwrap();
         assert!(taken.is_some(), "沒有人在送達臨界區：拿得到");
         let w = window_held(app).await.expect("拿到了就有閘門");
         assert_eq!((w.resource, w.owner.as_str()), ("restart", "k8bw2f"));
@@ -876,8 +920,73 @@ mod tests {
 
         // `rebuild` 不中斷任何人，不帶這個條件（`acquire` 只對 EXCLUSIVE 帶）。
         sqlx::query("UPDATE turns SET delivery='pending' WHERE id='tt'").execute(&app.db).await.unwrap();
-        let rebuild = store::acquire_lease(&app.db, "rebuild", "k8bw2f", None, None, &until, false, &json!({})).await.unwrap();
+        let rebuild = store::acquire_lease(&app.db, "rebuild", "k8bw2f", None, None, &until, false, None, &json!({})).await.unwrap();
         assert!(rebuild.is_some(), "rebuild 不看送達臨界區");
+    }
+
+    /// 2026-09-18：申請者在**自己的回合裡**拿 restart 永遠拿不到——`lease safety --owner X
+    /// --exclude-bot X` 說 safe=true，`acquire` 卻連 30 次都 409 `not_idle` / `raced=true`，因為
+    /// 送達臨界區那句條件不吃排除，而申請者自己的回合要等 acquire 回來才結束。結果只剩「把腳本
+    /// 丟背景、回合先結束」一條路，正好是任務規則 6a 禁止的。
+    ///
+    /// 修法：放過**申請者自己那一顆**（且必須出現在 `--exclude-bot` 裡），其他 bot 照擋。
+    #[tokio::test]
+    async fn the_requester_is_not_blocked_by_its_own_turn_but_everyone_else_still_blocks() {
+        let e = crate::testing::env().await;
+        let app = &e.app;
+        let now = crate::db::now();
+        for (bot, conv, run) in [("mine", "cm", "rm"), ("other", "co", "ro")] {
+            sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES (?,?,?,'claude',?,?)")
+                .bind(bot).bind(&e.project_id).bind(bot).bind(format!("tok-{bot}")).bind(&now).execute(&app.db).await.unwrap();
+            sqlx::query("INSERT INTO conversations (id,bot_id,created_at) VALUES (?,?,?)")
+                .bind(conv).bind(bot).bind(&now).execute(&app.db).await.unwrap();
+            sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,started_at) VALUES (?,?,'running','idle',?)")
+                .bind(run).bind(bot).bind(&now).execute(&app.db).await.unwrap();
+        }
+        let until = (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+
+        // 申請者自己正在送達臨界區（就是這一回合）。
+        sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,delivery,created_at) VALUES ('t1','cm','rm','web','in_flight','pending',?)")
+            .bind(&now).execute(&app.db).await.unwrap();
+        assert!(store::acquire_lease(&app.db, "restart", "mine", None, None, &until, true, None, &json!({})).await.unwrap().is_none(),
+            "不排除的話，申請者自己的回合就把自己擋在門外——這就是原本的 bug");
+        let taken = store::acquire_lease(&app.db, "restart", "mine", None, None, &until, true, Some("mine"), &json!({})).await.unwrap();
+        assert!(taken.is_some(), "放過申請者自己那顆之後就拿得到");
+        sqlx::query("UPDATE supervisor_leases SET released_at=? WHERE resource='restart'").bind(&now).execute(&app.db).await.unwrap();
+
+        // 別顆 bot 也在臨界區：照擋，排除自己不會把別人一起放過去。
+        sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,delivery,created_at) VALUES ('t2','co','ro','web','in_flight','pending',?)")
+            .bind(&now).execute(&app.db).await.unwrap();
+        assert!(store::acquire_lease(&app.db, "restart", "mine", None, None, &until, true, Some("mine"), &json!({})).await.unwrap().is_none(),
+            "別顆 bot 正在送達臨界區，窗口就不該拿得到");
+
+        // 別人送完了就拿得到（自己那一筆還在 pending）。
+        sqlx::query("UPDATE turns SET delivery='ok' WHERE id='t2'").execute(&app.db).await.unwrap();
+        assert!(store::acquire_lease(&app.db, "restart", "mine", None, None, &until, true, Some("mine"), &json!({})).await.unwrap().is_some());
+    }
+
+    /// 排除對象綁核准的 requester：拿自己的核准去排除**別顆** bot，等於把別人正在打字的 pane
+    /// 算成閒置，一律拒絕（巡檢 2026-09-18 定的規則）。
+    #[tokio::test]
+    async fn a_restart_window_may_only_ignore_the_requesters_own_bot() {
+        let e = crate::testing::env().await;
+        let app = &e.app;
+        let now = crate::db::now();
+        sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('mine',?,'mine','claude','tok-mine',?)")
+            .bind(&e.project_id).bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('other',?,'other','claude','tok-other',?)")
+            .bind(&e.project_id).bind(&now).execute(&app.db).await.unwrap();
+        let a = store::create_approval(&app.db, "mine", "restart", "release", None, None, None).await.unwrap().approval;
+        store::decide_approval(&app.db, &a.id, "approved", "AGM", None, None).await.unwrap();
+
+        let err = acquire(app, "restart", "mine", &a.id, None, 300, true, &["other".to_string()]).await.unwrap_err();
+        let LcError::Conflict(v) = err else { panic!("要是 409 conflict") };
+        assert_eq!(v.get("reason").and_then(|r| r.as_str()), Some("exclude_not_requester"), "{v}");
+        assert_eq!(v.get("excluded").and_then(|r| r.as_str()), Some("other"), "{v}");
+
+        // 排除自己是允許的（這一步沒有任何 bot 在臨界區，所以會真的拿到窗口）。
+        let ok = acquire(app, "restart", "mine", &a.id, None, 300, true, &["mine".to_string()]).await.unwrap();
+        assert_eq!(ok.get("lease").and_then(|l| l.get("owner")).and_then(|o| o.as_str()), Some("mine"), "{ok}");
     }
 
     /// 過期沒 release 的窗口不再是閘門：`held_at` 看 `expires_at`，不需要任何人來收尾（issue #86）。
@@ -886,7 +995,7 @@ mod tests {
         let e = crate::testing::env().await;
         let app = &e.app;
         let soon = (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        store::acquire_lease(&app.db, "restart", "k8bw2f", None, None, &soon, true, &json!({})).await.unwrap().unwrap();
+        store::acquire_lease(&app.db, "restart", "k8bw2f", None, None, &soon, true, None, &json!({})).await.unwrap().unwrap();
         assert!(window_held(app).await.is_some());
 
         let past = (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
@@ -907,7 +1016,7 @@ mod tests {
 
     async fn hold_rebuild(app: &Arc<App>, owner: &str) {
         store::acquire_lease(&app.db, "rebuild", owner, None, None,
-            &(chrono::Utc::now() + chrono::Duration::minutes(50)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true), false, &json!({}))
+            &(chrono::Utc::now() + chrono::Duration::minutes(50)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true), false, None, &json!({}))
             .await.unwrap().unwrap();
     }
 
