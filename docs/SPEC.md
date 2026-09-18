@@ -625,6 +625,8 @@ cancel 撤掉的是還沒送出的那則時，review 回應不再帶「turn 還�
 掛 timer 到撞限到期、最多 5 分鐘再看一次（新讀數可能提早作廢撞限）；換身分重啟（上一段）、換模型、撞限到期或被校正掉就放行，
 始終只有排著的那一則、走原本的 CAS claim，只送一次。為了讓 flush 看得到：`StopFailure` 的原因是帳號額度用完（跟畫面同一套橫幅或
 `usage limit`，`turn_error::is_quota_exhaustion`；`overloaded`／一般 429 不算）時，**先**記撞限（`mark_claude_limit_hit`）再推回合結束；
+撞額度是帳號的事實，**不管這一則還有沒有回合可收**都記——Esc 收掉回合之後才到、對上中斷的回聲、回合已被別的路收掉都一樣（#150），
+回合本身照舊不動；只記這一代 run 送來的（圍籬准入 `admitted`；沒有 run 時說不準是哪個身分，不記），已經收過的同一則（重播）不再記；
 `classify_failure` 也把 `You've hit your session limit` 這類橫幅歸成額度（以前沒有 rate／usage 字樣會被當成 API 錯誤）。
 排隊保險絲（`assignment_queue_wait_secs`）對這種刻意留在佇列的派工：撞限寫了到期時間、而且在 supervisor 的等待上限（6 小時）內，
 或 flush 剛放掉擋、下一次重看就會送的那 6 分鐘內，**不撤**；看不到盡頭的（沒寫時間、週窗）照舊撤成 `blocked`，理由寫「目標身分沒有額度」
