@@ -608,10 +608,15 @@ async fn consume_resume_session(
     // No session id proves nothing (codex notify may lack `thread-id`); leave the marker for the next hook.
     let Some(reported) = reported_session_id else { return Ok(()) };
     let mismatch = reported != expected;
-    let consumed = sqlx::query("UPDATE runs SET resume_session_id = NULL WHERE id = ? AND resume_session_id IS NOT NULL")
-        .bind(&run.id)
-        .execute(&app.db)
-        .await?;
+    // 結論跟清掉標記寫在同一句：`resume_gate` 看 `resume_outcome` 放行（issue #92）。先前等到期寫了
+    // `unverified` 的，這時候才到的回報照樣改成真正的結論。
+    let consumed = sqlx::query(
+        "UPDATE runs SET resume_session_id = NULL, resume_outcome = ? WHERE id = ? AND resume_session_id IS NOT NULL",
+    )
+    .bind(if mismatch { "mismatch" } else { "verified" })
+    .bind(&run.id)
+    .execute(&app.db)
+    .await?;
     // A second hook may hold a stale `Run` snapshot; only the one that cleared the marker records a mismatch.
     if consumed.rows_affected() == 0 {
         return Ok(());
@@ -621,6 +626,8 @@ async fn consume_resume_session(
             .await
             .map_err(|e| anyhow::anyhow!("{e:?}"))?;
     }
+    // 閘門在等的就是這一則：排著的 prompt 現在可以送了（對不上的話，上面那則說明已經先進聊天室）。
+    lifecycle::schedule_flush_queued(app, &bot.id);
     Ok(())
 }
 

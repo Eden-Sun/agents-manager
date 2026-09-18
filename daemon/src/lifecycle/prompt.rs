@@ -520,6 +520,19 @@ async fn prompt_inner(
         (true, None, true) => Some("interrupted"),
         (true, None, false) => Some("idle"),
     };
+    // `--resume` 接回之後還沒證明接回的是原本那段對話（issue #92，`resume_gate`）：一個字都不打。
+    // AGM 派工排進佇列（驗證完或到期由 flush 送）；其他送入跟「對方回合中」一樣回可重試的 409。
+    if let super::resume_gate::Gate::Waiting { expected, left } = super::resume_gate::check(app, &bot, &run, &conv).await {
+        if queue_if_busy {
+            let out = queue_for_next_turn(app, &conv, bot_id, text, &deliver, client_request_id, group_id, relay_from).await?;
+            schedule_flush_retry(app, bot_id, left);
+            return Ok(out);
+        }
+        return Err(LcError::conflict(
+            "resume_unverified",
+            json!({"run_id": run.id, "session_id": expected, "retry_after_s": left.as_secs().max(1)}),
+        ));
+    }
     // AGM 派工遇到「使用者剛按 Esc」：一樣先讓使用者拿回輸入框——排進佇列，寬限到了才送（§4.4a）。
     if queue_if_busy {
         if let Some(wait) = super::interrupt_grace::hold(app, &bot, &run, &conv).await {
