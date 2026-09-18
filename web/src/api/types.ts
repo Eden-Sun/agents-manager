@@ -841,6 +841,11 @@ export interface KindQuota {
   fable: QuotaWindow | null
   /** codex 的額度重置券；沒有（或不是 codex）就是 null。 */
   reset_credits: QuotaResetCredits | null
+  /**
+   * CLI 自己印的「這個帳號被擋住了」橫幅。5h／7d 是速率視窗，codex 的 credits 用完時它們可以
+   * 是滿的（2026-09-12：量表全滿、送出卻一直回 hit your usage limit），所以這格要單獨看。
+   */
+  limit_hit: QuotaLimitHit | null
   plan: string | null
   updated_at: string
   /** 這份額度是在哪台主機讀到的（`local` 或 `hosts[].name`）。 */
@@ -856,6 +861,16 @@ export interface KindQuota {
  * bot／專案所在的那台——所以遠端 bot 的 statusline 不會蓋到本機那列。
  */
 export type QuotaMap = Record<string, KindQuota | null>
+
+/** CLI 印出來的上限橫幅（`KindQuota.limit_hit`）。 */
+export interface QuotaLimitHit {
+  /** 橫幅原文。 */
+  message: string
+  /** 橫幅寫的恢復時間（ISO）；沒寫就是 null，那要等下一回合跑成功才會消失。 */
+  until: string | null
+  /** 什麼時候撞到的（ISO）。 */
+  at: string
+}
 
 /** `POST /api/hosts/:name/tools/install {kind, via_bot_id}` → `{turn_id}`。 */
 export interface InstallToolResult {

@@ -163,6 +163,7 @@ mod tests {
             seven_day: seven,
             fable,
             reset_credits: None,
+            limit_hit: None,
             plan: None,
             updated_at: NOW.into(),
             source: "test".into(),

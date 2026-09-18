@@ -390,6 +390,26 @@ daemon 每次起 pane 前，把一支 POSIX `sh` 包裝腳本裝到 `<bot 目錄
 
 子 agent 要指定自己的 pane 時用 herdr 自己注入的 `$HERDR_PANE_ID`（或 `--current`），不需要另外一個變數。
 
+### 6.5d agent 對 agent 的 prompt 要標出來源（2026-09-12）
+
+bot 之間互相派工有兩條路。走 daemon 的（`POST /api/bots/{id}/prompt`、總管的 assignment）會寫
+`messages.relay_from`，UI 畫成「AGM → 這顆 bot」。另一條是 agent 自己 `herdr agent prompt <名字> …`：
+daemon 沒有參與，那句話只以 **prompt 回音**的形式從 hook 回來（`source='hook'` 的 user 訊息），於是
+總管的裁示在對話裡跟使用者自己打的字長得一模一樣（2026-09-12 使用者：「這種 agm 的訊息標示為 agm 訊息」）。
+
+補法跟 §6.5b 同一種：**做成機制，不是請求**。
+
+1. PATH 上的 shim 攔 `agent prompt`：補完名字前綴之後，先 `POST /relay/announce`
+   （表單欄位 `bot_id`／`to_agent`／`text`，驗證用該 bot 的 `hook_token`，header `X-AM-Bot-Token`，
+   跟 hook 同一把鑰匙），再照常轉給真的 herdr。報不成功（沒有 curl、daemon 沒開）就只是少一次標示，
+   訊息照送。名字前面帶旗標時整串原樣轉發，不猜。
+2. daemon 把「誰要送什麼給哪個 agent」記在一張行程內的短命表（5 分鐘）。
+3. 那句話的回音從 hook 回來時，用 run 的 `agent_name` 去認領：比對時空白全部忽略（TUI 會在任意位置
+   折行、補縮排），長度取兩邊的較短者，至少要對上 12 個字元；短於此就要求完全一樣（「繼續」這種字
+   使用者自己也會打）。認到就在**插入當下**寫進 `relay_from`——事後補欄位的話，`message_added` 已經
+   推出去了，畫面上那顆泡泡要等重新載入才會變。
+4. 認不出來就維持 NULL＝使用者自己打的。寧可少標一次，也不要把使用者的話說成是別人送的。
+
 ### 6.5c 給 claude 注入 herdr skill（2026-09-07）
 
 啟動 claude bot 前，daemon 把 `herdr --skill` 的輸出寫到那個身份的
@@ -482,7 +502,6 @@ claude 把新版下載好之後只會在每顆 bot 的 pane 底下印 `Update in
 
   | 條件 | `reason` | 動作 |
   |---|---|---|
-  | `bots.managed_by = 'child'` | `spawned_child` | 跳過 |
   | `bots.managed_by = 'team'` | `team_member` | 跳過 |
   | `runs.state != 'running'` | `not_running` | 跳過 |
   | `agent_status = 'working'` | `working` | 跳過 |
@@ -492,8 +511,15 @@ claude 把新版下載好之後只會在每顆 bot 的 pane 底下印 `Update in
   | 以上都不中 | — | 重啟 |
 
   批次操作最不能做的事就是把使用者正在等的那一回合砍掉，所以規則刻意保守：`unknown` 也跳過。
-  `child` / `team` 不歸這顆按鈕管：子 agent 是父 agent 開的 pane（§6.5a，`start_bot` 本來就會拒絕，
-  放進去只會變成一則看不懂的失敗），team 成員的 run 由 team 排程記著，插手會讓排程對不上。
+  `team` 不歸這顆按鈕管：成員的 run 由 team 排程記著，插手會讓排程對不上。
+  **子 agent 進來**（2026-09-12 使用者：ns2 / race / sup 三顆全被跳過，子 agent 的更新永遠套不上去）。
+  它們不能照一般路徑重開 pane（§6.5a，`start_bot` 會拒絕），所以執行時改走
+  `lifecycle::restart_child_in_pane`：送 `ctrl+c` 讓 agent 退出、**不關 pane**，再用同一個 agent 名字在
+  同一個 pane 上 `agent.start`，帶 `--resume <上一個 session>`、`bots` 上那份模型／強度（§4.4a 從它自己的
+  argv 讀回來的）與 `auto_approve` 對應的旗標。pane 的環境（`CLAUDE_CONFIG_DIR`、PATH 上的 shim）留在
+  pane 的 shell 裡，所以帳號與工具不變；hook 一樣沒注入，回覆照舊走 §4.3 的終端快照。收 agent 的過程中
+  pane 不見了（父 agent 自己關掉）就把 run 標 exited、不重開。單顆的 `POST /api/bots/{id}/restart` 對子
+  agent 走同一條路。
 - 執行：一顆一顆、**序列**跑，每顆都是 `lifecycle::restart_bot_with(StartOpts { resume_native: true })`
   ——stop 與 start 在**同一次持有 bot 鎖**裡做完（見下方「2026-09-11 競態修正」）。也就是既有的單顆路徑加上 §6.2 的續接旗標——`stop_bot` 寫上 `ended_at`
   之後，剛結束那個 `native_session_id` 就成了 `last_native_session_id` 找得到的「上一個 session」，

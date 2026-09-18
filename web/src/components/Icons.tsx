@@ -21,6 +21,17 @@ export function GearIcon() {
   )
 }
 
+/** Git 的菱形分支標誌，用於收合的專案資訊入口。 */
+export function GitIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="1em" height="1em" aria-hidden="true">
+      <rect x="3.5" y="3.5" width="17" height="17" rx="2" transform="rotate(45 12 12)" fill="currentColor" />
+      <path d="M9 5v11M9 8l6 6" stroke="var(--bg-panel)" strokeWidth="1.8" fill="none" />
+      <g fill="var(--bg-panel)"><circle cx="9" cy="8" r="2" /><circle cx="9" cy="17" r="2" /><circle cx="15" cy="14" r="2" /></g>
+    </svg>
+  )
+}
+
 /** 溢位選單（`⋯`）：把不常按、又不該常駐在標題列上的動作收起來。 */
 export function MoreIcon() {
   return (

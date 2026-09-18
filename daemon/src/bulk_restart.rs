@@ -41,7 +41,6 @@ pub struct Cand {
 /// 為什麼這顆沒被重啟。`code` 給 API / 前端比對，`label` 給人看。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Skip {
-    SpawnedChild,
     TeamMember,
     NotRunning,
     Working,
@@ -53,7 +52,6 @@ pub enum Skip {
 impl Skip {
     pub fn code(self) -> &'static str {
         match self {
-            Skip::SpawnedChild => "spawned_child",
             Skip::TeamMember => "team_member",
             Skip::NotRunning => "not_running",
             Skip::Working => "working",
@@ -65,7 +63,6 @@ impl Skip {
 
     pub fn label(self) -> &'static str {
         match self {
-            Skip::SpawnedChild => "是別的 agent 開的子 agent，由它的父 agent 管",
             Skip::TeamMember => "是 team 的成員，由 team 排程管",
             Skip::NotRunning => "還在啟動或關閉中",
             Skip::Working => "正在跑，重啟會把這一回合砍掉",
@@ -87,15 +84,16 @@ pub fn is_candidate(c: &Cand) -> bool {
 /// 順序即優先序：先看這顆歸不歸使用者管，再看 run 本身穩不穩（`state`），再看 agent 在不在忙，
 /// 最後才看回合。回報的理由取第一個中的那個，因為那是使用者最該先處理的那件事。
 ///
-/// `child` / `team` 一律不碰：子 agent 是父 agent 開的 pane（`start_bot` 本來就會拒絕），
-/// team 成員的生死歸 team 排程管——批次重啟插手只會讓排程對不上自己記得的 run。
+/// `team` 不碰：成員的生死歸 team 排程管——批次重啟插手只會讓排程對不上自己記得的 run。
+///
+/// 子 agent（`child`）**進來**（2026-09-12 使用者：三顆子 agent 全被跳過，更新套不上去）。
+/// 它們跟別人一樣是帶著更新的 claude，只是不能照一般路徑重開 pane，所以執行時改走
+/// [`crate::lifecycle::restart_child_in_pane`]——在它自己那個 pane 裡 exit + resume。
 pub fn plan(cands: &[Cand]) -> (Vec<&Cand>, Vec<(&Cand, Skip)>) {
     let mut go = Vec::new();
     let mut skip = Vec::new();
     for c in cands.iter().filter(|c| is_candidate(c)) {
-        let why = if c.managed_by == "child" {
-            Some(Skip::SpawnedChild)
-        } else if c.managed_by == "team" {
+        let why = if c.managed_by == "team" {
             Some(Skip::TeamMember)
         } else if c.state != "running" {
             Some(Skip::NotRunning)
@@ -255,6 +253,10 @@ async fn run_batch(
 ///
 /// 跟 `lifecycle::restart_bot` 的差別只有這個旗標——那條路是「重新開始」，這條是「接著跑」。
 async fn restart_resuming(app: &Arc<App>, bot_id: &str) -> anyhow::Result<String> {
+    // 子 agent 的 pane 是父 agent 開的：關掉再開一個新的等於把它搬家，所以走原地重啟那條路。
+    if db::bot(&app.db, bot_id).await.ok().flatten().is_some_and(|b| b.managed_by == "child") {
+        return lifecycle::restart_child_in_pane(app, bot_id).await.map_err(why);
+    }
     // One hold of the bot's lock for both halves — see `lifecycle::restart_bot_with` for the
     // 2026-09-10 23:02 race this closes.
     lifecycle::restart_bot_with(app, bot_id, StartOpts { resume_native: true }).await.map_err(why)
@@ -440,20 +442,26 @@ mod tests {
         assert!(!is_candidate(&cands[2]));
     }
 
-    /// 子 agent 與 team 成員不歸這顆按鈕管——前者 `start_bot` 本來就會拒絕（放進去只會變成
-    /// 一則看不懂的失敗），後者的 run 由 team 排程記著。
+    /// team 成員不歸這顆按鈕管（run 由 team 排程記著）；子 agent 歸——它在自己的 pane 裡重啟
+    /// （2026-09-12 使用者：ns2 / race / sup 三顆全被跳過，更新永遠套不上去）。
     #[test]
-    fn children_and_team_members_are_skipped() {
+    fn children_join_the_batch_and_team_members_do_not() {
         let kid = Cand { managed_by: "child".into(), ..cand("kid", "claude", "running", "idle", true, false) };
         let member = Cand { managed_by: "team".into(), ..cand("dev-1", "claude", "running", "idle", true, false) };
         let mine = cand("mine", "claude", "running", "idle", true, false);
         let cands = [kid, member, mine];
         let (go, skip) = plan(&cands);
-        assert_eq!(go.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["mine"]);
-        assert_eq!(
-            skip.iter().map(|(_, w)| w.code()).collect::<Vec<_>>(),
-            ["spawned_child", "team_member"]
-        );
+        assert_eq!(go.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["kid", "mine"]);
+        assert_eq!(skip.iter().map(|(_, w)| w.code()).collect::<Vec<_>>(), ["team_member"]);
+    }
+
+    /// 忙碌判斷對子 agent 一樣成立——歸誰管不影響「現在能不能動它」。
+    #[test]
+    fn a_busy_child_is_still_skipped_for_being_busy() {
+        let kid = Cand { managed_by: "child".into(), ..cand("kid", "claude", "running", "working", true, false) };
+        let (go, skip) = plan(std::slice::from_ref(&kid));
+        assert!(go.is_empty());
+        assert_eq!(skip[0].1, Skip::Working);
     }
 
     /// 總管（AGM）排在最後重啟，其他順序不動；沒有總管或總管不在這批裡時原樣不變。

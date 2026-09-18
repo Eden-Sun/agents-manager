@@ -72,10 +72,18 @@ fn browser_of(argv: &str) -> Option<&'static str> {
 
 /// Per-browser tab count and RSS from one `ps` dump.
 pub fn sum_browsers(out: &str) -> Vec<BrowserMem> {
-    let mut map: std::collections::BTreeMap<&'static str, BrowserMem> = std::collections::BTreeMap::new();
+    let mut map: std::collections::BTreeMap<&'static str, BrowserMem> =
+        std::collections::BTreeMap::new();
     for p in parse_ps(out) {
-        let Some(name) = browser_of(&p.argv) else { continue };
-        let e = map.entry(name).or_insert_with(|| BrowserMem { name: name.into(), tabs: 0, bytes: 0, processes: 0 });
+        let Some(name) = browser_of(&p.argv) else {
+            continue;
+        };
+        let e = map.entry(name).or_insert_with(|| BrowserMem {
+            name: name.into(),
+            tabs: 0,
+            bytes: 0,
+            processes: 0,
+        });
         e.processes += 1;
         e.bytes += p.rss_kib * 1024;
         if p.argv.contains("--type=renderer") {
@@ -112,13 +120,26 @@ pub(crate) fn parse_ps(out: &str) -> Vec<Proc> {
     let mut v = Vec::new();
     for line in out.lines() {
         let mut it = line.split_whitespace();
-        let (Some(pid), Some(ppid), Some(rss)) = (it.next(), it.next(), it.next()) else { continue };
-        let (Ok(pid), Ok(ppid), Ok(rss_kib)) = (pid.parse::<i32>(), ppid.parse::<i32>(), rss.parse::<u64>()) else {
+        let (Some(pid), Some(ppid), Some(rss)) = (it.next(), it.next(), it.next()) else {
+            continue;
+        };
+        let (Ok(pid), Ok(ppid), Ok(rss_kib)) =
+            (pid.parse::<i32>(), ppid.parse::<i32>(), rss.parse::<u64>())
+        else {
             continue;
         };
         // argv keeps its internal spacing; only the three fixed columns were split off.
-        let argv = line.split_whitespace().skip(3).collect::<Vec<_>>().join(" ");
-        v.push(Proc { pid, ppid, rss_kib, argv });
+        let argv = line
+            .split_whitespace()
+            .skip(3)
+            .collect::<Vec<_>>()
+            .join(" ");
+        v.push(Proc {
+            pid,
+            ppid,
+            rss_kib,
+            argv,
+        });
     }
     v
 }
@@ -148,7 +169,9 @@ pub(crate) fn herdr_roots(procs: &[Proc], by_pid: &HashMap<i32, &Proc>) -> Vec<i
             }
             let mut cur = p.ppid;
             for _ in 0..64 {
-                let Some(parent) = by_pid.get(&cur) else { return true };
+                let Some(parent) = by_pid.get(&cur) else {
+                    return true;
+                };
                 if is_herdr(parent) {
                     return false;
                 }
@@ -208,7 +231,11 @@ pub fn sum_herdr(out: &str, host: &str) -> HostMem {
 }
 
 async fn sample_local(host: &str) -> HostMem {
-    let out = tokio::process::Command::new("/bin/sh").arg("-c").arg(PS_CMD).output().await;
+    let out = tokio::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(PS_CMD)
+        .output()
+        .await;
     match out {
         Ok(o) if o.status.success() => sum_herdr(&String::from_utf8_lossy(&o.stdout), host),
         Ok(o) => HostMem {
@@ -288,7 +315,10 @@ pub fn spawn_poller(app: Arc<App>) {
             let snap = sample(&app).await;
             let changed = match &last {
                 // Ignore drift below 1 MiB; it is never what the user is looking at.
-                Some(prev) => prev.total_bytes.abs_diff(snap.total_bytes) >= 1024 * 1024 || prev.hosts.len() != snap.hosts.len(),
+                Some(prev) => {
+                    prev.total_bytes.abs_diff(snap.total_bytes) >= 1024 * 1024
+                        || prev.hosts.len() != snap.hosts.len()
+                }
                 None => true,
             };
             if changed {
@@ -313,8 +343,14 @@ mod tests {
 7 0 10 /usr/bin/zsh\n";
         let b = super::sum_browsers(out);
         assert_eq!(b.len(), 2);
-        assert_eq!((b[0].name.as_str(), b[0].tabs, b[0].processes, b[0].bytes), ("Chrome", 1, 3, 600 * 1024));
-        assert_eq!((b[1].name.as_str(), b[1].tabs, b[1].processes), ("ego", 2, 3));
+        assert_eq!(
+            (b[0].name.as_str(), b[0].tabs, b[0].processes, b[0].bytes),
+            ("Chrome", 1, 3, 600 * 1024)
+        );
+        assert_eq!(
+            (b[1].name.as_str(), b[1].tabs, b[1].processes),
+            ("ego", 2, 3)
+        );
     }
 
     use super::*;

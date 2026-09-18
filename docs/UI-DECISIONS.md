@@ -1079,6 +1079,16 @@ pane id 截成「w1…」，★/⚙ 之後到額度列之間卻空著一截。�
 
 截圖 `docs/screenshots/desktop-head/`。
 
+## context bar：不顯示花費、版本貼右、git 動作收進 hover（2026-09-12）
+
+使用者指定：
+- `花費 $…` 不放進 context bar——這一列是「現在狀態」，花費不是每次要看的。
+- `版本` 固定貼最右（`margin-left: auto`）；≤1080px 仍照舊第一個讓位。
+- `commit / push / pull` 平常收起，桌面有游標時滑到 git 那段（或 Tab 進去）才在下方彈出小面板；
+  正在打 commit 訊息時常駐。觸控裝置（`hover: none`）與 ≤640px 手機照舊攤開——沒有 hover 可用。
+
+截圖 `docs/screenshots/context-bar/`。
+
 ## blocked 的編號選單：在 web 上直接點，不要去按 ↓↓↓ Enter（2026-09-12）
 
 使用者實拍（手機 390px）：`carbis` 停在 claude 的 AskUserQuestion 選單上，畫面是終端快照＋
@@ -1261,6 +1271,59 @@ fixture 兩份都進了測試（`carbis-review.txt`、`carbis-multiselect.txt`�
 （390×560 逼出溢出，面板自己捲得動）。這三張是拿真機快照餵給同一個元件畫出來的——carbis 當時
 已經答完那題，不能為了拍照替使用者按鍵。
 
+## 標題列底下那三列：各一列高，放不下往右捲（2026-09-12，ego 全畫面走查）
+
+`docs/goals/header-chrome-2026-09-12.md`。走查截圖 `docs/screenshots/ego-review/`：390px 的
+`09-mobile-chat.png` 上，標題列以下依序是額度列（兩行）、未讀列（三行），對話的第一則被推到
+192px 以下；1381px 的 `06-desktop-team.png` 同樣被三行的未讀列吃掉 80px。共同的毛病是**索引在
+跟內容搶高度**——這幾列講的都是「還有哪些東西在別處」，沒有一列該長高。
+
+### 額度 chip 在手機一格只寫一個窗口
+
+推翻上面〈手機的 chip：7d 常駐 ＋ 其他窗口警戒才追加（2026-09-09）〉裡「追加的那格往下排」
+那一條。當時的理由（往右長會把後面的帳號推出畫面）仍然成立，但往下長的代價被低估了：
+cc1 是 `7d 19%` ＋ `F 0%`、cc2 是 `7d 42%` ＋ `3m 0%`，兩格一折行整條額度列從 40px 變 54px，
+而 390px 一次要放五格（cc0/cc1/cc2/codex/grok）。
+
+- **決策**：一格常駐**一個**數字，預設 7d（grok 是「週」）；只有另一個窗口被 daemon 標成
+  low／critical **而且比 7d 更急**時才**取代**它，不並列。急的定義：先比旗標
+  （critical > low > 一般），同一級才比剩得少的；**平手留現任**，不然數字會在兩個窗口之間跳。
+- 門檻一律吃 daemon 的旗標（`docs/API.md` §12.4），前端不另外寫死 pct——條紅了側欄卻沒警告
+  的老問題。
+- **沒有少掉任何 kind，也沒有少掉任何窗口**：五格照舊全在，5h／7d／Fable 的完整數字在 tooltip
+  與點開的底部 sheet 裡；選取那格的上下邊框量表（手機才畫）也照舊同時畫 5h 與 7d。
+  百分比仍然始終保留，不只靠顏色。
+- 逐窗口上色（`.quota-compact-win`）保留：現在雖然只有一格，但那一格可能是被 5h 搶走的。
+
+### 未讀列改成一列可橫捲
+
+- **決策**：`.unread-bar` 從 `flex-wrap: wrap` 改成 `nowrap` + `overflow-x: auto`，高度鎖成
+  一列（量到 33px＝晶片 22px ＋ 上下 5px 內距），排不下就往右捲。桌機、手機同一套。
+- scroll shadow 跟 `.context-bar > .git-bar` 用同一組漸層（`local` 兩層蓋住 `scroll` 兩層），
+  排得下時完全不顯示——這一列本來就常常只有兩三顆。
+- **正在看的那一顆會自己捲進畫面**（`UnreadChip` 的 `useScrollCurrentIntoView`，用
+  `aria-current` 當選擇器）：橫捲列最怕「我在看的那顆在捲軸外」，而〈更正（2026-09-11 稍晚）〉
+  已經定了它要留在原位當定位點。已經看得見就完全不動，不搶使用者自己捲到的位置；只改這一列
+  自己的 `scrollLeft`，不用 `scrollIntoView`（它會連帶捲祖先，手機上會把整個 `.app` 推歪）。
+- **代價**：桌機十顆晶片時「進行中」那組會落在捲軸外，得往右捲才看得到。接受——這一列的第一
+  順位是不吃掉對話，而「進行中」在側欄與燈號上都還有第二個入口。`.unread-bar-gap` 仍然把
+  「進行中」推到最右，只是在溢出時縮回 8px 的間隔。
+
+### context／git 列：本來就沒有蓋住訊息，補一支量測腳本把它釘住
+
+`02-desktop-chat-clear.png` 看起來像 git／帳號／context 疊在氣泡上，實測不是：`.context-bar`
+是 `position: static` 的一般流列，`.msg-list` 的上緣**剛好**等於它的下緣（1380 / 1500 都量到
+context 93–128、msg-list 從 128 起）。看起來像疊住是因為 (a) 三行的未讀列把它壓到畫面中段，
+(b) 訊息捲到底時最上面那一行本來就會被 `.msg-list` 的 overflow 切一半。(a) 由上一節解掉。
+
+單看截圖分不出「被捲軸剪掉」與「被上面那列蓋住」，所以這條約束改用數字守：
+**`scripts/verify-header-chrome.mjs`**（要有真 daemon 的 dev server）一次量四件事——未讀列一列
+高、context 列 static 且 `msgList.top >= contextBar.bottom`、390px 額度每格一個窗口、390px
+`documentElement.scrollWidth === innerWidth`。`OUT=<dir>` 順便存圖。
+
+實測全 PASS。截圖 `docs/screenshots/header-chrome/`（`desktop-chat-1380`、`desktop-chat-1500`、
+`mobile-chat-390`）；改之前的樣子看 `docs/screenshots/ego-review/`。
+
 ## 多分頁問卷：先讀完、離線作答、最後一次送出（2026-09-12 第六輪）
 
 使用者：「響應速度有點慢是否能夠提升」→「一開始就先預載入所有的分頁，而不是每一次連動，
@@ -1300,3 +1363,27 @@ fixture 兩份都進了測試（`carbis-review.txt`、`carbis-multiselect.txt`�
 
 截圖：`draft-mobile-390-loaded.png`（預載完）、`draft-mobile-390.png`、`draft-desktop-1440.png`
 （勾了兩項、還沒送出）。真的 carbis 那題是使用者本人要回答的，不能拿來按。
+
+## 右邊那一欄只屬於使用者（2026-09-12）
+
+使用者：「訊息右方就只能有我的，agm 代發的特別標。」
+
+對話裡靠右的泡泡一直被讀成「我說的話」。但 `user` 這個 role 底下混了兩種來源：使用者自己打的，
+以及代發的——總管的裁示（`messages.relay_from`，SPEC §6.5d）和 daemon 的自動通知
+（`[AG Man 通知]` 開頭，`.daemon-notice`）。代發的靠右擺等於冒名。
+
+改法（`web/src/components/relayedMessage.css`，從 `App.tsx` 匯入）：這兩種移到左邊，換一套外觀
+——面板底色加左邊一條 accent 槓，圓角的尖角翻到左下；來源標（`AGM → <bot>`）留在泡泡左上。
+判斷不另外寫一套邏輯：代發的那一則本來就會畫出 `.msg-targets.relay`，daemon 通知本來就有
+`.daemon-notice`，CSS 用 `:has()` 認這兩個既有的記號。bot 的回覆維持原本的左側樣式（沒有槓），
+所以三種來源在畫面上各自分得開。
+
+截圖 `docs/screenshots/relayed-msg/`。
+
+## 手機抽屜一開不要先選中 RAM（2026-09-13）
+
+- **問題**：抽屜是 modal，focus trap 落到第一個 button——RAM 那顆。390px 上它還被加了
+  `min-height: 40px`，一開選單上方就出現一塊帶 focus ring 的記憶體徽章，搜尋框才是人要的。
+- **決策**：`initialFocus` 給 `.bot-search-input`。標題列 `.mem-open` 改用負 margin 放大點擊
+  範圍，不再撐高整列。徽章列維持一排（pane 數／RAM／連線／分頁），標籤照舊藏。
+

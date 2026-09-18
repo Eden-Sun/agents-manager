@@ -277,8 +277,15 @@ pub async fn apply(
     }
     if fields.contains(&"fast") {
         let want = bot.fast != 0;
-        // Unknown current tier: a toggle could turn it the wrong way round, so refuse.
-        let now = was_fast?;
+        // `/fast` is a toggle, so pressing it without knowing the current tier could turn it
+        // the wrong way round. `runs.runtime_fast` is NULL for an adopted pane (SPEC §4.4a
+        // "收編的 pane 三個欄位都是 NULL＝不知道") — but codex prints the tier in its own status
+        // line, so read it instead of refusing: that line is the definition of runtime anyway,
+        // and refusing meant an adopted codex could never toggle fast without a restart.
+        let now = match was_fast {
+            Some(v) => v,
+            None => parse_status_line(&read(client, pane_id).await)?.fast,
+        };
         if now != want && !toggle_fast(client, pane_id).await {
             return None;
         }

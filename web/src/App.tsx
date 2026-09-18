@@ -13,6 +13,7 @@ import { TeamPanel } from './components/TeamPanel'
 import { screenTitle, useDrawerRoute } from './store/routeSync'
 import { useStore } from './store/store'
 import { totalUnread } from './store/unread'
+import './components/relayedMessage.css'
 
 /**
  * 掛 `(N)` 之前的原始標題。要把既有的 `(N)` 剝掉再存：模組不一定在乾淨的文件上載入

@@ -41,11 +41,32 @@
 - 不要 push 編不過的 HEAD（別人的半成品被你的 commit 依賴到時，把那部分一起帶上並在訊息裡註明）。
 
 ## daemon 重啟
-預設**不要**自己重啟（其他 agent 與使用者正在用）。回報時寫「需要重啟 daemon 才生效」。派工者明確允許時才用：
+重啟 daemon、`cargo build --release -p agents-managerd`、或任何會替換正在使用的 Rust binary 之前，**必須先詢問 AGM**。在 AGM 使用者入口對話提出申請（不要用 worker assignment 自派給 AGM）；AGM 忙碌時不要插入或中斷它，等它下一次可回覆。詢問時附上：目前 agent 名稱、要改的檔案／範圍、工作樹中其他 agent 的 WIP、為什麼需要重啟或重建，以及預計影響。先查 AGM 的健康與派工狀態：
+
+```sh
+AGM_BIN="$HOME/.config/agents-manager/supervisor/AGM/bin/agm"
+"$AGM_BIN" health
+"$AGM_BIN" assignments --status queued
+```
+
+只有 AGM 明確回覆「可以」且確認不影響使用者回合、其他 agent 的 pane／assignment 與未提交改動，才可執行。AGM 未回覆、回覆不明確或 health 為 `degraded`／`critical` 時，停止並回報「等待 AGM 調度」，不要自行猜測。需要重疊檔案、同一模組或同一工作目錄時，交回 AGM 分配 ownership；不要直接插入其他 bot 的工作。
+
+重啟前仍要保留其他 agent 的 WIP，不得 stash、reset、checkout 或覆蓋別人的改動。AGM 同意後才用：
+
 ```sh
 OLD=$(lsof -nP -iTCP:7788 -sTCP:LISTEN -t | head -1); [ -n "$OLD" ] && kill $OLD; sleep 2
 nohup ./target/release/agents-managerd serve >> ~/.config/agents-manager/daemon.log 2>&1 & disown
 ```
+
+重建完成後先回報 AGM build/test 結果，再依 AGM 指示重啟；重啟後確認 `/api/supervisor/health` 與使用者入口 AGM 仍可用。若只是閱讀、`cargo check` 或不會替換執行中 binary 的局部驗證，不必重啟，但仍不可改動其他 agent 的工作範圍。
+
+## 多 agent 協作與 AGM 調度
+- AGM 是本 repo 的唯一調度者。開始新工作先讀 `AGM health` 與 `AGM assignments`，確認是否已有 bot 處理同一目標。
+- 建立 child 前，先用 `herdr agent list`、`agm state` 與 `agm assignments` 搜尋同一 project、cwd、模組或任務脈絡的既有 child；優先恢復並重用同 context 的 child，不要因為目前閒置就另開重複 bot。找不到明確對應者或無法判斷 session 是否可恢復時，交給 AGM 選擇。
+- 發現另一個 bot 正在改相同檔案、模組、API 或工作目錄時，停止擴大改動，將範圍、檔案與衝突點交給 AGM 決定；不要自行合併、覆蓋或替別人收尾。
+- 需要平行工作時，先請 AGM 指定每個 bot 的 ownership、完成條件與驗證責任。沒有明確 ownership 就保持等待。
+- AGM 也負責定期清理長時間未使用的 child：只候選沒有 active run、in-flight turn、未結案 assignment、user ownership 或最近活動的 child；先停止/關閉其 pane 並留下 bot id、最後活動時間與原因，刪除設定或歷史必須另取得使用者確認。
+- 所有重啟、release Rust rebuild、跨 bot 改派與可能中斷使用者 session 的操作，都在 AGM 同意後執行並回報證據。
 
 ## 用 herdr 開子 agent
 - 名稱一律 `<你的 agent 名>-<字尾>`（`$AM_AGENT_NAME` 有值；PATH 上的 `herdr` shim 會自動補前綴），daemon 才會把它掛在你底下。

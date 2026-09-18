@@ -83,11 +83,31 @@ pub async fn insert_message_grouped(
     snapshot: Option<&str>,
     group_id: Option<&str>,
 ) -> anyhow::Result<db::Message> {
+    insert_message_full(app, conversation_id, turn_id, role, content, source, incomplete, snapshot, group_id, None).await
+}
+
+/// 同上，外加 `relay_from`——「這句話是別的 bot 送進來的，不是使用者自己打的」（SPEC §6.5d）。
+///
+/// 為什麼要在 INSERT 就寫進去，而不是插完再 UPDATE：`message_added` 是插入的當下就推出去的，
+/// 事後補欄位的話畫面上那顆泡泡要等重新載入才會變成「AGM →」。
+#[allow(clippy::too_many_arguments)]
+pub async fn insert_message_full(
+    app: &Arc<App>,
+    conversation_id: &str,
+    turn_id: Option<&str>,
+    role: &str,
+    content: &str,
+    source: &str,
+    incomplete: bool,
+    snapshot: Option<&str>,
+    group_id: Option<&str>,
+    relay_from: Option<&str>,
+) -> anyhow::Result<db::Message> {
     let id = db::ulid();
     let now = db::now();
     sqlx::query(
-        "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, incomplete, terminal_snapshot, group_id, created_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, incomplete, terminal_snapshot, group_id, relay_from, created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?)",
     )
     .bind(&id)
     .bind(conversation_id)
@@ -98,6 +118,7 @@ pub async fn insert_message_grouped(
     .bind(incomplete as i64)
     .bind(snapshot)
     .bind(group_id)
+    .bind(relay_from)
     .bind(&now)
     .execute(&app.db)
     .await?;
@@ -1988,26 +2009,37 @@ pub async fn capture_codex_usage_notices(app: &Arc<App>, bot_id: &str, expected_
     let conversation_id = db::conversation_id(&app.db, bot_id).await?;
 
     for notice in codex_usage_notice_lines(&read.text) {
+        // 去重只看**這個 run 開始之後**。原本比對整段對話：codex-astra 的 pane 兩天前印過
+        // 一模一樣的上限橫幅，今天再撞一次時這裡直接 `continue`，於是額度沒有被標記、
+        // 卡住的回合也沒有被解開——畫面上額度是滿的，輸入列卻一直轉（2026-09-12 使用者）。
         let exists: i64 = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM messages
-             WHERE conversation_id=? AND role='system' AND source='system' AND content=?)",
+             WHERE conversation_id=? AND role='system' AND source='system' AND content=? AND created_at >= ?)",
         )
         .bind(&conversation_id)
         .bind(&notice)
+        .bind(&run.started_at)
         .fetch_one(&app.db)
         .await?;
-        if exists != 0 {
-            continue;
+        let fresh = exists == 0;
+        if fresh {
+            // Don't attach the pane snapshot: the idle splash is a boxed TUI (model /
+            // directory / Tip / "Ask Codex to do anything"), not a failed cut of a reply.
+            insert_message(app, &conversation_id, None, "system", &notice, "system", false, None).await?;
+            tracing::info!(bot = %bot.name, notice = %notice, "codex account notice captured");
         }
-        // Don't attach the pane snapshot: the idle splash is a boxed TUI (model /
-        // directory / Tip / "Ask Codex to do anything"), not a failed cut of a reply.
-        insert_message(app, &conversation_id, None, "system", &notice, "system", false, None).await?;
-        tracing::info!(bot = %bot.name, notice = %notice, "codex account notice captured");
         if codex_limit_hit_line(&notice).is_some() {
+            // 還有回合在飛＝這張橫幅就是我們剛送出去那一句的答案，即使字面上看過也要處理；
+            // 沒有回合在飛時只認這個 run 內第一次看到的，畫面上留著的舊橫幅才不會反覆把
+            // 額度打回 100%。
+            let in_flight = db::in_flight_turn(&app.db, &run.id).await?;
+            if !fresh && in_flight.is_none() {
+                continue;
+            }
             let host = db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| LOCAL_HOST.to_string());
             apply_codex_limit_hit_quota(app, &host, &notice).await;
             // Unlock the composer: a limit hit is a failed turn, not a silent idle.
-            if let Some(turn) = db::in_flight_turn(&app.db, &run.id).await? {
+            if let Some(turn) = in_flight {
                 let res = sqlx::query(
                     "UPDATE turns SET status='failed', completed_at=? WHERE id=? AND status='in_flight'",
                 )
@@ -2122,6 +2154,152 @@ pub async fn restart_bot_with(app: &Arc<App>, bot_id: &str, opts: StartOpts) -> 
         }
         other => other,
     }
+}
+
+/// 子 agent 的「原地重啟」：在**它自己那個 pane 裡**把 agent 收掉再起回來（SPEC §6.5a / §6.9）。
+///
+/// pane 是父 agent 用 `pane.split` 開的，[`start_bot_locked_with`] 因此拒絕子 agent——照那條路走
+/// 會多開一個跟父 agent 無關的 pane。但「套用 claude 更新」要的其實只是把 CLI 換成新版接回同一個
+/// session，pane 本身不必動：所以這裡送 `ctrl+c` 讓 agent 退出、**不關 pane**，再用同一個 agent
+/// 名字在同一個 pane 上 `agent.start`，帶 `--resume <上一個 session>`。
+///
+/// pane 的環境（`CLAUDE_CONFIG_DIR`、PATH 上的 herdr shim、父 agent 傳下來的那些）留在 pane 的
+/// shell 裡，所以重啟回來的還是同一個帳號、同一套工具——這是 daemon 重建不了的東西，也是不能關掉
+/// 這個 pane 的第二個理由。hook 一樣沒有注入（`inject_hooks = 0`），回覆照舊走終端快照。
+///
+/// pane 在收 agent 的過程中不見了（父 agent 自己關掉）就不重開：那顆子 agent 本來就結束了。
+pub async fn restart_child_in_pane(app: &Arc<App>, bot_id: &str) -> LcResult<String> {
+    let lock = app.bot_lock(bot_id).await;
+    let _g = lock.lock().await;
+    let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
+    if bot.managed_by != "child" {
+        return Err(LcError::Bad("這不是 agent spawn 出來的子 agent".into()));
+    }
+    let run = db::active_run(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("run".into()))?;
+    let Some(pane_id) = run.pane_id.clone() else {
+        return Err(LcError::Bad("這個子 agent 的 run 沒有記到 pane".into()));
+    };
+    let host = db::bot_host(&app.db, bot_id).await.map_err(up)?;
+    let client = client_for_run(app, &run).await?;
+    let agent = run.agent_name.clone().unwrap_or_else(|| bot.name.clone());
+
+    let _ = sqlx::query("UPDATE runs SET state='stopping' WHERE id=?").bind(&run.id).execute(&app.db).await;
+    app.emit_bot_status(bot_id).await;
+    fail_in_flight(app, &run.id, "restarted to apply the CLI update").await;
+
+    let target = db::run_target(&run, &bot);
+    for _ in 0..2 {
+        let _ = client.agent_send_keys(&target, &["ctrl+c".to_string()]).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let mut empty = false;
+    for _ in 0..20 {
+        match client.pane_get(&pane_id).await {
+            // pane 沒了：這顆子 agent 結束了，run 跟著收掉，不要在別的地方重開一個。
+            Ok(None) => {
+                mark_run_exited(app, &run.id, "子 agent 的 pane 在重啟過程中被關掉").await;
+                app.emit_bot_status(bot_id).await;
+                return Err(LcError::Bad("這個子 agent 的 pane 已經被關掉了".into()));
+            }
+            Ok(Some(p)) if p.agent.is_none() => {
+                empty = true;
+                break;
+            }
+            _ => {}
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    if !empty {
+        return Err(LcError::Upstream("子 agent 十秒內沒有退出，沒有動它的 pane".into()));
+    }
+    // `ended_at` 一寫上去，剛剛那個 native session 就成了 `last_native_session` 的「上一個」。
+    let _ = sqlx::query("UPDATE runs SET state='stopped', ended_at=? WHERE id=?")
+        .bind(db::now())
+        .bind(&run.id)
+        .execute(&app.db)
+        .await;
+
+    let mut args: Vec<String> = Vec::new();
+    if bot.auto_approve != 0 {
+        match bot.kind.as_str() {
+            "claude" => args.push("--dangerously-skip-permissions".into()),
+            "codex" => args.push("--yolo".into()),
+            "grok" => args.push("--always-approve".into()),
+            _ => {}
+        }
+    }
+    // 模型／強度用 `bots` 上那份——它是 §4.4a 從這顆子 agent 自己的 argv 讀回來補的，
+    // 不是我們挑的。讀不到就不帶，讓 CLI 用它自己的預設。
+    args.extend(model_args(&effort_checked(app, &bot, &host).await));
+    args.extend(bot.args());
+    let resume = match db::last_native_session(&app.db, bot_id).await.map_err(up)? {
+        Some((sid, _)) => resume_args_by_kind(&bot.kind, &sid).ok().map(|a| (sid, a)),
+        None => None,
+    };
+    if let Some((_, resume_args)) = resume.clone() {
+        if bot.kind == "codex" {
+            let mut resumed = resume_args;
+            resumed.extend(args);
+            args = resumed;
+        } else {
+            args.extend(resume_args);
+        }
+    } else {
+        tracing::info!(bot = %bot.name, "子 agent 沒有可接續的 session，重啟後從新的對話開始");
+    }
+
+    let run_id = db::ulid();
+    sqlx::query(
+        "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, tab_id, adopted, agent_name, herdr_session, resume_session_id, started_at)
+         VALUES (?,?,'starting','unknown',?,?,?,1,?,?,?,?)",
+    )
+    .bind(&run_id)
+    .bind(bot_id)
+    .bind(&run.workspace_id)
+    .bind(&pane_id)
+    .bind(&run.tab_id)
+    .bind(&agent)
+    .bind(&run.herdr_session)
+    .bind(resume.as_ref().map(|(sid, _)| sid.clone()))
+    .bind(db::now())
+    .execute(&app.db)
+    .await
+    .map_err(up)?;
+
+    let mut started = false;
+    for attempt in 0..10u32 {
+        match client.agent_start(&agent, &bot.kind, &pane_id, &args, 60_000).await {
+            Ok(_) => {
+                started = true;
+                break;
+            }
+            Err(e) if pane_not_ready(&e) => {
+                tracing::debug!(bot = %bot.name, attempt, error = %e, "子 agent 的 pane 還沒回到可用的 shell");
+                tokio::time::sleep(Duration::from_millis(300 + 200 * u64::from(attempt))).await;
+            }
+            Err(e) => {
+                mark_run_exited(app, &run_id, "子 agent 重啟時 agent.start 失敗").await;
+                app.emit_bot_status(bot_id).await;
+                return Err(up(e));
+            }
+        }
+    }
+    if !started {
+        mark_run_exited(app, &run_id, "子 agent 的 pane 一直不是可用的 shell").await;
+        app.emit_bot_status(bot_id).await;
+        return Err(LcError::Upstream(format!("pane {pane_id} never became an available shell")));
+    }
+    let _ = sqlx::query("UPDATE runs SET state='running' WHERE id=?").bind(&run_id).execute(&app.db).await;
+    let until = [AgentStatus::Idle, AgentStatus::Done, AgentStatus::Blocked];
+    if let Err(e) = client.agent_wait(&agent, &until, 60_000).await {
+        tracing::warn!(bot = %bot.name, error = %e, "子 agent 重啟後沒等到 ready，run 留著讓對帳接手");
+    }
+    // 跟收編同一條路：沒有 hook 的 run，畫面就是唯一來源。
+    spawn_adopted_capture(app, &run_id, bot_id);
+    app.emit_bot_status(bot_id).await;
+    app.emit("bot_changed", json!({"bot_id": bot_id})).await;
+    tracing::info!(bot = %bot.name, pane = %pane_id, run = %run_id, "子 agent 在原本的 pane 裡重啟完成");
+    Ok(run_id)
 }
 
 /// Is this run really there — its pane still open and herdr still listing its agent?
@@ -4930,6 +5108,7 @@ async fn apply_codex_limit_hit_quota(app: &Arc<App>, host: &str, notice: &str) {
             seven_day: None,
             fable: None,
             reset_credits: None,
+            limit_hit: None,
             plan: None,
             updated_at: crate::db::now(),
             source: "codex-limit-hit".into(),
@@ -4943,11 +5122,18 @@ async fn apply_codex_limit_hit_quota(app: &Arc<App>, host: &str, notice: &str) {
     } else if let Some(existing) = q.seven_day.as_mut() {
         existing.used_pct = 100.0;
         if resets.is_some() {
-            existing.resets_at = resets;
+            existing.resets_at = resets.clone();
         }
     } else {
         q.seven_day = Some(win);
     }
+    // CLI 自己說被擋住了，這一格黏著走（`quota::set` 會沿用，直到 `until` 過了或下一回合跑成功）。
+    // 沒有它的話，五分鐘後 app-server 的輪詢就把量表刷回滿格，畫面與實際對不上。
+    q.limit_hit = Some(crate::quota::LimitHit {
+        message: notice.to_string(),
+        until: resets.clone(),
+        at: crate::db::now(),
+    });
     q.updated_at = crate::db::now();
     q.source = "codex-limit-hit".into();
     crate::quota::set(app, host, "codex", q).await;

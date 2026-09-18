@@ -111,10 +111,19 @@
     height: 18px;
   }
 
-  /* 更新 chip 留在左上，底下讓給 git 鍵；chip 的右邊距要夠讓第一格額度不壓到 git。 */
-  .main-head.bot-head .quota-open > .quota-update {
-    align-self: flex-start;
-    margin-right: 14px;
+  /* 額度列左邊常駐讓出 git 鍵那一欄（4 + 32px）。原本靠「更新」chip 的右邊距撐開，
+     沒有更新時 chip 不畫，第一格 cc0 就滑到 git 鍵底下被蓋住（2026-09-11 手機實拍）。
+     更新 chip 仍在這一欄的左上，git 鍵在它下面。 */
+  .main-head.bot-head:has(> .mobile-git-info) .quota-open {
+    position: relative;
+    padding-left: 40px;
+  }
+
+  .main-head.bot-head:has(> .mobile-git-info) .quota-open > .quota-update {
+    position: absolute;
+    top: 2px;
+    left: 4px;
+    margin: 0;
   }
 
   .main-head.bot-head > .mobile-primary-row {

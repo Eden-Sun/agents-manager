@@ -4,6 +4,7 @@
 //!   serve                       run the daemon (REST + WS + hook receiver)
 //!   hook claude|codex ...       the tiny process agent CLIs invoke; always exits 0
 
+mod agent_relay;
 mod api;
 mod assets;
 mod attach;
