@@ -23,6 +23,7 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
 | 404 | `{"error":"not_found","what":"bot"\|"project"\|"run"\|"pane"\|"turn"}` | 找不到 |
 | 409 | `{"error":"conflict","reason":"<人類可讀>", ...extra}` | 狀態機衝突；extra 視情況含 `run_id` / `turn_id` / `bot_id` / `name` / `path` / `state` |
 | 502 | `{"error":"upstream","message":"..."}` | herdr / DB 出錯 |
+| 503 | `{"error":"start_state_uncommitted","run_id","retryable":true,"message","detail"}` | 外面的副作用已經做了（agent 起來了），run 的狀態卻寫不進 DB；daemon 已排重試，run 會照 herdr 的證據收斂（SPEC §6.2）。不是「沒做」也不是「做好了」：看 bot 狀態，或稍後重送 |
 
 所有寫 config.toml 的 API（建/改專案、建/改 bot、排序、還原、建/刪身分）套用、驗證、DB-backed 大量軟刪
 閘門都在**落盤之前**做完（issue #73，統一 commit boundary：全部走 `projection::update_and_project`），
@@ -154,7 +155,7 @@ config.toml 裡沒有的 id（child、已刪）忽略。成功推 `project_chang
 
 | 方法 | 路徑 | body | 回應 |
 |---|---|---|---|
-| POST | `/api/bots/{id}/start` | — | `200 {"run_id"}`；已有 active Run → `409 {"reason":"active run already exists","run_id"}`；`herdr_session = "default"` 的 bot（SPEC §6.5.1）→ `409 {"reason":"default_session"}`；herdr 失敗 502 |
+| POST | `/api/bots/{id}/start` | — | `200 {"run_id"}`；已有 active Run → `409 {"reason":"active run already exists","run_id"}`；`herdr_session = "default"` 的 bot（SPEC §6.5.1）→ `409 {"reason":"default_session"}`；herdr 失敗 502；agent 起來了但 `running` 寫不進去 → `503 start_state_uncommitted`（SPEC §6.2 第 7 步） |
 | POST | `/api/bots/{id}/start?resume=native` | — | 接回 DB 記的原生對話（SPEC §6.5.2）：`200 {"run_id","resumed","session_id","resume_outcome"}`（`resumed` 照 `runs.resume_outcome` 說：`verified`→`true`＋回報的 session；`mismatch`→`false`、`session_id:null`；還沒回報或 `unverified`→`true`＋帶出去的 session；這次沒帶 `--resume`→`false`。不看 SessionStart 一到就清掉的 `resume_session_id`，issue #107）；接不回**不啟動**、不開新對話 → `409 {"reason":"cannot_resume","resumed":false,"resume_reason":"no_session_id"|"transcript_missing"|"unsupported_kind","bot_id"}`，由呼叫端決定要不要改成不帶 `resume` 重送。`resume` 只認 `native`，其他值 400 |
 | POST | `/api/bots/{id}/stop` | — | `200 {}`；沒有 Run → `204`。default session 的 bot 只送 ctrl+c、不關 pane |
 | POST | `/api/bots/{id}/interrupt` | — | `200 {}`（送 `esc`，in-flight Turn 標 failed）；`esc` 送不出 → 502，Turn 維持 in-flight |

@@ -221,7 +221,7 @@ fn failure_text(e: &LcError) -> String {
     match e {
         LcError::NotFound(what) => format!("找不到 {what}"),
         LcError::Bad(m) | LcError::Upstream(m) => m.clone(),
-        LcError::Conflict(v) | LcError::BadValue(v) | LcError::Unprocessable(v) | LcError::Forbidden(v) | LcError::Unavailable(v) => ["hint", "message", "reason"]
+        LcError::Conflict(v) | LcError::BadValue(v) | LcError::Unprocessable(v) | LcError::Forbidden(v) | LcError::Unavailable(v) | LcError::Uncommitted(v) => ["hint", "message", "reason"]
             .iter()
             .find_map(|k| v.get(*k).and_then(|x| x.as_str()))
             .unwrap_or("啟動被拒絕")

@@ -725,6 +725,10 @@ stall watchdog 的自動補送走同一條驗證路徑，次數記在 `turns.res
 6. 開該 pane 的狀態訂閱。
 7. `agent.wait {until:[idle,done,blocked], timeout_ms: 60000}`：idle/done → running+idle；blocked → running+blocked（例如 trust 提示）；
    timeout/error → 不關 pane，`agent.get` 有 agent → running+unknown，沒有 → `exited` + 關 pane。
+   `running` 以 CAS（`starting → running`）寫入，**寫不進去就不回成功**（#145）：agent 已經在跑，不殺它、也不收成 `exited`，
+   回 `503 start_state_uncommitted`，排背景對帳重試照 herdr 的證據收成 `running`（不開第二顆）。CAS 輸了（不拿 bot 鎖的
+   pane-exit／workspace-closed 事件先把它收成終態）不拉回 `running`，回 502。前面任何一步失敗時的 `exited` 同樣是 CAS（from `starting`）；
+   pane 已經收掉、`exited` 卻寫不進去時排同一種重試，不留一顆永遠擋住下一次 start 的 `starting`。
 
 **run 狀態的寫法**（#135 起，`lifecycle::run_state`）：生命週期裡的 `runs.state` 轉移走 SQL 帶來源狀態的 CAS，
 三種結果分開——轉過去了才做後續的副作用；CAS 輸了表示別的路徑先收掉了，收尾歸那條路；DB 寫不進去就不做後續不可逆的動作、

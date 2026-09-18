@@ -98,6 +98,9 @@ pub enum LcError {
     /// 503：我們自己需要的一份狀態暫時讀不到（目前只有維護窗口的租約，issue #127），所以**不敢**往下做——
     /// 不是「herdr／DB 出錯」的統稱 502。body 是機器可讀的，帶 `retryable:true`、`sent:false`（一個字都沒送）。
     Unavailable(Value),
+    /// 503：跟 `Unavailable` 相反——外面的副作用**已經做了**（agent 起來了、pane 關了），run 的狀態卻寫不進 DB
+    /// （#145／#146）。不是「沒做」也不是「做好了」：重試已經排了，run 會照 herdr 的證據收斂。body 見 [`LcError::uncommitted`]。
+    Uncommitted(Value),
 }
 
 impl LcError {
@@ -109,6 +112,14 @@ impl LcError {
             }
         }
         LcError::Conflict(o)
+    }
+
+    /// `{"error": what, "run_id", "retryable": true, "message", "detail"}`；`what` 是
+    /// `start_state_uncommitted`／`stop_state_uncommitted`。
+    pub(crate) fn uncommitted(what: &str, run_id: &str, message: &str, detail: impl std::fmt::Display) -> Self {
+        LcError::Uncommitted(json!({
+            "error": what, "run_id": run_id, "retryable": true, "message": message, "detail": detail.to_string(),
+        }))
     }
 }
 
