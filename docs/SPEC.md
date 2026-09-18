@@ -730,10 +730,11 @@ stall watchdog 的自動補送走同一條驗證路徑，次數記在 `turns.res
    pane-exit／workspace-closed 事件先把它收成終態）不拉回 `running`，回 502。前面任何一步失敗時的 `exited` 同樣是 CAS（from `starting`）；
    pane 已經收掉、`exited` 卻寫不進去時排同一種重試，不留一顆永遠擋住下一次 start 的 `starting`。
 
-**run 狀態的寫法**（#135 起，`lifecycle::run_state`）：生命週期裡的 `runs.state` 轉移走 SQL 帶來源狀態的 CAS，
+**run 狀態的寫法**（#135／#145／#146，`lifecycle::run_state`）：生命週期裡的 `runs.state` 轉移一律是 SQL 帶來源狀態的 CAS，
 三種結果分開——轉過去了才做後續的副作用；CAS 輸了表示別的路徑先收掉了，收尾歸那條路；DB 寫不進去就不做後續不可逆的動作、
-錯誤往上傳。外面的事已經發生而狀態沒寫進去時，背景重試（2／5／15／30／60／120 秒，同一顆 run 同一種只排一條）交給對帳
-照 herdr 的證據收；daemon 在那之前重啟，開機的對帳照同一份證據收。重試只管節流，不是狀態的權威。
+錯誤往上傳。外面的副作用已經發生而狀態沒寫進去時（agent 起來了、pane 關了），背景重試（2／5／15／30／60／120 秒，同一顆 run
+同一種只排一條）：交給對帳照證據收、補記使用者 stop 的 `stopped`、或把停不下來的 run 放回 `running`；daemon 在那之前重啟，
+開機的對帳照同一份證據收。重試只管節流，不是狀態的權威。
 
 **tab 生命週期**：停止與 orphan 回收共用 `close_pane_and_tab`：先 `pane.close`，再 `tab.list` 確認該 tab `pane_count == 0` 才 `tab.close`；共享 tab 不動，
 tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run 只關 pane。
@@ -774,6 +775,15 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run
 - `interrupt`：`agent.send_keys [esc]`，Run 狀態不變。
   **按了 interrupt 之後，這顆 bot 排著的 queued 不立刻送**：先讓使用者拿回輸入框，規則見 §4.4a「使用者中斷之後，先讓使用者拿回輸入框」。
 - `stop`：Run `stopping` → in-flight Turn 標 `failed` → `ctrl+c` ×2（間隔 500 ms）→ 等 `pane.exited` 或 agent 消失最多 10 秒 → 否則 `pane.close` → `stopped` → 關訂閱。
+  run 狀態與破壞性的副作用不是兩條平行線（#146）：
+  - `stopping` 以 CAS（from `starting`／`running`／`stopping`，上次沒停成的可以再按）寫入，**寫不進去就一步都不做**（不收 in-flight、
+    不送 ctrl+c、不關 pane、不撤佇列），回 502。讀完 active run 之後已經被 pane-exit 事件收掉（CAS 輸了）→ 什麼都不做，回 `204`。
+  - 「agent 不在」只認 herdr 明確說不在；RPC 失敗不算。結果分成自己退出／pane 被強制關掉並確認不在／還活著／問不到。
+    後兩種不能記 `stopped`、不撤佇列，回 `502 stop_not_confirmed`：還活著（default session 的 pane 不能關，§6.5.1）就放回 `running`，
+    問不到就留 `stopping` 排對帳。
+  - `stopped` 以 CAS（from `stopping`）寫進去**之後**才撤孤兒佇列、撤回等它起來的訊息（#122）、關訂閱。寫不進去回 `503 stop_state_uncommitted`，
+    排重試補記 `stopped` 再收尾（重啟那一半的 stop 改交給對帳收成 `exited`：沒開回來不是使用者要它停）。stop 自己關的 pane 觸發的
+    pane-exit 事件搶先寫了 `exited` 時，改標成 `stopped`（兩個都是終態），一般的收尾不做第二份，只補撤回等它起來的訊息（exit 那條路不撤它）。
 - `POST /bots/:id/restart`：有 Run 先 stop 再 start，用來套用改過的 model／args／identity／env。
 - DELETE Bot：TOML 移除＋DB `deleted_at`（單一臨界區，§3.1；保留對話）→ stop（child 與自己）→ 刪 `~/.config/agents-manager/bots/<bot_id>/`（遠端 ssh `rm -rf`，失敗只 log）。
   先定案再停：拒絕只會發生在任何東西被停之前（2026-09-14 sol 四輪；原本是 stop 在前）。全程持該 bot 的 per-bot 鎖。
@@ -1296,6 +1306,9 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   - **子 agent**不能照一般路徑重開 pane，改走 `lifecycle::restart_child_in_pane`：送 `ctrl+c` 讓 agent 退出、**不關 pane**，同 agent 名在同 pane `agent.start`，
     帶 `--resume <上一個 session>`、bots 上的模型／強度與 `auto_approve` 旗標（pane shell 裡的帳號與 shim 不變）。過程中 pane 不見 → run 標 exited 不重開。
     agent 10 秒內沒退出 → 回 502、不動 pane，run 從 `stopping` **放回 `running`**（agent 還在）。單顆 `POST /api/bots/{id}/restart` 對子 agent 走同一條路。
+    舊 run 的 `running → stopping → stopped` 與新 run 的 `starting → running` 走 §6.4 stop 同一套 CAS（#146）：`stopping` 寫不進去就不動子 agent；
+    舊 run 的 `stopped` 寫進去之前不寫新 run、不 `agent.start`（寫不進去回 `503 stop_state_uncommitted`，憑證隨之放掉，對帳把舊 run 收成
+    `exited` 後排著的派工照 #129 撤）；新 run 的 `running` 寫不進去回 `503 start_state_uncommitted` 並排對帳重試。
   - 序列而非並行：per-bot 鎖與 pane 版面都假設一次一顆，並行的錯誤也分不出是誰的。
 - **一顆失敗不中斷整批**。最後仍啟動失敗的：留下 pane 已關的 run 就結束掉，並推 supervisor inbox `kind = bot_restart_failed`（`batch_id`、`bot_id`、`name`、`error`）。
 - **總管 bot 排最後**；重啟後 60 秒內每 5 秒檢查 running／pane／agent，沒回來就自動再啟動一次，推 `kind = supervisor_restart_retry`（含 `ok`、`error`）。

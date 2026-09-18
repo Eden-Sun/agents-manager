@@ -908,7 +908,7 @@ pub async fn restart_bot_with(app: &Arc<App>, bot_id: &str, opts: StartOpts) -> 
     let stopping = db::active_run(&app.db, bot_id).await.map_err(up)?.map(|r| r.id);
     // 停到起之間沒有 active run，但 bot 馬上就回來：排著的派工不是孤兒（issue #106，`restart_hold`）。
     let restarting = super::restart_hold::begin(bot_id);
-    stop_bot_locked(app, bot_id).await?;
+    stop_for_restart_locked(app, bot_id).await?;
     let started = restart_start(app, bot_id, opts).await;
     drop(restarting);
     match &started {
@@ -992,7 +992,14 @@ pub async fn restart_child_in_pane_with(app: &Arc<App>, bot_id: &str, require_id
     let client = client_for_run(app, &run).await?;
     let agent = run.agent_name.clone().unwrap_or_else(|| bot.name.clone());
 
-    let _ = sqlx::query("UPDATE runs SET state='stopping' WHERE id=?").bind(&run.id).execute(&app.db).await;
+    // 舊 run 跟 stop 走同一套（#146 留言）：先記「正在停」，記不下來就一步都不做；被 pane-exit 事件先收掉就不重開。
+    match super::run_state::transition(&app.db, &run.id, super::run_state::LIVE, "stopping", None).await.map_err(up)? {
+        super::run_state::Moved::Applied => {}
+        super::run_state::Moved::Lost => {
+            app.emit_bot_status(bot_id).await;
+            return Err(LcError::Bad("這個子 agent 的 pane 已經被關掉了".into()));
+        }
+    }
     app.emit_bot_status(bot_id).await;
     fail_in_flight(app, &run.id, "restarted to apply the CLI update").await;
 
@@ -1020,22 +1027,36 @@ pub async fn restart_child_in_pane_with(app: &Arc<App>, bot_id: &str, require_id
     }
     if !empty {
         // agent 還在：run 轉回 running。留在 `stopping` 會讓 prompt 409、start 拒絕、reconcile
-        // 也不救——永遠黃燈（2026-09-12 review #1）。
-        let _ = sqlx::query("UPDATE runs SET state='running' WHERE id=? AND state='stopping'")
-            .bind(&run.id)
-            .execute(&app.db)
-            .await;
+        // 也不救——永遠黃燈（2026-09-12 review #1）。寫不進去就排重試。
+        back_to_running(app, &run.id).await;
         app.emit_bot_status(bot_id).await;
         return Err(LcError::Upstream("子 agent 十秒內沒有退出，沒有動它的 pane".into()));
     }
     // 舊 run 停了、新 run 還沒寫進去：這一段沒有 active run，但子 agent 馬上就在同一個 pane 裡回來，
     // 排著的派工不是孤兒（#129，跟 #106 同一件事）。寫入新 run 之後就放掉：之後的失敗照舊撤。
     let restarting = super::restart_hold::begin(bot_id);
-    let _ = sqlx::query("UPDATE runs SET state='stopped', ended_at=? WHERE id=?")
-        .bind(db::now())
-        .bind(&run.id)
-        .execute(&app.db)
-        .await;
+    // 舊 run 的 `stopped` 寫進去之前不寫新 run、不 `agent.start`（#146 留言）：不靠 active-run 唯一索引碰巧擋住。
+    match super::run_state::transition(&app.db, &run.id, &["stopping"], "stopped", None).await {
+        Ok(super::run_state::Moved::Applied) => {}
+        // pane-exit 事件先把它收掉了（pane 沒了）：同上面 pane 不見的處理，不在別處重開。
+        Ok(super::run_state::Moved::Lost) => {
+            app.emit_bot_status(bot_id).await;
+            return Err(LcError::Bad("這個子 agent 的 pane 已經被關掉了".into()));
+        }
+        // agent 已經退出 pane，舊 run 卻還是 `stopping`：不重啟。憑證隨 return 放掉（#129：沒開回來照舊撤），
+        // 對帳照證據把舊 run 收成 exited 之後，排著的派工才當孤兒撤。
+        Err(e) => {
+            tracing::warn!(bot = %bot.name, run = %run.id, error = %e, "the child left its pane but its old run could not be recorded as stopped; not restarting");
+            super::run_state::schedule_settle(app, &run.id, super::run_state::Settle::Reconcile { stuck: "stopping".into() });
+            app.emit_bot_status(bot_id).await;
+            return Err(LcError::uncommitted(
+                "stop_state_uncommitted",
+                &run.id,
+                "子 agent 已經退出，但舊 run 的狀態寫不進 DB；沒有重啟，已排重試",
+                e,
+            ));
+        }
+    }
     // 測試在這裡插進不拿 bot 鎖的 sweeper。
     #[cfg(test)]
     {
@@ -1112,7 +1133,25 @@ pub async fn restart_child_in_pane_with(app: &Arc<App>, bot_id: &str, require_id
         app.emit_bot_status(bot_id).await;
         return Err(LcError::Upstream(format!("pane {pane_id} never became an available shell")));
     }
-    let _ = sqlx::query("UPDATE runs SET state='running' WHERE id=?").bind(&run_id).execute(&app.db).await;
+    // 同 #145：agent 起來了，`running` 寫不進去就不回成功；pane-exit 事件先收掉的不拉回來。
+    match super::run_state::transition(&app.db, &run_id, &["starting"], "running", None).await {
+        Ok(super::run_state::Moved::Applied) => {}
+        Ok(super::run_state::Moved::Lost) => {
+            app.emit_bot_status(bot_id).await;
+            return Err(LcError::Bad("這個子 agent 的 pane 已經被關掉了".into()));
+        }
+        Err(e) => {
+            tracing::warn!(bot = %bot.name, run = %run_id, error = %e, "the child is back but its run could not be recorded as running");
+            super::run_state::schedule_settle(app, &run_id, super::run_state::Settle::Reconcile { stuck: "starting".into() });
+            app.emit_bot_status(bot_id).await;
+            return Err(LcError::uncommitted(
+                "start_state_uncommitted",
+                &run_id,
+                "子 agent 已經在原 pane 裡起來了，但 run 的狀態寫不進 DB；已排重試，會照 herdr 的狀態收斂成 running",
+                e,
+            ));
+        }
+    }
     let until = [AgentStatus::Idle, AgentStatus::Done, AgentStatus::Blocked];
     if let Err(e) = client.agent_wait(&agent, &until, 60_000).await {
         tracing::warn!(bot = %bot.name, error = %e, "子 agent 重啟後沒等到 ready，run 留著讓對帳接手");

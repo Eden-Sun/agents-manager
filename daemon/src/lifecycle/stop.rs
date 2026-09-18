@@ -28,12 +28,50 @@ pub(crate) fn refuse_default_session(bot: &db::Bot) -> LcResult<()> {
 
 /// [`stop_bot`] with the lock already held, so a restart stops and starts under one guard.
 pub async fn stop_bot_locked(app: &Arc<App>, bot_id: &str) -> LcResult<bool> {
+    stop_locked(app, bot_id, false).await
+}
+
+/// 重啟那一半的 stop。差別只在 `stopped` 寫不進去之後的重試：重啟沒把 bot 開回來不是「使用者要它停」
+/// （同 `left_down_by_restart`），所以交給對帳照證據收成 `exited`，不補記 `stopped`。
+pub(crate) async fn stop_for_restart_locked(app: &Arc<App>, bot_id: &str) -> LcResult<bool> {
+    stop_locked(app, bot_id, true).await
+}
+
+/// ctrl+c（必要時關 pane）之後，外面的 agent 到底怎麼了（#146）。只有前兩種能記成 `stopped`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StopOutcome {
+    /// agent 自己退出了（或 pane 已經不在）。
+    Gone,
+    /// 沒退出，pane 被強制關掉、確認不在了。
+    ForcedClosed,
+    /// agent 還在：default session 不能關使用者的 pane，或 pane 關不掉。
+    StillAlive,
+    /// 問不到 herdr，不知道。
+    Unknown,
+}
+
+async fn stop_locked(app: &Arc<App>, bot_id: &str, for_restart: bool) -> LcResult<bool> {
     let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     let Some(run) = db::active_run(&app.db, bot_id).await.map_err(up)? else { return Ok(false) };
     let host = db::bot_host(&app.db, bot_id).await.map_err(up)?;
     let client = client_for_run(app, &run).await?;
+    // 讀完 active run、還沒記 `stopping` 的那一瞬（測試在這裡插進不拿 bot 鎖的 pane-exit 事件）。
+    #[cfg(test)]
+    {
+        super::race_point::hit("stop_before_stopping", bot_id).await;
+    }
 
-    let _ = sqlx::query("UPDATE runs SET state='stopping' WHERE id=?").bind(&run.id).execute(&app.db).await;
+    // 先把「正在停」記下來，才有權動外面（#146）：記不下來就一步都不做——不收 in-flight、不送 ctrl+c、
+    // 不關 pane、不撤佇列。讀完 active run 之後被不拿鎖的 pane-exit 事件先收掉的話（CAS 輸了），收尾歸那條路。
+    // 來源含 `stopping`：上一次沒停成（寫不進 `stopped`、agent 沒退出）的 stop 可以原樣再按一次。
+    match super::run_state::transition(&app.db, &run.id, super::run_state::LIVE, "stopping", None).await.map_err(up)? {
+        super::run_state::Moved::Applied => {}
+        super::run_state::Moved::Lost => {
+            tracing::info!(bot = %bot.name, run = %run.id, "stop: another path ended the run first; nothing left to stop");
+            app.emit_bot_status(bot_id).await;
+            return Ok(false);
+        }
+    }
     app.emit_bot_status(bot_id).await;
     fail_in_flight(app, &run.id, "run stopped by user").await;
 
@@ -42,14 +80,15 @@ pub async fn stop_bot_locked(app: &Arc<App>, bot_id: &str) -> LcResult<bool> {
         let _ = client.agent_send_keys(&target, &["ctrl+c".to_string()]).await;
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
+    // 只認 herdr 明確說「不在」：RPC 失敗不是退出的證據。
     let mut gone = false;
     for _ in 0..20 {
         let agent = client.agent_get(&target).await;
         let pane = match run.pane_id.as_deref() {
-            Some(p) => client.pane_get(p).await.ok().flatten(),
+            Some(p) => Some(client.pane_get(p).await),
             None => None,
         };
-        if matches!(agent, Ok(None)) || pane.is_none() {
+        if matches!(agent, Ok(None)) || matches!(pane, Some(Ok(None))) {
             gone = true;
             break;
         }
@@ -57,33 +96,141 @@ pub async fn stop_bot_locked(app: &Arc<App>, bot_id: &str) -> LcResult<bool> {
     }
     // Close the Run's pane (and its tab if owned) so no bare shell lingers — except in the user's
     // `default` session (SPEC §6.5.1): only ctrl+c; closing took their terminal (review 2026-09-12 #4).
-    if in_default_session(&run) {
-        if !gone {
+    let outcome = if in_default_session(&run) {
+        if gone {
+            StopOutcome::Gone
+        } else {
             tracing::warn!(bot = %bot.name, "agent did not exit within 10s; its pane is the user's own and is left open");
+            StopOutcome::StillAlive
         }
+    } else if let Some(p) = run.pane_id.as_deref() {
+        close_pane_and_tab(&client, run.workspace_id.as_deref(), run.tab_id.as_deref(), p).await;
+        if gone {
+            StopOutcome::Gone
+        } else {
+            tracing::warn!(bot = %bot.name, "agent did not exit within 10s; closing its pane forcibly");
+            match client.pane_get(p).await {
+                Ok(None) => StopOutcome::ForcedClosed,
+                Ok(Some(_)) => StopOutcome::StillAlive,
+                Err(_) => StopOutcome::Unknown,
+            }
+        }
+    } else if gone {
+        StopOutcome::Gone
     } else {
-        if let Some(p) = run.pane_id.as_deref() {
-            close_pane_and_tab(&client, run.workspace_id.as_deref(), run.tab_id.as_deref(), p).await;
+        StopOutcome::Unknown
+    };
+    if matches!(outcome, StopOutcome::StillAlive | StopOutcome::Unknown) {
+        // agent 可能還活著：不能記成 `stopped`、不撤佇列（#146 驗收 3）。確定還在就放回 `running`；
+        // 問不到就留 `stopping`，讓對帳照證據收（看得到 agent 放回 running，看不到收成 exited）。
+        if outcome == StopOutcome::StillAlive {
+            back_to_running(app, &run.id).await;
+        } else {
+            super::run_state::schedule_settle(app, &run.id, super::run_state::Settle::Reconcile { stuck: "stopping".into() });
         }
-        if !gone {
-            tracing::warn!(bot = %bot.name, "agent did not exit within 10s; pane closed forcibly");
-        }
+        app.emit_bot_status(bot_id).await;
+        return Err(LcError::Upstream(format!(
+            "stop_not_confirmed: agent `{target}` did not exit ({outcome:?}); the run is not recorded as stopped"
+        )));
     }
-    let _ = sqlx::query("UPDATE runs SET state='stopped', ended_at=? WHERE id=?")
-        .bind(db::now())
-        .bind(&run.id)
-        .execute(&app.db)
-        .await;
-    // 停掉之後沒有人會送它排著的 queued：收掉，不留著佔名額、擋 restart safety（AGM 2026-09-16）。
-    revoke_orphaned_queued_turns(app, bot_id, "bot 已被停止").await;
-    super::start_send::withdraw_on_stop(app, bot_id).await;
-    if let Some(p) = run.pane_id.as_deref() {
-        if let Some(session) = app.session_for_run(&run).await {
-            crate::events::unwatch_pane_on_session(app, &host, &session, p).await;
+    // pane 關了、`stopped` 還沒記下的那一瞬（herdr 的 pane_closed 事件會在這裡搶進來）。
+    #[cfg(test)]
+    {
+        super::race_point::hit("stop_before_stopped", bot_id).await;
+    }
+    match commit_stopped(app, &run.id).await {
+        Ok(StopCommit::Applied) => after_stop(app, bot_id, &run, &host).await,
+        // 被 pane-exit 事件收成 `exited`（已改標成 `stopped`）：一般的收尾那條路做過了，不做第二份；
+        // 只補 stop 才有的那一份（撤回等它起來的訊息）。
+        Ok(StopCommit::Relabelled) => super::start_send::withdraw_on_stop(app, bot_id).await,
+        Ok(StopCommit::Lost) => {}
+        // agent 已經停了，終態卻寫不進去（#146 驗收 2）：不回一般的成功，佇列與 watcher 等終態成立再動，排重試。
+        Err(e) => {
+            tracing::warn!(bot = %bot.name, run = %run.id, error = %e, "the agent is stopped but its run could not be recorded as stopped");
+            let how = if for_restart {
+                super::run_state::Settle::Reconcile { stuck: "stopping".into() }
+            } else {
+                super::run_state::Settle::FinishStop
+            };
+            super::run_state::schedule_settle(app, &run.id, how);
+            app.emit_bot_status(bot_id).await;
+            return Err(LcError::uncommitted(
+                "stop_state_uncommitted",
+                &run.id,
+                "agent 已經停了，但 run 的狀態寫不進 DB；已排重試，會補記成停止",
+                e,
+            ));
         }
     }
     app.emit_bot_status(bot_id).await;
     Ok(true)
+}
+
+/// [`commit_stopped`] 做成了什麼。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StopCommit {
+    /// `stopping → stopped`：收尾全部歸這裡（[`after_stop`]）。
+    Applied,
+    /// 被 pane-exit 事件先收成 `exited`，改標回 `stopped`：一般的收尾那條路做過了，只差 stop 才有的那一份。
+    Relabelled,
+    /// 兩者都不是：別的路徑已經收成別的樣子，什麼都不做。
+    Lost,
+}
+
+/// `stopping → stopped`。CAS 輸了而且是被不拿 bot 鎖的 pane-exit 事件收成 `exited`（多半是 stop 自己關的 pane
+/// 觸發的）：改標成 `stopped`——兩個都是終態、不復活任何東西，但 `stopped` 才是「使用者要它停」的紀錄（#131，
+/// incident 探針靠它分辨）。
+async fn commit_stopped(app: &Arc<App>, run_id: &str) -> Result<StopCommit, sqlx::Error> {
+    match super::run_state::transition(&app.db, run_id, &["stopping"], "stopped", None).await? {
+        super::run_state::Moved::Applied => Ok(StopCommit::Applied),
+        super::run_state::Moved::Lost => match super::run_state::transition(&app.db, run_id, &["exited"], "stopped", None).await {
+            Ok(super::run_state::Moved::Applied) => Ok(StopCommit::Relabelled),
+            Ok(super::run_state::Moved::Lost) => Ok(StopCommit::Lost),
+            Err(e) => {
+                tracing::warn!(run = run_id, error = %e, "could not relabel a run the pane-exit event ended during a stop");
+                Ok(StopCommit::Lost)
+            }
+        },
+    }
+}
+
+/// 終態寫進去之後才做的收尾（跟 #135 同一條：先有 durable 的終態，才撤佇列、拆 watcher）。
+async fn after_stop(app: &Arc<App>, bot_id: &str, run: &db::Run, host: &str) {
+    // 停掉之後沒有人會送它排著的 queued：收掉，不留著佔名額、擋 restart safety（AGM 2026-09-16）。
+    revoke_orphaned_queued_turns(app, bot_id, "bot 已被停止").await;
+    super::start_send::withdraw_on_stop(app, bot_id).await;
+    if let Some(p) = run.pane_id.as_deref() {
+        if let Some(session) = app.session_for_run(run).await {
+            crate::events::unwatch_pane_on_session(app, host, &session, p).await;
+        }
+    }
+}
+
+/// 停不下來（agent 還在）：`stopping → running` 放回去。留在 `stopping` 會讓 prompt 409、start 拒絕，
+/// default session 的 run 連對帳都不救（2026-09-12 review #1）。寫不進去就排重試。
+pub(crate) async fn back_to_running(app: &Arc<App>, run_id: &str) {
+    if let Err(e) = super::run_state::transition(&app.db, run_id, &["stopping"], "running", None).await {
+        tracing::warn!(run = run_id, error = %e, "could not put a run that did not stop back to running");
+        super::run_state::schedule_settle(app, run_id, super::run_state::Settle::BackToRunning);
+    }
+}
+
+/// [`run_state::Settle::FinishStop`] 的重試：stop 在外面已經做完，補記 `stopped` 與它之後的收尾。
+/// 在 bot 鎖裡做；只動仍停在 `stopping`（或被 pane-exit 收成 `exited`、還沒改標）的這一顆。
+pub(crate) async fn finish_stop(app: &Arc<App>, run_id: &str) {
+    let Ok(Some(run)) = db::run(&app.db, run_id).await else { return };
+    let lock = app.bot_lock(&run.bot_id).await;
+    let _g = lock.lock().await;
+    match commit_stopped(app, run_id).await {
+        Ok(StopCommit::Applied) => {
+            let host = db::bot_host(&app.db, &run.bot_id).await.unwrap_or_else(|_| LOCAL_HOST.to_string());
+            after_stop(app, &run.bot_id, &run, &host).await;
+        }
+        Ok(StopCommit::Relabelled) => super::start_send::withdraw_on_stop(app, &run.bot_id).await,
+        Ok(StopCommit::Lost) => {}
+        Err(e) => tracing::warn!(run = run_id, error = %e, "retrying the stopped record failed"),
+    }
+    app.emit_bot_status(&run.bot_id).await;
 }
 
 /// stop (if running) + start. Used to make edited `model` / `args` / `identity` / `env` take effect.
@@ -512,3 +659,328 @@ mod default_session_tests {
     }
 }
 
+
+#[cfg(test)]
+mod stop_commit_tests {
+    //! #146：`stopping`／`stopped` 寫不進去時，stop（與子 agent 原地重啟）不能照做破壞性的副作用、不能回成功。
+    use super::super::run_state as rs;
+    use super::*;
+    use crate::testing as tt;
+
+    fn since(env: &tt::Env, n: usize) -> Vec<String> {
+        env.herdr.methods().into_iter().skip(n).collect()
+    }
+
+    async fn state(app: &Arc<App>, run: &str) -> String {
+        db::run(&app.db, run).await.unwrap().unwrap().state
+    }
+
+    /// 一顆在跑的 bot：自己的 tab、pane、有名字的 agent（mock 收到 ctrl+c 就讓它離開）。不走 `start_bot`：
+    /// 遠端編譯機沒裝 claude，preflight 會擋（#139）。
+    async fn running_bot(env: &tt::Env) -> (String, String) {
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, _root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let pane = client.tab_create(&ws.workspace_id, "/tmp/p", "alfa", json!({})).await.unwrap();
+        let bot = tt::claude_bot(&app, &env.project_id, "alfa").await;
+        let run = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, tab_id, pane_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','idle',?,?,?,'proj-alfa','test',?)",
+        )
+        .bind(&run)
+        .bind(&bot.id)
+        .bind(&ws.workspace_id)
+        .bind(&pane.tab_id)
+        .bind(&pane.pane_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        env.herdr.agents.lock().unwrap().push(json!({
+            "name": "proj-alfa", "agent": "claude", "agent_status": "idle",
+            "workspace_id": ws.workspace_id, "tab_id": pane.tab_id, "pane_id": pane.pane_id, "cwd": "/tmp/p"}));
+        (bot.id, run)
+    }
+
+    /// 驗收 1：`stopping` 記不下來 → 一步都不做：不收 in-flight、不送 ctrl+c、不關 pane、不撤佇列。
+    #[tokio::test]
+    async fn a_stop_that_cannot_record_stopping_does_nothing_to_the_agent() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot, run) = running_bot(&env).await;
+        let in_flight = rs::a_turn(&app, &bot, Some(&run), "in_flight").await;
+        let queued = rs::a_turn(&app, &bot, None, "queued").await;
+        let watcher = rs::watch_run_pane(&app, &run).await;
+        rs::refuse_run_state(&app, "stopping").await;
+        let n = env.herdr.methods().len();
+
+        let err = stop_bot(&app, &bot).await.expect_err("沒記下「正在停」就不是在停");
+        assert!(matches!(err, LcError::Upstream(_)), "{err:?}");
+        let calls = since(&env, n);
+        assert!(!calls.iter().any(|m| m == "agent.send_keys" || m == "pane.close"), "{calls:?}");
+        assert_eq!(state(&app, &run).await, "running");
+        assert_eq!(rs::turn_status(&app, &in_flight).await, "in_flight");
+        assert_eq!(rs::turn_status(&app, &queued).await, "queued");
+        assert!(rs::watched(&app, &watcher).await);
+    }
+
+    /// 驗收 2：pane 真的關了，`stopped` 卻寫不進去——不回一般的成功；終態還沒成立，佇列與 watcher 先不動。
+    /// DB 恢復後補記 `stopped`（使用者要它停），收尾照常、只做一次。
+    #[tokio::test]
+    async fn a_stop_whose_stopped_state_cannot_be_recorded_is_not_reported_as_done() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot, run) = running_bot(&env).await;
+        let pane = db::run(&app.db, &run).await.unwrap().unwrap().pane_id.unwrap();
+        let queued = rs::a_turn(&app, &bot, None, "queued").await;
+        let watcher = rs::watch_run_pane(&app, &run).await;
+        rs::refuse_run_state(&app, "stopped").await;
+
+        match stop_bot(&app, &bot).await {
+            Err(LcError::Uncommitted(v)) => assert_eq!((v["error"].as_str(), v["run_id"].as_str()), (Some("stop_state_uncommitted"), Some(run.as_str()))),
+            other => panic!("DB 沒記下 stopped，要 503 stop_state_uncommitted，拿到 {other:?}"),
+        }
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        assert!(client.pane_get(&pane).await.unwrap().is_none(), "pane 真的關了");
+        assert_eq!(state(&app, &run).await, "stopping");
+        assert_eq!(rs::turn_status(&app, &queued).await, "queued", "終態還沒寫進去，佇列先不撤");
+        assert!(rs::watched(&app, &watcher).await);
+        assert_eq!(rs::scheduled(&run), vec![rs::Settle::FinishStop], "排了補記的重試");
+
+        rs::accept_run_state(&app, "stopped").await;
+        assert!(rs::settle_once(&app, &run, &rs::Settle::FinishStop).await);
+        assert_eq!(state(&app, &run).await, "stopped", "使用者要它停");
+        assert_eq!(rs::turn_status(&app, &queued).await, "failed");
+        assert_eq!(rs::system_notes(&app, &queued).await, 1);
+        assert!(!rs::watched(&app, &watcher).await);
+    }
+
+    /// 驗收 2 的另一半：重試還沒補上 daemon 就重啟了（排的重試跟著沒了）——開機的對帳照證據把它收掉，
+    /// 不會留一顆擋住 start 的 `stopping`。
+    #[tokio::test]
+    async fn a_stop_left_in_stopping_is_settled_by_the_reconcile_after_a_restart() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot, run) = running_bot(&env).await;
+        rs::refuse_run_state(&app, "stopped").await;
+        assert!(stop_bot(&app, &bot).await.is_err());
+        rs::accept_run_state(&app, "stopped").await;
+
+        crate::reconcile::reconcile_host(&app, LOCAL_HOST).await.unwrap();
+        assert!(db::active_run(&app.db, &bot).await.unwrap().is_none(), "不再擋住下一次 start：{}", state(&app, &run).await);
+    }
+
+    /// 驗收 3：default session 的 pane 不能強制關；agent 對 ctrl+c 沒反應、還活著，就不能記成 `stopped`。
+    #[tokio::test]
+    async fn a_default_session_agent_that_ignores_ctrl_c_is_not_recorded_as_stopped() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, _root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let pane = client.tab_create(&ws.workspace_id, "/tmp/p", "mine", json!({})).await.unwrap();
+        let bot = tt::claude_bot(&app, &env.project_id, "mine").await.id;
+        sqlx::query("UPDATE bots SET herdr_session='default' WHERE id=?").bind(&bot).execute(&app.db).await.unwrap();
+        let run = db::ulid();
+        // herdr 的目標寫成 pane id：mock 只照名字在 ctrl+c 時移除 agent，這顆就像不理 ctrl+c 的 agent。
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, tab_id, pane_id, agent_name, herdr_session, adopted, started_at)
+             VALUES (?,?,'running','idle',?,?,?,?,'default',1,?)",
+        )
+        .bind(&run)
+        .bind(&bot)
+        .bind(&ws.workspace_id)
+        .bind(&pane.tab_id)
+        .bind(&pane.pane_id)
+        .bind(&pane.pane_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        *env.herdr.agents.lock().unwrap() = vec![json!({
+            "name": "mine", "agent": "claude", "agent_status": "idle",
+            "workspace_id": ws.workspace_id, "tab_id": pane.tab_id, "pane_id": pane.pane_id, "cwd": "/tmp/p"})];
+        let queued = rs::a_turn(&app, &bot, None, "queued").await;
+
+        let err = stop_bot(&app, &bot).await.expect_err("agent 還活著，不是停好了");
+        assert!(matches!(&err, LcError::Upstream(m) if m.starts_with("stop_not_confirmed")), "{err:?}");
+        assert_eq!(state(&app, &run).await, "running", "agent 還在，run 放回 running");
+        assert_eq!(rs::turn_status(&app, &queued).await, "queued");
+        assert!(!env.herdr.methods().iter().any(|m| m == "pane.close"), "使用者的 pane 照舊不關");
+    }
+
+    /// 驗收 4：讀完 active run 之後，不拿 bot 鎖的 pane-exit 事件先把它收成 `exited`——stop 輸了 CAS，
+    /// 不再對它送 ctrl+c／關 pane，也不把它拉回 `stopping`。
+    #[tokio::test]
+    async fn a_stop_that_finds_its_run_already_ended_does_not_touch_the_pane() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot, run) = running_bot(&env).await;
+        let (app2, run2) = (app.clone(), run.clone());
+        super::super::race_point::arm("stop_before_stopping", &bot, move || async move {
+            mark_run_exited(&app2, &run2, "pane exited").await;
+        });
+        let n = env.herdr.methods().len();
+
+        assert!(!stop_bot(&app, &bot).await.unwrap(), "沒有東西要停");
+        let calls = since(&env, n);
+        assert!(!calls.iter().any(|m| m == "agent.send_keys" || m == "pane.close"), "{calls:?}");
+        assert_eq!(state(&app, &run).await, "exited", "終態不被拉回 stopping");
+    }
+
+    /// stop 自己關的 pane 觸發 herdr 的 pane_closed 事件，事件那邊的 `mark_run_exited` 搶在 stop 記
+    /// `stopped` 之前寫了 `exited`：仍然記成使用者要的 `stopped`（autostart 的 bot 才不會被報 `bot_stopped`），
+    /// 收尾不做第二份。
+    #[tokio::test]
+    async fn a_pane_exit_that_lands_during_a_stop_still_leaves_it_recorded_as_a_user_stop() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot, run) = running_bot(&env).await;
+        let queued = rs::a_turn(&app, &bot, None, "queued").await;
+        let (app2, run2) = (app.clone(), run.clone());
+        super::super::race_point::arm("stop_before_stopped", &bot, move || async move {
+            mark_run_exited(&app2, &run2, "pane exited").await;
+        });
+
+        assert!(stop_bot(&app, &bot).await.unwrap());
+        assert_eq!(state(&app, &run).await, "stopped");
+        assert_eq!(rs::turn_status(&app, &queued).await, "failed");
+        assert_eq!(rs::system_notes(&app, &queued).await, 1, "撤一次");
+    }
+
+    /// 同一個競態，排著的是「bot 沒在跑時送、等它起來」的那一種（#122 的 `awaits_start`）：撤孤兒那一支刻意不撤它，
+    /// 只有使用者的 stop 會撤——改標成 `stopped` 的這條路也要補上，不留到下次啟動又送出去。
+    #[tokio::test]
+    async fn a_user_stop_that_raced_a_pane_exit_still_withdraws_what_waited_for_the_start() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot, run) = running_bot(&env).await;
+        let waiting = rs::a_turn(&app, &bot, None, "queued").await;
+        sqlx::query("UPDATE turns SET awaits_start=1 WHERE id=?").bind(&waiting).execute(&app.db).await.unwrap();
+        let (app2, run2) = (app.clone(), run.clone());
+        super::super::race_point::arm("stop_before_stopped", &bot, move || async move {
+            mark_run_exited(&app2, &run2, "pane exited").await;
+        });
+
+        assert!(stop_bot(&app, &bot).await.unwrap());
+        assert_eq!(state(&app, &run).await, "stopped");
+        assert_eq!(rs::turn_status(&app, &waiting).await, "failed", "使用者停了，等它起來的那一則撤回");
+        assert_eq!(rs::system_notes(&app, &waiting).await, 1);
+    }
+
+    /// 子 agent：父開的 pane 裡一顆名字叫 `proj-alfa-ui` 的 agent，run 在跑。
+    async fn a_child(env: &tt::Env) -> (String, String, crate::herdr::PaneInfo) {
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let pane = client.pane_split(&root.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
+        let parent = tt::claude_bot(&app, &env.project_id, "alfa").await;
+        let kid = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, managed_by, parent_bot_id, created_at)
+             VALUES (?,?,'ui','claude','[]',0,0,'tok','child',?,?)",
+        )
+        .bind(&kid)
+        .bind(&env.project_id)
+        .bind(&parent.id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let run = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, tab_id, pane_id, agent_name, herdr_session, adopted, started_at)
+             VALUES (?,?,'running','idle',?,?,?,'proj-alfa-ui','test',1,?)",
+        )
+        .bind(&run)
+        .bind(&kid)
+        .bind(&ws.workspace_id)
+        .bind(&pane.tab_id)
+        .bind(&pane.pane_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        *env.herdr.agents.lock().unwrap() = vec![json!({
+            "name": "proj-alfa-ui", "agent": "claude", "agent_status": "idle",
+            "workspace_id": ws.workspace_id, "tab_id": pane.tab_id, "pane_id": pane.pane_id, "cwd": "/tmp/p"})];
+        (kid, run, pane)
+    }
+
+    /// #146 留言：子 agent 原地重啟的舊 run 走同一套——`stopping` 記不下來就不收 in-flight、不送 ctrl+c。
+    #[tokio::test]
+    async fn a_child_restart_that_cannot_record_stopping_does_not_touch_the_child() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (kid, run, _pane) = a_child(&env).await;
+        let in_flight = rs::a_turn(&app, &kid, Some(&run), "in_flight").await;
+        rs::refuse_run_state(&app, "stopping").await;
+        let n = env.herdr.methods().len();
+
+        assert!(restart_child_in_pane(&app, &kid).await.is_err());
+        let calls = since(&env, n);
+        assert!(!calls.iter().any(|m| m == "agent.send_keys" || m == "agent.start"), "{calls:?}");
+        assert_eq!(state(&app, &run).await, "running");
+        assert_eq!(rs::turn_status(&app, &in_flight).await, "in_flight");
+    }
+
+    /// #146 留言：舊 run 的 `stopped` 沒寫進去之前不能寫新 run、不能 `agent.start`——不是靠 active-run 唯一索引
+    /// 碰巧擋住。失敗照 #129：沒開回來的重啟放掉 `restart_hold`，舊 run 收成終態之後排著的派工才照舊撤。
+    #[tokio::test]
+    async fn a_child_restart_starts_no_replacement_before_the_old_run_is_recorded_stopped() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (kid, run, _pane) = a_child(&env).await;
+        let queued = rs::a_turn(&app, &kid, None, "queued").await;
+        rs::refuse_run_state(&app, "stopped").await;
+
+        let err = restart_child_in_pane(&app, &kid).await.expect_err("舊 run 沒記下 stopped");
+        assert!(matches!(&err, LcError::Uncommitted(v) if v["error"] == "stop_state_uncommitted"), "明確擋下，不是撞唯一索引：{err:?}");
+        assert!(!env.herdr.methods().iter().any(|m| m == "agent.start"));
+        let runs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE bot_id=?").bind(&kid).fetch_one(&app.db).await.unwrap();
+        assert_eq!(runs, 1, "沒有寫新 run");
+        assert_eq!(state(&app, &run).await, "stopping");
+        assert!(!super::super::restart_hold::in_progress(&kid), "重啟結束了");
+        assert_eq!(rs::turn_status(&app, &queued).await, "queued", "舊 run 還沒成終態，不撤");
+        assert_eq!(rs::scheduled(&run), vec![rs::Settle::Reconcile { stuck: "stopping".into() }]);
+
+        rs::accept_run_state(&app, "stopped").await;
+        assert!(rs::settle_once(&app, &run, &rs::Settle::Reconcile { stuck: "stopping".into() }).await);
+        assert!(db::active_run(&app.db, &kid).await.unwrap().is_none());
+        assert_eq!(rs::turn_status(&app, &queued).await, "failed", "沒開回來：照 #129 撤掉");
+    }
+
+    /// 子 agent 在原 pane 裡起來了，新 run 的 `running` 卻寫不進去：同 #145，不回成功、排重試。
+    #[tokio::test]
+    async fn a_child_restart_whose_new_run_cannot_be_recorded_running_is_not_reported_as_done() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (kid, _run, _pane) = a_child(&env).await;
+        rs::refuse_run_state(&app, "running").await;
+
+        let err = restart_child_in_pane(&app, &kid).await.expect_err("新 run 沒記下 running");
+        assert!(matches!(&err, LcError::Uncommitted(v) if v["error"] == "start_state_uncommitted"), "{err:?}");
+        let fresh = db::active_run(&app.db, &kid).await.unwrap().expect("新 run 還在");
+        assert_eq!(fresh.state, "starting");
+        assert_eq!(rs::scheduled(&fresh.id), vec![rs::Settle::Reconcile { stuck: "starting".into() }]);
+    }
+
+    /// 子 agent 不理 ctrl+c（10 秒後放棄），`stopping → running` 放回去也寫不進去：排重試，DB 恢復後放回。
+    #[tokio::test]
+    async fn a_child_restart_that_gives_up_retries_putting_the_run_back() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (kid, run, _pane) = a_child(&env).await;
+        // 名字清掉的 agent：mock 只照名字在 ctrl+c 時移除，這顆就像不理 ctrl+c。
+        env.herdr.agents.lock().unwrap()[0]["name"] = serde_json::Value::Null;
+        rs::refuse_run_state(&app, "running").await;
+
+        assert!(restart_child_in_pane(&app, &kid).await.is_err());
+        assert_eq!(state(&app, &run).await, "stopping");
+        assert_eq!(rs::scheduled(&run), vec![rs::Settle::BackToRunning]);
+
+        rs::accept_run_state(&app, "running").await;
+        assert!(rs::settle_once(&app, &run, &rs::Settle::BackToRunning).await);
+        assert_eq!(state(&app, &run).await, "running");
+    }
+}
