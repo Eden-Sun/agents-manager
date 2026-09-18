@@ -573,6 +573,13 @@ async fn sleep_one(app: &Arc<App>, c: &Cand, session: Option<String>, threshold:
             .await;
             app.emit("bot_changed", json!({"bot_id": c.bot_id, "asleep": true})).await;
         }
+        // agent 已經停了、pane 已經關了，只是 `stopped` 寫不進 DB（503 `stop_state_uncommitted`，run 停在 `stopping`、
+        // 背景重試會補記）：它**就是**睡著的，標記要留著——收回去的話補記之後它只是一顆「使用者停掉」的 bot，
+        // 下一則 prompt 不會用 `--resume` 叫醒它（issue #152）。
+        Err(e @ LcError::Uncommitted(_)) => {
+            tracing::warn!(bot = %c.name, error = ?e, "idle bot stopped but its run could not be recorded as stopped yet; keeping it marked asleep while the retry records it");
+            app.emit("bot_changed", json!({"bot_id": c.bot_id, "asleep": true})).await;
+        }
         Err(e) => {
             // 停不下來就不是睡著的：把標記收回去，下一輪再看。
             tracing::warn!(bot = %c.name, error = ?e, "could not stop the idle bot; it stays running");
@@ -601,7 +608,12 @@ pub async fn wake(app: &Arc<App>, bot_id: &str, why: &str) -> anyhow::Result<boo
 /// 「叫醒檢查過了」與「拿到鎖」之間把剛檢查過的 bot 收掉（那樣 prompt 拿到鎖只會看到 409 `bot has no active run`）。
 pub async fn wake_locked(app: &Arc<App>, bot_id: &str, why: &str) -> anyhow::Result<bool> {
     let Some((_, mins)) = read_asleep(app, bot_id).await? else { return Ok(false) };
-    if db::active_run(&app.db, bot_id).await?.is_some() {
+    if let Some(run) = db::active_run(&app.db, bot_id).await? {
+        // 停在 `stopping`：巡邏停掉了它、`stopped` 還沒補記上（issue #152）。那是睡著的過程，不是「其實還活著」——
+        // 標記留著，補記之後照 `--resume` 叫醒；現在拿一次 start 去撞它也只會撞上那筆還沒收掉的 run。
+        if run.state == "stopping" {
+            return Ok(false);
+        }
         clear_asleep(app, bot_id).await;
         return Ok(false);
     }
@@ -1148,6 +1160,61 @@ mod tests {
         let now = db::active_run(&app.db, &bot).await.unwrap().expect("使用者剛開始打字的 bot 不能被停掉");
         assert_eq!(now.state, "running");
         assert!(asleep(&app, &bot).await.is_none(), "沒收就不該留下睡著的標記");
+    }
+
+    /// issue #152（idle_sleep 那一半）：停機時 agent 已經停了、pane 已經關了，只是 `stopped` 寫不進 DB——`stop` 回 503
+    /// `stop_state_uncommitted`（run 停在 `stopping`，背景重試會補記）。以前一律當成「停不下來」把休眠標記收回去：
+    /// 重試補記成 `stopped` 之後它就是一顆普通「使用者停掉」的 bot，下一則 prompt 不會用 `--resume` 叫醒它。
+    /// 還沒補記的那一段，叫醒也不能因為「有 active run（`stopping`）」就把標記清掉。
+    #[tokio::test]
+    async fn a_stop_that_closed_the_pane_but_could_not_record_it_is_still_asleep() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (bot, run) = idle_bot_with_session(&app, &env.project_id, "foxtrot").await;
+        let c = candidates(&app).await.unwrap().into_iter().find(|c| c.bot_id == bot).unwrap();
+        // `stopped` 寫不進去（同 `run_state::refuse_run_state`）。
+        sqlx::query(
+            "CREATE TRIGGER test_refuse_stopped BEFORE UPDATE OF state ON runs WHEN NEW.state = 'stopped'
+             BEGIN SELECT RAISE(ABORT, 'injected: cannot write runs.state = stopped'); END",
+        )
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        sleep_one(&app, &c, Some("sid-1".into()), 90).await;
+        let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(&run).fetch_one(&app.db).await.unwrap();
+        assert_eq!(state, "stopping", "前提：pane 關了、stopped 沒記下");
+        assert!(asleep(&app, &bot).await.is_some(), "它其實已經睡了，標記要留著");
+
+        // 還沒補記的那一段有人要用它：不能把標記清掉（run 還掛在 stopping）。
+        assert!(!wake(&app, &bot, "測試").await.unwrap());
+        assert!(asleep(&app, &bot).await.is_some(), "停機還沒收成 stopped，叫醒不清標記");
+
+        // DB 恢復，重試補記成 stopped：它是一顆睡著的 bot，下一次要用時照 `--resume` 叫醒。
+        sqlx::query("DROP TRIGGER test_refuse_stopped").execute(&app.db).await.unwrap();
+        crate::lifecycle::finish_stop(&app, &run).await;
+        assert!(db::active_run(&app.db, &bot).await.unwrap().is_none());
+        assert!(asleep(&app, &bot).await.is_some());
+    }
+
+    /// 對照組（issue #152 驗收三）：`stopping` 都寫不進去時外面什麼都沒動——那才是「沒停」，標記照舊收回、bot 照舊在跑。
+    #[tokio::test]
+    async fn a_stop_that_could_not_even_start_leaves_the_bot_awake_and_unmarked() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (bot, _run) = idle_bot_with_session(&app, &env.project_id, "golf").await;
+        let c = candidates(&app).await.unwrap().into_iter().find(|c| c.bot_id == bot).unwrap();
+        sqlx::query(
+            "CREATE TRIGGER test_refuse_stopping BEFORE UPDATE OF state ON runs WHEN NEW.state = 'stopping'
+             BEGIN SELECT RAISE(ABORT, 'injected: cannot write runs.state = stopping'); END",
+        )
+        .execute(&app.db)
+        .await
+        .unwrap();
+        sleep_one(&app, &c, Some("sid-1".into()), 90).await;
+        let run = db::active_run(&app.db, &bot).await.unwrap().expect("還在跑");
+        assert_eq!(run.state, "running");
+        assert!(asleep(&app, &bot).await.is_none(), "沒停就不是睡著的");
     }
 
     /// issue #144 驗收三：`working` 寫不進 DB（`let _ =` 吞掉）時，DB 仍說 idle——那不能當成「閒著」的證據。

@@ -1434,7 +1434,8 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   `stopping`，`begin_external_turn`（鎖裡看 `state == running`）不會替正在關的 pane 開回合。另外 `handle_status` 在寫 DB
   **之前**把看到的狀態記在記憶體（`idle_sleep::observe_status`），DB 寫不進去（現在會記 warn，不再默默吞掉）時 DB 的
   idle 不算閒著的證據：事件流說它不是 idle 就不收。停失敗就把那一列
-  收回去，這顆仍是醒著的。收完在它自己的對話裡留一則 system 訊息說為什麼。
+  收回去，這顆仍是醒著的——**例外**是 503 `stop_state_uncommitted`（issue #152）：agent 已經停了、pane 已經關了，只是
+  `stopped` 寫不進 DB（run 停在 `stopping`，背景重試補記），它就是睡著的，標記留著。收完在它自己的對話裡留一則 system 訊息說為什麼。
 - **怎麼叫醒**（`idle_sleep::wake`／`wake_locked`）：用 `StartOpts { resume_native: true, resume_required: true }`
   起回來，claude 拿到的是 `--resume <上一個 session>`，跟 §6.9 的批次是同一條路。`resume_required`
   是重點：接不回原本那段對話時**不默默開新的**——「只留下 resume」是這個功能的全部前提，悄悄換成
@@ -1446,7 +1447,8 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
      只看到 409 `bot has no active run`；而且那條路在「已標記、還沒停」的瞬間會把標記清掉，留下一顆沒人知道要叫醒的 bot。
   2. `POST /api/bots/{id}/start`（`wake`，自己拿鎖）——使用者按「啟動」想要的是把剛剛那顆帶著對話的 bot 叫回來，
      不是開一段新的空白對話。
-  3. 已經有 active run 卻還標著睡著（stop 其實沒成功、或使用者自己起回來了）：只把標記清掉，
+  3. 已經有 active run 卻還標著睡著（stop 其實沒成功、或使用者自己起回來了）：只把標記清掉——但那個 run 停在 `stopping`
+     （巡邏停掉了它、`stopped` 還沒補記上，issue #152）時標記留著、回「不是睡著的」，補記之後照 `--resume` 叫醒；
      不拿一次 start 去撞正在跑的 run。
 - **看得出來**：`GET /api/state` 的每顆 bot 多一個 `asleep`（`{"since","idle_minutes"}` 或 `null`），
   `GET /api/supervisor/state` 的 bot 也有同一個欄位——總管才不會把「睡著」當成「掛了」。
