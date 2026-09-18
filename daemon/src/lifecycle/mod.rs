@@ -42,6 +42,9 @@ mod actor_runtime_eval_prototype;
 /// issue #92 的端到端情境：撞額度 → 換身分 → `--resume` 接回同一段 session（只在 `cargo test` 底下編）。
 #[cfg(test)]
 mod identity_switch_tests;
+/// 競態的注入點，只在 `cargo test` 底下存在（見檔案頂端的說明）。
+#[cfg(test)]
+pub(crate) mod race_point;
 
 /// Runs the daemon has typed into during **this** boot. `runs.pane_typed` is the durable record;
 /// this is the conservative in-process copy, so a row that later becomes unreadable cannot send a

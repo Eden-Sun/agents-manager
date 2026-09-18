@@ -572,7 +572,8 @@ cancel 撤掉的是還沒送出的那則時，review 回應不再帶「turn 還�
 中間那一段沒有 active run，但 bot 馬上就回來。重啟在 bot 鎖裡宣告「進行中」，這段期間任何撤孤兒的路徑——stop 自己、
 `restart_start` 收掉擋路 run 的 `mark_run_exited`、不拿 bot 鎖的 pane-exit 事件、定時掃描——都不撤；新 run 起來就叫醒 flush
 （`--resume` 起的 claude 由 §6.5.2 的閘門等驗證完才送）。重啟沒能把 bot 開回來才當孤兒撤（說明寫「重啟之後沒能把 bot 開回來」）。
-只放行程記憶體：daemon 在重啟途中掛掉，開機後那顆沒有 run、標記也不在，照舊收掉。子 agent 的原地重啟（§6.9）不走這條。
+只放行程記憶體：daemon 在重啟途中掛掉，開機後那顆沒有 run、標記也不在，照舊收掉。子 agent 的原地重啟（§6.9）不走 `restart_bot_with`，
+但停舊 run 到寫入新 run 那一段同樣宣告進行中（#129）；新 run 寫不進去或 `agent.start` 失敗時憑證已經放掉，照舊當孤兒撤。
 
 **目標身分沒額度就不送**（issue #108，`lifecycle::quota_hold`）：撞額度的回合被 `StopFailure` 收掉之後，回合結束的事件照例叫醒 flush，
 排在後面的派工以前會立刻被送進**同一個還沒額度的身分**、再撞一次。flush 在 claim 之前問跟派送前（`controller::dispatch`）同一支

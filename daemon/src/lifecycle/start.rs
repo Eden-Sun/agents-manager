@@ -1006,11 +1006,19 @@ pub async fn restart_child_in_pane_with(app: &Arc<App>, bot_id: &str, require_id
         app.emit_bot_status(bot_id).await;
         return Err(LcError::Upstream("子 agent 十秒內沒有退出，沒有動它的 pane".into()));
     }
+    // 舊 run 停了、新 run 還沒寫進去：這一段沒有 active run，但子 agent 馬上就在同一個 pane 裡回來，
+    // 排著的派工不是孤兒（#129，跟 #106 同一件事）。寫入新 run 之後就放掉：之後的失敗照舊撤。
+    let restarting = super::restart_hold::begin(bot_id);
     let _ = sqlx::query("UPDATE runs SET state='stopped', ended_at=? WHERE id=?")
         .bind(db::now())
         .bind(&run.id)
         .execute(&app.db)
         .await;
+    // 測試在這裡插進不拿 bot 鎖的 sweeper。
+    #[cfg(test)]
+    {
+        super::race_point::hit("child_restart_between_runs", bot_id).await;
+    }
 
     let mut args: Vec<String> = Vec::new();
     if bot.auto_approve != 0 {
@@ -1057,6 +1065,7 @@ pub async fn restart_child_in_pane_with(app: &Arc<App>, bot_id: &str, require_id
     .execute(&app.db)
     .await
     .map_err(up)?;
+    drop(restarting);
 
     let mut started = false;
     for attempt in 0..10u32 {
@@ -1815,6 +1824,69 @@ mod child_restart_tests {
         // Nothing touched the pane.
         assert!(env.herdr.tab(&kid_pane.tab_id).unwrap().panes.contains(&kid_pane.pane_id));
         assert!(!env.herdr.methods().iter().any(|m| m == "pane.close"));
+    }
+
+    /// 子 agent 原地重啟的「舊 run 停了、新 run 還沒寫進去」那一段也是重啟中（#106 換到這條路）：
+    /// 不拿 bot 鎖的 orphan sweeper 剛好在這時候跑，不可以把 AGM 排著的派工當孤兒撤掉。
+    #[tokio::test]
+    async fn a_queued_dispatch_survives_a_sweep_in_the_middle_of_a_child_restart() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let kid_pane = client.pane_split(&root.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
+        let parent = tt::claude_bot(&app, &env.project_id, "alfa").await;
+        let kid = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, managed_by, parent_bot_id, created_at)
+             VALUES (?,?,'ui','claude','[]',0,0,'tok','child',?,?)",
+        )
+        .bind(&kid)
+        .bind(&env.project_id)
+        .bind(&parent.id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, tab_id, pane_id, agent_name, herdr_session, adopted, started_at)
+             VALUES (?,?,'running','idle',?,?,?,'proj-alfa-ui','test',1,?)",
+        )
+        .bind(db::ulid())
+        .bind(&kid)
+        .bind(&ws.workspace_id)
+        .bind(&kid_pane.tab_id)
+        .bind(&kid_pane.pane_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        // 有名字的 agent：mock 收到 ctrl+c 就讓它離開，`agent.start` 再把它放回來。
+        *env.herdr.agents.lock().unwrap() = vec![json!({
+            "name": "proj-alfa-ui", "agent": "claude", "agent_status": "idle",
+            "workspace_id": ws.workspace_id, "tab_id": kid_pane.tab_id, "pane_id": kid_pane.pane_id,
+            "cwd": "/tmp/p"})];
+        let conv = db::conversation_id(&app.db, &kid).await.unwrap();
+        let queued = db::ulid();
+        sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, delivery, prompt_text, created_at) VALUES (?,?,'web','queued','pending','派工',?)")
+            .bind(&queued)
+            .bind(&conv)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        let swept = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (app2, swept2) = (app.clone(), swept.clone());
+        super::super::race_point::arm("child_restart_between_runs", &kid, move || async move {
+            revoke_all_orphaned_queued_turns(&app2).await;
+            swept2.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+
+        restart_child_in_pane(&app, &kid).await.expect("子 agent 在原本的 pane 裡回來了");
+        assert!(swept.load(std::sync::atomic::Ordering::SeqCst), "sweeper 真的落在停與起之間");
+        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(&queued).fetch_one(&app.db).await.unwrap();
+        assert_eq!(status, "queued", "重啟中的子 agent 不是孤兒：派工留給新的 run 送");
     }
 }
 
