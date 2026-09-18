@@ -21,9 +21,13 @@ pub fn late_reply_mark(p: &Value) -> String {
     }
 }
 
-/// 交辦回報那一型（`assignment_*`）：讀 `result`，由各自的 digest 照舊呈現。
+/// 交辦的**回合結果**那一型：payload 帶 `result`（回合的最後一句），由各自的 digest 照舊呈現。
+///
+/// 只有這三種。其他 `assignment_*`（送不進去、等額度、排隊中）不是回合結果、沒有 `result`：以前前綴一律算進來，
+/// `assignment_undeliverable` 要 AGM 讀的 `reason`／`hint`（改用 followup、不要拿同一個 request id 再 assign）
+/// 在摘要裡變成「（沒有留下回覆）」（issue #142）。它們走 [`detail`] 的一般寫法。
 pub fn is_assignment_report(e: &InboxEvent) -> bool {
-    e.kind.starts_with("assignment_")
+    matches!(e.kind.as_str(), "assignment_completed" | "assignment_failed" | "assignment_noticed")
 }
 
 /// 非交辦回報的事件，依種類寫出讀的人需要的欄位。每一行已經帶縮排與換行。
@@ -69,7 +73,7 @@ pub fn detail(e: &InboxEvent, p: &Value) -> String {
             // 故障類（`watchdog_gave_up`、`responder_*`、`bot_restart_failed`、`ops_alert`…）的欄位名不一，
             // 挑人看得懂的那幾個照順序印；一個都沒有就整份 payload 節錄，不要印成「空」。
             let mut out = String::new();
-            for (k, label) in [("text", "內容"), ("why", "原因"), ("reason", "原因"), ("message", "說明"), ("detail", "細節"), ("action", "處理")] {
+            for (k, label) in [("text", "內容"), ("why", "原因"), ("reason", "原因"), ("message", "說明"), ("detail", "細節"), ("action", "處理"), ("hint", "下一步")] {
                 if let Some(v) = s(k) {
                     out.push_str(&format!("\n  {label}：{}", snippet(v, 600)));
                 }
@@ -77,8 +81,10 @@ pub fn detail(e: &InboxEvent, p: &Value) -> String {
             if out.is_empty() {
                 out = format!("\n  內容：{}", snippet(&p.to_string(), 600));
             }
+            // 掛在交辦上的事件（送不進去、等額度…）要說得出是哪一件：下一步就是對它下 `review`。
+            let assignment = e.assignment_id.as_deref().map(|a| format!(" assignment={a}")).unwrap_or_default();
             let bot = e.bot_id.as_deref().map(|b| format!(" bot={b}")).unwrap_or_default();
-            format!("{bot}{out}\n")
+            format!("{assignment}{bot}{out}\n")
         }
     }
 }

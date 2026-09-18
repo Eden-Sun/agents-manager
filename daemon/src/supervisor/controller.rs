@@ -1816,6 +1816,22 @@ mod tests {
         assert!(!d.contains("沒有留下回覆"), "{d}");
     }
 
+    /// 送不進去（`assignment_undeliverable`）是要驗收角色動手的事：payload 裡的 `reason`（為什麼進不去）與 `hint`
+    /// （用 followup 改派、不要拿同一個 request id 再 assign，review2 deliv M1）就是要它讀的。以前 `assignment_*` 一律
+    /// 當成交辦回報、只印 `result`，這種事件沒有 `result`，摘要只剩「（沒有留下回覆）」，那段提示從來沒送到 AGM 眼前。
+    #[test]
+    fn an_undeliverable_assignment_shows_why_and_what_to_do() {
+        let mut e = ev("u1");
+        e.kind = "assignment_undeliverable".into();
+        e.payload_json = json!({"assignment_id": "a1", "reason": "turn_in_flight: a turn is already in flight",
+                                "status": "blocked", "hint": UNDELIVERABLE_HINT}).to_string();
+        let d = digest(&[e]);
+        assert!(d.contains("turn_in_flight"), "{d}");
+        assert!(d.contains("--decision followup"), "{d}");
+        assert!(d.contains("assignment=a-u1"), "要說得出是哪一件，下一步才下得了 review：{d}");
+        assert!(!d.contains("沒有留下回覆"), "{d}");
+    }
+
     /// 補送不是無限的（使用者 2026-09-17 裁示）：五次沒人 ack 就停手；開著超過六小時又已經補送過也停手。
     /// 只送過一次的（協調者在等額度、還沒讀到）永遠不放棄。
     #[test]
