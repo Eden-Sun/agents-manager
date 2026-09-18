@@ -25,6 +25,11 @@ pub struct HookBody {
     pub received_at: Option<String>,
     #[serde(default)]
     pub truncated: bool,
+    /// 送出這則 hook 的 CLI 行程是替哪個 run 起的（pane env 的 `AM_RUN_ID`，issue #92）。
+    /// 世代圍籬用它分辨「同一個 session、不同行程」：`--resume` 接回時新舊行程的 session id 一樣。
+    /// 舊行程、遠端舊版 `hook.sh`、手寫的 body 沒有這一欄——那就照舊只看 session。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
 }
 
 /// 驗 per-bot token → **寫進耐久收件匣並 commit** → 才回 200（SPEC §3.1、issue #70）。
@@ -638,7 +643,7 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
     // 世代圍籬（issue #69）：這一則屬於哪一代。只在這裡問一次，`fence` 是唯一的規則所在地——
     // 散在 hook／reconcile／fallback 各判一次，遲早會漂成三套。舊世代的事件只記錄，一個欄位都不改。
     if let Some(r) = &run {
-        let ev = crate::lifecycle::fence::EventIdentity { run_id: None, session_id: hook_session_id(&body.payload) };
+        let ev = crate::lifecycle::fence::EventIdentity { run_id: body.run_id.as_deref(), session_id: hook_session_id(&body.payload) };
         let owner = crate::lifecycle::fence::classify(&app.db, &bot.id, r, ev).await;
         if !owner.may_mutate() {
             let (prior_run_id, why) = match &owner {
@@ -1133,6 +1138,7 @@ fn status_body(bot_id: &str, raw: &str) -> Option<HookBody> {
         payload,
         received_at: Some(db::now()),
         truncated: false,
+        run_id: None,
     })
 }
 
@@ -1680,6 +1686,7 @@ mod external_claim_tests {
             }),
             received_at: None,
             truncated: false,
+            run_id: None,
         }
     }
 
@@ -1815,6 +1822,7 @@ mod external_claim_tests {
                                 "last_assistant_message": "上一代的回覆"}),
                 received_at: None,
                 truncated: false,
+                run_id: None,
             },
         )
         .await
@@ -1848,6 +1856,7 @@ mod external_claim_tests {
                                 "reason": "API Error: 500"}),
                 received_at: None,
                 truncated: false,
+                run_id: None,
             },
         )
         .await
@@ -1882,6 +1891,93 @@ mod external_claim_tests {
             .await
             .unwrap();
         assert_eq!(replies, vec!["hook reply".to_string()]);
+    }
+
+    /// issue #92：撞額度 → 換身分 → `--resume` 接回**同一個** session。換身分前那個行程的 `StopFailure`
+    /// （撞額度那一則）這時候才到：它帶的 session 跟新 run 一模一樣，只看 session 會被認成這一代的，
+    /// 把換身分之後剛送出去的那一回合收成失敗。它自己帶的 run id 才分得開。
+    #[tokio::test]
+    async fn a_late_hook_from_the_process_before_a_resume_cannot_touch_the_resumed_runs_turn() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "resumed").await;
+        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        // 身分 A 的那一代：session `s-same`，撞額度之後被換身分重啟收掉。
+        let old_run = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, pane_id, native_session_id, started_at, ended_at)
+             VALUES (?,?,'stopped','unknown','pane-a','s-same',?,?)",
+        )
+        .bind(&old_run)
+        .bind(&bot.id)
+        .bind(db::now())
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        // 身分 B 的這一代：`--resume s-same` 起來、SessionStart 已經對上（`native_session_id` 同一個），
+        // 並且已經送出一則新的回合。
+        let new_run = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, pane_id, native_session_id, started_at)
+             VALUES (?,?,'running','working','pane-b','s-same',?)",
+        )
+        .bind(&new_run)
+        .bind(&bot.id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let new_turn = db::ulid();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, prompt_text, created_at)
+             VALUES (?,?,?,'web','in_flight','ok','換身分之後問的',?)",
+        )
+        .bind(&new_turn)
+        .bind(&conv)
+        .bind(&new_run)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let turn_now = |id: String| {
+            let app = app.clone();
+            async move { sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(id).fetch_one(&app.db).await.unwrap() }
+        };
+        let from = |run: &str, payload: Value| HookBody {
+            bot_id: bot.id.clone(),
+            provider: "claude".into(),
+            payload,
+            received_at: None,
+            truncated: false,
+            run_id: Some(run.to_string()),
+        };
+
+        let mut events = app.subscribe();
+        let limit = json!({"hook_event_name": "StopFailure", "session_id": "s-same", "prompt_id": "p-a",
+                           "reason": "You've hit your usage limit · resets 5pm"});
+        process(&app, &from(&old_run, limit)).await.unwrap();
+        assert_eq!(turn_now(new_turn.clone()).await.status, "in_flight", "身分 A 遲到的撞額度不准收掉身分 B 的回合");
+        let ev = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv()).await.unwrap().unwrap();
+        assert_eq!((ev.kind.as_str(), ev.data["prior_run_id"].as_str()), ("hook_fenced", Some(old_run.as_str())));
+
+        let reply = json!({"hook_event_name": "Stop", "session_id": "s-same", "prompt_id": "p-a",
+                           "last_assistant_message": "身分 A 那一回合的半截回覆"});
+        process(&app, &from(&old_run, reply)).await.unwrap();
+        let t = turn_now(new_turn.clone()).await;
+        assert_eq!((t.status.as_str(), t.native_turn_id.as_deref()), ("in_flight", None), "也不准拿舊行程的 Stop 收尾");
+        let replies: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE conversation_id=? AND role='assistant'")
+            .bind(&conv)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(replies, 0, "舊行程的回覆不能貼進來，也不能變成一筆外部回合");
+
+        // 對照：同一個 session、這一代自己的行程送的——照常收（證明擋下前兩則的是 run id，不是別的條件）。
+        let own = json!({"hook_event_name": "StopFailure", "session_id": "s-same", "prompt_id": "p-b",
+                         "reason": "You've hit your usage limit · resets 5pm"});
+        process(&app, &from(&new_run, own)).await.unwrap();
+        assert_eq!(turn_now(new_turn).await.status, "failed");
     }
 
     /// review3 c1 L13：沒有 in-flight 回合時，遲到 hook 帶來的是**別句**的答案（使用者改到 pane 裡直接打）——
@@ -2016,7 +2112,7 @@ mod external_claim_tests {
     }
 
     fn stop_failure(bot_id: &str, payload: Value) -> HookBody {
-        HookBody { bot_id: bot_id.to_string(), provider: "claude".into(), payload, received_at: None, truncated: false }
+        HookBody { bot_id: bot_id.to_string(), provider: "claude".into(), payload, received_at: None, truncated: false, run_id: None }
     }
 
     async fn turn_row(app: &Arc<App>, id: &str) -> db::Turn {
@@ -2325,6 +2421,7 @@ mod external_claim_tests {
             }),
             received_at: None,
             truncated: false,
+            run_id: None,
         };
         process(&app, &stop("s1")).await.unwrap();
         let turn = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
@@ -2388,6 +2485,7 @@ mod external_claim_tests {
                 }),
                 received_at: None,
                 truncated: false,
+                run_id: None,
             },
         )
         .await
@@ -2479,6 +2577,7 @@ mod external_claim_tests {
                 }),
                 received_at: None,
                 truncated: false,
+                run_id: None,
             },
         )
         .await
@@ -2560,6 +2659,7 @@ mod external_claim_tests {
                 }),
                 received_at: None,
                 truncated: false,
+                run_id: None,
             },
         )
         .await
@@ -2633,6 +2733,7 @@ mod external_claim_tests {
                 }),
                 received_at: None,
                 truncated: false,
+                run_id: None,
             },
         )
         .await
@@ -2729,6 +2830,7 @@ mod durable_handoff_tests {
             }),
             received_at: Some("2026-09-17T12:00:00.000Z".into()),
             truncated: false,
+            run_id: None,
         }
     }
 
@@ -2858,6 +2960,7 @@ mod durable_handoff_tests {
             payload: json!({"hook_event_name": "StatusLine", "status_line": "…"}),
             received_at: Some("2026-09-17T12:00:00.000Z".into()),
             truncated: false,
+            run_id: None,
         };
         let (code, _) = receive(State(e.app.clone()), Path("claude".into()), headers("tok"), Json(body)).await;
         assert_eq!(code, StatusCode::OK);
@@ -3010,6 +3113,7 @@ mod codex_limit_clear_tests {
                                         "input-messages": ["hi"], "last-assistant-message": "done"}),
             received_at: None,
             truncated: false,
+            run_id: None,
         };
         let _ = process_locked(&app, &body).await;
 

@@ -329,6 +329,7 @@ mod tests {
             payload: json!({"hook_event_name": "Stop", "session_id": "s1", "prompt_id": prompt_id}),
             received_at: Some(at.into()),
             truncated: false,
+            run_id: None,
         }
     }
 
