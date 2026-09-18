@@ -419,12 +419,29 @@ async fn say(app: &Arc<App>, bot_id: &str, text: &str) {
 }
 
 /// 收一顆：標記 → `stop_bot`（送 ctrl+c 收 agent、關 pane）→ 在它自己的對話裡說一聲為什麼。
-async fn sleep_one(app: &Arc<App>, c: &Cand, session: Option<String>) {
-    if let Err(e) = mark_asleep(app, c, session.as_deref()).await {
+///
+/// 標記與停機前**在這顆 bot 的鎖裡再判斷一次**（issue #133）：`c` 是巡邏稍早湊的，之後還問過 herdr、跑過 ps，
+/// 那段時間 AGM 可能剛好把工作派給它。`prompt` 建回合拿的是同一把鎖，所以鎖裡看到的就是停機那一刻的事實——
+/// 以前拿舊的判斷直接停，剛送進去的回合被 `fail_in_flight` 標成「run stopped by user」。
+async fn sleep_one(app: &Arc<App>, c: &Cand, session: Option<String>, threshold: i64) {
+    let lock = app.bot_lock(&c.bot_id).await;
+    let _g = lock.lock().await;
+    let Ok(Some(run)) = db::active_run(&app.db, &c.bot_id).await else { return };
+    let sup = supervisor_bot_ids(app).await;
+    let fresh = match cand_for(app, &run, &sup).await {
+        // 背景工作那一項剛才已經問過（貴），沿用；其餘都是鎖裡重讀的。
+        Ok(Some(f)) => Cand { background_shell: c.background_shell, ..f },
+        _ => return,
+    };
+    if let Err(why) = decide(&fresh, threshold) {
+        tracing::info!(bot = %c.name, why = why.code(), "idle sweep: the bot is no longer idle; leaving it running");
+        return;
+    }
+    if let Err(e) = mark_asleep(app, &fresh, session.as_deref()).await {
         tracing::warn!(bot = %c.name, error = %e, "could not record the sleep; leaving the bot running");
         return;
     }
-    match lifecycle::stop_bot(app, &c.bot_id).await {
+    match lifecycle::stop_bot_locked(app, &c.bot_id).await {
         Ok(_) => {
             tracing::info!(bot = %c.name, idle_minutes = c.idle_minutes, "idle bot put to sleep; only its resumable session is kept");
             say(
@@ -559,7 +576,7 @@ async fn sweep(app: &Arc<App>, threshold: i64) {
             Ok(Some(mut f)) if decide(&f, threshold).is_ok() => {
                 f.background_shell = has_background_shell(app, &run).await;
                 if decide(&f, threshold).is_ok() {
-                    sleep_one(app, &f, session).await;
+                    sleep_one(app, &f, session, threshold).await;
                 }
             }
             _ => continue,
@@ -871,6 +888,57 @@ mod tests {
                 .await
                 .unwrap();
         }
+    }
+
+    /// 巡邏最後一次判斷「閒著」之後、真的停機之前（中間還要問 herdr、跑一次 ps，遠端主機走 ssh），AGM 剛好把
+    /// 工作派給這顆閒置 90 分鐘的 bot——正是它最常挑的那種。停機前要在這顆 bot 的鎖裡再看一次：以前拿舊的
+    /// 判斷直接 `stop_bot`，剛送進去的回合被 `fail_in_flight` 標成「run stopped by user」，bot 也被收起來。
+    #[tokio::test]
+    async fn a_bot_that_got_work_after_the_last_check_is_not_put_to_sleep() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "charlie").await.id;
+        let run = crate::testing::fake_run(&app, &bot).await;
+        sqlx::query("UPDATE runs SET started_at=?, native_session_id='sid-1' WHERE id=?")
+            .bind((chrono::Utc::now() - chrono::Duration::minutes(120)).to_rfc3339())
+            .bind(&run)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let stale = candidates(&app).await.unwrap().into_iter().find(|c| c.bot_id == bot).unwrap();
+        assert_eq!(decide(&stale, 90), Ok(()), "判斷當下它確實閒著");
+
+        // 判斷完之後派工落地：prompt 在 bot 鎖裡建了一筆送出中的回合。
+        let conv = db::conversation_id(&app.db, &bot).await.unwrap();
+        let turn = db::ulid();
+        sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'web','in_flight','ok',?)")
+            .bind(&turn)
+            .bind(&conv)
+            .bind(&run)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        sleep_one(&app, &stale, Some("sid-1".into()), 90).await;
+
+        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(&turn).fetch_one(&app.db).await.unwrap();
+        assert_eq!(status, "in_flight", "剛派進去的回合不能被收起來的那一下砍掉");
+        assert!(asleep(&app, &bot).await.is_none(), "它沒有被收起來，也不該留下睡著的標記");
+        assert!(db::active_run(&app.db, &bot).await.unwrap().is_some(), "run 照常活著");
+
+        // 那一回合早就結束、之後又閒置夠久：照常收（鎖裡的重看不會把該收的也擋掉）。
+        let long_ago = (chrono::Utc::now() - chrono::Duration::minutes(120)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        sqlx::query("UPDATE turns SET status='completed', created_at=?, completed_at=? WHERE id=?")
+            .bind(&long_ago)
+            .bind(&long_ago)
+            .bind(&turn)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        sleep_one(&app, &stale, Some("sid-1".into()), 90).await;
+        assert!(asleep(&app, &bot).await.is_some(), "閒著的照樣收起來");
+        assert!(db::active_run(&app.db, &bot).await.unwrap().is_none());
     }
 
     /// 標成睡著、實際上還活著（stop 沒成功、或使用者自己又把它起回來）：`wake` 只把標記清掉，

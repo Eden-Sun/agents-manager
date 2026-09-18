@@ -1278,9 +1278,11 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   | 沒有可續接的 session | `no_resume` | 沒 `native_session_id`、本機 transcript 不在、或 kind 不支援 `--resume`（grok）。收起來等於把對話丟掉，那不是省 RAM，是刪資料 |
   | 還沒閒置到門檻 | `still_warm` | — |
 
-- **怎麼收**：`bot_sleeps` 先寫一列（**先寫再停**：中間死掉留下的是「它應該是睡著的」，叫醒那條路
-  會處理；反過來死在中間就變成一顆沒人知道要 `--resume` 的 bot），再走既有的
-  `lifecycle::stop_bot`——ctrl+c ×2 收 agent、關 pane，等於在 pane 裡下 exit。停失敗就把那一列
+- **怎麼收**：先拿這顆 bot 的 per-bot 鎖，**在鎖裡重讀一次、再跑一次 `decide`**（issue #133）——巡邏稍早的
+  判斷之後還問過 herdr、跑過 ps，那段時間 AGM 可能剛把工作派給它；`prompt` 建回合拿的是同一把鎖，鎖裡看到的
+  就是停機那一刻的事實，已經有回合或排隊就不收。過了才 `bot_sleeps` 先寫一列（**先寫再停**：中間死掉留下的是
+  「它應該是睡著的」，叫醒那條路會處理；反過來死在中間就變成一顆沒人知道要 `--resume` 的 bot），再走
+  `lifecycle::stop_bot_locked`——ctrl+c ×2 收 agent、關 pane，等於在 pane 裡下 exit。停失敗就把那一列
   收回去，這顆仍是醒著的。收完在它自己的對話裡留一則 system 訊息說為什麼。
 - **怎麼叫醒**（`idle_sleep::wake`）：用 `StartOpts { resume_native: true, resume_required: true }`
   起回來，claude 拿到的是 `--resume <上一個 session>`，跟 §6.9 的批次是同一條路。`resume_required`
