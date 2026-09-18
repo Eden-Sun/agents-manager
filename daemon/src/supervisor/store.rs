@@ -2182,12 +2182,13 @@ pub async fn delivered_inbox(pool: &SqlitePool) -> Result<Vec<InboxEvent>> {
 #[cfg(test)]
 /// Pending events whose backoff has not run out yet are skipped; everything else is due.
 pub async fn due_inbox(pool: &SqlitePool, now: &str, max_attempts: i64) -> Result<Vec<InboxEvent>> {
-    Ok(sqlx::query_as::<_, InboxEvent>(
+    let next_at = crate::db::ts_sql("notify_next_at");
+    Ok(sqlx::query_as::<_, InboxEvent>(&format!(
         "SELECT * FROM supervisor_inbox WHERE supervisor_id=? AND state='pending'
-           AND (notify_next_at IS NULL OR notify_next_at <= ?)
+           AND (notify_next_at IS NULL OR {next_at} <= ?)
            AND notify_attempts < ?
-          ORDER BY created_at ASC, id ASC",
-    )
+          ORDER BY created_at ASC, id ASC"
+    ))
     .bind(SUPERVISOR_ID)
     .bind(now)
     .bind(max_attempts)
@@ -2261,7 +2262,7 @@ impl Approval {
     /// 升級計時的起點：接續來的 `wait_since` 與自己被核准的時間，取早的那個。還沒核准就沒有。
     pub fn waiting_since(&self) -> Option<&str> {
         let decided = self.decided_at.as_deref()?;
-        Some(self.wait_since.as_deref().filter(|w| *w < decided).unwrap_or(decided))
+        Some(self.wait_since.as_deref().filter(|w| crate::db::cmp_ts(w, decided).is_lt()).unwrap_or(decided))
     }
 
     /// Why this approval cannot be used right now, if it cannot. `None` = usable.
@@ -2278,7 +2279,7 @@ impl Approval {
                 _ => "approval_not_usable",
             });
         }
-        if self.expires_at.as_deref().is_some_and(|t| t <= now) {
+        if self.expires_at.as_deref().is_some_and(|t| crate::db::cmp_ts(t, now).is_le()) {
             return Some("approval_expired");
         }
         if self.purpose != resource {
@@ -2375,7 +2376,7 @@ pub async fn create_approval_superseding(
         if old.purpose != purpose {
             return Err(refuse("purpose_mismatch"));
         }
-        let live = matches!(old.status.as_str(), "pending" | "approved") && !old.expires_at.as_deref().is_some_and(|t| t <= now.as_str());
+        let live = matches!(old.status.as_str(), "pending" | "approved") && !old.expires_at.as_deref().is_some_and(|t| crate::db::cmp_ts(t, &now).is_le());
         if live {
             sqlx::query("UPDATE supervisor_approvals SET status='superseded', updated_at=? WHERE id=? AND status=?")
                 .bind(&now)
@@ -2503,12 +2504,14 @@ pub async fn approval(pool: &SqlitePool, id: &str) -> Result<Option<Approval>> {
 /// SPEC §18.10「等太久就縮小封鎖面」的計時從它的 `decided_at` 起算：一筆核准放著沒用掉，
 /// 代表這段時間一直等不到安全窗口。
 pub async fn oldest_live_window_approval(pool: &SqlitePool, now: &str) -> Result<Option<Approval>> {
-    Ok(sqlx::query_as::<_, Approval>(
+    // `expires_at` 可能是舊版寫的秒格式：正規化成毫秒再比（issue #101）。
+    let expires_at = crate::db::ts_sql("expires_at");
+    Ok(sqlx::query_as::<_, Approval>(&format!(
         "SELECT * FROM supervisor_approvals
           WHERE supervisor_id=? AND status='approved' AND purpose IN ('rebuild','restart')
-            AND decided_at IS NOT NULL AND (expires_at IS NULL OR expires_at > ?)
-          ORDER BY MIN(COALESCE(wait_since, decided_at), decided_at) LIMIT 1",
-    )
+            AND decided_at IS NOT NULL AND (expires_at IS NULL OR {expires_at} > ?)
+          ORDER BY MIN(COALESCE(wait_since, decided_at), decided_at) LIMIT 1"
+    ))
     .bind(SUPERVISOR_ID)
     .bind(now)
     .fetch_optional(pool)
@@ -2686,7 +2689,7 @@ impl Lease {
     }
 
     pub fn held_at(&self, now: &str) -> bool {
-        self.released_at.is_none() && self.expires_at.as_deref().is_some_and(|t| t > now)
+        self.released_at.is_none() && self.expires_at.as_deref().is_some_and(|t| crate::db::cmp_ts(t, now).is_gt())
     }
 }
 
@@ -2777,10 +2780,12 @@ pub async fn acquire_lease(
     // 前一個持有者**過期**而不是 release（腳本掛了、child 被殺）時，沒有人走過 release，
     // 它背後的核准因此還是 `approved`——同一張「可以」可以在有效期內開好幾個窗口，
     // 而決定歷程上一筆紀錄都沒有（review 2026-09-16）。接手前先把它消耗掉。
-    let stale_approval = sqlx::query_scalar::<_, Option<String>>(
+    // 租約的 `expires_at` 可能是舊版寫的秒格式：正規化成毫秒再比（issue #101）。
+    let expires_sql = crate::db::ts_sql("expires_at");
+    let stale_approval = sqlx::query_scalar::<_, Option<String>>(&format!(
         "SELECT approval_id FROM supervisor_leases
-          WHERE resource=? AND released_at IS NULL AND expires_at IS NOT NULL AND expires_at <= ?",
-    )
+          WHERE resource=? AND released_at IS NULL AND expires_at IS NOT NULL AND {expires_sql} <= ?"
+    ))
     .bind(resource)
     .bind(&now)
     .fetch_optional(pool)
@@ -2798,7 +2803,7 @@ pub async fn acquire_lease(
         "UPDATE supervisor_leases
             SET owner=?, approval_id=?, target_commit=?, fence=fence+1, acquired_at=?, expires_at=?,
                 released_at=NULL, lease_token=?, detail_json=?
-          WHERE resource=? AND (released_at IS NOT NULL OR expires_at IS NULL OR expires_at <= ?){quiet}"
+          WHERE resource=? AND (released_at IS NOT NULL OR expires_at IS NULL OR {expires_sql} <= ?){quiet}"
     );
     let mut q = sqlx::query(&sql)
     .bind(owner)
@@ -2874,10 +2879,11 @@ pub async fn lease_token(pool: &SqlitePool, resource: &str) -> Result<Option<Str
 
 pub async fn renew_lease(pool: &SqlitePool, resource: &str, owner: &str, fence: i64, expires_at: &str) -> Result<bool> {
     let now = crate::db::now();
-    Ok(sqlx::query(
+    let held_until = crate::db::ts_sql("expires_at");
+    Ok(sqlx::query(&format!(
         "UPDATE supervisor_leases SET expires_at=?
-          WHERE resource=? AND owner=? AND fence=? AND released_at IS NULL AND expires_at > ?",
-    )
+          WHERE resource=? AND owner=? AND fence=? AND released_at IS NULL AND {held_until} > ?"
+    ))
     .bind(expires_at)
     .bind(resource)
     .bind(owner)

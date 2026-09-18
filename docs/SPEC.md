@@ -101,11 +101,17 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   立刻處理（改成輪詢等於每個回合收尾都慢）。收成一個迴圈只會在裡面重新長出同樣三套政策。
 - **時間戳只有一種格式**（issue #101）：RFC3339、UTC、固定到毫秒、以 `Z` 結尾（`2026-09-18T07:00:00.000Z`），
   一律由 `db::now()` / `db::iso_in()` / `db::iso_at()` 產生，生產程式碼不自己 `to_rfc3339_opts`（有測試掃原始碼擋著）。
-  這不是風格問題：很多到期判斷是拿這些字串**在 SQL 裡直接比大小**（`… WHERE notify_next_at <= ?`），
-  同一種格式下字典序才等於時間序。寬度一混（秒 vs 毫秒）同一秒內就會判錯；格式若變成帶位移（`+08:00`）
-  會差到**幾小時**。Rust 這一側的 `past()` 都是 parse 之後比 `DateTime`，本來就不受格式影響。
-  **既有資料不改寫**：到期時間是短命的（送出或放棄就清掉），舊的秒格式在一個退避週期內就被新的蓋過去；
-  唯一的殘留影響是那段期間內「同一秒內」的舊列會晚一次 tick，而 tick 是 10 秒、退避 15 秒起跳。
+  這只管**新寫入**。**既有資料庫不改寫**（不做 migration），裡頭還有舊版寫的秒格式（`…:00Z`），
+  也有外部來的字串原樣存下來（CLI 回報的重置時間，`+00:00`、微秒都有），所以**判斷不靠寫入端的格式**：
+  到期／先後一律照**時刻**比，不拿字串字典序當時間序——`'…:00Z'` 與 `'…:00.500Z'` 差在第 20 個字元，
+  `Z`(0x5A) 大於 `.`(0x2E)，字串說「還沒到」，實際早就過了；帶位移的寫法（`+08:00`）會差到幾小時。
+  - SQL：把欄位包成 `db::ts_sql("col")`（`strftime` 正規化成毫秒格式，解不開的原樣退回）再比 `<=`／`>`／`ORDER BY`。
+    只用在筆數很小的到期欄位（收件匣、租約、核准、交辦、`due_actions`），代價是這欄用不上索引；
+    `messages`／`turns` 的 `created_at` 這種靠索引分頁的欄位只由 `db::now()` 寫，本來就同一種格式，不包。
+  - Rust：`db::cmp_ts`／`db::same_instant`／`db::parse_ts`（解不開才退回字串比較）；`past()` 等本來就是 parse 後比 `DateTime`。
+  - 從來沒有舊格式的欄位（`build_slots`、`hook_events.next_attempt_at`、`herdr_maintenance.until`、`bot_reads`）字串比較本來就對，
+    在 `timestamp_compat_tests` 的 `CANONICAL_ONLY` 各列理由。
+  有測試掃原始碼擋著（新寫一個裸字串比較會紅），也有用**兩種格式混存**的資料打真判斷的測試（同一秒內、跨種類、`+08:00`）。
 - **權威劃分**：TOML 是 Project／Bot 期望設定的唯一權威；SQLite 存 Run／Turn／Message／Conversation／hook token／workspace 映射。啟動與每次寫回 TOML 後做 TOML→SQLite 投影（依 id upsert；TOML 移除的 bot 標 `deleted_at`，保留歷史）。
 - **落盤前先驗投影**（issue #73）：`ConfigStore::update` 的順序是「重讀（mtime 變了）→ 在記憶體套用修改 →
   `projection::validate` 乾跑 → 原子寫入（暫存檔 + `rename`）」。驗不過就直接回錯誤，**config.toml 一個字都不動**，

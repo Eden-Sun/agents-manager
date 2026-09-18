@@ -548,9 +548,11 @@ pub async fn due_for(
         (Role::Responder, _) => (format!("{OWNER}='responder'"), "?1 = ?1".to_string()),
     };
     // 編號參數：三種組合用同一組 bind，不必各自對齊順序。
+    // `notify_next_at` 可能是舊版寫的秒格式：正規化成毫秒再比，同一秒內才判得對（issue #101）。
+    let next_at = crate::db::ts_sql("notify_next_at");
     let sql = format!(
         "SELECT * FROM supervisor_inbox WHERE supervisor_id=?2 AND state='pending' AND {owned}
-           AND (notify_next_at IS NULL OR notify_next_at <= ?3) AND {cap}
+           AND (notify_next_at IS NULL OR {next_at} <= ?3) AND {cap}
          ORDER BY created_at ASC, rowid ASC"
     );
     Ok(sqlx::query_as::<_, super::store::InboxEvent>(&sql)
@@ -737,13 +739,9 @@ mod tests {
     /// issue #101：**遷移期間新舊格式會並存**，混存時判斷仍要正確。
     ///
     /// `notify_next_at` 以前由 `defer_notify` 寫到**秒**（`…T07:00:00Z`），而 `due_for` 是拿
-    /// `db::now()`（毫秒）在 SQL 裡直接比字串。現在寫入端統一成毫秒了，但**既有的列還是秒**，
-    /// 所以這條測的就是那個混存狀態。
-    ///
-    /// 結論（也是我們接受的界線）：差一秒以上時兩種格式都判得對；**只有同一秒內**舊格式會被
-    /// 多壓一次 tick——`Z`(0x5A) 比 `.`(0x2E) 大，所以 `'…:05Z' <= '…:05.500Z'` 是 false。
-    /// 退避本身是 15 秒起跳、tick 10 秒，所以那不到一秒看不出來；而且到期時間是短命的，
-    /// 舊格式的列在一個退避週期內就被新的蓋掉了，不需要改寫既有資料。
+    /// `db::now()`（毫秒）比。既有的列還是秒，所以這條測的就是那個混存狀態：兩種格式都要照**時刻**判，
+    /// **包括同一秒內**（`07:00:00.000` 早於 `07:00:00.500`）。上一版把「同一秒內舊格式晚一拍」寫成接受的
+    /// 界線，重開後（判斷改成讀取端正規化）拿掉了；同一秒內與 `+08:00` 的混存另見 `timestamp_compat_tests`。
     #[tokio::test]
     async fn a_legacy_second_precision_deadline_is_still_judged_correctly() {
         let p = pool().await;
@@ -780,11 +778,11 @@ mod tests {
         got.sort();
         assert_eq!(got, vec!["legacy-past".to_string(), "new-past".to_string()], "新舊格式混存時要一起判對");
 
-        // 界線寫明白：同一秒內舊格式會被多壓一次 tick（下一次 tick 就過了）。
+        // 同一秒內：`07:00:00.000`（舊格式）早於 `07:00:00.500`，兩種格式都已到期。
         let same_second = "2026-09-18T07:00:00.500Z";
         let got = due_ids(due_for(&p, Role::Patrol, false, same_second, 5).await.unwrap());
         assert!(got.contains(&"new-past".to_string()), "新格式同一秒內判得對");
-        assert!(!got.contains(&"legacy-past".to_string()), "舊格式同一秒內晚一拍——這是我們接受的界線");
+        assert!(got.contains(&"legacy-past".to_string()), "舊格式同一秒內也判得對：照時刻比，不照字串");
     }
 
     async fn pool() -> SqlitePool {

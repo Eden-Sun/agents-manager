@@ -421,6 +421,49 @@ pub fn iso_at(t: chrono::DateTime<chrono::Utc>) -> String {
     t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
+/// 把 DB 裡讀出來的時間戳解成**時刻**。任何合法 RFC3339 都認（秒／毫秒／微秒、`Z` 或 `+08:00`）。
+///
+/// **讀取端**的入口：既有資料庫裡有舊版寫的秒格式（`…:00Z`），也有外部來的字串（CLI 回報的重置時間
+/// 原樣存下來，`quota::unix_to_rfc3339`）。寫入端統一成 [`now`] 的格式管不到這些，所以到期／先後判斷
+/// 一律**解析後比時刻**（[`cmp_ts`]），不拿字串的字典序當時間序（issue #101 重開）。
+pub fn parse_ts(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(s).ok().map(|t| t.with_timezone(&chrono::Utc))
+}
+
+/// 兩個時間戳誰先誰後——比時刻，不比字串。`cmp_ts(deadline, now).is_le()` 就是「到期了」。
+///
+/// 兩邊都解得開才比時刻；有一邊解不開就退回字串比較（跟過去一樣：不憑空替壞資料編一個時間）。
+pub fn cmp_ts(a: &str, b: &str) -> std::cmp::Ordering {
+    match (parse_ts(a), parse_ts(b)) {
+        (Some(x), Some(y)) => x.cmp(&y),
+        _ => a.cmp(b),
+    }
+}
+
+/// 兩個（可能沒有的）時間戳是不是**同一個時刻**。都沒有算相同；只有一邊有就不同。
+///
+/// 拿存起來的 `quota_reset_at` 跟新讀到的重置時間比「有沒有變」用的：字串 `==` 會把舊資料的
+/// `…:00Z` 與 `…:00.000Z` 當成兩個不同的時間，白白重寫一次狀態、多推一次事件。
+pub fn same_instant(a: Option<&str>, b: Option<&str>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => cmp_ts(a, b).is_eq(),
+        _ => false,
+    }
+}
+
+/// [`cmp_ts`] 的 SQL 版：把時間欄位（或運算式）正規化成 [`now`] 的格式，`WHERE ... <= ?`／`ORDER BY`
+/// 才是照時刻比，不是照舊資料的字串寫法比。**綁的那一邊仍要來自 [`now`]／[`iso_at`]。**
+///
+/// SQLite 的 `strftime` 認秒／毫秒／微秒、`Z` 與 `+08:00`，`%f` 固定吐 `SS.SSS`。解不開的值
+/// （`strftime` 回 NULL）退回原字串，行為跟沒包一樣。欄位是 NULL 就還是 NULL，`IS NULL` 的判斷不受影響。
+///
+/// 代價是這一欄用不上索引：只用在**到期時間**這種筆數很小的欄位（收件匣、租約、核准、交辦），
+/// 不用在 `messages`／`turns` 的 `created_at` 這種靠索引分頁的欄位——那些欄位只由 [`now`] 寫，本來就同一種格式。
+pub fn ts_sql(col: &str) -> String {
+    format!("COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', {col}), {col})")
+}
+
 pub fn ulid() -> String {
     ulid::Ulid::new().to_string()
 }
