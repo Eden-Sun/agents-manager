@@ -442,6 +442,33 @@ adopt 之後孤兒通知標記會清掉。pane 不存在 404、`owner_bot_id` �
   `pane` 的 `kind`／`foreground`／`listen_ports`／`read_only` 換成即時值（`unverified:true`＝讀不到，沿用表上的）——UI 要先把 port 顯示給人看再問一次。
 - 表裡沒有這顆 404；主機沒連上 502。
 
+## 外部 Cargo 主機（issue #104）
+
+把 `check`／`test`／`clippy` 丟到一台 SSH 主機跑；`build`／`run` 留本機（Linux/x86_64 的產物在 macOS/aarch64 上不能用）。
+
+### `GET /api/build/remote` / `PUT /api/build/remote`
+`{enabled, host, user, ssh_port, remote_root, cargo_jobs, password_set}`。PUT 另收 `password`（寫進 0600 的
+secret file，不進 config、不回前端）與 `clear_password`。`host`／`user` 空字串又要 `enabled` → 400。
+
+### `POST /api/build/remote/test`
+連上去看一眼：
+
+```json
+{"ok":true,"output":"OS=Linux\nARCH=x86_64\nCARGO=/home/ubuntu/.cargo/bin/cargo\ncargo 1.90.0",
+ "password_auth":true,"os":"Linux","arch":"x86_64","cargo_path":"…","cargo_version":"cargo 1.90.0","cargo_missing":false}
+```
+
+**連得上但沒有 cargo 不是錯誤**：`cargo_missing:true`、`cargo_path:null`，UI 據此提示安裝。ssh 本身失敗才 5xx。
+密碼認證優先用 `sshpass`，沒有就走 ssh 自己的 askpass（`SSH_ASKPASS_REQUIRE=force`，OpenSSH 8.4+）；兩條都不行才 5xx。
+
+### `POST /api/build/remote/install-toolchain`
+在那台跑 `rustup`（`--profile minimal --no-modify-path`，不動遠端的 shell profile）。冪等：已經有 cargo 就只回版本。
+
+`200 {"ok":true,"already_installed":bool,"cargo_version":"cargo 1.90.0","cc_missing":bool,"output":"…"}`
+（`cc_missing:true`＝那台沒有 `cc`／`gcc`：rustup 不裝 linker，`cargo test` 會在連結那一步才失敗，UI 當場提醒裝 build-essential）；遠端沒有 `curl` 或 rustup
+失敗 → 5xx 並帶 stderr。第一次大約要一兩分鐘。`~/.cargo/bin` 由 daemon 自己接到遠端 PATH 前面（probe 與真正的
+遠端 cargo 都是），所以不必改遠端 profile。
+
 ## Build scheduler（全機 cargo/rustc 併發，SPEC §6.5g，issue #90）
 
 不在 `/api` 底下的三支（`acquire`／`renew`／`release`）：bot 的 pane 只有自己的 hook token，拿不到一般 UI token。

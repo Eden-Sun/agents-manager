@@ -158,6 +158,7 @@ pub fn router(app: Arc<App>) -> Router {
             get(crate::remote_cargo::get_settings).put(crate::remote_cargo::put_settings),
         )
         .route("/build/remote/test", post(crate::remote_cargo::test_settings))
+        .route("/build/remote/install-toolchain", post(crate::remote_cargo::install_settings))
         .route("/mem", get(get_mem))
         .route("/mem/processes", get(get_mem_processes))
         .route("/mem/processes/kill", post(kill_mem_process))

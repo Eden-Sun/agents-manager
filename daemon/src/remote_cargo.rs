@@ -266,19 +266,104 @@ fn ssh_cmd(remote: &BuildRemoteCfg, password: Option<&str>, mode: Option<&PwMode
     cmd
 }
 
+/// probe 在遠端跑的那一行。`~/.cargo/bin` 一併看：rustup 裝好之後**只**改 shell profile，
+/// 而 ssh 的非互動 shell 不讀 profile，`command -v cargo` 會說沒有（2026-09-18）。
+const PROBE_SH: &str = "printf 'OS='; uname -s; printf 'ARCH='; uname -m; \
+PATH=\"$HOME/.cargo/bin:$PATH\"; printf 'CARGO='; command -v cargo || true; cargo --version 2>/dev/null || true";
+
+/// probe 的輸出拆成前端看得懂的欄位。**沒有 cargo 不是錯誤**——連得上只是還沒裝工具鏈，UI 要
+/// 能直接提示「幫你裝」，而不是丟一段原始輸出讓人猜（使用者 2026-09-18）。
+pub fn parse_probe(stdout: &str) -> (Option<String>, Option<String>, Option<String>, Option<String>) {
+    let (mut os, mut arch, mut cargo, mut version) = (None, None, None, None);
+    for line in stdout.lines() {
+        let line = line.trim();
+        if let Some(v) = line.strip_prefix("OS=") {
+            os = (!v.is_empty()).then(|| v.to_string());
+        } else if let Some(v) = line.strip_prefix("ARCH=") {
+            arch = (!v.is_empty()).then(|| v.to_string());
+        } else if let Some(v) = line.strip_prefix("CARGO=") {
+            cargo = (!v.is_empty()).then(|| v.to_string());
+        } else if line.starts_with("cargo ") {
+            version = Some(line.to_string());
+        }
+    }
+    (os, arch, cargo, version)
+}
+
 fn probe(remote: &BuildRemoteCfg, data_dir: &Path) -> anyhow::Result<Value> {
     let pw = secret(data_dir)?;
     let mut cmd = ssh_base(remote, pw.as_deref(), data_dir)?;
-    cmd.arg("printf 'OS='; uname -s; printf 'ARCH='; uname -m; printf 'CARGO='; command -v cargo || true; cargo --version 2>/dev/null || true");
+    cmd.arg(PROBE_SH);
     let out = cmd.output()?;
     if !out.status.success() {
         anyhow::bail!("ssh probe failed (exit {:?}): {}", out.status.code(), String::from_utf8_lossy(&out.stderr).trim());
     }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let (os, arch, cargo, version) = parse_probe(&stdout);
     Ok(json!({
         "ok": true,
-        "output": String::from_utf8_lossy(&out.stdout).trim(),
+        "output": stdout.trim(),
         "password_auth": pw.is_some(),
+        "os": os,
+        "arch": arch,
+        "cargo_path": cargo,
+        "cargo_version": version,
+        "cargo_missing": cargo.is_none(),
     }))
+}
+
+/// 在遠端裝 Rust 工具鏈。已經有了就什麼都不做（回報現有版本）。
+///
+/// `--profile minimal --no-modify-path`：我們只需要 cargo／rustc 跑 check/test/clippy，而且不要
+/// 去動使用者的 shell profile——probe 與 `run_remote` 都自己把 `~/.cargo/bin` 接到 PATH 前面。
+const INSTALL_SH: &str = "set -e\n\
+PATH=\"$HOME/.cargo/bin:$PATH\"\n\
+if command -v cargo >/dev/null 2>&1; then printf 'ALREADY='; cargo --version; exit 0; fi\n\
+if ! command -v curl >/dev/null 2>&1; then echo 'remote host has no curl; install curl (or rustup) there first' >&2; exit 2; fi\n\
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --no-modify-path\n\
+printf 'INSTALLED='; \"$HOME/.cargo/bin/cargo\" --version\n\
+command -v cc >/dev/null 2>&1 || command -v gcc >/dev/null 2>&1 || echo 'CC_MISSING=1'\n";
+
+fn install_toolchain(remote: &BuildRemoteCfg, data_dir: &Path) -> anyhow::Result<Value> {
+    let pw = secret(data_dir)?;
+    let mut cmd = ssh_base(remote, pw.as_deref(), data_dir)?;
+    cmd.arg(INSTALL_SH);
+    let out = cmd.output()?;
+    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    if !out.status.success() {
+        anyhow::bail!("rustup install failed (exit {:?}): {}", out.status.code(), if stderr.is_empty() { stdout } else { stderr });
+    }
+    let already = stdout.contains("ALREADY=");
+    // rustup 只裝 rust，不裝 linker。沒有 `cc` 的話 cargo test 會在連結那一步才爆，訊息很難懂
+    // （2026-09-18 實測這台就是這樣），所以當場講出來。
+    let cc_missing = stdout.lines().any(|l| l.trim() == "CC_MISSING=1");
+    let version = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("ALREADY=").or_else(|| l.strip_prefix("INSTALLED=")))
+        .map(|v| v.trim().to_string());
+    Ok(json!({
+        "ok": true,
+        "already_installed": already,
+        "cargo_version": version,
+        "cc_missing": cc_missing,
+        "output": stdout,
+    }))
+}
+
+/// `POST /api/build/remote/install-toolchain`
+pub async fn install_settings(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
+    let cfg = app.cfg.get().await;
+    let remote = cfg.build.remote.clone();
+    if remote.host.trim().is_empty() || remote.user.trim().is_empty() {
+        return Err(LcError::Bad("remote Cargo host 尚未設定".into()));
+    }
+    let data_dir = app.data_dir.clone();
+    tokio::task::spawn_blocking(move || install_toolchain(&remote, &data_dir))
+        .await
+        .map_err(|e| LcError::Upstream(e.to_string()))?
+        .map(Json)
+        .map_err(|e| LcError::Upstream(e.to_string()))
 }
 
 /// Only these commands are safe/useful to offload cross-platform in V1.
@@ -378,8 +463,9 @@ fn run_remote(remote: &BuildRemoteCfg, data_dir: &Path, dir: &str, args: &[Strin
     let pw = secret(data_dir)?;
     let mut cmd = ssh_base(remote, pw.as_deref(), data_dir)?;
     let argv = args.iter().map(|a| sh_quote(a)).collect::<Vec<_>>().join(" ");
+    // `~/.cargo/bin` 要自己接：rustup 只改 shell profile，ssh 的非互動 shell 不讀（同 `PROBE_SH`）。
     let remote_cmd = format!(
-        "cd {} && CARGO_BUILD_JOBS={} cargo {}",
+        "cd {} && PATH=\"$HOME/.cargo/bin:$PATH\" CARGO_BUILD_JOBS={} cargo {}",
         sh_quote(dir),
         remote.cargo_jobs.max(1),
         argv
@@ -496,6 +582,35 @@ mod tests {
             assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), before, "內容沒變就不要重寫");
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 連得上但沒有 cargo：這不是錯誤，是「還沒裝工具鏈」，UI 要據此提示幫忙安裝。
+    #[test]
+    fn a_probe_without_cargo_is_reported_as_a_missing_toolchain() {
+        let (os, arch, cargo, ver) = parse_probe("OS=Linux\nARCH=x86_64\nCARGO=\n");
+        assert_eq!(os.as_deref(), Some("Linux"));
+        assert_eq!(arch.as_deref(), Some("x86_64"));
+        assert!(cargo.is_none(), "{cargo:?}");
+        assert!(ver.is_none());
+
+        let (_, _, cargo, ver) = parse_probe("OS=Linux\nARCH=x86_64\nCARGO=/home/ubuntu/.cargo/bin/cargo\ncargo 1.90.0 (abc 2026-08-01)\n");
+        assert_eq!(cargo.as_deref(), Some("/home/ubuntu/.cargo/bin/cargo"));
+        assert_eq!(ver.as_deref(), Some("cargo 1.90.0 (abc 2026-08-01)"));
+    }
+
+    /// rustup 只改 shell profile，而 ssh 的非互動 shell 不讀 profile——probe、安裝後的檢查與真正
+    /// 的遠端 cargo 都要自己把 `~/.cargo/bin` 接到 PATH 前面，否則裝好了照樣說「沒有 cargo」。
+    #[test]
+    fn every_remote_command_puts_cargo_bin_on_the_path() {
+        assert!(PROBE_SH.contains("$HOME/.cargo/bin:$PATH"), "{PROBE_SH}");
+        assert!(INSTALL_SH.contains("$HOME/.cargo/bin:$PATH"), "{INSTALL_SH}");
+        // 安裝是冪等的：已經有就只回版本，不會再跑一次 rustup。
+        assert!(INSTALL_SH.contains("if command -v cargo >/dev/null 2>&1; then printf 'ALREADY='"), "{INSTALL_SH}");
+        // minimal，而且不去動使用者的 shell profile。
+        assert!(INSTALL_SH.contains("--profile minimal"), "{INSTALL_SH}");
+        assert!(INSTALL_SH.contains("--no-modify-path"), "{INSTALL_SH}");
+        // rustup 不裝 linker：沒有 cc 的機器要當場講，不要等到 cargo test 連結失敗才看到天書。
+        assert!(INSTALL_SH.contains("CC_MISSING=1"), "{INSTALL_SH}");
     }
 
     #[test]
