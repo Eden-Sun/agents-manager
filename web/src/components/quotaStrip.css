@@ -919,3 +919,15 @@
   /* 倒數＋百分比比 38px 的條寬：讓這一列撐開欄寬，不要往左蓋到窗口名（7d／43m）。 */
   min-width: max-content;
 }
+
+/* 勾了停用的帳號不分剩餘寬度、條縮短，空間留給啟用的（2026-09-18 使用者）。 */
+@media (width > 1024px) {
+  .main-head .quota-hp.off {
+    flex: 0 1 auto;
+  }
+
+  .main-head .quota-hp.off .quota-bar-wrap {
+    flex: 0 0 24px;
+    min-width: 24px;
+  }
+}
