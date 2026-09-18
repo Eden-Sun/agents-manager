@@ -196,18 +196,25 @@ pub async fn open_pr(dir: &Path, remote: &str, base: &str, branch: &str, title: 
     open_pr_with(Path::new("gh"), dir, remote, base, branch, title, body).await
 }
 
-/// 這條分支現在有沒有 PR。`None` = 沒有（`gh pr view` 找不到就是非 0）。
-async fn pr_url(gh: &Path, dir: &Path, branch: &str) -> Option<String> {
+/// 這條分支**最近的一條** PR：`(網址, 狀態)`，狀態是 `OPEN` | `CLOSED` | `MERGED`。`None` = 從來沒有
+/// （`gh pr view` 找不到就是非 0）。
+///
+/// `gh pr view <branch>` 不看狀態，關掉的、合併過的也照回（gh 2.98 實測），所以一定要把狀態一起拿回來，
+/// 由呼叫端決定算不算「已經交付」（issue #132）。
+async fn pr_for_branch(gh: &Path, dir: &Path, branch: &str) -> Option<(String, String)> {
     let out = Command::new(gh)
         .current_dir(dir)
-        .args(["pr", "view", branch, "--json", "url", "--jq", ".url"])
+        .args(["pr", "view", branch, "--json", "url,state"])
         .output()
         .await
         .ok()?;
     if !out.status.success() {
         return None;
     }
-    String::from_utf8_lossy(&out.stdout).trim().lines().last().map(str::to_string).filter(|u| u.starts_with("http"))
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    let url = v.get("url")?.as_str().filter(|u| u.starts_with("http"))?.to_string();
+    let state = v.get("state")?.as_str()?.to_ascii_uppercase();
+    Some((url, state))
 }
 
 /// `gh` 的路徑可換，測試才餵得進假的 `gh`（開 PR 不能真的打 GitHub）。
@@ -230,8 +237,13 @@ pub(crate) async fn open_pr_with(
         }
     }
     // 先看有沒有 PR：重試時 `gh pr create` 會因為「已經有一個」失敗，但事情早就做完了（review3 c1 M11）。
-    if let Some(url) = pr_url(gh, dir, branch).await {
-        return Ok(Opened { url, sha: head, existing: true });
+    // 只有**開著的**才算；合併過的只在 HEAD 已經在 base 裡時算（合併之後才重試）。被關掉的、或合併之後又有新
+    // commit 的，都要開一條新的——`gh pr create` 只擋「已經有開著的」（issue #132）。
+    match pr_for_branch(gh, dir, branch).await {
+        Some((url, state)) if state == "OPEN" || (state == "MERGED" && in_base) => {
+            return Ok(Opened { url, sha: head, existing: true });
+        }
+        _ => {}
     }
     if in_base {
         return Err(fail("nothing_to_deliver", format!("HEAD（{head}）已經在 {remote}/{base} 裡，也沒有開著的 PR")));
@@ -332,6 +344,7 @@ mod tests {
     }
 
     /// 假的 `gh`：第一次開 PR，第二次 `pr create` 會說已經有了——要回原本那條 PR，不是 `pr_failed`。
+    /// `view` 照真的 gh：`--json` 回物件（帶 `state`），`--jq` 才只印網址。
     #[tokio::test]
     async fn a_retry_returns_the_pull_request_that_already_exists() {
         let (root, _seed, work) = fixture();
@@ -339,7 +352,7 @@ mod tests {
         let gh = root.path().join("gh");
         std::fs::write(
             &gh,
-            "#!/bin/sh\ndir=$(dirname \"$0\")\ncase \"$2\" in\n  view) [ -f \"$dir/pr.url\" ] && cat \"$dir/pr.url\" && exit 0; echo 'no pull requests found' >&2; exit 1;;\n  create) [ -f \"$dir/pr.url\" ] && { echo 'a pull request for branch already exists' >&2; exit 1; }; echo https://example.invalid/pull/7 > \"$dir/pr.url\"; cat \"$dir/pr.url\";;\nesac\n",
+            "#!/bin/sh\ndir=$(dirname \"$0\")\ncase \"$2\" in\n  view) [ -f \"$dir/pr.url\" ] || { echo 'no pull requests found' >&2; exit 1; }; case \"$*\" in *--jq*) cat \"$dir/pr.url\";; *) echo \"{\\\"url\\\":\\\"$(cat \"$dir/pr.url\")\\\",\\\"state\\\":\\\"OPEN\\\"}\";; esac; exit 0;;\n  create) [ -f \"$dir/pr.url\" ] && { echo 'a pull request for branch already exists' >&2; exit 1; }; echo https://example.invalid/pull/7 > \"$dir/pr.url\"; cat \"$dir/pr.url\";;\nesac\n",
         )
         .unwrap();
         use std::os::unix::fs::PermissionsExt as _;
@@ -353,6 +366,52 @@ mod tests {
         assert_eq!((first.url.as_str(), first.existing), ("https://example.invalid/pull/7", false));
         let again = open("重試").await.expect("重試要回原本那條 PR");
         assert_eq!((again.url.as_str(), again.existing), ("https://example.invalid/pull/7", true));
+    }
+
+    /// `gh pr view <branch>` 回的是這條分支**最近的一條** PR，不管它開著、被關掉還是已經合併（gh 2.98 實測：
+    /// `gh pr view bump-go-gh -R cli/cli --json url,state` → `MERGED`）。以前只要問得到網址就當「PR 早就開著了」：
+    /// 使用者關掉 PR、任務退回重做之後再交付，新的 commit 推上分支、卻沒有任何開著的 PR，任務照樣記成已交付。
+    ///
+    /// 假的 `gh` 照真的 gh 行為：`view` 回最近那一條（帶 `--jq .url` 就只印網址），`create` 只有在已經有**開著的**
+    /// PR 時才失敗。
+    #[tokio::test]
+    async fn only_an_open_pull_request_counts_as_already_delivered() {
+        let gh_script = "#!/bin/sh\ndir=$(dirname \"$0\")\ncase \"$2\" in\n  view)\n    [ -f \"$dir/pr.json\" ] || { echo 'no pull requests found' >&2; exit 1; }\n    case \"$*\" in *--jq*) sed -n 's/.*\"url\":\"\\([^\"]*\\)\".*/\\1/p' \"$dir/pr.json\";; *) cat \"$dir/pr.json\";; esac;;\n  create)\n    grep -q '\"state\":\"OPEN\"' \"$dir/pr.json\" 2>/dev/null && { echo 'a pull request for branch already exists' >&2; exit 1; }\n    echo '{\"url\":\"https://example.invalid/pull/8\",\"state\":\"OPEN\"}' > \"$dir/pr.json\"; echo https://example.invalid/pull/8;;\nesac\n";
+        let setup = |state: &str| {
+            let (root, _seed, work) = fixture();
+            let gh = root.path().join("gh");
+            std::fs::write(&gh, gh_script).unwrap();
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::write(root.path().join("pr.json"), format!("{{\"url\":\"https://example.invalid/pull/7\",\"state\":\"{state}\"}}")).unwrap();
+            (root, gh, work)
+        };
+
+        // 上一條 PR 被關掉（或已經合併），這次有新的 commit：要開一條新的，不是回那條關掉的。
+        for state in ["CLOSED", "MERGED"] {
+            let (_root, gh, work) = setup(state);
+            commit(&work, "rework");
+            let out = open_pr_with(&gh, &work, "origin", "main", "mission/x", "重做", "body").await.unwrap_or_else(|f| panic!("{state}: {f:?}"));
+            assert_eq!((out.url.as_str(), out.existing), ("https://example.invalid/pull/8", false), "{state}：那條 PR 已經不開著了，要開新的");
+        }
+
+        // 開著的照舊回它（逾時重試，review3 c1 M11）。
+        let (_root, gh, work) = setup("OPEN");
+        commit(&work, "b");
+        let out = open_pr_with(&gh, &work, "origin", "main", "mission/x", "重試", "body").await.expect("開著的 PR 就是交付");
+        assert_eq!((out.url.as_str(), out.existing), ("https://example.invalid/pull/7", true));
+
+        // 已經合併、HEAD 也已經在 base 裡：先前那次其實交付成功了（合併之後才重試），照舊回那一條。
+        let (_root, gh, work) = setup("MERGED");
+        commit(&work, "merged");
+        sh(&work, &["push", "-q", "origin", "HEAD:main"]);
+        let out = open_pr_with(&gh, &work, "origin", "main", "mission/x", "重試", "body").await.expect("合併過的就是交付");
+        assert_eq!((out.url.as_str(), out.existing), ("https://example.invalid/pull/7", true));
+        // 被關掉、HEAD 卻在 base 裡：沒有東西可交，也沒有開著的 PR。
+        let (_root, gh, work) = setup("CLOSED");
+        commit(&work, "closed");
+        sh(&work, &["push", "-q", "origin", "HEAD:main"]);
+        assert_eq!(open_pr_with(&gh, &work, "origin", "main", "mission/x", "重試", "body").await.unwrap_err().code, "nothing_to_deliver");
     }
 
     /// 預設分支不叫 main 的專案也交得出去（以前寫死 main，一定 `fetch_failed`）。
