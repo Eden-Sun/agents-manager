@@ -811,7 +811,7 @@ mod flush_queue_tests {
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
         let t = turn(&app, &f.turn_id).await;
         assert!(t.flush_retries > 0 || t.status != "queued", "寬限過了要真的去送：{} retries={}", t.status, t.flush_retries);
-        assert!(!super::super::interrupt_grace::is_held(&f.bot_id), "等完就收掉標記");
+        assert_eq!(super::super::interrupt_grace::hold_of(&f.bot_id), None, "等完就收掉標記");
     }
 
     /// issue #86：維護窗口握著的時候，排隊的 prompt **留在佇列**，不進 pane。擋住它的是我們自己開的

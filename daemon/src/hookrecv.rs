@@ -721,11 +721,28 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
         // 而不是讓它掛著等 §4.3 備援（兩分鐘）或 stuck watchdog（五分鐘）來猜。
         HookKind::TurnFailed { session_id, turn_id, transcript_path, reason, detail } => {
             // 使用者自己中斷不是失敗。兩道都要：payload 說得出是中斷時照它說的；說不出來時看
-            // daemon 自己的紀錄——`interrupt_bot` 會先 `note_user_interrupt` 再收 in-flight turn，
-            // 所以這個窗口裡到的 StopFailure 就是那一次 Esc 的回聲（AGM 交辦 2026-09-18）。
-            if reason == FailureReason::Interrupted || lifecycle::user_interrupt_held(&bot.id) {
+            // daemon 自己的紀錄——`interrupt_bot` 先記下**被中斷的是哪一回合**再收 in-flight turn，
+            // 對得上那一回合的 StopFailure 才是那一次 Esc 的回聲（AGM 交辦 2026-09-18）。只看「剛按過停」
+            // 的話，Esc 之後馬上開的新回合撞額度也會被吞掉（#117）。
+            if reason == FailureReason::Interrupted {
                 tracing::info!(bot = %bot.name, ?reason, detail, "StopFailure 是使用者中斷的回聲：不算失敗，什麼都不動");
                 return Ok(());
+            }
+            if let Some(r) = &run {
+                let in_flight = db::in_flight_turn(&app.db, &r.id).await?;
+                let ev = lifecycle::InterruptFailureEvidence {
+                    session_id: session_id.as_deref(),
+                    prompt_id: turn_id.as_deref(),
+                    stamped_at: body
+                        .received_at
+                        .as_deref()
+                        .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                        .map(|t| t.with_timezone(&chrono::Utc)),
+                };
+                if lifecycle::settle_interrupt_echo(&bot.id, &r.id, &ev, in_flight.as_ref()) {
+                    tracing::info!(bot = %bot.name, ?reason, detail, "StopFailure 是被中斷那一回合的回聲：不算失敗，什麼都不動");
+                    return Ok(());
+                }
             }
             if let Some(r) = &run {
                 sqlx::query(
@@ -2227,7 +2244,7 @@ mod external_claim_tests {
     }
 
     /// 使用者自己按停不是 provider 失敗。兩條路都要擋：payload 說得出是中斷時照它說的；
-    /// 說不出來時看 daemon 自己的紀錄（`interrupt_bot` 先 `note_user_interrupt` 才收 turn）。
+    /// 說不出來時看 daemon 自己的紀錄（`interrupt_bot` 先記下被中斷的是哪一回合才收 turn）。
     #[tokio::test]
     async fn a_user_interrupt_is_never_recorded_as_a_provider_failure() {
         let env = tt::env().await;
@@ -2249,9 +2266,19 @@ mod external_claim_tests {
         assert_eq!(t.status, "in_flight", "使用者中斷不由這條路收尾");
         assert!(system_notes(&app, &turn_a).await.is_empty(), "也不寫「失敗」的說明");
 
-        // (b) payload 說不出原因，但 daemon 記得使用者剛按了停。
+        // (b) payload 說不出原因，但 daemon 記得使用者剛按停的就是這一筆（`fail_in_flight` 還沒收掉它）。
         let (bot_b, _c, turn_b) = delivered_turn(&app, &env.project_id).await;
-        lifecycle::note_user_interrupt(&bot_b);
+        let run_b = turn_row(&app, &turn_b).await.run_id.unwrap();
+        lifecycle::expect_interrupt_echo(
+            &bot_b,
+            lifecycle::InterruptedTurn {
+                run_id: run_b,
+                turn_id: Some(turn_b.clone()),
+                session_id: None,
+                prompt_id: None,
+                at: chrono::Utc::now(),
+            },
+        );
         process(&app, &stop_failure(&bot_b, json!({"hook_event_name": "StopFailure", "session_id": "sb", "prompt_id": "pb"})))
             .await
             .unwrap();

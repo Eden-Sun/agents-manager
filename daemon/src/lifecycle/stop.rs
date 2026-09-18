@@ -191,7 +191,9 @@ pub async fn interrupt_bot(app: &Arc<App>, bot_id: &str) -> LcResult<()> {
     let client = client_for_run(app, &run).await?;
     client.agent_send_keys(&target, &["esc".to_string()]).await.map_err(up)?;
     // 先記接管，再收 in-flight：`fail_in_flight` 會 emit turn → 觸發 flush，順序反過來排隊的派工就搶進去了。
-    note_user_interrupt(bot_id);
+    // 同時記下被中斷的是哪一回合：它的 `StopFailure` 回聲才認得出來，新回合的失敗不會被當成回聲（#117）。
+    let in_flight = db::in_flight_turn(&app.db, &run.id).await.ok().flatten();
+    note_user_interrupt_of(app, &bot, &run, in_flight.as_ref()).await;
     fail_in_flight(app, &run.id, "interrupted by user").await;
     clear_restored_prompt(&client, &run, &bot).await;
     Ok(())
@@ -243,11 +245,12 @@ pub async fn abort_turns(app: &Arc<App>, bot_id: &str) -> LcResult<Value> {
 
     let mut aborted: Vec<String> = Vec::new();
     if let Some(r) = run.as_ref() {
-        if let Ok(Some(t)) = db::in_flight_turn(&app.db, &r.id).await {
+        let in_flight = db::in_flight_turn(&app.db, &r.id).await.ok().flatten();
+        if let Some(t) = &in_flight {
             aborted.push(t.id.clone());
         }
         // 強制中止也是使用者要接手：排著的派工照樣不撤，只是先讓使用者拿回輸入框（§4.4a）。
-        note_user_interrupt(bot_id);
+        note_user_interrupt_of(app, &bot, r, in_flight.as_ref()).await;
         fail_in_flight(app, &r.id, "回合已由使用者強制中止").await;
         if let Some(c) = client.as_ref() {
             clear_restored_prompt(c, r, &bot).await;
