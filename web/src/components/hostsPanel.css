@@ -139,7 +139,8 @@
   gap: 8px;
 }
 
-.checkbox-field {
+.field.checkbox-field {
+  /* `.field` 在 styles.css（後載入）是 grid，同權重會把勾選框擠成獨立一行、置中。 */
   display: flex;
   align-items: center;
   gap: 7px;
@@ -158,4 +159,26 @@
   .remote-cargo-grid {
     grid-template-columns: 1fr;
   }
+}
+
+/* 外部 Cargo 的輸入框沒有 `type`，吃不到 `.field input[type='text']`，顯示成原生灰框、很難點（2026-09-18 使用者）。 */
+.remote-cargo-settings .field input:not([type='checkbox']) {
+  width: 100%;
+  padding: 7px 10px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+
+.remote-cargo-settings .field input:not([type='checkbox']):focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.remote-cargo-settings .field.checkbox-field > span {
+  font-size: 13px;
+  color: var(--text);
 }
