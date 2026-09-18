@@ -788,6 +788,22 @@ hint 可用，退回規則 2／3——這條沒有、也不打算改掉子代 ho
 以及 `pane_closed` 事件**先**結束 run、reconcile 後到——bot 沒有 active run、herdr 清單找不到它、且至少有一個已結束的 run，一樣退役。
 herdr 還列著這個 agent（pane 被搬走）的不算，會被重新收編。`pane_closed` 結束的是子 agent 的 run 時，2 秒後自己排一次 reconcile。
 
+### 6.5a-1 子 agent 卡住時通知父 agent（`child_alerts`，使用者 2026-09-18）
+
+側欄的 `!n` 與「等小孩」圓點是投影給**人**看的；父 agent 是一顆 CLI 行程，除非有人把字打進它的 pane，
+否則它不會知道自己的 child 停在提問上——它自己的回合早就結束了。使用者只好手動催「你 child 又問了」。
+
+child 轉成 `blocked` 並且**穩定 8 秒**（daemon 自己按掉的對話框在這段時間內就消失了）之後，daemon 讀它的
+畫面尾段當作「它在問什麼」，用 `relay_from = <child bot id>` 送一則進父 agent 的對話，走
+`prompt_relayed_queueable`——父 agent 正在回合中就**排隊**，不插隊、不打斷。界線：
+
+- 只有 `managed_by = 'child'`、未刪、`parent_bot_id` 有值的 bot 會觸發；
+- 父 agent 沒有活著的 run 就不送（沒有 pane 收得下，UI 徽章仍在）；
+- daemon 自己會按掉的畫面不算：滿意度問卷、`/model`／`/effort` 確認框（§3.1、`tui_prompts`）；
+- 同一個問題只講一次：指紋取畫面尾段，statusLine 與 `⏵⏵ bypass permissions` 這類每回合都在變的行先濾掉；
+  child 離開 `blocked` 就把指紋忘掉，同一個問題再出現才會再講；
+- 記憶體去重（daemon 重啟後最多重講一次），不為此加表。
+
 ### 6.5b herdr PATH shim（命名規則做成機制）
 
 daemon 每次起 pane 前把 POSIX `sh` 包裝腳本裝到 `<bot 目錄>/bin/herdr`（遠端走 ssh），並放到 pane `PATH` 最前面。

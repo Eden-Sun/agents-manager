@@ -319,6 +319,13 @@ async fn handle_status(app: &Arc<App>, host: &str, session: &str, ev: &crate::he
         tokio::spawn(async move {
             crate::tui_prompts::dismiss_if_survey(&app2, &run2).await;
         });
+        // 子 agent 停在提問時，它的父 agent 不會自己知道（`child_alerts`）：UI 的徽章是給人看的，
+        // 父 agent 是一顆 CLI 行程，沒有人打字進去就什麼都收不到。
+        crate::child_alerts::on_child_blocked(app, &run);
+    }
+    // 不再 blocked：同一個問題下次再出現時才要再講一次。
+    if prev == "blocked" && status != "blocked" {
+        crate::child_alerts::forget(&run.bot_id);
     }
 
     // 沒有 in-flight turn 卻開始 working＝有人在 pane 裡打字：現在就開 external turn，UI 才串得到；
