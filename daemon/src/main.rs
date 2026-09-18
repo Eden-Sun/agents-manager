@@ -43,6 +43,7 @@ mod outbox;
 mod mission;
 mod models;
 mod pane_identity;
+mod shim_path;
 mod panes;
 mod projection;
 mod quota;
