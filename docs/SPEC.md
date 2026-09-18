@@ -1797,7 +1797,15 @@ launchd `com.agm.claude-release` 每 30 分鐘跑 `bin/claude-release-kick.sh`�
 | 還在等 | `blocked`、`quota_blocked` | AGM／daemon，**仍算未結案** |
 
 合法的轉移集中在 `supervisor::assignment_state`（issue #71），SQL 的守衛（`… WHERE status IN (…)`）
-由 `sources_for()` 從那張表算出來，不再各自抄一份清單：
+由 `sources_for()` 從那張表算出來，不再各自抄一份清單。跟 `lifecycle::turn_controller`（4.2 節）同一個
+等級：這張表**生成一句 SQLite trigger**（`supervisor_assignments_status_transition`）裝在
+`supervisor_assignments` 上，非法轉移繞不過去——HTTP、reconcile、以後任何新寫的路徑都一樣（走哪條路
+都繞不過，值沒變的寫入一律放行，重播、冪等重寫不會被自己的保護擋下來）。`AssignmentState` 是型別化的
+狀態（不再是裸字串），`assignment_state::set_status`／`set_status_on` 是給新程式碼（例如 #74
+MissionController）用的單一入口：帶 CAS、擋非法邊、轉移沒發生時回 `Raced { now }`／`Missing`。既有那幾支
+「status 跟別的欄位一起寫在同一句」的函式（`mark_delivered`、`settle_and_notify`、`park_quota_blocked`）
+留著自己的整句 UPDATE——拆成兩步反而讓原子寫入變成非原子，但 guard 一樣從 `sources_for()`／
+`set_status_on` 算出來，不是自己抄的：
 
 - **已決定的四個是終局，沒有任何出邊。** `completed → delivered`、`cancelled → awaiting_review` 這種
   「把結案的工作弄活過來」一律擋掉。這不是理論問題：`dispatch` 從讀到 `queued` 到送完中間有好幾個 await，
@@ -1805,8 +1813,9 @@ launchd `com.agm.claude-release` 每 30 分鐘跑 `bin/claude-release-kick.sh`�
 - 在途三個（`queued`/`delivered`/`unknown`）之間可以再記一次送達（同一個 crid 重派是冪等的）；
   在途 → `awaiting_review`／`completed`（通知當場結案）／`quota_blocked`；`quota_blocked → queued`（額度回來）。
 - AGM 的裁示（`completed`/`failed`/`cancelled`/`superseded`/`blocked`）可以從任何**還沒結案**的狀態下達。
-- 表以外的一律不合法（預設關閉）。`mark_undeliverable`（只從 `queued`）與 `block_stale_queue`（只從 `delivered`）
-  的守衛比表更窄，那是各自的用途決定的，刻意保留。
+- 表以外的一律不合法（預設關閉，違反就是 `RAISE(ABORT, 'illegal assignment status transition')`）。
+  `mark_undeliverable`（只從 `queued`）與 `block_stale_queue`（只從 `delivered`）的守衛比表更窄，
+  那是各自的用途決定的，刻意保留。
 
 - 回合原始事實各自留欄：`delivery`、`turn_status`（`completed` / `completed_fallback` / `failed` / `dispatch_failed` / `turn_missing` / `quota_exhausted` / `identity_switch`）、`evidence_complete`。
   終端備援不會因為「跑完了」就被驗收。派不出去的交辦也進 `awaiting_review`（`dispatch_failed`）。

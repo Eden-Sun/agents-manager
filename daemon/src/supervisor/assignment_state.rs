@@ -11,6 +11,24 @@
 //! 跟 #68 的 TurnController 的分界：這裡只管**交辦**的 `status`。回合自己的狀態（`turn_status`、
 //! `delivery`）是傳輸事實，不是裁示，仍舊各走各的——schema 註解講得很清楚：「回合結束了」跟
 //! 「這份工作被接受了」不是同一個主張。
+//!
+//! **issue #71 第二刀**：跟 `lifecycle::turn_controller`（issue #68，管 `turns.status`）補齊同一個
+//! 等級的兩件事——
+//!
+//! 1. [`guard_ddl`] 由這張表生成一句 SQLite trigger 裝在 `supervisor_assignments` 上
+//!    （[`install_guard`]，接在 `store::migrate` 裡）。非法轉移現在**繞不過去**：走 HTTP、走
+//!    reconcile、走以後任何新寫的路徑都一樣，不再只靠「呼叫端記得帶 guard」這個約定。跟
+//!    `turn_controller::guard_ddl` 同一個理由、同一個形狀（`WHEN OLD.status IS NOT NEW.status`——
+//!    值沒變的重寫一律放行，不然重播、冪等重寫會被自己的保護擋下來）。
+//! 2. [`AssignmentState`] 是明確的型別，[`set_status`]／[`set_status_on`] 是給新程式碼用的單一
+//!    入口（回 [`Outcome`]，講得出轉移沒發生是因為別人先動了手還是這筆根本不存在），跟
+//!    `turn_controller::set_status`／`set_status_on` 同一個形狀。既有那幾支「status 跟別的欄位一起
+//!    寫在同一句」的函式（`mark_delivered`、`settle_and_notify`、`park_quota_blocked`）留著自己的
+//!    整句 UPDATE——拆成兩步反而讓原子寫入變成非原子（跟 `turn_controller` 模組文件講的是同一個
+//!    取捨），但它們的 `WHERE status IN (…)` 早就是從 [`sources_for`] 算出來的，不是自己抄的。
+
+use anyhow::Result;
+use sqlx::{SqlitePool, SqliteConnection};
 
 /// 終局：AGM 裁示過了，這筆交辦不會再動。**終局沒有任何出邊**——issue #71 要擋的就是
 /// `completed → delivered`、`cancelled → awaiting_review` 這種把結案的工作弄活過來的轉移。
@@ -88,6 +106,149 @@ pub const ALL: [&str; 10] = [
 /// 現在改表就等於改守衛，抄不走鐘。
 pub fn sources_for(to: &str) -> Vec<&'static str> {
     ALL.iter().copied().filter(|from| allowed(from, to)).collect()
+}
+
+/// 型別化的 `supervisor_assignments.status`。字串是給 DB／JSON 用的線上格式；新程式碼（包括
+/// #74 MissionController 要呼叫的入口）比對、傳遞狀態走這個 enum——打錯字在編譯期就會發現，
+/// 不用等到執行期查表才知道「這個狀態根本不存在」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AssignmentState {
+    Queued,
+    Delivered,
+    Unknown,
+    AwaitingReview,
+    Blocked,
+    QuotaBlocked,
+    Completed,
+    Failed,
+    Cancelled,
+    Superseded,
+}
+
+impl AssignmentState {
+    /// DB／JSON 上的線上格式。跟 [`ALL`] 是同一份值，這裡只是型別化的另一面。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Delivered => "delivered",
+            Self::Unknown => "unknown",
+            Self::AwaitingReview => "awaiting_review",
+            Self::Blocked => "blocked",
+            Self::QuotaBlocked => "quota_blocked",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Superseded => "superseded",
+        }
+    }
+
+    /// 從 DB 讀回來的字串解回型別。讀到不認得的字串（壞資料、將來被移除的狀態）回 `None`，
+    /// 不是 panic——呼叫端自己決定要當成「找不到這筆」還是要噴錯。
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "queued" => Self::Queued,
+            "delivered" => Self::Delivered,
+            "unknown" => Self::Unknown,
+            "awaiting_review" => Self::AwaitingReview,
+            "blocked" => Self::Blocked,
+            "quota_blocked" => Self::QuotaBlocked,
+            "completed" => Self::Completed,
+            "failed" => Self::Failed,
+            "cancelled" => Self::Cancelled,
+            "superseded" => Self::Superseded,
+            _ => return None,
+        })
+    }
+
+    /// 終局沒有出邊——跟 [`is_terminal`] 同一份答案，這裡不重複判斷邏輯，只是型別化的一面。
+    pub fn is_terminal(self) -> bool {
+        is_terminal(self.as_str())
+    }
+}
+
+impl std::fmt::Display for AssignmentState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// 由 [`allowed`] 生成的 trigger DDL：跟 `lifecycle::turn_controller::guard_ddl` 同一個形狀
+/// （`WHEN OLD.status IS NOT NEW.status`——值沒變的重寫一律放行，重播、冪等重寫不該被自己的
+/// 保護擋下來）。`ALL` 是封閉集合，`ALL × ALL` 只有 100 組，直接把 `allowed()` answer 是 true 的
+/// 那些組成 OR 清單——表改了（`allowed` 改了）trigger 就跟著改，只有一份定義。
+pub fn guard_ddl() -> String {
+    let allowed_pairs = ALL
+        .iter()
+        .flat_map(|&from| ALL.iter().filter(move |&&to| allowed(from, to)).map(move |to| format!("(OLD.status='{from}' AND NEW.status='{to}')")))
+        .collect::<Vec<_>>()
+        .join("\n                 OR ");
+    format!(
+        "CREATE TRIGGER IF NOT EXISTS supervisor_assignments_status_transition
+           BEFORE UPDATE OF status ON supervisor_assignments
+           WHEN OLD.status IS NOT NEW.status
+            AND NOT ({allowed_pairs})
+         BEGIN
+           SELECT RAISE(ABORT, 'illegal assignment status transition');
+         END"
+    )
+}
+
+/// 裝上 [`guard_ddl`] 那句 trigger。接在 `store::migrate` 裡，表一定已經存在之後。
+pub async fn install_guard(pool: &SqlitePool) -> Result<()> {
+    sqlx::query(&guard_ddl()).execute(pool).await?;
+    Ok(())
+}
+
+/// 一次轉移的結果。跟 `turn_controller::Outcome` 同一個形狀：轉移沒發生時講得出為什麼，
+/// 不是默默 0 rows 讓呼叫端自己猜。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Outcome {
+    /// 真的改了。
+    Applied,
+    /// 這一筆現在不是預期的 `from`：別的路徑先動了手（不是錯誤——重複收尾本來就該冪等），
+    /// 附上它現在真正的值。
+    Raced { now: String },
+    /// 這一筆不存在。
+    Missing,
+}
+
+/// **新程式碼改 assignment 的 `status` 走這裡。** 帶 CAS、擋非法邊、轉移沒發生時講得出為什麼。
+///
+/// `from == to` 一律放行（重播、冪等重寫，跟 `turn_controller::set_status` 同一個理由）；其餘
+/// 轉移合不合法問 [`allowed`]——那張表才是「這一步准不准」的權威，這裡不重複判斷一次。
+/// 既有那幾支「status 跟別的欄位一起寫」的函式（見模組文件）繼續用自己的整句 UPDATE，但一樣
+/// 從 [`sources_for`] 算 guard，跟這裡問的是同一張表。
+pub async fn set_status(pool: &SqlitePool, id: &str, from: AssignmentState, to: AssignmentState, why: &str) -> Result<Outcome> {
+    let mut conn = pool.acquire().await?;
+    set_status_on(&mut conn, id, from, to, why).await
+}
+
+/// [`set_status`] 的交易內版本：要跟同一個交易裡的其他寫入綁在一起時用。
+pub async fn set_status_on(conn: &mut SqliteConnection, id: &str, from: AssignmentState, to: AssignmentState, why: &str) -> Result<Outcome> {
+    if from != to && !allowed(from.as_str(), to.as_str()) {
+        anyhow::bail!("illegal assignment status transition {from} -> {to} ({why})");
+    }
+    let done = sqlx::query("UPDATE supervisor_assignments SET status=?, updated_at=? WHERE id=? AND status=?")
+        .bind(to.as_str())
+        .bind(crate::db::now())
+        .bind(id)
+        .bind(from.as_str())
+        .execute(&mut *conn)
+        .await?;
+    if done.rows_affected() > 0 {
+        return Ok(Outcome::Applied);
+    }
+    let now: Option<String> = sqlx::query_scalar("SELECT status FROM supervisor_assignments WHERE id=?").bind(id).fetch_optional(&mut *conn).await?;
+    match now {
+        Some(now) => {
+            tracing::info!(assignment = id, %from, %to, %now, why, "assignment 轉移沒發生：它已經不是預期的起點了");
+            Ok(Outcome::Raced { now })
+        }
+        None => {
+            tracing::warn!(assignment = id, %from, %to, why, "assignment 轉移沒發生：這一筆不存在");
+            Ok(Outcome::Missing)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -185,6 +346,105 @@ mod tests {
         assert!(!is_terminal("blocked"));
         for s in crate::supervisor::store::OPEN_STATES {
             assert!(!is_terminal(s), "{s} 在 OPEN_STATES 裡，不可能是終局");
+        }
+    }
+
+    /// `AssignmentState` 跟字串是同一件事的兩面：來回轉一定要對得回去，認不得的字串要老實說不知道。
+    #[test]
+    fn assignment_state_round_trips_through_its_string() {
+        for s in ALL {
+            let parsed = AssignmentState::parse(s).unwrap_or_else(|| panic!("{s} 應該解得回來"));
+            assert_eq!(parsed.as_str(), s);
+            assert_eq!(parsed.to_string(), s);
+        }
+        assert!(AssignmentState::parse("nonsense").is_none());
+        assert_eq!(AssignmentState::Completed.is_terminal(), is_terminal("completed"));
+        assert_eq!(AssignmentState::Queued.is_terminal(), is_terminal("queued"));
+    }
+
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    async fn pool() -> SqlitePool {
+        let p = SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+        crate::supervisor::store::migrate(&p).await.unwrap();
+        p
+    }
+
+    async fn row(p: &SqlitePool, crid: &str) -> String {
+        crate::supervisor::store::insert_assignment(p, None, "bot1", crid, "x", &[], None, true).await.unwrap().id
+    }
+
+    /// `set_status`：非法邊當場回錯（連 SQL 都不必送），轉移沒發生時講得出「它現在是什麼」，
+    /// 值不變的重寫（重播）照樣放行。跟 `turn_controller::set_status_reports_why_a_transition_did_not_happen`
+    /// 同一個形狀。
+    #[tokio::test]
+    async fn set_status_reports_why_a_transition_did_not_happen() {
+        let p = pool().await;
+        let id = row(&p, "c1").await;
+
+        assert_eq!(set_status(&p, &id, AssignmentState::Queued, AssignmentState::Delivered, "測試").await.unwrap(), Outcome::Applied);
+        let now: String = sqlx::query_scalar("SELECT status FROM supervisor_assignments WHERE id=?").bind(&id).fetch_one(&p).await.unwrap();
+        assert_eq!(now, "delivered");
+
+        // 別的路徑先動了手：不是錯誤，但講得出它現在是什麼。
+        assert_eq!(
+            set_status(&p, &id, AssignmentState::Queued, AssignmentState::Delivered, "測試").await.unwrap(),
+            Outcome::Raced { now: "delivered".into() },
+        );
+        assert_eq!(set_status(&p, "nope", AssignmentState::Queued, AssignmentState::Delivered, "測試").await.unwrap(), Outcome::Missing);
+
+        // 非法邊連 SQL 都不必送。
+        let err = set_status(&p, &id, AssignmentState::Completed, AssignmentState::Delivered, "測試").await.unwrap_err();
+        assert!(format!("{err}").contains("illegal assignment status transition"), "{err}");
+
+        // 值不變的重寫（重播）一律放行，不查表。
+        assert_eq!(set_status(&p, &id, AssignmentState::Delivered, AssignmentState::Delivered, "重播").await.unwrap(), Outcome::Applied);
+    }
+
+    /// trigger 是這張表的下限：不管走哪條路，非法轉移都繞不過去——包括完全跳過 Rust 這一層、
+    /// 直接下 SQL 的呼叫端（跟 `turn_controller::the_guard_refuses_to_resurrect_a_finished_turn` 同一個形狀）。
+    #[tokio::test]
+    async fn the_guard_refuses_to_resurrect_a_settled_assignment() {
+        let p = pool().await;
+        let id = row(&p, "c1").await;
+
+        // 合法：派出去、結案。
+        sqlx::query("UPDATE supervisor_assignments SET status='delivered' WHERE id=?").bind(&id).execute(&p).await.expect("queued -> delivered 合法");
+        sqlx::query("UPDATE supervisor_assignments SET status='completed' WHERE id=?").bind(&id).execute(&p).await.expect("delivered -> completed 合法");
+
+        // 非法：終局回到在途。任何路徑都不行——擋在 DB，繞不過 Rust 這一層。
+        for bad in ["delivered", "queued", "awaiting_review"] {
+            let err = sqlx::query("UPDATE supervisor_assignments SET status=? WHERE id=?")
+                .bind(bad)
+                .bind(&id)
+                .execute(&p)
+                .await
+                .expect_err(&format!("completed -> {bad} 必須是明確的錯誤，不是 0 rows"));
+            assert!(format!("{err}").contains("illegal assignment status transition"), "{err}");
+        }
+        let still: String = sqlx::query_scalar("SELECT status FROM supervisor_assignments WHERE id=?").bind(&id).fetch_one(&p).await.unwrap();
+        assert_eq!(still, "completed", "被擋下來的那一句一個欄位都沒改");
+
+        // 值不變的重寫（冪等收尾）照樣放行——trigger 只管真的改變值的那一句。
+        sqlx::query("UPDATE supervisor_assignments SET status='completed' WHERE id=?").bind(&id).execute(&p).await.expect("冪等重寫不該被擋");
+    }
+
+    /// 表跟 trigger 讀的是同一份 `allowed()`：合法的邊（同一份清單 `sources_for` 已經釘過）走 SQL
+    /// 一樣通，不會因為多了一層 trigger 就變嚴。
+    #[tokio::test]
+    async fn the_guard_permits_every_edge_the_table_calls_legal() {
+        let p = pool().await;
+        for (from, to) in [("queued", "blocked"), ("delivered", "blocked"), ("queued", "quota_blocked"), ("quota_blocked", "queued")] {
+            let id = row(&p, &format!("c-{from}-{to}")).await;
+            if from != "queued" {
+                sqlx::query("UPDATE supervisor_assignments SET status=? WHERE id=?").bind(from).bind(&id).execute(&p).await.unwrap();
+            }
+            sqlx::query("UPDATE supervisor_assignments SET status=? WHERE id=?")
+                .bind(to)
+                .bind(&id)
+                .execute(&p)
+                .await
+                .unwrap_or_else(|e| panic!("{from} -> {to} 表上是合法的，trigger 不該擋：{e}"));
         }
     }
 }

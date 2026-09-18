@@ -242,6 +242,10 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
         }
         sqlx::query(s).execute(pool).await?;
     }
+    // Assignment 狀態轉移的單一權威（issue #71，跟 issue #68 的 `turns_status_transition` 同一個
+    // 理由）：合法邊只定義在 `assignment_state::allowed`，trigger 由它生成。既有那幾支各自帶
+    // `WHERE status IN (…)` guard 的函式照舊，這是它們的下限；未來新寫的路徑繞不過去。
+    assignment_state::install_guard(pool).await?;
     // 換 commit 接續的等待起點（見 `Approval::wait_since`）。表由上面的 DDL 保證存在。
     if !has_column(pool, "supervisor_approvals", "wait_since").await? {
         sqlx::query("ALTER TABLE supervisor_approvals ADD COLUMN wait_since TEXT").execute(pool).await?;
