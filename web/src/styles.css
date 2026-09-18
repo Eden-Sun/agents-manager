@@ -768,6 +768,19 @@ button:disabled {
   filter: saturate(0.35);
 }
 
+/* 但選單開著時不調淡（2026-09-18 使用者截圖：⋯ 選單被下面幾列蓋住、還半透明）：
+   `opacity`／`filter` 會開一個 stacking context，泡泡的 z-index 40 只在那一格裡算數，
+   後面幾列照 DOM 順序畫在它上面；連選單自己也跟著半透明。 */
+.bot-row.quota-critical .bot-actions:has(.head-menu-pop) {
+  opacity: 1;
+  filter: none;
+}
+
+/* 選單開著的那一列抬到其他列之上（`.bot-row` 本來就是 position: relative）。 */
+.bot-row:has(.head-menu-pop) {
+  z-index: 40;
+}
+
 .bot-row .lamp {
   width: 8px;
   height: 8px;

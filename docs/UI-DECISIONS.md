@@ -318,3 +318,12 @@ shell 面板本來只有「打一行、Enter 送出」：TUI（`top`、`vim`、�
 - 母 bot 的身分徽章不再描邊（`.identity-diverged .identity-badge` 的 border 透明）。
 - 子帳號那顆從 10px 縮到 9px：它是附註，不是第二個身分。顏色維持琥珀（額度分開算的提醒），完整說明留在滑鼠提示。
 - 截圖 `docs/screenshots/identity-diverged/`。
+
+## 額度見底那一列的 ⋯ 選單被蓋住（2026-09-18 使用者截圖）
+
+額度 critical 的列會把 `.bot-actions` 調淡（`opacity: 0.5` + `filter: saturate(0.35)`）提醒它快不能用了。但這兩個屬性會**開一個 stacking context**：
+⋯ 選單的 `z-index: 40` 只在那一格裡算數，下面幾列照 DOM 順序畫在選單上面，選單自己也跟著半透明——看起來就是一個空白框卡在列中間。
+
+- 選單開著時那一格不調淡（`.bot-actions:has(.head-menu-pop)`），列本身抬到 `z-index: 40`（`.bot-row` 本來就是 `position: relative`）。
+- 調淡本身保留：它是「這顆 bot 快沒額度」的提示，只有在選單開著的那一刻讓位。
+- 驗法：`document.elementFromPoint` 取選單中心，修好前回下面那列的 `model-tag`，修好後回 `head-menu-item`。截圖 `docs/screenshots/row-menu-overlap/`。
