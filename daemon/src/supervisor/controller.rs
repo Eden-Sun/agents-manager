@@ -594,12 +594,16 @@ async fn executor_identity(app: &Arc<App>, mission_id: &str) -> Option<String> {
     bot.identity.filter(|s| !s.trim().is_empty())
 }
 
-/// 這件交辦屬於一個**還開著、但被暫停**的任務。
+/// 這件交辦屬於一個**還開著、而且被使用者暫停**的任務。
+///
+/// 只認使用者的暫停，跟派工的閘門（`api::user_pause_reason`）同一份判斷（issue #137）：daemon 自己設的那幾種
+/// （交付失敗、輪數用完、驗證者沒 Fable、要澄清）是「等 AGM 處理」，AGM 照 runbook 在那底下派的工作（例如交付失敗
+/// 之後的 rebase）撞額度之後一樣要重送——不然交付永遠不會成功、暫停也永遠解不開。
 async fn mission_paused(app: &Arc<App>, a: &store::Assignment) -> bool {
     let Some(mission_id) = a.mission_id.as_deref() else { return false };
     matches!(
         crate::mission::store::get(&app.db, mission_id).await,
-        Ok(Some(m)) if m.paused_reason.is_some() && m.completed_at.is_none() && m.cancelled_at.is_none()
+        Ok(Some(m)) if super::api::user_pause_reason(m.paused_reason.as_deref()).is_some() && m.completed_at.is_none() && m.cancelled_at.is_none()
     )
 }
 
@@ -3189,6 +3193,44 @@ mod quota_restart_tests {
         let (status, retries) = status_of(&app, &id).await;
         assert_ne!(status, "quota_blocked", "解除暫停就放行");
         assert_eq!(retries, 1);
+    }
+
+    /// 上一條只對**使用者**的暫停成立。daemon 自己設的那幾種（交付失敗、輪數用完、驗證者沒 Fable、要澄清）是
+    /// 「等 AGM 處理」：`post_assignment` 照樣讓 AGM 在那底下派工（交付失敗 → 派執行者 rebase → 重驗 → 再交付，
+    /// 交付成功才自動解除暫停）。那件 rebase 撞到額度之後若因為「任務停著」永遠不重送，交付就永遠不會成功、暫停
+    /// 也永遠解不開——卡死到有人手動放行為止。兩個閘門要認同一份「使用者的暫停」。
+    #[tokio::test]
+    async fn a_daemon_set_pause_still_resends_the_work_it_asked_for() {
+        use crate::mission::store as mstore;
+        for reason in ["push_main_failed", "pr_failed", "max_rounds", "no_fable_for_verifier", "clarify"] {
+            let app = app().await;
+            bot(&app, "b1", "cc2").await;
+            let (m, _) = mstore::create(
+                &app.db,
+                &mstore::NewMission {
+                    project_id: "p",
+                    client_request_id: &crate::db::ulid(),
+                    text: "做 X",
+                    delivery_mode: "push_main",
+                    executor_kind: "claude",
+                    on_5h_limit: "wait",
+                    max_rounds: 2,
+                    parent_mission_id: None,
+                },
+            )
+            .await
+            .unwrap();
+            assert!(mstore::pause(&app.db, &m.id, reason, None).await.unwrap());
+            // 暫停之後 AGM 照 runbook 派的那件（例如 rebase），撞到額度停著，時間早就到了。
+            let id = parked(&app, "b1", "2020-01-01T00:00:00Z", &crate::db::now()).await;
+            store::set_mission_link(&app.db, &id, &m.id, "executor").await.unwrap();
+
+            resume_quota_blocked(&app).await;
+
+            let (status, retries) = status_of(&app, &id).await;
+            assert_ne!(status, "quota_blocked", "{reason}：daemon 設的暫停在等 AGM 處理，它派的工作要照常重送");
+            assert_eq!(retries, 1, "{reason}");
+        }
     }
 
     /// 回填完再跑一次 resume：兩段合起來就是重啟的真實順序，parked 的交辦要原地不動。

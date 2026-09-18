@@ -121,7 +121,7 @@ impl AssignIn {
 /// daemon 自己設的暫停有固定幾種 reason，它們的意思是「等 AGM 處理」，不是「停手」：輪數用完
 /// （`max_rounds`）、驗證者沒有 Fable（`no_fable_for_verifier`）、交付失敗（`push_main_failed`／`pr_failed`）、
 /// 要澄清（`clarify`）。其餘的 reason 只會從 `POST /api/missions/{id}/pause` 進來，那就是人按的。
-fn user_pause_reason(paused_reason: Option<&str>) -> Option<&str> {
+pub(crate) fn user_pause_reason(paused_reason: Option<&str>) -> Option<&str> {
     const DAEMON_SET: [&str; 5] = ["max_rounds", "no_fable_for_verifier", "push_main_failed", "pr_failed", "clarify"];
     paused_reason.map(str::trim).filter(|r| !r.is_empty() && !DAEMON_SET.contains(r))
 }
