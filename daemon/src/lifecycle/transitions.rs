@@ -14,6 +14,14 @@
 //! 目前只有這個檔案自己的測試在讀這些表（`cargo clippy` 不編 `#[cfg(test)]`，所以看起來是
 //! death code）；`#[allow(dead_code)]` 是因為它們的價值是「給人看、給以後可能出現的
 //! TurnController（issue #69）當起點」，不是現在就要被生產程式碼呼叫。
+//!
+//! issue #76 checklist 第 4 項（舊 Run 的事件 vs 新 Run 的 Turn）**不在這張表裡**：#69 已經落地
+//! （`lifecycle/fence.rs`），管的是 run 的世代（generation），不是這裡這種單一 run 內的
+//! `runs.state`／`turns.status` CAS 邊，所以不重複列一份。覆蓋在 `fence.rs` 自己的 `decide()` 單元
+//! 測試＋`classify_finds_the_prior_run_by_insertion_order_even_when_its_ulid_sorts_after_the_current_one`
+//! （issue #98：世代序看的是 sqlite rowid 寫入順序，不是 ULID 字典序）＋
+//! `hookrecv.rs::external_claim_tests::a_late_stop_from_the_previous_run_cannot_touch_the_new_runs_turn`
+//! （接線到 `hookrecv::process` 的端到端驗證）。
 
 #![allow(dead_code)]
 
@@ -56,16 +64,11 @@ pub const TURN_STATUS_EDGES: &[(&str, &str, &str)] = &[
     ("completed_fallback", "completed", "hookrecv.rs:452 fill_or_drop_late_hook：備援關掉但還沒有回覆的回合，遲到的 hook 把答案補上；guard 是「還沒有 assistant 訊息」（Rust 層），不是 SQL 的 status guard"),
 ];
 
-/// 讀 `supervisor_assignments.status` 現況時另外發現、還沒被 #71 一起收掉的一條縫——只回報，
-/// 不在這裡動手，也沒有寫測試去把它釘成「正確行為」：`store.rs::settle_and_notify`（約 1327 行）
-/// 的 `status` 欄位本身已經有 #71 補上的正確 guard（來源從 `assignment_state::sources_for` 算出來），
-/// 但它「送通知」那句 `INSERT OR IGNORE INTO supervisor_inbox` 完全不看前面那句 UPDATE 的
-/// `moved`——guard 擋下時（例如這一列已經被 cancel，`moved=false`）它照樣排一則
-/// `assignment_completed`／`needs_review:true` 的通知：已經關掉的交辦還會讓 AGM 收到「請驗收」的
-/// 訊息。用跟 `daemon/src/supervisor/store.rs::a_cancelled_assignment_is_not_resurrected_by_a_late_settle`
-/// 同一個場景（先 cancel、再遲到的 settle）另外起了一支臨時測試驗證過：`moved=false` 時
-/// `supervisor_inbox` 仍然多一筆 `assignment_completed` 事件，確認後移除，沒有留在最終 commit——
-/// 這是回報用的觀察，不是要釘住的正確行為。
+/// 讀 `supervisor_assignments.status` 現況時曾經發現、還沒被 #71 一起收掉的一條縫（`store.rs::
+/// settle_and_notify` 送通知那句 `INSERT OR IGNORE INTO supervisor_inbox` 不看前面那句 UPDATE 的
+/// `moved`，guard 擋下時仍照樣排一則「請驗收」的通知）：**已修**，`f108cd56` 關掉 #99，`moved` 為假
+/// 時不再組通知、`event_new` 直接是 false；釘住的測試是
+/// `supervisor::store::a_cancelled_assignment_gets_no_stale_completion_notification`。
 
 #[cfg(test)]
 mod tests {
