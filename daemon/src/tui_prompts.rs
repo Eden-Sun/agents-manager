@@ -119,11 +119,15 @@ pub const UPDATE_NOTICE: &str = "Update installed · Restart to update";
 /// 有對話紀錄時 `/model <別名>` 會跳「Switch model?」確認框（2.1.268 實測），herdr 判成 `idle`，
 /// 下一則 prompt 被打進框裡、Enter 替使用者按 Yes、回合 stall（2026-09-11 AGM）。
 /// 只看最底幾行，理由同 [`update_notice`]。
+/// `/effort` 是同一個框，標題換成「Change effort level?」（2026-09-18 實測）：兩個都要認，
+/// 漏掉哪一個，那個框就留在畫面上吃掉下一則 prompt。
 pub fn is_switch_model_dialog(screen: &str) -> bool {
     let lines: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
     let tail = lines[lines.len().saturating_sub(DIALOG_TAIL_LINES)..].join("\n");
     let t = flatten(&tail);
-    t.contains("switch model?") && t.contains("yes, switch to") && t.contains("no, go back")
+    (t.contains("switch model?") || t.contains("change effort level?"))
+        && t.contains("yes, switch to")
+        && t.contains("no, go back")
 }
 
 /// grok 1.0.34 開在沒信任過的目錄時跳「Do you trust the contents of this directory?」（y／n），
@@ -257,6 +261,17 @@ mod tests {
 
     /// 2.1.268 在一個有對話紀錄的 session 裡打 `/model haiku` 之後的真畫面（2026-09-11）。
     const SWITCH_MODEL: &str = "  ⎿  Interrupted · What should Claude do instead?\n▔▔▔▔▔▔▔▔▔▔\n   Switch model?\n   Your next response will be slower and use more tokens\n   This conversation is cached for the current model. Switching to Haiku 4.5 means the full history gets re-read on your next message.\n   ❯ 1. Yes, switch to Haiku 4.5\n     2. No, go back\n";
+
+    /// `/effort low` 在同一種 session 裡跳的框（2026-09-18 實測，標題是「Change effort level?」）。
+    const CHANGE_EFFORT: &str = "  ✻ Cooked for 2m 16s · done 08:17\n▔▔▔▔▔▔▔▔▔▔\n   Change effort level?\n   Your next response will be slower and use more tokens\n\nThis conversation is cached for the current effort level. Switching to low means the full history gets re-read on your next message.\n\n❯ 1. Yes, switch to low\n  2. No, go back\n";
+
+    #[test]
+    fn change_effort_confirmation_is_recognised() {
+        assert!(is_switch_model_dialog(CHANGE_EFFORT));
+        // 同樣不能被正文裡的引文帶偏。
+        let quoted = format!("{}\n{}\n─────\n❯\n─────\n  tony. | agents-manager | Opus 5 | 5h:96%\n", CHANGE_EFFORT, "⏺ Bash(cargo test)\n  ⎿  ok\n".repeat(8));
+        assert!(!is_switch_model_dialog(&quoted));
+    }
 
     #[test]
     fn switch_model_confirmation_is_recognised() {
