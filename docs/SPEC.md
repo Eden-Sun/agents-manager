@@ -1298,20 +1298,34 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   | 沒有可續接的 session | `no_resume` | 沒 `native_session_id`、本機 transcript 不在、或 kind 不支援 `--resume`（grok）。收起來等於把對話丟掉，那不是省 RAM，是刪資料 |
   | 還沒閒置到門檻 | `still_warm` | — |
 
+- **讀不到就是不知道，不收**（issue #123）：收機器是破壞性動作，只有 affirmative 的安全證據才放行。活動時間、
+  交辦、總管身分（`supervisors`／`supervisor_roles`）、bot 所在主機任何一項 DB 讀不到，都是**跳過這顆（或這一輪）、
+  下一輪重試**，不拿預設值頂替（不是「0 筆交辦」、不是「退回 `started_at`」、不是「沒有總管」）。pane 的背景工作
+  那一項是三態 `BackgroundWork`：`None`（證明過：shell 在 ps 行程樹裡、底下沒有）才放行；`Running` 跳過；
+  `Unknown`（run 沒 pane id、找不到 herdr client、`pane.process_info` 失敗或沒回 `shell_pid`、ps／ssh 失敗或逾時
+  30 秒、shell 不在行程樹裡）一律跳過。log 分得開：`Running` 是 info「pane still has background work」，
+  `Unknown` 是 warn「could not tell whether the pane has background work」（含原因）。之後某一輪問得到、證明沒有，
+  照常收，不會永久卡住。
 - **怎麼收**：先拿這顆 bot 的 per-bot 鎖，**在鎖裡重讀一次、再跑一次 `decide`**（issue #133）——巡邏稍早的
   判斷之後還問過 herdr、跑過 ps，那段時間 AGM 可能剛把工作派給它；`prompt` 建回合拿的是同一把鎖，鎖裡看到的
-  就是停機那一刻的事實，已經有回合或排隊就不收。過了才 `bot_sleeps` 先寫一列（**先寫再停**：中間死掉留下的是
+  就是停機那一刻的事實，已經有回合、排隊、未結案交辦或更新的動作就不收，重讀本身讀不到也不收。這把鎖從最後一次
+  判斷一路握到 `stop_bot_locked` 結束（判斷、寫標記、停機是同一個序列化邊界；叫醒也在這把鎖裡，看不到「已標記、
+  還沒停」的中間狀態）。背景工作那一項是鎖外問的（貴），沿用到鎖裡——安全的理由是 daemon 經手的新工作一定先建
+  turn／訊息，鎖裡重讀的 in-flight、排隊、交辦、最後動作時間看得到；一個剛開始又結束的回合會把「最後動作」推到現在。
+  過了才 `bot_sleeps` 先寫一列（**先寫再停**：中間死掉留下的是
   「它應該是睡著的」，叫醒那條路會處理；反過來死在中間就變成一顆沒人知道要 `--resume` 的 bot），再走
   `lifecycle::stop_bot_locked`——ctrl+c ×2 收 agent、關 pane，等於在 pane 裡下 exit。停失敗就把那一列
   收回去，這顆仍是醒著的。收完在它自己的對話裡留一則 system 訊息說為什麼。
-- **怎麼叫醒**（`idle_sleep::wake`）：用 `StartOpts { resume_native: true, resume_required: true }`
+- **怎麼叫醒**（`idle_sleep::wake`／`wake_locked`）：用 `StartOpts { resume_native: true, resume_required: true }`
   起回來，claude 拿到的是 `--resume <上一個 session>`，跟 §6.9 的批次是同一條路。`resume_required`
   是重點：接不回原本那段對話時**不默默開新的**——「只留下 resume」是這個功能的全部前提，悄悄換成
   空白對話等於把脈絡弄丟還不說。真的接不回（session／transcript 在睡眠期間被清掉）就退回開新對話，
   但在那顆 bot 自己的對話裡寫明「原本那段接不回來（原因）」。三個入口：
-  1. `lifecycle::prompt`（拿 bot 鎖**之前**）——使用者送訊息、AGM 派 assignment、group chat、
+  1. `lifecycle::prompt`（拿到 bot 鎖**之後**，用 `wake_locked`）——使用者送訊息、AGM 派 assignment、group chat、
      team relay 全走這裡，所以「下次要用」自動就叫醒了。**不是睡著的 bot 只多一次索引查詢。**
-  2. `POST /api/bots/{id}/start`——使用者按「啟動」想要的是把剛剛那顆帶著對話的 bot 叫回來，
+     叫醒必須在鎖裡（issue #123）：放在鎖外會夾在「叫醒檢查過、沒睡」與「拿到鎖」之間被巡邏收掉，prompt 拿到鎖
+     只看到 409 `bot has no active run`；而且那條路在「已標記、還沒停」的瞬間會把標記清掉，留下一顆沒人知道要叫醒的 bot。
+  2. `POST /api/bots/{id}/start`（`wake`，自己拿鎖）——使用者按「啟動」想要的是把剛剛那顆帶著對話的 bot 叫回來，
      不是開一段新的空白對話。
   3. 已經有 active run 卻還標著睡著（stop 其實沒成功、或使用者自己起回來了）：只把標記清掉，
      不拿一次 start 去撞正在跑的 run。

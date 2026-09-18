@@ -203,8 +203,11 @@ fn resumable(kind: &str, session: Option<&str>, transcript: Option<&str>, local:
 ///
 /// 三個來源取最大：它的 turn（含還沒收掉的）、對話裡的訊息（終端快照補進來的回覆也算），
 /// 還有這個 run 自己的 `started_at`——剛起來的 bot 不能因為還沒人跟它講過話就被當成閒置 90 分鐘。
-async fn last_activity(app: &Arc<App>, bot_id: &str, run: &db::Run) -> String {
-    let conv = db::conversation_id(&app.db, bot_id).await.unwrap_or_default();
+///
+/// **讀不到就回 `Err`，不退回 `started_at`**（issue #123）：那個退路會讓一顆跑很久、剛剛才有訊息的 bot，
+/// 只因為這一次查詢失敗就被算成閒置 90 分鐘以上。收機器是破壞性動作，資料讀不到＝不知道，不是「閒很久」。
+async fn last_activity(app: &Arc<App>, bot_id: &str, run: &db::Run) -> anyhow::Result<String> {
+    let conv = db::conversation_id(&app.db, bot_id).await?;
     let latest: Option<String> = sqlx::query_scalar(
         "SELECT MAX(ts) FROM (
            SELECT MAX(COALESCE(completed_at, created_at)) AS ts FROM turns WHERE conversation_id = ?1
@@ -214,11 +217,10 @@ async fn last_activity(app: &Arc<App>, bot_id: &str, run: &db::Run) -> String {
     )
     .bind(&conv)
     .bind(&run.started_at)
-    .fetch_optional(&app.db)
-    .await
-    .ok()
-    .flatten();
-    latest.unwrap_or_else(|| run.started_at.clone())
+    .fetch_one(&app.db)
+    .await?;
+    // `SELECT ?2` 保證有值；真的拿到 NULL 代表查詢的形狀不對，一樣是「不知道」。
+    latest.ok_or_else(|| anyhow::anyhow!("the activity query returned no timestamp"))
 }
 
 fn minutes_since(iso: &str, now: chrono::DateTime<chrono::Utc>) -> i64 {
@@ -231,20 +233,23 @@ fn minutes_since(iso: &str, now: chrono::DateTime<chrono::Utc>) -> i64 {
 
 /// 總管自己那幾顆的 bot id：巡檢在 `supervisors`，回應者在 `supervisor_roles`（roles.rs）。
 /// 直接讀 row，不用 `get_or_init`——那會在使用者沒設總管的機器上建一列出來。
-async fn supervisor_bot_ids(app: &Arc<App>) -> std::collections::HashSet<String> {
+///
+/// 任何一張讀不到就回 `Err`（issue #123）：漏掉的那幾個 id 會被當成一般 worker，總管自己就被收掉了。
+async fn supervisor_bot_ids(app: &Arc<App>) -> anyhow::Result<std::collections::HashSet<String>> {
     let mut out = std::collections::HashSet::new();
     for q in ["SELECT bot_id FROM supervisors", "SELECT bot_id FROM supervisor_roles"] {
-        if let Ok(rows) = sqlx::query_scalar::<_, Option<String>>(q).fetch_all(&app.db).await {
-            out.extend(rows.into_iter().flatten().filter(|s| !s.is_empty()));
-        }
+        let rows = sqlx::query_scalar::<_, Option<String>>(q).fetch_all(&app.db).await?;
+        out.extend(rows.into_iter().flatten().filter(|s| !s.is_empty()));
     }
-    out
+    Ok(out)
 }
 
 /// 還沒結案的交辦＝**所有非終局狀態**，從 [`crate::supervisor::assignment_state`] 那張表算出來，
 /// 不在這裡抄一份清單（抄的那份就是 2026-09-18 停擺的根因：只認在途三態，一筆 `blocked` 的交辦
 /// 擋不住回收，建置 child 被收掉之後 kick 每輪跳過那張未結案，部署停了 3.5 小時）。
-async fn has_open_assignment(app: &Arc<App>, bot_id: &str) -> bool {
+///
+/// 查詢失敗回 `Err`，**不當成 0 筆**（issue #123）：資料庫讀不到不等於「沒有未結案交辦」。
+async fn has_open_assignment(app: &Arc<App>, bot_id: &str) -> anyhow::Result<bool> {
     let open = open_assignment_statuses();
     let marks = vec!["?"; open.len()].join(",");
     let sql = format!("SELECT COUNT(*) FROM supervisor_assignments WHERE target_bot_id = ? AND status IN ({marks})");
@@ -252,7 +257,7 @@ async fn has_open_assignment(app: &Arc<App>, bot_id: &str) -> bool {
     for st in &open {
         q = q.bind(*st);
     }
-    q.fetch_one(&app.db).await.unwrap_or(0) > 0
+    Ok(q.fetch_one(&app.db).await? > 0)
 }
 
 /// 非終局的交辦狀態。
@@ -261,13 +266,14 @@ pub fn open_assignment_statuses() -> Vec<&'static str> {
 }
 
 /// 一顆 bot 此刻的判斷素材。`sup` 是總管的 bot id。
+/// 任何一項證據讀不到就回 `Err`（issue #123）——呼叫端一律跳過這顆、下一輪再看，不拿預設值頂替。
 async fn cand_for(app: &Arc<App>, run: &db::Run, sup: &std::collections::HashSet<String>) -> anyhow::Result<Option<Cand>> {
     let Some(bot) = db::bot(&app.db, &run.bot_id).await? else { return Ok(None) };
     if bot.deleted_at.is_some() {
         return Ok(None);
     }
-    let host = db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| crate::config::LOCAL_HOST.to_string());
-    let seen = last_activity(app, &bot.id, run).await;
+    let host = db::bot_host(&app.db, &bot.id).await?;
+    let seen = last_activity(app, &bot.id, run).await?;
     Ok(Some(Cand {
         bot_id: bot.id.clone(),
         name: bot.name.clone(),
@@ -278,7 +284,7 @@ async fn cand_for(app: &Arc<App>, run: &db::Run, sup: &std::collections::HashSet
         agent_status: run.agent_status.clone(),
         turn_in_flight: db::in_flight_turn(&app.db, &run.id).await?.is_some(),
         queued_turn: db::queued_turn_for_bot(&app.db, &bot.id).await?.is_some(),
-        open_assignment: has_open_assignment(app, &bot.id).await,
+        open_assignment: has_open_assignment(app, &bot.id).await?,
         // 要問 herdr 與 ps，太貴；只有真的要收的那一顆才查（見 [`sweep`]）。
         background_shell: false,
         resumable: resumable(
@@ -292,12 +298,22 @@ async fn cand_for(app: &Arc<App>, run: &db::Run, sup: &std::collections::HashSet
 }
 
 /// 從資料庫湊出候選清單。只走有 active run 的 bot——沒在跑的本來就沒有 RAM 要省。
+///
+/// [`sweep`] 自己先讀 supervisor id 再走 [`candidates_with`]（讀不到就整輪跳過），所以這個只剩測試在用。
+#[cfg(test)]
 pub async fn candidates(app: &Arc<App>) -> anyhow::Result<Vec<Cand>> {
-    let sup = supervisor_bot_ids(app).await;
+    let sup = supervisor_bot_ids(app).await?;
+    candidates_with(app, &sup).await
+}
+
+async fn candidates_with(app: &Arc<App>, sup: &std::collections::HashSet<String>) -> anyhow::Result<Vec<Cand>> {
     let mut out = Vec::new();
     for run in db::all_active_runs(&app.db).await? {
-        if let Some(c) = cand_for(app, &run, &sup).await? {
-            out.push(c);
+        match cand_for(app, &run, sup).await {
+            Ok(Some(c)) => out.push(c),
+            Ok(None) => {}
+            // 這顆的證據讀不到：不進名單（＝這一輪不收），別的 bot 照常巡。
+            Err(e) => tracing::warn!(bot = %run.bot_id, error = %format!("{e:#}"), "idle sweep: could not read this bot's state; keeping it warm this round"),
         }
     }
     Ok(out)
@@ -311,11 +327,14 @@ pub async fn candidates(app: &Arc<App>) -> anyhow::Result<Vec<Cand>> {
 ///
 /// 只認得出來的形狀才算，不是「有子行程就算」：claude 的 MCP server、外掛、statusline 也是子行程，
 /// 把它們算進去等於把整個功能關掉。認的是 shell（背景 Bash 工作就長這樣）與建置工具。
-pub fn background_procs(ps_tree: &str, shell_pid: i32) -> Vec<String> {
+///
+/// `None` = 這顆 shell 根本不在行程樹裡（pane 剛好不在了、或 ps 與 herdr 講的不是同一台）：**證明不了**它底下
+/// 沒有背景工作，跟「證明沒有」是兩回事，不能一律當空清單（issue #123）。`Some(vec![])` 才是證明過的沒有。
+pub fn background_procs(ps_tree: &str, shell_pid: i32) -> Option<Vec<String>> {
     let procs = crate::memstat::parse_ps(ps_tree);
     let by_pid: std::collections::HashMap<i32, &crate::memstat::Proc> = procs.iter().map(|p| (p.pid, p)).collect();
     if !by_pid.contains_key(&shell_pid) {
-        return Vec::new();
+        return None;
     }
     let children = crate::memstat::child_index(&procs);
     let mut order = vec![shell_pid];
@@ -340,7 +359,7 @@ pub fn background_procs(ps_tree: &str, shell_pid: i32) -> Vec<String> {
             out.push(p.argv.clone());
         }
     }
-    out
+    Some(out)
 }
 
 /// 背景 Bash 工作跑起來就是這幾個。
@@ -349,20 +368,61 @@ const BACKGROUND_SHELLS: &[&str] = &["bash", "zsh", "sh", "dash", "ksh", "fish"]
 /// MCP server 與外掛就是那兩個，列進去等於所有 claude 都不收。
 const BACKGROUND_TOOLS: &[&str] = &["cargo", "rustc", "bun", "bunx", "npm", "pnpm", "yarn", "tsc", "vite", "make", "pytest", "sccache"];
 
-/// 這顆 bot 的 pane 底下現在有沒有背景工作。問不到（herdr 不在、ps 失敗、pane 沒了）一律回
-/// `false`：這是一道加碼的保險，不能因為問不到就永遠不收。
-async fn has_background_shell(app: &Arc<App>, run: &db::Run) -> bool {
-    let Some(pane) = run.pane_id.clone().map(|p| p.trim().to_string()).filter(|p| !p.is_empty()) else { return false };
-    let Some(client) = app.herdr_for_run(run).await else { return false };
-    let Ok(shell) = client.pane_shell(&pane).await else { return false };
-    let Some(pid) = shell.shell_pid else { return false };
-    let host = db::bot_host(&app.db, &run.bot_id).await.unwrap_or_else(|_| crate::config::LOCAL_HOST.to_string());
-    let Ok(dump) = crate::memproc::dump(app, &host).await else { return false };
-    let found = background_procs(&dump, pid as i32);
-    if !found.is_empty() {
-        tracing::info!(bot = %run.bot_id, procs = ?found, "idle sweep: pane still has background work; leaving it alone");
+/// 這顆 bot 的 pane 底下現在有沒有背景工作——**三態**（issue #123）。
+///
+/// 收機器是破壞性動作，所以只有 affirmative 的「沒有」才放行；問不到不是「沒有」。以前 herdr 不在、ps 失敗、
+/// pane id／shell pid 缺失一律回 `false`，暫時性的 herdr／ssh／ps 故障就成了停機許可（背景建置還在跑、bot 被回收，
+/// 2026-09-18 的事故就是這條路，加了行程樹檢查之後不該又讓「看不到」變成 kill permission）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BackgroundWork {
+    /// 證明過：shell 在行程樹裡，底下沒有背景工作。
+    None,
+    /// 底下還有背景工作（argv，去重後）。
+    Running(Vec<String>),
+    /// 問不到、或證明不了：原因寫在裡面，給 log 看。這一輪不收，下一輪重試。
+    Unknown(String),
+}
+
+/// 問 herdr 與 ps 最多等這麼久。巡邏是一顆一顆序列做的，某一顆的 ssh 卡住不能把整輪（以及之後每一輪，
+/// `SWEEPING` 沒放掉就不會再開）一起拖死。
+const INSPECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// ps 行程樹（或它讀不到的原因）＋pane 的 shell pid → 三態。純函式，好測。
+fn judge_background(ps_tree: Result<String, String>, shell_pid: i32) -> BackgroundWork {
+    let tree = match ps_tree {
+        Ok(t) => t,
+        Err(e) => return BackgroundWork::Unknown(format!("ps 行程樹讀不到：{e}")),
+    };
+    match background_procs(&tree, shell_pid) {
+        None => BackgroundWork::Unknown(format!("pane 的 shell（pid {shell_pid}）不在 ps 行程樹裡，證明不了它底下沒有背景工作")),
+        Some(found) if found.is_empty() => BackgroundWork::None,
+        Some(found) => BackgroundWork::Running(found),
     }
-    !found.is_empty()
+}
+
+async fn inspect_background(app: &Arc<App>, run: &db::Run) -> BackgroundWork {
+    match tokio::time::timeout(INSPECT_TIMEOUT, inspect_background_inner(app, run)).await {
+        Ok(w) => w,
+        Err(_) => BackgroundWork::Unknown(format!("問 herdr／ps 超過 {} 秒沒有回應", INSPECT_TIMEOUT.as_secs())),
+    }
+}
+
+async fn inspect_background_inner(app: &Arc<App>, run: &db::Run) -> BackgroundWork {
+    use BackgroundWork::Unknown;
+    let Some(pane) = run.pane_id.clone().map(|p| p.trim().to_string()).filter(|p| !p.is_empty()) else {
+        return Unknown("這個 run 沒有 pane id".into());
+    };
+    let Some(client) = app.herdr_for_run(run).await else { return Unknown("找不到這個 run 對應的 herdr client".into()) };
+    let shell = match client.pane_shell(&pane).await {
+        Ok(s) => s,
+        Err(e) => return Unknown(format!("herdr pane.process_info 失敗：{e:#}")),
+    };
+    let Some(pid) = shell.shell_pid else { return Unknown(format!("herdr 沒有回 pane {pane} 的 shell_pid")) };
+    let host = match db::bot_host(&app.db, &run.bot_id).await {
+        Ok(h) => h,
+        Err(e) => return Unknown(format!("讀不到這顆 bot 所在的主機：{e:#}")),
+    };
+    judge_background(crate::memproc::dump(app, &host).await.map_err(|e| format!("{e:#}")), pid as i32)
 }
 
 // ---------------------------------------------------------------- 睡著這件事本身
@@ -392,14 +452,18 @@ async fn clear_asleep(app: &Arc<App>, bot_id: &str) {
     let _ = sqlx::query("DELETE FROM bot_sleeps WHERE bot_id = ?").bind(bot_id).execute(&app.db).await;
 }
 
-/// 這顆現在是被收起來的嗎（`(slept_at, idle_minutes)`）。
+/// 這顆現在是被收起來的嗎（`(slept_at, idle_minutes)`）。讀不到當成「不是」，只給測試用；
+/// 決定要不要叫醒的 [`wake_locked`] 走 [`read_asleep`]，讀不到不能默默當成沒睡。
+#[cfg(test)]
 pub async fn asleep(app: &Arc<App>, bot_id: &str) -> Option<(String, i64)> {
-    sqlx::query_as::<_, (String, i64)>("SELECT slept_at, idle_minutes FROM bot_sleeps WHERE bot_id = ?")
+    read_asleep(app, bot_id).await.ok().flatten()
+}
+
+async fn read_asleep(app: &Arc<App>, bot_id: &str) -> anyhow::Result<Option<(String, i64)>> {
+    Ok(sqlx::query_as::<_, (String, i64)>("SELECT slept_at, idle_minutes FROM bot_sleeps WHERE bot_id = ?")
         .bind(bot_id)
         .fetch_optional(&app.db)
-        .await
-        .ok()
-        .flatten()
+        .await?)
 }
 
 /// 所有被收起來的 bot：`bot_id -> (slept_at, idle_minutes)`。狀態 JSON 一次讀完，不必每顆問一次。
@@ -418,20 +482,41 @@ async fn say(app: &Arc<App>, bot_id: &str, text: &str) {
     let _ = lifecycle::insert_message(app, &conv, None, "system", text, "system", false, None).await;
 }
 
+/// 鎖裡重讀證據時某一項讀不到：不收、不留標記，下一輪重試。
+fn unreadable(c: &Cand, what: &str, e: &anyhow::Error) {
+    tracing::warn!(bot = %c.name, what, error = %format!("{e:#}"), "idle sweep: could not re-read the evidence right before stopping; keeping the bot warm and retrying next round");
+}
+
 /// 收一顆：標記 → `stop_bot`（送 ctrl+c 收 agent、關 pane）→ 在它自己的對話裡說一聲為什麼。
 ///
 /// 標記與停機前**在這顆 bot 的鎖裡再判斷一次**（issue #133）：`c` 是巡邏稍早湊的，之後還問過 herdr、跑過 ps，
 /// 那段時間 AGM 可能剛好把工作派給它。`prompt` 建回合拿的是同一把鎖，所以鎖裡看到的就是停機那一刻的事實——
 /// 以前拿舊的判斷直接停，剛送進去的回合被 `fail_in_flight` 標成「run stopped by user」。
+///
+/// 這把鎖從最後一次判斷一路握到 `stop_bot_locked` 結束（issue #123）：最後的 admission check、寫標記、停機是同一個
+/// 序列化邊界，[`wake`] 與 `prompt` 的叫醒也在這把鎖裡，看不到「已標記、還沒停」的中間狀態。
+/// 鎖裡重讀的證據只要有一項**讀不到**就不收——跟背景工作那一項同一個規矩：只有 affirmative 的安全證據才能收。
 async fn sleep_one(app: &Arc<App>, c: &Cand, session: Option<String>, threshold: i64) {
     let lock = app.bot_lock(&c.bot_id).await;
     let _g = lock.lock().await;
-    let Ok(Some(run)) = db::active_run(&app.db, &c.bot_id).await else { return };
-    let sup = supervisor_bot_ids(app).await;
+    let run = match db::active_run(&app.db, &c.bot_id).await {
+        Ok(Some(run)) => run,
+        // 已經不在跑了（別人先停掉了它）：沒什麼好收的。
+        Ok(None) => return,
+        Err(e) => return unreadable(c, "active run", &e),
+    };
+    let sup = match supervisor_bot_ids(app).await {
+        Ok(sup) => sup,
+        Err(e) => return unreadable(c, "supervisor ids", &e),
+    };
     let fresh = match cand_for(app, &run, &sup).await {
         // 背景工作那一項剛才已經問過（貴），沿用；其餘都是鎖裡重讀的。
+        //
+        // 沿用是安全的：daemon 經手的新工作一定先建 turn／訊息（同一把鎖裡），鎖裡重讀的 in-flight、排隊、交辦、
+        // 最後動作時間就看得到；一個剛開始又結束的回合，也會把「最後動作」推到現在而不再閒置。
         Ok(Some(f)) => Cand { background_shell: c.background_shell, ..f },
-        _ => return,
+        Ok(None) => return,
+        Err(e) => return unreadable(c, "bot state", &e),
     };
     if let Err(why) = decide(&fresh, threshold) {
         tracing::info!(bot = %c.name, why = why.code(), "idle sweep: the bot is no longer idle; leaving it running");
@@ -441,6 +526,9 @@ async fn sleep_one(app: &Arc<App>, c: &Cand, session: Option<String>, threshold:
         tracing::warn!(bot = %c.name, error = %e, "could not record the sleep; leaving the bot running");
         return;
     }
+    // 測試專用的競態點：「已標記、還沒停」的那一瞬，另一條路（叫醒／prompt）剛好落在這裡。
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("idle_sleep.marked", &c.bot_id).await;
     match lifecycle::stop_bot_locked(app, &c.bot_id).await {
         Ok(_) => {
             tracing::info!(bot = %c.name, idle_minutes = c.idle_minutes, "idle bot put to sleep; only its resumable session is kept");
@@ -469,8 +557,20 @@ async fn sleep_one(app: &Arc<App>, c: &Cand, session: Option<String>, threshold:
 ///
 /// `Ok(false)` = 這顆本來就不是睡著的（絕大多數呼叫都是這一種，所以這條路必須便宜）。
 /// 已經有 active run 的話只把標記清掉：它其實活著，不能拿一次 start 去撞它。
+///
+/// **整段在 bot 鎖裡**（issue #123）：巡邏的 [`sleep_one`] 從寫標記握到停機結束都持著這把鎖。以前這裡先不拿鎖
+/// 讀標記，剛好落在「已標記、還沒停」的中間就會看到「標記在、run 還活著」，把標記清掉回 `false`——接著巡邏把
+/// 它停掉，留下一顆停著、沒有標記、再也沒人知道要 `--resume` 叫醒的 bot。
 pub async fn wake(app: &Arc<App>, bot_id: &str, why: &str) -> anyhow::Result<bool> {
-    let Some((_, mins)) = asleep(app, bot_id).await else { return Ok(false) };
+    let lock = app.bot_lock(bot_id).await;
+    let _g = lock.lock().await;
+    wake_locked(app, bot_id, why).await
+}
+
+/// [`wake`]，呼叫端已經握著這顆 bot 的鎖。`prompt` 用這個：叫醒與後面建回合在同一次持鎖裡，巡邏不會夾在
+/// 「叫醒檢查過了」與「拿到鎖」之間把剛檢查過的 bot 收掉（那樣 prompt 拿到鎖只會看到 409 `bot has no active run`）。
+pub async fn wake_locked(app: &Arc<App>, bot_id: &str, why: &str) -> anyhow::Result<bool> {
+    let Some((_, mins)) = read_asleep(app, bot_id).await? else { return Ok(false) };
     if db::active_run(&app.db, bot_id).await?.is_some() {
         clear_asleep(app, bot_id).await;
         return Ok(false);
@@ -479,7 +579,7 @@ pub async fn wake(app: &Arc<App>, bot_id: &str, why: &str) -> anyhow::Result<boo
     // 功能的全部前提，悄悄換成空白對話等於把使用者的脈絡弄丟還不說（上游 2026-09-17 的
     // `?resume=native` 用的是同一個旗標）。接不回就退回開新對話，但在那顆 bot 自己的對話裡講清楚。
     let resumed = StartOpts { resume_native: true, resume_required: true, ..Default::default() };
-    match lifecycle::start_bot_with(app, bot_id, resumed).await {
+    match lifecycle::start_bot_locked_with(app, bot_id, resumed).await {
         Ok(run_id) => {
             clear_asleep(app, bot_id).await;
             tracing::info!(bot = %bot_id, run = %run_id, why, "woke a sleeping bot with --resume");
@@ -496,7 +596,7 @@ pub async fn wake(app: &Arc<App>, bot_id: &str, why: &str) -> anyhow::Result<boo
         // 這顆還是要回得來，所以改開新對話，但把「原本那段接不回來」寫進對話裡，不裝作沒事。
         Err(LcError::Conflict(v)) if v.get("reason").and_then(|r| r.as_str()) == Some("cannot_resume") => {
             let reason = v.get("resume_reason").and_then(|r| r.as_str()).unwrap_or("unknown").to_string();
-            match lifecycle::start_bot(app, bot_id).await {
+            match lifecycle::start_bot_locked_with(app, bot_id, StartOpts::default()).await {
                 Ok(run_id) => {
                     clear_asleep(app, bot_id).await;
                     tracing::warn!(bot = %bot_id, run = %run_id, why, reason, "woke a sleeping bot, but its old session could not be resumed");
@@ -558,28 +658,59 @@ pub fn tick(app: &Arc<App>) {
 /// 巡一輪，一顆一顆收。序列而不是並行，理由跟 §6.9 的批次一樣：herdr 的 pane 版面與 per-bot 鎖
 /// 都假設一次一顆。
 async fn sweep(app: &Arc<App>, threshold: i64) {
-    let cands = match candidates(app).await {
-        Ok(c) => c,
+    let sup = match supervisor_bot_ids(app).await {
+        Ok(s) => s,
         Err(e) => {
-            tracing::warn!(error = %e, "idle sweep could not read the fleet");
+            // 認不出誰是總管就不能收任何一顆：漏掉的那幾個會被當成一般 worker。
+            tracing::warn!(error = %format!("{e:#}"), "idle sweep could not read who the supervisors are; skipping this round");
             return;
         }
     };
-    let sup = supervisor_bot_ids(app).await;
+    let cands = match candidates_with(app, &sup).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %format!("{e:#}"), "idle sweep could not read the fleet");
+            return;
+        }
+    };
     for c in cands.iter().filter(|c| decide(c, threshold).is_ok()) {
         // 收之前再確認一次：湊完清單到輪到這顆，中間隔了前面每一顆的停機時間（一顆最久十秒），
         // 這段時間裡它可能已經被派了工作。
-        let Ok(Some(run)) = db::active_run(&app.db, &c.bot_id).await else { continue };
-        let session = run.native_session_id.clone();
-        match cand_for(app, &run, &sup).await {
-            // 便宜的判斷全過了才去問 pane：一次 ps dump 不該為了每顆閒著的 bot 每分鐘跑一遍。
-            Ok(Some(mut f)) if decide(&f, threshold).is_ok() => {
-                f.background_shell = has_background_shell(app, &run).await;
-                if decide(&f, threshold).is_ok() {
-                    sleep_one(app, &f, session, threshold).await;
-                }
+        let run = match db::active_run(&app.db, &c.bot_id).await {
+            Ok(Some(run)) => run,
+            Ok(None) => continue,
+            Err(e) => {
+                unreadable(c, "active run", &e);
+                continue;
             }
-            _ => continue,
+        };
+        let session = run.native_session_id.clone();
+        let mut f = match cand_for(app, &run, &sup).await {
+            Ok(Some(f)) => f,
+            Ok(None) => continue,
+            Err(e) => {
+                unreadable(c, "bot state", &e);
+                continue;
+            }
+        };
+        // 便宜的判斷全過了才去問 pane：一次 ps dump 不該為了每顆閒著的 bot 每分鐘跑一遍。
+        if decide(&f, threshold).is_err() {
+            continue;
+        }
+        match inspect_background(app, &run).await {
+            BackgroundWork::None => {}
+            BackgroundWork::Running(procs) => {
+                tracing::info!(bot = %run.bot_id, procs = ?procs, "idle sweep: pane still has background work; leaving it alone");
+                f.background_shell = true;
+            }
+            // 問不到跟「有背景工作」是兩種暫緩，log 分開寫：前者是觀測失敗（下一輪重試），後者是真的在忙。
+            BackgroundWork::Unknown(reason) => {
+                tracing::warn!(bot = %run.bot_id, reason, "idle sweep: could not tell whether the pane has background work; keeping the bot warm and retrying next round");
+                continue;
+            }
+        }
+        if decide(&f, threshold).is_ok() {
+            sleep_one(app, &f, session, threshold).await;
         }
     }
 }
@@ -669,15 +800,27 @@ mod tests {
 
     #[test]
     fn background_build_under_the_pane_is_seen_but_mcp_servers_are_not() {
-        let found = background_procs(PS_WITH_BACKGROUND_BUILD, 1000);
+        let found = background_procs(PS_WITH_BACKGROUND_BUILD, 1000).expect("shell 在樹裡");
         assert_eq!(found.len(), 2, "{found:?}");
         assert!(found.iter().any(|a| a.contains("bun run build")), "{found:?}");
         assert!(found.iter().any(|a| a.contains("cargo build --release")), "{found:?}");
 
-        assert!(background_procs(PS_IDLE_WITH_MCP, 1000).is_empty(), "MCP／外掛不是背景工作");
-        // 樹裡沒有這顆 shell（pane 已經不在）：判不出來就當沒有，不要永遠不收。
-        assert!(background_procs(PS_WITH_BACKGROUND_BUILD, 4242).is_empty());
-        assert!(background_procs("", 1000).is_empty());
+        assert_eq!(background_procs(PS_IDLE_WITH_MCP, 1000), Some(vec![]), "MCP／外掛不是背景工作：證明過的沒有");
+        // 樹裡沒有這顆 shell（pane 已經不在、或 ps 與 herdr 講的不是同一台）：證明不了底下沒有背景工作，
+        // 不是「沒有」——三態的 Unknown，這一輪不收（issue #123）。
+        assert_eq!(background_procs(PS_WITH_BACKGROUND_BUILD, 4242), None);
+        assert_eq!(background_procs("", 1000), None);
+    }
+
+    /// 三態的判斷本身（純函式）：ps 讀不到、shell 不在樹裡都是 Unknown，只有「shell 在樹裡而且底下沒有」才是 None。
+    /// 端到端（herdr／pane id／shell pid 缺失）在 `a_background_inspection_that_fails_never_becomes_permission_to_stop`。
+    #[test]
+    fn only_an_affirmative_no_background_work_counts_as_none() {
+        assert!(matches!(judge_background(Err("ssh: timed out".into()), 1000), BackgroundWork::Unknown(r) if r.contains("ssh: timed out")));
+        assert!(matches!(judge_background(Ok(PS_WITH_BACKGROUND_BUILD.into()), 4242), BackgroundWork::Unknown(_)));
+        assert!(matches!(judge_background(Ok(String::new()), 1000), BackgroundWork::Unknown(_)));
+        assert_eq!(judge_background(Ok(PS_IDLE_WITH_MCP.into()), 1000), BackgroundWork::None);
+        assert!(matches!(judge_background(Ok(PS_WITH_BACKGROUND_BUILD.into()), 1000), BackgroundWork::Running(p) if p.len() == 2));
     }
 
     #[test]
@@ -844,7 +987,7 @@ mod tests {
         .execute(&app.db)
         .await
         .unwrap();
-        assert!(!has_open_assignment(&app, &bot).await, "還沒有交辦");
+        assert!(!has_open_assignment(&app, &bot).await.unwrap(), "還沒有交辦");
 
         let insert = |status: &'static str| {
             let app = app.clone();
@@ -870,18 +1013,18 @@ mod tests {
 
         // 事故當天那一張：AGM 還沒裁示，狀態是 blocked——舊的 SQL 看不到它。
         insert("blocked").await;
-        assert!(has_open_assignment(&app, &bot).await, "blocked 的交辦還沒結案，不能把它的 bot 收掉");
+        assert!(has_open_assignment(&app, &bot).await.unwrap(), "blocked 的交辦還沒結案，不能把它的 bot 收掉");
 
         sqlx::query("UPDATE supervisor_assignments SET status='completed' WHERE target_bot_id=?")
             .bind(&bot)
             .execute(&app.db)
             .await
             .unwrap();
-        assert!(!has_open_assignment(&app, &bot).await, "結案了就不該再擋著");
+        assert!(!has_open_assignment(&app, &bot).await.unwrap(), "結案了就不該再擋著");
 
         for st in ["awaiting_review", "quota_blocked", "unknown"] {
             insert(st).await;
-            assert!(has_open_assignment(&app, &bot).await, "{st} 還沒結案");
+            assert!(has_open_assignment(&app, &bot).await.unwrap(), "{st} 還沒結案");
             sqlx::query("UPDATE supervisor_assignments SET status='cancelled' WHERE status=?")
                 .bind(st)
                 .execute(&app.db)
@@ -979,5 +1122,342 @@ mod tests {
         let now = chrono::Utc::now();
         assert_eq!(minutes_since("not a timestamp", now), 0);
         assert_eq!(minutes_since(&(now - chrono::Duration::minutes(91)).to_rfc3339(), now), 91);
+    }
+
+    // ------------------------------------------------------------ issue #123：讀不到不等於安全
+
+    /// 一顆閒置 120 分鐘、可續接的 bot（run 是 `fake_run`：pane 在 mock herdr 裡有 id，但沒有 agent）。
+    async fn idle_bot(env: &crate::testing::Env, name: &str) -> (String, String) {
+        let bot = crate::testing::claude_bot(&env.app, &env.project_id, name).await.id;
+        let run = crate::testing::fake_run(&env.app, &bot).await;
+        sqlx::query("UPDATE runs SET started_at=?, native_session_id='sid-1' WHERE id=?")
+            .bind((chrono::Utc::now() - chrono::Duration::minutes(120)).to_rfc3339())
+            .bind(&run)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        (bot, run)
+    }
+
+    /// 判斷當下湊的候選（讀得到、閒著）。之後才把某個資料來源弄壞，模擬「最後一刻讀不到」。
+    async fn stale_cand(app: &Arc<App>, bot: &str) -> Cand {
+        let c = candidates(app).await.unwrap().into_iter().find(|c| c.bot_id == bot).unwrap();
+        assert_eq!(decide(&c, 90), Ok(()), "判斷當下它確實閒著");
+        c
+    }
+
+    async fn assert_left_running(app: &Arc<App>, bot: &str, why: &str) {
+        assert!(asleep(app, bot).await.is_none(), "{why}: 不該留下睡著的標記");
+        assert!(db::active_run(&app.db, bot).await.unwrap().is_some(), "{why}: run 照常活著");
+    }
+
+    /// 讓這顆 bot 的 pane **證明**沒有背景工作：mock herdr 回一個真的、底下沒有 shell／建置工具的行程（`sleep`）當
+    /// shell pid，ps 行程樹裡看得到它。整輪巡邏的測試要靠它走到 DB 證據那幾道關卡——不然背景巡檢先回 `Unknown`
+    /// 就把 bot 擋下來，DB 那條 fail-open 有沒有修好都看不出來。
+    struct FakeShell(std::process::Child);
+    impl Drop for FakeShell {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    fn provably_no_background_work(env: &crate::testing::Env, bot: &str) -> FakeShell {
+        let child = std::process::Command::new("sleep").arg("300").spawn().expect("spawn sleep");
+        env.herdr.set_shell_pid(&format!("pane-{bot}"), child.id() as i64);
+        FakeShell(child)
+    }
+
+    /// `has_open_assignment` 的 DB 錯誤以前被 `.unwrap_or(0)` 當成「沒有未結案交辦」：AGM 明明有一張
+    /// `blocked` 的交辦指著它，這顆卻被收掉（2026-09-18 停擺的同一類後果）。讀不到就是不知道，不收。
+    #[tokio::test]
+    async fn an_assignment_lookup_that_fails_is_not_read_as_no_assignment() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (bot, _) = idle_bot(&env, "delta").await;
+        let stale = stale_cand(&app, &bot).await;
+        let _shell = provably_no_background_work(&env, &bot);
+
+        sqlx::query("DROP TABLE supervisor_assignments").execute(&app.db).await.unwrap();
+        sleep_one(&app, &stale, Some("sid-1".into()), 90).await;
+        assert_left_running(&app, &bot, "交辦查不到（鎖裡重讀）").await;
+        sweep(&app, 90).await;
+        assert_left_running(&app, &bot, "交辦查不到（整輪巡邏）").await;
+    }
+
+    /// `last_activity` 的查詢錯誤以前被 `.ok().flatten()` 退回 `run.started_at`：一顆跑很久的 bot 就算剛剛
+    /// 才有訊息，只要那一次查詢失敗，就瞬間被算成閒置 90 分鐘以上。
+    #[tokio::test]
+    async fn an_activity_lookup_that_fails_does_not_fall_back_to_the_run_start() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (bot, _) = idle_bot(&env, "echo").await;
+        let stale = stale_cand(&app, &bot).await;
+        let _shell = provably_no_background_work(&env, &bot);
+
+        // 判斷之後才有動作：一則剛剛的訊息。活動時鐘本來應該從這裡重算。
+        let conv = db::conversation_id(&app.db, &bot).await.unwrap();
+        crate::lifecycle::insert_message(&app, &conv, None, "user", "還在嗎", "web", false, None).await.unwrap();
+
+        sqlx::query("DROP TABLE messages").execute(&app.db).await.unwrap();
+        sleep_one(&app, &stale, Some("sid-1".into()), 90).await;
+        assert_left_running(&app, &bot, "活動時間查不到（鎖裡重讀）").await;
+        sweep(&app, 90).await;
+        assert_left_running(&app, &bot, "活動時間查不到（整輪巡邏）").await;
+    }
+
+    /// 辨識不到「是不是總管」（`supervisors`／`supervisor_roles` 讀不到）以前當成「一般 worker」，總管自己
+    /// 會被自己人收掉。兩張表各壞一次：只壞其中一張也不行。
+    #[tokio::test]
+    async fn a_supervisor_lookup_that_fails_is_not_read_as_no_supervisor() {
+        for broken in ["supervisors", "supervisor_roles"] {
+            let env = crate::testing::env().await;
+            let app = env.app.clone();
+            let (bot, _) = idle_bot(&env, "foxtrot").await;
+            let _shell = provably_no_background_work(&env, &bot);
+            crate::supervisor::store::get_or_init(&app.db).await.unwrap();
+            crate::supervisor::roles::get(&app.db, crate::supervisor::roles::Role::Responder).await.unwrap();
+            // 它只登記在**被弄壞的那一張**：讀不到那張表，就沒有別的地方能認出它是總管。
+            match broken {
+                "supervisors" => sqlx::query("UPDATE supervisors SET bot_id=?").bind(&bot),
+                _ => sqlx::query("UPDATE supervisor_roles SET bot_id=? WHERE role='responder'").bind(&bot),
+            }
+            .execute(&app.db)
+            .await
+            .unwrap();
+            // 湊清單時它是總管所以不在名單裡；拿一份「當成一般 worker」的舊判斷來收，鎖裡重讀才是關卡。
+            let mut stale = Cand { bot_id: bot.clone(), name: "foxtrot".into(), ..cand() };
+            stale.idle_minutes = 120;
+
+            sqlx::query(&format!("DROP TABLE {broken}")).execute(&app.db).await.unwrap();
+            assert!(candidates(&app).await.is_err(), "{broken} 讀不到：名單不能照樣湊出來（漏掉的總管會被當成 worker）");
+            sleep_one(&app, &stale, Some("sid-1".into()), 90).await;
+            assert_left_running(&app, &bot, &format!("{broken} 讀不到（鎖裡重讀）")).await;
+            sweep(&app, 90).await;
+            assert_left_running(&app, &bot, &format!("{broken} 讀不到（整輪巡邏）")).await;
+        }
+    }
+
+    /// `pane_shell`／`memproc::dump`／pane id／shell pid 任何一項問不到，以前都回 `false`＝「沒有背景工作」，
+    /// 於是 herdr／ssh／ps 的一次暫時失敗就成了停機許可。現在：affirmative 證據才能收，問不到就跳過這一輪。
+    /// 每一種失敗各跑一次 sweep，都不能碰到 agent（沒有任何 ctrl+c）。
+    #[tokio::test]
+    async fn a_background_inspection_that_fails_never_becomes_permission_to_stop() {
+        for what in ["no_shell_pid", "shell_not_in_tree", "no_pane_id", "unknown_session"] {
+            let env = crate::testing::env().await;
+            let (bot, run) = idle_bot(&env, "golf").await;
+            match what {
+                // mock 的 `pane.process_info` 沒設 shell_pid 就不回這個欄位，像讀不到的 herdr。
+                "no_shell_pid" => {}
+                "shell_not_in_tree" => env.herdr.set_shell_pid(&format!("pane-{bot}"), 2_147_000_000),
+                "no_pane_id" => {
+                    sqlx::query("UPDATE runs SET pane_id=NULL WHERE id=?").bind(&run).execute(&env.app.db).await.unwrap();
+                }
+                _ => {
+                    sqlx::query("UPDATE runs SET herdr_session='ghost' WHERE id=?").bind(&run).execute(&env.app.db).await.unwrap();
+                }
+            }
+            // 分類本身要是 `Unknown`——不能靠「後面停機剛好也做不成」（例如找不到 herdr client 時 stop 自己也會失敗）過關。
+            let run = db::active_run(&env.app.db, &bot).await.unwrap().unwrap();
+            assert!(matches!(inspect_background(&env.app, &run).await, BackgroundWork::Unknown(_)), "{what}: 問不到要回 Unknown");
+            sweep(&env.app, 90).await;
+            assert_left_running(&env.app, &bot, what).await;
+            assert!(env.herdr.calls_to("agent.send_keys").is_empty(), "{what}: 不該對 agent 按任何鍵");
+        }
+
+        // herdr 那條線本身斷了（`pane_shell` 呼叫失敗）：換一個 client 指向不存在的 socket。
+        let env = crate::testing::env().await;
+        let (bot, _) = idle_bot(&env, "hotel").await;
+        let dead = app_with_dead_herdr(&env).await;
+        let run = db::active_run(&dead.db, &bot).await.unwrap().unwrap();
+        assert!(matches!(inspect_background(&dead, &run).await, BackgroundWork::Unknown(_)), "herdr 連不上要回 Unknown");
+        sweep(&dead, 90).await;
+        assert_left_running(&dead, &bot, "herdr 連不上").await;
+    }
+
+    /// 同一個 app，但 herdr 那條 socket 不存在：任何 herdr 呼叫都會失敗。
+    async fn app_with_dead_herdr(env: &crate::testing::Env) -> Arc<App> {
+        let data = env.dir.join("data");
+        let pool = db::open(&data.join("db.sqlite3")).await.unwrap();
+        let cfg = crate::config::ConfigStore::load(data.join("config.toml")).await.unwrap();
+        let client = crate::herdr::HerdrClient::new(data.join("no-such-herdr.sock"));
+        let app = App::new(pool, client.clone(), client, cfg, data.clone(), data.join("agents-managerd"), 7799, "test-token".into(), "test".into(), false);
+        app.connected.store(true, std::sync::atomic::Ordering::SeqCst);
+        app
+    }
+
+    // ------------------------------------------------------------ issue #123：判斷、標記、停機同一把鎖
+
+    /// `--resume <sid>` 有沒有出現在某一次 `agent.start` 的 argv 裡。
+    fn started_with_resume(env: &crate::testing::Env, sid: &str) -> bool {
+        env.herdr.calls_to("agent.start").iter().any(|p| {
+            let args: Vec<&str> = p.get("args").and_then(|a| a.as_array()).map(|a| a.iter().filter_map(|v| v.as_str()).collect()).unwrap_or_default();
+            args.windows(2).any(|w| w == ["--resume", sid])
+        })
+    }
+
+    /// 在「已標記、還沒停」的那一瞬（`idle_sleep.marked`）放一條路進來，回報它有沒有在那一瞬就跑完、以及事後的結果。
+    /// 那一瞬巡邏握著這顆 bot 的鎖：進來的人要是不必拿鎖，就會在這裡跑完（＝看到「標記在、run 還活著」）。
+    struct Landing<T> {
+        finished_inside_the_window: Arc<AtomicBool>,
+        handle: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<T>>>>,
+    }
+
+    fn land_in_the_window<T, F, Fut>(bot: &str, f: F) -> Landing<T>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = T> + Send + 'static,
+    {
+        let landing = Landing { finished_inside_the_window: Arc::new(AtomicBool::new(false)), handle: Arc::new(std::sync::Mutex::new(None)) };
+        let (finished, slot) = (landing.finished_inside_the_window.clone(), landing.handle.clone());
+        crate::lifecycle::race_point::arm("idle_sleep.marked", bot, move || async move {
+            let h = tokio::spawn(f());
+            // 給它足夠多的機會跑：沒被鎖擋住的話，這 300ms 裡一定跑完。
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            finished.store(h.is_finished(), Ordering::SeqCst);
+            *slot.lock().unwrap() = Some(h);
+        });
+        landing
+    }
+
+    impl<T> Landing<T> {
+        async fn result(self) -> T {
+            let h = self.handle.lock().unwrap().take().expect("the race point was never hit — sleep_one did not get to the stop");
+            h.await.unwrap()
+        }
+    }
+
+    /// 一顆已標記、還沒停的 bot 被叫醒（使用者按了啟動）：叫醒要等停機做完，再看到標記、走 `--resume`。
+    /// 以前 `wake` 不拿鎖，落在中間就看到「標記在、run 還活著」，把標記清掉回 `false`；接著巡邏把它停掉，
+    /// 留下一顆停著、沒有標記、沒有人知道要叫醒的 bot。
+    #[tokio::test]
+    async fn a_wake_between_the_mark_and_the_stop_waits_for_the_stop_and_then_resumes() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (bot, _) = idle_bot(&env, "juliet").await;
+        let stale = stale_cand(&app, &bot).await;
+
+        let (app2, bot2) = (app.clone(), bot.clone());
+        let landing = land_in_the_window(&bot, move || async move { wake(&app2, &bot2, "測試").await.map_err(|e| e.to_string()) });
+        sleep_one(&app, &stale, Some("sid-1".into()), 90).await;
+
+        assert!(!landing.finished_inside_the_window.load(Ordering::SeqCst), "叫醒不能在巡邏握著鎖的時候就跑完");
+        assert_eq!(landing.result().await, Ok(true), "停機做完之後，叫醒看到標記、把它 --resume 接回來");
+        assert!(started_with_resume(&env, "sid-1"), "帶著同一段 session 起來");
+        assert!(asleep(&app, &bot).await.is_none(), "叫醒成功之後標記才收掉");
+        assert!(db::active_run(&app.db, &bot).await.unwrap().is_some());
+    }
+
+    /// 同一個窗口，這次落進來的是 `prompt`（使用者在網頁打了一句話）：以前它先在鎖外叫醒，看到「標記在、run 還活著」
+    /// 就把標記清掉，拿到鎖時 run 已經被停掉，只得到 409 `bot has no active run`——而且標記沒了，之後的訊息也不會叫醒。
+    /// 現在叫醒在 prompt 自己的鎖裡：等巡邏做完，看到標記，`--resume` 接回來再往下送。
+    #[tokio::test]
+    async fn a_prompt_that_arrives_while_the_bot_is_being_put_to_sleep_wakes_it_instead_of_failing() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (bot, _) = idle_bot(&env, "kilo").await;
+        let stale = stale_cand(&app, &bot).await;
+
+        let (app2, bot2) = (app.clone(), bot.clone());
+        let landing = land_in_the_window(&bot, move || async move {
+            tokio::time::timeout(std::time::Duration::from_secs(30), crate::lifecycle::prompt(&app2, &bot2, "還在嗎", "req-during-sleep"))
+                .await
+                .map(|r| r.map(|_| ()).map_err(|e| format!("{e:?}")))
+        });
+        sleep_one(&app, &stale, Some("sid-1".into()), 90).await;
+
+        assert!(!landing.finished_inside_the_window.load(Ordering::SeqCst), "prompt 不能在巡邏握著鎖的時候就跑完");
+        let out = landing.result().await.expect("prompt 沒有卡住");
+        assert!(!matches!(&out, Err(e) if e.contains("no active run")), "叫醒之後才送，不是 409 沒有 active run：{out:?}");
+        assert!(started_with_resume(&env, "sid-1"), "prompt 把睡著的 bot 用 --resume 叫醒");
+        assert!(asleep(&app, &bot).await.is_none());
+        assert!(db::active_run(&app.db, &bot).await.unwrap().is_some());
+    }
+
+    /// 最容易漏的那一個縫：prompt 已經到了、還沒拿到鎖，巡邏整個做完（判斷、標記、停機）。prompt 這時還沒留下任何
+    /// DB 證據，巡邏沒有理由不收。拿到鎖之後的 prompt 必須自己看到標記、把它叫醒——**叫醒得在 prompt 的鎖裡**；
+    /// 放在鎖外（先叫醒、再拿鎖）的話，叫醒檢查早就過了（沒睡），拿到鎖只剩 409 `bot has no active run`，標記也留著沒人理。
+    #[tokio::test]
+    async fn a_prompt_already_on_its_way_when_the_bot_goes_to_sleep_wakes_it_under_its_own_lock() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (bot, _) = idle_bot(&env, "november").await;
+        let stale = stale_cand(&app, &bot).await;
+
+        let (app2, stale2) = (app.clone(), stale.clone());
+        crate::lifecycle::race_point::arm("prompt_before_bot_lock", &bot, move || async move {
+            sleep_one(&app2, &stale2, Some("sid-1".into()), 90).await;
+        });
+        let out = tokio::time::timeout(std::time::Duration::from_secs(30), crate::lifecycle::prompt(&app, &bot, "還在嗎", "req-on-its-way"))
+            .await
+            .expect("prompt 沒有卡住")
+            .map(|_| ())
+            .map_err(|e| format!("{e:?}"));
+
+        assert!(!matches!(&out, Err(e) if e.contains("no active run")), "拿到鎖之後先叫醒，不是 409 沒有 active run：{out:?}");
+        assert!(started_with_resume(&env, "sid-1"), "巡邏收掉的 bot 被這則 prompt 用 --resume 叫醒");
+        assert!(asleep(&app, &bot).await.is_none(), "叫醒成功，標記收掉");
+        assert!(db::active_run(&app.db, &bot).await.unwrap().is_some());
+    }
+
+    /// 巡邏最後一次判斷「閒著」之後，AGM 才把一張交辦指給它（交辦列先落地、prompt 還沒進來）：鎖裡重讀看得到那張，不收。
+    #[tokio::test]
+    async fn an_assignment_that_appears_after_the_last_check_keeps_the_bot_awake() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (bot, _) = idle_bot(&env, "lima").await;
+        let stale = stale_cand(&app, &bot).await;
+
+        sqlx::query(
+            "INSERT INTO supervisor_assignments
+               (id, supervisor_id, request_id, target_bot_id, client_request_id, text, status, attempts, expects_review, created_at, updated_at)
+             VALUES (?, 'AGM', NULL, ?, ?, '接手這張', 'queued', 0, 1, ?, ?)",
+        )
+        .bind(db::ulid())
+        .bind(&bot)
+        .bind(db::ulid())
+        .bind(db::now())
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        sleep_one(&app, &stale, Some("sid-1".into()), 90).await;
+        assert_left_running(&app, &bot, "交辦在最後一次判斷之後才出現").await;
+    }
+
+    /// 背景工作那一項是鎖外問的（貴）、沿用到鎖裡，所以要證明沿用是安全的：判斷之後一個回合來了又走了
+    /// （這正是「丟一個背景建置就結束回合」的形狀），「最後動作」被推到現在，這顆不再閒置，不收。
+    #[tokio::test]
+    async fn a_turn_that_started_and_finished_after_the_background_check_keeps_the_bot_awake() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (bot, run) = idle_bot(&env, "mike").await;
+        let stale = stale_cand(&app, &bot).await;
+
+        let conv = db::conversation_id(&app.db, &bot).await.unwrap();
+        sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at, completed_at) VALUES (?,?,?,'web','completed','ok',?,?)")
+            .bind(db::ulid())
+            .bind(&conv)
+            .bind(&run)
+            .bind(db::now())
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        sleep_one(&app, &stale, Some("sid-1".into()), 90).await;
+        assert_left_running(&app, &bot, "判斷之後有一個回合來了又走了").await;
+    }
+
+    /// 反向：問得到、而且證明沒有背景工作，這顆就照常收——「不知道就不收」不能變成永遠不收。
+    /// shell pid 用一個真的、底下沒有 shell／建置工具的行程（`sleep`），ps 行程樹裡看得到它。
+    #[tokio::test]
+    async fn once_the_inspection_proves_there_is_no_background_work_the_bot_sleeps() {
+        let env = crate::testing::env().await;
+        let (bot, _) = idle_bot(&env, "india").await;
+        let _shell = provably_no_background_work(&env, &bot);
+
+        sweep(&env.app, 90).await;
+        assert!(asleep(&env.app, &bot).await.is_some(), "證明沒有背景工作，照常收");
+        assert!(db::active_run(&env.app.db, &bot).await.unwrap().is_none());
     }
 }
