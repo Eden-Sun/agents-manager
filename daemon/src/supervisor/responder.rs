@@ -643,7 +643,7 @@ pub async fn quota_state(app: &Arc<App>, bot: &crate::db::Bot) -> QuotaState {
             .into_iter()
             .flatten()
             .filter_map(|w| w.resets_at.clone())
-            .min();
+            .min_by(|a, b| crate::db::cmp_ts(a, b));
         return QuotaState::Blocked(hit.until.clone().or(soonest));
     }
     let critical: Vec<&crate::quota::Window> = [&quota.five_hour, &quota.seven_day]
@@ -652,7 +652,7 @@ pub async fn quota_state(app: &Arc<App>, bot: &crate::db::Bot) -> QuotaState {
         .filter(|w| w.critical() && !w.resets_at.as_deref().is_some_and(|t| super::policy::past(t, now)))
         .collect();
     if !critical.is_empty() {
-        return QuotaState::Blocked(critical.iter().filter_map(|w| w.resets_at.clone()).min());
+        return QuotaState::Blocked(critical.iter().filter_map(|w| w.resets_at.clone()).min_by(|a, b| crate::db::cmp_ts(a, b)));
     }
     // 「可以用」要有證據：5 小時與 7 天兩個共用視窗**都有讀數**、都沒見底，也沒撞限。
     // 空的或不完整的讀數（探測只回了一半、剛起來還沒拿到）不能拿來宣稱恢復——少的那一格
@@ -751,6 +751,16 @@ fn snippet(s: &str, max: usize) -> String {
     if cut.chars().count() < t.chars().count() { format!("{cut}…") } else { cut }
 }
 
+/// 額度見底時下一次再試的時間：帳號的重置時間比退避早、而且還沒過，就等到重置；不然照退避。
+///
+/// 比時刻不比字串：`reset` 常是 CLI 回報的原樣字串（秒、`+00:00`），`retry` 是毫秒（issue #101）。
+fn quota_retry_at(reset: Option<&str>, retry: String) -> String {
+    match reset {
+        Some(t) if crate::db::cmp_ts(t, &retry).is_lt() && !watchdog::past(t) => t.to_string(),
+        _ => retry,
+    }
+}
+
 /// 喚醒協調者。每個 controller tick 一次；沒事的 tick 只讀 DB。
 pub async fn notify(app: &Arc<App>) {
     let Ok(row) = roles::get(&app.db, Role::Responder).await else { return };
@@ -775,15 +785,11 @@ pub async fn notify(app: &Arc<App>) {
             // 已經在等、時間還沒到、讀數也沒變 → **什麼都不寫**。每個 tick 重算 `iso_in(cap)` 會
             // 讓重試時間永遠往後飄（而且每 10 秒寫一次 DB、推一次 SSE），看起來像在等一個永遠不到的點。
             let due_now = row.notify_next_at.as_deref().is_none_or(watchdog::past);
-            let reset_changed = row.quota_reset_at.as_deref() != reset.as_deref();
+            let reset_changed = !crate::db::same_instant(row.quota_reset_at.as_deref(), reset.as_deref());
             if waiting && !due_now && !reset_changed {
                 return;
             }
-            let retry = watchdog::iso_in(cap);
-            let next = match reset.as_deref() {
-                Some(t) if t < retry.as_str() && !watchdog::past(t) => t.to_string(),
-                _ => retry,
-            };
+            let next = quota_retry_at(reset.as_deref(), watchdog::iso_in(cap));
             let detail = format!(
                 "{} 的額度見底；協調事件留在 inbox，{next} 再試，不會改由巡檢處理",
                 bot.identity.as_deref().unwrap_or("(身分不明)")
@@ -1107,6 +1113,41 @@ mod flow_tests {
         sqlx::query("UPDATE supervisor_inbox SET created_at='2026-01-01T00:00:00Z'").execute(&app.db).await.unwrap();
     }
 
+    /// issue #101：兩格都見底時，「最近的重置」是照**時刻**挑的。`resets_at` 有的是 CLI 回報的原樣字串
+    /// （秒），有的是毫秒——`.500Z` 在字串上排在 `Z` 前面，照字串挑會挑到晚的那個。
+    #[tokio::test]
+    async fn the_nearest_reset_is_picked_by_instant_across_precisions() {
+        let app = fx::app().await;
+        fx::configure_responder(&app).await;
+        let bot = roles::responder_bot(&app.db).await.unwrap().unwrap();
+        let w = |at: &str| Some(crate::quota::Window { used_pct: 99.0, resets_at: Some(at.into()) });
+        let mut q = available();
+        q.five_hour = w("2999-01-01T05:00:00.500Z");
+        q.seven_day = w("2999-01-01T05:00:00Z");
+        app.quotas.lock().await.insert("claude:cc0".into(), q);
+        assert_eq!(quota_state(&app, &bot).await, QuotaState::Blocked(Some("2999-01-01T05:00:00Z".into())));
+
+        // 撞限橫幅沒說幾點恢復時，取三格裡最近的重置——同樣照時刻。
+        let mut q = available();
+        q.five_hour = Some(crate::quota::Window { used_pct: 10.0, resets_at: Some("2999-01-01T05:00:00.500Z".into()) });
+        q.seven_day = Some(crate::quota::Window { used_pct: 10.0, resets_at: Some("2999-01-01T05:00:00Z".into()) });
+        q.fable = None;
+        q.limit_hit = Some(LimitHit { message: "You've hit your limit".into(), until: None, at: crate::db::now(), bucket: None });
+        app.quotas.lock().await.insert("claude:cc0".into(), q);
+        assert_eq!(quota_state(&app, &bot).await, QuotaState::Blocked(Some("2999-01-01T05:00:00Z".into())));
+    }
+
+    /// 額度見底時下一次再試：重置時間比退避早就等重置。`reset` 是秒格式、`retry` 是毫秒格式時，
+    /// 同一秒內舊格式的整點更早——字串比較把它判成比較晚，白白多等一個退避。
+    #[test]
+    fn the_quota_retry_waits_for_a_reset_that_comes_first_by_instant() {
+        let retry = "2999-01-01T05:00:00.500Z";
+        assert_eq!(quota_retry_at(Some("2999-01-01T05:00:00Z"), retry.into()), "2999-01-01T05:00:00Z", "05:00:00.000 早於 05:00:00.500");
+        assert_eq!(quota_retry_at(Some("2999-01-01T05:00:01Z"), retry.into()), retry, "重置比退避晚就照退避");
+        assert_eq!(quota_retry_at(Some("2000-01-01T00:00:00Z"), retry.into()), retry, "已經過去的重置不算");
+        assert_eq!(quota_retry_at(None, retry.into()), retry);
+    }
+
     #[tokio::test]
     async fn an_out_of_quota_responder_keeps_its_requests_and_patrol_never_gets_them() {
         let app = fx::app().await;
@@ -1130,6 +1171,33 @@ mod flow_tests {
         assert!(roles::due_for(&app.db, Role::Patrol, true, "2999-01-01T00:00:00Z", 5).await.unwrap().is_empty(), "不倒回巡檢");
         let turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns").fetch_one(&app.db).await.unwrap();
         assert_eq!(turns, 0);
+    }
+
+    /// issue #101：協調者已經在等額度、記著的重置時間是舊版寫的秒格式，新讀數是同一個時刻的毫秒寫法——
+    /// 那不是「重置時間變了」，什麼都不該寫（字串 `!=` 會判成變了，白白重寫狀態、多推一次事件）。
+    #[tokio::test]
+    async fn a_stored_reset_in_the_old_spelling_of_the_same_instant_is_not_rewritten() {
+        let app = fx::app().await;
+        fx::configure_responder(&app).await;
+        bot_requests::intercept(&app, "patrol", "w1", "請核准重建", Some("r1"), &[], true, "api", bot_requests::ReplyMark::default()).await.unwrap().unwrap();
+        age_everything(&app).await;
+        sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,started_at) VALUES ('run-r','resp','running','idle',?)")
+            .bind(crate::db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let mut q = blocked();
+        q.limit_hit.as_mut().unwrap().until = Some("2999-01-01T05:00:00.000Z".into());
+        app.quotas.lock().await.insert("claude:cc0".into(), q);
+
+        notify(&app).await; // 進入等待，記下重置時間
+        let legacy = "2999-01-01T05:00:00Z";
+        sqlx::query("UPDATE supervisor_roles SET quota_reset_at=? WHERE role='responder'").bind(legacy).execute(&app.db).await.unwrap();
+
+        notify(&app).await; // 讀數沒變、重試時間也還沒到 → 什麼都不寫
+        let row = roles::get(&app.db, Role::Responder).await.unwrap();
+        assert_eq!(row.status, "waiting_quota");
+        assert_eq!(row.quota_reset_at.as_deref(), Some(legacy), "同一個時刻，不重寫");
     }
 
     /// `cc0` 這種「就是預設帳號」的身分，env 是空的，讀數寫在**裸 `claude`** 那一把。固定拼

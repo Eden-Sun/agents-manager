@@ -31,13 +31,14 @@ pub struct DueAction {
 }
 
 impl DueAction {
-    fn json(&self, now: &str) -> Value {
+    pub(crate) fn json(&self, now: &str) -> Value {
         json!({
             "kind": self.kind,
             "entity_id": self.entity_id,
             "due_at": self.due_at,
             // 到期了還在這裡＝掃描還沒輪到它（正常）或它一直失敗（看 attempts／last_error）。
-            "overdue": self.due_at.as_deref().is_some_and(|d| d <= now),
+            // 比時刻，不比字串：舊資料的秒格式（`…:00Z`）與現在的毫秒格式混存（issue #101）。
+            "overdue": self.due_at.as_deref().is_some_and(|d| crate::db::cmp_ts(d, now).is_le()),
             "attempts": self.attempts,
             "last_error": self.last_error,
         })
@@ -159,7 +160,7 @@ const SAMPLE: i64 = 20;
 /// 試過這麼多次還沒成功就算「一直做不成」。
 pub const FAILING_ATTEMPTS: i64 = 3;
 /// [`pending`] 每一類最多列這麼多（列清單用；摘要的數字走 [`counts`]，不吃這個上限）。
-const PER_KIND: i64 = 50;
+pub(crate) const PER_KIND: i64 = 50;
 
 /// 每一類的**精確**數量。
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -181,10 +182,11 @@ pub async fn counts(pool: &SqlitePool) -> Result<std::collections::BTreeMap<&'st
     for s in SOURCES {
         let row: (i64, i64, i64) = sqlx::query_as(&format!(
             "SELECT COUNT(*),
-                    COALESCE(SUM(CASE WHEN {due} IS NOT NULL AND {due} <= ? THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN {due} IS NOT NULL AND {due_ts} <= ? THEN 1 ELSE 0 END), 0),
                     COALESCE(SUM(CASE WHEN {attempts} >= ? THEN 1 ELSE 0 END), 0)
              FROM {from} WHERE {filter}",
             due = s.due,
+            due_ts = crate::db::ts_sql(s.due),
             attempts = s.attempts,
             from = s.from,
             filter = s.filter_sql()
@@ -202,15 +204,18 @@ pub async fn counts(pool: &SqlitePool) -> Result<std::collections::BTreeMap<&'st
 pub async fn soonest(pool: &SqlitePool) -> Result<Option<DueAction>> {
     let mut best: Option<DueAction> = None;
     for s in SOURCES {
+        // 同一種來源裡新舊格式也會混存：`ORDER BY` 要照時刻排（issue #101）。
         let row: Option<DueAction> = sqlx::query_as(&format!(
-            "{} AND {due} IS NOT NULL ORDER BY {due} LIMIT 1",
+            "{} AND {due} IS NOT NULL ORDER BY {due_ts} LIMIT 1",
             s.select(),
-            due = s.due
+            due = s.due,
+            due_ts = crate::db::ts_sql(s.due)
         ))
         .fetch_optional(pool)
         .await?;
         if let Some(r) = row {
-            if best.as_ref().and_then(|b| b.due_at.clone()).map_or(true, |b| r.due_at.as_deref().is_some_and(|d| d < b.as_str())) {
+            let earlier = |r: &DueAction, b: &str| r.due_at.as_deref().is_some_and(|d| crate::db::cmp_ts(d, b).is_lt());
+            if best.as_ref().and_then(|b| b.due_at.as_deref()).is_none_or(|b| earlier(&r, b)) {
                 best = Some(r);
             }
         }
@@ -247,9 +252,9 @@ pub async fn pending(pool: &SqlitePool) -> Result<Vec<DueAction>> {
     for s in SOURCES {
         out.extend(
             sqlx::query_as::<_, DueAction>(&format!(
-                "{} ORDER BY COALESCE({due}, '') LIMIT ?",
+                "{} ORDER BY COALESCE({due_ts}, '') LIMIT ?",
                 s.select(),
-                due = s.due
+                due_ts = crate::db::ts_sql(s.due)
             ))
             .bind(PER_KIND)
             .fetch_all(pool)
@@ -258,7 +263,7 @@ pub async fn pending(pool: &SqlitePool) -> Result<Vec<DueAction>> {
     }
     // 沒有排定時間的排最後：它們在等事件，不在等時鐘。
     out.sort_by(|a, b| match (&a.due_at, &b.due_at) {
-        (Some(x), Some(y)) => x.cmp(y),
+        (Some(x), Some(y)) => crate::db::cmp_ts(x, y),
         (Some(_), None) => std::cmp::Ordering::Less,
         (None, Some(_)) => std::cmp::Ordering::Greater,
         (None, None) => std::cmp::Ordering::Equal,

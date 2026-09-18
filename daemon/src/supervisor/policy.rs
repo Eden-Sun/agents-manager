@@ -89,8 +89,9 @@ pub fn decide(sup: &Supervisor, quota: Option<&Quota>, liveness: &str, now: Date
     let critical: Vec<&Window> =
         [&q.five_hour, &q.seven_day].into_iter().flatten().filter(|w| shared_critical(w, now)).collect();
     if !critical.is_empty() {
-        let reset_at = critical.iter().filter_map(|w| w.resets_at.clone()).min();
-        if sup.status == "waiting_quota" && sup.quota_reset_at == reset_at {
+        // 比時刻不比字串：`resets_at` 有的是 CLI 回報的原樣字串（秒、`+00:00`），跟毫秒格式混在一起。
+        let reset_at = critical.iter().filter_map(|w| w.resets_at.clone()).min_by(|a, b| crate::db::cmp_ts(a, b));
+        if sup.status == "waiting_quota" && crate::db::same_instant(sup.quota_reset_at.as_deref(), reset_at.as_deref()) {
             return Decision::Keep;
         }
         return Decision::WaitQuota { reset_at };
@@ -241,6 +242,28 @@ mod tests {
         assert_eq!(
             decide(&sup("fable", "waiting_quota", None, Some(LATER)), Some(&q2), "idle", now()),
             Decision::WaitQuota { reset_at: Some(MUCH_LATER.into()) }
+        );
+    }
+
+    /// issue #101：`resets_at` 有的是 CLI 回報的原樣字串（秒），有的是毫秒——「最近的重置」與「還是
+    /// 同一個重置」都要比時刻，不能比字串（`.500Z` 排在 `Z` 前面）。
+    #[test]
+    fn resets_in_different_precisions_are_compared_by_instant() {
+        let secs = "2026-09-11T09:00:00Z";
+        let millis_later = "2026-09-11T09:00:00.500Z";
+        // 兩格都見底：09:00:00.000 比 09:00:00.500 早，最近的是秒格式那個。
+        let q = quota(w(97.0, millis_later), w(96.0, secs), None);
+        assert_eq!(
+            decide(&sup("fable", "", None, None), Some(&q), "idle", now()),
+            Decision::WaitQuota { reset_at: Some(secs.into()) }
+        );
+        // 已經記著同一個時刻（舊資料是秒、新讀數是毫秒 `.000`）：什麼都不用重寫。
+        let q = quota(w(97.0, "2026-09-11T09:00:00.000Z"), None, None);
+        assert_eq!(decide(&sup("fable", "waiting_quota", None, Some(secs)), Some(&q), "idle", now()), Decision::Keep);
+        // 真的不同的時刻照舊要更新。
+        assert_eq!(
+            decide(&sup("fable", "waiting_quota", None, Some(secs)), Some(&quota(w(97.0, millis_later), None, None)), "idle", now()),
+            Decision::WaitQuota { reset_at: Some(millis_later.into()) }
         );
     }
 

@@ -62,6 +62,8 @@ mod startup;
 mod statusline_cmd;
 #[cfg(test)]
 mod testing;
+#[cfg(test)]
+mod timestamp_compat_tests;
 mod tools;
 mod trust;
 mod trusted_open;
