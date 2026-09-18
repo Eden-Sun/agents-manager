@@ -181,13 +181,11 @@ async fn close_locked(app: &Arc<App>, run: &db::Run, turn: &db::Turn, idle: Dura
     let status = if reply.is_some() { "completed" } else { "completed_fallback" };
 
     let mut tx = app.db.begin().await?;
-    let claimed = sqlx::query("UPDATE turns SET status = ?, completed_at = ? WHERE id = ? AND status = 'in_flight'")
-        .bind(status)
-        .bind(db::now())
-        .bind(&turn.id)
-        .execute(&mut *tx)
-        .await?;
-    if claimed.rows_affected() == 0 {
+    // 這裡的終點是**算出來的**（有證得出來的回覆就 `completed`，否則 `completed_fallback`），
+    // 所以要走 controller：它會先擋掉不合法的終點，而不是讓一個綁錯的字串直接寫進 DB（issue #68）。
+    let claimed =
+        super::turn_controller::set_status_on(&mut tx, &turn.id, "in_flight", status, "reconcile 收掉閒置太久的回合").await?;
+    if claimed != super::turn_controller::Outcome::Applied {
         return Ok(false);
     }
     let message = match reply.as_deref() {

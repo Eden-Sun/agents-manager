@@ -15,6 +15,15 @@
 //!    默默 0 rows。既有那二十來處照舊——它們的 guard 已經在 SQL 裡，trigger 是它們的下限，
 //!    一次全部改寫只會在 1000 多支測試釘住的 lifecycle 上製造回歸。
 //!
+//! **哪些還沒搬，為什麼**（issue #68，逐條搬遷的現況）：剩下五處都是「status 跟別的欄位在**同一句**
+//! UPDATE 裡一起寫」的，拆成兩句會讓原本一個交易內的原子寫入變成兩步，比抄一句 SQL 更糟：
+//! - `hookrecv` 兩處（hook 收尾、`StopFailure`）順手寫 `native_session_id`／`native_turn_id`；
+//! - `queue` 三處（認領、放回佇列、撤銷）順手寫 `run_id`／`flush_retries`／`next_flush_at`。
+//!
+//! 它們的 CAS guard 都已經在自己的 SQL 裡，而且 trigger 是它們的下限，所以不搬不會少一層保護。
+//! 真要搬就得替每一種形狀各開一支「自己擁有整句 UPDATE」的函式——那是有價值的下一步，但不是
+//! 「把它們包進一個什麼都塞的通用 mutator」。
+//!
 //! 合法邊是逐條讀生產路徑的 `UPDATE turns SET status` 得到的。`lifecycle::transitions`（issue #76）
 //! 是同一批資料的**描述性**快照，兩者對不上時以這裡為準——它有 trigger 背書，跑起來會痛。
 //! （已知差異：`in_flight → queued`（`queue::defer_queued_turn` 把認領過的放回佇列）在 #76 那張表上
