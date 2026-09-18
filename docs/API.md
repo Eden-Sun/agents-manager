@@ -24,16 +24,20 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
 | 409 | `{"error":"conflict","reason":"<人類可讀>", ...extra}` | 狀態機衝突；extra 視情況含 `run_id` / `turn_id` / `bot_id` / `name` / `path` / `state` |
 | 502 | `{"error":"upstream","message":"..."}` | herdr / DB 出錯 |
 
-寫設定的 API（建專案／建 bot／改設定／排序／還原）在投影被大量軟刪閘門擋下來時回
-`409 {"reason":"projection_refused", message, config_written:true, bots, projects, allow_env}`——不是 502：那代表 config.toml 看起來被外部改過，
-要做的事是去把那幾列補回來（或帶 `AM_ALLOW_BULK_DELETE=1` 重啟 daemon，只放行啟動那一次投影），不是去查 herdr。
-`config_written:true`：閘門在**寫檔之後**才判，這次的變更已經在 config.toml 裡、只是還沒套用。**不要重試同一個請求**
-（例如建專案會撞 `409 project path already registered`）；補回被擋的那幾列後，下一次任何寫設定或重啟就會套用。
+Project／Bot 的寫設定 API（建專案、改專案、建 bot、改 bot、排序、還原）套用、驗證、DB-backed 大量軟刪閘門都在
+**落盤之前**做完（issue #73，統一 commit boundary），閘門擋下來時回
+`409 {"reason":"projection_refused", message, config_written:false, bots, projects}`：config.toml 與 SQLite 都沒被動過，
+`bots`／`projects` 是這次若寫入會被軟刪的名字，用來判斷是不是 config 已經跟 DB 對不上（該去 config.toml 補回那幾列，或改小這次
+的範圍），**直接重送同一個請求**即可，不必先回頭收拾。
 
-設定本身不合法（bot kind、identity 綁定與 kind 不符、id／名字格式）則回
-`400 {"error":"config_invalid", message, config_written:false}`——同樣不是 502。這一類在**落盤之前**就被擋下來
-（SPEC §3.1），所以 `config_written:false`：config.toml 與 SQLite 都沒被動過，recovery path 就是改個合法的值
-**直接重送**，不必先回頭收拾。`message` 保留原因並附「（config.toml 未變更）」。
+設定本身不合法（bot kind、identity 綁定與 kind 不符、id／名字格式）回
+`400 {"error":"config_invalid", message, config_written:false}`——同樣不是 502、同樣落盤之前就被擋下來（SPEC §3.1）。
+`message` 保留原因並附「（config.toml 未變更）」。
+
+身分的寫設定 API（建身分、刪身分）仍是舊的兩段式：先落盤、再投影，因為身分列表不影響 Project／Bot 的活列，
+DB-backed 閘門結構上碰不到。擋下來時回 `409 {"reason":"projection_refused", message, config_written:true, bots, projects, allow_env}`——
+`config_written:true`：這次的變更已經在 config.toml 裡、只是還沒套用，**不要重試同一個請求**（會撞「已存在」之類的衝突）；
+補回被擋的那幾列後，下一次任何寫設定或重啟（`AM_ALLOW_BULK_DELETE=1`，只放行啟動那一次投影）就會套用。
 
 ## 2. `GET /api/state`
 

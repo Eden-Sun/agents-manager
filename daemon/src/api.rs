@@ -487,12 +487,11 @@ async fn get_state(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> 
     Ok(Json(state_json(&app).await?))
 }
 
-/// 每個呼叫端都是**先** `app.cfg.update` 落盤、**再**投影，所以走到這裡被擋下時，這次的變更已經在
-/// config.toml 裡了（`config_written: true`）。
-///
-/// 會被 `projection::validate` 擋的那一類（bot kind、identity 綁定、id／名字格式）**到不了這裡**：
-/// `ConfigStore::update` 在落盤前就先驗過並直接回錯誤，檔案一個字都沒動（issue #73）。剩在這裡的是
-/// 需要 DB 才判得出來的大量軟刪閘門。
+/// 給仍是「先 `app.cfg.update` 落盤、再投影」兩段式的呼叫端用（`create_identity`／`delete_identity`：
+/// 改的是 `identities`，不影響 Project／Bot 的活列，DB-backed 閘門結構上碰不到，沒有跟著搬到
+/// `projection::update_and_project`）。走到這裡被擋下時，這次的變更已經在 config.toml 裡了
+/// （`config_written: true`）。Project／Bot mutation 用 `projection_err`（見下）：那條的閘門在落盤前就擋，
+/// `config_written` 相反。
 async fn reproject(app: &Arc<App>) -> Result<(), LcError> {
     crate::projection::project_config(&app.cfg, &app.db).await.map_err(|e| {
         // 閘門擋下來是**狀態不對**，不是上游壞掉：502 會讓呼叫端以為 herdr／DB 出問題，
@@ -512,6 +511,24 @@ async fn reproject(app: &Arc<App>) -> Result<(), LcError> {
             None => cfg_err(e),
         }
     })
+}
+
+/// `create_project`／`patch_project`／`create_bot`／`set_order`／`patch_bot`／`restore_bot` 用：
+/// 套用、純驗證、DB-backed 大量軟刪閘門都在 `projection::update_and_project` 裡、寫入 TOML **之前**
+/// 做完（issue #73 reopen，統一 commit boundary），取代「先 `app.cfg.update` 落盤、再 `reproject`」
+/// 那個兩段式。跟 `reproject` 的差別只在這裡：閘門擋下來時 config.toml 這次**沒有**被動過，
+/// 所以是 `config_written: false`——呼叫端改一下再送同一個請求就好，不必先去 config.toml 補列。
+fn projection_err(e: anyhow::Error) -> LcError {
+    match e.downcast_ref::<crate::projection::ProjectionRefused>() {
+        Some(r) => LcError::conflict(
+            "projection_refused",
+            json!({"reason": "projection_refused",
+                   "message": format!("{}（這次的變更沒有寫進 config.toml：處理完 DB 那邊的落差，或改小這次的範圍，再重送同一個請求）", r.detail),
+                   "config_written": false,
+                   "bots": r.bots, "projects": r.projects}),
+        ),
+        None => cfg_err(e),
+    }
 }
 
 #[cfg(test)]
@@ -679,30 +696,27 @@ async fn create_project(State(app): State<Arc<App>>, Json(b): Json<NewProject>) 
         std::path::Path::new(&path).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| path.clone())
     });
     let id = db::ulid();
-    let res = app
-        .cfg
-        .update(|cfg| {
-            if cfg.projects.iter().any(|p| p.path == path && p.host == host) {
-                anyhow::bail!("duplicate");
-            }
-            cfg.projects.push(crate::config::ProjectCfg {
-                id: Some(id.clone()),
-                path: path.clone(),
-                label: label.clone(),
-                host: host.clone(),
-                bots: vec![],
-            });
-            Ok(())
-        })
-        .await;
+    let res = crate::projection::update_and_project(&app.cfg, &app.db, |cfg| {
+        if cfg.projects.iter().any(|p| p.path == path && p.host == host) {
+            anyhow::bail!("duplicate");
+        }
+        cfg.projects.push(crate::config::ProjectCfg {
+            id: Some(id.clone()),
+            path: path.clone(),
+            label: label.clone(),
+            host: host.clone(),
+            bots: vec![],
+        });
+        Ok(())
+    })
+    .await;
     match res {
         Ok(()) => {}
         Err(e) if e.to_string() == "duplicate" => {
             return Err(LcError::conflict("project path already registered", json!({"path": path})))
         }
-        Err(e) => return Err(cfg_err(e)),
+        Err(e) => return Err(projection_err(e)),
     }
-    reproject(&app).await?;
     if let Ok(Some(p)) = db::project(&app.db, &id).await {
         crate::github::detect_project(&app, &p).await;
     }
@@ -805,21 +819,19 @@ async fn patch_project(
             Some(l.to_string())
         }
     };
-    app.cfg
-        .update(|cfg| {
-            let p = cfg
-                .projects
-                .iter_mut()
-                .find(|p| p.id.as_deref() == Some(id.as_str()))
-                .ok_or_else(|| anyhow::anyhow!("no-project"))?;
-            if let Some(l) = &label {
-                p.label = l.clone();
-            }
-            Ok(())
-        })
-        .await
-        .map_err(|e| if e.to_string() == "no-project" { LcError::NotFound("project".into()) } else { cfg_err(e) })?;
-    reproject(&app).await?;
+    crate::projection::update_and_project(&app.cfg, &app.db, |cfg| {
+        let p = cfg
+            .projects
+            .iter_mut()
+            .find(|p| p.id.as_deref() == Some(id.as_str()))
+            .ok_or_else(|| anyhow::anyhow!("no-project"))?;
+        if let Some(l) = &label {
+            p.label = l.clone();
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| if e.to_string() == "no-project" { LcError::NotFound("project".into()) } else { projection_err(e) })?;
     app.emit("project_changed", json!({"project_id": id})).await;
     Ok((StatusCode::OK, Json(json!({"project_id": id, "needs_restart": false}))).into_response())
 }
@@ -927,52 +939,49 @@ async fn create_bot(
     let env: BTreeMap<String, String> = b.env.clone().unwrap_or_default();
     let id = db::ulid();
     let used_name = std::sync::Mutex::new(b.name.clone());
-    let res = app
-        .cfg
-        .update(|cfg| {
-            let p = cfg
-                .projects
-                .iter_mut()
-                .find(|p| p.id.as_deref() == Some(pid.as_str()))
-                .ok_or_else(|| anyhow::anyhow!("no-project"))?;
-            let taken = |n: &str| p.bots.iter().any(|x| x.name == n);
-            let name = if taken(&b.name) {
-                if !b.name_auto {
-                    anyhow::bail!("duplicate-name");
-                }
-                next_free_name(&b.name, &taken)
-            } else {
-                b.name.clone()
-            };
-            *used_name.lock().unwrap() = name.clone();
-            p.bots.push(crate::config::BotCfg {
-                id: Some(id.clone()),
-                name,
-                kind: b.kind.clone(),
-                model: b.model.clone().map(|m| m.trim().to_string()).filter(|m| !m.is_empty()),
-                effort: effort.clone(),
-                fast: b.fast,
-                persona: b.persona.clone().filter(|s| !s.trim().is_empty()),
-                args: b.args.clone(),
-                autostart: b.autostart,
-                inject_hooks: b.inject_hooks.unwrap_or(true),
-                auto_approve: b.auto_approve.unwrap_or(true),
-                identity: identity.clone(),
-                env: env.clone(),
-                herdr_session: None,
-            });
-            Ok(())
-        })
-        .await;
+    let res = crate::projection::update_and_project(&app.cfg, &app.db, |cfg| {
+        let p = cfg
+            .projects
+            .iter_mut()
+            .find(|p| p.id.as_deref() == Some(pid.as_str()))
+            .ok_or_else(|| anyhow::anyhow!("no-project"))?;
+        let taken = |n: &str| p.bots.iter().any(|x| x.name == n);
+        let name = if taken(&b.name) {
+            if !b.name_auto {
+                anyhow::bail!("duplicate-name");
+            }
+            next_free_name(&b.name, &taken)
+        } else {
+            b.name.clone()
+        };
+        *used_name.lock().unwrap() = name.clone();
+        p.bots.push(crate::config::BotCfg {
+            id: Some(id.clone()),
+            name,
+            kind: b.kind.clone(),
+            model: b.model.clone().map(|m| m.trim().to_string()).filter(|m| !m.is_empty()),
+            effort: effort.clone(),
+            fast: b.fast,
+            persona: b.persona.clone().filter(|s| !s.trim().is_empty()),
+            args: b.args.clone(),
+            autostart: b.autostart,
+            inject_hooks: b.inject_hooks.unwrap_or(true),
+            auto_approve: b.auto_approve.unwrap_or(true),
+            identity: identity.clone(),
+            env: env.clone(),
+            herdr_session: None,
+        });
+        Ok(())
+    })
+    .await;
     match res {
         Ok(()) => {}
         Err(e) if e.to_string() == "duplicate-name" => {
             return Err(LcError::conflict("bot name already in use", json!({"name": b.name})))
         }
         Err(e) if e.to_string() == "no-project" => return Err(LcError::NotFound("project".into())),
-        Err(e) => return Err(cfg_err(e)),
+        Err(e) => return Err(projection_err(e)),
     }
-    reproject(&app).await?;
     app.emit("bot_changed", json!({"bot_id": id})).await;
     let name = used_name.into_inner().unwrap_or_default();
     Ok((StatusCode::OK, Json(json!({"bot_id": id, "name": name}))).into_response())
@@ -1025,22 +1034,20 @@ async fn set_order(State(app): State<Arc<App>>, Json(b): Json<SetOrder>) -> Resu
     if b.projects.is_none() && b.bots.is_none() {
         return Err(LcError::Bad("order: projects 或 bots 至少要有一個".into()));
     }
-    app.cfg
-        .update(|cfg| {
-            if let Some(want) = &b.projects {
-                reorder_by(&mut cfg.projects, want, |p| p.id.clone());
+    crate::projection::update_and_project(&app.cfg, &app.db, |cfg| {
+        if let Some(want) = &b.projects {
+            reorder_by(&mut cfg.projects, want, |p| p.id.clone());
+        }
+        if let Some(map) = &b.bots {
+            for p in cfg.projects.iter_mut() {
+                let Some(want) = p.id.as_deref().and_then(|id| map.get(id)) else { continue };
+                reorder_by(&mut p.bots, want, |x| x.id.clone());
             }
-            if let Some(map) = &b.bots {
-                for p in cfg.projects.iter_mut() {
-                    let Some(want) = p.id.as_deref().and_then(|id| map.get(id)) else { continue };
-                    reorder_by(&mut p.bots, want, |x| x.id.clone());
-                }
-            }
-            Ok(())
-        })
-        .await
-        .map_err(cfg_err)?;
-    reproject(&app).await?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(projection_err)?;
     app.emit("project_changed", json!({"reason": "order"})).await;
     Ok((StatusCode::OK, Json(json!({"ok": true}))).into_response())
 }
@@ -1195,52 +1202,50 @@ async fn patch_bot(
     if managed_by != "user" {
         patch_unprojected_bot(&app, &id, &b, &effort).await?;
     } else {
-    app.cfg
-        .update(|cfg| {
-            let bot = cfg
-                .projects
-                .iter_mut()
-                .flat_map(|p| p.bots.iter_mut())
-                .find(|x| x.id.as_deref() == Some(id.as_str()))
-                .ok_or_else(|| anyhow::anyhow!("no-bot"))?;
-            if let Some(idn) = &b.identity {
-                bot.identity = idn.clone().filter(|s| !s.trim().is_empty());
-            }
-            if let Some(e) = &b.env {
-                bot.env = e.clone();
-            }
-            if let Some(m) = &b.model {
-                bot.model = m.clone().map(|x| x.trim().to_string()).filter(|x| !x.is_empty());
-            }
-            if let Some(e) = &effort {
-                bot.effort = e.clone();
-            }
-            if let Some(f) = b.fast {
-                bot.fast = f;
-            }
-            if let Some(p) = &b.persona {
-                bot.persona = p.clone().filter(|x| !x.trim().is_empty());
-            }
-            if let Some(a) = &b.args {
-                bot.args = a.clone();
-            }
-            if let Some(a) = b.autostart {
-                bot.autostart = a;
-            }
-            if let Some(n) = &b.name {
-                bot.name = n.clone();
-            }
-            if let Some(h) = b.inject_hooks {
-                bot.inject_hooks = h;
-            }
-            if let Some(a) = b.auto_approve {
-                bot.auto_approve = a;
-            }
-            Ok(())
-        })
-        .await
-        .map_err(|e| if e.to_string() == "no-bot" { LcError::NotFound("bot".into()) } else { cfg_err(e) })?;
-    reproject(&app).await?;
+    crate::projection::update_and_project(&app.cfg, &app.db, |cfg| {
+        let bot = cfg
+            .projects
+            .iter_mut()
+            .flat_map(|p| p.bots.iter_mut())
+            .find(|x| x.id.as_deref() == Some(id.as_str()))
+            .ok_or_else(|| anyhow::anyhow!("no-bot"))?;
+        if let Some(idn) = &b.identity {
+            bot.identity = idn.clone().filter(|s| !s.trim().is_empty());
+        }
+        if let Some(e) = &b.env {
+            bot.env = e.clone();
+        }
+        if let Some(m) = &b.model {
+            bot.model = m.clone().map(|x| x.trim().to_string()).filter(|x| !x.is_empty());
+        }
+        if let Some(e) = &effort {
+            bot.effort = e.clone();
+        }
+        if let Some(f) = b.fast {
+            bot.fast = f;
+        }
+        if let Some(p) = &b.persona {
+            bot.persona = p.clone().filter(|x| !x.trim().is_empty());
+        }
+        if let Some(a) = &b.args {
+            bot.args = a.clone();
+        }
+        if let Some(a) = b.autostart {
+            bot.autostart = a;
+        }
+        if let Some(n) = &b.name {
+            bot.name = n.clone();
+        }
+        if let Some(h) = b.inject_hooks {
+            bot.inject_hooks = h;
+        }
+        if let Some(a) = b.auto_approve {
+            bot.auto_approve = a;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| if e.to_string() == "no-bot" { LcError::NotFound("bot".into()) } else { projection_err(e) })?;
     }
     app.emit("bot_changed", json!({"bot_id": id})).await;
     // 只動可用 slash 指令當場套用的欄位就不用重啟；grok `/model <id> <effort>` 可順帶 effort。
@@ -1439,19 +1444,17 @@ async fn restore_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Res
             herdr_session: None,
         };
         let pid = bot.project_id.clone();
-        app.cfg
-            .update(move |cfg| {
-                let Some(p) = cfg.projects.iter_mut().find(|p| p.id.as_deref() == Some(pid.as_str())) else {
-                    anyhow::bail!("the project this bot belonged to is gone")
-                };
-                if !p.bots.iter().any(|b| b.id.as_deref() == Some(entry.id.as_deref().unwrap_or_default())) {
-                    p.bots.push(entry.clone());
-                }
-                Ok(())
-            })
-            .await
-            .map_err(any_err)?;
-        reproject(&app).await?;
+        crate::projection::update_and_project(&app.cfg, &app.db, move |cfg| {
+            let Some(p) = cfg.projects.iter_mut().find(|p| p.id.as_deref() == Some(pid.as_str())) else {
+                anyhow::bail!("the project this bot belonged to is gone")
+            };
+            if !p.bots.iter().any(|b| b.id.as_deref() == Some(entry.id.as_deref().unwrap_or_default())) {
+                p.bots.push(entry.clone());
+            }
+            Ok(())
+        })
+        .await
+        .map_err(any_err)?;
     }
     app.emit("bot_changed", json!({"bot_id": id})).await;
     app.emit("project_changed", json!({"project_id": bot.project_id})).await;
@@ -1819,6 +1822,77 @@ mod project_tests {
             .await
             .unwrap_err();
         assert!(matches!(err, LcError::NotFound(_)), "unknown project is a 404, got {err:?}");
+    }
+
+    /// issue #73 reopen：需要 DB 才判得出來的大量軟刪閘門，現在也在**落盤之前**擋下非刪除的 mutation。
+    ///
+    /// 情境是 config.toml 被外部改掉（少了 3 顆 bot，DB 還沒被投影追上——事故路徑，不是使用者剛刪完），
+    /// 這時 `patch_project` 只是改個 label、完全不碰 bot 列表。以前的順序是：`app.cfg.update` 先把
+    /// （已經跟 DB 對不上的）整份 config 落盤，`reproject` 投影當下才被閘門擋下，回 `config_written: true`——
+    /// TOML 已經被「合法化」寫入了。統一 commit boundary（`projection::update_and_project`）之後，
+    /// 閘門在同一個臨界區內、寫檔前就查過 DB 快照：擋下來時 TOML 位元組與 DB 都不變。
+    #[tokio::test]
+    async fn a_non_delete_mutation_the_bulk_guard_would_reject_leaves_the_file_and_the_db_untouched() {
+        let e = crate::testing::env().await;
+        let (app, pid) = (e.app.clone(), e.project_id.clone());
+        let repo = e.repo.to_string_lossy().to_string();
+
+        // 種 4 顆 bot 並投影進 DB：DB 的活列＝上一次投影的結果。
+        app.cfg
+            .update(|cfg| {
+                cfg.projects.push(crate::config::ProjectCfg {
+                    id: Some(pid.clone()),
+                    path: repo.clone(),
+                    label: "proj".into(),
+                    host: LOCAL_HOST.into(),
+                    bots: ["b1", "b2", "b3", "b4"]
+                        .into_iter()
+                        .map(|id| crate::config::BotCfg {
+                            id: Some(id.to_string()),
+                            name: id.to_string(),
+                            kind: "claude".into(),
+                            model: None,
+                            effort: None,
+                            fast: false,
+                            persona: None,
+                            args: vec![],
+                            autostart: false,
+                            inject_hooks: true,
+                            auto_approve: true,
+                            identity: None,
+                            env: Default::default(),
+                            herdr_session: None,
+                        })
+                        .collect(),
+                });
+                Ok(())
+            })
+            .await
+            .unwrap();
+        crate::projection::project_config(&app.cfg, &app.db).await.unwrap();
+        assert_eq!(db::live_bots(&app.db).await.unwrap().len(), 4);
+
+        // 外面把 config.toml 換掉：只剩 1 顆 bot。`ConfigStore::update` 之後會比 mtime 重讀，這裡先強迫
+        // 重讀一次（不改任何東西，跟 projection.rs 的 `a_config_swapped_under_a_running_daemon_is_refused` 同一招）。
+        let reduced = format!(
+            "[server]\nlisten = '127.0.0.1:7788'\n\n[[projects]]\nid = '{pid}'\npath = '{repo}'\nlabel = 'proj'\nhost = 'local'\n\n[[projects.bots]]\nid = 'b1'\nname = 'b1'\nkind = 'claude'\n"
+        );
+        std::fs::write(&app.cfg.path, &reduced).unwrap();
+        app.cfg.update(|_| Ok(())).await.unwrap();
+
+        let err = patch_project(State(app.clone()), Path(pid.clone()), Json(PatchProject { label: Some("renamed".into()) }))
+            .await
+            .unwrap_err();
+        match err {
+            LcError::Conflict(body) => {
+                assert_eq!(body["reason"], "projection_refused");
+                assert_eq!(body["config_written"], false, "落盤前就被擋，跟身分 API 的 config_written:true 相反：{body}");
+            }
+            other => panic!("expected 409 projection_refused, got {other:?}"),
+        }
+        assert_eq!(std::fs::read_to_string(&app.cfg.path).unwrap(), reduced, "TOML 一個字都不能動");
+        assert_eq!(app.cfg.get().await.projects[0].label, "proj", "記憶體裡那份也不能變（rename 沒套用）");
+        assert_eq!(db::live_bots(&app.db).await.unwrap().len(), 4, "DB 不該被動到");
     }
 }
 

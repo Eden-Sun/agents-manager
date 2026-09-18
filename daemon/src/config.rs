@@ -631,6 +631,20 @@ impl ConfigStore {
     where
         F: FnOnce(&mut ConfigFile) -> Result<T>,
     {
+        self.update_guarded(f, |_next| Ok(())).await
+    }
+
+    /// 跟 [`Self::update`] 一樣的「重讀 → 套用 → 驗證 → 寫入」，多一道 `guard`：驗證過的 `next`
+    /// 落盤之前再跑一次額外檢查，驗不過一樣直接回錯誤、檔案一個字都不動（issue #73 reopen）。
+    ///
+    /// 給需要 DB 才判得出來的規則用（`projection::update_and_project` 的大量軟刪閘門）：那類檢查得先在
+    /// 呼叫端把 DB 快照查出來，再用同步的 `guard` 帶進來比對——`update_guarded` 本身不碰 DB，也不知道
+    /// 什麼時候該問誰，只負責「套用與驗證都過了才寫檔」這個順序不能亂。
+    pub async fn update_guarded<F, T, G>(&self, f: F, guard: G) -> Result<T>
+    where
+        F: FnOnce(&mut ConfigFile) -> Result<T>,
+        G: FnOnce(&ConfigFile) -> Result<()>,
+    {
         let mut g = self.inner.lock().await;
         let on_disk = std::fs::metadata(&self.path).ok().and_then(|m| m.modified().ok());
         if self.path.exists() && on_disk != g.mtime {
@@ -650,6 +664,8 @@ impl ConfigStore {
         // 本來就不該再往上疊寫。
         // 失敗是 `ConfigInvalid`：原因留在最前面（呼叫端與測試都在看它），型別讓 API 分得出這不是上游壞掉。
         crate::projection::validate(&next)?;
+        // 純驗證過了才問需要 DB 的那一類（同一條理由：驗不過就不寫，guard 也不例外）。
+        guard(&next)?;
         // A serde rewrite drops comments / unknown keys: no-op updates must not write (issue #38).
         if next != g.cfg {
             write_atomic(&self.path, &next)?;
