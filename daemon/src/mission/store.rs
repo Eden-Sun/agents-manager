@@ -403,6 +403,16 @@ pub async fn list(pool: &SqlitePool, project_id: &str, status: &str, limit: i64)
     .await?)
 }
 
+/// 還開著、沒有暫停的任務，舊的在前（`workflow::wake_stalled` 掃這些）。
+pub async fn open_unpaused(pool: &SqlitePool) -> Result<Vec<Mission>> {
+    Ok(sqlx::query_as::<_, Mission>(
+        "SELECT * FROM missions WHERE completed_at IS NULL AND cancelled_at IS NULL AND paused_reason IS NULL
+          ORDER BY created_at, rowid",
+    )
+    .fetch_all(pool)
+    .await?)
+}
+
 /// 群組時間軸，最舊在前。同一毫秒的兩筆照**寫入順序**排：`created_at` 只到毫秒，一輪來回
 /// （round → round → paused → resumed）常常擠在同一格，而 `id` 是 ULID，同一毫秒內的亂數段不保證
 /// 遞增，以前用 `id` 當第二鍵，使用者看到的事件順序會偶爾倒過來（`a_mission_runs_through_its_gates_end_to_end`

@@ -1,7 +1,7 @@
 //! `/api/projects/{id}/missions`、`/api/missions/*`、`/api/identities/{name}/disabled`。
 //! 契約寫在 `docs/API.md` 的「群組任務」一節；這支檔案改了那一節要跟著改。
 
-use super::{deliver, pick, store};
+use super::{deliver, flow, pick, store};
 use crate::lifecycle::LcError;
 use crate::state::App;
 use axum::extract::{Path, Query, State};
@@ -22,6 +22,13 @@ async fn emit(app: &Arc<App>, m: &store::Mission) {
 
 async fn load(app: &Arc<App>, id: &str) -> Result<store::Mission, LcError> {
     store::get(&app.db, id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("mission".into()))
+}
+
+/// 放行之後的那一步（不看暫停）。放進 `mission_resumed`／`mission_answered`，AGM 被叫醒時就知道
+/// 從哪裡接續，不必回頭翻 runbook 對「停下之前做到哪」（§18.14 第 8 步）。
+async fn resume_step(app: &Arc<App>, id: &str) -> Result<Value, LcError> {
+    let (assignments, events) = super::workflow::inputs(app, id).await?;
+    Ok(json!(flow::derive(&assignments, &events).step()))
 }
 
 /// 任務現在在哪一段：終態與暫停看任務本身，其餘從它的交辦推——最新一件還開著的交辦的角色。
@@ -50,9 +57,13 @@ pub fn phase(m: &store::Mission, assignments: &[crate::supervisor::store::Assign
 }
 
 async fn with_phase(app: &Arc<App>, m: &store::Mission) -> Result<Value, LcError> {
-    let assignments = crate::supervisor::store::mission_assignments(&app.db, &m.id).await.map_err(up)?;
+    let (assignments, events) = super::workflow::inputs(app, &m.id).await?;
     let mut out = m.json();
     out["phase"] = phase(m, &assignments).into();
+    // 下一步由 daemon 從持久狀態推導（issue #74）：AGM 照 `next` 做，不必自己記 runbook 的順序。
+    let f = flow::derive(&assignments, &events);
+    out["next"] = json!(f.next(m));
+    out["flow"] = f.summary();
     out["assignments"] = json!(assignments
         .iter()
         .map(|a| json!({
@@ -371,13 +382,16 @@ pub async fn post_answer(
         }
         (false, None) => None,
     };
-    let payload = json!({
+    let mut payload = json!({
         "mission_id": m.id,
         "project_id": m.project_id,
         "answer": text,
         "reply_to": reply_to,
         "from": from,
     });
+    if !is_bot_reply {
+        payload["next"] = resume_step(&app, &id).await?;
+    }
     let outcome = store::write_reply(
         &app.db,
         &id,
@@ -450,17 +464,19 @@ async fn mission_worktree(app: &Arc<App>, m: &store::Mission, raw: &str) -> Resu
 /// `verified` 一定要說清楚驗的是哪個 commit，交付時才比得出「推上去的就是驗過的那一個」（review3 c1 M9）。
 ///
 /// 以前只要有任何一則 `verified` 就放行：驗證者在 A 上驗過，執行者 rebase 成 B（可能含衝突解法），
-/// B 沒經過驗證者就被推上 main。回傳完整 sha。
-async fn verified_commit(app: &Arc<App>, m: &store::Mission, b: &EventIn) -> Result<String, LcError> {
+/// B 沒經過驗證者就被推上 main。回傳完整 sha，與給了的話那個工作樹（交付的下一步會提到它）。
+async fn verified_commit(app: &Arc<App>, m: &store::Mission, b: &EventIn) -> Result<(String, Option<String>), LcError> {
     let given = b
         .sha
         .as_deref()
         .or_else(|| b.payload.as_ref().and_then(|p| p.get("sha")).and_then(Value::as_str))
         .map(str::trim)
         .filter(|s| !s.is_empty());
+    let mut worktree = None;
     let from_worktree = match b.worktree.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         Some(w) => {
             let dir = mission_worktree(app, m, w).await?;
+            worktree = Some(dir.to_string_lossy().to_string());
             Some(deliver::head_sha(&dir).await.ok_or_else(|| LcError::Bad("could not read the worktree's HEAD".into()))?)
         }
         None => None,
@@ -476,8 +492,8 @@ async fn verified_commit(app: &Arc<App>, m: &store::Mission, b: &EventIn) -> Res
     };
     match (from_worktree, from_sha) {
         (Some(head), Some(sha)) if head != sha => Err(LcError::Bad(format!("sha {sha} is not the worktree's HEAD ({head})"))),
-        (Some(head), _) => Ok(head),
-        (None, Some(sha)) => Ok(sha),
+        (Some(head), _) => Ok((head, worktree)),
+        (None, Some(sha)) => Ok((sha, None)),
         (None, None) => Err(LcError::Bad("a verified event needs the commit it verified: `worktree` (its HEAD) or `sha`".into())),
     }
 }
@@ -493,9 +509,16 @@ pub async fn post_event(State(app): State<Arc<App>>, Path(id): Path<String>, Jso
     let from = check_relay_from(&app, b.relay_from.as_deref()).await?;
     let mut payload = b.payload.clone().unwrap_or_else(|| json!({}));
     if b.kind == "verified" {
-        let sha = verified_commit(&app, &m, &b).await?;
+        let (sha, worktree) = verified_commit(&app, &m, &b).await?;
+        // 這則驗證屬於哪一代、寫下時最後一件交辦是誰（`flow::ANCHOR`）：之後退回或再派執行者，它就不算數了。
+        let (assignments, events) = super::workflow::inputs(&app, &id).await?;
         let Some(obj) = payload.as_object_mut() else { return Err(LcError::Bad("payload must be an object".into())) };
         obj.insert("sha".into(), sha.into());
+        obj.insert(flow::ANCHOR.into(), json!(assignments.last().map(|a| a.id.clone())));
+        obj.insert("generation".into(), json!(events.iter().filter(|e| e.kind == "round").count()));
+        if let Some(w) = worktree {
+            obj.insert("worktree".into(), w.into());
+        }
     }
     let ev = store::add_event(&app.db, &id, &b.kind, b.text.trim(), from.as_deref(), &payload)
         .await
@@ -592,6 +615,7 @@ pub async fn post_resume(State(app): State<Arc<App>>, Path(id): Path<String>) ->
     ensure_open(&m)?;
     let paused_reason = m.paused_reason.clone();
     let project_id = m.project_id.clone();
+    let next = resume_step(&app, &id).await?;
     // 放行、記事件、推 inbox 一次交易。分開寫的話，中途失敗就會留下「已經放行但沒人被叫醒」，
     // 而且沒有任何東西會回頭補送。
     store::resume_and_wake(&app.db, &id, |_ev| {
@@ -600,6 +624,7 @@ pub async fn post_resume(State(app): State<Arc<App>>, Path(id): Path<String>) ->
             "project_id": project_id,
             "was_paused_for": paused_reason,
             "answered": false,
+            "next": next,
             // 來源中性：這支端點使用者與 AGM 都會呼叫，寫死「使用者」會在 AGM 自己續跑時說謊。
             "note": "任務被要求直接繼續（沒有附回答）",
         })
@@ -940,35 +965,77 @@ pub struct CompleteIn {
     result_summary: String,
     #[serde(default)]
     relay_from: Option<String>,
+    /// 沒交付就結案時必須講為什麼：`no_changes` | `user_declined`（`flow::Waiver`）。有交付時不看。
+    #[serde(default)]
+    no_delivery: Option<String>,
+    /// `no_delivery=no_changes` 而且任務派過執行者時：執行者的工作樹，daemon 自己查它乾淨、HEAD 已在 base 裡。
+    #[serde(default)]
+    worktree: Option<String>,
 }
 
+/// 結案。兩道關卡（issue #74），判定結果寫進 `completed` 事件的 `payload.delivery`，時間軸上看得出
+/// 「交了哪個 commit」或「為什麼沒交」：
+/// 1. 底下還有開著的交辦 → 409 `assignments_open`（那顆 bot 會繼續做一件已經關掉的任務）；
+/// 2. 對交付的要求（`flow::delivery_requirement`）：這一代驗過的 commit 已經交付，或 `no_delivery` 講的理由
+///    對得上事實——否則 409 `not_delivered`／`has_verified_changes`／`user_not_asked`／`worktree_has_changes`。
 pub async fn post_complete(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b): Json<CompleteIn>) -> Result<Json<Value>, LcError> {
     if b.result_summary.trim().is_empty() {
         return Err(LcError::Bad("result_summary is empty".into()));
     }
+    let waiver = match b.no_delivery.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(w) => Some(flow::Waiver::parse(w).ok_or_else(|| LcError::Bad(format!("no_delivery must be one of {}", flow::Waiver::ALL.join(" | "))))?),
+        None => None,
+    };
     let m = load(&app, &id).await?;
     ensure_open(&m)?;
     // 底下還有開著的交辦就不結案（issue #74）：那顆 bot 會繼續做一件已經關掉的任務，
     // 回合結束還會為它推一則沒有人要的 `assignment_completed`。取消那條路本來就會逐件收乾淨。
     crate::mission::workflow::ensure_can_complete(&app, &id).await?;
+    let (mut delivery, needs_proof) = crate::mission::workflow::delivery_record(&app, &id, waiver).await?;
+    if needs_proof {
+        // 派過執行者卻說「沒有改東西」：拿執行者的工作樹來看，不靠一句話。
+        let Some(raw) = b.worktree.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
+            return Err(LcError::Bad("no_delivery=no_changes on a mission that had an executor needs `worktree` (the executor's) to show nothing changed".into()));
+        };
+        let dir = mission_worktree(&app, &m, raw).await?;
+        let base = deliver::base_branch(&dir, "origin").await;
+        match deliver::nothing_beyond_base(&dir, "origin", &base).await {
+            Ok(head) => {
+                delivery["worktree"] = dir.to_string_lossy().to_string().into();
+                delivery["head"] = head.into();
+            }
+            Err(why) => {
+                return Err(LcError::conflict(
+                    "worktree_has_changes",
+                    json!({"mission_id": id, "detail": why,
+                           "hint": "執行者的工作樹有還沒交付的東西：走驗證與 `mission deliver`，或使用者決定不交付時用 `user_declined`"}),
+                ));
+            }
+        }
+    }
     let from = check_relay_from(&app, b.relay_from.as_deref()).await?;
     store::complete(&app.db, &id, b.result_summary.trim()).await.map_err(up)?;
-    store::add_event(&app.db, &id, "completed", b.result_summary.trim(), from.as_deref(), &json!({})).await.map_err(up)?;
+    store::add_event(&app.db, &id, "completed", b.result_summary.trim(), from.as_deref(), &json!({"delivery": delivery})).await.map_err(up)?;
     let m = load(&app, &id).await?;
     let temp = cleanup_temp_bots(&app, &m).await;
     emit(&app, &m).await;
     let mut out = m.json();
     out["temp_bots"] = temp;
+    out["delivery"] = delivery;
     Ok(Json(out))
 }
 
 /// 用掉一輪（review 退回或驗證失敗）。到上限就把任務停下來（`max_rounds`）並回 409。
+///
+/// 退回＝新的一代（`flow`）：事件記下當時最後一件交辦（`flow::ANCHOR`），之後派的才算這一代，
+/// 之前的驗證與交付都不再放行。
 pub async fn post_round(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Json<Value>, LcError> {
     let m = load(&app, &id).await?;
     ensure_open(&m)?;
+    let last = crate::supervisor::store::mission_assignments(&app.db, &id).await.map_err(up)?.last().map(|a| a.id.clone());
     match store::use_round(&app.db, &id).await.map_err(up)? {
         Ok(used) => {
-            store::add_event(&app.db, &id, "round", &format!("第 {used} 輪退回（上限 {}）", m.max_rounds), Some(crate::agent_relay::DAEMON_SENDER), &json!({"rounds_used": used}))
+            store::add_event(&app.db, &id, "round", &format!("第 {used} 輪退回（上限 {}）", m.max_rounds), Some(crate::agent_relay::DAEMON_SENDER), &json!({"rounds_used": used, flow::ANCHOR: last}))
                 .await
                 .map_err(up)?;
             let m = load(&app, &id).await?;
@@ -1058,20 +1125,31 @@ pub async fn post_deliver(State(app): State<Arc<App>>, Path(id): Path<String>, J
         ));
     }
     let from = check_relay_from(&app, b.relay_from.as_deref()).await?;
-    let events = store::events(&app.db, &id).await.map_err(up)?;
-    let Some(verified) = events.iter().rev().find(|e| e.kind == "verified") else {
-        return Err(LcError::conflict("not_verified", json!({"mission_id": id})));
+    let (assignments, events) = super::workflow::inputs(&app, &id).await?;
+    let f = flow::derive(&assignments, &events);
+    let Some((verified, stale)) = f.latest_verified.clone() else {
+        return Err(LcError::conflict("not_verified", json!({"mission_id": id, "next": f.step()})));
     };
-    let verified_sha = serde_json::from_str::<Value>(&verified.payload_json)
-        .ok()
-        .and_then(|p| p.get("sha").and_then(Value::as_str).map(str::to_string));
-    let Some(verified_sha) = verified_sha else {
+    let Some(verified_sha) = verified.sha.clone() else {
         return Err(LcError::conflict(
             "verified_without_sha",
-            json!({"mission_id": id, "event_id": verified.id,
+            json!({"mission_id": id, "event_id": verified.event_id,
                    "hint": "這則 verified 沒記是哪個 commit：請驗證者重驗後用 `mission event --kind verified --worktree <驗過的工作樹>` 重記"}),
         ));
     };
+    // 驗證綁在它那一代的成果上（issue #74）：之後退回過、或又派了執行者，就算 HEAD 碰巧沒變也要重驗——
+    // 否則被退回的那一份不必改就能靠舊驗證推上去。
+    if let Some(why) = stale {
+        return Err(LcError::conflict(
+            "verification_stale",
+            json!({"mission_id": id, "verified_sha": verified_sha, "stale_because": why,
+                   "verified_generation": verified.generation, "generation": f.generation, "next": f.step(),
+                   "hint": match why {
+                       flow::Stale::Round => "這則 verified 之後任務被退回過（round）：那是上一代的驗證，執行者重做之後要重驗",
+                       flow::Stale::NewExecutor => "這則 verified 之後又派了執行者（rebase／補改）：成果可能變了，重驗之後再交付",
+                   }}),
+        ));
+    }
     let dir = mission_worktree(&app, &m, &b.worktree).await?;
     let head = deliver::head_sha(&dir).await.ok_or_else(|| LcError::Bad("could not read the worktree's HEAD".into()))?;
     if head != verified_sha {
@@ -1082,7 +1160,7 @@ pub async fn post_deliver(State(app): State<Arc<App>>, Path(id): Path<String>, J
         ));
     }
     // 這個 commit 已經交付過了：回原本那一筆，不要再推一次、也不要把它報成失敗。
-    if let Some(done) = events.iter().rev().find(|e| e.kind == "delivered" && delivered_sha(e).as_deref() == Some(head.as_str())) {
+    if let Some(done) = events.iter().rev().find(|e| e.kind == "delivered" && flow::delivered_sha(e).as_deref() == Some(head.as_str())) {
         let mut out: Value = serde_json::from_str(&done.payload_json).unwrap_or_else(|_| json!({}));
         out["replayed"] = true.into();
         out["delivered_at"] = done.created_at.clone().into();
@@ -1149,11 +1227,6 @@ pub async fn post_deliver(State(app): State<Arc<App>>, Path(id): Path<String>, J
     }
 }
 
-/// 一則 `delivered` 事件交的是哪個 commit（舊事件沒記就是 `None`，永遠不會被當成重放）。
-fn delivered_sha(e: &store::MissionEvent) -> Option<String> {
-    serde_json::from_str::<Value>(&e.payload_json).ok()?.get("sha")?.as_str().map(str::to_string)
-}
-
 /// 一則 `note` 記的「開始交付」是哪個 commit。
 fn attempt_sha(e: &store::MissionEvent) -> Option<String> {
     serde_json::from_str::<Value>(&e.payload_json).ok()?.pointer("/delivery_attempt/sha")?.as_str().map(str::to_string)
@@ -1197,6 +1270,15 @@ mod tests {
     use super::*;
     use crate::quota::{Quota, Window};
 
+
+    fn done(summary: &str, no_delivery: Option<&str>, worktree: Option<&std::path::Path>) -> CompleteIn {
+        CompleteIn {
+            result_summary: summary.into(),
+            relay_from: None,
+            no_delivery: no_delivery.map(String::from),
+            worktree: worktree.map(|w| w.to_string_lossy().to_string()),
+        }
+    }
 
     fn new_mission(crid: &str, mode: &str) -> NewMissionIn {
         NewMissionIn {
@@ -1321,8 +1403,7 @@ mod tests {
         let pid = env.project_id.clone();
         let Json(m) = post_mission(State(app.clone()), Path(pid.clone()), Json(new_mission("r1", "pr"))).await.unwrap();
         let id = m["id"].as_str().unwrap().to_string();
-        let done = CompleteIn { result_summary: "改好了".into(), relay_from: None };
-        let _ = post_complete(State(app.clone()), Path(id.clone()), Json(done)).await.unwrap();
+        let _ = post_complete(State(app.clone()), Path(id.clone()), Json(done("改好了", Some("no_changes"), None))).await.unwrap();
         let before = get_mission(State(app.clone()), Path(id.clone())).await.unwrap().0;
 
         let Json(out) = post_question(State(app.clone()), Path(id.clone()), Json(q("這個改動會影響登入嗎？", "q1"))).await.unwrap();
@@ -1449,9 +1530,10 @@ mod tests {
             worktree: Some(env.repo.to_string_lossy().to_string()),
         };
         let _ = post_event(State(app.clone()), Path(id.clone()), Json(ev)).await.unwrap();
-        let _ = post_complete(State(app.clone()), Path(id.clone()), Json(CompleteIn { result_summary: "第一版".into(), relay_from: None }))
-            .await
-            .unwrap();
+        // 這筆 fixture 刻意**沒有交付**（下面要驗快照誠實地說不出交付方式）。沒交付要結案得有使用者的決定（issue #74）。
+        let _ = post_pause(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(PauseIn { reason: "clarify".into(), detail: None })).await.unwrap();
+        let _ = post_answer(State(app.clone()), Path(id.clone()), Json(ans("先不要交付，直接結案", "no-deliver"))).await.unwrap();
+        let _ = post_complete(State(app.clone()), Path(id.clone()), Json(done("第一版", Some("user_declined"), None))).await.unwrap();
 
         let Json(child) = post_revise(State(app.clone()), Path(id.clone()), Json(rev("順便把標題也改了", "rev1"))).await.unwrap();
         assert_eq!(child["created"], true);
@@ -1521,7 +1603,7 @@ mod tests {
         let app = env.app.clone();
         let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("source-parent", "pr"))).await.unwrap();
         let id = m["id"].as_str().unwrap().to_string();
-        let _ = post_complete(State(app.clone()), Path(id.clone()), Json(CompleteIn { result_summary: "v1".into(), relay_from: None })).await.unwrap();
+        let _ = post_complete(State(app.clone()), Path(id.clone()), Json(done("v1", Some("no_changes"), None))).await.unwrap();
         let mut input = rev("v2", "source-revise");
         input.relay_from = Some("daemon".into());
         let Json(child) = post_revise(State(app.clone()), Path(id.clone()), Json(input)).await.unwrap();
@@ -1626,8 +1708,18 @@ mod tests {
         let Json(cur) = get_mission(State(app.clone()), Path(id.clone())).await.unwrap();
         assert_eq!(cur["paused_reason"], "push_main_failed");
 
+        // 驗過卻沒交付：不能就這樣結案（issue #74），也不能說成「沒有改東西」；「使用者不要」要有使用者的回答。
+        let complete = |no_delivery: Option<&'static str>| post_complete(State(app.clone()), Path(id.clone()), Json(done("修好了", no_delivery, None)));
+        assert_eq!(conflict_reason(complete(None).await.unwrap_err()), "not_delivered");
+        assert_eq!(conflict_reason(complete(Some("no_changes")).await.unwrap_err()), "has_verified_changes");
+        assert_eq!(conflict_reason(complete(Some("user_declined")).await.unwrap_err()), "user_not_asked");
+        assert!(matches!(complete(Some("later")).await.unwrap_err(), LcError::Bad(_)), "不認得的理由是 400");
+        // 使用者在群組回答「不用推了」之後，照實記下沒交付的理由再結案。
+        let _ = post_answer(State(app.clone()), Path(id.clone()), Json(ans("不用推了，直接結案", "decline"))).await.unwrap();
+        let Json(closed) = complete(Some("user_declined")).await.unwrap();
+        assert_eq!((closed["delivery"]["status"].as_str(), closed["delivery"]["reason"].as_str()), (Some("waived"), Some("user_declined")));
+
         // 完成之後就關起來；已完成任務清單查得到。
-        let _ = post_complete(State(app.clone()), Path(id.clone()), Json(CompleteIn { result_summary: "修好了".into(), relay_from: None })).await.unwrap();
         let err = post_pause(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(PauseIn { reason: "late".into(), detail: None })).await.unwrap_err();
         assert_eq!(conflict_reason(err), "already_closed");
         let Json(done) = get_missions(State(app.clone()), Path(pid.clone()), Query(ListQuery { status: Some("done".into()), limit: None })).await.unwrap();
@@ -1788,6 +1880,209 @@ mod tests {
         assert_eq!(conflict_reason(err), "verified_without_sha");
     }
 
+    /// 交辦掛到任務上（測試夾具：直接寫 store，狀態由呼叫端決定——這裡要的是「有這件交辦」這個事實）。
+    async fn mission_assignment(app: &Arc<App>, mission_id: &str, crid: &str, role: &str, status: &str) -> String {
+        crate::supervisor::store::get_or_init(&app.db).await.unwrap();
+        let a = crate::supervisor::store::insert_assignment(&app.db, None, "bot1", crid, "做 X", &[], None, true).await.unwrap();
+        crate::supervisor::store::set_mission_link(&app.db, &a.id, mission_id, role).await.unwrap();
+        sqlx::query("UPDATE supervisor_assignments SET status=? WHERE id=?").bind(status).bind(&a.id).execute(&app.db).await.unwrap();
+        a.id
+    }
+
+    fn accept() -> crate::supervisor::api::ReviewIn {
+        crate::supervisor::api::ReviewIn {
+            decision: "accept".into(),
+            actor: None,
+            source: None,
+            reason: None,
+            evidence: None,
+            followup_text: None,
+            followup_request_id: None,
+            followup_bot_id: None,
+            ownership: Vec::new(),
+        }
+    }
+
+    /// issue #74 驗收一＋二：AGM **只照 `mission get` 的 `next` 做**，就能從派工一路走到結案，不必記 runbook
+    /// 的順序。每一步都重新從資料庫讀 `next`——等於每一步之間 daemon 都重啟過一次，推得出來的就是持久狀態。
+    /// 每個入口都是真的（assign、review、verified、deliver、complete），回合結束那一下用夾具模擬（沒有真的 bot）。
+    #[tokio::test]
+    async fn following_next_alone_walks_the_happy_path_to_completion() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        crate::supervisor::store::get_or_init(&app.db).await.unwrap();
+        let agm = crate::testing::claude_bot(&app, &env.project_id, "AGM").await;
+        crate::supervisor::store::set_env(&app.db, &agm.id, &env.project_id, "/tmp").await.unwrap();
+        let (origin, wt) = with_origin(&env);
+        let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("happy", "push_main"))).await.unwrap();
+        let id = m["id"].as_str().unwrap().to_string();
+        let next = || {
+            let (app, id) = (app.clone(), id.clone());
+            async move { get_mission(State(app), Path(id)).await.unwrap().0["next"].clone() }
+        };
+
+        let mut steps = Vec::new();
+        for turn in 0..12 {
+            let n = next().await;
+            let action = n["action"].as_str().unwrap().to_string();
+            steps.push(format!("{action}:{}", n["role"].as_str().unwrap_or("-")));
+            match action.as_str() {
+                "assign" => {
+                    let role = n["role"].as_str().unwrap();
+                    let bot = crate::testing::claude_bot(&app, &env.project_id, &format!("agm-mission-happy-{role}")).await;
+                    if role == "executor" {
+                        commit_file(&wt, "fix.txt"); // 執行者的成果
+                    }
+                    let out = crate::supervisor::assign(
+                        &app, &bot.id, "做 X", &format!("crid-happy-{turn}"), None, &[], None, true, Some((&id, role)), None, None,
+                        crate::supervisor::bot_requests::ReplyMark::default(),
+                    )
+                    .await
+                    .unwrap();
+                    // 回合結束（夾具）：交辦停在等裁示。
+                    sqlx::query("UPDATE supervisor_assignments SET status='awaiting_review' WHERE id=?")
+                        .bind(out["id"].as_str().unwrap())
+                        .execute(&app.db)
+                        .await
+                        .unwrap();
+                }
+                "review" => {
+                    let aid = n["assignment_id"].as_str().unwrap().to_string();
+                    let Json(r) = crate::supervisor::api::post_review(State(app.clone()), Path(aid), HeaderMap::new(), Json(accept())).await.unwrap();
+                    assert_eq!(r["mission_next"]["next"], next().await, "裁示的回應直接帶下一步，就是 mission get 推出來的那一步");
+                }
+                "record_verification" => {
+                    let Json(ev) = post_event(State(app.clone()), Path(id.clone()), Json(verified(Some(&wt), None))).await.unwrap();
+                    let p: Value = serde_json::from_str(ev["payload_json"].as_str().unwrap()).unwrap();
+                    assert_eq!(p[flow::ANCHOR], n["assignment_id"], "verified 記下當時最後一件交辦（驗證者那件）");
+                    assert_eq!(p["worktree"].as_str(), wt.to_str());
+                }
+                "deliver" => {
+                    assert_eq!(n["sha"], json!(git(&wt, &["rev-parse", "HEAD"])), "下一步說得出要交哪個 commit");
+                    let _ = post_deliver(State(app.clone()), Path(id.clone()), Json(deliver_from(&wt))).await.unwrap();
+                }
+                "complete" => {
+                    let Json(closed) = post_complete(State(app.clone()), Path(id.clone()), Json(done("完成", None, None))).await.unwrap();
+                    assert_eq!((closed["delivery"]["status"].as_str(), closed["delivery"]["sha"].as_str()), (Some("delivered"), Some(git(&wt, &["rev-parse", "HEAD"]).as_str())));
+                    break;
+                }
+                other => panic!("happy path 不該走到 {other}：{n}"),
+            }
+        }
+        assert_eq!(
+            steps,
+            [
+                "assign:executor", "review:executor", "assign:reviewer", "review:reviewer", "assign:verifier", "review:verifier",
+                "record_verification:-", "deliver:-", "complete:-",
+            ]
+        );
+        assert_eq!(git(&origin, &["rev-parse", "main"]), git(&wt, &["rev-parse", "HEAD"]), "推上去的就是驗過的那一個");
+        assert_eq!(next().await["action"], "closed");
+    }
+
+    /// 驗收八：退回（新的一代）或驗完又派了執行者，舊的 `verified` 就放行不了交付——**就算 HEAD 沒變**。
+    /// 被退回的那一份不必改一個字就能靠舊驗證推上去，是 commit 比對擋不到的那一半。
+    #[tokio::test]
+    async fn a_round_or_a_new_executor_after_verification_blocks_delivery_of_the_same_commit() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (origin, wt) = with_origin(&env);
+        let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("stale", "push_main"))).await.unwrap();
+        let id = m["id"].as_str().unwrap().to_string();
+        let a = commit_file(&wt, "a.txt");
+        let deliver = || post_deliver(State(app.clone()), Path(id.clone()), Json(deliver_from(&wt)));
+        let stale_because = |e: LcError| match e {
+            LcError::Conflict(v) => (v["reason"].as_str().unwrap_or_default().to_string(), v["stale_because"].as_str().unwrap_or_default().to_string()),
+            other => panic!("expected 409, got {other:?}"),
+        };
+
+        // 驗過 A 之後退回：HEAD 還是 A，但那是上一代的驗證。
+        let _ = post_event(State(app.clone()), Path(id.clone()), Json(verified(Some(&wt), None))).await.unwrap();
+        let _ = post_round(State(app.clone()), Path(id.clone())).await.unwrap();
+        assert_eq!(stale_because(deliver().await.unwrap_err()), ("verification_stale".into(), "round".into()));
+
+        // 這一代重驗之後，又派了執行者（rebase／補改）：它還沒動 HEAD 也一樣，要重驗。
+        let _ = post_event(State(app.clone()), Path(id.clone()), Json(verified(Some(&wt), None))).await.unwrap();
+        let exec = mission_assignment(&app, &id, "stale-exec", "executor", "delivered").await;
+        assert_eq!(stale_because(deliver().await.unwrap_err()), ("verification_stale".into(), "new_executor".into()));
+        assert_eq!(load(&app, &id).await.unwrap().status(), "open", "流程漏了一步不是交付失敗，不停下來");
+
+        // 執行者結案、重驗這個 commit：放行，推上去的是 A。
+        sqlx::query("UPDATE supervisor_assignments SET status='completed' WHERE id=?").bind(&exec).execute(&app.db).await.unwrap();
+        let _ = post_event(State(app.clone()), Path(id.clone()), Json(verified(Some(&wt), None))).await.unwrap();
+        let Json(out) = deliver().await.unwrap();
+        assert_eq!(out["sha"], json!(a));
+        assert_eq!(git(&origin, &["rev-parse", "main"]), a);
+    }
+
+    /// 驗收七＋九：沒交付就結案要被擋；「沒有改東西」派過執行者的話要拿工作樹證明，說謊的擋下來。
+    #[tokio::test]
+    async fn completing_without_delivery_is_refused_unless_the_stated_reason_holds() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (_origin, wt) = with_origin(&env);
+        let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("undelivered", "push_main"))).await.unwrap();
+        let id = m["id"].as_str().unwrap().to_string();
+        let _ = mission_assignment(&app, &id, "u-exec", "executor", "completed").await;
+        let complete = |no_delivery: Option<&'static str>, worktree: Option<&std::path::Path>| {
+            post_complete(State(app.clone()), Path(id.clone()), Json(done("完成", no_delivery, worktree)))
+        };
+
+        // 什麼都沒講：擋。
+        assert_eq!(conflict_reason(complete(None, None).await.unwrap_err()), "not_delivered");
+        // 說「沒有改東西」但派過執行者：要附工作樹。
+        assert!(bad_text(complete(Some("no_changes"), None).await.unwrap_err()).contains("needs `worktree`"));
+        // 工作樹有沒提交的改動、或有 base 以外的 commit：那就是有改東西。
+        std::fs::write(wt.join("dirty.txt"), "x").unwrap();
+        assert_eq!(conflict_reason(complete(Some("no_changes"), Some(&wt)).await.unwrap_err()), "worktree_has_changes");
+        std::fs::remove_file(wt.join("dirty.txt")).unwrap();
+        let b = commit_file(&wt, "b.txt");
+        assert_eq!(conflict_reason(complete(Some("no_changes"), Some(&wt)).await.unwrap_err()), "worktree_has_changes");
+        assert_eq!(load(&app, &id).await.unwrap().status(), "open", "被擋下來的結案什麼都沒寫");
+
+        // 驗過、交付了：結案，記下交了哪個 commit。
+        let _ = post_event(State(app.clone()), Path(id.clone()), Json(verified(Some(&wt), None))).await.unwrap();
+        let _ = post_deliver(State(app.clone()), Path(id.clone()), Json(deliver_from(&wt))).await.unwrap();
+        let Json(closed) = complete(None, None).await.unwrap();
+        assert_eq!((closed["delivery"]["status"].as_str(), closed["delivery"]["sha"].as_str()), (Some("delivered"), Some(b.as_str())));
+        let events = store::events(&app.db, &id).await.unwrap();
+        let completed = events.iter().find(|e| e.kind == "completed").unwrap();
+        let payload: Value = serde_json::from_str(&completed.payload_json).unwrap();
+        assert_eq!(payload["delivery"]["sha"], json!(b), "時間軸上看得出交的是哪個 commit");
+    }
+
+    /// 放行（answer／resume）叫醒 AGM 的通知帶著放行之後的那一步：AGM 不用自己記「停下之前做到哪」。
+    #[tokio::test]
+    async fn waking_the_manager_after_a_pause_says_where_to_continue() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("resume-next", "pr"))).await.unwrap();
+        let id = m["id"].as_str().unwrap().to_string();
+        let _ = mission_assignment(&app, &id, "rn-exec", "executor", "completed").await;
+        let payload_of = |kind: &'static str| {
+            let app = app.clone();
+            async move {
+                let raw: String = sqlx::query_scalar("SELECT payload_json FROM supervisor_inbox WHERE kind=? ORDER BY rowid DESC LIMIT 1")
+                    .bind(kind)
+                    .fetch_one(&app.db)
+                    .await
+                    .unwrap();
+                serde_json::from_str::<Value>(&raw).unwrap()
+            }
+        };
+        let _ = post_pause(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(PauseIn { reason: "clarify".into(), detail: None })).await.unwrap();
+        let Json(cur) = get_mission(State(app.clone()), Path(id.clone())).await.unwrap();
+        assert_eq!((cur["next"]["action"].as_str(), cur["next"]["then"]["role"].as_str()), (Some("paused"), Some("reviewer")));
+        let _ = post_answer(State(app.clone()), Path(id.clone()), Json(ans("照原本的做", "rn-a"))).await.unwrap();
+        let p = payload_of("mission_answered").await;
+        assert_eq!((p["next"]["action"].as_str(), p["next"]["role"].as_str()), (Some("assign"), Some("reviewer")));
+
+        let _ = post_pause(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(PauseIn { reason: "user_pause".into(), detail: None })).await.unwrap();
+        let _ = post_resume(State(app.clone()), Path(id.clone())).await.unwrap();
+        let p = payload_of("mission_resumed").await;
+        assert_eq!((p["next"]["action"].as_str(), p["next"]["role"].as_str()), (Some("assign"), Some("reviewer")));
+    }
+
     /// runbook 第 2 步：`pick` 回 `wait` 時照樣開 bot 並 `assign --mission`——派送時 daemon 查到撞限，
     /// 交辦停在 `quota_blocked`，額度回來 controller 自己重送。什麼都不做的話沒有任何東西會叫醒 AGM，
     /// 任務永遠停在「等 AGM 接手…」（review3 c1 M12）。
@@ -1869,7 +2164,9 @@ mod tests {
         assert_eq!(conflict_reason(err), "mission_busy", "assign 沒接上閘門");
 
         // 入口二：同一個狀態，結案也要被擋。
-        let complete = || post_complete(State(app.clone()), Path(id.clone()), Json(CompleteIn { result_summary: "完成".into(), relay_from: None }));
+        // 結案時對交付的要求另外測；這裡用「沒有改東西」並附上乾淨的執行者工作樹，只量「開著的交辦」這道。
+        let (_origin, wt) = with_origin(&env);
+        let complete = || post_complete(State(app.clone()), Path(id.clone()), Json(done("完成", Some("no_changes"), Some(&wt))));
         assert_eq!(conflict_reason(complete().await.unwrap_err()), "assignments_open", "complete 沒接上閘門");
 
         // 收乾淨之後兩邊都放行——閘門不是把路堵死。
@@ -2072,12 +2369,13 @@ mod tests {
                 .unwrap();
         }
 
-        let Json(done) = post_complete(State(app.clone()), Path(id.clone()), Json(CompleteIn { result_summary: "完成".into(), relay_from: None }))
+        let (_origin, wt) = with_origin(&env);
+        let Json(closed) = post_complete(State(app.clone()), Path(id.clone()), Json(done("完成", Some("no_changes"), Some(&wt))))
             .await
             .unwrap();
-        let deleted: Vec<&str> = done["temp_bots"]["deleted"].as_array().unwrap().iter().map(|b| b["bot_id"].as_str().unwrap()).collect();
+        let deleted: Vec<&str> = closed["temp_bots"]["deleted"].as_array().unwrap().iter().map(|b| b["bot_id"].as_str().unwrap()).collect();
         assert_eq!(deleted, ["t-exec"]);
-        let skipped: Vec<(&str, &str)> = done["temp_bots"]["skipped"]
+        let skipped: Vec<(&str, &str)> = closed["temp_bots"]["skipped"]
             .as_array()
             .unwrap()
             .iter()

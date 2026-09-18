@@ -119,6 +119,23 @@ pub async fn base_branch(dir: &Path, remote: &str) -> String {
     "main".into()
 }
 
+/// 結案時聲明「沒有改東西」（`no_delivery=no_changes`）的證明：工作樹乾淨，而且 HEAD 已經在
+/// `<remote>/<base>` 裡——沒有 base 以外的 commit。回傳 HEAD；不成立就回原因。
+///
+/// **不 fetch**：本地的 `<remote>/<base>` 舊了，只會讓 HEAD 更不容易被算進去（往嚴的方向錯），不會放過改動。
+pub async fn nothing_beyond_base(dir: &Path, remote: &str, base: &str) -> Result<String, String> {
+    let (_, porcelain) = git(dir, &["status", "--porcelain"]).await.map_err(|f| f.detail)?;
+    if !porcelain.trim().is_empty() {
+        return Err(format!("工作樹還有未提交的改動：\n{porcelain}"));
+    }
+    let head = head_sha(dir).await.ok_or_else(|| "讀不到工作樹的 HEAD".to_string())?;
+    let remote_ref = format!("{remote}/{base}");
+    if !is_ancestor(dir, &head, &remote_ref).await {
+        return Err(format!("HEAD {} 不在 {remote_ref} 裡：有還沒交付的 commit", &head[..12]));
+    }
+    Ok(head)
+}
+
 /// `a` 是不是 `b` 的祖先（`a` 已經在 `b` 裡）。
 async fn is_ancestor(dir: &Path, a: &str, b: &str) -> bool {
     matches!(git(dir, &["merge-base", "--is-ancestor", a, b]).await, Ok((true, _)))

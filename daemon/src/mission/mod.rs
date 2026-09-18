@@ -2,10 +2,12 @@
 //! 設計見 `docs/goals/agm-missions.md`（D1–D8）；契約見 `docs/API.md` 的「群組任務」一節。
 //!
 //! daemon 在這裡只做確定性的部分：任務與事件的持久化、身分挑選規則（[`pick`]）、輪數上限、
-//! 交付前的 fast-forward 檢查（[`deliver`]）。拆工、判斷 review 與驗證結果是 AGM 的事。
+//! 交付前的 fast-forward 檢查（[`deliver`]），以及流程推進——下一步是哪一關、哪些關卡開著（[`flow`]
+//! 推導、[`workflow`] 把關與叫醒）。拆工、判斷 review 與驗證結果是 AGM 的事。
 
 pub mod api;
 pub mod deliver;
+pub mod flow;
 pub mod pick;
 pub mod relay;
 pub mod store;

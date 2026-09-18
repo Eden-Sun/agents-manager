@@ -2004,11 +2004,40 @@ supervisor 相關資料表與欄位都是 additive，`db::migrate` 重跑冪等�
 
 ### 18.14 群組任務（mission）的 AGM runbook（2026-09-13）
 
-使用者決策見本節末的 D1–D8，API 契約 `docs/API.md`「群組任務」。daemon 只做確定性的部分（任務／事件持久化、
-身分挑選、輪數上限、fast-forward 交付、**下面兩道閘門**）；下面是 AGM 這一側的步驟，每一步都用 `bin/agm mission …`／`bin/agm assign --mission`，
+使用者決策見本節末的 D1–D8，API 契約 `docs/API.md`「群組任務」。daemon 做確定性的部分（任務／事件持久化、
+身分挑選、輪數上限、fast-forward 交付、**流程推進**：下一步是哪一關、哪些關卡開著）；下面是 AGM 這一側的步驟，每一步都用 `bin/agm mission …`／`bin/agm assign --mission`，
 不拼 curl。一個任務同時只有一件開著的交辦；`phase` 由交辦推導，AGM 不另存狀態。
 
-**這兩條由 daemon 擋，不再只是 AGM 要記得的規矩（issue #74，`mission::workflow`）：**
+**下一步由 daemon 推導（issue #74，`mission::flow`）。** `mission get`（與清單）帶 `next`，交辦裁示（`review`）的回應帶
+`mission_next`，`mission_resumed`／`mission_answered` 的 payload 帶放行之後的 `next`——AGM 照 `next.action` 做，不必自己記
+下面的順序（下面的步驟講的是**每一步怎麼做**）。`next` 是純函式，輸入只有任務列、交辦、事件，daemon 重啟後推得出同一個答案。
+
+| `next.action` | 意思 | AGM 做什麼 |
+|---|---|---|
+| `assign`（`role`） | 派這個角色。`retry_of`＝上一件同角色沒做完（`fail`／`cancel`）的重派；`rework`＝退回之後的重做 | 第 2／3／4 步 |
+| `review`（`assignment_id`） | 那件交辦停在 `awaiting_review`／`blocked` | 讀結果、裁示（accept／followup／fail／cancel） |
+| `wait` | 交辦在跑或在等額度 | 不用做事，回合結束會收到通知 |
+| `record_verification` | 驗證者的交辦被接受了、還沒記 `verified` | 讀 am-verify：通過 → `mission event --kind verified`；沒過 → `mission round` |
+| `deliver`（`sha`） | 這一代驗過的 commit 還沒交付 | 第 5 步 |
+| `complete`（`sha`） | 驗過的 commit 已交付 | 第 6 步 |
+| `paused`（`paused_reason`、`then`） | 任務停著在等人；`then` 是放行之後那一步 | 第 8 步 |
+| `closed` | 已完成／已取消 | — |
+
+`alternatives` 列出同一個判斷點上也合法的分支：`skip_reviewer`（沒有獨立 reviewer）、`round`（am-review 回 changes、am-verify 沒過）。
+**選哪一條是 AGM 的判斷**，daemon 只保證每條分支之後的下一步推得出來。推導規則：
+
+- **代（generation）**：每一則 `round` 開啟新的一代。`round`／`verified` 事件的 payload 記 `after_assignment`（寫下時最後一件交辦），
+  之後派的交辦才屬於新的一代——位置在交辦清單裡比，不比毫秒時間戳（AGM 背靠背呼叫時會撞在同一格）；這個欄位之前的舊事件退回用時間比。
+- **一代之內**：執行者被接受 → reviewer 被接受（或已經派過驗證者＝審查這關 AGM 放行了）→ 驗證者被接受並記 `verified(commit)` →
+  `delivered(同一個 commit)` → 可結案。驗完又派了執行者（rebase、補改）回到**驗證**那一關，審查不重來。
+- **失敗與重試**：交辦被 `fail`／`cancel`（bot 沒把工作做完）＝同一個角色再派一次，不換關、不算一輪；
+  工作做完但**成果**不行（am-review changes、am-verify 沒過）＝接受那件交辦、`mission round`，下一代從執行者重做。
+- **分工**：交辦自己的 `status` 歸 #71（`supervisor::assignment_state`），任務流程只讀、不寫；要動交辦一律走 supervisor 的入口。
+- **接續**：任務停在「輪到 AGM」（`assign`／`record_verification`／`deliver`／`complete`）超過 10 分鐘，沒有開著的交辦、這個任務也沒有
+  沒處理的 inbox，controller 推一則 `mission_next`（協調者、叫醒；payload 帶 `next`）。event_key 是那一步的簽名（動作、角色、代、交辦數、commit），
+  全部來自持久狀態，所以同一步只叫一次、重啟後也不會再叫一次。daemon 重啟、AGM 回合中斷、AGM 漏掉，三種情況都從這裡接回。暫停中的任務不叫（在等人）。
+
+**這幾條由 daemon 擋，不再只是 AGM 要記得的規矩（issue #74，`mission::workflow`）：**
 
 - `assign --mission` 時任務已經有一件開著的交辦 → 409 `mission_busy`（附上那一件）。`phase` 是「取最後一件
   還開著的交辦的角色」，同時開兩件時它就不是一個定義良好的答案——任務卡、`mission get` 與 AGM 的下一步
@@ -2017,6 +2046,16 @@ supervisor 相關資料表與欄位都是 additive，`db::migrate` 重跑冪等�
 - `mission complete` 時底下還有開著的交辦 → 409 `assignments_open`。以前 `complete` 除了「任務還開著」
   什麼都不查：那顆 bot 會繼續做一件已經關掉的任務，回合結束還會推一則沒有人要的 `assignment_completed`。
   先 `review accept`／`fail`／`cancel` 收乾淨，或走 `mission cancel`（那條本來就會逐件取消）。
+- `assign --mission --role reviewer|verifier` 時這一代還沒有被接受的執行成果（第一次派工、或退回之後還沒重做）→ 409 `out_of_order`
+  （附 `next`、`allowed_roles`）。審一份不存在的成果、或退回後沒重做就重審舊的那份，都是流程跳了一步。執行者在任何一關都派得出去。
+- `deliver` 時最新的 `verified` 之後有 `round`、或又派了執行者 → 409 `verification_stale`（`stale_because: round | new_executor`）——
+  **就算 HEAD 沒變**。被退回的那一份不改一個字，靠舊驗證也推不上去；commit 比對（`head_not_verified`）擋不到這一半。
+- `mission complete` 對交付的要求（`flow::delivery_requirement`，判定結果寫進 `completed` 事件的 `payload.delivery`）：這一代驗過的 commit
+  已經交付 → 放行並記下 commit。沒交付就必須帶 `no_delivery`，而且理由要對得上事實：
+  `no_changes`＝任務從來沒有 `verified`，派過執行者的話還要附執行者的 `--worktree`，daemon 查它乾淨、HEAD 已在 `origin/<base>` 裡（不 fetch，
+  本地 ref 舊了只會更嚴）；`user_declined`＝最近一次暫停之後使用者本人回答過（`answer` 事件、`relay_from` 空）。
+  對不上 → 409 `not_delivered`／`has_verified_changes`／`worktree_has_changes`／`user_not_asked`。以前 `complete` 什麼都不查：驗過卻沒交付、
+  或根本沒驗就結案，成果卡寫著「完成」，main 上什麼都沒有。
 
 需要人判斷的（`ask_user`、`no_independent_reviewer`、findings、要不要再一輪）仍然在 AGM 這一側，daemon 不碰。
 與 ownership 衝突的差別：那個是字串比對猜出來的，所以只回報不強制（§18.4）；這兩條是查得到的事實。
@@ -2031,21 +2070,25 @@ supervisor 相關資料表與欄位都是 additive，`db::migrate` 重跑冪等�
    `ask_user` 只會出現在驗證者。
 3. **reviewer**：執行者回合結束並 `review accept` 後，`mission pick --role reviewer --exclude <執行者身分>`；
    `no_independent_reviewer` → 跳過 reviewer、記 `note`「執行者自審＋驗證者把關」。reviewer 只讀 diff，回 `am-review`
-   （`approve|changes`＋findings）。`changes` → `mission round`（409 `max_rounds` 就停，任務已 `paused`，在群組問人）
-   → 對執行者那件 `review followup`，文字帶 findings。
+   （`approve|changes`＋findings）。先 `review accept` reviewer 那件（它的工作做完了），`changes` → `mission round`
+   （409 `max_rounds` 就停，任務已 `paused`，在群組問人）→ `next` 變成 `assign executor`（`rework:true`）：**新開**一件
+   `assign --mission --role executor`，文字帶 findings——執行者那件早就 accept 了，已結案的交辦不能 followup。
 4. **驗證者**：`mission pick --role verifier`；Fable 還有額度、只是 5h 窗撞限時回 `wait`（時間是 5h 的，不是 Fable 的下週），
    `ask_user` 只留給真的沒有 Fable 額度的情況（review3 c1 L12）。`ask_user` 時任務已停在 `no_fable_for_verifier`，在群組問使用者要等哪個身分
    或改用非 Fable，**不自行降級**。`use` → 臨時 bot 在乾淨 worktree 跑 repo 規定的驗證（本 repo：`cargo test`、
    `tsc -p tsconfig.app.json`、oxlint、build、UI 截圖），回 `am-verify`；通過 → `mission event --kind verified --worktree <驗過的工作樹>`
    （或 `--sha <驗過的 commit>`；帶數字與截圖路徑）——daemon 記下**驗的是哪個 commit**，沒帶就 400；
-   失敗 → `mission round` → followup 退回執行者。
+   失敗 → `mission round` → 新開一件執行者交辦退回重做（同第 3 步）。驗證者的**交辦**沒做完（bot 掛了、撞限放棄）是另一回事：
+   `review fail`／`cancel` 那件，`next` 會是同一個角色再派（`retry_of`），不算一輪。
 5. **交付**：`mission deliver --worktree <執行者 worktree>`。工作樹必須是這個專案的 repo，**HEAD 必須就是最新一則 `verified` 記的 commit**。
-   409 `not_verified`／`verified_without_sha`／`head_not_verified` 代表流程漏了第 4 步（或驗完又改過），任務**不會**停下來，回第 4 步重驗這個 commit；
+   409 `not_verified`／`verified_without_sha`／`verification_stale`／`head_not_verified` 代表流程漏了第 4 步（或驗完又改過、又退回過），任務**不會**停下來，回第 4 步重驗這個 commit；
    其餘 409 任務已 `paused`（`push_main_failed`／`pr_failed`，`reason` 是機器碼），在群組貼原因問人，**不 force、不自己 rebase 後硬推**。
    之後交付成功，daemon 會自動解除這兩種暫停（記一則 `resumed`）。
    交付含 daemon／agm.py／persona 改動時，正式 daemon 照 §18.2 例行更新，不另開重啟。
 6. **回報與收尾**：`mission complete <id> --text …`（或 `--text-file`；內容是結果摘要：commit／PR、驗證證據、輪數），
-   群組時間軸由 daemon 記 `completed`。daemon 在 complete／cancel 時會**自動軟刪**這個任務的臨時 bot——條件是它是任務某件交辦的
+   群組時間軸由 daemon 記 `completed`（payload 的 `delivery` 記交了哪個 commit）。**沒交付**的任務要帶 `--no-delivery`：
+   只查問題、沒改東西 → `no_changes`（派過執行者要加 `--worktree <執行者的工作樹>`）；交付失敗或使用者改主意，在群組問過、
+   使用者回答不要交付 → `user_declined`。daemon 在 complete／cancel 時會**自動軟刪**這個任務的臨時 bot——條件是它是任務某件交辦的
    目標、名字以 `agm-mission-<id 尾 6 碼>-` 開頭、而且沒有進行中的 run；回應的 `temp_bots.skipped` 列出沒刪的與原因。
    `still_running` 的那幾顆先 `bot stop <id>` 再 `bot delete <id>`；刪除保留對話紀錄與 `mission_events` 作證據。
    所以第 2、4 步開臨時 bot 時**一定照這個命名**，否則收尾時不會被認出來。
@@ -2053,7 +2096,8 @@ supervisor 相關資料表與欄位都是 additive，`db::migrate` 重跑冪等�
    `model`）開新臨時 bot，對原交辦 `review followup`，文字帶進度摘要（已做／未做／未提交檔案、worktree 路徑）；
    followup 會沿用 `mission_id`／`role`。同身分同模型的 `wait` 由 daemon 自己重送，AGM 不介入。
 8. **停下問人的統一原則**：`paused_reason ∈ max_rounds | no_fable_for_verifier | push_main_failed | pr_failed | clarify`
-   都是問使用者一個具體問題，得到答案後 `mission resume` 再從對應步驟接續；使用者取消 → `mission cancel`。
+   都是問使用者一個具體問題，得到答案後 `mission resume` 再從對應步驟接續（`mission_resumed`／`mission_answered` 的 `next`、
+   或 `mission get` 的 `next.then` 就是那一步）；使用者取消 → `mission cancel`。
    停在 `max_rounds` 的任務被放行（`answer`／`resume`）時 daemon 會把上限加一輪，所以「再改一輪」是走得通的：
    放行後照第 3 步 `mission round` 再 followup 一次（加的是一輪，用完又會停下來問人）。
    **使用者自己按暫停／取消**（web 的任務卡，或別人代按）daemon 會叫醒你：
@@ -2068,8 +2112,8 @@ supervisor 相關資料表與欄位都是 additive，`db::migrate` 重跑冪等�
 10. **實跑教訓（2026-09-13 兩個任務）**：
    - 驗證者的截圖**不要放在執行者的 worktree**（deliver 會 409 `dirty_worktree`）；放 AGM 的 scratchpad 或另一個目錄，路徑寫進 `verified` 事件。
    - `not_fast_forward` 不算「停下問人」：對執行者**新開**一件 `assign --mission --role executor`（已結案的交辦不能 `followup`）
-     要它 `git rebase origin/main`；rebase 乾淨就**重走第 4 步**（rebase 產生新的 commit，舊的 `verified` 對它無效，
-     daemon 會回 `head_not_verified`），驗過再 `deliver`；**有衝突才**停下問人。
+     要它 `git rebase origin/main`；rebase 乾淨就**重走第 4 步**（派了執行者之後舊的 `verified` 就不算數——daemon 回
+     `verification_stale`／`head_not_verified`，`next` 也會回到 `assign verifier`，審查不重來），驗過再 `deliver`；**有衝突才**停下問人。
    - `mission complete` 只會自動刪「沒有 run」的臨時 bot；idle 但 run 還活著的會被 `still_running` 跳過，收尾照第 6 步先 `bot stop` 再 `bot delete`。
 11. **完成之後的追問與追加修改（2026-09-13，AGM 裁示 01M2D18PQZSJ4Z5BJC21TF9Q77）**：交付完不是句點，使用者還會
     問問題、還會想再改一點。兩條路刻意分開，因為後果不同：

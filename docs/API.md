@@ -1274,6 +1274,8 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
     （附 `requested_role` 與 `open_assignments[]`）：一個任務同時只有一件開著的交辦（SPEC §18.14）。
     退回／換手走 `review followup`，那條在同一個交易裡把原件標成 `superseded`，不受這道閘門影響。
     跟上面 `ownership_conflicts` 的差別：那個是字串比對猜的，只回報；這個是查得到的事實，所以擋。
+    `role` 是 `reviewer`／`verifier` 而這一代還沒有被接受的執行成果（第一次派工、或 `round` 退回之後還沒重做）→ 409 `out_of_order`
+    （`{requested_role, stage, generation, allowed_roles, next}`）；`executor` 在任何一關都派得出去（重做、rebase、沒做完再派）。
   - 先落地再送 prompt；同 `client_request_id` 重試回同一筆（換 bot 或 text 409）。對方忙 → 留 `queued`，`error` 記真正理由
     （`bot has no active run`、`a turn is already in flight`、`needs_login: …`），`next_attempt_at` 下次重試時間，controller 依 15/30/60/120/300 秒退避、沿用同一 crid。delivery `unknown` 只對帳不重送。
   - 送出的 user message 寫入時帶 `relay_from` = 總管 bot id（驗收角色是已建立的協調者時為協調者 id）；daemon 自己送給 AGM 的通知帶 `daemon`。
@@ -1288,6 +1290,7 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
   **唯一的結案路徑**。`accept`→`completed`、`fail`→`failed`、`cancel`→`cancelled`、`block`→`blocked`、`followup`→原本 `superseded` 並以 `followup_request_id` 另開 `follow_up_of` 的新交辦（不改寫已送出的 text）。
   同 decision 重送冪等；followup 重送須同 request ID、文字與目標，不同 409 `followup_mismatch`。`followup_request_id` 已經是別件交辦的 → 409 `followup_request_id_taken`（`{client_request_id,assignment_id}`，換一個 id）。
   續作沿用父交辦的 `expects_review`（通知的續作仍是通知）、`review_role` 與任務連結。已結案 409 `already_closed`；還在跑只接受 `cancel`（409 `still_executing`，且 cancel 不中止回合）。
+  交辦掛在群組任務上時回應多 `mission_next: {mission_id, next, flow}`：裁示之後任務的下一步（同 `GET /api/missions/{id}` 的 `next`／`flow`）。
   決定成 `cancelled`／`superseded`／`failed` 時，交辦名下還在 `queued` 的 turn 一併撤銷（標 `failed`、插 system 訊息、釋放 queued 名額），回應多 `revoked_turn_id`；已經 `in_flight`／送出的不動、也不帶這個欄位（SPEC §4.4a）。
   撤回成功時，這次決定的稽核列（`reviews[].evidence`）也改寫成「排隊中的 turn … 已撤回，沒有送出」，不留「turn 還在跑」的警告。
 
@@ -1353,6 +1356,13 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
 - `phase`：`done | cancelled | paused` 同 `status`；其餘看**最新一件還開著的交辦**——`executing`／`reviewing`／`verifying`（依 `role`），
   那件停在 `quota_blocked` 時是 `waiting_quota`；還沒有任何交辦＝`planning`；交辦都結案了但任務還開著＝`awaiting_agm`（輪到 AGM 決定下一步）。
 - `assignments[]`：`{id, role, status, target_bot_id, turn_status, turn_error, follow_up_of, created_at, completed_at}`，舊的在前。
+- `next`：daemon 從任務列、交辦與事件推出來的**下一步**（issue #74，`mission::flow`；規則見 SPEC §18.14）。
+  `{action, role?, assignment_id?, retry_of?, rework?, sha?, worktree?, alternatives?, paused_reason?, then?, hint}`，
+  `action ∈ assign | review | wait | record_verification | deliver | complete | paused | closed`。`alternatives` 是同一個判斷點上也合法的分支
+  （`skip_reviewer`、`round`），選哪一條是 AGM 的判斷；`paused` 時 `then` 是放行之後那一步。
+- `flow`：`{generation, stage, allowed_roles, verified: {event_id, sha, generation, stale}|null, delivered: {event_id, sha}|null}`。
+  `generation`＝`round` 次數；`stage ∈ needs_executor | needs_review | needs_verification | needs_verdict | needs_delivery | delivered`；
+  `verified.stale ∈ null | round | new_executor`（之後退回過、或又派了執行者，這則就放行不了交付）。
 `paused_reason` 目前會出現：`max_rounds`、`no_fable_for_verifier`、`push_main_failed`、`pr_failed`、`user_pause`（任務卡的「暫停」按鈕），或呼叫端自己寫的原因。
 
 ### 交辦掛到任務上（P1b）
@@ -1375,6 +1385,8 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
 事件（`GET /api/missions/{id}` 的 `events[]`，也是群組時間軸上這個任務的那一串）：
 `{id, mission_id, kind, text, relay_from, payload_json, created_at}`，
 `kind ∈ instruction | report | note | verified | round | paused | resumed | cancelled | delivered | completed`。
+`round` 與 `verified` 的 payload 帶 `after_assignment`（寫下時這個任務最後一件交辦的 id，沒有就是 `null`），用來判斷之後的交辦屬於哪一代；
+`verified` 另帶 `generation` 與給了的 `worktree`。`completed` 的 payload 帶 `delivery`（見 `complete`）。
 `relay_from`：`null` = 使用者本人（只有 `instruction`），bot id = 那顆 bot，`"daemon"` = daemon 自己記的。
 
 ### 端點
@@ -1388,13 +1400,13 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
 | POST | `/api/missions/{id}/pause` | `{reason, detail?}` → 任務。`reason` **必填**（機器碼；缺了是 422，handler 不會跑）。任務列、`paused` 事件與叫醒協調者的 `mission_paused`（event_key `mission:<id>:paused:<event id>`，payload 含 `reason`／`detail`／`open_assignments[]`）是**同一個交易**；由收 mission 事件的那個 AGM 角色自己呼叫（bot token 驗過）時不推 inbox——自己叫醒自己只是多一個空回合。暫停**不**中止進行中的回合、不取消交辦，但 `deliver` 會 409（見下）。 |
 | POST | `/api/missions/{id}/resume` | → 任務（清掉 `paused_reason`）。 |
 | POST | `/api/missions/{id}/cancel` | → 任務，多 `temp_bots`（見 complete）與 `assignments[]`（被收掉的交辦：`{id, role, status, target_bot_id, turn_id, cancelled, revoked_turn_id?, may_still_be_running?}`）。任務列、`cancelled` 事件與 `mission_cancelled`（event_key `mission:<id>:cancelled:<event id>`；AGM 自己取消時不推）同一個交易；接著把底下**還開著的交辦**逐件走 `review --decision cancel`（排隊中的 turn 撤回、`quota_blocked` 不再被 controller 自動重送），最後才收臨時 bot。已經在跑的回合 daemon 不會中止，`may_still_be_running` 照實講。 |
-| POST | `/api/missions/{id}/complete` | `{result_summary, relay_from?}` → 任務（`done`），多 `temp_bots: {deleted:[{bot_id,name}], skipped:[{bot_id,name,reason}]}`：結案時 daemon 自動軟刪這個任務的臨時 bot，條件是「任務某件交辦的目標」＋「名字以 `agm-mission-<任務 id 尾 6 碼（相容 5 碼）>-<角色>` 開頭」＋「沒有進行中的 run」；`reason ∈ not_a_temp_bot \| still_running \| delete_failed`。刪除走 `DELETE /api/bots/{id}` 同一條路（停 pane、軟刪、子 agent 一起收、對話保留），並在任務記一則 `note`。 **關卡**：底下還有開著的交辦（`OPEN_STATES`）→ 409 `assignments_open`（附 `open_assignments[]`）：先 `review accept`／`fail`／`cancel` 收乾淨，或走 `mission cancel`（那條會自動逐件取消）。 |
+| POST | `/api/missions/{id}/complete` | `{result_summary, relay_from?}` → 任務（`done`），多 `temp_bots: {deleted:[{bot_id,name}], skipped:[{bot_id,name,reason}]}`：結案時 daemon 自動軟刪這個任務的臨時 bot，條件是「任務某件交辦的目標」＋「名字以 `agm-mission-<任務 id 尾 6 碼（相容 5 碼）>-<角色>` 開頭」＋「沒有進行中的 run」；`reason ∈ not_a_temp_bot \| still_running \| delete_failed`。刪除走 `DELETE /api/bots/{id}` 同一條路（停 pane、軟刪、子 agent 一起收、對話保留），並在任務記一則 `note`。 **關卡**：底下還有開著的交辦（`OPEN_STATES`）→ 409 `assignments_open`（附 `open_assignments[]`）：先 `review accept`／`fail`／`cancel` 收乾淨，或走 `mission cancel`（那條會自動逐件取消）。**對交付的要求**（body 另收 `no_delivery?: "no_changes" \| "user_declined"`、`worktree?`）：這一代驗過的 commit 已經交付 → 放行；沒交付就要 `no_delivery`，理由要對得上事實——`no_changes` 要任務從來沒有 `verified`，派過執行者時還要 `worktree`（執行者的工作樹，本專案 repo；乾淨而且 HEAD 已在 `origin/<base>` 裡，不 fetch），`user_declined` 要最近一次暫停之後有使用者本人（`relay_from` 空）的 `answer`。否則 409 `not_delivered`／`has_verified_changes`／`worktree_has_changes`／`user_not_asked`（都附 `next`），不認得的 `no_delivery` 或 `no_changes` 缺 `worktree` 是 400。判定結果寫進 `completed` 事件的 `payload.delivery` 並回在 `delivery`：`{status:"delivered", sha, mode, event_id}` 或 `{status:"waived", reason, answer_event_id?, worktree?, head?}`。 |
 | POST | `/api/missions/{id}/question` | `{text, client_request_id, relay_from?}` → `{event, replayed}`。對成果追問，**已完成的任務也接受**。只寫 `question` 事件並推 AGM inbox（`mission_question`，`expects: answer_only`）；不 resume、不碰 `completed_at`、不建任務、不產生交付。AGM 代問時帶 `relay_from`，時間軸才看得出那句話是誰問的。 |
 | POST | `/api/missions/{id}/answer` | `{text, client_request_id, reply_to?, relay_from?}` → `{event, replayed, resumed, mission}`。兩種語意由 `relay_from` 分：**沒有**（使用者本人）＝回答暫停的任務，daemon 在**同一個交易**裡寫事件、`paused→open`、推 inbox（`mission_answered`，event_key `mission:<id>:answer:<crid>`）；**有**（AGM／bot）＝回覆某則追問，`reply_to` **必填**且必須真的是這筆任務的 `question` 事件，不 resume、不推 inbox（自己叫醒自己就是通知迴圈）。使用者的 answer 只在任務真的 `paused` 時成立：`open` → 409 `not_paused`、`done` → 409 `already_closed`、`cancelled` → 409 `cancelled`，而且**被拒時什麼都不寫**（沒有事件、沒有 inbox）。 |
 | POST | `/api/missions/{id}/revise` | `{text, client_request_id, relay_from?, delivery_mode?, executor_kind?, on_5h_limit?, max_rounds?}` → **新的一筆任務**（`parent_mission_id` 指回來，`created`）。原成果完全不動。沒指定的選項沿用原任務，**有指定就照 `POST /projects/{id}/missions` 同一套驗證**（enum 與 `max_rounds` 0..=10，專案還要存在且是本機）。新任務、它的 `instruction`、原成果那邊的 `note`、以及 inbox 是**同一個交易**：中途失敗不會留下沒人知道的續作。新任務的 `instruction` 事件與 inbox `mission_created` 帶快照（原指示／結果摘要／commit 或 PR／`verified` 摘要／新要求／`runbook_start_step: 2`），所以原本的臨時 bot 被清掉也不影響續作——快照是**參考，不是證據**，新任務仍要自己的 `verified` 才能交付。只有 `done` 能續作（進行中或已取消 → 409 `not_completed`）；同一個 parent 同時只能有一筆未結案的續作（第二筆 → 409 `revision_in_progress`，附既存那筆的 id），由 partial unique index 擋，並發也只會成立一筆。 |
 | POST | `/api/missions/{id}/round` | 用掉一輪（review 退回或驗證失敗）→ 任務。已達 `max_rounds` → 任務停在 `max_rounds` 並回 409 `max_rounds`。**使用者放行時上限加一**：停在 `max_rounds` 的任務被 `answer`（使用者回答）或 `resume` 放行時，`max_rounds` 設成 `rounds_used + 1`，`resumed` 事件寫「來回上限加一輪：N」、payload 帶 `max_rounds`——否則使用者說「再改一輪」也沒有路，AGM 一呼叫 `round` 又是 409、任務再停一次。加的是**一輪**，不是解除上限；別的原因停下來的放行不動上限。 |
 | GET | `/api/missions/{id}/pick?role=executor\|reviewer\|verifier&exclude=<identity>` | 照任務設定挑身分，見下。`role=verifier` 回 `ask_user` 時會把任務停在 `no_fable_for_verifier`。 |
-| POST | `/api/missions/{id}/deliver` | `{worktree(本機絕對路徑), title?, body?, relay_from?}`。`push_main`：fetch → `origin/<base>` 必須是 HEAD 的祖先 → `git push origin HEAD:<base>`（fast-forward only，不 force）；`pr`：推 `mission/<id>` 分支並 `gh pr create`。`<base>` 是這個 repo 的預設分支（`origin/HEAD`，問不到才退回 `main`），回應與 `delivered` payload 都帶 `base`——寫死 main 的話預設分支叫 master／trunk 的專案一定 `fetch_failed`。成功記 `delivered` 事件並回 `{mode, sha, already_in_base}` 或 `{mode, branch, url, sha, existing_pr}`；**冪等**：同一個 commit 已經交付過就回原本那筆 payload＋`replayed:true`，不會再推一次。動手前記一則帶 `delivery_attempt:{sha,mode}` 的 `note`，所以「push／PR 成功但回應斷在路上」的重試認得出來——HEAD 已經在 `origin/main` 裡時回 `already_in_base:true` 並補記 `delivered`（沒試過那次仍是 `nothing_to_deliver`，那代表執行者根本沒 commit），PR 模式先問 `gh pr view`，已經有 PR 就回 `existing_pr:true` 而不是 `pr_failed`。任務若停在 `push_main_failed`／`pr_failed`，成功時自動解除（記 `resumed`）。**關卡**（不改任務狀態）：任務停著（`paused_reason` 不是 `push_main_failed`／`pr_failed`）→ 409 `mission_paused`；`worktree` 必須是本專案 repo 的工作樹（否則 400）；沒有 `verified` 事件 → 409 `not_verified`；最新一則 `verified` 沒記 commit → 409 `verified_without_sha`；工作樹 HEAD 不是那個 commit（rebase、又改過、指到主樹）→ 409 `head_not_verified`（`verified_sha`、`head`）。過了關卡之後的失敗一律**停下來問人**（`push_main_failed`／`pr_failed`）並回 409，`reason` 是機器碼：`dirty_worktree`、`fetch_failed`、`not_fast_forward`、`nothing_to_deliver`、`push_failed`、`pr_failed`。 |
+| POST | `/api/missions/{id}/deliver` | `{worktree(本機絕對路徑), title?, body?, relay_from?}`。`push_main`：fetch → `origin/<base>` 必須是 HEAD 的祖先 → `git push origin HEAD:<base>`（fast-forward only，不 force）；`pr`：推 `mission/<id>` 分支並 `gh pr create`。`<base>` 是這個 repo 的預設分支（`origin/HEAD`，問不到才退回 `main`），回應與 `delivered` payload 都帶 `base`——寫死 main 的話預設分支叫 master／trunk 的專案一定 `fetch_failed`。成功記 `delivered` 事件並回 `{mode, sha, already_in_base}` 或 `{mode, branch, url, sha, existing_pr}`；**冪等**：同一個 commit 已經交付過就回原本那筆 payload＋`replayed:true`，不會再推一次。動手前記一則帶 `delivery_attempt:{sha,mode}` 的 `note`，所以「push／PR 成功但回應斷在路上」的重試認得出來——HEAD 已經在 `origin/main` 裡時回 `already_in_base:true` 並補記 `delivered`（沒試過那次仍是 `nothing_to_deliver`，那代表執行者根本沒 commit），PR 模式先問 `gh pr view`，已經有 PR 就回 `existing_pr:true` 而不是 `pr_failed`。任務若停在 `push_main_failed`／`pr_failed`，成功時自動解除（記 `resumed`）。**關卡**（不改任務狀態）：任務停著（`paused_reason` 不是 `push_main_failed`／`pr_failed`）→ 409 `mission_paused`；`worktree` 必須是本專案 repo 的工作樹（否則 400）；沒有 `verified` 事件 → 409 `not_verified`；最新一則 `verified` 沒記 commit → 409 `verified_without_sha`；那一則之後有 `round`、或又派了執行者 → 409 `verification_stale`（`stale_because: round | new_executor`、`verified_generation`、`generation`、`next`；**HEAD 沒變也擋**，被退回的那一份不能靠舊驗證交付）；工作樹 HEAD 不是那個 commit（rebase、又改過、指到主樹）→ 409 `head_not_verified`（`verified_sha`、`head`）。過了關卡之後的失敗一律**停下來問人**（`push_main_failed`／`pr_failed`）並回 409，`reason` 是機器碼：`dirty_worktree`、`fetch_failed`、`not_fast_forward`、`nothing_to_deliver`、`push_failed`、`pr_failed`。 |
 | PUT | `/api/identities/{name}/disabled` | `{kind, disabled, host?}` → 同一份。身分停用搬進 daemon（原本只在瀏覽器 localStorage）；WS `identity_prefs_changed`。停用＝群組任務挑身分與**環境設定／Bot 設定的身份選單**都看不到它（已經綁著它的 bot 仍看得到自己那一個），不影響執行中的 bot，也不動主機上的 alias。 |
 | GET | `/api/identity-prefs` | `{disabled:[{host, kind, identity}]}`。 |
 
@@ -1411,7 +1423,12 @@ parent＋文字＋四個選項。只比文字的話，一則 `question` 與一�
 重送判斷排在狀態檢查**之前**（而且兩者都在同一個交易裡）——重送多半發生在任務已經被放行之後，
 先看狀態會把正確的重送擋掉；而放在交易外先查，兩個同 crid 的並發請求會雙雙通過檢查、其中一個撞索引變成 500。
 `POST /resume`（不回答直接繼續）同樣會推 inbox（`mission_resumed`），但只在真的發生 `paused→open` 時推一次，
-所以 AGM 自己呼叫 resume 不會把自己叫醒。
+所以 AGM 自己呼叫 resume 不會把自己叫醒。`mission_resumed` 與使用者回答的 `mission_answered` 的 payload 都帶 `next`：放行之後的那一步。
+
+**停在「輪到 AGM」的接續**（`mission_next`）：任務沒暫停、沒有開著的交辦、`next.action ∈ assign | record_verification | deliver | complete`，
+而且任務與它的交辦最後一次變動超過 10 分鐘、這個任務也沒有沒處理的 inbox → controller 推一則 `mission_next`（協調者、叫醒），
+payload `{mission_id, project_id, text, message, action, next, flow, idle_since, idle_minutes}`（`text`／`message`／`action` 是喚醒摘要會印的三欄：哪個任務、停多久、下一步），event_key `mission:<id>:next:<動作>:<角色>:g<代>:a<交辦數>:<commit 前 12 碼>`
+——同一步只推一次，daemon 重啟後算出同一個 key，不會再推。
 
 ### CLI 對照（`bin/agm mission …`）
 
@@ -1425,7 +1442,7 @@ parent＋文字＋四個選項。只比文字的話，一則 `question` 與一�
 | `agm mission event <mission> --kind report\|note\|verified --text …（或 --text-file）[--worktree <驗過的工作樹> \| --sha <commit>] [--as-daemon]` | `POST /api/missions/{id}/events`（`verified` 沒給 `--worktree`／`--sha` 在送出前擋下） |
 | `agm mission pause <mission> --reason <碼> [--detail …]` | `POST /api/missions/{id}/pause` |
 | `agm mission resume\|cancel\|round <mission>` | `POST /api/missions/{id}/resume`／`cancel`／`round` |
-| `agm mission complete <mission> --text …（或 --text-file）[--as-daemon]` | `POST /api/missions/{id}/complete` |
+| `agm mission complete <mission> --text …（或 --text-file）[--no-delivery no_changes\|user_declined [--worktree <執行者的工作樹>]] [--as-daemon]` | `POST /api/missions/{id}/complete`（`--no-delivery` 只收這兩個值，打錯在送出前擋下） |
 | `agm mission question <mission> --text … --request-id <穩定鍵>` | `POST /api/missions/{id}/question` |
 | `agm mission answer <mission> --text … --request-id <穩定鍵> [--reply-to <event id>]` | `POST /api/missions/{id}/answer`（預設帶 AGM 的 `relay_from`，回覆追問須 `--reply-to`；依使用者明確指示代送暫停回答須 `--as-user`） |
 | `agm mission revise <mission> --text … --request-id <穩定鍵>` | `POST /api/missions/{id}/revise` |
