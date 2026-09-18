@@ -81,6 +81,22 @@ fn line_starts_with(lines: &[String], prefix: &str) -> bool {
     lines.iter().any(|l| l.starts_with(prefix))
 }
 
+/// 畫面尾端有沒有哪一行是**空的**輸入列游標（框線／空白之外只剩一個 `❯`／`›`，同
+/// `capture::claude::ClaudeCapture::awaits_input` 認的形狀）。
+///
+/// 真正的確認框會佔用輸入列那一行（游標旁還跟著 `1. …`／選項文字），不可能同時讓輸入列
+/// 空著等打字；回覆裡逐行引用對話框原文——就算連編號、選項都照抄成單獨一行，跟真的框長得
+/// 一模一樣——那一輪的畫面稍後一定會再印出一行空的輸入列（`is_switch_model_dialog`／
+/// `is_grok_trust_dialog` 各自的 tail 範圍內），因為那時候根本沒有框在擋。用「輸入列還空著」
+/// 這個結構性事實去分辨，不必再猜引文的排版像不像框（2026-09-18：只認「標題／選項各自成行」
+/// 擋不住刻意排成一行一句的引文，見 issue #114）。
+fn composer_is_idle(lines: &[&str]) -> bool {
+    lines.iter().any(|l| {
+        let mut chars = l.chars().filter(|c| !"│┃╭╮╰╯─━▔ \t".contains(*c));
+        matches!(chars.next(), Some('❯') | Some('›')) && chars.next().is_none()
+    })
+}
+
 /// 問句要由 `●` / `>` 開頭且相鄰幾行內有至少三個選項，避免 agent 引用這些字串時誤認。
 pub fn is_feedback_survey(screen: &str) -> bool {
     let lines: Vec<String> = screen
@@ -146,8 +162,12 @@ pub const UPDATE_NOTICE: &str = "Update installed · Restart to update";
 /// `/effort` 是同一個框，標題換成「Change effort level?」（2026-09-18 實測）：兩個都要認，
 /// 漏掉哪一個，那個框就留在畫面上吃掉下一則 prompt。
 pub fn is_switch_model_dialog(screen: &str) -> bool {
-    let lines: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
-    let tail: Vec<String> = lines[lines.len().saturating_sub(DIALOG_TAIL_LINES)..].iter().map(|l| norm_line(l)).collect();
+    let raw: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
+    let tail_raw = &raw[raw.len().saturating_sub(DIALOG_TAIL_LINES)..];
+    if composer_is_idle(tail_raw) {
+        return false; // 輸入列還空著，不可能有框擋著它（見 [`composer_is_idle`]）。
+    }
+    let tail: Vec<String> = tail_raw.iter().map(|l| norm_line(l)).collect();
     let titled = tail.iter().any(|l| l.starts_with("switch model?") || l.starts_with("change effort level?"));
     titled && line_starts_with(&tail, "1. yes, switch to") && line_starts_with(&tail, "2. no, go back")
 }
@@ -155,11 +175,20 @@ pub fn is_switch_model_dialog(screen: &str) -> bool {
 /// grok 1.0.34 開在沒信任過的目錄時跳「Do you trust the contents of this directory?」（y／n），
 /// herdr 看不出是對話框，prompt 打進去會被吃掉（2026-09-17 使用者截圖，報 composer_unreadable）。
 pub fn is_grok_trust_dialog(screen: &str) -> bool {
-    // 同 [`is_switch_model_dialog`]：標題與兩個選項各自成行，句子裡提到不算。
-    let lines: Vec<String> = screen.lines().map(norm_line).collect();
-    line_starts_with(&lines, "do you trust the contents of this directory")
-        && line_starts_with(&lines, "yes, proceed")
-        && line_starts_with(&lines, "no, quit")
+    // 同 [`is_switch_model_dialog`]：標題與兩個選項各自成行，句子裡提到不算；只看最底
+    // [`DIALOG_TAIL_LINES`] 行；而且要求輸入列不是空的（[`composer_is_idle`]）——grok 回覆裡
+    // 就算把這三段字逐行照抄（連「各自成行」這個形狀都模仿了），畫面上其實沒有真的框，
+    // 稍後照樣會印出一行空的輸入列，用這個結構性事實分辨，不必再猜引文的排版像不像框
+    // （2026-09-18，issue #114：`is_switch_model_dialog` 已經修過同一種誤判，這裡補齊）。
+    let lines: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
+    let tail_raw = &lines[lines.len().saturating_sub(DIALOG_TAIL_LINES)..];
+    if composer_is_idle(tail_raw) {
+        return false;
+    }
+    let tail: Vec<String> = tail_raw.iter().map(|l| norm_line(l)).collect();
+    line_starts_with(&tail, "do you trust the contents of this directory")
+        && line_starts_with(&tail, "yes, proceed")
+        && line_starts_with(&tail, "no, quit")
 }
 
 /// 確認框連同框線與 statusLine 的最大高度；再往上是正文。
@@ -228,6 +257,25 @@ mod tests {
         let screen = "  main ~/p/h/projects/rt\n\n⠀⠀⠀⠀⠀⠀⣀⣀⡀\nDo you trust the contents of this directory?\n                /Users/m4p/project/hermes-agents/projects/rt\n\nGrok Build may run or modify contents in this directory,\n              posing security risks.\n\nYes, proceed                 y\n                  No, quit                     n\n\nGrok Build  1.0.34 [stable]\n";
         assert!(super::is_grok_trust_dialog(screen));
         assert!(!super::is_grok_trust_dialog("> Do you trust the contents of this directory? I asked grok that yesterday."));
+    }
+
+    /// grok bot 在回覆裡逐行引用這個對話框的三段字（例如報告自己怎麼處理這個誤判），輸入列其實還
+    /// 空著等打字，不是真的有框；`line_starts_with`（標題／選項各自成行）擋不住這種排版，得靠
+    /// [`composer_is_idle`] 這個結構性事實才分得出來（issue #114）。
+    #[test]
+    fn a_reply_quoting_the_grok_trust_dialog_is_not_the_dialog_itself() {
+        let quoted = "\
+⏺ grok 的 trust 對話框長這樣，三段字缺一不可：
+  Do you trust the contents of this directory?
+  Yes, proceed
+  No, quit
+  我已經在 pane_ready_for_prompt 補上判斷，關掉之後再送 prompt。
+────────────────────
+❯
+────────────────────
+  15m2dg | agents-manager | grok | 5h:96%
+";
+        assert!(!super::is_grok_trust_dialog(quoted), "畫面上沒有真的框，只是回覆引了原文");
     }
 
     #[test]
@@ -319,6 +367,35 @@ mod tests {
         assert!(!is_switch_model_dialog(QUOTED_REPORT));
         // 這份原始碼本身也引了那幾段字。
         assert!(!is_switch_model_dialog(include_str!("tui_prompts.rs")));
+    }
+
+    /// issue #114：`a_report_quoting_the_dialog_is_not_a_dialog` 擋住的是「正文中間夾雜引文」；
+    /// 但只認「標題／選項各自成行」擋不住把三段字逐行照抄成單獨一行（連編號都照抄），跟真的框
+    /// 長得一模一樣——這裡故意這樣排版，證明沒有輸入列閒置這個結構性判斷會被騙過去。
+    #[test]
+    fn quoting_the_dialog_verbatim_line_by_line_is_still_not_a_dialog() {
+        let verbatim = "\
+⏺ 這個框長這樣，三段字缺一不可：
+  Switch model?
+  1. Yes, switch to Haiku 4.5
+  2. No, go back
+  我已經在 pane_ready_for_prompt 補上判斷，關掉之後再送 prompt。
+────────────────────
+❯
+────────────────────
+  15m2dg | agents-manager | Opus 5 | 5h:96%
+";
+        assert!(!is_switch_model_dialog(verbatim), "畫面上沒有真的框，只是回覆逐行引了原文");
+    }
+
+    #[test]
+    fn composer_is_idle_only_when_the_prompt_cursor_stands_alone() {
+        assert!(composer_is_idle(&["❯"]));
+        assert!(composer_is_idle(&["│ ❯ │"]), "框線與空白不算內容");
+        assert!(composer_is_idle(&["›"]));
+        assert!(!composer_is_idle(&["❯ 1. Yes, switch to Haiku 4.5"]), "游標旁還有選項文字＝框還開著");
+        assert!(!composer_is_idle(&["some other line"]));
+        assert!(!composer_is_idle(&[]));
     }
 
     #[test]
