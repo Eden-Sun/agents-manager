@@ -736,7 +736,7 @@ p.project-quota-hidden {
   }
 }
 
-/* 子 bot 用別的帳號：母 bot 身分徽章描琥珀色，後面掛子 bot 用的身分。 */
+/* 子 bot 用別的帳號：母 bot 的身分徽章照常，後面掛一個更小的字＝子 bot 用的帳號（2026-09-18 使用者）。 */
 
 .identity-diverged {
   display: inline-flex;
@@ -746,7 +746,8 @@ p.project-quota-hidden {
 }
 
 .identity-diverged-mark {
-  font-size: 10px;
+  /* 比身分徽章小一號：它是附註，不是第二個身分（2026-09-18 使用者：「讓字更小」）。 */
+  font-size: 9px;
   font-weight: 650;
   font-family: var(--font-mono);
   color: var(--warn, #c9a227);

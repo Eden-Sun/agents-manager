@@ -3699,8 +3699,10 @@ button.model-tag:hover:not(:disabled) {
   }
 }
 
+/* 母 bot 的身分徽章不再描琥珀色（2026-09-18 使用者：「cc2 不要有 border」）：
+   那圈框看起來像另一種狀態，真正要說的是後面那個小字＝子 bot 用的帳號。 */
 .identity-diverged .identity-badge {
-  border-color: var(--warn, #c9a227);
+  border-color: transparent;
 }
 
 @media (width <= 640px) {
