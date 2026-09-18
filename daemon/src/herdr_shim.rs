@@ -496,9 +496,14 @@ mod tests {
             // 在 bot 的 pane 裡跑測試時，AM_BOT_ID／AM_HOOK_TOKEN／AM_PORT 都有值，shim 會真的去打
             // 正在跑的 daemon——而雙角色上線之後，daemon 會把寫給 AGM 的那句攔進佇列、shim 不再轉給
             // herdr，測試就看到空輸出。需要這幾個值的測試自己設。
-            for key in ["AM_MODEL", "AM_EFFORT", "AM_KIND", "AM_BOT_ID", "AM_HOOK_TOKEN", "AM_PORT", "AM_INSTANCE", "AM_DATA_DIR", "AM_OUTBOX", "HERDR_PANE_ID", "AM_WORKSPACE_ID", "AM_DAEMON_EXE", "AM_CONFIG_PATH"] {
-                cmd.env_remove(key);
+            // 字首清掉，不列清單：名單會漏（2026-09-19 `cargo_shim` 就是漏了 `AM_DAEMON_EXE`／
+            // `AM_CONFIG_PATH`，在 bot pane 裡必定紅）。需要值的測試自己設。
+            for (key, _) in std::env::vars() {
+                if key.starts_with("AM_") {
+                    cmd.env_remove(key);
+                }
             }
+            cmd.env_remove("HERDR_PANE_ID");
             for (k, v) in env {
                 cmd.env(k, v);
             }

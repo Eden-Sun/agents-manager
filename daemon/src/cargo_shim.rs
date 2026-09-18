@@ -317,21 +317,32 @@ mod tests {
             }
         }
 
-        fn run(&self, env: &[(&str, &str)], args: &[&str]) -> (String, String, i32) {
+        /// 乾淨的一次 shim 呼叫：**呼叫端所有的 `AM_*` 都清掉**，不是列一份清單。這些測試跑在
+        /// bot 的 pane 裡時，環境本來就有 `AM_DAEMON_EXE`／`AM_CONFIG_PATH`／`AM_DATA_DIR`（外部
+        /// 編譯）、`AM_BOT_ID`、`AM_REAL_CARGO`…；漏進來的那一個就讓「假設某變數沒設」的測試必定
+        /// 失敗，或讓 check 真的被 offload 到遠端主機（2026-09-19 build child 部署時兩種都中）。
+        /// 名單永遠會漏，字首才不會；需要值的測試自己設。
+        fn command(&self, path: &str) -> Command {
             let mut cmd = Command::new(self.dir.join("bin/cargo"));
+            cmd.env("PATH", path);
+            for (key, _) in std::env::vars() {
+                if key.starts_with("AM_") {
+                    cmd.env_remove(key);
+                }
+            }
+            // 假的 $HOME：不能真的去讀開發機自己的 ui-token（會讓測試偷偷通過或偷偷失敗）。
+            cmd.env("HOME", self.dir.join("fake-home"));
+            cmd
+        }
+
+        fn run(&self, env: &[(&str, &str)], args: &[&str]) -> (String, String, i32) {
             let path = format!(
                 "{}:{}:/usr/bin:/bin",
                 self.dir.join("bin").display(),
                 self.dir.join("real").display()
             );
-            cmd.env("PATH", path).args(args);
-            // `AM_REAL_CARGO` / `AM_BUILD_SLOT_HELD` 也要清掉：開發機的 shell 裡常設著（繞過 shim 跑
-            // 測試時就會設），留著會讓 shim 改用真的 cargo，六條測試一起假紅。
-            for key in ["AM_BOT_ID", "AM_HOOK_TOKEN", "AM_PORT", "AM_AGENT_NAME", "AM_REAL_CARGO", "AM_BUILD_SLOT_HELD", "AM_SHIM_DEPTH", "HOME"] {
-                cmd.env_remove(key);
-            }
-            // 假的 $HOME：不能真的去讀開發機自己的 ui-token（會讓測試偷偷通過或偷偷失敗）。
-            cmd.env("HOME", self.dir.join("fake-home"));
+            let mut cmd = self.command(&path);
+            cmd.args(args);
             for (k, v) in env {
                 cmd.env(k, v);
             }
@@ -485,20 +496,13 @@ esac
             log = call_log.display()
         ));
         let cargo_log = s.dir.join("cargo.log");
-        let mut cmd = std::process::Command::new(s.dir.join("bin/cargo"));
-        cmd.env(
-            "PATH",
-            format!(
-                "{}:{}:{}:/usr/bin:/bin",
-                s.dir.join("bin").display(),
-                other.join("bin").display(),
-                s.dir.join("real").display()
-            ),
+        let path = format!(
+            "{}:{}:{}:/usr/bin:/bin",
+            s.dir.join("bin").display(),
+            other.join("bin").display(),
+            s.dir.join("real").display()
         );
-        for key in ["AM_BOT_ID", "AM_HOOK_TOKEN", "AM_PORT", "AM_AGENT_NAME", "AM_REAL_CARGO", "AM_BUILD_SLOT_HELD", "AM_SHIM_DEPTH", "HOME"] {
-            cmd.env_remove(key);
-        }
-        cmd.env("HOME", s.dir.join("fake-home"));
+        let mut cmd = s.command(&path);
         cmd.env("AM_BOT_ID", "b1").env("AM_HOOK_TOKEN", "tok").env("AM_TEST_FAKE_CARGO_LOG", cargo_log.to_str().unwrap());
         let out = cmd.args(["check", "-p", "agents-managerd"]).output().unwrap();
         let err = String::from_utf8_lossy(&out.stderr).into_owned();
@@ -544,20 +548,13 @@ esac
             log = call_log.display()
         ));
         let cargo_log = s.dir.join("cargo.log");
-        let mut cmd = std::process::Command::new(s.dir.join("bin/cargo"));
-        cmd.env(
-            "PATH",
-            format!(
-                "{}:{}:{}:/usr/bin:/bin",
-                s.dir.join("bin").display(),
-                other.display(),
-                s.dir.join("real").display()
-            ),
+        let path = format!(
+            "{}:{}:{}:/usr/bin:/bin",
+            s.dir.join("bin").display(),
+            other.display(),
+            s.dir.join("real").display()
         );
-        for key in ["AM_BOT_ID", "AM_HOOK_TOKEN", "AM_PORT", "AM_AGENT_NAME", "AM_REAL_CARGO", "AM_BUILD_SLOT_HELD", "AM_SHIM_DEPTH", "HOME"] {
-            cmd.env_remove(key);
-        }
-        cmd.env("HOME", s.dir.join("fake-home"));
+        let mut cmd = s.command(&path);
         cmd.env("AM_BOT_ID", "b1").env("AM_HOOK_TOKEN", "tok").env("AM_TEST_FAKE_CARGO_LOG", cargo_log.to_str().unwrap());
         let out = cmd.args(["build", "--release"]).output().unwrap();
         let err = String::from_utf8_lossy(&out.stderr).into_owned();
