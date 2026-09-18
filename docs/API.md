@@ -446,6 +446,9 @@ adopt 之後孤兒通知標記會清掉。pane 不存在 404、`owner_bot_id` �
 
 把 `check`／`test`／`clippy` 丟到一台 SSH 主機跑；`build`／`run` 留本機（Linux/x86_64 的產物在 macOS/aarch64 上不能用）。
 
+shim 轉遠端要 pane 裡有 `AM_DAEMON_EXE`、`AM_CONFIG_PATH`、`AM_DATA_DIR`（`AM_DAEMON_EXE` 指到的檔案還要能執行）。缺任何一個時
+**不再靜默退回本機**：stderr 印一行 `外部編譯沒有啟用：這個 pane 缺 <名字>……這次 <子指令> 在本機跑`，缺哪個講哪個。
+
 ### `GET /api/build/remote` / `PUT /api/build/remote`
 `{enabled, host, user, ssh_port, remote_root, cargo_jobs, password_set}`。PUT 另收 `password`（寫進 0600 的
 secret file，不進 config、不回前端）與 `clear_password`。`host`／`user` 空字串又要 `enabled` → 400。

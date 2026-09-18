@@ -38,7 +38,11 @@ am_real_herdr() {
 
 # 帳號／hook 的保留清單：pane split／tab create／workspace create 補 `--env` 用（am_forward_with_env），
 # agent start 沒有 `--env` 時補 export 用（am_reexport_env_before_start，issue #57）。單一清單，兩邊不會走鐘。
-AM_RESERVED_ENV_KEYS="CLAUDE_CONFIG_DIR CODEX_HOME AM_BOT_ID AM_HOOK_TOKEN AM_PORT AM_RUN_ID AM_AGENT_NAME AM_KIND AM_MODEL AM_EFFORT AM_PROJECT_ID AM_WORKSPACE_ID AM_OUTBOX AM_REAL_HERDR PATH"
+#
+# `AM_DAEMON_EXE`／`AM_CONFIG_PATH`（issue #138）：cargo shim 把 check／test／clippy 轉到外部編譯主機的前提。
+# 少了它們，子 agent 的 cargo 永遠留在本機——#104 當初只在 daemon 注入端加了，這份清單漏了。
+# 跟其他 key 一樣：母 pane 有才帶、呼叫者自己給了就尊重（它們不是隔離實例那種要防偽造的保留變數）。
+AM_RESERVED_ENV_KEYS="CLAUDE_CONFIG_DIR CODEX_HOME AM_BOT_ID AM_HOOK_TOKEN AM_PORT AM_RUN_ID AM_AGENT_NAME AM_KIND AM_MODEL AM_EFFORT AM_PROJECT_ID AM_WORKSPACE_ID AM_OUTBOX AM_DAEMON_EXE AM_CONFIG_PATH AM_REAL_HERDR PATH"
 
 # `<name>` → `<AM_AGENT_NAME>-<name>`, unless it already carries the prefix. herdr agent names
 # are `[a-z][a-z0-9_-]{0,31}`, so the result is cut to 32.
@@ -486,7 +490,7 @@ mod tests {
             // 在 bot 的 pane 裡跑測試時，AM_BOT_ID／AM_HOOK_TOKEN／AM_PORT 都有值，shim 會真的去打
             // 正在跑的 daemon——而雙角色上線之後，daemon 會把寫給 AGM 的那句攔進佇列、shim 不再轉給
             // herdr，測試就看到空輸出。需要這幾個值的測試自己設。
-            for key in ["AM_MODEL", "AM_EFFORT", "AM_KIND", "AM_BOT_ID", "AM_HOOK_TOKEN", "AM_PORT", "AM_INSTANCE", "AM_DATA_DIR", "AM_OUTBOX", "HERDR_PANE_ID", "AM_WORKSPACE_ID"] {
+            for key in ["AM_MODEL", "AM_EFFORT", "AM_KIND", "AM_BOT_ID", "AM_HOOK_TOKEN", "AM_PORT", "AM_INSTANCE", "AM_DATA_DIR", "AM_OUTBOX", "HERDR_PANE_ID", "AM_WORKSPACE_ID", "AM_DAEMON_EXE", "AM_CONFIG_PATH"] {
                 cmd.env_remove(key);
             }
             for (k, v) in env {
@@ -576,6 +580,84 @@ mod tests {
         }
         let (out, _) = s.run(&[], &["pane", "split", "--pane", "w168:p1"]);
         assert!(!out.iter().any(|a| a.starts_with("AM_OUTBOX=")), "母 pane 沒有就不帶：{out:?}");
+    }
+
+    /// issue #138：cargo shim 要把 check／test／clippy 轉到外部編譯主機，pane 裡得有 `AM_DAEMON_EXE` 與
+    /// `AM_CONFIG_PATH`。daemon 起 bot 時會注入（`pane_env`），但 herdr 的 pane 是 **server** 生的、不繼承
+    /// 呼叫端 shell，所以父 bot 用 `pane split`／`tab create` 開子 pane 時只有傳遞清單裡的 key 到得了——
+    /// 這兩個當初（#104）沒進清單，於是每一個子 agent 的 cargo 都留在本機，沒有任何提示。
+    #[test]
+    fn a_child_pane_inherits_the_cargo_offload_helper_paths() {
+        let s = Sandbox::new();
+        let helper = [("AM_DAEMON_EXE", "/opt/am/agents-managerd"), ("AM_CONFIG_PATH", "/home/u/.config/agents-manager/config.toml")];
+        for argv in [
+            &["pane", "split", "--pane", "w168:p1"][..],
+            &["pane", "new", "--cwd", "/tmp"][..],
+            &["tab", "create", "--cwd", "/tmp"][..],
+            &["workspace", "create", "--cwd", "/tmp"][..],
+        ] {
+            let (out, _) = s.run(&helper, argv);
+            for (k, v) in helper {
+                assert_eq!(env_values(&out, k), vec![v.to_string()], "{argv:?} 要把 {k} 傳給子 pane：{out:?}");
+            }
+        }
+        // 母 pane 沒有就不帶（不要生出空值）。
+        let (out, _) = s.run(&[], &["pane", "split", "--pane", "w168:p1"]);
+        assert!(env_values(&out, "AM_DAEMON_EXE").is_empty() && env_values(&out, "AM_CONFIG_PATH").is_empty(), "{out:?}");
+        // 呼叫者自己給了就尊重，不補第二份。
+        let (out, _) = s.run(&helper, &["pane", "split", "--pane", "w168:p1", "--env", "AM_DAEMON_EXE=/mine/agents-managerd"]);
+        assert_eq!(env_values(&out, "AM_DAEMON_EXE"), vec!["/mine/agents-managerd".to_string()], "{out:?}");
+        assert_eq!(env_values(&out, "AM_CONFIG_PATH"), vec![helper[1].1.to_string()], "沒自己給的那個照母 pane：{out:?}");
+    }
+
+    /// `agent start` 沒有 `--env`：重用一顆沒走過 `pane split` 的舊 pane 時，靠 send-text 補 export
+    /// （issue #57）。同一份清單，所以這兩個也要補，不然那顆 pane 裡的 cargo 一樣留在本機。
+    #[test]
+    fn agent_start_reexports_the_cargo_offload_helper_paths_too() {
+        let s = Sandbox::new();
+        let log = s.dir.join("sendtext.log");
+        let env = [
+            ("AM_AGENT_NAME", "p-1"),
+            ("AM_DAEMON_EXE", "/opt/am/agents-managerd"),
+            ("AM_CONFIG_PATH", "/home/u/.config/agents-manager/config.toml"),
+            ("AM_TEST_SENDTEXT_LOG", log.to_str().unwrap()),
+        ];
+        s.run(&env, &["agent", "start", "kid", "--kind", "claude", "--pane", "w1:p9"]);
+        let sent = std::fs::read_to_string(&log).unwrap();
+        assert!(sent.contains("export AM_DAEMON_EXE='/opt/am/agents-managerd'"), "{sent}");
+        assert!(sent.contains("export AM_CONFIG_PATH='/home/u/.config/agents-manager/config.toml'"), "{sent}");
+    }
+
+    /// #138 的根因是兩份清單各改各的：daemon 注入什麼進 pane（`lifecycle/setup.rs` 的 `env.insert`），
+    /// 跟 shim 把什麼傳給子 pane（`AM_RESERVED_ENV_KEYS`＋隔離實例那兩個）。#104 加了兩個 key、只改了前者。
+    /// 這條把兩邊綁在一起：daemon 注入的每一個 key，要嘛在傳遞清單裡，要嘛明列成「刻意不傳」並寫理由——
+    /// 下一個新增 pane 環境變數的人不改 shim 就會在這裡紅。
+    #[test]
+    fn every_env_key_the_daemon_injects_reaches_child_panes_or_is_deliberately_left_out() {
+        // 刻意不傳。
+        const LEFT_OUT: [(&str, &str); 2] = [
+            ("CLAUDE_CODE_CHILD_SESSION", "空字串：daemon 用來洗掉它自己環境裡的 claude 標記；herdr server 開的子 pane 本來就沒有"),
+            ("CLAUDECODE", "同上"),
+        ];
+        let listed: Vec<&str> = super::SHIM_SH
+            .lines()
+            .find_map(|l| l.strip_prefix("AM_RESERVED_ENV_KEYS=\"").and_then(|r| r.strip_suffix('"')))
+            .expect("shim 裡要有 AM_RESERVED_ENV_KEYS")
+            .split_whitespace()
+            .collect();
+        let setup_src = include_str!("lifecycle/setup.rs");
+        let needle = concat!("env", ".insert(\"");
+        let injected: std::collections::BTreeSet<&str> = setup_src
+            .match_indices(needle)
+            .filter_map(|(i, _)| setup_src[i + needle.len()..].split('"').next())
+            .filter(|k| k.chars().all(|c| c.is_ascii_uppercase() || c == '_'))
+            .collect();
+        assert!(injected.contains("AM_BOT_ID") && injected.contains("AM_DAEMON_EXE"), "解析 setup.rs 失敗：{injected:?}");
+        for key in injected {
+            let passed_down = listed.contains(&key) || matches!(key, "AM_INSTANCE" | "AM_DATA_DIR");
+            let left_out = LEFT_OUT.iter().any(|(k, _)| *k == key);
+            assert!(passed_down || left_out, "daemon 會把 {key} 注入 bot 的 pane，但 herdr shim 開子 pane 時不會傳它——加進 AM_RESERVED_ENV_KEYS，或列進 LEFT_OUT 並寫理由（issue #138）");
+        }
     }
 
     #[test]

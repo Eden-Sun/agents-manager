@@ -79,6 +79,16 @@ am_remote_cargo_eligible() {
     esac
 }
 
+# 外部編譯（`remote-cargo` helper）需要的三樣東西；缺哪個就回哪個的名字，空字串＝齊了。
+# `AM_DAEMON_EXE` 指到的檔案不能執行（binary 被換掉／搬走）也算缺。
+am_remote_cargo_missing() {
+    _miss=""
+    { [ -n "${AM_DAEMON_EXE:-}" ] && [ -x "$AM_DAEMON_EXE" ]; } || _miss="$_miss AM_DAEMON_EXE"
+    [ -n "${AM_CONFIG_PATH:-}" ] || _miss="$_miss AM_CONFIG_PATH"
+    [ -n "${AM_DATA_DIR:-}" ] || _miss="$_miss AM_DATA_DIR"
+    printf '%s' "${_miss# }"
+}
+
 # `http://127.0.0.1:$AM_PORT` — bots always have `AM_PORT`; a manual host shell defaults to the
 # documented port (SPEC: daemon 在 127.0.0.1:7788)。
 am_build_port() {
@@ -200,15 +210,21 @@ am_cargo() {
     # 外部 Cargo worker：helper 本身讀 config + 0600 secret file，pane 不會拿到 SSH 密碼。
     # 125 = 設定在 pane 啟動後被關掉／這個指令不適合 offload，退回本機 cargo；
     # 其他非 0 = 遠端驗證真的失敗，原樣回報，不能偷偷改成本機成功。
-    if am_remote_cargo_eligible "${1:-}" \
-        && [ -n "${AM_DAEMON_EXE:-}" ] && [ -x "$AM_DAEMON_EXE" ] \
-        && [ -n "${AM_CONFIG_PATH:-}" ] && [ -n "${AM_DATA_DIR:-}" ]; then
-        "$AM_DAEMON_EXE" remote-cargo --config "$AM_CONFIG_PATH" --data-dir "$AM_DATA_DIR" --cwd "$PWD" -- "$@"
-        _remote_rc=$?
-        if [ "$_remote_rc" -ne 125 ]; then
-            _release
-            trap - EXIT INT TERM
-            exit "$_remote_rc"
+    #
+    # pane 缺 helper／config 的位置時**不能靜默退回本機**（issue #138）：整批子 agent 因此在本機排隊，
+    # 而沒有人知道外部編譯根本沒生效。缺哪個就講哪個。
+    if am_remote_cargo_eligible "${1:-}"; then
+        _remote_missing=$(am_remote_cargo_missing)
+        if [ -n "$_remote_missing" ]; then
+            printf 'agents-manager: 外部編譯沒有啟用：這個 pane 缺 %s（沒設，或指到的檔案不能執行），這次 %s 在本機跑\n' "$_remote_missing" "${1:-cargo}" >&2
+        else
+            "$AM_DAEMON_EXE" remote-cargo --config "$AM_CONFIG_PATH" --data-dir "$AM_DATA_DIR" --cwd "$PWD" -- "$@"
+            _remote_rc=$?
+            if [ "$_remote_rc" -ne 125 ]; then
+                _release
+                trap - EXIT INT TERM
+                exit "$_remote_rc"
+            fi
         fi
     fi
 
@@ -392,6 +408,61 @@ esac
         let calls = std::fs::read_to_string(&call_log).unwrap();
         assert!(calls.matches("acquire").count() >= 2, "第一次滿了，第二次才拿到：{calls}");
         assert!(calls.contains("release"), "結束要放：{calls}");
+    }
+
+    /// issue #138：check／test／clippy 該轉到外部編譯主機、卻因為 pane 缺 `AM_DAEMON_EXE`／`AM_CONFIG_PATH`／
+    /// `AM_DATA_DIR`（或 helper 不能執行）而退回本機時，要講出來，不能靜默——靜默的結果就是整批子 agent 的
+    /// 編譯都塞在本機排隊，沒有人知道 #104 根本沒生效。build 這類本來就不 offload 的不吵。
+    #[test]
+    fn falling_back_to_local_for_a_missing_offload_variable_says_which_one() {
+        let s = Sandbox::new();
+        s.install_fake_curl(
+            r#"case "$*" in
+  *acquire*) printf '{"granted":true,"token":"tok-1","cargo_jobs":2,"lease_ttl_secs":30}' ;;
+  *) printf '{}' ;;
+esac
+"#,
+        );
+        let cargo_log = s.dir.join("cargo.log");
+        let log = cargo_log.to_str().unwrap();
+        fn base<'a>(log: &'a str, extra: &[(&'a str, &'a str)]) -> Vec<(&'a str, &'a str)> {
+            let mut env = vec![("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_TEST_FAKE_CARGO_LOG", log)];
+            env.extend_from_slice(extra);
+            env
+        }
+        // 一個真的能執行的假 helper（回 125＝退回本機；不能用 `/bin/true`——macOS 沒有這個路徑）。
+        let helper = s.dir.join("fake-helper");
+        std::fs::write(&helper, "#!/bin/sh\nexit 125\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let helper_path = helper.to_str().unwrap();
+        // 什麼都沒有：一次講清楚缺哪三個。
+        let (_, err, rc) = s.run(&base(log, &[]), &["check", "-p", "agents-managerd"]);
+        assert_eq!(rc, 0, "{err}");
+        assert!(err.contains("外部編譯沒有啟用"), "{err}");
+        for k in ["AM_DAEMON_EXE", "AM_CONFIG_PATH", "AM_DATA_DIR"] {
+            assert!(err.contains(k), "要點名缺 {k}：{err}");
+        }
+        assert!(std::fs::read_to_string(&cargo_log).unwrap().contains("agents-managerd"), "照樣在本機跑");
+        // 只缺一個：只點那一個。
+        let (_, err, _) = s.run(&base(log, &[("AM_DAEMON_EXE", helper_path), ("AM_DATA_DIR", "/tmp")]), &["clippy"]);
+        assert!(err.contains("AM_CONFIG_PATH") && !err.contains("AM_DAEMON_EXE") && !err.contains("AM_DATA_DIR"), "{err}");
+        // helper 路徑在、但不能執行（binary 被換掉／搬走）：也算缺。
+        let (_, err, _) = s.run(&base(log, &[("AM_DAEMON_EXE", "/nonexistent/agents-managerd"), ("AM_CONFIG_PATH", "/tmp/c.toml"), ("AM_DATA_DIR", "/tmp")]), &["test"]);
+        assert!(err.contains("AM_DAEMON_EXE"), "{err}");
+        // build／run 本來就不 offload：不吵。
+        let (_, err, _) = s.run(&base(log, &[]), &["build", "--release"]);
+        assert!(!err.contains("外部編譯"), "{err}");
+        // 三個都齊：不提示（helper 會自己決定要不要轉；這裡假 helper 回 125＝退回本機）。
+        let (_, err, rc) = s.run(
+            &base(log, &[("AM_DAEMON_EXE", helper_path), ("AM_CONFIG_PATH", "/tmp/c.toml"), ("AM_DATA_DIR", "/tmp")]),
+            &["check"],
+        );
+        assert_eq!(rc, 0, "{err}");
+        assert!(!err.contains("外部編譯沒有啟用"), "齊全就不提示：{err}");
     }
 
     /// PATH 上還掛著**別顆 bot 的同一支 shim**（祖先 pane 繼承下來的，2026-09-18 實測有 6 個）：
