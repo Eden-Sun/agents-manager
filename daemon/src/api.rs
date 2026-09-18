@@ -2319,18 +2319,32 @@ fn resume_opts(q: &StartQuery) -> Result<lifecycle::StartOpts, LcError> {
     }
 }
 
-/// 回應裡的 `resumed`／`session_id`：看新 run 實際要求接回哪個 session（`runs.resume_session_id`）。
+/// 回應裡的 `resumed`／`session_id`／`resume_outcome`（issue #107）。
+///
+/// `runs.resume_session_id` 只是「帶了 `--resume`、還在等 CLI 回報」的暫存：SessionStart 一到就被清掉，
+/// 而這支是在 bot 鎖放掉之後才讀——只看它，接回成功的會被說成 `resumed:false`。結論以
+/// `runs.resume_outcome` 為準（`lifecycle::resume_gate`）：
+/// - `verified`：接回了，`session_id` 是回報的那一個；
+/// - `mismatch`：CLI 開了新對話，`resumed:false`；
+/// - 還沒結論或 `unverified`（等滿沒回報、刻意放行）：`resume_session_id` 還在，照「帶了 `--resume`」算 `true`；
+/// - 都沒有：這次沒帶 `--resume`（接不回、退回開新對話）。
 async fn started_json(app: &Arc<App>, run_id: &str, opts: &lifecycle::StartOpts) -> Result<Value, LcError> {
     if !opts.resume_native {
         return Ok(json!({"run_id": run_id}));
     }
-    let sid: Option<String> = sqlx::query_scalar("SELECT resume_session_id FROM runs WHERE id = ?")
-        .bind(run_id)
-        .fetch_optional(&app.db)
-        .await
-        .map_err(any_err)?
-        .flatten();
-    Ok(json!({"run_id": run_id, "resumed": sid.is_some(), "session_id": sid}))
+    let (pending, outcome, native): (Option<String>, Option<String>, Option<String>) =
+        sqlx::query_as("SELECT resume_session_id, resume_outcome, native_session_id FROM runs WHERE id = ?")
+            .bind(run_id)
+            .fetch_optional(&app.db)
+            .await
+            .map_err(any_err)?
+            .unwrap_or_default();
+    let (resumed, sid) = match outcome.as_deref() {
+        Some("verified") => (true, native),
+        Some("mismatch") => (false, None),
+        _ => (pending.is_some(), pending),
+    };
+    Ok(json!({"run_id": run_id, "resumed": resumed, "session_id": sid, "resume_outcome": outcome}))
 }
 
 async fn start_bot(State(app): State<Arc<App>>, Path(id): Path<String>, Query(q): Query<StartQuery>) -> Result<Response, LcError> {
@@ -2340,8 +2354,12 @@ async fn start_bot(State(app): State<Arc<App>>, Path(id): Path<String>, Query(q)
         .await
         .map_err(|e| LcError::Upstream(e.to_string()))?
     {
-        let run = db::active_run(&app.db, &id).await.map_err(any_err)?;
-        return Ok((StatusCode::OK, Json(json!({"run_id": run.map(|r| r.id), "resumed": true}))).into_response());
+        // 叫醒接不回時會退回開新對話（`idle_sleep::wake`）：照實際結果回，不寫死 `true`（issue #107）。
+        let body = match db::active_run(&app.db, &id).await.map_err(any_err)? {
+            Some(run) => started_json(&app, &run.id, &lifecycle::StartOpts { resume_native: true, ..Default::default() }).await?,
+            None => json!({"run_id": null, "resumed": false}),
+        };
+        return Ok((StatusCode::OK, Json(body)).into_response());
     }
     let opts = resume_opts(&q)?;
     let run_id = lifecycle::start_bot_with(&app, &id, opts.clone()).await?;
@@ -3546,5 +3564,100 @@ mod resume_query_tests {
         let v = get_capabilities().await.0;
         let caps: Vec<&str> = v["capabilities"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
         assert!(caps.contains(&"resume_native_start") && caps.contains(&"herdr_maintenance"), "{v}");
+    }
+}
+
+#[cfg(test)]
+mod started_json_tests {
+    //! issue #107：`?resume=native` 的回應要照接回的**結論**說，不是看一個 SessionStart 一到就被清掉的暫存欄位。
+    use super::*;
+    use crate::testing as tt;
+
+    async fn resumed_run(app: &Arc<App>, project_id: &str, name: &str, resume: Option<&str>) -> (String, String) {
+        let bot = tt::claude_bot(app, project_id, name).await;
+        let run = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, started_at, resume_session_id)
+             VALUES (?,?,'running','idle','ws-1',?,'agent','test',?,?)",
+        )
+        .bind(&run)
+        .bind(&bot.id)
+        .bind(format!("pane-{}", bot.id))
+        .bind(db::now())
+        .bind(resume)
+        .execute(&app.db)
+        .await
+        .unwrap();
+        (bot.id, run)
+    }
+
+    async fn session_start(app: &Arc<App>, bot_id: &str, run_id: &str, session: &str) {
+        crate::hookrecv::process(
+            app,
+            &crate::hookrecv::HookBody {
+                bot_id: bot_id.to_string(),
+                provider: "claude".into(),
+                payload: json!({"hook_event_name": "SessionStart", "session_id": session, "source": "resume"}),
+                received_at: None,
+                truncated: false,
+                run_id: Some(run_id.to_string()),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    fn summary(v: &Value) -> (Value, Value, Value) {
+        (v["resumed"].clone(), v["session_id"].clone(), v["resume_outcome"].clone())
+    }
+
+    #[tokio::test]
+    async fn resumed_reports_the_recorded_outcome_not_the_marker_session_start_clears() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let opts = lifecycle::StartOpts { resume_native: true, resume_required: true, ..Default::default() };
+
+        // 帶了 --resume、還在等回報。
+        let (bot, run) = resumed_run(&app, &e.project_id, "pending", Some("s-1")).await;
+        assert_eq!(summary(&started_json(&app, &run, &opts).await.unwrap()), (json!(true), json!("s-1"), Value::Null));
+        // SessionStart 在回應組好之前就到了：暫存欄位清掉，但接回了就是接回了。
+        session_start(&app, &bot, &run, "s-1").await;
+        let marker: Option<String> = sqlx::query_scalar("SELECT resume_session_id FROM runs WHERE id=?").bind(&run).fetch_one(&app.db).await.unwrap();
+        assert_eq!(marker, None, "前提：暫存欄位真的被清掉了");
+        assert_eq!(summary(&started_json(&app, &run, &opts).await.unwrap()), (json!(true), json!("s-1"), json!("verified")));
+
+        // CLI 開了新對話：不是接回。
+        let (bot, run) = resumed_run(&app, &e.project_id, "mismatch", Some("s-2")).await;
+        session_start(&app, &bot, &run, "s-brand-new").await;
+        assert_eq!(summary(&started_json(&app, &run, &opts).await.unwrap()), (json!(false), Value::Null, json!("mismatch")));
+
+        // 這次根本沒帶 --resume（接不回、退回開新對話）。
+        let (_bot, run) = resumed_run(&app, &e.project_id, "fresh", None).await;
+        assert_eq!(summary(&started_json(&app, &run, &opts).await.unwrap()), (json!(false), Value::Null, Value::Null));
+
+        // 沒要求 resume：只回 run_id，跟以前一樣。
+        assert_eq!(started_json(&app, &run, &lifecycle::StartOpts::default()).await.unwrap(), json!({"run_id": run}));
+    }
+
+    /// 按「啟動」叫醒睡著的 bot：接不回原對話時 `wake` 會退回開新對話，回應不能照樣說 `resumed:true`。
+    #[tokio::test]
+    async fn waking_a_sleeping_bot_that_could_not_resume_says_so() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let bot = tt::claude_bot(&app, &e.project_id, "sleeper").await;
+        // 睡著了，但沒有任何一段對話可以接（沒有 native session）。
+        sqlx::query("INSERT INTO bot_sleeps (bot_id, native_session_id, idle_minutes, reason, slept_at) VALUES (?,NULL,90,'idle',?)")
+            .bind(&bot.id)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let resp = start_bot(State(app.clone()), Path(bot.id.clone()), Query(StartQuery { resume: None })).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value = serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap()).unwrap();
+        let run = db::active_run(&app.db, &bot.id).await.unwrap().expect("叫醒了");
+        assert_eq!(body["run_id"], json!(run.id));
+        assert_eq!(body["resumed"], json!(false), "開的是新對話：{body}");
+        lifecycle::stop_bot(&app, &bot.id).await.unwrap();
     }
 }

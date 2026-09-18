@@ -609,11 +609,14 @@ async fn consume_resume_session(
     let Some(reported) = reported_session_id else { return Ok(()) };
     let mismatch = reported != expected;
     // 結論跟清掉標記寫在同一句：`resume_gate` 看 `resume_outcome` 放行（issue #92）。先前等到期寫了
-    // `unverified` 的，這時候才到的回報照樣改成真正的結論。
+    // `unverified` 的，這時候才到的回報照樣改成真正的結論。回報的 session 也在同一句記下：不拿鎖的讀者
+    // （`api::started_json`，issue #107）看到 `verified` 時一定讀得到是哪一段。
     let consumed = sqlx::query(
-        "UPDATE runs SET resume_session_id = NULL, resume_outcome = ? WHERE id = ? AND resume_session_id IS NOT NULL",
+        "UPDATE runs SET resume_session_id = NULL, resume_outcome = ?, native_session_id = COALESCE(native_session_id, ?)
+          WHERE id = ? AND resume_session_id IS NOT NULL",
     )
     .bind(if mismatch { "mismatch" } else { "verified" })
+    .bind(reported)
     .bind(&run.id)
     .execute(&app.db)
     .await?;
@@ -3046,6 +3049,17 @@ mod resume_tests {
         .await
         .unwrap();
         assert!(note.contains("不是同一個"), "{note}");
+    }
+
+    /// 結論與回報的 session 同一句寫下（issue #107）：不拿 bot 鎖的讀者（`api::started_json`）看到
+    /// `verified` 時，一定讀得到是哪一段——不必等 Identity 分支下一句 UPDATE。
+    #[tokio::test]
+    async fn the_verdict_and_the_reported_session_are_written_in_one_statement() {
+        let (e, bot, run) = fixture().await;
+        consume_resume_session(&e.app, &bot, &run, Some("native-expected")).await.unwrap();
+        let (outcome, native): (Option<String>, Option<String>) =
+            sqlx::query_as("SELECT resume_outcome, native_session_id FROM runs WHERE id=?").bind(&run.id).fetch_one(&e.app.db).await.unwrap();
+        assert_eq!((outcome.as_deref(), native.as_deref()), (Some("verified"), Some("native-expected")));
     }
 
     #[tokio::test]
