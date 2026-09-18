@@ -503,3 +503,14 @@ test('啟動撞到其他 409：沒有專屬文案時照舊顯示 reason（HTTP �
   await useStore.getState().startBot('b1')
   assert.deepEqual(noticeTexts(), ['not_idle（HTTP 409）'])
 })
+
+/** issue #112：刪 bot 成功只該跳一次帶「復原」的通知，不該在 refreshState 之後又補一則沒有復原的。 */
+test('刪 Bot 成功：只跳一張帶「復原」的通知，不重複跳第二張', async () => {
+  seed()
+  routeDaemon(() => json({}, 200))
+  await useStore.getState().removeBot('b1')
+  const notices = useStore.getState().notices
+  assert.equal(notices.length, 1, `應該只有一張通知，實際：${JSON.stringify(notices.map((n) => n.text))}`)
+  assert.match(notices[0].text, /已刪除/)
+  assert.ok(notices[0].action, '這張通知要帶「復原」')
+})
