@@ -156,7 +156,9 @@ fn lc_msg(e: &LcError) -> String {
     match e {
         LcError::Upstream(m) | LcError::Bad(m) => redact_secrets(m),
         LcError::NotFound(w) => format!("not found: {w}"),
-        LcError::Conflict(v) | LcError::BadValue(v) | LcError::Unprocessable(v) | LcError::Forbidden(v) => redact_secrets(&v.to_string()),
+        LcError::Conflict(v) | LcError::BadValue(v) | LcError::Unprocessable(v) | LcError::Forbidden(v) | LcError::Unavailable(v) => {
+            redact_secrets(&v.to_string())
+        }
     }
 }
 

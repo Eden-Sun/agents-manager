@@ -188,34 +188,90 @@ impl WindowHeld {
     }
 }
 
+/// 讀不到窗口狀態時，呼叫端多久之後再判斷一次（秒）。
+pub const UNREADABLE_RETRY_SECS: i64 = 10;
+
+/// 入場閘門**讀不到**租約狀態（DB 出錯、那一列解不開、沒放掉卻沒有讀得懂的到期時間）。
+///
+/// 這**不等於**「沒有窗口」：觀測不到 durable 的租約，不代表已經證明沒有租約。所以三個入口一律
+/// **fail closed**——prompt 回 503 `maintenance_state_unavailable`（一個字都不送）、排隊的 turn 留在佇列不 claim、
+/// 交辦留 `queued`。錯誤不偽裝成一個假的長 TTL 租約，可觀察（log／回應）、可重試（DB 一恢復就重新判斷，不會卡住）。
+#[derive(Debug, Clone)]
+pub struct WindowUnreadable {
+    pub resource: &'static str,
+    pub error: String,
+}
+
+impl WindowUnreadable {
+    fn new(resource: &'static str, error: impl std::fmt::Display) -> Self {
+        Self { resource, error: error.to_string() }
+    }
+
+    /// 503 的 body。跟 [`WindowHeld::detail`] 的 `maintenance_window` 分得開：那個是「確定有窗口」，
+    /// 這個是「不知道有沒有」。
+    pub fn detail(&self) -> Value {
+        json!({
+            "reason": "maintenance_state_unavailable",
+            "resource": self.resource,
+            "retry_after_secs": UNREADABLE_RETRY_SECS,
+            "retryable": true,
+            "sent": false,
+            "message": format!("讀不到 {} 維護窗口的狀態，所以不送新的 prompt（不確定有沒有窗口）；稍後原樣重送即可。", self.resource),
+        })
+    }
+
+    pub fn refusal(&self) -> LcError {
+        LcError::Unavailable(self.detail())
+    }
+}
+
 /// **入場閘門**：現在有沒有人握著會中斷 pane 的維護窗口。
 ///
 /// 這是唯一的定義，三個入口都讀它——`controller::dispatch`（交辦留在佇列）、`lifecycle::prompt`
 /// （新回合 409）、`lifecycle::queue::flush_queued_locked`（排隊的 prompt 等窗口關掉再送）。
 /// 以前只有第一個有擋，於是窗口承諾的「裡面不會有新東西開始」在另外兩條路上是假的（issue #86）。
 ///
+/// 三態（issue #127）：`Ok(Some)`＝明確有窗口，擋；`Ok(None)`＝明確沒有，放行；`Err`＝讀不到，**也擋**
+/// （[`WindowUnreadable`]）。以前 SELECT 失敗會被當成 `None`，窗口明明握著、卻因為一次 DB 讀錯就放新工作進 pane。
+///
 /// **過期不會鎖死**：判斷走 `held_at`，`expires_at` 一到就自動不再擋，不需要任何人來收尾
 /// （租約本身 TTL 上限 1 小時，預設 15 分鐘）；daemon 重啟時 `release_restart_on_startup` 再收一次。
-pub async fn window_held(app: &Arc<App>) -> Option<WindowHeld> {
+pub async fn window_held(app: &Arc<App>) -> Result<Option<WindowHeld>, WindowUnreadable> {
     let now = crate::db::now();
     for resource in EXCLUSIVE {
-        if let Ok(Some(l)) = store::lease(&app.db, resource).await {
-            if l.held_at(&now) {
-                return Some(WindowHeld {
-                    resource,
-                    owner: l.owner.clone().unwrap_or_default(),
-                    fence: l.fence,
-                    expires_at: l.expires_at.clone().unwrap_or_default(),
-                });
-            }
+        let lease = match store::lease(&app.db, resource).await {
+            Ok(l) => l,
+            Err(e) => return Err(unreadable(resource, e)),
+        };
+        let Some(l) = lease else { continue };
+        // 沒放掉、卻沒有一個讀得懂的到期時間：不知道它什麼時候結束，不能當它不存在。
+        // （`acquire_lease` 一定會寫到期時間，所以這只會是壞資料；daemon 重啟時會被收掉。）
+        if l.released_at.is_none() && l.expires_at.as_deref().is_none_or(|t| chrono::DateTime::parse_from_rfc3339(t).is_err()) {
+            return Err(unreadable(resource, format!("lease is not released but its expires_at is unreadable: {:?}", l.expires_at)));
+        }
+        if l.held_at(&now) {
+            return Ok(Some(WindowHeld {
+                resource,
+                owner: l.owner.clone().unwrap_or_default(),
+                fence: l.fence,
+                expires_at: l.expires_at.clone().unwrap_or_default(),
+            }));
         }
     }
-    None
+    Ok(None)
+}
+
+/// 讀不到就留一行結構化 log（`error` 等級：這是安全閘門在失效，不是一般的讀取失敗）。
+fn unreadable(resource: &'static str, error: impl std::fmt::Display) -> WindowUnreadable {
+    let u = WindowUnreadable::new(resource, error);
+    tracing::error!(resource, error = %u.error, "restart window state unreadable: failing closed (no new work goes in)");
+    u
 }
 
 /// Is a restart window currently held by someone? Used by the dispatcher to hold work back.
-pub async fn dispatch_paused(app: &Arc<App>) -> Option<String> {
-    window_held(app).await.map(|w| w.expires_at)
+/// 讀不到回 `Err`：呼叫端要**當作還握著**，不能拿去解除 hold。
+pub async fn dispatch_paused(app: &Arc<App>) -> Result<Option<String>, WindowUnreadable> {
+    Ok(window_held(app).await?.map(|w| w.expires_at))
 }
 
 /// A restart window is over: lift the holds it put on queued assignments so the next controller
@@ -271,7 +327,7 @@ pub async fn release(
                 }
             }
         }
-        if EXCLUSIVE.contains(&resource) && dispatch_paused(app).await.is_none() {
+        if EXCLUSIVE.contains(&resource) && matches!(dispatch_paused(app).await, Ok(None)) {
             window_closed(app, "lease released").await;
         }
     }
@@ -611,6 +667,28 @@ pub fn pause_note(until: &str) -> String {
     format!("restart window held until {until}")
 }
 
+/// 故障注入（只在測試裡）：讓「讀租約」這件事真的失敗，而租約本身（握著的窗口）原封不動，
+/// 才分得出「沒有窗口」與「窗口在、但讀不到」（issue #127）。
+#[cfg(test)]
+pub(crate) mod fault {
+    use sqlx::SqlitePool;
+
+    /// 之後每一句讀 `supervisor_leases` 的 SELECT 都失敗（`no such table`）——DB 出錯的樣子。
+    pub async fn break_lease_reads(pool: &SqlitePool) {
+        sqlx::query("ALTER TABLE supervisor_leases RENAME TO supervisor_leases_unreadable").execute(pool).await.unwrap();
+    }
+
+    /// 讀取恢復；租約列原封不動。
+    pub async fn restore_lease_reads(pool: &SqlitePool) {
+        sqlx::query("ALTER TABLE supervisor_leases_unreadable RENAME TO supervisor_leases").execute(pool).await.unwrap();
+    }
+
+    /// 讀得到那一列、但解不開（`fence` 不是整數）——parse 出錯的樣子。
+    pub async fn corrupt_lease_row(pool: &SqlitePool) {
+        sqlx::query("UPDATE supervisor_leases SET fence='corrupt' WHERE resource='restart'").execute(pool).await.unwrap();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -908,14 +986,14 @@ mod tests {
         assert!(store::delivery_critical_anywhere(&app.db).await.unwrap());
         let taken = store::acquire_lease(&app.db, "restart", "k8bw2f", None, None, &until, true, None, &json!({})).await.unwrap();
         assert!(taken.is_none(), "有人在送達臨界區：窗口拿不走");
-        assert!(window_held(app).await.is_none(), "沒拿到就不該有閘門");
+        assert!(window_held(app).await.unwrap().is_none(), "沒拿到就不該有閘門");
 
         // 那一則送完了（`delivery` 不再是 pending）：窗口就拿得到。
         sqlx::query("UPDATE turns SET delivery='ok' WHERE id='tt'").execute(&app.db).await.unwrap();
         assert!(!store::delivery_critical_anywhere(&app.db).await.unwrap());
         let taken = store::acquire_lease(&app.db, "restart", "k8bw2f", None, None, &until, true, None, &json!({})).await.unwrap();
         assert!(taken.is_some(), "沒有人在送達臨界區：拿得到");
-        let w = window_held(app).await.expect("拿到了就有閘門");
+        let w = window_held(app).await.unwrap().expect("拿到了就有閘門");
         assert_eq!((w.resource, w.owner.as_str()), ("restart", "k8bw2f"));
         assert!(w.retry_after_secs(&crate::db::now()) > 0);
 
@@ -997,13 +1075,81 @@ mod tests {
         let app = &e.app;
         let soon = (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         store::acquire_lease(&app.db, "restart", "k8bw2f", None, None, &soon, true, None, &json!({})).await.unwrap().unwrap();
-        assert!(window_held(app).await.is_some());
+        assert!(window_held(app).await.unwrap().is_some());
 
         let past = (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         sqlx::query("UPDATE supervisor_leases SET expires_at=? WHERE resource='restart'").bind(&past).execute(&app.db).await.unwrap();
         assert!(store::lease(&app.db, "restart").await.unwrap().unwrap().released_at.is_none(), "沒有人 release");
-        assert!(window_held(app).await.is_none(), "過期就自動不再擋");
-        assert!(dispatch_paused(app).await.is_none(), "派工那條讀的是同一份");
+        assert!(window_held(app).await.unwrap().is_none(), "過期就自動不再擋");
+        assert!(dispatch_paused(app).await.unwrap().is_none(), "派工那條讀的是同一份");
+    }
+
+    /// issue #127：入場閘門是三態——明確有窗口、明確沒有窗口、**讀不到**。讀不到不等於沒有：
+    /// 觀測不到 durable 的租約狀態，不代表已經證明沒有租約。三種讀不到（DB 出錯、那一列解不開、沒放掉卻沒有
+    /// 讀得懂的到期時間）都回 `Err`；DB 一恢復就重新判斷，不會永久卡住。
+    #[tokio::test]
+    async fn the_gate_tells_no_window_from_a_window_it_cannot_read() {
+        let e = crate::testing::env().await;
+        let app = &e.app;
+        assert!(window_held(app).await.unwrap().is_none(), "明確沒有窗口：放行");
+
+        let until = (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        store::acquire_lease(&app.db, "restart", "k8bw2f", None, None, &until, false, None, &json!({})).await.unwrap().unwrap();
+        let fence = store::lease(&app.db, "restart").await.unwrap().unwrap().fence;
+        assert!(window_held(app).await.unwrap().is_some(), "明確有窗口：擋");
+
+        // 1. DB 讀取出錯（表讀不到）：`Err`，不是 `Ok(None)`。
+        fault::break_lease_reads(&app.db).await;
+        let u = window_held(app).await.expect_err("讀不到要回 Err，不能當成沒有窗口");
+        assert_eq!(u.resource, "restart");
+        assert!(!u.error.is_empty());
+        assert!(dispatch_paused(app).await.is_err(), "派工那條讀的是同一份");
+        fault::restore_lease_reads(&app.db).await;
+        assert!(window_held(app).await.unwrap().is_some(), "DB 恢復後重新判斷：窗口還在就擋，沒有卡在 Err");
+
+        // 2. 那一列讀得到、但解不開。
+        fault::corrupt_lease_row(&app.db).await;
+        assert!(window_held(app).await.is_err(), "解不開＝讀不到");
+        sqlx::query("UPDATE supervisor_leases SET fence=? WHERE resource='restart'").bind(fence).execute(&app.db).await.unwrap();
+        assert!(window_held(app).await.unwrap().is_some(), "修好之後恢復");
+
+        // 3. 沒放掉、卻沒有讀得懂的到期時間：不知道它什麼時候結束，不能當它不存在。
+        for bad in [None, Some("not-a-time")] {
+            sqlx::query("UPDATE supervisor_leases SET expires_at=? WHERE resource='restart'").bind(bad).execute(&app.db).await.unwrap();
+            let u = window_held(app).await.expect_err("到期時間讀不懂＝讀不到");
+            assert!(u.error.contains("expires_at"), "{}", u.error);
+        }
+        // 已經放掉的租約，到期時間怎樣都不重要。
+        sqlx::query("UPDATE supervisor_leases SET released_at=? WHERE resource='restart'").bind(crate::db::now()).execute(&app.db).await.unwrap();
+        assert!(window_held(app).await.unwrap().is_none(), "放掉了就是放掉了");
+    }
+
+    /// 錯誤要**可觀察、可區分**：503 `maintenance_state_unavailable` 跟 409 `maintenance_window` 分得開
+    /// （使用者才知道是「真的有人在維護」還是「狀態暫時讀不到」），而且明講一個字都沒送、可以原樣重送。
+    /// 不是偽裝成一個假的長 TTL 租約。
+    #[tokio::test]
+    async fn an_unreadable_window_is_a_503_that_says_nothing_was_sent_and_a_real_window_stays_a_409() {
+        use axum::response::IntoResponse as _;
+        let e = crate::testing::env().await;
+        let app = &e.app;
+        let until = (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        store::acquire_lease(&app.db, "restart", "k8bw2f", None, None, &until, false, None, &json!({})).await.unwrap().unwrap();
+
+        let real = window_held(app).await.unwrap().unwrap().refusal();
+        assert_eq!(real.into_response().status(), axum::http::StatusCode::CONFLICT, "真的有窗口：409");
+
+        fault::break_lease_reads(&app.db).await;
+        let LcError::Unavailable(body) = window_held(app).await.unwrap_err().refusal() else { panic!("要是 Unavailable") };
+        assert_eq!(body["reason"], "maintenance_state_unavailable", "{body}");
+        assert_eq!(body["retryable"], true, "{body}");
+        assert_eq!(body["sent"], false, "{body}");
+        assert_eq!(body["resource"], "restart", "{body}");
+        assert!(body["retry_after_secs"].as_i64().unwrap_or(0) > 0, "{body}");
+        assert!(body.get("held_by").is_none() && body.get("expires_at").is_none(), "不編一個假的持有者／到期時間：{body}");
+
+        let resp = window_held(app).await.unwrap_err().refusal().into_response();
+        assert_eq!(resp.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE, "讀不到：5xx（可重試），不是 409");
+        assert!(resp.headers().get(axum::http::header::RETRY_AFTER).is_some(), "帶 Retry-After");
     }
 
     /// 已核准、還沒用掉的 restart 窗口（同 [`approved_window`]，只是用途不同）。申請者是 `k8bw2f`。

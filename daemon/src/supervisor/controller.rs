@@ -123,11 +123,23 @@ pub async fn dispatch(app: &Arc<App>, assignment_id: &str) {
     // 三條入口一份定義，不再是「交辦有擋、打字進 pane 的兩條沒擋」（issue #86）。
     // 交辦這條選**排隊**不是拒絕：它是有自己重試與驗收的持久工作項，窗口關掉就照常送出去，
     // 不會遺失也不會重送（`dispatch_crid` 冪等）。
-    if let Some(w) = super::maintenance::window_held(app).await {
-        let until = w.expires_at.clone();
-        let _ = store::hold(&app.db, &a.id, &until, &super::maintenance::pause_note(&until)).await;
-        tracing::info!(assignment = %a.id, until, holder = %w.owner, "assignment held: a restart window is open");
-        return;
+    // 讀不到窗口狀態也不派（issue #127）：觀測不到租約不等於沒有租約。這不是一次失敗的送達，用 `hold`
+    // （不花 attempts）排幾秒後再看；原因不寫成 `pause_note`，免得窗口收掉時被當成「窗口的 hold」一起放行——
+    // 這一筆等的是「讀得到」，不是「窗口收掉」。
+    match super::maintenance::window_held(app).await {
+        Ok(None) => {}
+        Ok(Some(w)) => {
+            let until = w.expires_at.clone();
+            let _ = store::hold(&app.db, &a.id, &until, &super::maintenance::pause_note(&until)).await;
+            tracing::info!(assignment = %a.id, until, holder = %w.owner, "assignment held: a restart window is open");
+            return;
+        }
+        Err(_) => {
+            let until = iso_in(super::maintenance::UNREADABLE_RETRY_SECS);
+            let _ = store::hold(&app.db, &a.id, &until, "restart window state unreadable; retrying (fail closed)").await;
+            tracing::warn!(assignment = %a.id, until, "assignment held: the restart window state cannot be read");
+            return;
+        }
     }
 
     // The assignment is stamped as coming from the manager, not from the user: `relay_from` is
@@ -1065,7 +1077,8 @@ async fn revoke_and_block(app: &Arc<App>, assignment_id: &str, turn_id: &str, wh
 async fn drain_queue(app: &Arc<App>) {
     // A hold whose window is no longer held (released by any path, or expired) is not a reason
     // to wait: lift it before looking at deadlines.
-    if super::maintenance::dispatch_paused(app).await.is_none() {
+    // 只在**確定**沒有窗口時才解除；讀不到不等於窗口收了。
+    if matches!(super::maintenance::dispatch_paused(app).await, Ok(None)) {
         super::maintenance::window_closed(app, "no restart window is held").await;
     }
     let Ok(open) = store::open_assignments(&app.db).await else { return };
@@ -2492,7 +2505,7 @@ mod no_grace_period_tests {
         let until = iso_in(900);
         let lease = store::acquire_lease(&app.db, "restart", "owner", Some(&ap.id), None, &until, false, None, &json!({})).await.unwrap().unwrap();
         let a = store::insert_assignment(&app.db, None, "gone-bot", crid, "do it", &[], None, true).await.unwrap();
-        let paused = super::super::maintenance::dispatch_paused(app).await.expect("window is held");
+        let paused = super::super::maintenance::dispatch_paused(app).await.unwrap().expect("window is held");
         store::hold(&app.db, &a.id, &paused, &super::super::maintenance::pause_note(&paused)).await.unwrap();
         let held = store::assignment(&app.db, &a.id).await.unwrap().unwrap();
         assert_eq!(held.next_attempt_at.as_deref(), Some(paused.as_str()));
@@ -2554,6 +2567,106 @@ mod no_grace_period_tests {
         let still = store::assignment(&app.db, &a.id).await.unwrap().unwrap();
         assert_eq!(still.status, "queued");
         assert!(still.next_attempt_at.is_some());
+    }
+}
+
+/// 入場閘門讀不到 restart 租約（issue #127）：讀不到不等於沒有窗口，一律照窗口處理——交辦留在佇列、不 dispatch。
+#[cfg(test)]
+mod window_unreadable_tests {
+    use super::*;
+    use crate::supervisor::maintenance::fault;
+
+    /// 一顆沒有 run 的 bot：只要 `dispatch` 走過閘門，就會撞到真的 409（`bot has no active run`）——
+    /// 那正是「閘門放行了」的可觀察證據。
+    async fn app() -> Arc<App> {
+        let dir = std::env::temp_dir().join(format!("agm-window-unreadable-{}", crate::db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = crate::db::open(&dir.join("test.sqlite")).await.unwrap();
+        let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
+        let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
+        let app = App::new(db, client.clone(), client, cfg, dir.clone(), dir.join("daemon"), 7799, "test".into(), "test".into(), false);
+        store::get_or_init(&app.db).await.unwrap();
+        let now = crate::db::now();
+        sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES ('p','/tmp','p',?)").bind(&now).execute(&app.db).await.unwrap();
+        for id in ["mgr", "b"] {
+            sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES (?,'p',?,'claude',?,?)")
+                .bind(id)
+                .bind(id)
+                .bind(format!("t-{id}"))
+                .bind(&now)
+                .execute(&app.db)
+                .await
+                .unwrap();
+        }
+        store::set_env(&app.db, "mgr", "p", "/tmp").await.unwrap();
+        app
+    }
+
+    async fn hold_window(app: &Arc<App>) -> String {
+        let until = iso_in(900);
+        store::acquire_lease(&app.db, "restart", "owner", None, None, &until, false, None, &json!({})).await.unwrap().unwrap();
+        until
+    }
+
+    async fn row(app: &Arc<App>, id: &str) -> store::Assignment {
+        store::assignment(&app.db, id).await.unwrap().unwrap()
+    }
+
+    /// 窗口握著、讀不到：交辦留 `queued`、不進 prompt（`attempts` 不動、沒有 409 起點）、排下一次。
+    /// 這不是一次失敗的送達，不能花它的重試額度；也不能被記成「窗口 hold」（窗口收掉時那批會被一起放行，
+    /// 而這一筆的原因是讀不到，不是窗口）。讀取恢復後照窗口正常判斷；窗口收了才真的送。
+    #[tokio::test]
+    async fn an_unreadable_restart_lease_keeps_the_assignment_queued_and_undispatched() {
+        let app = app().await;
+        hold_window(&app).await;
+        let a = store::insert_assignment(&app.db, None, "b", "unreadable-1", "做 X", &[], None, true).await.unwrap();
+        fault::break_lease_reads(&app.db).await;
+
+        dispatch(&app, &a.id).await;
+
+        let r = row(&app, &a.id).await;
+        assert_eq!(r.status, "queued");
+        assert_eq!(r.attempts, 0, "沒進到 prompt，也不算一次失敗的送達：{:?}", r.error);
+        assert_eq!(r.conflict_since, None, "沒撞到 409＝沒進到 prompt");
+        assert!(r.next_attempt_at.is_some(), "排了下一次，不是原地不動");
+
+        // 讀取恢復、窗口還握著：真的有窗口，照原本的 hold。
+        fault::restore_lease_reads(&app.db).await;
+        set_next_attempt_null(&app, &a.id).await;
+        dispatch(&app, &a.id).await;
+        let r = row(&app, &a.id).await;
+        assert_eq!((r.status.as_str(), r.attempts), ("queued", 0));
+        assert!(r.error.as_deref().is_some_and(|e| e.starts_with("restart window held until")), "{:?}", r.error);
+
+        // 窗口收了：交辦這次才真的走到 prompt（沒有 run，撞到 409）。
+        let l = store::lease(&app.db, "restart").await.unwrap().unwrap();
+        assert!(store::release_lease(&app.db, "restart", "owner", l.fence).await.unwrap());
+        set_next_attempt_null(&app, &a.id).await;
+        dispatch(&app, &a.id).await;
+        let r = row(&app, &a.id).await;
+        assert!(r.error.as_deref().is_some_and(|e| e.contains("no active run")), "走過閘門了：{:?}", r.error);
+    }
+
+    async fn set_next_attempt_null(app: &Arc<App>, id: &str) {
+        sqlx::query("UPDATE supervisor_assignments SET next_attempt_at=NULL WHERE id=?").bind(id).execute(&app.db).await.unwrap();
+    }
+
+    /// `drain_queue` 只在**確定**窗口沒握著時才解除 hold；讀不到不等於窗口收了。
+    /// 讀不到就解除的話，被窗口 hold 住的交辦會在維護中被放出來。
+    #[tokio::test]
+    async fn drain_queue_keeps_the_holds_when_it_cannot_tell_whether_the_window_is_still_held() {
+        let app = app().await;
+        let until = hold_window(&app).await;
+        let a = store::insert_assignment(&app.db, None, "b", "unreadable-2", "做 X", &[], None, true).await.unwrap();
+        store::hold(&app.db, &a.id, &until, &super::super::maintenance::pause_note(&until)).await.unwrap();
+        fault::break_lease_reads(&app.db).await;
+
+        drain_queue(&app).await;
+
+        let r = row(&app, &a.id).await;
+        assert_eq!(r.next_attempt_at.as_deref(), Some(until.as_str()), "hold 還在：不知道窗口收了沒，就當還沒收");
+        assert!(r.error.as_deref().is_some_and(|e| e.starts_with("restart window held until")), "{:?}", r.error);
+        assert_eq!(r.attempts, 0);
     }
 }
 
