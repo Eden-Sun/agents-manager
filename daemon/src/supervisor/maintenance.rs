@@ -93,7 +93,7 @@ pub async fn escalation_for(app: &Arc<App>, approval_id: Option<&str>) -> Result
             .map_err(|e| LcError::Upstream(e.to_string()))?
             // 只有「還能用來開窗口」的核准才有資格計時：已消耗、被撤、過期的都不算。
             .filter(|a| a.status == "approved" && RESOURCES.contains(&a.purpose.as_str()))
-            .filter(|a| !a.expires_at.as_deref().is_some_and(|t| t <= now.as_str())),
+            .filter(|a| !a.expires_at.as_deref().is_some_and(|t| crate::db::cmp_ts(t, &now).is_le())),
         None => store::oldest_live_window_approval(&app.db, &now).await.map_err(|e| LcError::Upstream(e.to_string()))?,
     };
     let Some(a) = found else { return Ok(None) };
@@ -597,9 +597,10 @@ pub async fn acquire(
 /// that permission lapses, and it cannot be granted past it either.
 pub fn lease_deadline(requested: &str, approval_expires_at: Option<&str>) -> String {
     match approval_expires_at {
-        // RFC3339 in UTC with the same precision sorts lexicographically, and both sides come
-        // from `iso_in` / the approvals table, so a string compare is the right comparison.
-        Some(exp) if exp < requested => exp.to_string(),
+        // Compare instants, not strings: the approval's `expires_at` may be a second-precision value
+        // written by an older build, or any RFC3339 the AGM sent through the API (`+08:00`), while
+        // `requested` is `iso_in`'s millisecond form (issue #101).
+        Some(exp) if crate::db::cmp_ts(exp, requested).is_lt() => exp.to_string(),
         _ => requested.to_string(),
     }
 }

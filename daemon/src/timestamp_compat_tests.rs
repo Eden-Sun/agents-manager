@@ -417,14 +417,8 @@ fn production_sources() -> Vec<(String, String)> {
 
 /// 已知還沒修、而且**不歸這張票的人改**的地方：`(命中的那行要包含的字串, 歸誰／追在哪張票)`。
 /// 修掉之後那一行不再命中，下面 `stale allowlist` 那道檢查會逼你把它從這裡拿掉。
-const KNOWN_UNFIXED: &[(&str, &str)] = &[
-    // supervisor/maintenance.rs 歸 rinf（#127），追在 #140：`escalation_for` 過濾核准是否過期、`lease_deadline`
-    // 取兩個到期時間較早者，都是字串比較；核准的 `expires_at` 可能是舊版寫的秒格式，或 AGM 從 API 帶進來的任意
-    // RFC3339。修法各一行：`crate::db::cmp_ts(t, &now).is_le()`、`crate::db::cmp_ts(exp, requested).is_lt()`，
-    // 然後把這兩條從這裡拿掉，並補混存測試（見 #140 內文）。
-    ("is_some_and(|t| t <= now.as_str())", "supervisor/maintenance.rs escalation_for — rinf"),
-    ("Some(exp) if exp < requested", "supervisor/maintenance.rs lease_deadline — rinf"),
-];
+/// （目前沒有：`supervisor/maintenance.rs` 那兩處已在 #140 修掉。）
+const KNOWN_UNFIXED: &[(&str, &str)] = &[];
 
 fn is_ident(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
@@ -589,4 +583,33 @@ fn the_source_guard_recognises_the_shapes_it_is_meant_to_catch() {
     assert!(closure_param_ordering(".filter(|w| *w < decided)"));
     assert!(!closure_param_ordering(".map(|t| t + 1)"));
     assert!(!closure_param_ordering(".map(|a, b| a.cmp(b))"));
+}
+
+/// 維護窗口的升級計時：`escalation_for` 過濾「還沒過期的核准」，用的是 `db::now()`。
+/// 核准的 `expires_at` 是舊版寫的秒格式、這一秒稍早已過期：不算還能用來開窗口。
+#[tokio::test]
+async fn an_approval_that_expired_earlier_this_second_does_not_start_the_escalation_clock() {
+    let e = tt::env().await;
+    let p = &e.app.db;
+    let id = approved(p, "bot-a", "restart", &mid_second().await).await;
+    let got = crate::supervisor::maintenance::escalation_for(&e.app, Some(&id)).await.unwrap();
+    assert!(got.is_none(), "已過期的核准不算還能用來開窗口");
+    // 下一秒才過期的照舊有效。
+    let live = approved(p, "bot-b", "restart", &db::iso_in(600)).await;
+    assert!(crate::supervisor::maintenance::escalation_for(&e.app, Some(&live)).await.unwrap().is_some());
+}
+
+/// 租約的到期時間取「要求的」與「核准自己的到期」較早的那個。核准的 `expires_at` 可能是舊版寫的秒格式，
+/// 或 AGM 從 API 帶進來的任意 RFC3339（`+08:00`）——照時刻取，不照字串。
+#[test]
+fn the_lease_deadline_is_the_earlier_instant_whatever_the_spelling() {
+    use crate::supervisor::maintenance::lease_deadline;
+    // 舊格式、同一秒內更早（10:00:00.000 < 10:00:00.500）→ 用核准的。
+    assert_eq!(lease_deadline("2026-09-18T10:00:00.500Z", Some("2026-09-18T10:00:00Z")), "2026-09-18T10:00:00Z");
+    // 帶位移：18:00:00+08:00 就是 10:00:00Z，早於 10:00:01 → 用核准的（字串比較差 8 小時）。
+    assert_eq!(lease_deadline("2026-09-18T10:00:01.000Z", Some("2026-09-18T18:00:00+08:00")), "2026-09-18T18:00:00+08:00");
+    // 核准比較晚 → 用要求的。
+    assert_eq!(lease_deadline("2026-09-18T10:00:00.500Z", Some("2026-09-18T10:00:01Z")), "2026-09-18T10:00:00.500Z");
+    assert_eq!(lease_deadline("2026-09-18T10:00:00.500Z", Some("2026-09-18T18:00:01+08:00")), "2026-09-18T10:00:00.500Z");
+    assert_eq!(lease_deadline("2026-09-18T10:00:00.500Z", None), "2026-09-18T10:00:00.500Z");
 }
