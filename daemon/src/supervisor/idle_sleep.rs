@@ -59,8 +59,12 @@ pub struct Cand {
     pub turn_in_flight: bool,
     /// 還有一則排隊中的 web prompt 等著送進去。
     pub queued_turn: bool,
-    /// AGM 還有沒結案的 assignment 指著它。
+    /// AGM 還有沒結案的 assignment 指著它（**非終局**的都算，含 `blocked`／`awaiting_review`／
+    /// `quota_blocked`——只看在途三態就是 2026-09-18 那次停擺的根因）。
     pub open_assignment: bool,
+    /// pane 裡還有背景 shell／建置在跑（agent 自己已經結束回合，但它丟到背景的工作還沒完）。
+    /// 便宜的檢查先做完才會去問這一項，所以 [`candidates`] 列出來的一律是 `false`。
+    pub background_shell: bool,
     /// 收起來之後接得回來（有 native session、transcript 還在、kind 支援 `--resume`）。
     pub resumable: bool,
     /// 最後一次有動作到現在幾分鐘。
@@ -80,6 +84,7 @@ pub enum Skip {
     TurnInFlight,
     QueuedTurn,
     OpenAssignment,
+    BackgroundShell,
     NoResume,
     StillWarm,
 }
@@ -97,6 +102,7 @@ impl Skip {
             Skip::TurnInFlight => "turn_in_flight",
             Skip::QueuedTurn => "queued_turn",
             Skip::OpenAssignment => "open_assignment",
+            Skip::BackgroundShell => "background_shell",
             Skip::NoResume => "no_resume",
             Skip::StillWarm => "still_warm",
         }
@@ -114,6 +120,7 @@ impl Skip {
             Skip::TurnInFlight => "還有一回合沒收掉",
             Skip::QueuedTurn => "還有排隊中的訊息沒送進去",
             Skip::OpenAssignment => "AGM 還有沒結案的 assignment 指著它",
+            Skip::BackgroundShell => "pane 裡還有背景 shell／建置在跑",
             Skip::NoResume => "沒有可續接的 session，收起來會把對話弄丟",
             Skip::StillWarm => "還沒閒置到門檻",
         }
@@ -147,6 +154,9 @@ pub fn decide(c: &Cand, threshold: i64) -> Result<(), Skip> {
     }
     if c.open_assignment {
         return Err(Skip::OpenAssignment);
+    }
+    if c.background_shell {
+        return Err(Skip::BackgroundShell);
     }
     if !c.resumable {
         return Err(Skip::NoResume);
@@ -221,16 +231,23 @@ async fn supervisor_bot_ids(app: &Arc<App>) -> std::collections::HashSet<String>
     out
 }
 
+/// 還沒結案的交辦＝**所有非終局狀態**，從 [`crate::supervisor::assignment_state`] 那張表算出來，
+/// 不在這裡抄一份清單（抄的那份就是 2026-09-18 停擺的根因：只認在途三態，一筆 `blocked` 的交辦
+/// 擋不住回收，建置 child 被收掉之後 kick 每輪跳過那張未結案，部署停了 3.5 小時）。
 async fn has_open_assignment(app: &Arc<App>, bot_id: &str) -> bool {
-    sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM supervisor_assignments
-          WHERE target_bot_id = ? AND status IN ('queued','delivered','unknown')",
-    )
-    .bind(bot_id)
-    .fetch_one(&app.db)
-    .await
-    .unwrap_or(0)
-        > 0
+    let open = open_assignment_statuses();
+    let marks = vec!["?"; open.len()].join(",");
+    let sql = format!("SELECT COUNT(*) FROM supervisor_assignments WHERE target_bot_id = ? AND status IN ({marks})");
+    let mut q = sqlx::query_scalar::<_, i64>(&sql).bind(bot_id);
+    for st in &open {
+        q = q.bind(*st);
+    }
+    q.fetch_one(&app.db).await.unwrap_or(0) > 0
+}
+
+/// 非終局的交辦狀態。
+pub fn open_assignment_statuses() -> Vec<&'static str> {
+    crate::supervisor::assignment_state::ALL.iter().copied().filter(|s| !crate::supervisor::assignment_state::is_terminal(s)).collect()
 }
 
 /// 一顆 bot 此刻的判斷素材。`sup` 是總管的 bot id。
@@ -251,6 +268,8 @@ async fn cand_for(app: &Arc<App>, run: &db::Run, sup: &std::collections::HashSet
         turn_in_flight: db::in_flight_turn(&app.db, &run.id).await?.is_some(),
         queued_turn: db::queued_turn_for_bot(&app.db, &bot.id).await?.is_some(),
         open_assignment: has_open_assignment(app, &bot.id).await,
+        // 要問 herdr 與 ps，太貴；只有真的要收的那一顆才查（見 [`sweep`]）。
+        background_shell: false,
         resumable: resumable(
             &bot.kind,
             run.native_session_id.as_deref(),
@@ -271,6 +290,68 @@ pub async fn candidates(app: &Arc<App>) -> anyhow::Result<Vec<Cand>> {
         }
     }
     Ok(out)
+}
+
+/// pane 的行程樹裡，除了那顆 shell 與 agent 自己以外還活著的**背景工作**（argv，去重後）。
+///
+/// 2026-09-18：建置 child 回了一句「正在背景建置測試」就結束回合，背景的 web build／cargo 還在跑。
+/// 對 daemon 來說它就是一顆 `idle` 的 bot，90 分鐘後被收起來，工作跟著沒了，部署停擺 3.5 小時。
+/// 回合結束不等於工作結束，所以收之前看一眼 pane 底下還有沒有活的背景工作。
+///
+/// 只認得出來的形狀才算，不是「有子行程就算」：claude 的 MCP server、外掛、statusline 也是子行程，
+/// 把它們算進去等於把整個功能關掉。認的是 shell（背景 Bash 工作就長這樣）與建置工具。
+pub fn background_procs(ps_tree: &str, shell_pid: i32) -> Vec<String> {
+    let procs = crate::memstat::parse_ps(ps_tree);
+    let by_pid: std::collections::HashMap<i32, &crate::memstat::Proc> = procs.iter().map(|p| (p.pid, p)).collect();
+    if !by_pid.contains_key(&shell_pid) {
+        return Vec::new();
+    }
+    let children = crate::memstat::child_index(&procs);
+    let mut order = vec![shell_pid];
+    let mut seen: std::collections::HashSet<i32> = std::collections::HashSet::from([shell_pid]);
+    let mut at = 0;
+    while at < order.len() {
+        if let Some(kids) = children.get(&order[at]) {
+            let mut kids = kids.clone();
+            kids.sort_unstable();
+            order.extend(kids.into_iter().filter(|k| seen.insert(*k)));
+        }
+        at += 1;
+    }
+    let mut out: Vec<String> = Vec::new();
+    for pid in order.into_iter().skip(1) {
+        let Some(p) = by_pid.get(&pid) else { continue };
+        let exe = crate::memstat::exe_name(&p.argv).trim_start_matches('-');
+        if !(BACKGROUND_SHELLS.contains(&exe) || BACKGROUND_TOOLS.contains(&exe)) {
+            continue;
+        }
+        if !out.contains(&p.argv) {
+            out.push(p.argv.clone());
+        }
+    }
+    out
+}
+
+/// 背景 Bash 工作跑起來就是這幾個。
+const BACKGROUND_SHELLS: &[&str] = &["bash", "zsh", "sh", "dash", "ksh", "fish"];
+/// 背景建置常見的長命行程（shell 自己先結束、工具還在跑的情形）。`node`／`python3` 刻意不列：
+/// MCP server 與外掛就是那兩個，列進去等於所有 claude 都不收。
+const BACKGROUND_TOOLS: &[&str] = &["cargo", "rustc", "bun", "bunx", "npm", "pnpm", "yarn", "tsc", "vite", "make", "pytest", "sccache"];
+
+/// 這顆 bot 的 pane 底下現在有沒有背景工作。問不到（herdr 不在、ps 失敗、pane 沒了）一律回
+/// `false`：這是一道加碼的保險，不能因為問不到就永遠不收。
+async fn has_background_shell(app: &Arc<App>, run: &db::Run) -> bool {
+    let Some(pane) = run.pane_id.clone().map(|p| p.trim().to_string()).filter(|p| !p.is_empty()) else { return false };
+    let Some(client) = app.herdr_for_run(run).await else { return false };
+    let Ok(shell) = client.pane_shell(&pane).await else { return false };
+    let Some(pid) = shell.shell_pid else { return false };
+    let host = db::bot_host(&app.db, &run.bot_id).await.unwrap_or_else(|_| crate::config::LOCAL_HOST.to_string());
+    let Ok(dump) = crate::memproc::dump(app, &host).await else { return false };
+    let found = background_procs(&dump, pid as i32);
+    if !found.is_empty() {
+        tracing::info!(bot = %run.bot_id, procs = ?found, "idle sweep: pane still has background work; leaving it alone");
+    }
+    !found.is_empty()
 }
 
 // ---------------------------------------------------------------- 睡著這件事本身
@@ -463,7 +544,13 @@ async fn sweep(app: &Arc<App>, threshold: i64) {
         let Ok(Some(run)) = db::active_run(&app.db, &c.bot_id).await else { continue };
         let session = run.native_session_id.clone();
         match cand_for(app, &run, &sup).await {
-            Ok(Some(f)) if decide(&f, threshold).is_ok() => sleep_one(app, &f, session).await,
+            // 便宜的判斷全過了才去問 pane：一次 ps dump 不該為了每顆閒著的 bot 每分鐘跑一遍。
+            Ok(Some(mut f)) if decide(&f, threshold).is_ok() => {
+                f.background_shell = has_background_shell(app, &run).await;
+                if decide(&f, threshold).is_ok() {
+                    sleep_one(app, &f, session).await;
+                }
+            }
             _ => continue,
         }
     }
@@ -484,9 +571,72 @@ mod tests {
             turn_in_flight: false,
             queued_turn: false,
             open_assignment: false,
+            background_shell: false,
             resumable: true,
             idle_minutes: 120,
         }
+    }
+
+    /// 2026-09-18 停擺：建置 child 的交辦停在 `blocked`（AGM 還沒裁示），舊的
+    /// `has_open_assignment` 只認在途三態，於是它被當成閒置收掉，kick 每輪跳過那張未結案的交辦，
+    /// 部署停了 3.5 小時。未結案就是未結案——非終局的每一個狀態都要擋住回收。
+    #[test]
+    fn every_unsettled_assignment_status_keeps_the_bot_awake() {
+        for st in open_assignment_statuses() {
+            assert!(
+                !crate::supervisor::assignment_state::is_terminal(st),
+                "{st} 是終局，不該出現在未結案清單裡"
+            );
+        }
+        for st in ["queued", "delivered", "unknown", "awaiting_review", "blocked", "quota_blocked"] {
+            assert!(open_assignment_statuses().contains(&st), "{st} 沒被當成未結案，回收會把它的 bot 收掉");
+        }
+        for st in crate::supervisor::assignment_state::TERMINAL {
+            assert!(!open_assignment_statuses().contains(&st), "{st} 已經結案，不該擋住回收");
+        }
+        let mut c = cand();
+        c.open_assignment = true;
+        assert_eq!(decide(&c, 90), Err(Skip::OpenAssignment));
+    }
+
+    /// 回合結束不等於工作結束：pane 底下還有背景 shell／建置在跑就不收。
+    #[test]
+    fn a_pane_with_background_work_is_left_alone() {
+        let mut c = cand();
+        c.background_shell = true;
+        assert_eq!(decide(&c, 90), Err(Skip::BackgroundShell));
+    }
+
+    /// 2026-09-18 那顆建置 child 當時的行程樹：claude 已經閒著，它丟到背景的 build 還在跑。
+    const PS_WITH_BACKGROUND_BUILD: &str = "\
+  900     1  4000 /opt/homebrew/bin/herdr --session w168
+ 1000   900  8000 -zsh
+ 1010  1000 900000 /Users/m4p/.local/bin/claude
+ 1020  1010  3000 /bin/bash -c cd /repo && bun run build && cargo build --release
+ 1030  1020 500000 /Users/m4p/.cargo/bin/cargo build --release
+";
+
+    /// 只剩 agent 自己（外加它的 MCP server／外掛）的 pane 是可以收的——把那些算成背景工作，
+    /// 等於把整個省 RAM 的功能關掉。
+    const PS_IDLE_WITH_MCP: &str = "\
+  900     1  4000 /opt/homebrew/bin/herdr --session w168
+ 1000   900  8000 -zsh
+ 1010  1000 900000 /Users/m4p/.local/bin/claude
+ 1040  1010 120000 node /Users/m4p/.claude/mcp/docs-server.js
+ 1050  1010  90000 /usr/bin/python3 /Users/m4p/.claude/plugins/thing.py
+";
+
+    #[test]
+    fn background_build_under_the_pane_is_seen_but_mcp_servers_are_not() {
+        let found = background_procs(PS_WITH_BACKGROUND_BUILD, 1000);
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert!(found.iter().any(|a| a.contains("bun run build")), "{found:?}");
+        assert!(found.iter().any(|a| a.contains("cargo build --release")), "{found:?}");
+
+        assert!(background_procs(PS_IDLE_WITH_MCP, 1000).is_empty(), "MCP／外掛不是背景工作");
+        // 樹裡沒有這顆 shell（pane 已經不在）：判不出來就當沒有，不要永遠不收。
+        assert!(background_procs(PS_WITH_BACKGROUND_BUILD, 4242).is_empty());
+        assert!(background_procs("", 1000).is_empty());
     }
 
     #[test]
@@ -633,6 +783,69 @@ mod tests {
             let c = cands.iter().find(|c| &c.bot_id == id).expect("在名單裡");
             assert!(c.is_supervisor, "{} 應該被認出是總管", c.name);
             assert_eq!(decide(c, 90), Err(Skip::Supervisor), "{}", c.name);
+        }
+    }
+
+    /// 真的打到 DB：一張 `blocked` 的交辦指著這顆 bot，`has_open_assignment` 就要是 true。
+    /// 純函式測 `open_assignment_statuses()` 證明不了 SQL 有用上它——2026-09-18 壞掉的正是那句 SQL。
+    #[tokio::test]
+    async fn a_blocked_assignment_is_still_open_in_the_query_itself() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let bot = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, created_at)
+             VALUES (?,?,'builder','claude','[]',0,1,'tok',?)",
+        )
+        .bind(&bot)
+        .bind(&env.project_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        assert!(!has_open_assignment(&app, &bot).await, "還沒有交辦");
+
+        let insert = |status: &'static str| {
+            let app = app.clone();
+            let bot = bot.clone();
+            async move {
+                sqlx::query(
+                    "INSERT INTO supervisor_assignments
+                       (id, supervisor_id, request_id, target_bot_id, client_request_id, text, status, attempts,
+                        expects_review, created_at, updated_at)
+                     VALUES (?, 'AGM', NULL, ?, ?, '建置並重啟', ?, 0, 1, ?, ?)",
+                )
+                .bind(db::ulid())
+                .bind(&bot)
+                .bind(db::ulid())
+                .bind(status)
+                .bind(db::now())
+                .bind(db::now())
+                .execute(&app.db)
+                .await
+                .unwrap();
+            }
+        };
+
+        // 事故當天那一張：AGM 還沒裁示，狀態是 blocked——舊的 SQL 看不到它。
+        insert("blocked").await;
+        assert!(has_open_assignment(&app, &bot).await, "blocked 的交辦還沒結案，不能把它的 bot 收掉");
+
+        sqlx::query("UPDATE supervisor_assignments SET status='completed' WHERE target_bot_id=?")
+            .bind(&bot)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        assert!(!has_open_assignment(&app, &bot).await, "結案了就不該再擋著");
+
+        for st in ["awaiting_review", "quota_blocked", "unknown"] {
+            insert(st).await;
+            assert!(has_open_assignment(&app, &bot).await, "{st} 還沒結案");
+            sqlx::query("UPDATE supervisor_assignments SET status='cancelled' WHERE status=?")
+                .bind(st)
+                .execute(&app.db)
+                .await
+                .unwrap();
         }
     }
 
