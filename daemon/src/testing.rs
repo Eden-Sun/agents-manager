@@ -649,6 +649,12 @@ impl MockHerdr {
         self.faults.lock().unwrap().push((method.to_string(), fault));
     }
 
+    /// 同 [`MockHerdr::fail_next`]，但拿得進 `race_point` 的 `'static` 閉包：要在某一瞬間之後才壞的時候用（#157）。
+    pub fn fail_later(&self) -> impl Fn(&str, Fault) + Send + Sync + 'static {
+        let faults = self.faults.clone();
+        move |method, fault| faults.lock().unwrap().push((method.to_string(), fault))
+    }
+
     pub fn methods(&self) -> Vec<String> {
         self.calls.lock().unwrap().iter().map(|(m, _)| m.clone()).collect()
     }

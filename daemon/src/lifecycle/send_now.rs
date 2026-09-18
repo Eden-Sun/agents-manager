@@ -147,7 +147,10 @@ pub(crate) async fn deliver(
         Ok(()) => Outcome::Interrupted(delivered),
         Err(e) => {
             // 送達結果先記在帳上，補的時候跟掛上 run 一起寫。DB 一時寫不進去多半已經好了：當場再補一次。
-            super::interruption::owe_delivery(&bot.id, new_turn, delivered.as_ref().ok().and_then(Delivered::record));
+            // 確認送出本身出錯也要記（#157）：鍵已經生效，證不出來就是 `unknown`（同 prompt 那一頭對 `Err` 的處理）——
+            // 沒記的話補收尾時沒東西可寫，那一則停在 pending 直到重啟。送達時間是此刻，不是補寫的時候。
+            let seen = delivered.as_ref().ok().copied().unwrap_or(Delivered::Unproven("send_now_unconfirmed"));
+            super::interruption::owe_delivery(&bot.id, new_turn, seen.record(), db::now());
             #[cfg(test)]
             super::race_point::hit("send_now_owed", &bot.id).await;
             let settled = super::interruption::settle_locked(app, &bot.id, super::interruption::Evidence::Nothing).await;

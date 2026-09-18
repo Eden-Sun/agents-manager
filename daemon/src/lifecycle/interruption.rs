@@ -83,7 +83,8 @@ struct Pending {
 #[derive(Debug, Clone)]
 struct NewTurn {
     id: String,
-    delivery: Option<DeliveryRecord>,
+    /// 送達結果與送出的那一刻（已經知道的話）。
+    delivery: Option<(DeliveryRecord, String)>,
 }
 
 /// bot → 這顆 bot 欠著／待證的收尾，一筆回合一條。同一個 run 同時最多一筆在飛，但 DB 一直寫不進去時，上一個 run
@@ -153,12 +154,12 @@ pub(crate) async fn send_now_interrupted(app: &Arc<App>, bot_id: &str, run_id: &
     owe(app, bot_id, p).await
 }
 
-/// 欠著的插隊送出，新那一則的送達結果後來才知道：記在帳上，補的時候一起寫。
-pub(crate) fn owe_delivery(bot_id: &str, new_turn: &str, delivery: Option<DeliveryRecord>) {
+/// 欠著的插隊送出，新那一則的送達結果後來才知道：記在帳上（連同送出的那一刻），補的時候一起寫。
+pub(crate) fn owe_delivery(bot_id: &str, new_turn: &str, delivery: Option<DeliveryRecord>, at: String) {
     let mut m = ledger().lock().unwrap_or_else(|e| e.into_inner());
     let list = m.get_mut(bot_id).into_iter().flatten();
     if let Some(n) = list.filter_map(|p| p.new_turn.as_mut()).find(|n| n.id == new_turn) {
-        n.delivery = delivery;
+        n.delivery = delivery.map(|rec| (rec, at));
     }
 }
 
@@ -324,9 +325,9 @@ async fn close(app: &Arc<App>, bot_id: &str, p: &Pending) -> anyhow::Result<()> 
         emit_message_added(app, bot_id, m).await;
     }
     if let Some(n) = &p.new_turn {
-        if let (true, Some(rec)) = (bound, n.delivery) {
+        if let (true, Some((rec, at))) = (bound, &n.delivery) {
             // 寫不進去就記在送達結果的帳上（#149，`owed_delivery` 自己重試）：這個交易已經 commit，打斷這一半不重來。
-            let _ = super::owed_delivery::delivered(app, bot_id, &n.id, rec).await;
+            let _ = super::owed_delivery::delivered_at(app, bot_id, &n.id, *rec, at).await;
         }
         emit_turn(app, &n.id).await;
     }
