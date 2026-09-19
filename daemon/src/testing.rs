@@ -45,6 +45,8 @@ pub struct MockHerdr {
     pub agents: Arc<StdMutex<Vec<Value>>>,
     /// 下一次（或下幾次）呼叫某個方法時要出的狀況，見 [`MockHerdr::fail_next`]。
     faults: Arc<StdMutex<Vec<(String, Fault)>>>,
+    /// `agent.list` 回空陣列，但 `agent.get` 仍看得到 `agents`：模擬「清單暫時是空的、agent 其實還在」。
+    pub hide_agent_list: Arc<std::sync::atomic::AtomicBool>,
     handle: tokio::task::JoinHandle<()>,
 }
 
@@ -203,6 +205,7 @@ struct MockState {
     pids: Arc<StdMutex<BTreeMap<String, i64>>>,
     shell_pids: Arc<StdMutex<BTreeMap<String, i64>>>,
     faults: Arc<StdMutex<Vec<(String, Fault)>>>,
+    hide_agent_list: Arc<std::sync::atomic::AtomicBool>,
     seq: Arc<std::sync::atomic::AtomicU64>,
 }
 
@@ -264,6 +267,7 @@ impl MockHerdr {
             pids: Default::default(),
             shell_pids: Default::default(),
             faults: Default::default(),
+            hide_agent_list: Default::default(),
             seq: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         };
         let (workspaces, tabs, calls, agents) =
@@ -273,6 +277,7 @@ impl MockHerdr {
         let reject_ansi = state.reject_ansi.clone();
         let ignore_ansi = state.ignore_ansi.clone();
         let faults = state.faults.clone();
+        let hide_agent_list = state.hide_agent_list.clone();
         let handle = tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
                 let st = state.clone();
@@ -630,7 +635,12 @@ impl MockHerdr {
                             }
                         }
                         "agent.list" => {
-                            json!({"id": id, "result": {"agents": st.agents.lock().unwrap().clone()}})
+                            let agents = if st.hide_agent_list.load(std::sync::atomic::Ordering::SeqCst) {
+                                vec![]
+                            } else {
+                                st.agents.lock().unwrap().clone()
+                            };
+                            json!({"id": id, "result": {"agents": agents}})
                         }
                         "agent.get" => {
                             // Like herdr: a live agent name or its pane id.
@@ -663,7 +673,7 @@ impl MockHerdr {
                 });
             }
         });
-        MockHerdr { workspaces, tabs, calls, agents, screens, live, reject_ansi, ignore_ansi, argvs, pids, shell_pids, faults, handle }
+        MockHerdr { workspaces, tabs, calls, agents, screens, live, reject_ansi, ignore_ansi, argvs, pids, shell_pids, faults, hide_agent_list, handle }
     }
 
     /// 接下來第一次呼叫 `method` 時照 `fault` 壞一次（排幾次就壞幾次，依序）。呼叫一樣記在 `calls` 裡。

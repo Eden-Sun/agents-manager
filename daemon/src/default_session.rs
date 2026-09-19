@@ -144,11 +144,28 @@ pub async fn sync(app: &Arc<App>) -> Result<()> {
 
     // A vanished default-session agent ends its Run, but its external pane is deliberately not
     // closed. The next sync can still observe a newly detected agent in that pane.
+    // `agent.list` 空陣列不是失敗：herdr 重啟中清單還沒填好時，list 空、get 還找得到。
+    // 沒再問就標 exited，等於把還在跑的 default-session bot 收掉（之後可能再 import 成另一顆）。
     for bot in db::live_bots(&app.db).await?.into_iter().filter(|b| b.herdr_session.as_deref() == Some(SESSION)) {
         if seen_bots.contains(&bot.id) {
             continue;
         }
         if let Some(run) = db::active_run(&app.db, &bot.id).await? {
+            let target = run.pane_id.as_deref().filter(|p| !p.is_empty()).map(str::to_string).or_else(|| run.agent_name.clone());
+            let still_there = match target.as_deref() {
+                Some(t) => match client.agent_get(t).await {
+                    Ok(Some(_)) => true,
+                    Ok(None) => false,
+                    Err(e) => {
+                        tracing::warn!(bot = %bot.name, error = %e, "default session: could not ask herdr if the agent is still there; leaving the run this pass");
+                        true
+                    }
+                },
+                None => false,
+            };
+            if still_there {
+                continue;
+            }
             crate::lifecycle::mark_run_exited(app, &run.id, "agent not found in default session").await;
         }
     }
@@ -274,8 +291,12 @@ async fn ensure_imported_bot(
 
 #[cfg(test)]
 mod tests {
-    use super::{imported_name, same_workdir};
+    use super::{imported_name, same_workdir, sync, SESSION};
+    use crate::db;
+    use crate::testing as tt;
+    use serde_json::json;
     use std::collections::HashSet;
+    use std::sync::atomic::Ordering;
 
     #[test]
     fn matches_only_the_same_directory() {
@@ -289,5 +310,92 @@ mod tests {
         assert_eq!(imported_name("agent", &used), "agent-2");
         assert_eq!(imported_name("agent bad", &HashSet::new()), "agentbad");
         assert_eq!(imported_name("bad name", &HashSet::from(["badname".to_string()])), "badname-2");
+    }
+
+    /// `agent.list` 暫時回空、但 `agent.get` 還找得到：不能把 default-session 的 run 標成 exited。
+    #[tokio::test]
+    async fn an_empty_agent_list_does_not_exit_a_default_session_run_that_is_still_there() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, _root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let pane = client.tab_create(&ws.workspace_id, env.repo.to_str().unwrap(), "imported", json!({})).await.unwrap();
+        let bot = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, herdr_session, created_at)
+             VALUES (?,?,?,'claude','[]',0,1,'tok',?,?)",
+        )
+        .bind(&bot)
+        .bind(&env.project_id)
+        .bind("imported")
+        .bind(SESSION)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let run = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, tab_id, pane_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','idle',?,?,?,?,'default',?)",
+        )
+        .bind(&run)
+        .bind(&bot)
+        .bind(&ws.workspace_id)
+        .bind(&pane.tab_id)
+        .bind(&pane.pane_id)
+        .bind("imported")
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        *env.herdr.agents.lock().unwrap() = vec![json!({
+            "name": "imported", "agent": "claude", "agent_status": "idle",
+            "workspace_id": ws.workspace_id, "tab_id": pane.tab_id, "pane_id": pane.pane_id,
+            "cwd": env.repo.to_string_lossy(),
+        })];
+        env.herdr.hide_agent_list.store(true, Ordering::SeqCst);
+
+        sync(&app).await.unwrap();
+
+        let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(&run).fetch_one(&app.db).await.unwrap();
+        assert_eq!(state, "running", "list 空、get 還在：不能當成 agent 消失");
+    }
+
+    /// list 空、get 也說沒有：這次是真的消失，run 才該收。
+    #[tokio::test]
+    async fn a_default_session_run_still_exits_when_herdr_confirms_the_agent_is_gone() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, herdr_session, created_at)
+             VALUES (?,?,?,'claude','[]',0,1,'tok',?,?)",
+        )
+        .bind(&bot)
+        .bind(&env.project_id)
+        .bind("gone")
+        .bind(SESSION)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let run = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, pane_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','idle',?,?,'default',?)",
+        )
+        .bind(&run)
+        .bind(&bot)
+        .bind("w1:pGone")
+        .bind("gone")
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        sync(&app).await.unwrap();
+
+        let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(&run).fetch_one(&app.db).await.unwrap();
+        assert_eq!(state, "exited");
     }
 }
