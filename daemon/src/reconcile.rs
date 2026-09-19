@@ -245,6 +245,15 @@ async fn rearm_run(app: &Arc<App>, run: &db::Run) -> bool {
     if !adopt_orphan_delivery(app, &turn).await {
         return false;
     }
+    // 重啟前就被按停的（打斷的帳只在記憶體；claude 2.1.276+ 按 Esc 不送 hook）：照 Esc 收，不接回（#235）。
+    match crate::lifecycle::adopt_interrupted_on_restart(app, run, &turn).await {
+        Ok(true) => return true,
+        Ok(false) => {}
+        Err(e) => {
+            tracing::warn!(run = %run.id, turn = %turn.id, error = %e, "cannot check whether this turn was interrupted before the restart yet");
+            return false;
+        }
+    }
     crate::lifecycle::arm_progress(app, &run.id, &run.bot_id, &turn.id).await;
     // 送出後幾秒內被重啟：補 Enter 與「畫面上找不到就重送」這兩層網都只活在上一個行程裡
     // （review 2026-09-16）。只對**剛送出**的補，不然會把幾小時前的 prompt 重送一次。

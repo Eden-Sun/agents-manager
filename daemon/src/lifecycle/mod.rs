@@ -89,7 +89,7 @@ pub(crate) use start::*;
 pub(crate) use start_send::{prompt_starting, withdraw_turn};
 pub(crate) use stop::*;
 pub(crate) use interrupt_grace::{note_user_interrupt_of, settle_interrupt_echo, FailureEvidence as InterruptFailureEvidence};
-pub(crate) use interruption::{adopt_turns_of_ended_runs, adopt_unbound_send_nows, settle_locked as settle_interruption, Evidence as InterruptEvidence};
+pub(crate) use interruption::{adopt_interrupted_on_restart, adopt_turns_of_ended_runs, adopt_unbound_send_nows, settle_locked as settle_interruption, Evidence as InterruptEvidence};
 pub(crate) use owed_delivery::{owed_as_unknown, settle_locked as settle_owed_deliveries};
 #[cfg(test)]
 pub(crate) use interrupt_grace::{expect_interrupt_echo, note_user_interrupt, InterruptedTurn};

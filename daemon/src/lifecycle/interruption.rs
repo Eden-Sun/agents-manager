@@ -389,6 +389,24 @@ async fn close(app: &Arc<App>, bot_id: &str, p: &Pending) -> anyhow::Result<()> 
     Ok(())
 }
 
+/// 重啟時從 session log 補收「重啟前就被按停」的那一筆，寫進對話的說明。
+const RESTART_INTERRUPT_NOTE: &str = "interrupted by user（在 daemon 重啟之前；重啟時照 session log 補收）";
+
+/// 重啟接回在飛的那一筆之前（#235）：它是不是在重啟前就被按停了。打斷的帳（欠著、待證）只在記憶體，使用者也可能在 daemon
+/// 停著的時候直接在 pane 裡按 Esc——claude 2.1.276+ 按 Esc 不送任何 hook（#223），接回 poller 之後它會被 §4.3 備援當成答完了
+/// 收掉，下一句的 Stop 還會認領它。session log 裡我們那一則之後、答完之前有中斷紀錄，就照 Esc 收。
+/// `Ok(true)`＝收掉了，不必接回；`Ok(false)`＝照舊接回（沒有這個證據、讀不到 log、找不到我們那一則）。
+pub(crate) async fn adopt_interrupted_on_restart(app: &Arc<App>, run: &db::Run, turn: &db::Turn) -> anyhow::Result<bool> {
+    let Some(bot) = db::bot(&app.db, &run.bot_id).await? else { return Ok(false) };
+    let sent = turn_echo_texts(app, &turn.id).await?;
+    if sent.is_empty() || !super::interrupt_grace::log_interrupted_after(app, &bot, run, &sent).await {
+        return Ok(false);
+    }
+    close_turn(app, &run.bot_id, &run.id, &turn.id, RESTART_INTERRUPT_NOTE).await?;
+    tracing::warn!(run = %run.id, turn = %turn.id, "this turn was interrupted before the restart; closed it from the session log");
+    Ok(true)
+}
+
 /// run 已經結束（不是 starting／running／stopping）、回合卻還 in_flight（#156）：欠著的收尾只記在記憶體，daemon 在補上
 /// 之前重啟就沒人會收——那個 run 不會再有 hook，閒置 watchdog 也只看活著的 run。重啟時補收成 failed，寫明原因。
 ///
@@ -1113,6 +1131,66 @@ mod tests {
             sqlx::query_as("SELECT status, delivery FROM turns WHERE id=?").bind(&orphan).fetch_one(&app.db).await.unwrap();
         assert_eq!((status.as_str(), delivery.as_str()), ("failed", "unknown"));
         assert_eq!(status_of(&app, &b.turn).await, "in_flight", "被插隊的那一筆不動");
+    }
+
+    fn end_turn_line(text: &str, at: &str) -> String {
+        json!({"type": "assistant", "timestamp": at, "message": {"role": "assistant", "stop_reason": "end_turn", "content": [{"type": "text", "text": text}]}})
+            .to_string()
+    }
+
+    /// 打斷的帳只在記憶體：Esc 生效但 DB 沒寫成（欠著）、Esc 待證，或使用者在 daemon 停著的時候直接在 pane 裡按了 Esc。
+    /// claude 2.1.276+ 按 Esc 不送任何 hook（#223），重啟後那一筆被接回 poller、等著被 §4.3 備援當成答完了收掉；
+    /// 使用者接著在 pane 裡打的下一句，它的 Stop 還會認領那一筆。transcript 裡我們那一則之後、答完之前有中斷標記＝被按停了：
+    /// 重啟時就照 Esc 收，下一句的回覆成外部回合。
+    #[tokio::test]
+    async fn a_turn_interrupted_before_a_restart_is_closed_from_the_transcript() {
+        let b = busy("esc-before-restart").await;
+        let app = b.env.app.clone();
+        let path = transcript(&b, &[prompt_line("跑一下測試", &at(-5_000)), esc_marker(&at(-1_000))]).await;
+
+        let fresh = tt::restart_app(&b.env).await;
+        crate::reconcile::rearm_progress(&fresh).await;
+        assert_eq!(status_of(&app, &b.turn).await, "failed", "重啟前就被按停了");
+        assert_eq!(system_notes(&app, &b.turn).await.len(), 1, "{:?}", system_notes(&app, &b.turn).await);
+
+        append(&path, &[prompt_line("算了，我自己來", &at(0))]);
+        let stop = crate::hookrecv::HookBody {
+            bot_id: b.bot.id.clone(),
+            provider: "claude".into(),
+            payload: json!({"hook_event_name": "Stop", "session_id": "s-typed", "prompt_id": "p-typed", "last_assistant_message": "下一句的回覆"}),
+            received_at: None,
+            truncated: false,
+            run_id: None,
+        };
+        crate::hookrecv::process(&fresh, &stop).await.unwrap();
+        let on_old: Vec<String> = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='assistant'")
+            .bind(&b.turn)
+            .fetch_all(&app.db)
+            .await
+            .unwrap();
+        assert!(on_old.is_empty(), "下一句的回覆掛到了被按停的那一筆上：{on_old:?}");
+    }
+
+    /// 反面：我們那一則在 daemon 停著時**答完了**（Stop 還在 spool 裡，重播在接回之後），之後使用者在 pane 裡打的另一句被按停——
+    /// 那個中斷標記是另一句的，不能把我們那一則收成被按停。
+    #[tokio::test]
+    async fn an_interruption_after_our_turn_finished_does_not_close_it_at_a_restart() {
+        let b = busy("answered-before-restart").await;
+        let app = b.env.app.clone();
+        transcript(
+            &b,
+            &[
+                prompt_line("跑一下測試", &at(-9_000)),
+                end_turn_line("測完了", &at(-8_000)),
+                prompt_line("再幫我看 lint", &at(-3_000)),
+                esc_marker(&at(-1_000)),
+            ],
+        )
+        .await;
+
+        let fresh = tt::restart_app(&b.env).await;
+        crate::reconcile::rearm_progress(&fresh).await;
+        assert_eq!(status_of(&app, &b.turn).await, "in_flight", "它是答完的，等它的 Stop（或備援）收");
     }
 
     /// #156：欠著的帳只在記憶體。run 已經結束（`exited`／`stopped`）、那一筆卻還 in_flight，而 daemon 在補上之前重啟了——
