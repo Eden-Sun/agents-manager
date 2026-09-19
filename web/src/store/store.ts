@@ -37,6 +37,7 @@ import { groupByProject, withPane, withoutPane } from '../lib/paneLists'
 import { prependDraft, restoreQueued } from './queuedSend'
 import { noteQueuedTurn, startingSend, startingSendLabel } from './startingSend'
 import { asUncommittedSend, noteInFlightTurn, uncommittedSendText } from './uncommittedSend'
+import { sendNowFellThrough } from './sendNowOutcome'
 import { missionRequests } from './missionRequests'
 import { MISSION_USER_PAUSE } from '../lib/missionView'
 
@@ -1238,6 +1239,13 @@ export const useStore = create<StoreState>((set, get) => ({
     const crid = api.newClientRequestId()
     try {
       const res = await api.sendPrompt(botId, text, crid, attachments, sendNow, startIfStopped)
+      // 送出鍵沒生效（not_sent）／不知道生效沒有（unknown）：這一則已是 failed、沒有照一般方式送出（#120）。
+      const fell = sendNow ? sendNowFellThrough(res.send_now) : null
+      if (fell) {
+        get().notify('error', fell.text)
+        void get().loadMessages(botId)
+        return fell.consumed
+      }
       // 沒插成隊時 daemon 照舊送出（閒著的 bot）；為什麼沒插隊要講出來，不然使用者以為打斷了。
       if (sendNow && res.send_now && res.send_now !== 'interrupted' && res.send_now !== 'idle') {
         get().notify('info', '沒有插隊：這顆 bot 的 claude 還沒有 send-now 鍵（2.1.275 起），訊息照一般方式送出。')
