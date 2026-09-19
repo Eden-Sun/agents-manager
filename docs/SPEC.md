@@ -1062,7 +1062,11 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
 1. shim 攔 `agent prompt`：目標名 herdr 認得（`herdr agent get` 找得到：AGM、其他頂層 bot、pane id）就照原名送，找不到才當自己的子 agent 補前綴。
    決定名字後先 `POST /relay/announce`（表單 `bot_id`／`to_agent`／`text`／`ack`／`reply_to`，header `X-AM-Bot-Token` 用該 bot 的 hook token），再轉給真的 herdr。
    `text` 只含 TEXT 位置參數（herdr 的 `--wait`／`--until`／`--timeout` 不算）；`--ack`、`--reply-to <id>` 是 shim 自己的旗標（§18.15），送給 daemon、不轉給 herdr。
-   curl 逾時（exit 28）再問一次（15 秒）才退回直送：daemon 可能已經排進 AGM 的佇列，只是回得慢。連不上照舊直送。
+   **「確定沒送到 daemon」與「送了但回覆不明」分開（issue #143）**：只有 **curl 7（連線根本沒建立，request 一定沒進 daemon）**才照舊直送。
+   其餘都不直送——逾時（28）、空回應（52）、連線被重置（56）、送到一半（55）、傳輸中斷（18）這類「request 可能已經進 daemon、只是回覆沒收完整」的，
+   同一個請求再問一次（第二次 15 秒；沒帶 request id 的申請 daemon 以內容指紋去重，重問不會變兩筆），還是不明就 exit 75；HTTP 非 2xx
+   （400／404／5xx，身分被拒的 401／403 是 exit 77）與看不懂的 2xx 一律 exit 75、不直送。daemon 明確回 `routed` 就不打進 pane，回 `{}`（announce 已記下、
+   不是給協調者的）才直送。受管的 bot（有 bot 身分與 `AM_PORT`）沒有 curl 也 exit 75。直送會變成佇列一份、pane 一份，而且不能把認證失敗變成繞過控制面的旁路。
    報不成功只是少一次標示；名字前面帶旗標時整串原樣轉發。
 2. daemon 把「誰要送什麼給哪個 agent」記在行程內的短命表（5 分鐘）。
 3. 回音從 hook 回來時用 run 的 `agent_name` 認領：忽略所有空白（TUI 任意折行），長度取兩邊較短者且至少 12 字元；更短就要完全一樣。
@@ -2600,7 +2604,7 @@ supervisor 相關資料表與欄位都是 additive，`db::migrate` 重跑冪等�
 - **bot 找 AGM**：`POST /api/bots/{巡檢或協調者}/prompt` 帶 `relay_from=<bot>`、或 pane 裡 `herdr agent prompt <AGM>`（shim 先打 `/relay/announce`），
   協調者建立後都**不開回合**：寫成 `bot_request`（202，`routed`），shim 看到 `routed` 就不打進 pane。
   路由狀態**不知道**不等於「不是 AGM」（issue #143）：`/relay/announce` 查不出目標是不是 AGM、或確定是 AGM 卻寫不進佇列，回 **503 `routing_unavailable`**
-  （`retryable:true`），shim 看到就明確失敗（exit 75）、不直送——直送會繞過 durable inbox、去重與 wake／ack 語意。daemon 根本連不上時才照舊直送。
+  （`retryable:true`），shim 看到就明確失敗（exit 75）、不直送——直送會繞過 durable inbox、去重與 wake／ack 語意。只有連線根本沒建立（curl 7）才照舊直送；回覆不明、非 2xx、身分被拒都不直送（§6.5b／§18.15）。
   去重鍵：有 `client_request_id` 用它，沒有就用寄件者＋內容指紋＋十分鐘一格——後者只擋**還沒結案**的那一筆：前一筆已經 `handled` 之後同一句再送是新的申請，換 `#2`、`#3` 的鍵重新入列（review 2026-09-16 c3 L1）。指紋 = 收件角色＋目標＋正文（逐字，不做空白正規化，縮排差一格就是不同內容）＋附件；
   同一個 id 換了內容不是重播，回 409 `request_mismatch` 且什麼都不寫——否則第二次申請會被讀成「送到了」而靜靜消失。
   一般 bot → 協調者；巡檢 ↔ 協調者互相交接給對方。不攔：使用者（沒有 `relay_from`）、`relay_from=daemon`、目標不是角色 bot、協調者未建立。

@@ -168,6 +168,12 @@ am_reexport_env_before_start() {
 " >/dev/null 2>&1
 }
 
+# 寫給 daemon 問過、但**不能**直送的結果（issue #143）：講明原因、不碰 pane，明確失敗讓寄件端重試。
+am_announce_refuse() {
+    printf 'agents-manager: 寫給 %s 的訊息沒有送出（%s）；不直接打進它的 pane——直送會繞過協調佇列，變成佇列一份、pane 一份。請稍後重試\n' "$2" "$3" >&2
+    exit "$1"
+}
+
 am_agent_prompt() {
     shift 2
     case "${1:-}" in
@@ -231,41 +237,66 @@ am_agent_prompt() {
         esac
         _text="${_text:+$_text }$_a"
     done
-    if [ -n "${AM_BOT_ID:-}" ] && [ -n "${AM_HOOK_TOKEN:-}" ] && [ -n "${AM_PORT:-}" ] && command -v curl >/dev/null 2>&1; then
-        # 表單編碼：prompt 內容有引號、換行、`&` 都不會壞，也不必在 sh 裡拼 JSON。
-        _resp=$(curl -s -m 2 -X POST "http://127.0.0.1:${AM_PORT}/relay/announce" \
-            -H "X-AM-Bot-Token: ${AM_HOOK_TOKEN}" \
-            --data-urlencode "bot_id=${AM_BOT_ID}" \
-            --data-urlencode "to_agent=${_name}" \
-            --data-urlencode "text=${_text}" \
-            --data-urlencode "ack=${_ack}" \
-            --data-urlencode "reply_to=${_reply_to}" 2>/dev/null)
-        # 28 = curl 逾時：daemon 可能已經排進佇列、只是回得慢。這時退回直送會讓同一句又打進 AGM 的
-        # pane。再問一次、給久一點——沒帶 request id 的申請 daemon 以內容指紋去重，重問不會變兩筆。
-        # 連不上（daemon 不在）才照舊直送。
-        if [ "$?" = 28 ]; then
-            _resp=$(curl -s -m 15 -X POST "http://127.0.0.1:${AM_PORT}/relay/announce" \
+    if [ -n "${AM_BOT_ID:-}" ] && [ -n "${AM_HOOK_TOKEN:-}" ] && [ -n "${AM_PORT:-}" ]; then
+        # 「確定沒送到 daemon」與「送了但回覆不明」要分清楚（issue #143）。直送 pane 只有一種情形站得住腳：**連線根本沒建立**
+        # （curl 7，daemon 不在），request 一定沒進 daemon。其餘——逾時、空回應、連線被重置、任何非 2xx、看不懂的 2xx——
+        # request 可能已經進了 daemon（durable 的 bot_request 可能已經 commit，只是回覆沒收完整）：直送會變成佇列一份、pane 一份，
+        # 而且 401／403 這種身分被拒也不能變成繞過控制面的旁路。這些一律明確失敗（exit 75／77），讓寄件端自己重試。
+        if ! command -v curl >/dev/null 2>&1; then
+            am_announce_refuse 75 "$_name" "這台機器沒有 curl，問不了 daemon 這句要不要走協調佇列"
+        fi
+        _try=0
+        while :; do
+            _try=$((_try + 1))
+            # 第一次 2 秒；再問就給久一點（daemon 可能已經排進佇列、只是回得慢）。沒帶 request id 的申請 daemon 以內容指紋去重，重問不會變兩筆。
+            if [ "$_try" = 1 ]; then _m=2; else _m=15; fi
+            # 表單編碼：prompt 內容有引號、換行、`&` 都不會壞，也不必在 sh 裡拼 JSON。`-w` 在回應後面補一行 HTTP 狀態碼。
+            _out=$(curl -s -m "$_m" -w '\n%{http_code}' -X POST "http://127.0.0.1:${AM_PORT}/relay/announce" \
                 -H "X-AM-Bot-Token: ${AM_HOOK_TOKEN}" \
                 --data-urlencode "bot_id=${AM_BOT_ID}" \
                 --data-urlencode "to_agent=${_name}" \
                 --data-urlencode "text=${_text}" \
                 --data-urlencode "ack=${_ack}" \
-                --data-urlencode "reply_to=${_reply_to}" 2>/dev/null) || _resp=""
+                --data-urlencode "reply_to=${_reply_to}" 2>/dev/null)
+            _rc=$?
+            case "$_rc" in 0 | 7) break ;; esac
+            [ "$_try" -lt 2 ] || break
+        done
+        if [ "$_rc" != 7 ]; then
+            if [ "$_rc" != 0 ]; then
+                am_announce_refuse 75 "$_name" "問 daemon 時連線出了狀況（curl 結束碼 ${_rc}），不確定它有沒有收到；同一句再送一次就好，daemon 以內容去重"
+            fi
+            _code=$(printf '%s\n' "$_out" | tail -n 1)
+            _resp=$(printf '%s\n' "$_out" | sed '$d')
+            case "$_resp" in
+                # 寫給 AGM、但 daemon 現在排不進協調佇列（issue #143）：不直送，明確失敗讓寄件端重試。
+                # 直送會繞過 durable inbox 與去重，控制面也不知道這則走了旁路。
+                *'"routing_unavailable":'*)
+                    printf 'agents-manager: 寫給 %s 的訊息現在排不進 AGM 協調佇列，沒有送出、也不直接打進它的 pane；請稍後重試：%s\n' "$_name" "$_resp" >&2
+                    exit 75
+                    ;;
+            esac
+            case "$_code" in
+                2??)
+                    case "$_resp" in
+                        # 寫給 AGM 的申請 daemon 已經排進協調者的佇列（SPEC §18.15）：不再打進 AGM 的 pane，否則同一句話會先燒一輪巡檢的回合。
+                        *'"routed":'*)
+                            printf 'agents-manager: 已排入 AGM 協調佇列，不直接打進 %s 的 pane：%s\n' "$_name" "$_resp" >&2
+                            exit 0
+                            ;;
+                        # daemon 明確說「不是給協調者的」（announce 已記下）：照舊直送。
+                        '{}') : ;;
+                        *) am_announce_refuse 75 "$_name" "daemon 回了看不懂的內容：$(printf '%s' "$_resp" | cut -c1-200)" ;;
+                    esac
+                    ;;
+                401 | 403)
+                    am_announce_refuse 77 "$_name" "daemon 不認這顆 bot 的身分（HTTP ${_code}）：$(printf '%s' "$_resp" | cut -c1-200)"
+                    ;;
+                *)
+                    am_announce_refuse 75 "$_name" "daemon 回 HTTP ${_code}：$(printf '%s' "$_resp" | cut -c1-200)"
+                    ;;
+            esac
         fi
-        # 寫給 AGM 的申請 daemon 已經排進協調者的佇列（SPEC §18.15）：不再打進 AGM 的 pane，
-        # 否則同一句話會先燒一輪巡檢的回合。daemon 沒回應時照舊送（寧可多一回合，不能掉訊息）。
-        case "$_resp" in
-            # 寫給 AGM、但 daemon 現在排不進協調佇列（issue #143）：不直送，明確失敗讓寄件端重試。
-            # 直送會繞過 durable inbox 與去重，控制面也不知道這則走了旁路。
-            *'"routing_unavailable":'*)
-                printf 'agents-manager: 寫給 %s 的訊息現在排不進 AGM 協調佇列，沒有送出、也不直接打進它的 pane；請稍後重試：%s\n' "$_name" "$_resp" >&2
-                exit 75
-                ;;
-            *'"routed":'*)
-                printf 'agents-manager: 已排入 AGM 協調佇列，不直接打進 %s 的 pane：%s\n' "$_name" "$_resp" >&2
-                exit 0
-                ;;
-        esac
     fi
     exec "$AM_HERDR" agent prompt "$_name" "$@"
 }
@@ -503,12 +534,41 @@ mod tests {
         }
 
         fn run(&self, env: &[(&str, &str)], args: &[&str]) -> (Vec<String>, String) {
-            let mut cmd = Command::new(self.dir.join("bin/herdr"));
-            let path = format!(
-                "{}:{}:/usr/bin:/bin",
-                self.dir.join("bin").display(),
-                self.dir.join("real").display()
-            );
+            let (out, err, _) = self.run_full(env, args);
+            (out, err)
+        }
+
+        /// 假 curl（`real/curl`）：本體是 `body`。shim 的 `-w '\n%{http_code}'` 要靠它自己補狀態碼。
+        fn install_fake_curl(&self, body: &str) {
+            write_script(&self.dir.join("real").join("curl"), &format!("{body}\n"));
+        }
+
+        /// 同 [`Sandbox::run`]，另外回 shim 的結束碼。
+        fn run_full(&self, env: &[(&str, &str)], args: &[&str]) -> (Vec<String>, String, i32) {
+            self.run_with_path(None, None, env, args)
+        }
+
+        /// 指定用哪個 shell 跑 shim（macOS 的 `/bin/sh`、`/bin/bash` 是 3.2，另有 `/bin/dash`）；`None` 照 shebang。
+        fn run_in(&self, shell: Option<&str>, env: &[(&str, &str)], args: &[&str]) -> (Vec<String>, String, i32) {
+            self.run_with_path(shell, None, env, args)
+        }
+
+        fn run_with_path(&self, shell: Option<&str>, path: Option<String>, env: &[(&str, &str)], args: &[&str]) -> (Vec<String>, String, i32) {
+            let mut cmd = match shell {
+                Some(sh) => {
+                    let mut c = Command::new(sh);
+                    c.arg(self.dir.join("bin/herdr"));
+                    c
+                }
+                None => Command::new(self.dir.join("bin/herdr")),
+            };
+            let path = path.unwrap_or_else(|| {
+                format!(
+                    "{}:{}:/usr/bin:/bin",
+                    self.dir.join("bin").display(),
+                    self.dir.join("real").display()
+                )
+            });
             cmd.env("PATH", path).args(args);
             // Don't inherit the test runner's own pane model settings.
             // 在 bot 的 pane 裡跑測試時，AM_BOT_ID／AM_HOOK_TOKEN／AM_PORT 都有值，shim 會真的去打
@@ -527,7 +587,7 @@ mod tests {
             }
             let out = output_retrying(&mut cmd);
             let stdout = String::from_utf8_lossy(&out.stdout).lines().map(String::from).collect();
-            (stdout, String::from_utf8_lossy(&out.stderr).into_owned())
+            (stdout, String::from_utf8_lossy(&out.stderr).into_owned(), out.status.code().unwrap_or(-1))
         }
     }
 
@@ -723,7 +783,7 @@ mod tests {
     fn a_request_the_daemon_queued_for_agm_is_not_typed_into_its_pane() {
         let s = Sandbox::new();
         let fake_curl = s.dir.join("real").join("curl");
-        write_script(&fake_curl, "printf '%s' \"${AM_TEST_CURL_REPLY:-}\"\n");
+        write_script(&fake_curl, "printf '%s\\n%s' \"${AM_TEST_CURL_REPLY:-}\" \"${AM_TEST_CURL_CODE:-200}\"\n");
         let base = [("AM_AGENT_NAME", "proj-abc123"), ("AM_TEST_AGENTS", "agm-pxf2pv"), ("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_PORT", "1")];
         let mut env = base.to_vec();
         env.push(("AM_TEST_CURL_REPLY", r#"{"routed":"responder","inbox_event_id":"e1"}"#));
@@ -743,9 +803,10 @@ mod tests {
     fn a_request_the_daemon_could_not_route_is_not_typed_into_the_pane() {
         let s = Sandbox::new();
         let fake_curl = s.dir.join("real").join("curl");
-        write_script(&fake_curl, "printf '%s' \"${AM_TEST_CURL_REPLY:-}\"\n");
+        write_script(&fake_curl, "printf '%s\\n%s' \"${AM_TEST_CURL_REPLY:-}\" \"${AM_TEST_CURL_CODE:-200}\"\n");
         let mut env = vec![("AM_AGENT_NAME", "proj-abc123"), ("AM_TEST_AGENTS", "agm-pxf2pv"), ("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_PORT", "1")];
         env.push(("AM_TEST_CURL_REPLY", r#"{"error":"routing_unavailable","routing_unavailable":true,"retryable":true}"#));
+        env.push(("AM_TEST_CURL_CODE", "503"));
         let (out, err) = s.run(&env, &["agent", "prompt", "agm-pxf2pv", "請准我重啟 daemon"]);
         assert!(out.is_empty(), "排不進協調佇列不能退回直送：{out:?}");
         assert!(err.contains("routing_unavailable") || err.contains("稍後重試"), "{err}");
@@ -768,7 +829,7 @@ mod tests {
                  for a in \"$@\"; do [ \"$prev\" = --data-urlencode ] && printf '%s\\n' \"$a\" >> '{log}'; prev=$a; done\n\
                  echo --- >> '{log}'\n\
                  if [ \"$n\" = 1 ] && [ -n \"${{AM_TEST_CURL_FIRST_RC:-}}\" ]; then exit \"$AM_TEST_CURL_FIRST_RC\"; fi\n\
-                 printf '%s' \"${{AM_TEST_CURL_REPLY:-}}\"\n",
+                 printf '%s\\n%s' \"${{AM_TEST_CURL_REPLY:-}}\" \"${{AM_TEST_CURL_CODE:-200}}\"\n",
                 count = count.display(),
                 log = log.display(),
             ),
@@ -809,6 +870,210 @@ mod tests {
         let (out, _) = s.run(&env, &["agent", "prompt", "agm-pxf2pv", "請核准重啟"]);
         assert_eq!(out, ["agent", "prompt", "agm-pxf2pv", "請核准重啟"]);
         assert_eq!(std::fs::read_to_string(&count).unwrap().trim(), "1");
+    }
+
+    /// 這台機器上有的 shell（沒有的略過）。macOS 的 `/bin/sh`／`/bin/bash` 是 3.2——腳本改動要在那個版本也驗。
+    fn shells() -> Vec<&'static str> {
+        ["/bin/sh", "/bin/bash", "/bin/dash"].into_iter().filter(|p| std::path::Path::new(p).exists()).collect()
+    }
+
+    /// issue #143（重開）：daemon 有回、但不是「排進佇列」也不是明確的 `{}`——非 2xx（400／401／403／404／5xx，body 沒有 `routing_unavailable`）、
+    /// 或 2xx 卻是看不懂的內容。以前一律退回直送 pane：佇列的申請可能已經 commit，直送就是佇列一份、pane 一份；401／403 更是把認證失敗變成繞過控制面的旁路。
+    /// 現在一律不直送、明確失敗（75；身分被拒 77）。每一種都驗真的 herdr 沒被叫到 `agent prompt`。
+    #[test]
+    fn a_daemon_that_refuses_or_answers_nonsense_never_gets_a_direct_prompt() {
+        let cases: [(&str, &str, i32); 9] = [
+            ("400", r#"{"error":"bad form"}"#, 75),
+            ("401", r#"{"error":"unknown bot or bad token"}"#, 77),
+            ("403", r#"{"error":"forbidden"}"#, 77),
+            ("404", "", 75),
+            ("500", r#"{"error":"boom"}"#, 75),
+            ("502", "<html>Bad Gateway</html>", 75),
+            ("503", r#"{"error":"busy"}"#, 75),
+            ("200", "<html>hello</html>", 75),
+            ("200", "", 75),
+        ];
+        for (sh, (code, reply, want_rc)) in shells().into_iter().flat_map(|sh| cases.into_iter().map(move |c| (sh, c))) {
+            let s = Sandbox::new();
+            s.install_fake_curl("printf '%s\\n%s' \"${AM_TEST_CURL_REPLY:-}\" \"${AM_TEST_CURL_CODE:-200}\"");
+            let env = [
+                ("AM_AGENT_NAME", "proj-abc123"),
+                ("AM_TEST_AGENTS", "agm-pxf2pv"),
+                ("AM_BOT_ID", "b1"),
+                ("AM_HOOK_TOKEN", "tok"),
+                ("AM_PORT", "1"),
+                ("AM_TEST_CURL_CODE", code),
+                ("AM_TEST_CURL_REPLY", reply),
+            ];
+            let (out, err, rc) = s.run_in(Some(sh), &env, &["agent", "prompt", "agm-pxf2pv", "請准我重啟 daemon"]);
+            let why = format!("{sh} HTTP {code} {reply:?}: {err}");
+            assert!(out.is_empty(), "不能退回直送 pane：{why} {out:?}");
+            assert_eq!(rc, want_rc, "{why}");
+            assert!(err.contains("沒有送出"), "要講明沒送出：{why}");
+        }
+    }
+
+    /// issue #143（重開）：「送了但回覆不明」——逾時（28）、空回應（52）、連線被重置（56）、送到一半（55）、傳輸中斷（18）：request 可能已進 daemon。
+    /// 同一個請求再問一次（daemon 以內容指紋去重，不會變兩筆），還是不明就明確失敗，**絕不直送**；再問到了就照 daemon 說的做。
+    /// 只有 curl 7（連線根本沒建立，request 一定沒到 daemon）才照舊直送（既有測試）。
+    #[test]
+    fn an_ambiguous_transport_failure_is_asked_again_and_then_stops_instead_of_typing_into_the_pane() {
+        for (sh, rc) in shells().into_iter().flat_map(|sh| [28, 52, 56, 55, 18].into_iter().map(move |rc| (sh, rc))) {
+            let s = Sandbox::new();
+            let count = s.dir.join("curl.count");
+            s.install_fake_curl(&format!(
+                "n=$(cat '{c}' 2>/dev/null || echo 0); n=$((n + 1)); echo $n > '{c}'\n\
+                 if [ -n \"${{AM_TEST_CURL_RC:-}}\" ] && [ \"$n\" -le \"${{AM_TEST_CURL_FAILS:-99}}\" ]; then exit \"$AM_TEST_CURL_RC\"; fi\n\
+                 printf '%s\\n%s' \"${{AM_TEST_CURL_REPLY:-}}\" \"${{AM_TEST_CURL_CODE:-200}}\"",
+                c = count.display()
+            ));
+            let rc_s = rc.to_string();
+            let base = [("AM_AGENT_NAME", "proj-abc123"), ("AM_TEST_AGENTS", "agm-pxf2pv"), ("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_PORT", "1")];
+
+            // 一直不明：問兩次就停，不直送。
+            let mut env = base.to_vec();
+            env.push(("AM_TEST_CURL_RC", &rc_s));
+            let (out, err, code) = s.run_in(Some(sh), &env, &["agent", "prompt", "agm-pxf2pv", "請准我重啟 daemon"]);
+            assert!(out.is_empty(), "{sh} curl {rc}：回覆不明不能直送：{out:?} {err}");
+            assert_eq!(code, 75, "curl {rc}: {err}");
+            assert_eq!(std::fs::read_to_string(&count).unwrap().trim(), "2", "同一個請求問兩次（第二次給久一點）");
+            assert!(err.contains(&format!("curl 結束碼 {rc}")) && err.contains("沒有送出"), "{err}");
+
+            // 第一次不明、再問到了（daemon 說排進佇列）：照 daemon 說的，不直送。
+            std::fs::remove_file(&count).unwrap();
+            let mut env = base.to_vec();
+            env.push(("AM_TEST_CURL_RC", &rc_s));
+            env.push(("AM_TEST_CURL_FAILS", "1"));
+            env.push(("AM_TEST_CURL_REPLY", r#"{"routed":"responder","inbox_event_id":"e7"}"#));
+            let (out, err, code) = s.run_in(Some(sh), &env, &["agent", "prompt", "agm-pxf2pv", "請准我重啟 daemon"]);
+            assert!(out.is_empty() && code == 0, "{sh} curl {rc}：再問到了就照佇列：{out:?} {code} {err}");
+        }
+    }
+
+    /// 受管的 bot（有 bot 身分與 `AM_PORT`）而這台機器沒有 curl：問不了 daemon 這句要不要走佇列——一樣不直送，明確失敗。
+    /// 沒有 bot 身分的人工 shell 照舊直送（daemon 根本不知道它）。
+    #[test]
+    fn a_managed_bot_without_curl_does_not_type_into_the_pane() {
+        let s = Sandbox::new();
+        let tools = s.dir.join("tools");
+        std::fs::create_dir_all(&tools).unwrap();
+        for t in ["tr", "sed", "cut", "dirname", "head", "tail", "cat", "env", "sh"] {
+            for base in ["/usr/bin", "/bin"] {
+                let src = std::path::Path::new(base).join(t);
+                if src.exists() {
+                    let _ = std::os::unix::fs::symlink(&src, tools.join(t));
+                    break;
+                }
+            }
+        }
+        let path = format!("{}:{}:{}", s.dir.join("bin").display(), s.dir.join("real").display(), tools.display());
+        let managed = [("AM_AGENT_NAME", "proj-abc123"), ("AM_TEST_AGENTS", "agm-pxf2pv"), ("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_PORT", "1")];
+        let (out, err, rc) = s.run_with_path(None, Some(path.clone()), &managed, &["agent", "prompt", "agm-pxf2pv", "請准我重啟 daemon"]);
+        assert!(out.is_empty(), "{out:?} {err}");
+        assert_eq!(rc, 75, "{err}");
+        assert!(err.contains("沒有 curl"), "{err}");
+        // 人工 shell：沒有 bot 身分，直送。
+        let (out, _, rc) = s.run_with_path(None, Some(path), &[("AM_TEST_AGENTS", "agm-pxf2pv")], &["agent", "prompt", "agm-pxf2pv", "hi"]);
+        assert_eq!((rc, out), (0, vec!["agent".to_string(), "prompt".into(), "agm-pxf2pv".into(), "hi".into()]));
+    }
+
+    /// issue #143 的回歸（重開）：daemon **已經**把申請 durable 寫進協調者的收件匣，回覆卻在路上斷掉（curl 52，empty reply）——
+    /// shim 不能因此直送 pane（佇列一份、pane 一份）；重問同一句（內容指紋去重）收件匣仍只有一筆；回覆通了之後照佇列說的做。
+    /// **真的** router（跟 daemon 同一份）＋**真的** curl＋**真的** shim；中間一個 TCP proxy 把 daemon 的回覆吞掉。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn a_reply_lost_after_the_request_was_queued_is_never_answered_with_a_direct_prompt() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        use tokio::net::{TcpListener, TcpStream};
+
+        let app = crate::supervisor::bot_requests::flow_tests::app().await;
+        crate::supervisor::bot_requests::flow_tests::configure_responder(&app).await;
+        let router_l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let router_port = router_l.local_addr().unwrap().port();
+        router_l.set_nonblocking(true).unwrap();
+        let router = crate::api::router(app.clone());
+        let server = tokio::spawn(async move {
+            let l = TcpListener::from_std(router_l).unwrap();
+            let _ = axum::serve(l, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await;
+        });
+
+        let drop_reply = Arc::new(AtomicBool::new(true));
+        let seen = Arc::new(AtomicUsize::new(0));
+        let proxy_l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_port = proxy_l.local_addr().unwrap().port();
+        let (dr, sn) = (drop_reply.clone(), seen.clone());
+        let proxy = tokio::spawn(async move {
+            loop {
+                let Ok((mut client, _)) = proxy_l.accept().await else { return };
+                let (dr, sn) = (dr.clone(), sn.clone());
+                tokio::spawn(async move {
+                    // 讀完整個 request（標頭＋Content-Length 的本文）。
+                    let mut buf = Vec::new();
+                    let mut tmp = [0u8; 4096];
+                    let (head_end, want) = loop {
+                        let n = client.read(&mut tmp).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&tmp[..n]);
+                        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let head = String::from_utf8_lossy(&buf[..pos]).to_lowercase();
+                            let cl = head.lines().find_map(|l| l.strip_prefix("content-length:")).and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(0);
+                            break (pos + 4, cl);
+                        }
+                    };
+                    while buf.len() < head_end + want {
+                        let n = client.read(&mut tmp).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&tmp[..n]);
+                    }
+                    sn.fetch_add(1, Ordering::SeqCst);
+                    // 轉給真的 router（要它關連線，才讀得到整個回覆）。
+                    let mut req = buf[..head_end - 2].to_vec();
+                    req.extend_from_slice(b"Connection: close\r\n\r\n");
+                    req.extend_from_slice(&buf[head_end..]);
+                    let Ok(mut up) = TcpStream::connect(("127.0.0.1", router_port)).await else { return };
+                    let _ = up.write_all(&req).await;
+                    let mut resp = Vec::new();
+                    let _ = up.read_to_end(&mut resp).await;
+                    if dr.load(Ordering::SeqCst) {
+                        return; // request 已經處理完、daemon 也回了，但回覆不轉給 curl：它看到 empty reply。
+                    }
+                    let _ = client.write_all(&resp).await;
+                });
+            }
+        });
+
+        let s = Sandbox::new();
+        let port = proxy_port.to_string();
+        let text = "請核准重建 relay-143-lost-reply";
+        let run = |s: Sandbox, port: String| {
+            tokio::task::spawn_blocking(move || {
+                let env = [("AM_AGENT_NAME", "fixer-abc"), ("AM_TEST_AGENTS", "AGM"), ("AM_BOT_ID", "w1"), ("AM_HOOK_TOKEN", "tok-w1"), ("AM_PORT", port.as_str())];
+                let r = s.run_full(&env, &["agent", "prompt", "AGM", text]);
+                (s, r)
+            })
+        };
+        let inbox = || async { sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM supervisor_inbox WHERE kind='bot_request'").fetch_one(&app.db).await.unwrap() };
+
+        // 回覆一直斷：request 進了 daemon（收件匣一筆），shim 問兩次後不直送、明確失敗。
+        let (s, (out, err, rc)) = run(s, port.clone()).await.unwrap();
+        assert!(out.is_empty(), "回覆丟了不能直送 pane（佇列一份、pane 一份）：{out:?} {err}");
+        assert_eq!(rc, 75, "{err}");
+        assert_eq!(seen.load(Ordering::SeqCst), 2, "同一個請求問了兩次：{err}");
+        assert_eq!(inbox().await, 1, "兩次都進了 daemon，內容指紋去重後仍只有一筆 durable 申請");
+
+        // 回覆通了：daemon 說已排進佇列，shim 不直送、exit 0；收件匣還是一筆。
+        drop_reply.store(false, Ordering::SeqCst);
+        let (_s, (out, err, rc)) = run(s, port).await.unwrap();
+        assert!(out.is_empty() && rc == 0, "{out:?} {rc} {err}");
+        assert!(err.contains("協調佇列"), "{err}");
+        assert_eq!(inbox().await, 1, "重問不會變兩筆");
+        proxy.abort();
+        server.abort();
     }
 
     #[test]
