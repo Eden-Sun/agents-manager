@@ -573,7 +573,7 @@ mod tests {
             (
                 "invalid bot name",
                 Box::new(|cfg: &mut crate::config::ConfigFile| {
-                    cfg.projects[0].bots[0].name = "not a valid name!".into();
+                    cfg.projects[0].bots[0].name = "not@valid".into();
                 }),
             ),
         ];

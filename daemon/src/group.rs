@@ -18,6 +18,31 @@ fn mention_char(c: char) -> bool {
     !c.is_whitespace() && !"@,:;?!。，、！？()（）[]{}<>\"'".contains(c)
 }
 
+/// 名字裡有空白的成員（2026-09-19 使用者：「bot name should be able to include space」）：`@my bot` 在第一個空白就被
+/// `mention_char` 切斷，只剩 `my`。`@` 後面若正好接著某個成員的**整個**名字（不分大小寫）、而且名字後面是結尾或
+/// 非名字字元，就算提到它。最長的先比，`@my bot 2` 不會被 `my bot` 搶走。回 `(成員索引, 名字結束位置)`。
+fn spaced_member_at(chars: &[char], start: usize, members: &[Member]) -> Option<(usize, usize)> {
+    let mut best: Option<(usize, usize)> = None;
+    for (idx, m) in members.iter().enumerate() {
+        if !m.name.contains(' ') {
+            continue;
+        }
+        let name: Vec<char> = m.name.chars().collect();
+        let end = start + name.len();
+        if end > chars.len() {
+            continue;
+        }
+        let same = chars[start..end].iter().zip(&name).all(|(a, b)| a.to_lowercase().eq(b.to_lowercase()));
+        if !same || (end < chars.len() && mention_char(chars[end]) && !matches!(chars[end], '-' | '_')) {
+            continue;
+        }
+        if best.is_none_or(|(_, e)| end > e) {
+            best = Some((idx, end));
+        }
+    }
+    best
+}
+
 /// SPEC §13.2. A `@` only counts after a non-word character, so `me@example.com` is not a mention.
 pub fn parse_mentions(text: &str, members: &[Member]) -> Vec<Member> {
     let mut all = false;
@@ -31,6 +56,15 @@ pub fn parse_mentions(text: &str, members: &[Member]) -> Vec<Member> {
         }
         let boundary = i == 0 || !(chars[i - 1].is_alphanumeric() || chars[i - 1] == '_');
         let start = i + 1;
+        if boundary {
+            if let Some((idx, end)) = spaced_member_at(&chars, start, members) {
+                if !hit.contains(&idx) {
+                    hit.push(idx);
+                }
+                i = end;
+                continue;
+            }
+        }
         let mut end = start;
         while end < chars.len() && mention_char(chars[end]) {
             end += 1;
@@ -71,6 +105,14 @@ pub fn strip_mentions(text: &str, members: &[Member]) -> String {
     while i < chars.len() {
         if chars[i] == '@' && (i == 0 || !(chars[i - 1].is_alphanumeric() || chars[i - 1] == '_')) {
             let start = i + 1;
+            if let Some((_, end)) = spaced_member_at(&chars, start, members) {
+                let mut skip_to = end;
+                if skip_to < chars.len() && matches!(chars[skip_to], ',' | ':' | ';' | '，' | '：' | '；' | '、') {
+                    skip_to += 1;
+                }
+                i = skip_to;
+                continue;
+            }
             let mut end = start;
             while end < chars.len() && mention_char(chars[end]) {
                 end += 1;
@@ -339,6 +381,20 @@ mod strip_tests {
     fn m(n: &str) -> Member {
         Member { id: n.to_string(), name: n.to_string() }
     }
+    /// 名字有空白（2026-09-19 使用者）：`@my bot` 要整個名字對上，`@my bot 2` 取最長的那顆。
+    #[test]
+    fn a_name_with_spaces_is_mentioned_by_its_whole_name() {
+        let ms = vec![m("my bot"), m("my bot 2"), m("my")];
+        let pick = |t: &str| parse_mentions(t, &ms).into_iter().map(|x| x.name).collect::<Vec<_>>();
+        assert_eq!(pick("@my bot 看一下"), ["my bot"]);
+        assert_eq!(pick("@My Bot，看一下"), ["my bot"], "不分大小寫、全形逗號收尾");
+        assert_eq!(pick("@my bot 2 跟 @my bot"), ["my bot", "my bot 2"]);
+        assert_eq!(pick("@my botanist"), ["my"], "後面還接著字就不是 my bot，照舊比到 my");
+        assert_eq!(pick("@my 自己"), ["my"], "沒空白的照舊");
+        assert_eq!(strip_mentions("@my bot, 看一下", &ms), "看一下");
+        assert_eq!(strip_mentions("@my bot 2 跟 @my 說", &ms), "跟 說");
+    }
+
     #[test]
     fn strips_all_and_members_only() {
         let ms = [m("am-claude"), m("am-codex")];

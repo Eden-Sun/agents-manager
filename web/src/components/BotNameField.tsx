@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { BOT_NAME_HINT, isValidBotName } from '../lib/botName'
 import type { ReactNode } from 'react'
 import { useEnterCommit } from '../hooks/useEnterCommit'
 import { useStore } from '../store/store'
@@ -41,8 +42,8 @@ export function BotNameField({
   }, [editing])
 
   const trimmed = draft.trim()
-  // Same rule as the settings panel: 1–32 chars, no whitespace and no `@ , : ;`.
-  const valid = /^[^\s@,:;]{1,32}$/.test(trimmed)
+  // Same rule as the daemon (`lib/botName.ts`): 1–32 chars, no `@ , : ;`, single inner spaces only.
+  const valid = isValidBotName(trimmed)
 
   const commit = () => {
     setEditing(false)
@@ -65,7 +66,7 @@ export function BotNameField({
         value={draft}
         spellCheck={false}
         aria-label="Bot 名稱"
-        title={valid ? '' : '1–32 字，不能有空白或 @ , : ;'}
+        title={valid ? '' : BOT_NAME_HINT}
         size={Math.max(6, draft.length + 1)}
         onChange={(e) => setDraft(e.target.value)}
         onBlur={commit}

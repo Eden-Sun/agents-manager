@@ -1500,7 +1500,7 @@ button.run-debug-toggle:hover:not(:disabled) {
   outline: none;
 }
 
-/* 1–32 chars, no whitespace, no `@ , : ;` — same rule the settings panel enforces. */
+/* 名字規則見 `lib/botName.ts`（跟 daemon 同一份）。 */
 
 .bot-name-input.bad {
   border-color: var(--danger);

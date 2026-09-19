@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
+import { BOT_NAME_HINT, isValidBotName } from '../lib/botName'
 import { useShallow } from 'zustand/react/shallow'
 import * as api from '../api'
 import { MOCK_MODE } from '../api'
@@ -541,7 +542,8 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
   const nameRef = useRef<HTMLInputElement>(null)
   const nameTouched = useRef(false)
 
-  const nameOk = /^[^\s@,:;]{1,32}$/.test(name)
+  // 驗 trim 過的：打到一半的 `my ` 不該先閃紅字；送出也送 trim 過的。
+  const nameOk = isValidBotName(name.trim())
   const cliOk = Boolean(tools[kind]?.installed)
   const canSubmit = nameOk && cliOk && Boolean(pid) && !busy
   const hostUp = (h: string) => h === 'local' || (hosts.find((x) => x.name === h)?.connected ?? false)
@@ -580,7 +582,7 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
         if (!canSubmit) return
         setBusy(true)
         void addBot(pid, {
-          name,
+          name: name.trim(),
           kind,
           model,
           effort,
@@ -697,7 +699,7 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
             setName(e.target.value)
           }}
         />
-        {name && !nameOk ? <span className="hint">1–32 個字，不可含空白或 @ , : ;</span> : null}
+        {name && !nameOk ? <span className="hint">{BOT_NAME_HINT}</span> : null}
         {!cliOk ? <span className="hint">此 kind 的 CLI 尚未安裝，無法建立</span> : null}
       </label>
       <PersonaField value={persona} onChange={setPersona} collapsible />

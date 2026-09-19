@@ -521,7 +521,7 @@ mod panes_cfg_tests {
 pub const SLUG_NAME_RE: &str = "[a-z][a-z0-9_-]{0,31}";
 pub const ID_RE: &str = "[A-Za-z0-9_-]{1,64}";
 /// Nicknames, never given to herdr.
-pub const BOT_NAME_RE: &str = "1–32 個字，不可含空白或 @ , : ;";
+pub const BOT_NAME_RE: &str = "1–32 個字，不可含 @ , : ;，空白只能單一個、夾在中間";
 
 /// SPEC §2, §12. Also the herdr `agent.start` `kind` value.
 pub const KINDS: [&str; 3] = ["claude", "codex", "grok"];
@@ -609,9 +609,16 @@ pub fn valid_id(id: &str) -> bool {
         && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
 }
 
+/// 名字中間可以有單一個半形空白（2026-09-19 使用者：「bot name should be able to include space」）；
+/// 頭尾空白、連續空白、tab／換行照樣不行。herdr 的 agent 名字是另外從 bot id 算的（`agent_name`），不受影響；
+/// 群組 `@` 靠 `group::spaced_member_at` 認整個名字。
 pub fn valid_bot_name(name: &str) -> bool {
     let n = name.chars().count();
-    n >= 1 && n <= 32 && !name.chars().any(|c| c.is_whitespace() || matches!(c, '@' | ',' | ':' | ';'))
+    (1..=32).contains(&n)
+        && !name.starts_with(' ')
+        && !name.ends_with(' ')
+        && !name.contains("  ")
+        && !name.chars().any(|c| (c.is_whitespace() && c != ' ') || matches!(c, '@' | ',' | ':' | ';'))
 }
 
 /// Into herdr's `[a-z][a-z0-9_-]*` alphabet; empty when nothing usable is left.
@@ -924,7 +931,14 @@ mod agent_name_tests {
         assert!(valid_bot_name("小幫手"));
         assert!(valid_bot_name("Reviewer_2"));
         assert!(!valid_bot_name(""));
-        assert!(!valid_bot_name("has space"));
+        assert!(valid_bot_name("has space"));
+        assert!(valid_bot_name("my bot 2"));
+        assert!(!valid_bot_name(" lead"));
+        assert!(!valid_bot_name("trail "));
+        assert!(!valid_bot_name("two  spaces"));
+        assert!(!valid_bot_name("tab\there"));
+        assert!(!valid_bot_name("new\nline"));
+        assert!(!valid_bot_name(" "));
         assert!(!valid_bot_name("a@b"));
         assert!(!valid_bot_name(&"x".repeat(33)));
     }

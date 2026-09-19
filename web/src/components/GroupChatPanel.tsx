@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { RefObject } from 'react'
 import { useShallow } from 'zustand/react/shallow'
-import { parseMentions } from '../api/mentions'
+import { parseMentions, stripMentionsOf } from '../api/mentions'
 import type { Bot, GroupMessage } from '../api/types'
 import { useScrollTail } from '../hooks/useScrollTail'
 import { attachCommandOf, botLamp, composerState, groupComposerState, projectHostName, useStore } from '../store/store'
@@ -34,8 +34,9 @@ import './groupChatPanel.css'
 const MENTION_RE = /(^|[^\p{L}\p{N}_])@([^\s@,:;?!。，、！？()（）[\]{}<>"']+)/gu
 
 /** Strip @mentions so chip selection can rewrite the recipient prefix. */
-function stripMentions(text: string): string {
-  return text.replace(MENTION_RE, '$1').replace(/[ \t]{2,}/g, ' ').replace(/^\s+/, '')
+function stripMentions(text: string, names: string[]): string {
+  // 名字有空白的先整段拿掉，不然 `@my bot` 只會拿掉 `@my`，`bot` 留在內文（2026-09-19）。
+  return stripMentionsOf(text, names).replace(MENTION_RE, '$1').replace(/[ \t]{2,}/g, ' ').replace(/^\s+/, '')
 }
 
 function hasAllMention(text: string): boolean {
@@ -45,8 +46,8 @@ function hasAllMention(text: string): boolean {
   return false
 }
 
-function applyRecipients(text: string, mode: 'all' | string[]): string {
-  const body = stripMentions(text)
+function applyRecipients(text: string, mode: 'all' | string[], names: string[]): string {
+  const body = stripMentions(text, names)
   if (mode === 'all') return body ? `@all ${body}` : '@all '
   if (mode.length === 0) return body
   const prefix = mode.map((n) => `@${n}`).join(' ')
@@ -296,18 +297,19 @@ function GroupComposer({
     })
   }
 
+  const memberNames = members.map((b) => b.name)
   const toggleAll = () => {
-    if (allSelected) writeDraft(stripMentions(text))
-    else writeDraft(applyRecipients(text, 'all'))
+    if (allSelected) writeDraft(stripMentions(text, memberNames))
+    else writeDraft(applyRecipients(text, 'all', memberNames))
   }
 
   const toggleBot = (name: string) => {
     if (allSelected) {
-      writeDraft(applyRecipients(text, [name]))
+      writeDraft(applyRecipients(text, [name], memberNames))
       return
     }
     const next = members.map((b) => b.name).filter((n) => (n === name ? !selectedNames.has(n) : selectedNames.has(n)))
-    writeDraft(applyRecipients(text, next))
+    writeDraft(applyRecipients(text, next, memberNames))
   }
 
   const pick = (c: Candidate) => {
