@@ -931,6 +931,11 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run
      `failed`、送達 `unknown`，回 `200 send_now:"unknown"`。之後這顆 bot 的回合 hook 一進來先看證據：出現了就把舊回合補收成
      被插隊打斷（回覆才不會掛到它身上，而是以外部回合出現）；舊回合自己答完了就作廢。
    - **送出鍵生效之後才失敗的**（證據證不出來、TUI 吃掉了鍵）：舊回合照被插隊打斷收，新的那一則是一般的 `unknown` 送達。
+   - **不登記回聲**（#178 實測）：claude 不會再替被插隊打斷的舊回合送 `Stop`／`StopFailure`，所以不像 Esc 那樣記「等回聲」。
+     2.1.276～2.1.278 的執行檔裡，被打斷的回合走 `aborted_streaming`／`aborted_tools` 出口：寫一列 `[Request interrupted by user…]`
+     就返回，不跑 Stop hook；`StopFailure` 只給 API 錯誤（`rate_limit`、`overloaded`…）。2026-09-19 在 2.1.278 實測工具執行中、串流中、
+     剛送出三種時機，hook 都只有新那一則自己的 `Stop`；transcript 的中斷標記那一列帶的是**新那一則**的 `promptId`。
+     換版時重驗：`strings` 找 `{reason:"aborted_streaming"}`，前面仍是中斷標記直接 `return`、沒有多出 Stop hook 的呼叫。
    - **生效了但 DB 那一半寫不進去**：跟 interrupt 同一套（§6.4，#147）——回 `503 send_now_state_uncommitted`（`sent:true`、
      帶新舊兩筆的 id），記成欠著，之後補（hook、下一則 prompt、同一個 request id 的重送、定時重試），補的時候不再按鍵。
      新的那一則的送達結果與送出的那一刻一起記在帳上，補的時候跟掛上 run 一起寫；確認送出本身出錯（讀不到畫面、證據讀不到）
