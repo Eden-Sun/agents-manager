@@ -883,6 +883,19 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run
    補送按過鍵證明不了、`delivery='unknown'` 卻寫不進去就欠著，每一輪先補，補上之前不判（打過的字可能已經被收下）。
    中性敘述並原樣引用含 `Not logged in`／`/login`／`unlock-keychain`／`usage limit`／`limit` 的行（提示 ssh 下 macOS Keychain 可能讀不到）。
 8. 請求可帶 `relay_from`（bot id 或 `"daemon"`），記下這則是誰轉述的，UI 據此不把它算成使用者發言。
+8a. **送進 claude pane 的字先清過**（#205，`lifecycle::pane_text`）：claude 2.1.277 起，prompt 裡有隱形的格式字元時 CLI 按 Enter 不送出，
+   而是把它們拿掉、清過的字留在框裡，顯示 `Removed N invisible character(s) · review and press Enter to send`；更早的版本收到終端色碼（`ESC[`）
+   會整顆 TUI 崩潰。daemon 靠 transcript 裡**逐字相同**的那一則認送達，所以要送的字（`prompt_inner`／`start_send` 算出的 deliver）先清成 CLI
+   會原樣收下的樣子：拿掉 2.1.278 執行檔 `jn()` 那一組（C0／C1 控制字元〔`\t`、`\n` 除外〕、U+00AD、U+034F、U+061C、U+115F／1160、U+17B4／17B5、
+   U+180B–180F、U+200B–200F、U+2028–202E、U+2060–206F、U+3164、U+FE00–FE0F、U+FEFF、U+FFA0、U+FFF0–FFFB、tag U+E0000–E0FFF 等），
+   換行類（CR、VT、FF、NEL、U+2028／2029）換成 `\n`、CRLF 收成 LF，終端控制序列（CSI、OSC、DCS…）整段拿掉。CLI 依上下文保留的
+   （emoji 之間的 ZWJ、emoji 後的 FE0F、旗子的 tag 序列、印度系等文字的 ZWJ／ZWNJ）也一律拿掉——多拿只讓 agent 看到拆開的 emoji，少拿就會
+   卡在 review。`prompt_text` 存清過的字（stall 重送、畫面比對、hook 對 prompt 都讀它），使用者泡泡留原文；只有 claude 清，codex／grok 照原樣；
+   原本有字、清完什麼都不剩回 400。萬一還是遇到 review 提示（清理表跟不上新版），`confirm_submitted` 不再按 Enter，記 `Unproven("invisible_chars_review")`。
+   **升級到 ≥ 2.1.277 後實機驗一次**（目前只讀了執行檔、跑的是模擬 pane）：從網頁複製一段帶 U+200B、U+FEFF 的文字，加一段 `ESC[31m` 色碼，
+   送給 managed claude bot——回合正常完成、UI 沒有「送出狀態不明」、`turns.prompt_text` 是清過的字；再在那顆 pane 裡手動貼同一段按 Enter，
+   把出現的 review 提示存成 `lifecycle/fixtures/`，對照 `pane_text::invisible_review_notice` 的字樣。換版時對照新執行檔的 `jn()`
+   （`strings` 找 `review and press Enter to send`，同一個模組裡）。
 9. **插隊送出**（issue #103，請求帶 `send_now: true`）：對方回合中時**打斷它**，而不是回 409。前提是這一顆 run 認得
    claude 2.1.275 的 send-now 鍵——CLI 自己決定怎麼收掉當下那一回合，比 daemon 從外面送 `esc` 再貼字準。
    - **閘門**（`lifecycle::send_now::supported`）：`kind = claude`，且 `runs.status_json.version`（statusLine 回報的**跑著的**

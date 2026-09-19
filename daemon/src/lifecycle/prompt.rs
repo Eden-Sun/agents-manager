@@ -476,7 +476,11 @@ async fn prompt_inner(
     let files = crate::attach::resolve(app, bot_id, attachment_ids)
         .await
         .map_err(|e| LcError::Bad(e.to_string()))?;
-    let deliver = crate::attach::deliver_text(deliver, &files);
+    // 打進 pane 的字先清成 CLI 會原樣收下的樣子（#205，`pane_text`）：`prompt_text` 存清過的字，泡泡（`text`）留原文。
+    let deliver = super::pane_text::for_pane(&bot.kind, &crate::attach::deliver_text(deliver, &files));
+    if super::pane_text::nothing_left(text, &deliver) {
+        return Err(LcError::Bad("the prompt is empty once invisible characters and terminal escapes are removed".into()));
+    }
 
     // 2. idempotency
     if let Some(t) = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE conversation_id=? AND client_request_id=?")
