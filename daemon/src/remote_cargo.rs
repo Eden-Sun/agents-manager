@@ -18,6 +18,32 @@ use std::sync::Arc;
 
 const PASSWORD_FILE: &str = "remote-cargo-password";
 
+/// 測試用：把 `ssh`／`rsync` 換成假腳本（本機當遠端）。只有測試 build 有這個入口，而且是**執行緒本地**的——並行的其他測試不受影響。
+#[cfg(test)]
+thread_local! {
+    static TEST_PROGRAMS: std::cell::RefCell<Option<(String, String)>> = const { std::cell::RefCell::new(None) };
+}
+
+fn ssh_program() -> String {
+    #[cfg(test)]
+    {
+        if let Some((ssh, _)) = TEST_PROGRAMS.with(|p| p.borrow().clone()) {
+            return ssh;
+        }
+    }
+    "ssh".to_string()
+}
+
+fn rsync_program() -> String {
+    #[cfg(test)]
+    {
+        if let Some((_, rsync)) = TEST_PROGRAMS.with(|p| p.borrow().clone()) {
+            return rsync;
+        }
+    }
+    "rsync".to_string()
+}
+
 #[derive(Debug, Deserialize)]
 pub struct RemoteBuildInput {
     pub enabled: bool,
@@ -252,7 +278,7 @@ fn ssh_cmd(remote: &BuildRemoteCfg, password: Option<&str>, mode: Option<&PwMode
             c.arg("-e").arg("ssh");
             c
         }
-        _ => Command::new("ssh"),
+        _ => Command::new(ssh_program()),
     };
     if let (Some(pw), Some(m)) = (password, mode) {
         match m {
@@ -525,6 +551,14 @@ reap() {
   i=0
   while kill -0 -"$g" 2>/dev/null && [ $i -lt 50 ]; do i=$((i + 1)); sleep 0.1; done
 }
+# 離開了 process group 的殘留（自己 `setsid` 的測試輔助行程之類，`reap` 追不到）：還把 cwd 放在這個目錄裡的一併收掉（issue #201）。
+# 這個目錄是這次租約獨佔的（flock），裡面的行程不是這次的就是上一代留下的孤兒；自己（cwd 在 $root）不會被打到。
+sweep() {
+  for p in /proc/[0-9]*; do
+    c=$(readlink "$p/cwd" 2>/dev/null) || continue
+    case "$c/" in "$1"/*) kill -KILL "${p#/proc/}" 2>/dev/null ;; esac
+  done
+}
 hold() {
   flock -n 8 || return 75
   same "$1.lock" 8 || return 76
@@ -538,6 +572,7 @@ hold() {
   # 先撤 owner 再收 pgid：晚到的 run 若通過了 owner 檢查，它的 pgid 一定已經寫好了。
   rm -f "$1.owner"
   reap "$1"
+  sweep "$1"
   rm -f "$1".pgid-*
   if [ "${1##*/}" = shared ]; then touch "$1.lock"; else rm -rf "$1"; rm -f "$1.lock"; fi
   return 0
@@ -721,9 +756,102 @@ fn run_script(dir: &str, sub: &str, token: &LeaseToken, jobs: usize, test_thread
     )
 }
 
-fn run_status(mut cmd: Command, what: &str) -> anyhow::Result<ExitStatus> {
+/// 收到的第一個終止訊號（0＝沒有）；[`install_signal_handlers`] 的 handler 寫它，[`Deadline`] 讀它。
+static SIGNALLED: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+extern "C" fn on_signal(sig: libc::c_int) {
+    // 第二次訊號＝不想再等了：直接結束。遠端那頭照樣清得掉——守門靠連線中斷（stdin EOF）偵測，不靠我們活著做完。
+    if SIGNALLED.swap(sig, std::sync::atomic::Ordering::SeqCst) != 0 {
+        unsafe { libc::_exit(128 + sig) };
+    }
+}
+
+/// helper 正式入口才裝（[`run_cli`]）：SIGINT（Ctrl-C）、SIGTERM、SIGHUP 不再直接把 helper 打死、留下還連著的 ssh 與遠端的 cargo，
+/// 而是記下來，[`run_offload`] 把本機的 rsync／ssh 收掉、等守門把遠端那組行程收乾淨才結束（issue #201）。
+/// 只裝 handler、只做 atomic 操作（async-signal-safe）。
+fn install_signal_handlers() {
+    for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+        unsafe { libc::signal(sig, on_signal as usize as libc::sighandler_t) };
+    }
+}
+
+/// 這次遠端編譯該不該停下來：整體時間上限（issue #194），或本機收到終止訊號（issue #201）。
+/// 連線正常、遠端的 cargo 或測試卡住（死結、等鎖、測試掛住）時，ssh 的 ConnectTimeout／ServerAlive（#174）管不到，沒有上限 helper 與
+/// 呼叫端的 agent 會一直等。
+struct Deadline {
+    at: Option<std::time::Instant>,
+    /// 測試用：模擬「收到終止訊號」。
+    abort: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// 只有正式的 helper 看真的訊號；測試在同一個行程裡並行跑，不能共用那個全域。
+    watch_signals: bool,
+}
+
+/// 為什麼停：當成 `anyhow` 錯誤一路往上傳，[`run_offload`] 認得它。
+#[derive(Debug)]
+enum Stopped {
+    /// 超過整體上限（[`Deadline::at`]）。
+    TimedOut,
+    /// 收到訊號（值）：回 `128 + 訊號`，跟被那個訊號打死的行程一樣。
+    Interrupted(i32),
+}
+
+impl std::fmt::Display for Stopped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Stopped::TimedOut => f.write_str("remote Cargo exceeded its overall time limit"),
+            Stopped::Interrupted(sig) => write!(f, "remote Cargo interrupted by signal {sig}"),
+        }
+    }
+}
+
+impl std::error::Error for Stopped {}
+
+impl Deadline {
+    /// `limit_secs == 0`＝不設上限。
+    fn new(limit_secs: u64) -> Self {
+        Deadline {
+            at: (limit_secs > 0).then(|| std::time::Instant::now() + std::time::Duration::from_secs(limit_secs)),
+            abort: Default::default(),
+            watch_signals: false,
+        }
+    }
+
+    /// 正式 helper：也看真的終止訊號。
+    fn watching_signals(mut self) -> Self {
+        self.watch_signals = true;
+        self
+    }
+
+    fn stop(&self) -> Option<Stopped> {
+        if self.abort.load(std::sync::atomic::Ordering::SeqCst) {
+            return Some(Stopped::Interrupted(libc::SIGTERM));
+        }
+        if self.watch_signals {
+            let sig = SIGNALLED.load(std::sync::atomic::Ordering::SeqCst);
+            if sig != 0 {
+                return Some(Stopped::Interrupted(sig));
+            }
+        }
+        self.at.filter(|at| std::time::Instant::now() >= *at).map(|_| Stopped::TimedOut)
+    }
+}
+
+/// 跑一個子行程到結束；該停了（超過上限、收到訊號）就砍掉它並回 [`Stopped`]。輪詢（20ms）而不是另開看門狗執行緒：`Child::kill` 只會砍還沒被
+/// 收掉的行程，不會碰到 pid 被回收重用的別人。被砍的只是**本機**這條 ssh／rsync；遠端那組行程由守門在 [`Lease`] 放掉時收（stdin EOF）。
+fn run_status(mut cmd: Command, what: &str, deadline: &Deadline) -> anyhow::Result<ExitStatus> {
     cmd.stdin(Stdio::inherit()).stdout(Stdio::inherit()).stderr(Stdio::inherit());
-    cmd.status().map_err(|e| anyhow::anyhow!("{what}: {e}"))
+    let mut child = cmd.spawn().map_err(|e| anyhow::anyhow!("{what}: {e}"))?;
+    loop {
+        if let Some(status) = child.try_wait().map_err(|e| anyhow::anyhow!("{what}: {e}"))? {
+            return Ok(status);
+        }
+        if let Some(why) = deadline.stop() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(anyhow::Error::new(why));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
 }
 
 /// 遠端該同步（也是遠端目錄 hash 的種子）的根，以及 cwd 相對於它的路徑（`""`＝cwd 就是根）。
@@ -779,8 +907,8 @@ fn rsync_rsh(remote: &BuildRemoteCfg, has_password: bool, askpass: bool) -> Stri
     ssh
 }
 
-fn sync_source(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, dir: &str) -> anyhow::Result<()> {
-    if !has_program("rsync") {
+fn sync_source(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, dir: &str, deadline: &Deadline) -> anyhow::Result<()> {
+    if !has_program(&rsync_program()) {
         anyhow::bail!("remote Cargo requires `rsync` on the daemon host");
     }
     let pw = secret(data_dir)?;
@@ -795,7 +923,7 @@ fn sync_source(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, dir: &str) 
             c.arg("-e").arg("rsync");
             c
         }
-        _ => Command::new("rsync"),
+        _ => Command::new(rsync_program()),
     };
     if let (Some(pw), Some(m)) = (pw.as_deref(), &mode) {
         match m {
@@ -812,7 +940,7 @@ fn sync_source(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, dir: &str) 
     cmd.args(["-az", "--delete", "--exclude", ".git", "--exclude", "target", "-e", &ssh])
         .arg(source)
         .arg(dest);
-    let status = run_status(cmd, "rsync source")?;
+    let status = run_status(cmd, "rsync source", deadline)?;
     if !status.success() {
         anyhow::bail!("rsync failed with exit {:?}", status.code());
     }
@@ -824,12 +952,12 @@ fn pick_test_threads(caller: Option<&str>, configured: usize) -> usize {
     caller.and_then(|v| v.trim().parse::<usize>().ok()).filter(|n| *n > 0).unwrap_or(configured)
 }
 
-fn run_remote(remote: &BuildRemoteCfg, data_dir: &Path, lease: &Lease, sub: &str, args: &[String]) -> anyhow::Result<i32> {
+fn run_remote(remote: &BuildRemoteCfg, data_dir: &Path, lease: &Lease, sub: &str, args: &[String], deadline: &Deadline) -> anyhow::Result<i32> {
     let pw = secret(data_dir)?;
     let mut cmd = ssh_base(remote, pw.as_deref(), data_dir)?;
     let threads = pick_test_threads(std::env::var("RUST_TEST_THREADS").ok().as_deref(), remote.test_threads);
     cmd.arg(run_script(&lease.hs.dir, sub, &lease.token, remote.cargo_jobs, threads, args));
-    let status = run_status(cmd, "remote cargo")?;
+    let status = run_status(cmd, "remote cargo", deadline)?;
     Ok(status.code().unwrap_or(1))
 }
 
@@ -855,16 +983,28 @@ pub fn run_cli(config_path: &Path, data_dir: &Path, cwd: &Path, args: &[String])
         "agents-manager: remote Cargo → {}@{}:{} ({})",
         remote.user, remote.host, remote.ssh_port, args.first().map(String::as_str).unwrap_or("")
     );
+    install_signal_handlers();
+    run_offload(&remote, data_dir, cwd, args, &Deadline::new(0).watching_signals())
+}
+
+/// 真的把這次呼叫丟到遠端（已經確定要轉、設定也讀好了）。收到終止訊號也會好好收尾（issue #201）。
+fn run_offload(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, args: &[String], ctl: &Deadline) -> i32 {
     let result = (|| -> anyhow::Result<i32> {
-        // 從這裡起不管怎麼離開（`?`、panic、被殺），守門都會收到 EOF 把目錄還回去。
+        // 從這裡起不管怎麼離開（`?`、panic、被殺、超過上限、收到訊號），守門都會收到 EOF 把目錄還回去、遠端還在跑的 cargo 整組收掉。
         let (root, sub) = source_root(cwd);
-        let mut lease = open_lease(&remote, data_dir, &root)?;
+        let mut lease = open_lease(remote, data_dir, &root)?;
         lease.collect(&select_gc(&lease.hs));
-        sync_source(&remote, data_dir, &root, &lease.hs.dir)?;
-        let code = run_remote(&remote, data_dir, &lease, &sub, args)?;
+        sync_source(remote, data_dir, &root, &lease.hs.dir, ctl)?;
+        let code = run_remote(remote, data_dir, &lease, &sub, args, ctl)?;
         lease.finish();
         Ok(code)
     })();
+    // `lease` 已經在上面那個閉包結束時放掉：守門的清理（收 process group、還目錄與鎖）做完才走到這裡。
+    // 收到終止訊號：Ctrl-C 會同時打到本機的 rsync／ssh，它們的結束碼不代表這次的結果——一律照訊號回 128+sig。
+    if let Some(Stopped::Interrupted(sig)) = ctl.stop() {
+        eprintln!("agents-manager: 收到訊號 {sig}，已中止遠端編譯（遠端那一整組行程已收掉、目錄與鎖已還回）");
+        return 128 + sig;
+    }
     match result {
         Ok(code) => code,
         Err(e) => {
@@ -1549,6 +1689,156 @@ mod guard_tests {
         let _ = locker.kill();
         let _ = busy.wait();
         let _ = locker.wait();
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    // ── 整體執行上限（issue #194）：用假的 ssh／rsync 把本機當成遠端，跑真的 `run_offload`＋真的守門腳本 ──
+
+    /// 寫一支假腳本並確定它已經可以被 exec：並行的另一條測試 fork 時會短暫繼承寫入 fd，這段時間 exec 會回 ETXTBSY（issue #189）——
+    /// 探測用 exec 一次（腳本第一行在 `AM_TEST_EXEC_PROBE` 有設時 `exit 0`），還在被擋就重試，等的是條件不是時間。
+    fn write_exec(path: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::write(path, format!("#!/bin/sh\n[ -z \"${{AM_TEST_EXEC_PROBE:-}}\" ] || exit 0\n{body}")).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let started = Instant::now();
+        loop {
+            match Command::new(path).env("AM_TEST_EXEC_PROBE", "1").output() {
+                Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && started.elapsed() < Duration::from_secs(30) => std::thread::sleep(Duration::from_millis(2)),
+                r => {
+                    assert!(r.unwrap().status.success());
+                    return;
+                }
+            }
+        }
+    }
+
+    /// 假遠端：`ssh` 把最後一個參數（要在遠端跑的指令字串）在**本機**用 `sh -c` 跑，跟 sshd 一樣每條連線自成一個 session
+    /// （`setsid`；收 process group 才不會打到測試本身）；`rsync` 把來源目錄複製到 `user@host:` 後面那個路徑。
+    /// `$HOME` 指到沙盒，裡面的假 cargo 就是「遠端的 cargo」。回傳 (設定, cwd, data_dir)。
+    fn fake_remote(base: &Path, cargo_body: &str) -> (BuildRemoteCfg, PathBuf, PathBuf) {
+        let bin = base.join("fakebin");
+        let home = base.join("home");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(home.join(".cargo/bin")).unwrap();
+        write_exec(&home.join(".cargo/bin/cargo"), cargo_body);
+        write_exec(
+            &bin.join("ssh"),
+            &format!("for a; do last=$a; done\nHOME='{}' exec setsid sh -c \"$last\"\n", home.display()),
+        );
+        write_exec(&bin.join("rsync"), "for a; do src=$dest; dest=$a; done\nd=${dest#*:}\nmkdir -p \"$d\" && cp -a \"${src}.\" \"$d\"\n");
+        let cwd = base.join("work");
+        std::fs::create_dir_all(cwd.join("src")).unwrap();
+        std::fs::write(cwd.join("Cargo.toml"), "[package]\nname = \"p\"\nversion = \"0.1.0\"\n").unwrap();
+        let data = base.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let remote = BuildRemoteCfg {
+            enabled: true,
+            host: "fake".into(),
+            user: "me".into(),
+            ssh_port: 22,
+            remote_root: base.join("rc").display().to_string(),
+            cargo_jobs: 1,
+            test_threads: 0,
+        };
+        (remote, cwd, data)
+    }
+
+    /// 在這條執行緒上把 `ssh`／`rsync` 換成 `fake_remote` 寫的假腳本再跑 `f`。
+    fn with_fake_transport<T>(base: &Path, f: impl FnOnce() -> T) -> T {
+        let bin = base.join("fakebin");
+        TEST_PROGRAMS.with(|p| *p.borrow_mut() = Some((bin.join("ssh").display().to_string(), bin.join("rsync").display().to_string())));
+        let out = f();
+        TEST_PROGRAMS.with(|p| *p.borrow_mut() = None);
+        out
+    }
+
+    /// 假 cargo 留下的 `cargo-started-<pid>`（在 `<root>/<hash>/`）裡的 pid。
+    fn started_cargo_pids(base: &Path) -> Vec<i32> {
+        let mut pids = Vec::new();
+        for hash in std::fs::read_dir(base.join("rc")).into_iter().flatten().flatten() {
+            for e in std::fs::read_dir(hash.path()).into_iter().flatten().flatten() {
+                if let Some(pid) = e.file_name().to_string_lossy().strip_prefix("cargo-started-").and_then(|p| p.parse().ok()) {
+                    pids.push(pid);
+                }
+            }
+        }
+        pids
+    }
+
+    // ── 本機 helper 被砍時遠端也要停（issue #201）──
+
+    /// 本機 helper 被 `kill -9`：kernel 收掉它所有的 fd，守門那條 ssh 的 stdin 關掉（**不是**我們自己做清理）——遠端還在跑的 cargo 整組要在
+    /// 幾秒內消失，shared 的鎖也要放掉（不然同一棵 worktree 的下一次編譯會卡在等鎖，只能連到遠端手動清）。
+    #[test]
+    fn a_dead_helper_leaves_no_running_remote_process_and_releases_the_shared_lock() {
+        let base = base();
+        let home = fake_home(&base);
+        let mut lease = guard(&base, HASH, "job-1-1"); // 搶到 shared
+        let dir = lease.hs.dir.clone();
+        assert!(dir.ends_with("/shared"), "{dir}");
+        let mut run = spawn_run(&base, &home, &dir, &lease.token);
+        wait_until("fake cargo to start", || started(&dir));
+        let lock = format!("{dir}.lock");
+        let lock_free = || Command::new("flock").args(["-n", &lock, "true"]).status().map(|s| s.success()).unwrap_or(false);
+        assert!(!lock_free(), "cargo 在跑：鎖被守門持有");
+
+        drop(lease.stdin.take()); // helper 死了：只剩連線中斷
+        let status = wait_run(&mut run);
+        assert!(status.signal().is_some() || !status.success(), "遠端的 cargo 要被收掉：{status:?}");
+        wait_until("the shared lock to be released", lock_free);
+        let _ = lease.child.wait();
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// 離開了 process group 的殘留（cargo 底下自己 `setsid` 的輔助行程）`reap` 追不到：守門收尾時，還把 cwd 放在這個目錄裡的一併收掉。
+    #[test]
+    fn a_process_that_left_the_process_group_is_still_reaped_when_the_lease_ends() {
+        let base = base();
+        let home = fake_home(&base);
+        write_exec(
+            &home.join(".cargo/bin/cargo"),
+            "touch \"$PWD/../cargo-started-$$\"\nsetsid sleep 45 >/dev/null 2>&1 &\necho $! > \"$PWD/../escaped.pid\"\nexec sleep 45\n",
+        );
+        let mut holder = guard(&base, HASH, "job-1-1"); // 佔住 shared，讓下一個拿 job 目錄
+        let mut lease = guard(&base, HASH, "job-2-2");
+        let dir = lease.hs.dir.clone();
+        let mut run = spawn_run(&base, &home, &dir, &lease.token);
+        let escaped_pid = || std::fs::read_to_string(Path::new(&dir).parent().unwrap().join("escaped.pid")).ok().and_then(|s| s.trim().parse::<i32>().ok());
+        wait_until("the escaped helper to be recorded", || escaped_pid().is_some());
+        let pid = escaped_pid().unwrap();
+        assert_eq!(unsafe { libc::kill(pid, 0) }, 0, "離開 process group 的輔助行程還活著");
+
+        drop(lease.stdin.take());
+        assert!(lease.finish().unwrap().success());
+        wait_until("the escaped helper to be reaped", || unsafe { libc::kill(pid, 0) } != 0);
+        let _ = run.wait();
+        holder.finish();
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// 收到終止訊號（Ctrl-C／TERM／HUP）：helper 不再直接被打死、留下還連著的 ssh 與遠端的 cargo——把本機的 ssh／rsync 收掉、等守門把遠端那組行程
+    /// 收乾淨，才用 `128 + 訊號` 結束。這裡用測試專用的 abort 旗標模擬「收到 SIGTERM」（真的訊號只有正式 helper 才看）。
+    #[test]
+    fn an_interrupted_helper_reaps_the_remote_group_before_it_exits() {
+        let base = base();
+        let (remote, cwd, data) = fake_remote(&base, "touch \"$PWD/../cargo-started-$$\"\nexec sleep 45\n");
+        let ctl = Deadline::new(0);
+        let abort = ctl.abort.clone();
+        let watcher = {
+            let base = base.clone();
+            std::thread::spawn(move || {
+                wait_until("the remote cargo to start", || !started_cargo_pids(&base).is_empty());
+                abort.store(true, std::sync::atomic::Ordering::SeqCst);
+            })
+        };
+        let t0 = Instant::now();
+        let rc = with_fake_transport(&base, || run_offload(&remote, &data, &cwd, &["test".to_string()], &ctl));
+        watcher.join().unwrap();
+        assert_eq!(rc, 128 + libc::SIGTERM, "被訊號中止：128＋訊號");
+        assert!(t0.elapsed() < Duration::from_secs(60), "{:?}", t0.elapsed());
+        let pids = started_cargo_pids(&base);
+        assert_eq!(pids.len(), 1, "{pids:?}");
+        wait_until("the remote cargo to be reaped", || unsafe { libc::kill(pids[0], 0) } != 0);
         let _ = std::fs::remove_dir_all(base);
     }
 }

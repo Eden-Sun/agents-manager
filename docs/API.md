@@ -529,6 +529,10 @@ shim 轉遠端要 pane 裡有 `AM_DAEMON_EXE`、`AM_CONFIG_PATH`、`AM_DATA_DIR`
   不會重新解析依賴。
 - 每次呼叫先開一條守門 ssh 拿鎖，再 rsync、再跑 cargo；守門讀 stdin 等到 EOF 才清理，所以 helper 成功、失敗、
   被 Ctrl-C／SIGTERM／kill -9 都會清（遠端還在跑的 cargo 按 process group 收掉，`job-*` 刪掉，`shared` 解鎖）。
+- **helper 被砍時遠端也要停（issue #201）**：SIGINT（Ctrl-C）、SIGTERM、SIGHUP 不再直接把 helper 打死（那會留下還連著的 ssh 與遠端還在跑的 cargo）——helper 記下訊號、
+  把本機的 rsync／ssh 收掉、等守門把遠端那組行程收乾淨（process group，同 #183）並還目錄與鎖，才用 `128＋訊號` 結束；第二次訊號直接結束（遠端照樣清得掉）。
+  SIGKILL 攔不到，只能靠連線中斷偵測：kernel 收掉 helper 的 fd，守門那條 ssh 的 stdin 關掉，守門讀到 EOF 就收尾。守門收尾時，除了按 process group 收，
+  還把 cwd 在這個目錄裡、卻離開了 process group（自己 `setsid` 的輔助行程）的一併收掉。
 - 租約身分（fencing token，issue #148）是本機每次呼叫新產生的 128 位元隨機數（32 個小寫 hex），不是遠端 shell 的 PID
   （PID 會被回收重用：值一樣不等於同一次租約）。守門把它寫進 `<dir>.owner`、原樣回給 helper，run 帶著它核對 owner
   （對不上＝晚到的舊 run，exit 126 不跑 cargo）；`<dir>.pgid-<token>` 也以它命名，守門只收自己那一代的 process group。
