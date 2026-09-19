@@ -650,6 +650,10 @@ def cmd_approval(client: Client, cfg: dict, args) -> object:
         # 同一個申請者換 commit 重新申請：舊的那筆標 superseded，等待起點接過來（SPEC §18.10）。
         if args.supersedes:
             body["supersedes"] = args.supersedes
+        # 申請理由要**真的送出去**：以前只有 `approval decide` 帶 reason，request 寫了等於沒寫，
+        # AGM 看到空欄位就以「未附理由」駁回（2026-09-19，連三張）。
+        if args.reason:
+            body["reason"] = args.reason
         return client.post("/api/supervisor/approvals", body)
     if not args.approval_id:
         raise AgmError("bad_args", "approval decide 需要 approval id", 2)

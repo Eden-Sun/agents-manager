@@ -167,7 +167,7 @@ async fn superseding_an_approval_that_expired_earlier_this_second_leaves_it_alon
     let e = tt::env().await;
     let p = &e.app.db;
     let old = approved(p, "bot-a", "rebuild", &mid_second().await).await;
-    let out = st::create_approval_superseding(p, "bot-a", "rebuild", "daemon", Some("abc"), None, None, Some(&old)).await.unwrap();
+    let out = st::create_approval_superseding(p, "bot-a", "rebuild", "daemon", Some("abc"), None, None, Some(&old), None).await.unwrap();
     assert!(out.superseded.is_none(), "已過期的舊申請不算活的，不該被接手");
     assert_eq!(st::approval(p, &old).await.unwrap().unwrap().status, "approved", "留著原狀");
     assert_eq!(out.approval.wait_since, None, "沒有接手，就沒有等待起點可以繼承");

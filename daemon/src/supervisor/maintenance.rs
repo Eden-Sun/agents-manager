@@ -488,12 +488,20 @@ async fn requester_bot_id(app: &Arc<App>, owner: &str) -> Option<String> {
     if matches!(crate::db::bot(&app.db, owner).await, Ok(Some(_))) {
         return Some(owner.to_string());
     }
-    crate::db::live_bots(&app.db)
+    if let Ok(bots) = crate::db::live_bots(&app.db).await {
+        if let Some(b) = bots.into_iter().find(|b| b.name == owner) {
+            return Some(b.id);
+        }
+    }
+    // **agent 名也要認**：申請者常用自己的 herdr agent 名（`AM_AGENT_NAME`），那跟 bot 的名字
+    // 不一定一樣——2026-09-19 實測 bot 叫 `AM-m3`、agent 叫 `agents-manager-15m2dg`，於是
+    // 「排除申請者自己」永遠對不上，restart 一律 409 `exclude_not_requester`。
+    sqlx::query_scalar::<_, String>("SELECT bot_id FROM runs WHERE agent_name = ? AND state = 'running' ORDER BY started_at DESC LIMIT 1")
+        .bind(owner)
+        .fetch_optional(&app.db)
         .await
-        .ok()?
-        .into_iter()
-        .find(|b| b.name == owner)
-        .map(|b| b.id)
+        .ok()
+        .flatten()
 }
 
 /// 送達臨界區真正要放過的那一顆：申請者自己，而且它確實出現在 `--exclude-bot` 裡。
@@ -578,9 +586,28 @@ pub async fn acquire(
     // 以 acquire 的 owner 問：自己手上的 rebuild 不擋自己的 restart。
     let safety = safety_as(app, exclude, Some(&approval.id), Some(owner)).await?;
     if require_idle && safety.get("safe") != Some(&Value::Bool(true)) {
+        // 講得出「還要等多久」：只說 not_idle 的話，呼叫端會以為沒有出路（2026-09-19 實測，
+        // 有人因此連試 `--allow-busy`、最後想繞過租約）。升級機制就是這種情況的出口，
+        // 所以把等待秒數、門檻與預估升級時間直接放進錯誤裡。
+        let waited = safety.get("waited_secs").and_then(Value::as_i64);
+        let threshold = safety.get("escalate_after_secs").and_then(Value::as_i64);
+        let eta = match (waited, threshold) {
+            (Some(w), Some(t)) if w < t => Some(crate::db::iso_in(t - w)),
+            _ => None,
+        };
         return Err(LcError::conflict(
             "something is still running; wait for a safe window",
-            json!({"reason": "not_idle", "safety": safety}),
+            json!({
+                "reason": "not_idle",
+                "waited_secs": waited,
+                "escalate_after_secs": threshold,
+                "escalates_at": eta,
+                "hint": eta.as_deref().map(|at| format!(
+                    "同一張核准等滿 {}s 之後 working 就不再擋（只剩送達臨界區、別人的租約、讀不到狀態）；預計 {at} 可以拿。帶同一張 --approval 再試，換一張會重算。",
+                    threshold.unwrap_or(0)
+                )),
+                "safety": safety,
+            }),
         ));
     }
 
@@ -1068,6 +1095,51 @@ mod tests {
         assert_eq!(ok.get("lease").and_then(|l| l.get("owner")).and_then(|o| o.as_str()), Some("mine"), "{ok}");
     }
 
+    /// requester 用的是 **agent 名**（`AM_AGENT_NAME`）而不是 bot 名時，也要認得出是同一顆
+    /// （2026-09-19：bot 叫 AM-m3、agent 叫 agents-manager-15m2dg，restart 因此一律 409
+    /// `exclude_not_requester`，人只好去試 --allow-busy）。
+    #[tokio::test]
+    async fn the_requester_can_be_the_agent_name_not_just_the_bot_name() {
+        let e = crate::testing::env().await;
+        let app = &e.app;
+        let now = crate::db::now();
+        sqlx::query(
+            "INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('b-m3',?,'AM-m3','claude','tok',?)",
+        )
+        .bind(&e.project_id).bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query(
+            "INSERT INTO runs (id,bot_id,state,agent_status,agent_name,started_at) VALUES ('r-m3','b-m3','running','idle','agents-manager-15m2dg',?)",
+        )
+        .bind(&now).execute(&app.db).await.unwrap();
+
+        assert_eq!(requester_bot_id(app, "b-m3").await.as_deref(), Some("b-m3"), "bot id");
+        assert_eq!(requester_bot_id(app, "AM-m3").await.as_deref(), Some("b-m3"), "bot 名");
+        assert_eq!(requester_bot_id(app, "agents-manager-15m2dg").await.as_deref(), Some("b-m3"), "agent 名");
+        assert!(requester_bot_id(app, "daemon-update-kick").await.is_none(), "腳本身分對不到 bot");
+        assert!(requester_bot_id(app, "  ").await.is_none());
+    }
+
+    /// 拿不到窗口時要講得出「還要等多久」：只回 not_idle 會讓人以為沒有出路（2026-09-19 實測）。
+    #[tokio::test]
+    async fn a_refused_window_says_when_the_approval_escalates() {
+        let e = crate::testing::env().await;
+        let app = &e.app;
+        let now = crate::db::now();
+        sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('busy',?,'busy','claude','tok',?)")
+            .bind(&e.project_id).bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,started_at) VALUES ('r-busy','busy','running','working',?)")
+            .bind(&now).execute(&app.db).await.unwrap();
+        let ap = approved_restart(app, 1).await;
+
+        let err = acquire(app, "restart", "k8bw2f", &ap, None, 300, true, &[]).await.unwrap_err();
+        let LcError::Conflict(v) = err else { panic!("要是 409") };
+        assert_eq!(v.get("reason").and_then(Value::as_str), Some("not_idle"));
+        assert!(v.get("waited_secs").and_then(Value::as_i64).is_some(), "{v}");
+        assert_eq!(v.get("escalate_after_secs").and_then(Value::as_i64), Some(escalate_after_secs()), "{v}");
+        assert!(v.get("escalates_at").and_then(Value::as_str).is_some(), "要說得出預計什麼時候可以拿：{v}");
+        assert!(v.get("hint").and_then(Value::as_str).is_some_and(|h| h.contains("不再擋")), "{v}");
+    }
+
     /// 過期沒 release 的窗口不再是閘門：`held_at` 看 `expires_at`，不需要任何人來收尾（issue #86）。
     #[tokio::test]
     async fn an_expired_window_stops_fencing_by_itself() {
@@ -1304,7 +1376,7 @@ mod tests {
         let old = approved_window(app, 40).await;
         let decided_old = store::approval(&app.db, &old).await.unwrap().unwrap().decided_at.unwrap();
 
-        let out = store::create_approval_superseding(&app.db, "ops", "rebuild", "release", Some("h2"), None, None, Some(&old)).await.unwrap();
+        let out = store::create_approval_superseding(&app.db, "ops", "rebuild", "release", Some("h2"), None, None, Some(&old), None).await.unwrap();
         assert_eq!(out.superseded.as_deref(), Some(old.as_str()));
         let new = out.approval;
         assert_eq!(new.wait_since.as_deref(), Some(decided_old.as_str()), "接過來的是舊那筆被核准的時間");
@@ -1320,17 +1392,17 @@ mod tests {
         assert!(s["waited_secs"].as_i64().unwrap() >= 2400);
 
         // 接力可以一直往下傳；別人的、或用途不同的不能取代。
-        let third = store::create_approval_superseding(&app.db, "ops", "rebuild", "release", Some("h3"), None, None, Some(&new.id)).await.unwrap().approval;
+        let third = store::create_approval_superseding(&app.db, "ops", "rebuild", "release", Some("h3"), None, None, Some(&new.id), None).await.unwrap().approval;
         assert_eq!(third.wait_since.as_deref(), Some(decided_old.as_str()));
         for (who, purpose) in [("bot-b", "rebuild"), ("ops", "restart")] {
-            let err = store::create_approval_superseding(&app.db, who, purpose, "release", Some("h4"), None, None, Some(&third.id)).await.unwrap_err();
+            let err = store::create_approval_superseding(&app.db, who, purpose, "release", Some("h4"), None, None, Some(&third.id), None).await.unwrap_err();
             assert!(err.downcast_ref::<store::ApprovalSupersedeRefused>().is_some(), "{who}/{purpose}: {err}");
         }
         assert_eq!(store::approval(&app.db, &third.id).await.unwrap().unwrap().status, "pending", "被拒的取代什麼都不動");
 
         // 舊的已經不能用（被駁）：新的照開，但不接等待。
         store::decide_approval(&app.db, &third.id, "denied", "AGM", None, None).await.unwrap();
-        let fresh = store::create_approval_superseding(&app.db, "ops", "rebuild", "release", Some("h5"), None, None, Some(&third.id)).await.unwrap();
+        let fresh = store::create_approval_superseding(&app.db, "ops", "rebuild", "release", Some("h5"), None, None, Some(&third.id), None).await.unwrap();
         assert_eq!((fresh.superseded, fresh.approval.wait_since), (None, None));
         assert_eq!(store::approval(&app.db, &third.id).await.unwrap().unwrap().status, "denied");
     }
@@ -1342,7 +1414,7 @@ mod tests {
         let app = &e.app;
         let old = store::create_approval(&app.db, "ops", "rebuild", "release", Some("h1"), None, None).await.unwrap().approval;
         store::push_inbox(&app.db, &format!("approval:{}:requested", old.id), "approval_requested", None, None, None, &json!({})).await.unwrap();
-        store::create_approval_superseding(&app.db, "ops", "rebuild", "release", Some("h2"), None, None, Some(&old.id)).await.unwrap();
+        store::create_approval_superseding(&app.db, "ops", "rebuild", "release", Some("h2"), None, None, Some(&old.id), None).await.unwrap();
         let (state, acked): (String, Option<String>) = sqlx::query_as("SELECT state, acked_by FROM supervisor_inbox WHERE event_key=?")
             .bind(format!("approval:{}:requested", old.id))
             .fetch_one(&app.db)
@@ -1353,6 +1425,7 @@ mod tests {
 
     fn approval(status: &str, purpose: &str, commit: Option<&str>, expires: Option<&str>) -> Approval {
         Approval {
+            request_reason: None,
             id: "ap1".into(),
             supervisor_id: "AGM".into(),
             requester: "bot-x".into(),

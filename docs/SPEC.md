@@ -2302,7 +2302,14 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
   `restart` 的 `--exclude-bot` 指到**別顆** bot 直接 409 `exclude_not_requester`——否則等於拿自己的核准把別人正在打字的 pane 算成閒置。
   `rebuild` 不帶這個條件，排除清單維持原本用法（kick 會排掉 AGM 三顆）。
 - **重啟後無等待期**：窗口在租約 release（API）或 daemon 啟動完成（開始 listen 後自動 release 仍未釋放的 `restart` 租約、consume 核准並記 info log）時就結束，被它 hold 的交辦立刻解除、controller 下一輪（≤10 秒）直接派送，不等 hold 寫的到期時間；controller 每輪派送前發現已沒有 held 的 `restart` 租約（含到期）也會先解除殘留 hold。
-- 安全窗口 fail closed：讀不到某顆 bot 狀態回 `safe:false` 並列在 `unreadable`。`restart` 不接受 `require_idle=false`。
+- 安全窗口 fail closed：讀不到某顆 bot 狀態回 `safe:false` 並列在 `unreadable`。`restart` 不接受 `require_idle=false`
+  （`--allow-busy` 對它是 400）。拿不到窗口的 409 會帶 `waited_secs`／`escalate_after_secs`／`escalates_at` 與一句
+  提示：**升級就是這種情況的出口**，只回 `not_idle` 會讓呼叫端以為沒有路，轉而想繞過租約（2026-09-19 實測）。
+- **申請理由**：`POST /api/supervisor/approvals` 收 `reason`，存在 `supervisor_approvals.request_reason`，
+  跟 AGM 裁示寫的 `reason` **分開兩欄**——共用一欄的話裁示一寫就把申請理由蓋掉，事後查不到「他當初為什麼申請」。
+- **申請者的身分**：`requester` 可以是 bot id、bot 名或**agent 名**（`AM_AGENT_NAME`），三種都對得回同一顆 bot
+  （`maintenance::requester_bot_id`）。2026-09-19 之前只認前兩種，bot 叫 `AM-m3`、agent 叫 `agents-manager-15m2dg`
+  的情形下「排除申請者自己」永遠對不上，restart 一律 409 `exclude_not_requester`。
 - **等太久就縮小封鎖面**（AGM 裁示 2026-09-16）：在這台機器的負載下「任何 bot 在回合中就不換」等同永遠不安全——2026-09-15 那筆核准卡了 11 小時，每 5 分鐘那一輪都撞到有人在講話。
   所以同一筆**已核准、未消耗**的 `rebuild`／`restart` 申請，從**核准時間**（`decided_at`；換 commit 接續的見下）起連續等超過門檻（常數 30 分鐘，`AM_MAINTENANCE_ESCALATE_MINS` 可調；0、負數或看不懂的值當沒設）之後，安全窗口改判「縮小封鎖面」：
   - **誰等太久就放寬誰**（AGM 裁示 2026-09-16）：`acquire` 只看**當下這筆核准自己**等了多久，別人放著沒用掉的核准不算數——否則一張被遺忘的核准等於把所有人的窗口都打開。

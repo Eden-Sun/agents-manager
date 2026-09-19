@@ -480,8 +480,10 @@ adopt 之後孤兒通知標記會清掉。pane 不存在 404、`owner_bot_id` �
 - **正文只有一份來源**：`claude-release-task.md`（AGM 目錄裝好的那份優先，其次 repo 的 `scripts/ops/`）原文
   ＋ 版本尾段（舊／新版號與兩顆 binary 路徑），跟 `claude-release-kick.sh` 完全一樣；規則要改就改那個檔案。
   找不到那份檔案 → 409 `no_task_file`；
-- `client_request_id` 固定是 `agm-claude-release-<版本>`（與 kick 同一個）。同一版已經有交辦時**在送出之前**
-  就回既有那一筆、`duplicate:true`（UI 顯示「已經派過」，不是錯誤）——kick 與按鈕的正文差一句觸發來源，
+- `client_request_id` 固定是 `agm-claude-release-<版本>`（與 kick 同一個）。同一版已經派過時**在送出之前**
+  就回 `duplicate:true`——**兩個地方都查**：既有的 assignment（回 `assignment_id`），以及 AGM 收件匣裡同一個
+  crid 的 `bot_request`（回 `inbox_event_id`；kick 是走收件匣派的，那一步還沒有 assignment，不查就會撞上
+  `bot_requests` 的 409 `request_mismatch`——2026-09-19 上線後實測）（UI 顯示「已經派過」，不是錯誤）——kick 與按鈕的正文差一句觸發來源，
   不先查會撞上 `text_mismatch` 409；
 - 派給誰：`AGM_RELEASE_BOT` ＞ `runtime.json` 的 `release_bot_id` ＞ `responder_bot_id`，**絕不派給巡檢**
   （daemon 擋「總管對自己下交辦」）。都沒設 → 409 `no_target`，`message` 就是給使用者看的原因；
