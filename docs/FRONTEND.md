@@ -53,6 +53,10 @@ web/src/
   `BlockedPanel`（對話上方，全畫面開著時暫停輪詢）共用 `useTerminalSnapshot` 與 `usePaneKeys`。
   全畫面的鍵盤直通把 `KeyboardEvent` 翻成 herdr 鍵名（⌘ 系列留給瀏覽器，Home/End/PgUp/PgDn herdr 不收）；直通時 Esc 也送給 agent。
   送鍵走佇列合批（`agent.send_keys` 吃陣列），不然快打會亂序。
+  送鍵／送字都帶 `expect_run_id`（bot 重啟過就不要把鍵打進新的 agent）；快取的 run id 過期時 daemon 回 409
+  `run mismatch` **並附上現在的 run id**，`store.sendWithFreshRun` 就拿它**自動重試一次**再順手 `refreshState`——
+  以前只跳「送出按鍵失敗：run mismatch」要使用者自己再按一次（2026-09-19 w168:p7J）。其他 409（框裡有字、
+  回合在飛）不重試，原樣回報。
 - **全域鍵盤**：⌥↑／⌥↓ 換 bot（bot 列內與對話框開著時不接）；**Control+1…9 跳到側欄第 n 個專案的群組對話、把側欄捲到那一列並 focus 輸入框**（2026-09-16 使用者；「第 n 個」＝側欄**畫出來**的第 n 個，搜尋時沒命中的專案整塊不畫，不算在內）——認 `event.code` 的 `Digit1…9`，所以中文輸入法照樣有效；用 Control 而非 ⌘（⌘1…9 是瀏覽器換分頁）；正在組字、對話框開著、事件已被處理就不接；第 n 個專案不存在就什麼都不做。
 - **群組任務入口**：`/api/missions` 不存在時整個入口靜默不出現，不重試不報錯。
 - **Mock**：`api/mock.ts` 的回應形狀刻意與 `daemon/src/api.rs` 一致。訊息含 `blocked`／`rm -rf` → 進 blocked；`fallback` → terminal_fallback 回覆；
