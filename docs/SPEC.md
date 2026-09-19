@@ -767,8 +767,18 @@ cancel 撤掉的是還沒送出的那則時，review 回應不再帶「turn 還�
   **grok 的撞限長不一樣**（2026-09-19 w168:pB7）：它畫在訊息區塊裡——`Turn failed: Request failed (402): Grok Build usage balance
   exhausted`、`You hit your weekly limit.`，底下還有 `1 (○) Upgrade tier` 等三行。**那三行不是可以選的選單**：方向鍵動不了、
   ANSI 也看不到游標，是 grok 用文字講出路，所以不畫成按鈕。`screen::grok_limit_hit_line` 認這兩句（402 那句要同時提到 grok），
-  畫面掃描（`screen::scan`）因此也對 grok 跑，bot 不會再停在一個「像在問問題、卻按不動」的 blocked 畫面。橫幅裡沒有時間，
-  `until` 就是 `None`。
+  畫面掃描（`screen::scan`）因此也對 grok 跑，bot 不會再停在一個「像在問問題、卻按不動」的 blocked 畫面。
+  **記帳與觸發**（#222）：
+  - 撞限記在 **grok 自己那一格**（`grok`／`grok:<身分>`，`turn_error::Banner::Grok`），不是 codex 的——`mark_codex_limit_hit` 對 grok 走
+    `record_grok`。橫幅沒寫重置時間：`You hit your weekly limit.` 標 `seven_day` 窗（grok 只有週窗）、保底 7 天；session／5-hour 標
+    `five_hour`、保底 5 小時；402 `usage balance exhausted`（credits 用完）沒有窗、保底 5 小時、不標窗（`screen::grok_limit_window`）。
+    桶名讓之後 grok `/usage` 探測的讀數能校正它（`quota::set`：窗是撞限之後才開的就清掉，否則 `until` 取與 `resets_at` 較早者）——
+    grok 沒有 codex 那種「下一回合答完就清」的訊號，沒有這條撞限會擋到保底過期。同一張畫面的兩句，有窗的排前面
+    （`limit_banner::sighting` 一次讀取只有第一句算新的），後到的短限不縮短已記的週限，同一句再看到不重算。
+  - 畫面掃描有三個觸發點：`working → idle` 的備援（`try_fallback` 不把這張畫面當回覆收成 `completed_fallback`，收成 `failed`）、
+    **`blocked` 的那條邊**（`events::handle_status` → `schedule_codex_notice_capture`，只對 grok）、以及回合進行中的 progress poller
+    （bot 停在 `blocked`、邊漏了或 daemon 重啟時已經停在那裡，每個 blocked 掃一次）。**一個鍵都不按**：選項 1、2 是付費，
+    「Try Again」也不自動按。
 
 **abort 不動 queued**（AGM 裁示 2026-09-16）：`POST /api/bots/{id}/abort` 的語意是「停掉這一回合」，排在後面的是 AGM 正當的派工，
 abort 之後照常 flush 出去（但先照下一段等寬限）。要取消排隊的派工，走交辦 `cancel`（上面那條會一併撤 queued）。這不是漏撤，不要當成 bug 修。
