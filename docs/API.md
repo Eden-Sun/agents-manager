@@ -958,8 +958,11 @@ readback_model_mismatch|readback_effort_mismatch|readback_fast_mismatch>`。以�
 - 已經有一批在跑：`202 {"batch_id": <那一批>, "total": 0, "planned": [], "skipped": [], "already_running": true}`，不另開一批、不推新的 `done`，進度照那一批的事件。
 - 每顆 `restart_bot_with(resume_native)`，claude 拿到 `--resume <上一個 session>`（上下文不掉）；本機找不到 `transcript_path` 時開新對話。
 - 候選 = claude 且 run 的 `update_notice` 非空；非候選不出現在任何清單。`reason`：`default_session` / `not_running` / `working` / `blocked` / `unknown_status` / `turn_in_flight`，
-  以及輪到它時已經不是候選的 `no_longer_pending`（每一顆真的重啟前會照同一張表再判斷一次），
+  以及輪到它時已經不是候選的 `no_longer_pending`（每一顆真的重啟前會照同一張表再判斷一次）、輪到它時 DB 讀不到它的狀態的 `state_unreadable`
+  （這次沒動它，更新還在等；不是 `no_longer_pending`），
   `reason_label` 是給人看的那句（前端直接顯示）。
+- 讀不到誰是總管（`supervisors`）：整批不開，回 502、沒動任何一顆，稍後再按。走哪一條重啟路（子 agent 原 pane 裡 exit + resume、其餘 stop + start）由一次讀得到的 bot 決定：
+  讀不到 bot 時那顆記進 `failed`（`error` 說是讀不到分類），不會改走一般 stop + start。
 - 一顆失敗不中斷整批。AGM 在 `planned` 永遠排最後，60 秒內沒回來自動再啟動一次（inbox `supervisor_restart_retry`）；最終啟動失敗推 inbox `bot_restart_failed`。
 
 WS：每顆兩次 `bots_restart_progress`（`restarting`，然後 `ok` / `failed` 帶 `error`）；輪到它時改判跳過的只有一次 `status:"skipped"`（帶 `reason`、`reason_label`），每顆之後另推 `bot_changed`；收尾一次 `bots_restart_done`：

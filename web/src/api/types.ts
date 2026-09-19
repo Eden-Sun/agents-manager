@@ -279,7 +279,7 @@ export interface Run {
 export interface RestartSkip {
   bot_id: string
   name: string
-  /** `working` / `blocked` / `turn_in_flight` / `not_running` / `unknown_status` / `no_longer_pending`（輪到它時狀態變了） */
+  /** `working` / `blocked` / `turn_in_flight` / `not_running` / `unknown_status` / `no_longer_pending`（輪到它時狀態變了）/ `state_unreadable`（輪到它時 DB 讀不到它的狀態，這次沒動它） */
   reason: string
   /** daemon 寫好的，前端不另編一套 */
   reason_label: string

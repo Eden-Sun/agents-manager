@@ -1489,6 +1489,10 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   刻意保守：批次最不能做的就是砍掉使用者正在等的回合。
   **輪到那一顆真的要重啟前再判斷一次**（`bulk_restart::recheck`，同一張表，外加「已經不是候選」→ `no_longer_pending`）：計畫是按下去那一刻的快照，
   排在後面的要等上一兩分鐘，這段時間 AGM 派了工或使用者打了字，它就在回合中了（review 2026-09-16）。改判跳過的推 `bots_restart_progress` `status:"skipped"`，也列進 `done.skipped`。
+  **讀不到不是「不在了」**（#188）：重看時讀 run／bot／in-flight turn 任何一步 DB 出錯，記成 `state_unreadable` 跳過（這次沒動它、更新還在等，稍後再按一次），不報成 `no_longer_pending`——那會讓人以為更新套上了。
+  **走哪一條重啟路由一次讀得到的 bot 決定**：`restart_resuming` 讀不到 bot 就這顆記 `failed`、什麼都不動，絕不猜成一般 bot——一般的 stop + start 會關掉父 agent 開的 pane、再開一個 daemon 重建不了環境的新 pane。
+  最後一道在 lifecycle：`restart_bot_with` 在鎖裡讀到 `managed_by = child` 就回 409 `child_restarts_in_pane`，什麼都還沒停，所以誤呼也不靠呼叫端先分類的約定。
+  讀不到誰是總管（`supervisors`）時整批不開（回 502）：不知道是誰，就排不出「總管最後重啟」，也不會替它排「60 秒內回不來就再啟動」的檢查。
   「重看」到拿到 bot 鎖之間的毫秒級空檔也關掉了：批次帶 `StartOpts.require_idle`，`restart_bot_with`／`restart_child_in_pane_with` **拿到鎖之後、送 ctrl+c 之前**
   再看一次（沒 run、非 running、working、blocked、非 idle、有 in-flight turn），不閒置回 409 `not_idle`（`busy` 帶上面的代碼），什麼都不動。使用者自己按的單顆重啟不帶這個旗標。
 - **同時只准一批**：已經有一批在跑時再按，回那一批的 `batch_id`（`already_running: true`、`total: 0`），不另開一份重疊的清單。

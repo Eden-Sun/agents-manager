@@ -54,6 +54,9 @@ pub(crate) mod race_point;
 /// #187：`purge_deleted_bot_dirs` 讀不到 run 的狀態時不刪目錄。
 #[cfg(test)]
 mod purge_dirs_tests;
+/// #188：子 agent 不能走 stop + start；夾具（一顆有真 mock pane 的子 agent）給批次重啟的測試共用。
+#[cfg(test)]
+pub(crate) mod restart_kind_tests;
 
 /// Runs the daemon has typed into during **this** boot. `runs.pane_typed` is the durable record;
 /// this is the conservative in-process copy, so a row that later becomes unreadable cannot send a
