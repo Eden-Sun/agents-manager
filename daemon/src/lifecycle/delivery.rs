@@ -579,7 +579,12 @@ pub(crate) fn log_hits_since(format: LogFormat, path: &std::path::Path, offset: 
     let mut buf = Vec::new();
     f.read_to_end(&mut buf)?;
     let body = String::from_utf8_lossy(&buf);
-    Ok(body.lines().filter_map(|l| log_user_text(format, l)).filter(|t| t == text).count())
+    // claude 可能把貼上的 prompt 包成 `<pasted_content>` 才寫進去（#218）；codex 不會。
+    let ours = |t: &String| match format {
+        LogFormat::Claude => super::pasted_content::is_sent(t, text),
+        LogFormat::Codex => t == text,
+    };
+    Ok(body.lines().filter_map(|l| log_user_text(format, l)).filter(ours).count())
 }
 
 /// Find the rollout codex writes for `session_id` under `codex_home/sessions`.
@@ -1431,6 +1436,29 @@ mod tests {
         std::fs::write(&path, "").unwrap();
         assert!(transcript_hits_since(&path, offset, code).is_err());
         assert!(transcript_hits_since(&dir.join("missing.jsonl"), 0, code).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #218：claude 2.1.278 把**貼上事件**（herdr `agent.prompt`、人在終端貼上）包成 `<pasted_content id=…>` 才寫進
+    /// transcript。真 transcript（2026-09-19 實測）：包起來的、20 字門檻下沒包的、字面標籤被 CLI 跳脫的，都認得是同一則；
+    /// 只是被包含的一段不算。
+    #[test]
+    fn a_prompt_the_cli_wrapped_as_pasted_content_is_still_our_prompt() {
+        let dir = std::env::temp_dir().join(format!("am-transcript-{}", db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.jsonl");
+        std::fs::write(&path, include_str!("fixtures/claude_2.1.278_pasted_content.jsonl")).unwrap();
+        let hits = |text: &str| transcript_hits_since(&path, 0, text).unwrap();
+        assert_eq!(hits("請只回覆 OK 兩個字母，不要多說任何其他的話，也不要使用任何工具。"), 1, "整段包起來");
+        assert_eq!(hits("請只回覆 OK 兩個字母不要多說其他話"), 1, "19 字：CLI 沒包，照舊逐字");
+        assert_eq!(hits("請只回覆 OK 兩個字母，不要多說其他話"), 1, "20 字：包起來");
+        assert_eq!(hits("第一行：這是多行貼上測試。\n第二行：請不要使用任何工具。\n第三行：還是一樣。\n第四行：只回覆 OK 兩個字母。"), 1, "多行");
+        assert_eq!(
+            hits("這段文字裡有字面的 <pasted_content id=\"1234\">x</pasted_content id=\"1234\"> 標籤，請只回覆 OK 兩個字母。"),
+            1,
+            "字面標籤被 CLI 跳脫成 <\\"
+        );
+        assert_eq!(hits("請只回覆 OK 兩個字母"), 0, "只是被包含的一段不算");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

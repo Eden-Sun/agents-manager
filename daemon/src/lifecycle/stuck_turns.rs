@@ -266,7 +266,10 @@ fn read_tail(path: &std::path::Path, max: u64) -> Option<String> {
 /// 回它的文字。之間又出現別的 user prompt（下一個回合）、或只有 tool_use（還在做）、或被中斷沒有 end_turn，都是 `None`。
 pub(crate) fn claude_reply_after(log: &str, sent: &[String]) -> Option<String> {
     let lines: Vec<&str> = log.lines().collect();
-    let start = lines.iter().rposition(|l| transcript_user_text(l).is_some_and(|t| sent.iter().any(|s| s == &t)))?;
+    // herdr `agent.prompt` 送的會被 CLI 包成 `<pasted_content>`（#218）。
+    let start = lines
+        .iter()
+        .rposition(|l| transcript_user_text(l).is_some_and(|t| sent.iter().any(|s| super::pasted_content::is_sent(&t, s))))?;
     for line in &lines[start + 1..] {
         if transcript_user_text(line).is_some() {
             return None;
@@ -529,6 +532,27 @@ mod tests {
         let msgs = messages(&app, &f.turn_id).await;
         assert!(msgs.contains(&("assistant".into(), "transcript".into(), "部署完成：pid 42894".into())), "{msgs:?}");
         assert!(!msgs.iter().any(|m| m.0 == "system"), "證得出來就不用解釋");
+    }
+
+    /// #218：herdr `agent.prompt` 送的回合，claude 2.1.278 在 transcript 裡把 prompt 包成 `<pasted_content id=…>`
+    /// （真 transcript，2026-09-19 實測）。Stop 漏掉時照樣找得到我們那一則、存下它之後的回覆；以前逐字比對找不到起點，
+    /// 收成 `completed_fallback`，transcript 裡那份完整的回覆就丟了。
+    #[tokio::test]
+    async fn a_prompt_the_cli_wrapped_as_pasted_content_still_proves_the_reply() {
+        let f = stuck("請只回覆 OK 兩個字母，不要多說任何其他的話，也不要使用任何工具。").await;
+        let app = f.env.app.clone();
+        let path = f.env.dir.join("transcript.jsonl");
+        let log: Vec<&str> = include_str!("fixtures/claude_2.1.278_pasted_content.jsonl").lines().take(2).collect();
+        assert!(log[0].contains("<pasted_content id=\\\"c4ab\\\">"), "fixture 第一列就是包起來的那一則");
+        std::fs::write(&path, log.join("\n") + "\n").unwrap();
+        sqlx::query("UPDATE runs SET transcript_path = ? WHERE id = ?").bind(path.to_string_lossy()).bind(&f.run_id).execute(&app.db).await.unwrap();
+
+        let t0 = Instant::now();
+        observe_at(&f.run_id, "idle", t0);
+        assert_eq!(sweep_at(&app, None, t0 + 6 * MIN, 5 * MIN).await.len(), 1);
+        assert_eq!(turn(&app, &f.turn_id).await.status, "completed");
+        let msgs = messages(&app, &f.turn_id).await;
+        assert!(msgs.contains(&("assistant".into(), "transcript".into(), "OK".into())), "{msgs:?}");
     }
 
     /// #193：收之前讀不到主機（證據要看本機 transcript）：這一輪不收、回錯，下一輪再看。以前當成「證不出回覆」，

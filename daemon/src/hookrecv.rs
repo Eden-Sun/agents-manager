@@ -511,7 +511,12 @@ fn last_transcript_user_text(path: &std::path::Path) -> Option<String> {
     f.seek(SeekFrom::Start(len.saturating_sub(TAIL))).ok()?;
     let mut buf = Vec::new();
     f.read_to_end(&mut buf).ok()?;
-    String::from_utf8_lossy(&buf).lines().rev().find_map(crate::lifecycle::transcript_user_text)
+    String::from_utf8_lossy(&buf)
+        .lines()
+        .rev()
+        .find_map(crate::lifecycle::transcript_user_text)
+        // CLI 把貼上的 prompt 包成 `<pasted_content>`（#218）：存進對話、比對的都是原文。
+        .map(|t| crate::lifecycle::pasted_content::original(&t).into_owned())
 }
 
 /// 有兩邊的原文、而且怎麼比都對不上，才算「hook 回答的是另一句」。去空白後互相包含就算同一句
@@ -1522,6 +1527,25 @@ mod external_claim_tests {
         assert!(!hook_user_is_new(&vec!["Reply with\n  exactly MERGED-OK".into()], "Reply with exactly MERGED-OK"));
         // The pane clipped the echo at the column width.
         assert!(!hook_user_is_new(&vec!["Reply with exactly MER".into()], "Reply with exactly MERGED-OK"));
+    }
+
+    /// #218：claude Stop 沒帶使用者訊息，從 transcript 尾巴補。CLI 把貼上的 prompt 包成 `<pasted_content id=…>`
+    /// （真 transcript，2026-09-19 實測）：要拆回原文——不然記成外部回合時標籤會顯示給使用者，`agent_relay::claim` 也對不上。
+    #[test]
+    fn the_transcript_user_text_drops_the_cli_pasted_content_wrapper() {
+        let dir = std::env::temp_dir().join(format!("am-hookrecv-{}", db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.jsonl");
+        let log: Vec<&str> = include_str!("lifecycle/fixtures/claude_2.1.278_pasted_content.jsonl").lines().collect();
+        std::fs::write(&path, log[..2].join("\n") + "\n").unwrap();
+        assert_eq!(last_transcript_user_text(&path).as_deref(), Some("請只回覆 OK 兩個字母，不要多說任何其他的話，也不要使用任何工具。"));
+        std::fs::write(&path, log[8..].join("\n") + "\n").unwrap();
+        assert_eq!(
+            last_transcript_user_text(&path).as_deref(),
+            Some("這段文字裡有字面的 <pasted_content id=\"1234\">x</pasted_content id=\"1234\"> 標籤，請只回覆 OK 兩個字母。"),
+            "CLI 跳脫的字面標籤還原"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
