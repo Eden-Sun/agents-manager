@@ -27,3 +27,20 @@ test('previewApiMissing: 404／405 是舊 daemon，其他錯誤不是', async ()
   assert.equal(previewApiMissing(new ApiError(409, { reason: 'no_vite_config' }, 'x')), false)
   assert.equal(previewApiMissing(new Error('x')), false)
 })
+
+test('toPreview: v2 的 source／candidates／others，壞項目丟掉', () => {
+  const p = toPreview({
+    status: 'running',
+    port: 5173,
+    source: 'attached',
+    pid: 4242,
+    candidates: ['/a/web', 3, ''],
+    others: [{ port: 3001, dir: '/b/apps/web', pid: 9 }, { port: 'x', dir: '/c' }, null],
+  })
+  assert.equal(p.source, 'attached')
+  assert.equal(p.pid, 4242)
+  assert.deepEqual(p.candidates, ['/a/web'])
+  assert.deepEqual(p.others, [{ port: 3001, dir: '/b/apps/web', pid: 9 }])
+  assert.deepEqual(toPreview({ status: 'off' }).others, [])
+  assert.equal(toPreview({ status: 'running', source: 'weird' }).source, null)
+})
