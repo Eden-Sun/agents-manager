@@ -653,6 +653,8 @@ export async function testRemoteCargo(): Promise<{
   password_auth: boolean
   cargo_missing: boolean
   cargo_version: string
+  /** 有 cargo 卻沒有 clippy（`cargo clippy` 轉過去會失敗；按安裝會補上）。 */
+  clippy_missing: boolean
   os: string
   arch: string
 }> {
@@ -664,6 +666,7 @@ export async function testRemoteCargo(): Promise<{
     password_auth: o.password_auth === true,
     cargo_missing: o.cargo_missing === true,
     cargo_version: str(o.cargo_version),
+    clippy_missing: o.clippy_missing === true,
     os: str(o.os),
     arch: str(o.arch),
   }
@@ -674,6 +677,7 @@ export async function installRemoteCargoToolchain(): Promise<{
   already_installed: boolean
   cargo_version: string
   cc_missing: boolean
+  clippy_missing: boolean
   output: string
 }> {
   const raw = await transport.request('POST', '/build/remote/install-toolchain', {})
@@ -682,6 +686,7 @@ export async function installRemoteCargoToolchain(): Promise<{
     already_installed: o.already_installed === true,
     cargo_version: str(o.cargo_version),
     cc_missing: o.cc_missing === true,
+    clippy_missing: o.clippy_missing === true,
     output: str(o.output),
   }
 }

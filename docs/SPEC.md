@@ -1479,6 +1479,7 @@ listen port 只在本機算（pane 行程樹的 pid 對 `lsof -nP -iTCP -sTCP:LI
   **反過來寫**：只有已知不編譯的（`metadata`／`tree`／`fmt`／`fetch`／`update`／`clean`／`add`／…，加上沒有子指令的 `--version`、`-h`）放行，其餘一律當 heavy——
   `cargo +nightly build`、`cargo -q build`、`cargo --locked test`、`.cargo/config.toml` 的 alias（`cargo dev`）與自訂子指令（`cargo nextest`）都不會悄悄繞過排程器。
   外部編譯（`remote-cargo` helper 的 `eligible`）只搬「原樣搬到遠端意思不變」的全域旗標（`-v`／`-q`／`--locked`／`--color`）；`+toolchain`、`-C`、`--config`、`--offline`、`--frozen`、`-Z` 留在本機、照本機名額排。
+  `cargo clippy --fix`（`--` 之前有 `--fix`）也留在本機（issue #104）：它會改原始碼，改到的是 rsync 過去的遠端那份、不會同步回來。
 - **排程器問不到（連不上、空回應、5xx／不是 JSON、身分被拒）時，受管的 bot 不會變成沒有名額的 cargo（issue #128 重開）**：daemon 重啟／升級／DB 出問題的
   瞬間所有 bot 同時開編就繞過了 `max_concurrent`，而那正是最需要保護本機的時候。「受管」＝pane 有 `AM_BOT_ID`、hook token 與 `AM_PORT`（本機 bot）。
   受管的 bot：每 3 秒重試，最多等 `AM_BUILD_SCHEDULER_WAIT_SECS`（預設 120 秒），之後 **fail closed，exit 75**（可重試），stderr 講明原因與怎麼明確繞過；
@@ -1492,7 +1493,8 @@ listen port 只在本機算（pane 行程樹的 pid 對 `lsof -nP -iTCP -sTCP:LI
   遠端那台的編譯本來就不受這台 daemon 的名額管。不把位址寫進遠端 shim：daemon 只聽本機 127.0.0.1，遠端連不到，寫了也是假的。
 - **轉到外部編譯主機的指令不佔本機名額（issue #155，使用者 2026-09-19 決定）**：本機名額管的是本機的 RAM／CPU。`check`／`test`／`clippy`
   （#104 的 verification 三個）在 pane 有 `AM_DAEMON_EXE`／`AM_CONFIG_PATH`／`AM_DATA_DIR` 時，shim **先**叫 `remote-cargo` helper，
-  **不先 acquire**：遠端有空就同時跑多少個都行，不受 `max_concurrent` 限制（遠端自己的容量靠 `cargo_jobs` 與那台機器；沒有另設遠端上限）。
+  **不先 acquire**：不受本機 `max_concurrent` 限制；遠端有自己的名額（`[build.remote] max_concurrent`，預設依遠端核數與 RAM 算，滿了排隊，
+  排超過 30 分鐘回 75，issue #104，詳見 API.md「外部 Cargo 主機」）。
   helper 結束碼原樣帶出（非 125 一律 `exit`，不會偷偷在本機重跑；超過整體上限 `[build.remote] timeout_secs`，預設 12 分鐘，是 **124**，issue #194）；只有 **125＝根本沒有在遠端動手**（設定被關掉、不適合 offload）才落到下面，
   這時才去 acquire、才受本機名額管。缺環境變數而沒轉成的（issue #138）也是落到本機、照本機名額排。`build`／`run`／…本來就不轉，照舊排。
   daemon 連不上時遠端編譯照樣能跑（它不需要 daemon）。

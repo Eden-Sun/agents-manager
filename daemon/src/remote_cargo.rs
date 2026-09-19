@@ -21,8 +21,15 @@ const PASSWORD_FILE: &str = "remote-cargo-password";
 /// 整體上限最多設到一天（0＝不設上限）。
 const MAX_TIMEOUT_SECS: u64 = 24 * 3600;
 
+/// `[build.remote] max_concurrent` 最多設到這麼多。
+const MAX_CONCURRENT: usize = 64;
+
 /// 超過整體上限時 helper 的結束碼（跟 GNU `timeout` 一樣是 124）。shim 只把 125 當成「退回本機」，所以不會在本機重跑一次。
 pub const EXIT_TIMEOUT: i32 = 124;
+
+/// 排遠端名額排超過 [`QUEUE_WAIT_SECS`] 時 helper 的結束碼（EX_TEMPFAIL：稍後再試；跟 shim 自己「排程器用不了」的 75 同一個意思）。
+/// 這時遠端什麼都還沒跑；原因守門已經印在 stderr。
+pub const EXIT_QUEUE_FULL: i32 = 75;
 
 /// 測試用：把 `ssh`／`rsync` 換成假腳本（本機當遠端）。只有測試 build 有這個入口，而且是**執行緒本地**的——並行的其他測試不受影響。
 #[cfg(test)]
@@ -73,6 +80,9 @@ pub struct RemoteBuildInput {
     /// 遠端 `shared/` 最多留幾份（issue #196）。None＝維持現在的值；0＝不限。
     #[serde(default)]
     pub max_shared_dirs: Option<usize>,
+    /// 遠端同時最多幾個編譯（issue #104）。None＝維持現在的值；0＝依遠端核數與 RAM 自動算。
+    #[serde(default)]
+    pub max_concurrent: Option<usize>,
     /// None = preserve the currently stored password; Some("") = delete it (key/agent auth).
     #[serde(default)]
     pub password: Option<String>,
@@ -82,31 +92,189 @@ fn default_port() -> u16 {
     22
 }
 
-fn password_path(data_dir: &Path) -> PathBuf {
-    data_dir.join(PASSWORD_FILE)
-}
-
-pub fn password_is_set(data_dir: &Path) -> bool {
-    std::fs::metadata(password_path(data_dir)).map(|m| m.is_file() && m.len() > 0).unwrap_or(false)
-}
-
-fn write_password(data_dir: &Path, password: &str) -> anyhow::Result<()> {
-    let path = password_path(data_dir);
-    if password.is_empty() {
-        match std::fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.into()),
+/// 這份設定的密碼檔在哪；`None`＝沒有密碼（key/agent）。
+///
+/// 設定沒有 `password_id`＝舊版，讀固定檔名 `remote-cargo-password`；有的話讀 `remote-cargo-password.<id>`（issue #104）。
+/// id 只收 16 位小寫 hex（本機產生），手改壞的設定不會變成路徑穿越。
+fn password_path(data_dir: &Path, remote: &BuildRemoteCfg) -> anyhow::Result<Option<PathBuf>> {
+    match remote.password_id.as_deref() {
+        None => Ok(Some(data_dir.join(PASSWORD_FILE))),
+        Some("") => Ok(None),
+        Some(id) if id.len() == 16 && id.bytes().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f')) => {
+            Ok(Some(data_dir.join(format!("{PASSWORD_FILE}.{id}"))))
         }
-        return Ok(());
+        Some(id) => anyhow::bail!("[build.remote] password_id 格式不對（{id:?}）；到設定頁重新輸入密碼"),
     }
-    std::fs::write(&path, password)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+}
+
+fn password_is_set(data_dir: &Path, remote: &BuildRemoteCfg) -> bool {
+    matches!(password_path(data_dir, remote), Ok(Some(p)) if std::fs::metadata(&p).map(|m| m.is_file() && m.len() > 0).unwrap_or(false))
+}
+
+/// 測試用的故障注入（issue #104）：`Fail`＝那一步回錯誤、照正常路徑收拾；`Crash`＝行程死在那一步之後，什麼都不收拾。
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Fault {
+    Fail,
+    Crash,
+}
+
+#[cfg(test)]
+thread_local! {
+    static SECRET_FAULT: std::cell::Cell<Option<(&'static str, Fault)>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct SimulatedCrash(&'static str);
+
+#[cfg(test)]
+impl std::fmt::Display for SimulatedCrash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "simulated crash after {}", self.0)
+    }
+}
+
+#[cfg(test)]
+impl std::error::Error for SimulatedCrash {}
+
+fn fault_point(step: &'static str) -> anyhow::Result<()> {
+    #[cfg(test)]
+    if let Some((at, how)) = SECRET_FAULT.with(|f| f.get()) {
+        if at == step {
+            return Err(match how {
+                Fault::Fail => anyhow::anyhow!("injected failure at {step}"),
+                Fault::Crash => anyhow::Error::new(SimulatedCrash(step)),
+            });
+        }
+    }
+    let _ = step;
+    Ok(())
+}
+
+/// 模擬的行程死亡：死掉的行程不會跑任何收拾。
+fn crashed(e: &anyhow::Error) -> bool {
+    #[cfg(test)]
+    let hit = e.downcast_ref::<SimulatedCrash>().is_some();
+    #[cfg(not(test))]
+    let hit = {
+        let _ = e;
+        false
+    };
+    hit
+}
+
+/// 把新密碼寫成一份**還沒有任何設定指到**的 `remote-cargo-password.<id>`，回傳 id（issue #104）。
+///
+/// 0600 是 open(2) 建檔時就給的，不是事後 chmod——以前 `fs::write` 完才 chmod，中間檔案是 umask 決定的 0644，
+/// 這時 crash 就永遠留著一份別人讀得到的密碼。寫完 fsync 才 rename 成正式檔名，看得到的正式檔一定是完整的；
+/// 中途失敗就刪掉暫存檔。現在在用的密碼檔從頭到尾沒被碰。
+fn stage_password(data_dir: &Path, password: &str) -> anyhow::Result<String> {
+    let id = format!("{:016x}", rand::random::<u64>());
+    let path = data_dir.join(format!("{PASSWORD_FILE}.{id}"));
+    let tmp = data_dir.join(format!("{PASSWORD_FILE}.{id}.tmp"));
+    let res = (|| -> anyhow::Result<()> {
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&tmp)?;
+        fault_point("created")?;
+        f.write_all(password.as_bytes())?;
+        fault_point("written")?;
+        f.sync_all()?;
+        fault_point("synced")?;
+        drop(f);
+        std::fs::rename(&tmp, &path)?;
+        fault_point("renamed")?;
+        // 目錄也 fsync，斷電後新檔名才一定在（有些檔案系統不支援對目錄 fsync：盡力而為）。
+        if let Ok(d) = std::fs::File::open(data_dir) {
+            let _ = d.sync_all();
+        }
+        Ok(())
+    })();
+    match res {
+        Ok(()) => Ok(id),
+        Err(e) if crashed(&e) => Err(e),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            let _ = std::fs::remove_file(&path);
+            Err(e)
+        }
+    }
+}
+
+/// 刪掉 data-dir 裡所有不是 `remote` 指到的密碼檔（舊的 id、舊版固定檔名、沒 rename 完的暫存檔）。
+fn remove_unused_passwords(data_dir: &Path, remote: &BuildRemoteCfg) -> anyhow::Result<()> {
+    let keep = password_path(data_dir, remote)?;
+    fault_point("cleanup")?;
+    let prefix = format!("{PASSWORD_FILE}.");
+    for e in std::fs::read_dir(data_dir)?.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if (name == PASSWORD_FILE || name.starts_with(&prefix)) && keep.as_deref() != Some(e.path().as_path()) {
+            std::fs::remove_file(e.path())?;
+        }
     }
     Ok(())
+}
+
+fn commit_lock() -> &'static tokio::sync::Mutex<()> {
+    static L: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    L.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+/// 換設定與密碼（issue #104）。唯一的提交點是 config.toml 的 rename（[`crate::config::write_atomic`]）：
+/// 1. 新密碼先寫成一份還沒人指到的 `remote-cargo-password.<新 id>`（[`stage_password`]）；
+/// 2. config.toml 一次換成「新設定＋`password_id` 指向新檔」；
+/// 3. 才刪掉沒有設定指到的舊密碼檔。
+///
+/// 任何一步失敗或行程死掉，重讀磁碟只會是「舊設定＋舊密碼」或「新設定＋新密碼」。以前先改 config 再寫密碼：
+/// 寫密碼失敗就停在新主機配舊密碼，下一次呼叫會把舊主機的密碼送去新主機。
+///
+/// `password`：`None`＝沿用現在的密碼（`password_id` 不變）；`Some("")`＝清掉改用 key/agent；其他＝新密碼。
+async fn commit_remote(
+    store: &crate::config::ConfigStore,
+    data_dir: &Path,
+    password: Option<&str>,
+    apply: impl FnOnce(&mut BuildRemoteCfg),
+) -> anyhow::Result<BuildRemoteCfg> {
+    // 兩次儲存交錯的話，先提交的那次清舊檔時，會把另一次剛寫好、還沒提交的新密碼檔當成「沒人指到」刪掉。
+    let _one_at_a_time = commit_lock().lock().await;
+    let staged = match password {
+        None => None,
+        Some("") => Some(String::new()),
+        Some(pw) => Some(stage_password(data_dir, pw)?),
+    };
+    let committed = store
+        .update(|cfg| {
+            apply(&mut cfg.build.remote);
+            if let Some(id) = &staged {
+                cfg.build.remote.password_id = Some(id.clone());
+            }
+            fault_point("config")?;
+            Ok(cfg.build.remote.clone())
+        })
+        .await;
+    let remote = match committed {
+        Ok(r) => r,
+        Err(e) => {
+            if let Some(id) = staged.as_deref().filter(|id| !id.is_empty() && !crashed(&e)) {
+                let _ = std::fs::remove_file(data_dir.join(format!("{PASSWORD_FILE}.{id}")));
+            }
+            return Err(e);
+        }
+    };
+    // 已經提交了：清舊檔失敗不算這次失敗（剩下的是沒人指到的 0600 舊檔，下次儲存再清）。
+    if let Err(e) = remove_unused_passwords(data_dir, &remote) {
+        if crashed(&e) {
+            return Err(e);
+        }
+        tracing::warn!("remote Cargo: 清掉沒在用的舊密碼檔失敗：{e:#}");
+    }
+    Ok(remote)
 }
 
 fn sanitized(cfg: &BuildRemoteCfg, data_dir: &Path) -> Value {
@@ -121,7 +289,8 @@ fn sanitized(cfg: &BuildRemoteCfg, data_dir: &Path) -> Value {
         "timeout_secs": cfg.timeout_secs,
         "shared_idle_hours": cfg.shared_idle_hours,
         "max_shared_dirs": cfg.max_shared_dirs,
-        "password_set": password_is_set(data_dir),
+        "max_concurrent": cfg.max_concurrent,
+        "password_set": password_is_set(data_dir, cfg),
     })
 }
 
@@ -159,43 +328,29 @@ pub async fn put_settings(
     if input.shared_idle_hours == Some(0) {
         return Err(LcError::Bad("shared_idle_hours 至少 1（要清就把 max_shared_dirs 設小）".into()));
     }
+    if input.max_concurrent.is_some_and(|n| n > MAX_CONCURRENT) {
+        return Err(LcError::Bad(format!("max_concurrent 最多 {MAX_CONCURRENT}（0＝依遠端核數與 RAM 自動算）")));
+    }
     if input.timeout_secs.is_some_and(|t| t > MAX_TIMEOUT_SECS) {
         return Err(LcError::Bad(format!("timeout_secs 最多 {MAX_TIMEOUT_SECS} 秒（0＝不設上限）")));
     }
-    app.cfg
-        .update(|cfg| {
-            let timeout_secs = input.timeout_secs.unwrap_or(cfg.build.remote.timeout_secs);
-            let shared_idle_hours = input.shared_idle_hours.unwrap_or(cfg.build.remote.shared_idle_hours);
-            let max_shared_dirs = input.max_shared_dirs.unwrap_or(cfg.build.remote.max_shared_dirs);
-            let test_threads = input.test_threads.unwrap_or(cfg.build.remote.test_threads).min(256);
-            cfg.build.remote = BuildRemoteCfg {
-                enabled: input.enabled,
-                host: host.clone(),
-                user: user.clone(),
-                ssh_port: input.ssh_port,
-                remote_root: if remote_root.is_empty() {
-                    crate::config::default_remote_build_root()
-                } else {
-                    remote_root.clone()
-                },
-                cargo_jobs,
-                test_threads,
-                timeout_secs,
-                shared_idle_hours,
-                max_shared_dirs,
-            };
-            Ok(())
-        })
-        .await
-        .map_err(|e| LcError::Upstream(e.to_string()))?;
-
-    // Secret is intentionally outside config.toml. If this write fails, report failure instead of
-    // pretending the setting is usable; the non-secret desired state is still visible for repair.
-    if let Some(password) = input.password.as_deref() {
-        write_password(&app.data_dir, password).map_err(|e| LcError::Upstream(format!("store remote Cargo password: {e}")))?;
-    }
-    let cfg = app.cfg.get().await;
-    Ok(Json(sanitized(&cfg.build.remote, &app.data_dir)))
+    // 密碼不進 config.toml；設定與密碼一起提交（見 `commit_remote`），失敗時兩邊都還是舊的。
+    let remote = commit_remote(&app.cfg, &app.data_dir, input.password.as_deref(), |r| {
+        r.enabled = input.enabled;
+        r.host = host.clone();
+        r.user = user.clone();
+        r.ssh_port = input.ssh_port;
+        r.remote_root = if remote_root.is_empty() { crate::config::default_remote_build_root() } else { remote_root.clone() };
+        r.cargo_jobs = cargo_jobs;
+        r.test_threads = input.test_threads.unwrap_or(r.test_threads).min(256);
+        r.timeout_secs = input.timeout_secs.unwrap_or(r.timeout_secs);
+        r.shared_idle_hours = input.shared_idle_hours.unwrap_or(r.shared_idle_hours);
+        r.max_shared_dirs = input.max_shared_dirs.unwrap_or(r.max_shared_dirs);
+        r.max_concurrent = input.max_concurrent.unwrap_or(r.max_concurrent);
+    })
+    .await
+    .map_err(|e| LcError::Upstream(format!("store remote Cargo settings: {e:#}")))?;
+    Ok(Json(sanitized(&remote, &app.data_dir)))
 }
 
 pub async fn test_settings(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
@@ -275,13 +430,18 @@ fn password_mode(data_dir: &Path) -> anyhow::Result<PwMode> {
     )
 }
 
-fn secret(data_dir: &Path) -> anyhow::Result<Option<String>> {
-    match std::fs::read_to_string(password_path(data_dir)) {
+/// 這份設定用的密碼。設定明確指到一份密碼檔（`password_id`）而它不見了是錯誤，不悄悄改成 key/agent。
+fn secret(data_dir: &Path, remote: &BuildRemoteCfg) -> anyhow::Result<Option<String>> {
+    let Some(path) = password_path(data_dir, remote)? else { return Ok(None) };
+    match std::fs::read_to_string(&path) {
         Ok(s) => {
             let s = s.trim_end_matches(|c| c == '\r' || c == '\n').to_string();
             Ok((!s.is_empty()).then_some(s))
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && remote.password_id.is_none() => Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            anyhow::bail!("設定指到的密碼檔 {} 不見了；到設定頁重新輸入密碼（或清掉改用 SSH 金鑰）", path.display())
+        }
         Err(e) => Err(e.into()),
     }
 }
@@ -338,8 +498,10 @@ fn ssh_cmd(remote: &BuildRemoteCfg, password: Option<&str>, mode: Option<&PwMode
 
 /// probe 在遠端跑的那一行。`~/.cargo/bin` 一併看：rustup 裝好之後**只**改 shell profile，
 /// 而 ssh 的非互動 shell 不讀 profile，`command -v cargo` 會說沒有（2026-09-18）。
+/// clippy 也看：它是轉過去的三個指令之一，rustup 的 minimal profile 不含它（issue #104）。
 const PROBE_SH: &str = "printf 'OS='; uname -s; printf 'ARCH='; uname -m; \
-PATH=\"$HOME/.cargo/bin:$PATH\"; printf 'CARGO='; command -v cargo || true; cargo --version 2>/dev/null || true";
+PATH=\"$HOME/.cargo/bin:$PATH\"; echo \"CARGO=$(command -v cargo)\"; cargo --version 2>/dev/null || true; \
+echo \"CLIPPY=$(cargo clippy --version 2>/dev/null)\"";
 
 /// probe 的輸出拆成前端看得懂的欄位。**沒有 cargo 不是錯誤**——連得上只是還沒裝工具鏈，UI 要
 /// 能直接提示「幫你裝」，而不是丟一段原始輸出讓人猜（使用者 2026-09-18）。
@@ -360,8 +522,13 @@ pub fn parse_probe(stdout: &str) -> (Option<String>, Option<String>, Option<Stri
     (os, arch, cargo, version)
 }
 
+/// probe 輸出裡的 `CLIPPY=<版本>`；空的＝沒有 clippy。
+pub fn probe_clippy(stdout: &str) -> Option<String> {
+    stdout.lines().find_map(|l| l.trim().strip_prefix("CLIPPY=")).filter(|v| !v.is_empty()).map(str::to_string)
+}
+
 fn probe(remote: &BuildRemoteCfg, data_dir: &Path) -> anyhow::Result<Value> {
-    let pw = secret(data_dir)?;
+    let pw = secret(data_dir, remote)?;
     let mut cmd = ssh_base(remote, pw.as_deref(), data_dir)?;
     cmd.arg(PROBE_SH);
     let out = cmd.output()?;
@@ -370,6 +537,7 @@ fn probe(remote: &BuildRemoteCfg, data_dir: &Path) -> anyhow::Result<Value> {
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
     let (os, arch, cargo, version) = parse_probe(&stdout);
+    let clippy = probe_clippy(&stdout);
     Ok(json!({
         "ok": true,
         "output": stdout.trim(),
@@ -379,6 +547,9 @@ fn probe(remote: &BuildRemoteCfg, data_dir: &Path) -> anyhow::Result<Value> {
         "cargo_path": cargo,
         "cargo_version": version,
         "cargo_missing": cargo.is_none(),
+        "clippy_version": clippy,
+        // 有 cargo 卻沒有 clippy：`cargo clippy` 轉過去才會失敗，UI 要當場講、給安裝按鈕（安裝會補上）。
+        "clippy_missing": cargo.is_some() && clippy.is_none(),
     }))
 }
 
@@ -386,16 +557,23 @@ fn probe(remote: &BuildRemoteCfg, data_dir: &Path) -> anyhow::Result<Value> {
 ///
 /// `--profile minimal --no-modify-path`：我們只需要 cargo／rustc 跑 check/test/clippy，而且不要
 /// 去動使用者的 shell profile——probe 與 `run_remote` 都自己把 `~/.cargo/bin` 接到 PATH 前面。
+/// minimal 不含 clippy，而 `cargo clippy` 是會轉過去的三個指令之一（issue #104）：新裝的帶 `--component clippy`，
+/// 本來就有 cargo 的也補一次（rustup 裝的才補得了），補不上就回報 `CLIPPY_MISSING=1`，不讓 UI 說「裝好了」卻第一次 clippy 才失敗。
 const INSTALL_SH: &str = "set -e\n\
 PATH=\"$HOME/.cargo/bin:$PATH\"\n\
-if command -v cargo >/dev/null 2>&1; then printf 'ALREADY='; cargo --version; exit 0; fi\n\
-if ! command -v curl >/dev/null 2>&1; then echo 'remote host has no curl; install curl (or rustup) there first' >&2; exit 2; fi\n\
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --no-modify-path\n\
-printf 'INSTALLED='; \"$HOME/.cargo/bin/cargo\" --version\n\
+if command -v cargo >/dev/null 2>&1; then\n\
+  printf 'ALREADY='; cargo --version\n\
+else\n\
+  if ! command -v curl >/dev/null 2>&1; then echo 'remote host has no curl; install curl (or rustup) there first' >&2; exit 2; fi\n\
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --component clippy --no-modify-path\n\
+  printf 'INSTALLED='; \"$HOME/.cargo/bin/cargo\" --version\n\
+fi\n\
+if ! cargo clippy --version >/dev/null 2>&1 && command -v rustup >/dev/null 2>&1; then rustup component add clippy >&2 || true; fi\n\
+cargo clippy --version >/dev/null 2>&1 || echo 'CLIPPY_MISSING=1'\n\
 command -v cc >/dev/null 2>&1 || command -v gcc >/dev/null 2>&1 || echo 'CC_MISSING=1'\n";
 
 fn install_toolchain(remote: &BuildRemoteCfg, data_dir: &Path) -> anyhow::Result<Value> {
-    let pw = secret(data_dir)?;
+    let pw = secret(data_dir, remote)?;
     let mut cmd = ssh_base(remote, pw.as_deref(), data_dir)?;
     cmd.arg(INSTALL_SH);
     let out = cmd.output()?;
@@ -408,6 +586,7 @@ fn install_toolchain(remote: &BuildRemoteCfg, data_dir: &Path) -> anyhow::Result
     // rustup 只裝 rust，不裝 linker。沒有 `cc` 的話 cargo test 會在連結那一步才爆，訊息很難懂
     // （2026-09-18 實測這台就是這樣），所以當場講出來。
     let cc_missing = stdout.lines().any(|l| l.trim() == "CC_MISSING=1");
+    let clippy_missing = stdout.lines().any(|l| l.trim() == "CLIPPY_MISSING=1");
     let version = stdout
         .lines()
         .find_map(|l| l.strip_prefix("ALREADY=").or_else(|| l.strip_prefix("INSTALLED=")))
@@ -417,6 +596,7 @@ fn install_toolchain(remote: &BuildRemoteCfg, data_dir: &Path) -> anyhow::Result
         "already_installed": already,
         "cargo_version": version,
         "cc_missing": cc_missing,
+        "clippy_missing": clippy_missing,
         "output": stdout,
     }))
 }
@@ -450,7 +630,10 @@ pub fn eligible(args: &[String]) -> bool {
                 it.next();
             }
             _ if a.starts_with("--color=") => continue,
-            "c" | "check" | "t" | "test" | "clippy" => return true,
+            "c" | "check" | "t" | "test" => return true,
+            // `clippy --fix` 會改原始碼：改到的是 rsync 過去的遠端那份、不會同步回來，呼叫端以為修好了、本機一個字都沒變（issue #104）。
+            // 只轉唯讀的驗證；`--` 後面是給 clippy-driver 的 lint 參數，不算。
+            "clippy" => return !it.take_while(|a| *a != "--").any(|a| a == "--fix"),
             _ => return false,
         }
     }
@@ -478,8 +661,10 @@ pub fn sh_quote(s: &str) -> String {
 //
 // 版面：`<remote_root>/<worktree 路徑的 fnv1a64>/`
 //   - `shared/`＋`shared.lock`：同一棵 worktree 共用的原始碼＋`target/`，跨呼叫保留（增量編譯）。
-//   - `job-<pid>-<ms>/`＋`.lock`：`shared` 正被另一次呼叫用著時的退路，冷編譯，結束就刪。
+//   - `job-<pid>-<ms>/`＋`.lock`：`shared` 被另一次呼叫佔著、等了 [`SHARED_WAIT_SECS`] 還沒空出來時的退路，冷編譯，結束就刪。
 //   - 純數字的 `<pid>/`：#141 之前的版本留下的，沒有鎖，只能靠「沒行程在用＋放很久」回收。
+// 另有 `<remote_root>/.slots/<n>`：遠端名額（issue #104）。守門拿到目錄之後再搶一個 `flock`，拿著直到結束——同一個 remote_root
+// 不分 worktree 同時最多 `max_concurrent` 個遠端編譯，其餘排隊。鎖跟著守門 shell 的 fd 走，守門怎麼死都會放。
 //
 // 每次呼叫先開一條「守門」ssh（[`guard_script`]）：它在遠端拿 flock、把目錄交給這次呼叫，然後讀 stdin
 // 等到 EOF 才清理。helper 正常結束、失敗、被 Ctrl-C／SIGTERM／kill -9，本機這端的 pipe 都會關掉，遠端就
@@ -497,6 +682,43 @@ const ORPHAN_IDLE_SECS: u64 = 10 * 60;
 const SHARED_IDLE_SECS: u64 = 3 * 3600;
 /// 遠端磁碟剩不到這個比例時，閒置的 `shared/` 也照孤兒的門檻收（#141：一小時塞滿 97G）。
 const LOW_DISK_FREE_PCT: u64 = 25;
+
+/// `shared/` 被同一棵 worktree 的另一次呼叫佔著時，最多等這麼久才改用冷編譯的 `job-*`（issue #104）。
+/// 等它用完再增量編譯只要十幾秒；搶不到就冷編譯，不但自己要重編幾分鐘，還多佔一份遠端的 RAM 與 2～3G 磁碟——
+/// 等得比一次冷編譯還久就不划算了，所以抓一次冷編譯的時間。
+const SHARED_WAIT_SECS: u64 = 5 * 60;
+/// 遠端名額全滿時最多排這麼久（issue #104）。每個佔著名額的編譯都受 `timeout_secs`（預設 12 分鐘）管，正常兩輪內就排得到；
+/// 排更久＝有名額被卡住（例如守門那條連線半開，遠端 sshd 要等 TCP keepalive 約 2 小時才發現），回 [`EXIT_QUEUE_FULL`]，不無限等。
+const QUEUE_WAIT_SECS: u64 = 30 * 60;
+/// `max_concurrent = 0`（自動）的記憶體帳：留給系統這麼多，每個遠端編譯算 [`AUTO_PER_JOB_KB`]。
+/// 2026-09-19 在 32 vCPU／64 GiB 的遠端量：一次冷的 `cargo test -p agents-managerd` 光主 crate 那顆 rustc 就多吃約 4.6 GiB，
+/// 兩次同時跑時全機用到 8.2 GiB；再加上測試本身（8 個執行緒、各自起子行程）與 lib／測試 harness 兩顆大 rustc 重疊，一次抓 8 GiB。
+const AUTO_RESERVE_KB: u64 = 8 * 1024 * 1024;
+const AUTO_PER_JOB_KB: u64 = 8 * 1024 * 1024;
+
+/// 守門的排隊參數（issue #104）。正式呼叫由設定與上面的常數組成（[`Admission::from_cfg`]）；測試用短的等待時間。
+#[derive(Debug, Clone, Copy)]
+struct Admission {
+    /// 同時最多幾個遠端編譯；`0`＝守門依遠端的核數與 RAM 算：
+    /// `min(核數 × 1.5 ÷ cargo_jobs, (RAM − 8 GiB) ÷ 8 GiB)`，至少 1。CPU 容許 1.5 倍超賣（一次編譯大多時間只有一顆 rustc 在跑，
+    /// `cargo_jobs` 是尖峰），記憶體不超賣——2026-09-19 就是 9 個冷編譯同時跑把遠端壓垮。32 核／64 GiB、`cargo_jobs = 8` → 6。
+    max: usize,
+    /// 自動算時每個編譯算幾個核（`cargo_jobs`）。
+    jobs: usize,
+    shared_wait_secs: u64,
+    queue_wait_secs: u64,
+}
+
+impl Admission {
+    fn from_cfg(remote: &BuildRemoteCfg) -> Self {
+        Admission {
+            max: remote.max_concurrent,
+            jobs: remote.cargo_jobs.max(1),
+            shared_wait_secs: SHARED_WAIT_SECS,
+            queue_wait_secs: QUEUE_WAIT_SECS,
+        }
+    }
+}
 
 /// 一次租約的身分（fencing token）：本機產生的 128 位元隨機數，固定 32 個小寫 hex。
 ///
@@ -523,25 +745,41 @@ impl LeaseToken {
 
 /// 守門連線在遠端跑的腳本（POSIX sh；遠端要是有 flock 與 /proc 的 Linux）。
 ///
-/// stdout 協定：`ROOT\t<絕對路徑>`、`DIR\t<這次的工作目錄>\t<token，原樣回>`、每個候選目錄一行
-/// `D\t<路徑>\t<鎖被持有>\t<有行程 cwd 在裡面>\t<閒置秒數>`、`F\t<剩餘 KB>\t<總 KB>`，最後 `END`。
+/// stdout 協定：排隊時每秒一行 `Q`（心跳，見 `alive`）；拿到目錄與名額後 `ROOT\t<絕對路徑>`、`DIR\t<這次的工作目錄>\t<token，原樣回>`、
+/// `SLOT\t<第幾個名額>\t<名額總數>`、每個候選目錄一行 `D\t<路徑>\t<鎖被持有>\t<有行程 cwd 在裡面>\t<閒置秒數>`、`F\t<剩餘 KB>\t<總 KB>`，最後 `END`。
 /// 之後 stdin 每行 `rm <路徑>` 是要它回收的孤兒（它自己拿鎖、重看一次有沒有人在用才刪），EOF＝這次結束。
-fn guard_script(root: &str, hash: &str, job: &str, token: &LeaseToken) -> String {
+/// 排遠端名額排超過 `queue_wait_secs` 就不交目錄、exit 75（[`EXIT_QUEUE_FULL`]）。
+fn guard_script(root: &str, hash: &str, job: &str, token: &LeaseToken, adm: Admission) -> String {
     GUARD_SH
         .replace("@ROOT@", &sh_quote(root))
         .replace("@HASH@", &sh_quote(hash))
         .replace("@JOB@", &sh_quote(job))
         .replace("@TOKEN@", &sh_quote(token.as_str()))
+        .replace("@MAX@", &adm.max.to_string())
+        .replace("@JOBS@", &adm.jobs.max(1).to_string())
+        .replace("@SWAIT@", &adm.shared_wait_secs.to_string())
+        .replace("@QWAIT@", &adm.queue_wait_secs.to_string())
+        .replace("@RESERVE_KB@", &AUTO_RESERVE_KB.to_string())
+        .replace("@PER_JOB_KB@", &AUTO_PER_JOB_KB.to_string())
         .replace("@HEX16@", &"[0-9a-f]".repeat(16))
 }
 
 const GUARD_SH: &str = r#"set -u
 trap '' HUP PIPE
 root=@ROOT@; hash=@HASH@; job=@JOB@; token=@TOKEN@
+max=@MAX@; jobs=@JOBS@; swait=@SWAIT@; qwait=@QWAIT@
 if ! command -v flock >/dev/null 2>&1 || [ ! -r /proc/self/stat ]; then
   echo 'agents-manager: remote Cargo 的遠端要有 flock（util-linux）與 /proc（Linux）' >&2; exit 2
 fi
 mkdir -p "$root" && cd "$root" && root=$(pwd -P) || exit 2
+# 名額數 0＝依這台的核數與 RAM 算（算式與理由見 helper 的 `Admission::max`）。
+if [ "$max" -eq 0 ]; then
+  cpu=$(getconf _NPROCESSORS_ONLN 2>/dev/null); case "$cpu" in ''|*[!0-9]*) cpu=1 ;; esac
+  mem=$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo 2>/dev/null); case "$mem" in ''|*[!0-9]*) mem=0 ;; esac
+  max=$((cpu * 3 / (2 * jobs))); b=$(((mem - @RESERVE_KB@) / @PER_JOB_KB@))
+  [ "$b" -lt "$max" ] && max=$b
+  [ "$max" -ge 1 ] || max=1
+fi
 # `$$` 只做行程簿記（自己的 process group 不能被收、`/proc/$$/fd`）；租約身分是本機給的 $token，PID 會被回收重用。
 me=$(ps -o pgid= -p $$ | tr -d ' ')
 # 只碰自己命名規則的目錄：remote_root 設錯（例如設成家目錄）也不會去刪別人的東西。
@@ -604,11 +842,62 @@ sweep() {
     case "$c/" in "$1"/*) kill -KILL "${p#/proc/}" 2>/dev/null ;; esac
   done
 }
+# 排隊中每秒問一次本機那端還在不在（順便當作這一秒的等待）；不在了就不再佔著 shared 的鎖空等。
+# helper 被砍、Ctrl-C、網路斷時，遠端 sshd 會關掉守門的 stdin，stdout 卻照樣寫得進去（2026-09-19 實測）——所以看 stdin：
+# 讀到 EOF＝斷了。helper 交握之前不寫 stdin，這裡讀不到東西、也不會吃掉資料：讀了一秒還在等＝還活著。
+# 另外對 stdout 打一行心跳（`Q`），寫不出去也算斷了。沒有 `timeout` 的機器只剩心跳這條，等待改用 sleep。
+has_timeout=$(command -v timeout)
+alive() {
+  printf 'Q\n' 2>/dev/null || return 1
+  if [ -n "$has_timeout" ]; then
+    timeout 1 dd bs=1 count=1 >/dev/null 2>&1
+    [ $? -eq 124 ]
+  else
+    sleep 1
+  fi
+}
+# 目錄的鎖（fd 8）：拿不到就每秒再試，最多等 $1 秒（0＝不等），還是拿不到回 75。
+lock_dir() {
+  flock -n 8 && return 0
+  [ "$1" -gt 0 ] || return 75
+  echo "agents-manager: 這棵 worktree 的共用遠端 target 正被另一次呼叫使用，等它用完（最多 $1 秒；增量編譯比冷編譯划算）…" >&2
+  h0=$(date +%s)
+  while :; do
+    alive || return 73
+    flock -n 8 && return 0
+    [ $(($(date +%s) - h0)) -lt "$1" ] || return 75
+  done
+}
+# 遠端名額（issue #104）：`$root/.slots/<n>` 的 flock，fd 7，拿著直到守門結束（怎麼死都會放）。
+# 同一個 remote_root 不分 worktree 最多 $max 個；全滿就每秒再試，排超過 $qwait 秒回 74。
+slot=0
+take_slot() {
+  mkdir -p "$root/.slots" || return 2
+  q0=$(date +%s); said=
+  while :; do
+    i=1
+    while [ "$i" -le "$max" ]; do
+      exec 7>>"$root/.slots/$i"
+      if flock -n 7; then
+        slot=$i
+        [ -z "$said" ] || echo "agents-manager: 排到遠端名額 $i/$max（等了 $(($(date +%s) - q0)) 秒）" >&2
+        return 0
+      fi
+      exec 7>&-
+      i=$((i + 1))
+    done
+    [ $(($(date +%s) - q0)) -lt "$qwait" ] || return 74
+    [ -n "$said" ] || { echo "agents-manager: 遠端同時編譯已滿（$max 個，[build.remote] max_concurrent），排隊等名額（最多 $qwait 秒）…" >&2; said=1; }
+    alive || return 73
+  done
+}
+# 目錄先、名額後：等 shared 的人不佔名額；拿著名額的人不會再等任何鎖（順序一致，不會互等）。
 hold() {
-  flock -n 8 || return 75
+  lock_dir "$2" || return $?
   same "$1.lock" 8 || return 76
+  take_slot || return $?
   mkdir -p "$1" && touch "$1.lock" && printf '%s\n' "$token" > "$1.owner" || return 2
-  printf 'ROOT\t%s\nDIR\t%s\t%s\n' "$root" "$1" "$token"
+  printf 'ROOT\t%s\nDIR\t%s\t%s\nSLOT\t%s\t%s\n' "$root" "$1" "$token" "$slot" "$max"
   inventory "$1"
   echo END
   # 本機隨時可能已經斷線：之後再寫 stdout/stderr 會 EPIPE，清理不能因此半途而廢。
@@ -622,18 +911,32 @@ hold() {
   if [ "${1##*/}" = shared ]; then touch "$1.lock"; else rm -rf "$1"; rm -f "$1.lock"; fi
   return 0
 }
-n=0
+queue_full() {
+  echo "agents-manager: 等遠端名額等了 $qwait 秒還是全滿（$max 個），這次沒跑；稍後再試（結束碼 75）" >&2
+  exit 75
+}
+# 73＝排隊中發現本機已經斷線：沒人要結果了，直接結束（鎖跟著放）。
+n=0; s0=$(date +%s)
 while :; do
   mkdir -p "$root/$hash" || exit 2
-  hold "$root/$hash/shared" 8>>"$root/$hash/shared.lock"; rc=$?
+  w=$((swait - ($(date +%s) - s0))); [ "$w" -gt 0 ] || w=0
+  hold "$root/$hash/shared" "$w" 8>>"$root/$hash/shared.lock"; rc=$?
   case $rc in
-    0) exit 0 ;;
+    0|73) exit 0 ;;
+    74) queue_full ;;
     75) break ;;
   esac
   n=$((n + 1)); [ $n -lt 5 ] || exit $rc
 done
+[ "$swait" -eq 0 ] || echo "agents-manager: 等了 $swait 秒共用遠端 target 還沒空出來" >&2
 echo 'agents-manager: 這棵 worktree 的共用遠端 target 正被另一次呼叫使用，這次改用獨立目錄（冷編譯，結束就刪）' >&2
-hold "$root/$hash/$job" 8>>"$root/$hash/$job.lock"
+hold "$root/$hash/$job" 0 8>>"$root/$hash/$job.lock"; rc=$?
+case $rc in
+  73) exit 0 ;;
+  74) queue_full ;;
+  75) exit 2 ;;
+esac
+exit $rc
 "#;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -653,6 +956,8 @@ pub struct Handshake {
     pub dirs: Vec<RemoteDir>,
     /// (剩餘 KB, 總 KB)
     pub disk: Option<(u64, u64)>,
+    /// (這次拿到第幾個遠端名額, 名額總數)
+    pub slot: Option<(usize, usize)>,
 }
 
 /// 讀到 `END` 為止。登入 shell 的雜訊行略過；還沒拿到 `DIR` 就 EOF＝守門失敗（原因在它的 stderr）。
@@ -679,6 +984,7 @@ pub fn read_handshake(r: &mut impl BufRead) -> anyhow::Result<Handshake> {
                 idle_secs: idle.parse::<i64>().unwrap_or(0).max(0) as u64,
             }),
             ["F", free, total] => hs.disk = free.parse().ok().zip(total.parse().ok()),
+            ["SLOT", i, max] => hs.slot = i.parse().ok().zip(max.parse().ok()),
             _ => {}
         }
     }
@@ -775,16 +1081,58 @@ struct Lease {
     token: LeaseToken,
 }
 
+/// 排遠端名額排超過上限，守門沒交目錄就結束了（exit 75）。
+#[derive(Debug)]
+struct QueueFull;
+
+impl std::fmt::Display for QueueFull {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("remote Cargo queue wait exceeded its limit")
+    }
+}
+
+impl std::error::Error for QueueFull {}
+
 impl Lease {
     /// `cmd` 跑的守門腳本要是用 `token` 產生的；它交回來的 token 對不上就當守門出事、不當成拿到目錄。
-    fn start(mut cmd: Command, token: LeaseToken) -> anyhow::Result<Self> {
+    ///
+    /// 名額全滿或 shared 被佔著時，守門要排隊，可能很久才交出目錄（issue #104）：交握放到另一條執行緒讀，
+    /// 這裡每 20ms 看一次 `ctl`，收到終止訊號就砍掉本機這條 ssh（排隊中的守門靠心跳發現斷線，自己結束、放鎖）。
+    fn start(mut cmd: Command, token: LeaseToken, ctl: &Deadline) -> anyhow::Result<Self> {
         cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit());
         let mut child = cmd.spawn().map_err(|e| anyhow::anyhow!("remote workdir guard: {e}"))?;
         let stdin = child.stdin.take();
-        let stdout = child.stdout.take().map(BufReader::new);
-        let mut lease = Lease { child, stdin, stdout, hs: Handshake::default(), token };
-        let reader = lease.stdout.as_mut().ok_or_else(|| anyhow::anyhow!("remote workdir guard: no stdout"))?;
-        lease.hs = read_handshake(reader)?;
+        let stdout = child.stdout.take().ok_or_else(|| anyhow::anyhow!("remote workdir guard: no stdout"))?;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            let hs = read_handshake(&mut reader);
+            let _ = tx.send((reader, hs));
+        });
+        let (reader, hs) = loop {
+            match rx.recv_timeout(std::time::Duration::from_millis(20)) {
+                Ok(got) => break got,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if let Some(why) = ctl.stop() {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(anyhow::Error::new(why));
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => anyhow::bail!("remote workdir guard: handshake reader died"),
+            }
+        };
+        let mut lease = Lease { child, stdin, stdout: Some(reader), hs: Handshake::default(), token };
+        lease.hs = match hs {
+            Ok(hs) => hs,
+            Err(e) => {
+                // 沒交目錄就結束了：75＝排隊超過上限（原因守門已經印在 stderr），其他是守門出事。
+                if lease.finish().and_then(|st| st.code()) == Some(EXIT_QUEUE_FULL) {
+                    return Err(anyhow::Error::new(QueueFull));
+                }
+                return Err(e);
+            }
+        };
         if lease.hs.token != lease.token.as_str() {
             anyhow::bail!("remote workdir guard answered with a lease token that is not the one it was given");
         }
@@ -866,7 +1214,9 @@ fn install_signal_handlers() {
 /// 連線正常、遠端的 cargo 或測試卡住（死結、等鎖、測試掛住）時，ssh 的 ConnectTimeout／ServerAlive（#174）管不到，沒有上限 helper 與
 /// 呼叫端的 agent 會一直等。
 struct Deadline {
-    at: Option<std::time::Instant>,
+    limit: Option<std::time::Duration>,
+    /// [`Deadline::arm`] 之後才有：排隊等遠端名額的時間不算（issue #104）。
+    at: std::cell::Cell<Option<std::time::Instant>>,
     /// 測試用：模擬「收到終止訊號」。
     abort: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// 只有正式的 helper 看真的訊號；測試在同一個行程裡並行跑，不能共用那個全域。
@@ -894,13 +1244,19 @@ impl std::fmt::Display for Stopped {
 impl std::error::Error for Stopped {}
 
 impl Deadline {
-    /// `limit_secs == 0`＝不設上限。
+    /// `limit_secs == 0`＝不設上限。時間從 [`Deadline::arm`] 起算，在那之前只看訊號。
     fn new(limit_secs: u64) -> Self {
         Deadline {
-            at: (limit_secs > 0).then(|| std::time::Instant::now() + std::time::Duration::from_secs(limit_secs)),
+            limit: (limit_secs > 0).then(|| std::time::Duration::from_secs(limit_secs)),
+            at: std::cell::Cell::new(None),
             abort: Default::default(),
             watch_signals: false,
         }
+    }
+
+    /// 從現在開始算整體上限：拿到遠端名額與目錄的那一刻。滿載時排了幾分鐘隊的編譯，不能一開始跑就被砍。
+    fn arm(&self) {
+        self.at.set(self.limit.map(|l| std::time::Instant::now() + l));
     }
 
     /// 正式 helper：也看真的終止訊號。
@@ -919,7 +1275,7 @@ impl Deadline {
                 return Some(Stopped::Interrupted(sig));
             }
         }
-        self.at.filter(|at| std::time::Instant::now() >= *at).map(|_| Stopped::TimedOut)
+        self.at.get().filter(|at| std::time::Instant::now() >= *at).map(|_| Stopped::TimedOut)
     }
 }
 
@@ -970,7 +1326,7 @@ fn source_root(cwd: &Path) -> (PathBuf, String) {
     (root.to_path_buf(), sub)
 }
 
-fn open_lease(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path) -> anyhow::Result<Lease> {
+fn open_lease(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, ctl: &Deadline) -> anyhow::Result<Lease> {
     let root = match remote.remote_root.trim().trim_end_matches('/') {
         "" => crate::config::default_remote_build_root(),
         r => r.to_string(),
@@ -981,11 +1337,11 @@ fn open_lease(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path) -> anyhow::R
         .map(|d| d.as_millis())
         .unwrap_or(0);
     let job = format!("job-{}-{millis}", std::process::id());
-    let pw = secret(data_dir)?;
+    let pw = secret(data_dir, remote)?;
     let token = LeaseToken::new();
     let mut cmd = ssh_base(remote, pw.as_deref(), data_dir)?;
-    cmd.arg(format!("sh -c {}", sh_quote(&guard_script(&root, &hash, &job, &token))));
-    Lease::start(cmd, token)
+    cmd.arg(format!("sh -c {}", sh_quote(&guard_script(&root, &hash, &job, &token, Admission::from_cfg(remote)))));
+    Lease::start(cmd, token, ctl)
 }
 
 /// rsync 的 `-e`：跟 [`ssh_cmd`] 同一組連線選項（`ssh` 那條與這條的行為不能各走各的）。
@@ -1006,7 +1362,7 @@ fn sync_source(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, dir: &str, 
     if !has_program(&rsync_program()) {
         anyhow::bail!("remote Cargo requires `rsync` on the daemon host");
     }
-    let pw = secret(data_dir)?;
+    let pw = secret(data_dir, remote)?;
     let mode = match pw {
         Some(_) => Some(password_mode(data_dir)?),
         None => None,
@@ -1048,7 +1404,7 @@ fn pick_test_threads(caller: Option<&str>, configured: usize) -> usize {
 }
 
 fn run_remote(remote: &BuildRemoteCfg, data_dir: &Path, lease: &Lease, sub: &str, args: &[String], deadline: &Deadline) -> anyhow::Result<i32> {
-    let pw = secret(data_dir)?;
+    let pw = secret(data_dir, remote)?;
     let mut cmd = ssh_base(remote, pw.as_deref(), data_dir)?;
     let threads = pick_test_threads(std::env::var("RUST_TEST_THREADS").ok().as_deref(), remote.test_threads);
     cmd.arg(run_script(&lease.hs.dir, sub, &lease.token, remote.cargo_jobs, threads, args));
@@ -1087,7 +1443,9 @@ fn run_offload(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, args: &[Str
     let result = (|| -> anyhow::Result<i32> {
         // 從這裡起不管怎麼離開（`?`、panic、被殺、超過上限、收到訊號），守門都會收到 EOF 把目錄還回去、遠端還在跑的 cargo 整組收掉。
         let (root, sub) = source_root(cwd);
-        let mut lease = open_lease(remote, data_dir, &root)?;
+        let mut lease = open_lease(remote, data_dir, &root, ctl)?;
+        // 整體上限從拿到名額與目錄才開始算（issue #104）。
+        ctl.arm();
         lease.collect(&select_gc(&lease.hs, &GcPolicy::from_cfg(remote)));
         sync_source(remote, data_dir, &root, &lease.hs.dir, ctl)?;
         let code = run_remote(remote, data_dir, &lease, &sub, args, ctl)?;
@@ -1102,6 +1460,8 @@ fn run_offload(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, args: &[Str
     }
     match result {
         Ok(code) => code,
+        // 遠端什麼都還沒跑：原因守門已經印了，回 75 讓呼叫端知道是「稍後再試」，不是驗證失敗。
+        Err(e) if e.downcast_ref::<QueueFull>().is_some() => EXIT_QUEUE_FULL,
         Err(e) if matches!(e.downcast_ref::<Stopped>(), Some(Stopped::TimedOut)) => {
             eprintln!(
                 "agents-manager: 遠端編譯超過 {} 上限，已中止（遠端那一整組行程已收掉、目錄與鎖已還回；可調 [build.remote] timeout_secs，0＝不設上限）。這次不會退回本機重跑",
@@ -1234,8 +1594,14 @@ mod tests {
         assert_eq!(set.timeout_secs, 90);
         assert_eq!(limit_text(720), "12 分鐘");
         assert_eq!(limit_text(90), "90 秒");
-        assert!(Deadline::new(0).stop().is_none(), "0＝不設上限");
-        assert!(Deadline::new(1).at.is_some());
+        let unlimited = Deadline::new(0);
+        unlimited.arm();
+        assert!(unlimited.stop().is_none(), "0＝不設上限");
+        // issue #104：上限從拿到名額與目錄（arm）才開始算，排隊的時間不算。
+        let d = Deadline::new(1);
+        assert!(d.limit.is_some() && d.at.get().is_none(), "還沒 arm：不計時");
+        d.arm();
+        assert!(d.at.get().is_some());
     }
 
     /// `ssh -V` 的版本要照數字比：字串比會說 `10.3` 比 `8.4` 小。
@@ -1289,13 +1655,66 @@ mod tests {
     fn every_remote_command_puts_cargo_bin_on_the_path() {
         assert!(PROBE_SH.contains("$HOME/.cargo/bin:$PATH"), "{PROBE_SH}");
         assert!(INSTALL_SH.contains("$HOME/.cargo/bin:$PATH"), "{INSTALL_SH}");
-        // 安裝是冪等的：已經有就只回版本，不會再跑一次 rustup。
-        assert!(INSTALL_SH.contains("if command -v cargo >/dev/null 2>&1; then printf 'ALREADY='"), "{INSTALL_SH}");
-        // minimal，而且不去動使用者的 shell profile。
-        assert!(INSTALL_SH.contains("--profile minimal"), "{INSTALL_SH}");
+        // 安裝是冪等的：已經有就只回版本，不會再跑一次 rustup-init。
+        assert!(INSTALL_SH.contains("if command -v cargo >/dev/null 2>&1; then\nprintf 'ALREADY='"), "{INSTALL_SH}");
+        // minimal（另外帶 clippy，issue #104），而且不去動使用者的 shell profile。
+        assert!(INSTALL_SH.contains("--profile minimal --component clippy"), "{INSTALL_SH}");
         assert!(INSTALL_SH.contains("--no-modify-path"), "{INSTALL_SH}");
         // rustup 不裝 linker：沒有 cc 的機器要當場講，不要等到 cargo test 連結失敗才看到天書。
         assert!(INSTALL_SH.contains("CC_MISSING=1"), "{INSTALL_SH}");
+    }
+
+    /// 在 `sh` 裡真的跑遠端的腳本：`HOME` 是空沙盒、PATH 只有 `uname`，`cargo`／`rustup` 用 shell 函式假裝（不寫可執行檔，免得撞 ETXTBSY）。
+    fn run_remote_sh(script: &str, fakes: &str) -> String {
+        let sandbox = std::env::temp_dir().join(format!("am-probe-{}", crate::db::ulid()));
+        std::fs::create_dir_all(sandbox.join("bin")).unwrap();
+        let uname = String::from_utf8(Command::new("sh").arg("-c").arg("command -v uname").output().unwrap().stdout).unwrap();
+        std::os::unix::fs::symlink(uname.trim(), sandbox.join("bin/uname")).unwrap();
+        // PATH 換掉之後 `sh` 也照新的 PATH 找：用絕對路徑。
+        let out = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!("{fakes}\n{script}"))
+            .env("HOME", &sandbox)
+            .env("PATH", sandbox.join("bin"))
+            .env("AM_TEST_SANDBOX", &sandbox)
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&sandbox);
+        String::from_utf8(out.stdout).unwrap()
+    }
+
+    /// issue #104：probe 要分得出「沒有 cargo」「有 cargo 沒 clippy」「都有」。clippy 是轉過去的三個指令之一，
+    /// 有 cargo 沒 clippy 時要報 `clippy_missing`，不能說「可用」然後第一次 `cargo clippy` 才失敗。沒有 cargo 時 `CARGO=` 不能跟下一行黏在一起。
+    #[test]
+    fn the_probe_tells_a_missing_clippy_apart_from_a_missing_cargo() {
+        let none = run_remote_sh(PROBE_SH, "");
+        assert!(none.contains("\nCARGO=\n"), "{none}");
+        let (_, _, cargo, _) = parse_probe(&none);
+        assert_eq!((cargo, probe_clippy(&none)), (None, None), "{none}");
+
+        let no_clippy = run_remote_sh(PROBE_SH, "cargo() { case \"$1\" in --version) echo 'cargo 1.90.0' ;; *) return 1 ;; esac; }");
+        let (_, _, cargo, version) = parse_probe(&no_clippy);
+        assert_eq!((cargo.as_deref(), version.as_deref(), probe_clippy(&no_clippy)), (Some("cargo"), Some("cargo 1.90.0"), None), "{no_clippy}");
+
+        let both = run_remote_sh(
+            PROBE_SH,
+            "cargo() { case \"$1\" in --version) echo 'cargo 1.90.0' ;; clippy) echo 'clippy 0.1.90 (abc 2026-08-01)' ;; esac; }",
+        );
+        assert_eq!(probe_clippy(&both).as_deref(), Some("clippy 0.1.90 (abc 2026-08-01)"), "{both}");
+    }
+
+    /// issue #104：本來就有 cargo（只是 minimal、沒有 clippy）的機器按「安裝」要補上 clippy；補不上（不是 rustup 裝的）就回報 `CLIPPY_MISSING=1`。
+    #[test]
+    fn installing_on_a_host_that_already_has_cargo_adds_clippy() {
+        // `rustup component add clippy` 會真的讓 `cargo clippy` 變成可用。
+        let cargo = "cargo() { case \"$1\" in --version) echo 'cargo 1.90.0' ;; clippy) [ -e \"$AM_TEST_SANDBOX/clippy\" ] && echo 'clippy 0.1.90' ;; esac; }";
+        let rustup = "rustup() { [ \"$*\" = 'component add clippy' ] && : > \"$AM_TEST_SANDBOX/clippy\"; }";
+        let out = run_remote_sh(INSTALL_SH, &format!("{cargo}\n{rustup}"));
+        assert!(out.contains("ALREADY=cargo 1.90.0"), "{out}");
+        assert!(!out.contains("CLIPPY_MISSING"), "rustup 補上了 clippy：{out}");
+
+        let out = run_remote_sh(INSTALL_SH, cargo);
+        assert!(out.contains("CLIPPY_MISSING=1"), "沒有 rustup 補不上：要講出來：{out}");
     }
 
     #[test]
@@ -1313,6 +1732,13 @@ mod tests {
         }
         for no in [&["+nightly", "test"][..], &["-C", "x", "test"], &["--offline", "test"], &["--frozen", "check"], &["-Z", "unstable-options", "check"], &["--config", "a=b", "test"], &["--locked", "build"], &["--locked"], &[]] {
             assert!(!eligible(&v(no)), "{no:?}");
+        }
+        // issue #104：`clippy --fix` 會改原始碼——改到的是遠端那份、不會同步回來，所以留在本機跑。`--` 後面是給 clippy-driver 的，不算。
+        for local in [&["clippy", "--fix"][..], &["clippy", "--all-targets", "--fix", "--allow-dirty"], &["-q", "clippy", "--fix", "--", "-D", "warnings"]] {
+            assert!(!eligible(&v(local)), "{local:?}");
+        }
+        for remote in [&["clippy", "--all-targets", "-p", "x"][..], &["clippy", "--", "-D", "warnings"], &["clippy", "--", "--fix"]] {
+            assert!(eligible(&v(remote)), "{remote:?}");
         }
     }
 
@@ -1336,6 +1762,7 @@ mod tests {
             token: "0123456789abcdef0123456789abcdef".into(),
             dirs,
             disk,
+            slot: None,
         }
     }
 
@@ -1450,10 +1877,12 @@ mod tests {
 
     #[test]
     fn the_handshake_skips_login_noise_and_fails_if_the_guard_dies_first() {
-        let out = "Welcome!\nROOT\t/r\nDIR\t/r/0123456789abcdef/shared\tfeedfacefeedfacefeedfacefeedface\n\
+        // 排隊時的心跳（`Q`）也是雜訊，略過。
+        let out = "Welcome!\nQ\nQ\nROOT\t/r\nDIR\t/r/0123456789abcdef/shared\tfeedfacefeedfacefeedfacefeedface\nSLOT\t3\t6\n\
                    D\t/r/00000000000000aa/111\t0\t1\t-3\nD\t/r/00000000000000aa/222\t1\t0\t900\n\
                    F\t500\t1000\nEND\nD\t/late\t0\t0\t9\n";
         let h = read_handshake(&mut std::io::Cursor::new(out)).unwrap();
+        assert_eq!(h.slot, Some((3, 6)));
         assert_eq!(h.root, "/r");
         assert_eq!(h.dir, "/r/0123456789abcdef/shared");
         assert_eq!(h.token, "feedfacefeedfacefeedfacefeedface");
@@ -1526,7 +1955,7 @@ mod tests {
         ] {
             assert!(LeaseToken::parse(bad).is_none(), "{bad:?}");
         }
-        let script = guard_script("/r", "0123456789abcdef", "job-1-1", &a);
+        let script = guard_script("/r", "0123456789abcdef", "job-1-1", &a, Admission::from_cfg(&BuildRemoteCfg::default()));
         assert!(script.contains(&format!("token={}", a.as_str())), "token 要原樣、不帶引號地進腳本");
         assert!(!script.contains("@TOKEN@"), "沒替換乾淨");
     }
@@ -1536,25 +1965,188 @@ mod tests {
     fn a_guard_that_answers_with_another_token_is_not_a_lease() {
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg("printf 'ROOT\\t/r\\nDIR\\t/r/0123456789abcdef/shared\\tfeedfacefeedfacefeedfacefeedface\\nEND\\n'; cat >/dev/null");
-        let err = Lease::start(cmd, LeaseToken::new()).err().expect("token mismatch must fail").to_string();
+        let err = Lease::start(cmd, LeaseToken::new(), &Deadline::new(0)).err().expect("token mismatch must fail").to_string();
         assert!(err.contains("lease token"), "{err}");
     }
 
+    /// 守門腳本裡那條自動上限算式的 Rust 版（測試用的對照；遠端才知道自己的核數與 RAM，正式的只有腳本那份）。
+    pub(super) fn auto_max_concurrent(ncpu: u64, mem_kb: u64, jobs: usize) -> usize {
+        let by_cpu = ncpu * 3 / (2 * jobs.max(1) as u64);
+        let by_mem = mem_kb.saturating_sub(AUTO_RESERVE_KB) / AUTO_PER_JOB_KB;
+        by_cpu.min(by_mem).max(1) as usize
+    }
+
+    /// issue #104：`max_concurrent = 0`（預設）依遠端核數與 RAM 算——CPU 容許 1.5 倍超賣，記憶體每個編譯 8 GiB、留 8 GiB 給系統。
+    /// 現在那台（32 核、MemTotal 65837352 kB）配 `cargo_jobs = 8` 是 6；小機器至少 1；設定寫了數字就用設定、最多 64。
     #[test]
-    fn password_file_is_private_and_metadata_does_not_echo_the_secret() {
+    fn the_remote_cap_defaults_to_what_the_hosts_cores_and_ram_can_take() {
+        assert_eq!(BuildRemoteCfg::default().max_concurrent, 0, "預設＝自動");
+        let old: BuildRemoteCfg = toml::from_str("host = \"h\"\n").unwrap();
+        assert_eq!(old.max_concurrent, 0, "舊設定沒有這個 key：自動");
+        assert_eq!(auto_max_concurrent(32, 65_837_352, 8), 6, "現在那台：min(32×1.5÷8, (62.8−8)÷8) = min(6, 6)");
+        assert_eq!(auto_max_concurrent(32, 65_837_352, 4), 6, "cargo_jobs 小一點時換記憶體卡住");
+        assert_eq!(auto_max_concurrent(8, 16 * 1024 * 1024, 4), 1, "16 GiB 的機器：一次一個");
+        assert_eq!(auto_max_concurrent(2, 4 * 1024 * 1024, 8), 1, "再小也至少 1");
+        assert_eq!(auto_max_concurrent(64, 256 * 1024 * 1024, 4), 24);
+        let set = BuildRemoteCfg { max_concurrent: 3, cargo_jobs: 5, ..Default::default() };
+        let adm = Admission::from_cfg(&set);
+        assert_eq!((adm.max, adm.jobs, adm.shared_wait_secs, adm.queue_wait_secs), (3, 5, SHARED_WAIT_SECS, QUEUE_WAIT_SECS));
+        let script = guard_script("/r", "0123456789abcdef", "job-1-1", &LeaseToken::new(), adm);
+        for want in ["max=3; jobs=5; swait=300; qwait=1800", &format!("(mem - {AUTO_RESERVE_KB}) / {AUTO_PER_JOB_KB}")] {
+            assert!(script.contains(want), "{want}");
+        }
+        assert!(!script.contains('@'), "沒替換乾淨");
+    }
+
+    /// issue #104：排隊時守門可能很久才交出目錄，這段時間收到終止訊號（Ctrl-C／TERM）也要馬上停，不能卡到排到名額為止。
+    #[test]
+    fn a_queued_handshake_still_honours_a_termination_signal() {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("exec sleep 60");
+        let ctl = Deadline::new(0);
+        let abort = ctl.abort.clone();
+        let flip = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            abort.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        let t0 = std::time::Instant::now();
+        let err = Lease::start(cmd, LeaseToken::new(), &ctl).err().expect("interrupted");
+        flip.join().unwrap();
+        assert!(matches!(err.downcast_ref::<Stopped>(), Some(Stopped::Interrupted(_))), "{err:#}");
+        assert!(t0.elapsed() < std::time::Duration::from_secs(10), "{:?}", t0.elapsed());
+    }
+
+    fn secret_dir() -> PathBuf {
         let dir = std::env::temp_dir().join(format!("am-remote-cargo-{}", crate::db::ulid()));
         std::fs::create_dir_all(&dir).unwrap();
-        write_password(&dir, "super-secret").unwrap();
-        assert!(password_is_set(&dir));
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(std::fs::metadata(password_path(&dir)).unwrap().permissions().mode() & 0o777, 0o600);
-        }
-        let v = sanitized(&BuildRemoteCfg::default(), &dir);
+        dir
+    }
+
+    /// data-dir 裡的密碼檔（含暫存檔）：(檔名, 權限)。
+    fn password_files(dir: &Path) -> Vec<(String, u32)> {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut v: Vec<(String, u32)> = std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(PASSWORD_FILE))
+            .map(|n| {
+                let mode = std::fs::metadata(dir.join(&n)).unwrap().permissions().mode() & 0o777;
+                (n, mode)
+            })
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[tokio::test]
+    async fn password_file_is_private_and_metadata_does_not_echo_the_secret() {
+        let dir = secret_dir();
+        let store = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
+        let remote = commit_remote(&store, &dir, Some("super-secret"), |_| {}).await.unwrap();
+        assert!(password_is_set(&dir, &remote));
+        let files = password_files(&dir);
+        assert_eq!(files.len(), 1, "{files:?}");
+        assert_eq!(files[0].1, 0o600, "{files:?}");
+        let v = sanitized(&remote, &dir);
         assert_eq!(v["password_set"], true);
         assert!(!v.to_string().contains("super-secret"));
+        assert!(!std::fs::read_to_string(dir.join("config.toml")).unwrap().contains("super-secret"), "密碼不進 config.toml");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 舊版設定（沒有 `password_id`）照舊讀固定檔名；`None`＝沿用（換主機也一樣）、`Some("")`＝清掉、新密碼＝換一份新檔、舊檔刪掉。
+    /// 設定明確指到一份密碼檔而它不見了是錯誤，不能悄悄改用 key/agent；手改壞的 id 不能變成路徑。
+    #[tokio::test]
+    async fn saving_settings_keeps_clears_or_replaces_the_password_as_asked() {
+        let dir = secret_dir();
+        let store = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
+        std::fs::write(dir.join(PASSWORD_FILE), "legacy-pw\n").unwrap();
+        let legacy = store.get().await.build.remote;
+        assert_eq!(legacy.password_id, None);
+        assert_eq!(secret(&dir, &legacy).unwrap().as_deref(), Some("legacy-pw"), "舊版設定：讀固定檔名");
+
+        let r = commit_remote(&store, &dir, None, |r| r.host = "b".into()).await.unwrap();
+        assert_eq!((r.host.as_str(), secret(&dir, &r).unwrap().as_deref()), ("b", Some("legacy-pw")), "None＝沿用");
+        let names: Vec<String> = password_files(&dir).into_iter().map(|(n, _)| n).collect();
+        assert_eq!(names, vec![PASSWORD_FILE.to_string()], "沿用：舊版固定檔名留著");
+
+        let r = commit_remote(&store, &dir, Some("pw2"), |_| {}).await.unwrap();
+        let id = r.password_id.clone().expect("新密碼要有自己的 id");
+        assert_eq!(secret(&dir, &r).unwrap().as_deref(), Some("pw2"));
+        assert_eq!(password_files(&dir), vec![(format!("{PASSWORD_FILE}.{id}"), 0o600)], "舊版固定檔名要刪掉");
+
+        let r = commit_remote(&store, &dir, None, |r| r.host = "c".into()).await.unwrap();
+        assert_eq!((r.password_id.as_deref(), secret(&dir, &r).unwrap().as_deref()), (Some(id.as_str()), Some("pw2")));
+
+        let r = commit_remote(&store, &dir, Some(""), |_| {}).await.unwrap();
+        assert_eq!(r.password_id.as_deref(), Some(""));
+        assert_eq!(secret(&dir, &r).unwrap(), None);
+        assert!(!password_is_set(&dir, &r));
+        assert!(password_files(&dir).is_empty(), "清掉＝一份密碼檔都不留：{:?}", password_files(&dir));
+
+        let gone = BuildRemoteCfg { password_id: Some("0123456789abcdef".into()), ..Default::default() };
+        let err = secret(&dir, &gone).unwrap_err().to_string();
+        assert!(err.contains("不見了"), "{err}");
+        for bad in ["../../etc/passwd", "0123456789ABCDEF", "123", "0123456789abcdef/"] {
+            let r = BuildRemoteCfg { password_id: Some(bad.into()), ..Default::default() };
+            assert!(secret(&dir, &r).is_err(), "{bad}");
+            assert!(!password_is_set(&dir, &r), "{bad}");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// issue #104：換設定＋密碼時，任何一步失敗、或行程死在任何一步之後，重讀磁碟只會是「舊主機＋舊密碼」或「新主機＋新密碼」，
+    /// 而且 data-dir 裡任何時候都沒有權限比 0600 寬的密碼檔。
+    /// 以前先改 config 再 `fs::write` 密碼、寫完才 chmod：寫密碼失敗＝新主機配舊密碼（舊密碼會被送去新主機）；
+    /// write 與 chmod 之間 crash＝密碼檔永遠是 umask 決定的 0644。
+    #[tokio::test]
+    async fn a_failure_or_crash_at_any_step_leaves_the_old_or_the_new_pair_never_a_mix() {
+        use std::os::unix::fs::PermissionsExt as _;
+        for step in ["created", "written", "synced", "renamed", "config", "cleanup"] {
+            for how in [Fault::Fail, Fault::Crash] {
+                let dir = secret_dir();
+                let cfg_path = dir.join("config.toml");
+                let store = crate::config::ConfigStore::load(cfg_path.clone()).await.unwrap();
+                store.update(|c| {
+                    c.build.remote.host = "old-host".into();
+                    Ok(())
+                })
+                .await
+                .unwrap();
+                let old_file = dir.join(PASSWORD_FILE);
+                std::fs::write(&old_file, "old-pw").unwrap();
+                std::fs::set_permissions(&old_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+                SECRET_FAULT.with(|f| f.set(Some((step, how))));
+                let res = commit_remote(&store, &dir, Some("new-pw"), |r| r.host = "new-host".into()).await;
+                SECRET_FAULT.with(|f| f.set(None));
+                let why = format!("{step}/{how:?}: {res:?}");
+
+                // 重開 daemon：只看磁碟上的東西。
+                let fresh = crate::config::ConfigStore::load(cfg_path.clone()).await.unwrap().get().await.build.remote;
+                let pair = (fresh.host.clone(), secret(&dir, &fresh).unwrap());
+                if step == "cleanup" {
+                    assert_eq!(pair, ("new-host".to_string(), Some("new-pw".to_string())), "已經提交：{why}");
+                } else {
+                    assert_eq!(pair, ("old-host".to_string(), Some("old-pw".to_string())), "還沒提交：{why}");
+                }
+                assert_eq!(res.is_ok(), step == "cleanup" && how == Fault::Fail, "提交之後清舊檔失敗不算失敗，其他都要回錯：{why}");
+                let files = password_files(&dir);
+                assert!(files.iter().all(|(_, mode)| *mode == 0o600), "每一份密碼檔（含暫存檔）都要是 0600：{why} {files:?}");
+                if how == Fault::Fail && step != "cleanup" {
+                    assert_eq!(files, vec![(PASSWORD_FILE.to_string(), 0o600)], "失敗要收乾淨，只剩舊檔：{why}");
+                }
+
+                // 下一次成功的儲存把殘骸（沒人指到的暫存檔、舊檔）收掉。
+                let store = crate::config::ConfigStore::load(cfg_path.clone()).await.unwrap();
+                let r = commit_remote(&store, &dir, Some("newer-pw"), |r| r.host = "newer-host".into()).await.unwrap();
+                assert_eq!(secret(&dir, &r).unwrap().as_deref(), Some("newer-pw"), "{why}");
+                let id = r.password_id.clone().unwrap();
+                assert_eq!(password_files(&dir), vec![(format!("{PASSWORD_FILE}.{id}"), 0o600)], "{why}");
+                let _ = std::fs::remove_dir_all(dir);
+            }
+        }
     }
 }
 
@@ -1574,11 +2166,26 @@ mod guard_tests {
         d
     }
 
+    /// 既有測試用的：名額夠多、shared 被佔著就馬上改用 job 目錄（等待另有測試）。
+    const QUICK: Admission = Admission { max: 64, jobs: 1, shared_wait_secs: 0, queue_wait_secs: 30 };
+
     fn guard(base: &Path, hash: &str, job: &str) -> Lease {
-        let token = LeaseToken::new();
+        guard_with(base, hash, job, QUICK)
+    }
+
+    fn guard_cmd(base: &Path, hash: &str, job: &str, token: &LeaseToken, adm: Admission) -> Command {
         let mut cmd = Command::new("sh");
-        cmd.arg("-c").arg(guard_script("rc", hash, job, &token)).current_dir(base);
-        Lease::start(cmd, token).expect("guard should hand out a directory")
+        cmd.arg("-c").arg(guard_script("rc", hash, job, token, adm)).current_dir(base);
+        cmd
+    }
+
+    fn guard_with(base: &Path, hash: &str, job: &str, adm: Admission) -> Lease {
+        let token = LeaseToken::new();
+        Lease::start(guard_cmd(base, hash, job, &token, adm), token, &Deadline::new(0)).expect("guard should hand out a directory")
+    }
+
+    fn lock_free(path: &Path) -> bool {
+        Command::new("flock").arg("-n").arg(path).arg("true").status().map(|s| s.success()).unwrap_or(false)
     }
 
     fn wait_until(what: &str, f: impl Fn() -> bool) {
@@ -2054,6 +2661,196 @@ mod guard_tests {
         let pids = started_cargo_pids(&base);
         assert_eq!(pids.len(), 1, "{pids:?}");
         wait_until("the remote cargo to be reaped", || unsafe { libc::kill(pids[0], 0) } != 0);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    // ── 遠端名額（issue #104）──
+
+    /// 不同 worktree 共用同一組遠端名額：上限 2 時第三棵要排隊，前面有人還回名額它才拿到（拿到的就是空出來的那個）。
+    #[test]
+    fn different_worktrees_share_one_remote_cap() {
+        let base = base();
+        let adm = Admission { max: 2, jobs: 1, shared_wait_secs: 0, queue_wait_secs: 60 };
+        let mut a = guard_with(&base, "00000000000000a1", "job-1-1", adm);
+        let mut b = guard_with(&base, "00000000000000b2", "job-2-2", adm);
+        let mut got = vec![a.hs.slot, b.hs.slot];
+        got.sort();
+        assert_eq!(got, vec![Some((1, 2)), Some((2, 2))]);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let b2 = base.clone();
+        let waiter = std::thread::spawn(move || tx.send(guard_with(&b2, "00000000000000c3", "job-3-3", adm)).unwrap());
+        assert!(rx.recv_timeout(Duration::from_millis(2500)).is_err(), "名額滿了，第三棵 worktree 要排隊");
+        let freed = a.hs.slot;
+        a.finish();
+        let mut c = rx.recv_timeout(Duration::from_secs(15)).expect("a 還回名額之後 c 要排到");
+        waiter.join().unwrap();
+        assert_eq!(c.hs.slot, freed);
+        b.finish();
+        c.finish();
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// 端到端（真的 `run_offload`＋真的守門）：四棵 worktree 同時跑、上限 2，任何時刻最多兩個遠端 cargo，而且四個都跑完、結果原樣帶回。
+    /// 修正前沒有遠端上限：四個一起跑（2026-09-19 就是 9 個冷編譯同時跑把遠端壓垮）。
+    #[test]
+    fn concurrent_calls_from_different_worktrees_never_exceed_the_remote_cap() {
+        let base = base();
+        let marks = base.join("running");
+        std::fs::create_dir_all(&marks).unwrap();
+        let body = format!(
+            "touch '{m}/'$$\nls '{m}' | wc -l >> '{m}.log'\nsleep 2\nrm -f '{m}/'$$\nexit 0\n",
+            m = marks.display()
+        );
+        let (mut remote, _, data) = fake_remote(&base, 60, &body);
+        remote.max_concurrent = 2;
+        let calls: Vec<_> = (0..4)
+            .map(|i| {
+                let cwd = base.join(format!("wt{i}"));
+                std::fs::create_dir_all(&cwd).unwrap();
+                let (remote, data, base) = (remote.clone(), data.clone(), base.clone());
+                std::thread::spawn(move || {
+                    with_fake_transport(&base, || run_offload(&remote, &data, &cwd, &["test".to_string()], &Deadline::new(remote.timeout_secs)))
+                })
+            })
+            .collect();
+        let rcs: Vec<i32> = calls.into_iter().map(|h| h.join().unwrap()).collect();
+        assert_eq!(rcs, vec![0; 4]);
+        let seen: Vec<u32> = std::fs::read_to_string(base.join("running.log")).unwrap().lines().map(|l| l.trim().parse().unwrap()).collect();
+        assert_eq!(seen.len(), 4, "{seen:?}");
+        assert!(seen.iter().all(|n| *n <= 2), "同時在跑的遠端 cargo 超過上限 2：{seen:?}");
+        assert!(seen.contains(&2), "兩個名額都該用上：{seen:?}");
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// 排隊的時間不算進整體上限：上限 3 秒、前面的人佔名額 4 秒、自己的 cargo 跑 1 秒 → 照常成功（不是 124）。
+    #[test]
+    fn time_spent_queueing_does_not_count_toward_the_overall_limit() {
+        let base = base();
+        let (mut remote, cwd, data) = fake_remote(&base, 3, "sleep 1\nexit 0\n");
+        remote.max_concurrent = 1;
+        let mut holder = guard_with(&base, "00000000000000a1", "job-1-1", Admission { max: 1, ..QUICK });
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(4));
+            holder.finish();
+        });
+        let t0 = Instant::now();
+        let rc = with_fake_transport(&base, || run_offload(&remote, &data, &cwd, &["test".to_string()], &Deadline::new(remote.timeout_secs)));
+        let took = t0.elapsed();
+        release.join().unwrap();
+        assert!(took >= Duration::from_secs(4), "真的有排隊：{took:?}");
+        assert_eq!(rc, 0, "排隊 4 秒＋跑 1 秒，上限 3 秒只算後面那段");
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// shared 被佔著時先等它用完（拿到同一個 shared、增量編譯），不是馬上改用冷編譯的 job 目錄；等超過上限才改用 job 目錄。
+    #[test]
+    fn a_busy_shared_target_is_waited_for_and_only_given_up_after_a_limit() {
+        let base = base();
+        let mut a = guard(&base, HASH, "job-1-1");
+        let adir = a.hs.dir.clone();
+        assert!(adir.ends_with("/shared"), "{adir}");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let b2 = base.clone();
+        let waiter = std::thread::spawn(move || {
+            tx.send(guard_with(&b2, HASH, "job-2-2", Admission { shared_wait_secs: 30, ..QUICK })).unwrap()
+        });
+        assert!(rx.recv_timeout(Duration::from_secs(2)).is_err(), "shared 被佔著：要等，不是馬上冷編譯");
+        a.finish();
+        let mut b = rx.recv_timeout(Duration::from_secs(15)).expect("a 用完之後 b 要拿到");
+        waiter.join().unwrap();
+        assert_eq!(b.hs.dir, adir, "b 拿到同一個 shared，不是 job-2-2");
+
+        // 佔著不放：等 2 秒還沒空出來就改用 job 目錄。
+        let t0 = Instant::now();
+        let mut c = guard_with(&base, HASH, "job-3-3", Admission { shared_wait_secs: 2, ..QUICK });
+        assert!(c.hs.dir.ends_with(&format!("/{HASH}/job-3-3")), "{:?}", c.hs);
+        assert!(t0.elapsed() >= Duration::from_secs(2), "{:?}", t0.elapsed());
+        c.finish();
+        b.finish();
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// 名額一直全滿：排到上限就放棄——不交目錄、exit 75（[`QueueFull`]），自己佔的 shared 鎖也放掉。
+    #[test]
+    fn a_queue_that_never_moves_gives_up_with_exit_75() {
+        let base = base();
+        let mut holder = guard_with(&base, "00000000000000a1", "job-1-1", Admission { max: 1, ..QUICK });
+        let token = LeaseToken::new();
+        let cmd = guard_cmd(&base, HASH, "job-2-2", &token, Admission { max: 1, queue_wait_secs: 2, ..QUICK });
+        let t0 = Instant::now();
+        let err = Lease::start(cmd, token, &Deadline::new(0)).err().expect("queue full");
+        assert!(err.downcast_ref::<QueueFull>().is_some(), "{err:#}");
+        assert!(t0.elapsed() >= Duration::from_secs(2) && t0.elapsed() < Duration::from_secs(20), "{:?}", t0.elapsed());
+        assert!(lock_free(&base.join(format!("rc/{HASH}/shared.lock"))), "放棄時要放掉 shared 的鎖");
+        holder.finish();
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// 開一個會排隊的守門，等它打出第一聲心跳，然後像 helper 那條 ssh 斷掉時遠端 sshd 做的一樣：**只關它的 stdin**，
+    /// stdout 繼續有人讀（2026-09-19 用真的 sshd 量：本機 ssh 被砍之後守門的 stdout 照樣寫得進去，只有 stdin 會讀到 EOF）。
+    /// 它要在幾秒內自己結束。
+    fn hang_up_while_queued(base: &Path, hash: &str, adm: Admission) {
+        let token = LeaseToken::new();
+        let mut child = guard_cmd(base, hash, "job-2-2", &token, adm)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut out = BufReader::new(child.stdout.take().unwrap());
+        let mut line = String::new();
+        while line.trim_end() != "Q" {
+            line.clear();
+            assert!(out.read_line(&mut line).unwrap() > 0, "守門還沒排隊就結束了");
+            assert!(!line.starts_with("ROOT"), "應該要排隊，不該拿到目錄");
+        }
+        drop(child.stdin.take());
+        let drain = std::thread::spawn(move || std::io::copy(&mut out, &mut std::io::sink()));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() > deadline {
+                let _ = child.kill();
+                panic!("helper 斷線了，排隊中的守門還一直佔著位置（{adm:?}）");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let _ = drain.join();
+    }
+
+    /// 排隊中 helper 斷線了（被砍、Ctrl-C、網路斷）：守門靠心跳發現，自己結束、放掉手上的鎖，不佔著位置空等到上限。
+    /// 兩種排隊都一樣：等遠端名額（這時它握著自己 worktree 的 shared 鎖）、等 shared。
+    #[test]
+    fn a_queued_guard_whose_helper_went_away_leaves_the_queue() {
+        let base = base();
+        let lock = base.join(format!("rc/{HASH}/shared.lock"));
+        let mut slot_holder = guard_with(&base, "00000000000000a1", "job-1-1", Admission { max: 1, ..QUICK });
+        hang_up_while_queued(&base, HASH, Admission { max: 1, queue_wait_secs: 120, ..QUICK });
+        assert!(lock_free(&lock), "結束時放掉 shared 的鎖");
+        slot_holder.finish();
+
+        let mut shared_holder = guard(&base, HASH, "job-1-1");
+        hang_up_while_queued(&base, HASH, Admission { shared_wait_secs: 120, ..QUICK });
+        shared_holder.finish();
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// 守門腳本裡的自動上限跟文件寫的算式一致（這台就是遠端：用它自己的核數與 RAM 核對）。
+    #[test]
+    fn the_guards_automatic_cap_matches_the_documented_formula() {
+        let base = base();
+        let ncpu: u64 = String::from_utf8(Command::new("getconf").arg("_NPROCESSORS_ONLN").output().unwrap().stdout).unwrap().trim().parse().unwrap();
+        let mem_kb: u64 = std::fs::read_to_string("/proc/meminfo")
+            .unwrap()
+            .lines()
+            .find_map(|l| l.strip_prefix("MemTotal:"))
+            .and_then(|v| v.trim().trim_end_matches("kB").trim().parse().ok())
+            .unwrap();
+        for jobs in [1, 3, 8] {
+            let mut g = guard_with(&base, HASH, "job-1-1", Admission { max: 0, jobs, ..QUICK });
+            let want = super::tests::auto_max_concurrent(ncpu, mem_kb, jobs);
+            assert_eq!(g.hs.slot.map(|s| s.1), Some(want), "jobs={jobs} ncpu={ncpu} mem_kb={mem_kb}");
+            g.finish();
+        }
         let _ = std::fs::remove_dir_all(base);
     }
 }

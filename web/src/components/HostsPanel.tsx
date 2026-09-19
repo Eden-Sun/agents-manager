@@ -438,11 +438,13 @@ function RemoteCargoPanel() {
       const target = `${user.trim()}@${host.trim()}${(Number(port) || 22) === 22 ? '' : `:${Number(port)}`}`
       const first = unsaved ? '（已先儲存表單裡的設定）' : ''
       // 連得上但沒有 cargo 是最常見的下一關：講清楚並給一顆按鈕，不要只丟原始輸出（使用者 2026-09-18）。
-      setNeedsToolchain(r.cargo_missing)
+      setNeedsToolchain(r.cargo_missing || r.clippy_missing)
       setMessage(
         r.cargo_missing
           ? `✓ ${target} 連得上（${how}）${first}，但這台還沒有 Rust 工具鏈（${r.os || '?'}/${r.arch || '?'}）。按下面「安裝 Rust 工具鏈」由 daemon 用 rustup 裝（minimal，不會改遠端的 shell profile）。`
-          : `✓ ${target} SSH/Cargo 可用（${how}）${first}：\n${r.output}`
+          : r.clippy_missing
+            ? `✓ ${target} 連得上（${how}）${first}，有 cargo 但沒有 clippy——cargo clippy 轉過去會失敗。按下面「安裝 Rust 工具鏈」補上。\n${r.output}`
+            : `✓ ${target} SSH/Cargo 可用（${how}）${first}：\n${r.output}`
       )
     } catch (e) {
       setNeedsToolchain(false)
@@ -459,8 +461,12 @@ function RemoteCargoPanel() {
       const r = await api.installRemoteCargoToolchain()
       setNeedsToolchain(false)
       const head = r.already_installed ? `✓ 這台本來就有了：${r.cargo_version}` : `✓ 已安裝：${r.cargo_version}`
-      // rustup 不裝 linker；少了 cc，cargo test 會在連結那一步才爆掉。
-      setMessage(r.cc_missing ? `${head}\n⚠ 這台沒有 C 編譯器（cc／gcc），cargo test 連結會失敗。請在遠端裝 build-essential（Debian/Ubuntu）或 gcc。` : head)
+      // rustup 不裝 linker；少了 cc，cargo test 會在連結那一步才爆掉。clippy 補不上（不是 rustup 裝的工具鏈）也當場講。
+      const warnings = [
+        r.cc_missing ? '⚠ 這台沒有 C 編譯器（cc／gcc），cargo test 連結會失敗。請在遠端裝 build-essential（Debian/Ubuntu）或 gcc。' : '',
+        r.clippy_missing ? '⚠ 這台的 cargo 沒有 clippy、也補不上（不是 rustup 裝的？），cargo clippy 轉過去會失敗。請在遠端裝 clippy。' : '',
+      ].filter(Boolean)
+      setMessage([head, ...warnings].join('\n'))
     } catch (e) {
       setMessage(`安裝失敗：${remoteCargoErr(e)}`)
     } finally {
