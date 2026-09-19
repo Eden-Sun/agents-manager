@@ -1735,13 +1735,17 @@ async fn logout_identity(
 }
 
 async fn identity_auth(app: Arc<App>, name: String, identity: String, logout: bool) -> Result<Response, LcError> {
+    // 沒寫 host 的身分在遠端也生效：未知主機若先查 identity／PATH，會變成 409「CLI 不在 PATH」。
+    if app.hosts.get(&name).await.is_none() {
+        return Err(LcError::NotFound("host".into()));
+    }
     let idn = crate::tools::identity_for_host(&app, &name, &identity)
         .await
         .ok_or_else(|| LcError::NotFound("identity".into()))?;
     let Some(_) = crate::tools::cached_path(&app, &name, &idn.kind).await else {
         return Err(LcError::conflict(
             "identity_login_unavailable",
-            json!({"host": name, "identity": identity, "kind": idn.kind, "reason": "CLI 不在 PATH，無法登入"}),
+            json!({"host": name, "identity": identity, "kind": idn.kind, "message": "CLI 不在 PATH，無法登入"}),
         ));
     };
     let home = crate::tools::host_home(&app, &name).await;
@@ -1765,6 +1769,68 @@ async fn identity_auth(app: Arc<App>, name: String, identity: String, logout: bo
     }
     crate::tools::spawn_identity_login_watch(app, name, shell.pane_id.clone(), identity, idn.kind, logout);
     Ok((StatusCode::OK, Json(json!(shell))).into_response())
+}
+
+#[cfg(test)]
+mod identity_auth_error_tests {
+    use super::*;
+    use axum::response::IntoResponse;
+
+    async fn body_of(err: LcError) -> (StatusCode, Value) {
+        let resp = err.into_response();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    async fn with_identity(app: &Arc<App>, name: &str, kind: &str) {
+        let ident = crate::config::IdentityCfg {
+            name: name.into(),
+            kind: kind.into(),
+            host: None,
+            env: Default::default(),
+            args: vec![],
+        };
+        app.cfg
+            .update(move |cfg| {
+                cfg.identities.push(ident);
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    /// API.md：CLI 不在 PATH → `409 {"reason":"identity_login_unavailable"}`。
+    /// extra 裡不能再寫 `reason`，否則會蓋掉機器 key，前端對不到這條。
+    #[tokio::test]
+    async fn missing_cli_is_409_identity_login_unavailable() {
+        let e = crate::testing::env().await;
+        with_identity(&e.app, "cc1", "claude").await;
+        let err = login_identity(State(e.app.clone()), Path(("local".into(), "cc1".into())))
+            .await
+            .expect_err("no CLI on PATH must not open a pane");
+        let (status, body) = body_of(err).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"], "conflict");
+        assert_eq!(body["reason"], "identity_login_unavailable", "{body}");
+        assert_eq!(body["identity"], "cc1");
+        assert_eq!(body["kind"], "claude");
+    }
+
+    /// API.md：host 不存在是 404。沒寫 host 的身分在遠端也生效，所以找不到主機時不能先走到
+    /// 「CLI 不在 PATH」那條 409——呼叫端會去裝 CLI，其實主機根本沒這台。
+    #[tokio::test]
+    async fn unknown_host_is_404_host_not_cli_missing() {
+        let e = crate::testing::env().await;
+        with_identity(&e.app, "work", "codex").await;
+        let err = login_identity(State(e.app.clone()), Path(("no-such-host".into(), "work".into())))
+            .await
+            .expect_err("unknown host");
+        let (status, body) = body_of(err).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert_eq!(body["error"], "not_found");
+        assert_eq!(body["what"], "host", "{body}");
+    }
 }
 
 async fn get_gh_status(State(app): State<Arc<App>>, Path(name): Path<String>) -> Result<Response, LcError> {
