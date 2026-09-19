@@ -1331,7 +1331,7 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
 
 更新徽章／批次重啟 chip 按下去先呼叫這支，把 changelog 放進確認框。
 
-- `kind` 省略 = `claude`，支援 `claude`、`codex`（其他回 `found:false`）。`host` 省略 = `local`。
+- `kind` 省略 = `claude`，支援 `claude`、`codex`（其他含 grok、未知字串一律 `found:false`）。`host` 省略 = `local`；不認得的 host 也是 200 `found:false` + `error`，不是 404。
 - 沒給 `to` 時 daemon 在該主機再跑 `claude --version` 當 `installed_version`（磁碟已是新版，不快取）。`from` 有給就回 `from`（不含）到目標（含）之間每一版，新的在前。
 - **codex 一定要給 `to`**：它的更新是 TUI 當場問（`✨ Update available! 0.153.4 -> 0.154.0`），新版還沒進磁碟；UI 從畫面那句解出 `from` / `to`。
 - 來源：claude `https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md`；codex `https://api.github.com/repos/openai/codex/releases`（濾掉 draft／prerelease，`rust-vX.Y.Z` + body 併成同格式）。各自快取 10 分鐘，認 `## x.y.z`。
