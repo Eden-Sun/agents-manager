@@ -10,6 +10,7 @@ import {
   toMemSnapshot,
   toIdentityStatusMap,
   toToolMap,
+  toHerdrVersion,
   optStr,
   sortById,
   sortByTime,
@@ -24,7 +25,7 @@ import {
   arr,
 } from '../api/normalize'
 import { ApiError } from '../api/types'
-import type { Bot, BotKind, RestartBatch, GroupChatResult, Mission, MissionDetail, NewMissionInput, MemSnapshot, GroupMessage, Host, HostResult, HostShell, Identity, IdentityStatusMap, Lamp, Message, ModelInfo, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, PatchBotInput, PatchProjectInput, Project, QuotaMap, Run, TerminalSource, ToolMap, Turn, TurnDelivery } from '../api/types'
+import type { Bot, BotKind, RestartBatch, GroupChatResult, Mission, MissionDetail, NewMissionInput, MemSnapshot, GroupMessage, Host, HerdrVersion, HostResult, HostShell, Identity, IdentityStatusMap, Lamp, Message, ModelInfo, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, PatchBotInput, PatchProjectInput, Project, QuotaMap, Run, TerminalSource, ToolMap, Turn, TurnDelivery } from '../api/types'
 import type { ProjectPane } from '../api'
 import { joinRunningBatch, restartProgress } from './restartBatch'
 import { dropHostModels, modelsKey, shouldFetchModels, type ModelsCache } from './modelsCache'
@@ -310,6 +311,7 @@ export interface StoreState {
   attachCommand: string
   /** Local machine's `hosts[0].tools`. */
   localTools: ToolMap
+  localHerdr: HerdrVersion
   /** Local machine's `hosts[0].identities`. */
   localIdentityStatus: IdentityStatusMap
   /** 被標為停用的身份，鍵是 `api.identityPrefKey(host, kind, name)`（daemon 端的設定，不是瀏覽器記的）。 */
@@ -735,6 +737,7 @@ export const useStore = create<StoreState>((set, get) => ({
   hosts: [],
   attachCommand: 'herdr --session agents-manager',
   localTools: toToolMap(undefined),
+  localHerdr: toHerdrVersion(undefined),
   localIdentityStatus: {},
   disabledIdentities: [],
   quota: {},
@@ -873,6 +876,7 @@ export const useStore = create<StoreState>((set, get) => ({
         hosts: st.hosts,
         attachCommand: st.attach_command,
         localTools: st.tools,
+        localHerdr: st.herdr,
         localIdentityStatus: st.identity_status,
         identities: st.identities,
         projects: st.projects,
@@ -2452,6 +2456,7 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
         set({
           connected: bool(pick(data, 'connected'), get().connected),
           ...(pick(data, 'tools') !== undefined ? { localTools: toToolMap(pick(data, 'tools')) } : {}),
+          ...(pick(data, 'herdr') !== undefined ? { localHerdr: toHerdrVersion(pick(data, 'herdr')) } : {}),
           ...(pick(data, 'identities') !== undefined
             ? { localIdentityStatus: toIdentityStatusMap(pick(data, 'identities')) }
             : {}),
@@ -2755,6 +2760,10 @@ function flushQueued(botId: string) {
 }
 
 /** Patch connection state onto the known hosts without losing their config fields. */
+function sameHerdr(a: HerdrVersion, b: HerdrVersion): boolean {
+  return a.server_version === b.server_version && a.protocol === b.protocol && a.cli_version === b.cli_version && a.mismatch === b.mismatch
+}
+
 function mergeHosts(current: Host[], updates: unknown[]): Host[] {
   let changed = false
   const next = current.map((h) => {
@@ -2770,11 +2779,12 @@ function mergeHosts(current: Host[], updates: unknown[]): Host[] {
     // `host_changed` only carries `identities` when the daemon has a detection result; an
     // absent field means "unchanged", never "no identities".
     const identityStatus = u.identities !== undefined ? toIdentityStatusMap(u.identities) : h.identity_status
-    if (connected === h.connected && error === h.error && tools === h.tools && identityStatus === h.identity_status) {
+    const herdr = u.herdr !== undefined ? toHerdrVersion(u.herdr) : h.herdr
+    if (connected === h.connected && error === h.error && tools === h.tools && identityStatus === h.identity_status && sameHerdr(herdr, h.herdr)) {
       return h
     }
     changed = true
-    return { ...h, connected, error, tools, identity_status: identityStatus }
+    return { ...h, connected, error, tools, identity_status: identityStatus, herdr }
   })
   return changed ? next : current
 }

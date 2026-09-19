@@ -194,6 +194,8 @@ pub struct Event {
 pub struct HerdrClient {
     socket: PathBuf,
     seq: std::sync::Arc<AtomicU64>,
+    /// 最近一次 ping 成功的回應（UI 顯示 herdr 版本用，[`crate::herdr_version`]）；clone 共用。
+    last_pong: std::sync::Arc<std::sync::Mutex<Option<Pong>>>,
 }
 
 pub const EXPECTED_PROTOCOL: u32 = 20;
@@ -250,7 +252,7 @@ fn fit_command_line(mut args: Vec<String>) -> Vec<String> {
 
 impl HerdrClient {
     pub fn new(socket: impl Into<PathBuf>) -> Self {
-        Self { socket: socket.into(), seq: Default::default() }
+        Self { socket: socket.into(), seq: Default::default(), last_pong: Default::default() }
     }
 
     pub fn socket_path(&self) -> &Path {
@@ -312,7 +314,13 @@ impl HerdrClient {
 
     pub async fn ping(&self) -> Result<Pong> {
         let v = self.call("ping", json!({})).await?;
-        Ok(serde_json::from_value(v)?)
+        let pong: Pong = serde_json::from_value(v)?;
+        *self.last_pong.lock().unwrap_or_else(|e| e.into_inner()) = Some(pong.clone());
+        Ok(pong)
+    }
+
+    pub fn last_pong(&self) -> Option<Pong> {
+        self.last_pong.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// herdr wraps the payload as `{"type":"session_snapshot","snapshot":{...}}`; unwrap it.

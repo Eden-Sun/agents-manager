@@ -1920,6 +1920,8 @@ claude 的 statusLine 每次重繪都呼叫、沒有回合語意，不進 spool�
 （`home` 取 `echo $HOME`，`~` 前綴展開）。隱藏目錄預設略過，`hidden=1` 才列。
 
 ### 11.6 API 與 UI
+
+- **herdr 版本**（`hosts[].herdr`，API §12.6b）：server 版本與 protocol 取自 ping、CLI 版本取自工具偵測的 `herdr --version`；兩者不同或 protocol 未驗證時 hosts 面板用警告色標出，讀不到顯示「未知」。
 - `GET /api/state` 帶 `hosts: [{name, ssh, herdr_session, connected, error?}]`、`projects[].host`；`POST /api/hosts`、`DELETE /api/hosts/:name`（需無 project 使用）、`POST /api/hosts/:name/reconnect`；
   `POST /api/projects` 可帶 `host`。WS `daemon_status {herdr_connected, hosts}`、`host_changed`。細節見 `API.md`。
 - UI：sidebar Project 標題顯示 host 徽章（本機不顯示）；新增 Project 表單有主機下拉，目錄選擇器跟著切換；主機管理表單列出連線狀態與重連；host 斷線時其 bot 燈號灰。

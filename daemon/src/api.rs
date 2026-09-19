@@ -500,6 +500,8 @@ async fn hosts_list(app: &Arc<App>) -> Vec<Value> {
             // Env unexpanded, as written.
             "shell_identities": t.map(|x| json!(x.shell_identities)),
             "tools_checked_at": t.map(|x| x.checked_at.clone()),
+            // herdr 版本（server／protocol 來自 ping，只在連著時報；CLI 來自探測），SPEC §11.6。
+            "herdr": crate::herdr_version::for_host(&c, connected, t),
         }));
     }
     out

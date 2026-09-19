@@ -938,7 +938,7 @@ mod tests {
                 tools: Default::default(),
                 identities: Default::default(),
                 shell_identities: vec![crate::config::IdentityCfg { name: row.identity.clone(), kind: "claude".into(), host: None, env: Default::default(), args: vec![] }],
-                utc_offset_secs: None, checked_at: crate::db::now(),
+                utc_offset_secs: None, herdr_cli: None, checked_at: crate::db::now(),
             },
         );
         let bin = dir(&app).join("bin");

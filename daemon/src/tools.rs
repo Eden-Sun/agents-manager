@@ -76,6 +76,8 @@ pub struct HostTools {
     pub shell_identities: Vec<crate::config::IdentityCfg>,
     /// 那台主機當下的 UTC 偏移（秒，`date +%z`）；codex 撞限橫幅印的是那台的當地時間（#239）。讀不到就是 None，不猜。
     pub utc_offset_secs: Option<i32>,
+    /// 那台 `herdr --version` 的原文（CLI 版本；server 版本看 ping，見 `herdr_version`）。讀不到＝None。
+    pub herdr_cli: Option<String>,
     pub checked_at: String,
 }
 
@@ -119,6 +121,9 @@ else
 fi
 if [ -f "${CODEX_HOME:-$HOME/.codex}/auth.json" ]; then printf 'AM_LOGIN codex 1\n'; else printf 'AM_LOGIN codex 0\n'; fi
 printf 'AM_TZ %s\n' "$(date +%z 2>/dev/null)"
+hp=$( "${SHELL:-/bin/sh}" -lic "command -v herdr" 2>/dev/null | tail -1 )
+[ -n "$hp" ] || hp=$(command -v herdr 2>/dev/null)
+case "$hp" in /*) printf 'AM_HERDR %s\n' "$( "$hp" --version 2>/dev/null </dev/null | head -1 | tr -d '\r' )" ;; esac
 GH="${GROK_HOME:-$HOME/.grok}"
 if [ -f "$GH/auth.json" ] || ls "$GH"/auth* >/dev/null 2>&1; then printf 'AM_LOGIN grok 1\n'; else printf 'AM_LOGIN grok 0\n'; fi
 "#, alias_sh!());
@@ -136,6 +141,12 @@ pub fn parse_utc_offset(out: &str) -> Option<i32> {
     }
     let (h, m): (i32, i32) = (d[..2].parse().ok()?, d[2..].parse().ok()?);
     (h < 24 && m < 60).then_some(sign * (h * 3600 + m * 60))
+}
+
+/// `AM_HERDR herdr 0.9.1` → `herdr 0.9.1`。沒這行或空的＝None。
+pub fn parse_herdr_cli(out: &str) -> Option<String> {
+    let v = out.lines().find_map(|l| l.trim().strip_prefix("AM_HERDR "))?.trim();
+    (!v.is_empty()).then(|| v.to_string())
 }
 
 pub fn parse_probe(out: &str) -> BTreeMap<String, ToolInfo> {
@@ -810,7 +821,8 @@ pub async fn detect(app: &Arc<App>, host: &str) -> Result<HostTools> {
     let shell_identities = parse_shell_identities(&out);
     let identities = detect_identities(app, host, &tools, &shell_identities).await;
     let utc_offset_secs = parse_utc_offset(&out);
-    let ht = HostTools { tools, identities, shell_identities, utc_offset_secs, checked_at: crate::db::now() };
+    let herdr_cli = parse_herdr_cli(&out);
+    let ht = HostTools { tools, identities, shell_identities, utc_offset_secs, herdr_cli, checked_at: crate::db::now() };
     install_host_tools(app, host, ht.clone()).await;
     tracing::info!(
         host,
@@ -979,7 +991,7 @@ mod tests {
             tools: Default::default(),
             identities: Default::default(),
             shell_identities: dir.map(|d| vec![cfg("cc1", "claude", None, "CLAUDE_CONFIG_DIR", d)]).unwrap_or_default(),
-            utc_offset_secs: None, checked_at: crate::db::now(),
+            utc_offset_secs: None, herdr_cli: None, checked_at: crate::db::now(),
         };
         app.tools.lock().await.insert("m4p".into(), shell(Some("$HOME/.claude-ccompany")));
         assert_eq!(dir_of(identity_for_host(app, "m4p", "cc1").await, "CLAUDE_CONFIG_DIR").as_deref(), Some("$HOME/.claude-ccompany"));
@@ -1293,6 +1305,14 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
         assert_eq!(parse_utc_offset("AM_TZ \n"), None);
         assert_eq!(parse_utc_offset("AM_TZ CST\n"), None);
         assert_eq!(parse_utc_offset("AM_PATH claude \n"), None);
+    }
+
+    #[test]
+    fn herdr_cli_version_is_read_from_the_probe_or_not_at_all() {
+        assert_eq!(parse_herdr_cli("AM_TZ +0800\nAM_HERDR herdr 0.9.1\n").as_deref(), Some("herdr 0.9.1"));
+        assert_eq!(parse_herdr_cli("AM_HERDR \n"), None, "herdr 沒裝：空的不是版本");
+        assert_eq!(parse_herdr_cli("AM_TZ +0800\n"), None);
+        assert!(PROBE_SH.contains("AM_HERDR"), "探測腳本要真的問 herdr --version");
     }
 
     #[test]

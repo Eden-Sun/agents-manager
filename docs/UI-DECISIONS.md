@@ -377,3 +377,14 @@ daemon 這幾天把「寫不進 DB」改成 fail closed：外面的副作用做�
 - **409／503 顯示人話**：`composer_busy`／`resume_unverified`／`transcript_*`／`host_unreadable` 等打字前擋下的 409 有固定說法（沒送出、怎麼辦）；帶人話 `message` 的（維護窗口、`interrupt_unconfirmed`、`identity_login_unavailable`、`default_session`…）直接顯示 daemon 的 `message`，不顯示 `reason` 代碼——**不論有沒有 `retryable`**：`reason` 是機器 key、`message` 才是給人看的（API.md），以前只有 `retryable:true` 才用 `message`，登入找不到 CLI、default session 的 bot 不給開關這兩條只剩代碼（#233）。
 - **外部 Cargo「測試連線」先存再測**：`POST /api/build/remote/test` 測的是已儲存的設定；表單有沒存的改動就先存，結果寫明測的是 `user@host`。
 - 截圖：`docs/screenshots/remote-cargo-test-saves-first/`。
+
+## herdr 版本顯示在 hosts 面板（2026-09-19）
+
+升級 herdr 時使用者要能在 UI 確認結果，所以每台主機（含本機）的那一列多一行小字 `herdr 0.9.1 · protocol 22`（等寬、`text-dim`）。
+
+- **CLI 與 server 版本不同**：整行改警告色並展開一句說明（「CLI 是 0.9.1，但跑著的 herdr server 還是 0.8.2：bot 的 herdr 指令會回 protocol_mismatch，要重啟 herdr server」）。
+  這是升級最容易踩的洞（#242 審查），只看 CLI 版本會誤以為升好了。
+- **protocol 不在實測清單**：同樣警告色，寫「未驗證」。
+- **讀不到**（主機沒連上、舊 daemon 沒這欄位）：寫「herdr 版本：未知」，不用別的欄位去猜。
+- 不放狀態列：版本是低頻資訊，狀態列每個字都要跟額度、context 搶位置；hosts 面板就是使用者驗收升級會去看的地方。
+- 文字組合在 `lib/herdrVersion.ts`（有單元測試）。截圖：`docs/screenshots/herdr-version/`。

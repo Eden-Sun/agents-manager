@@ -251,7 +251,7 @@ mod account_tests {
             tools: std::collections::BTreeMap::new(),
             identities: [(identity.name.clone(), identity)].into_iter().collect(),
             shell_identities: Vec::new(),
-            utc_offset_secs: None, checked_at: String::new(),
+            utc_offset_secs: None, herdr_cli: None, checked_at: String::new(),
         }
     }
 

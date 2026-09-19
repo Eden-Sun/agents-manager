@@ -363,7 +363,7 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 | `project_changed` | `{"project_id"}`（或 `{}`） |
 | `bot_changed` | `{"bot_id"}` |
 | `daemon_status` | `{"herdr_connected", "hosts": {"<name>": {"connected","error"?}}}` |
-| `host_changed` | `{"name","connected","error"?}` |
+| `host_changed` | `{"name","connected","error"?,"herdr"}`（`herdr` 見 §12.6b） |
 | `quota_updated` | 見 §12.5 |
 | `mem_updated` | 與 `GET /api/mem` 同形 |
 | `bots_restart_progress` / `bots_restart_done` | 見 §10.3a |
@@ -1228,6 +1228,21 @@ Project 底下所有存活 bot 的訊息合併，以插入順序（`rowid`）倒
   搭 §12.4 的 `claude-usage` 探測拿，所以第一輪額度輪詢（≤ 60 秒）後才從 `null` 變真答案，變了推 `host_changed`。
 - 尚未偵測時 `tools`、`tools_checked_at` 為 `null`。
 - `POST /api/hosts/{name}/tools/refresh` → 立即重新偵測 `200 {"name","tools","tools_checked_at"}`（host 不存在 404、ssh 失敗 502），並推 `host_changed`。
+
+### 12.6b herdr 版本 `hosts[].herdr`
+
+每台主機（含 `local`）一份，`GET /api/state` 的 `hosts[]` 與 WS `host_changed` 都帶：
+
+```json
+{ "herdr": { "server_version": "0.8.2", "protocol": 20, "protocol_supported": true,
+             "cli_version": "0.9.1", "mismatch": true } }
+```
+
+- `server_version`／`protocol`：最近一次 `ping` 成功的回應；**主機沒連上就是 `null`**（斷線後的舊值不算現況）。
+- `cli_version`：工具偵測（§12.6）跑 `herdr --version` 的版本號；herdr 沒裝或還沒偵測＝`null`。
+- `mismatch`：兩邊版本都讀得到而且不同。典型是 CLI 已升到 0.9.1、跑著的 server 還是 0.8.2 —— bot 的 herdr 指令會回 `protocol_mismatch`，要重啟 herdr server。只知道一邊時為 `false`，不猜。
+- `protocol_supported`：protocol 是否在 daemon 實測過的清單（`herdr.rs` `SUPPORTED_PROTOCOLS`，目前 20／22）；不知道 protocol 時 `null`。
+- 舊 daemon 沒有 `herdr` 欄位，前端一律當未知。
 
 ### 12.7 透過現有 agent 安裝 `POST /api/hosts/{name}/tools/install`
 `{ "kind": "grok", "via_bot_id": "01M1…" }`：daemon 組一則安裝 prompt（官方安裝方式：claude `curl -fsSL https://claude.ai/install.sh | bash`、codex `npm i -g @openai/codex`、

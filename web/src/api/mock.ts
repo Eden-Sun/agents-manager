@@ -2034,6 +2034,7 @@ export class MockTransport implements Transport {
           connected: this.connected,
           error: null,
           attach_command: 'herdr --session agents-manager',
+          herdr: { server_version: '0.9.1', protocol: 22, protocol_supported: true, cli_version: '0.9.1', mismatch: false },
           tools: this.localTools,
           identities: this.localIdentityStatus,
         },
@@ -2046,6 +2047,9 @@ export class MockTransport implements Transport {
           connected: h.connected,
           error: h.error,
           attach_command: `herdr --remote ${h.ssh}${h.ssh_port !== 22 ? ` -p ${h.ssh_port}` : ''} --session ${h.herdr_session}`,
+          herdr: h.connected
+            ? { server_version: '0.8.2', protocol: 20, protocol_supported: true, cli_version: '0.9.1', mismatch: true }
+            : { server_version: null, protocol: null, protocol_supported: null, cli_version: null, mismatch: false },
           tools: h.tools,
           identities: h.identities,
         })),

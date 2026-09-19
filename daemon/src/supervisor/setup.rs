@@ -396,7 +396,7 @@ mod tests {
                 tools: Default::default(),
                 identities: Default::default(),
                 shell_identities: vec![crate::config::IdentityCfg { name: sup.identity.clone(), kind: "claude".into(), host: None, env: Default::default(), args: vec![] }],
-                utc_offset_secs: None, checked_at: crate::db::now(),
+                utc_offset_secs: None, herdr_cli: None, checked_at: crate::db::now(),
             },
         );
         // 部署檔案那一步失敗：`bin` 被一個檔案佔住。

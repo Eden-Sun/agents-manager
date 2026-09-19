@@ -79,7 +79,7 @@ mod tests {
                 tools: Default::default(),
                 identities: Default::default(),
                 shell_identities: vec![identity("cc1", "claude"), identity("cc0", "claude"), identity("cc2", "codex")],
-                utc_offset_secs: None, checked_at: crate::db::now(),
+                utc_offset_secs: None, herdr_cli: None, checked_at: crate::db::now(),
             },
         );
         assert_eq!(usable(&candidates(&app, crate::config::LOCAL_HOST, "claude").await.unwrap()), vec!["cc1", "cc0"]);

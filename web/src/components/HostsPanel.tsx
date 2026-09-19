@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import * as api from '../api'
-import type { HostResult, HostShell, RemoteCargoSettings } from '../api/types'
+import type { HerdrVersion, HostResult, HostShell, RemoteCargoSettings } from '../api/types'
+import { herdrVersionView } from '../lib/herdrVersion'
 import { ApiError, HOST_DEFAULTS } from '../api/types'
 import { nestableBusy } from '../lib/nestableBusy'
 import { DEFAULT_REMOTE_ROOT, remoteCargoUnsaved, toRemoteCargoInput } from '../lib/remoteCargoForm'
@@ -121,6 +122,16 @@ function HostShellList({ host, connected }: { host: string; connected: boolean }
   )
 }
 
+function HerdrVersionLine({ herdr }: { herdr: HerdrVersion }) {
+  const v = herdrVersionView(herdr)
+  return (
+    <span className={`host-herdr ${v.level}`} title={v.hint || undefined} role={v.level === 'warn' ? 'alert' : undefined}>
+      {v.text}
+      {v.level === 'warn' && v.hint ? <span className="host-herdr-hint">{v.hint}</span> : null}
+    </span>
+  )
+}
+
 function HostRow({ name }: { name: string }) {
   const host = useStore((s) => s.hosts.find((h) => h.name === name))
   const projectCount = useStore((s) => s.projects.filter((p) => p.host === name).length)
@@ -152,6 +163,7 @@ function HostRow({ name }: { name: string }) {
             {host.error ?? '未連線'}
           </span>
         )}
+        <HerdrVersionLine herdr={host.herdr} />
         <ToolBadges host={host.name} tools={host.tools} />
         <GhHostStatus host={host.name} />
         <HostShellList host={host.name} connected={host.connected} />
@@ -318,6 +330,7 @@ function NewHostForm({ onResult }: { onResult: (r: HostResult | null) => void })
 function LocalHostRow() {
   const connected = useStore((s) => s.connected)
   const tools = useStore((s) => s.localTools)
+  const herdr = useStore((s) => s.localHerdr)
   const attach = useStore((s) => s.attachCommand)
   const projectCount = useStore((s) => s.projects.filter((p) => p.host === 'local').length)
   return (
@@ -329,6 +342,7 @@ function LocalHostRow() {
           <span className="host-count">{projectCount > 0 ? `${projectCount} 個 Project` : '未使用'}</span>
         </span>
         <span className="host-ssh">{attach}</span>
+        <HerdrVersionLine herdr={herdr} />
         <ToolBadges host="local" tools={tools} />
         <GhHostStatus host="local" />
         <HostShellList host="local" connected={connected} />
