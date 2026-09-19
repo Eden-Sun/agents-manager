@@ -284,6 +284,10 @@ pub struct BuildRemoteCfg {
     pub remote_root: String,
     #[serde(default = "default_remote_build_jobs")]
     pub cargo_jobs: usize,
+    /// 遠端 `cargo test` 的測試執行緒上限（`RUST_TEST_THREADS`，issue #202）；`0`＝不設（用 libtest 的預設＝核心數）。
+    /// 呼叫端自己帶了 `--test-threads`／`RUST_TEST_THREADS` 就尊重呼叫端。
+    #[serde(default = "default_remote_test_threads")]
+    pub test_threads: usize,
 }
 
 impl Default for BuildRemoteCfg {
@@ -295,6 +299,7 @@ impl Default for BuildRemoteCfg {
             ssh_port: default_ssh_port(),
             remote_root: default_remote_build_root(),
             cargo_jobs: default_remote_build_jobs(),
+            test_threads: default_remote_test_threads(),
         }
     }
 }
@@ -305,6 +310,12 @@ pub fn default_remote_build_root() -> String {
 
 fn default_remote_build_jobs() -> usize {
     4
+}
+
+/// 遠端是 32 vCPU 的超賣主機：測試預設開 32 個執行緒，大多在系統呼叫與鎖上互搶（`sy` 59～64%、每秒 50 萬次 context switch）。
+/// 全套 1611 條測試（issue #202 實測）：32 個執行緒 283 秒、16 個 199 秒、12 個 219 秒、**8 個 168～176 秒**——挑 8。
+fn default_remote_test_threads() -> usize {
+    8
 }
 
 impl Default for BuildCfg {
