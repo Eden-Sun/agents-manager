@@ -118,6 +118,9 @@ pub struct App {
     pub host_shells: crate::api::shell::Registry,
     /// 被 trace 的 pane 打字前的即時複查結果，幾秒內重用（`shell::live_verdict`）。
     pub pane_live: crate::api::shell::LiveCache,
+    /// 預覽（`preview.rs`）的行程／port 查詢，測試換成假貨；正式是 herdr＋本機 TCP。
+    #[cfg(test)]
+    pub preview_env: crate::preview::EnvOverride,
     /// 行程 dump 與 listen port 的來源；正式是 `ps`／`lsof`，測試可換成決定性的假貨（`pane_probe`）。
     pub pane_probe: std::sync::Mutex<Arc<dyn crate::pane_probe::PaneProbe>>,
     /// 這顆 daemon 已經跑過 autostart 的主機（§6.1 第 6 步：每台主機一生一次，`reconcile::autostart_after_reconcile`）。
@@ -193,6 +196,8 @@ impl App {
             submodules_cache: Mutex::new(HashMap::new()),
             gh_device: Mutex::new(HashMap::new()),
             host_shells: Default::default(),
+            #[cfg(test)]
+            preview_env: Default::default(),
             pane_live: Default::default(),
             pane_probe: std::sync::Mutex::new(Arc::new(crate::pane_probe::Real)),
             autostarted_hosts: Default::default(),

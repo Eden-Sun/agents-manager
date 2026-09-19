@@ -362,6 +362,7 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 | `turn_progress` | 即時輸出，見「WS `turn_progress`」 |
 | `project_changed` | `{"project_id"}`（或 `{}`） |
 | `bot_changed` | `{"bot_id"}` |
+| `preview_changed` | `{"bot_id", "status":"off"\|"starting"\|"running"\|"failed", "port"}`（SPEC §6.12） |
 | `daemon_status` | `{"herdr_connected", "hosts": {"<name>": {"connected","error"?}}}` |
 | `host_changed` | `{"name","connected","error"?,"herdr"}`（`herdr` 見 §12.6b） |
 | `quota_updated` | 見 §12.5 |
@@ -420,6 +421,38 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 
 ### `GET /api/bots/{id}/scratchpad`、`GET /api/bots/{id}/scratchpad/file`（已移除）
 2026-09-16 起一律 `404 {"what":"scratchpad"}`：scratchpad 不再給使用者（它暴露過私鑰與正式 DB 複本）。明確回 404，不落到 SPA fallback 回 HTML。
+
+## 預覽 `/api/bots/{id}/preview`（SPEC §6.12，issue #253）
+
+頂層 bot 的專案起一顆 vite dev server，右半面板內嵌顯示。`GET /api/state` 的每顆 bot 多一個 `preview`：
+`{"status","port"}`，沒開過或 `off` 是 `null`，首屏不必再打 GET。三個端點回同一個形狀：
+
+```json
+{"status": "off | starting | running | failed", "port": 5180, "dir": "/path/to/web",
+ "pane_id": "wM:pB", "error": null, "started_at": "2026-09-19T15:44:40.881Z"}
+```
+
+`off` 時只有 `{"status":"off"}`。`failed` 的 `error` 帶原因與 pane 最後 40 行。iframe 網址用 `http://${location.hostname}:${port}/`。
+
+### `GET /api/bots/{id}/preview`
+先對一次帳（pane 還在不在、port 有沒有在 listen）再回，所以 `running` 的 vite 半路掛掉，下一次 GET 就會看到 `failed`。
+
+### `POST /api/bots/{id}/preview`
+冪等啟動：已經 `starting`／`running` 就原樣回；`failed`／`off` 重新起（重挑 port）。錯誤是 409，`reason` 在 body 裡
+（跟其他 409 同一個格式 `{"error":"conflict","reason":…}`）：
+
+| `reason` | 意思 |
+|---|---|
+| `not_top_level` | 不是頂層 bot（子 agent、team 成員） |
+| `default_session` | 從使用者自己的 herdr default session 匯入的 bot |
+| `remote_host` | bot 在遠端主機（body 帶 `host`） |
+| `bot_not_running` | bot 現在沒有在跑的 run |
+| `no_vite_config` | 找不到 vite 設定；`tried` 是試過的八個完整路徑 |
+| `no_free_port` | 5180 起的 100 顆都被佔了 |
+
+### `DELETE /api/bots/{id}/preview`
+關 pane、放掉 port，回 `{"status":"off"}`；沒開過也是。bot 被停止／重啟／刪除、§6.11 閒置收 bot 時 daemon 也會做同一件事。
+每次狀態變動推 WS `preview_changed`。
 
 ## 非 agent 的 pane（SPEC §6.5e）
 

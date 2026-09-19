@@ -1793,6 +1793,44 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
 - **記憶體**：一顆 claude 的常駐大約在數百 MB 級別，這條規則的價值就是把「幾小時沒人理」的那幾顆
   從 RSS 裡拿掉，而使用者下次打字時看不出差別（多的只有 resume 起來那幾秒）。
 
+### 6.12 預覽模式：頂層 bot 的 vite dev server（issue #253，2026-09-19）
+
+> 使用者：「右半平面可以針對這個 parent bot 設定為 preview，目的是打開 vite dev server。」
+
+改 UI 的 bot 做完，人在同一個畫面就看得到結果，不必自己開終端跑 `cd web && npx vite`。實作在 `daemon/src/preview.rs`。
+
+- **誰能開**：只有頂層 bot（`parent_bot_id IS NULL` 且 `managed_by = 'user'`）；子 agent、team 成員 409 `not_top_level`。
+  user 自己 `default` session 匯入的 bot 409 `default_session`（daemon 不往使用者的 session 多開 pane）。
+  只給本機：iframe 連的是瀏覽器所在機器上的 port，遠端主機上的 vite 連不到，409 `remote_host`。
+  bot 沒在跑（沒有 running 的 run／pane）409 `bot_not_running`：pane 要切在它旁邊。
+- **偵測**：目錄取 `bots.cwd`，沒有就用專案路徑；依序找 `<dir>/vite.config.{ts,mts,js,mjs}`、`<dir>/web/vite.config.*`，
+  第一個存在的設定檔所在目錄就是 vite 的 cwd。都沒有 409 `no_vite_config`，body 的 `tried` 列出試過的八個路徑。
+  專案層的指令覆寫不在 v1。
+- **在哪跑**：`pane.split`（方向往下，只吃高度、不擠寬度）切在**該 bot 自己那顆 pane 旁邊**，也就是它自己的 tab
+  （開新 tab 會被 reconcile 串成鏈、長出重複 bot）。指令 `bunx vite --host <bind> --port <port> --strictPort`；
+  `<bind>` 看 daemon 的 `allow_lan`：開著 `0.0.0.0`，否則 `127.0.0.1`。
+- **port**：從 5180 起往上找 100 顆，跳過別的預覽佔著的（`starting`／`running` 的列）與當下有人在 listen 的；
+  5173 留給人手開。`failed`／`off` 的列不佔 port。
+- **狀態**（`bot_previews` 一顆 bot 一列；沒有列＝`off`）：
+
+  | 從 | 條件 | 到 |
+  |---|---|---|
+  | `starting` | port 開始 listen | `running` |
+  | `starting` | pane 已經不在 | `failed`（error 帶原因與 pane 最後 40 行） |
+  | `starting` | 啟動起 60 秒 port 還沒 listen | `failed`（同上） |
+  | `running` | pane 被關了 | `off`（使用者關的，不是錯） |
+  | `running` | pane 在、port 不再 listen | `failed`（vite 自己掛了） |
+
+  herdr 沒回答（`pane_alive` 問不到）當「沒變」，不當「不在」。`failed` 之後再 `POST` 就是重試：舊 pane 已收、port 重挑。
+- **誰在看**：`POST` 之後有背景 watcher 每秒看一次，離開 `starting` 就結束；`GET` 與開機（`reconcile_all`）各做一次同樣的
+  對帳（pane 還在不在＋port 有沒有在 listen）。`running` 之後沒有常駐輪詢，vite 半路掛掉要等下一次 `GET` 才會轉 `failed`。
+  對帳時 bot 已經沒有 active run（自己退了）預覽也一併收成 `off`。
+- **收掉**：`DELETE`、bot 被停止／重啟／刪除、§6.11 閒置收 bot（它們都走 `stop_locked`）一律先關預覽 pane 再動 agent 的 pane——
+  預覽的 pane 跟 agent 同一個 tab，先收它，agent 的 pane 關掉時那個 tab 才會是空的、才會被一起關。
+  收預覽是盡力而為，讀不到就記 log，不擋 bot 的停機。
+- **鎖**：預覽操作共用一把全域鎖，**不拿 bot 鎖**（停機、刪除是在 bot 鎖裡呼叫進來的，再拿會自己等自己）。
+- **測試**：行程與 port 查詢走 `PreviewEnv`，測試注入決定性的假貨，不碰真 herdr、真行程、真 port（#211）。
+
 ## 7. API
 
 完整契約在 `API.md`；這裡只記存取控制與 WS 語意。

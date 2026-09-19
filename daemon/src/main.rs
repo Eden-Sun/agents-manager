@@ -49,6 +49,7 @@ mod outbox;
 mod mission;
 mod models;
 mod pane_identity;
+mod preview;
 mod pane_probe;
 mod shim_path;
 mod shim_refresh;
@@ -344,6 +345,8 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     shim_refresh::refresh_at_startup(&app.data_dir);
     // #88: attachments whose save() died mid-write or mid-finalize before this restart.
     attach::reconcile_orphans(&app).await;
+    // 預覽（§6.12）：pane 還在不在、port 有沒有在 listen，對回 `bot_previews`。
+    preview::reconcile_all(&app).await;
     events::spawn_global(app.clone()).await;
 
     // The daemon never spawns the user's default session; watching it is best-effort.

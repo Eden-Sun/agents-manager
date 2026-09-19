@@ -115,6 +115,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/bots/{id}/fork", post(crate::fork::fork_bot))
         .route("/bots/{id}/promote", post(crate::promote::promote_bot))
         .route("/bots/{id}/stop", post(stop_bot))
+        .route("/bots/{id}/preview", get(preview_get).post(preview_start).delete(preview_stop))
         .route("/bots/{id}/interrupt", post(interrupt_bot))
         .route("/bots/{id}/login", post(login_bot))
         .route("/bots/{id}/pane/move-to-tab", post(move_bot_pane_to_tab))
@@ -516,6 +517,7 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
     let read_marks = crate::read_marks::marks(&app.db).await.map_err(any_err)?;
     // §6.11：AGM 因為閒置收起來的那些。一次讀完，免得每顆 bot 再問一次資料庫。
     let asleep = crate::supervisor::idle_sleep::all_asleep(app).await;
+    let previews = crate::preview::state_map(&app.db).await.map_err(any_err)?;
     let mut out = Vec::new();
     for p in projects {
         let mut bl = Vec::new();
@@ -550,6 +552,8 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
                 "run": run,
                 // §6.11：停著是因為 AGM 收起來省 RAM，不是壞掉也不是使用者關的；下次要用會自動
                 // 用 `--resume` 叫醒。`null` = 不是這種停。
+                // 預覽模式（§6.12）：`{status, port}`；沒開（或 off）是 `null`。
+                "preview": previews.get(&b.id),
                 "asleep": asleep.get(&b.id).map(|(at, mins)| json!({"since": at, "idle_minutes": mins})),
                 "queued_turn": queued_turn,
                 "lamp": lamp(bot_connected, run.as_ref()),
@@ -1396,6 +1400,16 @@ async fn patch_bot(
         });
     }
     Ok((StatusCode::OK, Json(out)).into_response())
+}
+
+async fn preview_get(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
+    Ok(Json(crate::preview::get(&app, &id).await?).into_response())
+}
+async fn preview_start(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
+    Ok(Json(crate::preview::start(&app, &id).await?).into_response())
+}
+async fn preview_stop(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
+    Ok(Json(crate::preview::stop(&app, &id).await?).into_response())
 }
 
 pub(crate) async fn delete_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
