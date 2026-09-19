@@ -210,13 +210,14 @@ config.toml 裡沒有的 id（child、已刪）忽略。成功推 `project_chang
 
 - `ok`：已送達，等 hook（或終端備援）。
 - `unknown`：RPC 逾時；該 Turn 仍 in_flight 時，**abandon / interrupt / stop 之前不能再送**（409）。Stop hook 完成時會收成 `ok`。UI 顯示「送出狀態不明」並提供放棄按鈕。
-- `failed`：agent 當下 blocked 或附件綁定失敗；Turn 直接 failed，並推 `message_added`（system）與 `turn_updated`。blocked 而 Turn 收不成 failed 時不回這個，回下面的 503。
+- `failed`：agent 當下 blocked 或附件綁定失敗；Turn 直接 failed，並推 `message_added`（system）與 `turn_updated`。Turn 收不成 failed 時不回這個，回下面的 503（`sent:false`，#158）。
 
 判斷送達看回應有沒有 `message_id`：409 的 body 也可能帶 `turn_id`。
 
 **送出之後結果寫不回 DB**（#149）→ `503 {"error":"delivery_state_uncommitted","run_id","turn_id","message_id","delivery","sent","retryable":true,"message","detail"}`：
-prompt 已經送出（或 herdr 已經拒收），只是那一筆回合的結果還沒寫成——**不是沒送**，不要換新的 `client_request_id` 重送。
-`delivery` 是看到的結果（`ok`／`unverified`／`unknown`／`failed`），`sent` 講字有沒有進去（`failed`＝herdr 拒收＝`false`，`unknown`＝`null`）。
+prompt 已經送出（或 herdr 已經拒收），或確定一個字都沒送（附件綁不上、撤不回來、插隊送出的鍵沒生效，#158），只是那一筆回合的結果還沒寫成——
+不要換新的 `client_request_id` 重送。
+`delivery` 是看到的結果（`ok`／`unverified`／`unknown`／`failed`），`sent` 講字有沒有進去（`failed`＝沒進去＝`false`，`unknown`＝`null`）。
 daemon 自己補（定時重試、下一則 prompt、回合 hook）；同一個 `client_request_id` 重問拿到寫好的結果，還沒寫成就再回這個 503（不回 `pending`）。
 補上之前 daemon 重啟的話，那一筆收成 `unknown`。見 SPEC §6「送出之後結果寫不回去」。
 

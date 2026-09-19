@@ -4,8 +4,8 @@ use super::*;
 
 /// Hand the oldest queued prompt to the agent, if it can take one now. Caller holds the bot lock
 /// (the one-in-flight / one-queued unique indexes make a lost race an error). Early returns leave
-/// the turn queued; after the claim, any give-up must `requeue_turn` — `in_flight` +
-/// `delivery='pending'` has no other way out.
+/// the turn queued; after the claim, any give-up must put it back or fail it — `in_flight` +
+/// `delivery='pending'` has no other way out. 那一句寫不進去就記成欠著（`owed_delivery`），回 `Err`（#158）。
 pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow::Result<()> {
     let conv = match db::conversation_id(&app.db, bot_id).await {
         Ok(conv) => conv,
@@ -95,8 +95,12 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
     }
     let text = turn.prompt_text.clone().unwrap_or_default();
     if text.trim().is_empty() {
-        // Nothing deliverable: drop it rather than leave the queue permanently blocked.
-        let _ = super::turn_controller::set_status(&app.db, &turn.id, "queued", "failed", "prompt 是空的，送不出去").await;
+        // Nothing deliverable: drop it rather than leave the queue permanently blocked. 還沒認領：收不成就留在佇列、
+        // 掛 timer 稍後再收，不當成丟掉了（#158）。
+        if let Err(e) = super::turn_controller::set_status(&app.db, &turn.id, "queued", "failed", "prompt 是空的，送不出去").await {
+            schedule_flush_retry(app, bot_id, std::time::Duration::from_secs(QUEUE_RETRY_BASE_SECS));
+            return Err(e.context("空的 prompt 收不成 failed：留在佇列，稍後再收"));
+        }
         emit_turn(app, &turn.id).await;
         return Ok(());
     }
@@ -126,8 +130,7 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
             LcError::Conflict(v) => v.get("reason").and_then(|r| r.as_str()).unwrap_or("conflict").to_string(),
             other => format!("{other:?}"),
         };
-        put_back_with_retry(app, &conv, &turn.id, bot_id, &format!("pane not ready for a prompt: {why}"), &wait_key).await;
-        return Ok(());
+        return put_back_or_owe(app, bot_id, &conv, &turn.id, &format!("pane not ready for a prompt: {why}"), &wait_key).await;
     }
 
     // From the claim to the RPC, giving up must requeue: `arm_stall` / `arm_progress` /
@@ -135,10 +138,7 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
     // later prompt until the run ended, invisibly (background task).
     let client = match client_for_run(app, &run).await {
         Ok(c) => c,
-        Err(e) => {
-            put_back_with_retry(app, &conv, &turn.id, bot_id, &format!("no herdr client: {e:?}"), &wait_key).await;
-            return Ok(());
-        }
+        Err(e) => return put_back_or_owe(app, bot_id, &conv, &turn.id, &format!("no herdr client: {e:?}"), &wait_key).await,
     };
     // A queued prompt waits a few put-backs for a codex rollout that is on its way, then goes out
     // with what is available. Counted only for that reason and only for this run and session.
@@ -162,24 +162,16 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
         // Nothing was typed. A temporary reason goes back on the queue with a timed retry — a busy
         // box produces no `working -> idle` edge to wake the flush (sol review round seven #2).
         Ok(Delivered::NotAttempted { reason, retry: true }) => {
-            match defer_queued_turn(app, &conv, &turn.id, reason, &wait_key).await {
-                Ok(Deferred::Requeued(delay)) => schedule_flush_retry(app, bot_id, delay),
-                Ok(Deferred::GaveUp) => tracing::warn!(bot = %bot_id, turn = %turn.id, reason, "queued prompt gave up after its retry limit"),
-                Ok(Deferred::Settled(now)) => tracing::info!(bot = %bot_id, turn = %turn.id, reason, ?now, "要放回佇列時已經被別的路徑收掉"),
-                Err(e) => tracing::error!(bot = %bot_id, turn = %turn.id, error = %e, "could not put a queued prompt back"),
-            }
-            emit_turn(app, &turn.id).await;
-            return Ok(());
+            return put_back_or_owe(app, bot_id, &conv, &turn.id, reason, &wait_key).await;
         }
         // A prompt that can never be sent as asked on this run: fail it visibly, in one transaction
-        // with its explanation, instead of retrying forever.
+        // with its explanation, instead of retrying forever. 收不成就記成欠著（#158），不回普通的成功。
         Ok(Delivered::NotAttempted { reason, retry: false }) => {
             let hint = format!("沒有送出（{reason}）：這一則在這個 bot 上沒有辦法照原樣送出，所以一個字都沒打。");
-            if let Err(e) = fail_queued_turn(app, &conv, &turn.id, &hint).await {
-                tracing::error!(bot = %bot_id, turn = %turn.id, error = %e, "could not fail an unsendable queued prompt");
-            }
-            emit_turn(app, &turn.id).await;
-            return Ok(());
+            return super::owed_delivery::closed(app, bot_id, &turn.id, "failed", &hint)
+                .await
+                .map(drop)
+                .map_err(|e| e.context("排隊的 prompt 一個字都沒打、送不出去，回合卻收不成 failed（記成欠著）"));
         }
         Ok(Delivered::Unproven(why)) => {
             tracing::warn!(bot = %bot_id, reason = why, "queued prompt delivery could not be proven");
@@ -189,8 +181,9 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
             let blocked = e.downcast_ref::<HerdrError>().map(|h| h.code == "agent_blocked").unwrap_or(false);
             if blocked {
                 // 收成 failed 寫不進去就記成欠著、之後補（#149），不留一筆永久 in_flight＋pending。
-                return super::owed_delivery::refused(app, bot_id, &turn.id, &format!("delivery failed: {e}"))
+                return super::owed_delivery::closed(app, bot_id, &turn.id, "failed", &format!("delivery failed: {e}"))
                     .await
+                    .map(drop)
                     .map_err(|e| e.context("herdr 拒收了排隊的 prompt，回合卻收不成 failed（記成欠著）"));
             }
             // Not requeued: the agent may have taken it, so a retry could deliver twice.
@@ -211,19 +204,25 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
 /// Undo a `queued -> in_flight` claim that never became a delivery, and arm a retry timer for it —
 /// the same backoff and retry limit as any other put-back (`defer_queued_turn`). Bot lock held and
 /// only for a turn this flush claimed, so `turns_one_queued` cannot be violated.
-async fn put_back_with_retry(app: &Arc<App>, conv: &str, turn_id: &str, bot_id: &str, reason: &str, wait_key: &str) {
-    match defer_queued_turn(app, conv, turn_id, reason, wait_key).await {
-        Ok(Deferred::Requeued(delay)) => {
+/// 寫不進去回 `Err`，不當成放回去了（#158）：flush 經 [`put_back_or_owe`] 記成欠著，由 `owed_delivery` 補。
+pub(super) async fn put_back(app: &Arc<App>, bot_id: &str, conv: &str, turn_id: &str, reason: &str, wait_key: &str) -> anyhow::Result<()> {
+    match defer_queued_turn(app, conv, turn_id, reason, wait_key).await? {
+        Deferred::Requeued(delay) => {
             tracing::warn!(bot = %bot_id, turn = %turn_id, %reason, retry_in_s = delay.as_secs(), "queued prompt put back on the queue");
             schedule_flush_retry(app, bot_id, delay);
         }
-        Ok(Deferred::GaveUp) => tracing::warn!(bot = %bot_id, turn = %turn_id, %reason, "queued prompt gave up after its retry limit"),
-        Ok(Deferred::Settled(now)) => {
-            tracing::info!(bot = %bot_id, turn = %turn_id, %reason, ?now, "要放回佇列時已經被別的路徑收掉：不重試")
-        }
-        Err(e) => tracing::error!(bot = %bot_id, turn = %turn_id, %reason, error = %e, "could not put a claimed prompt back on the queue"),
+        Deferred::GaveUp => tracing::warn!(bot = %bot_id, turn = %turn_id, %reason, "queued prompt gave up after its retry limit"),
+        Deferred::Settled(now) => tracing::info!(bot = %bot_id, turn = %turn_id, %reason, ?now, "要放回佇列時已經被別的路徑收掉：不重試"),
     }
-    emit_turn(app, turn_id).await;
+    Ok(())
+}
+
+/// 認領之後一個字都沒打：放回佇列；那一句寫不進去就記成欠著、之後補（`owed_delivery`），flush 回 `Err`——
+/// 不回普通的成功，那一筆也不會停在 in_flight＋pending 沒人收（#158）。
+async fn put_back_or_owe(app: &Arc<App>, bot_id: &str, conv: &str, turn_id: &str, reason: &str, wait_key: &str) -> anyhow::Result<()> {
+    super::owed_delivery::put_back(app, bot_id, conv, turn_id, reason, wait_key)
+        .await
+        .map_err(|e| e.context("認領了排隊的 prompt、一個字都沒打，卻放不回佇列（記成欠著）"))
 }
 
 /// Put-backs a queued prompt spends waiting for a codex rollout that has not been written yet.
@@ -417,15 +416,6 @@ pub(crate) async fn revoke_all_orphaned_queued_turns(app: &Arc<App>) -> Vec<Stri
         revoked.extend(revoke_orphaned_queued_turns(app, &bot, "它的 run 已經結束").await);
     }
     revoked
-}
-
-/// Fail a claimed turn together with the system message that explains it.
-async fn fail_queued_turn(app: &Arc<App>, conv: &str, turn_id: &str, hint: &str) -> anyhow::Result<()> {
-    let mut tx = app.db.begin().await?;
-    super::turn_controller::fail_on(&mut tx, turn_id, super::turn_controller::DeliveryOnFail::Failed, "這一則在這個 bot 上送不出去").await?;
-    insert_message_tx(&mut tx, conv, Some(turn_id), "system", hint, "system", false, None).await?;
-    tx.commit().await?;
-    Ok(())
 }
 
 /// One pending retry timer per bot: its generation (only the timer still registered fires) and when
@@ -1946,6 +1936,102 @@ mod flush_queue_tests {
             .await
             .unwrap();
         assert_eq!(hints, 1);
+    }
+
+    /// 之後讓放回佇列（寫 `flush_retries`）或收成 failed 的寫入失敗（SQLite 這一刻寫不進去）；認領那一句照常。
+    async fn lose(app: &Arc<App>, name: &str, what: &str) {
+        let on = if what == "failed" { "status ON turns WHEN NEW.status = 'failed'" } else { "flush_retries ON turns" };
+        sqlx::query(&format!("CREATE TRIGGER {name} BEFORE UPDATE OF {on} BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END"))
+            .execute(&app.db)
+            .await
+            .unwrap();
+    }
+
+    async fn heal(app: &Arc<App>, name: &str) {
+        sqlx::query(&format!("DROP TRIGGER {name}")).execute(&app.db).await.unwrap();
+    }
+
+    /// #158 驗收二：認領之後一個字都沒打就放棄（claude 停在登入選單、herdr client 拿不到），放回佇列那一句卻寫不進去——
+    /// 以前只記一行 error、flush 回 Ok，那一筆停在 in_flight＋pending：之後每一則都被擋，交辦看起來已經離開佇列，其實沒送。
+    /// 現在 flush 回錯誤、記成欠著；DB 好了補回佇列（照退避、算一次重試），擋住它的東西沒了就照常送，從頭到尾只送一次。
+    #[tokio::test]
+    async fn a_claim_whose_put_back_cannot_be_written_is_owed_not_left_in_flight() {
+        for (why, session) in [("pane not ready", "test"), ("no herdr client", "no-such-session")] {
+            let f = queued(session).await;
+            let app = f.env.app.clone();
+            if session == "test" {
+                f.env.herdr.set_screen("pane-1", "Select login method:\n❯ 1. Claude account with subscription\n  2. Anthropic Console account\n");
+            }
+            forget_queue_retry_timer(&f.bot_id);
+            lose(&app, "lost_put_back", "put_back").await;
+
+            assert!(flush_queued_locked(&app, &f.bot_id).await.is_err(), "{why}：放不回去，flush 不回普通的成功");
+            let t = turn(&app, &f.turn_id).await;
+            assert_eq!((t.status.as_str(), t.delivery.as_str(), t.flush_retries), ("in_flight", "pending", 0), "{why}：寫不進去就是還沒放回去");
+
+            heal(&app, "lost_put_back").await;
+            super::super::owed_delivery::settle_locked(&app, &f.bot_id).await.expect("DB 好了：補上");
+            let t = turn(&app, &f.turn_id).await;
+            assert_eq!((t.status.as_str(), t.run_id.as_deref(), t.flush_retries), ("queued", None, 1), "{why}：補回佇列，算一次重試");
+            assert!(t.next_flush_at.is_some() && queue_retry_timer_armed(&f.bot_id), "{why}：掛了下一次的 timer");
+            assert!(db::in_flight_turn(&app.db, &f.run_id).await.unwrap().is_none(), "{why}：不再擋住下一則");
+
+            // 擋住它的東西沒了、退避到了：照常送出，只送一次。
+            f.env.herdr.set_screen("pane-1", "");
+            f.env.herdr.set_agent("agent", "pane-1", true);
+            sqlx::query("UPDATE runs SET herdr_session = 'test' WHERE id = ?").bind(&f.run_id).execute(&app.db).await.unwrap();
+            sqlx::query("UPDATE turns SET next_flush_at = NULL WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+            flush_queued_locked(&app, &f.bot_id).await.unwrap();
+            assert_eq!(turn(&app, &f.turn_id).await.status, "in_flight", "{why}");
+            assert_eq!(f.env.herdr.calls_to("agent.prompt").len(), 1, "{why}：只送一次");
+        }
+    }
+
+    /// #158 驗收三：排隊的那一則在這個 bot 上永遠送不出去（太長、證明不了，`NotAttempted { retry: false }`），收成 failed
+    /// 那一句卻寫不進去——以前只記一行 error、flush 回 Ok，那一筆停在 in_flight＋pending。現在記成欠著、flush 回錯誤；
+    /// DB 好了收成 failed＋一則說明，一個字都沒打。
+    #[tokio::test]
+    async fn an_unsendable_queued_prompt_whose_failure_cannot_be_written_is_owed() {
+        let f = queued("test").await;
+        let app = f.env.app.clone();
+        let huge = "x".repeat(super::super::delivery::MAX_PROVABLE_CHARS + 1);
+        sqlx::query("UPDATE turns SET prompt_text = ? WHERE id = ?").bind(&huge).bind(&f.turn_id).execute(&app.db).await.unwrap();
+        lose(&app, "lost_close", "failed").await;
+
+        assert!(flush_queued_locked(&app, &f.bot_id).await.is_err(), "收不成 failed：flush 不回普通的成功");
+        let t = turn(&app, &f.turn_id).await;
+        assert_eq!((t.status.as_str(), t.delivery.as_str()), ("in_flight", "pending"));
+
+        heal(&app, "lost_close").await;
+        super::super::owed_delivery::settle_locked(&app, &f.bot_id).await.expect("DB 好了：補上");
+        let t = turn(&app, &f.turn_id).await;
+        assert_eq!((t.status.as_str(), t.delivery.as_str()), ("failed", "failed"), "不留永久 in_flight");
+        let notes: Vec<String> = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id = ? AND role = 'system'")
+            .bind(&f.turn_id)
+            .fetch_all(&app.db)
+            .await
+            .unwrap();
+        assert!(notes.len() == 1 && notes[0].contains("prompt_too_long_to_prove"), "{notes:?}");
+        assert!(!f.env.herdr.methods().iter().any(|m| m == "pane.send_text" || m == "agent.prompt"), "一個字都沒打");
+    }
+
+    /// #158（同一類，還沒認領的那一段）：空的 prompt 收成 failed 那一句寫不進去——以前 `let _ =` 吞掉、回 Ok、不掛 timer，
+    /// 那一筆佔著這個對話唯一的 queued 名額，直到有人剛好叫醒 flush。現在回錯誤、留在佇列、掛 timer；DB 好了就收掉。
+    #[tokio::test]
+    async fn an_empty_queued_prompt_that_cannot_be_dropped_stays_queued_and_is_retried() {
+        let f = queued("no-such-session").await;
+        let app = f.env.app.clone();
+        sqlx::query("UPDATE turns SET prompt_text = '   ' WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        forget_queue_retry_timer(&f.bot_id);
+        lose(&app, "lost_drop", "failed").await;
+
+        assert!(flush_queued_locked(&app, &f.bot_id).await.is_err(), "收不掉：不回普通的成功");
+        assert_eq!(turn(&app, &f.turn_id).await.status, "queued");
+        assert!(queue_retry_timer_armed(&f.bot_id), "掛了 timer，稍後再收");
+
+        heal(&app, "lost_drop").await;
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+        assert_eq!(turn(&app, &f.turn_id).await.status, "failed");
     }
 
     /// An empty queued prompt is dropped, not requeued ("always put it back" would loop forever).
