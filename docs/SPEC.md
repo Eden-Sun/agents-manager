@@ -1305,8 +1305,13 @@ listen port 只在本機算（pane 行程樹的 pid 對 `lsof -nP -iTCP -sTCP:LI
 
 #### `cargo` shim（issue 建議的 PATH wrapper；`cargo_shim.rs`，跟 `herdr_shim.rs` 同一種寫法）
 - 沒有 bot token 也沒有 UI token 檔可讀：直接不排程，印一行 stderr 說明，直接跑（issue 要求「明講的 bypass 路徑」）。
-- daemon 連不上（curl 失敗）、回應看不懂：一律不排程，直接跑——**shim 不能因為排程器出問題就讓建置卡死或失敗**，
-  跟 `herdr_shim.rs` 的哲學一樣：「a shim that aborts is worse than one that forwards」。
+- **排程器問不到（連不上、空回應、5xx／不是 JSON、身分被拒）時，受管的 bot 不會變成沒有名額的 cargo（issue #128 重開）**：daemon 重啟／升級／DB 出問題的
+  瞬間所有 bot 同時開編就繞過了 `max_concurrent`，而那正是最需要保護本機的時候。「受管」＝pane 有 `AM_BOT_ID`、hook token 與 `AM_PORT`（本機 bot）。
+  受管的 bot：每 3 秒重試，最多等 `AM_BUILD_SCHEDULER_WAIT_SECS`（預設 120 秒），之後 **fail closed，exit 75**（可重試），stderr 講明原因與怎麼明確繞過；
+  排程器回來了就照常排隊（名額滿了＝排程器有在回答，是另一條路：一直等到有名額）。`unauthorized`（bot 身分被拒）不會在幾秒內自己好，不等滿、馬上 exit 77。
+  沒有 bot 身分的**人工 host shell**維持明講的 bypass：問不到就直接跑、stderr 說一聲。bot 要繞過得**明講**：`AM_CARGO_BYPASS_SCHEDULER=1`（cargo 直接跑、不問排程器；
+  外部編譯照舊優先），不是連線錯誤自動取得的。同一類的另兩個入口一樣：受管的 bot 建不出暫存目錄（守衛沒地方放 pid，停不了 cargo；拿到的名額放回去）、
+  或這台機器沒有 curl，都 exit 75；人工 shell 才直接跑。遠端 bot（沒有 `AM_PORT`）不算受管：那台機器的編譯本來就不受這台 daemon 管（issue #153）。
 - **不猜 daemon 的位址（issue #153）**：埠只認 `AM_PORT`。沒有 `AM_PORT` 時，只有**沒有 bot 身分**的人工 host shell 用文件寫的預設 7788；
   有 bot 身分（`AM_BOT_ID`／`AM_HOOK_TOKEN`）卻沒有 `AM_PORT` 的 pane——**遠端主機**上的 bot 就是（遠端沒有 daemon、不開反向埠，§11.4，
   daemon 也不注入 `AM_PORT`）——一通 curl 都不打（127.0.0.1 在遠端是那台機器自己，可能是別顆 daemon），stderr 講明缺 `AM_PORT`，cargo 照跑：
@@ -1330,7 +1335,7 @@ listen port 只在本機算（pane 行程樹的 pid 對 `lsof -nP -iTCP -sTCP:LI
   - 「停」＝把前景的 cargo **整棵行程樹**（含 rustc）停掉：先 `SIGSTOP` 凍住並重拍快照直到不再長新的行程（cargo 在快照與送訊號之間
     還會生 rustc，父親一死就被 init 收養、追不到），再 `TERM`＋`CONT`，最多兩秒後補 `KILL`；只殺確定還是 shim 直接子行程的 pid（不殺被回收的 pid）。
     shim 退 **75**（可重試），stderr 講明原因，名額放掉（冪等）、暫存狀態目錄清掉；
-  - cargo 維持**前景**執行（背景會讓非互動 shell 忽略 SIGINT、換掉 stdin），pid 由 `exec` 包裝寫給守衛。建不出暫存目錄（沒地方放 pid 與失效標記）就不拿名額、放回去不排程直接跑；
+  - cargo 維持**前景**執行（背景會讓非互動 shell 忽略 SIGINT、換掉 stdin），pid 由 `exec` 包裝寫給守衛。建不出暫存目錄（沒地方放 pid 與失效標記）就不拿名額、放回去（受管的 bot 到此為止 exit 75，人工 shell 才不排程直接跑）；
   - 守衛只罩**本機**的 cargo（名額是本機的）；名額在 cargo 起來之前就失效，就不起它。
 - **shim 不留孤兒行程（issue #151）**：行程數是全機共用的資源（曾被塞到 2661／2666，其他 bot 的 `fork` 全失敗）。三件事：
   等名額的迴圈每輪確認呼叫端（`$PPID`）還在，不在了就自己印一行退出，不留永遠在等的孤兒；續約守衛的 `sleep` 放背景、用 `wait` 等，

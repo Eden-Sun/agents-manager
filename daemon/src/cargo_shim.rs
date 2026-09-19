@@ -125,6 +125,25 @@ am_build_auth_header() {
     return 1
 }
 
+# 受管的 bot pane：本機 bot（daemon 注入 `AM_BOT_ID`、hook token、`AM_PORT`）。這種 pane 的 cargo 不能因為排程器出問題就悄悄變成
+# 沒有名額的 cargo（issue #128：daemon 重啟／升級／DB 出問題的瞬間，所有 bot 同時開編就繞過了 `max_concurrent`，
+# 而那正是最需要保護本機的時候）。沒有 bot 身分的人工 host shell 才有「排程器出問題就直接跑」的隱式 bypass；bot 要繞過得明講
+# （`AM_CARGO_BYPASS_SCHEDULER=1`），不是由連線錯誤自動取得。遠端 bot pane（沒有 `AM_PORT`）不是：那台機器的編譯本來就不受這台 daemon 管。
+am_is_managed() {
+    [ -n "${AM_BOT_ID:-}" ] && [ -n "${AM_HOOK_TOKEN:-}" ] && [ -n "${AM_PORT:-}" ]
+}
+
+# 排程器用不了、而且這一輪不會自己好（沒有 curl、建不出暫存目錄）：受管的 bot 不跑（exit 75，可重試）；人工 shell 印一行後回 0，
+# 呼叫端接著 `exec` 真的 cargo。
+am_scheduler_unusable() {
+    if am_is_managed; then
+        printf 'agents-manager: %s；受管的 bot 不會在沒有名額的情況下跑 cargo（會突破 max_concurrent，issue #128）。要明確繞過就 AM_CARGO_BYPASS_SCHEDULER=1 再跑一次\n' "$1" >&2
+        exit 75
+    fi
+    printf 'agents-manager: %s，這次不排程，直接跑\n' "$1" >&2
+    return 0
+}
+
 # `sed` 從 JSON 回應挖一個欄位（herdr_shim.rs 同一招：不上 jq 依賴，冒號兩邊有沒有空白都認）。
 am_json_field() {
     printf '%s' "$2" | tr ',' '\n' | sed -n 's/.*"'"$1"'" *: *"\{0,1\}\([^",}]*\)"\{0,1\}.*/\1/p' | head -n 1
@@ -337,7 +356,7 @@ am_cargo() {
         printf 'agents-manager: 找不到真正的 cargo（把它的路徑放進 AM_REAL_CARGO）\n' >&2
         exit 127
     fi
-    if ! am_cargo_is_heavy "${1:-}" || ! command -v curl >/dev/null 2>&1; then
+    if ! am_cargo_is_heavy "${1:-}"; then
         exec "$_real" "$@"
     fi
     # 這條進程鏈上已經有人拿著名額（build script 或 xtask 再叫一次 cargo）：直接跑，不要再排一次。
@@ -383,7 +402,25 @@ am_cargo() {
         fi
     fi
 
+    # 明講的 bypass（issue #128）：使用者／agent 自己決定這次不經過排程器（排程器壞了又急著編）。是明確的選擇，不是連線錯誤自動取得的。
+    if [ -n "${AM_CARGO_BYPASS_SCHEDULER:-}" ]; then
+        printf 'agents-manager: AM_CARGO_BYPASS_SCHEDULER 有設，這次 cargo 明確不經過排程器，直接跑\n' >&2
+        exec "$_real" "$@"
+    fi
+    if ! command -v curl >/dev/null 2>&1; then
+        am_scheduler_unusable "這台機器沒有 curl，問不了 build scheduler"
+        exec "$_real" "$@"
+    fi
+
+    # 問不到排程器（連不上、回應看不懂、身分被拒）時：受管的 bot 每 3 秒重試、最多等 `AM_BUILD_SCHEDULER_WAIT_SECS`（預設 120 秒，
+    # daemon 重啟／升級夠了），之後 fail closed（exit 75）——**不自動變成沒有名額的 cargo**（issue #128）；排程器回來了就照常排隊。
+    # 人工 shell（沒有 bot 身分）維持明講的 bypass：直接跑。名額滿了（granted:false）是排程器有在回答，另一條路：一直等到有名額。
+    _wait=${AM_BUILD_SCHEDULER_WAIT_SECS:-120}
+    case "$_wait" in *[!0-9]* | '') _wait=120 ;; esac
+    _down_max=$((_wait / 3))
+    [ "$_down_max" -ge 1 ] || _down_max=1
     _attempt=0
+    _down=0
     while :; do
         _acq_at=$(am_epoch)
         _resp=$(curl -s -m 5 -X POST "${_url}/acquire" \
@@ -392,32 +429,55 @@ am_cargo() {
             --data-urlencode "bot_id=${_bot_id}" \
             --data-urlencode "purpose=${_purpose}" 2>/dev/null)
         _rc=$?
+        _bad=""
+        _fatal=""
         if [ "$_rc" -ne 0 ] || [ -z "$_resp" ]; then
-            printf 'agents-manager: build scheduler 連不上（daemon 沒開？），這次不排程，直接跑\n' >&2
+            _bad="連不上（daemon 沒開？curl 結束碼 ${_rc}）"
+        else
+            case "$_resp" in
+                *'"granted":true'*) break ;;
+                *'"granted":false'*)
+                    _attempt=$((_attempt + 1))
+                    _down=0
+                    if [ "$_attempt" = 1 ]; then
+                        printf 'agents-manager: 全機的 cargo 名額滿了，等一個空出來（waiting_for_build_slot）……\n' >&2
+                    fi
+                    # 呼叫端（叫我們的 shell／agent）已經不在了：沒有人在等這次建置，不要留一個永遠在等名額的孤兒。
+                    if ! kill -0 "$_parent" 2>/dev/null; then
+                        printf 'agents-manager: 呼叫端已經結束，不再等 cargo 名額\n' >&2
+                        exit 1
+                    fi
+                    _retry=$(am_json_field retry_after_secs "$_resp")
+                    case "$_retry" in *[!0-9]* | '') _retry=5 ;; esac
+                    sleep "$_retry"
+                    continue
+                    ;;
+                # 身分被拒不會在幾秒內自己好：不必等滿再說。
+                *'"error":"unauthorized"'*)
+                    _bad="不認得這顆 bot 的身分（unauthorized）"
+                    _fatal=1
+                    ;;
+                *) _bad="回應看不懂：$(printf '%s' "$_resp" | cut -c1-200)" ;;
+            esac
+        fi
+        if ! am_is_managed; then
+            printf 'agents-manager: build scheduler %s，這次不排程，直接跑（沒有 bot 身分的人工 shell）\n' "$_bad" >&2
             exec "$_real" "$@"
         fi
-        case "$_resp" in
-            *'"granted":true'*) break ;;
-            *'"granted":false'*)
-                _attempt=$((_attempt + 1))
-                if [ "$_attempt" = 1 ]; then
-                    printf 'agents-manager: 全機的 cargo 名額滿了，等一個空出來（waiting_for_build_slot）……\n' >&2
-                fi
-                # 呼叫端（叫我們的 shell／agent）已經不在了：沒有人在等這次建置，不要留一個永遠在等名額的孤兒。
-                if ! kill -0 "$_parent" 2>/dev/null; then
-                    printf 'agents-manager: 呼叫端已經結束，不再等 cargo 名額\n' >&2
-                    exit 1
-                fi
-                _retry=$(am_json_field retry_after_secs "$_resp")
-                case "$_retry" in *[!0-9]* | '') _retry=5 ;; esac
-                sleep "$_retry"
-                continue
-                ;;
-            *)
-                printf 'agents-manager: build scheduler 回應看不懂，這次不排程，直接跑：%s\n' "$_resp" >&2
-                exec "$_real" "$@"
-                ;;
-        esac
+        _down=$((_down + 1))
+        if [ -n "$_fatal" ] || [ "$_down" -ge "$_down_max" ]; then
+            printf 'agents-manager: build scheduler %s；受管的 bot 不會在沒有名額的情況下跑 cargo（會突破 max_concurrent，issue #128）。稍後重試，或明確繞過：AM_CARGO_BYPASS_SCHEDULER=1\n' "$_bad" >&2
+            [ -z "$_fatal" ] || exit 77
+            exit 75
+        fi
+        if [ "$_down" = 1 ]; then
+            printf 'agents-manager: build scheduler %s；受管的 bot 不會在沒有名額時跑 cargo，每 3 秒重試、最多等 %s 秒……\n' "$_bad" "$_wait" >&2
+        fi
+        if ! kill -0 "$_parent" 2>/dev/null; then
+            printf 'agents-manager: 呼叫端已經結束，不再等 build scheduler\n' >&2
+            exit 1
+        fi
+        sleep 3
     done
 
     _token=$(am_json_field token "$_resp")
@@ -447,7 +507,7 @@ am_cargo() {
     _state=$(mktemp -d "${TMPDIR:-/tmp}/am-cargo-lease.$$.XXXXXX" 2>/dev/null)
     if [ -z "$_state" ] || [ ! -d "$_state" ]; then
         curl -s -m 5 -X POST "${_url}/release" --data-urlencode "holder=${_holder}" --data-urlencode "token=${_token}" >/dev/null 2>&1
-        printf 'agents-manager: 建不出暫存目錄，沒辦法在名額失效時停掉 cargo，這次不排程，直接跑\n' >&2
+        am_scheduler_unusable "建不出暫存目錄，沒辦法在名額失效時停掉 cargo"
         exec "$_real" "$@"
     fi
     # shim 自己的 process group：守衛在 shim 被 SIGKILL 之後靠它確認 cargo 還是自己的（`am_kill_tree`，issue #183）。
@@ -913,19 +973,151 @@ esac"#
         assert!(std::fs::read_to_string(&log).unwrap().contains("build"));
     }
 
-    /// daemon 連不上（curl 失敗）：不排程，直接跑，不是掛在那裡等。
+    /// issue #128（重開）：**受管的 bot**（`AM_BOT_ID`＋hook token＋`AM_PORT`）問不到排程器——連不上、回應是空的／不是 JSON／5xx——
+    /// 不能悄悄變成沒有名額的 cargo：daemon 重啟／升級／DB 出問題的瞬間，所有 bot 同時開編就繞過了 `max_concurrent`。
+    /// 有限次重試之後 fail closed（exit 75，可重試），cargo 一次都沒起來，stderr 講明怎麼明確繞過。每一種 shell 都驗（含 macOS 的 bash 3.2）。
     #[test]
-    fn an_unreachable_daemon_bypasses_instead_of_hanging() {
+    fn a_managed_bot_never_gets_an_unscheduled_cargo_when_the_scheduler_cannot_be_asked() {
+        // (label, 假 curl 的本體)：連不上、空回應、HTML、5xx 的 JSON、看不懂的 JSON。
+        let cases: [(&str, &str); 5] = [
+            ("連不上", "exit 7\n"),
+            ("空回應", "printf ''\n"),
+            ("HTML", "printf '<html>502 Bad Gateway</html>'\n"),
+            ("5xx", "printf '{\"error\":\"upstream: database is locked\"}'\n"),
+            ("看不懂", "printf '{\"ok\":true}'\n"),
+        ];
+        for sh in shells() {
+            for (label, curl) in cases {
+                let s = Sandbox::new();
+                s.install_fake_curl(curl);
+                let log = s.dir.join("cargo.log");
+                let mut env = lease_env(&s);
+                env.push(("AM_BUILD_SCHEDULER_WAIT_SECS", "1".into())); // 不必真的等 120 秒
+                env.push(("AM_TEST_FAKE_CARGO_LOG", log.display().to_string()));
+                let (_, err, rc) = s.run_in(Some(sh), &as_refs(&env), &["test", "-p", "agents-managerd"]);
+                let why = format!("{sh} {label}: {err}");
+                assert_eq!(rc, 75, "問不到排程器：受管的 bot 退 75（可重試），不是跑起來：{why}");
+                assert!(!log.exists(), "真的 cargo 不能被叫起來（沒有名額就是突破 max_concurrent）：{why}");
+                assert!(err.contains("受管的 bot 不會在沒有名額"), "要講明原因：{why}");
+                assert!(err.contains("AM_CARGO_BYPASS_SCHEDULER"), "要講明怎麼明確繞過：{why}");
+            }
+        }
+    }
+
+    /// 暫時的：排程器前兩輪連不上、之後回來了——受管的 bot 每 3 秒重試，拿到名額才跑（不是先跑再說）。
+    #[test]
+    fn a_managed_bot_retries_until_the_scheduler_is_back_and_only_then_runs() {
+        for sh in shells() {
+            let s = Sandbox::new();
+            let d = s.dir.display();
+            s.install_fake_curl(&format!(
+                "echo \"$*\" >> '{d}/curl.log'\ncase \"$*\" in\n  *acquire*)\n    n=$(cat '{d}/n' 2>/dev/null || echo 0); n=$((n + 1)); echo $n > '{d}/n'\n    if [ \"$n\" -le 1 ]; then exit 7; fi\n    echo acquired >> '{d}/order.log'\n    printf '{{\"granted\":true,\"token\":\"tok-1\",\"cargo_jobs\":2,\"lease_ttl_secs\":30}}' ;;\n  *) printf '{{}}' ;;\nesac\n"
+            ));
+            let order = s.dir.join("order.log");
+            let mut env = lease_env(&s);
+            env.push(("AM_BUILD_SCHEDULER_WAIT_SECS", "30".into()));
+            env.push(("AM_TEST_FAKE_CARGO_LOG", order.display().to_string()));
+            let (_, err, rc) = s.run_in(Some(sh), &as_refs(&env), &["check", "-p", "agents-managerd"]);
+            let why = format!("{sh}: {err}");
+            assert_eq!(rc, 0, "{why}");
+            assert!(err.contains("每 3 秒重試"), "要講在重試：{why}");
+            let lines: Vec<String> = std::fs::read_to_string(&order).unwrap().lines().map(str::to_string).collect();
+            let pos = |w: &str| lines.iter().position(|l| l == w).unwrap_or_else(|| panic!("{why}: 順序紀錄裡沒有 {w}：{lines:?}"));
+            assert!(pos("acquired") < pos("CARGO_BUILD_JOBS=2"), "拿到名額才起 cargo：{why} {lines:?}");
+        }
+    }
+
+    /// 排程器回 `unauthorized`（bot 身分被拒）不會在幾秒內自己好：不等滿重試，馬上 fail closed（77），不是把認證失敗變成 bypass。
+    #[test]
+    fn a_rejected_bot_identity_stops_at_once_instead_of_waiting_or_bypassing() {
         let s = Sandbox::new();
-        s.install_fake_curl("exit 7\n"); // curl 的「連不上」退出碼
+        s.install_fake_curl("printf '{\"error\":\"unauthorized\",\"message\":\"need a matching X-AM-Bot-Token+bot_id, or X-AM-Token\"}'\n");
         let log = s.dir.join("cargo.log");
-        let (_, err, rc) = s.run(
-            &[("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_PORT", "1"), ("AM_TEST_FAKE_CARGO_LOG", log.to_str().unwrap())],
-            &["test", "-p", "agents-managerd"],
-        );
+        let mut env = lease_env(&s);
+        env.push(("AM_BUILD_SCHEDULER_WAIT_SECS", "120".into()));
+        env.push(("AM_TEST_FAKE_CARGO_LOG", log.display().to_string()));
+        let t0 = std::time::Instant::now();
+        let (_, err, rc) = s.run(&as_refs(&env), &["build"]);
+        assert_eq!(rc, 77, "{err}");
+        assert!(t0.elapsed() < std::time::Duration::from_secs(10), "身分被拒不該等重試：{:?}", t0.elapsed());
+        assert!(!log.exists(), "{err}");
+        assert!(err.contains("unauthorized"), "{err}");
+    }
+
+    /// 人工 host shell（沒有 bot 身分）維持**明講的** bypass：排程器問不到就直接跑，stderr 說一聲。
+    #[test]
+    fn a_manual_shell_keeps_the_announced_bypass_when_the_scheduler_is_down() {
+        let s = Sandbox::new();
+        s.install_fake_curl("exit 7\n");
+        let home = s.dir.join("fake-home/.config/agents-manager");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("ui-token"), "test-token").unwrap();
+        let log = s.dir.join("cargo.log");
+        let (_, err, rc) = s.run(&[("AM_TEST_FAKE_CARGO_LOG", log.to_str().unwrap())], &["test", "-p", "agents-managerd"]);
         assert_eq!(rc, 0, "{err}");
-        assert!(err.contains("連不上"), "{err}");
+        assert!(err.contains("連不上") && err.contains("直接跑"), "{err}");
         assert!(std::fs::read_to_string(&log).unwrap().contains("agents-managerd"));
+    }
+
+    /// bot 要繞過排程器得**明講**（`AM_CARGO_BYPASS_SCHEDULER=1`），不是連線錯誤自動取得的：明講的話 cargo 直接跑、一通 curl 都不叫。
+    #[test]
+    fn a_bot_can_bypass_the_scheduler_only_by_saying_so() {
+        let s = Sandbox::new();
+        s.install_fake_curl(&format!("echo \"$*\" >> '{}/curl.log'\nexit 7\n", s.dir.display()));
+        let log = s.dir.join("cargo.log");
+        let mut env = lease_env(&s);
+        env.push(("AM_CARGO_BYPASS_SCHEDULER", "1".into()));
+        env.push(("AM_TEST_FAKE_CARGO_LOG", log.display().to_string()));
+        let (_, err, rc) = s.run(&as_refs(&env), &["build"]);
+        assert_eq!(rc, 0, "{err}");
+        assert!(err.contains("AM_CARGO_BYPASS_SCHEDULER"), "要講這次是明確繞過：{err}");
+        assert!(std::fs::read_to_string(&log).unwrap().contains("build"), "cargo 照跑");
+        assert!(!s.dir.join("curl.log").exists(), "明確繞過就不問排程器");
+    }
+
+    /// 同一類的另兩個入口：受管的 bot 建不出暫存目錄（沒地方放 pid 與失效標記，守衛停不了 cargo）、或這台機器沒有 curl——
+    /// 也是「排程器用不了」，一樣 fail closed（拿到的名額要放回去）；人工 shell 才直接跑。
+    #[test]
+    fn a_managed_bot_that_cannot_hold_or_ask_for_a_slot_is_stopped_too() {
+        // 建不出暫存目錄：TMPDIR 指到不存在的地方；排程器本身是好的（granted），所以名額要放回去。
+        let s = Sandbox::new();
+        let d = s.dir.display();
+        s.install_fake_curl(&format!(
+            "echo \"$*\" >> '{d}/curl.log'\ncase \"$*\" in\n  *acquire*) printf '{{\"granted\":true,\"token\":\"tok-1\",\"cargo_jobs\":2,\"lease_ttl_secs\":30}}' ;;\n  *) printf '{{}}' ;;\nesac\n"
+        ));
+        let log = s.dir.join("cargo.log");
+        let mut env = lease_env(&s);
+        env.retain(|(k, _)| *k != "TMPDIR");
+        env.push(("TMPDIR", s.dir.join("no/such/dir").display().to_string()));
+        env.push(("AM_TEST_FAKE_CARGO_LOG", log.display().to_string()));
+        let (_, err, rc) = s.run(&as_refs(&env), &["build"]);
+        assert_eq!(rc, 75, "{err}");
+        assert!(!log.exists(), "cargo 不能在沒有守衛的情況下跑：{err}");
+        assert!(std::fs::read_to_string(s.dir.join("curl.log")).unwrap().contains("/release"), "拿到的名額要放回去");
+
+        // 沒有 curl：PATH 只放 shim 需要的那幾個工具（不含 curl）。
+        let s = Sandbox::new();
+        let tools = s.dir.join("tools");
+        std::fs::create_dir_all(&tools).unwrap();
+        for t in ["head", "grep", "tr", "dirname", "cut", "cat", "sed", "awk", "ps", "rm", "mktemp", "sleep", "env", "sh", "date", "find", "wc", "uname", "printf", "kill", "tail"] {
+            for base in ["/usr/bin", "/bin"] {
+                let src = std::path::Path::new(base).join(t);
+                if src.exists() {
+                    let _ = std::os::unix::fs::symlink(&src, tools.join(t));
+                    break;
+                }
+            }
+        }
+        let log = s.dir.join("cargo.log");
+        let mut cmd = s.command(&format!("{}:{}:{}", s.dir.join("bin").display(), s.dir.join("real").display(), tools.display()));
+        cmd.arg("build").env("AM_TEST_FAKE_CARGO_LOG", &log);
+        for (k, v) in &lease_env(&s) {
+            cmd.env(k, v);
+        }
+        let (_, err, rc) = s.run_group(cmd, None);
+        assert_eq!(rc, 75, "{err}");
+        assert!(err.contains("沒有 curl"), "{err}");
+        assert!(!log.exists(), "{err}");
     }
 
     /// issue #153：遠端主機上的 bot pane 沒有 `AM_PORT`（遠端沒有 daemon，也不開反向埠，SPEC §11.4；daemon 不注入），
@@ -1130,7 +1322,12 @@ esac
 
     /// 真的 router（跟 daemon 同一份），回傳它的 port 與 server 的 handle。
     fn serve_router(app: std::sync::Arc<crate::state::App>) -> (u16, tokio::task::JoinHandle<()>) {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        serve_router_on(app, 0)
+    }
+
+    /// 同上，指定埠（0＝隨便一個）。
+    fn serve_router_on(app: std::sync::Arc<crate::state::App>, port: u16) -> (u16, tokio::task::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
         let port = listener.local_addr().unwrap().port();
         listener.set_nonblocking(true).unwrap();
         let router = crate::api::router(app);
@@ -1251,6 +1448,58 @@ esac
         let peaks: Vec<u32> = std::fs::read_to_string(s.dir.join("peak.log")).unwrap().lines().filter_map(|l| l.trim().parse().ok()).collect();
         assert_eq!(peaks.len(), 4, "四個都要跑完：{peaks:?}");
         assert_eq!(peaks.iter().max(), Some(&2), "本機同時在跑的編譯要剛好壓在 2（不是 1＝排太嚴、也不是 3+＝名額沒管到）：{peaks:?}");
+    }
+
+    /// issue #128（重開）的驗收：`max_concurrent=1`，排程器整個沒開（沒有人在聽那個埠），同時起兩顆**受管的** bot 的 cargo——
+    /// 撐過整段 outage，任何時刻都不能有 cargo 在跑（沒有名額）；排程器回來之後照常排隊，兩顆各自跑完、同時在跑的最多 1 顆。
+    /// **真的** router（同 daemon 一份）＋**真的** curl＋**真的** shim；bot 身分是真的資料列（router 用 hook token 認證）。
+    /// 以前 curl 連不上就 `exec` 真的 cargo：兩顆一起編。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_scheduler_that_is_down_never_lets_two_managed_cargos_compile_and_the_queue_resumes() {
+        let env = crate::testing::env().await;
+        env.app
+            .cfg
+            .update(|c| {
+                c.build.max_concurrent = 1;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let bot_id = crate::db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, created_at)
+             VALUES (?,?,?,'claude','[]',0,1,'tok-128',?)",
+        )
+        .bind(&bot_id)
+        .bind(&env.project_id)
+        .bind(format!("bot-{bot_id}"))
+        .bind(crate::db::now())
+        .execute(&env.app.db)
+        .await
+        .unwrap();
+        // 先佔一個埠再放掉：這段時間沒有人在聽，連線被拒（curl 7）。
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+
+        let s = Sandbox::new();
+        s.install_counting_cargo();
+        let extra: Vec<(&str, String)> = vec![("AM_BOT_ID", bot_id.clone()), ("AM_HOOK_TOKEN", "tok-128".into()), ("AM_BUILD_SCHEDULER_WAIT_SECS", "90".into())];
+        let shims = start_shims(&s, port, 2, &extra);
+
+        // outage 期間（兩顆都至少重試過一輪）：沒有任何 cargo 起來。
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        assert!(!s.dir.join("peak.log").exists(), "排程器沒開、沒有名額：不能有 cargo 在跑：{:?}", std::fs::read_to_string(s.dir.join("peak.log")));
+
+        // 排程器回來：照常排隊，一次一顆。
+        let (_, server) = serve_router_on(env.app.clone(), port);
+        let results = finish_shims(&s, shims).await;
+        server.abort();
+        for (rc, err) in &results {
+            assert_eq!(*rc, 0, "{err}");
+            assert!(err.contains("受管的 bot 不會在沒有名額時跑 cargo"), "outage 期間要講在等：{err}");
+        }
+        let peaks: Vec<u32> = std::fs::read_to_string(s.dir.join("peak.log")).unwrap().lines().filter_map(|l| l.trim().parse().ok()).collect();
+        assert_eq!(peaks.len(), 2, "兩顆都要跑完：{peaks:?}");
+        assert_eq!(peaks.iter().max(), Some(&1), "同時在跑的最多 1 顆（max_concurrent=1）：{peaks:?}");
     }
 
     /// 這台機器上有的 shell（沒有的略過）。macOS 的 `/bin/sh`／`/bin/bash` 是 3.2——腳本改動要在那個版本也驗。
