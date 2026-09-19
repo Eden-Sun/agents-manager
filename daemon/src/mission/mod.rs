@@ -26,11 +26,14 @@ pub const CLAUDE_ORDER: [&str; 3] = ["cc2", "cc1", "cc0"];
 /// `use`，AGM 照著開 bot 才被 `identity is not known on this host` 409 擋下
 /// （review3 c1「沒把握」清單）。查不到任何同 kind 的身分時（偵測還沒跑完、或這台讀不到 alias）
 /// 維持原本的三個：不知道不等於沒有。
-pub async fn candidates(app: &Arc<App>, host: &str, kind: &str) -> Vec<(String, bool, Option<crate::quota::Quota>)> {
-    let disabled = store::disabled_identities(&app.db, host, kind).await.unwrap_or_default();
+///
+/// 使用者停用的清單讀不到就回 `Err`（issue #160）：以前 `unwrap_or_default()` 當成「沒有停用」，被停用的身分又成了候選。
+/// 這是會改變派工身分的政策，讀不到＝不知道，呼叫端要停下來下一次再判，不是照「都可用」挑。
+pub async fn candidates(app: &Arc<App>, host: &str, kind: &str) -> anyhow::Result<Vec<(String, bool, Option<crate::quota::Quota>)>> {
+    let disabled = store::disabled_identities(&app.db, host, kind).await?;
     if kind != "claude" {
         let quotas = app.quotas.lock().await;
-        return vec![(String::new(), false, quotas.get(&crate::quota::quota_key(host, kind)).cloned())];
+        return Ok(vec![(String::new(), false, quotas.get(&crate::quota::quota_key(host, kind)).cloned())]);
     }
     let known: Vec<String> =
         crate::tools::identities_for_host(app, host).await.into_iter().filter(|i| i.kind == kind).map(|i| i.name).collect();
@@ -42,13 +45,13 @@ pub async fn candidates(app: &Arc<App>, host: &str, kind: &str) -> Vec<(String, 
         bases.push((name, crate::quota::quota_base_for_host(app, host, "claude", Some(name)).await));
     }
     let quotas = app.quotas.lock().await;
-    bases
+    Ok(bases
         .into_iter()
         .map(|(name, base)| {
             let q = quotas.get(&crate::quota::quota_key(host, &base)).cloned();
             (name.to_string(), disabled.iter().any(|d| d == name) || missing_here(name), q)
         })
-        .collect()
+        .collect())
 }
 
 #[cfg(test)]
@@ -67,7 +70,7 @@ mod tests {
         let usable = |rows: &[(String, bool, Option<crate::quota::Quota>)]| {
             rows.iter().filter(|(_, skip, _)| !skip).map(|(n, _, _)| n.clone()).collect::<Vec<_>>()
         };
-        assert_eq!(usable(&candidates(&app, crate::config::LOCAL_HOST, "claude").await), CLAUDE_ORDER.to_vec(), "偵測前照舊");
+        assert_eq!(usable(&candidates(&app, crate::config::LOCAL_HOST, "claude").await.unwrap()), CLAUDE_ORDER.to_vec(), "偵測前照舊");
 
         // 偵測過：這台只有 cc1 與 cc0（外加一個 codex 的同名身分，不算）。
         app.tools.lock().await.insert(
@@ -79,10 +82,10 @@ mod tests {
                 checked_at: crate::db::now(),
             },
         );
-        assert_eq!(usable(&candidates(&app, crate::config::LOCAL_HOST, "claude").await), vec!["cc1", "cc0"]);
+        assert_eq!(usable(&candidates(&app, crate::config::LOCAL_HOST, "claude").await.unwrap()), vec!["cc1", "cc0"]);
 
         // 使用者停用的照舊也不挑。
         store::set_identity_disabled(&app.db, crate::config::LOCAL_HOST, "claude", "cc1", true).await.unwrap();
-        assert_eq!(usable(&candidates(&app, crate::config::LOCAL_HOST, "claude").await), vec!["cc0"]);
+        assert_eq!(usable(&candidates(&app, crate::config::LOCAL_HOST, "claude").await.unwrap()), vec!["cc0"]);
     }
 }

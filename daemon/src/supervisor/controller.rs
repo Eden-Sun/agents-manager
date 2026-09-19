@@ -367,19 +367,7 @@ async fn settle(
     result: Option<&str>,
     error: Option<&str>,
 ) -> bool {
-    let ok = turn_status == "completed" || turn_status == "completed_fallback";
-    let kind = if ok { "assignment_completed" } else { "assignment_failed" };
-    let payload = json!({
-        "bot_id": a.target_bot_id,
-        "turn_status": turn_status,
-        // `completed_fallback` means the reply was scraped off the terminal, not reported by a
-        // hook. The manager is told, because "it finished" and "we saw all of it" differ.
-        "evidence_complete": evidence_complete,
-        "result": result,
-        "error": error,
-        // Said out loud in the payload so a digest cannot read as an acceptance.
-        "needs_review": true,
-    });
+    let (kind, payload) = settle_event(a, turn_status, evidence_complete, result, error);
     match store::settle_and_notify(
         &app.db,
         &a.id,
@@ -404,6 +392,24 @@ async fn settle(
             false
         }
     }
+}
+
+/// [`settle`] 推給驗收者的那一則：種類與內容。
+fn settle_event(a: &store::Assignment, turn_status: &str, evidence_complete: bool, result: Option<&str>, error: Option<&str>) -> (&'static str, serde_json::Value) {
+    let ok = turn_status == "completed" || turn_status == "completed_fallback";
+    let kind = if ok { "assignment_completed" } else { "assignment_failed" };
+    let payload = json!({
+        "bot_id": a.target_bot_id,
+        "turn_status": turn_status,
+        // `completed_fallback` means the reply was scraped off the terminal, not reported by a
+        // hook. The manager is told, because "it finished" and "we saw all of it" differ.
+        "evidence_complete": evidence_complete,
+        "result": result,
+        "error": error,
+        // Said out loud in the payload so a digest cannot read as an acceptance.
+        "needs_review": true,
+    });
+    (kind, payload)
 }
 
 /// 撞到上限時要做什麼——抽成純函式，好讓「重送幾次之後放棄」這條規則能被測到。
@@ -460,34 +466,62 @@ fn quota_action(retries: i64, until: Option<&str>) -> QuotaAction {
     }
 }
 
-/// 群組任務的交辦撞到額度（`docs/goals/agm-missions.md` D4–D6）。回傳 `true` = 已經處理掉，
-/// 不要再進 `quota_blocked`。
+/// [`mission_quota`] 的結果（issue #160：政策讀不到是第三態，不能跟「不適用」或「允許」混成同一個值）。
+#[derive(Debug)]
+enum MissionQuota {
+    /// 照任務的規則處理掉了（換手、停下來問人，或交辦已經被別的路徑裁示掉）：不要再進 `quota_blocked`。
+    Handled,
+    /// 確定不歸任務的規則管（不是任務的交辦、任務已經關了、`pick` 說原地等）：走一般的 `quota_blocked`。
+    NotApplicable,
+    /// 判斷要讀的東西讀不到（任務、bot、主機、停用清單、執行者的身分）：什麼都不做，下一輪再判。
+    Unavailable(String),
+}
+
+/// 讀不到就是第三態，不退回允許／不適用的預設值。
+fn unavailable<T>(what: &str, r: anyhow::Result<T>) -> Result<T, MissionQuota> {
+    r.map_err(|e| MissionQuota::Unavailable(format!("{what}: {e:#}")))
+}
+
+/// 讀不到的政策多久之後再判一次（交辦還排著的話 `hold` 到那時）。
+const POLICY_RETRY_SECS: i64 = 10;
+
+/// 群組任務的交辦撞到額度（`docs/goals/agm-missions.md` D4–D6）。
 ///
 /// 規則在 `mission::pick`（純函式，有測試）：同一身分同一模型仍被挑中 → 照原本的等待；
 /// 挑到別的身分或要換模型 → 這件交辦進 `awaiting_review`（`turn_status=identity_switch`），
 /// 通知 AGM 用挑到的身分開 followup 接手——換身分不能續接 session（各身分的 CLAUDE_CONFIG_DIR
 /// 不同），所以是新 bot＋新 session，不是在原 bot 上重送；驗證者找不到 Fable → 停下任務問人。
-async fn mission_quota(app: &Arc<App>, a: &store::Assignment, mission_id: &str, hit: &crate::quota::LimitHit, where_seen: &str) -> bool {
-    use crate::mission::{pick, store as mstore};
-    let Ok(Some(m)) = mstore::get(&app.db, mission_id).await else { return false };
-    if m.completed_at.is_some() || m.cancelled_at.is_some() {
-        return false;
+///
+/// 會改變派工身分、reviewer 的獨立性、任務要不要停下來的讀取一律三態（issue #160）：以前任務／bot 讀錯回「不適用」
+/// （退回一般等待），主機讀錯退回 `local`（遠端任務用本機的身分與額度），停用清單讀錯當「沒有停用」，執行者的身分讀錯
+/// 就拿掉 reviewer 的排除條件——「不知道政策」被當成政策允許。現在讀不到就 [`MissionQuota::Unavailable`]。
+async fn mission_quota(app: &Arc<App>, a: &store::Assignment, mission_id: &str, hit: &crate::quota::LimitHit, where_seen: &str) -> MissionQuota {
+    match mission_quota_inner(app, a, mission_id, hit, where_seen).await {
+        Ok(outcome) | Err(outcome) => outcome,
     }
-    let Some(role) = a.mission_role.as_deref().and_then(pick::Role::parse) else { return false };
-    let Ok(Some(bot)) = crate::db::bot(&app.db, &a.target_bot_id).await else { return false };
-    let host = crate::db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| crate::config::LOCAL_HOST.to_string());
+}
+
+async fn mission_quota_inner(app: &Arc<App>, a: &store::Assignment, mission_id: &str, hit: &crate::quota::LimitHit, where_seen: &str) -> Result<MissionQuota, MissionQuota> {
+    use crate::mission::{pick, store as mstore};
+    let Some(m) = unavailable("mission", mstore::get(&app.db, mission_id).await)? else { return Ok(MissionQuota::NotApplicable) };
+    if m.completed_at.is_some() || m.cancelled_at.is_some() {
+        return Ok(MissionQuota::NotApplicable);
+    }
+    let Some(role) = a.mission_role.as_deref().and_then(pick::Role::parse) else { return Ok(MissionQuota::NotApplicable) };
+    let Some(bot) = unavailable("target bot", crate::db::bot(&app.db, &a.target_bot_id).await)? else { return Ok(MissionQuota::NotApplicable) };
+    let host = unavailable("bot host", crate::db::bot_host(&app.db, &bot.id).await)?;
     let kind = if role == pick::Role::Verifier { "claude" } else { m.executor_kind.as_str() };
-    let raw = crate::mission::candidates(app, &host, kind).await;
+    let raw = unavailable("identity candidates", crate::mission::candidates(app, &host, kind).await)?;
     let cands: Vec<pick::Candidate> = raw.iter().map(|(n, d, q)| pick::Candidate { name: n, disabled: *d, quota: q.as_ref() }).collect();
     let on_5h = if m.on_5h_limit == "switch" { pick::On5hLimit::Switch } else { pick::On5hLimit::Wait };
     // reviewer 換手時要排除執行者的身分（runbook 第 3 步的 `--exclude`）：以前固定傳 None，撞限換手挑出來的
     // 可能就是執行者自己那個帳號，「reviewer 必須是另一個身分」被悄悄打破（review3 c1 L11）。挑不到別的身分時
     // `pick` 回 `NoIndependentReviewer`，`quota_policy` 當成 Wait——原地等，不會退而求其次用同一個身分。
-    let exclude = if role == pick::Role::Reviewer { executor_identity(app, mission_id).await } else { None };
+    let exclude = if role == pick::Role::Reviewer { unavailable("executor identity", executor_identity(app, mission_id).await)? } else { None };
     let decision = pick::pick(role, &cands, on_5h, exclude.as_deref(), chrono::Utc::now());
     let current = bot.identity.clone().unwrap_or_default();
     match pick::quota_policy(&current, bot.model.as_deref(), &decision) {
-        pick::QuotaPolicy::Wait => false,
+        pick::QuotaPolicy::Wait => Ok(MissionQuota::NotApplicable),
         pick::QuotaPolicy::Switch { identity, model, reason } => {
             let to = match model.as_deref() {
                 Some(mdl) => format!("{identity}（{mdl}）"),
@@ -496,7 +530,7 @@ async fn mission_quota(app: &Arc<App>, a: &store::Assignment, mission_id: &str, 
             let why = format!("帳號撞到用量上限（{where_seen}）：{}｜依任務規則換手：{} → {}（{}）", hit.message.trim(), current, to, reason);
             // 交辦已經不在途中（讀完之後被裁示掉）：沒有換手可言，下面的通知與時間軸一句都不寫（issue #110）。
             if !settle(app, a, "identity_switch", true, None, Some(&why)).await {
-                return true;
+                return Ok(MissionQuota::Handled);
             }
             let payload = json!({
                 "mission_id": mission_id,
@@ -515,20 +549,50 @@ async fn mission_quota(app: &Arc<App>, a: &store::Assignment, mission_id: &str, 
             let _ = store::push_inbox(&app.db, &key, "mission_identity_switch", Some(&a.id), Some(&a.target_bot_id), a.turn_id.as_deref(), &payload).await;
             let _ = mstore::add_event(&app.db, mission_id, "note", &format!("{current} 撞到用量上限，換 {to} 接手"), Some(crate::agent_relay::DAEMON_SENDER), &payload).await;
             app.emit("mission_updated", json!({"mission_id": mission_id, "project_id": m.project_id, "status": m.status()})).await;
-            true
+            Ok(MissionQuota::Handled)
         }
         pick::QuotaPolicy::AskUser { reason } => {
-            // 同上：交辦已經被裁示掉，就不為它把任務停下來問人。
-            if !settle(app, a, "quota_exhausted", true, None, Some(&reason)).await {
-                return true;
-            }
-            if mstore::pause(&app.db, mission_id, "no_fable_for_verifier", Some(&reason)).await.unwrap_or(false) {
-                let _ = mstore::add_event(&app.db, mission_id, "paused", &format!("暫停：{reason}，等使用者決定"), Some(crate::agent_relay::DAEMON_SENDER), &json!({"reason": "no_fable_for_verifier", "assignment_id": a.id})).await;
-            }
-            app.emit("mission_updated", json!({"mission_id": mission_id, "project_id": m.project_id, "status": "paused"})).await;
-            true
+            // 交辦收成 `quota_exhausted` 與任務停下來問人**一起成立或一起不發生**（issue #160 留言）：以前先收交辦、再暫停
+            // 任務，暫停寫不進去時交辦已經離開執行態、任務卻沒停，還照樣發「paused」、回「處理掉了」，之後沒有任何東西會讓
+            // 它真的停下來。寫不進去就整批回滾、留著下一輪再來。
+            let already = m.paused_reason.as_deref() == Some("no_fable_for_verifier");
+            let paused = match settle_and_pause(app, a, mission_id, already, &reason).await {
+                // 交辦已經被裁示掉：不為它把任務停下來問人（issue #110）。
+                Ok(None) => return Ok(MissionQuota::Handled),
+                Ok(Some(paused)) => paused,
+                Err(e) => return Err(MissionQuota::Unavailable(format!("settle and pause: {e:#}"))),
+            };
+            app.emit("supervisor_changed", json!({"assignment_id": a.id, "status": "awaiting_review"})).await;
+            // 任務這中間被關掉了（`pause_on` 回 false）：沒有停下來，就不說它停了。
+            let status = if paused { "paused" } else { m.status() };
+            app.emit("mission_updated", json!({"mission_id": mission_id, "project_id": m.project_id, "status": status})).await;
+            Ok(MissionQuota::Handled)
         }
     }
+}
+
+/// 驗證者挑不到 Fable：交辦收成 `quota_exhausted`（推驗收通知）＋任務停成 `no_fable_for_verifier`＋`paused` 事件，**同一個交易**。
+/// `Ok(None)` ＝ 交辦已經不在途中（別的路徑先裁示了），什麼都沒寫；`Ok(Some(paused))` ＝ 寫下了，`paused=false` 是任務這中間已經
+/// 關掉（只收交辦）。任務本來就停在同一個原因（`already`）就不再記一則暫停。
+async fn settle_and_pause(app: &Arc<App>, a: &store::Assignment, mission_id: &str, already: bool, reason: &str) -> anyhow::Result<Option<bool>> {
+    let (kind, payload) = settle_event(a, "quota_exhausted", true, None, Some(reason));
+    let mut tx = app.db.begin().await?;
+    let s = store::settle_and_notify_on(&mut tx, &a.id, "quota_exhausted", true, None, Some(reason), &event_key(kind, a), kind, &payload).await?;
+    if !s.moved {
+        return Ok(None);
+    }
+    let paused = already
+        || crate::mission::store::pause_on(
+            &mut tx,
+            mission_id,
+            "no_fable_for_verifier",
+            Some(reason),
+            &format!("暫停：{reason}，等使用者決定"),
+            &json!({"reason": "no_fable_for_verifier", "assignment_id": a.id}),
+        )
+        .await?;
+    tx.commit().await?;
+    Ok(Some(paused))
 }
 
 /// 把一件被額度擋下的 assignment 停在 `quota_blocked`，並通知 AGM 一次。
@@ -539,8 +603,16 @@ async fn mission_quota(app: &Arc<App>, a: &store::Assignment, mission_id: &str, 
 async fn park_quota(app: &Arc<App>, a: &store::Assignment, hit: &crate::quota::LimitHit, where_seen: &str) {
     // 群組任務的交辦先照任務的規則判斷：要換手（換身分／換模型）或停下問人就不進 quota_blocked。
     if let Some(mission_id) = a.mission_id.as_deref() {
-        if mission_quota(app, a, mission_id, hit, where_seen).await {
-            return;
+        match mission_quota(app, a, mission_id, hit, where_seen).await {
+            MissionQuota::Handled => return,
+            MissionQuota::NotApplicable => {}
+            // 政策讀不到（issue #160）：不退回一般的等待、也不照「都可用」換手——什麼都不改，下一輪再判。
+            // 排著的交辦 `hold` 幾秒（不花重試）；回合已經結束的那種留在原狀態，對帳每一輪都會再走一次 `on_turn_done`。
+            MissionQuota::Unavailable(why) => {
+                tracing::warn!(assignment = %a.id, mission = mission_id, why, "mission quota policy unreadable; leaving the assignment as it is until it can be read");
+                let _ = store::hold(&app.db, &a.id, &iso_in(POLICY_RETRY_SECS), &format!("mission policy unreadable ({why}); retrying")).await;
+                return;
+            }
         }
     }
     if quota_action(a.quota_retries, hit.until.as_deref()) == QuotaAction::GiveUp {
@@ -638,11 +710,14 @@ pub async fn backfill_quota_limits_once(app: &Arc<App>, host: &str) {
 }
 
 /// 這個任務的執行者現在掛在哪個身分上（最新一筆 executor 交辦的 bot）。挑 reviewer 時要排除它。
-async fn executor_identity(app: &Arc<App>, mission_id: &str) -> Option<String> {
-    let rows = store::mission_assignments(&app.db, mission_id).await.ok()?;
-    let executor = rows.iter().rev().find(|x| x.mission_role.as_deref() == Some("executor"))?;
-    let bot = crate::db::bot(&app.db, &executor.target_bot_id).await.ok().flatten()?;
-    bot.identity.filter(|s| !s.trim().is_empty())
+///
+/// `Ok(None)` ＝ 確定沒有（沒派過執行者、那顆 bot 不在了、它沒設身分）；讀不到回 `Err`（issue #160）——以前 `.ok()?` 讓讀錯
+/// 變成 `None`，排除條件跟著消失，reviewer 可能被換到執行者自己的帳號上。
+async fn executor_identity(app: &Arc<App>, mission_id: &str) -> anyhow::Result<Option<String>> {
+    let rows = store::mission_assignments(&app.db, mission_id).await?;
+    let Some(executor) = rows.iter().rev().find(|x| x.mission_role.as_deref() == Some("executor")) else { return Ok(None) };
+    let Some(bot) = crate::db::bot(&app.db, &executor.target_bot_id).await? else { return Ok(None) };
+    Ok(bot.identity.filter(|s| !s.trim().is_empty()))
 }
 
 /// 這件交辦屬於一個**還開著、而且被使用者暫停**的任務。
@@ -650,12 +725,15 @@ async fn executor_identity(app: &Arc<App>, mission_id: &str) -> Option<String> {
 /// 只認使用者的暫停，跟派工的閘門（`api::user_pause_reason`）同一份判斷（issue #137）：daemon 自己設的那幾種
 /// （交付失敗、輪數用完、驗證者沒 Fable、要澄清）是「等 AGM 處理」，AGM 照 runbook 在那底下派的工作（例如交付失敗
 /// 之後的 rebase）撞額度之後一樣要重送——不然交付永遠不會成功、暫停也永遠解不開。
-async fn mission_paused(app: &Arc<App>, a: &store::Assignment) -> bool {
-    let Some(mission_id) = a.mission_id.as_deref() else { return false };
-    matches!(
-        crate::mission::store::get(&app.db, mission_id).await,
-        Ok(Some(m)) if super::api::user_pause_reason(m.paused_reason.as_deref()).is_some() && m.completed_at.is_none() && m.cancelled_at.is_none()
-    )
+///
+/// 讀不到任務回 `Err`（issue #160）：使用者的暫停是存在 DB 裡的意圖，DB 暫時讀不到不等於解除暫停——以前 `Err` 當成 `false`，
+/// 等額度的交辦就被放回 queued 重送。
+async fn mission_paused(app: &Arc<App>, a: &store::Assignment) -> anyhow::Result<bool> {
+    let Some(mission_id) = a.mission_id.as_deref() else { return Ok(false) };
+    Ok(matches!(
+        crate::mission::store::get(&app.db, mission_id).await?,
+        Some(m) if super::api::user_pause_reason(m.paused_reason.as_deref()).is_some() && m.completed_at.is_none() && m.cancelled_at.is_none()
+    ))
 }
 
 /// 這件交辦 park 時撞的是模型專屬的桶（`error` 裡記的 claude 橫幅，例如 Fable），而這顆 bot 現在跑的模型
@@ -680,9 +758,14 @@ async fn resume_quota_blocked(app: &Arc<App>) {
     for a in rows {
         // 使用者（或 AGM）把這件交辦的任務暫停了：暫停不收交辦，所以要在這裡擋——不然額度一回來，
         // 背景就把它重送出去，暫停等於沒按（取消那條路 mission 自己會把交辦收成 cancelled）。
-        // 任務解除暫停後，下一個 tick 照常重送。
-        if mission_paused(app, &a).await {
-            continue;
+        // 任務解除暫停後，下一個 tick 照常重送。讀不到任務也不重送：原地不動、不算次數，下一個 tick 再看（issue #160）。
+        match mission_paused(app, &a).await {
+            Ok(false) => {}
+            Ok(true) => continue,
+            Err(e) => {
+                tracing::warn!(assignment = %a.id, error = %format!("{e:#}"), "cannot tell whether the mission is paused by the user; not resending");
+                continue;
+            }
         }
         let Ok(Some(bot)) = crate::db::bot(&app.db, &a.target_bot_id).await else { continue };
         let still_hit = crate::quota::limit_hit_for_bot(app, &bot).await;
@@ -2459,7 +2542,7 @@ mod mission_quota_tests {
             !inbox_kinds(&app).await.contains(&"mission_identity_switch".to_string()),
             "不能換手到執行者自己的帳號"
         );
-        assert_eq!(executor_identity(&app, &mid).await.as_deref(), Some("cc2"));
+        assert_eq!(executor_identity(&app, &mid).await.unwrap().as_deref(), Some("cc2"));
     }
 
     /// 撞限換手的判斷用的是呼叫端手上那份交辦（`on_turn_done`／`dispatch` 讀的）；讀完到收成之間 AGM
@@ -2628,6 +2711,164 @@ mod mission_quota_tests {
         assert_eq!(all.len(), 2);
         let m = mstore::get(&app.db, &mid).await.unwrap().unwrap();
         assert_eq!(crate::mission::api::phase(&m, &all), "executing");
+    }
+
+    // ------------------------------------------------------------ issue #160：政策讀不到不是「政策允許」
+
+    /// 一件交辦現在的狀態、它的 quota_retries、inbox 裡有沒有換手通知。
+    async fn snapshot(app: &Arc<App>, id: &str) -> (String, i64, bool) {
+        let a = store::assignment(&app.db, id).await.unwrap().unwrap();
+        (a.status, a.quota_retries, inbox_kinds(app).await.contains(&"mission_identity_switch".to_string()))
+    }
+
+    /// 驗收 2＋5：reviewer 換手要排除執行者的身分，而**執行者那顆 bot 讀不到**時以前 `executor_identity` 回 `None`，
+    /// 排除條件消失——挑出來的就是執行者自己的帳號（cc2），「reviewer 必須是另一個身分」被悄悄打破。讀不到就不判、
+    /// 不換手、不收成任何東西；DB 恢復之後照原本的規則走一次（這裡沒有別的身分可挑：原地等）。
+    #[tokio::test]
+    async fn a_reviewer_is_not_moved_onto_the_executor_when_the_executor_cannot_be_read() {
+        let app = app().await;
+        bot(&app, "b-cc2", "cc2", Some("fable")).await;
+        bot(&app, "b-cc1", "cc1", Some("fable")).await;
+        let mid = mission(&app, "wait").await;
+        let _executor = assignment(&app, "b-cc2", &mid, "executor").await;
+        let reviewer = assignment(&app, "b-cc1", &mid, "reviewer").await;
+        {
+            let mut q = app.quotas.lock().await;
+            q.insert("claude:cc2".into(), quota(10.0, 10.0, 10.0)); // 額度很夠，但它是執行者
+            q.insert("claude:cc1".into(), quota(10.0, 100.0, 10.0));
+            q.insert("claude:cc0".into(), quota(10.0, 100.0, 10.0));
+        }
+        // 執行者那顆 bot 的列解不開（讀得到、decode 失敗）。
+        sqlx::query("UPDATE bots SET inject_hooks='corrupt' WHERE id='b-cc2'").execute(&app.db).await.unwrap();
+        park_quota(&app, &reviewer, &hit(), "turn").await;
+        assert_eq!(snapshot(&app, &reviewer.id).await, ("queued".into(), 0, false), "讀不到執行者的身分：不換手、不收成，留著下一輪再判");
+
+        sqlx::query("UPDATE bots SET inject_hooks=1 WHERE id='b-cc2'").execute(&app.db).await.unwrap();
+        park_quota(&app, &reviewer, &hit(), "turn").await;
+        assert_eq!(snapshot(&app, &reviewer.id).await, ("quota_blocked".into(), 0, false), "讀得到了：沒有別的身分可挑，原地等");
+    }
+
+    /// 驗收 3＋5：使用者停用的身分讀不到（`identity_prefs` 讀錯）時以前當成「沒有停用」，被停用的 cc1 又被挑去接手。
+    /// controller 的換手與 API 的 `pick` 都不能拿它當候選；恢復之後換到 cc0，只換一次。
+    #[tokio::test]
+    async fn a_disabled_identity_is_not_offered_when_the_preferences_cannot_be_read() {
+        let app = app().await;
+        bot(&app, "b-cc2", "cc2", Some("fable")).await;
+        let mid = mission(&app, "wait").await;
+        let a = assignment(&app, "b-cc2", &mid, "executor").await;
+        {
+            let mut q = app.quotas.lock().await;
+            q.insert("claude:cc2".into(), quota(10.0, 100.0, 10.0));
+            q.insert("claude:cc1".into(), quota(0.0, 0.0, 0.0));
+            q.insert("claude:cc0".into(), quota(0.0, 0.0, 0.0));
+        }
+        mstore::set_identity_disabled(&app.db, crate::config::LOCAL_HOST, "claude", "cc1", true).await.unwrap();
+        sqlx::query("ALTER TABLE identity_prefs RENAME TO identity_prefs_unreadable").execute(&app.db).await.unwrap();
+
+        park_quota(&app, &a, &hit(), "turn").await;
+        assert_eq!(snapshot(&app, &a.id).await, ("queued".into(), 0, false), "停用清單讀不到：不換手");
+        let q = std::collections::HashMap::from([("role".to_string(), "executor".to_string())]);
+        let res = crate::mission::api::get_pick(axum::extract::State(app.clone()), axum::extract::Path(mid.clone()), axum::extract::Query(q)).await;
+        assert!(matches!(res, Err(LcError::Unavailable(_))), "API 的挑身分也不能拿「讀不到」當「沒有停用」：{:?}", res.map(|j| j.0));
+
+        sqlx::query("ALTER TABLE identity_prefs_unreadable RENAME TO identity_prefs").execute(&app.db).await.unwrap();
+        park_quota(&app, &a, &hit(), "turn").await;
+        let payload: String = sqlx::query_scalar("SELECT payload_json FROM supervisor_inbox WHERE kind='mission_identity_switch'").fetch_one(&app.db).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(payload["to_identity"], "cc0", "讀得到了：跳過停用的 cc1");
+        park_quota(&app, &a, &hit(), "turn").await;
+        let switches: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE kind='mission_identity_switch'").fetch_one(&app.db).await.unwrap();
+        assert_eq!(switches, 1, "只換一次");
+    }
+
+    /// 驗收 4：bot 在哪台主機讀不到時以前退回 `local`——遠端任務的換手用的是本機的身分與額度。讀不到就不判。
+    #[tokio::test]
+    async fn a_handover_is_not_decided_on_local_identities_when_the_host_cannot_be_read() {
+        let app = app().await;
+        bot(&app, "b-cc2", "cc2", Some("fable")).await;
+        let mid = mission(&app, "wait").await;
+        let a = assignment(&app, "b-cc2", &mid, "executor").await;
+        {
+            let mut q = app.quotas.lock().await;
+            q.insert("claude:cc2".into(), quota(10.0, 100.0, 10.0));
+            q.insert("claude:cc1".into(), quota(0.0, 0.0, 0.0));
+        }
+        sqlx::query("ALTER TABLE projects RENAME TO projects_unreadable").execute(&app.db).await.unwrap();
+        park_quota(&app, &a, &hit(), "turn").await;
+        assert_eq!(snapshot(&app, &a.id).await, ("queued".into(), 0, false), "主機讀不到：不拿本機的身分換手");
+
+        sqlx::query("ALTER TABLE projects_unreadable RENAME TO projects").execute(&app.db).await.unwrap();
+        park_quota(&app, &a, &hit(), "turn").await;
+        assert_eq!(snapshot(&app, &a.id).await, ("awaiting_review".into(), 0, true), "讀得到了：照規則換手一次");
+    }
+
+    /// 驗收 1＋5：使用者暫停的任務，讀任務那一下出錯時以前當成「沒暫停」——等額度的交辦被放回 queued、重送次數加一。
+    /// 讀不到就原地不動；恢復之後仍暫停就繼續擋；放行之後只重送一次。
+    #[tokio::test]
+    async fn a_quota_resend_stays_parked_when_the_user_pause_cannot_be_read() {
+        let app = app().await;
+        bot(&app, "b-cc2", "cc2", Some("fable")).await;
+        let mid = mission(&app, "wait").await;
+        let a = assignment(&app, "b-cc2", &mid, "executor").await;
+        let past = crate::db::iso_at(chrono::Utc::now() - chrono::Duration::minutes(5));
+        sqlx::query("UPDATE supervisor_assignments SET status='quota_blocked', resume_at=?, updated_at=? WHERE id=?")
+            .bind(&past)
+            .bind(&past)
+            .bind(&a.id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        assert!(mstore::pause(&app.db, &mid, "user_hold", None).await.unwrap());
+
+        sqlx::query("ALTER TABLE missions RENAME TO missions_unreadable").execute(&app.db).await.unwrap();
+        resume_quota_blocked(&app).await;
+        assert_eq!(snapshot(&app, &a.id).await, ("quota_blocked".into(), 0, false), "暫停讀不到不等於解除暫停");
+
+        sqlx::query("ALTER TABLE missions_unreadable RENAME TO missions").execute(&app.db).await.unwrap();
+        resume_quota_blocked(&app).await;
+        assert_eq!(snapshot(&app, &a.id).await, ("quota_blocked".into(), 0, false), "讀得到了、仍然暫停：照舊擋");
+
+        assert!(mstore::resume(&app.db, &mid).await.unwrap());
+        resume_quota_blocked(&app).await;
+        let (status, retries, _) = snapshot(&app, &a.id).await;
+        assert_ne!(status, "quota_blocked", "放行之後重送");
+        assert_eq!(retries, 1, "只重送一次");
+    }
+
+    /// 票上留言（寫入側）：驗證者挑不到 Fable → 交辦收成 `quota_exhausted`＋任務停下來問人。以前先收交辦、再暫停任務，
+    /// 暫停寫不進去時交辦已經離開執行態、任務卻沒停，還照樣發「paused」、回「處理掉了」，之後沒有任何東西會讓它真的停下來。
+    /// 兩件事要一起成立或一起不發生；寫不進去就留著下一輪再來，只發生一次。
+    #[tokio::test]
+    async fn a_verifier_without_fable_settles_and_pauses_together_or_not_at_all() {
+        let app = app().await;
+        bot(&app, "b-v", "cc1", Some("fable")).await;
+        let mid = mission(&app, "switch").await;
+        let a = assignment(&app, "b-v", &mid, "verifier").await;
+        {
+            let mut q = app.quotas.lock().await;
+            for id in ["cc2", "cc1"] {
+                q.insert(format!("claude:{id}"), quota(0.0, 0.0, 100.0));
+            }
+        }
+        sqlx::query("CREATE TRIGGER test_pause_lost BEFORE UPDATE OF paused_reason ON missions BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END")
+            .execute(&app.db)
+            .await
+            .unwrap();
+        park_quota(&app, &a, &hit(), "turn").await;
+        let paused_events = |app: Arc<App>, mid: String| async move {
+            mstore::events(&app.db, &mid).await.unwrap().iter().filter(|e| e.kind == "paused").count()
+        };
+        assert_eq!(snapshot(&app, &a.id).await.0, "queued", "暫停寫不進去：交辦也不收成 quota_exhausted");
+        assert_eq!(mstore::get(&app.db, &mid).await.unwrap().unwrap().paused_reason, None);
+        assert_eq!(paused_events(app.clone(), mid.clone()).await, 0);
+
+        sqlx::query("DROP TRIGGER test_pause_lost").execute(&app.db).await.unwrap();
+        park_quota(&app, &a, &hit(), "turn").await;
+        park_quota(&app, &a, &hit(), "turn").await;
+        let row = store::assignment(&app.db, &a.id).await.unwrap().unwrap();
+        assert_eq!((row.status.as_str(), row.turn_status.as_deref()), ("awaiting_review", Some("quota_exhausted")));
+        assert_eq!(mstore::get(&app.db, &mid).await.unwrap().unwrap().paused_reason.as_deref(), Some("no_fable_for_verifier"));
+        assert_eq!(paused_events(app.clone(), mid.clone()).await, 1, "只停一次");
     }
 }
 

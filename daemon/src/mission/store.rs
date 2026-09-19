@@ -750,6 +750,9 @@ pub async fn resume_and_wake(pool: &SqlitePool, mission_id: &str, payload_of: im
 }
 
 /// 已結案（完成或取消）的任務不接受任何狀態變更。回傳 `false` = 沒有改到（已結案或不存在）。
+///
+/// 只剩測試在用：正式路徑的暫停都要連同 `paused` 事件一起寫（`pause_announced`／`pause_with_event`／`pause_on`，issue #160）。
+#[cfg(test)]
 pub async fn pause(pool: &SqlitePool, id: &str, reason: &str, detail: Option<&str>) -> Result<bool> {
     let now = crate::db::now();
     let n = sqlx::query(
@@ -860,6 +863,34 @@ async fn pause_tx(
         push_inbox_tx(&mut tx, &format!("{}:{}", a.event_key_prefix, ev.id), a.kind, &a.payload, &now).await?;
     }
     tx.commit().await?;
+    Ok(true)
+}
+
+/// 暫停＋`paused` 事件，寫在呼叫端的交易裡（issue #160：跟交辦收成 `quota_exhausted` 一起成立或一起不發生）。
+/// 回 `false` ＝ 任務已結案，什麼都沒寫。不 commit。
+pub async fn pause_on(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    id: &str,
+    reason: &str,
+    detail: Option<&str>,
+    text: &str,
+    payload: &serde_json::Value,
+) -> Result<bool> {
+    let n = sqlx::query(
+        "UPDATE missions SET paused_reason = ?, paused_detail = ?, updated_at = ?
+         WHERE id = ? AND completed_at IS NULL AND cancelled_at IS NULL",
+    )
+    .bind(reason)
+    .bind(detail)
+    .bind(crate::db::now())
+    .bind(id)
+    .execute(&mut **tx)
+    .await?
+    .rows_affected();
+    if n != 1 {
+        return Ok(false);
+    }
+    insert_event(tx, id, "paused", text, Some(crate::agent_relay::DAEMON_SENDER), payload, None, None).await?;
     Ok(true)
 }
 
