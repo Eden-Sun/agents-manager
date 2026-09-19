@@ -123,21 +123,7 @@ async fn handle_global(app: &Arc<App>, host: &str, session: &str, ev: &crate::he
         "workspace_closed" => {
             let Some(ws) = ev.data.get("workspace_id").and_then(|v| v.as_str()) else { return };
             tracing::info!(host, workspace_id = ws, "workspace closed");
-            for b in crate::db::live_bots_on_host(&app.db, host).await.unwrap_or_default() {
-                if let Ok(Some(r)) = crate::db::active_run(&app.db, &b.id).await {
-                    if r.workspace_id.as_deref() == Some(ws) && app.session_for_run(&r).await.as_deref() == Some(session) {
-                        crate::lifecycle::mark_run_exited(app, &r.id, "workspace closed").await;
-                    }
-                }
-            }
-            if app.session_for_host(host).await.as_deref() == Some(session) {
-                let _ = sqlx::query("UPDATE projects SET workspace_id = NULL WHERE workspace_id = ? AND host = ?")
-                    .bind(ws)
-                    .bind(host)
-                    .execute(&app.db)
-                    .await;
-                app.emit("project_changed", json!({})).await;
-            }
+            close_workspace_try(app, host, session, ws, 0).await;
         }
         "pane_agent_detected" => {
             tracing::debug!(host, session, data = %ev.data, "pane.agent_detected");
@@ -226,6 +212,61 @@ async fn end_runs_for_pane_try(app: &Arc<App>, host: &str, session: &str, pane_i
             }
         });
     }
+}
+
+/// workspace 關閉（#245）：外部事實，事件只來一次。DB 讀不到就不能當成沒有 run／沒有綁定，
+/// 也不能發出「project_changed」假裝清好了；任何一步沒成就整段稍後重來（每一步都是冪等的）。
+async fn close_workspace_try(app: &Arc<App>, host: &str, session: &str, ws: &str, attempt: usize) {
+    let mut converged = true;
+    match crate::db::live_bots_on_host(&app.db, host).await {
+        Ok(bots) => {
+            for b in bots {
+                match crate::db::active_run(&app.db, &b.id).await {
+                    Ok(Some(r)) => {
+                        if r.workspace_id.as_deref() == Some(ws)
+                            && app.session_for_run(&r).await.as_deref() == Some(session)
+                            && matches!(crate::lifecycle::mark_run_exited(app, &r.id, "workspace closed").await, crate::lifecycle::RunExit::NotRecorded)
+                        {
+                            converged = false;
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        tracing::warn!(host, workspace_id = ws, bot = %b.id, error = ?e, "could not read a bot's run after its workspace closed");
+                        converged = false;
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(host, workspace_id = ws, error = ?e, "could not list the host's bots after a workspace closed");
+            converged = false;
+        }
+    }
+    if app.session_for_host(host).await.as_deref() == Some(session) {
+        match sqlx::query("UPDATE projects SET workspace_id = NULL WHERE workspace_id = ? AND host = ?").bind(ws).bind(host).execute(&app.db).await {
+            Ok(_) => app.emit("project_changed", json!({})).await,
+            Err(e) => {
+                tracing::warn!(host, workspace_id = ws, error = ?e, "could not clear the closed workspace's project binding");
+                converged = false;
+            }
+        }
+    }
+    if !converged {
+        retry_workspace_close(app, host, session, ws, attempt);
+    }
+}
+
+fn retry_workspace_close(app: &Arc<App>, host: &str, session: &str, ws: &str, attempt: usize) {
+    let Some(wait) = close_retry_delays().get(attempt).copied() else {
+        tracing::warn!(host, workspace_id = ws, "gave up retrying a workspace-close; periodic reconcile is the safety net");
+        return;
+    };
+    let (app, host, session, ws) = (app.clone(), host.to_string(), session.to_string(), ws.to_string());
+    tokio::spawn(async move {
+        tokio::time::sleep(wait).await;
+        close_workspace_try(&app, &host, &session, &ws, attempt + 1).await;
+    });
 }
 
 fn retry_pane_close(app: &Arc<App>, host: &str, session: &str, pane_id: &str, attempt: usize) {
@@ -598,6 +639,60 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         assert!(!watching(&app, &pane).await, "確認 run 已結束才退出");
+    }
+
+    fn ws_event(ws: &str) -> crate::herdr::Event {
+        crate::herdr::Event { event: "workspace.closed".into(), data: json!({"workspace_id": ws}) }
+    }
+
+    async fn project_ws(app: &Arc<App>, id: &str) -> Option<String> {
+        sqlx::query_scalar("SELECT workspace_id FROM projects WHERE id=?").bind(id).fetch_one(&app.db).await.unwrap()
+    }
+
+    /// #245：workspace.closed 時讀不到 bot／run 以前當成「沒有」，run 留活、綁定殘留；現在重試到收斂，只動符合的 workspace。
+    #[tokio::test]
+    async fn a_workspace_close_whose_reads_fail_is_retried_until_it_converges() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let bot = tt::claude_bot(&app, &e.project_id, "wsbot").await;
+        let run = tt::fake_run(&app, &bot.id).await; // workspace ws-1
+        let other = tt::claude_bot(&app, &e.project_id, "other").await;
+        let other_run = tt::fake_run(&app, &other.id).await;
+        sqlx::query("UPDATE runs SET workspace_id='ws-2' WHERE id=?").bind(&other_run).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE projects SET workspace_id='ws-1' WHERE id=?").bind(&e.project_id).execute(&app.db).await.unwrap();
+
+        tt::make_table_unreadable(&app, "bots").await;
+        handle_global(&app, LOCAL_HOST, "test", &ws_event("ws-1")).await;
+        tt::make_table_readable(&app, "bots").await;
+        assert_eq!(run_state(&app, &run).await, "running", "前提：這一刻沒收到");
+
+        for _ in 0..250 {
+            if run_state(&app, &run).await == "exited" && project_ws(&app, &e.project_id).await.is_none() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(run_state(&app, &run).await, "exited");
+        assert_eq!(project_ws(&app, &e.project_id).await, None, "綁定清掉");
+        assert_eq!(run_state(&app, &other_run).await, "running", "別的 workspace 不受影響");
+    }
+
+    /// #245：清綁定的 UPDATE 寫失敗一次，不能永遠殘留。
+    #[tokio::test]
+    async fn a_failed_workspace_binding_clear_is_retried() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        sqlx::query("UPDATE projects SET workspace_id='ws-9' WHERE id=?").bind(&e.project_id).execute(&app.db).await.unwrap();
+        tt::make_table_unreadable(&app, "projects").await;
+        handle_global(&app, LOCAL_HOST, "test", &ws_event("ws-9")).await;
+        tt::make_table_readable(&app, "projects").await;
+        for _ in 0..250 {
+            if project_ws(&app, &e.project_id).await.is_none() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(project_ws(&app, &e.project_id).await, None);
     }
 
     fn close_event(pane: &str) -> crate::herdr::Event {
