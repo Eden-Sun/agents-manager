@@ -1625,9 +1625,10 @@ pub(crate) async fn close_tracked(app: &Arc<App>, host: &str, pane_id: &str, con
         Some(p) if p.agent.as_deref().is_some_and(|a| !a.is_empty()) => return Err(agent_pane()),
         Some(_) => {}
     }
-    let live = match (crate::memproc::dump(&app, &host).await, client.pane_shell(&pane_id).await) {
+    let probe = app.probe();
+    let live = match (probe.dump(&app, &host).await, client.pane_shell(&pane_id).await) {
         (Ok(dump), Ok(shell)) => match facts_from(&shell, &dump, &pane_id) {
-            Some(f) => listen_ports(&host, &f.pids).await.map(|ports| (f, ports)),
+            Some(f) => probe.listen_ports(&host, &f.pids).await.map(|ports| (f, ports)),
             None => None,
         },
         _ => None,
