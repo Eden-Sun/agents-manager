@@ -73,3 +73,10 @@
   font-family: var(--font-mono);
   font-weight: 650;
 }
+
+/* 外部 rustc 主機：跟本機 RAM 同一格外觀，標籤用 accent 好分開。 */
+.mem-badge.rustc-remote .mem-k {
+  color: var(--accent-ink);
+  font-family: var(--font-mono);
+  font-weight: 650;
+}

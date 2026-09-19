@@ -44,7 +44,8 @@
 - 未讀：`!N` 方角小標（不是圓點），單位是回合；專案收合時加總掛到標題；分頁標題 `(N)` 只算 bot 那份，且**跟側欄同一條規則**排除總管專案（AGM 的例行往來不顯示未讀，標題照算的話會掛著一個點不掉的 `(N)`）；已讀標記＋數字存 localStorage，刪 bot 時清帳；**bot 的已讀標記與未讀數以 daemon 為準、跨裝置共用**（2026-09-15：手機分頁凍結收不到回合完成、在桌機讀過手機不知道，兩邊主力區不一致），本機標記與 daemon 標記取較新者。群組未讀仍是各瀏覽器自己的。
   「在看」＝選中＋分頁可見＋視窗有 focus，回到前景時把正在看的標成已讀。
 - 「可更新」記號：kind icon 右上角綠色雙 chevron，無底色（使用者指定）。
-- 標題列三欄：左 `AG Man`＋`pane N`＋連線燈（文字在 title）、中 RAM（已用＋剩，同一行）、右 Chrome／ego。RAM 點開的清單 portal 到 `body`、`position: fixed`。
+- 標題列三欄：左 `AG Man`＋`pane N`＋連線燈（文字在 title）、中 RAM（本機 herdr 已用＋剩）＋外部 rustc（整機 CPU% · 編譯 RAM · 剩 N；`[build.remote]` 沒開就不畫）、右 Chrome／ego。RAM 點開的清單 portal 到 `body`、`position: fixed`。
+  ![桌機](screenshots/rustc-remote-mem/desktop-1440.png) ![手機抽屜](screenshots/rustc-remote-mem/phone-390.png)
 - RAM 清單：只列每棵子樹最上層（≥ 8 MiB 的 shell／CLI），大小是子樹加總；bot 那幾列走「停止 bot」不給 kill；kill 是 TERM → 再按才 KILL；
   「自己開的 pane」點了開唯讀終端視窗；關著就不抓。
 

@@ -39,6 +39,7 @@ mod lifecycle;
 mod local_image;
 mod memproc;
 mod memstat;
+mod remote_cargo_mem;
 mod outbox;
 mod mission;
 mod models;

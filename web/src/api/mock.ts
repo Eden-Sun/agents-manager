@@ -1088,6 +1088,18 @@ export class MockTransport implements Transport {
       herdr_bytes: rows.reduce((n, r) => n + r.herdr_bytes, 0),
       agents_bytes: rows.reduce((n, r) => n + r.agents_bytes, 0),
       processes: rows.reduce((n, r) => n + r.processes, 0),
+      cargo_remote: {
+        host: '192.168.1.46',
+        user: 'ubuntu',
+        rustc_bytes: 3.1 * 1024 ** 3,
+        rustc_cpu_pct: 240,
+        rustc_processes: 6,
+        machine: { total_bytes: 32 * 1024 ** 3, available_bytes: 18 * 1024 ** 3 },
+        cpu_pct: 41,
+        nproc: 32,
+        load1: 8.2,
+        error: null,
+      },
       hosts: rows,
       projects: this.projects
         .map((p) => {

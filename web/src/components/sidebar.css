@@ -65,6 +65,21 @@
 .head-ram {
   justify-self: center;
   min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+/* 第二顆（外部 rustc）不要把「剩 N」拆成整列，否則會疊到右邊的瀏覽器晶片。 */
+.sidebar-head .head-ram .mem-badge.rustc-remote {
+  flex-wrap: nowrap;
+  white-space: nowrap;
+}
+.sidebar-head .head-ram .mem-badge.rustc-remote .mem-free {
+  flex: none;
+  text-align: start;
 }
 
 /* 側欄放不下「已連線」（會切成「已連」），燈＋title 就夠。 */
