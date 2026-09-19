@@ -967,7 +967,10 @@ agent，hint 錯了或指到不存在的 agent，最多就是這一顆這一輪�
 **child 沒有這條路**：`managed_by='child'` 的 bot 一律沒有 hook（§4.3），沒有 Bash 工具事件流可看，子代自己開孫代時完全沒有
 hint 可用，退回規則 2／3——這條沒有、也不打算改掉子代 hookless 這件事。
 
-三條都沒中的照舊只退回血緣／前綴（規則 2、3）。認領：`managed_by='child'`、`parent_bot_id`、`adopted=1` 的 run；同一父 bot 底下同名的 live child 直接重用。
+三條都沒中的照舊只退回血緣／前綴（規則 2、3）。
+**hint 讀不到不等於沒有 hint**（#94 重開）：`spawn_hints` 這一輪 SELECT 失敗（busy／I/O）時，hint 可能好好地在表裡——退回規則 2、3
+正好會把新 tab 裡的一排子代理串回鏈。所以這一輪**一顆都不認領**，排一輪 15 秒後的補跑對帳（同 §6.5.2 第 2 條的延後機制）；
+讀到空的（`Ok`、沒有列）才是真的沒有，照舊退回規則 2、3。認領：`managed_by='child'`、`parent_bot_id`、`adopted=1` 的 run；同一父 bot 底下同名的 live child 直接重用。
 子 bot `name`：有前綴取字尾，否則用 herdr agent 名（去空白與 `@,:;`、截 32 字）。字尾在專案裡已被別人用掉時改存完整 herdr agent 名（herdr 保證唯一）。
 每顆認領各自成敗：失敗只 log 跳過，不中止整台主機的對帳。
 

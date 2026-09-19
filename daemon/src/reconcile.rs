@@ -557,10 +557,23 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
     // 比同 tab／名字前綴更早也更精確，排最前面；查不到（CLI 版本太舊、這顆 bot 沒有 hook——典型是
     // child 自己開孫代，§4.3 一律沒有 hook——或根本不是這樣開的）就照舊退回血緣／前綴推斷，那條路一個
     // 位元組都沒動，也是唯一在 CLI 不發 hook 時能依靠的線索。
+    //
+    // 讀不到 hint 不等於沒有 hint（#94 重開）：hint 可能好好地在表裡，只是這一輪 SELECT 失敗；這時退回同 tab／前綴推斷，
+    // 正好把新 tab 裡的一排子代理串回鏈、掛錯 parent。所以這一輪一顆都不認領，排一輪晚一點的補跑；`Ok(空)` 才是真的沒有。
     crate::spawn_hints::prune_stale(app).await;
-    let hints = crate::spawn_hints::for_host(app, host).await.unwrap_or_default();
+    let (hints, strangers): (HashMap<String, String>, &[crate::herdr::AgentInfo]) =
+        match crate::spawn_hints::for_host(app, host).await {
+            Ok(h) => (h, agents.as_slice()),
+            Err(e) => {
+                if agents.iter().any(|a| a.name.as_deref().is_some_and(|n| !claimed.contains(n))) {
+                    tracing::warn!(host, error = ?e, "reconcile: cannot read spawn hints; adopting no new child this pass, will look again");
+                    schedule_deferred_pass(app, host);
+                }
+                (HashMap::new(), &[][..])
+            }
+        };
     let mut new_children = 0usize;
-    for agent in agents.iter() {
+    for agent in strangers.iter() {
         let Some(name) = agent.name.as_deref() else { continue };
         if claimed.contains(name) {
             continue;
@@ -2310,6 +2323,78 @@ mod compat_tests {
         super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bots WHERE parent_bot_id IS NOT NULL").fetch_one(&app.db).await.unwrap();
         assert_eq!(n, 3, "重跑一次不該重複建立");
+    }
+
+    /// **#94 重開**：hint 讀不到不等於沒有 hint。父 agent 在新 tab 裡連開三顆、每一顆的 hint 都已經記在表裡，只是第二、三顆
+    /// 出現的那一輪 SELECT 失敗——退回同 tab 推斷就會把 k2 掛到 k1 底下（串鏈、還因為短名字對錯 parent 取不到而長出重複 bot）。
+    /// 讀不到的那一輪一顆都不認領；DB 恢復之後，延後的那一輪自己照 hint 認領（這之後沒有任何人叫 reconcile）。
+    #[tokio::test]
+    async fn an_unreadable_spawn_hint_defers_adoption_instead_of_guessing_by_tab() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+
+        let parent = a_bot(&env, "alfa").await;
+        let parent_agent = crate::config::agent_name("proj", &parent);
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, tab_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','idle',?,?,?,?,'test',?)",
+        )
+        .bind(db::ulid())
+        .bind(&parent)
+        .bind(&ws.workspace_id)
+        .bind(&root.pane_id)
+        .bind(&root.tab_id)
+        .bind(&parent_agent)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let p1 = client.tab_create(&ws.workspace_id, "/tmp/p", "kids", json!({})).await.unwrap();
+        let p2 = client.pane_split(&p1.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
+        let p3 = client.pane_split(&p2.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
+        let agent_json = |name: &str, pane: &crate::herdr::PaneInfo| {
+            json!({"name": name, "agent": "claude", "agent_status": "idle",
+                   "workspace_id": ws.workspace_id, "tab_id": pane.tab_id, "pane_id": pane.pane_id, "cwd": "/tmp/p"})
+        };
+        let (name1, name2, name3) = (format!("{parent_agent}-k1"), format!("{parent_agent}-k2"), format!("{parent_agent}-k3"));
+        for p in [&p1, &p2, &p3] {
+            crate::spawn_hints::record(&app, &parent, &p.pane_id).await.unwrap();
+        }
+        let children = |app: Arc<App>| async move {
+            sqlx::query_as::<_, db::Bot>("SELECT * FROM bots WHERE parent_bot_id IS NOT NULL ORDER BY name").fetch_all(&app.db).await.unwrap()
+        };
+
+        // k1 那一輪讀得到：照 hint 掛在父底下。
+        *env.herdr.agents.lock().unwrap() = vec![agent_json(&parent_agent, &root), agent_json(&name1, &p1)];
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+        assert_eq!(children(app.clone()).await.len(), 1);
+
+        // k2、k3 出現的那兩輪 hint 讀不到：k1 已經是那個 tab 的候選 parent，退回推斷就會串鏈。
+        sqlx::query("ALTER TABLE spawn_hints RENAME TO spawn_hints_unreadable").execute(&app.db).await.unwrap();
+        env.herdr.agents.lock().unwrap().push(agent_json(&name2, &p2));
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+        env.herdr.agents.lock().unwrap().push(agent_json(&name3, &p3));
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+        let kids = children(app.clone()).await;
+        assert_eq!(kids.len(), 1, "hint 讀不到的那幾輪一顆都不認領，不猜：{kids:?}");
+
+        // DB 恢復：延後的那一輪自己補跑，照 hint 認領，沒有鏈、沒有重複。
+        sqlx::query("ALTER TABLE spawn_hints_unreadable RENAME TO spawn_hints").execute(&app.db).await.unwrap();
+        let mut kids = Vec::new();
+        for _ in 0..100 {
+            kids = children(app.clone()).await;
+            if kids.len() == 3 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        }
+        assert_eq!(kids.len(), 3, "剛好三顆：{kids:?}");
+        for c in &kids {
+            assert_eq!(c.parent_bot_id.as_deref(), Some(parent.as_str()), "{} 要掛在真正的父 bot 底下", c.name);
+        }
+        assert_eq!(kids.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["k1", "k2", "k3"], "短名字都取得到：parent 沒選錯");
     }
 
     /// 對照組（issue #94）：跟上面完全同樣的場景，但**不送任何 hint**——證明 hook 缺席時，舊的（有缺陷
