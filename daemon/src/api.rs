@@ -1405,8 +1405,14 @@ async fn patch_bot(
 async fn preview_get(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
     Ok(Json(crate::preview::get(&app, &id).await?).into_response())
 }
-async fn preview_start(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
-    Ok(Json(crate::preview::start(&app, &id).await?).into_response())
+async fn preview_start(State(app): State<Arc<App>>, Path(id): Path<String>, body: Bytes) -> Result<Response, LcError> {
+    // body 可有可無（沒帶＝auto）；帶了就要是合法的 JSON。
+    let req: crate::preview::StartReq = if body.iter().all(u8::is_ascii_whitespace) {
+        Default::default()
+    } else {
+        serde_json::from_slice(&body).map_err(|e| LcError::Bad(format!("preview body: {e}")))?
+    };
+    Ok(Json(crate::preview::start(&app, &id, req).await?).into_response())
 }
 async fn preview_stop(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
     Ok(Json(crate::preview::stop(&app, &id).await?).into_response())
