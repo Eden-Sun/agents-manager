@@ -169,6 +169,12 @@ launchd：`com.agm.herdr-update`，`StartInterval 86400`（每天一次），`Pr
   還活著但超過 `AGM_LOCK_HUNG_SECS` 推 `ops_alert`（`runner_hung`）；回收不掉推 `stale_lock`。
 - **依賴**（補 #66 留言的洞）：開頭自補 `PATH=/opt/homebrew/bin:/usr/local/bin:$PATH`；找不到 `python3` 推 `ops_alert`（`missing_dependency`）並寫 log，不靜默 `exit 0`。
   只依賴 `python3` 與 `bin/agm`（額度走 `agm quota`，不用 `curl`／`gh`；開 issue 是 daemon 的事）。
+- **派成功要寫回帳本**：`assign` 成功後對**這一則實際帶出去的版本**（截斷後那批，不是全部 pending）呼叫
+  `bin/agm release-triage dispatched --kind <k> --version <v>…`，帳本才會離開 `pending`（下一輪不再回同一批、「`dispatched` 超過 6 小時沒 verdict 退回 pending」的計時才會開始）。
+  `assign` 失敗不標；`dispatched` 本身失敗只記一行 log、照舊 `exit 0`，**不重派**（request-id 會擋住重複交辦）。
+- **`publish` 重試**：每輪（不論有沒有 pending、額度擋不擋）對兩個 kind 各呼叫一次 `bin/agm release-triage publish --kind <k>`，
+  給 gh 失敗停在 `judged` 的版本一個重試入口（daemon 端不做定時器）。沒東西要重試（results 空、`disabled`、`deferred`）時安靜；只有 `published`／`failed` 才寫 log。
+  舊的 `bin/agm` 不認得 `release-triage`（argparse exit 2）：log 講一次就略過，用 `release-triage-publish-unsupported` 這個 state 檔記「已經講過」，換新 agm 後自動清掉。
 - 某個 kind 的 `release-triage-check` 失敗（抓不到 feed 等）只跳過那個 kind，不當成「沒有新版」，另一個 kind 照跑。
 
 **跟其他 kick 的分工**：

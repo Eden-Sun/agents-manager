@@ -24,11 +24,17 @@ echo "$*" >> "$AGM_DIR/calls.log"
 DEFAULT_QUOTA='{"kinds":{"claude":{"five_hour":{"used_pct":10.0},"limit_hit":null}}}'
 for a in "$@"; do
   case "$a" in
-    --compact|--bot|--review-by|--text-file|--request-id|--source|--reason|--detail|assign|quota|state|ops-alert) ;;
+    --compact|--bot|--review-by|--text-file|--request-id|--source|--reason|--detail|--kind|--version|assign|quota|state|ops-alert|release-triage|dispatched|publish) ;;
     --*) echo "agm: error: unrecognized arguments: $a" >&2; exit 2 ;;
   esac
 done
 case "$*" in
+  *"release-triage "*)
+    [ -n "${STUB_OLD_AGM:-}" ] && { echo "agm: error: argument cmd: invalid choice: 'release-triage'" >&2; exit 2; }
+    case "$*" in
+      *" dispatched "*) [ -n "${STUB_DISPATCHED_FAIL:-}" ] && exit 1; printf '%s' '{"dispatched":1}' ;;
+      *" publish "*) printf '%s' "${STUB_PUBLISH_JSON:-{\"publish_enabled\":false,\"results\":[]\}}" ;;
+    esac ;;
   *" quota"*|"--compact quota")
     [ -n "${STUB_QUOTA_FAIL:-}" ] && exit 1
     printf '%s' "${STUB_QUOTA_JSON:-$DEFAULT_QUOTA}" ;;
@@ -59,13 +65,13 @@ PYEOF
   chmod +x "$ROOT/fake-agents-managerd"
   export AM_BINARY="$ROOT/fake-agents-managerd"
   : > "$AGM_DIR/calls.log"; : > "$AGM_DIR/assign-body.txt"
-  export STUB_ASSIGN_FAIL="" STUB_QUOTA_FAIL="" STUB_QUOTA_JSON=""
+  export STUB_ASSIGN_FAIL="" STUB_QUOTA_FAIL="" STUB_QUOTA_JSON="" STUB_DISPATCHED_FAIL="" STUB_PUBLISH_JSON="" STUB_OLD_AGM=""
   unset AGM_RELEASE_BOT
 }
 teardown() {
   rm -rf "$ROOT"
   unset AGM_DIR AGM_REPO AM_BINARY AGM_RELEASE_BOT AGM_TRIAGE_QUOTA_MAX AGM_LOCK_STALE_SECS AGM_LOCK_HUNG_SECS AGM_EXTRA_PATH
-  unset STUB_ASSIGN_FAIL STUB_QUOTA_FAIL STUB_QUOTA_JSON
+  unset STUB_ASSIGN_FAIL STUB_QUOTA_FAIL STUB_QUOTA_JSON STUB_DISPATCHED_FAIL STUB_PUBLISH_JSON STUB_OLD_AGM
 }
 
 # mk_pending <kind> <to> <version…>：每版 2 條 kept、1 條 unmatched。
@@ -328,6 +334,82 @@ export AM_BINARY="$ROOT/no-such-binary"
 bash "$SCRIPT"
 check "binary 不在就跳過" "找不到" "$AGM_DIR/release-triage.log"
 equals "binary 不在不派" "$(assigns)" "0"
+teardown
+
+# 13. 派成功 → 對這一則實際帶出去的版本標 dispatched（截斷時只標截斷後那批）；派失敗不標。
+setup
+mk_pending claude 2.1.278 2.1.277 2.1.278; mk_empty codex
+bash "$SCRIPT"
+check "dispatched 帶 kind 與兩版" "release-triage dispatched --kind claude --version 2.1.277 --version 2.1.278$" "$AGM_DIR/calls.log"
+equals "dispatched 只呼叫一次" "$(grep -c 'release-triage dispatched' "$AGM_DIR/calls.log" | tr -d ' ')" "1"
+teardown
+setup
+mk_pending claude 2.1.290 2.1.281 2.1.282 2.1.283 2.1.284 2.1.285 2.1.290; mk_empty codex
+bash "$SCRIPT"
+check "截斷：dispatched 只帶前 5 版" "dispatched --kind claude --version 2.1.281 --version 2.1.282 --version 2.1.283 --version 2.1.284 --version 2.1.285$" "$AGM_DIR/calls.log"
+check_no "截斷：第 6 版不標" "version 2.1.290" "$AGM_DIR/calls.log"
+teardown
+setup
+mk_pending claude 2.1.278 2.1.278; mk_pending codex 0.155.0 0.155.0
+bash "$SCRIPT"
+check "兩個 kind 各標自己的" "dispatched --kind codex --version 0.155.0$" "$AGM_DIR/calls.log"
+teardown
+setup
+mk_pending claude 2.1.278 2.1.278; mk_empty codex
+export STUB_ASSIGN_FAIL=1
+bash "$SCRIPT"
+check_no "assign 失敗：不標 dispatched" "dispatched" "$AGM_DIR/calls.log"
+teardown
+setup
+mk_empty claude; mk_empty codex
+bash "$SCRIPT"
+check_no "沒 pending：不標 dispatched" "dispatched" "$AGM_DIR/calls.log"
+teardown
+# 13b. dispatched 失敗：記 log、不重派、exit 0。
+setup
+mk_pending claude 2.1.278 2.1.278; mk_empty codex
+export STUB_DISPATCHED_FAIL=1
+bash "$SCRIPT"; equals "dispatched 失敗：exit 0" "$?" "0"
+equals "dispatched 失敗：不重派" "$(assigns)" "1"
+check "dispatched 失敗有記 log" "標記 dispatched 失敗" "$AGM_DIR/release-triage.log"
+teardown
+
+# 14. publish：每輪每個 kind 各一次（不論有沒有 pending）；沒東西要重試時安靜。
+setup
+mk_empty claude; mk_empty codex
+bash "$SCRIPT"
+check "publish claude" "release-triage publish --kind claude" "$AGM_DIR/calls.log"
+check "publish codex" "release-triage publish --kind codex" "$AGM_DIR/calls.log"
+equals "publish 共兩次" "$(grep -c 'release-triage publish' "$AGM_DIR/calls.log" | tr -d ' ')" "2"
+equals "無事：不寫 log" "$(cat "$AGM_DIR/release-triage.log" 2>/dev/null)" ""
+teardown
+setup
+mk_pending claude 2.1.278 2.1.278; mk_empty codex
+export STUB_QUOTA_JSON='{"kinds":{"claude":{"five_hour":{"used_pct":95.0},"limit_hit":null}}}'
+bash "$SCRIPT"
+equals "額度擋下時 publish 仍照跑" "$(grep -c 'release-triage publish' "$AGM_DIR/calls.log" | tr -d ' ')" "2"
+teardown
+setup
+mk_empty claude; mk_empty codex
+export STUB_PUBLISH_JSON='{"publish_enabled":false,"results":[{"kind":"claude","version":"2.1.1","result":{"outcome":"disabled"}}]}'
+bash "$SCRIPT"
+equals "publish disabled：不寫 log" "$(cat "$AGM_DIR/release-triage.log" 2>/dev/null)" ""
+teardown
+setup
+mk_empty claude; mk_empty codex
+export STUB_PUBLISH_JSON='{"publish_enabled":true,"results":[{"kind":"claude","version":"2.1.1","result":{"outcome":"published"}}]}'
+bash "$SCRIPT"
+check "publish 成功有記 log" "2.1.1：publish published" "$AGM_DIR/release-triage.log"
+teardown
+
+# 15. 舊 agm 不認得 release-triage（exit 2）：只講一次；派工照舊。
+setup
+mk_pending claude 2.1.278 2.1.278; mk_empty codex
+export STUB_OLD_AGM=1
+bash "$SCRIPT"; equals "舊 agm：exit 0" "$?" "0"
+equals "舊 agm：assign 照派" "$(assigns)" "1"
+bash "$SCRIPT"; bash "$SCRIPT"
+equals "舊 agm：說明只寫一次" "$(grep -c '不認得 release-triage' "$AGM_DIR/release-triage.log" | tr -d ' ')" "1"
 teardown
 
 echo "$PASS passed, $FAIL failed"

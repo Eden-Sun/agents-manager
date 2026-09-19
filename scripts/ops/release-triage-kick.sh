@@ -98,6 +98,34 @@ print(d.get("release_bot_id") or d.get("responder_bot_id") or "")
 ' "$DIR/runtime.json" 2>/dev/null)
 fi
 
+# 重試 gh 失敗、停在 judged 的版本（daemon 端刻意不做定時器，靠這裡每輪叫一次）。與有沒有 pending、額度夠不夠無關，
+# 所以放在派工迴圈之前；沒東西要重試（results 空、或只有 disabled／deferred）時安靜，不寫 log。
+# 舊的 bin/agm 沒有 release-triage 子命令（argparse exit 2）：只講一次，用 state 檔記「已經講過」，不每 30 分鐘洗 log。
+NO_PUBLISH_NOTE="$DIR/release-triage-publish-unsupported"
+for KIND in claude codex; do
+  OUT=$("$AGM" --compact release-triage publish --kind "$KIND" 2>&1); RC=$?
+  if [ "$RC" -eq 2 ]; then
+    [ -e "$NO_PUBLISH_NOTE" ] || { log "bin/agm 不認得 release-triage（舊版，exit 2），略過 publish 重試；換新 agm 後才會有效"; : > "$NO_PUBLISH_NOTE"; }
+    break
+  elif [ "$RC" -ne 0 ]; then
+    log "release-triage publish --kind ${KIND} 失敗（rc=${RC}）：$(printf '%s' "$OUT" | head -c 200)"
+    continue
+  fi
+  rm -f "$NO_PUBLISH_NOTE" 2>/dev/null
+  printf '%s' "$OUT" | KIND="$KIND" python3 -c '
+import json, os, sys
+try:
+    res = json.load(sys.stdin).get("results") or []
+except ValueError:
+    sys.exit(0)
+for r in res:
+    x = r.get("result") or {}
+    if x.get("outcome") in ("published", "failed"):
+        print("%s %s：publish %s%s" % (r.get("kind") or os.environ["KIND"], r.get("version"), x["outcome"],
+                                       "（" + str(x["error"])[:200] + "）" if x.get("error") else ""))
+' 2>/dev/null | while IFS= read -r _l; do log "$_l"; done
+done
+
 # 額度閘門（issue #204 §3）：該 bot 身分的 5h ≥ 門檻或有 limit_hit → 不派，列維持 pending，下一輪再看。
 # 查不到（端點壞、找不到這顆 bot 的額度格）照派並記 log，不要因為端點壞了就永遠不做。
 # 只在真的有 pending 時才查（沒事的輪次不打 API），且一輪只查一次（兩個 kind 派給同一顆 bot）。
@@ -188,6 +216,19 @@ print(json.dumps(out, ensure_ascii=False, indent=2))
   if "$AGM" --compact assign --bot "$BOT" --review-by patrol --text-file "$BODY" \
        --request-id "release-triage-${KIND}-${TO}" >> "$LOG" 2>&1; then
     log "${KIND} → ${TO}：已派 ${BOT} 分診"
+    # 只標這一則實際帶出去的版本（截斷後那批）。標失敗不重派：request-id 會擋住重複交辦；
+    # 帳本這輪停在 pending 只代表下一輪 check 又回同一批，下一輪同 request-id 由 daemon 去重。
+    VERS=$(printf '%s' "$PAYLOAD" | python3 -c '
+import json, sys
+for p in json.load(sys.stdin)["pending"]:
+    print(p["version"])
+' 2>>"$LOG") || VERS=""
+    VARGS=()
+    while IFS= read -r _v; do [ -n "$_v" ] && VARGS+=(--version "$_v"); done <<< "$VERS"
+    if [ ${#VARGS[@]} -gt 0 ]; then
+      "$AGM" --compact release-triage dispatched --kind "$KIND" "${VARGS[@]}" >> "$LOG" 2>&1 ||
+        log "標記 dispatched 失敗（${KIND} → ${TO}），帳本仍是 pending；不重派"
+    fi
   else
     log "派工失敗（${KIND} → ${TO}），下一輪再試"
   fi
