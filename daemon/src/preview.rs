@@ -77,6 +77,33 @@ pub trait PreviewEnv: Send + Sync {
     fn port_listening(&self, port: u16) -> BoxFuture<'_, bool>;
     /// 本機上在 listen 的 vite 行程（pid、port、cwd）；`None`＝掃不到（不是「沒有」）。
     fn scan_vites(&self) -> BoxFuture<'_, Option<Vec<ViteProc>>>;
+    /// 這個目錄屬於哪個 git repo；不是 repo 或讀不到＝`None`。
+    fn repo_key<'a>(&'a self, dir: &'a str) -> BoxFuture<'a, Option<RepoKey>>;
+}
+
+/// 判斷「同一個 repo」用：git common dir（同一個 repo 的所有 worktree 共用）與 origin URL（各自 clone 的同一個 repo）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoKey {
+    pub common: String,
+    pub origin: Option<String>,
+}
+
+/// 兩個目錄是不是同一個 repo：common dir 相同，或兩邊都有 origin 而且相同。
+pub fn same_repo(a: &RepoKey, b: &RepoKey) -> bool {
+    a.common == b.common || matches!((&a.origin, &b.origin), (Some(x), Some(y)) if x == y)
+}
+
+/// `git rev-parse --git-common-dir`（可能是相對於 `dir` 的路徑）與 `git config remote.origin.url` 的輸出。
+pub fn parse_repo_key(dir: &str, common_out: &str, origin_out: &str) -> Option<RepoKey> {
+    let common = common_out.trim();
+    if common.is_empty() {
+        return None;
+    }
+    let p = Path::new(common);
+    let abs = if p.is_absolute() { p.to_path_buf() } else { Path::new(dir).join(p) };
+    let common = std::fs::canonicalize(&abs).unwrap_or(abs).to_string_lossy().into_owned();
+    let origin = Some(origin_out.trim().to_string()).filter(|o| !o.is_empty());
+    Some(RepoKey { common, origin })
 }
 
 /// 一顆已經在跑、而且有 TCP listen 的 vite。
@@ -132,6 +159,18 @@ impl PreviewEnv for RealEnv {
     }
     fn scan_vites(&self) -> BoxFuture<'_, Option<Vec<ViteProc>>> {
         Box::pin(scan_real())
+    }
+    fn repo_key<'a>(&'a self, dir: &'a str) -> BoxFuture<'a, Option<RepoKey>> {
+        Box::pin(async move {
+            let q = crate::hosts::sh_quote(dir);
+            let t = Duration::from_secs(5);
+            let common = crate::hosts::sh_local(&format!("git -C {q} rev-parse --git-common-dir 2>/dev/null"), t).await.ok().flatten()?;
+            if !common.status.success() {
+                return None;
+            }
+            let origin = crate::hosts::sh_local(&format!("git -C {q} config --get remote.origin.url 2>/dev/null"), t).await.ok().flatten()?;
+            parse_repo_key(dir, &String::from_utf8_lossy(&common.stdout), &String::from_utf8_lossy(&origin.stdout))
+        })
     }
 }
 
@@ -443,7 +482,7 @@ async fn candidates_of(app: &Arc<App>, bot: &db::Bot) -> LcResult<Result<Vec<Pat
 }
 
 /// 回應在 [`Row::body`] 之外多兩欄：`candidates`（可以起 vite 的目錄）、`others`（沒在用的狀態下才掃：
-/// 別份 checkout 或別的專案已經在跑的 vite，列出來讓使用者自己選）。
+/// 同一個 repo 的別份 checkout／worktree 已經在跑的 vite，列出來讓使用者自己選）。
 async fn decorated(app: &Arc<App>, bot: &db::Bot, mut body: Value, live: bool) -> LcResult<Value> {
     let cands = candidates_of(app, bot).await?.unwrap_or_default();
     let mut others = Vec::new();
@@ -454,7 +493,18 @@ async fn decorated(app: &Arc<App>, bot: &db::Bot, mut body: Value, live: bool) -
         };
         // 掃不到就當沒有：這只是「順便列出來」，不是決定。
         let scan = env.scan_vites().await.unwrap_or_default();
-        others = classify(&scan, &cands).1;
+        let (_, rest) = classify(&scan, &cands);
+        // 只列同一個 repo 的其他 checkout／worktree；別的 repo 一律不列。bot 自己的 repo 或某顆 vite 的 repo
+        // 判不出來（不是 git、git 讀不到）也不列：寧可少列，不要拿別人的畫面誤導使用者。
+        if let Some(mine) = cands.first() {
+            if let Some(mine) = env.repo_key(&mine.to_string_lossy()).await {
+                for p in rest {
+                    if env.repo_key(&p.cwd).await.is_some_and(|k| same_repo(&mine, &k)) {
+                        others.push(p);
+                    }
+                }
+            }
+        }
     }
     if let Some(o) = body.as_object_mut() {
         o.insert("candidates".into(), json!(cands.iter().map(|c| c.to_string_lossy()).collect::<Vec<_>>()));

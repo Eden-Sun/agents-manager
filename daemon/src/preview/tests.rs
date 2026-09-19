@@ -14,6 +14,8 @@ struct FakeEnv {
     next: std::sync::atomic::AtomicU32,
     spawn_fails: std::sync::atomic::AtomicBool,
     vites: StdMutex<Vec<ViteProc>>,
+    /// 目錄 → 它的 repo；沒登記＝判不出來。
+    repos: StdMutex<HashMap<String, RepoKey>>,
 }
 
 impl FakeEnv {
@@ -29,6 +31,9 @@ impl FakeEnv {
     fn vite(&self, pid: i32, port: u16, cwd: &str) {
         self.vites.lock().unwrap().push(ViteProc { pid, port, cwd: cwd.into() });
         self.listen(port);
+    }
+    fn repo(&self, dir: &str, common: &str, origin: Option<&str>) {
+        self.repos.lock().unwrap().insert(dir.into(), RepoKey { common: common.into(), origin: origin.map(Into::into) });
     }
     fn vite_exits(&self, port: u16) {
         self.vites.lock().unwrap().retain(|v| v.port != port);
@@ -69,6 +74,9 @@ impl PreviewEnv for FakeEnv {
     }
     fn scan_vites(&self) -> BoxFuture<'_, Option<Vec<ViteProc>>> {
         Box::pin(async move { Some(self.vites.lock().unwrap().clone()) })
+    }
+    fn repo_key<'a>(&'a self, dir: &'a str) -> BoxFuture<'a, Option<RepoKey>> {
+        Box::pin(async move { self.repos.lock().unwrap().get(dir).cloned() })
     }
 }
 
@@ -498,6 +506,8 @@ async fn auto_attaches_to_a_vite_already_running_in_the_same_checkout() {
 async fn another_checkout_is_listed_not_attached_and_a_spawn_follows() {
     let r = rig().await;
     r.fake.vite(1, 5173, "/somewhere/agents-manager-main/web");
+    r.fake.repo("/somewhere/agents-manager-main/web", "/git/am/.git", None);
+    r.fake.repo(&web_dir(&r), "/git/am/.git", None);
     let bot = running_bot(&r, "alfa").await;
     let body = start(&r.e.app, &bot, StartReq::default()).await.unwrap();
     assert_eq!(body["source"], "spawned");
@@ -602,4 +612,53 @@ async fn opening_a_pre_v2_database_adds_the_source_and_pid_columns() {
     let cols: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info('bot_previews')").fetch_all(&pool).await.unwrap();
     assert!(cols.contains(&"source".to_string()) && cols.contains(&"pid".to_string()), "{cols:?}");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn same_repo_by_common_dir_or_by_origin() {
+    let k = |c: &str, o: Option<&str>| RepoKey { common: c.into(), origin: o.map(Into::into) };
+    assert!(same_repo(&k("/a/.git", None), &k("/a/.git", None)), "同一個 repo 的 worktree");
+    assert!(same_repo(&k("/a/.git", Some("git@h:x/y.git")), &k("/b/.git", Some("git@h:x/y.git"))), "各自 clone 的同一個 repo");
+    assert!(!same_repo(&k("/a/.git", Some("git@h:x/y.git")), &k("/b/.git", Some("git@h:x/z.git"))));
+    assert!(!same_repo(&k("/a/.git", None), &k("/b/.git", Some("git@h:x/y.git"))));
+    assert!(!same_repo(&k("/a/.git", None), &k("/b/.git", None)), "沒有 origin 也對不上就不算");
+}
+
+#[test]
+fn repo_key_parsing_resolves_a_relative_common_dir_and_treats_nothing_as_unknown() {
+    let dir = std::env::temp_dir().join(format!("am-test-{}", db::ulid()));
+    std::fs::create_dir_all(dir.join(".git")).unwrap();
+    let d = dir.to_string_lossy().into_owned();
+    let k = parse_repo_key(&d, ".git\n", "https://h/x/y.git\n").unwrap();
+    assert_eq!(k.common, std::fs::canonicalize(dir.join(".git")).unwrap().to_string_lossy());
+    assert_eq!(k.origin.as_deref(), Some("https://h/x/y.git"));
+    assert_eq!(parse_repo_key(&d, ".git", "").unwrap().origin, None);
+    assert_eq!(parse_repo_key(&d, "  \n", "x"), None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn others_only_lists_vites_of_the_same_repo() {
+    let r = rig().await;
+    r.fake.repo(&web_dir(&r), "/git/am/.git", Some("git@h:me/am.git"));
+    r.fake.vite(1, 5173, "/x/am-main/web"); // 同 repo 的另一個 worktree
+    r.fake.repo("/x/am-main/web", "/git/am/.git", Some("git@h:me/am.git"));
+    r.fake.vite(2, 5174, "/x/am-clone/web"); // 另一份 clone，origin 一樣
+    r.fake.repo("/x/am-clone/web", "/git/clone/.git", Some("git@h:me/am.git"));
+    r.fake.vite(3, 3001, "/x/hermes/apps/web"); // 別的 repo
+    r.fake.repo("/x/hermes/apps/web", "/git/hermes/.git", Some("git@h:me/hermes.git"));
+    r.fake.vite(4, 3002, "/x/not-git/web"); // 判不出來
+    let bot = running_bot(&r, "alfa").await;
+    let off = get(&r.e.app, &bot).await.unwrap();
+    let ports: Vec<u64> = off["others"].as_array().unwrap().iter().map(|o| o["port"].as_u64().unwrap()).collect();
+    assert_eq!(ports, vec![5173, 5174]);
+}
+
+#[tokio::test]
+async fn others_is_empty_when_the_bots_own_repo_cannot_be_read() {
+    let r = rig().await;
+    r.fake.vite(1, 5173, "/x/am-main/web");
+    r.fake.repo("/x/am-main/web", "/git/am/.git", None); // bot 自己的目錄沒登記＝讀不到
+    let bot = running_bot(&r, "alfa").await;
+    assert_eq!(get(&r.e.app, &bot).await.unwrap()["others"], json!([]));
 }

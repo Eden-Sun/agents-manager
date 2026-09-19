@@ -436,7 +436,7 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 
 `source`：`spawned`＝AG Man 起的（有 `pane_id`）；`attached`＝接上一顆本來就在跑的 vite（沒有 pane，`pid` 是那顆行程）。
 `candidates`：這顆 bot 可以起 vite 的目錄（`<dir>`、`web`、`apps/*`、`packages/*` 有 vite 設定的，第一個是預設）。
-`others`：**沒有預覽在用時**才掃，別份 checkout／別的專案已經在跑的 vite；畫面上看到的不是這顆 bot 工作樹的程式碼，所以不自動接。
+`others`：**沒有預覽在用時**才掃，**同一個 repo**（git common dir 或 origin URL 相同）的別份 checkout／worktree 已經在跑的 vite；畫面上看到的不是這顆 bot 工作樹的程式碼，所以不自動接。別的 repo、判不出 repo 的不列。
 `GET`／`POST` 回全部欄位；`off` 時只有 `status`（`GET`／`POST` 另外帶 `candidates`、`others`），`DELETE` 只回 `{"status":"off"}`。`failed` 的 `error` 帶原因與 pane 最後 40 行。iframe 網址用 `http://${location.hostname}:${port}/`。
 
 ### `GET /api/bots/{id}/preview`
