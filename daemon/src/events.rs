@@ -379,6 +379,11 @@ async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate
         tokio::spawn(async move {
             crate::tui_prompts::dismiss_if_survey(&app2, &run2).await;
         });
+        // grok 撞週限的畫面（#222）：herdr 把它判成 `blocked`、沒有 working->idle 那條邊，畫面掃描不會自己跑。
+        // 不是 grok 的 bot、或畫面上沒有那兩句，掃描什麼都不做；一個鍵都不按（選項 1、2 是付費）。
+        if crate::db::bot(&app.db, &run.bot_id).await.ok().flatten().is_some_and(|b| b.kind == "grok") {
+            crate::lifecycle::schedule_codex_notice_capture(app, &run.bot_id, &run.id);
+        }
         // 子 agent 停在提問時，它的父 agent 不會自己知道（`child_alerts`）：UI 的徽章是給人看的，
         // 父 agent 是一顆 CLI 行程，沒有人打字進去就什麼都收不到。
         crate::child_alerts::on_child_blocked(app, &run);

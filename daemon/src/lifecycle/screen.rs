@@ -442,7 +442,23 @@ pub(crate) fn grok_limit_hit_line(line: &str) -> Option<String> {
     hit.then(|| s.to_string())
 }
 
-/// 同一張畫面上所有值得記一筆的 grok 通知（目前只有撞額度）。重複的只留第一句。
+/// grok 那一句撞的是哪個額度窗、保底撐多久（橫幅沒寫重置時間）。週限存在 `seven_day`（grok 只有週窗）；
+/// 402 `usage balance exhausted`（credits 用完）沒有窗、認不出的也一樣，用最短的 5 小時——
+/// 寧可早一點放行讓它再撞一次。之後 grok `/usage` 探測的讀數會校正（`quota::set`）。
+pub(crate) fn grok_limit_window(line: &str) -> (Option<&'static str>, i64) {
+    let low = line.to_ascii_lowercase();
+    if low.contains("weekly") {
+        (Some("seven_day"), 24 * 7)
+    } else if low.contains("session") || low.contains("5-hour") {
+        (Some("five_hour"), 5)
+    } else {
+        (None, 5)
+    }
+}
+
+/// 同一張畫面上所有值得記一筆的 grok 通知（目前只有撞額度）。重複的只留第一句；**有額度窗的那一句排前面**
+/// （`Turn failed: … (402): … usage balance exhausted` 在 `You hit your weekly limit.` 上面，但只有後者說得出是哪個窗）：
+/// `limit_banner::sighting` 一個 run 第一次讀畫面時只有第一句算新的，後面同一次讀到的都當舊字跳過。
 pub(crate) fn grok_limit_notice_lines(text: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for line in text.lines() {
@@ -452,6 +468,7 @@ pub(crate) fn grok_limit_notice_lines(text: &str) -> Vec<String> {
             }
         }
     }
+    out.sort_by_key(|l| grok_limit_window(l).0.is_none());
     out
 }
 

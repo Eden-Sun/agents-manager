@@ -380,14 +380,21 @@ pub(crate) async fn mark_claude_limit_hit(app: &Arc<App>, bot: &db::Bot, line: &
 /// 本機 `codex` 那一格，本機帳號被當成用盡、派工停擺，真正用盡的遠端身分反而沒擋）、那台的身分表還沒偵測完、排著的
 /// prompt 蓋不上憑據，都回錯並記成欠著；補上之前 flush 與派送前照欠著的那一筆擋。
 pub(crate) async fn mark_codex_limit_hit(app: &Arc<App>, bot: &db::Bot, notice: &str) -> Result<()> {
-    // grok 撞週限時畫的是自己的字（`screen::grok_limit_hit_line`），但要記的東西一模一樣：
-    // 這顆 bot 的主機與身分那一格標成用盡、派工前擋住。橫幅裡沒有時間，`until` 就是 None
-    // （2026-09-19 w168:pB7：以前 grok 根本不走這條，bot 一直停在 blocked、額度還顯示有餘）。
-    if !matches!(bot.kind.as_str(), "codex" | "grok") {
-        return Ok(());
+    // grok 撞週限時畫的是自己的字（`screen::grok_limit_hit_line`），走同一條畫面擷取（2026-09-19 w168:pB7：以前 grok 根本不走這條，
+    // bot 一直停在 blocked、額度還顯示有餘），但撞限記在 **grok** 那一格、帶額度窗與保底到期（#222）：橫幅裡沒有時間，
+    // 記成 `until: None` 就是永不過期、`/usage` 探測也校正不到，而且 `record` 對 codex 橫幅一律算 `codex` 的 key，
+    // 會把 codex 標成用盡。
+    match bot.kind.as_str() {
+        "codex" => {
+            let until = crate::lifecycle::parse_codex_try_again(notice);
+            mark_limit_hit(app, bot, notice, Banner::Codex { until }).await
+        }
+        "grok" => {
+            let (bucket, hours) = crate::lifecycle::grok_limit_window(notice);
+            mark_limit_hit(app, bot, notice, Banner::Grok { bucket, hours }).await
+        }
+        _ => Ok(()),
     }
-    let until = crate::lifecycle::parse_codex_try_again(notice);
-    mark_limit_hit(app, bot, notice, Banner::Codex { until }).await
 }
 
 async fn mark_limit_hit(app: &Arc<App>, bot: &db::Bot, line: &str, banner: Banner) -> Result<()> {
@@ -428,6 +435,9 @@ enum Banner {
     /// codex 的撞限橫幅：到期是橫幅上寫的時間，撞的當下解析（晚點補寫時裸鐘點可能已經過了）；沒寫就沒有
     /// （credits 用完，等下一個成功回合清）。
     Codex { until: Option<String> },
+    /// grok 的撞額度畫面（#222）：桶名是額度窗（`seven_day`／`five_hour`，認不出就沒有），橫幅沒寫重置時間，
+    /// 到期是撞的那一刻加保底時數（[`crate::lifecycle::grok_limit_window`]）。
+    Grok { bucket: Option<&'static str>, hours: i64 },
 }
 
 fn identity_of(bot: &db::Bot) -> Option<String> {
@@ -450,6 +460,12 @@ impl Mark {
             Banner::Codex { until } => {
                 crate::quota::LimitHit { message: self.line.clone(), until: until.clone(), at: self.at.clone(), bucket: None }
             }
+            Banner::Grok { bucket, hours } => {
+                let until = chrono::DateTime::parse_from_rfc3339(&self.at)
+                    .ok()
+                    .map(|t| crate::db::iso_at(t.with_timezone(&chrono::Utc) + chrono::Duration::hours(*hours)));
+                crate::quota::LimitHit { message: self.line.clone(), until, at: self.at.clone(), bucket: bucket.map(String::from) }
+            }
         }
     }
 }
@@ -462,6 +478,10 @@ async fn record(app: &Arc<App>, bot_id: &str, m: &Mark) -> Result<()> {
         Banner::Codex { .. } => {
             let base = crate::quota::resolve_quota_base(app, &host, "codex", m.identity.as_deref()).await?;
             crate::lifecycle::apply_codex_limit_hit_quota(app, &host, &base, m.hit()).await
+        }
+        Banner::Grok { bucket, .. } => {
+            let base = crate::quota::resolve_quota_base(app, &host, "grok", m.identity.as_deref()).await?;
+            record_grok(app, &host, &base, m, *bucket).await
         }
     };
     crate::lifecycle::quota_hold::stamp_queued(app, bot_id, m.identity.as_deref(), &hit).await
@@ -494,6 +514,52 @@ async fn record_claude(app: &Arc<App>, host: &str, m: &Mark) -> Result<crate::qu
     q.updated_at = db::now();
     crate::quota::set(app, host, &base, q).await;
     Ok(hit)
+}
+
+/// grok 的一格（`grok`／`grok:<身分>`）：那個窗標成用完，撞限掛上去。窗沒有讀數時補一個 100% 的（重置時間留給
+/// `/usage` 探測），額度面板才看得到「用完了」。
+async fn record_grok(app: &Arc<App>, host: &str, base: &str, m: &Mark, bucket: Option<&'static str>) -> crate::quota::LimitHit {
+    let key = crate::quota::quota_key(host, base);
+    let prev = app.quotas.lock().await.get(&key).cloned();
+    let hit = m.hit();
+    // 已經記著、還沒過期的撞限：同一句再看到不是新證據（撞的那一刻不往後推）；到期比較晚的也不被較短的蓋掉
+    // （同一張畫面兩句：402 credits 用完只有 5 小時的保底，`You hit your weekly limit.` 是 7 天，後到的不能把週限縮短）。
+    // 已經過期的不算：過期後真的又被擋一次。
+    if let Some(h) = prev.as_ref().and_then(|q| q.limit_hit.as_ref()).filter(|h| !crate::quota::limit_hit_expired(Some(h))) {
+        let later = |a: &Option<String>, b: &Option<String>| match (a, b) {
+            (Some(a), Some(b)) => chrono::DateTime::parse_from_rfc3339(a).ok() > chrono::DateTime::parse_from_rfc3339(b).ok(),
+            (None, Some(_)) => true,
+            _ => false,
+        };
+        if h.message == hit.message || !later(&hit.until, &h.until) {
+            return h.clone();
+        }
+    }
+    let mut q = prev.unwrap_or_else(|| crate::quota::Quota {
+        five_hour: None,
+        seven_day: None,
+        fable: None,
+        reset_credits: None,
+        limit_hit: None,
+        plan: None,
+        updated_at: db::now(),
+        source: "grok-limit-hit".into(),
+        account: m.identity.clone(),
+        host: host.to_string(),
+    });
+    let full = |w: &mut Option<crate::quota::Window>| match w {
+        Some(w) => w.used_pct = 100.0,
+        None => *w = Some(crate::quota::Window { used_pct: 100.0, resets_at: None }),
+    };
+    match bucket {
+        Some("seven_day") => full(&mut q.seven_day),
+        Some("five_hour") => full(&mut q.five_hour),
+        _ => {}
+    }
+    q.limit_hit = Some(hit.clone());
+    q.updated_at = db::now();
+    crate::quota::set(app, host, base, q).await;
+    hit
 }
 
 /// bot → 欠著的那一筆撞限（只留最新的）。只在記憶體：daemon 在補上之前重啟就沒了——`StopFailure` 那條路回錯、
