@@ -1,0 +1,270 @@
+# 上游新版分診的第一層：決定性規則（issue #204 §2）。改規則＝改這個檔＝有 diff、有 review。
+#
+# 判定順序（rules.rs）：
+#   1. `hard_drop` 任何一條命中 → dropped（連 kept 類別與動詞規則都輸它）。
+#   2. `kept`（各類別）與 `verbs`（Removed／Deprecated／Changed 開頭）命中 → kept，categories 列出所有命中的類別。
+#   3. 沒有 kept、但 `soft_drop` 命中 → dropped。供應商名字常常只是附註（2.1.277 的 AGENTS.md 條目
+#      「not yet on Bedrock…」），所以軟 drop 輸給任何 kept 類別。
+#   4. 都沒中 → unmatched（照樣送模型，但放在第二張精簡清單；比例本身就是規則該不該修的指標）。
+#
+# 每條規則 `name` 會被記進帳本。`kind`：
+#   prefix   文字以 pattern 開頭（不分大小寫）
+#   contains 子字串（不分大小寫）
+#   word     子字串，且前一個字元不是英數（「hook」命中 hooks、不命中 webhook）；不分大小寫
+#   exact    前後都不是英數／底線；預設區分大小寫（`Stop`、`Task`）
+#   flag     `--` 後接小寫字母與連字號的 CLI 旗標（pattern 忽略）
+#   env      CLAUDE_*／ANTHROPIC_* 這類全大寫底線變數，pattern 是前綴清單
+#   camel    反引號裡的 camelCase 設定鍵（pattern 忽略）
+# `case_sensitive` 可逐條覆寫（預設：exact 區分、其他不分）。
+
+# ───────────────────────────── claude ─────────────────────────────
+[[claude.hard_drop]]
+name = "tag-surface"
+kind = "prefix"
+patterns = ["[VSCode]", "[JetBrains]", "[Claude Code on the web]", "[Claude Tag]", "[Cowork]"]
+
+[[claude.hard_drop]]
+name = "gateway"
+kind = "contains"
+patterns = ["gateway"]
+
+[[claude.hard_drop]]
+name = "marketplace"
+kind = "contains"
+patterns = ["marketplace"]
+
+[[claude.hard_drop]]
+name = "plugin-command"
+kind = "contains"
+patterns = ["/plugin"]
+
+[[claude.hard_drop]]
+name = "platform-windows"
+kind = "word"
+case_sensitive = true
+patterns = ["Windows", "winget", "apk", "WSL"]
+
+[[claude.hard_drop]]
+name = "ultrareview"
+kind = "contains"
+patterns = ["/ultrareview"]
+
+[[claude.hard_drop]]
+name = "artifact"
+kind = "word"
+case_sensitive = true
+patterns = ["Artifact"]
+
+[[claude.hard_drop]]
+name = "console-sign-in"
+kind = "contains"
+patterns = ["Console sign-in"]
+
+[[claude.soft_drop]]
+name = "cloud-provider"
+kind = "word"
+case_sensitive = true
+patterns = ["Bedrock", "Vertex", "Foundry"]
+
+[[claude.soft_drop]]
+name = "agent-sdk"
+kind = "contains"
+patterns = ["Agent SDK"]
+
+[[claude.verbs]]
+name = "verb-behavior-change"
+category = "behavior-change"
+kind = "prefix"
+patterns = ["Removed", "Deprecated", "Changed"]
+
+[[claude.kept]]
+name = "settings-file"
+category = "settings"
+kind = "contains"
+patterns = ["settings.json", "/config"]
+
+[[claude.kept]]
+name = "settings-key"
+category = "settings"
+kind = "camel"
+patterns = []
+
+[[claude.kept]]
+name = "env-var"
+category = "env"
+kind = "env"
+patterns = ["CLAUDE_", "ANTHROPIC_"]
+
+[[claude.kept]]
+name = "hook-word"
+category = "hook"
+kind = "word"
+patterns = ["hook"]
+
+[[claude.kept]]
+name = "hook-event"
+category = "hook"
+kind = "exact"
+patterns = ["SessionStart", "Stop", "StopFailure", "SubagentStart", "SubagentStop", "PostToolUse"]
+
+[[claude.kept]]
+name = "session-flag"
+category = "session"
+kind = "contains"
+patterns = ["--resume", "--continue", "--fork-session", "/clear"]
+
+[[claude.kept]]
+name = "session-word"
+category = "session"
+kind = "word"
+patterns = ["transcript", "session"]
+
+[[claude.kept]]
+name = "statusline"
+category = "statusline"
+kind = "contains"
+patterns = ["statusLine", "status line", "/status"]
+
+[[claude.kept]]
+name = "quota"
+category = "quota"
+kind = "word"
+patterns = ["usage", "rate limit", "limit", "cost", "/usage", "prompt cach"]
+
+[[claude.kept]]
+name = "tui-input"
+category = "tui"
+kind = "word"
+patterns = ["prompt", "paste", "typed", "keybinding", "queue", "spinner", "interface error", "dialog"]
+
+[[claude.kept]]
+name = "tui-enter"
+category = "tui"
+kind = "word"
+case_sensitive = true
+patterns = ["Enter"]
+
+[[claude.kept]]
+name = "cli-flag"
+category = "cli"
+kind = "flag"
+patterns = []
+
+[[claude.kept]]
+name = "cli-command"
+category = "cli"
+kind = "contains"
+patterns = ["claude -p", "claude update"]
+
+[[claude.kept]]
+name = "subagent-word"
+category = "subagent"
+kind = "word"
+patterns = ["subagent", "teammate", "background", "--bg", "claude agents"]
+
+[[claude.kept]]
+name = "subagent-task"
+category = "subagent"
+kind = "word"
+case_sensitive = true
+patterns = ["Task"]
+
+[[claude.kept]]
+name = "auth"
+category = "auth"
+kind = "word"
+patterns = ["login", "logout", "logged out", "/login"]
+
+[[claude.kept]]
+name = "instructions"
+category = "instructions"
+kind = "word"
+patterns = ["CLAUDE.md", "AGENTS.md", "memory"]
+
+# ───────────────────────────── codex ─────────────────────────────
+# releases body 在 `## Changelog`（PR 流水帳）之前截斷，只留策展過的段落（mod.rs）。
+[[codex.hard_drop]]
+name = "platform-windows"
+kind = "word"
+case_sensitive = true
+patterns = ["Windows", "WSL"]
+
+[[codex.hard_drop]]
+name = "voice"
+kind = "word"
+patterns = ["voice"]
+
+[[codex.hard_drop]]
+name = "python-sdk"
+kind = "contains"
+patterns = ["Python SDK"]
+
+[[codex.hard_drop]]
+name = "touch-id"
+kind = "contains"
+patterns = ["Touch ID"]
+
+[[codex.hard_drop]]
+name = "bazel"
+kind = "word"
+patterns = ["Bazel"]
+
+[[codex.soft_drop]]
+name = "cloud-provider"
+kind = "word"
+case_sensitive = true
+patterns = ["Bedrock"]
+
+[[codex.verbs]]
+name = "verb-behavior-change"
+category = "behavior-change"
+kind = "prefix"
+patterns = ["Removed", "Deprecated", "Changed"]
+
+[[codex.kept]]
+name = "tui"
+category = "tui"
+kind = "word"
+patterns = ["TUI", "status row", "composer"]
+
+[[codex.kept]]
+name = "hook"
+category = "hook"
+kind = "word"
+patterns = ["notify", "hook"]
+
+[[codex.kept]]
+name = "session"
+category = "session"
+kind = "word"
+patterns = ["resume", "fork", "thread", "rollout"]
+
+[[codex.kept]]
+name = "quota"
+category = "quota"
+kind = "word"
+patterns = ["usage limit"]
+
+[[codex.kept]]
+name = "app-server"
+category = "app-server"
+kind = "contains"
+patterns = ["app-server"]
+
+[[codex.kept]]
+name = "config"
+category = "settings"
+kind = "contains"
+patterns = ["config.toml"]
+
+[[codex.kept]]
+name = "cli-flag"
+category = "cli"
+kind = "flag"
+patterns = []
+
+[[codex.kept]]
+name = "sandbox"
+category = "sandbox"
+kind = "word"
+patterns = ["approval", "sandbox"]

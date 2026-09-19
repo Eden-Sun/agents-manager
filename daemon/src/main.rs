@@ -52,6 +52,7 @@ mod panes;
 mod projection;
 mod quota;
 mod quota_claude;
+mod release_triage;
 mod quota_grok;
 mod read_marks;
 mod remote_cargo;
@@ -132,6 +133,30 @@ enum Cmd {
         #[arg(long)]
         last_notified: Option<String>,
     },
+    /// 上游新版分診（issue #204）：抓 claude／codex 的 changelog，把 `(帳本已分診的最大版本, 最新正式版]`
+    /// 每一版切成逐條 entry、用 `release_triage/rules.toml` 分桶、記進帳本，JSON 印到 stdout（`--json`；
+    /// 契約 `{kind,from,to,pending:[{version,kept,unmatched,dropped_count}]}`）。抓不到 feed 時 exit 1，
+    /// 這一輪不做（不當成沒有新版）。第一次跑只記磁碟版本當基準、不回 pending。
+    ReleaseTriageCheck {
+        /// claude | codex
+        #[arg(long)]
+        kind: String,
+        /// 補歷史：從這一版（不含）起算，忽略帳本裡的最大版本。
+        #[arg(long)]
+        since: Option<String>,
+        /// 輸出 JSON（目前唯一格式，旗標留給 kick 腳本明示）。
+        #[arg(long)]
+        json: bool,
+        /// 指定「磁碟上的版本」，省得第一次跑時去問 login shell（測試用）。
+        #[arg(long, hide = true)]
+        installed: Option<String>,
+        /// 帳本所在的 SQLite（預設 `AM_DATA_DIR`／預設資料目錄底下的 agents-manager.sqlite3）。
+        #[arg(long, hide = true)]
+        db: Option<PathBuf>,
+        /// 不抓網路，直接讀這個 feed 檔（測試用）。
+        #[arg(long, hide = true)]
+        feed_file: Option<PathBuf>,
+    },
     /// Claude Code statusLine command for daemon-started claude bots (v4.0): reports the
     /// rate limits to the daemon, then runs the user's own statusLine command. Always exits 0.
     Statusline {
@@ -197,6 +222,19 @@ fn main() {
                 })
             );
             std::process::exit(0);
+        }
+        Cmd::ReleaseTriageCheck { kind, since, json: _, installed, db, feed_file } => {
+            let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+            match rt.block_on(release_triage::run_check(release_triage::CheckArgs { kind, since, installed, db, feed_file })) {
+                Ok(report) => {
+                    println!("{}", serde_json::to_string(&report).expect("serialize CheckReport"));
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    eprintln!("release-triage-check: {e:#}");
+                    std::process::exit(1);
+                }
+            }
         }
         Cmd::Serve { config, dev_watch_all_panes } => {
             let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
