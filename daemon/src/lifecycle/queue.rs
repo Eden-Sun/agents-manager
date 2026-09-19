@@ -14,14 +14,30 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
             return Ok(());
         }
     };
+    // 使用者按停止時沒撤成、還在等 bot 起來的那幾則（#159）：先補撤，補不上就這一輪一則都不送（一個對話只有一筆 queued）。
+    if let Err(e) = super::start_send::settle_withdrawals_locked(app, bot_id).await {
+        schedule_flush_retry(app, bot_id, WITHDRAWAL_RECHECK);
+        return Err(e.context("使用者停止時沒撤成的訊息還是撤不掉：這一輪不送，稍後再試"));
+    }
     let Some(turn) = db::queued_turn(&app.db, &conv).await? else { return Ok(()) };
     // 交辦已經不要了（cancel／superseded／failed）：撤銷，不送。API 做決定的當下已經撤過一次，這裡是保險——
     // 繞過 API 改了狀態、或決定 commit 之後還沒撤就重啟，都不能讓一則已取消的指令在錯的時機送到（AGM 2026-09-16）。
-    if let Some(why) = withdrawn_assignment_reason(app, &turn.id).await {
-        if let Err(e) = revoke_queued_turn(app, &turn.id, &why).await {
-            tracing::error!(bot = %bot_id, turn = %turn.id, error = %e, "could not revoke a withdrawn queued prompt");
+    // 讀不到交辦的狀態不等於還要、撤不掉也不等於撤完了（#159）：都留在佇列（不認領、不花重試、一個字都不送），
+    // 短 timer 再判斷一次。
+    match assignment_withdrawal(app, &turn.id).await {
+        Ok(None) => {}
+        Ok(Some(why)) => {
+            if let Err(e) = revoke_queued_turn(app, &turn.id, &why).await {
+                schedule_flush_retry(app, bot_id, WITHDRAWAL_RECHECK);
+                return Err(e.context("交辦已經不要了，排著的這一則卻撤不掉：留在佇列，稍後再撤"));
+            }
+            return Ok(());
         }
-        return Ok(());
+        Err(e) => {
+            tracing::warn!(bot = %bot_id, turn = %turn.id, error = %e, "讀不到交辦是否已撤回：排著的 prompt 留在佇列，稍後重新判斷");
+            schedule_flush_retry(app, bot_id, WITHDRAWAL_RECHECK);
+            return Err(e.context("讀不到交辦是否已撤回：排著的 prompt 留在佇列"));
+        }
     }
     // Put back with a backoff: other wake-ups must not spend its retries early. Its timer brings it back.
     if let Some(at) = turn.next_flush_at.as_deref().and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok()) {
@@ -112,10 +128,14 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
     }
     // Claim it first. If the CAS loses, another flush got there and this one has nothing to do.
     // 認領只認領到此刻還在跑的 run（issue #125）：讀完 run 之後它被收掉的話，這一筆留在佇列給下一個 run。
+    // 掛的交辦也要此刻還要（#159）：上面讀完到這裡之間才被取消的，不被領走；下一輪照它的狀態撤。
     match super::turn_controller::claim_queued(&mut *app.db.acquire().await?, &turn.id, &run.id).await? {
         super::turn_controller::Outcome::Applied => {}
         other => {
             tracing::info!(bot = %bot_id, turn = %turn.id, run = %run.id, ?other, "排隊的 prompt 沒認領到：留在佇列");
+            if matches!(other, super::turn_controller::Outcome::Fenced(_)) {
+                schedule_flush_retry(app, bot_id, WITHDRAWAL_RECHECK);
+            }
             return Ok(());
         }
     }
@@ -306,10 +326,17 @@ async fn defer_queued_turn(
     Ok(Deferred::Requeued(delay))
 }
 
+/// 讀不到交辦、或排著的那一則撤不掉時，flush 多久之後再判斷一次（同維護窗口讀不到的那一條，#127）。
+const WITHDRAWAL_RECHECK: std::time::Duration = std::time::Duration::from_secs(crate::supervisor::maintenance::UNREADABLE_RETRY_SECS as u64);
+
+/// 掛著這些狀態的交辦，它排著的那一則不送（[`assignment_withdrawal`]；`turn_controller::claim_queued` 認領時也看這張表）。
+pub(crate) const WITHDRAWN_ASSIGNMENT: [&str; 5] = ["cancelled", "superseded", "failed", "blocked", "quota_blocked"];
+
 /// 這筆 queued turn 掛的交辦已經不要了（cancelled／superseded／failed，或被保險絲停在 blocked）→ 寫進對話的撤銷理由；
-/// 還要、或沒掛交辦 → `None`。blocked 的交辦不在執行中，就算送出去，結果也沒有地方收（AGM 會以為沒送出而重派）。
-pub(crate) async fn withdrawn_assignment_reason(app: &Arc<App>, turn_id: &str) -> Option<String> {
-    let a = crate::supervisor::store::assignment_by_turn(&app.db, turn_id).await.ok()??;
+/// 還要、或沒掛交辦 → `Ok(None)`。blocked 的交辦不在執行中，就算送出去，結果也沒有地方收（AGM 會以為沒送出而重派）。
+/// **讀不到是錯誤，不是「還要」**（#159）：不知道交辦還要不要，就不能送。
+pub(crate) async fn assignment_withdrawal(app: &Arc<App>, turn_id: &str) -> anyhow::Result<Option<String>> {
+    let Some(a) = crate::supervisor::store::assignment_by_turn(&app.db, turn_id).await? else { return Ok(None) };
     let (what, detail) = match a.status.as_str() {
         "cancelled" => ("已取消", a.review_reason.as_deref()),
         "superseded" => ("已被後續交辦取代", a.review_reason.as_deref()),
@@ -317,10 +344,19 @@ pub(crate) async fn withdrawn_assignment_reason(app: &Arc<App>, turn_id: &str) -
         "blocked" => ("已停在 blocked", a.error.as_deref()),
         // 額度回來後 controller 會用下一個 `#r<n>` 另開一則重送；這一則送出去就是做兩次。
         "quota_blocked" => ("在等額度回來，屆時會用新的一則重送", None),
-        _ => return None,
+        _ => return Ok(None),
     };
     let why = detail.map(str::trim).filter(|r| !r.is_empty()).map(|r| format!("（{r}）")).unwrap_or_default();
-    Some(format!("排隊中的這則沒有送出：交辦 {} {what}{why}，一併撤銷，不會再送。", a.id))
+    Ok(Some(format!("排隊中的這則沒有送出：交辦 {} {what}{why}，一併撤銷，不會再送。", a.id)))
+}
+
+/// review API 做完決定當下的那一次撤銷用（`supervisor::api`）：讀不到就這一次先不撤、記一行。不會因此送出去——
+/// flush 送之前再判斷一次，讀不到就不送（[`assignment_withdrawal`]）。
+pub(crate) async fn withdrawn_assignment_reason(app: &Arc<App>, turn_id: &str) -> Option<String> {
+    assignment_withdrawal(app, turn_id).await.unwrap_or_else(|e| {
+        tracing::warn!(turn = turn_id, error = %e, "讀不到交辦是否已撤回：這一次先不撤，flush 送之前會再判斷（讀不到就不送）");
+        None
+    })
 }
 
 /// 撤銷一筆還在排隊的 turn：標成 failed、寫明理由、釋放這個對話的 queued 名額，**不送**。
@@ -1153,6 +1189,94 @@ mod flush_queue_tests {
         queued_assignment(&f).await;
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
         assert_eq!(turn(&app, &f.turn_id).await.status, "in_flight");
+    }
+
+    /// 之後每一句讀 `supervisor_assignments` 的都失敗（`no such table`）——DB 出錯的樣子（同 `maintenance::fault`）。
+    async fn break_assignment_reads(app: &Arc<App>) {
+        sqlx::query("ALTER TABLE supervisor_assignments RENAME TO supervisor_assignments_unreadable").execute(&app.db).await.unwrap();
+    }
+
+    async fn restore_assignment_reads(app: &Arc<App>) {
+        sqlx::query("ALTER TABLE supervisor_assignments_unreadable RENAME TO supervisor_assignments").execute(&app.db).await.unwrap();
+    }
+
+    /// #159 驗收一、二、五：交辦已經不要了（cancelled／superseded／failed／blocked／quota_blocked），flush 卻讀不到它——
+    /// 以前 `.ok()??` 把讀取錯誤當成「沒有撤銷理由」，照樣認領、打進 pane，被取消的工作真的開始跑。讀不到不等於還要：
+    /// 留在佇列、不認領、不花重試、一個字都不送，掛短 timer；讀得到之後照它的狀態撤掉，永遠不送。
+    #[tokio::test]
+    async fn a_queued_prompt_whose_assignment_cannot_be_read_is_never_sent() {
+        for status in WITHDRAWN_ASSIGNMENT {
+            let f = queued("test").await;
+            let app = f.env.app.clone();
+            f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
+            sqlx::query("UPDATE turns SET prompt_text = '請釋放 fence 21' WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+            let a = queued_assignment(&f).await;
+            sqlx::query("UPDATE supervisor_assignments SET status = ? WHERE id = ?").bind(status).bind(&a).execute(&app.db).await.unwrap();
+            forget_queue_retry_timer(&f.bot_id);
+            break_assignment_reads(&app).await;
+
+            assert!(flush_queued_locked(&app, &f.bot_id).await.is_err(), "{status}：讀不到，不回普通的成功");
+            let t = turn(&app, &f.turn_id).await;
+            assert_eq!((t.status.as_str(), t.run_id.as_deref(), t.flush_retries), ("queued", None, 0), "{status}：留在佇列、不認領、不花重試");
+            assert_eq!(typed(&f, "fence 21"), 0, "{status}：一個字都沒送");
+            assert!(queue_retry_timer_armed(&f.bot_id), "{status}：掛了 timer，稍後重新判斷");
+
+            restore_assignment_reads(&app).await;
+            flush_queued_locked(&app, &f.bot_id).await.unwrap();
+            assert_eq!(turn(&app, &f.turn_id).await.status, "failed", "{status}：讀得到了就撤");
+            assert_eq!(typed(&f, "fence 21"), 0, "{status}：永遠不送");
+        }
+    }
+
+    /// #159：交辦已經取消、要撤排著的那一則時寫不進去——以前只記一行 error、回 Ok、不掛 timer：沒撤成卻當撤完了，那一筆
+    /// 佔著佇列，直到下一次剛好有人叫醒 flush。現在留在佇列、回錯誤、掛短 timer；DB 好了就撤，一個字都不送。
+    #[tokio::test]
+    async fn a_withdrawn_prompt_that_cannot_be_revoked_stays_queued_and_is_retried() {
+        let f = queued("test").await;
+        let app = f.env.app.clone();
+        f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
+        sqlx::query("UPDATE turns SET prompt_text = '請釋放 fence 21' WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        let a = queued_assignment(&f).await;
+        sqlx::query("UPDATE supervisor_assignments SET status = 'cancelled' WHERE id = ?").bind(&a).execute(&app.db).await.unwrap();
+        forget_queue_retry_timer(&f.bot_id);
+        sqlx::query("CREATE TRIGGER lost_revoke BEFORE UPDATE OF status ON turns WHEN NEW.status = 'failed' BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END")
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        assert!(flush_queued_locked(&app, &f.bot_id).await.is_err(), "撤不掉：不回普通的成功");
+        assert_eq!(turn(&app, &f.turn_id).await.status, "queued");
+        assert!(queue_retry_timer_armed(&f.bot_id), "掛了 timer，稍後再撤");
+        assert_eq!(typed(&f, "fence 21"), 0);
+
+        sqlx::query("DROP TRIGGER lost_revoke").execute(&app.db).await.unwrap();
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+        assert_eq!(turn(&app, &f.turn_id).await.status, "failed");
+        assert_eq!(typed(&f, "fence 21"), 0, "永遠不送");
+    }
+
+    /// #159（同一類）：flush 讀完交辦（還要）、還沒認領的那一瞬，交辦被取消（review API 不拿 bot 鎖）。認領那一句本身帶上
+    /// 「掛的交辦此刻還要」：已經取消的那一則不被領走、不打進 pane；下一輪照它的狀態撤掉。
+    #[tokio::test]
+    async fn an_assignment_cancelled_between_the_check_and_the_claim_is_not_claimed() {
+        let f = queued("test").await;
+        let app = f.env.app.clone();
+        f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
+        sqlx::query("UPDATE turns SET prompt_text = '請釋放 fence 21' WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        let a = queued_assignment(&f).await;
+        let (app2, a2) = (app.clone(), a.clone());
+        super::super::race_point::arm("flush_before_claim", &f.bot_id, move || async move {
+            sqlx::query("UPDATE supervisor_assignments SET status = 'cancelled' WHERE id = ?").bind(&a2).execute(&app2.db).await.unwrap();
+        });
+
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+        let t = turn(&app, &f.turn_id).await;
+        assert_eq!((t.status.as_str(), t.run_id.as_deref()), ("queued", None), "取消了就不領走");
+        assert_eq!(typed(&f, "fence 21"), 0, "一個字都沒打");
+
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+        assert_eq!(turn(&app, &f.turn_id).await.status, "failed", "下一輪撤掉");
+        assert_eq!(typed(&f, "fence 21"), 0);
     }
 
     /// run 結束（pane 不見、agent 退出）：它排著的 queued 收掉、名額釋放，交辦照一般流程變成失敗讓 AGM 看得到。

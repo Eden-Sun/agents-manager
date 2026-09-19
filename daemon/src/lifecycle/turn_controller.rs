@@ -273,10 +273,13 @@ pub async fn fail_with_native_evidence(
 /// 送達結果寫回時照證據打開。
 pub async fn claim_queued(conn: &mut sqlx::SqliteConnection, turn_id: &str, run_id: &str) -> Result<Outcome> {
     edge("queued", "in_flight", "認領排隊")?;
-    let done = sqlx::query(
+    // 掛的交辦此刻已經不要了也不認領（#159）：flush 讀完交辦到這一句之間才被取消的，同一句擋下。
+    let withdrawn = super::queue::WITHDRAWN_ASSIGNMENT.map(|s| format!("'{s}'")).join(",");
+    let done = sqlx::query(&format!(
         "UPDATE turns SET status='in_flight', run_id=?, auto_resend=0
-          WHERE id=? AND status='queued' AND EXISTS (SELECT 1 FROM runs WHERE id=? AND state='running')",
-    )
+          WHERE id=? AND status='queued' AND EXISTS (SELECT 1 FROM runs WHERE id=? AND state='running')
+            AND NOT EXISTS (SELECT 1 FROM supervisor_assignments a WHERE a.turn_id = turns.id AND a.status IN ({withdrawn}))",
+    ))
     .bind(run_id)
     .bind(turn_id)
     .bind(run_id)
@@ -285,7 +288,7 @@ pub async fn claim_queued(conn: &mut sqlx::SqliteConnection, turn_id: &str, run_
     if done.rows_affected() > 0 {
         return Ok(Outcome::Applied);
     }
-    settled_or_fenced(&mut *conn, turn_id, "queued", "in_flight", "認領排隊", "要認領到的 run 已經不在跑").await
+    settled_or_fenced(&mut *conn, turn_id, "queued", "in_flight", "認領排隊", "要認領到的 run 已經不在跑，或掛的交辦已經不要了").await
 }
 
 /// **認領過但沒打字，放回佇列**：`in_flight -> queued`，同一句拔掉 run、重試次數加一、排下一次嘗試。
