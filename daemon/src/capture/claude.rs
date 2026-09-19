@@ -169,6 +169,22 @@ fn codex_usage_notice_line(line: &str) -> Option<String> {
     }
 }
 
+/// claude 在輸入框上方靠右印的版本列：`current: 2.1.276 · latest: 2.1.277 ✔ Update installed · Restart to update`
+/// （也可能只有 `current … · latest …`，或只剩 `✔ Update installed …`）。回合結束後它還在畫面上，
+/// 終端備援抓回覆時會被當成回覆的最後一行（2026-09-19 使用者截圖，AM-1-XH-2）。
+/// 只認整行就是這條版本列，回覆裡**提到**這句話的不算。
+fn is_update_banner(s: &str) -> bool {
+    let s = s.trim();
+    if let Some(rest) = s.strip_prefix("current: ") {
+        let Some((cur, after)) = rest.split_once(" · latest: ") else { return false };
+        let latest = after.split_whitespace().next().unwrap_or("");
+        let tail = after[latest.len()..].trim();
+        let is_ver = |v: &str| !v.is_empty() && v.chars().all(|c| c.is_ascii_alphanumeric() || ".-+".contains(c));
+        return is_ver(cur) && is_ver(latest) && (tail.is_empty() || tail.starts_with('✔'));
+    }
+    s.starts_with("✔ Update installed")
+}
+
 fn is_noise(s: &str) -> bool {
     if s.is_empty() {
         return false;
@@ -178,6 +194,9 @@ fn is_noise(s: &str) -> bool {
         return true;
     }
     if s.contains("Auto-update failed") {
+        return true;
+    }
+    if is_update_banner(s) {
         return true;
     }
     if s.chars()
