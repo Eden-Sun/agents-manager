@@ -162,13 +162,15 @@ async fn stop_locked(app: &Arc<App>, bot_id: &str, for_restart: bool, only_if_id
     {
         super::race_point::hit("stop_before_stopped", bot_id).await;
     }
-    match commit_stopped(app, &run.id).await {
+    match commit_stopped(app, &run.id, for_restart).await {
         Ok(StopCommit::Applied) => after_stop(app, bot_id, &run, &host).await,
         // 被 pane-exit 事件收成 `exited`（已改標成 `stopped`）：一般的收尾那條路做過了，不做第二份；
         // 只補 stop 才有的那一份（撤回等它起來的訊息）。
         Ok(StopCommit::Relabelled) => super::start_send::withdraw_on_stop(app, bot_id).await,
         Ok(StopCommit::Lost) => {}
         // agent 已經停了，終態卻寫不進去（#146 驗收 2）：不回一般的成功，佇列與 watcher 等終態成立再動，排重試。
+        // 被 pane-exit 先收成 `exited`、改標回 `stopped` 寫不進去也是這一支（#146 重開 A）：留著 `exited` 就是在說
+        // 「它自己掛了」，autostart 的 bot 會被報 `bot_stopped`。重試（`FinishStop`）照樣補改標。
         Err(e) => {
             tracing::warn!(bot = %bot.name, run = %run.id, error = %e, "the agent is stopped but its run could not be recorded as stopped");
             let how = if for_restart {
@@ -201,9 +203,6 @@ enum StopCommit {
     Lost,
 }
 
-/// `stopping → stopped`。CAS 輸了而且是被不拿 bot 鎖的 pane-exit 事件收成 `exited`（多半是 stop 自己關的 pane
-/// 觸發的）：改標成 `stopped`——兩個都是終態、不復活任何東西，但 `stopped` 才是「使用者要它停」的紀錄（#131，
-/// incident 探針靠它分辨）。
 /// [`stop_bot_locked_if_idle`] 的許可：跟 `transition(LIVE → stopping)` 同一步，多三個條件，都在同一句 UPDATE 裡。
 async fn admit_idle_stop(db: &sqlx::SqlitePool, run_id: &str, bot_id: &str) -> Result<super::run_state::Moved, sqlx::Error> {
     let r = sqlx::query(
@@ -220,16 +219,19 @@ async fn admit_idle_stop(db: &sqlx::SqlitePool, run_id: &str, bot_id: &str) -> R
     Ok(if r.rows_affected() == 0 { super::run_state::Moved::Lost } else { super::run_state::Moved::Applied })
 }
 
-async fn commit_stopped(app: &Arc<App>, run_id: &str) -> Result<StopCommit, sqlx::Error> {
+/// `stopping → stopped`。CAS 輸了而且是被不拿 bot 鎖的 pane-exit 事件收成 `exited`（多半是 stop 自己關的 pane
+/// 觸發的）：改標成 `stopped`（`run_state::relabel`）——兩個都是終態、不復活任何東西，但 `stopped` 才是「使用者要它停」
+/// 的紀錄（#131，incident 探針靠它分辨）。改標寫不進去回錯，不當成 CAS 輸了（#146 重開 A）。
+///
+/// 重啟那一半（`for_restart`）不改標：重啟不是「使用者要它停」——開不回來時要的正是 `exited`（同 `left_down_by_restart`），
+/// 開回來了舊 run 的標籤也不再代表 bot。
+async fn commit_stopped(app: &Arc<App>, run_id: &str, for_restart: bool) -> Result<StopCommit, sqlx::Error> {
     match super::run_state::transition(&app.db, run_id, &["stopping"], "stopped", None).await? {
         super::run_state::Moved::Applied => Ok(StopCommit::Applied),
-        super::run_state::Moved::Lost => match super::run_state::transition(&app.db, run_id, &["exited"], "stopped", None).await {
-            Ok(super::run_state::Moved::Applied) => Ok(StopCommit::Relabelled),
-            Ok(super::run_state::Moved::Lost) => Ok(StopCommit::Lost),
-            Err(e) => {
-                tracing::warn!(run = run_id, error = %e, "could not relabel a run the pane-exit event ended during a stop");
-                Ok(StopCommit::Lost)
-            }
+        super::run_state::Moved::Lost if for_restart => Ok(StopCommit::Lost),
+        super::run_state::Moved::Lost => match super::run_state::relabel(&app.db, run_id, "exited", "stopped").await? {
+            super::run_state::Moved::Applied => Ok(StopCommit::Relabelled),
+            super::run_state::Moved::Lost => Ok(StopCommit::Lost),
         },
     }
 }
@@ -275,11 +277,16 @@ pub(crate) async fn finish_stop(app: &Arc<App>, run_id: &str) {
     let Ok(Some(run)) = db::run(&app.db, run_id).await else { return };
     let lock = app.bot_lock(&run.bot_id).await;
     let _g = lock.lock().await;
-    match commit_stopped(app, run_id).await {
-        Ok(StopCommit::Applied) => {
-            let host = db::bot_host(&app.db, &run.bot_id).await.unwrap_or_else(|_| LOCAL_HOST.to_string());
-            after_stop(app, &run.bot_id, &run, &host).await;
+    // 收尾要拆那台主機上的 watcher：讀不到主機就這一輪什麼都不寫，下一輪重試（不退回 local——拆錯台，這台的 watcher 就留著）。
+    let host = match db::bot_host(&app.db, &run.bot_id).await {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::warn!(run = run_id, error = %e, "cannot read the host of a run whose stop is being recorded; retrying");
+            return;
         }
+    };
+    match commit_stopped(app, run_id, false).await {
+        Ok(StopCommit::Applied) => after_stop(app, &run.bot_id, &run, &host).await,
         Ok(StopCommit::Relabelled) => super::start_send::withdraw_on_stop(app, &run.bot_id).await,
         Ok(StopCommit::Lost) => {}
         Err(e) => tracing::warn!(run = run_id, error = %e, "retrying the stopped record failed"),
@@ -879,6 +886,29 @@ mod stop_commit_tests {
         assert!(!rs::watched(&app, &watcher).await);
     }
 
+    /// 補記 `stopped` 的重試（`FinishStop`）讀不到主機：這一輪什麼都不寫——收尾要拆那台主機上的 watcher，以前退回 local，
+    /// 遠端那台的 watcher 就留著。讀得到之後照常補記、收尾。
+    #[tokio::test]
+    async fn a_finish_stop_retry_that_cannot_read_the_host_records_nothing_yet() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot, run) = running_bot(&env).await;
+        let watcher = rs::watch_run_pane(&app, &run).await;
+        rs::refuse_run_state(&app, "stopped").await;
+        assert!(stop_bot(&app, &bot).await.is_err());
+        rs::accept_run_state(&app, "stopped").await;
+
+        sqlx::query("ALTER TABLE projects RENAME TO projects_unreadable").execute(&app.db).await.unwrap();
+        assert!(!rs::settle_once(&app, &run, &rs::Settle::FinishStop).await, "讀不到主機：還沒補上");
+        sqlx::query("ALTER TABLE projects_unreadable RENAME TO projects").execute(&app.db).await.unwrap();
+        assert_eq!(state(&app, &run).await, "stopping", "一步都沒寫");
+        assert!(rs::watched(&app, &watcher).await);
+
+        assert!(rs::settle_once(&app, &run, &rs::Settle::FinishStop).await);
+        assert_eq!(state(&app, &run).await, "stopped");
+        assert!(!rs::watched(&app, &watcher).await, "拆的是那台主機上的 watcher");
+    }
+
     /// 驗收 2 的另一半：重試還沒補上 daemon 就重啟了（排的重試跟著沒了）——開機的對帳照證據把它收掉，
     /// 不會留一顆擋住 start 的 `stopping`。
     #[tokio::test]
@@ -969,6 +999,54 @@ mod stop_commit_tests {
         assert_eq!(state(&app, &run).await, "stopped");
         assert_eq!(rs::turn_status(&app, &queued).await, "failed");
         assert_eq!(rs::system_notes(&app, &queued).await, 1, "撤一次");
+    }
+
+    /// #146 重開 A：stop 自己關的 pane 觸發的 pane-exit 事件先寫了 `exited`，改標回 `stopped` 卻寫不進去。以前被當成 CAS
+    /// 輸了：回一般的成功、不排重試，DB 永遠留 `exited`——autostart 的 bot 從此被 incident 探針報成「自己掛了」。現在回
+    /// 503 `stop_state_uncommitted`、排 `FinishStop`；DB 恢復後改標成 `stopped`、探針不再報，stop 才有的撤回也在那時補上。
+    #[tokio::test]
+    async fn a_stop_whose_relabel_after_a_pane_exit_cannot_be_written_is_not_reported_as_done() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot, run) = running_bot(&env).await;
+        sqlx::query("UPDATE bots SET autostart=1 WHERE id=?").bind(&bot).execute(&app.db).await.unwrap();
+        let waiting = rs::a_turn(&app, &bot, None, "queued").await;
+        sqlx::query("UPDATE turns SET awaits_start=1 WHERE id=?").bind(&waiting).execute(&app.db).await.unwrap();
+        let (app2, run2) = (app.clone(), run.clone());
+        super::super::race_point::arm("stop_before_stopped", &bot, move || async move {
+            mark_run_exited(&app2, &run2, "pane exited").await;
+        });
+        rs::refuse_run_state(&app, "stopped").await;
+
+        match stop_bot(&app, &bot).await {
+            Err(LcError::Uncommitted(v)) => assert_eq!((v["error"].as_str(), v["run_id"].as_str()), (Some("stop_state_uncommitted"), Some(run.as_str()))),
+            other => panic!("改標寫不進去不是停好了，要 503 stop_state_uncommitted，拿到 {other:?}"),
+        }
+        assert_eq!(state(&app, &run).await, "exited");
+        assert_eq!(rs::scheduled(&run), vec![rs::Settle::FinishStop], "排了補改標的重試");
+        assert!(rs::bot_stopped_reported(&app, &bot).await, "前提：留著 exited，探針說它自己掛了");
+        assert_eq!(rs::turn_status(&app, &waiting).await, "queued", "標籤還沒成立，等它起來的那一則先不撤");
+
+        rs::accept_run_state(&app, "stopped").await;
+        assert!(rs::settle_once(&app, &run, &rs::Settle::FinishStop).await);
+        assert_eq!(state(&app, &run).await, "stopped", "使用者要它停");
+        assert!(!rs::bot_stopped_reported(&app, &bot).await, "故意停的 autostart bot 不是 outage");
+        assert_eq!(rs::turn_status(&app, &waiting).await, "failed", "改標成立之後撤回等它起來的那一則");
+    }
+
+    /// 重啟那一半不改標：重啟不是「使用者要它停」。pane-exit 先寫了 `exited` 就留著（開不回來時要的正是它），重啟照常往下走。
+    #[tokio::test]
+    async fn a_restart_whose_old_run_a_pane_exit_ended_keeps_it_exited() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot, run) = running_bot(&env).await;
+        let (app2, run2) = (app.clone(), run.clone());
+        super::super::race_point::arm("stop_before_stopped", &bot, move || async move {
+            mark_run_exited(&app2, &run2, "pane exited").await;
+        });
+        assert!(stop_for_restart_locked(&app, &bot).await.unwrap(), "pane 關了、舊 run 收掉了：重啟照常往下走");
+        assert_eq!(state(&app, &run).await, "exited", "不改標成 stopped：沒開回來時探針才看得到");
+        assert!(rs::scheduled(&run).is_empty(), "沒有要補的");
     }
 
     /// 同一個競態，排著的是「bot 沒在跑時送、等它起來」的那一種（#122 的 `awaits_start`）：撤孤兒那一支刻意不撤它，

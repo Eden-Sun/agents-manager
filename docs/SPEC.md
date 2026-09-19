@@ -889,7 +889,12 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run
   - `stopped` 以 CAS（from `stopping`）寫進去**之後**才撤孤兒佇列、撤回等它起來的訊息（#122）、關訂閱。寫不進去回 `503 stop_state_uncommitted`，
     排重試補記 `stopped` 再收尾（重啟那一半的 stop 改交給對帳收成 `exited`：沒開回來不是使用者要它停）。stop 自己關的 pane 觸發的
     pane-exit 事件搶先寫了 `exited` 時，改標成 `stopped`（兩個都是終態），一般的收尾不做第二份，只補撤回等它起來的訊息（exit 那條路不撤它）。
-- `POST /bots/:id/restart`：有 Run 先 stop 再 start，用來套用改過的 model／args／identity／env。
+  - 終態改標（`exited ↔ stopped`）跟轉移走同一句 CAS（`run_state::relabel`，多一個條件：同一顆 bot 沒有別的 active run），寫不進去一樣是錯
+    （#146 重開）：上面那個改標寫不進去回 `503 stop_state_uncommitted`、排重試補改標，不當成 CAS 輸了回成功——留著 `exited` 等於說它自己掛了，
+    autostart 的 bot 會被報 `bot_stopped`。重啟那一半的 stop 不改標：重啟不是使用者要它停，被 pane-exit 收成 `exited` 就留著。
+- `POST /bots/:id/restart`：有 Run 先 stop 再 start，用來套用改過的 model／args／identity／env。停掉了卻沒能開回來（start 在前置檢查就失敗、
+  沒建新 run）時，剛停掉的 run 改標 `exited`（`run_state::relabel`；`stopped` 是「使用者要它停」，incident 探針靠它分辨）。改標寫不進去回
+  `503 restart_state_uncommitted`（帶 `start_error`）並排重試（#146 重開），不只回 start 的錯。
 - DELETE Bot：TOML 移除＋DB `deleted_at`（單一臨界區，§3.1；保留對話）→ stop（child 與自己）→ 刪 `~/.config/agents-manager/bots/<bot_id>/`（遠端 ssh `rm -rf`，失敗只 log）。
   先定案再停：拒絕只會發生在任何東西被停之前（2026-09-14 sol 四輪；原本是 stop 在前）。全程持該 bot 的 per-bot 鎖。
   `child` 不在 TOML，直接 `deleted_at` 並停 pane。
