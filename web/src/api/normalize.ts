@@ -16,6 +16,7 @@ import type {
   GroupMessagesPage,
   HostShell,
   Host,
+  HerdrVersion,
   Identity,
   IdentityStatusMap,
   InstallToolResult,
@@ -46,6 +47,7 @@ import type {
   TurnStatus,
  ProjectSubmodule } from './types.ts'
 import {
+  UNKNOWN_HERDR,
   BOT_KINDS,
   INSTRUCTION_FILES,
   type Mission,
@@ -113,6 +115,21 @@ const ORIGINS = ['web', 'external'] as const
 const ROLES = ['user', 'assistant', 'system'] as const
 const SOURCES = ['web', 'hook', 'transcript', 'terminal_fallback', 'system'] as const
 
+/** 缺欄位＝舊 daemon，一律當未知（null），不猜。 */
+export function toHerdrVersion(v: unknown): HerdrVersion {
+  if (!isRec(v)) return UNKNOWN_HERDR
+  const nullableStr = (x: unknown) => (typeof x === 'string' && x.trim() ? x : null)
+  const protocol = pick(v, 'protocol')
+  const supported = pick(v, 'protocol_supported')
+  return {
+    server_version: nullableStr(pick(v, 'server_version')),
+    protocol: typeof protocol === 'number' ? protocol : null,
+    protocol_supported: typeof supported === 'boolean' ? supported : null,
+    cli_version: nullableStr(pick(v, 'cli_version')),
+    mismatch: pick(v, 'mismatch') === true,
+  }
+}
+
 /** SPEC §11.6 */
 export function toHost(v: unknown): Host | null {
   if (!isRec(v)) return null
@@ -129,6 +146,7 @@ export function toHost(v: unknown): Host | null {
     attach_command:
       str(pick(v, 'attach_command')) ||
       `herdr --remote ${str(pick(v, 'ssh'))} --session ${str(pick(v, 'herdr_session'), 'agents-manager')}`,
+    herdr: toHerdrVersion(pick(v, 'herdr')),
     tools: toToolMap(pick(v, 'tools')),
     identity_status: toIdentityStatusMap(pick(v, 'identities')),
   }
@@ -486,6 +504,7 @@ export function toState(raw: unknown): AppState {
   const session = str(pick(root, 'herdr_session'), 'agents-manager')
   let attachCommand = `herdr --session ${session}`
   let localTools = toToolMap(undefined)
+  let localHerdr = UNKNOWN_HERDR
   let localIdentityStatus: IdentityStatusMap = {}
   for (const h of hostArray(pick(root, 'hosts'))) {
     // `local` is modelled via `state.connected`; keep only its attach/tools/identities.
@@ -494,6 +513,7 @@ export function toState(raw: unknown): AppState {
     if (host.name === 'local') {
       if (isRec(h) && str(h.attach_command)) attachCommand = str(h.attach_command)
       localTools = host.tools
+      localHerdr = host.herdr
       localIdentityStatus = host.identity_status
       continue
     }
@@ -544,6 +564,7 @@ export function toState(raw: unknown): AppState {
     connected: bool(pick(root, 'connected'), true),
     default_connected: bool(pick(root, 'default_connected'), false),
     attach_command: attachCommand,
+    herdr: localHerdr,
     tools: localTools,
     identity_status: localIdentityStatus,
     hosts,

@@ -405,7 +405,7 @@ mod tests {
             tools: Default::default(),
             identities: Default::default(),
             shell_identities: vec![crate::config::IdentityCfg { name: "cc0".into(), kind: "claude".into(), host: None, env: Default::default(), args: vec![] }],
-            utc_offset_secs: None, checked_at: db::now(),
+            utc_offset_secs: None, herdr_cli: None, checked_at: db::now(),
         }
     }
 

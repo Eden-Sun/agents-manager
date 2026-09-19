@@ -499,7 +499,7 @@ async fn restarted(e: &tt::Env, bot_id: &str) -> Arc<App> {
 
 /// 開機後那台主機的身分偵測寫完（`tools::detect` → `install_host_tools`，回填掛在這之後）。
 async fn identities_detected(app: &Arc<App>) {
-    let ht = crate::tools::HostTools { tools: Default::default(), identities: Default::default(), shell_identities: vec![], utc_offset_secs: None, checked_at: db::now() };
+    let ht = crate::tools::HostTools { tools: Default::default(), identities: Default::default(), shell_identities: vec![], utc_offset_secs: None, herdr_cli: None, checked_at: db::now() };
     crate::tools::install_host_tools(app, LOCAL_HOST, ht).await;
 }
 

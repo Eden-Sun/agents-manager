@@ -43,6 +43,21 @@ export interface ProjectSubmodule {
   github: ProjectGithub | null
 }
 
+/** 每台主機的 herdr 版本（SPEC §11.6）。任一欄讀不到＝null，不猜。 */
+export interface HerdrVersion {
+  /** ping 回報的 server 版本；主機沒連上時為 null */
+  server_version: string | null
+  protocol: number | null
+  /** protocol 是否在 daemon 實測過的清單；null＝不知道 */
+  protocol_supported: boolean | null
+  /** `herdr --version`（CLI）；server 與 CLI 可能不同版 */
+  cli_version: string | null
+  /** CLI 與 server 版本都知道而且不同 */
+  mismatch: boolean
+}
+
+export const UNKNOWN_HERDR: HerdrVersion = { server_version: null, protocol: null, protocol_supported: null, cli_version: null, mismatch: false }
+
 /** SPEC §11.2 / §11.6 — 遠端主機（透過 SSH 轉發的遠端 herdr）。 */
 export interface Host {
   /** `[a-z][a-z0-9_-]{0,31}`；`"local"` 保留給本機，不會出現在這個清單 */
@@ -57,6 +72,7 @@ export interface Host {
   error: string | null
   /** 在本機終端 attach 同一個 herdr session 的指令 */
   attach_command: string
+  herdr: HerdrVersion
   tools: ToolMap
   /** daemon 的 `hosts[].identities`；per-host，因為同一身份的帳號能不能用因主機而異。 */
   identity_status: IdentityStatusMap
@@ -440,6 +456,8 @@ export interface AppState {
   default_connected: boolean
   /** attach_command / tools / identity_status 取自本機 `hosts[0]`。 */
   attach_command: string
+  /** 本機 `hosts[0].herdr` */
+  herdr: HerdrVersion
   tools: ToolMap
   identity_status: IdentityStatusMap
   hosts: Host[]

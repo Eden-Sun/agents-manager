@@ -944,7 +944,7 @@ mod quota_limit_tests {
         let cc0 = crate::config::IdentityCfg { name: "cc0".into(), kind: "claude".into(), host: None, env: Default::default(), args: vec![] };
         app.tools.lock().await.insert(
             crate::config::LOCAL_HOST.to_string(),
-            crate::tools::HostTools { tools: Default::default(), identities: Default::default(), shell_identities: vec![cc0], utc_offset_secs: None, checked_at: db::now() },
+            crate::tools::HostTools { tools: Default::default(), identities: Default::default(), shell_identities: vec![cc0], utc_offset_secs: None, herdr_cli: None, checked_at: db::now() },
         );
         assert!(crate::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some());
         assert!(!owes_limit_hit(&app, &bot.id));
@@ -962,7 +962,7 @@ mod quota_limit_tests {
     async fn set_remote_offset(app: &Arc<App>, host: &str, offset: Option<i32>) {
         app.tools.lock().await.insert(
             host.to_string(),
-            crate::tools::HostTools { tools: Default::default(), identities: Default::default(), shell_identities: vec![], utc_offset_secs: offset, checked_at: db::now() },
+            crate::tools::HostTools { tools: Default::default(), identities: Default::default(), shell_identities: vec![], utc_offset_secs: offset, herdr_cli: None, checked_at: db::now() },
         );
     }
 
@@ -1025,7 +1025,7 @@ mod quota_limit_tests {
         let cx0 = crate::config::IdentityCfg { name: "cx0".into(), kind: "codex".into(), host: None, env: Default::default(), args: vec![] };
         app.tools.lock().await.insert(
             crate::config::LOCAL_HOST.to_string(),
-            crate::tools::HostTools { tools: Default::default(), identities: Default::default(), shell_identities: vec![cx0], utc_offset_secs: None, checked_at: db::now() },
+            crate::tools::HostTools { tools: Default::default(), identities: Default::default(), shell_identities: vec![cx0], utc_offset_secs: None, herdr_cli: None, checked_at: db::now() },
         );
         assert!(crate::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some());
         assert!(!owes_limit_hit(&app, &bot.id));

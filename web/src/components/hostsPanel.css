@@ -182,3 +182,20 @@
   font-size: 13px;
   color: var(--text);
 }
+
+.host-herdr {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+.host-herdr.warn {
+  color: var(--warn);
+}
+
+.host-herdr-hint {
+  display: block;
+  font-family: inherit;
+  margin-top: 2px;
+}
