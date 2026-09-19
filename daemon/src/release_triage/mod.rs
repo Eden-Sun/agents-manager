@@ -1,17 +1,21 @@
 //! 上游新版分診（issue #204）：claude／codex 每出一版，把那一版的 changelog 逐條切開、用決定性規則分桶、
 //! 記進帳本；語意判斷交給模型，結果再由 daemon 驗過才開 GitHub issue。
 //!
-//! 這一層（A）只做「抓 → 切條 → 分桶 → 記帳」，不做語意判斷、不碰 gh：
+//! A 這一半只做「抓 → 切條 → 分桶 → 記帳」，不做語意判斷、不碰 gh：
 //! - [`split_entries`]：把 `changelog::Section` 的 body 切成逐條 entry。
 //! - [`rules`]：`rules.toml` 的引擎。
 //! - [`ledger`]：SQLite 帳本（狀態機 `pending|dispatched|judged|published|empty|failed`）。
+//! - B：`verdict`（驗證模型交回的逐條 verdict）、`issue`（渲染＋gh publish＋去重＋上限）、`http`（`/api/release-triage/*`）。
 //! - [`run_check`]：`agents-managerd release-triage-check` 背後的流程，輸出契約固定（見 [`CheckReport`]）。
 //!
 //! 版本比較、標題解析一律重用 `changelog.rs`（`parse_changelog`／`pick_sections`／`parse_version`），
 //! 不另寫一套。
 
+pub mod http;
+pub mod issue;
 pub mod ledger;
 pub mod rules;
+pub mod verdict;
 
 use std::path::Path;
 
@@ -357,3 +361,5 @@ pub async fn run_check(a: CheckArgs) -> Result<CheckReport> {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_publish;

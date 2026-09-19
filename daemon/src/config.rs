@@ -250,6 +250,27 @@ pub struct ConfigFile {
     /// issue #90：全機 cargo/rustc 併發的排程設定。
     #[serde(default)]
     pub build: BuildCfg,
+    /// issue #204：上游新版分診開 GitHub issue 的設定（預設不開）。
+    #[serde(default, skip_serializing_if = "ReleaseTriageCfg::is_default")]
+    pub release_triage: ReleaseTriageCfg,
+}
+
+/// `[release_triage]`：`publish = false`（預設）時只寫帳本、完全不呼叫 `gh issue create`——先乾跑幾版，
+/// 看過品質再打開。`gh_bin` 省略＝PATH 上的 `gh`（daemon 會補上 Homebrew 路徑）；`repo` 是 `owner/name`。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ReleaseTriageCfg {
+    #[serde(default)]
+    pub publish: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gh_bin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+}
+
+impl ReleaseTriageCfg {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// issue #90：build scheduler 的門檻。名額的存活期（`lease_ttl_secs`）是「持有者多久沒續約就當它死了」，

@@ -2114,6 +2114,43 @@ herdr 有新版時自動發現、整理出「對我們有沒有用、會不會�
    這件事留給 AGM 收到交辦、看過 CHANGELOG 差異之後，依那一版實際改了什麼決定要不要花這個成本，而不是每次偵測到新版
    都先跑一次不確定驗不驗得到問題的固定沙箱。
 
+### 18.2c 上游新版分診：claude／codex 的 changelog → GitHub issue（issue #204）
+
+claude 與 codex **每出一個新版**，自動把那一版的 changelog 逐條分析，「該採用」或「必須提防」的開成 GitHub issue。
+**只開 issue**：不升級、不改設定、不重啟——升級照舊走 §6.9（批次 exit＋resume，AGM 排）。
+
+**與其他章節的分工**
+- **#66（§18.2b herdr 升級）**：herdr 的「偵測＋交辦」。三個上游是同一條管線的三個 `kind`；herdr 之後併進來（`herdr-update-kick.sh` 變薄殼），
+  #66 留下它獨有的兩件事：隔離相容性驗證與升級窗口。本節目前只有 claude、codex。
+- **§6.9（一鍵套用 claude 更新）**：分診發生在**升級之前**（`from` 是帳本已分診的最大版本，不是磁碟上的、也不是跑著的），
+  `guard` 類的鎖要在升級前補好；`upgrade-arg` 類（值得早點升級的理由）只進通知、當 AGM 排 §6.9 的依據，永遠不開 issue。
+- `claude-release-kick.sh` 的 binary diff 是 changelog 沒寫到的東西的補充，保留，由同一支 kick 帶進同一則交辦。
+
+**兩層判斷**
+1. **決定性規則**（`daemon/src/release_triage/rules.toml`，`include_str!`；改規則＝改檔）。每條 changelog（`- ` 開頭、續行併入）一個 entry，
+   `id = sha1(kind|version|空白正規化後的原文)` 前 10 碼；分三桶並**記下命中的規則名**：`dropped`（不送模型）、`kept`（帶類別：settings／env／hook／session／
+   statusline／quota／tui／cli／subagent／auth／instructions，動詞 `Removed`／`Deprecated`／`Changed` 開頭＝`behavior-change`）、`unmatched`（兩邊都沒中，照樣送模型但放第二張清單）。
+   drop 分**硬**（`[VSCode]` 等前綴標籤、`gateway`、`marketplace`、`/plugin`、`Windows`／`winget`／`apk`／`WSL`、`/ultrareview`、`Artifact`、`Console sign-in`；連 kept 與動詞規則都輸它）與
+   **軟**（`Bedrock`／`Vertex`／`Foundry`、`Agent SDK`；**輸給任何 kept 類別**——供應商名字常只是附註，2.1.277 的「AGENTS.md support … (not yet on Bedrock…)」就是回歸測試）。
+   codex 的 releases body 在 `## Changelog`（PR 流水帳）之前截斷。`unmatched` 的比例是規則該不該修的指標（帳本可查）。
+2. **模型的語意判斷，輸出被框死**：對每個 kept／unmatched entry 回 `guard`｜`adopt`｜`upgrade-arg`｜`none`＋理由＋對到的模組，整份存帳本。**只有 `guard`／`adopt` 會變成 issue。**
+
+**帳本**（SQLite `release_triage`，`(kind, version)` 為主鍵）：`status` ＝ `pending`（待派）→ `dispatched`（kick 派出）→ `judged`（verdict 已收）→ `published`（issue 開完）；
+`empty`（沒有 kept／unmatched，或全部 verdict 都不開 issue）；`failed`（`dispatched` 超過 6 小時沒回、退回 `pending` 累計 3 次）。
+另存 `entries_json`（逐條原文、桶、類別、規則名）、`verdicts_json`、`issue_numbers_json`、`attempts`、`publish_error`。第一次跑（帳本空）只把磁碟上的版本記成 `empty` 基準；補歷史用 `--since`。
+`(from, to]` 每一版各自一列；`pending` 舊版在前（kick 截斷時 request-id 取該批最後一版）。
+
+**issue**：一項一張，沒有「一版一張報告」；「這一版看過了、逐條結論是什麼」放帳本（`GET /api/release-triage`）。模型不直接跑 `gh`，用 `bin/agm release-triage submit` 交回結構化結果，
+daemon 驗過才收（每個 kept／unmatched 都有 verdict、提案只引用 guard／adopt、同一 entry 只進一張、文字不得含去重標記）。**`## 來源` 的引用由 daemon 從帳本原文貼**，模型的字只進 `## 目標`／`## 建議`／`## 驗收`。
+標題 `<kind> <version>: <一句話>（提防｜採用）`，標籤 `release-triage`、`upstream:<kind>`、`triage:guard|adopt`，結尾 `<!-- release-triage: <kind>@<version>#<id>[,<id>] -->`。
+提案帶 `duplicate_of` 時只在那張 issue 留言，不另開。
+
+**publish**（`[release_triage]`）：`publish = false`（**預設**）只寫帳本、**完全不啟動 gh**；`gh_bin`（省略＝PATH 上的 `gh`，daemon 補 Homebrew 路徑）、`repo`（`owner/name`，publish 開啟時必填）。
+開之前帳本＋`gh issue list --state all --search "release-triage: <marker> in:body"` 雙重去重（**已關的不復活**）；每版 ≤4 張（超過的記在 `publish_error` 不再開）、每 24 小時 ≤8 張（超過的留在 `judged` 待下一輪）、`guard` 優先；
+每開一張立刻寫回帳本。gh／設定失敗 → 停在 `judged`、錯誤進 `publish_error`，重試（`POST /api/release-triage/publish`）只重跑 publish，不重派模型、不重花額度。
+
+**尚未做（要另外接）**：啟動時 `gh auth status` 失敗要在 `/api/supervisor/health` 露出原因（目前只在 publish 時檢查、記進 `publish_error`）；`publish` 重試的定時觸發（由 kick 呼叫上述端點）。
+
 ### 18.3 喚醒 AGM 的節流
 巡檢：`[supervisor] notify_interval_secs`（預設 600），規則見 §5；只有 `wake=1` 的事件會開一次喚醒，送前合併重複（§18.15）。協調者：短窗批次（§18.15）。
 API 端狀態機見 `API.md` 的 `GET /api/supervisor/inbox`。

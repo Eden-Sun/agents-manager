@@ -848,6 +848,36 @@ def cmd_ops_alert(client: Client, cfg: dict, args) -> object:
     return client.post("/api/supervisor/ops-alerts", body)
 
 
+def cmd_release_triage(client: Client, cfg: dict, args) -> object:
+    """上游新版分診（issue #204）：模型交回 verdict、查帳本、標記派出、重試 publish。
+
+    `submit --file` 是模型唯一的出口：它不直接跑 `gh`。daemon 驗過（每個 kept／unmatched entry 都有
+    verdict、提案只引用 guard／adopt）才收，`## 來源` 的引用由 daemon 從帳本原文貼。
+    """
+    if args.op == "show":
+        return client.get("/api/release-triage", {"kind": args.kind, "version": (args.version or [None])[0]})
+    if args.op == "submit":
+        if not args.file:
+            raise AgmError("bad_args", "submit 要 --file <verdicts.json>", 2)
+        try:
+            body = json.loads(Path(args.file).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            raise AgmError("bad_args", f"讀不了 {args.file}：{e}", 2)
+        if not isinstance(body, dict):
+            raise AgmError("bad_args", f"{args.file} 要是一個 JSON 物件（{{kind,version,verdicts,issues}}）", 2)
+        return client.post("/api/release-triage/verdicts", body)
+    if args.op == "dispatched":
+        if not args.kind or not args.version:
+            raise AgmError("bad_args", "dispatched 要 --kind 與至少一個 --version", 2)
+        return client.post("/api/release-triage/dispatched", {"kind": args.kind, "versions": args.version})
+    body = {}
+    if args.kind:
+        body["kind"] = args.kind
+    if args.version:
+        body["version"] = args.version[0]
+    return client.post("/api/release-triage/publish", body)
+
+
 def cmd_handoff(client: Client, cfg: dict, args) -> object:
     if args.summary is None and args.summary_file is None:
         return client.get("/api/supervisor/handoff")
@@ -1225,6 +1255,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--reason", required=True, help="卡在什麼上（例如 stale_lock、approval_missing）")
     s.add_argument("--detail", help="人看得懂的細節：要怎麼處理")
     s.set_defaults(func=cmd_ops_alert)
+
+    s = sub.add_parser("release-triage", help="上游新版分診：submit（交回 verdict）/ show / dispatched / publish（issue #204）")
+    s.add_argument("op", choices=["submit", "show", "dispatched", "publish"])
+    s.add_argument("--file", help="submit：verdicts.json（{kind,version,verdicts,issues}）")
+    s.add_argument("--kind", choices=["claude", "codex"])
+    s.add_argument("--version", action="append", help="show／publish：某一版；dispatched：可重複給多版")
+    s.set_defaults(func=cmd_release_triage)
 
     s = sub.add_parser("handoff", help="讀管理摘要；帶 --summary/--summary-file 就是寫入")
     s.add_argument("--summary")
