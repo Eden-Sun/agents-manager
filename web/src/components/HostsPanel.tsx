@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import * as api from '../api'
-import type { HostResult, HostShell } from '../api/types'
+import type { HostResult, HostShell, RemoteCargoSettings } from '../api/types'
 import { ApiError, HOST_DEFAULTS } from '../api/types'
 import { nestableBusy } from '../lib/nestableBusy'
+import { DEFAULT_REMOTE_ROOT, remoteCargoUnsaved, toRemoteCargoInput } from '../lib/remoteCargoForm'
 import { useStore } from '../store/store'
 import { AttachButton } from './AttachButton'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -355,7 +356,9 @@ function RemoteCargoPanel() {
   const [host, setHost] = useState('')
   const [user, setUser] = useState('')
   const [port, setPort] = useState('22')
-  const [root, setRoot] = useState('.cache/agents-manager/remote-cargo')
+  const [root, setRoot] = useState(DEFAULT_REMOTE_ROOT)
+  /** daemon 目前存著的那一份：「測試連線」測的是它，不是表單（`lib/remoteCargoForm`）。 */
+  const [saved, setSaved] = useState<RemoteCargoSettings | null>(null)
   const [needsToolchain, setNeedsToolchain] = useState(false)
   const [jobs, setJobs] = useState('4')
   const [password, setPassword] = useState('')
@@ -378,6 +381,7 @@ function RemoteCargoPanel() {
         setRoot(cfg.remote_root)
         setJobs(String(cfg.cargo_jobs))
         setPasswordSet(cfg.password_set)
+        setSaved(cfg)
         setLoaded(true)
       },
       (e) => {
@@ -392,23 +396,18 @@ function RemoteCargoPanel() {
     }
   }, [])
 
-  // `test()` 借用這段來先存密碼；busy 全程由呼叫端（`save` 或 `test`）自己用 `lock` 包一次，
+  const form = { enabled, host, user, port, root, jobs, password, clearPassword }
+
+  // `test()` 借用這段來先存表單；busy 全程由呼叫端（`save` 或 `test`）自己用 `lock` 包一次，
   // 這裡不碰 busy，才不會在 `test()` 還沒做完時就把旗標撥回 false（見 `lib/nestableBusy.ts`）。
   const persist = async (): Promise<boolean> => {
     setMessage('')
     try {
-      const cfg = await api.saveRemoteCargoSettings({
-        enabled,
-        host: host.trim(),
-        user: user.trim(),
-        ssh_port: Number(port) || 22,
-        remote_root: root.trim() || '.cache/agents-manager/remote-cargo',
-        cargo_jobs: Math.max(1, Number(jobs) || 4),
-        ...(password ? { password } : clearPassword ? { password: '' } : {}),
-      })
+      const cfg = await api.saveRemoteCargoSettings(toRemoteCargoInput(form))
       setPassword('')
       setClearPassword(false)
       setPasswordSet(cfg.password_set)
+      setSaved(cfg)
       setMessage('✓ 已儲存。新啟動的本機 Bot 會自動使用外部 Cargo verification。')
       return true
     } catch (e) {
@@ -430,16 +429,20 @@ function RemoteCargoPanel() {
     lock.begin()
     setMessage('')
     try {
-      // 未儲存的新密碼先寫入，避免「測試」其實測到舊 credential。
-      if ((password || clearPassword) && !(await persist())) return
+      // 測試連線測的是 daemon 已儲存的設定（`POST /build/remote/test` 不收 body）：表單有沒存的改動（新密碼、換主機、
+      // 第一次設定）就先存，不然測到的是舊的主機／舊 credential，還報「可用」。
+      const unsaved = !saved || remoteCargoUnsaved(saved, form)
+      if (unsaved && !(await persist())) return
       const r = await api.testRemoteCargo()
       const how = r.password_auth ? '密碼' : 'SSH key/agent'
+      const target = `${user.trim()}@${host.trim()}${(Number(port) || 22) === 22 ? '' : `:${Number(port)}`}`
+      const first = unsaved ? '（已先儲存表單裡的設定）' : ''
       // 連得上但沒有 cargo 是最常見的下一關：講清楚並給一顆按鈕，不要只丟原始輸出（使用者 2026-09-18）。
       setNeedsToolchain(r.cargo_missing)
       setMessage(
         r.cargo_missing
-          ? `✓ SSH 連得上（${how}），但這台還沒有 Rust 工具鏈（${r.os || '?'}/${r.arch || '?'}）。按下面「安裝 Rust 工具鏈」由 daemon 用 rustup 裝（minimal，不會改遠端的 shell profile）。`
-          : `✓ SSH/Cargo 可用（${how}）：\n${r.output}`
+          ? `✓ ${target} 連得上（${how}）${first}，但這台還沒有 Rust 工具鏈（${r.os || '?'}/${r.arch || '?'}）。按下面「安裝 Rust 工具鏈」由 daemon 用 rustup 裝（minimal，不會改遠端的 shell profile）。`
+          : `✓ ${target} SSH/Cargo 可用（${how}）${first}：\n${r.output}`
       )
     } catch (e) {
       setNeedsToolchain(false)
