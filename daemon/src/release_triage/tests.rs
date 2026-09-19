@@ -261,3 +261,17 @@ async fn pending_is_sorted_oldest_first_numerically() {
     let r = check(&p, "claude", &all, None, Some("0.2.5")).await.unwrap();
     assert_eq!(r.pending.iter().map(|v| v.version.as_str()).collect::<Vec<_>>(), ["0.9.0", "0.9.1", "0.10.0"]);
 }
+
+#[test]
+fn cli_version_output_with_a_name_prefix_is_still_a_version() {
+    // AGM 2026-09-19 實測：`codex --version` 印 `codex-cli 0.154.0`，以前整個 check 掛掉、kick 每輪跳過 codex。
+    for (line, want) in [
+        ("codex-cli 0.154.0", Some("0.154.0")),
+        ("2.1.278 (Claude Code)", Some("2.1.278")),
+        ("herdr 0.8.2", Some("0.8.2")),
+        ("codex-cli", None),
+        ("", None),
+    ] {
+        assert_eq!(changelog::cli_version_string(line).as_deref(), want, "{line}");
+    }
+}
