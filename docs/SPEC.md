@@ -244,6 +244,7 @@ daemon 收到就**當場**把那一筆 in-flight turn 收成 `status='failed'`�
   此刻在飛的就是被中斷那一筆 → 是；都證不出來時看**送端蓋的擷取時間**（`received_at`）：Esc 之後 `ECHO_CAPTURE_SLACK`（3 秒，
   涵蓋遠端 `hook.sh` 只蓋到秒與兩台時鐘的小誤差）內擷取、且早於此刻在飛的新回合開始的才是；沒有擷取時間的一律不是。
   認成回聲就結清那筆（排隊寬限的接管標記另外算，不受影響）；不是回聲的照真的失敗收，那筆留著等回聲。
+  claude 2.1.276～2.1.278 按 Esc 根本不送 StopFailure（也不送 Stop，#223），這道防的是舊版與其他情況；那幾版的 Esc 生效證據看 log，見 §6.4。
   回聲（兩道任一道認出來的）就是 Esc 生效的證據：結清標記**之前**先把那次打斷欠著／待證的收尾補上（§6.4，#147）——
   回合照 Esc 的說明收，不算 provider／額度失敗；補不上就讓這一則 hook 失敗、由收件匣重試，標記留著，重試時照樣認得。
   比的是擷取時間不是收到時間：遠端 spool 放 30 秒以上才撈回來也認得出來，而 Esc 之後新開的回合失敗不會被吞掉
@@ -999,7 +1000,14 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run
   - **Esc 與「把回合收成 failed」是兩半**（issue #147，`lifecycle::interruption`），中間不是同一個交易。鍵的結果分三種：
     herdr 回錯誤或連不上（`herdr::never_applied`）＝**沒做**：502，回合照舊在飛、不記任何帳；回 ok＝**做了**：同一個交易裡收成
     `failed`＋說明「interrupted by user」；送出去之後逾時／斷線沒回＝**不知道**：**不假定打斷**，回合留在 in_flight，回
-    `409 interrupt_unconfirmed`，等那次 Esc 的 `StopFailure` 回聲（§6.7）證明它進去了才收；回合自己答完（Stop）就照答完收。
+    `409 interrupt_unconfirmed`，等證據證明 Esc 進去了才收；回合自己答完（Stop）就照答完收。
+  - **不知道的那種，證據看 log**（#223）：claude 2.1.276～2.1.278 按 Esc **不送 Stop 也不送 StopFailure**（被打斷的回合寫完中斷標記
+    就返回，#178 實測＋執行檔），§6.7 的回聲等不到；codex 的 notify 本來就不為被中斷的回合送東西。Esc 生效當下 session log 就留了紀錄——
+    claude transcript 帶 `interruptedMessageId` 的 `[Request interrupted by user…]`、codex rollout 的 `turn_aborted`（`interrupted`）。
+    按鍵**之前**記下時刻；herdr 沒回時，**還握著 bot 鎖**就先看一次 log：按鍵之後（放寬 1 秒，且不早於這一回合開始）出現了中斷紀錄＝做了，
+    照上面收、回 200。放了鎖才看就晚了：§4.3 備援計時器等的是同一把鎖，它會先把回合收成 `completed_fallback`、把串流到一半的字當回覆。
+    還看不到才記成待證；待證的在補欠著的那些時機（含定時重試）都再看一次 log，StopFailure 回聲照樣算。讀不到 log 的（遠端、grok）維持等回聲或 Stop。
+    畫面上的 `Interrupted · What should Claude do instead?`、輸入框變空都不當證據：前者可能是捲動區裡舊的那一次，後者回合自己答完也一樣。
   - **做了但 DB 寫不進去**：不回普通成功，回 `503 interrupt_state_uncommitted`（跟 start／stop 的 `*_state_uncommitted` 同一種；帶 `run_id`／`turn_id`、`esc_sent: true`），
     那一筆記成**欠著**。欠著的在這些時候補上（CAS 在那一筆的 `id` 與 `status='in_flight'`，**從不再按鍵**）：
     這顆 bot 的下一則回合 hook（先補再對回合——Esc 的回聲不再被吞、下一句的回覆不會掛到被中斷的那一筆上；
