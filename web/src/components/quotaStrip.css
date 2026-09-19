@@ -426,11 +426,13 @@
   right: 0;
   z-index: 40;
   width: 336px;
-  max-height: 420px;
+  /* 一眼看完（使用者 2026-09-19）：本機常有 claude×3＋codex＋grok，固定 420px 會把最後一兩個
+     供應商切在捲軸外，得捲才知道有沒有用盡。改成吃得到的視窗高度，並把行距收緊。 */
+  max-height: min(78vh, 640px);
   overflow-y: auto;
   display: grid;
-  gap: 10px;
-  padding: 12px;
+  gap: 6px;
+  padding: 10px 12px;
   border: 1px solid var(--border-strong);
   border-radius: 10px;
   background: var(--bg-panel);
@@ -447,8 +449,8 @@
 
 .quota-pop-row {
   display: grid;
-  gap: 4px;
-  padding-bottom: 10px;
+  gap: 1px;
+  padding-bottom: 6px;
   border-bottom: 1px solid var(--border);
   cursor: pointer;
 }
@@ -503,6 +505,7 @@
   display: flex;
   align-items: center;
   gap: 6px;
+  min-height: 22px;
 }
 
 .quota-plan {
@@ -519,7 +522,7 @@
 }
 
 .quota-pop-foot {
-  margin: 6px 0 0;
+  margin: 2px 0 0;
   font-size: 10.5px;
   color: var(--text-faint);
 }
@@ -529,6 +532,8 @@
   align-items: baseline;
   gap: 8px;
   font-size: 11.5px;
+  /* 每一列少幾 px，五個供應商就省掉一整塊捲動。 */
+  line-height: 1.35;
   color: var(--text-dim);
   font-variant-numeric: tabular-nums;
 }
