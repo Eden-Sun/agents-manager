@@ -1997,12 +1997,17 @@ mod changelog_route_tests {
     }
 
     /// API.md：host 不存在也是 200 `found:false`，不是 404——UI 必須能寫「找不到 changelog」。
+    /// 而且講的是**這台 host 不認得**，不能退回去問本機：只看 `found:false`＋有 error 的話，改成退回本機也照綠
+    /// （測試環境的本機 claude 一樣讀不到版本，#220 的測試原本就是這樣沒釘住）。
     #[tokio::test]
     async fn an_unknown_host_is_200_found_false_not_404() {
         let (status, body) = call(Some("claude"), Some("no-such-host")).await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["found"], false);
-        assert!(body["error"].as_str().is_some_and(|s| !s.is_empty()), "{body}");
+        assert_eq!(body["host"], "no-such-host", "回的是問的那台，不是 local：{body}");
+        assert!(body["installed_version"].is_null(), "沒去問任何一台的版本：{body}");
+        let err = body["error"].as_str().unwrap_or_default();
+        assert!(err.contains("unknown host") && err.contains("no-such-host"), "錯誤要講是這台 host 不認得：{body}");
     }
 }
 
