@@ -19,6 +19,8 @@
 //!   不收自己，而且 watchdog 反正會把它們拉回來；
 //! * 主力 bot（`bots.is_primary`，側欄打星號的那幾顆）——2026-09-18 使用者：「主力 bot 超時也不先 kill」。
 //!   主力是使用者隨時會切回去的那幾顆，叫醒要等 `--resume` 起來，比省下的 RAM 更貴。
+//! * 它開的子 agent 還在跑——父 bot 分完工就結束回合等回報，看起來是閒著，但子 agent 做完要
+//!   `herdr agent prompt` 回報給它、卡住時 `child_alerts` 要通知它；收掉就沒人收（issue #172）。
 
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
@@ -66,6 +68,9 @@ pub struct Cand {
     /// AGM 還有沒結案的 assignment 指著它（**非終局**的都算，含 `blocked`／`awaiting_review`／
     /// `quota_blocked`——只看在途三態就是 2026-09-18 那次停擺的根因）。
     pub open_assignment: bool,
+    /// 它開的子 agent（`managed_by = 'child'`、`parent_bot_id` 指著它）還有活著的 run：子 agent 做完要用
+    /// `herdr agent prompt` 回報給它、卡住時 `child_alerts` 要通知它，收掉就沒人收（issue #172）。
+    pub live_children: bool,
     /// pane 裡還有背景 shell／建置在跑（agent 自己已經結束回合，但它丟到背景的工作還沒完）。
     /// 便宜的檢查先做完才會去問這一項，所以 [`candidates`] 列出來的一律是 `false`。
     pub background_shell: bool,
@@ -89,6 +94,7 @@ pub enum Skip {
     TurnInFlight,
     QueuedTurn,
     OpenAssignment,
+    LiveChildren,
     BackgroundShell,
     NoResume,
     StillWarm,
@@ -108,6 +114,7 @@ impl Skip {
             Skip::TurnInFlight => "turn_in_flight",
             Skip::QueuedTurn => "queued_turn",
             Skip::OpenAssignment => "open_assignment",
+            Skip::LiveChildren => "live_children",
             Skip::BackgroundShell => "background_shell",
             Skip::NoResume => "no_resume",
             Skip::StillWarm => "still_warm",
@@ -127,6 +134,7 @@ impl Skip {
             Skip::TurnInFlight => "還有一回合沒收掉",
             Skip::QueuedTurn => "還有排隊中的訊息沒送進去",
             Skip::OpenAssignment => "AGM 還有沒結案的 assignment 指著它",
+            Skip::LiveChildren => "它開的子 agent 還在跑，回報與提問要送得到它",
             Skip::BackgroundShell => "pane 裡還有背景 shell／建置在跑",
             Skip::NoResume => "沒有可續接的 session，收起來會把對話弄丟",
             Skip::StillWarm => "還沒閒置到門檻",
@@ -164,6 +172,9 @@ pub fn decide(c: &Cand, threshold: i64) -> Result<(), Skip> {
     }
     if c.open_assignment {
         return Err(Skip::OpenAssignment);
+    }
+    if c.live_children {
+        return Err(Skip::LiveChildren);
     }
     if c.background_shell {
         return Err(Skip::BackgroundShell);
@@ -260,6 +271,20 @@ async fn has_open_assignment(app: &Arc<App>, bot_id: &str) -> anyhow::Result<boo
     Ok(q.fetch_one(&app.db).await? > 0)
 }
 
+/// 它開的子 agent 還有沒有活著的 run（`db::active_run` 同一組狀態）。子 agent 的 pane 是 herdr 另開的，不在這顆 bot 的
+/// 行程樹底下，背景工作那一項看不到它們（issue #172）。查詢失敗回 `Err`，不當成「沒有」（issue #123 同一個規矩）。
+async fn has_live_children(app: &Arc<App>, bot_id: &str) -> anyhow::Result<bool> {
+    let n: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM bots b JOIN runs r ON r.bot_id = b.id
+          WHERE b.parent_bot_id = ? AND b.managed_by = 'child' AND b.deleted_at IS NULL
+            AND r.state IN ('starting','running','stopping')",
+    )
+    .bind(bot_id)
+    .fetch_one(&app.db)
+    .await?;
+    Ok(n > 0)
+}
+
 /// 非終局的交辦狀態。
 pub fn open_assignment_statuses() -> Vec<&'static str> {
     crate::supervisor::assignment_state::ALL.iter().copied().filter(|s| !crate::supervisor::assignment_state::is_terminal(s)).collect()
@@ -285,6 +310,7 @@ async fn cand_for(app: &Arc<App>, run: &db::Run, sup: &std::collections::HashSet
         turn_in_flight: db::in_flight_turn(&app.db, &run.id).await?.is_some(),
         queued_turn: db::queued_turn_for_bot(&app.db, &bot.id).await?.is_some(),
         open_assignment: has_open_assignment(app, &bot.id).await?,
+        live_children: has_live_children(app, &bot.id).await?,
         // 要問 herdr 與 ps，太貴；只有真的要收的那一顆才查（見 [`sweep`]）。
         background_shell: false,
         resumable: resumable(
@@ -782,6 +808,7 @@ mod tests {
             turn_in_flight: false,
             queued_turn: false,
             open_assignment: false,
+            live_children: false,
             background_shell: false,
             resumable: true,
             idle_minutes: 120,
@@ -898,6 +925,7 @@ mod tests {
             (|c| c.turn_in_flight = true, Skip::TurnInFlight),
             (|c| c.queued_turn = true, Skip::QueuedTurn),
             (|c| c.open_assignment = true, Skip::OpenAssignment),
+            (|c| c.live_children = true, Skip::LiveChildren),
         ] {
             let mut c = cand();
             set(&mut c);
@@ -1652,6 +1680,40 @@ mod tests {
             .unwrap();
         sleep_one(&app, &stale, Some("sid-1".into()), 90).await;
         assert_left_running(&app, &bot, "判斷之後有一個回合來了又走了").await;
+    }
+
+    /// 父 bot 把工作分給子 agent、自己結束回合等回報：對 daemon 來說它就是一顆閒著的 bot，子 agent 的 pane 也不在它的
+    /// 行程樹底下（背景工作那一項看不到）。90 分鐘後被收起來，子 agent 做完用 `herdr agent prompt <父>` 回報時找不到
+    /// 對象，卡在提問時 `child_alerts` 也因為父沒有 active run 直接不送——子 agent 的結果與提問都沒人收（issue #172）。
+    #[tokio::test]
+    async fn a_parent_whose_children_are_still_running_is_not_put_to_sleep() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (parent, _) = idle_bot(&env, "papa").await;
+        let _shell = provably_no_background_work(&env, &parent);
+        let kid = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, managed_by, parent_bot_id, created_at)
+             VALUES (?,?,'papa-kid','claude','[]',0,1,?,'child',?,?)",
+        )
+        .bind(&kid)
+        .bind(&env.project_id)
+        .bind(format!("tok-{kid}"))
+        .bind(&parent)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let kid_run = crate::testing::fake_run(&app, &kid).await;
+        sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&kid_run).execute(&app.db).await.unwrap();
+
+        sweep(&app, 90).await;
+        assert_left_running(&app, &parent, "子 agent 還在跑").await;
+
+        // 子 agent 做完、pane 關了：父 bot 再閒著就照常收。
+        sqlx::query("UPDATE runs SET state='exited', ended_at=? WHERE id=?").bind(db::now()).bind(&kid_run).execute(&app.db).await.unwrap();
+        sweep(&app, 90).await;
+        assert!(asleep(&app, &parent).await.is_some(), "沒有活著的子 agent：照常收");
     }
 
     /// 反向：問得到、而且證明沒有背景工作，這顆就照常收——「不知道就不收」不能變成永遠不收。
