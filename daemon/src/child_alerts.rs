@@ -12,6 +12,7 @@
 //! * daemon 自己會按掉的畫面不算（滿意度問卷、`/model` 確認框）——那些幾秒內就消失了；
 //! * 同一個問題只講一次（畫面尾段的指紋），child 在同一個提問上重畫不會變成連珠炮；
 //! * 父 agent 沒有活著的 run 就不送：沒有 pane 可以收，UI 的徽章仍在，使用者看得到；
+//! * 父 agent 這一刻收不下（409）就在背景照 [`RETRY`] 再試，child 還卡著才試（issue #169）；
 //! * 只有 `managed_by = 'child'` 且真的有 `parent_bot_id` 的 bot 會觸發。
 
 use std::collections::HashMap;
@@ -194,10 +195,46 @@ pub fn on_child_blocked(app: &Arc<App>, run: &db::Run) {
     let (app, run) = (app.clone(), run.clone());
     tokio::spawn(async move {
         tokio::time::sleep(SETTLE).await;
-        if let Err(e) = tell_parent(&app, &run).await {
-            tracing::debug!(bot = %run.bot_id, error = %e, "could not tell the parent about its blocked child");
-        }
+        keep_telling(&app, &run, &RETRY).await;
     });
+}
+
+/// parent 這一刻收不下這則（409：它唯一的排隊名額被別的佔著、它自己卡在提問、維護窗口…）時，隔多久再試（issue #169）。
+/// child 停在同一個問題上不會再有狀態事件，不自己重試就沒有下一次。加起來約一小時，每一次都先重看 child 還卡不卡著。
+const RETRY: [Duration; 6] = [
+    Duration::from_secs(30),
+    Duration::from_secs(60),
+    Duration::from_secs(120),
+    Duration::from_secs(300),
+    Duration::from_secs(600),
+    Duration::from_secs(1800),
+];
+
+/// 8 秒之後的那一段：告訴 parent；這一刻收不下就照 `retry` 的間隔再試。每一次都從頭判斷（child 還卡著嗎、parent
+/// 還在嗎、畫面上是什麼問題），child 被回答、parent 走了就自己停；同一次 blocked 的冪等鍵不變，重試不會變成兩則。
+pub(crate) async fn keep_telling(app: &Arc<App>, run: &db::Run, retry: &[Duration]) {
+    let mut waits = retry.iter();
+    loop {
+        let why = match tell_parent(app, run).await {
+            Ok(Told::Settled) => return,
+            Ok(Told::NotYet(why)) => why,
+            Err(e) => format!("{e:#}"),
+        };
+        let Some(wait) = waits.next() else {
+            tracing::warn!(bot = %run.bot_id, why, "gave up telling the parent about its blocked child; the UI badge is still there");
+            return;
+        };
+        tracing::debug!(bot = %run.bot_id, why, retry_in_secs = wait.as_secs(), "the parent could not take the alert yet; retrying");
+        tokio::time::sleep(*wait).await;
+    }
+}
+
+/// 一次 [`tell_parent`] 的結果。
+enum Told {
+    /// 送到了，或現在沒有要講的（不再 blocked、講過了、沒有 parent 可講）。
+    Settled,
+    /// 該講、parent 這一刻收不下：稍後再試。
+    NotYet(String),
 }
 
 /// 這顆 child 現在該不該通知、通知誰。回 `(父 bot id, child)`；不該通知就是 `None`。
@@ -226,33 +263,35 @@ pub async fn parent_to_tell(app: &Arc<App>, bot_id: &str) -> anyhow::Result<Opti
     Ok(Some((parent_id, child)))
 }
 
-async fn tell_parent(app: &Arc<App>, run: &db::Run) -> anyhow::Result<()> {
-    let Some((parent_id, child)) = parent_to_tell(app, &run.bot_id).await? else { return Ok(()) };
-    let Some(fresh) = db::active_run(&app.db, &run.bot_id).await? else { return Ok(()) };
-    let Some(pane) = fresh.pane_id.clone().filter(|p| !p.trim().is_empty()) else { return Ok(()) };
-    let Some(client) = app.herdr_for_run(&fresh).await else { return Ok(()) };
+async fn tell_parent(app: &Arc<App>, run: &db::Run) -> anyhow::Result<Told> {
+    let Some((parent_id, child)) = parent_to_tell(app, &run.bot_id).await? else { return Ok(Told::Settled) };
+    let Some(fresh) = db::active_run(&app.db, &run.bot_id).await? else { return Ok(Told::Settled) };
+    let Some(pane) = fresh.pane_id.clone().filter(|p| !p.trim().is_empty()) else { return Ok(Told::Settled) };
+    let Some(client) = app.herdr_for_run(&fresh).await else { return Ok(Told::Settled) };
     let screen = client.pane_read(&pane, "visible", 60).await?.text;
-    let Some(question) = alertable_question(&screen) else { return Ok(()) };
+    let Some(question) = alertable_question(&screen) else { return Ok(Told::Settled) };
 
     let fp = fingerprint(&question);
     let now = std::time::Instant::now();
     {
         let mut seen = spoken().lock().unwrap();
         if !may_speak(seen.get(&child.id).copied(), fp, now, THROTTLE) {
-            return Ok(());
+            return Ok(Told::Settled);
         }
         seen.insert(child.id.clone(), (fp, now));
     }
 
     match deliver(app, &parent_id, &child.id, &child.name, &question).await {
-        Ok(out) => tracing::info!(child = %child.name, parent = %parent_id, delivery = %out.delivery, "told the parent its child is waiting"),
+        Ok(out) => {
+            tracing::info!(child = %child.name, parent = %parent_id, delivery = %out.delivery, "told the parent its child is waiting");
+            Ok(Told::Settled)
+        }
         Err(e) => {
-            // 送不出去就把指紋收回來，下一次事件再試一次。
+            // 送不出去就把指紋收回來，由 [`keep_telling`] 稍後再試：child 還卡著就不會有下一次狀態事件（issue #169）。
             spoken().lock().unwrap().remove(&child.id);
-            tracing::debug!(child = %child.name, parent = %parent_id, error = ?e, "the parent could not be told");
+            Ok(Told::NotYet(format!("{e:?}")))
         }
     }
-    Ok(())
 }
 
 /// child 不再 blocked 時把指紋忘掉：同一個問題**再次**出現（例如它又問一次）才會再講一次。
@@ -516,6 +555,64 @@ mod tests {
 
         let told = parent_to_tell(&app, "mid-q").await.unwrap();
         assert_eq!(told.map(|(p, _)| p).as_deref(), Some("top-q"), "mid 是被自己的回合 X 卡住，不是讀了那則通知：top 要收到");
+    }
+
+    /// parent 這一刻收不下這則（每個對話最多一筆 queued：另一顆 child 的通知或 AGM 的派工已經排著；parent 自己卡在提問；
+    /// 維護窗口）：`prompt` 回 409。以前「送不出去就把指紋收回來，下一次事件再試」——可是 child 停在同一個問題上不會再有
+    /// 狀態事件，那個「下一次」永遠不來，parent 一直不知道它在等。child 還卡著，就要自己再試（issue #169）。
+    #[tokio::test]
+    async fn an_alert_the_parent_could_not_take_yet_is_retried_while_the_child_still_waits() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let parent = crate::testing::claude_bot(&app, &e.project_id, "p-retry").await.id;
+        let prun = crate::testing::fake_run(&app, &parent).await;
+        let conv = db::conversation_id(&app.db, &parent).await.unwrap();
+        // parent 正在回合中，而它唯一的排隊名額已經被另一則佔走。
+        for (id, status) in [("t-busy-r", "in_flight"), ("t-other-r", "queued")] {
+            sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,delivery,created_at,prompt_text) VALUES (?,?,?,'web',?,'pending',?,'別的事')")
+                .bind(id).bind(&conv).bind(&prun).bind(status).bind(db::now()).execute(&app.db).await.unwrap();
+        }
+        let kid = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, managed_by, parent_bot_id, created_at)
+             VALUES (?,?,'kid-retry','claude','[]',0,1,?,'child',?,?)",
+        )
+        .bind(&kid).bind(&e.project_id).bind(format!("tok-{kid}")).bind(&parent).bind(db::now())
+        .execute(&app.db).await.unwrap();
+        crate::testing::fake_run(&app, &kid).await;
+        sqlx::query("UPDATE runs SET agent_status='blocked' WHERE bot_id=?").bind(&kid).execute(&app.db).await.unwrap();
+        e.herdr.set_screen(&format!("pane-{kid}"), PERMISSION);
+        let run = db::active_run(&app.db, &kid).await.unwrap().unwrap();
+        let alerts = || {
+            let (app, conv) = (app.clone(), conv.clone());
+            async move {
+                sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM messages WHERE conversation_id=? AND role='user' AND content LIKE ?")
+                    .bind(&conv)
+                    .bind(format!("{ALERT_MARK}%"))
+                    .fetch_one(&app.db)
+                    .await
+                    .unwrap()
+            }
+        };
+
+        let (app2, run2) = (app.clone(), run.clone());
+        let task = tokio::spawn(async move { keep_telling(&app2, &run2, &[Duration::from_millis(1500); 4]).await });
+        // 第一次試：讀了畫面、送不進去。
+        let reads = |e: &crate::testing::Env| e.herdr.calls_to("pane.read").len();
+        for _ in 0..100 {
+            if reads(&e) > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(reads(&e) > 0, "前提：第一次已經試過");
+        assert_eq!(alerts().await, 0, "前提：排隊名額被佔著，第一次送不進去");
+
+        // 佔著名額的那一則離開佇列了；child 還卡在同一個問題上，沒有任何新的狀態事件。
+        sqlx::query("UPDATE turns SET status='failed', delivery='failed' WHERE id='t-other-r'").execute(&app.db).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(20), task).await.expect("重試有盡頭").unwrap();
+        assert_eq!(alerts().await, 1, "child 還在等：parent 要收到這一則（而且只有一則）");
     }
 
     /// 解除 blocked 之後**再**卡住同一個問題：要重新送（`forget` 把指紋清掉）。
