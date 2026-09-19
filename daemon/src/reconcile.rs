@@ -173,6 +173,11 @@ impl Recovery {
 
     /// 補一輪；回 `true`＝什麼都不欠了。
     async fn pass(&mut self, app: &Arc<App>) -> bool {
+        // 插隊送出途中停掉、還沒掛上 run 的那一則（#120）。排在接回 poller 之前：鍵其實生效了的那一則會在這裡掛上 run（#229），
+        // 接回的才是它、不是已經被它打斷的那一筆。
+        if self.send_nows {
+            self.send_nows = !crate::lifecycle::adopt_unbound_send_nows(app, &self.boot).await;
+        }
         self.rearm_in_flight(app).await;
         // Queued prompts in a backoff lost their timers with the old process (SPEC §4.4a).
         if self.queue {
@@ -180,10 +185,6 @@ impl Recovery {
                 Ok(_) => self.queue = false,
                 Err(e) => tracing::warn!(error = %e, "cannot re-arm queued prompt retries yet"),
             }
-        }
-        // 插隊送出途中停掉、還沒掛上 run 的那一則（#120）。
-        if self.send_nows {
-            self.send_nows = !crate::lifecycle::adopt_unbound_send_nows(app, &self.boot).await;
         }
         // run 已經結束、收尾卻欠著（帳只在記憶體，重啟就沒了）的那一筆（#156）。
         if self.ended_runs {

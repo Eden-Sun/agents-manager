@@ -963,7 +963,10 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run
    - **新的那一則先不佔 run**：它要在打字前就寫進 DB（維護窗口的閘門看得到它、同一個 `client_request_id` 冪等），但舊的那一筆還在跑、
      還佔著 `turns_one_in_flight` 的名額，所以先以 `run_id = NULL` 的 in_flight 存在，送出鍵生效時才掛上去。這也是「連續兩次 send-now
      不會有兩個 `in_flight`」的保證：兩次都在同一顆 per-bot 鎖裡排隊，第二次打斷的是第一次掛上去的那一則。
-     重啟時還沒掛上的那一則（送到一半 daemon 停了）由 `reconcile::rearm_progress` 收成 `failed`、送達 `unknown`，並寫明原因。
+     重啟時還沒掛上的那一則（送到一半 daemon 停了）由 `reconcile::rearm_progress` 收：這顆 bot 的 session log（本機 claude／codex）
+     在它建立之後出現了這一句＝送出鍵生效了，照平常的收尾做——run 上在飛的那一筆收成被插隊打斷、這一則掛上 run、送達記 `ok`（有證據）；
+     不這樣做的話 claude 替它送的 Stop 會認領被插隊的那一筆，回覆掛錯回合（#229）。看不到、讀不到（遠端、grok）才收成 `failed`、
+     送達 `unknown`，並寫明原因。開機恢復先處理這一步、再把在飛的回合接回 poller，接回的才是掛上去的那一則。
    - **送出鍵之前的每一種放棄都不動舊回合**：準備被擋（框裡有字、證據讀不到、`pane_typed` 寫不進去）或 herdr 拒收打字
      → 撤回新的那一則、回可重試的 409（`sent:false`、不留任何列，同一個 request id 可重送）；打字沒有回應、打完框是空的／讀不到、
      herdr 拒收送出鍵 → 新的那一則收成 `failed`（送達 `failed`，說明「字可能還留在終端的輸入框」），回 `200 send_now:"not_sent"`。
