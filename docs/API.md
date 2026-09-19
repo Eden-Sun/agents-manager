@@ -723,7 +723,7 @@ Project 可在另一台機器，daemon 透過 SSH 轉發連遠端 herdr。`host`
 | `ssh` | ✅ | `user@host` 或 ssh_config 別名 |
 | `ssh_port` | | `22` |
 | `herdr_session` | | `"agents-manager"` |
-| `remote_path` | | `""`（前置到遠端 PATH） |
+| `remote_path` | | `""`（前置到遠端 PATH）。以 `:` 分項、每項各自 quote；項目開頭的 `$HOME`／`${HOME}`／`~` 展開成遠端 home，其他 `$`、`;` 都是字面（#241） |
 | `ssh_opts` | | `[]`，原樣附加到每個 ssh 指令 |
 
 回 `200 {"name","connected","error"}`；連不上仍 200（設定已寫入）。名稱不合法或為 `local` 400。同名視為更新（先斷舊連線）。

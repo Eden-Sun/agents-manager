@@ -78,14 +78,32 @@ pub async fn sh_local(script: &str, timeout: Duration) -> Result<Option<std::pro
     Ok(Some(std::process::Output { status, stdout, stderr }))
 }
 
-/// Quoted so a value with a space (or `;`, `$(…)`) is one PATH entry, not a shell command.
+/// PATH 以 `:` 分項，每項各自 quote，所以空白、`;`、`$(…)` 是資料不是指令；只有項目**開頭**的
+/// `$HOME`／`${HOME}`／`~` 展開成遠端 home（API.md 的範例就是 `/opt/homebrew/bin:$HOME/.local/bin`，
+/// 整串包單引號會讓 `$HOME` 留成字面，遠端找不到 herdr，#241）。
 pub fn remote_path_prefix(remote_path: &str) -> String {
     let p = remote_path.trim();
     if p.is_empty() {
-        String::new()
-    } else {
-        format!("export PATH={}:\"$PATH\"\n", sh_quote(p))
+        return String::new();
     }
+    let entries: Vec<String> = p
+        .split(':')
+        .filter(|e| !e.is_empty())
+        .map(|e| {
+            for home in ["${HOME}", "$HOME", "~"] {
+                if let Some(rest) = e.strip_prefix(home) {
+                    if rest.is_empty() || rest.starts_with('/') {
+                        return if rest.is_empty() { "\"$HOME\"".to_string() } else { format!("\"$HOME\"{}", sh_quote(rest)) };
+                    }
+                }
+            }
+            sh_quote(e)
+        })
+        .collect();
+    if entries.is_empty() {
+        return String::new();
+    }
+    format!("export PATH={}:\"$PATH\"\n", entries.join(":"))
 }
 
 pub struct HostConn {
@@ -803,6 +821,23 @@ mod tests {
         // A space no longer splits the export; a `;` or `$(…)` is data, not a command.
         let p = remote_path_prefix("/Users/me/my tools/bin;$(touch /tmp/pwned)");
         assert_eq!(p, "export PATH='/Users/me/my tools/bin;$(touch /tmp/pwned)':\"$PATH\"\n");
+    }
+
+    /// #241：`$HOME/.local/bin` 以前整串單引號、字面 `$HOME` 進 PATH，遠端找不到 herdr。
+    #[test]
+    fn remote_path_expands_a_leading_home_and_splits_on_colon() {
+        assert_eq!(remote_path_prefix("$HOME/.local/bin"), "export PATH=\"$HOME\"'/.local/bin':\"$PATH\"\n");
+        assert_eq!(remote_path_prefix("${HOME}/bin"), "export PATH=\"$HOME\"'/bin':\"$PATH\"\n");
+        assert_eq!(remote_path_prefix("~/bin"), "export PATH=\"$HOME\"'/bin':\"$PATH\"\n");
+        assert_eq!(
+            remote_path_prefix("/opt/homebrew/bin:$HOME/.local/bin"),
+            "export PATH='/opt/homebrew/bin':\"$HOME\"'/.local/bin':\"$PATH\"\n"
+        );
+        // `$HOME` 只在項目開頭展開；其他 `$` 仍是資料。
+        assert_eq!(remote_path_prefix("/x/$HOME/bin"), "export PATH='/x/$HOME/bin':\"$PATH\"\n");
+        assert_eq!(remote_path_prefix("$HOMEX/bin"), "export PATH='$HOMEX/bin':\"$PATH\"\n");
+        let p = remote_path_prefix("$HOME/a;$(touch /tmp/pwned)");
+        assert_eq!(p, "export PATH=\"$HOME\"'/a;$(touch /tmp/pwned)':\"$PATH\"\n");
     }
 
     /// 兩個 daemon 實例（正式＋隔離，或兩個資料目錄不同的隔離實例）以前共用同一個
