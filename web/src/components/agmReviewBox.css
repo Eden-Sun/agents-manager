@@ -29,3 +29,28 @@
   font-size: 13px;
   line-height: 1.5;
 }
+
+/* 桌機更新框分左右（2026-09-19 使用者）：左 changelog、右 AGM 解析，視窗放寬，各自捲動。手機維持上下。 */
+@media (width > 900px) {
+  .confirm-dialog:has(.update-split) {
+    width: min(980px, 94vw) !important;
+  }
+
+  .update-split {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 12px;
+    align-items: stretch;
+  }
+
+  .update-split > * {
+    min-width: 0;
+    margin: 0;
+    max-height: 62vh;
+    overflow: auto;
+  }
+
+  .update-split .agm-review-body {
+    max-height: none;
+  }
+}

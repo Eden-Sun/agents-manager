@@ -104,10 +104,10 @@ export function UpdateQuotaChip() {
         body={
           <>
             {confirming ? (
-              <>
+              <div className="update-split">
                 <UpdateChangelog kind="claude" host={changelogHost} from={changelogFrom} />
                 <AgmReviewBox host={changelogHost} from={changelogFrom} refreshKey={reviewKey} />
-              </>
+              </div>
             ) : null}
             <p>
               以下 <strong>{readyCount}</strong> 顆會結束目前的 agent，再用同一個 session <code>--resume</code>{' '}

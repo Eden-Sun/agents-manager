@@ -78,10 +78,10 @@ export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; varian
       asking={asking}
       changelog={
         confirming ? (
-          <>
+          <div className="update-split">
             <UpdateChangelog kind={botKind} host={host} from={runningVersion} />
             {botKind === 'claude' ? <AgmReviewBox host={host} from={runningVersion} refreshKey={reviewKey} /> : null}
-          </>
+          </div>
         ) : null
       }
       onCancel={() => setConfirming(false)}
