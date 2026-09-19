@@ -891,7 +891,7 @@ env 前綴跟登入是同一段程式算出來的——少帶 `CLAUDE_CONFIG_DIR
 
 | 欄位 | 型別 | 說明 |
 |---|---|---|
-| `name` | string | 暱稱：1–32 字、允許 CJK，不可含空白或 `@ , : ;`；專案內唯一（重複 409 `bot name already in use in this project`）。執行中也可改，不影響 herdr |
+| `name` | string | 暱稱：1–32 字、允許 CJK，不可含 `@ , : ;`；空白只能是單一個半形空白、夾在中間（頭尾、連續、tab／換行不行，2026-09-19）；專案內唯一（重複 409 `bot name already in use in this project`）。執行中也可改，不影響 herdr |
 | `agent_name` | string（唯讀） | herdr 內的 agent 名：有 active Run 時是實際啟動的名稱，否則是下次會用的 `<project slug>-<bot id 尾 6 碼>` |
 | `kind` | `claude` \| `codex` \| `grok` | 其他值 400 `kind must be claude, codex or grok` |
 | `model` | string \| null | `null` = CLI 自己決定；不做白名單驗證，空白字串正規化成 `null` |

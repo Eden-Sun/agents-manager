@@ -1998,6 +1998,7 @@ poller 啟動時 `sweep_stale()` 關掉 `am-quota` 與本機 session 裡 label �
 
 ### 13.2 mention 解析（後端為準，前端只提示）
 - `@all` = 專案內所有 bot（不分大小寫）。`@<name>` 比對暱稱，支援 unicode 暱稱與全形標點；尾隨標點切掉。
+- 暱稱可以有空白（2026-09-19）：`@` 後面正好接著某個有空白的暱稱**整段**（不分大小寫、後面是結尾或標點／空白）就是它，最長的先比（`@my bot 2` 不會被 `my bot` 搶走）；沒對上的照原本逐字規則（`@my botanist` → `my`）。
 - `@` 須在開頭或非字元之後（`me@example.com` 不算）。沒有有效 mention → 400 `{error:"no_mention", message, bots}`。目標依專案內 bot 順序去重。
 
 ### 13.3 不可送的 bot（略過，不自動啟動）

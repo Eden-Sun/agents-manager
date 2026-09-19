@@ -4,6 +4,7 @@
  */
 
 import { parseMentions } from './mentions'
+import { BOT_NAME_HINT, isValidBotName } from '../lib/botName'
 import { ApiError, BOT_KINDS } from './types'
 import type { BotKind } from './types'
 import type { HttpMethod, SocketHandlers, Transport } from './transport'
@@ -2140,8 +2141,8 @@ export class MockTransport implements Transport {
 
   private addBot(projectId: string, b: Rec) {
     const name = String(b.name ?? '').trim()
-    if (!/^[^\s@,:;]{1,32}$/.test(name)) {
-      throw new ApiError(400, { reason: 'name：1–32 個字，不可含空白或 @ , : ;' }, 'bad request')
+    if (!isValidBotName(name)) {
+      throw new ApiError(400, { reason: `name：${BOT_NAME_HINT}` }, 'bad request')
     }
     if (this.bots.some((x) => x.name === name)) {
       throw new ApiError(409, { reason: `agent name 已被使用：${name}` }, 'conflict')
@@ -2268,8 +2269,8 @@ export class MockTransport implements Transport {
     }
     if (typeof b.name === 'string') {
       const name = b.name.trim()
-      if (!/^[^\s@,:;]{1,32}$/.test(name)) {
-        throw new ApiError(400, { error: 'bad_request', message: 'name：1–32 個字，不可含空白或 @ , : ;' }, 'bad request')
+      if (!isValidBotName(name)) {
+        throw new ApiError(400, { error: 'bad_request', message: `name：${BOT_NAME_HINT}` }, 'bad request')
       }
       if (this.bots.some((x) => x.id !== id && x.name === name)) {
         throw new ApiError(409, { error: 'conflict', reason: 'bot name already in use', name }, 'conflict')
