@@ -227,6 +227,9 @@ pub struct ReviewIn {
 /// Idempotent: repeating a decision that is already recorded returns the same row without
 /// writing a second audit entry, and a `followup` reuses its `followup_request_id`, so a retry
 /// after a timeout cannot fan out into two continuations.
+/// 裁示當下撤不成排著的那一則時，多久之後叫 flush 再判斷一次（同 flush 讀不到交辦那一條）。
+const REVOKE_RECHECK: std::time::Duration = std::time::Duration::from_secs(super::maintenance::UNREADABLE_RETRY_SECS as u64);
+
 pub async fn post_review(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
@@ -407,10 +410,29 @@ pub async fn post_review(
 
     // 交辦不要了：它排著還沒送出的 queued turn 一併撤銷、釋放名額（AGM 2026-09-16）。
     // 已經 in_flight 或送出的撤不回來，不動——上面的 warning 已經講清楚。
+    // 讀不到交辦、或撤不掉（寫不進去）：這一刻撤不成，不假裝沒有要撤的（#200）。那一則不會因此送出——flush 送之前
+    // 再判斷一次，讀不到就不送、讀得到就撤（#159）；這裡叫醒 flush、回應裡講明撤銷待補（`revoke_pending_turn_id`）。
     let mut revoked_turn = None;
+    let mut revoke_pending = None;
     if matches!(updated.status.as_str(), "cancelled" | "superseded" | "failed") {
         if let Some(tid) = updated.turn_id.as_deref() {
-            if let Some(why) = crate::lifecycle::withdrawn_assignment_reason(&app, tid).await {
+            // 決定 commit 了、還沒撤的那一瞬（測試在這裡讓交辦讀不到）。
+            #[cfg(test)]
+            crate::lifecycle::race_point::hit("review_before_revoke", &updated.id).await;
+            let withdrawal = crate::lifecycle::assignment_withdrawal(&app, tid).await;
+            if let Err(e) = &withdrawal {
+                tracing::warn!(assignment = %updated.id, turn = tid, error = ?e, "讀不到交辦是否已撤回：排著的那一則這一刻撤不成，交給 flush");
+                // 還排著的才有得撤；已經送出去的不講待補。回合的狀態也讀不到時當成可能還排著。
+                let queued = sqlx::query_scalar::<_, String>("SELECT status FROM turns WHERE id=?")
+                    .bind(tid)
+                    .fetch_optional(&app.db)
+                    .await
+                    .map_or(true, |s| s.as_deref() == Some("queued"));
+                if queued {
+                    revoke_pending = Some(tid.to_string());
+                }
+            }
+            if let Ok(Some(why)) = withdrawal {
                 match crate::lifecycle::revoke_queued_turn(&app, tid, &why).await {
                     Ok(true) => {
                         revoked_turn = Some(tid.to_string());
@@ -427,8 +449,14 @@ pub async fn post_review(
                         }
                     }
                     Ok(false) => {}
-                    Err(e) => tracing::error!(assignment = %updated.id, turn = tid, error = %e, "could not revoke the withdrawn assignment's queued turn"),
+                    Err(e) => {
+                        tracing::error!(assignment = %updated.id, turn = tid, error = %e, "could not revoke the withdrawn assignment's queued turn");
+                        revoke_pending = Some(tid.to_string());
+                    }
                 }
+            }
+            if revoke_pending.is_some() {
+                crate::lifecycle::schedule_flush_retry(&app, &updated.target_bot_id, REVOKE_RECHECK);
             }
         }
     }
@@ -452,6 +480,10 @@ pub async fn post_review(
     }
     if let Some(t) = revoked_turn.as_deref() {
         out["revoked_turn_id"] = json!(t);
+    }
+    if let Some(t) = revoke_pending.as_deref() {
+        out["revoke_pending_turn_id"] = json!(t);
+        out["revoke_pending"] = json!("排著的那一則這一刻撤不成（讀不到交辦或寫不進去）；它不會被送出——送出前會再判斷一次，讀得到就撤。");
     }
     // 撤掉的是還沒送出的那則：「turn 還在跑」的警告不成立，不要跟 revoked_turn_id 一起回給呼叫端。
     let still_running = if revoked_turn.is_some() { None } else { still_running };

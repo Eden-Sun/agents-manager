@@ -350,14 +350,6 @@ pub(crate) async fn assignment_withdrawal(app: &Arc<App>, turn_id: &str) -> anyh
     Ok(Some(format!("排隊中的這則沒有送出：交辦 {} {what}{why}，一併撤銷，不會再送。", a.id)))
 }
 
-/// review API 做完決定當下的那一次撤銷用（`supervisor::api`）：讀不到就這一次先不撤、記一行。不會因此送出去——
-/// flush 送之前再判斷一次，讀不到就不送（[`assignment_withdrawal`]）。
-pub(crate) async fn withdrawn_assignment_reason(app: &Arc<App>, turn_id: &str) -> Option<String> {
-    assignment_withdrawal(app, turn_id).await.unwrap_or_else(|e| {
-        tracing::warn!(turn = turn_id, error = %e, "讀不到交辦是否已撤回：這一次先不撤，flush 送之前會再判斷（讀不到就不送）");
-        None
-    })
-}
 
 /// 撤銷一筆還在排隊的 turn：標成 failed、寫明理由、釋放這個對話的 queued 名額，**不送**。
 /// 只動 `queued`——已經 in_flight 或送出的撤不回來，不假裝撤回。`Ok(true)`＝這次真的撤掉了。
@@ -1149,6 +1141,46 @@ mod flush_queue_tests {
         let typed = f.env.herdr.pane("pane-1").unwrap().transcript;
         assert!(!typed.iter().any(|l| l.contains("fence 21")), "已取消的那則一個字都沒送：{typed:?}");
         assert!(typed.iter().any(|l| l.contains("下一則")), "排在後面的照常送：{typed:?}");
+    }
+
+    /// #200：cancel 的那一刻撤不掉排著的那一則——讀不到交辦（以前舊介面把讀取錯誤吞成「沒有要撤的」），或撤銷那一句寫不進去
+    /// （以前只記一行）——回應看起來都跟「沒有要撤的」一樣。現在回應講明撤銷待補（`revoke_pending_turn_id`）、叫醒 flush；
+    /// DB 好了 flush 把它撤掉，一個字都不送。
+    #[tokio::test]
+    async fn a_cancel_that_cannot_revoke_the_queued_prompt_right_now_says_it_is_pending() {
+        for why in ["讀不到交辦", "撤銷寫不進去"] {
+            let f = queued("test").await;
+            let app = f.env.app.clone();
+            f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
+            sqlx::query("UPDATE turns SET prompt_text = '請釋放 fence 21' WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+            let a = queued_assignment(&f).await;
+            forget_queue_retry_timer(&f.bot_id);
+            if why == "讀不到交辦" {
+                let app2 = app.clone();
+                super::super::race_point::arm("review_before_revoke", &a, move || async move { break_assignment_reads(&app2).await });
+            } else {
+                sqlx::query("CREATE TRIGGER lost_revoke BEFORE UPDATE OF status ON turns WHEN NEW.status = 'failed' BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END")
+                    .execute(&app.db)
+                    .await
+                    .unwrap();
+            }
+
+            let out = decide(&app, &a, "cancel").await;
+            if why == "讀不到交辦" {
+                restore_assignment_reads(&app).await;
+            } else {
+                sqlx::query("DROP TRIGGER lost_revoke").execute(&app.db).await.unwrap();
+            }
+            assert_eq!(out["status"], "cancelled", "{why}");
+            assert!(out.get("revoked_turn_id").is_none(), "{why}：沒撤成：{out}");
+            assert_eq!(out["revoke_pending_turn_id"], json!(f.turn_id), "{why}：講明撤銷待補：{out}");
+            assert!(queue_retry_timer_armed(&f.bot_id), "{why}：叫醒 flush 再撤");
+            assert_eq!(turn(&app, &f.turn_id).await.status, "queued", "{why}");
+
+            flush_queued_locked(&app, &f.bot_id).await.unwrap();
+            assert_eq!(turn(&app, &f.turn_id).await.status, "failed", "{why}：flush 撤掉");
+            assert_eq!(typed(&f, "fence 21"), 0, "{why}：一個字都沒送");
+        }
     }
 
     /// 已經 in_flight（送出去了）的撤不回來：cancel 不動 turn，也不說撤掉了。
