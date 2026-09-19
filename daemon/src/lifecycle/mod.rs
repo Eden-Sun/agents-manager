@@ -21,6 +21,7 @@ mod delivery;
 mod prompt;
 mod pane_text;
 mod poller;
+mod transcript_origin;
 mod screen;
 mod limit_banner;
 mod stuck_turns;
