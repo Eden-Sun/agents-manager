@@ -1739,6 +1739,49 @@ mod send_now_tests {
         assert_eq!(send_now_presses(&f), 1);
     }
 
+    /// #149 重開的時序：插隊送出收舊回合那一半一時寫不進去（欠著），當場補上時交易 commit 了，緊接著寫新那一則的送達結果
+    /// （送出的那一刻）又失敗——記成送達欠帳；回到 `prompt_inner` 再寫一次（此刻）時 DB 好了。舊帳要跟著清掉，送達時間
+    /// 要是最早送出的那一刻；之後別的路寫進較新的證據，結清時不能被舊帳蓋回去。
+    #[tokio::test]
+    async fn a_send_now_whose_owed_delivery_write_lands_on_the_second_try_leaves_no_stale_debt() {
+        let f = fixture("claude", Some("2.1.275")).await;
+        let app = f.env.app.clone();
+        let running = busy(&f).await;
+        sqlx::query(&format!(
+            "CREATE TRIGGER lost_close BEFORE UPDATE OF status ON turns WHEN OLD.id = '{running}' BEGIN SELECT RAISE(ABORT, 'database is locked'); END"
+        ))
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let sent_by = Arc::new(std::sync::Mutex::new(String::new()));
+        let (db, bot, seen) = (app.db.clone(), f.bot_id.clone(), sent_by.clone());
+        super::super::race_point::arm("send_now_owed", &f.bot_id, move || async move {
+            // 收舊回合那一半好了，寫送達結果的那一句（只有它寫 `delivery_verified`）換成寫不進去。
+            sqlx::query("DROP TRIGGER lost_close").execute(&db).await.unwrap();
+            sqlx::query("CREATE TRIGGER lost_delivery BEFORE UPDATE OF delivery_verified ON turns BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END")
+                .execute(&db)
+                .await
+                .unwrap();
+            super::super::race_point::arm("owed_delivery_recorded", &bot, move || async move {
+                *seen.lock().unwrap() = db::now();
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                sqlx::query("DROP TRIGGER lost_delivery").execute(&db).await.unwrap();
+            });
+        });
+
+        let out = prompt_send_now(&app, &f.bot_id, "先看這句", "sn-stale-debt", &[], None).await.expect("第二次寫成了：普通的成功");
+        assert_eq!((out.send_now, out.delivery.as_str()), (Some("interrupted"), "ok"));
+        let sent_by = sent_by.lock().unwrap().clone();
+        assert!(!sent_by.is_empty(), "送達結果的第一次寫入確實失敗、記成欠著");
+        let at: Option<String> = sqlx::query_scalar("SELECT delivered_at FROM turns WHERE id=?").bind(&out.turn_id).fetch_one(&app.db).await.unwrap();
+        assert!(at.as_deref().is_some_and(|at| at <= sent_by.as_str()), "送達時間是送出的那一刻（{sent_by} 之前），拿到 {at:?}");
+
+        sqlx::query("UPDATE turns SET delivery='unknown', delivery_verified=0 WHERE id=?").bind(&out.turn_id).execute(&app.db).await.unwrap();
+        super::super::owed_delivery::settle_locked(&app, &f.bot_id).await.expect("沒有欠著的");
+        assert_eq!(delivery_of(&f, &out.turn_id).await, "unknown", "舊帳不會把較新的結果蓋回去");
+        assert_eq!(send_now_presses(&f), 1);
+    }
+
     /// 驗收二：連續兩次插隊送出不會產生兩個 `in_flight`——第二次同樣先收掉第一次那筆。
     #[tokio::test]
     async fn two_send_nows_in_a_row_never_leave_two_in_flight_turns() {

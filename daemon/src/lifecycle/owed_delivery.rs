@@ -96,13 +96,31 @@ pub(crate) async fn refused(app: &Arc<App>, bot_id: &str, turn_id: &str, note: &
     owe(app, bot_id, Owed { turn_id: turn_id.to_string(), write: Write::Refused { note: note.to_string() } }).await
 }
 
-async fn owe(app: &Arc<App>, bot_id: &str, o: Owed) -> anyhow::Result<()> {
+/// 同一筆回合**任何一次寫成**都是它最新的送達結果：之前欠著的那一條跟著作廢（#149 重開）。留著的話定時重試會把舊的
+/// 那一份再寫一次，蓋掉這之間別的路寫進去的較新結果。送達時間取帳上與這一次較早的那一刻——`delivered_at` 只記第一次，
+/// 先寫成的若是較晚的那一刻，之後就改不回來了。寫帳的路握著 bot 鎖；唯一不拿鎖的（run 結束時補插隊送出的收尾）寫的是
+/// 帳上記著的同一份結果。
+async fn owe(app: &Arc<App>, bot_id: &str, mut o: Owed) -> anyhow::Result<()> {
+    if let Write::Delivered { at, .. } = &mut o.write {
+        let earlier = owed(bot_id).into_iter().filter(|x| x.turn_id == o.turn_id).find_map(|x| match x.write {
+            Write::Delivered { at: first, .. } if first < *at => Some(first),
+            _ => None,
+        });
+        if let Some(first) = earlier {
+            *at = first;
+        }
+    }
     match write(app, bot_id, &o).await {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            forget(bot_id, &o.turn_id);
+            Ok(())
+        }
         Err(e) => {
             tracing::warn!(bot = bot_id, turn = %o.turn_id, error = %e, "prompt 已經送出（或被拒收），結果卻寫不進 DB：記成欠著，之後補");
             record(bot_id, o);
             schedule_retry(app, bot_id);
+            #[cfg(test)]
+            super::race_point::hit("owed_delivery_recorded", bot_id).await;
             Err(e)
         }
     }
@@ -575,6 +593,43 @@ mod tests {
     }
 
     /// AGM 收件匣的通知只要「綁在哪一筆、別再送一份」：欠著的當 `unknown`，拒收的照樣 `failed`，其他錯誤原樣回。
+    /// #149 重開：第一次寫回失敗（欠著），同一筆接著**直接**寫成功（沒經過結清）——舊帳要跟著清掉。留著的話定時重試
+    /// 之後會把舊的那一份再寫一次：這之間別人寫進去的較新結果被蓋回舊的，`delivered_at` 也不是最早送出的那一刻。
+    #[tokio::test]
+    async fn a_later_write_that_lands_clears_the_older_debt_for_the_same_turn() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot, conv, run) = idle_bot(&env, "claude").await;
+        let turn_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, client_request_id, created_at, auto_resend)
+             VALUES (?,?,?,'web','in_flight','pending','crid-twice',?,0)",
+        )
+        .bind(&turn_id)
+        .bind(&conv)
+        .bind(&run)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let sent_at = db::now();
+        lose_delivery_writes(&app).await;
+        delivered_at(&app, &bot, &turn_id, Delivered::Submitted.record().unwrap(), &sent_at).await.expect_err("DB 壞著");
+        assert_eq!(owed_answer(&turn_id), Some("ok"), "記成欠著");
+
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        heal_delivery_writes(&app).await;
+        delivered(&app, &bot, &turn_id, Delivered::Submitted.record().unwrap()).await.expect("同一筆直接寫成了");
+        assert_eq!(owed_answer(&turn_id), None, "寫成了就不再欠：舊帳跟著清掉");
+        assert_eq!(turn(&app, &turn_id).await.delivered_at.as_deref(), Some(sent_at.as_str()), "送達時間是最早送出的那一刻，不是後來寫的時候");
+
+        // 之後別的路寫進較新的證據（重送證不明，poller 改記 unknown）：定時重試不能把它蓋回舊的。
+        sqlx::query("UPDATE turns SET delivery='unknown', delivery_verified=0 WHERE id=?").bind(&turn_id).execute(&app.db).await.unwrap();
+        settle(&app, &bot).await.expect("定時重試");
+        let t = turn(&app, &turn_id).await;
+        assert_eq!((t.delivery.as_str(), t.delivery_verified), ("unknown", 0), "舊帳不會把較新的結果降回去");
+    }
+
     #[test]
     fn an_owed_delivery_reads_as_unknown_to_callers_that_only_need_the_turn() {
         let owed = |delivery: &str| Err(super::uncommitted(Some("r"), "t", "m", delivery, None));
