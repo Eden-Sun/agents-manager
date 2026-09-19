@@ -1,0 +1,29 @@
+       49    `unknown` 只有 agent **不是** `working` 才鎖輸入（grok 單行回音證不出時 agent 往往已經在想，鎖框會變成黃條＋紅 toast 蓋住 outbox）；
+       50    `working` 當一般 in-flight，下一則排隊。鎖定原因的順序在 `composerState()`；Enter 送出、Shift+Enter 換行、組字中的 Enter 不送。
+       51  - **來源標籤**：`hook` 不標；`terminal_fallback` 標「可能不完整」；系統訊息另有來源標。
+       52  - **WS**：指數退避重連（250ms 起跳、上限 3 秒 + jitter；`transport.ts`），重連帶 `?since=<最高 seq>`；`resync` 或 `project_changed`／`bot_changed` → 重新 `GET /api/state`
+       53  - **blocked**：`BlockedModal`（全畫面，blocked 1 秒後自動彈出，只彈正在看的 bot，關過就不再彈直到下一次 blocked）與
+
+     ◆ Task started: Run grok echo_row_hits unit tests
+     ◆ Task failed in 16s: Run grok echo_row_hits unit tests (exit 1)
+
+  ┃  Turn failed: Request failed (402): Grok Build usage balance exhausted
+                                                                                                                                                                                        █
+
+  Help improve Grok                                                                                                                                                  [Opt out] [Opt in]
+  Off by default. Opt-in to allow SpaceXAI to retain coding data, e.g., prompts, traces, & metrics, for training and debugging purposes. Change anytime via
+  settings.
+  Read Terms and Privacy Policy.
+
+  ┃
+  ┃  You hit your weekly limit.
+  ┃
+  ┃
+  ┃  1 (○) Upgrade tier      Upgrade to a higher tier for more usage
+  ┃  2 (○) Buy more credits  Purchase credits to keep using Grok Build
+  ┃  3 (○) Try Again         Resubmit the last prompt once you have usage again
+  ┃
+  ┃  ↑/↓ navigate · y copy                                                                                                                                             Enter:submit
+  ┃
+
+  Tab:next answer  │  Esc:scrollback  │  Shift+x:dismiss

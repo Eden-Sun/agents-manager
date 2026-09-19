@@ -30,7 +30,7 @@ pub async fn capture_codex_usage_notices(app: &Arc<App>, bot_id: &str, expected_
         return Ok(());
     }
     let Some(bot) = db::bot(&app.db, bot_id).await? else { return Ok(()) };
-    if bot.kind != "codex" {
+    if !matches!(bot.kind.as_str(), "codex" | "grok") {
         return Ok(());
     }
     let Some(pane_id) = run.pane_id.as_deref() else { return Ok(()) };
@@ -38,13 +38,15 @@ pub async fn capture_codex_usage_notices(app: &Arc<App>, bot_id: &str, expected_
     let read = client.pane_read(pane_id, "recent_unwrapped", 200).await?;
     let conversation_id = db::conversation_id(&app.db, bot_id).await?;
 
-    let notices = codex_usage_notice_lines(&read.text);
-    let limit_banners: Vec<String> = notices.iter().filter(|n| codex_limit_hit_line(n).is_some()).cloned().collect();
+    let grok = bot.kind == "grok";
+    let notices = if grok { grok_limit_notice_lines(&read.text) } else { codex_usage_notice_lines(&read.text) };
+    let is_limit_line = |n: &str| if grok { grok_limit_hit_line(n).is_some() } else { codex_limit_hit_line(n).is_some() };
+    let limit_banners: Vec<String> = notices.iter().filter(|n| is_limit_line(n)).cloned().collect();
     // 同一畫面裡比最後一張橫幅更新的狀態列還有餘裕 → 畫面上的撞限橫幅都是舊的（見 `limit_banner`）。
     let headroom_below = super::limit_banner::status_line_says_headroom(&read.text);
     let mut marked = Ok(());
     for notice in notices {
-        let is_limit = codex_limit_hit_line(&notice).is_some();
+        let is_limit = is_limit_line(&notice);
         // 撞限要看的「有沒有回合在飛」在寫通知訊息**之前**讀（#198）：訊息寫了之後這一則就不再是新的（`fresh`），
         // 讀在後面的話讀錯就回錯，沒有在飛回合時下一次被當成看過的舊橫幅跳過，撞限永遠不記。
         let in_flight = if is_limit { db::in_flight_turn(&app.db, &run.id).await? } else { None };
@@ -74,7 +76,7 @@ pub async fn capture_codex_usage_notices(app: &Arc<App>, bot_id: &str, expected_
         if fresh {
             // No pane snapshot: the idle splash is a boxed TUI, not a failed cut of a reply.
             insert_message(app, &conversation_id, None, "system", &notice, "system", false, None).await?;
-            tracing::info!(bot = %bot.name, notice = %notice, "codex account notice captured");
+            tracing::info!(bot = %bot.name, kind = %bot.kind, notice = %notice, "CLI account notice captured");
         }
         #[cfg(test)]
         super::race_point::hit("codex_notice_after_insert", bot_id).await;
@@ -419,6 +421,40 @@ fn codex_usage_notice_line(line: &str) -> Option<String> {
 }
 
 /// `ERROR: You've hit your usage limit. Upgrade to Pro …, or try again at Aug 8th, 2025 1:47 PM.`
+/// grok 撞額度時畫在訊息區塊裡的那幾句（2026-09-19 w168:pB7 真畫面）：
+///
+/// ```text
+/// ┃  Turn failed: Request failed (402): Grok Build usage balance exhausted
+/// ┃  You hit your weekly limit.
+/// ┃  1 (○) Upgrade tier  …
+/// ```
+///
+/// 那三個編號**不是可以選的選單**（方向鍵動不了、ANSI 也看不到游標），是 grok 用文字告訴你有哪些
+/// 出路。以前 grok 完全不走這條掃描，bot 就一直停在 `blocked`、畫面沒人解讀，使用者看到的是一份
+/// 「像在問問題、卻按不動」的終端。
+pub(crate) fn grok_limit_hit_line(line: &str) -> Option<String> {
+    let s = line.trim().trim_start_matches(['┃', '│', '▌', '|']).trim();
+    let low = s.to_ascii_lowercase();
+    let hit = low.contains("usage balance exhausted")
+        || low.contains("you hit your weekly limit")
+        || low.contains("you've hit your weekly limit")
+        || (low.contains("request failed (402)") && low.contains("grok"));
+    hit.then(|| s.to_string())
+}
+
+/// 同一張畫面上所有值得記一筆的 grok 通知（目前只有撞額度）。重複的只留第一句。
+pub(crate) fn grok_limit_notice_lines(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in text.lines() {
+        if let Some(n) = grok_limit_hit_line(line) {
+            if !out.iter().any(|x| x == &n) {
+                out.push(n);
+            }
+        }
+    }
+    out
+}
+
 pub(crate) fn codex_limit_hit_line(line: &str) -> Option<String> {
     let raw = line.trim();
     if raw.is_empty() {
@@ -1447,6 +1483,26 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
     fn the_stall_message_says_an_enter_was_re_sent() {
         assert!(stall_reason(&[], true).contains("補送"));
         assert!(!stall_reason(&[], false).contains("補送"));
+    }
+
+    /// grok 撞週限的真畫面（2026-09-19 w168:pB7）：那三個編號不是選單，是 grok 用文字講出路
+    /// （方向鍵動不了、ANSI 也看不到游標）。以前 grok 完全不走這條掃描，bot 一直停在 `blocked`、
+    /// 額度還顯示有餘。
+    #[test]
+    fn a_grok_weekly_limit_screen_is_read_as_a_limit_hit() {
+        const GROK_LIMIT: &str = include_str!("fixtures/grok_limit_hit.txt");
+        let lines = grok_limit_notice_lines(GROK_LIMIT);
+        assert!(lines.iter().any(|l| l.contains("usage balance exhausted")), "{lines:?}");
+        assert!(lines.iter().any(|l| l.contains("You hit your weekly limit")), "{lines:?}");
+        // 畫面上重畫很多次，每一句只記一筆。
+        assert_eq!(lines.len(), lines.iter().collect::<std::collections::HashSet<_>>().len());
+
+        // 一般畫面、選項行本身都不算。
+        assert!(grok_limit_notice_lines("⏺ 做完了\n  ❯ \n").is_empty());
+        assert!(grok_limit_hit_line("  ┃  1 (○) Upgrade tier      Upgrade to a higher tier").is_none());
+        // 402 要跟 grok 一起出現才算，別的 CLI 的 402 不借用這條。
+        assert!(grok_limit_hit_line("Request failed (402): something else").is_none());
+        assert!(grok_limit_hit_line("┃  Turn failed: Request failed (402): Grok Build usage balance exhausted").is_some());
     }
 
     #[test]

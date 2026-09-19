@@ -747,7 +747,7 @@ cancel 撤掉的是還沒送出的那則時，review 回應不再帶「turn 還�
 保留撞限時刻與桶名、沒寫時間的照樣黏著、回填前已經進來的讀數當場校正），之後只看記憶體——新讀數、換身分、換模型、成功回合照舊校正或清掉它。
 這一輪自己寫的憑據記憶體本來就有，不另外看。
 **讀不到就擋、記不進去就欠著**（#108 第三次重開）：這條閘門上任何一步讀不到，都不能當成「沒撞限」。
-- 撞限寫入（`turn_error::mark_claude_limit_hit`；codex 的撞限橫幅走 `mark_codex_limit_hit`，畫面擷取與終端備援都是，#198）回 `Result`：
+- 撞限寫入（`turn_error::mark_claude_limit_hit`；codex **與 grok** 的撞限橫幅走 `mark_codex_limit_hit`，畫面擷取與終端備援都是，#198）回 `Result`：
   讀不到這顆 bot 在哪台主機（不退回 `local`——那會把撞限寫進本機身分的 key：本機帳號被當成用盡、遠端那個真的用盡的身分反而沒擋）、
   那台的身分表還沒偵測完又不是手寫的身分（`quota::resolve_quota_base`，不猜 `claude:cc0`）、排著的 prompt 身上的憑據寫不進去，都回錯。
   撞限是外面已經發生的事，所以同時記成**欠著**（`turn_error::owed_limit_hit`，行程記憶體）：補上之前，這顆 bot 的 flush 與派送前都照欠著的
@@ -763,6 +763,11 @@ cancel 撤掉的是還沒送出的那則時，review 回應不再帶「turn 還�
   撞限清掉）、`limit_cleared_since` 讀不到回沒清過、`running_model` 讀不到 run 回不知道（照擋，不退回設定值）、claude statusLine 讀不到主機
   就丟掉那一份（不寫進本機那一格、不拿它去校正本機的撞限）。supervisor 的派送／重送仍用 `quota::limit_hit_for_bot`（讀不到回沒有並記 warn；
   那邊拿到撞限會 park、群組任務會換身分，不能拿假的撞限去擋）。
+  **grok 的撞限長不一樣**（2026-09-19 w168:pB7）：它畫在訊息區塊裡——`Turn failed: Request failed (402): Grok Build usage balance
+  exhausted`、`You hit your weekly limit.`，底下還有 `1 (○) Upgrade tier` 等三行。**那三行不是可以選的選單**：方向鍵動不了、
+  ANSI 也看不到游標，是 grok 用文字講出路，所以不畫成按鈕。`screen::grok_limit_hit_line` 認這兩句（402 那句要同時提到 grok），
+  畫面掃描（`screen::scan`）因此也對 grok 跑，bot 不會再停在一個「像在問問題、卻按不動」的 blocked 畫面。橫幅裡沒有時間，
+  `until` 就是 `None`。
 
 **abort 不動 queued**（AGM 裁示 2026-09-16）：`POST /api/bots/{id}/abort` 的語意是「停掉這一回合」，排在後面的是 AGM 正當的派工，
 abort 之後照常 flush 出去（但先照下一段等寬限）。要取消排隊的派工，走交辦 `cancel`（上面那條會一併撤 queued）。這不是漏撤，不要當成 bug 修。
