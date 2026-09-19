@@ -1536,6 +1536,7 @@ listen port 只在本機算（pane 行程樹的 pid 對 `lsof -nP -iTCP -sTCP:LI
   **不先 acquire**：不受本機 `max_concurrent` 限制；遠端有自己的名額（`[build.remote] max_concurrent`，預設依遠端核數與 RAM 算，滿了排隊，
   排超過 30 分鐘回 75，issue #104，詳見 API.md「外部 Cargo 主機」）。
   helper 結束碼原樣帶出（非 125 一律 `exit`，不會偷偷在本機重跑；超過整體上限 `[build.remote] timeout_secs`，預設 12 分鐘，是 **124**，issue #194）；只有 **125＝根本沒有在遠端動手**（設定被關掉、不適合 offload）才落到下面，
+  認證：密碼留空＝走 ssh 的 key／agent（`BatchMode=yes`，不碰 sshpass／askpass）；`[build.remote] identity_file = "<路徑>"` 讓 ssh 與 rsync 都帶同一把 `-i … -o IdentitiesOnly=yes`（只放路徑；檔案不存在或 key 被拒都是 126 明確失敗，不退回本機，issue #104）。
   這時才去 acquire、才受本機名額管。缺環境變數而沒轉成的（issue #138）也是落到本機、照本機名額排。`build`／`run`／…本來就不轉，照舊排。
   daemon 連不上時遠端編譯照樣能跑（它不需要 daemon）。
 - `CARGO_BUILD_JOBS` 由 daemon 的 acquire 回應決定（`build.cargo_jobs`，預設 2），不吃 cargo 自己抓核心數的預設值。

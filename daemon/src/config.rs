@@ -329,6 +329,10 @@ pub struct BuildRemoteCfg {
     /// 空字串＝沒有密碼（key/agent）。密碼本身永遠不在這裡——換主機與換密碼靠「config.toml 換成指向新檔」這一次 rename 一起生效。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password_id: Option<String>,
+    /// 指定 ssh 金鑰檔（issue #104）：ssh／rsync 帶 `-i <path> -o IdentitiesOnly=yes`。空字串＝走 ssh 預設（agent、`~/.ssh/config`、預設金鑰名）。
+    /// 只放路徑，私鑰本身不進設定；檔案不存在會明確報錯，不退回本機。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub identity_file: String,
 }
 
 impl Default for BuildRemoteCfg {
@@ -346,6 +350,7 @@ impl Default for BuildRemoteCfg {
             max_shared_dirs: default_remote_max_shared_dirs(),
             max_concurrent: 0,
             password_id: None,
+            identity_file: String::new(),
         }
     }
 }
