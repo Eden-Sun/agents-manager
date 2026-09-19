@@ -217,6 +217,52 @@ install -m 644 scripts/ops/release-triage-task.md ~/.config/agents-manager/super
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agm.release-triage.plist
 ```
 
+## ci-watch-kick.sh
+
+main 的 GitHub CI 盯哨（issue #211）。2026-09-16 起 main 的 CI 連紅好幾天沒人發現——規則只要求跑本機 `check.sh`，沒人看 GitHub 的結果。
+launchd `com.agm.ci-watch` 每 10 分鐘跑一次；只開 issue、留言、派工，**不改程式、不重啟、不關 issue**。形狀比照 `release-triage-kick.sh`（鎖與殘留回收、開頭自補 PATH、缺依賴走 `ops-alert`、無事不寫 log）。
+
+- 每輪 `gh run list --branch main --workflow CI -L 20`，只看**已完成**的 run：success 算綠，failure／timed_out／startup_failure 算紅，cancelled／skipped／進行中當沒看到。
+- 狀態檔 `ci-watch.state.json` 記目前這一段紅：`first_red_sha`、`first_red_run`、`issue`、`assigned`、`failures`。
+  - **綠→紅**：從 `gh run view <id> --log-failed` 抽失敗的測試名（cargo 的 `test X ... FAILED`／`failures:` 區塊、python 的 `ERROR:`／`FAIL:`），開一張 issue（標題 `CI 紅了：<第一個紅的 sha 前 8 碼> 起 N 條失敗`，標籤 `ci-red`，不存在就建；內文有第一個紅的 run、失敗清單、上一個綠到第一個紅之間的 `git log`），再 `bin/agm assign … --request-id ci-red-<first_red_sha>` 派工。開 issue 前先看有沒有開著的 `ci-red` issue（狀態檔遺失時接手它，不重開、不重派）。
+  - **還在紅**：不重開、不重派；失敗清單多了新的測試才在同一張 issue 留言一次。上一輪派工失敗會補派（同 request-id，daemon 去重）。
+  - **紅→綠**：在 issue 留言「<sha> 起恢復綠，run <id>」，清狀態；**不自動關 issue**，由修的人關。
+- `gh` 失敗／rate limit：這輪什麼都不做、不改狀態、記一行 log，不誤報紅或綠。
+- 派給誰：`AGM_CI_BOT` ＞ `runtime.json` 的 `ci_bot_id` ＞ `responder_bot_id`；不能是巡檢自己。交辦正文在 `ci-watch-task.md`。
+- 一段紅沒人關 issue 就恢復綠、下一段紅又來時，會接手那張還開著的 issue；所以修的人要記得關。
+
+launchd plist 範例（`~/Library/LaunchAgents/com.agm.ci-watch.plist`；**必須帶 `EnvironmentVariables.PATH`**，launchd 預設 PATH 不含 `/opt/homebrew/bin`，`gh` 在那裡）：
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.agm.ci-watch</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/USER/.config/agents-manager/supervisor/AGM/bin/ci-watch-kick.sh</string>
+  </array>
+  <key>StartInterval</key><integer>600</integer>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+</dict>
+</plist>
+```
+
+隔離測試：`bash scripts/ops/ci-watch-kick_test.sh`（假 `gh`、假 `bin/agm`，含 `env -i` 最小 PATH、殘留鎖與活鎖、gh 失敗、狀態檔遺失）。不會真的呼叫 `gh issue create`。
+
+正式安裝（**需要 AGM 核准**）：
+
+```sh
+install -m 755 scripts/ops/ci-watch-kick.sh ~/.config/agents-manager/supervisor/AGM/bin/
+install -m 644 scripts/ops/ci-watch-task.md ~/.config/agents-manager/supervisor/AGM/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agm.ci-watch.plist
+```
+
 ## 租約管得到什麼、管不到什麼
 
 租約約束的是**走 API 與這些腳本的路徑**：
