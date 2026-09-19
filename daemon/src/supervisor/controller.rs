@@ -3797,7 +3797,7 @@ mod quota_restart_tests {
             tools: Default::default(),
             identities: Default::default(),
             shell_identities: vec![crate::config::IdentityCfg { name: "cc0".into(), kind: "claude".into(), host: None, env: Default::default(), args: vec![] }],
-            checked_at: crate::db::now(),
+            utc_offset_secs: None, checked_at: crate::db::now(),
         }
     }
 

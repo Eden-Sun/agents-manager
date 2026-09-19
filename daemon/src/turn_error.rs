@@ -402,7 +402,7 @@ pub(crate) async fn mark_codex_limit_hit(app: &Arc<App>, bot: &db::Bot, notice: 
     // 會把 codex 標成用盡。
     match bot.kind.as_str() {
         "codex" => {
-            let until = crate::lifecycle::parse_codex_try_again(notice);
+            let until = codex_banner_until(app, bot, notice).await;
             mark_limit_hit(app, bot, notice, Banner::Codex { until }).await
         }
         "grok" => {
@@ -411,6 +411,29 @@ pub(crate) async fn mark_codex_limit_hit(app: &Arc<App>, bot: &db::Bot, notice: 
         }
         _ => Ok(()),
     }
+}
+
+/// codex 橫幅上的時間是**那台主機**的當地時間（#239）：本機照 daemon 的時區；遠端用偵測時記下的 UTC 偏移。
+/// 偏移讀不到就不猜（同 #59）：改用 app-server 讀到的重置時間，也沒有就撞限那一刻起 5 小時（最短的窗，寧可早放行再撞一次）。
+async fn codex_banner_until(app: &Arc<App>, bot: &db::Bot, notice: &str) -> Option<String> {
+    if !notice.to_ascii_lowercase().contains("try again at") {
+        return None;
+    }
+    let host = db::bot_host(&app.db, &bot.id).await.ok();
+    if host.as_deref() == Some(crate::config::LOCAL_HOST) {
+        return crate::lifecycle::parse_codex_try_again(notice);
+    }
+    let offset = match &host {
+        Some(h) => app.tools.lock().await.get(h).and_then(|t| t.utc_offset_secs),
+        None => None,
+    };
+    if let Some(until) = offset.and_then(|o| crate::lifecycle::parse_codex_try_again_offset(notice, o)) {
+        return Some(until);
+    }
+    if let Some(until) = crate::quota::next_reset_for_bot(app, bot).await {
+        return Some(until);
+    }
+    Some(db::iso_at(chrono::Utc::now() + chrono::Duration::hours(5)))
 }
 
 async fn mark_limit_hit(app: &Arc<App>, bot: &db::Bot, line: &str, banner: Banner) -> Result<()> {
@@ -921,7 +944,7 @@ mod quota_limit_tests {
         let cc0 = crate::config::IdentityCfg { name: "cc0".into(), kind: "claude".into(), host: None, env: Default::default(), args: vec![] };
         app.tools.lock().await.insert(
             crate::config::LOCAL_HOST.to_string(),
-            crate::tools::HostTools { tools: Default::default(), identities: Default::default(), shell_identities: vec![cc0], checked_at: db::now() },
+            crate::tools::HostTools { tools: Default::default(), identities: Default::default(), shell_identities: vec![cc0], utc_offset_secs: None, checked_at: db::now() },
         );
         assert!(crate::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some());
         assert!(!owes_limit_hit(&app, &bot.id));
@@ -934,6 +957,31 @@ mod quota_limit_tests {
         let (bot, queued) = bot_with_a_queued_prompt(env, host, identity).await;
         sqlx::query("UPDATE bots SET kind='codex' WHERE id=?").bind(&bot.id).execute(&env.app.db).await.unwrap();
         (db::bot(&env.app.db, &bot.id).await.unwrap().unwrap(), queued)
+    }
+
+    async fn set_remote_offset(app: &Arc<App>, host: &str, offset: Option<i32>) {
+        app.tools.lock().await.insert(
+            host.to_string(),
+            crate::tools::HostTools { tools: Default::default(), identities: Default::default(), shell_identities: vec![], utc_offset_secs: offset, checked_at: db::now() },
+        );
+    }
+
+    /// #239：橫幅的時間是遠端主機的當地時間。遠端 UTC−05:00、橫幅 6:43 PM → 23:43Z，不是照 daemon 的時區讀；
+    /// 讀不到遠端偏移就不猜——到期是保底（約 5 小時後），不是照本機時區算出來的鐘點。
+    #[tokio::test]
+    async fn a_remote_codex_banner_is_read_in_the_remote_hosts_zone_and_never_guessed() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (bot, _q) = codex_bot_with_a_queued_prompt(&env, "remote1", None).await;
+        set_remote_offset(&app, "remote1", Some(-5 * 3600)).await;
+        mark_codex_limit_hit(&app, &bot, CODEX_LIMIT).await.unwrap();
+        assert_eq!(crate::quota::limit_hit_for_bot(&app, &bot).await.and_then(|h| h.until).as_deref(), Some("2099-09-19T23:43:00.000Z"));
+
+        let (bot2, _q) = codex_bot_with_a_queued_prompt(&env, "remote2", None).await;
+        set_remote_offset(&app, "remote2", None).await;
+        mark_codex_limit_hit(&app, &bot2, CODEX_LIMIT).await.unwrap();
+        let until = crate::quota::limit_hit_for_bot(&app, &bot2).await.and_then(|h| h.until).expect("保底到期");
+        assert!(chrono::DateTime::parse_from_rfc3339(&until).unwrap() < chrono::Utc::now() + chrono::Duration::hours(6), "保底約 5 小時，不是 2099 年的橫幅時間");
     }
 
     /// #198：遠端 codex bot 撞限，那一刻讀不到它在哪台主機。以前退回 `local`——撞限寫進本機 `codex` 那一格，本機帳號被當成
@@ -951,7 +999,8 @@ mod quota_limit_tests {
         assert!(owes_limit_hit(&app, &bot.id));
         let owed = crate::quota::limit_hit_for_bot(&app, &bot).await.expect("欠著的那一筆照擋（派送前讀的就是這支）");
         assert!(crate::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some(), "flush 的閘門也一樣");
-        assert_eq!(owed.until, crate::lifecycle::parse_codex_try_again(CODEX_LIMIT), "到期是橫幅上寫的時間");
+        let soon = chrono::Utc::now() + chrono::Duration::hours(6);
+        assert!(owed.until.as_deref().is_some_and(|u| chrono::DateTime::parse_from_rfc3339(u).unwrap() < soon), "讀不到主機就不猜橫幅的時區：保底到期（#239）：{owed:?}");
         assert!(hold_on(&app, &queued).await.is_none(), "還沒寫成");
 
         sqlx::query("ALTER TABLE projects_unreadable RENAME TO projects").execute(&app.db).await.unwrap();
@@ -976,7 +1025,7 @@ mod quota_limit_tests {
         let cx0 = crate::config::IdentityCfg { name: "cx0".into(), kind: "codex".into(), host: None, env: Default::default(), args: vec![] };
         app.tools.lock().await.insert(
             crate::config::LOCAL_HOST.to_string(),
-            crate::tools::HostTools { tools: Default::default(), identities: Default::default(), shell_identities: vec![cx0], checked_at: db::now() },
+            crate::tools::HostTools { tools: Default::default(), identities: Default::default(), shell_identities: vec![cx0], utc_offset_secs: None, checked_at: db::now() },
         );
         assert!(crate::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some());
         assert!(!owes_limit_hit(&app, &bot.id));

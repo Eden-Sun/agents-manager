@@ -74,6 +74,8 @@ pub struct HostTools {
     pub identities: BTreeMap<String, IdentityInfo>,
     /// Re-read on every detection and never written back to `config.toml`.
     pub shell_identities: Vec<crate::config::IdentityCfg>,
+    /// 那台主機當下的 UTC 偏移（秒，`date +%z`）；codex 撞限橫幅印的是那台的當地時間（#239）。讀不到就是 None，不猜。
+    pub utc_offset_secs: Option<i32>,
     pub checked_at: String,
 }
 
@@ -116,9 +118,25 @@ else
   printf 'AM_LOGIN claude 0\n'
 fi
 if [ -f "${CODEX_HOME:-$HOME/.codex}/auth.json" ]; then printf 'AM_LOGIN codex 1\n'; else printf 'AM_LOGIN codex 0\n'; fi
+printf 'AM_TZ %s\n' "$(date +%z 2>/dev/null)"
 GH="${GROK_HOME:-$HOME/.grok}"
 if [ -f "$GH/auth.json" ] || ls "$GH"/auth* >/dev/null 2>&1; then printf 'AM_LOGIN grok 1\n'; else printf 'AM_LOGIN grok 0\n'; fi
 "#, alias_sh!());
+
+/// `AM_TZ +0800` → 28800。不是 `±HHMM` 就是 None。
+pub fn parse_utc_offset(out: &str) -> Option<i32> {
+    let v = out.lines().find_map(|l| l.trim().strip_prefix("AM_TZ "))?.trim();
+    let (sign, d) = match v.as_bytes().first()? {
+        b'+' => (1, &v[1..]),
+        b'-' => (-1, &v[1..]),
+        _ => return None,
+    };
+    if d.len() != 4 || !d.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let (h, m): (i32, i32) = (d[..2].parse().ok()?, d[2..].parse().ok()?);
+    (h < 24 && m < 60).then_some(sign * (h * 3600 + m * 60))
+}
 
 pub fn parse_probe(out: &str) -> BTreeMap<String, ToolInfo> {
     let mut m: BTreeMap<String, ToolInfo> = crate::config::KINDS.iter().map(|k| (k.to_string(), ToolInfo::default())).collect();
@@ -791,7 +809,8 @@ pub async fn detect(app: &Arc<App>, host: &str) -> Result<HostTools> {
     let tools = parse_probe(&out);
     let shell_identities = parse_shell_identities(&out);
     let identities = detect_identities(app, host, &tools, &shell_identities).await;
-    let ht = HostTools { tools, identities, shell_identities, checked_at: crate::db::now() };
+    let utc_offset_secs = parse_utc_offset(&out);
+    let ht = HostTools { tools, identities, shell_identities, utc_offset_secs, checked_at: crate::db::now() };
     install_host_tools(app, host, ht.clone()).await;
     tracing::info!(
         host,
@@ -960,7 +979,7 @@ mod tests {
             tools: Default::default(),
             identities: Default::default(),
             shell_identities: dir.map(|d| vec![cfg("cc1", "claude", None, "CLAUDE_CONFIG_DIR", d)]).unwrap_or_default(),
-            checked_at: crate::db::now(),
+            utc_offset_secs: None, checked_at: crate::db::now(),
         };
         app.tools.lock().await.insert("m4p".into(), shell(Some("$HOME/.claude-ccompany")));
         assert_eq!(dir_of(identity_for_host(app, "m4p", "cc1").await, "CLAUDE_CONFIG_DIR").as_deref(), Some("$HOME/.claude-ccompany"));
@@ -1267,6 +1286,15 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
     }
 
     /// 登出要帶跟登入一模一樣的環境前綴，否則按下 cc2 的登出會把 cc0 登掉。
+    #[test]
+    fn utc_offset_is_read_from_the_probe_or_not_at_all() {
+        assert_eq!(parse_utc_offset("AM_PATH claude \nAM_TZ +0800\n"), Some(8 * 3600));
+        assert_eq!(parse_utc_offset("AM_TZ -0330\n"), Some(-(3 * 3600 + 1800)));
+        assert_eq!(parse_utc_offset("AM_TZ \n"), None);
+        assert_eq!(parse_utc_offset("AM_TZ CST\n"), None);
+        assert_eq!(parse_utc_offset("AM_PATH claude \n"), None);
+    }
+
     #[test]
     fn identity_logout_commands_carry_the_same_config_dir() {
         let mut env = BTreeMap::new();

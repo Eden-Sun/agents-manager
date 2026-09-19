@@ -1252,7 +1252,7 @@ mod tests {
                 tools: Default::default(),
                 identities: Default::default(),
                 shell_identities: vec![ident("cc0", &[]), ident("cc1", &[("CLAUDE_CONFIG_DIR", "$HOME/.claude-cc1")])],
-                checked_at: crate::db::now(),
+                utc_offset_secs: None, checked_at: crate::db::now(),
             },
         );
         // 偵測完：cc0 收斂到裸 key。下一筆讀數寫裸 key 的同時把殘留的那一格清掉。
@@ -1295,7 +1295,7 @@ mod tests {
                         args: vec![],
                     },
                 ],
-                checked_at: crate::db::now(),
+                utc_offset_secs: None, checked_at: crate::db::now(),
             },
         );
         assert_eq!(quota_base_for_host(&app, LOCAL_HOST, "codex", Some("cc1")).await, "codex");
@@ -1972,7 +1972,7 @@ mod tests {
         let cc0 = crate::config::IdentityCfg { name: "cc0".into(), kind: "claude".into(), host: None, env: Default::default(), args: vec![] };
         app.tools.lock().await.insert(
             LOCAL_HOST.to_string(),
-            crate::tools::HostTools { tools: Default::default(), identities: Default::default(), shell_identities: vec![cc0], checked_at: crate::db::now() },
+            crate::tools::HostTools { tools: Default::default(), identities: Default::default(), shell_identities: vec![cc0], utc_offset_secs: None, checked_at: crate::db::now() },
         );
         assert_eq!(resolve_quota_base(&app, LOCAL_HOST, "claude", Some("cc0")).await.unwrap(), "claude", "偵測完：cc0 就是預設帳號");
         assert_eq!(resolve_quota_base(&app, LOCAL_HOST, "claude", Some("nobody")).await.unwrap(), "claude:nobody", "偵測完還查不到：照舊分開");
