@@ -3666,6 +3666,27 @@ Tab:next answer  |  Esc:scrollback  |  Shift+x:dismiss
         assert!(app.quotas.lock().await.is_empty());
     }
 
+    /// 票上要求：同一選單的其他變體（session／daily limit）也要認。6d5e74ab 的辨識只有 `weekly` 與 402 兩句。
+    #[test]
+    fn the_other_limit_variants_the_ticket_names_are_read_too() {
+        for (title, window) in [
+            ("You hit your session limit.", (Some("five_hour"), 5)),
+            ("You hit your 5-hour limit.", (Some("five_hour"), 5)),
+            ("You hit your daily limit.", (None, 24)),
+            ("You hit your monthly limit.", (None, 5)),
+            ("You've hit your weekly limit.", (Some("seven_day"), 168)),
+        ] {
+            let screen = TICKET_SCREEN.replace("You hit your weekly limit.", title);
+            let lines = grok_limit_notice_lines(&screen);
+            assert_eq!(lines, vec![title.to_string()], "{title}");
+            assert_eq!(grok_limit_window(&lines[0]), window, "{title}");
+        }
+        // 只認畫面上那一句標題：回覆裡談到、或標題後面接了字母的不算。
+        assert!(grok_limit_hit_line("Then you hit your daily limit and stopped").is_none());
+        assert!(grok_limit_hit_line("You hit your daily limits, apparently").is_none());
+        assert!(grok_limit_hit_line("You hit your limit").is_none(), "沒有說是哪個窗");
+    }
+
     #[test]
     fn the_window_a_grok_line_names() {
         assert_eq!(grok_limit_window("┃  You hit your weekly limit."), (Some("seven_day"), 168));

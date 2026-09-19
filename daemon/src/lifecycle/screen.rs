@@ -451,8 +451,17 @@ pub(crate) fn grok_limit_hit_line(line: &str) -> Option<String> {
     let hit = low.contains("usage balance exhausted")
         || low.contains("you hit your weekly limit")
         || low.contains("you've hit your weekly limit")
+        || is_limit_title(&low)
         || (low.contains("request failed (402)") && low.contains("grok"));
     hit.then(|| s.to_string())
+}
+
+/// 同一張畫面的其他變體（`You hit your session limit.`、`… daily limit.`，#222）：行首就是 `You hit your <一到三個字> limit`，
+/// 後面沒有字或只跟標點。只認行首——回覆裡談到這句話（句子中間、或標題後面接字母）不算。
+fn is_limit_title(low: &str) -> bool {
+    let Some(rest) = low.strip_prefix("you hit your ").or_else(|| low.strip_prefix("you've hit your ")) else { return false };
+    let Some((what, after)) = rest.split_once(" limit") else { return false };
+    (1..=3).contains(&what.split_whitespace().count()) && !after.trim_start().chars().next().is_some_and(char::is_alphanumeric)
 }
 
 /// grok 那一句撞的是哪個額度窗、保底撐多久（橫幅沒寫重置時間）。週限存在 `seven_day`（grok 只有週窗）；
@@ -464,6 +473,8 @@ pub(crate) fn grok_limit_window(line: &str) -> (Option<&'static str>, i64) {
         (Some("seven_day"), 24 * 7)
     } else if low.contains("session") || low.contains("5-hour") {
         (Some("five_hour"), 5)
+    } else if low.contains("daily") {
+        (None, 24)
     } else {
         (None, 5)
     }
