@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # 收尾前一鍵跑跟 CI（.github/workflows/ci.yml）同一組檢查。
 #
-#   scripts/check.sh            # OB + web + daemon
+#   scripts/check.sh            # OB + ops + web + daemon
 #   scripts/check.sh web        # bun install --frozen-lockfile、tsc、oxlint、bun test、vite build
 #   scripts/check.sh daemon     # cargo test -p agents-managerd（要先有 web/dist）
+#   scripts/check.sh ops        # scripts/ops/*_test.sh（AGM 運維腳本，假 agm／假 gh，不碰正式環境）
 #   scripts/check.sh ob         # 沒有被追蹤的 bytecode；OB queue/operator 與瀏覽器契約（隔離，不用登入）
 #   scripts/check.sh fmt        # cargo fmt --check（只報告，現況不乾淨）
 #   scripts/check.sh clippy     # cargo clippy（只報告，現況不乾淨）
@@ -66,6 +67,14 @@ check_ob() {
     bash -n scripts/chatgpt-consult.sh
 }
 
+check_ops() {
+    local t
+    for t in scripts/ops/*_test.sh; do
+        step "ops: $t"
+        bash "$t"
+    done
+}
+
 check_fmt() {
     step "daemon: cargo fmt --check"
     cargo fmt -p agents-managerd -- --check
@@ -80,16 +89,18 @@ case "${1:-default}" in
     web) check_web ;;
     daemon) check_daemon ;;
     ob) check_ob ;;
+    ops) check_ops ;;
     fmt) check_fmt ;;
     clippy) check_clippy ;;
-    default) check_ob; check_web; check_daemon ;;
+    default) check_ob; check_ops; check_web; check_daemon ;;
     all)
         check_ob
+        check_ops
         check_web
         check_daemon
         # fmt / clippy 現況不乾淨，只報告不擋；見 ci.yml 的註解。
         check_fmt || echo "!! fmt 不乾淨（不擋）"
         check_clippy || echo "!! clippy 不乾淨（不擋）"
         ;;
-    *) echo "用法：scripts/check.sh [web|daemon|ob|fmt|clippy|all]" >&2; exit 2 ;;
+    *) echo "用法：scripts/check.sh [web|daemon|ob|ops|fmt|clippy|all]" >&2; exit 2 ;;
 esac
