@@ -163,7 +163,12 @@ pub(crate) fn owe_delivery(bot_id: &str, new_turn: &str, delivery: Option<Delive
     }
 }
 
-async fn owe(app: &Arc<App>, bot_id: &str, p: Pending) -> anyhow::Result<()> {
+async fn owe(app: &Arc<App>, bot_id: &str, mut p: Pending) -> anyhow::Result<()> {
+    // 這一筆已經欠著插隊送出的收尾（#164）：帳上跟它綁在一起的新那一則要跟著這一次一起收。帳是一筆回合一條，
+    // 不帶過來的話，收成了就連它一起 `forget`、收不成就被這一條 `record` 蓋掉——它從此是 run_id 為空的 in_flight。
+    if p.new_turn.is_none() {
+        p.new_turn = pending(bot_id).into_iter().find(|x| x.turn_id == p.turn_id).and_then(|x| x.new_turn);
+    }
     let turn_id = p.turn_id.clone();
     match close(app, bot_id, &p).await {
         Ok(()) => {
