@@ -779,6 +779,10 @@ cancel 撤掉的是還沒送出的那則時，review 回應不再帶「turn 還�
     整行 `contains` 會把它們當成撞限，在飛的回合被收成 failed、額度標 7 天。真選單是擋住輸入列的 modal：標題、兩個以上的選項列
     （`1 (○) …`），之後只剩選單自己的說明列（`screen::grok_limit_notice_lines`）；bot 的回覆或輸入列在它後面就是引用或已處理掉的舊畫面。
     402 那句要在標題上方 16 行內（同一個框）。
+  - **codex 的撞限橫幅同一套規則**（#237）：`screen::codex_limit_hit_line` 只認行首——橫幅符號（`■`／`•`）或 `ERROR:` 之後整句就是
+    `You've hit your usage limit…`，工具輸出的前綴（`└`、`+`、`-`、`>`）不算；`codex_usage_notice_lines` 再要求橫幅是**最後一個
+    cell**（跳過空行後只剩輸入列與頁尾），後面還有 codex 自己的回覆就是引用。codex 0.155.1 的頁尾沒有 `5h N% left`，
+    `limit_banner::status_line_says_headroom` 讀不到東西，這兩條是唯一的保護；貼在最後一個 cell 的引用分不出來（已知限制）。
   - 撞限記在 **grok 自己那一格**（`grok`／`grok:<身分>`，`turn_error::Banner::Grok`），不是 codex 的——`mark_codex_limit_hit` 對 grok 走
     `record_grok`。橫幅沒寫重置時間：`You hit your weekly limit.` 標 `seven_day` 窗（grok 只有週窗）、保底 7 天；session／5-hour 標
     `five_hour`、保底 5 小時；`daily` 沒有窗、保底 24 小時；402 `usage balance exhausted`（credits 用完）沒有窗、保底 5 小時、不標窗（`screen::grok_limit_window`）。
