@@ -164,8 +164,13 @@ am_descendants() {
 # 凍住之後再 TERM＋CONT 讓它們正常收尾，兩秒後還活著的補 KILL。
 am_kill_tree() {
     _kt_ppid=$(ps -o ppid= -p "$1" 2>/dev/null | tr -d ' ')
-    # 已經退出（pid 可能被別的行程用掉了）就不要亂殺。
-    [ "$_kt_ppid" = "$$" ] || return 0
+    if [ "$_kt_ppid" != "$$" ]; then
+        # 不是 shim 的直接子行程。shim 還活著＝那個 pid 已經退出、被別的行程用掉了，不要亂殺。
+        # shim 已經死了（被單獨 SIGKILL，issue #183）＝cargo 被 init 收養、ppid 變成 1，這個檢查永遠不成立：
+        # 改認它是不是還在 shim 那一組（`_pgid`，shim 啟動時記下的 process group；重用這個 pid 的行程不會在這一組）。
+        ! kill -0 "$$" 2>/dev/null || return 0
+        [ -n "${_pgid:-}" ] && [ "$(ps -o pgid= -p "$1" 2>/dev/null | tr -d ' ')" = "$_pgid" ] || return 0
+    fi
     _kt_set="$1 $(am_descendants "$1" | tr '\n' ' ')"
     _kt_round=0
     while [ "$_kt_round" -lt 5 ]; do
@@ -202,6 +207,11 @@ am_lease_lost() {
     printf '%s\n' "$1" > "$_state/lost"
     _lost_pid=$(cat "$_state/pid" 2>/dev/null)
     [ -z "$_lost_pid" ] || am_kill_tree "$_lost_pid"
+    # shim 已經被 SIGKILL：沒有人會來 `wait` 這個守衛、放名額、收狀態目錄（前景那邊才做這些）——自己收。
+    if ! kill -0 "$_lw_shim" 2>/dev/null; then
+        curl -s -m 5 -X POST "${_url}/release" --data-urlencode "holder=${_holder}" --data-urlencode "token=${_token}" >/dev/null 2>&1
+        rm -rf "$_state" 2>/dev/null
+    fi
     return 0
 }
 
@@ -440,6 +450,8 @@ am_cargo() {
         printf 'agents-manager: 建不出暫存目錄，沒辦法在名額失效時停掉 cargo，這次不排程，直接跑\n' >&2
         exec "$_real" "$@"
     fi
+    # shim 自己的 process group：守衛在 shim 被 SIGKILL 之後靠它確認 cargo 還是自己的（`am_kill_tree`，issue #183）。
+    _pgid=$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')
     am_lease_watch &
     _renew_pid=$!
     trap '_release' EXIT INT TERM
@@ -1464,6 +1476,79 @@ esac"#,
         assert!(calls.contains("/release"), "名額要放掉：{calls}");
         let leftovers: Vec<_> = std::fs::read_dir(s.dir.join("tmp")).unwrap().flatten().collect();
         assert!(leftovers.is_empty(), "狀態目錄要清掉：{leftovers:?}");
+    }
+
+    /// issue #183：shim 被單獨 SIGKILL（守衛與 cargo 成了孤兒、ppid 變 1）**之後**租約才失效（daemon 收回名額）——名額已經不是
+    /// 我們的，cargo 與它底下的編譯器照樣要停，不然別人拿到同一個名額也開始編，`max_concurrent` 被突破。以前 `am_kill_tree`
+    /// 用「ppid 是不是 shim」確認目標，shim 死了之後永遠不成立，什麼都不停就 return。守衛停完還要自己放名額、收狀態目錄
+    /// （shim 已經不在，沒有別人會做）。每一種 shell 都驗（含 macOS 的 bash 3.2）。
+    #[test]
+    fn a_lease_lost_after_the_shim_was_killed_still_stops_cargo_and_cleans_up() {
+        std::thread::scope(|scope| {
+            for sh in shells() {
+                scope.spawn(move || {
+                    let s = Sandbox::new();
+                    s.install_virtual_clock();
+                    s.install_lease_curl(180);
+                    s.install_slow_cargo(120);
+                    let mut cmd = s.command_in(Some(sh), &s.path());
+                    cmd.args(["check"]);
+                    for (k, v) in &lease_env(&s) {
+                        cmd.env(k, v);
+                    }
+                    let (mut shim, _, _) = s.start_group(&mut cmd, false);
+                    let group = shim.id() as i32;
+                    s.wait_cargo_ready();
+                    // shim 被 SIGKILL：守衛與 cargo 成了孤兒；租約這時還有效，cargo 照跑。
+                    unsafe { libc::kill(shim.id() as i32, libc::SIGKILL) };
+                    let _ = shim.wait();
+                    assert!(s.alive("cargo.pid"), "{sh}: 租約還有效，cargo 不該停");
+                    // daemon 現在收回名額：守衛下一次續約會被明確拒絕。
+                    s.set_renew_mode("notfound");
+                    let up = std::time::Instant::now();
+                    while (s.alive("cargo.pid") || s.alive("rustc.pid")) && up.elapsed() < std::time::Duration::from_secs(20) {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    assert!(!s.alive("cargo.pid"), "{sh}: 租約失效了，孤兒 cargo 還在編（突破 max_concurrent）");
+                    assert!(!s.alive("rustc.pid"), "{sh}: cargo 底下的編譯器還活著（孤兒）");
+                    assert!(!s.dir.join("cargo.done").exists(), "{sh}: cargo 不能跑完");
+                    // 守衛自己也要收工：整組沒有行程、名額放掉、狀態目錄清掉。
+                    s.assert_group_gone(group);
+                    let calls = std::fs::read_to_string(s.dir.join("curl.log")).unwrap();
+                    assert!(calls.contains("/release"), "{sh}: 名額要放掉：{calls}");
+                    assert!(s.lease_dirs().is_empty(), "{sh}: 狀態目錄要清掉：{:?}", s.lease_dirs());
+                });
+            }
+        });
+    }
+
+    /// #183 的另一面：shim 死了之後靠「還在 shim 那一組」確認目標——**不在那一組**的行程（cargo 早已退出、pid 被回收重用給了別人）
+    /// 租約失效時不能被殺。這裡把守衛認的 cargo pid 換成一個路人（自己的 process group）的 pid，模擬 pid 被重用。
+    #[test]
+    fn a_lease_lost_never_stops_a_process_outside_the_shims_process_group() {
+        use std::os::unix::process::CommandExt as _;
+        let s = Sandbox::new();
+        s.install_virtual_clock();
+        s.install_lease_curl(180);
+        s.install_slow_cargo(120);
+        let mut bystander = Command::new("/bin/sleep").arg("300").process_group(0).spawn().unwrap();
+        let (mut shim, _group) = start_slow_shim(&s);
+        let dirs = s.lease_dirs();
+        assert_eq!(dirs.len(), 1, "{dirs:?}");
+        std::fs::write(s.dir.join("tmp").join(&dirs[0]).join("pid"), bystander.id().to_string()).unwrap();
+        unsafe { libc::kill(shim.id() as i32, libc::SIGKILL) };
+        let _ = shim.wait();
+        s.set_renew_mode("notfound");
+        // 守衛判定失效、（不）動手之後會把狀態目錄收掉；等到它收完才能斷言路人還活著。
+        let up = std::time::Instant::now();
+        while !s.lease_dirs().is_empty() && up.elapsed() < std::time::Duration::from_secs(20) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let survived = bystander.try_wait().unwrap().is_none();
+        let _ = bystander.kill();
+        let _ = bystander.wait();
+        assert!(s.lease_dirs().is_empty(), "守衛沒有在時限內收工");
+        assert!(survived, "不在 shim 那一組的行程被租約失效誤殺了（pid 被重用時會殺到別人）");
     }
 
     /// 起一顆 shim（慢的假 cargo）放進自己的 process group，等 cargo 起來；回傳它與 group id。
