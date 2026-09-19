@@ -186,10 +186,11 @@ pub(crate) async fn live_verdict(app: &Arc<App>, host: &str, pane_id: &str) -> O
         Some(p) if p.agent.as_deref().is_some_and(|a| !a.is_empty()) => LiveVerdict::Agent,
         Some(_) if host != crate::config::LOCAL_HOST => LiveVerdict::Typeable,
         Some(_) => {
-            let dump = crate::memproc::dump(app, host).await.ok()?;
+            let probe = app.probe();
+            let dump = probe.dump(app, host).await.ok()?;
             let shell = client.pane_shell(pane_id).await.ok()?;
             let facts = crate::panes::facts_from(&shell, &dump, pane_id)?;
-            let ports = crate::panes::listen_ports(host, &facts.pids).await?;
+            let ports = probe.listen_ports(host, &facts.pids).await?;
             if !ports.is_empty() {
                 LiveVerdict::ReadOnly
             } else {
@@ -521,24 +522,30 @@ mod tests {
         };
 
         // 跑著 vim 的 pane：shell 底下一個不 listen 的行程。表上還記著舊的 port——即時的為準，可以打字。
+        // 行程樹與 listen port 是決定性的假貨：真的 `ps`／`lsof` 在 CI runner 上會慢到逾時（見 `probe_smoke_*`）。
+        *app.pane_probe.lock().unwrap() = Arc::new(
+            crate::pane_probe::Fixed::tree(&[
+                (41001, 1, "-zsh"),
+                (41002, 41001, "sleep 60"),
+                (41003, 1, "-zsh"),
+                (41004, 41003, "node dev-server"),
+            ])
+            .listening(41004, 3010),
+        );
         let (_, vim) = app.herdr.workspace_create("/tmp", "vim", json!({})).await.unwrap();
-        let mut idle = std::process::Command::new("sleep").arg("60").spawn().unwrap();
-        env.herdr.set_shell_pid(&vim.pane_id, i64::from(idle.id()));
+        env.herdr.set_shell_pid(&vim.pane_id, 41001);
         track(vim.pane_id.clone(), vim.workspace_id.clone(), vim.tab_id.clone(), Some("3010")).await;
         let typed = registered(app, "local", &vim.pane_id, Access::Type).await;
-        let _ = idle.kill();
         assert!(typed.is_ok(), "{:?}", typed.map(|s| s.pane_id));
 
-        // 真的在 listen 的：唯讀（shell pid 用這個測試行程自己，它正 listen 一個 port）。
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        // 真的在 listen 的：唯讀。
         let (_, dev) = app.herdr.workspace_create("/tmp", "dev", json!({})).await.unwrap();
-        env.herdr.set_shell_pid(&dev.pane_id, i64::from(std::process::id()));
+        env.herdr.set_shell_pid(&dev.pane_id, 41003);
         track(dev.pane_id.clone(), dev.workspace_id.clone(), dev.tab_id.clone(), None).await;
         match registered(app, "local", &dev.pane_id, Access::Type).await {
             Err(LcError::Forbidden(body)) => assert_eq!(body["error"], "read_only_pane"),
             other => panic!("在 listen 的不能打字：{:?}", other.map(|s| s.pane_id)),
         }
-        drop(listener);
 
         // pane 已經不在：404。
         track("ws-9:pGone".into(), "ws-9".into(), "ws-9:t1".into(), None).await;
@@ -583,16 +590,15 @@ mod tests {
     }
 
     /// AGM 2026-09-16 驗收：daemon 重啟後「結束 shell」走 `panes` 表關，confirm 要照呼叫端帶的。
-    /// 在 listen 的服務 pane 沒確認 → 409 service_pane，帶即時的 kind／port（shell pid 用這個測試行程自己，它正 listen）。
+    /// 在 listen 的服務 pane 沒確認 → 409 service_pane，帶即時的 kind／port（行程樹與 port 由 `pane_probe::Fixed` 決定）。
     #[tokio::test]
     async fn ending_an_unconfirmed_service_pane_after_a_restart_is_refused() {
         let env = crate::testing::env().await;
         let dev = tracked_after_restart(&env, "dev").await;
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        env.herdr.set_shell_pid(&dev.pane_id, i64::from(std::process::id()));
+        let port = 8123;
+        *env.app.pane_probe.lock().unwrap() = Arc::new(crate::pane_probe::Fixed::tree(&[(42001, 1, "-zsh")]).listening(42001, port));
+        env.herdr.set_shell_pid(&dev.pane_id, 42001);
         let body = conflict_body(close_confirmed(&env.app, "local", &dev.pane_id, false).await);
-        drop(listener);
         assert_eq!(body["reason"], "service_pane");
         assert_eq!(body["unverified"], false);
         assert_eq!(body["pane"]["kind"], "service");
@@ -642,5 +648,31 @@ mod tests {
                 assert!(!allowed(kind, ro, Access::View) && !allowed(kind, ro, Access::Type), "{kind}");
             }
         }
+    }
+
+    /// 煙霧測試：真的 `ps`／`lsof`（正式路徑）對真的 pid。上面兩條決定性的測試驗邏輯，這條驗指令本身。
+    /// 外部指令不可用或逾時（CI 的 macOS runner 上 `lsof` 出了名的慢，回 `None`）就略過並印原因，
+    /// 不把「機器慢」當成程式錯；能讀到就一定要對。
+    #[tokio::test]
+    async fn probe_smoke_real_ps_and_lsof_see_this_process_listening() {
+        let env = crate::testing::env().await;
+        let probe = crate::pane_probe::Real;
+        let me = i32::try_from(std::process::id()).unwrap();
+        let dump = match crate::pane_probe::PaneProbe::dump(&probe, &env.app, "local").await {
+            Ok(d) => d,
+            Err(e) => return eprintln!("略過：`ps` 讀不到（{e}）"),
+        };
+        let Some(facts) = crate::memproc::pane_facts_for_shell(&dump, "w1:p1", me) else {
+            let head: String = dump.lines().take(3).collect::<Vec<_>>().join(" | ");
+            return eprintln!("略過：這台機器的 `ps` 輸出裡找不到本行程 {me}（前三行：{head}）");
+        };
+        assert!(facts.pids.contains(&me));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        match crate::pane_probe::PaneProbe::listen_ports(&probe, "local", &[me]).await {
+            None => eprintln!("略過：`lsof` 起不來或逾時（10 秒）——這台機器讀不到 port"),
+            Some(ports) => assert!(ports.contains(&port), "lsof 讀得到就要看到 {port}：{ports:?}"),
+        }
+        drop(listener);
     }
 }

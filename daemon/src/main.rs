@@ -46,6 +46,7 @@ mod outbox;
 mod mission;
 mod models;
 mod pane_identity;
+mod pane_probe;
 mod shim_path;
 mod shim_refresh;
 mod panes;

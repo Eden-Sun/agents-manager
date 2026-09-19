@@ -118,6 +118,8 @@ pub struct App {
     pub host_shells: crate::api::shell::Registry,
     /// 被 trace 的 pane 打字前的即時複查結果，幾秒內重用（`shell::live_verdict`）。
     pub pane_live: crate::api::shell::LiveCache,
+    /// 行程 dump 與 listen port 的來源；正式是 `ps`／`lsof`，測試可換成決定性的假貨（`pane_probe`）。
+    pub pane_probe: std::sync::Mutex<Arc<dyn crate::pane_probe::PaneProbe>>,
     /// 這顆 daemon 已經跑過 autostart 的主機（§6.1 第 6 步：每台主機一生一次，`reconcile::autostart_after_reconcile`）。
     pub autostarted_hosts: Mutex<std::collections::HashSet<String>>,
     /// hook 收件匣有新列時叫醒 worker（`hook_inbox`）。commit 完才 notify，所以 worker 一醒來
@@ -133,6 +135,10 @@ pub struct App {
 }
 
 impl App {
+    pub fn probe(&self) -> Arc<dyn crate::pane_probe::PaneProbe> {
+        self.pane_probe.lock().unwrap().clone()
+    }
+
     pub fn new(
         db: SqlitePool,
         herdr: HerdrClient,
@@ -188,6 +194,7 @@ impl App {
             gh_device: Mutex::new(HashMap::new()),
             host_shells: Default::default(),
             pane_live: Default::default(),
+            pane_probe: std::sync::Mutex::new(Arc::new(crate::pane_probe::Real)),
             autostarted_hosts: Default::default(),
             hook_inbox_wake: tokio::sync::Notify::new(),
             build_slot_lock: Mutex::new(()),
