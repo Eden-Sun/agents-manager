@@ -157,14 +157,19 @@ pub async fn start_bot_locked_with(app: &Arc<App>, bot_id: &str, opts: StartOpts
     }
 
     // 1. INSERT Run before touching herdr (SPEC §6.2.1).
+    // 身分跟著 run 走（issue #238）：pane 用這一刻的身分起來，之後 PATCH 改身分要重啟才生效，額度要記在這個身分上。
     let run_id = db::ulid();
-    let ins = sqlx::query("INSERT INTO runs (id, bot_id, state, agent_status, herdr_session, started_at) VALUES (?,?,'starting','unknown',?,?)")
-        .bind(&run_id)
-        .bind(bot_id)
-        .bind(&session)
-        .bind(db::now())
-        .execute(&app.db)
-        .await;
+    let started_identity = bot.identity.as_deref().map(str::trim).unwrap_or("").to_string();
+    let ins = sqlx::query(
+        "INSERT INTO runs (id, bot_id, state, agent_status, herdr_session, runtime_identity, started_at) VALUES (?,?,'starting','unknown',?,?,?)",
+    )
+    .bind(&run_id)
+    .bind(bot_id)
+    .bind(&session)
+    .bind(&started_identity)
+    .bind(db::now())
+    .execute(&app.db)
+    .await;
     if let Err(e) = ins {
         if let Some(dbe) = e.as_database_error() {
             if dbe.is_unique_violation() {

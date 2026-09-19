@@ -530,7 +530,8 @@ async fn mission_quota_inner(app: &Arc<App>, a: &store::Assignment, mission_id: 
     // `pick` 回 `NoIndependentReviewer`，`quota_policy` 當成 Wait——原地等，不會退而求其次用同一個身分。
     let exclude = if role == pick::Role::Reviewer { unavailable("executor identity", executor_identity(app, mission_id).await)? } else { None };
     let decision = pick::pick(role, &cands, on_5h, exclude.as_deref(), chrono::Utc::now());
-    let current = bot.identity.clone().unwrap_or_default();
+    // 撞限的是 pane 裡實際的帳號（run 起來時的身分，issue #238），不是剛改、還沒重啟生效的設定。
+    let current = unavailable("bot identity", crate::quota::billing_identity(app, &bot).await)?.unwrap_or_default();
     match pick::quota_policy(&current, bot.model.as_deref(), &decision) {
         pick::QuotaPolicy::Wait => Ok(MissionQuota::NotApplicable),
         pick::QuotaPolicy::Switch { identity, model, reason } => {
@@ -706,7 +707,15 @@ async fn backfill_quota_limits(app: &Arc<App>, host: &str, parked_before: Option
         if bot_host != host {
             continue;
         }
-        let base = crate::quota::quota_base_for_host(app, host, &bot.kind, bot.identity.as_deref()).await;
+        // park 時撞到的是 pane 裡實際的帳號（run 起來時的身分，issue #238）；讀不到 run 同讀不到主機，這一件跳過、稍後重跑。
+        let identity = match crate::quota::billing_identity(app, &bot).await {
+            Ok(i) => i,
+            Err(e) => {
+                unreadable.get_or_insert(e);
+                continue;
+            }
+        };
+        let base = crate::quota::quota_base_for_host(app, host, &bot.kind, identity.as_deref()).await;
         let why = format!("重啟前記下的等待：{} 還在等額度", a.id);
         // 桶名只有 claude 橫幅講得出來；park 時把橫幅寫進了 `error`，從那裡找回來（找不到就 None，照舊用讀數推）。
         let bucket = if bot.kind == "claude" { a.error.as_deref().and_then(crate::turn_error::banner_bucket) } else { None };
@@ -766,7 +775,8 @@ async fn executor_identity(app: &Arc<App>, mission_id: &str) -> anyhow::Result<O
     let rows = store::mission_assignments(&app.db, mission_id).await?;
     let Some(executor) = rows.iter().rev().find(|x| x.mission_role.as_deref() == Some("executor")) else { return Ok(None) };
     let Some(bot) = crate::db::bot(&app.db, &executor.target_bot_id).await? else { return Ok(None) };
-    Ok(bot.identity.filter(|s| !s.trim().is_empty()))
+    // 實際在跑的帳號（issue #238）。
+    crate::quota::billing_identity(app, &bot).await
 }
 
 /// 這件交辦屬於一個**還開著、而且被使用者暫停**的任務。

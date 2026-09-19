@@ -1171,6 +1171,9 @@ Project 底下所有存活 bot 的訊息合併，以插入順序（`rowid`）倒
   寫入端（codex statusline、撞限橫幅、claude statusLine）與查詢端（`limit_hit_for_bot`／`next_reset_for_bot`、
   supervisor 額度判讀、mission 挑身分）都走同一支 `quota::quota_base_for_host`。（2026-09-14：cc0 改用 cc1 之後額度列
   又冒出 `codex:cc1`，因為舊規則只把「env 整個空的身分」當預設。）
+  **身分是 run 起來時的那個**（issue #238，`quota::billing_identity`）：bot 在跑的時候改身分要重啟才生效，這段時間 pane 裡還是舊帳號，
+  statusLine 讀數、撞限、成功回合清撞限、派送與排隊的閘門都記在／看 `runs.runtime_identity`；沒有 run、或 run 沒記（收編的 pane、升級前的舊列）
+  才用 `bots.identity`。讀不到 run 時閘門照擋（不拿設定的身分猜）。
 - `used_pct` 0–100；`resets_at` RFC3339 或 `null`；`five_hour` / `seven_day` 任一可為 `null`。
 - `fable`：Claude Max 方案的 Fable 週額度（`Current week (Fable)`），形狀同 `seven_day`；沒有這個桶一律 `null`，**UI 不畫也不佔位**。
 - `reset_credits`（只有 codex）：`account/rateLimits/read` 的 `rateLimitResetCredits`——`available` = 可用張數，`title`/`expires_at` 取第一張 available 的。daemon 只讀不用。
@@ -1323,6 +1326,7 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
 | `herdr_session` | bot 與 run 都有；一般為 `null`（沿用 host 設定），從本機 `default` session 採用的是 `"default"`（SPEC §6.5.1） |
 | `update_notice` | 等重啟套用的 claude 更新，固定字串 `"Update installed · Restart to update"` 或 `null`（SPEC §3.1）。單顆套用 `POST /bots/{id}/restart`，全部 `POST /bots/restart-idle` |
 | `runtime_model` / `runtime_effort` / `runtime_fast` | run **實際**在跑的值（SPEC §4.4a），跟 `bot.*`（下次啟動的設定）分開。三個都 `null` = 不知道（收編的 pane），前端不比對不標 |
+| `runtime_identity` | run 用哪個身分起來的（issue #238）：`""`＝沒有身分（預設帳號）、`null`＝不知道（收編的 pane、升級前的舊列）。改了 `bot.identity` 之後、重啟之前兩者不同；額度一律記在這個身分上 |
 | `turn_error` | 上一回合被 API 中斷或額度拒絕時 pane 上那行原文，否則 `null`；下一回合開始清回（SPEC §4.3a）。命中時對話多一則釘在回合上的 system 訊息（`incomplete = 1`、附 `terminal_snapshot`），回合還 in_flight 就收成 failed。重送就是再 `POST /prompt` 最後一則 user 訊息 |
 
 `turn_error` 為額度用盡（`You've reached your Fable limit…`）時，daemon 同時把該 bot 帳號的額度格標 `limit_hit`，`until` 取橫幅講的桶（`Fable` → `fable`，否則 5h）的 `resets_at`；

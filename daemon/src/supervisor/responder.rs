@@ -614,7 +614,8 @@ pub enum QuotaState {
 /// **裸 `claude`** 那一把——所以固定拼 `claude:<identity>` 的協調者永遠讀不到自己的額度，也就永遠
 /// 不知道自己撞限了。反過來，有自己 env 的身分（cc1／cc2）只讀自己那把，不借用 cc0 的數字。
 async fn quota_key_for(app: &Arc<App>, bot: &crate::db::Bot) -> Option<String> {
-    let identity = bot.identity.clone().filter(|s| !s.trim().is_empty())?;
+    // pane 裡實際的帳號（run 起來時的身分，issue #238）；讀不到 run 當 Unknown。
+    let identity = crate::quota::billing_identity(app, bot).await.ok().flatten()?;
     // 主機要**確定**。`db::bot_host` 查不到專案或讀錯時退回本機，那對一般顯示是合理的預設，
     // 但拿來判斷額度就是借別台機器（本機）的數字——讀不到就回 `None`，由呼叫端當成 Unknown。
     let host = strict_bot_host(&app.db, &bot.id).await?;
