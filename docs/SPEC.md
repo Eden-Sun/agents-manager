@@ -1508,7 +1508,9 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   跟那一句寫入由 SQLite 排序：它先落地就 0 rows、不停（回 409 `no_longer_idle`，標記收回）；許可先落地，run 已經是
   `stopping`，`begin_external_turn`（鎖裡看 `state == running`）不會替正在關的 pane 開回合。另外 `handle_status` 在寫 DB
   **之前**把看到的狀態記在記憶體（`idle_sleep::observe_status`），DB 寫不進去（現在會記 warn，不再默默吞掉）時 DB 的
-  idle 不算閒著的證據：事件流說它不是 idle 就不收。停失敗就把那一列
+  idle 不算閒著的證據：事件流說它不是 idle 就不收——但只有那一則**不比 DB 最後一次改狀態舊**時才算（issue #184）：對帳、收編
+  default session、起 run 也會照 herdr 當下的答案寫 `agent_status`，herdr 的 idle 事件漏了、由對帳寫回 idle 時，DB 的
+  `agent_status_since` 比那一則 working 新，照 DB 判；那一則寫不進 DB 時 DB 沒動，它照舊擋。停失敗就把那一列
   收回去，這顆仍是醒著的——**例外**是 503 `stop_state_uncommitted`（issue #152）：agent 已經停了、pane 已經關了，只是
   `stopped` 寫不進 DB（run 停在 `stopping`，背景重試補記），它就是睡著的，標記留著。其餘的停機錯誤也只在**確定它還在跑**
   （active run 是 `running`：許可沒過、agent 對 ctrl+c 沒反應被放回 running、在飛的那一筆收不成）時才收回標記；
