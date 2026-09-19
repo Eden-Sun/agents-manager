@@ -931,3 +931,28 @@
     min-width: 24px;
   }
 }
+
+/* 額度 popover（2026-09-19 使用者：「name 在左邊、整體窄一點」）：
+   方案（MAX／PLUS）緊貼帳號名，不再被兩個 margin-left:auto 擠到正中間；重置時間固定欄寬、靠右，
+   各列的條才一樣長；整體從 336px 收到 300px。 */
+.quota-pop .quota-plan {
+  margin-left: 0;
+}
+
+.quota-pop {
+  width: 300px;
+}
+
+.quota-pop .quota-reset {
+  flex: none;
+  width: 5.6em;
+  margin-left: 0;
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* 百分比也固定欄寬：「0%」比「100%」窄，條就會跟著變長。 */
+.quota-pop .quota-bar-pct {
+  min-width: 2.8em;
+  text-align: right;
+}
