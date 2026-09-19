@@ -350,3 +350,13 @@ shell 面板本來只有「打一行、Enter 送出」：TUI（`top`、`vim`、�
 - **取消＝放回輸入框最前面**（跟取消排隊同一個規則，附件要重加）；已經送出去的撤不回來，照實說「撤不回來」，不把字塞回輸入框。
 - **再打一則**：排在它後面（瀏覽器那一格），提示寫「bot 起來、前一則送出後才輪到它」，不寫「這回合還在跑」。
 - 截圖：`docs/screenshots/start-send-122/`（啟動中、沒能啟動、手機 390px、重新啟動後送出）。
+
+## 送出結果「欠著／不明」時前端怎麼說與怎麼收（2026-09-19，#161 #162 #173 #176）
+
+daemon 這幾天把「寫不進 DB」改成 fail closed：外面的副作用做了、DB 那一半欠著，回 503 而不是假裝成功或失敗。前端的判準是**字有沒有進 bot**，不是 HTTP 成不成功：
+
+- **`503 delivery_state_uncommitted`／`send_now_state_uncommitted` 且 `sent` 不是 `false`＝已送出**：`sendPrompt` 回 `true`（輸入框清掉、排隊的不放回去）、鎖上那一回合、通知「已送出…不要重送」。回 `false` 會讓輸入框留著同一段字、flush 又用新的 client_request_id 送一次（API.md §5）。`sent:false`（herdr 拒收）才維持沒送出。「請 AGM 現在重建」同理，落在「已送出但送達不明」，不說「送給 AGM 失敗」。
+- **插隊送出 200 的 `send_now`**：`interrupted`／`idle` 是成功；`not_sent`＝送出鍵沒生效，這一則沒送出、字可能還留在終端輸入框（輸入框保留、通知指向終端）；`unknown`＝不知道生效沒有，說結果不明、先別重送，不記進行中的本地回合（那一則已是 failed，沒有回合可「放棄」）。不再一律說「claude 太舊、照一般方式送出」。
+- **可重試的 409／503 顯示人話**：`composer_busy`／`resume_unverified`／`transcript_*` 等打字前擋下的 409 有固定說法（沒送出、怎麼辦）；帶 `retryable:true` 與人話 `message` 的（維護窗口、`interrupt_unconfirmed`…）直接顯示 daemon 的 `message`，不顯示 `reason` 代碼。
+- **外部 Cargo「測試連線」先存再測**：`POST /api/build/remote/test` 測的是已儲存的設定；表單有沒存的改動就先存，結果寫明測的是 `user@host`。
+- 截圖：`docs/screenshots/remote-cargo-test-saves-first/`。
