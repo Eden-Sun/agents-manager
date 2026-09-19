@@ -1,0 +1,21 @@
+╭─────────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.155.1)                      │
+│                                                 │
+│ model:       gpt-6-astra low   /model to change │
+│ directory:   /private/tmp/am-g1-codex0155-cwd   │
+│ permissions: YOLO mode                          │
+╰─────────────────────────────────────────────────╯
+
+  Tip: This is GPT-6, a new generation of intelligence. Astra is state-of-the-art in coding, computer use, science, and professional work. Give it a hard problem, a half-formed idea, or
+  anything you've been meaning to build. See where it takes you.
+
+
+› Reply with only the word PONG. Do not use tools.
+
+
+• Working (0s • esc to interrupt)
+
+
+› Ask Codex to do anything
+
+  gpt-6-astra low · /private/tmp/am-g1-codex0155-cwd

@@ -3143,43 +3143,51 @@ mod codex_limit_fallback_tests {
 
 #[cfg(test)]
 mod codex_0155_fallback_tests {
-    //! #207：codex 0.155 的狀態列字頭可能是 reasoning summary、回合結束後多一行完成時間。畫面照 codex rust-v0.155.0 的原始碼
-    //! 組的，不是實抓（見 `screen.rs` 的 `codex_0155_screen_tests`）。
+    //! #207：codex 0.155.1 真畫面（見 `screen.rs` 的 `codex_0155_screen_tests`）。
     use super::*;
     use crate::testing as tt;
 
-    async fn codex_turn(screen: &str) -> (tt::Env, String, String) {
+    const WORKING: &str = include_str!("fixtures/codex-0.155-working.txt");
+    const WORKING_SUMMARY: &str = include_str!("fixtures/codex-0.155-working-summary.txt");
+    const FINISHED: &str = include_str!("fixtures/codex-0.155-finished.txt");
+
+    async fn codex_turn(screen: &str, prompt: &str) -> (tt::Env, String, String) {
         let env = tt::env().await;
         let app = env.app.clone();
         let bot = tt::claude_bot(&app, &env.project_id, "cx").await;
         sqlx::query("UPDATE bots SET kind='codex' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
         let run = tt::fake_run(&app, &bot.id).await;
         let turn = crate::lifecycle::run_state::a_turn(&app, &bot.id, Some(&run), "in_flight").await;
+        sqlx::query("UPDATE turns SET prompt_text=? WHERE id=?").bind(prompt).bind(&turn).execute(&app.db).await.unwrap();
         env.herdr.set_screen(&format!("pane-{}", bot.id), screen);
         (env, run, turn)
     }
 
-    const FOOTER: &str = "  gpt-6-astra low · ~/project/agents-manager · Context 3% used";
-
-    /// summary 當字頭的狀態列：還在想，備援不收（以前只認 `Working (`，把狀態列當成回覆收掉回合）。
+    /// 真畫面回合中：還在想，備援不收。summary 開著時字頭在撞限前仍是 `Working`；疊上 summary 字頭一樣不收。
     #[tokio::test]
     async fn a_codex_still_thinking_under_a_summary_header_is_not_closed() {
-        let screen = format!("› 派工\n\n• Planning the fix for the poller (12s • esc to interrupt)\n\n› Ask Codex to do anything\n\n{FOOTER}\n");
-        let (env, run, turn) = codex_turn(&screen).await;
+        for screen in [WORKING, WORKING_SUMMARY] {
+            let (env, run, turn) = codex_turn(screen, "Reply with only the word PONG. Do not use tools.").await;
+            let app = env.app.clone();
+            assert!(!try_fallback(&app, &run, Some(&turn)).await.unwrap(), "還在想：不收");
+            assert_eq!(crate::lifecycle::run_state::turn_status(&app, &turn).await, "in_flight");
+        }
+        let summary = WORKING.replace("Working (0s • esc to interrupt)", "Planning the fix for the poller (12s • esc to interrupt)");
+        let (env, run, turn) = codex_turn(&summary, "Reply with only the word PONG. Do not use tools.").await;
         let app = env.app.clone();
-        assert!(!try_fallback(&app, &run, Some(&turn)).await.unwrap(), "還在想：不收");
+        assert!(!try_fallback(&app, &run, Some(&turn)).await.unwrap(), "summary 字頭：不收");
         assert_eq!(crate::lifecycle::run_state::turn_status(&app, &turn).await, "in_flight");
     }
 
-    /// 回合結束：存下來的回覆不帶完成時間那一行。
+    /// 真畫面回合結束：存下來的回覆不帶完成時間那一行。
     #[tokio::test]
     async fn a_finished_codex_turn_is_stored_without_its_completion_line() {
-        let screen = format!("› 派工\n\n• 做完了。\n\n  Worked for 2m 5s · done 3:24 PM\n\n› Ask Codex to do anything\n\n{FOOTER}\n");
-        let (env, run, turn) = codex_turn(&screen).await;
+        let (env, run, turn) = codex_turn(FINISHED, "Reply with exactly: CODEX OK").await;
         let app = env.app.clone();
         assert!(try_fallback(&app, &run, Some(&turn)).await.unwrap());
         let reply: String = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='assistant'").bind(&turn).fetch_one(&app.db).await.unwrap();
-        assert_eq!(reply, "做完了。");
+        assert_eq!(reply, "CODEX OK");
+        assert!(!reply.contains("done"));
     }
 }
 
