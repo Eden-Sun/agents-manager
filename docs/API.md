@@ -1274,7 +1274,7 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
 - `POST /api/supervisor/responder/start {}` / `stop {}` → 同 GET。`start` 標應該在跑（看門狗會拉起），`stop` 先標不要再停。
 - `GET /api/supervisor/responder/persona`、`PUT {text,expected_version?}` → 同巡檢的 persona 形狀加 `role:"responder"`；內嵌種子 `docs/goals/agm-responder-persona.md`。
 - `POST /api/supervisor/setup {}` → 同上再加 `deployed:{cwd,agm_cli}`。冪等：建立專用 Project／Bot／cwd，寫 `CLAUDE.md`、`persona.md`、`runtime.json`（**不含 token**）、`bin/agm`、
-  `handoff.md`（已存在不覆蓋）。args `["--remote-control","AGM"]`、`autostart=false`，**只建立不啟動**。`cc0` 不存在 409 `identity_missing`；專案裡有別的 `AGM` 409 `name_taken`。
+  `handoff.md`（已存在不覆蓋）。args `["--remote-control","AGM"]`、`autostart=false`，**只建立不啟動**。`cc0` 不存在 409 `identity_missing`；專案裡有別的 `AGM` 409 `name_taken`——supervisor 列還沒記過 bot 時（第一次設定、或上一次寫進 config 之後部署／記錄失敗），daemon 目錄那個專案裡的同名 `AGM` 就是上一次寫進去的那一顆，接著用它、不回 `name_taken`（協調者的 `AGM-responder` 同一條，#181）。
   總管認持久化的 `bot_id`，改名不會多開一個。
 - `POST /api/supervisor/start {}` / `stop {}` → 同 GET。`start` 後 `remote.status` 是 `requested`。`start` 標「應該在跑」、`stop` 標「使用者要它停」：不是經 `stop` 停掉的
   （被殺、崩潰、更新重啟沒回來），watchdog 自動再 `start`（30 秒，之後 60／120／300 秒退避，連續 5 次失敗寫進 `status_detail` 並停止）。`waiting_quota` 期間與 setup 後沒 start 過的不拉起。

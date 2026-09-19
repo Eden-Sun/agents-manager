@@ -240,7 +240,12 @@ pub async fn ensure_env(
             }
             let project_id = cfg.projects[pidx].id.clone().expect("set above");
             let proj = &mut cfg.projects[pidx];
-            let bidx = known_bot.as_ref().and_then(|id| proj.bots.iter().position(|b| b.id.as_ref() == Some(id)));
+            let bidx = match known_bot.as_ref() {
+                Some(id) => proj.bots.iter().position(|b| b.id.as_ref() == Some(id)),
+                // 還沒記過 bot：這時找到的專案只會是 daemon 自己目錄裡的那一個，同名的 `AGM-responder` 只可能是上一次設定寫進 config、
+                // 還沒來得及記進角色列就失敗的那一顆——接著用它（issue #181）。當成別人的回 `name_taken`，就永遠設定不起來。
+                None => proj.bots.iter().position(|b| b.name == BOT_NAME),
+            };
             let bidx = match bidx {
                 Some(i) => i,
                 None => {
@@ -917,6 +922,35 @@ pub async fn status_json(app: &Arc<App>) -> Result<Value, LcError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 協調者的設定做到一半失敗（config 已經寫進 `AGM-responder`，部署檔案那一步失敗）：再按一次要能接著做完，
+    /// 不能把上一次自己寫進去的那一顆當成「別的 bot 已經叫這個名字」回 409 `name_taken`（同 `setup` 那條，issue #181）。
+    #[tokio::test]
+    async fn a_responder_setup_that_failed_halfway_can_be_run_again() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let row = roles::get(&app.db, Role::Responder).await.unwrap();
+        app.tools.lock().await.insert(
+            crate::config::LOCAL_HOST.to_string(),
+            crate::tools::HostTools {
+                tools: Default::default(),
+                identities: Default::default(),
+                shell_identities: vec![crate::config::IdentityCfg { name: row.identity.clone(), kind: "claude".into(), host: None, env: Default::default(), args: vec![] }],
+                checked_at: crate::db::now(),
+            },
+        );
+        let bin = dir(&app).join("bin");
+        std::fs::create_dir_all(dir(&app)).unwrap();
+        std::fs::write(&bin, "not a directory").unwrap();
+        assert!(ensure_env(&app, None, None, None).await.is_err(), "前提：做到一半失敗");
+        std::fs::remove_file(&bin).unwrap();
+
+        let (_, bot_id, _) = ensure_env(&app, None, None, None).await.map_err(|e| format!("{e:?}")).expect("再跑一次要能做完");
+        let named: Vec<String> =
+            app.cfg.get().await.projects.iter().flat_map(|p| p.bots.iter()).filter(|b| b.name == BOT_NAME).filter_map(|b| b.id.clone()).collect();
+        assert_eq!(named, vec![bot_id.clone()], "接著用上一次寫進去的那一顆，不另外長一顆");
+        assert_eq!(roles::get(&app.db, Role::Responder).await.unwrap().bot_id.as_deref(), Some(bot_id.as_str()));
+    }
 
     /// config 上一顆 bot 的最小樣子（`toml::from_str` 省得把每個欄位寫一遍）。
     fn cfg_bot(id: &str, name: &str) -> BotCfg {
