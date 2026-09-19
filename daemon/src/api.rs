@@ -525,6 +525,8 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
                 "effort": b.effort,
                 "fast": b.fast == 1,
                 "persona": b.persona,
+                // claude 才有：這顆 bot 現在讀哪份專案指示檔（沒設＝daemon 釘的 `claude-md`），issue #213。
+                "instruction_files": (b.kind == "claude").then(|| crate::config::effective_instruction_files(b.instruction_files.as_deref())),
                 "args": b.args(),
                 "autostart": b.autostart == 1,
                 "inject_hooks": b.inject_hooks == 1,
@@ -945,6 +947,9 @@ struct NewBot {
     fast: bool,
     #[serde(default)]
     persona: Option<String>,
+    /// claude only; blank / null = unset (the pinned `claude-md`). See `config::INSTRUCTION_FILES`.
+    #[serde(default)]
+    instruction_files: Option<String>,
     #[serde(default)]
     args: Vec<String>,
     #[serde(default)]
@@ -990,6 +995,7 @@ async fn create_bot(
         .unwrap_or_else(|| crate::config::LOCAL_HOST.to_string());
     let identity = check_identity(&app, &host, &b.identity, &b.kind).await?;
     let effort = crate::config::normalize_effort(&b.kind, b.effort.as_deref()).map_err(LcError::Bad)?;
+    let instruction_files = crate::config::normalize_instruction_files(&b.kind, b.instruction_files.as_deref()).map_err(LcError::Bad)?;
     let env: BTreeMap<String, String> = b.env.clone().unwrap_or_default();
     let id = db::ulid();
     let used_name = std::sync::Mutex::new(b.name.clone());
@@ -1017,6 +1023,7 @@ async fn create_bot(
             effort: effort.clone(),
             fast: b.fast,
             persona: b.persona.clone().filter(|s| !s.trim().is_empty()),
+            instruction_files: instruction_files.clone(),
             args: b.args.clone(),
             autostart: b.autostart,
             inject_hooks: b.inject_hooks.unwrap_or(true),
@@ -1123,6 +1130,9 @@ struct PatchBot {
     fast: Option<bool>,
     #[serde(default, deserialize_with = "double_option")]
     persona: Option<Option<String>>,
+    /// claude only. `Some(Some(v))` sets, `Some(None)` / `Some("")` clears back to the pinned `claude-md`, absent = unchanged.
+    #[serde(default, deserialize_with = "double_option")]
+    instruction_files: Option<Option<String>>,
     args: Option<Vec<String>>,
     autostart: Option<bool>,
     name: Option<String>,
@@ -1223,6 +1233,7 @@ async fn patch_bot(
         || b.effort.is_some()
         || b.fast.is_some()
         || b.persona.is_some()
+        || b.instruction_files.is_some()
         || b.args.is_some()
         || b.identity.is_some()
         || b.env.is_some()
@@ -1233,6 +1244,18 @@ async fn patch_bot(
     let effort: Option<Option<String>> = match &b.effort {
         None => None,
         Some(e) => Some(crate::config::normalize_effort(&kind, e.as_deref()).map_err(LcError::Bad)?),
+    };
+    // issue #213：只有 daemon 帶 `--settings` 起的 claude bot 讀得到這一格；child bot 是被認領的既有 pane，沒有這包設定，
+    // 收下來只會讓畫面上顯示一個沒有作用的值。
+    let instruction_files: Option<Option<String>> = match &b.instruction_files {
+        None => None,
+        Some(v) => {
+            let managed_by = db::bot(&app.db, &id).await.map_err(any_err)?.map(|x| x.managed_by).unwrap_or_default();
+            if managed_by != "user" {
+                return Err(LcError::Bad("instruction_files does not apply to child bots (they are not started with the daemon's --settings)".into()));
+            }
+            Some(crate::config::normalize_instruction_files(&kind, v.as_deref()).map_err(LcError::Bad)?)
+        }
     };
     if let Some(Some(name)) = &b.identity {
         if !name.trim().is_empty() {
@@ -1288,6 +1311,9 @@ async fn patch_bot(
         if let Some(p) = &b.persona {
             bot.persona = p.clone().filter(|x| !x.trim().is_empty());
         }
+        if let Some(v) = &instruction_files {
+            bot.instruction_files = v.clone();
+        }
         if let Some(a) = &b.args {
             bot.args = a.clone();
         }
@@ -1317,6 +1343,7 @@ async fn patch_bot(
             // `fast` 也要吃 `skip`（SPEC §4.4a），否則只改 fast 永遠回 needs_restart（2026-09-09 實測）。
             || hit("fast", b.fast.is_some())
             || b.persona.is_some()
+            || b.instruction_files.is_some()
             || b.args.is_some()
             || b.identity.is_some()
             || b.env.is_some()
@@ -1545,6 +1572,7 @@ async fn restore_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Res
             effort: bot.effort.clone(),
             fast: bot.fast != 0,
             persona: bot.persona.clone(),
+            instruction_files: bot.instruction_files.clone(),
             args: serde_json::from_str(&bot.args_json).unwrap_or_default(),
             autostart: bot.autostart != 0,
             inject_hooks: bot.inject_hooks != 0,
@@ -1965,6 +1993,7 @@ mod project_tests {
                             effort: None,
                             fast: false,
                             persona: None,
+                            instruction_files: None,
                             args: vec![],
                             autostart: false,
                             inject_hooks: true,
@@ -3955,5 +3984,203 @@ mod started_json_tests {
         assert_eq!(body["run_id"], json!(run.id));
         assert_eq!(body["resumed"], json!(false), "開的是新對話：{body}");
         lifecycle::stop_bot(&app, &bot.id).await.unwrap();
+    }
+}
+
+/// issue #213：claude bot 讀哪份專案指示檔——bot 層級的設定，從 API 一路驗到啟動時寫進 `--settings` 的檔案。
+#[cfg(test)]
+mod instruction_files_tests {
+    use super::*;
+    use crate::testing::{env, Env};
+
+    /// `testing::env` 只種 DB 那一列；bot 要從 config.toml 進來，所以先把專案寫進 config。
+    async fn seed_project(e: &Env) {
+        let (pid, repo) = (e.project_id.clone(), e.repo.to_string_lossy().to_string());
+        e.app
+            .cfg
+            .update(move |cfg| {
+                cfg.projects.push(crate::config::ProjectCfg {
+                    id: Some(pid),
+                    path: repo,
+                    label: "proj".into(),
+                    host: LOCAL_HOST.into(),
+                    bots: vec![],
+                });
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    async fn add(e: &Env, body: Value) -> Result<String, LcError> {
+        let res = create_bot(State(e.app.clone()), Path(e.project_id.clone()), Json(serde_json::from_value(body).unwrap())).await?;
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
+        Ok(serde_json::from_slice::<Value>(&bytes).unwrap()["bot_id"].as_str().unwrap().to_string())
+    }
+
+    async fn patch(e: &Env, id: &str, body: Value) -> Result<Value, LcError> {
+        let res = patch_bot(State(e.app.clone()), Path(id.to_string()), Json(serde_json::from_value(body).unwrap())).await?;
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
+        Ok(serde_json::from_slice(&bytes).unwrap())
+    }
+
+    /// `GET /api/state` 裡這顆 bot 的 `instruction_files`。
+    async fn shown(e: &Env, id: &str) -> Value {
+        let st = state_json(&e.app).await.unwrap();
+        let bots = st["projects"][0]["bots"].as_array().unwrap().clone();
+        bots.into_iter().find(|b| b["id"] == json!(id)).expect("state 裡有這顆 bot")["instruction_files"].clone()
+    }
+
+    async fn stored(e: &Env, id: &str) -> (Option<String>, Option<String>) {
+        let cfg = e.app.cfg.get().await;
+        let in_cfg = cfg.projects[0].bots.iter().find(|b| b.id.as_deref() == Some(id)).unwrap().instruction_files.clone();
+        (in_cfg, db::bot(&e.app.db, id).await.unwrap().unwrap().instruction_files)
+    }
+
+    /// 最近一次 `agent.start` 的 `--settings` 檔案內容：daemon 真的交給 claude 的那包設定。
+    fn settings_of_last_start(e: &Env) -> Value {
+        let call = e.herdr.calls_to("agent.start").pop().expect("有起過 agent");
+        let args: Vec<String> = call["args"].as_array().unwrap().iter().filter_map(|a| a.as_str().map(String::from)).collect();
+        let at = args.iter().position(|a| a == "--settings").expect("claude 帶 --settings") + 1;
+        serde_json::from_slice(&std::fs::read(&args[at]).unwrap()).unwrap()
+    }
+
+    fn pinned(settings: &Value) -> Value {
+        settings["pluginConfigs"]["agents-md@builtin"]["options"]["instructionFiles"].clone()
+    }
+
+    /// 沒設的 bot 讀 `claude-md`（跟 #206 一樣）；設了的 bot 讀自己的值；兩顆同一個 project 的 bot 互不影響。
+    /// 這條從建 bot 一路走到 `--settings` 檔，接線斷在任何一段都會紅。
+    #[tokio::test]
+    async fn each_bot_starts_with_its_own_instruction_files() {
+        let e = env().await;
+        seed_project(&e).await;
+        let plain = add(&e, json!({"name": "plain", "kind": "claude"})).await.unwrap();
+        let shared = add(&e, json!({"name": "shared", "kind": "claude", "instruction_files": "claude-md-and-agents-md"})).await.unwrap();
+
+        assert_eq!(shown(&e, &plain).await, json!("claude-md"), "沒設＝daemon 釘的預設，畫面上直接看得到");
+        assert_eq!(shown(&e, &shared).await, json!("claude-md-and-agents-md"));
+        assert_eq!(stored(&e, &plain).await, (None, None), "沒設就不落值");
+        assert_eq!(stored(&e, &shared).await, (Some("claude-md-and-agents-md".into()), Some("claude-md-and-agents-md".into())), "config.toml 與 DB 都有");
+
+        lifecycle::start_bot(&e.app, &plain).await.unwrap();
+        assert_eq!(pinned(&settings_of_last_start(&e)), json!("claude-md"));
+        lifecycle::start_bot(&e.app, &shared).await.unwrap();
+        assert_eq!(pinned(&settings_of_last_start(&e)), json!("claude-md-and-agents-md"), "共用 AGENTS.md 的那顆才會改讀");
+    }
+
+    /// PATCH：設、換、清；清掉回到 `claude-md`，不是 CLI 的預設。有 active run 要提示重啟（設定檔只在啟動時讀）。
+    #[tokio::test]
+    async fn patching_changes_what_the_next_start_reads_and_asks_for_a_restart_when_running() {
+        let e = env().await;
+        seed_project(&e).await;
+        let id = add(&e, json!({"name": "a", "kind": "claude"})).await.unwrap();
+
+        let out = patch(&e, &id, json!({"instruction_files": "claude-md-or-agents-md"})).await.unwrap();
+        assert_eq!(out["needs_restart"], json!(false), "沒在跑，不必重啟：{out}");
+        assert_eq!(shown(&e, &id).await, json!("claude-md-or-agents-md"));
+        assert_eq!(stored(&e, &id).await, (Some("claude-md-or-agents-md".into()), Some("claude-md-or-agents-md".into())));
+
+        lifecycle::start_bot(&e.app, &id).await.unwrap();
+        assert_eq!(pinned(&settings_of_last_start(&e)), json!("claude-md-or-agents-md"));
+
+        let out = patch(&e, &id, json!({"instruction_files": "managed-only"})).await.unwrap();
+        assert_eq!(out["needs_restart"], json!(true), "有 active run：新值要重啟才讀到：{out}");
+        // 跟可以當場套用的欄位（claude 的 model → /model）一起改：不能只套用那一個、把要重啟才生效的這個當成已生效。
+        let out = patch(&e, &id, json!({"model": "opus", "instruction_files": "claude-md-and-agents-md"})).await.unwrap();
+        assert_eq!(out["needs_restart"], json!(true), "{out}");
+        assert!(out.get("live_apply").is_none(), "有 instruction_files 同行時不走當場套用：{out}");
+
+        // null 與空字串都是「清掉」，回到釘住的預設。
+        for clear in [json!(null), json!("")] {
+            patch(&e, &id, json!({"instruction_files": "managed-only"})).await.unwrap();
+            patch(&e, &id, json!({"instruction_files": clear})).await.unwrap();
+            assert_eq!(shown(&e, &id).await, json!("claude-md"));
+            assert_eq!(stored(&e, &id).await, (None, None));
+        }
+    }
+
+    /// 值不在 CLI 的選項裡（CLI 會當成它自己的預設＝改讀 AGENTS.md）、非 claude 的 bot、child bot 都是 400，而且什麼都不改。
+    #[tokio::test]
+    async fn a_value_the_cli_would_ignore_or_a_bot_that_cannot_use_it_is_a_400() {
+        let e = env().await;
+        seed_project(&e).await;
+        let claude = add(&e, json!({"name": "c", "kind": "claude", "instruction_files": "managed-only"})).await.unwrap();
+        let codex = add(&e, json!({"name": "x", "kind": "codex"})).await.unwrap();
+
+        for bad in ["agents-md", "claude", "CLAUDE-MD", "both"] {
+            assert!(matches!(add(&e, json!({"name": "bad", "kind": "claude", "instruction_files": bad})).await, Err(LcError::Bad(_))), "建：{bad}");
+            let err = patch(&e, &claude, json!({"instruction_files": bad})).await.unwrap_err();
+            assert!(matches!(err, LcError::Bad(_)), "改：{bad} → {err:?}");
+        }
+        assert_eq!(shown(&e, &claude).await, json!("managed-only"), "被拒的請求不能動到原本的值");
+        assert_eq!(stored(&e, &claude).await, (Some("managed-only".into()), Some("managed-only".into())));
+
+        assert!(matches!(add(&e, json!({"name": "y", "kind": "codex", "instruction_files": "claude-md"})).await, Err(LcError::Bad(_))));
+        assert!(matches!(patch(&e, &codex, json!({"instruction_files": "claude-md"})).await, Err(LcError::Bad(_))));
+        assert_eq!(shown(&e, &codex).await, Value::Null, "codex／grok 沒有這個設定，畫面上是 null 不是 claude-md");
+        // 清成空對沒有這個設定的 bot 無害。
+        patch(&e, &codex, json!({"instruction_files": null})).await.unwrap();
+
+        // child bot 是被認領的既有 pane：沒有 daemon 的 --settings，設了也讀不到。
+        let child = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, managed_by, created_at)
+             VALUES (?,?,'kid','claude','[]',0,0,'tok','child',?)",
+        )
+        .bind(&child)
+        .bind(&e.project_id)
+        .bind(db::now())
+        .execute(&e.app.db)
+        .await
+        .unwrap();
+        let err = patch(&e, &child, json!({"instruction_files": "claude-md-and-agents-md"})).await.unwrap_err();
+        assert!(matches!(err, LcError::Bad(_)), "{err:?}");
+        assert_eq!(db::bot(&e.app.db, &child).await.unwrap().unwrap().instruction_files, None);
+    }
+
+    /// 刪掉再還原：設定跟著回來（還原是從 DB 那一列重建 config 條目，漏抄欄位會在這裡悄悄變回預設）。
+    #[tokio::test]
+    async fn restoring_a_deleted_bot_keeps_its_instruction_files() {
+        let e = env().await;
+        seed_project(&e).await;
+        let id = add(&e, json!({"name": "keep", "kind": "claude", "instruction_files": "claude-md-and-agents-md"})).await.unwrap();
+
+        delete_bot(State(e.app.clone()), Path(id.clone())).await.unwrap();
+        assert!(e.app.cfg.get().await.projects[0].bots.iter().all(|b| b.id.as_deref() != Some(id.as_str())), "刪掉之後 config 裡沒有了");
+        restore_bot(State(e.app.clone()), Path(id.clone())).await.unwrap();
+
+        assert_eq!(stored(&e, &id).await, (Some("claude-md-and-agents-md".into()), Some("claude-md-and-agents-md".into())));
+        assert_eq!(shown(&e, &id).await, json!("claude-md-and-agents-md"));
+    }
+
+    /// 手改 config.toml 寫錯（拼錯的值、寫在 codex 上）：投影時丟掉、存 NULL，bot 讀釘住的 `claude-md`——
+    /// 不能把拼錯的值原樣交給 CLI，它會當成自己的預設。
+    #[tokio::test]
+    async fn a_hand_edited_bad_value_projects_as_unset() {
+        let e = env().await;
+        seed_project(&e).await;
+        let (typo, on_codex, good) = (db::ulid(), db::ulid(), db::ulid());
+        let ids = [(typo.clone(), "claude", "agents-md"), (on_codex.clone(), "codex", "claude-md"), (good.clone(), "claude", "managed-only")];
+        e.app
+            .cfg
+            .update(|cfg| {
+                for (i, (id, kind, v)) in ids.iter().enumerate() {
+                    let mut b: crate::config::BotCfg = toml::from_str(&format!("id = '{id}'\nname = 'h{i}'\nkind = '{kind}'\n")).unwrap();
+                    b.instruction_files = Some((*v).to_string());
+                    cfg.projects[0].bots.push(b);
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+        crate::projection::project_config(&e.app.cfg, &e.app.db).await.unwrap();
+
+        assert_eq!(db::bot(&e.app.db, &typo).await.unwrap().unwrap().instruction_files, None);
+        assert_eq!(db::bot(&e.app.db, &on_codex).await.unwrap().unwrap().instruction_files, None);
+        assert_eq!(db::bot(&e.app.db, &good).await.unwrap().unwrap().instruction_files.as_deref(), Some("managed-only"));
+        assert_eq!(shown(&e, &typo).await, json!("claude-md"));
+        lifecycle::start_bot(&e.app, &typo).await.unwrap();
+        assert_eq!(pinned(&settings_of_last_start(&e)), json!("claude-md"), "拼錯的值沒有走到 --settings");
     }
 }

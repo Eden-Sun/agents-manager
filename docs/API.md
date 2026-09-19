@@ -82,7 +82,7 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
 
 - `queued_turn`：排在下一個要送的 Turn（`status = "queued"`，§5），沒有就 `null`；前端據此把輸入框畫成「已排隊」。**生產者兩個**：對方回合中時 AGM 的派工（2026-09-16），與 bot 沒在跑時帶 `start_if_stopped` 的送出（issue #122，turn 帶 `awaits_start:1`）。使用者對**回合中**的 bot 送 `/prompt` 仍是 409，見 SPEC §4.4a。
 - `unread` 固定 `0`（未讀由前端算）。
-- 其他欄位（hosts、identities、bot 的 model/effort/fast/persona/identity/managed_by/parent_bot_id、run 的 runtime_* 等）見各節。
+- 其他欄位（hosts、identities、bot 的 model/effort/fast/persona/instruction_files/identity/managed_by/parent_bot_id、run 的 runtime_* 等）見各節。
 
 ### `run` 物件（`null` = 沒有 active Run）
 
@@ -138,7 +138,7 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
 | POST | `/api/projects` | `{"path":"/abs/or/~/path","label"?:"foo","host"?:"m4p"}`（`label` 預設目錄名） | `200 {"project_id"}`；路徑不存在 400；重複 409 |
 | DELETE | `/api/projects/{id}` | — | `200 {}`；仍有 active Run → 409 |
 | PATCH | `/api/projects/{id}` | `{"label":"新名字"}` | `200 {"project_id","needs_restart":false}`；trim 後為空 400。不擋 active run（agent 身分取自 bot id，label 只影響**下次啟動**的 `agent_name` slug） |
-| POST | `/api/projects/{id}/bots` | `{"name","kind":"claude"\|"codex"\|"grok","args":[],"autostart":false,"inject_hooks":true,"name_auto":false, model?, effort?, fast?, identity?, persona?, auto_approve?}` | `200 {"bot_id","name"}`；名稱重複 409，但 `name_auto:true` 時自動往後找 `<base>-<n>`（回應 `name` 是實際用的） |
+| POST | `/api/projects/{id}/bots` | `{"name","kind":"claude"\|"codex"\|"grok","args":[],"autostart":false,"inject_hooks":true,"name_auto":false, model?, effort?, fast?, identity?, persona?, instruction_files?, auto_approve?}` | `200 {"bot_id","name"}`；名稱重複 409，`instruction_files` 不合法 400（§12.8b），但 `name_auto:true` 時自動往後找 `<base>-<n>`（回應 `name` 是實際用的） |
 | PATCH | `/api/bots/{id}` | 見 §10.2 | `200 {"needs_restart":bool}` |
 | POST | `/api/bots/{id}/fork` | `{"name"?}` | 見 §10.3b |
 | DELETE | `/api/bots/{id}` | — | 見 §10.4 |
@@ -883,6 +883,7 @@ env 前綴跟登入是同一段程式算出來的——少帶 `CLAUDE_CONFIG_DIR
 | `primary` | bool，預設 `false` | 純顯示用釘選（標題列下面那一列排最前）。不影響 argv/env，永遠 `needs_restart:false`；不進 config.toml（`bots.is_primary`），child bot 也能釘，手機與電腦同步 |
 | `identity` / `env` | 見身份一節 | |
 | `persona` | §12.8 | |
+| `instruction_files` | string \| null（唯讀給 codex／grok） | claude 才有：這顆 bot 讀哪份專案指示檔，§12.8b。`GET /api/state` 永遠給有效值（沒設＝`claude-md`），codex／grok 是 `null` |
 | `managed_by` / `parent_bot_id` | 唯讀 | `user` = config.toml 的 bot；`child` = bot 自己開的子 agent（§子 agent） |
 
 啟動 argv 順序（前端可據此預覽）：daemon 旗標（auto_approve、hooks、persona）→ model（claude `--model`、codex/grok `-m`）→ effort（claude `--effort`、grok `--reasoning-effort`、
@@ -893,7 +894,7 @@ codex `-c model_reasoning_effort="<level>"`）→ identity.args → bot.args。
 body 所有欄位可省；`model`、`identity` 傳 `null` 或 `""` 清除；`env` 傳整個物件為**取代**：
 
 ```json
-{ "name": "am-codex", "model": "gpt-5.5", "effort": "high", "fast": false, "args": ["--search"], "autostart": false, "auto_approve": true, "inject_hooks": true, "identity": "cc1", "env": {"FOO": "bar"}, "primary": false, "persona": "…" }
+{ "name": "am-codex", "model": "gpt-5.5", "effort": "high", "fast": false, "args": ["--search"], "autostart": false, "auto_approve": true, "inject_hooks": true, "identity": "cc1", "env": {"FOO": "bar"}, "primary": false, "persona": "…", "instruction_files": "claude-md-and-agents-md" }
 ```
 
 回 `200 {"needs_restart": bool}`，成功推 `bot_changed`。真的試過「當場套用」時多一個
@@ -904,7 +905,7 @@ body 所有欄位可省；`model`、`identity` 傳 `null` 或 `""` 清除；`env
 readback_model_mismatch|readback_effort_mismatch|readback_fast_mismatch>`。以前失敗是**靜默**的：
 只回 `needs_restart: true`、log 也沒寫，「codex 改 effort 明明不用重啟，為什麼又重啟」查不出來。
 
-- **`needs_restart: true`**：有 active Run 且動到影響啟動 argv/env 的欄位（`model`、`effort`、`fast`、`args`、`identity`、`env`、`auto_approve`、`inject_hooks`、`persona`）。
+- **`needs_restart: true`**：有 active Run 且動到影響啟動 argv/env 的欄位（`model`、`effort`、`fast`、`args`、`identity`、`env`、`auto_approve`、`inject_hooks`、`persona`、`instruction_files`）。
   沒有 active Run，或只改 `name` / `autostart` / `primary` → `false`。前端顯示「需要重新啟動」並提供 §10.3。
 - **當場套用的例外**：只動了下列欄位、Run `running` 且不忙（非 working/blocked、無 in-flight turn）、新值不是清成 `null`（codex `fast` 例外）時，daemon 操作 TUI 並回 `false`；
   任一條件不成立或回讀對不上就回 `true`。細節見 SPEC §4.4a：
@@ -945,7 +946,7 @@ readback_model_mismatch|readback_effort_mismatch|readback_fast_mismatch>`。以�
 
 ### 10.3b `POST /api/bots/{id}/fork`
 從頂層 bot 分出一顆新 bot，讓它的 CLI 接續來源到目前為止的完整對話脈絡（SPEC §6.10）。body 可省略：`{"name"?:"alfa-fork"}`（省略＝`<來源>-fork`，撞名自動加 `-N`）。
-- 設定照抄來源的 config.toml 條目（kind、model、effort、fast、persona、args、identity、env、auto_approve、inject_hooks），`autostart` 一律 false。建好立刻啟動。
+- 設定照抄來源的 config.toml 條目（kind、model、effort、fast、persona、instruction_files、args、identity、env、auto_approve、inject_hooks），`autostart` 一律 false。建好立刻啟動。
 - `200 {"bot_id","name","forked_from":{"bot_id","session_id"},"run_id"|null,"start_error"|null}`：建好但沒啟動成功仍回 200，`start_error` 帶原因。推 `bot_changed`；新 bot 的對話裡有一則系統訊息說明從哪裡分出來。
 - 錯誤（都不會先建 bot）：來源不存在 404；`409 reason`：`fork_child`（子 agent）、`default_session`（從 herdr default session 匯入的）、`no_session`（還沒記到 native session）、`transcript_missing`（本機對話檔不在）、`unsupported_kind`、`not_in_config`；名字不合法 400。
 
@@ -1204,6 +1205,22 @@ grok `curl -fsSL https://x.ai/cli/install.sh | bash`；接著確認 `--version`�
 | `codex` | `-c developer_instructions=<TOML basic string>`（daemon 逃逸換行與引號） |
 
 位置在 daemon 旗標之後、model 之前。AGM 的人設另走 `/api/supervisor/persona`（總管一節）。
+
+### 12.8b bot 的專案指示檔 `bot.instruction_files`（issue #213）
+claude 2.1.277 起，內建 `agents-md` plugin 決定專案指示檔讀哪幾份（`instructionFiles`）。daemon 在每顆 claude bot 啟動時寫進它的 `--settings`（SPEC §4「注入設定」），**值由這顆 bot 決定，不是全域開關**：
+
+| 值（就是 CLI 的選項，只收這四個） | claude 讀什麼 |
+|---|---|
+| `claude-md`（沒設時的值） | 只讀 `CLAUDE.md`。跟 2.1.277 以前一樣，不會因為專案沒有 `CLAUDE.md` 就改讀寫給 codex 的 `AGENTS.md` |
+| `claude-md-or-agents-md` | 有 `CLAUDE.md` 讀它，沒有才讀 `AGENTS.md`（CLI 自己的預設） |
+| `claude-md-and-agents-md` | 兩份都讀——要讓這顆 claude 和同專案的 codex 共用同一份 `AGENTS.md` 就選這個 |
+| `managed-only` | 專案與使用者自己的指示檔都不讀，只留組織管理的 `CLAUDE.md` 與 memory |
+
+- TOML `instruction_files = "claude-md-and-agents-md"`；POST 可省、PATCH 可改（`null`／`""` 清回 `claude-md`，不是 CLI 的預設）。有 active Run 時列入 `needs_restart`——設定檔只在啟動時讀。
+- `GET /api/state` 每顆 claude bot 都帶**有效值**（`claude-md` 就是沒設），codex／grok 是 `null`；前端 Bot 設定面板的「專案指示檔」就是這一格，只在 claude 的 `managed_by: "user"` bot 顯示。
+- **400**：值不在上表（CLI 遇到選項以外的值會當成它自己的預設＝改讀 `AGENTS.md`，等於沒釘，所以在 API 就擋）；`kind` 不是 claude 卻帶值（`null`／`""` 放行）；`managed_by: "child"` 的 bot（被認領的既有 pane，沒有 daemon 的 `--settings`，設了也讀不到）。
+- 手改 config.toml 寫了看不懂的值、或寫在 codex／grok 上：投影時丟掉（DB 存 NULL），bot 照樣讀 `claude-md`，不會把拼錯的值交給 CLI。
+- fork（§10.3b）與還原已刪的 bot 都會帶著這個值。
 
 ### 12.9 GitHub 專案偵測與 issues
 

@@ -1,11 +1,31 @@
-import type { BotKind, PatchBotInput } from '../api/types'
+import { INSTRUCTION_FILES_DEFAULT, type BotKind, type InstructionFiles, type PatchBotInput } from '../api/types'
 
 /**
  * Bot 設定面板的純函式（docs/reviews/2026-09-12/web.md §1）。只有 `touched` 欄位算數，其餘跟 `base`：
  * 別處改了同一顆 bot 時，儲存才不會用開啟當下的舊值蓋回去。
  */
 
-export type BotFormKey = 'name' | 'model' | 'effort' | 'fast' | 'persona' | 'identity'
+/** 專案指示檔的四個選項（面板順序）；`hint` 是選中時顯示的說明。值必須跟 daemon／CLI 的 `instructionFiles` 一致（API.md §10）。 */
+export const INSTRUCTION_FILES_CHOICES: readonly { value: InstructionFiles; label: string; hint: string }[] = [
+  { value: 'claude-md', label: '只讀 CLAUDE.md（預設）', hint: '只讀 CLAUDE.md，不讀寫給 codex 的 AGENTS.md。' },
+  {
+    value: 'claude-md-or-agents-md',
+    label: 'CLAUDE.md，沒有才讀 AGENTS.md',
+    hint: '專案有 CLAUDE.md 就只讀它；沒有才改讀 AGENTS.md（claude 2.1.277 的原生預設）。',
+  },
+  {
+    value: 'claude-md-and-agents-md',
+    label: '兩份都讀（跟 codex 共用）',
+    hint: 'CLAUDE.md 與 AGENTS.md 都讀（CLAUDE.md 已經引用的檔不會讀兩次）。適合讓這顆 claude 和同專案的 codex 共用同一份 AGENTS.md。',
+  },
+  {
+    value: 'managed-only',
+    label: '都不讀',
+    hint: '專案與使用者自己的指示檔全部不讀，只留組織管理的 CLAUDE.md 與 memory。',
+  },
+]
+
+export type BotFormKey = 'name' | 'model' | 'effort' | 'fast' | 'persona' | 'identity' | 'instruction_files'
 
 export interface BotFormValues {
   name: string
@@ -16,6 +36,8 @@ export interface BotFormValues {
   persona: string
   /** `''` = 不指定。 */
   identity: string
+  /** claude 才有；面板永遠是四個值之一（沒設＝預設）。 */
+  instruction_files: InstructionFiles
 }
 
 export interface BotFormBase {
@@ -25,6 +47,8 @@ export interface BotFormBase {
   fast: boolean
   persona: string | null
   identity: string | null
+  /** null = 這顆 bot 沒有這個設定（codex／grok、舊 daemon）。 */
+  instruction_files: InstructionFiles | null
 }
 
 /** 畫面上要顯示的值：動過的用表單的，沒動過的跟 base 走。 */
@@ -36,10 +60,11 @@ export function effectiveForm(base: BotFormBase, form: BotFormValues, touched: R
     fast: touched.has('fast') ? form.fast : base.fast,
     persona: touched.has('persona') ? form.persona : (base.persona ?? ''),
     identity: touched.has('identity') ? form.identity : (base.identity ?? ''),
+    instruction_files: touched.has('instruction_files') ? form.instruction_files : (base.instruction_files ?? INSTRUCTION_FILES_DEFAULT),
   }
 }
 
-/** 動過且跟 base 不同的欄位才進 patch。`fast` 只有 codex；`identity` 三種 kind 都收。 */
+/** 動過且跟 base 不同的欄位才進 patch。`fast` 只有 codex；`identity` 三種 kind 都收；`instruction_files` 只有 claude 且 daemon 有給這一格（`base` 不是 null）。 */
 export function computeBotPatch(
   base: BotFormBase,
   form: BotFormValues,
@@ -56,5 +81,8 @@ export function computeBotPatch(
   if (touched.has('persona') && persona !== base.persona) patch.persona = persona
   const identity = v.identity || null
   if (touched.has('identity') && identity !== base.identity) patch.identity = identity
+  if (kind === 'claude' && base.instruction_files !== null && touched.has('instruction_files') && v.instruction_files !== base.instruction_files) {
+    patch.instruction_files = v.instruction_files
+  }
   return patch
 }

@@ -321,7 +321,7 @@ async fn install_remote_hook(conn: &HostConn, bot: &db::Bot, instance: Option<&s
     let statusline = shell_join(&[p.hook_sh.clone(), "statusline".into(), bot.id.clone(), REMOTE_TOKEN_SLOT.into()]);
     // 遠端也用同一支：`remoteControlAtStartup` 要明講，否則那台機器帳號的全域設定會替每顆 bot
     // 決定要不要開手機入口（見 `claude_settings`）。
-    let settings = claude_settings(&cmd, &statusline, bot.args().iter().any(|a| a == "--remote-control"));
+    let settings = claude_settings(&cmd, &statusline, bot.args().iter().any(|a| a == "--remote-control"), instruction_files_of(bot));
     let settings_text = serde_json::to_string_pretty(&settings)?;
     let script = format!(
         "set -e\nD={dir}\nmkdir -p \"$D\"\ncat > \"$D/hook.sh\" <<'AM_HOOK_EOF'\n{hook}AM_HOOK_EOF\nchmod +x \"$D/hook.sh\"\ncat > \"$D/claude-settings.json\" <<'AM_SETTINGS_EOF'\n{settings}\nAM_SETTINGS_EOF\nprintf 'AM_INSTALLED\\n'\n",
@@ -432,7 +432,7 @@ pub(crate) async fn injected_args(app: &App, bot: &db::Bot, project: &db::Projec
             let statusline = shell_join(&statusline_parts(hook_cmd_parts(app, bot, "claude")));
             // Remote Control 明講，不要靠帳號的全域 settings 決定（見 `claude_settings`）。
             let wants_remote = bot.args().iter().any(|a| a == "--remote-control");
-            let settings = claude_settings(&cmd, &statusline, wants_remote);
+            let settings = claude_settings(&cmd, &statusline, wants_remote, instruction_files_of(bot));
             let path = dir.join("claude-settings.json");
             write_private(&path, &serde_json::to_vec_pretty(&settings)?)?;
             vec!["--settings".into(), path.to_string_lossy().to_string(), "--verbose".into()]
@@ -457,7 +457,10 @@ pub(crate) async fn injected_args(app: &App, bot: &db::Bot, project: &db::Projec
 /// `remoteControlAtStartup` 明講而不是省略：使用者帳號的全域 `settings.json` 只要開了它，
 /// **每一顆** bot 起來都會多開一個手機入口（SPEC §18.15 說入口只有巡檢一個，背景 worker 一律
 /// rc off）。判準是這顆 bot 自己有沒有要求——argv 帶了 `--remote-control` 才是 true。
-fn claude_settings(hook_cmd: &str, statusline: &str, wants_remote: bool) -> Value {
+///
+/// `instruction_files` 是 `agents-md` plugin 的選項值，只能是 `config::INSTRUCTION_FILES` 裡的一個
+/// （由 [`instruction_files_of`] 給；CLI 遇到選項以外的值會退回它自己的預設，等於沒釘）。
+fn claude_settings(hook_cmd: &str, statusline: &str, wants_remote: bool, instruction_files: &str) -> Value {
     json!({
         "remoteControlAtStartup": wants_remote,
         "hooks": {
@@ -518,8 +521,16 @@ fn claude_settings(hook_cmd: &str, statusline: &str, wants_remote: bool) -> Valu
         // plugin 的選項只從 user／`--settings`／managed settings 讀（專案層的 settings 不讀），鍵認 `agents-md` 與 `agents-md@builtin`。
         // 2.1.276 的舊選項 `projectInstructions` 預設本來就是只讀 CLAUDE.md，不另外寫（新版兩個都寫會印一行提示）；更舊的
         // 版本沒有這個 plugin，這一格沒人讀、不影響啟動。
-        "pluginConfigs": {"agents-md@builtin": {"options": {"instructionFiles": "claude-md"}}}
+        //
+        // issue #213：值由 bot 決定（`bots.instruction_files`，沒設＝`claude-md`），不是全域開關——要讓某顆 claude 跟同 project 的
+        // codex 共用 AGENTS.md 就在那顆 bot 上設 `claude-md-and-agents-md`（或 `claude-md-or-agents-md`）。
+        "pluginConfigs": {"agents-md@builtin": {"options": {"instructionFiles": instruction_files}}}
     })
+}
+
+/// 這顆 bot 的 `instructionFiles`：`bots.instruction_files`，沒設或不在 CLI 選項裡就是釘住的 `claude-md`。
+fn instruction_files_of(bot: &db::Bot) -> &'static str {
+    crate::config::effective_instruction_files(bot.instruction_files.as_deref())
 }
 
 
@@ -918,7 +929,7 @@ mod hook_cmd_parts_tests {
     /// 既有的兩個 hook 一個都不能掉，三個都指向同一支 hook 指令（分類在 daemon 裡做）。
     #[test]
     fn a_claude_bot_subscribes_to_stop_failure_as_well_as_stop() {
-        let v = claude_settings("/usr/bin/agents-managerd hook claude --bot b1", "/usr/bin/agents-managerd statusline", false);
+        let v = claude_settings("/usr/bin/agents-managerd hook claude --bot b1", "/usr/bin/agents-managerd statusline", false, "claude-md");
         let hooks = v.get("hooks").and_then(|h| h.as_object()).expect("hooks");
         let mut names: Vec<&String> = hooks.keys().collect();
         names.sort();
@@ -995,6 +1006,7 @@ mod model_args_tests {
             effort: effort.map(String::from),
             fast: fast as i64,
             persona: None,
+            instruction_files: None,
             args_json: "[]".into(),
             autostart: 0,
             inject_hooks: 1,
@@ -1604,9 +1616,9 @@ mod claude_settings_tests {
     /// 現在每顆 bot 的設定檔都明講，且只有自己 argv 要求過才是 true。
     #[test]
     fn remote_control_is_stated_per_bot_not_inherited_from_the_account() {
-        let off = claude_settings("hook", "sl", false);
+        let off = claude_settings("hook", "sl", false, "claude-md");
         assert_eq!(off["remoteControlAtStartup"], json!(false));
-        let on = claude_settings("hook", "sl", true);
+        let on = claude_settings("hook", "sl", true, "claude-md");
         assert_eq!(on["remoteControlAtStartup"], json!(true));
         for v in [&off, &on] {
             assert_eq!(v["statusLine"]["command"], "sl");
@@ -1625,7 +1637,7 @@ mod claude_settings_tests {
     #[test]
     fn managed_panes_do_not_let_claude_auto_continue_past_a_usage_limit() {
         for wants_remote in [false, true] {
-            let v = claude_settings("hook", "sl", wants_remote);
+            let v = claude_settings("hook", "sl", wants_remote, "claude-md");
             assert_eq!(v["autoContinueAtUsageLimit"], json!(false), "wants_remote={wants_remote}");
         }
     }
@@ -1636,25 +1648,28 @@ mod claude_settings_tests {
     #[test]
     fn managed_panes_do_not_sync_skills_or_plugins_from_the_claude_ai_account() {
         for wants_remote in [false, true] {
-            let v = claude_settings("hook", "sl", wants_remote);
+            let v = claude_settings("hook", "sl", wants_remote, "claude-md");
             assert_eq!(v["syncClaudeAiSkills"], json!(false), "wants_remote={wants_remote}");
             assert_eq!(v["syncClaudeAiPlugins"], json!(false), "wants_remote={wants_remote}");
         }
     }
 
-    /// issue #206：claude 2.1.277 起，沒有 CLAUDE.md 的專案會改讀 AGENTS.md（寫給同一個 project 裡 codex bot 的那份）。
-    /// managed pane 讀哪份指示檔由 daemon 釘住：`agents-md` plugin 的 `instructionFiles` 固定 `claude-md`，值必須是 CLI 認得的
-    /// 那幾個之一——認不得的值 CLI 會退回預設（`claude-md-or-agents-md`），等於沒釘。
+    /// issue #206／#213：claude 2.1.277 起，沒有 CLAUDE.md 的專案會改讀 AGENTS.md（寫給同一個 project 裡 codex bot 的那份）。
+    /// managed pane 讀哪份指示檔由 daemon 決定：`agents-md` plugin 的 `instructionFiles` 寫這顆 bot 的值，值必須是 CLI 認得的
+    /// 那幾個之一——認不得的值 CLI 會退回預設（`claude-md-or-agents-md`），等於沒釘。沒設的 bot 是 `claude-md`
+    /// （bot 這一層的接線與預設值由 `api.rs` 的 `instruction_files_tests` 從建 bot 一路驗到 `--settings` 檔）。
     #[test]
-    fn managed_panes_pin_the_project_instructions_to_claude_md() {
+    fn managed_panes_write_the_instruction_files_they_are_given() {
         // 2.1.277／2.1.278 binary 裡 `instructionFiles` 的 options。
         const KNOWN: [&str; 4] = ["claude-md", "claude-md-or-agents-md", "claude-md-and-agents-md", "managed-only"];
         for wants_remote in [false, true] {
-            let v = claude_settings("hook", "sl", wants_remote);
-            let options = &v["pluginConfigs"]["agents-md@builtin"]["options"];
-            assert_eq!(options["instructionFiles"], json!("claude-md"), "wants_remote={wants_remote}");
-            assert!(KNOWN.contains(&options["instructionFiles"].as_str().unwrap()));
-            assert!(options.get("projectInstructions").is_none(), "舊選項不寫：新版兩個都有時會在畫面上提示一行 (wants_remote={wants_remote})");
+            for want in KNOWN {
+                let v = claude_settings("hook", "sl", wants_remote, want);
+                let options = &v["pluginConfigs"]["agents-md@builtin"]["options"];
+                assert_eq!(options["instructionFiles"], json!(want), "wants_remote={wants_remote}");
+                assert!(KNOWN.contains(&options["instructionFiles"].as_str().unwrap()));
+                assert!(options.get("projectInstructions").is_none(), "舊選項不寫：新版兩個都有時會在畫面上提示一行 (wants_remote={wants_remote})");
+            }
         }
     }
 
@@ -1662,7 +1677,7 @@ mod claude_settings_tests {
     /// 一樣——`hook_cmd.rs` 是通用轉發，不分事件名字（`payload comes from stdin`），不需要另外的旗標。
     #[test]
     fn subagent_lifecycle_hooks_are_registered_on_the_same_command() {
-        let v = claude_settings("hook", "sl", false);
+        let v = claude_settings("hook", "sl", false, "claude-md");
         for event in ["SubagentStart", "SubagentStop"] {
             assert_eq!(v["hooks"][event][0]["hooks"][0]["command"], "hook", "{event}");
         }
@@ -1672,7 +1687,7 @@ mod claude_settings_tests {
     /// Read／Edit／Grep 這些跟子 pane 完全無關的呼叫也送進 daemon，白白增加流量。
     #[test]
     fn post_tool_use_only_matches_the_bash_tool() {
-        let v = claude_settings("hook", "sl", false);
+        let v = claude_settings("hook", "sl", false, "claude-md");
         assert_eq!(v["hooks"]["PostToolUse"][0]["matcher"], json!("Bash"));
         assert_eq!(v["hooks"]["PostToolUse"][0]["hooks"][0]["command"], "hook");
     }

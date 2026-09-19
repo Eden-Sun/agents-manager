@@ -1482,6 +1482,7 @@ export const useStore = create<StoreState>((set, get) => ({
         effort: bot.effort,
         fast: bot.fast,
         persona: bot.persona,
+        instruction_files: bot.instruction_files,
         identity: bot.identity,
         env: bot.env,
         autostart: bot.autostart,

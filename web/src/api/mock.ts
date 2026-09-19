@@ -125,6 +125,8 @@ interface MockBot {
   effort: string | null
   fast: number
   persona: string | null
+  /** claude only（issue #213）；null = 沒設＝`claude-md`。 */
+  instruction_files: string | null
   args_json: string
   autostart: number
   inject_hooks: number
@@ -509,6 +511,7 @@ export class MockTransport implements Transport {
       effort: null,
       fast: 0,
       persona: '你是 agents-manager 的 PM。回覆用繁體中文，先給結論再列理由；改動前先說明影響範圍。',
+      instruction_files: null,
       args_json: '[]',
       autostart: 1,
       inject_hooks: 1,
@@ -529,6 +532,7 @@ export class MockTransport implements Transport {
       effort: null,
       fast: 0,
       persona: null,
+      instruction_files: null,
       args_json: '[]',
       autostart: 0,
       inject_hooks: 1,
@@ -548,6 +552,7 @@ export class MockTransport implements Transport {
       effort: null,
       fast: 0,
       persona: null,
+      instruction_files: null,
       args_json: '[]',
       autostart: 0,
       inject_hooks: 1,
@@ -567,6 +572,7 @@ export class MockTransport implements Transport {
       effort: null,
       fast: 0,
       persona: null,
+      instruction_files: null,
       args_json: '[]',
       autostart: 0,
       inject_hooks: 1,
@@ -2027,6 +2033,7 @@ export class MockTransport implements Transport {
               effort: b.effort,
               fast: b.fast === 1,
               persona: b.persona,
+              instruction_files: b.kind === 'claude' ? (b.instruction_files ?? 'claude-md') : null,
               args: JSON.parse(b.args_json) as string[],
               autostart: b.autostart === 1,
               inject_hooks: b.inject_hooks === 1,
@@ -2115,6 +2122,7 @@ export class MockTransport implements Transport {
       effort: typeof b.effort === 'string' && b.effort.trim() ? b.effort.trim() : null,
       fast: b.fast === true ? 1 : 0,
       persona: typeof b.persona === 'string' && b.persona.trim() ? b.persona.trim() : null,
+      instruction_files: toKind(b.kind) === 'claude' && typeof b.instruction_files === 'string' && b.instruction_files.trim() ? b.instruction_files.trim() : null,
       args_json: JSON.stringify(Array.isArray(b.args) ? b.args : []),
       autostart: b.autostart ? 1 : 0,
       inject_hooks: 1,
@@ -2160,6 +2168,7 @@ export class MockTransport implements Transport {
       effort: src.effort,
       fast: src.fast === 1,
       persona: src.persona,
+      instruction_files: src.instruction_files,
       args: JSON.parse(src.args_json) as unknown,
       identity: src.identity,
       env: JSON.parse(src.env_json) as unknown,
@@ -2236,13 +2245,14 @@ export class MockTransport implements Transport {
     }
     if (b.fast !== undefined) bot.fast = b.fast ? 1 : 0
     if (b.persona !== undefined) bot.persona = typeof b.persona === 'string' && b.persona.trim() ? b.persona.trim() : null
+    if (b.instruction_files !== undefined) bot.instruction_files = typeof b.instruction_files === 'string' && b.instruction_files.trim() ? b.instruction_files.trim() : null
     if (b.autostart !== undefined) bot.autostart = b.autostart ? 1 : 0
     if (b.auto_approve !== undefined) bot.auto_approve = b.auto_approve ? 1 : 0
     if (b.inject_hooks !== undefined) bot.inject_hooks = b.inject_hooks ? 1 : 0
     if (b.primary !== undefined) bot.is_primary = b.primary ? 1 : 0
     this.emit('bot_changed', { bot_id: id })
     // API.md §10.2: 只有影響啟動 argv / env 的欄位才需要重啟。
-    const LAUNCH_FIELDS = ['model', 'effort', 'fast', 'persona', 'args', 'identity', 'env', 'auto_approve', 'inject_hooks']
+    const LAUNCH_FIELDS = ['model', 'effort', 'fast', 'persona', 'instruction_files', 'args', 'identity', 'env', 'auto_approve', 'inject_hooks']
     let needs_restart = run !== undefined && LAUNCH_FIELDS.some((k) => b[k] !== undefined)
     // 同 daemon `apply_live_setting`：slash 指令當場套用；清成 CLI 預設沒有對應指令。
     const only = (...fields: string[]) =>

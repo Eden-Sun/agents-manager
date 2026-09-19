@@ -3,6 +3,12 @@
 export type BotKind = 'claude' | 'codex' | 'grok'
 /** SPEC §12 */
 export const BOT_KINDS: readonly BotKind[] = ['claude', 'codex', 'grok']
+
+/** claude 2.1.277+ 內建 `agents-md` plugin 的 `instructionFiles`（API.md §10）：這顆 claude bot 讀哪份專案指示檔。順序 = 面板上的順序。 */
+export const INSTRUCTION_FILES = ['claude-md', 'claude-md-or-agents-md', 'claude-md-and-agents-md', 'managed-only'] as const
+export type InstructionFiles = (typeof INSTRUCTION_FILES)[number]
+/** daemon 沒設時釘的值（跟 2.1.277 以前一樣只讀 CLAUDE.md）。 */
+export const INSTRUCTION_FILES_DEFAULT: InstructionFiles = 'claude-md'
 export type RunState = 'starting' | 'running' | 'stopping' | 'stopped' | 'exited'
 export type AgentStatus = 'idle' | 'working' | 'blocked' | 'unknown'
 export type TurnStatus = 'queued' | 'in_flight' | 'completed' | 'completed_fallback' | 'failed'
@@ -188,6 +194,8 @@ export interface Bot {
   fast: boolean
   /** system prompt 前置文字，null = 無 */
   persona: string | null
+  /** claude 才有：這顆 bot 現在讀哪份專案指示檔（沒設＝`claude-md`）；codex／grok 或舊 daemon 沒有這欄＝null。 */
+  instruction_files: InstructionFiles | null
   args: string[]
   autostart: boolean
   /** false = no hook injection (terminal-fallback path) */
@@ -560,6 +568,8 @@ export interface NewBotInput {
   env?: Record<string, string>
   fast?: boolean
   persona?: string | null
+  /** claude 才收；`null` / 省略 = `claude-md`。 */
+  instruction_files?: InstructionFiles | null
 }
 
 /** API.md v3.3：只送有變更的欄位；`null` 代表清除。 */
@@ -575,6 +585,8 @@ export interface PatchBotInput {
   env?: Record<string, string>
   fast?: boolean
   persona?: string | null
+  /** claude user bot 才收；`null` 清回 `claude-md`。要重啟才讀到新值。 */
+  instruction_files?: InstructionFiles | null
   /** 純顯示，`needs_restart` 一定是 false */
   primary?: boolean
 }

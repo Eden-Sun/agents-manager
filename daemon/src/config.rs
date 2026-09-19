@@ -145,6 +145,10 @@ pub struct BotCfg {
     /// Appended to the system prompt; never touches CLAUDE.md / AGENTS.md.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub persona: Option<String>,
+    /// claude only: which project instruction files the CLI reads (`agents-md` plugin's `instructionFiles`, issue #213).
+    /// None = [`INSTRUCTION_FILES_DEFAULT`] — the daemon pins it, it never falls back to the CLI's own default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instruction_files: Option<String>,
     #[serde(default)]
     pub args: Vec<String>,
     #[serde(default)]
@@ -530,6 +534,33 @@ pub fn normalize_effort(kind: &str, e: Option<&str>) -> Result<Option<String>, S
     }
 }
 
+/// The `instructionFiles` values claude 2.1.277+ accepts (issue #213, read off the 2.1.277／2.1.278 binary's option list).
+/// A value outside this list makes the CLI read it as *its* default (`claude-md-or-agents-md`) — silently unpinned — so nothing
+/// the daemon writes into `--settings` may come from anywhere but this list.
+pub const INSTRUCTION_FILES: [&str; 4] = ["claude-md", "claude-md-or-agents-md", "claude-md-and-agents-md", "managed-only"];
+/// What a claude bot reads when nothing is set: CLAUDE.md only, the behaviour before claude 2.1.277 (issue #206).
+pub const INSTRUCTION_FILES_DEFAULT: &str = "claude-md";
+
+/// `bots.instruction_files` → the value the daemon writes. Anything unset, blank or not in [`INSTRUCTION_FILES`]
+/// (a hand-edited TOML) gives the default, never the CLI's.
+pub fn effective_instruction_files(v: Option<&str>) -> &'static str {
+    let v = v.map(str::trim).unwrap_or_default();
+    INSTRUCTION_FILES.iter().copied().find(|k| *k == v).unwrap_or(INSTRUCTION_FILES_DEFAULT)
+}
+
+/// Blank / null = unset (`Ok(None)`); only claude has this switch, and only the values in [`INSTRUCTION_FILES`].
+pub fn normalize_instruction_files(kind: &str, v: Option<&str>) -> Result<Option<String>, String> {
+    let Some(v) = v.map(str::trim).filter(|s| !s.is_empty()) else { return Ok(None) };
+    if kind != "claude" {
+        return Err(format!("instruction_files is only for claude bots (this one is {kind})"));
+    }
+    if INSTRUCTION_FILES.contains(&v) {
+        Ok(Some(v.to_string()))
+    } else {
+        Err(format!("instruction_files must be one of {}", INSTRUCTION_FILES.join(", ")))
+    }
+}
+
 pub fn attach_command(host: Option<&HostCfg>, local_session: &str) -> String {
     match host {
         None => format!("herdr --session {local_session}"),
@@ -808,6 +839,53 @@ mod v40_tests {
         assert!(normalize_effort("claude", Some("ultracode")).is_err());
         assert_eq!(normalize_effort("codex", Some("")).unwrap(), None);
         assert_eq!(normalize_effort("codex", None).unwrap(), None);
+    }
+}
+
+#[cfg(test)]
+mod instruction_files_tests {
+    use super::{effective_instruction_files, normalize_instruction_files, INSTRUCTION_FILES, INSTRUCTION_FILES_DEFAULT};
+
+    /// claude 2.1.277／2.1.278 binary 裡 `agents-md` plugin 的 `instructionFiles` options（`strings` 讀出來的那個陣列）。
+    /// CLI 換名或增減值時要照 binary 改這一份，再改 `INSTRUCTION_FILES`。
+    const BINARY_OPTIONS: [&str; 4] = ["claude-md", "claude-md-or-agents-md", "claude-md-and-agents-md", "managed-only"];
+
+    #[test]
+    fn the_allowed_values_are_the_binarys_options() {
+        assert_eq!(INSTRUCTION_FILES, BINARY_OPTIONS);
+        assert!(BINARY_OPTIONS.contains(&INSTRUCTION_FILES_DEFAULT));
+    }
+
+    #[test]
+    fn unset_or_unknown_is_the_pinned_default_never_the_clis() {
+        assert_eq!(effective_instruction_files(None), "claude-md");
+        assert_eq!(effective_instruction_files(Some("")), "claude-md");
+        assert_eq!(effective_instruction_files(Some("  ")), "claude-md");
+        // 手改 TOML 寫錯：寫進 --settings 的話 CLI 會退回它自己的預設（改讀 AGENTS.md），所以在這裡就擋回釘住的值。
+        assert_eq!(effective_instruction_files(Some("agents-md")), "claude-md");
+        assert_eq!(effective_instruction_files(Some("Claude-MD-And-Agents-MD")), "claude-md");
+        for v in BINARY_OPTIONS {
+            assert_eq!(effective_instruction_files(Some(v)), v);
+            assert_eq!(effective_instruction_files(Some(&format!(" {v} "))), v);
+        }
+    }
+
+    #[test]
+    fn only_claude_takes_a_value_and_only_a_known_one() {
+        for v in BINARY_OPTIONS {
+            assert_eq!(normalize_instruction_files("claude", Some(v)).unwrap(), Some(v.to_string()));
+        }
+        assert_eq!(normalize_instruction_files("claude", Some(" managed-only ")).unwrap(), Some("managed-only".into()));
+        assert_eq!(normalize_instruction_files("claude", None).unwrap(), None);
+        assert_eq!(normalize_instruction_files("claude", Some(" ")).unwrap(), None);
+        assert!(normalize_instruction_files("claude", Some("agents-md")).is_err());
+        assert!(normalize_instruction_files("claude", Some("claude")).is_err(), "2.1.276 的舊值不能寫進新選項");
+        // 沒有這個 plugin 的 kind：帶值就拒，清成空才放行。
+        for kind in ["codex", "grok"] {
+            assert!(normalize_instruction_files(kind, Some("claude-md")).is_err(), "{kind}");
+            assert_eq!(normalize_instruction_files(kind, None).unwrap(), None);
+            assert_eq!(normalize_instruction_files(kind, Some("")).unwrap(), None);
+        }
     }
 }
 

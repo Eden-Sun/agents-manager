@@ -26,6 +26,8 @@ CREATE TABLE IF NOT EXISTS bots (
   effort TEXT,
   fast INTEGER NOT NULL DEFAULT 0,
   persona TEXT,
+  -- claude only（issue #213）：讀哪份專案指示檔（`agents-md` plugin 的 `instructionFiles`）。NULL＝daemon 釘的預設 `claude-md`。
+  instruction_files TEXT,
   args_json TEXT NOT NULL DEFAULT '[]', autostart INTEGER NOT NULL DEFAULT 0,
   inject_hooks INTEGER NOT NULL DEFAULT 1,
   auto_approve INTEGER NOT NULL DEFAULT 1,
@@ -158,7 +160,11 @@ CREATE TABLE IF NOT EXISTS spawn_hints (
 ///
 /// 1～4 版在指紋之前。4 版之後又改過子模組 schema 卻沒升（`supervisor_approvals.request_reason`、
 /// `release_triage` 表），同樣記著 4 的 DB 長相不一，所以從 5 開始釘。
-const SCHEMA_HISTORY: &[(i64, &str)] = &[(5, "519fd4f808b8ac5b")];
+const SCHEMA_HISTORY: &[(i64, &str)] = &[
+    (5, "519fd4f808b8ac5b"),
+    // issue #213：`bots.instruction_files`（claude bot 讀哪份專案指示檔）。
+    (6, "f75ac921663299da"),
+];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
 /// 裝一個 trigger，DB 裡那一份跟 `ddl` 不同就換掉（issue #186）。
@@ -298,6 +304,8 @@ async fn apply_migrations(pool: &SqlitePool) -> Result<()> {
         ("runs", "subagent_json", "ALTER TABLE runs ADD COLUMN subagent_json TEXT"),
         // `resume_native` 的結論（issue #92）；見 SCHEMA 那一欄的說明與 `lifecycle::resume_gate`。
         ("runs", "resume_outcome", "ALTER TABLE runs ADD COLUMN resume_outcome TEXT"),
+        // claude bot 讀哪份專案指示檔（issue #213）；舊列 NULL＝釘在 `claude-md`，跟加這一欄之前一樣。
+        ("bots", "instruction_files", "ALTER TABLE bots ADD COLUMN instruction_files TEXT"),
     ] {
         if !has_column(&mut *tx, table, col).await? {
             sqlx::query(ddl).execute(&mut *tx).await.with_context(|| format!("add {table}.{col}"))?;
@@ -488,6 +496,8 @@ pub struct Bot {
     pub fast: i64,
     /// Appended to the agent's system prompt.
     pub persona: Option<String>,
+    /// claude only: `agents-md` plugin's `instructionFiles`. NULL = `config::INSTRUCTION_FILES_DEFAULT`.
+    pub instruction_files: Option<String>,
     pub args_json: String,
     pub autostart: i64,
     pub inject_hooks: i64,
@@ -1120,6 +1130,30 @@ mod tests {
         assert!(has_column(&pool, "turns", "delivered_at").await.unwrap(), "開的時候補上");
         let t = sqlx::query_as::<_, Turn>("SELECT * FROM turns WHERE id='t'").fetch_one(&pool).await.unwrap();
         assert_eq!(t.delivered_at, None, "舊列沒有送出時間：重啟補 watchdog 退回看 created_at");
+        pool.close().await;
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// schema 變更（additive）`bots.instruction_files`（issue #213）：沒有這一欄的舊 DB 開起來會補上，舊列是 NULL
+    /// （＝daemon 釘的 `claude-md`），`SELECT *` 照樣讀得進 `Bot`。少了這條 ALTER，`check_schema_drift` 會讓 daemon 起不來。
+    #[tokio::test]
+    async fn an_old_database_gains_bots_instruction_files_on_open() {
+        let dir = std::env::temp_dir().join(format!("am-instruction-files-{}", ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("old.sqlite3");
+        {
+            let pool = open(&path).await.unwrap();
+            sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES ('p','/tmp','p',?)").bind(now()).execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('b','p','b','claude','t',?)").bind(now()).execute(&pool).await.unwrap();
+            // 做成上一版的形狀：這一欄還不存在。
+            sqlx::query("ALTER TABLE bots DROP COLUMN instruction_files").execute(&pool).await.unwrap();
+            assert!(!has_column(&pool, "bots", "instruction_files").await.unwrap());
+            pool.close().await;
+        }
+        let pool = open(&path).await.expect("舊 DB 照常開起來");
+        assert!(has_column(&pool, "bots", "instruction_files").await.unwrap(), "開的時候補上");
+        let b = bot(&pool, "b").await.unwrap().expect("舊列還在");
+        assert_eq!(b.instruction_files, None, "舊列沒有設定：釘在預設 claude-md");
         pool.close().await;
         std::fs::remove_dir_all(&dir).unwrap();
     }

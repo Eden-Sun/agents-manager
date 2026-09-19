@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import type { BotKind, IdentityStatus, PatchBotInput } from '../api/types'
+import { INSTRUCTION_FILES_DEFAULT, type BotKind, type IdentityStatus, type InstructionFiles, type PatchBotInput } from '../api/types'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { useDialogFocus } from '../hooks/useDialogFocus'
 import { enabledIdentities, identitiesOfHost, identityStatusOfHost, projectHostName, useStore } from '../store/store'
@@ -8,7 +8,7 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { CopyChip } from './CopyChip'
 import { KindTag } from './KindTag'
 import { ApiModelFields } from './ModelPicker'
-import { computeBotPatch, effectiveForm, type BotFormKey } from './botSettingsForm'
+import { computeBotPatch, effectiveForm, INSTRUCTION_FILES_CHOICES, type BotFormKey } from './botSettingsForm'
 import './botSettings.css'
 
 /**
@@ -215,6 +215,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
   /** 人設預設收起，已有人設才勾著（2026-09-13 使用者）。 */
   const [personaOn, setPersonaOn] = useState(Boolean(bot?.persona))
   const [identity, setIdentity] = useState(bot?.identity ?? '')
+  const [instructionFiles, setInstructionFiles] = useState<InstructionFiles>(bot?.instruction_files ?? INSTRUCTION_FILES_DEFAULT)
   /** 沒動過的欄位跟著 store 走，別處改了 model／effort 時不會被開啟當下的舊值蓋回去。 */
   const [touched, setTouched] = useState<ReadonlySet<BotFormKey>>(() => new Set())
   const touch = (k: BotFormKey) =>
@@ -315,6 +316,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
     setPersona(b.persona ?? '')
     setPersonaOn(Boolean(b.persona))
     setIdentity(b.identity ?? '')
+    setInstructionFiles(b.instruction_files ?? INSTRUCTION_FILES_DEFAULT)
     setTouched(new Set())
     setSaved({})
     setBanner(null)
@@ -350,9 +352,12 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
     fast: 'fast' in saved ? Boolean(saved.fast) : bot.fast,
     persona: 'persona' in saved ? saved.persona ?? null : bot.persona,
     identity: 'identity' in saved ? saved.identity ?? null : bot.identity,
+    // `null` = 沒有這一格（codex／grok、舊 daemon）；存過的話 `saved` 的 null 是「清回預設」。
+    instruction_files:
+      bot.instruction_files === null ? null : 'instruction_files' in saved ? (saved.instruction_files ?? INSTRUCTION_FILES_DEFAULT) : bot.instruction_files,
   }
 
-  const form = effectiveForm(base, { name, model, effort, fast, persona, identity }, touched)
+  const form = effectiveForm(base, { name, model, effort, fast, persona, identity, instruction_files: instructionFiles }, touched)
   const patch: PatchBotInput = computeBotPatch(base, form, touched, bot.kind)
   const changedKeys = Object.keys(patch)
   const dirty = changedKeys.length > 0
@@ -562,6 +567,34 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
               </span>
             </div>
           )}
+          {/* 只有 claude 有；child bot 不是 daemon 帶 --settings 起的，daemon 會拒，所以不顯示。 */}
+          {bot.kind === 'claude' && bot.managed_by === 'user' && base.instruction_files !== null ? (
+            <div className="field instruction-files-field">
+              <span>專案指示檔</span>
+              <div className="opt-group" role="radiogroup" aria-label="專案指示檔">
+                {INSTRUCTION_FILES_CHOICES.map((c) => (
+                  <button
+                    key={c.value}
+                    type="button"
+                    role="radio"
+                    aria-checked={form.instruction_files === c.value}
+                    className={`opt${form.instruction_files === c.value ? ' on' : ''}`}
+                    title={c.hint}
+                    onClick={() => {
+                      touch('instruction_files')
+                      setInstructionFiles(c.value)
+                    }}
+                  >
+                    {c.label}
+                  </button>
+                ))}
+              </div>
+              <span className="hint">
+                {INSTRUCTION_FILES_CHOICES.find((c) => c.value === form.instruction_files)?.hint}
+                改了要重啟 Bot 才會讀到。
+              </span>
+            </div>
+          ) : null}
           {/* 人設預設不勾（2026-09-13 使用者）；取消勾選＝清掉人設。 */}
           <label className="bs-persona-toggle">
             <input
