@@ -291,11 +291,15 @@ pub async fn watch_pane_on_session(app: &Arc<App>, host: &str, session: &str, pa
                 }
                 Err(e) => tracing::debug!(host = %hst, session = %sess, pane_id = %pid, error = %e, "pane status subscribe failed"),
             }
-            // Stop retrying once the run is no longer active.
-            let fallback = app2.session_for_host(&hst).await.unwrap_or_default();
-            let still = crate::db::active_runs_for_pane(&app2.db, &hst, &pid, &sess, &fallback).await.unwrap_or_default().len();
-            if still == 0 {
-                break;
+            // Stop retrying only once the run is *provably* no longer active (#244): a read error or an
+            // unknown session is not proof, so keep the watcher and retry after the backoff.
+            match app2.session_for_host(&hst).await {
+                None => tracing::warn!(host = %hst, pane_id = %pid, "watcher cannot tell the host's session; keeping it"),
+                Some(fallback) => match crate::db::active_runs_for_pane(&app2.db, &hst, &pid, &sess, &fallback).await {
+                    Ok(runs) if runs.is_empty() => break,
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(host = %hst, pane_id = %pid, error = ?e, "watcher cannot read the pane's runs; keeping it"),
+                },
             }
             tokio::time::sleep(backoff).await;
             backoff = (backoff * 2).min(Duration::from_secs(10));
@@ -567,6 +571,33 @@ mod tests {
 
     async fn watching(app: &Arc<App>, pane: &str) -> bool {
         app.pane_watchers.lock().await.contains_key(&(LOCAL_HOST.to_string(), "test".to_string(), pane.to_string()))
+    }
+
+    /// #244：訂閱掉線後的「還有沒有 active run」讀不到，以前當成 0 個、watcher 永久退出。現在不退；DB 好了它照樣在，run 真的結束才退。
+    #[tokio::test]
+    async fn a_watcher_whose_liveness_read_fails_keeps_watching() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let bot = tt::claude_bot(&app, &e.project_id, "watched").await;
+        let run = tt::fake_run(&app, &bot.id).await;
+        let pane = format!("pane-{}", bot.id);
+
+        tt::make_table_unreadable(&app, "runs").await;
+        watch_pane_on_session(&app, LOCAL_HOST, "test", &pane).await;
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(watching(&app, &pane).await, "讀不到 run 時 watcher 不能自己退出");
+        tt::make_table_readable(&app, "runs").await;
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(watching(&app, &pane).await, "run 還活著，watcher 仍在");
+
+        sqlx::query("UPDATE runs SET state='exited' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
+        for _ in 0..250 {
+            if !watching(&app, &pane).await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(!watching(&app, &pane).await, "確認 run 已結束才退出");
     }
 
     fn close_event(pane: &str) -> crate::herdr::Event {
