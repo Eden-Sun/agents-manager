@@ -761,3 +761,48 @@ test('daemon 帶了人話 message 的可重試錯誤（維護窗口、Esc 送出
   assert.match(noticeTexts()[0], /不知道進了沒有/)
   assert.doesNotMatch(noticeTexts()[0], /interrupt_unconfirmed/)
 })
+
+/**
+ * 連點：第一下撤回成功之後，第二下拿到 409（那一則已經是 failed）。以前 `cancelStartingSend`／`abandonTurn` 沒有防連點，
+ * 第二下的 409 被說成「撤不回來（可能已經送出）」／原始英文 409——而字明明已經接回輸入框。
+ */
+test('取消等 bot 起來的那一則連點兩下：只撤一次，不跳「撤不回來」', async () => {
+  seed()
+  useStore.setState({
+    runs: {},
+    turns: { b1: { t9: { id: 't9', status: 'queued', awaitsStart: true, startError: null } as never } },
+    messages: { b1: [{ id: 'm9', turn_id: 't9', role: 'user', content: '起來後幫我跑測試', attachments: [] } as never] },
+    drafts: {},
+  })
+  let withdrawn = 0
+  routeDaemon((req) => {
+    if (req.path.endsWith('/withdraw')) {
+      withdrawn += 1
+      // 第一下成功；那一則之後就是 failed，再撤回 409。回應慢一拍，第二下才來得及在第一下還沒回來時進場。
+      return withdrawn === 1 ? json({}, 200) : json({ error: 'conflict', reason: 'turn is not waiting for its bot to start' }, 409)
+    }
+    return json({ messages: [], turns: [], has_more: false }, 200)
+  })
+  await Promise.all([useStore.getState().cancelStartingSend('b1'), useStore.getState().cancelStartingSend('b1')])
+  assert.equal(withdrawn, 1, '第二下不該再送一次撤回')
+  assert.equal(useStore.getState().drafts['bot:b1'], '起來後幫我跑測試', '字接回一次，不重複')
+  assert.deepEqual(
+    noticeTexts().filter((t) => t.includes('撤不回來')),
+    [],
+  )
+})
+
+test('放棄未知送達的回合連點兩下：只放棄一次', async () => {
+  seed()
+  let abandoned = 0
+  routeDaemon((req) => {
+    if (req.path.endsWith('/abandon')) {
+      abandoned += 1
+      return abandoned === 1 ? json({}, 200) : json({ error: 'conflict', reason: 'turn is neither in-flight nor of unknown delivery' }, 409)
+    }
+    return json({ messages: [], turns: [], has_more: false }, 200)
+  })
+  await Promise.all([useStore.getState().abandonTurn('b1', 't1'), useStore.getState().abandonTurn('b1', 't1')])
+  assert.equal(abandoned, 1)
+  assert.deepEqual(noticeTexts(), [])
+})
