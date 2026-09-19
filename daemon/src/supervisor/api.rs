@@ -882,6 +882,10 @@ pub struct ApprovalIn {
     /// 同一個申請者換 commit 重新申請：舊的那筆標成 `superseded`，等待起點接過來（SPEC §18.10）。
     #[serde(default)]
     pub supersedes: Option<String>,
+    /// 申請理由：AGM 裁示時看的就是這段（2026-09-19：CLI 有 `--reason` 但根本沒送，三張申請
+    /// 都被當成「未附理由」駁回）。存在 `request_reason`，不會被裁示理由蓋掉。
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 fn iso_in(secs: i64) -> String {
@@ -903,6 +907,7 @@ pub async fn post_approval(State(app): State<Arc<App>>, Json(b): Json<ApprovalIn
         expires.as_deref(),
         b.request_id.as_deref(),
         b.supersedes.as_deref(),
+        b.reason.as_deref(),
     )
     .await
     .map_err(|e| match e.downcast::<store::ApprovalRequestMismatch>() {
@@ -1522,6 +1527,7 @@ mod approval_decision_tests {
     async fn resending_one_approval_request_id_returns_the_same_row() {
         let app = app().await;
         let ask = |rid: Option<&str>, commit: &str| ApprovalIn {
+            reason: None,
             requester: "k8bw2f".into(),
             purpose: "restart".into(),
             scope: "daemon".into(),

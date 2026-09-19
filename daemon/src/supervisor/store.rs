@@ -172,7 +172,11 @@ CREATE TABLE IF NOT EXISTS supervisor_approvals (
   status TEXT NOT NULL DEFAULT 'pending',
   decided_by TEXT,
   decided_at TEXT,
+  -- AGM **裁示**時寫的理由。申請時寫的那段在 `request_reason`：以前共用一欄，裁示一寫就把申請
+  -- 理由蓋掉，事後查「他當初為什麼要申請」只剩 deny 的那句（2026-09-19 實測）。
   reason TEXT,
+  -- 申請者寫的理由（`approval request --reason`）。
+  request_reason TEXT,
   expires_at TEXT,
   -- 呼叫端自己給的穩定 id：同一個 supervisor 下重送同一個 id 回原本那一筆（冪等）。NULL＝沒帶。
   client_request_id TEXT,
@@ -249,6 +253,10 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
     // 換 commit 接續的等待起點（見 `Approval::wait_since`）。表由上面的 DDL 保證存在。
     if !has_column(pool, "supervisor_approvals", "wait_since").await? {
         sqlx::query("ALTER TABLE supervisor_approvals ADD COLUMN wait_since TEXT").execute(pool).await?;
+    }
+    // 申請理由（2026-09-19）：舊庫沒有這一欄。
+    if !has_column(pool, "supervisor_approvals", "request_reason").await? {
+        sqlx::query("ALTER TABLE supervisor_approvals ADD COLUMN request_reason TEXT").execute(pool).await?;
     }
     // Additive columns for databases created before they existed (same pattern as `db::migrate`).
     for (col, ddl) in [
@@ -2244,6 +2252,9 @@ pub struct Approval {
     pub decided_by: Option<String>,
     pub decided_at: Option<String>,
     pub reason: Option<String>,
+    /// 申請者寫的理由（裁示理由在 `reason`，兩個分開存，裁示不會蓋掉申請時寫的那段）。
+    #[sqlx(default)]
+    pub request_reason: Option<String>,
     pub expires_at: Option<String>,
     /// 呼叫端給的穩定 id（`--request-id`）。重送同一個回原本那一筆，不新增。
     #[sqlx(default)]
@@ -2269,6 +2280,7 @@ impl Approval {
             "decided_by": self.decided_by,
             "decided_at": self.decided_at,
             "reason": self.reason,
+            "request_reason": self.request_reason,
             "expires_at": self.expires_at,
             "client_request_id": self.client_request_id,
             "wait_since": self.wait_since,
@@ -2351,7 +2363,7 @@ pub async fn create_approval(
     expires_at: Option<&str>,
     request_id: Option<&str>,
 ) -> Result<ApprovalOutcome> {
-    create_approval_superseding(pool, requester, purpose, scope, target_commit, expires_at, request_id, None).await
+    create_approval_superseding(pool, requester, purpose, scope, target_commit, expires_at, request_id, None, None).await
 }
 
 /// 同上，外加 `supersedes`：**同一個申請者、同一種用途**換 commit 重新申請時，把舊的那筆
@@ -2367,8 +2379,11 @@ pub async fn create_approval_superseding(
     expires_at: Option<&str>,
     request_id: Option<&str>,
     supersedes: Option<&str>,
+    // 申請者寫的理由（`approval request --reason`）。AGM 裁示時看的就是這段。
+    request_reason: Option<&str>,
 ) -> Result<ApprovalOutcome> {
     let request_id = request_id.map(str::trim).filter(|s| !s.is_empty());
+    let request_reason = request_reason.map(str::trim).filter(|s| !s.is_empty());
     if let Some(rid) = request_id {
         if let Some(existing) = approval_by_request(pool, rid).await? {
             // 已經被裁示的也回它本人：重送的人要看到的是「這件事已經有裁示了」，不是再開一筆。
@@ -2429,8 +2444,8 @@ pub async fn create_approval_superseding(
     }
     let insert = sqlx::query(
         "INSERT INTO supervisor_approvals
-           (id, supervisor_id, requester, purpose, scope, target_commit, status, expires_at, client_request_id, wait_since, created_at, updated_at)
-         VALUES (?,?,?,?,?,?, 'pending', ?, ?, ?, ?, ?)",
+           (id, supervisor_id, requester, purpose, scope, target_commit, status, expires_at, client_request_id, request_reason, wait_since, created_at, updated_at)
+         VALUES (?,?,?,?,?,?, 'pending', ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(SUPERVISOR_ID)
@@ -2440,6 +2455,7 @@ pub async fn create_approval_superseding(
     .bind(target_commit)
     .bind(expires_at)
     .bind(request_id)
+    .bind(request_reason)
     .bind(&wait_since)
     .bind(&now)
     .bind(&now)

@@ -144,6 +144,22 @@ pub async fn existing_for(app: &Arc<App>, to: &str) -> anyhow::Result<Option<cra
     crate::supervisor::store::assignment_by_crid(&app.db, &request_id(to)).await
 }
 
+/// 同一個 `client_request_id` 已經進過 AGM 的收件匣了嗎（kick 是**透過協調者的收件匣**派的，
+/// 那一步還沒建成 assignment）。
+///
+/// 2026-09-19 上線後實測：按鈕回 409 `request_mismatch`——crid 被 18:27 那次 kick 的 bot_request
+/// 佔住，正文不同（我們多一句「使用者按了…」）所以指紋對不上。對使用者來說那就是「已經派過」，
+/// 不是錯誤，所以這裡也要算進去。
+pub async fn inbox_event_for(app: &Arc<App>, to: &str) -> Option<String> {
+    let like = format!("%:crid:{}", request_id(to));
+    sqlx::query_scalar::<_, String>("SELECT id FROM supervisor_inbox WHERE event_key LIKE ? ORDER BY created_at DESC LIMIT 1")
+        .bind(like)
+        .fetch_optional(&app.db)
+        .await
+        .ok()
+        .flatten()
+}
+
 /// 同一版只派一次的識別碼（跟 kick 用同一個格式，兩邊撞到就是同一筆）。
 pub fn request_id(to: &str) -> String {
     format!("agm-claude-release-{to}")
@@ -178,6 +194,16 @@ pub async fn post_review(State(app): State<Arc<App>>, Json(b): Json<ReviewIn>) -
     // `post_assignment` 對「同一個 crid、不同正文」是 409 `text_mismatch`，而 kick 與這顆按鈕的正文
     // 本來就差一句觸發來源——不短路的話，kick 先派過再按按鈕會變成錯誤，而不是「已經派過」
     // （協調者 2026-09-19）。
+    if let Some(event_id) = inbox_event_for(&app, &to).await {
+        // kick 已經透過收件匣派過這一版：還沒有 assignment 可回，但對使用者就是「已經派過」。
+        return Ok(Json(json!({
+            "version": to,
+            "from_version": reply.from_version,
+            "inbox_event_id": event_id,
+            "duplicate": true,
+            "sections": reply.sections.len(),
+        })));
+    }
     if let Some(a) = existing_for(&app, &to).await.map_err(|e| LcError::Upstream(e.to_string()))? {
         return Ok(Json(json!({
             "version": to,
@@ -344,6 +370,24 @@ mod tests {
         .await
         .unwrap_err();
         assert!(format!("{err:?}").contains("text_mismatch"), "{err:?}");
+    }
+
+    /// kick 是透過**協調者的收件匣**派的，那一步還沒有 assignment：同一個 crid 已經在收件匣裡時，
+    /// 按鈕要回 duplicate，而不是撞上 bot_requests 的 409 request_mismatch（2026-09-19 上線後實測）。
+    #[tokio::test]
+    async fn a_version_already_in_the_inbox_counts_as_a_duplicate() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        assert!(inbox_event_for(&app, "2.1.277").await.is_none(), "還沒派過");
+
+        let key = crate::supervisor::bot_requests::event_key("kick", Some(&request_id("2.1.277")), "fp-1", 0);
+        let id = crate::supervisor::store::push_inbox(&app.db, &key, "bot_request", None, Some("kick"), None, &json!({"fingerprint": "fp-1"}))
+            .await
+            .unwrap()
+            .expect("收件匣裡要有這一筆");
+        assert_eq!(inbox_event_for(&app, "2.1.277").await.as_deref(), Some(id.as_str()));
+        // 別的版本不受影響。
+        assert!(inbox_event_for(&app, "2.1.278").await.is_none());
     }
 
     /// 巡檢絕不會被選成目標；誰都沒設時回 `None`（呼叫端據此回 409）。
