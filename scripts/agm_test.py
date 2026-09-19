@@ -747,6 +747,24 @@ class MiscCommandTest(CliCase):
         self.assertEqual(self.ok("approval", "list", "--id", "ap-1")["approvals"][0]["status"], "approved")
         self.assertEqual([r["path"] for r in FakeDaemon.seen if r["method"] == "GET"][-1], "/api/supervisor/approvals?id=ap-1")
 
+    def test_release_triage_submit_show_dispatched(self):
+        FakeDaemon.routes["POST /api/release-triage/verdicts"] = (200, {"status": "judged"})
+        FakeDaemon.routes["GET /api/release-triage"] = (200, {"rows": []})
+        FakeDaemon.routes["POST /api/release-triage/dispatched"] = (200, {"dispatched": 2})
+        f = Path(self.dir.name) / "verdicts.json"
+        f.write_text(json.dumps({"kind": "claude", "version": "2.1.277", "verdicts": [], "issues": []}), encoding="utf-8")
+        self.assertEqual(self.ok("release-triage", "submit", "--file", str(f))["status"], "judged")
+        posted = [r["body"] for r in FakeDaemon.seen if r["path"] == "/api/release-triage/verdicts"][-1]
+        self.assertEqual((posted["kind"], posted["version"]), ("claude", "2.1.277"))
+        self.ok("release-triage", "show", "--kind", "claude", "--version", "2.1.277")
+        self.assertEqual([r["path"] for r in FakeDaemon.seen if r["method"] == "GET"][-1], "/api/release-triage?kind=claude&version=2.1.277")
+        out = self.ok("release-triage", "dispatched", "--kind", "claude", "--version", "2.1.277", "--version", "2.1.278")
+        self.assertEqual(out["dispatched"], 2)
+        self.assertEqual([r["body"] for r in FakeDaemon.seen if r["path"] == "/api/release-triage/dispatched"][-1]["versions"], ["2.1.277", "2.1.278"])
+        self.assertEqual(self.bad("release-triage", "submit")["error"], "bad_args")
+        f.write_text("not json", encoding="utf-8")
+        self.assertEqual(self.bad("release-triage", "submit", "--file", str(f))["error"], "bad_args")
+
     def test_supervisor_actions(self):
         for act in ("setup", "start", "stop", "fallback"):
             FakeDaemon.routes[f"POST /api/supervisor/{act}"] = (200, {"status": act})

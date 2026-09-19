@@ -1301,6 +1301,20 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
   "source_url": "https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md", "error": null }
 ```
 
+## 上游新版分診 `/api/release-triage/*`（SPEC §18.2c，issue #204）
+
+CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>] --json`（抓 feed、切條、分桶、寫帳本；抓不到 exit 1）輸出
+`{"kind","from","to","pending":[{"version","kept":[{"id","text","categories":[]}],"unmatched":[{"id","text"}],"dropped_count"}]}`，`pending` 舊版在前。
+
+- `GET /api/release-triage?kind=&version=` → `{publish_enabled, repo, rows:[{kind,version,status,entries:[{id,text,bucket,categories,rules}],verdicts,issues:[{marker,entry_ids,number,url,created_at,comment}],dispatched_at,attempts,publish_error,created_at,updated_at}]}`，新版在前；`status`：`pending|dispatched|judged|published|empty|failed`。
+- `POST /api/release-triage/dispatched {kind, versions[]}` → `{kind, dispatched}`。`pending` → `dispatched`（CAS，同一版不被下一輪再派）。
+- `POST /api/release-triage/verdicts {kind, version, verdicts:[{entry_id, verdict:guard|adopt|upgrade-arg|none, reason, module}], issues:[{entry_ids[], title, goal, suggestion, acceptance, verdict?, duplicate_of?}]}`。
+  只收 `pending|dispatched|failed` 的版本（其他 409 `not_awaiting_verdict`）；**整份驗過才收**，不合格 400 `{error:"invalid_verdicts", problems:[…]}` 一次列完。
+  沒有任何 issue 提案 → 版本 `empty`；否則 `judged`，`[release_triage] publish = true` 時當場 publish。回 `{kind,version,status,verdicts,issues_proposed,publish_enabled,publish}`。
+- `POST /api/release-triage/publish {kind?, version?}` → `{publish_enabled, results:[{kind,version,result:{outcome:disabled|published|deferred|failed,…}}]}`。重試所有（或指定的）`judged` 版本；`publish = false` 時每一筆都是 `disabled`、gh 不會被呼叫。
+- 設定：`[release_triage] publish = false`（預設）／`gh_bin`／`repo`。
+- CLI：`bin/agm release-triage submit --file verdicts.json`；另有 `show`／`dispatched --kind K --version V…`／`publish`。
+
 ## 總管 AGM（SPEC §18）
 
 全部走 `X-AM-Token`。未部署的 daemon 對這些路徑回 404（前端用 404 判斷「這台不支援」）。

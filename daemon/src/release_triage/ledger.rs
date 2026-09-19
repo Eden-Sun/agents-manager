@@ -269,3 +269,50 @@ pub async fn requeue_stale(pool: &SqlitePool, kind: &str) -> Result<Vec<(String,
     }
     Ok(moved)
 }
+
+/// verdict 進來：`pending`／`dispatched`／`failed` → `next`（`judged` 或沒有任何提案時的 `empty`），CAS。
+/// `failed` 也收：bot 撞限退了三次之後人工補交一份，不必為此重設 attempts。回傳是不是真的寫進去了。
+pub async fn save_verdicts(pool: &SqlitePool, kind: &str, version: &str, verdicts: &serde_json::Value, next: Status) -> Result<bool> {
+    let r = sqlx::query(
+        "UPDATE release_triage SET status = ?, verdicts_json = ?, dispatched_at = NULL, publish_error = NULL, updated_at = ?
+         WHERE kind = ? AND version = ? AND status IN ('pending','dispatched','failed')",
+    )
+    .bind(next.as_str())
+    .bind(serde_json::to_string(verdicts)?)
+    .bind(now_ts())
+    .bind(kind)
+    .bind(version)
+    .execute(pool)
+    .await?;
+    Ok(r.rows_affected() == 1)
+}
+
+/// publish 之後寫回：目前的 issue 清單、狀態（`judged` 或 `published`）與錯誤／備註。只動 `judged` 的列
+/// （重複 publish 不會把 `published` 改回去）。
+pub async fn save_publish(pool: &SqlitePool, kind: &str, version: &str, issues: &[IssueRef], status: Status, note: Option<&str>) -> Result<bool> {
+    let r = sqlx::query(
+        "UPDATE release_triage SET status = ?, issue_numbers_json = ?, publish_error = ?, updated_at = ?
+         WHERE kind = ? AND version = ? AND status = 'judged'",
+    )
+    .bind(status.as_str())
+    .bind(serde_json::to_string(issues)?)
+    .bind(note)
+    .bind(now_ts())
+    .bind(kind)
+    .bind(version)
+    .execute(pool)
+    .await?;
+    Ok(r.rows_affected() == 1)
+}
+
+/// 最近 24 小時內**新開**的 issue 數（不含只留言／找到既有的），全部 kind、全部版本合計。
+pub async fn created_in_last_day(pool: &SqlitePool) -> Result<usize> {
+    let cutoff = chrono::Utc::now() - chrono::Duration::hours(24);
+    Ok(list(pool, None, None)
+        .await?
+        .iter()
+        .flat_map(|r| r.issues.iter())
+        .filter(|i| !i.comment)
+        .filter(|i| chrono::DateTime::parse_from_rfc3339(&i.created_at).is_ok_and(|t| t.with_timezone(&chrono::Utc) >= cutoff))
+        .count())
+}
