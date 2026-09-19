@@ -50,3 +50,13 @@ test('那一回合已經 failed：換新的 crid，否則重按只會拿回同�
   await ask(async (crid) => (seen.push(crid), { delivery: 'ok' }))
   assert.deepEqual(seen, ['c1', 'c2'])
 })
+
+test('503 送達結果寫不進 DB：送出去了就不能說「送給 AGM 失敗，請再試一次」（重按只會被叫去重複要求）', () => {
+  const body = (over: Record<string, unknown>) =>
+    new ApiError(503, { error: 'delivery_state_uncommitted', turn_id: 't1', retryable: true, ...over }, 'x')
+  assert.equal(classifyRebuildAsk(null, body({ delivery: 'ok', sent: true })).kind, 'unknown')
+  assert.equal(classifyRebuildAsk(null, body({ delivery: 'unknown', sent: null })).kind, 'unknown')
+  assert.equal(classifyRebuildAsk(null, body({ delivery: 'failed', sent: false })).kind, 'undelivered')
+  // 別的 503（維護窗口讀不到）一個字都沒送，照舊是一般失敗。
+  assert.equal(classifyRebuildAsk(null, new ApiError(503, { reason: 'maintenance_state_unavailable', sent: false }, 'x')).kind, 'error')
+})

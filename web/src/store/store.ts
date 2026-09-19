@@ -24,7 +24,7 @@ import {
   arr,
 } from '../api/normalize'
 import { ApiError } from '../api/types'
-import type { Bot, BotKind, RestartBatch, GroupChatResult, Mission, MissionDetail, NewMissionInput, MemSnapshot, GroupMessage, Host, HostResult, HostShell, Identity, IdentityStatusMap, Lamp, Message, ModelInfo, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, PatchBotInput, PatchProjectInput, Project, QuotaMap, Run, TerminalSource, ToolMap, Turn } from '../api/types'
+import type { Bot, BotKind, RestartBatch, GroupChatResult, Mission, MissionDetail, NewMissionInput, MemSnapshot, GroupMessage, Host, HostResult, HostShell, Identity, IdentityStatusMap, Lamp, Message, ModelInfo, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, PatchBotInput, PatchProjectInput, Project, QuotaMap, Run, TerminalSource, ToolMap, Turn, TurnDelivery } from '../api/types'
 import type { ProjectPane } from '../api'
 import { joinRunningBatch, restartProgress } from './restartBatch'
 import { dropHostModels, modelsKey, shouldFetchModels, type ModelsCache } from './modelsCache'
@@ -36,6 +36,7 @@ import { paneReadOnly } from '../lib/shellAccess'
 import { groupByProject, withPane, withoutPane } from '../lib/paneLists'
 import { prependDraft, restoreQueued } from './queuedSend'
 import { noteQueuedTurn, startingSend, startingSendLabel } from './startingSend'
+import { asUncommittedSend, noteInFlightTurn, uncommittedSendText } from './uncommittedSend'
 import { missionRequests } from './missionRequests'
 import { MISSION_USER_PAUSE } from '../lib/missionView'
 
@@ -1257,35 +1258,24 @@ export const useStore = create<StoreState>((set, get) => ({
       }
       const delivery = res.delivery
       // Patch the turn map so the composer locks even if the socket frame is slow.
-      set((s) => {
-        // `turn_updated(completed)` 可能先到：終態不能被 HTTP 的 delivery 蓋回（completed+unknown 殘影）。
-        const existing = s.turns[botId]?.[res.turn_id]
-        if (existing && existing.status !== 'in_flight') return {}
-        return {
-        turns: {
-          ...s.turns,
-          [botId]: {
-            ...(s.turns[botId] ?? {}),
-            [res.turn_id]: {
-              ...(existing ?? {
-                id: res.turn_id,
-                conversation_id: '',
-                run_id: get().runs[botId]?.id ?? null,
-                bot_id: botId,
-                origin: 'web' as const,
-                status: 'in_flight' as const,
-                client_request_id: crid,
-                created_at: new Date().toISOString(),
-                completed_at: null,
-              }),
-              delivery,
-            },
-          },
-        },
-        }
-      })
+      set((s) => noteInFlightTurn(s, botId, res.turn_id, crid, get().runs[botId]?.id ?? null, delivery))
       return true
     } catch (e) {
+      // 送了、結果還沒寫進 DB（503）：不是沒送。回 false 會讓輸入框留著同一段字、排隊的被放回去，之後又送一次。
+      const un = asUncommittedSend(e)
+      if (un) {
+        get().notify('error', uncommittedSendText(un))
+        if (un.sent === false) {
+          void get().loadMessages(botId)
+          return false
+        }
+        // 回合在 DB 裡還是 in_flight＋pending（欠著的結果之後補）：先鎖上輸入框，別等 socket 那一幀。
+        if (un.delivery) {
+          const seen: TurnDelivery = un.delivery === 'unknown' ? 'unknown' : 'pending'
+          set((s) => noteInFlightTurn(s, botId, un.turnId, crid, get().runs[botId]?.id ?? null, seen))
+        }
+        return true
+      }
       // claude 停在登入選單：通知講白，不要只給「HTTP 409」。
       if (e instanceof ApiError && e.status === 409 && e.body.reason === 'needs_login') {
         get().notify('error', typeof e.body.message === 'string' ? e.body.message : '這個 claude 還沒登入，先到「終端」分頁完成登入。')
