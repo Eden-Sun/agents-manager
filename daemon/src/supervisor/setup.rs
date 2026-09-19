@@ -247,7 +247,12 @@ pub async fn ensure_env(app: &Arc<App>) -> Result<(String, String, Deployed), Lc
             // Bot: only the persisted id identifies the manager. Without one, the name must be
             // free — an existing `AGM` we have never managed belongs to someone else.
             let proj = &mut cfg.projects[pidx];
-            let bidx = known_bot.as_ref().and_then(|id| proj.bots.iter().position(|b| b.id.as_ref() == Some(id)));
+            let bidx = match known_bot.as_ref() {
+                Some(id) => proj.bots.iter().position(|b| b.id.as_ref() == Some(id)),
+                // 還沒記過 bot：這時找到的專案只會是 daemon 自己目錄裡的那一個，同名的 `AGM` 只可能是上一次設定寫進 config、
+                // 還沒來得及記進角色列就失敗的那一顆——接著用它（issue #181）。當成別人的回 `name_taken`，就永遠設定不起來。
+                None => proj.bots.iter().position(|b| b.name == BOT_NAME),
+            };
             let bidx = match bidx {
                 Some(i) => i,
                 None => {
@@ -374,6 +379,37 @@ mod tests {
         write_runtime_json(&app, "bot-agm", Some("bot-resp")).unwrap();
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
         assert_eq!((v["manager_bot_id"].as_str(), v["responder_bot_id"].as_str()), (Some("bot-agm"), Some("bot-resp")));
+    }
+
+    /// 設定 AGM 做到一半失敗：config 已經寫進 `AGM` 這顆 bot，之後部署檔案（或把 bot 記進 supervisor 列）那一步失敗。
+    /// 再按一次設定要能接著做完。以前重跑時 supervisor 列還沒記 bot id，找到的是上一次自己寫進去的那顆 `AGM`，被當成
+    /// 「別的 bot 已經叫 AGM」回 409 `name_taken`——之後永遠設定不起來，只能手動改 config（issue #181）。
+    #[tokio::test]
+    async fn a_setup_that_failed_halfway_can_be_run_again() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let sup = store::get_or_init(&app.db).await.unwrap();
+        app.tools.lock().await.insert(
+            crate::config::LOCAL_HOST.to_string(),
+            crate::tools::HostTools {
+                tools: Default::default(),
+                identities: Default::default(),
+                shell_identities: vec![crate::config::IdentityCfg { name: sup.identity.clone(), kind: "claude".into(), host: None, env: Default::default(), args: vec![] }],
+                checked_at: crate::db::now(),
+            },
+        );
+        // 部署檔案那一步失敗：`bin` 被一個檔案佔住。
+        let bin = agm_dir(&app).join("bin");
+        std::fs::create_dir_all(agm_dir(&app)).unwrap();
+        std::fs::write(&bin, "not a directory").unwrap();
+        assert!(ensure_env(&app).await.is_err(), "前提：做到一半失敗");
+        std::fs::remove_file(&bin).unwrap();
+
+        let (_, bot_id, _) = ensure_env(&app).await.map_err(|e| format!("{e:?}")).expect("再跑一次要能做完");
+        let agms: Vec<String> =
+            app.cfg.get().await.projects.iter().flat_map(|p| p.bots.iter()).filter(|b| b.name == BOT_NAME).filter_map(|b| b.id.clone()).collect();
+        assert_eq!(agms, vec![bot_id.clone()], "接著用上一次寫進去的那一顆，不另外長一顆");
+        assert_eq!(store::get_or_init(&app.db).await.unwrap().bot_id.as_deref(), Some(bot_id.as_str()));
     }
 
     #[test]
