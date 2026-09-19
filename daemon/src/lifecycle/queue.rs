@@ -14,11 +14,6 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
             return Ok(());
         }
     };
-    // 使用者按停止時沒撤成、還在等 bot 起來的那幾則（#159）：先補撤，補不上就這一輪一則都不送（一個對話只有一筆 queued）。
-    if let Err(e) = super::start_send::settle_withdrawals_locked(app, bot_id).await {
-        schedule_flush_retry(app, bot_id, WITHDRAWAL_RECHECK);
-        return Err(e.context("使用者停止時沒撤成的訊息還是撤不掉：這一輪不送，稍後再試"));
-    }
     let Some(turn) = db::queued_turn(&app.db, &conv).await? else { return Ok(()) };
     // 交辦已經不要了（cancel／superseded／failed）：撤銷，不送。API 做決定的當下已經撤過一次，這裡是保險——
     // 繞過 API 改了狀態、或決定 commit 之後還沒撤就重啟，都不能讓一則已取消的指令在錯的時機送到（AGM 2026-09-16）。
