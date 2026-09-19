@@ -982,7 +982,10 @@ WS：每顆兩次 `bots_restart_progress`（`restarting`，然後 `ok` / `failed
 `done` 的三張清單是權威（補齊漏掉的 progress）；用 `batch_id` 擋掉別的分頁那一批。
 
 ### 10.4 `DELETE /api/bots/{id}`
-`200 {}`（有連帶刪子 agent 時 `{"removed_children":["<bot_id>",…]}`）。
+`200 {}`（有連帶刪子 agent 時 `{"removed_children":["<bot_id>",…]}`；有沒清掉的 runtime 目錄時另帶 `"kept_dirs":[{"bot_id","reason"}]`）。
+`kept_dirs[].reason`：`stop_not_confirmed`（停機失敗，run 已強制收成 `exited` 但 agent 可能還活著）、`run_state_unreadable`（讀不到 active run）、
+`run_still_active`（收完 run 仍是 active）——都表示 bot 已軟刪、只有目錄留著，下次開機的清掃在 run 確定結束後收（SPEC §3.1）。
+定案之前讀不到 bot 或 child 的 active run → 502，什麼都不動，可原樣重試。
 
 - 流程：有 active Run 先 stop（host 連不上送不出去時 run 直接標 `exited` 照常刪）→ 從 config.toml 移除 → `bots.deleted_at`（**對話與訊息保留**，`GET /api/bots/{id}/messages` 仍讀得到）→
   刪 `~/.config/agents-manager/bots/<bot_id>/`（遠端 ssh `rm -rf`，失敗只 log）。
