@@ -1,6 +1,6 @@
 //! herdr Unix socket client.
 //!
-//! Wire contract (verified against herdr 0.8.2 / protocol 20):
+//! Wire contract (verified against herdr 0.8.2 / protocol 20 and 0.9.1 / protocol 22 — 同一組 RPC 的請求與回應形狀逐項比對過，#242):
 //! - one connection per RPC: send `{"id":"<string>","method","params"}\n`, read one line, server closes.
 //! - `events.subscribe` keeps the connection open and streams `{"event":"<name>","data":{...}}\n`.
 //! - request `id` must be a string.
@@ -197,6 +197,14 @@ pub struct HerdrClient {
 }
 
 pub const EXPECTED_PROTOCOL: u32 = 20;
+
+/// 實測過、RPC 形狀相容的 protocol：20（0.8.2，正式現況）與 22（0.9.1）。
+/// 升級窗口內 0.8.2 server 還在跑、升完是 0.9.1，兩邊都不該報「未預期版本」。
+pub const SUPPORTED_PROTOCOLS: &[u32] = &[20, 22];
+
+pub fn protocol_supported(protocol: u32) -> bool {
+    SUPPORTED_PROTOCOLS.contains(&protocol)
+}
 
 /// herdr rejects any argument with a newline (`invalid_agent_argument`; only newlines, verified
 /// 2026-09-06 herdr 0.8.2). Multi-line personas are common, so fold rather than fail to start.
@@ -633,6 +641,14 @@ mod arg_tests {
             assert_eq!(out[0], flag);
             assert!(out[1].len() < value_len, "overshoot {overshoot}: the value did shrink");
         }
+    }
+
+    #[test]
+    fn protocols_verified_against_both_herdr_versions_are_supported() {
+        assert!(super::protocol_supported(20), "0.8.2（正式現況）");
+        assert!(super::protocol_supported(22), "0.9.1（#242 實測過）");
+        assert!(!super::protocol_supported(21), "沒實測過的版本不能默默放行");
+        assert!(!super::protocol_supported(23));
     }
 
     #[test]

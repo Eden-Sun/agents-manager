@@ -290,7 +290,7 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
 
     let herdr_client = state::ensure_session(&cfg.server.herdr_session, &dir).await?;
     let pong = herdr_client.ping().await?;
-    if pong.protocol != herdr::EXPECTED_PROTOCOL {
+    if !herdr::protocol_supported(pong.protocol) {
         tracing::warn!(got = pong.protocol, expected = herdr::EXPECTED_PROTOCOL, "unexpected herdr protocol version");
     }
     tracing::info!(version = %pong.version, protocol = pong.protocol, "herdr ping ok");
