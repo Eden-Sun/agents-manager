@@ -1125,7 +1125,14 @@ pub async fn get_pick(
     let project = crate::db::project(&app.db, &m.project_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("project".into()))?;
     // 驗證者一律 claude＋Fable（D3）；reviewer 跟執行者同 kind。
     let kind = if role == pick::Role::Verifier { "claude" } else { m.executor_kind.as_str() };
-    let raw = super::candidates(&app, &project.host, kind).await;
+    // 停用清單讀不到：503 可重試，不拿「都可用」挑（issue #160）。
+    let raw = super::candidates(&app, &project.host, kind).await.map_err(|e| {
+        LcError::Unavailable(json!({
+            "error": "policy_unavailable", "reason": "identity_preferences_unreadable", "retryable": true, "retry_after_secs": 10,
+            "message": "讀不到身分的停用設定，沒有挑身分（不能把停用的身分當成可用）；稍後再問一次。",
+            "detail": format!("{e:#}"),
+        }))
+    })?;
     let cands: Vec<pick::Candidate> = raw.iter().map(|(n, d, q)| pick::Candidate { name: n, disabled: *d, quota: q.as_ref() }).collect();
     let on_5h = if m.on_5h_limit == "switch" { pick::On5hLimit::Switch } else { pick::On5hLimit::Wait };
     let decision = pick::pick(role, &cands, on_5h, q.get("exclude").map(String::as_str), chrono::Utc::now());

@@ -1389,8 +1389,27 @@ pub async fn settle_and_notify(
     kind: &str,
     payload: &Value,
 ) -> Result<Settled> {
-    let now = crate::db::now();
     let mut tx = pool.begin().await?;
+    let s = settle_and_notify_on(&mut tx, id, turn_status, evidence_complete, result, error, event_key, kind, payload).await?;
+    tx.commit().await?;
+    Ok(s)
+}
+
+/// [`settle_and_notify`] 的交易內版本：要跟別的寫入（例如任務停下來問人，issue #160）一起成立或一起不發生時用。
+/// 不 commit，由呼叫端決定。
+#[allow(clippy::too_many_arguments)]
+pub async fn settle_and_notify_on(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    id: &str,
+    turn_status: &str,
+    evidence_complete: bool,
+    result: Option<&str>,
+    error: Option<&str>,
+    event_key: &str,
+    kind: &str,
+    payload: &Value,
+) -> Result<Settled> {
+    let now = crate::db::now();
     // 通知（`expects_review=0`）而且回合是正常結束的：沒有東西要驗收，當場結案。
     // 這是 2026-09-12 兩件 `assignment_stalled` incident 的根因——AGM 說一句「收到」也要
     // 它自己回頭 review，沒 review 就被當成卡住的工作。
@@ -1412,7 +1431,7 @@ pub async fn settle_and_notify(
     .bind(&now)
     .bind(&now)
     .bind(id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?
     .rows_affected()
         > 0;
@@ -1424,7 +1443,7 @@ pub async fn settle_and_notify(
         let (bot_id, turn_id, expects_review, status): (String, Option<String>, i64, String) =
             sqlx::query_as("SELECT target_bot_id, turn_id, expects_review, status FROM supervisor_assignments WHERE id=?")
                 .bind(id)
-                .fetch_one(&mut *tx)
+                .fetch_one(&mut **tx)
                 .await?;
         // 通知結案了就不要再叫 AGM 來看：inbox 事件改成 `assignment_noticed`，digest 與
         // `needs_review` 都不會把它算成待辦。失敗的通知照舊走原本那條（它真的需要有人看）。
@@ -1452,14 +1471,13 @@ pub async fn settle_and_notify(
         .bind(payload.to_string())
         .bind(&now)
         .bind(&now)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?
         .rows_affected()
             > 0
     } else {
         false
     };
-    tx.commit().await?;
     Ok(Settled { moved, event_new })
 }
 

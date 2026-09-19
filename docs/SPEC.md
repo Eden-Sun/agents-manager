@@ -2211,7 +2211,8 @@ inbox `assignment_noticed`（`needs_review=false`）。送不出去或回合失�
   409 退避中的交辦（`queued`，`drain_queue` 的重試）一樣：`dispatch` 看到任務被使用者暫停就 `hold` 30 秒、不送、不花重試（issue #175）；
   以前只有等額度的重送看暫停，排著的那件幾秒後照樣打進 bot。
 - `assignment_quota_blocked` / `assignment_quota_resumed` 各推一則 inbox（`needs_review=false`），不開 incident；只在交辦**真的**轉進／轉出 `quota_blocked` 時推——
-  讀完之後已被裁示掉（取消等）的不推，mission 的換手通知（`mission_identity_switch`）與 `no_fable_for_verifier` 暫停也一樣（issue #110）。到期仍被擋（順延，或重送後又撞到）累計 6 次 → `awaiting_review` + `turn_status=quota_exhausted`（通常是 credits 真的用完）。
+  讀完之後已被裁示掉（取消等）的不推，mission 的換手通知（`mission_identity_switch`）與 `no_fable_for_verifier` 暫停也一樣（issue #110）。
+  **任務的撞限政策讀不到就不判**（issue #160）：換手／停下來問人要讀的任務、目標 bot、它在哪台主機、身分停用清單、reviewer 要排除的執行者身分，任何一項讀不到都是第三態——什麼都不改（排著的交辦 `hold` 10 秒、回合已結束的留著給下一輪對帳），不退回一般等待、不當成 `local`、不當成「沒有停用」、不拿掉排除條件；使用者暫停讀不到時等額度的交辦也不重送。驗證者挑不到 Fable 時，交辦收成 `quota_exhausted` 與任務停成 `no_fable_for_verifier`（含 `paused` 事件）是同一個交易，寫不進去就整批不發生、不發 paused。到期仍被擋（順延，或重送後又撞到）累計 6 次 → `awaiting_review` + `turn_status=quota_exhausted`（通常是 credits 真的用完）。
   mission 交辦另有 `quota_policy` 與身份切換，見 §18.14。撞限換手挑 reviewer 時 daemon 自己帶上 `exclude`＝該任務執行者現在的身分，
   挑不到別的身分就回 `no_independent_reviewer`（＝原地等），不會偷偷讓 reviewer 跟執行者同一個帳號（review3 c1 L11）。
 
