@@ -253,6 +253,7 @@ async fn ensure_imported_bot(
             effort: None,
             fast: false,
             persona: None,
+            instruction_files: None,
             args: vec![],
             autostart: false,
             // The agent already owns its process/config; do not rewrite its hooks when a

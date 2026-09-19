@@ -11,6 +11,7 @@ import type {
   Bot,
   BotKind,
   BotManagedBy,
+  InstructionFiles,
   GroupMessage,
   GroupMessagesPage,
   HostShell,
@@ -46,6 +47,7 @@ import type {
  ProjectSubmodule } from './types.ts'
 import {
   BOT_KINDS,
+  INSTRUCTION_FILES,
   type Mission,
   type MissionAssignment,
   type MissionParentRef,
@@ -221,6 +223,11 @@ export function toBot(v: unknown, projectId?: string): Bot | null {
     persona: (() => {
       const x = pick(v, 'persona')
       return typeof x === 'string' && x.trim() ? x : null
+    })(),
+    // 只有 claude 有；daemon 沒給（codex／grok、舊版）或給了看不懂的值＝null，面板就不顯示這一格，不猜。
+    instruction_files: (() => {
+      const x = pick(v, 'instruction_files')
+      return typeof x === 'string' && (INSTRUCTION_FILES as readonly string[]).includes(x) ? (x as InstructionFiles) : null
     })(),
     args,
     autostart: bool(v.autostart),

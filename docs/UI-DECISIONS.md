@@ -159,6 +159,14 @@
 - **標題列**：只寫 bot 名稱＋可複製的 pane 識別籤，不再帶專案名；內文的「識別」整列拿掉。
 
 截圖 `docs/screenshots/bot-settings/compact-1600.png`。
+
+### Bot 設定：claude 的「專案指示檔」（issue #213）
+
+- **只有 claude 的 user bot 才有這一格**：codex／grok 沒有 `agents-md` plugin；child bot 不是 daemon 帶 `--settings` 起的，daemon 會拒絕，所以不顯示（不是灰掉）。
+  daemon 沒給這欄（舊版）時也不顯示，不猜預設。
+- **四選一的按鈕列**（跟身份、模型同一種 `opt-group`，不用下拉）：值就是 CLI 的四個選項，預設 `claude-md` 排第一。選中的那項底下顯示一行說明；
+  「兩份都讀」的說明點出用途（跟同專案的 codex 共用 `AGENTS.md`）。改值要重啟才讀到，所以說明尾巴寫明，這一點跟模型／強度的當場套用不同。
+- 位置在身份／帳號之後、人設之前（都是「這顆 bot 讀到什麼」的設定）。截圖 `docs/screenshots/instruction-files/`。
 ## 晶片列：daemon 自己的雜務 bot 跑完不出現（2026-09-13）
 
 使用者：「w8WM:pC 屬於 daemon 的，完成不需要在 header 列標示」。那顆是 `agm-pxf2pv-browser-gc`

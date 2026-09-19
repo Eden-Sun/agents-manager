@@ -294,7 +294,13 @@ codex bot，AGENTS.md 是寫給 codex 的（`codex fork`、sandbox／approval �
 `agents-md@builtin`；值不在上面四個裡時 CLI 退回預設（等於沒釘），所以單元測試照 binary 的 enum 驗值。2.1.276 的舊選項 `projectInstructions`
 （`claude` 預設／`agents-fallback`／`both`／`none`）預設本來就只讀 CLAUDE.md，不另外寫——新版兩個都設時會印一行「remove projectInstructions」；
 更舊的版本沒有這個 plugin，這一格沒人讀（2.1.276 實測帶著這包照常啟動、沒有警告）。
-要讓某顆 claude 跟 codex 共用 AGENTS.md，應該做成 bot 層級的設定（不做全域開關），另開 issue。
+**bot 層級的開關**（issue #213）：值由這顆 bot 的 `instruction_files`（`bots.instruction_files`，TOML 同名，claude 專用）決定，**不是全域開關**：
+沒設＝`claude-md`（上面那個釘住的預設），要讓某顆 claude 跟同 project 的 codex 共用 AGENTS.md 就在那顆設 `claude-md-and-agents-md`。四個值就是 CLI 的選項，
+API 只收這四個（`config::INSTRUCTION_FILES`，單元測試照 2.1.277／2.1.278 binary 的選項列表釘住；CLI 換名或增減值要照 binary 改這一份與測試）——不在裡面的值 CLI 會
+退回它自己的預設（`claude-md-or-agents-md`），所以 API 400、手改 TOML 寫錯則投影時丟掉（存 NULL＝`claude-md`），不會有拼錯的值走到 `--settings`。
+`claude_settings` 照 bot 的有效值（`config::effective_instruction_files`）寫，本機與遠端同一份；`GET /api/state` 的每顆 claude bot 帶有效值、前端 Bot 設定面板顯示與修改
+（API.md §12.8b）。改值要重啟才讀到（設定檔只在啟動時讀）。child bot 沒有 `--settings`，這一格管不到，API 直接拒絕。
+`bots.instruction_files` 是新欄位：加了 ALTER（舊列 NULL）、`SCHEMA_VERSION` 5 → 6（`SCHEMA_HISTORY` 加一行指紋）；**回滾到 `SCHEMA_VERSION` ≤ 5 的 daemon binary 會被 §3.1 的版本閘擋下**（不是資料壞掉）。
 這個 plugin 的提示（2.1.276 通知列 10 秒的 toast「This project has AGENTS.md but no CLAUDE.md; …」、2.1.277 起改讀時的 log
 「no CLAUDE.md found; AGENTS.md loaded: …」）在 `capture::claude::is_noise` 一律當雜訊，不會被 §4.3 備援收進回覆。
 **要在真機驗的**（旗標放量到這台、或下一次升級時）：在一個只有 `AGENTS.md` 的拋棄式專案起一顆 managed claude bot，`--debug-file` 要看到

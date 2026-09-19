@@ -260,6 +260,7 @@ pub async fn ensure_env(
                         effort: None,
                         fast: false,
                         persona: None,
+                        instruction_files: None,
                         args: vec![],
                         autostart: false,
                         inject_hooks: true,
