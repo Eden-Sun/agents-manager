@@ -1273,6 +1273,26 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         assert_eq!(composer_text("grok", GROK_SCREEN), None);
     }
 
+    /// claude 把長段貼上摺成 `[Pasted text #N +M lines]`（2026-09-19 AM-1-XH 沒收到 v4 的 blocked 通知）：
+    /// 行數對得上就是我們送的那則、該補 Enter；對不上（使用者自己貼的）不是。
+    #[test]
+    fn a_folded_paste_whose_line_count_matches_is_our_prompt() {
+        let sent = "[daemon 自動通知]子 agent v4 停在 blocked\n\n原文：\n```text\nDo you want to proceed?\n```\n要回它就用 herdr agent prompt";
+        assert_eq!(sent.matches('\n').count(), 6);
+        let folded = CLAUDE_UNSENT_PROMPT.replace(
+            "❯ [Image #6]試著對claude max方案增加 fable用量的讀取\n  附加圖片（請讀取這個檔案來查看）：",
+            "❯ [Pasted text #3 +6 lines]",
+        );
+        assert!(composer_holds_prompt("claude", &folded, sent));
+        // 行數不同：不是我們的貼上，不按 Enter。
+        assert!(!composer_holds_prompt("claude", &folded, "第一行\n第二行"));
+        // 摺起來的貼上後面還有別的字：使用者在打字，不動它。
+        let typing = folded.replace("+6 lines]", "+6 lines] 再補一句");
+        assert!(!composer_holds_prompt("claude", &typing, sent));
+        // 只有 claude 會摺。
+        assert!(!composer_holds_prompt("codex", &folded, sent));
+    }
+
     /// A prompt too short to identify is never matched — every screen contains "hi".
     #[test]
     fn a_very_short_prompt_is_not_matched() {

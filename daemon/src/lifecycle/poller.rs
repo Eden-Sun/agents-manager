@@ -574,11 +574,31 @@ pub(crate) fn composer_text(kind: &str, screen: &str) -> Option<String> {
 /// compacting; the turn failed as a stall with the message one keystroke from sent.
 pub(crate) fn composer_holds_prompt(kind: &str, screen: &str, sent: &str) -> bool {
     let Some(box_text) = composer_text(kind, screen) else { return false };
+    if kind == "claude" && is_our_folded_paste(&box_text, sent) {
+        return true;
+    }
     let needle: String = squash(sent).chars().take(COMPOSER_HEAD).collect();
     if needle.chars().count() < COMPOSER_HEAD_MIN {
         return false;
     }
     squash(&box_text).contains(&needle)
+}
+
+/// claude 把長段貼上摺成 `[Pasted text #3 +10 lines]`，框裡看不到原文，上面的比對永遠落空：
+/// 補 Enter 不會發生、重送又因為框不空被擋，12 秒後直接判失敗。2026-09-19 AM-1-XH：子 agent v4
+/// 卡在 blocked 的通知就這樣停在父 bot 的輸入框，父 bot 一直沒回應。
+///
+/// 框裡**只有**一個摺起來的貼上，而且 `+N lines` 的 N 正好是我們送的字的換行數，才算是我們的：
+/// 使用者自己貼的東西行數對不上就不按 Enter。
+fn is_our_folded_paste(box_text: &str, sent: &str) -> bool {
+    let Some(rest) = box_text.trim().strip_prefix("[Pasted text #") else { return false };
+    let Some(rest) = rest.strip_suffix(" lines]") else { return false };
+    let Some((id, lines)) = rest.split_once(" +") else { return false };
+    if id.is_empty() || !id.chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    let Ok(lines) = lines.parse::<usize>() else { return false };
+    lines > 0 && lines == sent.trim_end().matches('\n').count()
 }
 
 /// Early check after delivery: enough for the box to draw, short of the full stall deadline.
