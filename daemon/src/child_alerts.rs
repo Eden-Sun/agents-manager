@@ -14,6 +14,10 @@
 //! * 父 agent 沒有活著的 run 就不送：沒有 pane 可以收，UI 的徽章仍在，使用者看得到；
 //! * 父 agent 這一刻收不下（409）就在背景照 [`RETRY`] 再試，child 還卡著才試（issue #169）；
 //! * 只有 `managed_by = 'child'` 且真的有 `parent_bot_id` 的 bot 會觸發。
+//!
+//! 觸發不只靠那一條 `blocked` 邊（#192）：那一刻讀不到 run 的話事件會延後重放，重放也不成、或 daemon 漏了那則事件，
+//! 還有定時的 [`sweep`]——掃一遍「活著、blocked 的子 agent」，沒有通知工作在跑的就補一個。已經講過的問題照上面的指紋
+//! 與 episode 不重講，已經不 blocked 的不補。
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -193,10 +197,89 @@ pub fn on_child_blocked(app: &Arc<App>, run: &db::Run) {
         return;
     }
     let (app, run) = (app.clone(), run.clone());
+    let working = Working::start(&run.bot_id);
     tokio::spawn(async move {
+        let _working = working;
         tokio::time::sleep(SETTLE).await;
         keep_telling(&app, &run, &RETRY).await;
     });
+}
+
+/// 哪幾顆 child 現在有通知工作在跑（等 [`SETTLE`]、或在 [`RETRY`] 之間睡著）：[`sweep`] 不替它們再開一個。
+fn working() -> &'static Mutex<HashMap<String, usize>> {
+    static V: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+    V.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 一個通知工作還在跑；結束（包括 panic）時自己登出。
+struct Working(String);
+
+impl Working {
+    fn start(bot_id: &str) -> Working {
+        *working().lock().unwrap().entry(bot_id.to_string()).or_insert(0) += 1;
+        Working(bot_id.to_string())
+    }
+
+    fn running(bot_id: &str) -> bool {
+        working().lock().unwrap().get(bot_id).is_some_and(|n| *n > 0)
+    }
+}
+
+impl Drop for Working {
+    fn drop(&mut self) {
+        let mut m = working().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = m.get_mut(&self.0) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                m.remove(&self.0);
+            }
+        }
+    }
+}
+
+/// 活著、停在 blocked、有 parent 的子 agent（[`parent_to_tell`] 之後會再逐條確認）。
+async fn blocked_children(app: &Arc<App>) -> anyhow::Result<Vec<db::Run>> {
+    Ok(sqlx::query_as::<_, db::Run>(
+        "SELECT r.* FROM runs r JOIN bots b ON b.id = r.bot_id
+          WHERE r.state IN ('starting','running','stopping') AND r.agent_status = 'blocked'
+            AND b.managed_by = 'child' AND b.deleted_at IS NULL AND TRIM(COALESCE(b.parent_bot_id, '')) <> ''",
+    )
+    .fetch_all(&app.db)
+    .await?)
+}
+
+/// 定時的安全網（#192，跟著卡住回合的定時掃描每分鐘一次）：`blocked` 那條邊是一次性的——那一刻讀不到 run、事件漏了、
+/// 重放也不成，child 停在同一個問題上就不會再有第二個狀態事件，parent 永遠收不到。這裡照 DB 補：活著、blocked、
+/// 沒有通知工作在跑的 child 開一個（不必再等 [`SETTLE`]：它已經 blocked 至少一輪了）。重講不了：同一個問題照
+/// 指紋不再講、同一次 blocked 照 episode 的冪等鍵不多送；已經不 blocked 的不在這一批。回傳開了幾個。
+pub async fn sweep(app: &Arc<App>) -> usize {
+    let runs = match blocked_children(app).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = ?e, "child alert sweep: could not list blocked children; next round");
+            return 0;
+        }
+    };
+    let mut started = 0;
+    for run in runs {
+        if Working::running(&run.bot_id) {
+            continue;
+        }
+        started += 1;
+        let working = Working::start(&run.bot_id);
+        if cfg!(test) {
+            // 測試裡就地跑完一輪、不重試：看得到結果，也不留背景工作。
+            keep_telling(app, &run, &[]).await;
+            drop(working);
+            continue;
+        }
+        let app = app.clone();
+        tokio::spawn(async move {
+            let _working = working;
+            keep_telling(&app, &run, &RETRY).await;
+        });
+    }
+    started
 }
 
 /// parent 這一刻收不下這則（409：它唯一的排隊名額被別的佔著、它自己卡在提問、維護窗口…）時，隔多久再試（issue #169）。
@@ -613,6 +696,110 @@ mod tests {
         sqlx::query("UPDATE turns SET status='failed', delivery='failed' WHERE id='t-other-r'").execute(&app.db).await.unwrap();
         tokio::time::timeout(Duration::from_secs(20), task).await.expect("重試有盡頭").unwrap();
         assert_eq!(alerts().await, 1, "child 還在等：parent 要收到這一則（而且只有一則）");
+    }
+
+    /// 一顆活著、正在回合中的 parent（通知會排進它的佇列、留得下來）與它底下一顆 child（run 在 `pane-<child>`，畫面停在提問）。
+    async fn family(e: &crate::testing::Env, tag: &str) -> (String, String, String) {
+        let app = e.app.clone();
+        let parent = crate::testing::claude_bot(&app, &e.project_id, &format!("p-{tag}")).await.id;
+        let prun = crate::testing::fake_run(&app, &parent).await;
+        let conv = db::conversation_id(&app.db, &parent).await.unwrap();
+        sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,delivery,created_at,prompt_text) VALUES (?,?,?,'web','in_flight','ok',?,'別的事')")
+            .bind(db::ulid()).bind(&conv).bind(&prun).bind(db::now()).execute(&app.db).await.unwrap();
+        let kid = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, managed_by, parent_bot_id, created_at)
+             VALUES (?,?,?,'claude','[]',0,1,?,'child',?,?)",
+        )
+        .bind(&kid).bind(&e.project_id).bind(format!("kid-{tag}")).bind(format!("tok-{kid}")).bind(&parent).bind(db::now())
+        .execute(&app.db).await.unwrap();
+        crate::testing::fake_run(&app, &kid).await;
+        e.herdr.set_screen(&format!("pane-{kid}"), PERMISSION);
+        (parent, conv, kid)
+    }
+
+    async fn alerts_in(app: &Arc<App>, conv: &str) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE conversation_id=? AND role='user' AND content LIKE ?")
+            .bind(conv)
+            .bind(format!("{ALERT_MARK}%"))
+            .fetch_one(&app.db)
+            .await
+            .unwrap()
+    }
+
+    /// #192 驗收一～四：child 進 blocked 的那一刻事件沒處理成（讀不到 run、事件漏了），之後對帳把 DB 寫成 blocked——
+    /// 但 child 停在同一個問題上不會再有第二個狀態事件，以前 parent 就永遠收不到。定時掃描要補上：parent 收到一則；
+    /// 再掃不重送；有通知工作在跑就不再開一個；child 解除 blocked 之後不補送舊問題。
+    #[tokio::test]
+    async fn the_periodic_sweep_tells_the_parent_about_a_child_whose_blocked_edge_was_missed() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let (_parent, conv, kid) = family(&e, "sweep").await;
+        sqlx::query("UPDATE runs SET agent_status='blocked' WHERE bot_id=?").bind(&kid).execute(&app.db).await.unwrap();
+
+        let w = Working::start(&kid);
+        assert_eq!(sweep(&app).await, 0, "那一條邊的通知工作還在跑（等 8 秒、或在重試之間）：不再開一個");
+        drop(w);
+
+        assert_eq!(sweep(&app).await, 1);
+        assert_eq!(alerts_in(&app, &conv).await, 1, "DB 恢復、對帳寫成 blocked 之後，parent 最終收到一次");
+        sweep(&app).await;
+        assert_eq!(alerts_in(&app, &conv).await, 1, "同一次 blocked 再掃不重送");
+
+        // child 被回答了：事件路徑會把狀態寫成 idle、忘掉這一次。
+        sqlx::query("UPDATE runs SET agent_status='idle' WHERE bot_id=?").bind(&kid).execute(&app.db).await.unwrap();
+        forget(&kid);
+        assert_eq!(sweep(&app).await, 0, "已經不 blocked 的不補");
+        assert_eq!(alerts_in(&app, &conv).await, 1, "不補送舊問題");
+    }
+
+    fn status_event(kid: &str, status: &str) -> crate::herdr::Event {
+        crate::herdr::Event {
+            event: "pane_agent_status_changed".into(),
+            data: serde_json::json!({"pane_id": format!("pane-{kid}"), "agent_status": status}),
+        }
+    }
+
+    async fn stored_status(app: &Arc<App>, kid: &str) -> String {
+        sqlx::query_scalar("SELECT agent_status FROM runs WHERE bot_id=?").bind(kid).fetch_one(&app.db).await.unwrap()
+    }
+
+    /// #192 快路徑：blocked 事件到的那一刻讀不到這個 pane 的 run（`active_runs_for_pane` 出錯）——以前讀取錯誤被當成空集合、
+    /// 整則事件丟掉，那條邊的副作用（通知 parent）就沒了。現在稍後重放這一則；DB 好了之後照常處理（狀態寫進去、走 blocked 邊）。
+    #[tokio::test]
+    async fn a_blocked_event_whose_run_lookup_fails_is_replayed_not_dropped() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let (_parent, _conv, kid) = family(&e, "replay").await;
+        sqlx::query("ALTER TABLE projects RENAME TO projects_unreadable").execute(&app.db).await.unwrap();
+
+        crate::events::handle_status(&app, crate::config::LOCAL_HOST, "test", &status_event(&kid, "blocked")).await;
+        assert_eq!(stored_status(&app, &kid).await, "idle", "前提：這一刻讀不到 run");
+        sqlx::query("ALTER TABLE projects_unreadable RENAME TO projects").execute(&app.db).await.unwrap();
+
+        for _ in 0..250 {
+            if stored_status(&app, &kid).await == "blocked" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(stored_status(&app, &kid).await, "blocked", "重放那一則：不是丟掉");
+    }
+
+    /// 重放只在那個 pane 之後沒有更新的事件時才算數：讀不到時排著的 blocked，被之後到的 idle 取代了，就不能再把狀態寫回 blocked。
+    #[tokio::test]
+    async fn a_replayed_status_event_never_overwrites_a_newer_one() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let (_parent, _conv, kid) = family(&e, "stale").await;
+        sqlx::query("ALTER TABLE projects RENAME TO projects_unreadable").execute(&app.db).await.unwrap();
+        crate::events::handle_status(&app, crate::config::LOCAL_HOST, "test", &status_event(&kid, "blocked")).await;
+        sqlx::query("ALTER TABLE projects_unreadable RENAME TO projects").execute(&app.db).await.unwrap();
+
+        // 重放之前，同一個 pane 來了新的一則（child 已經被回答）。
+        crate::events::handle_status(&app, crate::config::LOCAL_HOST, "test", &status_event(&kid, "idle")).await;
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(stored_status(&app, &kid).await, "idle", "舊的那一則不再算數");
     }
 
     /// 解除 blocked 之後**再**卡住同一個問題：要重新送（`forget` 把指紋清掉）。
