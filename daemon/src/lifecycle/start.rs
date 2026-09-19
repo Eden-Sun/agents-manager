@@ -882,6 +882,14 @@ pub async fn restart_bot_with(app: &Arc<App>, bot_id: &str, opts: StartOpts) -> 
     // Checked before the stop, or the user's agent gets ctrl+c for nothing.
     let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     refuse_default_session(&bot)?;
+    // 子 agent 的 pane 是父 agent 開的，daemon 重建不了它的環境：這條 stop + start 會把 pane 關掉再開一個不一樣的（#188）。
+    // 走哪條路由呼叫端先分類，分錯或誤呼不能靠約定——鎖裡讀到 child 就拒絕，什麼都還沒停。
+    if bot.managed_by == "child" {
+        return Err(LcError::conflict(
+            "child_restarts_in_pane",
+            json!({"bot_id": bot_id, "message": "子 agent 的 pane 是父 agent 開的，不能 stop + start：改走 restart_child_in_pane（原 pane 裡 exit + resume）。"}),
+        ));
+    }
     if opts.require_idle {
         if let Some(why) = busy_reason_locked(app, bot_id).await? {
             return Err(not_idle(bot_id, why));

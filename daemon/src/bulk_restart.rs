@@ -36,6 +36,8 @@ pub enum Skip {
     TurnInFlight,
     /// 排到它的時候已經不用重啟了：更新套用過、run 不在了、bot 被刪了。
     NoLongerPending,
+    /// 輪到它時 DB 讀不到它的狀態（一時忙、I/O 錯）：不知道≠不用重啟，這次先不動，更新還在等（#188）。
+    StateUnreadable,
 }
 
 impl Skip {
@@ -48,6 +50,7 @@ impl Skip {
             Skip::UnknownStatus => "unknown_status",
             Skip::TurnInFlight => "turn_in_flight",
             Skip::NoLongerPending => "no_longer_pending",
+            Skip::StateUnreadable => "state_unreadable",
         }
     }
 
@@ -60,6 +63,7 @@ impl Skip {
             Skip::UnknownStatus => "狀態不明，不確定它在不在忙",
             Skip::TurnInFlight => "還有一回合沒收掉",
             Skip::NoLongerPending => "排到它時已經不用重啟了（更新套用過或 run 不在了）",
+            Skip::StateUnreadable => "讀不到它的狀態，這次沒動它；更新還在等，稍後再按一次",
         }
     }
 }
@@ -130,18 +134,34 @@ pub async fn candidates(app: &Arc<App>) -> anyhow::Result<Vec<Cand>> {
 }
 
 /// 輪到這顆真的要重啟前再看一次（計畫是按下去那一刻的快照）。`None`＝還是可以重啟。
+/// 讀不到（DB 錯誤）與「不在了」是兩回事：前者不能報成「已經不用重啟」，那會讓人以為更新套上了（#188）。
 async fn recheck(app: &Arc<App>, bot_id: &str) -> Option<Skip> {
-    let (Ok(Some(run)), Ok(Some(bot))) = (db::active_run(&app.db, bot_id).await, db::bot(&app.db, bot_id).await) else {
-        return Some(Skip::NoLongerPending);
+    let run = match db::active_run(&app.db, bot_id).await {
+        Ok(Some(run)) => run,
+        Ok(None) => return Some(Skip::NoLongerPending),
+        Err(e) => return Some(unreadable(bot_id, "its active run", &e)),
+    };
+    let bot = match db::bot(&app.db, bot_id).await {
+        Ok(Some(bot)) => bot,
+        Ok(None) => return Some(Skip::NoLongerPending),
+        Err(e) => return Some(unreadable(bot_id, "the bot row", &e)),
     };
     if bot.deleted_at.is_some() {
         return Some(Skip::NoLongerPending);
     }
-    let Ok(c) = cand_of(app, &run, &bot).await else { return Some(Skip::UnknownStatus) };
+    let c = match cand_of(app, &run, &bot).await {
+        Ok(c) => c,
+        Err(e) => return Some(unreadable(bot_id, "its in-flight turn", &e)),
+    };
     if !is_candidate(&c) {
         return Some(Skip::NoLongerPending);
     }
     skip_reason(&c)
+}
+
+fn unreadable(bot_id: &str, what: &str, e: &dyn std::fmt::Display) -> Skip {
+    tracing::warn!(bot = bot_id, error = %e, "could not read {what} at restart time; leaving the bot alone this batch");
+    Skip::StateUnreadable
 }
 
 /// 這個 daemon（以 `data_dir` 分）正在跑的那一批。同時只准一批：連按兩次、或使用者按一次 AGM 也叫一次，
@@ -179,7 +199,7 @@ pub async fn spawn(app: &Arc<App>) -> anyhow::Result<serde_json::Value> {
     let slot = BatchSlot(slot_key);
     let cands = candidates(app).await?;
     let (go, skipped) = plan(&cands);
-    let supervisor = supervisor_bot_id(app).await;
+    let supervisor = supervisor_bot_id(app).await?;
     let targets = supervisor_last(go.iter().map(|c| (c.bot_id.clone(), c.name.clone())).collect(), supervisor.as_deref());
     let planned: Vec<serde_json::Value> = targets.iter().map(|(id, name)| json!({"bot_id": id, "name": name})).collect();
     let skipped_json: Vec<serde_json::Value> = skipped.iter().map(|(c, w)| skip_json(c, *w)).collect();
@@ -310,8 +330,20 @@ enum Restarted {
 }
 
 async fn restart_resuming(app: &Arc<App>, bot_id: &str) -> Restarted {
+    // 走哪一條是破壞性的決定（一般路徑會把 pane 關掉），所以要由一次**讀得到**的 bot 決定：讀不到就這顆失敗、什麼都不動，
+    // 絕不猜成一般 bot（#188）。`restart_bot_with` 自己也會拒絕 child，這裡是第一道、那裡是最後一道。
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("bulk_restart_before_lookup", bot_id).await;
+    let lookup = db::bot(&app.db, bot_id).await;
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("bulk_restart_after_lookup", bot_id).await;
+    let child = match lookup {
+        Ok(Some(bot)) => bot.managed_by == "child",
+        Ok(None) => return Restarted::Busy(Skip::NoLongerPending),
+        Err(e) => return Restarted::Failed(anyhow::anyhow!("讀不到 bot 的類別，這次沒有動它（重啟要靠它決定走哪一條路）：{e:#}")),
+    };
     // 子 agent 的 pane 是父 agent 開的：關掉再開等於搬家，所以原地重啟。
-    let res = if db::bot(&app.db, bot_id).await.ok().flatten().is_some_and(|b| b.managed_by == "child") {
+    let res = if child {
         lifecycle::restart_child_in_pane_with(app, bot_id, true).await
     } else {
         // One lock hold for both halves — closes the 2026-09-10 23:02 race (see `restart_bot_with`).
@@ -342,14 +374,13 @@ fn busy_skip(e: &LcError) -> Option<Skip> {
 }
 
 /// Read straight off the row: `get_or_init` would create a supervisor the user never asked for.
-async fn supervisor_bot_id(app: &Arc<App>) -> Option<String> {
-    sqlx::query_scalar::<_, Option<String>>("SELECT bot_id FROM supervisors LIMIT 1")
+/// 讀不到是錯誤，不是「沒有總管」：不知道誰是總管，就排不出「它最後重啟」，也不會替它排回來的檢查（#188）。
+async fn supervisor_bot_id(app: &Arc<App>) -> anyhow::Result<Option<String>> {
+    Ok(sqlx::query_scalar::<_, Option<String>>("SELECT bot_id FROM supervisors LIMIT 1")
         .fetch_optional(&app.db)
-        .await
-        .ok()
+        .await?
         .flatten()
-        .flatten()
-        .filter(|s| !s.is_empty())
+        .filter(|s| !s.is_empty()))
 }
 
 /// Supervisor goes last: it repairs the others, so it must be up while they restart.
@@ -365,8 +396,15 @@ pub fn supervisor_last(mut targets: Vec<(String, String)>, supervisor: Option<&s
 
 /// A run left pointing at a closed pane would read as running and never be started again.
 async fn settle_failed_restart(app: &Arc<App>, bot_id: &str) {
-    let (Ok(Some(run)), Ok(Some(bot))) = (db::active_run(&app.db, bot_id).await, db::bot(&app.db, bot_id).await) else {
-        return;
+    let (run, bot) = match (db::active_run(&app.db, bot_id).await, db::bot(&app.db, bot_id).await) {
+        (Ok(Some(run)), Ok(Some(bot))) => (run, bot),
+        (Ok(_), Ok(_)) => return,
+        // 讀不到就不能判斷 pane 還在不在，不動它（reconcile 每一輪會收留下來的 run）；但要留一行，不能靜默。
+        (run, bot) => {
+            let why = run.err().or_else(|| bot.err());
+            tracing::warn!(bot = bot_id, error = ?why, "could not read the run after a failed restart; leaving it for reconcile");
+            return;
+        }
     };
     if !lifecycle::run_alive(app, &run, &bot).await {
         tracing::warn!(bot = %bot.name, run = %run.id, "restart failed and left a run with no live pane; ending it");
@@ -646,6 +684,153 @@ mod tests {
         assert_ne!(third["batch_id"], "batch-first");
         assert!(third.get("already_running").is_none());
         assert!(!running_batches().lock().unwrap().contains_key(&key), "空批次不佔著");
+    }
+
+    /// 第一次讀 bot（決定走哪一條重啟路）壞掉、下一次 DB 已經好了：#188 的窗口。
+    fn first_bot_read_fails(app: &Arc<App>, bot_id: &str) {
+        let (a, b) = (app.clone(), app.clone());
+        crate::lifecycle::race_point::arm("bulk_restart_before_lookup", bot_id, move || async move { crate::testing::make_table_unreadable(&a, "bots").await });
+        crate::lifecycle::race_point::arm("bulk_restart_after_lookup", bot_id, move || async move { crate::testing::make_table_readable(&b, "bots").await });
+    }
+
+    async fn mark_update_pending(app: &Arc<App>, run_id: &str) {
+        sqlx::query("UPDATE runs SET update_notice='Update installed · Restart to update' WHERE id=?").bind(run_id).execute(&app.db).await.unwrap();
+    }
+
+    /// #188 驗收一：子 agent 的第一次 bot 查詢失敗、下一次已經恢復——不得改走一般 `restart_bot_with`（會關掉父 agent 開的 pane），
+    /// 這顆記成失敗、什麼都不動。（`restart_bot_with` 自己也拒絕 child，所以連「錯走了、被擋下」都要分得出來：訊息得是讀不到分類。）
+    #[tokio::test]
+    async fn a_child_whose_bot_row_cannot_be_read_fails_instead_of_being_restarted_as_a_regular_bot() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let kid = crate::lifecycle::restart_kind_tests::live_child(&env, "ui").await;
+        first_bot_read_fails(&app, &kid.id);
+
+        match restart_resuming(&app, &kid.id).await {
+            Restarted::Failed(e) => {
+                let msg = format!("{e:#}");
+                assert!(msg.contains("讀不到 bot 的類別"), "失敗要說是讀不到分類，不是別的原因：{msg}");
+            }
+            Restarted::Ok(_) => panic!("讀不到分類，這顆不能被重啟"),
+            Restarted::Busy(_) => panic!("讀不到分類是失敗，不是跳過"),
+        }
+        crate::lifecycle::restart_kind_tests::assert_child_untouched(&env, &kid).await;
+        // 對照：DB 好了，同一顆走子 agent 的原地重啟（不是一般路徑）。
+        assert!(db::bot(&app.db, &kid.id).await.unwrap().is_some_and(|b| b.managed_by == "child"));
+    }
+
+    /// 驗收二：child 只走原地重啟、一般 bot 照舊 stop + start；分類的那顆已經不在了是跳過。
+    #[tokio::test]
+    async fn the_restart_path_follows_the_bot_kind() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let kid = crate::lifecycle::restart_kind_tests::live_child(&env, "ui").await;
+        let since = env.herdr.methods().len();
+        match restart_resuming(&app, &kid.id).await {
+            Restarted::Ok(run_id) => assert_ne!(run_id, kid.run_id, "原地重啟換了一個新的 run"),
+            Restarted::Failed(e) => panic!("子 agent 應該在原 pane 裡回來：{e:#}"),
+            Restarted::Busy(w) => panic!("不該被跳過：{}", w.code()),
+        }
+        let calls = env.herdr.methods();
+        assert!(!calls[since..].iter().any(|m| m == "pane.close"), "子 agent 的 pane 不能被關：{:?}", &calls[since..]);
+        assert!(env.herdr.tab(&kid.tab_id).unwrap().panes.contains(&kid.pane_id));
+
+        // 一般 bot：stop + start（這裡身分不存在，start 一定失敗，證明走的是 restart_bot_with 那一條）。
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "alfa").await;
+        sqlx::query("UPDATE bots SET identity='nope-not-on-this-host' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
+        crate::testing::fake_run(&app, &bot.id).await;
+        match restart_resuming(&app, &bot.id).await {
+            Restarted::Failed(e) => assert!(format!("{e:#}").contains("identity is not known"), "{e:#}"),
+            _ => panic!("一般 bot 走 stop + start，身分不存在時 start 失敗"),
+        }
+        // 不存在的 bot：排到它時已經不用重啟，是跳過。
+        assert!(matches!(restart_resuming(&app, "no-such-bot").await, Restarted::Busy(Skip::NoLongerPending)));
+    }
+
+    /// 驗收四：批次裡一顆分類失敗不中斷整批——它與後面那顆各自列在 `failed`，子 agent 沒被動、也沒有被記成跳過。
+    #[tokio::test]
+    async fn one_unclassifiable_bot_does_not_stop_the_batch() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let kid = crate::lifecycle::restart_kind_tests::live_child(&env, "ui").await;
+        mark_update_pending(&app, &kid.run_id).await;
+        // 後面那顆：身分不存在，start 一定失敗（跟上面 a_failed_restart… 同一個做法）。
+        let other = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, identity, created_at)
+             VALUES (?,?,'alfa','claude','[]',0,1,'tok','nope',?)",
+        )
+        .bind(&other)
+        .bind(&env.project_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let other_run = crate::testing::fake_run(&app, &other).await;
+        mark_update_pending(&app, &other_run).await;
+        first_bot_read_fails(&app, &kid.id);
+        let mut events = app.subscribe();
+
+        run_batch(&app, "batch-lookup", vec![(kid.id.clone(), "ui".into()), (other.clone(), "alfa".into())], vec![], None).await;
+
+        let mut done = None;
+        while let Ok(ev) = events.try_recv() {
+            if ev.kind == "bots_restart_done" {
+                done = Some(ev.data);
+            }
+        }
+        let done = done.expect("done 一定會送");
+        let failed = done["failed"].as_array().unwrap();
+        assert_eq!(failed.len(), 2, "{done}");
+        assert_eq!(failed[0]["bot_id"], kid.id.as_str());
+        assert!(failed[0]["error"].as_str().unwrap().contains("讀不到 bot 的類別"), "{done}");
+        assert_eq!(failed[1]["bot_id"], other.as_str(), "後面那顆照跑、照列");
+        assert!(done["ok"].as_array().unwrap().is_empty() && done["skipped"].as_array().unwrap().is_empty(), "{done}");
+        crate::lifecycle::restart_kind_tests::assert_child_untouched(&env, &kid).await;
+    }
+
+    /// 輪到它時 DB 讀不到它的狀態：是「這次沒動它」，不是「已經不用重啟」（那會讓人以為更新套上了）。
+    #[tokio::test]
+    async fn a_bot_whose_state_cannot_be_read_at_restart_time_is_skipped_as_unreadable() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "alfa").await;
+        let run = crate::testing::fake_run(&app, &bot.id).await;
+        mark_update_pending(&app, &run).await;
+        assert_eq!(recheck(&app, &bot.id).await, None, "前提：讀得到時它還是候選、可以重啟");
+
+        for table in ["runs", "bots", "turns"] {
+            crate::testing::make_table_unreadable(&app, table).await;
+            assert_eq!(recheck(&app, &bot.id).await, Some(Skip::StateUnreadable), "{table} 讀不到");
+            crate::testing::make_table_readable(&app, table).await;
+        }
+        let mut events = app.subscribe();
+        crate::testing::make_table_unreadable(&app, "runs").await;
+        run_batch(&app, "batch-unreadable", vec![(bot.id.clone(), "alfa".into())], vec![], None).await;
+        crate::testing::make_table_readable(&app, "runs").await;
+        assert_eq!(db::active_run(&app.db, &bot.id).await.unwrap().map(|r| r.id), Some(run), "沒動它");
+        let mut done = None;
+        while let Ok(ev) = events.try_recv() {
+            if ev.kind == "bots_restart_done" {
+                done = Some(ev.data);
+            }
+        }
+        let done = done.expect("done 一定會送");
+        assert_eq!(done["skipped"][0]["reason"], "state_unreadable", "{done}");
+        assert!(done["ok"].as_array().unwrap().is_empty() && done["failed"].as_array().unwrap().is_empty(), "{done}");
+    }
+
+    /// 讀不到誰是總管：不知道就排不出「總管最後重啟」，整批不開（沒動任何一顆），也不留著批次的名額。
+    #[tokio::test]
+    async fn a_batch_does_not_start_when_the_supervisor_cannot_be_identified() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let key = app.data_dir.display().to_string();
+        crate::testing::make_table_unreadable(&app, "supervisors").await;
+        assert!(spawn(&app).await.is_err(), "讀不到 supervisors：不能當成沒有總管");
+        assert!(!running_batches().lock().unwrap().contains_key(&key), "沒開成的批次不佔著名額");
+        crate::testing::make_table_readable(&app, "supervisors").await;
+        assert_eq!(spawn(&app).await.unwrap()["total"], 0);
     }
 
     #[test]
