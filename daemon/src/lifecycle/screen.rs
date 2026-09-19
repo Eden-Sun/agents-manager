@@ -1336,6 +1336,22 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         assert!(clean_screen("claude", "❯ hi\n✢ Baking…\nTip: Use /memory\n✗ Auto-update failed · Run claude doctor\n❯ ").is_none());
     }
 
+    /// 2026-09-19 AM-1-XH-2：回合結束後版本列還在輸入框上方，終端備援把它接在回覆最後一行。
+    #[test]
+    fn the_update_banner_above_the_composer_is_not_part_of_the_reply() {
+        let screen = "❯ 看一下孫代\n⏺ parent_bot_id 正確指向 is102103。\n  要不要我開一張 UI issue。\n\n✻ Worked for 15s · done 12:49 · 1 shell still running\n                                   current: 2.1.276 · latest: 2.1.277 ✔ Update installed · Restart to update\n──────\n❯\n──────\n  xavie | agents-manager | OP5 H 47% | 5h:94%\n";
+        assert_eq!(extract_reply("claude", screen).unwrap(), "parent_bot_id 正確指向 is102103。\n  要不要我開一張 UI issue。");
+        // 還沒裝好時只有前半段；裝好後被擠到只剩後半段也一樣。
+        for banner in ["current: 2.1.276 · latest: 2.1.277", "✔ Update installed · Restart to update"] {
+            let s = screen.replace("current: 2.1.276 · latest: 2.1.277 ✔ Update installed · Restart to update", banner);
+            assert!(!extract_reply("claude", &s).unwrap().contains("2.1.27"), "{banner}");
+            assert!(!extract_reply("claude", &s).unwrap().contains("Restart"), "{banner}");
+        }
+        // 回覆裡**講到**這句話的照留。
+        let talk = "❯ hi\n⏺ 狀態列會印 current: 2.1.276 · latest: 2.1.277 ✔ Update installed · Restart to update，要重啟才套用。\n╭───╮\n│ ❯ │\n╰───╯";
+        assert!(extract_reply("claude", talk).unwrap().contains("要重啟才套用"));
+    }
+
     #[test]
     fn a_real_reply_is_still_stored() {
         // Finished tools (`Ran`, no ellipsis) come with the answer; do not throw that away.
