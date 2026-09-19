@@ -145,9 +145,20 @@ pub async fn dispatch(app: &Arc<App>, assignment_id: &str) {
     // 帳號正被 CLI 擋著（`You've hit your usage limit …`）：送出去只會換來一句系統錯誤，
     // 而 `queued` 的重試會在 backoff 用完之後把它變成 dispatch_failed——工作就這樣無聲斷掉。
     // 停在 `quota_blocked` 等額度回來，時間到了 controller 自己重送。
-    if let Some(hit) = crate::quota::limit_hit_for_bot(app, &target).await {
-        park_quota(app, &a, &hit, "dispatch").await;
-        return;
+    // 查不到（讀不到這顆 bot 在哪台主機，#197）不當成沒撞限——那樣會送進一個已經用盡的遠端身分：跟讀不到任務、讀不到窗口
+    // 同一個做法，`hold` 幾秒再看，不花重試。
+    match crate::quota::try_limit_hit_for_bot(app, &target).await {
+        Ok(Some(hit)) => {
+            park_quota(app, &a, &hit, "dispatch").await;
+            return;
+        }
+        Ok(None) => {}
+        Err(e) => {
+            let until = iso_in(super::maintenance::UNREADABLE_RETRY_SECS);
+            let _ = store::hold(&app.db, &a.id, &until, &format!("cannot tell whether the target's identity has hit its limit: {e:#}")).await;
+            tracing::warn!(assignment = %a.id, until, error = ?e, "assignment held: cannot tell whether its target has hit its limit");
+            return;
+        }
     }
     // A restart window is being held: the point of the window is that nothing new starts inside
     // it. The assignment stays queued (nothing is lost or refused) until the window closes.
@@ -658,9 +669,14 @@ async fn park_quota(app: &Arc<App>, a: &store::Assignment, hit: &crate::quota::L
 ///
 /// 只處理 `host` 上的 bot，而且只收 `parked_before` 之前就停下的交辦：這個行程裡才 park 的那幾件，
 /// 記憶體本來就有撞限，回填只會把成功回合已經清掉的撞限種回去（review 2026-09-16 L1）。
-async fn backfill_quota_limits(app: &Arc<App>, host: &str, parked_before: Option<chrono::DateTime<chrono::Utc>>) {
-    let Ok(rows) = store::quota_blocked_all(&app.db).await else { return };
+///
+/// 讀不到（交辦清單、bot、bot 在哪台主機）不當成沒有、也不退回 `local`（#197）：退回 `local` 的話，遠端 bot 停下的撞限會種進
+/// 本機同名的 key，把本機那個健康的帳號擋住。那一件跳過、回 `Err`，這台主機這一輪不算回填完（[`backfill_quota_limits_once`]
+/// 拿掉標記、稍後重跑）；已經種回去的留著（`seed_limit_hit` 只留最晚的，重來不會疊）。
+async fn backfill_quota_limits(app: &Arc<App>, host: &str, parked_before: Option<chrono::DateTime<chrono::Utc>>) -> anyhow::Result<()> {
+    let rows = store::quota_blocked_all(&app.db).await?;
     let mut seeded = 0usize;
+    let mut unreadable = None;
     for a in rows {
         let Some(resume_at) = a.resume_at.as_deref().map(str::trim).filter(|s| !s.is_empty()) else { continue };
         if past(resume_at) {
@@ -672,8 +688,21 @@ async fn backfill_quota_limits(app: &Arc<App>, host: &str, parked_before: Option
                 _ => continue,
             }
         }
-        let Ok(Some(bot)) = crate::db::bot(&app.db, &a.target_bot_id).await else { continue };
-        let bot_host = crate::db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| crate::config::LOCAL_HOST.to_string());
+        let bot = match crate::db::bot(&app.db, &a.target_bot_id).await {
+            Ok(Some(bot)) => bot,
+            Ok(None) => continue,
+            Err(e) => {
+                unreadable.get_or_insert(e);
+                continue;
+            }
+        };
+        let bot_host = match crate::db::bot_host(&app.db, &bot.id).await {
+            Ok(h) => h,
+            Err(e) => {
+                unreadable.get_or_insert(e);
+                continue;
+            }
+        };
         if bot_host != host {
             continue;
         }
@@ -688,7 +717,11 @@ async fn backfill_quota_limits(app: &Arc<App>, host: &str, parked_before: Option
     if seeded > 0 {
         tracing::info!(host, seeded, "重啟回填：用 parked assignment 的 resume_at 補回 limit_hit");
     }
+    unreadable.map_or(Ok(()), Err)
 }
+
+/// 開機回填讀不到之後多久再試（同 `quota_hold` 那一支）。
+const BACKFILL_RETRY: Duration = Duration::from_secs(30);
 
 /// 開機回填的真正入口：`tools::detect` 每次寫完一台主機的身分表就呼叫，**每台主機在這個行程裡只跑一次**。
 ///
@@ -702,11 +735,27 @@ async fn backfill_quota_limits(app: &Arc<App>, host: &str, parked_before: Option
 pub async fn backfill_quota_limits_once(app: &Arc<App>, host: &str) {
     static DONE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
     let key = format!("{}\u{0}{host}", app.data_dir.display());
-    if !DONE.get_or_init(Default::default).lock().unwrap().insert(key) {
+    if !DONE.get_or_init(Default::default).lock().unwrap().insert(key.clone()) {
         return;
     }
     let started = chrono::DateTime::parse_from_rfc3339(&crate::build_info::started_at()).ok().map(|t| t.with_timezone(&chrono::Utc));
-    backfill_quota_limits(app, host, started).await;
+    if let Err(e) = backfill_quota_limits(app, host, started).await {
+        // 這一輪不算跑完（#197）：拿掉標記，稍後（或那台主機下一次偵測完）再回填一次。
+        tracing::warn!(host, error = ?e, "開機回填讀不到它要的東西：這台主機這一輪不算回填完，稍後重跑");
+        DONE.get_or_init(Default::default).lock().unwrap().remove(&key);
+        retry_backfill_quota_limits(app, host);
+    }
+}
+
+fn retry_backfill_quota_limits(app: &Arc<App>, host: &str) {
+    if cfg!(test) {
+        return;
+    }
+    let (app, host) = (app.clone(), host.to_string());
+    tokio::spawn(async move {
+        tokio::time::sleep(BACKFILL_RETRY).await;
+        backfill_quota_limits_once(&app, &host).await;
+    });
 }
 
 /// 這個任務的執行者現在掛在哪個身分上（最新一筆 executor 交辦的 bot）。挑 reviewer 時要排除它。
@@ -768,7 +817,14 @@ async fn resume_quota_blocked(app: &Arc<App>) {
             }
         }
         let Ok(Some(bot)) = crate::db::bot(&app.db, &a.target_bot_id).await else { continue };
-        let still_hit = crate::quota::limit_hit_for_bot(app, &bot).await;
+        // 讀不到這顆 bot 在哪台主機（#197）不等於「沒人說還在擋」：原地不動、不算次數，下一個 tick 再看。
+        let still_hit = match crate::quota::try_limit_hit_for_bot(app, &bot).await {
+            Ok(hit) => hit,
+            Err(e) => {
+                tracing::warn!(assignment = %a.id, error = %format!("{e:#}"), "cannot tell whether the target's identity is still blocked; not resending");
+                continue;
+            }
+        };
         let due = a.resume_at.as_deref().map(past).unwrap_or(true);
         match (&still_hit, due) {
             // 還在擋、時間也還沒到：什麼都不做。
@@ -811,7 +867,10 @@ async fn resume_quota_blocked(app: &Arc<App>) {
         if let Some(old) = a.turn_id.as_deref() {
             let text = format!("排隊中的這則沒有送出：交辦 {} 撞到額度上限，額度回來後用新的一則重送，舊的這則撤回，不會再送。", a.id);
             if let Err(e) = crate::lifecycle::revoke_queued_turn(app, old, &text).await {
-                tracing::error!(assignment = %a.id, turn = old, error = %e, "could not revoke the old queued turn before a quota resend");
+                // 撤不掉不等於撤完了（#159 同一類）：照樣重送會清掉 `turn_id`，舊的那則對不回交辦、之後照送就是做兩次。
+                // 這一拍不重送，下一個 tick 再撤。
+                tracing::error!(assignment = %a.id, turn = old, error = %e, "could not revoke the old queued turn before a quota resend; not resending yet");
+                continue;
             }
         }
         let key = format!("quota_resumed:{}:{}", a.id, a.quota_retries);
@@ -3337,6 +3396,34 @@ mod queue_dispatch_tests {
         assert_ne!(row.status, "quota_blocked", "照常重送");
     }
 
+    /// #197 同一檔（#159 同一類）：重送前撤舊的那則寫不進去——以前只記一行，照樣重送、清掉 `turn_id`，舊的那則對不回交辦、
+    /// 佔著名額、之後照送就是做兩次。撤不掉就這一拍不重送；DB 好了下一拍撤掉再送。
+    #[tokio::test]
+    async fn a_quota_resend_waits_while_the_old_prompt_cannot_be_revoked() {
+        let app = app().await;
+        let a = queued_assignment(&app, 60).await;
+        let old = a.turn_id.clone().unwrap();
+        let past = (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        sqlx::query("UPDATE supervisor_assignments SET status='quota_blocked', resume_at=? WHERE id=?").bind(&past).bind(&a.id).execute(&app.db).await.unwrap();
+        sqlx::query("CREATE TRIGGER lost_revoke BEFORE UPDATE OF status ON turns WHEN NEW.status = 'failed' BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END")
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let turn_status = |app: Arc<App>, id: String| async move {
+            sqlx::query_scalar::<_, String>("SELECT status FROM turns WHERE id=?").bind(&id).fetch_one(&app.db).await.unwrap()
+        };
+
+        resume_quota_blocked(&app).await;
+        let row = store::assignment(&app.db, &a.id).await.unwrap().unwrap();
+        assert_eq!((row.status.as_str(), row.turn_id.as_deref()), ("quota_blocked", Some(old.as_str())), "撤不掉：這一拍不重送、turn_id 不清");
+        assert_eq!(turn_status(app.clone(), old.clone()).await, "queued");
+
+        sqlx::query("DROP TRIGGER lost_revoke").execute(&app.db).await.unwrap();
+        resume_quota_blocked(&app).await;
+        assert_eq!(turn_status(app.clone(), old.clone()).await, "failed", "舊的撤掉");
+        assert_ne!(store::assignment(&app.db, &a.id).await.unwrap().unwrap().status, "quota_blocked", "撤掉之後照常重送");
+    }
+
     /// turn 已經被 flush 出去（不再是 queued）就不歸這條管。
     #[tokio::test]
     async fn a_queue_that_flushed_in_time_is_left_alone() {
@@ -3453,6 +3540,90 @@ mod quota_restart_tests {
         (a.status, a.quota_retries)
     }
 
+    /// 之後每一句讀 `projects` 的都失敗——讀不到 bot 在哪台主機（#197 的注入方式）。
+    async fn break_host_reads(app: &Arc<App>) {
+        sqlx::query("ALTER TABLE projects RENAME TO projects_unreadable").execute(&app.db).await.unwrap();
+    }
+
+    async fn restore_host_reads(app: &Arc<App>) {
+        sqlx::query("ALTER TABLE projects_unreadable RENAME TO projects").execute(&app.db).await.unwrap();
+    }
+
+    /// #197：派送時查撞限讀不到這顆 bot 在哪台主機——以前當成沒撞限照送，可能送進一個已經用盡的遠端身分。現在 `hold`
+    /// 幾秒、不花重試、一個字都不送；讀得到之後照撞限停進 quota_blocked。
+    #[tokio::test]
+    async fn a_dispatch_that_cannot_read_the_targets_host_holds_instead_of_sending() {
+        let app = app().await;
+        bot(&app, "b1", "cc2").await;
+        assert!(crate::quota::seed_limit_hit(&app, "local", "claude:cc2", "2999-01-01T00:00:00Z", "撞限", None).await);
+        let a = store::insert_assignment(&app.db, None, "b1", "crid-197", "做 X", &[], None, true).await.unwrap();
+        break_host_reads(&app).await;
+
+        dispatch(&app, &a.id).await;
+        let row = store::assignment(&app.db, &a.id).await.unwrap().unwrap();
+        assert_eq!((row.status.as_str(), row.attempts, row.turn_id.as_deref()), ("queued", 0, None), "不送、不花重試：{:?}", row.error);
+        assert!(row.next_attempt_at.is_some() && row.error.as_deref().is_some_and(|e| e.contains("limit")), "hold 住、講明原因：{:?}", row.error);
+
+        restore_host_reads(&app).await;
+        sqlx::query("UPDATE supervisor_assignments SET next_attempt_at=NULL WHERE id=?").bind(&a.id).execute(&app.db).await.unwrap();
+        dispatch(&app, &a.id).await;
+        assert_eq!(status_of(&app, &a.id).await.0, "quota_blocked", "讀得到了：照撞限停下");
+    }
+
+    /// #197：時間到了、要重送之前查撞限讀不到主機——以前當成「沒人說還在擋」照樣重送（送進可能還用盡的身分，還算一次重送）。
+    /// 現在原地不動、不算次數；讀得到之後照常重送。
+    #[tokio::test]
+    async fn a_resume_that_cannot_read_the_targets_host_stays_parked() {
+        let app = app().await;
+        bot(&app, "b1", "cc2").await;
+        let id = parked(&app, "b1", "2020-01-01T00:00:00Z", &crate::db::now()).await;
+        break_host_reads(&app).await;
+
+        resume_quota_blocked(&app).await;
+        assert_eq!(status_of(&app, &id).await, ("quota_blocked".into(), 0), "不重送、不算次數");
+
+        restore_host_reads(&app).await;
+        resume_quota_blocked(&app).await;
+        let (status, retries) = status_of(&app, &id).await;
+        assert_ne!(status, "quota_blocked", "讀得到了：照常重送");
+        assert_eq!(retries, 1);
+    }
+
+    /// #197：開機回填讀不到 bot 在哪台主機——以前退回 `local`，遠端 bot 停下的撞限種進本機同名的 key、把本機那個健康的帳號
+    /// 擋住，而且這一輪照樣標成回填完、之後不會再補。現在那一件跳過、這一輪不算回填完；讀得到之後重跑，只種回它自己那台。
+    #[tokio::test]
+    async fn a_backfill_that_cannot_read_a_bots_host_skips_it_and_runs_again() {
+        let app = app().await;
+        sqlx::query("INSERT INTO projects (id,path,label,host,created_at) VALUES ('p-remote','/tmp','r','m4p',?)")
+            .bind(crate::db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        bot(&app, "b-local", "cc2").await;
+        sqlx::query("INSERT INTO bots (id,project_id,name,kind,identity,hook_token,created_at) VALUES ('b-remote','p-remote','b-remote','claude','cc9','t',?)")
+            .bind(crate::db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        parked(&app, "b-local", "2999-01-01T00:00:00Z", "2026-09-16T00:00:01Z").await;
+        parked(&app, "b-remote", "2999-01-01T00:00:00Z", "2026-09-16T00:00:01Z").await;
+        break_host_reads(&app).await;
+
+        backfill_quota_limits_once(&app, "local").await;
+        let seeded = |q: &std::collections::BTreeMap<String, crate::quota::Quota>, k: &str| q.get(k).and_then(|x| x.limit_hit.as_ref()).is_some();
+        {
+            let q = app.quotas.lock().await;
+            assert!(!seeded(&q, "claude:cc9"), "遠端 bot 的撞限不能種進本機的 key");
+            assert!(!seeded(&q, "claude:cc2"), "讀不到的那一件先跳過");
+        }
+
+        restore_host_reads(&app).await;
+        backfill_quota_limits_once(&app, "local").await;
+        let q = app.quotas.lock().await;
+        assert!(seeded(&q, "claude:cc2"), "這一輪沒算回填完：讀得到之後重跑，本機的補回去");
+        assert!(!seeded(&q, "claude:cc9"), "遠端的照舊不歸本機");
+    }
+
     /// 重啟後 `app.quotas` 是空的，但 `resume_at` 還沒到——那段等待沒有結束，不能重送。
     /// 沒有這條，daemon 一開機就會把整批 parked 的交辦倒給還在被擋的帳號。
     #[tokio::test]
@@ -3495,7 +3666,7 @@ mod quota_restart_tests {
         // 這個帳號只剩一張過期的：完全不該生出一格撞限。
         parked(&app, "b-cc1", "2020-01-01T00:00:00Z", "2026-09-16T00:00:04Z").await;
 
-        backfill_quota_limits(&app, "local", None).await;
+        backfill_quota_limits(&app, "local", None).await.unwrap();
 
         let q = app.quotas.lock().await;
         let hit = q.get("claude:cc2").and_then(|x| x.limit_hit.clone()).expect("還在等額度的那格要補回來");
@@ -3671,7 +3842,7 @@ mod quota_restart_tests {
             .execute(&app.db)
             .await
             .unwrap();
-        backfill_quota_limits(&app, "local", None).await;
+        backfill_quota_limits(&app, "local", None).await.unwrap();
         let q = app.quotas.lock().await;
         assert_eq!(q.get("claude:cc2").and_then(|x| x.limit_hit.as_ref()).and_then(|h| h.bucket.as_deref()), Some("five_hour"));
     }
@@ -3827,7 +3998,7 @@ mod quota_restart_tests {
         bot(&app, "b1", "cc2").await;
         let id = parked(&app, "b1", "2999-01-01T00:00:00Z", &crate::db::now()).await;
 
-        backfill_quota_limits(&app, "local", None).await;
+        backfill_quota_limits(&app, "local", None).await.unwrap();
         resume_quota_blocked(&app).await;
 
         assert_eq!(status_of(&app, &id).await, ("quota_blocked".into(), 0));
