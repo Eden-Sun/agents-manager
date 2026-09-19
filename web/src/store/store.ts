@@ -600,6 +600,20 @@ function startErrText(e: unknown): string {
   return errText(e)
 }
 
+/** API.md：`start_state_uncommitted`／`stop_state_uncommitted`／`restart_state_uncommitted`——外面做了、DB 還沒寫成。 */
+function isRunStateUncommitted(e: unknown, which: 'start' | 'stop' | 'restart'): boolean {
+  return e instanceof ApiError && e.status === 503 && e.body.error === `${which}_state_uncommitted`
+}
+
+function isActiveRunConflict(e: unknown): boolean {
+  return e instanceof ApiError && e.status === 409 && e.body.reason === 'active run already exists'
+}
+
+function runStateUncommittedText(e: unknown): string {
+  if (e instanceof ApiError && typeof e.body.message === 'string' && e.body.message.trim()) return e.body.message.trim()
+  return errText(e)
+}
+
 /** daemon 回穩定的機器 key，文案留在前端。 */
 function loginErrText(e: unknown): string {
   if (!(e instanceof ApiError)) return errText(e)
@@ -1161,7 +1175,16 @@ export const useStore = create<StoreState>((set, get) => ({
       get,
       `start:${botId}`,
       async () => {
-        await api.startBot(botId)
+        try {
+          await api.startBot(botId)
+        } catch (e) {
+          // 503：agent 已經起來；409 已有 run：側欄還沒跟上。都不是「沒啟動」。
+          if (isRunStateUncommitted(e, 'start')) {
+            get().notify('error', runStateUncommittedText(e))
+          } else if (!isActiveRunConflict(e)) {
+            throw e
+          }
+        }
         await get().refreshState()
         if (get().queuedSends[botId]) flushQueued(botId)
       },
@@ -1171,7 +1194,15 @@ export const useStore = create<StoreState>((set, get) => ({
 
   async stopBot(botId) {
     await guarded(set, get, `stop:${botId}`, async () => {
-      await api.stopBot(botId)
+      try {
+        await api.stopBot(botId)
+      } catch (e) {
+        if (isRunStateUncommitted(e, 'stop')) {
+          get().notify('error', runStateUncommittedText(e))
+        } else {
+          throw e
+        }
+      }
       await get().refreshState()
     })
   },
@@ -1561,6 +1592,8 @@ export const useStore = create<StoreState>((set, get) => ({
         // 好過使用者按了「立即重啟」卻什麼都沒發生。
         if (resumeNative && e instanceof ApiError && e.body.reason === 'cannot_resume') {
           await api.restartBot(botId)
+        } else if (isRunStateUncommitted(e, 'restart') || isRunStateUncommitted(e, 'start') || isRunStateUncommitted(e, 'stop')) {
+          get().notify('error', runStateUncommittedText(e))
         } else {
           throw e
         }

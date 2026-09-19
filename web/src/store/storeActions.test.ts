@@ -504,6 +504,54 @@ test('啟動撞到其他 409：沒有專屬文案時照舊顯示 reason（HTTP �
   assert.deepEqual(noticeTexts(), ['not_idle（HTTP 409）'])
 })
 
+const uncommittedRun = (error: string) =>
+  json(
+    {
+      error,
+      run_id: 'r1',
+      retryable: true,
+      message: 'agent 已經在跑，但 run 的狀態寫不進 DB；已排重試，會照 herdr 的狀態收斂成 running',
+    },
+    503,
+  )
+
+/** API.md：503 start_state_uncommitted＝agent 起來了、DB 還沒寫成。當失敗、不刷新的話側欄仍顯示停著，使用者再按一次就 409。 */
+test('啟動 503 start_state_uncommitted：要刷新狀態，不能當成沒啟動', async () => {
+  seed()
+  routeDaemon((r) => (r.path.endsWith('/start') ? uncommittedRun('start_state_uncommitted') : json({}, 200)))
+  await useStore.getState().startBot('b1')
+  assert.ok(
+    requests.some((r) => r.method === 'GET' && r.path.endsWith('/state')),
+    `503 之後要 refreshState，實際請求：${requests.map((r) => r.method + ' ' + r.path).join(', ')}`,
+  )
+  assert.ok(noticeTexts().some((t) => /已經在跑/.test(t)))
+})
+
+/** 側欄還沒跟上時再按啟動：daemon 回 409 active run already exists——bot 其實在跑，要刷新而不是只報機器碼。 */
+test('啟動 409 已有 active run：刷新狀態，不當成啟動失敗', async () => {
+  seed()
+  routeDaemon((r) =>
+    r.path.endsWith('/start') ? json({ error: 'conflict', reason: 'active run already exists', run_id: 'r1' }, 409) : json({}, 200),
+  )
+  await useStore.getState().startBot('b1')
+  assert.ok(requests.some((r) => r.method === 'GET' && r.path.endsWith('/state')))
+  assert.equal(noticeTexts().some((t) => /active run already exists/.test(t)), false)
+})
+
+test('停止 503 stop_state_uncommitted：要刷新狀態，不能當成沒停', async () => {
+  seed()
+  routeDaemon((r) => (r.path.endsWith('/stop') ? uncommittedRun('stop_state_uncommitted') : json({}, 200)))
+  await useStore.getState().stopBot('b1')
+  assert.ok(requests.some((r) => r.method === 'GET' && r.path.endsWith('/state')))
+})
+
+test('重啟 503 restart_state_uncommitted：要刷新狀態', async () => {
+  seed()
+  routeDaemon((r) => (r.path.includes('/restart') ? uncommittedRun('restart_state_uncommitted') : json({}, 200)))
+  assert.equal(await useStore.getState().restartBot('b1'), true)
+  assert.ok(requests.some((r) => r.method === 'GET' && r.path.endsWith('/state')))
+})
+
 /** issue #112：刪 bot 成功只該跳一次帶「復原」的通知，不該在 refreshState 之後又補一則沒有復原的。 */
 test('刪 Bot 成功：只跳一張帶「復原」的通知，不重複跳第二張', async () => {
   seed()
