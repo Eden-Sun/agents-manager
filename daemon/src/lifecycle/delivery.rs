@@ -708,7 +708,14 @@ pub(crate) async fn plan_delivery(
     let Some(pane) = run.pane_id.as_deref().map(str::trim).filter(|p| !p.is_empty()).map(str::to_string) else {
         return Ok(Err(Delivered::NotAttempted { reason: "no_pane_to_type_into", retry: true }));
     };
-    let host_is_local = matches!(db::project(&app.db, &bot.project_id).await, Ok(Some(p)) if p.host == LOCAL_HOST);
+    // 讀不到主機就不送（#198）：當成遠端會跳過本機 transcript／rollout 這種無損證據，改成盲打；一個字都還沒打，可重試。
+    let host_is_local = match db::project(&app.db, &bot.project_id).await {
+        Ok(p) => p.is_some_and(|p| p.host == LOCAL_HOST),
+        Err(e) => {
+            tracing::warn!(run = %run.id, error = %e, "cannot read the bot's host; not typing without knowing which evidence applies");
+            return Ok(Err(Delivered::NotAttempted { reason: "host_unreadable", retry: true }));
+        }
+    };
     let pane_cols = client.pane_size(&pane).await.ok().flatten().map(|(w, _)| w);
     let codex_log = match (bot.kind.as_str(), host_is_local, run.native_session_id.as_deref()) {
         ("codex", true, Some(session)) => codex_home(app, bot).await.and_then(|h| codex_session_log(&h, session)),

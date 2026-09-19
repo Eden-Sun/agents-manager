@@ -394,25 +394,64 @@ pub async fn withdraw_turn(app: &Arc<App>, turn_id: &str) -> LcResult<()> {
 
 /// 開機（那台主機對帳完成、autostart 那一步）：還在等 bot 起來、沒有 run 的，再替它啟動一次。
 /// 重啟前那次啟動可能根本沒做完。回傳踢了幾顆。
+///
+/// 讀不到就延後，不猜（#198）：以前清單讀不到當成「沒有」、主機讀不到當成本機——本機開機時把還沒對帳的遠端 bot
+/// 也起一顆（同一顆 bot 兩個 agent），真的在本機的那顆反而可能永遠沒人起。現在讀不到的 [`RESUME_RETRY`] 之後再看一次。
 pub(crate) async fn resume_after_boot(app: &Arc<App>, host: &str) -> usize {
-    let bots: Vec<String> = sqlx::query_scalar(
+    resume_waiting(app, host, None).await
+}
+
+/// 開機替等著的 bot 起來時，讀不到清單或主機，多久之後再看。
+const RESUME_RETRY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// `only`：重看時只看上一次讀不到主機的那幾顆。
+async fn resume_waiting(app: &Arc<App>, host: &str, only: Option<HashSet<String>>) -> usize {
+    let bots: Vec<String> = match sqlx::query_scalar(
         "SELECT DISTINCT c.bot_id FROM turns t JOIN conversations c ON c.id = t.conversation_id JOIN bots b ON b.id = c.bot_id
           WHERE t.status = 'queued' AND t.awaits_start = 1 AND b.deleted_at IS NULL
             AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.bot_id = c.bot_id AND r.state IN ('starting','running','stopping'))",
     )
     .fetch_all(&app.db)
     .await
-    .unwrap_or_default();
+    {
+        Ok(bots) => bots,
+        Err(e) => {
+            tracing::warn!(host, error = %e, "開機：讀不到等著起來的 bot，稍後再看");
+            retry_resume(app, host, only);
+            return 0;
+        }
+    };
     let mut kicked = 0;
-    for bot_id in bots {
-        if db::bot_host(&app.db, &bot_id).await.unwrap_or_else(|_| LOCAL_HOST.to_string()) != host {
-            continue;
+    let mut unknown = HashSet::new();
+    for bot_id in bots.into_iter().filter(|b| only.as_ref().is_none_or(|o| o.contains(b))) {
+        match db::bot_host(&app.db, &bot_id).await {
+            Ok(h) if h == host => {}
+            Ok(_) => continue,
+            Err(e) => {
+                tracing::warn!(host, bot = %bot_id, error = %e, "開機：讀不到這顆 bot 在哪台主機，先不替它起、稍後再看");
+                unknown.insert(bot_id);
+                continue;
+            }
         }
         tracing::info!(host, bot = %bot_id, "開機：有一則訊息等著這顆起來，替它啟動");
         kick(app, &bot_id);
         kicked += 1;
     }
+    if !unknown.is_empty() {
+        retry_resume(app, host, Some(unknown));
+    }
     kicked
+}
+
+fn retry_resume(app: &Arc<App>, host: &str, only: Option<HashSet<String>>) {
+    if cfg!(test) {
+        return;
+    }
+    let (app, host) = (app.clone(), host.to_string());
+    tokio::spawn(async move {
+        tokio::time::sleep(RESUME_RETRY).await;
+        resume_waiting(&app, &host, only).await;
+    });
 }
 
 #[cfg(test)]
@@ -459,6 +498,24 @@ mod tests {
         assert_eq!((t.status.as_str(), t.awaits_start), ("queued", 1), "還在佇列");
         assert_eq!(resume_after_boot(&fresh, LOCAL_HOST).await, 1, "開機對帳完替它再啟動一次");
         assert_eq!(resume_after_boot(&fresh, "elsewhere").await, 0, "別台主機的不歸這一輪");
+    }
+
+    /// #198 同類：開機替等著的 bot 起來時讀不到它在哪台主機，不當成本機——本機開機時把還沒對帳的遠端 bot 也起一顆，
+    /// 就是同一顆 bot 兩個 agent。讀不到的先不起，那台自己的開機（或稍後重看）再起。
+    #[tokio::test]
+    async fn a_waiting_bot_whose_host_cannot_be_read_is_not_started_as_local() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let far = db::ulid();
+        sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?, '/r/p', 'r', 'far', ?)").bind(&far).bind(db::now()).execute(&app.db).await.unwrap();
+        let bot = tt::claude_bot(&app, &far, "remote-waiting").await;
+        prompt_starting(&app, &bot.id, TEXT, "crid-far", &[], None).await.unwrap();
+
+        sqlx::query("ALTER TABLE projects RENAME TO projects_unreadable").execute(&app.db).await.unwrap();
+        assert_eq!(resume_after_boot(&app, LOCAL_HOST).await, 0, "讀不到主機：不當成本機的替它起");
+        sqlx::query("ALTER TABLE projects_unreadable RENAME TO projects").execute(&app.db).await.unwrap();
+        assert_eq!(resume_after_boot(&app, LOCAL_HOST).await, 0, "它不在本機");
+        assert_eq!(resume_after_boot(&app, "far").await, 1, "那台自己的開機替它起");
     }
 
     /// 啟動失敗不丟訊息：留在佇列、原因寫在 turn 上（UI 顯示「沒能啟動」＋重新啟動／取消）。每分鐘的撤孤兒掃描

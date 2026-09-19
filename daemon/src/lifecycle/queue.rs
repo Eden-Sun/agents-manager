@@ -654,9 +654,15 @@ pub async fn mark_run_exited(app: &Arc<App>, run_id: &str, reason: &str) -> RunE
     };
     revoke_orphaned_queued_turns(app, &run.bot_id, &format!("run 已結束（{reason}）")).await;
     if let Some(p) = run.pane_id.as_deref() {
-        let host = db::bot_host(&app.db, &run.bot_id).await.unwrap_or_else(|_| LOCAL_HOST.to_string());
-        if let Some(session) = app.session_for_run(&run).await {
-            crate::events::unwatch_pane_on_session(app, &host, &session, p).await;
+        // watcher 的 key 是 (host, session, pane)。讀不到主機就不拆（#198）：以前退回 `local`，本機剛好同名 session、同 pane id
+        // 的那顆 bot 的 watcher 被拆掉，它的狀態事件從此收不到。留下一個死 pane 的 watcher 無害。
+        match db::bot_host(&app.db, &run.bot_id).await {
+            Ok(host) => {
+                if let Some(session) = app.session_for_run(&run).await {
+                    crate::events::unwatch_pane_on_session(app, &host, &session, p).await;
+                }
+            }
+            Err(e) => tracing::warn!(run = run_id, error = %e, "cannot read the host of an exited run; its pane watcher is left in place"),
         }
     }
     app.emit_bot_status(&run.bot_id).await;
@@ -773,6 +779,26 @@ mod run_exit_race_tests {
         assert!(!rs::watched(&app, &watcher).await);
     }
 
+    /// #198 同類：run 結束時讀不到它的主機，不拿 `local` 頂替去拆 watcher——本機剛好同名 session、同 pane id 的那顆
+    /// bot 的 watcher 會被拆掉，它的狀態事件從此收不到。
+    #[tokio::test]
+    async fn a_run_exit_whose_host_cannot_be_read_leaves_other_hosts_watchers_alone() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let far = db::ulid();
+        sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?, '/r/p', 'r', 'far', ?)").bind(&far).bind(db::now()).execute(&app.db).await.unwrap();
+        let bot = tt::claude_bot(&app, &far, "remote").await;
+        let run = tt::fake_run(&app, &bot.id).await;
+        let pane = format!("pane-{}", bot.id);
+        let local = (LOCAL_HOST.to_string(), "test".to_string(), pane.clone());
+        app.pane_watchers.lock().await.insert(local.clone(), tokio::spawn(std::future::pending::<()>()));
+
+        sqlx::query("ALTER TABLE projects RENAME TO projects_unreadable").execute(&app.db).await.unwrap();
+        mark_run_exited(&app, &run, "pane exited").await;
+        sqlx::query("ALTER TABLE projects_unreadable RENAME TO projects").execute(&app.db).await.unwrap();
+        assert!(rs::watched(&app, &local).await, "本機那顆的 watcher 不是這個 run 的");
+    }
+
     /// #156：`exited` 記下了，in-flight 那一筆卻收不成。pane 已經沒了（這不是我們能不做的事），所以不回
     /// 「收尾做完了」：記成欠著的收尾、之後補上；佇列與 watcher 照樣收（那是 run 結束的事，跟回合收不收得成無關）。
     #[tokio::test]
@@ -841,7 +867,7 @@ mod flush_queue_tests {
         let env = tt::env().await;
         let app = env.app.clone();
         let notice = "ERROR: You've hit your usage limit, or try again at 10:15 PM.";
-        apply_codex_limit_hit_quota(&app, LOCAL_HOST, Some("astra"), notice).await;
+        apply_codex_limit_hit_quota(&app, LOCAL_HOST, "codex:astra", codex_limit_hit(notice, db::now())).await;
 
         let q = app.quotas.lock().await;
         let mine = q.get("codex:astra").expect("寫進帶身分的那把");
@@ -858,11 +884,11 @@ mod flush_queue_tests {
         let env = tt::env().await;
         let app = env.app.clone();
         let notice = "ERROR: You've hit your usage limit, or try again at 10:15 PM.";
-        apply_codex_limit_hit_quota(&app, LOCAL_HOST, None, notice).await;
+        apply_codex_limit_hit_quota(&app, LOCAL_HOST, "codex", codex_limit_hit(notice, db::now())).await;
         let first = app.quotas.lock().await.get("codex").unwrap().limit_hit.clone().unwrap();
 
         // 中間 app-server 清橫幅是另一條規則；這裡只測重掃。
-        apply_codex_limit_hit_quota(&app, LOCAL_HOST, None, notice).await;
+        apply_codex_limit_hit_quota(&app, LOCAL_HOST, "codex", codex_limit_hit(notice, db::now())).await;
         let again = app.quotas.lock().await.get("codex").unwrap().limit_hit.clone().unwrap();
         assert_eq!(first.at, again.at, "同一張橫幅不會把時間戳往前推");
         assert_eq!(first.until, again.until);

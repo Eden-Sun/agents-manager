@@ -21,6 +21,9 @@ pub fn schedule_codex_notice_capture(app: &Arc<App>, bot_id: &str, run_id: &str)
 }
 
 /// Persist newly seen Codex account notices (reset available or hard limit). Caller holds the bot lock.
+///
+/// 撞限記不進正確那一格（讀不到主機、身分表還沒偵測完、排著的蓋不上憑據）時欠著（[`crate::turn_error::mark_codex_limit_hit`]，
+/// #198），回合照樣收，錯誤最後回給呼叫端。
 pub async fn capture_codex_usage_notices(app: &Arc<App>, bot_id: &str, expected_run_id: &str) -> anyhow::Result<()> {
     let Some(run) = db::active_run(&app.db, bot_id).await? else { return Ok(()) };
     if run.id != expected_run_id {
@@ -39,15 +42,18 @@ pub async fn capture_codex_usage_notices(app: &Arc<App>, bot_id: &str, expected_
     let limit_banners: Vec<String> = notices.iter().filter(|n| codex_limit_hit_line(n).is_some()).cloned().collect();
     // 同一畫面裡比最後一張橫幅更新的狀態列還有餘裕 → 畫面上的撞限橫幅都是舊的（見 `limit_banner`）。
     let headroom_below = super::limit_banner::status_line_says_headroom(&read.text);
+    let mut marked = Ok(());
     for notice in notices {
         let is_limit = codex_limit_hit_line(&notice).is_some();
+        // 撞限要看的「有沒有回合在飛」在寫通知訊息**之前**讀（#198）：訊息寫了之後這一則就不再是新的（`fresh`），
+        // 讀在後面的話讀錯就回錯，沒有在飛回合時下一次被當成看過的舊橫幅跳過，撞限永遠不記。
+        let in_flight = if is_limit { db::in_flight_turn(&app.db, &run.id).await? } else { None };
         if is_limit {
             // fork／resume 重播的舊橫幅、或同一畫面更新的狀態列說還有額度：不寫系統訊息、不標額度、
             // 不解開回合（2026-09-14 AGM：fork 重播讓交辦被 quota_blocked）。`sighting` 每次讀取都要問，
             // 它同時更新「上一次看到幾次」。
-            let in_flight_now = db::in_flight_turn(&app.db, &run.id).await?.is_some();
             let seen = super::limit_banner::sighting(&run.id, &read.text, &notice, &limit_banners);
-            let replayed = super::limit_banner::is_history(seen, in_flight_now);
+            let replayed = super::limit_banner::is_history(seen, in_flight.is_some());
             if replayed || headroom_below {
                 tracing::debug!(bot = %bot.name, replayed, headroom_below, "codex limit banner on screen is history, not a limit hit");
                 continue;
@@ -70,15 +76,19 @@ pub async fn capture_codex_usage_notices(app: &Arc<App>, bot_id: &str, expected_
             insert_message(app, &conversation_id, None, "system", &notice, "system", false, None).await?;
             tracing::info!(bot = %bot.name, notice = %notice, "codex account notice captured");
         }
+        #[cfg(test)]
+        super::race_point::hit("codex_notice_after_insert", bot_id).await;
         if is_limit {
             // 有回合在飛＝橫幅就是那句的答案，照樣處理；否則只認這個 run 內第一次看到的，
             // 舊橫幅才不會反覆把額度打回 100%。
-            let in_flight = db::in_flight_turn(&app.db, &run.id).await?;
             if !fresh && in_flight.is_none() {
                 continue;
             }
-            let host = db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| LOCAL_HOST.to_string());
-            apply_codex_limit_hit_quota(app, &host, bot.identity.as_deref(), &notice).await;
+            // 記在這顆 bot 的主機與身分那一格；讀不到主機不退回 `local`（那會把本機帳號標成用盡，遠端那個用盡的身分
+            // 反而沒擋），記不進去就欠著，派送前與 flush 照欠著的那一筆擋（#198）。
+            if let Err(e) = crate::turn_error::mark_codex_limit_hit(app, &bot, &notice).await {
+                marked = Err(e);
+            }
             // Unlock the composer: a limit hit is a failed turn, not a silent idle.
             if let Some(turn) = in_flight {
                 let res = super::turn_controller::fail(&app.db, &turn.id, super::turn_controller::DeliveryOnFail::Keep, "撞限橫幅").await?;
@@ -88,7 +98,7 @@ pub async fn capture_codex_usage_notices(app: &Arc<App>, bot_id: &str, expected_
             }
         }
     }
-    Ok(())
+    marked
 }
 
 
@@ -451,7 +461,7 @@ fn month_num_token(tok: &str) -> Option<u32> {
 
 /// `try again at Aug 8th, 2025 1:47 PM` → RFC3339 UTC. The date is optional: same-day resets are
 /// a bare `5:07 AM.` (2026-09-10, codex-astra), read as the next time that clock comes round.
-fn parse_codex_try_again(notice: &str) -> Option<String> {
+pub(crate) fn parse_codex_try_again(notice: &str) -> Option<String> {
     parse_codex_try_again_at(notice, chrono::Local::now())
 }
 
@@ -558,12 +568,20 @@ fn parse_codex_try_again_at(notice: &str, now: chrono::DateTime<chrono::Local>) 
     Some(dt.with_timezone(&chrono::Utc).to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
 }
 
+/// codex 撞限橫幅的那一筆撞限：到期是橫幅上寫的時間（撞的當下解析），沒寫就沒有（credits 用完，等下一個成功回合清）。
+/// 正式路徑在 `turn_error::mark_codex_limit_hit` 組（欠帳要留著撞的當下那一份），這支給測試直接寫一格。
+#[cfg(test)]
+pub(crate) fn codex_limit_hit(notice: &str, at: String) -> crate::quota::LimitHit {
+    crate::quota::LimitHit { message: notice.to_string(), until: parse_codex_try_again(notice), at, bucket: None }
+}
+
 /// Mirror a Codex hard limit-hit onto that host's quota row immediately (the rate-limits RPC lags).
-pub(crate) async fn apply_codex_limit_hit_quota(app: &Arc<App>, host: &str, identity: Option<&str>, notice: &str) {
-    let resets = parse_codex_try_again(notice);
-    // 寫進這顆 bot 身分的 key：查詢端先查 `codex:<identity>`，以前寫裸 `codex` 對不上（2026-09-13 AGM）。
-    let base = crate::quota::quota_base_for_host(app, host, "codex", identity).await;
-    let key = crate::quota::quota_key(host, &base);
+/// 回傳記憶體裡擋著的那一筆（同一張還沒過期的橫幅就是原本那筆）。
+///
+/// `base` 由呼叫端算（[`crate::turn_error::mark_codex_limit_hit`]）：寫進這顆 bot 身分的 key——查詢端先查
+/// `codex:<identity>`，以前寫裸 `codex` 對不上（2026-09-13 AGM）；讀不到主機、身分表還沒偵測完都不猜（#198）。
+pub(crate) async fn apply_codex_limit_hit_quota(app: &Arc<App>, host: &str, base: &str, hit: crate::quota::LimitHit) -> crate::quota::LimitHit {
+    let key = crate::quota::quota_key(host, base);
     let mut q = app
         .quotas
         .lock()
@@ -585,8 +603,8 @@ pub(crate) async fn apply_codex_limit_hit_quota(app: &Arc<App>, host: &str, iden
     // 同一張橫幅再看到不是新證據（2026-09-13：掃到 22:15 的舊橫幅卻把 `at` 蓋成現在、量表打回 100%）。
     // 但**已經過期**的那張不算數：`until` 到了、交辦重送、CLI 回同一句橫幅——這是真的又被擋一次，
     // 略過的話 `on_turn_done` 查不到撞限，交辦會被結成 failed 送去驗收（review3 c2 M1）。
-    if q.limit_hit.as_ref().is_some_and(|h| h.message == notice && !crate::quota::limit_hit_expired(Some(h))) {
-        return;
+    if let Some(h) = q.limit_hit.as_ref().filter(|h| h.message == hit.message && !crate::quota::limit_hit_expired(Some(h))) {
+        return h.clone();
     }
     // 量表標成用完，但重置時間不從橫幅寫：橫幅時間會舊會歪（同日解析成隔天，交辦等 24 小時）。
     // 只記在 `limit_hit.until`；`resets_at` 留給 app-server／statusLine。
@@ -599,15 +617,11 @@ pub(crate) async fn apply_codex_limit_hit_quota(app: &Arc<App>, host: &str, iden
         q.five_hour = Some(win);
     }
     // 黏著走，直到 `until` 過了、下一回合成功、或更新的結構化讀數說還有額度（`quota::set`）。
-    q.limit_hit = Some(crate::quota::LimitHit {
-        message: notice.to_string(),
-        until: resets.clone(),
-        at: crate::db::now(),
-            bucket: None,
-    });
+    q.limit_hit = Some(hit.clone());
     q.updated_at = crate::db::now();
     q.source = "codex-limit-hit".into();
-    crate::quota::set(app, host, &base, q).await;
+    crate::quota::set(app, host, base, q).await;
+    hit
 }
 
 /// No reply marker: keep what follows the last prompt echo minus chrome. `⎿` lines stay — they
@@ -1677,13 +1691,17 @@ mod limit_hit_quota_tests {
 
     const NOTICE: &str = "ERROR: You've hit your usage limit, or try again at 10:15 PM.";
 
+    async fn apply(app: &Arc<App>) {
+        apply_codex_limit_hit_quota(app, LOCAL_HOST, "codex", codex_limit_hit(NOTICE, crate::db::now())).await;
+    }
+
     /// review3 c2 M1：`until` 到了、交辦重送、CLI 回同一句橫幅——這是真的又被擋一次，不是重掃舊字。
     /// 以前同文就直接略過，記憶體裡只剩那張過期的，`on_turn_done` 查不到撞限，交辦被結成 failed 送去驗收。
     #[tokio::test]
     async fn the_same_banner_after_the_old_one_expired_is_a_fresh_hit() {
         let env = tt::env().await;
         let app = env.app.clone();
-        apply_codex_limit_hit_quota(&app, LOCAL_HOST, None, NOTICE).await;
+        apply(&app).await;
         // 改成已經過期，模擬「等到重置時間、重送一次，又撞到同一句」。
         {
             let mut q = app.quotas.lock().await;
@@ -1692,11 +1710,70 @@ mod limit_hit_quota_tests {
             hit.at = "2020-01-01T00:00:00Z".into();
         }
 
-        apply_codex_limit_hit_quota(&app, LOCAL_HOST, None, NOTICE).await;
+        apply(&app).await;
 
         let hit = app.quotas.lock().await.get("codex").unwrap().limit_hit.clone().expect("又被擋一次要重新記上");
         assert!(!crate::quota::limit_hit_expired(Some(&hit)), "新的那張不該是過期的：{hit:?}");
         assert_ne!(hit.at, "2020-01-01T00:00:00Z", "時間戳要更新成這一次");
+    }
+
+    const FAR_LIMIT: &str = "■ You've hit your usage limit. Upgrade to Pro, or try again at Sep 19th, 2099 6:43 PM.";
+
+    /// 一顆在跑的本機 codex bot，畫面上是 `screen`。
+    async fn codex_run(env: &tt::Env, identity: Option<&str>, screen: &str) -> (crate::db::Bot, String) {
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "cx").await;
+        sqlx::query("UPDATE bots SET kind='codex', identity=? WHERE id=?").bind(identity).bind(&bot.id).execute(&app.db).await.unwrap();
+        let run = tt::fake_run(&app, &bot.id).await;
+        env.herdr.set_screen(&format!("pane-{}", bot.id), screen);
+        (crate::db::bot(&app.db, &bot.id).await.unwrap().unwrap(), run)
+    }
+
+    fn banner_screen() -> String {
+        format!("› Reply with PONG\n\n{FAR_LIMIT}\n\n› \n")
+    }
+
+    async fn limit_hits(app: &Arc<App>) -> Vec<String> {
+        app.quotas.lock().await.iter().filter(|(_, q)| q.limit_hit.is_some()).map(|(k, _)| k.clone()).collect()
+    }
+
+    /// #198：畫面上的撞限橫幅記不進正確那一格（身分表還沒偵測完，算不出 `cx0` 是不是預設帳號）就欠著，不猜一格
+    /// `codex:cx0`；回合照樣收成 failed，派送前照欠著的那一筆擋。
+    #[tokio::test]
+    async fn a_limit_notice_whose_key_is_unknown_is_owed_not_guessed() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot, run) = codex_run(&env, Some("cx0"), &banner_screen()).await;
+        let turn = crate::lifecycle::run_state::a_turn(&app, &bot.id, Some(&run), "in_flight").await;
+
+        assert!(capture_codex_usage_notices(&app, &bot.id, &run).await.is_err(), "記不進去要回錯");
+        assert_eq!(limit_hits(&app).await, Vec::<String>::new(), "沒有猜一格寫下去");
+        assert_eq!(crate::lifecycle::run_state::turn_status(&app, &turn).await, "failed", "回合照樣收");
+        assert!(crate::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some(), "欠著照擋");
+    }
+
+    /// #198 的留言：通知訊息先寫，之後這一則就不是新的。以前寫完訊息才讀「有沒有回合在飛」，那一下讀錯就回錯——沒有在飛
+    /// 回合的話，下一次被當成看過的舊橫幅跳過，撞限永遠不記。現在先讀再寫；訊息寫下之後的失敗（這裡是蓋憑據）由欠帳接手。
+    #[tokio::test]
+    async fn a_limit_notice_is_never_lost_to_a_read_error_after_it_was_written() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot, run) = codex_run(&env, None, &banner_screen()).await;
+        // 這個 run 已經讀過一次畫面（那時沒有橫幅），這張是新的。
+        super::super::limit_banner::sighting(&run, "", FAR_LIMIT, &[]);
+        let a = app.clone();
+        super::super::race_point::arm("codex_notice_after_insert", &bot.id, move || async move {
+            sqlx::query("ALTER TABLE turns RENAME TO turns_unreadable").execute(&a.db).await.unwrap();
+        });
+        let first = capture_codex_usage_notices(&app, &bot.id, &run).await;
+        sqlx::query("ALTER TABLE turns_unreadable RENAME TO turns").execute(&app.db).await.unwrap();
+        assert!(first.is_err(), "後面寫不進去要回錯");
+        capture_codex_usage_notices(&app, &bot.id, &run).await.unwrap();
+
+        let notes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE role='system' AND content LIKE '%hit your usage limit%'").fetch_one(&app.db).await.unwrap();
+        assert_eq!(notes, 1, "通知只寫一次");
+        assert!(crate::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some(), "撞限記下了（或欠著照擋），沒有因為讀錯就丟掉");
+        assert_eq!(limit_hits(&app).await, vec!["codex".to_string()]);
     }
 
     /// 還沒過期的同一張橫幅照舊不算新證據（2026-09-13：22:21 掃到 22:15 的舊橫幅，把 `at` 蓋成現在）。
@@ -1704,10 +1781,10 @@ mod limit_hit_quota_tests {
     async fn an_unexpired_banner_seen_again_is_still_not_new_evidence() {
         let env = tt::env().await;
         let app = env.app.clone();
-        apply_codex_limit_hit_quota(&app, LOCAL_HOST, None, NOTICE).await;
+        apply(&app).await;
         let first = app.quotas.lock().await.get("codex").unwrap().limit_hit.clone().unwrap();
 
-        apply_codex_limit_hit_quota(&app, LOCAL_HOST, None, NOTICE).await;
+        apply(&app).await;
 
         let again = app.quotas.lock().await.get("codex").unwrap().limit_hit.clone().unwrap();
         assert_eq!((first.at, first.until), (again.at, again.until));
