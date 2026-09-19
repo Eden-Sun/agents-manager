@@ -61,12 +61,33 @@ am_real_cargo() {
     }
 }
 
-# `build`/`check`/`test`/`clippy`/… multiply rustc processes; `--version`/`metadata`/`tree`/`fmt`/
-# `fetch` don't compile anything and would just add latency for nothing.
+# cargo 的命令列是 `cargo [+toolchain] [全域旗標…] <子指令> …`：第一個參數不一定是子指令（issue #195）——`cargo +nightly build`、`cargo -q build`、
+# `cargo --locked test`、`cargo -Z unstable-options build` 的第一個參數都不是。以前只看 `$1`，這些一律被當成「輕量子指令」直接 exec，
+# 不問排程器、不佔名額、也不轉外部編譯。這裡找出真正的子指令：跳過 `+toolchain` 與全域旗標（`-Z`／`-C`／`--config`／`--color`／`--explain` 連它的值一起跳過）。
+# 找不到子指令（`cargo`、`cargo --version`、`cargo -h`）就印空字串。
+am_cargo_subcommand() {
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            +*) ;;
+            -Z | -C | --config | --color | --explain) [ "$#" -lt 2 ] || shift ;;
+            -*) ;;
+            *)
+                printf '%s' "$1"
+                return 0
+                ;;
+        esac
+        shift
+    done
+    return 0
+}
+
+# `build`/`check`/`test`/`clippy`/… multiply rustc processes;`metadata`/`tree`/`fmt`/`fetch`/… 這些**已知不編譯**的才放行。
+# 反過來寫（不在輕量清單裡的都當成會編譯，issue #195）：`.cargo/config.toml` 的 alias（本 repo 的 `cargo dev` 展開成 `run`）由 cargo 自己展開、
+# 自訂子指令（`cargo nextest`、`cargo xtask`）也可能編譯——認不得就當成 heavy，寧可排一下隊，不要悄悄繞過排程器。
 am_cargo_is_heavy() {
     case "$1" in
-        b | build | c | check | t | test | clippy | bench | r | run | rustc | doc | install) return 0 ;;
-        *) return 1 ;;
+        '' | version | help | metadata | tree | fmt | fetch | locate-project | pkgid | read-manifest | verify-project | search | login | logout | owner | yank | new | init | add | remove | rm | update | generate-lockfile | vendor | config | report | clean | uninstall) return 1 ;;
+        *) return 0 ;;
     esac
 }
 
@@ -371,7 +392,8 @@ am_cargo() {
         printf 'agents-manager: 找不到真正的 cargo（把它的路徑放進 AM_REAL_CARGO）\n' >&2
         exit 127
     fi
-    if ! am_cargo_is_heavy "${1:-}"; then
+    _sub=$(am_cargo_subcommand "$@")
+    if ! am_cargo_is_heavy "$_sub"; then
         exec "$_real" "$@"
     fi
     # 這條進程鏈上已經有人拿著名額（build script 或 xtask 再叫一次 cargo）：直接跑，不要再排一次。
@@ -406,10 +428,10 @@ am_cargo() {
     #
     # pane 缺 helper／config 的位置時**不能靜默退回本機**（issue #138）：整批子 agent 因此在本機排隊，
     # 而沒有人知道外部編譯根本沒生效。缺哪個就講哪個。
-    if am_remote_cargo_eligible "${1:-}"; then
+    if am_remote_cargo_eligible "$_sub"; then
         _remote_missing=$(am_remote_cargo_missing)
         if [ -n "$_remote_missing" ]; then
-            printf 'agents-manager: 外部編譯沒有啟用：這個 pane 缺 %s（沒設，或指到的檔案不能執行），這次 %s 在本機跑\n' "$_remote_missing" "${1:-cargo}" >&2
+            printf 'agents-manager: 外部編譯沒有啟用：這個 pane 缺 %s（沒設，或指到的檔案不能執行），這次 %s 在本機跑\n' "$_remote_missing" "${_sub:-cargo}" >&2
         else
             "$AM_DAEMON_EXE" remote-cargo --config "$AM_CONFIG_PATH" --data-dir "$AM_DATA_DIR" --cwd "$PWD" -- "$@"
             _remote_rc=$?
@@ -1138,6 +1160,51 @@ esac"#
         assert_eq!(rc, 75, "{err}");
         assert!(err.contains("沒有 curl"), "{err}");
         assert!(!log.exists(), "{err}");
+    }
+
+    /// issue #195：cargo 的命令列是 `cargo [+toolchain] [全域旗標…] <子指令>`，子指令不一定是第一個參數。以前只看 `$1`：`cargo +nightly build`、
+    /// `cargo -q build`、`cargo --locked test`、`cargo -Z … build` 一律被當成輕量子指令直接 exec，不問排程器。現在找出真正的子指令；
+    /// 而且反過來寫（不在已知輕量清單裡的都當 heavy）：`.cargo/config.toml` 的 alias（本 repo 的 `cargo dev`）與自訂子指令（`cargo nextest`）也不再悄悄繞過。
+    /// 每一種 shell 都驗（含 macOS 的 bash 3.2）：要排程的問過排程器且真的 cargo 收到原樣的參數；輕量的一通 curl 都不叫。
+    #[test]
+    fn the_subcommand_is_found_behind_a_toolchain_and_global_flags() {
+        let heavy: &[&[&str]] = &[
+            &["build"],
+            &["+nightly", "build"],
+            &["-q", "build"],
+            &["--locked", "test", "-p", "agents-managerd"],
+            &["-Z", "unstable-options", "build"],
+            &["--color", "always", "check"],
+            &["--color=never", "clippy"],
+            &["+nightly", "-q", "--locked", "clippy", "--all-targets"],
+            &["-C", "daemon", "test"],
+            &["--config", "build.jobs=2", "build"],
+            &["dev"],
+            &["nextest", "run"],
+        ];
+        let light: &[&[&str]] = &[&["--version"], &["-V"], &["-q", "metadata"], &["+nightly", "fmt", "--check"], &["--locked", "tree"], &["--color", "always", "fetch"], &["+nightly"], &[]];
+        for sh in shells() {
+            for (asked, cases) in [(true, heavy), (false, light)] {
+                for args in cases {
+                    let s = Sandbox::new();
+                    s.install_fake_curl(&format!(
+                        "echo \"$*\" >> '{d}/curl.log'\ncase \"$*\" in\n  *acquire*) printf '{{\"granted\":true,\"token\":\"tok-1\",\"cargo_jobs\":2,\"lease_ttl_secs\":30}}' ;;\n  *) printf '{{}}' ;;\nesac\n",
+                        d = s.dir.display()
+                    ));
+                    let log = s.dir.join("cargo.log");
+                    let mut env = lease_env(&s);
+                    env.push(("AM_TEST_FAKE_CARGO_LOG", log.display().to_string()));
+                    let (_, err, rc) = s.run_in(Some(sh), &as_refs(&env), args);
+                    let why = format!("{sh} cargo {args:?}: {err}");
+                    assert_eq!(rc, 0, "{why}");
+                    let asked_now = std::fs::read_to_string(s.dir.join("curl.log")).unwrap_or_default().contains("/acquire");
+                    assert_eq!(asked_now, asked, "{}問排程器：{why}", if asked { "該" } else { "不該" });
+                    // 真的 cargo 收到的參數要原樣（`CARGO_BUILD_JOBS=` 那行之後一行一個）。
+                    let ran: Vec<String> = std::fs::read_to_string(&log).unwrap().lines().skip(1).map(str::to_string).collect();
+                    assert_eq!(ran, args.iter().map(|a| a.to_string()).collect::<Vec<_>>(), "{why}");
+                }
+            }
+        }
     }
 
     /// issue #153：遠端主機上的 bot pane 沒有 `AM_PORT`（遠端沒有 daemon，也不開反向埠，SPEC §11.4；daemon 不注入），

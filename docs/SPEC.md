@@ -1436,6 +1436,10 @@ listen port 只在本機算（pane 行程樹的 pid 對 `lsof -nP -iTCP -sTCP:LI
 
 #### `cargo` shim（issue 建議的 PATH wrapper；`cargo_shim.rs`，跟 `herdr_shim.rs` 同一種寫法）
 - 沒有 bot token 也沒有 UI token 檔可讀：直接不排程，印一行 stderr 說明，直接跑（issue 要求「明講的 bypass 路徑」）。
+- **子指令的判斷（issue #195）**：cargo 的命令列是 `cargo [+toolchain] [全域旗標…] <子指令>`。shim 跳過 `+toolchain` 與全域旗標（`-Z`／`-C`／`--config`／`--color`／`--explain` 連值一起）找出真正的子指令，
+  **反過來寫**：只有已知不編譯的（`metadata`／`tree`／`fmt`／`fetch`／`update`／`clean`／`add`／…，加上沒有子指令的 `--version`、`-h`）放行，其餘一律當 heavy——
+  `cargo +nightly build`、`cargo -q build`、`cargo --locked test`、`.cargo/config.toml` 的 alias（`cargo dev`）與自訂子指令（`cargo nextest`）都不會悄悄繞過排程器。
+  外部編譯（`remote-cargo` helper 的 `eligible`）只搬「原樣搬到遠端意思不變」的全域旗標（`-v`／`-q`／`--locked`／`--color`）；`+toolchain`、`-C`、`--config`、`--offline`、`--frozen`、`-Z` 留在本機、照本機名額排。
 - **排程器問不到（連不上、空回應、5xx／不是 JSON、身分被拒）時，受管的 bot 不會變成沒有名額的 cargo（issue #128 重開）**：daemon 重啟／升級／DB 出問題的
   瞬間所有 bot 同時開編就繞過了 `max_concurrent`，而那正是最需要保護本機的時候。「受管」＝pane 有 `AM_BOT_ID`、hook token 與 `AM_PORT`（本機 bot）。
   受管的 bot：每 3 秒重試，最多等 `AM_BUILD_SCHEDULER_WAIT_SECS`（預設 120 秒），之後 **fail closed，exit 75**（可重試），stderr 講明原因與怎麼明確繞過；
