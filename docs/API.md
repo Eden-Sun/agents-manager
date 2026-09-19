@@ -858,8 +858,8 @@ env 值的 `$HOME`、`${HOME}` 與開頭 `~` 展開成**該 host 的 home**。id
 | 狀況 | 回應 |
 |---|---|
 | identity 不存在 | `404 {"what":"identity"}` |
-| 該 kind 的 CLI 不在偵測到的 PATH | `409 {"reason":"identity_login_unavailable"}` |
-| host 不存在 / 未連線 / pane 建立失敗 | 404 / 502 |
+| 該 kind 的 CLI 不在偵測到的 PATH | `409 {"reason":"identity_login_unavailable","host","identity","kind","message"}`（`message` 是人話；`reason` 是機器 key，不能再用 `reason` 放中文否則會蓋掉） |
+| host 不存在 / 未連線 / pane 建立失敗 | `404 {"what":"host"}` / 502 |
 
 ### `POST /api/hosts/{name}/identities/{identity}/logout`
 同一條路、同一組 env，只是指令換成 `claude /logout` / `codex logout` / `grok logout`（回應與錯誤與 login 相同）。
