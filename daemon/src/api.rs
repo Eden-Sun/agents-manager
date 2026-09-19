@@ -1388,6 +1388,11 @@ pub(crate) async fn delete_bot(State(app): State<Arc<App>>, Path(id): Path<Strin
         return Err(LcError::NotFound("bot".into()));
     }
     let host = db::bot_host(&app.db, &id).await.map_err(any_err)?;
+    // 定案之前先確定讀得到每一顆的 run 狀態：讀不到就 502、什麼都不動，可以原樣再按一次。定案之後才發現讀不到，
+    // 已經是「軟刪了、run 不知道還在不在」，只能保住目錄（#210）。
+    for b in std::iter::once(&bot).chain(children.iter()) {
+        db::active_run(&app.db, &b.id).await.map_err(any_err)?;
+    }
     // 先定案、再停機（sol 四輪）：會 409 的只有這一步，這時什麼都還沒停；定案之後沒有會失敗回頭的步驟，
     // 所以不會留下「已停、未刪」。（child 由母 agent 開，daemon 本來就重開不了它，事後回滾做不到。）
     if bot.managed_by == "child" {
@@ -1395,29 +1400,45 @@ pub(crate) async fn delete_bot(State(app): State<Arc<App>>, Path(id): Path<Strin
     } else {
         delete_in_config(&app, crate::projection::DeleteTarget::Bot(&id)).await?;
     }
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("delete_bot_after_decided", &id).await;
+    // 目錄只在「確定沒有 active run」時才 purge（#210）；不確定的留著，列在回應的 `kept_dirs`，下次開機的
+    // `purge_deleted_bot_dirs` 在 run 確定結束之後再收。
     let mut removed_children = Vec::new();
+    let mut kept_dirs: Vec<Value> = Vec::new();
     for child in children {
-        stop_for_delete_locked(&app, &child.id).await;
+        let settled = stop_for_delete_locked(&app, &child.id).await;
         sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL")
             .bind(db::now())
             .bind(&child.id)
             .execute(&app.db)
             .await
             .map_err(any_err)?;
-        let child_host = db::bot_host(&app.db, &child.id).await.unwrap_or_else(|_| host.clone());
-        lifecycle::purge_bot_dir(&app, &child.id, &child_host).await;
+        match settled {
+            Ok(()) => {
+                let child_host = db::bot_host(&app.db, &child.id).await.unwrap_or_else(|_| host.clone());
+                lifecycle::purge_bot_dir(&app, &child.id, &child_host).await;
+            }
+            Err(why) => kept_dirs.push(json!({"bot_id": child.id, "reason": why})),
+        }
         app.emit("bot_changed", json!({"bot_id": child.id})).await;
         removed_children.push(child.id);
     }
     // 已經拿著全部的鎖：一律用 locked 版（stop_bot 會再拿同一把而卡死）。
-    stop_for_delete_locked(&app, &id).await;
-    // Soft delete; the conversation and its messages stay.
-    lifecycle::purge_bot_dir(&app, &id, &host).await;
+    match stop_for_delete_locked(&app, &id).await {
+        // Soft delete; the conversation and its messages stay.
+        Ok(()) => lifecycle::purge_bot_dir(&app, &id, &host).await,
+        Err(why) => kept_dirs.push(json!({"bot_id": id, "reason": why})),
+    }
     app.emit("bot_changed", json!({"bot_id": id})).await;
     if bot.managed_by == "child" {
         app.emit("project_changed", json!({"project_id": bot.project_id})).await;
     }
-    Ok((StatusCode::OK, Json(json!({"removed_children": removed_children}))).into_response())
+    let mut out = json!({"removed_children": removed_children});
+    if !kept_dirs.is_empty() {
+        out["kept_dirs"] = json!(kept_dirs);
+    }
+    Ok((StatusCode::OK, Json(out)).into_response())
 }
 
 /// If the host is down the stop fails; end the run anyway, else no reconcile ever ends it and
@@ -1437,11 +1458,39 @@ async fn lock_bots_in_order(
     (ids, guards)
 }
 
-async fn stop_for_delete_locked(app: &Arc<App>, bot_id: &str) {
+/// 刪除前的停機。`Ok(())`＝停好了、而且**讀得到**現在沒有 active run，這顆的目錄可以 purge；`Err(reason)`＝不確定，
+/// 目錄要留著（#210，跟 `purge_deleted_bot_dirs` 同一條原則：只有確定才有權刪）：
+/// - `stop_not_confirmed`：停機失敗（主機連不上、agent 沒退出…）。run 照舊強制收成 `exited`（已軟刪的 bot 不進對帳，
+///   不收就沒有人收），但 agent 可能還活著——目錄留給下次開機的清掃；
+/// - `run_state_unreadable`：最後那次讀不到 active run（停機失敗時連強制收掉都做不了；run 可能還在跑）；
+/// - `run_still_active`：停完、收完再讀，run 還是 active（終態寫不進去）。
+///
+/// 唯一的證明是最後那一次讀到 `Ok(None)`。
+async fn stop_for_delete_locked(app: &Arc<App>, bot_id: &str) -> Result<(), &'static str> {
+    let mut forced = false;
     if let Err(e) = lifecycle::stop_bot_locked(app, bot_id).await {
         tracing::warn!(bot = %bot_id, error = ?e, "could not stop the bot while deleting it; ending its run");
+        // 讀不到就收不掉：往下由最後那一次讀取判定（讀不到＝不確定，目錄留著）。
         if let Ok(Some(run)) = db::active_run(&app.db, bot_id).await {
             lifecycle::mark_run_exited(app, &run.id, "the bot was deleted while its host was unreachable").await;
+            forced = true;
+        }
+    }
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("delete_stop_before_proof", bot_id).await;
+    match db::active_run(&app.db, bot_id).await {
+        Ok(None) if forced => {
+            tracing::warn!(bot = %bot_id, "the stop was not confirmed (the run was ended anyway); keeping the bot's directory");
+            Err("stop_not_confirmed")
+        }
+        Ok(None) => Ok(()),
+        Ok(Some(run)) => {
+            tracing::warn!(bot = %bot_id, run = %run.id, "the bot's run is still active after the stop; keeping its directory");
+            Err("run_still_active")
+        }
+        Err(e) => {
+            tracing::warn!(bot = %bot_id, error = %e, "could not confirm the bot has no live run; keeping its directory");
+            Err("run_state_unreadable")
         }
     }
 }
@@ -3476,6 +3525,150 @@ mod delete_bot_tests {
         let r = db::run(&app.db, &run).await.unwrap().unwrap();
         assert_eq!(r.state, "exited");
         assert!(r.ended_at.is_some());
+    }
+
+    /// 這顆 bot 的 runtime 目錄（裡面放著 hook 設定，砍掉就補不回來）。
+    fn runtime_dir(app: &Arc<App>, bot_id: &str) -> std::path::PathBuf {
+        let dir = app.bot_dir(bot_id).unwrap();
+        std::fs::create_dir_all(dir.join("hooks")).unwrap();
+        std::fs::write(dir.join("hooks/settings.json"), "{}").unwrap();
+        dir
+    }
+
+    async fn body_of(resp: Response) -> Value {
+        serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap()).unwrap()
+    }
+
+    /// #210 驗收 1（讀不到 run 的狀態）：定案之前就讀不到 → 502、什麼都不動（bot 沒刪、config 沒寫、沒停、目錄在），可以原樣再按一次。
+    #[tokio::test]
+    async fn an_unreadable_run_state_refuses_the_delete_before_anything_is_decided() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let b1 = a_bot(&e, "alfa", "user").await;
+        in_config(&e, &[(&b1, "alfa")]).await;
+        let run = crate::testing::fake_run(&app, &b1).await;
+        let dir = runtime_dir(&app, &b1);
+
+        crate::testing::make_table_unreadable(&app, "runs").await;
+        let err = delete_bot(State(app.clone()), Path(b1.clone())).await.unwrap_err();
+        crate::testing::make_table_readable(&app, "runs").await;
+
+        assert!(matches!(err, LcError::Upstream(_)), "{err:?}");
+        assert!(db::bot(&app.db, &b1).await.unwrap().unwrap().deleted_at.is_none(), "定案前不能刪");
+        assert!(app.cfg.get().await.projects[0].bots.iter().any(|b| b.id.as_deref() == Some(b1.as_str())), "config 沒寫");
+        assert_eq!(db::run(&app.db, &run).await.unwrap().unwrap().state, "running", "沒停");
+        assert!(dir.join("hooks/settings.json").exists());
+        assert!(!e.herdr.methods().iter().any(|m| m == "agent.send_keys"), "一個鍵都沒送");
+    }
+
+    /// #210 驗收 1（停機失敗而且讀不到 active run）：定案之後才讀不到——停機失敗、run 收不掉——目錄必須留著，
+    /// 回應列在 `kept_dirs`；DB 好了 run 還活著，開機清掃也不會去刪它。
+    #[tokio::test]
+    async fn a_failed_stop_that_cannot_read_the_run_keeps_the_dir() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let id = a_bot(&e, "alfa", "user").await;
+        in_config(&e, &[(&id, "alfa")]).await;
+        let run = a_running_run(&app, &id).await; // session 不存在：stop 一定失敗
+        let dir = runtime_dir(&app, &id);
+        let a = app.clone();
+        crate::lifecycle::race_point::arm("delete_bot_after_decided", &id, move || async move {
+            crate::testing::make_table_unreadable(&a, "runs").await
+        });
+
+        let out = body_of(delete_bot(State(app.clone()), Path(id.clone())).await.unwrap()).await;
+        crate::testing::make_table_readable(&app, "runs").await;
+
+        assert_eq!(out["kept_dirs"], json!([{"bot_id": id, "reason": "run_state_unreadable"}]), "{out}");
+        assert!(dir.join("hooks/settings.json").exists(), "讀不到 run 的狀態，不能刪它的目錄");
+        assert!(db::bot(&app.db, &id).await.unwrap().unwrap().deleted_at.is_some(), "刪除本身已經定案");
+        assert_eq!(db::run(&app.db, &run).await.unwrap().unwrap().state, "running", "讀不到就沒有動 run");
+        assert_eq!(crate::lifecycle::purge_deleted_bot_dirs(&app).await, 0, "run 還活著：開機清掃也不刪");
+        assert!(dir.exists());
+    }
+
+    /// #210：停機失敗（主機連不上）而 run 讀得到：run 照舊強制收成 exited，但停機沒有確認、agent 可能還活著——目錄留著、
+    /// 列在 `kept_dirs`；沒有 run 的 parent 照常 purge。下次開機的清掃在 run 確定結束之後把它收掉。
+    #[tokio::test]
+    async fn a_delete_whose_stop_failed_keeps_that_dir_until_the_startup_sweep() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let parent = a_bot(&e, "alfa", "user").await;
+        let kid = a_bot(&e, "alfa-kid", "child").await;
+        sqlx::query("UPDATE bots SET parent_bot_id = ? WHERE id = ?").bind(&parent).bind(&kid).execute(&app.db).await.unwrap();
+        in_config(&e, &[(&parent, "alfa")]).await;
+        let run = a_running_run(&app, &kid).await;
+        let (parent_dir, kid_dir) = (runtime_dir(&app, &parent), runtime_dir(&app, &kid));
+
+        let out = body_of(delete_bot(State(app.clone()), Path(parent.clone())).await.unwrap()).await;
+
+        assert_eq!(out["removed_children"], json!([kid]), "{out}");
+        assert_eq!(out["kept_dirs"], json!([{"bot_id": kid, "reason": "stop_not_confirmed"}]), "{out}");
+        assert!(!parent_dir.exists(), "沒有 run、確定沒有：照常 purge");
+        assert!(kid_dir.join("hooks/settings.json").exists(), "停機沒有確認：目錄留著");
+        assert_eq!(db::run(&app.db, &run).await.unwrap().unwrap().state, "exited", "run 照舊被收掉，不留孤兒");
+
+        assert_eq!(crate::lifecycle::purge_deleted_bot_dirs(&app).await, 1, "下次開機：run 確定結束了才收");
+        assert!(!kid_dir.exists());
+    }
+
+    /// 收完再讀，run 還是 active（`exited` 寫不進去）：不是「確定沒有 active run」，目錄留著。
+    #[tokio::test]
+    async fn a_run_that_could_not_be_ended_keeps_the_dir() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let id = a_bot(&e, "alfa", "user").await;
+        in_config(&e, &[(&id, "alfa")]).await;
+        let run = a_running_run(&app, &id).await;
+        let dir = runtime_dir(&app, &id);
+        sqlx::query("CREATE TRIGGER refuse_exit BEFORE UPDATE OF state ON runs WHEN NEW.state = 'exited' BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END")
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        let out = body_of(delete_bot(State(app.clone()), Path(id.clone())).await.unwrap()).await;
+
+        assert_eq!(out["kept_dirs"], json!([{"bot_id": id, "reason": "run_still_active"}]), "{out}");
+        assert!(dir.join("hooks/settings.json").exists());
+        assert_eq!(db::run(&app.db, &run).await.unwrap().unwrap().state, "running");
+    }
+
+    /// #210 驗收 2：停好了、而且讀得到現在沒有 active run，才 purge；回應不帶 `kept_dirs`。
+    #[tokio::test]
+    async fn a_confirmed_stop_purges_the_dir() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let id = a_bot(&e, "alfa", "user").await;
+        in_config(&e, &[(&id, "alfa")]).await;
+        let run = crate::testing::fake_run(&app, &id).await; // session `test`＝mock herdr，stop 會真的送鍵
+        let dir = runtime_dir(&app, &id);
+
+        let out = body_of(delete_bot(State(app.clone()), Path(id.clone())).await.unwrap()).await;
+
+        assert!(out.get("kept_dirs").is_none(), "{out}");
+        assert!(!dir.exists(), "確定停了、確定沒有 run：purge");
+        assert_eq!(db::run(&app.db, &run).await.unwrap().unwrap().state, "stopped");
+    }
+
+    /// 停好了，但「現在沒有 active run」讀不到（停機與收尾之間 DB 壞了）：不是確定，目錄留著。
+    #[tokio::test]
+    async fn a_stop_whose_result_cannot_be_read_back_keeps_the_dir() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let id = a_bot(&e, "alfa", "user").await;
+        in_config(&e, &[(&id, "alfa")]).await;
+        crate::testing::fake_run(&app, &id).await;
+        let dir = runtime_dir(&app, &id);
+        let a = app.clone();
+        crate::lifecycle::race_point::arm("delete_stop_before_proof", &id, move || async move {
+            crate::testing::make_table_unreadable(&a, "runs").await
+        });
+
+        let out = body_of(delete_bot(State(app.clone()), Path(id.clone())).await.unwrap()).await;
+        crate::testing::make_table_readable(&app, "runs").await;
+
+        assert_eq!(out["kept_dirs"], json!([{"bot_id": id, "reason": "run_state_unreadable"}]), "{out}");
+        assert!(dir.join("hooks/settings.json").exists());
     }
 }
 

@@ -156,6 +156,10 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   所有投影與刪除共用同一把鎖，兩支 DELETE 並發時不會互相把對方的刪除當成未授權、也不會替對方放行。
   **先定案、再停機**：`DELETE /api/bots/:id` 全程拿著該 bot 的 per-bot 鎖（start 用同一把，拿到時 bot 已刪 → NotFound），會 409 的只有定案那一步、那時什麼都還沒停；
   定案後才停 child 與自己、軟刪 child、清目錄，所以停機期間 TOML 再怎麼變都不會留下「已停、未刪」（child 由母 agent 開、daemon 重開不了，事後回滾本來就做不到）。
+  **目錄只在「確定」時才清**（#210）：定案之前先確認讀得到這顆與每個 child 的 active run，讀不到 → 502、什麼都不動，可原樣再按一次。定案之後每顆 bot 的 `bots/<id>/`
+  只在「停機成功、而且停完再讀一次確定沒有 active run」時才 purge。停機失敗（主機連不上、agent 沒退出）時 run 照舊強制收成 `exited`（已軟刪的 bot 不進對帳，不收就沒有人收），
+  但停機沒有確認、agent 可能還活著，目錄留著；讀不到 run、或收完 run 仍是 active（`exited` 寫不進去）也留著。留著的列在回應的 `kept_dirs`（`reason` 是
+  `stop_not_confirmed` / `run_state_unreadable` / `run_still_active`）——刪除本身已經定案（bot 已軟刪），所以回 200 而不是錯誤；下次開機的清掃在 run 確定結束後把目錄收掉。
   **開機的殘留清掃**（`purge_deleted_bot_dirs`，reconcile／rearm 之後跑一次）只刪「確定軟刪」而且「確定沒有 active run」的 `bots/<id>/`；沒有 bot 認領的目錄不碰。
   bot 列或 active run 讀不到（DB 一時忙、I/O 錯）＝還不知道：目錄留著、記一行 warn，下次開機再判斷——清理可重入，刪掉還在跑的 bot 的 hook／shim／spool 補不回來（#187）。
   `DELETE /api/projects/:id` 依 id 排序拿齊專案內每顆 bot 的 per-bot 鎖，**在鎖內**重驗都已停止再定案；TOML 裡多出沒鎖住的 bot（剛建立、可能正要啟動）就 409 `delete_refused`。
