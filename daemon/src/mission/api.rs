@@ -939,6 +939,8 @@ pub async fn post_cancel(State(app): State<Arc<App>>, Path(id): Path<String>, he
 /// 2. 名字以 `agm-mission-<任務 id 尾碼>-` 開頭（尾 6 碼；相容 5 碼的舊命名）——
 ///    使用者自己的常駐 bot 也可能被派到任務裡的工作，名字是「這是臨時開的」唯一的證據；
 /// 3. 沒有進行中的 run——還在跑的不能從它腳下把 bot 刪掉，AGM 停掉之後用 `agm bot delete` 收。
+///    「確定沒有」才有權刪：讀不到 bot 列或 active run（DB 一時忙、I/O 錯）＝還不知道，記成 `state_unreadable`、不呼叫刪除
+///    （`delete_bot` 之後讀得到時會照樣看到 run、把它停掉再軟刪，正是這裡要擋的，#190）。
 /// 刪除走跟 `DELETE /api/bots/{id}` 同一條路（軟刪、子 agent 一起收、對話紀錄保留）。
 pub fn is_temp_bot_name(mission_id: &str, name: &str) -> bool {
     let Some(rest) = name.strip_prefix("agm-mission-") else { return false };
@@ -949,8 +951,12 @@ pub fn is_temp_bot_name(mission_id: &str, name: &str) -> bool {
 }
 
 async fn cleanup_temp_bots(app: &Arc<App>, m: &store::Mission) -> Value {
-    let Ok(assignments) = crate::supervisor::store::mission_assignments(&app.db, &m.id).await else {
-        return json!({"deleted": [], "skipped": [], "error": "could not read the mission's assignments"});
+    let assignments = match crate::supervisor::store::mission_assignments(&app.db, &m.id).await {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::warn!(mission = %m.id, error = %e, "could not read the mission's assignments; no temp bot was cleaned up");
+            return json!({"deleted": [], "skipped": [], "error": "could not read the mission's assignments"});
+        }
     };
     let mut seen = std::collections::BTreeSet::new();
     let (mut deleted, mut skipped) = (Vec::new(), Vec::new());
@@ -958,7 +964,16 @@ async fn cleanup_temp_bots(app: &Arc<App>, m: &store::Mission) -> Value {
         if !seen.insert(a.target_bot_id.clone()) {
             continue;
         }
-        let Ok(Some(bot)) = crate::db::bot(&app.db, &a.target_bot_id).await else { continue };
+        let bot = match crate::db::bot(&app.db, &a.target_bot_id).await {
+            Ok(Some(bot)) => bot,
+            Ok(None) => continue,
+            Err(e) => {
+                // 連名字都讀不到，認不出它是不是臨時 bot：不刪，留一筆讓人知道這次沒清完。
+                tracing::warn!(mission = %m.id, bot = %a.target_bot_id, error = %e, "could not read a mission's target bot; not cleaning it up");
+                skipped.push(json!({"bot_id": a.target_bot_id, "name": null, "reason": "state_unreadable", "detail": format!("{e:#}")}));
+                continue;
+            }
+        };
         if bot.deleted_at.is_some() {
             continue;
         }
@@ -966,9 +981,22 @@ async fn cleanup_temp_bots(app: &Arc<App>, m: &store::Mission) -> Value {
             skipped.push(json!({"bot_id": bot.id, "name": bot.name, "reason": "not_a_temp_bot"}));
             continue;
         }
-        if crate::db::active_run(&app.db, &bot.id).await.ok().flatten().is_some() {
-            skipped.push(json!({"bot_id": bot.id, "name": bot.name, "reason": "still_running"}));
-            continue;
+        #[cfg(test)]
+        crate::lifecycle::race_point::hit("mission_cleanup_before_active_run", &bot.id).await;
+        let running = crate::db::active_run(&app.db, &bot.id).await;
+        #[cfg(test)]
+        crate::lifecycle::race_point::hit("mission_cleanup_after_active_run", &bot.id).await;
+        match running {
+            Ok(None) => {}
+            Ok(Some(_)) => {
+                skipped.push(json!({"bot_id": bot.id, "name": bot.name, "reason": "still_running"}));
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(mission = %m.id, bot = %bot.id, error = %e, "could not read whether a temp bot still has a live run; not deleting it");
+                skipped.push(json!({"bot_id": bot.id, "name": bot.name, "reason": "state_unreadable", "detail": format!("{e:#}")}));
+                continue;
+            }
         }
         match crate::api::delete_bot(State(app.clone()), Path(bot.id.clone())).await {
             Ok(_) => deleted.push(json!({"bot_id": bot.id, "name": bot.name})),
@@ -978,6 +1006,13 @@ async fn cleanup_temp_bots(app: &Arc<App>, m: &store::Mission) -> Value {
     let out = json!({"deleted": deleted, "skipped": skipped});
     if !deleted.is_empty() || !skipped.is_empty() {
         let names = |v: &[Value]| v.iter().filter_map(|x| x["name"].as_str()).collect::<Vec<_>>().join("、");
+        // 沒刪的要講理由（還在跑／讀不到狀態要的處置不一樣）；讀不到 bot 列時連名字都沒有，以 bot id 代替。
+        let why = |v: &[Value]| {
+            v.iter()
+                .filter_map(|x| Some(format!("{}（{}）", x["name"].as_str().or_else(|| x["bot_id"].as_str())?, x["reason"].as_str()?)))
+                .collect::<Vec<_>>()
+                .join("、")
+        };
         let mut text = String::new();
         if !deleted.is_empty() {
             text.push_str(&format!("已刪除臨時 bot：{}", names(&deleted)));
@@ -986,7 +1021,7 @@ async fn cleanup_temp_bots(app: &Arc<App>, m: &store::Mission) -> Value {
             if !text.is_empty() {
                 text.push('；');
             }
-            text.push_str(&format!("未刪除：{}", names(&skipped)));
+            text.push_str(&format!("未刪除：{}", why(&skipped)));
         }
         let _ = store::add_event(&app.db, &m.id, "note", &text, Some(crate::agent_relay::DAEMON_SENDER), &out).await;
     }
@@ -3000,6 +3035,114 @@ mod tests {
         assert!(!gone("regular").await, "使用者自己的 bot 不碰");
         let Json(full) = get_mission(State(app.clone()), Path(id.clone())).await.unwrap();
         assert!(full["events"].as_array().unwrap().iter().any(|e| e["kind"] == "note" && e["text"].as_str().unwrap().contains("已刪除臨時 bot")));
+    }
+
+    /// 任務底下掛一顆臨時 bot（交辦已結案，`still_running` 只看 run）；`running` 時帶一個進行中的 run。
+    async fn temp_bot_on(app: &Arc<App>, project_id: &str, mission_id: &str, running: bool) -> (String, String) {
+        let tail = mission_id[mission_id.len() - 6..].to_ascii_lowercase();
+        let (bid, run) = ("t-exec".to_string(), "run-t-exec".to_string());
+        let now = crate::db::now();
+        sqlx::query("INSERT INTO bots (id,project_id,name,kind,managed_by,hook_token,created_at) VALUES (?,?,?,'claude','child','t',?)")
+            .bind(&bid)
+            .bind(project_id)
+            .bind(format!("agm-mission-{tail}-exec"))
+            .bind(&now)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        if running {
+            sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,started_at) VALUES (?,?,'running','idle',?)")
+                .bind(&run)
+                .bind(&bid)
+                .bind(&now)
+                .execute(&app.db)
+                .await
+                .unwrap();
+        }
+        let a = crate::supervisor::store::insert_assignment(&app.db, None, &bid, "crid-t-exec", "做 X", &[], None, true).await.unwrap();
+        crate::supervisor::store::set_mission_link(&app.db, &a.id, mission_id, "executor").await.unwrap();
+        sqlx::query("UPDATE supervisor_assignments SET status='completed' WHERE id=?").bind(&a.id).execute(&app.db).await.unwrap();
+        (bid, run)
+    }
+
+    async fn bot_deleted(app: &Arc<App>, bot_id: &str) -> bool {
+        sqlx::query_scalar::<_, Option<String>>("SELECT deleted_at FROM bots WHERE id = ?").bind(bot_id).fetch_one(&app.db).await.unwrap().is_some()
+    }
+
+    fn reasons(out: &Value) -> Vec<(String, String)> {
+        out["skipped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| (b["bot_id"].as_str().unwrap().to_string(), b["reason"].as_str().unwrap().to_string()))
+            .collect()
+    }
+
+    /// #190 驗收一～四：查 active run 讀不到（下一次 DB 已經好了）→ 不呼叫停機／刪除，bot 與 run 都留著，回應寫 `state_unreadable`
+    /// （跟 `still_running` 分開）；DB 好了但 run 還在 → 仍是 `still_running`；確定沒有 run 之後才刪。
+    #[tokio::test]
+    async fn an_unreadable_active_run_never_deletes_a_running_temp_bot() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        crate::supervisor::store::get_or_init(&app.db).await.unwrap();
+        let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("cleanup", "pr"))).await.unwrap();
+        let id = m["id"].as_str().unwrap().to_string();
+        let (bid, run) = temp_bot_on(&app, &env.project_id, &id, true).await;
+        let mission = load(&app, &id).await.unwrap();
+
+        let (a, b) = (app.clone(), app.clone());
+        crate::lifecycle::race_point::arm("mission_cleanup_before_active_run", &bid, move || async move { crate::testing::make_table_unreadable(&a, "runs").await });
+        crate::lifecycle::race_point::arm("mission_cleanup_after_active_run", &bid, move || async move { crate::testing::make_table_readable(&b, "runs").await });
+        let out = cleanup_temp_bots(&app, &mission).await;
+        assert!(out["deleted"].as_array().unwrap().is_empty(), "讀不到 run 的狀態，不能刪：{out}");
+        assert_eq!(reasons(&out), [(bid.clone(), "state_unreadable".to_string())], "{out}");
+        assert!(!bot_deleted(&app, &bid).await, "bot 留著");
+        let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(&run).fetch_one(&app.db).await.unwrap();
+        assert_eq!(state, "running", "run 沒被停");
+        assert!(env.herdr.methods().iter().all(|m| !m.contains("close") && !m.contains("send_keys")), "沒有動到任何 pane：{:?}", env.herdr.methods());
+
+        // note 分得出兩種沒刪的理由。
+        let Json(full) = get_mission(State(app.clone()), Path(id.clone())).await.unwrap();
+        let note = full["events"].as_array().unwrap().iter().find(|e| e["kind"] == "note" && e["text"].as_str().unwrap().contains("未刪除")).unwrap();
+        assert!(note["text"].as_str().unwrap().contains("（state_unreadable）"), "{note}");
+
+        // DB 好了、run 還活著：照舊 still_running。
+        let out = cleanup_temp_bots(&app, &mission).await;
+        assert_eq!(reasons(&out), [(bid.clone(), "still_running".to_string())], "{out}");
+        assert!(!bot_deleted(&app, &bid).await);
+
+        // run 終止了（讀得到、確定沒有）才刪。
+        sqlx::query("UPDATE runs SET state='exited', ended_at=? WHERE id=?").bind(crate::db::now()).bind(&run).execute(&app.db).await.unwrap();
+        let out = cleanup_temp_bots(&app, &mission).await;
+        assert_eq!(out["deleted"][0]["bot_id"], bid.as_str(), "{out}");
+        assert!(bot_deleted(&app, &bid).await);
+    }
+
+    /// 連 bot 列都讀不到：認不出是不是臨時 bot，一顆都不刪，回應列出來（沒有名字就給 bot id），DB 好了下一次照常清。
+    #[tokio::test]
+    async fn an_unreadable_bot_row_is_reported_and_nothing_is_deleted() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        crate::supervisor::store::get_or_init(&app.db).await.unwrap();
+        let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("cleanup", "pr"))).await.unwrap();
+        let id = m["id"].as_str().unwrap().to_string();
+        let (bid, _) = temp_bot_on(&app, &env.project_id, &id, false).await;
+        let mission = load(&app, &id).await.unwrap();
+
+        crate::testing::make_table_unreadable(&app, "bots").await;
+        let out = cleanup_temp_bots(&app, &mission).await;
+        crate::testing::make_table_readable(&app, "bots").await;
+        assert!(out["deleted"].as_array().unwrap().is_empty(), "{out}");
+        assert_eq!(reasons(&out), [(bid.clone(), "state_unreadable".to_string())], "{out}");
+        assert!(!bot_deleted(&app, &bid).await);
+        let Json(full) = get_mission(State(app.clone()), Path(id.clone())).await.unwrap();
+        assert!(
+            full["events"].as_array().unwrap().iter().any(|e| e["kind"] == "note" && e["text"].as_str().unwrap().contains(&format!("{bid}（state_unreadable）"))),
+            "讀不到名字時 note 以 bot id 代替"
+        );
+
+        let out = cleanup_temp_bots(&app, &mission).await;
+        assert_eq!(out["deleted"][0]["bot_id"], bid.as_str(), "DB 好了，沒有 run 的臨時 bot 照常刪：{out}");
     }
 
     #[tokio::test]

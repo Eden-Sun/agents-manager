@@ -2545,8 +2545,9 @@ supervisor 相關資料表與欄位都是 additive，`db::migrate` 重跑冪等�
    群組時間軸由 daemon 記 `completed`（payload 的 `delivery` 記交了哪個 commit）。**沒交付**的任務要帶 `--no-delivery`：
    只查問題、沒改東西 → `no_changes`（派過執行者要加 `--worktree <執行者的工作樹>`）；交付失敗或使用者改主意，在群組問過、
    使用者回答不要交付 → `user_declined`。daemon 在 complete／cancel 時會**自動軟刪**這個任務的臨時 bot——條件是它是任務某件交辦的
-   目標、名字以 `agm-mission-<id 尾 6 碼>-` 開頭、而且沒有進行中的 run；回應的 `temp_bots.skipped` 列出沒刪的與原因。
-   `still_running` 的那幾顆先 `bot stop <id>` 再 `bot delete <id>`；刪除保留對話紀錄與 `mission_events` 作證據。
+   目標、名字以 `agm-mission-<id 尾 6 碼>-` 開頭、而且**確定**沒有進行中的 run；回應的 `temp_bots.skipped` 列出沒刪的與原因。
+   `still_running` 的那幾顆先 `bot stop <id>` 再 `bot delete <id>`；`state_unreadable`（DB 讀不到它的 bot 列或 active run，daemon 不知道它還在不在跑，
+   所以不刪、不停）等 DB 好了照同樣處置；刪除保留對話紀錄與 `mission_events` 作證據。
    所以第 2、4 步開臨時 bot 時**一定照這個命名**，否則收尾時不會被認出來。
 7. **撞額度換手（`mission_identity_switch`）**：那件交辦停在 `awaiting_review`／`identity_switch`。用 `to_identity`（與
    `model`）開新臨時 bot，對原交辦 `review followup`，文字帶進度摘要（已做／未做／未提交檔案、worktree 路徑）；
@@ -2570,7 +2571,7 @@ supervisor 相關資料表與欄位都是 additive，`db::migrate` 重跑冪等�
    - `not_fast_forward` 不算「停下問人」：對執行者**新開**一件 `assign --mission --role executor`（已結案的交辦不能 `followup`）
      要它 `git rebase origin/main`；rebase 乾淨就**重走第 4 步**（派了執行者之後舊的 `verified` 就不算數——daemon 回
      `verification_stale`／`head_not_verified`，`next` 也會回到 `assign verifier`，審查不重來），驗過再 `deliver`；**有衝突才**停下問人。
-   - `mission complete` 只會自動刪「沒有 run」的臨時 bot；idle 但 run 還活著的會被 `still_running` 跳過，收尾照第 6 步先 `bot stop` 再 `bot delete`。
+   - `mission complete` 只會自動刪「確定沒有 run」的臨時 bot；idle 但 run 還活著的會被 `still_running` 跳過、讀不到 run 的狀態的會被 `state_unreadable` 跳過，收尾照第 6 步先 `bot stop` 再 `bot delete`。
 11. **完成之後的追問與追加修改（2026-09-13，AGM 裁示 01M2D18PQZSJ4Z5BJC21TF9Q77）**：交付完不是句點，使用者還會
     問問題、還會想再改一點。兩條路刻意分開，因為後果不同：
    - **追問**（`mission question`，inbox `mission_question`）：只是問一句話。你回 `mission answer <id> --reply-to <question 事件 id>`
