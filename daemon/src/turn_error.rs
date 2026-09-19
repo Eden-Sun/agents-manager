@@ -414,7 +414,9 @@ pub(crate) async fn mark_codex_limit_hit(app: &Arc<App>, bot: &db::Bot, notice: 
 }
 
 async fn mark_limit_hit(app: &Arc<App>, bot: &db::Bot, line: &str, banner: Banner) -> Result<()> {
-    let identity = identity_of(bot);
+    // 撞的是 pane 裡實際的帳號＝run 起來時的身分（issue #238），不是剛改、還沒重啟生效的設定。讀不到 run 回錯（不猜）：
+    // `StopFailure` 由收件匣重試；這段時間閘門同樣讀不到 run，照擋。
+    let identity = crate::quota::billing_identity(app, bot).await?;
     // 同一筆撞限重來（收件匣重試 `StopFailure`、下一次讀到同一張橫幅）：撞的那一刻、橫幅上的時間都還是當初的，不往後推。
     let (banner, at) = match owed(app, &bot.id).filter(|m| m.identity == identity && m.line == line) {
         Some(m) => (m.banner, m.at),
@@ -454,10 +456,6 @@ enum Banner {
     /// grok 的撞額度畫面（#222）：桶名是額度窗（`seven_day`／`five_hour`，認不出就沒有），橫幅沒寫重置時間，
     /// 到期是撞的那一刻加保底時數（[`crate::lifecycle::grok_limit_window`]）。
     Grok { bucket: Option<&'static str>, hours: i64 },
-}
-
-fn identity_of(bot: &db::Bot) -> Option<String> {
-    bot.identity.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(String::from)
 }
 
 impl Mark {
@@ -610,8 +608,8 @@ fn settled(app: &App, bot_id: &str, recorded: &Mark) {
 
 /// 這顆 bot 欠著、還擋著它的撞限：先補一次，補上就回 `None`（記憶體裡已經有了，照一般的查法）；補不上、而且那一筆
 /// 是這顆 bot **現在**的身分撞的、沒到期、管得到它在跑的模型，就照那一筆擋。身分已經換掉的留著等補（寫回舊身分的
-/// key），不擋新身分；到期的直接丟掉。
-pub(crate) async fn owed_limit_hit(app: &Arc<App>, bot: &db::Bot) -> Option<crate::quota::LimitHit> {
+/// key），不擋新身分；到期的直接丟掉。`identity` 是呼叫端算好的 [`crate::quota::billing_identity`]（issue #238）。
+pub(crate) async fn owed_limit_hit(app: &Arc<App>, bot: &db::Bot, identity: Option<&str>) -> Option<crate::quota::LimitHit> {
     let m = owed(app, &bot.id)?;
     let hit = m.hit();
     if crate::quota::limit_hit_expired(Some(&hit)) {
@@ -626,7 +624,7 @@ pub(crate) async fn owed_limit_hit(app: &Arc<App>, bot: &db::Bot) -> Option<crat
         }
         Err(e) => tracing::debug!(bot = %bot.id, error = %e, "an owed quota limit hit still cannot be recorded"),
     }
-    if m.identity != identity_of(bot) {
+    if m.identity.as_deref() != identity {
         return None;
     }
     let model = crate::quota::running_model(app, bot).await;

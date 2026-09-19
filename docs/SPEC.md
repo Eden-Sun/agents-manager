@@ -302,6 +302,7 @@ API 只收這四個（`config::INSTRUCTION_FILES`，單元測試照 2.1.277／2.
 `claude_settings` 照 bot 的有效值（`config::effective_instruction_files`）寫，本機與遠端同一份；`GET /api/state` 的每顆 claude bot 帶有效值、前端 Bot 設定面板顯示與修改
 （API.md §12.8b）。改值要重啟才讀到（設定檔只在啟動時讀）。child bot 沒有 `--settings`，這一格管不到，API 直接拒絕。
 `bots.instruction_files` 是新欄位：加了 ALTER（舊列 NULL）、`SCHEMA_VERSION` 5 → 6（`SCHEMA_HISTORY` 加一行指紋）；**回滾到 `SCHEMA_VERSION` ≤ 5 的 daemon binary 會被 §3.1 的版本閘擋下**（不是資料壞掉）。
+`runs.runtime_identity`（issue #238，見 §12.4 的「額度記在 run 的身分」）同樣是新欄位：ALTER（舊列 NULL＝沒記）、`SCHEMA_VERSION` 6 → 7；回滾到 ≤ 6 的 binary 一樣被版本閘擋下，要連 DB 一起還原成升級前的備份。
 這個 plugin 的提示在 `capture::claude::is_noise` 一律當雜訊，不會被 §4.3 備援收進回覆。#212 真機（2.1.277／2.1.278 互動式、預設 config dir、只有 AGENTS.md 的拋棄式專案）：
 帶 daemon 注入的 `instructionFiles: "claude-md"` 時 debug log **沒有** `AGENTS.md loaded`、畫面沒有那一行；拿掉這一格時 log 寫 `every option is its default`，並在回覆槽畫
 `⏺ agents-md: no CLAUDE.md found; AGENTS.md loaded: <path>`（跟助手回覆同一個 `⏺`，閒置時它就是畫面上最後一個 `⏺`）。鍵名與 enum 沒再換。2.1.276 的通知列 toast 這次沒重抓。
@@ -2469,6 +2470,12 @@ inbox `assignment_noticed`（`needs_review=false`）。送不出去或回合失�
   codex 只在重置落在**同一個當地日期**時省略日期，所以沒有日期的鐘點一律當「今天」——已經過去（不管多久）就是畫面上留著的舊橫幅，改 5 分鐘後再問、不滾到隔天；
   還在未來就照字面，**不設上限**（以前「裸鐘點最多 6 小時」把今天 23:40 才重置的週窗／credits 改成 5 分鐘後再問，真的撞限只擋 5 分鐘就一直重送，review3 c2 M1）。
   帶月日、沒有年份的橫幅維持舊規則（過去 ≤ 15 分鐘＝舊橫幅，更久才滾到明年）。算出等待 > 6 小時改 15 分鐘後重試；兩邊都沒有時間退回 +30 分鐘。
+- **額度記在 run 的身分**（issue #238，使用者 2026-09-19 決定）：bot 在跑的時候改身分（PATCH 回 `needs_restart`），按重啟之前 pane 裡還是**起來時的帳號**。
+  `start_bot` 建 run 時把當時的身分蓋進 `runs.runtime_identity`（`''`＝沒有身分）；statusLine 讀數、撞限記帳（含欠著的比對）、成功回合清撞限、
+  派送與排隊 prompt 的閘門與憑據、開機回填、協調者額度、mission 換手判斷、codex 狀態列與 claude 探測的「在跑的身分」都看它（`quota::billing_identity`），
+  所以**重啟前排著的 prompt 照舊身分擋**（它會送進舊帳號的行程）；重啟之後才換成新身分。沒有 run、或 run 沒記（收編的 pane、加欄位之前的舊列）才用 `bots.identity`；
+  讀不到 run 回錯，閘門照擋、記帳由收件匣重試（不拿設定的身分猜——那正是會記錯格的那一個）。以前一律看 `bots.identity`：舊帳號用盡記到新帳號名下，
+  新帳號被誤擋、舊帳號的其他 bot 照樣被派工。
 - **上限橫幅三條規則**：① 寫進該 bot 身份的 key——寫入、查詢（`limit_hit_for_bot`）、清除（`clear_limit_hit_for_bot`）三端都走 `quota::quota_base_for_host`，有自己 `CODEX_HOME` 的 `cx2` 成功回合清的是 `codex:cx2`，不是裸 `codex`；
   寫入端算不準就不寫（`turn_error::mark_codex_limit_hit`：讀不到主機、身分表還沒偵測完，欠著照擋，§6「目標身分沒額度就不送」的「讀不到就擋、記不進去就欠著」，#198）。
   畫面擷取（`capture_codex_usage_notices`）判斷「有沒有回合在飛」要在寫通知訊息**之前**讀：訊息寫了之後那一張就不是新的，讀在後面的話一次讀錯就永遠不記；

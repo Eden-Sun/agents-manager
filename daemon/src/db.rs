@@ -61,6 +61,9 @@ CREATE TABLE IF NOT EXISTS runs (
   -- SPEC §4.4a: what this run is *actually* on — stamped from the argv it was started with,
   -- and updated when a slash command changes it live. NULL = the daemon did not start it.
   runtime_model TEXT, runtime_effort TEXT, runtime_fast INTEGER,
+  -- 這個 run 用哪個身分起來的（issue #238）：pane 裡實際的帳號。'' ＝沒有身分（預設帳號）；NULL＝沒記（不是 daemon 起的、
+  -- 或加這一欄之前的舊列），退回 bot 設定的身分。PATCH 改身分要重啟才生效，這段時間額度要記在這個身分上。
+  runtime_identity TEXT,
   -- Native session requested by a `resume_native` start. Cleared by the first identity/turn hook.
   resume_session_id TEXT,
   -- 那一次 `resume_native` 的結論（issue #92）：`verified`（回報的就是要接的那段）、`mismatch`（CLI 開了
@@ -164,6 +167,8 @@ const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (5, "519fd4f808b8ac5b"),
     // issue #213：`bots.instruction_files`（claude bot 讀哪份專案指示檔）。
     (6, "f75ac921663299da"),
+    // issue #238：`runs.runtime_identity`（run 用哪個身分起來的，額度記在它上面）。
+    (7, "7372788a43638544"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -306,6 +311,8 @@ async fn apply_migrations(pool: &SqlitePool) -> Result<()> {
         ("runs", "resume_outcome", "ALTER TABLE runs ADD COLUMN resume_outcome TEXT"),
         // claude bot 讀哪份專案指示檔（issue #213）；舊列 NULL＝釘在 `claude-md`，跟加這一欄之前一樣。
         ("bots", "instruction_files", "ALTER TABLE bots ADD COLUMN instruction_files TEXT"),
+        // run 用哪個身分起來的（issue #238）；舊列 NULL＝沒記，額度照 bot 設定的身分算，跟加這一欄之前一樣。
+        ("runs", "runtime_identity", "ALTER TABLE runs ADD COLUMN runtime_identity TEXT"),
     ] {
         if !has_column(&mut *tx, table, col).await? {
             sqlx::query(ddl).execute(&mut *tx).await.with_context(|| format!("add {table}.{col}"))?;
@@ -559,6 +566,8 @@ pub struct Run {
     pub runtime_effort: Option<String>,
     /// See [`Run::runtime_model`].
     pub runtime_fast: Option<i64>,
+    /// 啟動時的身分（issue #238），解讀見 [`Run::started_identity`]。
+    pub runtime_identity: Option<String>,
     /// `API Error: …` that cut the last turn short; cleared when the next turn opens ([`crate::turn_error`]).
     pub turn_error: Option<String>,
     pub native_session_id: Option<String>,
@@ -577,6 +586,16 @@ pub struct Run {
     /// claude 原生 SubagentStart／SubagentStop 的最後一筆快照（issue #82）。純可見性，`hookrecv` 是
     /// 唯一寫入者；不影響 §6.5a 的血緣認領。
     pub subagent_json: Option<String>,
+}
+
+impl Run {
+    /// 這個 run 是用哪個身分起來的（issue #238）：`Some(Some(名字))`、`Some(None)`＝沒有身分（預設帳號）、
+    /// `None`＝沒記（不是 daemon 起的、或加欄位之前的舊列）——呼叫端退回 bot 設定的身分。
+    pub fn started_identity(&self) -> Option<Option<String>> {
+        let v = self.runtime_identity.as_deref()?;
+        let v = v.trim();
+        Some((!v.is_empty()).then(|| v.to_string()))
+    }
 }
 
 #[derive(Debug, Clone, FromRow, serde::Serialize)]
@@ -756,13 +775,16 @@ pub async fn bot_host(pool: &SqlitePool, bot_id: &str) -> Result<String> {
 /// A live run under an identity proves that account is logged in on `host`, whatever
 /// `claude auth status` said ([`crate::quota_claude`]); survives a daemon restart.
 pub async fn live_identities_on_host(pool: &SqlitePool, host: &str) -> Result<BTreeSet<String>> {
+    // run 實際的身分（issue #238）：記了就用它，沒記才用 bot 設定的。
     let rows = sqlx::query_scalar::<_, String>(
-        "SELECT DISTINCT b.identity FROM runs r
-           JOIN bots b ON b.id = r.bot_id
-           JOIN projects p ON p.id = b.project_id
-          WHERE r.state IN ('starting','running','stopping')
-            AND p.host = ? AND b.deleted_at IS NULL
-            AND b.identity IS NOT NULL AND b.identity <> ''",
+        "SELECT DISTINCT ident FROM (
+           SELECT CASE WHEN r.runtime_identity IS NULL THEN b.identity ELSE r.runtime_identity END AS ident
+             FROM runs r
+             JOIN bots b ON b.id = r.bot_id
+             JOIN projects p ON p.id = b.project_id
+            WHERE r.state IN ('starting','running','stopping')
+              AND p.host = ? AND b.deleted_at IS NULL)
+          WHERE ident IS NOT NULL AND TRIM(ident) <> ''",
     )
     .bind(host)
     .fetch_all(pool)
@@ -1154,6 +1176,63 @@ mod tests {
         assert!(has_column(&pool, "bots", "instruction_files").await.unwrap(), "開的時候補上");
         let b = bot(&pool, "b").await.unwrap().expect("舊列還在");
         assert_eq!(b.instruction_files, None, "舊列沒有設定：釘在預設 claude-md");
+        pool.close().await;
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// schema 變更（additive）`runs.runtime_identity`（issue #238）：沒有這一欄的舊 DB 開起來會補上，舊列是 NULL
+    /// （＝沒記，額度照 bot 設定的身分算，跟加這一欄之前一樣），`SELECT *` 照樣讀得進 `Run`。
+    #[tokio::test]
+    async fn an_old_database_gains_runs_runtime_identity_on_open() {
+        let dir = std::env::temp_dir().join(format!("am-runtime-identity-{}", ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("old.sqlite3");
+        {
+            let pool = open(&path).await.unwrap();
+            sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES ('p','/tmp','p',?)").bind(now()).execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,identity,created_at) VALUES ('b','p','b','claude','t','cc1',?)").bind(now()).execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO runs (id,bot_id,state,started_at) VALUES ('r','b','running',?)").bind(now()).execute(&pool).await.unwrap();
+            // 做成上一版的形狀：這一欄還不存在。
+            sqlx::query("ALTER TABLE runs DROP COLUMN runtime_identity").execute(&pool).await.unwrap();
+            assert!(!has_column(&pool, "runs", "runtime_identity").await.unwrap());
+            pool.close().await;
+        }
+        let pool = open(&path).await.expect("舊 DB 照常開起來");
+        assert!(has_column(&pool, "runs", "runtime_identity").await.unwrap(), "開的時候補上");
+        let r = active_run(&pool, "b").await.unwrap().expect("舊列還在");
+        assert_eq!((r.runtime_identity.clone(), r.started_identity()), (None, None), "舊列沒記：照 bot 設定的身分算");
+        pool.close().await;
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 「這台有哪些身分在跑」（claude 探測拿它當登入證據）看的是 run 實際的身分（#238）：改了設定還沒重啟的是舊的那個；
+    /// run 沒記的照 bot 設定的；起來時沒有身分的不算。
+    #[tokio::test]
+    async fn live_identities_are_the_ones_the_runs_started_with() {
+        let dir = std::env::temp_dir().join(format!("am-live-identities-{}", ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pool = open(&dir.join("db.sqlite3")).await.unwrap();
+        sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES ('p','/tmp','p',?)").bind(now()).execute(&pool).await.unwrap();
+        for (bot, identity, run_identity) in [("a", Some("cc2"), Some("cc1")), ("b", Some("cc3"), None), ("c", Some("cc4"), Some(""))] {
+            sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,identity,created_at) VALUES (?,'p',?,'claude','t',?,?)")
+                .bind(bot)
+                .bind(bot)
+                .bind(identity)
+                .bind(now())
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO runs (id,bot_id,state,runtime_identity,started_at) VALUES (?,?,'running',?,?)")
+                .bind(format!("r-{bot}"))
+                .bind(bot)
+                .bind(run_identity)
+                .bind(now())
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let live: Vec<String> = live_identities_on_host(&pool, crate::config::LOCAL_HOST).await.unwrap().into_iter().collect();
+        assert_eq!(live, vec!["cc1".to_string(), "cc3".to_string()]);
         pool.close().await;
         std::fs::remove_dir_all(&dir).unwrap();
     }

@@ -833,6 +833,9 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             // 讀不到主機就丟掉這一份，下一次重繪會再來（#108 重開）：退回 local 會把遠端的讀數寫進本機那一格，
             // 還會拿它去校正、作廢本機身分真的撞限（`quota::set`）。
             let host = db::bot_host(&app.db, &bot.id).await?;
+            // 讀數是這個 run 的 pane 送來的：帳號是它起來時的身分（issue #238），不是剛改、還沒重啟生效的設定。
+            let identity = crate::quota::identity_for_run(&bot, run.as_ref());
+            let identity = identity.as_deref();
             // Written only when changed — claude refreshes often and every write wakes every client.
             if let Some(r) = &run {
                 let text = body.payload.get("status_line").and_then(|v| v.as_str()).map(str::trim).filter(|t| !t.is_empty());
@@ -840,7 +843,6 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                 if let Some(o) = rich.as_object_mut() {
                     o.remove("status_line");
                     o.remove("hook_event_name");
-                    let identity = bot.identity.as_deref().filter(|s| !s.is_empty());
                     let (email, warning) = claude_account(app, &host, identity).await;
                     if let Some(email) = email {
                         o.insert("account_email".into(), serde_json::json!(email));
@@ -862,7 +864,6 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                 }
             }
             // Always keyed under the bot's **host**: remote limits must not land on the local row (SPEC §14).
-            let identity = bot.identity.as_deref().filter(|s| !s.is_empty());
             if let Some(idn) = identity {
                 if let Some(q) = crate::quota::quota_from_statusline(&body.payload, Some(idn)) {
                     // 對 claude 共用預設帳號的身分（沒設 CLAUDE_CONFIG_DIR）寫裸 `claude`：另開 `claude:cc0` 會少掉

@@ -69,10 +69,6 @@ impl Held {
     }
 }
 
-fn identity_of(bot: &db::Bot) -> Option<String> {
-    bot.identity.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(String::from)
-}
-
 /// 判斷擋不擋要的狀態讀不到時，多久之後再看一次。
 pub(crate) const UNVERIFIED_RETRY: Duration = Duration::from_secs(10);
 
@@ -135,7 +131,7 @@ async fn held_on_turn(app: &Arc<App>, bot: &db::Bot, turn_id: &str) -> anyhow::R
     let raw: Option<Option<String>> = sqlx::query_scalar("SELECT quota_hold FROM turns WHERE id=?").bind(turn_id).fetch_optional(&app.db).await?;
     let Some(raw) = raw.flatten() else { return Ok(None) };
     let held: Held = serde_json::from_str(&raw).map_err(|e| anyhow::anyhow!("the quota hold on turn {turn_id} is unreadable: {e}"))?;
-    if held.boot == app.boot_id || !still_holds(app, bot, &held).await {
+    if held.boot == app.boot_id || !still_holds(app, bot, &held).await? {
         return Ok(None);
     }
     let hit = held.hit();
@@ -143,19 +139,21 @@ async fn held_on_turn(app: &Arc<App>, bot: &db::Bot, turn_id: &str) -> anyhow::R
     Ok(crate::quota::limit_hit_blocks_model(&hit, model.as_deref()).then_some(hit))
 }
 
-/// 憑據還算數：身分沒換、還沒到期、寫下之後同一把 key 沒有被成功回合清過撞限。
-async fn still_holds(app: &Arc<App>, bot: &db::Bot, held: &Held) -> bool {
-    if held.identity != identity_of(bot) || crate::quota::limit_hit_expired(Some(&held.hit())) {
-        return false;
+/// 憑據還算數：身分沒換、還沒到期、寫下之後同一把 key 沒有被成功回合清過撞限。身分是這顆 bot 現在實際跑的那個
+/// （[`crate::quota::billing_identity`]，issue #238）；讀不到回錯（呼叫端照擋）。
+async fn still_holds(app: &Arc<App>, bot: &db::Bot, held: &Held) -> anyhow::Result<bool> {
+    if held.identity != crate::quota::billing_identity(app, bot).await? || crate::quota::limit_hit_expired(Some(&held.hit())) {
+        return Ok(false);
     }
-    match chrono::DateTime::parse_from_rfc3339(&held.held_at) {
+    Ok(match chrono::DateTime::parse_from_rfc3339(&held.held_at) {
         Ok(t) => !crate::quota::limit_cleared_since(app, bot, t.with_timezone(&chrono::Utc)).await,
         Err(_) => true,
-    }
+    })
 }
 
 async fn remember(app: &Arc<App>, turn_id: &str, bot: &db::Bot, hit: &crate::quota::LimitHit) -> anyhow::Result<()> {
-    let json = serde_json::to_string(&Held::new(app, identity_of(bot).as_deref(), hit))?;
+    let identity = crate::quota::billing_identity(app, bot).await?;
+    let json = serde_json::to_string(&Held::new(app, identity.as_deref(), hit))?;
     sqlx::query("UPDATE turns SET quota_hold=? WHERE id=? AND status='queued'").bind(&json).bind(turn_id).execute(&app.db).await?;
     Ok(())
 }
@@ -271,10 +269,11 @@ async fn backfill(app: &Arc<App>, host: &str) -> anyhow::Result<Vec<String>> {
                 continue;
             }
         };
-        if held.boot == app.boot_id || !still_holds(app, &bot, &held).await {
+        if held.boot == app.boot_id || !still_holds(app, &bot, &held).await? {
             continue;
         }
-        let base = crate::quota::quota_base_for_host(app, host, &bot.kind, bot.identity.as_deref()).await;
+        // 種回撞到的那個帳號（憑據上記的身分；`still_holds` 已經確認它就是這顆 bot 現在實際跑的，issue #238）。
+        let base = crate::quota::quota_base_for_host(app, host, &bot.kind, held.identity.as_deref()).await;
         if crate::quota::restore_limit_hit(app, host, &base, held.hit()).await {
             tracing::info!(host, bot = %bot.id, until = ?held.until, "重啟回填：排著的 prompt 記下的撞限補回記憶體");
         }
@@ -452,6 +451,40 @@ mod tests {
 
     fn later(hours: i64) -> String {
         db::iso_at(chrono::Utc::now() + chrono::Duration::hours(hours))
+    }
+
+    /// #238：run 以 cc1 起來、設定已改成 cc2（還沒重啟）：排著的那一則會送進 cc1 的行程，照 cc1 的撞限擋，憑據也記 cc1——
+    /// 記成 cc2 的話，重啟後回填拿它跟 run 的 cc1 比對不上，重啟前記下的撞限就被放掉。cc2 撞限不擋它（它還不在 cc2 上）。
+    #[tokio::test]
+    async fn a_queued_prompt_is_held_on_the_identity_its_run_started_with() {
+        for (hit_on, held) in [("claude:cc1", true), ("claude:cc2", false)] {
+            let q = queued_on(Some("cc2"), "switched").await;
+            let app = q.env.app.clone();
+            for name in ["cc1", "cc2"] {
+                let dir = q.env.dir.join(format!("claude-{name}")).to_string_lossy().into_owned();
+                app.cfg
+                    .update(move |c| {
+                        c.identities.push(crate::config::IdentityCfg {
+                            name: name.into(),
+                            kind: "claude".into(),
+                            host: None,
+                            env: [("CLAUDE_CONFIG_DIR".to_string(), dir)].into(),
+                            args: vec![],
+                        });
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+            }
+            sqlx::query("UPDATE runs SET runtime_identity='cc1' WHERE bot_id=?").bind(&q.bot.id).execute(&app.db).await.unwrap();
+            assert!(crate::quota::seed_limit_hit(&app, crate::config::LOCAL_HOST, hit_on, &later(2), "You've hit your session limit", Some("five_hour".into())).await);
+            flush(&app, &q.bot.id).await;
+            let (was_held, hold) = state(&app, &q.turn).await;
+            assert_eq!(was_held, held, "{hit_on} 撞限：擋不擋");
+            if held {
+                assert_eq!(hold.and_then(|h| h.identity).as_deref(), Some("cc1"), "憑據記的是 run 的身分");
+            }
+        }
     }
 
     /// 重開留言那條序列，而且 key 在偵測前後不一樣：cc0 撞限（裸 `claude`）→ 排著的被擋、憑據寫在那一列 → 重啟

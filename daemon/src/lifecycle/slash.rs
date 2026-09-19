@@ -440,6 +440,7 @@ mod login_slash_tests {
             runtime_model: None,
             runtime_effort: None,
             runtime_fast: None,
+            runtime_identity: None,
             update_notice: None,
             turn_error: None,
             native_session_id: None,

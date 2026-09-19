@@ -105,10 +105,26 @@ pub async fn resolve_quota_base(app: &Arc<App>, host: &str, kind: &str, identity
     Ok(quota_base_for_host(app, host, kind, identity).await)
 }
 
+/// 額度記在哪個身分上（issue #238）：pane 裡實際的帳號＝這個 run 起來時的身分。PATCH 改了身分、還沒重啟時，
+/// `bots.identity` 已經是新的、pane 還是舊帳號——讀數、撞限、閘門都要跟著 run 走，不然舊帳號用盡記到新帳號名下
+/// （新帳號被誤擋、舊帳號的其他 bot 照樣被派工）。沒有 run、或 run 沒記身分（不是 daemon 起的、升級前的舊列）才用設定的。
+pub fn identity_for_run(bot: &crate::db::Bot, run: Option<&crate::db::Run>) -> Option<String> {
+    match run.and_then(|r| r.started_identity()) {
+        Some(started) => started,
+        None => bot.identity.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(String::from),
+    }
+}
+
+/// [`identity_for_run`]，run 用這顆 bot 現在的 active run。讀不到 run 回錯：不能拿設定的身分猜（那正是會記錯格的那一個）。
+pub async fn billing_identity(app: &Arc<App>, bot: &crate::db::Bot) -> Result<Option<String>> {
+    let run = crate::db::active_run(&app.db, &bot.id).await?;
+    Ok(identity_for_run(bot, run.as_ref()))
+}
+
 /// 查詢端：這顆 bot 的讀數在哪幾把 key。先查它自己那一把（收斂規則同寫入端），**只有**收斂到裸 kind
-/// 的身分才會落在裸 key——有自己 home 的身分（cc2 帶 `CODEX_HOME`）不借預設帳號的數字。
-async fn keys_for_bot(app: &Arc<App>, host: &str, bot: &crate::db::Bot) -> Vec<String> {
-    let base = quota_base_for_host(app, host, &bot.kind, bot.identity.as_deref()).await;
+/// 的身分才會落在裸 key——有自己 home 的身分（cc2 帶 `CODEX_HOME`）不借預設帳號的數字。身分是 [`billing_identity`]。
+async fn keys_for_bot(app: &Arc<App>, host: &str, bot: &crate::db::Bot, identity: Option<&str>) -> Vec<String> {
+    let base = quota_base_for_host(app, host, &bot.kind, identity).await;
     vec![quota_key(host, &base)]
 }
 
@@ -170,11 +186,12 @@ pub async fn running_model(app: &Arc<App>, bot: &crate::db::Bot) -> Option<Strin
 /// 讀不到這顆 bot 在哪台主機就回錯（#108 重開）：以前退回 `local`，查錯 key、回「沒撞限」，遠端那個已經用盡的身分
 /// 就被放行。撞限記不進正確那把 key 而欠著的那一筆（`turn_error::owed_limit_hit`）先算。
 pub async fn try_limit_hit_for_bot(app: &Arc<App>, bot: &crate::db::Bot) -> Result<Option<LimitHit>> {
-    if let Some(hit) = crate::turn_error::owed_limit_hit(app, bot).await {
+    let identity = billing_identity(app, bot).await?;
+    if let Some(hit) = crate::turn_error::owed_limit_hit(app, bot, identity.as_deref()).await {
         return Ok(Some(hit));
     }
     let host = crate::db::bot_host(&app.db, &bot.id).await?;
-    let keys = keys_for_bot(app, &host, bot).await;
+    let keys = keys_for_bot(app, &host, bot, identity.as_deref()).await;
     let model = running_model(app, bot).await;
     let q = app.quotas.lock().await;
     for k in keys {
@@ -209,7 +226,14 @@ pub async fn next_reset_for_bot(app: &Arc<App>, bot: &crate::db::Bot) -> Option<
             return None;
         }
     };
-    let keys = keys_for_bot(app, &host, bot).await;
+    let identity = match billing_identity(app, bot).await {
+        Ok(i) => i,
+        Err(e) => {
+            tracing::warn!(bot = %bot.id, error = %e, "cannot read the run of a bot; no quota reset time from its readings");
+            return None;
+        }
+    };
+    let keys = keys_for_bot(app, &host, bot, identity.as_deref()).await;
     let now = chrono::Utc::now();
     let future = |t: &Option<String>| {
         t.as_deref()
@@ -578,7 +602,15 @@ pub async fn clear_limit_hit_for_bot(app: &Arc<App>, bot: &crate::db::Bot) {
             return;
         }
     };
-    let base = quota_base_for_host(app, &host, &bot.kind, bot.identity.as_deref()).await;
+    // 清的是答完這一回合的那個帳號（issue #238）：run 起來時的身分，不是剛改、還沒生效的設定。
+    let identity = match billing_identity(app, bot).await {
+        Ok(i) => i,
+        Err(e) => {
+            tracing::warn!(bot = %bot.id, error = %e, "cannot read the run of a bot; its limit hit is left in place");
+            return;
+        }
+    };
+    let base = quota_base_for_host(app, &host, &bot.kind, identity.as_deref()).await;
     clear_limit_hit(app, &host, &base).await;
 }
 
@@ -606,7 +638,14 @@ pub async fn limit_cleared_since(app: &Arc<App>, bot: &crate::db::Bot, since: ch
             return false;
         }
     };
-    let keys = keys_for_bot(app, &host, bot).await;
+    let identity = match billing_identity(app, bot).await {
+        Ok(i) => i,
+        Err(e) => {
+            tracing::warn!(bot = %bot.id, error = %e, "cannot read the run of a bot; no evidence its limit was cleared");
+            return false;
+        }
+    };
+    let keys = keys_for_bot(app, &host, bot, identity.as_deref()).await;
     let m = cleared_at().lock().unwrap();
     keys.iter().any(|k| m.get(&cleared_at_key(app, k)).is_some_and(|t| *t > since))
 }
@@ -844,7 +883,8 @@ pub async fn refresh_codex_from_panes(app: &Arc<App>, host: &str) -> usize {
     let rows: Vec<(String, Option<String>, Option<String>)> = match sqlx::query_as(
         // 最近有動靜的 pane 排前面：它的狀態列最新。閒著的 pane 也會刷新，但剛跑完回合的那顆最準。
         // 第三欄是那顆 pane 畫面的年紀：最後一回合結束（或開始）的時間，沒有回合就是 run 起來的時間。
-        "SELECT r.pane_id, b.identity,
+        // run 實際的身分（issue #238）：記了就用它，沒記才用 bot 設定的。
+        "SELECT r.pane_id, CASE WHEN r.runtime_identity IS NULL THEN b.identity ELSE NULLIF(TRIM(r.runtime_identity), '') END,
                 COALESCE((SELECT MAX(COALESCE(t.completed_at, t.created_at)) FROM turns t WHERE t.run_id = r.id), r.started_at)
            FROM runs r JOIN bots b ON b.id = r.bot_id JOIN projects p ON p.id = b.project_id
           WHERE p.host = ? AND b.kind = 'codex' AND r.state = 'running' AND r.pane_id IS NOT NULL
@@ -1560,6 +1600,99 @@ mod tests {
         assert_eq!(got, Some(hit), "經過 set 也還擋著");
     }
 
+    /// #238：run 在跑的時候改身分（PATCH 回 `needs_restart`）：按「重啟」之前 pane 裡還是**起來時的帳號**。額度讀數、撞限、
+    /// 閘門、成功回合清撞限都要記在那個身分上；以前一律看 `bots.identity`（已經是新的）——舊帳號用盡記到新帳號名下，
+    /// 新帳號被誤擋、舊帳號的其他 bot 照樣被派工。重啟之後才換成新身分。
+    #[tokio::test]
+    async fn a_run_bills_the_identity_it_started_with_until_it_is_restarted() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        for name in ["cc1", "cc2"] {
+            let dir = env.dir.join(format!("claude-{name}")).to_string_lossy().into_owned();
+            app.cfg
+                .update(move |c| {
+                    c.identities.push(crate::config::IdentityCfg {
+                        name: name.into(),
+                        kind: "claude".into(),
+                        host: None,
+                        env: [("CLAUDE_CONFIG_DIR".to_string(), dir)].into(),
+                        args: vec![],
+                    });
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "switcher").await;
+        sqlx::query("UPDATE bots SET identity='cc1' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
+        crate::lifecycle::start_bot(&app, &bot.id).await.unwrap();
+        let run = crate::db::active_run(&app.db, &bot.id).await.unwrap().unwrap();
+        assert_eq!(run.started_identity(), Some(Some("cc1".to_string())), "起來時的身分蓋在 run 上");
+
+        // 使用者把身分改成 cc2、還沒重啟：pane 還是 cc1 的帳號。
+        sqlx::query("UPDATE bots SET identity='cc2' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
+        let bot = crate::db::bot(&app.db, &bot.id).await.unwrap().unwrap();
+        let status = crate::hookrecv::HookBody {
+            bot_id: bot.id.clone(),
+            provider: "claude".into(),
+            payload: json!({"hook_event_name": "StatusLine", "rate_limits": {"five_hour": {"used_percentage": 42.0, "resets_at": (chrono::Utc::now() + chrono::Duration::hours(2)).timestamp()}}}),
+            received_at: None,
+            truncated: false,
+            run_id: None,
+        };
+        crate::hookrecv::process(&app, &status).await.unwrap();
+        {
+            let q = app.quotas.lock().await;
+            let keys: Vec<String> = q.keys().cloned().collect();
+            assert_eq!(q.get("claude:cc1").and_then(|x| x.five_hour.as_ref()).map(|w| w.used_pct), Some(42.0), "讀數記在 cc1：{keys:?}");
+            assert!(q.get("claude:cc2").is_none(), "新身分那一格沒被寫：{keys:?}");
+        }
+
+        crate::turn_error::mark_claude_limit_hit(&app, &bot, "You've hit your session limit · resets 5pm").await.unwrap();
+        let hits: Vec<String> = app.quotas.lock().await.iter().filter(|(_, q)| q.limit_hit.is_some()).map(|(k, _)| k.clone()).collect();
+        assert_eq!(hits, vec!["claude:cc1".to_string()], "撞限記在實際撞到的帳號");
+        assert!(try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some(), "閘門照 cc1 擋：排著的會送進 cc1 的行程");
+        clear_limit_hit_for_bot(&app, &bot).await;
+        assert!(app.quotas.lock().await["claude:cc1"].limit_hit.is_none(), "成功回合清的是 cc1");
+
+        // 重啟之後才是 cc2：cc1 的撞限不再擋它，cc2 的才擋。
+        crate::turn_error::mark_claude_limit_hit(&app, &bot, "You've hit your session limit · resets 5pm").await.unwrap();
+        crate::lifecycle::stop_bot(&app, &bot.id).await.unwrap();
+        crate::lifecycle::start_bot(&app, &bot.id).await.unwrap();
+        let run = crate::db::active_run(&app.db, &bot.id).await.unwrap().unwrap();
+        assert_eq!(run.started_identity(), Some(Some("cc2".to_string())));
+        assert!(try_limit_hit_for_bot(&app, &bot).await.unwrap().is_none(), "重啟成 cc2：cc1 的撞限不擋它");
+        assert_eq!(billing_identity(&app, &bot).await.unwrap().as_deref(), Some("cc2"));
+    }
+
+    /// run 沒記身分（不是 daemon 起的、升級前的舊列）照 bot 設定的；記了空字串＝起來時沒有身分（預設帳號），就算之後設了身分也一樣。
+    #[tokio::test]
+    async fn a_run_without_a_recorded_identity_falls_back_to_the_bots() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "fallback").await;
+        let run_id = crate::testing::fake_run(&app, &bot.id).await;
+        let case = |bot_identity: Option<&'static str>, recorded: Option<&'static str>| {
+            let (app, bot_id, run_id) = (app.clone(), bot.id.clone(), run_id.clone());
+            async move {
+                sqlx::query("UPDATE bots SET identity=? WHERE id=?").bind(bot_identity).bind(&bot_id).execute(&app.db).await.unwrap();
+                sqlx::query("UPDATE runs SET runtime_identity=? WHERE id=?").bind(recorded).bind(&run_id).execute(&app.db).await.unwrap();
+                let bot = crate::db::bot(&app.db, &bot_id).await.unwrap().unwrap();
+                billing_identity(&app, &bot).await.unwrap()
+            }
+        };
+        assert_eq!(case(Some("cc2"), None).await.as_deref(), Some("cc2"), "run 沒記：照 bot 設定的");
+        assert_eq!(case(Some("cc2"), Some("cc1")).await.as_deref(), Some("cc1"), "run 記了就用它");
+        assert_eq!(case(Some("cc2"), Some("")).await, None, "起來時沒有身分（預設帳號）");
+        assert_eq!(case(None, Some(" cc1 ")).await.as_deref(), Some("cc1"));
+        assert_eq!(case(Some("  "), None).await, None);
+        crate::lifecycle::stop_bot(&app, &bot.id).await.ok();
+        sqlx::query("UPDATE runs SET state='exited' WHERE id=?").bind(&run_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET identity='cc2' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
+        let bot = crate::db::bot(&app.db, &bot.id).await.unwrap().unwrap();
+        assert_eq!(billing_identity(&app, &bot).await.unwrap().as_deref(), Some("cc2"), "沒有 run：照 bot 設定的");
+    }
+
     #[tokio::test]
     async fn a_limit_hit_past_its_reset_time_is_dropped() {
         let app = crate::testing::env().await.app.clone();
@@ -1815,7 +1948,9 @@ mod tests {
 
         sqlx::query("ALTER TABLE runs RENAME TO runs_unreadable").execute(&app.db).await.unwrap();
         assert_eq!(running_model(&app, &bot).await, None, "不知道，不是設定值的 opus");
-        assert!(try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some(), "不知道在跑什麼：照擋");
+        // 讀不到 run 連它用哪個身分起來都不知道（#238）：回錯，呼叫端照擋（hold）。無論如何不能是「沒撞限」。
+        let got = try_limit_hit_for_bot(&app, &bot).await;
+        assert!(!matches!(got, Ok(None)), "不知道在跑什麼：照擋，不是沒撞限：{got:?}");
         sqlx::query("ALTER TABLE runs_unreadable RENAME TO runs").execute(&app.db).await.unwrap();
     }
 
