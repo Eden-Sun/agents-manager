@@ -2406,6 +2406,10 @@ supervisor 相關資料表與欄位都是 additive，`db::migrate` 重跑冪等�
   git 不進交易：先在交易外算證據，交易裡只確認「算證據時看到的那一代還是同一代」。`deliver` 的 push 是對外的副作用，擋不回來，
   它的 `delivered` 照實記；但 `delivered` 只有在它的 commit 就是**這一代**驗過的那一個時才算數（`flow`），所以 push 途中被退回的話，
   那一則放行不了新一代的結案。
+- **任務關了，排著的交辦就不送**（issue #171）：`mission cancel` 先在 supervisor 鎖裡把任務關掉、放鎖後才逐件 `review cancel`。
+  `controller::dispatch` 先看交辦所屬的任務，已取消／已結案就不送（留在 `queued` 由取消那條路收掉；讀不到任務就 `hold` 幾秒再看）；
+  所有派送入口（`drain_queue`、`assign`、`review followup`、等額度回來的 `resume_quota_blocked`）都在同一把鎖裡呼叫它，
+  檢查到打字之間取消插不進來。以前中間那一瞬拿到鎖的派送照樣把使用者剛取消的工作打進 bot。
 
 需要人判斷的（`ask_user`、`no_independent_reviewer`、findings、要不要再一輪）仍然在 AGM 這一側，daemon 不碰。
 與 ownership 衝突的差別：那個是字串比對猜出來的，所以只回報不強制（§18.4）；這兩條是查得到的事實。

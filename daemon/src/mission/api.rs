@@ -882,6 +882,9 @@ pub async fn post_cancel(State(app): State<Arc<App>>, Path(id): Path<String>, he
     if !cancelled {
         return Err(LcError::conflict("already_closed", json!({"mission_id": id})));
     }
+    // 任務已經關了、底下的交辦還沒逐件取消的那一瞬（測試在這裡插進 controller 的派送）。
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("mission_cancel_after_close", &id).await;
     // 取消之後才重讀：鎖外排隊的派工拿到鎖時會看到任務已關，不會在這之後冒出新的交辦。
     let mut withdrawn = Vec::new();
     for a in open_assignments(&app, &id).await? {
@@ -1595,6 +1598,64 @@ mod tests {
                 after.status()
             );
         }
+    }
+
+    /// 取消任務是兩步：鎖裡把任務關掉（`cancel_announced`），鎖外再逐件 `review cancel` 底下的交辦。中間那一瞬
+    /// controller 的 `drain_queue` 拿到鎖（或 `resume_quota_blocked` 根本不拿鎖），`dispatch` 不看任務關了沒，
+    /// 就把一件排著的交辦送進 bot——使用者剛取消的工作被送出去開始做，取消那一步只能事後標 `may_still_be_running`（issue #171）。
+    #[tokio::test]
+    async fn a_queued_assignment_is_not_sent_after_its_mission_is_cancelled() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        crate::supervisor::store::get_or_init(&app.db).await.unwrap();
+        let agm = crate::testing::claude_bot(&app, &env.project_id, "AGM").await;
+        crate::supervisor::store::set_env(&app.db, &agm.id, &env.project_id, "/tmp").await.unwrap();
+        let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("cancel-vs-dispatch", "pr"))).await.unwrap();
+        let id = m["id"].as_str().unwrap().to_string();
+        // 派工當下 worker 還沒起來（409）：交辦留在 queued 等下一次派送。
+        let worker = crate::testing::claude_bot(&app, &env.project_id, "worker").await;
+        let out = crate::supervisor::assign(
+            &app, &worker.id, "做 X", "cancel-vs-dispatch-exec", None, &[], None, true, Some((&id, "executor")), None, None,
+            crate::supervisor::bot_requests::ReplyMark::default(),
+        )
+        .await
+        .unwrap();
+        let aid = out["id"].as_str().unwrap().to_string();
+        assert_eq!(out["status"], "queued", "前提：排著等下一次派送：{out}");
+        // 之後 worker 起來了（pane 活著、打得進字）：下一次派送會真的送進去。
+        let pane = format!("pane-{}", worker.id);
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, pane_typed, started_at)
+             VALUES (?,?,'running','idle','ws-1',?,'cancel-worker','test',1,?)",
+        )
+        .bind(crate::db::ulid())
+        .bind(&worker.id)
+        .bind(&pane)
+        .bind(crate::db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        env.herdr.live_pane(&pane, crate::testing::LivePane { width: Some(120), ..Default::default() });
+
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (app2, aid2, ran2) = (app.clone(), aid.clone(), ran.clone());
+        crate::lifecycle::race_point::arm("mission_cancel_after_close", &id, move || async move {
+            let _g = crate::supervisor::lock().await;
+            crate::supervisor::controller::dispatch(&app2, &aid2).await;
+            ran2.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        let _ = post_cancel(State(app.clone()), Path(id.clone()), HeaderMap::new()).await.expect("取消要成功");
+        assert!(ran.load(std::sync::atomic::Ordering::SeqCst), "派送真的落在「任務已關、交辦還沒收」那一瞬");
+
+        let sent: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns t JOIN conversations c ON c.id = t.conversation_id WHERE c.bot_id=?")
+            .bind(&worker.id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        let typed = env.herdr.calls_to("pane.send_text").iter().filter(|p| p["pane_id"] == json!(pane)).count();
+        let row = crate::supervisor::store::assignment(&app.db, &aid).await.unwrap().unwrap();
+        assert_eq!((typed, sent, row.turn_id.as_deref()), (0, 0, None), "任務已經取消：排著的交辦不能再送進 bot");
+        assert_eq!(row.status, "cancelled", "取消那一步照樣把它收掉");
     }
 
     /// 請求跑到一半任務被取消了：之後的「停下來問人」不能再寫進去（`store::pause` 的 `false` 以前沒人看）。
