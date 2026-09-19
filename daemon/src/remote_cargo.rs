@@ -29,6 +29,9 @@ pub struct RemoteBuildInput {
     pub remote_root: String,
     #[serde(default)]
     pub cargo_jobs: usize,
+    /// 遠端測試執行緒上限（issue #202）。None＝維持現在的值；0＝不設。
+    #[serde(default)]
+    pub test_threads: Option<usize>,
     /// None = preserve the currently stored password; Some("") = delete it (key/agent auth).
     #[serde(default)]
     pub password: Option<String>,
@@ -73,6 +76,7 @@ fn sanitized(cfg: &BuildRemoteCfg, data_dir: &Path) -> Value {
         "ssh_port": cfg.ssh_port,
         "remote_root": cfg.remote_root,
         "cargo_jobs": cfg.cargo_jobs,
+        "test_threads": cfg.test_threads,
         "password_set": password_is_set(data_dir),
     })
 }
@@ -110,6 +114,7 @@ pub async fn put_settings(
     let cargo_jobs = if input.cargo_jobs == 0 { 4 } else { input.cargo_jobs.min(64) };
     app.cfg
         .update(|cfg| {
+            let test_threads = input.test_threads.unwrap_or(cfg.build.remote.test_threads).min(256);
             cfg.build.remote = BuildRemoteCfg {
                 enabled: input.enabled,
                 host: host.clone(),
@@ -121,6 +126,7 @@ pub async fn put_settings(
                     remote_root.clone()
                 },
                 cargo_jobs,
+                test_threads,
             };
             Ok(())
         })
@@ -695,9 +701,11 @@ impl Drop for Lease {
 /// 遠端跑 cargo 的那一行。先記下自己的 process group、再確認目錄還是這次租的（owner＝token），順序不能反：
 /// 守門清理是「先撤 owner、再讀 pgid」，所以通過檢查的 run 一定會被收到。
 ///
+/// `test_threads > 0` 就帶 `RUST_TEST_THREADS`（issue #202）：libtest 的命令列 `--test-threads` 優先於環境變數，所以呼叫端自己帶了旗標照樣算數。
+///
 /// `sub` 是本機 cwd 相對於同步過去的根的路徑（[`source_root`]；`""`＝就在根）：遠端也要在同一個子目錄下跑，
 /// 相對路徑的參數（`--manifest-path ../x`、`-p` 的路徑）才跟本機是同一個意思。
-fn run_script(dir: &str, sub: &str, token: &LeaseToken, jobs: usize, args: &[String]) -> String {
+fn run_script(dir: &str, sub: &str, token: &LeaseToken, jobs: usize, test_threads: usize, args: &[String]) -> String {
     let argv = args.iter().map(|a| sh_quote(a)).collect::<Vec<_>>().join(" ");
     let tok = token.as_str();
     // `~/.cargo/bin` 要自己接：rustup 只改 shell profile，ssh 的非互動 shell 不讀（同 `PROBE_SH`）。
@@ -705,10 +713,11 @@ fn run_script(dir: &str, sub: &str, token: &LeaseToken, jobs: usize, args: &[Str
         "d={dir}; g=$(ps -o pgid= -p $$ | tr -d ' ') && printf '%s\\n' \"$g\" > \"$d.pgid-{tok}\" \
          && [ \"$(cat \"$d.owner\" 2>/dev/null)\" = {tok} ] \
          || {{ echo 'agents-manager: 遠端工作目錄已經還回去了（helper 中途被砍？），不跑 cargo' >&2; exit 126; }}; \
-         cd \"$d\"/{sub} && PATH=\"$HOME/.cargo/bin:$PATH\" CARGO_BUILD_JOBS={jobs} cargo {argv}",
+         cd \"$d\"/{sub} && PATH=\"$HOME/.cargo/bin:$PATH\" CARGO_BUILD_JOBS={jobs}{threads} cargo {argv}",
         dir = sh_quote(dir),
         sub = sh_quote(sub),
         jobs = jobs.max(1),
+        threads = if test_threads > 0 { format!(" RUST_TEST_THREADS={test_threads}") } else { String::new() },
     )
 }
 
@@ -810,10 +819,16 @@ fn sync_source(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, dir: &str) 
     Ok(())
 }
 
+/// 測試執行緒數：呼叫端自己設了 `RUST_TEST_THREADS`（正整數）就尊重它，沒有才用設定（`0`＝不設）。
+fn pick_test_threads(caller: Option<&str>, configured: usize) -> usize {
+    caller.and_then(|v| v.trim().parse::<usize>().ok()).filter(|n| *n > 0).unwrap_or(configured)
+}
+
 fn run_remote(remote: &BuildRemoteCfg, data_dir: &Path, lease: &Lease, sub: &str, args: &[String]) -> anyhow::Result<i32> {
     let pw = secret(data_dir)?;
     let mut cmd = ssh_base(remote, pw.as_deref(), data_dir)?;
-    cmd.arg(run_script(&lease.hs.dir, sub, &lease.token, remote.cargo_jobs, args));
+    let threads = pick_test_threads(std::env::var("RUST_TEST_THREADS").ok().as_deref(), remote.test_threads);
+    cmd.arg(run_script(&lease.hs.dir, sub, &lease.token, remote.cargo_jobs, threads, args));
     let status = run_status(cmd, "remote cargo")?;
     Ok(status.code().unwrap_or(1))
 }
@@ -1151,14 +1166,32 @@ mod tests {
     #[test]
     fn the_remote_run_records_its_group_before_checking_the_lease() {
         let tok = LeaseToken::parse("0123456789abcdef0123456789abcdef").unwrap();
-        let s = run_script("/r/0123456789abcdef/shared", "", &tok, 4, &["test".into(), "-p".into(), "x; rm -rf ~".into()]);
+        let s = run_script("/r/0123456789abcdef/shared", "", &tok, 4, 8, &["test".into(), "-p".into(), "x; rm -rf ~".into()]);
         let pgid = s.find("> \"$d.pgid-0123456789abcdef0123456789abcdef\"").expect(&s);
         let owner = s.find("\"$d.owner\"").expect(&s);
         let cargo = s.find("cargo test").expect(&s);
         assert!(pgid < owner && owner < cargo, "{s}");
         assert!(s.contains("exit 126"), "{s}");
         assert!(s.contains("'x; rm -rf ~'"), "{s}");
-        assert!(s.contains("PATH=\"$HOME/.cargo/bin:$PATH\" CARGO_BUILD_JOBS=4"), "{s}");
+        assert!(s.contains("PATH=\"$HOME/.cargo/bin:$PATH\" CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=8 cargo"), "{s}");
+        // 0＝不設：不帶這個環境變數（libtest 用自己的預設）。
+        let s = run_script("/r/0123456789abcdef/shared", "", &tok, 4, 0, &["test".into()]);
+        assert!(!s.contains("RUST_TEST_THREADS"), "{s}");
+    }
+
+    /// issue #202：遠端是 32 vCPU 的超賣主機，測試預設開 32 個執行緒反而更慢（283 秒 vs 限 8 個 183 秒）。預設 8、可設定；呼叫端自己設了
+    /// `RUST_TEST_THREADS` 就尊重它（`--test-threads` 命令列旗標本來就優先於環境變數）；`0`＝不設。
+    #[test]
+    fn the_remote_test_thread_cap_defaults_to_eight_and_yields_to_the_caller() {
+        assert_eq!(BuildRemoteCfg::default().test_threads, 8);
+        let old: BuildRemoteCfg = toml::from_str("host = \"h\"\n").unwrap();
+        assert_eq!(old.test_threads, 8, "舊設定沒有這個 key：用預設");
+        assert_eq!(pick_test_threads(None, 8), 8);
+        assert_eq!(pick_test_threads(Some("4"), 8), 4, "呼叫端自己設的優先");
+        assert_eq!(pick_test_threads(Some(" 16 "), 8), 16);
+        assert_eq!(pick_test_threads(Some("0"), 8), 8, "0 或看不懂的不算數");
+        assert_eq!(pick_test_threads(Some("many"), 8), 8);
+        assert_eq!(pick_test_threads(None, 0), 0, "設定成 0＝不設");
     }
 
     /// #148：租約身分固定格式（32 個小寫 hex），嵌進遠端 shell 與檔名都不會變成 injection；
@@ -1264,7 +1297,7 @@ mod guard_tests {
         // 遠端每條 ssh 都是自己的 session（sshd setsid）；這裡用獨立的 process group 模擬，收 pgid 才不會打到測試本身。
         Command::new("sh")
             .arg("-c")
-            .arg(run_script(dir, "", token, 1, &["test".into()]))
+            .arg(run_script(dir, "", token, 1, 0, &["test".into()]))
             .env("HOME", home)
             .current_dir(base)
             .process_group(0)
@@ -1367,7 +1400,7 @@ mod guard_tests {
             let _ = std::fs::remove_file(&out);
             let status = Command::new("sh")
                 .arg("-c")
-                .arg(run_script(&dir, sub, &lease.token, 1, &["check".into()]))
+                .arg(run_script(&dir, sub, &lease.token, 1, 0, &["check".into()]))
                 .env("HOME", &home)
                 .env("AM_TEST_PWD", &out)
                 .current_dir(&base)

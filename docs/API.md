@@ -536,13 +536,17 @@ shim 轉遠端要 pane 裡有 `AM_DAEMON_EXE`、`AM_CONFIG_PATH`、`AM_DATA_DIR`
 - 守門順手回收孤兒：沒鎖被持有、沒有行程的 cwd 在裡面、閒置超過 10 分鐘的 `job-*`／舊版 `<pid>/`；閒置超過
   3 小時的 `shared/`（遠端磁碟剩不到 25% 時也降到 10 分鐘）。只碰 `<16 位 hex>/<shared｜job-*｜數字>` 這種名字。
 - 遠端要是有 `flock`（util-linux）與 `/proc` 的 Linux，沒有就直接報錯、不跑。
+- **測試執行緒上限（issue #202）**：遠端命令帶 `RUST_TEST_THREADS=<[build.remote] test_threads>`（預設 8）。遠端是 32 vCPU 的超賣主機，libtest 預設開 32 個執行緒，大多在系統呼叫與鎖上互搶
+  （`sy` 59～64%、每秒 50 萬次 context switch），全套 1611 條測試：32 個執行緒 283 秒、16 個 199 秒、12 個 219 秒、8 個 168～176 秒（預設挑 8）。呼叫端自己帶了 `--test-threads`（命令列旗標本來就優先於環境變數）或設了 `RUST_TEST_THREADS`
+  就尊重呼叫端；`0`＝不設。`check`／`clippy` 不受影響（那是 `cargo_jobs` 管的）。
 - helper 的每一條 ssh（守門／run／probe／安裝）與 rsync 的 `-e` 都帶 `ConnectTimeout=15`、`ServerAliveInterval=15`、`ServerAliveCountMax=3`
   （issue #174，跟 `hosts.rs` 的連線一致）：連線靜默斷掉（Wi-Fi 換 AP、Mac 睡著醒來 IP 變了、遠端掉電）約 45 秒內就放棄，
   不會卡到 TCP keepalive 的 2 小時。
 
 ### `GET /api/build/remote` / `PUT /api/build/remote`
-`{enabled, host, user, ssh_port, remote_root, cargo_jobs, password_set}`。PUT 另收 `password`（寫進 0600 的
+`{enabled, host, user, ssh_port, remote_root, cargo_jobs, test_threads, password_set}`。PUT 另收 `password`（寫進 0600 的
 secret file，不進 config、不回前端）與 `clear_password`。`host`／`user` 空字串又要 `enabled` → 400。
+`test_threads`＝遠端 `cargo test` 的測試執行緒上限（`RUST_TEST_THREADS`，預設 8，`0`＝不設，最多 256；PUT 省略＝維持現在的值）。
 
 ### `POST /api/build/remote/test`
 連上去看一眼：
