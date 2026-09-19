@@ -1755,6 +1755,8 @@ poller 啟動時 `sweep_stale()` 關掉 `am-quota` 與本機 session 裡 label �
 沒有 active Run、非 `running`、`blocked`、已有 in-flight Turn、有 `delivery=unknown` → 略過，列在 `skipped:[{bot_id, bot_name, reason, detail}]`
 （`reason ∈ not_running | blocked | in_flight | unknown_delivery | conflict | not_found | bad_request | upstream`），並在該 bot 對話寫一則同 `group_id` 的 system Message
 （「群組訊息未送達 X：…（不會自動啟動）」）；同 crid 重送不重寫。**絕不自動啟動。**
+**例外**：那一顆的字已經送進去、只是送達結果寫不進 DB（`LcError::Uncommitted`，§6 送達那段，#149／#167）**不算略過**——放進 `sent`（`delivery:"unknown"`，
+herdr 明確拒收才是 `failed`）、不寫「未送達」，之後由 daemon 補結果；同 crid 重送走冪等分支，不再打字。
 
 API：`GET /api/projects/:id/messages`、`POST /api/projects/:id/chat`（`API.md`）。WS 沿用 `message_added`（含 `group_id`）與 `turn_updated`。
 
