@@ -1712,6 +1712,10 @@ mod flush_queue_tests {
     }
 
     /// 退避中重啟：記憶體裡的 timer 沒了，啟動時依 next_flush_at 重建每 bot 唯一的 timer，到期恰好送一次（sol 第九輪 #3）。
+    ///
+    /// 兩段都不跟真實時間賽跑（#203）。以前退避只剩 150 ms：負載一高，兩次重建之間 timer 就先燒掉、把自己從表上拿掉，
+    /// 第二次重建又掛一個，「不疊 timer」被判成錯的（偶發紅）。先把到期設在一小時後，驗「每顆 bot 一個、照 next_flush_at 掛」；
+    /// 再把到期改成現在、重建一次（較早的取代較晚的），驗到期送出、只送一次。
     #[tokio::test]
     async fn a_backoff_survives_a_restart_and_the_prompt_goes_out_exactly_once() {
         let f = queued_kind("grok", "test").await;
@@ -1723,11 +1727,16 @@ mod flush_queue_tests {
         );
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
         assert_eq!(turn(&app, &f.turn_id).await.status, "queued");
-        // 「重啟」：舊行程的 timer 全沒了；框也清空了。退避剩 150 ms。
+        // 「重啟」：舊行程的 timer 全沒了；框也清空了。
         forget_queue_retry_timer(&f.bot_id);
         f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), boxed: true, ..Default::default() });
-        let soon = (chrono::Utc::now() + chrono::Duration::milliseconds(150)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        sqlx::query("UPDATE turns SET next_flush_at = ? WHERE id = ?").bind(&soon).bind(&f.turn_id).execute(&app.db).await.unwrap();
+        let due_in = |d: chrono::Duration| (chrono::Utc::now() + d).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        sqlx::query("UPDATE turns SET next_flush_at = ? WHERE id = ?")
+            .bind(due_in(chrono::Duration::hours(1)))
+            .bind(&f.turn_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
 
         let fire = {
             let app = app.clone();
@@ -1741,10 +1750,21 @@ mod flush_queue_tests {
             }
         };
         assert_eq!(rearm_queue_retries_with(&app, fire.clone()).await, 1, "one timer for the bot");
-        assert_eq!(rearm_queue_retries_with(&app, fire).await, 0, "a second pass does not add another");
+        assert_eq!(rearm_queue_retries_with(&app, fire.clone()).await, 0, "a second pass does not add another");
+        let left = queue_retry_timer_left(&f.bot_id).expect("armed");
+        assert!(left > std::time::Duration::from_secs(55 * 60), "armed for next_flush_at, not sooner: {left:?}");
         assert_eq!(turn(&app, &f.turn_id).await.status, "queued", "not before it is due");
 
-        // The timer fires after ~150 ms; the typed delivery itself then takes about two seconds.
+        // 到期了：到期時間改成現在、再重建一次——較早的取代還在睡的那一個（它醒來時世代對不上，什麼都不做）。
+        sqlx::query("UPDATE turns SET next_flush_at = ? WHERE id = ?")
+            .bind(due_in(chrono::Duration::zero()))
+            .bind(&f.turn_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(rearm_queue_retries_with(&app, fire).await, 1, "the due one replaces the later timer");
+
+        // The typed delivery itself takes about two seconds.
         let mut t = turn(&app, &f.turn_id).await;
         for _ in 0..80 {
             if t.delivery != "pending" && t.status != "queued" {
