@@ -373,6 +373,7 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     // 這顆 binary 是哪一版、什麼時候**上線**的（`GET /api/supervisor` 的 `last_deploy`）。
     build_info::mark_started(&app.data_dir);
     tools::spawn_alias_poller(app.clone());
+    herdr_version::spawn_poller(app.clone());
     quota::spawn_codex_poller(app.clone());
     memstat::spawn_poller(app.clone());
     quota_claude::spawn_claude_poller(app.clone());

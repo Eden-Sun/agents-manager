@@ -313,8 +313,18 @@ impl HerdrClient {
     }
 
     pub async fn ping(&self) -> Result<Pong> {
-        let v = self.call("ping", json!({})).await?;
-        let pong: Pong = serde_json::from_value(v)?;
+        let parsed = match self.call("ping", json!({})).await {
+            Ok(v) => serde_json::from_value::<Pong>(v).map_err(anyhow::Error::from),
+            Err(e) => Err(e),
+        };
+        // 讀不到就清掉：舊的版本不能冒充現況（#254）。
+        let pong = match parsed {
+            Ok(p) => p,
+            Err(e) => {
+                *self.last_pong.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                return Err(e);
+            }
+        };
         *self.last_pong.lock().unwrap_or_else(|e| e.into_inner()) = Some(pong.clone());
         Ok(pong)
     }

@@ -1983,7 +1983,7 @@ claude 的 statusLine 每次重繪都呼叫、沒有回合語意，不進 spool�
 
 ### 11.6 API 與 UI
 
-- **herdr 版本**（`hosts[].herdr`，API §12.6b）：server 版本與 protocol 取自 ping、CLI 版本取自工具偵測的 `herdr --version`；兩者不同或 protocol 未驗證時 hosts 面板用警告色標出，讀不到顯示「未知」。
+- **herdr 版本**（`hosts[].herdr`，API §12.6b）：server 版本與 protocol 取自 ping、CLI 版本取自工具偵測的 `herdr --version`；兩者不同或 protocol 未驗證時 hosts 面板用警告色標出，讀不到顯示「未知」。訂閱重建成功後與每 60 秒重 ping／重探 CLI，有變就推 `host_changed`，讀不到即 `null`（#254）。
 - `GET /api/state` 帶 `hosts: [{name, ssh, herdr_session, connected, error?}]`、`projects[].host`；`POST /api/hosts`、`DELETE /api/hosts/:name`（需無 project 使用）、`POST /api/hosts/:name/reconnect`；
   `POST /api/projects` 可帶 `host`。WS `daemon_status {herdr_connected, hosts}`、`host_changed`。細節見 `API.md`。
 - UI：sidebar Project 標題顯示 host 徽章（本機不顯示）；新增 Project 表單有主機下拉，目錄選擇器跟著切換；主機管理表單列出連線狀態與重連；host 斷線時其 bot 燈號灰。

@@ -25,9 +25,48 @@ pub fn for_host(conn: &crate::hosts::HostConn, connected: bool, detected: Option
     summary(pong.as_ref().map(|p| (p.version.as_str(), p.protocol)), detected.and_then(|d| d.herdr_cli.as_deref()))
 }
 
+/// 重 ping＋重探 CLI 版本，有變就推 `host_changed`（#254）：herdr live-handoff 後 server 版本／protocol 換了，
+/// 或只換了 CLI，快取都會過期。`cli` 由呼叫端探（測試直接給）；讀不到＝None，不保留舊值。
+pub async fn refresh_with(app: &std::sync::Arc<crate::state::App>, host: &str, cli: Option<String>) {
+    let Some(conn) = app.hosts.get(host).await else { return };
+    let connected = if conn.is_local() { app.connected.load(std::sync::atomic::Ordering::SeqCst) } else { conn.is_connected() };
+    let before = for_host(&conn, connected, app.tools.lock().await.get(host));
+    let _ = conn.client.ping().await;
+    let after = {
+        let mut tools = app.tools.lock().await;
+        if let Some(t) = tools.get_mut(host) {
+            t.herdr_cli = cli;
+        }
+        for_host(&conn, connected, tools.get(host))
+    };
+    if before != after {
+        tracing::info!(host, ?before, ?after, "herdr version changed");
+        crate::state::emit_host_changed(app, &conn).await;
+    }
+}
+
+pub async fn refresh(app: &std::sync::Arc<crate::state::App>, host: &str) {
+    let cli = crate::tools::probe_herdr_cli(app, host).await;
+    refresh_with(app, host, cli).await;
+}
+
+const REFRESH_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// 定期重探每台主機：只換了 CLI 的 mismatch 要即時亮警告。
+pub fn spawn_poller(app: std::sync::Arc<crate::state::App>) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(REFRESH_EVERY).await;
+            for name in app.hosts.names().await {
+                refresh(&app, &name).await;
+            }
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
-    use super::summary;
+    use super::{for_host, summary};
 
     #[test]
     fn reports_server_protocol_and_cli() {
@@ -62,5 +101,45 @@ mod tests {
     #[test]
     fn an_unverified_protocol_is_flagged() {
         assert_eq!(summary(Some(("0.9.2", 23)), None)["protocol_supported"], false);
+    }
+
+    #[tokio::test]
+    async fn handoff_updates_the_cached_server_version() {
+        let env = crate::testing::env().await;
+        let app = &env.app;
+        let conn = app.hosts.get("local").await.unwrap();
+        conn.client.ping().await.unwrap();
+        app.tools.lock().await.insert("local".into(), crate::tools::HostTools {
+            tools: Default::default(), identities: Default::default(), shell_identities: Default::default(),
+            utc_offset_secs: None, herdr_cli: Some("herdr 0.8.2".into()), checked_at: crate::db::now(),
+        });
+        *env.herdr.pong.lock().unwrap() = ("0.9.1".into(), 22);
+        let mut rx = app.subscribe();
+        super::refresh_with(app, "local", Some("herdr 0.9.1".into())).await;
+        let v = for_host(&conn, true, app.tools.lock().await.get("local"));
+        assert_eq!(v["server_version"], "0.9.1");
+        assert_eq!(v["protocol"], 22);
+        assert_eq!(v["cli_version"], "0.9.1");
+        let mut pushed = false;
+        while let Ok(ev) = rx.try_recv() {
+            pushed |= ev.kind == "host_changed" && ev.data["herdr"]["server_version"] == "0.9.1";
+        }
+        assert!(pushed, "版本有變要推 host_changed");
+    }
+
+    #[tokio::test]
+    async fn unreadable_cli_or_server_becomes_null_not_stale() {
+        let env = crate::testing::env().await;
+        let app = &env.app;
+        let conn = app.hosts.get("local").await.unwrap();
+        conn.client.ping().await.unwrap();
+        app.tools.lock().await.insert("local".into(), crate::tools::HostTools {
+            tools: Default::default(), identities: Default::default(), shell_identities: Default::default(),
+            utc_offset_secs: None, herdr_cli: Some("herdr 0.9.1".into()), checked_at: crate::db::now(),
+        });
+        env.herdr.fail_next("ping", crate::testing::Fault::Refuse);
+        super::refresh_with(app, "local", None).await;
+        let v = for_host(&conn, true, app.tools.lock().await.get("local"));
+        assert!(v["server_version"].is_null() && v["cli_version"].is_null());
     }
 }

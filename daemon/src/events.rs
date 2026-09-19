@@ -70,6 +70,11 @@ async fn global_loop(app: Arc<App>, host: String, session: String) {
                     crate::state::set_default_connected(&app, true).await;
                 }
                 tracing::info!(host = %host, session = %session, "global herdr event subscription established");
+                // herdr live-handoff 後訂閱重建：server 版本／protocol 可能換了，重問一次（#254）。
+                if is_local_main || host != LOCAL_HOST {
+                    let (app2, host2) = (app.clone(), host.clone());
+                    tokio::spawn(async move { crate::herdr_version::refresh(&app2, &host2).await });
+                }
                 // Reconcile after every (re)connect.
                 if is_local_default {
                     if let Err(e) = crate::default_session::sync(&app).await {
