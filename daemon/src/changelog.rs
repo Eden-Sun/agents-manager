@@ -60,6 +60,12 @@ pub fn version_string(s: &str) -> Option<String> {
     parse_version(s).map(|v| v.iter().map(|n| n.to_string()).collect::<Vec<_>>().join("."))
 }
 
+/// `--version` 的輸出：`2.1.278 (Claude Code)`、`codex-cli 0.154.0`、`herdr 0.8.2`。版本不一定在第一個 token，
+/// 取第一個看得出版本的 token（至少 `x.y` 兩段，避免把 `codex-cli` 之類當成版本）。
+pub fn cli_version_string(line: &str) -> Option<String> {
+    line.split_whitespace().find(|t| t.contains('.')).and_then(version_string)
+}
+
 /// 認 `## 1.2.3` 二級標題（Claude Code 的格式）。
 pub fn parse_changelog(md: &str) -> Vec<Section> {
     let mut out: Vec<Section> = Vec::new();
@@ -125,7 +131,7 @@ pub async fn installed_version(app: &Arc<App>, host: &str, kind: &str) -> Result
         conn.ssh_exec_path(&script).await?
     };
     let line = out.lines().next().unwrap_or("").trim();
-    version_string(line).ok_or_else(|| anyhow!("`{kind} --version` 回了「{line}」，看不出版本"))
+    cli_version_string(line).ok_or_else(|| anyhow!("`{kind} --version` 回了「{line}」，看不出版本"))
 }
 
 /// 抓 feed 的網址與「是不是 codex releases JSON」。`release_triage` 的 CLI 是獨立行程，沒有 `App` 的快取可用。

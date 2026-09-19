@@ -283,7 +283,7 @@ async fn local_installed_version(kind: &str) -> Result<String> {
     .map_err(|_| anyhow!("`{kind} --version` timed out"))??;
     let out = String::from_utf8_lossy(&o.stdout).to_string();
     let line = out.lines().next().unwrap_or("").trim().to_string();
-    changelog::version_string(&line).ok_or_else(|| anyhow!("`{kind} --version` 回了「{line}」，看不出版本"))
+    changelog::cli_version_string(&line).ok_or_else(|| anyhow!("`{kind} --version` 回了「{line}」，看不出版本"))
 }
 
 /// 抓上游 feed（沒有 daemon 的記憶體快取：CLI 是獨立行程，30 分鐘才跑一次）。抓不到就回錯——
