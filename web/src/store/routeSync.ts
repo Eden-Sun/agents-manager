@@ -7,6 +7,11 @@ import * as api from '../api'
 import { buildRoute, parseRoute, screenKey, type Route } from '../lib/routes'
 import { useStore, type StoreState } from './store'
 
+/** 預覽分頁只給頂層 bot（issue #253）；`ChatPanel` 與網址還原共用這條。 */
+export function isTopLevelBot(b: { parent_bot_id: string | null; managed_by: string } | undefined): boolean {
+  return Boolean(b) && b!.parent_bot_id === null && b!.managed_by === 'user'
+}
+
 /** 判斷順序照 `App.tsx` 的 render 分支（誰蓋在誰上面）。 */
 export function routeOf(s: StoreState): Route {
   if (s.shellView) return { kind: 'shell', host: s.shellView.host, paneId: s.shellView.paneId }
@@ -27,7 +32,7 @@ export function screenTitle(s: StoreState): string {
     case 'bot': {
       const name = s.bots.find((b) => b.id === r.botId)?.name
       if (!name) return ''
-      return r.settings ? `${name} · 設定` : r.tab === 'terminal' ? `${name} · 終端` : name
+      return r.settings ? `${name} · 設定` : r.tab === 'terminal' ? `${name} · 終端` : r.tab === 'preview' ? `${name} · 預覽` : name
     }
     case 'project':
       return s.projects.find((p) => p.id === r.projectId)?.label ?? ''
@@ -101,6 +106,7 @@ async function applyRoute(r: Route) {
       }
       s.selectBot(r.botId)
       if (r.tab === 'terminal') s.setRightTab('terminal')
+      else if (r.tab === 'preview' && isTopLevelBot(s.bots.find((b) => b.id === r.botId))) s.setRightTab('preview')
       return
     }
     case 'project':

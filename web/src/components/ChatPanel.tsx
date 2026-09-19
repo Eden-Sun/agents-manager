@@ -54,6 +54,8 @@ import { DELIVERY_HINT_TEXT, DELIVERY_WARN_TEXT, deliveryNotice } from '../lib/d
 import { markdownComponents } from '../lib/markdownComponents'
 import { markdownUrlTransform } from '../lib/markdownUrl'
 import { TerminalTab } from './TerminalTab'
+import { PreviewPanel } from './PreviewPanel'
+import { isTopLevelBot } from '../store/routeSync'
 import { ToolsHint } from './Tools'
 import './chatPanel.css'
 
@@ -1120,7 +1122,10 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
     const name = projectHostName(s, s.bots.find((b) => b.id === s.selectedBotId)?.project_id ?? null)
     return name === 'local' || (s.hosts.find((h) => h.name === name)?.connected ?? false)
   })
-  const tab = useStore((s) => s.rightTab)
+  const rawTab = useStore((s) => s.rightTab)
+  // 預覽只給頂層 bot；切到子 agent 時 store 會回 chat，這裡再擋一次（例如舊網址）。
+  const canPreview = isTopLevelBot(bot ?? undefined)
+  const tab = rawTab === 'preview' && !canPreview ? 'chat' : rawTab
   const setRightTab = useStore((s) => s.setRightTab)
   const shellView = useStore((s) => s.shellView)
   const closeShellView = useStore((s) => s.closeShellView)
@@ -1164,7 +1169,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   const files = useAttachments(botId, botId)
   const drop = useDropTarget(files.add, !botId)
   // 暫存區縮圖落進這個托盤；終端分頁時托盤不在畫面上就不接收，免得圖憑空消失。
-  useShelfSink(files.add, botId && bot && (tab !== 'terminal' || settingsBotId === botId) ? bot.name : null)
+  useShelfSink(files.add, botId && bot && (tab === 'chat' || settingsBotId === botId) ? bot.name : null)
 
   const messages = useStore((s) => (botId ? s.messages[botId] : undefined))
   const messagesLoaded = useStore((s) => (botId ? Boolean(s.loadedBots[botId]) : false))
@@ -1371,6 +1376,22 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           >
             終端
           </button>
+          {canPreview ? (
+            <button
+              type="button"
+              className="tab"
+              role="tab"
+              id={`${panelId}-tab-preview`}
+              aria-controls={`${panelId}-panel`}
+              aria-selected={tab === 'preview' && !settingsOpen && !shellOpen}
+              onClick={() => {
+                closeShellView()
+                setRightTab('preview')
+              }}
+            >
+              預覽
+            </button>
+          ) : null}
           {shellOpen ? (
             <button
               type="button"
@@ -1415,10 +1436,12 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
         className="tab-panel"
         role="tabpanel"
         id={`${panelId}-panel`}
-        aria-labelledby={`${panelId}-tab-${shellOpen ? 'shell' : tab === 'terminal' && !settingsOpen ? 'terminal' : 'chat'}`}
+        aria-labelledby={`${panelId}-tab-${shellOpen ? 'shell' : tab === 'terminal' && !settingsOpen ? 'terminal' : tab === 'preview' && !settingsOpen ? 'preview' : 'chat'}`}
       >
       {shellOpen && shellView ? (
         <HostShellPanel key={`${shellView.host}:${shellView.paneId}`} host={shellView.host} paneId={shellView.paneId} cwd={shellView.cwd} embedded />
+      ) : tab === 'preview' && !settingsOpen ? (
+        <PreviewPanel key={botId} botId={botId} />
       ) : tab === 'terminal' && !settingsOpen ? (
         active ? (
           <TerminalTab botId={botId} />

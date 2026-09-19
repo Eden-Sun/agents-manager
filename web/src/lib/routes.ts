@@ -3,7 +3,7 @@
  * 好測；跟 store 同步在 `store/routeSync.ts`，這裡不碰 `window`／store。
  */
 
-export type RouteTab = 'chat' | 'terminal'
+export type RouteTab = 'chat' | 'terminal' | 'preview'
 
 export type Route =
   /** 開機時代表「網址沒指定」，不是「清空選取」——見 routeSync。 */
@@ -31,6 +31,7 @@ export function parseRoute(pathname: string): Route {
   if (p[0] === 'bots' && p[1]) {
     if (p.length === 2) return { kind: 'bot', botId: p[1], tab: 'chat', settings: false }
     if (p.length === 3 && p[2] === 'terminal') return { kind: 'bot', botId: p[1], tab: 'terminal', settings: false }
+    if (p.length === 3 && p[2] === 'preview') return { kind: 'bot', botId: p[1], tab: 'preview', settings: false }
     if (p.length === 3 && p[2] === 'settings') return { kind: 'bot', botId: p[1], tab: 'chat', settings: true }
     return HOME
   }
@@ -55,7 +56,7 @@ export function buildRoute(r: Route): string {
       return '/'
     case 'bot':
       // 設定浮窗蓋在對話上，不與 `terminal` 同時成立。
-      return `/bots/${e(r.botId)}${r.settings ? '/settings' : r.tab === 'terminal' ? '/terminal' : ''}`
+      return `/bots/${e(r.botId)}${r.settings ? '/settings' : r.tab === 'terminal' ? '/terminal' : r.tab === 'preview' ? '/preview' : ''}`
     case 'project':
       return `/projects/${e(r.projectId)}`
     case 'shell':

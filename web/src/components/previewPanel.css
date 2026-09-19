@@ -1,0 +1,120 @@
+/* components/PreviewPanel.tsx 專屬樣式（issue #253）。 */
+.preview-pane {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.preview-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+  padding: 6px 12px 0;
+}
+
+.preview-url {
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-decoration: none;
+  min-width: 0;
+}
+
+.preview-frame {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: #fff;
+}
+
+.preview-pane > .preview-note {
+  padding: 0 12px;
+}
+
+.preview-empty {
+  margin: auto;
+  max-width: 560px;
+  padding: 24px 16px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+.preview-title {
+  margin: 0;
+  font-size: 16px;
+  color: var(--text);
+}
+
+.preview-body {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+.preview-body code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.preview-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.preview-progress {
+  width: 200px;
+  max-width: 100%;
+}
+
+.preview-log {
+  align-self: stretch;
+  margin: 0;
+  max-height: 40vh;
+  overflow: auto;
+  text-align: left;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding: 8px 10px;
+  background: var(--term-bg);
+  color: var(--term-text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.preview-note.error {
+  font-size: 12px;
+  color: var(--danger);
+}
+
+.preview-btn {
+  padding: 3px 10px;
+  font-size: 12px;
+  white-space: nowrap;
+  text-decoration: none;
+}
+
+@media (max-width: 720px) {
+
+  .preview-frame {
+    border-radius: 0;
+    border-inline: 0;
+  }
+}

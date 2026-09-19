@@ -231,6 +231,8 @@ export interface Bot {
   primary: boolean
   /** null = 用 `project.path` */
   cwd: string | null
+  /** 預覽模式（issue #253）：`/api/state` 帶的簡版；舊 daemon 沒有＝undefined，null＝沒開過。 */
+  preview?: { status: 'off' | 'starting' | 'running' | 'failed'; port: number | null } | null
   /** 只存在於瀏覽器的佔位列（`id` 以 `pending:` 開頭），daemon 建好後被取代。 */
   pending?: boolean
   /** 有 active run 時是實際用的名字，否則是下次啟動會用的；debug 時拿去 herdr 對照 pane。 */

@@ -47,6 +47,7 @@ web/src/
 - **送出**：前端產生 `client_request_id` 當冪等鍵；使用者氣泡不做本地暫存，一律等 `message_added`（以 message id 去重）。
   `delivery="failed"` 不塞假 turn，文字留在框裡；`pending/ok/unknown` 才先補一筆 turn 讓輸入框立即鎖住。
   輸入框鎖定原因的順序在 `composerState()`；Enter 送出、Shift+Enter 換行、組字中的 Enter 不送。
+- **預覽分頁**（issue #253）：`api/preview.ts` 三個端點與型別、`store.previews`（`preview_changed` 寫入）、`components/PreviewPanel.tsx`；取捨見 UI-DECISIONS〈預覽分頁〉。
 - **來源標籤**：`hook` 不標；`terminal_fallback` 標「可能不完整」；系統訊息另有來源標。
 - **WS**：指數退避重連（250ms 起跳、上限 3 秒 + jitter；`transport.ts`），重連帶 `?since=<最高 seq>`；`resync` 或 `project_changed`／`bot_changed` → 重新 `GET /api/state`。
 - **blocked**：`BlockedModal`（全畫面，blocked 1 秒後自動彈出，只彈正在看的 bot，關過就不再彈直到下一次 blocked）與
