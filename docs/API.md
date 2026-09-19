@@ -1426,6 +1426,7 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
   續作沿用父交辦的 `expects_review`（通知的續作仍是通知）、`review_role` 與任務連結。已結案 409 `already_closed`；還在跑只接受 `cancel`（409 `still_executing`，且 cancel 不中止回合）。
   交辦掛在群組任務上時回應多 `mission_next: {mission_id, next, flow}`：裁示之後任務的下一步（同 `GET /api/missions/{id}` 的 `next`／`flow`）。
   決定成 `cancelled`／`superseded`／`failed` 時，交辦名下還在 `queued` 的 turn 一併撤銷（標 `failed`、插 system 訊息、釋放 queued 名額），回應多 `revoked_turn_id`；已經 `in_flight`／送出的不動、也不帶這個欄位（SPEC §4.4a）。
+  這一刻撤不成（讀不到交辦、或撤銷寫不進去）時改帶 `revoke_pending_turn_id` 與 `revoke_pending`（說明）：那一則不會被送出，daemon 會在送出前再判斷一次並撤掉（#200）。
   撤回成功時，這次決定的稽核列（`reviews[].evidence`）也改寫成「排隊中的 turn … 已撤回，沒有送出」，不留「turn 還在跑」的警告。
 
 ### 交接、inbox、狀態、證據

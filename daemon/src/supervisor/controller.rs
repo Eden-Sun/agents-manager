@@ -836,16 +836,14 @@ async fn resume_quota_blocked(app: &Arc<App>) {
 }
 
 /// The worker's last word on the turn, which is what the manager actually has to read before
-/// it may call an assignment done.
-async fn last_reply(app: &Arc<App>, turn_id: &str) -> Option<String> {
-    sqlx::query_scalar::<_, String>(
+/// it may call an assignment done. 讀不到是錯誤，不是「沒有回覆」（#200）。
+async fn last_reply(app: &Arc<App>, turn_id: &str) -> anyhow::Result<Option<String>> {
+    Ok(sqlx::query_scalar::<_, String>(
         "SELECT content FROM messages WHERE turn_id=? AND role='assistant' ORDER BY created_at DESC LIMIT 1",
     )
     .bind(turn_id)
     .fetch_optional(&app.db)
-    .await
-    .ok()
-    .flatten()
+    .await?)
 }
 
 /// 備援先把回合關成 `completed_fallback`、交辦已經帶著「沒有回覆」結算，之後遲到的 hook 才把真正的回覆補進回合
@@ -860,8 +858,12 @@ pub(crate) async fn late_reply_for_turn(app: &Arc<App>, turn_id: &str, status: &
     if !matches!(status, "completed" | "completed_fallback") {
         return;
     }
-    let Ok(Some(a)) = store::assignment_by_turn(&app.db, turn_id).await else { return };
-    late_reply(app, &a, turn_id).await;
+    // 讀不到不等於沒掛交辦（#200）：這一次寫不回去，每一輪對帳的 `sweep_late_replies` 照 DB 再找一次。
+    match store::assignment_by_turn(&app.db, turn_id).await {
+        Ok(Some(a)) => late_reply(app, &a, turn_id).await,
+        Ok(None) => {}
+        Err(e) => tracing::warn!(turn = turn_id, error = ?e, "讀不到這一回合掛的交辦：遲到的回覆這一次寫不回去，下一輪對帳再找"),
+    }
 }
 
 async fn late_reply(app: &Arc<App>, a: &store::Assignment, turn_id: &str) {
@@ -869,12 +871,22 @@ async fn late_reply(app: &Arc<App>, a: &store::Assignment, turn_id: &str) {
     if a.is_executing() || a.status == "quota_blocked" || a.turn_status.as_deref() != Some("completed_fallback") {
         return;
     }
-    let now_status: Option<String> =
-        sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(turn_id).fetch_optional(&app.db).await.ok().flatten();
-    if now_status.as_deref() != Some("completed") {
-        return;
-    }
-    let Some(reply) = last_reply(app, turn_id).await.filter(|r| !r.trim().is_empty()) else { return };
+    // 讀不到就這一次不寫（#200）：不寫就沒有收不回來的東西，每一輪對帳的 `sweep_late_replies` 照 DB 再找一次。
+    let read = async {
+        let now_status: Option<String> = sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(turn_id).fetch_optional(&app.db).await?;
+        if now_status.as_deref() != Some("completed") {
+            return anyhow::Ok(None);
+        }
+        last_reply(app, turn_id).await
+    };
+    let reply = match read.await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(assignment = %a.id, turn = turn_id, error = ?e, "讀不到回合或它的回覆：遲到的回覆這一次寫不回去，下一輪對帳再找");
+            return;
+        }
+    };
+    let Some(reply) = reply.filter(|r| !r.trim().is_empty()) else { return };
     let res = async {
         let now = crate::db::now();
         let mut tx = app.db.begin().await?;
@@ -946,43 +958,55 @@ async fn late_reply(app: &Arc<App>, a: &store::Assignment, turn_id: &str) {
 
 /// A tracked turn finished. That ends the *execution*, not the job: the assignment moves to
 /// `awaiting_review` and waits for an explicit decision (docs/SPEC.md §18.3).
+///
+/// 結案要看的東西（掛的交辦、這一回合的中斷原因、最後一句回覆、撞限）**讀不到就不結案**（#200）：結案之後對帳就不再看這筆，
+/// 拿殘缺的證據結案（當成沒有回覆、沒有撞限）收不回來——AGM 讀到空的 `result` 會 followup 或改派，做完的工作再做一次。
+/// 這一次記一行，每一輪對帳（`reconcile`，從 DB 重新掃開著的交辦）再試。
 async fn on_turn_done(app: &Arc<App>, turn_id: &str, status: &str) {
     // 只有真的終態才結案。`queued`／`in_flight` 是「還在路上」，結案會把排隊寫成失敗。
     if !matches!(status, "completed" | "completed_fallback" | "failed") {
         return;
     }
-    let Ok(Some(a)) = store::assignment_by_turn(&app.db, turn_id).await else { return };
+    if let Err(e) = settle_finished_turn(app, turn_id, status).await {
+        tracing::warn!(turn = turn_id, error = ?e, "回合結束了，結案要的東西卻讀不到（或寫不進去）：這一次不結案，下一輪對帳再試");
+    }
+}
+
+async fn settle_finished_turn(app: &Arc<App>, turn_id: &str, status: &str) -> anyhow::Result<()> {
+    let Some(a) = store::assignment_by_turn(&app.db, turn_id).await? else { return Ok(()) };
     if !a.is_executing() {
-        return;
+        return Ok(());
     }
     // 回合結束時 run 上記的錯誤原因（撞限、API 錯誤…）抄進交辦：`turn_status` 只說成敗，
     // 換手與驗收要看的是為什麼。
-    let turn_error = turn_error_of(app, turn_id).await;
+    let turn_error = turn_error_of(app, turn_id).await?;
     if let Some(err) = turn_error.as_deref() {
-        let _ = store::set_turn_error(&app.db, &a.id, err).await;
+        store::set_turn_error(&app.db, &a.id, err).await?;
     }
-    let reply = last_reply(app, turn_id).await;
+    let reply = last_reply(app, turn_id).await?;
     // 回合「結束」了，但 CLI 其實是回了一句「你的用量上限到了」——那不是工作的結果。
     // 這種回合跟正常的 completed 分開處理：assignment 進 `quota_blocked` 等重送，
     // 那句系統訊息記在 `error`（不是 `result`），免得 AGM 把它讀成 bot 的回覆。
     // 只有**這一回合**被撞限打斷才算：帳號上有撞限、這顆卻正常答完（同身分別的 bot 撞的），照常結案（review3 c1 H1）。
+    // 所以撞限只在這一回合看起來被打斷時才查；查不到（讀不到主機，#197）不當成沒撞限。
     let end = TurnEnd { status, reply: reply.as_deref(), turn_error: turn_error.as_deref() };
-    if let Ok(Some(bot)) = crate::db::bot(&app.db, &a.target_bot_id).await {
-        if let Some(hit) = crate::quota::limit_hit_for_bot(app, &bot).await {
-            if end.cut_by_limit() {
+    if end.cut_by_limit() {
+        if let Some(bot) = crate::db::bot(&app.db, &a.target_bot_id).await? {
+            if let Some(hit) = crate::quota::try_limit_hit_for_bot(app, &bot).await? {
                 park_quota(app, &a, &hit, "turn").await;
-                return;
+                return Ok(());
             }
         }
     }
     let ok = status == "completed" || status == "completed_fallback";
     settle(app, &a, status, status != "completed_fallback", reply.as_deref(), (!ok).then_some(status)).await;
+    Ok(())
 }
 
 /// run 上記的中斷原因，**只在它屬於這一回合時**才回：`runs.turn_error` 是整個 run 一格，下一回合開始才清，
-/// 所以同一個 run 上已經有更晚開始的回合（不是還在排隊的）時，那格講的是別的回合。
-async fn turn_error_of(app: &Arc<App>, turn_id: &str) -> Option<String> {
-    sqlx::query_scalar::<_, Option<String>>(
+/// 所以同一個 run 上已經有更晚開始的回合（不是還在排隊的）時，那格講的是別的回合。讀不到是錯誤（#200）。
+async fn turn_error_of(app: &Arc<App>, turn_id: &str) -> anyhow::Result<Option<String>> {
+    Ok(sqlx::query_scalar::<_, Option<String>>(
         "SELECT r.turn_error FROM turns t JOIN runs r ON r.id = t.run_id
           WHERE t.id = ?
             AND NOT EXISTS (SELECT 1 FROM turns n WHERE n.run_id = t.run_id AND n.id <> t.id
@@ -990,11 +1014,9 @@ async fn turn_error_of(app: &Arc<App>, turn_id: &str) -> Option<String> {
     )
     .bind(turn_id)
     .fetch_optional(&app.db)
-    .await
-    .ok()
+    .await?
     .flatten()
-    .flatten()
-    .filter(|e| !e.trim().is_empty())
+    .filter(|e| !e.trim().is_empty()))
 }
 
 /// 回合結束時手上的證據，判斷它是不是被撞限打斷的。
@@ -4075,6 +4097,70 @@ mod turn_done_quota_tests {
         }
     }
 
+    /// #200：回合結束了，結案要讀的東西讀不到（DB 出錯）——以前最後一句回覆讀不到就當成「沒有回覆」、中斷原因讀不到就當成
+    /// 「沒有原因」，照樣結案：交辦收成 awaiting_review、`result` 是空的，AGM 以為 bot 沒交出東西而 followup 或改派；
+    /// 結案之後對帳也不再看它。讀不到就不結案，交給下一輪對帳；讀得到之後照真的證據結案。
+    #[tokio::test]
+    async fn a_finished_turn_whose_evidence_cannot_be_read_is_not_settled_without_it() {
+        for (what, table) in [("最後一句回覆", "messages"), ("這一回合的中斷原因", "runs")] {
+            let app = app().await;
+            let a = finished(&app, "completed", Some("改好了，測試也過了。")).await;
+            sqlx::query(&format!("ALTER TABLE {table} RENAME TO {table}_unreadable")).execute(&app.db).await.unwrap();
+
+            on_turn_done(&app, a.turn_id.as_deref().unwrap(), "completed").await;
+            let row = store::assignment(&app.db, &a.id).await.unwrap().unwrap();
+            assert_eq!((row.status.as_str(), row.result.as_deref()), ("delivered", None), "{what}讀不到：不結案");
+
+            sqlx::query(&format!("ALTER TABLE {table}_unreadable RENAME TO {table}")).execute(&app.db).await.unwrap();
+            reconcile(&app).await;
+            let row = store::assignment(&app.db, &a.id).await.unwrap().unwrap();
+            assert_eq!((row.status.as_str(), row.result.as_deref()), ("awaiting_review", Some("改好了，測試也過了。")), "{what}：下一輪對帳照真的回覆結案");
+        }
+    }
+
+    /// #200：回合的中斷原因抄不進交辦（寫不進去）——以前 `let _ =` 吞掉照樣結案，驗收者看不到回合為什麼失敗。
+    /// 寫不進去就不結案；下一輪對帳寫進去、再結案。
+    #[tokio::test]
+    async fn a_turn_error_that_cannot_be_copied_holds_the_settle() {
+        let app = app().await;
+        sqlx::query("UPDATE runs SET turn_error='API Error: Connection lost mid-response.' WHERE id='run-b'").execute(&app.db).await.unwrap();
+        let a = finished(&app, "failed", None).await;
+        sqlx::query("CREATE TRIGGER lost_turn_error BEFORE UPDATE OF turn_error ON supervisor_assignments BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END")
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        on_turn_done(&app, a.turn_id.as_deref().unwrap(), "failed").await;
+        assert_eq!(store::assignment(&app.db, &a.id).await.unwrap().unwrap().status, "delivered", "原因抄不進去：不結案");
+
+        sqlx::query("DROP TRIGGER lost_turn_error").execute(&app.db).await.unwrap();
+        reconcile(&app).await;
+        let row = store::assignment(&app.db, &a.id).await.unwrap().unwrap();
+        assert_eq!(row.status, "awaiting_review");
+        assert_eq!(row.turn_error.as_deref(), Some("API Error: Connection lost mid-response."));
+    }
+
+    /// #200／#197 那一格：這一回合看起來被撞限打斷，查撞限時卻讀不到這顆 bot 在哪台主機——以前當成沒撞限，照一般失敗結案，
+    /// 交給 AGM 重派（再撞一次）。現在不結案、下一輪再判；讀得到之後照撞限停進 quota_blocked。
+    /// 對照：正常答完的回合不必查撞限，主機讀不到照樣結案（不因為用不到的證據卡住）。
+    #[tokio::test]
+    async fn a_limit_check_that_cannot_read_the_host_holds_a_cut_turn_but_not_an_answered_one() {
+        let app = app().await;
+        account_hit(&app).await;
+        let cut = finished(&app, "failed", None).await;
+        let answered = finished(&app, "completed", Some("改好了，測試也過了。")).await;
+        sqlx::query("ALTER TABLE projects RENAME TO projects_unreadable").execute(&app.db).await.unwrap();
+
+        on_turn_done(&app, cut.turn_id.as_deref().unwrap(), "failed").await;
+        on_turn_done(&app, answered.turn_id.as_deref().unwrap(), "completed").await;
+        assert_eq!(store::assignment(&app.db, &cut.id).await.unwrap().unwrap().status, "delivered", "讀不到主機：不當成沒撞限");
+        assert_eq!(store::assignment(&app.db, &answered.id).await.unwrap().unwrap().status, "awaiting_review", "答完的不必查撞限");
+
+        sqlx::query("ALTER TABLE projects_unreadable RENAME TO projects").execute(&app.db).await.unwrap();
+        on_turn_done(&app, cut.turn_id.as_deref().unwrap(), "failed").await;
+        assert_eq!(store::assignment(&app.db, &cut.id).await.unwrap().unwrap().status, "quota_blocked");
+    }
+
     /// run 上那格 `turn_error` 屬於更晚開始的回合時，不是這一回合的原因。
     #[tokio::test]
     async fn a_newer_turns_error_is_not_this_turns() {
@@ -4088,11 +4174,11 @@ mod turn_done_quota_tests {
             .await
             .unwrap();
         sqlx::query("UPDATE runs SET turn_error=? WHERE id='run-b'").bind(SESSION_BANNER).execute(&app.db).await.unwrap();
-        assert_eq!(turn_error_of(&app, a.turn_id.as_deref().unwrap()).await, None);
-        assert_eq!(turn_error_of(&app, "t-next").await.as_deref(), Some(SESSION_BANNER));
+        assert_eq!(turn_error_of(&app, a.turn_id.as_deref().unwrap()).await.unwrap(), None);
+        assert_eq!(turn_error_of(&app, "t-next").await.unwrap().as_deref(), Some(SESSION_BANNER));
         // 還在排隊的回合沒開始，不算「更晚開始」。
         sqlx::query("UPDATE turns SET status='queued' WHERE id='t-next'").execute(&app.db).await.unwrap();
-        assert_eq!(turn_error_of(&app, a.turn_id.as_deref().unwrap()).await.as_deref(), Some(SESSION_BANNER));
+        assert_eq!(turn_error_of(&app, a.turn_id.as_deref().unwrap()).await.unwrap().as_deref(), Some(SESSION_BANNER));
     }
 }
 

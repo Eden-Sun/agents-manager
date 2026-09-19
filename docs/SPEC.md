@@ -593,7 +593,8 @@ daemon 重啟時把所有 `queued` turn（含沒有 `next_flush_at` 的）重新
 讀不到交辦的狀態（DB 出錯）**不等於還要**，撤不掉（寫不進去）也不等於撤完了（#159）：都留在佇列——不認領、不花重試、一個字都不送——
 掛短 timer（10 秒，同維護窗口讀不到那一條）再判斷，flush 回錯誤；讀得到之後照它的狀態撤。認領那一句（`claim_queued`）本身也帶上
 「掛的交辦此刻不是 cancelled／superseded／failed／blocked／quota_blocked」：flush 讀完交辦到認領之間才被取消的，同一句擋下、留在佇列，
-下一輪撤。review API 決定當下那一次撤銷讀不到就先不撤（記一行），交給 flush 那一道。
+下一輪撤。review API 決定當下那一次撤銷讀不到交辦、或撤銷寫不進去時，回應帶 `revoke_pending_turn_id`（講明這一刻沒撤成）、
+叫醒 flush，由 flush 那一道撤掉（#200）；那一則不會因此送出。
 保險絲（`assignment_queue_wait_secs`）**先撤 turn、撤成功才把交辦標 `blocked`，同一個交易**：只標不撤的話，那筆之後照送、結果沒地方收
 （blocked 不在執行中，`on_turn_done` 直接 return），AGM 以為沒送出又重派；先標再撤的話，flush 剛好在兩步之間領走 turn 時，
 會把已經送出的交辦說成「沒有送出」。撤不到（已被 flush 領走）或交辦已經不是 `delivered`（別人先決定了）就整筆回滾、什麼都不動。
@@ -2177,6 +2178,11 @@ MissionController）用的單一入口：帶 CAS、擋非法邊、轉移沒發�
 
 - 回合原始事實各自留欄：`delivery`、`turn_status`（`completed` / `completed_fallback` / `failed` / `dispatch_failed` / `turn_missing` / `quota_exhausted` / `identity_switch`）、`evidence_complete`。
   終端備援不會因為「跑完了」就被驗收。派不出去的交辦也進 `awaiting_review`（`dispatch_failed`）。
+- **結案要的證據讀不到就不結案**（#200）：回合結束時要讀掛的交辦、這一回合的中斷原因（並抄進交辦的 `turn_error`）、最後一句回覆，
+  看起來被撞限打斷時再查撞限（`quota::try_limit_hit_for_bot`）。任何一項讀不到（或原因抄不進去）都不結案——結案之後對帳就不再看這筆，
+  當成「沒有回覆」「沒有撞限」結案收不回來（AGM 讀到空的 `result` 會 followup／改派，把做完的工作再做一次）。這一次記一行，
+  每個 tick 的 `controller::reconcile` 從 DB 重掃開著的交辦再試。正常答完的回合不查撞限，主機讀不到也照常結案。
+  遲到回覆那一條讀不到就這一次不寫，每輪 reconcile 的 `sweep_late_replies` 照 DB 再找。
 - **遲到的回覆**（review3 c1 M3）：交辦已經帶著 `completed_fallback`（沒有回覆）結算，之後遲到的 hook 把回覆補進回合（§4.3 例外）時，
   controller（回合事件＋每輪 reconcile）把 `turn_status` 升成 `completed`、`evidence_complete=1`、`result` 補上；原本沒有 `result` 的另推一則
   inbox（事件鍵 `assignment_late_reply:<assignment>:<turn>`，payload `late_reply:true`、`assignment_status`、`note`）：一般交辦 `assignment_completed`（叫醒驗收者，
