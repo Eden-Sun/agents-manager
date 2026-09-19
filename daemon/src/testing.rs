@@ -829,6 +829,23 @@ pub async fn fake_run(app: &Arc<App>, bot_id: &str) -> String {
     id
 }
 
+/// 讀取故障的注入：`table` 的 SELECT 全部壞掉（`no such table`），到 [`make_table_readable`] 為止。
+/// 連線池的每條連線各有自己的 schema 快取：先在**同一條**連線上讀一次 `sqlite_master` 刷新，再 ALTER；
+/// 不然剛好抽到沒看過上一次改動的連線，`ALTER` 在編譯階段就 `no such table`（時有時無）。
+pub async fn make_table_unreadable(app: &Arc<App>, table: &str) {
+    rename_table(app, table, &format!("{table}_unreadable")).await;
+}
+
+pub async fn make_table_readable(app: &Arc<App>, table: &str) {
+    rename_table(app, &format!("{table}_unreadable"), table).await;
+}
+
+async fn rename_table(app: &Arc<App>, from: &str, to: &str) {
+    let mut conn = app.db.acquire().await.unwrap();
+    sqlx::query("SELECT count(*) FROM sqlite_master").fetch_one(&mut *conn).await.unwrap();
+    sqlx::query(&format!("ALTER TABLE {from} RENAME TO {to}")).execute(&mut *conn).await.unwrap();
+}
+
 pub mod git {
     //! So the git tests never touch the repo they run in.
     use std::path::PathBuf;

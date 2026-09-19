@@ -51,6 +51,9 @@ mod identity_switch_tests;
 /// 競態的注入點，只在 `cargo test` 底下存在（見檔案頂端的說明）。
 #[cfg(test)]
 pub(crate) mod race_point;
+/// #187：`purge_deleted_bot_dirs` 讀不到 run 的狀態時不刪目錄。
+#[cfg(test)]
+mod purge_dirs_tests;
 
 /// Runs the daemon has typed into during **this** boot. `runs.pane_typed` is the durable record;
 /// this is the conservative in-process copy, so a row that later becomes unreadable cannot send a
