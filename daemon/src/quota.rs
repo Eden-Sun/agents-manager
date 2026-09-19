@@ -528,6 +528,8 @@ fn parse_utc(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
 /// - 讀數的窗是撞限**之後**才開的（`resets_at − 窗長 ≥ hit.at`）：那一桶已經重置過了，撞限作廢。
 ///   用窗的起點判斷而不是看百分比：撞限前就開始、撞限後才回來的 `/usage` 探測，百分比可能還沒到頂。
 /// - 否則撞限最晚到這個窗重置為止：`until = min(until, resets_at)`。
+/// - 讀數的窗在撞限**之前**就結束了（`resets_at ≤ hit.at`）：那是上一個窗的讀數（閒置的 5h 窗，`/usage` 照樣回上一個
+///   重置時間），說不出這次撞限的事，不動——拿它取 `min`，撞限會被拉到過去、當場作廢（#236）。
 ///
 /// 沒有桶名（codex 的 credits 用完、開機回填的格子）一律不動：那種撞限只有橫幅說得準。
 fn recalibrate_limit_hit(mut hit: LimitHit, fresh: &Quota) -> Option<LimitHit> {
@@ -542,6 +544,9 @@ fn recalibrate_limit_hit(mut hit: LimitHit, fresh: &Quota) -> Option<LimitHit> {
     };
     let Some(resets) = window.and_then(|w| w.resets_at.as_deref()).and_then(parse_utc) else { return Some(hit) };
     let Some(at) = parse_utc(&hit.at) else { return Some(hit) };
+    if resets <= at {
+        return Some(hit);
+    }
     if resets - len >= at {
         return None;
     }
@@ -1527,6 +1532,32 @@ mod tests {
         let mut later = reading.clone();
         later.five_hour.as_mut().unwrap().resets_at = Some(iso(at + chrono::Duration::hours(6)));
         assert_eq!(recalibrate_limit_hit(hit(Some("five_hour")), &later), None);
+    }
+
+    /// #236：窗在撞限**之前**就結束的讀數（閒置的 5h 窗：`/usage` 照樣回上一個重置時間）說不出這次撞限的事——
+    /// 拿它取 `min` 會把 `until` 拉到過去、撞限當場作廢，派工照送。撞限原樣留著，經過 `set` 也一樣。
+    #[tokio::test]
+    async fn a_reading_of_a_window_that_ended_before_the_hit_leaves_it_alone() {
+        let now = chrono::Utc::now();
+        let at = now - chrono::Duration::minutes(10);
+        let hit = LimitHit {
+            message: "You've hit your session limit".into(),
+            until: Some(iso(at + chrono::Duration::hours(5))),
+            at: iso(at),
+            bucket: Some("five_hour".into()),
+        };
+        let mut idle = codex_q("claude-usage", None);
+        idle.five_hour = Some(Window { used_pct: 0.0, resets_at: Some(iso(now - chrono::Duration::hours(1))) });
+        assert_eq!(recalibrate_limit_hit(hit.clone(), &idle), Some(hit.clone()), "上一個窗的讀數不動它");
+
+        let app = crate::testing::env().await.app.clone();
+        let mut banner = codex_q("claude-limit-hit", Some(hit.clone()));
+        banner.five_hour = None;
+        banner.seven_day = None;
+        set(&app, LOCAL_HOST, "claude:cc1", banner).await;
+        set(&app, LOCAL_HOST, "claude:cc1", idle).await;
+        let got = app.quotas.lock().await.get("claude:cc1").unwrap().limit_hit.clone();
+        assert_eq!(got, Some(hit), "經過 set 也還擋著");
     }
 
     #[tokio::test]

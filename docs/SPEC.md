@@ -2475,6 +2475,9 @@ inbox `assignment_noticed`（`needs_review=false`）。送不出去或回合失�
   不再留下 `until=None`——那等於永遠不過期，交辦會卡在 `quota_blocked` 到有人重啟 daemon（review 2026-09-16）。
   保底或橫幅當下的時間**之後要被那一桶的真讀數校正**（`quota::set`，只對帶桶名的撞限）：新讀數那一桶的窗起點（`resets_at − 窗長`）晚於撞限時刻＝已經重置過，撞限作廢；
   否則 `until = min(until, 那一桶的 resets_at)`。沒有桶名的撞限（codex credits 用完、開機回填）不校正。
+  **重置時間不晚於撞限時刻的讀數是上一個窗的**（#236）：閒置的 5h 窗 `/usage` 照樣回上一個重置時間（2026-09-19 `claude:cc1`：0%、−0.2h）。
+  撞的當下不拿它當到期（明講的那一桶照樣標滿、到期改用保底；認不出桶名時 5h 閒著就看 7d），之後也不拿它校正——否則 `until` 落在過去，
+  撞限一記下就過期被 `quota::set` 丟掉，派工照送。
 - controller 每 tick 掃：仍擋而 `resume_at` 到了就**順延並算一次** `quota_retries`，新時間照上一條的規則重算（取最早、>6 小時改 15 分鐘後、都沒有 +30 分鐘）——
   不再直接抄橫幅的 `until`（帶日期的橫幅能壓好幾天），沒寫時間的撞限也不會每 30 分鐘順延到永遠（review 2026-09-16）。不擋了回 `queued` 立刻重送，用 `<client_request_id>#r<n>`（`lifecycle::prompt` 的冪等是同 crid 回同 turn，不換序號等於沒送）。
   「不擋了」要**兩個條件同時成立**：查不到未過期的 `limit_hit`，**而且** `resume_at` 已經到了。查不到讀數不等於額度回來了——`app.quotas` 只在記憶體（§12.4），
