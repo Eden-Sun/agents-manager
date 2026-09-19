@@ -236,9 +236,22 @@ am_lease_lost() {
 
 # 可以被 TERM 打斷的 `sleep`：`_release` 殺守衛（子 shell）時，它手上的 `sleep N` 不會變成孤兒（行程數是全機共用的資源，
 # 每次 cargo 都留一顆 `sleep 60` 的孤兒，很快就把機器的行程表塞滿——issue #151）。
+#
+# **TERM 落在 fork 與記下 pid 之間也不能留孤兒**（issue #189）：`sleep &` 之後、`_ls_pid=$!` 之前的縫裡收到 TERM，handler 不知道要殺誰、
+# 守衛一退出那顆 `sleep` 就成了孤兒（快速跑完的 cargo 讓 `_release` 在守衛才剛起來時就送 TERM，負載一高就踩到；實測 480 次快跑留下 2～3 顆）。
+# 所以縫裡（`_ls_gap`）handler 只記下 `_lw_term`、不退出，縫過了再由這裡殺掉手上的 sleep 並退出；縫外 handler 直接殺 `_ls_pid` 並退出。
+# **殺它要用 KILL**：剛 fork 出來、還沒 exec 的 sleep 仍帶著守衛的 TERM handler，TERM 會被那個 handler 吞掉（只設旗標）、exec 之後就沒了，
+# sleep 照睡 60 秒；KILL 不能被接住。sleep 沒有任何東西要收尾。
 am_lease_sleep() {
+    _ls_pid=""
+    _ls_gap=1
     sleep "$1" &
     _ls_pid=$!
+    _ls_gap=""
+    if [ -n "$_lw_term" ]; then
+        kill -KILL "$_ls_pid" 2>/dev/null
+        exit 0
+    fi
     wait "$_ls_pid"
     _ls_pid=""
 }
@@ -254,7 +267,9 @@ am_lease_sleep() {
 am_lease_watch() {
     _lw_shim=$$
     _ls_pid=""
-    trap '[ -z "$_ls_pid" ] || kill "$_ls_pid" 2>/dev/null; exit 0' TERM
+    _ls_gap=""
+    _lw_term=""
+    trap 'if [ -n "$_ls_gap" ]; then _lw_term=1; else [ -z "$_ls_pid" ] || kill -KILL "$_ls_pid" 2>/dev/null; exit 0; fi' TERM
     # 續約請求的逾時：隔多久續一次的一半，夾在 1～5 秒（正常的 TTL 下就是 5 秒）。
     _lw_m=$((_renew_every / 2))
     [ "$_lw_m" -ge 1 ] || _lw_m=1
@@ -597,6 +612,25 @@ mod tests {
         cmd.spawn().unwrap()
     }
 
+    /// 寫一支測試用腳本（`content` 以 `#!` 開頭）並確定它**已經可以被 exec**（issue #189）：並行的另一條測試在別的執行緒 `fork`，
+    /// 短暫繼承了這個檔案的寫入 fd 直到它自己 `exec`，這段時間 exec 這支腳本會回 `ETXTBSY`——不管是測試直接 exec，還是被測的 shim 去 exec 它。
+    /// 腳本第一行在 `AM_TEST_EXEC_PROBE` 有設時直接 `exit 0`；寫完用它 exec 一次、`ETXTBSY` 就重試（`output_retrying`，條件是「還在被擋」，不是睡固定時間）。
+    /// exec 成功那一刻沒有任何行程握著寫入 fd，之後就不會再撞——只有我們會開它來寫，而我們寫完了。
+    fn write_exec(path: impl AsRef<std::path::Path>, content: impl AsRef<str>) {
+        let path = path.as_ref();
+        let content = content.as_ref();
+        let (shebang, rest) = content.split_once('\n').expect("script needs a shebang line");
+        assert!(shebang.starts_with("#!"), "{shebang}");
+        std::fs::write(path, format!("{shebang}\n[ -z \"${{AM_TEST_EXEC_PROBE:-}}\" ] || exit 0\n{rest}")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let out = output_retrying(Command::new(path).env("AM_TEST_EXEC_PROBE", "1"));
+        assert!(out.status.success(), "{}: {:?}", path.display(), out.status);
+    }
+
     struct Sandbox {
         dir: std::path::PathBuf,
         /// 這個沙盒起過的每一次 shim 的 process group（issue #151）：Drop（含測試 panic）時整組終止。
@@ -643,22 +677,24 @@ mod tests {
             super::install_local(&dir).unwrap();
             let fake = dir.join("real");
             std::fs::create_dir_all(&fake).unwrap();
-            let mut f = std::fs::File::create(fake.join("cargo")).unwrap();
             // Echoes argv and the env vars a test cares about, one per line, so assertions don't need a
             // real compiler. `$AM_TEST_FAKE_CARGO_LOG` records that the real cargo actually ran.
-            f.write_all(
-                b"#!/bin/sh\n\
-                  { printf 'CARGO_BUILD_JOBS=%s\\n' \"${CARGO_BUILD_JOBS:-}\"; for a in \"$@\"; do printf '%s\\n' \"$a\"; done; } \
-                    >> \"${AM_TEST_FAKE_CARGO_LOG:-/dev/null}\"\n\
-                  exit \"${AM_TEST_FAKE_CARGO_EXIT:-0}\"\n",
-            )
-            .unwrap();
-            drop(f);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt as _;
-                std::fs::set_permissions(fake.join("cargo"), std::fs::Permissions::from_mode(0o755)).unwrap();
-            }
+            write_exec(
+                &fake.join("cargo"),
+                "#!/bin/sh\n\
+                 { printf 'CARGO_BUILD_JOBS=%s\\n' \"${CARGO_BUILD_JOBS:-}\"; for a in \"$@\"; do printf '%s\\n' \"$a\"; done; } \
+                   >> \"${AM_TEST_FAKE_CARGO_LOG:-/dev/null}\"\n\
+                 exit \"${AM_TEST_FAKE_CARGO_EXIT:-0}\"\n",
+            );
+            // shim 自己也是剛寫好的腳本：用一個沒有副作用的呼叫（輕量子指令、真 cargo 換成 /usr/bin/true）exec 到成功為止。
+            let probe = output_retrying(
+                Command::new(dir.join("bin/cargo"))
+                    .arg("--version")
+                    .env_clear()
+                    .env("PATH", "/usr/bin:/bin")
+                    .env("AM_REAL_CARGO", "/usr/bin/true"),
+            );
+            assert!(probe.status.success(), "{:?}", probe);
             Sandbox { dir, groups: Default::default() }
         }
 
@@ -666,12 +702,7 @@ mod tests {
         /// whatever behavior they need (record calls, answer with canned JSON, fail to simulate no daemon).
         fn install_fake_curl(&self, body: &str) {
             let path = self.dir.join("real").join("curl");
-            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt as _;
-                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-            }
+            write_exec(&path, format!("#!/bin/sh\n{body}\n"));
         }
 
         /// 乾淨的一次 shim 呼叫：**呼叫端所有的 `AM_*` 都清掉**，不是列一份清單。這些測試跑在
@@ -714,12 +745,21 @@ mod tests {
                 "#!/bin/sh\n[ -z \"${{AM_TEST_FAST:-}}\" ] || exit 0\necho $$ > '{d}/cargo.pid'\n( exec /bin/sleep 300 ) >/dev/null 2>&1 &\necho $! > '{d}/rustc.pid'\ntouch '{d}/cargo.ready'\n/bin/sleep {secs}\nkill $(cat '{d}/rustc.pid') 2>/dev/null\necho done > '{d}/cargo.done'\nexit 0\n"
             );
             let path = self.dir.join("real/cargo");
-            std::fs::write(&path, body).unwrap();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt as _;
-                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-            }
+            write_exec(&path, body);
+        }
+
+        /// 一直跑到**虛擬時鐘**走過 `virtual_secs` 秒才正常結束（寫 `cargo.done`、退 0）的假 cargo（要先 `install_virtual_clock`）。
+        /// 「租約撐過好幾個 TTL」這類斷言要的是「虛擬時間走過去了」而不是「真的過了幾秒」——用固定的真實秒數
+        /// （`install_slow_cargo(3)`）時，機器一忙守衛在那 3 秒裡跑不完足夠的輪數，斷言就間歇紅（issue #189）。
+        /// 真實時間只留一個很寬的保險上限（75 秒），超過就退 3，讓測試明確失敗而不是永遠等。
+        fn install_cargo_until_virtual(&self, virtual_secs: u32) {
+            let d = self.dir.display();
+            write_exec(
+                self.dir.join("real/cargo"),
+                format!(
+                    "#!/bin/sh\necho $$ > '{d}/cargo.pid'\ntouch '{d}/cargo.ready'\nstart=$(cat '{d}/clock')\ni=0\nwhile [ $(( $(cat '{d}/clock') - start )) -lt {virtual_secs} ] && [ $i -lt 1500 ]; do /bin/sleep 0.05; i=$((i + 1)); done\n[ $(( $(cat '{d}/clock') - start )) -ge {virtual_secs} ] || exit 3\necho done > '{d}/cargo.done'\nexit 0\n"
+                ),
+            );
         }
 
         /// 名額租約的假 daemon：acquire 一律 granted（TTL 由參數給），renew 依 `renew-mode` 檔決定：
@@ -765,12 +805,7 @@ esac"#
             ];
             for (name, body) in files {
                 let path = self.dir.join("real").join(name);
-                std::fs::write(&path, body).unwrap();
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt as _;
-                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-                }
+                write_exec(&path, body);
             }
         }
 
@@ -795,24 +830,14 @@ esac"#
                  touch '{d}/cargo.ready'\n/bin/sleep 120\necho done > '{d}/cargo.done'\n"
             );
             let path = self.dir.join("real/cargo");
-            std::fs::write(&path, body).unwrap();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt as _;
-                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-            }
+            write_exec(&path, body);
         }
 
         /// 假的 `remote-cargo` helper（`AM_DAEMON_EXE`）：先把收到的 argv 記進 `helper.log`，再照 `body` 跑。
         /// 回傳 pane 環境裡要帶的三個變數（`AM_DAEMON_EXE`／`AM_CONFIG_PATH`／`AM_DATA_DIR`——缺哪個 shim 都不會轉遠端）。
         fn install_fake_helper(&self, body: &str) -> Vec<(&'static str, String)> {
             let helper = self.dir.join("fake-helper");
-            std::fs::write(&helper, format!("#!/bin/sh\necho \"$*\" >> '{}/helper.log'\n{body}\n", self.dir.display())).unwrap();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt as _;
-                std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
-            }
+            write_exec(&helper, format!("#!/bin/sh\necho \"$*\" >> '{}/helper.log'\n{body}\n", self.dir.display()));
             vec![("AM_DAEMON_EXE", helper.display().to_string()), ("AM_CONFIG_PATH", "/tmp/c.toml".into()), ("AM_DATA_DIR", "/tmp".into())]
         }
 
@@ -823,12 +848,7 @@ esac"#
                 "#!/bin/sh\nmkdir -p '{d}/running'\n: > '{d}/running/'$$\nls '{d}/running' | wc -l | tr -d ' ' >> '{d}/peak.log'\n/bin/sleep 1\nrm -f '{d}/running/'$$\nexit 0\n"
             );
             let path = self.dir.join("real/cargo");
-            std::fs::write(&path, body).unwrap();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt as _;
-                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-            }
+            write_exec(&path, body);
         }
 
         /// PATH：沙盒的 shim、假的真 cargo／curl，再來才是系統的。
@@ -1231,12 +1251,7 @@ esac
         }
         // 一個真的能執行的假 helper（回 125＝退回本機；不能用 `/bin/true`——macOS 沒有這個路徑）。
         let helper = s.dir.join("fake-helper");
-        std::fs::write(&helper, "#!/bin/sh\nexit 125\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        write_exec(&helper, "#!/bin/sh\nexit 125\n");
         let helper_path = helper.to_str().unwrap();
         // 什麼都沒有：一次講清楚缺哪三個。
         let (_, err, rc) = s.run(&base(log, &[]), &["check", "-p", "agents-managerd"]);
@@ -1607,7 +1622,7 @@ esac
         let s = Sandbox::new();
         s.install_virtual_clock();
         s.install_lease_curl(180);
-        s.install_slow_cargo(3);
+        s.install_cargo_until_virtual(3 * 180 + 60);
         s.set_renew_mode("once_down");
         let env = lease_env(&s);
         let (_, err, rc) = s.run(&as_refs(&env), &["check"]);
@@ -1624,7 +1639,7 @@ esac
         let s = Sandbox::new();
         s.install_virtual_clock();
         s.install_lease_curl(180);
-        s.install_slow_cargo(3);
+        s.install_cargo_until_virtual(3 * 180 + 60);
         s.set_renew_mode("alternate");
         let env = lease_env(&s);
         let (_, err, rc) = s.run(&as_refs(&env), &["test"]);
@@ -1800,6 +1815,30 @@ esac"#,
         assert!(survived, "不在 shim 那一組的行程被租約失效誤殺了（pid 被重用時會殺到別人）");
     }
 
+    /// issue #189：快速跑完的 cargo 讓 shim 的 `_release` 在續約守衛才剛起來時就送 TERM。守衛手上的 `sleep 60` 有兩個縫會被漏掉、成為孤兒
+    /// （行程數是全機共用的資源，#151）：TERM 落在 `sleep &` 與記下它的 pid 之間，handler 不知道要殺誰；以及剛 fork 出來、還沒 exec 的 sleep
+    /// 仍帶著守衛的 TERM handler，TERM 被那個 handler 吞掉、sleep 照睡。一次的機率很小（本機實測快跑 480 次留下 2～19 顆），
+    /// 所以一口氣跑很多次——每一次 `run_group` 都會確認整個 process group 一顆行程都不剩。每一種 shell 都驗（含 macOS 的 bash 3.2）。
+    #[test]
+    fn a_guard_stopped_right_after_it_starts_never_leaves_its_sleep_behind() {
+        std::thread::scope(|scope| {
+            for sh in shells() {
+                for _ in 0..4 {
+                    scope.spawn(move || {
+                        let s = Sandbox::new();
+                        s.install_lease_curl(180); // renew 間隔 60 秒：守衛的 `sleep 60`
+                        let env = lease_env(&s);
+                        for i in 0..60 {
+                            // 預設的假 cargo 立刻退 0：租約才剛拿到、守衛才剛起來。
+                            let (_, err, rc) = s.run_in(Some(sh), &as_refs(&env), &["check"]);
+                            assert_eq!(rc, 0, "{sh} 第 {i} 次：{err}");
+                        }
+                    });
+                }
+            }
+        });
+    }
+
     /// 起一顆 shim（慢的假 cargo）放進自己的 process group，等 cargo 起來；回傳它與 group id。
     fn start_slow_shim(s: &Sandbox) -> (std::process::Child, i32) {
         let mut cmd = s.command(&s.path());
@@ -1948,12 +1987,7 @@ esac"#,
         let s = Sandbox::new();
         s.install_lease_curl(30);
         let sink = s.dir.join("stdin.got");
-        std::fs::write(s.dir.join("real/cargo"), format!("#!/bin/sh\ncat > '{}'\nexit 0\n", sink.display())).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(s.dir.join("real/cargo"), std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        write_exec(s.dir.join("real/cargo"), format!("#!/bin/sh\ncat > '{}'\nexit 0\n", sink.display()));
         let env = lease_env(&s);
         let mut cmd = s.command(&format!("{}:{}:/usr/bin:/bin", s.dir.join("bin").display(), s.dir.join("real").display()));
         cmd.args(["run"]);
@@ -2105,12 +2139,7 @@ esac
         let other = s.dir.join("bots").join("OTHER").join("bin");
         std::fs::create_dir_all(&other).unwrap();
         let old_shim = super::SHIM_SH.replace("AM_SHIM_MARKER", "(舊版沒有這一行)");
-        std::fs::write(other.join("cargo"), &old_shim).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(other.join("cargo"), std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        write_exec(other.join("cargo"), &old_shim);
         // 名額上限 2，而且拿滿就不再給——真的死鎖時這個測試會停在這裡（fake curl 不會 sleep，
         // shim 的 retry_after_secs=0，所以是一個忙等的迴圈，不是 10 分鐘的假等待）。
         let call_log = s.dir.join("curl-calls.log");
