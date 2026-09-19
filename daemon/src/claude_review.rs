@@ -188,23 +188,72 @@ pub struct ReviewState {
 }
 
 /// 讀這一版的解析狀態。`GET /api/claude-update/review` 與 POST 的回應都用它。
+///
+/// 結論從**收件匣事件的回合**讀，不是從 assignment：派給 AGM 角色（協調者／巡檢）的工作一律走
+/// 交接佇列（`supervisor::assign` → `bot_requests::queue`），根本不會有 assignment，`result` 永遠
+/// 是空的——2026-09-19 上線後實測，視窗一直停在「還沒派」。那筆事件處理完會帶 `notify_turn_id`，
+/// 對方在那個回合裡講的話就是結論。
 pub async fn review_state(app: &Arc<App>, to: &str) -> ReviewState {
-    let a = crate::supervisor::store::assignment_by_crid(&app.db, &ui_request_id(to)).await.ok().flatten();
-    match a {
-        None => ReviewState { state: "none", assignment_id: None, target_bot_name: None, asked_at: None, answered_at: None, result: None },
-        Some(a) => {
-            let name = crate::db::bot(&app.db, &a.target_bot_id).await.ok().flatten().map(|b| b.name);
-            let has_result = a.result.as_deref().map(str::trim).is_some_and(|r| !r.is_empty());
-            ReviewState {
-                state: if has_result { "done" } else { "pending" },
-                assignment_id: Some(a.id),
-                target_bot_name: name,
-                asked_at: Some(a.created_at),
-                answered_at: a.completed_at,
-                result: a.result,
-            }
+    // 自己派的那筆優先；沒有就看 kick 派的（同一版，結論一樣算數）。
+    let mut row: Option<(String, Option<String>, Option<String>, String)> = None;
+    for crid in [ui_request_id(to), request_id(to)] {
+        row = sqlx::query_as::<_, (String, Option<String>, Option<String>, String)>(
+            "SELECT id, bot_id, notify_turn_id, created_at FROM supervisor_inbox
+              WHERE event_key LIKE ? ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(format!("%:crid:{crid}"))
+        .fetch_optional(&app.db)
+        .await
+        .ok()
+        .flatten();
+        if row.is_some() {
+            break;
         }
     }
+    let Some((event_id, bot_id, notify_turn_id, asked_at)) = row else {
+        return ReviewState { state: "none", assignment_id: None, target_bot_name: None, asked_at: None, answered_at: None, result: None };
+    };
+    let target_bot_name = match bot_id.as_deref() {
+        Some(b) => crate::db::bot(&app.db, b).await.ok().flatten().map(|x| x.name),
+        None => None,
+    };
+    let answer = match notify_turn_id.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        Some(turn) => answer_of_turn(app, turn).await,
+        None => None,
+    };
+    match answer {
+        Some((text, at)) => ReviewState {
+            state: "done",
+            assignment_id: Some(event_id),
+            target_bot_name,
+            asked_at: Some(asked_at),
+            answered_at: Some(at),
+            result: Some(text),
+        },
+        None => ReviewState {
+            state: "pending",
+            assignment_id: Some(event_id),
+            target_bot_name,
+            asked_at: Some(asked_at),
+            answered_at: None,
+            result: None,
+        },
+    }
+}
+
+/// 那個回合裡對方講的話（最後一則 assistant 訊息）。空白或還沒講就是 `None`。
+async fn answer_of_turn(app: &Arc<App>, turn_id: &str) -> Option<(String, String)> {
+    let row = sqlx::query_as::<_, (String, String)>(
+        "SELECT content, created_at FROM messages
+          WHERE turn_id = ? AND role = 'assistant' ORDER BY created_at DESC, rowid DESC LIMIT 1",
+    )
+    .bind(turn_id)
+    .fetch_optional(&app.db)
+    .await
+    .ok()
+    .flatten()?;
+    let text = row.0.trim().to_string();
+    (!text.is_empty()).then_some((text, row.1))
 }
 
 /// `GET /api/claude-update/review`：這一版的解析到哪了（視窗一打開就讀，結論直接顯示在框裡）。
@@ -434,6 +483,9 @@ mod tests {
     }
 
     /// 更新框要讀得到三種狀態：還沒派／派了還沒結論／有結論。
+    ///
+    /// 結論在**收件匣事件的回合**裡，不在 assignment：派給 AGM 角色一律走交接佇列，那條路沒有
+    /// assignment（2026-09-19 上線後實測，視窗一直停在「還沒派」）。
     #[tokio::test]
     async fn the_dialog_can_tell_none_pending_and_done_apart() {
         let e = crate::testing::env().await;
@@ -444,32 +496,50 @@ mod tests {
              VALUES ('resp1',?,'AGM-responder','claude','[]',0,1,'tok-r',?)",
         )
         .bind(&e.project_id).bind(&now).execute(&app.db).await.unwrap();
+        let conv = crate::db::conversation_id(&app.db, "resp1").await.unwrap();
 
-        assert_eq!(review_state(&app, "2.1.277").await.state, "none", "還沒派");
+        assert_eq!(review_state(&app, "2.1.278").await.state, "none", "還沒派");
 
-        sqlx::query(
-            "INSERT INTO supervisor_assignments
-               (id, supervisor_id, request_id, target_bot_id, client_request_id, text, status, attempts, expects_review, created_at, updated_at)
-             VALUES ('a1','AGM',NULL,'resp1',?,'解析一下','delivered',0,1,?,?)",
-        )
-        .bind(ui_request_id("2.1.277")).bind(&now).bind(&now).execute(&app.db).await.unwrap();
-        let pending = review_state(&app, "2.1.277").await;
-        assert_eq!(pending.state, "pending", "派了還沒結論");
+        // 派出去了：收件匣有這筆，還沒有回合。
+        let key = crate::supervisor::bot_requests::event_key("AGM", Some(&ui_request_id("2.1.278")), "fp", 0);
+        crate::supervisor::store::push_inbox(&app.db, &key, "bot_request", None, Some("resp1"), None, &json!({"fingerprint": "fp"}))
+            .await
+            .unwrap()
+            .expect("收件匣要有這一筆");
+        let pending = review_state(&app, "2.1.278").await;
+        assert_eq!(pending.state, "pending");
         assert_eq!(pending.target_bot_name.as_deref(), Some("AGM-responder"));
         assert!(pending.result.is_none());
 
-        sqlx::query("UPDATE supervisor_assignments SET result=?, status='completed', completed_at=? WHERE id='a1'")
-            .bind("2.1.277 對我們沒有用得上的東西，建議不跟進。")
-            .bind(&now)
+        // 處理完：事件帶回合 id，對方在那個回合講的話就是結論。
+        sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, created_at) VALUES ('t-1',?,'web','completed',?)")
+            .bind(&conv).bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE supervisor_inbox SET notify_turn_id='t-1', state='handled' WHERE event_key=?")
+            .bind(&key).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO messages (id, conversation_id, turn_id, role, content, source, created_at) VALUES (?,?, 't-1','assistant', ?, 'hook', ?)")
+            .bind(crate::db::ulid()).bind(&conv).bind("2.1.278 沒有值得 AG Man 跟進的改動。").bind(&now)
             .execute(&app.db).await.unwrap();
-        let done = review_state(&app, "2.1.277").await;
+        let done = review_state(&app, "2.1.278").await;
         assert_eq!(done.state, "done");
-        assert_eq!(done.result.as_deref(), Some("2.1.277 對我們沒有用得上的東西，建議不跟進。"), "結論要原樣帶出去給框顯示");
+        assert_eq!(done.result.as_deref(), Some("2.1.278 沒有值得 AG Man 跟進的改動。"), "結論原樣帶出去給框顯示");
         assert!(done.answered_at.is_some());
 
-        // 空字串的 result 不算有結論（agent 還沒寫東西就結案）。
-        sqlx::query("UPDATE supervisor_assignments SET result='   ' WHERE id='a1'").execute(&app.db).await.unwrap();
-        assert_eq!(review_state(&app, "2.1.277").await.state, "pending");
+        // 只有空白的回覆不算結論。
+        sqlx::query("UPDATE messages SET content='   ' WHERE turn_id='t-1'").execute(&app.db).await.unwrap();
+        assert_eq!(review_state(&app, "2.1.278").await.state, "pending");
+
+        // kick 派的那筆（不帶 -ui）也讀得到：同一版的結論一樣算數。
+        let kick_key = crate::supervisor::bot_requests::event_key("AGM", Some(&request_id("2.1.279")), "fp2", 0);
+        crate::supervisor::store::push_inbox(&app.db, &kick_key, "bot_request", None, Some("resp1"), None, &json!({}))
+            .await
+            .unwrap()
+            .unwrap();
+        sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, created_at) VALUES ('t-2',?,'web','completed',?)")
+            .bind(&conv).bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE supervisor_inbox SET notify_turn_id='t-2' WHERE event_key=?").bind(&kick_key).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO messages (id, conversation_id, turn_id, role, content, source, created_at) VALUES (?,?, 't-2','assistant','kick 那輪的結論','hook', ?)")
+            .bind(crate::db::ulid()).bind(&conv).bind(&now).execute(&app.db).await.unwrap();
+        assert_eq!(review_state(&app, "2.1.279").await.result.as_deref(), Some("kick 那輪的結論"));
     }
 
     /// kick 是透過**協調者的收件匣**派的，那一步還沒有 assignment：同一個 crid 已經在收件匣裡時，
