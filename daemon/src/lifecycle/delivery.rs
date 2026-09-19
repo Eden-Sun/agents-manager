@@ -232,17 +232,26 @@ pub(crate) struct Cell {
     pub ch: char,
     pub dim: bool,
     pub fg: bool,
+    /// 真彩／256 色的前景與背景（`38;2;r;g;b`、`48;2;r;g;b`、`38;5;n` 的灰階段）。
+    ///
+    /// grok 的建議句**不是** SGR 2 的 dim，而是直接畫一個暗灰前景（實測 `38;2;88;88;88`，marker
+    /// `❯` 是 `200;200;200`、真的打的字是 `225;225;225`）。只看 `dim` 會把它當成使用者打的草稿，
+    /// 那顆 bot 從此每一則 prompt 都 409 `composer_busy`（2026-09-19 w168:p7J）。
+    pub fg_rgb: Option<(u8, u8, u8)>,
+    pub bg_rgb: Option<(u8, u8, u8)>,
 }
 
 pub(crate) fn styled_cells(row: &str) -> Vec<Cell> {
     let mut out = Vec::new();
     let mut dim = false;
     let mut fg = false;
+    let mut fg_rgb: Option<(u8, u8, u8)> = None;
+    let mut bg_rgb: Option<(u8, u8, u8)> = None;
     let mut it = row.chars().peekable();
     while let Some(c) = it.next() {
         if c != '\u{1b}' {
             if c != '\r' {
-                out.push(Cell { ch: c, dim, fg });
+                out.push(Cell { ch: c, dim, fg, fg_rgb, bg_rgb });
             }
             continue;
         }
@@ -270,14 +279,39 @@ pub(crate) fn styled_cells(row: &str) -> Vec<Cell> {
                 "" | "0" => {
                     dim = false;
                     fg = false;
+                    fg_rgb = None;
+                    bg_rgb = None;
                 }
                 "2" => dim = true,
                 "22" => dim = false,
-                "39" => fg = false,
+                "39" => {
+                    fg = false;
+                    fg_rgb = None;
+                }
+                "49" => bg_rgb = None,
                 n if matches!(n.parse::<u8>(), Ok(30..=37 | 90..=97)) => fg = true,
                 "38" | "48" | "58" => {
-                    if nums[i] == "38" {
+                    let is_fg = nums[i] == "38";
+                    if is_fg {
                         fg = true;
+                    }
+                    let rgb = match nums.get(i + 1).copied() {
+                        Some("2") => {
+                            let c = |k: usize| nums.get(i + 2 + k).and_then(|v| v.parse::<u8>().ok());
+                            match (c(0), c(1), c(2)) {
+                                (Some(r), Some(g), Some(b)) => Some((r, g, b)),
+                                _ => None,
+                            }
+                        }
+                        Some("5") => nums.get(i + 2).and_then(|v| v.parse::<u8>().ok()).map(xterm256_rgb),
+                        _ => None,
+                    };
+                    if nums[i] != "58" {
+                        if is_fg {
+                            fg_rgb = rgb;
+                        } else {
+                            bg_rgb = rgb;
+                        }
                     }
                     i += match nums.get(i + 1).copied() {
                         Some("5") => 2,
@@ -291,6 +325,47 @@ pub(crate) fn styled_cells(row: &str) -> Vec<Cell> {
         }
     }
     out
+}
+
+/// `38;5;n` 的近似 RGB（只要能比亮度就夠，不必精準）。
+fn xterm256_rgb(n: u8) -> (u8, u8, u8) {
+    match n {
+        0..=7 => [(0, 0, 0), (128, 0, 0), (0, 128, 0), (128, 128, 0), (0, 0, 128), (128, 0, 128), (0, 128, 128), (192, 192, 192)][n as usize],
+        8..=15 => [(128, 128, 128), (255, 0, 0), (0, 255, 0), (255, 255, 0), (0, 0, 255), (255, 0, 255), (0, 255, 255), (255, 255, 255)][(n - 8) as usize],
+        16..=231 => {
+            let v = n - 16;
+            let step = |x: u8| if x == 0 { 0u8 } else { 55 + 40 * x };
+            (step(v / 36), step((v / 6) % 6), step(v % 6))
+        }
+        _ => {
+            let g = 8 + 10 * (n - 232);
+            (g, g, g)
+        }
+    }
+}
+
+fn luma((r, g, b): (u8, u8, u8)) -> f32 {
+    0.2126 * f32::from(r) + 0.7152 * f32::from(g) + 0.0722 * f32::from(b)
+}
+
+/// 這個格子是不是 TUI 自己畫的提示（灰字），而不是使用者打的字。
+///
+/// SGR 2 的 dim 直接算。顏色的部分**跟同一列的 marker 比**：marker（`❯`／`>`）一定是實字的顏色，
+/// 提示畫得比它更貼近背景。比相對亮度差，所以深色淺色主題都成立。
+pub(crate) fn is_hint_cell(cell: &Cell, marker: Option<&Cell>) -> bool {
+    if cell.dim {
+        return true;
+    }
+    let (Some(fg), Some(bg)) = (cell.fg_rgb, cell.bg_rgb.or(marker.and_then(|m| m.bg_rgb))) else { return false };
+    let Some(marker_fg) = marker.and_then(|m| m.fg_rgb) else { return false };
+    let bg_l = luma(bg);
+    let marker_contrast = (luma(marker_fg) - bg_l).abs();
+    if marker_contrast <= f32::EPSILON {
+        return false;
+    }
+    // 對比不到 marker 的六成＝提示。實測 grok：提示 88,88,88／marker 200,200,200／底 20,20,20
+    // → 0.37；使用者打的字 225,225,225 → 1.15。
+    (luma(fg) - bg_l).abs() / marker_contrast < 0.6
 }
 
 /// The row with styling removed.
@@ -325,31 +400,36 @@ fn blank_particles(cells: Vec<Cell>, drop: bool) -> Vec<Cell> {
     if !drop {
         return cells;
     }
-    cells.into_iter().map(|c| if is_particle(&c) { Cell { ch: ' ', dim: false, fg: false } } else { c }).collect()
+    cells.into_iter().map(|c| if is_particle(&c) { Cell { ch: ' ', dim: false, fg: false, fg_rgb: None, bg_rgb: None } } else { c }).collect()
 }
 
 fn locate_composer(kind: &str, lines: &[&str], drop_particles: bool) -> Option<ComposerRow> {
     let glyph = composer_glyph(kind)?;
     let from = lines.len().saturating_sub(COMPOSER_TAIL);
     (from..lines.len()).rev().find_map(|idx| {
-        let chars: Vec<(char, bool)> =
-            blank_particles(styled_cells(lines[idx]), drop_particles).into_iter().map(|c| (c.ch, c.dim)).collect();
-        let mut i = chars.iter().position(|(c, _)| !c.is_whitespace())?;
-        let boxed = chars[i].0 == '│';
-        let mut end = chars.len();
+        let cells = blank_particles(styled_cells(lines[idx]), drop_particles);
+        let mut i = cells.iter().position(|c| !c.ch.is_whitespace())?;
+        let boxed = cells[i].ch == '│';
+        let mut end = cells.len();
         if boxed {
             i += 1;
-            while i < end && chars[i].0 == ' ' {
+            while i < end && cells[i].ch == ' ' {
                 i += 1;
             }
-            while end > i && chars[end - 1].0.is_whitespace() {
+            while end > i && cells[end - 1].ch.is_whitespace() {
                 end -= 1;
             }
-            if end > i && chars[end - 1].0 == '│' {
+            if end > i && cells[end - 1].ch == '│' {
                 end -= 1;
             }
         }
-        (i < end && chars[i].0 == glyph).then(|| ComposerRow { idx, boxed, after_glyph: chars[i + 1..end].to_vec() })
+        // marker 是那一列實字的顏色基準：提示畫得比它更貼近背景（`is_hint_cell`）。
+        let marker = cells.get(i).copied();
+        (i < end && cells[i].ch == glyph).then(|| ComposerRow {
+            idx,
+            boxed,
+            after_glyph: cells[i + 1..end].iter().map(|c| (c.ch, is_hint_cell(c, marker.as_ref()))).collect(),
+        })
     })
 }
 
@@ -1194,6 +1274,41 @@ mod tests {
         // claude 不套這條：同樣的點字仍是內容。
         let claude = format!("─────\n❯ {particle}\n─────\n");
         assert_eq!(box_state("claude", &claude), BoxState::NonEmpty);
+    }
+
+    #[test]
+    /// grok 的建議句是**暗灰前景**（`38;2;88;88;88`），不是 SGR 2 的 dim：只看 dim 會把它當成
+    /// 使用者打的草稿，那顆 bot 從此每一則 prompt 都 409 `composer_busy`（2026-09-19 w168:p7J，
+    /// 使用者打了字送不出去，畫面上框裡只有一句灰色的「繼續寫完」）。
+    #[test]
+    fn a_grok_ghost_suggestion_is_a_hint_not_a_draft() {
+        // 真畫面的顏色：框線與提示 88,88,88／marker 200,200,200／底 20,20,20。
+        let esc = "\u{1b}";
+        let bg = format!("{esc}[48;2;20;20;20m");
+        let row = |text_fg: &str| {
+            format!(
+                "{bg}{esc}[38;2;80;80;88m│ {esc}[38;2;200;200;200m❯ {esc}[38;2;{text_fg}m繼續寫完{bg}          {esc}[38;2;80;80;88m│"
+            )
+        };
+        let screen = format!("⏺ 先前的輸出\n{}\n╰──────────────╯\n", row("88;88;88"));
+        assert_eq!(box_state("grok", &screen), BoxState::Empty, "灰色建議不是草稿");
+
+        // 同一個框、同樣位置，使用者真的打的字（亮色）就是草稿。
+        let screen = format!("⏺ 先前的輸出\n{}\n╰──────────────╯\n", row("225;225;225"));
+        assert_eq!(box_state("grok", &screen), BoxState::NonEmpty, "亮色是使用者打的字");
+    }
+
+    /// 顏色比的是**跟 marker 的對比**，不是寫死的門檻：淺色主題（白底黑字）一樣分得出來。
+    #[test]
+    fn the_hint_rule_works_on_a_light_theme_too() {
+        let marker = Cell { ch: '❯', dim: false, fg: true, fg_rgb: Some((20, 20, 20)), bg_rgb: Some((250, 250, 250)) };
+        let hint = Cell { ch: '字', dim: false, fg: true, fg_rgb: Some((190, 190, 190)), bg_rgb: Some((250, 250, 250)) };
+        let typed = Cell { ch: '字', dim: false, fg: true, fg_rgb: Some((30, 30, 30)), bg_rgb: Some((250, 250, 250)) };
+        assert!(is_hint_cell(&hint, Some(&marker)), "淺色主題的灰提示");
+        assert!(!is_hint_cell(&typed, Some(&marker)), "淺色主題打的字");
+        // SGR 2 照舊算提示；沒有顏色資訊（純文字讀）一律不放寬。
+        assert!(is_hint_cell(&Cell { ch: 'x', dim: true, fg: false, fg_rgb: None, bg_rgb: None }, None));
+        assert!(!is_hint_cell(&Cell { ch: 'x', dim: false, fg: false, fg_rgb: None, bg_rgb: None }, Some(&marker)));
     }
 
     #[test]
