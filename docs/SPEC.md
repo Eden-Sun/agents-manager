@@ -288,7 +288,7 @@ resend／排隊機制決定（`stuck_turns.rs`），不讓 CLI 自己另開一�
 還有 `pluginConfigs: {"agents-md@builtin": {"options": {"instructionFiles": "claude-md"}}}`（issue #206，claude **2.1.277** 起）：
 2.1.277 起，專案沒有 CLAUDE.md 時 claude 會改讀 AGENTS.md——內建 plugin `agents-md` 的 `instructionFiles`（`/config` 的「Project instructions」），
 可選 `claude-md`／`claude-md-or-agents-md`（**預設**）／`claude-md-and-agents-md`／`managed-only`。開不開由伺服器端旗標 `tengu_agents_md_mod`
-放量（2026-09-19 同一台機器上 2.1.276 開著、2.1.278 關著），也就是**升級或放量會在 daemon 不知情時換掉 bot 讀的指示檔**。同一個 project 常同時有
+放量（2026-09-19 互動式 TUI：2.1.277 與 2.1.278 都 `plugin.register: agents-md … admitted`；同一顆 binary 的 `-p`／SDK 路徑 GrowthBook 關掉，plugin 可以完全不註冊——#206 當時看 2.1.278 `-p` 以為旗標關著）。同一個 project 常同時有
 codex bot，AGENTS.md 是寫給 codex 的（`codex fork`、sandbox／approval 的說法），所以釘在 `claude-md`＝維持 2.1.277 以前的行為（理由同 #102：
 升級不該改變 bot 讀到的指示）。plugin 的選項只從 user／`--settings`／managed settings 讀（**專案層 settings 不讀**），鍵認 `agents-md` 或
 `agents-md@builtin`；值不在上面四個裡時 CLI 退回預設（等於沒釘），所以單元測試照 binary 的 enum 驗值。2.1.276 的舊選項 `projectInstructions`
@@ -301,12 +301,9 @@ API 只收這四個（`config::INSTRUCTION_FILES`，單元測試照 2.1.277／2.
 `claude_settings` 照 bot 的有效值（`config::effective_instruction_files`）寫，本機與遠端同一份；`GET /api/state` 的每顆 claude bot 帶有效值、前端 Bot 設定面板顯示與修改
 （API.md §12.8b）。改值要重啟才讀到（設定檔只在啟動時讀）。child bot 沒有 `--settings`，這一格管不到，API 直接拒絕。
 `bots.instruction_files` 是新欄位：加了 ALTER（舊列 NULL）、`SCHEMA_VERSION` 5 → 6（`SCHEMA_HISTORY` 加一行指紋）；**回滾到 `SCHEMA_VERSION` ≤ 5 的 daemon binary 會被 §3.1 的版本閘擋下**（不是資料壞掉）。
-這個 plugin 的提示（2.1.276 通知列 10 秒的 toast「This project has AGENTS.md but no CLAUDE.md; …」、2.1.277 起改讀時的 log
-「no CLAUDE.md found; AGENTS.md loaded: …」）在 `capture::claude::is_noise` 一律當雜訊，不會被 §4.3 備援收進回覆。
-**要在真機驗的**（旗標放量到這台、或下一次升級時）：在一個只有 `AGENTS.md` 的拋棄式專案起一顆 managed claude bot，`--debug-file` 要看到
-`plugin.register: agents-md (builtin, agents-md@builtin) … admitted`、**看不到** `no CLAUDE.md found; AGENTS.md loaded`，`/memory` 列的指示檔裡沒有
-AGENTS.md；同時抓一次畫面，確認 toast／log 實際畫在哪（`screen.rs` 的 fixture 目前照推測放了兩種位置）。鍵名或 enum 換了（2.1.276→2.1.277
-就換過一次）要跟著改這一格與單元測試。
+這個 plugin 的提示在 `capture::claude::is_noise` 一律當雜訊，不會被 §4.3 備援收進回覆。#212 真機（2.1.277／2.1.278 互動式、預設 config dir、只有 AGENTS.md 的拋棄式專案）：
+帶 daemon 注入的 `instructionFiles: "claude-md"` 時 debug log **沒有** `AGENTS.md loaded`、畫面沒有那一行；拿掉這一格時 log 寫 `every option is its default`，並在回覆槽畫
+`⏺ agents-md: no CLAUDE.md found; AGENTS.md loaded: <path>`（跟助手回覆同一個 `⏺`，閒置時它就是畫面上最後一個 `⏺`）。鍵名與 enum 沒再換。2.1.276 的通知列 toast 這次沒重抓。
 
 **Codex**：`-c notify=["/abs/agents-managerd","hook","codex","--bot",…,"--token",…,"--port",…]`；argv 最後一個參數是 JSON
 `{"type":"agent-turn-complete","thread-id","turn-id","cwd","input-messages","last-assistant-message"}`。使用者原本的 `notify` 在此實例被覆蓋。
