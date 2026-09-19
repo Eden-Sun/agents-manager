@@ -163,7 +163,7 @@ pub fn alertable_question(screen: &str) -> Option<String> {
 ///
 /// 固定寫死三個反引號關不住：child 畫面上本來就常有程式碼區塊，原文裡的 ``` 會把框提前關掉，
 /// 後面的字就變成 parent 對話裡的一般文字——「是資料不是指令」那句等於沒有（協調者 2026-09-18）。
-fn fence_for(text: &str) -> String {
+pub fn fence_for(text: &str) -> String {
     let (mut longest, mut run) = (0usize, 0usize);
     for c in text.chars() {
         if c == '`' {

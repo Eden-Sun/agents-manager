@@ -474,14 +474,20 @@ adopt 之後孤兒通知標記會清掉。pane 不存在 404、`owner_bot_id` �
 
 ```json
 {"version":"2.1.277","from_version":"2.1.276","target_bot_id":"01…","target_bot_name":"AGM-responder",
- "assignment_id":"01…","already_requested":false,"sections":1}
+ "assignment_id":"01…","duplicate":false,"sections":1}
 ```
 
-- `client_request_id` 固定是 `agm-claude-release-<版本>`（與 kick 同一個），**同一版重按回同一筆**，
-  `already_requested:true`；
-- 沒有設協調者 → 409 `no_responder`（巡檢自己不能收交辦：daemon 擋「總管對自己下交辦」）；
+- **正文只有一份來源**：`claude-release-task.md`（AGM 目錄裝好的那份優先，其次 repo 的 `scripts/ops/`）原文
+  ＋ 版本尾段（舊／新版號與兩顆 binary 路徑），跟 `claude-release-kick.sh` 完全一樣；規則要改就改那個檔案。
+  找不到那份檔案 → 409 `no_task_file`；
+- `client_request_id` 固定是 `agm-claude-release-<版本>`（與 kick 同一個）。同一版已經有交辦時**在送出之前**
+  就回既有那一筆、`duplicate:true`（UI 顯示「已經派過」，不是錯誤）——kick 與按鈕的正文差一句觸發來源，
+  不先查會撞上 `text_mismatch` 409；
+- 派給誰：`AGM_RELEASE_BOT` ＞ `runtime.json` 的 `release_bot_id` ＞ `responder_bot_id`，**絕不派給巡檢**
+  （daemon 擋「總管對自己下交辦」）。都沒設 → 409 `no_target`，`message` 就是給使用者看的原因；
 - 那台主機還讀不到 claude 版本 → 409 `no_version`；
-- 正文只放版差內的前 3 段、最多 4000 字，其餘給 CHANGELOG 連結——整份貼進去會塞爆對話。
+- changelog 原文框成引用（反引號數比原文最長那串多一個）並註明是資料，上限 8000 字，超過截斷並註明；
+  抓不到 changelog 照樣派，正文請協調者改用 diff binary 的做法。
 
 ## 外部 Cargo 主機（issue #104）
 

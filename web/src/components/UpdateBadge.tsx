@@ -52,11 +52,13 @@ export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; varian
         setConfirming(false)
         notify(
           'info',
-          r.already_requested
-            ? `${r.version} 的 changelog 已經派給 ${r.target_bot_name} 解析過了，結論會回到這裡`
+          // 已經派過（自己按過，或 30 分鐘那支排程先派了）不是錯誤，照實說一次就好。
+          r.duplicate
+            ? `claude ${r.version} 已經派給 ${r.target_bot_name || 'AGM'} 解析過了，結論會回到這裡`
             : `已請 ${r.target_bot_name} 解析 claude ${r.version} 的 changelog，結論會回到這裡`,
         )
       })
+      // 409 的 `message` 就是「為什麼派不出去」（沒設協調者、沒裝 task 檔），原樣讓使用者看到。
       .catch((e: unknown) => notify('error', `派不出去：${e instanceof Error ? e.message : String(e)}`))
       .finally(() => setAsking(false))
   }

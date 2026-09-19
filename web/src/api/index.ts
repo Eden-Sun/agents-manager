@@ -689,7 +689,7 @@ export async function installRemoteCargoToolchain(): Promise<{
 export async function requestClaudeUpdateReview(input: { host?: string; from?: string | null; to?: string | null }): Promise<{
   version: string
   target_bot_name: string
-  already_requested: boolean
+  duplicate: boolean
 }> {
   const raw = await transport.request('POST', '/claude-update/review', {
     host: input.host,
@@ -697,7 +697,7 @@ export async function requestClaudeUpdateReview(input: { host?: string; from?: s
     to: input.to ?? undefined,
   })
   const o = isRec(raw) ? raw : {}
-  return { version: str(o.version), target_bot_name: str(o.target_bot_name), already_requested: o.already_requested === true }
+  return { version: str(o.version), target_bot_name: str(o.target_bot_name), duplicate: o.duplicate === true }
 }
 
 /** 開臨時 pane 做該身份的登入。 */
