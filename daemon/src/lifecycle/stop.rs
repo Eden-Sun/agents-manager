@@ -406,9 +406,11 @@ pub async fn interrupt_turn(app: &Arc<App>, bot_id: &str, expect_turn: Option<&s
     let settled = super::interruption::settle_locked(app, bot_id, super::interruption::Evidence::Nothing).await;
     let in_flight = db::in_flight_turn(&app.db, &run.id).await.map_err(up)?;
     // 欠著的那一筆剛剛補上（或已經被別的路收掉）：這一次就是上一次中斷的重試，中斷已經完成——不再按 Esc。
+    // 沒指名哪一筆時，只有 run 上已經沒有別的在飛才算（#166）：欠著的帳不一定是 Esc 記的——插隊送出的帳一結清，
+    // 新的那一則就掛上 run、claude 正在做它，這一次的 Esc 是要打斷它。
     if let Some(t) = owed.as_deref() {
         let done = settled.is_ok() && in_flight.as_ref().map(|x| x.id.as_str()) != Some(t);
-        if done && (expect_turn.is_none() || expect_turn == Some(t)) {
+        if done && (expect_turn == Some(t) || (expect_turn.is_none() && in_flight.is_none())) {
             return Ok(());
         }
     }

@@ -1936,4 +1936,25 @@ mod send_now_tests {
         a_run_that_ends_while_a_send_now_is_owed(false).await;
     }
 
+    /// 插隊送出欠著收尾（503）之後，使用者看 claude 還在忙、按 Esc（網頁不帶 turn_id）：補帳把新的那一則掛上 run，claude
+    /// 正在處理的就是它——這一次 Esc 要打斷它，不是「上一次中斷的重試」：不能回 200 卻一個鍵都沒按。
+    #[tokio::test]
+    async fn an_esc_after_an_owed_send_now_interrupts_the_message_claude_is_working_on() {
+        let f = fixture("claude", Some("2.1.275")).await;
+        let app = f.env.app.clone();
+        let (running, new_turn) = an_owed_send_now(&f, "sn-then-esc", true).await;
+
+        interrupt_turn(&app, &f.bot_id, None).await.expect("Esc 進去了");
+        let escs = f
+            .env
+            .herdr
+            .calls_to("agent.send_keys")
+            .iter()
+            .filter(|p| p.get("keys").and_then(|k| k.as_array()).is_some_and(|k| k.iter().any(|k| k == "esc")))
+            .count();
+        assert_eq!(escs, 1, "使用者要停下 claude 正在做的：Esc 要按下去");
+        assert_eq!(status_of(&f, &running).await, "failed");
+        assert_eq!(status_of(&f, &new_turn).await, "failed", "被這次 Esc 打斷的是新的那一則");
+        assert_eq!(notes_on(&f, &new_turn).await, vec![super::super::interruption::INTERRUPT_NOTE.to_string()]);
+    }
 }
