@@ -194,8 +194,13 @@ pub fn guard_ddl() -> String {
 }
 
 /// 裝上 [`guard_ddl`] 那句 trigger。接在 `store::migrate` 裡，表一定已經存在之後。
+///
+/// DB 裡那一份跟現在的轉移表不同就換掉（issue #186）：以前 `IF NOT EXISTS` 只建一次，表改了舊 DB 永遠停在舊規則。
+/// DROP 與重建在同一個交易裡，換到一半失敗不會留下沒有守衛的空窗。
 pub async fn install_guard(pool: &SqlitePool) -> Result<()> {
-    sqlx::query(&guard_ddl()).execute(pool).await?;
+    let mut tx = pool.begin().await?;
+    crate::db::sync_trigger(&mut tx, "supervisor_assignments_status_transition", &guard_ddl()).await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -427,6 +432,58 @@ mod tests {
 
         // 值不變的重寫（冪等收尾）照樣放行——trigger 只管真的改變值的那一句。
         sqlx::query("UPDATE supervisor_assignments SET status='completed' WHERE id=?").bind(&id).execute(&p).await.expect("冪等重寫不該被擋");
+    }
+
+    /// issue #186：守衛 trigger 的內容由轉移表產生，以前用 `CREATE TRIGGER IF NOT EXISTS` 建——轉移表改了之後，舊 DB
+    /// 裡那一份已經存在，永遠不會換：新增的合法邊被舊守衛擋下、拿掉的邊照樣放行。turns 那一個（#68，`turn_controller`）同一個做法。
+    /// 只在測試的暫存 DB 驗：開一次、換成舊版的守衛、關掉重開（＝升級後的 daemon 開同一個 DB）。
+    #[tokio::test]
+    async fn guards_left_by_an_older_build_are_replaced_when_the_db_is_opened() {
+        let dir = std::env::temp_dir().join(format!("agm-guard-refresh-{}", crate::db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("db.sqlite3");
+        let p = crate::db::open(&path).await.unwrap();
+        // 舊版留下的守衛：轉移表還沒有 → quota_blocked 那幾條（現在合法的邊被擋），turns 那張還沒有 → in_flight。
+        for (name, stale) in [
+            (
+                "supervisor_assignments_status_transition",
+                "CREATE TRIGGER supervisor_assignments_status_transition BEFORE UPDATE OF status ON supervisor_assignments
+                   WHEN OLD.status IS NOT NEW.status AND NEW.status = 'quota_blocked'
+                 BEGIN SELECT RAISE(ABORT, 'stale assignment guard'); END",
+            ),
+            (
+                "turns_status_transition",
+                "CREATE TRIGGER turns_status_transition BEFORE UPDATE OF status ON turns
+                   WHEN OLD.status IS NOT NEW.status AND NEW.status = 'in_flight'
+                 BEGIN SELECT RAISE(ABORT, 'stale turn guard'); END",
+            ),
+        ] {
+            // 同一條連線、同一個交易：DROP 與 CREATE 不能落在連線池裡兩條不同的連線上。
+            let mut tx = p.begin().await.unwrap();
+            sqlx::query(&format!("DROP TRIGGER {name}")).execute(&mut *tx).await.unwrap();
+            sqlx::query(stale).execute(&mut *tx).await.unwrap();
+            tx.commit().await.unwrap();
+        }
+        p.close().await;
+
+        let p = crate::db::open(&path).await.unwrap();
+        // SQLite 存的是去掉 `IF NOT EXISTS` 的原文。
+        let current = |ddl: String| ddl.replacen("CREATE TRIGGER IF NOT EXISTS ", "CREATE TRIGGER ", 1);
+        for (name, want) in [
+            ("supervisor_assignments_status_transition", current(guard_ddl())),
+            ("turns_status_transition", current(crate::lifecycle::turn_controller::guard_ddl())),
+        ] {
+            let have: Option<String> = sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?").bind(name).fetch_optional(&p).await.unwrap();
+            assert_eq!(have.as_deref(), Some(want.as_str()), "{name}：重開之後守衛要等於現在的轉移表");
+        }
+        // 行為上也是現在這一份：表上合法的邊走得通，終局照樣回不去。
+        let id = row(&p, "g1").await;
+        sqlx::query("UPDATE supervisor_assignments SET status='quota_blocked' WHERE id=?").bind(&id).execute(&p).await.expect("queued -> quota_blocked 現在是合法的");
+        sqlx::query("UPDATE supervisor_assignments SET status='cancelled' WHERE id=?").bind(&id).execute(&p).await.unwrap();
+        let err = sqlx::query("UPDATE supervisor_assignments SET status='queued' WHERE id=?").bind(&id).execute(&p).await.expect_err("終局不能回頭");
+        assert!(format!("{err}").contains("illegal assignment status transition"), "{err}");
+        p.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 表跟 trigger 讀的是同一份 `allowed()`：合法的邊（同一份清單 `sources_for` 已經釘過）走 SQL
