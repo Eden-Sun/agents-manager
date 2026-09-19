@@ -77,7 +77,8 @@ async fn post_verdicts(State(app): State<Arc<App>>, Json(sub): Json<Submission>)
     let next = if proposals.is_empty() { Status::Empty } else { Status::Judged };
     let stored = json!({"submitted_at": ledger::now_ts(), "verdicts": verdicts, "issues": proposals});
     if !ledger::save_verdicts(&app.db, &sub.kind, &version, &stored, next).await.map_err(up)? {
-        return Err(LcError::conflict("not_awaiting_verdict", json!({"reason": "狀態在驗證期間變了"})));
+        // 說明放 `message`：extra 的 `reason` 會蓋掉機器 key（#228，同 #219）。
+        return Err(LcError::conflict("not_awaiting_verdict", json!({"message": "狀態在驗證期間變了"})));
     }
     let cfg = app.cfg.get().await.release_triage;
     let publish = if next == Status::Judged && cfg.publish {
@@ -180,5 +181,32 @@ mod tests {
         // publish 重試端點在 publish=false 時什麼都不做。
         let p = post_publish(State(app.clone()), None).await.unwrap();
         assert_eq!(p.0["results"][0]["result"]["outcome"], "disabled");
+    }
+
+    /// 驗證期間狀態被別人改掉（`save_verdicts` 沒更新到任何一列）：一樣是 API.md 的 409 `not_awaiting_verdict`。
+    /// 以前 extra 帶 `reason: "狀態在驗證期間變了"`，`LcError::conflict` 合併時蓋掉機器 key（跟 #219 同一類），
+    /// `agm release-triage submit` 的呼叫端對不到。
+    #[tokio::test]
+    async fn a_state_change_during_validation_is_still_the_documented_409() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let sections = source_sections("claude", include_str!("fixtures/claude_2.1.276-278.md"));
+        let entries = build_entries("claude", sections.iter().find(|s| s.version == "2.1.277").unwrap()).unwrap();
+        ledger::insert_version(&app.db, "claude", "2.1.277", &entries).await.unwrap();
+        let vs: Vec<EntryVerdict> = entries
+            .iter()
+            .filter(|e| e.bucket != Bucket::Dropped)
+            .map(|e| EntryVerdict { entry_id: e.id.clone(), verdict: Verdict::None, reason: "r".into(), module: "m".into() })
+            .collect();
+        // 讀的時候還是 pending、寫的時候一列都沒更新到＝驗證期間狀態變了。
+        sqlx::query("CREATE TRIGGER hold_release_triage BEFORE UPDATE ON release_triage BEGIN SELECT RAISE(IGNORE); END")
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let err = post_verdicts(State(app.clone()), Json(Submission { kind: "claude".into(), version: "2.1.277".into(), verdicts: vs, issues: vec![] }))
+            .await
+            .expect_err("沒寫進去就不能回成功");
+        let LcError::Conflict(body) = err else { panic!("要是 409：{err:?}") };
+        assert_eq!((body["error"].as_str(), body["reason"].as_str()), (Some("conflict"), Some("not_awaiting_verdict")), "{body}");
     }
 }
