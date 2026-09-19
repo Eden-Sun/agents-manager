@@ -431,8 +431,39 @@ pub async fn install_remote(conn: &crate::hosts::HostConn, remote_bot_dir: &str)
 #[cfg(test)]
 mod tests {
     //! Runs the real script against a fake `herdr` that prints argv one per line.
-    use std::io::Write as _;
+    use std::path::Path;
     use std::process::Command;
+
+    /// 剛寫好的腳本立刻 exec 可能撞上 `ETXTBSY`（Text file busy）（issue #189）：並行的另一條測試在別的執行緒 `fork`，
+    /// 短暫繼承了這個檔案的寫入 fd，直到它自己 `exec` 為止；這邊在那一刻 exec 就回 `Text file busy`。這不是被測程式的問題，是測試
+    /// 基礎設施的競態。重試的條件是「exec 還在被擋」，不是睡一個固定的時間：等到 exec **真的成功**才往下。
+    fn is_text_file_busy(e: &std::io::Error) -> bool {
+        e.raw_os_error() == Some(libc::ETXTBSY)
+    }
+
+    fn output_retrying(cmd: &mut Command) -> std::process::Output {
+        let started = std::time::Instant::now();
+        loop {
+            match cmd.output() {
+                Err(e) if is_text_file_busy(&e) && started.elapsed() < std::time::Duration::from_secs(30) => std::thread::sleep(std::time::Duration::from_millis(2)),
+                r => return r.unwrap(),
+            }
+        }
+    }
+
+    /// 寫一支測試用腳本（`body` 接在 `#!/bin/sh` 之後）並確定它**已經可以被 exec**：腳本第一行在 `AM_TEST_EXEC_PROBE` 有設時直接 `exit 0`，
+    /// 寫完後用它 exec 一次、`ETXTBSY` 就重試。exec 成功那一刻沒有任何行程握著它的寫入 fd，之後（含被測的 shim 自己去 exec 這支腳本）
+    /// 就不會再撞上——只有我們會開它來寫，而我們已經寫完了。
+    fn write_script(path: &Path, body: &str) {
+        std::fs::write(path, format!("#!/bin/sh\n[ -z \"${{AM_TEST_EXEC_PROBE:-}}\" ] || exit 0\n{body}")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let out = output_retrying(Command::new(path).env("AM_TEST_EXEC_PROBE", "1"));
+        assert!(out.status.success(), "{}: {:?}", path.display(), out.status);
+    }
 
     struct Sandbox {
         dir: std::path::PathBuf,
@@ -451,31 +482,23 @@ mod tests {
             super::install_local(&dir).unwrap();
             let fake = dir.join("real");
             std::fs::create_dir_all(&fake).unwrap();
-            let mut f = std::fs::File::create(fake.join("herdr")).unwrap();
             // `agent get <name>` answers from `AM_TEST_AGENTS`; everything else echoes argv.
-            f.write_all(
-                b"#!/bin/sh\n\
-                  if [ \"$1\" = agent ] && [ \"$2\" = get ]; then\n\
-                    case \" ${AM_TEST_AGENTS:-} \" in *\" $3 \"*) exit 0 ;; *) exit 1 ;; esac\n\
-                  fi\n\
-                  if [ \"$1\" = pane ] && [ \"$2\" = get ]; then\n\
-                    [ -n \"${AM_TEST_PANE_JSON:-}\" ] || exit 1\n\
-                    printf '%s\\n' \"$AM_TEST_PANE_JSON\"; exit 0\n\
-                  fi\n\
-                  if [ -n \"${AM_TEST_CREATE_JSON:-}\" ]; then printf '%s\\n' \"$AM_TEST_CREATE_JSON\"; exit 0; fi\n\
-                  if [ \"$1\" = pane ] && [ \"$2\" = send-text ]; then\n\
-                    { for a in \"$@\"; do printf '%s\\n' \"$a\"; done; printf -- '---\\n'; } >> \"${AM_TEST_SENDTEXT_LOG:-/dev/null}\"\n\
-                    exit 0\n\
-                  fi\n\
-                  for a in \"$@\"; do printf '%s\\n' \"$a\"; done\n",
-            )
-            .unwrap();
-            drop(f);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt as _;
-                std::fs::set_permissions(fake.join("herdr"), std::fs::Permissions::from_mode(0o755)).unwrap();
-            }
+            write_script(
+                &fake.join("herdr"),
+                "if [ \"$1\" = agent ] && [ \"$2\" = get ]; then\n\
+                   case \" ${AM_TEST_AGENTS:-} \" in *\" $3 \"*) exit 0 ;; *) exit 1 ;; esac\n\
+                 fi\n\
+                 if [ \"$1\" = pane ] && [ \"$2\" = get ]; then\n\
+                   [ -n \"${AM_TEST_PANE_JSON:-}\" ] || exit 1\n\
+                   printf '%s\\n' \"$AM_TEST_PANE_JSON\"; exit 0\n\
+                 fi\n\
+                 if [ -n \"${AM_TEST_CREATE_JSON:-}\" ]; then printf '%s\\n' \"$AM_TEST_CREATE_JSON\"; exit 0; fi\n\
+                 if [ \"$1\" = pane ] && [ \"$2\" = send-text ]; then\n\
+                   { for a in \"$@\"; do printf '%s\\n' \"$a\"; done; printf -- '---\\n'; } >> \"${AM_TEST_SENDTEXT_LOG:-/dev/null}\"\n\
+                   exit 0\n\
+                 fi\n\
+                 for a in \"$@\"; do printf '%s\\n' \"$a\"; done\n",
+            );
             Sandbox { dir }
         }
 
@@ -502,7 +525,7 @@ mod tests {
             for (k, v) in env {
                 cmd.env(k, v);
             }
-            let out = cmd.output().unwrap();
+            let out = output_retrying(&mut cmd);
             let stdout = String::from_utf8_lossy(&out.stdout).lines().map(String::from).collect();
             (stdout, String::from_utf8_lossy(&out.stderr).into_owned())
         }
@@ -560,12 +583,7 @@ mod tests {
         let s = Sandbox::new();
         let fake_curl = s.dir.join("real").join("curl");
         let log = s.dir.join("curl.log");
-        std::fs::write(&fake_curl, format!("#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\n", log.display())).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&fake_curl, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        write_script(&fake_curl, &format!("printf '%s\\n' \"$@\" >> '{}'\n", log.display()));
         let created = r#"{"id":"cli:tab:create","result":{"root_pane":{"agent":null,"pane_id": "w5:p9","tab_id":"w5:t4","workspace_id":"w5"},"tab":{"label":"sh","tab_id":"w5:t4","workspace_id":"w5"},"type":"tab_created"}}"#;
         let env = [("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_PORT", "1"), ("AM_TEST_CREATE_JSON", created)];
         let (out, _) = s.run(&env, &["tab", "create", "--workspace", "w5", "--purpose", "dev-server"]);
@@ -705,12 +723,7 @@ mod tests {
     fn a_request_the_daemon_queued_for_agm_is_not_typed_into_its_pane() {
         let s = Sandbox::new();
         let fake_curl = s.dir.join("real").join("curl");
-        std::fs::write(&fake_curl, "#!/bin/sh\nprintf '%s' \"${AM_TEST_CURL_REPLY:-}\"\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&fake_curl, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        write_script(&fake_curl, "printf '%s' \"${AM_TEST_CURL_REPLY:-}\"\n");
         let base = [("AM_AGENT_NAME", "proj-abc123"), ("AM_TEST_AGENTS", "agm-pxf2pv"), ("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_PORT", "1")];
         let mut env = base.to_vec();
         env.push(("AM_TEST_CURL_REPLY", r#"{"routed":"responder","inbox_event_id":"e1"}"#));
@@ -730,12 +743,7 @@ mod tests {
     fn a_request_the_daemon_could_not_route_is_not_typed_into_the_pane() {
         let s = Sandbox::new();
         let fake_curl = s.dir.join("real").join("curl");
-        std::fs::write(&fake_curl, "#!/bin/sh\nprintf '%s' \"${AM_TEST_CURL_REPLY:-}\"\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&fake_curl, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        write_script(&fake_curl, "printf '%s' \"${AM_TEST_CURL_REPLY:-}\"\n");
         let mut env = vec![("AM_AGENT_NAME", "proj-abc123"), ("AM_TEST_AGENTS", "agm-pxf2pv"), ("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_PORT", "1")];
         env.push(("AM_TEST_CURL_REPLY", r#"{"error":"routing_unavailable","routing_unavailable":true,"retryable":true}"#));
         let (out, err) = s.run(&env, &["agent", "prompt", "agm-pxf2pv", "請准我重啟 daemon"]);
@@ -752,11 +760,10 @@ mod tests {
         let count = s.dir.join("curl.count");
         let fake_curl = s.dir.join("real").join("curl");
         // 每次呼叫把 --data-urlencode 的值一行一行記下來；第一次照 AM_TEST_CURL_FIRST_RC 結束。
-        std::fs::write(
+        write_script(
             &fake_curl,
-            format!(
-                "#!/bin/sh\n\
-                 n=$(cat '{count}' 2>/dev/null || echo 0); n=$((n + 1)); echo $n > '{count}'\n\
+            &format!(
+                "n=$(cat '{count}' 2>/dev/null || echo 0); n=$((n + 1)); echo $n > '{count}'\n\
                  prev=''\n\
                  for a in \"$@\"; do [ \"$prev\" = --data-urlencode ] && printf '%s\\n' \"$a\" >> '{log}'; prev=$a; done\n\
                  echo --- >> '{log}'\n\
@@ -765,13 +772,7 @@ mod tests {
                 count = count.display(),
                 log = log.display(),
             ),
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&fake_curl, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        );
         let base = [("AM_AGENT_NAME", "proj-abc123"), ("AM_TEST_AGENTS", "agm-pxf2pv"), ("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_PORT", "1")];
 
         // daemon 沒排進佇列（`{}`）→ 照舊直送，但我們的旗標不給 herdr，herdr 的旗標原樣保留。
