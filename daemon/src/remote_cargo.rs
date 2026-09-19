@@ -694,7 +694,10 @@ impl Drop for Lease {
 
 /// 遠端跑 cargo 的那一行。先記下自己的 process group、再確認目錄還是這次租的（owner＝token），順序不能反：
 /// 守門清理是「先撤 owner、再讀 pgid」，所以通過檢查的 run 一定會被收到。
-fn run_script(dir: &str, token: &LeaseToken, jobs: usize, args: &[String]) -> String {
+///
+/// `sub` 是本機 cwd 相對於同步過去的根的路徑（[`source_root`]；`""`＝就在根）：遠端也要在同一個子目錄下跑，
+/// 相對路徑的參數（`--manifest-path ../x`、`-p` 的路徑）才跟本機是同一個意思。
+fn run_script(dir: &str, sub: &str, token: &LeaseToken, jobs: usize, args: &[String]) -> String {
     let argv = args.iter().map(|a| sh_quote(a)).collect::<Vec<_>>().join(" ");
     let tok = token.as_str();
     // `~/.cargo/bin` 要自己接：rustup 只改 shell profile，ssh 的非互動 shell 不讀（同 `PROBE_SH`）。
@@ -702,8 +705,9 @@ fn run_script(dir: &str, token: &LeaseToken, jobs: usize, args: &[String]) -> St
         "d={dir}; g=$(ps -o pgid= -p $$ | tr -d ' ') && printf '%s\\n' \"$g\" > \"$d.pgid-{tok}\" \
          && [ \"$(cat \"$d.owner\" 2>/dev/null)\" = {tok} ] \
          || {{ echo 'agents-manager: 遠端工作目錄已經還回去了（helper 中途被砍？），不跑 cargo' >&2; exit 126; }}; \
-         cd \"$d\" && PATH=\"$HOME/.cargo/bin:$PATH\" CARGO_BUILD_JOBS={jobs} cargo {argv}",
+         cd \"$d\"/{sub} && PATH=\"$HOME/.cargo/bin:$PATH\" CARGO_BUILD_JOBS={jobs} cargo {argv}",
         dir = sh_quote(dir),
+        sub = sh_quote(sub),
         jobs = jobs.max(1),
     )
 }
@@ -711,6 +715,27 @@ fn run_script(dir: &str, token: &LeaseToken, jobs: usize, args: &[String]) -> St
 fn run_status(mut cmd: Command, what: &str) -> anyhow::Result<ExitStatus> {
     cmd.stdin(Stdio::inherit()).stdout(Stdio::inherit()).stderr(Stdio::inherit());
     cmd.status().map_err(|e| anyhow::anyhow!("{what}: {e}"))
+}
+
+/// 遠端該同步（也是遠端目錄 hash 的種子）的根，以及 cwd 相對於它的路徑（`""`＝cwd 就是根）。
+///
+/// 跟 cargo 一樣往上找：最近一層宣告 `[workspace]` 的 `Cargo.toml` 就是工作區根；一路上都沒有就用最近的那個套件根；
+/// 完全不在 cargo 專案裡就是 cwd 本身。只同步 cwd（#177）的話，`cd daemon && cargo check` 到了遠端沒有根的
+/// `Cargo.lock`、`[profile.*]`、`.cargo/config.toml`——本機用鎖定的依賴，遠端重新解析、驗的不是同一份東西。
+fn source_root(cwd: &Path) -> (PathBuf, String) {
+    let mut package: Option<&Path> = None;
+    let mut root: Option<&Path> = None;
+    for dir in cwd.ancestors() {
+        let Ok(manifest) = std::fs::read_to_string(dir.join("Cargo.toml")) else { continue };
+        package.get_or_insert(dir);
+        if manifest.parse::<toml::Table>().is_ok_and(|t| t.contains_key("workspace")) {
+            root = Some(dir);
+            break;
+        }
+    }
+    let root = root.or(package).unwrap_or(cwd);
+    let sub = cwd.strip_prefix(root).map(|r| r.to_string_lossy().into_owned()).unwrap_or_default();
+    (root.to_path_buf(), sub)
 }
 
 fn open_lease(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path) -> anyhow::Result<Lease> {
@@ -785,10 +810,10 @@ fn sync_source(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, dir: &str) 
     Ok(())
 }
 
-fn run_remote(remote: &BuildRemoteCfg, data_dir: &Path, lease: &Lease, args: &[String]) -> anyhow::Result<i32> {
+fn run_remote(remote: &BuildRemoteCfg, data_dir: &Path, lease: &Lease, sub: &str, args: &[String]) -> anyhow::Result<i32> {
     let pw = secret(data_dir)?;
     let mut cmd = ssh_base(remote, pw.as_deref(), data_dir)?;
-    cmd.arg(run_script(&lease.hs.dir, &lease.token, remote.cargo_jobs, args));
+    cmd.arg(run_script(&lease.hs.dir, sub, &lease.token, remote.cargo_jobs, args));
     let status = run_status(cmd, "remote cargo")?;
     Ok(status.code().unwrap_or(1))
 }
@@ -817,10 +842,11 @@ pub fn run_cli(config_path: &Path, data_dir: &Path, cwd: &Path, args: &[String])
     );
     let result = (|| -> anyhow::Result<i32> {
         // 從這裡起不管怎麼離開（`?`、panic、被殺），守門都會收到 EOF 把目錄還回去。
-        let mut lease = open_lease(&remote, data_dir, cwd)?;
+        let (root, sub) = source_root(cwd);
+        let mut lease = open_lease(&remote, data_dir, &root)?;
         lease.collect(&select_gc(&lease.hs));
-        sync_source(&remote, data_dir, cwd, &lease.hs.dir)?;
-        let code = run_remote(&remote, data_dir, &lease, args)?;
+        sync_source(&remote, data_dir, &root, &lease.hs.dir)?;
+        let code = run_remote(&remote, data_dir, &lease, &sub, args)?;
         lease.finish();
         Ok(code)
     })();
@@ -872,6 +898,43 @@ mod tests {
         let cmd = ssh_cmd(&remote(), None, None);
         assert_eq!(cmd.get_program(), "ssh");
         assert!(envs(&cmd).is_empty(), "{:?}", envs(&cmd));
+    }
+
+    /// #177：`cd daemon && cargo check` 到遠端時，要同步的是**工作區根**（有根的 Cargo.lock／[profile]／.cargo/config.toml），
+    /// 再在同一個子目錄下跑。以前一律同步 cwd 本身：遠端沒有鎖檔、重新解析依賴，驗的不是本機那份。
+    #[test]
+    fn a_subdirectory_call_syncs_the_workspace_root_and_runs_in_the_same_subdirectory() {
+        let t = std::env::temp_dir().join(format!("am-r177-{}", crate::db::ulid()));
+        let mk = |rel: &str, manifest: Option<&str>| {
+            let d = t.join(rel);
+            std::fs::create_dir_all(&d).unwrap();
+            if let Some(m) = manifest {
+                std::fs::write(d.join("Cargo.toml"), m).unwrap();
+            }
+            d
+        };
+        let pkg = "[package]\nname = \"p\"\nversion = \"0.1.0\"\n";
+        let ws = mk("ws", Some("[workspace]\nmembers = [\"daemon\"]\n"));
+        let daemon = mk("ws/daemon", Some(pkg));
+        let src = mk("ws/daemon/src", None);
+        let solo = mk("solo", Some(pkg));
+        let solo_src = mk("solo/src", None);
+        let bare = mk("bare/x", None);
+        // 自己就是另一個工作區根的目錄（不歸外層管）：它自己當根。
+        let inner = mk("ws/tools", Some("[workspace]\n"));
+        let inner_src = mk("ws/tools/src", None);
+        // manifest 壞掉的目錄不算工作區根，也不能讓 helper 出事。
+        let broken = mk("broken", Some("[workspace\n"));
+
+        assert_eq!(source_root(&ws), (ws.clone(), String::new()), "就在根：不變");
+        assert_eq!(source_root(&daemon), (ws.clone(), "daemon".into()), "成員目錄：往上找到工作區根");
+        assert_eq!(source_root(&src), (ws.clone(), "daemon/src".into()), "更深的子目錄也一樣");
+        assert_eq!(source_root(&solo), (solo.clone(), String::new()));
+        assert_eq!(source_root(&solo_src), (solo.clone(), "src".into()), "沒有工作區的單一套件：套件根");
+        assert_eq!(source_root(&bare), (bare.clone(), String::new()), "不在 cargo 專案裡：cwd 本身，跟以前一樣");
+        assert_eq!(source_root(&inner_src), (inner.clone(), "src".into()), "有自己 [workspace] 的算自己的根");
+        assert_eq!(source_root(&broken), (broken.clone(), String::new()), "壞 manifest：當成一般套件根");
+        let _ = std::fs::remove_dir_all(t);
     }
 
     /// #174：連線靜默斷掉（Wi-Fi 換 AP、Mac 睡著醒來 IP 變了、遠端掉電）時，ssh 沒有 ServerAlive 就只能等 TCP keepalive
@@ -1088,7 +1151,7 @@ mod tests {
     #[test]
     fn the_remote_run_records_its_group_before_checking_the_lease() {
         let tok = LeaseToken::parse("0123456789abcdef0123456789abcdef").unwrap();
-        let s = run_script("/r/0123456789abcdef/shared", &tok, 4, &["test".into(), "-p".into(), "x; rm -rf ~".into()]);
+        let s = run_script("/r/0123456789abcdef/shared", "", &tok, 4, &["test".into(), "-p".into(), "x; rm -rf ~".into()]);
         let pgid = s.find("> \"$d.pgid-0123456789abcdef0123456789abcdef\"").expect(&s);
         let owner = s.find("\"$d.owner\"").expect(&s);
         let cargo = s.find("cargo test").expect(&s);
@@ -1201,7 +1264,7 @@ mod guard_tests {
         // 遠端每條 ssh 都是自己的 session（sshd setsid）；這裡用獨立的 process group 模擬，收 pgid 才不會打到測試本身。
         Command::new("sh")
             .arg("-c")
-            .arg(run_script(dir, token, 1, &["test".into()]))
+            .arg(run_script(dir, "", token, 1, &["test".into()]))
             .env("HOME", home)
             .current_dir(base)
             .process_group(0)
@@ -1284,6 +1347,38 @@ mod guard_tests {
         let status = spawn_run(&base, &home, &dir, &token).wait().unwrap();
         assert_eq!(status.code(), Some(126));
         assert!(!started(&dir));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// #177：從子目錄呼叫時，遠端也要在同一個子目錄下跑 cargo（相對路徑的參數才跟本機是同一個意思）；
+    /// 就在根的呼叫照舊在根目錄跑。
+    #[test]
+    fn the_remote_run_starts_in_the_same_subdirectory_as_the_local_call() {
+        let base = base();
+        let home = fake_home(&base);
+        // 這裡的假 cargo 把自己的 cwd 記下來就結束。
+        let cargo = home.join(".cargo/bin/cargo");
+        std::fs::write(&cargo, "#!/bin/sh\npwd > \"$AM_TEST_PWD\"\n").unwrap();
+        let mut lease = guard(&base, HASH, "job-1-1");
+        let dir = lease.hs.dir.clone();
+        std::fs::create_dir_all(Path::new(&dir).join("daemon/src")).unwrap();
+        for sub in ["daemon/src", ""] {
+            let out = base.join("pwd.out");
+            let _ = std::fs::remove_file(&out);
+            let status = Command::new("sh")
+                .arg("-c")
+                .arg(run_script(&dir, sub, &lease.token, 1, &["check".into()]))
+                .env("HOME", &home)
+                .env("AM_TEST_PWD", &out)
+                .current_dir(&base)
+                .status()
+                .unwrap();
+            assert!(status.success(), "{sub}: {status:?}");
+            let cwd = std::fs::read_to_string(&out).unwrap();
+            let want = Path::new(&dir).join(sub);
+            assert_eq!(std::fs::canonicalize(cwd.trim()).unwrap(), std::fs::canonicalize(&want).unwrap(), "sub={sub:?}");
+        }
+        lease.finish();
         let _ = std::fs::remove_dir_all(base);
     }
 
