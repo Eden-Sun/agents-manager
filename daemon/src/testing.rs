@@ -47,6 +47,8 @@ pub struct MockHerdr {
     faults: Arc<StdMutex<Vec<(String, Fault)>>>,
     /// `agent.list` 回空陣列，但 `agent.get` 仍看得到 `agents`：模擬「清單暫時是空的、agent 其實還在」。
     pub hide_agent_list: Arc<std::sync::atomic::AtomicBool>,
+    /// `ping` 的回答 `(version, protocol)`；測 live-handoff 後版本變了（#254）。
+    pub pong: Arc<StdMutex<(String, u32)>>,
     handle: tokio::task::JoinHandle<()>,
 }
 
@@ -206,6 +208,7 @@ struct MockState {
     shell_pids: Arc<StdMutex<BTreeMap<String, i64>>>,
     faults: Arc<StdMutex<Vec<(String, Fault)>>>,
     hide_agent_list: Arc<std::sync::atomic::AtomicBool>,
+    pong: Arc<StdMutex<(String, u32)>>,
     seq: Arc<std::sync::atomic::AtomicU64>,
 }
 
@@ -268,6 +271,7 @@ impl MockHerdr {
             shell_pids: Default::default(),
             faults: Default::default(),
             hide_agent_list: Default::default(),
+            pong: Arc::new(StdMutex::new(("mock".into(), 20))),
             seq: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         };
         let (workspaces, tabs, calls, agents) =
@@ -278,6 +282,7 @@ impl MockHerdr {
         let ignore_ansi = state.ignore_ansi.clone();
         let faults = state.faults.clone();
         let hide_agent_list = state.hide_agent_list.clone();
+        let pong = state.pong.clone();
         let handle = tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
                 let st = state.clone();
@@ -312,7 +317,10 @@ impl MockHerdr {
                     }
                     let wid_of = |k: &str| params.get(k).and_then(Value::as_str).unwrap_or("").to_string();
                     let out = match method.as_str() {
-                        "ping" => json!({"id": id, "result": {"version": "mock", "protocol": 20}}),
+                        "ping" => {
+                            let (v, p) = st.pong.lock().unwrap().clone();
+                            json!({"id": id, "result": {"version": v, "protocol": p}})
+                        }
                         "workspace.create" => {
                             let wid = format!("ws-{}", st.next());
                             let label = params.get("label").and_then(Value::as_str).unwrap_or("").to_string();
@@ -673,7 +681,7 @@ impl MockHerdr {
                 });
             }
         });
-        MockHerdr { workspaces, tabs, calls, agents, screens, live, reject_ansi, ignore_ansi, argvs, pids, shell_pids, faults, hide_agent_list, handle }
+        MockHerdr { workspaces, tabs, calls, agents, screens, live, reject_ansi, ignore_ansi, argvs, pids, shell_pids, faults, hide_agent_list, pong, handle }
     }
 
     /// 接下來第一次呼叫 `method` 時照 `fault` 壞一次（排幾次就壞幾次，依序）。呼叫一樣記在 `calls` 裡。

@@ -143,6 +143,26 @@ pub fn parse_utc_offset(out: &str) -> Option<i32> {
     (h < 24 && m < 60).then_some(sign * (h * 3600 + m * 60))
 }
 
+/// 只問 `herdr --version`（比整套 [`PROBE_SH`] 便宜，定期重探用，#254）。
+const HERDR_CLI_SH: &str = r#"hp=$( "${SHELL:-/bin/sh}" -lic "command -v herdr" 2>/dev/null | tail -1 )
+[ -n "$hp" ] || hp=$(command -v herdr 2>/dev/null)
+case "$hp" in /*) printf 'AM_HERDR %s\n' "$( "$hp" --version 2>/dev/null </dev/null | head -1 | tr -d '\r' )" ;; esac
+"#;
+
+/// 重探那台的 herdr CLI 版本；連不上或讀不到＝None（不沿用舊值）。
+pub async fn probe_herdr_cli(app: &Arc<App>, host: &str) -> Option<String> {
+    let out = if host == LOCAL_HOST {
+        run_local(HERDR_CLI_SH, PROBE_TIMEOUT).await.ok()?
+    } else {
+        let conn = app.hosts.get(host).await?;
+        if !conn.connected.load(std::sync::atomic::Ordering::Relaxed) {
+            return None;
+        }
+        conn.ssh_exec_path(HERDR_CLI_SH).await.ok()?
+    };
+    parse_herdr_cli(&out)
+}
+
 /// `AM_HERDR herdr 0.9.1` → `herdr 0.9.1`。沒這行或空的＝None。
 pub fn parse_herdr_cli(out: &str) -> Option<String> {
     let v = out.lines().find_map(|l| l.trim().strip_prefix("AM_HERDR "))?.trim();

@@ -1291,6 +1291,7 @@ Project 底下所有存活 bot 的訊息合併，以插入順序（`rowid`）倒
 
 - `server_version`／`protocol`：最近一次 `ping` 成功的回應；**主機沒連上就是 `null`**（斷線後的舊值不算現況）。
 - `cli_version`：工具偵測（§12.6）跑 `herdr --version` 的版本號；herdr 沒裝或還沒偵測＝`null`。
+- 更新時機：訂閱（重）建成功後與每 60 秒重 ping、重探 CLI 版本（herdr live-handoff、只換 CLI 都會反映），有變就推 `host_changed`；讀不到＝`null`，不保留舊值。
 - `mismatch`：兩邊版本都讀得到而且不同。典型是 CLI 已升到 0.9.1、跑著的 server 還是 0.8.2 —— bot 的 herdr 指令會回 `protocol_mismatch`，要重啟 herdr server。只知道一邊時為 `false`，不猜。
 - `protocol_supported`：protocol 是否在 daemon 實測過的清單（`herdr.rs` `SUPPORTED_PROTOCOLS`，目前 20／22）；不知道 protocol 時 `null`。
 - 舊 daemon 沒有 `herdr` 欄位，前端一律當未知。
