@@ -774,7 +774,11 @@ cancel 撤掉的是還沒送出的那則時，review 回應不再帶「turn 還�
   畫面掃描（`screen::scan`）因此也對 grok 跑，bot 不會再停在一個「像在問問題、卻按不動」的 blocked 畫面。
   **記帳與觸發**（#222）：
   - 辨識不只 `weekly`：行首是 `You hit your <一到三個字> limit`（`session`／`5-hour`／`daily`…，`screen::is_limit_title`）都算；
-    只認標題那一行，回覆裡談到這句話不算。
+    402 那句要行首是 `Turn failed: Request failed (402): …`。**只認行首，而且要是畫面最底下的那張選單**（#227）：grok 就在這個 repo
+    裡工作，畫面上常有含這幾句話的別人的輸出（`rg`／`git diff`／測試斷言訊息／原始碼，甚至一字不差 cat 出來的 fixture）。
+    整行 `contains` 會把它們當成撞限，在飛的回合被收成 failed、額度標 7 天。真選單是擋住輸入列的 modal：標題、兩個以上的選項列
+    （`1 (○) …`），之後只剩選單自己的說明列（`screen::grok_limit_notice_lines`）；bot 的回覆或輸入列在它後面就是引用或已處理掉的舊畫面。
+    402 那句要在標題上方 16 行內（同一個框）。
   - 撞限記在 **grok 自己那一格**（`grok`／`grok:<身分>`，`turn_error::Banner::Grok`），不是 codex 的——`mark_codex_limit_hit` 對 grok 走
     `record_grok`。橫幅沒寫重置時間：`You hit your weekly limit.` 標 `seven_day` 窗（grok 只有週窗）、保底 7 天；session／5-hour 標
     `five_hour`、保底 5 小時；`daily` 沒有窗、保底 24 小時；402 `usage balance exhausted`（credits 用完）沒有窗、保底 5 小時、不標窗（`screen::grok_limit_window`）。

@@ -445,15 +445,25 @@ fn codex_usage_notice_line(line: &str) -> Option<String> {
 /// 那三個編號**不是可以選的選單**（方向鍵動不了、ANSI 也看不到游標），是 grok 用文字告訴你有哪些
 /// 出路。以前 grok 完全不走這條掃描，bot 就一直停在 `blocked`、畫面沒人解讀，使用者看到的是一份
 /// 「像在問問題、卻按不動」的終端。
+///
+/// **只認行首**（#227）：grok 就在這個 repo 裡工作，畫面上常有含這幾句話的**別人的輸出**（`rg`／`git diff`／測試斷言訊息／
+/// 原始碼），整行 `contains` 會把它們當成撞限——在飛的回合被收成 failed、額度標 7 天。框線之後整句就是那句話才算：
+/// 標題走 [`is_limit_title`]，402 那句要行首是 `Turn failed:`（真畫面的形狀）。單行判斷擋得掉引用的一行，擋不掉一字不差
+/// cat 出來的整張畫面——那要靠 [`grok_limit_notice_lines`] 認「它是不是畫面最底下的那張選單」。
 pub(crate) fn grok_limit_hit_line(line: &str) -> Option<String> {
-    let s = line.trim().trim_start_matches(['┃', '│', '▌', '|']).trim();
+    let s = grok_unframed(line);
     let low = s.to_ascii_lowercase();
-    let hit = low.contains("usage balance exhausted")
-        || low.contains("you hit your weekly limit")
-        || low.contains("you've hit your weekly limit")
-        || is_limit_title(&low)
-        || (low.contains("request failed (402)") && low.contains("grok"));
-    hit.then(|| s.to_string())
+    (is_limit_title(&low) || is_balance_line(&low)).then(|| s.to_string())
+}
+
+/// 行首的框線（`┃`）與空白去掉。
+fn grok_unframed(line: &str) -> &str {
+    line.trim().trim_start_matches(['┃', '│', '▌', '|']).trim()
+}
+
+/// `Turn failed: Request failed (402): Grok Build usage balance exhausted`：credits 用完。
+fn is_balance_line(low: &str) -> bool {
+    low.starts_with("turn failed:") && low.contains("request failed (402)") && (low.contains("usage balance exhausted") || low.contains("grok"))
 }
 
 /// 同一張畫面的其他變體（`You hit your session limit.`、`… daily limit.`，#222）：行首就是 `You hit your <一到三個字> limit`，
@@ -483,9 +493,16 @@ pub(crate) fn grok_limit_window(line: &str) -> (Option<&'static str>, i64) {
 /// 同一張畫面上所有值得記一筆的 grok 通知（目前只有撞額度）。重複的只留第一句；**有額度窗的那一句排前面**
 /// （`Turn failed: … (402): … usage balance exhausted` 在 `You hit your weekly limit.` 上面，但只有後者說得出是哪個窗）：
 /// `limit_banner::sighting` 一個 run 第一次讀畫面時只有第一句算新的，後面同一次讀到的都當舊字跳過。
+///
+/// **只有畫面最底下真的有那張選單才算**（#227）：真選單是擋住輸入列的 modal——標題、兩個以上的選項列（`1 (○) Upgrade tier …`），
+/// 之後只剩選單自己的說明列（`↑/↓ navigate`、`Tab:next answer │ Esc:scrollback`…）。bot 自己的回覆、輸入列、下一段輸出出現在它後面，
+/// 就是引用（cat 出來的 fixture、貼在對話裡的原文）或已經被處理掉的舊畫面。402 那句要在選單標題上方 [`MENU_BLOCK_LINES`] 行內
+/// （同一個框，中間隔著 grok 的「Help improve Grok」）；再往上的是別的輸出。
 pub(crate) fn grok_limit_notice_lines(text: &str) -> Vec<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let Some(title_at) = bottom_menu_title(&lines) else { return Vec::new() };
     let mut out: Vec<String> = Vec::new();
-    for line in text.lines() {
+    for line in &lines[title_at.saturating_sub(MENU_BLOCK_LINES)..=title_at] {
         if let Some(n) = grok_limit_hit_line(line) {
             if !out.iter().any(|x| x == &n) {
                 out.push(n);
@@ -494,6 +511,40 @@ pub(crate) fn grok_limit_notice_lines(text: &str) -> Vec<String> {
     }
     out.sort_by_key(|l| grok_limit_window(l).0.is_none());
     out
+}
+
+/// 選單標題上方多遠內的 402 那句算同一個框（真畫面隔 10 行左右）。
+const MENU_BLOCK_LINES: usize = 16;
+
+/// 最後一個標題行，而且它之後只有選項列與選單說明列、至少兩個選項列——畫面最底下的那張選單。
+fn bottom_menu_title(lines: &[&str]) -> Option<usize> {
+    let title_at = lines.iter().rposition(|l| is_limit_title(&grok_unframed(l).to_ascii_lowercase()))?;
+    let mut options = 0;
+    for line in &lines[title_at + 1..] {
+        let s = grok_unframed(line);
+        if s.is_empty() {
+            continue;
+        }
+        if is_menu_option_row(s) {
+            options += 1;
+        } else if !is_menu_chrome(s) {
+            return None;
+        }
+    }
+    (options >= 2).then_some(title_at)
+}
+
+/// `1 (○) Upgrade tier      Upgrade to a …`：編號、圓點括號，之後是選項名。
+fn is_menu_option_row(s: &str) -> bool {
+    let rest = s.trim_start_matches(|c: char| c.is_ascii_digit());
+    rest.len() < s.len() && rest.trim_start().starts_with('(') && rest.contains(')')
+}
+
+/// 選單自己的說明列，以及 grok 可能畫在最底下的使用者狀態列（`名字 | 專案 | grok | 5h:96%`）。
+fn is_menu_chrome(s: &str) -> bool {
+    let low = s.to_ascii_lowercase();
+    ["navigate", "enter:submit", "tab:next answer", "esc:scrollback", "shift+x:dismiss"].iter().any(|k| low.contains(k))
+        || (low.contains(" | ") && low.contains('%'))
 }
 
 pub(crate) fn codex_limit_hit_line(line: &str) -> Option<String> {

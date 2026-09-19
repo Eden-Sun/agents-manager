@@ -3676,6 +3676,81 @@ Tab:next answer  |  Esc:scrollback  |  Shift+x:dismiss
         assert!(app.quotas.lock().await.is_empty());
     }
 
+    /// #227（r1 的重現）：grok 畫面上印出的別人的輸出——原始碼、diff、測試斷言訊息——含有那幾句，不是撞限。
+    #[test]
+    fn grok_source_lines_are_not_limit_hits() {
+        let lines = [
+            r#"daemon/src/lifecycle/screen.rs:439:        || low.contains("you hit your weekly limit")"#,
+            r#"+  ┃  Turn failed: Request failed (402): Grok Build usage balance exhausted"#,
+            r#"thread 'x' panicked at src/a.rs:1:1: expected no hit: ["You hit your weekly limit."]"#,
+            r#"    assert!(lines.iter().any(|l| l.contains("usage balance exhausted")), "{lines:?}");"#,
+            "Request failed (402): Grok Build usage balance exhausted",
+            "The 402 error says usage balance exhausted, so you hit your weekly limit.",
+        ];
+        let hits: Vec<&str> = lines.iter().copied().filter(|l| grok_limit_hit_line(l).is_some()).collect();
+        assert!(hits.is_empty(), "{hits:#?}");
+        // 真畫面的形狀照舊認：框線、行首就是那句。
+        assert!(grok_limit_hit_line("  ┃  You hit your weekly limit.").is_some());
+        assert!(grok_limit_hit_line("  ┃  You've hit your weekly limit.").is_some());
+        assert!(grok_limit_hit_line("  ┃  Turn failed: Request failed (402): Grok Build usage balance exhausted").is_some());
+    }
+
+    /// #227：cat 出來的 fixture 一字不差（連框線都在），但它不是畫面最底下那張會擋住輸入列的選單——底下還有 bot 自己的回覆與輸入列。
+    /// 真選單是 modal：標題、兩個以上的選項、之後只剩選單自己的說明列。
+    #[test]
+    fn output_that_quotes_the_limit_screen_is_not_a_limit() {
+        let cat = format!("❯ cat daemon/src/lifecycle/fixtures/grok_limit_hit.txt\n{PB7_SCREEN}\n⏺ 這是 6d5e74ab 的 fixture，我在讀它。\n────\n❯\n────\n");
+        let ticket = format!("❯ 貼一下票上的原文\n{TICKET_SCREEN}\n⏺ 好了。\n❯\n");
+        let diff = "❯ git diff\n+  ┃  You hit your weekly limit.\n+  ┃  Turn failed: Request failed (402): Grok Build usage balance exhausted\n⏺ 看完了\n❯\n";
+        let test_out = "❯ cargo test\nthread 'x' panicked at src/a.rs:1:1: expected no hit: [\"You hit your weekly limit.\"]\n⏺ 紅了\n❯\n";
+        // 只有句子、沒有選項：不是那張選單（後面接別的行、或後面只剩說明列都一樣；只有一個選項也不夠）。
+        let bare = "❯ echo\n┃  You hit your weekly limit.\n⏺ 我把這句印出來看看\n";
+        let title_only = "┃  You hit your weekly limit.\n┃\n┃  ↑/↓ navigate · y copy   Enter:submit\n";
+        let one_option = "┃  You hit your weekly limit.\n┃  3 (○) Try Again         Resubmit the last prompt once you have usage again\n┃  ↑/↓ navigate · y copy\n";
+        for (what, screen) in [
+            ("cat", cat.as_str()),
+            ("票上原文貼在對話裡", ticket.as_str()),
+            ("diff", diff),
+            ("測試輸出", test_out),
+            ("只有句子", bare),
+            ("標題加說明列、沒有選項", title_only),
+            ("只有一個選項", one_option),
+        ] {
+            let lines = grok_limit_notice_lines(screen);
+            assert!(lines.is_empty(), "{what}：{lines:?}");
+        }
+    }
+
+    /// 真選單前面就算捲著引用同一句話的輸出，還是要認（而且只記那張選單，不記上面引用的）。
+    #[test]
+    fn the_real_menu_is_read_under_quoted_scrollback() {
+        let filler: String = (0..24).map(|i| format!("⏺ 之後又做了第 {i} 件事\n")).collect();
+        let screen = format!("❯ rg limit\n┃  You hit your daily limit.\n┃  Turn failed: Request failed (402): Grok Build usage balance exhausted\n{filler}{TICKET_SCREEN}");
+        assert_eq!(grok_limit_notice_lines(&screen), vec![WEEKLY.to_string()]);
+        // 真的 pB7 畫面：402 那句在選單上面十幾行，屬於同一個框，要跟著記。
+        let pb7 = grok_limit_notice_lines(PB7_SCREEN);
+        assert_eq!(pb7.len(), 2, "{pb7:?}");
+    }
+
+    /// #227 的傷害：在飛的回合其實正常做完了（畫面上只是引用那幾句），被收成 failed、額度標 7 天。備援與 blocked 邊都不能。
+    #[tokio::test]
+    async fn a_turn_that_only_quotes_the_limit_screen_finishes_normally() {
+        let quoted = format!("❯ cat fixtures/grok_limit_hit.txt\n{PB7_SCREEN}\n⏺ 這是 fixture，我在讀它。\n────\n❯\n────\n");
+        let (env, bot, run, turn) = grok_turn(&quoted).await;
+        let app = env.app.clone();
+        assert!(try_fallback(&app, &run, Some(&turn)).await.unwrap());
+        assert_eq!(status(&app, &turn).await, "completed_fallback", "正常做完，不是撞限");
+        assert!(crate::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_none());
+        assert!(app.quotas.lock().await.is_empty(), "額度沒被標");
+
+        let (env, bot, _run, turn) = grok_turn(&quoted).await;
+        let app = env.app.clone();
+        crate::events::handle_status(&app, crate::config::LOCAL_HOST, "test", &blocked_event(&bot.id)).await;
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        assert_eq!(status(&app, &turn).await, "in_flight", "blocked 邊掃了也不動");
+        assert!(app.quotas.lock().await.is_empty());
+    }
+
     /// 票上要求：同一選單的其他變體（session／daily limit）也要認。6d5e74ab 的辨識只有 `weekly` 與 402 兩句。
     #[test]
     fn the_other_limit_variants_the_ticket_names_are_read_too() {
