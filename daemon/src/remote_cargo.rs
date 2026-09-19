@@ -452,7 +452,16 @@ fn secret(data_dir: &Path, remote: &BuildRemoteCfg) -> anyhow::Result<Option<Str
 /// 跟 `hosts.rs::ssh_args` 的節奏一致。
 const SSH_LIVENESS_OPTS: [&str; 6] = ["-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3"];
 
+/// 設了 `identity_file` 卻讀不到＝明確報錯（ssh 對不存在的 `-i` 只警告，會悄悄改試別把 key）。
+fn check_identity(remote: &BuildRemoteCfg) -> anyhow::Result<()> {
+    if !remote.identity_file.is_empty() && !Path::new(&remote.identity_file).is_file() {
+        anyhow::bail!("[build.remote] identity_file 找不到：{}", remote.identity_file);
+    }
+    Ok(())
+}
+
 fn ssh_base(remote: &BuildRemoteCfg, password: Option<&str>, data_dir: &Path) -> anyhow::Result<Command> {
+    check_identity(remote)?;
     let mode = match password {
         Some(_) => Some(password_mode(data_dir)?),
         None => None,
@@ -491,8 +500,11 @@ fn ssh_cmd(remote: &BuildRemoteCfg, password: Option<&str>, mode: Option<&PwMode
         .arg("-o")
         .arg("StrictHostKeyChecking=accept-new")
         .arg("-o")
-        .arg(if password.is_some() { "BatchMode=no" } else { "BatchMode=yes" })
-        .arg(format!("{}@{}", remote.user, remote.host));
+        .arg(if password.is_some() { "BatchMode=no" } else { "BatchMode=yes" });
+    if !remote.identity_file.is_empty() {
+        cmd.arg("-i").arg(&remote.identity_file).arg("-o").arg("IdentitiesOnly=yes");
+    }
+    cmd.arg(format!("{}@{}", remote.user, remote.host));
     cmd
 }
 
@@ -1355,6 +1367,9 @@ fn rsync_rsh(remote: &BuildRemoteCfg, has_password: bool, askpass: bool) -> Stri
     if askpass {
         ssh.push_str(" -o NumberOfPasswordPrompts=1");
     }
+    if !remote.identity_file.is_empty() {
+        ssh.push_str(&format!(" -i {} -o IdentitiesOnly=yes", sh_quote(&remote.identity_file)));
+    }
     ssh
 }
 
@@ -1362,6 +1377,7 @@ fn sync_source(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, dir: &str, 
     if !has_program(&rsync_program()) {
         anyhow::bail!("remote Cargo requires `rsync` on the daemon host");
     }
+    check_identity(remote)?;
     let pw = secret(data_dir, remote)?;
     let mode = match pw {
         Some(_) => Some(password_mode(data_dir)?),
@@ -1582,6 +1598,27 @@ mod tests {
             }
             assert!(rsh.starts_with("ssh -p 2222 "), "{rsh}");
         }
+    }
+
+    /// issue #104：密碼留空＝key／agent。沒有 sshpass／askpass、BatchMode=yes；有 `identity_file` 時 ssh 與 rsync 都帶同一把 `-i`；找不到檔案要明確報錯。
+    #[test]
+    fn a_blank_password_uses_key_auth_and_identity_file_reaches_ssh_and_rsync() {
+        let mut r = remote();
+        r.identity_file = "/keys/my key".into();
+        let cmd = ssh_cmd(&r, None, None);
+        let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(cmd.get_program(), "ssh");
+        assert!(envs(&cmd).is_empty(), "空密碼不該有 SSHPASS／askpass：{:?}", envs(&cmd));
+        assert!(args.contains(&"BatchMode=yes".to_string()), "{args:?}");
+        let i = args.iter().position(|a| a == "-i").expect("少了 -i");
+        assert_eq!(args[i + 1], "/keys/my key");
+        assert!(args.contains(&"IdentitiesOnly=yes".to_string()));
+        let rsh = rsync_rsh(&r, false, false);
+        assert!(rsh.contains("BatchMode=yes") && rsh.contains("-i '/keys/my key' -o IdentitiesOnly=yes"), "{rsh}");
+        assert!(!rsync_rsh(&remote(), false, false).contains("-i "), "沒設就不能帶 -i");
+        let err = check_identity(&r).unwrap_err().to_string();
+        assert!(err.contains("identity_file") && err.contains("/keys/my key"), "{err}");
+        assert!(check_identity(&remote()).is_ok());
     }
 
     /// issue #194：整體上限預設 12 分鐘、可設定；舊的 config.toml 沒寫這個 key 也是 12 分鐘；`0`＝不設上限。
