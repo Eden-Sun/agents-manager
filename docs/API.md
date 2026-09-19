@@ -275,7 +275,7 @@ prompt 改成打字進 pane 並以無損證據確認。**一個字都沒打時�
 
 | 狀態 | body | 意思 |
 |---|---|---|
-| 409 | `{"reason":"composer_busy"|"composer_unreadable"|"transcript_not_ready"|"transcript_unreadable"|"codex_log_not_ready"|"no_pane_to_type_into","retryable":true,"sent":false,"run_id"}` | 暫時送不了（輸入框有字、claude 還沒回報 session…）。同一個 `client_request_id` 稍後重送即可；AGM 交辦維持 queued 退避重試。 |
+| 409 | `{"reason":"composer_busy"|"composer_unreadable"|"transcript_not_ready"|"transcript_unreadable"|"codex_log_not_ready"|"no_pane_to_type_into"|"host_unreadable","retryable":true,"sent":false,"run_id"}` | 暫時送不了（輸入框有字、claude 還沒回報 session…）。同一個 `client_request_id` 稍後重送即可；AGM 交辦維持 queued 退避重試。 |
 | 422 | `{"error":"delivery_unprovable","reason":"prompt_too_long_to_prove","sent":false,"run_id"}` | 超過 20 萬字，不打。 |
 | 409 | `{"reason":"maintenance_window","resource":"restart","held_by","fence","expires_at","retry_after_secs","retryable":true,"sent":false,"message"}` | 有人握著會中斷 pane 的維護窗口（SPEC §18.10），daemon 這一側不送新的 prompt，連 turn 都不建。窗口 release 或到期就自動恢復，同一個 `client_request_id` 原樣重送即可。AGM 派工不走這個 409——它在 `controller::dispatch` 就被 hold 在佇列裡。 |
 | 503 | `{"reason":"maintenance_state_unavailable","resource":"restart","retry_after_secs","retryable":true,"sent":false,"message"}`（帶 `Retry-After` header） | **讀不到**維護窗口的狀態（DB 出錯、租約那一列解不開、沒放掉卻沒有讀得懂的到期時間，issue #127）——觀測不到租約不等於沒有租約，所以照窗口處理：不送任何字、連 turn 都不留（已 commit 的那一筆會撤回）。跟上一列 409 `maintenance_window`（**確定**有人握著）分得開；DB 一恢復就重新判斷，同一個 `client_request_id` 原樣重送即可。AGM 派工不回這個 503——留在佇列。 |

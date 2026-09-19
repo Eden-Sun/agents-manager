@@ -1375,8 +1375,11 @@ async fn try_fallback(app: &Arc<App>, run_id: &str) -> anyhow::Result<bool> {
         remember_pane_cursor_tx(&mut tx, run_id, &read).await?;
         tx.commit().await?;
         emit_message_added(app, &bot.id, message).await;
-        let host = db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| LOCAL_HOST.to_string());
-        apply_codex_limit_hit_quota(app, &host, bot.identity.as_deref(), &hit).await;
+        // 記在這顆 bot 的主機與身分那一格。讀不到主機不退回 `local`；記不進去就欠著，派送前與 flush 照欠著的那一筆擋、
+        // 之後每次查詢先補寫（#198）。回合已經收掉了，照樣回 `true`。
+        if let Err(e) = crate::turn_error::mark_codex_limit_hit(app, &bot, &hit).await {
+            tracing::warn!(turn = %turn.id, error = %e, "codex limit hit owed; it holds this bot until it is recorded");
+        }
         emit_turn(app, &turn.id).await;
         return Ok(true);
     }
@@ -2499,6 +2502,22 @@ mod issue_17_tests {
         assert_eq!(count(&f, "agent.prompt"), 0);
     }
 
+    /// #198 同類：讀不到主機就不打字——當成遠端會跳過本機 transcript 這種無損證據，改成盲打。一個字都還沒打，可重試。
+    #[tokio::test]
+    async fn a_prompt_whose_host_cannot_be_read_is_not_typed() {
+        let f = fixture("claude", "").await;
+        let _t = with_transcript(&f, wide()).await;
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        let (run, bot) = run_and_bot(&f).await;
+        let client = client_for_run(&app, &run).await.unwrap();
+        sqlx::query("ALTER TABLE projects RENAME TO projects_unreadable").execute(&app.db).await.unwrap();
+        let out = deliver_prompt(&app, &client, &run, &bot, "Reply with PONG please", false, false).await.unwrap();
+        sqlx::query("ALTER TABLE projects_unreadable RENAME TO projects").execute(&app.db).await.unwrap();
+        assert_eq!(out, not("host_unreadable", true));
+        assert_eq!(count(&f, "pane.send_text"), 0, "一個字都沒打");
+    }
+
     #[tokio::test]
     async fn no_pane_is_not_attempted_and_never_an_agent_prompt() {
         let f = fixture("claude", "").await;
@@ -3040,6 +3059,31 @@ mod progress_poll_tests {
             .await
             .unwrap();
         assert_eq!(reply, "PONG");
+    }
+}
+
+#[cfg(test)]
+mod codex_limit_fallback_tests {
+    //! #198：備援看到 codex 撞限橫幅，記撞限走 `turn_error::mark_codex_limit_hit`（讀不到主機、算不準 key 都欠著），不退回 `local`、不猜 key。
+    use super::*;
+    use crate::testing as tt;
+
+    #[tokio::test]
+    async fn a_limit_banner_whose_key_is_unknown_is_owed_by_the_fallback() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "cx").await;
+        sqlx::query("UPDATE bots SET kind='codex', identity='cx0' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
+        let bot = db::bot(&app.db, &bot.id).await.unwrap().unwrap();
+        let run = tt::fake_run(&app, &bot.id).await;
+        let turn = crate::lifecycle::run_state::a_turn(&app, &bot.id, Some(&run), "in_flight").await;
+        let banner = "■ You've hit your usage limit. Upgrade to Pro, or try again at Sep 19th, 2099 6:43 PM.";
+        env.herdr.set_screen(&format!("pane-{}", bot.id), &format!("› 派工\n\n{banner}\n\n› \n"));
+
+        assert!(try_fallback(&app, &run).await.unwrap(), "回合照樣收");
+        assert_eq!(crate::lifecycle::run_state::turn_status(&app, &turn).await, "failed");
+        assert!(app.quotas.lock().await.values().all(|q| q.limit_hit.is_none()), "身分表還沒偵測完：沒有猜一格 `codex:cx0` 寫下去");
+        assert!(crate::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some(), "欠著照擋");
     }
 }
 

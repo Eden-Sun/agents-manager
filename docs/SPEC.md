@@ -389,7 +389,8 @@ claude 連線在回應中途掉了時，pane 只多一行 `⏺ API Error: Connec
   `hit your monthly spend limit`、`fast limit`、團隊預算不是速率桶用完，不當撞限（2026-09-15；以前非 Fable 一律記 5h，撞週額度會把 5h 釘滿、等 5h 重置就當成解除）。
   關鍵是「最後一件事」：`API error · Retrying…` 之後又把答案講完的是重試成功，不算。
 - **記錄**：原文寫 `runs.turn_error`（屬於這個 CLI 程序，重啟即清），對話補一則釘在該回合的 `system` 訊息（`incomplete = 1`、附快照）；
-  回合還 `in_flight` 就收成 `failed`（不然輸入框鎖死）。同一行只記一次。
+  回合還 `in_flight` 就收成 `failed`（不然輸入框鎖死）。同一行只記一次。三件事**同一個交易**、要讀的先讀：`turn_error` 就是「只記一次」的標記，
+  以前它先寫、後面失敗的話下一次擷取被標記擋掉，訊息沒釘、回合不收，再也不重來（#198 同類）。
 - **清除**：下一回合開始（`arm_progress`）設回 NULL 並推 `bot_status`。寫不進去就由那一回合的輪詢器再清（#193）：留著的話，
   這一回合斷在同一句錯誤上會被「同一行只記一次」吞掉。
 - UI：側欄「⚠ 中斷」、標題列紅 chip，點開看原文與「重送上一則」（走既有 prompt API）。
@@ -514,6 +515,7 @@ pane 上回過 ok 卻沒送進去（wits-c1-op-xh 14:24、15:33，第二次距 s
   放回等 3 次後才退回一列回音或 unverified。等待次數另存在 `turns.rollout_waits`，綁 `turns.rollout_wait_key =
   <run id>:<session id>`：只有這個原因會累計（框忙等其他放回不算），run 或 session 換了就從頭算。只算頂層 `response_item`／`message`／`role=user` 且全部是
   `input_text` 的項目；`compacted` 重播的歷史、developer 訊息、帶圖片的訊息都不算。
+- 前兩種只在本機有：讀不到這顆 bot 在哪台主機就不打（`NotAttempted(host_unreadable, retry)`，#198）——當成遠端會跳過它們改成盲打。
 - **一列回音**：單行、首尾無空白、不含 tab／控制字元／ZWJ／變體選擇符／組合字元，且在 herdr `pane.layout`
   回報的當下欄寬下保證放得進一列（ASCII 一欄、其他兩欄保守估，加 marker 與 6 欄餘裕）。送出後輸入框上方要多出
   恰好一列 `❯ <原文>`（claude 也接受 `> `；codex 是 `› `），原樣前綴比對、不 trim，且底下沒有續行。
@@ -643,7 +645,8 @@ cancel 撤掉的是還沒送出的那則時，review 回應不再帶「turn 還�
 4. 取消：`POST /api/turns/{id}/withdraw` 只撤還在等的那一則（`failed`＋說明）；已被佇列領走的回 409——不能拿 abandon 頂替，
    那會把已經送出的回合收成失敗，web 又把文字放回輸入框，再按一次就送兩次。
 5. daemon 重啟：開機對帳完成、autostart 那一步（`reconcile::autostart_after_reconcile` → `start_send::resume_after_boot`），
-   還在等、沒有 run 的再替它起一次（重啟前那次可能沒做完）。每次開機最多一次。
+   還在等、沒有 run 的再替它起一次（重啟前那次可能沒做完）。每次開機最多一次。清單或那顆 bot 在哪台主機讀不到就先不起、30 秒後再看那幾顆
+   （#198）——以前讀不到主機當成本機，本機開機時把還沒對帳的遠端 bot 也起一顆（同一顆 bot 兩個 agent）。
 前端（`store/startingSend.ts`）只從 daemon 給的 turn 與訊息推出「有一則在等 bot 起來」：輸入框上方一條「啟動中，起來後自動送出」，
 失敗時「沒能啟動（原因），還沒送出」＋重新啟動（`POST /start`，起來後照樣由 flush 送）／取消；有這一條時不再另外顯示「啟動」列。
 `queued` 的 `turn_updated` 不算回合完成（不然未讀先多一，真正完成那次又被同一個 turn id 去重吃掉）。
@@ -680,10 +683,12 @@ cancel 撤掉的是還沒送出的那則時，review 回應不再帶「turn 還�
 保留撞限時刻與桶名、沒寫時間的照樣黏著、回填前已經進來的讀數當場校正），之後只看記憶體——新讀數、換身分、換模型、成功回合照舊校正或清掉它。
 這一輪自己寫的憑據記憶體本來就有，不另外看。
 **讀不到就擋、記不進去就欠著**（#108 第三次重開）：這條閘門上任何一步讀不到，都不能當成「沒撞限」。
-- 撞限寫入（`turn_error::mark_claude_limit_hit`）回 `Result`：讀不到這顆 bot 在哪台主機（不退回 `local`——那會把撞限寫進本機身分的 key）、
+- 撞限寫入（`turn_error::mark_claude_limit_hit`；codex 的撞限橫幅走 `mark_codex_limit_hit`，畫面擷取與終端備援都是，#198）回 `Result`：
+  讀不到這顆 bot 在哪台主機（不退回 `local`——那會把撞限寫進本機身分的 key：本機帳號被當成用盡、遠端那個真的用盡的身分反而沒擋）、
   那台的身分表還沒偵測完又不是手寫的身分（`quota::resolve_quota_base`，不猜 `claude:cc0`）、排著的 prompt 身上的憑據寫不進去，都回錯。
   撞限是外面已經發生的事，所以同時記成**欠著**（`turn_error::owed_limit_hit`，行程記憶體）：補上之前，這顆 bot 的 flush 與派送前都照欠著的
-  那一筆擋（身分已經換掉的不擋新身分，留著寫回舊身分的 key）；之後每一次問都先補一次，補上時撞限時刻不變。`StopFailure` 記不進去就讓這一則
+  那一筆擋（身分已經換掉的不擋新身分，留著寫回舊身分的 key）；之後每一次問都先補一次，補上時撞限時刻不變（codex 橫幅上的到期時間也是撞的
+  當下解析的那個）。`StopFailure` 記不進去就讓這一則
   失敗、由 hook 收件匣重試（耐久）：回合先不收、不推回合結束，在飛的回合本身擋著 flush。
 - 撞限記下的當下就把憑據蓋到這顆 bot 排著的每一則上（`quota_hold::stamp_queued`），不等 flush 擋下才寫：記下到擋下之間 daemon 死掉、
   或 flush 那一下寫不進去，重啟之後都還有憑據。
@@ -2313,6 +2318,8 @@ inbox `assignment_noticed`（`needs_review=false`）。送不出去或回合失�
   還在未來就照字面，**不設上限**（以前「裸鐘點最多 6 小時」把今天 23:40 才重置的週窗／credits 改成 5 分鐘後再問，真的撞限只擋 5 分鐘就一直重送，review3 c2 M1）。
   帶月日、沒有年份的橫幅維持舊規則（過去 ≤ 15 分鐘＝舊橫幅，更久才滾到明年）。算出等待 > 6 小時改 15 分鐘後重試；兩邊都沒有時間退回 +30 分鐘。
 - **上限橫幅三條規則**：① 寫進該 bot 身份的 key——寫入、查詢（`limit_hit_for_bot`）、清除（`clear_limit_hit_for_bot`）三端都走 `quota::quota_base_for_host`，有自己 `CODEX_HOME` 的 `cx2` 成功回合清的是 `codex:cx2`，不是裸 `codex`；
+  寫入端算不準就不寫（`turn_error::mark_codex_limit_hit`：讀不到主機、身分表還沒偵測完，欠著照擋，§6「目標身分沒額度就不送」的「讀不到就擋、記不進去就欠著」，#198）。
+  畫面擷取（`capture_codex_usage_notices`）判斷「有沒有回合在飛」要在寫通知訊息**之前**讀：訊息寫了之後那一張就不是新的，讀在後面的話一次讀錯就永遠不記；
   ② 只設 `limit_hit`（含 `until`）與「量表用完」，**不**把時間寫進窗口 `resets_at`；③ 同一張橫幅再掃到不算新證據（時間戳不前推）——但**那張已經過期**時不適用：重送後 CLI 回同一句就是又被擋一次，要重新記上（review3 c2 M1）。
   **後到的結構化讀數不會清掉橫幅**（2026-09-13 晚改回）：codex 的 credits 用完時 5h／7d 這兩條**速率**視窗可以是滿的、app-server 也照實回報 0% 已用，
   唯一講出「現在收不下工作」的就是橫幅——那正是 `limit_hit` 這一格存在的理由。清掉它只有兩條路：`until` 到了，或下一回合真的跑完（`clear_limit_hit`，**只有 codex 走這條**：claude 的 Fable 用完換 opus 照樣能跑，成功回合不算解除）。
