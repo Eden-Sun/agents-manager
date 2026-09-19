@@ -93,6 +93,18 @@ pub async fn quota_base_for_host(app: &Arc<App>, host: &str, kind: &str, identit
     quota_base_default_aware(kind, Some(idn), shares)
 }
 
+/// [`quota_base_for_host`]，但**算不準就回錯**：寫撞限要落在查詢端之後會讀的那一把 key（#108 重開）。
+/// 那台主機的身分表還沒偵測完（重啟後、`tools::detect` 之前）又不是手寫的 `[[identities]]` 時，共用預設帳號的
+/// `cc0` 會被算成 `claude:cc0`：偵測完之後查詢端讀裸 `claude`，那一格的撞限就沒人看得到。
+pub async fn resolve_quota_base(app: &Arc<App>, host: &str, kind: &str, identity: Option<&str>) -> Result<String> {
+    if let Some(idn) = identity.map(str::trim).filter(|s| !s.is_empty()) {
+        if crate::tools::identity_for_host(app, host, idn).await.is_none() && !app.tools.lock().await.contains_key(host) {
+            anyhow::bail!("`{host}` 的身分表還沒偵測完，算不出身分 `{idn}` 的額度 key");
+        }
+    }
+    Ok(quota_base_for_host(app, host, kind, identity).await)
+}
+
 /// 查詢端：這顆 bot 的讀數在哪幾把 key。先查它自己那一把（收斂規則同寫入端），**只有**收斂到裸 kind
 /// 的身分才會落在裸 key——有自己 home 的身分（cc2 帶 `CODEX_HOME`）不借預設帳號的數字。
 async fn keys_for_bot(app: &Arc<App>, host: &str, bot: &crate::db::Bot) -> Vec<String> {
@@ -139,30 +151,64 @@ pub fn limit_hit_blocks_model(hit: &LimitHit, model: Option<&str>) -> bool {
 }
 
 /// 這顆 bot 現在實際在跑的模型：run 的 `runtime_model`（啟動 argv 與 `/model` 會更新它），沒有就用設定值。
+///
+/// 讀不到 run 就是「不知道」（`None`，[`bucket_blocks_model`] 照舊擋），不退回設定值：`/model` 換過的話設定值是錯的，
+/// 撞的是模型專屬的桶時會把正在跑那個模型的 bot 放行（#108 重開）。
 pub async fn running_model(app: &Arc<App>, bot: &crate::db::Bot) -> Option<String> {
-    let runtime = crate::db::active_run(&app.db, &bot.id).await.ok().flatten().and_then(|r| r.runtime_model);
+    let runtime = match crate::db::active_run(&app.db, &bot.id).await {
+        Ok(run) => run.and_then(|r| r.runtime_model),
+        Err(e) => {
+            tracing::warn!(bot = %bot.id, error = %e, "cannot read the running model; treating it as unknown");
+            return None;
+        }
+    };
     runtime.or_else(|| bot.model.clone()).filter(|m| !m.trim().is_empty())
 }
 
 /// 擋住這顆 bot 的撞限：沒過期、而且撞的那一桶管得到它在跑的模型（[`bucket_blocks_model`]）。
-pub async fn limit_hit_for_bot(app: &Arc<App>, bot: &crate::db::Bot) -> Option<LimitHit> {
-    let host = crate::db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| LOCAL_HOST.to_string());
+///
+/// 讀不到這顆 bot 在哪台主機就回錯（#108 重開）：以前退回 `local`，查錯 key、回「沒撞限」，遠端那個已經用盡的身分
+/// 就被放行。撞限記不進正確那把 key 而欠著的那一筆（`turn_error::owed_limit_hit`）先算。
+pub async fn try_limit_hit_for_bot(app: &Arc<App>, bot: &crate::db::Bot) -> Result<Option<LimitHit>> {
+    if let Some(hit) = crate::turn_error::owed_limit_hit(app, bot).await {
+        return Ok(Some(hit));
+    }
+    let host = crate::db::bot_host(&app.db, &bot.id).await?;
     let keys = keys_for_bot(app, &host, bot).await;
     let model = running_model(app, bot).await;
     let q = app.quotas.lock().await;
     for k in keys {
         if let Some(hit) = q.get(&k).and_then(|x| x.limit_hit.clone()) {
             if !limit_hit_expired(Some(&hit)) && limit_hit_blocks_model(&hit, model.as_deref()) {
-                return Some(hit);
+                return Ok(Some(hit));
             }
         }
     }
-    None
+    Ok(None)
+}
+
+/// [`try_limit_hit_for_bot`]，讀不到時回 `None`（記 warn）。只剩 supervisor 的派送／重送在用：那邊拿到撞限會 park、
+/// 群組任務還會換身分，不能拿假的撞限去擋；改用 `try_` 版、讀不到就延後，見 #108 重開時開的 supervisor 票。
+pub async fn limit_hit_for_bot(app: &Arc<App>, bot: &crate::db::Bot) -> Option<LimitHit> {
+    match try_limit_hit_for_bot(app, bot).await {
+        Ok(hit) => hit,
+        Err(e) => {
+            tracing::warn!(bot = %bot.id, error = %e, "cannot tell whether this bot's identity has hit its limit");
+            None
+        }
+    }
 }
 
 /// 只回未來的重置時間；CLI 橫幅時間會舊，supervisor 要兩邊都看（2026-09-13：橫幅 22:15、app-server 22:20）。
+/// 讀不到主機回 `None`（沒有這份證據，只看橫幅的時間）：退回 `local` 會拿到本機帳號的重置時間，把重送提早。
 pub async fn next_reset_for_bot(app: &Arc<App>, bot: &crate::db::Bot) -> Option<String> {
-    let host = crate::db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| LOCAL_HOST.to_string());
+    let host = match crate::db::bot_host(&app.db, &bot.id).await {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::warn!(bot = %bot.id, error = %e, "cannot read the host of a bot; no quota reset time from its readings");
+            return None;
+        }
+    };
     let keys = keys_for_bot(app, &host, bot).await;
     let now = chrono::Utc::now();
     let future = |t: &Option<String>| {
@@ -517,8 +563,16 @@ pub fn limit_hit_expired(hit: Option<&LimitHit>) -> bool {
 /// 這顆 bot 真的答完一回合：清掉**它自己那把 key** 的撞限。key 跟寫入端（`apply_codex_limit_hit_quota`）
 /// 與查詢端（[`limit_hit_for_bot`]）走同一支 [`quota_base_for_host`]——以前寫死裸 `codex`，有自己
 /// `CODEX_HOME` 的 `cx2` 一撞限就永遠清不掉，反而把預設帳號真的撞限清掉（review 2026-09-16 H1）。
+///
+/// 讀不到主機就不清（#108 重開）：退回 `local` 會把**本機**那個身分真的撞限清掉。少清一次只是多擋到到期。
 pub async fn clear_limit_hit_for_bot(app: &Arc<App>, bot: &crate::db::Bot) {
-    let host = crate::db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| LOCAL_HOST.to_string());
+    let host = match crate::db::bot_host(&app.db, &bot.id).await {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::warn!(bot = %bot.id, error = %e, "cannot read the host of a bot; its limit hit is left in place");
+            return;
+        }
+    };
     let base = quota_base_for_host(app, &host, &bot.kind, bot.identity.as_deref()).await;
     clear_limit_hit(app, &host, &base).await;
 }
@@ -538,8 +592,15 @@ fn cleared_at_key(app: &App, key: &str) -> String {
 
 /// 這顆 bot 的帳號在 `since` 之後有沒有被成功回合清過撞限。`resume_quota_blocked` 用它分辨
 /// 「記憶體裡沒有撞限是因為真的被清掉了」與「只是重啟後什麼都不記得」（review 2026-09-16 M1）。
+/// 讀不到主機回 `false`（沒有證據說額度回來了）：退回 `local` 會拿本機帳號的成功回合當作這顆的放行證據。
 pub async fn limit_cleared_since(app: &Arc<App>, bot: &crate::db::Bot, since: chrono::DateTime<chrono::Utc>) -> bool {
-    let host = crate::db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| LOCAL_HOST.to_string());
+    let host = match crate::db::bot_host(&app.db, &bot.id).await {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::warn!(bot = %bot.id, error = %e, "cannot read the host of a bot; no evidence its limit was cleared");
+            return false;
+        }
+    };
     let keys = keys_for_bot(app, &host, bot).await;
     let m = cleared_at().lock().unwrap();
     keys.iter().any(|k| m.get(&cleared_at_key(app, k)).is_some_and(|t| *t > since))
@@ -1657,5 +1718,96 @@ mod tests {
         assert!(restore_limit_hit(&app, LOCAL_HOST, "claude:r4", hit(&t(-90), Some(t(120)), Some("five_hour"))).await);
         assert_eq!(got("claude:r4").await.and_then(|h| h.until), Some(resets));
         assert_eq!(app.quotas.lock().await["claude:r4"].five_hour.as_ref().map(|w| w.used_pct), Some(3.0), "讀數不動");
+    }
+
+    /// 一顆遠端 bot（`remote1`），它自己的 key 沒有撞限；本機 `claude` 是另一個帳號，有撞限、有讀數。
+    async fn remote_bot_beside_a_local_hit(app: &Arc<App>) -> crate::db::Bot {
+        let pid = crate::db::ulid();
+        sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?, '/r/p', 'r', 'remote1', ?)")
+            .bind(&pid)
+            .bind(crate::db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let bot = crate::testing::claude_bot(app, &pid, "far").await;
+        let later = |h: i64| crate::db::iso_at(chrono::Utc::now() + chrono::Duration::hours(h));
+        let mut local = codex_q("statusline", None);
+        local.five_hour = Some(Window { used_pct: 40.0, resets_at: Some(later(1)) });
+        set(app, LOCAL_HOST, "claude", local).await;
+        assert!(seed_limit_hit(app, LOCAL_HOST, "claude", &later(2), "You've hit your session limit", Some("five_hour".into())).await);
+        bot
+    }
+
+    async fn projects_unreadable(app: &Arc<App>, unreadable: bool) {
+        let sql = if unreadable { "ALTER TABLE projects RENAME TO projects_unreadable" } else { "ALTER TABLE projects_unreadable RENAME TO projects" };
+        sqlx::query(sql).execute(&app.db).await.unwrap();
+    }
+
+    /// #108 重開：讀不到 bot 在哪台主機不等於它在本機。以前四支都退回 `local`：查本機帳號的撞限回「沒撞限」、拿本機的
+    /// 重置時間把重送提早、把**本機**帳號真的撞限清掉、拿本機的成功回合當放行證據。
+    #[tokio::test]
+    async fn a_bot_whose_host_cannot_be_read_is_never_read_or_cleared_on_the_local_key() {
+        let env_ = crate::testing::env().await;
+        let app = env_.app.clone();
+        let bot = remote_bot_beside_a_local_hit(&app).await;
+        let since = chrono::Utc::now() - chrono::Duration::seconds(1);
+
+        projects_unreadable(&app, true).await;
+        assert!(try_limit_hit_for_bot(&app, &bot).await.is_err(), "讀不到主機是錯，不是「沒撞限」");
+        assert!(limit_hit_for_bot(&app, &bot).await.is_none(), "舊介面（supervisor 用）讀不到記 warn，不拿本機的撞限頂替");
+        assert_eq!(next_reset_for_bot(&app, &bot).await, None, "不拿本機帳號的重置時間");
+        clear_limit_hit_for_bot(&app, &bot).await;
+        assert!(app.quotas.lock().await["claude"].limit_hit.is_some(), "本機帳號的撞限沒被別台 bot 的成功回合清掉");
+        clear_limit_hit(&app, LOCAL_HOST, "claude").await; // 本機帳號自己答完一回合
+        assert!(!limit_cleared_since(&app, &bot, since).await, "本機的成功回合不是遠端這顆的放行證據");
+
+        projects_unreadable(&app, false).await;
+        assert_eq!(try_limit_hit_for_bot(&app, &bot).await.unwrap(), None, "讀得到：看自己那把 `remote1/claude`");
+        assert!(!limit_cleared_since(&app, &bot, since).await);
+    }
+
+    /// 讀不到 run 就不知道它在跑什麼模型：照擋（`None`），不退回設定值——`/model` 換成 fable 的 bot 撞 Fable 桶，
+    /// 設定值還寫 opus，退回設定值就放行了。
+    #[tokio::test]
+    async fn a_model_bucket_hit_holds_a_bot_whose_running_model_cannot_be_read() {
+        let env_ = crate::testing::env().await;
+        let app = env_.app.clone();
+        let bot = crate::testing::claude_bot(&app, &env_.project_id, "switched").await;
+        sqlx::query("UPDATE bots SET model='opus' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
+        let bot = crate::db::bot(&app.db, &bot.id).await.unwrap().unwrap();
+        let run = crate::testing::fake_run(&app, &bot.id).await;
+        sqlx::query("UPDATE runs SET runtime_model='fable' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
+        let until = crate::db::iso_at(chrono::Utc::now() + chrono::Duration::hours(2));
+        assert!(seed_limit_hit(&app, LOCAL_HOST, "claude", &until, "You've hit your Fable limit", Some("fable".into())).await);
+        assert!(try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some(), "前提：它實際在跑 fable");
+
+        sqlx::query("ALTER TABLE runs RENAME TO runs_unreadable").execute(&app.db).await.unwrap();
+        assert_eq!(running_model(&app, &bot).await, None, "不知道，不是設定值的 opus");
+        assert!(try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some(), "不知道在跑什麼：照擋");
+        sqlx::query("ALTER TABLE runs_unreadable RENAME TO runs").execute(&app.db).await.unwrap();
+    }
+
+    /// 寫撞限要落在查詢端之後讀的那把 key：身分表還沒偵測完、又不是手寫的身分時算不準，回錯（不猜 `claude:cc0`）。
+    #[tokio::test]
+    async fn the_limit_key_is_not_guessed_before_the_identities_are_known() {
+        let env_ = crate::testing::env().await;
+        let app = env_.app.clone();
+        assert!(resolve_quota_base(&app, LOCAL_HOST, "claude", Some("cc0")).await.is_err(), "偵測之前：cc0 是不是預設帳號還不知道");
+        assert_eq!(resolve_quota_base(&app, LOCAL_HOST, "claude", None).await.unwrap(), "claude", "沒有身分就是裸 kind");
+        app.cfg
+            .update(|c| {
+                c.identities.push(crate::config::IdentityCfg { name: "hand".into(), kind: "claude".into(), host: None, env: env(&[("CLAUDE_CONFIG_DIR", "/x")]), args: vec![] });
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(resolve_quota_base(&app, LOCAL_HOST, "claude", Some("hand")).await.unwrap(), "claude:hand", "手寫的身分不必等偵測");
+        let cc0 = crate::config::IdentityCfg { name: "cc0".into(), kind: "claude".into(), host: None, env: Default::default(), args: vec![] };
+        app.tools.lock().await.insert(
+            LOCAL_HOST.to_string(),
+            crate::tools::HostTools { tools: Default::default(), identities: Default::default(), shell_identities: vec![cc0], checked_at: crate::db::now() },
+        );
+        assert_eq!(resolve_quota_base(&app, LOCAL_HOST, "claude", Some("cc0")).await.unwrap(), "claude", "偵測完：cc0 就是預設帳號");
+        assert_eq!(resolve_quota_base(&app, LOCAL_HOST, "claude", Some("nobody")).await.unwrap(), "claude:nobody", "偵測完還查不到：照舊分開");
     }
 }
