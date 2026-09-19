@@ -94,6 +94,27 @@ pub async fn dispatch(app: &Arc<App>, assignment_id: &str) {
     if a.status != "queued" {
         return;
     }
+    // 任務已經關了（取消）：不送（issue #171）。取消是兩步——鎖裡把任務關掉、放鎖後逐件 `review cancel` 底下的交辦，
+    // 中間拿到鎖的派送以前照樣把排著的這件打進 bot，使用者剛取消的工作被送出去開始做。留在 queued，由取消那條路收掉。
+    // 呼叫端都持著 supervisor 鎖（`drain_queue`、`assign`、`review`、`resume_quota_blocked`），檢查到送出之間取消插不進來。
+    // 讀不到任務就不送：跟窗口讀不到同一個做法，`hold` 幾秒再看，不花重試。
+    if let Some(mission_id) = a.mission_id.as_deref() {
+        match crate::mission::store::get(&app.db, mission_id).await {
+            Ok(Some(m)) if m.cancelled_at.is_some() || m.completed_at.is_some() => {
+                tracing::info!(assignment = %a.id, mission = mission_id, "the assignment's mission is closed; not dispatching it");
+                return;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                let _ = store::hold(&app.db, &a.id, &iso_in(30), &format!("could not read the mission: {e}")).await;
+                tracing::warn!(assignment = %a.id, mission = mission_id, error = ?e, "holding the assignment: its mission cannot be read");
+                return;
+            }
+        }
+    }
+    // 看過任務還開著、還沒送出的那一瞬（測試在這裡插進取消任務）。
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("dispatch_after_mission_check", &a.id).await;
     // Re-check the target: between queueing and now it could have been deleted.
     let target = match crate::db::bot(&app.db, &a.target_bot_id).await {
         Ok(Some(b)) if b.deleted_at.is_none() => b,
@@ -711,6 +732,9 @@ async fn resume_quota_blocked(app: &Arc<App>) {
                     tracing::info!(assignment = %a.id, bot = %a.target_bot_id, "額度回來了，重送 assignment");
                 }
                 app.emit("supervisor_changed", json!({"assignment_id": a.id, "status": "queued"})).await;
+                // 跟 `drain_queue` 一樣在 supervisor 鎖裡派：`dispatch` 看「任務關了沒」到送出之間，取消任務（拿同一把鎖）
+                // 才插不進來（issue #171）。
+                let _g = super::lock().await;
                 dispatch(app, &a.id).await;
             }
             Ok(_) => {}
@@ -3769,5 +3793,102 @@ mod turn_done_quota_tests {
         // 還在排隊的回合沒開始，不算「更晚開始」。
         sqlx::query("UPDATE turns SET status='queued' WHERE id='t-next'").execute(&app.db).await.unwrap();
         assert_eq!(turn_error_of(&app, a.turn_id.as_deref().unwrap()).await.as_deref(), Some(SESSION_BANNER));
+    }
+}
+
+/// 交辦所屬的任務關了或被使用者暫停時，派送（含背景的重試與等額度重送）不能再把它送進 bot。
+#[cfg(test)]
+mod mission_state_dispatch_tests {
+    use super::*;
+    use crate::testing as tt;
+    use axum::extract::{Path, State};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// 一個任務、底下一件排著的執行者交辦；worker 的 pane 活著、打得進字（派送會真的打字）。
+    async fn mission_with_queued_assignment(name: &str) -> (tt::Env, String, String, String) {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        store::get_or_init(&app.db).await.unwrap();
+        let agm = tt::claude_bot(&app, &env.project_id, "AGM").await;
+        store::set_env(&app.db, &agm.id, &env.project_id, "/tmp").await.unwrap();
+        let (m, _) = crate::mission::store::create(
+            &app.db,
+            &crate::mission::store::NewMission {
+                project_id: &env.project_id,
+                client_request_id: name,
+                text: "把設定頁的錯字修掉",
+                delivery_mode: "pr",
+                executor_kind: "claude",
+                on_5h_limit: "wait",
+                max_rounds: 2,
+                parent_mission_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        let worker = tt::claude_bot(&app, &env.project_id, &format!("{name}-worker")).await;
+        let a = store::insert_assignment_linked(&app.db, None, &worker.id, &format!("{name}-exec"), "做 X", &[], None, true, Some((&m.id, "executor")), None)
+            .await
+            .unwrap();
+        let pane = format!("pane-{}", worker.id);
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, pane_typed, started_at)
+             VALUES (?,?,'running','idle','ws-1',?,?,'test',1,?)",
+        )
+        .bind(crate::db::ulid())
+        .bind(&worker.id)
+        .bind(&pane)
+        .bind(format!("{name}-agent"))
+        .bind(crate::db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        env.herdr.live_pane(&pane, tt::LivePane { width: Some(120), ..Default::default() });
+        (env, m.id, a.id, pane)
+    }
+
+    /// issue #171 的另一半：等額度回來的重送（`resume_quota_blocked`）以前不拿 supervisor 鎖就呼叫 `dispatch`。派送看過
+    /// 「任務還開著」之後、打字之前，取消任務（拿鎖）可以整個做完——交辦照樣被打進一個已經取消的任務的 bot。
+    /// 重送跟取消要排隊：取消落在這個縫裡時，要等這一次派送做完（那時送出確實在取消之前），再由取消把它收掉。
+    #[tokio::test]
+    async fn a_quota_resend_and_a_mission_cancel_do_not_interleave() {
+        let (env, mission, aid, _pane) = mission_with_queued_assignment("resend-vs-cancel").await;
+        let app = env.app.clone();
+        let past = crate::db::iso_at(chrono::Utc::now() - chrono::Duration::minutes(1));
+        sqlx::query("UPDATE supervisor_assignments SET status='quota_blocked', resume_at=?, updated_at=? WHERE id=?")
+            .bind(&past)
+            .bind(&past)
+            .bind(&aid)
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        let finished = Arc::new(AtomicBool::new(false));
+        type Pending = Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<Result<(), String>>>>>;
+        let slot: Pending = Arc::default();
+        let (app2, mission2, finished2, slot2) = (app.clone(), mission.clone(), finished.clone(), slot.clone());
+        crate::lifecycle::race_point::arm("dispatch_after_mission_check", &aid, move || async move {
+            let h = tokio::spawn(async move {
+                crate::mission::api::post_cancel(State(app2), Path(mission2), axum::http::HeaderMap::new())
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| format!("{e:?}"))
+            });
+            // 沒被鎖擋住的話，取消幾百毫秒就做完。等久一點：supervisor 鎖是全域的，平行的測試可能剛好握著它一下。
+            for _ in 0..30 {
+                if h.is_finished() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            finished2.store(h.is_finished(), Ordering::SeqCst);
+            *slot2.lock().unwrap() = Some(h);
+        });
+        resume_quota_blocked(&app).await;
+
+        let h = slot.lock().unwrap().take().expect("派送走到了「看過任務、還沒送出」那一瞬");
+        assert!(!finished.load(Ordering::SeqCst), "取消不能落在派送看過任務還開著、還沒送出之間");
+        h.await.unwrap().expect("取消照樣成功");
+        assert_eq!(store::assignment(&app.db, &aid).await.unwrap().unwrap().status, "cancelled", "取消把它收掉");
     }
 }
