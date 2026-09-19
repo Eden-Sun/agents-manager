@@ -547,14 +547,18 @@ fn is_menu_chrome(s: &str) -> bool {
         || (low.contains(" | ") && low.contains('%'))
 }
 
+///
+/// **只認行首**（#237，同 #227 的 grok）：codex 讀到含這句話的檔案、diff、測試輸出時，整行 `contains` 會把它當成撞限——
+/// 在飛的回合收成 failed、額度標用盡。真 codex 0.155 的頁尾沒有 `5h N% left`，`limit_banner::status_line_says_headroom`
+/// 讀不到東西，沒有第二道保護。行首是橫幅符號（`■`／`•`）或 `ERROR:`，之後整句就是 `You've hit your usage limit…`；
+/// 工具輸出的前綴（`└`、`+`、`-`、`>`）不算。回覆散文裡逐行貼出來的橫幅（行首就是 `■`）單行分不出來，靠
+/// [`codex_usage_notice_lines`] 認「橫幅是不是最後一個 cell」；貼在最後一個 cell 的則分不出來（已知限制）。
 pub(crate) fn codex_limit_hit_line(line: &str) -> Option<String> {
     let raw = line.trim();
-    if raw.is_empty() {
-        return None;
-    }
     let s = match raw.chars().next() {
-        Some(c) if !c.is_alphanumeric() => raw[c.len_utf8()..].trim(),
-        _ => raw,
+        Some(c @ ('■' | '•')) => raw[c.len_utf8()..].trim(),
+        Some(c) if c.is_alphanumeric() => raw,
+        _ => return None,
     };
     let body = s
         .strip_prefix("ERROR:")
@@ -563,8 +567,9 @@ pub(crate) fn codex_limit_hit_line(line: &str) -> Option<String> {
         .map(str::trim_start)
         .unwrap_or(s);
     let lower = body.to_ascii_lowercase();
-    let hit = lower.contains("hit your usage limit")
-        || (lower.contains("usage limit") && (lower.contains("try again") || lower.contains("upgrade to")));
+    let head: String = lower.chars().take(32).collect();
+    let hit = (lower.starts_with("you") && head.contains("hit your usage limit"))
+        || (lower.starts_with("usage limit") && (lower.contains("try again") || lower.contains("upgrade to")));
     if !hit {
         return None;
     }
@@ -618,6 +623,10 @@ pub(crate) fn codex_usage_notice_lines(text: &str) -> Vec<String> {
             // When wrapped, `try again at …` (the only reset time) is on the next row; the single row
             // stored `…, visit` with no reset (2026-09-10, codex-astra). Prefer the join only if it adds that.
             let (joined, next) = join_wrapped_limit_hit(&lines, i);
+            if !banner_is_last_cell(&lines, next.max(i + 1)) {
+                i = next.max(i + 1); // 引用的輸出（#237）：後面還有 codex 自己的回覆。
+                continue;
+            }
             if !has_try_again(&notice) {
                 if let Some(joined) = joined.filter(|j| has_try_again(j)) {
                     push(&mut out, joined);
@@ -635,12 +644,12 @@ pub(crate) fn codex_usage_notice_lines(text: &str) -> Vec<String> {
             continue;
         }
         let head_low = strip_codex_bullet(line).to_ascii_lowercase();
-        let looks_hit = head_low.contains("hit your usage")
-            || (head_low.contains("error") && head_low.contains("usage"))
-            || head_low.contains("you've hit");
+        let looks_hit = head_low.starts_with("you've hit your usage")
+            || head_low.starts_with("you hit your usage")
+            || (head_low.starts_with("error") && head_low.contains("usage"));
         if looks_hit {
             let (joined, next) = join_wrapped_limit_hit(&lines, i);
-            if let Some(notice) = joined {
+            if let Some(notice) = joined.filter(|_| banner_is_last_cell(&lines, next.max(i + 1))) {
                 push(&mut out, notice);
                 i = next;
                 continue;
@@ -649,6 +658,18 @@ pub(crate) fn codex_usage_notice_lines(text: &str) -> Vec<String> {
         i += 1;
     }
     out
+}
+
+/// 撞限橫幅是不是畫面上最後一個 cell（#237）：真橫幅結束了這一回合，後面（跳過空行）只剩輸入列與頁尾。
+/// 後面還有 codex 自己的回覆（`• …`）、`└` 工具輸出、`done …`、`• Working` 的，是 codex 讀到、印出來的引用，或已經處理掉的舊畫面。
+/// `from` 是橫幅（含折行）之後的第一行。
+fn banner_is_last_cell(lines: &[&str], from: usize) -> bool {
+    let Some(next) = lines.get(from..).and_then(|rest| rest.iter().map(|l| l.trim()).find(|l| !l.is_empty())) else { return true };
+    let low = next.to_ascii_lowercase();
+    next.starts_with(['›', '❯', '╭', '╰', '│', '─'])
+        || low.starts_with("gpt-")
+        || low.contains("max fas") // 窄 pane 截斷的模型頁尾
+        || next.contains(" · ") // 頁尾、`1 background terminal running · /ps to view · /stop to close`
 }
 
 fn has_try_again(notice: &str) -> bool {
