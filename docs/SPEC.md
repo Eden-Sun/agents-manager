@@ -2174,6 +2174,9 @@ herdr 有新版時自動發現、整理出「對我們有沒有用、會不會�
 **只做到「偵測＋交辦」**：真的升級、重啟 herdr server 一律要 AGM 核准後手動做，這支腳本不會、也不能觸發。
 
 1. **偵測**：`scripts/ops/herdr-update-kick.sh`，launchd `com.agm.herdr-update` 每天跑一次。
+   launchd 預設 PATH 不含 Homebrew：腳本開頭自補 `/opt/homebrew/bin:/usr/local/bin`，plist 必須設
+   `EnvironmentVariables.PATH`。找不到 `herdr`／`gh`／`python3`／`curl` 推 `ops_alert`（`missing_dependency`），
+   不靜默結束——否則 job 表面已排程、永遠不派（#66 留言／#204 C）。
    本機版本問 `herdr --version`；最新穩定版問 `gh release list -R herdrdev/herdr --exclude-pre-releases -L 1`
    （Homebrew 的 `herdr`跟這台機器實際在跑的那份不一定同步——bot 目錄有自己的私有拷貝、PATH shadow 掉 Homebrew 連結的那份，
    release 清單是兩邊最後都會對齊的真相來源）；CHANGELOG 全文抓 `https://raw.githubusercontent.com/herdrdev/herdr/master/CHANGELOG.md`。
