@@ -403,16 +403,16 @@ pub async fn pane_typed(pool: &SqlitePool, run_id: &str) -> Result<bool> {
 }
 
 /// Claim one re-delivery for `turn_id`, at most `max` per turn. `true` = claimed (and counted);
-/// the UPDATE is the lock, so a queue flush and the stall watchdog cannot both resend.
-pub async fn claim_resend(pool: &SqlitePool, turn_id: &str, max: i64) -> bool {
-    matches!(
-        sqlx::query("UPDATE turns SET resend_count = resend_count + 1 WHERE id = ? AND resend_count < ?")
-            .bind(turn_id)
-            .bind(max)
-            .execute(pool)
-            .await,
-        Ok(r) if r.rows_affected() > 0
-    )
+/// the UPDATE is the lock, so a queue flush and the stall watchdog cannot both resend. 寫不進去回錯，
+/// 不是「額度用完了」（#193）。
+pub async fn claim_resend(pool: &SqlitePool, turn_id: &str, max: i64) -> Result<bool> {
+    Ok(sqlx::query("UPDATE turns SET resend_count = resend_count + 1 WHERE id = ? AND resend_count < ?")
+        .bind(turn_id)
+        .bind(max)
+        .execute(pool)
+        .await?
+        .rows_affected()
+        > 0)
 }
 
 /// 退還一次重送額度。只有在**確定一個位元組都沒寫進 pane** 時才准叫（`Delivered::NotAttempted`
@@ -1023,10 +1023,10 @@ mod tests {
         sqlx::query("INSERT INTO turns (id,conversation_id,origin,status,delivery,created_at) VALUES ('t',?,'web','in_flight','ok',?)")
             .bind(&conv).bind(now()).execute(&pool).await.unwrap();
 
-        assert!(claim_resend(&pool, "t", 1).await, "第一次拿得到");
-        assert!(!claim_resend(&pool, "t", 1).await, "額度只有一次");
+        assert!(claim_resend(&pool, "t", 1).await.unwrap(), "第一次拿得到");
+        assert!(!claim_resend(&pool, "t", 1).await.unwrap(), "額度只有一次");
         refund_resend(&pool, "t").await;
-        assert!(claim_resend(&pool, "t", 1).await, "退還之後還有一次");
+        assert!(claim_resend(&pool, "t", 1).await.unwrap(), "退還之後還有一次");
         refund_resend(&pool, "t").await;
         refund_resend(&pool, "t").await;
         let n: i64 = sqlx::query_scalar("SELECT resend_count FROM turns WHERE id='t'").fetch_one(&pool).await.unwrap();

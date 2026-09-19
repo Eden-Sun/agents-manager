@@ -244,13 +244,24 @@ pub async fn capture(app: &Arc<App>, bot_id: &str, expected_run_id: &str) -> Res
     marked
 }
 
-pub async fn clear(app: &Arc<App>, run_id: &str, bot_id: &str) {
+/// 新回合開始：上一回合的錯誤是舊的了。寫不進去回錯（#193），呼叫端（progress poller）之後再清：留著的話，這一回合
+/// 斷在同一句錯誤上會被 [`capture`] 的「同一則只記一次」吞掉——回合不收、輸入框一直鎖著。
+pub async fn clear(app: &Arc<App>, run_id: &str, bot_id: &str) -> Result<()> {
     let res = sqlx::query("UPDATE runs SET turn_error = NULL WHERE id = ? AND turn_error IS NOT NULL")
         .bind(run_id)
         .execute(&app.db)
         .await;
-    if matches!(res, Ok(r) if r.rows_affected() > 0) {
-        app.emit_bot_status(bot_id).await;
+    match res {
+        Ok(r) => {
+            if r.rows_affected() > 0 {
+                app.emit_bot_status(bot_id).await;
+            }
+            Ok(())
+        }
+        Err(e) => {
+            tracing::warn!(run = %run_id, error = %e, "the previous turn's error could not be cleared; retrying while this turn runs");
+            Err(e.into())
+        }
     }
 }
 

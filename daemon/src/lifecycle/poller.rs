@@ -45,11 +45,67 @@ async fn flush_progress(app: &Arc<App>, run_id: &str, pending: &mut Option<Value
     app.emit("turn_progress", frame).await;
 }
 
+/// 輪詢讀 DB 失敗時的退避上限（#193）。讀不到不等於回合收掉了：poller 是這一回合終端側的安全網，一次讀錯就
+/// 退出、Stop hook 又剛好漏掉的話，那一回合就再也沒人收。所以讀不到只延後、重讀，間隔從一個輪詢間隔加倍到這裡
+/// 為止（DB 長時間壞掉時不每 700ms 打一行 log）；只有讀到了、確定不再是這一回合才退出。
+const PROGRESS_BACKOFF_MAX: Duration = Duration::from_secs(30);
+
+fn progress_backoff(interval: Duration, failures: u32) -> Duration {
+    interval.saturating_mul(1u32 << failures.min(6)).min(PROGRESS_BACKOFF_MAX.max(interval))
+}
+
+#[cfg(not(test))]
+fn progress_interval(_run_id: &str) -> Duration {
+    PROGRESS_INTERVAL
+}
+
+/// 測試可以把單一 run 的輪詢調快（[`progress_poll_tests`]），別的測試的 poller 照舊。
+#[cfg(test)]
+fn progress_interval(run_id: &str) -> Duration {
+    progress_poll_tests::interval(run_id).unwrap_or(PROGRESS_INTERVAL)
+}
+
+/// 這一輪還是不是這一回合的 poller：讀到了、確定不是（回合收掉或換了一筆、run 或 bot 沒了）回 `Ok(None)`；
+/// 讀不到回錯（#193）。bot 與送了什麼讀到一次就留著。
+async fn still_ours(
+    app: &Arc<App>,
+    run_id: &str,
+    bot_id: &str,
+    turn_id: &str,
+    bot: &mut Option<db::Bot>,
+    sent: &mut Option<Vec<String>>,
+) -> anyhow::Result<Option<db::Run>> {
+    match db::in_flight_turn(&app.db, run_id).await? {
+        Some(t) if t.id == turn_id => {}
+        _ => return Ok(None),
+    }
+    let Some(run) = db::run(&app.db, run_id).await? else { return Ok(None) };
+    if bot.is_none() {
+        let Some(b) = db::bot(&app.db, bot_id).await? else { return Ok(None) };
+        *bot = Some(b);
+    }
+    if sent.is_none() {
+        *sent = Some(turn_echo_texts(app, turn_id).await?);
+    }
+    Ok(Some(run))
+}
+
+/// 讀不到：記一筆（第一次 warn，之後 debug），回傳新的連續失敗次數。
+fn poll_unreadable(turn_id: &str, failures: u32, e: &anyhow::Error) -> u32 {
+    if failures == 0 {
+        tracing::warn!(turn = %turn_id, error = %e, "progress poller cannot read the turn's state; retrying, not giving up the turn");
+    } else {
+        tracing::debug!(turn = %turn_id, failures, error = %e, "progress poller still cannot read the turn's state");
+    }
+    failures.saturating_add(1)
+}
+
 /// While a turn is in flight, poll the pane and push partial replies as `turn_progress`. Also the
 /// idle-prompt safety net that calls `try_fallback` (see below). Stops once the turn leaves `in_flight`.
 pub async fn arm_progress(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &str) {
-    // A new turn is starting: whatever cut the *previous* one short is history (§4.3a).
-    crate::turn_error::clear(app, run_id, bot_id).await;
+    // A new turn is starting: whatever cut the *previous* one short is history (§4.3a). 清不掉就在 poller 裡
+    // 再清：留著的話，這一回合斷在同一句錯誤上會被「同一則只記一次」吞掉（#193）。
+    let mut error_cleared = crate::turn_error::clear(app, run_id, bot_id).await.is_ok();
     let mut pollers = app.progress_pollers.lock().await;
     if let Some(h) = pollers.remove(run_id) {
         h.abort();
@@ -61,22 +117,37 @@ pub async fn arm_progress(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &
     let key = run_id.clone();
     let h = tokio::spawn(async move {
         let started = std::time::Instant::now();
-        let Ok(Some(bot)) = db::bot(&app2.db, &bot_id).await else { return };
+        let interval = progress_interval(&run_id);
+        // 連續讀不到幾次（#193）：讀到就歸零。
+        let mut failures = 0u32;
+        let mut bot: Option<db::Bot> = None;
         // What we sent, to strip the pane's echo off every frame.
-        let sent = turn_echo_texts(&app2, &turn_id).await;
+        let mut sent: Option<Vec<String>> = None;
         let mut last = (String::new(), String::new(), String::new());
         let mut quiet = 0u32;
         let mut pending: Option<Value> = None;
         loop {
-            tokio::time::sleep(PROGRESS_INTERVAL).await;
+            tokio::time::sleep(progress_backoff(interval, failures)).await;
             if started.elapsed() > PROGRESS_MAX {
                 break;
             }
-            let still = matches!(db::in_flight_turn(&app2.db, &run_id).await, Ok(Some(t)) if t.id == turn_id);
-            if !still {
-                break;
+            #[cfg(test)]
+            super::race_point::hit("progress_poll", &run_id).await;
+            // 讀不到（DB 一時 busy／I/O error）不是「回合收掉了」：延後重讀，不放掉這一回合（#193）。
+            let run = match still_ours(&app2, &run_id, &bot_id, &turn_id, &mut bot, &mut sent).await {
+                Ok(Some(run)) => run,
+                Ok(None) => break,
+                Err(e) => {
+                    failures = poll_unreadable(&turn_id, failures, &e);
+                    continue;
+                }
+            };
+            failures = 0;
+            // `still_ours` 讀到了才回 `Some`：兩個都已經有了。
+            let (Some(bot), Some(sent)) = (bot.as_ref(), sent.as_deref()) else { continue };
+            if !error_cleared {
+                error_cleared = crate::turn_error::clear(&app2, &run_id, &bot_id).await.is_ok();
             }
-            let Ok(Some(run)) = db::run(&app2.db, &run_id).await else { break };
             let Some(pane) = run.pane_id.clone() else { continue };
             let Ok(client) = client_for_run(&app2, &run).await else { continue };
             let Ok(read) = client.pane_read(&pane, "recent_unwrapped", 160).await else { continue };
@@ -100,7 +171,12 @@ pub async fn arm_progress(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &
             // pane too: empty composer + no change = wants input. `blocked` excluded (a modal isn't an end).
             let agent_status = match db::run(&app2.db, &run_id).await {
                 Ok(Some(r)) => r.agent_status,
-                _ => String::new(),
+                Ok(None) => break,
+                // 不知道是不是 `blocked`（對話框）：這一輪不算閒著，也不歸零（#193）。以前當成空字串，照樣累計。
+                Err(e) => {
+                    failures = poll_unreadable(&turn_id, failures, &e);
+                    continue;
+                }
             };
             if agent_status == "blocked" || !pane_awaits_input(&bot.kind, &read.text) {
                 quiet = 0;
@@ -241,15 +317,16 @@ pub(crate) fn idle_threshold(said_something: bool, agent_status: &str) -> u32 {
 ///
 /// 第一個是 `turns.prompt_text`——**實際打給 agent 的字**。訊息泡泡存的是使用者看到的原文：群組訊息帶著 @mention，
 /// 拿它去搜畫面一定找不到、重送時還把路由語法打進 pane（review3 c3 M4）。沒有 `prompt_text` 的舊列才退回從訊息重算。
-pub(crate) async fn turn_echo_texts(app: &Arc<App>, turn_id: &str) -> Vec<String> {
-    let rows = db::turn_user_messages_with_attachments(&app.db, turn_id).await.unwrap_or_default();
+///
+/// 讀不到回錯（#193），不是「什麼都沒送」：空的清單會讓備援把我們自己的 prompt 當成 agent 的回覆存下來、
+/// stall watchdog 找不到框裡的字也不重送，接著判失敗。
+pub(crate) async fn turn_echo_texts(app: &Arc<App>, turn_id: &str) -> anyhow::Result<Vec<String>> {
+    let rows = db::turn_user_messages_with_attachments(&app.db, turn_id).await?;
     let mut out = Vec::new();
     let delivered: Option<String> = sqlx::query_scalar("SELECT prompt_text FROM turns WHERE id = ?")
         .bind(turn_id)
         .fetch_optional(&app.db)
-        .await
-        .ok()
-        .flatten()
+        .await?
         .flatten();
     if let Some(p) = delivered.filter(|p| !p.trim().is_empty()) {
         out.push(p);
@@ -267,7 +344,7 @@ pub(crate) async fn turn_echo_texts(app: &Arc<App>, turn_id: &str) -> Vec<String
             out.push(content);
         }
     }
-    out
+    Ok(out)
 }
 
 /// The reply in this snapshot with our prompt echo removed, or `None`. The three strippers only
@@ -607,29 +684,41 @@ const NUDGE_EARLY_SECS: u64 = 3;
 /// After re-sending Enter, how long the agent gets to react before the turn is failed.
 const NUDGE_GRACE_SECS: u64 = 8;
 
-/// Press Enter if our prompt is still in the box and the agent idle. Best effort: every reason to
-/// do nothing is `false`, never an error.
-async fn nudge_unsent_prompt(app: &Arc<App>, run_id: &str, turn_id: &str, sent: &[String]) -> bool {
-    let Ok(Some(run)) = db::run(&app.db, run_id).await else { return false };
+/// 判斷救不救得回來要的狀態讀不到時，stall watchdog 隔多久整輪再看一次（#193）。
+const STALL_RECHECK: Duration = Duration::from_secs(10);
+
+/// Press Enter if our prompt is still in the box and the agent idle. Every reason to do nothing is
+/// `Ok(false)`. The DB unreadable is an error (#193): whether the text is still in the box is then
+/// unknown, and the watchdog must not go on to fail the turn as if it weren't.
+async fn nudge_unsent_prompt(app: &Arc<App>, run_id: &str, turn_id: &str, sent: &[String]) -> anyhow::Result<bool> {
+    let Some(run) = db::run(&app.db, run_id).await? else { return Ok(false) };
     if run.agent_status == "working" || run.agent_status == "blocked" {
-        return false;
+        return Ok(false);
     }
-    if !matches!(db::in_flight_turn(&app.db, run_id).await, Ok(Some(t)) if t.id == turn_id && t.delivery == "ok") {
-        return false;
+    if !matches!(db::in_flight_turn(&app.db, run_id).await?, Some(t) if t.id == turn_id && t.delivery == "ok") {
+        return Ok(false);
     }
-    let Ok(Some(bot)) = db::bot(&app.db, &run.bot_id).await else { return false };
-    let Some(pane) = run.pane_id.clone() else { return false };
-    let Ok(client) = client_for_run(app, &run).await else { return false };
-    let Ok(read) = client.pane_read(&pane, "visible", 80).await else { return false };
+    let Some(bot) = db::bot(&app.db, &run.bot_id).await? else { return Ok(false) };
+    let Some(pane) = run.pane_id.clone() else { return Ok(false) };
+    let Ok(client) = client_for_run(app, &run).await else { return Ok(false) };
+    let Ok(read) = client.pane_read(&pane, "visible", 80).await else { return Ok(false) };
     if !sent.iter().any(|p| composer_holds_prompt(&bot.kind, &read.text, p)) {
-        return false;
+        return Ok(false);
     }
     if let Err(e) = client.pane_send_keys(&pane, &["Enter"]).await {
         tracing::warn!(error = ?e, run_id, "could not re-send Enter for an unsent prompt");
-        return false;
+        return Ok(false);
     }
     tracing::warn!(run_id, turn = %turn_id, "prompt was still in the composer; re-sent Enter");
-    true
+    Ok(true)
+}
+
+/// [`nudge_unsent_prompt`]，送了什麼先讀（讀到一次就留在 `sent`）。讀不到回錯（#193）。
+async fn nudge_if_unsent(app: &Arc<App>, run_id: &str, turn_id: &str, sent: &mut Option<Vec<String>>) -> anyhow::Result<bool> {
+    if sent.is_none() {
+        *sent = Some(turn_echo_texts(app, turn_id).await?);
+    }
+    nudge_unsent_prompt(app, run_id, turn_id, sent.as_deref().unwrap_or_default()).await
 }
 
 /// How many times one turn may be re-delivered because the prompt never showed up on screen.
@@ -680,6 +769,16 @@ enum Resend {
     /// 重送按過鍵卻證明不了（`Unproven`，或打字之後出錯）：turn 已改記 `delivery='unknown'`，不能判失敗
     /// （review3 c3 M5）。`fail_stalled_turn` 只收 `delivery='ok'`，所以接下來那一步自然不動它。
     Unproven,
+    /// 同上，但 `delivery='unknown'` 寫不進去（#193）：欠著（原因在這裡），補上之前 watchdog 不判失敗——打過的字
+    /// 可能已經被收下，判 failed 會讓 AGM 重派同一件事。
+    UnprovenOwed(&'static str),
+    /// 判斷要不要重送的狀態讀不到（DB，#193）：這一輪不知道，不能當成「不必重送」接著判失敗。
+    Unreadable,
+}
+
+fn resend_unreadable(turn_id: &str, e: &anyhow::Error) -> Resend {
+    tracing::warn!(turn = %turn_id, error = %e, "cannot tell whether a lost prompt should be re-delivered; not failing the turn on it");
+    Resend::Unreadable
 }
 
 impl Resend {
@@ -695,16 +794,27 @@ const RESEND_RETRY_SECS: u64 = 3;
 /// Re-deliver a prompt that never reached the pane, at most [`MAX_PROMPT_RESENDS`] times per turn.
 /// Same guards as [`nudge_unsent_prompt`]; every reason to do nothing is `Skipped`.
 async fn resend_lost_prompt(app: &Arc<App>, run_id: &str, turn_id: &str, sent: &[String]) -> Resend {
-    let Ok(Some(run)) = db::run(&app.db, run_id).await else { return Resend::Skipped };
+    // DB 讀不到是 `Unreadable`，不是 `Skipped`（#193）：`Skipped` 之後 watchdog 就判失敗了。
+    let run = match db::run(&app.db, run_id).await {
+        Ok(Some(run)) => run,
+        Ok(None) => return Resend::Skipped,
+        Err(e) => return resend_unreadable(turn_id, &e),
+    };
     if run.agent_status == "working" || run.agent_status == "blocked" {
         return Resend::Skipped;
     }
     // 重送看 `auto_resend`，不看有沒有證據（AGM 2026-09-16）：打過字但證不明的那條路重送會重複派工，
     // 所以它是 0；`agent.prompt` 一樣沒有證據，但它沒送進去才會走到這裡，重送是安全的。
-    if !matches!(db::in_flight_turn(&app.db, run_id).await, Ok(Some(t)) if t.id == turn_id && t.delivery == "ok" && t.auto_resend != 0) {
-        return Resend::Skipped;
+    match db::in_flight_turn(&app.db, run_id).await {
+        Ok(Some(t)) if t.id == turn_id && t.delivery == "ok" && t.auto_resend != 0 => {}
+        Ok(_) => return Resend::Skipped,
+        Err(e) => return resend_unreadable(turn_id, &e),
     }
-    let Ok(Some(bot)) = db::bot(&app.db, &run.bot_id).await else { return Resend::Skipped };
+    let bot = match db::bot(&app.db, &run.bot_id).await {
+        Ok(Some(bot)) => bot,
+        Ok(None) => return Resend::Skipped,
+        Err(e) => return resend_unreadable(turn_id, &e),
+    };
     let Some(pane) = run.pane_id.clone() else { return Resend::Skipped };
     let Ok(client) = client_for_run(app, &run).await else { return Resend::Skipped };
     let Ok(read) = client.pane_read(&pane, crate::lifecycle::delivery::SCAN_SOURCE, RESEND_SCAN_LINES).await else { return Resend::Skipped };
@@ -716,8 +826,10 @@ async fn resend_lost_prompt(app: &Arc<App>, run_id: &str, turn_id: &str, sent: &
     let Some(text) = sent.first() else { return Resend::Skipped };
     // The claim is the lock and it lives in the DB: a queue flush and this watchdog cannot both
     // resend, and a daemon restart does not hand the same turn a fresh budget (sol review #3).
-    if !db::claim_resend(&app.db, turn_id, MAX_PROMPT_RESENDS).await {
-        return Resend::Skipped;
+    match db::claim_resend(&app.db, turn_id, MAX_PROMPT_RESENDS).await {
+        Ok(true) => {}
+        Ok(false) => return Resend::Skipped,
+        Err(e) => return resend_unreadable(turn_id, &e),
     }
     // The first delivery just failed silently; re-deliver the way that is verified on screen.
     let res = deliver_prompt(app, &client, &run, &bot, text, true, true).await;
@@ -740,14 +852,23 @@ async fn resend_lost_prompt(app: &Arc<App>, run_id: &str, turn_id: &str, sent: &
         }
         Ok(Delivered::Unproven(why)) => {
             tracing::warn!(run_id, turn = %turn_id, reason = why, "re-delivery could not be proven either");
-            mark_resend_unproven(app, &bot.id, turn_id, why).await;
-            Resend::Unproven
+            unproven(app, &bot.id, turn_id, why).await
         }
         // `execute_delivery` 在打第一個字之前的失敗都是 `NotAttempted`，走到 `Err` 就是鍵可能已經送出去了。
         Err(e) => {
             tracing::warn!(run_id, turn = %turn_id, error = %e, "re-delivering a lost prompt failed after typing started");
-            mark_resend_unproven(app, &bot.id, turn_id, "resend_error").await;
-            Resend::Unproven
+            unproven(app, &bot.id, turn_id, "resend_error").await
+        }
+    }
+}
+
+/// 重送打過字、證明不了：記成 `delivery='unknown'`；寫不進去就欠著（`UnprovenOwed`，#193）。
+async fn unproven(app: &Arc<App>, bot_id: &str, turn_id: &str, why: &'static str) -> Resend {
+    match mark_resend_unproven(app, bot_id, turn_id, why).await {
+        Ok(()) => Resend::Unproven,
+        Err(e) => {
+            tracing::warn!(turn = %turn_id, error = ?e, "could not record an unproven resend as unknown delivery; owed, the turn is not failed meanwhile");
+            Resend::UnprovenOwed(why)
         }
     }
 }
@@ -755,8 +876,8 @@ async fn resend_lost_prompt(app: &Arc<App>, run_id: &str, turn_id: &str, sent: &
 /// 重送已經打了字卻證明不了：字可能還在框裡（claude compact 時吞 Enter），也可能已經被收下、排在後面。
 /// 兩種都不是「agent 沒反應」，判 failed 會讓交辦跟著失敗、AGM 重派同一件事（review3 c3 M5）。
 /// 照 §6「Unproven 才會變成 unknown」記成 `delivery='unknown'`，並留一則說明；hook 來了照樣認領，
-/// 真的沒人收由 §4.3b 收尾。
-async fn mark_resend_unproven(app: &Arc<App>, bot_id: &str, turn_id: &str, why: &str) {
+/// 真的沒人收由 §4.3b 收尾。寫不進去回錯（#193）：呼叫端記成欠著，補上之前不判失敗。
+async fn mark_resend_unproven(app: &Arc<App>, bot_id: &str, turn_id: &str, why: &str) -> anyhow::Result<()> {
     let text = format!(
         "（畫面上完全沒有這則訊息，已自動重打一次，但證明不了有送出（{why}）：字可能還留在輸入框裡，也可能已經被收下、排在後面。\
          這一則先記成「送達不明」，不判失敗。請到終端看一下——還在框裡就按 Enter 或清掉；已經在跑就等它回完。）"
@@ -778,22 +899,19 @@ async fn mark_resend_unproven(app: &Arc<App>, bot_id: &str, turn_id: &str, why: 
         tx.commit().await?;
         anyhow::Ok(Some(m))
     }
-    .await;
-    match res {
-        Ok(Some(m)) => {
-            emit_message_added(app, bot_id, m).await;
-            emit_turn(app, turn_id).await;
-        }
-        Ok(None) => {}
-        Err(e) => tracing::warn!(turn = %turn_id, error = ?e, "could not record an unproven resend as unknown delivery"),
+    .await?;
+    if let Some(m) = res {
+        emit_message_added(app, bot_id, m).await;
+        emit_turn(app, turn_id).await;
     }
+    Ok(())
 }
 
 /// The watchdog's resend, with one retry when the first try was refused before typing anything.
 ///
 /// Before this, a refunded budget was never used: `arm_stall` failed the turn right after the refusal,
 /// and nothing re-arms a watchdog later (review2 deliv #4). `None` = the stall timer was replaced
-/// meanwhile (the caller stops); otherwise `(re-delivered, what blocked the last try)`.
+/// meanwhile (the caller stops); otherwise `(what the last try came to, what blocked a try)`.
 async fn resend_with_retry(
     app: &Arc<App>,
     run_id: &str,
@@ -802,8 +920,9 @@ async fn resend_with_retry(
     sent: &[String],
     generation: u64,
     retry_after: Duration,
-) -> Option<(bool, Option<&'static str>)> {
+) -> Option<(Resend, Option<&'static str>)> {
     let mut blocked = None;
+    let mut last = Resend::Skipped;
     for attempt in 0..2 {
         if attempt > 0 {
             tokio::time::sleep(retry_after).await;
@@ -813,18 +932,19 @@ async fn resend_with_retry(
         if app.stall_timers.lock().await.get(run_id) != Some(&generation) {
             return None;
         }
-        match resend_lost_prompt(app, run_id, turn_id, sent).await {
-            Resend::Sent => return Some((true, None)),
-            Resend::Skipped | Resend::Unproven => return Some((false, blocked)),
+        last = resend_lost_prompt(app, run_id, turn_id, sent).await;
+        match last {
+            Resend::Sent => return Some((last, None)),
             Resend::Blocked { reason, retry } => {
                 blocked = Some(reason);
                 if !retry {
                     break;
                 }
             }
+            Resend::Skipped | Resend::Unproven | Resend::UnprovenOwed(_) | Resend::Unreadable => return Some((last, blocked)),
         }
     }
-    Some((false, blocked))
+    Some((last, blocked))
 }
 
 /// The agent must leave `idle` within `STALL_SECS` after delivery, or the Turn sits `in_flight`
@@ -839,8 +959,7 @@ pub async fn arm_stall(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &str
     let bot_id = bot_id.to_string();
     let turn_id = turn_id.to_string();
     tokio::spawn(async move {
-        let sent = turn_echo_texts(&app2, &turn_id).await;
-        let mut nudged;
+        let mut st = Stall::default();
     // Every prompt gets the early look: a single line pasted into a busy TUI loses its Enter too.
         tokio::time::sleep(Duration::from_secs(NUDGE_EARLY_SECS)).await;
         {
@@ -849,58 +968,138 @@ pub async fn arm_stall(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &str
             if app2.stall_timers.lock().await.get(&run_id) != Some(&generation) {
                 return;
             }
-            nudged = nudge_unsent_prompt(&app2, &run_id, &turn_id, &sent).await;
+            // 早看的這一眼讀不到就算了：期限那一輪會再看，那一輪讀不到才擋著不判失敗。
+            match nudge_if_unsent(&app2, &run_id, &turn_id, &mut st.sent).await {
+                Ok(n) => st.nudged = n,
+                Err(e) => tracing::debug!(turn = %turn_id, error = %e, "early nudge could not read the turn; the deadline looks again"),
+            }
         }
         tokio::time::sleep(Duration::from_secs(STALL_SECS - NUDGE_EARLY_SECS)).await;
-    // Deadline: if the text is still there, press Enter and grant a grace period first.
-        {
-            let lock = app2.bot_lock(&bot_id).await;
-            let _g = lock.lock().await;
-            if app2.stall_timers.lock().await.get(&run_id) != Some(&generation) {
-                return;
+        loop {
+            match stall_round(&app2, &run_id, &bot_id, &turn_id, generation, &mut st, Duration::from_secs(NUDGE_GRACE_SECS)).await {
+                StallRound::Replaced => return,
+                StallRound::Unsure => tokio::time::sleep(STALL_RECHECK).await,
+                StallRound::Done => break,
             }
-            nudged |= nudge_unsent_prompt(&app2, &run_id, &turn_id, &sent).await;
-        }
-        // Not in the box either: the prompt never reached the TUI. Deliver it again once instead of
-        // failing the turn with a system message the user has to act on.
-        let mut resent = false;
-        let mut blocked = None;
-        if !nudged {
-            let Some((r, b)) =
-                resend_with_retry(&app2, &run_id, &bot_id, &turn_id, &sent, generation, Duration::from_secs(RESEND_RETRY_SECS)).await
-            else {
-                return;
-            };
-            (resent, blocked) = (r, b);
-        }
-        if nudged || resent {
-            tokio::time::sleep(Duration::from_secs(NUDGE_GRACE_SECS)).await;
-        }
-        // A resend can land in a busy box just like the first try did.
-        if resent {
-            let lock = app2.bot_lock(&bot_id).await;
-            let _g = lock.lock().await;
-            if app2.stall_timers.lock().await.get(&run_id) != Some(&generation) {
-                return;
-            }
-            if nudge_unsent_prompt(&app2, &run_id, &turn_id, &sent).await {
-                drop(_g);
-                tokio::time::sleep(Duration::from_secs(NUDGE_GRACE_SECS)).await;
-            }
-        }
-        let lock = app2.bot_lock(&bot_id).await;
-        let _g = lock.lock().await;
-        if app2.stall_timers.lock().await.get(&run_id) != Some(&generation) {
-            return;
-        }
-        if let Err(e) = fail_stalled_turn(&app2, &run_id, &bot_id, &turn_id, nudged, resent, blocked).await {
-            tracing::warn!(error = ?e, "stall watchdog failed");
         }
         let mut timers = app2.stall_timers.lock().await;
         if timers.get(&run_id) == Some(&generation) {
             timers.remove(&run_id);
         }
     });
+}
+
+/// stall watchdog 一輪一輪之間要記得的事。
+#[derive(Debug, Default)]
+struct Stall {
+    /// 送了什麼（[`turn_echo_texts`]）：讀到一次就留著，讀不到下一步再讀（#193）。
+    sent: Option<Vec<String>>,
+    nudged: bool,
+    resent: bool,
+    blocked: Option<&'static str>,
+    /// 重送打過字、`delivery='unknown'` 卻寫不進去（[`Resend::UnprovenOwed`]）：每一輪先補，補上之前不判失敗。
+    owed_unproven: Option<&'static str>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum StallRound {
+    /// 計時器被換掉（新的回合、取消）：停手，什麼都不動。
+    Replaced,
+    /// 有一步讀不到、判斷不了（#193）：不判失敗，隔 [`STALL_RECHECK`] 整輪再看。
+    Unsure,
+    Done,
+}
+
+fn stall_unsure(turn_id: &str, e: &anyhow::Error) -> bool {
+    tracing::warn!(turn = %turn_id, error = %e, "stall watchdog cannot tell whether the prompt can still be saved; not failing the turn yet");
+    true
+}
+
+/// 期限到了的那一輪：還在框裡就補 Enter，完全沒到就重送一次，都沒用才判失敗。
+///
+/// 哪一步讀不到（#193）都不當成「不在框裡」「不必重送」接著判失敗——以前送了什麼讀不到就當成什麼都沒送，框裡的字
+/// 不補 Enter、沒到的不重送，回合直接判 failed；重送打過字卻記不成 `unknown` 也照樣判 failed，AGM 重派同一件事。
+async fn stall_round(
+    app: &Arc<App>,
+    run_id: &str,
+    bot_id: &str,
+    turn_id: &str,
+    generation: u64,
+    st: &mut Stall,
+    grace: Duration,
+) -> StallRound {
+    let mut unsure = false;
+    // Deadline: if the text is still there, press Enter and grant a grace period first.
+    {
+        let lock = app.bot_lock(bot_id).await;
+        let _g = lock.lock().await;
+        if app.stall_timers.lock().await.get(run_id) != Some(&generation) {
+            return StallRound::Replaced;
+        }
+        match nudge_if_unsent(app, run_id, turn_id, &mut st.sent).await {
+            Ok(n) => st.nudged |= n,
+            Err(e) => unsure = stall_unsure(turn_id, &e),
+        }
+    }
+    #[cfg(test)]
+    super::race_point::hit("stall_after_nudge", turn_id).await;
+    // Not in the box either: the prompt never reached the TUI. Deliver it again once instead of
+    // failing the turn with a system message the user has to act on.
+    let mut resent_now = false;
+    if !st.nudged && !st.resent && !unsure {
+        // 期限那一次 nudge 讀到了才走到這裡：`sent` 已經有了。
+        let sent = st.sent.clone().unwrap_or_default();
+        let Some((last, blocked)) =
+            resend_with_retry(app, run_id, bot_id, turn_id, &sent, generation, Duration::from_secs(RESEND_RETRY_SECS)).await
+        else {
+            return StallRound::Replaced;
+        };
+        st.blocked = blocked;
+        match last {
+            Resend::Sent => resent_now = true,
+            Resend::UnprovenOwed(why) => st.owed_unproven = Some(why),
+            Resend::Unreadable => unsure = true,
+            Resend::Skipped | Resend::Unproven | Resend::Blocked { .. } => {}
+        }
+        st.resent = resent_now;
+    }
+    if st.nudged || resent_now {
+        tokio::time::sleep(grace).await;
+    }
+    // A resend can land in a busy box just like the first try did.
+    if resent_now {
+        let lock = app.bot_lock(bot_id).await;
+        let _g = lock.lock().await;
+        if app.stall_timers.lock().await.get(run_id) != Some(&generation) {
+            return StallRound::Replaced;
+        }
+        match nudge_if_unsent(app, run_id, turn_id, &mut st.sent).await {
+            Ok(true) => {
+                drop(_g);
+                tokio::time::sleep(grace).await;
+            }
+            Ok(false) => {}
+            Err(e) => unsure = stall_unsure(turn_id, &e),
+        }
+    }
+    let lock = app.bot_lock(bot_id).await;
+    let _g = lock.lock().await;
+    if app.stall_timers.lock().await.get(run_id) != Some(&generation) {
+        return StallRound::Replaced;
+    }
+    if let Some(why) = st.owed_unproven {
+        match mark_resend_unproven(app, bot_id, turn_id, why).await {
+            Ok(()) => st.owed_unproven = None,
+            Err(e) => unsure = stall_unsure(turn_id, &e),
+        }
+    }
+    if unsure {
+        return StallRound::Unsure;
+    }
+    if let Err(e) = fail_stalled_turn(app, run_id, bot_id, turn_id, st.nudged, st.resent, st.blocked).await {
+        tracing::warn!(error = ?e, "stall watchdog failed");
+    }
+    StallRound::Done
 }
 
 pub async fn cancel_stall(app: &Arc<App>, run_id: &str) {
@@ -1125,8 +1324,11 @@ async fn try_fallback(app: &Arc<App>, run_id: &str) -> anyhow::Result<bool> {
     let reply = if codex_hit.is_some() {
         None
     } else {
-    // Only the `❯` row counts as echo; lines 2..n would be stored as the answer.
-        let sent = turn_echo_texts(app, &turn.id).await;
+    // Only the `❯` row counts as echo; lines 2..n would be stored as the answer. 讀不到送了什麼就不收（#193），
+    // 回合留在飛、下一次再來：當成什麼都沒送，我們自己的 prompt 就被當成 agent 的回覆存下來。
+        let sent = turn_echo_texts(app, &turn.id).await?;
+        #[cfg(test)]
+        super::race_point::hit("fallback_after_echo", &turn.id).await;
         match screen_reply(&bot.kind, &fresh, &sent) {
             None => None,
             Some(reply) => Some(if is_shredded(&reply) {
@@ -1288,7 +1490,7 @@ async fn capture_hookless_turn_locked(app: &Arc<App>, run_id: &str, seed: bool) 
         return Ok(false);
     }
     // herdr reports `working -> idle` more than once per answer: an identical reply is the same reply.
-    if last_assistant_content(app, &conv).await.as_deref().map(str::trim) == Some(reply.trim()) {
+    if last_assistant_content(app, &conv).await?.as_deref().map(str::trim) == Some(reply.trim()) {
         remember_pane_cursor(app, run_id, &read).await?;
         return Ok(false);
     }
@@ -1603,6 +1805,26 @@ mod hookless_capture_tests {
         assert!(!capture_hookless_turn_locked(&app, &c.run_id, false).await.unwrap(), "nothing new on the pane");
         assert!(!capture_hookless_turn_locked(&app, &c.run_id, true).await.unwrap(), "and the adoption seed is one-shot");
 
+        assert_eq!(messages(&app, &c.conv).await.len(), 2);
+    }
+
+    /// #193：去重要看的上一則回覆讀不到，不當成「還沒有回覆」——以前照樣開一個外部回合，同一份回覆存第二次
+    /// （這裡訊息寫不進去，留下一個沒有訊息的回合）。
+    #[tokio::test]
+    async fn an_unreadable_last_reply_is_not_taken_as_no_reply() {
+        let c = child("idle", EXCHANGE, 0, 1).await;
+        let app = c.env.app.clone();
+        assert!(capture_hookless_turn_locked(&app, &c.run_id, false).await.unwrap());
+        // herdr 對同一份回答報了第二次 `working -> idle`，游標又不在（重讀同一個畫面）：只有去重擋得住。
+        sqlx::query("UPDATE runs SET last_read_tail_hash=NULL WHERE id=?").bind(&c.run_id).execute(&app.db).await.unwrap();
+
+        sqlx::query("ALTER TABLE messages RENAME TO messages_unreadable").execute(&app.db).await.unwrap();
+        assert!(capture_hookless_turn_locked(&app, &c.run_id, false).await.is_err(), "讀不到上一則回覆是錯，不是「沒有」");
+        sqlx::query("ALTER TABLE messages_unreadable RENAME TO messages").execute(&app.db).await.unwrap();
+        assert!(!capture_hookless_turn_locked(&app, &c.run_id, false).await.unwrap(), "讀得到了：同一份回覆");
+
+        let turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE conversation_id=?").bind(&c.conv).fetch_one(&app.db).await.unwrap();
+        assert_eq!(turns, 1, "沒有多開回合");
         assert_eq!(messages(&app, &c.conv).await.len(), 2);
     }
 
@@ -2303,7 +2525,7 @@ mod issue_17_tests {
         assert_eq!([a, b].iter().filter(|x| x.sent()).count(), 1);
         let pane = f.env.herdr.pane("pane-17").unwrap();
         assert_eq!(pane.transcript.iter().filter(|l| l.contains("Reply with PONG")).count(), 1);
-        assert!(!db::claim_resend(&app.db, &f.turn_id, MAX_PROMPT_RESENDS).await);
+        assert!(!db::claim_resend(&app.db, &f.turn_id, MAX_PROMPT_RESENDS).await.unwrap());
     }
 
     /// 群組訊息的泡泡帶著 @mention，實際送給 bot 的是去掉 mention 的字（`turns.prompt_text`）。
@@ -2327,7 +2549,7 @@ mod issue_17_tests {
         db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
         group_turn(&f, "@AM-2-M @AM-3-X 請跑一次完整的測試並回報", "請跑一次完整的測試並回報").await;
 
-        let sent = turn_echo_texts(&app, &f.turn_id).await;
+        let sent = turn_echo_texts(&app, &f.turn_id).await.unwrap();
         assert_eq!(sent.first().map(String::as_str), Some("請跑一次完整的測試並回報"), "實際送出的字排第一：{sent:?}");
         assert_eq!(resend_lost_prompt(&app, &f.run_id, &f.turn_id, &sent).await, Resend::Skipped);
         assert_eq!(count(&f, "pane.send_text"), 0, "已經到了，不重送");
@@ -2342,7 +2564,7 @@ mod issue_17_tests {
         db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
         group_turn(&f, "@AM-2-M @AM-3-X 請跑一次完整的測試並回報", "請跑一次完整的測試並回報").await;
 
-        let sent = turn_echo_texts(&app, &f.turn_id).await;
+        let sent = turn_echo_texts(&app, &f.turn_id).await.unwrap();
         assert!(resend_lost_prompt(&app, &f.run_id, &f.turn_id, &sent).await.sent());
         let pane = f.env.herdr.pane("pane-17").unwrap();
         assert!(pane.transcript.iter().any(|l| l == "❯ 請跑一次完整的測試並回報"), "{:?}", pane.transcript);
@@ -2372,9 +2594,9 @@ mod issue_17_tests {
         };
         let out = resend_with_retry(&app, &f.run_id, &f.bot_id, &f.turn_id, &sent, generation, Duration::from_millis(900)).await;
         unlock.await.unwrap();
-        assert_eq!(out, Some((true, None)), "第二次用退回的額度送出去");
+        assert_eq!(out, Some((Resend::Sent, None)), "第二次用退回的額度送出去");
         assert_eq!(count(&f, "pane.send_text"), 1, "只送了一次");
-        assert!(!db::claim_resend(&app.db, &f.turn_id, MAX_PROMPT_RESENDS).await, "額度這次真的用掉了");
+        assert!(!db::claim_resend(&app.db, &f.turn_id, MAX_PROMPT_RESENDS).await.unwrap(), "額度這次真的用掉了");
     }
 
     /// review3 c3 M5：重送打了字、Enter 被吞，字還在框裡（`Unproven("still_in_box")`）——不是「agent 沒反應」。
@@ -2389,7 +2611,7 @@ mod issue_17_tests {
         let sent = vec!["Reply with PONG please".to_string()];
 
         let out = resend_with_retry(&app, &f.run_id, &f.bot_id, &f.turn_id, &sent, 11, Duration::from_millis(1)).await;
-        assert_eq!(out, Some((false, None)));
+        assert_eq!(out, Some((Resend::Unproven, None)));
         assert_eq!(count(&f, "pane.send_text"), 1, "打過一次字");
         let t = turn(&app, &f.turn_id).await;
         assert_eq!((t.status.as_str(), t.delivery.as_str()), ("in_flight", "unknown"));
@@ -2402,6 +2624,89 @@ mod issue_17_tests {
 
         fail_stalled_turn(&app, &f.run_id, &f.bot_id, &f.turn_id, false, false, None).await.unwrap();
         assert_eq!(turn(&app, &f.turn_id).await.status, "in_flight", "送達不明的不判失敗");
+    }
+
+    /// #193：重送打過字、證明不了，`delivery='unknown'` 卻寫不進去——以前只記一行 warning，接著照 `delivery='ok'`
+    /// 判 failed，打過的字可能已經被收下，AGM 重派同一件事。現在欠著、這一輪不判；寫得進去的下一輪補上，不判失敗、不重打。
+    #[tokio::test]
+    async fn an_unproven_resend_that_cannot_be_recorded_is_owed_not_failed() {
+        let f = fixture("claude", "").await;
+        live(&f, crate::testing::LivePane { transcript: vec!["⏺ 先前的回覆".into()], swallow_enter: true, ..wide() });
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        app.stall_timers.lock().await.insert(f.run_id.clone(), 12);
+        sqlx::query(
+            "CREATE TRIGGER refuse_unknown BEFORE UPDATE OF delivery ON turns WHEN NEW.delivery='unknown'
+             BEGIN SELECT RAISE(ABORT, 'injected: cannot record unknown delivery'); END",
+        )
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let mut st = Stall::default();
+        assert_eq!(stall_round(&app, &f.run_id, &f.bot_id, &f.turn_id, 12, &mut st, Duration::from_millis(1)).await, StallRound::Unsure);
+        assert_eq!(count(&f, "pane.send_text"), 1, "打過一次字");
+        let t = turn(&app, &f.turn_id).await;
+        assert_eq!((t.status.as_str(), t.delivery.as_str()), ("in_flight", "ok"), "記不成 unknown：欠著，不判失敗");
+
+        sqlx::query("DROP TRIGGER refuse_unknown").execute(&app.db).await.unwrap();
+        assert_eq!(stall_round(&app, &f.run_id, &f.bot_id, &f.turn_id, 12, &mut st, Duration::from_millis(1)).await, StallRound::Done);
+        let t = turn(&app, &f.turn_id).await;
+        assert_eq!((t.status.as_str(), t.delivery.as_str()), ("in_flight", "unknown"), "補上了：送達不明，不判失敗");
+        assert_eq!(count(&f, "pane.send_text"), 1, "不重打第二次");
+    }
+
+    /// #193：期限那一輪讀不到送了什麼——以前當成什麼都沒送：框裡的字不補 Enter、沒到的不重送，接著判失敗。
+    /// 現在這一輪不判（`Unsure`）；讀得到的下一輪照常，字還在框裡就補 Enter。
+    #[tokio::test]
+    async fn a_stall_round_that_cannot_read_what_was_sent_does_not_fail_the_turn() {
+        let rule = "─".repeat(82);
+        let screen = format!("⏺ 先前的回覆\n\n✻ Worked for 2s · done 3:34 PM\n{rule}\n❯ Reply with PONG\n{rule}\n  ⏵⏵ bypass permissions on (shift+tab to cycle)\n");
+        let f = fixture("claude", &screen).await;
+        let app = f.env.app.clone();
+        app.stall_timers.lock().await.insert(f.run_id.clone(), 31);
+        sqlx::query("ALTER TABLE messages RENAME TO messages_unreadable").execute(&app.db).await.unwrap();
+        // 讀完之後 DB 就恢復：接下來判失敗是寫得進去的。
+        let a = app.clone();
+        crate::lifecycle::race_point::arm("stall_after_nudge", &f.turn_id, move || async move {
+            sqlx::query("ALTER TABLE messages_unreadable RENAME TO messages").execute(&a.db).await.unwrap();
+        });
+        let mut st = Stall::default();
+        assert_eq!(stall_round(&app, &f.run_id, &f.bot_id, &f.turn_id, 31, &mut st, Duration::from_millis(1)).await, StallRound::Unsure);
+        assert_eq!(turn(&app, &f.turn_id).await.status, "in_flight", "判斷不了就不判失敗");
+        assert_eq!(count(&f, "pane.send_keys"), 0);
+
+        assert_eq!(stall_round(&app, &f.run_id, &f.bot_id, &f.turn_id, 31, &mut st, Duration::from_millis(1)).await, StallRound::Done);
+        assert_eq!(count(&f, "pane.send_keys"), 1, "讀得到了：字還在框裡，補 Enter");
+        assert_eq!(turn(&app, &f.turn_id).await.status, "failed", "補了 Enter 還是沒反應：照常判失敗");
+        let msg: String = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='system'")
+            .bind(&f.turn_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert!(msg.contains("已嘗試補送一次 Enter"), "{msg}");
+    }
+
+    /// #193：重送前讀不到 run／bot、重送額度寫不進去，都是 `Unreadable`，不是 `Skipped`（`Skipped` 之後就判失敗了）。
+    #[tokio::test]
+    async fn a_resend_that_cannot_read_or_claim_is_unreadable_not_skipped() {
+        let f = fixture("claude", "").await;
+        live(&f, crate::testing::LivePane { transcript: vec!["⏺ 先前的回覆".into()], ..wide() });
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        let sent = vec!["Reply with PONG".to_string()];
+
+        sqlx::query("ALTER TABLE bots RENAME TO bots_unreadable").execute(&app.db).await.unwrap();
+        assert_eq!(resend_lost_prompt(&app, &f.run_id, &f.turn_id, &sent).await, Resend::Unreadable, "讀不到 bot");
+        sqlx::query("ALTER TABLE bots_unreadable RENAME TO bots").execute(&app.db).await.unwrap();
+
+        sqlx::query("CREATE TRIGGER refuse_claim BEFORE UPDATE OF resend_count ON turns BEGIN SELECT RAISE(ABORT, 'injected: cannot claim a resend'); END")
+            .execute(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(resend_lost_prompt(&app, &f.run_id, &f.turn_id, &sent).await, Resend::Unreadable, "額度寫不進去不是「用完了」");
+        assert_eq!(count(&f, "pane.send_text"), 0);
+        sqlx::query("DROP TRIGGER refuse_claim").execute(&app.db).await.unwrap();
+        assert!(resend_lost_prompt(&app, &f.run_id, &f.turn_id, &sent).await.sent(), "寫得進去了：照常重送");
     }
 
     /// 兩次都被擋：回合照樣判失敗，但訊息說出試過重送、被什麼擋下，不是「agent 沒反應」。
@@ -2418,9 +2723,9 @@ mod issue_17_tests {
         std::fs::set_permissions(&t, std::fs::Permissions::from_mode(0o000)).unwrap();
         let out = resend_with_retry(&app, &f.run_id, &f.bot_id, &f.turn_id, &sent, 7, Duration::from_millis(50)).await;
         std::fs::set_permissions(&t, std::fs::Permissions::from_mode(0o644)).unwrap();
-        let Some((false, Some(why))) = out else { panic!("expected blocked twice, got {out:?}") };
+        let Some((Resend::Blocked { .. }, Some(why))) = out else { panic!("expected blocked twice, got {out:?}") };
         assert_eq!(count(&f, "pane.send_text"), 0, "一個字都沒打");
-        assert!(db::claim_resend(&app.db, &f.turn_id, MAX_PROMPT_RESENDS).await, "額度還在（兩次都退回了）");
+        assert!(db::claim_resend(&app.db, &f.turn_id, MAX_PROMPT_RESENDS).await.unwrap(), "額度還在（兩次都退回了）");
 
         fail_stalled_turn(&app, &f.run_id, &f.bot_id, &f.turn_id, false, false, Some(why)).await.unwrap();
         let msg: String = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='system'")
@@ -2475,6 +2780,266 @@ mod issue_17_tests {
             .await
             .unwrap();
         assert!(notes.iter().any(|n| n.contains("hit your usage limit")), "{notes:?}");
+    }
+}
+
+#[cfg(test)]
+mod progress_poll_tests {
+    //! #193：終端側的安全網讀 DB 一時失敗，不能當成「回合沒了」就收手。故障用改表名／trigger 注入；poller 的輪詢只對
+    //! 這幾個 run 調快（[`fast`]），每一輪讀 DB 之前的 `progress_poll` 注入點讓故障確定落在某一輪、下一輪恢復。
+    use super::*;
+    use crate::lifecycle::race_point;
+    use crate::testing as tt;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    fn intervals() -> &'static Mutex<HashMap<String, Duration>> {
+        static M: OnceLock<Mutex<HashMap<String, Duration>>> = OnceLock::new();
+        M.get_or_init(Default::default)
+    }
+
+    pub(super) fn interval(run_id: &str) -> Option<Duration> {
+        intervals().lock().ok()?.get(run_id).copied()
+    }
+
+    fn fast(run_id: &str) {
+        intervals().lock().unwrap().insert(run_id.to_string(), Duration::from_millis(10));
+    }
+
+    const PONG: &str = "❯ Reply with PONG\n⏺ PONG\n✻ Worked for 5s · done 1:07 AM\n──────\n❯\n";
+    const BUSY: &str = "❯ Reply with PONG\n✢ Baking… (3s · esc to interrupt)\n──────\n❯\n";
+
+    struct F {
+        env: tt::Env,
+        bot_id: String,
+        run_id: String,
+        turn_id: String,
+    }
+
+    /// 一顆在跑的 claude（`pane-p`），一筆在飛、送達 ok 的回合，對話裡是 `prompt`。
+    async fn in_flight(screen: &str, prompt: &str) -> F {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "polled").await;
+        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        let run_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, pane_id, herdr_session, started_at)
+             VALUES (?,?,'running','idle','pane-p','test',?)",
+        )
+        .bind(&run_id)
+        .bind(&bot.id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let turn_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'web','in_flight','ok',?)",
+        )
+        .bind(&turn_id)
+        .bind(&conv)
+        .bind(&run_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO messages (id, conversation_id, turn_id, role, content, source, created_at) VALUES (?,?,?,'user',?,'web',?)")
+            .bind(db::ulid())
+            .bind(&conv)
+            .bind(&turn_id)
+            .bind(prompt)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        env.herdr.set_screen("pane-p", screen);
+        F { env, bot_id: bot.id, run_id, turn_id }
+    }
+
+    async fn unreadable(app: &Arc<App>, table: &str, yes: bool) {
+        let sql = if yes { format!("ALTER TABLE {table} RENAME TO {table}_unreadable") } else { format!("ALTER TABLE {table}_unreadable RENAME TO {table}") };
+        sqlx::query(&sql).execute(&app.db).await.unwrap();
+    }
+
+    /// 還沒恢復才恢復（注入點可能走到、也可能沒走到）。
+    async fn readable_again(app: &Arc<App>, table: &str) {
+        let _ = sqlx::query(&format!("ALTER TABLE {table}_unreadable RENAME TO {table}")).execute(&app.db).await;
+    }
+
+    /// 這一輪（`progress_poll`）先跑 `now`，下一輪跑 `next` 並通知測試。poller 在這一輪之後就退出的話，永遠等不到通知。
+    fn this_poll_then_next<A, AF, B, BF>(run_id: &str, now: A, next: B) -> tokio::sync::oneshot::Receiver<()>
+    where
+        A: FnOnce() -> AF + Send + 'static,
+        AF: std::future::Future<Output = ()> + Send + 'static,
+        B: FnOnce() -> BF + Send + 'static,
+        BF: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let run = run_id.to_string();
+        race_point::arm("progress_poll", run_id, move || async move {
+            now().await;
+            race_point::arm("progress_poll", &run, move || async move {
+                next().await;
+                let _ = tx.send(());
+            });
+        });
+        rx
+    }
+
+    async fn still_polled_after(rx: tokio::sync::oneshot::Receiver<()>) {
+        tokio::time::timeout(Duration::from_secs(10), rx)
+            .await
+            .expect("讀錯之後 poller 應該還在：下一輪沒有來，它在讀錯那一輪就退出了")
+            .unwrap();
+    }
+
+    async fn status(app: &Arc<App>, turn_id: &str) -> String {
+        sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(turn_id).fetch_one(&app.db).await.unwrap()
+    }
+
+    async fn pollers(app: &Arc<App>, run_id: &str) -> Option<bool> {
+        app.progress_pollers.lock().await.get(run_id).map(|h| h.is_finished())
+    }
+
+    async fn wait_for_status(app: &Arc<App>, turn_id: &str, want: &str) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while status(app, turn_id).await != want {
+            assert!(std::time::Instant::now() < deadline, "回合沒有變成 {want}（pane 閒著、沒有 Stop hook，閒置備援應該收掉它）");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    async fn wait_until_poller_gone(app: &Arc<App>, run_id: &str) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while pollers(app, run_id).await.is_some() {
+            assert!(std::time::Instant::now() < deadline, "回合收掉了，poller 應該退出");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// 驗收 1、2：某一輪讀 `in_flight_turn` 失敗（SQLite busy／I/O error），一輪之後 DB 恢復——poller 還活著；之後 pane
+    /// 閒著、沒有 Stop hook，閒置備援照樣把回合收掉。以前讀錯＝`still=false`＝退出，那一回合從此沒人收。
+    #[tokio::test]
+    async fn a_transient_in_flight_read_error_does_not_end_the_poller() {
+        let f = in_flight(PONG, "Reply with PONG").await;
+        let app = f.env.app.clone();
+        fast(&f.run_id);
+        let (a, b) = (app.clone(), app.clone());
+        let rx = this_poll_then_next(&f.run_id, move || async move { unreadable(&a, "turns", true).await }, move || async move {
+            unreadable(&b, "turns", false).await
+        });
+        arm_progress(&app, &f.run_id, &f.bot_id, &f.turn_id).await;
+        still_polled_after(rx).await;
+
+        wait_for_status(&app, &f.turn_id, "completed_fallback").await;
+        let reply: String = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='assistant'")
+            .bind(&f.turn_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(reply, "PONG");
+        wait_until_poller_gone(&app, &f.run_id).await;
+    }
+
+    /// 驗收 3：讀到了、確定不是這一回合（`Ok(None)`）才停。
+    #[tokio::test]
+    async fn the_poller_stops_once_the_turn_is_really_closed() {
+        let f = in_flight(BUSY, "Reply with PONG").await;
+        let app = f.env.app.clone();
+        fast(&f.run_id);
+        let rx = this_poll_then_next(&f.run_id, || async {}, || async {});
+        arm_progress(&app, &f.run_id, &f.bot_id, &f.turn_id).await;
+        still_polled_after(rx).await;
+        assert_eq!(pollers(&app, &f.run_id).await, Some(false), "回合還在飛：poller 在跑");
+
+        sqlx::query("UPDATE turns SET status='completed', completed_at=? WHERE id=?").bind(db::now()).bind(&f.turn_id).execute(&app.db).await.unwrap();
+        wait_until_poller_gone(&app, &f.run_id).await;
+    }
+
+    /// 驗收 4：讀 `runs` 一時失敗一樣重讀，不退出；恢復之後還是同一個 poller。
+    #[tokio::test]
+    async fn a_transient_run_read_error_does_not_end_the_poller() {
+        let f = in_flight(BUSY, "Reply with PONG").await;
+        let app = f.env.app.clone();
+        fast(&f.run_id);
+        let (a, b) = (app.clone(), app.clone());
+        let rx = this_poll_then_next(&f.run_id, move || async move { unreadable(&a, "runs", true).await }, move || async move {
+            unreadable(&b, "runs", false).await
+        });
+        arm_progress(&app, &f.run_id, &f.bot_id, &f.turn_id).await;
+        still_polled_after(rx).await;
+        assert_eq!(pollers(&app, &f.run_id).await, Some(false));
+        assert_eq!(app.progress_pollers.lock().await.len(), 1, "沒有多出第二個 poller");
+    }
+
+    /// 驗收 4：掛上的那一刻讀不到 bot，以前 poller 直接不開始；現在下一輪再讀。
+    #[tokio::test]
+    async fn a_bot_that_cannot_be_read_when_the_poller_starts_is_read_again() {
+        let f = in_flight(BUSY, "Reply with PONG").await;
+        let app = f.env.app.clone();
+        fast(&f.run_id);
+        unreadable(&app, "bots", true).await;
+        let b = app.clone();
+        // 第一輪 bot 還讀不到，第二輪之前恢復。
+        let rx = this_poll_then_next(&f.run_id, || async {}, move || async move { unreadable(&b, "bots", false).await });
+        arm_progress(&app, &f.run_id, &f.bot_id, &f.turn_id).await;
+        still_polled_after(rx).await;
+        let again = this_poll_then_next(&f.run_id, || async {}, || async {});
+        still_polled_after(again).await;
+        assert_eq!(pollers(&app, &f.run_id).await, Some(false));
+        assert_eq!(app.progress_pollers.lock().await.len(), 1);
+    }
+
+    /// 開始新回合時上一回合的錯誤標記清不掉（寫入失敗）：poller 之後再清。留著的話，這一回合斷在同一句錯誤上會被
+    /// `turn_error::capture` 的「同一則只記一次」吞掉。
+    #[tokio::test]
+    async fn the_previous_turns_error_is_cleared_once_the_write_goes_through() {
+        let f = in_flight(BUSY, "Reply with PONG").await;
+        let app = f.env.app.clone();
+        fast(&f.run_id);
+        sqlx::query("UPDATE runs SET turn_error='API Error: Connection lost mid-response.' WHERE id=?").bind(&f.run_id).execute(&app.db).await.unwrap();
+        sqlx::query(
+            "CREATE TRIGGER refuse_clear BEFORE UPDATE OF turn_error ON runs WHEN NEW.turn_error IS NULL
+             BEGIN SELECT RAISE(ABORT, 'injected: cannot clear runs.turn_error'); END",
+        )
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let a = app.clone();
+        let rx = this_poll_then_next(&f.run_id, move || async move { sqlx::query("DROP TRIGGER refuse_clear").execute(&a.db).await.unwrap(); }, || async {});
+        arm_progress(&app, &f.run_id, &f.bot_id, &f.turn_id).await;
+        still_polled_after(rx).await;
+        let left: Option<String> = sqlx::query_scalar("SELECT turn_error FROM runs WHERE id=?").bind(&f.run_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(left, None, "寫得進去之後就清掉了");
+    }
+
+    /// 備援收回合之前讀不到送了什麼：不收（回合留在飛），不把我們自己的 prompt 當成 agent 的回覆存下來。
+    #[tokio::test]
+    async fn a_fallback_that_cannot_read_what_was_sent_closes_nothing() {
+        let f = in_flight(PONG, "Reply with PONG").await;
+        let app = f.env.app.clone();
+        unreadable(&app, "messages", true).await;
+        // 讀完「送了什麼」之後 DB 就恢復：接著寫得進去的話，錯的回覆就真的存下來了。
+        let a = app.clone();
+        race_point::arm("fallback_after_echo", &f.turn_id, move || async move { readable_again(&a, "messages").await });
+
+        let first = {
+            let lock = app.bot_lock(&f.bot_id).await;
+            let _g = lock.lock().await;
+            try_fallback(&app, &f.run_id).await
+        };
+        assert!(first.is_err(), "讀不到送了什麼是錯，不是「什麼都沒送」：{first:?}");
+        assert_eq!(status(&app, &f.turn_id).await, "in_flight");
+        readable_again(&app, "messages").await;
+
+        assert!(try_fallback(&app, &f.run_id).await.unwrap(), "讀得到了：照常收");
+        let reply: String = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='assistant'")
+            .bind(&f.turn_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(reply, "PONG");
     }
 }
 

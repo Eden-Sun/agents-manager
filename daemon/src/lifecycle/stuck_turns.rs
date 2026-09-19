@@ -171,7 +171,7 @@ pub(crate) async fn sweep_at(app: &Arc<App>, host: Option<&str>, now: Instant, t
 /// 收一筆。`Ok(false)`：CAS 沒搶到（別的路剛好收掉了）。
 async fn close_locked(app: &Arc<App>, run: &db::Run, turn: &db::Turn, idle: Duration) -> anyhow::Result<bool> {
     let Some(bot) = db::bot(&app.db, &run.bot_id).await? else { return Ok(false) };
-    let reply = proven_reply(app, &bot, run, turn).await;
+    let reply = proven_reply(app, &bot, run, turn).await?;
     let already_answered: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM messages WHERE turn_id = ? AND role = 'assistant')")
             .bind(&turn.id)
@@ -210,22 +210,29 @@ async fn close_locked(app: &Arc<App>, run: &db::Run, turn: &db::Turn, idle: Dura
 }
 
 /// 讀 transcript／rollout 尾端：我們送的 prompt 之後，agent 有沒有完整回完。本機 claude／codex 才讀得到。
-async fn proven_reply(app: &Arc<App>, bot: &db::Bot, run: &db::Run, turn: &db::Turn) -> Option<String> {
-    if db::bot_host(&app.db, &bot.id).await.ok()? != LOCAL_HOST {
-        return None;
+///
+/// 讀不到主機、讀不到送了什麼都回錯（#193），這一輪不收、下一輪再看：以前當成「證不出回覆」，照樣收成
+/// `completed_fallback`，transcript 裡那份完整的回覆就沒存。
+async fn proven_reply(app: &Arc<App>, bot: &db::Bot, run: &db::Run, turn: &db::Turn) -> anyhow::Result<Option<String>> {
+    if db::bot_host(&app.db, &bot.id).await? != LOCAL_HOST {
+        return Ok(None);
     }
-    let mut sent = turn_echo_texts(app, &turn.id).await;
+    let mut sent = turn_echo_texts(app, &turn.id).await?;
     if let Some(p) = turn.prompt_text.as_deref().filter(|p| !p.trim().is_empty()) {
         sent.push(p.to_string());
     }
     if sent.is_empty() {
-        return None;
+        return Ok(None);
     }
+    Ok(logged_reply(app, bot, run, &sent).await)
+}
+
+async fn logged_reply(app: &Arc<App>, bot: &db::Bot, run: &db::Run, sent: &[String]) -> Option<String> {
     match bot.kind.as_str() {
         "claude" => {
             let path = std::path::PathBuf::from(run.transcript_path.as_deref().filter(|p| !p.trim().is_empty())?);
             let log = tokio::task::spawn_blocking(move || read_tail(&path, LOG_TAIL_BYTES)).await.ok()??;
-            claude_reply_after(&log, &sent)
+            claude_reply_after(&log, sent)
         }
         "codex" => {
             let home = codex_home(app, bot).await?;
@@ -236,7 +243,7 @@ async fn proven_reply(app: &Arc<App>, bot: &db::Bot, run: &db::Run, turn: &db::T
             })
             .await
             .ok()??;
-            codex_reply_after(&log, &sent)
+            codex_reply_after(&log, sent)
         }
         _ => None,
     }
@@ -520,6 +527,30 @@ mod tests {
         let msgs = messages(&app, &f.turn_id).await;
         assert!(msgs.contains(&("assistant".into(), "transcript".into(), "部署完成：pid 42894".into())), "{msgs:?}");
         assert!(!msgs.iter().any(|m| m.0 == "system"), "證得出來就不用解釋");
+    }
+
+    /// #193：收之前讀不到主機（證據要看本機 transcript）：這一輪不收、回錯，下一輪再看。以前當成「證不出回覆」，
+    /// 照樣收成 `completed_fallback`，transcript 裡那份完整的回覆就沒存。
+    #[tokio::test]
+    async fn a_stuck_turn_whose_proof_cannot_be_read_is_left_for_the_next_sweep() {
+        let f = stuck("部署 6b84fa5").await;
+        let app = f.env.app.clone();
+        let path = f.env.dir.join("transcript.jsonl");
+        let log = [claude_user("部署 6b84fa5"), claude_assistant("end_turn", json!([{"type": "text", "text": "部署完成：pid 42894"}]))].join("\n");
+        std::fs::write(&path, log + "\n").unwrap();
+        sqlx::query("UPDATE runs SET transcript_path = ? WHERE id = ?").bind(path.to_string_lossy()).bind(&f.run_id).execute(&app.db).await.unwrap();
+        let run = db::run(&app.db, &f.run_id).await.unwrap().unwrap();
+        let t = turn(&app, &f.turn_id).await;
+
+        sqlx::query("ALTER TABLE projects RENAME TO projects_unreadable").execute(&app.db).await.unwrap();
+        assert!(close_locked(&app, &run, &t, 6 * MIN).await.is_err(), "讀不到主機是錯，不是「證不出來」");
+        sqlx::query("ALTER TABLE projects_unreadable RENAME TO projects").execute(&app.db).await.unwrap();
+        assert_eq!(turn(&app, &f.turn_id).await.status, "in_flight", "這一輪不收");
+
+        assert!(close_locked(&app, &run, &t, 6 * MIN).await.unwrap(), "讀得到了：照常收");
+        assert_eq!(turn(&app, &f.turn_id).await.status, "completed", "transcript 證得出來");
+        let msgs = messages(&app, &f.turn_id).await;
+        assert!(msgs.contains(&("assistant".into(), "transcript".into(), "部署完成：pid 42894".into())), "{msgs:?}");
     }
 
     /// working 或 blocked（等人回答）一律不收，就算計時早就超過；閃一下 working 就重算。
