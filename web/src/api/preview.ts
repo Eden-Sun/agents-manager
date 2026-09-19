@@ -15,9 +15,36 @@ export interface Preview {
   pane_id: string | null
   error: string | null
   started_at: string | null
+  /** v2：`attached` = 接上本機已在跑的 vite（斷開不會 kill 它）；`spawned` = AG Man 自己起的；舊 daemon 沒有＝null。 */
+  source: PreviewSource | null
+  pid: number | null
+  /** v2：這顆 bot 的 vite 目錄候選（依序）。 */
+  candidates: string[]
+  /** v2：別份 checkout 已在跑的 vite；不自動接。 */
+  others: PreviewOther[]
 }
 
-export const PREVIEW_OFF: Preview = { status: 'off', port: null, dir: null, pane_id: null, error: null, started_at: null }
+export type PreviewSource = 'spawned' | 'attached'
+export interface PreviewOther {
+  port: number
+  dir: string
+  pid: number | null
+}
+
+export const PREVIEW_OFF: Preview = {
+  status: 'off',
+  port: null,
+  dir: null,
+  pane_id: null,
+  error: null,
+  started_at: null,
+  source: null,
+  pid: null,
+  candidates: [],
+  others: [],
+}
+
+const posInt = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.floor(v) : null)
 
 const STATUSES: readonly PreviewStatus[] = ['off', 'starting', 'running', 'failed']
 
@@ -35,6 +62,25 @@ export function toPreview(v: unknown): Preview {
     pane_id: optStr(pick(v, 'pane_id')),
     error: optStr(pick(v, 'error')),
     started_at: optStr(pick(v, 'started_at')),
+    source: (() => {
+      const x = pick(v, 'source')
+      return x === 'spawned' || x === 'attached' ? x : null
+    })(),
+    pid: posInt(pick(v, 'pid')),
+    candidates: (() => {
+      const x = pick(v, 'candidates')
+      return Array.isArray(x) ? x.filter((d): d is string => typeof d === 'string' && d !== '') : []
+    })(),
+    others: (() => {
+      const x = pick(v, 'others')
+      if (!Array.isArray(x)) return []
+      return x.flatMap((o) => {
+        if (!isRec(o)) return []
+        const port = posInt(pick(o, 'port'))
+        const dir = optStr(pick(o, 'dir'))
+        return port && dir ? [{ port, dir, pid: posInt(pick(o, 'pid')) }] : []
+      })
+    })(),
   }
 }
 
@@ -47,7 +93,7 @@ export function toPreviewEvent(data: unknown, prev: Preview): Preview {
     status,
     port: status === 'off' ? null : (n.port ?? prev.port),
     error: status === 'failed' ? prev.error : null,
-    ...(status === 'off' ? { pane_id: null, started_at: null } : {}),
+    ...(status === 'off' ? { pane_id: null, started_at: null, source: null, pid: null } : {}),
   }
 }
 
@@ -64,8 +110,15 @@ export async function fetchPreview(botId: string): Promise<Preview> {
   return toPreview(await rawTransport.request('GET', path(botId)))
 }
 
-export async function startPreview(botId: string): Promise<Preview> {
-  return toPreview(await rawTransport.request('POST', path(botId)))
+/** v2 body：`auto`（預設，同目錄有就接、沒有就起）／`attach`（要帶 port）／`spawn`（可帶 dir 挑候選）。 */
+export interface StartPreviewOpts {
+  mode?: 'auto' | 'attach' | 'spawn'
+  port?: number
+  dir?: string
+}
+
+export async function startPreview(botId: string, opts?: StartPreviewOpts): Promise<Preview> {
+  return toPreview(await rawTransport.request('POST', path(botId), opts))
 }
 
 export async function stopPreview(botId: string): Promise<Preview> {

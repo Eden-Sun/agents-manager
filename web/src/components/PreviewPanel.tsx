@@ -3,7 +3,7 @@
  * 狀態來自 store.previews（WS `preview_changed` 即時寫入）；進來與 daemon 重連時 GET 一次補齊 dir／error。
  */
 import { useCallback, useEffect, useState } from 'react'
-import { fetchPreview, previewApiMissing, PREVIEW_API_MISSING, previewUrl, startPreview, stopPreview, PREVIEW_OFF, type Preview } from '../api/preview'
+import { fetchPreview, type StartPreviewOpts, previewApiMissing, PREVIEW_API_MISSING, previewUrl, startPreview, stopPreview, PREVIEW_OFF, type Preview } from '../api/preview'
 import { isMock } from '../api'
 import { ApiError } from '../api/types'
 import { useStore } from '../store/store'
@@ -65,11 +65,11 @@ export function PreviewPanel({ botId }: { botId: string }) {
     }
   }, [botId, connected, setPreview])
 
-  const start = useCallback(async () => {
+  const start = useCallback(async (opts?: StartPreviewOpts) => {
     setPending('start')
     setErr(null)
     try {
-      setPreview(botId, await startPreview(botId))
+      setPreview(botId, await startPreview(botId, opts))
     } catch (e) {
       setErr(startError(e))
     } finally {
@@ -90,6 +90,9 @@ export function PreviewPanel({ botId }: { botId: string }) {
     }
   }, [botId, notify, setPreview])
 
+  // 多個候選目錄時讓使用者挑；沒挑＝不帶 dir，由 daemon 用第一個。
+  const [pickDir, setPickDir] = useState('')
+  const attached = p.source === 'attached'
   const busy = pending !== null
   const url = p.port ? previewUrl(p.port) : null
 
@@ -100,6 +103,9 @@ export function PreviewPanel({ botId }: { botId: string }) {
           <span className="preview-url" title={url}>
             {url}
           </span>
+          <span className="preview-src" title={p.dir ?? undefined}>
+            {attached ? `已接上既有的 vite（port ${p.port}）` : p.source === 'spawned' ? '由 AG Man 啟動' : ''}
+          </span>
           <span className="spacer" />
           <button type="button" className="btn preview-btn" onClick={() => setNonce((n) => n + 1)}>
             重新整理
@@ -107,8 +113,14 @@ export function PreviewPanel({ botId }: { botId: string }) {
           <a className="btn preview-btn" href={url} target="_blank" rel="noreferrer">
             在新分頁開
           </a>
-          <button type="button" className="btn preview-btn" disabled={busy} onClick={() => void stop()}>
-            {pending === 'stop' ? '停止中…' : '停止'}
+          <button
+            type="button"
+            className="btn preview-btn"
+            disabled={busy}
+            title={attached ? '只斷開連結，不會關掉對方的 vite server' : undefined}
+            onClick={() => void stop()}
+          >
+            {pending === 'stop' ? (attached ? '中斷中…' : '停止中…') : attached ? '中斷連接' : '停止'}
           </button>
         </div>
         {err ? (
@@ -173,11 +185,52 @@ export function PreviewPanel({ botId }: { botId: string }) {
               替 {bot ? <b>{bot.name}</b> : '這顆 bot'} 的專案起 vite dev server，畫面直接顯示在這裡。會在 <code>{bot?.cwd ?? '專案目錄'}</code> 或其{' '}
               <code>web/</code> 下找 <code>vite.config.*</code>。
             </p>
+            {p.candidates.length > 1 ? (
+              <label className="preview-pick">
+                目錄
+                <select value={pickDir} onChange={(e) => setPickDir(e.target.value)} disabled={busy}>
+                  {p.candidates.map((d) => (
+                    <option key={d} value={d}>
+                      {d}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : null}
             <div className="preview-actions">
-              <button type="button" className="btn primary" disabled={busy || !connected} onClick={() => void start()}>
+              <button
+                type="button"
+                className="btn primary"
+                disabled={busy || !connected}
+                onClick={() => void start(p.candidates.length > 1 ? { dir: pickDir || p.candidates[0] } : undefined)}
+              >
                 {pending === 'start' ? '啟動中…' : '啟動預覽'}
               </button>
             </div>
+            {p.others.length > 0 ? (
+              <div className="preview-others">
+                <p className="preview-body">
+                  本機還有別的 vite 在跑（另一份 checkout，看到的不是這顆 bot 的程式碼）：
+                </p>
+                <ul>
+                  {p.others.map((o) => (
+                    <li key={o.port}>
+                      <span className="preview-other-dir">
+                        :{o.port} · <code>{o.dir}</code>
+                      </span>
+                      <button
+                        type="button"
+                        className="btn preview-btn"
+                        disabled={busy || !connected}
+                        onClick={() => void start({ mode: 'attach', port: o.port })}
+                      >
+                        還是接這個
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
           </>
         )}
         {err ? (
