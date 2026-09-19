@@ -98,6 +98,12 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   協調者補送 `supervisor_inbox.notify_next_at`、總管看門狗 `supervisors.watchdog_next_at`、hook 事件 `hook_events.next_attempt_at`。
   記憶體 timer 只是加速：重啟後由 `reconcile::rearm_progress`（含 `rearm_queue_retries`）、總管 tick、
   `herdr_maintenance::arm_on_startup` 與 `hook_inbox` 的 worker 依 DB 重掛或掃回來，重掛是冪等的（同一顆 bot 只會有一個 timer）。
+  **開機的一次性恢復讀不到不算做完**（#75 重開）：總管 tick 與 hook worker 本來就週期性地掃；只跑一次的兩個——
+  `rearm_progress`（in-flight 回合的 poller／stall watchdog、送到一半的收成 `unknown`、排隊 prompt 的 timer、沒掛上 run 的
+  插隊送出、已結束 run 上還在飛的回合）與 `arm_on_startup`——任何一部分讀寫不到就把**欠著的那幾件**記下來，背景照
+  2、5、15、30 秒、之後每分鐘重試到做完。做完的不再碰（每個 run 的 poller／watchdog 只掛一次）；重啟之後才開始的 run、
+  之後才建立的插隊送出、之後才結束的 run 是這個行程自己的帳，重試不碰；重試走到某個 run 時先拿那顆 bot 的鎖、先結清這個
+  行程欠著的送達結果（#149 的帳），已經有 poller 盯著的 run 不再掛一次。
   `GET /api/supervisor/health` 的 `due_actions` 把這六處讀成同一份摘要，供觀測 pending／failing（數字是 SQL 聚合算的，
   不吃列表上限；`items` 是有界的樣本，`items_truncated` 說有沒有列完）。
   **執行端刻意不統一**（issue #97）：三個執行者對應三種延遲與鎖的需求——總管 tick 10 秒輪詢（交辦重送／等額度／

@@ -402,7 +402,7 @@ mod tests {
         forget_queue_retry_timer(&bot.id);
 
         let app = tt::restart_app(&e).await;
-        assert!(rearm_queue_retries(&app).await >= 1, "開機接回排著的 prompt");
+        assert!(rearm_queue_retries(&app).await.unwrap() >= 1, "開機接回排著的 prompt");
         assert!(queue_retry_timer_armed(&bot.id));
         forget_queue_retry_timer(&bot.id); // 那個 timer 燒起來做的就是下面這一步
         flush_queued_locked(&app, &bot.id).await.unwrap();
