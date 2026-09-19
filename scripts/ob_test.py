@@ -209,7 +209,9 @@ class QueueTests(unittest.TestCase):
             seen.update(json.loads(kw["stdin"].split("globalThis.CONSULT_ARGS = ", 1)[1].split(";\n", 1)[0]))
             return (0, '{"result":"ok"}', "")
 
-        with patch.object(operator, "run_process", side_effect=fake):
+        # 派送前 browser_consult 會查行程表有沒有 ego lite；CI 的 runner 沒有，假 dispatch 就永遠沒被呼叫。
+        with patch.object(operator, "ego_lite_running", return_value=True), \
+                patch.object(operator, "run_process", side_effect=fake):
             cfg = dict(claude_config_dir=str(Path.home() / ".claude"), claude_binary="/fake/claude", ego_binary="/fake/ego")
             with self.assertRaises(OBError):
                 operator.browser_consult(self.s, b["id"], cfg, token=token)
