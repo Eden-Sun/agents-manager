@@ -510,7 +510,15 @@ fn claude_settings(hook_cmd: &str, statusline: &str, wants_remote: bool) -> Valu
         // 只寫進 daemon 注入的 `--settings` 檔，使用者自己終端的 `~/.claude*/settings.json` 不受影響；
         // 2.1.275 以前的 claude 不認得這兩個鍵，一律靜靜忽略。
         "syncClaudeAiSkills": false,
-        "syncClaudeAiPlugins": false
+        "syncClaudeAiPlugins": false,
+        // issue #206：claude 2.1.277 起，專案沒有 CLAUDE.md 時改讀 AGENTS.md——內建 plugin `agents-md` 的 `instructionFiles`
+        // （`/config` 裡的「Project instructions」），預設 `claude-md-or-agents-md`，開不開由伺服器端旗標 `tengu_agents_md_mod`
+        // 放量（同一台機器上 2.1.276 開著、2.1.278 關著）。同一個 project 常同時有 codex bot，`AGENTS.md` 是寫給 codex 的：
+        // bot 讀哪份指示檔要由 daemon 決定，不因 CLI 升級或放量悄悄換檔——釘在 `claude-md`（跟 2.1.277 以前一樣只讀 CLAUDE.md）。
+        // plugin 的選項只從 user／`--settings`／managed settings 讀（專案層的 settings 不讀），鍵認 `agents-md` 與 `agents-md@builtin`。
+        // 2.1.276 的舊選項 `projectInstructions` 預設本來就是只讀 CLAUDE.md，不另外寫（新版兩個都寫會印一行提示）；更舊的
+        // 版本沒有這個 plugin，這一格沒人讀、不影響啟動。
+        "pluginConfigs": {"agents-md@builtin": {"options": {"instructionFiles": "claude-md"}}}
     })
 }
 
@@ -1631,6 +1639,22 @@ mod claude_settings_tests {
             let v = claude_settings("hook", "sl", wants_remote);
             assert_eq!(v["syncClaudeAiSkills"], json!(false), "wants_remote={wants_remote}");
             assert_eq!(v["syncClaudeAiPlugins"], json!(false), "wants_remote={wants_remote}");
+        }
+    }
+
+    /// issue #206：claude 2.1.277 起，沒有 CLAUDE.md 的專案會改讀 AGENTS.md（寫給同一個 project 裡 codex bot 的那份）。
+    /// managed pane 讀哪份指示檔由 daemon 釘住：`agents-md` plugin 的 `instructionFiles` 固定 `claude-md`，值必須是 CLI 認得的
+    /// 那幾個之一——認不得的值 CLI 會退回預設（`claude-md-or-agents-md`），等於沒釘。
+    #[test]
+    fn managed_panes_pin_the_project_instructions_to_claude_md() {
+        // 2.1.277／2.1.278 binary 裡 `instructionFiles` 的 options。
+        const KNOWN: [&str; 4] = ["claude-md", "claude-md-or-agents-md", "claude-md-and-agents-md", "managed-only"];
+        for wants_remote in [false, true] {
+            let v = claude_settings("hook", "sl", wants_remote);
+            let options = &v["pluginConfigs"]["agents-md@builtin"]["options"];
+            assert_eq!(options["instructionFiles"], json!("claude-md"), "wants_remote={wants_remote}");
+            assert!(KNOWN.contains(&options["instructionFiles"].as_str().unwrap()));
+            assert!(options.get("projectInstructions").is_none(), "舊選項不寫：新版兩個都有時會在畫面上提示一行 (wants_remote={wants_remote})");
         }
     }
 

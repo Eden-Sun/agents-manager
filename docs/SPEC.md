@@ -271,6 +271,22 @@ resend／排隊機制決定（`stuck_turns.rs`），不讓 CLI 自己另開一�
 而 §4.4a 的 context／額度判斷都假設環境由 daemon 決定；而且帳號是共用的（cc0／cc1／cc2…），一個人在網站上開一個 skill 會
 同時改掉所有用那個帳號的 bot。這只寫進 daemon 注入的 `--settings`，使用者自己終端的 `~/.claude*/settings.json` 不受影響；
 子 agent（`managed_by='child'`）目前沒有 `--settings`，管不到，那是另一個題目。
+還有 `pluginConfigs: {"agents-md@builtin": {"options": {"instructionFiles": "claude-md"}}}`（issue #206，claude **2.1.277** 起）：
+2.1.277 起，專案沒有 CLAUDE.md 時 claude 會改讀 AGENTS.md——內建 plugin `agents-md` 的 `instructionFiles`（`/config` 的「Project instructions」），
+可選 `claude-md`／`claude-md-or-agents-md`（**預設**）／`claude-md-and-agents-md`／`managed-only`。開不開由伺服器端旗標 `tengu_agents_md_mod`
+放量（2026-09-19 同一台機器上 2.1.276 開著、2.1.278 關著），也就是**升級或放量會在 daemon 不知情時換掉 bot 讀的指示檔**。同一個 project 常同時有
+codex bot，AGENTS.md 是寫給 codex 的（`codex fork`、sandbox／approval 的說法），所以釘在 `claude-md`＝維持 2.1.277 以前的行為（理由同 #102：
+升級不該改變 bot 讀到的指示）。plugin 的選項只從 user／`--settings`／managed settings 讀（**專案層 settings 不讀**），鍵認 `agents-md` 或
+`agents-md@builtin`；值不在上面四個裡時 CLI 退回預設（等於沒釘），所以單元測試照 binary 的 enum 驗值。2.1.276 的舊選項 `projectInstructions`
+（`claude` 預設／`agents-fallback`／`both`／`none`）預設本來就只讀 CLAUDE.md，不另外寫——新版兩個都設時會印一行「remove projectInstructions」；
+更舊的版本沒有這個 plugin，這一格沒人讀（2.1.276 實測帶著這包照常啟動、沒有警告）。
+要讓某顆 claude 跟 codex 共用 AGENTS.md，應該做成 bot 層級的設定（不做全域開關），另開 issue。
+這個 plugin 的提示（2.1.276 通知列 10 秒的 toast「This project has AGENTS.md but no CLAUDE.md; …」、2.1.277 起改讀時的 log
+「no CLAUDE.md found; AGENTS.md loaded: …」）在 `capture::claude::is_noise` 一律當雜訊，不會被 §4.3 備援收進回覆。
+**要在真機驗的**（旗標放量到這台、或下一次升級時）：在一個只有 `AGENTS.md` 的拋棄式專案起一顆 managed claude bot，`--debug-file` 要看到
+`plugin.register: agents-md (builtin, agents-md@builtin) … admitted`、**看不到** `no CLAUDE.md found; AGENTS.md loaded`，`/memory` 列的指示檔裡沒有
+AGENTS.md；同時抓一次畫面，確認 toast／log 實際畫在哪（`screen.rs` 的 fixture 目前照推測放了兩種位置）。鍵名或 enum 換了（2.1.276→2.1.277
+就換過一次）要跟著改這一格與單元測試。
 
 **Codex**：`-c notify=["/abs/agents-managerd","hook","codex","--bot",…,"--token",…,"--port",…]`；argv 最後一個參數是 JSON
 `{"type":"agent-turn-complete","thread-id","turn-id","cwd","input-messages","last-assistant-message"}`。使用者原本的 `notify` 在此實例被覆蓋。
