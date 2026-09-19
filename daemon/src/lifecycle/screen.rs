@@ -266,7 +266,20 @@ fn echo_continuation<'a>(kind: &str, line: &'a str) -> Option<&'a str> {
 
 /// Is this line TUI chrome (banner, boxes, rules, status bar, spinner) rather than content?
 pub(crate) fn is_noise(s: &str) -> bool {
-    crate::capture::claude::PARSER.noise_line(s)
+    crate::capture::claude::PARSER.noise_line(s) || is_codex_status_row(s)
+}
+
+/// codex 狀態列：`gpt-… · <cwd> · Context … · 5h … left`。0.155.1 還沒跑完一回合時只有
+/// `gpt-… · <cwd>`，舊規則要 `Context`／`left` 才認，完成時間行就不在回覆尾巴（#207 真畫面）。
+fn is_codex_status_row(s: &str) -> bool {
+    let s = s.trim();
+    let Some((head, rest)) = s.split_once('·') else { return false };
+    let model = head.split_whitespace().next().unwrap_or("");
+    if !model.contains('-') {
+        return false;
+    }
+    let rest = rest.trim();
+    rest.starts_with('/') || rest.starts_with('~') || rest.contains("Context") || rest.contains("% left")
 }
 
 /// Codex empty-composer placeholder `› Ask Codex to do anything` — looks like an echo, isn't one.
@@ -787,8 +800,8 @@ pub(crate) fn clean_screen(kind: &str, text: &str) -> Option<String> {
         if is_noise(s) || is_activity_shape(s) || (grok && is_grok_noise(s)) {
             continue;
         }
-        // An empty prompt box means the transcript ended.
-        if s == "❯" || s == "›" {
+        // Prompt box means the transcript ended. Codex's composer is unboxed `› …`（佔位字不是空的 `›`）。
+        if s == "❯" || s == "›" || s.starts_with("❯ ") || s.starts_with("› ") {
             break;
         }
         let s = s.strip_prefix("⎿ ").or_else(|| s.strip_prefix("⎿")).unwrap_or(s).trim();
@@ -836,7 +849,12 @@ pub(crate) fn extract_reply(kind: &str, text: &str) -> Option<String> {
         let t = line.trim_end();
         let s = t.trim_start();
         // Stop at the input box / horizontal rule drawn below the transcript.
-        if s.starts_with('╭') || s.starts_with('│') || s.starts_with('╰') || s.starts_with('▔') {
+        // Codex has no frame: the composer is an unboxed `›` row（#207 真畫面：不在這裡停的話，
+        // 沒有 Context 的狀態列會留在尾巴，完成時間行就剝不掉）。
+        if s.starts_with('╭') || s.starts_with('│') || s.starts_with('╰') || s.starts_with('▔')
+            || s.starts_with('›')
+            || s.starts_with('❯')
+        {
             break;
         }
         if !s.is_empty() && s.chars().all(|c| c == '─' || c == '━' || c == '-' || c == '=' || c == '_') {
@@ -1891,29 +1909,44 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
 }
 
 
-/// #207：codex 0.155 的畫面。**不是實抓**——照 codex rust-v0.155.0 的原始碼與它自己的 snapshot 組出來的（完成行：
-/// `tui/src/history_cell/separators.rs`、`chatwidget/snapshots/*completion_after_plain_answer.snap`；狀態列：
-/// `tui/src/status_indicator_widget.rs`）。升級之前照 SPEC §4.3「codex 0.155」的步驟實抓，換成 `fixtures/codex-0.155-*.txt`。
+/// #207：codex 0.155.1 真畫面（SPEC §4.3）。私有 prefix 的 0.155.1、拋棄式 `CODEX_HOME`、
+/// AG Man 不會認領的 pane。`idle`／`working` 是 live TUI；`working-summary` 是
+/// `-c model_reasoning_summary="concise"`（字頭仍是 `Working`：帳號撞限，summary 還沒流出）。
+/// `finished` 是 resume 已成功回合，完成行 `  done Aug 2 at 3:00 AM`（別天、duration 3.5s 所以沒有
+/// `Worked for`）。解析器對其他完成行格式的覆蓋仍用下面 `COMPLETIONS`。
 #[cfg(test)]
 mod codex_0155_screen_tests {
     use super::*;
 
+    const IDLE: &str = include_str!("fixtures/codex-0.155-idle.txt");
+    const IDLE_ANSI: &str = include_str!("fixtures/codex-0.155-idle.ansi");
+    const WORKING: &str = include_str!("fixtures/codex-0.155-working.txt");
+    const WORKING_ANSI: &str = include_str!("fixtures/codex-0.155-working.ansi");
+    const WORKING_SUMMARY: &str = include_str!("fixtures/codex-0.155-working-summary.txt");
+    const WORKING_SUMMARY_ANSI: &str = include_str!("fixtures/codex-0.155-working-summary.ansi");
+    const FINISHED: &str = include_str!("fixtures/codex-0.155-finished.txt");
+    const FINISHED_ANSI: &str = include_str!("fixtures/codex-0.155-finished.ansi");
+
     const FOOTER: &str = "  gpt-6-astra low · ~/project/agents-manager · Context 3% used · 5h 82% left · weekly 97% left";
 
-    /// 回合剛成功結束：回覆、空一行、完成時間、空一行、空框、狀態列。
-    fn finished(completion: &str) -> String {
-        format!("› Reply with PONG\n\n• PONG\n\n  {completion}\n\n› Ask Codex to do anything\n\n{FOOTER}\n")
+    /// 真畫面的 footer 沒有 `Context` 時，補上一行有 Context 的狀態列，用來回歸「最後一行勝」。
+    fn with_context_footer(screen: &str) -> String {
+        let mut out = screen.trim_end().to_string();
+        if let Some(pos) = out.rfind('\n') {
+            let last = &out[pos + 1..];
+            if last.contains("gpt-") && last.contains('·') && !last.contains("Context") {
+                out.push_str(" · Context 3% used · 5h 82% left · weekly 97% left");
+            }
+        }
+        out.push('\n');
+        out
     }
 
-    /// 回合中：狀態列的字頭是 `header`（預設 `Working`，summary 開著時是 summary 的最新一行）。
-    fn thinking(header: &str) -> String {
-        format!("› Reply with PONG\n\n• {header} (12s • esc to interrupt)\n\n› Ask Codex to do anything\n\n{FOOTER}\n")
-    }
-
-    const COMPLETIONS: [&str; 6] = [
+    const COMPLETIONS: [&str; 7] = [
         "done 3:24 PM",
         "Worked for 2m 5s · done 3:24 PM",
         "done Sep 6 at 2:32 PM",
+        "done Aug 2 at 3:00 AM", // 真畫面
         "Worked for 1h 2m 3s · done Sep 6, 2000 at 2:32 PM",
         "Worked for 2m 5s",
         "Worked for 2m 5s · done 12:05 AM · Local tools: 2 calls (1.2s)",
@@ -1943,16 +1976,14 @@ mod codex_0155_screen_tests {
         }
     }
 
-    /// 回合剛結束的畫面：切出來的回覆不帶時間戳（extract_reply 與沒有標記時的 clean_screen 都是）。
+    /// 真畫面回合剛結束：切出來的回覆不帶時間戳。
     #[test]
-    fn the_completion_line_is_not_part_of_the_reply() {
-        for c in COMPLETIONS {
-            let screen = finished(c);
-            assert_eq!(extract_reply("codex", &screen).as_deref(), Some("PONG"), "{c}");
-            let cleaned = clean_screen("codex", &screen).unwrap();
-            assert!(!cleaned.contains("done") && !cleaned.contains("Worked for"), "{c} → {cleaned:?}");
-            assert!(cleaned.contains("PONG"));
-        }
+    fn the_real_finished_screen_does_not_keep_the_completion_line_in_the_reply() {
+        assert!(FINISHED.contains("  done Aug 2 at 3:00 AM"), "fixture 要有真的完成行");
+        assert_eq!(extract_reply("codex", FINISHED).as_deref(), Some("CODEX OK"));
+        let cleaned = clean_screen("codex", FINISHED).unwrap();
+        assert!(!cleaned.contains("done") && !cleaned.contains("Worked for"), "{cleaned:?}");
+        assert!(cleaned.contains("CODEX OK"));
     }
 
     /// 只剝回覆**尾巴**那一行：回覆中間剛好有一行長得一樣的字（codex 自己的測試就有）照留。
@@ -1962,33 +1993,54 @@ mod codex_0155_screen_tests {
         assert_eq!(extract_reply("codex", &screen).as_deref(), Some("It finished:\n  done 3:24 PM\n  and then it stopped."));
     }
 
-    /// 字頭換成 reasoning summary、壓縮中、狀態列後面接訊息、中斷鍵改綁，都還是忙；結束的畫面、工具結果不是。
+    /// 真畫面回合中是忙的；summary 開著時字頭在撞限前仍是 `Working`。結束／閒置不是。
+    /// 字頭換成 summary／壓縮中／中斷鍵改綁：疊在真畫面的狀態列結構上驗。
     #[test]
-    fn a_status_row_is_busy_whatever_its_header_says() {
-        for header in ["Working", "Planning the fix for the poller", "Compacting context", "Reading `screen.rs` (again)"] {
-            assert!(pane_still_busy(&thinking(header)), "{header}");
+    fn a_status_row_is_busy_on_the_real_working_screens() {
+        assert!(pane_still_busy(WORKING), "summary 關");
+        assert!(pane_still_busy(WORKING_SUMMARY), "summary 開、字頭仍 Working");
+        assert!(!pane_still_busy(FINISHED));
+        assert!(!pane_still_busy(IDLE));
+        for header in ["Planning the fix for the poller", "Compacting context", "Reading `screen.rs` (again)"] {
+            let screen = WORKING.replace("Working (0s • esc to interrupt)", &format!("{header} (12s • esc to interrupt)"));
+            assert!(pane_still_busy(&screen), "{header}");
         }
         assert!(pane_still_busy("• Reviewing the diff (1m 05s • esc to interrupt) · 2 background terminals running\n"));
         assert!(pane_still_busy("• Reviewing (1h 02m 03s • ctrl + c to interrupt)\n"), "中斷鍵改綁");
-        for c in COMPLETIONS {
-            assert!(!pane_still_busy(&finished(c)), "回合結束的畫面不是忙：{c}");
-        }
         assert!(!pane_still_busy("• Ran cargo test (4 passed)\n"), "工具結果不是狀態列");
         assert!(!pane_still_busy("• The fix (see above • done) is in.\n"));
     }
 
-    /// 狀態列的模型／強度／context 與額度照讀（summary 裡剛好有 `Context`、`5h … left` 也不會蓋掉最底下那一行）；
-    /// 框還是在同一個地方。
+    /// 票上「回合中 box_state = Unready」是錯的：真畫面回合中輸入框一直在，ansi 判 Empty。
+    #[test]
+    fn box_state_on_real_0155_screens_is_empty_not_unready() {
+        use crate::lifecycle::{box_state, BoxState};
+        for (name, screen) in [
+            ("idle", IDLE_ANSI),
+            ("working", WORKING_ANSI),
+            ("working-summary", WORKING_SUMMARY_ANSI),
+            ("finished", FINISHED_ANSI),
+        ] {
+            assert_eq!(box_state("codex", screen), BoxState::Empty, "{name}");
+        }
+    }
+
+    /// 真畫面 footer 沒有 `Context`／`% left`（還沒跑完一回合），`parse_status_line` 讀不到是對的。
+    /// 補上 Context 之後照舊讀得到；summary 字頭夾帶 `Context` 也不會蓋掉最底下那一行。
     #[test]
     fn the_status_line_and_the_composer_are_read_as_before() {
-        let noisy = thinking("Checking Context usage against 5h 10% left · weekly 1% left");
-        for screen in [finished("Worked for 2m 5s · done 3:24 PM"), thinking("Planning the fix"), noisy] {
-            let rt = crate::codex_live::parse_status_line(&screen).expect("讀得到狀態列");
-            assert_eq!((rt.model.as_str(), rt.effort.as_deref()), ("gpt-6-astra", Some("low")), "{screen}");
+        assert!(crate::codex_live::parse_status_line(WORKING).is_none(), "真畫面沒有 Context 段");
+        assert!(crate::codex_live::parse_status_quota(WORKING).is_none());
+        let with_ctx = with_context_footer(WORKING);
+        let noisy = with_ctx.replace(
+            "Working (0s • esc to interrupt)",
+            "Checking Context usage against 5h 10% left · weekly 1% left (12s • esc to interrupt)",
+        );
+        for screen in [with_context_footer(FINISHED), with_ctx, noisy] {
+            let rt = crate::codex_live::parse_status_line(&screen).expect("有 Context 就讀得到狀態列");
+            assert!(rt.model.contains("gpt-"), "{screen}");
             let q = crate::codex_live::parse_status_quota(&screen).expect("讀得到額度");
             assert_eq!((q.five_hour_left, q.weekly_left), (Some(82.0), Some(97.0)), "{screen}");
-            let styled = screen.replace("› Ask Codex to do anything", "› \u{1b}[2mAsk Codex to do anything\u{1b}[22m");
-            assert_eq!(crate::lifecycle::box_state("codex", &styled), crate::lifecycle::BoxState::Empty, "{screen}");
         }
     }
 }
