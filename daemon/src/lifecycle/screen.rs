@@ -749,6 +749,53 @@ mod extract_tests {
   ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
 ";
 
+    /// issue #206：claude `agents-md` plugin 的兩種提示——2.1.276 在通知列跳 10 秒的 toast（「This project has AGENTS.md but
+    /// no CLAUDE.md; …」），2.1.277 起改讀 AGENTS.md 時記一行 log（「no CLAUDE.md found; AGENTS.md loaded: …」）。畫面上的確切
+    /// 位置要等伺服器端旗標放量後在真機抓（本機 2.1.278 旗標關著）；這裡放兩種：banner 下方（跟 `⚠ AGENTS.md is over …` 同一區）、
+    /// 以及最容易出事的回覆與輸入框之間。
+    const CLAUDE_AGENTS_MD_NOTICE: &str = "\
+ ▐▛███▛█   Claude Code v2.1.277
+▝▜██████▀  Opus 4.8 · Claude Max
+  ▝▝ ▝▝    ~/project/demo
+
+  no CLAUDE.md found; AGENTS.md loaded: /Users/u/project/demo/AGENTS.md
+  This project has AGENTS.md but no CLAUDE.md; set the agents-md plugin's projectInstructions option to agents-fallback to load it.
+
+❯ Reply with PONG please
+
+⏺ PONG
+
+────────────────────────────────────────────
+❯
+────────────────────────────────────────────
+  u | demo | OPUS | 5h:90%
+  ⏵⏵ bypass permissions on (shift+tab to cycle)
+";
+
+    /// 同一批提示，畫在回覆與輸入框之間（通知列的可能位置）。
+    const CLAUDE_AGENTS_MD_TOAST_UNDER_REPLY: &str = "\
+❯ Reply with PONG please
+
+⏺ PONG
+
+  This project has AGENTS.md but no CLAUDE.md; set the agents-md plugin's projectInstructions option to agents-fallback to load it.
+  no CLAUDE.md found; AGENTS.md loaded: /Users/u/project/demo/AGENTS.md
+────────────────────────────────────────────
+❯
+────────────────────────────────────────────
+";
+
+    /// 那兩行提示不是回覆內容、不是使用者打的字，也不是輸入框——不管畫在 banner 下方還是回覆下方。
+    #[test]
+    fn claude_agents_md_notices_are_neither_the_reply_nor_the_prompt() {
+        for (where_, screen) in [("banner 下方", CLAUDE_AGENTS_MD_NOTICE), ("回覆下方", CLAUDE_AGENTS_MD_TOAST_UNDER_REPLY)] {
+            assert_eq!(extract_reply("claude", screen).as_deref(), Some("PONG"), "{where_}");
+            let cleaned = clean_screen("claude", screen).unwrap_or_default();
+            assert!(!cleaned.contains("AGENTS.md"), "{where_}：{cleaned}");
+            assert_eq!(last_prompt_echo_text("claude", screen).as_deref(), Some("Reply with PONG please"), "{where_}");
+        }
+    }
+
     const CODEX_STARTUP: &str = "\
 ╭────────────────────────────────────────────╮
 │ >_ OpenAI Codex (v0.153.4)                  │
