@@ -827,6 +827,51 @@ test('daemon 帶了人話 message 的可重試錯誤（維護窗口、Esc 送出
 })
 
 /**
+ * #233：daemon 的 409 帶了人話 `message`、但**沒有** `retryable`（登入指令找不到 CLI、default session 的 bot 不給開／關）時，
+ * `reasonText` 只在 `retryable:true` 才用 `message`，通知就成了 `identity_login_unavailable（HTTP 409）` 這種機器代碼。
+ */
+test('身分登入 409 identity_login_unavailable：顯示 daemon 的人話 message，不是機器代碼', async () => {
+  seed()
+  routeDaemon(() =>
+    json({ error: 'conflict', reason: 'identity_login_unavailable', host: 'm4p', identity: 'cc1', kind: 'claude', message: 'CLI 不在 PATH，無法登入' }, 409),
+  )
+  assert.equal(await useStore.getState().loginIdentity('m4p', 'cc1'), false)
+  const texts = noticeTexts()
+  assert.equal(texts.length, 1)
+  assert.match(texts[0], /CLI 不在 PATH/)
+  assert.doesNotMatch(texts[0], /identity_login_unavailable/)
+})
+
+test('啟動撞 409 default_session：顯示 daemon 的人話 message', async () => {
+  seed()
+  routeDaemon(() =>
+    json(
+      {
+        error: 'conflict',
+        reason: 'default_session',
+        bot_id: 'b1',
+        message: '這顆是從你自己的 herdr default session 匯入的，daemon 只觀察、不替它開或關 pane：要重啟請在那個終端裡自己做。',
+      },
+      409,
+    ),
+  )
+  await useStore.getState().startBot('b1')
+  const texts = noticeTexts()
+  assert.match(texts[0], /default session/)
+  assert.doesNotMatch(texts[0], /default_session/)
+})
+
+test('送出撞 409 host_unreadable（沒有 message）：講人話，不是機器代碼', async () => {
+  seed()
+  routeDaemon(() => json({ error: 'conflict', reason: 'host_unreadable', run_id: 'r1', retryable: true, sent: false }, 409))
+  assert.equal(await useStore.getState().sendPrompt('b1', 'x'), false)
+  const texts = noticeTexts()
+  assert.doesNotMatch(texts[0], /host_unreadable/)
+  assert.match(texts[0], /沒送出/)
+  assert.match(texts[0], /主機/)
+})
+
+/**
  * 連點：第一下撤回成功之後，第二下拿到 409（那一則已經是 failed）。以前 `cancelStartingSend`／`abandonTurn` 沒有防連點，
  * 第二下的 409 被說成「撤不回來（可能已經送出）」／原始英文 409——而字明明已經接回輸入框。
  */

@@ -373,6 +373,6 @@ daemon 這幾天把「寫不進 DB」改成 fail closed：外面的副作用做�
 
 - **`503 delivery_state_uncommitted`／`send_now_state_uncommitted` 且 `sent` 不是 `false`＝已送出**：`sendPrompt` 回 `true`（輸入框清掉、排隊的不放回去）、鎖上那一回合、通知「已送出…不要重送」。回 `false` 會讓輸入框留著同一段字、flush 又用新的 client_request_id 送一次（API.md §5）。`sent:false`（herdr 拒收）才維持沒送出。「請 AGM 現在重建」同理，落在「已送出但送達不明」，不說「送給 AGM 失敗」。
 - **插隊送出 200 的 `send_now`**：`interrupted`／`idle` 是成功；`not_sent`＝送出鍵沒生效，這一則沒送出、字可能還留在終端輸入框（輸入框保留、通知指向終端）；`unknown`＝不知道生效沒有，說結果不明、先別重送，不記進行中的本地回合（那一則已是 failed，沒有回合可「放棄」）。不再一律說「claude 太舊、照一般方式送出」。
-- **可重試的 409／503 顯示人話**：`composer_busy`／`resume_unverified`／`transcript_*` 等打字前擋下的 409 有固定說法（沒送出、怎麼辦）；帶 `retryable:true` 與人話 `message` 的（維護窗口、`interrupt_unconfirmed`…）直接顯示 daemon 的 `message`，不顯示 `reason` 代碼。
+- **409／503 顯示人話**：`composer_busy`／`resume_unverified`／`transcript_*`／`host_unreadable` 等打字前擋下的 409 有固定說法（沒送出、怎麼辦）；帶人話 `message` 的（維護窗口、`interrupt_unconfirmed`、`identity_login_unavailable`、`default_session`…）直接顯示 daemon 的 `message`，不顯示 `reason` 代碼——**不論有沒有 `retryable`**：`reason` 是機器 key、`message` 才是給人看的（API.md），以前只有 `retryable:true` 才用 `message`，登入找不到 CLI、default session 的 bot 不給開關這兩條只剩代碼（#233）。
 - **外部 Cargo「測試連線」先存再測**：`POST /api/build/remote/test` 測的是已儲存的設定；表單有沒存的改動就先存，結果寫明測的是 `user@host`。
 - 截圖：`docs/screenshots/remote-cargo-test-saves-first/`。
