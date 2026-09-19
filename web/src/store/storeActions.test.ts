@@ -515,6 +515,22 @@ test('刪 Bot 成功：只跳一張帶「復原」的通知，不重複跳第二
   assert.ok(notices[0].action, '這張通知要帶「復原」')
 })
 
+/** 復原撞名 409：現況 `restoreBot` 吞掉錯誤，通知上按「復原」沒有任何回饋。 */
+test('復原 Bot 失敗：要跳出錯誤，不能靜默什麼都不說', async () => {
+  seed()
+  routeDaemon(() => json({}, 200))
+  await useStore.getState().removeBot('b1')
+  const restore = useStore.getState().notices[0]?.action?.run
+  assert.ok(restore)
+  routeDaemon((r) =>
+    r.path.includes('/restore')
+      ? json({ error: 'conflict', reason: 'bot name already in use in this project', name: 'b1' }, 409)
+      : json({}, 200),
+  )
+  await restore!()
+  assert.match(noticeTexts().join('\n'), /復原失敗：bot name already in use in this project（HTTP 409）/)
+})
+
 /** issue #122：沒在跑的 bot 按送出——交給 daemon 先收下，瀏覽器不留一份、自己也不去按啟動。 */
 test('沒在跑的 bot 送出：帶 start_if_stopped 交給 daemon，瀏覽器不排隊也不自己啟動', async () => {
   seed()
