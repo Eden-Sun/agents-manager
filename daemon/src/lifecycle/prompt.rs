@@ -1902,4 +1902,38 @@ mod send_now_tests {
         assert_eq!(send_now_presses(&f), 1, "補的時候不再按鍵");
     }
 
+    /// 插隊送出欠著收尾時 run 結束了（pane 關了）：run 結束那一路收的是被插隊的那一筆，帳上跟它綁在一起的新那一則不能跟著
+    /// 被忘掉或蓋掉——不然它永遠是 `run_id` 為空的 in_flight＋pending：同一個 request id 重問永遠 503、維護窗口的送達臨界區
+    /// 永遠有它，直到 daemon 重啟。run 結束的當下 DB 好了（收得掉）、還沒好（又記成欠著）各一條。
+    async fn a_run_that_ends_while_a_send_now_is_owed(healed: bool) {
+        let f = fixture("claude", Some("2.1.275")).await;
+        let app = f.env.app.clone();
+        let crid = format!("sn-run-ended-{healed}");
+        let (running, new_turn) = an_owed_send_now(&f, &crid, healed).await;
+        mark_run_exited(&app, &f.run_id, "pane exited").await;
+        if !healed {
+            sqlx::query("DROP TRIGGER lost_close").execute(&app.db).await.unwrap();
+        }
+
+        let again = prompt_send_now(&app, &f.bot_id, "先看這句", &crid, &[], None)
+            .await
+            .unwrap_or_else(|e| panic!("healed={healed}：DB 好了，同一個 request id 要拿到這一則，拿到 {e:?}"));
+        assert_eq!(again.turn_id, new_turn);
+        assert_eq!(status_of(&f, &running).await, "failed", "healed={healed}");
+        assert_eq!(status_of(&f, &new_turn).await, "failed", "healed={healed}：run 不在了，這一則接不上去，也不能一直在飛");
+        assert_eq!(again.delivery, "ok", "healed={healed}");
+        assert!(!crate::supervisor::store::delivery_critical_anywhere(&app.db).await.unwrap(), "healed={healed}：不再佔著送達臨界區");
+        assert_eq!(send_now_presses(&f), 1, "healed={healed}");
+    }
+
+    #[tokio::test]
+    async fn a_run_that_ends_while_a_send_now_is_owed_does_not_orphan_the_new_message() {
+        a_run_that_ends_while_a_send_now_is_owed(true).await;
+    }
+
+    #[tokio::test]
+    async fn a_run_that_ends_while_a_send_now_is_owed_and_the_db_is_still_down_does_not_orphan_the_new_message() {
+        a_run_that_ends_while_a_send_now_is_owed(false).await;
+    }
+
 }
