@@ -399,11 +399,22 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
     let by_name: HashMap<String, &crate::herdr::AgentInfo> =
         agents.iter().filter_map(|a| a.name.clone().map(|n| (n, a))).collect();
 
-    let live_ws: Vec<String> = snapshot
+    let mut live_ws: Vec<String> = snapshot
         .get("workspaces")
         .and_then(|v| v.as_array())
         .map(|a| a.iter().filter_map(|w| w.get("workspace_id").and_then(|s| s.as_str()).map(String::from)).collect())
         .unwrap_or_default();
+    // `workspaces: []` 但 pane 還掛著 workspace_id＝清單暫時是空的，不是 workspace 消失了。
+    // 只看 workspaces 陣列會把專案映射清成 NULL，下次 start 再開一個（舊 pane 變孤兒）。
+    if let Some(panes) = snapshot.get("panes").and_then(|v| v.as_array()) {
+        for p in panes {
+            if let Some(ws) = p.get("workspace_id").and_then(|s| s.as_str()) {
+                if !ws.is_empty() && !live_ws.iter().any(|w| w == ws) {
+                    live_ws.push(ws.to_string());
+                }
+            }
+        }
+    }
     let live_panes: Vec<String> = snapshot
         .get("panes")
         .and_then(|v| v.as_array())
@@ -2972,5 +2983,34 @@ mod compat_tests {
 
         assert_eq!(run_of(&app, &bot).await.unwrap().state, "running");
         assert_eq!(run_of(&app, &ghost).await.unwrap().state, "exited");
+    }
+}
+
+/// snapshot 的 `workspaces` 暫時是空陣列、pane 還掛著那個 workspace_id：不能把專案映射清成 NULL。
+#[cfg(test)]
+mod snapshot_workspace_tests {
+    use crate::db;
+    use crate::testing as tt;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn an_empty_workspaces_array_does_not_clear_a_mapping_still_referenced_by_panes() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, _root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        sqlx::query("UPDATE projects SET workspace_id=? WHERE id=?")
+            .bind(&ws.workspace_id)
+            .bind(&env.project_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        env.herdr.workspaces.lock().unwrap().clear();
+
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+
+        let mapped: Option<String> =
+            sqlx::query_scalar("SELECT workspace_id FROM projects WHERE id=?").bind(&env.project_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(mapped.as_deref(), Some(ws.workspace_id.as_str()), "pane 還在那個 workspace，映射不能清掉");
     }
 }

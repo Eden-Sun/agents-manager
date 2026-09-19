@@ -446,8 +446,8 @@ impl MockHerdr {
                                 .collect();
                             let panes: Vec<Value> = tabs
                                 .iter()
-                                .flat_map(|t| t.panes.iter())
-                                .map(|p| json!({"pane_id": p, "agent": if names.contains(p) { json!("x") } else { Value::Null }}))
+                                .flat_map(|t| t.panes.iter().map(|p| (t.workspace_id.clone(), p.clone())))
+                                .map(|(ws, p)| json!({"pane_id": p, "workspace_id": ws, "agent": if names.contains(&p) { json!("x") } else { Value::Null }}))
                                 .collect();
                             let wss: Vec<Value> = st
                                 .workspaces
