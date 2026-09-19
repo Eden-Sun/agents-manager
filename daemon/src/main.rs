@@ -14,6 +14,7 @@ mod assets;
 mod attach;
 mod bulk_restart;
 mod changelog;
+mod claude_review;
 mod child_alerts;
 mod codex_live;
 mod config;

@@ -1,4 +1,5 @@
 import { useState, type ReactNode } from 'react'
+import * as api from '../api'
 import { inFlightTurn, projectHostName, useStore } from '../store/store'
 import { updateBatchCounts } from '../lib/updateBatch'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -21,6 +22,7 @@ export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; varian
   const notify = useStore((s) => s.notify)
   const [restarting, setRestarting] = useState(false)
   const [confirming, setConfirming] = useState(false)
+  const [asking, setAsking] = useState(false)
 
   // selector 回純布林：`updateBatchCounts` 每次回新陣列，連 `useShallow` 都擋不住（見 `UpdateQuotaChip.tsx`）。
   const coveredByBatch = useStore((s) =>
@@ -40,14 +42,35 @@ export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; varian
     })
   }
 
+  // 使用者不想現在重啟，但想知道「這版有沒有我們用得上的東西」：交給 AGM 解析，結論回使用者入口。
+  // 唯讀，所以按完就關框，不擋重啟那條路（使用者 2026-09-19）。
+  const askAgm = () => {
+    setAsking(true)
+    void api
+      .requestClaudeUpdateReview({ host, from: runningVersion })
+      .then((r) => {
+        setConfirming(false)
+        notify(
+          'info',
+          r.already_requested
+            ? `${r.version} 的 changelog 已經派給 ${r.target_bot_name} 解析過了，結論會回到這裡`
+            : `已請 ${r.target_bot_name} 解析 claude ${r.version} 的 changelog，結論會回到這裡`,
+        )
+      })
+      .catch((e: unknown) => notify('error', `派不出去：${e instanceof Error ? e.message : String(e)}`))
+      .finally(() => setAsking(false))
+  }
+
   const confirmDialog = (
     <ConfirmRestart
       open={confirming}
       name={botName}
       busy={busy}
+      asking={asking}
       changelog={confirming ? <UpdateChangelog kind={botKind} host={host} from={runningVersion} /> : null}
       onCancel={() => setConfirming(false)}
       onConfirm={restart}
+      onAskAgm={botKind === 'claude' ? askAgm : undefined}
     />
   )
 
@@ -117,16 +140,20 @@ function ConfirmRestart({
   open,
   name,
   busy,
+  asking,
   changelog,
   onCancel,
   onConfirm,
+  onAskAgm,
 }: {
   open: boolean
   name: string
   busy: boolean
+  asking: boolean
   changelog: ReactNode
   onCancel: () => void
   onConfirm: () => void
+  onAskAgm?: () => void
 }) {
   return (
     <ConfirmDialog
@@ -148,6 +175,9 @@ function ConfirmRestart({
         </>
       }
       confirmLabel="重啟套用"
+      secondaryLabel={onAskAgm ? (asking ? '派工中…' : '請 AGM 解析') : undefined}
+      secondaryDisabled={asking}
+      onSecondary={onAskAgm}
       danger={busy}
       width={440}
       onCancel={onCancel}

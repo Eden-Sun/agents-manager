@@ -465,6 +465,24 @@ adopt 之後孤兒通知標記會清掉。pane 不存在 404、`owner_bot_id` �
   `pane` 的 `kind`／`foreground`／`listen_ports`／`read_only` 換成即時值（`unverified:true`＝讀不到，沿用表上的）——UI 要先把 port 顯示給人看再問一次。
 - 表裡沒有這顆 404；主機沒連上 502。
 
+## 請 AGM 解析 claude 新版（使用者 2026-09-19）
+
+### `POST /api/claude-update/review`
+`{host?, from?, to?}`（預設 `host=local`、`to`＝磁碟上那一版）。把這一版的 changelog 組成交辦派給**協調者**，
+唯讀——只建交辦，不 build、不重啟、不碰 claude 的檔案。內容與 `scripts/ops/claude-release-task.md` 同一套規則，
+結論照那份任務的指示回到使用者入口。
+
+```json
+{"version":"2.1.277","from_version":"2.1.276","target_bot_id":"01…","target_bot_name":"AGM-responder",
+ "assignment_id":"01…","already_requested":false,"sections":1}
+```
+
+- `client_request_id` 固定是 `agm-claude-release-<版本>`（與 kick 同一個），**同一版重按回同一筆**，
+  `already_requested:true`；
+- 沒有設協調者 → 409 `no_responder`（巡檢自己不能收交辦：daemon 擋「總管對自己下交辦」）；
+- 那台主機還讀不到 claude 版本 → 409 `no_version`；
+- 正文只放版差內的前 3 段、最多 4000 字，其餘給 CHANGELOG 連結——整份貼進去會塞爆對話。
+
 ## 外部 Cargo 主機（issue #104）
 
 把 `check`／`test`／`clippy` 丟到一台 SSH 主機跑；`build`／`run` 留本機（Linux/x86_64 的產物在 macOS/aarch64 上不能用）。
