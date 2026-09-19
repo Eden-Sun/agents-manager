@@ -1,5 +1,6 @@
 /* 手機（≤640px）bot 標題列排位（2026-09-11，ego 390px 實測）：第一行擠六樣時名字只剩 94px，兄弟 bot 分不出來。
-   位置（使用者指定）：第一行 ☰、名字、★、⚙、分頁；第二行 kind＋版本號；第三行額度列，git 鍵在最左、「更新」chip 正下方。 */
+   位置（使用者指定）：第一行 ☰、名字、更新 chip、★、⚙、分頁（更新 chip 2026-09-19 從額度列搬上來）；第二行 kind＋版本號；
+   第三行額度列，git 鍵在最左。 */
 @media (width <= 640px) {
   .main-head.bot-head {
     grid-template-columns: 40px minmax(0, 1fr) auto;
@@ -56,6 +57,24 @@
     min-width: 36px;
   }
 
+  /* 「claude 有更新」在 ★ 左邊，跟 ★／⚙ 一樣絕對定位；有它時名字行右內距再讓 40px。 */
+  .main-head.bot-head .main-title-row > .quota-update {
+    position: absolute;
+    top: 50%;
+    right: 82px;
+    transform: translateY(-50%);
+    align-self: auto;
+    margin: 0;
+  }
+
+  .main-head.bot-head .main-title-row > .quota-update::before {
+    display: none;
+  }
+
+  .main-head.bot-head .main-title-row:has(> .quota-update) {
+    padding-right: 124px;
+  }
+
   .main-head.bot-head .mobile-bot-version {
     min-height: 0;
     padding-left: 4px;
@@ -93,17 +112,10 @@
     height: 18px;
   }
 
-  /* 常駐讓出 git 鍵欄（4 + 32px）：靠更新 chip 撐開時，沒更新 cc0 就滑到 git 鍵底下（2026-09-11 手機實拍）。 */
+  /* 常駐讓出 git 鍵欄（4 + 32px），不然 cc0 會滑到 git 鍵底下（2026-09-11 手機實拍）。 */
   .main-head.bot-head:has(> .mobile-git-info) .quota-open {
     position: relative;
     padding-left: 40px;
-  }
-
-  .main-head.bot-head:has(> .mobile-git-info) .quota-open > .quota-update {
-    position: absolute;
-    top: 2px;
-    left: 4px;
-    margin: 0;
   }
 
   .main-head.bot-head > .mobile-primary-row {

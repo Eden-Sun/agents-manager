@@ -47,6 +47,7 @@ import { shortModel } from '../lib/shortModel'
 import { MemBadge } from './MemBadge'
 import { QuotaStrip } from './QuotaStrip'
 import { PrimaryStar } from './PrimaryStar'
+import { UpdateQuotaChip } from './UpdateQuotaChip'
 import { UnreadChip } from './UnreadChip'
 import { LAMP_LABEL, StatusLamp } from './StatusLamp'
 import { DELIVERY_HINT_TEXT, DELIVERY_WARN_TEXT, deliveryNotice } from '../lib/deliveryNotice'
@@ -1243,6 +1244,8 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             <StatusLamp lamp={lamp} />
             {/* kind logo 放第二行 model 左邊（2026-09-11 使用者），不佔名字寬度。 */}
             {phone ? <BotSwitcher botId={botId} name={bot.name} /> : <BotNameField botId={botId} name={bot.name} />}
+            {/* 手機的「claude 有更新」放 ★ 左邊（2026-09-19 使用者）；桌面仍在額度列最左。 */}
+            {phone ? <UpdateQuotaChip /> : null}
             {/* Ahead of the badges: the row clips its tail, and the gear is the only non-duplicated entry. */}
             <PrimaryStar botId={botId} />
             <button

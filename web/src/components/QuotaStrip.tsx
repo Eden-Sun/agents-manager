@@ -874,8 +874,8 @@ export function QuotaStrip({
     <div className="quota-strip" ref={wrap} aria-label={quotaTitle(host)}>
       {/* 容器而非 button：checkbox 不能塞在 button 裡。 */}
       <div className={`quota-open${collapsed ? ' collapsed' : ''}`}>
-        {/* 更新 chip 放最左邊，避免夾在兩個 kind 間被誤認（2026-09-11 使用者）。 */}
-        <UpdateQuotaChip />
+        {/* 更新 chip 放最左邊，避免夾在兩個 kind 間被誤認（2026-09-11 使用者）。手機搬到標題列 ★ 左邊（ChatPanel，2026-09-19 使用者）。 */}
+        {phone ? null : <UpdateQuotaChip />}
         {/* 遠端才掛主機名。 */}
         {remote ? (
           <span className="quota-host" aria-hidden="true">
