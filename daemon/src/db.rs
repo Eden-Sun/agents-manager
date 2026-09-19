@@ -316,6 +316,7 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
     crate::mission::store::migrate(pool).await?;
     crate::hook_inbox::migrate(pool).await?;
     crate::build_scheduler::migrate(pool).await?;
+    crate::release_triage::ledger::migrate(pool).await?;
     check_schema_drift(pool).await?;
     Ok(())
 }

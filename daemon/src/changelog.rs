@@ -128,6 +128,15 @@ pub async fn installed_version(app: &Arc<App>, host: &str, kind: &str) -> Result
     version_string(line).ok_or_else(|| anyhow!("`{kind} --version` 回了「{line}」，看不出版本"))
 }
 
+/// 抓 feed 的網址與「是不是 codex releases JSON」。`release_triage` 的 CLI 是獨立行程，沒有 `App` 的快取可用。
+pub(crate) fn feed_url(kind: &str) -> Option<(&'static str, bool)> {
+    match kind {
+        "claude" => Some((CHANGELOG_URL, false)),
+        "codex" => Some((CODEX_RELEASES_API, true)),
+        _ => None,
+    }
+}
+
 pub fn source_url(kind: &str) -> &'static str {
     if kind == "codex" {
         CODEX_RELEASES_URL
@@ -137,7 +146,7 @@ pub fn source_url(kind: &str) -> &'static str {
 }
 
 /// releases JSON → 同 CHANGELOG 格式的 markdown。預覽版與草稿丟掉：使用者被問到的都是正式版。
-fn codex_releases_to_md(json: &str) -> Result<String> {
+pub(crate) fn codex_releases_to_md(json: &str) -> Result<String> {
     let v: serde_json::Value = serde_json::from_str(json).map_err(|e| anyhow!("讀 releases 失敗：{e}"))?;
     let arr = v.as_array().ok_or_else(|| anyhow!("releases 不是陣列"))?;
     let mut out = String::new();
