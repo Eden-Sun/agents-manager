@@ -265,6 +265,35 @@ pub struct BuildCfg {
     /// 名額 TTL（秒）：拿到之後這麼久沒 renew 就視為持有者已死，下一次 acquire 收回。
     #[serde(default = "default_build_lease_ttl_secs")]
     pub lease_ttl_secs: u64,
+    /// issue #104：外部 Cargo／rustc 主機。密碼不在這裡（`data-dir/remote-cargo-password`）。
+    /// 這個 tree 可能還沒有 offload helper；左上角用量取樣只讀這段設定。
+    #[serde(default)]
+    pub remote: BuildRemoteCfg,
+}
+
+/// `[build.remote]`。取樣 CPU／RAM 只需要連線欄；其餘鍵 serde 忽略，跟完整 offload 設定檔相容。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BuildRemoteCfg {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub host: String,
+    #[serde(default)]
+    pub user: String,
+    #[serde(default = "default_ssh_port")]
+    pub ssh_port: u16,
+}
+
+impl Default for BuildRemoteCfg {
+    fn default() -> Self {
+        Self { enabled: false, host: String::new(), user: String::new(), ssh_port: default_ssh_port() }
+    }
+}
+
+impl BuildRemoteCfg {
+    pub fn is_configured(&self) -> bool {
+        self.enabled && !self.host.trim().is_empty() && !self.user.trim().is_empty()
+    }
 }
 
 impl Default for BuildCfg {
@@ -273,6 +302,7 @@ impl Default for BuildCfg {
             max_concurrent: default_build_max_concurrent(),
             cargo_jobs: default_build_cargo_jobs(),
             lease_ttl_secs: default_build_lease_ttl_secs(),
+            remote: BuildRemoteCfg::default(),
         }
     }
 }

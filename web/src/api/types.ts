@@ -650,6 +650,22 @@ export interface MemSnapshot {
   hosts: HostMem[]
   /** 每個專案的 bot（含 child）佔幾個 pane、多少 RAM（2026-09-15）；量不到的主機上的專案不在清單裡。 */
   projects: ProjectMem[]
+  /** `[build.remote]` 外部 rustc／Cargo 主機（SPEC §15.1c）。沒開或量不到結構本身仍可能有 `error`。 */
+  cargo_remote: CargoRemoteMem | null
+}
+
+/** 外部編譯機。`cpu_pct` 是整機 0–100；`rustc_cpu_pct` 是 rustc／cargo 加總（一核＝100）。 */
+export interface CargoRemoteMem {
+  host: string
+  user: string
+  rustc_bytes: number
+  rustc_cpu_pct: number | null
+  rustc_processes: number
+  machine: MachineMem | null
+  cpu_pct: number | null
+  nproc: number | null
+  load1: number | null
+  error: string | null
 }
 
 export interface ProjectMem {

@@ -1463,6 +1463,15 @@ UI：左上格「已用 · 剩 N」，剩餘 < 15% 轉警示色；明細第一�
 
 側欄（手機是選單抽屜）每個專案標題旁標「N pane · RAM」。來源是 `GET /api/mem` 的 `projects`：同一次 15 秒取樣裡，對每台量得到的主機多跑一趟帶環境變數的 `ps`，把 herdr 樹裡帶 `AM_BOT_ID` 的程序歸給那顆 bot 的專案——每個程序只算自己的 RSS（child 程序繼承變數、自己算），pane 數以 socket＋pane id 去重。沒在跑的專案不畫；量不到就不畫，不畫成 0。使用者自己開的 shell pane 沒有 `AM_BOT_ID`，不算進任何專案。
 
+### 15.1c 外部 rustc／Cargo 主機（`[build.remote]`）
+
+issue #104 的編譯機不在 herdr 樹裡，本機 RAM 格看不到它。設定 `enabled` 且有 host／user 時，同一輪 15 秒取樣另外 ssh 一次（8 秒逾時、不走 herdr ssh master）：
+
+- 整機：Linux `/proc/meminfo`（與 §15.1a 同一解析）＋ `/proc/stat` 兩次取樣算 CPU%（第一次還沒有前值就省略）＋ `loadavg`／`nproc`。
+- 編譯行程：`ps` 的 `rss`／`%cpu`／`comm`，只加 `rustc`／`cargo`／`sccache`／`rustdoc`／`clippy-driver`。
+
+寫在 `GET /api/mem` 的 `cargo_remote`，**不**加進 `hosts` 或 `total_bytes`。沒開設定就省略。ssh 失敗仍回該物件、帶 `error`。UI 左上角 RAM 旁一顆 `rustc` 徽章（CPU% · 編譯 RAM · 剩 N）；沒開不畫。密碼與 askpass 跟遠端 Cargo helper 同一份（`data-dir/remote-cargo-password`）。
+
 ### 15.2 展開看程序 / 砍程序
 **owner 判定讀 process 環境變數，不讀我們的帳本**：daemon 起 bot 注入 `AM_BOT_ID`，herdr 對每個 pane 注入 `HERDR_PANE_ID`，子孫繼承——連 daemon 開機前就在跑的也判得對。
 macOS `ps -Ewwo pid=,args=`，Linux `/proc/<pid>/environ`。

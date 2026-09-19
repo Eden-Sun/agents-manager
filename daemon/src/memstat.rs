@@ -156,6 +156,9 @@ pub struct MemSnapshot {
     /// bot 與它們的 child）；量不到的主機上的專案不出現，不是 0。
     #[serde(default)]
     pub projects: Vec<ProjectMem>,
+    /// `[build.remote]` 那台外部 rustc／Cargo 主機（SPEC §15.1c）。沒開就是 `null`，不混進 `hosts`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cargo_remote: Option<crate::remote_cargo_mem::CargoRemoteMem>,
 }
 
 pub(crate) struct Proc {
@@ -328,8 +331,10 @@ pub async fn sample(app: &Arc<App>) -> MemSnapshot {
     }
 
     let projects = project_totals(app, &hosts).await;
+    let cargo_remote = crate::remote_cargo_mem::sample(app).await;
     MemSnapshot {
         projects,
+        cargo_remote,
         total_bytes: hosts.iter().map(|h| h.total_bytes).sum(),
         herdr_bytes: hosts.iter().map(|h| h.herdr_bytes).sum(),
         agents_bytes: hosts.iter().map(|h| h.agents_bytes).sum(),
@@ -405,6 +410,7 @@ pub fn spawn_poller(app: Arc<App>) {
                         // 晚上沒有 bot 在跑時 herdr 樹幾乎不動，使用者開了四十個分頁、可用記憶體掉到
                         // 800 MiB，一次事件都不會送——正好在最該示警的時候失效（review 2026-09-16）。
                         || host_signals_changed(&prev.hosts, &snap.hosts)
+                        || crate::remote_cargo_mem::changed(&prev.cargo_remote, &snap.cargo_remote)
                 }
                 None => true,
             };

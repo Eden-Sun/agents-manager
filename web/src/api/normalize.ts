@@ -855,6 +855,28 @@ export function toMemSnapshot(v: unknown): MemSnapshot {
       panes: n(pm.panes),
       bytes: n(pm.bytes),
     })),
+    cargo_remote: toCargoRemote(r.cargo_remote),
+  }
+}
+
+function toCargoRemote(v: unknown): import('./types').CargoRemoteMem | null {
+  if (!isRec(v)) return null
+  const n = (x: unknown): number => (typeof x === 'number' && Number.isFinite(x) && x >= 0 ? x : 0)
+  const optN = (x: unknown): number | null => (typeof x === 'number' && Number.isFinite(x) ? x : null)
+  return {
+    host: str(v.host),
+    user: str(v.user),
+    rustc_bytes: n(v.rustc_bytes),
+    rustc_cpu_pct: optN(v.rustc_cpu_pct),
+    rustc_processes: n(v.rustc_processes),
+    machine:
+      isRec(v.machine) && n(v.machine.total_bytes) > 0
+        ? { total_bytes: n(v.machine.total_bytes), available_bytes: n(v.machine.available_bytes) }
+        : null,
+    cpu_pct: optN(v.cpu_pct),
+    nproc: optN(v.nproc),
+    load1: optN(v.load1),
+    error: v.error == null ? null : str(v.error),
   }
 }
 

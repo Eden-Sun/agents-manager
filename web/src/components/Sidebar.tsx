@@ -38,6 +38,7 @@ import { HostBadge, HostsPanel } from './HostsPanel'
 import { BotNameField } from './BotNameField'
 import { ProjectNameField } from './ProjectNameField'
 import { MemBadge } from './MemBadge'
+import { RustcRemoteBadge } from './RustcRemoteBadge'
 import { ThemeToggle } from './ThemeToggle'
 import { ProjectMemBadge } from './ProjectMemBadge'
 import { RebuildBadge } from './RebuildBadge'
@@ -1059,6 +1060,7 @@ export function Sidebar() {
         </div>
         <div className="head-ram">
           <MemBadge />
+          <RustcRemoteBadge />
         </div>
         <div className="head-right">
           <TabsBadge />

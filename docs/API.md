@@ -466,6 +466,9 @@ herdr 進程樹佔多少常駐記憶體（SPEC §15）。
 ```json
 {"total_bytes":1610612736,"herdr_bytes":50331648,"agents_bytes":1560281088,"processes":5,
  "projects":[{"project_id":"p1","host":"local","panes":3,"bytes":1932735283}],
+ "cargo_remote":{"host":"192.168.1.46","user":"ubuntu","rustc_bytes":3328599654,"rustc_cpu_pct":240.0,
+                 "rustc_processes":6,"machine":{"total_bytes":34359738368,"available_bytes":19327352832},
+                 "cpu_pct":41.0,"nproc":32,"load1":8.2},
  "hosts":[{"host":"local","herdr_bytes":50331648,"agents_bytes":1560281088,"total_bytes":1610612736,"processes":5,"error":null,
            "browsers":[{"name":"Chrome","tabs":34,"bytes":3435973836,"processes":41}],
            "machine":{"total_bytes":17179869184,"available_bytes":5536579584}},
@@ -475,6 +478,7 @@ herdr 進程樹佔多少常駐記憶體（SPEC §15）。
 - `browsers`：同一份 `ps` 裡的 Chromium 系瀏覽器依 app bundle 分組（`Google Chrome.app` → `Chrome`、`ego lite.app` → `ego`），`tabs` = `--type=renderer` 數。不算進 `total_bytes`；前端總分頁 ≥ 30 時標紅。
 - `machine`：整台機器（SPEC §15.1a），認不出來 `null`。
 - `projects`（2026-09-15）：`[{"project_id","host","panes","bytes"}]`，側欄專案標題的「N pane · RAM」。只算 herdr 樹裡帶 `AM_BOT_ID` 的程序（該專案的 bot 與 child；每個程序算自己的 RSS 一次），`panes` 以 socket＋pane id 去重；bot 已刪或量不到的主機不列，沒有程序的專案不在清單裡。多一趟帶環境變數的 `ps`（同 `/mem/processes`）；pane 數變了或任一專案差 ≥ 1 MiB 也會推 `mem_updated`。
+- `cargo_remote`（SPEC §15.1c）：`[build.remote]` 那台外部 rustc／Cargo 主機。沒開設定時省略。`rustc_bytes`／`rustc_cpu_pct`／`rustc_processes` 是遠端 `rustc`／`cargo`／`sccache`／`rustdoc`／`clippy-driver` 的加總（`%cpu` 一核＝100，多核可超過 100）；`cpu_pct` 是整機 0–100（要兩次 `/proc/stat` 才有，第一次可能省略）；`machine` 與本機同一形狀。量不到時仍回這個物件，帶 `error`，數字為 0。不計入 `hosts`／`total_bytes`。
 - 量不到的主機用 `error` 回報，不從清單消失（UI 標星號）。每 15 秒取樣，變化超過 1 MiB 才推 `mem_updated`。
 
 ### `GET /api/mem/processes?host=local`
