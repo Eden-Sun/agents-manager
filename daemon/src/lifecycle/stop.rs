@@ -533,6 +533,13 @@ pub async fn abort_turns(app: &Arc<App>, bot_id: &str) -> LcResult<Value> {
         tracing::warn!(bot = %bot.name, error = %e, "上一次打斷欠著的收尾還是寫不進去");
     }
 
+    // 在飛的那一筆在按 esc **之前**讀（#208）：讀不到就一步都不做。以前放在 esc 之後、讀錯當成「沒有」——esc 已經送出去，
+    // 打斷的紀錄（`note_user_interrupt_of`、`interrupted`）卻沒記，那一回合的 StopFailure 回聲之後會被當成真的失敗。
+    let in_flight = match run.as_ref() {
+        Some(r) => db::in_flight_turn(&app.db, &r.id).await.map_err(up)?,
+        None => None,
+    };
+
     let mut keys_sent = false;
     let mut key_error: Option<String> = None;
     let mut client: Option<HerdrClient> = None;
@@ -552,7 +559,6 @@ pub async fn abort_turns(app: &Arc<App>, bot_id: &str) -> LcResult<Value> {
 
     let mut aborted: Vec<String> = Vec::new();
     if let Some(r) = run.as_ref() {
-        let in_flight = db::in_flight_turn(&app.db, &r.id).await.ok().flatten();
         if let Some(t) = &in_flight {
             aborted.push(t.id.clone());
         }
@@ -588,19 +594,27 @@ pub async fn abort_turns(app: &Arc<App>, bot_id: &str) -> LcResult<Value> {
         // prompt 的東西，見 `prompt_inner` 的前置檢查），不改它的 status——回合已經收好了，
         // 把它改寫成 failed 會讓使用者看到一筆「失敗」的回合，而它其實答完了。
         // （`turn_controller` 的轉移表也沒有 `completed_fallback -> failed` 這條邊，issue #68。）
+        // 收掉與說明同一個交易（#208，同 `fail_in_flight`）：以前說明寫不進去被 `let _` 吞掉，回合收了、對話裡卻沒有一句話。
+        let mut tx = app.db.begin().await.map_err(up)?;
         if t.status == "in_flight" {
-            super::turn_controller::fail(&app.db, &t.id, super::turn_controller::DeliveryOnFail::FailedIfUnknown, "使用者強制中止")
+            super::turn_controller::fail_on(&mut tx, &t.id, super::turn_controller::DeliveryOnFail::FailedIfUnknown, "使用者強制中止")
                 .await
                 .map_err(up)?;
         } else if t.delivery == "unknown" {
             sqlx::query("UPDATE turns SET delivery='failed' WHERE id=? AND delivery='unknown'")
                 .bind(&t.id)
-                .execute(&app.db)
+                .execute(&mut *tx)
                 .await
                 .map_err(up)?;
         }
-        if !aborted.contains(&t.id) {
-            let _ = insert_message(app, &t.conversation_id, Some(&t.id), "system", "回合已由使用者強制中止", "system", false, None).await;
+        let note = if aborted.contains(&t.id) {
+            None
+        } else {
+            Some(insert_message_tx(&mut tx, &t.conversation_id, Some(&t.id), "system", "回合已由使用者強制中止", "system", false, None).await.map_err(up)?)
+        };
+        tx.commit().await.map_err(up)?;
+        if let Some(m) = note {
+            emit_message_added(app, bot_id, m).await;
             aborted.push(t.id.clone());
         }
         emit_turn(app, &t.id).await;
@@ -942,6 +956,91 @@ mod stop_commit_tests {
         assert!(rs::settle_once(&app, &run, &rs::Settle::FinishStop).await);
         assert_eq!(state(&app, &run).await, "stopped");
         assert!(!rs::watched(&app, &watcher).await, "拆的是那台主機上的 watcher");
+    }
+
+    /// #208：遠端 bot 的 `FinishStop` 補記時讀不到主機。以前退回 local 去拆 watcher——拆掉的是本機同名 session、同 pane id
+    /// 那顆 bot 的（它從此收不到狀態事件、回合收不掉），遠端該拆的反而留著。現在這一輪什麼都不寫；讀得到才補記、拆遠端那一個。
+    #[tokio::test]
+    async fn a_finish_stop_that_cannot_read_the_host_never_unwatches_a_local_pane_of_the_same_name() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let remote = db::ulid();
+        sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?, '/r/p', 'r', 'remote1', ?)")
+            .bind(&remote)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let far = tt::claude_bot(&app, &remote, "far").await;
+        let near = tt::claude_bot(&app, &env.project_id, "near").await;
+        let far_run = tt::fake_run(&app, &far.id).await;
+        let near_run = tt::fake_run(&app, &near.id).await;
+        sqlx::query("UPDATE runs SET pane_id='p-same' WHERE id IN (?, ?)").bind(&far_run).bind(&near_run).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET state='stopping' WHERE id=?").bind(&far_run).execute(&app.db).await.unwrap();
+        let key = |host: &str| (host.to_string(), "test".to_string(), "p-same".to_string());
+        {
+            let mut w = app.pane_watchers.lock().await;
+            w.insert(key(LOCAL_HOST), tokio::spawn(std::future::pending::<()>()));
+            w.insert(key("remote1"), tokio::spawn(std::future::pending::<()>()));
+        }
+
+        sqlx::query("ALTER TABLE projects RENAME TO projects_unreadable").execute(&app.db).await.unwrap();
+        assert!(!rs::settle_once(&app, &far_run, &rs::Settle::FinishStop).await, "讀不到主機：這一輪不補");
+        sqlx::query("ALTER TABLE projects_unreadable RENAME TO projects").execute(&app.db).await.unwrap();
+        assert_eq!(state(&app, &far_run).await, "stopping");
+        assert!(rs::watched(&app, &key(LOCAL_HOST)).await && rs::watched(&app, &key("remote1")).await, "兩個 watcher 都沒動");
+
+        assert!(rs::settle_once(&app, &far_run, &rs::Settle::FinishStop).await);
+        assert_eq!(state(&app, &far_run).await, "stopped");
+        assert!(!rs::watched(&app, &key("remote1")).await, "拆的是遠端那一個");
+        assert!(rs::watched(&app, &key(LOCAL_HOST)).await, "本機同名的那顆照舊收得到狀態事件");
+    }
+
+    /// #208（同檔同類）：強制中止讀不到在飛的那一筆——以前 esc 已經送出去了，讀錯又當成「沒有」，打斷的紀錄沒記，
+    /// 那一回合的 StopFailure 回聲之後會被當成真的失敗。現在先讀再按：讀不到就一步都不做。
+    #[tokio::test]
+    async fn a_force_abort_that_cannot_read_the_in_flight_turn_sends_no_esc() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot, run) = running_bot(&env).await;
+        rs::a_turn(&app, &bot, Some(&run), "in_flight").await;
+        let n = env.herdr.methods().len();
+        sqlx::query("ALTER TABLE turns RENAME TO turns_unreadable").execute(&app.db).await.unwrap();
+        assert!(abort_turns(&app, &bot).await.is_err());
+        sqlx::query("ALTER TABLE turns_unreadable RENAME TO turns").execute(&app.db).await.unwrap();
+        let calls = since(&env, n);
+        assert!(!calls.iter().any(|m| m == "agent.send_keys"), "讀不到就不按 esc：{calls:?}");
+    }
+
+    /// #208（同檔同類）：強制中止收掉 `delivery = unknown` 的那一筆，說明寫不進去——以前 `let _` 吞掉，回合解開了、對話裡卻沒有
+    /// 一句話，API 照回 `aborted`。現在收掉與說明同一個交易：寫不進去就兩個都沒發生、回錯；寫得進去再按一次，一起成立。
+    #[tokio::test]
+    async fn a_force_abort_whose_note_cannot_be_written_changes_nothing() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "unknown").await;
+        let turn = rs::a_turn(&app, &bot.id, None, "failed").await;
+        sqlx::query("UPDATE turns SET delivery='unknown' WHERE id=?").bind(&turn).execute(&app.db).await.unwrap();
+        sqlx::query(&format!(
+            "CREATE TRIGGER refuse_abort_note BEFORE INSERT ON messages WHEN NEW.turn_id = '{turn}' BEGIN SELECT RAISE(ABORT, 'injected'); END"
+        ))
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let delivery = || {
+            let app = app.clone();
+            let turn = turn.clone();
+            async move { sqlx::query_scalar::<_, String>("SELECT delivery FROM turns WHERE id=?").bind(&turn).fetch_one(&app.db).await.unwrap() }
+        };
+
+        assert!(abort_turns(&app, &bot.id).await.is_err(), "說明寫不進去：不回 aborted");
+        assert_eq!(delivery().await, "unknown", "解開也沒發生");
+        assert_eq!(rs::system_notes(&app, &turn).await, 0);
+
+        sqlx::query("DROP TRIGGER refuse_abort_note").execute(&app.db).await.unwrap();
+        let out = abort_turns(&app, &bot.id).await.unwrap();
+        assert_eq!(out["aborted"], json!([turn.clone()]));
+        assert_eq!((delivery().await, rs::system_notes(&app, &turn).await), ("failed".to_string(), 1));
     }
 
     /// 驗收 2 的另一半：重試還沒補上 daemon 就重啟了（排的重試跟著沒了）——開機的對帳照證據把它收掉，
