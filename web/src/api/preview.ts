@@ -53,14 +53,15 @@ export function toPreviewEvent(data: unknown, prev: Preview): Preview {
 
 const path = (botId: string) => `/bots/${encodeURIComponent(botId)}/preview`
 
+/** 404／405：這顆 daemon 還沒有預覽 API（POST 掉進前端 SPA 的 catch-all，那條只收 GET 所以是 405）。 */
+export function previewApiMissing(e: unknown): boolean {
+  return e instanceof ApiError && (e.status === 404 || e.status === 405)
+}
+
+export const PREVIEW_API_MISSING = 'daemon 還沒有預覽功能（二進位比前端舊），需要重建＋重啟 daemon。'
+
 export async function fetchPreview(botId: string): Promise<Preview> {
-  try {
-    return toPreview(await rawTransport.request('GET', path(botId)))
-  } catch (e) {
-    // 舊 daemon 還沒有這個端點：當作沒開過，面板照樣能顯示「啟動預覽」（按下去才會有真的錯誤）。
-    if (e instanceof ApiError && (e.status === 404 || e.status === 405)) return PREVIEW_OFF
-    throw e
-  }
+  return toPreview(await rawTransport.request('GET', path(botId)))
 }
 
 export async function startPreview(botId: string): Promise<Preview> {
