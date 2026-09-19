@@ -226,6 +226,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/supervisor/evidence", get(crate::supervisor_evidence::search))
         .merge(crate::supervisor::responder_api::routes())
         .merge(crate::release_triage::http::routes())
+        .merge(crate::judge::http::routes())
         .route("/bots/{id}/restore", post(restore_bot))
         .route("/identities", post(create_identity))
         .route("/identities/{name}", delete(delete_identity))

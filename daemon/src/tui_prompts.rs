@@ -90,7 +90,7 @@ fn line_starts_with(lines: &[String], prefix: &str) -> bool {
 /// `is_grok_trust_dialog` 各自的 tail 範圍內），因為那時候根本沒有框在擋。用「輸入列還空著」
 /// 這個結構性事實去分辨，不必再猜引文的排版像不像框（2026-09-18：只認「標題／選項各自成行」
 /// 擋不住刻意排成一行一句的引文，見 issue #114）。
-fn composer_is_idle(lines: &[&str]) -> bool {
+pub(crate) fn composer_is_idle(lines: &[&str]) -> bool {
     lines.iter().any(|l| {
         let mut chars = l.chars().filter(|c| !"│┃╭╮╰╯─━▔ \t".contains(*c));
         matches!(chars.next(), Some('❯') | Some('›')) && chars.next().is_none()

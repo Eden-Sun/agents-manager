@@ -169,6 +169,8 @@ const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (6, "f75ac921663299da"),
     // issue #238：`runs.runtime_identity`（run 用哪個身分起來的，額度記在它上面）。
     (7, "7372788a43638544"),
+    // issue #240：`judge_shadow`（撞限第二意見的帳本，只記錄）。
+    (8, "3b7f1d3c6f8712de"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -352,6 +354,7 @@ async fn apply_migrations(pool: &SqlitePool) -> Result<()> {
     crate::hook_inbox::migrate(pool).await?;
     crate::build_scheduler::migrate(pool).await?;
     crate::release_triage::ledger::migrate(pool).await?;
+    crate::judge::migrate(pool).await?;
     Ok(())
 }
 

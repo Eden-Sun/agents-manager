@@ -88,6 +88,18 @@ pub async fn capture_codex_usage_notices(app: &Arc<App>, bot_id: &str, expected_
             }
             // 記在這顆 bot 的主機與身分那一格；讀不到主機不退回 `local`（那會把本機帳號標成用盡，遠端那個用盡的身分
             // 反而沒擋），記不進去就欠著，派送前與 flush 照欠著的那一筆擋（#198）。
+            // 第二意見只記錄（#240）：鎖外去問，回合與額度照下面的收。
+            crate::judge::shadow_limit_hit(
+                app,
+                crate::judge::Sample {
+                    bot_id: bot.id.clone(),
+                    run_id: run.id.clone(),
+                    project_id: bot.project_id.clone(),
+                    kind: bot.kind.clone(),
+                    matched_line: notice.clone(),
+                    screen: read.text.clone(),
+                },
+            );
             if let Err(e) = crate::turn_error::mark_codex_limit_hit(app, &bot, &notice).await {
                 marked = Err(e);
             }

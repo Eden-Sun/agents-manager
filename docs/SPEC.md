@@ -454,6 +454,17 @@ claude 連線在回應中途掉了時，pane 只多一行 `⏺ API Error: Connec
   這一回合斷在同一句錯誤上會被「同一行只記一次」吞掉。
 - UI：側欄「⚠ 中斷」、標題列紅 chip，點開看原文與「重送上一則」（走既有 prompt API）。
 
+
+### 4.3c 撞限偵測的第二意見：只記錄（`[judge]`，issue #240）
+畫面比對判定「這是新的撞限」（codex／grok，`capture_codex_usage_notices`）的那一刻，daemon 另外問 TypeSafe 的 Jev 一題是非題：命中的那一行是介面自己畫的，還是 bot 印出來的內容（原始碼、diff、測試輸出——#227／#237 的誤判來源）。**只寫帳本、不改行為**：回合照收、額度照標；這條路的任何失敗（關閉、逾時 3 秒、429、key 讀不到）都不影響它們，也不重試。
+- **預設全關，兩層都要開**：`[judge] enabled = true` 且專案的 id 或 label 在 `projects` 名單裡。另有 `max_per_hour`（預設 60）保險絲。
+- **送出的內容**：agent kind、命中行、畫面最後 60 行（上限 6,000 字元）、輸入列是否空著。不送 bot／專案／對話的任何識別。送出前逐行遮罩：常見 token 前綴、`Bearer …`、`*TOKEN／SECRET／PASSWORD／API_KEY*` 的值、PEM 區塊、email、≥32 字元的亂數字串，`/Users/<name>/` 改成 `~/`。遮罩是盡力而為；閘門是上面的開關。
+- **key**：設定只存檔案路徑（`key_file`，預設 `~/.config/typesafe/api-key`），每次呼叫才讀；檔案對 group／other 可讀就拒用。key 不進 DB、log、API 回應。
+- **在 bot 鎖外問**：命中當下只複製畫面，另起 task 去問（一次約 0.6 秒）。
+- **帳本 `judge_shadow`**：遮罩後的命中行、`composer_idle`、`jev_is_live_ui`（機率）、模型、耗時、input tokens、錯誤、`cleared_at`。不存畫面全文。`cleared_at` 是這顆 bot 的撞限之後被成功回合清掉的時刻——撞限後幾分鐘內就被清掉＝當時其實沒撞限，這就是事後對帳的標籤。
+- **設定入口**：網頁「環境設定 → Jev 第二意見」（或 `PUT /api/judge/settings`）：貼 API key、開關、勾專案。存檔當下生效，不用重啟。貼進來的 key 由 daemon 寫到 `key_file`（600），不進 `config.toml`，任何 API 都不回 key，只回 `key_present`／`key_error`。沒有可用的 key 時不給開（409 `needs_key`）。
+- 模型釘 `jev-1.13.0`。離線量測與題目來源在 `reports/jev-spike/`。Jev 的答案目前**不**作為否決票；要升級得先看帳本的數字。
+
 ### 4.4 hook 子命令（`agents-managerd hook claude|codex|grok`）最低契約
 
 1. wall-clock ≤ 3 秒；**永遠 exit 0、永遠空 stdout**。
