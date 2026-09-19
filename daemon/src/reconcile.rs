@@ -75,33 +75,135 @@ pub async fn autostart_after_reconcile(app: &Arc<App>, host: &str, reconciled: b
 
 /// A Turn that outlives a restart has no poller: no live bubble, and nothing completes it if its
 /// hook never arrives. Re-arm every in-flight Turn once the runs are adopted.
+///
+/// 開機只跑這一次，所以**讀不到不算做完**（#75 重開）：真相都在 DB（in-flight 回合、`next_flush_at`、送到一半的那一筆），
+/// 把它變回 poller／timer 的卻只有這一步——這一步讀不到，那個回合重啟後就沒人盯，閒著的 bot 也不會再有事件叫醒排著的那一則。
+/// 讀不到的部分記成欠著，背景照退避一直補到做完。做完的不再碰（poller／watchdog 各只掛一次）；重啟之後才開始的 run、
+/// 之後才建立或才結束的回合是這個行程自己的，補收不碰。
 pub async fn rearm_progress(app: &Arc<App>) {
-    let runs = match crate::db::all_active_runs(&app.db).await {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(error = ?e, "cannot re-arm progress pollers");
-            return;
-        }
-    };
-    for run in runs {
-        if let Ok(Some(turn)) = crate::db::in_flight_turn(&app.db, &run.id).await {
-            tracing::info!(run = %run.id, turn = %turn.id, "re-arming progress poller after restart");
-            adopt_orphan_delivery(app, &turn).await;
-            crate::lifecycle::arm_progress(app, &run.id, &run.bot_id, &turn.id).await;
-            // 送出後幾秒內被重啟：補 Enter 與「畫面上找不到就重送」這兩層網都只活在上一個行程裡
-            // （review 2026-09-16）。只對**剛送出**的補，不然會把幾小時前的 prompt 重送一次。
-            // 「剛送出」看送出的時間：排隊的 turn 的 created_at 是排進佇列的時間，flush 可能晚了半小時（deliv L3）。
-            if turn.delivery == "ok" && fresh_enough(turn.delivered_at.as_deref().unwrap_or(&turn.created_at)) {
-                crate::lifecycle::arm_stall(app, &run.id, &run.bot_id, &turn.id).await;
+    let mut owed = Recovery::new();
+    if owed.pass(app).await {
+        return;
+    }
+    tracing::warn!("startup recovery could not read everything it needs; retrying in the background until it can");
+    let app = app.clone();
+    tokio::spawn(async move {
+        for attempt in 0.. {
+            tokio::time::sleep(recovery_retry_delay(attempt)).await;
+            if owed.pass(&app).await {
+                tracing::info!(retries = attempt + 1, "startup recovery caught up");
+                return;
             }
         }
+    });
+}
+
+/// 開機恢復讀不到之後，第 `attempt` 次重試前等多久：很快就好的多半是 busy，一直讀不到就放慢到每分鐘一次。
+pub(crate) fn recovery_retry_delay(attempt: usize) -> std::time::Duration {
+    if cfg!(test) {
+        return std::time::Duration::from_millis(20);
     }
-    // Queued prompts in a backoff lost their timers with the old process (SPEC §4.4a).
-    crate::lifecycle::rearm_queue_retries(app).await;
-    // 插隊送出途中停掉、還沒掛上 run 的那一則（#120）。
-    crate::lifecycle::adopt_unbound_send_nows(app).await;
-    // run 已經結束、收尾卻欠著（帳只在記憶體，重啟就沒了）的那一筆（#156）。
-    crate::lifecycle::adopt_turns_of_ended_runs(app).await;
+    const SECS: [u64; 5] = [2, 5, 15, 30, 60];
+    std::time::Duration::from_secs(SECS[attempt.min(SECS.len() - 1)])
+}
+
+/// 開機恢復還欠著的部分。
+struct Recovery {
+    /// 開機那一刻。之後才開始的 run、之後才建立的插隊送出、之後才結束的 run 都是這個行程自己的帳。
+    boot: String,
+    /// 還沒把 in-flight 回合接回來的 run；`None`＝連 run 清單都還沒讀到。
+    runs: Option<std::collections::HashSet<String>>,
+    queue: bool,
+    send_nows: bool,
+    ended_runs: bool,
+}
+
+impl Recovery {
+    fn new() -> Self {
+        Self { boot: db::now(), runs: None, queue: true, send_nows: true, ended_runs: true }
+    }
+
+    /// 補一輪；回 `true`＝什麼都不欠了。
+    async fn pass(&mut self, app: &Arc<App>) -> bool {
+        self.rearm_in_flight(app).await;
+        // Queued prompts in a backoff lost their timers with the old process (SPEC §4.4a).
+        if self.queue {
+            match crate::lifecycle::rearm_queue_retries(app).await {
+                Ok(_) => self.queue = false,
+                Err(e) => tracing::warn!(error = %e, "cannot re-arm queued prompt retries yet"),
+            }
+        }
+        // 插隊送出途中停掉、還沒掛上 run 的那一則（#120）。
+        if self.send_nows {
+            self.send_nows = !crate::lifecycle::adopt_unbound_send_nows(app, &self.boot).await;
+        }
+        // run 已經結束、收尾卻欠著（帳只在記憶體，重啟就沒了）的那一筆（#156）。
+        if self.ended_runs {
+            self.ended_runs = !crate::lifecycle::adopt_turns_of_ended_runs(app, &self.boot).await;
+        }
+        self.runs.as_ref().is_some_and(|r| r.is_empty()) && !self.queue && !self.send_nows && !self.ended_runs
+    }
+
+    async fn rearm_in_flight(&mut self, app: &Arc<App>) {
+        if self.runs.as_ref().is_some_and(|r| r.is_empty()) {
+            return;
+        }
+        let runs = match crate::db::all_active_runs(&app.db).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = ?e, "cannot re-arm progress pollers yet");
+                return;
+            }
+        };
+        let mut still = std::collections::HashSet::new();
+        for run in runs {
+            let owed = match &self.runs {
+                Some(ids) => ids.contains(&run.id),
+                None => run.started_at <= self.boot,
+            };
+            if owed && !rearm_run(app, &run).await {
+                still.insert(run.id);
+            }
+        }
+        // 清單上已經不在的 run（結束了）不再欠：它的回合歸結束那條路收。
+        self.runs = Some(still);
+    }
+}
+
+/// 一個 run 在飛的那一筆接回 poller（剛送出的再補 stall watchdog）。`false`＝這一輪讀寫不到，之後再補。
+async fn rearm_run(app: &Arc<App>, run: &db::Run) -> bool {
+    // 跟送出同一把鎖：這個行程送到一半的那一筆不會被當成重啟前的孤兒。
+    let lock = app.bot_lock(&run.bot_id).await;
+    let _g = lock.lock().await;
+    // 這個行程欠著的送達結果先結清：DB 裡那一筆還是 pending，不能被當成重啟前送到一半的收成 unknown（#149 的帳）。
+    if let Err(e) = crate::lifecycle::settle_owed_deliveries(app, &run.bot_id).await {
+        tracing::warn!(run = %run.id, error = %e, "cannot settle this bot's owed delivery results yet; its in-flight turn waits");
+        return false;
+    }
+    // 已經有人盯著這個 run（重試期間這個行程自己送出的回合掛了 poller）：不再掛一次。
+    if app.progress_pollers.lock().await.contains_key(&run.id) {
+        return true;
+    }
+    let turn = match crate::db::in_flight_turn(&app.db, &run.id).await {
+        Ok(Some(t)) => t,
+        Ok(None) => return true,
+        Err(e) => {
+            tracing::warn!(run = %run.id, error = ?e, "cannot read this run's in-flight turn yet");
+            return false;
+        }
+    };
+    tracing::info!(run = %run.id, turn = %turn.id, "re-arming progress poller after restart");
+    if !adopt_orphan_delivery(app, &turn).await {
+        return false;
+    }
+    crate::lifecycle::arm_progress(app, &run.id, &run.bot_id, &turn.id).await;
+    // 送出後幾秒內被重啟：補 Enter 與「畫面上找不到就重送」這兩層網都只活在上一個行程裡
+    // （review 2026-09-16）。只對**剛送出**的補，不然會把幾小時前的 prompt 重送一次。
+    // 「剛送出」看送出的時間：排隊的 turn 的 created_at 是排進佇列的時間，flush 可能晚了半小時（deliv L3）。
+    if turn.delivery == "ok" && fresh_enough(turn.delivered_at.as_deref().unwrap_or(&turn.created_at)) {
+        crate::lifecycle::arm_stall(app, &run.id, &run.bot_id, &turn.id).await;
+    }
+    true
 }
 
 /// 重啟前正在送出的那一筆（`in_flight` 而 `delivery` 還是 `pending`）：它的收尾者只活在上一個行程的
@@ -111,11 +213,13 @@ pub async fn rearm_progress(app: &Arc<App>) {
 /// 鍵可能已經按下去了，所以不能當成沒送：標成 `unknown`（＝「按過了，證不出來」）交給既有的
 /// 放棄／人工判斷那條路，UI 也才會顯示「送出狀態不明」而不是一直轉。送達結果寫不回去、帳在重啟時丟了的那一筆
 /// 也走這裡（#149）：不自動重送，送出時間最晚就是現在——閒置 watchdog 才不會把剛送出的看成排隊那時一樣老。
-async fn adopt_orphan_delivery(app: &Arc<App>, turn: &db::Turn) {
+///
+/// 寫不進去回 `false`（#75）：那一筆還是 pending，不能照樣掛 poller 當成收好了，留給開機恢復的下一輪。
+async fn adopt_orphan_delivery(app: &Arc<App>, turn: &db::Turn) -> bool {
     if turn.delivery != "pending" {
-        return;
+        return true;
     }
-    let n = sqlx::query(
+    let n = match sqlx::query(
         "UPDATE turns SET delivery='unknown', auto_resend=0, delivered_at=COALESCE(delivered_at, ?)
           WHERE id = ? AND status='in_flight' AND delivery='pending'",
     )
@@ -123,12 +227,18 @@ async fn adopt_orphan_delivery(app: &Arc<App>, turn: &db::Turn) {
     .bind(&turn.id)
     .execute(&app.db)
     .await
-    .map(|r| r.rows_affected())
-    .unwrap_or(0);
+    {
+        Ok(r) => r.rows_affected(),
+        Err(e) => {
+            tracing::warn!(turn = %turn.id, error = ?e, "cannot mark a prompt caught mid-delivery by the restart as unknown yet");
+            return false;
+        }
+    };
     if n > 0 {
         tracing::warn!(turn = %turn.id, "a prompt was mid-delivery when the daemon stopped; marked unknown so somebody can decide");
         crate::lifecycle::emit_turn(app, &turn.id).await;
     }
+    true
 }
 
 /// 剛送出不久才值得補上 stall watchdog：它會在 12 秒後判「畫面上完全沒有這則」並重送一次，
@@ -1028,6 +1138,226 @@ mod compat_tests {
         assert!(!super::fresh_enough(&iso(chrono::Duration::seconds(121))));
         assert!(!super::fresh_enough(&iso(chrono::Duration::hours(3))));
         assert!(!super::fresh_enough("not-a-time"), "讀不懂時間就不要補");
+    }
+
+    // ---- #75 重開：開機恢復讀不到不算做完 ----
+
+    fn ago(d: chrono::Duration) -> String {
+        (chrono::Utc::now() - d).to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    }
+
+    async fn a_run(app: &Arc<App>, bot: &str, state: &str, started_at: &str, ended_at: Option<&str>) -> String {
+        let run = db::ulid();
+        sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,started_at,ended_at) VALUES (?,?,?,'idle',?,?)")
+            .bind(&run)
+            .bind(bot)
+            .bind(state)
+            .bind(started_at)
+            .bind(ended_at)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        run
+    }
+
+    /// 直接寫進 `table`（讀不到的那段時間 `turns` 改了名，要塞「重啟之後才有」的列就寫進改名後的表）。
+    #[allow(clippy::too_many_arguments)]
+    async fn a_turn(app: &Arc<App>, table: &str, bot: &str, run: Option<&str>, status: &str, delivery: &str, created_at: &str, delivered_at: Option<&str>) -> String {
+        let conv = db::conversation_id(&app.db, bot).await.unwrap();
+        let id = db::ulid();
+        sqlx::query(&format!(
+            "INSERT INTO {table} (id,conversation_id,run_id,origin,status,delivery,created_at,delivered_at,next_flush_at,prompt_text)
+             VALUES (?,?,?,'web',?,?,?,?,?,'hi')"
+        ))
+        .bind(&id)
+        .bind(&conv)
+        .bind(run)
+        .bind(status)
+        .bind(delivery)
+        .bind(created_at)
+        .bind(delivered_at)
+        // 排著的那一則：一小時後才到期，timer 掛上之後會一直掛著，看得到。
+        .bind((status == "queued").then(|| ago(chrono::Duration::hours(-1))))
+        .execute(&app.db)
+        .await
+        .unwrap();
+        id
+    }
+
+    async fn turn_state(app: &Arc<App>, table: &str, id: &str) -> (String, String) {
+        sqlx::query_as(&format!("SELECT status, delivery FROM {table} WHERE id=?")).bind(id).fetch_one(&app.db).await.unwrap()
+    }
+
+    async fn rename(app: &Arc<App>, from: &str, to: &str) {
+        sqlx::query(&format!("ALTER TABLE {from} RENAME TO {to}")).execute(&app.db).await.unwrap();
+    }
+
+    async fn polled(app: &Arc<App>, run: &str) -> bool {
+        app.progress_pollers.lock().await.contains_key(run)
+    }
+
+    async fn stall_gen(app: &Arc<App>, run: &str) -> Option<u64> {
+        app.stall_timers.lock().await.get(run).copied()
+    }
+
+    /// 等到條件成立（開機恢復的背景重試在測試裡 20ms 一輪），最多約 3 秒。巨集：條件裡要 `.await`。
+    macro_rules! eventually {
+        ($cond:expr) => {{
+            let mut ok = false;
+            for _ in 0..150 {
+                if $cond {
+                    ok = true;
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            ok
+        }};
+    }
+
+    /// **#75 重開驗收**：開機那一次讀 `turns` 失敗（busy／I/O）。真相都還在 DB，但把它變回 poller／timer 的只有這一步——
+    /// 以前讀不到就回 0／跳過，那個回合重啟後沒人盯，閒著的 bot 也不會再有事件叫醒排著的那一則。現在 DB 恢復之後，
+    /// **沒有任何 hook／狀態邊／新 prompt**，背景重試自己把每一件接回來；而重啟之後才出現的（這個行程自己的）一件都不碰。
+    #[tokio::test]
+    async fn a_startup_recovery_that_cannot_read_turns_catches_up_once_the_db_does() {
+        let env = tt::env().await;
+        let app = &env.app;
+        let long_ago = ago(chrono::Duration::minutes(30));
+        // 重啟前就在的五件。
+        let flying = a_bot(&env, "flying").await;
+        let r_flying = a_run(app, &flying, "running", &long_ago, None).await;
+        a_turn(app, "turns", &flying, Some(&r_flying), "in_flight", "ok", &long_ago, Some(&db::now())).await;
+        let orphan = a_bot(&env, "orphan").await;
+        let r_orphan = a_run(app, &orphan, "running", &long_ago, None).await;
+        let t_orphan = a_turn(app, "turns", &orphan, Some(&r_orphan), "in_flight", "pending", &long_ago, None).await;
+        let waiting = a_bot(&env, "waiting").await;
+        a_turn(app, "turns", &waiting, None, "queued", "pending", &long_ago, None).await;
+        let send_now = a_bot(&env, "send-now").await;
+        let t_send_now = a_turn(app, "turns", &send_now, None, "in_flight", "pending", &long_ago, None).await;
+        let ended = a_bot(&env, "ended").await;
+        let r_ended = a_run(app, &ended, "exited", &long_ago, Some(&long_ago)).await;
+        let t_ended = a_turn(app, "turns", &ended, Some(&r_ended), "in_flight", "ok", &long_ago, Some(&long_ago)).await;
+
+        rename(app, "turns", "turns_unreadable").await;
+        super::rearm_progress(app).await;
+        assert!(!polled(app, &r_flying).await && !polled(app, &r_orphan).await, "讀不到：這一次什麼都沒接回");
+        assert!(stall_gen(app, &r_flying).await.is_none());
+        assert!(!crate::lifecycle::queue_retry_timer_armed(&waiting));
+        assert_eq!(turn_state(app, "turns_unreadable", &t_orphan).await.1, "pending");
+
+        // 重啟之後才有的：這個行程自己送到一半的插隊送出、剛結束的 run 上還沒收的回合（收尾在這個行程的記憶體帳上）。
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let live_send_now = a_bot(&env, "live-send-now").await;
+        let t_live_send_now = a_turn(app, "turns_unreadable", &live_send_now, None, "in_flight", "pending", &db::now(), None).await;
+        let live_ended = a_bot(&env, "live-ended").await;
+        let r_live_ended = a_run(app, &live_ended, "exited", &long_ago, Some(&db::now())).await;
+        let t_live_ended = a_turn(app, "turns_unreadable", &live_ended, Some(&r_live_ended), "in_flight", "ok", &long_ago, Some(&long_ago)).await;
+
+        rename(app, "turns_unreadable", "turns").await;
+        let caught_up = eventually!(
+            polled(app, &r_flying).await
+                && polled(app, &r_orphan).await
+                && stall_gen(app, &r_flying).await.is_some()
+                && crate::lifecycle::queue_retry_timer_armed(&waiting)
+                && turn_state(app, "turns", &t_orphan).await.1 == "unknown"
+                && turn_state(app, "turns", &t_send_now).await.0 == "failed"
+                && turn_state(app, "turns", &t_ended).await.0 == "failed"
+        );
+        assert!(caught_up, "DB 恢復之後，沒有任何事件也要全部接回");
+        assert_eq!(turn_state(app, "turns", &t_send_now).await, ("failed".into(), "unknown".into()), "送出鍵生效了沒人知道");
+        assert!(stall_gen(app, &r_orphan).await.is_none(), "送到一半的那一筆不補 watchdog（不能重送）");
+
+        let armed = stall_gen(app, &r_flying).await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert_eq!(stall_gen(app, &r_flying).await, armed, "接回之後不再掛第二次");
+        assert_eq!(turn_state(app, "turns", &t_live_send_now).await, ("in_flight".into(), "pending".into()), "重啟之後才送的插隊送出不是孤兒");
+        assert_eq!(turn_state(app, "turns", &t_live_ended).await.0, "in_flight", "重啟之後才結束的 run，收尾歸這個行程的帳");
+    }
+
+    /// 只補還欠著的：一個 run 接回來了、另一個還寫不進去時，背景每一輪只碰欠著的那一個——接回來的 watchdog 不會一輪被換一次，
+    /// 開機時就確定沒事的 run 之後有了這個行程自己的回合（送達證不出來、所以沒掛 poller 的那種）也不被接手。
+    #[tokio::test]
+    async fn the_startup_recovery_retries_only_what_it_still_owes() {
+        let env = tt::env().await;
+        let app = &env.app;
+        let long_ago = ago(chrono::Duration::minutes(30));
+        let flying = a_bot(&env, "flying").await;
+        let r_flying = a_run(app, &flying, "running", &long_ago, None).await;
+        a_turn(app, "turns", &flying, Some(&r_flying), "in_flight", "ok", &long_ago, Some(&db::now())).await;
+        let orphan = a_bot(&env, "orphan").await;
+        let r_orphan = a_run(app, &orphan, "running", &long_ago, None).await;
+        let t_orphan = a_turn(app, "turns", &orphan, Some(&r_orphan), "in_flight", "pending", &long_ago, None).await;
+        let idle = a_bot(&env, "idle").await;
+        let r_idle = a_run(app, &idle, "running", &long_ago, None).await;
+        sqlx::query(
+            "CREATE TRIGGER orphan_unwritable BEFORE UPDATE OF delivery ON turns WHEN NEW.delivery = 'unknown'
+             BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END",
+        )
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        super::rearm_progress(app).await;
+        let armed = stall_gen(app, &r_flying).await;
+        assert!(armed.is_some() && polled(app, &r_flying).await, "讀得到的那一個當場接回");
+        assert!(!polled(app, &r_orphan).await, "收不成 unknown 就先不掛：欠著");
+        // 重試期間：這個行程送到 `idle`，送達證不出來（`unknown`，照設計不掛 poller）。
+        a_turn(app, "turns", &idle, Some(&r_idle), "in_flight", "unknown", &db::now(), Some(&db::now())).await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(!polled(app, &r_idle).await, "開機時就沒欠的 run，之後的回合是這個行程自己的");
+        assert_eq!(stall_gen(app, &r_flying).await, armed, "背景重試只碰還欠著的");
+        assert_eq!(turn_state(app, "turns", &t_orphan).await.1, "pending");
+
+        sqlx::query("DROP TRIGGER orphan_unwritable").execute(&app.db).await.unwrap();
+        assert!(
+            eventually!(polled(app, &r_orphan).await && turn_state(app, "turns", &t_orphan).await.1 == "unknown"),
+            "寫得進去之後接回"
+        );
+        assert_eq!(stall_gen(app, &r_flying).await, armed, "從頭到尾只掛一次");
+    }
+
+    /// 連 run 清單都讀不到時，欠著的是「開機前就在跑的 run」：重啟之後才開始的 run 不碰；重試期間這個行程自己已經盯上的 run
+    /// （新回合送出時掛了 poller）也不再掛一次。
+    #[tokio::test]
+    async fn the_startup_recovery_leaves_what_this_process_already_owns_alone() {
+        let env = tt::env().await;
+        let app = &env.app;
+        let long_ago = ago(chrono::Duration::minutes(30));
+        let flying = a_bot(&env, "flying").await;
+        let r_flying = a_run(app, &flying, "running", &long_ago, None).await;
+        a_turn(app, "turns", &flying, Some(&r_flying), "in_flight", "ok", &long_ago, Some(&db::now())).await;
+        let taken = a_bot(&env, "taken").await;
+        let r_taken = a_run(app, &taken, "running", &long_ago, None).await;
+        let t_taken = a_turn(app, "turns", &taken, Some(&r_taken), "in_flight", "ok", &long_ago, Some(&db::now())).await;
+
+        rename(app, "runs", "runs_unreadable").await;
+        super::rearm_progress(app).await;
+        assert!(!polled(app, &r_flying).await, "run 清單讀不到：這一次什麼都沒接回");
+
+        // 重試期間：這個行程送出了 `taken` 的回合、自己掛上 poller 與 watchdog；另一顆 bot 重啟之後才開始跑。
+        crate::lifecycle::arm_progress(app, &r_taken, &taken, &t_taken).await;
+        crate::lifecycle::arm_stall(app, &r_taken, &taken, &t_taken).await;
+        let own = stall_gen(app, &r_taken).await;
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let fresh = a_bot(&env, "fresh").await;
+        let r_fresh = db::ulid();
+        sqlx::query("INSERT INTO runs_unreadable (id,bot_id,state,agent_status,started_at) VALUES (?,?,'running','idle',?)")
+            .bind(&r_fresh)
+            .bind(&fresh)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        a_turn(app, "turns", &fresh, Some(&r_fresh), "in_flight", "ok", &db::now(), Some(&db::now())).await;
+
+        rename(app, "runs_unreadable", "runs").await;
+        assert!(
+            eventually!(polled(app, &r_flying).await && stall_gen(app, &r_flying).await.is_some()),
+            "開機前就在跑的那一個接回來"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert_eq!(stall_gen(app, &r_taken).await, own, "這個行程已經盯著的不再掛一次");
+        assert!(!polled(app, &r_fresh).await && stall_gen(app, &r_fresh).await.is_none(), "重啟之後才開始的 run 不是開機恢復的事");
     }
 
     /// A give-up stop's `stopping` run is healed while herdr lists the agent (review 2026-09-12 #1).

@@ -118,11 +118,30 @@ fn arm_expiry(app: &Arc<App>, until: &str) {
 }
 
 /// 開機時接手：上一顆 daemon 開的窗口還沒到期就重新排截止，已經過期就當場結束。
+///
+/// 讀不到不算接手過（#75 重開）：窗口可能還開著，沒排截止就只能等哪一輪對帳剛好來查——期間被標 exited 的子 agent
+/// 一直掛著。背景照開機恢復的退避再讀，讀到為止。
 pub async fn arm_on_startup(app: &Arc<App>) {
     match active(app).await {
         Ok(Some(w)) => arm_expiry(app, &w.until),
         Ok(None) => {}
-        Err(e) => tracing::warn!(error = ?e, "could not read herdr maintenance state"),
+        Err(e) => {
+            tracing::warn!(error = ?e, "could not read herdr maintenance state; retrying in the background");
+            let app = app.clone();
+            tokio::spawn(async move {
+                for attempt in 0.. {
+                    tokio::time::sleep(crate::reconcile::recovery_retry_delay(attempt)).await;
+                    match active(&app).await {
+                        Ok(Some(w)) => {
+                            arm_expiry(&app, &w.until);
+                            return;
+                        }
+                        Ok(None) => return,
+                        Err(e) => tracing::warn!(error = ?e, "still cannot read herdr maintenance state"),
+                    }
+                }
+            });
+        }
     }
 }
 
@@ -312,6 +331,31 @@ mod tests {
         assert!(deleted(&app, &lost).await, "維護結束仍沒接回：照原規則退休");
         assert!(!deleted(&app, &back).await, "接回來的留著");
         assert!(!deleted(&app, &before).await, "不回頭清舊帳");
+    }
+
+    /// #75 重開：開機接手窗口那一次讀不到，不算接手過。窗口在這之間已經到期：背景重試讀到之後照樣收尾（寫 note、退休
+    /// 沒接回的子 agent），不必等哪一輪對帳剛好來查。
+    #[tokio::test]
+    async fn a_startup_that_cannot_read_the_window_keeps_trying_until_it_can() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let h = agm_headers(&app).await;
+        let _ = open(State(app.clone()), h, open_in(10)).await.unwrap();
+        let lost = child_with_ended_run(&env, &crate::db::now()).await;
+        sqlx::query("UPDATE herdr_maintenance SET until = '2020-01-01T00:00:00.000Z'").execute(&app.db).await.unwrap();
+        sqlx::query("ALTER TABLE herdr_maintenance RENAME TO herdr_maintenance_unreadable").execute(&app.db).await.unwrap();
+        arm_on_startup(&app).await;
+        assert!(!deleted(&app, &lost).await, "讀不到：還沒接手");
+
+        sqlx::query("ALTER TABLE herdr_maintenance_unreadable RENAME TO herdr_maintenance").execute(&app.db).await.unwrap();
+        for _ in 0..150 {
+            if deleted(&app, &lost).await {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(deleted(&app, &lost).await, "讀得到之後自己接手：過期的窗口收尾、沒接回的子 agent 退休");
+        assert_eq!(notes(&app, "herdr_maintenance_expired").await, 1);
     }
 
     #[tokio::test]

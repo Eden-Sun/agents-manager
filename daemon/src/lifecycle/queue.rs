@@ -520,17 +520,13 @@ pub(crate) async fn pending_queue_retries(app: &Arc<App>) -> anyhow::Result<Vec<
 
 /// After a restart the in-memory retry timers are gone while `next_flush_at` survived: arm one per
 /// bot again at `max(now, next_flush_at)` (sol review round nine #3). `fire` is what the timer does.
-pub(crate) async fn rearm_queue_retries_with<F>(app: &Arc<App>, fire: F) -> usize
+///
+/// 讀不到回 `Err`，不是「沒有排著的」（#75 重開）：開機恢復把它記成欠著、之後再掃。
+pub(crate) async fn rearm_queue_retries_with<F>(app: &Arc<App>, fire: F) -> anyhow::Result<usize>
 where
     F: Fn(String) + Clone + Send + 'static,
 {
-    let pending = match pending_queue_retries(app).await {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!(error = %e, "cannot re-arm queued prompt retries");
-            return 0;
-        }
-    };
+    let pending = pending_queue_retries(app).await?;
     let mut armed = 0;
     for (bot, delay) in pending {
         let fire = fire.clone();
@@ -540,10 +536,10 @@ where
             tracing::info!(bot = %bot, retry_in_s = delay.as_secs(), "re-armed a queued prompt retry after restart");
         }
     }
-    armed
+    Ok(armed)
 }
 
-pub async fn rearm_queue_retries(app: &Arc<App>) -> usize {
+pub async fn rearm_queue_retries(app: &Arc<App>) -> anyhow::Result<usize> {
     let a = app.clone();
     rearm_queue_retries_with(app, move |bot| schedule_flush_queued(&a, &bot)).await
 }
@@ -1749,8 +1745,8 @@ mod flush_queue_tests {
                 });
             }
         };
-        assert_eq!(rearm_queue_retries_with(&app, fire.clone()).await, 1, "one timer for the bot");
-        assert_eq!(rearm_queue_retries_with(&app, fire.clone()).await, 0, "a second pass does not add another");
+        assert_eq!(rearm_queue_retries_with(&app, fire.clone()).await.unwrap(), 1, "one timer for the bot");
+        assert_eq!(rearm_queue_retries_with(&app, fire.clone()).await.unwrap(), 0, "a second pass does not add another");
         let left = queue_retry_timer_left(&f.bot_id).expect("armed");
         assert!(left > std::time::Duration::from_secs(55 * 60), "armed for next_flush_at, not sooner: {left:?}");
         assert_eq!(turn(&app, &f.turn_id).await.status, "queued", "not before it is due");
@@ -1762,7 +1758,7 @@ mod flush_queue_tests {
             .execute(&app.db)
             .await
             .unwrap();
-        assert_eq!(rearm_queue_retries_with(&app, fire).await, 1, "the due one replaces the later timer");
+        assert_eq!(rearm_queue_retries_with(&app, fire).await.unwrap(), 1, "the due one replaces the later timer");
 
         // The typed delivery itself takes about two seconds.
         let mut t = turn(&app, &f.turn_id).await;
@@ -1923,7 +1919,7 @@ mod flush_queue_tests {
         forget_queue_retry_timer(&f.bot_id);
         let fired = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let seen = fired.clone();
-        let armed = rearm_queue_retries_with(&app, move |bot: String| seen.lock().unwrap().push(bot)).await;
+        let armed = rearm_queue_retries_with(&app, move |bot: String| seen.lock().unwrap().push(bot)).await.unwrap();
         assert_eq!(armed, 1, "沒有 next_flush_at 的 queued turn 也要重新掛上");
         for _ in 0..40 {
             if !fired.lock().unwrap().is_empty() {
@@ -1954,7 +1950,7 @@ mod flush_queue_tests {
         assert!(!queue_retry_timer_armed(&f.bot_id));
         crate::reconcile::rearm_progress(&fresh).await;
         assert!(queue_retry_timer_armed(&f.bot_id), "startup re-armed it from next_flush_at");
-        let again = rearm_queue_retries(&fresh).await;
+        let again = rearm_queue_retries(&fresh).await.unwrap();
         assert_eq!(again, 0, "a second startup pass does not add another timer");
     }
 

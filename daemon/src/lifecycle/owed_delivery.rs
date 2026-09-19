@@ -448,6 +448,39 @@ mod tests {
         assert_eq!(env.herdr.calls_to("agent.prompt").len(), 1, "不再送");
     }
 
+    /// #75 重開：開機恢復讀不到時會在背景重試，重試那時這個行程可能正欠著某一筆的送達結果（DB 裡還是 in_flight＋pending）。
+    /// 那一筆不是重啟前送到一半的孤兒：先結清這個行程自己的帳，不能被收成 `unknown`、還掛上 poller。
+    #[tokio::test]
+    async fn the_startup_recovery_settles_this_processs_owed_result_instead_of_taking_it_for_an_orphan() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot, _conv, run) = idle_bot(&env, "codex").await;
+        sqlx::query("UPDATE runs SET pane_typed=0 WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
+        env.herdr.set_agent("api-bot", "pane-api", true);
+        env.herdr.fail_next("agent.prompt", tt::Fault::RefuseWith("agent_blocked"));
+        lose_delivery_writes(&app).await;
+        let body = uncommitted(prompt(&app, &bot, "跑一下測試", "crid-recovery").await);
+        let turn_id = body["turn_id"].as_str().unwrap().to_string();
+
+        // 開機恢復（的背景重試）這時走到這個 run：欠著的那一句還寫不進去，就先不碰。
+        crate::reconcile::rearm_progress(&app).await;
+        let t = turn(&app, &turn_id).await;
+        assert_eq!((t.status.as_str(), t.delivery.as_str()), ("in_flight", "pending"));
+
+        heal_delivery_writes(&app).await;
+        let mut t = turn(&app, &turn_id).await;
+        for _ in 0..150 {
+            if t.status != "in_flight" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            t = turn(&app, &turn_id).await;
+        }
+        assert_eq!((t.status.as_str(), t.delivery.as_str()), ("failed", "failed"), "結清的是這個行程記下的「一個字都沒進去」，不是 unknown");
+        assert!(!app.progress_pollers.lock().await.contains_key(&run), "收掉的回合不掛 poller");
+        assert_eq!(env.herdr.calls_to("agent.prompt").len(), 1, "不再送");
+    }
+
     /// 收成 failed 那一句欠著的時候，那一筆被別的路（run 結束、watchdog）先收掉了，而那條路不動 `delivery`：補的時候
     /// 回合照它收的樣子、不補說明，但送達要補成這一次看到的 `failed`——不能留一筆已經結束、送達卻永遠 `pending` 的回合
     /// （同一個 request id 重問會拿到 `pending`）。

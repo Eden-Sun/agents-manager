@@ -344,50 +344,65 @@ async fn close(app: &Arc<App>, bot_id: &str, p: &Pending) -> anyhow::Result<()> 
 
 /// run 已經結束（不是 starting／running／stopping）、回合卻還 in_flight（#156）：欠著的收尾只記在記憶體，daemon 在補上
 /// 之前重啟就沒人會收——那個 run 不會再有 hook，閒置 watchdog 也只看活著的 run。重啟時補收成 failed，寫明原因。
-pub(crate) async fn adopt_turns_of_ended_runs(app: &Arc<App>) {
+///
+/// 只收 `boot`（開機那一刻）之前就結束的 run：開機恢復讀不到時會在背景重試（#75），那時才結束的 run 的收尾在這個行程
+/// 自己的記憶體帳上，不歸這裡。回 `true`＝都收完了；讀不到或有一筆收不成回 `false`，下一輪再來。
+pub(crate) async fn adopt_turns_of_ended_runs(app: &Arc<App>, boot: &str) -> bool {
     let rows: Vec<(String, String, String, String)> = match sqlx::query_as(
         "SELECT t.id, t.run_id, c.bot_id, r.state FROM turns t
            JOIN runs r ON r.id = t.run_id
            JOIN conversations c ON c.id = t.conversation_id
-          WHERE t.status = 'in_flight' AND r.state NOT IN ('starting','running','stopping')",
+          WHERE t.status = 'in_flight' AND r.state NOT IN ('starting','running','stopping')
+            AND (r.ended_at IS NULL OR r.ended_at <= ?)",
     )
+    .bind(boot)
     .fetch_all(&app.db)
     .await
     {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(error = %e, "could not look for in-flight turns left on ended runs");
-            return;
+            return false;
         }
     };
+    let mut done = true;
     for (turn, run, bot, state) in rows {
         let lock = app.bot_lock(&bot).await;
         let _g = lock.lock().await;
         let note = format!("這一回合的 run 已經結束（{state}），當時沒能把回合收掉；daemon 重啟時補收。");
         match close_turn(app, &bot, &run, &turn, &note).await {
             Ok(()) => tracing::warn!(turn = %turn, run = %run, %state, "closed a turn left in flight on an ended run"),
-            Err(e) => tracing::warn!(turn = %turn, error = %e, "could not close a turn left in flight on an ended run"),
+            Err(e) => {
+                tracing::warn!(turn = %turn, error = %e, "could not close a turn left in flight on an ended run");
+                done = false;
+            }
         }
     }
+    done
 }
 
 /// 重啟前正在插隊送出、還沒掛上 run 的那一則（`in_flight`、`run_id IS NULL`）：送出鍵有沒有生效沒有人知道，
 /// 收它的那個 async 任務也跟著上一個行程走了。收成 failed、送達記成 unknown，不留一筆沒有 run 的 in_flight
 /// （它會一直佔著維護窗口的閘門）。被插隊的那一筆照舊在它的 run 上，由 hook 或 watchdog 收。
-pub(crate) async fn adopt_unbound_send_nows(app: &Arc<App>) {
+///
+/// 只收 `boot`（開機那一刻）之前建立的：開機恢復讀不到時會在背景重試（#75），那時這個行程自己正在插隊送出的那一則
+/// 同樣是 in_flight、還沒掛上 run，不能被當成孤兒收掉。回 `true`＝都收完了；讀不到或有一筆收不成回 `false`。
+pub(crate) async fn adopt_unbound_send_nows(app: &Arc<App>, boot: &str) -> bool {
     let rows: Vec<(String, String, String)> = match sqlx::query_as(
         "SELECT t.id, t.conversation_id, c.bot_id FROM turns t JOIN conversations c ON c.id = t.conversation_id
-          WHERE t.status = 'in_flight' AND t.run_id IS NULL",
+          WHERE t.status = 'in_flight' AND t.run_id IS NULL AND t.created_at <= ?",
     )
+    .bind(boot)
     .fetch_all(&app.db)
     .await
     {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(error = %e, "could not look for send-now turns left unbound by a restart");
-            return;
+            return false;
         }
     };
+    let mut done = true;
     let why = "插隊送出途中 daemon 停了：送出鍵有沒有生效不知道。正在跑的那一回合沒有被收掉；這一句若真的送出去了，回覆會以外部回合出現。";
     for (turn, conv, bot) in rows {
         let lock = app.bot_lock(&bot).await;
@@ -412,9 +427,13 @@ pub(crate) async fn adopt_unbound_send_nows(app: &Arc<App>) {
                 emit_turn(app, &turn).await;
             }
             Ok(None) => {}
-            Err(e) => tracing::warn!(turn = %turn, error = %e, "could not close a send-now left unbound by a restart"),
+            Err(e) => {
+                tracing::warn!(turn = %turn, error = %e, "could not close a send-now left unbound by a restart");
+                done = false;
+            }
         }
     }
+    done
 }
 
 /// 欠著的帳沒有 hook 也要補上：DB 一時寫不進去多半很快就好。只補欠著的（待證的要證據，不是時間）。
