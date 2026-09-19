@@ -190,7 +190,12 @@ pub async fn chat(
     let mut skipped = Vec::new();
     for t in targets {
         let crid = format!("{client_request_id}:{}", t.id);
-        match lifecycle::prompt_grouped(app, &t.id, text, &crid, Some(&group_id), Some(&deliver), attachment_ids, None).await {
+        // #167：字已經打進去、只是送達結果寫不進 DB（`Uncommitted`）——那是「結果不明」，不是「沒送」：放進 `sent`
+        // （`delivery:"unknown"`，daemon 自己補），不插「未送達」。同一個 crid 重送走冪等分支，不會再打字。
+        let sent_now = lifecycle::owed_as_unknown(
+            lifecycle::prompt_grouped(app, &t.id, text, &crid, Some(&group_id), Some(&deliver), attachment_ids, None).await,
+        );
+        match sent_now {
             Ok(out) => sent.push(json!({
                 "bot_id": t.id, "bot_name": t.name, "turn_id": out.turn_id,
                 "message_id": out.message_id, "delivery": out.delivery,
@@ -425,5 +430,115 @@ mod message_tests {
 
         app.db.close().await;
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// #167：收件 bot 的送達結果寫不進 DB（`LcError::Uncommitted`）＝字**已經打進 pane**，只是結果欠著。
+/// 群組送出以前把它記成 `skipped`（`detail` 是整段 503 JSON）並在那顆 bot 的對話插「群組訊息未送達」——
+/// 其實送到了、agent 正在做；照字面重發就是 bot 收到兩份。
+#[cfg(test)]
+mod uncommitted_tests {
+    use super::*;
+    use crate::testing as tt;
+
+    /// 一顆閒著、打字進 pane 的 claude（同 `owed_delivery::tests::idle_bot`）。
+    async fn idle_bot(env: &tt::Env, name: &str) -> (db::Bot, String) {
+        let app = &env.app;
+        let bot = tt::claude_bot(app, &env.project_id, name).await;
+        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, pane_typed, started_at)
+             VALUES (?,?,'running','idle','ws-1','pane-api','api-bot','test',1,?)",
+        )
+        .bind(db::ulid())
+        .bind(&bot.id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        (bot, conv)
+    }
+
+    async fn lose_delivery_writes(app: &Arc<App>) {
+        sqlx::query("CREATE TRIGGER lost_delivery_write BEFORE UPDATE OF delivery ON turns BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END")
+            .execute(&app.db)
+            .await
+            .unwrap();
+    }
+
+    fn typed(env: &tt::Env) -> usize {
+        env.herdr.methods().iter().filter(|m| *m == "pane.send_text").count()
+    }
+
+    async fn system_notes(app: &Arc<App>, conv: &str) -> Vec<String> {
+        sqlx::query_scalar("SELECT content FROM messages WHERE conversation_id=? AND role='system'")
+            .bind(conv)
+            .fetch_all(&app.db)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_recipient_whose_delivery_result_is_owed_is_sent_as_unknown_not_skipped() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (_bot, conv) = idle_bot(&env, "grp-owed").await;
+        env.herdr.live_pane("pane-api", tt::LivePane { width: Some(120), ..Default::default() });
+        lose_delivery_writes(&app).await;
+
+        let out = chat(&app, &env.project_id, "@grp-owed 跑一下測試", "crid-grp", &[]).await.ok().expect("chat 本身要成功");
+        assert_eq!(typed(&env), 1, "字已經打進 pane 了");
+        assert!(out["skipped"].as_array().unwrap().is_empty(), "已送出的收件人不能算「跳過」：{out}");
+        let sent = out["sent"].as_array().unwrap();
+        assert_eq!(sent.len(), 1, "{out}");
+        assert_eq!(sent[0]["delivery"], "unknown", "結果寫不進去＝結果不明，不假裝成功也不說失敗：{out}");
+        assert!(sent[0]["turn_id"].as_str().is_some_and(|t| !t.is_empty()), "前端靠 turn_id 鎖那一回合：{out}");
+        assert!(sent[0]["message_id"].as_str().is_some_and(|t| !t.is_empty()), "{out}");
+        let notes = system_notes(&app, &conv).await;
+        assert!(notes.iter().all(|n| !n.contains("未送達")), "對話裡不能說「未送達」：{notes:?}");
+    }
+
+    /// 同一個群組訊息重送（前端／使用者重按）：走冪等分支，DB 還壞著時照樣是結果不明、**不再打字**；
+    /// DB 好了之後拿到寫好的結果。
+    #[tokio::test]
+    async fn retrying_the_group_message_never_types_it_again() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (_bot, conv) = idle_bot(&env, "grp-retry").await;
+        env.herdr.live_pane("pane-api", tt::LivePane { width: Some(120), ..Default::default() });
+        lose_delivery_writes(&app).await;
+
+        let first = chat(&app, &env.project_id, "@grp-retry 跑一下測試", "crid-retry", &[]).await.ok().unwrap();
+        let turn_id = first["sent"][0]["turn_id"].as_str().unwrap().to_string();
+        let again = chat(&app, &env.project_id, "@grp-retry 跑一下測試", "crid-retry", &[]).await.ok().unwrap();
+        assert!(again["skipped"].as_array().unwrap().is_empty(), "{again}");
+        assert_eq!(again["sent"][0]["turn_id"], turn_id.as_str(), "同一個回合：{again}");
+        assert_eq!(typed(&env), 1, "DB 還壞著：重送不再打字");
+
+        sqlx::query("DROP TRIGGER lost_delivery_write").execute(&app.db).await.unwrap();
+        let healed = chat(&app, &env.project_id, "@grp-retry 跑一下測試", "crid-retry", &[]).await.ok().unwrap();
+        assert_eq!(healed["sent"][0]["turn_id"], turn_id.as_str(), "{healed}");
+        assert_eq!(healed["sent"][0]["delivery"], "ok", "DB 好了：拿到寫好的結果：{healed}");
+        assert_eq!(typed(&env), 1, "從頭到尾只打了一次");
+        assert!(system_notes(&app, &conv).await.iter().all(|n| !n.contains("未送達")));
+    }
+
+    /// 只要有一個收件人欠著，其他收件人照常送、照常算 `sent`；真的沒送出的（bot 沒在跑）仍是 `skipped`＋說明。
+    #[tokio::test]
+    async fn one_owed_recipient_does_not_change_how_the_others_are_reported() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (_owed, _conv) = idle_bot(&env, "grp-a").await;
+        let stopped = tt::claude_bot(&app, &env.project_id, "grp-b").await;
+        env.herdr.live_pane("pane-api", tt::LivePane { width: Some(120), ..Default::default() });
+        lose_delivery_writes(&app).await;
+
+        let out = chat(&app, &env.project_id, "@all 跑一下測試", "crid-mix", &[]).await.ok().unwrap();
+        assert_eq!(out["sent"].as_array().unwrap().len(), 1, "{out}");
+        assert_eq!(out["sent"][0]["bot_name"], "grp-a", "{out}");
+        let skipped = out["skipped"].as_array().unwrap();
+        assert_eq!(skipped.len(), 1, "{out}");
+        assert_eq!(skipped[0]["bot_id"], stopped.id.as_str(), "{out}");
+        assert_eq!(skipped[0]["reason"], "not_running", "{out}");
     }
 }

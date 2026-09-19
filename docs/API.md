@@ -990,6 +990,9 @@ Project 底下所有存活 bot 的訊息合併，以插入順序（`rowid`）倒
 
 - 部分略過仍 200。`sent[].delivery` 同 §5。`skipped[].reason`：`not_running`、`blocked`、`in_flight`、`unknown_delivery`、`conflict`、`not_found`、`bad_request`、`upstream`；
   `detail` 即單 bot prompt 的 409 reason。每個略過的 bot 對話多一則同 `group_id` 的 system 訊息（經 `message_added` 推）。
+  **字已經送進去、送達結果寫不進 DB**（單 bot prompt 的 `503 delivery_state_uncommitted`，§5，#149）不是略過：那個收件人放進 `sent`，
+  `delivery` 依 `owed_delivery::owed_as_unknown` 標成 `unknown`（herdr 明確拒收才是 `failed`），帶 `turn_id`／`message_id`，**不**插「群組訊息未送達」。
+  daemon 自己補上結果；同一個群組訊息（同 `client_request_id`）重送走冪等分支，不會再打字，DB 好了之後拿到寫好的 `delivery`。
 - 錯誤：`400 {"error":"no_mention","message","bots":[{id,name,kind}]}`；`400` 空 text；`404` project。
 - WS 沒有新事件：各 bot 各自推 `message_added`（帶 `group_id`）與 `turn_updated`，前端依 `bot_id → project_id` 歸群組。
 
