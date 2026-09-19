@@ -1431,7 +1431,12 @@ pub async fn replay_host(app: &Arc<App>, host: &str) {
     });
 }
 
+#[cfg(not(test))]
 const REPLAY_RETRIES: u32 = 40;
+// 測試的間隔是 50ms，40 次只撐 2 秒：runner 負載高時，測試執行緒從 `replay_host` 到把表改回
+// 可讀之間就可能超過，背景重試先放棄，spool 永遠收不進來（#255 的另一個偶發來源）。
+#[cfg(test)]
+const REPLAY_RETRIES: u32 = 400;
 #[cfg(not(test))]
 const REPLAY_RETRY_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
 #[cfg(test)]
@@ -3745,13 +3750,18 @@ mod host_unreadable_replay_tests {
         replay_host(&env.app, crate::config::LOCAL_HOST).await;
         assert!(spool.exists(), "讀不到時什麼都不能動");
         tt::make_table_readable(&env.app, "projects").await;
-        for _ in 0..100 {
-            if !spool.exists() {
+        // 等的是「收完」，不是「spool 不見了」（#255）：`replay_spool` 先把 spool rename 成
+        // `.replaying`、逐行 commit 進 hook_events，**全部 commit 之後**才刪 `.replaying`。只等
+        // spool 消失，會在 rename 之後、commit 之前就去數列數，慢的 runner 上數到 0。
+        let staging = spool.with_extension("jsonl.replaying");
+        for _ in 0..200 {
+            if !spool.exists() && !staging.exists() {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         assert!(!spool.exists(), "DB 恢復後背景重試要把 spool 收進來");
+        assert!(!staging.exists(), "收完才刪 .replaying：{staging:?}");
         assert_eq!(inbox_rows(&env).await, 1, "恰好收一次");
     }
 }
