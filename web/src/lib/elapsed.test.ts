@@ -6,7 +6,9 @@ test('跑了多久：秒、分秒、時分秒', () => {
   assert.equal(fmtElapsed(14_000), '14s')
   assert.equal(fmtElapsed(194_000), '3m14')
   assert.equal(fmtElapsed(185_000), '3m05')
-  assert.equal(fmtElapsed(4_805_000), '1:20:05')
+  assert.equal(fmtElapsed(4_805_000), '1h20')
+  assert.equal(fmtElapsed(3_600_000), '1h00')
+  assert.equal(fmtElapsed(8_455_000), '2h20')
 })
 
 // issue #93：起點要用 daemon 觀察到的時間，不能靠前端自己在事件抵達那一刻現算。
