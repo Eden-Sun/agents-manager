@@ -1380,6 +1380,12 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
   "source_url": "https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md", "error": null }
 ```
 
+## 撞限第二意見帳本 `/api/judge/shadow`（SPEC §4.3c，issue #240）
+- `GET /api/judge/shadow?limit=`（預設 200、上限 1000）→ `{enabled, projects, model, rows:[{id,at,bot_id,run_id,kind,matched_line,composer_idle,regex_verdict,jev_is_live_ui,model,ms,input_tokens,error,cleared_at}]}`，新的在前。唯讀；`matched_line` 是遮罩後的；key 與 `key_file` 不回。
+
+- `GET /api/judge/settings` → `{enabled, projects, model, key_present, key_error}`。key 永遠不回。
+- `PUT /api/judge/settings {enabled?, projects?, token?}` → 同上。`token` 非空＝寫進 key 檔（600）、空或省略＝不動；`projects` 是專案 id 或 label，去空白、去重；`enabled:true` 而沒有可用的 key → 409 `{error:"needs_key", reason}`；`token` 含空白／控制字元 → 400。存檔當下生效。
+
 ## 上游新版分診 `/api/release-triage/*`（SPEC §18.2c，issue #204）
 
 CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>] --json`（抓 feed、切條、分桶、寫帳本；抓不到 exit 1）輸出

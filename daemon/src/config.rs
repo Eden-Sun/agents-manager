@@ -257,6 +257,67 @@ pub struct ConfigFile {
     /// issue #204：上游新版分診開 GitHub issue 的設定（預設不開）。
     #[serde(default, skip_serializing_if = "ReleaseTriageCfg::is_default")]
     pub release_triage: ReleaseTriageCfg,
+    /// issue #240：撞限偵測的第二意見（只記錄），預設關。
+    #[serde(default, skip_serializing_if = "JudgeCfg::is_default")]
+    pub judge: JudgeCfg,
+}
+
+/// `[judge]`（SPEC §4.3c）：`enabled` 與 `projects`（專案 id 或 label）兩層都要開才會把遮罩後的畫面尾段
+/// 送到 `endpoint`。`key_file` 只是路徑，key 本身不進設定檔。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JudgeCfg {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub projects: Vec<String>,
+    #[serde(default = "default_judge_key_file")]
+    pub key_file: String,
+    #[serde(default = "default_judge_endpoint")]
+    pub endpoint: String,
+    /// 釘版本：`jev-latest` 會漂，shadow 的數字就不能前後比。
+    #[serde(default = "default_judge_model")]
+    pub model: String,
+    #[serde(default = "default_judge_timeout_ms")]
+    pub timeout_ms: u64,
+    /// 保險絲：一小時內問過這麼多次就不再問。
+    #[serde(default = "default_judge_max_per_hour")]
+    pub max_per_hour: u32,
+}
+
+fn default_judge_key_file() -> String {
+    "~/.config/typesafe/api-key".into()
+}
+fn default_judge_endpoint() -> String {
+    "https://api.typesafe.ai/v1/systemone".into()
+}
+fn default_judge_model() -> String {
+    "jev-1.13.0".into()
+}
+fn default_judge_timeout_ms() -> u64 {
+    3000
+}
+fn default_judge_max_per_hour() -> u32 {
+    60
+}
+
+impl Default for JudgeCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            projects: Vec::new(),
+            key_file: default_judge_key_file(),
+            endpoint: default_judge_endpoint(),
+            model: default_judge_model(),
+            timeout_ms: default_judge_timeout_ms(),
+            max_per_hour: default_judge_max_per_hour(),
+        }
+    }
+}
+
+impl JudgeCfg {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// `[release_triage]`：`publish = false`（預設）時只寫帳本、完全不呼叫 `gh issue create`——先乾跑幾版，

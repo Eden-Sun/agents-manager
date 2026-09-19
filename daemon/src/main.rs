@@ -37,6 +37,7 @@ mod herdr_update;
 mod herdr_version;
 mod hook_cmd;
 mod hook_inbox;
+mod judge;
 mod hookrecv;
 mod hosts;
 mod kind_probe;

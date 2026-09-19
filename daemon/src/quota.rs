@@ -612,6 +612,7 @@ pub async fn clear_limit_hit_for_bot(app: &Arc<App>, bot: &crate::db::Bot) {
     };
     let base = quota_base_for_host(app, &host, &bot.kind, identity.as_deref()).await;
     clear_limit_hit(app, &host, &base).await;
+    crate::judge::note_cleared(&app.db, &bot.id).await;
 }
 
 /// 每把 key 上一次被成功回合清撞限（[`clear_limit_hit`]）的時刻。只在記憶體：重啟後是空的，意思就是
