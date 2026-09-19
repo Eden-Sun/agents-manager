@@ -325,7 +325,8 @@ async fn close(app: &Arc<App>, bot_id: &str, p: &Pending) -> anyhow::Result<()> 
         emit_message_added(app, bot_id, m).await;
     }
     if let Some(n) = &p.new_turn {
-        if let (true, Some((rec, at))) = (bound, &n.delivery) {
+        // 掛不上 run、收成 failed 的那一則也要寫（#163）：送出鍵生效過，字送出去了——送達與回合成敗是兩件事（§4.4a）。
+        if let Some((rec, at)) = &n.delivery {
             // 寫不進去就記在送達結果的帳上（#149，`owed_delivery` 自己重試）：這個交易已經 commit，打斷這一半不重來。
             let _ = super::owed_delivery::delivered_at(app, bot_id, &n.id, *rec, at).await;
         }
