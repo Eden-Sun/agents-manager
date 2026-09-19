@@ -30,27 +30,54 @@
   line-height: 1.5;
 }
 
-/* 桌機更新框分左右（2026-09-19 使用者）：左 changelog、右 AGM 解析，視窗放寬，各自捲動。手機維持上下。 */
+/* 桌機更新框分左右（2026-09-19 使用者），但別把視窗撐滿（同日：「現又太大，聰明的調整 render 空間」）：
+   兩欄只長到內容需要的高度、上限 42vh 各自捲；bot 清單改成會換行的小晶片，不再一顆一行；手機維持上下。 */
 @media (width > 900px) {
   .confirm-dialog:has(.update-split) {
-    width: min(980px, 94vw) !important;
+    width: min(880px, 92vw) !important;
   }
 
   .update-split {
     display: grid;
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     gap: 12px;
-    align-items: stretch;
+    align-items: start;
   }
 
   .update-split > * {
     min-width: 0;
     margin: 0;
-    max-height: 62vh;
+    max-height: 42vh;
     overflow: auto;
   }
 
   .update-split .agm-review-body {
     max-height: none;
+  }
+
+  .confirm-dialog:has(.update-split) .confirm-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 6px;
+    margin: 6px 0 10px;
+    padding: 0;
+    list-style: none;
+    max-height: 18vh;
+    overflow: auto;
+  }
+
+  .confirm-dialog:has(.update-split) .confirm-list > li {
+    padding: 1px 8px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--bg-sunken);
+    font-size: 12px;
+    line-height: 1.6;
+    white-space: nowrap;
+  }
+
+  .confirm-dialog:has(.update-split) .confirm-note {
+    margin: 4px 0 0;
+    padding: 4px 10px;
   }
 }
