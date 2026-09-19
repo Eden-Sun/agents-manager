@@ -2453,6 +2453,7 @@ inbox `assignment_noticed`（`needs_review=false`）。送不出去或回合失�
 
 #### 18.8b 撞到用量上限是「等」，不是「失敗」
 `quota.limit_hit` 記 CLI 印的上限橫幅（`You've hit your usage limit …`，可能帶 `try again at …`）。狀態 `quota_blocked`（未結案）：
+codex 橫幅的 `try again at` 沒有時區，印的是**那台主機**的當地時間：本機照 daemon 時區、遠端照 `tools::detect` 記下的 `date +%z` 偏移（`HostTools.utc_offset_secs`）；偏移讀不到（或讀不到 bot 在哪台主機）不猜，到期改用 app-server 的重置時間，沒有就撞限起 5 小時（#239）。
 
 - **派送前**（`controller::dispatch`）與**回合結束後**（`on_turn_done`）各查一次 `quota::try_limit_hit_for_bot`，撞到就停在 `quota_blocked`。
   回合結束那次的「回覆」是系統錯誤，記進 `error`，不寫 `result`、不算 `completed`。
