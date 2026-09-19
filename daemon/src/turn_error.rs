@@ -114,18 +114,34 @@ fn fallback_until(lower: &str, at: &str) -> Option<String> {
 ///
 /// Opus／Sonnet 的週桶 daemon 沒有量表可放：**一格都不標**（標 7d 會讓同身分所有 bot 看起來週額度用光），
 /// 重置時間借 7d 那格——`/usage` 的 `weekly_scoped` 列跟 `weekly_all` 同一個重置週期（review3 c4 M1）。
-fn saturate_bucket(q: &mut crate::quota::Quota, lower: &str) -> Option<String> {
+///
+/// 重置時間不晚於撞的那一刻（`at`）的讀數是**上一個窗**的：閒置的 5h 窗，`/usage` 照樣回上一個重置時間
+/// （2026-09-19 `claude:cc1`：0%、−0.2h）。它說不出這次撞限什麼時候解除——拿來當到期，撞限一記下就過期、被
+/// `quota::set` 丟掉，派工照送（#236）。所以不拿它的時間：認不出桶名時改看下一個窗；明講的那一桶照樣標滿，
+/// 過期的重置時間丟掉，到期交給保底（[`fallback_until`]）。
+fn saturate_bucket(q: &mut crate::quota::Quota, lower: &str, at: &str) -> Option<String> {
+    let hit_at = chrono::DateTime::parse_from_rfc3339(at).ok();
+    let stale = |w: &crate::quota::Window| {
+        let reset = w.resets_at.as_deref().and_then(|r| chrono::DateTime::parse_from_rfc3339(r).ok());
+        matches!((reset, hit_at), (Some(r), Some(a)) if r <= a)
+    };
+    let current = |w: &Option<crate::quota::Window>| w.as_ref().is_some_and(|w| !stale(w));
     let full = |w: &mut Option<crate::quota::Window>| {
         w.as_mut().map(|w| {
             w.used_pct = 100.0;
+            if stale(w) {
+                w.resets_at = None;
+            }
             w.resets_at.clone()
         })
     };
     match limit_bucket(lower) {
         LimitBucket::Fable => full(&mut q.fable).flatten(),
-        LimitBucket::Model(_) => q.seven_day.as_ref().and_then(|w| w.resets_at.clone()),
+        LimitBucket::Model(_) => q.seven_day.as_ref().filter(|w| !stale(w)).and_then(|w| w.resets_at.clone()),
         LimitBucket::Weekly => full(&mut q.seven_day).flatten(),
         LimitBucket::Session => full(&mut q.five_hour).flatten(),
+        // 5h 窗閒著（上一個窗的讀數）＝撞的不會是 5h，先看 7d。
+        LimitBucket::Unknown if !current(&q.five_hour) && current(&q.seven_day) => full(&mut q.seven_day).flatten(),
         LimitBucket::Unknown => match full(&mut q.five_hour) {
             Some(until) => until,
             None => full(&mut q.seven_day).flatten(),
@@ -508,7 +524,7 @@ async fn record_claude(app: &Arc<App>, host: &str, m: &Mark) -> Result<crate::qu
     let lower = m.line.to_ascii_lowercase();
     // 那一桶還沒有讀數時 `saturate_bucket` 回 None，而 `None` 在 `limit_hit_expired` 是「永不過期」。
     // 給一個保底時間，撞限才有出口（review 2026-09-16）。
-    let until = saturate_bucket(&mut q, &lower).or_else(|| fallback_until(&lower, &m.at));
+    let until = saturate_bucket(&mut q, &lower, &m.at).or_else(|| fallback_until(&lower, &m.at));
     let hit = crate::quota::LimitHit { message: m.line.clone(), until, at: m.at.clone(), bucket: bucket_name(&lower) };
     q.limit_hit = Some(hit.clone());
     q.updated_at = db::now();
@@ -698,7 +714,7 @@ mod quota_limit_tests {
             updated_at: at.into(), source: "test".into(), account: None, host: "local".into(),
         };
         let lower = "you've hit your session limit".to_string();
-        let until = saturate_bucket(&mut q, &lower).or_else(|| fallback_until(&lower, at));
+        let until = saturate_bucket(&mut q, &lower, at).or_else(|| fallback_until(&lower, at));
         assert_eq!(until.as_deref(), Some("2026-09-16T12:00:00Z"));
     }
 
@@ -714,7 +730,7 @@ mod quota_limit_tests {
         ] {
             assert!(is_quota_limit(line), "{line}");
             let mut q = quota();
-            assert_eq!(saturate_bucket(&mut q, &line.to_ascii_lowercase()).as_deref(), Some(until), "{line}");
+            assert_eq!(saturate_bucket(&mut q, &line.to_ascii_lowercase(), "2026-09-16T10:00:00Z").as_deref(), Some(until), "{line}");
             let pct = |w: &Option<crate::quota::Window>| w.as_ref().unwrap().used_pct;
             let got = [("5h", pct(&q.five_hour)), ("7d", pct(&q.seven_day)), ("fable", pct(&q.fable))];
             for (name, p) in got {
@@ -736,14 +752,14 @@ mod quota_limit_tests {
             assert_eq!(bucket_name(&lower).as_deref(), Some(bucket), "{line}");
             let mut q = quota();
             // 重置時間借 7d 那格（`/usage` 的 weekly_scoped 與 weekly_all 同一個週期），但一格量表都不標。
-            assert_eq!(saturate_bucket(&mut q, &lower).as_deref(), Some("7d-reset"), "{line}");
+            assert_eq!(saturate_bucket(&mut q, &lower, "2026-09-16T10:00:00Z").as_deref(), Some("7d-reset"), "{line}");
             let pct = |w: &Option<crate::quota::Window>| w.as_ref().unwrap().used_pct;
             assert_eq!((pct(&q.five_hour), pct(&q.seven_day), pct(&q.fable)), (40.0, 60.0, 10.0), "{line}：量表不動");
             // 那一桶連 7d 都還沒有讀數時照舊給保底（一週），不會留下 until=None。
             let mut empty = quota();
             empty.seven_day = None;
             let at = "2026-09-16T10:00:00Z";
-            let until = saturate_bucket(&mut empty, &lower).or_else(|| fallback_until(&lower, at));
+            let until = saturate_bucket(&mut empty, &lower, at).or_else(|| fallback_until(&lower, at));
             assert_eq!(until.as_deref(), Some("2026-09-23T10:00:00.000Z"), "{line}");
         }
         // 「weekly limit」仍然是整個身分的 7d。
@@ -846,6 +862,51 @@ mod quota_limit_tests {
         assert!(!owes_limit_hit(&app, &bot.id), "較舊的那筆一併結清");
         let hit = crate::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().expect("照擋");
         assert_eq!(hit.bucket.as_deref(), Some("seven_day"), "記憶體留著較新的那筆，沒被舊的蓋回去");
+    }
+
+    /// 那一桶的讀數已經過了重置時間：閒置的 5h 窗，`/usage` 探測照樣回上一個窗的重置時間（2026-09-19 正式資料
+    /// `claude:cc1`：five_hour 0%、重置 −0.2h，同時週窗 97%）。撞限的到期不能拿這個過去的時間——一記下就算過期、被
+    /// `quota::set` 丟掉，等於沒撞限，排著的與派工照送、再撞一次。
+    /// 認不出桶名的橫幅（`You've hit your limit`）：5h 窗閒著，撞的只可能是週窗，到期借 7d 的重置時間；
+    /// 說是 session 的：5h 窗的讀數過期了，照保底（撞的那一刻 +5 小時）。
+    #[tokio::test]
+    async fn a_limit_hit_does_not_take_its_expiry_from_a_window_that_already_reset() {
+        let hours = |h: i64| db::iso_at(chrono::Utc::now() + chrono::Duration::hours(h));
+        let week_reset = hours(100);
+        let reading = || crate::quota::Quota {
+            five_hour: Some(crate::quota::Window { used_pct: 0.0, resets_at: Some(hours(-1)) }),
+            seven_day: Some(crate::quota::Window { used_pct: 97.0, resets_at: Some(week_reset.clone()) }),
+            fable: None,
+            reset_credits: None,
+            limit_hit: None,
+            plan: None,
+            updated_at: db::now(),
+            source: "claude-usage".into(),
+            account: None,
+            host: crate::config::LOCAL_HOST.into(),
+        };
+        let later_than = |until: &Option<String>, h: i64| {
+            let u = chrono::DateTime::parse_from_rfc3339(until.as_deref().expect("要有到期時間")).unwrap();
+            u.with_timezone(&chrono::Utc) > chrono::Utc::now() + chrono::Duration::hours(h)
+        };
+
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (bot, queued) = bot_with_a_queued_prompt(&env, crate::config::LOCAL_HOST, None).await;
+        crate::quota::set(&app, crate::config::LOCAL_HOST, "claude", reading()).await;
+        mark_claude_limit_hit(&app, &bot, "You've hit your limit · resets 5pm (Asia/Taipei)").await.unwrap();
+        let hit = crate::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().expect("撞限要擋住，不能一記下就過期");
+        assert_eq!(hit.until.as_deref(), Some(week_reset.as_str()), "5h 窗閒著：到期借 7d 的重置時間");
+        let held = hold_on(&app, &queued).await.expect("排著的那一則蓋上了憑據");
+        assert!(later_than(&held["until"].as_str().map(String::from), 99), "憑據上的到期也不能是過去：{held}");
+
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (bot, _queued) = bot_with_a_queued_prompt(&env, crate::config::LOCAL_HOST, None).await;
+        crate::quota::set(&app, crate::config::LOCAL_HOST, "claude", reading()).await;
+        mark_claude_limit_hit(&app, &bot, LIMIT).await.unwrap();
+        let hit = crate::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().expect("session 撞限要擋住");
+        assert!(later_than(&hit.until, 4), "5h 窗的讀數過期了：保底 5 小時，不是過去的時間：{hit:?}");
     }
 
     /// 身分表還沒偵測完（重啟後、`tools::detect` 之前）：共用預設帳號的 cc0 會被猜成 `claude:cc0`，偵測完之後查詢端讀裸
