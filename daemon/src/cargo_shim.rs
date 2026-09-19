@@ -266,6 +266,7 @@ am_lease_sleep() {
 # * 讀不到時間（`date +%s` 壞掉）：沒有依據可以等，第一次失敗就停。
 am_lease_watch() {
     _lw_shim=$$
+    trap 'echo "[dbg] watcher got HUP" >&2; ps -axo pid,ppid,pgid,sess,stat,command | tail -30 >&2; exit 129' HUP
     _ls_pid=""
     _ls_gap=""
     _lw_term=""
@@ -527,6 +528,8 @@ am_cargo() {
     fi
     # shim 自己的 process group：守衛在 shim 被 SIGKILL 之後靠它確認 cargo 還是自己的（`am_kill_tree`，issue #183）。
     _pgid=$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')
+    ps -o pid,ppid,pgid,sess,tpgid,stat,tty,command -p $$ >&2
+    trap 'echo "[dbg] shim got HUP" >&2; ps -axo pid,ppid,pgid,sess,stat,command | grep -v " grep" | tail -30 >&2; exit 129' HUP
     am_lease_watch &
     _renew_pid=$!
     trap '_release' EXIT INT TERM
