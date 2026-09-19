@@ -903,8 +903,13 @@ pub async fn restart_bot_with(app: &Arc<App>, bot_id: &str, opts: StartOpts) -> 
     match &started {
         // 排著的交給新的 run：`--resume` 起的 claude 由 `resume_gate` 等驗證，其他照常送。
         Ok(_) => schedule_flush_queued(app, bot_id),
-        // 新 agent 起來了，只是 `running` 還沒記下（#145）：bot 回來了，不是沒開回來。重試收成 running 之後照常送。
-        Err(LcError::Uncommitted(_)) => {}
+        // 新 agent 起來了，只是 `running` 還沒記下（#145）：bot 回來了，不是沒開回來。對帳重試收成 running 時不叫 flush，
+        // 它起來時的 idle 邊又早在 `starting` 就過了：等它收斂再叫（#165，同 start_send 的 #152）。
+        Err(LcError::Uncommitted(v)) => {
+            if let Some(run_id) = v.get("run_id").and_then(|r| r.as_str()) {
+                super::start_send::flush_once_running(app, bot_id, run_id);
+            }
+        }
         Err(_) => {
             if let Some(run_id) = stopping.as_deref() {
                 left_down_by_restart(app, bot_id, run_id).await;
@@ -1135,6 +1140,8 @@ pub async fn restart_child_in_pane_with(app: &Arc<App>, bot_id: &str, require_id
         Err(e) => {
             tracing::warn!(bot = %bot.name, run = %run_id, error = %e, "the child is back but its run could not be recorded as running");
             super::run_state::schedule_settle(app, &run_id, super::run_state::Settle::Reconcile { stuck: "starting".into() });
+            // 排著的派工留給它（#129），但收成 running 的對帳不叫 flush：等它收斂再叫（#165）。
+            super::start_send::flush_once_running(app, bot_id, &run_id);
             app.emit_bot_status(bot_id).await;
             return Err(LcError::uncommitted(
                 "start_state_uncommitted",
@@ -2404,6 +2411,26 @@ mod run_state_commit_tests {
         assert_eq!(db::run(&app.db, &run.id).await.unwrap().unwrap().state, "running", "照 herdr 的證據收斂");
         assert_eq!(starts(&env), 1, "沒有再開第二顆");
         assert_eq!(live_runs(&app, &bot.id).await, 1);
+    }
+
+    /// 同驗收 1，走重啟（換身分、`?resume=native`、一鍵重啟）而且 AGM 有一則排著的派工：重啟中不撤（#106），但對帳把新 run
+    /// 收成 `running` 不會叫 flush（#152 在 start_send 補過同一個洞），它起來時的 idle 邊又早在 `starting` 就過了——要自己等它
+    /// 收斂再叫，不然那一則要等 30 分鐘的排隊保險絲把它撤掉、交辦停在 blocked。
+    #[tokio::test]
+    async fn a_restart_whose_new_run_cannot_be_recorded_running_still_flushes_the_queue_once_it_settles() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "alfa").await;
+        start_bot(&app, &bot.id).await.expect("先起來");
+        let queued = rs::a_turn(&app, &bot.id, None, "queued").await;
+        rs::refuse_run_state(&app, "running").await;
+
+        let err = restart_bot(&app, &bot.id).await.expect_err("新 run 沒記下 running");
+        let LcError::Uncommitted(body) = &err else { panic!("要 503 start_state_uncommitted，拿到 {err:?}") };
+        let run = db::active_run(&app.db, &bot.id).await.unwrap().expect("新 run 停在 starting");
+        assert_eq!((body["run_id"].as_str(), run.state.as_str()), (Some(run.id.as_str()), "starting"));
+        assert_eq!(rs::turn_status(&app, &queued).await, "queued", "重啟中：不當孤兒撤");
+        assert!(super::super::start_send::watching_for_running(&run.id), "排了「收成 running 就叫 flush」");
     }
 
     /// 驗收 3：start 失敗、pane 收掉了，`exited` 卻也寫不進去——不能留一顆永遠擋住下一次 start 的 `starting`。
