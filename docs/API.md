@@ -1132,7 +1132,7 @@ Project 底下所有存活 bot 的訊息合併，以插入順序（`rowid`）倒
 | kind | model | effort | fast |
 |---|---|---|---|
 | `codex` | `-m <model>` | `-c model_reasoning_effort="<effort>"` | 一律帶：`-c service_tier="priority"`（勾）或 `-c service_tier=""`（沒勾），見 SPEC §4.4a |
-| `grok` | `-m <model>` | `--reasoning-effort <effort>`（模型不支援的等級啟動時丟掉） | 不注入 |
+| `grok` | `-m <model>` | `--reasoning-effort <effort>`（模型不支援的等級啟動時丟掉）。TUI 不理這個參數也不理 config 的 `default_reasoning_effort`（#215）：就緒後若框底不是設定的等級，daemon 補送 `/effort <level>` | 不注入 |
 | `claude` | `--model <model>` | `--effort <effort>` | 不注入 |
 
 ### 12.3 `hosts[].attach_command`

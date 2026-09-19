@@ -509,6 +509,18 @@ pub fn grok_title_model_effort(title: &str) -> (Option<String>, Option<String>) 
     (model, effort)
 }
 
+/// grok TUI 把實際 effort 畫在框底 `╰── Grok 4.6 (high) · always-approve ─╯`（#215）。
+/// `--reasoning-effort` 與 `default_reasoning_effort` 都被 TUI 忽略，啟動後要靠這行判斷要不要補 `/effort`。
+pub fn grok_effort_from_screen(screen: &str) -> Option<String> {
+    for line in screen.lines() {
+        let Some(idx) = line.find("Grok ").or_else(|| line.find("grok ")) else { continue };
+        if let (_, Some(e)) = grok_title_model_effort(&line[idx..]) {
+            return Some(e);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -560,6 +572,15 @@ mod tests {
         // A title the agent has renamed to its task says nothing about the model.
         assert_eq!(grok_title_model_effort("遠端主機 gh 登入 API 與 UI - grok"), (None, None));
         assert_eq!(grok_title_model_effort("Grok Code Fast"), (None, None));
+    }
+
+    #[test]
+    fn grok_effort_is_read_off_the_tui_footer() {
+        let high = "  │ ❯                                        │\n  ╰──────────────── Grok 4.6 (high) · always-approve ─╯\n";
+        assert_eq!(grok_effort_from_screen(high).as_deref(), Some("high"));
+        let medium = "  ╰──────────────────────────────── Grok 4.6 (medium) · always-approve ─╯\n";
+        assert_eq!(grok_effort_from_screen(medium).as_deref(), Some("medium"));
+        assert_eq!(grok_effort_from_screen("claude composer, no grok footer"), None);
     }
 
     /// Real `settings.json` shapes seen on this machine and on m4p, 2026-09-07: an account

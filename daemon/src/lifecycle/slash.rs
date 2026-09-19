@@ -161,6 +161,39 @@ async fn apply_live_setting_inner(app: &Arc<App>, bot_id: &str, fields: &[&str])
     None
 }
 
+/// #215：grok TUI 不理啟動參數 `--reasoning-effort`（也不理 `default_reasoning_effort`）。
+/// agent 就緒後讀框底 `Grok 4.6 (high)`；跟 bot 設定不同才送 `/effort`（已相符就不要打字，否則 `pane_typed` 會改 prompt 路徑）。
+/// 呼叫端必須已握 bot 鎖、run 已是 running。slash 失敗不讓 start 失敗——agent 已經在跑。
+pub(crate) async fn apply_grok_startup_effort(
+    app: &Arc<App>,
+    bot: &db::Bot,
+    run_id: &str,
+    pane_id: &str,
+    client: &HerdrClient,
+) -> Result<(), String> {
+    if bot.kind != "grok" {
+        return Ok(());
+    }
+    let Some(wanted) = bot.effort.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(|s| s.to_ascii_lowercase()) else {
+        return Ok(());
+    };
+    let screen = client.pane_read(pane_id, "visible", 60).await.map(|r| r.text).unwrap_or_default();
+    if crate::models::grok_effort_from_screen(&screen).as_deref() == Some(wanted.as_str()) {
+        return Ok(());
+    }
+    let line = format!("/effort {wanted}");
+    mark_pane_typed(app, run_id).await?;
+    send_slash_line(client, pane_id, &line).await.map_err(|e| format!("{e:?}"))?;
+    let _ = wait_for_composer_settled(client, pane_id, "grok").await;
+    let _ = sqlx::query("UPDATE runs SET runtime_effort = ? WHERE id = ?")
+        .bind(&wanted)
+        .bind(run_id)
+        .execute(&app.db)
+        .await;
+    tracing::info!(bot = %bot.id, line, "grok TUI ignored --reasoning-effort; applied via slash");
+    Ok(())
+}
+
 /// 不能送 slash 指令的理由。`apply_live_setting` 只需要「不行」，但使用者按「登入」時靜默失敗是 bug。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlashBlocked {
