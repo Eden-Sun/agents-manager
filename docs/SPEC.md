@@ -150,6 +150,8 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   所有投影與刪除共用同一把鎖，兩支 DELETE 並發時不會互相把對方的刪除當成未授權、也不會替對方放行。
   **先定案、再停機**：`DELETE /api/bots/:id` 全程拿著該 bot 的 per-bot 鎖（start 用同一把，拿到時 bot 已刪 → NotFound），會 409 的只有定案那一步、那時什麼都還沒停；
   定案後才停 child 與自己、軟刪 child、清目錄，所以停機期間 TOML 再怎麼變都不會留下「已停、未刪」（child 由母 agent 開、daemon 重開不了，事後回滾本來就做不到）。
+  **開機的殘留清掃**（`purge_deleted_bot_dirs`，reconcile／rearm 之後跑一次）只刪「確定軟刪」而且「確定沒有 active run」的 `bots/<id>/`；沒有 bot 認領的目錄不碰。
+  bot 列或 active run 讀不到（DB 一時忙、I/O 錯）＝還不知道：目錄留著、記一行 warn，下次開機再判斷——清理可重入，刪掉還在跑的 bot 的 hook／shim／spool 補不回來（#187）。
   `DELETE /api/projects/:id` 依 id 排序拿齊專案內每顆 bot 的 per-bot 鎖，**在鎖內**重驗都已停止再定案；TOML 裡多出沒鎖住的 bot（剛建立、可能正要啟動）就 409 `delete_refused`。
   **鎖順序**：刪除是唯一會同時持多把 per-bot 鎖的路徑，兩支 DELETE 都「依 id 排序、一次拿齊」（`DELETE /api/bots/:id` 拿 parent＋所有 descendants，拿鎖途中若認領了新 child 就全放掉重來，三次後 409 `children_changed`），再用 locked 版停機；持一把再補拿另一把會與另一支互等成死鎖（ULID 不保證 parent 比 child 小）。
   其他情況真的要刪這麼多就帶 `AM_ALLOW_BULK_DELETE=1` 重啟 daemon：`serve` 啟動時讀一次，**只放行啟動那一次投影**；之後 runtime 的重投不吃這個 env（env 留在行程裡，config 再被外部換掉時照樣擋）。

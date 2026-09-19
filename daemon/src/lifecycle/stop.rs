@@ -342,17 +342,29 @@ pub async fn purge_deleted_bot_dirs(app: &Arc<App>) -> usize {
             continue;
         }
         let Some(id) = entry.file_name().to_str().map(str::to_string) else { continue };
-        let deleted: Option<Option<String>> = sqlx::query_scalar("SELECT deleted_at FROM bots WHERE id = ?")
+        // 只有「確定是軟刪」而且「確定沒有 active run」才有權刪：讀不到（DB 一時忙、I/O 錯）不等於沒有，留著、記一行，
+        // 下一次啟動再判斷（清理可重入）。刪掉還在跑的 bot 的目錄會拿走它的 hook／shim／spool，補不回來。
+        let deleted: Option<Option<String>> = match sqlx::query_scalar("SELECT deleted_at FROM bots WHERE id = ?")
             .bind(&id)
             .fetch_optional(&app.db)
             .await
-            .ok()
-            .flatten();
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(bot = %id, error = %e, "could not read whether a bots/<id>/ directory's bot is deleted; leaving it for the next start");
+                continue;
+            }
+        };
         if !matches!(deleted, Some(Some(_))) {
             continue;
         }
-        if matches!(db::active_run(&app.db, &id).await, Ok(Some(_))) {
-            continue;
+        match db::active_run(&app.db, &id).await {
+            Ok(None) => {}
+            Ok(Some(_)) => continue,
+            Err(e) => {
+                tracing::warn!(bot = %id, error = %e, "could not read whether a deleted bot still has a live run; leaving its directory for the next start");
+                continue;
+            }
         }
         match std::fs::remove_dir_all(entry.path()) {
             Ok(()) => removed += 1,
