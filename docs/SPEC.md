@@ -1803,15 +1803,28 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   user 自己 `default` session 匯入的 bot 409 `default_session`（daemon 不往使用者的 session 多開 pane）。
   只給本機：iframe 連的是瀏覽器所在機器上的 port，遠端主機上的 vite 連不到，409 `remote_host`。
   bot 沒在跑（沒有 running 的 run／pane）409 `bot_not_running`：pane 要切在它旁邊。
-- **偵測**：目錄取 `bots.cwd`，沒有就用專案路徑；依序找 `<dir>/vite.config.{ts,mts,js,mjs}`、`<dir>/web/vite.config.*`，
-  第一個存在的設定檔所在目錄就是 vite 的 cwd。都沒有 409 `no_vite_config`，body 的 `tried` 列出試過的八個路徑。
-  專案層的指令覆寫不在 v1。
+- **偵測**：目錄取 `bots.cwd`，沒有就用專案路徑；依序找 `<dir>`、`<dir>/web`、`<dir>/apps/*`、`<dir>/packages/*`
+  （後兩層各自照名字排序），有 `vite.config.{ts,mts,js,mjs}` 的全部列成**候選**（`candidates`），第一個是預設。
+  都沒有 409 `no_vite_config`，`tried` 列出試過的路徑（`apps/*`、`packages/*` 寫成樣式）。專案層的指令覆寫不在 v1。
+- **先接既有的**（2026-09-20 使用者：「有的已經啟動 vite 了，應該先自動偵測 vite 目錄」）：啟動前先掃本機在 listen 的
+  vite 行程（`ps` 命令列有 `vite`／`…/vite`／`vite.js` 這個字，`vitest` 不算；再各問一次 `lsof`：listen port 與 cwd）。
+  - cwd **正好是這顆 bot 的候選目錄**（同一份 checkout）→ 直接接上，不另起：`source: "attached"`、`status: running`、
+    沒有 pane，記 `pid`。
+  - **別份 checkout／別的專案**的 vite 不自動接（畫面上看到的不是這顆 bot 工作樹裡的程式碼）：列在回應的 `others`
+    （`{port, dir, pid}`，只在沒有預覽在用時掃），讓使用者用 `mode=attach` 自己選。
+  - **接上的只斷開、絕不砍人**：`DELETE`、bot 停止／刪除／閒置收掉時，`attached` 那列只標 `off`，不關任何 pane、不 kill 任何行程。
+    只有 `source: "spawned"`（自己起的）才關 pane。接上的 vite 自己結束（port 不再 listen）→ 轉 `off`（不是 `failed`）；
+    接上的預覽跟 bot 有沒有在跑無關，只看它自己的 port。
+  - `POST` 的 `mode`：`auto`（預設，同目錄有就接、沒有就起）／`attach`（必須帶 `port`，且那個 port 真的是掃到的 vite，
+    否則 409 `not_vite`）／`spawn`（不管有沒有現成的都自己起）；`dir` 從 `candidates` 挑要用哪個目錄。明確指定
+    （mode／port／dir 任何一個）而且已經有預覽在用時，先斷開舊的再照新的來；沒指定就原樣回舊的（冪等）。
+  - 掃描（`PreviewEnv::scan_vites`）與行程／port 查詢一樣可注入，測試不碰真行程（#211）。掃不到只影響「自動接」與 `others`，不擋 spawn。
 - **在哪跑**：`pane.split`（方向往下，只吃高度、不擠寬度）切在**該 bot 自己那顆 pane 旁邊**，也就是它自己的 tab
   （開新 tab 會被 reconcile 串成鏈、長出重複 bot）。指令 `bunx vite --host <bind> --port <port> --strictPort`；
   `<bind>` 看 daemon 的 `allow_lan`：開著 `0.0.0.0`，否則 `127.0.0.1`。
 - **port**：從 5180 起往上找 100 顆，跳過別的預覽佔著的（`starting`／`running` 的列）與當下有人在 listen 的；
   5173 留給人手開。`failed`／`off` 的列不佔 port。
-- **狀態**（`bot_previews` 一顆 bot 一列；沒有列＝`off`）：
+- **狀態**（`bot_previews` 一顆 bot 一列，多 `source`／`pid`；沒有列＝`off`）：
 
   | 從 | 條件 | 到 |
   |---|---|---|
@@ -1819,7 +1832,7 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   | `starting` | pane 已經不在 | `failed`（error 帶原因與 pane 最後 40 行） |
   | `starting` | 啟動起 60 秒 port 還沒 listen | `failed`（同上） |
   | `running` | pane 被關了 | `off`（使用者關的，不是錯） |
-  | `running` | pane 在、port 不再 listen | `failed`（vite 自己掛了） |
+  | `running` | pane 在、port 不再 listen | `failed`（vite 自己掛了；`attached` 是 `off`） |
 
   herdr 沒回答（`pane_alive` 問不到）當「沒變」，不當「不在」。`failed` 之後再 `POST` 就是重試：舊 pane 已收、port 重挑。
 - **誰在看**：`POST` 之後有背景 watcher 每秒看一次，離開 `starting` 就結束；`GET` 與開機（`reconcile_all`）各做一次同樣的

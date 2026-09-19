@@ -362,7 +362,7 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 | `turn_progress` | 即時輸出，見「WS `turn_progress`」 |
 | `project_changed` | `{"project_id"}`（或 `{}`） |
 | `bot_changed` | `{"bot_id"}` |
-| `preview_changed` | `{"bot_id", "status":"off"\|"starting"\|"running"\|"failed", "port"}`（SPEC §6.12） |
+| `preview_changed` | `{"bot_id", "status":"off"\|"starting"\|"running"\|"failed", "port", "source"}`（SPEC §6.12） |
 | `daemon_status` | `{"herdr_connected", "hosts": {"<name>": {"connected","error"?}}}` |
 | `host_changed` | `{"name","connected","error"?,"herdr"}`（`herdr` 見 §12.6b） |
 | `quota_updated` | 見 §12.5 |
@@ -425,20 +425,37 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 ## 預覽 `/api/bots/{id}/preview`（SPEC §6.12，issue #253）
 
 頂層 bot 的專案起一顆 vite dev server，右半面板內嵌顯示。`GET /api/state` 的每顆 bot 多一個 `preview`：
-`{"status","port"}`，沒開過或 `off` 是 `null`，首屏不必再打 GET。三個端點回同一個形狀：
+`{"status","port","source"}`，沒開過或 `off` 是 `null`，首屏不必再打 GET。三個端點回同一個形狀：
 
 ```json
 {"status": "off | starting | running | failed", "port": 5180, "dir": "/path/to/web",
- "pane_id": "wM:pB", "error": null, "started_at": "2026-09-19T15:44:40.881Z"}
+ "pane_id": "wM:pB", "error": null, "started_at": "2026-09-19T15:44:40.881Z",
+ "source": "spawned | attached", "pid": null,
+ "candidates": ["/path/to/web", "/path/to/apps/site"], "others": [{"port": 5173, "dir": "/path/other-checkout/web", "pid": 123}]}
 ```
 
-`off` 時只有 `{"status":"off"}`。`failed` 的 `error` 帶原因與 pane 最後 40 行。iframe 網址用 `http://${location.hostname}:${port}/`。
+`source`：`spawned`＝AG Man 起的（有 `pane_id`）；`attached`＝接上一顆本來就在跑的 vite（沒有 pane，`pid` 是那顆行程）。
+`candidates`：這顆 bot 可以起 vite 的目錄（`<dir>`、`web`、`apps/*`、`packages/*` 有 vite 設定的，第一個是預設）。
+`others`：**沒有預覽在用時**才掃，別份 checkout／別的專案已經在跑的 vite；畫面上看到的不是這顆 bot 工作樹的程式碼，所以不自動接。
+`GET`／`POST` 回全部欄位；`off` 時只有 `status`（`GET`／`POST` 另外帶 `candidates`、`others`），`DELETE` 只回 `{"status":"off"}`。`failed` 的 `error` 帶原因與 pane 最後 40 行。iframe 網址用 `http://${location.hostname}:${port}/`。
 
 ### `GET /api/bots/{id}/preview`
 先對一次帳（pane 還在不在、port 有沒有在 listen）再回，所以 `running` 的 vite 半路掛掉，下一次 GET 就會看到 `failed`。
 
 ### `POST /api/bots/{id}/preview`
-冪等啟動：已經 `starting`／`running` 就原樣回；`failed`／`off` 重新起（重挑 port）。錯誤是 409，`reason` 在 body 裡
+冪等啟動：已經 `starting`／`running` 就原樣回；`failed`／`off` 重新起（重挑 port）。body 可省略，或：
+
+```json
+{"mode": "auto | attach | spawn", "port": 5173, "dir": "/path/to/apps/site"}
+```
+
+- `auto`（預設）：本機已經有 vite 在跑、cwd 正好是這顆 bot 的候選目錄（同一份 checkout）→ **接上，不另起**（`source: "attached"`）；沒有才自己起。
+- `attach`：必須帶 `port`，那個 port 要真的是掃到的 vite（不是就 409 `not_vite`）；`others` 裡的用這個接。
+- `spawn`：不管有沒有現成的，自己起。`dir` 從 `candidates` 挑（不在裡面 400）。
+- 明確指定了 mode／port／dir 而且已經有預覽在用：先斷開舊的（`attached` 只斷開、`spawned` 關 pane）再照新的來。
+- `mode` 不合法、`attach` 沒帶 `port` 是 400。
+
+錯誤是 409，`reason` 在 body 裡
 （跟其他 409 同一個格式 `{"error":"conflict","reason":…}`）：
 
 | `reason` | 意思 |
@@ -447,11 +464,12 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 | `default_session` | 從使用者自己的 herdr default session 匯入的 bot |
 | `remote_host` | bot 在遠端主機（body 帶 `host`） |
 | `bot_not_running` | bot 現在沒有在跑的 run |
-| `no_vite_config` | 找不到 vite 設定；`tried` 是試過的八個完整路徑 |
+| `no_vite_config` | 找不到 vite 設定；`tried` 是試過的路徑（含 `apps/*`、`packages/*` 樣式） |
 | `no_free_port` | 5180 起的 100 顆都被佔了 |
+| `not_vite` | `mode=attach` 的 `port` 不是掃到的 vite（body 帶 `port`） |
 
 ### `DELETE /api/bots/{id}/preview`
-關 pane、放掉 port，回 `{"status":"off"}`；沒開過也是。bot 被停止／重啟／刪除、§6.11 閒置收 bot 時 daemon 也會做同一件事。
+`spawned` 關 pane、放掉 port；`attached` **只斷開，絕不動對方的 vite**。回 `{"status":"off"}`；沒開過也是。bot 被停止／重啟／刪除、§6.11 閒置收 bot 時 daemon 也會做同一件事。
 每次狀態變動推 WS `preview_changed`。
 
 ## 非 agent 的 pane（SPEC §6.5e）

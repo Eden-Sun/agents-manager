@@ -179,6 +179,8 @@ const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (8, "3b7f1d3c6f8712de"),
     // issue #253：`bot_previews`（頂層 bot 的 vite 預覽）。
     (9, "be0411b44c5111ab"),
+    // issue #253 v2：`bot_previews.source`／`pid`（預覽可以接上既有的 vite）。
+    (10, "d17c9db38b9c22e7"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -323,6 +325,9 @@ async fn apply_migrations(pool: &SqlitePool) -> Result<()> {
         ("bots", "instruction_files", "ALTER TABLE bots ADD COLUMN instruction_files TEXT"),
         // run 用哪個身分起來的（issue #238）；舊列 NULL＝沒記，額度照 bot 設定的身分算，跟加這一欄之前一樣。
         ("runs", "runtime_identity", "ALTER TABLE runs ADD COLUMN runtime_identity TEXT"),
+        // 預覽（issue #253 v2）：`spawned`（自己起的）／`attached`（接上既有的 vite）與被接上的 pid；舊列都是 spawned。
+        ("bot_previews", "source", "ALTER TABLE bot_previews ADD COLUMN source TEXT NOT NULL DEFAULT 'spawned'"),
+        ("bot_previews", "pid", "ALTER TABLE bot_previews ADD COLUMN pid INTEGER"),
     ] {
         if !has_column(&mut *tx, table, col).await? {
             sqlx::query(ddl).execute(&mut *tx).await.with_context(|| format!("add {table}.{col}"))?;

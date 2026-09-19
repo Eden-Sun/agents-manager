@@ -29,6 +29,8 @@ pub const PORT_SPAN: u16 = 100;
 pub const START_TIMEOUT_SECS: i64 = 60;
 const POLL: Duration = Duration::from_secs(1);
 const TAIL_LINES: u32 = 40;
+pub const SOURCE_SPAWNED: &str = "spawned";
+pub const SOURCE_ATTACHED: &str = "attached";
 const CONFIG_NAMES: [&str; 4] = ["vite.config.ts", "vite.config.mts", "vite.config.js", "vite.config.mjs"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -73,6 +75,16 @@ pub trait PreviewEnv: Send + Sync {
     fn close_pane<'a>(&'a self, pane_id: &'a str) -> BoxFuture<'a, ()>;
     /// 本機這個 port 現在有沒有人在 listen。
     fn port_listening(&self, port: u16) -> BoxFuture<'_, bool>;
+    /// 本機上在 listen 的 vite 行程（pid、port、cwd）；`None`＝掃不到（不是「沒有」）。
+    fn scan_vites(&self) -> BoxFuture<'_, Option<Vec<ViteProc>>>;
+}
+
+/// 一顆已經在跑、而且有 TCP listen 的 vite。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ViteProc {
+    pub pid: i32,
+    pub port: u16,
+    pub cwd: String,
 }
 
 /// herdr＋本機 TCP。
@@ -118,6 +130,26 @@ impl PreviewEnv for RealEnv {
             matches!(tokio::time::timeout(Duration::from_millis(400), c).await, Ok(Ok(_)))
         })
     }
+    fn scan_vites(&self) -> BoxFuture<'_, Option<Vec<ViteProc>>> {
+        Box::pin(scan_real())
+    }
+}
+
+/// `ps` 找出命令列是 vite 的 pid，再各問一次 `lsof`：listen 的 port、cwd。
+async fn scan_real() -> Option<Vec<ViteProc>> {
+    let t = Duration::from_secs(10);
+    let ps = crate::hosts::sh_local("ps -axo pid=,command=", t).await.ok().flatten()?;
+    let pids = parse_ps_vites(&String::from_utf8_lossy(&ps.stdout));
+    if pids.is_empty() {
+        return Some(Vec::new());
+    }
+    let list = pids.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(",");
+    let ports = crate::hosts::sh_local(&format!("lsof -nP -iTCP -sTCP:LISTEN -a -p {list} -Fpn 2>/dev/null"), t).await.ok().flatten()?;
+    let cwds = crate::hosts::sh_local(&format!("lsof -nP -a -d cwd -p {list} -Fpn 2>/dev/null"), t).await.ok().flatten()?;
+    Some(join_vites(
+        &crate::panes::parse_lsof(&String::from_utf8_lossy(&ports.stdout)),
+        &parse_lsof_cwd(&String::from_utf8_lossy(&cwds.stdout)),
+    ))
 }
 
 #[cfg(test)]
@@ -147,19 +179,92 @@ fn fallback_env(app: &Arc<App>) -> Arc<dyn PreviewEnv> {
 
 // ───────────────────────────── 純函式 ─────────────────────────────
 
-/// `<cwd>/vite.config.*`，再來 `<cwd>/web/vite.config.*`。回設定檔所在的目錄；找不到回試過的完整路徑。
-pub fn detect_dir(cwd: &Path, exists: impl Fn(&Path) -> bool) -> Result<PathBuf, Vec<String>> {
+/// 候選目錄，依序：`<cwd>`、`<cwd>/web`、`<cwd>/apps/*`、`<cwd>/packages/*`（monorepo 常見；後兩層各自照名字排序），
+/// 只留下有 `vite.config.*` 的。全都沒有回試過的路徑（`apps/*`、`packages/*` 寫成樣式）。
+pub fn detect_dirs(
+    cwd: &Path,
+    exists: impl Fn(&Path) -> bool,
+    subdirs: impl Fn(&Path) -> Vec<PathBuf>,
+) -> Result<Vec<PathBuf>, Vec<String>> {
+    let has_config = |dir: &Path| CONFIG_NAMES.iter().any(|n| exists(&dir.join(n)));
+    let mut dirs = vec![cwd.to_path_buf(), cwd.join("web")];
+    for group in ["apps", "packages"] {
+        let mut subs = subdirs(&cwd.join(group));
+        subs.sort();
+        dirs.extend(subs);
+    }
+    let found: Vec<PathBuf> = dirs.into_iter().filter(|d| has_config(d)).collect();
+    if !found.is_empty() {
+        return Ok(found);
+    }
     let mut tried = Vec::new();
     for dir in [cwd.to_path_buf(), cwd.join("web")] {
-        for name in CONFIG_NAMES {
-            let p = dir.join(name);
-            if exists(&p) {
-                return Ok(dir);
-            }
-            tried.push(p.to_string_lossy().into_owned());
-        }
+        tried.extend(CONFIG_NAMES.iter().map(|n| dir.join(n).to_string_lossy().into_owned()));
+    }
+    for group in ["apps", "packages"] {
+        tried.push(cwd.join(group).join("*").join("vite.config.*").to_string_lossy().into_owned());
     }
     Err(tried)
+}
+
+/// 命令列的某個字是 `vite` 或 `.../vite`、`.../vite.js`（`vitest` 之類不算）。
+pub fn is_vite_command(cmd: &str) -> bool {
+    cmd.split_whitespace().any(|t| {
+        let base = t.rsplit('/').next().unwrap_or(t);
+        base == "vite" || base == "vite.js"
+    })
+}
+
+/// `ps -axo pid=,command=` 的輸出裡，命令列是 vite 的 pid。
+pub fn parse_ps_vites(out: &str) -> Vec<i32> {
+    out.lines()
+        .filter_map(|l| {
+            let l = l.trim_start();
+            let (pid, cmd) = l.split_once(char::is_whitespace)?;
+            is_vite_command(cmd).then(|| pid.parse().ok()).flatten()
+        })
+        .collect()
+}
+
+/// `lsof -a -d cwd -Fpn`：`p<pid>` 之後的 `n<path>` 是那個 pid 的 cwd。
+pub fn parse_lsof_cwd(out: &str) -> HashMap<i32, String> {
+    let mut cur = None;
+    let mut m = HashMap::new();
+    for l in out.lines() {
+        if let Some(r) = l.strip_prefix('p') {
+            cur = r.trim().parse().ok();
+        } else if let (Some(r), Some(pid)) = (l.strip_prefix('n'), cur) {
+            m.insert(pid, r.to_string());
+        }
+    }
+    m
+}
+
+/// 有 listen port 又查得到 cwd 的才算一顆可接的 vite（一顆行程多個 port 就一個 port 一筆）。
+pub fn join_vites(ports: &HashMap<i32, Vec<u16>>, cwds: &HashMap<i32, String>) -> Vec<ViteProc> {
+    let mut v: Vec<ViteProc> = ports
+        .iter()
+        .filter_map(|(pid, ps)| Some((pid, ps, cwds.get(pid)?)))
+        .flat_map(|(pid, ps, cwd)| ps.iter().map(move |port| ViteProc { pid: *pid, port: *port, cwd: cwd.clone() }))
+        .collect();
+    v.sort_by_key(|p| (p.port, p.pid));
+    v
+}
+
+fn norm(p: &str) -> &str {
+    let t = p.trim_end_matches('/');
+    if t.is_empty() { "/" } else { t }
+}
+
+/// 掃到的 vite 分兩類：cwd 正好是候選目錄的（同一份 checkout，`attach`；候選順序在前的優先），
+/// 其餘全部是 `others`（別份 checkout 或別的專案：畫面上看到的不是這顆 bot 工作樹裡的程式碼，不自動接）。
+pub fn classify(procs: &[ViteProc], candidates: &[PathBuf]) -> (Option<ViteProc>, Vec<ViteProc>) {
+    let hit = candidates
+        .iter()
+        .find_map(|c| procs.iter().find(|p| norm(&p.cwd) == norm(&c.to_string_lossy())))
+        .cloned();
+    let others = procs.iter().filter(|p| Some(*p) != hit.as_ref()).cloned().collect();
+    (hit, others)
 }
 
 /// 從 [`PORT_START`] 起往上找第一顆沒被別的預覽佔著、也沒人在 listen 的。
@@ -189,7 +294,7 @@ pub enum Next {
 
 /// `off`／`failed` 是靜止的；`starting` 等 port 出現（pane 沒了或逾時＝失敗）；`running` 在 pane 被關時回 `off`
 /// （使用者自己關的，不是錯），port 不見但 pane 還在＝vite 掛了，`failed`。
-pub fn next_status(cur: Status, obs: Observed, elapsed_secs: i64) -> Next {
+pub fn next_status(cur: Status, attached: bool, obs: Observed, elapsed_secs: i64) -> Next {
     let gone = obs.pane_alive == Some(false);
     match cur {
         Status::Off | Status::Failed => Next::Stay,
@@ -200,6 +305,8 @@ pub fn next_status(cur: Status, obs: Observed, elapsed_secs: i64) -> Next {
         }
         Status::Starting => Next::Stay,
         Status::Running if gone => Next::To(Status::Off, None),
+        // 接上的是別人的 server：它結束了就是斷開，不算我們的失敗。
+        Status::Running if attached && !obs.listening => Next::To(Status::Off, None),
         Status::Running if !obs.listening => Next::To(Status::Failed, Some("vite 已經停了（port 不再 listen）")),
         Status::Running => Next::Stay,
     }
@@ -218,11 +325,17 @@ pub struct Row {
     pub error: Option<String>,
     pub started_at: Option<String>,
     pub updated_at: String,
+    /// `spawned`（AG Man 起的，有 pane）或 `attached`（接上既有的 vite，沒有 pane；只斷開、不殺）。
+    pub source: String,
+    pub pid: Option<i64>,
 }
 
 impl Row {
     fn status(&self) -> Status {
         Status::parse(&self.status)
+    }
+    fn attached(&self) -> bool {
+        self.source == SOURCE_ATTACHED
     }
     /// `GET/POST/DELETE` 的回應形狀。
     pub fn body(&self) -> Value {
@@ -236,6 +349,8 @@ impl Row {
             "pane_id": self.pane_id,
             "error": self.error,
             "started_at": self.started_at,
+            "source": self.source,
+            "pid": self.pid,
         })
     }
 }
@@ -258,11 +373,11 @@ async fn taken_ports(pool: &SqlitePool) -> anyhow::Result<HashSet<u16>> {
 
 async fn put(pool: &SqlitePool, r: &Row) -> anyhow::Result<()> {
     sqlx::query(
-        "INSERT INTO bot_previews (bot_id, host, pane_id, port, dir, status, error, started_at, updated_at)
-         VALUES (?,?,?,?,?,?,?,?,?)
+        "INSERT INTO bot_previews (bot_id, host, pane_id, port, dir, status, error, started_at, updated_at, source, pid)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?)
          ON CONFLICT(bot_id) DO UPDATE SET host=excluded.host, pane_id=excluded.pane_id, port=excluded.port,
            dir=excluded.dir, status=excluded.status, error=excluded.error, started_at=excluded.started_at,
-           updated_at=excluded.updated_at",
+           updated_at=excluded.updated_at, source=excluded.source, pid=excluded.pid",
     )
     .bind(&r.bot_id)
     .bind(&r.host)
@@ -273,6 +388,8 @@ async fn put(pool: &SqlitePool, r: &Row) -> anyhow::Result<()> {
     .bind(&r.error)
     .bind(&r.started_at)
     .bind(&r.updated_at)
+    .bind(&r.source)
+    .bind(r.pid)
     .execute(pool)
     .await?;
     Ok(())
@@ -281,11 +398,11 @@ async fn put(pool: &SqlitePool, r: &Row) -> anyhow::Result<()> {
 /// `/api/state` 每顆 bot 的 `preview`：`{"status","port"}`，沒開過或 `off` 是 `null`。
 pub async fn state_map(pool: &SqlitePool) -> anyhow::Result<HashMap<String, Value>> {
     let rows = sqlx::query_as::<_, Row>("SELECT * FROM bot_previews WHERE status != 'off'").fetch_all(pool).await?;
-    Ok(rows.into_iter().map(|r| (r.bot_id.clone(), json!({"status": r.status, "port": r.port}))).collect())
+    Ok(rows.into_iter().map(|r| (r.bot_id.clone(), json!({"status": r.status, "port": r.port, "source": r.source}))).collect())
 }
 
 async fn emit_changed(app: &Arc<App>, r: &Row) {
-    app.emit("preview_changed", json!({"bot_id": r.bot_id, "status": r.status, "port": r.port})).await;
+    app.emit("preview_changed", json!({"bot_id": r.bot_id, "status": r.status, "port": r.port, "source": r.source})).await;
 }
 
 // ───────────────────────────── 入口 ─────────────────────────────
@@ -315,15 +432,63 @@ async fn top_level_bot(app: &Arc<App>, bot_id: &str) -> LcResult<db::Bot> {
     Ok(bot)
 }
 
+/// 這顆 bot 的 vite 候選目錄（[`detect_dirs`] 對真的檔案系統）。
+async fn candidates_of(app: &Arc<App>, bot: &db::Bot) -> LcResult<Result<Vec<PathBuf>, Vec<String>>> {
+    let project = db::project(&app.db, &bot.project_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("project".into()))?;
+    let cwd = bot.cwd.clone().filter(|c| !c.trim().is_empty()).unwrap_or(project.path);
+    let subdirs = |d: &Path| -> Vec<PathBuf> {
+        std::fs::read_dir(d).map(|it| it.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect()).unwrap_or_default()
+    };
+    Ok(detect_dirs(Path::new(&cwd), |p| p.is_file(), subdirs))
+}
+
+/// 回應在 [`Row::body`] 之外多兩欄：`candidates`（可以起 vite 的目錄）、`others`（沒在用的狀態下才掃：
+/// 別份 checkout 或別的專案已經在跑的 vite，列出來讓使用者自己選）。
+async fn decorated(app: &Arc<App>, bot: &db::Bot, mut body: Value, live: bool) -> LcResult<Value> {
+    let cands = candidates_of(app, bot).await?.unwrap_or_default();
+    let mut others = Vec::new();
+    if !live {
+        let env = match db::active_run(&app.db, &bot.id).await {
+            Ok(Some(run)) => env_for(app, &run).await.unwrap_or_else(|_| fallback_env(app)),
+            _ => fallback_env(app),
+        };
+        // 掃不到就當沒有：這只是「順便列出來」，不是決定。
+        let scan = env.scan_vites().await.unwrap_or_default();
+        others = classify(&scan, &cands).1;
+    }
+    if let Some(o) = body.as_object_mut() {
+        o.insert("candidates".into(), json!(cands.iter().map(|c| c.to_string_lossy()).collect::<Vec<_>>()));
+        o.insert("others".into(), json!(others.iter().map(|p| json!({"port": p.port, "dir": p.cwd, "pid": p.pid})).collect::<Vec<_>>()));
+    }
+    Ok(body)
+}
+
 /// `GET`：先對一次帳（pane 還在嗎、port 還在 listen 嗎），再回。
 pub async fn get(app: &Arc<App>, bot_id: &str) -> LcResult<Value> {
-    top_level_bot(app, bot_id).await?;
+    let bot = top_level_bot(app, bot_id).await?;
     let _g = gate().lock().await;
-    Ok(refresh_locked(app, bot_id).await.map(|r| r.body()).unwrap_or_else(off_body))
+    let r = refresh_locked(app, bot_id).await;
+    let live = r.as_ref().is_some_and(|r| r.status().is_live());
+    decorated(app, &bot, r.map(|r| r.body()).unwrap_or_else(off_body), live).await
+}
+
+#[derive(Debug, Default, Clone, serde::Deserialize)]
+pub struct StartReq {
+    /// `auto`（預設：同目錄有在跑的就接、沒有就起）／`attach`（要帶 `port`）／`spawn`。
+    pub mode: Option<String>,
+    pub port: Option<u16>,
+    pub dir: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Auto,
+    Attach,
+    Spawn,
 }
 
 /// `POST`：冪等啟動。
-pub async fn start(app: &Arc<App>, bot_id: &str) -> LcResult<Value> {
+pub async fn start(app: &Arc<App>, bot_id: &str, req: StartReq) -> LcResult<Value> {
     let bot = top_level_bot(app, bot_id).await?;
     if bot.parent_bot_id.is_some() || bot.managed_by != "user" {
         return Err(LcError::conflict("not_top_level", json!({"bot_id": bot_id})));
@@ -334,24 +499,88 @@ pub async fn start(app: &Arc<App>, bot_id: &str) -> LcResult<Value> {
         // iframe 連的是瀏覽器所在那台的 port；遠端主機上的 vite 連不到。
         return Err(LcError::conflict("remote_host", json!({"bot_id": bot_id, "host": host})));
     }
+    let mode = match req.mode.as_deref().unwrap_or("auto") {
+        "auto" => Mode::Auto,
+        "attach" => Mode::Attach,
+        "spawn" => Mode::Spawn,
+        other => return Err(LcError::Bad(format!("mode 只能是 auto／attach／spawn，收到 `{other}`"))),
+    };
+    if mode == Mode::Attach && req.port.is_none() {
+        return Err(LcError::Bad("mode=attach 必須帶 port".into()));
+    }
+    let explicit = mode != Mode::Auto || req.port.is_some() || req.dir.is_some();
     let _g = gate().lock().await;
-    // 已經在跑（或在起）而且對得上帳：原樣回。
+    // 已經在跑（或在起）而且對得上帳：原樣回；明確指定了別的（換目錄、換接哪顆）才先斷開再來。
     if let Some(r) = refresh_locked(app, bot_id).await {
         if r.status().is_live() {
-            return Ok(r.body());
+            if !explicit {
+                return decorated(app, &bot, r.body(), true).await;
+            }
+            disconnect_locked(app, r).await;
         }
     }
+    let cands = candidates_of(app, &bot).await?;
+    let no_config = |tried: Vec<String>| LcError::conflict("no_vite_config", json!({"bot_id": bot_id, "tried": tried}));
     let run = db::active_run(&app.db, bot_id).await.map_err(up)?;
+    let env = match &run {
+        Some(run) => env_for(app, run).await.unwrap_or_else(|_| fallback_env(app)),
+        None => fallback_env(app),
+    };
+    // 掃不到只影響「自動接」，不擋 spawn；明確要求 attach 時掃不到就是失敗。
+    let scan = env.scan_vites().await;
+
+    let attach_to: Option<ViteProc> = match mode {
+        Mode::Attach => {
+            let port = req.port.unwrap_or_default();
+            let hit = scan.as_deref().unwrap_or_default().iter().find(|p| p.port == port).cloned();
+            Some(hit.ok_or_else(|| LcError::conflict("not_vite", json!({"bot_id": bot_id, "port": port})))?)
+        }
+        Mode::Auto => {
+            let all = cands.clone().map_err(no_config)?;
+            let pool = match req.dir.as_deref() {
+                Some(d) => vec![all.iter().find(|c| norm(&c.to_string_lossy()) == norm(d)).cloned().ok_or_else(|| {
+                    LcError::Bad(format!("dir `{d}` 不是這顆 bot 的 vite 候選目錄"))
+                })?],
+                None => all,
+            };
+            classify(scan.as_deref().unwrap_or_default(), &pool).0
+        }
+        Mode::Spawn => None,
+    };
+    if let Some(p) = attach_to {
+        let now = db::now();
+        let r = Row {
+            bot_id: bot_id.to_string(),
+            host,
+            pane_id: None,
+            port: Some(p.port as i64),
+            dir: Some(p.cwd),
+            status: Status::Running.as_str().into(),
+            error: None,
+            started_at: Some(now.clone()),
+            updated_at: now,
+            source: SOURCE_ATTACHED.into(),
+            pid: Some(p.pid as i64),
+        };
+        put(&app.db, &r).await.map_err(up)?;
+        emit_changed(app, &r).await;
+        return decorated(app, &bot, r.body(), true).await;
+    }
+
+    let cands = cands.map_err(no_config)?;
+    let dir = match req.dir.as_deref() {
+        Some(d) => cands
+            .iter()
+            .find(|c| norm(&c.to_string_lossy()) == norm(d))
+            .cloned()
+            .ok_or_else(|| LcError::Bad(format!("dir `{d}` 不是這顆 bot 的 vite 候選目錄")))?,
+        None => cands[0].clone(),
+    }
+    .to_string_lossy()
+    .into_owned();
     let Some(run) = run.filter(|r| r.state == "running" && r.pane_id.is_some()) else {
         return Err(LcError::conflict("bot_not_running", json!({"bot_id": bot_id})));
     };
-    let project = db::project(&app.db, &bot.project_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("project".into()))?;
-    let cwd = bot.cwd.clone().filter(|c| !c.trim().is_empty()).unwrap_or(project.path);
-    let dir = detect_dir(Path::new(&cwd), |p| p.is_file())
-        .map_err(|tried| LcError::conflict("no_vite_config", json!({"bot_id": bot_id, "tried": tried})))?;
-    let dir = dir.to_string_lossy().into_owned();
-
-    let env = env_for(app, &run).await?;
     let taken = taken_ports(&app.db).await.map_err(up)?;
     let listening = listening_window(env.as_ref()).await;
     let port = pick_port(&taken, &listening)
@@ -369,6 +598,8 @@ pub async fn start(app: &Arc<App>, bot_id: &str) -> LcResult<Value> {
         error: None,
         started_at: Some(now.clone()),
         updated_at: now,
+        source: SOURCE_SPAWNED.into(),
+        pid: None,
     };
     if let Err(e) = put(&app.db, &r).await {
         // 記不下來就不留孤兒 pane。
@@ -379,7 +610,23 @@ pub async fn start(app: &Arc<App>, bot_id: &str) -> LcResult<Value> {
     // 測試自己決定什麼時候看（不然背景那一拍會跟測試的手動轉移搶）；watcher 另有測試。
     #[cfg(not(test))]
     spawn_watcher(app.clone(), bot_id.to_string());
-    Ok(r.body())
+    decorated(app, &bot, r.body(), true).await
+}
+
+/// 斷開一列：`spawned` 關 pane，`attached` 什麼都不動（那顆 vite 是別人的），然後標 `off`。要在 [`gate`] 裡呼叫。
+async fn disconnect_locked(app: &Arc<App>, r: Row) -> Option<Row> {
+    close_row_pane(app, &r).await;
+    let off = Row { pane_id: None, status: Status::Off.as_str().into(), error: None, updated_at: db::now(), ..r };
+    match put(&app.db, &off).await {
+        Ok(()) => {
+            emit_changed(app, &off).await;
+            Some(off)
+        }
+        Err(e) => {
+            tracing::warn!(bot = %off.bot_id, error = %e, "preview: cannot mark the preview off");
+            None
+        }
+    }
 }
 
 /// `DELETE`：關 pane、放掉 port。
@@ -400,16 +647,14 @@ pub async fn stop_for_bot(app: &Arc<App>, bot_id: &str) {
             return;
         }
     };
-    close_row_pane(app, &r).await;
-    let off = Row { pane_id: None, status: Status::Off.as_str().into(), error: None, updated_at: db::now(), ..r };
-    if let Err(e) = put(&app.db, &off).await {
-        tracing::warn!(bot = bot_id, error = %e, "preview: the preview was closed but its row could not be marked off");
-        return;
-    }
-    emit_changed(app, &off).await;
+    disconnect_locked(app, r).await;
 }
 
 async fn close_row_pane(app: &Arc<App>, r: &Row) {
+    // 接上的那顆是別人開的 server：只斷開，絕不動它。
+    if r.attached() {
+        return;
+    }
     let Some(pane) = r.pane_id.as_deref() else { return };
     let env = match db::active_run(&app.db, &r.bot_id).await {
         Ok(Some(run)) => env_for(app, &run).await.unwrap_or_else(|_| fallback_env(app)),
@@ -451,29 +696,23 @@ async fn refresh_locked(app: &Arc<App>, bot_id: &str) -> Option<Row> {
     if !r.status().is_live() {
         return Some(r);
     }
+    let attached = r.attached();
     let run = db::active_run(&app.db, bot_id).await.ok().flatten();
-    // bot 自己掛了或被停了：預覽跟著收，不留一顆沒人管的 vite。
-    if run.is_none() {
-        close_row_pane(app, &r).await;
-        let off = Row { pane_id: None, status: Status::Off.as_str().into(), error: None, updated_at: db::now(), ..r };
-        return match put(&app.db, &off).await {
-            Ok(()) => {
-                emit_changed(app, &off).await;
-                Some(off)
-            }
-            Err(e) => {
-                tracing::warn!(bot = bot_id, error = %e, "preview: cannot mark the preview off");
-                None
-            }
-        };
+    // bot 自己掛了或被停了：預覽跟著收，不留一顆沒人管的 vite。接上的只看它自己的 port，不看 bot。
+    if run.is_none() && !attached {
+        return disconnect_locked(app, r).await;
     }
-    let env = env_for(app, run.as_ref()?).await.ok()?;
+    let env = match (&run, attached) {
+        (Some(run), false) => env_for(app, run).await.ok()?,
+        _ => fallback_env(app),
+    };
     let (pane_alive, listening) = match (&r.pane_id, r.port) {
         (Some(p), Some(port)) => (env.pane_alive(p).await, env.port_listening(port as u16).await),
+        (None, Some(port)) if attached => (None, env.port_listening(port as u16).await),
         (_, Some(port)) => (Some(false), env.port_listening(port as u16).await),
         _ => (Some(false), false),
     };
-    let next = next_status(r.status(), Observed { pane_alive, listening }, elapsed_secs(r.started_at.as_deref()));
+    let next = next_status(r.status(), attached, Observed { pane_alive, listening }, elapsed_secs(r.started_at.as_deref()));
     let Next::To(to, why) = next else { return Some(r) };
     let error = match (to, why) {
         (Status::Failed, Some(why)) => {
