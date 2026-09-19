@@ -924,6 +924,30 @@ mod quota_limit_tests {
         assert_eq!(hits(&app).await.into_iter().map(|(k, _)| k).collect::<Vec<_>>(), vec!["codex".to_string()], "補進裸 `codex`");
     }
 
+    /// #225：grok 撞週限記在 **grok** 自己那一格（6d5e74ab 讓 grok 走 `mark_codex_limit_hit`，`record` 卻把 kind 寫死成 `codex`：codex
+    /// 被標成用盡、grok 那格沒事）。同一台主機上另有一顆 codex bot：它不能被擋，grok 自己要被擋；撞限當下排著的那一則蓋上憑據；
+    /// `/api/quota` 的來源標 `grok-limit-hit`，不是 `codex-limit-hit`。
+    #[tokio::test]
+    async fn a_grok_limit_hit_lands_on_the_grok_key_not_codex() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (grok, queued) = bot_with_a_queued_prompt(&env, crate::config::LOCAL_HOST, None).await;
+        sqlx::query("UPDATE bots SET kind='grok' WHERE id=?").bind(&grok.id).execute(&app.db).await.unwrap();
+        let grok = db::bot(&app.db, &grok.id).await.unwrap().unwrap();
+        let codex = crate::testing::claude_bot(&app, &env.project_id, "cx").await;
+        sqlx::query("UPDATE bots SET kind='codex' WHERE id=?").bind(&codex.id).execute(&app.db).await.unwrap();
+        let codex = db::bot(&app.db, &codex.id).await.unwrap().unwrap();
+
+        mark_codex_limit_hit(&app, &grok, "You hit your weekly limit.").await.unwrap();
+
+        let keys: Vec<String> = hits(&app).await.into_iter().map(|(k, _)| k).collect();
+        let codex_blocked = crate::quota::limit_hit_for_bot(&app, &codex).await.is_some();
+        let grok_blocked = crate::quota::limit_hit_for_bot(&app, &grok).await.is_some();
+        assert_eq!((keys, codex_blocked, grok_blocked), (vec!["grok".to_string()], false, true));
+        assert_eq!(app.quotas.lock().await.get("grok").map(|q| q.source.clone()).as_deref(), Some("grok-limit-hit"));
+        assert!(hold_on(&app, &queued).await.is_some(), "撞限當下排著的那一則蓋上憑據");
+    }
+
     /// 同類（#198 的留言）：「同一則只記一次」的標記（`runs.turn_error`）先寫、訊息後寫的話，訊息寫不進去之後下一次擷取被
     /// 標記擋掉——錯誤沒釘上、回合不收（輸入框鎖著），再也不重來。現在標記、訊息、收回合同一個交易。
     #[tokio::test]
