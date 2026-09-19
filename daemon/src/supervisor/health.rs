@@ -6,6 +6,21 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
 
+/// `gh auth status` 要打網路，health 又常被輪詢：60 秒內沿用上一次的結果。
+async fn release_triage_health(app: &Arc<App>) -> Value {
+    static CACHE: tokio::sync::Mutex<Option<(std::time::Instant, Value)>> = tokio::sync::Mutex::const_new(None);
+    let cfg = app.cfg.get().await.release_triage;
+    let mut c = CACHE.lock().await;
+    if let Some((at, v)) = c.as_ref() {
+        if at.elapsed() < std::time::Duration::from_secs(60) {
+            return v.clone();
+        }
+    }
+    let v = crate::release_triage::issue::health_probe(&cfg).await.unwrap_or(Value::Null);
+    *c = Some((std::time::Instant::now(), v.clone()));
+    v
+}
+
 pub async fn snapshot(app: &Arc<App>) -> Result<Value, LcError> {
     let bots = crate::db::live_bots(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     let mut running = 0usize;
@@ -74,6 +89,8 @@ pub async fn snapshot(app: &Arc<App>) -> Result<Value, LcError> {
         "awaiting_review": crate::supervisor::store::awaiting_review_count(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?,
         "inbox_open": crate::supervisor::store::open_inbox_count(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?,
         "hosts": {"total": hosts.len(), "disconnected": disconnected_hosts},
+        // issue #204：`[release_triage] publish = true` 時 gh 沒登入要在這裡看得到（publish = false 為 null）。
+        "release_triage": release_triage_health(app).await,
     }))
 }
 
