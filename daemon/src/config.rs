@@ -288,6 +288,9 @@ pub struct BuildRemoteCfg {
     /// 呼叫端自己帶了 `--test-threads`／`RUST_TEST_THREADS` 就尊重呼叫端。
     #[serde(default = "default_remote_test_threads")]
     pub test_threads: usize,
+    /// 一次遠端編譯（同步＋編譯＋測試）的整體時間上限，秒（issue #194）；`0`＝不設上限。超過就整組砍掉、回 124，不退回本機重跑。
+    #[serde(default = "default_remote_build_timeout_secs")]
+    pub timeout_secs: u64,
 }
 
 impl Default for BuildRemoteCfg {
@@ -300,6 +303,7 @@ impl Default for BuildRemoteCfg {
             remote_root: default_remote_build_root(),
             cargo_jobs: default_remote_build_jobs(),
             test_threads: default_remote_test_threads(),
+            timeout_secs: default_remote_build_timeout_secs(),
         }
     }
 }
@@ -316,6 +320,11 @@ fn default_remote_build_jobs() -> usize {
 /// 全套 1611 條測試（issue #202 實測）：32 個執行緒 283 秒、16 個 199 秒、12 個 219 秒、**8 個 168～176 秒**——挑 8。
 fn default_remote_test_threads() -> usize {
     8
+}
+
+/// 12 分鐘：實測 112 次遠端編譯最長 8.9 分鐘（全套 test 中位數 5.0、P90 8.7），約 1.35 倍，不誤殺正常編譯（issue #194）。
+pub fn default_remote_build_timeout_secs() -> u64 {
+    12 * 60
 }
 
 impl Default for BuildCfg {

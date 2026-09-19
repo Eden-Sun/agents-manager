@@ -18,6 +18,12 @@ use std::sync::Arc;
 
 const PASSWORD_FILE: &str = "remote-cargo-password";
 
+/// 整體上限最多設到一天（0＝不設上限）。
+const MAX_TIMEOUT_SECS: u64 = 24 * 3600;
+
+/// 超過整體上限時 helper 的結束碼（跟 GNU `timeout` 一樣是 124）。shim 只把 125 當成「退回本機」，所以不會在本機重跑一次。
+pub const EXIT_TIMEOUT: i32 = 124;
+
 /// 測試用：把 `ssh`／`rsync` 換成假腳本（本機當遠端）。只有測試 build 有這個入口，而且是**執行緒本地**的——並行的其他測試不受影響。
 #[cfg(test)]
 thread_local! {
@@ -58,6 +64,9 @@ pub struct RemoteBuildInput {
     /// 遠端測試執行緒上限（issue #202）。None＝維持現在的值；0＝不設。
     #[serde(default)]
     pub test_threads: Option<usize>,
+    /// 一次遠端編譯的整體時間上限（秒，issue #194）。None＝維持現在的值；0＝不設上限。
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
     /// None = preserve the currently stored password; Some("") = delete it (key/agent auth).
     #[serde(default)]
     pub password: Option<String>,
@@ -103,6 +112,7 @@ fn sanitized(cfg: &BuildRemoteCfg, data_dir: &Path) -> Value {
         "remote_root": cfg.remote_root,
         "cargo_jobs": cfg.cargo_jobs,
         "test_threads": cfg.test_threads,
+        "timeout_secs": cfg.timeout_secs,
         "password_set": password_is_set(data_dir),
     })
 }
@@ -138,8 +148,12 @@ pub async fn put_settings(
         return Err(LcError::Bad("ssh_port must be 1..65535".into()));
     }
     let cargo_jobs = if input.cargo_jobs == 0 { 4 } else { input.cargo_jobs.min(64) };
+    if input.timeout_secs.is_some_and(|t| t > MAX_TIMEOUT_SECS) {
+        return Err(LcError::Bad(format!("timeout_secs 最多 {MAX_TIMEOUT_SECS} 秒（0＝不設上限）")));
+    }
     app.cfg
         .update(|cfg| {
+            let timeout_secs = input.timeout_secs.unwrap_or(cfg.build.remote.timeout_secs);
             let test_threads = input.test_threads.unwrap_or(cfg.build.remote.test_threads).min(256);
             cfg.build.remote = BuildRemoteCfg {
                 enabled: input.enabled,
@@ -153,6 +167,7 @@ pub async fn put_settings(
                 },
                 cargo_jobs,
                 test_threads,
+                timeout_secs,
             };
             Ok(())
         })
@@ -789,7 +804,7 @@ struct Deadline {
 /// 為什麼停：當成 `anyhow` 錯誤一路往上傳，[`run_offload`] 認得它。
 #[derive(Debug)]
 enum Stopped {
-    /// 超過整體上限（[`Deadline::at`]）。
+    /// 超過整體上限：回 [`EXIT_TIMEOUT`]。
     TimedOut,
     /// 收到訊號（值）：回 `128 + 訊號`，跟被那個訊號打死的行程一樣。
     Interrupted(i32),
@@ -851,6 +866,14 @@ fn run_status(mut cmd: Command, what: &str, deadline: &Deadline) -> anyhow::Resu
             return Err(anyhow::Error::new(why));
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+fn limit_text(secs: u64) -> String {
+    if secs % 60 == 0 {
+        format!("{} 分鐘", secs / 60)
+    } else {
+        format!("{secs} 秒")
     }
 }
 
@@ -984,10 +1007,10 @@ pub fn run_cli(config_path: &Path, data_dir: &Path, cwd: &Path, args: &[String])
         remote.user, remote.host, remote.ssh_port, args.first().map(String::as_str).unwrap_or("")
     );
     install_signal_handlers();
-    run_offload(&remote, data_dir, cwd, args, &Deadline::new(0).watching_signals())
+    run_offload(&remote, data_dir, cwd, args, &Deadline::new(remote.timeout_secs).watching_signals())
 }
 
-/// 真的把這次呼叫丟到遠端（已經確定要轉、設定也讀好了）。收到終止訊號也會好好收尾（issue #201）。
+/// 真的把這次呼叫丟到遠端（已經確定要轉、設定也讀好了）。整體時間受 `remote.timeout_secs` 限制（issue #194）；收到終止訊號也會好好收尾（issue #201）。
 fn run_offload(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, args: &[String], ctl: &Deadline) -> i32 {
     let result = (|| -> anyhow::Result<i32> {
         // 從這裡起不管怎麼離開（`?`、panic、被殺、超過上限、收到訊號），守門都會收到 EOF 把目錄還回去、遠端還在跑的 cargo 整組收掉。
@@ -1007,6 +1030,13 @@ fn run_offload(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, args: &[Str
     }
     match result {
         Ok(code) => code,
+        Err(e) if matches!(e.downcast_ref::<Stopped>(), Some(Stopped::TimedOut)) => {
+            eprintln!(
+                "agents-manager: 遠端編譯超過 {} 上限，已中止（遠端那一整組行程已收掉、目錄與鎖已還回；可調 [build.remote] timeout_secs，0＝不設上限）。這次不會退回本機重跑",
+                limit_text(remote.timeout_secs)
+            );
+            EXIT_TIMEOUT
+        }
         Err(e) => {
             eprintln!("agents-manager: remote Cargo failed: {e:#}");
             126
@@ -1120,6 +1150,20 @@ mod tests {
             }
             assert!(rsh.starts_with("ssh -p 2222 "), "{rsh}");
         }
+    }
+
+    /// issue #194：整體上限預設 12 分鐘、可設定；舊的 config.toml 沒寫這個 key 也是 12 分鐘；`0`＝不設上限。
+    #[test]
+    fn the_overall_limit_defaults_to_twelve_minutes_and_is_configurable() {
+        assert_eq!(BuildRemoteCfg::default().timeout_secs, 720);
+        let old: BuildRemoteCfg = toml::from_str("enabled = true\nhost = \"h\"\nuser = \"u\"\n").unwrap();
+        assert_eq!(old.timeout_secs, 720, "舊設定沒有這個 key：用預設");
+        let set: BuildRemoteCfg = toml::from_str("timeout_secs = 90\n").unwrap();
+        assert_eq!(set.timeout_secs, 90);
+        assert_eq!(limit_text(720), "12 分鐘");
+        assert_eq!(limit_text(90), "90 秒");
+        assert!(Deadline::new(0).stop().is_none(), "0＝不設上限");
+        assert!(Deadline::new(1).at.is_some());
     }
 
     /// `ssh -V` 的版本要照數字比：字串比會說 `10.3` 比 `8.4` 小。
@@ -1715,7 +1759,7 @@ mod guard_tests {
     /// 假遠端：`ssh` 把最後一個參數（要在遠端跑的指令字串）在**本機**用 `sh -c` 跑，跟 sshd 一樣每條連線自成一個 session
     /// （`setsid`；收 process group 才不會打到測試本身）；`rsync` 把來源目錄複製到 `user@host:` 後面那個路徑。
     /// `$HOME` 指到沙盒，裡面的假 cargo 就是「遠端的 cargo」。回傳 (設定, cwd, data_dir)。
-    fn fake_remote(base: &Path, cargo_body: &str) -> (BuildRemoteCfg, PathBuf, PathBuf) {
+    fn fake_remote(base: &Path, timeout_secs: u64, cargo_body: &str) -> (BuildRemoteCfg, PathBuf, PathBuf) {
         let bin = base.join("fakebin");
         let home = base.join("home");
         std::fs::create_dir_all(&bin).unwrap();
@@ -1739,6 +1783,7 @@ mod guard_tests {
             remote_root: base.join("rc").display().to_string(),
             cargo_jobs: 1,
             test_threads: 0,
+            timeout_secs,
         };
         (remote, cwd, data)
     }
@@ -1763,6 +1808,51 @@ mod guard_tests {
             }
         }
         pids
+    }
+
+    /// 連線正常、遠端的 cargo 卡住（睡 300 秒）：超過上限（這裡 3 秒）就中止——回 124、遠端那顆 cargo 整組收掉、鎖與目錄還回去；
+    /// 而且**不退回本機**（124 不是 shim 認的 125）。以前沒有上限：一直等到有人 Ctrl-C。
+    #[test]
+    fn a_remote_build_over_the_limit_is_aborted_and_its_remote_processes_are_reaped() {
+        let base = base();
+        let (remote, cwd, data) = fake_remote(&base, 3, "touch \"$PWD/../cargo-started-$$\"\nexec sleep 45\n");
+        let t0 = Instant::now();
+        let rc = with_fake_transport(&base, || run_offload(&remote, &data, &cwd, &["test".to_string()], &Deadline::new(remote.timeout_secs)));
+        let took = t0.elapsed();
+        assert_eq!(rc, 124, "超過上限要回 124（不是 125＝退回本機，也不是 126＝失敗）");
+        assert!(took >= Duration::from_secs(3), "上限沒到不能中止：{took:?}");
+        assert!(took < Duration::from_secs(60), "超過上限之後要很快收乾淨：{took:?}");
+        let pids = started_cargo_pids(&base);
+        assert_eq!(pids.len(), 1, "假 cargo 真的起來過：{pids:?}");
+        wait_until("the remote cargo to be reaped", || unsafe { libc::kill(pids[0], 0) } != 0);
+        // 守門收尾做完才回來：這次的 owner 撤掉了（＝目錄已還回去，晚到的 run 不會再跑）。
+        let owners: Vec<_> = std::fs::read_dir(base.join("rc")).unwrap().flatten().flat_map(|h| std::fs::read_dir(h.path()).unwrap().flatten()).filter(|e| e.file_name().to_string_lossy().ends_with(".owner")).collect();
+        assert!(owners.is_empty(), "目錄要還回去：{owners:?}");
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// 沒超過上限的照常回傳結果（成功回 0、cargo 失敗回它的退出碼），不會被誤判成逾時。
+    #[test]
+    fn a_remote_build_within_the_limit_returns_its_own_result() {
+        let base = base();
+        let (remote, cwd, data) = fake_remote(&base, 60, "exit 101\n");
+        let rc = with_fake_transport(&base, || run_offload(&remote, &data, &cwd, &["test".to_string()], &Deadline::new(remote.timeout_secs)));
+        assert_eq!(rc, 101, "cargo 自己的退出碼原樣帶回");
+        let _ = std::fs::remove_dir_all(&base);
+        let (remote, cwd, data) = fake_remote(&base, 60, "exit 0\n");
+        let rc = with_fake_transport(&base, || run_offload(&remote, &data, &cwd, &["check".to_string()], &Deadline::new(remote.timeout_secs)));
+        assert_eq!(rc, 0);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// `timeout_secs = 0`＝不設上限：跑得比「一般的上限」久也照常等到結束。
+    #[test]
+    fn a_zero_limit_means_no_limit() {
+        let base = base();
+        let (remote, cwd, data) = fake_remote(&base, 0, "sleep 3\nexit 0\n");
+        let rc = with_fake_transport(&base, || run_offload(&remote, &data, &cwd, &["test".to_string()], &Deadline::new(remote.timeout_secs)));
+        assert_eq!(rc, 0);
+        let _ = std::fs::remove_dir_all(base);
     }
 
     // ── 本機 helper 被砍時遠端也要停（issue #201）──
@@ -1821,7 +1911,7 @@ mod guard_tests {
     #[test]
     fn an_interrupted_helper_reaps_the_remote_group_before_it_exits() {
         let base = base();
-        let (remote, cwd, data) = fake_remote(&base, "touch \"$PWD/../cargo-started-$$\"\nexec sleep 45\n");
+        let (remote, cwd, data) = fake_remote(&base, 0, "touch \"$PWD/../cargo-started-$$\"\nexec sleep 45\n");
         let ctl = Deadline::new(0);
         let abort = ctl.abort.clone();
         let watcher = {
