@@ -477,7 +477,10 @@ impl MockHerdr {
                                     p.render()
                                 })
                             };
-                            let text = live_text.unwrap_or_else(|| st.screens.lock().unwrap().get(&pid).cloned().unwrap_or_default());
+                            let text = live_text.unwrap_or_else(|| {
+                                let screens = st.screens.lock().unwrap();
+                                screens.get(&pid).cloned().or_else(|| screens.get("*").cloned()).unwrap_or_default()
+                            });
                             // A screen set to this marker answers like a broken pane: the caller
                             // must treat a read failure as an error, never as an empty screen.
                             if text == "__READ_ERROR__" {

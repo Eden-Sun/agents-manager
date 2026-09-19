@@ -496,6 +496,8 @@ claude 連線在回應中途掉了時，pane 只多一行 `⏺ API Error: Connec
 
 - **daemon 記 runtime**：`start_inner` 在 `agent.start` 前用 `models::model_effort_from_argv` 從最終 argv 讀回，存 `runs.runtime_model/effort/fast`
   （讀 argv 而非抄 bots：`effort_checked` 會丟掉模型不收的等級，`bot.args` 也可能自帶 `-m`）。slash 指令套用成功就同步改。
+  grok TUI 不理 `--reasoning-effort` 也不理 `~/.grok/config.toml` 的 `default_reasoning_effort`（#215，畫面仍是模型預設如 `Grok 4.6 (high)`）：
+  agent 就緒後讀框底，跟 `bots.effort` 不同就送 `/effort <level>`（已相符不打字，免得 `pane_typed` 改 prompt 路徑）。
 - **收編的 pane**三欄是 NULL = 不知道，UI 不比也不標。codex 例外：它把三個值印在狀態列上，reconcile 讀那行補 NULL（`reconcile::fill_codex_runtime`）——
   否則 UI 會拿 bots 頂上，而 `/fast` 是開關，不知道的 tier 等於切不掉。
 - **UI 一律顯示 runtime**；設定 ≠ runtime 時多一顆「需重啟」chip（`POST /api/bots/{id}/restart`）。不准靜靜顯示還沒生效的值。

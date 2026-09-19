@@ -829,6 +829,10 @@ async fn start_inner(
     if bot.kind == "codex" {
         schedule_codex_notice_capture(app, &bot.id, run_id);
     }
+    // grok TUI 不理 `--reasoning-effort`（#215）：就緒後看框底，不對就補 `/effort`。失敗只記 log，agent 已經在跑。
+    if let Err(e) = super::apply_grok_startup_effort(app, &bot, run_id, &pane_id, &client).await {
+        tracing::warn!(bot = %bot.id, error = %e, "could not apply grok effort via /effort after start");
+    }
     app.emit_bot_status(&bot.id).await;
     Ok(())
 }
@@ -2538,5 +2542,74 @@ mod run_state_commit_tests {
         assert!(matches!(&err, LcError::Upstream(m) if m.contains("ended while it was starting")), "要輸在 running 的 CAS，拿到 {err:?}");
         let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE bot_id=?").bind(&bot.id).fetch_one(&app.db).await.unwrap();
         assert_eq!(state, "exited", "終態不會被拉回 running");
+    }
+}
+
+/// #215：grok TUI 不理 `--reasoning-effort`，啟動後畫面還是模型預設 high；daemon 要在就緒後補 `/effort`。
+#[cfg(test)]
+mod grok_startup_effort_tests {
+    use super::start_bot;
+    use crate::db;
+    use crate::testing as tt;
+
+    const GROK_HIGH: &str = "  ╭──────────────────────────────────────────╮\n  │ ❯                                        │\n  ╰──────────────── Grok 4.6 (high) · always-approve ─╯\n";
+    const GROK_MEDIUM: &str = "  ╭──────────────────────────────────────────╮\n  │ ❯                                        │\n  ╰──────────────── Grok 4.6 (medium) · always-approve ─╯\n";
+
+    async fn grok_bot(app: &std::sync::Arc<crate::state::App>, project_id: &str, effort: Option<&str>) -> db::Bot {
+        let id = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, model, effort, args_json, autostart, inject_hooks, hook_token, managed_by, created_at)
+             VALUES (?,?,?,'grok','grok-4.6',?,'[]',0,1,'tok','user',?)",
+        )
+        .bind(&id)
+        .bind(project_id)
+        .bind("g-effort")
+        .bind(effort)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        db::bot(&app.db, &id).await.unwrap().unwrap()
+    }
+
+    fn sent_effort_slash(e: &tt::Env) -> Vec<String> {
+        e.herdr
+            .calls_to("pane.send_text")
+            .into_iter()
+            .filter_map(|p| p.get("text").and_then(|t| t.as_str()).map(str::to_string))
+            .filter(|t| t.contains("/effort "))
+            .collect()
+    }
+
+    /// 啟動後標示 high、設定是 medium → 送出 /effort medium。
+    #[tokio::test]
+    async fn a_grok_bot_set_to_medium_gets_effort_slash_when_the_tui_shows_high() {
+        let e = tt::env().await;
+        e.herdr.set_screen("*", GROK_HIGH);
+        let bot = grok_bot(&e.app, &e.project_id, Some("medium")).await;
+        start_bot(&e.app, &bot.id).await.unwrap();
+        assert_eq!(sent_effort_slash(&e), vec!["/effort medium".to_string()], "TUI 還在 high，要補 slash");
+        let run = db::active_run(&e.app.db, &bot.id).await.unwrap().unwrap();
+        assert_eq!(run.runtime_effort.as_deref(), Some("medium"));
+    }
+
+    /// 畫面已經是設定的等級：不要再打字（pane_typed 會改 prompt 路徑）。
+    #[tokio::test]
+    async fn a_grok_bot_does_not_slash_when_the_tui_already_matches() {
+        let e = tt::env().await;
+        e.herdr.set_screen("*", GROK_MEDIUM);
+        let bot = grok_bot(&e.app, &e.project_id, Some("medium")).await;
+        start_bot(&e.app, &bot.id).await.unwrap();
+        assert!(sent_effort_slash(&e).is_empty(), "已經 medium 就不要再 /effort");
+    }
+
+    /// 沒設 effort：不要自作主張改 TUI。
+    #[tokio::test]
+    async fn a_grok_bot_without_effort_is_left_on_the_tui_default() {
+        let e = tt::env().await;
+        e.herdr.set_screen("*", GROK_HIGH);
+        let bot = grok_bot(&e.app, &e.project_id, None).await;
+        start_bot(&e.app, &bot.id).await.unwrap();
+        assert!(sent_effort_slash(&e).is_empty());
     }
 }
