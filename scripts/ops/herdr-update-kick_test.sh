@@ -1,6 +1,7 @@
 #!/bin/bash
 # herdr-update-kick.sh 的隔離測試：自己的 AGM 目錄、假的 `herdr`／`gh`／`agents-managerd`／`bin/agm`，
-# 完全不碰正式 AGM、daemon 或真的 herdr。測的是決策：什麼時候派、派幾次、派給誰、state 什麼時候才寫；
+# 完全不碰正式 AGM、daemon 或真的 herdr。測的是決策：什麼時候派、派幾次、派給誰、state 什麼時候才寫、
+# launchd 最小 PATH 找不找得到依賴、缺依賴會不會喊人；
 # 版本比較與 CHANGELOG 段落擷取本身的正確性由 `daemon/src/herdr_update.rs` 的 `cargo test` 釘住，
 # 這裡的假 `agents-managerd` 只做最簡單的版本比較，不重現全部 Rust 邏輯。
 #
@@ -22,10 +23,13 @@ setup() {
 echo "$*" >> "$AGM_DIR/calls.log"
 for a in "$@"; do
   case "$a" in
-    --compact|--bot|--review-by|--text-file|--request-id|assign) ;;
+    --compact|--bot|--review-by|--text-file|--request-id|--source|--reason|--detail|assign|ops-alert) ;;
     --*) echo "agm: error: unrecognized arguments: $a" >&2; exit 2 ;;
   esac
 done
+case "$*" in
+  *ops-alert*) printf '%s' '{"ok":true}'; exit 0 ;;
+esac
 for i in $(seq 1 $#); do
   eval "a=\${$i}"
   case "$a" in --text-file) eval "f=\${$((i+1))}"; cat "$f" >> "$AGM_DIR/assign-body.txt" ;; esac
@@ -54,6 +58,9 @@ else
 fi
 STUB
   chmod +x "$ROOT/stubbin/gh"
+  # 腳本開頭會把 AGM_EXTRA_PATH（預設 Homebrew）接到 PATH 前面；不蓋掉的話真的
+  # /opt/homebrew/bin/herdr、gh 會蓋過假的。env -i 模擬 launchd 時也靠這個找到 stub。
+  export AGM_EXTRA_PATH="$ROOT/stubbin"
   export PATH="$ROOT/stubbin:$PATH"
 
   # 假 agents-managerd：只做最簡單的數值版本比較，跟真 CLI 同一份 JSON 形狀
@@ -124,9 +131,21 @@ PYEOF
 }
 teardown() {
   rm -rf "$ROOT"
-  unset AGM_DIR AGM_REPO HERDR_REPO AM_BINARY HERDR_CHANGELOG_URL AGM_HERDR_UPDATE_BOT
-  unset STUB_ASSIGN_FAIL STUB_HERDR_VERSION STUB_GH_TAG PATH_ADDED
+  unset AGM_DIR AGM_REPO HERDR_REPO AM_BINARY HERDR_CHANGELOG_URL AGM_HERDR_UPDATE_BOT AGM_EXTRA_PATH
+  unset STUB_ASSIGN_FAIL STUB_HERDR_VERSION STUB_GH_TAG
 }
+# launchd 的預設 PATH 不含 Homebrew。AGM_EXTRA_PATH 指向 stubbin＝「配置完成後仍找得到依賴」。
+run_launchd() {
+  env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+    AGM_DIR="$AGM_DIR" AGM_REPO="$AGM_REPO" AM_BINARY="$AM_BINARY" \
+    HERDR_REPO="$HERDR_REPO" HERDR_CHANGELOG_URL="$HERDR_CHANGELOG_URL" \
+    AGM_EXTRA_PATH="${1-$ROOT/stubbin}" \
+    STUB_HERDR_VERSION="${STUB_HERDR_VERSION:-0.8.2}" \
+    STUB_GH_TAG="${STUB_GH_TAG:-v0.9.0}" \
+    STUB_ASSIGN_FAIL="${STUB_ASSIGN_FAIL:-}" \
+    /bin/bash "$SCRIPT"
+}
+assigns() { grep -c ' assign ' "$AGM_DIR/calls.log" 2>/dev/null | tr -d ' '; }
 
 check() {
   if grep -q -- "$2" "$3" 2>/dev/null; then echo "ok   - $1"; PASS=$((PASS + 1))
@@ -263,6 +282,72 @@ if [ -x /bin/bash ]; then
 else
   echo "skip - 這台機器沒有 /bin/bash，略過舊版 bash 相容性測試"
 fi
+
+# 14. launchd 的最小環境：env -i、PATH 只有 /usr/bin:/bin:/usr/sbin:/sbin（不含 Homebrew），
+# 假 herdr／gh 只在 AGM_EXTRA_PATH。腳本必須自己把 EXTRA_PATH 接到前面，系統 /bin/bash 也要跑得起來。
+setup
+run_launchd
+equals "env -i 最小 PATH（系統 /bin/bash）：照派" "$(assigns)" "1"
+equals "env -i 最小 PATH：state 照寫" "$(cat "$AGM_DIR/herdr-update.last")" "0.9.0"
+teardown
+
+# 14b. 找不到 herdr／gh／python3／curl：log＋ops_alert，不是靜默 exit 0（#66 留言：
+# launchd 預設 PATH 找不到 Homebrew 的 herdr／gh 時，功能表面「已排程」但永遠不派）。
+link_tools() { # link_tools <dir> <name…>
+  local d="$1"; shift
+  mkdir -p "$d"
+  for t in "$@"; do ln -s "$(command -v "$t")" "$d/$t"; done
+}
+setup
+mkdir "$ROOT/noherdr"
+ln -s "$ROOT/stubbin/gh" "$ROOT/noherdr/gh"
+link_tools "$ROOT/noherdr" date python3 curl
+env -i PATH="$ROOT/noherdr:/usr/bin:/bin" AGM_EXTRA_PATH="" \
+  AGM_DIR="$AGM_DIR" AGM_REPO="$AGM_REPO" AM_BINARY="$AM_BINARY" \
+  HERDR_REPO="$HERDR_REPO" HERDR_CHANGELOG_URL="$HERDR_CHANGELOG_URL" \
+  /bin/bash "$SCRIPT"
+check "缺 herdr：有記 log" "找不到 herdr" "$AGM_DIR/herdr-update.log"
+check "缺 herdr：推 ops-alert" "\-\-reason missing_dependency" "$AGM_DIR/calls.log"
+equals "缺 herdr：不派" "$(assigns)" "0"
+teardown
+setup
+mkdir "$ROOT/nogh"
+ln -s "$ROOT/stubbin/herdr" "$ROOT/nogh/herdr"
+link_tools "$ROOT/nogh" date python3 curl
+env -i PATH="$ROOT/nogh:/usr/bin:/bin" AGM_EXTRA_PATH="" \
+  AGM_DIR="$AGM_DIR" AGM_REPO="$AGM_REPO" AM_BINARY="$AM_BINARY" \
+  HERDR_REPO="$HERDR_REPO" HERDR_CHANGELOG_URL="$HERDR_CHANGELOG_URL" \
+  STUB_HERDR_VERSION=0.8.2 /bin/bash "$SCRIPT"
+check "缺 gh：有記 log" "找不到 gh" "$AGM_DIR/herdr-update.log"
+check "缺 gh：推 ops-alert" "\-\-reason missing_dependency" "$AGM_DIR/calls.log"
+equals "缺 gh：不派" "$(assigns)" "0"
+teardown
+setup
+mkdir "$ROOT/nopy"
+ln -s "$ROOT/stubbin/herdr" "$ROOT/nopy/herdr"
+ln -s "$ROOT/stubbin/gh" "$ROOT/nopy/gh"
+link_tools "$ROOT/nopy" date cat head sed mktemp tr curl mkdir rmdir rm
+env -i PATH="$ROOT/nopy" AGM_EXTRA_PATH="" \
+  AGM_DIR="$AGM_DIR" AGM_REPO="$AGM_REPO" AM_BINARY="$AM_BINARY" \
+  HERDR_REPO="$HERDR_REPO" HERDR_CHANGELOG_URL="$HERDR_CHANGELOG_URL" \
+  STUB_HERDR_VERSION=0.8.2 STUB_GH_TAG=v0.9.0 /bin/bash "$SCRIPT"
+check "缺 python3：有記 log" "找不到 python3" "$AGM_DIR/herdr-update.log"
+check "缺 python3：推 ops-alert" "\-\-reason missing_dependency" "$AGM_DIR/calls.log"
+equals "缺 python3：不派" "$(assigns)" "0"
+teardown
+setup
+mkdir "$ROOT/nocurl"
+ln -s "$ROOT/stubbin/herdr" "$ROOT/nocurl/herdr"
+ln -s "$ROOT/stubbin/gh" "$ROOT/nocurl/gh"
+link_tools "$ROOT/nocurl" date python3
+env -i PATH="$ROOT/nocurl" AGM_EXTRA_PATH="" \
+  AGM_DIR="$AGM_DIR" AGM_REPO="$AGM_REPO" AM_BINARY="$AM_BINARY" \
+  HERDR_REPO="$HERDR_REPO" HERDR_CHANGELOG_URL="$HERDR_CHANGELOG_URL" \
+  STUB_HERDR_VERSION=0.8.2 STUB_GH_TAG=v0.9.0 /bin/bash "$SCRIPT"
+check "缺 curl：有記 log" "找不到 curl" "$AGM_DIR/herdr-update.log"
+check "缺 curl：推 ops-alert" "\-\-reason missing_dependency" "$AGM_DIR/calls.log"
+equals "缺 curl：不派" "$(assigns)" "0"
+teardown
 
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

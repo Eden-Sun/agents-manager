@@ -7,23 +7,39 @@
 # 抓 CHANGELOG 全文——然後照它印出的 JSON 決定要不要派工。不在這裡重做版本比較（`457dd14` 的
 # `0.9.0` 判成比 `0.10.0` 新那個坑，字串比較一定會再踩一次）。
 #
-#   AGM_DIR、AGM_REPO、AM_BINARY、HERDR_REPO、HERDR_CHANGELOG_URL、AGM_HERDR_UPDATE_BOT 可覆寫（測試用）。
+#   AGM_DIR、AGM_REPO、AM_BINARY、HERDR_REPO、HERDR_CHANGELOG_URL、AGM_HERDR_UPDATE_BOT、
+#   AGM_EXTRA_PATH 可覆寫（測試用）。
+#
+# launchd 預設 PATH 不含 Homebrew（#66 留言／#204 C）：開頭自補 PATH；缺 herdr／gh／python3／curl
+# 不靜默 exit 0，log＋ops_alert，否則 job「已排程」但永遠不派。
 set -u
-DIR="${AGM_DIR:-$HOME/.config/agents-manager/supervisor/AGM}"
-REPO="${AGM_REPO:-$HOME/project/agents-manager}"
+PATH="${AGM_EXTRA_PATH-/opt/homebrew/bin:/usr/local/bin}:$PATH"; export PATH   # AGM_EXTRA_PATH 只給測試蓋掉
+
+DIR="${AGM_DIR:-${HOME:-/nonexistent}/.config/agents-manager/supervisor/AGM}"
+REPO="${AGM_REPO:-${HOME:-/nonexistent}/project/agents-manager}"
 HERDR_REPO="${HERDR_REPO:-herdrdev/herdr}"
 AGM="$DIR/bin/agm"
 BIN="${AM_BINARY:-$REPO/target/release/agents-managerd}"
 CHANGELOG_URL="${HERDR_CHANGELOG_URL:-https://raw.githubusercontent.com/${HERDR_REPO}/master/CHANGELOG.md}"
 LOG="$DIR/herdr-update.log"
 STATE="$DIR/herdr-update.last"       # 已經派過工的版本（should_notify 的去重就是靠比對這個檔）
+OWNER="${AM_AGENT_NAME:-herdr-update-kick}"
 
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
 
 [ -x "$AGM" ] || exit 0
+
+alert() { # alert <reason> <detail>：一則 durable inbox 事件（同 source+reason 每小時一則，daemon 去重）
+  log "ALERT ${1}：${2}"
+  "$AGM" --compact ops-alert --source "$OWNER" --reason "$1" --detail "$2" >> "$LOG" 2>&1 ||
+    log "推 ops-alert 失敗（舊 CLI 或 daemon 不在），只留在這份 log"
+}
+
 [ -x "$BIN" ] || { log "找不到 ${BIN}，跳過（需要先建好 release binary）"; exit 0; }
-command -v herdr >/dev/null 2>&1 || { log "找不到 herdr，跳過"; exit 0; }
-command -v gh >/dev/null 2>&1 || { log "找不到 gh，跳過"; exit 0; }
+command -v herdr >/dev/null 2>&1 || { alert missing_dependency "找不到 herdr（PATH=${PATH}），herdr 新版偵測停住"; exit 0; }
+command -v gh >/dev/null 2>&1 || { alert missing_dependency "找不到 gh（PATH=${PATH}），herdr 新版偵測停住"; exit 0; }
+command -v python3 >/dev/null 2>&1 || { alert missing_dependency "找不到 python3（PATH=${PATH}），herdr 新版偵測停住"; exit 0; }
+command -v curl >/dev/null 2>&1 || { alert missing_dependency "找不到 curl（PATH=${PATH}），herdr 新版偵測停住"; exit 0; }
 
 # 兩個執行者同時派會送出兩筆一樣的交辦。殘留的鎖交 AGM 檢查，寧可不派（同 claude-release-kick.sh）。
 LOCK="$DIR/herdr-update.lock"
