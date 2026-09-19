@@ -579,6 +579,15 @@ pane 上回過 ok 卻沒送進去（wits-c1-op-xh 14:24、15:33，第二次距 s
 相同**的 user 訊息；同時 run 仍須指向同一個 session（claude 另比對路徑），途中換了就是 `Unproven("session_changed")`；
 檔案比基準還短視為讀取錯誤。
 
+**claude 的貼上包裝**（#218）：2.1.27x 的伺服器旗標 `tengu_virtual_pancake` 開著時，CLI 把**貼上事件**包成
+`\n\n<pasted_content id="XXXX">\n<貼上的字>\n</pasted_content id="XXXX">\n` 才寫進 transcript：id 是 `sha256(session id)` 前 4 個 hex；
+一般貼上先 trim、少於 20 字不包，大段貼上（超過 800 字或超過 2 個換行）整段包；整則裡的 `<pasted_content`／`</pasted_content`
+跳脫成 `<\…`；send-now 送出的那一則不包。2026-09-19 在 2.1.278 實測，會被包的是 herdr `agent.prompt`（還有人在終端貼上、
+bot 用 `herdr agent prompt` 轉的訊息），上面的打字路線（`pane.send_text`，短句、4 行、880 字都試過）不會。所以讀 transcript 的
+user 文字先照 CLI 自己的拆法還原（`lifecycle::pasted_content`，只認格式完全對的區塊）：送達證據、stuck watchdog 找「我們送的那一則」
+（§4.3b）、Stop hook 從 transcript 補的使用者訊息（記成外部回合時存的字、`answers_another_prompt`）。被 CLI 改寫過的那一則比還原後的字、
+頭尾空白不計；沒改寫的照舊逐位元組。形近字被換成 ASCII `<\` 的那種還原不了，照舊當成證不出來。
+
 **證據矩陣**（先符合的先用）：
 
 | provider | 主機 | 單行、放得進一列 | 其他（多行、長文、縮排／行尾空白、特殊字元、量不到欄寬） |
