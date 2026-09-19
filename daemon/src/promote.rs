@@ -386,7 +386,9 @@ mod tests {
             self.dir.join("projects").join(cwd_key(CHILD_CWD)).join(format!("{SID}.jsonl"))
         }
         fn dest(&self) -> PathBuf {
-            self.dir.join("projects").join(cwd_key(&self.e.repo.to_string_lossy())).join(format!("{SID}.jsonl"))
+            // 專案路徑入庫時會 canonicalize（macOS 的 /var → /private/var），claude 的 cwd 也是真實路徑。
+            let repo = std::fs::canonicalize(&self.e.repo).unwrap_or_else(|_| self.e.repo.clone());
+            self.dir.join("projects").join(cwd_key(&repo.to_string_lossy())).join(format!("{SID}.jsonl"))
         }
     }
 
