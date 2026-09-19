@@ -1658,6 +1658,67 @@ mod tests {
         assert_eq!(row.status, "cancelled", "取消那一步照樣把它收掉");
     }
 
+    /// issue #185：取消任務時逐件 `review cancel` 有一件失敗（DB 暫時寫不進去），任務已經關了、那件交辦卻一直開著——
+    /// #171 之後派送不會再送它，但也沒有任何路徑補收：它永遠佔著「未結交辦」。controller 的對帳要把「所屬任務已取消、
+    /// 沒在跑」的交辦補收成 cancelled（跟取消那一步同一個裁示），可重入；仍在跑的（delivered）與開著的任務底下的不碰。
+    #[tokio::test]
+    async fn an_assignment_the_mission_cancel_could_not_close_is_collected_later() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        crate::supervisor::store::get_or_init(&app.db).await.unwrap();
+        let agm = crate::testing::claude_bot(&app, &env.project_id, "AGM").await;
+        crate::supervisor::store::set_env(&app.db, &agm.id, &env.project_id, "/tmp").await.unwrap();
+        let worker = crate::testing::claude_bot(&app, &env.project_id, "worker").await;
+        let queued_under = |crid: &'static str| {
+            let (app, worker) = (app.clone(), worker.id.clone());
+            let project = env.project_id.clone();
+            async move {
+                let Json(m) = post_mission(State(app.clone()), Path(project), Json(new_mission(crid, "pr"))).await.unwrap();
+                let id = m["id"].as_str().unwrap().to_string();
+                // worker 沒在跑：派送 409，交辦留在 queued。
+                let out = crate::supervisor::assign(
+                    &app, &worker, "做 X", &format!("{crid}-exec"), None, &[], None, true, Some((&id, "executor")), None, None,
+                    crate::supervisor::bot_requests::ReplyMark::default(),
+                )
+                .await
+                .unwrap();
+                (id, out["id"].as_str().unwrap().to_string())
+            }
+        };
+        let status = |aid: String| {
+            let app = app.clone();
+            async move { crate::supervisor::store::assignment(&app.db, &aid).await.unwrap().unwrap().status }
+        };
+
+        let (mission, aid) = queued_under("cancel-leftover").await;
+        sqlx::query(&format!(
+            "CREATE TRIGGER test_cancel_lost BEFORE UPDATE OF status ON supervisor_assignments WHEN OLD.id = '{aid}' AND NEW.status = 'cancelled'
+             BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END"
+        ))
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let Json(out) = post_cancel(State(app.clone()), Path(mission.clone()), HeaderMap::new()).await.expect("任務照樣取消");
+        assert_eq!(out["assignments"][0]["cancelled"], json!(false), "前提：那一件沒收成：{out}");
+        sqlx::query("DROP TRIGGER test_cancel_lost").execute(&app.db).await.unwrap();
+        assert_eq!(status(aid.clone()).await, "queued", "前提：任務關了、交辦還開著");
+
+        // 仍開著的任務底下排著的、已取消任務底下還在跑的，都不是補收的對象。
+        let (_, open_aid) = queued_under("still-open").await;
+        let (running_mission, running_aid) = queued_under("cancel-running").await;
+        sqlx::query("UPDATE supervisor_assignments SET status='delivered' WHERE id=?").bind(&running_aid).execute(&app.db).await.unwrap();
+        assert!(store::cancel(&app.db, &running_mission).await.unwrap());
+
+        crate::supervisor::controller::reconcile(&app).await;
+        assert_eq!(status(aid.clone()).await, "cancelled", "所屬任務已取消：補收");
+        assert_eq!(status(open_aid.clone()).await, "queued", "任務還開著：不碰");
+        assert_eq!(status(running_aid.clone()).await, "delivered", "回合可能還在跑：不碰，等它結束再收");
+        // 可重入：再跑一次什麼都不多寫。
+        crate::supervisor::controller::reconcile(&app).await;
+        let reviews: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_reviews WHERE assignment_id=?").bind(&aid).fetch_one(&app.db).await.unwrap();
+        assert_eq!(reviews, 1, "補收只記一次裁示");
+    }
+
     /// 請求跑到一半任務被取消了：之後的「停下來問人」不能再寫進去（`store::pause` 的 `false` 以前沒人看）。
     ///
     /// 三個地方都一樣：退回（輪數用完的那一支）、挑驗證者挑不到 Fable、交付失敗。`round` 還多一層：任務被關掉時
