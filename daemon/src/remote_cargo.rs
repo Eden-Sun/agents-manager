@@ -224,6 +224,12 @@ fn secret(data_dir: &Path) -> anyhow::Result<Option<String>> {
     }
 }
 
+/// 連線存活選項（#174），ssh 與 rsync 的 `-e` 共用：對端連上之後靜默消失（Wi-Fi 換 AP、Mac 睡著醒來 IP 變了、遠端掉電）時，
+/// 沒有這些 ssh 只能等 TCP keepalive（預設 2 小時），helper 與 agent 的 cargo 一路卡著，遠端的鎖與目錄也一直被佔。
+/// `ConnectTimeout` 連握手一起算（連上就不說話的對端）；`ServerAlive*` 管連上之後——15 秒問一次、連 3 次沒回（約 45 秒）就斷。
+/// 跟 `hosts.rs::ssh_args` 的節奏一致。
+const SSH_LIVENESS_OPTS: [&str; 6] = ["-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3"];
+
 fn ssh_base(remote: &BuildRemoteCfg, password: Option<&str>, data_dir: &Path) -> anyhow::Result<Command> {
     let mode = match password {
         Some(_) => Some(password_mode(data_dir)?),
@@ -259,6 +265,7 @@ fn ssh_cmd(remote: &BuildRemoteCfg, password: Option<&str>, mode: Option<&PwMode
     }
     cmd.arg("-p")
         .arg(remote.ssh_port.to_string())
+        .args(SSH_LIVENESS_OPTS)
         .arg("-o")
         .arg("StrictHostKeyChecking=accept-new")
         .arg("-o")
@@ -724,6 +731,20 @@ fn open_lease(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path) -> anyhow::R
     Lease::start(cmd, token)
 }
 
+/// rsync 的 `-e`：跟 [`ssh_cmd`] 同一組連線選項（`ssh` 那條與這條的行為不能各走各的）。
+fn rsync_rsh(remote: &BuildRemoteCfg, has_password: bool, askpass: bool) -> String {
+    let mut ssh = format!(
+        "ssh -p {} {} -o StrictHostKeyChecking=accept-new -o {}",
+        remote.ssh_port,
+        SSH_LIVENESS_OPTS.join(" "),
+        if has_password { "BatchMode=no" } else { "BatchMode=yes" }
+    );
+    if askpass {
+        ssh.push_str(" -o NumberOfPasswordPrompts=1");
+    }
+    ssh
+}
+
 fn sync_source(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, dir: &str) -> anyhow::Result<()> {
     if !has_program("rsync") {
         anyhow::bail!("remote Cargo requires `rsync` on the daemon host");
@@ -733,14 +754,7 @@ fn sync_source(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, dir: &str) 
         Some(_) => Some(password_mode(data_dir)?),
         None => None,
     };
-    let mut ssh = format!(
-        "ssh -p {} -o StrictHostKeyChecking=accept-new -o {}",
-        remote.ssh_port,
-        if pw.is_some() { "BatchMode=no" } else { "BatchMode=yes" }
-    );
-    if matches!(mode, Some(PwMode::Askpass(_))) {
-        ssh.push_str(" -o NumberOfPasswordPrompts=1");
-    }
+    let ssh = rsync_rsh(remote, pw.is_some(), matches!(mode, Some(PwMode::Askpass(_))));
     let mut cmd = match &mode {
         Some(PwMode::Sshpass) => {
             let mut c = Command::new("sshpass");
@@ -858,6 +872,36 @@ mod tests {
         let cmd = ssh_cmd(&remote(), None, None);
         assert_eq!(cmd.get_program(), "ssh");
         assert!(envs(&cmd).is_empty(), "{:?}", envs(&cmd));
+    }
+
+    /// #174：連線靜默斷掉（Wi-Fi 換 AP、Mac 睡著醒來 IP 變了、遠端掉電）時，ssh 沒有 ServerAlive 就只能等 TCP keepalive
+    /// （預設 2 小時）——helper 不返回、agent 的 cargo 卡死，遠端的鎖與目錄也一直被佔。沒有 ConnectTimeout，連上就不說話的對端也
+    /// 讓 ssh 永遠停在握手。ssh 那條（守門／run／probe／install）與 rsync 的 `-e` 都要帶，有沒有密碼都一樣。
+    #[test]
+    fn every_ssh_of_the_offload_gives_up_on_a_silent_peer() {
+        fn has(args: &[String], opt: &str) -> bool {
+            args.windows(2).any(|w| w[0] == "-o" && w[1].starts_with(opt))
+        }
+        let ssh_args = |password: Option<&str>, mode: Option<&PwMode>| -> Vec<String> {
+            ssh_cmd(&remote(), password, mode).get_args().map(|a| a.to_string_lossy().into_owned()).collect()
+        };
+        let variants = [
+            ssh_args(None, None),
+            ssh_args(Some("pw"), Some(&PwMode::Sshpass)),
+            ssh_args(Some("pw"), Some(&PwMode::Askpass(PathBuf::from("/d/askpass.sh")))),
+        ];
+        for args in &variants {
+            for opt in ["ConnectTimeout=", "ServerAliveInterval=", "ServerAliveCountMax="] {
+                assert!(has(args, opt), "ssh 少了 {opt}：{args:?}");
+            }
+        }
+        for (password, askpass) in [(false, false), (true, false), (true, true)] {
+            let rsh = rsync_rsh(&remote(), password, askpass);
+            for opt in ["ConnectTimeout=", "ServerAliveInterval=", "ServerAliveCountMax="] {
+                assert!(rsh.contains(&format!("-o {opt}")), "rsync 的 -e 少了 {opt}：{rsh}");
+            }
+            assert!(rsh.starts_with("ssh -p 2222 "), "{rsh}");
+        }
     }
 
     /// `ssh -V` 的版本要照數字比：字串比會說 `10.3` 比 `8.4` 小。
