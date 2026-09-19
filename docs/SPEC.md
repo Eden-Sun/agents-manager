@@ -803,6 +803,9 @@ stall watchdog 的自動補送走同一條驗證路徑，次數記在 `turns.res
 6. `autostart = true` 且無 active Run 的 bot 走 §6.2。**每台主機在這顆 daemon 的一生只跑一次，而且要那台的對帳成功**：
    本機在開機對帳之後；遠端在那台連上並對帳成功之後（`reconcile::autostart_after_reconcile`）。對帳失敗那次不算數、下次連上再試；
    ssh 斷線重連不再跑——`stop` 不改 `autostart`，使用者停掉的 bot 不能因為筆電睡醒重連就被重開（review 2026-09-16 core 5）。
+   **讀不到不當成沒有**（#209）：bot 清單讀不到＝這一輪一顆都不起；某顆讀不到主機（不當成本機）或讀不到 active run（不當成沒在跑）
+   就只跳過那顆。沒判斷完的部分背景照開機恢復的退避（§3.1）補到判斷完——本機不會有「下次連上」，不能只靠重連。主機照樣只算跑過
+   一次：補的只是這一次還沒判斷完的，已經判斷過的不再碰；第一次嘗試之後才有 run 的 bot（使用者自己起過又停掉）也不再替它起。
 
 ### 6.2 啟動 Bot（per-bot 鎖內）
 1. `INSERT runs (state='starting')`；違反 active Run 唯一索引 → 409 附既有 `run_id`。

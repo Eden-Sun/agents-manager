@@ -26,31 +26,64 @@ pub async fn reconcile(app: &Arc<App>) -> Result<()> {
     }
 }
 
-/// `autostart = true` 且沒有 active Run 的 bot 走 §6.2。`only_host` 給了就只看那一台
-/// （主機剛連上時用），`None` ＝ 全部（開機時用，連不上的那些留給連上的那一刻）。
+/// `host` 上 `autostart = true` 且沒有 active Run 的 bot 走 §6.2，一輪。回 `true`＝每一顆都判斷完了。
 ///
 /// 一定要在對帳**之後**才叫：否則會把 herdr 上還活著、只是 DB 還沒認回來的那顆再開一次。
-pub async fn autostart_connected(app: &Arc<App>, only_host: Option<&str>) {
-    for bot in db::live_bots(&app.db).await.unwrap_or_default() {
-        if bot.autostart != 1 {
+///
+/// 讀不到不當成沒有（#209）：清單讀不到＝這一輪一顆都不起、`owed` 維持原樣；某顆讀不到就只跳過那顆、記進 `owed`，
+/// 其他照起。`owed`：`None`＝清單還沒讀到過（全部都要看）；`Some`＝上一輪沒判斷完的那幾顆，這一輪只看它們。
+async fn autostart_pass(app: &Arc<App>, host: &str, owed: &mut Option<std::collections::HashSet<String>>, since: &str) -> bool {
+    let bots = match db::live_bots(&app.db).await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(host, error = ?e, "autostart: cannot list bots; none started this pass, will try again");
+            return false;
+        }
+    };
+    let mut still = std::collections::HashSet::new();
+    for bot in bots {
+        if bot.autostart != 1 || owed.as_ref().is_some_and(|o| !o.contains(&bot.id)) {
             continue;
         }
-        let host = db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| crate::config::LOCAL_HOST.to_string());
-        if only_host.is_some_and(|h| h != host) {
-            continue;
-        }
-        if !app.host_connected(&host).await {
-            tracing::info!(bot = %bot.name, host, "autostart skipped: host not connected");
-            continue;
-        }
-        if db::active_run(&app.db, &bot.id).await.ok().flatten().is_some() {
-            continue;
-        }
-        tracing::info!(bot = %bot.name, host, "autostart");
-        if let Err(e) = crate::lifecycle::start_bot(app, &bot.id).await {
-            tracing::error!(bot = %bot.name, error = ?e, "autostart failed");
+        if let Err(e) = autostart_one(app, host, &bot, since).await {
+            tracing::warn!(host, bot = %bot.name, error = ?e, "autostart: cannot tell whether this bot should start; will look again");
+            still.insert(bot.id.clone());
         }
     }
+    let done = still.is_empty();
+    *owed = Some(still);
+    done
+}
+
+/// 一顆 bot 要不要起、起它。`Err`＝判斷要用的東西讀不到（起失敗不算：那是 `start_bot` 的結論，照舊只記 log）。
+async fn autostart_one(app: &Arc<App>, host: &str, bot: &db::Bot, since: &str) -> Result<()> {
+    // 讀不到主機不能當成本機：那會在本機這一輪對別台的 bot 下 `start_bot`，而那台可能還沒連上、還沒對帳。
+    let bot_host = db::bot_host(&app.db, &bot.id).await?;
+    if bot_host != host {
+        return Ok(());
+    }
+    if !app.host_connected(host).await {
+        tracing::info!(bot = %bot.name, host, "autostart skipped: host not connected");
+        return Ok(());
+    }
+    // 讀不到 active run 也不能當成沒在跑。
+    if db::active_run(&app.db, &bot.id).await?.is_some() {
+        return Ok(());
+    }
+    // 第一次嘗試之後才有 run 的：使用者（或別的路）已經動過它，重試不再替它啟動——停掉的就是要它停。
+    let touched: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE bot_id = ? AND started_at >= ?")
+        .bind(&bot.id)
+        .bind(since)
+        .fetch_one(&app.db)
+        .await?;
+    if touched > 0 {
+        return Ok(());
+    }
+    tracing::info!(bot = %bot.name, host, "autostart");
+    if let Err(e) = crate::lifecycle::start_bot(app, &bot.id).await {
+        tracing::error!(bot = %bot.name, error = ?e, "autostart failed");
+    }
+    Ok(())
 }
 
 /// 對帳做完之後才叫的 autostart 入口（§6.1 第 6 步，review 2026-09-16 core 5）。回 `true`＝這次真的跑了。
@@ -67,7 +100,22 @@ pub async fn autostart_after_reconcile(app: &Arc<App>, host: &str, reconciled: b
         tracing::info!(host, "autostart already ran for this host in this daemon's lifetime; not restarting stopped bots");
         return false;
     }
-    autostart_connected(app, Some(host)).await;
+    // 讀不到的部分背景補到判斷完（#209）：本機不會有「下次連上」，只等重連的話 AGM 在內的 autostart bot 要到下次重啟才起。
+    // 主機照樣只算跑過一次：補的只是這一次還沒判斷完的，已經判斷過（起了、或本來就在跑）的不再碰。
+    let since = db::now();
+    let mut owed = None;
+    if !autostart_pass(app, host, &mut owed, &since).await {
+        let (app, host) = (app.clone(), host.to_string());
+        tokio::spawn(async move {
+            for attempt in 0.. {
+                tokio::time::sleep(recovery_retry_delay(attempt)).await;
+                if autostart_pass(&app, &host, &mut owed, &since).await {
+                    tracing::info!(host = %host, "autostart caught up");
+                    return;
+                }
+            }
+        });
+    }
     // bot 沒在跑時收下、還在等它起來的訊息（issue #122）：重啟前那次啟動可能沒做完，這裡再替它起一次。
     crate::lifecycle::start_send::resume_after_boot(app, host).await;
     true
@@ -1016,6 +1064,112 @@ mod autostart_tests {
         assert!(super::autostart_after_reconcile(app, "m4p", true).await, "失敗那次不算數：下次連上照跑");
         assert!(!super::autostart_after_reconcile(app, "m4p", true).await, "重連不再跑");
         assert!(super::autostart_after_reconcile(app, "local", true).await, "每台主機各算各的");
+    }
+
+    use crate::db;
+    use crate::state::App;
+    use crate::testing as tt;
+    use std::sync::Arc;
+
+    async fn autostart_bot(env: &tt::Env, project: &str, name: &str) -> String {
+        let bot = tt::claude_bot(&env.app, project, name).await;
+        sqlx::query("UPDATE bots SET autostart=1 WHERE id=?").bind(&bot.id).execute(&env.app.db).await.unwrap();
+        bot.id
+    }
+
+    async fn running(app: &Arc<App>, bot: &str) -> bool {
+        db::active_run(&app.db, bot).await.unwrap().is_some()
+    }
+
+    async fn eventually_running(app: &Arc<App>, bot: &str) -> bool {
+        for _ in 0..150 {
+            if running(app, bot).await {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        false
+    }
+
+    /// **#209.** 開機那一刻 bot 清單讀不到：以前變成空清單、一顆都不起，主機卻已經標成「跑過」——本機不會有下一次連上，
+    /// AGM 在內的 autostart bot 要到下次重啟才起。現在這一輪不起，DB 恢復後背景自己補起，而且主機仍只算跑過一次。
+    #[tokio::test]
+    async fn an_autostart_that_cannot_list_bots_starts_them_once_the_db_can() {
+        let env = tt::env().await;
+        let app = &env.app;
+        let bot = autostart_bot(&env, &env.project_id, "auto").await;
+
+        sqlx::query("ALTER TABLE bots RENAME TO bots_unreadable").execute(&app.db).await.unwrap();
+        assert!(super::autostart_after_reconcile(app, "local", true).await);
+        sqlx::query("ALTER TABLE bots_unreadable RENAME TO bots").execute(&app.db).await.unwrap();
+        assert!(eventually_running(app, &bot).await, "DB 恢復之後，沒有任何重連也要起來");
+        assert!(!super::autostart_after_reconcile(app, "local", true).await, "主機照樣只算跑過一次");
+        let runs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE bot_id=?").bind(&bot).fetch_one(&app.db).await.unwrap();
+        assert_eq!(runs, 1, "只起一次");
+    }
+
+    /// #209 同一支：讀不到 active run 也不當成沒在跑——這一輪不起、記成欠著，讀得到之後再判斷（以前落進 `start_bot`、
+    /// 在鎖裡再讀一次失敗，之後就再也沒人管）。這一列讀不出來（欄位型別錯，跟 I/O 錯誤一樣是 `Err`）；修好時它已經結束。
+    #[tokio::test]
+    async fn an_autostart_that_cannot_read_active_runs_retries_that_bot() {
+        let env = tt::env().await;
+        let app = &env.app;
+        let bot = autostart_bot(&env, &env.project_id, "auto").await;
+        let run = db::ulid();
+        sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,agent_name,started_at) VALUES (?,?,'running','idle',X'6B6964','2020-01-01T00:00:00.000Z')")
+            .bind(&run)
+            .bind(&bot)
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        assert!(super::autostart_after_reconcile(app, "local", true).await);
+        let runs = || async { sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM runs WHERE bot_id=?").bind(&bot).fetch_one(&app.db).await.unwrap() };
+        assert_eq!(runs().await, 1, "讀不到它在不在跑：不起");
+        sqlx::query("UPDATE runs SET agent_name=NULL, state='exited', ended_at=? WHERE id=?").bind(db::now()).bind(&run).execute(&app.db).await.unwrap();
+        assert!(eventually_running(app, &bot).await, "讀得到之後再判斷：確定沒在跑就起");
+    }
+
+    /// #209 同一支：某顆讀不到主機不能當成本機（那會對別台的 bot 下 start），只跳過那顆、其他照起；讀得到之後補起。
+    /// 補的時候，使用者在這之間自己起過又停掉的那顆不再替它起——停掉的就是要它停。
+    #[tokio::test]
+    async fn an_autostart_bot_whose_host_is_unreadable_is_skipped_and_retried_alone() {
+        let env = tt::env().await;
+        let app = &env.app;
+        let good = autostart_bot(&env, &env.project_id, "good").await;
+        // 主機欄讀不出字串（型別錯，跟 I/O 錯誤一樣是 `Err`）：只有這個專案的 bot 讀不到主機。
+        let broken = db::ulid();
+        let repo = env.dir.join("broken");
+        tt::git::init_repo(&repo);
+        sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?, ?, 'broken', X'6C6F63616C', ?)")
+            .bind(&broken)
+            .bind(repo.to_string_lossy().to_string())
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let later = autostart_bot(&env, &broken, "later").await;
+        let stopped = autostart_bot(&env, &broken, "stopped").await;
+
+        assert!(super::autostart_after_reconcile(app, "local", true).await);
+        assert!(running(app, &good).await, "讀得到的照起");
+        assert!(!running(app, &later).await && !running(app, &stopped).await, "讀不到主機：不當成本機起");
+
+        // 這之間使用者自己起過 `stopped` 又停掉它。
+        sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,started_at,ended_at) VALUES (?,?,'stopped','idle',?,?)")
+            .bind(db::ulid())
+            .bind(&stopped)
+            .bind(db::now())
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE projects SET host='local' WHERE id=?").bind(&broken).execute(&app.db).await.unwrap();
+        assert!(eventually_running(app, &later).await, "讀得到之後補起");
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(!running(app, &stopped).await, "使用者停掉的不再替它起");
+        let good_runs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE bot_id=?").bind(&good).fetch_one(&app.db).await.unwrap();
+        assert_eq!(good_runs, 1, "已經判斷過的不再碰");
     }
 }
 
