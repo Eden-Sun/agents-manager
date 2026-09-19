@@ -2194,7 +2194,7 @@ herdr 有新版時自動發現、整理出「對我們有沒有用、會不會�
 **只做到「偵測＋交辦」**：真的升級、重啟 herdr server 一律要 AGM 核准後手動做，這支腳本不會、也不能觸發。
 
 1. **偵測**：`scripts/ops/herdr-update-kick.sh`，launchd `com.agm.herdr-update` 每天跑一次。
-   launchd 預設 PATH 不含 Homebrew：腳本開頭自補 `/opt/homebrew/bin:/usr/local/bin`，plist 必須設
+   launchd 預設 PATH 不含 Homebrew：腳本開頭自補 `~/.local/bin:/opt/homebrew/bin:/usr/local/bin`（順序照登入 shell 的 `which herdr`），plist 必須設
    `EnvironmentVariables.PATH`。找不到 `herdr`／`gh`／`python3`／`curl` 推 `ops_alert`（`missing_dependency`），
    不靜默結束——否則 job 表面已排程、永遠不派（#66 留言／#204 C）。
    本機版本問 `herdr --version`；最新穩定版問 `gh release list -R herdrdev/herdr --exclude-pre-releases -L 1`
@@ -2215,7 +2215,10 @@ herdr 有新版時自動發現、整理出「對我們有沒有用、會不會�
    `runtime.json` 的 `herdr_update_bot_id`（專用 child，選用欄位）＞ `release_bot_id`（跟 Claude Code 換版通知同一顆分析型 child 也合理）＞
    `responder_bot_id`（協調者兜底）。**不能派給巡檢自己**（daemon 擋「總管對自己下交辦」）。查不到任何一個就跳過，不亂派給使用者的專案 bot。
 5. **同版不重派**：`herdr-update.last` 記上次真的派過工的版本，`should_notify` 比對這個字串；派工失敗不寫，下一輪重試同一版。
-   跟殘留鎖（`herdr-update.lock`）處理方式同 `claude-release-kick.sh`：另一個執行者在跑就安靜跳過，交 AGM 判斷要不要清。
+   **鎖**（`herdr-update.lock`，#66 review 留言）：鎖裡寫 pid＋時間（同 `release-triage-kick.sh`）。另一個執行者還活著就安靜跳過（超過一小時才推 `runner_hung`，不搶鎖）；
+   執行者不在（SIGKILL／斷電讓 EXIT trap 沒跑、pid 被別的程序重用、舊版純 `mkdir` 鎖）就回收接手並記 log，不再永久跳過——否則一次異常就讓偵測永久停擺，違反「有新版 24 小時內一定交辦」。
+   **連續失敗要被 AGM 看見**：「這輪沒能完成檢查」的出口（讀不到本機版本、查不到最新版、抓不到 CHANGELOG、版本比較失敗、找不到派給誰、派工失敗、binary 不在）在 `herdr-update.fails`
+   記連續次數，連續兩輪（每天一輪＝隔天還是不行）推 `ops_alert`（`check_failing`）；完整跑完檢查或派工成功就清零。
 6. **上線**：驗證通過、AGM 核准後，走既有的 herdr 維護模式（§6.5.2）：`POST /api/supervisor/herdr-maintenance/open`
    關維護窗、換 binary、重啟、`resume=native` 接回所有子 agent——這條路已經因為 0.9.0 那次真的升級失敗自動回滾而建好，
    herdr-update-kick.sh 不重造它。

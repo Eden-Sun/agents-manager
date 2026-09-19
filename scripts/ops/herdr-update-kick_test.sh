@@ -132,6 +132,7 @@ PYEOF
 teardown() {
   rm -rf "$ROOT"
   unset AGM_DIR AGM_REPO HERDR_REPO AM_BINARY HERDR_CHANGELOG_URL AGM_HERDR_UPDATE_BOT AGM_EXTRA_PATH
+  unset AGM_LOCK_STALE_SECS AGM_LOCK_HUNG_SECS AGM_FAIL_ALERT_AFTER
   unset STUB_ASSIGN_FAIL STUB_HERDR_VERSION STUB_GH_TAG
 }
 # launchd 的預設 PATH 不含 Homebrew。AGM_EXTRA_PATH 指向 stubbin＝「配置完成後仍找得到依賴」。
@@ -253,12 +254,64 @@ check "查不到最新版有記 log" "查不到" "$AGM_DIR/herdr-update.log"
 check_no "查不到最新版不派" "assign" "$AGM_DIR/calls.log"
 teardown
 
-# 11. 殘留的鎖：不派，交 AGM 檢查。
+# 11. 鎖（#66 review 留言：純 mkdir 鎖被 SIGKILL 就永久停擺）。鎖裡寫 pid＋時間，執行者不在就回收。
+# seed_lock <owner 那行|空字串＝舊版腳本留下的、沒有 owner 檔的鎖> <鎖已經存在幾秒>
+seed_lock() {
+  mkdir "$AGM_DIR/herdr-update.lock"
+  [ -n "$1" ] && echo "$1" > "$AGM_DIR/herdr-update.lock/owner"
+  python3 -c 'import os,sys,time; t=time.time()-int(sys.argv[2]); os.utime(sys.argv[1],(t,t))' "$AGM_DIR/herdr-update.lock" "$2"
+}
+lock_gone() { [ ! -d "$AGM_DIR/herdr-update.lock" ]; }
+
+# 11a. 昨天留下的鎖（執行者 pid 早就不在）：今天照常偵測、派工，並記一行回收 log。
 setup
-mkdir "$AGM_DIR/herdr-update.lock"
+seed_lock "999999 $(( $(date +%s) - 90000 ))" 90000
 bash "$SCRIPT"
-check "有鎖就跳過" "已有執行者或殘留鎖" "$AGM_DIR/herdr-update.log"
-check_no "有鎖不派" "assign" "$AGM_DIR/calls.log"
+equals "昨天留下的鎖：回收後照派" "$(assigns)" "1"
+check "昨天留下的鎖：有記回收 log" "清掉殘留鎖" "$AGM_DIR/herdr-update.log"
+equals "昨天留下的鎖：state 寫入" "$(cat "$AGM_DIR/herdr-update.last" 2>/dev/null)" "0.9.0"
+lock_gone && { echo "ok   - 跑完鎖有釋放"; PASS=$((PASS + 1)); } || { echo "FAIL - 跑完鎖有釋放"; FAIL=$((FAIL + 1)); }
+teardown
+
+# 11b. 舊版腳本留下的鎖（沒有 owner 檔，就是原本那個純 mkdir）：昨天的回收；剛建立的先不動。
+setup
+seed_lock "" 90000
+bash "$SCRIPT"
+equals "沒有 owner 檔的昨天的舊鎖：回收後照派" "$(assigns)" "1"
+teardown
+setup
+seed_lock "" 0
+bash "$SCRIPT"
+equals "剛建立、讀不到執行者的鎖：這輪不派" "$(assigns)" "0"
+check "剛建立的鎖：有記跳過原因" "鎖剛建立" "$AGM_DIR/herdr-update.log"
+[ -d "$AGM_DIR/herdr-update.lock" ] && { echo "ok   - 剛建立的鎖沒被動"; PASS=$((PASS + 1)); } || { echo "FAIL - 剛建立的鎖沒被動"; FAIL=$((FAIL + 1)); }
+teardown
+
+# 11c. 活鎖（執行者還在、指令列是這支腳本）：擋下、不搶；卡太久才推 ops-alert。
+setup
+bash -c 'sleep 30; : # herdr-update-kick' & LIVE=$!
+sleep 0.3
+seed_lock "$LIVE $(date +%s)" 0
+bash "$SCRIPT"
+equals "活鎖：不派" "$(assigns)" "0"
+check "活鎖：有記 log" "已有執行者" "$AGM_DIR/herdr-update.log"
+check_no "活鎖：沒到卡住門檻不喊人" "ops-alert" "$AGM_DIR/calls.log"
+export AGM_LOCK_HUNG_SECS=0
+bash "$SCRIPT"
+check "活鎖卡太久：推 ops-alert" "ops-alert .*\-\-reason runner_hung" "$AGM_DIR/calls.log"
+equals "活鎖卡太久：仍不搶鎖、不派" "$(assigns)" "0"
+[ -d "$AGM_DIR/herdr-update.lock" ] && { echo "ok   - 活鎖沒被搶"; PASS=$((PASS + 1)); } || { echo "FAIL - 活鎖沒被搶"; FAIL=$((FAIL + 1)); }
+kill "$LIVE" 2>/dev/null; wait "$LIVE" 2>/dev/null
+teardown
+
+# 11d. pid 還活著但不是這支腳本（pid 被別的程序重用）：視為殘留，回收。
+setup
+bash -c 'sleep 30; :' & LIVE=$!
+sleep 0.3
+seed_lock "$LIVE $(( $(date +%s) - 90000 ))" 90000
+bash "$SCRIPT"
+equals "pid 被別的程序重用：回收後照派" "$(assigns)" "1"
+kill "$LIVE" 2>/dev/null; wait "$LIVE" 2>/dev/null
 teardown
 
 # 12. 找不到 agents-managerd binary：跳過，不當機。
@@ -347,6 +400,60 @@ env -i PATH="$ROOT/nocurl" AGM_EXTRA_PATH="" \
 check "缺 curl：有記 log" "找不到 curl" "$AGM_DIR/herdr-update.log"
 check "缺 curl：推 ops-alert" "\-\-reason missing_dependency" "$AGM_DIR/calls.log"
 equals "缺 curl：不派" "$(assigns)" "0"
+teardown
+
+# 14c. 預設補的目錄要含 ~/.local/bin（這台登入 shell 的 herdr 在那裡，launchd 預設 PATH 沒有）：AGM_EXTRA_PATH **不設**，
+# 假 herdr／gh 只放在 $HOME/.local/bin（HOME 指到測試目錄）。用系統 /bin/bash（3.2）＋最小 PATH，stderr 收下來看有沒有 unbound variable。
+setup
+unset AGM_EXTRA_PATH
+mkdir -p "$ROOT/home/.local/bin"
+cp "$ROOT/stubbin/herdr" "$ROOT/stubbin/gh" "$ROOT/home/.local/bin/"
+env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME="$ROOT/home" \
+  AGM_DIR="$AGM_DIR" AGM_REPO="$AGM_REPO" AM_BINARY="$AM_BINARY" HERDR_REPO="$HERDR_REPO" HERDR_CHANGELOG_URL="$HERDR_CHANGELOG_URL" \
+  STUB_HERDR_VERSION=0.8.2 STUB_GH_TAG=v0.9.0 /bin/bash "$SCRIPT" 2>"$ROOT/stderr.txt"
+equals "預設補的目錄含 ~/.local/bin：照派" "$(assigns)" "1"
+check_no "預設補 PATH 的那輪沒有 unbound variable" "unbound variable" "$ROOT/stderr.txt"
+teardown
+
+# 15. 「連續一個排程週期不可運作」要被 AGM 看見（#66 review 留言）：查不到最新版連續兩輪才喊，一次抖動不吵人；成功一次就清零。
+setup
+export STUB_GH_TAG=""
+bash "$SCRIPT"
+check_no "第一次失敗：只留 log，不喊人" "ops-alert" "$AGM_DIR/calls.log"
+equals "第一次失敗：連續次數記 1" "$(cat "$AGM_DIR/herdr-update.fails")" "1"
+bash "$SCRIPT"
+check "連續第二輪失敗：推 ops-alert" "ops-alert .*\-\-reason check_failing" "$AGM_DIR/calls.log"
+equals "連續次數記 2" "$(cat "$AGM_DIR/herdr-update.fails")" "2"
+export STUB_GH_TAG="v0.9.0"
+bash "$SCRIPT"
+[ ! -f "$AGM_DIR/herdr-update.fails" ] && { echo "ok   - 恢復之後連續次數清零"; PASS=$((PASS + 1)); } || { echo "FAIL - 恢復之後連續次數清零"; FAIL=$((FAIL + 1)); }
+equals "恢復之後照派" "$(assigns)" "1"
+teardown
+
+# 15b. 沒有新版（檢查完整跑完）也算成功，清零；之後再失敗一次不會直接喊人。
+setup
+export STUB_GH_TAG=""
+bash "$SCRIPT"
+export STUB_HERDR_VERSION="0.9.0" STUB_GH_TAG="v0.9.0"
+bash "$SCRIPT"
+[ ! -f "$AGM_DIR/herdr-update.fails" ] && { echo "ok   - 沒有新版的一輪也清零"; PASS=$((PASS + 1)); } || { echo "FAIL - 沒有新版的一輪也清零"; FAIL=$((FAIL + 1)); }
+export STUB_GH_TAG=""
+bash "$SCRIPT"
+check_no "清零之後再失敗一次不喊人" "ops-alert" "$AGM_DIR/calls.log"
+teardown
+
+# 15c. 派工連續失敗也算「不可運作」：兩輪之後喊人；binary 連續不在也一樣（原本只有 local log）。
+setup
+export STUB_ASSIGN_FAIL=1
+bash "$SCRIPT"; bash "$SCRIPT"
+check "派工連續失敗：推 ops-alert" "ops-alert .*\-\-reason check_failing" "$AGM_DIR/calls.log"
+teardown
+setup
+export AM_BINARY="$ROOT/no-such-binary"
+bash "$SCRIPT"
+check_no "binary 第一次不在：只留 log" "ops-alert" "$AGM_DIR/calls.log"
+bash "$SCRIPT"
+check "binary 連續不在：推 ops-alert" "ops-alert .*\-\-reason check_failing" "$AGM_DIR/calls.log"
 teardown
 
 echo "$PASS passed, $FAIL failed"

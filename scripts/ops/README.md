@@ -122,11 +122,20 @@ herdr 有新版時整理出「對我們有沒有用、會不會壞」，派給 A
 | `HERDR_REPO` | `herdrdev/herdr` | 查最新穩定版與 CHANGELOG 的 GitHub repo |
 | `HERDR_CHANGELOG_URL` | `https://raw.githubusercontent.com/<HERDR_REPO>/master/CHANGELOG.md` | CHANGELOG 全文來源（測試用 `file://` 亦可） |
 | `AGM_HERDR_UPDATE_BOT` | （無） | 派給誰；沒設就退回 `runtime.json` 的 `herdr_update_bot_id` → `release_bot_id` → `responder_bot_id` |
-| `AGM_EXTRA_PATH` | `/opt/homebrew/bin:/usr/local/bin` | 腳本開頭補在 `PATH` 前面的目錄；只給測試蓋掉 |
+| `AGM_EXTRA_PATH` | `~/.local/bin:/opt/homebrew/bin:/usr/local/bin` | 腳本開頭補在 `PATH` 前面的目錄（順序照登入 shell 的 `which herdr`）；空字串＝不補；只給測試蓋掉 |
+| `AGM_LOCK_STALE_SECS` | `120` | 鎖沒有可查的執行者（含舊版腳本留下、沒有 owner 檔的鎖）時，超過這麼久就當殘留回收 |
+| `AGM_LOCK_HUNG_SECS` | `3600` | 執行者還活著但卡了這麼久：推 `ops_alert`（`runner_hung`），不搶鎖 |
+| `AGM_FAIL_ALERT_AFTER` | `2` | 連續幾輪沒能完成檢查就推 `ops_alert`（`check_failing`） |
 
 狀態檔 `herdr-update.last`＝已經派過工的版本，派工成功才寫；同一版不重派。
 開頭自補 PATH（launchd 預設不含 Homebrew，herdr／gh 多半在那裡）；找不到 `herdr`／`gh`／`python3`／`curl` 推 `ops_alert`（`missing_dependency`）並寫 log，不靜默 `exit 0`。
-隔離測試：`bash scripts/ops/herdr-update-kick_test.sh`（假的 `herdr`／`gh`／`agents-managerd`／`bin/agm`，`file://` CHANGELOG；含 `env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin` 模擬 launchd、缺依賴喊人，系統 `/bin/bash` 3.2 也跑）；
+**鎖**（#66 review 留言）：`herdr-update.lock` 裡寫 pid＋時間（同 `release-triage-kick.sh`）。SIGKILL／斷電讓 EXIT trap 沒跑、鎖留在磁碟上時，
+下一輪發現執行者不在（含 pid 被別的程序重用）就回收接手並記一行 log；舊版純 `mkdir` 鎖（沒有 owner 檔）超過 `AGM_LOCK_STALE_SECS` 一樣回收，
+剛建立的先不動；執行者還活著但超過 `AGM_LOCK_HUNG_SECS` 推 `runner_hung`，回收不掉推 `stale_lock`。
+**連續失敗要被看見**（#66 review 留言）：讀不到本機版本、查不到最新版、抓不到 CHANGELOG、版本比較失敗、找不到派給誰、派工失敗、binary 不在，這些「這輪沒能完成檢查」的出口
+除了 log 還會在 `herdr-update.fails` 記連續次數；連續 `AGM_FAIL_ALERT_AFTER` 輪（每天一輪＝隔天還是不行）推 `ops_alert`（`check_failing`），一次網路抖動不吵人。
+檢查完整跑完（含「沒有新版」）或派工成功就清零。
+隔離測試：`bash scripts/ops/herdr-update-kick_test.sh`（假的 `herdr`／`gh`／`agents-managerd`／`bin/agm`，`file://` CHANGELOG；含 `env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin` 模擬 launchd、缺依賴喊人、殘留鎖與活鎖、連續失敗喊人，系統 `/bin/bash` 3.2 也跑）；
 `herdr-update-check` 本身的版本比較與 CHANGELOG 段落擷取正確性由 `cargo test -p agents-managerd` 釘住
 （`daemon/src/changelog.rs`、`daemon/src/herdr_update.rs`），不在這支腳本測試裡重測。
 
@@ -136,7 +145,7 @@ herdr 有新版時整理出「對我們有沒有用、會不會壞」，派給 A
 install -m 755 scripts/ops/herdr-update-kick.sh ~/.config/agents-manager/supervisor/AGM/bin/
 ```
 
-launchd plist 範例（`~/Library/LaunchAgents/com.agm.herdr-update.plist`；**必須帶 `EnvironmentVariables.PATH`**，launchd 預設 PATH 不含 `/opt/homebrew/bin`，herdr／gh 在那裡）：
+launchd plist 範例（`~/Library/LaunchAgents/com.agm.herdr-update.plist`；**必須帶 `EnvironmentVariables.PATH`**，launchd 預設 PATH 不含 `/opt/homebrew/bin`，herdr／gh 在那裡，herdr 也可能在 `~/.local/bin`；腳本開頭另外自補一次）：
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -152,7 +161,7 @@ launchd plist 範例（`~/Library/LaunchAgents/com.agm.herdr-update.plist`；**�
   <key>StartInterval</key><integer>86400</integer>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>PATH</key><string>/Users/USER/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
 </dict>
 </plist>
@@ -203,7 +212,7 @@ launchd plist 範例（`~/Library/LaunchAgents/com.agm.herdr-update.plist`；**�
 
 - `claude-release-kick.sh`：看 claude **binary diff**（changelog 沒寫到的東西），**保留不動**；這支看的是 changelog 逐條，兩者互補。
   issue #204 之後的方向是讓 binary diff 由同一支 kick 帶進同一則交辦，那一步不在這次範圍。
-- `herdr-update-kick.sh`（#66）：herdr 是另一條管線；#204 說第二階段才把 herdr 併進來，這次不動。#66 留言的兩個洞（殘留鎖、launchd PATH）在這支一次補掉。
+- `herdr-update-kick.sh`（#66）：herdr 是另一條管線；#204 說第二階段才把 herdr 併進來，這次不動。#66 留言的兩個洞（殘留鎖、launchd PATH）在這支一次補掉；`herdr-update-kick.sh` 之後也照同一套補上（鎖、PATH、缺依賴與連續失敗喊人）。
 - `daemon-update-kick.sh`：鎖回收與 `ops_alert` 的寫法照抄它，格式一致。
 
 launchd plist 範例（`~/Library/LaunchAgents/com.agm.release-triage.plist`；**必須帶 `EnvironmentVariables.PATH`**，launchd 預設 PATH 不含 `/opt/homebrew/bin`）：
