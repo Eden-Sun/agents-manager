@@ -538,7 +538,10 @@ shim 轉遠端要 pane 裡有 `AM_DAEMON_EXE`、`AM_CONFIG_PATH`、`AM_DATA_DIR`
   （對不上＝晚到的舊 run，exit 126 不跑 cargo）；`<dir>.pgid-<token>` 也以它命名，守門只收自己那一代的 process group。
   token 只有固定格式，不可能夾帶 shell 字元或路徑。
 - 守門順手回收孤兒：沒鎖被持有、沒有行程的 cwd 在裡面、閒置超過 10 分鐘的 `job-*`／舊版 `<pid>/`；閒置超過
-  3 小時的 `shared/`（遠端磁碟剩不到 25% 時也降到 10 分鐘）。只碰 `<16 位 hex>/<shared｜job-*｜數字>` 這種名字。
+  `[build.remote] shared_idle_hours`（預設 3）小時的 `shared/`（遠端磁碟剩不到 25% 時也降到 10 分鐘）。只碰 `<16 位 hex>/<shared｜job-*｜數字>` 這種名字。
+  **`shared/` 另有數量上限（issue #196）**：`[build.remote] max_shared_dirs`（預設 8，`0`＝不限）——一天開十幾顆子 agent、每張票數個變異副本，每個路徑一個新的 hash、
+  各 2～3G（實測 36 個 hash、29G），只靠時間擋不住。超過就從最久沒用的開始收（LRU；至少閒置 10 分鐘，剛用完的不動；鎖被持有、有行程在用、這次自己的永遠不收），
+  時機是每次 remote-cargo 呼叫開始時（跟 #141 的孤兒回收同一處），不靠 crontab。
 - 遠端要是有 `flock`（util-linux）與 `/proc` 的 Linux，沒有就直接報錯、不跑。
 - **整體上限（issue #194）**：一次遠端編譯（同步＋編譯＋測試）最多 `[build.remote] timeout_secs`（預設 **720 秒＝12 分鐘**；實測 112 次遠端編譯最長 8.9 分鐘、
   全套 test 中位數 5.0、P90 8.7）。連線正常、遠端的 cargo 或測試卡住（死結、等鎖、測試掛住）時 ssh 的 ConnectTimeout／ServerAlive 管不到，沒有上限 helper 與呼叫端的 agent 會一直等。
@@ -553,10 +556,11 @@ shim 轉遠端要 pane 裡有 `AM_DAEMON_EXE`、`AM_CONFIG_PATH`、`AM_DATA_DIR`
   不會卡到 TCP keepalive 的 2 小時。
 
 ### `GET /api/build/remote` / `PUT /api/build/remote`
-`{enabled, host, user, ssh_port, remote_root, cargo_jobs, test_threads, timeout_secs, password_set}`。PUT 另收 `password`（寫進 0600 的
+`{enabled, host, user, ssh_port, remote_root, cargo_jobs, test_threads, timeout_secs, shared_idle_hours, max_shared_dirs, password_set}`。PUT 另收 `password`（寫進 0600 的
 secret file，不進 config、不回前端）與 `clear_password`。`host`／`user` 空字串又要 `enabled` → 400。
 `test_threads`＝遠端 `cargo test` 的測試執行緒上限（`RUST_TEST_THREADS`，預設 8，`0`＝不設，最多 256；PUT 省略＝維持現在的值）。
 `timeout_secs`＝一次遠端編譯的整體時間上限（見上「整體上限」）：PUT 省略＝維持現在的值，`0`＝不設上限，超過 86400 → 400。
+`shared_idle_hours`（至少 1）與 `max_shared_dirs`（`0`＝不限）是遠端 `shared/` 的回收政策（見上），PUT 省略＝維持現在的值。
 
 ### `POST /api/build/remote/test`
 連上去看一眼：
