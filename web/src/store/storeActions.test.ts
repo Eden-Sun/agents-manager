@@ -714,3 +714,50 @@ test('插隊送出成功（interrupted／idle）不多說話', async () => {
   assert.equal(await useStore.getState().sendPrompt('b1', 'x', [], true), true)
   assert.deepEqual(noticeTexts(), [])
 })
+
+/**
+ * 這幾天 daemon 新增的「暫時不行、之後可以原樣重來」的 409／503：`ApiError.message` 取 `reason`，
+ * 通知就只剩 `composer_busy（HTTP 409）` 這種機器代碼——看不出是沒送出、字在不在、要等多久。
+ */
+test('送出撞 409 composer_busy／resume_unverified：講人話（沒送出、怎麼辦），不是機器代碼', async () => {
+  seed()
+  routeDaemon(() => json({ error: 'conflict', reason: 'composer_busy', run_id: 'r1', retryable: true, sent: false }, 409))
+  assert.equal(await useStore.getState().sendPrompt('b1', 'x'), false)
+  let texts = noticeTexts()
+  assert.equal(texts.length, 1)
+  assert.doesNotMatch(texts[0], /composer_busy/)
+  assert.match(texts[0], /沒送出/)
+  assert.match(texts[0], /輸入框/)
+
+  seed()
+  routeDaemon(() => json({ error: 'conflict', reason: 'resume_unverified', run_id: 'r1', session_id: 's1', retry_after_s: 90 }, 409))
+  assert.equal(await useStore.getState().sendPrompt('b1', 'x'), false)
+  texts = noticeTexts()
+  assert.doesNotMatch(texts[0], /resume_unverified/)
+  assert.match(texts[0], /沒送出/)
+  assert.match(texts[0], /接回/)
+})
+
+test('daemon 帶了人話 message 的可重試錯誤（維護窗口、Esc 送出去了不知道進了沒有）：顯示 message，不顯示 reason 代碼', async () => {
+  seed()
+  routeDaemon(() =>
+    json(
+      { error: 'conflict', reason: 'maintenance_window', retryable: true, sent: false, message: 'am-agm 正在進行維護（restart 窗口），到 12:00 為止不送新的 prompt。' },
+      409,
+    ),
+  )
+  await useStore.getState().sendPrompt('b1', 'x')
+  assert.match(noticeTexts()[0], /正在進行維護/)
+  assert.doesNotMatch(noticeTexts()[0], /maintenance_window/)
+
+  seed()
+  routeDaemon(() =>
+    json(
+      { error: 'conflict', reason: 'interrupt_unconfirmed', esc_sent: 'unknown', retryable: true, message: 'Esc 送出去了但 herdr 沒有回，不知道進了沒有；回合先不收，等它的回聲或自己結束。' },
+      409,
+    ),
+  )
+  await useStore.getState().interruptBot('b1')
+  assert.match(noticeTexts()[0], /不知道進了沒有/)
+  assert.doesNotMatch(noticeTexts()[0], /interrupt_unconfirmed/)
+})

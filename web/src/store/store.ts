@@ -542,10 +542,29 @@ function forkErrText(e: unknown): string {
 /** daemon 回的機器 key 換成人話；沒列到的照原樣顯示。 */
 const REASON_TEXT: Record<string, string> = {
   composer_unreadable: '沒送出：讀不到 bot 的輸入框（可能正在切換畫面或還在啟動），稍後再送一次',
+  // 這幾個是 daemon 打字送出前就擋下的 409（`sent:false`、不留 turn）：字還在輸入框，稍後原樣重送。
+  composer_busy: '沒送出：bot 的輸入框裡有字（可能有人正在終端打字，或上一次插隊沒送出的字還留著），清掉或送出之後再送一次',
+  transcript_not_ready: '沒送出：claude 還沒回報這段對話（session），稍後再送一次',
+  transcript_unreadable: '沒送出：讀不到這段對話的紀錄檔，稍後再送一次',
+  codex_log_not_ready: '沒送出：codex 的紀錄還沒寫出來，稍後再送一次',
+  no_pane_to_type_into: '沒送出：找不到這顆 bot 的終端畫面可以打字，重啟它再試',
+  resume_unverified: '沒送出：這顆 bot 是接回舊對話起來的，還在確認接回的是不是原本那段（最多約兩分鐘），稍後再送一次',
+}
+
+/**
+ * 可重試的錯誤（`retryable:true`）daemon 會附人話的 `message`（維護窗口、Esc 送出去了不知道進了沒有…）；
+ * `ApiError.message` 取的是 `reason` 代碼，直接顯示只剩 `maintenance_window（HTTP 409）`。
+ */
+function reasonText(e: ApiError): string {
+  const known = REASON_TEXT[e.message]
+  if (known) return known
+  const human = e.body.message
+  if (e.body.retryable === true && typeof e.body.reason === 'string' && typeof human === 'string' && human.trim()) return human.trim()
+  return e.message
 }
 
 function errText(e: unknown): string {
-  if (e instanceof ApiError) return `${REASON_TEXT[e.message] ?? e.message}（HTTP ${e.status}）`
+  if (e instanceof ApiError) return `${reasonText(e)}（HTTP ${e.status}）`
   if (e instanceof Error) return e.message
   return String(e)
 }
