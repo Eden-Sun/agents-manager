@@ -448,7 +448,42 @@ async fn inspect_background_inner(app: &Arc<App>, run: &db::Run) -> BackgroundWo
         Ok(h) => h,
         Err(e) => return Unknown(format!("讀不到這顆 bot 所在的主機：{e:#}")),
     };
-    judge_background(crate::memproc::dump(app, &host).await.map_err(|e| format!("{e:#}")), pid as i32)
+    judge_background(ps_tree(app, &host, &run.bot_id).await, pid as i32)
+}
+
+/// 行程樹的來源。正式路徑就是 `memproc::dump`；測試可以照 bot 注入一份決定性的答案（見 `test_ps`），
+/// 不然「證明沒有背景工作」要靠本機真的有一個 `sleep` 行程、而且 runner 上的 ps 讀得到它。
+async fn ps_tree(app: &Arc<App>, host: &str, _bot_id: &str) -> Result<String, String> {
+    #[cfg(test)]
+    if let Some(injected) = test_ps::get(_bot_id) {
+        return injected;
+    }
+    crate::memproc::dump(app, host).await.map_err(|e| format!("{e:#}"))
+}
+
+/// 測試用：按 bot id 注入 ps 行程樹（或讀不到的原因）。bot id 是每個測試自己的 ULID，平行測試互不干擾。
+#[cfg(test)]
+pub(crate) mod test_ps {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    fn map() -> &'static Mutex<HashMap<String, Result<String, String>>> {
+        static V: OnceLock<Mutex<HashMap<String, Result<String, String>>>> = OnceLock::new();
+        V.get_or_init(Default::default)
+    }
+    pub fn get(bot_id: &str) -> Option<Result<String, String>> {
+        map().lock().unwrap_or_else(|e| e.into_inner()).get(bot_id).cloned()
+    }
+    pub struct Guard(String);
+    pub fn set(bot_id: &str, tree: Result<String, String>) -> Guard {
+        map().lock().unwrap_or_else(|e| e.into_inner()).insert(bot_id.to_string(), tree);
+        Guard(bot_id.to_string())
+    }
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            map().lock().unwrap_or_else(|e| e.into_inner()).remove(&self.0);
+        }
+    }
 }
 
 // ---------------------------------------------------------------- 睡著這件事本身
@@ -1424,20 +1459,14 @@ mod tests {
         assert!(db::active_run(&app.db, bot).await.unwrap().is_some(), "{why}: run 照常活著");
     }
 
-    /// 讓這顆 bot 的 pane **證明**沒有背景工作：mock herdr 回一個真的、底下沒有 shell／建置工具的行程（`sleep`）當
-    /// shell pid，ps 行程樹裡看得到它。整輪巡邏的測試要靠它走到 DB 證據那幾道關卡——不然背景巡檢先回 `Unknown`
+    /// 讓這顆 bot 的 pane **證明**沒有背景工作：mock herdr 回 shell pid，ps 行程樹（注入，不依賴 runner 的真行程）裡
+    /// 看得到它、底下沒有 shell／建置工具。整輪巡邏的測試要靠它走到 DB 證據那幾道關卡——不然背景巡檢先回 `Unknown`
     /// 就把 bot 擋下來，DB 那條 fail-open 有沒有修好都看不出來。
-    struct FakeShell(std::process::Child);
-    impl Drop for FakeShell {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
-    fn provably_no_background_work(env: &crate::testing::Env, bot: &str) -> FakeShell {
-        let child = std::process::Command::new("sleep").arg("300").spawn().expect("spawn sleep");
-        env.herdr.set_shell_pid(&format!("pane-{bot}"), child.id() as i64);
-        FakeShell(child)
+    fn provably_no_background_work(env: &crate::testing::Env, bot: &str) -> test_ps::Guard {
+        const SHELL_PID: i64 = 4242;
+        env.herdr.set_shell_pid(&format!("pane-{bot}"), SHELL_PID);
+        // 決定性的行程樹：shell 在樹裡、底下只有 agent 自己（不是背景工作）。
+        test_ps::set(bot, Ok(format!("  900     1  4000 herdr\n {SHELL_PID}   900  8000 -zsh\n 4300 {SHELL_PID} 900000 /usr/local/bin/claude\n")))
     }
 
     /// `has_open_assignment` 的 DB 錯誤以前被 `.unwrap_or(0)` 當成「沒有未結案交辦」：AGM 明明有一張
@@ -1536,6 +1565,16 @@ mod tests {
             assert_left_running(&env.app, &bot, what).await;
             assert!(env.herdr.calls_to("agent.send_keys").is_empty(), "{what}: 不該對 agent 按任何鍵");
         }
+
+        // ps 行程樹本身讀不到（ssh 逾時、ps 失敗）：shell pid 問得到也證明不了，不收。
+        let env = crate::testing::env().await;
+        let (bot, _) = idle_bot(&env, "juliet").await;
+        env.herdr.set_shell_pid(&format!("pane-{bot}"), 4242);
+        let _ps = test_ps::set(&bot, Err("ssh: timed out".into()));
+        let run = db::active_run(&env.app.db, &bot).await.unwrap().unwrap();
+        assert!(matches!(inspect_background(&env.app, &run).await, BackgroundWork::Unknown(r) if r.contains("ssh: timed out")), "ps 讀不到要回 Unknown");
+        sweep(&env.app, 90).await;
+        assert_left_running(&env.app, &bot, "ps 行程樹讀不到").await;
 
         // herdr 那條線本身斷了（`pane_shell` 呼叫失敗）：換一個 client 指向不存在的 socket。
         let env = crate::testing::env().await;
@@ -1756,7 +1795,7 @@ mod tests {
     }
 
     /// 反向：問得到、而且證明沒有背景工作，這顆就照常收——「不知道就不收」不能變成永遠不收。
-    /// shell pid 用一個真的、底下沒有 shell／建置工具的行程（`sleep`），ps 行程樹裡看得到它。
+    /// ps 行程樹是注入的（`test_ps`）：shell 在樹裡、底下沒有背景工作。
     #[tokio::test]
     async fn once_the_inspection_proves_there_is_no_background_work_the_bot_sleeps() {
         let env = crate::testing::env().await;
