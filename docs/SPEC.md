@@ -2230,7 +2230,7 @@ herdr 有新版時自動發現、整理出「對我們有沒有用、會不會�
 5. **同版不重派**：`herdr-update.last` 記上次真的派過工的版本，`should_notify` 比對這個字串；派工失敗不寫，下一輪重試同一版。
    **鎖**（`herdr-update.lock`，#66 review 留言）：鎖裡寫 pid＋時間（同 `release-triage-kick.sh`）。另一個執行者還活著就安靜跳過（超過一小時才推 `runner_hung`，不搶鎖）；
    執行者不在（SIGKILL／斷電讓 EXIT trap 沒跑、pid 被別的程序重用、舊版純 `mkdir` 鎖）就回收接手並記 log，不再永久跳過——否則一次異常就讓偵測永久停擺，違反「有新版 24 小時內一定交辦」。
-   **連續失敗要被 AGM 看見**：「這輪沒能完成檢查」的出口（讀不到本機版本、查不到最新版、抓不到 CHANGELOG、版本比較失敗、找不到派給誰、派工失敗、binary 不在）在 `herdr-update.fails`
+   **連續失敗要被 AGM 看見**：「這輪沒能完成檢查」的出口（讀不到本機版本、查不到最新版、抓不到 CHANGELOG、版本比較失敗、比較報告看不懂——不是 JSON 或沒有布林的 `should_notify`，不當成「沒有新版」（#226）、找不到派給誰、派工失敗、binary 不在）在 `herdr-update.fails`
    記連續次數，連續兩輪（每天一輪＝隔天還是不行）推 `ops_alert`（`check_failing`）；完整跑完檢查或派工成功就清零。
 6. **上線**：驗證通過、AGM 核准後，走既有的 herdr 維護模式（§6.5.2）：`POST /api/supervisor/herdr-maintenance/open`
    關維護窗、換 binary、重啟、`resume=native` 接回所有子 agent——這條路已經因為 0.9.0 那次真的升級失敗自動回滾而建好，

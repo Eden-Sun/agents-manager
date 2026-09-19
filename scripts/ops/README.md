@@ -132,7 +132,7 @@ herdr 有新版時整理出「對我們有沒有用、會不會壞」，派給 A
 **鎖**（#66 review 留言）：`herdr-update.lock` 裡寫 pid＋時間（同 `release-triage-kick.sh`）。SIGKILL／斷電讓 EXIT trap 沒跑、鎖留在磁碟上時，
 下一輪發現執行者不在（含 pid 被別的程序重用）就回收接手並記一行 log；舊版純 `mkdir` 鎖（沒有 owner 檔）超過 `AGM_LOCK_STALE_SECS` 一樣回收，
 剛建立的先不動；執行者還活著但超過 `AGM_LOCK_HUNG_SECS` 推 `runner_hung`，回收不掉推 `stale_lock`。
-**連續失敗要被看見**（#66 review 留言）：讀不到本機版本、查不到最新版、抓不到 CHANGELOG、版本比較失敗、找不到派給誰、派工失敗、binary 不在，這些「這輪沒能完成檢查」的出口
+**連續失敗要被看見**（#66 review 留言）：讀不到本機版本、查不到最新版、抓不到 CHANGELOG、版本比較失敗、比較報告看不懂（不是 JSON、沒有布林的 `should_notify`，#226——不當成「沒有新版」）、找不到派給誰、派工失敗、binary 不在，這些「這輪沒能完成檢查」的出口
 除了 log 還會在 `herdr-update.fails` 記連續次數；連續 `AGM_FAIL_ALERT_AFTER` 輪（每天一輪＝隔天還是不行）推 `ops_alert`（`check_failing`），一次網路抖動不吵人。
 檢查完整跑完（含「沒有新版」）或派工成功就清零。
 隔離測試：`bash scripts/ops/herdr-update-kick_test.sh`（假的 `herdr`／`gh`／`agents-managerd`／`bin/agm`，`file://` CHANGELOG；含 `env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin` 模擬 launchd、缺依賴喊人、殘留鎖與活鎖、連續失敗喊人，系統 `/bin/bash` 3.2 也跑）；

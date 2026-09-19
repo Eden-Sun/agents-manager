@@ -456,5 +456,20 @@ bash "$SCRIPT"
 check "binary 連續不在：推 ops-alert" "ops-alert .*\-\-reason check_failing" "$AGM_DIR/calls.log"
 teardown
 
+# 15d. 版本比較 CLI 結束碼 0、卻印出看不懂的東西（不是 JSON、或少了 should_notify）：這輪沒能完成檢查，不是「沒有新版」。
+# 以前 `|| SHOULD=0` 把它當成沒有新版：安靜退出、還把連續失敗清零，CLI 換了輸出形狀就永遠沒人知道。
+for bad in 'warning: config.toml 有不認得的 key' '{"installed_version":"0.8.2"}'; do
+  setup
+  printf '#!/bin/bash\necho %q\n' "$bad" > "$ROOT/odd-agents-managerd"
+  chmod +x "$ROOT/odd-agents-managerd"
+  export AM_BINARY="$ROOT/odd-agents-managerd"
+  echo 1 > "$AGM_DIR/herdr-update.fails"
+  bash "$SCRIPT"
+  equals "報告看不懂（${bad}）：算一輪失敗，不清零" "$(cat "$AGM_DIR/herdr-update.fails" 2>/dev/null)" "2"
+  check "報告看不懂（${bad}）：連續兩輪推 ops-alert" "ops-alert .*\-\-reason check_failing" "$AGM_DIR/calls.log"
+  equals "報告看不懂（${bad}）：不派工" "$(assigns)" "0"
+  teardown
+done
+
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
