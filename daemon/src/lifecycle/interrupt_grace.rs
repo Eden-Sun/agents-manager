@@ -384,6 +384,25 @@ async fn log_interrupted_at(app: &Arc<App>, bot: &db::Bot, run: &db::Run) -> Opt
     }
 }
 
+/// `since` 之後這顆 bot 的 session log 裡有沒有使用者送出 `text` 這一則（#229：重啟後補證插隊送出的鍵生效了沒有——
+/// 平常那份 `SentProof` 只活在上一個行程的記憶體裡）。claude 可能把貼上的字包成 `<pasted_content>`（#218）；codex 逐字。
+/// 沒有時間的列不算。讀不到＝沒有證據。
+pub(crate) async fn log_shows_prompt_since(app: &Arc<App>, bot: &db::Bot, run: &db::Run, text: &str, since: DateTime<Utc>) -> bool {
+    let Some(log) = session_log(app, bot, run).await else { return false };
+    let claude = bot.kind == "claude";
+    log.lines().any(|line| {
+        let Ok(v) = serde_json::from_str::<Value>(line) else { return false };
+        if !ts(&v).is_some_and(|t| t >= since) {
+            return false;
+        }
+        if claude {
+            transcript_user_text(line).is_some_and(|t| super::pasted_content::is_sent(&t, text))
+        } else {
+            codex_user_text(line).is_some_and(|t| t == text)
+        }
+    })
+}
+
 /// `since` 之後這顆 bot 的 log 裡有沒有使用者中斷的紀錄（#223）。讀不到＝沒有證據。
 pub(crate) async fn log_interrupted_since(app: &Arc<App>, bot: &db::Bot, run: &db::Run, since: DateTime<Utc>) -> bool {
     let Some(log) = session_log(app, bot, run).await else { return false };
