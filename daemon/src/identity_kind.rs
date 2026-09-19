@@ -128,7 +128,7 @@ mod tests {
                 tools: Default::default(),
                 identities: Default::default(),
                 shell_identities: vec![ident("cc0", "claude"), ident("cc1", "claude")],
-                checked_at: crate::db::now(),
+                utc_offset_secs: None, checked_at: crate::db::now(),
             },
         );
         let bot = |name: &str, kind: &str, identity: &str, managed_by: &str| {

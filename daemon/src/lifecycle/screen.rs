@@ -692,6 +692,12 @@ pub(crate) fn parse_codex_try_again(notice: &str) -> Option<String> {
     parse_codex_try_again_at(notice, chrono::Local::now())
 }
 
+/// 橫幅是「那台主機」印的當地時間（#239）：遠端主機用偵測時記下的 UTC 偏移（秒）解讀，不是 daemon 的時區。
+pub(crate) fn parse_codex_try_again_offset(notice: &str, offset_secs: i32) -> Option<String> {
+    let tz = chrono::FixedOffset::east_opt(offset_secs)?;
+    parse_codex_try_again_at(notice, chrono::Utc::now().with_timezone(&tz))
+}
+
 /// 橫幅時間剛過去幾分鐘＝舊橫幅，不要滾到明天。2026-09-13：22:15:22 派工時橫幅還是 `10:15 PM`，
 /// 滾成隔天讓兩筆交辦等 24 小時，而 app-server 說 22:20 就重置。
 const STALE_BANNER_GRACE_MINS: i64 = 15;
@@ -707,8 +713,8 @@ const STALE_BANNER_RETRY_MINS: i64 = 5;
 ///   （review3 c2 M1）。
 
 /// 可測版本：`now` 由呼叫端給。
-fn parse_codex_try_again_at(notice: &str, now: chrono::DateTime<chrono::Local>) -> Option<String> {
-    use chrono::{Datelike, Local, NaiveDate, TimeZone};
+fn parse_codex_try_again_at<Tz: chrono::TimeZone>(notice: &str, now: chrono::DateTime<Tz>) -> Option<String> {
+    use chrono::{Datelike, NaiveDate};
     let low = notice.to_ascii_lowercase();
     let rest = low.split("try again at").nth(1)?.trim();
     let mut month = None;
@@ -791,7 +797,7 @@ fn parse_codex_try_again_at(notice: &str, now: chrono::DateTime<chrono::Local>) 
             };
         }
     }
-    let dt = Local.from_local_datetime(&naive).earliest()?;
+    let dt = now.timezone().from_local_datetime(&naive).earliest()?;
     Some(dt.with_timezone(&chrono::Utc).to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
 }
 
@@ -1162,6 +1168,18 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         assert!(parse_codex_try_again(&lines[0]).is_some());
         // A banner that already carries its own reset is not extended by whatever follows it.
         assert_eq!(codex_usage_notice_lines(CODEX_LIMIT_HIT).len(), 1);
+    }
+    #[test]
+    fn codex_banner_reads_in_the_hosts_own_zone() {
+        // 遠端 UTC、橫幅 6:43 PM（遠端當地）＝ 18:43Z，不管 daemon 在哪個時區（#239）。
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-19T08:00:00Z").unwrap();
+        let utc = chrono::FixedOffset::east_opt(0).unwrap();
+        let got = parse_codex_try_again_at("try again at Sep 19th, 2026 6:43 PM", now.with_timezone(&utc));
+        assert_eq!(got.as_deref(), Some("2026-09-19T18:43:00.000Z"));
+        let tpe = chrono::FixedOffset::east_opt(8 * 3600).unwrap();
+        let got = parse_codex_try_again_at("try again at Sep 19th, 2026 6:43 PM", now.with_timezone(&tpe));
+        assert_eq!(got.as_deref(), Some("2026-09-19T10:43:00.000Z"));
+        assert_eq!(parse_codex_try_again_offset("try again at Sep 19th, 2099 6:43 PM", 0).as_deref(), Some("2099-09-19T18:43:00.000Z"));
     }
     /// 2026-09-13：派工時橫幅剛過去 22 秒是舊字，不能滾到隔天壓 24 小時。
     #[test]

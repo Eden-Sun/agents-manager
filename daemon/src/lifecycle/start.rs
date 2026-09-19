@@ -1801,7 +1801,7 @@ mod identity_login_gate_tests {
                 )]
                 .into(),
                 shell_identities: vec![],
-                checked_at: db::now(),
+                utc_offset_secs: None, checked_at: db::now(),
             },
         );
     }
