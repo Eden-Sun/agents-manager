@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from 'react'
 import * as api from '../api'
+import { ApiError } from '../api/types'
 import { inFlightTurn, projectHostName, useStore } from '../store/store'
 import { updateBatchCounts } from '../lib/updateBatch'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -58,8 +59,7 @@ export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; varian
             : `已請 ${r.target_bot_name} 解析 claude ${r.version} 的 changelog，結論會回到這裡`,
         )
       })
-      // 409 的 `message` 就是「為什麼派不出去」（沒設協調者、沒裝 task 檔），原樣讓使用者看到。
-      .catch((e: unknown) => notify('error', `派不出去：${e instanceof Error ? e.message : String(e)}`))
+      .catch((e: unknown) => notify('error', `派不出去：${reviewErr(e)}`))
       .finally(() => setAsking(false))
   }
 
@@ -135,6 +135,20 @@ export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; varian
       {confirmDialog}
     </>
   )
+}
+
+/**
+ * 派不出去時要講得出**下一步**。
+ *
+ * 404／405：這顆 daemon 還沒有這支 API（POST 掉進前端的 catch-all，那條只收 GET 所以是 405——
+ * 2026-09-19 使用者實測，當時線上是 a8b84a63、功能還沒上線）。其餘 409 的 `message` 本來就是
+ * 「為什麼派不出去」（沒設協調者、沒裝 claude-release-task.md），原樣顯示。
+ */
+function reviewErr(e: unknown): string {
+  if (e instanceof ApiError && (e.status === 404 || e.status === 405)) {
+    return `這顆 daemon 還沒有 /api/claude-update/review（HTTP ${e.status}），二進位比前端舊；要重建並重啟 daemon 才會有這支 API。`
+  }
+  return e instanceof Error ? e.message : String(e)
 }
 
 /** 確認框：changelog 在上，忙碌警語在下。 */
