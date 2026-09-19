@@ -402,3 +402,9 @@ daemon 這幾天把「寫不進 DB」改成 fail closed：外面的副作用做�
 - **重新整理是換 iframe 的 key**：跨 origin 拿不到 `contentWindow.location.reload()`；代價是會丟掉頁面內的暫存狀態（預期如此）。
 - **手機**：一樣有這個分頁，iframe 滿版（去掉左右框線與圓角）。截圖：`docs/screenshots/preview/`。
 - **mock**（`VITE_MOCK=1`）：三個端點與 `preview_changed` 都演；iframe 用 `srcDoc` 放一頁說明，因為沒有真的 vite。
+
+## 環境設定的「Jev 第二意見」（使用者 2026-09-19，issue #240）
+- API key 用 `type="password"` 的輸入框，存檔後清空；daemon 不回 key，所以這裡只顯示「已設定／未設定（原因）」，沒有「顯示 key」。留空存檔＝不更換。
+- 「啟用」那一行直接寫出會送什麼出去（專案撞限畫面最後 60 行、遮罩後、送到 TypeSafe），不收進說明或 tooltip——這是會讓內容離開這台機器的開關。
+- 沒有可用的 key 時開關不能勾；專案名單沒勾任何一個＝不送（兩層都要開，SPEC §4.3c）。專案區在開關關著時整塊 disabled。
+- 舊 daemon 沒有端點時整塊只顯示一句「需要更新 daemon」，不顯示壞掉的表單。

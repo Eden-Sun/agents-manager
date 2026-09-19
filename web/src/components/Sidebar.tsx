@@ -45,6 +45,7 @@ import { RebuildBadge } from './RebuildBadge'
 import { TabsBadge } from './TabsBadge'
 import { ModelTag } from './ModelTag'
 import { BotRowMenu } from './BotRowMenu'
+import { JudgePanel } from './JudgePanel'
 import { KIND_LABEL, KindDisplayToggle, KindTag } from './KindTag'
 import { QuickAddBots } from './QuickAddBots'
 import { UpdateAllBanner } from './UpdateAllBanner'
@@ -1414,6 +1415,10 @@ export function Sidebar() {
           <section className="env-sec">
             <h3>身分</h3>
             <IdentitiesPanel />
+          </section>
+          <section className="env-sec">
+            <h3>Jev 第二意見</h3>
+            <JudgePanel />
           </section>
           <section className="env-sec">
             <h3>顯示</h3>
