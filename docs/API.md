@@ -478,7 +478,12 @@ adopt 之後孤兒通知標記會清掉。pane 不存在 404、`owner_bot_id` �
 ```
 
 `state`：`none`（還沒派，UI 顯示按鈕）｜`pending`（派了還沒結論）｜`done`（`result` 就是結論原文）。
-`result` 只有空白也算 `pending`——agent 還沒寫東西就結案不該顯示成有結論。
+只有空白的回覆算 `pending`——對方還沒講東西不該顯示成有結論。
+
+結論從**收件匣事件的回合**讀（`supervisor_inbox.notify_turn_id` → 那個回合的最後一則 assistant 訊息），
+不是從 assignment：派給 AGM 角色（協調者／巡檢）的工作一律走交接佇列，那條路**不會產生 assignment**，
+`result` 永遠是空的（2026-09-19 上線後實測，視窗一直停在「還沒派」）。按鈕派的（`…-ui`）與 kick 派的
+（不帶 `-ui`）兩個 crid 都查，同一版誰先派結論都算數。
 
 ### `POST /api/claude-update/review`
 `{host?, from?, to?}`（預設 `host=local`、`to`＝磁碟上那一版）。把這一版的 changelog 組成交辦派給**協調者**，
