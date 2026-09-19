@@ -189,7 +189,10 @@ pub fn router(app: Arc<App>) -> Router {
         // 回合結束只到 awaiting_review；驗收／阻塞／續作／取消都走這支（SPEC §18.3）。
         .route("/supervisor/assignments/{id}/review", post(crate::supervisor::api::post_review))
         // 使用者在更新提示上按「請 AGM 解析」：把這一版的 changelog 派給協調者判讀（唯讀）。
-        .route("/claude-update/review", post(crate::claude_review::post_review))
+        .route(
+            "/claude-update/review",
+            get(crate::claude_review::get_review).post(crate::claude_review::post_review),
+        )
         .route("/supervisor/incidents", get(crate::supervisor::api::get_incidents))
         // 人設：持久版本是權威，內嵌版只在首次安裝當種子（SPEC §18.11）。
         .route(

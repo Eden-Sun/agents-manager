@@ -6,6 +6,7 @@ import { updateBatchCounts } from '../lib/updateBatch'
 import { ConfirmDialog } from './ConfirmDialog'
 import { UpgradeIcon } from './UpgradeIcon'
 import { UpdateChangelog } from './UpdateChangelog'
+import { AgmReviewBox } from './AgmReviewBox'
 import './updateBadge.css'
 
 /**
@@ -25,6 +26,7 @@ export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; varian
   const [restarting, setRestarting] = useState(false)
   const [confirming, setConfirming] = useState(false)
   const [asking, setAsking] = useState(false)
+  const [reviewKey, setReviewKey] = useState(0)
 
   // selector 回純布林：`updateBatchCounts` 每次回新陣列，連 `useShallow` 都擋不住（見 `UpdateQuotaChip.tsx`）。
   // 忙碌的也算：額度列的 chip 把它列在「在忙」那組，照樣畫著；再畫一顆就是同一個 ⌃⌃ 兩次（2026-09-19 使用者：「logo 重工了」）。
@@ -54,7 +56,8 @@ export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; varian
     void api
       .requestClaudeUpdateReview({ host, from: runningVersion })
       .then((r) => {
-        setConfirming(false)
+        // 不關框：結論就顯示在框裡（使用者 2026-09-19）。派完先刷新一次，之後打開也會再讀。
+        setReviewKey((n) => n + 1)
         notify(
           'info',
           // 已經派過（自己按過，或 30 分鐘那支排程先派了）不是錯誤，照實說一次就好。
@@ -73,7 +76,14 @@ export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; varian
       name={botName}
       busy={busy}
       asking={asking}
-      changelog={confirming ? <UpdateChangelog kind={botKind} host={host} from={runningVersion} /> : null}
+      changelog={
+        confirming ? (
+          <>
+            <UpdateChangelog kind={botKind} host={host} from={runningVersion} />
+            {botKind === 'claude' ? <AgmReviewBox host={host} from={runningVersion} refreshKey={reviewKey} /> : null}
+          </>
+        ) : null
+      }
       onCancel={() => setConfirming(false)}
       onConfirm={restart}
       onAskAgm={botKind === 'claude' ? askAgm : undefined}

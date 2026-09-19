@@ -6,6 +6,7 @@ import { updateBatchCounts } from '../lib/updateBatch'
 import { ConfirmDialog } from './ConfirmDialog'
 import { UpgradeIcon } from './UpgradeIcon'
 import { UpdateChangelog } from './UpdateChangelog'
+import { AgmReviewBox } from './AgmReviewBox'
 import './updateQuotaChip.css'
 
 /**
@@ -40,6 +41,7 @@ export function UpdateQuotaChip() {
   const busyCount = busyLines ? busyLines.split('\n').length : 0
   const [confirming, setConfirming] = useState(false)
   const [asking, setAsking] = useState(false)
+  const [reviewKey, setReviewKey] = useState(0)
   const notify = useStore((s) => s.notify)
   // changelog 用第一顆等著套用的 bot 所在主機與它跑著的版本；同一台的 claude 都是同一份。
   const changelogHost = useStore((s) => {
@@ -101,7 +103,12 @@ export function UpdateQuotaChip() {
         title="重啟這些 Bot 來套用 claude 更新？"
         body={
           <>
-            {confirming ? <UpdateChangelog kind="claude" host={changelogHost} from={changelogFrom} /> : null}
+            {confirming ? (
+              <>
+                <UpdateChangelog kind="claude" host={changelogHost} from={changelogFrom} />
+                <AgmReviewBox host={changelogHost} from={changelogFrom} refreshKey={reviewKey} />
+              </>
+            ) : null}
             <p>
               以下 <strong>{readyCount}</strong> 顆會結束目前的 agent，再用同一個 session <code>--resume</code>{' '}
               接回來——上下文不會掉，但重啟要花幾秒，這段時間它們不會回話。
@@ -134,7 +141,8 @@ export function UpdateQuotaChip() {
           void api
             .requestClaudeUpdateReview({ host: changelogHost, from: changelogFrom })
             .then((r) => {
-              setConfirming(false)
+              // 框留著：結論直接顯示在裡面。
+              setReviewKey((n) => n + 1)
               notify(
                 'info',
                 r.duplicate

@@ -160,9 +160,72 @@ pub async fn inbox_event_for(app: &Arc<App>, to: &str) -> Option<String> {
         .flatten()
 }
 
-/// 同一版只派一次的識別碼（跟 kick 用同一個格式，兩邊撞到就是同一筆）。
+/// kick 用的識別碼。使用者按鈕用 [`ui_request_id`]，兩邊分開。
 pub fn request_id(to: &str) -> String {
     format!("agm-claude-release-{to}")
+}
+
+/// 使用者按鈕派的那一筆。
+///
+/// **跟 kick 分開**（2026-09-19 使用者：「解析結果直接在更新視窗 show 出」）：kick 走的是 AGM 的
+/// 收件匣（`bot_request`），那條路沒有 assignment，結論只留在協調者自己的對話裡，視窗讀不到。
+/// 走自己的交辦就有 `result` 可以讀，做得到「按了 → 視窗裡看得到結論」。同一版重按仍只有一筆
+/// （`post_assignment` 靠這個 id 冪等）。
+pub fn ui_request_id(to: &str) -> String {
+    format!("agm-claude-release-{to}-ui")
+}
+
+/// 這一版的解析現在到哪了：`none`（還沒派）／`pending`（派了還沒結論）／`done`（有結論）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReviewState {
+    pub state: &'static str,
+    pub assignment_id: Option<String>,
+    pub target_bot_name: Option<String>,
+    pub asked_at: Option<String>,
+    pub answered_at: Option<String>,
+    /// AGM 的結論原文（`done` 才有）。
+    pub result: Option<String>,
+}
+
+/// 讀這一版的解析狀態。`GET /api/claude-update/review` 與 POST 的回應都用它。
+pub async fn review_state(app: &Arc<App>, to: &str) -> ReviewState {
+    let a = crate::supervisor::store::assignment_by_crid(&app.db, &ui_request_id(to)).await.ok().flatten();
+    match a {
+        None => ReviewState { state: "none", assignment_id: None, target_bot_name: None, asked_at: None, answered_at: None, result: None },
+        Some(a) => {
+            let name = crate::db::bot(&app.db, &a.target_bot_id).await.ok().flatten().map(|b| b.name);
+            let has_result = a.result.as_deref().map(str::trim).is_some_and(|r| !r.is_empty());
+            ReviewState {
+                state: if has_result { "done" } else { "pending" },
+                assignment_id: Some(a.id),
+                target_bot_name: name,
+                asked_at: Some(a.created_at),
+                answered_at: a.completed_at,
+                result: a.result,
+            }
+        }
+    }
+}
+
+/// `GET /api/claude-update/review`：這一版的解析到哪了（視窗一打開就讀，結論直接顯示在框裡）。
+pub async fn get_review(State(app): State<Arc<App>>, axum::extract::Query(q): axum::extract::Query<ReviewQuery>) -> Result<Json<Value>, LcError> {
+    let host = q.host.clone().unwrap_or_else(|| crate::config::LOCAL_HOST.to_string());
+    let to = match q.to.clone() {
+        Some(v) if !v.trim().is_empty() => v,
+        _ => crate::changelog::lookup(&app, &host, "claude", None, None).await.installed_version.unwrap_or_default(),
+    };
+    if to.trim().is_empty() {
+        return Ok(Json(json!({"version": null, "review": ReviewState { state: "none", assignment_id: None, target_bot_name: None, asked_at: None, answered_at: None, result: None }})));
+    }
+    Ok(Json(json!({"version": to, "review": review_state(&app, &to).await})))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReviewQuery {
+    #[serde(default)]
+    pub host: Option<String>,
+    #[serde(default)]
+    pub to: Option<String>,
 }
 
 /// `POST /api/claude-update/review`
@@ -189,29 +252,19 @@ pub async fn post_review(State(app): State<Arc<App>>, Json(b): Json<ReviewIn>) -
                    "message": "找不到 claude-release-task.md（AGM 目錄或 repo 的 scripts/ops/ 都沒有）。照 scripts/ops/README.md 安裝之後再按一次。"}),
         ));
     };
-    let crid = request_id(&to);
-    // 這一版已經派過（使用者剛按過，或 30 分鐘那支 kick 先派了）：**直接回既有那一筆**，不要再送一次。
+    let crid = ui_request_id(&to);
+    // 這一版已經派過（使用者剛按過）：**直接回既有那一筆**，不要再送一次。
     // `post_assignment` 對「同一個 crid、不同正文」是 409 `text_mismatch`，而 kick 與這顆按鈕的正文
     // 本來就差一句觸發來源——不短路的話，kick 先派過再按按鈕會變成錯誤，而不是「已經派過」
     // （協調者 2026-09-19）。
-    if let Some(event_id) = inbox_event_for(&app, &to).await {
-        // kick 已經透過收件匣派過這一版：還沒有 assignment 可回，但對使用者就是「已經派過」。
+    // 已經有自己的那一筆就回它（含目前的解析狀態），不再派第二次。
+    let state = review_state(&app, &to).await;
+    if state.state != "none" {
         return Ok(Json(json!({
             "version": to,
             "from_version": reply.from_version,
-            "inbox_event_id": event_id,
             "duplicate": true,
-            "sections": reply.sections.len(),
-        })));
-    }
-    if let Some(a) = existing_for(&app, &to).await.map_err(|e| LcError::Upstream(e.to_string()))? {
-        return Ok(Json(json!({
-            "version": to,
-            "from_version": reply.from_version,
-            "target_bot_id": a.target_bot_id,
-            "target_bot_name": crate::db::bot(&app.db, &a.target_bot_id).await.ok().flatten().map(|b| b.name),
-            "assignment_id": a.id,
-            "duplicate": true,
+            "review": state,
             "sections": reply.sections.len(),
         })));
     }
@@ -242,14 +295,14 @@ pub async fn post_review(State(app): State<Arc<App>>, Json(b): Json<ReviewIn>) -
         }),
     )
     .await?;
-    let assignment_id = out.0.get("id").and_then(|v| v.as_str()).map(str::to_string);
+    let _ = out;
     Ok(Json(json!({
         "version": to,
         "from_version": reply.from_version,
         "target_bot_id": target.id,
         "target_bot_name": target.name,
-        "assignment_id": assignment_id,
         "duplicate": false,
+        "review": review_state(&app, &to).await,
         "sections": reply.sections.len(),
     })))
 }
@@ -370,6 +423,53 @@ mod tests {
         .await
         .unwrap_err();
         assert!(format!("{err:?}").contains("text_mismatch"), "{err:?}");
+    }
+
+    /// 使用者按鈕走自己的 crid，跟 kick 分開：kick 那條路沒有 assignment，結論留在協調者的
+    /// 對話裡，更新框讀不到（使用者 2026-09-19：「解析結果直接在更新視窗 show 出」）。
+    #[test]
+    fn the_button_uses_its_own_request_id_so_the_result_has_somewhere_to_live() {
+        assert_eq!(ui_request_id("2.1.277"), "agm-claude-release-2.1.277-ui");
+        assert_ne!(ui_request_id("2.1.277"), request_id("2.1.277"));
+    }
+
+    /// 更新框要讀得到三種狀態：還沒派／派了還沒結論／有結論。
+    #[tokio::test]
+    async fn the_dialog_can_tell_none_pending_and_done_apart() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let now = crate::db::now();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, created_at)
+             VALUES ('resp1',?,'AGM-responder','claude','[]',0,1,'tok-r',?)",
+        )
+        .bind(&e.project_id).bind(&now).execute(&app.db).await.unwrap();
+
+        assert_eq!(review_state(&app, "2.1.277").await.state, "none", "還沒派");
+
+        sqlx::query(
+            "INSERT INTO supervisor_assignments
+               (id, supervisor_id, request_id, target_bot_id, client_request_id, text, status, attempts, expects_review, created_at, updated_at)
+             VALUES ('a1','AGM',NULL,'resp1',?,'解析一下','delivered',0,1,?,?)",
+        )
+        .bind(ui_request_id("2.1.277")).bind(&now).bind(&now).execute(&app.db).await.unwrap();
+        let pending = review_state(&app, "2.1.277").await;
+        assert_eq!(pending.state, "pending", "派了還沒結論");
+        assert_eq!(pending.target_bot_name.as_deref(), Some("AGM-responder"));
+        assert!(pending.result.is_none());
+
+        sqlx::query("UPDATE supervisor_assignments SET result=?, status='completed', completed_at=? WHERE id='a1'")
+            .bind("2.1.277 對我們沒有用得上的東西，建議不跟進。")
+            .bind(&now)
+            .execute(&app.db).await.unwrap();
+        let done = review_state(&app, "2.1.277").await;
+        assert_eq!(done.state, "done");
+        assert_eq!(done.result.as_deref(), Some("2.1.277 對我們沒有用得上的東西，建議不跟進。"), "結論要原樣帶出去給框顯示");
+        assert!(done.answered_at.is_some());
+
+        // 空字串的 result 不算有結論（agent 還沒寫東西就結案）。
+        sqlx::query("UPDATE supervisor_assignments SET result='   ' WHERE id='a1'").execute(&app.db).await.unwrap();
+        assert_eq!(review_state(&app, "2.1.277").await.state, "pending");
     }
 
     /// kick 是透過**協調者的收件匣**派的，那一步還沒有 assignment：同一個 crid 已經在收件匣裡時，
