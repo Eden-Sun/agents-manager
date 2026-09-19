@@ -6,7 +6,8 @@
 //! - **沒做**：什麼都不動，那一筆照舊 in_flight。
 //! - **做了**：DB 那一半跟著寫（收成 failed 與說明同一個交易）。寫不進去就**記成欠著**，呼叫端不回普通的成功。
 //! - **不知道**：不假定打斷——那一筆留在 in_flight，**記成待證**；之後的證據（那次 Esc 的 `StopFailure` 回聲；
-//!   插隊那一句出現在 transcript 裡）說鍵生效了才收。那一筆自己正常收尾了（Stop hook）就作廢。
+//!   按鍵之後 log 裡出現的使用者中斷紀錄；插隊那一句出現在 transcript 裡）說鍵生效了才收。那一筆自己正常收尾了
+//!   （Stop hook）就作廢。claude 2.1.276～2.1.278 按 Esc 不送 Stop／StopFailure（#223），Esc 實際上只能靠 log 證明。
 //!
 //! 插隊送出多一件事：新的那一則在送出鍵生效**之前**已經寫進 DB（維護窗口的閘門與冪等靠它），但還不能佔 run 的
 //! in-flight 名額（`turns_one_in_flight`，舊的那一筆還在跑）——所以它先以 `run_id = NULL` 的 in_flight 存在，
@@ -20,6 +21,7 @@
 //! 跟記帳之前一樣——不會永遠卡住，只是慢。
 
 use super::*;
+use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
@@ -78,6 +80,8 @@ struct Pending {
     new_turn: Option<NewTurn>,
     /// 待證的插隊送出：之後看得到那一則進了 transcript，就是送出鍵生效了。
     proof: Option<SentProof>,
+    /// 待證的 Esc：按鍵**之前**的時刻。log 裡在這之後出現使用者中斷的紀錄，就是 Esc 生效了（#223）。
+    esc_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone)]
@@ -137,6 +141,7 @@ pub(crate) async fn interrupted(app: &Arc<App>, bot_id: &str, run_id: &str, turn
         stage: Stage::Owed,
         new_turn: None,
         proof: None,
+        esc_at: None,
     };
     owe(app, bot_id, p).await
 }
@@ -150,6 +155,7 @@ pub(crate) async fn send_now_interrupted(app: &Arc<App>, bot_id: &str, run_id: &
         stage: Stage::Owed,
         new_turn: Some(NewTurn { id: new_turn.to_string(), delivery: None }),
         proof: None,
+        esc_at: None,
     };
     owe(app, bot_id, p).await
 }
@@ -184,20 +190,59 @@ async fn owe(app: &Arc<App>, bot_id: &str, mut p: Pending) -> anyhow::Result<()>
     }
 }
 
-/// 鍵不知道做了沒有：那一筆留在 in_flight（不假定打斷），記成待證。
-pub(crate) fn unconfirmed(bot_id: &str, run_id: &str, turn_id: &str, note: &str) {
+/// 從 log 認 Esc 生效的證據時，按鍵時刻往前放寬這麼多：log 與 daemon 是同一台的時鐘，只差毫秒的捨入。
+const ESC_LOG_SLACK: Duration = Duration::from_secs(1);
+
+/// Esc 不知道進了沒有（herdr 沒回）：先看 log（#223）。claude 2.1.276～2.1.278 按 Esc 不送 Stop／StopFailure，回聲等不到；
+/// Esc 生效當下 transcript 就寫了中斷標記（codex 是 rollout 的 `turn_aborted`）。看到了就照「做了」收：`Ok(true)`，
+/// DB 寫不進去就記成欠著、回 `Err`。還看不到就記成待證、排定時重試再看，那一筆留在 in_flight（不假定打斷）：`Ok(false)`。
+///
+/// 呼叫端握著 bot 鎖，**放鎖之前**呼叫：§4.3 備援計時器等的是同一把鎖，放了鎖它就先把回合收成 `completed_fallback`、
+/// 串流到一半的字當回覆。
+pub(crate) async fn unconfirmed(
+    app: &Arc<App>,
+    bot_id: &str,
+    run_id: &str,
+    turn_id: &str,
+    note: &str,
+    esc_at: DateTime<Utc>,
+) -> anyhow::Result<bool> {
+    let mut p = Pending {
+        run_id: run_id.to_string(),
+        turn_id: turn_id.to_string(),
+        note: note.to_string(),
+        stage: Stage::Unconfirmed,
+        new_turn: None,
+        proof: None,
+        esc_at: Some(esc_at),
+    };
+    if esc_landed(app, bot_id, &p).await {
+        tracing::info!(bot = bot_id, turn = turn_id, "herdr 沒回 Esc，但 log 裡已經有這次的中斷紀錄：照打斷收");
+        p.stage = Stage::Owed;
+        return owe(app, bot_id, p).await.map(|()| true);
+    }
     tracing::warn!(bot = bot_id, turn = turn_id, "不知道打斷的鍵有沒有進 pane：回合留在 in_flight，等證據");
-    record(
-        bot_id,
-        Pending {
-            run_id: run_id.to_string(),
-            turn_id: turn_id.to_string(),
-            note: note.to_string(),
-            stage: Stage::Unconfirmed,
-            new_turn: None,
-            proof: None,
-        },
-    );
+    record(bot_id, p);
+    schedule_retry(app, bot_id);
+    Ok(false)
+}
+
+/// 待證的 Esc：log 裡在按鍵之後（而且不早於這一回合開始）出現了使用者中斷的紀錄嗎？讀不到＝沒有證據。
+/// 不早於回合開始：上一回合被按停留下的標記不能拿來證明這一次。
+async fn esc_landed(app: &Arc<App>, bot_id: &str, p: &Pending) -> bool {
+    let Some(esc_at) = p.esc_at else { return false };
+    let (Ok(Some(bot)), Ok(Some(run))) = (db::bot(&app.db, bot_id).await, db::run(&app.db, &p.run_id).await) else { return false };
+    let began = sqlx::query_scalar::<_, String>("SELECT created_at FROM turns WHERE id=?")
+        .bind(&p.turn_id)
+        .fetch_optional(&app.db)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|t| DateTime::parse_from_rfc3339(&t).ok())
+        .map(|t| t.with_timezone(&Utc));
+    let since = esc_at - chrono::Duration::from_std(ESC_LOG_SLACK).unwrap_or_default();
+    let since = began.map_or(since, |b| b.max(since));
+    super::interrupt_grace::log_interrupted_since(app, &bot, &run, since).await
 }
 
 /// 插隊送出的送出鍵不知道生效了沒有（#120）：被插隊的那一筆留在 in_flight，記成待證。`proof` 在的話，之後
@@ -213,6 +258,7 @@ pub(crate) fn unconfirmed_send_now(bot_id: &str, run_id: &str, turn_id: &str, pr
             stage: Stage::Unconfirmed,
             new_turn: None,
             proof,
+            esc_at: None,
         },
     );
 }
@@ -250,7 +296,7 @@ async fn settle_one(app: &Arc<App>, bot_id: &str, p: &Pending, evidence: Evidenc
     }
     let proven = match p.stage {
         Stage::Owed => true,
-        Stage::Unconfirmed => evidence == Evidence::Echo || shows(p.proof.clone()).await,
+        Stage::Unconfirmed => evidence == Evidence::Echo || shows(p.proof.clone()).await || esc_landed(app, bot_id, p).await,
     };
     if !proven {
         return Ok(());
@@ -278,6 +324,7 @@ pub(crate) async fn close_turn(app: &Arc<App>, bot_id: &str, run_id: &str, turn_
         stage: Stage::Owed,
         new_turn: None,
         proof: None,
+        esc_at: None,
     };
     close(app, bot_id, &p).await
 }
@@ -446,7 +493,8 @@ pub(crate) fn schedule_retry(app: &Arc<App>, bot_id: &str) {
     tokio::spawn(async move {
         for secs in RETRY_DELAYS_SECS {
             tokio::time::sleep(Duration::from_secs(secs)).await;
-            if !pending(&bot_id).iter().any(|p| p.stage == Stage::Owed) {
+            // 欠著的補寫；待證的 Esc 再看一次 log（#223：它等不到回聲）。
+            if !pending(&bot_id).iter().any(|p| p.stage == Stage::Owed || p.esc_at.is_some()) {
                 return;
             }
             if let Err(e) = settle(&app, &bot_id).await {
@@ -698,6 +746,126 @@ mod tests {
         assert!(system_notes(&app, &c.turn).await.is_empty(), "不補「被中斷」");
         settle(&app, &c.bot.id).await.unwrap();
         assert!(pending(&c.bot.id).is_empty(), "那一筆不在飛了：帳作廢");
+    }
+
+    /// claude transcript 的一列（`at`＝claude 寫下它的時間，RFC 3339 UTC）。中斷標記照 2.1.278 實測的樣子（#178）：
+    /// 帶 `interruptedMessageId`、`promptId` 是被中斷的那一則。
+    fn prompt_line(text: &str, at: &str) -> String {
+        json!({"type": "user", "promptId": "p-run", "timestamp": at, "message": {"role": "user", "content": text}}).to_string()
+    }
+    fn esc_marker(at: &str) -> String {
+        json!({"type": "user", "promptId": "p-run", "interruptedMessageId": "msg_011CfCSBuE", "timestamp": at,
+               "message": {"role": "user", "content": [{"type": "text", "text": "[Request interrupted by user]"}]}})
+        .to_string()
+    }
+    fn at(offset_ms: i64) -> String {
+        (chrono::Utc::now() + chrono::Duration::milliseconds(offset_ms)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    }
+    /// 這個 run 的 transcript（本機 claude）。
+    async fn transcript(b: &Busy, lines: &[String]) -> std::path::PathBuf {
+        let path = b.env.dir.join(format!("t-{}.jsonl", db::ulid()));
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+        sqlx::query("UPDATE runs SET transcript_path=? WHERE id=?").bind(path.to_string_lossy()).bind(&b.run).execute(&b.env.app.db).await.unwrap();
+        path
+    }
+    fn append(path: &std::path::Path, lines: &[String]) {
+        use std::io::Write as _;
+        let mut f = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+        writeln!(f, "{}", lines.join("\n")).unwrap();
+    }
+
+    /// #223：claude 2.1.276～2.1.278 按 Esc 不送 Stop／StopFailure（#178 實測＋執行檔），herdr 沒回 Esc 時等回聲永遠等不到。
+    /// Esc 生效當下 transcript 就寫了中斷標記——無損證據。放鎖之前就看到：當場照 Esc 收（跟 herdr 有回一樣），
+    /// 不留給 §4.3 備援把它記成「答完了」、半截的字當回覆。
+    #[tokio::test]
+    async fn an_unanswered_esc_is_proven_by_the_interruption_the_transcript_recorded() {
+        let b = busy("esc-unknown-logged").await;
+        let app = b.env.app.clone();
+        // claude 在 Esc 進去之後才寫下標記。
+        transcript(&b, &[prompt_line("跑一下測試", &at(0)), esc_marker(&at(300))]).await;
+        b.env.herdr.fail_next("agent.send_keys", tt::Fault::DropAfter);
+
+        interrupt_bot(&app, &b.bot.id).await.expect("transcript 證明 Esc 進去了：跟 herdr 有回一樣是成功");
+        assert_eq!(status_of(&app, &b.turn).await, "failed");
+        assert_eq!(system_notes(&app, &b.turn).await, vec![INTERRUPT_NOTE.to_string()]);
+        assert!(pending(&b.bot.id).is_empty(), "證明了、收好了：沒有帳");
+        assert_eq!(escs(&b.env), 1);
+    }
+
+    /// #223：當下還看不到（標記晚一點才寫）就照舊 409、留在 in_flight；之後結帳（hook、prompt、重試、定時重試）看到標記就收。
+    #[tokio::test]
+    async fn an_unanswered_esc_is_closed_once_the_transcript_shows_it_landed() {
+        let b = busy("esc-unknown-late-log").await;
+        let app = b.env.app.clone();
+        let path = transcript(&b, &[prompt_line("跑一下測試", &at(0))]).await;
+        b.env.herdr.fail_next("agent.send_keys", tt::Fault::DropAfter);
+
+        let err = interrupt_bot(&app, &b.bot.id).await.expect_err("還看不出 Esc 進了沒有");
+        let LcError::Conflict(body) = err else { panic!("{err:?}") };
+        assert_eq!(body["reason"], "interrupt_unconfirmed", "{body}");
+        settle(&app, &b.bot.id).await.unwrap();
+        assert_eq!(status_of(&app, &b.turn).await, "in_flight", "log 裡還沒有：照舊等");
+
+        append(&path, &[esc_marker(&at(0))]);
+        settle(&app, &b.bot.id).await.unwrap();
+        assert_eq!(status_of(&app, &b.turn).await, "failed", "標記證明 Esc 進去了");
+        assert_eq!(system_notes(&app, &b.turn).await, vec![INTERRUPT_NOTE.to_string()]);
+        assert!(pending(&b.bot.id).is_empty());
+        assert_eq!(escs(&b.env), 1, "結帳從不按鍵");
+    }
+
+    /// #223 最糟的一種：Esc 生效（沒有任何 hook）、使用者直接在 pane 裡打了下一句，那一句的 Stop 先到。以前在飛的還是被中斷的
+    /// 那一筆，下一句的回覆就掛到它身上、收成 completed。hook 一進來先結帳：被中斷的那一筆照 Esc 收，回覆以外部回合出現。
+    #[tokio::test]
+    async fn the_next_answer_after_an_unanswered_esc_is_not_pinned_on_the_interrupted_turn() {
+        let b = busy("esc-unknown-then-typed").await;
+        let app = b.env.app.clone();
+        let path = transcript(&b, &[prompt_line("跑一下測試", &at(0))]).await;
+        b.env.herdr.fail_next("agent.send_keys", tt::Fault::DropAfter);
+        interrupt_bot(&app, &b.bot.id).await.expect_err("還看不出來");
+
+        append(&path, &[esc_marker(&at(0)), prompt_line("算了，我自己來", &at(10))]);
+        let stop = crate::hookrecv::HookBody {
+            bot_id: b.bot.id.clone(),
+            provider: "claude".into(),
+            payload: json!({"hook_event_name": "Stop", "session_id": "s-next", "prompt_id": "p-next", "last_assistant_message": "下一句的回覆"}),
+            received_at: None,
+            truncated: false,
+            run_id: None,
+        };
+        crate::hookrecv::process(&app, &stop).await.unwrap();
+
+        assert_eq!(status_of(&app, &b.turn).await, "failed", "被中斷的那一筆照 Esc 收");
+        let replies: Vec<(String, String)> = sqlx::query_as(
+            "SELECT m.turn_id, m.content FROM messages m JOIN turns t ON t.id = m.turn_id WHERE t.run_id=? AND m.role='assistant'",
+        )
+        .bind(&b.run)
+        .fetch_all(&app.db)
+        .await
+        .unwrap();
+        assert_eq!(replies.len(), 1, "{replies:?}");
+        assert_ne!(replies[0].0, b.turn, "回覆不掛在被中斷的那一筆上");
+        assert_eq!(replies[0].1, "下一句的回覆");
+    }
+
+    /// 證據要是**這一次** Esc 的：這一回合開始之前就留在 transcript 裡的中斷標記（上一回合被按停的）不算——
+    /// 就算它離按鍵不到一秒、落在時鐘放寬的範圍裡。
+    #[tokio::test]
+    async fn an_older_interruption_in_the_transcript_does_not_prove_this_esc() {
+        let b = busy("esc-unknown-old-marker").await;
+        let app = b.env.app.clone();
+        let began: String = sqlx::query_scalar("SELECT created_at FROM turns WHERE id=?").bind(&b.turn).fetch_one(&app.db).await.unwrap();
+        let just_before = (chrono::DateTime::parse_from_rfc3339(&began).unwrap() - chrono::Duration::milliseconds(200))
+            .with_timezone(&chrono::Utc)
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        transcript(&b, &[prompt_line("上一件事", &at(-60_000)), esc_marker(&just_before), prompt_line("跑一下測試", &at(0))]).await;
+        b.env.herdr.fail_next("agent.send_keys", tt::Fault::DropAfter);
+
+        let err = interrupt_bot(&app, &b.bot.id).await.expect_err("舊的標記不是證據");
+        let LcError::Conflict(body) = err else { panic!("{err:?}") };
+        assert_eq!(body["reason"], "interrupt_unconfirmed", "{body}");
+        settle(&app, &b.bot.id).await.unwrap();
+        assert_eq!(status_of(&app, &b.turn).await, "in_flight");
     }
 
     /// 寫失敗之後，使用者直接在 pane 裡打了下一句、它的 Stop 先到：被 Esc 停掉的那一筆要先收掉（hook 一進來先補帳），

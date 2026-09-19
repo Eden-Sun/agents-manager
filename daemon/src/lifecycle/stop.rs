@@ -470,6 +470,8 @@ pub async fn interrupt_turn(app: &Arc<App>, bot_id: &str, expect_turn: Option<&s
     }
     let target = db::run_target(&run, &bot);
     let client = client_for_run(app, &run).await?;
+    // herdr 沒回時要拿它去 log 裡找這次 Esc 留下的中斷紀錄（#223）：取在按鍵**之前**。
+    let esc_at = chrono::Utc::now();
     let sent = client.agent_send_keys(&target, &["esc".to_string()]).await;
     let fate = super::interruption::key_fate(&sent);
     if fate == super::interruption::KeyFate::NotApplied {
@@ -480,15 +482,26 @@ pub async fn interrupt_turn(app: &Arc<App>, bot_id: &str, expect_turn: Option<&s
     // 同時記下被中斷的是哪一回合：它的 `StopFailure` 回聲才認得出來，新回合的失敗不會被當成回聲（#117）。
     note_user_interrupt_of(app, &bot, &run, in_flight.as_ref()).await;
     if fate == super::interruption::KeyFate::Unknown {
-        // 不知道 Esc 進了沒有：不假定打斷。回合留在 in_flight，等那次 Esc 的回聲來證明。
+        // 不知道 Esc 進了沒有：不假定打斷。claude 2.1.276～2.1.278 按 Esc 不送任何 hook（#223），回聲等不到——
+        // 趁還握著鎖先看 log 裡有沒有這次的中斷紀錄（§4.3 備援等的是同一把鎖）；還看不到就留在 in_flight 等證據。
         if let Some(t) = in_flight.as_ref() {
-            super::interruption::unconfirmed(bot_id, &run.id, &t.id, super::interruption::INTERRUPT_NOTE);
+            match super::interruption::unconfirmed(app, bot_id, &run.id, &t.id, super::interruption::INTERRUPT_NOTE, esc_at).await {
+                Ok(false) => {}
+                Ok(true) => {
+                    clear_restored_prompt(&client, &run, &bot).await;
+                    return Ok(());
+                }
+                Err(e) => {
+                    clear_restored_prompt(&client, &run, &bot).await;
+                    return Err(super::interruption::uncommitted(&run.id, &t.id, Some(&e)));
+                }
+            }
         }
         return Err(LcError::conflict(
             "interrupt_unconfirmed",
             json!({"run_id": run.id, "turn_id": in_flight.as_ref().map(|t| t.id.clone()), "esc_sent": "unknown", "retryable": true,
                    "error": sent.err().map(|e| format!("{e:#}")),
-                   "message": "Esc 送出去了但 herdr 沒有回，不知道進了沒有；回合先不收，等它的回聲或自己結束。"}),
+                   "message": "Esc 送出去了但 herdr 沒有回，不知道進了沒有；回合先不收，等 log 裡出現中斷紀錄（或它的回聲）、或它自己結束。"}),
         ));
     }
     if let Some(t) = in_flight.as_ref() {

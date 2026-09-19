@@ -285,11 +285,7 @@ pub(crate) fn claude_interrupted_at(log: &str) -> Option<DateTime<Utc>> {
         let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
         match v.get("type").and_then(Value::as_str) {
             Some("user") => {
-                let marker = v.get("interruptedMessageId").is_some()
-                    || v.pointer("/message/content").and_then(Value::as_array).is_some_and(|parts| {
-                        parts.iter().any(|p| p.get("text").and_then(Value::as_str).is_some_and(|t| t.starts_with("[Request interrupted by user")))
-                    });
-                if marker {
+                if claude_interrupt_marker(&v) {
                     last = Some(ts(&v));
                 } else if transcript_user_text(line).is_some() {
                     last = Some(None);
@@ -323,6 +319,33 @@ pub(crate) fn codex_interrupted_at(log: &str) -> Option<DateTime<Utc>> {
     last.flatten()
 }
 
+/// claude 的使用者中斷標記：帶 `interruptedMessageId`，或文字是 `[Request interrupted by user…]`（工具執行中被按掉的那種沒有 id）。
+fn claude_interrupt_marker(v: &Value) -> bool {
+    v.get("interruptedMessageId").is_some()
+        || v.pointer("/message/content").and_then(Value::as_array).is_some_and(|parts| {
+            parts.iter().any(|p| p.get("text").and_then(Value::as_str).is_some_and(|t| t.starts_with("[Request interrupted by user")))
+        })
+}
+
+/// `since` 之後 claude transcript 裡有沒有使用者中斷標記（#223：claude 2.1.276～2.1.278 按 Esc 不送 Stop／StopFailure，
+/// Esc 生效的證據只剩這一列）。不管它還是不是最後一個回合邊界——中斷之後使用者可能已經又打了一句。沒有時間的列不算。
+pub(crate) fn claude_interrupted_since(log: &str, since: DateTime<Utc>) -> bool {
+    log.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|v| v.get("type").and_then(Value::as_str) == Some("user") && v.get("isSidechain").and_then(Value::as_bool) != Some(true))
+        .any(|v| claude_interrupt_marker(&v) && ts(&v).is_some_and(|t| t >= since))
+}
+
+/// 同上，codex rollout 的 `turn_aborted`（`reason: interrupted`）。codex 的 notify 本來就不為被中斷的回合送東西。
+pub(crate) fn codex_interrupted_since(log: &str, since: DateTime<Utc>) -> bool {
+    log.lines().filter_map(|line| serde_json::from_str::<Value>(line).ok()).any(|v| {
+        v.get("type").and_then(Value::as_str) == Some("event_msg")
+            && v.pointer("/payload/type").and_then(Value::as_str) == Some("turn_aborted")
+            && v.pointer("/payload/reason").and_then(Value::as_str) == Some("interrupted")
+            && ts(&v).is_some_and(|t| t >= since)
+    })
+}
+
 fn read_tail(path: &std::path::Path) -> Option<String> {
     use std::io::{Read, Seek, SeekFrom};
     let mut f = std::fs::File::open(path).ok()?;
@@ -333,24 +356,40 @@ fn read_tail(path: &std::path::Path) -> Option<String> {
     Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
-/// 使用者直接在 pane 裡按 Esc：讀這顆 bot 的 log。本機 claude／codex 才讀得到。
-async fn log_interrupted_at(app: &Arc<App>, bot: &db::Bot, run: &db::Run) -> Option<DateTime<Utc>> {
+/// 這顆 bot 的 session log 尾端：本機 claude 的 transcript、codex 的 rollout。其他（遠端、grok）讀不到。
+async fn session_log(app: &Arc<App>, bot: &db::Bot, run: &db::Run) -> Option<String> {
     if db::bot_host(&app.db, &bot.id).await.ok()? != LOCAL_HOST {
         return None;
     }
     match bot.kind.as_str() {
         "claude" => {
             let path = std::path::PathBuf::from(run.transcript_path.as_deref().filter(|p| !p.trim().is_empty())?);
-            let log = tokio::task::spawn_blocking(move || read_tail(&path)).await.ok()??;
-            claude_interrupted_at(&log)
+            tokio::task::spawn_blocking(move || read_tail(&path)).await.ok()?
         }
         "codex" => {
             let home = codex_home(app, bot).await?;
             let session = run.native_session_id.clone().filter(|s| !s.trim().is_empty())?;
-            let log = tokio::task::spawn_blocking(move || read_tail(&codex_session_log(&home, &session)?)).await.ok()??;
-            codex_interrupted_at(&log)
+            tokio::task::spawn_blocking(move || read_tail(&codex_session_log(&home, &session)?)).await.ok()?
         }
         _ => None,
+    }
+}
+
+/// 使用者直接在 pane 裡按 Esc：讀這顆 bot 的 log。本機 claude／codex 才讀得到。
+async fn log_interrupted_at(app: &Arc<App>, bot: &db::Bot, run: &db::Run) -> Option<DateTime<Utc>> {
+    let log = session_log(app, bot, run).await?;
+    match bot.kind.as_str() {
+        "claude" => claude_interrupted_at(&log),
+        _ => codex_interrupted_at(&log),
+    }
+}
+
+/// `since` 之後這顆 bot 的 log 裡有沒有使用者中斷的紀錄（#223）。讀不到＝沒有證據。
+pub(crate) async fn log_interrupted_since(app: &Arc<App>, bot: &db::Bot, run: &db::Run, since: DateTime<Utc>) -> bool {
+    let Some(log) = session_log(app, bot, run).await else { return false };
+    match bot.kind.as_str() {
+        "claude" => claude_interrupted_since(&log, since),
+        _ => codex_interrupted_since(&log, since),
     }
 }
 
@@ -668,5 +707,33 @@ mod tests {
         assert_eq!(codex_interrupted_at(&[prompt.clone(), aborted("replaced")].join("\n")), None, "不是使用者中斷");
         assert_eq!(codex_interrupted_at(&[aborted("interrupted"), prompt.clone()].join("\n")), None);
         assert_eq!(codex_interrupted_at(&[aborted("interrupted"), done].join("\n")), None);
+    }
+
+    /// #223：Esc 生效的證據是「按鍵之後」出現的中斷紀錄，不管它還是不是最後一個回合邊界（中斷之後可能又打了一句）；
+    /// 之前的、沒有時間的、subagent（sidechain）的、不是使用者中斷的都不算。
+    #[test]
+    fn an_interruption_logged_after_the_key_is_found_even_if_more_followed() {
+        let since = DateTime::parse_from_rfc3339("2026-09-16T12:01:00.000Z").unwrap().with_timezone(&Utc);
+        let before = interrupted("2026-09-16T12:00:59.000Z");
+        let after = interrupted("2026-09-16T12:01:00.250Z");
+        assert!(claude_interrupted_since(&[user("跑測試"), after.clone(), user("我自己來"), end_turn()].join("\n"), since));
+        assert!(!claude_interrupted_since(&[before, user("跑測試")].join("\n"), since), "按鍵之前的");
+        let tool = json!({"type": "user", "timestamp": "2026-09-16T12:01:01.000Z",
+                          "message": {"content": [{"type": "text", "text": "[Request interrupted by user for tool use]"}]}})
+        .to_string();
+        assert!(claude_interrupted_since(&tool, since), "工具執行中被按掉的那種寫法");
+        let mut side: Value = serde_json::from_str(&after).unwrap();
+        side["isSidechain"] = json!(true);
+        assert!(!claude_interrupted_since(&side.to_string(), since), "subagent 的中斷不是這一回合");
+        let mut undated: Value = serde_json::from_str(&after).unwrap();
+        undated.as_object_mut().unwrap().remove("timestamp");
+        assert!(!claude_interrupted_since(&undated.to_string(), since), "沒有時間的不算");
+
+        let aborted = |at: &str, reason: &str| {
+            json!({"timestamp": at, "type": "event_msg", "payload": {"type": "turn_aborted", "reason": reason}}).to_string()
+        };
+        assert!(codex_interrupted_since(&aborted("2026-09-16T12:01:02.000Z", "interrupted"), since));
+        assert!(!codex_interrupted_since(&aborted("2026-09-16T12:00:30.000Z", "interrupted"), since), "按鍵之前的");
+        assert!(!codex_interrupted_since(&aborted("2026-09-16T12:01:02.000Z", "replaced"), since), "不是使用者中斷");
     }
 }
