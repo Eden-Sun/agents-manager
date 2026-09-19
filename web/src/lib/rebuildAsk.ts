@@ -7,6 +7,7 @@
  * daemon 不替人排隊（API.md §5）。
  */
 import { ApiError } from '../api/types'
+import { asUncommittedSend } from '../store/uncommittedSend'
 
 export type RebuildAskOutcome =
   | { kind: 'sent' }
@@ -26,6 +27,9 @@ export function classifyRebuildAsk(result: { delivery: string } | null, error: u
     if (result.delivery === 'unknown') return { kind: 'unknown' }
     return { kind: 'sent' }
   }
+  // 503 delivery_state_uncommitted（#149）：字已經送進 AGM（或 herdr 明確拒收），只是結果還沒寫進 DB——不是「送給 AGM 失敗」。
+  const un = asUncommittedSend(error)
+  if (un) return { kind: un.sent === false ? 'undelivered' : 'unknown' }
   if (error instanceof ApiError && error.status === 409) {
     const reason = String(error.body.reason ?? error.body.message ?? '')
     if (/in flight/.test(reason)) return { kind: 'busy' }

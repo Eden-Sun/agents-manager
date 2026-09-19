@@ -560,3 +560,109 @@ test('取消時已經送出去了（409）：不把文字塞回輸入框，講�
   assert.equal(useStore.getState().drafts['bot:b1'], undefined, '送出去的那則不會又出現在輸入框')
   assert.ok(noticeTexts().some((t) => t.includes('撤不回來')))
 })
+
+/**
+ * #149／#147：字已經送進 bot，只是結果寫不進 DB——daemon 回 503，但 turn 與訊息都已經在對話裡（`message_added`／
+ * `turn_updated` 先推了）。前端把它當「沒送出」：輸入框留著同一段字、排隊的被放回去，下一次 Enter／回合結束的 flush
+ * 就用新的 client_request_id 再送一次——bot 收到兩則。API.md §5：**不是沒送，不要換新的 client_request_id 重送**。
+ */
+const uncommitted503 = (over: Record<string, unknown> = {}) =>
+  json(
+    {
+      error: 'delivery_state_uncommitted',
+      run_id: 'r1',
+      turn_id: 't7',
+      message_id: 'm7',
+      delivery: 'ok',
+      sent: true,
+      retryable: true,
+      message: '這一則的送達結果還沒寫進 DB（delivery 是看到的結果）；daemon 會自己補上。',
+      ...over,
+    },
+    503,
+  )
+
+test('送達結果寫不進 DB（503 delivery_state_uncommitted、sent:true）：算送出去了，輸入框可以清，不能叫人重送', async () => {
+  seed()
+  useStore.setState({ runs: { b1: { id: 'r1', state: 'running', agent_status: 'idle' } as never }, turns: {}, messages: {} })
+  routeDaemon(() => uncommitted503())
+  const ok = await useStore.getState().sendPrompt('b1', '跑一下測試')
+  assert.equal(ok, true, '字已經進了 bot；回 false 會讓輸入框留著同一段字、排隊的被放回去，之後又送一次')
+  assert.equal(requests.length, 1)
+  const t = useStore.getState().turns.b1?.t7
+  assert.equal(t?.status, 'in_flight', '輸入框要像成功時一樣鎖上這一回合')
+  const texts = noticeTexts()
+  assert.equal(texts.length, 1)
+  assert.match(texts[0], /已送出/)
+  assert.match(texts[0], /不要重送/)
+})
+
+test('送達結果寫不進 DB、delivery:unknown（sent:null）：一樣不是沒送', async () => {
+  seed()
+  useStore.setState({ turns: {} })
+  routeDaemon(() => uncommitted503({ delivery: 'unknown', sent: null }))
+  assert.equal(await useStore.getState().sendPrompt('b1', 'x'), true)
+})
+
+test('寫不進 DB 但 herdr 明確拒收（delivery:failed、sent:false）：一個字都沒進去，照舊回 false 讓字留在輸入框', async () => {
+  seed()
+  useStore.setState({ turns: {} })
+  routeDaemon(() => uncommitted503({ delivery: 'failed', sent: false }))
+  assert.equal(await useStore.getState().sendPrompt('b1', 'x'), false)
+  assert.equal(useStore.getState().turns.b1?.t7, undefined, '失敗的回合不能鎖輸入框')
+})
+
+test('插隊送出鍵已生效、狀態寫不進去（503 send_now_state_uncommitted、sent:true）：算送出去了', async () => {
+  seed()
+  routeDaemon(() =>
+    json(
+      {
+        error: 'send_now_state_uncommitted',
+        run_id: 'r1',
+        turn_id: 't8',
+        interrupted_turn_id: 't1',
+        sent: true,
+        retryable: true,
+        message: '送出鍵已經生效了，但回合的狀態還沒寫成；daemon 會自己補上。',
+      },
+      503,
+    ),
+  )
+  assert.equal(await useStore.getState().sendPrompt('b1', 'x', [], true), true)
+  assert.match(noticeTexts()[0], /已送出/)
+})
+
+test('503 維護窗口讀不到（sent:false）跟別的 503 一樣：沒送出，回 false', async () => {
+  seed()
+  routeDaemon(() => json({ reason: 'maintenance_state_unavailable', retryable: true, sent: false, message: 'x' }, 503))
+  assert.equal(await useStore.getState().sendPrompt('b1', 'x'), false)
+})
+
+/** 上面那個 503 落在「排隊那則被 flush」：以前 `flushQueued` 見 false 就把已經送進 bot 的那則放回佇列，下一個回合結束又送一次。 */
+test('排隊的那則 flush 時撞到 503 delivery_state_uncommitted：不放回佇列（放回去＝下一輪再送一次）', async () => {
+  seed()
+  useStore.setState({ turns: {}, messages: {}, runs: {}, queuedSends: { b1: { text: '排隊那則', attachments: [] } } })
+  routeDaemon((req) => {
+    if (req.path.endsWith('/start')) return json({ run_id: 'r1' }, 200)
+    if (req.path.endsWith('/state'))
+      return json(
+        {
+          daemon_seq: 50,
+          projects: [
+            {
+              id: 'p1',
+              path: '/p',
+              bots: [{ id: 'b1', name: 'b1', kind: 'claude', run: { id: 'r1', bot_id: 'b1', state: 'running', agent_status: 'idle' } }],
+            },
+          ],
+        },
+        200,
+      )
+    if (req.path.endsWith('/prompt')) return uncommitted503()
+    return json({ messages: [], turns: [], has_more: false }, 200)
+  })
+  await useStore.getState().startBot('b1')
+  await new Promise((r) => setTimeout(r, 500))
+  assert.equal(requests.filter((r) => r.path.endsWith('/prompt')).length, 1, '有送出去一次')
+  assert.equal(useStore.getState().queuedSends.b1, undefined, '已經送進 bot 的那則不能又躺回佇列')
+})
