@@ -407,6 +407,18 @@ export async function forkBot(botId: string, name?: string): Promise<ForkResult>
   return { id: str(pick(o, 'bot_id')), name: str(pick(o, 'name')), start_error: typeof err === 'string' && err ? err : null }
 }
 
+/** API.md §promote：子 agent 升級成頂層 bot，保留同一段 claude 對話。 */
+export interface PromoteResult {
+  id: string
+  name: string
+}
+
+export async function promoteBot(botId: string, name?: string): Promise<PromoteResult> {
+  const raw = await transport.request('POST', `/bots/${encodeURIComponent(botId)}/promote`, name ? { name } : {})
+  const o = isRec(raw) ? raw : {}
+  return { id: str(pick(o, 'bot_id')), name: str(pick(o, 'name')) }
+}
+
 /**
  * `resumeNative`：帶 `?resume=native` 接回 DB 記的原生對話（換身分後重啟要接續，SPEC §6.5.2）。
  * 接不回時 daemon 回 409 `cannot_resume`——呼叫端（`store.restartBot`）決定要不要改成不帶這個旗標重送。

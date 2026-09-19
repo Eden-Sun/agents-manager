@@ -141,6 +141,7 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
 | POST | `/api/projects/{id}/bots` | `{"name","kind":"claude"\|"codex"\|"grok","args":[],"autostart":false,"inject_hooks":true,"name_auto":false, model?, effort?, fast?, identity?, persona?, instruction_files?, auto_approve?}` | `200 {"bot_id","name"}`；名稱重複 409，`instruction_files` 不合法 400（§12.8b），但 `name_auto:true` 時自動往後找 `<base>-<n>`（回應 `name` 是實際用的） |
 | PATCH | `/api/bots/{id}` | 見 §10.2 | `200 {"needs_restart":bool}` |
 | POST | `/api/bots/{id}/fork` | `{"name"?}` | 見 §10.3b |
+| POST | `/api/bots/{id}/promote` | `{"name"?,"model"?,"effort"?}` | 子 agent 升級成頂層 bot，見 §10.3c |
 | DELETE | `/api/bots/{id}` | — | 見 §10.4 |
 | POST | `/api/order` | `{"projects"?:["pid",…],"bots"?:{"pid":["bot_id",…]}}` | `200 {"ok":true}`；兩個都沒有 400 |
 
@@ -967,6 +968,13 @@ readback_model_mismatch|readback_effort_mismatch|readback_fast_mismatch>`。以�
 - 設定照抄來源的 config.toml 條目（kind、model、effort、fast、persona、instruction_files、args、identity、env、auto_approve、inject_hooks），`autostart` 一律 false。建好立刻啟動。
 - `200 {"bot_id","name","forked_from":{"bot_id","session_id"},"run_id"|null,"start_error"|null}`：建好但沒啟動成功仍回 200，`start_error` 帶原因。推 `bot_changed`；新 bot 的對話裡有一則系統訊息說明從哪裡分出來。
 - 錯誤（都不會先建 bot）：來源不存在 404；`409 reason`：`fork_child`（子 agent）、`default_session`（從 herdr default session 匯入的）、`no_session`（還沒記到 native session）、`transcript_missing`（本機對話檔不在）、`unsupported_kind`、`not_in_config`；名字不合法 400。
+
+### 10.3c `POST /api/bots/{id}/promote`
+把子 agent（`managed_by="child"`）升級成頂層 bot（`managed_by="user"`、進 config.toml），**保留同一段 claude 對話**（SPEC §6.10a，issue #248）。body 可省略：`name`（省略＝沿用 child 的名字，它自己還占著就加 `-N`）、`model`、`effort`（省略＝沿用 child 的）。
+- 只收 claude、本機、自己沒有子 agent 的 child。session 從 pane 裡活著的 claude 行程找（`<CLAUDE_CONFIG_DIR>/sessions/<pid>.json` 的 `sessionId`）；child 已停時用上一次做到一半記在它 run 上的 session。
+- 步驟與收回：transcript **複製**（不搬、不覆寫）到新 bot cwd（專案路徑）對應的 `projects/` 目錄 → 停 child → 建 user bot → 種下 session → `resume=native` 啟動（接不回就不啟動）→ 收掉 child 紀錄。停不掉、建不成或啟動失敗都不留第二顆 bot：複製的檔與新 bot 收回。停掉 child 之後不可逆（它的 pane 是母 agent 開的），失敗回應帶 `child_stopped:true`，同一個請求可原樣再送。
+- `200 {"bot_id","name","promoted_from":{"bot_id","session_id"},"transcript_path","run_id"}`。推 `bot_changed`（新舊兩顆）、`project_changed`。
+- 錯誤：來源不存在 404；名字不合法 400；`409 reason`：`not_child`、`unsupported_kind`、`remote_not_supported`、`default_session`、`has_children`、`bot name already in use`（明給的名字撞名）、`session_not_found`、`session_ambiguous`、`transcript_exists`（目標已有不同內容的同名檔）、`transcript_copy_failed`、`stop_failed`、`promote_create_failed`、`promote_start_failed`（`rolled_back`、`child_stopped`）、`promote_child_not_removed`、`not_in_config`。
 
 ### 10.3a `POST /api/bots/restart-idle`
 一鍵把「帶著 claude 更新且閒置」的 bot 全部 exit + resume（SPEC §6.9）。無 body。

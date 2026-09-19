@@ -84,7 +84,7 @@ impl ProcEnvHook {
         let _ = self.0.set(reader);
     }
 
-    fn reader(&self) -> Arc<dyn ProcEnv> {
+    pub(crate) fn reader(&self) -> Arc<dyn ProcEnv> {
         self.0.get().cloned().unwrap_or_else(|| Arc::new(PsProcEnv))
     }
 }
