@@ -1863,4 +1863,43 @@ mod send_now_tests {
         assert_eq!(send_now_presses(&f), 1);
         assert_eq!(f.env.herdr.calls_to("pane.send_text").len(), 1);
     }
+
+    /// 送出鍵生效了（transcript 證明送到），收掉被插隊那一筆寫不進去：回 503、帳上欠著（新的那一則還沒掛上 run）。
+    /// `healed`：回來之前 DB 就好了；否則收被插隊那一筆的寫入還壞著，由呼叫端之後自己拿掉。
+    async fn an_owed_send_now(f: &Fixture, crid: &str, healed: bool) -> (String, String) {
+        let app = f.env.app.clone();
+        let running = busy(f).await;
+        sqlx::query(&format!(
+            "CREATE TRIGGER lost_close BEFORE UPDATE OF status ON turns WHEN OLD.id = '{running}' BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END"
+        ))
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let err = prompt_send_now(&app, &f.bot_id, "先看這句", crid, &[], None).await.unwrap_err();
+        let LcError::Uncommitted(body) = err else { panic!("鍵生效、收尾沒寫成：{err:?}") };
+        assert!(transcript_of(f).await.contains("先看這句"), "鍵確實生效了");
+        if healed {
+            sqlx::query("DROP TRIGGER lost_close").execute(&app.db).await.unwrap();
+        }
+        (running, body["turn_id"].as_str().unwrap().to_string())
+    }
+
+    /// 插隊送出欠著收尾時 bot 被停掉：補收尾時新的那一則掛不上 run（run 已經不在），收成 failed——但送出鍵生效過、
+    /// 送達結果也在帳上，不能丟掉只留 `pending`：503 叫呼叫端用同一個 request id 重問，拿到的要是送達結果（API 說不回 `pending`）。
+    #[tokio::test]
+    async fn a_send_now_owed_when_its_run_stops_keeps_its_delivery_result() {
+        let f = fixture("claude", Some("2.1.275")).await;
+        let app = f.env.app.clone();
+        let (running, new_turn) = an_owed_send_now(&f, "sn-stopped", true).await;
+        stop_bot(&app, &f.bot_id).await.expect("停得掉");
+        assert_eq!(status_of(&f, &running).await, "failed");
+
+        let again = prompt_send_now(&app, &f.bot_id, "先看這句", "sn-stopped", &[], None).await.expect("補上了：同一個 request id 拿到這一則");
+        assert_eq!(again.turn_id, new_turn);
+        assert_eq!(status_of(&f, &new_turn).await, "failed", "run 已經不在：這一則接不上去");
+        assert_eq!(again.delivery, "ok", "送出鍵生效過、有送達證據：不是 pending");
+        assert_eq!(delivery_of(&f, &new_turn).await, "ok");
+        assert_eq!(send_now_presses(&f), 1, "補的時候不再按鍵");
+    }
+
 }
