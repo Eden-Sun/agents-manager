@@ -537,6 +537,10 @@ pane 上回過 ok 卻沒送進去（wits-c1-op-xh 14:24、15:33，第二次距 s
   DB 存 `delivery='ok'`＋`turns.delivery_verified=0`（`delivery` 的 CHECK 只有原本四種狀態，不改表），API 回
   `"delivery":"unverified"`，AGM 交辦記成 `delivery=unverified`，UI 在使用者泡泡上標「未驗證送達」。它照常掛 stall
   與進度輪詢、Enter 補送，但**絕不自動重送**（可能已經被收下）。
+- **Enter 補送認得摺起來的貼上**（2026-09-19）：claude 把長段貼上摺成 `[Pasted text #N +M lines]`，框裡看不到原文。
+  框裡**只有**這一個佔位、且 M 等於送出字的換行數，就當成我們那則還沒送出、照樣補 Enter；行數對不上或後面還有字
+  （使用者自己貼的／正在打的）不動。以前比對原文落空、重送又因框不空被擋，12 秒後直接判 stall——AM-1-XH 就這樣
+  沒收到子 agent v4 卡在 blocked 的通知。
 - `NotAttempted`：一個字都沒送。
 - `Unproven`：按過鍵、該有證據卻證明不了——只有這種會變成 `delivery='unknown'`。
 
