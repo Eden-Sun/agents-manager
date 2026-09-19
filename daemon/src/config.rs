@@ -312,6 +312,12 @@ pub struct BuildRemoteCfg {
     /// 一次遠端編譯（同步＋編譯＋測試）的整體時間上限，秒（issue #194）；`0`＝不設上限。超過就整組砍掉、回 124，不退回本機重跑。
     #[serde(default = "default_remote_build_timeout_secs")]
     pub timeout_secs: u64,
+    /// 遠端每棵 worktree 的 `shared/`（原始碼＋target，各 2～3G）閒置這麼多小時就回收（issue #196）。
+    #[serde(default = "default_remote_shared_idle_hours")]
+    pub shared_idle_hours: u64,
+    /// 遠端 `shared/` 最多留幾份（連同正在用的）；超過就從最久沒用的開始收。`0`＝不限（issue #196）。
+    #[serde(default = "default_remote_max_shared_dirs")]
+    pub max_shared_dirs: usize,
 }
 
 impl Default for BuildRemoteCfg {
@@ -325,6 +331,8 @@ impl Default for BuildRemoteCfg {
             cargo_jobs: default_remote_build_jobs(),
             test_threads: default_remote_test_threads(),
             timeout_secs: default_remote_build_timeout_secs(),
+            shared_idle_hours: default_remote_shared_idle_hours(),
+            max_shared_dirs: default_remote_max_shared_dirs(),
         }
     }
 }
@@ -340,6 +348,15 @@ fn default_remote_build_jobs() -> usize {
 /// 遠端是 32 vCPU 的超賣主機：測試預設開 32 個執行緒，大多在系統呼叫與鎖上互搶（`sy` 59～64%、每秒 50 萬次 context switch）。
 /// 全套 1611 條測試（issue #202 實測）：32 個執行緒 283 秒、16 個 199 秒、12 個 219 秒、**8 個 168～176 秒**——挑 8。
 fn default_remote_test_threads() -> usize {
+    8
+}
+
+fn default_remote_shared_idle_hours() -> u64 {
+    3
+}
+
+/// 每份約 2～3G：8 份約 20～25G，不把遠端的磁碟吃光（issue #196：一天開十幾顆子 agent、每張票數個變異副本，各是一個新 hash）。
+fn default_remote_max_shared_dirs() -> usize {
     8
 }
 

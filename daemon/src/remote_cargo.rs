@@ -67,6 +67,12 @@ pub struct RemoteBuildInput {
     /// 一次遠端編譯的整體時間上限（秒，issue #194）。None＝維持現在的值；0＝不設上限。
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    /// 遠端 `shared/` 閒置幾小時回收（issue #196）。None＝維持現在的值。
+    #[serde(default)]
+    pub shared_idle_hours: Option<u64>,
+    /// 遠端 `shared/` 最多留幾份（issue #196）。None＝維持現在的值；0＝不限。
+    #[serde(default)]
+    pub max_shared_dirs: Option<usize>,
     /// None = preserve the currently stored password; Some("") = delete it (key/agent auth).
     #[serde(default)]
     pub password: Option<String>,
@@ -113,6 +119,8 @@ fn sanitized(cfg: &BuildRemoteCfg, data_dir: &Path) -> Value {
         "cargo_jobs": cfg.cargo_jobs,
         "test_threads": cfg.test_threads,
         "timeout_secs": cfg.timeout_secs,
+        "shared_idle_hours": cfg.shared_idle_hours,
+        "max_shared_dirs": cfg.max_shared_dirs,
         "password_set": password_is_set(data_dir),
     })
 }
@@ -148,12 +156,17 @@ pub async fn put_settings(
         return Err(LcError::Bad("ssh_port must be 1..65535".into()));
     }
     let cargo_jobs = if input.cargo_jobs == 0 { 4 } else { input.cargo_jobs.min(64) };
+    if input.shared_idle_hours == Some(0) {
+        return Err(LcError::Bad("shared_idle_hours 至少 1（要清就把 max_shared_dirs 設小）".into()));
+    }
     if input.timeout_secs.is_some_and(|t| t > MAX_TIMEOUT_SECS) {
         return Err(LcError::Bad(format!("timeout_secs 最多 {MAX_TIMEOUT_SECS} 秒（0＝不設上限）")));
     }
     app.cfg
         .update(|cfg| {
             let timeout_secs = input.timeout_secs.unwrap_or(cfg.build.remote.timeout_secs);
+            let shared_idle_hours = input.shared_idle_hours.unwrap_or(cfg.build.remote.shared_idle_hours);
+            let max_shared_dirs = input.max_shared_dirs.unwrap_or(cfg.build.remote.max_shared_dirs);
             let test_threads = input.test_threads.unwrap_or(cfg.build.remote.test_threads).min(256);
             cfg.build.remote = BuildRemoteCfg {
                 enabled: input.enabled,
@@ -168,6 +181,8 @@ pub async fn put_settings(
                 cargo_jobs,
                 test_threads,
                 timeout_secs,
+                shared_idle_hours,
+                max_shared_dirs,
             };
             Ok(())
         })
@@ -676,20 +691,62 @@ fn leaf_kind(root: &str, path: &str) -> Option<LeafKind> {
     ok.then_some(LeafKind::Job)
 }
 
+/// 回收政策（issue #196）。`shared/` 是快取不是垃圾，但不能只靠時間：一天開十幾顆子 agent、每張票數個變異副本，每個路徑一個新的 hash、各 2～3G，
+/// 一天內就塞滿（實測 36 個 hash、29G）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GcPolicy {
+    /// 閒置這麼久的 `shared/` 就收（磁碟緊的時候降到 [`ORPHAN_IDLE_SECS`]）。
+    pub shared_idle_secs: u64,
+    /// `shared/` 最多留幾份（連同正在用的、這次自己的）；超過就從最久沒用的開始收（至少閒置 [`ORPHAN_IDLE_SECS`]，剛用完的不動）。`0`＝不限。
+    pub max_shared: usize,
+}
+
+impl Default for GcPolicy {
+    fn default() -> Self {
+        GcPolicy { shared_idle_secs: SHARED_IDLE_SECS, max_shared: crate::config::BuildRemoteCfg::default().max_shared_dirs }
+    }
+}
+
+impl GcPolicy {
+    pub fn from_cfg(remote: &BuildRemoteCfg) -> Self {
+        GcPolicy { shared_idle_secs: remote.shared_idle_hours.max(1) * 3600, max_shared: remote.max_shared_dirs }
+    }
+}
+
 /// 這次要請守門回收哪些目錄。有鎖被持有、有行程 cwd 在裡面、或就是自己這次的目錄，一律不動；
-/// 其餘照種類看閒置多久。守門刪之前會自己再拿鎖、再看一次行程，這裡是第一道篩選。
-pub fn select_gc(hs: &Handshake) -> Vec<String> {
+/// 其餘照種類看閒置多久，`shared/` 另外受 [`GcPolicy::max_shared`] 的數量上限管（LRU：最久沒用的先收）。
+/// 守門刪之前會自己再拿鎖、再看一次行程，這裡是第一道篩選。
+pub fn select_gc(hs: &Handshake, policy: &GcPolicy) -> Vec<String> {
     let low_disk = matches!(hs.disk, Some((free, total)) if total > 0 && free * 100 < total * LOW_DISK_FREE_PCT);
-    hs.dirs
+    let is_shared = |d: &&RemoteDir| leaf_kind(&hs.root, &d.path) == Some(LeafKind::Shared);
+    let mut picked: Vec<String> = hs
+        .dirs
         .iter()
         .filter(|d| !d.locked && !d.busy && d.path != hs.dir)
         .filter(|d| match leaf_kind(&hs.root, &d.path) {
-            Some(LeafKind::Shared) if !low_disk => d.idle_secs >= SHARED_IDLE_SECS,
+            Some(LeafKind::Shared) if !low_disk => d.idle_secs >= policy.shared_idle_secs,
             Some(_) => d.idle_secs >= ORPHAN_IDLE_SECS,
             None => false,
         })
         .map(|d| d.path.clone())
-        .collect()
+        .collect();
+    if policy.max_shared > 0 {
+        // 盤點不含這次自己的目錄，所以自己的那份另外算。
+        let total = hs.dirs.iter().filter(is_shared).count() + usize::from(hs.dir.ends_with("/shared"));
+        let gone = hs.dirs.iter().filter(is_shared).filter(|d| picked.contains(&d.path)).count();
+        let kept = total.saturating_sub(gone);
+        if kept > policy.max_shared {
+            let mut extra: Vec<&RemoteDir> = hs
+                .dirs
+                .iter()
+                .filter(is_shared)
+                .filter(|d| !d.locked && !d.busy && d.path != hs.dir && d.idle_secs >= ORPHAN_IDLE_SECS && !picked.contains(&d.path))
+                .collect();
+            extra.sort_by(|a, b| b.idle_secs.cmp(&a.idle_secs));
+            picked.extend(extra.into_iter().take(kept - policy.max_shared).map(|d| d.path.clone()));
+        }
+    }
+    picked
 }
 
 /// 守門連線。活著＝遠端目錄是這次呼叫的；關掉 stdin（[`Lease::finish`]、drop、或這個行程死掉）＝還回去。
@@ -1016,7 +1073,7 @@ fn run_offload(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, args: &[Str
         // 從這裡起不管怎麼離開（`?`、panic、被殺、超過上限、收到訊號），守門都會收到 EOF 把目錄還回去、遠端還在跑的 cargo 整組收掉。
         let (root, sub) = source_root(cwd);
         let mut lease = open_lease(remote, data_dir, &root)?;
-        lease.collect(&select_gc(&lease.hs));
+        lease.collect(&select_gc(&lease.hs, &GcPolicy::from_cfg(remote)));
         sync_source(remote, data_dir, &root, &lease.hs.dir, ctl)?;
         let code = run_remote(remote, data_dir, &lease, &sub, args, ctl)?;
         lease.finish();
@@ -1276,7 +1333,7 @@ mod tests {
             Some((80, 100)),
         );
         assert_eq!(
-            select_gc(&h),
+            select_gc(&h, &GcPolicy::default()),
             vec![format!("{ROOT}/00000000000000aa/111"), format!("{ROOT}/00000000000000aa/job-9-1")]
         );
     }
@@ -1289,14 +1346,58 @@ mod tests {
             rdir("00000000000000bb/shared", false, false, SHARED_IDLE_SECS + 1),
             rdir("00000000000000cc/shared", true, false, SHARED_IDLE_SECS * 10),
         ];
-        let roomy = select_gc(&hs(dirs.clone(), Some((50, 100))));
+        let roomy = select_gc(&hs(dirs.clone(), Some((50, 100))), &GcPolicy::default());
         assert_eq!(roomy, vec![format!("{ROOT}/00000000000000bb/shared")]);
-        let full = select_gc(&hs(dirs, Some((10, 100))));
+        let full = select_gc(&hs(dirs, Some((10, 100))), &GcPolicy::default());
         assert_eq!(
             full,
             vec![format!("{ROOT}/00000000000000aa/shared"), format!("{ROOT}/00000000000000bb/shared")],
             "磁碟緊時，被持有的 shared 還是不能收"
         );
+    }
+
+    /// issue #196：只靠「閒置 3 小時」擋不住——一天開十幾顆子 agent、每張票數個變異副本，每個路徑一個新的 hash、各 2～3G（實測 36 個 hash、29G）。
+    /// 閒置時間可設定；另外  最多留 N 份，超過就從最久沒用的開始收（LRU）。鎖被持有、有行程在用、這次自己的不算「可收」，
+    /// 而且剛用完的（不到 10 分鐘）不動——不然一次跑完的變異副本會被下一個呼叫立刻收走、白白冷編譯。
+    #[test]
+    fn shared_targets_are_reclaimed_by_a_configurable_age_and_by_a_count_cap_oldest_first() {
+        let h = |n: &str| format!("{ROOT}/00000000000000{n}/shared");
+        let dirs = vec![
+            rdir("00000000000000a1/shared", false, false, 7 * 3600), // 7 小時：超過 6 小時 → 依時間收
+            rdir("00000000000000a2/shared", false, false, 5 * 3600),
+            rdir("00000000000000a3/shared", false, false, 4 * 3600),
+            rdir("00000000000000a4/shared", false, false, 3 * 3600),
+            rdir("00000000000000a5/shared", false, false, 2 * 3600),
+            rdir("00000000000000aa/shared", false, false, 3600),
+            rdir("00000000000000a6/shared", false, false, 30 * 60),
+            rdir("00000000000000a7/shared", false, false, 5 * 60), // 剛用完：就算超過數量上限也不動
+            rdir("00000000000000a8/shared", true, false, 20 * 3600), // 鎖被持有：不動
+            rdir("00000000000000a9/shared", false, true, 20 * 3600), // 有行程在裡面：不動
+        ];
+        let pick = |policy: &GcPolicy| {
+            let mut got = select_gc(&hs(dirs.clone(), Some((80, 100))), policy);
+            got.sort();
+            got
+        };
+        let names = |ns: &[&str]| ns.iter().map(|n| h(n)).collect::<Vec<_>>();
+        // 共 10 份＋這次自己的一份。數量不限：只依時間收超過 6 小時的。
+        assert_eq!(pick(&GcPolicy { shared_idle_secs: 6 * 3600, max_shared: 0 }), names(&["a1"]));
+        // 上限 10：依時間收掉 a1 之後剩 10 份，剛好在上限內。
+        assert_eq!(pick(&GcPolicy { shared_idle_secs: 6 * 3600, max_shared: 10 }), names(&["a1"]));
+        // 上限 6：還要再收 4 份——**最久沒用的先收**（a2、a3、a4、a5），不是最新的。
+        assert_eq!(pick(&GcPolicy { shared_idle_secs: 6 * 3600, max_shared: 6 }), names(&["a1", "a2", "a3", "a4", "a5"]));
+        // 上限 1：能收的都收（a2～a6、aa），但不碰鎖住的（a8）、有行程的（a9）、**剛用完的（a7）**、也不碰自己——留下的比上限多也沒關係。
+        assert_eq!(pick(&GcPolicy { shared_idle_secs: 6 * 3600, max_shared: 1 }), names(&["a1", "a2", "a3", "a4", "a5", "a6", "aa"]));
+    }
+
+    /// 政策從設定來：閒置小時數至少算 1（0 不能變成「馬上收光」），預設 3 小時、最多 8 份，舊設定沒寫這兩個 key 也是預設。
+    #[test]
+    fn the_gc_policy_comes_from_the_remote_settings() {
+        assert_eq!(GcPolicy::default(), GcPolicy { shared_idle_secs: 3 * 3600, max_shared: 8 });
+        let cfg = BuildRemoteCfg { shared_idle_hours: 0, max_shared_dirs: 3, ..Default::default() };
+        assert_eq!(GcPolicy::from_cfg(&cfg), GcPolicy { shared_idle_secs: 3600, max_shared: 3 });
+        let old: BuildRemoteCfg = toml::from_str("host = \"h\"\n").unwrap();
+        assert_eq!(GcPolicy::from_cfg(&old), GcPolicy::default());
     }
 
     /// remote_root 設錯（例如設成家目錄）也只碰自己命名規則的目錄。
@@ -1318,7 +1419,7 @@ mod tests {
             .iter()
             .map(|p| RemoteDir { path: p.clone(), locked: false, busy: false, idle_secs: old })
             .collect();
-        assert!(select_gc(&hs(dirs, Some((1, 100)))).is_empty());
+        assert!(select_gc(&hs(dirs, Some((1, 100))), &GcPolicy::default()).is_empty());
         assert_eq!(leaf_kind(ROOT, &format!("{ROOT}/00000000000000aa/shared")), Some(LeafKind::Shared));
         assert_eq!(leaf_kind(ROOT, &format!("{ROOT}/00000000000000aa/job-12-34")), Some(LeafKind::Job));
         assert_eq!(leaf_kind(ROOT, &format!("{ROOT}/00000000000000aa/4711")), Some(LeafKind::Job));
@@ -1703,7 +1804,7 @@ mod guard_tests {
         assert!(find(&format!("{h}/222")).unwrap().busy);
         assert!(find(&format!("{h}/333")).unwrap().locked);
         assert!(find(&format!("{h}/src")).is_none() && find("nothex/555").is_none(), "{:?}", g.hs.dirs);
-        assert!(select_gc(&g.hs).is_empty(), "剛建的目錄還沒到閒置門檻：{:?}", g.hs.dirs);
+        assert!(select_gc(&g.hs, &GcPolicy::default()).is_empty(), "剛建的目錄還沒到閒置門檻：{:?}", g.hs.dirs);
 
         let own = g.hs.dir.clone();
         let named: Vec<String> = [
@@ -1784,6 +1885,7 @@ mod guard_tests {
             cargo_jobs: 1,
             test_threads: 0,
             timeout_secs,
+            ..Default::default()
         };
         (remote, cwd, data)
     }
