@@ -61,7 +61,8 @@ async fn sweep(app: &Arc<App>) {
         // 畫面原句優先（claude 自己說的較準），沒有才用版本比對。
         if seen.is_none() {
             if let Some(running) = running_version(run.status_json.as_deref()) {
-                let host = db::bot_host(&app.db, &run.bot_id).await.unwrap_or_else(|_| crate::config::LOCAL_HOST.to_string());
+                // 讀不到 host 就整輪跳過、不動既有通知：拿本機的 claude 去比遠端跑的版本會造出或清掉假通知（#243）。
+                let Ok(host) = db::bot_host(&app.db, &run.bot_id).await else { continue };
                 if let Some(disk) = disk_version(app, &host).await {
                     seen = version_notice(&disk, &running);
                 }

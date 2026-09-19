@@ -250,7 +250,8 @@ impl App {
 
     pub async fn bot_connected(&self, bot_id: &str) -> bool {
         let Ok(Some(bot)) = crate::db::bot(&self.db, bot_id).await else { return false };
-        let host = crate::db::bot_host(&self.db, bot_id).await.unwrap_or_else(|_| LOCAL_HOST.to_string());
+        // 讀不到 host＝不知道，不當成 local 去比對本機 herdr（#243）。
+        let Ok(host) = crate::db::bot_host(&self.db, bot_id).await else { return false };
         let Some(session) = self.session_for_bot(&bot, &host).await else { return false };
         self.session_connected(&host, &session).await
     }
@@ -370,7 +371,11 @@ impl App {
     pub async fn emit_bot_status(&self, bot_id: &str) {
         if let Ok(Some(bot)) = crate::db::bot(&self.db, bot_id).await {
             let run = crate::db::active_run(&self.db, bot_id).await.ok().flatten();
-            let host = crate::db::bot_host(&self.db, bot_id).await.unwrap_or_else(|_| LOCAL_HOST.to_string());
+            // 讀不到 host 就不發：發 `host:"local"` 會讓前端把遠端 bot 顯示成本機（#243）；DB 好了下一次事件會補。
+            let Ok(host) = crate::db::bot_host(&self.db, bot_id).await else {
+                tracing::warn!(bot_id, "bot_status not emitted: bot host unreadable");
+                return;
+            };
             self.emit(
                 "bot_status",
                 json!({
@@ -509,5 +514,28 @@ mod ws_seq_tests {
         assert_eq!(seqs.last().copied(), Some(200));
         assert!(seqs.windows(2).all(|w| w[1] == w[0] + 1), "no gaps: {seqs:?}");
         assert_eq!(app.current_seq(), 200);
+    }
+}
+
+/// #243：讀不到 bot 的 host 不能當成本機。
+#[cfg(test)]
+mod host_unreadable_tests {
+    use crate::testing as tt;
+
+    #[tokio::test]
+    async fn an_unreadable_host_is_neither_connected_nor_announced_as_local() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "alfa").await;
+        let mut rx = app.subscribe();
+        tt::make_table_unreadable(&app, "projects").await;
+        assert!(!app.bot_connected(&bot.id).await);
+        app.emit_bot_status(&bot.id).await;
+        tt::make_table_readable(&app, "projects").await;
+        while let Ok(ev) = rx.try_recv() {
+            assert_ne!(ev.kind, "bot_status", "不知道 host 就不能發（會被當成 host=local）：{:?}", ev.data);
+        }
+        app.emit_bot_status(&bot.id).await;
+        assert_eq!(rx.try_recv().unwrap().data["host"], "local", "讀得到才發");
     }
 }

@@ -1354,7 +1354,8 @@ fn scan_script(root: &str) -> String {
 
 /// SPEC §4.4.6.
 pub async fn replay_spool(app: &Arc<App>, bot_id: &str) -> Result<usize> {
-    let host = db::bot_host(&app.db, bot_id).await.unwrap_or_else(|_| crate::config::LOCAL_HOST.to_string());
+    // 讀不到 host 不等於本機（#243）：退回 local 會去讀本機 spool、遠端那份留著沒人排。回錯讓呼叫端重試。
+    let host = db::bot_host(&app.db, bot_id).await?;
     if host != crate::config::LOCAL_HOST {
         return drain_remote(app, &host, bot_id).await;
     }
@@ -1412,12 +1413,47 @@ pub async fn replay_all(app: &Arc<App>) {
     }
 }
 
+/// 重放一台 host 的 spool。列舉 bot 讀不到、或某顆 bot 的重放失敗，都不能當成「沒有 spool」：
+/// 記下來、背景重試到補齊為止（#243），沒有新的 reconnect／status 事件也會補。
 pub async fn replay_host(app: &Arc<App>, host: &str) {
-    for b in db::live_bots_on_host(&app.db, host).await.unwrap_or_default() {
+    if replay_host_pass(app, host).await {
+        return;
+    }
+    let (app, host) = (app.clone(), host.to_string());
+    tokio::spawn(async move {
+        for _ in 0..REPLAY_RETRIES {
+            tokio::time::sleep(REPLAY_RETRY_EVERY).await;
+            if replay_host_pass(&app, &host).await {
+                return;
+            }
+        }
+        tracing::error!(host, "spool replay still failing after retries; spools stay on the host until the next reconnect");
+    });
+}
+
+const REPLAY_RETRIES: u32 = 40;
+#[cfg(not(test))]
+const REPLAY_RETRY_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
+#[cfg(test)]
+const REPLAY_RETRY_EVERY: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// 一輪；全部成功才回 true。
+async fn replay_host_pass(app: &Arc<App>, host: &str) -> bool {
+    let bots = match db::live_bots_on_host(&app.db, host).await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(host, error = ?e, "spool replay: could not list the host's bots; will retry");
+            return false;
+        }
+    };
+    let mut ok = true;
+    for b in bots {
         if let Err(e) = replay_spool(app, &b.id).await {
-            tracing::warn!(bot = %b.name, host, error = ?e, "spool replay failed");
+            tracing::warn!(bot = %b.name, host, error = ?e, "spool replay failed; will retry");
+            ok = false;
         }
     }
+    ok
 }
 
 #[cfg(test)]
@@ -3663,5 +3699,59 @@ mod codex_title_tests {
             "input-messages": ["Reply with exactly MERGED-OK"], "last-assistant-message": "MERGED-OK"
         });
         assert!(matches!(classify("codex", &real), HookKind::TurnComplete { .. }));
+    }
+}
+
+/// #243：讀不到 bot 的 host 不能當成本機——spool 重放要回錯、事件留著等下一輪，DB 好了要補回來。
+#[cfg(test)]
+mod host_unreadable_replay_tests {
+    use super::*;
+    use crate::testing as tt;
+
+    async fn spooled(env: &tt::Env, name: &str) -> (db::Bot, std::path::PathBuf) {
+        let bot = tt::claude_bot(&env.app, &env.project_id, name).await;
+        let dir = env.app.bot_dir(&bot.id).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        let line = serde_json::json!({"bot_id": bot.id, "provider": "claude", "payload": {"hook_event_name": "Stop", "session_id": "s1"}});
+        let spool = dir.join("hook-spool.jsonl");
+        std::fs::write(&spool, format!("{line}\n")).unwrap();
+        (bot, spool)
+    }
+
+    async fn inbox_rows(env: &tt::Env) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM hook_events").fetch_one(&env.app.db).await.unwrap()
+    }
+
+    /// 每顆 bot 的 host 讀不到：修前退回 local，把（遠端 bot 的）本機 spool 當成它的收下；修後回錯、檔案原封不動。
+    #[tokio::test]
+    async fn a_bot_whose_host_cannot_be_read_is_not_replayed_as_local() {
+        let env = tt::env().await;
+        let (bot, spool) = spooled(&env, "alfa").await;
+        tt::make_table_unreadable(&env.app, "projects").await;
+        let r = replay_spool(&env.app, &bot.id).await;
+        tt::make_table_readable(&env.app, "projects").await;
+        assert!(r.is_err(), "host 讀不到要回錯：{r:?}");
+        assert!(spool.exists(), "spool 不能被當成本機的吃掉");
+        assert_eq!(inbox_rows(&env).await, 0);
+        assert_eq!(replay_spool(&env.app, &bot.id).await.unwrap(), 1, "DB 好了補回來");
+    }
+
+    /// 列舉那一層：`live_bots_on_host` 讀不到，以前變成「沒有 bot」；現在背景重試，DB 好了不需要任何新事件就補齊。
+    #[tokio::test]
+    async fn a_host_pass_that_cannot_enumerate_bots_retries_until_the_spool_is_drained() {
+        let env = tt::env().await;
+        let (_, spool) = spooled(&env, "alfa").await;
+        tt::make_table_unreadable(&env.app, "projects").await;
+        replay_host(&env.app, crate::config::LOCAL_HOST).await;
+        assert!(spool.exists(), "讀不到時什麼都不能動");
+        tt::make_table_readable(&env.app, "projects").await;
+        for _ in 0..100 {
+            if !spool.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(!spool.exists(), "DB 恢復後背景重試要把 spool 收進來");
+        assert_eq!(inbox_rows(&env).await, 1, "恰好收一次");
     }
 }
