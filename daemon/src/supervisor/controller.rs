@@ -1031,8 +1031,10 @@ async fn block_stale_queues(app: &Arc<App>) {
         }
         // 被 flush 的額度閘門刻意留在佇列（issue #108，`lifecycle::quota_hold`）：撞限在上限內會到期、或 flush
         // 剛放掉擋、下一次重看就會送——這時候撤掉等於把馬上要送的派工丟掉。看不到盡頭的才照舊撤，理由寫額度。
+        // 判準跟 flush 是同一支（`blocking_hit`）：重啟之後、這台主機回填之前記憶體是空的，那一列自己帶的上一輪憑據
+        // 才是證據——只看記憶體的話，控制迴圈第一拍（比回填早）就把等額度的派工撤掉（issue #168）。
         let hit = match crate::db::bot(&app.db, &a.target_bot_id).await {
-            Ok(Some(bot)) => crate::quota::limit_hit_for_bot(app, &bot).await,
+            Ok(Some(bot)) => crate::lifecycle::quota_hold::blocking_hit(app, &bot, &turn_id).await,
             _ => None,
         };
         let now = chrono::Utc::now();
@@ -2997,6 +2999,64 @@ mod queue_dispatch_tests {
         sqlx::query("UPDATE turns SET status='in_flight' WHERE client_request_id='crid-q'").execute(&app.db).await.unwrap();
         block_stale_queues(&app).await;
         assert_eq!(store::assignment(&app.db, &a.id).await.unwrap().unwrap().status, "delivered");
+    }
+
+    /// 重啟之後、這台主機的開機回填（`tools::detect` 之後才跑）之前，記憶體裡還沒有撞限；排著的派工身上帶著上一輪
+    /// 開機記下的憑據（`turns.quota_hold`，#108 重開），flush 在回填之前看的就是它。控制迴圈的第一拍比回填早，
+    /// 保險絲只看記憶體的話，會把這一則當成「對方一直沒有空檔」撤掉、交辦停在 blocked——撞限兩小時後就會送的派工沒了
+    /// （issue #168）。
+    #[tokio::test]
+    async fn the_fuse_honours_the_quota_hold_a_queued_dispatch_carries_across_a_restart() {
+        let app = app().await;
+        // 自己一顆 bot：`quota_hold` 記「剛擋過」是全域的。
+        let bot = format!("r{}", crate::db::ulid());
+        sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES (?,'p',?,'claude','t',?)")
+            .bind(&bot)
+            .bind(&bot)
+            .bind(crate::db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let a = store::insert_assignment(&app.db, None, &bot, "crid-restart-hold", "做這件事", &[], None, true).await.unwrap();
+        let conv = crate::db::conversation_id(&app.db, &bot).await.unwrap();
+        let turn_id = crate::db::ulid();
+        let now = chrono::Utc::now();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, client_request_id, created_at, prompt_text)
+             VALUES (?,?,NULL,'web','queued','pending','crid-restart-hold',?,'做這件事')",
+        )
+        .bind(&turn_id)
+        .bind(&conv)
+        .bind(crate::db::iso_at(now - chrono::Duration::minutes(45)))
+        .execute(&app.db)
+        .await
+        .unwrap();
+        store::mark_delivered(&app.db, &a.id, &turn_id, "queued").await.unwrap();
+        // 上一輪開機時 flush 擋下它、寫在這一列上的憑據：5 小時窗，兩小時後重置。
+        let hold = |until: chrono::DateTime<chrono::Utc>| {
+            json!({"identity": null, "message": "You've hit your session limit", "until": crate::db::iso_at(until),
+                   "at": crate::db::iso_at(now - chrono::Duration::minutes(50)), "bucket": "five_hour",
+                   "held_at": crate::db::iso_at(now - chrono::Duration::minutes(5)), "boot": "previous-boot"})
+            .to_string()
+        };
+        sqlx::query("UPDATE turns SET quota_hold=? WHERE id=?").bind(hold(now + chrono::Duration::hours(2))).bind(&turn_id).execute(&app.db).await.unwrap();
+        let row = crate::db::bot(&app.db, &bot).await.unwrap().unwrap();
+        assert!(crate::quota::limit_hit_for_bot(&app, &row).await.is_none(), "前提：新行程，記憶體裡沒有撞限");
+
+        block_stale_queues(&app).await;
+        let turn_status = |app: Arc<App>, id: String| async move {
+            sqlx::query_scalar::<_, String>("SELECT status FROM turns WHERE id=?").bind(&id).fetch_one(&app.db).await.unwrap()
+        };
+        assert_eq!(store::assignment(&app.db, &a.id).await.unwrap().unwrap().status, "delivered", "撞限兩小時後就到期：留給 flush");
+        assert_eq!(turn_status(app.clone(), turn_id.clone()).await, "queued", "排著的那則不撤");
+
+        // 同一份憑據、但是週窗（遠超過保險絲自己的等待上限）：看不到盡頭，照舊撤，理由寫額度。
+        sqlx::query("UPDATE turns SET quota_hold=? WHERE id=?").bind(hold(now + chrono::Duration::days(6))).bind(&turn_id).execute(&app.db).await.unwrap();
+        block_stale_queues(&app).await;
+        let row = store::assignment(&app.db, &a.id).await.unwrap().unwrap();
+        assert_eq!(row.status, "blocked");
+        let why = row.error.unwrap_or_default();
+        assert!(why.contains("沒有額度") && !why.contains("空檔"), "{why}");
     }
 }
 
