@@ -75,11 +75,16 @@ async fn stop_locked(app: &Arc<App>, bot_id: &str, for_restart: bool, only_if_id
     // 先把「正在停」記下來，才有權動外面（#146）：記不下來就一步都不做——不收 in-flight、不送 ctrl+c、
     // 不關 pane、不撤佇列。讀完 active run 之後被不拿鎖的 pane-exit 事件先收掉的話（CAS 輸了），收尾歸那條路。
     // 來源含 `stopping`：上一次沒停成（寫不進 `stopped`、agent 沒退出）的 stop 可以原樣再按一次。
-    let moved = if only_if_idle {
-        admit_idle_stop(&app.db, &run.id, bot_id).await.map_err(up)?
+    // 使用者的 stop 在同一個交易撤回等它起來才送的那幾則（[`begin_stop`]，#199）。閒置回收的許可本來就要求沒有排著的。
+    let (moved, withdrawn) = if only_if_idle {
+        (admit_idle_stop(&app.db, &run.id, bot_id).await.map_err(up)?, Vec::new())
     } else {
-        super::run_state::transition(&app.db, &run.id, super::run_state::LIVE, "stopping", None).await.map_err(up)?
+        let withdraw = !for_restart && !super::restart_hold::in_progress(bot_id);
+        begin_stop(app, &run.id, bot_id, withdraw).await.map_err(up)?
     };
+    for (turn_id, revoked) in withdrawn {
+        announce_revoked(app, &turn_id, revoked).await;
+    }
     match moved {
         super::run_state::Moved::Applied => {}
         // 閒置回收的許可沒過：它不再閒著（或已經被別的路停掉）。外面一步都沒動。
@@ -164,10 +169,9 @@ async fn stop_locked(app: &Arc<App>, bot_id: &str, for_restart: bool, only_if_id
     }
     match commit_stopped(app, &run.id, for_restart).await {
         Ok(StopCommit::Applied) => after_stop(app, bot_id, &run, &host).await,
-        // 被 pane-exit 事件收成 `exited`（已改標成 `stopped`）：一般的收尾那條路做過了，不做第二份；
-        // 只補 stop 才有的那一份（撤回等它起來的訊息）。
-        Ok(StopCommit::Relabelled) => super::start_send::withdraw_on_stop(app, bot_id).await,
-        Ok(StopCommit::Lost) => {}
+        // 被 pane-exit 事件收成 `exited`（已改標成 `stopped`）：一般的收尾那條路做過了，不做第二份（stop 才有的撤回
+        // 在記 `stopping` 時就跟著做了）。
+        Ok(StopCommit::Relabelled | StopCommit::Lost) => {}
         // agent 已經停了，終態卻寫不進去（#146 驗收 2）：不回一般的成功，佇列與 watcher 等終態成立再動，排重試。
         // 被 pane-exit 先收成 `exited`、改標回 `stopped` 寫不進去也是這一支（#146 重開 A）：留著 `exited` 就是在說
         // 「它自己掛了」，autostart 的 bot 會被報 `bot_stopped`。重試（`FinishStop`）照樣補改標。
@@ -197,10 +201,31 @@ async fn stop_locked(app: &Arc<App>, bot_id: &str, for_restart: bool, only_if_id
 enum StopCommit {
     /// `stopping → stopped`：收尾全部歸這裡（[`after_stop`]）。
     Applied,
-    /// 被 pane-exit 事件先收成 `exited`，改標回 `stopped`：一般的收尾那條路做過了，只差 stop 才有的那一份。
+    /// 被 pane-exit 事件先收成 `exited`，改標回 `stopped`：一般的收尾那條路做過了。
     Relabelled,
     /// 兩者都不是：別的路徑已經收成別的樣子，什麼都不做。
     Lost,
+}
+
+/// `LIVE → stopping`；`withdraw` 時同一個交易撤回還在等它起來才送的那幾則（`start_send::withdraw_waiting_tx`，#199）：
+/// 要嘛「正在停」與撤回都成立，要嘛都不成立——撤回寫不進去就連 `stopping` 都不記，外面一步都不動（跟 `stopping` 寫不進去
+/// 同一條路，502）。撤回放在這裡、不放在記 `stopped` 那一步：`stopped` 寫不進去時 run 停在 `stopping`，重試補上之前
+/// daemon 重啟的話，開機對帳把它收成 `exited`，`start_send::resume_after_boot` 看到沒有 run 就替它啟動——那一則照樣送出去。
+/// 跟著第一個 durable 的「使用者要它停」一起落地，之後不管怎麼收斂都送不出去。CAS 輸了什麼都不寫。
+async fn begin_stop(
+    app: &Arc<App>,
+    run_id: &str,
+    bot_id: &str,
+    withdraw: bool,
+) -> anyhow::Result<(super::run_state::Moved, Vec<(String, Revoked)>)> {
+    let mut tx = app.db.begin().await?;
+    let moved = super::run_state::transition_on(&mut tx, run_id, super::run_state::LIVE, "stopping", None).await?;
+    if moved == super::run_state::Moved::Lost {
+        return Ok((moved, Vec::new()));
+    }
+    let withdrawn = if withdraw { super::start_send::withdraw_waiting_tx(&mut tx, bot_id).await? } else { Vec::new() };
+    tx.commit().await?;
+    Ok((moved, withdrawn))
 }
 
 /// [`stop_bot_locked_if_idle`] 的許可：跟 `transition(LIVE → stopping)` 同一步，多三個條件，都在同一句 UPDATE 裡。
@@ -240,7 +265,6 @@ async fn commit_stopped(app: &Arc<App>, run_id: &str, for_restart: bool) -> Resu
 async fn after_stop(app: &Arc<App>, bot_id: &str, run: &db::Run, host: &str) {
     // 停掉之後沒有人會送它排著的 queued：收掉，不留著佔名額、擋 restart safety（AGM 2026-09-16）。
     revoke_orphaned_queued_turns(app, bot_id, "bot 已被停止").await;
-    super::start_send::withdraw_on_stop(app, bot_id).await;
     if let Some(p) = run.pane_id.as_deref() {
         if let Some(session) = app.session_for_run(run).await {
             crate::events::unwatch_pane_on_session(app, host, &session, p).await;
@@ -287,8 +311,7 @@ pub(crate) async fn finish_stop(app: &Arc<App>, run_id: &str) {
     };
     match commit_stopped(app, run_id, false).await {
         Ok(StopCommit::Applied) => after_stop(app, &run.bot_id, &run, &host).await,
-        Ok(StopCommit::Relabelled) => super::start_send::withdraw_on_stop(app, &run.bot_id).await,
-        Ok(StopCommit::Lost) => {}
+        Ok(StopCommit::Relabelled | StopCommit::Lost) => {}
         Err(e) => tracing::warn!(run = run_id, error = %e, "retrying the stopped record failed"),
     }
     app.emit_bot_status(&run.bot_id).await;
@@ -1025,13 +1048,13 @@ mod stop_commit_tests {
         assert_eq!(state(&app, &run).await, "exited");
         assert_eq!(rs::scheduled(&run), vec![rs::Settle::FinishStop], "排了補改標的重試");
         assert!(rs::bot_stopped_reported(&app, &bot).await, "前提：留著 exited，探針說它自己掛了");
-        assert_eq!(rs::turn_status(&app, &waiting).await, "queued", "標籤還沒成立，等它起來的那一則先不撤");
+        assert_eq!(rs::turn_status(&app, &waiting).await, "failed", "等它起來的那一則在記 `stopping` 時就一起撤了（#199）");
 
         rs::accept_run_state(&app, "stopped").await;
         assert!(rs::settle_once(&app, &run, &rs::Settle::FinishStop).await);
         assert_eq!(state(&app, &run).await, "stopped", "使用者要它停");
         assert!(!rs::bot_stopped_reported(&app, &bot).await, "故意停的 autostart bot 不是 outage");
-        assert_eq!(rs::turn_status(&app, &waiting).await, "failed", "改標成立之後撤回等它起來的那一則");
+        assert_eq!(rs::system_notes(&app, &waiting).await, 1, "只撤一次");
     }
 
     /// 重啟那一半不改標：重啟不是「使用者要它停」。pane-exit 先寫了 `exited` 就留著（開不回來時要的正是它），重啟照常往下走。
@@ -1047,6 +1070,65 @@ mod stop_commit_tests {
         assert!(stop_for_restart_locked(&app, &bot).await.unwrap(), "pane 關了、舊 run 收掉了：重啟照常往下走");
         assert_eq!(state(&app, &run).await, "exited", "不改標成 stopped：沒開回來時探針才看得到");
         assert!(rs::scheduled(&run).is_empty(), "沒有要補的");
+    }
+
+    /// #199：使用者按停止時，等它起來才送的那一則撤不掉（DB 寫不進去）——撤回跟記 `stopping` 同一個交易，所以連停都不算開始：
+    /// 回 502、run 照舊 running、不送 ctrl+c、不關 pane、那一則還在。寫得進去之後再按一次，兩個一起成立。
+    #[tokio::test]
+    async fn a_stop_whose_withdrawal_cannot_be_written_does_nothing_at_all() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot, run) = running_bot(&env).await;
+        let waiting = rs::a_turn(&app, &bot, None, "queued").await;
+        sqlx::query("UPDATE turns SET awaits_start=1 WHERE id=?").bind(&waiting).execute(&app.db).await.unwrap();
+        rs::refuse_turn_close(&app, &waiting).await;
+        let n = env.herdr.methods().len();
+
+        let err = stop_bot(&app, &bot).await.expect_err("撤回寫不進去：不算開始停");
+        assert!(matches!(err, LcError::Upstream(_)), "{err:?}");
+        let calls = since(&env, n);
+        assert!(!calls.iter().any(|m| m == "agent.send_keys" || m == "pane.close"), "{calls:?}");
+        assert_eq!((state(&app, &run).await, rs::turn_status(&app, &waiting).await), ("running".to_string(), "queued".to_string()), "兩個都沒成立");
+
+        rs::accept_turn_close(&app).await;
+        assert!(stop_bot(&app, &bot).await.unwrap());
+        assert_eq!((state(&app, &run).await, rs::turn_status(&app, &waiting).await), ("stopped".to_string(), "failed".to_string()));
+        assert_eq!(rs::system_notes(&app, &waiting).await, 1);
+    }
+
+    /// #199 驗收 2：撤回跟著 `stopping` 落地之後，`stopped` 寫不進去、重試補上之前 daemon 就重啟——開機對帳把那顆收成 `exited`，
+    /// 等它起來的那一則已經撤了，開機不替它啟動、永遠不送。（撤回若放在記 `stopped` 那一步，這裡就會被開機再啟動、送出去。）
+    #[tokio::test]
+    async fn a_withdrawal_made_with_stopping_survives_a_restart_before_stopped_is_recorded() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot, run) = running_bot(&env).await;
+        let waiting = rs::a_turn(&app, &bot, None, "queued").await;
+        sqlx::query("UPDATE turns SET awaits_start=1 WHERE id=?").bind(&waiting).execute(&app.db).await.unwrap();
+        rs::refuse_run_state(&app, "stopped").await;
+        assert!(matches!(stop_bot(&app, &bot).await, Err(LcError::Uncommitted(_))));
+        assert_eq!((state(&app, &run).await, rs::turn_status(&app, &waiting).await), ("stopping".to_string(), "failed".to_string()));
+        rs::accept_run_state(&app, "stopped").await;
+
+        let fresh = tt::restart_app(&env).await;
+        crate::reconcile::reconcile_host(&fresh, LOCAL_HOST).await.unwrap();
+        assert!(db::active_run(&fresh.db, &bot).await.unwrap().is_none(), "開機對帳收掉了卡在 stopping 的 run");
+        assert_eq!(super::super::start_send::resume_after_boot(&fresh, LOCAL_HOST).await, 0, "沒有在等它起來的：不替它啟動");
+        assert_eq!(rs::turn_status(&fresh, &waiting).await, "failed");
+    }
+
+    /// 重啟那一半的 stop 不撤等它起來的訊息：那段沒有 run 是暫時的（`restart_hold`），重啟不是「不要了」。
+    #[tokio::test]
+    async fn a_restart_does_not_withdraw_what_waits_for_the_start() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot, _run) = running_bot(&env).await;
+        let waiting = rs::a_turn(&app, &bot, None, "queued").await;
+        sqlx::query("UPDATE turns SET awaits_start=1 WHERE id=?").bind(&waiting).execute(&app.db).await.unwrap();
+        let restarting = super::super::restart_hold::begin(&bot);
+        assert!(stop_for_restart_locked(&app, &bot).await.unwrap());
+        drop(restarting);
+        assert_eq!(rs::turn_status(&app, &waiting).await, "queued", "重啟不是不要了");
     }
 
     /// 同一個競態，排著的是「bot 沒在跑時送、等它起來」的那一種（#122 的 `awaits_start`）：撤孤兒那一支刻意不撤它，

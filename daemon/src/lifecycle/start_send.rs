@@ -20,7 +20,7 @@
 //!   （重啟前那次可能根本沒做完、或起不來的原因已經排除）。每次開機最多一次，失敗照樣只記原因。
 
 use super::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
 
 enum Accepted {
@@ -342,87 +342,29 @@ pub(crate) async fn note_run_gone(app: &Arc<App>, bot_id: &str, why: &str) {
 /// 使用者按停止時撤回的說明。
 const STOP_WHY: &str = "bot 已被停止：這一則是 bot 沒在跑時送的，還在等它起來，沒有送出，一併撤銷，不會再送。";
 
-/// 使用者按停止時沒撤成的（讀不到、寫不進去，#159）：bot → 停止的那一刻。補撤之前，那一刻以前收下、還在等 bot 起來的
-/// 那幾則一則都不送——flush 送之前先補（[`settle_withdrawals_locked`]），補不上就留在佇列。帳只在記憶體：補上之前
-/// daemon 重啟就沒了（停止與撤回不在同一個交易裡，SPEC §6 的已知缺口）。
-fn owed_withdrawals() -> &'static Mutex<HashMap<String, String>> {
-    static M: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
-    M.get_or_init(Default::default)
-}
-
-/// 使用者自己按停止（`stop_bot`）：還在等它起來的那幾則一併撤回，不留到下次啟動又送出去。
-/// 重啟（換身分、`?resume=native`）的停不算——那段沒有 run 是暫時的（`restart_hold`）。
-/// 讀不到、撤不掉不是撤完了（#159）：記成欠著、定時補撤，補上之前 flush 不送。
-pub(crate) async fn withdraw_on_stop(app: &Arc<App>, bot_id: &str) {
-    if super::restart_hold::in_progress(bot_id) {
-        return;
-    }
-    let stopped_at = db::now();
-    if let Err(e) = withdraw_waiting(app, bot_id, &stopped_at).await {
-        tracing::warn!(bot = %bot_id, error = %e, "bot 停了，等它起來的訊息卻撤不掉：記成欠著，補撤之前不送");
-        let mut owed = owed_withdrawals().lock().unwrap_or_else(|e| e.into_inner());
-        let at = owed.entry(bot_id.to_string()).or_insert_with(|| stopped_at.clone());
-        if *at < stopped_at {
-            *at = stopped_at;
-        }
-        drop(owed);
-        schedule_withdrawal_retry(app, bot_id);
-    }
-}
-
-/// 撤掉 `before`（停止的那一刻）以前收下、還在等 bot 起來的那幾則。讀不到、有一則撤不掉都是 `Err`（撤得掉的照撤）。
-async fn withdraw_waiting(app: &Arc<App>, bot_id: &str, before: &str) -> anyhow::Result<()> {
+/// 使用者自己按停止：還在等它起來的那幾則一併撤回，不留到下次啟動又送出去。呼叫端是 `stop` 記 `stopping` 的**同一個交易**
+/// （#199）：要嘛「正在停」與撤回都成立，要嘛都不成立（stop 一步都不做）。以前兩步分開、撤不掉只記在記憶體（#159 的欠帳），
+/// 補上之前 daemon 重啟，開機就照舊替它啟動、把使用者已經不要的那一則送出去。
+/// 重啟（換身分、`?resume=native`）的停不撤——那段沒有 run 是暫時的（`restart_hold`），由呼叫端判斷。
+/// 回傳撤掉的那幾則，commit 之後逐一 [`announce_revoked`]。
+pub(crate) async fn withdraw_waiting_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    bot_id: &str,
+) -> anyhow::Result<Vec<(String, super::Revoked)>> {
     let ids: Vec<String> = sqlx::query_scalar(
         "SELECT t.id FROM turns t JOIN conversations c ON c.id = t.conversation_id
-          WHERE c.bot_id = ? AND t.status = 'queued' AND t.awaits_start = 1 AND t.created_at <= ?",
+          WHERE c.bot_id = ? AND t.status = 'queued' AND t.awaits_start = 1",
     )
     .bind(bot_id)
-    .bind(before)
-    .fetch_all(&app.db)
+    .fetch_all(&mut **tx)
     .await?;
-    let mut failed = None;
+    let mut withdrawn = Vec::new();
     for id in ids {
-        if let Err(e) = revoke_queued_turn(app, &id, STOP_WHY).await {
-            tracing::error!(bot = %bot_id, turn = %id, error = %e, "could not withdraw a starting send on stop");
-            failed.get_or_insert(e);
+        if let Some(r) = revoke_queued_turn_tx(tx, &id, STOP_WHY).await? {
+            withdrawn.push((id, r));
         }
     }
-    failed.map_or(Ok(()), Err)
-}
-
-/// 補撤使用者按停止時沒撤成的那幾則。呼叫端握著 bot 鎖。`Err`＝還是撤不掉：帳留著，這一輪不能送。
-pub(crate) async fn settle_withdrawals_locked(app: &Arc<App>, bot_id: &str) -> anyhow::Result<()> {
-    let Some(at) = owed_withdrawals().lock().unwrap_or_else(|e| e.into_inner()).get(bot_id).cloned() else { return Ok(()) };
-    withdraw_waiting(app, bot_id, &at).await?;
-    tracing::info!(bot = %bot_id, "補撤了使用者按停止時沒撤成的訊息");
-    let mut owed = owed_withdrawals().lock().unwrap_or_else(|e| e.into_inner());
-    if owed.get(bot_id) == Some(&at) {
-        owed.remove(bot_id);
-    }
-    Ok(())
-}
-
-/// 沒有 flush 來叫也要補撤（同 `owed_delivery` 的間隔，約四分鐘；之後交給 flush）。
-fn schedule_withdrawal_retry(app: &Arc<App>, bot_id: &str) {
-    if cfg!(test) {
-        return;
-    }
-    let app = app.clone();
-    let bot_id = bot_id.to_string();
-    tokio::spawn(async move {
-        for secs in [1u64, 2, 4, 8, 15, 30, 60, 120] {
-            tokio::time::sleep(Duration::from_secs(secs)).await;
-            let lock = app.bot_lock(&bot_id).await;
-            let _g = lock.lock().await;
-            if !owed_withdrawals().lock().unwrap_or_else(|e| e.into_inner()).contains_key(&bot_id) {
-                return;
-            }
-            match settle_withdrawals_locked(&app, &bot_id).await {
-                Ok(()) => return,
-                Err(e) => tracing::warn!(bot = %bot_id, error = %e, "使用者停止時沒撤成的訊息還是撤不掉；稍後再試"),
-            }
-        }
-    });
+    Ok(withdrawn)
 }
 
 /// 使用者取消（`POST /turns/{id}/withdraw`）：還在等 bot 起來的那一則撤回、寫明理由，不送。
@@ -607,8 +549,10 @@ mod tests {
         let _ = run2;
     }
 
-    /// #159（同一類）：使用者按停止時，等 bot 起來的那一則撤不掉（DB 一時寫不進去）——以前只記一行 error，之後 bot 重新
-    /// 起來、閒下來，flush 就把使用者已經不要的那一則送進去。沒撤成不是撤完了：補撤之前一則都不送；DB 好了補撤，永遠不送。
+    /// #159（同一類）→ #199：使用者按停止時，等 bot 起來的那一則撤不掉（DB 一時寫不進去）——以前只記一行 error，之後 bot 重新
+    /// 起來、閒下來，flush 就把使用者已經不要的那一則送進去；#159 改成記在記憶體的欠帳，daemon 重啟就沒了。現在撤回跟記
+    /// `stopping` 同一個交易：撤不掉就連停都沒停（502，agent 照跑，外面一步都沒動）；再按一次、寫得進去，兩個一起成立，
+    /// 之後 bot 重新起來也永遠不送。
     #[tokio::test]
     async fn a_stop_whose_withdrawal_could_not_be_written_never_lets_the_send_go_out() {
         let e = tt::env().await;
@@ -626,28 +570,27 @@ mod tests {
         .execute(&app.db)
         .await
         .unwrap();
-        crate::lifecycle::stop_bot(&app, &bot.id).await.unwrap();
-        assert_eq!(turn_of(&app, "crid-stop-lost").await.status, "queued", "撤不掉：還在佇列");
+        let n = e.herdr.methods().len();
+        let err = crate::lifecycle::stop_bot(&app, &bot.id).await.expect_err("撤不掉：連停都不算開始");
+        assert!(matches!(err, LcError::Upstream(_)), "{err:?}");
+        assert!(!e.herdr.methods().iter().skip(n).any(|m| m == "agent.send_keys" || m == "pane.close"), "外面一步都沒動");
+        let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(&run).fetch_one(&app.db).await.unwrap();
+        assert_eq!((state.as_str(), turn_of(&app, "crid-stop-lost").await.status.as_str()), ("running", "queued"), "兩個都沒成立");
 
-        // 使用者又把它起來了、閒著：flush 不能把那一則送出去。
+        sqlx::query("DROP TRIGGER lost_withdraw").execute(&app.db).await.unwrap();
+        crate::lifecycle::stop_bot(&app, &bot.id).await.unwrap();
+        let t = turn_of(&app, "crid-stop-lost").await;
+        assert_eq!(t.status, "failed", "再按一次：撤回跟停一起成立");
+        assert_eq!(count(&app, "SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='system' AND content LIKE 'bot 已被停止%'", &t.id).await, 1);
+
+        // 使用者又把它起來了、閒著：flush 不會把那一則送出去。
         let run2 = tt::fake_run(&app, &bot.id).await;
         let pane = format!("pane-{}", bot.id);
         e.herdr.live_pane(&pane, tt::LivePane { width: Some(120), ..Default::default() });
         db::set_pane_typed(&app.db, &run2).await.unwrap();
-        let sent = || e.herdr.pane(&pane).map_or(0, |p| p.transcript.iter().filter(|l| l.contains(TEXT)).count());
-        forget_queue_retry_timer(&bot.id);
-        assert!(flush_queued_locked(&app, &bot.id).await.is_err(), "撤回還欠著：不送，也不回普通的成功");
-        assert_eq!(sent(), 0, "一個字都沒送");
-        assert_eq!(turn_of(&app, "crid-stop-lost").await.status, "queued");
-
-        sqlx::query("DROP TRIGGER lost_withdraw").execute(&app.db).await.unwrap();
-        flush_queued_locked(&app, &bot.id).await.unwrap();
-        let t = turn_of(&app, "crid-stop-lost").await;
-        assert_eq!(t.status, "failed", "DB 好了：補撤");
-        assert_eq!(count(&app, "SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='system' AND content LIKE 'bot 已被停止%'", &t.id).await, 1);
         forget_queue_retry_timer(&bot.id);
         flush_queued_locked(&app, &bot.id).await.unwrap();
-        assert_eq!(sent(), 0, "永遠不送");
+        assert_eq!(e.herdr.pane(&pane).map_or(0, |p| p.transcript.iter().filter(|l| l.contains(TEXT)).count()), 0, "永遠不送");
     }
 
     /// 在跑的 bot：旗標沒有作用，走一般的送出（有 run、沒有 `awaits_start`）。附件跟訊息同一個交易綁上；

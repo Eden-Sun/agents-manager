@@ -608,9 +608,11 @@ cancel 撤掉的是還沒送出的那則時，review 回應不再帶「turn 還�
 掛著的交辦照一般流程收到 `failed` 的回合結束，AGM 看得到。還有活著的 run 就不動。
 定時掃描（每 60 秒，§4.3b 那一支）也收一次「run 早就不在的 queued」，包含這條規則上線前就留下來的。
 **例外**：`awaits_start=1` 的（下一段）本來就是在沒有 run 的時候收下的，這幾條路都不撤它，只在 `start_error` 記原因（已有原因不蓋）；
-只有使用者自己按停止（`stop_bot`，重啟那一段不算）才撤。撤的時候讀不到、或有一則撤不掉，不當成撤完了（#159）：記成欠著（停止的那一刻），
-定時補撤；補上之前 flush 一則都不送（先補撤，補不上就留在佇列、回錯誤）。帳只在記憶體——停止與撤回不在同一個交易裡，補上之前 daemon
-重啟的話，開機會照舊替它啟動、那一則會送出去（已知缺口，要把撤回併進記 `stopped` 的那個交易才補得起來）。
+只有使用者自己按停止（`stop_bot`，重啟那一段不算）才撤，而且跟記 `stopping` 同一個交易（`stop::begin_stop`，#199）：要嘛「正在停」
+與撤回都成立，要嘛都不成立——讀不到、有一則撤不掉，就連 `stopping` 都不記，外面一步都不動（502，跟 `stopping` 寫不進去同一條路）。
+放在 `stopping` 而不是 `stopped`：`stopped` 寫不進去時 run 停在 `stopping`，重試補上之前 daemon 重啟的話，開機對帳把它收成 `exited`，
+`resume_after_boot` 看到沒有 run 就會替它啟動、把那一則送出去；跟著第一個耐久的「使用者要它停」一起落地，之後怎麼收斂都送不出去。
+（#159 那本只在記憶體的欠帳因此拿掉了。）
 
 **bot 沒在跑時送出**（issue #122，`lifecycle::start_send`）：web 對沒在跑的 bot 按送出，以前是把訊息放在瀏覽器記憶體、自己按啟動、
 等起來再 `POST /prompt`——在那之前 daemon 不知道這則存在，重整、關分頁、換裝置、啟動失敗就沒了。現在 web 送 `POST /prompt` 帶
@@ -880,15 +882,16 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run
   run 狀態與破壞性的副作用不是兩條平行線（#146）：
   - `stopping` 以 CAS（from `starting`／`running`／`stopping`，上次沒停成的可以再按）寫入，**寫不進去就一步都不做**（不收 in-flight、
     不送 ctrl+c、不關 pane、不撤佇列），回 502。讀完 active run 之後已經被 pane-exit 事件收掉（CAS 輸了）→ 什麼都不做，回 `204`。
+    使用者的 stop 在同一個交易撤回等它起來才送的訊息（#122 的 `awaits_start`，#199）：撤不掉就連 `stopping` 都不記（見本節前面「沒有 run 的 queued 一律收掉」那段）。
   - in-flight 那一筆收成 `failed`（跟說明同一個交易，`fail_in_flight`）也在動外面**之前**：寫不進去就一步都不做——這時 agent 還沒被打斷、
     那一回合真的還在跑——run 放回 `running`，回 `503 turn_state_unwritable`（可重試，#156）。以前寫失敗只記 warning，照樣 ctrl+c、記 `stopped`，
     DB 裡那一筆卻永遠在飛。
   - 「agent 不在」只認 herdr 明確說不在；RPC 失敗不算。結果分成自己退出／pane 被強制關掉並確認不在／還活著／問不到。
     後兩種不能記 `stopped`、不撤佇列，回 `502 stop_not_confirmed`：還活著（default session 的 pane 不能關，§6.5.1）就放回 `running`，
     問不到就留 `stopping` 排對帳。
-  - `stopped` 以 CAS（from `stopping`）寫進去**之後**才撤孤兒佇列、撤回等它起來的訊息（#122）、關訂閱。寫不進去回 `503 stop_state_uncommitted`，
+  - `stopped` 以 CAS（from `stopping`）寫進去**之後**才撤孤兒佇列、關訂閱。寫不進去回 `503 stop_state_uncommitted`，
     排重試補記 `stopped` 再收尾（重啟那一半的 stop 改交給對帳收成 `exited`：沒開回來不是使用者要它停）。stop 自己關的 pane 觸發的
-    pane-exit 事件搶先寫了 `exited` 時，改標成 `stopped`（兩個都是終態），一般的收尾不做第二份，只補撤回等它起來的訊息（exit 那條路不撤它）。
+    pane-exit 事件搶先寫了 `exited` 時，改標成 `stopped`（兩個都是終態），一般的收尾不做第二份。
   - 終態改標（`exited ↔ stopped`）跟轉移走同一句 CAS（`run_state::relabel`，多一個條件：同一顆 bot 沒有別的 active run），寫不進去一樣是錯
     （#146 重開）：上面那個改標寫不進去回 `503 stop_state_uncommitted`、排重試補改標，不當成 CAS 輸了回成功——留著 `exited` 等於說它自己掛了，
     autostart 的 bot 會被報 `bot_stopped`。重啟那一半的 stop 不改標：重啟不是使用者要它停，被 pane-exit 收成 `exited` 就留著。

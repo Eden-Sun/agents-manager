@@ -30,7 +30,18 @@ pub(crate) async fn transition(
     to: &str,
     agent_status: Option<&str>,
 ) -> Result<Moved, sqlx::Error> {
-    cas(db, run_id, from, to, agent_status, "").await
+    cas(&mut *db.acquire().await?, run_id, from, to, agent_status, "").await
+}
+
+/// [`transition`] 的交易內版本：轉移要跟別的寫入一起成立或一起不成立時用（例如 stop 記 `stopping` 與撤回，#199）。
+pub(crate) async fn transition_on(
+    conn: &mut sqlx::SqliteConnection,
+    run_id: &str,
+    from: &[&str],
+    to: &str,
+    agent_status: Option<&str>,
+) -> Result<Moved, sqlx::Error> {
+    cas(conn, run_id, from, to, agent_status, "").await
 }
 
 /// 終態改標：`exited ↔ stopped`，只改「這顆為什麼停」，不復活任何東西。`stopped` 是「使用者要它停」——incident 探針
@@ -40,7 +51,7 @@ pub(crate) async fn transition(
 pub(crate) async fn relabel(db: &sqlx::SqlitePool, run_id: &str, from: &str, to: &str) -> Result<Moved, sqlx::Error> {
     debug_assert!(matches!(from, "stopped" | "exited") && matches!(to, "stopped" | "exited"));
     cas(
-        db,
+        &mut *db.acquire().await?,
         run_id,
         &[from],
         to,
@@ -52,7 +63,7 @@ pub(crate) async fn relabel(db: &sqlx::SqlitePool, run_id: &str, from: &str, to:
 }
 
 async fn cas(
-    db: &sqlx::SqlitePool,
+    conn: &mut sqlx::SqliteConnection,
     run_id: &str,
     from: &[&str],
     to: &str,
@@ -71,7 +82,7 @@ async fn cas(
     for s in from {
         q = q.bind(*s);
     }
-    let r = q.execute(db).await?;
+    let r = q.execute(conn).await?;
     Ok(if r.rows_affected() == 0 { Moved::Lost } else { Moved::Applied })
 }
 
