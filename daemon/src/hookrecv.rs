@@ -2904,6 +2904,45 @@ mod external_claim_tests {
         assert!(answers_another_prompt(Some("跑一次測試"), Some("算了")));
     }
 
+    /// #217：`unknown` 那一則在 transcript 裡被 CLI 包成 `<pasted_content>`（真 transcript，2026-09-19 實測）還是同一則，照樣認領。
+    /// prompt 本身寫著字面的 `<pasted_content …>` 時 CLI 還把它跳脫成 `<\…`，兩邊去空白後互不包含——以前被當成「回答的是別句」：
+    /// 答案記到一筆外部回合、那一則一直掛在 unknown。
+    #[tokio::test]
+    async fn an_unknown_turn_whose_prompt_the_cli_wrapped_as_pasted_content_is_still_claimed() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let prompt = "這段文字裡有字面的 <pasted_content id=\"1234\">x</pasted_content id=\"1234\"> 標籤，請只回覆 OK 兩個字母。";
+        let (bot_id, conv, turn_id) = unknown_turn(&app, &env.project_id, "claude", prompt).await;
+        let transcript = app.data_dir.join(format!("t-{}.jsonl", db::ulid()));
+        let log: Vec<&str> = include_str!("lifecycle/fixtures/claude_2.1.278_pasted_content.jsonl").lines().collect();
+        assert!(log[8].contains(r#"<\\pasted_content id=\"1234\">"#), "fixture 這一列是 CLI 跳脫過又包起來的");
+        std::fs::write(&transcript, log[8..].join("\n") + "\n").unwrap();
+        let stop = HookBody {
+            bot_id: bot_id.clone(),
+            provider: "claude".into(),
+            payload: json!({
+                "hook_event_name": "Stop",
+                "session_id": "2c0bdae3-b75f-4dad-a24c-ed9b751cb14d",
+                "prompt_id": db::ulid(),
+                "transcript_path": transcript.to_string_lossy(),
+                "last_assistant_message": "OK",
+            }),
+            received_at: None,
+            truncated: false,
+            run_id: None,
+        };
+        process(&app, &stop).await.unwrap();
+
+        let turn = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!((turn.status.as_str(), turn.delivery.as_str()), ("completed", "ok"), "同一則：認領並升成 ok");
+        let external: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE conversation_id=? AND origin='external'")
+            .bind(&conv)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(external, 0, "沒有多一筆外部回合");
+    }
+
     #[tokio::test]
     async fn stop_hook_resolves_unknown_delivery_when_it_completes_a_turn() {
         let env = tt::env().await;
