@@ -469,6 +469,12 @@ export class MockTransport implements Transport {
   /** 模擬舊 daemon 沒有 `/api/missions`（`__amMock.missionsOff()`）。 */
   private missionsDisabled = false
 
+  /** 下一個符合的請求回指定的錯誤（`__amMock.failNext`）：手動看錯誤路徑、截圖用，用過一次就拿掉。 */
+  private faults: { method: HttpMethod; pattern: RegExp; status: number; body: Rec }[] = []
+  failNext(method: HttpMethod, pattern: string, status: number, body: Rec = {}) {
+    this.faults.push({ method, pattern: new RegExp(pattern), status, body })
+  }
+
   /** 面板自己開的 shell（daemon 的 `app.host_shells`）。key = `<host>/<pane_id>`。 */
   private shells = new Map<string, MockShell>()
   /**
@@ -700,6 +706,11 @@ export class MockTransport implements Transport {
   async request(method: HttpMethod, path: string, body?: unknown): Promise<unknown> {
     // A little latency so loading states are visible.
     await sleep(60)
+    const fault = this.faults.findIndex((f) => f.method === method && f.pattern.test(path))
+    if (fault >= 0) {
+      const [f] = this.faults.splice(fault, 1)
+      throw new ApiError(f.status, f.body, `mock fault ${f.status}`)
+    }
     const [rawPath, query] = path.split('?')
     const q = new URLSearchParams(query ?? '')
     const b = (body ?? {}) as Rec
@@ -3247,5 +3258,7 @@ function installDevHelpers(mock: MockTransport) {
     hosts: () => mock.hostNames(),
     // 窄 pane / 移到自己的分頁
     paneSqueeze: (n = 5) => mock.setForeignPanes(n),
+    // 下一個符合的請求回錯：`__amMock.failNext('POST', 'identities/.*/login', 409, {reason: '…', message: '…'})`
+    failNext: (method: HttpMethod, pattern: string, status: number, body: Rec = {}) => mock.failNext(method, pattern, status, body),
   }
 }

@@ -549,17 +549,21 @@ const REASON_TEXT: Record<string, string> = {
   codex_log_not_ready: '沒送出：codex 的紀錄還沒寫出來，稍後再送一次',
   no_pane_to_type_into: '沒送出：找不到這顆 bot 的終端畫面可以打字，重啟它再試',
   resume_unverified: '沒送出：這顆 bot 是接回舊對話起來的，還在確認接回的是不是原本那段（最多約兩分鐘），稍後再送一次',
+  // API.md 有列、daemon 不附 `message`：讀不到這顆 bot 在哪台主機（daemon 的資料暫時讀不到），字沒打進去（#233）。
+  host_unreadable: '沒送出：讀不到這顆 bot 在哪台主機（daemon 的資料暫時讀不到），稍後再送一次',
 }
 
 /**
- * 可重試的錯誤（`retryable:true`）daemon 會附人話的 `message`（維護窗口、Esc 送出去了不知道進了沒有…）；
- * `ApiError.message` 取的是 `reason` 代碼，直接顯示只剩 `maintenance_window（HTTP 409）`。
+ * daemon 的 409 帶機器 key `reason` 時，常常另外附一句人話 `message`（維護窗口、Esc 送出去了不知道進了沒有、
+ * 登入指令找不到 CLI、default session 的 bot 不給開關…）；`ApiError.message` 取的是 `reason` 代碼，直接顯示只剩
+ * `maintenance_window（HTTP 409）`。以前只有 `retryable:true` 才用 `message`，不可重試的那幾條照樣只剩代碼（#233）。
+ * `reason`（機器 key）與 `message`（人話）是分開的兩個欄位（API.md），兩個都在就顯示人話。
  */
 function reasonText(e: ApiError): string {
   const known = REASON_TEXT[e.message]
   if (known) return known
   const human = e.body.message
-  if (e.body.retryable === true && typeof e.body.reason === 'string' && typeof human === 'string' && human.trim()) return human.trim()
+  if (typeof e.body.reason === 'string' && typeof human === 'string' && human.trim()) return human.trim()
   return e.message
 }
 
