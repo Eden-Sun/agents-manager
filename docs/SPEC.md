@@ -1482,6 +1482,7 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   | 還有 `in_flight` Turn | `turn_in_flight` | 同上 |
   | 還有排隊中的 web prompt | `queued_turn` | 收掉等於把它永遠留在隊列裡 |
   | AGM 還有沒結案的 assignment 指著它 | `open_assignment` | 那顆正要被派工 |
+  | 它開的子 agent（`managed_by = 'child'`、`parent_bot_id` 指著它）還有 active run | `live_children` | 父 bot 分完工就結束回合等回報，看起來閒著；子 agent 的 pane 不在它的行程樹底下。收掉之後子 agent 用 `herdr agent prompt` 回報找不到人，§6.5a-1 的提問通知也因為父沒有 run 不送（#172） |
   | 沒有可續接的 session | `no_resume` | 沒 `native_session_id`、本機 transcript 不在、或 kind 不支援 `--resume`（grok）。收起來等於把對話丟掉，那不是省 RAM，是刪資料 |
   | 還沒閒置到門檻 | `still_warm` | — |
 
