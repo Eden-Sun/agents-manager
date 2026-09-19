@@ -384,6 +384,53 @@ async fn log_interrupted_at(app: &Arc<App>, bot: &db::Bot, run: &db::Run) -> Opt
     }
 }
 
+/// 我們送的那一則（`sent` 任一句）之後、它答完（`end_turn`）之前，claude transcript 有沒有使用者中斷標記（#235）。
+/// 答完之後才出現的是別一句被按停。找不到我們那一則＝`false`。
+pub(crate) fn claude_interrupted_after(log: &str, sent: &[String]) -> bool {
+    let lines: Vec<&str> = log.lines().collect();
+    let ours = |l: &&str| transcript_user_text(l).is_some_and(|t| sent.iter().any(|s| super::pasted_content::is_sent(&t, s)));
+    let Some(start) = lines.iter().rposition(ours) else { return false };
+    for line in &lines[start + 1..] {
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        if v.get("isSidechain").and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
+        match v.get("type").and_then(Value::as_str) {
+            Some("user") if claude_interrupt_marker(&v) => return true,
+            Some("assistant") if v.pointer("/message/stop_reason").and_then(Value::as_str) == Some("end_turn") => return false,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// 同上，codex rollout：我們那一則之後、`task_complete` 之前有 `turn_aborted`（`interrupted`）。
+pub(crate) fn codex_interrupted_after(log: &str, sent: &[String]) -> bool {
+    let lines: Vec<&str> = log.lines().collect();
+    let Some(start) = lines.iter().rposition(|l| codex_user_text(l).is_some_and(|t| sent.iter().any(|s| s == &t))) else { return false };
+    for line in &lines[start + 1..] {
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        if v.get("type").and_then(Value::as_str) != Some("event_msg") {
+            continue;
+        }
+        match v.pointer("/payload/type").and_then(Value::as_str) {
+            Some("turn_aborted") if v.pointer("/payload/reason").and_then(Value::as_str) == Some("interrupted") => return true,
+            Some("task_complete") => return false,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// 這一筆（`sent`）在這顆 bot 的 session log 裡是不是已經被使用者按停了（#235，重啟時用）。讀不到＝不知道＝`false`。
+pub(crate) async fn log_interrupted_after(app: &Arc<App>, bot: &db::Bot, run: &db::Run, sent: &[String]) -> bool {
+    let Some(log) = session_log(app, bot, run).await else { return false };
+    match bot.kind.as_str() {
+        "claude" => claude_interrupted_after(&log, sent),
+        _ => codex_interrupted_after(&log, sent),
+    }
+}
+
 /// `since` 之後這顆 bot 的 session log 裡有沒有使用者送出 `text` 這一則（#229：重啟後補證插隊送出的鍵生效了沒有——
 /// 平常那份 `SentProof` 只活在上一個行程的記憶體裡）。claude 可能把貼上的字包成 `<pasted_content>`（#218）；codex 逐字。
 /// 沒有時間的列不算。讀不到＝沒有證據。
@@ -726,6 +773,31 @@ mod tests {
         assert_eq!(codex_interrupted_at(&[prompt.clone(), aborted("replaced")].join("\n")), None, "不是使用者中斷");
         assert_eq!(codex_interrupted_at(&[aborted("interrupted"), prompt.clone()].join("\n")), None);
         assert_eq!(codex_interrupted_at(&[aborted("interrupted"), done].join("\n")), None);
+    }
+
+    /// #235：重啟時判斷「我們那一則是不是被按停了」——中斷標記要在我們那一則之後、它答完之前；答完之後的是別一句的。
+    /// 我們那一則被 CLI 包成 `<pasted_content>`（#218）也認得；找不到我們那一則就不下判斷。
+    #[test]
+    fn only_an_interruption_before_our_turn_finished_counts() {
+        let sent = vec!["跑測試".to_string()];
+        let at = "2026-09-16T12:01:00.000Z";
+        assert!(claude_interrupted_after(&[user("跑測試"), interrupted(at)].join("\n"), &sent));
+        assert!(claude_interrupted_after(&[user("跑測試"), interrupted(at), user("我自己來")].join("\n"), &sent), "之後又打了一句");
+        assert!(!claude_interrupted_after(&[user("跑測試"), end_turn(), user("再一件"), interrupted(at)].join("\n"), &sent), "答完之後的");
+        assert!(!claude_interrupted_after(&[user("跑測試")].join("\n"), &sent), "還在做");
+        assert!(!claude_interrupted_after(&[user("別的"), interrupted(at)].join("\n"), &sent), "找不到我們那一則");
+        let wrapped = user("\n\n<pasted_content id=\"0a9f\">\n跑測試\n</pasted_content id=\"0a9f\">\n");
+        assert!(claude_interrupted_after(&[wrapped, interrupted(at)].join("\n"), &sent), "agent.prompt 送的會被包起來");
+        let mut side: Value = serde_json::from_str(&interrupted(at)).unwrap();
+        side["isSidechain"] = json!(true);
+        assert!(!claude_interrupted_after(&[user("跑測試"), side.to_string()].join("\n"), &sent), "subagent 的中斷");
+
+        let prompt = json!({"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "跑測試"}]}}).to_string();
+        let aborted = |reason: &str| json!({"timestamp": at, "type": "event_msg", "payload": {"type": "turn_aborted", "reason": reason}}).to_string();
+        let done = json!({"type": "event_msg", "payload": {"type": "task_complete", "last_agent_message": "好了"}}).to_string();
+        assert!(codex_interrupted_after(&[prompt.clone(), aborted("interrupted")].join("\n"), &sent));
+        assert!(!codex_interrupted_after(&[prompt.clone(), done, aborted("interrupted")].join("\n"), &sent), "答完之後的");
+        assert!(!codex_interrupted_after(&[prompt, aborted("replaced")].join("\n"), &sent), "不是使用者中斷");
     }
 
     /// #223：Esc 生效的證據是「按鍵之後」出現的中斷紀錄，不管它還是不是最後一個回合邊界（中斷之後可能又打了一句）；
