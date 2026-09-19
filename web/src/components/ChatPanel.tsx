@@ -14,6 +14,7 @@ import { cleanLiveActivity, cleanLiveText } from '../store/liveText'
 import { typeAlongside } from '../store/alongside'
 import { queueFromComposer, settleComposerSend } from '../store/queuedSend'
 import { startingSend, startingSendLabel } from '../store/startingSend'
+import { composerPlaceholder, sendButtonLabel, sendButtonTitle } from '../lib/composerLabels'
 import { herdrJumpCommand } from '../lib/herdrJump'
 import { anchorOf, botLamp, composerState, inFlightTurn, liveReplyOf, projectHostName, toolsOfHost, useStore } from '../store/store'
 import { AttachPicker, AttachTray, DropVeil, MessageAttachments, useAttachments, useDropTarget } from './Attachments'
@@ -916,13 +917,7 @@ function Composer({
           /* 斷線也讓人繼續打（草稿會存）。 */
           disabled={sending}
           /* 手機短版：390px 會撐成兩行，且觸控不能拖放。 */
-          placeholder={
-            state.disabled
-              ? `${state.reason || '目前無法送出訊息'}${phone ? '' : '——可以先打，恢復後再送'}`
-              : state.queued
-                ? (phone ? '下一則訊息…' : starting ? '先打下一則…（bot 起來、前一則送出後才輪到它）' : '這回合還在跑，先打下一則…（送出會排隊）')
-                : `輸入訊息…${phone ? '' : '（檔案可直接拖放或貼上）'}`
-          }
+          placeholder={composerPlaceholder(state, { phone, starting: Boolean(starting) })}
           title="Enter 送出，Shift+Enter 換行；檔案可拖放或貼上"
           onChange={(e) => {
             setText(e.target.value)
@@ -951,12 +946,12 @@ function Composer({
           type="button"
           className="send-btn"
           disabled={state.disabled || sending || files.uploading || nothingToSend}
-          title={files.uploading ? '附件上傳中…' : state.queued ? '這回合結束後自動送出' : undefined}
+          title={sendButtonTitle(state, files.uploading)}
           /* 手機失焦收鍵盤→版面位移→click 不成立；擋 mousedown 保住焦點（2026-09-10）。 */
           onMouseDown={(e) => e.preventDefault()}
           onClick={submit}
         >
-          {sending ? '送出中…' : files.uploading ? '上傳中…' : state.queued ? (phone ? '排隊' : '排隊送出') : '送出'}
+          {sendButtonLabel(state, { phone, sending, uploading: files.uploading })}
         </button>
       </div>
     </div>
