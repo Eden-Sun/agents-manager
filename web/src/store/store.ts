@@ -563,6 +563,26 @@ function reasonText(e: ApiError): string {
   return e.message
 }
 
+/**
+ * 送鍵／送字帶的 `expect_run_id` 是這一顆 bot 被重啟過的圍籬：run 換了就不該把鍵打進新的 agent。
+ *
+ * 但前端快取的 run id 會過期（bot 剛重啟、狀態還沒推到；或 daemon 換版後第一次操作），使用者看到的
+ * 只是「送出按鍵失敗：run mismatch（HTTP 409）」，得自己重按一次——2026-09-19 w168:p7J 就是這樣。
+ * daemon 的 409 本來就把**現在的** run id 放在 body 裡，所以這裡拿它重試一次；再失敗才報錯。
+ * 只對 `run mismatch` 重試，而且只重試一次：其他 409（框裡有字、回合在飛）照舊原樣回報。
+ */
+export async function sendWithFreshRun(get: () => StoreState, botId: string, send: (runId: string | null) => Promise<unknown>): Promise<void> {
+  try {
+    await send(get().runs[botId]?.id ?? null)
+  } catch (e) {
+    const fresh = e instanceof ApiError && e.status === 409 && e.message === 'run mismatch' ? e.body.run_id : undefined
+    if (typeof fresh !== 'string' || !fresh) throw e
+    await send(fresh)
+    // 快取已經過期，順手把狀態拉回來（失敗不影響這次送出）。
+    void get().refreshState()
+  }
+}
+
 function errText(e: unknown): string {
   if (e instanceof ApiError) return `${reasonText(e)}（HTTP ${e.status}）`
   if (e instanceof Error) return e.message
@@ -1323,7 +1343,7 @@ export const useStore = create<StoreState>((set, get) => ({
 
   async sendKeys(botId, keys) {
     try {
-      await api.sendKeys(botId, keys, get().runs[botId]?.id ?? null)
+      await sendWithFreshRun(get, botId, (runId) => api.sendKeys(botId, keys, runId))
     } catch (e) {
       get().notify('error', `送出按鍵失敗：${errText(e)}`)
     }
@@ -1331,7 +1351,7 @@ export const useStore = create<StoreState>((set, get) => ({
 
   async sendText(botId, text, enter) {
     try {
-      await api.sendText(botId, text, enter, get().runs[botId]?.id ?? null)
+      await sendWithFreshRun(get, botId, (runId) => api.sendText(botId, text, enter, runId))
       return true
     } catch (e) {
       get().notify('error', `送出文字失敗：${errText(e)}`)
