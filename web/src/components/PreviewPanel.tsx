@@ -3,7 +3,7 @@
  * 狀態來自 store.previews（WS `preview_changed` 即時寫入）；進來與 daemon 重連時 GET 一次補齊 dir／error。
  */
 import { useCallback, useEffect, useState } from 'react'
-import { fetchPreview, previewUrl, startPreview, stopPreview, PREVIEW_OFF, type Preview } from '../api/preview'
+import { fetchPreview, previewApiMissing, PREVIEW_API_MISSING, previewUrl, startPreview, stopPreview, PREVIEW_OFF, type Preview } from '../api/preview'
 import { isMock } from '../api'
 import { ApiError } from '../api/types'
 import { useStore } from '../store/store'
@@ -11,6 +11,7 @@ import './previewPanel.css'
 
 /** 起 vite 失敗的 409：`no_vite_config` 的 body 帶試過哪些路徑。 */
 function startError(e: unknown): string {
+  if (previewApiMissing(e)) return PREVIEW_API_MISSING
   if (e instanceof ApiError) {
     if (e.body.reason === 'not_top_level' || e.body.error === 'not_top_level') return '只有頂層 bot 能開預覽。'
     const tried = e.body.tried
@@ -34,20 +35,31 @@ export function PreviewPanel({ botId }: { botId: string }) {
   const notify = useStore((s) => s.notify)
   const [pending, setPending] = useState<'start' | 'stop' | null>(null)
   const [err, setErr] = useState<string | null>(null)
+  // GET 失敗：不能拿 state 帶的 starting 當真，否則分頁會永遠卡在「啟動中」。
+  const [loadFailed, setLoadFailed] = useState(false)
   // 「重新整理」換 key 強制重載 iframe；跨 origin 拿不到 contentWindow.location.reload。
   const [nonce, setNonce] = useState(0)
 
   // 首屏先用 /api/state 帶的簡版，GET 回來再蓋掉。
   const fromState = bot?.preview
-  const p: Preview =
+  const p0: Preview =
     stored ?? (fromState ? { ...PREVIEW_OFF, status: fromState.status, port: fromState.port } : PREVIEW_OFF)
+  const p: Preview = loadFailed && p0.status === 'starting' ? PREVIEW_OFF : p0
 
   useEffect(() => {
     if (!connected) return
     let alive = true
     fetchPreview(botId)
-      .then((r) => alive && setPreview(botId, r))
-      .catch(() => undefined)
+      .then((r) => {
+        if (!alive) return
+        setLoadFailed(false)
+        setPreview(botId, r)
+      })
+      .catch((e) => {
+        if (!alive) return
+        setLoadFailed(true)
+        setErr(startError(e))
+      })
     return () => {
       alive = false
     }

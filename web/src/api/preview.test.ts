@@ -18,3 +18,12 @@ test('toPreviewEvent: running 沿用 dir，離開 failed 清錯誤，off 清 por
   assert.equal(off.port, null)
   assert.equal(off.status, 'off')
 })
+
+test('previewApiMissing: 404／405 是舊 daemon，其他錯誤不是', async () => {
+  const { ApiError } = await import('./types')
+  const { previewApiMissing } = await import('./preview')
+  assert.equal(previewApiMissing(new ApiError(405, {}, 'x')), true)
+  assert.equal(previewApiMissing(new ApiError(404, {}, 'x')), true)
+  assert.equal(previewApiMissing(new ApiError(409, { reason: 'no_vite_config' }, 'x')), false)
+  assert.equal(previewApiMissing(new Error('x')), false)
+})
