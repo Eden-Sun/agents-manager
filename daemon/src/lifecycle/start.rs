@@ -900,42 +900,64 @@ pub async fn restart_bot_with(app: &Arc<App>, bot_id: &str, opts: StartOpts) -> 
     stop_for_restart_locked(app, bot_id).await?;
     let started = restart_start(app, bot_id, opts).await;
     drop(restarting);
-    match &started {
+    match started {
         // 排著的交給新的 run：`--resume` 起的 claude 由 `resume_gate` 等驗證，其他照常送。
-        Ok(_) => schedule_flush_queued(app, bot_id),
+        Ok(run_id) => {
+            schedule_flush_queued(app, bot_id);
+            Ok(run_id)
+        }
         // 新 agent 起來了，只是 `running` 還沒記下（#145）：bot 回來了，不是沒開回來。對帳重試收成 running 時不叫 flush，
         // 它起來時的 idle 邊又早在 `starting` 就過了：等它收斂再叫（#165，同 start_send 的 #152）。
         Err(LcError::Uncommitted(v)) => {
             if let Some(run_id) = v.get("run_id").and_then(|r| r.as_str()) {
                 super::start_send::flush_once_running(app, bot_id, run_id);
             }
+            Err(LcError::Uncommitted(v))
         }
-        Err(_) => {
-            if let Some(run_id) = stopping.as_deref() {
-                left_down_by_restart(app, bot_id, run_id).await;
-            }
+        Err(e) => {
+            let unlabelled = match stopping.as_deref() {
+                Some(run_id) => left_down_by_restart(app, bot_id, run_id).await.err().map(|db_err| (run_id, db_err)),
+                None => None,
+            };
             // 沒開回來：這下排著的才真的沒有人會送。
             revoke_orphaned_queued_turns(app, bot_id, "重啟之後沒能把 bot 開回來").await;
+            match unlabelled {
+                // 舊 run 還記著 `stopped`（「使用者要它停」）：不能只回 start 的錯，那等於默認它是故意停的（#146 重開 B）。
+                Some((run_id, db_err)) => {
+                    let mut err = LcError::uncommitted(
+                        "restart_state_uncommitted",
+                        run_id,
+                        "重啟停掉了 bot、沒能開回來；舊 run 改不成 exited（還記著使用者要它停），已排重試",
+                        db_err,
+                    );
+                    if let LcError::Uncommitted(v) = &mut err {
+                        v["start_error"] = json!(format!("{e:?}"));
+                    }
+                    Err(err)
+                }
+                None => Err(e),
+            }
         }
     }
-    started
 }
 
 /// 重啟停掉了 bot、卻沒能把它開回來（start 在前置檢查就失敗，連新的 run 都沒建）：剛停掉的那個 run 改記
 /// `exited`。`stopped` 的意思是「使用者要它停」——incident 探針靠它分辨故意停的 bot，留著的話一顆
 /// `autostart=1` 的 bot 從此沒在跑、卻永遠不開 `bot_stopped`，health 一直是綠的（review 2026-09-16 c1 L3）。
-async fn left_down_by_restart(app: &Arc<App>, bot_id: &str, run_id: &str) {
-    let res = sqlx::query(
-        "UPDATE runs SET state='exited' WHERE id=? AND state='stopped'
-           AND NOT EXISTS (SELECT 1 FROM runs WHERE bot_id=? AND state IN ('starting','running','stopping'))",
-    )
-    .bind(run_id)
-    .bind(bot_id)
-    .execute(&app.db)
-    .await;
-    if matches!(res, Ok(r) if r.rows_affected() > 0) {
-        tracing::warn!(bot = bot_id, run = run_id, "restart stopped the bot but could not start it again; recorded as exited, not as a user stop");
-        app.emit_bot_status(bot_id).await;
+///
+/// 走 `run_state::relabel`（跟 stop 的改標同一支）：寫不進去回錯並排重試（#146 重開 B），不再只看 `Ok(rows>0)`。
+async fn left_down_by_restart(app: &Arc<App>, bot_id: &str, run_id: &str) -> Result<(), sqlx::Error> {
+    match super::run_state::relabel(&app.db, run_id, "stopped", "exited").await {
+        Ok(super::run_state::Moved::Applied) => {
+            tracing::warn!(bot = bot_id, run = run_id, "restart stopped the bot but could not start it again; recorded as exited, not as a user stop");
+            app.emit_bot_status(bot_id).await;
+            Ok(())
+        }
+        Ok(super::run_state::Moved::Lost) => Ok(()),
+        Err(e) => {
+            super::run_state::schedule_settle(app, run_id, super::run_state::Settle::Relabel { from: "stopped", to: "exited" });
+            Err(e)
+        }
     }
 }
 
@@ -2333,6 +2355,36 @@ mod idle_restart_tests {
         stop_bot(&app, &other).await.unwrap();
         let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(&other_run).fetch_one(&app.db).await.unwrap();
         assert_eq!(state, "stopped");
+    }
+
+    /// #146 重開 B：重啟停掉了、start 在前置檢查就失敗，舊 run 改記 `exited` 卻寫不進去。以前只看 `Ok(rows>0)`，DB 錯誤
+    /// 直接吞掉，留下 `stopped`（「使用者要它停」）：autostart 的 bot 從此沒在跑，incident 探針卻永遠不報。現在回 503
+    /// `restart_state_uncommitted`（帶著 start 的錯）、排 `Relabel` 重試；DB 恢復後成 `exited`，探針報 `bot_stopped`。
+    #[tokio::test]
+    async fn a_restart_that_cannot_relabel_its_old_run_says_so_and_retries() {
+        use super::super::run_state as rs;
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, run_id) = bot_with_run(&env, "user", "idle").await;
+        sqlx::query("UPDATE bots SET identity='nope-not-on-this-host', autostart=1 WHERE id=?").bind(&bot_id).execute(&app.db).await.unwrap();
+        rs::refuse_run_state(&app, "exited").await;
+        match restart_bot(&app, &bot_id).await {
+            Err(LcError::Uncommitted(v)) => {
+                assert_eq!((v["error"].as_str(), v["run_id"].as_str()), (Some("restart_state_uncommitted"), Some(run_id.as_str())));
+                assert!(v["start_error"].as_str().is_some_and(|s| s.contains("Conflict")), "start 的錯一起帶回：{v}");
+            }
+            other => panic!("舊 run 還記著使用者要它停，不能只回 start 的錯：{other:?}"),
+        }
+        let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(&run_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(state, "stopped");
+        assert_eq!(rs::scheduled(&run_id), vec![rs::Settle::Relabel { from: "stopped", to: "exited" }], "排了改標的重試");
+        assert!(!rs::bot_stopped_reported(&app, &bot_id).await, "前提：留著 stopped，探針以為是故意停的");
+
+        rs::accept_run_state(&app, "exited").await;
+        assert!(rs::settle_once(&app, &run_id, &rs::Settle::Relabel { from: "stopped", to: "exited" }).await);
+        let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(&run_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(state, "exited", "重啟沒開回來，不是使用者停的");
+        assert!(rs::bot_stopped_reported(&app, &bot_id).await, "autostart 的 bot 沒在跑：探針報出來");
     }
 
     /// 排到它的那一刻還閒著、拿到鎖時已經在跑：不送 ctrl+c、run 原封不動。

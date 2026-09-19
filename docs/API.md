@@ -23,7 +23,7 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
 | 404 | `{"error":"not_found","what":"bot"\|"project"\|"run"\|"pane"\|"turn"}` | 找不到 |
 | 409 | `{"error":"conflict","reason":"<人類可讀>", ...extra}` | 狀態機衝突；extra 視情況含 `run_id` / `turn_id` / `bot_id` / `name` / `path` / `state` |
 | 502 | `{"error":"upstream","message":"..."}` | herdr / DB 出錯 |
-| 503 | `{"error":"start_state_uncommitted"\|"stop_state_uncommitted","run_id","retryable":true,"message","detail"}` | 外面的副作用已經做了（agent 起來了／停了），run 的狀態卻寫不進 DB；daemon 已排重試，run 會照 herdr 的證據收斂（SPEC §6.2、§6.4）。不是「沒做」也不是「做好了」：看 bot 狀態，或稍後重送。另一種 503 是「讀不到狀態所以一步都沒做」（`sent:false`，帶 `Retry-After`，例如 prompt 的 `maintenance_state_unavailable`），兩者 body 分得開 |
+| 503 | `{"error":"start_state_uncommitted"\|"stop_state_uncommitted"\|"restart_state_uncommitted","run_id","retryable":true,"message","detail"}` | 外面的副作用已經做了（agent 起來了／停了），run 的狀態卻寫不進 DB；daemon 已排重試，run 會照 herdr 的證據收斂（SPEC §6.2、§6.4）。不是「沒做」也不是「做好了」：看 bot 狀態，或稍後重送。另一種 503 是「讀不到狀態所以一步都沒做」（`sent:false`，帶 `Retry-After`，例如 prompt 的 `maintenance_state_unavailable`），兩者 body 分得開 |
 
 所有寫 config.toml 的 API（建/改專案、建/改 bot、排序、還原、建/刪身分）套用、驗證、DB-backed 大量軟刪
 閘門都在**落盤之前**做完（issue #73，統一 commit boundary：全部走 `projection::update_and_project`），
@@ -909,6 +909,7 @@ readback_model_mismatch|readback_effort_mismatch|readback_fast_mismatch>`。以�
 子 agent 在原 pane 重開（SPEC §6.9）。
 `?resume=native`：同 start 的語意，**停之前**就判斷接不接得回（看現在這個 Run 的 session）；接不回回 `409 cannot_resume`，原本的 agent 不會被停。預設（不帶）行為不變。
 重啟期間這顆 bot 排著的 queued（AGM 派工）**不撤**，留給新的 Run 送；重啟沒能把 bot 開回來才撤（SPEC §4.4a「重啟不是停」，issue #106）。
+停掉了卻沒能開回來時，舊 Run 改標 `exited`；改標寫不進 DB 回 `503 {"error":"restart_state_uncommitted","run_id":<舊 Run>,"retryable":true,"message","detail","start_error"}`（`start_error` 是 start 那一半的錯），已排重試（SPEC §6.4）。
 
 ### 10.3c `GET /api/capabilities`
 `200 {"capabilities":["resume_native_start","herdr_maintenance"]}`。會停 herdr server 的腳本先確認這裡有 `resume_native_start` 才動手。

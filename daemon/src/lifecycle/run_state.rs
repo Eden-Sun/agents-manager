@@ -30,12 +30,41 @@ pub(crate) async fn transition(
     to: &str,
     agent_status: Option<&str>,
 ) -> Result<Moved, sqlx::Error> {
+    cas(db, run_id, from, to, agent_status, "").await
+}
+
+/// 終態改標：`exited ↔ stopped`，只改「這顆為什麼停」，不復活任何東西。`stopped` 是「使用者要它停」——incident 探針
+/// （最後一個 run 是不是 `stopped`）靠它分辨故意停的 autostart bot 與掛掉的。所以跟 [`transition`] 同一句 CAS、同樣三種
+/// 結果，寫不進去一樣回錯（#146 重開）：沒有「終態改終態，寫不進去沒關係」的例外。多一個條件：這顆 bot 沒有別的
+/// active run——新的 run 已經起來，舊 run 的標籤就不代表 bot 現在的樣子，不動它（`Lost`）。
+pub(crate) async fn relabel(db: &sqlx::SqlitePool, run_id: &str, from: &str, to: &str) -> Result<Moved, sqlx::Error> {
+    debug_assert!(matches!(from, "stopped" | "exited") && matches!(to, "stopped" | "exited"));
+    cas(
+        db,
+        run_id,
+        &[from],
+        to,
+        None,
+        " AND NOT EXISTS (SELECT 1 FROM runs o WHERE o.bot_id = runs.bot_id AND o.id <> runs.id
+                           AND o.state IN ('starting','running','stopping'))",
+    )
+    .await
+}
+
+async fn cas(
+    db: &sqlx::SqlitePool,
+    run_id: &str,
+    from: &[&str],
+    to: &str,
+    agent_status: Option<&str>,
+    guard: &str,
+) -> Result<Moved, sqlx::Error> {
     debug_assert!(!from.is_empty());
     let terminal = matches!(to, "stopped" | "exited");
     let sql = format!(
         "UPDATE runs SET state = ?, agent_status = COALESCE(?, agent_status),
                 ended_at = CASE WHEN ? THEN COALESCE(ended_at, ?) ELSE ended_at END
-          WHERE id = ? AND state IN ({})",
+          WHERE id = ? AND state IN ({}){guard}",
         vec!["?"; from.len()].join(",")
     );
     let mut q = sqlx::query(&sql).bind(to).bind(agent_status).bind(terminal).bind(db::now()).bind(run_id);
@@ -57,6 +86,9 @@ pub(crate) enum Settle {
     FinishStop,
     /// 停不下來（agent 還活著）：`stopping → running` 放回去。
     BackToRunning,
+    /// 終態的標籤寫不進去（[`relabel`]，#146 重開）：`from → to` 再寫一次。run 離開 `from`、或這顆 bot 已經有新的
+    /// active run（標籤不再代表它）就算收斂。
+    Relabel { from: &'static str, to: &'static str },
 }
 
 impl Settle {
@@ -66,6 +98,7 @@ impl Settle {
             Settle::Reconcile { stuck } => state == stuck,
             Settle::FinishStop => matches!(state, "stopping" | "exited"),
             Settle::BackToRunning => state == "stopping",
+            Settle::Relabel { from, .. } => state == *from,
         }
     }
 
@@ -74,6 +107,7 @@ impl Settle {
             Settle::Reconcile { .. } => "reconcile",
             Settle::FinishStop => "finish_stop",
             Settle::BackToRunning => "back_to_running",
+            Settle::Relabel { .. } => "relabel",
         }
     }
 }
@@ -139,6 +173,23 @@ pub(crate) async fn settle_once(app: &Arc<App>, run_id: &str, how: &Settle) -> b
                 app.emit_bot_status(&run.bot_id).await;
             }
         }
+        // CAS 輸了（已經不是 `from`、或 bot 有了新的 active run）也算收斂：這一筆已經沒有要改的標籤。
+        Settle::Relabel { from, to } => {
+            let lock = app.bot_lock(&run.bot_id).await;
+            let _g = lock.lock().await;
+            return match relabel(&app.db, run_id, from, to).await {
+                Ok(Moved::Applied) => {
+                    tracing::info!(run = run_id, from, to, "a run's terminal label is now recorded");
+                    app.emit_bot_status(&run.bot_id).await;
+                    true
+                }
+                Ok(Moved::Lost) => true,
+                Err(e) => {
+                    tracing::warn!(run = run_id, error = %e, "relabel retry failed");
+                    false
+                }
+            };
+        }
     }
     match db::run(&app.db, run_id).await {
         Ok(Some(r)) => !how.pending(&r.state),
@@ -176,6 +227,13 @@ pub(crate) async fn refuse_run_state(app: &Arc<App>, state: &str) {
 #[cfg(test)]
 pub(crate) async fn accept_run_state(app: &Arc<App>, state: &str) {
     sqlx::query(&format!("DROP TRIGGER refuse_run_state_{state}")).execute(&app.db).await.unwrap();
+}
+
+/// 測試用：incident 探針這一輪會不會說這顆 bot「應該在跑卻停了」（`bot_stopped`）——`stopped`／`exited` 標籤的語意就在這裡。
+#[cfg(test)]
+pub(crate) async fn bot_stopped_reported(app: &Arc<App>, bot_id: &str) -> bool {
+    let t = crate::supervisor::incidents::Thresholds { host_disconnected_secs: 120, bot_stopped_secs: 300, assignment_stalled_secs: 7200, notify_max_attempts: 5 };
+    crate::supervisor::incidents::observe(app, &t).await.seen.iter().any(|o| o.kind == "bot_stopped" && o.resource == bot_id)
 }
 
 /// 測試用的故障注入（#156）：之後改這一筆回合 `status` 的 UPDATE 一律失敗，直到 [`accept_turn_close`]。
@@ -271,5 +329,26 @@ mod tests {
         let ended: Option<String> = sqlx::query_scalar("SELECT ended_at FROM runs WHERE id=?").bind(&run).fetch_one(&app.db).await.unwrap();
         assert!(ended.is_some(), "終態補上 ended_at");
         assert_eq!(transition(&app.db, &run, LIVE, "running", None).await.unwrap(), Moved::Lost, "終態不會被拉回 active");
+    }
+
+    /// 終態改標跟轉移同一套三種結果（#146 重開）：寫不進去是錯、不是「輸了」；這顆 bot 已經有新的 active run 時不動舊的。
+    #[tokio::test]
+    async fn a_relabel_tells_applied_lost_and_a_failed_write_apart() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "relabel").await;
+        let old = tt::fake_run(&app, &bot.id).await;
+        assert_eq!(transition(&app.db, &old, LIVE, "exited", None).await.unwrap(), Moved::Applied);
+
+        refuse_run_state(&app, "stopped").await;
+        assert!(relabel(&app.db, &old, "exited", "stopped").await.is_err(), "寫不進去就是錯");
+        assert_eq!(state(&app, &old).await, "exited");
+        accept_run_state(&app, "stopped").await;
+        assert_eq!(relabel(&app.db, &old, "stopped", "exited").await.unwrap(), Moved::Lost, "它是 exited，不是 stopped");
+        assert_eq!(relabel(&app.db, &old, "exited", "stopped").await.unwrap(), Moved::Applied);
+
+        let new = tt::fake_run(&app, &bot.id).await;
+        assert_eq!(relabel(&app.db, &old, "stopped", "exited").await.unwrap(), Moved::Lost, "新的 run 起來了：舊 run 的標籤不再代表 bot");
+        assert_eq!((state(&app, &old).await, state(&app, &new).await), ("stopped".to_string(), "running".to_string()));
     }
 }
