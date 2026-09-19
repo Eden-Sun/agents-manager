@@ -342,9 +342,8 @@ async fn a_dispatch_queued_before_the_switch_survives_the_restart_and_goes_out_e
     stop_bot(&app, &bot.id).await.unwrap();
 }
 
-/// issue #108 的起點：身分 A 起來、pane 可以打字，一回合在飛時 AGM 的派工排在後面，接著撞額度的
-/// `StopFailure` **先到**（比換身分早）。回傳 `(bot, run_a, pane_a, 派工的 turn)`。
-async fn quota_hit_with_a_dispatch_queued(e: &tt::Env, name: &str) -> (db::Bot, String, String, String) {
+/// 身分 A 起來、pane 可以打字，一回合在飛時 AGM 的派工排在後面。回傳 `(bot, run_a, pane_a, 派工的 turn)`。
+async fn dispatch_queued_behind_a_turn(e: &tt::Env, name: &str) -> (db::Bot, String, String, String) {
     let app = e.app.clone();
     add_identity(&app, "cc-a", &e.dir.join("cc-a")).await;
     add_identity(&app, "cc-b", &e.dir.join("cc-b")).await;
@@ -381,23 +380,36 @@ async fn quota_hit_with_a_dispatch_queued(e: &tt::Env, name: &str) -> (db::Bot, 
         .await
         .unwrap();
     assert_eq!(dispatch.delivery, "queued");
+    let bot = db::bot(&app.db, &bot.id).await.unwrap().unwrap();
+    (bot, run_a, pane_a, dispatch.turn_id)
+}
+
+/// A 撞額度的那一則 `StopFailure`。
+fn a_limit(bot_id: &str, run_a: &str) -> crate::hookrecv::HookBody {
+    hook(bot_id, run_a, json!({"hook_event_name": "StopFailure", "session_id": S, "prompt_id": "p-a",
+                               "reason": "You've hit your session limit · resets 5pm"}))
+}
+
+/// issue #108 的起點：[`dispatch_queued_behind_a_turn`]，接著撞額度的 `StopFailure` **先到**（比換身分早）。
+/// 回傳 `(bot, run_a, pane_a, 派工的 turn)`。
+async fn quota_hit_with_a_dispatch_queued(e: &tt::Env, name: &str) -> (db::Bot, String, String, String) {
+    let app = e.app.clone();
+    let (bot, run_a, pane_a, dispatch) = dispatch_queued_behind_a_turn(e, name).await;
 
     // StopFailure 先到：回合收成失敗，而且 A 的撞限在推回合結束**之前**就記下來了。
-    let limit = json!({"hook_event_name": "StopFailure", "session_id": S, "prompt_id": "p-a",
-                       "reason": "You've hit your session limit · resets 5pm"});
-    crate::hookrecv::process(&app, &hook(&bot.id, &run_a, limit)).await.unwrap();
+    crate::hookrecv::process(&app, &a_limit(&bot.id, &run_a)).await.unwrap();
     let bot = db::bot(&app.db, &bot.id).await.unwrap().unwrap();
     assert!(crate::quota::limit_hit_for_bot(&app, &bot).await.is_some(), "StopFailure 就記下撞限，不等讀畫面");
 
     // 回合結束叫醒的 flush（測試裡 `schedule_flush_queued` 是 no-op，直接叫）：派工留在佇列，沒有送進 A。
     forget_queue_retry_timer(&bot.id);
     flush_queued_locked(&app, &bot.id).await.unwrap();
-    let t = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(&dispatch.turn_id).fetch_one(&app.db).await.unwrap();
+    let t = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(&dispatch).fetch_one(&app.db).await.unwrap();
     assert_eq!((t.status.as_str(), t.flush_retries, t.run_id.as_deref()), ("queued", 0, None), "A 沒額度：不 claim、不花重試");
     assert_eq!(e.herdr.pane(&pane_a).map_or(0, |p| p.transcript.iter().filter(|l| l.contains("撞額度後排著的派工")).count()), 0);
     assert!(queue_retry_timer_armed(&bot.id), "掛了 timer 回來再看");
     forget_queue_retry_timer(&bot.id);
-    (bot, run_a, pane_a, dispatch.turn_id)
+    (bot, run_a, pane_a, dispatch)
 }
 
 fn sent_to(e: &tt::Env, pane: &str) -> usize {
@@ -587,4 +599,107 @@ async fn a_quota_hold_survives_a_daemon_restart_then_goes_out_once_when_a_new_re
     assert_eq!(sent_to(&e, &pane_a), 1, "只送一次");
     forget_queue_retry_timer(&bot.id);
     stop_bot(&app, &bot.id).await.unwrap();
+}
+
+/// 換到 B、接回驗證完 flush：派工送進 B 一次，A 一次都沒有。
+async fn goes_to_b_exactly_once(e: &tt::Env, app: &Arc<App>, bot: &db::Bot, pane_a: &str, dispatch: &str) {
+    sqlx::query("UPDATE bots SET identity='cc-b' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
+    let strict = StartOpts { resume_native: true, resume_required: true, ..Default::default() };
+    let run_b = restart_bot_with(app, &bot.id, strict).await.unwrap();
+    let bot = db::bot(&app.db, &bot.id).await.unwrap().unwrap();
+    assert!(crate::quota::limit_hit_for_bot(app, &bot).await.is_none(), "B 這個身分沒有撞限");
+    let transcript_b = e.dir.join("cc-b").join("projects").join(CWD_KEY).join(format!("{S}.jsonl"));
+    let pane_b: String = sqlx::query_scalar("SELECT pane_id FROM runs WHERE id=?").bind(&run_b).fetch_one(&app.db).await.unwrap();
+    e.herdr.live_pane(&pane_b, tt::LivePane { width: Some(120), transcript_file: Some(transcript_b.clone()), ..Default::default() });
+    db::set_pane_typed(&app.db, &run_b).await.unwrap();
+    crate::hookrecv::process(
+        app,
+        &hook(&bot.id, &run_b, json!({"hook_event_name": "SessionStart", "session_id": S, "source": "resume",
+                                      "transcript_path": transcript_b.to_string_lossy()})),
+    )
+    .await
+    .unwrap();
+    for _ in 0..3 {
+        forget_queue_retry_timer(&bot.id);
+        flush_queued_locked(app, &bot.id).await.unwrap();
+    }
+    let t = turn_row(app, dispatch).await;
+    assert_eq!((t.status.as_str(), t.delivery.as_str(), t.run_id.as_deref()), ("in_flight", "ok", Some(run_b.as_str())));
+    assert_eq!((sent_to(e, &pane_b), sent_to(e, pane_a)), (1, 0), "送進 B、只送一次；A 一次都沒有");
+    forget_queue_retry_timer(&bot.id);
+    stop_bot(app, &bot.id).await.unwrap();
+}
+
+async fn limit_hits(app: &Arc<App>) -> Vec<String> {
+    app.quotas.lock().await.iter().filter(|(_, q)| q.limit_hit.is_some()).map(|(k, _)| k.clone()).collect()
+}
+
+/// #108 重開（故障注入 1、4）：A 撞額度的 `StopFailure` 到的時候讀不到 A 在哪台主機。以前退回 `local` 照記、照收回合、
+/// 推回合結束。現在這一則失敗（收件匣重試）、哪一格都不寫、撞限欠著、回合不收——派工留在佇列。讀得到之後收件匣重試：
+/// 撞限記下、回合收成失敗、派工照撞限擋；換到 B → 送出，只送一次。
+#[tokio::test]
+async fn a_quota_stop_failure_that_cannot_find_its_identity_holds_the_dispatch_until_recorded_then_goes_to_b_once() {
+    let e = tt::env().await;
+    let app = e.app.clone();
+    let (bot, run_a, pane_a, dispatch) = dispatch_queued_behind_a_turn(&e, "quota-unrecorded").await;
+
+    sqlx::query("ALTER TABLE projects RENAME TO projects_unreadable").execute(&app.db).await.unwrap();
+    assert!(crate::hookrecv::process(&app, &a_limit(&bot.id, &run_a)).await.is_err(), "記不進去：這一則失敗，收件匣重試");
+    assert_eq!(limit_hits(&app).await, Vec::<String>::new(), "沒有退回 local 記在別的帳號上");
+    assert!(crate::turn_error::owes_limit_hit(&app, &bot.id));
+    assert!(crate::quota::limit_hit_for_bot(&app, &bot).await.is_some(), "派送前也看得到欠著的撞限");
+    forget_queue_retry_timer(&bot.id);
+    flush_queued_locked(&app, &bot.id).await.unwrap();
+    assert_eq!(held(&turn_row(&app, &dispatch).await), ("queued", 0, None));
+    assert_eq!(sent_to(&e, &pane_a), 0, "沒有送進還沒額度的 A");
+    sqlx::query("ALTER TABLE projects_unreadable RENAME TO projects").execute(&app.db).await.unwrap();
+
+    crate::hookrecv::process(&app, &a_limit(&bot.id, &run_a)).await.expect("收件匣重試：讀得到了");
+    assert!(!crate::turn_error::owes_limit_hit(&app, &bot.id));
+    assert_eq!(limit_hits(&app).await.len(), 1);
+    forget_queue_retry_timer(&bot.id);
+    flush_queued_locked(&app, &bot.id).await.unwrap();
+    assert_eq!((held(&turn_row(&app, &dispatch).await), sent_to(&e, &pane_a)), (("queued", 0, None), 0), "照撞限擋");
+    goes_to_b_exactly_once(&e, &app, &bot, &pane_a, &dispatch).await;
+}
+
+/// #108 重開（故障注入 3、4）：撞限記進記憶體了，憑據（`turns.quota_hold`）卻寫不進去。以前只記 warn、照收回合——重啟之後
+/// 記憶體沒了、那一列也沒有憑據，派工送進 A。現在沒落地不算記好：這一則失敗、回合不收，重啟前後都不送；寫得進去之後
+/// 收件匣重試落地，再重啟一次也照擋（偵測之前看那一列、偵測之後回填），換到 B → 只送一次。
+#[tokio::test]
+async fn a_quota_hold_that_cannot_be_persisted_is_not_sent_before_or_after_a_restart() {
+    let e = tt::env().await;
+    let (bot, run_a, pane_a, dispatch) = dispatch_queued_behind_a_turn(&e, "quota-unpersisted").await;
+    sqlx::query("CREATE TRIGGER refuse_quota_hold BEFORE UPDATE OF quota_hold ON turns BEGIN SELECT RAISE(ABORT, 'injected: cannot write turns.quota_hold'); END")
+        .execute(&e.app.db)
+        .await
+        .unwrap();
+    assert!(crate::hookrecv::process(&e.app, &a_limit(&bot.id, &run_a)).await.is_err(), "憑據沒落地：這一則失敗");
+    forget_queue_retry_timer(&bot.id);
+    flush_queued_locked(&e.app, &bot.id).await.unwrap();
+    assert_eq!((held(&turn_row(&e.app, &dispatch).await), sent_to(&e, &pane_a)), (("queued", 0, None), 0), "重啟前：不送");
+
+    let app = restarted(&e, &bot.id).await;
+    flush_queued_locked(&app, &bot.id).await.unwrap();
+    assert!(crate::hookrecv::process(&app, &a_limit(&bot.id, &run_a)).await.is_err(), "開機後收件匣重試：還是寫不進去");
+    forget_queue_retry_timer(&bot.id);
+    flush_queued_locked(&app, &bot.id).await.unwrap();
+    assert_eq!((held(&turn_row(&app, &dispatch).await), sent_to(&e, &pane_a)), (("queued", 0, None), 0), "重啟後：不送");
+
+    sqlx::query("DROP TRIGGER refuse_quota_hold").execute(&app.db).await.unwrap();
+    crate::hookrecv::process(&app, &a_limit(&bot.id, &run_a)).await.expect("寫得進去了：收件匣重試成功");
+    forget_queue_retry_timer(&bot.id);
+    flush_queued_locked(&app, &bot.id).await.unwrap();
+    assert_eq!((held(&turn_row(&app, &dispatch).await), sent_to(&e, &pane_a)), (("queued", 0, None), 0), "照撞限擋");
+    let hold: Option<String> = sqlx::query_scalar("SELECT quota_hold FROM turns WHERE id=?").bind(&dispatch).fetch_one(&app.db).await.unwrap();
+    assert!(hold.is_some(), "憑據落地");
+
+    let app = restarted(&e, &bot.id).await;
+    flush_queued_locked(&app, &bot.id).await.unwrap();
+    assert_eq!((held(&turn_row(&app, &dispatch).await), sent_to(&e, &pane_a)), (("queued", 0, None), 0), "再重啟：偵測之前看那一列");
+    identities_detected(&app).await;
+    forget_queue_retry_timer(&bot.id);
+    flush_queued_locked(&app, &bot.id).await.unwrap();
+    assert_eq!((held(&turn_row(&app, &dispatch).await), sent_to(&e, &pane_a)), (("queued", 0, None), 0), "回填之後照擋");
+    goes_to_b_exactly_once(&e, &app, &bot, &pane_a, &dispatch).await;
 }

@@ -754,9 +754,11 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             // 這個身分沒額度。撞額度是帳號的事實，跟這一則還有沒有回合可收無關：Esc 收掉回合之後才到、對上中斷的回聲、
             // 回合已被別的路收掉，都一樣要記，不然下一件派工會被送進沒額度的身分。只記這一代 run 送來的（`admitted`：
             // 上一代的在圍籬就丟了；沒有 run 時說不準是哪個身分）；已經收過的同一則不再記，免得把撞限時刻往後推。
+            // 記不進去（讀不到主機、身分表還沒進來、憑據寫不進去）就讓這一則失敗、由收件匣重試（#108 重開）：回合先不收、
+            // 不推回合結束，排著的派工照欠著的那一筆擋（`turn_error::owed_limit_hit`），不能當作沒撞。
             if bot.kind == "claude" && admitted.is_some() && seen.is_none() {
                 if let Some(d) = detail.as_deref().filter(|d| crate::turn_error::is_quota_exhaustion(d)) {
-                    crate::turn_error::mark_claude_limit_hit(app, &bot.id, d).await;
+                    crate::turn_error::mark_claude_limit_hit(app, &bot, d).await?;
                 }
             }
             if let Some(r) = &run {
@@ -823,7 +825,9 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             Ok(())
         }
         HookKind::StatusLine => {
-            let host = db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| crate::config::LOCAL_HOST.to_string());
+            // 讀不到主機就丟掉這一份，下一次重繪會再來（#108 重開）：退回 local 會把遠端的讀數寫進本機那一格，
+            // 還會拿它去校正、作廢本機身分真的撞限（`quota::set`）。
+            let host = db::bot_host(&app.db, &bot.id).await?;
             // Written only when changed — claude refreshes often and every write wakes every client.
             if let Some(r) = &run {
                 let text = body.payload.get("status_line").and_then(|v| v.as_str()).map(str::trim).filter(|t| !t.is_empty());
@@ -2452,6 +2456,114 @@ mod external_claim_tests {
         let hit = crate::quota::limit_hit_for_bot(&app, &bot).await.expect("撞限記下來了");
         assert_eq!(hit.bucket.as_deref(), Some("five_hour"));
         assert!(hit.until.is_some(), "有期限，不會永遠擋著");
+    }
+
+    /// #108 重開：撞額度的 `StopFailure` 到的時候讀不到這顆（遠端）bot 在哪台主機。以前退回 `local`：撞限寫進本機帳號
+    /// 那一格，回合照收、推回合結束，flush 查遠端那把 key 看不到撞限，排著的派工當場送進用盡的身分。現在這一則失敗、
+    /// 由收件匣重試：哪一格都不寫、回合不收（在飛的回合本身擋著 flush），撞限記成欠著——就算回合被別的路收掉，排著的
+    /// 照欠著的那一筆擋。讀得到之後重試：撞限進 `remote1/claude`，回合照常收成失敗。讀不到 bot 本身也一樣是這一則失敗。
+    #[tokio::test]
+    async fn a_quota_stop_failure_whose_host_cannot_be_read_fails_and_holds_the_queue() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let remote = db::ulid();
+        sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?, '/r/p', 'r', 'remote1', ?)")
+            .bind(&remote)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let (bot_id, conv, turn_id) = delivered_turn(&app, &remote).await;
+        let queued = db::ulid();
+        sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, delivery, prompt_text, created_at) VALUES (?,?,'web','queued','pending','下一件派工',?)")
+            .bind(&queued)
+            .bind(&conv)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let ev = stop_failure(&bot_id, json!({"hook_event_name": "StopFailure", "session_id": "s-far", "prompt_id": "p-far",
+                                              "reason": "You've hit your session limit · resets 5pm"}));
+        let limit_hits = || {
+            let app = app.clone();
+            async move { app.quotas.lock().await.iter().filter(|(_, q)| q.limit_hit.is_some()).map(|(k, _)| k.clone()).collect::<Vec<_>>() }
+        };
+
+        sqlx::query("ALTER TABLE bots RENAME TO bots_unreadable").execute(&app.db).await.unwrap();
+        assert!(process(&app, &ev).await.is_err(), "讀不到 bot：這一則失敗、收件匣重試");
+        sqlx::query("ALTER TABLE bots_unreadable RENAME TO bots").execute(&app.db).await.unwrap();
+        assert_eq!(turn_row(&app, &turn_id).await.status, "in_flight");
+
+        sqlx::query("ALTER TABLE projects RENAME TO projects_unreadable").execute(&app.db).await.unwrap();
+        assert!(process(&app, &ev).await.is_err(), "讀不到主機：不當作沒撞限");
+        assert_eq!(limit_hits().await, Vec::<String>::new(), "哪一格都沒寫，尤其不是本機的 `claude`");
+        assert!(crate::turn_error::owes_limit_hit(&app, &bot_id), "撞限記成欠著");
+        let bot = db::bot(&app.db, &bot_id).await.unwrap().unwrap();
+        let owed_at = crate::quota::limit_hit_for_bot(&app, &bot).await.expect("派送前照欠著的那一筆擋").at;
+        assert_eq!(turn_row(&app, &turn_id).await.status, "in_flight", "回合不收、不推回合結束");
+        // 回合被別的路收掉（卡住的回合被看門狗收了）：沒有在飛的回合擋著，排著的照欠著的那一筆擋。
+        let run: String = sqlx::query_scalar("SELECT run_id FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET status='failed', completed_at=? WHERE id=?").bind(db::now()).bind(&turn_id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET agent_status='idle' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
+        lifecycle::forget_queue_retry_timer(&bot_id);
+        lifecycle::flush_queued_locked(&app, &bot_id).await.unwrap();
+        let q = turn_row(&app, &queued).await;
+        assert_eq!((q.status.as_str(), q.flush_retries, q.run_id.as_deref()), ("queued", 0, None), "派工沒有送進用盡的身分");
+        sqlx::query("ALTER TABLE projects_unreadable RENAME TO projects").execute(&app.db).await.unwrap();
+
+        // 收件匣重試：讀得到了。
+        process(&app, &ev).await.expect("重試");
+        assert_eq!(limit_hits().await, vec!["remote1/claude".to_string()], "記在遠端那一格");
+        assert_eq!(app.quotas.lock().await["remote1/claude"].limit_hit.as_ref().map(|h| h.at.clone()), Some(owed_at), "撞限時刻是當初那一刻，不是重試的時刻");
+        assert!(!crate::turn_error::owes_limit_hit(&app, &bot_id));
+        lifecycle::forget_queue_retry_timer(&bot_id);
+        lifecycle::flush_queued_locked(&app, &bot_id).await.unwrap();
+        let q = turn_row(&app, &queued).await;
+        assert_eq!((q.status.as_str(), q.flush_retries), ("queued", 0), "照撞限擋");
+        let hold: Option<String> = sqlx::query_scalar("SELECT quota_hold FROM turns WHERE id=?").bind(&queued).fetch_one(&app.db).await.unwrap();
+        assert!(hold.is_some(), "憑據落地");
+        lifecycle::forget_queue_retry_timer(&bot_id);
+        crate::lifecycle::quota_hold::forget_held(&bot_id);
+    }
+
+    /// #108 重開：遠端 bot 的 statusLine 到的時候讀不到它在哪台主機。以前退回 `local`：遠端帳號的讀數寫進本機那一格，
+    /// 還拿它去校正本機帳號的撞限——那個窗是撞限之後才開的，本機真的撞限就被作廢了。現在丟掉這一份，下一次重繪再來。
+    #[tokio::test]
+    async fn a_status_line_whose_host_cannot_be_read_is_dropped_not_written_to_the_local_key() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let remote = db::ulid();
+        sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?, '/r/p', 'r', 'remote1', ?)")
+            .bind(&remote)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let (bot_id, _conv, _turn) = delivered_turn(&app, &remote).await;
+        let until = db::iso_at(chrono::Utc::now() + chrono::Duration::hours(2));
+        assert!(crate::quota::seed_limit_hit(&app, crate::config::LOCAL_HOST, "claude", &until, "You've hit your session limit", Some("five_hour".into())).await);
+        let reopened = (chrono::Utc::now() + chrono::Duration::hours(5) + chrono::Duration::seconds(30)).timestamp();
+        let line = HookBody {
+            bot_id: bot_id.clone(),
+            provider: "claude".into(),
+            payload: json!({"hook_event_name": "StatusLine", "rate_limits": {"five_hour": {"used_percentage": 3.0, "resets_at": reopened}}}),
+            received_at: None,
+            truncated: false,
+            run_id: None,
+        };
+
+        sqlx::query("ALTER TABLE projects RENAME TO projects_unreadable").execute(&app.db).await.unwrap();
+        assert!(process(&app, &line).await.is_err(), "讀不到主機：丟掉這一份");
+        sqlx::query("ALTER TABLE projects_unreadable RENAME TO projects").execute(&app.db).await.unwrap();
+        {
+            let q = app.quotas.lock().await;
+            assert!(q["claude"].limit_hit.is_some(), "本機帳號的撞限沒被遠端的讀數作廢");
+            assert!(q["claude"].five_hour.is_none(), "遠端的讀數沒寫進本機那一格");
+        }
+        process(&app, &line).await.unwrap();
+        let q = app.quotas.lock().await;
+        assert_eq!(q.get("remote1/claude").and_then(|x| x.five_hour.as_ref()).map(|w| w.used_pct), Some(3.0), "讀得到：寫進遠端那一格");
+        assert!(q["claude"].limit_hit.is_some());
     }
 
     /// issue #150：撞額度是帳號的事實，跟這一則還有沒有回合可收無關。Esc 把回合收掉之後，同一個身分晚到的真撞額度

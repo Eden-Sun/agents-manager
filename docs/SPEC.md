@@ -634,8 +634,8 @@ cancel 撤掉的是還沒送出的那則時，review 回應不再帶「turn 還�
 但停舊 run 到寫入新 run 那一段同樣宣告進行中（#129）；新 run 寫不進去或 `agent.start` 失敗時憑證已經放掉，照舊當孤兒撤。
 
 **目標身分沒額度就不送**（issue #108，`lifecycle::quota_hold`）：撞額度的回合被 `StopFailure` 收掉之後，回合結束的事件照例叫醒 flush，
-排在後面的派工以前會立刻被送進**同一個還沒額度的身分**、再撞一次。flush 在 claim 之前問跟派送前（`controller::dispatch`）同一支
-`quota::limit_hit_for_bot`——看這顆 bot **現在**的身分那把 key、撞的桶管不管得到它正在跑的模型。還在擋就留在佇列、不 claim、不花重試，
+排在後面的派工以前會立刻被送進**同一個還沒額度的身分**、再撞一次。flush 在 claim 之前問跟派送前（`controller::dispatch`）同一套判準
+（`quota::try_limit_hit_for_bot`）——看這顆 bot **現在**的身分那把 key、撞的桶管不管得到它正在跑的模型。還在擋就留在佇列、不 claim、不花重試，
 掛 timer 到撞限到期、最多 5 分鐘再看一次（新讀數可能提早作廢撞限）；換身分重啟（上一段）、換模型、撞限到期或被校正掉就放行，
 始終只有排著的那一則、走原本的 CAS claim，只送一次。為了讓 flush 看得到：`StopFailure` 的原因是帳號額度用完（跟畫面同一套橫幅或
 `usage limit`，`turn_error::is_quota_exhaustion`；`overloaded`／一般 429 不算）時，**先**記撞限（`mark_claude_limit_hit`）再推回合結束；
@@ -655,6 +655,21 @@ cancel 撤掉的是還沒送出的那則時，review 回應不再帶「turn 還�
 `tools::install_host_tools` 之後，每台主機每一輪開機一次）用那台 bot 現在的身分算 key，原樣種回記憶體（`quota::restore_limit_hit`：
 保留撞限時刻與桶名、沒寫時間的照樣黏著、回填前已經進來的讀數當場校正），之後只看記憶體——新讀數、換身分、換模型、成功回合照舊校正或清掉它。
 這一輪自己寫的憑據記憶體本來就有，不另外看。
+**讀不到就擋、記不進去就欠著**（#108 第三次重開）：這條閘門上任何一步讀不到，都不能當成「沒撞限」。
+- 撞限寫入（`turn_error::mark_claude_limit_hit`）回 `Result`：讀不到這顆 bot 在哪台主機（不退回 `local`——那會把撞限寫進本機身分的 key）、
+  那台的身分表還沒偵測完又不是手寫的身分（`quota::resolve_quota_base`，不猜 `claude:cc0`）、排著的 prompt 身上的憑據寫不進去，都回錯。
+  撞限是外面已經發生的事，所以同時記成**欠著**（`turn_error::owed_limit_hit`，行程記憶體）：補上之前，這顆 bot 的 flush 與派送前都照欠著的
+  那一筆擋（身分已經換掉的不擋新身分，留著寫回舊身分的 key）；之後每一次問都先補一次，補上時撞限時刻不變。`StopFailure` 記不進去就讓這一則
+  失敗、由 hook 收件匣重試（耐久）：回合先不收、不推回合結束，在飛的回合本身擋著 flush。
+- 撞限記下的當下就把憑據蓋到這顆 bot 排著的每一則上（`quota_hold::stamp_queued`），不等 flush 擋下才寫：記下到擋下之間 daemon 死掉、
+  或 flush 那一下寫不進去，重啟之後都還有憑據。
+- flush 的閘門（`quota_hold::blocking_hit`，查詢走 `quota::try_limit_hit_for_bot`）讀不到主機、讀不到那一列的憑據、憑據解不開，都照擋、
+  10 秒後再看；這種擋寫了到期時間，排隊保險絲不會把它當成看不到盡頭的額度撤掉。憑據寫不進去不算圍籬做完：記憶體照擋，5 秒後再寫一次。
+  開機回填讀不到就不算回填過（flush 繼續看每一列自己的憑據），30 秒後或那台下一次偵測完再回填；憑據內容壞了的那一列回填時跳過。
+- 讀主機的其他地方同一條規則：`next_reset_for_bot` 讀不到回沒有（只看橫幅的時間）、`clear_limit_hit_for_bot` 讀不到不清（不把本機帳號真的
+  撞限清掉）、`limit_cleared_since` 讀不到回沒清過、`running_model` 讀不到 run 回不知道（照擋，不退回設定值）、claude statusLine 讀不到主機
+  就丟掉那一份（不寫進本機那一格、不拿它去校正本機的撞限）。supervisor 的派送／重送仍用 `quota::limit_hit_for_bot`（讀不到回沒有並記 warn；
+  那邊拿到撞限會 park、群組任務會換身分，不能拿假的撞限去擋）。
 
 **abort 不動 queued**（AGM 裁示 2026-09-16）：`POST /api/bots/{id}/abort` 的語意是「停掉這一回合」，排在後面的是 AGM 正當的派工，
 abort 之後照常 flush 出去（但先照下一段等寬限）。要取消排隊的派工，走交辦 `cancel`（上面那條會一併撤 queued）。這不是漏撤，不要當成 bug 修。

@@ -195,6 +195,9 @@ pub async fn capture(app: &Arc<App>, bot_id: &str, expected_run_id: &str) -> Res
     if run.turn_error.as_deref() == Some(line.as_str()) {
         return Ok(());
     }
+    // 撞限要記在哪個身分：在寫下 `turn_error` 之前讀，讀不到就整件不做，下一次擷取照樣重來（寫了才讀，失敗後會被
+    // 上面的「同一則只記一次」擋掉，撞限就再也不記了）。
+    let Some(bot) = db::bot(&app.db, bot_id).await? else { return Ok(()) };
 
     sqlx::query("UPDATE runs SET turn_error = ? WHERE id = ?")
         .bind(&line)
@@ -203,10 +206,9 @@ pub async fn capture(app: &Arc<App>, bot_id: &str, expected_run_id: &str) -> Res
         .await?;
     tracing::warn!(bot = %bot_id, run = %run.id, error = %line, "turn cut short by an API error");
 
-    // 額度格標成被擋，量表與標題列才對得上。
-    if is_quota_limit(&line) {
-        mark_claude_limit_hit(app, bot_id, &line).await;
-    }
+    // 額度格標成被擋，量表與標題列才對得上。記不進去時欠著（排著的派工照欠著的那一筆擋），回合照樣往下收，
+    // 錯誤留到最後回給呼叫端。
+    let marked = if is_quota_limit(&line) { mark_claude_limit_hit(app, &bot, &line).await } else { Ok(()) };
 
     // 釘在那一回合上，看得出是哪一則回覆斷的。
     let conversation_id = db::conversation_id(&app.db, bot_id).await?;
@@ -239,7 +241,7 @@ pub async fn capture(app: &Arc<App>, bot_id: &str, expected_run_id: &str) -> Res
         }
     }
     app.emit_bot_status(bot_id).await;
-    Ok(())
+    marked
 }
 
 pub async fn clear(app: &Arc<App>, run_id: &str, bot_id: &str) {
@@ -361,15 +363,63 @@ mod tests {
 
 /// 跟 codex 不同，**不**在下一回合成功時清掉：Fable 用盡後換 opus 照樣能跑，不代表 Fable 恢復；
 /// 只靠 `until`（該桶子的 `resets_at`）到期解除。
-pub(crate) async fn mark_claude_limit_hit(app: &Arc<App>, bot_id: &str, line: &str) {
-    let Ok(Some(bot)) = db::bot(&app.db, bot_id).await else { return };
+///
+/// 記不進去就回錯（#108 重開），不當作沒撞：讀不到這顆 bot 在哪台主機（不退回 `local`——那會把撞限寫進本機身分的
+/// key）、那台的身分表還沒偵測完（key 算不準，[`crate::quota::resolve_quota_base`]）、排著的 prompt 身上的憑據寫不進去
+/// （[`crate::lifecycle::quota_hold::stamp_queued`]）。撞限是外面已經發生的事，所以同時記成**欠著**（[`owed_limit_hit`]）：
+/// 補上之前，這顆 bot 的 flush 與派送前都照欠著的那一筆擋；之後每一次問都先補一次。
+pub(crate) async fn mark_claude_limit_hit(app: &Arc<App>, bot: &db::Bot, line: &str) -> Result<()> {
     if bot.kind != "claude" {
-        return;
+        return Ok(());
     }
-    let host = db::bot_host(&app.db, bot_id).await.unwrap_or_else(|_| "local".to_string());
+    let identity = identity_of(bot);
+    // 同一筆撞限重來（收件匣重試 `StopFailure`）：撞的那一刻還是當初那一刻，不往後推。
+    let at = owed(app, &bot.id).filter(|m| m.identity == identity && m.line == line).map(|m| m.at).unwrap_or_else(db::now);
+    let mark = Mark { identity, line: line.to_string(), at };
+    match record(app, &bot.id, &mark).await {
+        Ok(()) => {
+            settled(app, &bot.id, &mark);
+            Ok(())
+        }
+        Err(e) => {
+            tracing::warn!(bot = %bot.id, error = %e, line, "a quota limit hit could not be recorded; it is owed and holds this bot");
+            owe(app, &bot.id, mark);
+            Err(e)
+        }
+    }
+}
+
+/// 一筆撞限：撞的那一刻、那時的身分、橫幅。欠著的時候原樣留著，補上時 `at` 不會變成補上的時間。
+#[derive(Debug, Clone)]
+struct Mark {
+    identity: Option<String>,
+    line: String,
+    at: String,
+}
+
+fn identity_of(bot: &db::Bot) -> Option<String> {
+    bot.identity.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(String::from)
+}
+
+impl Mark {
+    /// 還沒有那一桶的讀數可借時的撞限（到期用保底時間）。欠著的時候就照這一筆擋。
+    fn hit(&self) -> crate::quota::LimitHit {
+        let lower = self.line.to_ascii_lowercase();
+        crate::quota::LimitHit {
+            message: self.line.clone(),
+            until: fallback_until(&lower, &self.at),
+            at: self.at.clone(),
+            bucket: bucket_name(&lower),
+        }
+    }
+}
+
+/// 寫進那台主機、那個身分的 key，再蓋到這顆 bot 排著的每一則上。
+async fn record(app: &Arc<App>, bot_id: &str, m: &Mark) -> Result<()> {
+    let host = db::bot_host(&app.db, bot_id).await?;
     // 落點只能有一份規則：手拼 `claude:{id}` 會讓「共用預設帳號」的身分（cc0）寫進一格沒有人查的
     // key，`limit_hit_for_bot` 讀的是裸 `claude`，於是撞限對 AGM 完全隱形（review 2026-09-16）。
-    let base = crate::quota::quota_base_for_host(app, &host, "claude", bot.identity.as_deref()).await;
+    let base = crate::quota::resolve_quota_base(app, &host, "claude", m.identity.as_deref()).await?;
     let key = crate::quota::quota_key(&host, &base);
     let prev = app.quotas.lock().await.get(&key).cloned();
     let mut q = prev.unwrap_or_else(|| crate::quota::Quota {
@@ -381,18 +431,78 @@ pub(crate) async fn mark_claude_limit_hit(app: &Arc<App>, bot_id: &str, line: &s
         plan: None,
         updated_at: db::now(),
         source: "claude-limit-hit".into(),
-        account: bot.identity.clone(),
+        account: m.identity.clone(),
         host: host.clone(),
     });
-    let lower = line.to_ascii_lowercase();
-    let at = db::now();
+    let lower = m.line.to_ascii_lowercase();
     // 那一桶還沒有讀數時 `saturate_bucket` 回 None，而 `None` 在 `limit_hit_expired` 是「永不過期」。
     // 給一個保底時間，撞限才有出口（review 2026-09-16）。
-    let until = saturate_bucket(&mut q, &lower).or_else(|| fallback_until(&lower, &at));
-    q.limit_hit =
-        Some(crate::quota::LimitHit { message: line.to_string(), until, at, bucket: bucket_name(&lower) });
+    let until = saturate_bucket(&mut q, &lower).or_else(|| fallback_until(&lower, &m.at));
+    let hit = crate::quota::LimitHit { message: m.line.clone(), until, at: m.at.clone(), bucket: bucket_name(&lower) };
+    q.limit_hit = Some(hit.clone());
     q.updated_at = db::now();
     crate::quota::set(app, &host, &base, q).await;
+    crate::lifecycle::quota_hold::stamp_queued(app, bot_id, m.identity.as_deref(), &hit).await
+}
+
+/// bot → 欠著的那一筆撞限（只留最新的）。只在記憶體：daemon 在補上之前重啟就沒了——`StopFailure` 那條路回錯、
+/// 由 hook 收件匣（耐久）重試，那一回合也還沒收掉（在飛的回合本身就擋著 flush）；已經蓋上憑據的排隊 prompt 照
+/// `quota_hold` 的規則擋。鍵帶 `boot_id`：測試裡模擬重啟的新 `App` 看不到上一個的帳，跟真的重啟一樣。
+fn owed_marks() -> &'static std::sync::Mutex<std::collections::HashMap<String, Mark>> {
+    static M: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, Mark>>> = std::sync::OnceLock::new();
+    M.get_or_init(Default::default)
+}
+
+fn owed_key(app: &App, bot_id: &str) -> String {
+    format!("{}\u{0}{bot_id}", app.boot_id)
+}
+
+fn owed(app: &App, bot_id: &str) -> Option<Mark> {
+    owed_marks().lock().unwrap_or_else(|e| e.into_inner()).get(&owed_key(app, bot_id)).cloned()
+}
+
+fn owe(app: &App, bot_id: &str, m: Mark) {
+    owed_marks().lock().unwrap_or_else(|e| e.into_inner()).insert(owed_key(app, bot_id), m);
+}
+
+/// `recorded` 寫進去了：同一個身分、不比它新的那一筆欠帳一併結清（寫進的是同一把 key、同一刻或更晚的撞限）。
+/// 補的過程中又欠了一筆更新的、或欠的是換身分之前那個身分的，留著。
+fn settled(app: &App, bot_id: &str, recorded: &Mark) {
+    let key = owed_key(app, bot_id);
+    let mut m = owed_marks().lock().unwrap_or_else(|e| e.into_inner());
+    if m.get(&key).is_some_and(|x| x.identity == recorded.identity && x.at <= recorded.at) {
+        m.remove(&key);
+    }
+}
+
+/// 這顆 bot 欠著、還擋著它的撞限：先補一次，補上就回 `None`（記憶體裡已經有了，照一般的查法）；補不上、而且那一筆
+/// 是這顆 bot **現在**的身分撞的、沒到期、管得到它在跑的模型，就照那一筆擋。身分已經換掉的留著等補（寫回舊身分的
+/// key），不擋新身分；到期的直接丟掉。
+pub(crate) async fn owed_limit_hit(app: &Arc<App>, bot: &db::Bot) -> Option<crate::quota::LimitHit> {
+    let m = owed(app, &bot.id)?;
+    let hit = m.hit();
+    if crate::quota::limit_hit_expired(Some(&hit)) {
+        settled(app, &bot.id, &m);
+        return None;
+    }
+    match record(app, &bot.id, &m).await {
+        Ok(()) => {
+            tracing::info!(bot = %bot.id, "an owed quota limit hit is now recorded");
+            settled(app, &bot.id, &m);
+            return None;
+        }
+        Err(e) => tracing::debug!(bot = %bot.id, error = %e, "an owed quota limit hit still cannot be recorded"),
+    }
+    if m.identity != identity_of(bot) {
+        return None;
+    }
+    let model = crate::quota::running_model(app, bot).await;
+    crate::quota::limit_hit_blocks_model(&hit, model.as_deref()).then_some(hit)
+}
+
+#[cfg(test)]
+pub(crate) fn owes_limit_hit(app: &App, bot_id: &str) -> bool {
+    owed(app, bot_id).is_some()
 }
 
 #[cfg(test)]
@@ -533,6 +643,137 @@ mod quota_limit_tests {
         ] {
             assert!(!is_quota_limit(line), "{line}");
         }
+    }
+
+    const LIMIT: &str = "You've hit your session limit · resets 5pm";
+
+    /// 一顆 bot，對話裡排著一則。`host` 不是本機時建一個那台主機的專案。
+    async fn bot_with_a_queued_prompt(env: &crate::testing::Env, host: &str, identity: Option<&str>) -> (db::Bot, String) {
+        let app = env.app.clone();
+        let pid = if host == crate::config::LOCAL_HOST {
+            env.project_id.clone()
+        } else {
+            let pid = db::ulid();
+            sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?, '/r/p', 'r', ?, ?)")
+                .bind(&pid)
+                .bind(host)
+                .bind(db::now())
+                .execute(&app.db)
+                .await
+                .unwrap();
+            pid
+        };
+        let bot = crate::testing::claude_bot(&app, &pid, "limited").await;
+        sqlx::query("UPDATE bots SET identity=? WHERE id=?").bind(identity).bind(&bot.id).execute(&app.db).await.unwrap();
+        let bot = db::bot(&app.db, &bot.id).await.unwrap().unwrap();
+        crate::testing::fake_run(&app, &bot.id).await;
+        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        let turn = db::ulid();
+        sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, delivery, prompt_text, created_at) VALUES (?,?,'web','queued','pending','派工',?)")
+            .bind(&turn)
+            .bind(&conv)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        (bot, turn)
+    }
+
+    async fn hits(app: &Arc<App>) -> Vec<(String, String)> {
+        app.quotas.lock().await.iter().filter_map(|(k, q)| q.limit_hit.as_ref().map(|h| (k.clone(), h.at.clone()))).collect()
+    }
+
+    async fn hold_on(app: &Arc<App>, turn: &str) -> Option<serde_json::Value> {
+        let raw: Option<String> = sqlx::query_scalar("SELECT quota_hold FROM turns WHERE id=?").bind(turn).fetch_one(&app.db).await.unwrap();
+        raw.map(|r| serde_json::from_str(&r).unwrap())
+    }
+
+    /// #108 重開：遠端 bot 撞限，那一刻讀不到它在哪台主機。以前退回 `local`——撞限寫進本機帳號那一格，遠端那個用盡的
+    /// 身分照樣被派工。現在回錯、哪一格都不寫、記成欠著：派送前與 flush 照欠著的那一筆擋；讀得到之後補進 `remote1/claude`，
+    /// 撞限時刻是當初那一刻，排著的那一則也蓋上憑據。
+    #[tokio::test]
+    async fn a_limit_hit_whose_host_cannot_be_read_is_owed_and_never_lands_on_the_local_key() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (bot, queued) = bot_with_a_queued_prompt(&env, "remote1", None).await;
+
+        sqlx::query("ALTER TABLE projects RENAME TO projects_unreadable").execute(&app.db).await.unwrap();
+        assert!(mark_claude_limit_hit(&app, &bot, LIMIT).await.is_err(), "記不進去就是錯");
+        assert_eq!(hits(&app).await, vec![], "哪一格都沒寫，尤其不是本機的 `claude`");
+        assert!(owes_limit_hit(&app, &bot.id));
+        let owed = crate::quota::limit_hit_for_bot(&app, &bot).await.expect("欠著的那一筆照擋（派送前讀的就是這支）");
+        assert_eq!(owed.bucket.as_deref(), Some("five_hour"));
+        assert!(crate::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some(), "flush 的閘門也一樣");
+        assert!(hold_on(&app, &queued).await.is_none(), "還沒寫成");
+
+        sqlx::query("ALTER TABLE projects_unreadable RENAME TO projects").execute(&app.db).await.unwrap();
+        let hit = crate::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().expect("補上之後照一般的查法擋");
+        assert!(!owes_limit_hit(&app, &bot.id), "補上了");
+        assert_eq!(hits(&app).await, vec![("remote1/claude".to_string(), owed.at.clone())], "寫進遠端那一格，撞限時刻不變");
+        assert_eq!(hit.at, owed.at);
+        let held = hold_on(&app, &queued).await.expect("排著的那一則蓋上了憑據");
+        assert_eq!((held["at"].as_str(), held["bucket"].as_str()), (Some(owed.at.as_str()), Some("five_hour")));
+    }
+
+    /// 欠著一筆（5 小時窗）的時候，同一個身分又撞了一筆更新的（週窗）而且記進去了：舊的那筆一併結清，不會在之後被補寫、
+    /// 把記憶體裡較新的那筆蓋回去。
+    #[tokio::test]
+    async fn a_newer_hit_recorded_for_the_same_identity_settles_the_older_owed_one() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (bot, _queued) = bot_with_a_queued_prompt(&env, crate::config::LOCAL_HOST, None).await;
+        sqlx::query("ALTER TABLE projects RENAME TO projects_unreadable").execute(&app.db).await.unwrap();
+        assert!(mark_claude_limit_hit(&app, &bot, LIMIT).await.is_err());
+        sqlx::query("ALTER TABLE projects_unreadable RENAME TO projects").execute(&app.db).await.unwrap();
+        mark_claude_limit_hit(&app, &bot, "You've hit your weekly limit · resets Sep 25").await.unwrap();
+        assert!(!owes_limit_hit(&app, &bot.id), "較舊的那筆一併結清");
+        let hit = crate::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().expect("照擋");
+        assert_eq!(hit.bucket.as_deref(), Some("seven_day"), "記憶體留著較新的那筆，沒被舊的蓋回去");
+    }
+
+    /// 身分表還沒偵測完（重啟後、`tools::detect` 之前）：共用預設帳號的 cc0 會被猜成 `claude:cc0`，偵測完之後查詢端讀裸
+    /// `claude`，那一格沒人看。現在不猜：欠著，偵測完的第一次查詢補進裸 `claude`。
+    #[tokio::test]
+    async fn a_limit_hit_before_the_identities_are_known_is_owed_until_its_key_is() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (bot, _queued) = bot_with_a_queued_prompt(&env, crate::config::LOCAL_HOST, Some("cc0")).await;
+        assert!(mark_claude_limit_hit(&app, &bot, LIMIT).await.is_err());
+        assert_eq!(hits(&app).await, vec![], "沒有猜一格 `claude:cc0`");
+        assert!(crate::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some(), "欠著照擋");
+
+        let cc0 = crate::config::IdentityCfg { name: "cc0".into(), kind: "claude".into(), host: None, env: Default::default(), args: vec![] };
+        app.tools.lock().await.insert(
+            crate::config::LOCAL_HOST.to_string(),
+            crate::tools::HostTools { tools: Default::default(), identities: Default::default(), shell_identities: vec![cc0], checked_at: db::now() },
+        );
+        assert!(crate::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some());
+        assert!(!owes_limit_hit(&app, &bot.id));
+        assert_eq!(hits(&app).await.into_iter().map(|(k, _)| k).collect::<Vec<_>>(), vec!["claude".to_string()], "補進裸 `claude`");
+    }
+
+    /// 撞限記下的當下就蓋到排著的那一則上（不等 flush）；蓋不上就回錯、欠著——記憶體那一格照樣寫了（照擋），
+    /// 補的時候再蓋一次。
+    #[tokio::test]
+    async fn a_limit_hit_stamps_the_queued_prompts_at_once_or_stays_owed() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (bot, queued) = bot_with_a_queued_prompt(&env, crate::config::LOCAL_HOST, None).await;
+        sqlx::query("CREATE TRIGGER refuse_quota_hold BEFORE UPDATE OF quota_hold ON turns BEGIN SELECT RAISE(ABORT, 'injected: cannot write turns.quota_hold'); END")
+            .execute(&app.db)
+            .await
+            .unwrap();
+        assert!(mark_claude_limit_hit(&app, &bot, LIMIT).await.is_err(), "憑據沒落地不算記好了");
+        assert!(owes_limit_hit(&app, &bot.id));
+        assert_eq!(hits(&app).await.len(), 1, "記憶體那一格寫了：這一輪照擋");
+        assert!(hold_on(&app, &queued).await.is_none());
+
+        sqlx::query("DROP TRIGGER refuse_quota_hold").execute(&app.db).await.unwrap();
+        assert!(crate::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some());
+        assert!(!owes_limit_hit(&app, &bot.id));
+        let held = hold_on(&app, &queued).await.expect("補的時候蓋上了");
+        assert_eq!(held["boot"].as_str(), Some(app.boot_id.as_str()));
+        assert_eq!(held["identity"], serde_json::Value::Null);
     }
 
     #[test]
