@@ -516,7 +516,7 @@ fn claude_settings(hook_cmd: &str, statusline: &str, wants_remote: bool, instruc
         "syncClaudeAiPlugins": false,
         // issue #206：claude 2.1.277 起，專案沒有 CLAUDE.md 時改讀 AGENTS.md——內建 plugin `agents-md` 的 `instructionFiles`
         // （`/config` 裡的「Project instructions」），預設 `claude-md-or-agents-md`，開不開由伺服器端旗標 `tengu_agents_md_mod`
-        // 放量（同一台機器上 2.1.276 開著、2.1.278 關著）。同一個 project 常同時有 codex bot，`AGENTS.md` 是寫給 codex 的：
+        // 放量（#212 真機：2.1.277／2.1.278 互動式 TUI 都 admitted；`-p`／SDK 路徑 GrowthBook 關掉時可以完全不註冊）。同一個 project 常同時有 codex bot，`AGENTS.md` 是寫給 codex 的：
         // bot 讀哪份指示檔要由 daemon 決定，不因 CLI 升級或放量悄悄換檔——釘在 `claude-md`（跟 2.1.277 以前一樣只讀 CLAUDE.md）。
         // plugin 的選項只從 user／`--settings`／managed settings 讀（專案層的 settings 不讀），鍵認 `agents-md` 與 `agents-md@builtin`。
         // 2.1.276 的舊選項 `projectInstructions` 預設本來就是只讀 CLAUDE.md，不另外寫（新版兩個都寫會印一行提示）；更舊的

@@ -869,51 +869,55 @@ mod extract_tests {
   ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
 ";
 
-    /// issue #206：claude `agents-md` plugin 的兩種提示——2.1.276 在通知列跳 10 秒的 toast（「This project has AGENTS.md but
-    /// no CLAUDE.md; …」），2.1.277 起改讀 AGENTS.md 時記一行 log（「no CLAUDE.md found; AGENTS.md loaded: …」）。畫面上的確切
-    /// 位置要等伺服器端旗標放量後在真機抓（本機 2.1.278 旗標關著）；這裡放兩種：banner 下方（跟 `⚠ AGENTS.md is over …` 同一區）、
-    /// 以及最容易出事的回覆與輸入框之間。
-    const CLAUDE_AGENTS_MD_NOTICE: &str = "\
- ▐▛███▛█   Claude Code v2.1.277
-▝▜██████▀  Opus 4.8 · Claude Max
-  ▝▝ ▝▝    ~/project/demo
+    /// issue #212：2.1.277／2.1.278 真機（預設 `instructionFiles`）把改讀 AGENTS.md 畫成回覆槽裡的
+    /// `⏺ agents-md: no CLAUDE.md found; AGENTS.md loaded: …`，跟助手回覆同一個 `⏺` 標記。開機閒置畫面
+    /// 最後一個 `⏺` 就是這行——§4.3 備援若沒當雜訊，會把它收成回覆。2.1.276 的通知列 toast 這次沒重抓。
+    const CLAUDE_AGENTS_MD_IDLE: &str = "\
+ ▐▛███▛█   Claude Code v2.1.278
+▝▜██████▀  Haiku 4.5 · Claude Max
+  ▝▝ ▝▝    /tmp/demo
 
-  no CLAUDE.md found; AGENTS.md loaded: /Users/u/project/demo/AGENTS.md
-  This project has AGENTS.md but no CLAUDE.md; set the agents-md plugin's projectInstructions option to agents-fallback to load it.
-
-❯ Reply with PONG please
-
-⏺ PONG
+⏺ agents-md: no CLAUDE.md found; AGENTS.md loaded: /tmp/demo/AGENTS.md
 
 ────────────────────────────────────────────
 ❯
 ────────────────────────────────────────────
-  u | demo | OPUS | 5h:90%
+  u | demo | HAI4.5 | 5h:- | 7d:-
   ⏵⏵ bypass permissions on (shift+tab to cycle)
 ";
 
-    /// 同一批提示，畫在回覆與輸入框之間（通知列的可能位置）。
-    const CLAUDE_AGENTS_MD_TOAST_UNDER_REPLY: &str = "\
+    /// 同一行提示留在畫面上，後面才是這一回合的使用者回音與真正回覆。
+    const CLAUDE_AGENTS_MD_THEN_PONG: &str = "\
+ ▐▛███▛█   Claude Code v2.1.278
+▝▜██████▀  Haiku 4.5 · Claude Max
+  ▝▝ ▝▝    /tmp/demo
+
+⏺ agents-md: no CLAUDE.md found; AGENTS.md loaded: /tmp/demo/AGENTS.md
+
 ❯ Reply with PONG please
 
 ⏺ PONG
 
-  This project has AGENTS.md but no CLAUDE.md; set the agents-md plugin's projectInstructions option to agents-fallback to load it.
-  no CLAUDE.md found; AGENTS.md loaded: /Users/u/project/demo/AGENTS.md
 ────────────────────────────────────────────
 ❯
 ────────────────────────────────────────────
+  u | demo | HAI4.5 | 5h:90%
+  ⏵⏵ bypass permissions on (shift+tab to cycle)
 ";
 
-    /// 那兩行提示不是回覆內容、不是使用者打的字，也不是輸入框——不管畫在 banner 下方還是回覆下方。
+    /// 那一行不是回覆、不是使用者打的字。閒置時備援必須是空的；有真正 `⏺ PONG` 時只收 PONG。
     #[test]
     fn claude_agents_md_notices_are_neither_the_reply_nor_the_prompt() {
-        for (where_, screen) in [("banner 下方", CLAUDE_AGENTS_MD_NOTICE), ("回覆下方", CLAUDE_AGENTS_MD_TOAST_UNDER_REPLY)] {
-            assert_eq!(extract_reply("claude", screen).as_deref(), Some("PONG"), "{where_}");
-            let cleaned = clean_screen("claude", screen).unwrap_or_default();
-            assert!(!cleaned.contains("AGENTS.md"), "{where_}：{cleaned}");
-            assert_eq!(last_prompt_echo_text("claude", screen).as_deref(), Some("Reply with PONG please"), "{where_}");
-        }
+        assert_eq!(extract_reply("claude", CLAUDE_AGENTS_MD_IDLE), None, "閒置：最後一個 ⏺ 是 plugin 提示");
+        let idle_cleaned = clean_screen("claude", CLAUDE_AGENTS_MD_IDLE).unwrap_or_default();
+        assert!(!idle_cleaned.contains("AGENTS.md"), "閒置：{idle_cleaned}");
+        assert_eq!(extract_reply("claude", CLAUDE_AGENTS_MD_THEN_PONG).as_deref(), Some("PONG"));
+        let cleaned = clean_screen("claude", CLAUDE_AGENTS_MD_THEN_PONG).unwrap_or_default();
+        assert!(!cleaned.contains("AGENTS.md"), "{cleaned}");
+        assert_eq!(
+            last_prompt_echo_text("claude", CLAUDE_AGENTS_MD_THEN_PONG).as_deref(),
+            Some("Reply with PONG please"),
+        );
     }
 
     const CODEX_STARTUP: &str = "\

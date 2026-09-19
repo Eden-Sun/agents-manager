@@ -223,8 +223,15 @@ fn is_noise(s: &str) -> bool {
         || (s.contains("Context ") && s.contains("% used"))
         || is_codex_idle_prompt(s)
         || codex_usage_notice_line(s).is_some()
-        // claude 的 `agents-md` plugin 提示（issue #206）：2.1.276 在通知列跳 10 秒的 toast，2.1.277 起改讀 AGENTS.md 時記一行 log。
-        // 畫在畫面哪裡沒實測過（通知列可能落在回覆與輸入框之間，會被收進回覆）：一律不當內容。
-        || s.starts_with("This project has AGENTS.md but no CLAUDE.md")
-        || s.starts_with("no CLAUDE.md found; AGENTS.md loaded:")
+        || is_agents_md_notice(s)
+}
+
+/// claude `agents-md` plugin 提示（issue #212 真機 2.1.277／2.1.278）：改讀 AGENTS.md 時畫在回覆槽，
+/// 行首是 `⏺ agents-md: no CLAUDE.md found; AGENTS.md loaded: …`（跟助手回覆同一個 `⏺`）。
+/// 2.1.276 的通知列 toast 這次沒重抓，舊字串仍當雜訊。
+fn is_agents_md_notice(s: &str) -> bool {
+    let t = s.trim_start().strip_prefix("⏺ ").unwrap_or(s.trim_start()).trim_start();
+    t.starts_with("agents-md: no CLAUDE.md found; AGENTS.md loaded:")
+        || t.starts_with("no CLAUDE.md found; AGENTS.md loaded:")
+        || t.starts_with("This project has AGENTS.md but no CLAUDE.md")
 }
