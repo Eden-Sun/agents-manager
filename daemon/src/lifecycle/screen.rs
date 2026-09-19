@@ -99,17 +99,16 @@ pub(crate) async fn conversation_message_count(app: &Arc<App>, conversation_id: 
         .await?)
 }
 
-/// Newest assistant message: duplicate guard for re-reading an unchanged screen.
-pub(crate) async fn last_assistant_content(app: &Arc<App>, conversation_id: &str) -> Option<String> {
-    sqlx::query_scalar::<_, String>(
+/// Newest assistant message: duplicate guard for re-reading an unchanged screen. 讀不到回錯（#193）：
+/// 當成「還沒有回覆」，同一份回覆就存第二次。
+pub(crate) async fn last_assistant_content(app: &Arc<App>, conversation_id: &str) -> anyhow::Result<Option<String>> {
+    Ok(sqlx::query_scalar::<_, String>(
         "SELECT content FROM messages WHERE conversation_id = ? AND role = 'assistant'
          ORDER BY created_at DESC, id DESC LIMIT 1",
     )
     .bind(conversation_id)
     .fetch_optional(&app.db)
-    .await
-    .ok()
-    .flatten()
+    .await?)
 }
 
 /// Record how far into the pane we have read, so the next capture starts after it.

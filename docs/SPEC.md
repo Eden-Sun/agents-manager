@@ -337,11 +337,16 @@ hook body 另外帶 `run_id`＝這個 CLI 行程 pane env 的 `AM_RUN_ID`（本�
 - **第二個觸發點**：`turn_progress` 輪詢器（狀態沒翻時的安全網：空輸入列且畫面沒變）。herdr 說 idle 且這回合**印過東西後停住** → 14 秒；
   herdr 說 working、或這回合**什麼都沒印過** → 63 秒（working 可能真的在想，等不夠的代價是吃掉使用者的問題）。grok 常駐 telemetry 橫幅不算內容。
   它也在 bot 鎖內呼叫同一支 `try_fallback`（在鎖外會與 hook 交錯成一回合兩則 assistant）；沒收成就繼續盯，Turn 被任一方收掉時迴圈自然結束。
+  **讀不到不等於收掉了**（#193）：讀 DB 失敗（busy／I/O error）時退避重讀（一個輪詢間隔起加倍、最多 30 秒），只有**讀到了**回合不在飛或換了一筆、
+  run 或 bot 沒了才退出——以前一次讀錯就退出，Stop hook 又剛好漏掉的話那一回合就沒人收。讀不到 agent 狀態的那一輪不算閒著。
+- **讀不到送了什麼就不收**（#193）：`try_fallback` 剝回音要的「送了什麼」讀不到時回錯、回合留在飛，下一次再來——當成什麼都沒送，
+  我們自己的 prompt 就被當成 agent 的回覆存下來。
 - **沒有 hook 的 run**：被認領的 pane（`runs.adopted = 1` 且 `bots.inject_hooks = 0`，典型是 bot 自己開的子 agent，§6.5a）等不到 hook，
   快照是**唯一來源**：`working → idle` 沒有 in-flight Turn 時，補一筆 `origin = external`、`completed_fallback` 的 Turn（prompt 回音記 user、回覆記 assistant）。
   認領當下仍 `working` 就先開一筆 in-flight Turn。
   - 沒有游標時要求畫面上有 prompt 回音（否則整個 scrollback 變一則訊息）；擷取不到只推游標、不寫訊息。
   - 去重：游標 + 與上一則 assistant 比對（herdr 同一輪可能報兩次 idle；重啟會讀到同一畫面）；單則上限 6000 字；認領時的補記只在對話為空時做一次。
+    上一則讀不到就不寫（#193），不當成「還沒有回覆」。
 
 ### 4.3b 回合結束沒被偵測到：reconcile 收尾（AGM 2026-09-16）
 上面兩個觸發點都會漏：hook 沒來；快照備援只收 `delivery = ok`、畫面殘留 spinner 就放手、事件漏掉 `working → idle` 那一邊就根本沒排。
@@ -358,6 +363,7 @@ R-部署console-fork `01M2MG74HFY3PYD8FMBJKEJX8J` 是 AskUserQuestion 被中斷�
   rollout（codex：同樣範圍內 `event_msg`／`task_complete` 且 `last_agent_message` 非空）的尾端 8 MiB。證得出 → `completed`，
   回覆以 `source = transcript` 補進對話（已經有 assistant 訊息就不寫第二份）；證不出（遠端、grok、被中斷、只有 error）→ `completed_fallback`，
   並插一則 system 訊息寫明「閒置 N 分鐘仍 in_flight，由 reconcile 收尾」。**不標 `failed`**：回合多半做完了，只是結束沒被看見。
+  讀不到主機或送了什麼（要拿去對 transcript）就這一輪不收、下一輪再看（#193），不當成「證不出」。
 - **之後**：走 `emit_turn`（交辦照一般回合結束流程：notice 自動結案、task 進 `awaiting_review`），並在同一把 bot 鎖裡立刻 flush 這顆 bot 的 `queued`。
 
 ### 4.3a 回合被 API 中斷
@@ -376,7 +382,8 @@ claude 連線在回應中途掉了時，pane 只多一行 `⏺ API Error: Connec
   關鍵是「最後一件事」：`API error · Retrying…` 之後又把答案講完的是重試成功，不算。
 - **記錄**：原文寫 `runs.turn_error`（屬於這個 CLI 程序，重啟即清），對話補一則釘在該回合的 `system` 訊息（`incomplete = 1`、附快照）；
   回合還 `in_flight` 就收成 `failed`（不然輸入框鎖死）。同一行只記一次。
-- **清除**：下一回合開始（`arm_progress`）設回 NULL 並推 `bot_status`。
+- **清除**：下一回合開始（`arm_progress`）設回 NULL 並推 `bot_status`。寫不進去就由那一回合的輪詢器再清（#193）：留著的話，
+  這一回合斷在同一句錯誤上會被「同一行只記一次」吞掉。
 - UI：側欄「⚠ 中斷」、標題列紅 chip，點開看原文與「重送上一則」（走既有 prompt API）。
 
 ### 4.4 hook 子命令（`agents-managerd hook claude|codex|grok`）最低契約
@@ -821,6 +828,8 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run
 7. **stall watchdog**：`delivery = ok` 後 12 秒內沒收到 `working`／`blocked` 且仍 idle/unknown → 先看字是不是還在框裡（在就補按 Enter、給寬限）；
    不在框裡、畫面上也找不到 → `auto_resend=1` 的自動重送一次（本章開頭：讀 `prompt_text`、打字前被擋退還額度再試一次、按過鍵證明不了記 `unknown`）；
    都沒用才讀 `visible` 快照 → Turn `failed` + system Message，
+   **判斷不了就不判**（#193）：送了什麼、run／turn／bot、重送額度讀不到或寫不進去，這一輪不判失敗，隔 10 秒整輪再看；
+   補送按過鍵證明不了、`delivery='unknown'` 卻寫不進去就欠著，每一輪先補，補上之前不判（打過的字可能已經被收下）。
    中性敘述並原樣引用含 `Not logged in`／`/login`／`unlock-keychain`／`usage limit`／`limit` 的行（提示 ssh 下 macOS Keychain 可能讀不到）。
 8. 請求可帶 `relay_from`（bot id 或 `"daemon"`），記下這則是誰轉述的，UI 據此不把它算成使用者發言。
 9. **插隊送出**（issue #103，請求帶 `send_now: true`）：對方回合中時**打斷它**，而不是回 409。前提是這一顆 run 認得
