@@ -513,6 +513,9 @@ shim 轉遠端要 pane 裡有 `AM_DAEMON_EXE`、`AM_CONFIG_PATH`、`AM_DATA_DIR`
 - 守門順手回收孤兒：沒鎖被持有、沒有行程的 cwd 在裡面、閒置超過 10 分鐘的 `job-*`／舊版 `<pid>/`；閒置超過
   3 小時的 `shared/`（遠端磁碟剩不到 25% 時也降到 10 分鐘）。只碰 `<16 位 hex>/<shared｜job-*｜數字>` 這種名字。
 - 遠端要是有 `flock`（util-linux）與 `/proc` 的 Linux，沒有就直接報錯、不跑。
+- helper 的每一條 ssh（守門／run／probe／安裝）與 rsync 的 `-e` 都帶 `ConnectTimeout=15`、`ServerAliveInterval=15`、`ServerAliveCountMax=3`
+  （issue #174，跟 `hosts.rs` 的連線一致）：連線靜默斷掉（Wi-Fi 換 AP、Mac 睡著醒來 IP 變了、遠端掉電）約 45 秒內就放棄，
+  不會卡到 TCP keepalive 的 2 小時。
 
 ### `GET /api/build/remote` / `PUT /api/build/remote`
 `{enabled, host, user, ssh_port, remote_root, cargo_jobs, password_set}`。PUT 另收 `password`（寫進 0600 的
