@@ -7,6 +7,8 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::str::FromStr;
 
+mod schema_guard;
+
 pub const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS projects (
   id TEXT PRIMARY KEY, path TEXT NOT NULL, label TEXT NOT NULL,
@@ -141,22 +143,32 @@ CREATE TABLE IF NOT EXISTS spawn_hints (
 /// 這個 binary 認得的 schema 版本，存在 SQLite 內建的 `PRAGMA user_version`（跟資料庫檔案綁在一起，
 /// 讀寫都在同一個交易裡，不像 `journal_mode` 那類 pragma 有「不能包進交易」的限制）。
 ///
-/// 這不是「照順序跑第 N 號 migration」的版本號——`SCHEMA`／下面的 additive ALTER 名單本來就是
-/// `CREATE TABLE IF NOT EXISTS`／`has_column` 檢查過的冪等操作，天生可重入，這次刻意不推翻
-/// （issue #72 的調查結論，見 `migrate` 上面的說明）。這個數字只解決一件事：**擋住舊 binary 開到
-/// 新 schema**——目前完全偵測不到這種情況，`daemon-update-kick.sh` 那類滾動升級如果有一顆卡在舊
-/// binary 卻碰到剛被新版升級過的 DB，會拿著過期的欄位假設去讀一個它不認識的資料庫。每次在 `SCHEMA`
-/// 或 ALTER 名單裡加東西，這個數字要跟著 +1；忘記加只會讓 `check_schema_drift` 照樣抓到欄位對不上
-/// （那個檢查看的是實際欄位，不看這個數字），不會讓資料庫壞掉，但舊 binary 就少了這一層提早攔截。
-pub const SCHEMA_VERSION: i64 = 4;
+/// **它是「最低相容 binary」的圍籬，不是 migration 帳本**（issue #72）：DB 記著 N，代表 `SCHEMA_VERSION`
+/// 至少是 N 的 binary 才准開它，更舊的在 `migrate` 一開頭就拒絕，一個 DDL 都不碰（`daemon-update-kick.sh`
+/// 那類滾動升級卡在舊 binary、或手動回滾時，不會拿過期的假設去讀、甚至用 `sync_trigger` 把守衛換回舊規則）。
+/// 它不記錄「跑過哪幾號 migration」：`SCHEMA`／ALTER 名單／各子模組的 migrate 全是 `IF NOT EXISTS`／
+/// `has_column` 檢查過的冪等操作，每次開 DB 全部重跑，實際長相由 [`schema_guard::check_drift`] 對著全新 DB 的
+/// 標準答案核對。等真的出現非 additive 的資料轉換（改欄位型別、拆表、改約束得重建表），再引入照順序執行的
+/// migration 框架。
+///
+/// **什麼時候升**：migrate 建出來的任何 schema 物件變了就升——不管是 `SCHEMA`、ALTER 名單還是哪個子模組，
+/// 表、欄位、型別、預設值、約束、索引、trigger 內容（含由轉移表產生的守衛）都算，排版與註解不算。不靠人記：
+/// `schema_guard` 的測試拿全新 DB 的指紋跟這裡最後一行比，對不上就紅，錯誤訊息會給出要加的那一行。
+/// **只准在最後加一行，不准改既有的**——版本號沒動，舊 binary 就會照開它不懂的 schema。
+///
+/// 1～4 版在指紋之前。4 版之後又改過子模組 schema 卻沒升（`supervisor_approvals.request_reason`、
+/// `release_triage` 表），同樣記著 4 的 DB 長相不一，所以從 5 開始釘。
+const SCHEMA_HISTORY: &[(i64, &str)] = &[(5, "519fd4f808b8ac5b")];
+pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
 /// 裝一個 trigger，DB 裡那一份跟 `ddl` 不同就換掉（issue #186）。
 ///
 /// 守衛的內容是由轉移表產生的（`turn_controller::guard_ddl`、`assignment_state::guard_ddl`）。以前用
 /// `CREATE TRIGGER IF NOT EXISTS`：只有第一次建得進去，之後轉移表改了（新增或拿掉一條合法邊），舊 DB 裡那一份已經存在，
 /// 守衛就永遠停在舊規則——新的合法轉移被擋下、拿掉的照樣放行。這裡每次開 DB 都拿 `sqlite_master.sql`（SQLite 存的是去掉
-/// `IF NOT EXISTS` 的原文）跟現在的 DDL 比，不同才 DROP 再建，所以不必靠 `SCHEMA_VERSION`。呼叫端要在同一個交易裡：
-/// 換到一半失敗整批回滾，不會留下一段沒有守衛的空窗。
+/// `IF NOT EXISTS` 的原文）跟現在的 DDL 比，不同才 DROP 再建，舊 DB 不必等人手動重建。呼叫端要在同一個交易裡：
+/// 換到一半失敗整批回滾，不會留下一段沒有守衛的空窗。守衛內容變了一樣要升 [`SCHEMA_VERSION`]（issue #72）：
+/// 不然舊 binary 開到這個 DB，會照它自己的轉移表把守衛換回舊規則。
 pub(crate) async fn sync_trigger(conn: &mut sqlx::SqliteConnection, name: &str, ddl: &str) -> Result<()> {
     let want = ddl.trim().replacen("CREATE TRIGGER IF NOT EXISTS ", "CREATE TRIGGER ", 1);
     let have: Option<Option<String>> = sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?")
@@ -196,6 +208,12 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
     Ok(pool)
 }
 
+/// 套用全部 schema，最後對一次帳（[`schema_guard::check_drift`]）。
+async fn migrate(pool: &SqlitePool) -> Result<()> {
+    apply_migrations(pool).await?;
+    schema_guard::check_drift(pool).await
+}
+
 /// Only the current schema is supported: older databases are not upgraded. Leftover tables of
 /// removed features (`teams`, `team_*`) may exist; nothing reads them.
 ///
@@ -213,7 +231,9 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
 /// binary 已經動過這個檔案——直接拒絕，一個 SCHEMA／ALTER 都不碰，不要拿舊的欄位假設去讀一個看
 /// 不懂的資料庫（issue #72）。版本比較與最後的版本戳記都在同一個交易裡：SCHEMA／ALTER 失敗時
 /// 版本號要跟著回滾，不能宣稱「已經是這個版本」卻沒有真的套用成功。
-async fn migrate(pool: &SqlitePool) -> Result<()> {
+///
+/// 不含最後的漂移核對：`schema_guard` 拿它在全新的 in-memory DB 上跑一次，當 schema 的標準答案。
+async fn apply_migrations(pool: &SqlitePool) -> Result<()> {
     let mut tx = pool.begin().await?;
     let stored_version: i64 = sqlx::query_scalar("PRAGMA user_version").fetch_one(&mut *tx).await?;
     anyhow::ensure!(
@@ -317,62 +337,7 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
     crate::hook_inbox::migrate(pool).await?;
     crate::build_scheduler::migrate(pool).await?;
     crate::release_triage::ledger::migrate(pool).await?;
-    check_schema_drift(pool).await?;
     Ok(())
-}
-
-/// `SCHEMA` 的 `CREATE TABLE IF NOT EXISTS` 對**既有**資料庫是完全的 no-op，所以「欄位有哪些」其實
-/// 記在兩個地方：宣告式的 SCHEMA，與上面那份手維護的 ALTER 名單。往 SCHEMA 加一欄卻忘了補 ALTER，
-/// 在開發者自己的機器上一律是綠的（每個測試都開新 DB），到使用者那裡才會炸——而且是 `SELECT *` 的
-/// `FromRow` 整個失敗，daemon 起不來，錯誤訊息是 sqlx 的 column-not-found（review 2026-09-16）。
-///
-/// 所以 migrate 的最後一步自己對一次帳：宣告了什麼欄位，DB 就要有什麼欄位。
-async fn check_schema_drift(pool: &SqlitePool) -> Result<()> {
-    for (table, declared) in declared_columns(SCHEMA) {
-        let have: Vec<(i64, String, String, i64, Option<String>, i64)> =
-            sqlx::query_as(&format!("PRAGMA table_info({table})")).fetch_all(pool).await?;
-        if have.is_empty() {
-            continue; // 這一版沒建出來（舊功能留下的宣告）：不是這個檢查要管的事
-        }
-        let missing: Vec<&str> =
-            declared.iter().filter(|c| !have.iter().any(|h| h.1.eq_ignore_ascii_case(c))).map(|c| c.as_str()).collect();
-        anyhow::ensure!(
-            missing.is_empty(),
-            "schema drift：`SCHEMA` 宣告了 {table}.{} 但這個資料庫沒有。CREATE TABLE IF NOT EXISTS 對既有 DB 不做事，\
-             請在 db.rs 的 ALTER 名單補一條 `ALTER TABLE {table} ADD COLUMN …`（既有列要能留白）。",
-            missing.join("、")
-        );
-    }
-    Ok(())
-}
-
-/// 從 `CREATE TABLE IF NOT EXISTS <名字> ( … )` 抽出欄位名。只認每一行的第一個 token，
-/// 約束子句（PRIMARY／FOREIGN／UNIQUE／CHECK／CONSTRAINT）與 `--` 註解跳過。
-fn declared_columns(schema: &str) -> Vec<(String, Vec<String>)> {
-    const HEAD: &str = "CREATE TABLE IF NOT EXISTS ";
-    let mut out = Vec::new();
-    for chunk in schema.split(HEAD).skip(1) {
-        let Some(open) = chunk.find('(') else { continue };
-        let table = chunk[..open].trim().trim_matches('"').to_string();
-        let Some(close) = chunk.find("\n)") else { continue };
-        let mut cols = Vec::new();
-        for line in chunk[open + 1..close].lines() {
-            let line = line.split("--").next().unwrap_or("").trim().trim_end_matches(',').trim();
-            let Some(first) = line.split_whitespace().next() else { continue };
-            let upper = first.to_ascii_uppercase();
-            if ["PRIMARY", "FOREIGN", "UNIQUE", "CHECK", "CONSTRAINT"].contains(&upper.as_str()) {
-                continue;
-            }
-            if first.is_empty() || first.starts_with('(') {
-                continue;
-            }
-            cols.push(first.trim_matches('"').to_string());
-        }
-        if !cols.is_empty() {
-            out.push((table, cols));
-        }
-    }
-    out
 }
 
 /// 泛型 executor：`db::migrate` 要在自己的 transaction 裡查（`&mut *tx`），一般呼叫端仍然直接

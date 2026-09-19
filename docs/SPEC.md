@@ -78,8 +78,8 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   已移除功能留下的表與欄位（`teams`、`team_*`、`bots.team_id`…）在既有檔案裡原樣保留、不讀。
   **trigger 例外**（issue #186）：內容由程式產生的守衛（`turns_status_transition`、`supervisor_assignments_status_transition`，
   連同 `runs_agent_status_since`）不能只 `IF NOT EXISTS`——轉移表改了，舊 DB 裡那一份會永遠停在舊規則（新的合法邊被擋、拿掉的照樣放行）。
-  每次開 DB 都由 `db::sync_trigger` 拿 `sqlite_master.sql` 跟現在的 DDL 比，不同就在同一個交易裡 DROP 再建；不靠 `SCHEMA_VERSION`，
-  所以改轉移表不必升版號。
+  每次開 DB 都由 `db::sync_trigger` 拿 `sqlite_master.sql` 跟現在的 DDL 比，不同就在同一個交易裡 DROP 再建，舊 DB 不必等人手動重建。
+  改轉移表仍然算 schema 變更、要升 `SCHEMA_VERSION`（見下面的版本戳記）：不然舊 binary 開到這個 DB，會照它自己的轉移表把守衛換回舊規則。
   `db::migrate` 自己的 SCHEMA／additive ALTER 包在一個 transaction 裡，中途失敗（例如舊資料違反新加的 UNIQUE INDEX）整批回滾，
   不留半套 schema；重跑冪等。子模組各自的 migration（`supervisor::store`、`read_marks`、`panes`、`herdr_maintenance`、
   `mission::store`）不在這個 transaction 裡，各自維護自己那張表，風險最高的「加欄＋回填」已經各自包了自己的 transaction。
@@ -89,10 +89,24 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
     0）一律照舊往下跑，成功後才蓋上這顆 binary 的版本號。**這不是「照順序執行第 N 號 migration」的機制**——`SCHEMA`／
     additive ALTER 名單本身已經是 `CREATE TABLE IF NOT EXISTS`／`has_column` 檢查過的冪等操作，天生可重入；拆成
     `001_xxx.sql`／`002_xxx.sql` 這種按版本編號執行的檔案清單，是刻意評估後放棄的方向：現有機制的「單一事實來源＝實際
-    schema，且每次開機自我核對」（`check_schema_drift`）比「另外維護一份『哪些 migration 跑過』的帳本」更難跟實際狀態
+    schema，且每次開機自我核對」（`db::schema_guard::check_drift`）比「另外維護一份『哪些 migration 跑過』的帳本」更難跟實際狀態
     脫鉤，跨檔案改寫全部子模組簽名的風險也不成比例於「舊 binary 開到新 schema」這個唯一還沒被擋住的漏洞。往回滾到較
     舊 binary：只要那顆 binary 的 `SCHEMA_VERSION` 沒有比 DB 記的更舊，就能正常開；比較舊就會在啟動時直接報錯退出
     （不會把資料庫改壞，也不會用不懂的欄位硬跑）。
+    也就是說 `user_version` 是**最低相容 binary 的圍籬，不是 migration 帳本**：它只回答「哪些 binary 准開這個檔案」，
+    不記錄跑過哪些步驟。等真的出現非 additive 的資料轉換（改欄位型別、拆表、改約束得重建表），再引入照順序執行的
+    migration 框架。
+  - **什麼時候升 `SCHEMA_VERSION`**：migrate 建出來的任何 schema 物件變了就升——`db::SCHEMA`、ALTER 名單或任何一個
+    子模組的 migrate，表、欄位、型別、預設值、約束、索引、trigger 內容（含由轉移表產生的守衛）都算；排版與 `--` 註解
+    不算。不靠人記：`db::schema_guard` 的測試拿全新 DB 的 schema 指紋跟 `db::SCHEMA_HISTORY` 最後一行比，對不上就紅，
+    錯誤訊息直接給出要加的那一行。`SCHEMA_VERSION` 由這份清單的最後一行推出來；**只准在最後加一行，不准改既有的**。
+    1～4 版在指紋之前：4 版之後又改過子模組 schema 卻沒升（`supervisor_approvals.request_reason`、`release_triage`），
+    同樣記著 4 的 DB 長相不一，所以從 5 開始釘。
+  - **漂移核對涵蓋所有由程式建立的物件**（`db::schema_guard::check_drift`，migrate 的最後一步）：拿一顆全新的 in-memory
+    DB 跑同一套 migrate（含交易 commit 之後才跑的子模組）當標準答案，既有 DB 要有其中每張表的每個欄位、每個索引與
+    trigger（正規化後定義相同）。`CREATE … IF NOT EXISTS` 對既有 DB 是 no-op，漏了升級步驟就在啟動時講清楚是哪張表
+    哪一欄、哪個索引，不等某條路徑才炸成 column-not-found 或守衛默默停在舊規則。表的原文與約束不比（舊 DB 的表是
+    ALTER 一欄一欄補出來的，原文本來就不同）；標準答案裡沒有的東西（已移除功能留下的表、索引）不管。
 - **到期動作不靠行程內的 timer 當唯一真相**（issue #75）：每一種「等一下再做」的到期時間都**存在 DB 的擁有者那一列**上——
   排隊 prompt 的重試 `turns.next_flush_at`、交辦重送 `supervisor_assignments.next_attempt_at`、等額度 `…resume_at`、
   協調者補送 `supervisor_inbox.notify_next_at`、總管看門狗 `supervisors.watchdog_next_at`、hook 事件 `hook_events.next_attempt_at`。
