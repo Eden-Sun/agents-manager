@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import * as api from '../api'
 import type { OutboxFile } from '../api'
-import { emptyReason, fileSize, isPreviewableImage, lastSettledTurnKey, orderFiles, remainingLabel, remainingNow } from '../lib/outboxList'
+import { emptyReason, fileSize, isPreviewableImage, lastSettledTurnKey, LOAD_FAILED, readOutbox, remainingLabel, remainingNow } from '../lib/outboxList'
 import { clearOutboxPreviews } from '../lib/outboxPreviewCache'
 import { OutboxImagePreview } from './OutboxImagePreview'
 import { useStore } from '../store/store'
@@ -81,23 +81,15 @@ export function OutboxFiles() {
     // 換 bot 換得快時，慢回來的那一份不能蓋掉新的：離開就把自己標成過期。
     let alive = true
     void (async () => {
-      try {
-        const out = await api.fetchOutbox(botId)
-        if (!alive) return
-        setFiles(orderFiles(out.files))
-        setReason(out.reason)
-        setDir(out.dir)
-        setFetchedAt(Date.now())
-        setNow(Date.now())
-      } catch {
-        // 讀不到不是紅字：這一段是附加資訊，不該讓整個暫存區看起來壞掉。
-        if (!alive) return
-        setFiles([])
-        setReason(null)
-        setDir('')
-      } finally {
-        if (alive) setLoadedFor(botId)
-      }
+      // 讀不到不跳紅字（這一段是附加資訊，每個回合結束都重讀），但也不能說成「還沒有檔案」：`readOutbox` 回 `load_failed`（#234）。
+      const out = await readOutbox(() => api.fetchOutbox(botId))
+      if (!alive) return
+      setFiles(out.files)
+      setReason(out.reason)
+      setDir(out.dir)
+      setFetchedAt(Date.now())
+      setNow(Date.now())
+      setLoadedFor(botId)
     })()
     return () => {
       alive = false
@@ -148,7 +140,9 @@ export function OutboxFiles() {
         </button>
       </div>
       {files.length === 0 ? (
-        <p className="outbox-empty">{botId && loadedFor !== botId ? '讀取中…' : emptyReason(reason, Boolean(botId))}</p>
+        <p className={`outbox-empty${reason === LOAD_FAILED ? ' failed' : ''}`} role={reason === LOAD_FAILED ? 'alert' : undefined}>
+          {botId && loadedFor !== botId ? '讀取中…' : emptyReason(reason, Boolean(botId))}
+        </p>
       ) : (
         <ul className="outbox-list" role="list">
           {files.map((f) => {

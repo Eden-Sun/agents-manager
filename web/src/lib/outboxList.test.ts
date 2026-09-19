@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { emptyReason, fileSize, isPreviewableImage, lastSettledTurnKey, orderFiles, previewPlacement, remainingLabel, remainingNow } from './outboxList'
+import { emptyReason, fileSize, isPreviewableImage, lastSettledTurnKey, orderFiles, previewPlacement, readOutbox, remainingLabel, remainingNow } from './outboxList'
 
 const file = (name: string, modified: number, remainingSecs = 3600) => ({ name, size: 1, modified, remainingSecs })
 
@@ -37,6 +37,29 @@ test('沒有檔案的每一種原因都要講清楚，不能只留一片空白',
   assert.match(emptyReason(null, true), /AM_OUTBOX/)
   assert.match(emptyReason(null, true), /1 小時/)
   assert.ok(emptyReason('something_new', true).length > 0, '認不得的原因也要有話講')
+})
+
+/**
+ * #234：`GET /api/bots/{id}/outbox` 失敗（網路、500、404）以前被當成「沒有檔案」：`reason: null` 的空清單，畫面寫「還沒有檔案。bot 把要給你的
+ * 檔案放進 $AM_OUTBOX…」——bot 明明放了檔案，使用者卻被告知沒有，還照著說明重放一次。讀不到與真的沒檔分不開。
+ */
+test('讀不到清單不是「還沒有檔案」：講讀不到、指路去按重新讀取', () => {
+  const text = emptyReason('load_failed', true)
+  assert.doesNotMatch(text, /還沒有檔案/)
+  assert.match(text, /讀不到/)
+  assert.match(text, /重新讀取|↻/)
+})
+
+test('讀清單失敗回 load_failed，不是 reason 為 null 的空清單；成功的照舊排序、原樣帶 reason', async () => {
+  for (const err of [new TypeError('Failed to fetch'), new Error('HTTP 500'), Object.assign(new Error('not found'), { status: 404 })]) {
+    const out = await readOutbox(() => Promise.reject(err))
+    assert.deepEqual(out, { dir: '', reason: 'load_failed', ttlSecs: 0, files: [] }, String(err))
+  }
+  const ok = await readOutbox(() => Promise.resolve({ dir: '/o', reason: null, ttlSecs: 3600, files: [file('a.md', 1), file('b.md', 9)] }))
+  assert.deepEqual(ok.files.map((f) => f.name), ['b.md', 'a.md'])
+  assert.equal(ok.reason, null)
+  // 遠端的 200 帶 reason：原樣帶著，不被當成失敗。
+  assert.equal((await readOutbox(() => Promise.resolve({ dir: '', reason: 'outbox_remote', ttlSecs: 3600, files: [] }))).reason, 'outbox_remote')
 })
 
 test('新的排前面，同一秒的依名字排（順序不要每次重整都在跳）', () => {
