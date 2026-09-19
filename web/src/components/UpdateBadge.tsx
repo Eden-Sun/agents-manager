@@ -12,6 +12,7 @@ import './updateBadge.css'
  * claude 下載好新版只在 pane 底部印 `Update installed`；daemon 讀成 `runs.update_notice`，這顆 chip 點下去走重啟套用。
  * 2026-09-10：一律先開確認框並列 changelog。`variant="dot"`：側欄 bot 列上的小 ⌃⌃（2026-09-11 使用者：「click to update latest」）。
  * 2026-09-11 使用者：chip 版在批次（`UpdateQuotaChip`）蓋得到時不畫，省標題列第一排寬度；判斷只用 `updateBatch.ts` 與 daemon 同一份規則。
+ * 2026-09-19：「蓋得到」含在忙那組——額度列 chip 一樣畫著它。
  */
 export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; variant?: 'chip' | 'dot' | 'inline' }) {
   const run = useStore((s) => s.runs[botId] ?? null)
@@ -26,9 +27,12 @@ export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; varian
   const [asking, setAsking] = useState(false)
 
   // selector 回純布林：`updateBatchCounts` 每次回新陣列，連 `useShallow` 都擋不住（見 `UpdateQuotaChip.tsx`）。
-  const coveredByBatch = useStore((s) =>
-    updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null).ready.some((b) => b.botId === botId),
-  )
+  // 忙碌的也算：額度列的 chip 把它列在「在忙」那組，照樣畫著；再畫一顆就是同一個 ⌃⌃ 兩次（2026-09-19 使用者：「logo 重工了」）。
+  // 這顆 bot 自己要套用走 context bar 版本號旁的「升級」（`inline`）。
+  const coveredByBatch = useStore((s) => {
+    const { ready, busy } = updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null)
+    return ready.some((b) => b.botId === botId) || busy.some((b) => b.botId === botId)
+  })
 
   const notice = run?.update_notice ?? null
   if (!notice) return null

@@ -55,7 +55,7 @@
 - 第一行：燈號、名字、★、⚙、更新 chip 等；第二行：`● 需要回應`（blocked 時，排第一）、kind logo（無框、有底色、貼近 model）、model／effort chip、pane id（擠不下只剩 `▾`）。
 - 顏色：kind 品牌色 `--kind-claude` 橘、`--kind-codex` 綠、`--kind-grok` 紫（使用者選的）；model chip 吃該 kind 色；⚙ 與 ▾ 吃 accent；★ 釘起來實心黃、沒釘淡黃空心。
   kind 圖示 tooltip 寫「這是哪個 CLI、哪家模型」，`aria-label` 只有 kind 名。codex 顯示時去掉 `gpt-` 前綴（完整 id 在 tooltip）（使用者指定）。
-- 更新 chip 只寫 `${kind} 有更新`；批次重啟蓋得到當前 bot 時不畫（忙碌、非 user 管理、非 claude 才留）。
+- 更新 chip 只寫 `${kind} 有更新`；額度列的更新 chip 有列到當前 bot（閒置或在忙那組都算）就不畫，免得同一個 ⌃⌃ 出現兩次（2026-09-19 使用者：「logo 重工了」）；只剩非 claude 的會畫。這顆自己要套用走 context bar 版本號旁的「升級」。
 - 「回合被 API 中斷」：側欄紅記號＋標題列紅 chip（點開原文＋「重送上一則」，走一般送出路徑）；沒有「知道了」。
 - context bar：不顯示花費；版本貼右；commit／push／pull 桌機 hover 才彈出、打 commit 訊息時常駐；CLI 可升級時版本旁出現「⌃⌃ 升級」。
 
