@@ -28,12 +28,32 @@ export function remainingLabel(secs: number): string {
   return `剩 ${Math.ceil(secs / 60)} 分鐘`
 }
 
+/** 讀不到清單（網路、500、404）：畫面上的 `reason`，不是 daemon 回的（#234）。 */
+export const LOAD_FAILED = 'load_failed'
+
+export type OutboxList = { dir: string; reason: string | null; ttlSecs: number; files: OutboxFile[] }
+
 /**
- * 「這顆 bot 沒有可列的檔案」有好幾種原因，而且都**不是錯誤**：講清楚是哪一種，
- * 使用者才不會對著空白區域猜自己是不是按錯了。
+ * 讀一次清單。讀不到回 `reason: 'load_failed'` 的空清單，**不是** `reason: null`：以前 catch 把任何錯誤都當成「還沒有檔案」，
+ * bot 明明放了檔案，畫面卻叫使用者「把檔案放進 $AM_OUTBOX」，讀不到與真的沒檔分不開（#234）。
+ * 這是附加資訊，不跳紅字（每個回合結束都會重讀，toast 會變成連珠炮）；畫面在空白處講清楚並指路去按 ↻。
+ */
+export async function readOutbox(fetchList: () => Promise<OutboxList>): Promise<OutboxList> {
+  try {
+    const out = await fetchList()
+    return { ...out, files: orderFiles(out.files) }
+  } catch {
+    return { dir: '', reason: LOAD_FAILED, ttlSecs: 0, files: [] }
+  }
+}
+
+/**
+ * 「這顆 bot 沒有可列的檔案」有好幾種原因，多半**不是錯誤**：講清楚是哪一種，
+ * 使用者才不會對著空白區域猜自己是不是按錯了。讀不到清單（[`LOAD_FAILED`]）是唯一的例外，要講得跟「沒有檔案」不一樣。
  */
 export function emptyReason(reason: string | null, botSelected: boolean): string {
   if (!botSelected) return '先選一顆 bot，這裡會列出它交給你的檔案。'
+  if (reason === LOAD_FAILED) return '讀不到這顆 bot 的檔案清單（daemon 沒有回應或出錯），不代表沒有檔案。按上面的 ↻ 重新讀取。'
   if (reason === 'outbox_remote') return '這顆 bot 在遠端主機上，它的檔案不在這台機器，列不出來。'
   // daemon 902a85c：outbox 或 bot 那一層是符號連結、擁有者不是資料目錄的使用者——為了安全不列也不給下載，不能說成「還沒有檔案」。
   if (reason === 'outbox_untrusted') return '這顆 bot 的 outbox 不是一般資料夾（符號連結或擁有者不對），為了安全不列出、也不給下載。'

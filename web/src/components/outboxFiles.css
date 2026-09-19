@@ -45,6 +45,11 @@
   color: var(--text-faint);
 }
 
+/* 讀不到清單（#234）：跟「還沒有檔案」用不同顏色，別讓人以為是空的。 */
+.outbox-empty.failed {
+  color: var(--danger);
+}
+
 .outbox-list {
   list-style: none;
   margin: 0;
