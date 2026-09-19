@@ -63,7 +63,11 @@ enum StopOutcome {
 
 async fn stop_locked(app: &Arc<App>, bot_id: &str, for_restart: bool, only_if_idle: bool) -> LcResult<bool> {
     let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
-    let Some(run) = db::active_run(&app.db, bot_id).await.map_err(up)? else { return Ok(false) };
+    let Some(run) = db::active_run(&app.db, bot_id).await.map_err(up)? else {
+        // agent 自己退了、預覽還掛著的話也一併收（§6.12）。
+        crate::preview::stop_for_bot(app, bot_id).await;
+        return Ok(false);
+    };
     let host = db::bot_host(&app.db, bot_id).await.map_err(up)?;
     let client = client_for_run(app, &run).await?;
     // 讀完 active run、還沒記 `stopping` 的那一瞬（測試在這裡插進不拿 bot 鎖的 pane-exit 事件）。
@@ -104,6 +108,8 @@ async fn stop_locked(app: &Arc<App>, bot_id: &str, for_restart: bool, only_if_id
         return Err(turn_unwritable(app, bot_id, &run.id, "停", e).await);
     }
 
+    // 預覽的 pane 跟 agent 同一個 tab：先收，agent 的 pane 關掉時那個 tab 才會是空的（§6.12）。
+    crate::preview::stop_for_bot(app, bot_id).await;
     let target = db::run_target(&run, &bot);
     for _ in 0..2 {
         let _ = client.agent_send_keys(&target, &["ctrl+c".to_string()]).await;

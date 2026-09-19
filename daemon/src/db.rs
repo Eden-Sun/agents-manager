@@ -143,6 +143,12 @@ CREATE TABLE IF NOT EXISTS spawn_hints (
   pane_id TEXT PRIMARY KEY, host TEXT NOT NULL, bot_id TEXT NOT NULL REFERENCES bots(id),
   created_at TEXT NOT NULL
 );
+-- 預覽模式（issue #253）：頂層 bot 的專案起的 vite dev server。一顆 bot 一列；`status` 是 off／starting／running／failed，
+-- `pane_id` 是放在該 bot 那個 tab 裡的 service pane，`off` 時是 NULL、`port` 也不再算被佔用。
+CREATE TABLE IF NOT EXISTS bot_previews (
+  bot_id TEXT PRIMARY KEY REFERENCES bots(id), host TEXT NOT NULL, pane_id TEXT, port INTEGER, dir TEXT,
+  status TEXT NOT NULL, error TEXT, started_at TEXT, updated_at TEXT NOT NULL
+);
 "#;
 
 /// 這個 binary 認得的 schema 版本，存在 SQLite 內建的 `PRAGMA user_version`（跟資料庫檔案綁在一起，
@@ -171,6 +177,8 @@ const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (7, "7372788a43638544"),
     // issue #240：`judge_shadow`（撞限第二意見的帳本，只記錄）。
     (8, "3b7f1d3c6f8712de"),
+    // issue #253：`bot_previews`（頂層 bot 的 vite 預覽）。
+    (9, "be0411b44c5111ab"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
