@@ -521,8 +521,9 @@ shim 轉遠端要 pane 裡有 `AM_DAEMON_EXE`、`AM_CONFIG_PATH`、`AM_DATA_DIR`
 
 遠端工作目錄（issue #141，`remote_cargo.rs`）：`<remote_root>/<worktree 路徑的 fnv1a64>/` 底下，
 - `shared/`：同一棵 worktree 共用的原始碼＋`target/`，用完保留，下次 rsync 只傳差異、cargo 增量編譯。旁邊的
-  `shared.lock` 是 flock，同一時間只給一次呼叫；搶不到（同一棵 worktree 同時兩個 `cargo test`）就改用
-  `job-<pid>-<ms>/`，冷編譯、結束就刪，stderr 會講。
+  `shared.lock` 是 flock，同一時間只給一次呼叫；被佔著（同一棵 worktree 同時兩個 `cargo test`）時**先等它用完**（每秒再試，最多 5 分鐘，
+  issue #104：等完再增量編譯只要十幾秒，冷編譯要重編幾分鐘、還多佔一份遠端 RAM 與 2～3G 磁碟），等超過 5 分鐘才改用
+  `job-<pid>-<ms>/`，冷編譯、結束就刪，stderr 都會講。
 - 同步、算 hash 的是**工作區根**（issue #177），不是呼叫時的 cwd：像 cargo 一樣往上找最近一層宣告 `[workspace]` 的
   `Cargo.toml`（沒有工作區就用最近的套件根；完全不在 cargo 專案裡才是 cwd 本身），遠端 cargo 再 `cd` 到同一個相對子目錄。
   所以 `cd daemon && cargo check` 與在根目錄呼叫共用同一份 `shared/`，遠端有根的 `Cargo.lock`／`[profile]`／`.cargo/config.toml`，
@@ -542,9 +543,18 @@ shim 轉遠端要 pane 裡有 `AM_DAEMON_EXE`、`AM_CONFIG_PATH`、`AM_DATA_DIR`
   **`shared/` 另有數量上限（issue #196）**：`[build.remote] max_shared_dirs`（預設 8，`0`＝不限）——一天開十幾顆子 agent、每張票數個變異副本，每個路徑一個新的 hash、
   各 2～3G（實測 36 個 hash、29G），只靠時間擋不住。超過就從最久沒用的開始收（LRU；至少閒置 10 分鐘，剛用完的不動；鎖被持有、有行程在用、這次自己的永遠不收），
   時機是每次 remote-cargo 呼叫開始時（跟 #141 的孤兒回收同一處），不靠 crontab。
+- **遠端名額（issue #104）**：同一個 `remote_root` 不分 worktree 同時最多 `[build.remote] max_concurrent` 個遠端編譯（`<remote_root>/.slots/<n>`
+  的 flock，守門拿到目錄之後再搶、拿著直到結束，怎麼死都會放）。#155 讓遠端編譯不佔本機名額之後遠端沒有自己的上限，2026-09-19 就是 9 個冷編譯同時跑把遠端壓垮。
+  `0`（預設）＝守門依那台的核數與 RAM 算：`min(核數 × 1.5 ÷ cargo_jobs, (MemTotal − 8 GiB) ÷ 8 GiB)`，至少 1——CPU 容許 1.5 倍超賣（一次編譯大多時間只有
+  一顆 rustc 在跑），記憶體不超賣（實測一次冷的 `cargo test -p agents-managerd` 光主 crate 那顆 rustc 就多吃約 4.6 GiB）；32 核／64 GiB、`cargo_jobs = 8` 是 6。
+  全滿就排隊：每秒再試，stderr 講「遠端同時編譯已滿（N 個），排隊等名額」，排到了講等了幾秒。順序是**先目錄、後名額**：等 shared 的人不佔名額，拿著名額的人不再等任何鎖。
+  排隊期間守門每秒看一次 helper 還在不在：helper 那條 ssh 斷了（被砍、Ctrl-C、網路斷）時遠端 sshd 會關掉守門的 **stdin**（stdout 反而照樣寫得進去，
+  2026-09-19 用真的 sshd 量過），所以用 `timeout 1 dd` 讀 stdin——讀到 EOF 就自己結束、放掉手上的鎖（實測砍掉本機 ssh 後 1 秒內）；helper 交握前不寫 stdin，不會吃掉資料。
+  helper 這端交握改在另一條執行緒讀，收到終止訊號照樣馬上停。排超過 30 分鐘（每個佔名額的編譯都受 `timeout_secs` 管，正常兩輪內就排到；再久＝有名額被卡住，例如守門那條連線半開）就放棄：
+  遠端什麼都沒跑，**結束碼 75**（EX_TEMPFAIL，稍後再試；shim 原樣帶出，不退回本機）。
 - 遠端要是有 `flock`（util-linux）與 `/proc` 的 Linux，沒有就直接報錯、不跑。
 - **整體上限（issue #194）**：一次遠端編譯（同步＋編譯＋測試）最多 `[build.remote] timeout_secs`（預設 **720 秒＝12 分鐘**；實測 112 次遠端編譯最長 8.9 分鐘、
-  全套 test 中位數 5.0、P90 8.7）。連線正常、遠端的 cargo 或測試卡住（死結、等鎖、測試掛住）時 ssh 的 ConnectTimeout／ServerAlive 管不到，沒有上限 helper 與呼叫端的 agent 會一直等。
+  全套 test 中位數 5.0、P90 8.7）。從**拿到遠端名額與目錄**才開始算（issue #104）：排隊的時間不算，不然滿載時排久一點的編譯一開始跑就被砍。連線正常、遠端的 cargo 或測試卡住（死結、等鎖、測試掛住）時 ssh 的 ConnectTimeout／ServerAlive 管不到，沒有上限 helper 與呼叫端的 agent 會一直等。
   超過就：砍掉本機的 rsync／ssh、守門收到 EOF 把遠端那一整組行程（process group，同 #183）收掉並還目錄與鎖（#141），stderr 印一行
   「遠端編譯超過 12 分鐘上限，已中止（…可調 [build.remote] timeout_secs）」，**結束碼 124**（跟 GNU `timeout` 一樣）。shim 只把 125 當成「退回本機」，
   所以**不會在本機重跑**（那只會讓卡住的東西在本機再卡一次）。`timeout_secs = 0`＝不設上限。
@@ -556,8 +566,13 @@ shim 轉遠端要 pane 裡有 `AM_DAEMON_EXE`、`AM_CONFIG_PATH`、`AM_DATA_DIR`
   不會卡到 TCP keepalive 的 2 小時。
 
 ### `GET /api/build/remote` / `PUT /api/build/remote`
-`{enabled, host, user, ssh_port, remote_root, cargo_jobs, test_threads, timeout_secs, shared_idle_hours, max_shared_dirs, password_set}`。PUT 另收 `password`（寫進 0600 的
-secret file，不進 config、不回前端）與 `clear_password`。`host`／`user` 空字串又要 `enabled` → 400。
+`{enabled, host, user, ssh_port, remote_root, cargo_jobs, test_threads, timeout_secs, shared_idle_hours, max_shared_dirs, max_concurrent, password_set}`。PUT 另收 `password`
+（省略＝沿用現在的密碼，換主機也一樣；`""`＝清掉改用 SSH key/agent；其他＝新密碼）——不進 config、不回前端。`host`／`user` 空字串又要 `enabled` → 400。
+**設定與密碼一起提交（issue #104）**：新密碼先寫成一份還沒人指到的 `<data-dir>/remote-cargo-password.<16 hex>`（open(2) 時就是 0600，不是事後 chmod；寫完 fsync 才從
+`.tmp` rename 成正式檔名），再把 config.toml 一次換成「新設定＋`[build.remote] password_id` 指向新檔」——唯一的提交點是 config.toml 的 rename；最後才刪掉沒有設定指到的舊密碼檔。
+任何一步失敗或行程死掉，重讀磁碟只會是「舊設定＋舊密碼」或「新設定＋新密碼」，不會出現新主機配舊密碼（舊密碼被送去新主機）或權限比 0600 寬的密碼檔；
+提交前失敗 → 5xx、什麼都沒變。沒有 `password_id` 的舊設定照舊讀 `remote-cargo-password`，下一次儲存就換成新格式；設定指到的密碼檔不見了是錯誤（不悄悄改用 key/agent）。
+`max_concurrent`＝遠端名額（見上「遠端名額」）：PUT 省略＝維持現在的值，`0`＝依遠端核數與 RAM 自動算，超過 64 → 400。
 `test_threads`＝遠端 `cargo test` 的測試執行緒上限（`RUST_TEST_THREADS`，預設 8，`0`＝不設，最多 256；PUT 省略＝維持現在的值）。
 `timeout_secs`＝一次遠端編譯的整體時間上限（見上「整體上限」）：PUT 省略＝維持現在的值，`0`＝不設上限，超過 86400 → 400。
 `shared_idle_hours`（至少 1）與 `max_shared_dirs`（`0`＝不限）是遠端 `shared/` 的回收政策（見上），PUT 省略＝維持現在的值。
@@ -571,12 +586,15 @@ secret file，不進 config、不回前端）與 `clear_password`。`host`／`us
 ```
 
 **連得上但沒有 cargo 不是錯誤**：`cargo_missing:true`、`cargo_path:null`，UI 據此提示安裝。ssh 本身失敗才 5xx。
+另回 `clippy_version`（`cargo clippy --version`，沒有是 `null`）與 `clippy_missing`（有 cargo 卻沒有 clippy，issue #104）：clippy 是會轉過去的三個指令之一，
+rustup 的 minimal profile 不含它——UI 據此提示「按安裝補上」，不說「可用」然後第一次 `cargo clippy` 才失敗。
 密碼認證優先用 `sshpass`，沒有就走 ssh 自己的 askpass（`SSH_ASKPASS_REQUIRE=force`，OpenSSH 8.4+）；兩條都不行才 5xx。
 
 ### `POST /api/build/remote/install-toolchain`
-在那台跑 `rustup`（`--profile minimal --no-modify-path`，不動遠端的 shell profile）。冪等：已經有 cargo 就只回版本。
+在那台跑 `rustup`（`--profile minimal --component clippy --no-modify-path`，不動遠端的 shell profile）。冪等：已經有 cargo 就不重裝，
+只在缺 clippy 時 `rustup component add clippy`（issue #104；不是 rustup 裝的工具鏈補不上，回 `clippy_missing:true`，UI 當場提醒）。
 
-`200 {"ok":true,"already_installed":bool,"cargo_version":"cargo 1.90.0","cc_missing":bool,"output":"…"}`
+`200 {"ok":true,"already_installed":bool,"cargo_version":"cargo 1.90.0","cc_missing":bool,"clippy_missing":bool,"output":"…"}`
 （`cc_missing:true`＝那台沒有 `cc`／`gcc`：rustup 不裝 linker，`cargo test` 會在連結那一步才失敗，UI 當場提醒裝 build-essential）；遠端沒有 `curl` 或 rustup
 失敗 → 5xx 並帶 stderr。第一次大約要一兩分鐘。`~/.cargo/bin` 由 daemon 自己接到遠端 PATH 前面（probe 與真正的
 遠端 cargo 都是），所以不必改遠端 profile。

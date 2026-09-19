@@ -322,6 +322,13 @@ pub struct BuildRemoteCfg {
     /// 遠端 `shared/` 最多留幾份（連同正在用的）；超過就從最久沒用的開始收。`0`＝不限（issue #196）。
     #[serde(default = "default_remote_max_shared_dirs")]
     pub max_shared_dirs: usize,
+    /// 同一個 `remote_root` 同時最多幾個遠端編譯（不分 worktree）；滿了就排隊。`0`（預設）＝依遠端的核數與 RAM 自動算（issue #104）。
+    #[serde(default)]
+    pub max_concurrent: usize,
+    /// 密碼檔是 data-dir 的哪一份（issue #104）：`remote-cargo-password.<id>`。沒有這個 key＝舊版設定，讀 `remote-cargo-password`；
+    /// 空字串＝沒有密碼（key/agent）。密碼本身永遠不在這裡——換主機與換密碼靠「config.toml 換成指向新檔」這一次 rename 一起生效。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password_id: Option<String>,
 }
 
 impl Default for BuildRemoteCfg {
@@ -337,6 +344,8 @@ impl Default for BuildRemoteCfg {
             timeout_secs: default_remote_build_timeout_secs(),
             shared_idle_hours: default_remote_shared_idle_hours(),
             max_shared_dirs: default_remote_max_shared_dirs(),
+            max_concurrent: 0,
+            password_id: None,
         }
     }
 }
