@@ -1,0 +1,31 @@
+/* 更新框裡的「AGM 解析」區塊。載入順序在 styles.css 之後由元件自己 import。 */
+.agm-review {
+  margin: 10px 0 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--line, #e3e3e3);
+  border-radius: 8px;
+  background: var(--surface-2, #fafafa);
+}
+
+.agm-review-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.agm-review-who {
+  color: var(--muted, #777);
+  font-size: 12px;
+}
+
+.agm-review-body {
+  margin: 6px 0 0;
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+}

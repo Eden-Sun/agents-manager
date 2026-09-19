@@ -468,6 +468,18 @@ adopt 之後孤兒通知標記會清掉。pane 不存在 404、`owner_bot_id` �
 
 ## 請 AGM 解析 claude 新版（使用者 2026-09-19）
 
+### `GET /api/claude-update/review`
+這一版的 AGM 解析到哪了——更新框一打開就讀，**有結論就直接印在框裡**（使用者 2026-09-19：不要只給一句
+「結論會回到這裡」）。`?host=`／`?to=` 可指定，預設本機與磁碟上那一版。
+
+```json
+{"version":"2.1.277","review":{"state":"done","assignment_id":"01…","target_bot_name":"AGM-responder",
+ "asked_at":"…","answered_at":"…","result":"2.1.277 沒有值得跟進的東西…"}}
+```
+
+`state`：`none`（還沒派，UI 顯示按鈕）｜`pending`（派了還沒結論）｜`done`（`result` 就是結論原文）。
+`result` 只有空白也算 `pending`——agent 還沒寫東西就結案不該顯示成有結論。
+
 ### `POST /api/claude-update/review`
 `{host?, from?, to?}`（預設 `host=local`、`to`＝磁碟上那一版）。把這一版的 changelog 組成交辦派給**協調者**，
 唯讀——只建交辦，不 build、不重啟、不碰 claude 的檔案。內容與 `scripts/ops/claude-release-task.md` 同一套規則，
@@ -481,7 +493,10 @@ adopt 之後孤兒通知標記會清掉。pane 不存在 404、`owner_bot_id` �
 - **正文只有一份來源**：`claude-release-task.md`（AGM 目錄裝好的那份優先，其次 repo 的 `scripts/ops/`）原文
   ＋ 版本尾段（舊／新版號與兩顆 binary 路徑），跟 `claude-release-kick.sh` 完全一樣；規則要改就改那個檔案。
   找不到那份檔案 → 409 `no_task_file`；
-- `client_request_id` 固定是 `agm-claude-release-<版本>`（與 kick 同一個）。同一版已經派過時**在送出之前**
+- 按鈕用**自己的** `client_request_id`：`agm-claude-release-<版本>-ui`（kick 用不帶 `-ui` 的那個）。
+  分開是因為 kick 走 AGM 收件匣的 `bot_request`，那條路沒有 assignment，**結論無處可讀**；走自己的交辦
+  才有 `result` 能回填到更新框。同一版重按仍然只有一筆，回應帶 `duplicate:true` 與當下的 `review` 狀態。
+- （舊行為，仍保留在回應裡）`client_request_id` 曾與 kick 共用 `agm-claude-release-<版本>`。同一版已經派過時**在送出之前**
   就回 `duplicate:true`——**兩個地方都查**：既有的 assignment（回 `assignment_id`），以及 AGM 收件匣裡同一個
   crid 的 `bot_request`（回 `inbox_event_id`；kick 是走收件匣派的，那一步還沒有 assignment，不查就會撞上
   `bot_requests` 的 409 `request_mismatch`——2026-09-19 上線後實測）（UI 顯示「已經派過」，不是錯誤）——kick 與按鈕的正文差一句觸發來源，

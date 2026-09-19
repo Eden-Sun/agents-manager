@@ -923,3 +923,13 @@ export interface NewMissionInput {
   on_5h_limit: MissionOn5h
   max_rounds?: number
 }
+
+/** `GET/POST /api/claude-update/review` 的 `review` 欄位：這一版的 AGM 解析到哪了。 */
+export interface ClaudeReview {
+  state: 'none' | 'pending' | 'done'
+  target_bot_name: string
+  asked_at: string
+  answered_at: string
+  /** `done` 才有：AGM 的結論原文。 */
+  result: string
+}

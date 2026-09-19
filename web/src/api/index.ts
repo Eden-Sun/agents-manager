@@ -21,6 +21,7 @@ import type {
   GroupSkipReason,
   HostResult,
   HostShell,
+  ClaudeReview,
   RemoteCargoInput,
   RemoteCargoSettings,
   IdentityStatusMap,
@@ -683,6 +684,26 @@ export async function installRemoteCargoToolchain(): Promise<{
     cc_missing: o.cc_missing === true,
     output: str(o.output),
   }
+}
+
+function toReview(raw: unknown): ClaudeReview {
+  const o = isRec(raw) ? raw : {}
+  const state = o.state === 'done' || o.state === 'pending' ? o.state : 'none'
+  return {
+    state,
+    target_bot_name: str(o.target_bot_name),
+    asked_at: str(o.asked_at),
+    answered_at: str(o.answered_at),
+    result: str(o.result),
+  }
+}
+
+/** 這一版的 AGM 解析到哪了（更新框一打開就讀，有結論就直接顯示）。 */
+export async function fetchClaudeUpdateReview(input: { host?: string; from?: string | null }): Promise<ClaudeReview> {
+  const q = new URLSearchParams()
+  if (input.host) q.set('host', input.host)
+  const raw = await transport.request('GET', `/claude-update/review${q.size ? `?${q}` : ''}`)
+  return toReview(isRec(raw) ? raw.review : null)
 }
 
 /** 請 AGM 解析這一版 claude changelog（唯讀，只建交辦）。 */
