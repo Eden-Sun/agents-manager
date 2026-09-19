@@ -90,11 +90,27 @@ pub struct LivePane {
     pub codex: bool,
     /// claude's suggested next prompt: drawn dim in an empty composer, gone once anything is typed.
     pub suggestion: Option<String>,
+    /// claude 2.1.277+（#205）：Enter 時框裡有這些字就先拿掉、清過的字留在框裡，底下顯示 review 提示；再按一次才送出。
+    pub strips_on_enter: Option<fn(char) -> bool>,
+    /// 上面那個 review 提示（畫在框的下緣之後）。
+    pub notice: Option<String>,
 }
 
 /// 框裡的字送出去：進 transcript，有 transcript 檔就照 claude 的格式補一筆 user entry。
 /// Enter 與 send-now 和弦（issue #103）共用這一段——兩顆鍵對框的效果一樣。
 fn submit_composer(p: &mut LivePane) {
+    if let Some(strips) = p.strips_on_enter {
+        let removed: usize = p.composer.iter().map(|r| r.chars().filter(|c| strips(*c)).count()).sum();
+        if removed > 0 {
+            for r in p.composer.iter_mut() {
+                r.retain(|c| !strips(c));
+            }
+            let what = if removed == 1 { "Removed 1 invisible character".to_string() } else { format!("Removed {removed} invisible characters") };
+            p.notice = Some(format!("{what} · review and press Enter to send"));
+            return;
+        }
+    }
+    p.notice = None;
     let rows: Vec<String> = p.composer.drain(..).collect();
     if let (Some(path), false) = (&p.transcript_file, rows.is_empty()) {
         use std::io::Write as _;
@@ -165,6 +181,9 @@ impl LivePane {
             }
         }
         out.push_str("─────────────────────────────────────────────\n");
+        if let Some(n) = &self.notice {
+            out.push_str(&format!("  {n}\n"));
+        }
         out.push_str("  user. | proj | OP5 61% | 5h:53%(rst 2h 35m) | 7d:95%\n");
         out
     }

@@ -96,7 +96,11 @@ async fn accept_locked(
         return Err(refusal);
     }
     let files = crate::attach::resolve(app, bot_id, attachment_ids).await.map_err(|e| LcError::Bad(e.to_string()))?;
-    let deliver = crate::attach::deliver_text(text, &files);
+    // 同 `prompt_inner`：起來後打進 pane 的是清過的字（#205），泡泡留原文。
+    let deliver = super::pane_text::for_pane(&bot.kind, &crate::attach::deliver_text(text, &files));
+    if super::pane_text::nothing_left(text, &deliver) {
+        return Err(LcError::Bad("the prompt is empty once invisible characters and terminal escapes are removed".into()));
+    }
     let (turn_id, msg_id) = (db::ulid(), db::ulid());
     // 沒有 run 才要替它起（`starting` 那顆已經有人在起）。已經有人在替它起（重複的請求）就不再疊一次。
     let mark = if run.is_none() { Starting::begin(bot_id) } else { None };

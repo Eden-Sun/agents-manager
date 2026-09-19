@@ -995,6 +995,12 @@ pub(crate) async fn confirm_submitted(
                 tracing::info!(run = %run.id, bot = %bot.name, proof = ?proof, "prompt typed into the pane and proven submitted");
                 return Ok(Delivered::Submitted);
             }
+            // claude 清掉隱形字元、等人 review（#205）：框裡是**清過的**字，再按一次送出去的就不是記下的那一段，
+            // 證據永遠對不上。不按，交給使用者看。送出前的清理（`pane_text::for_pane`）本來就不該讓這個畫面出現。
+            BoxState::NonEmpty if super::pane_text::invisible_review_notice(&now) => {
+                tracing::warn!(run = %run.id, bot = %bot.name, "claude is asking to review a prompt it cleaned of invisible characters; not pressing Enter");
+                return Ok(Delivered::Unproven("invisible_chars_review"));
+            }
             BoxState::NonEmpty if !pressed_again => {
                 tracing::warn!(run = %run.id, bot = %bot.name, ?submit, "prompt still in the composer after the submit key; pressing it again");
                 client.pane_send_keys(pane, submit.keys()).await?;

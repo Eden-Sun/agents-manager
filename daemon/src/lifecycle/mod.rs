@@ -19,6 +19,7 @@ mod stop;
 mod slash;
 mod delivery;
 mod prompt;
+mod pane_text;
 mod poller;
 mod screen;
 mod limit_banner;
