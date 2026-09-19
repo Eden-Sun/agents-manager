@@ -500,6 +500,10 @@ shim 轉遠端要 pane 裡有 `AM_DAEMON_EXE`、`AM_CONFIG_PATH`、`AM_DATA_DIR`
 - `shared/`：同一棵 worktree 共用的原始碼＋`target/`，用完保留，下次 rsync 只傳差異、cargo 增量編譯。旁邊的
   `shared.lock` 是 flock，同一時間只給一次呼叫；搶不到（同一棵 worktree 同時兩個 `cargo test`）就改用
   `job-<pid>-<ms>/`，冷編譯、結束就刪，stderr 會講。
+- 同步、算 hash 的是**工作區根**（issue #177），不是呼叫時的 cwd：像 cargo 一樣往上找最近一層宣告 `[workspace]` 的
+  `Cargo.toml`（沒有工作區就用最近的套件根；完全不在 cargo 專案裡才是 cwd 本身），遠端 cargo 再 `cd` 到同一個相對子目錄。
+  所以 `cd daemon && cargo check` 與在根目錄呼叫共用同一份 `shared/`，遠端有根的 `Cargo.lock`／`[profile]`／`.cargo/config.toml`，
+  不會重新解析依賴。
 - 每次呼叫先開一條守門 ssh 拿鎖，再 rsync、再跑 cargo；守門讀 stdin 等到 EOF 才清理，所以 helper 成功、失敗、
   被 Ctrl-C／SIGTERM／kill -9 都會清（遠端還在跑的 cargo 按 process group 收掉，`job-*` 刪掉，`shared` 解鎖）。
 - 租約身分（fencing token，issue #148）是本機每次呼叫新產生的 128 位元隨機數（32 個小寫 hex），不是遠端 shell 的 PID
