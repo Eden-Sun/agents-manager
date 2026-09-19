@@ -25,6 +25,7 @@ import {
   arr,
 } from '../api/normalize'
 import { ApiError } from '../api/types'
+import { PREVIEW_OFF, toPreviewEvent, type Preview } from '../api/preview'
 import type { Bot, BotKind, RestartBatch, GroupChatResult, Mission, MissionDetail, NewMissionInput, MemSnapshot, GroupMessage, Host, HerdrVersion, HostResult, HostShell, Identity, IdentityStatusMap, Lamp, Message, ModelInfo, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, PatchBotInput, PatchProjectInput, Project, QuotaMap, Run, TerminalSource, ToolMap, Turn, TurnDelivery } from '../api/types'
 import type { ProjectPane } from '../api'
 import { joinRunningBatch, restartProgress } from './restartBatch'
@@ -82,7 +83,7 @@ export const MISSION_CLOSED_LIMIT = 50
 const MISSION_OPEN_LIMIT = 500
 
 export type SocketStatus = 'connecting' | 'open' | 'closed'
-export type RightTab = 'chat' | 'terminal'
+export type RightTab = 'chat' | 'terminal' | 'preview'
 
 export type SettingsAnchor = { left: number; right: number; top: number; bottom: number }
 
@@ -393,6 +394,9 @@ export interface StoreState {
 
   selectedBotId: string | null
   rightTab: RightTab
+  /** 預覽模式（issue #253）：每顆頂層 bot 的 vite 預覽；`preview_changed` 與面板的 GET／POST／DELETE 寫入。 */
+  previews: Record<string, Preview>
+  setPreview: (botId: string, p: Preview) => void
   settingsBotId: string | null
   /** null = 置中。 */
   settingsAnchor: SettingsAnchor | null
@@ -778,6 +782,8 @@ export const useStore = create<StoreState>((set, get) => ({
 
   selectedBotId: initialSelection.botId,
   rightTab: 'chat',
+  previews: {},
+  setPreview: (botId, p) => set((s) => ({ previews: { ...s.previews, [botId]: p } })),
   settingsBotId: null,
   settingsAnchor: null,
   botOrder: {},
@@ -2702,6 +2708,15 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
       }
       // 重啟過的 bot 換了 run，狀態一次撈回來。
       void get().refreshState()
+      return
+    }
+    case 'preview_changed': {
+      if (!isRec(data)) return
+      const botId = str(pick(data, 'bot_id'))
+      if (!botId) return
+      const prev = get().previews[botId] ?? PREVIEW_OFF
+      const next = toPreviewEvent(data, prev)
+      set((s) => ({ previews: { ...s.previews, [botId]: next } }))
       return
     }
     case 'identities_changed':

@@ -388,3 +388,17 @@ daemon 這幾天把「寫不進 DB」改成 fail closed：外面的副作用做�
 - **讀不到**（主機沒連上、舊 daemon 沒這欄位）：寫「herdr 版本：未知」，不用別的欄位去猜。
 - 不放狀態列：版本是低頻資訊，狀態列每個字都要跟額度、context 搶位置；hosts 面板就是使用者驗收升級會去看的地方。
 - 文字組合在 `lib/herdrVersion.ts`（有單元測試）。截圖：`docs/screenshots/herdr-version/`。
+
+## 預覽分頁：頂層 bot 的 vite dev server 內嵌在右半面板（2026-09-19，issue #253）
+
+- **只給頂層 bot**：tablist 在「對話／終端」後多一個「預覽」，`parent_bot_id` 為空且 `managed_by='user'` 才出現（`routeSync.isTopLevelBot`）。
+  子 agent、team 成員看不到；網址 `/bots/<id>/preview` 對它們退回對話。
+- **四種狀態**（`PreviewPanel.tsx`）：`off` 一顆「啟動預覽」＋會在哪個目錄找 vite；`starting` 進度條＋取消；`running` iframe＋工具列（重新整理、在新分頁開、停止）；
+  `failed` 顯示 daemon 給的最後 40 行輸出＋「重試」「關閉」。狀態由 `preview_changed` 即時更新，進面板時再 GET 一次補 `dir`／`error`。
+- **iframe 網址 `http://${location.hostname}:${port}/`，不帶 token。** 現行 dev UI 拿 token 的方式是啟動時打一次 `GET /api/session`（只存記憶體，不讀網址）；
+  vite dev 的 `/api` proxy 從 loopback 打 daemon，所以被預覽的若是 AG Man 自己，iframe 是另一個 origin 也不需要我們遞 token。
+  不用 `?token=`（會進網址列、歷史、log）、不用 `postMessage` 遞 token（多一條要維護的信任路徑）。
+  取捨：預覽的是別的專案而它自己要 UI token 時，這裡不代辦——那是它自己的認證。
+- **重新整理是換 iframe 的 key**：跨 origin 拿不到 `contentWindow.location.reload()`；代價是會丟掉頁面內的暫存狀態（預期如此）。
+- **手機**：一樣有這個分頁，iframe 滿版（去掉左右框線與圓角）。截圖：`docs/screenshots/preview/`。
+- **mock**（`VITE_MOCK=1`）：三個端點與 `preview_changed` 都演；iframe 用 `srcDoc` 放一頁說明，因為沒有真的 vite。

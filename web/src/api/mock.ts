@@ -842,6 +842,11 @@ export class MockTransport implements Transport {
       if (method === 'PATCH' && !action) return this.patchBot(botId, b)
       if (method === 'DELETE' && !action) return this.deleteBot(botId)
       if (method === 'GET' && action === 'messages') return this.messagesOf(botId, q)
+      if (action === 'preview' && seg.length === 3) {
+        if (method === 'GET') return this.previewOf(botId)
+        if (method === 'POST') return this.startPreview(botId)
+        if (method === 'DELETE') return this.stopPreview(botId)
+      }
       if (method === 'GET' && action === 'terminal') {
         return this.terminal(botId, q.get('source') ?? 'visible', Number(q.get('lines') ?? 40))
       }
@@ -2487,6 +2492,47 @@ export class MockTransport implements Transport {
       })
     }, 1400)
     return { run_id: run.id }
+  }
+
+  /** 預覽模式（issue #253）：starting 1.2 秒後轉 running，跟 daemon 的 `preview_changed` 同形。 */
+  private previews = new Map<string, { status: string; port: number | null; dir: string | null; pane_id: string | null; error: string | null; started_at: string | null }>()
+
+  private previewOf(botId: string) {
+    this.bot(botId)
+    return this.previews.get(botId) ?? { status: 'off' }
+  }
+
+  private setPreviewState(botId: string, patch: Record<string, unknown>) {
+    const cur = this.previews.get(botId) ?? { status: 'off', port: null, dir: null, pane_id: null, error: null, started_at: null }
+    const next = { ...cur, ...patch }
+    this.previews.set(botId, next)
+    this.emit('preview_changed', { bot_id: botId, status: next.status, port: next.port })
+    return next
+  }
+
+  private startPreview(botId: string) {
+    const bot = this.bot(botId)
+    if (bot.parent_bot_id || bot.managed_by === 'child') {
+      throw new ApiError(409, { reason: 'not_top_level' }, 'not_top_level')
+    }
+    const cur = this.previews.get(botId)
+    if (cur && (cur.status === 'starting' || cur.status === 'running')) return cur
+    const used = new Set([...this.previews.values()].map((p) => p.port))
+    let port = 5180
+    while (used.has(port)) port += 1
+    const dir = `${bot.cwd ?? '/Users/m4p/project/agents-manager'}/web`
+    const starting = this.setPreviewState(botId, { status: 'starting', port, dir, pane_id: `mock-pv-${port}`, error: null, started_at: now() })
+    setTimeout(() => {
+      if (this.previews.get(botId)?.status === 'starting') this.setPreviewState(botId, { status: 'running' })
+    }, 1200)
+    return starting
+  }
+
+  private stopPreview(botId: string) {
+    this.bot(botId)
+    this.previews.delete(botId)
+    this.emit('preview_changed', { bot_id: botId, status: 'off', port: null })
+    return { status: 'off' }
   }
 
   private stop(botId: string) {

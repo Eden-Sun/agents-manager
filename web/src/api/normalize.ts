@@ -260,6 +260,19 @@ export function toBot(v: unknown, projectId?: string): Bot | null {
     parent_bot_id: optStr(pick(v, 'parent_bot_id')),
     primary: bool(pick(v, 'primary')),
     cwd: optStr(pick(v, 'cwd')),
+    ...(() => {
+      const x = pick(v, 'preview')
+      if (x === undefined) return {}
+      if (!isRec(x)) return { preview: null }
+      const st = pick(x, 'status')
+      const port = pick(x, 'port')
+      return {
+        preview: {
+          status: st === 'starting' || st === 'running' || st === 'failed' ? st : ('off' as const),
+          port: typeof port === 'number' && port > 0 ? Math.floor(port) : null,
+        },
+      }
+    })(),
     herdr_session: optStr(pick(v, 'herdr_session')),
     agent_name: optStr(pick(v, 'agent_name')),
     ...(() => {

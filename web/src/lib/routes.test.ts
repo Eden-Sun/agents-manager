@@ -10,6 +10,7 @@ test('parse/build: 每個畫面都對稱', () => {
     HOME,
     { kind: 'bot', botId: 'b1', tab: 'chat', settings: false },
     { kind: 'bot', botId: 'b1', tab: 'terminal', settings: false },
+    { kind: 'bot', botId: 'b1', tab: 'preview', settings: false },
     { kind: 'bot', botId: 'b1', tab: 'chat', settings: true },
     { kind: 'project', projectId: 'p1' },
     { kind: 'shell', host: 'local', paneId: 'pane-9' },
@@ -20,6 +21,7 @@ test('parse/build: 每個畫面都對稱', () => {
 test('build: goal 表格裡的路徑就是這些字串', () => {
   assert.equal(buildRoute({ kind: 'bot', botId: 'b1', tab: 'chat', settings: false }), '/bots/b1')
   assert.equal(buildRoute({ kind: 'bot', botId: 'b1', tab: 'terminal', settings: false }), '/bots/b1/terminal')
+  assert.equal(buildRoute({ kind: 'bot', botId: 'b1', tab: 'preview', settings: false }), '/bots/b1/preview')
   assert.equal(buildRoute({ kind: 'bot', botId: 'b1', tab: 'chat', settings: true }), '/bots/b1/settings')
   assert.equal(buildRoute({ kind: 'project', projectId: 'p1' }), '/projects/p1')
   assert.equal(buildRoute({ kind: 'shell', host: 'mini', paneId: 'w1:t2:p3' }), '/hosts/mini/shells/w1%3At2%3Ap3')
