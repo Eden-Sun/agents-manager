@@ -975,6 +975,56 @@ pub async fn reconcile(app: &Arc<App>) {
     }
     sweep_missing_events(app).await;
     sweep_late_replies(app).await;
+    collect_cancelled_missions(app).await;
+}
+
+/// 所屬任務已經取消、自己卻還開著的交辦（issue #185）：取消任務時逐件 `review cancel`，有一件失敗（DB 暫時寫不進去）
+/// 就一直開著——#171 之後派送不會再送它，但也沒有別的路會收它，永遠佔著「未結交辦」。這裡補做取消那一步的同一個裁示。
+///
+/// 只收**沒在跑**的：`delivered`／`unknown` 的回合可能還在跑，等它結束、收到 `awaiting_review` 之後下一輪再收，不在回合
+/// 中途把追蹤斷掉。走 `post_review` 同一條路（同一把 supervisor 鎖、同一份稽核），收過的就不再是開著的，可重入。
+async fn collect_cancelled_missions(app: &Arc<App>) {
+    let idle: Vec<&str> = super::assignment_state::ALL
+        .iter()
+        .copied()
+        .filter(|s| !super::assignment_state::is_terminal(s) && !matches!(*s, "delivered" | "unknown"))
+        .collect();
+    let marks = vec!["?"; idle.len()].join(",");
+    let sql = format!(
+        "SELECT a.* FROM supervisor_assignments a JOIN missions m ON m.id = a.mission_id
+          WHERE a.supervisor_id = ? AND m.cancelled_at IS NOT NULL AND a.status IN ({marks})
+          ORDER BY a.created_at, a.rowid LIMIT 50"
+    );
+    let mut q = sqlx::query_as::<_, store::Assignment>(&sql).bind(store::SUPERVISOR_ID);
+    for st in &idle {
+        q = q.bind(*st);
+    }
+    let Ok(rows) = q.fetch_all(&app.db).await else { return };
+    for a in rows {
+        let mission = a.mission_id.clone().unwrap_or_default();
+        let review = super::api::ReviewIn {
+            decision: "cancel".into(),
+            actor: Some("daemon".into()),
+            source: Some("mission_cancel".into()),
+            reason: Some(format!("群組任務 {mission} 已取消（取消當下這一件沒收成，補收）")),
+            evidence: None,
+            followup_text: None,
+            followup_request_id: None,
+            followup_bot_id: None,
+            ownership: Vec::new(),
+        };
+        match super::api::post_review(
+            axum::extract::State(app.clone()),
+            axum::extract::Path(a.id.clone()),
+            axum::http::HeaderMap::new(),
+            axum::Json(review),
+        )
+        .await
+        {
+            Ok(_) => tracing::info!(assignment = %a.id, mission, "collected an assignment its cancelled mission left open"),
+            Err(e) => tracing::warn!(assignment = %a.id, mission, error = ?e, "could not collect an assignment its cancelled mission left open"),
+        }
+    }
 }
 
 /// 已經結算過、但回合後來被遲到的 hook 補上回覆的交辦（`open_assignments` 只列執行中的，掃不到它們）。

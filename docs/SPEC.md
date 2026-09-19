@@ -2416,6 +2416,9 @@ supervisor 相關資料表與欄位都是 additive，`db::migrate` 重跑冪等�
   `controller::dispatch` 先看交辦所屬的任務，已取消／已結案就不送（留在 `queued` 由取消那條路收掉；讀不到任務就 `hold` 幾秒再看）；
   所有派送入口（`drain_queue`、`assign`、`review followup`、等額度回來的 `resume_quota_blocked`）都在同一把鎖裡呼叫它，
   檢查到打字之間取消插不進來。以前中間那一瞬拿到鎖的派送照樣把使用者剛取消的工作打進 bot。
+  逐件 `review cancel` 有一件失敗（DB 暫時寫不進去）時，那件會一直開著：controller 的對帳（`controller::reconcile`，每個 tick）
+  把「所屬任務已取消、沒在跑」的交辦補做同一個裁示（`post_review` cancel，`source=mission_cancel`），可重入；`delivered`／`unknown`
+  的回合可能還在跑，等它結束、收到 `awaiting_review` 再收（issue #185）。
 
 需要人判斷的（`ask_user`、`no_independent_reviewer`、findings、要不要再一輪）仍然在 AGM 這一側，daemon 不碰。
 與 ownership 衝突的差別：那個是字串比對猜出來的，所以只回報不強制（§18.4）；這兩條是查得到的事實。
