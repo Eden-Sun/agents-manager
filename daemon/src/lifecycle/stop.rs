@@ -1138,6 +1138,22 @@ mod stop_commit_tests {
         assert_eq!(rs::scheduled(&fresh.id), vec![rs::Settle::Reconcile { stuck: "starting".into() }]);
     }
 
+    /// 同上，AGM 有一則排著的派工：重啟中不撤（#129），但對帳把新 run 收成 `running` 不會叫 flush，它起來時的 idle 邊又早在
+    /// `starting` 就過了——要自己等它收斂再叫，不然那一則要等 30 分鐘的排隊保險絲把它撤掉。
+    #[tokio::test]
+    async fn a_child_restart_whose_new_run_cannot_be_recorded_running_still_flushes_the_queue_once_it_settles() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (kid, _run, _pane) = a_child(&env).await;
+        let queued = rs::a_turn(&app, &kid, None, "queued").await;
+        rs::refuse_run_state(&app, "running").await;
+
+        restart_child_in_pane(&app, &kid).await.expect_err("新 run 沒記下 running");
+        let fresh = db::active_run(&app.db, &kid).await.unwrap().expect("新 run 還在");
+        assert_eq!(rs::turn_status(&app, &queued).await, "queued", "重啟中：不當孤兒撤");
+        assert!(super::super::start_send::watching_for_running(&fresh.id), "排了「收成 running 就叫 flush」");
+    }
+
     /// 子 agent 不理 ctrl+c（10 秒後放棄），`stopping → running` 放回去也寫不進去：排重試，DB 恢復後放回。
     #[tokio::test]
     async fn a_child_restart_that_gives_up_retries_putting_the_run_back() {

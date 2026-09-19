@@ -619,7 +619,9 @@ cancel 撤掉的是還沒送出的那則時，review 回應不再帶「turn 還�
 **重啟不是停**（issue #106，`lifecycle::restart_hold`）：`restart_bot_with`（換身分、`?resume=native`、一鍵重啟）先停舊 run 再起新 run，
 中間那一段沒有 active run，但 bot 馬上就回來。重啟在 bot 鎖裡宣告「進行中」，這段期間任何撤孤兒的路徑——stop 自己、
 `restart_start` 收掉擋路 run 的 `mark_run_exited`、不拿 bot 鎖的 pane-exit 事件、定時掃描——都不撤；新 run 起來就叫醒 flush
-（`--resume` 起的 claude 由 §6.5.2 的閘門等驗證完才送）。重啟沒能把 bot 開回來才當孤兒撤（說明寫「重啟之後沒能把 bot 開回來」）。
+（`--resume` 起的 claude 由 §6.5.2 的閘門等驗證完才送）。新 agent 起來了、只是 `running` 寫不進去（`start_state_uncommitted`）時，
+它起來時的 idle 邊與 `SessionStart` 早在 `starting` 就過了、對帳收成 `running` 又不叫 flush，所以跟 §6.2 的 `start_if_stopped`
+（#152）一樣在背景等 run 收成 `running` 再叫 flush（子 agent 的原地重啟同，#165）。重啟沒能把 bot 開回來才當孤兒撤（說明寫「重啟之後沒能把 bot 開回來」）。
 只放行程記憶體：daemon 在重啟途中掛掉，開機後那顆沒有 run、標記也不在，照舊收掉。子 agent 的原地重啟（§6.9）不走 `restart_bot_with`，
 但停舊 run 到寫入新 run 那一段同樣宣告進行中（#129）；新 run 寫不進去或 `agent.start` 失敗時憑證已經放掉，照舊當孤兒撤。
 
@@ -1419,7 +1421,8 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
     舊 run 的 `running → stopping → stopped` 與新 run 的 `starting → running` 走 §6.4 stop 同一套 CAS（#146）：`stopping` 寫不進去就不動子 agent；
     舊 run 的 in-flight 收不成也不動（放回 `running`，`503 turn_state_unwritable`，#156）；
     舊 run 的 `stopped` 寫進去之前不寫新 run、不 `agent.start`（寫不進去回 `503 stop_state_uncommitted`，憑證隨之放掉，對帳把舊 run 收成
-    `exited` 後排著的派工照 #129 撤）；新 run 的 `running` 寫不進去回 `503 start_state_uncommitted` 並排對帳重試。
+    `exited` 後排著的派工照 #129 撤）；新 run 的 `running` 寫不進去回 `503 start_state_uncommitted` 並排對帳重試，排著的派工等 run
+    收成 `running` 再叫 flush（對帳那條不叫，#165）。
   - 序列而非並行：per-bot 鎖與 pane 版面都假設一次一顆，並行的錯誤也分不出是誰的。
 - **一顆失敗不中斷整批**。最後仍啟動失敗的：留下 pane 已關的 run 就結束掉，並推 supervisor inbox `kind = bot_restart_failed`（`batch_id`、`bot_id`、`name`、`error`）。
 - **總管 bot 排最後**；重啟後 60 秒內每 5 秒檢查 running／pane／agent，沒回來就自動再啟動一次，推 `kind = supervisor_restart_retry`（含 `ok`、`error`）。

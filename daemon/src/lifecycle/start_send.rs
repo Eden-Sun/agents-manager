@@ -237,8 +237,8 @@ enum Started {
 /// 替它起的 agent 已經起來、`running` 卻沒寫進 DB（`Uncommitted`，#152）：對帳重試會照 herdr 的證據把 run 收成
 /// `running`，但那條路不會叫 flush——排著的這一則就沒人送。這裡在背景等它收斂：`running` 就叫醒 flush；run 不在了
 /// （收成 `exited`）就停，撤孤兒那條路會記原因。測試裡不開背景 task，只記下排了誰（[`watching_for_running`]），
-/// 由測試自己呼叫 [`flush_if_running`]。
-fn flush_once_running(app: &Arc<App>, bot_id: &str, run_id: &str) {
+/// 由測試自己呼叫 [`flush_if_running`]。重啟（`restart_bot_with`／子 agent 原地重啟）遇到同一種 `Uncommitted` 也走這裡（#165）。
+pub(crate) fn flush_once_running(app: &Arc<App>, bot_id: &str, run_id: &str) {
     tracing::warn!(bot = %bot_id, run = %run_id, "agent 起來了、running 還沒記下：等對帳收斂後再叫 flush");
     if cfg!(test) {
         #[cfg(test)]
