@@ -285,7 +285,10 @@ async fn relay_pane(
         Ok(Some(b)) if b.deleted_at.is_none() && !token.is_empty() && token == b.hook_token => b,
         _ => return (StatusCode::UNAUTHORIZED, Json(json!({"error": "unknown bot or bad token"}))),
     };
-    let host = db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| crate::config::LOCAL_HOST.to_string());
+    // 讀不到 host 就 503 讓 shim 重試：退回 local 會把遠端 pane id 寫進本機 namespace（#243）。
+    let Ok(host) = db::bot_host(&app.db, &bot.id).await else {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": "bot host unreadable; retry"})));
+    };
     match crate::panes::note_purpose(&app, &host, &body.pane_id, &bot, body.purpose.trim()).await {
         Ok(()) => (StatusCode::OK, Json(json!({"pane_id": body.pane_id, "purpose": body.purpose}))),
         Err(e) => {
@@ -2525,7 +2528,8 @@ async fn delete_identity(
             continue;
         }
         // 同一台的 bot 還在用它。同名的 `cc1` 在別台通常是別的帳號——除非那台用的正是這筆沒寫 host 的。
-        let bot_host = db::bot_host(&app.db, &b.id).await.unwrap_or_else(|_| crate::config::LOCAL_HOST.to_string());
+        // 讀不到某顆 bot 的 host 就不刪（#243）：當成 local 可能放行「遠端 bot 還在用」的 identity。
+        let bot_host = db::bot_host(&app.db, &b.id).await.map_err(any_err)?;
         let shell = app.tools.lock().await.get(&bot_host).map(|t| t.shell_identities.clone());
         if bot_host == host
             || (removing_hostless && hostless_identity_in_effect(&cfg.identities, &bot_host, shell.as_deref(), &name))
@@ -4324,5 +4328,36 @@ mod instruction_files_tests {
         assert_eq!(shown(&e, &typo).await, json!("claude-md"));
         lifecycle::start_bot(&e.app, &typo).await.unwrap();
         assert_eq!(pinned(&settings_of_last_start(&e)), json!("claude-md"), "拼錯的值沒有走到 --settings");
+    }
+}
+
+/// #243：pane-purpose 回報遇到 host 讀不到，要 503 讓 shim 重試——不能把遠端 pane id 寫進 `host='local'`。
+#[cfg(test)]
+mod relay_pane_host_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn an_unreadable_bot_host_is_a_retryable_error_and_writes_no_pane_row() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let bot = crate::testing::claude_bot(&app, &e.project_id, "alfa").await;
+        let report = || {
+            let mut h = HeaderMap::new();
+            h.insert("X-AM-Bot-Token", "tok".parse().unwrap());
+            let body = RelayPane { bot_id: bot.id.clone(), pane_id: "w1-9".into(), purpose: "build".into() };
+            relay_pane(State(app.clone()), h, axum::extract::Form(body))
+        };
+        let panes = || async { sqlx::query_scalar::<_, i64>("SELECT count(*) FROM panes").fetch_one(&app.db).await.unwrap() };
+
+        crate::testing::make_table_unreadable(&app, "projects").await;
+        let (code, _) = report().await;
+        crate::testing::make_table_readable(&app, "projects").await;
+        assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(panes().await, 0, "不能寫出任何 pane 列");
+
+        let (code, _) = report().await;
+        assert_eq!(code, StatusCode::OK, "DB 好了重送就成功");
+        let host: String = sqlx::query_scalar("SELECT host FROM panes WHERE pane_id='w1-9'").fetch_one(&app.db).await.unwrap();
+        assert_eq!(host, "local");
     }
 }
