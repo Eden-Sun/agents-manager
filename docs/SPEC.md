@@ -1509,7 +1509,10 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   **之前**把看到的狀態記在記憶體（`idle_sleep::observe_status`），DB 寫不進去（現在會記 warn，不再默默吞掉）時 DB 的
   idle 不算閒著的證據：事件流說它不是 idle 就不收。停失敗就把那一列
   收回去，這顆仍是醒著的——**例外**是 503 `stop_state_uncommitted`（issue #152）：agent 已經停了、pane 已經關了，只是
-  `stopped` 寫不進 DB（run 停在 `stopping`，背景重試補記），它就是睡著的，標記留著。收完在它自己的對話裡留一則 system 訊息說為什麼。
+  `stopped` 寫不進 DB（run 停在 `stopping`，背景重試補記），它就是睡著的，標記留著。其餘的停機錯誤也只在**確定它還在跑**
+  （active run 是 `running`：許可沒過、agent 對 ctrl+c 沒反應被放回 running、在飛的那一筆收不成）時才收回標記；
+  問不到 herdr 證實 agent 不在（`stop_not_confirmed`，pane 已經關了、run 留在 `stopping` 交給對帳）一樣留著（issue #170）——
+  對帳收成 `exited` 它就是睡著的；對帳看到 agent 放回 `running`，叫醒那條路看到活著的 run 會自己清掉。收完在它自己的對話裡留一則 system 訊息說為什麼。
 - **怎麼叫醒**（`idle_sleep::wake`／`wake_locked`）：用 `StartOpts { resume_native: true, resume_required: true }`
   起回來，claude 拿到的是 `--resume <上一個 session>`，跟 §6.9 的批次是同一條路。`resume_required`
   是重點：接不回原本那段對話時**不默默開新的**——「只留下 resume」是這個功能的全部前提，悄悄換成

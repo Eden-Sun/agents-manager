@@ -580,11 +580,20 @@ async fn sleep_one(app: &Arc<App>, c: &Cand, session: Option<String>, threshold:
             tracing::warn!(bot = %c.name, error = ?e, "idle bot stopped but its run could not be recorded as stopped yet; keeping it marked asleep while the retry records it");
             app.emit("bot_changed", json!({"bot_id": c.bot_id, "asleep": true})).await;
         }
-        Err(e) => {
-            // 停不下來就不是睡著的：把標記收回去，下一輪再看。
-            tracing::warn!(bot = %c.name, error = ?e, "could not stop the idle bot; it stays running");
-            clear_asleep(app, &c.bot_id).await;
-        }
+        // 其餘的錯誤：只有**確定它還在跑**（許可沒過、agent 對 ctrl+c 沒反應被放回 `running`、在飛的那一筆收不成）才收回
+        // 標記。問不到 herdr 證實 agent 不在（`stop_not_confirmed`／`Unknown`：pane 已經關了）時 run 留在 `stopping` 交給
+        // 對帳——收成 `exited` 的話它就是睡著的，標記收回去就叫不醒原本的對話（issue #170）；對帳看到 agent 放回
+        // `running` 的話，`wake` 看到活著的 run 本來就會把標記清掉。讀不到 run 也不算「確定還在跑」。
+        Err(e) => match db::active_run(&app.db, &c.bot_id).await {
+            Ok(Some(r)) if r.state == "running" => {
+                tracing::warn!(bot = %c.name, error = ?e, "could not stop the idle bot; it stays running");
+                clear_asleep(app, &c.bot_id).await;
+            }
+            now => {
+                tracing::warn!(bot = %c.name, error = ?e, state = ?now.map(|r| r.map(|r| r.state)), "the idle stop could not be confirmed; keeping the bot marked asleep until the run settles");
+                app.emit("bot_changed", json!({"bot_id": c.bot_id, "asleep": true})).await;
+            }
+        },
     }
 }
 
@@ -1215,6 +1224,39 @@ mod tests {
         let run = db::active_run(&app.db, &bot).await.unwrap().expect("還在跑");
         assert_eq!(run.state, "running");
         assert!(asleep(&app, &bot).await.is_none(), "沒停就不是睡著的");
+    }
+
+    /// 停機送了 ctrl+c、關了 pane，卻問不到 herdr 證實 agent 不在（`stop_not_confirmed`，`Unknown`）：run 留在 `stopping`
+    /// 交給對帳照證據收——看得到 agent 就放回 running，看不到就收成 `exited`。以前這一支跟「確定還活著」（`StillAlive`，
+    /// 已經放回 running）一起把休眠標記收回：對帳收成 `exited` 之後，它是一顆沒有標記、pane 已關的 bot，下一則 prompt
+    /// 不會 `--resume`，原本的對話接不回來。標記要留著：還活著的話 `wake` 看到 running 自己會清掉（issue #170）。
+    #[tokio::test]
+    async fn a_stop_herdr_could_not_confirm_keeps_the_bot_marked_asleep() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (bot, run) = idle_bot(&env, "oscar").await;
+        let stale = stale_cand(&app, &bot).await;
+        // agent 對 ctrl+c 沒有馬上消失（herdr 用 pane id 找得到它），而 pane 的狀態一直問不到：十秒的等待沒看到它退出，
+        // 關掉 pane 之後的確認也問不到。
+        let pane = format!("pane-{bot}");
+        sqlx::query("UPDATE runs SET agent_name=? WHERE id=?").bind(&pane).bind(&run).execute(&app.db).await.unwrap();
+        *env.herdr.agents.lock().unwrap() = vec![json!({
+            "name": "oscar-live", "agent": "claude", "agent_status": "idle",
+            "workspace_id": "ws-1", "tab_id": "t-1", "pane_id": pane, "cwd": "/tmp/p"})];
+        for _ in 0..21 {
+            env.herdr.fail_next("pane.get", crate::testing::Fault::Refuse);
+        }
+
+        sleep_one(&app, &stale, Some("sid-1".into()), 90).await;
+        let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(&run).fetch_one(&app.db).await.unwrap();
+        assert_eq!(state, "stopping", "前提：停機確認不了，留給對帳");
+        assert!(asleep(&app, &bot).await.is_some(), "pane 已經關了、只是證實不了：標記要留著");
+
+        // 對帳看不到 agent，收成 exited：它是睡著的 bot，下一次要用時照 `--resume` 接回原本那段。
+        env.herdr.agents.lock().unwrap().clear();
+        crate::lifecycle::mark_run_exited(&app, &run, "agent not found during reconcile").await;
+        assert_eq!(wake(&app, &bot, "測試").await.map_err(|e| e.to_string()), Ok(true));
+        assert!(started_with_resume(&env, "sid-1"), "用同一段 session 叫醒");
     }
 
     /// issue #144 驗收三：`working` 寫不進 DB（`let _ =` 吞掉）時，DB 仍說 idle——那不能當成「閒著」的證據。
