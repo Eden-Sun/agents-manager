@@ -1012,6 +1012,16 @@ WS：每顆兩次 `bots_restart_progress`（`restarting`，然後 `ok` / `failed
 - 找不到 404。
 - daemon 啟動時掃一次 `bots/`，只刪 DB 裡已 `deleted_at` 且沒有 active Run 的 hook 材料目錄。
 
+### 10.4a `POST /api/bots/{id}/restore`
+軟刪復原：`200 {"bot_id"}`，推 `bot_changed` / `project_changed`。child 直接清 `deleted_at`；user bot 把 config.toml 那一筆加回去再投影。
+
+| 狀況 | 回應 |
+|---|---|
+| 找不到 | `404 {"what":"bot"}` |
+| 還沒刪 | `409 {"reason":"bot is not deleted","bot_id"}` |
+| 同專案已有同名活著的 bot | `409 {"reason":"bot name already in use in this project","bot_id","name","taken_by"}` |
+| 投影閘門擋下 | 同 §1 `projection_refused` |
+
 ### 10.5 `POST /relay/announce`
 **不在 `/api` 下**，不吃 UI token：呼叫者是 pane 裡的 herdr shim，驗證用該 bot 的 hook token（`X-AM-Bot-Token`）。
 表單編碼 `bot_id`、`to_agent`、`text` → `200 {}`；bot 不存在、已刪或 token 不符 → 401。

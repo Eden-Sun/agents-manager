@@ -1616,10 +1616,12 @@ export const useStore = create<StoreState>((set, get) => ({
       get().notify('info', `已刪除 ${name}`, {
         label: '復原',
         run: async () => {
-          const ok = await api.restoreBot(botId)
-          if (ok) {
+          try {
+            await api.restoreBot(botId)
             await get().refreshState()
             get().selectBot(botId)
+          } catch (e) {
+            get().notify('error', `復原失敗：${errText(e)}`)
           }
         },
       })

@@ -582,14 +582,9 @@ export async function searchMessages(q: string): Promise<Record<string, MessageH
   return out
 }
 
-/** 任何失敗 → false，呼叫端顯示失敗而不是假裝成功。 */
-export async function restoreBot(botId: string): Promise<boolean> {
-  try {
-    await transport.request('POST', `/bots/${encodeURIComponent(botId)}/restore`)
-    return true
-  } catch {
-    return false
-  }
+/** 軟刪復原。失敗丟 `ApiError`（撞名 409、不存在 404），由呼叫端顯示，不能吞成 false。 */
+export async function restoreBot(botId: string): Promise<void> {
+  await transport.request('POST', `/bots/${encodeURIComponent(botId)}/restore`)
 }
 
 /** SPEC §15. */
