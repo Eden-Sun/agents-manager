@@ -369,6 +369,21 @@ hook body 另外帶 `run_id`＝這個 CLI 行程 pane env 的 `AM_RUN_ID`（本�
   run 或 bot 沒了才退出——以前一次讀錯就退出，Stop hook 又剛好漏掉的話那一回合就沒人收。讀不到 agent 狀態的那一輪不算閒著。
 - **讀不到送了什麼就不收**（#193）：`try_fallback` 剝回音要的「送了什麼」讀不到時回錯、回合留在飛，下一次再來——當成什麼都沒送，
   我們自己的 prompt 就被當成 agent 的回覆存下來。
+- **codex 0.155 的畫面**（#207；照 rust-v0.155.0 的原始碼先做好，真畫面等升級時驗）：
+  - 狀態列 `• {字頭} ({經過時間} • esc to interrupt)`，後面可能再接 ` · {訊息}`。字頭預設 `Working`，壓縮時 `Compacting context`，
+    reasoning summary 開著時是 summary 的最新一行（0.155.0 預設開、0.155.1 預設關回去，身分的 config 明寫的照開）。「還在忙」認**結構**
+    （括號裡是經過時間、` • `、`… to interrupt`；中斷鍵可以改綁），不認字頭——只認 `Working (` 會把還在想的 codex 當成停了，備援把狀態列當回覆收掉回合。
+  - 成功回合結束後，回覆**下面**多一行完成時間：`Worked for 2m 5s · done 3:24 PM`（一分鐘內只有 `done 3:24 PM`；別天 `done Sep 6 at 2:32 PM`、
+    別年 `done Sep 6, 2000 at 2:32 PM`；重播可能只有 `Worked for …`；後面可能再接 runtime metrics）。`extract_reply`／`clean_screen` 剝掉回覆
+    **尾巴**的這一行，回覆中間長得一樣的字照留。0.154 以前是回覆上方一整條 `─ Worked for … ─`。
+  - 底下的狀態列（模型／強度／Context／額度）與輸入框的位置不受影響：summary 畫在輸入框上面那一列。
+  - 完成時間行還沒拿來當回合結束的訊號（票上的「採用」）：格式要先對過真畫面，`notify` hook 仍是主訊號。
+  - **升級時真機驗**：`CODEX_HOME` 指向拋棄式目錄（不在 scratchpad／outbox，在裡面 `codex login`，驗完整個刪掉），0.155.1 裝在私有 prefix
+    （`npm i --prefix <拋棄式目錄> @openai/codex@0.155.1`），開在 AG Man 不會認領的 pane（名字不帶 bot 前綴、不在任何 bot 的 tab），
+    不要替正式 pane 按更新。`model_reasoning_summary = "concise"` 與預設各跑一輪，回合中、剛結束、閒置各讀一次
+    `herdr pane read <pane> --source recent-unwrapped --lines 200`（`--format text` 與 `ansi` 各一份），存成
+    `daemon/src/lifecycle/fixtures/codex-0.155-*.txt`；把 `screen.rs` 的 `codex_0155_screen_tests`、`poller.rs` 的 `codex_0155_fallback_tests`
+    改讀這些檔，跑 `cargo test -p agents-managerd codex_0155`。紅的才修，修法是認得新的那一行並跳過，不放寬成模糊比對。
 - **沒有 hook 的 run**：被認領的 pane（`runs.adopted = 1` 且 `bots.inject_hooks = 0`，典型是 bot 自己開的子 agent，§6.5a）等不到 hook，
   快照是**唯一來源**：`working → idle` 沒有 in-flight Turn 時，補一筆 `origin = external`、`completed_fallback` 的 Turn（prompt 回音記 user、回覆記 assistant）。
   認領當下仍 `working` 就先開一筆 in-flight Turn。

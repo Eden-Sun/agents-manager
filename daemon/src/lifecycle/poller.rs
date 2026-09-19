@@ -1422,9 +1422,16 @@ pub(crate) fn pane_still_busy(screen: &str) -> bool {
     crate::capture::claude::PARSER.still_busy(screen) || screen.lines().any(is_codex_working_line)
 }
 
+/// codex 的狀態列：`• {header} ({elapsed} • esc to interrupt)`，後面可能再接 ` · {訊息}`。header 預設 `Working`，
+/// 壓縮時是 `Compacting context`，reasoning summary 開著時是 summary 的最新一行（0.155 起，#207）——只認 `Working (`
+/// 的話，還在想的 codex 會被當成停了，備援把狀態列當回覆收掉回合。所以認結構：括號裡是經過時間、` • `、`… to interrupt`
+/// （中斷鍵可以改綁）。格式照 codex `status_indicator_widget.rs`。
 fn is_codex_working_line(s: &str) -> bool {
-    let s = s.trim();
-    s.starts_with('•') && s.contains("Working (") && s.contains("esc to interrupt")
+    let Some(rest) = s.trim().strip_prefix('•') else { return false };
+    rest.match_indices(" (").any(|(i, _)| {
+        let Some((elapsed, tail)) = rest[i + 2..].split_once(" • ") else { return false };
+        is_codex_duration(elapsed) && tail.split_once(')').is_some_and(|(hint, _)| hint.ends_with(" to interrupt"))
+    })
 }
 
 pub(crate) fn is_tool_progress(reply: &str) -> bool {
@@ -3084,6 +3091,48 @@ mod codex_limit_fallback_tests {
         assert_eq!(crate::lifecycle::run_state::turn_status(&app, &turn).await, "failed");
         assert!(app.quotas.lock().await.values().all(|q| q.limit_hit.is_none()), "身分表還沒偵測完：沒有猜一格 `codex:cx0` 寫下去");
         assert!(crate::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some(), "欠著照擋");
+    }
+}
+
+#[cfg(test)]
+mod codex_0155_fallback_tests {
+    //! #207：codex 0.155 的狀態列字頭可能是 reasoning summary、回合結束後多一行完成時間。畫面照 codex rust-v0.155.0 的原始碼
+    //! 組的，不是實抓（見 `screen.rs` 的 `codex_0155_screen_tests`）。
+    use super::*;
+    use crate::testing as tt;
+
+    async fn codex_turn(screen: &str) -> (tt::Env, String, String) {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "cx").await;
+        sqlx::query("UPDATE bots SET kind='codex' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
+        let run = tt::fake_run(&app, &bot.id).await;
+        let turn = crate::lifecycle::run_state::a_turn(&app, &bot.id, Some(&run), "in_flight").await;
+        env.herdr.set_screen(&format!("pane-{}", bot.id), screen);
+        (env, run, turn)
+    }
+
+    const FOOTER: &str = "  gpt-6-astra low · ~/project/agents-manager · Context 3% used";
+
+    /// summary 當字頭的狀態列：還在想，備援不收（以前只認 `Working (`，把狀態列當成回覆收掉回合）。
+    #[tokio::test]
+    async fn a_codex_still_thinking_under_a_summary_header_is_not_closed() {
+        let screen = format!("› 派工\n\n• Planning the fix for the poller (12s • esc to interrupt)\n\n› Ask Codex to do anything\n\n{FOOTER}\n");
+        let (env, run, turn) = codex_turn(&screen).await;
+        let app = env.app.clone();
+        assert!(!try_fallback(&app, &run).await.unwrap(), "還在想：不收");
+        assert_eq!(crate::lifecycle::run_state::turn_status(&app, &turn).await, "in_flight");
+    }
+
+    /// 回合結束：存下來的回覆不帶完成時間那一行。
+    #[tokio::test]
+    async fn a_finished_codex_turn_is_stored_without_its_completion_line() {
+        let screen = format!("› 派工\n\n• 做完了。\n\n  Worked for 2m 5s · done 3:24 PM\n\n› Ask Codex to do anything\n\n{FOOTER}\n");
+        let (env, run, turn) = codex_turn(&screen).await;
+        let app = env.app.clone();
+        assert!(try_fallback(&app, &run).await.unwrap());
+        let reply: String = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='assistant'").bind(&turn).fetch_one(&app.db).await.unwrap();
+        assert_eq!(reply, "做完了。");
     }
 }
 

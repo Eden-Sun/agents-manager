@@ -274,6 +274,84 @@ fn is_codex_idle_prompt(s: &str) -> bool {
     body.to_ascii_lowercase().starts_with("ask codex to do")
 }
 
+/// codex 的經過時間：`45s`、`2m 5s`／`2m 05s`、`1h 2m 3s`（`fmt_elapsed_compact`、完成行的 `Worked for`）。
+pub(crate) fn is_codex_duration(d: &str) -> bool {
+    let parts: Vec<&str> = d.split(' ').collect();
+    parts.len() <= 3
+        && parts.iter().all(|p| {
+            let (n, unit) = p.split_at(p.len().saturating_sub(1));
+            !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) && matches!(unit, "h" | "m" | "s")
+        })
+}
+
+/// codex 0.155 起回合成功結束後，回覆**下面**多一行完成時間（#207）：`Worked for 2m 5s · done 3:24 PM`，一分鐘以內只有
+/// `done 3:24 PM`；不是今天就帶日期（`done Sep 6 at 2:32 PM`、`done Sep 6, 2000 at 2:32 PM`）；重播時可能只有 `Worked for …`；
+/// 後面可能再接 ` · <runtime metrics>`。格式照 codex `history_cell/separators.rs`（rust-v0.155.0）。這是 TUI 的 chrome：
+/// 不剝掉的話，備援切出來的回覆尾巴會多一行時間戳。0.154 以前的分隔線是整條 `─ Worked for … ─`、畫在回覆上面。
+pub(crate) fn is_codex_completion_line(s: &str) -> bool {
+    let s = s.trim();
+    let rest = match s.strip_prefix("Worked for ") {
+        Some(r) => {
+            let (elapsed, tail) = r.split_once(" · ").unwrap_or((r, ""));
+            if !is_codex_duration(elapsed) {
+                return false;
+            }
+            if tail.is_empty() {
+                return true;
+            }
+            tail
+        }
+        None => s,
+    };
+    let Some(when) = rest.strip_prefix("done ") else { return false };
+    is_codex_done_time(when.split(" · ").next().unwrap_or(when))
+}
+
+/// `3:24 PM`／`Sep 6 at 2:32 PM`／`Sep 6, 2000 at 2:32 PM`（`%-I:%M %p`，別天加 `%b %-d`，別年再加 `, %Y`）。
+fn is_codex_done_time(w: &str) -> bool {
+    let clock = match w.split_once(" at ") {
+        Some((date, clock)) => {
+            let mut it = date.split(' ');
+            let (Some(mon), Some(day)) = (it.next(), it.next()) else { return false };
+            let year = it.next();
+            let day_ok = match year {
+                None => day.parse::<u32>().is_ok(),
+                Some(y) => day.strip_suffix(',').is_some_and(|d| d.parse::<u32>().is_ok()) && y.len() == 4 && y.parse::<u32>().is_ok(),
+            };
+            if it.next().is_some() || mon.len() != 3 || month_num_token(mon).is_none() || !day_ok {
+                return false;
+            }
+            clock
+        }
+        None => w,
+    };
+    let Some((hm, ampm)) = clock.split_once(' ') else { return false };
+    let Some((h, m)) = hm.split_once(':') else { return false };
+    matches!(ampm, "AM" | "PM")
+        && h.parse::<u32>().is_ok_and(|h| (1..=12).contains(&h))
+        && m.len() == 2
+        && m.parse::<u32>().is_ok_and(|m| m < 60)
+}
+
+/// 回覆尾端的完成時間行（跟它前面的空行）拿掉。只剝**尾巴**：回覆中間剛好有一行長得一樣的字（codex 自己的測試就有），照留。
+fn drop_codex_completion_tail(out: &mut Vec<String>) {
+    loop {
+        match out.last() {
+            Some(l) if l.trim().is_empty() || is_codex_completion_line(l) => {
+                let done = !l.trim().is_empty();
+                out.pop();
+                if done {
+                    while out.last().is_some_and(|l| l.trim().is_empty()) {
+                        out.pop();
+                    }
+                    return;
+                }
+            }
+            _ => return,
+        }
+    }
+}
+
 /// grok 1.0.13 TUI chrome (appendix F): `◆` rows, "Worked for" footer, telemetry banner, shortcut
 /// footer, `<cwd>   15K / 500K` header, `[stable]`.
 fn is_grok_noise(s: &str) -> bool {
@@ -672,6 +750,9 @@ pub(crate) fn clean_screen(kind: &str, text: &str) -> Option<String> {
     while out.last().map(|l| l.is_empty()).unwrap_or(false) {
         out.pop();
     }
+    if kind == "codex" {
+        drop_codex_completion_tail(&mut out);
+    }
     let joined = out.join("\n").trim().to_string();
     if joined.is_empty() {
         None
@@ -714,6 +795,9 @@ pub(crate) fn extract_reply(kind: &str, text: &str) -> Option<String> {
         }
         let cleaned = s.strip_prefix(marker).unwrap_or(t).to_string();
         out.push(cleaned);
+    }
+    if kind == "codex" {
+        drop_codex_completion_tail(&mut out);
     }
     while out.last().map(|l| l.trim().is_empty()).unwrap_or(false) {
         out.pop();
@@ -1729,6 +1813,108 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
     }
 }
 
+
+/// #207：codex 0.155 的畫面。**不是實抓**——照 codex rust-v0.155.0 的原始碼與它自己的 snapshot 組出來的（完成行：
+/// `tui/src/history_cell/separators.rs`、`chatwidget/snapshots/*completion_after_plain_answer.snap`；狀態列：
+/// `tui/src/status_indicator_widget.rs`）。升級之前照 SPEC §4.3「codex 0.155」的步驟實抓，換成 `fixtures/codex-0.155-*.txt`。
+#[cfg(test)]
+mod codex_0155_screen_tests {
+    use super::*;
+
+    const FOOTER: &str = "  gpt-6-astra low · ~/project/agents-manager · Context 3% used · 5h 82% left · weekly 97% left";
+
+    /// 回合剛成功結束：回覆、空一行、完成時間、空一行、空框、狀態列。
+    fn finished(completion: &str) -> String {
+        format!("› Reply with PONG\n\n• PONG\n\n  {completion}\n\n› Ask Codex to do anything\n\n{FOOTER}\n")
+    }
+
+    /// 回合中：狀態列的字頭是 `header`（預設 `Working`，summary 開著時是 summary 的最新一行）。
+    fn thinking(header: &str) -> String {
+        format!("› Reply with PONG\n\n• {header} (12s • esc to interrupt)\n\n› Ask Codex to do anything\n\n{FOOTER}\n")
+    }
+
+    const COMPLETIONS: [&str; 6] = [
+        "done 3:24 PM",
+        "Worked for 2m 5s · done 3:24 PM",
+        "done Sep 6 at 2:32 PM",
+        "Worked for 1h 2m 3s · done Sep 6, 2000 at 2:32 PM",
+        "Worked for 2m 5s",
+        "Worked for 2m 5s · done 12:05 AM · Local tools: 2 calls (1.2s)",
+    ];
+
+    #[test]
+    fn the_completion_line_is_recognised_and_nothing_else_is() {
+        for c in COMPLETIONS {
+            assert!(is_codex_completion_line(c), "{c}");
+            assert!(is_codex_completion_line(&format!("  {c}  ")), "縮排：{c}");
+        }
+        for not in [
+            "done",
+            "done soon",
+            "done 3:24",
+            "done 13:24 PM",
+            "done 3:4 PM",
+            "Done 3:24 PM",
+            "done Sept 6 at 2:32 PM",
+            "done Sep 6 2000 at 2:32 PM",
+            "Worked for the team · done 3:24 PM",
+            "Worked for 2 minutes",
+            "• done 3:24 PM",
+            "The job was done 3:24 PM",
+        ] {
+            assert!(!is_codex_completion_line(not), "{not}");
+        }
+    }
+
+    /// 回合剛結束的畫面：切出來的回覆不帶時間戳（extract_reply 與沒有標記時的 clean_screen 都是）。
+    #[test]
+    fn the_completion_line_is_not_part_of_the_reply() {
+        for c in COMPLETIONS {
+            let screen = finished(c);
+            assert_eq!(extract_reply("codex", &screen).as_deref(), Some("PONG"), "{c}");
+            let cleaned = clean_screen("codex", &screen).unwrap();
+            assert!(!cleaned.contains("done") && !cleaned.contains("Worked for"), "{c} → {cleaned:?}");
+            assert!(cleaned.contains("PONG"));
+        }
+    }
+
+    /// 只剝回覆**尾巴**那一行：回覆中間剛好有一行長得一樣的字（codex 自己的測試就有）照留。
+    #[test]
+    fn a_reply_line_that_only_looks_like_a_completion_line_is_kept() {
+        let screen = format!("› when?\n\n• It finished:\n  done 3:24 PM\n  and then it stopped.\n\n  done 3:25 PM\n\n› Ask Codex to do anything\n\n{FOOTER}\n");
+        assert_eq!(extract_reply("codex", &screen).as_deref(), Some("It finished:\n  done 3:24 PM\n  and then it stopped."));
+    }
+
+    /// 字頭換成 reasoning summary、壓縮中、狀態列後面接訊息、中斷鍵改綁，都還是忙；結束的畫面、工具結果不是。
+    #[test]
+    fn a_status_row_is_busy_whatever_its_header_says() {
+        for header in ["Working", "Planning the fix for the poller", "Compacting context", "Reading `screen.rs` (again)"] {
+            assert!(pane_still_busy(&thinking(header)), "{header}");
+        }
+        assert!(pane_still_busy("• Reviewing the diff (1m 05s • esc to interrupt) · 2 background terminals running\n"));
+        assert!(pane_still_busy("• Reviewing (1h 02m 03s • ctrl + c to interrupt)\n"), "中斷鍵改綁");
+        for c in COMPLETIONS {
+            assert!(!pane_still_busy(&finished(c)), "回合結束的畫面不是忙：{c}");
+        }
+        assert!(!pane_still_busy("• Ran cargo test (4 passed)\n"), "工具結果不是狀態列");
+        assert!(!pane_still_busy("• The fix (see above • done) is in.\n"));
+    }
+
+    /// 狀態列的模型／強度／context 與額度照讀（summary 裡剛好有 `Context`、`5h … left` 也不會蓋掉最底下那一行）；
+    /// 框還是在同一個地方。
+    #[test]
+    fn the_status_line_and_the_composer_are_read_as_before() {
+        let noisy = thinking("Checking Context usage against 5h 10% left · weekly 1% left");
+        for screen in [finished("Worked for 2m 5s · done 3:24 PM"), thinking("Planning the fix"), noisy] {
+            let rt = crate::codex_live::parse_status_line(&screen).expect("讀得到狀態列");
+            assert_eq!((rt.model.as_str(), rt.effort.as_deref()), ("gpt-6-astra", Some("low")), "{screen}");
+            let q = crate::codex_live::parse_status_quota(&screen).expect("讀得到額度");
+            assert_eq!((q.five_hour_left, q.weekly_left), (Some(82.0), Some(97.0)), "{screen}");
+            let styled = screen.replace("› Ask Codex to do anything", "› \u{1b}[2mAsk Codex to do anything\u{1b}[22m");
+            assert_eq!(crate::lifecycle::box_state("codex", &styled), crate::lifecycle::BoxState::Empty, "{screen}");
+        }
+    }
+}
 
 /// 撞限橫幅寫進額度那一格（`apply_codex_limit_hit_quota`）的去重規則。
 #[cfg(test)]
