@@ -1953,19 +1953,57 @@ struct ChangelogQuery {
 }
 
 /// 永遠 200：抓不到時 `found:false` + `error`，UI 照實寫「找不到 changelog」。
+/// 未知 kind／host 也走這條（不是 400／404）：確認框必須能顯示原因，不能讓 HTTP 層失敗。
 async fn get_changelog(State(app): State<Arc<App>>, Query(q): Query<ChangelogQuery>) -> Result<Json<Value>, LcError> {
     let kind = q.kind.clone().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "claude".to_string());
-    if !crate::config::valid_kind(&kind) {
-        return Err(LcError::Bad(format!("kind must be {}", crate::config::kinds_list())));
-    }
     let host = q.host.clone().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| LOCAL_HOST.to_string());
-    if app.hosts.get(&host).await.is_none() {
-        return Err(LcError::NotFound("host".into()));
-    }
     let from = q.from.as_deref().filter(|s| !s.trim().is_empty());
     let to = q.to.as_deref().filter(|s| !s.trim().is_empty());
     let r = crate::changelog::lookup(&app, &host, &kind, from, to).await;
     Ok(Json(serde_json::to_value(r).map_err(any_err)?))
+}
+
+#[cfg(test)]
+mod changelog_route_tests {
+    use super::*;
+    use axum::response::IntoResponse;
+
+    async fn call(kind: Option<&str>, host: Option<&str>) -> (StatusCode, Value) {
+        let e = crate::testing::env().await;
+        let q = ChangelogQuery {
+            kind: kind.map(str::to_string),
+            host: host.map(str::to_string),
+            from: None,
+            to: None,
+        };
+        match get_changelog(State(e.app.clone()), Query(q)).await {
+            Ok(Json(v)) => (StatusCode::OK, v),
+            Err(err) => {
+                let resp = err.into_response();
+                let status = resp.status();
+                let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+                (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+            }
+        }
+    }
+
+    /// API.md：changelog **永遠 200**；沒有來源的 kind 是 `found:false`，不是 400。
+    #[tokio::test]
+    async fn an_unknown_kind_is_200_found_false_not_400() {
+        let (status, body) = call(Some("nope"), None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["found"], false);
+        assert!(body["error"].as_str().is_some_and(|s| !s.is_empty()), "{body}");
+    }
+
+    /// API.md：host 不存在也是 200 `found:false`，不是 404——UI 必須能寫「找不到 changelog」。
+    #[tokio::test]
+    async fn an_unknown_host_is_200_found_false_not_404() {
+        let (status, body) = call(Some("claude"), Some("no-such-host")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["found"], false);
+        assert!(body["error"].as_str().is_some_and(|s| !s.is_empty()), "{body}");
+    }
 }
 
 async fn get_models(State(app): State<Arc<App>>, Query(q): Query<ModelsQuery>) -> Result<Json<Value>, LcError> {
