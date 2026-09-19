@@ -1239,19 +1239,22 @@ export const useStore = create<StoreState>((set, get) => ({
   async cancelStartingSend(botId) {
     const pending = startingSend(get().turns[botId], get().messages[botId])
     if (!pending) return
-    try {
-      await api.withdrawTurn(pending.turnId)
-    } catch (e) {
-      // 409：已經被佇列送出去了，撤不回來。
-      get().notify('error', `撤不回來（可能已經送出）：${errText(e)}`)
+    // 連點：第一下撤回成功之後，第二下拿到 409（那一則已經是 failed）——不能被說成「撤不回來」。
+    await guarded(set, get, `withdraw:${botId}`, async () => {
+      try {
+        await api.withdrawTurn(pending.turnId)
+      } catch (e) {
+        // 409：已經被佇列送出去了，撤不回來。
+        get().notify('error', `撤不回來（可能已經送出）：${errText(e)}`)
+        await get().loadMessages(botId)
+        return
+      }
+      const key = `bot:${botId}` as const
+      get().setDraft(key, prependDraft(pending.text, get().drafts[key] ?? ''))
+      get().setDraftCursor(key, pending.text.length)
+      if (pending.attachments > 0) get().notify('error', `訊息已放回輸入框，但 ${pending.attachments} 個附件要重新加`)
       await get().loadMessages(botId)
-      return
-    }
-    const key = `bot:${botId}` as const
-    get().setDraft(key, prependDraft(pending.text, get().drafts[key] ?? ''))
-    get().setDraftCursor(key, pending.text.length)
-    if (pending.attachments > 0) get().notify('error', `訊息已放回輸入框，但 ${pending.attachments} 個附件要重新加`)
-    await get().loadMessages(botId)
+    })
   },
 
   async sendPrompt(botId, text, attachments = [], sendNow = false, startIfStopped = false) {
@@ -1337,12 +1340,11 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   async abandonTurn(botId, turnId) {
-    try {
+    // 連點：第二下撞 409（已經放棄了）會跳一則原始英文錯誤。
+    await guarded(set, get, `abandon:${turnId}`, async () => {
       await api.abandonTurn(turnId)
       await get().loadMessages(botId)
-    } catch (e) {
-      get().notify('error', errText(e))
-    }
+    })
   },
 
   async addIdentity(input) {
