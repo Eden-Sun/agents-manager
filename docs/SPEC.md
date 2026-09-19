@@ -773,9 +773,11 @@ cancel 撤掉的是還沒送出的那則時，review 回應不再帶「turn 還�
   ANSI 也看不到游標，是 grok 用文字講出路，所以不畫成按鈕。`screen::grok_limit_hit_line` 認這兩句（402 那句要同時提到 grok），
   畫面掃描（`screen::scan`）因此也對 grok 跑，bot 不會再停在一個「像在問問題、卻按不動」的 blocked 畫面。
   **記帳與觸發**（#222）：
+  - 辨識不只 `weekly`：行首是 `You hit your <一到三個字> limit`（`session`／`5-hour`／`daily`…，`screen::is_limit_title`）都算；
+    只認標題那一行，回覆裡談到這句話不算。
   - 撞限記在 **grok 自己那一格**（`grok`／`grok:<身分>`，`turn_error::Banner::Grok`），不是 codex 的——`mark_codex_limit_hit` 對 grok 走
     `record_grok`。橫幅沒寫重置時間：`You hit your weekly limit.` 標 `seven_day` 窗（grok 只有週窗）、保底 7 天；session／5-hour 標
-    `five_hour`、保底 5 小時；402 `usage balance exhausted`（credits 用完）沒有窗、保底 5 小時、不標窗（`screen::grok_limit_window`）。
+    `five_hour`、保底 5 小時；`daily` 沒有窗、保底 24 小時；402 `usage balance exhausted`（credits 用完）沒有窗、保底 5 小時、不標窗（`screen::grok_limit_window`）。
     桶名讓之後 grok `/usage` 探測的讀數能校正它（`quota::set`：窗是撞限之後才開的就清掉，否則 `until` 取與 `resets_at` 較早者）——
     grok 沒有 codex 那種「下一回合答完就清」的訊號，沒有這條撞限會擋到保底過期。同一張畫面的兩句，有窗的排前面
     （`limit_banner::sighting` 一次讀取只有第一句算新的），後到的短限不縮短已記的週限，同一句再看到不重算。
