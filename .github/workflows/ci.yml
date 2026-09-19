@@ -39,6 +39,7 @@ jobs:
         with:
           node-version: 22
       - run: scripts/check.sh ob
+      - run: scripts/check.sh ops
 
   web:
     runs-on: macos-latest
