@@ -600,7 +600,7 @@ daemon 重啟時把所有 `queued` turn（含沒有 `next_flush_at` 的）重新
 會把已經送出的交辦說成「沒有送出」。撤不到（已被 flush 領走）或交辦已經不是 `delivered`（別人先決定了）就整筆回滾、什麼都不動。
 推的是 `assignment_undeliverable`（送不進去，不是回合失敗），payload 帶 `revoked_turn_id` 與「已撤回，不會再送」。
 `quota_blocked` 也算「這一則不送」：額度回來後 controller 用下一個 `#r<n>` 另開一則重送；重送前若舊的那則還排著，先撤掉再清 `turn_id`
-（清掉之後它就對不回交辦，會佔名額、之後照送變成做兩次）。
+（清掉之後它就對不回交辦，會佔名額、之後照送變成做兩次）；撤不掉（寫不進去）就這一拍不重送、`turn_id` 不清，下一個 tick 再撤（#197）。
 cancel 撤掉的是還沒送出的那則時，review 回應不再帶「turn 還在跑」的 `warning`／`may_still_be_running`。
 
 **沒有 run 的 queued 一律收掉**：AGM 的排隊只會發生在「有 running run、正在回合中」的時候，所以 bot 被 stop、或 run 結束
@@ -2228,8 +2228,11 @@ inbox `assignment_noticed`（`needs_review=false`）。送不出去或回合失�
 #### 18.8b 撞到用量上限是「等」，不是「失敗」
 `quota.limit_hit` 記 CLI 印的上限橫幅（`You've hit your usage limit …`，可能帶 `try again at …`）。狀態 `quota_blocked`（未結案）：
 
-- **派送前**（`controller::dispatch`）與**回合結束後**（`on_turn_done`）各查一次 `quota::limit_hit_for_bot`，撞到就停在 `quota_blocked`。
+- **派送前**（`controller::dispatch`）與**回合結束後**（`on_turn_done`）各查一次 `quota::try_limit_hit_for_bot`，撞到就停在 `quota_blocked`。
   回合結束那次的「回覆」是系統錯誤，記進 `error`，不寫 `result`、不算 `completed`。
+  **查不到（讀不到 bot 在哪台主機）不當成沒撞限**（#197）：派送 `hold` 10 秒、不花重試、不送；回合結束不結案、交給下一輪對帳；
+  等額度的重送這一拍不動、不算次數；開機回填那一件跳過、不退回 `local`（會把遠端 bot 的撞限種進本機同名的 key），這台主機這一輪不算回填完，
+  30 秒後（或那台下一次偵測完）重跑。
 - **撞限看桶與模型**（`quota::bucket_blocks_model`）：5h、7d 與沒有桶名的撞限（codex、開機回填）擋整個帳號；模型專屬的桶（`fable`／`opus`／`sonnet`）
   只擋**正在跑那個模型**的 bot——看 run 的 `runtime_model`，沒有才看設定值，兩個都沒有就保守地照擋。`limit_hit_for_bot` 與協調者的額度判讀（§18.15）走同一條。
   以前不分桶：巡檢（cc0、fable）撞 Fable 上限，同帳號跑 opus 的協調者與交辦都被擋到 Fable 週窗重置（review3 c3 H2）。
