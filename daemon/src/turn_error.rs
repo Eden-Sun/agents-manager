@@ -380,7 +380,10 @@ pub(crate) async fn mark_claude_limit_hit(app: &Arc<App>, bot: &db::Bot, line: &
 /// 本機 `codex` 那一格，本機帳號被當成用盡、派工停擺，真正用盡的遠端身分反而沒擋）、那台的身分表還沒偵測完、排著的
 /// prompt 蓋不上憑據，都回錯並記成欠著；補上之前 flush 與派送前照欠著的那一筆擋。
 pub(crate) async fn mark_codex_limit_hit(app: &Arc<App>, bot: &db::Bot, notice: &str) -> Result<()> {
-    if bot.kind != "codex" {
+    // grok 撞週限時畫的是自己的字（`screen::grok_limit_hit_line`），但要記的東西一模一樣：
+    // 這顆 bot 的主機與身分那一格標成用盡、派工前擋住。橫幅裡沒有時間，`until` 就是 None
+    // （2026-09-19 w168:pB7：以前 grok 根本不走這條，bot 一直停在 blocked、額度還顯示有餘）。
+    if !matches!(bot.kind.as_str(), "codex" | "grok") {
         return Ok(());
     }
     let until = crate::lifecycle::parse_codex_try_again(notice);
