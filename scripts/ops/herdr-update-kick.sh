@@ -155,7 +155,15 @@ REPORT=$("$BIN" herdr-update-check --installed "$INSTALLED" --latest "$LATEST_TA
   fail_run "版本比較失敗（installed='${INSTALLED}' latest='${LATEST_TAG}'）"
 
 # 沒有更新、或這一版已經派過：安靜退出，不留 log（每天一次，「沒事」不值得留一行）。
-SHOULD=$(printf '%s' "$REPORT" | python3 -c 'import json,sys; print("1" if json.load(sys.stdin).get("should_notify") else "0")' 2>/dev/null) || SHOULD=0
+# 報告看不懂（不是 JSON、沒有布林的 should_notify）是這輪沒能完成檢查，不是「沒有新版」（#226）：
+# 以前 `|| SHOULD=0` 把它當成沒事，安靜退出還把連續失敗清零，CLI 換了輸出形狀就永遠沒人知道。
+SHOULD=$(printf '%s' "$REPORT" | python3 -c '
+import json,sys
+v = json.load(sys.stdin).get("should_notify")
+if not isinstance(v, bool):
+    sys.exit(1)
+print("1" if v else "0")
+' 2>/dev/null) || fail_run "看不懂版本比較的報告（${REPORT}）"
 [ "$SHOULD" = "1" ] || { ran_ok; exit 0; }
 
 LATEST_VERSION=$(printf '%s' "$REPORT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["latest_version"])')
