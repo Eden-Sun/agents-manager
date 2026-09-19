@@ -89,9 +89,9 @@ pub fn guard_ddl() -> String {
     )
 }
 
+/// 內容跟 DB 裡那一份不同就換掉（issue #186）：轉移表改了，舊 DB 的守衛要跟著換。
 pub async fn install_guard(tx: &mut sqlx::SqliteConnection) -> Result<()> {
-    sqlx::query(&guard_ddl()).execute(&mut *tx).await?;
-    Ok(())
+    crate::db::sync_trigger(tx, "turns_status_transition", &guard_ddl()).await
 }
 
 /// 一次轉移的結果。

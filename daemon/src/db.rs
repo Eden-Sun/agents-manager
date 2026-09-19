@@ -150,6 +150,27 @@ CREATE TABLE IF NOT EXISTS spawn_hints (
 /// （那個檢查看的是實際欄位，不看這個數字），不會讓資料庫壞掉，但舊 binary 就少了這一層提早攔截。
 pub const SCHEMA_VERSION: i64 = 4;
 
+/// 裝一個 trigger，DB 裡那一份跟 `ddl` 不同就換掉（issue #186）。
+///
+/// 守衛的內容是由轉移表產生的（`turn_controller::guard_ddl`、`assignment_state::guard_ddl`）。以前用
+/// `CREATE TRIGGER IF NOT EXISTS`：只有第一次建得進去，之後轉移表改了（新增或拿掉一條合法邊），舊 DB 裡那一份已經存在，
+/// 守衛就永遠停在舊規則——新的合法轉移被擋下、拿掉的照樣放行。這裡每次開 DB 都拿 `sqlite_master.sql`（SQLite 存的是去掉
+/// `IF NOT EXISTS` 的原文）跟現在的 DDL 比，不同才 DROP 再建，所以不必靠 `SCHEMA_VERSION`。呼叫端要在同一個交易裡：
+/// 換到一半失敗整批回滾，不會留下一段沒有守衛的空窗。
+pub(crate) async fn sync_trigger(conn: &mut sqlx::SqliteConnection, name: &str, ddl: &str) -> Result<()> {
+    let want = ddl.trim().replacen("CREATE TRIGGER IF NOT EXISTS ", "CREATE TRIGGER ", 1);
+    let have: Option<Option<String>> = sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?")
+        .bind(name)
+        .fetch_optional(&mut *conn)
+        .await?;
+    if have.flatten().as_deref() == Some(want.as_str()) {
+        return Ok(());
+    }
+    sqlx::query(&format!("DROP TRIGGER IF EXISTS {name}")).execute(&mut *conn).await?;
+    sqlx::query(&want).execute(&mut *conn).await.with_context(|| format!("create trigger {name}"))?;
+    Ok(())
+}
+
 pub async fn open(path: &Path) -> Result<SqlitePool> {
     let url = format!("sqlite://{}", path.display());
     let opts = SqliteConnectOptions::from_str(&url)?
@@ -266,14 +287,15 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
     // body 自己就帶了分號，切开來就會斷成兩句送不出去。寫 `agent_status` 的地方有好幾處（events／
     // reconcile／default session／bulk_restart／stuck_turns…），用 trigger 而不是在每一處補一行：
     // 漏掉一處就會讓「起點」在那條路徑上悄悄跟丟（issue #93）。
-    sqlx::query(
-        "CREATE TRIGGER IF NOT EXISTS runs_agent_status_since AFTER UPDATE OF agent_status ON runs
+    sync_trigger(
+        &mut tx,
+        "runs_agent_status_since",
+        "CREATE TRIGGER runs_agent_status_since AFTER UPDATE OF agent_status ON runs
            WHEN OLD.agent_status IS NOT NEW.agent_status
          BEGIN
            UPDATE runs SET agent_status_since = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = NEW.id;
          END",
     )
-    .execute(&mut *tx)
     .await
     .context("create runs_agent_status_since trigger")?;
     // Turn 狀態轉移的單一權威（issue #68）：合法邊只定義在 `lifecycle::turn_controller::LEGAL_EDGES`，

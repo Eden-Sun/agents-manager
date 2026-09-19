@@ -76,6 +76,10 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
 - axum + tokio + serde；SQLite 用 sqlx（每條連線 `foreign_keys=ON`、`journal_mode=WAL`）。
 - **DB schema 只支援現行版本**：`db::migrate` 只跑 `CREATE … IF NOT EXISTS`（加上 supervisor／mission 各自的 migration），不升級更舊的檔案；
   已移除功能留下的表與欄位（`teams`、`team_*`、`bots.team_id`…）在既有檔案裡原樣保留、不讀。
+  **trigger 例外**（issue #186）：內容由程式產生的守衛（`turns_status_transition`、`supervisor_assignments_status_transition`，
+  連同 `runs_agent_status_since`）不能只 `IF NOT EXISTS`——轉移表改了，舊 DB 裡那一份會永遠停在舊規則（新的合法邊被擋、拿掉的照樣放行）。
+  每次開 DB 都由 `db::sync_trigger` 拿 `sqlite_master.sql` 跟現在的 DDL 比，不同就在同一個交易裡 DROP 再建；不靠 `SCHEMA_VERSION`，
+  所以改轉移表不必升版號。
   `db::migrate` 自己的 SCHEMA／additive ALTER 包在一個 transaction 裡，中途失敗（例如舊資料違反新加的 UNIQUE INDEX）整批回滾，
   不留半套 schema；重跑冪等。子模組各自的 migration（`supervisor::store`、`read_marks`、`panes`、`herdr_maintenance`、
   `mission::store`）不在這個 transaction 裡，各自維護自己那張表，風險最高的「加欄＋回填」已經各自包了自己的 transaction。
