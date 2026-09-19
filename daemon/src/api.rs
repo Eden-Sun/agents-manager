@@ -113,6 +113,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/bots/{id}/start", post(start_bot))
         .route("/bots/{id}/restart", post(restart_bot))
         .route("/bots/{id}/fork", post(crate::fork::fork_bot))
+        .route("/bots/{id}/promote", post(crate::promote::promote_bot))
         .route("/bots/{id}/stop", post(stop_bot))
         .route("/bots/{id}/interrupt", post(interrupt_bot))
         .route("/bots/{id}/login", post(login_bot))
@@ -1530,7 +1531,7 @@ async fn stop_for_delete_locked(app: &Arc<App>, bot_id: &str) -> Result<(), &'st
 }
 
 /// Parents before children, so `.rev()` deletes deepest first.
-async fn descendant_children(app: &Arc<App>, root: &str) -> anyhow::Result<Vec<db::Bot>> {
+pub(crate) async fn descendant_children(app: &Arc<App>, root: &str) -> anyhow::Result<Vec<db::Bot>> {
     let all = db::live_bots(&app.db).await?;
     let mut out = Vec::new();
     let mut frontier = vec![root.to_string()];

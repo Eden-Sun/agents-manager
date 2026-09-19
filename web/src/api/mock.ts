@@ -133,7 +133,9 @@ interface MockBot {
   auto_approve: number
   identity: string | null
   env_json: string
-  managed_by: 'user'
+  managed_by: 'user' | 'child'
+  /** child 才有：母 bot 的 id（側欄縮排在它底下）。 */
+  parent_bot_id?: string
   cwd: string | null
   /** 使用者釘選（`PATCH {primary}`）；省略 = 沒釘。 */
   is_primary?: number
@@ -549,6 +551,28 @@ export class MockTransport implements Transport {
       cwd: null,
       created_at: now(),
     })
+    // 母 agent 自己開的子 agent（managed_by=child）：選單要有「升級成頂層」。
+    this.bots.push({
+      id: ulid('bot'),
+      project_id: p.id,
+      name: 'am-claude-kid',
+      kind: 'claude',
+      model: null,
+      effort: null,
+      fast: 0,
+      persona: null,
+      instruction_files: null,
+      args_json: '[]',
+      autostart: 0,
+      inject_hooks: 0,
+      auto_approve: 1,
+      identity: null,
+      env_json: '{}',
+      managed_by: 'child',
+      parent_bot_id: this.bots[0].id,
+      cwd: null,
+      created_at: now(),
+    })
     this.bots.push({
       id: ulid('bot'),
       project_id: p.id,
@@ -829,6 +853,7 @@ export class MockTransport implements Transport {
         if (action === 'stop') return this.stop(botId)
         if (action === 'restart') return this.restart(botId)
         if (action === 'fork') return this.fork(botId, b)
+        if (action === 'promote') return this.promote(botId, b)
         if (action === 'interrupt') return this.interrupt(botId)
     if (action === 'abort') return this.abort(botId)
         if (action === 'login') return this.login(botId)
@@ -2162,6 +2187,20 @@ export class MockTransport implements Transport {
       this.bots = this.bots.map((x) => (x.project_id === pid ? sorted[k++] : x))
     }
     return { ok: true }
+  }
+
+  /** 規則照 `daemon/src/promote.rs`：只收 child；同一顆升成頂層（保留對話），名字預設 `<名>-1`。 */
+  private promote(botId: string, b: Rec) {
+    const bot = this.bots.find((x) => x.id === botId)
+    if (!bot) throw new ApiError(404, { error: 'not_found', what: 'bot' }, 'not found')
+    if (bot.managed_by !== 'child') throw new ApiError(409, { error: 'conflict', reason: 'not_child' }, 'not child')
+    const wanted = typeof b.name === 'string' && b.name.trim() ? b.name.trim() : bot.name
+    let name = wanted
+    for (let n = 1; this.bots.some((x) => x.id !== bot.id && x.name === name); n += 1) name = `${wanted}-${n}`
+    bot.name = name
+    bot.managed_by = 'user'
+    delete bot.parent_bot_id
+    return { bot_id: bot.id, name, promoted_from: { bot_id: bot.id, session_id: 'mock-session' }, run_id: null }
   }
 
   /** 規則照 `daemon/src/fork.rs`：只給頂層 bot；設定照抄、autostart 關、名字 `<來源>-fork` 撞名加尾碼。 */

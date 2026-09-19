@@ -22,9 +22,12 @@ export function BotRowMenu({ botId, compact }: { botId: string; compact?: boolea
   const startBot = useStore((s) => s.startBot)
   const cloneBot = useStore((s) => s.cloneBot)
   const forkBot = useStore((s) => s.forkBot)
+  const promoteBot = useStore((s) => s.promoteBot)
+  const busyPromote = useStore((s) => Boolean(s.busy[`promote:${botId}`]))
   const removeBot = useStore((s) => s.removeBot)
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [cloneOpen, setCloneOpen] = useState(false)
+  const [promoteOpen, setPromoteOpen] = useState(false)
   if (!bot) return null
 
   return (
@@ -62,6 +65,19 @@ export function BotRowMenu({ botId, compact }: { botId: string; compact?: boolea
             開同類分身…
           </button>
         )}
+        {/* 子 agent 升級成頂層 bot（issue #248）：daemon 只收 claude、本機、沒有孫 agent 的 child。 */}
+        {bot.managed_by === 'child' && bot.kind === 'claude' ? (
+          <button
+            type="button"
+            className="head-menu-item"
+            role="menuitem"
+            disabled={busyPromote}
+            title="保留同一段對話，移出母 bot、進 config.toml，之後由你直接對話"
+            onClick={() => setPromoteOpen(true)}
+          >
+            升級成頂層…
+          </button>
+        ) : null}
         <button type="button" className="head-menu-item danger" role="menuitem" onClick={() => setDeleteOpen(true)}>
           刪除…
         </button>
@@ -96,6 +112,27 @@ export function BotRowMenu({ botId, compact }: { botId: string; compact?: boolea
         onConfirm={() => {
           setCloneOpen(false)
           void forkBot(botId)
+        }}
+      />
+
+      <ConfirmDialog
+        open={promoteOpen}
+        title="升級成頂層 bot"
+        body={
+          <>
+            把子 agent <strong>{bot.name}</strong> 升級成頂層 bot：會先停掉它、把對話檔複製到專案目錄，再以同一段對話重新啟動。
+            <ul className="confirm-choices">
+              <li>保留同一段 claude 對話（<code>--resume</code>），之後不再縮排在母 bot 底下。</li>
+              <li>任何一步失敗就整個收回，不會留下兩顆。</li>
+            </ul>
+          </>
+        }
+        confirmLabel="升級"
+        width={380}
+        onCancel={() => setPromoteOpen(false)}
+        onConfirm={() => {
+          setPromoteOpen(false)
+          void promoteBot(botId)
         }}
       />
 

@@ -455,6 +455,8 @@ export interface StoreState {
   cloneBot: (botId: string) => Promise<string | null>
   /** 分出新 bot 並接續來源的對話脈絡（daemon 建好就啟動）。null = 失敗（原因已跳通知）。 */
   forkBot: (botId: string) => Promise<string | null>
+  /** 子 agent 升級成頂層 bot（保留對話）。回新 bot id；null = 失敗（原因已跳通知）。 */
+  promoteBot: (botId: string) => Promise<string | null>
   /** 回傳 `needs_restart`；null = 失敗（原因已跳通知）。 */
   patchBot: (botId: string, input: PatchBotInput) => Promise<boolean | null>
   patchProject: (projectId: string, input: PatchProjectInput) => Promise<boolean>
@@ -537,6 +539,29 @@ function forkErrText(e: unknown): string {
     if (typeof e.body.message === 'string' && e.body.message) return `fork 失敗：${e.body.message}`
   }
   return `fork 失敗：${errText(e)}`
+}
+
+const PROMOTE_REASON_TEXT: Record<string, string> = {
+  session_not_found: '找不到它的 claude session（pane 裡沒有對得上的行程或對話檔）',
+  session_ambiguous: 'pane 裡有不只一段 claude session，無法確定要接哪一段',
+  transcript_exists: '目標目錄已經有一份不同內容的同名對話檔，不覆寫',
+  has_children: '它自己還有子 agent，先處理掉再升級',
+  stop_failed: '停不掉這顆子 agent，什麼都沒動',
+  remote_not_supported: '遠端主機上的子 agent 還不支援升級',
+  unsupported_kind: '只有 claude 的子 agent 能升級',
+  promote_start_failed: '升級後的新 bot 起不來，已收回',
+}
+
+function promoteErrText(e: unknown): string {
+  if (e instanceof ApiError) {
+    if (e.status === 405 || (e.status === 404 && e.body.what !== 'bot')) {
+      return '升級失敗：正在跑的 daemon 還沒有這個功能，要重新 build 並重啟 daemon 後才能用。'
+    }
+    const why = typeof e.body.reason === 'string' ? PROMOTE_REASON_TEXT[e.body.reason] : undefined
+    if (why) return `升級失敗：${why}`
+    if (typeof e.body.message === 'string' && e.body.message) return `升級失敗：${e.body.message}`
+  }
+  return `升級失敗：${errText(e)}`
 }
 
 /** daemon 回的機器 key 換成人話；沒列到的照原樣顯示。 */
@@ -1571,6 +1596,23 @@ export const useStore = create<StoreState>((set, get) => ({
       } else {
         get().notify('info', `已從 ${bot.name} fork 出 ${res.name}，接續它的對話脈絡`)
       }
+    })
+    return id
+  },
+
+  async promoteBot(botId) {
+    const bot = get().bots.find((b) => b.id === botId)
+    if (!bot) return null
+    let id: string | null = null
+    await guarded(set, get, `promote:${botId}`, async () => {
+      const res = await api.promoteBot(botId).catch((e: unknown) => {
+        throw new Error(promoteErrText(e))
+      })
+      id = res.id || null
+      await get().refreshState()
+      if (!id) return
+      set({ selectedBotId: id })
+      get().notify('info', `已把子 agent ${bot.name} 升級成頂層 bot ${res.name}，接續同一段對話`)
     })
     return id
   },

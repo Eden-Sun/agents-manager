@@ -258,7 +258,7 @@ pub(crate) async fn native_resume_plan(
 }
 
 /// 這個身分實際用的 `CLAUDE_CONFIG_DIR`（沒設、或身分未知都算預設帳號 `~/.claude`）。
-async fn identity_config_dir(app: &Arc<App>, host: &str, identity: Option<&str>) -> String {
+pub(crate) async fn identity_config_dir(app: &Arc<App>, host: &str, identity: Option<&str>) -> String {
     let home = crate::tools::host_home(app, host).await;
     let dir = match identity.map(str::trim).filter(|s| !s.is_empty()) {
         Some(name) => crate::tools::identity_for_host(app, host, name)
@@ -409,7 +409,7 @@ fn parse_stage_output(out: &str) -> Result<(), &'static str> {
     }
 }
 
-fn copy_dir_recursive(src: &std::path::Path, dest: &std::path::Path) -> std::io::Result<()> {
+pub(crate) fn copy_dir_recursive(src: &std::path::Path, dest: &std::path::Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dest)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;

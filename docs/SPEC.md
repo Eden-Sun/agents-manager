@@ -1692,6 +1692,13 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
 - 之後兩顆各走各的：新 bot 的下一次重啟用它自己的新 session（照 §6.9 的 resume）。分叉前的訊息不複製到新 bot 的對話紀錄（CLI 裡有），改在新 bot 對話放一則系統訊息指回來源。
 - 跟「開同類分身並啟動」的差別只在脈絡：分身是全新對話。
 
+### 6.10a 子 agent 升級成頂層 bot（issue #248，2026-09-19）
+- 入口：子 bot 列 `⋯` →「升級成頂層…」→ `POST /api/bots/:id/promote`（`daemon/src/promote.rs`）。只給 claude、本機、沒有孫 agent 的 child。
+- child 沒有 hook，`native_session_id` 是 null：session 從 pane 前景行程找——`<CLAUDE_CONFIG_DIR>/sessions/<pid>.json` 的 pid 要對得上、有 `sessionId`／`cwd`，transcript 在 `<CLAUDE_CONFIG_DIR>/projects/<cwd 每個非英數字元換成 ->/<sessionId>.jsonl`。找不到或不只一段就 409、什麼都不動。
+- 新 bot 的 cwd 是專案路徑，不是 child 的 worktree，CLI 只會去新 cwd 對應的 projects 目錄找，所以 transcript **複製**過去（來源留著；目標已有內容不同的同名檔就拒絕，相同視為上次留下的）。
+- 順序把不可逆的一步排最後：驗證 → 找 session → 複製 → 停 child（先把 session 記在它的 run 上，停不掉就收回複製）→ 建 user bot（設定從 child 帶、`inject_hooks` 開、`autostart` 關）並種下 `native_session_id` → `resume_native`＋`resume_required` 啟動 → 收 child 紀錄。啟動失敗把新 bot 與複製收回；child 已停、紀錄與 session 還在，同一個請求可再送。
+- 預設名字沿用 child，但同專案 live 名字唯一、child 自己還占著，所以預設是 `<名>-1`；明給的名字撞名就 409。
+
 ### 6.11 閒置太久就收起來，只留 resume（AGM 巡檢，2026-09-17）
 
 > 使用者：「讓 AGM 巡超過 90 分鐘未動作的 bot 主動下 exit，只留下 resume 以節省 RAM 使用，下次要用再叫醒。」
