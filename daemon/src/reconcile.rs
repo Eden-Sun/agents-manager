@@ -168,6 +168,54 @@ fn child_name_from_agent(name: &str) -> String {
     }
 }
 
+/// 子 agent 的 agent 不在了，能不能照 #60 退休它（#191）。兩條退休路徑共用這一支，免得一邊修、一邊漏。
+///
+/// 只有**確定沒在維護**才可以：herdr 重啟的那幾分鐘正是所有 pane 同時消失的時候，這時讀不到維護狀態就當成
+/// 「沒在維護」，子 bot 被軟刪，pane 回來之後也接不回原對話與血緣。讀不到＝這一輪留著、晚一點再看。
+async fn may_retire_child(app: &Arc<App>, host: &str, bot: &db::Bot) -> bool {
+    match crate::herdr_maintenance::active(app).await {
+        Ok(None) => true,
+        Ok(Some(_)) => {
+            tracing::info!(host, bot = %bot.name, "reconcile: herdr maintenance in progress, child kept");
+            false
+        }
+        Err(e) => {
+            tracing::warn!(host, bot = %bot.name, error = ?e,
+                "reconcile: cannot read the herdr maintenance state; child kept this pass, will look again");
+            schedule_deferred_pass(app, host);
+            false
+        }
+    }
+}
+
+/// 延後的那一輪多久之後補跑。
+const DEFERRED_PASS_DELAY: std::time::Duration =
+    if cfg!(test) { std::time::Duration::from_millis(50) } else { std::time::Duration::from_secs(15) };
+
+/// 這一輪有一件事因為讀不到而延後了（#94、#191）。對帳平常只在事件上跑（連上、`pane.agent_detected`、子 agent 的
+/// pane 關掉），延後的那一件若等不到下一個事件就一直掛著——排一輪晚一點的補跑。同一台主機同時只排一輪；補跑還是
+/// 讀不到就會再排，整輪失敗（DB、herdr）也再排；那台主機斷線或不在設定裡就停，重新連上時本來就會對帳。
+fn schedule_deferred_pass(app: &Arc<App>, host: &str) {
+    static PENDING: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+    let pending = PENDING.get_or_init(Default::default);
+    // 測試共用這個行程：key 帶資料目錄，不同的 App 才不會互相吃掉。
+    let key = format!("{}\u{0}{host}", app.data_dir.display());
+    if !pending.lock().unwrap_or_else(|e| e.into_inner()).insert(key.clone()) {
+        return;
+    }
+    let (app, host) = (app.clone(), host.to_string());
+    tokio::spawn(async move {
+        tokio::time::sleep(DEFERRED_PASS_DELAY).await;
+        pending.lock().unwrap_or_else(|e| e.into_inner()).remove(&key);
+        if let Err(e) = reconcile_host(&app, &host).await {
+            if app.session_for_host(&host).await.is_some() && app.host_connected(&host).await {
+                tracing::warn!(host = %host, error = ?e, "deferred reconcile pass failed; trying again");
+                schedule_deferred_pass(&app, &host);
+            }
+        }
+    });
+}
+
 pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
     let Some(session) = app.session_for_host(host).await else {
         anyhow::bail!("unknown host `{host}`");
@@ -417,14 +465,16 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
                     }
                 }
                 tracing::info!(host, bot = %bot.name, run = %run.id, "reconcile: agent gone, marking run exited");
-                crate::lifecycle::mark_run_exited(app, &run.id, "agent not found during reconcile").await;
+                let exit = crate::lifecycle::mark_run_exited(app, &run.id, "agent not found during reconcile").await;
                 // A child exists only as long as its pane; its conversation is kept.
                 // 計畫中的 herdr 重啟期間不算：所有 pane 同時消失不是子 agent 做完了（§6.5.2）。
                 // 維護結束時仍沒接回的，由 `herdr_maintenance` 照同一條規則退休。
-                let in_maintenance = matches!(crate::herdr_maintenance::active(app).await, Ok(Some(_)));
-                if bot.managed_by == "child" && in_maintenance {
-                    tracing::info!(host, bot = %bot.name, "reconcile: herdr maintenance in progress, child kept (run marked exited)");
-                } else if bot.managed_by == "child" {
+                // run 的結束沒寫進去（#191）：DB 裡它還在跑，這時退休就是一顆刪掉的 bot 掛著活的 run。這一輪不動，
+                // 晚一點再對一次帳：結束寫得進去之後，子 agent 走下面的 `(None, None)` 退休。
+                if exit == crate::lifecycle::RunExit::NotRecorded {
+                    tracing::warn!(host, bot = %bot.name, run = %run.id, "reconcile: the run's exit was not recorded; bot left as is, will look again");
+                    schedule_deferred_pass(app, host);
+                } else if bot.managed_by == "child" && may_retire_child(app, host, &bot).await {
                     sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?")
                         .bind(db::now())
                         .bind(&bot.id)
@@ -474,9 +524,7 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
             (None, None) => {
                 // #60: `pane_closed` ended the child's run before we got here, so "agent gone" above
                 // never sees it. A child cannot be restarted (`start_bot` refuses): retire it.
-                if bot.managed_by == "child" && matches!(crate::herdr_maintenance::active(app).await, Ok(Some(_))) {
-                    tracing::info!(host, bot = %bot.name, "reconcile: herdr maintenance in progress, child with an ended run kept");
-                } else if bot.managed_by == "child" {
+                if bot.managed_by == "child" && may_retire_child(app, host, &bot).await {
                     let ended: i64 = sqlx::query_scalar(
                         "SELECT COUNT(*) FROM runs WHERE bot_id = ? AND state NOT IN ('starting','running','stopping')",
                     )
@@ -1618,6 +1666,120 @@ mod compat_tests {
         for kid in [&k1, &k2] {
             assert!(db::bot(&app.db, kid).await.unwrap().unwrap().deleted_at.is_some(), "expired window: normal rule again");
         }
+    }
+
+    /// 讀不到／讀得到之間切換 `herdr_maintenance`（改表名＝SELECT 失敗，跟 SQLite busy／I/O 錯誤同一條路）。
+    async fn maintenance_readable(app: &Arc<App>, readable: bool) {
+        let sql = if readable {
+            "ALTER TABLE herdr_maintenance_unreadable RENAME TO herdr_maintenance"
+        } else {
+            "ALTER TABLE herdr_maintenance RENAME TO herdr_maintenance_unreadable"
+        };
+        sqlx::query(sql).execute(&app.db).await.unwrap();
+    }
+
+    async fn retired(app: &Arc<App>, bot: &str) -> bool {
+        db::bot(&app.db, bot).await.unwrap().unwrap().deleted_at.is_some()
+    }
+
+    /// **#191.** 維護狀態讀不到不等於沒在維護：herdr 重啟那幾分鐘所有 pane 同時消失，這時把子 agent 軟刪，pane 回來也接不回。
+    /// 兩條退休路徑（run 還開著／run 已經結束）都要留著；DB 恢復後還在維護照樣留；確定窗口結束、pane 也沒回來，才照原規則
+    /// 退休——而且不必等下一個 herdr 事件，延後的那一輪自己會補跑。
+    #[tokio::test]
+    async fn an_unreadable_maintenance_state_never_retires_a_child() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, _root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let parent = a_bot(&env, "alfa").await;
+        sqlx::query("INSERT INTO herdr_maintenance (id, opened_at, until, opened_by, reason) VALUES (1,?,'2999-01-01T00:00:00.000Z','patrol','test')")
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        // 路徑 1：run 還開著，agent 不見了。路徑 2：pane_closed 先把 run 結束了。
+        let p1 = client.tab_create(&ws.workspace_id, "/tmp/p", "k1", json!({})).await.unwrap();
+        let a1 = format!("{}-k1", crate::config::agent_name("proj", &parent));
+        let (k1, r1) = a_child(&env, &parent, "k1", &a1, &ws.workspace_id, &p1.tab_id, &p1.pane_id).await;
+        let p2 = client.tab_create(&ws.workspace_id, "/tmp/p", "k2", json!({})).await.unwrap();
+        let a2 = format!("{}-k2", crate::config::agent_name("proj", &parent));
+        let (k2, r2) = a_child(&env, &parent, "k2", &a2, &ws.workspace_id, &p2.tab_id, &p2.pane_id).await;
+        client.pane_close(&p1.pane_id).await.unwrap();
+        client.pane_close(&p2.pane_id).await.unwrap();
+        env.herdr.agents.lock().unwrap().clear();
+        crate::lifecycle::mark_run_exited(&app, &r2, "pane exited").await;
+
+        maintenance_readable(&app, false).await;
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+        for kid in [&k1, &k2] {
+            assert!(!retired(&app, kid).await, "讀不到維護狀態：這一輪留著");
+        }
+        let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(&r1).fetch_one(&app.db).await.unwrap();
+        assert_eq!(state, "exited", "run 照樣結束，留著的是子 bot");
+
+        // DB 恢復，窗口還開著：照樣留。
+        maintenance_readable(&app, true).await;
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+        for kid in [&k1, &k2] {
+            assert!(!retired(&app, kid).await, "還在維護：留著");
+        }
+
+        // 兩顆都沒有 active run 了，再讀不到一次：一樣不退休。
+        maintenance_readable(&app, false).await;
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+        for kid in [&k1, &k2] {
+            assert!(!retired(&app, kid).await, "沒有 active run 也不因為讀不到而退休");
+        }
+
+        // 窗口確定結束、pane 也沒回來：延後的那一輪自己補跑，照原規則退休（這之後沒有任何人叫 reconcile）。
+        sqlx::query("DELETE FROM herdr_maintenance_unreadable").execute(&app.db).await.unwrap();
+        maintenance_readable(&app, true).await;
+        for _ in 0..100 {
+            if retired(&app, &k1).await && retired(&app, &k2).await {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        }
+        for kid in [&k1, &k2] {
+            assert!(retired(&app, kid).await, "確定沒在維護：延後的那一輪照原規則退休");
+        }
+    }
+
+    /// #191 同一條：run 的結束寫不進去時，DB 裡它還在跑——這時把子 bot 軟刪，就是一顆刪掉的 bot 掛著活的 run。
+    #[tokio::test]
+    async fn a_child_whose_run_exit_was_not_recorded_is_not_retired() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, _root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let parent = a_bot(&env, "alfa").await;
+        let pane = client.tab_create(&ws.workspace_id, "/tmp/p", "kid", json!({})).await.unwrap();
+        let agent = format!("{}-kid", crate::config::agent_name("proj", &parent));
+        let (kid, run) = a_child(&env, &parent, "kid", &agent, &ws.workspace_id, &pane.tab_id, &pane.pane_id).await;
+        client.pane_close(&pane.pane_id).await.unwrap();
+        env.herdr.agents.lock().unwrap().clear();
+        sqlx::query(
+            "CREATE TRIGGER exit_unwritable BEFORE UPDATE OF state ON runs WHEN NEW.state = 'exited'
+             BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END",
+        )
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+        let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(&run).fetch_one(&app.db).await.unwrap();
+        assert_eq!(state, "running", "前提：結束沒寫進去");
+        assert!(!retired(&app, &kid).await, "run 還活著就不退休");
+
+        // 寫得進去之後，延後的那一輪自己把它收掉並退休。
+        sqlx::query("DROP TRIGGER exit_unwritable").execute(&app.db).await.unwrap();
+        for _ in 0..100 {
+            if retired(&app, &kid).await {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        }
+        assert!(retired(&app, &kid).await, "結束寫進去之後照原規則退休");
     }
 
     /// An ended run is not enough: a still-listed child agent gets its run back.
