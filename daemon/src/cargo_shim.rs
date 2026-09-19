@@ -287,6 +287,7 @@ am_lease_sleep() {
 # * 讀不到時間（`date +%s` 壞掉）：沒有依據可以等，第一次失敗就停。
 am_lease_watch() {
     _lw_shim=$$
+    trap ':' HUP
     _ls_pid=""
     _ls_gap=""
     _lw_term=""
@@ -549,6 +550,11 @@ am_cargo() {
     fi
     # shim 自己的 process group：守衛在 shim 被 SIGKILL 之後靠它確認 cargo 還是自己的（`am_kill_tree`，issue #183）。
     _pgid=$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')
+    # SIGSTOP 凍住行程樹（`am_kill_tree`）時，如果這一組行程剛好是「孤兒 process group」（沒有成員的父行程在同 session 的別組——
+    # 沒有控制終端的 CI／launchd／`nohup`，或呼叫端是背景行程時），kernel 會對整組送 SIGHUP＋SIGCONT，連 shim 自己都收到：
+    # shim 被 HUP 殺掉、退出碼是 -1／129，呼叫端拿不到可重試的 75（CI 上間歇紅）。用「執行 `:`」而不是「忽略」：
+    # 有 handler 的訊號在 exec 時會還原成預設，所以 cargo／rustc 仍照常吃終端機掛斷，只有 shim 與守衛不被這個假的 HUP 帶走。
+    trap ':' HUP
     am_lease_watch &
     _renew_pid=$!
     trap '_release' EXIT INT TERM
@@ -988,6 +994,18 @@ esac"#
                 cmd.env(k, v);
             }
             self.run_group(cmd, None)
+        }
+
+        /// 模擬 kernel 的孤兒 process group 規則：停 cargo 樹時（`am_kill_tree` 的第一通 `ps -o ppid= -p`，此時「租約失效」標記已經寫好）
+        /// 對整個 process group 送一次 SIGHUP，就像 kernel 發現「孤兒組裡有被 SIGSTOP 的成員」時做的。
+        /// 真的孤兒組只在 runner（沒有控制終端、呼叫端不在同 session 的別組）上出現，本機重現不了，所以用假 `ps` 把那個訊號送出來。
+        fn install_group_hup_on_first_freeze(&self) {
+            let d = self.dir.display();
+            write_exec(
+                self.dir.join("real/ps"),
+                format!("#!/bin/sh
+case \"$*\" in\n  *ppid=*-p*) if [ ! -e '{d}/hup.sent' ]; then : > '{d}/hup.sent'; kill -HUP 0; fi ;;\nesac\nexec /bin/ps \"$@\"\n"),
+            );
         }
     }
 
@@ -1659,6 +1677,31 @@ esac
                 });
             }
         });
+    }
+
+    /// 沒有控制終端、呼叫端早就走了（CI、launchd、`nohup`）：shim 那一組是孤兒 process group，而停 cargo 要先 SIGSTOP 凍住整棵樹——
+    /// kernel 對「孤兒組裡有被停住的成員」會整組送 SIGHUP，shim 自己被打死，呼叫端拿到的是訊號死（-1／129）而不是可重試的 75，
+    /// 名額與狀態目錄也沒收（GitHub runner 上間歇紅的原因）。這裡在停 cargo 時對整組送一次 HUP：shim 得照樣退 75、什麼都不留。
+    /// 每一種 shell 都驗。
+    #[test]
+    fn a_group_wide_sighup_while_stopping_cargo_does_not_take_the_shim_down() {
+        for sh in shells() {
+            let s = Sandbox::new();
+            s.install_virtual_clock();
+            s.install_lease_curl(180);
+            s.install_spawning_cargo();
+            s.install_group_hup_on_first_freeze();
+            s.set_renew_mode("notfound");
+            let env = lease_env(&s);
+            let (_, err, rc) = s.run_in(Some(sh), &as_refs(&env), &["build"]);
+            assert!(s.dir.join("hup.sent").exists(), "{sh}: 這條測試要真的送出過 HUP，不然是空過：{err}");
+            assert_eq!(rc, 75, "{sh}: 整組收到 HUP 也要退 75（可重試），不是被訊號打死：{err}");
+            assert!(err.contains("名額租約失效"), "{sh}: 要告訴使用者為什麼：{err}");
+            assert!(!s.alive("cargo.pid"), "{sh}: cargo 還活著");
+            assert!(std::fs::read_to_string(s.dir.join("curl.log")).unwrap().contains("/release"), "{sh}: 名額要放掉");
+            let leftovers: Vec<_> = std::fs::read_dir(s.dir.join("tmp")).unwrap().flatten().collect();
+            assert!(leftovers.is_empty(), "{sh}: 狀態目錄要清掉：{leftovers:?}");
+        }
     }
 
     /// 續約**一直**失敗（daemon 連不上）：不能等到 daemon 端的到期時間之後才動手——那時 B 可能已經拿到同一個名額。
