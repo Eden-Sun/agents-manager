@@ -38,9 +38,11 @@
 - 工作樹裡別人的 WIP 讓編譯掛掉時，對**你 staged 的內容**驗：`git archive` 出來或用 `git stash --keep-index` 以外的方式，總之不能碰別人的檔。
 - UI 改動要看真畫面：`OUT=/tmp/shots node scripts/ui-goal-shots.mjs`（headless Chrome 七張）或 ego-browser；截圖放 `docs/screenshots/<feature>/`。
 - daemon 在 `127.0.0.1:7788`，token 在 `~/.config/agents-manager/ui-token`，header `X-AM-Token`。
+- **本機綠不等於 CI 綠**：runner 是 macOS、`TZ=Asia/Taipei`、claude／codex／grok 是空殼、沒有 herdr、沒有 `AM_*`、沒有真的 pane 行程。推完要用 `gh run list --branch main --commit <sha>` 找到這次 push 的 run，`gh run watch <id>` 盯到跑完，看結果（issue #211：CI 曾連紅好幾天沒人發現）。
 
 ## 提交
 - 只在自己的 worktree 改與 commit；只 `git add` 自己改的檔案與 hunk（混檔用 `git apply --cached` 過濾），一個功能一個 commit。
+- **推完不算完成**：確認這次 push 的 CI 結果（`gh run list --branch main --commit <sha>`／`gh run watch <id>`）。紅的是你造成的就修到綠；不是你造成的就回報派工者，指出**哪一條測試、哪個 run**。不能只看本機 `check.sh`。
 - 訊息：`feat(scope): …` / `fix(scope): …` / `perf` / `docs` / `chore`，scope 用 `daemon` / `web` / `hosts` / `quota` / `mission` 等，第一行說**為什麼**。
 - 回報 commit hash，讓派工者在主樹只做 `git -C <主樹> merge --ff-only <你的分支>`；需要 rebase 時在自己的 worktree 做完再推自己的分支，禁止在主樹 stash、`checkout --` 或 autostash。
 - 不要 push 編不過的 HEAD（別人的半成品被你的 commit 依賴到時，把那部分一起帶上並在訊息裡註明）。整合完成後移除自己的 worktree：`git worktree remove .claude/worktrees/<你的 agent 名>`。
@@ -55,7 +57,7 @@ nohup ./target/release/agents-managerd serve >> ~/.config/agents-manager/daemon.
 ## 用 herdr 開子 agent
 - 名稱一律 `<你的 agent 名>-<字尾>`（`$AM_AGENT_NAME` 有值；PATH 上的 `herdr` shim 會自動補前綴），daemon 才會把它掛在你底下。
 - 子 pane 用 `herdr pane split --pane $HERDR_PANE_ID`，帳號與 hook 環境會繼承。
-- 子 agent 一樣要遵守本檔；派工 prompt 必須帶上：「先 `git worktree list` 找自己的 `.claude/worktrees/<你的 agent 名>`，沒有就 `git worktree add .claude/worktrees/<你的 agent 名>-<字尾> -b <分支>`；只在自己的 worktree 改與 commit，禁止在主樹 `git stash` / `--autostash` / `git checkout --`，只 `git add` 自己的檔案，收尾前跑 `scripts/check.sh`，完成後移除自己的 worktree。」
+- 子 agent 一樣要遵守本檔；派工 prompt 必須帶上：「先 `git worktree list` 找自己的 `.claude/worktrees/<你的 agent 名>`，沒有就 `git worktree add .claude/worktrees/<你的 agent 名>-<字尾> -b <分支>`；只在自己的 worktree 改與 commit，禁止在主樹 `git stash` / `--autostash` / `git checkout --`，只 `git add` 自己的檔案，收尾前跑 `scripts/check.sh`，推完用 `gh run list --branch main --commit <sha>`／`gh run watch <id>` 確認這次 push 的 CI 結果（紅的是你造成的就修，不是就回報派工者哪一條、哪個 run，不能只看本機 check.sh），完成後移除自己的 worktree。」
 - 做完的子 agent 關掉 pane（`herdr pane close`），不要留一堆 done 的 pane。
 
 ## OB（網頁 GPT 外腦，使用者 2026-09-15）
