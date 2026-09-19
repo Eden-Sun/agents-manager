@@ -162,16 +162,58 @@ async fn handle_global(app: &Arc<App>, host: &str, session: &str, ev: &crate::he
     }
 }
 
+/// pane 關閉事件重試的間隔（#247）：DB 讀不到就不能當成「沒有 run」，事件只有這一次，要自己補。
+const CLOSE_RETRY: [Duration; 6] = [Duration::from_secs(2), Duration::from_secs(5), Duration::from_secs(15), Duration::from_secs(30), Duration::from_secs(60), Duration::from_secs(120)];
+const CLOSE_RETRY_IN_TESTS: [Duration; 20] = [Duration::from_millis(100); 20];
+
+fn close_retry_delays() -> &'static [Duration] {
+    if cfg!(test) {
+        &CLOSE_RETRY_IN_TESTS
+    } else {
+        &CLOSE_RETRY
+    }
+}
+
 async fn end_runs_for_pane(app: &Arc<App>, host: &str, session: &str, pane_id: &str) {
-    let fallback = app.session_for_host(host).await.unwrap_or_default();
+    end_runs_for_pane_try(app, host, session, pane_id, 0).await
+}
+
+/// pane 已經沒了（外部事實）。順序：找出受影響的 run → 收成 exited → **才**拆 watcher。
+/// 任何一步讀寫不到就不拆 watcher（它還能提供證據）、也不當成沒有 run，稍後整段重來；
+/// `mark_run_exited` 靠 CAS，重複收是安全的。
+async fn end_runs_for_pane_try(app: &Arc<App>, host: &str, session: &str, pane_id: &str, attempt: usize) {
+    let Some(fallback) = app.session_for_host(host).await else {
+        tracing::warn!(host, pane_id, "pane closed but the host's session is unknown; will retry");
+        retry_pane_close(app, host, session, pane_id, attempt);
+        return;
+    };
+    let runs = match crate::db::active_runs_for_pane(&app.db, host, pane_id, session, &fallback).await {
+        Ok(runs) => runs,
+        Err(e) => {
+            tracing::warn!(host, pane_id, error = ?e, "could not look up the runs of a closed pane; watcher kept, retrying");
+            retry_pane_close(app, host, session, pane_id, attempt);
+            return;
+        }
+    };
     let mut ended_a_child = false;
-    for r in crate::db::active_runs_for_pane(&app.db, host, pane_id, session, &fallback).await.unwrap_or_default() {
-        crate::lifecycle::mark_run_exited(app, &r.id, "pane exited").await;
+    let mut converged = true;
+    for r in runs {
+        if matches!(crate::lifecycle::mark_run_exited(app, &r.id, "pane exited").await, crate::lifecycle::RunExit::NotRecorded) {
+            converged = false;
+            continue;
+        }
         if matches!(crate::db::bot(&app.db, &r.bot_id).await, Ok(Some(b)) if b.managed_by == "child") {
             ended_a_child = true;
         }
     }
-    unwatch_pane_on_session(app, host, session, pane_id).await;
+    if !converged {
+        tracing::warn!(host, pane_id, "a closed pane's run could not be recorded as exited; watcher kept, retrying");
+        retry_pane_close(app, host, session, pane_id, attempt);
+        // 已收成功的 child 仍要排對帳（重試時它不再是 active，不會再算到）。
+    }
+    if converged {
+        unwatch_pane_on_session(app, host, session, pane_id).await;
+    }
     // #60：子 agent 退役由對帳判定（pane 被搬走也會報舊 id 關閉），但關 pane 不保證會發
     // `pane.agent_detected`，所以這裡自己排一次，同樣晚一拍等 herdr 穩定。
     if ended_a_child {
@@ -184,6 +226,18 @@ async fn end_runs_for_pane(app: &Arc<App>, host: &str, session: &str, pane_id: &
             }
         });
     }
+}
+
+fn retry_pane_close(app: &Arc<App>, host: &str, session: &str, pane_id: &str, attempt: usize) {
+    let Some(wait) = close_retry_delays().get(attempt).copied() else {
+        tracing::warn!(host, pane_id, "gave up retrying a pane-close; periodic reconcile is the safety net");
+        return;
+    };
+    let (app, host, session, pane_id) = (app.clone(), host.to_string(), session.to_string(), pane_id.to_string());
+    tokio::spawn(async move {
+        tokio::time::sleep(wait).await;
+        end_runs_for_pane_try(&app, &host, &session, &pane_id, attempt + 1).await;
+    });
 }
 
 /// Open (or replace) the per-run status subscription in the host's configured session.
@@ -495,4 +549,57 @@ async fn poll_titles(app: &Arc<App>, host: &str, session: &str, fallback_session
         app.emit_bot_status(&bot_id).await;
     }
     let _ = host; // kept in the helper signature for session-scoped tracing/debugging callers
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing as tt;
+
+    async fn run_state(app: &Arc<App>, run: &str) -> String {
+        sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(run).fetch_one(&app.db).await.unwrap()
+    }
+
+    async fn plant_watcher(app: &Arc<App>, pane: &str) {
+        let h = tokio::spawn(std::future::pending::<()>());
+        app.pane_watchers.lock().await.insert((LOCAL_HOST.into(), "test".into(), pane.into()), h);
+    }
+
+    async fn watching(app: &Arc<App>, pane: &str) -> bool {
+        app.pane_watchers.lock().await.contains_key(&(LOCAL_HOST.to_string(), "test".to_string(), pane.to_string()))
+    }
+
+    fn close_event(pane: &str) -> crate::herdr::Event {
+        crate::herdr::Event { event: "pane.closed".into(), data: json!({"pane_id": pane}) }
+    }
+
+    /// #247：pane.closed 到的那一刻讀不到 run，以前被當成「沒有 run」、照樣拆 watcher，事件就永久漏掉。
+    /// 現在 watcher 留著、稍後重試；DB 好了之後不需要第二個事件，run 收成 exited、watcher 才拆。
+    #[tokio::test]
+    async fn a_pane_close_whose_run_lookup_fails_is_retried_and_keeps_the_watcher() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let bot = tt::claude_bot(&app, &e.project_id, "closer").await;
+        let run = tt::fake_run(&app, &bot.id).await;
+        let pane = format!("pane-{}", bot.id);
+        plant_watcher(&app, &pane).await;
+
+        tt::make_table_unreadable(&app, "runs").await;
+        handle_global(&app, LOCAL_HOST, "test", &close_event(&pane)).await;
+        assert!(watching(&app, &pane).await, "讀不到 run 時不能拆 watcher");
+        tt::make_table_readable(&app, "runs").await;
+        assert_eq!(run_state(&app, &run).await, "running", "前提：這一刻沒收到");
+
+        for _ in 0..250 {
+            if run_state(&app, &run).await == "exited" && !watching(&app, &pane).await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(run_state(&app, &run).await, "exited", "重試補上，不靠第二個事件");
+        assert!(!watching(&app, &pane).await, "收斂之後才拆 watcher");
+        // 重複的關閉事件是安全的。
+        handle_global(&app, LOCAL_HOST, "test", &close_event(&pane)).await;
+        assert_eq!(run_state(&app, &run).await, "exited");
+    }
 }
