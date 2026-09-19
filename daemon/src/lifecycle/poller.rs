@@ -268,7 +268,17 @@ pub async fn begin_external_turn(app: &Arc<App>, run: &db::Run) {
     }
     tracing::info!(run = %run.id, turn = %tid, "external turn opened from pane activity");
     // No echo on screen: open the turn anyway rather than invent a user message.
-    if let Some(text) = pane_prompt_echo(app, &run).await {
+    // claude 自己起頭的回合（背景 shell 的 task notification）畫面上沒有新的回音，最後一個是上一則使用者 prompt，
+    // 已經記在上一回合底下——不是這一回合的 user 訊息（issue #224，`transcript_origin`）。
+    let by_the_cli = match db::bot(&app.db, &run.bot_id).await {
+        Ok(Some(bot)) => super::transcript_origin::started_by_the_cli_itself(&bot.kind, run.transcript_path.as_deref()).await,
+        _ => false,
+    };
+    let echo = if by_the_cli { None } else { pane_prompt_echo(app, &run).await };
+    if by_the_cli {
+        tracing::info!(turn = %tid, "external turn started by the CLI itself (task notification); no user message");
+    }
+    if let Some(text) = echo {
         if let Err(e) = insert_message(app, &conv, Some(&tid), "user", &text, "hook", false, None).await {
             tracing::warn!(turn = %tid, error = ?e, "external prompt echo not stored");
         }

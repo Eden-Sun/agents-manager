@@ -1585,6 +1585,12 @@ default Bot 的 prompt／keys／terminal 讀取依 Run 的 session 回到 defaul
 
 ### 6.6 事件處理
 - `pane.agent_status_changed`：更新 `agent_status`；`working→idle` 啟動備援計時（§4.3）；推 WS。遠端 run 先 drain 一次該 bot 的 spool（§11.4.3）。
+  沒有 in-flight Turn 卻 `→ working`：開一筆 `origin = external`、in_flight 的 Turn（`begin_external_turn`），並把畫面上最後一個 `❯` 回音存成它的 user Message
+  （使用者直接在 pane 裡打字時那就是這一回合的 prompt）。**claude 自己起頭的回合不存**（issue #224）：背景 shell（`Bash run_in_background`）跑完後 claude 自己接一回合，畫面上
+  沒有新的回音，最後一個是上一則使用者 prompt、早就記在上一回合底下，存了就是「背景任務完成」那一回合掛著上一則 prompt。判斷看 claude 的 transcript（2.1.278 起，2026-09-19 真機實抓，
+  `lifecycle/fixtures/claude_2.1.278_task_notification.jsonl`）：回合起頭的 `type = "user"` entry 帶 `origin.kind`，使用者打的（含 daemon 經 herdr 送的）是 `human`，背景 shell 完成是
+  `task-notification`（另有 `promptSource: "system"`、`turnOrigin: "task_notification"`，前面有 `queue-operation`）；回合中間的工具結果也是 `type = "user"` 但沒有 `origin`，不算起點。
+  最新的起點不是 `human` 就不存回音（回合照開，回覆有地方掛，只是沒有 user 訊息）；讀不到 transcript、舊版沒有 `origin`、不是 claude 一律照舊存。
 - `pane.exited` / `pane.closed`：Run → `exited`，in-flight Turn → `failed`。
   in-flight 那一筆收不成（寫不進 `failed`，#156）：pane 已經沒了、不能不做，所以記成**欠著的收尾**（`interruption` 的帳，跟 #147 同一套），
   由定時重試、這顆 bot 的下一則 hook／prompt 補上；回傳 `RunExit::TurnOwed`，不說「收尾做完了」。撤孤兒佇列與拆 watcher 是 run 結束的事，照做。
