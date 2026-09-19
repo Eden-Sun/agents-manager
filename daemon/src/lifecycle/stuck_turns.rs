@@ -99,6 +99,8 @@ pub fn spawn_stuck_turn_sweeper(app: Arc<App>) {
             sweep(&app, None).await;
             // run 早就結束卻還排著的 queued（含這個版本上線前留下來的）：沒有人會送，收掉。
             revoke_all_orphaned_queued_turns(&app).await;
+            // 停在提問的子 agent 的通知不只靠那一條 blocked 邊（#192）。
+            crate::child_alerts::sweep(&app).await;
         }
     });
 }

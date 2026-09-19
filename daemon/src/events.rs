@@ -276,6 +276,44 @@ pub async fn unwatch_pane_on_session(app: &Arc<App>, host: &str, session: &str, 
 }
 
 pub(crate) async fn handle_status(app: &Arc<App>, host: &str, session: &str, ev: &crate::herdr::Event) {
+    handle_status_try(app, host, session, ev, 0).await
+}
+
+/// 同一個 pane 最新的狀態事件是第幾則：讀不到 run 而延後重放的那一則，只在它之後沒有更新的事件時才算數（#192）。
+fn status_seq() -> &'static std::sync::Mutex<std::collections::HashMap<PaneKey, u64>> {
+    static M: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<PaneKey, u64>>> = std::sync::OnceLock::new();
+    M.get_or_init(Default::default)
+}
+
+/// 讀不到 run 的狀態事件隔多久重放一次；用完就交給 `child_alerts::sweep` 的定時安全網。
+const STATUS_REPLAY: [Duration; 4] = [Duration::from_secs(2), Duration::from_secs(5), Duration::from_secs(15), Duration::from_secs(30)];
+const STATUS_REPLAY_IN_TESTS: [Duration; 20] = [Duration::from_millis(100); 20];
+
+fn status_replay_delays() -> &'static [Duration] {
+    if cfg!(test) {
+        &STATUS_REPLAY_IN_TESTS
+    } else {
+        &STATUS_REPLAY
+    }
+}
+
+fn replay_status_later(app: &Arc<App>, host: &str, session: &str, ev: &crate::herdr::Event, key: PaneKey, seq: u64, attempt: usize) {
+    let Some(wait) = status_replay_delays().get(attempt).copied() else {
+        tracing::warn!(host, pane = %key.2, "gave up replaying a pane status event; the periodic child-alert sweep is the safety net");
+        return;
+    };
+    let (app, host, session, ev) = (app.clone(), host.to_string(), session.to_string(), ev.clone());
+    tokio::spawn(async move {
+        tokio::time::sleep(wait).await;
+        // 這個 pane 之後又來過事件：那一則比這一則新，這一則不再算數。
+        if status_seq().lock().unwrap().get(&key) != Some(&seq) {
+            return;
+        }
+        handle_status_try(&app, &host, &session, &ev, attempt + 1).await;
+    });
+}
+
+async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate::herdr::Event, attempt: usize) {
     let name = norm(&ev.event);
     if name != "pane_agent_status_changed" {
         tracing::trace!(event = %ev.event, "unhandled pane event");
@@ -290,10 +328,27 @@ pub(crate) async fn handle_status(app: &Arc<App>, host: &str, session: &str, ev:
         .unwrap_or("unknown")
         .to_string();
     tracing::info!(host, session, pane_id, status = %status, "pane.agent_status_changed");
+    let key: PaneKey = (host.to_string(), session.to_string(), pane_id.to_string());
+    let seq = {
+        let mut m = status_seq().lock().unwrap();
+        let n = m.entry(key.clone()).or_insert(0);
+        *n += 1;
+        *n
+    };
 
     let fallback = app.session_for_host(host).await.unwrap_or_default();
-    let Some(run) = crate::db::active_runs_for_pane(&app.db, host, pane_id, session, &fallback).await.unwrap_or_default().into_iter().next()
-    else {
+    // 讀不到不等於這個 pane 沒有 run（#192）：以前讀取錯誤被當成空集合、整則事件丟掉。對 working／idle 之後的對帳還補得回來，
+    // 但 `blocked` 那條邊的副作用（告訴父 agent 它的 child 在等）只有這一次——child 停在同一個問題上不會再有第二個狀態事件。
+    // 稍後重放這一則（這個 pane 之後沒有更新的事件才算數）；重放也讀不到，還有 `child_alerts::sweep` 的定時安全網。
+    let runs = match crate::db::active_runs_for_pane(&app.db, host, pane_id, session, &fallback).await {
+        Ok(runs) => runs,
+        Err(e) => {
+            tracing::warn!(host, pane_id, status = %status, error = ?e, "could not look up the run for a pane status event; replaying it shortly");
+            replay_status_later(app, host, session, ev, key, seq, attempt);
+            return;
+        }
+    };
+    let Some(run) = runs.into_iter().next() else {
         return;
     };
     let prev = run.agent_status.clone();
