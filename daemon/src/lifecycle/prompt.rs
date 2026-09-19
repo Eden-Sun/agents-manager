@@ -2,33 +2,6 @@
 
 use super::*;
 
-/// Close a prompt whose local setup failed after its turn was committed; `pending` must never
-/// be the last state the frontend sees.
-async fn fail_prompt_delivery(app: &Arc<App>, conversation_id: &str, turn_id: &str, reason: &str) {
-    let updated = match super::turn_controller::fail(&app.db, turn_id, super::turn_controller::DeliveryOnFail::Failed, reason).await {
-        Ok(result) => result,
-        Err(e) => {
-            tracing::error!(turn = %turn_id, error = %e, "could not fail prompt delivery");
-            return;
-        }
-    };
-    if updated != super::turn_controller::Outcome::Applied {
-        return;
-    }
-    let _ = insert_message(
-        app,
-        conversation_id,
-        Some(turn_id),
-        "system",
-        &format!("delivery failed: {reason}"),
-        "system",
-        false,
-        None,
-    )
-    .await;
-    emit_turn(app, turn_id).await;
-}
-
 pub(super) async fn emit_prompt_message(app: &Arc<App>, bot_id: &str, message_id: &str) {
     if let Ok(Some(m)) = sqlx::query_as::<_, db::Message>("SELECT * FROM messages WHERE id=?")
         .bind(message_id)
@@ -82,6 +55,26 @@ pub(crate) fn not_attempted_error(run_id: &str, not: Delivered) -> LcError {
     }
 }
 
+/// 撤不回來（DB 出錯）：改收成 failed 了，或那一句也寫不進去、記成欠著（`owed`，#158）。
+struct Unretracted {
+    cause: anyhow::Error,
+    owed: Option<anyhow::Error>,
+}
+
+impl Unretracted {
+    /// 收成 failed 了：這個 request id 之後只會拿到那筆失敗的回合，回 5xx（最終答案，不是可重試的 409）。還欠著：跟送達結果
+    /// 寫不回去同一種 503（`sent:false`）——不回普通的錯誤讓人以為收掉了，daemon 自己補，同一個 request id 重問拿得到結果。
+    fn answer(self, run_id: &str, turn_id: &str, msg_id: &str, what: &str) -> LcError {
+        match self.owed {
+            Some(e) => super::owed_delivery::uncommitted(Some(run_id), turn_id, msg_id, "failed", Some(&e)),
+            None => LcError::Upstream(format!("{what}: {}", self.cause)),
+        }
+    }
+}
+
+/// 撤不回來、改收成 failed 時寫進對話的說明。
+const UNRETRACTED_NOTE: &str = "沒有送出：一個字都沒打，但這一則撤不回來，改收成 failed。";
+
 /// 撤回一筆沒送出的 turn 的結果。
 #[derive(Debug, PartialEq, Eq)]
 enum Retraction {
@@ -98,7 +91,7 @@ enum Retraction {
 /// 刪之前先確認 turn 還是 `in_flight`，而且跟刪訊息在同一個交易裡：`fail_in_flight` 不拿 per-bot 鎖，
 /// 會在「turn 已 commit、第一個字還沒打」這個窄窗裡把它標成 failed 並插一則「run ended」說明。訊息那句
 /// 原本不帶條件，於是使用者那顆泡泡跟那則說明被一起刪掉，只留下一個空的 failed 回合（review3 L4）。
-async fn retract_unsent_turn(app: &Arc<App>, turn_id: &str, msg_id: &str) -> anyhow::Result<Retraction> {
+async fn retract_unsent_turn(app: &Arc<App>, bot_id: &str, turn_id: &str, msg_id: &str) -> Result<Retraction, Unretracted> {
     let res = async {
         let mut tx = app.db.begin().await?;
         // 訊息要先刪（`messages.turn_id` 指著 turns，反過來會踩到外鍵），turn 那句才是把關的：
@@ -124,8 +117,9 @@ async fn retract_unsent_turn(app: &Arc<App>, turn_id: &str, msg_id: &str) -> any
         }
         Err(e) => {
             tracing::error!(turn = turn_id, error = %e, "could not retract an unsent turn; failing it instead");
-            let _ = super::turn_controller::fail(&app.db, turn_id, super::turn_controller::DeliveryOnFail::Failed, "撤回失敗，改標成 failed").await;
-            Err(e)
+            // 收成 failed 也寫不進去就記成欠著、之後補（#158）：不留一筆沒人收的 in_flight＋pending。
+            let owed = super::owed_delivery::closed(app, bot_id, turn_id, "failed", UNRETRACTED_NOTE).await.err();
+            Err(Unretracted { cause: e, owed })
         }
     };
     emit_turn(app, turn_id).await;
@@ -630,8 +624,14 @@ async fn prompt_inner(
     tx.commit().await.map_err(up)?;
     if let Err(e) = crate::attach::bind(app, &msg_id, &files).await {
         emit_prompt_message(app, bot_id, &msg_id).await;
-        fail_prompt_delivery(app, &conv, &turn_id, &format!("attachment binding failed: {e}")).await;
-        return Ok(PromptOut { turn_id, message_id: msg_id, delivery: "failed".into(), send_now });
+        // 一個字都沒送：收成 failed＋說明（同一個交易），前端最後看到的不能是 `pending`。收不成就記成欠著、回 503（#158）——
+        // DB 還是 in_flight＋pending 時不回普通的 `failed`。
+        let note = format!("delivery failed: attachment binding failed: {e}");
+        return match super::owed_delivery::closed(app, bot_id, &turn_id, "failed", &note).await {
+            Ok(true) => Ok(PromptOut { turn_id, message_id: msg_id, delivery: "failed".into(), send_now }),
+            Ok(false) => answer_for_turn_id(app, &turn_id).await,
+            Err(err) => Err(super::owed_delivery::uncommitted(Some(&run.id), &turn_id, &msg_id, "failed", Some(&err))),
+        };
     }
     emit_prompt_message(app, bot_id, &msg_id).await;
     emit_turn(app, &turn_id).await;
@@ -641,11 +641,11 @@ async fn prompt_inner(
     // 由 SQLite 排序，所以先 commit 的那個贏：這裡贏 → acquire 拿不到；acquire 贏 → 這裡撤回。
     // 兩邊加起來才是「acquire 回 Ok 之後不會有任何一個字進 pane」（issue #86）。
     if let Some(refusal) = maintenance_refusal(app, admission).await {
-        match retract_unsent_turn(app, &turn_id, &msg_id).await {
+        match retract_unsent_turn(app, bot_id, &turn_id, &msg_id).await {
             Ok(Retraction::Withdrawn) => return Err(refusal),
             // 這筆已經被別的路徑收掉了：照它現在的樣子回，跟同一個 request id 重送一致（review3 L4）。
             Ok(Retraction::AlreadySettled) => return answer_for_turn_id(app, &turn_id).await,
-            Err(e) => return Err(LcError::Upstream(format!("a maintenance window opened and the turn could not be withdrawn: {e}"))),
+            Err(u) => return Err(u.answer(&run.id, &turn_id, &msg_id, "a maintenance window opened and the turn could not be withdrawn")),
         }
     }
 
@@ -659,8 +659,8 @@ async fn prompt_inner(
         Some(old) => match super::send_now::deliver(app, &client, &run, &bot, &deliver, plan, old, &turn_id).await {
             super::send_now::Outcome::Interrupted(res) => res,
             super::send_now::Outcome::NotAttempted(not) => Ok(not),
-            super::send_now::Outcome::NotSent(why) => return send_now_fell_through(app, &conv, &turn_id, &msg_id, why, false).await,
-            super::send_now::Outcome::Unknown(why) => return send_now_fell_through(app, &conv, &turn_id, &msg_id, why, true).await,
+            super::send_now::Outcome::NotSent(why) => return send_now_fell_through(app, bot_id, &run.id, &turn_id, &msg_id, why, false).await,
+            super::send_now::Outcome::Unknown(why) => return send_now_fell_through(app, bot_id, &run.id, &turn_id, &msg_id, why, true).await,
             // 送出鍵生效了、狀態沒寫成：503，跟 interrupt／start／stop 的 `*_state_uncommitted` 同一種（#147）。
             super::send_now::Outcome::Uncommitted(e) => {
                 return Err(LcError::Uncommitted(json!({
@@ -689,7 +689,7 @@ async fn prompt_inner(
         // The box filled between the plan and the first keystroke: nothing was sent. Take the turn
         // back out so the same request id can be sent again, and answer 409 like the plan would.
         Ok(not @ Delivered::NotAttempted { .. }) => {
-            match retract_unsent_turn(app, &turn_id, &msg_id).await {
+            match retract_unsent_turn(app, bot_id, &turn_id, &msg_id).await {
                 // 撤掉了：同一個 request id 原樣重送會重來一次，照計畫階段的答案回 409／422。
                 Ok(Retraction::Withdrawn) => return Err(not_attempted_error(&run.id, not)),
                 // 窄窗裡別的路徑（`mark_run_exited` → `fail_in_flight`）已經把這筆收掉並插了說明：
@@ -699,7 +699,7 @@ async fn prompt_inner(
                 Ok(Retraction::AlreadySettled) => return answer_for_turn_id(app, &turn_id).await,
                 // If the turn cannot be taken back, the same request id would only ever find a failed
                 // turn: answer 5xx (final for this id), not a retryable 409.
-                Err(e) => return Err(LcError::Upstream(format!("prompt was not sent and its turn could not be withdrawn: {e}"))),
+                Err(u) => return Err(u.answer(&run.id, &turn_id, &msg_id, "prompt was not sent and its turn could not be withdrawn")),
             }
         }
         // Keys were sent and the result cannot be proven: that is what `unknown` means (§6.3).
@@ -711,7 +711,7 @@ async fn prompt_inner(
             let blocked = e.downcast_ref::<HerdrError>().map(|h| h.code == "agent_blocked").unwrap_or(false);
             if blocked {
                 // 收成 failed 寫不進去就記成欠著（#149）：DB 還是 in_flight＋pending 時不回普通的 `failed`。
-                if let Err(err) = super::owed_delivery::refused(app, bot_id, &turn_id, &format!("delivery failed: {e}")).await {
+                if let Err(err) = super::owed_delivery::closed(app, bot_id, &turn_id, "failed", &format!("delivery failed: {e}")).await {
                     return Err(super::owed_delivery::uncommitted(Some(&run.id), &turn_id, &msg_id, "failed", Some(&err)));
                 }
                 return Ok(PromptOut { turn_id, message_id: msg_id, delivery: "failed".into(), send_now });
@@ -734,10 +734,11 @@ async fn prompt_inner(
 
 /// 插隊送出沒有打斷任何東西（#120）：送出鍵沒生效（`unknown = false`）或不知道生效了沒有（`true`）。
 /// 正在跑的那一回合原封不動；新的那一則收成 failed（不佔 run 的 in-flight 名額），送達記成 `failed`／`unknown`，
-/// 並說清楚字可能還留在輸入框裡。
+/// 並說清楚字可能還留在輸入框裡。收不成就記成欠著、回 503（#158）：不留一筆 run_id 為空的 in_flight 沒人收。
 async fn send_now_fell_through(
     app: &Arc<App>,
-    conv: &str,
+    bot_id: &str,
+    run_id: &str,
     turn_id: &str,
     msg_id: &str,
     why: &'static str,
@@ -752,35 +753,17 @@ async fn send_now_fell_through(
         format!("插隊送出沒有送出（{why}）：送出鍵沒有生效，正在跑的那一回合照常進行。這一句可能還留在終端的輸入框裡。")
     };
     let delivery = if unknown { "unknown" } else { "failed" };
-    let written: anyhow::Result<Option<db::Message>> = async {
-        let mut tx = app.db.begin().await?;
-        if super::turn_controller::fail_on(&mut tx, turn_id, super::turn_controller::DeliveryOnFail::Keep, why).await?
-            != super::turn_controller::Outcome::Applied
-        {
-            return Ok(None);
-        }
-        sqlx::query("UPDATE turns SET delivery=? WHERE id=?").bind(delivery).bind(turn_id).execute(&mut *tx).await?;
-        let m = insert_message_tx(&mut tx, conv, Some(turn_id), "system", &note, "system", false, None).await?;
-        tx.commit().await?;
-        Ok(Some(m))
-    }
-    .await;
-    match written {
-        Ok(Some(m)) => {
-            let bot_id: String = sqlx::query_scalar("SELECT bot_id FROM conversations WHERE id=?").bind(conv).fetch_one(&app.db).await.map_err(up)?;
-            emit_message_added(app, &bot_id, m).await;
-        }
+    match super::owed_delivery::closed(app, bot_id, turn_id, delivery, &note).await {
+        Ok(true) => Ok(PromptOut {
+            turn_id: turn_id.to_string(),
+            message_id: msg_id.to_string(),
+            delivery: delivery.into(),
+            send_now: Some(if unknown { "unknown" } else { "not_sent" }),
+        }),
         // 別的路徑先收掉了：照它現在的樣子回。
-        Ok(None) => return answer_for_turn_id(app, turn_id).await,
-        Err(e) => return Err(LcError::Upstream(format!("插隊送出沒有送出，那一則卻收不成：{e:#}"))),
+        Ok(false) => answer_for_turn_id(app, turn_id).await,
+        Err(e) => Err(super::owed_delivery::uncommitted(Some(run_id), turn_id, msg_id, delivery, Some(&e))),
     }
-    emit_turn(app, turn_id).await;
-    Ok(PromptOut {
-        turn_id: turn_id.to_string(),
-        message_id: msg_id.to_string(),
-        delivery: delivery.into(),
-        send_now: Some(if unknown { "unknown" } else { "not_sent" }),
-    })
 }
 
 #[cfg(test)]
@@ -1234,6 +1217,76 @@ mod prompt_tests {
         assert_eq!(f.env.herdr.methods().iter().filter(|m| *m == "pane.send_text" || *m == "agent.prompt").count(), 0, "一個字都沒送");
     }
 
+    /// #158 驗收一：附件綁不上（一個字都沒送），收成 failed 那一句又寫不進去——以前 helper 只記一行 error，照樣回普通的
+    /// `delivery=failed`，DB 卻停在 in_flight＋pending。現在記成欠著、回 503（`sent:false`）；DB 好了同一個 request id
+    /// 拿到 failed＋說明，一個字都沒送。
+    #[tokio::test]
+    async fn an_attachment_bind_failure_whose_close_cannot_be_written_is_not_a_plain_failed() {
+        let f = fixture("codex", "test").await;
+        let app = f.env.app.clone();
+        let attachment_id = attachment(&app, &f.bot_id).await;
+        sqlx::query("CREATE TRIGGER fail_prompt_attachment_bind BEFORE UPDATE OF message_id ON attachments BEGIN SELECT RAISE(ABORT, 'bind failed'); END")
+            .execute(&app.db)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TRIGGER lost_close BEFORE UPDATE OF status ON turns WHEN NEW.status = 'failed' BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END")
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        let res = prompt_with(&app, &f.bot_id, "look", "prompt-attach-lost", std::slice::from_ref(&attachment_id)).await;
+        let Err(LcError::Uncommitted(body)) = res else { panic!("收尾沒寫成，卻回了 {:?}", res.map(|o| o.delivery)) };
+        assert_eq!((body["error"].as_str(), body["delivery"].as_str(), &body["sent"]), (Some("delivery_state_uncommitted"), Some("failed"), &json!(false)), "{body}");
+        let turn_id = body["turn_id"].as_str().unwrap().to_string();
+        let t: db::Turn = sqlx::query_as("SELECT * FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!((t.status.as_str(), t.delivery.as_str()), ("in_flight", "pending"), "寫不進去就是還沒收");
+
+        sqlx::query("DROP TRIGGER lost_close").execute(&app.db).await.unwrap();
+        let again = prompt_with(&app, &f.bot_id, "look", "prompt-attach-lost", &[attachment_id]).await.expect("DB 好了");
+        assert_eq!((again.turn_id.as_str(), again.delivery.as_str()), (turn_id.as_str(), "failed"));
+        let t: db::Turn = sqlx::query_as("SELECT * FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!((t.status.as_str(), t.delivery.as_str()), ("failed", "failed"));
+        let notes: Vec<String> = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='system'").bind(&turn_id).fetch_all(&app.db).await.unwrap();
+        assert!(notes.len() == 1 && notes[0].contains("attachment binding failed"), "{notes:?}");
+        assert!(db::in_flight_turn(&app.db, &f.run_id).await.unwrap().is_none(), "不擋住下一則");
+        assert!(!f.env.herdr.methods().iter().any(|m| m == "agent.prompt" || m == "pane.send_text"), "一個字都沒送");
+    }
+
+    /// #158（同一類）：打字前才發現送不了（`runs.pane_typed` 寫不進去 → `NotAttempted`），撤回那一句寫不進去、改收成 failed
+    /// 那一句也寫不進去——以前第二句被 `let _ =` 吞掉，那一筆停在 in_flight＋pending、沒人會收（擋住之後每一則）。
+    /// 現在記成欠著、回 503（`sent:false`）；DB 好了同一個 request id 拿到 failed＋說明，一個字都沒打。
+    #[tokio::test]
+    async fn an_unsent_turn_that_can_neither_be_withdrawn_nor_failed_is_owed_not_left_in_flight() {
+        let f = fixture("claude", "test").await;
+        let app = f.env.app.clone();
+        sqlx::query("UPDATE runs SET pane_id = 'pane-prompt-test', pane_typed = 1 WHERE id = ?").bind(&f.run_id).execute(&app.db).await.unwrap();
+        f.env.herdr.live_pane("pane-prompt-test", tt::LivePane { width: Some(120), ..Default::default() });
+        for ddl in [
+            "CREATE TRIGGER pane_typed_unwritable BEFORE UPDATE OF pane_typed ON runs BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END",
+            "CREATE TRIGGER lost_retract BEFORE DELETE ON turns BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END",
+            "CREATE TRIGGER lost_close BEFORE UPDATE OF status ON turns WHEN NEW.status = 'failed' BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END",
+        ] {
+            sqlx::query(ddl).execute(&app.db).await.unwrap();
+        }
+
+        let res = prompt(&app, &f.bot_id, "Reply with PONG please", "prompt-unretractable").await;
+        let Err(LcError::Uncommitted(body)) = res else { panic!("撤不回來也收不成，卻回了 {:?}", res.map(|o| o.delivery)) };
+        assert_eq!((body["delivery"].as_str(), &body["sent"]), (Some("failed"), &json!(false)), "{body}");
+        let turn_id = body["turn_id"].as_str().unwrap().to_string();
+        let t: db::Turn = sqlx::query_as("SELECT * FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!((t.status.as_str(), t.delivery.as_str()), ("in_flight", "pending"));
+
+        sqlx::query("DROP TRIGGER lost_retract").execute(&app.db).await.unwrap();
+        sqlx::query("DROP TRIGGER lost_close").execute(&app.db).await.unwrap();
+        let again = prompt(&app, &f.bot_id, "Reply with PONG please", "prompt-unretractable").await.expect("DB 好了");
+        assert_eq!((again.turn_id.as_str(), again.delivery.as_str()), (turn_id.as_str(), "failed"));
+        let t: db::Turn = sqlx::query_as("SELECT * FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!((t.status.as_str(), t.delivery.as_str()), ("failed", "failed"), "不留永久 in_flight");
+        let notes: Vec<String> = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='system'").bind(&turn_id).fetch_all(&app.db).await.unwrap();
+        assert_eq!(notes, vec![UNRETRACTED_NOTE.to_string()]);
+        assert_eq!(f.env.herdr.methods().iter().filter(|m| *m == "pane.send_text").count(), 0, "一個字都沒打");
+    }
+
     /// Binding can fail after the turn commits; the UI must still get a terminal turn event.
     #[tokio::test]
     async fn an_attachment_bind_failure_closes_the_pending_turn() {
@@ -1548,6 +1601,35 @@ mod send_now_tests {
         assert_eq!(status_of(&f, &running).await, "in_flight", "鍵沒按下去：舊回合照常");
         assert!(notes_on(&f, &running).await.is_empty());
         assert!(!transcript_of(&f).await.contains("先看這句"), "沒送出");
+        assert_eq!(in_flight_count(&f).await, 1);
+    }
+
+    /// #158（同一類）：插隊送出的鍵被 herdr 拒收（沒生效），新的那一則收成 failed 那一句卻寫不進去——以前回 502，那一則停在
+    /// run_id 為空的 in_flight＋pending（佔住維護窗口的送達臨界區、同一個 request id 重問拿不到結果）直到 daemon 重啟。
+    /// 現在記成欠著、回 503；DB 好了同一個 request id 拿到 failed。正在跑的那一回合從頭到尾不動。
+    #[tokio::test]
+    async fn a_send_now_that_fell_through_and_could_not_be_closed_is_owed() {
+        let f = fixture("claude", Some("2.1.275")).await;
+        let app = f.env.app.clone();
+        let running = busy(&f).await;
+        f.env.herdr.fail_next("pane.send_keys", tt::Fault::Refuse);
+        sqlx::query("CREATE TRIGGER lost_close BEFORE UPDATE OF status ON turns WHEN OLD.run_id IS NULL BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END")
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        let err = prompt_send_now(&app, &f.bot_id, "先看這句", "sn-fell-lost", &[], None).await.unwrap_err();
+        let LcError::Uncommitted(body) = err else { panic!("收不成，卻回了 {err:?}") };
+        assert_eq!((body["error"].as_str(), body["delivery"].as_str(), &body["sent"]), (Some("delivery_state_uncommitted"), Some("failed"), &json!(false)), "{body}");
+        let new_turn = body["turn_id"].as_str().unwrap().to_string();
+        assert_eq!(status_of(&f, &new_turn).await, "in_flight", "寫不進去就是還沒收");
+
+        sqlx::query("DROP TRIGGER lost_close").execute(&app.db).await.unwrap();
+        let again = prompt_send_now(&app, &f.bot_id, "先看這句", "sn-fell-lost", &[], None).await.expect("DB 好了");
+        assert_eq!((again.turn_id.as_str(), again.delivery.as_str()), (new_turn.as_str(), "failed"));
+        assert_eq!(status_of(&f, &new_turn).await, "failed");
+        assert!(notes_on(&f, &new_turn).await.iter().any(|n| n.contains("插隊送出沒有送出")));
+        assert_eq!(status_of(&f, &running).await, "in_flight", "鍵沒生效：舊回合照常");
         assert_eq!(in_flight_count(&f).await, 1);
     }
 

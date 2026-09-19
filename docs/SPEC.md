@@ -716,6 +716,15 @@ abort 之後照常 flush 出去（但先照下一段等寬限）。要取消排�
 - 呼叫端：AGM 交辦遇到這個 503 不記成送達、不花 attempts、不判 `dispatch_failed`，`hold` 15 秒後用同一個 crid 再問，拿到寫好的結果才記（§18.8）；
   巡檢／協調者的收件匣通知照 `unknown` 把那一批綁在那一筆回合上，不換 `-r<n>` 的新 crid 再送一份。
 
+**確定沒送出、收尾寫不進去**（#158）：回合已經 commit（直接送）或已經從佇列認領（flush）之後，才發現一個字都送不了——附件綁不上、
+打字前被擋下而撤回（`NotAttempted`）撤不掉、插隊送出的鍵沒生效（或不知道生效沒有）、flush 認領後畫面沒準備好／拿不到 herdr client／
+框被佔住／這一則在這個 bot 上永遠送不出去——把它收回來（直接送：收成 failed＋說明、`delivery` 記 `failed`／`unknown`，同一個交易；
+flush：放回佇列照退避與重試上限，或收成 failed＋說明）那一句寫不進去時，**不回普通的 `failed`／`Ok`、也不留 in_flight＋pending**：
+跟上面同一本帳（`owed_delivery` 的 `Closed`／`PutBack`）記成欠著、同一套結清，補的時候從不送。直接送的回 `503 delivery_state_uncommitted`
+（`sent:false`；不知道的是 `null`），flush 回錯誤。收成 failed 那一句 CAS 輸給別的路（run 結束、watchdog 先收掉）時不補說明，
+但 `delivery` 還是 `pending` 的話補成這一次看到的——送達與回合成敗是兩件事，結束了的回合送達不留 `pending`。
+還沒認領的空 prompt 收不成 failed 時同樣不當成丟掉了：留在佇列、掛 timer 稍後再收。
+
 **撤回**（一個字都沒送出而刪掉 turn 與訊息）之後推一次 `resync`：事件模型沒有「刪除」，不補的話客戶端會留著一顆送不出去的泡泡與一個永遠不會結束的回合。
 撤回只在 turn **還是 `in_flight`** 時算數，而且跟刪訊息在同一個交易裡（`DELETE turns … AND status='in_flight'` 刪不到就整個 rollback）：
 `fail_in_flight` 不拿 per-bot 鎖，會在這個窄窗裡把 turn 標 failed 並插「run ended」說明；撤不掉時**一個字都不刪**、不推 `resync`，

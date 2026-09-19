@@ -10,6 +10,11 @@
 //!   下一則回合 hook（先補再對回合）、定時重試。只寫記下的那一筆，從不再送。
 //! - 帳只在記憶體：daemon 在補上之前重啟就沒了。那一筆由 `rearm_progress` 收成 `unknown`（鍵按過、證不出來）；
 //!   「不自動重送」在打字之前就寫死了（`auto_resend=0`），不會因為帳丟了變成可以重送。
+//!
+//! 「確定一個字都沒送出」的那一頭同一套（#158）：回合已經 commit（直接送）或已經從佇列認領（flush）之後才發現送不了——
+//! 附件綁不上、撤不回來、插隊送出的鍵沒生效、畫面沒準備好、herdr client 拿不到、框被佔住——收回來（收成 failed、放回佇列）
+//! 那一句寫不進去時，不回普通的 `failed`／`Ok`，也不讓那一筆停在 in_flight＋pending 沒人收（擋住之後每一則、佔住維護窗口的
+//! 送達臨界區）。記成欠著、照上面同一套補；補的時候同樣從不送。
 
 use super::*;
 use std::collections::HashMap;
@@ -26,8 +31,11 @@ const RETRY_DELAYS_SECS: [u64; 8] = [1, 2, 4, 8, 15, 30, 60, 120];
 enum Write {
     /// 字送出去了（或送出去但證不明）：寫回送達結果。`at` 是送出的那一刻——`delivered_at` 記它，不記補寫的時間。
     Delivered { rec: DeliveryRecord, at: String },
-    /// herdr 明確拒收：一個字都沒進去，收成 failed＋說明（同一個交易）。
-    Refused { note: String },
+    /// 收成 failed＋說明（同一個交易），`delivery` 記看到的：`failed`＝一個字都沒進去（herdr 拒收、本地準備失敗、
+    /// 送出鍵沒生效），`unknown`＝不知道進去了沒有（插隊送出的鍵沒回）。
+    Closed { delivery: &'static str, note: String },
+    /// 從佇列認領了、一個字都沒打：放回佇列（照退避與重試上限，[`super::queue::put_back`]）。
+    PutBack { conv: String, reason: String, wait_key: String },
 }
 
 impl Write {
@@ -36,7 +44,8 @@ impl Write {
         match self {
             Write::Delivered { rec, .. } if rec.stored == "ok" && !rec.verified => "unverified",
             Write::Delivered { rec, .. } => rec.stored,
-            Write::Refused { .. } => "failed",
+            Write::Closed { delivery, .. } => delivery,
+            Write::PutBack { .. } => "queued",
         }
     }
 }
@@ -88,19 +97,26 @@ pub(crate) async fn delivered(app: &Arc<App>, bot_id: &str, turn_id: &str, rec: 
 
 /// [`delivered`]，但送出的那一刻早就過了：插隊送出欠著的那一則，補收尾時才寫（#157）。
 pub(crate) async fn delivered_at(app: &Arc<App>, bot_id: &str, turn_id: &str, rec: DeliveryRecord, at: &str) -> anyhow::Result<()> {
-    owe(app, bot_id, Owed { turn_id: turn_id.to_string(), write: Write::Delivered { rec, at: at.to_string() } }).await
+    owe(app, bot_id, Owed { turn_id: turn_id.to_string(), write: Write::Delivered { rec, at: at.to_string() } }).await.map(drop)
 }
 
-/// herdr 明確拒收（`agent_blocked`）：收成 failed＋說明。寫不進去同 [`delivered`]。
-pub(crate) async fn refused(app: &Arc<App>, bot_id: &str, turn_id: &str, note: &str) -> anyhow::Result<()> {
-    owe(app, bot_id, Owed { turn_id: turn_id.to_string(), write: Write::Refused { note: note.to_string() } }).await
+/// 收掉一則沒送出（或不知道送出沒有）的回合：failed＋說明，`delivery` 記 `failed`／`unknown`（[`Write::Closed`]）。
+/// 寫不進去同 [`delivered`]。`Ok(false)`：別的路先收掉了——回合怎麼收歸它，送達照樣補成這一次看到的。
+pub(crate) async fn closed(app: &Arc<App>, bot_id: &str, turn_id: &str, delivery: &'static str, note: &str) -> anyhow::Result<bool> {
+    owe(app, bot_id, Owed { turn_id: turn_id.to_string(), write: Write::Closed { delivery, note: note.to_string() } }).await
+}
+
+/// 認領了排隊的那一筆、一個字都沒打：放回佇列並掛 retry timer。寫不進去同 [`delivered`]（#158）。
+pub(crate) async fn put_back(app: &Arc<App>, bot_id: &str, conv: &str, turn_id: &str, reason: &str, wait_key: &str) -> anyhow::Result<()> {
+    let write = Write::PutBack { conv: conv.to_string(), reason: reason.to_string(), wait_key: wait_key.to_string() };
+    owe(app, bot_id, Owed { turn_id: turn_id.to_string(), write }).await.map(drop)
 }
 
 /// 同一筆回合**任何一次寫成**都是它最新的送達結果：之前欠著的那一條跟著作廢（#149 重開）。留著的話定時重試會把舊的
 /// 那一份再寫一次，蓋掉這之間別的路寫進去的較新結果。送達時間取帳上與這一次較早的那一刻——`delivered_at` 只記第一次，
 /// 先寫成的若是較晚的那一刻，之後就改不回來了。寫帳的路握著 bot 鎖；唯一不拿鎖的（run 結束時補插隊送出的收尾）寫的是
 /// 帳上記著的同一份結果。
-async fn owe(app: &Arc<App>, bot_id: &str, mut o: Owed) -> anyhow::Result<()> {
+async fn owe(app: &Arc<App>, bot_id: &str, mut o: Owed) -> anyhow::Result<bool> {
     if let Write::Delivered { at, .. } = &mut o.write {
         let earlier = owed(bot_id).into_iter().filter(|x| x.turn_id == o.turn_id).find_map(|x| match x.write {
             Write::Delivered { at: first, .. } if first < *at => Some(first),
@@ -111,12 +127,12 @@ async fn owe(app: &Arc<App>, bot_id: &str, mut o: Owed) -> anyhow::Result<()> {
         }
     }
     match write(app, bot_id, &o).await {
-        Ok(()) => {
+        Ok(applied) => {
             forget(bot_id, &o.turn_id);
-            Ok(())
+            Ok(applied)
         }
         Err(e) => {
-            tracing::warn!(bot = bot_id, turn = %o.turn_id, error = %e, "prompt 已經送出（或被拒收），結果卻寫不進 DB：記成欠著，之後補");
+            tracing::warn!(bot = bot_id, turn = %o.turn_id, error = %e, "prompt 送出（或確定沒送出）之後，結果卻寫不進 DB：記成欠著，之後補");
             record(bot_id, o);
             schedule_retry(app, bot_id);
             #[cfg(test)]
@@ -131,7 +147,7 @@ pub(crate) async fn settle_locked(app: &Arc<App>, bot_id: &str) -> anyhow::Resul
     let mut failed = None;
     for o in owed(bot_id) {
         match write(app, bot_id, &o).await {
-            Ok(()) => {
+            Ok(_) => {
                 tracing::info!(bot = bot_id, turn = %o.turn_id, "補上了欠著的送達結果");
                 forget(bot_id, &o.turn_id);
             }
@@ -152,14 +168,20 @@ async fn settle(app: &Arc<App>, bot_id: &str) -> anyhow::Result<()> {
 }
 
 /// 寫那一句。那一筆已經被別的路收掉（run 結束、watchdog）時，收成 failed 那句 CAS 不到，就不補說明；送達結果照寫
-/// （送達與回合成敗是兩件事）。
-async fn write(app: &Arc<App>, bot_id: &str, o: &Owed) -> anyhow::Result<()> {
-    match &o.write {
-        Write::Delivered { rec, at } => mark_delivery(app, &o.turn_id, *rec, at).await?,
-        Write::Refused { note } => {
+/// （送達與回合成敗是兩件事）——收掉的那條路若沒動 `delivery`，它不能停在 `pending`。`Ok(false)`＝別的路先收掉了。
+async fn write(app: &Arc<App>, bot_id: &str, o: &Owed) -> anyhow::Result<bool> {
+    let applied = match &o.write {
+        Write::Delivered { rec, at } => {
+            mark_delivery(app, &o.turn_id, *rec, at).await?;
+            true
+        }
+        Write::Closed { delivery, note } => {
             let mut tx = app.db.begin().await?;
-            let out = super::turn_controller::fail_on(&mut tx, &o.turn_id, super::turn_controller::DeliveryOnFail::Failed, "agent_blocked").await?;
-            let m = if out == super::turn_controller::Outcome::Applied {
+            let out = super::turn_controller::fail_on(&mut tx, &o.turn_id, super::turn_controller::DeliveryOnFail::Keep, note).await?;
+            let applied = out == super::turn_controller::Outcome::Applied;
+            let only_pending = if applied { "" } else { " AND delivery='pending'" };
+            sqlx::query(&format!("UPDATE turns SET delivery=? WHERE id=?{only_pending}")).bind(*delivery).bind(&o.turn_id).execute(&mut *tx).await?;
+            let m = if applied {
                 let conv: String = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id=?").bind(&o.turn_id).fetch_one(&mut *tx).await?;
                 Some(insert_message_tx(&mut tx, &conv, Some(&o.turn_id), "system", note, "system", false, None).await?)
             } else {
@@ -169,10 +191,15 @@ async fn write(app: &Arc<App>, bot_id: &str, o: &Owed) -> anyhow::Result<()> {
             if let Some(m) = m {
                 emit_message_added(app, bot_id, m).await;
             }
+            applied
         }
-    }
+        Write::PutBack { conv, reason, wait_key } => {
+            super::queue::put_back(app, bot_id, conv, &o.turn_id, reason, wait_key).await?;
+            true
+        }
+    };
     emit_turn(app, &o.turn_id).await;
-    Ok(())
+    Ok(applied)
 }
 
 /// 欠著的帳沒有 hook、也沒有下一則 prompt 時也要補上。
@@ -195,12 +222,12 @@ fn schedule_retry(app: &Arc<App>, bot_id: &str) {
     });
 }
 
-/// 503：這一則的副作用已經發生（字送出去了，或 herdr 已經拒收），結果還沒寫進 DB。`delivery` 是看到的結果，
-/// `sent` 講字有沒有進去（`unknown` 的話不知道，是 `null`）。重試帶同一個 `client_request_id`，拿到的就是這一則。
+/// 503：這一則的副作用已經發生（字送出去了，或 herdr 已經拒收），或確定沒送出（#158），結果還沒寫進 DB。`delivery` 是看到的
+/// 結果，`sent` 講字有沒有進去（`failed`／放回佇列的 `queued` 是 `false`，`unknown` 的話不知道，是 `null`）。重試帶同一個 `client_request_id`，拿到的就是這一則。
 pub(crate) fn uncommitted(run_id: Option<&str>, turn_id: &str, message_id: &str, delivery: &str, cause: Option<&anyhow::Error>) -> LcError {
     let sent = match delivery {
         "ok" | "unverified" => json!(true),
-        "failed" => json!(false),
+        "failed" | "queued" => json!(false),
         _ => Value::Null,
     };
     LcError::Uncommitted(json!({
@@ -419,6 +446,31 @@ mod tests {
             .unwrap();
         assert!(notes.len() == 1 && notes[0].contains("agent_blocked"), "{notes:?}");
         assert_eq!(env.herdr.calls_to("agent.prompt").len(), 1, "不再送");
+    }
+
+    /// 收成 failed 那一句欠著的時候，那一筆被別的路（run 結束、watchdog）先收掉了，而那條路不動 `delivery`：補的時候
+    /// 回合照它收的樣子、不補說明，但送達要補成這一次看到的 `failed`——不能留一筆已經結束、送達卻永遠 `pending` 的回合
+    /// （同一個 request id 重問會拿到 `pending`）。
+    #[tokio::test]
+    async fn an_owed_refusal_on_a_turn_another_path_closed_still_records_that_nothing_was_sent() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot, _conv, run) = idle_bot(&env, "codex").await;
+        sqlx::query("UPDATE runs SET pane_typed=0 WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
+        env.herdr.set_agent("api-bot", "pane-api", true);
+        env.herdr.fail_next("agent.prompt", tt::Fault::RefuseWith("agent_blocked"));
+        lose_delivery_writes(&app).await;
+        let body = uncommitted(prompt(&app, &bot, "跑一下測試", "crid-closed-elsewhere").await);
+        let turn_id = body["turn_id"].as_str().unwrap().to_string();
+        heal_delivery_writes(&app).await;
+
+        super::super::turn_controller::fail(&app.db, &turn_id, super::super::turn_controller::DeliveryOnFail::Keep, "run ended").await.unwrap();
+        settle(&app, &bot).await.expect("補上");
+        let t = turn(&app, &turn_id).await;
+        assert_eq!((t.status.as_str(), t.delivery.as_str()), ("failed", "failed"), "一個字都沒進去：送達不留 pending");
+        assert_eq!(owed_answer(&turn_id), None);
+        let out = prompt(&app, &bot, "跑一下測試", "crid-closed-elsewhere").await.expect("同一個 request id");
+        assert_eq!(out.delivery, "failed");
     }
 
     /// 一顆閒著的 bot 與一筆排著的 prompt（掛著 AGM 的交辦，delivered/queued）。
