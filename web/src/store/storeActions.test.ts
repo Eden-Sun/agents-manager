@@ -666,3 +666,51 @@ test('排隊的那則 flush 時撞到 503 delivery_state_uncommitted：不放回
   assert.equal(requests.filter((r) => r.path.endsWith('/prompt')).length, 1, '有送出去一次')
   assert.equal(useStore.getState().queuedSends.b1, undefined, '已經送進 bot 的那則不能又躺回佇列')
 })
+
+/**
+ * 插隊送出（#103、#120）的 200 有四個 `send_now`：interrupted／idle 是成功；`not_sent`（送出鍵沒生效，這一則 failed，
+ * 字可能還留在終端輸入框）與 `unknown`（不知道生效沒有，這一則 failed＋delivery unknown，不佔 in-flight）是**沒插成**。
+ * 以前前端一律說「沒有插隊：claude 還沒有 send-now 鍵，訊息照一般方式送出」——那兩種都沒有照一般方式送出。
+ */
+test('插隊送出鍵沒生效（send_now:not_sent）：說沒送出、字可能還在終端，不能說「照一般方式送出」', async () => {
+  seed()
+  useStore.setState({ turns: {}, messages: {} })
+  routeDaemon((req) =>
+    req.path.endsWith('/prompt')
+      ? json({ turn_id: 't9', message_id: 'm9', delivery: 'failed', send_now: 'not_sent' }, 200)
+      : json({ messages: [], turns: [], has_more: false }, 200),
+  )
+  const ok = await useStore.getState().sendPrompt('b1', '先看這句', [], true)
+  assert.equal(ok, false, '沒送出：字留在輸入框')
+  const texts = noticeTexts()
+  assert.equal(texts.length, 1, `一則就夠，別再疊「delivery=failed」：${JSON.stringify(texts)}`)
+  assert.doesNotMatch(texts[0], /照一般方式送出|還沒有 send-now/)
+  assert.match(texts[0], /沒送出/)
+  assert.match(texts[0], /終端/)
+})
+
+test('插隊送出不知道有沒有生效（send_now:unknown）：不叫人「放棄該回合」、不重送，也不把輸入框鎖進未知送達', async () => {
+  seed()
+  useStore.setState({ turns: {}, messages: {} })
+  routeDaemon((req) =>
+    req.path.endsWith('/prompt')
+      ? json({ turn_id: 't9', message_id: 'm9', delivery: 'unknown', send_now: 'unknown' }, 200)
+      : json({ messages: [], turns: [], has_more: false }, 200),
+  )
+  const ok = await useStore.getState().sendPrompt('b1', '先看這句', [], true)
+  assert.equal(ok, true, '不知道有沒有進去：不留字在輸入框等人重送')
+  const texts = noticeTexts()
+  assert.equal(texts.length, 1, JSON.stringify(texts))
+  assert.doesNotMatch(texts[0], /照一般方式送出|還沒有 send-now|放棄該回合/)
+  assert.match(texts[0], /不重送|先別重送/)
+  // 那一則已經是 failed、不佔 in-flight：沒有回合可放棄，本地不能記一筆「送達未知的進行中回合」把輸入框鎖住。
+  assert.equal(useStore.getState().turns.b1?.t9, undefined)
+})
+
+test('插隊送出成功（interrupted／idle）不多說話', async () => {
+  seed()
+  useStore.setState({ turns: {}, messages: {} })
+  routeDaemon(() => json({ turn_id: 't9', message_id: 'm9', delivery: 'ok', send_now: 'interrupted' }, 200))
+  assert.equal(await useStore.getState().sendPrompt('b1', 'x', [], true), true)
+  assert.deepEqual(noticeTexts(), [])
+})
