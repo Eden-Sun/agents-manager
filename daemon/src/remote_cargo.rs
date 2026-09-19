@@ -438,8 +438,23 @@ pub async fn install_settings(State(app): State<Arc<App>>) -> Result<Json<Value>
 
 /// Only these commands are safe/useful to offload cross-platform in V1.
 /// `build` stays local because Linux/x86_64 artifacts are not macOS/aarch64 artifacts.
+///
+/// 子指令前面可以有「原樣搬到遠端也是同一個意思」的全域旗標（`-v`／`-q`／`--locked`／`--color`，issue #195：`cargo --locked test` 也是驗證）。
+/// `+toolchain`（遠端不一定裝了）、`-C`／`--config`（本機路徑）、`--offline`／`--frozen`（取決於本機的快取）、`-Z` 不搬——回 false 讓它留在本機、照本機名額排。
 pub fn eligible(args: &[String]) -> bool {
-    matches!(args.first().map(String::as_str), Some("c" | "check" | "t" | "test" | "clippy"))
+    let mut it = args.iter().map(String::as_str);
+    while let Some(a) = it.next() {
+        match a {
+            "-v" | "-vv" | "--verbose" | "-q" | "--quiet" | "--locked" => continue,
+            "--color" => {
+                it.next();
+            }
+            _ if a.starts_with("--color=") => continue,
+            "c" | "check" | "t" | "test" | "clippy" => return true,
+            _ => return false,
+        }
+    }
+    false
 }
 
 fn fnv1a64(s: &str) -> u64 {
@@ -1290,6 +1305,14 @@ mod tests {
         }
         for cmd in ["build", "run", "bench", "doc", "install", "metadata"] {
             assert!(!eligible(&[cmd.into()]), "{cmd}");
+        }
+        // issue #195：子指令前面的全域旗標。搬得走的（原樣搬過去意思不變）照樣轉；`+toolchain`／本機路徑／取決於本機快取的留在本機。
+        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        for ok in [&["--locked", "test"][..], &["-q", "check"], &["--color", "always", "clippy"], &["--color=never", "t"], &["-v", "--locked", "test", "--", "x"]] {
+            assert!(eligible(&v(ok)), "{ok:?}");
+        }
+        for no in [&["+nightly", "test"][..], &["-C", "x", "test"], &["--offline", "test"], &["--frozen", "check"], &["-Z", "unstable-options", "check"], &["--config", "a=b", "test"], &["--locked", "build"], &["--locked"], &[]] {
+            assert!(!eligible(&v(no)), "{no:?}");
         }
     }
 
