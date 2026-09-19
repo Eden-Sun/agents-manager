@@ -366,6 +366,10 @@ hook body 另外帶 `run_id`＝這個 CLI 行程 pane env 的 `AM_RUN_ID`（本�
 ### 4.3 備援來源：終端快照
 
 - **觸發**：Turn `in_flight` 且 `delivery = ok`，agent 由 `working` 轉 **`idle`**（`blocked` 不觸發），5 秒內沒收到 hook。
+- **只收排定當下那一回合**（#216）：計時器在 `working → idle` 那一刻記下當時在飛的 Turn（沒有回合在飛就記「沒有」），到點時在飛的若不是它就不收——
+  Stop hook 先收掉了上一回合、這 5 秒內使用者又送出新的一則（CLI 還沒畫 spinner、herdr 還沒報 working）時，到點在飛的是新回合，畫面上最後一段回覆卻是上一則的，
+  收下去就是把上一則的答案掛在剛送出的那一則底下、真正的回覆只能落到另一個外部回合（2026-09-19 真機）。沒收的回合留給它自己的 hook／下一次 idle edge（會排一個綁它的新計時）／輪詢器。
+  排定當下讀不到在飛的是哪一回合就不排（收錯比不收糟，回合有輪詢器的閒置備援與 stuck watchdog 兜著）。輪詢器那一條同一個規則：它問的是自己那一回合。
 - **執行**：CAS `UPDATE turns SET status='completed_fallback' WHERE id=? AND status='in_flight'`，成功才 `agent.read {source: recent_unwrapped, lines: 200}`，
   取游標（`last_read_revision` + 已見文字尾端 hash）之後的內容，依 provider 抽回覆：Claude `⏺ ` 開頭、Codex `• ` 開頭；grok 無標記（§12.3）。
 - **沒有回覆標記**時用 `clean_screen`：取最後一行 prompt 回音之後的內容，去掉 banner、方框、分隔線、狀態列、spinner、`⚠` 行，保留 `⎿` 工具結果行。
