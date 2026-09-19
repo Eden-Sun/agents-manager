@@ -904,14 +904,18 @@ async fn delete_project(State(app): State<Arc<App>>, Path(id): Path<String>) -> 
             return Err(LcError::conflict("all bots must be stopped first", json!({"bot_id": bot_id})));
         }
     }
+    // 專案 host 在**定案之前**讀好（#246）：定案之後才重讀、讀不到就退回 local，會去砍本機同 id 的目錄、
+    // 遠端那份留著沒人回收。讀不到就 502、什麼都還沒動，可以原樣再按一次。
+    let host = db::project(&app.db, &id).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("project".into()))?.host;
     // 授權範圍在臨界區裡從**當下的** TOML 算；TOML 裡多出沒鎖住的 bot 就拒絕。
     let held: std::collections::HashSet<String> = ids.iter().cloned().collect();
     delete_in_config(&app, crate::projection::DeleteTarget::Project { id: &id, held: &held }).await?;
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("delete_project_after_commit", &id).await;
     // config 投影只軟刪「不在 TOML 裡的 user bot」，child 本來就不進 TOML，所以會留下一批
     // `deleted_at IS NULL`、project 卻已經軟刪的列：UI 看不到、reconcile 也掃不到（`live_bots_on_host`
     // 要求專案還活著），它們的 pane 與 hook 目錄從此沒人回收（review 2026-09-16）。
     // 鎖還在手上，順手比照 delete_bot 收掉。
-    let host = db::project(&app.db, &id).await.ok().flatten().map(|p| p.host).unwrap_or_else(|| crate::config::LOCAL_HOST.to_string());
     for bot in in_project.iter().filter(|b| b.managed_by != "user") {
         // 這個 UPDATE 以前用 `let _ =` 忽略結果：DB 寫不進去也照樣往下 purge，變成
         // 「DB 說它還活著、runtime 目錄卻已經被砍光」，事後救不回來（issue #87）。失敗就整支
@@ -3671,6 +3675,35 @@ mod delete_bot_tests {
         std::fs::create_dir_all(dir.join("hooks")).unwrap();
         std::fs::write(dir.join("hooks/settings.json"), "{}").unwrap();
         dir
+    }
+
+    /// #246：遠端專案刪除定案之後 `projects` 讀不到，child 的目錄清理不能退回 local——本機同 id 的目錄一根毛都不能動。
+    /// host 在定案之前就讀好；定案前就讀不到則 502、什麼都沒動。
+    #[tokio::test]
+    async fn a_remote_project_delete_never_purges_local_dirs_when_the_host_cannot_be_reread() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let kid = a_bot(&e, "kid", "child").await;
+        in_config(&e, &[]).await;
+        sqlx::query("UPDATE projects SET host='remote1' WHERE id=?").bind(&e.project_id).execute(&app.db).await.unwrap();
+        let dir = runtime_dir(&app, &kid);
+
+        // 定案前讀不到：整支失敗、bot 沒軟刪。
+        crate::testing::make_table_unreadable(&app, "projects").await;
+        let err = delete_project(State(app.clone()), Path(e.project_id.clone())).await.unwrap_err();
+        crate::testing::make_table_readable(&app, "projects").await;
+        assert!(matches!(err, LcError::Upstream(_)), "{err:?}");
+        assert!(db::bot(&app.db, &kid).await.unwrap().unwrap().deleted_at.is_none());
+        assert!(dir.exists());
+
+        // 定案之後才讀不到（重讀的舊寫法在這裡退回 local）：本機目錄必須還在。
+        let a = app.clone();
+        crate::lifecycle::race_point::arm("delete_project_after_commit", &e.project_id, move || async move {
+            crate::testing::make_table_unreadable(&a, "projects").await
+        });
+        let _ = delete_project(State(app.clone()), Path(e.project_id.clone())).await;
+        crate::testing::make_table_readable(&app, "projects").await;
+        assert!(dir.join("hooks/settings.json").exists(), "遠端專案的清理不能砍到本機目錄");
     }
 
     async fn body_of(resp: Response) -> Value {
