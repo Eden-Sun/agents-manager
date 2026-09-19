@@ -104,6 +104,15 @@ pub async fn dispatch(app: &Arc<App>, assignment_id: &str) {
                 tracing::info!(assignment = %a.id, mission = mission_id, "the assignment's mission is closed; not dispatching it");
                 return;
             }
+            // 使用者按了暫停：暫停不收交辦，但排著的這件也不由背景自己送出去（issue #175）——等額度的重送早就這樣擋
+            // （`mission_paused`，#137），409 的退避重試走這裡，以前沒擋，暫停等於沒按。`hold` 不花重試、也結束 409 的計時；
+            // 放行之後下一次照常送。daemon 自己設的暫停（交付失敗等 AGM 處理）不擋，同 `api::user_pause_reason`。
+            Ok(Some(m)) if super::api::user_pause_reason(m.paused_reason.as_deref()).is_some() => {
+                let why = format!("mission paused by the user ({})", m.paused_reason.as_deref().unwrap_or_default());
+                let _ = store::hold(&app.db, &a.id, &iso_in(30), &why).await;
+                tracing::info!(assignment = %a.id, mission = mission_id, "the assignment's mission is paused by the user; holding it");
+                return;
+            }
             Ok(_) => {}
             Err(e) => {
                 let _ = store::hold(&app.db, &a.id, &iso_in(30), &format!("could not read the mission: {e}")).await;
@@ -3847,6 +3856,10 @@ mod mission_state_dispatch_tests {
         (env, m.id, a.id, pane)
     }
 
+    fn typed(env: &tt::Env, pane: &str) -> usize {
+        env.herdr.calls_to("pane.send_text").iter().filter(|p| p["pane_id"] == json!(pane)).count()
+    }
+
     /// issue #171 的另一半：等額度回來的重送（`resume_quota_blocked`）以前不拿 supervisor 鎖就呼叫 `dispatch`。派送看過
     /// 「任務還開著」之後、打字之前，取消任務（拿鎖）可以整個做完——交辦照樣被打進一個已經取消的任務的 bot。
     /// 重送跟取消要排隊：取消落在這個縫裡時，要等這一次派送做完（那時送出確實在取消之前），再由取消把它收掉。
@@ -3890,5 +3903,29 @@ mod mission_state_dispatch_tests {
         assert!(!finished.load(Ordering::SeqCst), "取消不能落在派送看過任務還開著、還沒送出之間");
         h.await.unwrap().expect("取消照樣成功");
         assert_eq!(store::assignment(&app.db, &aid).await.unwrap().unwrap().status, "cancelled", "取消把它收掉");
+    }
+
+    /// 使用者按了暫停，任務底下一件排著的交辦（對方回合中 409、退避等下一次）以前照樣被 `drain_queue` 送出去：
+    /// 等額度的重送會看暫停（§18.8b、#137），409 的重試不看——暫停等於沒按。daemon 自己設的暫停（交付失敗等 AGM 處理）
+    /// 不擋：那底下派的 rebase 要送得出去（#137 同一個判斷，`api::user_pause_reason`）。
+    #[tokio::test]
+    async fn a_queued_assignment_is_not_sent_while_the_user_has_its_mission_paused() {
+        let (env, mission, aid, pane) = mission_with_queued_assignment("pause-vs-retry").await;
+        let app = env.app.clone();
+        assert!(crate::mission::store::pause(&app.db, &mission, "user_hold", None).await.unwrap());
+        {
+            let _g = super::super::lock().await;
+            dispatch(&app, &aid).await;
+        }
+        assert_eq!(typed(&env, &pane), 0, "使用者按了暫停：排著的交辦不自己送出去");
+        assert_eq!(store::assignment(&app.db, &aid).await.unwrap().unwrap().status, "queued", "暫停不收交辦：留著等放行");
+
+        // 換成 daemon 自己設的暫停（交付失敗）：照常送。
+        assert!(crate::mission::store::pause(&app.db, &mission, "push_main_failed", None).await.unwrap());
+        {
+            let _g = super::super::lock().await;
+            dispatch(&app, &aid).await;
+        }
+        assert_eq!(typed(&env, &pane), 1, "等 AGM 處理的暫停不擋派送");
     }
 }

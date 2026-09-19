@@ -2198,6 +2198,8 @@ inbox `assignment_noticed`（`needs_review=false`）。送不出去或回合失�
   暫停不收交辦（取消才收），額度一回來就重送的話使用者按的暫停等於沒按；解除暫停後下一個 tick 照常重送。daemon 自己設的暫停
   （`push_main_failed`／`pr_failed`／`max_rounds`／`no_fable_for_verifier`／`clarify`）照常重送：那些是「等 AGM 處理」，派工的閘門也不擋，
   交付失敗之後 AGM 派的 rebase 若因此不重送，交付永遠不會成功、暫停也永遠解不開（issue #137，兩道閘門共用 `api::user_pause_reason`）。
+  409 退避中的交辦（`queued`，`drain_queue` 的重試）一樣：`dispatch` 看到任務被使用者暫停就 `hold` 30 秒、不送、不花重試（issue #175）；
+  以前只有等額度的重送看暫停，排著的那件幾秒後照樣打進 bot。
 - `assignment_quota_blocked` / `assignment_quota_resumed` 各推一則 inbox（`needs_review=false`），不開 incident；只在交辦**真的**轉進／轉出 `quota_blocked` 時推——
   讀完之後已被裁示掉（取消等）的不推，mission 的換手通知（`mission_identity_switch`）與 `no_fable_for_verifier` 暫停也一樣（issue #110）。到期仍被擋（順延，或重送後又撞到）累計 6 次 → `awaiting_review` + `turn_status=quota_exhausted`（通常是 credits 真的用完）。
   mission 交辦另有 `quota_policy` 與身份切換，見 §18.14。撞限換手挑 reviewer 時 daemon 自己帶上 `exclude`＝該任務執行者現在的身分，
