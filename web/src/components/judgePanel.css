@@ -1,0 +1,47 @@
+/* 環境設定 → Jev 第二意見（SPEC §4.3c） */
+.judge-panel .judge-key {
+  font-style: normal;
+  color: var(--warn);
+}
+.judge-panel .judge-key.ok {
+  color: var(--status-ok);
+}
+.judge-panel .judge-switch,
+.judge-panel .judge-projects label {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-height: 28px;
+}
+.judge-panel .judge-projects {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.judge-panel .judge-projects:disabled {
+  opacity: 0.55;
+}
+.judge-panel .judge-note {
+  margin-right: auto;
+  font-size: 12px;
+}
+.judge-panel .judge-note.err {
+  color: var(--danger);
+}
+/* styles.css 的 `.field input` 只認 type=text；key 是 password，樣式照抄同一組，不去動共用檔。 */
+.judge-panel .field input[type='password'] {
+  width: 100%;
+  padding: 5px 8px;
+  color: inherit;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.judge-panel .field input[type='password']:focus {
+  border-color: var(--accent);
+  outline: none;
+}
