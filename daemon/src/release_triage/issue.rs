@@ -61,6 +61,23 @@ impl Gh {
     }
 }
 
+fn gh_for(cfg: &ReleaseTriageCfg) -> Gh {
+    Gh {
+        bin: PathBuf::from(cfg.gh_bin.clone().filter(|b| !b.trim().is_empty()).unwrap_or_else(|| "gh".into())),
+        repo: cfg.repo.clone().unwrap_or_default(),
+    }
+}
+
+/// `/api/supervisor/health` 的 `release_triage` 一格：`gh auth status` 失敗要看得到原因，
+/// 不是等到有版本要開 issue 才在帳本的 `publish_error` 裡發現。`publish = false` 時不碰 gh、回 `None`。
+pub async fn health_probe(cfg: &ReleaseTriageCfg) -> Option<serde_json::Value> {
+    if !cfg.publish {
+        return None;
+    }
+    let r = gh_for(cfg).run(&["auth", "status"]).await;
+    Some(serde_json::json!({"gh_auth_ok": r.is_ok(), "gh_auth_error": r.err()}))
+}
+
 pub fn marker(kind: &str, version: &str, ids: &[String]) -> String {
     format!("{kind}@{version}#{}", ids.join(","))
 }
@@ -142,7 +159,7 @@ pub async fn publish_version(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: &s
         ledger::save_publish(pool, kind, version, &row.issues, Status::Judged, Some(&e)).await?;
         return Ok(fail(e));
     };
-    let gh = Gh { bin: PathBuf::from(cfg.gh_bin.clone().filter(|b| !b.trim().is_empty()).unwrap_or_else(|| "gh".into())), repo };
+    let gh = Gh { repo, ..gh_for(cfg) };
     let mut issues = row.issues.clone();
     let record_err = |issues: &[IssueRef], e: String| {
         let issues = issues.to_vec();

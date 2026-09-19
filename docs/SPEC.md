@@ -2313,7 +2313,7 @@ daemon 驗過才收（每個 kept／unmatched 都有 verdict、提案只引用 g
 開之前帳本＋`gh issue list --state all --search "release-triage: <marker> in:body"` 雙重去重（**已關的不復活**）；每版 ≤4 張（超過的記在 `publish_error` 不再開）、每 24 小時 ≤8 張（超過的留在 `judged` 待下一輪）、`guard` 優先；
 每開一張立刻寫回帳本。gh／設定失敗 → 停在 `judged`、錯誤進 `publish_error`，重試（`POST /api/release-triage/publish`）只重跑 publish，不重派模型、不重花額度。
 
-**尚未做（要另外接）**：啟動時 `gh auth status` 失敗要在 `/api/supervisor/health` 露出原因（目前只在 publish 時檢查、記進 `publish_error`）；`publish` 重試的定時觸發（由 kick 呼叫上述端點）。
+`gh auth status` 失敗露在 `/api/supervisor/health` 的 `release_triage`（`{gh_auth_ok, gh_auth_error}`；`publish = false` 時為 `null`、不碰 gh；結果快取 60 秒）。`publish` 重試沒有 daemon 內定時器，由 kick 呼叫上述端點。
 
 ### 18.3 喚醒 AGM 的節流
 巡檢：`[supervisor] notify_interval_secs`（預設 600），規則見 §5；只有 `wake=1` 的事件會開一次喚醒，送前合併重複（§18.15）。協調者：短窗批次（§18.15）。

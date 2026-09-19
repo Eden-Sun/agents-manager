@@ -333,3 +333,16 @@ async fn repo_missing_is_a_recorded_failure_not_a_gh_call() {
     assert!(matches!(issue::publish_version(&p, &cfg, "claude", "2.1.277").await.unwrap(), Outcome::Failed { .. }));
     assert!(gh.calls().is_empty());
 }
+
+#[tokio::test]
+async fn health_probe_reports_gh_auth_failure_and_stays_silent_when_publish_is_off() {
+    let gh = FakeGh::new("health");
+    assert_eq!(issue::health_probe(&gh.cfg(false)).await, None);
+    assert_eq!(gh.calls().len(), 0, "publish=false 不碰 gh");
+    let ok = issue::health_probe(&gh.cfg(true)).await.unwrap();
+    assert_eq!(ok["gh_auth_ok"], true);
+    gh.flag("fail_auth", true);
+    let bad = issue::health_probe(&gh.cfg(true)).await.unwrap();
+    assert_eq!(bad["gh_auth_ok"], false);
+    assert!(bad["gh_auth_error"].as_str().unwrap().contains("not logged in"));
+}
