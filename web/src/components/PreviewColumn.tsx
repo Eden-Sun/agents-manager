@@ -26,7 +26,7 @@ const KEY_STEP = 24
 export function PreviewColumn() {
   const drawer = useMediaQuery(DRAWER_QUERY)
   const bot = useStore((s) => (s.selectedProjectId ? null : (s.bots.find((b) => b.id === s.selectedBotId) ?? null)))
-  const open = usePreviewColOpen()
+  const open = usePreviewColOpen(bot?.id ?? null)
   const stored = usePreviewColWidth()
   const [viewport, setViewport] = useState(() => window.innerWidth)
   // 拖曳中的即時寬度；放開才寫進 localStorage。
@@ -86,7 +86,7 @@ export function PreviewColumn() {
           title="展開預覽"
           aria-label="展開預覽"
           aria-expanded={false}
-          onClick={() => setPreviewColOpen(true)}
+          onClick={() => setPreviewColOpen(bot.id, true)}
         >
           ◧
         </button>
@@ -121,7 +121,7 @@ export function PreviewColumn() {
           title="收合預覽"
           aria-label="收合預覽"
           aria-expanded
-          onClick={() => setPreviewColOpen(false)}
+          onClick={() => setPreviewColOpen(bot.id, false)}
         >
           ▸
         </button>

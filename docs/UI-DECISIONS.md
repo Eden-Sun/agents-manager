@@ -436,3 +436,6 @@ daemon 這幾天把「寫不進 DB」改成 fail closed：外面的副作用做�
   清單每筆前面一顆 kind 標籤（Vite／Next.js／webpack／…，沒見過的名字首字大寫，`unknown` 顯示「其他」；舊 daemon 沒有 `kind` 就當 vite）。
   「啟動預覽」旁一行小字寫清楚「會在 <目錄> 跑 <指令>」：目錄與指令取自選中的 `candidates`（v4 每筆可帶 `command`），沒有候選時用 daemon 回的 `command`；
   兩者都沒有就只說「指令由 daemon 依專案決定」，不猜。`candidates` 同時吃字串與 `{dir, command}`。
+- **v5：預覽欄的開／關是 by parent bot（2026-09-20，#253）**：A 開著、切到 B 不跟著開，切回 A 還原。每顆 bot 各記一格，存 localStorage `am.previewCol.openBots`（`{botId: true}`，沒記＝收合），重整照舊。
+  欄寬維持全域一份（調一次就好）。收合條的開關位置不變，按下去只影響當下這顆。舊的全域旗標 `am.previewCol.open` 不遷移：升級後每顆 bot 預設收合。
+  （mock 的 bot id 每次載入都重新產生，所以 mock 下重整看不到還原；真 daemon 的 id 是穩定的。）
