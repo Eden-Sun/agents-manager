@@ -431,6 +431,12 @@ class AssignCommandTest(CliCase):
         posts = [r for r in FakeDaemon.seen if r["path"] == "/api/supervisor/assignments"]
         self.assertEqual(len(posts), 1, "不能自己重送")
 
+    def test_oversized_text_is_refused_before_any_request(self):
+        err = self.bad("assign", "--bot", "b1", "--text", "x" * (agm.MAX_TEXT_CHARS + 1), "--request-id", "r-big")
+        self.assertEqual(err["error"], "bad_args")
+        self.assertEqual(err["max_chars"], agm.MAX_TEXT_CHARS)
+        self.assertEqual([r for r in FakeDaemon.seen if r["method"] == "POST"], [])
+
     def test_empty_text_rejected_before_any_request(self):
         err = self.bad("assign", "--bot", "b1", "--text", "   ", "--request-id", "r")
         self.assertEqual(err["error"], "bad_args")

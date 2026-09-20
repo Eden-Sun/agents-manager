@@ -31,6 +31,8 @@ import urllib.request
 from pathlib import Path
 
 DEFAULT_TIMEOUT = 30.0
+# 跟 daemon 的 MAX_PROVABLE_CHARS 同一個數字：超過的內容派送時一定送不出去，daemon 入口回 422 text_too_long（#335）。
+MAX_TEXT_CHARS = 200_000
 LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost", "0:0:0:0:0:0:0:1"}
 DEFAULT_RUNTIME_DIR = "~/.config/agents-manager/supervisor/AGM"
 
@@ -476,6 +478,17 @@ def cmd_messages(client: Client, cfg: dict, args) -> object:
     }
 
 
+def _check_length(text: str) -> None:
+    if len(text) > MAX_TEXT_CHARS:
+        raise AgmError(
+            "bad_args",
+            f"內容 {len(text)} 字，超過上限 {MAX_TEXT_CHARS}（daemon 也會拒收）。拆成多筆，或把長內容寫進檔案、交辦裡只寫路徑讓對方自己讀",
+            2,
+            chars=len(text),
+            max_chars=MAX_TEXT_CHARS,
+        )
+
+
 def _assign_text(args) -> str:
     if args.text_file:
         try:
@@ -489,6 +502,7 @@ def _assign_text(args) -> str:
     text = text.strip()
     if not text:
         raise AgmError("bad_args", "交辦內容不可為空", 2)
+    _check_length(text)
     return text
 
 
@@ -995,6 +1009,7 @@ def _mission_text(args) -> str:
         text = args.text or ""
     if not text.strip():
         raise AgmError("bad_args", "內容是空的", 2)
+    _check_length(text)
     return text
 
 

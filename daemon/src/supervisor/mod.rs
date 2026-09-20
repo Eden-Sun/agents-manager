@@ -252,6 +252,14 @@ pub async fn assign(
     if text.trim().is_empty() {
         return Err(LcError::Bad("text must not be empty".into()));
     }
+    // 派送時超過這個長度的 prompt 一定送不出去（`prompt_too_long_to_prove`，不會重試）：入口就擋，不要收下一件註定失敗的工作
+    // 讓呼叫端拿到 200（#335）。跟 bot prompt API 同一個上限、同樣回 422。
+    let chars = text.chars().count();
+    if chars > crate::lifecycle::MAX_PROVABLE_CHARS {
+        return Err(LcError::Unprocessable(json!({
+            "error": "text_too_long", "max_chars": crate::lifecycle::MAX_PROVABLE_CHARS, "chars": chars, "sent": false,
+        })));
+    }
     let _g = lock().await;
 
     // A retry of the same request is the same assignment, never a second one.

@@ -1763,6 +1763,22 @@ mod review_boundary_tests {
         std::fs::remove_dir_all(&app.data_dir).unwrap();
     }
 
+    /// #335：超長的交辦內容在入口就 422，不建列、不等派送時才靜默失敗。
+    #[tokio::test]
+    async fn an_oversized_assignment_is_refused_up_front_and_leaves_no_row() {
+        let app = app().await;
+        let big = "x".repeat(crate::lifecycle::MAX_PROVABLE_CHARS + 1);
+        let err = crate::supervisor::assign(&app, "bot", &big, "crid-big", None, &[], None, true, None, None, None, Default::default())
+            .await
+            .expect_err("too long");
+        let LcError::Unprocessable(d) = err else { panic!("expected 422, got {err:?}") };
+        assert_eq!(d["error"], "text_too_long");
+        assert_eq!(d["sent"], false);
+        assert!(store::assignment_by_crid(&app.db, "crid-big").await.unwrap().is_none());
+        app.db.close().await;
+        std::fs::remove_dir_all(&app.data_dir).unwrap();
+    }
+
     #[tokio::test]
     async fn followup_replay_requires_the_same_instruction_and_request_id() {
         let app = app().await;
