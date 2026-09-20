@@ -963,3 +963,29 @@ test('任務「暫停」連點兩下：只送一次，不跳「任務操作失�
   assert.equal(pauses, 1)
   assert.deepEqual(noticeTexts(), [])
 })
+
+test('removeBot／addBot／addProject 連點：只送一次，不跳第二個失敗通知（#276）', async () => {
+  seed()
+  const hits = { del: 0, bot: 0, proj: 0 }
+  routeDaemon((r) => {
+    if (r.method === 'DELETE' && r.path.endsWith('/bots/b1')) {
+      hits.del += 1
+      return hits.del === 1 ? json({}, 200) : json({ error: 'not_found', what: 'bot' }, 404)
+    }
+    if (r.method === 'POST' && r.path.endsWith('/projects/p1/bots')) {
+      hits.bot += 1
+      return json({ bot_id: 'nb', name: 'x' }, 200)
+    }
+    if (r.method === 'POST' && r.path.endsWith('/projects')) {
+      hits.proj += 1
+      return hits.proj === 1 ? json({ project_id: 'np' }, 200) : json({ error: 'conflict', reason: 'project path already registered' }, 409)
+    }
+    return json({ daemon_seq: 1, connected: true, projects: [] }, 200)
+  })
+  const st = useStore.getState()
+  await Promise.all([st.removeBot('b1'), st.removeBot('b1')])
+  await Promise.all([st.addBot('p1', { name: 'x', kind: 'claude' } as never), st.addBot('p1', { name: 'x', kind: 'claude' } as never)])
+  await Promise.all([st.addProject({ path: '/tmp/x' } as never), st.addProject({ path: '/tmp/x' } as never)])
+  assert.deepEqual(hits, { del: 1, bot: 1, proj: 1 })
+  assert.equal(noticeTexts().filter((t) => /not_found|already|找不到/.test(t)).length, 0)
+})
