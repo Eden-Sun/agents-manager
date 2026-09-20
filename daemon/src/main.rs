@@ -50,6 +50,7 @@ mod mission;
 mod models;
 mod pane_identity;
 mod preview;
+mod primary_order;
 mod pane_probe;
 mod shim_path;
 mod shim_refresh;
