@@ -811,17 +811,6 @@ export function QuotaStrip({
   }
   const wrap = useRef<HTMLDivElement>(null)
 
-  // layout effect：首次繪製前量到，避免開頁先閃一次全部攤開。
-  useLayoutEffect(() => {
-    const box = wrap.current?.parentElement
-    if (!box) return
-    setAvail(box.clientWidth)
-    if (typeof ResizeObserver === 'undefined') return
-    const ro = new ResizeObserver(() => setAvail(box.clientWidth))
-    ro.observe(box)
-    return () => ro.disconnect()
-  }, [])
-
   useEffect(() => {
     if (!open) return
     const onDoc = (e: MouseEvent) => {
@@ -852,6 +841,19 @@ export function QuotaStrip({
       (e) => !e.identity || !disabledIdentities.includes(identityPrefKey(host, e.kind, e.identity)),
     )
   }, [quota, configured, idStatus, host, disabledIdentities])
+
+  // layout effect：首次繪製前量到，避免開頁先閃一次全部攤開。
+  // 沒有任何額度時整條不畫（`wrap` 是 null）；deps 要跟著「有沒有畫」走，不然額度晚到時永遠不會開始量寬度。
+  const drawn = ordered.length > 0
+  useLayoutEffect(() => {
+    const box = wrap.current?.parentElement
+    if (!drawn || !box) return
+    setAvail(box.clientWidth)
+    if (typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(() => setAvail(box.clientWidth))
+    ro.observe(box)
+    return () => ro.disconnect()
+  }, [drawn])
 
   const popEntries = ordered
 
