@@ -1,3 +1,4 @@
+import { quotaCollapsed } from '../lib/quotaLayout'
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { BotKind, Identity, KindQuota, QuotaLimitHit, QuotaMap, QuotaResetCredits, QuotaWindow } from '../api/types'
@@ -867,7 +868,7 @@ export function QuotaStrip({
     .pop()
 
   const box = avail ?? 1416
-  const collapsed = box < 604
+  const collapsed = quotaCollapsed(box, ordered.length)
   /** CSS 也是 640px 那條線。 */
   const compact = phone
   // 全部帳號都畫完整量表（2026-09-11 使用者：「額度顯示是很重要的訊息，不要去省他的空間」）。
