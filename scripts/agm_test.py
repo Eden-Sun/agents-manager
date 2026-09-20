@@ -11,6 +11,7 @@ import contextlib
 import io
 import json
 import os
+import socket
 import socketserver
 import sys
 import tempfile
@@ -31,6 +32,7 @@ class FakeDaemon(BaseHTTPRequestHandler):
     routes: dict = {}
     seen: list = []
     slow: set = set()
+    drop: set = set()
 
     def log_message(self, *_args):  # 別把測試輸出洗掉
         pass
@@ -45,6 +47,10 @@ class FakeDaemon(BaseHTTPRequestHandler):
         })
         if path in type(self).slow:
             time.sleep(1.5)
+        if path in type(self).drop:
+            # 收到請求後不回應就把連線掐掉（送達未知的那種故障）。
+            self.request.shutdown(socket.SHUT_RDWR)
+            return
         entry = type(self).routes.get(f"{method} {path.split('?')[0]}")
         if entry is None:
             self._send(404, {"error": "not_found"})
@@ -105,6 +111,7 @@ class CliCase(unittest.TestCase):
         FakeDaemon.routes = {"GET /api/session": (200, {"token": TOKEN})}
         FakeDaemon.seen = []
         FakeDaemon.slow = set()
+        FakeDaemon.drop = set()
         self.dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.dir.cleanup)
         self.write_runtime({"daemon_url": f"http://127.0.0.1:{self.port}", "manager_bot_id": "bot-agm"})
@@ -407,6 +414,22 @@ class AssignCommandTest(CliCase):
         self.assertEqual(err["client_request_id"], "req-9")
         posts = [r for r in FakeDaemon.seen if r["path"] == "/api/supervisor/assignments"]
         self.assertEqual(len(posts), 1, "逾時不能自己重送——那會派出第二份同樣的工")
+
+    def test_a_non_utf8_text_file_is_a_bad_arg_not_a_traceback(self):
+        f = Path(self.dir.name) / "bin.txt"
+        f.write_bytes(b"\xff\xfe not utf8 \x80")
+        err = self.bad("assign", "--bot", "b1", "--text-file", str(f), "--request-id", "r-bin")
+        self.assertEqual(err["error"], "bad_args")
+        self.assertEqual([r for r in FakeDaemon.seen if r["method"] == "POST"], [], "沒送出任何請求")
+
+    def test_a_connection_dropped_after_sending_is_delivery_unknown_not_connect_failed(self):
+        FakeDaemon.routes["POST /api/supervisor/assignments"] = (200, {"id": "a1"})
+        FakeDaemon.drop = {"/api/supervisor/assignments"}
+        err = self.bad("assign", "--bot", "b1", "--text", "x", "--request-id", "req-drop")
+        self.assertEqual(err["error"], "delivery_unknown")
+        self.assertEqual(err["client_request_id"], "req-drop")
+        posts = [r for r in FakeDaemon.seen if r["path"] == "/api/supervisor/assignments"]
+        self.assertEqual(len(posts), 1, "不能自己重送")
 
     def test_empty_text_rejected_before_any_request(self):
         err = self.bad("assign", "--bot", "b1", "--text", "   ", "--request-id", "r")
