@@ -22,6 +22,7 @@ import { PIN_GRID_MAX, sortPinned } from '../lib/pinnedOrder'
 import { useChipFlip } from './useChipFlip'
 import { botLamp, orderedBotIds, useStore } from '../store/store'
 import { StatusLamp } from './StatusLamp'
+import type { Lamp } from '../api/types'
 import { usePinnedDrag, type PinnedDnd } from './usePinnedDrag'
 import './unreadChip.css'
 
@@ -55,10 +56,13 @@ interface ChipItem {
   title: string
 }
 
+/** 手機主力晶片只畫「值得注意」的狀態；idle（常態）、離線、啟動／停止中都不畫，全亮是雜訊（#344 補充 3）。 */
+const LAMP_SHOWN = new Set<Lamp>(['working', 'blocked', 'unknown', 'disconnected'])
+
 /** 側欄同一顆燈（`botLamp`）：working 會脈動、blocked 紅、斷線灰。 */
 function ChipLamp({ id }: { id: string }) {
   const lamp = useStore((s) => botLamp(s, id))
-  return <StatusLamp lamp={lamp} />
+  return LAMP_SHOWN.has(lamp) ? <StatusLamp lamp={lamp} /> : null
 }
 
 function Chip({ it, dnd, lamp }: { it: ChipItem; dnd?: PinnedDnd; lamp?: boolean }) {
