@@ -141,24 +141,19 @@ pub async fn tick(app: &Arc<App>) {
 /// at the supervisor now, an SSE event for an open UI, and an **inbox event** so AGM finds out
 /// even though the thing that would normally tell it is the thing that is down — the routing table
 /// hands `watchdog_gave_up` to the responder, the half that is still up (`roles::route`). The write is
-/// guarded by `mark_watchdog_gave_up`, so ticks two through infinity are silent.
+/// Every `GaveUp` tick lands here: the marker means "owed a notification", not "notified" (#251).
+/// The inbox event is the durable half, keyed by the persisted marker time and inserted with
+/// `INSERT OR IGNORE`, so retrying each tick until it lands costs nothing and yields exactly one
+/// event per give-up episode. `status_detail`, the log line and the SSE event are best-effort and
+/// ride along with the tick that actually inserts the event.
 async fn report_gave_up(app: &Arc<App>, why: &str) {
-    let first = store::mark_watchdog_gave_up(&app.db, why).await.unwrap_or(false);
-    if !first {
-        return;
-    }
-    tracing::error!(attempts = MAX_ATTEMPTS, why, "supervisor watchdog gave up; the manager stays down");
-    let _ = store::set_status_detail(
-        &app.db,
-        Some(&format!(
-            "watchdog 連續 {MAX_ATTEMPTS} 次自動啟動後仍沒有活著，已停止重試；請手動 supervisor-start。原因：{why}"
-        )),
-    )
-    .await;
+    let _ = store::mark_watchdog_gave_up(&app.db, why).await;
+    // The key comes from the persisted marker, never from a degraded read: no marker or an
+    // unreadable row means "try again next tick", not an empty-key event.
+    let Some(at) = store::get_or_init(&app.db).await.ok().and_then(|s| s.watchdog_gave_up_at) else { return };
     // One durable event per give-up. The key is the moment it happened, so a later outage
     // (after a recovery clears the marker) is a new event rather than a silenced duplicate.
-    let at = store::get_or_init(&app.db).await.ok().and_then(|s| s.watchdog_gave_up_at).unwrap_or_default();
-    let _ = store::push_inbox(
+    let pushed = store::push_inbox(
         &app.db,
         &format!("watchdog:gave_up:{at}"),
         "watchdog_gave_up",
@@ -171,6 +166,16 @@ async fn report_gave_up(app: &Arc<App>, why: &str) {
             "gave_up_at": at,
             "action": "手動 `bin/agm supervisor-start`；自動重試不會再發生，直到有人重新啟動它",
         }),
+    )
+    .await;
+    // Err = not durable yet, retry next tick; Ok(None) = already delivered on an earlier tick.
+    let Ok(Some(_)) = pushed else { return };
+    tracing::error!(attempts = MAX_ATTEMPTS, why, "supervisor watchdog gave up; the manager stays down");
+    let _ = store::set_status_detail(
+        &app.db,
+        Some(&format!(
+            "watchdog 連續 {MAX_ATTEMPTS} 次自動啟動後仍沒有活著，已停止重試；請手動 supervisor-start。原因：{why}"
+        )),
     )
     .await;
     app.emit("supervisor_changed", serde_json::json!({"watchdog": "gave_up", "why": why})).await;
@@ -345,5 +350,29 @@ mod tests {
             let s = store::get_or_init(&app.db).await.unwrap();
             assert_eq!(s.watchdog_next_at, None, "{table} 恢復後 manager 是活的");
         }
+    }
+    /// #251：標記寫進去了、inbox 事件卻寫不進去（一次暫時性故障）——之後的 tick 要補上，而且只有一則、
+    /// key 帶真正的標記時間。修前第二次呼叫看到標記已存在就直接 return，通知永遠少一則。
+    #[tokio::test]
+    async fn a_failed_inbox_write_is_retried_until_exactly_one_event_exists() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        store::get_or_init(&app.db).await.unwrap();
+
+        crate::testing::make_table_unreadable(&app, "supervisor_inbox").await;
+        report_gave_up(&app, "boom").await;
+        crate::testing::make_table_readable(&app, "supervisor_inbox").await;
+        let s = store::get_or_init(&app.db).await.unwrap();
+        assert!(s.watchdog_gave_up_at.is_some(), "標記已經寫下");
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE kind='watchdog_gave_up'").fetch_one(&app.db).await.unwrap();
+        assert_eq!(n, 0, "故障那一輪沒有事件");
+
+        // 下一個 tick、沒有人介入：補上。再多幾輪也只有一則。
+        for _ in 0..3 {
+            report_gave_up(&app, "boom").await;
+        }
+        let keys: Vec<String> =
+            sqlx::query_scalar("SELECT event_key FROM supervisor_inbox WHERE kind='watchdog_gave_up'").fetch_all(&app.db).await.unwrap();
+        assert_eq!(keys, vec![format!("watchdog:gave_up:{}", s.watchdog_gave_up_at.unwrap())]);
     }
 }
