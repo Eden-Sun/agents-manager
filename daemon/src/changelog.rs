@@ -63,7 +63,7 @@ pub fn version_string(s: &str) -> Option<String> {
 /// `--version` 的輸出：`2.1.278 (Claude Code)`、`codex-cli 0.154.0`、`herdr 0.8.2`。版本不一定在第一個 token，
 /// 取第一個看得出版本的 token（至少 `x.y` 兩段，避免把 `codex-cli` 之類當成版本）。
 pub fn cli_version_string(line: &str) -> Option<String> {
-    line.split_whitespace().find(|t| t.contains('.')).and_then(version_string)
+    line.split_whitespace().filter(|t| t.contains('.')).find_map(version_string)
 }
 
 /// 認 `## 1.2.3` 二級標題（Claude Code 的格式）。

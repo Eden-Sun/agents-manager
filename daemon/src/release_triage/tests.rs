@@ -269,6 +269,9 @@ fn cli_version_output_with_a_name_prefix_is_still_a_version() {
         ("codex-cli 0.154.0", Some("0.154.0")),
         ("2.1.278 (Claude Code)", Some("2.1.278")),
         ("herdr 0.8.2", Some("0.8.2")),
+        // 前面有帶點的非版本 token（檔名、網址）不能讓後面真的版本被略過。
+        ("claude.real 2.1.278", Some("2.1.278")),
+        ("herdr.exe 0.9.1 (build 2026.09.10)", Some("0.9.1")),
         ("codex-cli", None),
         ("", None),
     ] {
