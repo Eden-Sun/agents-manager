@@ -7,6 +7,7 @@ import { orderRows, showRepo } from '../lib/previewList'
 import { groupOthers, kindLabel, fetchPreview, type PreviewOther, type PreviewRelation, type StartPreviewOpts, previewApiMissing, PREVIEW_API_MISSING, previewUrl, startPreview, stopPreview, PREVIEW_OFF, type Preview } from '../api/preview'
 import { isMock } from '../api'
 import { ApiError } from '../api/types'
+import type { ReactNode } from 'react'
 import { useStore } from '../store/store'
 import './previewPanel.css'
 
@@ -134,7 +135,7 @@ function OthersList({
   )
 }
 
-export function PreviewPanel({ botId }: { botId: string }) {
+export function PreviewPanel({ botId, headStart, headEnd }: { botId: string; headStart?: ReactNode; headEnd?: ReactNode }) {
   const bot = useStore((s) => s.bots.find((b) => b.id === botId) ?? null)
   const stored = useStore((s) => s.previews[botId])
   const setPreview = useStore((s) => s.setPreview)
@@ -243,7 +244,9 @@ export function PreviewPanel({ botId }: { botId: string }) {
   if (p.status === 'running' && url) {
     return (
       <div className="preview-pane">
-        <div className="preview-bar">
+        {/* 跑起來之後這一列就是預覽欄的標題列（2026-09-20 使用者：「兩排 header 可併在同一排」）。 */}
+        <div className="preview-bar merged">
+          {headStart}
           <span className="preview-url" title={url}>
             {url}
           </span>
@@ -266,6 +269,7 @@ export function PreviewPanel({ botId }: { botId: string }) {
           >
             {pending === 'stop' ? (attached ? '中斷中…' : '停止中…') : attached ? '中斷連接' : '停止'}
           </button>
+          {headEnd}
         </div>
         {err ? <ErrNote err={err} /> : null}
         <iframe
