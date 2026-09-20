@@ -1810,9 +1810,13 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   vite 行程（`ps` 命令列有 `vite`／`…/vite`／`vite.js` 這個字，`vitest` 不算；再各問一次 `lsof`：listen port 與 cwd）。
   - cwd **正好是這顆 bot 的候選目錄**（同一份 checkout）→ 直接接上，不另起：`source: "attached"`、`status: running`、
     沒有 pane，記 `pid`。
-  - **同一個 repo 的別份 checkout／worktree** 的 vite 不自動接（畫面上看到的不是這顆 bot 工作樹裡的程式碼）：列在回應的 `others`
-    （`{port, dir, pid}`，只在沒有預覽在用時掃），讓使用者用 `mode=attach` 自己選。「同一個 repo」＝`git rev-parse --git-common-dir`
-    相同，或兩邊都有 `remote.origin.url` 而且相同；**別的 repo 一律不列，判不出來（不是 git、git 讀不到）也不列**——寧可少列，不要誤導。
+  - **只自動接 `same_dir`**。本機**所有**在 listen 的 vite 都列在回應的 `others`（只在沒有預覽在用時掃），使用者可以用
+    `mode=attach` 直接挑任何一顆，包括別的專案（2026-09-20 使用者：「還要可以直接選擇本機已開的 vite」）。每筆
+    `{port, dir, pid, relation, repo}`：`relation` 是 `same_dir`（cwd 正好是這顆 bot 的候選目錄）／`same_repo`（同一個 repo
+    的別份 checkout：`git rev-parse --git-common-dir` 相同，或兩邊都有 `remote.origin.url` 而且相同）／`other`（別的專案；
+    判不出來——不是 git、git 讀不到——也退成 `other`）；`repo` 是給 UI 分組的 repo 名（common dir 是 `<repo>/.git` 就取
+    `<repo>`，不是 git 用目錄名）。排序 same_dir、same_repo、other，各自依 port。非 `same_dir` 看到的不是這顆 bot 工作樹裡的程式碼，
+    所以不自動接，UI 要標清楚。
   - **接上的只斷開、絕不砍人**：`DELETE`、bot 停止／刪除／閒置收掉時，`attached` 那列只標 `off`，不關任何 pane、不 kill 任何行程。
     只有 `source: "spawned"`（自己起的）才關 pane。接上的 vite 自己結束（port 不再 listen）→ 轉 `off`（不是 `failed`）；
     接上的預覽跟 bot 有沒有在跑無關，只看它自己的 port。

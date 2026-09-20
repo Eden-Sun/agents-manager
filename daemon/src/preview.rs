@@ -290,6 +290,52 @@ pub fn join_vites(ports: &HashMap<i32, Vec<u16>>, cwds: &HashMap<i32, String>) -
     v
 }
 
+/// 一顆已經在跑的 vite 跟這顆 bot 的關係；排序就是列出來的順序。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Relation {
+    /// cwd 正好是這顆 bot 的候選目錄。
+    SameDir,
+    /// 同一個 repo 的別份 checkout／worktree。
+    SameRepo,
+    /// 別的專案，或判不出來。
+    Other,
+}
+
+impl Relation {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Relation::SameDir => "same_dir",
+            Relation::SameRepo => "same_repo",
+            Relation::Other => "other",
+        }
+    }
+}
+
+/// 判不出來（bot 或那顆 vite 的 repo 讀不到）退成 `Other`。
+pub fn relation_of(p: &ViteProc, cands: &[PathBuf], mine: Option<&RepoKey>, theirs: Option<&RepoKey>) -> Relation {
+    if cands.iter().any(|c| norm(&c.to_string_lossy()) == norm(&p.cwd)) {
+        return Relation::SameDir;
+    }
+    match (mine, theirs) {
+        (Some(a), Some(b)) if same_repo(a, b) => Relation::SameRepo,
+        _ => Relation::Other,
+    }
+}
+
+/// 給 UI 分組顯示的 repo 名：common dir 是 `<repo>/.git` 就取 `<repo>` 的目錄名，bare 之類取它自己的名字；
+/// 不是 git 就用目錄名。
+pub fn repo_name(key: Option<&RepoKey>, dir: &str) -> String {
+    let base = |p: &str| Path::new(norm(p)).file_name().map(|n| n.to_string_lossy().into_owned());
+    if let Some(k) = key {
+        let common = Path::new(norm(&k.common));
+        let named = if common.file_name().is_some_and(|n| n == ".git") { common.parent().and_then(|p| base(&p.to_string_lossy())) } else { base(&k.common) };
+        if let Some(n) = named {
+            return n;
+        }
+    }
+    base(dir).unwrap_or_else(|| dir.to_string())
+}
+
 fn norm(p: &str) -> &str {
     let t = p.trim_end_matches('/');
     if t.is_empty() { "/" } else { t }
@@ -482,10 +528,10 @@ async fn candidates_of(app: &Arc<App>, bot: &db::Bot) -> LcResult<Result<Vec<Pat
 }
 
 /// 回應在 [`Row::body`] 之外多兩欄：`candidates`（可以起 vite 的目錄）、`others`（沒在用的狀態下才掃：
-/// 同一個 repo 的別份 checkout／worktree 已經在跑的 vite，列出來讓使用者自己選）。
+/// 本機所有在 listen 的 vite，各帶 `relation`／`repo`，列出來讓使用者自己選）。
 async fn decorated(app: &Arc<App>, bot: &db::Bot, mut body: Value, live: bool) -> LcResult<Value> {
     let cands = candidates_of(app, bot).await?.unwrap_or_default();
-    let mut others = Vec::new();
+    let mut others: Vec<(Relation, String, ViteProc)> = Vec::new();
     if !live {
         let env = match db::active_run(&app.db, &bot.id).await {
             Ok(Some(run)) => env_for(app, &run).await.unwrap_or_else(|_| fallback_env(app)),
@@ -493,22 +539,24 @@ async fn decorated(app: &Arc<App>, bot: &db::Bot, mut body: Value, live: bool) -
         };
         // 掃不到就當沒有：這只是「順便列出來」，不是決定。
         let scan = env.scan_vites().await.unwrap_or_default();
-        let (_, rest) = classify(&scan, &cands);
-        // 只列同一個 repo 的其他 checkout／worktree；別的 repo 一律不列。bot 自己的 repo 或某顆 vite 的 repo
-        // 判不出來（不是 git、git 讀不到）也不列：寧可少列，不要拿別人的畫面誤導使用者。
-        if let Some(mine) = cands.first() {
-            if let Some(mine) = env.repo_key(&mine.to_string_lossy()).await {
-                for p in rest {
-                    if env.repo_key(&p.cwd).await.is_some_and(|k| same_repo(&mine, &k)) {
-                        others.push(p);
-                    }
-                }
-            }
+        let mine = match cands.first() {
+            Some(c) => env.repo_key(&c.to_string_lossy()).await,
+            None => None,
+        };
+        for p in scan {
+            let key = env.repo_key(&p.cwd).await;
+            let relation = relation_of(&p, &cands, mine.as_ref(), key.as_ref());
+            let repo = repo_name(key.as_ref(), &p.cwd);
+            others.push((relation, repo, p));
         }
+        others.sort_by_key(|(r, _, p)| (*r, p.port));
     }
     if let Some(o) = body.as_object_mut() {
         o.insert("candidates".into(), json!(cands.iter().map(|c| c.to_string_lossy()).collect::<Vec<_>>()));
-        o.insert("others".into(), json!(others.iter().map(|p| json!({"port": p.port, "dir": p.cwd, "pid": p.pid})).collect::<Vec<_>>()));
+        o.insert("others".into(), json!(others
+            .iter()
+            .map(|(rel, repo, p)| json!({"port": p.port, "dir": p.cwd, "pid": p.pid, "relation": rel.as_str(), "repo": repo}))
+            .collect::<Vec<_>>()));
     }
     Ok(body)
 }
