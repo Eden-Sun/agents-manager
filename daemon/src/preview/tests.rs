@@ -575,6 +575,49 @@ async fn startup_reconcile_matches_rows_against_panes_and_ports() {
     assert_eq!(row(&app2.db, &c).await.unwrap().unwrap().status, "running");
 }
 
+/// 讀不到 runs（改表名），bot_previews 仍讀得到：模擬 active_run 的暫時性 DB 故障（#299）。
+async fn break_runs(r: &Rig) {
+    sqlx::query("ALTER TABLE runs RENAME TO runs_broken").execute(&r.e.app.db).await.unwrap();
+}
+async fn fix_runs(r: &Rig) {
+    sqlx::query("ALTER TABLE runs_broken RENAME TO runs").execute(&r.e.app.db).await.unwrap();
+}
+
+#[tokio::test]
+async fn an_unreadable_active_run_never_closes_a_healthy_preview() {
+    let r = rig().await;
+    let bot = running_bot(&r, "alfa").await;
+    start(&r.e.app, &bot, StartReq::default()).await.unwrap();
+    r.fake.listen(5180);
+    assert_eq!(status(&get(&r.e.app, &bot).await.unwrap()), "running");
+    break_runs(&r).await;
+    // GET／開機對帳都會走 refresh_locked：讀不到 run 是「不知道」，不是「bot 停了」。
+    get(&r.e.app, &bot).await.unwrap();
+    reconcile_all(&r.e.app).await;
+    assert!(r.fake.closed.lock().unwrap().is_empty(), "健康的 vite pane 被關了");
+    assert_eq!(row(&r.e.app.db, &bot).await.unwrap().unwrap().status, "running");
+    // 讀得回來之後照常運作。
+    fix_runs(&r).await;
+    assert_eq!(status(&get(&r.e.app, &bot).await.unwrap()), "running");
+    assert!(r.fake.closed.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn stopping_with_an_unreadable_run_keeps_the_row_until_the_owner_session_is_known() {
+    let r = rig().await;
+    let bot = running_bot(&r, "alfa").await;
+    let pane = start(&r.e.app, &bot, StartReq::default()).await.unwrap()["pane_id"].as_str().unwrap().to_string();
+    break_runs(&r).await;
+    stop_for_bot(&r.e.app, &bot).await;
+    // 不知道該用哪個 session 關：不關、也不寫 off（否則 pane 與 port 變成沒人管的孤兒）。
+    assert!(r.fake.closed.lock().unwrap().is_empty());
+    assert_eq!(row(&r.e.app.db, &bot).await.unwrap().unwrap().status, "starting");
+    fix_runs(&r).await;
+    stop_for_bot(&r.e.app, &bot).await;
+    assert_eq!(r.fake.closed.lock().unwrap().clone(), vec![pane]);
+    assert_eq!(row(&r.e.app.db, &bot).await.unwrap().unwrap().status, "off");
+}
+
 #[tokio::test]
 async fn the_watcher_promotes_a_starting_preview_without_anyone_asking() {
     let r = rig().await;
