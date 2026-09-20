@@ -12,7 +12,7 @@
  * 排除（2026-09-10 使用者）：AGM 總管專案不算（例行 loop 會洗版），但 ★ 釘選不受影響；
  * 認 `GET /api/supervisor` 的 `project_id` 不認名字（2026-09-13 已從 `AGM` 改名 `AGM-DM-GRUP`）。
  */
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from 'react'
 import type { Bot } from '../api/types'
 import { useMediaQuery } from '../hooks/useMediaQuery'
 import { clipAfterRows, lineBudget, moreTitle } from '../lib/chipOverflow'
@@ -55,14 +55,23 @@ interface ChipItem {
 
 function Chip({ it, dnd }: { it: ChipItem; dnd?: PinnedDnd }) {
   const drag = it.pinned ? dnd : undefined
-  const mark = drag && drag.dragId && drag.before !== undefined && drag.dragId !== it.id && drag.before === it.id ? ' drop-before' : drag && drag.dragId && drag.before === null && drag.dragId !== it.id && drag.lastId === it.id ? ' drop-after' : ''
+  const dragging = drag?.dragId != null && drag.dragId !== it.id
+  const shifted = dragging && drag.shifted.includes(it.id)
+  // 落點標示：讓位的那一格（`drop-before`，標示畫在這顆左邊的空位）；落在行尾則畫在那一行最後一顆右邊（`drop-after`）。
+  const mark = dragging && drag.before !== undefined ? (drag.after === it.id ? ' drop-after' : drag.after == null && drag.before === it.id ? ' drop-before' : '') : ''
   return (
     <button
       type="button"
-      className={`${chipClass(it)}${drag?.dragId === it.id ? ' dragging' : ''}${mark}`}
+      className={`${chipClass(it)}${drag?.dragId === it.id ? ' dragging' : ''}${shifted ? ' shifted' : ''}${mark}`}
       title={it.title}
       data-bot-id={it.pinned ? it.id : undefined}
-      style={drag?.dragId === it.id ? { transform: `translate(${drag.offset.x}px, ${drag.offset.y}px) scale(1.06)` } : undefined}
+      style={
+        drag?.dragId === it.id
+          ? { transform: `translate(${drag.offset.x}px, ${drag.offset.y}px) scale(1.06)` }
+          : dragging
+            ? ({ '--drop-w': `${drag.gap}px`, transform: shifted ? `translateX(${drag.gap}px)` : undefined } as CSSProperties)
+            : undefined
+      }
       aria-current={it.current ? 'true' : undefined}
       aria-describedby={drag ? PIN_HINT_ID : undefined}
       onClick={() => {

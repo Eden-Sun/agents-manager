@@ -416,36 +416,77 @@
   transition: box-shadow 0.12s ease, opacity 0.12s ease;
 }
 
-/* 放開會插在這顆前面／最後一顆後面：旁邊的晶片讓出一個缺口（margin 過渡，後面的自然跟著滑），缺口邊緣一條主色線。 */
+/* 落點（2026-09-20 使用者：「drop 點放開大一點，顯標示欲落點」）：讓位的那一格就是落點——落點之後同一行的晶片往右推一個晶片寬（`.shifted`，
+   transform 過渡，位置由 JS 算好放在 inline），空出來的位置畫一個**虛線＋淡底的膠囊**（`::before`／`::after`，寬度＝被拖那顆的寬度，
+   脈動一下），一眼看得出放開會落在哪。命中區在 `lib/pinnedOrder.ts::pickSlot`：最近的插入縫隙、到相鄰晶片的中線、再加 16px 遲滯。 */
 .unread-chip.pinned {
-  transition: margin 0.16s cubic-bezier(0.2, 0.8, 0.2, 1);
+  position: relative;
+  transition: transform 0.16s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
-.unread-chip.drop-before {
-  margin-left: 14px;
-  box-shadow: -8px 0 0 -5px var(--accent);
+.unread-chip.dragging {
+  transition: box-shadow 0.12s ease, opacity 0.12s ease;
 }
 
-.unread-chip.drop-after {
-  margin-right: 14px;
-  box-shadow: 8px 0 0 -5px var(--accent);
+.unread-chip.drop-before::before,
+.unread-chip.drop-after::after {
+  content: '';
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  width: calc(var(--drop-w, 96px) - 8px);
+  box-sizing: border-box;
+  border: 2px dashed var(--accent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  pointer-events: none;
+  animation: drop-slot-pulse 0.9s ease-in-out infinite;
 }
 
-/* 減少動態：不位移、不縮放、不做缺口過渡；落點仍用主色線標示。 */
+.unread-chip.drop-before::before {
+  left: calc(-1 * var(--drop-w, 96px));
+}
+
+.unread-chip.drop-after::after {
+  left: calc(100% + 8px);
+}
+
+@keyframes drop-slot-pulse {
+  0%, 100% { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+  50% { background: color-mix(in srgb, var(--accent) 26%, transparent); }
+}
+
+/* 減少動態：不位移、不縮放、不脈動；落點標示仍在——目標晶片外圍一圈虛線框，加一條粗的主色落點線（左側或右側）。 */
 @media (prefers-reduced-motion: reduce) {
-  .unread-chip.pinned {
+  .unread-chip.pinned,
+  .unread-chip.dragging {
     transition: none;
   }
   .unread-chip.dragging {
-    transition: none;
     transform: none !important;
   }
-  .unread-chip.drop-before {
-    margin-left: 0;
-    box-shadow: -3px 0 0 0 var(--accent);
+  .unread-chip.shifted {
+    transform: none !important;
   }
+  .unread-chip.drop-before,
   .unread-chip.drop-after {
-    margin-right: 0;
-    box-shadow: 3px 0 0 0 var(--accent);
+    outline: 2px dashed var(--accent);
+    outline-offset: 2px;
+  }
+  .unread-chip.drop-before::before,
+  .unread-chip.drop-after::after {
+    top: -5px;
+    bottom: -5px;
+    width: 4px;
+    border: 0;
+    border-radius: 2px;
+    background: var(--accent);
+    animation: none;
+  }
+  .unread-chip.drop-before::before {
+    left: -8px;
+  }
+  .unread-chip.drop-after::after {
+    left: calc(100% + 6px);
   }
 }

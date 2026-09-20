@@ -71,3 +71,46 @@ export function dropBefore(boxes: Box[], x: number, y: number, dragId: string): 
   if (hit) return hit.id
   return rows[bi + 1]?.[0]?.id ?? null
 }
+
+/** 換手的遲滯（px）：游標離目前鎖定的落點不比離新落點遠超過這個距離，就維持原落點——拖到附近就鎖定、不在兩個落點的交界抖動。 */
+export const DROP_STICKY_PX = 16
+
+export interface Slot {
+  /** 插在誰前面；null＝全列最後。 */
+  before: string | null
+  /** 落點讓位時要往右推的晶片（同一行、落點之後的）。 */
+  shift: string[]
+  /** 落點在這一行的行尾時，那一行的最後一顆（落點標示畫在它右邊）；否則 null。 */
+  after: string | null
+}
+
+/**
+ * 放開位置對應的落點（#344 第二輪：使用者「drop 點放開大一點」）。跟 `dropBefore` 同一套分行，但改成**最近的插入縫隙**：
+ * 每顆晶片之間（與行首、行尾）各一個插入點，游標選離它最近的一個，命中區從縫隙往兩邊各延伸到相鄰晶片的中線（不要求對準縫隙）；
+ * 再加遲滯（`prev`＝目前鎖定的落點）。`boxes` 要是**沒被落點讓位推過**的位置（呼叫端把讓位的位移扣掉），不然讓位一開、量到的位置一動就會來回抖。
+ */
+export function pickSlot(boxes: Box[], x: number, y: number, dragId: string, prev?: string | null): Slot {
+  const others = boxes.filter((b) => b.id !== dragId)
+  if (others.length === 0) return { before: null, shift: [], after: null }
+  const rows: Box[][] = []
+  for (const b of [...others].sort((p, q) => p.top - q.top || p.left - q.left)) {
+    const row = rows[rows.length - 1]
+    if (row && Math.abs(row[0].top - b.top) < (b.bottom - b.top) / 2) row.push(b)
+    else rows.push([b])
+  }
+  const dist = (row: Box[]) => {
+    const top = Math.min(...row.map((b) => b.top))
+    const bottom = Math.max(...row.map((b) => b.bottom))
+    return y < top ? top - y : y > bottom ? y - bottom : 0
+  }
+  let bi = 0
+  for (let i = 1; i < rows.length; i++) if (dist(rows[i]) < dist(rows[bi])) bi = i
+  const row = [...rows[bi]].sort((p, q) => p.left - q.left)
+  const slots = row.map((b, i) => ({ x: i === 0 ? b.left : (row[i - 1].right + b.left) / 2, before: b.id as string | null, at: i }))
+  slots.push({ x: row[row.length - 1].right, before: rows[bi + 1]?.[0]?.id ?? null, at: row.length })
+  let best = slots[0]
+  for (const sl of slots) if (Math.abs(sl.x - x) < Math.abs(best.x - x)) best = sl
+  const held = prev === undefined ? undefined : slots.find((sl) => sl.before === prev)
+  if (held && Math.abs(held.x - x) <= Math.abs(best.x - x) + DROP_STICKY_PX) best = held
+  return { before: best.before, shift: row.slice(best.at).map((b) => b.id), after: best.at === row.length ? row[row.length - 1].id : null }
+}
