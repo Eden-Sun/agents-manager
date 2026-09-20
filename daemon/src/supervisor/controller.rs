@@ -1617,9 +1617,6 @@ fn age_secs(iso: &str) -> i64 {
 /// 三個管道，跟看門狗放棄時同一套：事件本身改成 `gave_up`（不再補送、但仍算未處理，人照樣 ack 得掉）、
 /// 一則 durable inbox 事件叫醒另一個角色、一行 error log。`event_key` 綁事件 id，所以只會喊一次。
 async fn give_up_on(app: &Arc<App>, e: &store::InboxEvent, why: &str, age: i64) {
-    if !store::give_up_inbox(&app.db, &e.id, why).await.unwrap_or(false) {
-        return;
-    }
     let owner = e.claimed_by.clone().or_else(|| e.role.clone()).unwrap_or_else(|| "patrol".into());
     let to = match super::roles::Role::parse(&owner) {
         Some(super::roles::Role::Responder) => super::roles::Role::Patrol,
@@ -1632,31 +1629,31 @@ async fn give_up_on(app: &Arc<App>, e: &store::InboxEvent, why: &str, age: i64) 
         .map(str::to_string)
         .or_else(|| payload.get("from_bot_id").and_then(serde_json::Value::as_str).map(str::to_string))
         .or_else(|| e.bot_id.clone());
+    let notice = json!({
+        "to_role": to.as_str(),
+        "event_id": e.id,
+        "event_kind": e.kind,
+        "owner_role": owner,
+        "deliveries": e.notify_attempts,
+        "open_secs": age,
+        "waiting_for": waiting,
+        "why": format!("送了 {} 次都沒有人 ack（最後一次：{why}），已停止自動補送", e.notify_attempts),
+        "action": format!(
+            "`bin/agm inbox --all` 找 event_id={}：確認 {owner} 是不是還在讀得到通知（沒在跑就拉起來），處理完直接 ack 那一則",
+            e.id
+        ),
+    });
+    // 放棄補送與喊另一個角色同一個交易（#310）：寫不進去事件就留在 delivered，下一輪再判。
+    match store::give_up_inbox_and_notify(&app.db, &e.id, why, &format!("inbox_gave_up:{}", e.id), e.assignment_id.as_deref(), e.bot_id.as_deref(), &notice).await {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(err) => {
+            tracing::warn!(event = %e.id, error = ?err, "could not record giving up on an unacknowledged notification; will look again");
+            return;
+        }
+    }
     tracing::error!(event = %e.id, kind = %e.kind, owner = %owner, attempts = e.notify_attempts, why,
                     "giving up on re-delivering an unacknowledged notification; asking the other role to look");
-    let _ = store::push_inbox(
-        &app.db,
-        &format!("inbox_gave_up:{}", e.id),
-        "inbox_gave_up",
-        e.assignment_id.as_deref(),
-        e.bot_id.as_deref(),
-        None,
-        &json!({
-            "to_role": to.as_str(),
-            "event_id": e.id,
-            "event_kind": e.kind,
-            "owner_role": owner,
-            "deliveries": e.notify_attempts,
-            "open_secs": age,
-            "waiting_for": waiting,
-            "why": format!("送了 {} 次都沒有人 ack（最後一次：{why}），已停止自動補送", e.notify_attempts),
-            "action": format!(
-                "`bin/agm inbox --all` 找 event_id={}：確認 {owner} 是不是還在讀得到通知（沒在跑就拉起來），處理完直接 ack 那一則",
-                e.id
-            ),
-        }),
-    )
-    .await;
     app.emit("supervisor_changed", json!({"inbox_gave_up": e.id, "to_role": to.as_str()})).await;
 }
 
@@ -2186,6 +2183,45 @@ mod tests {
 
         // 再跑一次不會重複喊，也不會又把它放回 pending。
         recover_unacked(&app).await;
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE kind='inbox_gave_up'").fetch_one(&app.db).await.unwrap();
+        assert_eq!(n, 1);
+    }
+
+    /// 放棄補送（`gave_up`）與喊另一個角色的 `inbox_gave_up` 同一個交易：通知寫不進去，事件就不轉 `gave_up`、留在
+    /// `delivered` 下一輪再判。以前先標 `gave_up`（不再被掃）、再 `let _` 推喊人的事件，寫不進去就永遠沒人被叫醒。
+    #[tokio::test]
+    async fn giving_up_and_waking_the_other_role_land_together() {
+        use super::super::bot_requests::flow_tests;
+        use super::super::roles::{self, Role};
+        let app = flow_tests::app().await;
+        flow_tests::configure_responder(&app).await;
+        let id = store::push_inbox(&app.db, "bot_request:w2:x", "bot_request", None, Some("w2"), None,
+                                   &json!({"to_role": "responder", "wake": true, "from_bot_id": "w2", "from_name": "fixer", "text": "請核准重建"}))
+            .await
+            .unwrap()
+            .unwrap();
+        roles::classify(&app.db).await.unwrap();
+        let now = crate::db::now();
+        sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,started_at) VALUES ('r-n','resp','running','idle',?)")
+            .bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO conversations (id,bot_id,created_at) VALUES ('c-n','resp',?)")
+            .bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,created_at,completed_at) VALUES ('t-n','c-n','r-n','web','completed',?,?)")
+            .bind(&now).bind(&now).execute(&app.db).await.unwrap();
+        roles::mark_delivered(&app.db, &[id.clone()], Role::Responder, "t-n", "ok").await.unwrap();
+        sqlx::query("UPDATE supervisor_inbox SET notify_attempts=5, delivered_at='2020-01-01T00:00:00Z' WHERE id=?")
+            .bind(&id).execute(&app.db).await.unwrap();
+        sqlx::query("CREATE TRIGGER no_gave_up_event BEFORE INSERT ON supervisor_inbox WHEN NEW.kind='inbox_gave_up' BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END")
+            .execute(&app.db).await.unwrap();
+
+        recover_unacked(&app).await;
+        let state: String = sqlx::query_scalar("SELECT state FROM supervisor_inbox WHERE id=?").bind(&id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(state, "delivered", "喊人的事件寫不進去：不轉 gave_up，下一輪再判");
+
+        sqlx::query("DROP TRIGGER no_gave_up_event").execute(&app.db).await.unwrap();
+        recover_unacked(&app).await;
+        let state: String = sqlx::query_scalar("SELECT state FROM supervisor_inbox WHERE id=?").bind(&id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(state, "gave_up");
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE kind='inbox_gave_up'").fetch_one(&app.db).await.unwrap();
         assert_eq!(n, 1);
     }

@@ -2210,12 +2210,18 @@ pub async fn requeue_inbox(pool: &SqlitePool, id: &str, why: &str) -> Result<boo
     Ok(res.rows_affected() > 0)
 }
 
-/// 不再自動補送這一則：送過 N 次都沒有人 ack，繼續補送只是每 30 分鐘燒一輪 opus。
-///
-/// **不是結案**：`state='gave_up'` 仍算未處理（`state!='handled'` 的查詢、`inbox_open`、UI 都還看得到），
-/// 人或 AGM 照樣 ack 得掉；只是 `due_for`（`state='pending'`）與 `delivered_inbox`（`state='delivered'`）
-/// 都不再撿它。停手的同時會推一則 `inbox_gave_up` 叫醒**另一個角色**（`controller::recover_unacked`）。
-pub async fn give_up_inbox(pool: &SqlitePool, id: &str, why: &str) -> Result<bool> {
+/// 放棄補送（`delivered → gave_up`）加上叫醒另一個角色的事件，同一個交易（#310）：喊人的事件寫不進去，事件就不轉 `gave_up`，
+/// 留在 `delivered` 讓下一輪再判。回 `false` ＝ 事件已經不在 `delivered`，什麼都沒寫。
+pub async fn give_up_inbox_and_notify(
+    pool: &SqlitePool,
+    id: &str,
+    why: &str,
+    notice_key: &str,
+    assignment_id: Option<&str>,
+    bot_id: Option<&str>,
+    payload: &Value,
+) -> Result<bool> {
+    let mut tx = pool.begin().await?;
     let res = sqlx::query(
         "UPDATE supervisor_inbox SET state='gave_up', notify_error=?, notify_next_at=NULL, updated_at=?
           WHERE id=? AND state='delivered'",
@@ -2223,9 +2229,14 @@ pub async fn give_up_inbox(pool: &SqlitePool, id: &str, why: &str) -> Result<boo
     .bind(why)
     .bind(crate::db::now())
     .bind(id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
-    Ok(res.rows_affected() > 0)
+    if res.rows_affected() == 0 {
+        return Ok(false);
+    }
+    push_inbox_tx(&mut tx, notice_key, "inbox_gave_up", assignment_id, bot_id, None, payload).await?;
+    tx.commit().await?;
+    Ok(true)
 }
 
 /// Delivered events still unacked, oldest delivery first — the ACK-recovery work list.
