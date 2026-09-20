@@ -490,6 +490,7 @@ async fn prompt_inner(
         .await
         .map_err(up)?
     {
+        check_same_text(app, &t, text).await?;
         return answer_for_turn(app, &t).await;
     }
 
@@ -2085,5 +2086,22 @@ mod send_now_tests {
         assert_eq!(status_of(&f, &running).await, "failed");
         assert_eq!(status_of(&f, &new_turn).await, "failed", "被這次 Esc 打斷的是新的那一則");
         assert_eq!(notes_on(&f, &new_turn).await, vec![super::super::interruption::INTERRUPT_NOTE.to_string()]);
+    }
+}
+
+/// 同一個 client_request_id 換了內容不能回第一則的結果（#337）：呼叫端會以為新的那則送達了，其實一個字都沒打。
+/// 只有內容完全一樣的重送才是冪等；讀不到原本的內容也不敢說「一樣」，回錯讓呼叫端重試。
+pub(crate) async fn check_same_text(app: &Arc<App>, turn: &db::Turn, text: &str) -> LcResult<()> {
+    let stored: Option<String> = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id = ? AND role = 'user' ORDER BY created_at LIMIT 1")
+        .bind(&turn.id)
+        .fetch_optional(&app.db)
+        .await
+        .map_err(up)?;
+    match stored {
+        Some(prev) if prev != text => Err(LcError::conflict(
+            "client_request_id already used with different text",
+            json!({"reason": "text_mismatch", "turn_id": turn.id}),
+        )),
+        _ => Ok(()),
     }
 }
