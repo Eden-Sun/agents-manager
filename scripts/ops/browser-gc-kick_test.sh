@@ -35,8 +35,6 @@ setup() {
     echo 'sleep() { :; }'
     tail -n +2 "$HERE/browser-gc-kick.sh" | sed "s#/tmp/am-#$TMPD/am-#g"
   } > "$ROOT/agm/bin/browser-gc-kick.sh"
-  # 至少留一個 am-*：原腳本在 zsh 下 /tmp/am-* 沒有任何符合時會 "no matches found" 直接中止（既有行為，不在 #318 範圍）。
-  mkdir -p "$TMPD/am-placeholder"
   echo '#!/bin/bash
 echo "pane-gc called" >> "$FIX/kills.log"' > "$ROOT/agm/bin/pane-gc.sh"
   echo "TASK-BODY-MARKER" > "$ROOT/agm/browser-gc-task.md"
@@ -187,6 +185,15 @@ setup
 echo 'null' > "$FIX/agm-state"
 run >/dev/null
 check "bot 沒有 run（null）：先 start" "bot start" "$FIX/agm.log"
+teardown
+
+# 7. /tmp 底下一個 am-* 都沒有（issue #371）：zsh 的 glob 沒符合會 "no matches found" 中止整支，
+#    後面的 pane-gc 與派工整輪都不跑。setup 刻意不留任何 am-*。
+setup
+equals "沒有任何 am-*：exit 0" "$(run)" "0"
+check  "沒有任何 am-*：profile 清理照跑、刪 0 個" "profile 目錄：刪掉 0 個" "$LOG"
+check  "沒有任何 am-*：pane-gc 照跑" "pane-gc called" "$FIX/kills.log"
+check  "沒有任何 am-*：照派 assign" " assign " "$FIX/agm.log"
 teardown
 
 echo "$PASS passed, $FAIL failed"
