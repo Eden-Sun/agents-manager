@@ -961,3 +961,25 @@
   min-width: 2.8em;
   text-align: right;
 }
+
+/* 收合（寬度不夠放完整量表，`quotaCollapsed`）之後每格還是要放得下：條縮到 24px、格不再縮到比內容小，
+   放不下的尾巴直接裁掉（明細點開看）；`clip` 不是 `auto`——後者會把往下開的提示（停用方塊）一起裁掉。
+   以前收合只少一條窗口、寬度不變，百分比照樣疊到下一格的身分名（#314）。 */
+@media (width > 640px) {
+  .main-head .quota-open.collapsed {
+    overflow-x: clip;
+  }
+
+  .main-head .quota-open.collapsed .quota-hp {
+    flex: 1 0 auto;
+  }
+
+  .main-head .quota-open.collapsed .quota-bar-row {
+    min-width: 0;
+  }
+
+  .main-head .quota-open.collapsed .quota-bar-wrap {
+    flex: 0 0 24px;
+    min-width: 24px;
+  }
+}
