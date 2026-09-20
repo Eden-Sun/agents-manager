@@ -2425,8 +2425,41 @@ pub async fn create_approval_superseding(
     expires_at: Option<&str>,
     request_id: Option<&str>,
     supersedes: Option<&str>,
+    request_reason: Option<&str>,
+) -> Result<ApprovalOutcome> {
+    create_approval_inner(pool, requester, purpose, scope, target_commit, expires_at, request_id, supersedes, request_reason, false).await
+}
+
+/// [`create_approval_superseding`]，新建時同一個交易推 `approval_requested` 叫醒 AGM（#320）：通知寫不進去整筆不成立，
+/// 申請者重送再來。重送（`created=false`）不再推。
+#[allow(clippy::too_many_arguments)]
+pub async fn create_approval_notifying(
+    pool: &SqlitePool,
+    requester: &str,
+    purpose: &str,
+    scope: &str,
+    target_commit: Option<&str>,
+    expires_at: Option<&str>,
+    request_id: Option<&str>,
+    supersedes: Option<&str>,
+    request_reason: Option<&str>,
+) -> Result<ApprovalOutcome> {
+    create_approval_inner(pool, requester, purpose, scope, target_commit, expires_at, request_id, supersedes, request_reason, true).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn create_approval_inner(
+    pool: &SqlitePool,
+    requester: &str,
+    purpose: &str,
+    scope: &str,
+    target_commit: Option<&str>,
+    expires_at: Option<&str>,
+    request_id: Option<&str>,
+    supersedes: Option<&str>,
     // 申請者寫的理由（`approval request --reason`）。AGM 裁示時看的就是這段。
     request_reason: Option<&str>,
+    notify: bool,
 ) -> Result<ApprovalOutcome> {
     let request_id = request_id.map(str::trim).filter(|s| !s.is_empty());
     let request_reason = request_reason.map(str::trim).filter(|s| !s.is_empty());
@@ -2509,6 +2542,10 @@ pub async fn create_approval_superseding(
     .await;
     match insert {
         Ok(_) => {
+            if notify {
+                let row = sqlx::query_as::<_, Approval>("SELECT * FROM supervisor_approvals WHERE id=?").bind(&id).fetch_one(&mut *tx).await?;
+                push_inbox_tx(&mut tx, &format!("approval:{id}:requested"), "approval_requested", None, None, None, &row.to_json()).await?;
+            }
             tx.commit().await?;
             Ok(ApprovalOutcome { approval: approval(pool, &id).await?.expect("just inserted"), created: true, superseded })
         }
