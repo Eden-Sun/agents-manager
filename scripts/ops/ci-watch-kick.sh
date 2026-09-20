@@ -26,7 +26,7 @@ FAIL_ALERT_AFTER=${AGM_FAIL_ALERT_AFTER:-6}   # 每 10 分鐘一輪＝連續約 
 
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
 
-[ -x "$AGM" ] || exit 0
+[ -x "$AGM" ] || { log "agm CLI 不在 ${AGM}，跳過"; exit 0; }
 
 alert() { # alert <reason> <detail>：一則 durable inbox 事件（同 source+reason 每小時一則，daemon 去重）
   log "ALERT ${1}：${2}"

@@ -480,5 +480,13 @@ for bad in 'warning: config.toml 有不認得的 key' '{"installed_version":"0.8
   teardown
 done
 
+# agm CLI 不在：整輪不跑，但要留一行 log，不能安靜 exit 0（#375）。
+setup
+chmod -x "$AGM_DIR/bin/agm"
+bash "$SCRIPT"; RC=$?
+equals "agm 不在：exit 0" "$RC" "0"
+check  "agm 不在：留一行 log" "agm CLI 不在" "$AGM_DIR/herdr-update.log"
+teardown
+
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

@@ -426,5 +426,13 @@ bash "$SCRIPT"; bash "$SCRIPT"
 equals "舊 agm：說明只寫一次" "$(grep -c '不認得 release-triage' "$AGM_DIR/release-triage.log" | tr -d ' ')" "1"
 teardown
 
+# agm CLI 不在：整輪不跑，但要留一行 log，不能安靜 exit 0（#375）。
+setup
+chmod -x "$AGM_DIR/bin/agm"
+bash "$SCRIPT"; RC=$?
+equals "agm 不在：exit 0" "$RC" "0"
+check  "agm 不在：留一行 log" "agm CLI 不在" "$AGM_DIR/release-triage.log"
+teardown
+
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
