@@ -140,6 +140,7 @@ interface MockBot {
   cwd: string | null
   /** 使用者釘選（`PATCH {primary}`）；省略 = 沒釘。 */
   is_primary?: number
+  primary_position?: number
   created_at: string
 }
 
@@ -527,6 +528,7 @@ export class MockTransport implements Transport {
       auto_approve: 1,
       identity: null,
       env_json: '{}',
+      is_primary: 1,
       managed_by: 'user',
       cwd: null,
       created_at: now(),
@@ -548,6 +550,7 @@ export class MockTransport implements Transport {
       auto_approve: 1,
       identity: null,
       env_json: '{}',
+      is_primary: 1,
       managed_by: 'user',
       cwd: null,
       created_at: now(),
@@ -590,6 +593,7 @@ export class MockTransport implements Transport {
       auto_approve: 1,
       identity: null,
       env_json: '{}',
+      is_primary: 1,
       managed_by: 'user',
       cwd: null,
       created_at: now(),
@@ -610,6 +614,7 @@ export class MockTransport implements Transport {
       auto_approve: 1,
       identity: null,
       env_json: '{}',
+      is_primary: 1,
       managed_by: 'user',
       cwd: null,
       created_at: now(),
@@ -2088,6 +2093,7 @@ export class MockTransport implements Transport {
               env: JSON.parse(b.env_json) as Record<string, string>,
               managed_by: b.managed_by,
               primary: b.is_primary === 1,
+              primary_position: b.primary_position ?? 0,
               cwd: b.cwd,
               // 同 daemon：`slug(label)-<bot id 末 6 碼>`。
               agent_name: `${p.label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'b'}-${b.id.slice(-6).toLowerCase()}`,
@@ -2195,6 +2201,15 @@ export class MockTransport implements Transport {
       const sorted = [...mine].sort((x, y) => (rank.get(x.id) ?? Infinity) - (rank.get(y.id) ?? Infinity))
       let k = 0
       this.bots = this.bots.map((x) => (x.project_id === pid ? sorted[k++] : x))
+    }
+    // #344：主力那列的順序，陣列位置寫進 primary_position；未知 bot id 回 400，不在陣列裡的維持原值。
+    if (Array.isArray(b.primary)) {
+      const ids = b.primary.map(String)
+      const unknown = ids.find((id) => !this.bots.some((x) => x.id === id))
+      if (unknown) throw new ApiError(400, { error: 'bad_request', message: `unknown bot ${unknown}` }, 'bad request')
+      ids.forEach((id, i) => {
+        this.bots.find((x) => x.id === id)!.primary_position = i
+      })
     }
     return { ok: true }
   }

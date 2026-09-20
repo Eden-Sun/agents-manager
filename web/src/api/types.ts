@@ -229,6 +229,8 @@ export interface Bot {
   parent_bot_id: string | null
   /** 使用者釘的主要 bot：純顯示、不用重啟，存在 daemon 讓手機與電腦同步。 */
   primary: boolean
+  /** 主力（★）那列的固定順序（issue #344，daemon 存 DB）；小的在前，沒拖過都是 0，舊 daemon 沒這欄＝0。 */
+  primary_position: number
   /** null = 用 `project.path` */
   cwd: string | null
   /** 預覽模式（issue #253）：`/api/state` 帶的簡版；舊 daemon 沒有＝undefined，null＝沒開過。 */
