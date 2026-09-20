@@ -205,7 +205,7 @@ fn is_noise(s: &str) -> bool {
         return true;
     }
     if (s.contains(" | ") && (s.contains("5h:") || s.contains("7d:")))
-        || (s.contains(" · ") && s.contains("left"))
+        || (s.contains(" · ") && s.contains("% left"))
     {
         return true;
     }
@@ -234,4 +234,22 @@ fn is_agents_md_notice(s: &str) -> bool {
     t.starts_with("agents-md: no CLAUDE.md found; AGENTS.md loaded:")
         || t.starts_with("no CLAUDE.md found; AGENTS.md loaded:")
         || t.starts_with("This project has AGENTS.md but no CLAUDE.md")
+}
+
+#[cfg(test)]
+mod loose_noise_tests {
+    use super::*;
+
+    /// #330：回覆裡剛好有「 · 」和 `left` 兩個字的一行（清單、進度）被當成 codex 狀態列剝掉——回覆少一行。
+    #[test]
+    fn a_reply_row_with_a_dot_and_the_word_left_is_not_chrome() {
+        assert!(!is_noise("還剩 · 3 tasks left"));
+        assert!(!is_noise("Time left · about 5 minutes"));
+        let screen = "❯ 進度？\n⏺ 目前狀況：\n  build done · 3 tasks left\n  下一步跑測試\n";
+        let reply = ClaudeCapture.extract_reply(screen).unwrap();
+        assert!(reply.contains("3 tasks left"), "回覆中間那行不能被剝掉：{reply}");
+        // 真的狀態列照舊是雜訊。
+        assert!(is_noise("gpt-5.6-sol high · ~/p · Context 3% used · 5h 82% left · weekly 97% left"));
+        assert!(is_noise("· 5h 82% left · weekly 97% left"));
+    }
 }
