@@ -70,12 +70,6 @@ const SOURCE_LABEL: Record<string, string> = {
   system: '系統通知',
 }
 
-export const KIND_TITLE: Record<BotKind, string> = {
-  claude: 'Claude',
-  codex: 'Codex',
-  grok: 'Grok',
-}
-
 /** 訊息時間只到分；完整時間在 `title`。 */
 function timeOf(iso: string): string {
   const d = new Date(iso)
