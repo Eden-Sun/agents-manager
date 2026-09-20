@@ -914,7 +914,16 @@ pub async fn restart_bot_with(app: &Arc<App>, bot_id: &str, opts: StartOpts) -> 
     let stopping = db::active_run(&app.db, bot_id).await.map_err(up)?.map(|r| r.id);
     // 停到起之間沒有 active run，但 bot 馬上就回來：排著的派工不是孤兒（issue #106，`restart_hold`）。
     let restarting = super::restart_hold::begin(bot_id);
-    stop_for_restart_locked(app, bot_id).await?;
+    let stopped = if opts.require_idle { super::stop::stop_for_restart_if_idle_locked(app, bot_id).await } else { stop_for_restart_locked(app, bot_id).await };
+    match stopped {
+        Ok(_) => {}
+        // 鎖裡看過閒置之後、記 `stopping` 之前它開始忙了（#346）：什麼都沒動，照 `busy` 對回 `not_idle`。
+        Err(LcError::Conflict(v)) if v.get("reason").and_then(|r| r.as_str()) == Some("no_longer_idle") => {
+            let why = busy_reason_locked(app, bot_id).await.ok().flatten().unwrap_or("working");
+            return Err(not_idle(bot_id, why));
+        }
+        Err(e) => return Err(e),
+    }
     let started = restart_start(app, bot_id, opts).await;
     drop(restarting);
     match started {
@@ -1025,9 +1034,23 @@ pub async fn restart_child_in_pane_with(app: &Arc<App>, bot_id: &str, require_id
     let client = client_for_run(app, &run).await?;
     let agent = run.agent_name.clone().unwrap_or_else(|| bot.name.clone());
 
+    // 鎖裡看過閒置、還沒記 `stopping` 的那一瞬（測試在這裡讓使用者剛好開始打字）。
+    #[cfg(test)]
+    super::race_point::hit("child_restart_before_stopping", bot_id).await;
     // 舊 run 跟 stop 走同一套（#146 留言）：先記「正在停」，記不下來就一步都不做；被 pane-exit 事件先收掉就不重開。
-    match super::run_state::transition(&app.db, &run.id, super::run_state::LIVE, "stopping", None).await.map_err(up)? {
+    // `require_idle`（一鍵重啟）時這一步同時是「還是閒著才准停」的許可（#346，同 `stop_for_restart_if_idle_locked`）。
+    let moved = if require_idle {
+        super::stop::admit_idle_stop(&app.db, &run.id, bot_id, true).await.map_err(up)?
+    } else {
+        super::run_state::transition(&app.db, &run.id, super::run_state::LIVE, "stopping", None).await.map_err(up)?
+    };
+    match moved {
         super::run_state::Moved::Applied => {}
+        super::run_state::Moved::Lost if require_idle => {
+            app.emit_bot_status(bot_id).await;
+            let why = busy_reason_locked(app, bot_id).await.ok().flatten().unwrap_or("working");
+            return Err(not_idle(bot_id, why));
+        }
         super::run_state::Moved::Lost => {
             app.emit_bot_status(bot_id).await;
             return Err(LcError::Bad("這個子 agent 的 pane 已經被關掉了".into()));
@@ -2433,6 +2456,42 @@ mod idle_restart_tests {
         assert_eq!(reason(restart_child_in_pane_with(&app, &kid, true).await.unwrap_err()).1, "working");
         let methods = env.herdr.methods();
         assert!(!methods.iter().any(|m| m == "agent.send_keys" || m == "pane.close"), "什麼都沒動：{methods:?}");
+    }
+
+    /// 子 agent 的原地重啟（一鍵重啟也會走）同一個競態：鎖裡看過閒置之後才開始工作，不能送 ctrl+c。
+    #[tokio::test]
+    async fn a_child_that_starts_working_right_before_the_in_pane_restart_is_not_interrupted() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (kid, run_id) = bot_with_run(&env, "child", "idle").await;
+        let (a, r) = (app.clone(), run_id.clone());
+        crate::lifecycle::race_point::arm("child_restart_before_stopping", &kid, move || async move {
+            sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&r).execute(&a.db).await.unwrap();
+        });
+        let err = restart_child_in_pane_with(&app, &kid, true).await.expect_err("剛開始工作的子 agent 不能被重啟");
+        assert_eq!(reason(err).0, "not_idle");
+        assert_eq!(db::active_run(&app.db, &kid).await.unwrap().map(|r| (r.id, r.state)), Some((run_id, "running".into())), "run 原封不動");
+        assert!(!env.herdr.methods().iter().any(|m| m == "agent.send_keys" || m == "pane.close"), "沒有 ctrl+c");
+    }
+
+    /// 一鍵重啟鎖裡看過閒置、還沒記 `stopping` 的那一瞬，使用者直接在 pane 裡打字：`events::handle_status` 不拿 bot 鎖就寫
+    /// `agent_status=working`。閒置回收（#144）對這一瞬有「還是 idle 才准停」的許可，重啟停機那一步以前沒有：照樣記 `stopping`、
+    /// 送 ctrl+c，使用者剛開始的那一回合被砍。要跟那一句寫入互相排序：不閒了就不停，什麼都不動。
+    #[tokio::test]
+    async fn a_bot_that_starts_working_right_before_the_restart_stop_is_not_interrupted() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, run_id) = bot_with_run(&env, "user", "idle").await;
+        let (a, r) = (app.clone(), run_id.clone());
+        crate::lifecycle::race_point::arm("stop_before_stopping", &bot_id, move || async move {
+            sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&r).execute(&a.db).await.unwrap();
+        });
+        let opts = StartOpts { resume_native: true, require_idle: true, ..Default::default() };
+        let err = restart_bot_with(&app, &bot_id, opts).await.expect_err("剛開始工作的 bot 不能被重啟");
+        assert_eq!(reason(err).0, "not_idle");
+        assert_eq!(db::active_run(&app.db, &bot_id).await.unwrap().map(|r| (r.id, r.state)), Some((run_id, "running".into())), "run 原封不動");
+        let methods = env.herdr.methods();
+        assert!(!methods.iter().any(|m| m == "agent.send_keys" || m == "pane.close"), "沒有 ctrl+c、沒有關 pane：{methods:?}");
     }
 }
 

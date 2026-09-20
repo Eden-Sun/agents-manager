@@ -48,6 +48,12 @@ pub(crate) async fn stop_for_restart_locked(app: &Arc<App>, bot_id: &str) -> LcR
     stop_locked(app, bot_id, true, false).await
 }
 
+/// 一鍵重啟（`require_idle`）那一半的 stop：記 `stopping` 的那一步同時是**「還是閒著才准停」的許可**（#346，同 [`stop_bot_locked_if_idle`]），
+/// 使用者剛在 pane 裡打字（`handle_status` 不拿鎖）落在鎖裡看過閒置之後，這一句 UPDATE 輸了、什麼都不動，回 409 `no_longer_idle`。
+pub(crate) async fn stop_for_restart_if_idle_locked(app: &Arc<App>, bot_id: &str) -> LcResult<bool> {
+    stop_locked(app, bot_id, true, true).await
+}
+
 /// ctrl+c（必要時關 pane）之後，外面的 agent 到底怎麼了（#146）。只有前兩種能記成 `stopped`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StopOutcome {
@@ -81,7 +87,7 @@ async fn stop_locked(app: &Arc<App>, bot_id: &str, for_restart: bool, only_if_id
     // 來源含 `stopping`：上一次沒停成（寫不進 `stopped`、agent 沒退出）的 stop 可以原樣再按一次。
     // 使用者的 stop 在同一個交易撤回等它起來才送的那幾則（[`begin_stop`]，#199）。閒置回收的許可本來就要求沒有排著的。
     let (moved, withdrawn) = if only_if_idle {
-        (admit_idle_stop(&app.db, &run.id, bot_id).await.map_err(up)?, Vec::new())
+        (admit_idle_stop(&app.db, &run.id, bot_id, for_restart).await.map_err(up)?, Vec::new())
     } else {
         let withdraw = !for_restart && !super::restart_hold::in_progress(bot_id);
         begin_stop(app, &run.id, bot_id, withdraw).await.map_err(up)?
@@ -235,18 +241,26 @@ async fn begin_stop(
 }
 
 /// [`stop_bot_locked_if_idle`] 的許可：跟 `transition(LIVE → stopping)` 同一步，多三個條件，都在同一句 UPDATE 裡。
-async fn admit_idle_stop(db: &sqlx::SqlitePool, run_id: &str, bot_id: &str) -> Result<super::run_state::Moved, sqlx::Error> {
-    let r = sqlx::query(
+///
+/// `allow_queued`：重啟那一半（#346）排隊中的訊息不擋——`restart_hold` 本來就把它們留給新的 run；閒置回收（收起來不再送）才擋。
+pub(crate) async fn admit_idle_stop(db: &sqlx::SqlitePool, run_id: &str, bot_id: &str, allow_queued: bool) -> Result<super::run_state::Moved, sqlx::Error> {
+    let queued = if allow_queued {
+        ""
+    } else {
+        "AND NOT EXISTS (SELECT 1 FROM turns t JOIN conversations c ON c.id = t.conversation_id
+                             WHERE c.bot_id = ? AND t.status = 'queued')"
+    };
+    let sql = format!(
         "UPDATE runs SET state = 'stopping'
           WHERE id = ? AND state = 'running' AND agent_status = 'idle'
             AND NOT EXISTS (SELECT 1 FROM turns t WHERE t.run_id = runs.id AND t.status = 'in_flight')
-            AND NOT EXISTS (SELECT 1 FROM turns t JOIN conversations c ON c.id = t.conversation_id
-                             WHERE c.bot_id = ? AND t.status = 'queued')",
-    )
-    .bind(run_id)
-    .bind(bot_id)
-    .execute(db)
-    .await?;
+            {queued}"
+    );
+    let mut q = sqlx::query(&sql).bind(run_id);
+    if !allow_queued {
+        q = q.bind(bot_id);
+    }
+    let r = q.execute(db).await?;
     Ok(if r.rows_affected() == 0 { super::run_state::Moved::Lost } else { super::run_state::Moved::Applied })
 }
 
