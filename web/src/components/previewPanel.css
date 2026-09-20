@@ -377,3 +377,20 @@
     display: none;
   }
 }
+
+/* 併進標題列之後這一排要有標題列的份量與邊框（2026-09-20 使用者）。 */
+.preview-bar.merged {
+  min-height: 44px;
+  padding: 6px 6px 6px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+
+.preview-bar.merged .preview-col-title,
+.preview-bar.merged .preview-col-bot {
+  flex: none;
+}
+
+.preview-bar.merged .preview-url {
+  min-width: 0;
+}

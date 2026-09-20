@@ -27,6 +27,7 @@ export function PreviewColumn() {
   const drawer = useMediaQuery(DRAWER_QUERY)
   const bot = useStore((s) => (s.selectedProjectId ? null : (s.bots.find((b) => b.id === s.selectedBotId) ?? null)))
   const open = usePreviewColOpen(bot?.id ?? null)
+  const running = useStore((s) => (bot ? s.previews[bot.id]?.status === 'running' : false))
   const stored = usePreviewColWidth()
   const [viewport, setViewport] = useState(() => window.innerWidth)
   // 拖曳中的即時寬度；放開才寫進 localStorage。
@@ -77,6 +78,29 @@ export function PreviewColumn() {
 
   if (drawer || IN_MOBILE_PREVIEW || !bot || !isTopLevelBot(bot)) return null
 
+  // 預覽在跑時標題列併進 PreviewPanel 的網址列，省一整排（2026-09-20 使用者）。
+  const merged = running
+  const headStart = (
+    <>
+      <span className="preview-col-title">預覽</span>
+      <span className="preview-col-bot" title={bot.name}>
+        {bot.name}
+      </span>
+    </>
+  )
+  const collapse = (
+    <button
+      type="button"
+      className="icon-btn preview-col-toggle"
+      title="收合預覽"
+      aria-label="收合預覽"
+      aria-expanded
+      onClick={() => setPreviewColOpen(bot.id, false)}
+    >
+      ▸
+    </button>
+  )
+
   if (!open) {
     return (
       <aside className="preview-col rail" style={{ width: PREVIEW_RAIL_W }} aria-label="預覽">
@@ -110,24 +134,14 @@ export function PreviewColumn() {
         onPointerCancel={onUp}
         onKeyDown={onKey}
       />
-      <div className="preview-col-head">
-        <span className="preview-col-title">預覽</span>
-        <span className="preview-col-bot" title={bot.name}>
-          {bot.name}
-        </span>
-        <button
-          type="button"
-          className="icon-btn preview-col-toggle"
-          title="收合預覽"
-          aria-label="收合預覽"
-          aria-expanded
-          onClick={() => setPreviewColOpen(bot.id, false)}
-        >
-          ▸
-        </button>
-      </div>
+      {merged ? null : (
+        <div className="preview-col-head">
+          {headStart}
+          {collapse}
+        </div>
+      )}
       <div className="preview-col-body">
-        <PreviewPanel key={bot.id} botId={bot.id} />
+        <PreviewPanel key={bot.id} botId={bot.id} {...(merged ? { headStart, headEnd: collapse } : {})} />
       </div>
     </aside>
   )
