@@ -43,6 +43,7 @@ mod hosts;
 mod kind_probe;
 mod lifecycle;
 mod local_image;
+mod local_sh;
 mod memproc;
 mod memstat;
 mod outbox;

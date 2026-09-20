@@ -294,7 +294,7 @@ pub fn processes_from_dump(out: &str) -> Vec<MemProcess> {
 pub(crate) async fn dump(app: &Arc<App>, host: &str) -> anyhow::Result<String> {
     let conn = app.hosts.get(host).await.ok_or_else(|| anyhow::anyhow!("unknown host `{host}`"))?;
     if conn.is_local() {
-        let o = tokio::process::Command::new("/bin/sh").arg("-c").arg(PS_TREE_ENV).output().await?;
+        let o = crate::local_sh::output(PS_TREE_ENV).await?;
         if !o.status.success() {
             anyhow::bail!("ps exited {}", o.status);
         }
@@ -392,7 +392,7 @@ pub async fn kill(app: &Arc<App>, host: &str, pid: i32, signal: &str) -> anyhow:
     let cmd = format!("kill -{sig} {pid}");
     let conn = app.hosts.get(host).await.ok_or_else(|| anyhow::anyhow!("unknown host `{host}`"))?;
     if conn.is_local() {
-        let o = tokio::process::Command::new("/bin/sh").arg("-c").arg(&cmd).output().await?;
+        let o = crate::local_sh::output(&cmd).await?;
         if !o.status.success() {
             anyhow::bail!("kill exited {}: {}", o.status, String::from_utf8_lossy(&o.stderr).trim());
         }

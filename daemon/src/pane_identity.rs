@@ -51,13 +51,7 @@ impl ProcEnv for PsProcEnv {
         Box::pin(async move {
             let conn = app.hosts.get(host).await?;
             let out = if conn.is_local() {
-                let o = tokio::process::Command::new("/bin/sh")
-                    .arg("-c")
-                    .arg(ps_cmd(pid))
-                    .stdin(std::process::Stdio::null())
-                    .output()
-                    .await
-                    .ok()?;
+                let o = crate::local_sh::output(&ps_cmd(pid)).await.ok()?;
                 if !o.status.success() {
                     return None;
                 }
