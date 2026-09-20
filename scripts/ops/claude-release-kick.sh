@@ -17,10 +17,56 @@ log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
 [ -f "$TASK" ] || { log "找不到 ${TASK}，跳過"; exit 0; }
 [ -d "$VERSIONS" ] || { log "找不到版本目錄 ${VERSIONS}，跳過"; exit 0; }
 
-# 兩個執行者同時派會送出兩筆一樣的交辦。殘留的鎖交 AGM 檢查，寧可不派。
+# 兩個執行者同時派會送出兩筆一樣的交辦。鎖裡寫 pid 與時間（同 herdr-update-kick.sh／release-triage-kick.sh）：
+# SIGKILL／斷電那一輪 EXIT trap 沒跑，鎖會留在磁碟上——以前這裡只 `mkdir` 失敗就跳過，殘留的鎖讓 Claude 換版通知
+# 永久、安靜地停住（#66 同一類）。現在執行者不在就回收接手；還活著但卡太久、或回收不了才推 ops_alert。
+OWNER="${AM_AGENT_NAME:-claude-release-kick}"
+alert() { # alert <reason> <detail>：一則 durable inbox 事件（同 source+reason 每小時一則，daemon 去重）
+  log "ALERT ${1}：${2}"
+  "$AGM" --compact ops-alert --source "$OWNER" --reason "$1" --detail "$2" >> "$LOG" 2>&1 ||
+    log "推 ops-alert 失敗（舊 CLI 或 daemon 不在），只留在這份 log"
+}
 LOCK="$DIR/claude-release.lock"
-mkdir "$LOCK" 2>/dev/null || { log "已有執行者或殘留鎖，跳過"; exit 0; }
-trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
+LOCK_STALE_SECS=${AGM_LOCK_STALE_SECS:-120}    # 沒有 pid 可查時，超過這麼久就算殘留
+LOCK_HUNG_SECS=${AGM_LOCK_HUNG_SECS:-3600}     # 執行者還活著但卡了這麼久：喊人
+lock_age() { # lock_age → 鎖建立到現在幾秒（讀不到就當 0）
+  _born=$(python3 -c '
+import os,sys
+try:
+    print(int(os.path.getmtime(sys.argv[1])))
+except OSError:
+    print(0)
+' "$LOCK" 2>/dev/null) || _born=0
+  case "$_born" in ''|*[!0-9]*) _born=0 ;; esac
+  [ "$_born" = 0 ] && { echo 0; return; }
+  echo $(( $(date +%s) - _born ))
+}
+BODY=""
+cleanup() { rm -rf "$LOCK" 2>/dev/null || true; [ -n "$BODY" ] && rm -f "$BODY" 2>/dev/null; true; }
+take_lock() { mkdir "$LOCK" 2>/dev/null && { echo "$$ $(date +%s)" > "$LOCK/owner"; trap cleanup EXIT; return 0; }; return 1; }
+if ! take_lock; then
+  _pid=$(cut -d' ' -f1 "$LOCK/owner" 2>/dev/null)
+  _age=$(lock_age)
+  if [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null && ps -o command= -p "$_pid" 2>/dev/null | grep -q 'claude-release-kick'; then
+    if [ "$_age" -ge "$LOCK_HUNG_SECS" ]; then
+      alert runner_hung "上一輪（pid ${_pid}）已經跑了 ${_age} 秒還沒結束，Claude 換版通知停住。請確認它在做什麼，必要時結束它並移除 ${LOCK}"
+    else
+      log "已有執行者（pid ${_pid}，${_age} 秒），這輪跳過"
+    fi
+    exit 0
+  fi
+  if [ "$_age" -lt "$LOCK_STALE_SECS" ]; then
+    log "鎖剛建立（${_age} 秒）但讀不到執行者，這輪跳過"
+    exit 0
+  fi
+  rm -rf "$LOCK" 2>/dev/null
+  if take_lock; then
+    log "清掉殘留鎖（執行者 ${_pid:-未知} 已不在，鎖存在 ${_age} 秒）並接手這一輪"
+  else
+    alert stale_lock "殘留鎖 ${LOCK} 清不掉（執行者 ${_pid:-未知} 已不在），Claude 換版通知停住。請人工確認沒有執行者後移除它"
+    exit 0
+  fi
+fi
 
 # 版本目錄名就是版本號；最新的那個是現在會跑的（claude 自己更新時寫進去）。
 NEW=$(ls -t "$VERSIONS" 2>/dev/null | head -1)
@@ -53,7 +99,6 @@ fi
 [ -n "$BOT" ] || { log "找不到要派給誰（AGM_RELEASE_BOT／runtime.json 的 release_bot_id 或 responder_bot_id），跳過"; exit 0; }
 
 BODY=$(mktemp -t agm-claude-release)
-trap 'rm -f "$BODY"; rmdir "$LOCK" 2>/dev/null || true' EXIT
 {
   cat "$TASK"
   printf '\n\n---\n本次：舊版 %s → 新版 %s\n' "$OLD" "$NEW"
