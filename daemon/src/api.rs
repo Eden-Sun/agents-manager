@@ -2440,6 +2440,40 @@ mod delete_identity_tests {
         let left = app.cfg.get().await.identities;
         assert_eq!((left.len(), left[0].host.as_deref()), (1, Some("m4p")));
     }
+
+    /// 刪 m4p 那一台的 `work`：本機另有一筆自己的 `work`，它的快取列不能跟著消失（快取只在下次偵測才會補回來）。
+    #[tokio::test]
+    async fn deleting_one_hosts_identity_leaves_the_other_hosts_cached_row() {
+        let env = crate::testing::env().await;
+        let app = &env.app;
+        std::fs::write(
+            &app.cfg.path,
+            "[server]\nlisten = '127.0.0.1:7788'\n\n[[identities]]\nname = 'work'\nkind = 'codex'\nhost = 'm4p'\n\n\
+             [[identities]]\nname = 'work'\nkind = 'codex'\nhost = 'local'\n\n\
+             [[projects]]\nid = 'p9'\npath = '/Users/me/wt'\nlabel = 'wt'\nhost = 'm4p'\n",
+        )
+        .unwrap();
+        app.cfg.update(|_| Ok(())).await.unwrap();
+        crate::projection::project_config(&app.cfg, &app.db).await.unwrap();
+        for host in ["local", "m4p"] {
+            let mut ht = crate::tools::HostTools {
+                tools: Default::default(),
+                identities: Default::default(),
+                shell_identities: vec![],
+                utc_offset_secs: None,
+                herdr_cli: None,
+                checked_at: crate::db::now(),
+            };
+            ht.identities.insert("work".into(), crate::tools::IdentityInfo::shell("work", "codex", None));
+            app.tools.lock().await.insert(host.into(), ht);
+        }
+        delete_identity(State(app.clone()), Path("work".into()), Query(IdentityHostQuery { host: Some("m4p".into()) }))
+            .await
+            .expect("沒有 bot 在用");
+        let tools = app.tools.lock().await;
+        assert!(!tools["m4p"].identities.contains_key("work"), "被刪的那一台的快取列要拿掉");
+        assert!(tools["local"].identities.contains_key("work"), "本機自己的 work 沒被刪，快取列不能一起消失");
+    }
 }
 
 #[cfg(test)]
@@ -2569,7 +2603,13 @@ async fn delete_identity(
     .await
     .map_err(projection_err)?;
     // A same-named `ccN` alias is a different entry (SPEC §16) and is put back from `shell_identities`.
-    for ht in app.tools.lock().await.values_mut() {
+    // 只動受影響的那幾台的快取：被刪的那一台；刪的是沒寫 host 的那筆時，還靠它的每一台（自己沒有明寫同名的）。
+    let cfg_after = app.cfg.get().await;
+    for (h, ht) in app.tools.lock().await.iter_mut() {
+        let has_own = cfg_after.identities.iter().any(|i| i.name == name && i.host_or_local() == h.as_str());
+        if !(*h == host || (removing_hostless && !has_own)) {
+            continue;
+        }
         ht.identities.remove(&name);
         if let Some(i) = ht.shell_identities.iter().find(|i| i.name == name) {
             let dir = i.env.get("CLAUDE_CONFIG_DIR").cloned();
