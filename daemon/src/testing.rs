@@ -869,6 +869,27 @@ pub async fn fake_run(app: &Arc<App>, bot_id: &str) -> String {
     id
 }
 
+/// 等到條件成立（巨集：條件裡可以 `.await`），回是否在期限內成立。
+///
+/// 測試裡「等背景工作做完」一律用這個，不要 `sleep(固定時間)` 之後直接斷言、也不要自己寫 `for _ in 0..N` 的短輪詢：
+/// 完整測試同時跑上千條，runner 一慢，固定的短等待就偶發紅（#255、#256、quota_refresh）。這裡的期限只是**放棄的上限**
+/// （30 秒，條件一成立就立刻回），不是成功的條件。要斷言「沒有發生」的事仍可以固定睡一下再看，那種只會在慢 runner 上少測到，不會翻紅。
+macro_rules! eventually {
+    ($cond:expr) => {{
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            if $cond {
+                break true;
+            }
+            if std::time::Instant::now() >= deadline {
+                break false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }};
+}
+pub(crate) use eventually;
+
 /// 讀取故障的注入：`table` 的 SELECT 全部壞掉（`no such table`），到 [`make_table_readable`] 為止。
 /// 連線池的每條連線各有自己的 schema 快取：先在**同一條**連線上讀一次 `sqlite_master` 刷新，再 ALTER；
 /// 不然剛好抽到沒看過上一次改動的連線，`ALTER` 在編譯階段就 `no such table`（時有時無）。
