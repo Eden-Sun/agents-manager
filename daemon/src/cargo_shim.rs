@@ -996,15 +996,20 @@ esac"#
             self.run_group(cmd, None)
         }
 
-        /// 模擬 kernel 的孤兒 process group 規則：停 cargo 樹時（`am_kill_tree` 的第一通 `ps -o ppid= -p`，此時「租約失效」標記已經寫好）
-        /// 對整個 process group 送一次 SIGHUP，就像 kernel 發現「孤兒組裡有被 SIGSTOP 的成員」時做的。
+        /// 模擬 kernel 的孤兒 process group 規則：**先凍住**（`am_kill_tree` 的第一輪 `kill -STOP` 之後、第二次行程快照
+        /// `ps -A -o pid= -o ppid=`）才對整個 process group 送一次 SIGHUP，就像 kernel 發現「孤兒組裡有被 SIGSTOP 的成員」時做的。
+        /// 順序要對：以前是在第一通 `ps -o ppid= -p` 就送，那時還沒凍住，而且假 `ps` 自己也在組內、被這個 HUP 打死，
+        /// `am_kill_tree` 拿到空輸出就直接放棄——整棵樹只剩「HUP 對一直在 fork 的假 cargo 的那一下」能收，
+        /// 剛 fork 出來、還沒被訊號掃到的 `sleep` 就成了孤兒（負載一高就踩到，issue #256）。
+        /// 假 `ps` 先 `trap '' HUP`（忽略會被 exec 帶過去），自己不被打死、照樣把快照印出來。
         /// 真的孤兒組只在 runner（沒有控制終端、呼叫端不在同 session 的別組）上出現，本機重現不了，所以用假 `ps` 把那個訊號送出來。
         fn install_group_hup_on_first_freeze(&self) {
             let d = self.dir.display();
             write_exec(
                 self.dir.join("real/ps"),
-                format!("#!/bin/sh
-case \"$*\" in\n  *ppid=*-p*) if [ ! -e '{d}/hup.sent' ]; then : > '{d}/hup.sent'; kill -HUP 0; fi ;;\nesac\nexec /bin/ps \"$@\"\n"),
+                format!(
+                    "#!/bin/sh\ncase \"$*\" in\n  *-A*pid=*ppid=*)\n    n=$(cat '{d}/ps.snapshots' 2>/dev/null || echo 0); n=$((n + 1)); echo $n > '{d}/ps.snapshots'\n    if [ \"$n\" = 2 ] && [ ! -e '{d}/hup.sent' ]; then : > '{d}/hup.sent'; trap '' HUP; kill -HUP 0; fi ;;\nesac\nexec /bin/ps \"$@\"\n"
+                ),
             );
         }
     }
