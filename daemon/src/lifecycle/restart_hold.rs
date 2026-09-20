@@ -8,8 +8,10 @@
 //! `revoke_all_orphaned_queued_turns` 都會。所以不在各處補判斷，而是讓重啟**宣告**自己在進行中，
 //! 撤孤兒的那一支只問這一件事。
 //!
-//! 只放行程記憶體：重啟整段在同一把 bot 鎖裡、同一個行程內做完。daemon 在重啟途中掛掉，開機後
-//! 那顆 bot 沒有 active run、標記也不在了——排著的就照舊當孤兒收掉，因為那次重啟確實沒完成。
+//! hold 本身是行程記憶體，但重啟的**意圖**是持久的（`restart` intent，#355）：daemon 在 stop 與 start 之間死掉，
+//! 開機由 `restart_intents::recover_host` 往前補完那次重啟，所以排著的派工同樣不是孤兒（#378）。
+//! 開機時（對帳之前，那會把舊 run 收尾並撤孤兒）[`adopt_open_intents`] 把每件還開著的 `restart` intent 灌成一個 hold，
+//! recovery 把那件 intent 收尾（done／abandoned／failed／過期）才放掉；補不成的重試期間 hold 也留著。
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -43,6 +45,46 @@ impl Drop for Hold {
             }
         }
     }
+}
+
+/// 開機接回的 hold：intent id → 憑證。`recover_host` 收掉那件 intent 才放。
+fn adopted() -> &'static Mutex<HashMap<String, Hold>> {
+    static M: OnceLock<Mutex<HashMap<String, Hold>>> = OnceLock::new();
+    M.get_or_init(Default::default)
+}
+
+/// 開機（**對帳之前**）把還開著的 `restart` intent 各灌一個 hold。讀不到 DB 只能記 log（此時什麼都撤不了以外的事無從判斷），
+/// 之後 `recover_host` 照樣會補完，只是這段視窗沒有保護。
+pub(crate) async fn adopt_open_intents(pool: &sqlx::SqlitePool) {
+    match crate::intents::open(pool).await {
+        Ok(open) => {
+            for i in open.into_iter().filter(|i| i.kind == "restart") {
+                let hold = begin(&i.subject_id);
+                if let Ok(mut m) = adopted().lock() {
+                    m.entry(i.id).or_insert(hold);
+                }
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "cannot list open restart intents; queued prompts are unprotected until recovery"),
+    }
+}
+
+/// 那件 intent 已經收尾：放掉它的 hold（沒有就什麼都不做）。
+pub(crate) fn release_intent(intent_id: &str) {
+    let hold = adopted().lock().ok().and_then(|mut m| m.remove(intent_id));
+    drop(hold);
+}
+
+/// 只留還開著的 intent 的 hold；其餘（例如過期被收掉的）放掉。
+pub(crate) fn retain_open(open_ids: &std::collections::HashSet<String>) {
+    let gone: Vec<Hold> = match adopted().lock() {
+        Ok(mut m) => {
+            let ids: Vec<String> = m.keys().filter(|k| !open_ids.contains(*k)).cloned().collect();
+            ids.into_iter().filter_map(|k| m.remove(&k)).collect()
+        }
+        Err(_) => return,
+    };
+    drop(gone);
 }
 
 /// 這顆 bot 現在是不是在重啟（stop 到 start 之間）。鎖壞了當成「不是」：照舊行為撤孤兒，不會卡住佇列。

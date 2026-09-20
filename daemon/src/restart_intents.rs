@@ -44,7 +44,11 @@ pub async fn recover_host(app: &Arc<App>, host: &str) {
         tracing::warn!(error = %e, "could not sweep finished intents");
     }
     let open = match intents::open(&app.db).await {
-        Ok(v) => v,
+        Ok(v) => {
+            // 過期被收掉的、或別人收尾的：它們的開機 hold 不用再留（#378）。
+            lifecycle::restart_hold::retain_open(&v.iter().map(|i| i.id.clone()).collect());
+            v
+        }
         Err(e) => {
             // 讀不到不等於沒有：稍後整輪重來。
             tracing::warn!(error = %e, host, "cannot list open intents yet; will retry");
@@ -69,6 +73,8 @@ pub async fn recover_host(app: &Arc<App>, host: &str) {
             tracing::warn!(intent = %i.id, bot = %i.subject_id, error = %why, "interrupted restart could not be completed yet; retrying in the background");
             let (app, id) = (app.clone(), i.id.clone());
             tokio::spawn(async move { retry_loop(&app, &id).await });
+        } else {
+            lifecycle::restart_hold::release_intent(&i.id);
         }
     }
 }
@@ -77,6 +83,7 @@ async fn retry_loop(app: &Arc<App>, id: &str) {
     for attempt in 0.. {
         tokio::time::sleep(crate::reconcile::recovery_retry_delay(attempt)).await;
         if drive_once(app, id).await == Outcome::Finished {
+            lifecycle::restart_hold::release_intent(id);
             return;
         }
     }
@@ -85,6 +92,8 @@ async fn retry_loop(app: &Arc<App>, id: &str) {
 async fn drive(app: &Arc<App>, id: &str) {
     if let Outcome::Retry(_) = drive_once(app, id).await {
         retry_loop(app, id).await;
+    } else {
+        lifecycle::restart_hold::release_intent(id);
     }
 }
 
@@ -226,6 +235,43 @@ mod tests {
         recover_host(&app2, LOCAL_HOST).await;
         tokio::join!(recover_host(&app2, LOCAL_HOST), recover_host(&app2, LOCAL_HOST));
         assert_eq!(runs_of(&app2, &bot.id).await, 2, "舊的＋補起來的那一顆，沒有第三個");
+    }
+
+    /// #378：stop 之後、start 之前死掉，開機時對帳／sweeper 在 recovery 補完之前先跑——排著的派工不能被當孤兒撤掉，
+    /// 補完之後（新 run 起來、hold 放掉）它還在佇列。
+    #[tokio::test]
+    async fn a_queued_prompt_survives_the_gap_between_boot_and_recovery_of_an_interrupted_restart() {
+        let e = tt::env().await;
+        let (bot, run1) = running_bot(&e, "queued-victim").await;
+        let conv = db::conversation_id(&e.app.db, &bot.id).await.unwrap();
+        let turn = db::ulid();
+        sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, delivery, prompt_text, created_at) VALUES (?,?,'web','queued','pending','派工',?)")
+            .bind(&turn)
+            .bind(&conv)
+            .bind(db::now())
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        die_at(&e, &bot.id, "restart_after_stop").await;
+        assert!(!lifecycle::restart_hold::in_progress(&bot.id), "行程死了，記憶體 hold 隨 future 一起消失");
+        assert_eq!(run_state(&e.app, &run1).await, "stopped");
+
+        let app2 = tt::restart_app(&e).await;
+        lifecycle::restart_hold::adopt_open_intents(&app2.db).await;
+        assert!(lifecycle::restart_hold::in_progress(&bot.id), "開機接回 hold");
+        // recovery 之前：對帳收尾／回合結束事件／定時 sweeper 的撤孤兒路徑。
+        assert!(lifecycle::revoke_orphaned_queued_turns(&app2, &bot.id, "它的 run 已經結束").await.is_empty());
+        assert!(lifecycle::revoke_all_orphaned_queued_turns(&app2).await.is_empty());
+        let st = |t: String| {
+            let app = app2.clone();
+            async move { sqlx::query_scalar::<_, String>("SELECT status FROM turns WHERE id=?").bind(t).fetch_one(&app.db).await.unwrap() }
+        };
+        assert_eq!(st(turn.clone()).await, "queued", "recovery 之前沒被撤");
+
+        recover_host(&app2, LOCAL_HOST).await;
+        assert!(db::active_run(&app2.db, &bot.id).await.unwrap().is_some(), "recovery 把 bot 補起來");
+        assert!(!lifecycle::restart_hold::in_progress(&bot.id), "intent 收尾後 hold 放掉");
+        assert_ne!(st(turn.clone()).await, "failed", "排著的派工留給新 run，沒有被撤");
     }
 
     /// 承諾點之前（intent 寫了、stop 還沒記）死掉：世界沒變，abandoned，bot 照舊在跑、不多起。

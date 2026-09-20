@@ -334,6 +334,9 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
         local.connected.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
+    // #378: 被打斷的重啟在 recovery 補完之前，對帳收尾舊 run 不能把它排著的派工當孤兒撤掉。
+    lifecycle::restart_hold::adopt_open_intents(&app.db).await;
+
     // §11.3: each remote host's supervisor reconciles on connect.
     app.hosts.apply_config(&app, &cfg.hosts).await;
 
