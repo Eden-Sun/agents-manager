@@ -332,3 +332,15 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agm.ci-watch.plist
   「問過了」這件事在執行期間持續成立，不是替代它。
 
 此 safety API／內嵌 CLI 更新需要重建並部署 daemon，再由 AGM 部署 kick。升級前暫保留正式環境的 client-side 過濾熱修；repo 本版不再自行排除，舊端點會使本版跳過派工。
+
+## outbox-gc.sh／pane-gc.sh／browser-gc-kick.sh（issue #318）
+
+三支純機械的清理腳本，原本只存在 AGM 的 `bin/`，沒有版本控制也沒有測試，卻都是破壞性的（刪檔、殺行程、關 pane）。
+現在 repo 是來源，內容與已安裝的那份逐位元組相同（`cmp`），另附 `browser-gc-task.md`（browser-gc bot 的交辦正文）。
+
+- `outbox-gc.sh`：launchd `com.agm.outbox-gc` 每 10 分鐘；刪 outbox 底下（含 bot 子目錄）超過 60 分鐘的檔與空目錄。護欄：`AM_OUTBOX_ROOT` 不在 `~/.config/agents-manager/outbox*` 就拒絕。
+- `pane-gc.sh`：關卡住超過 24 小時的 `claude auth login`／`gcloud auth login`／`codex login` pane；幽靈 pane 只記錄。由 `browser-gc-kick.sh` 呼叫。
+- `browser-gc-kick.sh`：每 6 小時；收孤兒、無 CDP 連線、活超過 2 分鐘的 headless Chrome，刪沒人用的 `/tmp/am-*` Chrome profile，跑 `pane-gc.sh`，再派 `browser-gc-task.md`。
+
+隔離測試：`bash scripts/ops/outbox-gc_test.sh`、`pane-gc_test.sh`、`browser-gc-kick_test.sh`（假 `ps`／`lsof`／`herdr`／`bin/agm`，`kill` 用函式替身，`/tmp/am-*` 換成暫存目錄；不會殺行程、關 pane 或碰真的 outbox／HOME）。
+安裝比照其他 kick：`install -m 755 scripts/ops/{outbox-gc,pane-gc,browser-gc-kick}.sh ~/.config/agents-manager/supervisor/AGM/bin/`、`install -m 644 scripts/ops/browser-gc-task.md ~/.config/agents-manager/supervisor/AGM/`；launchd 由巡檢處理。
