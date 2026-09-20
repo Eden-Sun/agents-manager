@@ -30,6 +30,7 @@
 - 不要翻案 `docs/UI-DECISIONS.md` 已定案的決定；新的取捨補寫進去。
 - 改了 API 要同步 `docs/API.md`；改了行為要同步 `docs/SPEC.md`。
 - 不要加新功能、不要順手重構任務以外的東西。
+- **新增／修改資料表、欄位、索引、trigger（含各子模組的 `migrate`）＝升 `SCHEMA_VERSION`**：在 `daemon/src/db.rs` 的 `SCHEMA_HISTORY` 最後加一行 `(N+1, "<指紋>")`（指紋照 `schema_guard` 測試失敗訊息給的值），不准改既有那幾行。沒升版＝pin 測試紅，而且舊 binary 會照開一個它不懂的 schema。已合流的別人的 schema 變更沒升版時，以主幹現況重算、併進同一版，不要只顧自己那一行。
 
 ## 驗證（收尾前必跑）
 - 先跑一鍵檢查：`scripts/check.sh`。只驗單一側可用 `web` 或 `daemon` 參數。
