@@ -435,7 +435,7 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 ```
 
 `source`：`spawned`＝AG Man 起的（有 `pane_id`）；`attached`＝接上一顆本來就在跑的 vite（沒有 pane，`pid` 是那顆行程）。
-`candidates`：這顆 bot 可以起 vite 的目錄（`<dir>`、`web`、`apps/*`、`packages/*` 有 vite 設定的，第一個是預設）。
+`candidates`：這顆 bot 可以起 vite 的目錄（在 bot 的工作目錄底下最多找 3 層，有 vite 設定的都列，最多 20 個；略過隱藏目錄、`node_modules`、`target`、`dist`、`build`、`worktrees`、`vendor`；`<dir>` 本身、`<dir>/web` 排前面，第一個是預設）。
 `others`：**沒有預覽在用時**才掃，本機**所有**在 listen 的 vite，每筆 `{port, dir, pid, relation, repo}`：
 `relation` 是 `same_dir`（這顆 bot 的候選目錄，`auto` 會自動接它）／`same_repo`（同一個 repo 的別份 checkout：git common dir 或 origin URL 相同）／
 `other`（別的專案，判不出 repo 也算）；`repo` 是分組顯示用的 repo 名。排序 same_dir、same_repo、other，各自依 port。非 `same_dir` 的不自動接
@@ -467,7 +467,7 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 | `default_session` | 從使用者自己的 herdr default session 匯入的 bot |
 | `remote_host` | bot 在遠端主機（body 帶 `host`） |
 | `bot_not_running` | bot 現在沒有在跑的 run |
-| `no_vite_config` | 找不到 vite 設定；`tried` 是試過的路徑（含 `apps/*`、`packages/*` 樣式） |
+| `no_vite_config` | 找不到 vite 設定；`tried` 是試過的路徑（含 `**/vite.config.*` 樣式） |
 | `no_free_port` | 5180 起的 100 顆都被佔了 |
 | `not_vite` | `mode=attach` 的 `port` 不是掃到的 vite（body 帶 `port`） |
 
