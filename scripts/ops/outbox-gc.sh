@@ -8,7 +8,7 @@ LOG="$DIR/outbox-gc.log"
 OUTBOX="${AM_OUTBOX_ROOT:-$HOME/.config/agents-manager/outbox}"
 MAX_AGE_MIN=${OUTBOX_MAX_AGE_MIN:-60}
 [ -d "$OUTBOX" ] || exit 0
-case "$OUTBOX" in "$HOME/.config/agents-manager/outbox"*) ;; *) echo "$(date '+%F %T') 拒絕：OUTBOX 不在預期路徑 $OUTBOX" >> "$LOG"; exit 1 ;; esac
+case "$OUTBOX" in "$HOME/.config/agents-manager/outbox"|"$HOME/.config/agents-manager/outbox/"*) ;; *) echo "$(date '+%F %T') 拒絕：OUTBOX 不在預期路徑 $OUTBOX" >> "$LOG"; exit 1 ;; esac
 removed=$(find "$OUTBOX" -mindepth 2 -type f -mmin +"$MAX_AGE_MIN" -print -delete 2>/dev/null | wc -l | tr -d ' ')
 find "$OUTBOX" -mindepth 1 -type d -empty -delete 2>/dev/null
 [ "$removed" != "0" ] && echo "$(date '+%F %T') 清掉 $removed 個超過 ${MAX_AGE_MIN} 分鐘的檔案" >> "$LOG"

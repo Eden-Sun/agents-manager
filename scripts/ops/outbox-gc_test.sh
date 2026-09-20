@@ -120,5 +120,19 @@ gone   "不會替它建目錄" "$OB"
 check_no "不寫 log" "拒絕\|清掉" "$LOG"
 teardown
 
+# 護欄是「剛好等於該路徑或在它底下」，不是前綴比對（issue #372）：outbox-evil 這種同前綴的兄弟路徑要被拒，不能刪。
+setup
+EVIL="$HOME/.config/agents-manager/outbox-evil"
+mkdir -p "$EVIL/botA"; echo x > "$EVIL/botA/old.txt"; old "$EVIL/botA/old.txt"
+equals "同前綴的假路徑（outbox-evil）exit 1" "$(AM_OUTBOX_ROOT="$EVIL" run)" "1"
+exists "假路徑裡的過期檔不刪" "$EVIL/botA/old.txt"
+check  "拒絕寫進 log" "拒絕：OUTBOX 不在預期路徑" "$LOG"
+teardown
+setup
+mkdir -p "$OB/botA"; echo x > "$OB/botA/old.txt"; old "$OB/botA/old.txt"
+equals "尾端帶斜線的正確路徑照跑 exit 0" "$(AM_OUTBOX_ROOT="$OB/" run)" "0"
+gone   "尾端帶斜線的正確路徑照刪" "$OB/botA/old.txt"
+teardown
+
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
