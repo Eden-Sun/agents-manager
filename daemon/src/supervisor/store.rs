@@ -1348,7 +1348,7 @@ pub async fn defer_conflict(pool: &SqlitePool, id: &str, next_attempt_at: &str, 
 /// `delivered`／`unknown` 已經送出去了，進不去的保險絲是 [`block_stale_queue`] 的事，兩者不能共用
 /// 同一個更寬的 guard。guard 跟 CAS 走 [`assignment_state::set_status_on`]（issue #71 第二刀），
 /// 這裡自己只管 `queued → blocked` 以外的欄位。
-pub async fn mark_undeliverable(pool: &SqlitePool, id: &str, why: &str) -> Result<bool> {
+pub async fn mark_undeliverable(pool: &SqlitePool, id: &str, why: &str, event_key: &str, payload: &Value) -> Result<bool> {
     let mut tx = pool.begin().await?;
     let moved = matches!(
         assignment_state::set_status_on(&mut tx, id, assignment_state::AssignmentState::Queued, assignment_state::AssignmentState::Blocked, why).await?,
@@ -1361,6 +1361,9 @@ pub async fn mark_undeliverable(pool: &SqlitePool, id: &str, why: &str) -> Resul
             .bind(id)
             .execute(&mut *tx)
             .await?;
+        // 通知同一個交易（#283）：寫不進去就整組不成立，下一輪重來，不留下沒人知道的 blocked。
+        let bot: String = sqlx::query_scalar("SELECT target_bot_id FROM supervisor_assignments WHERE id=?").bind(id).fetch_one(&mut *tx).await?;
+        push_inbox_tx(&mut tx, event_key, "assignment_undeliverable", Some(id), Some(&bot), None, payload).await?;
     }
     tx.commit().await?;
     Ok(moved)
@@ -2002,6 +2005,38 @@ pub async fn link_followup(pool: &SqlitePool, id: &str, followup_id: &str) -> Re
 
 /// Insert an event unless its `event_key` is already known. `Ok(None)` = a duplicate, which is
 /// the normal outcome for a replayed turn event or a restart rescan.
+/// [`push_inbox`] 寫在呼叫端的交易裡：狀態轉移與它要通知的那件事同生共死（#283）。
+pub async fn push_inbox_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    event_key: &str,
+    kind: &str,
+    assignment_id: Option<&str>,
+    bot_id: Option<&str>,
+    turn_id: Option<&str>,
+    payload: &Value,
+) -> Result<Option<String>> {
+    let id = crate::db::ulid();
+    let now = crate::db::now();
+    let res = sqlx::query(
+        "INSERT OR IGNORE INTO supervisor_inbox
+           (id, supervisor_id, event_key, assignment_id, bot_id, turn_id, kind, payload_json, state, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?, 'pending', ?, ?)",
+    )
+    .bind(&id)
+    .bind(SUPERVISOR_ID)
+    .bind(event_key)
+    .bind(assignment_id)
+    .bind(bot_id)
+    .bind(turn_id)
+    .bind(kind)
+    .bind(payload.to_string())
+    .bind(&now)
+    .bind(&now)
+    .execute(&mut **tx)
+    .await?;
+    Ok((res.rows_affected() > 0).then_some(id))
+}
+
 pub async fn push_inbox(
     pool: &SqlitePool,
     event_key: &str,

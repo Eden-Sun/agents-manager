@@ -326,23 +326,20 @@ async fn undeliverable(app: &Arc<App>, a: &store::Assignment, since: &str, why: 
     let mins = env_i64(CONFLICT_GIVE_UP_ENV, CONFLICT_GIVE_UP_MINS);
     // 照實寫：原因是最後一次 409 說的那句，不是一律「對方在回合中」；次數是累計的派送嘗試。
     let note = format!("從 {since} 起超過 {mins} 分鐘一直送不進去（最後一次：{why}；累計派送嘗試 {} 次）", a.attempts);
-    if !store::mark_undeliverable(&app.db, &a.id, &note).await.unwrap_or(false) {
-        return; // 這一輪已經被別的路徑改掉了（結案、取消…）：不要蓋回去
-    }
-    tracing::warn!(assignment = %a.id, bot = %a.target_bot_id, attempts = a.attempts, why, "assignment could not be delivered; marked blocked");
-    let _ = store::push_inbox(
-        &app.db,
-        &event_key("assignment_undeliverable", a),
-        "assignment_undeliverable",
-        Some(&a.id),
-        Some(&a.target_bot_id),
-        None,
-        &json!({"assignment_id": a.id, "target_bot_id": a.target_bot_id, "attempts": a.attempts,
+    let payload = json!({"assignment_id": a.id, "target_bot_id": a.target_bot_id, "attempts": a.attempts,
                 "waited_mins": mins, "conflict_since": since, "reason": why, "status": "blocked",
                 // 不能叫人用同一個 request id 再 `assign`：那是冪等查詢，只會拿回這筆 blocked（review2 deliv M1）。
-                "hint": UNDELIVERABLE_HINT}),
-    )
-    .await;
+                "hint": UNDELIVERABLE_HINT});
+    // blocked 與通知同一個交易（#283）：寫不進去就不標，下一輪重來。
+    match store::mark_undeliverable(&app.db, &a.id, &note, &event_key("assignment_undeliverable", a), &payload).await {
+        Ok(true) => {}
+        Ok(false) => return, // 這一輪已經被別的路徑改掉了（結案、取消…）：不要蓋回去
+        Err(e) => {
+            tracing::warn!(assignment = %a.id, error = ?e, "could not record an undeliverable assignment; will look again next tick");
+            return;
+        }
+    }
+    tracing::warn!(assignment = %a.id, bot = %a.target_bot_id, attempts = a.attempts, why, "assignment could not be delivered; marked blocked");
     app.emit("supervisor_changed", json!({"assignment_id": a.id, "status": "blocked"})).await;
 }
 
@@ -1311,16 +1308,16 @@ async fn block_stale_queues(app: &Arc<App>) {
         // - 只標 blocked 不撤：之後照送、結果沒地方收（blocked 不在執行中），AGM 以為沒送出又重派。
         // - 先標再撤：flush 剛好在兩步之間領走 turn 時，會把已經送出的交辦標成「沒有送出」。
         //   撤不到＝已經被 flush 領走，交辦維持 delivered，照一般回合結束流程走。
-        match revoke_and_block(app, &a.id, &turn_id, &why, &text).await {
+        let payload = json!({"assignment_id": a.id, "bot_id": a.target_bot_id, "turn_id": turn_id, "revoked_turn_id": turn_id,
+            "waited_s": waited, "reason": why, "status": "blocked", "needs_review": true,
+            "hint": "排著的那則已撤回，不會再送。等那顆 bot 空下來再派一次（followup），或改派給別人。"});
+        let key = format!("queue_blocked:{}:{}", a.id, turn_id);
+        // 撤 turn、標 blocked、通知 AGM 同一個交易（#283）：通知寫不進去整組回滾，下一輪重來。
+        match revoke_and_block(app, &a.id, &turn_id, &why, &text, Some((&key, &payload))).await {
             Ok(Some(revoked)) => {
                 tracing::warn!(assignment = %a.id, bot = %a.target_bot_id, waited_s = waited, "排隊太久：撤回排著的 prompt，交辦停在 blocked");
                 // 先 commit 再推：turn 事件到 `on_turn_done` 時交辦已經是 blocked，不會被當成回合失敗結案。
                 crate::lifecycle::announce_revoked(app, &turn_id, revoked).await;
-                let payload = json!({"assignment_id": a.id, "bot_id": a.target_bot_id, "turn_id": turn_id, "revoked_turn_id": turn_id,
-                    "waited_s": waited, "reason": why, "status": "blocked", "needs_review": true,
-                    "hint": "排著的那則已撤回，不會再送。等那顆 bot 空下來再派一次（followup），或改派給別人。"});
-                let key = format!("queue_blocked:{}:{}", a.id, turn_id);
-                let _ = store::push_inbox(&app.db, &key, "assignment_undeliverable", Some(&a.id), Some(&a.target_bot_id), Some(&turn_id), &payload).await;
                 app.emit("supervisor_changed", json!({"assignment_id": a.id, "status": "blocked"})).await;
             }
             Ok(None) => {}
@@ -1331,11 +1328,22 @@ async fn block_stale_queues(app: &Arc<App>) {
 
 /// 保險絲的寫入：撤掉排著的 turn、把交辦標 blocked，**兩個都成功才 commit**。
 /// turn 已經不是 queued（被 flush 領走）或交辦已經不是 delivered（別人先決定了）→ `None`，什麼都不寫。
-async fn revoke_and_block(app: &Arc<App>, assignment_id: &str, turn_id: &str, why: &str, text: &str) -> anyhow::Result<Option<crate::lifecycle::Revoked>> {
+async fn revoke_and_block(
+    app: &Arc<App>,
+    assignment_id: &str,
+    turn_id: &str,
+    why: &str,
+    text: &str,
+    notify: Option<(&str, &serde_json::Value)>,
+) -> anyhow::Result<Option<crate::lifecycle::Revoked>> {
     let mut tx = app.db.begin().await?;
     let Some(revoked) = crate::lifecycle::revoke_queued_turn_tx(&mut tx, turn_id, text).await? else { return Ok(None) };
     if !store::block_stale_queue_tx(&mut tx, assignment_id, why).await? {
         return Ok(None); // 交易回滾：turn 也不撤。
+    }
+    if let Some((key, payload)) = notify {
+        let bot: String = sqlx::query_scalar("SELECT target_bot_id FROM supervisor_assignments WHERE id=?").bind(assignment_id).fetch_one(&mut *tx).await?;
+        store::push_inbox_tx(&mut tx, key, "assignment_undeliverable", Some(assignment_id), Some(&bot), Some(turn_id), payload).await?;
     }
     tx.commit().await?;
     Ok(Some(revoked))
@@ -2547,6 +2555,34 @@ mod conflict_fuse_tests {
         assert_eq!((again.id.as_str(), again.status.as_str()), (a.id.as_str(), "blocked"));
     }
 
+    /// 保險絲的 blocked 與通知 AGM 的 inbox 要同生共死：通知寫不進去就不標 blocked（下一輪重來），
+    /// 不能留下一筆「不會再自己重試」、又沒有任何人被告知的 blocked。
+    #[tokio::test]
+    async fn the_undeliverable_block_and_its_notification_land_together() {
+        let app = app().await;
+        let a = store::insert_assignment(&app.db, None, "b", "fuse-atomic", "做 X", &[], None, true).await.unwrap();
+        dispatch(&app, &a.id).await;
+        set(&app, &a.id, "conflict_since=?, next_attempt_at=NULL", &ago(31)).await;
+        sqlx::query("CREATE TRIGGER no_undeliverable_event BEFORE INSERT ON supervisor_inbox WHEN NEW.kind='assignment_undeliverable' BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END")
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        dispatch(&app, &a.id).await;
+        assert_eq!(row(&app, &a.id).await.status, "queued", "通知寫不進去：不標 blocked，留著下一輪重來");
+
+        sqlx::query("DROP TRIGGER no_undeliverable_event").execute(&app.db).await.unwrap();
+        set(&app, &a.id, "next_attempt_at=NULL", "").await;
+        dispatch(&app, &a.id).await;
+        assert_eq!(row(&app, &a.id).await.status, "blocked");
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE kind='assignment_undeliverable' AND assignment_id=?")
+            .bind(&a.id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
     /// 送達就結束這一輪：之後再撞 409 是新的一輪。
     #[tokio::test]
     async fn a_delivery_ends_the_streak() {
@@ -3413,7 +3449,7 @@ mod queue_dispatch_tests {
         let turn_id = a.turn_id.clone().unwrap();
         // flush 在保險絲讀完 turn 之後、寫入之前領走它。
         sqlx::query("UPDATE turns SET status='in_flight' WHERE id=?").bind(&turn_id).execute(&app.db).await.unwrap();
-        assert!(revoke_and_block(&app, &a.id, &turn_id, "why", "text").await.unwrap().is_none(), "撤不到");
+        assert!(revoke_and_block(&app, &a.id, &turn_id, "why", "text", None).await.unwrap().is_none(), "撤不到");
         assert_eq!(store::assignment(&app.db, &a.id).await.unwrap().unwrap().status, "delivered", "不把已經送出的說成沒送出");
         let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
         assert_eq!(status, "in_flight", "送出去的那則不動");
@@ -3431,10 +3467,37 @@ mod queue_dispatch_tests {
         let a = queued_assignment(&app, 3600).await;
         let turn_id = a.turn_id.clone().unwrap();
         sqlx::query("UPDATE supervisor_assignments SET status='cancelled' WHERE id=?").bind(&a.id).execute(&app.db).await.unwrap();
-        assert!(revoke_and_block(&app, &a.id, &turn_id, "why", "text").await.unwrap().is_none(), "已經不是 delivered，不標");
+        assert!(revoke_and_block(&app, &a.id, &turn_id, "why", "text", None).await.unwrap().is_none(), "已經不是 delivered，不標");
         assert_eq!(store::assignment(&app.db, &a.id).await.unwrap().unwrap().status, "cancelled");
         let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
         assert_eq!(status, "queued", "撤銷跟著回滾");
+    }
+
+    /// 撤回排著的 turn、標 blocked、通知 AGM 三件同一個交易：通知寫不進去就整組不成立（turn 還排著、交辦還是 delivered），
+    /// 下一輪再來——不能留下一筆撤掉了、blocked 了、卻沒有人知道的交辦。
+    #[tokio::test]
+    async fn the_fuse_block_and_its_notification_land_together() {
+        let app = app().await;
+        let a = queued_assignment(&app, 3600).await;
+        let turn_id = a.turn_id.clone().unwrap();
+        sqlx::query("CREATE TRIGGER no_queue_blocked_event BEFORE INSERT ON supervisor_inbox WHEN NEW.kind='assignment_undeliverable' BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END")
+            .execute(&app.db)
+            .await
+            .unwrap();
+        block_stale_queues(&app).await;
+        assert_eq!(store::assignment(&app.db, &a.id).await.unwrap().unwrap().status, "delivered", "通知寫不進去：不標 blocked");
+        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(status, "queued", "撤銷跟著回滾");
+
+        sqlx::query("DROP TRIGGER no_queue_blocked_event").execute(&app.db).await.unwrap();
+        block_stale_queues(&app).await;
+        assert_eq!(store::assignment(&app.db, &a.id).await.unwrap().unwrap().status, "blocked");
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE kind='assignment_undeliverable' AND assignment_id=?")
+            .bind(&a.id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
     }
 
     /// 額度回來重送前，舊的那則若還排著就先撤：不然清掉 turn_id 後它對不回交辦，佔著名額、之後照送。
