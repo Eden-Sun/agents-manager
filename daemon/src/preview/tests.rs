@@ -18,6 +18,10 @@ struct FakeEnv {
     repos: StdMutex<HashMap<String, RepoKey>>,
     /// pane → 它的行程樹 listen 的 port（dev script 起的 server 自己挑的）。
     pane_ports: StdMutex<HashMap<String, Vec<u16>>>,
+    /// 模擬「拿不到這顆 bot 的 herdr session」（#257）。
+    unresolvable: std::sync::atomic::AtomicBool,
+    /// 模擬 herdr 的關 pane 失敗。
+    close_fails: std::sync::atomic::AtomicBool,
 }
 
 impl FakeEnv {
@@ -72,11 +76,18 @@ impl PreviewEnv for FakeEnv {
     fn pane_tail<'a>(&'a self, _: &'a str) -> BoxFuture<'a, String> {
         Box::pin(async move { self.tail.lock().unwrap().clone() })
     }
-    fn close_pane<'a>(&'a self, pane_id: &'a str) -> BoxFuture<'a, ()> {
+    fn close_pane<'a>(&'a self, pane_id: &'a str) -> BoxFuture<'a, bool> {
         Box::pin(async move {
+            if self.close_fails.load(std::sync::atomic::Ordering::SeqCst) {
+                return false;
+            }
             self.alive.lock().unwrap().remove(pane_id);
             self.closed.lock().unwrap().push(pane_id.into());
+            true
         })
+    }
+    fn resolvable(&self) -> bool {
+        !self.unresolvable.load(std::sync::atomic::Ordering::SeqCst)
     }
     fn port_listening(&self, port: u16) -> BoxFuture<'_, bool> {
         Box::pin(async move { self.listening.lock().unwrap().contains(&port) })
@@ -616,6 +627,78 @@ async fn stopping_with_an_unreadable_run_keeps_the_row_until_the_owner_session_i
     stop_for_bot(&r.e.app, &bot).await;
     assert_eq!(r.fake.closed.lock().unwrap().clone(), vec![pane]);
     assert_eq!(row(&r.e.app.db, &bot).await.unwrap().unwrap().status, "off");
+}
+
+#[tokio::test]
+async fn cleanup_never_goes_through_another_session_when_the_owner_session_is_unavailable() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let r = rig().await;
+    let bot = running_bot(&r, "alfa").await;
+    let pane = start(&r.e.app, &bot, StartReq::default()).await.unwrap()["pane_id"].as_str().unwrap().to_string();
+    // 有 run，但拿不到它那個 session 的 client：不可退回管理 session 去關。
+    r.fake.unresolvable.store(true, SeqCst);
+    stop_for_bot(&r.e.app, &bot).await;
+    assert!(r.fake.closed.lock().unwrap().is_empty());
+    assert_eq!(row(&r.e.app.db, &bot).await.unwrap().unwrap().status, "starting");
+    // bot 已經沒有 run 的那一條：同樣要靠 bot 自己的 session，拿不到就不動。
+    sqlx::query("UPDATE runs SET state = 'exited' WHERE bot_id = ?").bind(&bot).execute(&r.e.app.db).await.unwrap();
+    get(&r.e.app, &bot).await.unwrap();
+    assert!(r.fake.closed.lock().unwrap().is_empty());
+    assert_eq!(row(&r.e.app.db, &bot).await.unwrap().unwrap().status, "starting");
+    // session 回來：在那個 session 關掉 pane，這時才記 off。
+    r.fake.unresolvable.store(false, SeqCst);
+    assert_eq!(status(&get(&r.e.app, &bot).await.unwrap()), "off");
+    assert_eq!(r.fake.closed.lock().unwrap().clone(), vec![pane]);
+}
+
+#[tokio::test]
+async fn a_close_that_fails_or_is_unconfirmed_does_not_record_off() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let r = rig().await;
+    let bot = running_bot(&r, "alfa").await;
+    let pane = start(&r.e.app, &bot, StartReq::default()).await.unwrap()["pane_id"].as_str().unwrap().to_string();
+    r.fake.close_fails.store(true, SeqCst);
+    stop_for_bot(&r.e.app, &bot).await;
+    // pane 與 port 還在：不能寫成 off 讓 vite 變成沒人管的孤兒。
+    assert_eq!(row(&r.e.app.db, &bot).await.unwrap().unwrap().status, "starting");
+    r.fake.close_fails.store(false, SeqCst);
+    stop_for_bot(&r.e.app, &bot).await;
+    assert_eq!(r.fake.closed.lock().unwrap().clone(), vec![pane]);
+    assert_eq!(row(&r.e.app.db, &bot).await.unwrap().unwrap().status, "off");
+}
+
+#[tokio::test]
+async fn the_starting_watcher_survives_a_herdr_session_that_is_briefly_unavailable() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let r = rig().await;
+    let bot = running_bot(&r, "alfa").await;
+    start(&r.e.app, &bot, StartReq::default()).await.unwrap();
+    r.fake.unresolvable.store(true, SeqCst);
+    spawn_watcher(r.e.app.clone(), bot.clone());
+    // 好幾拍都拿不到 client：watcher 不能因此結束。
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    r.fake.unresolvable.store(false, SeqCst);
+    r.fake.listen(5180);
+    assert!(
+        testing::eventually!(row(&r.e.app.db, &bot).await.unwrap().unwrap().status == "running"),
+        "watcher 在 herdr 暫時拿不到時就結束了，沒人把 starting 推到 running"
+    );
+}
+
+#[tokio::test]
+async fn the_starting_watcher_survives_an_unreadable_preview_row() {
+    let r = rig().await;
+    let bot = running_bot(&r, "alfa").await;
+    start(&r.e.app, &bot, StartReq::default()).await.unwrap();
+    sqlx::query("ALTER TABLE bot_previews RENAME TO bot_previews_broken").execute(&r.e.app.db).await.unwrap();
+    spawn_watcher(r.e.app.clone(), bot.clone());
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    sqlx::query("ALTER TABLE bot_previews_broken RENAME TO bot_previews").execute(&r.e.app.db).await.unwrap();
+    r.fake.listen(5180);
+    assert!(
+        testing::eventually!(row(&r.e.app.db, &bot).await.unwrap().unwrap().status == "running"),
+        "讀不到那一列（暫時性）時 watcher 就結束了"
+    );
 }
 
 #[tokio::test]

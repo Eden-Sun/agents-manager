@@ -1880,7 +1880,10 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   預覽的 pane 跟 agent 同一個 tab，先收它，agent 的 pane 關掉時那個 tab 才會是空的、才會被一起關。
   收預覽是盡力而為，讀不到就記 log，不擋 bot 的停機。
   **讀不到 run 不等於 bot 停了**（#299）：對帳與收預覽時讀 `active_run` 失敗（DB busy／I/O）是「不知道」——不關 pane、不標 `off`，列原樣留著等下次；
-  只有讀到 `Ok(None)` 才確定沒有 run（才跟著收、才退回管理 session 關 pane）。關 pane 的 session 不確定就不能標 `off`，否則 pane 與 port 變成沒人管的孤兒。
+  只有讀到 `Ok(None)` 才確定沒有 run（才跟著收），這時關 pane 用 **bot 自己設定的 session**（`session_for_bot`），不猜管理 session。
+  **權威不明一律不動作**（#257）：讀 run 失敗、拿不到那個 session 的 herdr client、關 pane 的指令失敗或事後 `pane_get` 仍看得到它，都不標 `off`——
+  `PreviewEnv::close_pane` 回 `bool`（`true`＝關掉了或確定本來就不在），標 `off` 以它為準，否則 pane 與 port 變成沒人管的孤兒；列原樣留著等下次對帳。
+  同理 `refresh_locked` 拿不到 client 時回**原列**而不是 `None`，watcher 只在「確定沒有這一列」或離開 `starting` 時才結束，暫時性的讀不到會重試。
 - **鎖**：預覽操作共用一把全域鎖，**不拿 bot 鎖**（停機、刪除是在 bot 鎖裡呼叫進來的，再拿會自己等自己）。
 - **測試**：行程與 port 查詢走 `PreviewEnv`，測試注入決定性的假貨，不碰真 herdr、真行程、真 port（#211）。
 
