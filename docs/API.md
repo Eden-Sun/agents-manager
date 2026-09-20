@@ -1028,7 +1028,7 @@ readback_model_mismatch|readback_effort_mismatch|readback_fast_mismatch>`。以�
 - 只收 claude、本機、自己沒有子 agent 的 child。session 從 pane 裡活著的 claude 行程找（`<CLAUDE_CONFIG_DIR>/sessions/<pid>.json` 的 `sessionId`）；child 已停時用上一次做到一半記在它 run 上的 session。
 - 步驟與收回：transcript **複製**（不搬、不覆寫）到新 bot cwd（專案路徑）對應的 `projects/` 目錄 → 停 child → 建 user bot → 種下 session → `resume=native` 啟動（接不回就不啟動）→ 收掉 child 紀錄。停不掉、建不成或啟動失敗都不留第二顆 bot：複製的檔與新 bot 收回。停掉 child 之後不可逆（它的 pane 是母 agent 開的），失敗回應帶 `child_stopped:true`，同一個請求可原樣再送。
 - `200 {"bot_id","name","promoted_from":{"bot_id","session_id"},"transcript_path","run_id"}`。推 `bot_changed`（新舊兩顆）、`project_changed`。
-- 錯誤：來源不存在 404；名字不合法 400；`409 reason`：`not_child`、`unsupported_kind`、`remote_not_supported`、`default_session`、`has_children`、`bot name already in use`（明給的名字撞名）、`session_not_found`、`session_ambiguous`、`transcript_exists`（目標已有不同內容的同名檔）、`transcript_copy_failed`、`stop_failed`、`promote_create_failed`、`promote_start_failed`（`rolled_back`、`child_stopped`）、`promote_child_not_removed`、`not_in_config`。
+- 錯誤：來源不存在 404；名字不合法 400；`409 reason`：`not_child`、`unsupported_kind`、`remote_not_supported`、`default_session`、`has_children`、`bot name already in use`（明給的名字撞名）、`session_not_found`、`session_ambiguous`、`transcript_exists`（目標已有不同內容的同名檔）、`transcript_copy_failed`、`stop_failed`、`promote_checkpoint_failed`（session 記不進 child 的 run：child 照跑、什麼都不動）、`promote_create_failed`、`promote_start_failed`（`rolled_back`、`child_stopped`）、`promote_child_not_removed`（最後收 child 紀錄重試 3 次仍寫不進去：新 bot 已收回、`rolled_back` 表示是否收乾淨，child 已停、可原樣重送）、`not_in_config`。
 
 ### 10.3a `POST /api/bots/restart-idle`
 一鍵把「帶著 claude 更新且閒置」的 bot 全部 exit + resume（SPEC §6.9）。無 body。
