@@ -656,5 +656,23 @@ check "用新的那筆拿窗口" "lease acquire rebuild --approval ap-2" "$AGM_D
 check "log 寫明為什麼重申請" "核准 ap-1 已經不能用（consumed），重新申請" "$AGM_DIR/daemon-update.log"
 teardown
 
+# 31. 讀不到重建申請數不能當 0（當 0＝沒人申請＝非整點整輪跳過，換版流程靜默停擺）：這輪照常往下檢查、記成失敗、
+#     連續幾輪就喊人；不是「非整點且重建申請只有 0/3，這輪不檢查」。
+setup
+export AGM_TEST_MINUTE="37"
+export STUB_APPROVAL_LIST='not json at all'
+bash "$SCRIPT"
+check "讀不到申請數要講清楚" "讀不到重建申請數" "$AGM_DIR/daemon-update.log"
+check_no "不能當成 0 個申請而跳過這輪" "非整點且重建申請只有 0/3" "$AGM_DIR/daemon-update.log"
+check "照常往下檢查（過了閘，走到申請核准）" "已申請核准" "$AGM_DIR/daemon-update.log"
+teardown
+
+setup
+export AGM_TEST_MINUTE="37" AGM_FAIL_ALERT_AFTER=1
+export STUB_APPROVAL_LIST='not json at all'
+bash "$SCRIPT"
+check "讀不到申請數算失敗、連續幾輪會喊人" "ops-alert.*check_failing" "$AGM_DIR/calls.log"
+teardown
+
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
