@@ -80,8 +80,9 @@ async fn global_loop(app: Arc<App>, host: String, session: String) {
                     if let Err(e) = crate::default_session::sync(&app).await {
                         tracing::debug!(host = %host, session = %session, error = ?e, "default session sync failed");
                     }
-                } else if let Err(e) = crate::reconcile::reconcile_host(&app, &host).await {
-                    tracing::error!(host = %host, session = %session, error = ?e, "reconcile failed");
+                } else {
+                    // 遠端 supervisor 連上那一輪對帳失敗、這裡才成功（連線沒斷）：欠著的一生一次 autostart 在這補（#259）。本機由開機那一輪負責。
+                    reconcile_and_autostart(&app, &host, host != LOCAL_HOST).await;
                 }
                 while let Some(ev) = rx.recv().await {
                     handle_global(&app, &host, &session, &ev).await;
@@ -150,6 +151,23 @@ async fn handle_global(app: &Arc<App>, host: &str, session: &str, ev: &crate::he
             }
         }
         other => tracing::trace!(host, session, event = other, "unhandled global herdr event"),
+    }
+}
+
+/// 訂閱（重）建後的對帳；成功且 `autostart` 才補跑欠著的 autostart（#259）。`autostarted_hosts` 保證每台主機一生只跑一次：
+/// 之後的重連不會把使用者停掉的 bot 再開起來。
+async fn reconcile_and_autostart(app: &Arc<App>, host: &str, autostart: bool) -> bool {
+    match crate::reconcile::reconcile_host(app, host).await {
+        Ok(()) => {
+            if autostart {
+                crate::reconcile::autostart_after_reconcile(app, host, true).await;
+            }
+            true
+        }
+        Err(e) => {
+            tracing::error!(host, error = ?e, "reconcile failed");
+            false
+        }
     }
 }
 
@@ -608,6 +626,38 @@ mod tests {
 
     async fn run_state(app: &Arc<App>, run: &str) -> String {
         sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(run).fetch_one(&app.db).await.unwrap()
+    }
+
+    /// #259：supervisor 連上那一輪對帳失敗（autostart 跳過、主機沒記成跑過），連線沒斷、訂閱建好後對帳成功——
+    /// 欠著的 autostart 要在這補；補過之後再對帳不會再起，使用者停掉的也不會被重開。
+    #[tokio::test]
+    async fn a_later_successful_subscribe_reconcile_pays_the_owed_autostart() {
+        let e = tt::env().await;
+        let app = &e.app;
+        let bot = tt::claude_bot(app, &e.project_id, "auto").await;
+        sqlx::query("UPDATE bots SET autostart=1 WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
+        let active = || async { crate::db::active_run(&app.db, &bot.id).await.unwrap().is_some() };
+
+        e.herdr.fail_next("session.snapshot", tt::Fault::Refuse);
+        assert!(!reconcile_and_autostart(app, LOCAL_HOST, true).await, "對帳失敗");
+        assert!(!active().await && app.autostarted_hosts.lock().await.is_empty(), "失敗不算數：沒起、主機沒記成跑過");
+
+        assert!(reconcile_and_autostart(app, LOCAL_HOST, true).await, "之後對帳成功");
+        let mut up = false;
+        for _ in 0..150 {
+            if active().await {
+                up = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(up, "欠著的 autostart 在這補上");
+
+        // 再一次訂閱重建的對帳不能再起一次（一生一次；使用者停掉的就是靠這個不被重開）。
+        assert!(reconcile_and_autostart(app, LOCAL_HOST, true).await);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let runs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE bot_id=?").bind(&bot.id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(runs, 1, "只跑一次：不再替它開新的 run");
     }
 
     async fn plant_watcher(app: &Arc<App>, pane: &str) {

@@ -90,7 +90,7 @@ async fn autostart_one(app: &Arc<App>, host: &str, bot: &db::Bot, since: &str) -
 ///
 /// - **對帳沒成功就不跑**：不知道 herdr 上哪些 agent 其實還活著，開下去就是同一顆 bot 兩個 agent。
 /// - **每台主機在這顆 daemon 的一生只跑一次**：遠端 ssh 斷線重連會再走一次「連上」，而 `stop` 不會改 `autostart`——
-///   使用者停掉的 autostart bot 在筆電睡醒重連後被重開、開始吃額度，本機同樣設定的卻不會。對帳失敗不算數，下次連上再試。
+///   使用者停掉的 autostart bot 在筆電睡醒重連後被重開、開始吃額度，本機同樣設定的卻不會。對帳失敗不算數，之後任一次成功的對帳（supervisor 連上、或全域訂閱建好後那次，#259）補跑。
 pub async fn autostart_after_reconcile(app: &Arc<App>, host: &str, reconciled: bool) -> bool {
     if !reconciled {
         tracing::warn!(host, "autostart skipped: reconcile did not succeed; will retry on the next successful connect");
