@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import * as api from '../api'
 import type { ProjectPane } from '../api'
 import { useStore } from '../store/store'
+import { ConfirmDialog } from './ConfirmDialog'
 import './projectPanes.css'
 
 /** 「上次有輸出」到現在多久：只給人看，粗略就好。 */
@@ -111,31 +112,27 @@ export function ProjectPanes({ projectId, workspaceId }: { projectId: string; wo
           )
         })}
       </ul>
-      {confirming ? (
-        <div className="modal-backdrop" role="presentation" onMouseDown={() => setConfirming(null)}>
-          <div className="modal pane-close-modal" role="dialog" aria-modal="true" onMouseDown={(e) => e.stopPropagation()}>
-            <strong>關掉這顆服務 pane？</strong>
-            <p>
-              {confirming.purpose || confirming.pane_id} 正在跑{' '}
-              <code>{confirming.foreground ?? '（讀不到前景程式）'}</code>
+      <ConfirmDialog
+        open={confirming !== null}
+        title="關掉這顆服務 pane？"
+        danger
+        confirmLabel="關閉"
+        body={
+          confirming ? (
+            <>
+              {confirming.purpose || confirming.pane_id} 正在跑 <code>{confirming.foreground ?? '（讀不到前景程式）'}</code>
               {confirming.listen_ports.length > 0 ? (
                 <>
                   ，listen <strong>port {confirming.listen_ports.join('、')}</strong>
                 </>
               ) : null}
               。關掉會一起殺掉裡面在跑的東西。
-            </p>
-            <div className="modal-actions">
-              <button type="button" className="btn" onClick={() => setConfirming(null)}>
-                取消
-              </button>
-              <button type="button" className="btn danger" onClick={() => void close(confirming, true)}>
-                關閉
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
+            </>
+          ) : null
+        }
+        onConfirm={() => confirming && void close(confirming, true)}
+        onCancel={() => setConfirming(null)}
+      />
     </section>
   )
 }
