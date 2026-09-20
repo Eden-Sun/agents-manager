@@ -8,7 +8,7 @@
 #   {"first_red_sha","first_red_run","issue","assigned","failures":[…]}
 # 只看已完成的 run；cancelled／skipped 等不算紅也不算綠（不改變狀態）。gh 失敗／rate limit 這輪什麼都不做。
 #
-#   AGM_DIR、AGM_REPO、AGM_CI_BOT、AGM_LOCK_STALE_SECS、AGM_LOCK_HUNG_SECS、AGM_EXTRA_PATH 可覆寫（測試用）。
+#   AGM_DIR、AGM_REPO、AGM_CI_BOT、AGM_LOCK_STALE_SECS、AGM_LOCK_HUNG_SECS、AGM_FAIL_ALERT_AFTER、AGM_EXTRA_PATH 可覆寫（測試用）。
 set -u
 PATH="${AGM_EXTRA_PATH-/opt/homebrew/bin:/usr/local/bin}:$PATH"; export PATH   # AGM_EXTRA_PATH 只給測試蓋掉
 
@@ -21,6 +21,9 @@ STATE="$DIR/ci-watch.state.json"
 OWNER="${AM_AGENT_NAME:-ci-watch-kick}"
 LABEL="ci-red"
 
+FAILS="$DIR/ci-watch.fails"      # 連續幾輪沒能完成檢查（完成一次就清掉）
+FAIL_ALERT_AFTER=${AGM_FAIL_ALERT_AFTER:-6}   # 每 10 分鐘一輪＝連續約 1 小時
+
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
 
 [ -x "$AGM" ] || exit 0
@@ -30,6 +33,19 @@ alert() { # alert <reason> <detail>：一則 durable inbox 事件（同 source+r
   "$AGM" --compact ops-alert --source "$OWNER" --reason "$1" --detail "$2" >> "$LOG" 2>&1 ||
     log "推 ops-alert 失敗（舊 CLI 或 daemon 不在），只留在這份 log"
 }
+
+# 這一輪沒能完成檢查（gh 被 rate limit／登入過期／網路斷）。一次抖動不吵人，但連續 FAIL_ALERT_AFTER 輪就推 ops_alert：
+# 以前只寫 local log，gh 登入過期後盯哨永遠安靜，等於 #211（CI 連紅好幾天沒人發現）換一種方式重演。
+fail_run() { # fail_run <log 訊息>
+  log "$1"
+  _n=$(cat "$FAILS" 2>/dev/null)
+  case "$_n" in ''|*[!0-9]*) _n=0 ;; esac
+  _n=$((_n + 1))
+  echo "$_n" > "$FAILS"
+  [ "$_n" -ge "$FAIL_ALERT_AFTER" ] && alert check_failing "main CI 盯哨連續 ${_n} 輪沒能完成檢查（等於沒在盯）：${1}"
+  exit 0
+}
+ran_ok() { rm -f "$FAILS" 2>/dev/null; return 0; }
 
 # launchd 的預設 PATH 不含 Homebrew；缺依賴不能只靜默 exit 0，否則「已排程」但永遠不盯（#66 留言）。
 command -v python3 >/dev/null 2>&1 || { alert missing_dependency "找不到 python3（PATH=${PATH}），main CI 盯哨停住"; exit 0; }
@@ -86,8 +102,7 @@ cd "$REPO" 2>/dev/null || { log "進不了 ${REPO}，跳過"; exit 0; }   # gh �
 # 1. 抓最近的 run。失敗（網路、rate limit、沒登入）＝這輪什麼都不做，不改狀態、不誤報紅或綠。
 RUNS="$WORK/runs.json"
 if ! gh run list --branch main --workflow CI -L 20 --json databaseId,conclusion,status,headSha,createdAt,url > "$RUNS" 2> "$WORK/err"; then
-  log "gh run list 失敗，這輪不動：$(head -c 200 "$WORK/err" | tr '\n' ' ')"
-  exit 0
+  fail_run "gh run list 失敗，這輪不動：$(head -c 200 "$WORK/err" | tr '\n' ' ')"
 fi
 
 # 2. 分析：只看已完成的；success 算綠、failure／timed_out／startup_failure 算紅，其他（cancelled、skipped…）當沒看到。
@@ -118,7 +133,7 @@ print("verdict=red"); kv("", latest); kv("first_", first)
 prev = done[i + 1] if i + 1 < len(done) else {}
 print("prev_green_sha=%s" % (prev.get("headSha") or ""))
 print("red_runs=%d" % (i + 1))
-' "$RUNS") || { log "gh run list 的輸出看不懂，這輪不動"; exit 0; }
+' "$RUNS") || fail_run "gh run list 的輸出看不懂，這輪不動"
 field() { printf '%s\n' "$ANALYSIS" | sed -n "s/^$1=//p" | head -1; }
 VERDICT=$(field verdict)
 RUN_ID=$(field run); RUN_SHA=$(field sha); RUN_URL=$(field url)
@@ -144,16 +159,16 @@ json.dump({"first_red_sha": sha, "first_red_run": run, "issue": int(issue) if is
 S_SHA=$(state_get first_red_sha)
 
 case "$VERDICT" in
-  none) exit 0 ;;
+  none) ran_ok; exit 0 ;;
   green)
-    [ -n "$S_SHA" ] || exit 0    # 本來就綠：安靜
+    [ -n "$S_SHA" ] || { ran_ok; exit 0; }    # 本來就綠：安靜
     S_ISSUE=$(state_get issue)
     if [ -n "$S_ISSUE" ]; then
       if ! gh issue comment "$S_ISSUE" --body "${RUN_SHA} 起恢復綠，run ${RUN_ID}${RUN_URL:+（${RUN_URL}）}。這張 issue 不會自動關，請修的人確認後關掉。" >> "$LOG" 2>&1; then
-        log "issue #${S_ISSUE} 留言失敗，狀態先不清，下一輪再試"; exit 0
+        fail_run "issue #${S_ISSUE} 留言失敗，狀態先不清，下一輪再試"
       fi
     fi
-    rm -f "$STATE"
+    rm -f "$STATE"; ran_ok
     log "恢復綠：${RUN_SHA:0:8}（run ${RUN_ID}）${S_ISSUE:+，已在 issue #${S_ISSUE} 留言}"
     exit 0 ;;
   red) ;;
@@ -164,8 +179,7 @@ FIRST_SHA=$(field first_sha); FIRST_RUN=$(field first_run); FIRST_URL=$(field fi
 
 # 3. 失敗清單：從最新一個紅 run 的 --log-failed 抽。抓不到就這輪不動（沒有清單就開不出有用的 issue）。
 if ! gh run view "$RUN_ID" --log-failed > "$WORK/failed.log" 2> "$WORK/err"; then
-  log "gh run view ${RUN_ID} --log-failed 失敗，這輪不動：$(head -c 200 "$WORK/err" | tr '\n' ' ')"
-  exit 0
+  fail_run "gh run view ${RUN_ID} --log-failed 失敗，這輪不動：$(head -c 200 "$WORK/err" | tr '\n' ' ')"
 fi
 FAILURES=$(python3 -c '
 import json, re, sys
@@ -250,17 +264,16 @@ old = json.loads(sys.argv[1]); print(json.dumps(old + [n for n in json.loads(sys
     fi
   fi
   state_write "$S_SHA" "$FIRST_RUN" "${S_ISSUE:-}" "${S_ASSIGNED:-false}" "$S_FAILS"
-  exit 0
+  ran_ok; exit 0
 fi
 
 # 4b. 新的一段紅。狀態檔可能只是遺失：先看有沒有現成開著的 ci-red issue，有就接手、不重開、不重派。
 if ! EXISTING=$(gh issue list --label "$LABEL" --state open --json number --limit 1 -q '.[0].number // empty' 2> "$WORK/err"); then
-  log "gh issue list 失敗，這輪不動：$(head -c 200 "$WORK/err" | tr '\n' ' ')"
-  exit 0
+  fail_run "gh issue list 失敗，這輪不動：$(head -c 200 "$WORK/err" | tr '\n' ' ')"
 fi
 if [ -n "$EXISTING" ]; then
   state_write "$FIRST_SHA" "$FIRST_RUN" "$EXISTING" true "$FAILURES"
-  log "已有開著的 ${LABEL} issue #${EXISTING}，接手這一段紅（${FIRST_SHA:0:8}），不重開、不重派"
+  ran_ok; log "已有開著的 ${LABEL} issue #${EXISTING}，接手這一段紅（${FIRST_SHA:0:8}），不重開、不重派"
   exit 0
 fi
 
@@ -278,8 +291,7 @@ if [ "$NFAIL" -gt 0 ]; then TITLE="CI 紅了：${FIRST_SHA:0:8} 起 ${NFAIL} 條
   printf '## 嫌疑 commit（上一個綠的 `%s` 之後）\n```\n%s\n```\n' "${PREV_GREEN:0:8}" "$SUSPECTS"
 } > "$WORK/issue.md"
 if ! URL=$(gh issue create --title "$TITLE" --label "$LABEL" --body-file "$WORK/issue.md" 2> "$WORK/err"); then
-  log "開 issue 失敗，下一輪再試：$(head -c 200 "$WORK/err" | tr '\n' ' ')"
-  exit 0
+  fail_run "開 issue 失敗，下一輪再試：$(head -c 200 "$WORK/err" | tr '\n' ' ')"
 fi
 ISSUE=$(printf '%s\n' "$URL" | tail -1 | sed 's|.*/||')
 case "$ISSUE" in ''|*[!0-9]*) log "開了 issue 但讀不到編號（${URL}），狀態不寫，下一輪會用現成的 ${LABEL} issue 接手"; exit 0 ;; esac
@@ -291,4 +303,5 @@ if dispatch "$ISSUE"; then
 else
   log "派工失敗（issue #${ISSUE}），下一輪補派"
 fi
+ran_ok
 exit 0

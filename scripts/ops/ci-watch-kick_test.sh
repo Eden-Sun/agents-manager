@@ -258,6 +258,23 @@ bash "$SCRIPT"
 equals "下一輪重試就開成功" "$(creates)" "1"
 teardown
 
+# 7c. 連續 gh 失敗：一次抖動不吵人，連續 N 輪就推 ops_alert（不能永遠只有 log）；成功一輪就清零。
+setup
+mk_runs 5:success 4:success
+export STUB_GH_FAIL=1 AGM_FAIL_ALERT_AFTER=3
+bash "$SCRIPT"; bash "$SCRIPT"
+check_no "連續 2 輪還不喊人" "ops-alert" "$AGM_DIR/calls.log"
+bash "$SCRIPT"
+check "連續 3 輪推 check_failing" "ops-alert.*check_failing" "$AGM_DIR/calls.log"
+unset STUB_GH_FAIL
+bash "$SCRIPT"
+[ ! -e "$AGM_DIR/ci-watch.fails" ] && { echo "ok   - 成功一輪就清零"; PASS=$((PASS + 1)); } || { echo "FAIL - 成功一輪就清零"; FAIL=$((FAIL + 1)); }
+: > "$AGM_DIR/calls.log"; export STUB_GH_FAIL=1
+bash "$SCRIPT"; bash "$SCRIPT"
+check_no "清零後重新累計" "ops-alert" "$AGM_DIR/calls.log"
+unset AGM_FAIL_ALERT_AFTER
+teardown
+
 # 8. cancelled／skipped／進行中不算紅也不算綠。
 setup
 mk_runs 6:cancelled 5:skipped 4:success 3:failure:in_progress
