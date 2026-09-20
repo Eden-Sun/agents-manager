@@ -1,5 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { listDirs } from '../api'
+import { createLatestOnly } from '../lib/latestOnly'
 import type { DirListing } from '../api/types'
 import './dirPicker.css'
 
@@ -41,11 +42,15 @@ export function DirPicker({
   const listId = useId()
   const optId = (i: number) => `${listId}-opt-${i}`
 
+  // 手動輸入路徑的表單不看 `busy`，可以疊送：只採最後一次的結果，不然停在舊路徑、選到不是最後輸入的目錄。
+  const latest = useRef(createLatestOnly()).current
   const load = (path?: string, opts?: { hidden?: boolean; keep?: string }) => {
+    const ticket = latest.begin()
     setBusy(true)
     setError(null)
     listDirs(path, host, opts?.hidden ?? hidden)
       .then((l) => {
+        if (!latest.isCurrent(ticket)) return
         setListing(l)
         setManual(l.path)
         setEditing(false)
@@ -55,8 +60,12 @@ export function DirPicker({
         setSel(back)
         filterRef.current?.focus()
       })
-      .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
-      .finally(() => setBusy(false))
+      .catch((e: unknown) => {
+        if (latest.isCurrent(ticket)) setError(e instanceof Error ? e.message : String(e))
+      })
+      .finally(() => {
+        if (latest.isCurrent(ticket)) setBusy(false)
+      })
   }
 
   useEffect(() => {
