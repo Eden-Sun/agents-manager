@@ -755,7 +755,7 @@ cancel 撤掉的是還沒送出的那則時，review 回應不再帶「turn 還�
 （`--resume` 起的 claude 由 §6.5.2 的閘門等驗證完才送）。新 agent 起來了、只是 `running` 寫不進去（`start_state_uncommitted`）時，
 它起來時的 idle 邊與 `SessionStart` 早在 `starting` 就過了、對帳收成 `running` 又不叫 flush，所以跟 §6.2 的 `start_if_stopped`
 （#152）一樣在背景等 run 收成 `running` 再叫 flush（子 agent 的原地重啟同，#165）。重啟沒能把 bot 開回來才當孤兒撤（說明寫「重啟之後沒能把 bot 開回來」）。
-只放行程記憶體：daemon 在重啟途中掛掉，開機後那顆沒有 run、標記也不在，照舊收掉。子 agent 的原地重啟（§6.9）不走 `restart_bot_with`，
+hold 是行程記憶體，但被打斷的重啟由持久的 `restart` intent（#355）接回（#378）：開機**在對帳之前**（`restart_hold::adopt_open_intents`）把每件還開著的 `restart` intent 灌成一個 hold，`restart_intents::recover_host` 把那件 intent 收尾（done／abandoned／failed／過期；補不成重試期間也留著）才放掉——recovery 補完之前對帳收尾舊 run、回合結束事件、sweeper 都不會把排著的派工當孤兒撤掉。子 agent 的原地重啟（§6.9）不走 `restart_bot_with`，
 但停舊 run 到寫入新 run 那一段同樣宣告進行中（#129）；新 run 寫不進去或 `agent.start` 失敗時憑證已經放掉，照舊當孤兒撤。
 
 **目標身分沒額度就不送**（issue #108，`lifecycle::quota_hold`）：撞額度的回合被 `StopFailure` 收掉之後，回合結束的事件照例叫醒 flush，
