@@ -162,12 +162,14 @@ pub async fn start_bot_locked_with(app: &Arc<App>, bot_id: &str, opts: StartOpts
     let run_id = db::ulid();
     let started_identity = bot.identity.as_deref().map(str::trim).unwrap_or("").to_string();
     let ins = sqlx::query(
-        "INSERT INTO runs (id, bot_id, state, agent_status, herdr_session, runtime_identity, started_at) VALUES (?,?,'starting','unknown',?,?,?)",
+        "INSERT INTO runs (id, bot_id, state, agent_status, herdr_session, runtime_identity, launch_rev, started_at) VALUES (?,?,'starting','unknown',?,?,?,?)",
     )
     .bind(&run_id)
     .bind(bot_id)
     .bind(&session)
     .bind(&started_identity)
+    // 這個 run 載入的啟動設定版本（#353）：之後 config 改了、版本對不上＝需要重啟，不靠 PATCH 回應裡那個會遺失的布林。
+    .bind(crate::launch_rev::of(&bot))
     .bind(db::now())
     .execute(&app.db)
     .await;

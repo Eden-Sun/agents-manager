@@ -633,6 +633,9 @@ pub struct Run {
     /// claude 原生 SubagentStart／SubagentStop 的最後一筆快照（issue #82）。純可見性，`hookrecv` 是
     /// 唯一寫入者；不影響 §6.5a 的血緣認領。
     pub subagent_json: Option<String>,
+    /// 這個 run 啟動時載入的啟動設定版本（`launch_rev::of`）；NULL＝沒記（adopt 來的、升版前的舊列），不誤報「需重啟」。
+    #[sqlx(default)]
+    pub launch_rev: Option<String>,
 }
 
 impl Run {
