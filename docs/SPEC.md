@@ -1793,57 +1793,69 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
 - **記憶體**：一顆 claude 的常駐大約在數百 MB 級別，這條規則的價值就是把「幾小時沒人理」的那幾顆
   從 RSS 裡拿掉，而使用者下次打字時看不出差別（多的只有 resume 起來那幾秒）。
 
-### 6.12 預覽模式：頂層 bot 的 vite dev server（issue #253，2026-09-19）
+### 6.12 預覽模式：頂層 bot 的本機 dev server（issue #253，2026-09-19；2026-09-20 從 vite 擴大成任何 dev server）
 
 > 使用者：「右半平面可以針對這個 parent bot 設定為 preview，目的是打開 vite dev server。」
+> 「還要可以直接選擇本機已開的 vite」「:3200 一直沒被看到」（那顆是 `next-server`）→ 擴大成本機 dev server 預覽。
 
-改 UI 的 bot 做完，人在同一個畫面就看得到結果，不必自己開終端跑 `cd web && npx vite`。實作在 `daemon/src/preview.rs`。
+改 UI 的 bot 做完，人在同一個畫面就看得到結果，不必自己開終端跑 dev server。實作在 `daemon/src/preview.rs`。endpoint 路徑
+仍是 `/preview`；文件與 UI 的字眼是「dev server」，不只 vite。
 
 - **誰能開**：只有頂層 bot（`parent_bot_id IS NULL` 且 `managed_by = 'user'`）；子 agent、team 成員 409 `not_top_level`。
   user 自己 `default` session 匯入的 bot 409 `default_session`（daemon 不往使用者的 session 多開 pane）。
-  只給本機：iframe 連的是瀏覽器所在機器上的 port，遠端主機上的 vite 連不到，409 `remote_host`。
-  bot 沒在跑（沒有 running 的 run／pane）409 `bot_not_running`：pane 要切在它旁邊。
-- **偵測**：目錄取 `bots.cwd`，沒有就用專案路徑；在它底下**有界地往下找**——最多 3 層（`<dir>` 是第 0 層）、最多走過 2000 個目錄、
-  最多留 20 個候選；有 `vite.config.{ts,mts,js,mjs}` 的全部列成**候選**（`candidates`），找到設定的目錄不再往裡面找。順序：`<dir>` 本身、
-  `<dir>/web`，其餘照（層數、路徑）排序，第一個是預設。略過隱藏目錄（`.git`、`.claude`…）與 `node_modules`、`target`、`dist`、
-  `build`、`worktrees`、`vendor`（別份 checkout 不是這顆 bot 的工作樹）；不跟 symlink。都沒有 409 `no_vite_config`，`tried`
-  列出試過的路徑（更深的寫成 `<dir>/**/vite.config.*（最多 3 層）`）。專案層的指令覆寫不在 v1。
-- **先接既有的**（2026-09-20 使用者：「有的已經啟動 vite 了，應該先自動偵測 vite 目錄」）：啟動前先掃本機在 listen 的
-  vite 行程（`ps` 命令列有 `vite`／`…/vite`／`vite.js` 這個字，`vitest` 不算；再各問一次 `lsof`：listen port 與 cwd）。
-  - cwd **正好是這顆 bot 的候選目錄**（同一份 checkout）→ 直接接上，不另起：`source: "attached"`、`status: running`、
-    沒有 pane，記 `pid`。
-  - **只自動接 `same_dir`**。本機**所有**在 listen 的 vite 都列在回應的 `others`（只在沒有預覽在用時掃），使用者可以用
-    `mode=attach` 直接挑任何一顆，包括別的專案（2026-09-20 使用者：「還要可以直接選擇本機已開的 vite」）。每筆
-    `{port, dir, pid, relation, repo}`：`relation` 是 `same_dir`（cwd 正好是這顆 bot 的候選目錄）／`same_repo`（同一個 repo
-    的別份 checkout：`git rev-parse --git-common-dir` 相同，或兩邊都有 `remote.origin.url` 而且相同）／`other`（別的專案；
-    判不出來——不是 git、git 讀不到——也退成 `other`；這顆 bot 屬於哪個 repo 看它自己的工作目錄，跟有沒有找到 vite 設定無關）；`repo` 是給 UI 分組的 repo 名（common dir 是 `<repo>/.git` 就取
-    `<repo>`，不是 git 用目錄名）。排序 same_dir、same_repo、other，各自依 port。非 `same_dir` 看到的不是這顆 bot 工作樹裡的程式碼，
-    所以不自動接，UI 要標清楚。
+  只給本機：iframe 連的是瀏覽器所在機器上的 port，遠端主機上的 server 連不到，409 `remote_host`。
+  bot 沒在跑（沒有 running 的 run／pane）409 `bot_not_running`：要起新的才需要，pane 要切在它旁邊；接上既有的不需要。
+- **候選目錄**（`candidates`）：目錄取 `bots.cwd`，沒有就用專案路徑；在它底下**有界地往下找**——最多 3 層（`<dir>` 是第 0 層）、
+  最多走過 2000 個目錄、最多留 20 個。一個目錄算候選，若有 `vite.config.{ts,mts,js,mjs}`，**或** `package.json` 的 `scripts.dev`
+  非空。有 vite 設定的目錄不再往裡面找；只有 `dev` script 的不擋住往下找（monorepo 根目錄常有 `turbo run dev`，真正的 app 在裡面）。
+  順序：`<dir>` 本身、`<dir>/web`，其餘照（層數、路徑）排序，第一個是預設。略過隱藏目錄（`.git`、`.claude`…）與 `node_modules`、
+  `target`、`dist`、`build`、`worktrees`、`vendor`（別份 checkout 不是這顆 bot 的工作樹）；不跟 symlink。都沒有 409
+  `no_vite_config`（名字沿用），`tried` 列出試過的路徑。`candidate_info` 是每個候選會跑的那一行。專案層的指令覆寫不在 v1。
+- **本機有哪些 dev server**（`others`，只在沒有預覽在用時掃）：掃本機**在 listen 的行程**（`ps` 命令列、`lsof` 全機 listen 的 port、
+  再問那些 pid 的 cwd），符合**任一**條才列：
+  1. 命令列對得上已知的 dev server（`kind`）：`vite`、`next`（`next-server`、`next dev|start`）、`webpack`（`webpack`／`webpack-dev-server`）、
+     `astro`、`remix`、`storybook`、`nuxt`（`nuxt`／`nuxi`）、`rsbuild`、`parcel`、`angular`（`ng serve`）、`react-scripts`、`bun`（`bun --hot`）；
+     看的是命令列每個字的檔名部分，所以 `vitest`、`vitepress`、`next build` 不算；
+  2. **或行程的 cwd 落在 AG Man 認得的任何一個本機專案路徑底下**（`kind: "unknown"`）——免得追著框架名字跑，`next-server` 就是靠這條
+     才在 wits-ops 的專案裡被抓到。
+  其餘一律不列；AG Man 自己、herdr、ssh／sshd、資料庫這類常駐程式即使 cwd 在專案底下也不列（不把 7788 倒出來）。
+  每筆 `{port, dir, pid, kind, relation, repo}`：
+  - `relation`：`same_dir`（cwd 是這顆 bot 的候選目錄，**或就是它的工作目錄**）／`same_repo`（同一個 repo 的別份 checkout：
+    `git rev-parse --git-common-dir` 相同，或兩邊都有 `remote.origin.url` 而且相同）／`other`（別的專案；判不出來也退成 `other`）。
+    **這顆 bot 屬於哪個 repo、什麼算同一個目錄，一律看它自己的工作目錄（`bots.cwd`／專案路徑）**，跟有沒有找到候選、有沒有 vite 設定無關。
+  - `repo`：給 UI 分組的 repo 名（common dir 是 `<repo>/.git` 就取 `<repo>`，不是 git 用目錄名）。
+  - 排序 same_dir、same_repo、other，各自依 port。
+- **先接既有的**：`POST`（`mode=auto`）啟動前先用同一份掃描找 `same_dir`：cwd 是候選目錄或 bot 工作目錄的那顆，**直接接上，不另起**：
+  `source: "attached"`、`status: running`、沒有 pane，記 `pid` 與 `kind`。非 `same_dir` 的（別份 checkout、別的專案）看到的不是這顆 bot
+  工作樹裡的程式碼，不自動接，使用者用 `mode=attach` 明確挑，清單上任何一顆（包括 `other`）都能接。
   - **接上的只斷開、絕不砍人**：`DELETE`、bot 停止／刪除／閒置收掉時，`attached` 那列只標 `off`，不關任何 pane、不 kill 任何行程。
-    只有 `source: "spawned"`（自己起的）才關 pane。接上的 vite 自己結束（port 不再 listen）→ 轉 `off`（不是 `failed`）；
+    只有 `source: "spawned"`（自己起的）才關 pane。接上的 server 自己結束（port 不再 listen）→ 轉 `off`（不是 `failed`）；
     接上的預覽跟 bot 有沒有在跑無關，只看它自己的 port。
-  - `POST` 的 `mode`：`auto`（預設，同目錄有就接、沒有就起）／`attach`（必須帶 `port`，且那個 port 真的是掃到的 vite，
-    否則 409 `not_vite`）／`spawn`（不管有沒有現成的都自己起）；`dir` 從 `candidates` 挑要用哪個目錄。明確指定
-    （mode／port／dir 任何一個）而且已經有預覽在用時，先斷開舊的再照新的來；沒指定就原樣回舊的（冪等）。
-  - 掃描（`PreviewEnv::scan_vites`）與行程／port 查詢一樣可注入，測試不碰真行程（#211）。掃不到只影響「自動接」與 `others`，不擋 spawn。
-- **在哪跑**：`pane.split`（方向往下，只吃高度、不擠寬度）切在**該 bot 自己那顆 pane 旁邊**，也就是它自己的 tab
-  （開新 tab 會被 reconcile 串成鏈、長出重複 bot）。指令 `bunx vite --host <bind> --port <port> --strictPort`；
-  `<bind>` 看 daemon 的 `allow_lan`：開著 `0.0.0.0`，否則 `127.0.0.1`。
-- **port**：從 5180 起往上找 100 顆，跳過別的預覽佔著的（`starting`／`running` 的列）與當下有人在 listen 的；
-  5173 留給人手開。`failed`／`off` 的列不佔 port。
-- **狀態**（`bot_previews` 一顆 bot 一列，多 `source`／`pid`；沒有列＝`off`）：
+  - `POST` 的 `mode`：`auto`（預設）／`attach`（必須帶 `port`，且那個 port 真的是掃到的 dev server，否則 409 `not_vite`）／`spawn`
+    （不管有沒有現成的都自己起）；`dir` 從 `candidates` 挑。明確指定（mode／port／dir 任何一個）而且已經有預覽在用時，先斷開舊的
+    再照新的來；沒指定就原樣回舊的（冪等）。
+  - 掃描（`PreviewEnv::scan_servers`）、pane 的 listen port（`pane_ports`）與其他行程／port 查詢一樣可注入，測試不碰真行程（#211）。
+    掃不到只影響「自動接」與 `others`，不擋 spawn。
+- **起新的**：`pane.split`（方向往下，只吃高度、不擠寬度）切在**該 bot 自己那顆 pane 旁邊**，也就是它自己的 tab
+  （開新 tab 會被 reconcile 串成鏈、長出重複 bot）。要跑的那一行（回應與資料庫的 `command`）：
+  - 目錄的 `package.json` 有 `dev` script → **`bun run dev`**。**不硬塞 port**：server 自己挑，起來之後觀察那顆 pane 的行程樹
+    **實際 listen 到哪個 port**（`PreviewEnv::pane_ports`，多個取最小的）記進 `port`；在那之前 `port` 是 `null`。
+  - 沒有才退回 `bunx vite --host <bind> --port <port> --strictPort`；`<bind>` 看 daemon 的 `allow_lan`：開著 `0.0.0.0`，否則
+    `127.0.0.1`；`<port>` 從 5180 起往上找 100 顆，跳過別的預覽佔著的（`starting`／`running` 的列）與當下有人在 listen 的
+    （5173 留給人手開）。`failed`／`off` 的列不佔 port。
+- **狀態**（`bot_previews` 一顆 bot 一列，另有 `source`／`pid`／`command`／`kind`；沒有列＝`off`）：
 
   | 從 | 條件 | 到 |
   |---|---|---|
-  | `starting` | port 開始 listen | `running` |
+  | `starting` | port 開始 listen（dev script 起的：pane 的行程樹出現 listen port） | `running` |
   | `starting` | pane 已經不在 | `failed`（error 帶原因與 pane 最後 40 行） |
-  | `starting` | 啟動起 60 秒 port 還沒 listen | `failed`（同上） |
+  | `starting` | 啟動起 60 秒沒偵測到 listen 的 port | `failed`（同上） |
   | `running` | pane 被關了 | `off`（使用者關的，不是錯） |
-  | `running` | pane 在、port 不再 listen | `failed`（vite 自己掛了；`attached` 是 `off`） |
+  | `running` | pane 在、port 不再 listen | `failed`（server 自己掛了；`attached` 是 `off`） |
 
   herdr 沒回答（`pane_alive` 問不到）當「沒變」，不當「不在」。`failed` 之後再 `POST` 就是重試：舊 pane 已收、port 重挑。
 - **誰在看**：`POST` 之後有背景 watcher 每秒看一次，離開 `starting` 就結束；`GET` 與開機（`reconcile_all`）各做一次同樣的
-  對帳（pane 還在不在＋port 有沒有在 listen）。`running` 之後沒有常駐輪詢，vite 半路掛掉要等下一次 `GET` 才會轉 `failed`。
+  對帳（pane 還在不在＋port 有沒有在 listen）。`running` 之後沒有常駐輪詢，server 半路掛掉要等下一次 `GET` 才會轉 `failed`。
   對帳時 bot 已經沒有 active run（自己退了）預覽也一併收成 `off`。
 - **收掉**：`DELETE`、bot 被停止／重啟／刪除、§6.11 閒置收 bot（它們都走 `stop_locked`）一律先關預覽 pane 再動 agent 的 pane——
   預覽的 pane 跟 agent 同一個 tab，先收它，agent 的 pane 關掉時那個 tab 才會是空的、才會被一起關。

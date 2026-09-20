@@ -16,6 +16,8 @@ struct FakeEnv {
     vites: StdMutex<Vec<ViteProc>>,
     /// 目錄 → 它的 repo；沒登記＝判不出來。
     repos: StdMutex<HashMap<String, RepoKey>>,
+    /// pane → 它的行程樹 listen 的 port（dev script 起的 server 自己挑的）。
+    pane_ports: StdMutex<HashMap<String, Vec<u16>>>,
 }
 
 impl FakeEnv {
@@ -29,7 +31,14 @@ impl FakeEnv {
         self.alive.lock().unwrap().remove(pane);
     }
     fn vite(&self, pid: i32, port: u16, cwd: &str) {
-        self.vites.lock().unwrap().push(ViteProc { pid, port, cwd: cwd.into() });
+        self.server(pid, port, cwd, "vite");
+    }
+    fn server(&self, pid: i32, port: u16, cwd: &str, kind: &str) {
+        self.vites.lock().unwrap().push(ViteProc { pid, port, cwd: cwd.into(), kind: kind.into() });
+        self.listen(port);
+    }
+    fn pane_listens(&self, pane: &str, port: u16) {
+        self.pane_ports.lock().unwrap().entry(pane.into()).or_default().push(port);
         self.listen(port);
     }
     fn repo(&self, dir: &str, common: &str, origin: Option<&str>) {
@@ -72,8 +81,11 @@ impl PreviewEnv for FakeEnv {
     fn port_listening(&self, port: u16) -> BoxFuture<'_, bool> {
         Box::pin(async move { self.listening.lock().unwrap().contains(&port) })
     }
-    fn scan_vites(&self) -> BoxFuture<'_, Option<Vec<ViteProc>>> {
+    fn scan_servers<'a>(&'a self, _roots: &'a [String]) -> BoxFuture<'a, Option<Vec<ViteProc>>> {
         Box::pin(async move { Some(self.vites.lock().unwrap().clone()) })
+    }
+    fn pane_ports<'a>(&'a self, pane_id: &'a str) -> BoxFuture<'a, Option<Vec<u16>>> {
+        Box::pin(async move { Some(self.pane_ports.lock().unwrap().get(pane_id).cloned().unwrap_or_default()) })
     }
     fn repo_key<'a>(&'a self, dir: &'a str) -> BoxFuture<'a, Option<RepoKey>> {
         Box::pin(async move { self.repos.lock().unwrap().get(dir).cloned() })
@@ -90,7 +102,7 @@ fn dirs(cwd: &str, files: &[&str], subs: &[(&str, &[&str])]) -> Result<Vec<PathB
     let files: HashSet<PathBuf> = files.iter().map(PathBuf::from).collect();
     let subs: HashMap<PathBuf, Vec<PathBuf>> =
         subs.iter().map(|(d, v)| (PathBuf::from(d), v.iter().map(PathBuf::from).collect())).collect();
-    detect_dirs(Path::new(cwd), |p| files.contains(p), |d| subs.get(d).cloned().unwrap_or_default())
+    detect_dirs(Path::new(cwd), |p| files.contains(p), |d| subs.get(d).cloned().unwrap_or_default(), |_| false)
 }
 
 #[test]
@@ -176,43 +188,88 @@ fn detect_reports_what_it_tried() {
 }
 
 #[test]
-fn vite_commands_are_told_apart_from_lookalikes() {
-    assert!(is_vite_command("node /x/node_modules/.bin/vite --port 5173"));
-    assert!(is_vite_command("bun x vite --host 0.0.0.0"));
-    assert!(is_vite_command("node /x/node_modules/vite/bin/vite.js"));
-    assert!(!is_vite_command("node /x/node_modules/.bin/vitest run"));
-    assert!(!is_vite_command("vim vite.config.ts"));
-    assert!(!is_vite_command("/usr/bin/vitepress dev"));
+fn dev_servers_are_recognised_by_command_line() {
+    for (cmd, kind) in [
+        ("node /x/node_modules/.bin/vite --port 5173", "vite"),
+        ("bun x vite --host 0.0.0.0", "vite"),
+        ("node /x/node_modules/vite/bin/vite.js", "vite"),
+        ("next-server (v16.3.5)", "next"),
+        ("node /x/node_modules/.bin/next dev -p 3200", "next"),
+        ("node /x/node_modules/.bin/webpack serve", "webpack"),
+        ("node /x/webpack-dev-server --hot", "webpack"),
+        ("node /x/.bin/astro dev", "astro"),
+        ("node /x/.bin/remix-serve build", "remix"),
+        ("node /x/.bin/storybook dev -p 6006", "storybook"),
+        ("node /x/.bin/nuxi dev", "nuxt"),
+        ("node /x/.bin/rsbuild dev", "rsbuild"),
+        ("node /x/.bin/parcel src/index.html", "parcel"),
+        ("node /x/.bin/ng serve", "angular"),
+        ("node /x/.bin/react-scripts start", "react-scripts"),
+        ("bun --hot server.ts", "bun"),
+    ] {
+        assert_eq!(dev_kind(cmd), Some(kind), "{cmd}");
+    }
+    for cmd in ["node /x/.bin/vitest run", "vim vite.config.ts", "/usr/bin/vitepress dev", "node /x/.bin/next build", "bun run build", "/usr/sbin/sshd -D", "ng build"] {
+        assert_eq!(dev_kind(cmd), None, "{cmd}");
+    }
 }
 
 #[test]
-fn ps_and_lsof_output_join_into_vite_procs() {
-    let ps = "  101 node /a/node_modules/.bin/vite --port 5241
-  102 vim notes
- 103 bunx vite --strictPort
-  104 node vitest
-";
-    assert_eq!(parse_ps_vites(ps), vec![101, 103]);
-    let cwd = parse_lsof_cwd("p101
-fcwd
-n/a/web
-p103
-fcwd
-n/b/web/
-");
-    assert_eq!(cwd[&101], "/a/web");
-    let ports: HashMap<i32, Vec<u16>> = [(101, vec![5241]), (103, vec![5173, 5174]), (999, vec![1])].into();
-    let procs = join_vites(&ports, &cwd);
-    assert_eq!(procs.len(), 3, "沒有 cwd 的 999 不算");
-    assert_eq!(procs[0], ViteProc { pid: 103, port: 5173, cwd: "/b/web/".into() });
+fn a_listener_counts_by_command_or_by_living_under_a_project() {
+    let roots = vec!["/home/wt".to_string()];
+    assert_eq!(classify_listener("next-server (v16)", "/elsewhere", &roots), Some("next"));
+    assert_eq!(classify_listener("node server.js", "/home/wt/witsper-ops", &roots), Some("unknown"));
+    assert_eq!(classify_listener("node server.js", "/home/wt", &roots), Some("unknown"));
+    assert_eq!(classify_listener("node server.js", "/home/wt-other/x", &roots), None, "前綴相同不算底下");
+    assert_eq!(classify_listener("node server.js", "/elsewhere", &roots), None);
+    // 7788、ssh、資料庫不列，即使 cwd 在專案底下。
+    for c in ["/x/target/release/agents-managerd serve", "ssh -N host", "/usr/local/bin/postgres -D data", "herdr server"] {
+        assert_eq!(classify_listener(c, "/home/wt/agents-manager", &roots), None, "{c}");
+    }
+}
+
+#[test]
+fn join_servers_filters_and_labels_listeners() {
+    let ports: HashMap<i32, Vec<u16>> = [(1, vec![3200]), (2, vec![7788]), (3, vec![22]), (4, vec![9999]), (5, vec![5173, 5174])].into();
+    let cwds: HashMap<i32, String> = [
+        (1, "/home/wt/witsper-ops".to_string()),
+        (2, "/home/wt/agents-manager".to_string()),
+        (3, "/home/wt".to_string()),
+        (4, "/unrelated".to_string()),
+        (5, "/unrelated/web".to_string()),
+    ]
+    .into();
+    let cmds: HashMap<i32, String> = [
+        (1, "next-server (v16.3.5)".to_string()),
+        (2, "/x/agents-managerd serve".to_string()),
+        (3, "sshd: me".to_string()),
+        (4, "node other.js".to_string()),
+        (5, "node /x/.bin/vite".to_string()),
+    ]
+    .into();
+    let got = join_servers(&ports, &cwds, &cmds, &["/home/wt".to_string()], 999);
+    let brief: Vec<(u16, &str)> = got.iter().map(|p| (p.port, p.kind.as_str())).collect();
+    assert_eq!(brief, vec![(3200, "next"), (5173, "vite"), (5174, "vite")]);
+    // 自己的 pid 不列。
+    assert!(join_servers(&ports, &cwds, &cmds, &["/home/wt".to_string()], 1).iter().all(|p| p.port != 3200));
+}
+
+#[test]
+fn package_json_dev_script_and_the_command_that_follows() {
+    assert_eq!(parse_dev_script(r#"{"scripts":{"dev":"next dev -p 3200","build":"x"}}"#).as_deref(), Some("next dev -p 3200"));
+    assert_eq!(parse_dev_script(r#"{"scripts":{"build":"x"}}"#), None);
+    assert_eq!(parse_dev_script(r#"{"scripts":{"dev":"  "}}"#), None);
+    assert_eq!(parse_dev_script("not json"), None);
+    assert_eq!(run_command(Some("next dev"), false, 5180), "bun run dev");
+    assert_eq!(run_command(None, false, 5181), "bunx vite --host 127.0.0.1 --port 5181 --strictPort");
 }
 
 #[test]
 fn classify_attaches_only_to_the_bots_own_checkout() {
     let procs = vec![
-        ViteProc { pid: 1, port: 5173, cwd: "/main/web".into() },
-        ViteProc { pid: 2, port: 5241, cwd: "/mine/web/".into() },
-        ViteProc { pid: 3, port: 3001, cwd: "/other/apps/web".into() },
+        ViteProc { pid: 1, port: 5173, cwd: "/main/web".into(), kind: "vite".into() },
+        ViteProc { pid: 2, port: 5241, cwd: "/mine/web/".into(), kind: "vite".into() },
+        ViteProc { pid: 3, port: 3001, cwd: "/other/apps/web".into(), kind: "vite".into() },
     ];
     let cands = vec![PathBuf::from("/mine"), PathBuf::from("/mine/web")];
     let (hit, others) = classify(&procs, &cands);
@@ -576,7 +633,7 @@ async fn another_checkout_is_listed_not_attached_and_a_spawn_follows() {
     let off = get(&r.e.app, &bot).await.unwrap();
     assert_eq!(
         off["others"],
-        json!([{"port": 5173, "dir": "/somewhere/agents-manager-main/web", "pid": 1, "relation": "same_repo", "repo": "am"}])
+        json!([{"port": 5173, "dir": "/somewhere/agents-manager-main/web", "pid": 1, "kind": "vite", "relation": "same_repo", "repo": "am"}])
     );
 }
 
@@ -700,7 +757,7 @@ fn repo_key_parsing_resolves_a_relative_common_dir_and_treats_nothing_as_unknown
 
 #[test]
 fn relation_and_repo_name() {
-    let p = |d: &str| ViteProc { pid: 1, port: 1, cwd: d.into() };
+    let p = |d: &str| ViteProc { pid: 1, port: 1, cwd: d.into(), kind: "vite".into() };
     let k = |c: &str, o: Option<&str>| RepoKey { common: c.into(), origin: o.map(Into::into) };
     let cands = vec![PathBuf::from("/am/web")];
     let mine = k("/am/.git", None);
@@ -806,4 +863,108 @@ async fn the_real_filesystem_search_finds_a_nested_app_and_skips_node_modules() 
     let body = start(&r.e.app, &bot, StartReq::default()).await.unwrap();
     assert_eq!(body["dir"], app.to_string_lossy().as_ref());
     assert_eq!(body["candidates"], json!([app.to_string_lossy()]));
+}
+
+#[test]
+fn detect_counts_a_dev_script_and_still_looks_inside_a_monorepo_root() {
+    let files: HashSet<PathBuf> = ["/p/apps/web/vite.config.ts"].iter().map(PathBuf::from).collect();
+    let devs: HashSet<PathBuf> = ["/p", "/p/apps/site"].iter().map(PathBuf::from).collect();
+    let subs: HashMap<PathBuf, Vec<PathBuf>> = [("/p", vec!["/p/apps"]), ("/p/apps", vec!["/p/apps/web", "/p/apps/site"])]
+        .into_iter()
+        .map(|(d, v)| (PathBuf::from(d), v.into_iter().map(PathBuf::from).collect()))
+        .collect();
+    let got = detect_dirs(Path::new("/p"), |f| files.contains(f), |d| subs.get(d).cloned().unwrap_or_default(), |d| devs.contains(d)).unwrap();
+    let want: Vec<PathBuf> = ["/p", "/p/apps/site", "/p/apps/web"].iter().map(PathBuf::from).collect();
+    assert_eq!(got, want, "根目錄的 dev script（turbo）不擋住裡面真正的 app");
+}
+
+fn write_pkg(dir: &Path, dev: Option<&str>) {
+    std::fs::create_dir_all(dir).unwrap();
+    let scripts = dev.map(|d| format!(r#""dev": "{d}""#)).unwrap_or_default();
+    std::fs::write(dir.join("package.json"), format!(r#"{{"scripts": {{{scripts}}}}}"#)).unwrap();
+}
+
+#[tokio::test]
+async fn a_dev_script_directory_is_spawned_with_bun_run_dev_and_the_port_is_observed() {
+    let r = rig().await;
+    std::fs::remove_file(r.e.repo.join("web/vite.config.ts")).unwrap();
+    write_pkg(&r.e.repo, Some("next dev"));
+    let bot = running_bot(&r, "alfa").await;
+    let body = start(&r.e.app, &bot, StartReq::default()).await.unwrap();
+    assert_eq!(status(&body), "starting");
+    assert_eq!(body["command"], "bun run dev");
+    assert_eq!(body["port"], Value::Null, "不硬塞 port");
+    assert_eq!(r.fake.spawns()[0].2, "bun run dev");
+    assert_eq!(r.fake.spawns()[0].1, r.e.repo.to_string_lossy());
+    // 還沒 listen：留在 starting。
+    assert_eq!(status(&get(&r.e.app, &bot).await.unwrap()), "starting");
+    // server 自己挑了 3200：從 pane 的行程樹觀察到，記進去。
+    let pane = body["pane_id"].as_str().unwrap().to_string();
+    r.fake.pane_listens(&pane, 3200);
+    let seen = get(&r.e.app, &bot).await.unwrap();
+    assert_eq!((status(&seen), seen["port"].as_u64()), ("running", Some(3200)));
+    assert_eq!(state_map(&r.e.app.db).await.unwrap()[&bot], json!({"status": "running", "port": 3200, "source": "spawned"}));
+    // 之後照一般的 port 檢查：server 掛了就 failed。
+    r.fake.unlisten(3200);
+    assert_eq!(status(&get(&r.e.app, &bot).await.unwrap()), "failed");
+}
+
+#[tokio::test]
+async fn a_dev_script_that_never_listens_fails_after_60s_with_the_pane_tail() {
+    let r = rig().await;
+    write_pkg(&r.e.repo.join("web"), Some("vite"));
+    let bot = running_bot(&r, "alfa").await;
+    start(&r.e.app, &bot, StartReq::default()).await.unwrap();
+    *r.fake.tail.lock().unwrap() = "error: script dev exited\n".into();
+    let old = (chrono::Utc::now() - chrono::Duration::seconds(61)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    sqlx::query("UPDATE bot_previews SET started_at = ? WHERE bot_id = ?").bind(old).bind(&bot).execute(&r.e.app.db).await.unwrap();
+    let body = get(&r.e.app, &bot).await.unwrap();
+    assert_eq!(status(&body), "failed");
+    assert!(body["error"].as_str().unwrap().contains("script dev exited"));
+}
+
+#[tokio::test]
+async fn off_state_shows_the_command_it_would_run_per_candidate() {
+    let r = rig().await;
+    write_pkg(&r.e.repo.join("apps/site"), Some("next dev"));
+    let bot = running_bot(&r, "alfa").await;
+    let off = get(&r.e.app, &bot).await.unwrap();
+    let web = r.e.repo.join("web").to_string_lossy().into_owned();
+    let site = r.e.repo.join("apps/site").to_string_lossy().into_owned();
+    assert_eq!(off["candidates"], json!([web, site]));
+    assert_eq!(off["command"], "bunx vite --host 127.0.0.1 --port 5180 --strictPort");
+    assert_eq!(
+        off["candidate_info"],
+        json!([
+            {"dir": web, "command": "bunx vite --host 127.0.0.1 --port 5180 --strictPort"},
+            {"dir": site, "command": "bun run dev"},
+        ])
+    );
+}
+
+#[tokio::test]
+async fn auto_attaches_to_a_non_vite_server_running_in_the_bots_own_dir() {
+    let r = rig().await;
+    std::fs::remove_file(r.e.repo.join("web/vite.config.ts")).unwrap();
+    let base = r.e.repo.to_string_lossy().into_owned();
+    r.fake.server(44112, 3200, &base, "next");
+    let bot = running_bot(&r, "alfa").await;
+    let body = start(&r.e.app, &bot, StartReq::default()).await.unwrap();
+    assert_eq!((body["source"].as_str(), body["kind"].as_str(), body["port"].as_u64()), (Some("attached"), Some("next"), Some(3200)));
+    assert!(r.fake.spawns().is_empty());
+}
+
+#[tokio::test]
+async fn others_carry_the_kind_and_a_server_in_the_project_dir_is_same_dir_even_without_candidates() {
+    let r = rig().await;
+    std::fs::remove_file(r.e.repo.join("web/vite.config.ts")).unwrap();
+    let base = r.e.repo.to_string_lossy().into_owned();
+    r.fake.server(1, 3200, &base, "next");
+    r.fake.server(2, 6006, "/x/other/sb", "storybook");
+    let bot = running_bot(&r, "alfa").await;
+    let off = get(&r.e.app, &bot).await.unwrap();
+    assert_eq!(off["candidates"], json!([]));
+    let got: Vec<(&str, &str)> =
+        off["others"].as_array().unwrap().iter().map(|o| (o["kind"].as_str().unwrap(), o["relation"].as_str().unwrap())).collect();
+    assert_eq!(got, vec![("next", "same_dir"), ("storybook", "other")]);
 }

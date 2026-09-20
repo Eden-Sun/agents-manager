@@ -75,8 +75,11 @@ pub trait PreviewEnv: Send + Sync {
     fn close_pane<'a>(&'a self, pane_id: &'a str) -> BoxFuture<'a, ()>;
     /// 本機這個 port 現在有沒有人在 listen。
     fn port_listening(&self, port: u16) -> BoxFuture<'_, bool>;
-    /// 本機上在 listen 的 vite 行程（pid、port、cwd）；`None`＝掃不到（不是「沒有」）。
-    fn scan_vites(&self) -> BoxFuture<'_, Option<Vec<ViteProc>>>;
+    /// 本機上在 listen 的 dev server：命令列對得上已知的 dev server，或行程 cwd 落在 `roots`（AG Man 認得的專案路徑）底下；
+    /// `None`＝掃不到（不是「沒有」）。
+    fn scan_servers<'a>(&'a self, roots: &'a [String]) -> BoxFuture<'a, Option<Vec<ViteProc>>>;
+    /// 這顆 pane 的行程樹現在 listen 的 port（昇冪）；`None`＝問不到。dev script 起的 server 自己挑 port，靠這個觀察。
+    fn pane_ports<'a>(&'a self, pane_id: &'a str) -> BoxFuture<'a, Option<Vec<u16>>>;
     /// 這個目錄屬於哪個 git repo；不是 repo 或讀不到＝`None`。
     fn repo_key<'a>(&'a self, dir: &'a str) -> BoxFuture<'a, Option<RepoKey>>;
 }
@@ -106,17 +109,20 @@ pub fn parse_repo_key(dir: &str, common_out: &str, origin_out: &str) -> Option<R
     Some(RepoKey { common, origin })
 }
 
-/// 一顆已經在跑、而且有 TCP listen 的 vite。
+/// 一顆已經在跑、而且有 TCP listen 的 dev server（名字沿用 v2，不只 vite）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ViteProc {
     pub pid: i32,
     pub port: u16,
     pub cwd: String,
+    /// `vite`／`next`／`webpack`／…／`unknown`（命令列認不得、只因為 cwd 在專案底下才列進來）。
+    pub kind: String,
 }
 
 /// herdr＋本機 TCP。
 pub struct RealEnv {
     pub client: HerdrClient,
+    pub app: Arc<App>,
 }
 
 impl PreviewEnv for RealEnv {
@@ -157,8 +163,18 @@ impl PreviewEnv for RealEnv {
             matches!(tokio::time::timeout(Duration::from_millis(400), c).await, Ok(Ok(_)))
         })
     }
-    fn scan_vites(&self) -> BoxFuture<'_, Option<Vec<ViteProc>>> {
-        Box::pin(scan_real())
+    fn scan_servers<'a>(&'a self, roots: &'a [String]) -> BoxFuture<'a, Option<Vec<ViteProc>>> {
+        Box::pin(scan_real(roots))
+    }
+    fn pane_ports<'a>(&'a self, pane_id: &'a str) -> BoxFuture<'a, Option<Vec<u16>>> {
+        Box::pin(async move {
+            let local = crate::config::LOCAL_HOST;
+            let probe = self.app.probe();
+            let shell = self.client.pane_shell(pane_id).await.ok()?;
+            let dump = probe.dump(&self.app, local).await.ok()?;
+            let facts = crate::panes::facts_from(&shell, &dump, pane_id)?;
+            probe.listen_ports(local, &facts.pids).await
+        })
     }
     fn repo_key<'a>(&'a self, dir: &'a str) -> BoxFuture<'a, Option<RepoKey>> {
         Box::pin(async move {
@@ -174,21 +190,19 @@ impl PreviewEnv for RealEnv {
     }
 }
 
-/// `ps` 找出命令列是 vite 的 pid，再各問一次 `lsof`：listen 的 port、cwd。
-async fn scan_real() -> Option<Vec<ViteProc>> {
+/// 三次查詢：`ps`（每個 pid 的命令列）、`lsof`（全機 listen 的 port）、`lsof`（那些 pid 的 cwd），再交給 [`join_servers`] 篩。
+async fn scan_real(roots: &[String]) -> Option<Vec<ViteProc>> {
     let t = Duration::from_secs(10);
     let ps = crate::hosts::sh_local("ps -axo pid=,command=", t).await.ok().flatten()?;
-    let pids = parse_ps_vites(&String::from_utf8_lossy(&ps.stdout));
-    if pids.is_empty() {
+    let cmds = parse_ps_commands(&String::from_utf8_lossy(&ps.stdout));
+    let ports = crate::hosts::sh_local("lsof -nP -iTCP -sTCP:LISTEN -Fpn 2>/dev/null", t).await.ok().flatten()?;
+    let ports = crate::panes::parse_lsof(&String::from_utf8_lossy(&ports.stdout));
+    if ports.is_empty() {
         return Some(Vec::new());
     }
-    let list = pids.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(",");
-    let ports = crate::hosts::sh_local(&format!("lsof -nP -iTCP -sTCP:LISTEN -a -p {list} -Fpn 2>/dev/null"), t).await.ok().flatten()?;
+    let list = ports.keys().map(|p| p.to_string()).collect::<Vec<_>>().join(",");
     let cwds = crate::hosts::sh_local(&format!("lsof -nP -a -d cwd -p {list} -Fpn 2>/dev/null"), t).await.ok().flatten()?;
-    Some(join_vites(
-        &crate::panes::parse_lsof(&String::from_utf8_lossy(&ports.stdout)),
-        &parse_lsof_cwd(&String::from_utf8_lossy(&cwds.stdout)),
-    ))
+    Some(join_servers(&ports, &parse_lsof_cwd(&String::from_utf8_lossy(&cwds.stdout)), &cmds, roots, std::process::id() as i32))
 }
 
 #[cfg(test)]
@@ -204,7 +218,7 @@ async fn env_for(app: &Arc<App>, run: &db::Run) -> LcResult<Arc<dyn PreviewEnv>>
         .herdr_for_run(run)
         .await
         .ok_or_else(|| LcError::Upstream(format!("no Herdr session is available for run `{}`", run.id)))?;
-    Ok(Arc::new(RealEnv { client }))
+    Ok(Arc::new(RealEnv { client, app: app.clone() }))
 }
 
 /// 沒有 run 可問（bot 已停）時關舊 pane 用的 env：本機的管理 session。
@@ -213,7 +227,7 @@ fn fallback_env(app: &Arc<App>) -> Arc<dyn PreviewEnv> {
     if let Some(e) = app.preview_env.lock().unwrap().clone() {
         return e;
     }
-    Arc::new(RealEnv { client: app.herdr.clone() })
+    Arc::new(RealEnv { client: app.herdr.clone(), app: app.clone() })
 }
 
 // ───────────────────────────── 純函式 ─────────────────────────────
@@ -231,12 +245,13 @@ fn skipped(name: &str) -> bool {
 }
 
 /// 候選目錄：在 `<cwd>` 底下有界地找（最多 [`SEARCH_DEPTH`] 層、走過 [`SEARCH_MAX_DIRS`] 個目錄、留 [`MAX_CANDIDATES`] 個），
-/// 有 `vite.config.{ts,mts,js,mjs}` 的全列。順序：`<cwd>` 本身、`<cwd>/web`，其餘照（層數、路徑）排序。
-/// 找到設定的目錄不再往裡面找。全都沒有回試過的路徑。
+/// 有 `vite.config.{ts,mts,js,mjs}`，或 `package.json` 帶 `dev` script 的全列。順序：`<cwd>` 本身、`<cwd>/web`，其餘照（層數、路徑）排序。
+/// 找到 vite 設定的目錄不再往裡面找。全都沒有回試過的路徑。
 pub fn detect_dirs(
     cwd: &Path,
     exists: impl Fn(&Path) -> bool,
     subdirs: impl Fn(&Path) -> Vec<PathBuf>,
+    has_dev_script: impl Fn(&Path) -> bool,
 ) -> Result<Vec<PathBuf>, Vec<String>> {
     let has_config = |dir: &Path| CONFIG_NAMES.iter().any(|n| exists(&dir.join(n)));
     let mut found: Vec<(usize, PathBuf)> = Vec::new();
@@ -252,6 +267,10 @@ pub fn detect_dirs(
             if has_config(&dir) {
                 found.push((depth, dir));
                 continue;
+            }
+            // 有 `dev` script 的也是候選，但不擋住往下找：monorepo 根目錄常有一個 `turbo run dev`，真正的 app 在裡面。
+            if has_dev_script(&dir) {
+                found.push((depth, dir.clone()));
             }
             if depth == SEARCH_DEPTH {
                 continue;
@@ -278,25 +297,67 @@ pub fn detect_dirs(
     for dir in [cwd.to_path_buf(), cwd.join("web")] {
         tried.extend(CONFIG_NAMES.iter().map(|n| dir.join(n).to_string_lossy().into_owned()));
     }
-    tried.push(cwd.join("**").join("vite.config.*").to_string_lossy().into_owned() + &format!("（最多 {SEARCH_DEPTH} 層）"));
+    tried.push(cwd.join("**").join("vite.config.*").to_string_lossy().into_owned() + &format!("、package.json 的 dev script（最多 {SEARCH_DEPTH} 層）"));
     Err(tried)
 }
 
-/// 命令列的某個字是 `vite` 或 `.../vite`、`.../vite.js`（`vitest` 之類不算）。
-pub fn is_vite_command(cmd: &str) -> bool {
-    cmd.split_whitespace().any(|t| {
+/// 命令列對得上哪種已知的 dev server。看的是命令列裡每個字的檔名部分（`vitest`、`vitepress` 之類不算）。
+pub fn dev_kind(cmd: &str) -> Option<&'static str> {
+    let toks: Vec<&str> = cmd.split_whitespace().collect();
+    let has = |w: &str| toks.contains(&w);
+    for t in &toks {
         let base = t.rsplit('/').next().unwrap_or(t);
-        base == "vite" || base == "vite.js"
+        let kind = match base {
+            "vite" | "vite.js" => "vite",
+            "next-server" => "next",
+            "next" if has("dev") || has("start") => "next",
+            "webpack" | "webpack-dev-server" => "webpack",
+            "astro" => "astro",
+            "remix" | "remix-serve" => "remix",
+            "storybook" | "start-storybook" => "storybook",
+            "nuxt" | "nuxi" => "nuxt",
+            "rsbuild" => "rsbuild",
+            "parcel" => "parcel",
+            "ng" if has("serve") => "angular",
+            "react-scripts" => "react-scripts",
+            "bun" if has("--hot") => "bun",
+            _ => continue,
+        };
+        return Some(kind);
+    }
+    None
+}
+
+/// 不是 dev server、只是碰巧 cwd 在專案底下的常駐程式：資料庫、ssh、AG Man 自己與 herdr 不列。
+fn is_infrastructure(cmd: &str) -> bool {
+    let first = cmd.split_whitespace().next().unwrap_or("");
+    let base = first.rsplit('/').next().unwrap_or(first).trim_start_matches('-').trim_end_matches(':');
+    ["ssh", "sshd", "postgres", "mysqld", "mongod", "redis-server", "agents-managerd", "herdr", "launchd"].contains(&base)
+}
+
+/// cwd 是不是落在某個專案路徑底下（含正好等於）。
+pub fn under_any(cwd: &str, roots: &[String]) -> bool {
+    let c = norm(cwd);
+    roots.iter().any(|r| {
+        let r = norm(r);
+        c == r || (c.len() > r.len() && c.starts_with(r) && c.as_bytes()[r.len()] == b'/')
     })
 }
 
-/// `ps -axo pid=,command=` 的輸出裡，命令列是 vite 的 pid。
-pub fn parse_ps_vites(out: &str) -> Vec<i32> {
+/// 一個在 listen 的行程要不要列：命令列是已知 dev server，或 cwd 在專案底下（而且不是常駐的基礎設施）。
+pub fn classify_listener(cmd: &str, cwd: &str, roots: &[String]) -> Option<&'static str> {
+    if let Some(k) = dev_kind(cmd) {
+        return Some(k);
+    }
+    (under_any(cwd, roots) && !is_infrastructure(cmd)).then_some("unknown")
+}
+
+/// `ps -axo pid=,command=` → pid 到命令列。
+pub fn parse_ps_commands(out: &str) -> HashMap<i32, String> {
     out.lines()
         .filter_map(|l| {
-            let l = l.trim_start();
-            let (pid, cmd) = l.split_once(char::is_whitespace)?;
-            is_vite_command(cmd).then(|| pid.parse().ok()).flatten()
+            let (pid, cmd) = l.trim_start().split_once(char::is_whitespace)?;
+            Some((pid.parse().ok()?, cmd.trim().to_string()))
         })
         .collect()
 }
@@ -315,13 +376,21 @@ pub fn parse_lsof_cwd(out: &str) -> HashMap<i32, String> {
     m
 }
 
-/// 有 listen port 又查得到 cwd 的才算一顆可接的 vite（一顆行程多個 port 就一個 port 一筆）。
-pub fn join_vites(ports: &HashMap<i32, Vec<u16>>, cwds: &HashMap<i32, String>) -> Vec<ViteProc> {
-    let mut v: Vec<ViteProc> = ports
-        .iter()
-        .filter_map(|(pid, ps)| Some((pid, ps, cwds.get(pid)?)))
-        .flat_map(|(pid, ps, cwd)| ps.iter().map(move |port| ViteProc { pid: *pid, port: *port, cwd: cwd.clone() }))
-        .collect();
+/// 有 listen port、查得到 cwd、又符合 [`classify_listener`] 的才列（一顆行程多個 port 就一個 port 一筆；`own_pid` 自己不列）。
+pub fn join_servers(
+    ports: &HashMap<i32, Vec<u16>>,
+    cwds: &HashMap<i32, String>,
+    cmds: &HashMap<i32, String>,
+    roots: &[String],
+    own_pid: i32,
+) -> Vec<ViteProc> {
+    let mut v = Vec::new();
+    for (pid, ps) in ports {
+        let (Some(cwd), true) = (cwds.get(pid), *pid != own_pid) else { continue };
+        let cmd = cmds.get(pid).map(String::as_str).unwrap_or("");
+        let Some(kind) = classify_listener(cmd, cwd, roots) else { continue };
+        v.extend(ps.iter().map(|port| ViteProc { pid: *pid, port: *port, cwd: cwd.clone(), kind: kind.into() }));
+    }
     v.sort_by_key(|p| (p.port, p.pid));
     v
 }
@@ -393,6 +462,26 @@ pub fn pick_port(taken: &HashSet<u16>, listening: &HashSet<u16>) -> Option<u16> 
     (PORT_START..PORT_START + PORT_SPAN).find(|p| !taken.contains(p) && !listening.contains(p))
 }
 
+/// `package.json` 的 `scripts.dev`（非空字串）；沒有或壞掉＝`None`。
+pub fn parse_dev_script(json: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(json).ok()?;
+    let dev = v.get("scripts")?.get("dev")?.as_str()?.trim();
+    (!dev.is_empty()).then(|| dev.to_string())
+}
+
+fn read_dev_script(dir: &Path) -> Option<String> {
+    parse_dev_script(&std::fs::read_to_string(dir.join("package.json")).ok()?)
+}
+
+/// 實際要跑的那一行：目錄有 `dev` script 就 `bun run dev`（不硬塞 port，起來之後觀察它實際 listen 的 port），
+/// 沒有才退回 `bunx vite`（port 由 daemon 挑好）。
+pub fn run_command(dev_script: Option<&str>, allow_lan: bool, port: u16) -> String {
+    match dev_script {
+        Some(_) => "bun run dev".to_string(),
+        None => command(allow_lan, port),
+    }
+}
+
 /// `allow_lan` 開著（dev 的區網／Tailscale 存取）才綁全部介面。
 pub fn command(allow_lan: bool, port: u16) -> String {
     let bind = if allow_lan { "0.0.0.0" } else { "127.0.0.1" };
@@ -422,7 +511,7 @@ pub fn next_status(cur: Status, attached: bool, obs: Observed, elapsed_secs: i64
         Status::Starting if obs.listening => Next::To(Status::Running, None),
         Status::Starting if gone => Next::To(Status::Failed, Some("pane 在 vite 起來之前就被關了")),
         Status::Starting if elapsed_secs >= START_TIMEOUT_SECS => {
-            Next::To(Status::Failed, Some("60 秒內 port 沒有開始 listen"))
+            Next::To(Status::Failed, Some("60 秒內沒有偵測到 listen 的 port"))
         }
         Status::Starting => Next::Stay,
         Status::Running if gone => Next::To(Status::Off, None),
@@ -449,6 +538,10 @@ pub struct Row {
     /// `spawned`（AG Man 起的，有 pane）或 `attached`（接上既有的 vite，沒有 pane；只斷開、不殺）。
     pub source: String,
     pub pid: Option<i64>,
+    /// 實際跑的那一行（`attached` 是 `None`：那是別人開的）。
+    pub command: Option<String>,
+    /// dev server 種類（`vite`／`next`／…／`unknown`）；`spawned` 由命令決定。
+    pub kind: Option<String>,
 }
 
 impl Row {
@@ -472,6 +565,8 @@ impl Row {
             "started_at": self.started_at,
             "source": self.source,
             "pid": self.pid,
+            "command": self.command,
+            "kind": self.kind,
         })
     }
 }
@@ -494,11 +589,12 @@ async fn taken_ports(pool: &SqlitePool) -> anyhow::Result<HashSet<u16>> {
 
 async fn put(pool: &SqlitePool, r: &Row) -> anyhow::Result<()> {
     sqlx::query(
-        "INSERT INTO bot_previews (bot_id, host, pane_id, port, dir, status, error, started_at, updated_at, source, pid)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?)
+        "INSERT INTO bot_previews (bot_id, host, pane_id, port, dir, status, error, started_at, updated_at, source, pid, command, kind)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
          ON CONFLICT(bot_id) DO UPDATE SET host=excluded.host, pane_id=excluded.pane_id, port=excluded.port,
            dir=excluded.dir, status=excluded.status, error=excluded.error, started_at=excluded.started_at,
-           updated_at=excluded.updated_at, source=excluded.source, pid=excluded.pid",
+           updated_at=excluded.updated_at, source=excluded.source, pid=excluded.pid,
+           command=excluded.command, kind=excluded.kind",
     )
     .bind(&r.bot_id)
     .bind(&r.host)
@@ -511,6 +607,8 @@ async fn put(pool: &SqlitePool, r: &Row) -> anyhow::Result<()> {
     .bind(&r.updated_at)
     .bind(&r.source)
     .bind(r.pid)
+    .bind(&r.command)
+    .bind(&r.kind)
     .execute(pool)
     .await?;
     Ok(())
@@ -568,26 +666,49 @@ async fn candidates_of(app: &Arc<App>, bot: &db::Bot) -> LcResult<Result<Vec<Pat
             .map(|it| it.flatten().filter(|e| e.file_type().is_ok_and(|t| t.is_dir())).map(|e| e.path()).collect())
             .unwrap_or_default()
     };
-    Ok(detect_dirs(Path::new(&cwd), |p| p.is_file(), subdirs))
+    Ok(detect_dirs(Path::new(&cwd), |p| p.is_file(), subdirs, |d| read_dev_script(d).is_some()))
 }
 
-/// 回應在 [`Row::body`] 之外多兩欄：`candidates`（可以起 vite 的目錄）、`others`（沒在用的狀態下才掃：
-/// 本機所有在 listen 的 vite，各帶 `relation`／`repo`，列出來讓使用者自己選）。
+/// AG Man 認得的本機專案路徑：行程 cwd 落在其中一個底下就算「跟專案有關」。
+async fn local_project_roots(app: &Arc<App>) -> Vec<String> {
+    db::live_projects(&app.db)
+        .await
+        .map(|ps| ps.into_iter().filter(|p| p.host == crate::config::LOCAL_HOST).map(|p| p.path).collect())
+        .unwrap_or_default()
+}
+
+/// 回應在 [`Row::body`] 之外多幾欄：`candidates`（可以起 dev server 的目錄）與 `candidate_info`（各自會跑的那一行）、
+/// 沒在用的狀態下另有 `command`（預設候選會跑的那一行）與 `others`（本機所有 dev server，各帶 `kind`／`relation`／`repo`）。
 async fn decorated(app: &Arc<App>, bot: &db::Bot, mut body: Value, live: bool) -> LcResult<Value> {
     let cands = candidates_of(app, bot).await?.unwrap_or_default();
     let mut others: Vec<(Relation, String, ViteProc)> = Vec::new();
+    let env = match db::active_run(&app.db, &bot.id).await {
+        Ok(Some(run)) => env_for(app, &run).await.unwrap_or_else(|_| fallback_env(app)),
+        _ => fallback_env(app),
+    };
+    // 各候選會跑的那一行；退回 `bunx vite` 的要先知道會挑到哪個 port。
+    let devs: Vec<Option<String>> = cands.iter().map(|c| read_dev_script(c)).collect();
+    let mut port = PORT_START;
+    if devs.iter().any(Option::is_none) {
+        let taken = taken_ports(&app.db).await.unwrap_or_default();
+        port = pick_port(&taken, &listening_window(env.as_ref()).await).unwrap_or(PORT_START);
+    }
+    let info: Vec<Value> = cands
+        .iter()
+        .zip(&devs)
+        .map(|(c, d)| json!({"dir": c.to_string_lossy(), "command": run_command(d.as_deref(), app.allow_lan, port)}))
+        .collect();
     if !live {
-        let env = match db::active_run(&app.db, &bot.id).await {
-            Ok(Some(run)) => env_for(app, &run).await.unwrap_or_else(|_| fallback_env(app)),
-            _ => fallback_env(app),
-        };
+        let base = base_dir(app, bot).await?;
         // 掃不到就當沒有：這只是「順便列出來」，不是決定。
-        let scan = env.scan_vites().await.unwrap_or_default();
-        // 這顆 bot 屬於哪個 repo 看它自己的目錄，跟找沒找到 vite.config 無關。
-        let mine = env.repo_key(&base_dir(app, bot).await?).await;
+        let scan = env.scan_servers(&local_project_roots(app).await).await.unwrap_or_default();
+        // 這顆 bot 屬於哪個 repo、什麼算「同一個目錄」都看它自己的工作目錄（專案路徑），跟找沒找到設定檔無關。
+        let mine = env.repo_key(&base).await;
+        let mut same_dirs = cands.clone();
+        same_dirs.push(PathBuf::from(&base));
         for p in scan {
             let key = env.repo_key(&p.cwd).await;
-            let relation = relation_of(&p, &cands, mine.as_ref(), key.as_ref());
+            let relation = relation_of(&p, &same_dirs, mine.as_ref(), key.as_ref());
             let repo = repo_name(key.as_ref(), &p.cwd);
             others.push((relation, repo, p));
         }
@@ -595,9 +716,13 @@ async fn decorated(app: &Arc<App>, bot: &db::Bot, mut body: Value, live: bool) -
     }
     if let Some(o) = body.as_object_mut() {
         o.insert("candidates".into(), json!(cands.iter().map(|c| c.to_string_lossy()).collect::<Vec<_>>()));
+        if !live {
+            o.insert("command".into(), info.first().map(|i| i["command"].clone()).unwrap_or(Value::Null));
+        }
+        o.insert("candidate_info".into(), json!(info));
         o.insert("others".into(), json!(others
             .iter()
-            .map(|(rel, repo, p)| json!({"port": p.port, "dir": p.cwd, "pid": p.pid, "relation": rel.as_str(), "repo": repo}))
+            .map(|(rel, repo, p)| json!({"port": p.port, "dir": p.cwd, "pid": p.pid, "kind": p.kind, "relation": rel.as_str(), "repo": repo}))
             .collect::<Vec<_>>()));
     }
     Ok(body)
@@ -667,7 +792,8 @@ pub async fn start(app: &Arc<App>, bot_id: &str, req: StartReq) -> LcResult<Valu
         None => fallback_env(app),
     };
     // 掃不到只影響「自動接」，不擋 spawn；明確要求 attach 時掃不到就是失敗。
-    let scan = env.scan_vites().await;
+    let roots = local_project_roots(app).await;
+    let scan = env.scan_servers(&roots).await;
 
     let attach_to: Option<ViteProc> = match mode {
         Mode::Attach => {
@@ -676,12 +802,13 @@ pub async fn start(app: &Arc<App>, bot_id: &str, req: StartReq) -> LcResult<Valu
             Some(hit.ok_or_else(|| LcError::conflict("not_vite", json!({"bot_id": bot_id, "port": port})))?)
         }
         Mode::Auto => {
-            let all = cands.clone().map_err(no_config)?;
+            let all = cands.clone().unwrap_or_default();
             let pool = match req.dir.as_deref() {
                 Some(d) => vec![all.iter().find(|c| norm(&c.to_string_lossy()) == norm(d)).cloned().ok_or_else(|| {
-                    LcError::Bad(format!("dir `{d}` 不是這顆 bot 的 vite 候選目錄"))
+                    LcError::Bad(format!("dir `{d}` 不是這顆 bot 的 dev server 候選目錄"))
                 })?],
-                None => all,
+                // 候選目錄之外，bot 自己的工作目錄也算「同一個目錄」（那顆 server 可能沒有 vite 設定，例如 next）。
+                None => all.into_iter().chain([PathBuf::from(base_dir(app, &bot).await?)]).collect(),
             };
             classify(scan.as_deref().unwrap_or_default(), &pool).0
         }
@@ -701,6 +828,8 @@ pub async fn start(app: &Arc<App>, bot_id: &str, req: StartReq) -> LcResult<Valu
             updated_at: now,
             source: SOURCE_ATTACHED.into(),
             pid: Some(p.pid as i64),
+            command: None,
+            kind: Some(p.kind),
         };
         put(&app.db, &r).await.map_err(up)?;
         emit_changed(app, &r).await;
@@ -713,7 +842,7 @@ pub async fn start(app: &Arc<App>, bot_id: &str, req: StartReq) -> LcResult<Valu
             .iter()
             .find(|c| norm(&c.to_string_lossy()) == norm(d))
             .cloned()
-            .ok_or_else(|| LcError::Bad(format!("dir `{d}` 不是這顆 bot 的 vite 候選目錄")))?,
+            .ok_or_else(|| LcError::Bad(format!("dir `{d}` 不是這顆 bot 的 dev server 候選目錄")))?,
         None => cands[0].clone(),
     }
     .to_string_lossy()
@@ -721,18 +850,27 @@ pub async fn start(app: &Arc<App>, bot_id: &str, req: StartReq) -> LcResult<Valu
     let Some(run) = run.filter(|r| r.state == "running" && r.pane_id.is_some()) else {
         return Err(LcError::conflict("bot_not_running", json!({"bot_id": bot_id})));
     };
-    let taken = taken_ports(&app.db).await.map_err(up)?;
-    let listening = listening_window(env.as_ref()).await;
-    let port = pick_port(&taken, &listening)
-        .ok_or_else(|| LcError::conflict("no_free_port", json!({"from": PORT_START, "span": PORT_SPAN})))?;
+    // 有 dev script 就用它，不硬塞 port（起來之後觀察實際 listen 的 port）；沒有才退回 `bunx vite` 並由 daemon 挑 port。
+    let dev = read_dev_script(Path::new(&dir));
+    let port = if dev.is_some() {
+        None
+    } else {
+        let taken = taken_ports(&app.db).await.map_err(up)?;
+        let listening = listening_window(env.as_ref()).await;
+        Some(
+            pick_port(&taken, &listening)
+                .ok_or_else(|| LcError::conflict("no_free_port", json!({"from": PORT_START, "span": PORT_SPAN})))?,
+        )
+    };
+    let cmd = run_command(dev.as_deref(), app.allow_lan, port.unwrap_or(PORT_START));
     let pane = run.pane_id.clone().unwrap_or_default();
-    let pane_id = env.spawn(&pane, &dir, &command(app.allow_lan, port)).await.map_err(up)?;
+    let pane_id = env.spawn(&pane, &dir, &cmd).await.map_err(up)?;
     let now = db::now();
     let r = Row {
         bot_id: bot_id.to_string(),
         host,
         pane_id: Some(pane_id.clone()),
-        port: Some(port as i64),
+        port: port.map(i64::from),
         dir: Some(dir),
         status: Status::Starting.as_str().into(),
         error: None,
@@ -740,6 +878,8 @@ pub async fn start(app: &Arc<App>, bot_id: &str, req: StartReq) -> LcResult<Valu
         updated_at: now,
         source: SOURCE_SPAWNED.into(),
         pid: None,
+        kind: Some(dev_kind(&cmd).unwrap_or(if dev.is_some() { "unknown" } else { "vite" }).into()),
+        command: Some(cmd),
     };
     if let Err(e) = put(&app.db, &r).await {
         // 記不下來就不留孤兒 pane。
@@ -846,8 +986,15 @@ async fn refresh_locked(app: &Arc<App>, bot_id: &str) -> Option<Row> {
         (Some(run), false) => env_for(app, run).await.ok()?,
         _ => fallback_env(app),
     };
+    let mut port = r.port;
     let (pane_alive, listening) = match (&r.pane_id, r.port) {
         (Some(p), Some(port)) => (env.pane_alive(p).await, env.port_listening(port as u16).await),
+        // dev script 起的 server 自己挑 port：看這顆 pane 的行程樹實際 listen 到哪個（多個取最小的）。
+        (Some(p), None) if !attached => {
+            let alive = env.pane_alive(p).await;
+            port = env.pane_ports(p).await.unwrap_or_default().first().map(|x| i64::from(*x));
+            (alive, port.is_some())
+        }
         (None, Some(port)) if attached => (None, env.port_listening(port as u16).await),
         (_, Some(port)) => (Some(false), env.port_listening(port as u16).await),
         _ => (Some(false), false),
@@ -868,7 +1015,7 @@ async fn refresh_locked(app: &Arc<App>, bot_id: &str) -> Option<Row> {
         close_row_pane(app, &r).await;
     }
     let pane_id = if to == Status::Off { None } else { r.pane_id.clone() };
-    let updated = Row { status: to.as_str().into(), error, pane_id, updated_at: db::now(), ..r };
+    let updated = Row { status: to.as_str().into(), error, pane_id, port, updated_at: db::now(), ..r };
     match put(&app.db, &updated).await {
         Ok(()) => {
             emit_changed(app, &updated).await;

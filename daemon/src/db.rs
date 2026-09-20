@@ -181,6 +181,8 @@ const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (9, "be0411b44c5111ab"),
     // issue #253 v2：`bot_previews.source`／`pid`（預覽可以接上既有的 vite）。
     (10, "d17c9db38b9c22e7"),
+    // issue #253 v4：`bot_previews.command`／`kind`（預覽擴大成本機 dev server）。
+    (11, "b2704fdf9aeb332c"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -336,6 +338,9 @@ async fn apply_migrations(pool: &SqlitePool) -> Result<()> {
         // 預覽（issue #253 v2）：`spawned`（自己起的）／`attached`（接上既有的 vite）與被接上的 pid；舊列都是 spawned。
         ("bot_previews", "source", "ALTER TABLE bot_previews ADD COLUMN source TEXT NOT NULL DEFAULT 'spawned'"),
         ("bot_previews", "pid", "ALTER TABLE bot_previews ADD COLUMN pid INTEGER"),
+        // 預覽擴大成本機 dev server（issue #253 v4）：實際跑的那一行與 dev server 種類。
+        ("bot_previews", "command", "ALTER TABLE bot_previews ADD COLUMN command TEXT"),
+        ("bot_previews", "kind", "ALTER TABLE bot_previews ADD COLUMN kind TEXT"),
     ] {
         if !has_column(&mut *tx, table, col).await? {
             sqlx::query(ddl).execute(&mut *tx).await.with_context(|| format!("add {table}.{col}"))?;

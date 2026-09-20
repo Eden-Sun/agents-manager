@@ -424,26 +424,36 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 
 ## 預覽 `/api/bots/{id}/preview`（SPEC §6.12，issue #253）
 
-頂層 bot 的專案起一顆 vite dev server，右半面板內嵌顯示。`GET /api/state` 的每顆 bot 多一個 `preview`：
-`{"status","port","source"}`，沒開過或 `off` 是 `null`，首屏不必再打 GET。三個端點回同一個形狀：
+頂層 bot 的本機 dev server（vite、Next、webpack、astro、storybook…不只 vite），右半面板內嵌顯示。`GET /api/state` 的每顆 bot
+多一個 `preview`：`{"status","port","source"}`，沒開過或 `off` 是 `null`，首屏不必再打 GET。三個端點回同一個形狀：
 
 ```json
 {"status": "off | starting | running | failed", "port": 5180, "dir": "/path/to/web",
  "pane_id": "wM:pB", "error": null, "started_at": "2026-09-19T15:44:40.881Z",
- "source": "spawned | attached", "pid": null,
- "candidates": ["/path/to/web", "/path/to/apps/site"], "others": [{"port": 5173, "dir": "/path/other-checkout/web", "pid": 123}]}
+ "source": "spawned | attached", "pid": null, "command": "bun run dev", "kind": "vite",
+ "candidates": ["/path/to/web", "/path/to/apps/site"],
+ "candidate_info": [{"dir": "/path/to/web", "command": "bunx vite --host 127.0.0.1 --port 5180 --strictPort"}],
+ "others": [{"port": 3200, "dir": "/path/wt/witsper-ops", "pid": 44112, "kind": "next", "relation": "same_dir", "repo": "wt"}]}
 ```
 
-`source`：`spawned`＝AG Man 起的（有 `pane_id`）；`attached`＝接上一顆本來就在跑的 vite（沒有 pane，`pid` 是那顆行程）。
-`candidates`：這顆 bot 可以起 vite 的目錄（在 bot 的工作目錄底下最多找 3 層，有 vite 設定的都列，最多 20 個；略過隱藏目錄、`node_modules`、`target`、`dist`、`build`、`worktrees`、`vendor`；`<dir>` 本身、`<dir>/web` 排前面，第一個是預設）。
-`others`：**沒有預覽在用時**才掃，本機**所有**在 listen 的 vite，每筆 `{port, dir, pid, relation, repo}`：
-`relation` 是 `same_dir`（這顆 bot 的候選目錄，`auto` 會自動接它）／`same_repo`（同一個 repo 的別份 checkout：git common dir 或 origin URL 相同）／
-`other`（別的專案，判不出 repo 也算）；`repo` 是分組顯示用的 repo 名。排序 same_dir、same_repo、other，各自依 port。非 `same_dir` 的不自動接
-（畫面上看到的不是這顆 bot 工作樹的程式碼），要用 `mode=attach` 明確挑。
-`GET`／`POST` 回全部欄位；`off` 時只有 `status`（`GET`／`POST` 另外帶 `candidates`、`others`），`DELETE` 只回 `{"status":"off"}`。`failed` 的 `error` 帶原因與 pane 最後 40 行。iframe 網址用 `http://${location.hostname}:${port}/`。
+- `source`：`spawned`＝AG Man 起的（有 `pane_id`）；`attached`＝接上一顆本來就在跑的 server（沒有 pane，`pid` 是那顆行程）。
+- `command`：`spawned` 實際跑的那一行；`off`／`failed` 時是**下一次啟動預設候選會跑的那一行**（`attached` 是 `null`，那是別人開的）。
+  目錄的 `package.json` 有 `dev` script 就是 `bun run dev`（不指定 port：server 自己挑，起來之後 daemon 觀察那顆 pane **實際 listen 的 port**
+  記進 `port`；在那之前 `starting` 的 `port` 是 `null`），沒有才是 `bunx vite --host <bind> --port <port> --strictPort`。
+- `kind`：`vite`／`next`／`webpack`／`astro`／`remix`／`storybook`／`nuxt`／`rsbuild`／`parcel`／`angular`／`react-scripts`／`bun`／`unknown`。
+- `candidates`：這顆 bot 可以起 dev server 的目錄（在 bot 的工作目錄底下最多找 3 層、最多 20 個；有 `vite.config.*`，**或** `package.json` 帶
+  `dev` script 的都算；略過隱藏目錄、`node_modules`、`target`、`dist`、`build`、`worktrees`、`vendor`；`<dir>` 本身、`<dir>/web` 排前面，
+  第一個是預設）。`candidate_info` 是同一份清單，每個目錄附上會跑的那一行。
+- `others`：**沒有預覽在用時**才掃，本機在 listen 的 dev server：命令列是已知的 dev server，**或**行程 cwd 落在 AG Man 認得的任何一個本機專案路徑
+  底下（`kind: "unknown"`）；AG Man 自己、herdr、ssh、資料庫不列。每筆 `{port, dir, pid, kind, relation, repo}`：`relation` 是 `same_dir`
+  （cwd 是這顆 bot 的候選目錄**或它的工作目錄**，`auto` 會自動接它）／`same_repo`（同一個 repo 的別份 checkout：git common dir 或 origin URL 相同）／
+  `other`（別的專案，判不出 repo 也算）；判 repo 與 same_dir 一律看 bot 自己的工作目錄，跟有沒有找到候選無關。`repo` 是分組顯示用的 repo 名。
+  排序 same_dir、same_repo、other，各自依 port。非 `same_dir` 的不自動接（畫面上看到的不是這顆 bot 工作樹的程式碼），要用 `mode=attach` 明確挑。
+- `GET`／`POST` 回全部欄位；`off` 時只有 `status`＋`candidates`／`candidate_info`／`command`／`others`，`DELETE` 只回 `{"status":"off"}`。
+  `failed` 的 `error` 帶原因與 pane 最後 40 行。iframe 網址用 `http://${location.hostname}:${port}/`。
 
 ### `GET /api/bots/{id}/preview`
-先對一次帳（pane 還在不在、port 有沒有在 listen）再回，所以 `running` 的 vite 半路掛掉，下一次 GET 就會看到 `failed`。
+先對一次帳（pane 還在不在、port 有沒有在 listen）再回，所以 `running` 的 server 半路掛掉，下一次 GET 就會看到 `failed`。
 
 ### `POST /api/bots/{id}/preview`
 冪等啟動：已經 `starting`／`running` 就原樣回；`failed`／`off` 重新起（重挑 port）。body 可省略，或：
@@ -452,8 +462,8 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 {"mode": "auto | attach | spawn", "port": 5173, "dir": "/path/to/apps/site"}
 ```
 
-- `auto`（預設）：本機已經有 vite 在跑、cwd 正好是這顆 bot 的候選目錄（同一份 checkout）→ **接上，不另起**（`source: "attached"`）；沒有才自己起。
-- `attach`：必須帶 `port`，那個 port 要真的是掃到的 vite（不是就 409 `not_vite`）；`others` 裡任何一顆（包括 `other`，別的專案）都能接，回應照實記 `source: "attached"` 與那顆的 `dir`／`pid`。
+- `auto`（預設）：本機已經有 dev server 在跑、cwd 是這顆 bot 的候選目錄或工作目錄（`same_dir`）→ **接上，不另起**（`source: "attached"`）；沒有才自己起。
+- `attach`：必須帶 `port`，那個 port 要真的是掃到的 dev server（不是就 409 `not_vite`）；`others` 裡任何一顆（包括 `other`，別的專案）都能接，回應照實記 `source: "attached"` 與那顆的 `dir`／`pid`。
 - `spawn`：不管有沒有現成的，自己起。`dir` 從 `candidates` 挑（不在裡面 400）。
 - 明確指定了 mode／port／dir 而且已經有預覽在用：先斷開舊的（`attached` 只斷開、`spawned` 關 pane）再照新的來。
 - `mode` 不合法、`attach` 沒帶 `port` 是 400。
@@ -467,12 +477,12 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 | `default_session` | 從使用者自己的 herdr default session 匯入的 bot |
 | `remote_host` | bot 在遠端主機（body 帶 `host`） |
 | `bot_not_running` | bot 現在沒有在跑的 run |
-| `no_vite_config` | 找不到 vite 設定；`tried` 是試過的路徑（含 `**/vite.config.*` 樣式） |
+| `no_vite_config` | 找不到 vite 設定或帶 `dev` script 的 `package.json`（名字沿用）；`tried` 是試過的路徑 |
 | `no_free_port` | 5180 起的 100 顆都被佔了 |
-| `not_vite` | `mode=attach` 的 `port` 不是掃到的 vite（body 帶 `port`） |
+| `not_vite` | `mode=attach` 的 `port` 不是掃到的 dev server（body 帶 `port`） |
 
 ### `DELETE /api/bots/{id}/preview`
-`spawned` 關 pane、放掉 port；`attached` **只斷開，絕不動對方的 vite**。回 `{"status":"off"}`；沒開過也是。bot 被停止／重啟／刪除、§6.11 閒置收 bot 時 daemon 也會做同一件事。
+`spawned` 關 pane、放掉 port；`attached` **只斷開，絕不動對方的 server**。回 `{"status":"off"}`；沒開過也是。bot 被停止／重啟／刪除、§6.11 閒置收 bot 時 daemon 也會做同一件事。
 每次狀態變動推 WS `preview_changed`。
 
 ## 非 agent 的 pane（SPEC §6.5e）
