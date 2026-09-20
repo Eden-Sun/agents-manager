@@ -41,6 +41,7 @@ web/src/
 
 ## 讀程式看不出來的約定
 
+- **螢幕保持亮著**：Screen Wake Lock 只在安全來源（HTTPS／localhost）存在；手機走 `https://<機器>.<tailnet>.ts.net:8443`（tailscale serve）才有。開關存 `am-keep-awake`，預設關，切回前景要重拿鎖（見 `hooks/useWakeLock.ts`）。
 - **token**：啟動時打一次 `GET /api/session`，只存記憶體；不讀網址上的 `?token=`，`routeSync` 第一次 `replaceState` 時把它從網址拿掉。
   **GET 撞 401 會自己重拿一次 token 再送一次**（single-flight，2026-09-20 使用者：blocked 面板卡在「讀取終端失敗：missing or bad X-AM-Token」，
   只能重整）；重拿後仍 401 就照實丟。寫入請求（POST/PATCH…）不重送——401 時 daemon 沒跑到處理函式，但重送仍可能變成送兩次。

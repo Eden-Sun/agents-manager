@@ -125,6 +125,15 @@
   `decision.decision`）；進度格連交辦的 `role` 一起看，等 AGM／等額度時不倒退；「等額度」的說明照任務的
   `on_5h_limit` 與 kind 講，並顯示交辦的 `resume_at`。自編一套只存在 mock 裡的欄位＝接上真 daemon 就全部留白（review3 c1 L9）。
 
+## 螢幕保持亮著（2026-09-20 使用者）
+
+- 手機盯著畫面等 bot 回話時不要鎖屏。用瀏覽器內建的 Screen Wake Lock（`lib/wakeLock.ts`／`hooks/useWakeLock.ts`），
+  開關在環境設定→顯示，**預設關**（一直亮著很耗電），狀態存這台裝置的 `am-keep-awake`。
+- **只有安全來源有這個 API**：`http://<區網 IP>:7788` 開的頁面 `navigator.wakeLock` 是 undefined。這時開關停用並寫出原因
+  （「這個網址不是 HTTPS」／「這個瀏覽器沒有」），不要靜靜失效。手機要走 HTTPS 就用 tailscale serve
+  （本機是 `https://m4p.tail161aae.ts.net:8443`，443 被別的服務占著）。
+- 鎖會在分頁切到背景時被系統收回：回到前景自動再拿一次，面板照實說現在有沒有握住。關掉開關或離開頁面就釋放。
+
 ## 其他元件
 
 - 刻意不擋的亂序：終端分頁快速切「行數」時回應可能亂序（內容仍是同一顆 bot，換 bot 會因 `ChatPanel key={botId}` 重掛）；pane 清單在關掉一顆 pane 後，飛行中的舊輪詢可能讓它短暫回來，緊接的補抓（`refreshPanes` trailing）就會拿掉。兩者影響都在一個往返內自癒，不加守衛。

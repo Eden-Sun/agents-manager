@@ -38,6 +38,7 @@ import { RunElapsed } from './RunElapsed'
 import { SupervisorPanel } from './SupervisorPanel'
 import { IdentityOptions, PersonaField, PersonaMark } from './BotSettingsPanel'
 import { HostBadge, HostsPanel } from './HostsPanel'
+import { KeepAwakeToggle } from './KeepAwakeToggle'
 import { BotNameField } from './BotNameField'
 import { ProjectNameField } from './ProjectNameField'
 import { MemBadge } from './MemBadge'
@@ -1417,6 +1418,7 @@ export function Sidebar() {
           <section className="env-sec">
             <h3>顯示</h3>
             <KindDisplayToggle />
+            <KeepAwakeToggle />
           </section>
         </div>
       </Modal>
