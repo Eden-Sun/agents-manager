@@ -61,3 +61,25 @@ AGM 定期交辦：正式 daemon（`target/release/agents-managerd serve`，監�
   3. 核准後 `bin/agm lease safety --approval <restart 核准> --owner <你的 bot id> --exclude-bot <你的 bot id>` 等窗口，再 `bin/agm lease acquire restart --approval <restart 核准> --commit <sha> --owner <你的 bot id> --exclude-bot <你的 bot id>`；換 binary 前一刻照 3a 再查一次。
   4. 重啟後 daemon 會自動 release restart；仍 held 就用 acquire 回的 token 手動 release（3b）。
 - token 檔用完不要刪、不要貼進回報或對話；拿不到就照 3b 請 AGM force 並附理由。
+
+## 換版與重啟：用 scripts/ops/daemon-swap.sh，不要自己寫一份
+
+建置與整樹測試過了之後，**第 3～7 步（拿 restart 窗口、備份、換 binary、重啟、驗證、寫 `.built`）
+一律呼叫 repo 裡那支腳本**，不要每趟在 scratchpad 臨時寫：
+
+```sh
+scripts/ops/daemon-swap.sh \
+  --sha <完整 sha> --old <線上那顆的 short sha> --old-hash <它的 sha256 前 16 碼> \
+  --approval <restart 核准 id> --owner <你自己的 bot id> --checkout <乾淨 worktree>
+```
+
+它已經處理掉 2026-09-20 那次 33 秒停機的四個根因（`scripts/ops/daemon-swap_test.sh` 釘住）：
+
+- 預期的 schema 版本**從 checkout 的 `SCHEMA_HISTORY` 讀**，不寫死、不沿用上一輪的數字；讀不到就中止。
+- 回滾還原 DB 會先停 daemon、清掉 `-wal`／`-shm` 再還原，並自驗 `user_version` 與 `integrity_check`。
+- **升過 schema 的失敗預設往前修**（沿用新 binary 重起，exit 6），只有新 binary 真的起不來才還原 binary 與 DB（exit 7）。
+- 啟動走 `launchctl submit` ＋ fork/setsid 啟動器：daemon 是 ppid=1、**nice 0**；在 pane 裡直接背景起會繼承 pane 忙碌時的 nice 5，而且降不回去。
+
+離開碼：0 成功、3 前置核對失敗（checkout／回滾點／讀不到 schema 版本）、4 沒窗口或複查不安全、
+5 備份有問題、6 往前修後停在新 binary、7 已回滾。窗口要自己等的話由呼叫端輪詢 `lease safety`，
+拿到窗口那一刻再呼叫這支（它自己也會再查一次 §3a）。

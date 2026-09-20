@@ -85,6 +85,26 @@ install -m 644 scripts/ops/daemon-update-task.md ~/.config/agents-manager/superv
 launchd：`com.agm.daemon-update` 改成每 5 分鐘跑一次（`StartInterval 300`），由腳本自己判斷
 「整點、集滿門檻，或等太久」；`AGM_BUILD_BOT`（必要）與 `AGM_REBUILD_THRESHOLD`／`AGM_REBUILD_MAX_WAIT_MIN`（可選）放 `EnvironmentVariables`。
 
+## daemon-swap.sh（＋ daemon-start.py）
+
+建置 child 換 binary 用的那一段：拿 restart 窗口 → 備份 DB → 換 binary → 重啟 → 驗證 → 寫 `.built`。
+以前每趟由 child 在 scratchpad 臨時寫一份，2026-09-20 就因為把 `user_version` 寫死成 10（那批升到 11）
+誤判成失敗、回滾、舊 binary 被版本閘擋下，daemon 停了 33 秒。所以它進了版控，行為由
+`daemon-swap_test.sh` 釘住：
+
+- 預期 schema 版本從 checkout 的 `SCHEMA_HISTORY` 讀，不寫死；讀不到就中止。
+- 回滾還原 DB 前先停 daemon、清掉 `-wal`／`-shm`，還原後自驗 `user_version` 與 `integrity_check`。
+- 升過 schema 的失敗**預設往前修**（沿用新 binary，exit 6），只有新 binary 起不來才還原 binary＋DB（exit 7）。
+- 啟動走 `launchctl submit` ＋ `daemon-start.py`（fork + setsid）：daemon 是 ppid=1、nice 0。
+  在 pane 裡直接背景起會繼承 pane 忙碌時的 nice 5，非 root 降不回去。
+
+```sh
+scripts/ops/daemon-swap.sh --sha <完整 sha> --old <short sha> --old-hash <sha256 前 16 碼> \
+    --approval <restart 核准 id> --owner <自己的 bot id> --checkout <乾淨 worktree>
+```
+
+離開碼：0 成功、2 參數錯、3 前置核對失敗、4 沒窗口／複查不安全、5 備份有問題、6 往前修後停在新 binary、7 已回滾。
+
 ## claude-release-kick.sh
 
 Claude Code 換版就派 AGM 解析新版有什麼用得上的，AGM 的回覆就是給使用者的通知（使用者 2026-09-16）。
