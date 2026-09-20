@@ -13,6 +13,7 @@ mod identity_kind;
 mod intents;
 mod restart_intents;
 mod delete_intents;
+mod promote_intents;
 mod assets;
 mod attach;
 mod bulk_restart;
