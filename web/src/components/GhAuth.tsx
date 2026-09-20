@@ -3,7 +3,7 @@ import * as api from '../api'
 import type { GhPending, GhStatus } from '../api/types'
 import { useStore } from '../store/store'
 import { CopyChip } from './CopyChip'
-import { hostLabel } from './Tools'
+import { hostLabel } from './toolsHelpers'
 import './ghAuth.css'
 
 function pendingUrl(p: GhPending): string {
