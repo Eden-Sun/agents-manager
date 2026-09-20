@@ -1276,7 +1276,9 @@ pub async fn post_deliver(State(app): State<Arc<App>>, Path(id): Path<String>, J
     // 「上一次其實成功了」與「執行者根本沒 commit」。
     let attempted_before = events.iter().any(|e| attempt_sha(e).as_deref() == Some(head.as_str()));
     if !attempted_before {
-        let _ = store::add_event(
+        // 記不下就不動手（#269）：這則 note 是重試認得「上一次其實成功了」的唯一依據，吞掉失敗照推，
+        // 之後 `delivered` 再寫不成，重試會把早就在 base 上的交付報成 `nothing_to_deliver`。
+        store::add_event(
             &app.db,
             &id,
             "note",
@@ -1284,7 +1286,8 @@ pub async fn post_deliver(State(app): State<Arc<App>>, Path(id): Path<String>, J
             Some(crate::agent_relay::DAEMON_SENDER),
             &json!({"delivery_attempt": {"sha": head, "mode": m.delivery_mode}}),
         )
-        .await;
+        .await
+        .map_err(up)?;
     }
     // 交付的 base 從 repo 問（`origin/HEAD`），不是寫死 main：預設分支叫 master／trunk 的專案
     // 以前一定 `fetch_failed`。
@@ -2888,6 +2891,30 @@ mod tests {
         let events = store::events(&app.db, &id).await.unwrap();
         assert!(events.iter().any(|e| e.kind == "delivered" && e.text.contains("已在 main 上")), "補記一則 delivered");
         assert_eq!(events.iter().filter(|e| e.text.contains("開始交付")).count(), 1, "同一個 commit 只記一次 delivery_attempt");
+    }
+
+    /// 「開始交付」那則 note 是重試分辨「上一次其實成功了」的唯一依據：寫不進去就不能推。
+    /// 以前 `let _ =` 吞掉失敗照推，之後 `delivered` 再寫不成，重試看不到 delivery_attempt、
+    /// HEAD 又已在 base 裡，就被報成 `nothing_to_deliver`、任務停在「交付失敗」——其實早就推上去了。
+    #[tokio::test]
+    async fn a_delivery_that_cannot_record_its_attempt_is_not_pushed() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (origin, wt) = with_origin(&env);
+        let base_before = git(&origin, &["rev-parse", "main"]);
+        let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("noattempt", "push_main"))).await.unwrap();
+        let id = m["id"].as_str().unwrap().to_string();
+        commit_file(&wt, "a.txt");
+        let _ = post_event(State(app.clone()), Path(id.clone()), Json(verified(Some(&wt), None))).await.unwrap();
+
+        sqlx::query("CREATE TRIGGER no_notes BEFORE INSERT ON mission_events WHEN NEW.kind = 'note' BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END")
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let res = post_deliver(State(app.clone()), Path(id.clone()), Json(deliver_from(&wt))).await;
+        assert!(res.is_err(), "記不下「開始交付」就不該動手：{res:?}");
+        assert_eq!(git(&origin, &["rev-parse", "main"]), base_before, "什麼都沒推");
+        assert_eq!(load(&app, &id).await.unwrap().status(), "open", "沒動手也不是交付失敗");
     }
 
     /// 使用者取消任務：AGM 被叫醒，底下還開著的交辦一併取消（等額度那件不會幾小時後自己重送）。
