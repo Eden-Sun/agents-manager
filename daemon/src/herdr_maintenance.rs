@@ -351,12 +351,7 @@ mod tests {
         // 等的是 `close()` 的**最後一步**（寫 note），不是中間那步（退休子 agent）：`close()` 的順序是
         // 刪窗口 → 退休沒接回的子 agent → 寫 note，兩者之間有 await。只等「子 agent 被退休」的話，慢的
         // runner 上會在寫 note 之前就去數 note，數到 0（#274，跟 #255 同一族）。
-        for _ in 0..150 {
-            if notes(&app, "herdr_maintenance_expired").await == 1 {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
+        let _ = crate::testing::eventually!(notes(&app, "herdr_maintenance_expired").await == 1);
         assert!(deleted(&app, &lost).await, "讀得到之後自己接手：過期的窗口收尾、沒接回的子 agent 退休");
         assert_eq!(notes(&app, "herdr_maintenance_expired").await, 1);
     }
