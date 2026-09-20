@@ -64,7 +64,27 @@ except OSError:
   [ "$_born" = 0 ] && { echo 0; return; }
   echo $(( $(date +%s) - _born ))
 }
-take_lock() { mkdir "$LOCK" 2>/dev/null && { echo "$$ $(date +%s)" > "$LOCK/owner"; trap 'rm -rf "$LOCK" 2>/dev/null || true' EXIT; return 0; }; return 1; }
+# 連續「沒能完成」不能永遠只有 local log（換版流程靜默停住＝正式 daemon 從此不再自動更新，且沒人知道）：
+# 過了觸發條件、真的往下檢查的那一輪，只要出過「讀不到／申請不了／拿不到窗口／派不出去」就算失敗，
+# 連續 FAIL_ALERT_AFTER 輪（預設 3；整點才會過閘＝約 3 小時）推 ops_alert；完整跑完一輪清零。
+# 沒過觸發條件的輪次（每 5 分鐘那些）不動計數。「還有人在跑」「等 AGM 裁示」是正常的等，不算失敗。
+FAILS="$DIR/daemon-update.fails"
+FAIL_ALERT_AFTER=${AGM_FAIL_ALERT_AFTER:-3}
+ROUND_FAIL=""; CHECKED=0
+note_fail() { ROUND_FAIL="${ROUND_FAIL:-$1}"; log "$1"; }
+settle() {
+  if [ -n "$ROUND_FAIL" ]; then
+    _n=$(cat "$FAILS" 2>/dev/null)
+    case "$_n" in ''|*[!0-9]*) _n=0 ;; esac
+    _n=$((_n + 1)); echo "$_n" > "$FAILS"
+    [ "$_n" -ge "$FAIL_ALERT_AFTER" ] && alert check_failing "例行更新連續 ${_n} 輪沒能完成：${ROUND_FAIL}"
+  elif [ "$CHECKED" = 1 ]; then
+    rm -f "$FAILS" 2>/dev/null
+  fi
+  return 0
+}
+cleanup() { settle; rm -rf "$LOCK" 2>/dev/null || true; }
+take_lock() { mkdir "$LOCK" 2>/dev/null && { echo "$$ $(date +%s)" > "$LOCK/owner"; trap cleanup EXIT; return 0; }; return 1; }
 if ! take_lock; then
   _pid=$(cut -d' ' -f1 "$LOCK/owner" 2>/dev/null)
   _age=$(lock_age)
@@ -167,8 +187,9 @@ elif [ "$MINE" = 1 ]; then
 elif [ "$MINUTE" -ge 5 ]; then
   log "非整點且重建申請只有 ${REQUESTS}/${THRESHOLD}（最早一筆等了 ${WAITED} 分鐘），這輪不檢查"; exit 0
 fi
+CHECKED=1   # 過了觸發條件：從這裡起這一輪算「真的檢查」，失敗才會累計、完整跑完才會清零
 "$GIT" -C "$REPO" fetch -q origin main 2>>"$LOG" || log "fetch 失敗，用本地 origin/main"
-HEAD_SHA=$("$GIT" -C "$REPO" rev-parse origin/main) || { log "無法讀取 origin/main，跳過"; exit 0; }
+HEAD_SHA=$("$GIT" -C "$REPO" rev-parse origin/main) || { note_fail "無法讀取 origin/main，跳過"; exit 0; }
 
 # 會影響 binary 的路徑。問 daemon 拿（它知道自己 include_str! 了什麼）；問不到再用保底清單。
 PATHS=$("$AGM" --compact build-inputs 2>/dev/null | python3 -c '
@@ -203,7 +224,7 @@ if ! "$AGM" --compact state | BOT="$BOT" python3 -c '
 import json,os,sys
 sys.exit(0 if any(b.get("id")==os.environ["BOT"] for b in json.load(sys.stdin).get("bots",[])) else 1)
 ' 2>/dev/null; then
-  log "建置 child $BOT 不在，跳過"; exit 0
+  note_fail "建置 child $BOT 不在，跳過"; exit 0
 fi
 
 # 上一筆更新派工還沒**結案**就不要再疊：回合跑完但沒人驗收的也算未結案。
@@ -213,7 +234,7 @@ rows = json.load(sys.stdin)["assignments"]
 if not isinstance(rows, list): sys.exit(1)
 mine = [r for r in rows if str(r.get("client_request_id","")).startswith("agm-daemon-update-")]
 print(mine[0]["client_request_id"] if mine else "")
-' 2>/dev/null) || { log "無法確認未結案派工，這輪不派"; exit 0; }
+' 2>/dev/null) || { note_fail "無法確認未結案派工，這輪不派"; exit 0; }
 if [ -n "$PENDING" ]; then
   log "上一筆更新還沒結案（${PENDING}），跳過"; exit 0
 fi
@@ -227,7 +248,7 @@ manager=d.get("manager_bot_id")
 if not isinstance(manager,str) or not manager.strip(): sys.exit(1)
 print(manager.strip())
 ' "$DIR/runtime.json" 2>/dev/null) || {
-  log "無法從 runtime.json 取得 manager_bot_id，這輪不派"; exit 0;
+  note_fail "無法從 runtime.json 取得 manager_bot_id，這輪不派"; exit 0;
 }
 # AGM 雙角色（SPEC §18.15）：協調者也是 AGM，一樣排除。沒建立（或舊 CLI 沒有這個子命令）就只有巡檢。
 RESPONDER=$("$AGM" --compact responder show 2>/dev/null | python3 -c '
@@ -308,7 +329,7 @@ import json,sys
 d=json.load(sys.stdin)
 if not isinstance(d.get("id"),str) or not d["id"]: sys.exit(1)
 print(d["id"])
-' 2>/dev/null) || { log "申請核准失敗，這輪不派"; exit 0; }
+' 2>/dev/null) || { note_fail "申請核准失敗，這輪不派"; exit 0; }
   APPR_COMMIT="$HEAD_SHA"
   python3 -c '
 import json,os,sys
@@ -316,7 +337,7 @@ path,commit,owner,aid=sys.argv[1:]
 with open(path+".tmp","w") as f: json.dump(dict(commit=commit,owner=owner,id=aid),f)
 os.replace(path+".tmp",path)
 ' "$APPROVAL_STATE" "$HEAD_SHA" "$OWNER" "$APPROVAL" || {
-    log "保存核准 ID 失敗，這輪不派"; exit 0;
+    note_fail "保存核准 ID 失敗，這輪不派"; exit 0;
   }
   if [ ${#SUP_ARGS[@]} -gt 0 ]; then
     log "已申請核准 ${APPROVAL}（commit ${HEAD_SHA}，取代 ${SUPERSEDE}），等 AGM 裁示"
@@ -415,6 +436,7 @@ ESC_REST=${SAFE_RAW#*|}
 ESCALATED=${ESC_REST%%|*}
 WAITED_SECS=${ESC_REST##*|}
 case "$WAITED_SECS" in ''|*[!0-9]*) WAITED_SECS=0 ;; esac
+case "$SAFE" in unknown|unreadable) note_fail "讀不到／看不懂安全窗口判定（${SAFE}），這輪不派" ;; esac
 if [ "$SAFE" != "yes" ]; then
   log "還有人在跑（${SAFE}），這輪不派"; exit 0
 fi
@@ -437,7 +459,7 @@ print("%s|%s" % (d.get("lease", {}).get("fence") or "", d.get("lease_token") or 
 LEASE=${ACQUIRED%%|*}
 LEASE_TOKEN=${ACQUIRED#*|}
 if [ -z "$LEASE" ]; then
-  log "拿不到 rebuild 窗口（可能有人正在做或核准對不上），這輪不派"; exit 0
+  note_fail "拿不到 rebuild 窗口（可能有人正在做或核准對不上），這輪不派"; exit 0
 fi
 # 舊 daemon 還沒有 token（升級前的那一版）：照舊不帶，release 那邊會放行並留 warn。
 # token **不進派工正文**（review2 sup #5）：正文會出現在 `GET /api/supervisor/assignments`、建置 child 的對話紀錄，
@@ -451,7 +473,7 @@ if [ -n "$LEASE_TOKEN" ]; then
   if ( umask 077 && printf '%s' "$LEASE_TOKEN" > "$TOKEN_FILE" ); then
     TOKEN_TEXT=" --lease-token \"\$(cat $TOKEN_FILE)\""
   else
-    log "寫不進 lease token 檔，交還窗口，這輪不派"
+    note_fail "寫不進 lease token 檔，交還窗口，這輪不派"
     # shellcheck disable=SC2086
     "$AGM" --compact lease release rebuild --owner "$OWNER" --fence "$LEASE" $TOKEN_ARG >> "$LOG" 2>&1 || true
     exit 0
@@ -476,7 +498,7 @@ if "$AGM" --compact assign --bot "$BOT" --text-file "$TMP" \
   echo "$HEAD_SHA" > "$STATE"
   log "已派工 agm-daemon-update-$HEAD_SHA"
 else
-  log "派工失敗，交還窗口"
+  note_fail "派工失敗，交還窗口"
   # shellcheck disable=SC2086  # TOKEN_ARG 是刻意要拆成兩個參數的（沒有 token 時是空字串）
   "$AGM" --compact lease release rebuild --owner "$OWNER" --fence "$LEASE" $TOKEN_ARG >> "$LOG" 2>&1 || true
   rm -f "$TOKEN_FILE"
