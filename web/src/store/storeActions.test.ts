@@ -1045,3 +1045,16 @@ test('斷線重連後：已載入的對話要重抓訊息，不能只補狀態�
   await reloadLoadedConversations(useStore.getState)
   assert.ok(requests.some((r) => r.path.includes('/bots/b1/messages')))
 })
+
+test('連不上 daemon／代理回空的 502：通知講人話，不是 Failed to fetch 或 HTTP 路徑（#370）', async () => {
+  seed()
+  routeDaemon(() => {
+    throw new TypeError('Failed to fetch')
+  })
+  await useStore.getState().sendPrompt('b1', 'x')
+  assert.ok(noticeTexts().some((t) => t.includes('連不上 daemon')), noticeTexts().join('|'))
+  useStore.setState({ notices: [] })
+  routeDaemon(() => new Response('Bad Gateway', { status: 502 }))
+  await useStore.getState().sendPrompt('b1', 'y')
+  assert.ok(noticeTexts().some((t) => t.includes('暫時不可用')), noticeTexts().join('|'))
+})
