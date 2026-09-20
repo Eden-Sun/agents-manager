@@ -234,7 +234,15 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
 /// 套用全部 schema，最後對一次帳（[`schema_guard::check_drift`]）。
 async fn migrate(pool: &SqlitePool) -> Result<()> {
     apply_migrations(pool).await?;
-    schema_guard::check_drift(pool).await
+    schema_guard::check_drift(pool).await?;
+    // 版本戳記最後才蓋（#289）：子模組 migrate 或漂移核對失敗時 daemon 起不來，這時 DB 不能已經宣稱是新版，
+    // 否則回滾用的舊 binary 會被版本閘（#72）擋在門外。
+    let stored: i64 = sqlx::query_scalar("PRAGMA user_version").fetch_one(pool).await?;
+    if stored < SCHEMA_VERSION {
+        // `user_version` 不接受 bind 參數，但這裡的值是編譯期常數，不是外部輸入。
+        sqlx::query(&format!("PRAGMA user_version = {SCHEMA_VERSION}")).execute(pool).await.context("stamp schema version")?;
+    }
+    Ok(())
 }
 
 /// Only the current schema is supported: older databases are not upgraded. Leftover tables of
@@ -252,8 +260,8 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
 ///
 /// 進交易之前先比對 [`SCHEMA_VERSION`]：資料庫記的版本比這顆 binary 認得的還新，代表有更新版的
 /// binary 已經動過這個檔案——直接拒絕，一個 SCHEMA／ALTER 都不碰，不要拿舊的欄位假設去讀一個看
-/// 不懂的資料庫（issue #72）。版本比較與最後的版本戳記都在同一個交易裡：SCHEMA／ALTER 失敗時
-/// 版本號要跟著回滾，不能宣稱「已經是這個版本」卻沒有真的套用成功。
+/// 不懂的資料庫（issue #72）。版本戳記由 [`migrate`] 在全部子模組 migrate 與漂移核對通過之後才蓋，中途失敗時
+/// 版本號維持原樣，不能宣稱「已經是這個版本」卻沒有真的套用成功。
 ///
 /// 不含最後的漂移核對：`schema_guard` 拿它在全新的 in-memory DB 上跑一次，當 schema 的標準答案。
 async fn apply_migrations(pool: &SqlitePool) -> Result<()> {
@@ -352,12 +360,6 @@ async fn apply_migrations(pool: &SqlitePool) -> Result<()> {
     // trigger 由它生成。二十來處 `UPDATE turns SET status` 各自帶的 CAS guard 照舊，這是它們的下限，
     // 而且未來新寫的路徑繞不過去——終局的回合不可能被改回進行中。
     crate::lifecycle::turn_controller::install_guard(&mut tx).await.context("create turns_status_transition trigger")?;
-    // 版本戳記放最後：所有 DDL 都成功了才蓋，中途失敗整批回滾、下次從乾淨的起點重來。
-    if stored_version < SCHEMA_VERSION {
-        // `user_version` 不接受 bind 參數（跟 `table_info` 那個 PRAGMA 一樣），但這裡的值是編譯期常數，
-        // 不是外部輸入，直接內嵌沒有注入風險。
-        sqlx::query(&format!("PRAGMA user_version = {SCHEMA_VERSION}")).execute(&mut *tx).await.context("stamp schema version")?;
-    }
     tx.commit().await?;
     crate::supervisor::store::migrate(pool).await?;
     crate::read_marks::migrate(pool).await?;
@@ -1263,6 +1265,25 @@ mod tests {
         let p2 = open(&file).await.unwrap();
         assert_eq!(columns(&p2, "bots").await, before);
         p2.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 版本戳記要在子模組 migrate 與漂移核對之後才蓋：主交易 commit 了、子模組才失敗，DB 不能已經是新版
+    /// （否則回滾用的舊 binary 被版本閘擋住）。
+    #[tokio::test]
+    async fn a_failed_submodule_migrate_leaves_the_version_unstamped() {
+        let dir = tmp_dir();
+        let pool = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1).connect(&format!("sqlite://{}?mode=rwc", dir.join("db.sqlite3").display())).await.unwrap();
+        // hook_inbox::migrate 要建 index hook_events_dedupe；名字先被一張表占走，它會失敗，而主交易那時已經 commit。
+        sqlx::query("CREATE TABLE hook_events_dedupe (x INTEGER)").execute(&pool).await.unwrap();
+        assert!(migrate(&pool).await.is_err());
+        let v: i64 = sqlx::query_scalar("PRAGMA user_version").fetch_one(&pool).await.unwrap();
+        assert_eq!(v, 0, "子模組沒 migrate 成功，版本戳記不能已經蓋上");
+        sqlx::query("DROP TABLE hook_events_dedupe").execute(&pool).await.unwrap();
+        migrate(&pool).await.unwrap();
+        let v: i64 = sqlx::query_scalar("PRAGMA user_version").fetch_one(&pool).await.unwrap();
+        assert_eq!(v, SCHEMA_VERSION);
+        pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     }
 
