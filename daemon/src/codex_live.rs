@@ -50,7 +50,8 @@ pub fn parse_status_line(screen: &str) -> Option<CodexRuntime> {
             continue;
         }
         let mut parts = head.split_whitespace();
-        let model = parts.next()?.to_string();
+        // 這一行的開頭沒有東西（`· Context …`）只是別的行：略過，不能整個函式回 None（下面才有真的狀態列）。
+        let Some(model) = parts.next().map(str::to_string) else { continue };
         if !model.contains('-') {
             continue;
         }
@@ -306,6 +307,15 @@ pub async fn apply(
 #[cfg(test)]
 mod tests {
     /// 2026-09-14 實況：fork 起來的 codex 狀態列沒有 `Context` 那段，照樣要讀得到剩餘額度。
+    /// #321：畫面上方有一行開頭是 `·`、又含 `Context` 的字（bot 印的、或別的 chrome），以前 `parts.next()?` 直接讓整個函式
+    /// 回 None，下面真正的狀態列讀不到——改模型／強度的讀回驗證就誤判成「沒落地」。
+    #[test]
+    fn a_stray_leading_dot_row_does_not_hide_the_real_status_line() {
+        let screen = "  · Context notes: see docs\n\n  gpt-5.6-sol high · /tmp · Context 3% used\n";
+        let rt = parse_status_line(screen).expect("下面那行才是狀態列");
+        assert_eq!((rt.model.as_str(), rt.effort.as_deref()), ("gpt-5.6-sol", Some("high")));
+    }
+
     #[test]
     fn a_status_line_without_context_still_yields_the_quota() {
         let q = parse_status_quota("  gpt-5.6-sol medium · ~/project/agents-manager · 5h 82% left · weekly 97% left\n").unwrap();
