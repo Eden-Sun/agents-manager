@@ -46,18 +46,18 @@ pub async fn receive(
     Json(body): Json<HookBody>,
 ) -> (StatusCode, Json<Value>) {
     let token = headers.get("X-AM-Bot-Token").and_then(|v| v.to_str().ok()).unwrap_or("");
-    let expected = match db::bot(&app.db, &body.bot_id).await {
-        // A3: a deleted bot's surviving agent must not be able to create turns / messages.
-        Ok(Some(b)) if b.deleted_at.is_some() => {
-            return (StatusCode::GONE, Json(json!({"error": "bot deleted"})));
-        }
-        Ok(Some(b)) => b.hook_token,
-        _ => {
-            return (StatusCode::UNAUTHORIZED, Json(json!({"error": "unknown bot"})));
-        }
+    // 分不出「沒這顆 bot」與「token 不對」（#304）：先驗 token，410 只給 token 正確者。
+    let unauthorized = || (StatusCode::UNAUTHORIZED, Json(json!({"error": "unknown bot or bad token"})));
+    let bot = match db::bot(&app.db, &body.bot_id).await {
+        Ok(Some(b)) => b,
+        _ => return unauthorized(),
     };
-    if token.is_empty() || !crate::api::ct_eq(token, &expected) {
-        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "bad token"})));
+    if token.is_empty() || !crate::api::ct_eq(token, &bot.hook_token) {
+        return unauthorized();
+    }
+    // A3: a deleted bot's surviving agent must not be able to create turns / messages.
+    if bot.deleted_at.is_some() {
+        return (StatusCode::GONE, Json(json!({"error": "bot deleted"})));
     }
     let provider = if body.provider.is_empty() { provider } else { body.provider.clone() };
     let mut b = body;
@@ -3491,6 +3491,28 @@ mod durable_handoff_tests {
         .await;
         assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE, "寫不進去就不是 200");
         assert!(!code.is_success(), "送端要看得出來該 spool");
+    }
+
+    /// #304：沒帶對 token 的人分不出「有過這顆 bot」與「沒有」——不存在、已刪、token 不對都是同一個 401；
+    /// 410 只給 token 正確者（被刪 bot 還活著的 agent 要知道自己該停）。
+    #[tokio::test]
+    async fn the_hook_endpoint_does_not_reveal_whether_a_bot_id_exists() {
+        let e = env().await;
+        let live = claude_bot(&e.app, &e.project_id, "live").await;
+        let gone = claude_bot(&e.app, &e.project_id, "gone").await;
+        sqlx::query("UPDATE bots SET deleted_at=? WHERE id=?").bind(db::now()).bind(&gone.id).execute(&e.app.db).await.unwrap();
+        let mut seen = Vec::new();
+        for (id, token) in [(&live.id, "wrong"), (&gone.id, "wrong"), (&gone.id, ""), (&"no-such-bot".to_string(), "wrong")] {
+            let (code, Json(body)) =
+                receive(State(e.app.clone()), Path("claude".into()), headers(token), Json(stop_body(id, "p1"))).await;
+            seen.push((code, body));
+        }
+        assert!(seen.iter().all(|s| *s == seen[0]), "沒有有效 token：存在、已刪、不存在的回應要一模一樣：{seen:?}");
+        assert_eq!(seen[0].0, StatusCode::UNAUTHORIZED);
+        let (code, _) =
+            receive(State(e.app.clone()), Path("claude".into()), headers("tok"), Json(stop_body(&gone.id, "p1"))).await;
+        assert_eq!(code, StatusCode::GONE, "token 正確的已刪 bot 仍是 410");
+        assert_eq!(inbox_rows(&e).await, 0, "任何一種都不能寫進收件匣");
     }
 
     /// 收下了才 200；而且 200 的當下那一列已經在 DB 裡（不是「待會背景寫」）。
