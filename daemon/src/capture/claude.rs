@@ -38,7 +38,7 @@ impl Capture for ClaudeCapture {
             {
                 break;
             }
-            if s.chars().next().map(is_spinner_glyph).unwrap_or(false) || self.noise_line(s) {
+            if spinner_led(s) || self.noise_line(s) {
                 continue;
             }
             let cleaned = s.strip_prefix(marker).unwrap_or(t).to_string();
@@ -68,7 +68,7 @@ impl Capture for ClaudeCapture {
             let Some(first) = s.chars().next() else {
                 continue;
             };
-            let rest = if is_spinner_glyph(first) {
+            let rest = if spinner_led(s) {
                 s[first.len_utf8()..].trim()
             } else if super::is_activity_shape(s) {
                 if first.is_alphanumeric() {
@@ -96,6 +96,15 @@ impl Capture for ClaudeCapture {
             .to_string();
         cut.push('…');
         Some(cut)
+    }
+}
+
+/// 這一行是 spinner 開頭嗎。`*` 也是 spinner 的一格，但同時是回覆裡的 markdown 項目、程式碼區塊的 ` * 註解`：
+/// `*` 開頭要有 spinner 該有的 `…` 才算（其他字頭照舊一律算，完成行沒有 `…`；`·` 不動：真畫面的 `· Run in another terminal…` 提示行靠它剝掉）。
+fn spinner_led(s: &str) -> bool {
+    match s.trim_start().chars().next() {
+        Some(c) if is_spinner_glyph(c) => c != '*' || s.contains('…'),
+        _ => false,
     }
 }
 
@@ -190,7 +199,10 @@ fn is_noise(s: &str) -> bool {
         return false;
     }
     let first = s.chars().next().unwrap_or(' ');
-    if "▐▝▛▜█╭╮╰╯│▔⏵⚠✗✘".contains(first) || is_spinner_glyph(first) {
+    if "▐▝▛▜█╭╮╰╯│▔⏵⚠✗✘".contains(first) {
+        return true;
+    }
+    if spinner_led(s) {
         return true;
     }
     if s.contains("Auto-update failed") {
@@ -251,5 +263,19 @@ mod loose_noise_tests {
         // 真的狀態列照舊是雜訊。
         assert!(is_noise("gpt-5.6-sol high · ~/p · Context 3% used · 5h 82% left · weekly 97% left"));
         assert!(is_noise("· 5h 82% left · weekly 97% left"));
+    }
+
+    /// #331：`*` 開頭的回覆行（markdown 項目、程式碼區塊的 ` * 註解`）被當 spinner 剝掉。
+    #[test]
+    fn a_reply_row_starting_with_star_or_dot_is_not_a_spinner() {
+        assert!(!is_noise("* 第一點"));
+        assert!(!is_noise("* Returns the count of items"));
+        let screen = "❯ 寫註解\n⏺ 這樣：\n  /**\n   * Returns the count of items\n   */\n  fn count() {}\n";
+        let reply = ClaudeCapture.extract_reply(screen).unwrap();
+        assert!(reply.contains("* Returns the count of items"), "程式碼區塊的註解行不能被剝：{reply}");
+        // 真的 spinner 行照舊是雜訊。
+        assert!(is_noise("* Cooking… (3s · ↓ 1.0k tokens)"));
+        assert!(is_noise("· Philosophising… (33m 33s · ↓ 94.9k tokens)"));
+        assert!(is_noise("✻ Crunched for 9s · done 11:35 PM"));
     }
 }
