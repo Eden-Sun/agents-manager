@@ -1008,3 +1008,13 @@ test('removeBot／addBot／addProject 連點：只送一次，不跳第二個失
   assert.deepEqual(hits, { del: 1, bot: 1, proj: 1 })
   assert.equal(noticeTexts().filter((t) => /not_found|already|找不到/.test(t)).length, 0)
 })
+
+test('多分頁：這個分頁存草稿不能洗掉別的分頁剛存的草稿', () => {
+  seed()
+  // 別的分頁在這個分頁載入之後才寫進 localStorage 的 bot9 草稿。
+  localStorage.setItem('am.drafts', JSON.stringify({ 'bot:b9': '另一個分頁打的' }))
+  useStore.getState().setDraft('bot:b1', '這個分頁打的')
+  assert.deepEqual(JSON.parse(localStorage.getItem('am.drafts')!), { 'bot:b9': '另一個分頁打的', 'bot:b1': '這個分頁打的' })
+  useStore.getState().setDraft('bot:b1', '')
+  assert.deepEqual(JSON.parse(localStorage.getItem('am.drafts')!), { 'bot:b9': '另一個分頁打的' }, '清掉自己的鍵，別人的留著')
+})
