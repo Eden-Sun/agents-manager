@@ -96,6 +96,9 @@ pub async fn autostart_after_reconcile(app: &Arc<App>, host: &str, reconciled: b
         tracing::warn!(host, "autostart skipped: reconcile did not succeed; will retry on the next successful connect");
         return false;
     }
+    // 被打斷的重啟先補完（#355 P2）：要在下面 autostart 判斷「使用者停掉的」之前——不然剛停掉的那顆會被當成使用者要它停。
+    // 每次對帳成功都做（重啟 intent 隨時可能產生），不受下面「每台主機一生一次」限制。
+    crate::restart_intents::recover_host(app, host).await;
     if !app.autostarted_hosts.lock().await.insert(host.to_string()) {
         tracing::info!(host, "autostart already ran for this host in this daemon's lifetime; not restarting stopped bots");
         return false;

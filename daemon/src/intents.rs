@@ -151,12 +151,44 @@ pub async fn fail(pool: &SqlitePool, id: &str, err: &str) -> Result<bool> {
     finish(pool, id, "failed", Some(err)).await
 }
 
+/// 放棄並**同一個交易**推 AGM inbox（`intent_failed`）：補做用完次數或過期了，不能只寫 log（使用者 2026-09-20 裁示）；
+/// 標記與通知同生共死，不會有「失敗了卻沒人知道」。回 `true`＝這次真的由它標成 failed。
+pub async fn fail_and_notify(pool: &SqlitePool, id: &str, err: &str) -> Result<bool> {
+    let Some(i) = get(pool, id).await? else { return Ok(false) };
+    let mut tx = pool.begin().await?;
+    let n = sqlx::query("UPDATE intents SET status = 'failed', last_error = ?, updated_at = ? WHERE id = ? AND status IN ('pending','running')")
+        .bind(err)
+        .bind(crate::db::now())
+        .bind(id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    if n == 1 {
+        crate::supervisor::store::push_inbox_tx(
+            &mut tx,
+            &format!("intent_failed:{id}"),
+            "intent_failed",
+            None,
+            Some(&i.subject_id),
+            None,
+            &serde_json::json!({
+                "intent_id": i.id, "kind": i.kind, "subject_id": i.subject_id, "host": i.host,
+                "attempts": i.attempts, "last_error": err,
+                "message": format!("{} 沒能補完（已試 {} 次）：{err}。請人工確認 {} 的狀態。", i.kind, i.attempts, i.subject_id),
+            }),
+        )
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(n == 1)
+}
+
 /// 這一次補做失敗了：記下原因、放回 `pending`（下一輪 recovery 再認領）；用完 [`MAX_ATTEMPTS`] 就直接 `failed`。
 /// 回 `true`＝已經放棄（呼叫端該推 AGM inbox）。
 pub async fn record_failure(pool: &SqlitePool, id: &str, err: &str) -> Result<bool> {
     let attempts: Option<i64> = sqlx::query_scalar("SELECT attempts FROM intents WHERE id = ?").bind(id).fetch_optional(pool).await?;
     if attempts.unwrap_or(0) >= MAX_ATTEMPTS {
-        return fail(pool, id, err).await;
+        return fail_and_notify(pool, id, err).await;
     }
     sqlx::query("UPDATE intents SET status = 'pending', last_error = ?, updated_at = ? WHERE id = ? AND status = 'running'")
         .bind(err)
@@ -183,7 +215,7 @@ pub async fn expire_overdue(pool: &SqlitePool, now: &str) -> Result<Vec<Intent>>
         .await?;
     let mut out = Vec::new();
     for i in overdue {
-        if fail(pool, &i.id, "expired before it could be completed").await? {
+        if fail_and_notify(pool, &i.id, "expired before it could be completed").await? {
             out.push(i);
         }
     }
