@@ -56,7 +56,8 @@ reap_profiles() {
   live=$(ps -axo command | grep 'Google Chrome' | grep -- '--headless' | sed -n 's/.*--user-data-dir=\([^ ]*\).*/\1/p')
   # 任何 /tmp/am-* 只要長得像 Chrome profile（有 Local State / Default / DevToolsActivePort）就算；
   # 截圖、build target 之類的目錄沒有這些標記，不會被碰。
-  for d in /tmp/am-*; do
+  # (N)＝沒符合就展開成空；只放寬這一個 glob，不對整支 setopt nonomatch（#371）。
+  for d in /tmp/am-*(N); do
     [ -d "$d" ] || continue
     { [ -e "$d/Local State" ] || [ -d "$d/Default" ] || [ -e "$d/DevToolsActivePort" ]; } || continue
     echo "$live" | grep -qx "$d" && continue
