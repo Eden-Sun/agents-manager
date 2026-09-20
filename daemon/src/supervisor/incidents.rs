@@ -364,7 +364,15 @@ pub async fn sweep(app: &Arc<App>, detector: &mut Detector) {
         tracing::warn!(blind = ?probed.failed, "some incident probes could not run; their incidents are left as they are");
     }
     note_blind(app, &probed.failed);
-    let responder_configured = super::roles::responder_configured(&app.db).await.unwrap_or(false);
+    // 讀不到＝不知道：當成「沒有協調者」會讓 notify_exhausted 的事件被吞掉（incident 已開、通知不再補），
+    // 所以整輪不做，跟上面讀不到 open incidents 同一個原則（#250）。
+    let responder_configured = match super::roles::responder_configured(&app.db).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = ?e, "incident sweep skipped: could not read whether the responder is configured");
+            return;
+        }
+    };
     let plan = detector.plan(
         &probed.seen,
         &open_keys,
