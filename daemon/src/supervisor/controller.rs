@@ -537,10 +537,6 @@ async fn mission_quota_inner(app: &Arc<App>, a: &store::Assignment, mission_id: 
                 None => identity.clone(),
             };
             let why = format!("帳號撞到用量上限（{where_seen}）：{}｜依任務規則換手：{} → {}（{}）", hit.message.trim(), current, to, reason);
-            // 交辦已經不在途中（讀完之後被裁示掉）：沒有換手可言，下面的通知與時間軸一句都不寫（issue #110）。
-            if !settle(app, a, "identity_switch", true, None, Some(&why)).await {
-                return Ok(MissionQuota::Handled);
-            }
             let payload = json!({
                 "mission_id": mission_id,
                 "assignment_id": a.id,
@@ -555,7 +551,23 @@ async fn mission_quota_inner(app: &Arc<App>, a: &store::Assignment, mission_id: 
                 "needs_review": true,
             });
             let key = format!("mission_switch:{}:{}", a.id, a.turn_id.clone().unwrap_or_default());
-            let _ = store::push_inbox(&app.db, &key, "mission_identity_switch", Some(&a.id), Some(&a.target_bot_id), a.turn_id.as_deref(), &payload).await;
+            // 交辦收成 `identity_switch` 與叫醒 AGM 的通知同一個交易（#305）：通知寫不進去就整組不成立，下一輪再判。
+            // 交辦已經不在途中（讀完之後被裁示掉）：沒有換手可言，通知與時間軸一句都不寫（issue #110）。
+            let (skind, spayload) = settle_event(a, "identity_switch", true, None, Some(&why));
+            let mut tx = unavailable("settle identity switch", app.db.begin().await.map_err(anyhow::Error::from))?;
+            let s = unavailable(
+                "settle identity switch",
+                store::settle_and_notify_on(&mut tx, &a.id, "identity_switch", true, None, Some(&why), &event_key(skind, a), skind, &spayload).await,
+            )?;
+            if !s.moved {
+                return Ok(MissionQuota::Handled);
+            }
+            unavailable(
+                "queue mission_identity_switch",
+                store::push_inbox_tx(&mut tx, &key, "mission_identity_switch", Some(&a.id), Some(&a.target_bot_id), a.turn_id.as_deref(), &payload).await,
+            )?;
+            unavailable("commit identity switch", tx.commit().await.map_err(anyhow::Error::from))?;
+            app.emit("supervisor_changed", json!({"assignment_id": a.id, "status": "awaiting_review"})).await;
             let _ = mstore::add_event(&app.db, mission_id, "note", &format!("{current} 撞到用量上限，換 {to} 接手"), Some(crate::agent_relay::DAEMON_SENDER), &payload).await;
             app.emit("mission_updated", json!({"mission_id": mission_id, "project_id": m.project_id, "status": m.status()})).await;
             Ok(MissionQuota::Handled)
@@ -2689,6 +2701,36 @@ mod mission_quota_tests {
         assert_eq!(payload["to_identity"], "cc1");
         let notes = mstore::events(&app.db, &mid).await.unwrap();
         assert!(notes.iter().any(|e| e.kind == "note" && e.text.contains("cc1")));
+    }
+
+    /// 換手的交辦收成 `identity_switch` 與叫醒 AGM 的 `mission_identity_switch` 同一個交易：通知寫不進去就整組不成立、
+    /// 下一輪再判。以前先收交辦、再 `let _` 推通知：寫不進去時交辦已離開執行態、AGM 卻不知道要換手，工作就這樣停住。
+    #[tokio::test]
+    async fn an_identity_switch_and_its_notification_land_together() {
+        let app = app().await;
+        bot(&app, "b-cc2", "cc2", Some("fable")).await;
+        let mid = mission(&app, "wait").await;
+        let a = assignment(&app, "b-cc2", &mid, "executor").await;
+        {
+            let mut q = app.quotas.lock().await;
+            q.insert("claude:cc2".into(), quota(10.0, 100.0, 10.0));
+            q.insert("claude:cc1".into(), quota(0.0, 0.0, 0.0));
+        }
+        sqlx::query("CREATE TRIGGER no_switch_event BEFORE INSERT ON supervisor_inbox WHEN NEW.kind='mission_identity_switch' BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END")
+            .execute(&app.db)
+            .await
+            .unwrap();
+        park_quota(&app, &a, &hit(), "turn").await;
+        let now = store::assignment(&app.db, &a.id).await.unwrap().unwrap();
+        assert_ne!(now.turn_status.as_deref(), Some("identity_switch"), "通知寫不進去：交辦不收成 identity_switch");
+        assert_ne!(now.status, "awaiting_review");
+
+        sqlx::query("DROP TRIGGER no_switch_event").execute(&app.db).await.unwrap();
+        let again = store::assignment(&app.db, &a.id).await.unwrap().unwrap();
+        park_quota(&app, &again, &hit(), "turn").await;
+        let done = store::assignment(&app.db, &a.id).await.unwrap().unwrap();
+        assert_eq!(done.turn_status.as_deref(), Some("identity_switch"));
+        assert!(inbox_kinds(&app).await.contains(&"mission_identity_switch".to_string()));
     }
 
     /// review3 c1 L11：reviewer 撞限換手時要排除**執行者現在的身分**。以前固定傳 `exclude=None`：
