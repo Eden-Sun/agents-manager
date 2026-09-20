@@ -660,6 +660,28 @@ async fn consume_resume_session(
     Ok(())
 }
 
+/// 120 秒內被終端備援關掉、還沒收到過 native id 的最近一筆回合（遲到的 hook 可能是它的真回覆，§4.3）。
+async fn recent_fallback_turn(app: &Arc<App>, run_id: &str) -> Result<Option<db::Turn>> {
+    // Fixed-width RFC3339 UTC, so lexicographic comparison is chronological.
+    let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(120)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    Ok(sqlx::query_as::<_, db::Turn>(
+        "SELECT * FROM turns WHERE run_id=? AND status='completed_fallback' AND native_turn_id IS NULL
+         AND completed_at > ? ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(run_id)
+    .bind(&cutoff)
+    .fetch_optional(&app.db)
+    .await?)
+}
+
+/// 那一回合被問了什麼：`prompt_text`，沒有就取第一則使用者訊息。
+async fn turn_prompt(app: &Arc<App>, t: &db::Turn) -> Result<Option<String>> {
+    match t.prompt_text.clone().filter(|p| !p.trim().is_empty()) {
+        Some(p) => Ok(Some(p)),
+        None => Ok(db::turn_user_messages(&app.db, &t.id).await?.into_iter().next()),
+    }
+}
+
 pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
     let Some(bot) = db::bot(&app.db, &body.bot_id).await? else { return Ok(()) };
     // A3: also guards the spool-replay path, where nothing checked the token.
@@ -980,6 +1002,27 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                         (Some(t), user)
                     }
                 }
+                // 備援關掉 T1、使用者接著送了 T2（已送達、in-flight），T1 的真回覆這時才到（#297）：
+                // hook 看得到的使用者訊息不是 T2 的、而是那筆備援回合的，答案屬於 T1，不能收掉 T2。
+                // 兩邊都對不上（或看不到使用者訊息）時照舊認領——沒有證據不改判。
+                Some(t) => {
+                    if let Some(r) = &run {
+                        if let Some(late) = recent_fallback_turn(app, &r.id).await? {
+                            let seen = hook_user_text(user.as_deref(), transcript_path.as_deref()).await;
+                            let late_prompt = turn_prompt(app, &late).await?;
+                            if answers_another_prompt(t.prompt_text.as_deref(), seen.as_deref())
+                                && seen.is_some()
+                                && late_prompt.is_some()
+                                && !answers_another_prompt(late_prompt.as_deref(), seen.as_deref())
+                            {
+                                tracing::info!(turn = %t.id, late = %late.id, bot = %bot.id, "遲到 hook 回答的是備援關掉的那一回合，不是現在 in-flight 的：補回那一回合");
+                                fill_or_drop_late_hook(app, &late, &assistant.clone().unwrap_or_default(), &session_id, &turn_id).await?;
+                                return Ok(());
+                            }
+                        }
+                    }
+                    (Some(t), user)
+                }
                 other => (other, user),
             };
             let body_text = assistant.clone().unwrap_or_default();
@@ -1042,26 +1085,13 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             // §4.3: a late hook must not overwrite a fallback-claimed turn.
             let mut user = user;
             if let Some(r) = &run {
-                // Fixed-width RFC3339 UTC, so lexicographic comparison is chronological.
-                let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(120))
-                    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-                let late = sqlx::query_as::<_, db::Turn>(
-                    "SELECT * FROM turns WHERE run_id=? AND status='completed_fallback' AND native_turn_id IS NULL
-                     AND completed_at > ? ORDER BY created_at DESC LIMIT 1",
-                )
-                .bind(&r.id)
-                .bind(&cutoff)
-                .fetch_optional(&app.db)
-                .await?;
+                let late = recent_fallback_turn(app, &r.id).await?;
                 if let Some(t) = late {
                     // 跟上面 unknown 那條同一個判斷（review3 c1 L13）：hook 帶來的使用者訊息若是**別句**
                     // （使用者改到 pane 裡直接打、herdr 卡 working 沒開外部回合），答案屬於那一句，不能補進 T1、
                     // 更不能把 T1 標成 completed。對不上就往下記成外部回合；看不到使用者訊息時照舊補。
                     let seen = hook_user_text(user.as_deref(), transcript_path.as_deref()).await;
-                    let prompt = match t.prompt_text.clone().filter(|p| !p.trim().is_empty()) {
-                        Some(p) => Some(p),
-                        None => db::turn_user_messages(&app.db, &t.id).await?.into_iter().next(),
-                    };
+                    let prompt = turn_prompt(app, &t).await?;
                     if answers_another_prompt(prompt.as_deref(), seen.as_deref()) {
                         tracing::info!(turn = %t.id, bot = %bot.id, "遲到 hook 的使用者訊息不是這一筆備援回合的 prompt：不補，記成外部回合");
                         user = user.or(seen);
@@ -2167,6 +2197,43 @@ mod external_claim_tests {
         .await
         .unwrap();
         assert_eq!(external, vec!["順便看一下 lint".to_string(), "hook reply".to_string()], "答案跟它的問題一起記在外部回合");
+    }
+
+    /// #297：備援關掉 T1、使用者接著送 T2（已送達、in-flight），T1 的真回覆這時才到——答案屬於 T1，
+    /// 不能把 T2 收成 completed 還貼上 T1 的回覆（以前只有 `delivery = unknown` 才比對使用者訊息）。
+    #[tokio::test]
+    async fn a_late_hook_for_the_fallback_turn_does_not_complete_the_next_in_flight_turn() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, conv, t1) = fallback_closed_turn(&app, &env.project_id, "第一句").await;
+        let run_id: String = sqlx::query_scalar("SELECT run_id FROM turns WHERE id=?").bind(&t1).fetch_one(&app.db).await.unwrap();
+        let t2 = db::ulid();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, prompt_text, created_at)
+             VALUES (?,?,?,'web','in_flight','ok','第二句',?)",
+        )
+        .bind(&t2)
+        .bind(&conv)
+        .bind(&run_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        process(&app, &codex_done(&bot_id, "第一句")).await.unwrap();
+
+        let turn = |id: String| {
+            let app = app.clone();
+            async move { sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(id).fetch_one(&app.db).await.unwrap() }
+        };
+        assert_eq!(turn(t2.clone()).await.status, "in_flight", "T2 還在跑，T1 的回覆不能收掉它");
+        let on_t2: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='assistant'")
+            .bind(&t2)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(on_t2, 0, "T1 的回覆不能貼在 T2 上");
+        assert_eq!(turn(t1).await.status, "completed", "回覆補回它真正的回合");
     }
 
     /// 同一句就照舊補進去（2026-09-13 GROK 那種）。
