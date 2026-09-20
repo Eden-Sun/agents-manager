@@ -118,9 +118,7 @@ async fn accept_locked(
     .execute(&mut *tx)
     .await;
     if let Err(e) = queued {
-        // 已經有一筆在排（每個對話最多一筆 queued）：照舊回 409，這一則留在呼叫端。
-        tracing::info!(bot = %bot_id, error = %e, "另一筆 prompt 已經在排隊，這次照舊回 409");
-        return Err(LcError::conflict("a turn is already queued for this bot", json!({"conversation_id": conv})));
+        return Err(super::prompt::queue_insert_error(bot_id, &conv, e));
     }
     sqlx::query(
         "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, relay_from, created_at) VALUES (?,?,?,'user',?,'web',?,?)",
