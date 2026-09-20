@@ -2507,7 +2507,11 @@ export class MockTransport implements Transport {
     const base = this.bot(botId).cwd ?? '/Users/me/project/agents-manager'
     return {
       candidates: [`${base}/web`, `${base}/apps/web`],
-      others: [{ port: 5173, dir: '/Users/me/project/agents-manager-main/web', pid: 4242 }],
+      others: [
+        { port: 5241, dir: `${base}/web`, pid: 4101, relation: 'same_dir', repo: 'agents-manager' },
+        { port: 5173, dir: '/Users/me/project/agents-manager-main/web', pid: 4242, relation: 'same_repo', repo: 'agents-manager' },
+        { port: 3001, dir: '/Users/me/project/example-agents/projects/wt/webui/apps/web', pid: 4377, relation: 'other', repo: 'example-agents' },
+      ],
     }
   }
 

@@ -3,7 +3,7 @@
  * 狀態來自 store.previews（WS `preview_changed` 即時寫入）；進來與 daemon 重連時 GET 一次補齊 dir／error。
  */
 import { useCallback, useEffect, useState } from 'react'
-import { fetchPreview, type StartPreviewOpts, previewApiMissing, PREVIEW_API_MISSING, previewUrl, startPreview, stopPreview, PREVIEW_OFF, type Preview } from '../api/preview'
+import { groupOthers, fetchPreview, type PreviewOther, type PreviewRelation, type StartPreviewOpts, previewApiMissing, PREVIEW_API_MISSING, previewUrl, startPreview, stopPreview, PREVIEW_OFF, type Preview } from '../api/preview'
 import { isMock } from '../api'
 import { ApiError } from '../api/types'
 import { useStore } from '../store/store'
@@ -26,6 +26,49 @@ function startError(e: unknown): string {
 
 /** mock 模式沒有真的 vite：iframe 放一頁說明，截圖與手動驗才看得到「running」長相。 */
 const MOCK_DOC = `<!doctype html><meta charset="utf-8"><body style="font:14px system-ui;margin:0;display:grid;place-items:center;height:100vh;background:#f6f8fa;color:#1b2430"><div style="text-align:center"><h2 style="margin:0 0 6px">Vite dev server</h2><p style="margin:0;color:#5e6a78">（mock 預覽畫面）</p></div>`
+
+const RELATION_TITLE: Record<PreviewRelation, string> = {
+  same_dir: '這顆 bot 自己的目錄',
+  same_repo: '同一個 repo 的其他 checkout',
+  other: '其他專案',
+}
+
+const RELATION_NOTE: Record<PreviewRelation, string> = {
+  same_dir: '',
+  same_repo: '另一份 checkout，看到的不是這顆 bot 工作樹裡的程式碼',
+  other: '不是這顆 bot 的程式碼',
+}
+
+/** 本機所有在跑的 vite，依 relation 分組；選了就 attach（斷開時不會關掉對方）。 */
+function OthersList({ others, busy, onAttach }: { others: PreviewOther[]; busy: boolean; onAttach: (port: number) => void }) {
+  if (others.length === 0) return null
+  return (
+    <div className="preview-others">
+      <p className="preview-body">本機已開的 vite，選一個直接接上：</p>
+      {groupOthers(others).map((g) => (
+        <section key={g.relation} className={`preview-group ${g.relation}`}>
+          <h3 className="preview-group-title">
+            {RELATION_TITLE[g.relation]}
+            {RELATION_NOTE[g.relation] ? <span className="preview-group-note">{RELATION_NOTE[g.relation]}</span> : null}
+          </h3>
+          <ul>
+            {g.items.map((o) => (
+              <li key={o.port}>
+                <span className="preview-other-dir">
+                  :{o.port} · <code>{o.dir}</code>
+                  {o.repo ? <span className="preview-other-repo"> ({o.repo})</span> : null}
+                </span>
+                <button type="button" className="btn preview-btn" disabled={busy} onClick={() => onAttach(o.port)}>
+                  {g.relation === 'same_dir' ? '接這個' : '還是接這個'}
+                </button>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ))}
+    </div>
+  )
+}
 
 export function PreviewPanel({ botId }: { botId: string }) {
   const bot = useStore((s) => s.bots.find((b) => b.id === botId) ?? null)
@@ -177,6 +220,7 @@ export function PreviewPanel({ botId }: { botId: string }) {
                 關閉
               </button>
             </div>
+            <OthersList others={p.others} busy={busy || !connected} onAttach={(port) => void start({ mode: 'attach', port })} />
           </>
         ) : (
           <>
@@ -207,30 +251,7 @@ export function PreviewPanel({ botId }: { botId: string }) {
                 {pending === 'start' ? '啟動中…' : '啟動預覽'}
               </button>
             </div>
-            {p.others.length > 0 ? (
-              <div className="preview-others">
-                <p className="preview-body">
-                  本機還有別的 vite 在跑（另一份 checkout，看到的不是這顆 bot 的程式碼）：
-                </p>
-                <ul>
-                  {p.others.map((o) => (
-                    <li key={o.port}>
-                      <span className="preview-other-dir">
-                        :{o.port} · <code>{o.dir}</code>
-                      </span>
-                      <button
-                        type="button"
-                        className="btn preview-btn"
-                        disabled={busy || !connected}
-                        onClick={() => void start({ mode: 'attach', port: o.port })}
-                      >
-                        還是接這個
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ) : null}
+            <OthersList others={p.others} busy={busy || !connected} onAttach={(port) => void start({ mode: 'attach', port })} />
           </>
         )}
         {err ? (

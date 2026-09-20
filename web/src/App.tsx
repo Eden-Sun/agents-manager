@@ -9,6 +9,7 @@ import { GroupChatPanel } from './components/GroupChatPanel'
 import { HostShellPanel } from './components/HostShellPanel'
 import { ImageShelf } from './components/ImageShelf'
 import { MobilePreview } from './components/MobilePreview'
+import { PreviewColumn } from './components/PreviewColumn'
 import { Sidebar } from './components/Sidebar'
 import { screenTitle, useDrawerRoute } from './store/routeSync'
 import { useStore } from './store/store'
@@ -255,6 +256,7 @@ export default function App() {
       {/* 刻意掛在 `main` 外：換 bot／project 不 unmount，暫存的檔案才跨得過去。 */}
       <ImageShelf />
       <MobilePreview />
+      <PreviewColumn />
       <Notices />
     </div>
   )

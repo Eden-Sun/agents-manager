@@ -1,0 +1,94 @@
+/* components/PreviewColumn.tsx：`.app` 的第四欄（檔案暫存右邊）。欄寬由元件 inline 決定，軌道用 auto。 */
+body:has(.preview-col) .app {
+  grid-template-columns: clamp(288px, 18vw, 344px) minmax(0, 1fr) auto auto;
+}
+
+/* 手機預覽也開著時，第三欄仍是它固定的 213px。 */
+body:has(.preview-col):has(.mobile-preview) .app {
+  grid-template-columns: clamp(288px, 18vw, 344px) minmax(0, 1fr) 213px auto;
+}
+
+.preview-col {
+  grid-column: 4;
+  grid-row: 1 / -1;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  border-left: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+
+.preview-col.rail {
+  align-items: center;
+  gap: 8px;
+  padding-top: 8px;
+  background: var(--bg-side);
+}
+
+.preview-col-rail-label {
+  writing-mode: vertical-rl;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+/* 跟 `.main-head`、`.shelf-head` 同高，三個標題列連成一條線。 */
+.preview-col-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  height: 60px;
+  padding: 0 6px 0 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+
+.preview-col-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.preview-col-bot {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.preview-col-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 拖曳手柄：欄左緣一條 8px 的感應區，蓋在邊框上。 */
+.preview-col-grip {
+  position: absolute;
+  inset: 0 auto 0 -4px;
+  width: 8px;
+  cursor: col-resize;
+  z-index: 5;
+  touch-action: none;
+}
+
+.preview-col-grip:hover,
+.preview-col-grip:focus-visible,
+.preview-col.dragging .preview-col-grip {
+  background: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+/* 拖曳中 iframe 會吃掉 pointer 事件，先關掉。 */
+.preview-col.dragging iframe {
+  pointer-events: none;
+}
+
+.preview-col.dragging {
+  user-select: none;
+}

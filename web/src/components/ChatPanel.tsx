@@ -5,7 +5,7 @@ import type { ReactNode, RefObject } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import type { BotKind, KindQuota, Message, QuotaWindow, StatusInfo } from '../api/types'
 import { effortLabel, quotaKey } from '../api/types'
-import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
+import { DRAWER_QUERY, PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { useEnterToSend } from '../hooks/useEnterToSend'
 import { useComposerFocus } from '../hooks/useComposerFocus'
 import { useScrollTail } from '../hooks/useScrollTail'
@@ -1124,7 +1124,9 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   })
   const rawTab = useStore((s) => s.rightTab)
   // 預覽只給頂層 bot；切到子 agent 時 store 會回 chat，這裡再擋一次（例如舊網址）。
-  const canPreview = isTopLevelBot(bot ?? undefined)
+  // 桌機預覽在 `.app` 最右欄（PreviewColumn）；只有抽屜版面（≤1024px，含手機）沒有那一欄，才留分頁。
+  const drawerLayout = useMediaQuery(DRAWER_QUERY)
+  const canPreview = drawerLayout && isTopLevelBot(bot ?? undefined)
   const tab = rawTab === 'preview' && !canPreview ? 'chat' : rawTab
   const setRightTab = useStore((s) => s.setRightTab)
   const shellView = useStore((s) => s.shellView)
