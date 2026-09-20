@@ -1924,18 +1924,72 @@ async fn is_manager(app: &Arc<App>, bot_id: &str) -> bool {
     super::roles::role_of_bot(&app.db, bot_id).await.map(|r| r.is_some()).unwrap_or(false)
 }
 
+/// 開機讀不到 supervisor 列時的重試間隔，最後一個之後一直用最後一個（#300）。
+const RESPAWN_RETRY: [Duration; 4] = [Duration::from_secs(2), Duration::from_secs(5), Duration::from_secs(15), Duration::from_secs(60)];
+
 /// Called once from `serve`: bring the controller back for whatever generation is on disk.
+///
+/// 讀不到（DB 開機當下忙一次）不能就此放棄：這顆 controller 起不來，AGM 的派送、驗收通知、額度重送整個行程期間都不動，
+/// 又沒有任何 log。記一行，背景重試到讀得到為止（#300）。`spawn` 自己一個 generation 只起一條迴圈，重試不會疊。
 pub async fn respawn(app: &Arc<App>) {
-    let Ok(sup) = store::get_or_init(&app.db).await else { return };
-    if sup.bot_id.is_none() {
-        return;
+    respawn_with(app, &RESPAWN_RETRY).await
+}
+
+async fn respawn_with(app: &Arc<App>, delays: &'static [Duration]) {
+    match store::get_or_init(&app.db).await {
+        Ok(sup) => {
+            if sup.bot_id.is_some() {
+                spawn(app.clone(), sup.generation);
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = ?e, "cannot read the supervisor row at startup; the AGM controller will be retried in the background");
+            let app = app.clone();
+            tokio::spawn(async move {
+                for attempt in 0usize.. {
+                    tokio::time::sleep(delays[attempt.min(delays.len() - 1)]).await;
+                    match store::get_or_init(&app.db).await {
+                        Ok(sup) => {
+                            tracing::info!(attempt, "supervisor row readable again; starting the AGM controller");
+                            if sup.bot_id.is_some() {
+                                spawn(app.clone(), sup.generation);
+                            }
+                            return;
+                        }
+                        Err(e) => tracing::warn!(attempt, error = ?e, "supervisor row still unreadable; will retry"),
+                    }
+                }
+            });
+        }
     }
-    spawn(app.clone(), sup.generation);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #300：開機讀不到 supervisor 列不能讓 controller 整個行程期間都不起來——背景重試，讀得到就起。
+    #[tokio::test]
+    async fn an_unreadable_supervisor_row_at_boot_is_retried_until_the_controller_starts() {
+        static FAST: [Duration; 1] = [Duration::from_millis(20)];
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let sup = store::get_or_init(&app.db).await.unwrap();
+        const GEN: i64 = 7_300_001;
+        sqlx::query("UPDATE supervisors SET bot_id='b-boot', generation=? WHERE id=?").bind(GEN).bind(&sup.id).execute(&app.db).await.unwrap();
+        crate::testing::make_table_unreadable(&app, "supervisors").await;
+
+        respawn_with(&app, &FAST).await;
+        assert_ne!(LIVE_GENERATION.load(std::sync::atomic::Ordering::SeqCst), GEN, "讀不到：這一刻還起不來");
+        crate::testing::make_table_readable(&app, "supervisors").await;
+        for _ in 0..100 {
+            if LIVE_GENERATION.load(std::sync::atomic::Ordering::SeqCst) == GEN {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("讀得到之後 controller 仍沒被起（沒有重試）");
+    }
 
     /// 409 的退避要爬得過一個典型回合（10～20 分鐘），而且壞掉的環境變數不能把保險絲變成
     /// 「立刻放棄」（review 續補 2026-09-16）。
