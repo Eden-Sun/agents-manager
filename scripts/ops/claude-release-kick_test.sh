@@ -42,7 +42,7 @@ STUB
   : > "$AGM_DIR/assign-body.txt"
   export STUB_ASSIGN_FAIL=""
 }
-teardown() { rm -rf "$ROOT"; unset AGM_DIR CLAUDE_VERSIONS_DIR AGM_RELEASE_BOT STUB_ASSIGN_FAIL; }
+teardown() { rm -rf "$ROOT"; unset AGM_DIR CLAUDE_VERSIONS_DIR AGM_RELEASE_BOT STUB_ASSIGN_FAIL AGM_FAIL_ALERT_AFTER; }
 
 ver() { mkdir -p "$CLAUDE_VERSIONS_DIR/$1"; touch "$CLAUDE_VERSIONS_DIR/$1"; sleep 0.01; }
 check() {
@@ -102,6 +102,21 @@ check "失敗有記 log" "派工失敗" "$AGM_DIR/claude-release.log"
 export STUB_ASSIGN_FAIL=""
 bash "$SCRIPT"
 equals "下一輪重派後才寫 state" "$(cat "$AGM_DIR/claude-release.last")" "2.1.274"
+teardown
+
+# 4b. 連續派工失敗：連續 N 輪推 ops_alert；派成功清零。
+setup
+ver 2.1.273; bash "$SCRIPT"
+ver 2.1.274
+export STUB_ASSIGN_FAIL=1 AGM_FAIL_ALERT_AFTER=3
+bash "$SCRIPT"; bash "$SCRIPT"
+check_no "連續 2 輪還不喊人" "ops-alert" "$AGM_DIR/calls.log"
+bash "$SCRIPT"
+check "連續 3 輪推 dispatch_failing" "ops-alert.*dispatch_failing" "$AGM_DIR/calls.log"
+export STUB_ASSIGN_FAIL=""
+bash "$SCRIPT"
+[ ! -e "$AGM_DIR/claude-release.fails" ] && { echo "ok   - 派成功就清零"; PASS=$((PASS + 1)); } || { echo "FAIL - 派成功就清零"; FAIL=$((FAIL + 1)); }
+unset AGM_FAIL_ALERT_AFTER
 teardown
 
 # 5. 找不到要派給誰（沒有 runtime.json 也沒設 env）：跳過，不亂派給別的 bot。
