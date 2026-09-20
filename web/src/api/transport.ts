@@ -34,6 +34,38 @@ async function readBody(res: Response): Promise<unknown> {
 export class HttpTransport implements Transport {
   readonly mock = false
   private token = ''
+  /** 同時只跑一次 `GET /api/session`：401 常常一次來一整批（終端每秒輪詢＋WS 重連）。 */
+  private refreshing: Promise<string> | null = null
+
+  /**
+   * token 只在開頁時拿一次、存在記憶體裡：那一次沒拿到（daemon 正在重啟／換版），這一頁之後每個請求都
+   * 401，畫面就卡在「讀取終端失敗：missing or bad X-AM-Token」直到使用者自己重新整理
+   * （2026-09-20 使用者在 blocked 面板上看到）。所以 401 時重拿一次 token 再重試一次。
+   */
+  private async refreshToken(): Promise<string> {
+    if (!this.refreshing) {
+      this.refreshing = this.session().finally(() => {
+        this.refreshing = null
+      })
+    }
+    return this.refreshing
+  }
+
+  /** 重試過還是 401 就照實丟出去（token 真的不對，重試再多次也一樣）。 */
+  private async withFreshToken<T>(send: (tok: string) => Promise<Response>, run: (res: Response) => Promise<T>): Promise<T> {
+    let res = await send(this.token)
+    if (res.status === 401) {
+      const before = this.token
+      let tok = ''
+      try {
+        tok = await this.refreshToken()
+      } catch {
+        return run(res)
+      }
+      if (tok && tok !== before) res = await send(tok)
+    }
+    return run(res)
+  }
 
   async session(): Promise<string> {
     const res = await fetch('/api/session', { headers: { Accept: 'application/json' } })
@@ -53,14 +85,18 @@ export class HttpTransport implements Transport {
   }
 
   async request(method: HttpMethod, path: string, body?: unknown): Promise<unknown> {
-    const headers: Record<string, string> = { Accept: 'application/json' }
-    if (this.token) headers['X-AM-Token'] = this.token
-    if (body !== undefined) headers['Content-Type'] = 'application/json'
-    const res = await fetch(`/api${path}`, {
-      method,
-      headers,
-      body: body === undefined ? undefined : JSON.stringify(body),
-    })
+    const send = (tok: string) => {
+      const headers: Record<string, string> = { Accept: 'application/json' }
+      if (tok) headers['X-AM-Token'] = tok
+      if (body !== undefined) headers['Content-Type'] = 'application/json'
+      return fetch(`/api${path}`, {
+        method,
+        headers,
+        body: body === undefined ? undefined : JSON.stringify(body),
+      })
+    }
+    // 只有 GET 敢重試：POST/PATCH 401 時 daemon 根本沒跑到處理函式，但重送一次仍可能重複送出。
+    const res = method === 'GET' ? await this.withFreshToken(send, async (r) => r) : await send(this.token)
     const parsed = await readBody(res)
     if (!res.ok) {
       const errBody: ApiErrorBody =
@@ -85,9 +121,8 @@ export class HttpTransport implements Transport {
   }
 
   async blobUrl(path: string): Promise<string> {
-    const headers: Record<string, string> = {}
-    if (this.token) headers['X-AM-Token'] = this.token
-    const res = await fetch(`/api${path}`, { headers })
+    const send = (tok: string) => fetch(`/api${path}`, { headers: tok ? { 'X-AM-Token': tok } : {} })
+    const res = await this.withFreshToken(send, async (r) => r)
     if (!res.ok) throw new ApiError(res.status, { reason: res.statusText }, `GET ${path} failed (${res.status})`)
     return URL.createObjectURL(await res.blob())
   }
@@ -112,6 +147,10 @@ export class HttpTransport implements Transport {
       }
       handlers.onStatus('connecting')
       const scheme = location.protocol === 'https:' ? 'wss' : 'ws'
+      // token 空的時候連了也會被踢掉，先補一次再連（下一輪 backoff 會再試）。
+      if (!this.token) {
+        void this.refreshToken().then(retryNow, () => {})
+      }
       const qs = new URLSearchParams({ token: this.token, since: String(handlers.since()) })
       const ws = new WebSocket(`${scheme}://${location.host}/ws?${qs.toString()}`)
       sock = ws
