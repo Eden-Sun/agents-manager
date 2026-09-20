@@ -8,7 +8,7 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { CopyChip } from './CopyChip'
 import { KindTag } from './KindTag'
 import { ApiModelFields } from './ModelPicker'
-import { computeBotPatch, effectiveForm, INSTRUCTION_FILES_CHOICES, type BotFormKey } from './botSettingsForm'
+import { computeBotPatch, effectiveForm, INSTRUCTION_FILES_CHOICES, pruneSaved, type BotFormKey } from './botSettingsForm'
 import './botSettings.css'
 
 /**
@@ -344,6 +344,10 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
   // 名稱不做前端檢查（2026-09-09 使用者決定）：規則在 daemon，前端會漂走。
   const nameOk = name.trim().length > 0
   const hostLabel = !host || host === 'local' ? '本機' : host
+
+  // store 追上存過的值就放掉那一欄，之後別處改了同一欄才看得到（render 期 setState：沒東西可放時回傳同一個物件）。
+  const prunedSaved = pruneSaved(saved, bot)
+  if (prunedSaved !== saved) setSaved(prunedSaved)
 
   const base = {
     name: 'name' in saved ? (saved.name ?? bot.name) : bot.name,

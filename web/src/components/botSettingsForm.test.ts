@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { computeBotPatch, effectiveForm, INSTRUCTION_FILES_CHOICES, type BotFormBase, type BotFormKey, type BotFormValues } from './botSettingsForm.ts'
+import { computeBotPatch, effectiveForm, INSTRUCTION_FILES_CHOICES, pruneSaved, type BotFormBase, type BotFormKey, type BotFormValues } from './botSettingsForm.ts'
 import { INSTRUCTION_FILES } from '../api/types.ts'
 
 const base: BotFormBase = { name: 'am', model: 'opus', effort: 'high', fast: false, persona: null, identity: null, instruction_files: 'claude-md' }
@@ -76,4 +76,19 @@ test('專案指示檔：面板的選項就是 API 的四個值，順序一致，
   assert.deepEqual(INSTRUCTION_FILES_CHOICES.map((c) => c.value), [...INSTRUCTION_FILES])
   assert.equal(INSTRUCTION_FILES_CHOICES[0].value, 'claude-md')
   for (const c of INSTRUCTION_FILES_CHOICES) assert.ok(c.label && c.hint, c.value)
+})
+
+test('store 追上存過的值：那一欄從 saved 拿掉，之後別處改了才不會被舊的存值蓋住', () => {
+  const saved = { model: 'sonnet', effort: 'low' }
+  assert.deepEqual(pruneSaved(saved, { ...base, model: 'sonnet', effort: 'high' }), { effort: 'low' })
+})
+
+test('store 還沒追上：存值照留（避免誤跳放棄未儲存）', () => {
+  const saved = { model: 'sonnet' }
+  assert.equal(pruneSaved(saved, base), saved)
+})
+
+test('存過 null（清回預設）與 fast：以 store 的值相等為準', () => {
+  assert.deepEqual(pruneSaved({ effort: null, fast: true }, { ...base, effort: null, fast: true }), {})
+  assert.deepEqual(pruneSaved({ persona: null }, { ...base, persona: 'x' }), { persona: null })
 })
