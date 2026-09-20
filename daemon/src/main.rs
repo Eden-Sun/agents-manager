@@ -24,6 +24,7 @@ mod db;
 mod due_actions;
 mod events;
 mod fork;
+mod fork_ops;
 mod promote;
 mod gh_auth;
 mod git_quick;

@@ -1703,6 +1703,11 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   claude、grok 附 `--resume <id> --fork-session`；codex 的 `fork` 是子命令，`fork <id>` 排在所有參數最前（三家 CLI help 2026-09-14 實測）。不寫 `runs.resume_session_id`：fork 本來就會拿到新 id，不能當成 resume mismatch。
 - 之後兩顆各走各的：新 bot 的下一次重啟用它自己的新 session（照 §6.9 的 resume）。分叉前的訊息不複製到新 bot 的對話紀錄（CLI 裡有），改在新 bot 對話放一則系統訊息指回來源。
 - 跟「開同類分身並啟動」的差別只在脈絡：分身是全新對話。
+- **冪等（issue #348）**：body 的 `client_request_id` 是這次 fork 的身分，持久記在 `fork_ops`（`daemon/src/fork_ops.rs`）。驗證通過後**先記**（目標 bot id、來源 session、名字、`planned`）再動 config，
+  之後 `planned → created → started｜failed` 每一步都先看做過沒有：config 已有那個 id 就沿用、說明訊息已寫過不再寫、目標已有 run 就當啟動過（不再對 provider 分岔一次）。
+  所以回應遺失或 daemon 在任何兩步之間死掉，用同一個 id 重送就從停下的那步接下去、回同一個目標與結果；分岔點沿用第一次記的 session。同一個 id 但來源或名字不同 → 409 `request_mismatch`；
+  結果已定案後目標被刪 → 409 `fork_target_deleted`。想再 fork 一次就換一個 id；省略 `client_request_id` ＝每次都是新的一次（不保證冪等）。讀不到紀錄是錯誤，不當成「沒有這筆」。
+  沒有開機時自動續做：分岔會用掉 provider 額度，只在呼叫端明確重送時才續。
 
 ### 6.10a 子 agent 升級成頂層 bot（issue #248，2026-09-19）
 - 入口：子 bot 列 `⋯` →「升級成頂層…」→ `POST /api/bots/:id/promote`（`daemon/src/promote.rs`）。只給 claude、本機、沒有孫 agent 的 child。

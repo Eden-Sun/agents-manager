@@ -1035,9 +1035,10 @@ readback_model_mismatch|readback_effort_mismatch|readback_fast_mismatch>`。以�
 - 開、關、逾時都寫 `supervisor_notes`（`herdr_maintenance_start`／`_end`／`_expired`）。
 
 ### 10.3b `POST /api/bots/{id}/fork`
-從頂層 bot 分出一顆新 bot，讓它的 CLI 接續來源到目前為止的完整對話脈絡（SPEC §6.10）。body 可省略：`{"name"?:"alfa-fork"}`（省略＝`<來源>-fork`，撞名自動加 `-N`）。
+從頂層 bot 分出一顆新 bot，讓它的 CLI 接續來源到目前為止的完整對話脈絡（SPEC §6.10）。body 可省略：`{"name"?:"alfa-fork","client_request_id"?:"<冪等鍵>"}`（省略＝`<來源>-fork`，撞名自動加 `-N`）。
 - 設定照抄來源的 config.toml 條目（kind、model、effort、fast、persona、instruction_files、args、identity、env、auto_approve、inject_hooks），`autostart` 一律 false。建好立刻啟動。
 - `200 {"bot_id","name","forked_from":{"bot_id","session_id"},"run_id"|null,"start_error"|null}`：建好但沒啟動成功仍回 200，`start_error` 帶原因。推 `bot_changed`；新 bot 的對話裡有一則系統訊息說明從哪裡分出來。
+- **冪等**（SPEC §6.10）：`client_request_id` 相同的重送回同一個 `bot_id`／`run_id`／`start_error`，不會再建一顆或再對 provider 分岔；中斷（回應遺失、daemon 死掉）後也一樣從停下的那步接著做。同一個 id 但來源或名字不同 → `409 request_mismatch`；已定案的結果其目標已被刪 → `409 fork_target_deleted`。要再 fork 一次請換 id；不帶＝每次都是新的一次。
 - 錯誤（都不會先建 bot）：來源不存在 404；`409 reason`：`fork_child`（子 agent）、`default_session`（從 herdr default session 匯入的）、`no_session`（還沒記到 native session）、`transcript_missing`（本機對話檔不在）、`unsupported_kind`、`not_in_config`；名字不合法 400。
 
 ### 10.3c `POST /api/bots/{id}/promote`
