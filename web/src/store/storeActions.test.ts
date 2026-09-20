@@ -205,6 +205,25 @@ test('專案排序沒存起來也一樣收回', async () => {
   assert.deepEqual(useStore.getState().projectOrder, [], '失敗後回到原本的順序')
 })
 
+test('兩次排序重疊、第一次晚到失敗：不能蓋掉第二次成功的順序（#275）', async () => {
+  seed()
+  useStore.setState({ projects: [project(), { id: 'p2', label: 'p2', path: '/p2', host: 'local' } as Project, { id: 'p3', label: 'p3', path: '/p3', host: 'local' } as Project] })
+  let n = 0
+  routeDaemon(async () => {
+    n += 1
+    if (n === 1) {
+      await new Promise((r) => setTimeout(r, 30))
+      return json({ error: 'upstream', message: 'x' }, 502)
+    }
+    return json({ ok: true }, 200)
+  })
+  useStore.getState().moveProject('p3', 'p1')
+  useStore.getState().moveProject('p2', 'p1')
+  const want = useStore.getState().projectOrder
+  await new Promise((r) => setTimeout(r, 60))
+  assert.deepEqual(useStore.getState().projectOrder, want, '第二次已存成功，舊的失敗不能把順序退回去')
+})
+
 test('回合還在跑時排第二則：第一則退回輸入框，不是無聲消失', () => {
   seed()
   useStore.getState().queueSend('b1', '先跑一次測試', ['a1'])

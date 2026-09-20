@@ -715,11 +715,17 @@ function flushUnsentReads() {
 
 /** 在飛的 `POST /api/order` 數；歸零時 `refreshState` 清掉樂觀順序，別台裝置的順序才會過來。 */
 let orderSavesInFlight = 0
-function saveOrderTracked(input: Parameters<typeof api.saveOrder>[0], onFail: (e?: unknown) => void) {
+/** 每個排序範圍（專案／某專案的 bot／主力）最新一次存檔的代次；晚到的舊失敗不准回滾較新的結果（#275）。 */
+const orderSaveGen = new Map<string, number>()
+function saveOrderTracked(key: string, input: Parameters<typeof api.saveOrder>[0], onFail: (e?: unknown) => void) {
   orderSavesInFlight += 1
+  const gen = (orderSaveGen.get(key) ?? 0) + 1
+  orderSaveGen.set(key, gen)
   void api
     .saveOrder(input)
-    .catch((e) => onFail(e))
+    .catch((e) => {
+      if (orderSaveGen.get(key) === gen) onFail(e)
+    })
     .finally(() => {
       orderSavesInFlight -= 1
     })
@@ -1089,7 +1095,7 @@ export const useStore = create<StoreState>((set, get) => ({
       // 順序存 daemon（config.toml）讓各裝置一致；先樂觀套用，等 `project_changed`。
       // 失敗一定要自己收回：daemon 沒收到就不會推 `project_changed`、也就不會 `refreshState`，
       // 「讓位給權威順序」那條路永遠走不到，樂觀順序反而是最持久的——跟通知說的正好相反。
-      saveOrderTracked({ bots: { [pid]: next } }, () => {
+      saveOrderTracked(`bots:${pid}`, { bots: { [pid]: next } }, () => {
         set((st) => ({ botOrder: prev ? { ...st.botOrder, [pid]: prev } : withoutKey(st.botOrder, pid) }))
         get().notify('error', '排序沒存起來（daemon 沒收到），已回到原本的順序')
       })
@@ -1103,7 +1109,7 @@ export const useStore = create<StoreState>((set, get) => ({
     const pos = new Map(order.map((id, i) => [id, i]))
     if (order.every((id) => prev.get(id) === pos.get(id))) return
     set({ bots: s.bots.map((b) => (pos.has(b.id) ? { ...b, primary_position: pos.get(b.id)! } : b)) })
-    saveOrderTracked({ primary: order }, (e) => {
+    saveOrderTracked('primary', { primary: order }, (e) => {
       set((st) => ({ bots: st.bots.map((b) => (prev.has(b.id) && pos.has(b.id) ? { ...b, primary_position: prev.get(b.id)! } : b)) }))
       // 把 daemon 的原因帶出來（舊 daemon 沒有 primary 這個欄位會回 400）：只說「沒收到」使用者看不出為什麼，重整後順序又回去。
       get().notify('error', `主力順序沒存起來，已回到原本的順序：${errText(e)}`)
@@ -1120,7 +1126,7 @@ export const useStore = create<StoreState>((set, get) => ({
       const next = [...rest.slice(0, at), projectId, ...rest.slice(at)]
       if (next.join() === current.join()) return {}
       const prev = s.projectOrder
-      saveOrderTracked({ projects: next }, () => {
+      saveOrderTracked('projects', { projects: next }, () => {
         set({ projectOrder: prev })
         get().notify('error', '排序沒存起來（daemon 沒收到），已回到原本的順序')
       })

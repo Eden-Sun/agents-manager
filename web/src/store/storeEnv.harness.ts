@@ -15,10 +15,10 @@ export interface FakeRequest {
 export const requests: FakeRequest[] = []
 
 const ok = (body: unknown = {}) => new Response(JSON.stringify(body), { status: 200 })
-let route: (req: FakeRequest) => Response = () => ok()
+let route: (req: FakeRequest) => Response | Promise<Response> = () => ok()
 
 /** 這一段測試裡 daemon 怎麼回；回傳 `Response`，非 2xx 會被 transport 包成 `ApiError`。 */
-export function routeDaemon(handler: (req: FakeRequest) => Response): void {
+export function routeDaemon(handler: (req: FakeRequest) => Response | Promise<Response>): void {
   route = handler
 }
 
