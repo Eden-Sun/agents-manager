@@ -10,10 +10,15 @@
 # `CARGO_TARGET_DIR` 完全不動，快取只是省下重算 rustc 的輸出，不共用 target/ 本身。
 set -euo pipefail
 
-if command -v sccache >/dev/null 2>&1; then
-  : "${SCCACHE_DIR:="${HOME:-/tmp}/.cache/agents-manager-sccache"}"
-  : "${SCCACHE_CACHE_SIZE:=10G}"
-  export SCCACHE_DIR SCCACHE_CACHE_SIZE
+# 只有「sccache 自己健康」才走它：先問一次 --show-stats（server 沒起會順便拉起來），失敗就當作
+# sccache 壞了、退回直編。探測放在編譯之前，所以真正的編譯錯誤（sccache 原樣轉出 rustc 的結束碼）
+# 不會被誤判成 sccache 壞掉、也不會被吞成成功。探測過了之後 sccache 在編譯途中才掛掉的情況不在
+# 這裡處理（sccache 自己對快取後端錯誤會退回本機編譯）。
+# 探測要吃跟真正編譯同一組 SCCACHE_DIR／大小，所以預設值先給。
+: "${SCCACHE_DIR:="${HOME:-/tmp}/.cache/agents-manager-sccache"}"
+: "${SCCACHE_CACHE_SIZE:=10G}"
+export SCCACHE_DIR SCCACHE_CACHE_SIZE
+if command -v sccache >/dev/null 2>&1 && sccache --show-stats >/dev/null 2>&1; then
   # sccache 不支援 incremental compilation（官方文件的已知限制：incremental 的產物本質上跟
   # 這次編譯自己的歷史狀態綁在一起，沒辦法變成能重用的快取鍵）。cargo 給每個 crate 的
   # `-C incremental=<CARGO_TARGET_DIR>/…` 路徑天生跟著 target dir 走，每個 worktree 都不一樣；
