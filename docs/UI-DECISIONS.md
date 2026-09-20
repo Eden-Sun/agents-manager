@@ -427,3 +427,7 @@ daemon 這幾天把「寫不進 DB」改成 fail closed：外面的副作用做�
   - **≤1024px（抽屜版面與手機）沒有這欄**，維持 ChatPanel 的「預覽」分頁：沒有空間開第四欄。桌機因此不再顯示那個分頁。
   - **直接挑本機已開的 vite**：`others` 列出本機所有 listen 中的 vite，依 `relation` 分三組——這顆 bot 自己的目錄（`same_dir`，按鈕「接這個」）、同一個 repo 的其他 checkout（`same_repo`）、其他專案（`other`）；
     後兩組標黃字「不是這顆 bot 的程式碼」，按鈕都叫「還是接這個」，送 `{mode:"attach", port}`。缺 `relation` 的舊回應照 `same_repo` 看。off 與 failed 兩種狀態都列。
+- **偵測不到 vite 設定檔時，清單才是主角（2026-09-20，#253）**：使用者實測 wits-ops 只看到紅字「找不到 vite 設定檔」。`off`／`failed` 一律畫 `others`（依 relation 分組，顯示 port＋目錄＋repo），
+  即使 `candidates` 是空的、偵測失敗。`no_vite_config` 降為次要灰字（「AG Man 沒辦法自己起」），試過的路徑收進 `<details>`（可能十幾條會洗版）；
+  「由 AG Man 另起一顆」收進摺疊，本機有 vite 在跑時自己起是次要路徑。面板容器改成可捲（原本 `margin:auto` 置中，清單一長上下會同時被切掉又不能捲）。
+  進面板與狀態變化時都重打 GET：`DELETE` 只回 `{status:"off"}`，不重打的話清單會在停止後消失。
