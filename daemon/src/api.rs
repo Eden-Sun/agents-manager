@@ -69,6 +69,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/state", get(get_state))
         .route("/projects", post(create_project))
         .route("/order", post(set_order))
+        .route("/intents", get(list_intents))
         .route("/projects/{id}", patch(patch_project).delete(delete_project))
         .route("/projects/{id}/bots", post(create_bot))
         .route("/projects/{id}/messages", get(get_project_messages))
@@ -1179,6 +1180,12 @@ fn reorder_by<T>(items: &mut Vec<T>, want: &[String], id_of: impl Fn(&T) -> Opti
         .collect();
     keyed.sort_by_key(|(r, i, _)| (*r, *i));
     items.extend(keyed.into_iter().map(|(_, _, it)| it));
+}
+
+/// 持久 intent 的最近紀錄（#355 P1：只讀，目前沒有路徑會寫它）。
+async fn list_intents(State(app): State<Arc<App>>) -> Result<Response, LcError> {
+    let rows = crate::intents::recent(&app.db, 100).await.map_err(any_err)?;
+    Ok((StatusCode::OK, Json(json!({"intents": rows}))).into_response())
 }
 
 async fn set_order(State(app): State<Arc<App>>, Json(b): Json<SetOrder>) -> Result<Response, LcError> {

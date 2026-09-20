@@ -149,6 +149,16 @@ CREATE TABLE IF NOT EXISTS bot_previews (
   bot_id TEXT PRIMARY KEY REFERENCES bots(id), host TEXT NOT NULL, pane_id TEXT, port INTEGER, dir TEXT,
   status TEXT NOT NULL, error TEXT, started_at TEXT, updated_at TEXT NOT NULL
 );
+-- 持久 intent（#355）：多步驟動作「已承諾、可能只做了一半」的紀錄，daemon 中途死掉後開機由 `intents` 模組接續。
+-- 一列＝一件動作；同一目標同一種動作同時只能有一件開著（partial unique index）。見 `intents.rs`。
+CREATE TABLE IF NOT EXISTS intents (
+  id TEXT PRIMARY KEY, kind TEXT NOT NULL, subject_id TEXT NOT NULL, host TEXT NOT NULL DEFAULT 'local',
+  payload_json TEXT NOT NULL DEFAULT '{}', step TEXT,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','running','done','failed','abandoned')),
+  owner_boot TEXT, attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT,
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL, expires_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS intents_one_open ON intents(kind, subject_id) WHERE status IN ('pending','running');
 "#;
 
 /// 這個 binary 認得的 schema 版本，存在 SQLite 內建的 `PRAGMA user_version`（跟資料庫檔案綁在一起，
@@ -185,6 +195,8 @@ const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (11, "b2704fdf9aeb332c"),
     // issue #344：`bots.primary_position`（主力那列的固定順序）。
     (12, "dd16404b83c0823f"),
+    // issue #355：`intents`（持久 intent）、`bots.launch_rev`／`runs.launch_rev`（啟動版本雜湊）。
+    (13, "05c1dce04e940b94"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -345,6 +357,10 @@ async fn apply_migrations(pool: &SqlitePool) -> Result<()> {
         ("bot_previews", "kind", "ALTER TABLE bot_previews ADD COLUMN kind TEXT"),
         // 主力那列的固定順序（issue #344）；舊列 0＝沒排過，排在有排過的之後。
         ("bots", "primary_position", "ALTER TABLE bots ADD COLUMN primary_position INTEGER NOT NULL DEFAULT 0"),
+        // 啟動相關設定的版本雜湊（#355 機制 B／#353）：`bots.launch_rev`＝目前設定的版本，`runs.launch_rev`＝這個 run 啟動時載入的版本；
+        // NULL＝沒記（舊資料，視為相同、不誤報「需重啟」）。P1 只加欄位、沒有人讀寫。
+        ("bots", "launch_rev", "ALTER TABLE bots ADD COLUMN launch_rev TEXT"),
+        ("runs", "launch_rev", "ALTER TABLE runs ADD COLUMN launch_rev TEXT"),
     ] {
         if !has_column(&mut *tx, table, col).await? {
             sqlx::query(ddl).execute(&mut *tx).await.with_context(|| format!("add {table}.{col}"))?;
