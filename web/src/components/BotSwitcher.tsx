@@ -1,5 +1,8 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
+import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, RefObject } from 'react'
+import { useMenuKeys } from '../hooks/useMenuKeys'
+import type { Bot, Project } from '../api/types'
 import { botLamp, useStore } from '../store/store'
 import { KindTag } from './KindTag'
 import { StatusLamp } from './StatusLamp'
@@ -12,6 +15,7 @@ import './botSwitcher.css'
 export function BotSwitcher({ botId, name }: { botId?: string; name: string }) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
+  const btnRef = useRef<HTMLButtonElement>(null)
   const popRef = useRef<HTMLDivElement>(null)
   // `.main-title-row` 會裁掉溢出，泡泡在裡面整個看不到（2026-09-09 手機實測）→ portal 到 body、fixed 定位。
   const [pos, setPos] = useState<{ top: number; left: number; maxWidth: number } | null>(null)
@@ -23,6 +27,8 @@ export function BotSwitcher({ botId, name }: { botId?: string; name: string }) {
     // 從按鈕左緣長出，`max-width: 100vw` 擋不住右邊界，長名字會出畫面。
     setPos({ top: Math.round(b.bottom + 6), left, maxWidth: Math.max(200, window.innerWidth - left - 8) })
   }, [open])
+  // 方向鍵／Home／End 移動、Esc／Tab 關掉並把焦點還給按鈕（同 HeadMoreMenu）。
+  const menuKeys = useMenuKeys(open, popRef, btnRef, () => setOpen(false))
   const selectBot = useStore((s) => s.selectBot)
   const projects = useStore((s) => s.projects)
   const bots = useStore((s) => s.bots)
@@ -55,9 +61,10 @@ export function BotSwitcher({ botId, name }: { botId?: string; name: string }) {
   return (
     <div className="bot-switcher" ref={ref}>
       <button
+        ref={btnRef}
         type="button"
         className="bot-name-btn bot-switcher-btn"
-        aria-haspopup="listbox"
+        aria-haspopup="menu"
         aria-expanded={open}
         title="換一顆 bot"
         onClick={() => setOpen((v) => !v)}
@@ -69,30 +76,17 @@ export function BotSwitcher({ botId, name }: { botId?: string; name: string }) {
       </button>
       {open && pos
         ? createPortal(
-            <div ref={popRef} className="bot-switcher-pop" role="listbox" aria-label="切換 bot" style={{ top: pos.top, left: pos.left, maxWidth: pos.maxWidth }}>
-              {groups.map((g) => (
-                <div key={g.project.id} className="bot-switcher-group">
-                  <div className="bot-switcher-project">⌗ {g.project.label}</div>
-                  {g.bots.map((b) => (
-                    <button
-                      key={b.id}
-                      type="button"
-                      role="option"
-                      aria-selected={b.id === botId}
-                      className={`bot-switcher-item${b.id === botId ? ' on' : ''}`}
-                      onClick={() => {
-                        setOpen(false)
-                        if (b.id !== botId) selectBot(b.id)
-                      }}
-                    >
-                      <RowLamp botId={b.id} />
-                      <KindTag kind={b.kind} />
-                      <span className="bot-switcher-name">{b.name}</span>
-                    </button>
-                  ))}
-                </div>
-              ))}
-            </div>,
+            <BotSwitcherMenu
+              popRef={popRef}
+              style={{ top: pos.top, left: pos.left, maxWidth: pos.maxWidth }}
+              groups={groups}
+              botId={botId}
+              onKeyDown={menuKeys}
+              onPick={(id) => {
+                setOpen(false)
+                if (id !== botId) selectBot(id)
+              }}
+            />,
             document.body,
           )
         : null}
@@ -104,4 +98,45 @@ export function BotSwitcher({ botId, name }: { botId?: string; name: string }) {
 function RowLamp({ botId }: { botId: string }) {
   const lamp = useStore((s) => botLamp(s, botId))
   return <StatusLamp lamp={lamp} />
+}
+
+export function BotSwitcherMenu({
+  popRef,
+  style,
+  groups,
+  botId,
+  onPick,
+  onKeyDown,
+}: {
+  popRef?: RefObject<HTMLDivElement | null>
+  style?: CSSProperties
+  groups: { project: Project; bots: Bot[] }[]
+  botId?: string
+  onPick: (id: string) => void
+  onKeyDown?: (e: ReactKeyboardEvent<HTMLElement>) => void
+}) {
+  return (
+    <div ref={popRef} className="bot-switcher-pop" role="menu" aria-label="切換 bot" style={style} onKeyDown={onKeyDown}>
+      {groups.map((g) => (
+        <div key={g.project.id} className="bot-switcher-group" role="group" aria-label={g.project.label}>
+          <div className="bot-switcher-project" aria-hidden="true">⌗ {g.project.label}</div>
+          {g.bots.map((b) => (
+            <button
+              key={b.id}
+              type="button"
+              role="menuitemradio"
+              aria-checked={b.id === botId}
+              tabIndex={-1}
+              className={`bot-switcher-item${b.id === botId ? ' on' : ''}`}
+              onClick={() => onPick(b.id)}
+            >
+              <RowLamp botId={b.id} />
+              <KindTag kind={b.kind} />
+              <span className="bot-switcher-name">{b.name}</span>
+            </button>
+          ))}
+        </div>
+      ))}
+    </div>
+  )
 }
