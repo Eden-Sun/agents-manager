@@ -200,9 +200,20 @@ function readDrafts(): Record<string, string> {
   }
 }
 
-function writeDrafts(drafts: Record<string, string>) {
+/**
+ * 多分頁：整份覆寫會把別的分頁剛存的草稿洗掉（分頁 A 打 bot1、分頁 B 的記憶體沒有它，B 一打 bot2 就寫回不含 bot1 的整份）。
+ * 只把「這次相對 prev 有變的鍵」套到磁碟上現有的那份（#300）。
+ */
+function persistDiff<V>(storageKey: string, prev: Record<string, V>, next: Record<string, V>, read: () => Record<string, V>) {
+  const disk = read()
+  for (const k of Object.keys(prev)) if (!(k in next)) delete disk[k]
+  for (const [k, v] of Object.entries(next)) if (prev[k] !== v) disk[k] = v
+  localStorage.setItem(storageKey, JSON.stringify(disk))
+}
+
+function writeDrafts(prev: Record<string, string>, drafts: Record<string, string>) {
   try {
-    writeShared(() => localStorage.setItem(DRAFTS_KEY, JSON.stringify(drafts)))
+    writeShared(() => persistDiff(DRAFTS_KEY, prev, drafts, readDrafts))
   } catch {
     /* storage unavailable: drafts still live for this page */
   }
@@ -228,9 +239,9 @@ function readDraftCursors(): Record<string, DraftCursor> {
   }
 }
 
-function writeDraftCursors(cursors: Record<string, DraftCursor>) {
+function writeDraftCursors(prev: Record<string, DraftCursor>, cursors: Record<string, DraftCursor>) {
   try {
-    writeShared(() => localStorage.setItem(DRAFT_CURSORS_KEY, JSON.stringify(cursors)))
+    writeShared(() => persistDiff(DRAFT_CURSORS_KEY, prev, cursors, readDraftCursors))
   } catch {
     /* storage unavailable: cursors still live for this page */
   }
@@ -1327,7 +1338,7 @@ export const useStore = create<StoreState>((set, get) => ({
     set((st) => ({ queuedSends: { ...st.queuedSends, [botId]: { text, attachments } } }))
     if (!prev) return
     const r = restoreQueued(get(), botId, prev)
-    applyRestore(set, r)
+    applyRestore(set, get, r)
     const lost = r.droppedAttachments > 0 ? `，${r.droppedAttachments} 個附件要重新加` : ''
     get().notify('error', `一次只排得下一則，前一則已退回輸入框${lost}`)
   },
@@ -1352,7 +1363,7 @@ export const useStore = create<StoreState>((set, get) => ({
 
   restoreQueuedSend(botId, pending) {
     const r = restoreQueued(get(), botId, pending)
-    applyRestore(set, r)
+    applyRestore(set, get, r)
     if (r.droppedAttachments > 0) {
       get().notify('error', `訊息已退回輸入框，但 ${r.droppedAttachments} 個附件要重新加`)
     }
@@ -1778,8 +1789,8 @@ export const useStore = create<StoreState>((set, get) => ({
         set((s) => {
           const drafts = withoutKey(s.drafts, `bot:${botId}`)
           const draftCursors = withoutKey(s.draftCursors, `bot:${botId}`)
-          writeDrafts(drafts)
-          writeDraftCursors(draftCursors)
+          writeDrafts(s.drafts, drafts)
+          writeDraftCursors(s.draftCursors, draftCursors)
           return {
             selectedBotId: s.selectedBotId === botId ? next : s.selectedBotId,
             settingsBotId: s.settingsBotId === botId ? null : s.settingsBotId,
@@ -1820,8 +1831,8 @@ export const useStore = create<StoreState>((set, get) => ({
         let draftCursors = withoutKey(s.draftCursors, `group:${projectId}`)
         for (const id of botIds) drafts = withoutKey(drafts, `bot:${id}`)
         for (const id of botIds) draftCursors = withoutKey(draftCursors, `bot:${id}`)
-        writeDrafts(drafts)
-        writeDraftCursors(draftCursors)
+        writeDrafts(s.drafts, drafts)
+        writeDraftCursors(s.draftCursors, draftCursors)
         return {
           drafts,
           draftCursors,
@@ -1937,13 +1948,13 @@ export const useStore = create<StoreState>((set, get) => ({
       if ((s.drafts[key] ?? '') === text) {
         if (text || !s.draftCursors[key]) return {}
         const draftCursors = withoutKey(s.draftCursors, key)
-        writeDraftCursors(draftCursors)
+        writeDraftCursors(s.draftCursors, draftCursors)
         return { draftCursors }
       }
       const drafts = text ? { ...s.drafts, [key]: text } : withoutKey(s.drafts, key)
       const draftCursors = text ? s.draftCursors : withoutKey(s.draftCursors, key)
-      writeDrafts(drafts)
-      if (!text) writeDraftCursors(draftCursors)
+      writeDrafts(s.drafts, drafts)
+      if (!text) writeDraftCursors(s.draftCursors, draftCursors)
       return { drafts, draftCursors }
     })
   },
@@ -1954,7 +1965,7 @@ export const useStore = create<StoreState>((set, get) => ({
       if (!text) {
         if (!s.draftCursors[key]) return {}
         const draftCursors = withoutKey(s.draftCursors, key)
-        writeDraftCursors(draftCursors)
+        writeDraftCursors(s.draftCursors, draftCursors)
         return { draftCursors }
       }
       const max = text.length
@@ -1965,7 +1976,7 @@ export const useStore = create<StoreState>((set, get) => ({
       const previous = s.draftCursors[key]
       if (previous && previous.start === next.start && previous.end === next.end) return {}
       const draftCursors = { ...s.draftCursors, [key]: next }
-      writeDraftCursors(draftCursors)
+      writeDraftCursors(s.draftCursors, draftCursors)
       return { draftCursors }
     })
   },
@@ -2807,9 +2818,10 @@ function dropPane(set: SetFn, host: string, paneId: string) {
 }
 
 /** 退回輸入框的字也要寫進 localStorage：只 `set` 的話，重整一次就沒了。 */
-function applyRestore(set: SetFn, r: RestoreResult) {
+function applyRestore(set: SetFn, get: GetFn, r: RestoreResult) {
+  const prev = get().drafts
   set(r.patch)
-  if (r.patch.drafts) writeDrafts(r.patch.drafts)
+  if (r.patch.drafts) writeDrafts(prev, r.patch.drafts)
 }
 
 function withoutKey<T>(map: Record<string, T>, key: string): Record<string, T> {
