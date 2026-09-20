@@ -1520,6 +1520,9 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   async addProject(input) {
+    const key = `add-project:${input.path}`
+    if (get().busy[key]) return false
+    set((st) => ({ busy: { ...st.busy, [key]: true } }))
     try {
       await api.createProject(input)
       await get().refreshState()
@@ -1528,10 +1531,19 @@ export const useStore = create<StoreState>((set, get) => ({
     } catch (e) {
       get().notify('error', errText(e))
       return false
+    } finally {
+      set((st) => {
+        const busy = { ...st.busy }
+        delete busy[key]
+        return { busy }
+      })
     }
   },
 
   async addBot(projectId, input) {
+    const key = `add-bot:${projectId}:${input.name}`
+    if (get().busy[key]) return null
+    set((st) => ({ busy: { ...st.busy, [key]: true } }))
     try {
       const { id, name } = await api.createBot(projectId, input)
       await get().refreshState()
@@ -1541,6 +1553,12 @@ export const useStore = create<StoreState>((set, get) => ({
     } catch (e) {
       get().notify('error', errText(e))
       return null
+    } finally {
+      set((st) => {
+        const busy = { ...st.busy }
+        delete busy[key]
+        return { busy }
+      })
     }
   },
 
@@ -1555,6 +1573,7 @@ export const useStore = create<StoreState>((set, get) => ({
     while (taken.has(`${stem}-${n}`)) n += 1
     const name = `${stem}-${n}`
     const key = `clone:${botId}`
+    if (s.busy[key]) return null
     // 先放灰色佔位列（假 id）在本尊後面；`refreshState` 保留它到同名真 bot 出現。
     const tempId = `pending:${Date.now().toString(36)}`
     const placeholder: Bot = { ...bot, id: tempId, name, parent_bot_id: null, pending: true }
@@ -1718,47 +1737,49 @@ export const useStore = create<StoreState>((set, get) => ({
 
   async removeBot(botId) {
     // SPEC: selection moves to the next bot in the same project, else null.
-    const s0 = get()
-    const bot = s0.bots.find((b) => b.id === botId)
-    const siblings = bot ? s0.bots.filter((b) => b.project_id === bot.project_id) : []
-    const i = siblings.findIndex((b) => b.id === botId)
-    const next = (siblings[i + 1] ?? siblings[i - 1] ?? null)?.id ?? null
-    const name = bot?.name ?? 'Bot'
-    try {
-      await api.deleteBot(botId)
-      // 軟刪除（只設 `deleted_at`），所以復原是真的復原。
-      get().notify('info', `已刪除 ${name}`, {
-        label: '復原',
-        run: async () => {
-          try {
-            await api.restoreBot(botId)
-            await get().refreshState()
-            get().selectBot(botId)
-          } catch (e) {
-            get().notify('error', `復原失敗：${errText(e)}`)
+    await guarded(set, get, `remove:${botId}`, async () => {
+      const s0 = get()
+      const bot = s0.bots.find((b) => b.id === botId)
+      const siblings = bot ? s0.bots.filter((b) => b.project_id === bot.project_id) : []
+      const i = siblings.findIndex((b) => b.id === botId)
+      const next = (siblings[i + 1] ?? siblings[i - 1] ?? null)?.id ?? null
+      const name = bot?.name ?? 'Bot'
+      try {
+        await api.deleteBot(botId)
+        // 軟刪除（只設 `deleted_at`），所以復原是真的復原。
+        get().notify('info', `已刪除 ${name}`, {
+          label: '復原',
+          run: async () => {
+            try {
+              await api.restoreBot(botId)
+              await get().refreshState()
+              get().selectBot(botId)
+            } catch (e) {
+              get().notify('error', `復原失敗：${errText(e)}`)
+            }
+          },
+        })
+        set((s) => {
+          const drafts = withoutKey(s.drafts, `bot:${botId}`)
+          const draftCursors = withoutKey(s.draftCursors, `bot:${botId}`)
+          writeDrafts(drafts)
+          writeDraftCursors(draftCursors)
+          return {
+            selectedBotId: s.selectedBotId === botId ? next : s.selectedBotId,
+            settingsBotId: s.settingsBotId === botId ? null : s.settingsBotId,
+            drafts,
+            draftCursors,
           }
-        },
-      })
-      set((s) => {
-        const drafts = withoutKey(s.drafts, `bot:${botId}`)
-        const draftCursors = withoutKey(s.draftCursors, `bot:${botId}`)
-        writeDrafts(drafts)
-        writeDraftCursors(draftCursors)
-        return {
-          selectedBotId: s.selectedBotId === botId ? next : s.selectedBotId,
-          settingsBotId: s.settingsBotId === botId ? null : s.settingsBotId,
-          drafts,
-          draftCursors,
+        })
+        await get().refreshState()
+        // `refreshState` falls back to `bots[0]`; honour "no sibling left" instead.
+        if (next === null && get().selectedBotId !== null && !get().bots.some((b) => b.id === botId)) {
+          set({ selectedBotId: null })
         }
-      })
-      await get().refreshState()
-      // `refreshState` falls back to `bots[0]`; honour "no sibling left" instead.
-      if (next === null && get().selectedBotId !== null && !get().bots.some((b) => b.id === botId)) {
-        set({ selectedBotId: null })
+      } catch (e) {
+        get().notify('error', errText(e))
       }
-    } catch (e) {
-      get().notify('error', errText(e))
-    }
+    })
   },
 
   async patchProject(projectId, input) {
