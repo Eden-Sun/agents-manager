@@ -475,3 +475,7 @@ daemon 這幾天把「寫不進 DB」改成 fail closed：外面的副作用做�
   未讀數字照舊並存；有未讀的晶片是 accent 底，藍色 working 燈會融進去，所以那種晶片的燈加白邊。燈是 `role="img"` 帶狀態文字，讀屏聽得到。桌機那列不變（★ 是分兩組的依據）。截圖：`docs/screenshots/primary-order/lamp-1-mobile-mixed.png`。
 - **手機主力晶片的燈只在「值得注意」時才畫（2026-09-20，#344 補充 3）**：idle（綠）是常態，每顆都亮是雜訊。只畫 working、blocked、unknown、斷線；idle 不畫，離線與啟動／停止中也照字面不畫（補充只列了那四種）。
   沒燈的晶片名字置中，未讀數字照舊。截圖 `lamp-1-mobile-mixed.png` 已換成這個樣子（idle 那顆與離線的 w3、w4 沒有燈）。
+- **主力晶片標示「子 agent 在跑」（2026-09-20，#344 補充 4）**：條件沿用 `waitsKids` 的定義——`parent_bot_id` 指到這顆、且 `working` 或 `blocked` 的子 bot；但**數量**另外記（`kidsRunning`），而且不受自己狀態影響
+  （舊的 `waitsKids` 在自己要回答時會被壓掉，這個不會）。符號是一個小的分叉圖示（形狀跟燈、狀態點都不同，不是同一顆燈換色），多顆時帶數字（>9 顯示 `9+`），畫在晶片最右；桌機與手機都畫。
+  自己 idle 時只有這個圖示（idle 燈照補充 3 不畫），自己 working 又有子在跑就兩個都看得到。`title` 與 sr-only 文字都加「N 個子 agent 在跑」（`lib/chipStateText.ts::kidsText`，有測試）。
+  有未讀的晶片是 accent 底，圖示改跟字同色。截圖：`docs/screenshots/primary-order/kids-1-desktop.png`、`kids-2-mobile.png`。
