@@ -1036,3 +1036,12 @@ test('送出時連線斷了（回應遺失）：再送同一句要沿用同一�
   const last = requests.filter((r) => r.path.endsWith('/prompt')).at(-1)!.body as { client_request_id?: string }
   assert.notEqual(last.client_request_id, crids[0], '成功之後同一句是新的動作')
 })
+
+test('斷線重連後：已載入的對話要重抓訊息，不能只補狀態（#368）', async () => {
+  seed()
+  useStore.setState({ loadedBots: { b1: true } })
+  routeDaemon(() => json({ messages: [], turns: [], has_more: false }, 200))
+  const { reloadLoadedConversations } = await import('./store.ts')
+  await reloadLoadedConversations(useStore.getState)
+  assert.ok(requests.some((r) => r.path.includes('/bots/b1/messages')))
+})
