@@ -259,6 +259,10 @@ export function toBot(v: unknown, projectId?: string): Bot | null {
     managed_by: oneOf<BotManagedBy>(pick(v, 'managed_by'), ['user', 'child'], 'user'),
     parent_bot_id: optStr(pick(v, 'parent_bot_id')),
     primary: bool(pick(v, 'primary')),
+    primary_position: (() => {
+      const n = pick(v, 'primary_position')
+      return typeof n === 'number' && Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0
+    })(),
     cwd: optStr(pick(v, 'cwd')),
     ...(() => {
       const x = pick(v, 'preview')

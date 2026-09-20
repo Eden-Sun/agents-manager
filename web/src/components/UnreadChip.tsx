@@ -17,13 +17,17 @@ import type { Bot } from '../api/types'
 import { useMediaQuery } from '../hooks/useMediaQuery'
 import { clipAfterRows, lineBudget, moreTitle } from '../lib/chipOverflow'
 import { chipTracked } from '../lib/supervisorProject'
-import { useStore } from '../store/store'
+import { sortPinned } from '../lib/pinnedOrder'
+import { orderedBotIds, useStore } from '../store/store'
+import { usePinnedDrag, type PinnedDnd } from './usePinnedDrag'
 import './unreadChip.css'
 
 /** 與 `unreadChip.css` 斷點同值。 */
 const NARROW_QUERY = '(max-width: 720px)'
 
-const RANK = { needsReply: 0, unread: 1, waitsKids: 2, current: 3, rest: 4 } as const
+/** 主力晶片的操作說明（`aria-describedby` 指到它）；畫面上看不到。 */
+const PIN_HINT_ID = 'unread-pin-hint'
+const PIN_HINT = '主力順序是固定的：可以拖曳晶片重排，鍵盤按 Ctrl 加左右方向鍵移動一格，觸控請長按後拖。'
 
 /** 桌機的兩組：★ 主力一組、其餘（在跑、剛跑完、要回答）一組，各自換行、各自裁切。 */
 type GroupName = 'pinned' | 'others'
@@ -36,7 +40,9 @@ interface ChipItem {
   id: string
   name: string
   go: () => void
-  rank: number
+  /** 主力組排序用（#344）：`primary_position`＋原順序。 */
+  position: number
+  index: number
   current: boolean
   pinned: boolean
   unread: number
@@ -46,9 +52,24 @@ interface ChipItem {
   title: string
 }
 
-function Chip({ it }: { it: ChipItem }) {
+function Chip({ it, dnd }: { it: ChipItem; dnd?: PinnedDnd }) {
+  const drag = it.pinned ? dnd : undefined
+  const mark = drag && drag.dragId && drag.before !== undefined && drag.dragId !== it.id && drag.before === it.id ? ' drop-before' : drag && drag.dragId && drag.before === null && drag.dragId !== it.id && drag.lastId === it.id ? ' drop-after' : ''
   return (
-    <button type="button" className={chipClass(it)} title={it.title} aria-current={it.current ? 'true' : undefined} onClick={it.go}>
+    <button
+      type="button"
+      className={`${chipClass(it)}${drag?.dragId === it.id ? ' dragging' : ''}${mark}`}
+      title={it.title}
+      data-bot-id={it.pinned ? it.id : undefined}
+      aria-current={it.current ? 'true' : undefined}
+      aria-describedby={drag ? PIN_HINT_ID : undefined}
+      onClick={() => {
+        if (drag?.consumeClick()) return
+        it.go()
+      }}
+      onPointerDown={drag ? (e) => drag.onPointerDown(e, it.id) : undefined}
+      onKeyDown={drag ? (e) => drag.onKeyDown(e, it.id) : undefined}
+    >
       {it.pinned ? (
         <span className="unread-chip-star" aria-hidden="true">
           ★
@@ -65,14 +86,14 @@ function Chip({ it }: { it: ChipItem }) {
  * 手機的一排：自己橫捲、自己一組箭頭。★ 主力一排、在跑／剛完成的另一排（2026-09-16 使用者：
  * 「已完成放下一排，方便我點選」），不必先把主力捲過去才點得到剛跑完的那顆。
  */
-function ScrollRow({ items, label, selectedBotId }: { items: ChipItem[]; label: string; selectedBotId: string | null }) {
+function ScrollRow({ items, label, selectedBotId, dnd }: { items: ChipItem[]; label: string; selectedBotId: string | null; dnd?: PinnedDnd }) {
   // 空的那排整個不掛：捲動 hook 的 effect 只在掛載時讀 `barRef`，空著掛上去讀到 null 就再也不接
   // scroll／wheel／ResizeObserver——之後晶片出現、溢出了也沒有 ◂ ▸（review3 c5 L1）。
   if (items.length === 0) return null
-  return <ScrollRowBar items={items} label={label} selectedBotId={selectedBotId} />
+  return <ScrollRowBar items={items} label={label} selectedBotId={selectedBotId} dnd={dnd} />
 }
 
-function ScrollRowBar({ items, label, selectedBotId }: { items: ChipItem[]; label: string; selectedBotId: string | null }) {
+function ScrollRowBar({ items, label, selectedBotId, dnd }: { items: ChipItem[]; label: string; selectedBotId: string | null; dnd?: PinnedDnd }) {
   const barRef = useRef<HTMLDivElement | null>(null)
   const scroll = useHorizontalScroll(barRef, true)
   useScrollCurrentIntoView(barRef, `${selectedBotId}/${items.length}`)
@@ -85,8 +106,9 @@ function ScrollRowBar({ items, label, selectedBotId }: { items: ChipItem[]; labe
       ) : null}
       <div className="unread-bar" ref={barRef} role="status" aria-live="polite" aria-label={label}>
         {items.map((it) => (
-          <Chip key={it.id} it={it} />
+          <Chip key={it.id} it={it} dnd={dnd} />
         ))}
+        {dnd ? <span className="sr-only" aria-live="polite">{dnd.announce}</span> : null}
       </div>
       {scroll.right ? (
         <button type="button" className="unread-bar-arrow right" aria-label="往右看更多" onClick={() => scroll.by(1)}>
@@ -132,7 +154,8 @@ export function UnreadChip() {
         id: b.id,
         name: b.name,
         go: () => selectBot(b.id),
-        rank: needsReply ? RANK.needsReply : n > 0 ? RANK.unread : kids ? RANK.waitsKids : current ? RANK.current : RANK.rest,
+        position: b.primary_position,
+        index: out.length,
         current,
         pinned,
         unread: n,
@@ -142,12 +165,28 @@ export function UnreadChip() {
         title: botTitle(b.name, pinned, n, needsReply, kids, current),
       })
     }
-    if (narrow) return out
-    return out.map((it, i) => ({ it, i })).sort((a, b) => a.it.rank - b.it.rank || a.i - b.i).map((x) => x.it)
-  }, [supervisorProjectId, botUnread, bots, hiddenBotIds, keptId, narrow, runs, selectBot, selectedBotId])
+    return out
+  }, [supervisorProjectId, botUnread, bots, hiddenBotIds, keptId, runs, selectBot, selectedBotId])
 
-  const pinnedItems = useMemo(() => items.filter((it) => it.pinned), [items])
-  const otherItems = useMemo(() => items.filter((it) => !it.pinned), [items])
+  // 固定順序（#344）：主力組照 `primary_position`，其餘組照側欄順序；未讀／忙碌／卡住只用顏色與角標表示、不再讓晶片跳位。
+  const pinnedItems = useMemo(() => sortPinned(items.filter((it) => it.pinned)), [items])
+  const sidebarRank = useStore((s) => s.botOrder)
+  const projects = useStore((s) => s.projects)
+  const projectOrder = useStore((s) => s.projectOrder)
+  const otherItems = useMemo(() => {
+    const rank = new Map(orderedBotIds({ projects, projectOrder, bots, botOrder: sidebarRank }).map((id, i) => [id, i]))
+    return items.filter((it) => !it.pinned).sort((a, b) => (rank.get(a.id) ?? Infinity) - (rank.get(b.id) ?? Infinity) || a.index - b.index)
+  }, [items, projects, projectOrder, bots, sidebarRank])
+
+  // 存回 daemon 用完整的主力順序（含側欄收起來、沒畫成晶片的）。
+  const movePrimary = useStore((s) => s.movePrimary)
+  const fullPinned = useMemo(
+    () => sortPinned(bots.filter((b) => b.primary && !b.pending).map((b, i) => ({ id: b.id, position: b.primary_position, index: i }))).map((x) => x.id),
+    [bots],
+  )
+  const visiblePinned = useMemo(() => pinnedItems.map((it) => it.id), [pinnedItems])
+  const names = useMemo(() => Object.fromEntries(pinnedItems.map((it) => [it.id, it.name])), [pinnedItems])
+  const dnd = usePinnedDrag(fullPinned, visiblePinned, names, movePrimary)
   const ordered = useMemo(() => [...pinnedItems, ...otherItems], [pinnedItems, otherItems])
   const barRef = useRef<HTMLDivElement | null>(null)
   const [expanded, setExpanded] = useState(false)
@@ -158,14 +197,16 @@ export function UnreadChip() {
   if (narrow) {
     return (
       <>
-        <ScrollRow items={items.filter((it) => it.pinned)} label="主力 bot" selectedBotId={selectedBotId} />
-        <ScrollRow items={items.filter((it) => !it.pinned)} label="在跑或剛完成的 bot" selectedBotId={selectedBotId} />
+        <PinHint />
+        <ScrollRow items={pinnedItems} label="主力 bot" selectedBotId={selectedBotId} dnd={dnd} />
+        <ScrollRow items={otherItems} label="在跑或剛完成的 bot" selectedBotId={selectedBotId} />
       </>
     )
   }
   // 主力一組、其餘一組，各自換行、各自裁切；收合時兩組都在就各佔一行，只有一組時最多兩行（`lib/chipOverflow.ts`）。
   return (
     <div className="unread-bar-wrap">
+      <PinHint />
       <div className={`unread-bar${expanded ? ' expanded' : ''}`} ref={barRef} role="status" aria-live="polite">
         {GROUPS.map(({ name, pinned }) => {
           const group = pinned ? pinnedItems : otherItems
@@ -179,8 +220,9 @@ export function UnreadChip() {
               style={!expanded && clipPx[name] > 0 ? { maxHeight: clipPx[name], overflow: 'hidden' } : undefined}
             >
               {group.map((it) => (
-                <Chip key={it.id} it={it} />
+                <Chip key={it.id} it={it} dnd={pinned ? dnd : undefined} />
               ))}
+              {pinned ? <span className="sr-only" aria-live="polite">{dnd.announce}</span> : null}
             </div>
           )
         })}
@@ -197,6 +239,14 @@ export function UnreadChip() {
         </button>
       ) : null}
     </div>
+  )
+}
+
+function PinHint() {
+  return (
+    <span id={PIN_HINT_ID} className="sr-only">
+      {PIN_HINT}
+    </span>
   )
 }
 

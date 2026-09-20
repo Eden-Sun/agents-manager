@@ -422,6 +422,8 @@ export interface StoreState {
   openSettings: (botId: string, anchor?: SettingsAnchor | null) => void
   /** `beforeId = null` = 移到最後。同專案內才有效。 */
   moveBot: (botId: string, beforeId: string | null) => void
+  /** 主力那列（★）的固定順序（#344）：整份順序（陣列位置＝primary_position）；樂觀套用、失敗回捲並提示。 */
+  movePrimary: (order: string[]) => void
   moveProject: (projectId: string, beforeId: string | null) => void
   closeSettings: () => void
   requestOpenBotSheet: (projectId: string) => void
@@ -1091,6 +1093,18 @@ export const useStore = create<StoreState>((set, get) => ({
         get().notify('error', '排序沒存起來（daemon 沒收到），已回到原本的順序')
       })
       return { botOrder }
+    })
+  },
+
+  movePrimary: (order) => {
+    const s = get()
+    const prev = new Map(s.bots.map((b) => [b.id, b.primary_position]))
+    const pos = new Map(order.map((id, i) => [id, i]))
+    if (order.every((id) => prev.get(id) === pos.get(id))) return
+    set({ bots: s.bots.map((b) => (pos.has(b.id) ? { ...b, primary_position: pos.get(b.id)! } : b)) })
+    saveOrderTracked({ primary: order }, () => {
+      set((st) => ({ bots: st.bots.map((b) => (prev.has(b.id) && pos.has(b.id) ? { ...b, primary_position: prev.get(b.id)! } : b)) }))
+      get().notify('error', '主力順序沒存起來（daemon 沒收到），已回到原本的順序')
     })
   },
 

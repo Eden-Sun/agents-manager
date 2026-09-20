@@ -388,8 +388,8 @@ export async function patchBot(botId: string, input: PatchBotInput): Promise<Pat
   return { needs_restart: o.needs_restart === true || o.restart_required === true }
 }
 
-/** 側欄排序（API.md §5.4），存 config.toml 讓各裝置共用同一份。 */
-export async function saveOrder(input: { projects?: string[]; bots?: Record<string, string[]> }): Promise<void> {
+/** 側欄排序（API.md §5.4），存 config.toml 讓各裝置共用同一份；`primary` 是主力那列的順序（#344，存 DB）。 */
+export async function saveOrder(input: { projects?: string[]; bots?: Record<string, string[]>; primary?: string[] }): Promise<void> {
   await transport.request('POST', '/order', input)
 }
 
