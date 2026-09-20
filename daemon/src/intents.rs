@@ -15,16 +15,9 @@
 use anyhow::Result;
 use serde_json::Value;
 use sqlx::SqlitePool;
-use std::sync::OnceLock;
 
 /// 補做失敗最多試幾次就放棄（使用者 2026-09-20 裁示：重試幾次就放棄、不無限重試）。
 pub const MAX_ATTEMPTS: i64 = 5;
-
-/// 這個 daemon 行程的啟動 id：認領時記進 `owner_boot`，別的 boot 看到 `running` 且 owner 不是自己＝上個行程死了，可以接手。
-pub fn boot_id() -> &'static str {
-    static BOOT: OnceLock<String> = OnceLock::new();
-    BOOT.get_or_init(crate::db::ulid)
-}
 
 #[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
 pub struct Intent {
