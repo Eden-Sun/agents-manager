@@ -1728,6 +1728,41 @@ mod review_boundary_tests {
         app
     }
 
+    /// #334：同一個 client_request_id、同 text、同 bot，但 notice／ownership／mission／review_role 不同——
+    /// 不能靜默回原筆 200（呼叫端的新意圖被吃掉）；完全一樣的重送照舊回原筆。
+    #[tokio::test]
+    async fn a_retry_that_changes_the_settings_is_refused_not_silently_answered_with_the_original() {
+        let app = app().await;
+        store::insert_assignment(&app.db, None, "bot", "crid-1", "do the thing", &["a/b".to_string()], None, true).await.unwrap();
+        let go = |expects_review: bool, own: &[String], mission: Option<(&str, &str)>, role: Option<crate::supervisor::roles::Role>| {
+            let app = app.clone();
+            let own = own.to_vec();
+            let mission = mission.map(|(a, b)| (a.to_string(), b.to_string()));
+            async move {
+                crate::supervisor::assign(
+                    &app, "bot", "do the thing", "crid-1", None, &own, None, expects_review,
+                    mission.as_ref().map(|(a, b)| (a.as_str(), b.as_str())), role, None, Default::default(),
+                )
+                .await
+            }
+        };
+        let own = ["a/b".to_string()];
+        assert!(go(true, &own, None, None).await.is_ok(), "完全一樣的重送回原筆");
+        assert!(go(true, &own, None, Some(crate::supervisor::roles::Role::Responder)).await.is_ok(), "沒寫＝協調者：明講 responder 的重送是同一件");
+        for (label, r) in [
+            ("expects_review", go(false, &own, None, None).await),
+            ("ownership", go(true, &[], None, None).await),
+            ("mission", go(true, &own, Some(("m1", "executor")), None).await),
+            ("review_role", go(true, &own, None, Some(crate::supervisor::roles::Role::Patrol)).await),
+        ] {
+            let LcError::Conflict(d) = r.expect_err(label) else { panic!("{label}: expected 409") };
+            assert_eq!(d["reason"], "assignment_request_mismatch", "{label}");
+            assert_eq!(d["field"], label);
+        }
+        app.db.close().await;
+        std::fs::remove_dir_all(&app.data_dir).unwrap();
+    }
+
     #[tokio::test]
     async fn followup_replay_requires_the_same_instruction_and_request_id() {
         let app = app().await;
