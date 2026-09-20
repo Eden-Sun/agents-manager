@@ -270,3 +270,110 @@
   font-family: var(--font-mono);
   font-size: 11.5px;
 }
+
+/* v6：一筆一行、整列可點。八筆在桌機預設欄寬下不用捲動。 */
+.preview-others ul {
+  gap: 2px;
+}
+
+.preview-group {
+  margin-top: 6px;
+}
+
+.preview-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  height: 26px;
+  padding: 0 6px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.preview-row:hover:not(:disabled),
+.preview-row:focus-visible {
+  background: var(--bg-hover);
+  border-color: var(--border);
+}
+
+.preview-row:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.preview-row .preview-kind {
+  margin-right: 0;
+  flex: none;
+}
+
+.preview-row-port {
+  flex: none;
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+}
+
+.preview-row-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+}
+
+.preview-samedir {
+  flex: none;
+  font-size: 10px;
+  color: var(--text-dim);
+  border: 1px dashed var(--border);
+  border-radius: 999px;
+  padding: 0 5px;
+}
+
+/* 右邊的動作字收斂成次要文字（整列才是按鈕）。 */
+.preview-row-act {
+  flex: none;
+  font-size: 11px;
+  color: var(--accent-ink);
+  opacity: 0.75;
+}
+
+.preview-row:hover .preview-row-act {
+  opacity: 1;
+  text-decoration: underline;
+}
+
+.preview-more {
+  align-self: flex-start;
+  margin-top: 6px;
+  padding: 2px 6px;
+  border: 0;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.preview-more:hover {
+  color: var(--text);
+  text-decoration: underline;
+}
+
+@media (max-width: 720px) {
+  .preview-row {
+    height: 32px;
+  }
+
+  .preview-row-act {
+    display: none;
+  }
+}
