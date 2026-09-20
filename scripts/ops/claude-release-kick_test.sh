@@ -25,7 +25,7 @@ echo "$*" >> "$AGM_DIR/calls.log"
 # 拼錯的旗標在測試裡永遠是綠的（2026-09-16 的事故就是這樣漏掉的）。
 for a in "$@"; do
   case "$a" in
-    --compact|--bot|--review-by|--text-file|--request-id|--notice|--owns|assign) ;;
+    --compact|--bot|--review-by|--text-file|--request-id|--notice|--owns|--source|--reason|--detail|assign|ops-alert) ;;
     --*) echo "agm: error: unrecognized arguments: $a" >&2; exit 2 ;;
   esac
 done
@@ -124,14 +124,39 @@ check "沒有協調者就跳過" "找不到要派給誰" "$AGM_DIR/claude-releas
 check_no "不派給巡檢自己" "--bot bot-agm" "$AGM_DIR/calls.log"
 teardown
 
-# 6. 殘留的鎖：不派，交 AGM 檢查。
+# 6. 鎖：讀不到執行者、剛建立的鎖不動（可能是另一個正在起跑的執行者）。
 setup
 ver 2.1.273; bash "$SCRIPT"
 ver 2.1.274
 mkdir "$AGM_DIR/claude-release.lock"
 bash "$SCRIPT"
-check "有鎖就跳過" "已有執行者或殘留鎖" "$AGM_DIR/claude-release.log"
+check "剛建立的無主鎖先跳過" "鎖剛建立" "$AGM_DIR/claude-release.log"
 check_no "有鎖不派" "assign" "$AGM_DIR/calls.log"
+teardown
+
+# 6b. 殘留鎖（執行者已死）：回收接手、照派，不能永遠安靜地停住。
+setup
+ver 2.1.273; bash "$SCRIPT"
+ver 2.1.274
+DEAD=$(sh -c 'echo $$')
+mkdir "$AGM_DIR/claude-release.lock"; echo "$DEAD $(date +%s)" > "$AGM_DIR/claude-release.lock/owner"
+AGM_LOCK_STALE_SECS=0 bash "$SCRIPT"
+check "殘留鎖被回收" "清掉殘留鎖" "$AGM_DIR/claude-release.log"
+check "回收後照派" "assign" "$AGM_DIR/calls.log"
+equals "回收後 state 更新" "$(cat "$AGM_DIR/claude-release.last")" "2.1.274"
+[ ! -e "$AGM_DIR/claude-release.lock" ] && echo "ok   - 收尾移除鎖" && PASS=$((PASS + 1)) || { echo "FAIL - 收尾沒移除鎖"; FAIL=$((FAIL + 1)); }
+teardown
+
+# 6c. 執行者還活著但卡太久：不搶鎖，推 ops_alert 喊人。
+setup
+ver 2.1.273; bash "$SCRIPT"
+ver 2.1.274
+printf 'sleep 30\n' > "$ROOT/claude-release-kick-fake.sh"; bash "$ROOT/claude-release-kick-fake.sh" & LIVE=$!
+mkdir "$AGM_DIR/claude-release.lock"; echo "$LIVE $(date +%s)" > "$AGM_DIR/claude-release.lock/owner"
+AGM_LOCK_HUNG_SECS=0 bash "$SCRIPT"
+kill "$LIVE" 2>/dev/null; wait "$LIVE" 2>/dev/null
+check "卡住的執行者推 runner_hung" "ops-alert.*runner_hung" "$AGM_DIR/calls.log"
+check_no "不搶活著的鎖、不派" "assign" "$AGM_DIR/calls.log"
 teardown
 
 echo "$PASS passed, $FAIL failed"
