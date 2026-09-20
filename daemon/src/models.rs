@@ -292,26 +292,40 @@ async fn claude_config_dir(app: &Arc<App>, host: &str, identity: Option<&str>) -
     Some(expand_home(dir, &home))
 }
 
-async fn read_claude_effort_settings(app: &Arc<App>, host: &str, config_dir: Option<&str>) -> (Option<String>, BTreeMap<String, String>) {
-    let script = match config_dir {
-        Some(dir) => format!("cat {}/settings.json 2>/dev/null", sh_quote(dir)),
-        None => "cat \"$HOME/.claude/settings.json\" 2>/dev/null".to_string(),
-    };
-    let text = if host == LOCAL_HOST {
-        tokio::process::Command::new("/bin/sh")
+fn optional_cat_script(path_expr: &str) -> String {
+    format!("cat {path_expr} 2>/dev/null || true")
+}
+
+/// 讀那台主機上的一個選用設定檔。**缺檔是答案（回空字串），讀不到是錯誤**：以前兩者都變成 `""`，
+/// ssh 逾時／連不上就被當成「沒設定」，接下來拿內建預設值當成事實記下去（#268）。
+/// 遠端 `ssh_exec` 看 exit code，所以缺檔那條要自己收成 0（`|| true`），不然缺檔也是 Err。
+async fn read_optional_text(app: &Arc<App>, host: &str, path_expr: &str) -> Result<String> {
+    let script = optional_cat_script(path_expr);
+    if host == LOCAL_HOST {
+        let o = tokio::process::Command::new("/bin/sh")
             .arg("-c")
             .arg(&script)
             .stdin(std::process::Stdio::null())
             .output()
             .await
-            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-            .unwrap_or_default()
-    } else if let Some(conn) = app.hosts.get(host).await {
-        conn.ssh_exec(&format!("{script}\n")).await.unwrap_or_default()
+            .with_context(|| format!("read {path_expr}"))?;
+        Ok(String::from_utf8_lossy(&o.stdout).to_string())
     } else {
-        String::new()
+        let conn = app.hosts.get(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
+        conn.ssh_exec(&format!("{script}\n")).await.with_context(|| format!("read {path_expr} on {host}"))
+    }
+}
+
+async fn read_claude_effort_settings(
+    app: &Arc<App>,
+    host: &str,
+    config_dir: Option<&str>,
+) -> Result<(Option<String>, BTreeMap<String, String>)> {
+    let path = match config_dir {
+        Some(dir) => format!("{}/settings.json", sh_quote(dir)),
+        None => "\"$HOME/.claude/settings.json\"".to_string(),
     };
-    parse_claude_effort_settings(&text)
+    Ok(parse_claude_effort_settings(&read_optional_text(app, host, &path).await?))
 }
 
 /// claude's built-in default with no `effortLevel` / override: docs and a fresh identity both say
@@ -319,16 +333,17 @@ async fn read_claude_effort_settings(app: &Arc<App>, host: &str, config_dir: Opt
 const CLAUDE_BUILTIN_DEFAULT_EFFORT: &str = "high";
 
 /// What "不帶 `--effort`" resolves to; fills a spawned child's effort, since its argv never says.
-pub async fn claude_default_effort(app: &Arc<App>, host: &str, identity: Option<&str>, alias: &str) -> String {
+/// 讀不到設定檔回 `Err`（不是內建預設）：呼叫端會把這個值記進 bot，記錯了沒有人會再來讀一次。
+pub async fn claude_default_effort(app: &Arc<App>, host: &str, identity: Option<&str>, alias: &str) -> Result<String> {
     let dir = claude_config_dir(app, host, identity).await;
-    let (global, per_model) = read_claude_effort_settings(app, host, dir.as_deref()).await;
+    let (global, per_model) = read_claude_effort_settings(app, host, dir.as_deref()).await?;
     let alias = alias.to_ascii_lowercase();
-    per_model
+    Ok(per_model
         .iter()
         .find(|(k, _)| k.to_ascii_lowercase().contains(&alias))
         .map(|(_, v)| v.clone())
         .or(global)
-        .unwrap_or_else(|| CLAUDE_BUILTIN_DEFAULT_EFFORT.to_string())
+        .unwrap_or_else(|| CLAUDE_BUILTIN_DEFAULT_EFFORT.to_string()))
 }
 
 pub fn claude_static_models(global: Option<&str>, per_model: &BTreeMap<String, String>) -> Vec<Value> {
@@ -382,37 +397,14 @@ pub async fn fetch(app: &Arc<App>, host: &str, kind: &str, identity: Option<&str
             if m.is_empty() {
                 bail!("could not parse `grok models` output:\n{}", text.trim());
             }
-            let (cfg_text, cache_text) = if host == LOCAL_HOST {
-                let cfg = tokio::process::Command::new("/bin/sh")
-                    .arg("-c")
-                    .arg("cat \"$HOME/.grok/config.toml\" 2>/dev/null")
-                    .stdin(std::process::Stdio::null())
-                    .output()
-                    .await
-                    .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-                    .unwrap_or_default();
-                let cache = tokio::process::Command::new("/bin/sh")
-                    .arg("-c")
-                    .arg("cat \"$HOME/.grok/models_cache.json\" 2>/dev/null")
-                    .stdin(std::process::Stdio::null())
-                    .output()
-                    .await
-                    .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-                    .unwrap_or_default();
-                (cfg, cache)
-            } else if let Some(conn) = app.hosts.get(host).await {
-                let cfg = conn.ssh_exec("cat \"$HOME/.grok/config.toml\" 2>/dev/null\n").await.unwrap_or_default();
-                let cache = conn.ssh_exec("cat \"$HOME/.grok/models_cache.json\" 2>/dev/null\n").await.unwrap_or_default();
-                (cfg, cache)
-            } else {
-                (String::new(), String::new())
-            };
+            let cfg_text = read_optional_text(app, host, "\"$HOME/.grok/config.toml\"").await?;
+            let cache_text = read_optional_text(app, host, "\"$HOME/.grok/models_cache.json\"").await?;
             let m = enrich_grok_models(m, &cache_text, &cfg_text);
             ("grok-cli", m)
         }
         "claude" => {
             let config_dir = claude_config_dir(app, host, identity).await;
-            let (global, per_model) = read_claude_effort_settings(app, host, config_dir.as_deref()).await;
+            let (global, per_model) = read_claude_effort_settings(app, host, config_dir.as_deref()).await?;
             ("static", claude_static_models(global.as_deref(), &per_model))
         }
         other => bail!("unknown kind `{other}`"),
@@ -524,6 +516,54 @@ pub fn grok_effort_from_screen(screen: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 一台設定了、但連不上的遠端主機（沒有人在聽那個 port，connection refused，快速失敗）。
+    async fn unreachable_host(e: &crate::testing::Env) -> &'static str {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let cfg = crate::config::HostCfg {
+            name: "unreachable-box".into(),
+            ssh: "127.0.0.1".into(),
+            ssh_port: port,
+            ssh_opts: vec!["-o".into(), "ConnectTimeout=2".into()],
+            herdr_session: "agents-manager".into(),
+            remote_path: String::new(),
+        };
+        e.app.hosts.apply_config(&e.app, &[cfg]).await;
+        "unreachable-box"
+    }
+
+    /// #268：遠端 settings.json 讀不到（ssh 失敗）不是「沒設定」——以前讀成 `""`，預設 effort 變成內建的 `high`，
+    /// 對帳把它記進子 bot，之後沒有人會再讀一次。
+    #[tokio::test]
+    async fn an_unreadable_remote_settings_file_is_an_error_not_the_builtin_default() {
+        let e = crate::testing::env().await;
+        let host = unreachable_host(&e).await;
+        let r = tokio::time::timeout(Duration::from_secs(20), claude_default_effort(&e.app, host, None, "opus"))
+            .await
+            .expect("連不上要快速失敗");
+        assert!(r.is_err(), "讀不到設定檔不能回內建預設：{r:?}");
+        let listed = tokio::time::timeout(Duration::from_secs(20), list(&e.app, host, "claude", None, true)).await.unwrap();
+        assert!(listed.is_err(), "模型清單不能拿內建預設充數、還快取十分鐘");
+        assert!(e.app.models_cache.lock().await.is_empty(), "失敗的結果不能進快取");
+        e.app.hosts.remove(&e.app, host).await;
+    }
+
+    /// 缺檔是答案不是錯誤：本機回 `""`，遠端腳本要 exit 0（`ssh_exec` 看 exit code）。
+    #[tokio::test]
+    async fn a_missing_settings_file_is_an_empty_answer_not_a_failure() {
+        let e = crate::testing::env().await;
+        let local = read_optional_text(&e.app, LOCAL_HOST, "/nonexistent-am-dir/settings.json").await.unwrap();
+        assert_eq!(local, "");
+        let st = tokio::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(optional_cat_script("/nonexistent-am-dir/settings.json"))
+            .status()
+            .await
+            .unwrap();
+        assert!(st.success(), "缺檔時腳本要 exit 0，不然遠端缺檔會被 ssh_exec 當成失敗");
+    }
 
     /// The argv shapes `herdr pane process-info` actually reported on this machine,
     /// 2026-09-07 (a claude child pane and a grok one).
