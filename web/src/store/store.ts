@@ -714,11 +714,11 @@ function flushUnsentReads() {
 
 /** 在飛的 `POST /api/order` 數；歸零時 `refreshState` 清掉樂觀順序，別台裝置的順序才會過來。 */
 let orderSavesInFlight = 0
-function saveOrderTracked(input: Parameters<typeof api.saveOrder>[0], onFail: () => void) {
+function saveOrderTracked(input: Parameters<typeof api.saveOrder>[0], onFail: (e?: unknown) => void) {
   orderSavesInFlight += 1
   void api
     .saveOrder(input)
-    .catch(onFail)
+    .catch((e) => onFail(e))
     .finally(() => {
       orderSavesInFlight -= 1
     })
@@ -1102,9 +1102,10 @@ export const useStore = create<StoreState>((set, get) => ({
     const pos = new Map(order.map((id, i) => [id, i]))
     if (order.every((id) => prev.get(id) === pos.get(id))) return
     set({ bots: s.bots.map((b) => (pos.has(b.id) ? { ...b, primary_position: pos.get(b.id)! } : b)) })
-    saveOrderTracked({ primary: order }, () => {
+    saveOrderTracked({ primary: order }, (e) => {
       set((st) => ({ bots: st.bots.map((b) => (prev.has(b.id) && pos.has(b.id) ? { ...b, primary_position: prev.get(b.id)! } : b)) }))
-      get().notify('error', '主力順序沒存起來（daemon 沒收到），已回到原本的順序')
+      // 把 daemon 的原因帶出來（舊 daemon 沒有 primary 這個欄位會回 400）：只說「沒收到」使用者看不出為什麼，重整後順序又回去。
+      get().notify('error', `主力順序沒存起來，已回到原本的順序：${errText(e)}`)
     })
   },
 

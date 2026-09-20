@@ -18,6 +18,7 @@ import { useMediaQuery } from '../hooks/useMediaQuery'
 import { clipAfterRows, lineBudget, moreTitle } from '../lib/chipOverflow'
 import { chipTracked } from '../lib/supervisorProject'
 import { sortPinned } from '../lib/pinnedOrder'
+import { useChipFlip } from './useChipFlip'
 import { orderedBotIds, useStore } from '../store/store'
 import { usePinnedDrag, type PinnedDnd } from './usePinnedDrag'
 import './unreadChip.css'
@@ -61,6 +62,7 @@ function Chip({ it, dnd }: { it: ChipItem; dnd?: PinnedDnd }) {
       className={`${chipClass(it)}${drag?.dragId === it.id ? ' dragging' : ''}${mark}`}
       title={it.title}
       data-bot-id={it.pinned ? it.id : undefined}
+      style={drag?.dragId === it.id ? { transform: `translate(${drag.offset.x}px, ${drag.offset.y}px) scale(1.06)` } : undefined}
       aria-current={it.current ? 'true' : undefined}
       aria-describedby={drag ? PIN_HINT_ID : undefined}
       onClick={() => {
@@ -97,6 +99,7 @@ function ScrollRowBar({ items, label, selectedBotId, dnd }: { items: ChipItem[];
   const barRef = useRef<HTMLDivElement | null>(null)
   const scroll = useHorizontalScroll(barRef, true)
   useScrollCurrentIntoView(barRef, `${selectedBotId}/${items.length}`)
+  useChipFlip(barRef, dnd?.dragId != null)
   return (
     <div className={`unread-bar-wrap row${scroll.left ? ' can-left' : ''}${scroll.right ? ' can-right' : ''}`}>
       {scroll.left ? (
@@ -191,6 +194,7 @@ export function UnreadChip() {
   const barRef = useRef<HTMLDivElement | null>(null)
   const [expanded, setExpanded] = useState(false)
   const { hiddenItems, clipPx } = useOverflowChips(barRef, !narrow && !expanded, ordered)
+  useChipFlip(barRef, dnd.dragId != null)
   const hidden = hiddenItems.length
 
   if (items.length === 0) return null
