@@ -163,7 +163,7 @@ async fn finish(app: &Arc<App>, mut op: ForkOp) -> Result<Response, LcError> {
             // 設定照抄（模型、強度、身份、env、人設、args）：同一個帳號目錄才找得到那段對話。
             // autostart 不抄——fork 是一次性的分岔，不該每次開 daemon 都多一顆。
             // 插在來源正下方（陣列位置＝側欄順序）：分出來的那顆要看得出是誰分的，不是掉到專案最底下（使用者 2026-09-15）。
-            p.bots.insert(at + 1, BotCfg { id: Some(new_id.clone()), name, autostart: false, herdr_session: None, ..src });
+            p.bots.insert(at + 1, BotCfg { id: Some(new_id.clone()), name, autostart: false, herdr_session: None, create_request_id: None, create_fingerprint: None, ..src });
             Ok(())
         })
         .await;
@@ -516,7 +516,7 @@ mod tests {
             .update(move |cfg| {
                 let bots = &mut cfg.projects[0].bots;
                 let src_cfg = bots[0].clone();
-                bots.push(BotCfg { id: Some(t), name: "alfa-fork".into(), autostart: false, ..src_cfg });
+                bots.push(BotCfg { id: Some(t), name: "alfa-fork".into(), autostart: false, create_request_id: None, create_fingerprint: None, ..src_cfg });
                 Ok(())
             })
             .await

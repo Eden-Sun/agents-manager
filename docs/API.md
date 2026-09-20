@@ -139,7 +139,7 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
 | POST | `/api/projects` | `{"path":"/abs/or/~/path","label"?:"foo","host"?:"m4p"}`（`label` 預設目錄名） | `200 {"project_id"}`；路徑不存在 400；重複 409 |
 | DELETE | `/api/projects/{id}` | — | `200 {}`；仍有 active Run → 409 |
 | PATCH | `/api/projects/{id}` | `{"label":"新名字"}` | `200 {"project_id","needs_restart":false}`；trim 後為空 400。不擋 active run（agent 身分取自 bot id，label 只影響**下次啟動**的 `agent_name` slug） |
-| POST | `/api/projects/{id}/bots` | `{"name","kind":"claude"\|"codex"\|"grok","args":[],"autostart":false,"inject_hooks":true,"name_auto":false, model?, effort?, fast?, identity?, persona?, instruction_files?, auto_approve?}` | `200 {"bot_id","name"}`；名稱重複 409，`instruction_files` 不合法 400（§12.8b），但 `name_auto:true` 時自動往後找 `<base>-<n>`（回應 `name` 是實際用的） |
+| POST | `/api/projects/{id}/bots` | `{"name","kind":"claude"\|"codex"\|"grok","args":[],"autostart":false,"inject_hooks":true,"name_auto":false, model?, effort?, fast?, identity?, persona?, instruction_files?, auto_approve?, client_request_id?}` | `200 {"bot_id","name"}`；名稱重複 409，`instruction_files` 不合法 400（§12.8b），但 `name_auto:true` 時自動往後找 `<base>-<n>`（回應 `name` 是實際用的）。**`client_request_id`（冪等鍵，1..128 個 `[A-Za-z0-9-_.:]`，#352）**：同一個專案裡同一個鍵＋同樣的請求內容重送（回應遺失後重試），回第一次建好的那顆 `{"bot_id","name","replayed":true}`，不再建第二顆；同一個鍵換了請求內容（`name_auto:true` 時 `name` 只是提示、不算內容）回 409 `request_id_reused`（帶原本那顆的 `bot_id`）；沒帶＝照舊每次都建。鍵記在 config.toml 該 bot 的 `create_request_id`／`create_fingerprint`（daemon 持久，bot 刪除即失效） |
 | PATCH | `/api/bots/{id}` | 見 §10.2 | `200 {"needs_restart":bool}` |
 | POST | `/api/bots/{id}/fork` | `{"name"?}` | 見 §10.3b |
 | POST | `/api/bots/{id}/promote` | `{"name"?,"model"?,"effort"?}` | 子 agent 升級成頂層 bot，見 §10.3c |

@@ -1043,6 +1043,10 @@ struct NewBot {
     identity: Option<String>,
     #[serde(default)]
     env: Option<BTreeMap<String, String>>,
+    /// 冪等鍵（#352）：同一個鍵＋同樣的請求內容重送，拿回第一次建好的那顆（`{bot_id,name,replayed:true}`），不再建第二顆；
+    /// 同一個鍵換了請求內容回 409 `request_id_reused`；沒帶＝照舊每次都建。`name_auto` 時 `name` 只是提示，不算請求內容。
+    #[serde(default)]
+    client_request_id: Option<String>,
 }
 
 /// Must exist **on that bot's host** (`[[identities]]` + its `ccN` aliases, SPEC §16) and match `kind`.
@@ -1080,12 +1084,52 @@ async fn create_bot(
     let env: BTreeMap<String, String> = b.env.clone().unwrap_or_default();
     let id = db::ulid();
     let used_name = std::sync::Mutex::new(b.name.clone());
+    let create_request_id = b.client_request_id.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+    if let Some(c) = &create_request_id {
+        if c.len() > 128 || !c.chars().all(|ch| ch.is_ascii_alphanumeric() || "-_.:".contains(ch)) {
+            return Err(LcError::Bad("client_request_id must be 1..=128 chars of [A-Za-z0-9-_.:]".into()));
+        }
+    }
+    // 請求指紋＝會影響這顆 bot 的欄位；`name_auto` 時名字只是提示（重送時瀏覽器的清單已同步，算出來的名字本來就會變）。
+    let create_fingerprint = create_request_id.as_ref().map(|_| {
+        json!([
+            pid,
+            if b.name_auto { Value::Null } else { json!(b.name) },
+            b.name_auto,
+            b.kind,
+            b.model.as_deref().map(str::trim).filter(|m| !m.is_empty()),
+            effort,
+            b.fast,
+            b.persona.as_deref().filter(|s| !s.trim().is_empty()),
+            instruction_files,
+            b.args,
+            b.autostart,
+            b.inject_hooks.unwrap_or(true),
+            b.auto_approve.unwrap_or(true),
+            identity,
+            env,
+        ])
+        .to_string()
+    });
+    let replayed: std::sync::Mutex<Option<(String, String)>> = std::sync::Mutex::new(None);
+    let reused: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
     let res = crate::projection::update_and_project(&app.cfg, &app.db, |cfg| {
         let p = cfg
             .projects
             .iter_mut()
             .find(|p| p.id.as_deref() == Some(pid.as_str()))
             .ok_or_else(|| anyhow::anyhow!("no-project"))?;
+        // 同一個請求鍵：在 config 鎖裡查（跟寫入同一個原子步驟），重送不會並發建出兩顆。
+        if let Some(c) = &create_request_id {
+            if let Some(prev) = p.bots.iter().find(|x| x.create_request_id.as_deref() == Some(c.as_str())) {
+                if prev.create_fingerprint == create_fingerprint {
+                    *replayed.lock().unwrap() = Some((prev.id.clone().unwrap_or_default(), prev.name.clone()));
+                    return Ok(());
+                }
+                *reused.lock().unwrap() = Some(prev.id.clone().unwrap_or_default());
+                anyhow::bail!("request-id-reused");
+            }
+        }
         let taken = |n: &str| p.bots.iter().any(|x| x.name == n);
         let name = if taken(&b.name) {
             if !b.name_auto {
@@ -1112,17 +1156,29 @@ async fn create_bot(
             identity: identity.clone(),
             env: env.clone(),
             herdr_session: None,
+            create_request_id: create_request_id.clone(),
+            create_fingerprint: create_fingerprint.clone(),
         });
         Ok(())
     })
     .await;
     match res {
         Ok(()) => {}
+        Err(e) if e.to_string() == "request-id-reused" => {
+            return Err(LcError::conflict(
+                "request_id_reused",
+                json!({"bot_id": reused.into_inner().unwrap(), "detail": "same client_request_id, different request"}),
+            ))
+        }
         Err(e) if e.to_string() == "duplicate-name" => {
             return Err(LcError::conflict("bot name already in use", json!({"name": b.name})))
         }
         Err(e) if e.to_string() == "no-project" => return Err(LcError::NotFound("project".into())),
         Err(e) => return Err(projection_err(e)),
+    }
+    if let Some((bot_id, name)) = replayed.into_inner().unwrap() {
+        // 重送：拿回原本那顆，什麼都沒新建、不推事件。
+        return Ok((StatusCode::OK, Json(json!({"bot_id": bot_id, "name": name, "replayed": true}))).into_response());
     }
     app.emit("bot_changed", json!({"bot_id": id})).await;
     let name = used_name.into_inner().unwrap_or_default();
@@ -1734,6 +1790,8 @@ async fn restore_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Res
             identity: bot.identity.clone(),
             env,
             herdr_session: bot.herdr_session.clone(),
+            create_request_id: None,
+            create_fingerprint: None,
         };
         let pid = bot.project_id.clone();
         crate::projection::update_and_project(&app.cfg, &app.db, move |cfg| {
@@ -2264,6 +2322,8 @@ mod project_tests {
                             identity: None,
                             env: Default::default(),
                             herdr_session: None,
+                            create_request_id: None,
+                            create_fingerprint: None,
                         })
                         .collect(),
                 });
@@ -4849,5 +4909,80 @@ mod mixed_store_tests {
         assert!(matches!(err, LcError::Bad(_)), "混送要 400：{err:?}");
         assert_eq!(order_of(&e).await, before, "config 順序沒動");
         assert_eq!(pin_state(&e, &a).await.1, 0, "primary_position 也沒寫");
+    }
+}
+
+/// #352：`POST /api/projects/:id/bots` 的冪等。回應遺失後原樣重送（快速新增每次帶 `name_auto:true`）不能再建第二顆 bot；
+/// 記在 config.toml 的那顆 bot 上（daemon 持久，瀏覽器重整、daemon 重啟都在）。
+#[cfg(test)]
+mod create_bot_idempotency_tests {
+    use super::*;
+    use crate::testing::{env, Env};
+
+    async fn seed_project(e: &Env) {
+        let (pid, repo) = (e.project_id.clone(), e.repo.to_string_lossy().to_string());
+        e.app
+            .cfg
+            .update(move |cfg| {
+                cfg.projects.push(crate::config::ProjectCfg { id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![] });
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    async fn create(e: &Env, body: Value) -> Result<Value, LcError> {
+        let res = create_bot(State(e.app.clone()), Path(e.project_id.clone()), Json(serde_json::from_value(body).unwrap())).await?;
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
+        Ok(serde_json::from_slice(&bytes).unwrap())
+    }
+
+    async fn bots_in_config(e: &Env) -> usize {
+        e.app.cfg.get().await.projects[0].bots.len()
+    }
+
+    #[tokio::test]
+    async fn a_resent_create_with_the_same_request_id_returns_the_original_bot() {
+        let e = env().await;
+        seed_project(&e).await;
+        let body = |name: &str| json!({"name": name, "name_auto": true, "kind": "claude", "client_request_id": "req-1"});
+        let first = create(&e, body("cc1-1")).await.unwrap();
+        // 回應遺失後重送：瀏覽器清單已同步，`nextName` 算出來的名字變成 cc1-2——名字只是 name_auto 的提示，不算請求內容。
+        let again = create(&e, body("cc1-2")).await.unwrap();
+        assert_eq!((again["bot_id"].clone(), again["name"].clone()), (first["bot_id"].clone(), first["name"].clone()), "重送拿回原本那顆：{again}");
+        assert_eq!(bots_in_config(&e).await, 1, "只有一顆 bot");
+        // 持久在 config.toml（瀏覽器重整、daemon 重啟都在）。
+        let text = std::fs::read_to_string(&e.app.cfg.path).unwrap();
+        assert!(text.contains("req-1"), "request id 要寫進 config.toml：{text}");
+    }
+
+    #[tokio::test]
+    async fn the_same_request_id_with_a_different_request_is_a_409() {
+        let e = env().await;
+        seed_project(&e).await;
+        create(&e, json!({"name": "a", "kind": "claude", "client_request_id": "req-2"})).await.unwrap();
+        let err = create(&e, json!({"name": "b", "kind": "codex", "client_request_id": "req-2"})).await.unwrap_err();
+        assert!(matches!(err, LcError::Conflict(_)), "同 id 換 kind：{err:?}");
+        assert_eq!(bots_in_config(&e).await, 1);
+    }
+
+    #[tokio::test]
+    async fn a_new_request_id_is_a_deliberate_second_create() {
+        let e = env().await;
+        seed_project(&e).await;
+        let a = create(&e, json!({"name": "cc1-1", "name_auto": true, "kind": "claude", "client_request_id": "req-3"})).await.unwrap();
+        let b = create(&e, json!({"name": "cc1-1", "name_auto": true, "kind": "claude", "client_request_id": "req-4"})).await.unwrap();
+        assert_ne!(a["bot_id"], b["bot_id"]);
+        assert_eq!(b["name"], "cc1-2", "新的請求照常用 name_auto 往後找");
+        assert_eq!(bots_in_config(&e).await, 2);
+    }
+
+    #[tokio::test]
+    async fn a_create_without_a_request_id_behaves_as_before() {
+        let e = env().await;
+        seed_project(&e).await;
+        create(&e, json!({"name": "x", "name_auto": true, "kind": "claude"})).await.unwrap();
+        create(&e, json!({"name": "x", "name_auto": true, "kind": "claude"})).await.unwrap();
+        assert_eq!(bots_in_config(&e).await, 2);
     }
 }
