@@ -174,8 +174,9 @@
   /* 方角是主訊號（不靠顏色）；999px 圓角會把 inset 左條削成月牙（2026-09-12 實拍），收成 6px。 */
   border-radius: 6px;
   box-shadow: inset 3px 0 0 var(--lamp-green);
-  font-weight: 650;
-  padding-left: 11px;
+  /* 650 + 多出來的左內距讓這顆看起來比別人大一號（2026-09-20 使用者）：收回 600／10px。 */
+  font-weight: 600;
+  padding-left: 10px;
 }
 
 /* 同時有未讀：底維持實心藍，左條反白才看得見。 */
@@ -183,25 +184,26 @@
 .unread-chip.current {
   border-color: var(--lamp-green);
   /* 左條原本是石墨色，在 20px 藥丸上看起來像缺一角的黑底（2026-09-20 使用者）：跟外框同綠。 */
-  box-shadow: inset 3px 0 0 var(--lamp-green), 0 0 0 1px var(--lamp-green);
+  /* 外框往內畫：`0 0 0 1px` 是盒子外的一圈，看起來又大一號。 */
+  box-shadow: inset 3px 0 0 var(--lamp-green), inset 0 0 0 1px var(--lamp-green);
 }
 
 .unread-chip.current.unread {
   background: var(--accent);
   border-color: var(--lamp-green);
   color: var(--accent-text);
-  box-shadow: inset 3px 0 0 var(--accent-text), 0 0 0 1px var(--lamp-green);
+  box-shadow: inset 3px 0 0 var(--accent-text), inset 0 0 0 1px var(--lamp-green);
 }
 
 /* 方角照舊套在紅、黃、進行中：它是「你在這裡」，跟顏色無關。 */
 .unread-chip.current.needs-reply {
   border-color: var(--lamp-green);
-  box-shadow: inset 3px 0 0 var(--danger), 0 0 0 1px var(--lamp-green);
+  box-shadow: inset 3px 0 0 var(--danger), inset 0 0 0 1px var(--lamp-green);
 }
 
 .unread-chip.current.waits-kids {
   border-color: var(--lamp-green);
-  box-shadow: inset 3px 0 0 var(--warn), 0 0 0 1px var(--lamp-green);
+  box-shadow: inset 3px 0 0 var(--warn), inset 0 0 0 1px var(--lamp-green);
 }
 
 /* 紅／黃講「該做什麼」比「你在哪」重要：填色維持語意，左條疊上去。 */
