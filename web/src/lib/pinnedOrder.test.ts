@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { dropBefore, moveBefore, moveStep, pickSlot, sortPinned, DROP_STICKY_PX, type Box } from './pinnedOrder'
+import { PIN_GRID_MAX, dropBefore, endBefore, moveBefore, moveStep, pickSlot, sortPinned, DROP_STICKY_PX, type Box } from './pinnedOrder'
 
 test('sortPinned: 照 primary_position，同值照原順序', () => {
   const items = [
@@ -70,4 +70,12 @@ test('pickSlot: 換行——行尾落點接到下一行第一顆之前，讓位�
   const boxes = [box('a', 0, 0), box('b', 90, 0), box('c', 0, 30), box('d', 90, 30)]
   assert.deepEqual(pickSlot(boxes, 200, 5, 'd'), { before: 'c', shift: [], after: 'b' }, '第一行行尾：標示在 b 右邊，不是 c 左邊')
   assert.deepEqual(pickSlot(boxes, 95, 35, 'a'), { before: 'd', shift: ['d'], after: null })
+})
+
+test('endBefore: 拖到可見的最後面＝插在被藏起來的第一顆之前', () => {
+  const full = ['a', 'b', 'c', 'd', 'e']
+  assert.equal(endBefore(full, ['a', 'b', 'c']), 'd')
+  assert.equal(endBefore(full, full), null)
+  assert.equal(endBefore(full, []), null)
+  assert.equal(PIN_GRID_MAX, 8)
 })

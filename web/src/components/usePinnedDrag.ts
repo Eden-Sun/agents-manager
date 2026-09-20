@@ -8,7 +8,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { flushSync } from 'react-dom'
 import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from 'react'
-import { moveBefore, pickSlot, type Box } from '../lib/pinnedOrder'
+import { endBefore, moveBefore, pickSlot, type Box } from '../lib/pinnedOrder'
 
 const MOUSE_SLOP = 5
 const TOUCH_SLOP = 10
@@ -51,15 +51,15 @@ export function usePinnedDrag(
   const [announce, setAnnounce] = useState('')
   const suppress = useRef(false)
   // 事件處理在 window 上，讀最新的順序要靠 ref。
-  const latest = useRef({ fullOrder, commit })
+  const latest = useRef({ fullOrder, visibleOrder, commit })
   useEffect(() => {
-    latest.current = { fullOrder, commit }
+    latest.current = { fullOrder, visibleOrder, commit }
   })
   const cleanup = useRef<(() => void) | null>(null)
   useEffect(() => () => cleanup.current?.(), [])
 
   const boxesOf = (from: HTMLElement): Box[] => {
-    const scope = from.closest('.unread-group, .unread-bar') ?? document
+    const scope = from.closest('.unread-group, .unread-bar, .unread-pin-grid') ?? document
     return [...scope.querySelectorAll<HTMLElement>('.unread-chip.pinned[data-bot-id]')].map((c) => {
       const r = c.getBoundingClientRect()
       // 量的是「沒被讓位推過」的位置：扣回它**目前實際**的 translateX（過渡到一半也對；減少動態時沒有位移就不扣）。
@@ -115,8 +115,11 @@ export function usePinnedDrag(
       const was = dragging
       end()
       if (!was) return
-      const before = pickSlot(boxesOf(chip), ev.clientX, ev.clientY, id, held.current.before).before
-      const next = moveBefore(latest.current.fullOrder, id, before)
+      const picked = pickSlot(boxesOf(chip), ev.clientX, ev.clientY, id, held.current.before).before
+      // 放到可見的最後面：插在被藏起來的第一顆前面，不跳到它們後面（手機主力區有 8 顆上限）。
+      const { fullOrder: full, visibleOrder: shown } = latest.current
+      const before = picked === null ? endBefore(full.filter((x) => x !== id), shown.filter((x) => x !== id)) : picked
+      const next = moveBefore(full, id, before)
       // 同一次渲染收起拖曳狀態與套用新順序：分兩次渲染的話，中間那一格會讓晶片先「彈回原位」再滑去新位置（useChipFlip 量的是每次渲染後的位置）。
       flushSync(() => {
         setDrag(null)
@@ -155,7 +158,7 @@ export function usePinnedDrag(
         return
       }
       // 往左＝插在左邊那顆前面；往右＝插在右邊那顆的下一顆前面（沒有＝最後）。
-      const before = dir < 0 ? visibleOrder[to] : (visibleOrder[to + 1] ?? null)
+      const before = dir < 0 ? visibleOrder[to] : (visibleOrder[to + 1] ?? endBefore(fullOrder, visibleOrder))
       const next = moveBefore(fullOrder, id, before)
       if (!next) return
       commit(next)
