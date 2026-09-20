@@ -1185,6 +1185,11 @@ async fn set_order(State(app): State<Arc<App>>, Json(b): Json<SetOrder>) -> Resu
     if b.projects.is_none() && b.bots.is_none() && b.primary.is_none() {
         return Err(LcError::Bad("order: projects、bots 或 primary 至少要有一個".into()));
     }
+    // 兩個 store 不可能同一個交易：`primary` 只存 DB、projects／bots 寫 config.toml；混送要嘛半套生效、要嘛回滾也可能失敗。
+    // 一律 400、什麼都不寫，分成兩次送（#350）。
+    if b.primary.is_some() && (b.projects.is_some() || b.bots.is_some()) {
+        return Err(LcError::Bad("order: primary（只存 DB）不能跟 projects／bots（寫 config.toml）同一個請求送，請分成兩次".into()));
+    }
     // 先驗再動：點名了不存在的 bot，config 那邊的順序也不寫。
     if let Some(ids) = &b.primary {
         crate::primary_order::validate(&app.db, ids).await?;
@@ -1354,6 +1359,14 @@ async fn patch_bot(
         if !name.trim().is_empty() {
             let host = db::bot_host(&app.db, &id).await.map_err(any_err)?;
             check_identity(&app, &host, &Some(name.clone()), &kind).await?;
+        }
+    }
+    // `primary` 只存 DB、其他欄位寫 config.toml：兩個 store 不可能同一個交易，混送半套生效的風險比多送一次請求大得多（#350）。
+    // config 裡的 bot（managed_by=user）混送一律 400、什麼都不寫；child bot 全在 DB，不受這條限制。
+    if b.is_primary.is_some() && (restart_relevant || b.name.is_some() || b.autostart.is_some()) {
+        let managed_by = db::bot(&app.db, &id).await.map_err(any_err)?.map(|x| x.managed_by).unwrap_or_default();
+        if managed_by == "user" {
+            return Err(LcError::Bad("primary（只存 DB）不能跟會寫 config.toml 的欄位（name／autostart／model／effort／args／identity／env…）同一個請求送，請分成兩次 PATCH".into()));
         }
     }
     // child bot 不在 config.toml，cfg.update 只會 404（2026-09-09 使用者：child 身分改不了）→ 直接改 DB。
@@ -4753,5 +4766,81 @@ mod ct_eq_tests {
         // 三個欄位都沒有仍是 400。
         let none = SetOrder { projects: None, bots: None, primary: None };
         assert!(matches!(set_order(State(e.app.clone()), Json(none)).await.unwrap_err(), LcError::Bad(_)));
+    }
+}
+
+/// #350：一個請求同時要寫 config.toml 與只存 DB 的欄位（`primary`／`primary_position`）時，兩個 store 不可能同一個交易
+/// （`update_and_project` 自己就會寫 DB，外層交易會死鎖；事後回滾又是第二次寫入、一樣會失敗）。所以混送一律 400、什麼都不寫，
+/// 呼叫端分成兩次；不會有「回失敗、其中一半卻生效了」。
+#[cfg(test)]
+mod mixed_store_tests {
+    use super::*;
+    use crate::testing::{env, Env};
+
+    async fn seed_project(e: &Env) {
+        let (pid, repo) = (e.project_id.clone(), e.repo.to_string_lossy().to_string());
+        e.app
+            .cfg
+            .update(move |cfg| {
+                cfg.projects.push(crate::config::ProjectCfg { id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![] });
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    async fn add(e: &Env, name: &str) -> String {
+        let res = create_bot(State(e.app.clone()), Path(e.project_id.clone()), Json(serde_json::from_value(json!({"name": name, "kind": "claude"})).unwrap())).await.unwrap();
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
+        serde_json::from_slice::<Value>(&bytes).unwrap()["bot_id"].as_str().unwrap().to_string()
+    }
+
+    async fn patch(e: &Env, id: &str, body: Value) -> Result<Response, LcError> {
+        patch_bot(State(e.app.clone()), Path(id.to_string()), Json(serde_json::from_value(body).unwrap())).await
+    }
+
+    async fn pin_state(e: &Env, id: &str) -> (i64, i64) {
+        sqlx::query_as("SELECT is_primary, primary_position FROM bots WHERE id = ?").bind(id).fetch_one(&e.app.db).await.unwrap()
+    }
+
+    async fn model_of(e: &Env, id: &str) -> Option<String> {
+        e.app.cfg.get().await.projects[0].bots.iter().find(|b| b.id.as_deref() == Some(id)).unwrap().model.clone()
+    }
+
+    #[tokio::test]
+    async fn a_patch_mixing_primary_with_a_config_field_is_rejected_and_changes_nothing() {
+        let e = env().await;
+        seed_project(&e).await;
+        let id = add(&e, "mix").await;
+        let before = model_of(&e, &id).await;
+        let err = patch(&e, &id, json!({"primary": true, "model": "opus"})).await.unwrap_err();
+        assert!(matches!(err, LcError::Bad(_)), "混送要 400：{err:?}");
+        assert_eq!(pin_state(&e, &id).await, (0, 0), "primary 不能單獨生效");
+        assert_eq!(model_of(&e, &id).await, before, "config 欄位也沒動");
+        // 分開送各自照常成功。
+        patch(&e, &id, json!({"primary": true})).await.unwrap();
+        assert_eq!(pin_state(&e, &id).await.0, 1);
+        patch(&e, &id, json!({"model": "opus"})).await.unwrap();
+        assert_eq!(model_of(&e, &id).await.as_deref(), Some("opus"));
+    }
+
+    #[tokio::test]
+    async fn an_order_request_mixing_primary_with_config_orders_is_rejected_and_changes_nothing() {
+        let e = env().await;
+        seed_project(&e).await;
+        let a = add(&e, "a").await;
+        let b = add(&e, "b").await;
+        let order_of = |e: &Env| {
+            let app = e.app.clone();
+            async move { app.cfg.get().await.projects[0].bots.iter().map(|x| x.id.clone().unwrap()).collect::<Vec<_>>() }
+        };
+        let before = order_of(&e).await;
+        let mut bots = BTreeMap::new();
+        bots.insert(e.project_id.clone(), vec![b.clone(), a.clone()]);
+        let mixed = SetOrder { projects: None, bots: Some(bots), primary: Some(vec![b.clone(), a.clone()]) };
+        let err = set_order(State(e.app.clone()), Json(mixed)).await.unwrap_err();
+        assert!(matches!(err, LcError::Bad(_)), "混送要 400：{err:?}");
+        assert_eq!(order_of(&e).await, before, "config 順序沒動");
+        assert_eq!(pin_state(&e, &a).await.1, 0, "primary_position 也沒寫");
     }
 }

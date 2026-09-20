@@ -144,7 +144,7 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
 | POST | `/api/bots/{id}/fork` | `{"name"?}` | 見 §10.3b |
 | POST | `/api/bots/{id}/promote` | `{"name"?,"model"?,"effort"?}` | 子 agent 升級成頂層 bot，見 §10.3c |
 | DELETE | `/api/bots/{id}` | — | 見 §10.4 |
-| POST | `/api/order` | `{"projects"?:["pid",…],"bots"?:{"pid":["bot_id",…]},"primary"?:["bot_id",…]}` | `200 {"ok":true}`；三個都沒有 400；`primary` 有未知（或已刪除）或重複的 bot id 也 400，一筆都不寫 |
+| POST | `/api/order` | `{"projects"?:["pid",…],"bots"?:{"pid":["bot_id",…]},"primary"?:["bot_id",…]}` | `200 {"ok":true}`；三個都沒有 400；`primary` 有未知（或已刪除）或重複的 bot id 也 400，一筆都不寫；**`primary` 不能跟 `projects`／`bots` 混送**（前者只存 DB、後者寫 config.toml，兩個 store 不可能同一個交易）：混送 400、什麼都不寫，分成兩次（#350） |
 
 成功後推 `project_changed` / `bot_changed`。
 
@@ -970,7 +970,7 @@ env 前綴跟登入是同一段程式算出來的——少帶 `CLAUDE_CONFIG_DIR
 | `fast` | bool | §12.2 |
 | `auto_approve` | bool，預設 `true` | 注入略過權限確認的旗標：claude `--dangerously-skip-permissions`、codex `--yolo`、grok `--always-approve` |
 | `inject_hooks` | bool，預設 `true` | `false` 時回覆走終端備援 |
-| `primary` | bool，預設 `false` | 純顯示用釘選（標題列下面那一列排最前）。不影響 argv/env，永遠 `needs_restart:false`；不進 config.toml（`bots.is_primary`），child bot 也能釘，手機與電腦同步；新釘的排到主力那列最後（`primary_position`，見 `POST /api/order`） |
+| `primary` | bool，預設 `false` | 純顯示用釘選（標題列下面那一列排最前）。不影響 argv/env，永遠 `needs_restart:false`；不進 config.toml（`bots.is_primary`），child bot 也能釘，手機與電腦同步；新釘的排到主力那列最後（`primary_position`，見 `POST /api/order`）。**不能跟會寫 config.toml 的欄位（name／autostart／model／effort／args／identity／env…）同一個 PATCH 送**（config 內的 bot）：混送 400、什麼都不寫，分兩次（#350，兩個 store 不可能同一個交易）；child bot 全在 DB，不受此限 |
 | `identity` / `env` | 見身份一節 | |
 | `persona` | §12.8 | |
 | `instruction_files` | string \| null（唯讀給 codex／grok） | claude 才有：這顆 bot 讀哪份專案指示檔，§12.8b。`GET /api/state` 永遠給有效值（沒設＝`claude-md`），codex／grok 是 `null` |
