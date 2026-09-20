@@ -468,14 +468,8 @@ mod tests {
         assert_eq!((t.status.as_str(), t.delivery.as_str()), ("in_flight", "pending"));
 
         heal_delivery_writes(&app).await;
-        let mut t = turn(&app, &turn_id).await;
-        for _ in 0..150 {
-            if t.status != "in_flight" {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            t = turn(&app, &turn_id).await;
-        }
+        let _ = crate::testing::eventually!(turn(&app, &turn_id).await.status != "in_flight");
+        let t = turn(&app, &turn_id).await;
         assert_eq!((t.status.as_str(), t.delivery.as_str()), ("failed", "failed"), "結清的是這個行程記下的「一個字都沒進去」，不是 unknown");
         assert!(!app.progress_pollers.lock().await.contains_key(&run), "收掉的回合不掛 poller");
         assert_eq!(env.herdr.calls_to("agent.prompt").len(), 1, "不再送");

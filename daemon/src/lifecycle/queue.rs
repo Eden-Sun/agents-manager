@@ -1787,14 +1787,11 @@ mod flush_queue_tests {
         assert_eq!(rearm_queue_retries_with(&app, fire).await.unwrap(), 1, "the due one replaces the later timer");
 
         // The typed delivery itself takes about two seconds.
-        let mut t = turn(&app, &f.turn_id).await;
-        for _ in 0..80 {
-            if t.delivery != "pending" && t.status != "queued" {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            t = turn(&app, &f.turn_id).await;
-        }
+        let _ = crate::testing::eventually!({
+            let t = turn(&app, &f.turn_id).await;
+            t.delivery != "pending" && t.status != "queued"
+        });
+        let t = turn(&app, &f.turn_id).await;
         assert_eq!((t.status.as_str(), t.delivery.as_str()), ("in_flight", "ok"));
         assert_eq!(f.env.herdr.methods().iter().filter(|m| *m == "pane.send_text").count(), 1, "exactly once");
     }
@@ -1947,12 +1944,7 @@ mod flush_queue_tests {
         let seen = fired.clone();
         let armed = rearm_queue_retries_with(&app, move |bot: String| seen.lock().unwrap().push(bot)).await.unwrap();
         assert_eq!(armed, 1, "沒有 next_flush_at 的 queued turn 也要重新掛上");
-        for _ in 0..40 {
-            if !fired.lock().unwrap().is_empty() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
+        let _ = crate::testing::eventually!(!fired.lock().unwrap().is_empty());
         assert_eq!(fired.lock().unwrap().as_slice(), &[f.bot_id.clone()], "立刻補一次 flush");
     }
 

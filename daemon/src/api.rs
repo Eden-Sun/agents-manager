@@ -3613,12 +3613,7 @@ mod delete_bot_tests {
             let (app, b1) = (app.clone(), b1.clone());
             async move { delete_bot(State(app), Path(b1)).await.map(|_| ()).map_err(reason) }
         });
-        for _ in 0..400 {
-            if e.herdr.methods().iter().any(|m| m == "agent.send_keys") {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
+        let _ = crate::testing::eventually!(e.herdr.methods().iter().any(|m| m == "agent.send_keys"));
         assert!(e.herdr.methods().iter().any(|m| m == "agent.send_keys"), "stop 應該已經開始");
         // 停機進行中，外面把 bravo 從 TOML 拿掉。
         let text = std::fs::read_to_string(&app.cfg.path).unwrap();
@@ -3732,15 +3727,7 @@ mod delete_bot_tests {
             assert!(db::bot(&app.db, k).await.unwrap().unwrap().deleted_at.is_some(), "失敗的那顆後面的 child 也要收掉");
         }
         sqlx::query("DROP TRIGGER am_test_fail_first").execute(&app.db).await.unwrap();
-        let mut done = false;
-        for _ in 0..150 {
-            if db::bot(&app.db, &kids[0]).await.unwrap().unwrap().deleted_at.is_some() {
-                done = true;
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-        assert!(done, "寫得進去之後背景補上");
+        assert!(crate::testing::eventually!(db::bot(&app.db, &kids[0]).await.unwrap().unwrap().deleted_at.is_some()), "寫得進去之後背景補上");
     }
 
     /// #296：定案之後某顆 child 的軟刪寫不進去，不能 early return 把母 bot 的 run 留著不停。
@@ -3763,15 +3750,7 @@ mod delete_bot_tests {
         assert!(res.is_ok(), "定案之後的失敗記進 kept_dirs，不能回錯：{:?}", res.err().map(|e| format!("{e:?}")));
         assert!(db::active_run(&app.db, &parent).await.unwrap().is_none(), "母 bot 已刪，它的 run 一定要停");
         sqlx::query("DROP TRIGGER am_test_fail_kid").execute(&app.db).await.unwrap();
-        let mut done = false;
-        for _ in 0..150 {
-            if db::bot(&app.db, &child).await.unwrap().unwrap().deleted_at.is_some() {
-                done = true;
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-        assert!(done, "寫得進去之後背景補上");
+        assert!(crate::testing::eventually!(db::bot(&app.db, &child).await.unwrap().unwrap().deleted_at.is_some()), "寫得進去之後背景補上");
     }
 
     /// #298：專案已刪的 child 不能還原成看不到的活 bot。

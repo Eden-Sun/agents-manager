@@ -682,12 +682,7 @@ mod tests {
         let task = tokio::spawn(async move { keep_telling(&app2, &run2, &[Duration::from_millis(1500); 4]).await });
         // 第一次試：讀了畫面、送不進去。
         let reads = |e: &crate::testing::Env| e.herdr.calls_to("pane.read").len();
-        for _ in 0..100 {
-            if reads(&e) > 0 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        let _ = crate::testing::eventually!(reads(&e) > 0);
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(reads(&e) > 0, "前提：第一次已經試過");
         assert_eq!(alerts().await, 0, "前提：排隊名額被佔著，第一次送不進去");
@@ -777,12 +772,7 @@ mod tests {
         assert_eq!(stored_status(&app, &kid).await, "idle", "前提：這一刻讀不到 run");
         sqlx::query("ALTER TABLE projects_unreadable RENAME TO projects").execute(&app.db).await.unwrap();
 
-        for _ in 0..250 {
-            if stored_status(&app, &kid).await == "blocked" {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        let _ = crate::testing::eventually!(stored_status(&app, &kid).await == "blocked");
         assert_eq!(stored_status(&app, &kid).await, "blocked", "重放那一則：不是丟掉");
     }
 
