@@ -336,6 +336,15 @@ else
   echo "skip - 這台機器沒有 /bin/bash，略過舊版 bash 相容性測試"
 fi
 
+# 13b. state 原子寫：rename 失敗時不留暫存檔、不留半個 state（下一輪同 request-id 由 daemon 去重）。
+setup
+mkdir "$ROOT/failmv"; printf '#!/bin/sh\nexit 1\n' > "$ROOT/failmv/mv"; chmod +x "$ROOT/failmv/mv"
+PATH="$ROOT/failmv:$PATH" bash "$SCRIPT"
+[ ! -f "$AGM_DIR/herdr-update.last" ] && { echo "ok   - rename 失敗：不留 state"; PASS=$((PASS + 1)); } || { echo "FAIL - rename 失敗：留下 state"; FAIL=$((FAIL + 1)); }
+[ -z "$(ls "$AGM_DIR" | grep 'last.tmp')" ] && { echo "ok   - rename 失敗：不留暫存檔"; PASS=$((PASS + 1)); } || { echo "FAIL - rename 失敗：留下暫存檔"; FAIL=$((FAIL + 1)); }
+check "寫不了狀態檔有記 log" "寫不了狀態檔" "$AGM_DIR/herdr-update.log"
+teardown
+
 # 14. launchd 的最小環境：env -i、PATH 只有 /usr/bin:/bin:/usr/sbin:/sbin（不含 Homebrew），
 # 假 herdr／gh 只在 AGM_EXTRA_PATH。腳本必須自己把 EXTRA_PATH 接到前面，系統 /bin/bash 也要跑得起來。
 setup

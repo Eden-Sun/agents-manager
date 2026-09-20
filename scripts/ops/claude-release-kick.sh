@@ -13,6 +13,15 @@ TASK="$DIR/claude-release-task.md"
 
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
 
+# 狀態檔一律先寫暫存檔再 rename（同一目錄＝同一檔案系統）：`echo > $STATE` 被中斷（斷電、SIGKILL）會留下空檔，
+# 空的狀態檔在這裡等於「第一次執行」，會漏掉一次該派的工。寫不成功就保留舊檔並回非 0。
+write_state() { # write_state <內容>
+  _t="$STATE.tmp.$$"
+  if printf '%s\n' "$1" > "$_t" 2>/dev/null && mv -f "$_t" "$STATE" 2>/dev/null; then return 0; fi
+  rm -rf "$_t" 2>/dev/null
+  return 1
+}
+
 [ -x "$AGM" ] || exit 0
 [ -f "$TASK" ] || { log "找不到 ${TASK}，跳過"; exit 0; }
 [ -d "$VERSIONS" ] || { log "找不到版本目錄 ${VERSIONS}，跳過"; exit 0; }
@@ -94,7 +103,7 @@ if [ "$NEW" = "$DONE_VER" ]; then
 fi
 # 第一次跑（還沒有 state）只記下現在的版本，不為「安裝當下已經在的版本」派一次工。
 if [ -z "$DONE_VER" ]; then
-  echo "$NEW" > "$STATE"
+  write_state "$NEW" || log "寫不了狀態檔 ${STATE}，下一輪仍會當成第一次執行"
   log "第一次執行，記下目前版本 ${NEW}，不派工"
   exit 0
 fi
@@ -125,7 +134,7 @@ BODY=$(mktemp -t agm-claude-release)
 # 而 stub 吃掉未知旗標的測試看不出來（2026-09-16 的事故）。
 if "$AGM" --compact assign --bot "$BOT" --review-by patrol --text-file "$BODY" \
      --request-id "agm-claude-release-$NEW" >> "$LOG" 2>&1; then
-  echo "$NEW" > "$STATE"
+  write_state "$NEW" || log "寫不了狀態檔 ${STATE}（已派成功；下一輪同 request-id 由 daemon 去重）"
   log "Claude Code ${OLD} → ${NEW}：已派 AGM 解析"
 else
   note_fail "派工失敗（${OLD} → ${NEW}），下一輪再試"

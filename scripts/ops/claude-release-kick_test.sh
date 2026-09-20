@@ -174,5 +174,22 @@ check "卡住的執行者推 runner_hung" "ops-alert.*runner_hung" "$AGM_DIR/cal
 check_no "不搶活著的鎖、不派" "assign" "$AGM_DIR/calls.log"
 teardown
 
+# 7. 狀態檔原子寫：中斷留下的暫存檔不影響下一輪；寫不進去時舊檔原封不動、不寫出空檔。
+setup
+ver 2.1.273; bash "$SCRIPT"
+ver 2.1.274
+printf '2.1' > "$AGM_DIR/claude-release.last.tmp.99999"      # 上一輪寫到一半被殺留下的暫存檔
+bash "$SCRIPT"
+equals "殘留暫存檔不影響派工與 state" "$(cat "$AGM_DIR/claude-release.last")" "2.1.274"
+teardown
+setup
+ver 2.1.273; bash "$SCRIPT"
+ver 2.1.274
+mkdir "$ROOT/failmv"; printf '#!/bin/sh\nexit 1\n' > "$ROOT/failmv/mv"; chmod +x "$ROOT/failmv/mv"   # rename 失敗（磁碟滿、權限）
+PATH="$ROOT/failmv:$PATH" bash "$SCRIPT"
+[ -z "$(ls "$AGM_DIR" | grep 'last.tmp')" ] && { echo "ok   - 失敗後不留暫存檔"; PASS=$((PASS + 1)); } || { echo "FAIL - 失敗後留下暫存檔"; FAIL=$((FAIL + 1)); }
+equals "寫不進去時舊 state 不動（不是空檔）" "$(cat "$AGM_DIR/claude-release.last")" "2.1.273"
+teardown
+
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
