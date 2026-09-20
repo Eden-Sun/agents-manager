@@ -19,7 +19,12 @@ OUT=$(AM_DEV_SSHD_DIR="$ROOT/notadir/sub" sh "$HERE/dev-sshd.sh" ssh-opts 2>"$RO
 grep -q 'ssh-opts' "$ROOT/err" && ok "產不出金鑰：stderr 說明原因" || bad "stderr 沒有說明"
 rm -rf "$ROOT"
 
-# 2. 金鑰產得出來：照常印 JSON、exit 0、金鑰檔真的存在。
+# 2. 金鑰產得出來（要 ssh-keygen；沒有就明確 skip，不當成通過也不算失敗）。
+if ! command -v ssh-keygen >/dev/null 2>&1; then
+  echo "skip - 金鑰產得出來：這台沒有 ssh-keygen"
+  echo "$PASS passed, $FAIL failed（1 組 skip）"
+  [ "$FAIL" -eq 0 ]; exit
+fi
 ROOT=$(mktemp -d)
 OUT=$(AM_DEV_SSHD_DIR="$ROOT/d" sh "$HERE/dev-sshd.sh" ssh-opts 2>/dev/null); RC=$?
 [ "$RC" -eq 0 ] && ok "正常：exit 0" || bad "正常卻 exit ${RC}"
