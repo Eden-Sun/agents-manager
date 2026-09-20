@@ -7,6 +7,7 @@ import { useStore } from '../store/store'
 import type { DraftKey } from '../store/store'
 import { labelStyle } from '../lib/labelStyle'
 import { GhLoginButton, isGhAuthError } from './GhAuth'
+import { ISSUE_PAGE_LIMIT, openCountFromPage } from '../lib/issueCount'
 import { onTabListKeyDown } from './tabKeys'
 import './issuesBar.css'
 
@@ -100,10 +101,10 @@ export function IssuesBar({ projectId, draftKey, inputRef }: { projectId: string
       setError(null)
       setAuthError(false)
       try {
-        const list = await api.fetchIssues(projectId, { state: st, limit: 50, q: query.trim() || undefined, repo })
+        const list = await api.fetchIssues(projectId, { state: st, limit: ISSUE_PAGE_LIMIT, q: query.trim() || undefined, repo })
         if (id !== seq.current) return
         setIssues(list)
-        if (st === 'open' && !query.trim()) setOpenCount(list.length)
+        if (st === 'open' && !query.trim()) setOpenCount((prev) => openCountFromPage(prev, list.length))
       } catch (e) {
         if (id !== seq.current) return
         setIssues(null)
