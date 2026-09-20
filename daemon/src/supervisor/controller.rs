@@ -1437,7 +1437,15 @@ async fn notify(app: &Arc<App>) {
     let max_attempts = cfg.supervisor.notify_max_attempts.max(1);
     let now = crate::db::now();
     // 「建立過」而不是「現在活著」：協調者停了或被刪，它的事件仍歸它（SPEC §18.15）。
-    let responder_configured = super::roles::responder_configured(&app.db).await.unwrap_or(false);
+    // 讀不到＝不知道，不是「單角色」：unwrap_or(false) 會讓巡檢撿走協調者的事件、mark_delivered 還把
+    // claimed_by 改成 patrol，永久改寫歸屬。這輪不送，事件留 pending（#250）。
+    let responder_configured = match super::roles::responder_configured(&app.db).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = ?e, "supervisor notify cannot read whether the responder is configured; skipping this tick");
+            return;
+        }
+    };
     let Ok(pending) = super::roles::due_for(&app.db, super::roles::Role::Patrol, responder_configured, &now, max_attempts).await
     else {
         return;
@@ -2318,6 +2326,44 @@ mod patrol_wake_tests {
             sqlx::query_as("SELECT state, notify_attempts FROM supervisor_inbox").fetch_all(&app.db).await.unwrap();
         assert!(rows.iter().all(|(s, n)| s == "pending" && *n == 0), "{rows:?}");
         assert!(store::get_or_init(&app.db).await.unwrap().last_notify_at.is_none());
+    }
+}
+
+/// #250：讀不到「協調者建立過沒有」不能當成單角色，把協調者的事件改送給巡檢。
+#[cfg(test)]
+mod responder_configured_fault_tests {
+    use super::*;
+    use crate::supervisor::roles::{self, Role};
+    use crate::testing as tt;
+
+    #[tokio::test]
+    async fn an_unreadable_responder_config_never_hands_its_events_to_patrol() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let mgr = tt::claude_bot(&app, &env.project_id, "agm-mgr").await.id;
+        tt::fake_run(&app, &mgr).await;
+        store::get_or_init(&app.db).await.unwrap();
+        sqlx::query("UPDATE supervisors SET bot_id=?, desired_running=1, generation=1 WHERE id=?")
+            .bind(&mgr)
+            .bind(store::SUPERVISOR_ID)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        roles::get(&app.db, Role::Responder).await.unwrap();
+        sqlx::query("UPDATE supervisor_roles SET bot_id='resp-bot' WHERE role='responder'").execute(&app.db).await.unwrap();
+        store::push_inbox(&app.db, "incident:I1:opened", "incident_opened", None, None, None, &json!({})).await.unwrap();
+        // 直接指定歸屬：這條測的是 notify 的守衛，不是分類規則。
+        sqlx::query("UPDATE supervisor_inbox SET role='responder', wake=1").execute(&app.db).await.unwrap();
+
+        tt::make_table_unreadable(&app, "supervisor_roles").await;
+        notify(&app).await;
+        tt::make_table_readable(&app, "supervisor_roles").await;
+
+        let (state, claimed, attempts, role): (String, Option<String>, i64, String) =
+            sqlx::query_as("SELECT state, claimed_by, notify_attempts, role FROM supervisor_inbox").fetch_one(&app.db).await.unwrap();
+        assert_eq!((state.as_str(), claimed, attempts, role.as_str()), ("pending", None, 0, "responder"));
+        let turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns").fetch_one(&app.db).await.unwrap();
+        assert_eq!(turns, 0, "沒有對巡檢送出任何 prompt");
     }
 }
 
