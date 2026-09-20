@@ -12,7 +12,8 @@ async fn identity_args(app: &Arc<App>, bot: &db::Bot, host: &str) -> Vec<String>
 /// `resume_native` continues the bot's last native session (batch update restart).
 /// `fork_session`：從這個 native session 分出一個新 session（`POST /bots/:id/fork` 的第一次啟動，SPEC §6.10）。
 /// `require_idle`：restart 在**拿到 bot 鎖之後**再確認一次閒置，不閒置回 409 `not_idle`、什麼都不動（一鍵重啟用）。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct StartOpts {
     pub resume_native: bool,
     /// 跟 `resume_native` 一起用：接不回原本的對話就**不啟動**，回 409 `resumed:false`＋原因，
@@ -912,6 +913,44 @@ pub async fn restart_bot_with(app: &Arc<App>, bot_id: &str, opts: StartOpts) -> 
         }
     }
     let stopping = db::active_run(&app.db, bot_id).await.map_err(up)?.map(|r| r.id);
+    // 持久 intent（#355 P2）：在第一個不可逆步驟（記 `stopping`）**之前**先 commit，daemon 在 stop 與 start 之間死掉的話，
+    // 開機由 `restart_intents::recover_host` 往前補完。寫不進去＝什麼都還沒動，不能開始（fail closed）。
+    let host = db::bot_host(&app.db, bot_id).await.map_err(up)?;
+    let payload = json!({"opts": opts, "from_run_id": stopping, "bot_name": bot.name});
+    let intent_id = match crate::intents::insert(&app.db, "restart", bot_id, &host, &payload, RESTART_INTENT_TTL_SECS).await {
+        // 已經有一件開著：上一個行程留下的（我們持著 bot 鎖、這次自己來做同一件事），沿用它。
+        Ok(crate::intents::Inserted::New(i)) | Ok(crate::intents::Inserted::AlreadyOpen(i)) => i.id,
+        Err(e) => return Err(LcError::Upstream(format!("cannot record the restart intent: {e:#}"))),
+    };
+    #[cfg(test)]
+    super::race_point::hit("restart_after_intent", bot_id).await;
+    let res = restart_stop_and_start(app, bot_id, opts, stopping).await;
+    settle_restart_intent(app, &intent_id, &res).await;
+    res
+}
+
+/// 重啟的 intent 放置多久還沒補完就放棄（`failed`＋通知）。
+const RESTART_INTENT_TTL_SECS: i64 = 15 * 60;
+
+/// handler 還活著時的收尾：成功／bot 回來了＝`done`；什麼都沒動的拒絕＝`abandoned`；其他失敗＝`failed`（**不推 AGM**：呼叫端已經拿到錯誤）。
+/// 標不成也不影響結果：intent 留著開機時會被驗證世界後收掉（bot 已經在跑就 `done`）。
+async fn settle_restart_intent(app: &Arc<App>, intent_id: &str, res: &LcResult<String>) {
+    let out = match res {
+        Ok(_) => crate::intents::complete(&app.db, intent_id).await,
+        // 新 agent 起來了、只是 `running` 還沒記下（#145）：bot 回來了。
+        Err(LcError::Uncommitted(v)) if v.get("start_error").is_none() => crate::intents::complete(&app.db, intent_id).await,
+        Err(LcError::Conflict(v)) if matches!(v.get("reason").and_then(|r| r.as_str()), Some("not_idle" | "no_longer_idle")) => {
+            crate::intents::abandon(&app.db, intent_id, "refused before anything was stopped").await
+        }
+        Err(e) => crate::intents::fail(&app.db, intent_id, &format!("{e:?}")).await,
+    };
+    if let Err(e) = out {
+        tracing::warn!(intent = intent_id, error = %e, "could not settle the restart intent; boot recovery will verify it");
+    }
+}
+
+/// 停 → 起（原本 `restart_bot_with` 鎖裡的後半段，行為不變）。
+async fn restart_stop_and_start(app: &Arc<App>, bot_id: &str, opts: StartOpts, stopping: Option<String>) -> LcResult<String> {
     // 停到起之間沒有 active run，但 bot 馬上就回來：排著的派工不是孤兒（issue #106，`restart_hold`）。
     let restarting = super::restart_hold::begin(bot_id);
     let stopped = if opts.require_idle { super::stop::stop_for_restart_if_idle_locked(app, bot_id).await } else { stop_for_restart_locked(app, bot_id).await };
@@ -924,6 +963,8 @@ pub async fn restart_bot_with(app: &Arc<App>, bot_id: &str, opts: StartOpts) -> 
         }
         Err(e) => return Err(e),
     }
+    #[cfg(test)]
+    super::race_point::hit("restart_after_stop", bot_id).await;
     let started = restart_start(app, bot_id, opts).await;
     drop(restarting);
     match started {
@@ -972,7 +1013,7 @@ pub async fn restart_bot_with(app: &Arc<App>, bot_id: &str, opts: StartOpts) -> 
 /// `autostart=1` 的 bot 從此沒在跑、卻永遠不開 `bot_stopped`，health 一直是綠的（review 2026-09-16 c1 L3）。
 ///
 /// 走 `run_state::relabel`（跟 stop 的改標同一支）：寫不進去回錯並排重試（#146 重開 B），不再只看 `Ok(rows>0)`。
-async fn left_down_by_restart(app: &Arc<App>, bot_id: &str, run_id: &str) -> Result<(), sqlx::Error> {
+pub(crate) async fn left_down_by_restart(app: &Arc<App>, bot_id: &str, run_id: &str) -> Result<(), sqlx::Error> {
     match super::run_state::relabel(&app.db, run_id, "stopped", "exited").await {
         Ok(super::run_state::Moved::Applied) => {
             tracing::warn!(bot = bot_id, run = run_id, "restart stopped the bot but could not start it again; recorded as exited, not as a user stop");
@@ -987,7 +1028,7 @@ async fn left_down_by_restart(app: &Arc<App>, bot_id: &str, run_id: &str) -> Res
     }
 }
 
-async fn restart_start(app: &Arc<App>, bot_id: &str, opts: StartOpts) -> LcResult<String> {
+pub(crate) async fn restart_start(app: &Arc<App>, bot_id: &str, opts: StartOpts) -> LcResult<String> {
     match start_bot_locked_with(app, bot_id, opts.clone()).await {
         Err(LcError::Conflict(v)) if v.get("reason").and_then(|r| r.as_str()) == Some("active run already exists") => {
             let Some(run) = db::active_run(&app.db, bot_id).await.map_err(up)? else {
@@ -2676,4 +2717,24 @@ mod grok_startup_effort_tests {
         start_bot(&e.app, &bot.id).await.unwrap();
         assert!(sent_effort_slash(&e).is_empty());
     }
+}
+
+/// 開機補完被打斷的重啟（#355 P2）：呼叫端持 bot 鎖，已經決定要往前補。stop 做到一半（`stopping`）先補完它；
+/// 剛停掉的舊 run 由 `stopped`（使用者要它停）改標 `exited`；再照原本的選項 start（不再要求閒置——使用者要的是它回來）。
+pub(crate) async fn resume_restart_locked(app: &Arc<App>, bot_id: &str, opts: StartOpts, from_run: Option<&str>) -> LcResult<String> {
+    if let Some(run) = db::active_run(&app.db, bot_id).await.map_err(up)? {
+        if run.state == "stopping" {
+            stop_for_restart_locked(app, bot_id).await?;
+        }
+    }
+    if let Some(run_id) = from_run {
+        left_down_by_restart(app, bot_id, run_id).await.map_err(up)?;
+    }
+    let restarting = super::restart_hold::begin(bot_id);
+    let started = restart_start(app, bot_id, StartOpts { require_idle: false, ..opts }).await;
+    drop(restarting);
+    if started.is_ok() {
+        schedule_flush_queued(app, bot_id);
+    }
+    started
 }

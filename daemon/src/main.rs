@@ -11,6 +11,7 @@ mod agent_relay;
 mod api;
 mod identity_kind;
 mod intents;
+mod restart_intents;
 mod assets;
 mod attach;
 mod bulk_restart;
