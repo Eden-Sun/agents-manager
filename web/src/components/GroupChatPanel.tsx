@@ -8,6 +8,7 @@ import { attachCommandOf, botLamp, composerState, groupComposerState, projectHos
 import { useEnterToSend } from '../hooks/useEnterToSend'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { useComposerFocus } from '../hooks/useComposerFocus'
+import { useRefocusAfterSend } from '../hooks/useRefocusAfterSend'
 import { AttachButton } from './AttachButton'
 import { AttachPicker, AttachTray, DropVeil, useAttachments, useDropTarget } from './Attachments'
 import { agmAttachmentBlock } from '../lib/agmAttachments'
@@ -242,7 +243,7 @@ function GroupComposer({
     const saved = s.draftCursors[draftKey]?.start ?? value.length
     return Math.max(0, Math.min(value.length, saved))
   })
-  const [sending, setSending] = useState(false)
+  const [sending, setSendingState] = useState(false)
   /** 「交給 AGM」開關（§11）：建任務而非發給 bot，收件者 chip 與 @mention 不適用。 */
   const [toAgm, setToAgm] = useState(false)
   const [missionOpts, setMissionOpts] = useState<MissionOpts>(loadMissionOpts)
@@ -256,6 +257,11 @@ function GroupComposer({
   const empty = useStore((s) => (s.groupMessages[projectId]?.length ?? 0) === 0)
   const focusEmpty = loaded && empty
   const phone = useMediaQuery(PHONE_QUERY)
+  const noteSend = useRefocusAfterSend(sending, ref, phone)
+  const setSending = (v: boolean) => {
+    if (v) noteSend()
+    setSendingState(v)
+  }
 
   // 手機不自動 focus：鍵盤會擋住視線，要打字自己點（同 ChatPanel）。
   useComposerFocus({ draftKey, ref, forceFocus: focusEmpty && !phone, autoFocus: !phone })

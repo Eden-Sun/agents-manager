@@ -8,6 +8,7 @@ import { effortLabel, quotaKey } from '../api/types'
 import { DRAWER_QUERY, PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { useEnterToSend } from '../hooks/useEnterToSend'
 import { useComposerFocus } from '../hooks/useComposerFocus'
+import { useRefocusAfterSend } from '../hooks/useRefocusAfterSend'
 import { useScrollTail } from '../hooks/useScrollTail'
 import { useTapCopy } from '../hooks/useTapCopy'
 import { cleanLiveActivity, cleanLiveText } from '../store/liveText'
@@ -714,8 +715,14 @@ function Composer({
   const setDraft = useStore((s) => s.setDraft)
   const setDraftCursor = useStore((s) => s.setDraftCursor)
   const setText = (v: string) => setDraft(draftKey, v)
-  const [sending, setSending] = useState(false)
+  const [sending, setSendingState] = useState(false)
   const ref = inputRef
+  // 送出期間輸入框 disabled、焦點掉到 body；送完還給輸入框（手機不還）。
+  const noteSend = useRefocusAfterSend(sending, ref, phone)
+  const setSending = (v: boolean) => {
+    if (v) noteSend()
+    setSendingState(v)
+  }
 
   // 手機不自動 focus（2026-09-09 使用者：切 bot 就彈鍵盤擋住視線，要打字自己點）。
   useComposerFocus({ draftKey, ref, forceFocus: forceFocus && !phone, autoFocus: !phone })
