@@ -436,7 +436,10 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 
 `source`：`spawned`＝AG Man 起的（有 `pane_id`）；`attached`＝接上一顆本來就在跑的 vite（沒有 pane，`pid` 是那顆行程）。
 `candidates`：這顆 bot 可以起 vite 的目錄（`<dir>`、`web`、`apps/*`、`packages/*` 有 vite 設定的，第一個是預設）。
-`others`：**沒有預覽在用時**才掃，**同一個 repo**（git common dir 或 origin URL 相同）的別份 checkout／worktree 已經在跑的 vite；畫面上看到的不是這顆 bot 工作樹的程式碼，所以不自動接。別的 repo、判不出 repo 的不列。
+`others`：**沒有預覽在用時**才掃，本機**所有**在 listen 的 vite，每筆 `{port, dir, pid, relation, repo}`：
+`relation` 是 `same_dir`（這顆 bot 的候選目錄，`auto` 會自動接它）／`same_repo`（同一個 repo 的別份 checkout：git common dir 或 origin URL 相同）／
+`other`（別的專案，判不出 repo 也算）；`repo` 是分組顯示用的 repo 名。排序 same_dir、same_repo、other，各自依 port。非 `same_dir` 的不自動接
+（畫面上看到的不是這顆 bot 工作樹的程式碼），要用 `mode=attach` 明確挑。
 `GET`／`POST` 回全部欄位；`off` 時只有 `status`（`GET`／`POST` 另外帶 `candidates`、`others`），`DELETE` 只回 `{"status":"off"}`。`failed` 的 `error` 帶原因與 pane 最後 40 行。iframe 網址用 `http://${location.hostname}:${port}/`。
 
 ### `GET /api/bots/{id}/preview`
@@ -450,7 +453,7 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 ```
 
 - `auto`（預設）：本機已經有 vite 在跑、cwd 正好是這顆 bot 的候選目錄（同一份 checkout）→ **接上，不另起**（`source: "attached"`）；沒有才自己起。
-- `attach`：必須帶 `port`，那個 port 要真的是掃到的 vite（不是就 409 `not_vite`）；`others` 裡的用這個接。
+- `attach`：必須帶 `port`，那個 port 要真的是掃到的 vite（不是就 409 `not_vite`）；`others` 裡任何一顆（包括 `other`，別的專案）都能接，回應照實記 `source: "attached"` 與那顆的 `dir`／`pid`。
 - `spawn`：不管有沒有現成的，自己起。`dir` 從 `candidates` 挑（不在裡面 400）。
 - 明確指定了 mode／port／dir 而且已經有預覽在用：先斷開舊的（`attached` 只斷開、`spawned` 關 pane）再照新的來。
 - `mode` 不合法、`attach` 沒帶 `port` 是 400。

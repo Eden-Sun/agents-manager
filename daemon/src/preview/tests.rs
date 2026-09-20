@@ -516,7 +516,10 @@ async fn another_checkout_is_listed_not_attached_and_a_spawn_follows() {
     // 起好之後停掉，回 off 的畫面要列出別份 checkout 讓使用者選。
     stop(&r.e.app, &bot).await.unwrap();
     let off = get(&r.e.app, &bot).await.unwrap();
-    assert_eq!(off["others"], json!([{"port": 5173, "dir": "/somewhere/agents-manager-main/web", "pid": 1}]));
+    assert_eq!(
+        off["others"],
+        json!([{"port": 5173, "dir": "/somewhere/agents-manager-main/web", "pid": 1, "relation": "same_repo", "repo": "am"}])
+    );
 }
 
 #[tokio::test]
@@ -637,28 +640,77 @@ fn repo_key_parsing_resolves_a_relative_common_dir_and_treats_nothing_as_unknown
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn relation_and_repo_name() {
+    let p = |d: &str| ViteProc { pid: 1, port: 1, cwd: d.into() };
+    let k = |c: &str, o: Option<&str>| RepoKey { common: c.into(), origin: o.map(Into::into) };
+    let cands = vec![PathBuf::from("/am/web")];
+    let mine = k("/am/.git", None);
+    assert_eq!(relation_of(&p("/am/web/"), &cands, None, None), Relation::SameDir);
+    assert_eq!(relation_of(&p("/am-main/web"), &cands, Some(&mine), Some(&k("/am/.git", None))), Relation::SameRepo);
+    assert_eq!(relation_of(&p("/h/web"), &cands, Some(&mine), Some(&k("/h/.git", None))), Relation::Other);
+    assert_eq!(relation_of(&p("/am-main/web"), &cands, Some(&mine), None), Relation::Other, "判不出來退成 other");
+    assert_eq!(relation_of(&p("/am-main/web"), &cands, None, Some(&mine)), Relation::Other);
+    assert!(Relation::SameDir < Relation::SameRepo && Relation::SameRepo < Relation::Other);
+    assert_eq!(repo_name(Some(&k("/x/hermes-agents/.git", None)), "/x/hermes-agents/wt/web"), "hermes-agents");
+    assert_eq!(repo_name(Some(&k("/x/bare.git", None)), "/d"), "bare.git");
+    assert_eq!(repo_name(None, "/x/not-git/web/"), "web");
+}
+
 #[tokio::test]
-async fn others_only_lists_vites_of_the_same_repo() {
+async fn others_lists_every_local_vite_with_its_relation() {
     let r = rig().await;
-    r.fake.repo(&web_dir(&r), "/git/am/.git", Some("git@h:me/am.git"));
+    let mine = web_dir(&r);
+    r.fake.repo(&mine, "/git/am/.git", Some("git@h:me/am.git"));
+    r.fake.vite(9, 5299, &mine); // 這顆 bot 自己的目錄
     r.fake.vite(1, 5173, "/x/am-main/web"); // 同 repo 的另一個 worktree
     r.fake.repo("/x/am-main/web", "/git/am/.git", Some("git@h:me/am.git"));
     r.fake.vite(2, 5174, "/x/am-clone/web"); // 另一份 clone，origin 一樣
     r.fake.repo("/x/am-clone/web", "/git/clone/.git", Some("git@h:me/am.git"));
     r.fake.vite(3, 3001, "/x/hermes/apps/web"); // 別的 repo
-    r.fake.repo("/x/hermes/apps/web", "/git/hermes/.git", Some("git@h:me/hermes.git"));
+    r.fake.repo("/x/hermes/apps/web", "/git/hermes-agents/.git", Some("git@h:me/hermes.git"));
     r.fake.vite(4, 3002, "/x/not-git/web"); // 判不出來
     let bot = running_bot(&r, "alfa").await;
     let off = get(&r.e.app, &bot).await.unwrap();
-    let ports: Vec<u64> = off["others"].as_array().unwrap().iter().map(|o| o["port"].as_u64().unwrap()).collect();
-    assert_eq!(ports, vec![5173, 5174]);
+    let got: Vec<(u64, &str, &str)> = off["others"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| (o["port"].as_u64().unwrap(), o["relation"].as_str().unwrap(), o["repo"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            (5299, "same_dir", "am"),
+            (5173, "same_repo", "am"),
+            (5174, "same_repo", "clone"),
+            (3001, "other", "hermes-agents"),
+            (3002, "other", "web"),
+        ]
+    );
+    // 5174 的 common dir 不同但 origin 相同，仍是 same_repo（repo 名取它自己的 clone 目錄）。
 }
 
 #[tokio::test]
-async fn others_is_empty_when_the_bots_own_repo_cannot_be_read() {
+async fn every_vite_is_other_when_the_bots_own_repo_cannot_be_read() {
     let r = rig().await;
     r.fake.vite(1, 5173, "/x/am-main/web");
     r.fake.repo("/x/am-main/web", "/git/am/.git", None); // bot 自己的目錄沒登記＝讀不到
     let bot = running_bot(&r, "alfa").await;
-    assert_eq!(get(&r.e.app, &bot).await.unwrap()["others"], json!([]));
+    let off = get(&r.e.app, &bot).await.unwrap();
+    assert_eq!(off["others"][0]["relation"], "other");
+}
+
+#[tokio::test]
+async fn attach_accepts_a_vite_of_another_project_and_records_its_dir() {
+    let r = rig().await;
+    r.fake.vite(7, 3001, "/x/hermes/apps/web");
+    let bot = running_bot(&r, "alfa").await;
+    let body = start(&r.e.app, &bot, req("attach", Some(3001), None)).await.unwrap();
+    assert_eq!((body["source"].as_str(), body["dir"].as_str(), body["port"].as_u64()), (Some("attached"), Some("/x/hermes/apps/web"), Some(3001)));
+    assert_eq!(body["pid"], 7);
+    // auto 不會自己去接別的專案的（先斷開，再用 auto 起）。
+    stop(&r.e.app, &bot).await.unwrap();
+    let auto = start(&r.e.app, &bot, StartReq::default()).await.unwrap();
+    assert_eq!(auto["source"], "spawned");
 }
