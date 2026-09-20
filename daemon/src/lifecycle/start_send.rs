@@ -82,6 +82,7 @@ async fn accept_locked(
         .await
         .map_err(up)?
     {
+        super::prompt::check_same_text(app, &t, text).await?;
         let waiting = t.status == "queued" && t.awaits_start == 1 && run.is_none();
         let mark = if waiting { Starting::begin(bot_id) } else { None };
         return Ok(Accepted::Queued(super::prompt::answer_for_turn(app, &t).await?, mark));

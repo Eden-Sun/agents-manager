@@ -4263,6 +4263,21 @@ mod prompt_route_tests {
         assert_eq!(body["sent"], false);
     }
 
+    /// #337：同一個 client_request_id 換了內容不能回第一則的結果；完全一樣的重送照舊回同一個 turn。
+    #[tokio::test]
+    async fn a_reused_request_id_with_different_text_is_a_409_not_the_first_result() {
+        let e = crate::testing::env().await;
+        let bot = typed_bot(&e, "grok").await;
+        e.herdr.live_pane("pane-route", crate::testing::LivePane { width: Some(120), boxed: true, ..Default::default() });
+        let (s1, b1) = call(&e, &bot, "first".into(), "crid-x").await;
+        assert_eq!(s1, StatusCode::OK, "{b1}");
+        let (s2, b2) = call(&e, &bot, "first".into(), "crid-x").await;
+        assert_eq!((s2, &b2["turn_id"]), (StatusCode::OK, &b1["turn_id"]), "一樣的重送回同一個 turn");
+        let (s3, b3) = call(&e, &bot, "second".into(), "crid-x").await;
+        assert_eq!(s3, StatusCode::CONFLICT, "{b3}");
+        assert_eq!(b3["reason"], "text_mismatch");
+    }
+
     /// 輸入框有字是 HTTP 409、可重試，沒有建立 turn。
     #[tokio::test]
     async fn a_busy_composer_is_http_409_and_retryable() {
