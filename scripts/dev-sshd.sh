@@ -105,7 +105,7 @@ case "${1:-}" in
     if is_running; then echo "running (pid $(cat "$PIDFILE")) on 127.0.0.1:$PORT"; else echo "stopped"; exit 1; fi
     ;;
   ssh-opts)
-    ensure_material >/dev/null 2>&1 || true
+    ensure_material >/dev/null || { echo "dev-sshd ssh-opts: could not create keys under $DIR" >&2; exit 1; }
     ssh_opts_json
     ;;
   key)
