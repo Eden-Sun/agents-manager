@@ -348,8 +348,11 @@ mod tests {
         assert!(!deleted(&app, &lost).await, "讀不到：還沒接手");
 
         sqlx::query("ALTER TABLE herdr_maintenance_unreadable RENAME TO herdr_maintenance").execute(&app.db).await.unwrap();
+        // 等的是 `close()` 的**最後一步**（寫 note），不是中間那步（退休子 agent）：`close()` 的順序是
+        // 刪窗口 → 退休沒接回的子 agent → 寫 note，兩者之間有 await。只等「子 agent 被退休」的話，慢的
+        // runner 上會在寫 note 之前就去數 note，數到 0（#274，跟 #255 同一族）。
         for _ in 0..150 {
-            if deleted(&app, &lost).await {
+            if notes(&app, "herdr_maintenance_expired").await == 1 {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
