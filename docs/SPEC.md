@@ -104,7 +104,10 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
     （`restart_intents::recover_host`）讀還開著的 restart intent 檢查世界：有新 run＝`done`；舊 run 還 running／starting＝`abandoned`（`stopping` 從沒記過）；
     舊 run `stopping`＝補完停；沒有 active run＝舊 run 由 `stopped` 改標 `exited`（不是使用者要它停）並照原選項 start（`autostart=0` 也補）。
     補不成最多試 5 次（背景以退避重試），用完標 `failed` 並在同一個交易推 AGM inbox `intent_failed`；放置超過 15 分鐘同樣 `failed`＋通知。
-    其餘路徑（delete／promote／launch_rev）尚未接線（見 #355 的 P3–P5）。
+    **已接線：`delete_bot`／`delete_project`**（#296／#284）：定案（config＋DB 軟刪）**之前**先 commit intent（payload＝當時的 bot 快照，之後才出現的 child 不在授權範圍；寫不進去就不刪），
+    handler 自己認領；定案之後死掉，開機（`delete_intents::recover_host`）檢查：母 bot／專案還活著＝`abandoned`；已定案＝逐顆（快照裡的）停、軟刪、清目錄補完（每步先驗世界，重跑安全）。
+    軟刪寫不進去的 child 由 intent 的背景重試補完（取代各路徑自己的記憶體重試 task），5 次用完 `failed`＋AGM inbox；目錄清不掉不算補不成（`kept_dirs`／開機清掃／`remote_purge` 各有帳）。
+    其餘路徑（promote／launch_rev）尚未接線（見 #355 的 P4–P5）。
   - **什麼時候升 `SCHEMA_VERSION`**：migrate 建出來的任何 schema 物件變了就升——`db::SCHEMA`、ALTER 名單或任何一個
     子模組的 migrate，表、欄位、型別、預設值、約束、索引、trigger 內容（含由轉移表產生的守衛）都算；排版與 `--` 註解
     不算。不靠人記：`db::schema_guard` 的測試拿全新 DB 的 schema 指紋跟 `db::SCHEMA_HISTORY` 最後一行比，對不上就紅，

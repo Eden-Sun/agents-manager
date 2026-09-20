@@ -90,7 +90,7 @@ async fn drive(app: &Arc<App>, id: &str) {
 
 /// 認領一次並補一輪。認領不到（別的行程／已收尾）＝ `Finished`。
 pub async fn drive_once(app: &Arc<App>, id: &str) -> Outcome {
-    match intents::claim(&app.db, id, intents::boot_id()).await {
+    match intents::claim(&app.db, id, &app.boot_id).await {
         Ok(true) => {}
         Ok(false) => return Outcome::Finished,
         Err(e) => return Outcome::Retry(format!("cannot claim the intent: {e:#}")),

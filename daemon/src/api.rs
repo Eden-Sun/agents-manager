@@ -921,7 +921,7 @@ async fn patch_project(
     Ok((StatusCode::OK, Json(json!({"project_id": id, "needs_restart": false}))).into_response())
 }
 
-async fn soft_delete_child(app: &Arc<App>, bot_id: &str) -> Result<(), sqlx::Error> {
+pub(crate) async fn soft_delete_child(app: &Arc<App>, bot_id: &str) -> Result<(), sqlx::Error> {
     sqlx::query("UPDATE bots SET deleted_at=? WHERE id=? AND deleted_at IS NULL").bind(db::now()).bind(bot_id).execute(&app.db).await.map(|_| ())
 }
 
@@ -942,7 +942,15 @@ async fn delete_project(State(app): State<Arc<App>>, Path(id): Path<String>) -> 
     let host = db::project(&app.db, &id).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("project".into()))?.host;
     // 授權範圍在臨界區裡從**當下的** TOML 算；TOML 裡多出沒鎖住的 bot 就拒絕。
     let held: std::collections::HashSet<String> = ids.iter().cloned().collect();
-    delete_in_config(&app, crate::projection::DeleteTarget::Project { id: &id, held: &held }).await?;
+    // 持久 intent（#355 P3）：定案**之前**先 commit（payload＝當時的 bot 快照）；定案之後 daemon 死掉，開機由 `delete_intents::recover_host` 補完。
+    let snapshot: Vec<Value> = in_project.iter().map(|b| json!({"id": b.id, "managed_by": b.managed_by})).collect();
+    let intent = crate::delete_intents::begin(&app, "delete_project", &id, &host, &json!({"bots": snapshot})).await?;
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("delete_after_intent", &id).await;
+    if let Err(e) = delete_in_config(&app, crate::projection::DeleteTarget::Project { id: &id, held: &held }).await {
+        crate::delete_intents::abandon(&app, &intent, "delete_in_config refused").await;
+        return Err(e);
+    }
     #[cfg(test)]
     crate::lifecycle::race_point::hit("delete_project_after_commit", &id).await;
     // config 投影只軟刪「不在 TOML 裡的 user bot」，child 本來就不進 TOML，所以會留下一批
@@ -965,26 +973,8 @@ async fn delete_project(State(app): State<Arc<App>>, Path(id): Path<String>) -> 
     }
     let retry_failed = !failed.is_empty();
     if retry_failed {
-        let (app2, host2) = (app.clone(), host.clone());
-        tokio::spawn(async move {
-            let mut pending = failed;
-            for attempt in 0.. {
-                tokio::time::sleep(crate::reconcile::recovery_retry_delay(attempt)).await;
-                let mut still = Vec::new();
-                for bot in pending {
-                    if soft_delete_child(&app2, &bot.id).await.is_ok() {
-                        lifecycle::purge_bot_dir(&app2, &bot.id, &host2).await;
-                    } else {
-                        still.push(bot);
-                    }
-                }
-                if still.is_empty() {
-                    app2.emit("project_changed", json!({})).await;
-                    return;
-                }
-                pending = still;
-            }
-        });
+        // 各路徑自己的記憶體重試 task 換成 intent 的重試（#355）：intent 留著，背景用 recovery 補完（含清目錄），daemon 死掉開機也接得回。
+        crate::delete_intents::spawn_retry(app.clone(), intent.clone(), "some child bots could not be soft-deleted".into());
     }
     // user bot 由 config 投影軟刪，但 bots/<id>/ 沒人清：本機要等下次開機、遠端永遠不掃（#313）。已確認皆無 active run、鎖在手。
     // 只清「確定軟刪」的；讀不到就留著。清不掉（ssh 失敗等）不算成功，列進 kept_dirs。
@@ -1004,6 +994,7 @@ async fn delete_project(State(app): State<Arc<App>>, Path(id): Path<String>) -> 
     if retry_failed {
         return Err(any_err("project deleted, but some child bots could not be soft-deleted yet; retrying in the background"));
     }
+    crate::delete_intents::complete(&app, &intent).await;
     let mut out = json!({});
     if !kept_dirs.is_empty() {
         out["kept_dirs"] = json!(kept_dirs);
@@ -1601,13 +1592,23 @@ pub(crate) async fn delete_bot(State(app): State<Arc<App>>, Path(id): Path<Strin
     }
     // 先定案、再停機（sol 四輪）：會 409 的只有這一步，這時什麼都還沒停；定案之後沒有會失敗回頭的步驟，
     // 所以不會留下「已停、未刪」。（child 由母 agent 開，daemon 本來就重開不了它，事後回滾做不到。）
-    if bot.managed_by == "child" {
-        sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(db::now()).bind(&id).execute(&app.db).await.map_err(any_err)?;
+    // 持久 intent（#355 P3）：定案**之前**先 commit（payload＝當時的 child 快照，深的先）；定案之後 daemon 死掉，開機由 `delete_intents::recover_host` 補完。
+    let snapshot: Vec<Value> = children.iter().map(|c| json!({"id": c.id, "managed_by": c.managed_by})).collect();
+    let intent = crate::delete_intents::begin(&app, "delete_bot", &id, &host, &json!({"bots": snapshot})).await?;
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("delete_after_intent", &id).await;
+    let decided: Result<(), LcError> = if bot.managed_by == "child" {
+        sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(db::now()).bind(&id).execute(&app.db).await.map(|_| ()).map_err(any_err)
     } else {
-        delete_in_config(&app, crate::projection::DeleteTarget::Bot(&id)).await?;
+        delete_in_config(&app, crate::projection::DeleteTarget::Bot(&id)).await.map(|_| ())
+    };
+    if let Err(e) = decided {
+        crate::delete_intents::abandon(&app, &intent, "the delete was refused").await;
+        return Err(e);
     }
     #[cfg(test)]
     crate::lifecycle::race_point::hit("delete_bot_after_decided", &id).await;
+    let mut child_retry = false;
     // 目錄只在「確定沒有 active run」時才 purge（#210）；不確定的留著，列在回應的 `kept_dirs`，下次開機的
     // `purge_deleted_bot_dirs` 在 run 確定結束之後再收。
     let mut removed_children = Vec::new();
@@ -1619,18 +1620,8 @@ pub(crate) async fn delete_bot(State(app): State<Arc<App>>, Path(id): Path<Strin
         let settled = match soft_delete_child(&app, &child.id).await {
             Ok(()) => settled,
             Err(e) => {
-                tracing::error!(bot = %child.name, error = ?e, "child could not be soft-deleted; retrying in the background");
-                let (app2, cid, chost) = (app.clone(), child.id.clone(), host.clone());
-                tokio::spawn(async move {
-                    for attempt in 0.. {
-                        tokio::time::sleep(crate::reconcile::recovery_retry_delay(attempt)).await;
-                        if soft_delete_child(&app2, &cid).await.is_ok() {
-                            lifecycle::purge_bot_dir(&app2, &cid, &chost).await;
-                            app2.emit("bot_changed", json!({"bot_id": cid})).await;
-                            return;
-                        }
-                    }
-                });
+                tracing::error!(bot = %child.name, error = ?e, "child could not be soft-deleted; the delete intent stays open and retries in the background");
+                child_retry = true;
                 Err("soft delete failed; retrying in the background")
             }
         };
@@ -1656,6 +1647,12 @@ pub(crate) async fn delete_bot(State(app): State<Arc<App>>, Path(id): Path<Strin
     if bot.managed_by == "child" {
         app.emit("project_changed", json!({"project_id": bot.project_id})).await;
     }
+    // intent：有 child 軟刪沒寫成就留著、背景補完（含清目錄）；否則收成 done。
+    if child_retry {
+        crate::delete_intents::spawn_retry(app.clone(), intent.clone(), "some child bots could not be soft-deleted".into());
+    } else {
+        crate::delete_intents::complete(&app, &intent).await;
+    }
     let mut out = json!({"removed_children": removed_children});
     if !kept_dirs.is_empty() {
         out["kept_dirs"] = json!(kept_dirs);
@@ -1667,7 +1664,7 @@ pub(crate) async fn delete_bot(State(app): State<Arc<App>>, Path(id): Path<Strin
 /// `purge_deleted_bot_dirs` waits forever (review 2026-09-12 d). The orphan-pane sweep reclaims the pane later.
 /// 多顆 bot 的 per-bot 鎖一律**依 id 排序、一次拿齊**（刪除是唯一會同時持多把的路徑；其他路徑一次只拿一把）。
 /// 回傳排序去重後的 id 與鎖。
-async fn lock_bots_in_order(
+pub(crate) async fn lock_bots_in_order(
     app: &Arc<App>,
     mut ids: Vec<String>,
 ) -> (Vec<String>, Vec<tokio::sync::OwnedMutexGuard<()>>) {
@@ -1688,7 +1685,7 @@ async fn lock_bots_in_order(
 /// - `run_still_active`：停完、收完再讀，run 還是 active（終態寫不進去）。
 ///
 /// 唯一的證明是最後那一次讀到 `Ok(None)`。
-async fn stop_for_delete_locked(app: &Arc<App>, bot_id: &str) -> Result<(), &'static str> {
+pub(crate) async fn stop_for_delete_locked(app: &Arc<App>, bot_id: &str) -> Result<(), &'static str> {
     let mut forced = false;
     if let Err(e) = lifecycle::stop_bot_locked(app, bot_id).await {
         tracing::warn!(bot = %bot_id, error = ?e, "could not stop the bot while deleting it; ending its run");
@@ -3895,6 +3892,137 @@ mod delete_bot_tests {
         sqlx::query("UPDATE projects SET host='ghost' WHERE id=?").bind(&e2.project_id).execute(&app2.db).await.unwrap();
         let out = body_of(delete_project(State(app2.clone()), Path(e2.project_id.clone())).await.unwrap()).await;
         assert_eq!(out["kept_dirs"], json!([{"bot_id": b2, "reason": "purge_failed"}]), "{out}");
+    }
+
+    // ---- #355 P3：刪除在定案之後（或之前）行程死掉，開機補完 ----
+
+    /// 模擬行程死亡：刪除走到 `point` 就卡住，再把整個 future abort 掉。
+    async fn die_in_delete(e: &crate::testing::Env, key: &str, point: &'static str, project: bool) {
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let r2 = reached.clone();
+        crate::lifecycle::race_point::arm(point, key, move || async move {
+            r2.notify_one();
+            std::future::pending::<()>().await
+        });
+        let (app, k) = (e.app.clone(), key.to_string());
+        let h = tokio::spawn(async move {
+            if project {
+                delete_project(State(app), Path(k)).await.map(|_| ())
+            } else {
+                delete_bot(State(app), Path(k)).await.map(|_| ())
+            }
+        });
+        reached.notified().await;
+        h.abort();
+        let _ = h.await;
+    }
+
+    async fn deleted(app: &Arc<App>, id: &str) -> bool {
+        db::bot(&app.db, id).await.unwrap().unwrap().deleted_at.is_some()
+    }
+
+    async fn intent_states(app: &Arc<App>, subject: &str) -> Vec<String> {
+        sqlx::query_scalar("SELECT status FROM intents WHERE subject_id = ? ORDER BY created_at").bind(subject).fetch_all(&app.db).await.unwrap()
+    }
+
+    async fn parent_and_child(e: &crate::testing::Env) -> (String, String) {
+        let parent = a_bot(e, "alfa", "user").await;
+        in_config(e, &[(&parent, "alfa")]).await;
+        let kid = a_bot(e, "alfa-kid", "child").await;
+        sqlx::query("UPDATE bots SET parent_bot_id = ? WHERE id = ?").bind(&parent).bind(&kid).execute(&e.app.db).await.unwrap();
+        (parent, kid)
+    }
+
+    /// #296：母 bot 已定案刪除、child 還沒處理就死。以前 child 永遠活著（reconcile 不掃已刪母 bot 的 child）；現在開機補完，而且補兩次／併發補都一樣。
+    #[tokio::test]
+    async fn a_delete_bot_killed_after_the_decision_is_completed_on_boot() {
+        let e = crate::testing::env().await;
+        let (parent, kid) = parent_and_child(&e).await;
+        die_in_delete(&e, &parent, "delete_bot_after_decided", false).await;
+        assert!(deleted(&e.app, &parent).await, "定案了");
+        assert!(!deleted(&e.app, &kid).await, "child 還活著——這就是 #296 的半套");
+        assert_eq!(intent_states(&e.app, &parent).await, vec!["running"]);
+
+        let app2 = crate::testing::restart_app(&e).await;
+        crate::delete_intents::recover_host(&app2, LOCAL_HOST).await;
+        assert!(deleted(&app2, &kid).await, "開機補完：child 收掉了");
+        assert_eq!(intent_states(&app2, &parent).await, vec!["done"]);
+        crate::delete_intents::recover_host(&app2, LOCAL_HOST).await;
+        tokio::join!(crate::delete_intents::recover_host(&app2, LOCAL_HOST), crate::delete_intents::recover_host(&app2, LOCAL_HOST));
+        assert_eq!(intent_states(&app2, &parent).await, vec!["done"], "冪等");
+    }
+
+    /// 定案之前就死：世界沒變（bot 還活著、還在 config），abandoned。
+    #[tokio::test]
+    async fn a_delete_bot_killed_before_the_decision_is_abandoned() {
+        let e = crate::testing::env().await;
+        let (parent, kid) = parent_and_child(&e).await;
+        die_in_delete(&e, &parent, "delete_after_intent", false).await;
+        let app2 = crate::testing::restart_app(&e).await;
+        crate::delete_intents::recover_host(&app2, LOCAL_HOST).await;
+        assert_eq!(intent_states(&app2, &parent).await, vec!["abandoned"]);
+        assert!(!deleted(&app2, &parent).await && !deleted(&app2, &kid).await, "什麼都沒刪");
+    }
+
+    /// #284：專案已定案刪除、child 還沒軟刪就死。
+    #[tokio::test]
+    async fn a_delete_project_killed_after_the_decision_is_completed_on_boot() {
+        let e = crate::testing::env().await;
+        let (_parent, kid) = parent_and_child(&e).await;
+        die_in_delete(&e, &e.project_id, "delete_project_after_commit", true).await;
+        assert!(!deleted(&e.app, &kid).await, "child 還活著、專案已刪——這就是 #284 的半套");
+        let app2 = crate::testing::restart_app(&e).await;
+        crate::delete_intents::recover_host(&app2, LOCAL_HOST).await;
+        assert!(deleted(&app2, &kid).await, "開機補完");
+        assert_eq!(intent_states(&app2, &e.project_id).await, vec!["done"]);
+    }
+
+    #[tokio::test]
+    async fn a_delete_project_killed_before_the_decision_is_abandoned() {
+        let e = crate::testing::env().await;
+        let (_parent, kid) = parent_and_child(&e).await;
+        die_in_delete(&e, &e.project_id, "delete_after_intent", true).await;
+        let app2 = crate::testing::restart_app(&e).await;
+        crate::delete_intents::recover_host(&app2, LOCAL_HOST).await;
+        assert_eq!(intent_states(&app2, &e.project_id).await, vec!["abandoned"]);
+        assert!(!deleted(&app2, &kid).await);
+    }
+
+    /// 補不成（child 的軟刪一直寫不進去）：最多試 MAX_ATTEMPTS 次，failed＋AGM inbox。
+    #[tokio::test]
+    async fn a_delete_that_can_never_be_completed_gives_up_and_tells_agm() {
+        let e = crate::testing::env().await;
+        let (parent, kid) = parent_and_child(&e).await;
+        die_in_delete(&e, &parent, "delete_bot_after_decided", false).await;
+        sqlx::query(&format!(
+            "CREATE TRIGGER am_test_kid_stuck BEFORE UPDATE OF deleted_at ON bots WHEN NEW.id = '{kid}' BEGIN SELECT RAISE(ABORT, 'boom'); END"
+        ))
+        .execute(&e.app.db)
+        .await
+        .unwrap();
+        let app2 = crate::testing::restart_app(&e).await;
+        crate::delete_intents::recover_host(&app2, LOCAL_HOST).await;
+        let mut st = vec![];
+        for _ in 0..200 {
+            st = intent_states(&app2, &parent).await;
+            if st == vec!["failed"] {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert_eq!(st, vec!["failed"]);
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE kind = 'intent_failed' AND bot_id = ?").bind(&parent).fetch_one(&app2.db).await.unwrap();
+        assert_eq!(n, 1, "AGM inbox 有一則 intent_failed");
+    }
+
+    /// intent 寫不進去＝什麼都還沒動：不能定案刪除。
+    #[tokio::test]
+    async fn a_delete_that_cannot_record_its_intent_decides_nothing() {
+        let e = crate::testing::env().await;
+        let (parent, _kid) = parent_and_child(&e).await;
+        sqlx::query("CREATE TRIGGER am_test_no_intents BEFORE INSERT ON intents BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END").execute(&e.app.db).await.unwrap();
+        assert!(delete_bot(State(e.app.clone()), Path(parent.clone())).await.is_err());
+        assert!(!deleted(&e.app, &parent).await, "沒定案");
     }
 
     /// 死鎖回歸（sol 五輪）：child id 字典序**小於** parent。舊寫法 delete_bot 先持 parent、定案後才拿 child，
