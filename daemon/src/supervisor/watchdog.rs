@@ -98,7 +98,14 @@ pub(super) fn past(iso: &str) -> bool {
 pub async fn tick(app: &Arc<App>) {
     let Ok(sup) = store::get_or_init(&app.db).await else { return };
     let Some(bot_id) = sup.bot_id.clone() else { return };
-    let liveness = super::manager_liveness(app, &bot_id).await.unwrap_or("stopped");
+    // 讀不到 liveness ＝ 不知道，不是「已停止」：不排程、不計次、不動任何 watchdog 狀態，下一個 tick 再看（#249）。
+    let liveness = match super::manager_liveness(app, &bot_id).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = ?e, "supervisor watchdog cannot read manager liveness; skipping this tick");
+            return;
+        }
+    };
     match plan(&sup, liveness, past) {
         Plan::Idle => {
             // Seen answering prompts again: the streak is over. `starting` is not enough — a
@@ -173,7 +180,7 @@ async fn start(app: &Arc<App>, bot_id: &str, failures: i64) {
     let _g = super::lock().await;
     // Re-read under the lock: `start`, `stop` or a bulk restart may have moved it meanwhile.
     let Ok(sup) = store::get_or_init(&app.db).await else { return };
-    let liveness = super::manager_liveness(app, bot_id).await.unwrap_or("stopped");
+    let Ok(liveness) = super::manager_liveness(app, bot_id).await else { return };
     if plan(&sup, liveness, past) != Plan::Start {
         return;
     }
@@ -306,5 +313,37 @@ mod tests {
         // And a human starting it by hand resets `watchdog_attempts` to 0 (see
         // `store::set_desired_running`), which puts it back in the ordinary flow.
         assert_eq!(plan(&sup(true, "", 0, None), "stopped", |_| true), Plan::Wait { schedule: true });
+    }
+    /// #249：讀不到 manager liveness（`runs`／`turns` 的 SELECT 壞掉）不能當成「已停止」。
+    /// 修前：活著的 manager 遇到一次 DB 讀故障，看門狗就當它掛了、排定自動重啟（`watchdog_next_at`
+    /// 被寫上）。修後這個 tick 什麼都不動，DB 恢復後下一個 tick 看到真的狀態。
+    #[tokio::test]
+    async fn an_unreadable_liveness_is_not_an_outage() {
+        for table in ["runs", "turns"] {
+            let env = crate::testing::env().await;
+            let app = env.app.clone();
+            let bot = crate::testing::claude_bot(&app, &env.project_id, "agm-mgr").await.id;
+            crate::testing::fake_run(&app, &bot).await;
+            store::get_or_init(&app.db).await.unwrap();
+            sqlx::query("UPDATE supervisors SET bot_id=?, desired_running=1, generation=1, status='' WHERE id=?")
+                .bind(&bot)
+                .bind(store::SUPERVISOR_ID)
+                .execute(&app.db)
+                .await
+                .unwrap();
+
+            crate::testing::make_table_unreadable(&app, table).await;
+            tick(&app).await;
+            crate::testing::make_table_readable(&app, table).await;
+            let s = store::get_or_init(&app.db).await.unwrap();
+            assert_eq!(s.watchdog_next_at, None, "{table} 讀不到：不可排定重啟");
+            assert_eq!(s.watchdog_attempts, 0, "{table} 讀不到：不可計次");
+            assert!(s.watchdog_gave_up_at.is_none());
+
+            // 恢復後下一個 tick 看到活著的 manager，照常沒事。
+            tick(&app).await;
+            let s = store::get_or_init(&app.db).await.unwrap();
+            assert_eq!(s.watchdog_next_at, None, "{table} 恢復後 manager 是活的");
+        }
     }
 }

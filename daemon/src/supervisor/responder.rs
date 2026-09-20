@@ -468,7 +468,8 @@ pub async fn watchdog_tick(app: &Arc<App>) {
         }
         return;
     };
-    let liveness = super::manager_liveness(app, &bot.id).await.unwrap_or("stopped");
+    // 讀不到 liveness ＝ 不知道，不是「已停止」：這個 tick 不動看門狗狀態（#249）。
+    let Ok(liveness) = super::manager_liveness(app, &bot.id).await else { return };
     // 等額度時看門狗不把它拉起來——除非我們其實**不知道**額度狀態（Unknown），而且排定的重試時間已經到了：
     // 那一次重試要有一個活著的協調者才發生得了。協調者在 `waiting_quota` 時 pane 掛掉或主機重開，而這個身分
     // 一直拿不到 5h＋7d 兩格讀數（探測壞掉、身分被停用、帳號本來就沒有那兩個窗）時，以前看門狗不重啟、
@@ -833,7 +834,7 @@ pub async fn notify(app: &Arc<App>) {
     if !batch_due(&oldest.created_at, row.last_notify_at.as_deref(), batch, now) {
         return;
     }
-    if super::manager_liveness(app, &bot.id).await.unwrap_or("stopped") != "idle" {
+    if !matches!(super::manager_liveness(app, &bot.id).await, Ok("idle")) {
         return;
     }
     let ids: Vec<String> = due.iter().map(|e| e.id.clone()).collect();
