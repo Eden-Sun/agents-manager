@@ -1644,6 +1644,15 @@ async fn restore_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Res
         ));
     }
     if bot.managed_by != "user" {
+        // child 的專案或母 bot 已經刪了：還原只會得到一顆誰都看不到的活 bot（#298）。
+        let project_live = db::project(&app.db, &bot.project_id).await.map_err(any_err)?.is_some_and(|p| p.deleted_at.is_none());
+        let parent_live = match &bot.parent_bot_id {
+            Some(pid) => db::bot(&app.db, pid).await.map_err(any_err)?.is_some_and(|p| p.deleted_at.is_none()),
+            None => true,
+        };
+        if !project_live || !parent_live {
+            return Err(LcError::conflict("the project or parent bot of this child is deleted", json!({"bot_id": id})));
+        }
         sqlx::query("UPDATE bots SET deleted_at = NULL WHERE id = ?").bind(&id).execute(&app.db).await.map_err(any_err)?;
     } else {
         // 讀不懂的 args／env 不能當成空的寫回 config（#295）：env 可能帶帳號設定，還原後會以錯的身分起。
@@ -3725,6 +3734,19 @@ mod delete_bot_tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         assert!(done, "寫得進去之後背景補上");
+    }
+
+    /// #298：專案已刪的 child 不能還原成看不到的活 bot。
+    #[tokio::test]
+    async fn a_child_of_a_deleted_project_cannot_be_restored() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let b1 = a_bot(&e, "alfa", "user").await;
+        in_config(&e, &[(&b1, "alfa")]).await;
+        let child = a_bot(&e, "alfa-kid", "child").await;
+        delete_project(State(app.clone()), Path(e.project_id.clone())).await.unwrap();
+        assert!(restore_bot(State(app.clone()), Path(child.clone())).await.is_err());
+        assert!(db::bot(&app.db, &child).await.unwrap().unwrap().deleted_at.is_some());
     }
 
     /// 死鎖回歸（sol 五輪）：child id 字典序**小於** parent。舊寫法 delete_bot 先持 parent、定案後才拿 child，
