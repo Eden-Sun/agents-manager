@@ -41,7 +41,8 @@ reap_headless() {
     sleep 3
     kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null
     echo "  reap headless pid $pid（孤兒、無 CDP 連線、活了 ${secs:-?}s）dir=$dir" >> "$LOG"
-    case "$dir" in /tmp/am-*) rm -rf "$dir" && echo "    rm -rf $dir" >> "$LOG";; esac
+    # 帶 .. 的不刪：/tmp/am-x/../../foo 前綴上像 /tmp/am-*，實際指到別處（#373）。
+    case "$dir" in *..*) ;; /tmp/am-*) rm -rf "$dir" && echo "    rm -rf $dir" >> "$LOG";; esac
     reaped=$((reaped+1))
   done <<EOF2
 $(ps -axo pid,ppid,command | grep 'Google Chrome' | grep -- '--headless' | grep -v -- '--type=' | grep -v grep)
