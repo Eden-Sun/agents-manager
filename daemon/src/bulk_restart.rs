@@ -415,10 +415,19 @@ async fn settle_failed_restart(app: &Arc<App>, bot_id: &str) {
 
 /// Retry once and record it in the inbox: the bot that would otherwise notice is this one.
 async fn verify_supervisor_back(app: Arc<App>, bot_id: String, name: String, batch_id: String) {
+    verify_supervisor_back_with(app, bot_id, name, batch_id, SUPERVISOR_WINDOW, SUPERVISOR_POLL).await
+}
+
+async fn verify_supervisor_back_with(app: Arc<App>, bot_id: String, name: String, batch_id: String, window: Duration, poll: Duration) {
     let mut waited = Duration::ZERO;
-    while waited < SUPERVISOR_WINDOW {
-        tokio::time::sleep(SUPERVISOR_POLL).await;
-        waited += SUPERVISOR_POLL;
+    while waited < window {
+        tokio::time::sleep(poll).await;
+        waited += poll;
+        // 等待期間使用者明確停了它、或總管改指別顆：這個延遲任務不再有立場動它（#351）。
+        if !supervisor_still_wanted(&app, &bot_id).await {
+            tracing::info!(bot = %name, "supervisor restart verification dropped: the supervisor is no longer wanted running (user stop or re-setup)");
+            return;
+        }
         if supervisor_is_back(&app, &bot_id).await {
             tracing::info!(bot = %name, secs = waited.as_secs(), "supervisor is back after the update restart");
             return;
@@ -426,6 +435,13 @@ async fn verify_supervisor_back(app: Arc<App>, bot_id: String, name: String, bat
     }
     tracing::warn!(bot = %name, "supervisor did not come back within 60s of the update restart; starting it once more");
     settle_failed_restart(&app, &bot_id).await;
+    // 補啟動之前在 supervisor 鎖裡再讀一次權威意圖（#351）：使用者的停止（`post_stop`）也在這把鎖裡先寫 `desired_running=0`
+    // 再停機，所以這裡要嘛看到停止（不啟動），要嘛在它之前啟動、之後被它停掉——不會有「停完又被拉起來」。
+    let _g = crate::supervisor::lock().await;
+    if !supervisor_still_wanted(&app, &bot_id).await {
+        tracing::info!(bot = %name, "supervisor restart retry cancelled: the supervisor is no longer wanted running");
+        return;
+    }
     let res = match db::active_run(&app.db, &bot_id).await {
         Ok(Some(run)) => Ok(run.id),
         _ => lifecycle::start_bot_with(&app, &bot_id, StartOpts { resume_native: true, ..Default::default() }).await.map_err(why),
@@ -446,6 +462,19 @@ async fn verify_supervisor_back(app: Arc<App>, bot_id: String, name: String, bat
     )
     .await;
     app.emit("bot_changed", json!({"bot_id": bot_id})).await;
+}
+
+/// 這顆現在還是「該跑著的總管」嗎：`supervisors` 列仍指著它、而且 `desired_running != 0`。讀不到當成不是（不確定就不啟動：
+/// 這是延遲補啟動，讀不到時寧可少啟動一次——看門狗本來就會照同一個意圖處理）。
+async fn supervisor_still_wanted(app: &Arc<App>, bot_id: &str) -> bool {
+    match sqlx::query_scalar::<_, i64>("SELECT desired_running FROM supervisors WHERE bot_id = ? LIMIT 1").bind(bot_id).fetch_optional(&app.db).await {
+        Ok(Some(d)) => d != 0,
+        Ok(None) => false,
+        Err(e) => {
+            tracing::warn!(bot = bot_id, error = %e, "could not read the supervisor's intent; not starting it from the delayed verifier");
+            false
+        }
+    }
 }
 
 async fn supervisor_is_back(app: &Arc<App>, bot_id: &str) -> bool {
@@ -837,5 +866,56 @@ mod tests {
     fn nothing_to_do_is_an_empty_plan() {
         let (go, skip) = plan(&[]);
         assert!(go.is_empty() && skip.is_empty());
+    }
+
+    /// #351：批次重啟替總管排的「60 秒內沒回來就再啟動一次」是延遲任務，等待期間使用者按了明確的停止
+    /// （`desired_running=0` 是看門狗的權威意圖）不能被它拉回來。以前它到期直接 `start_bot_with`，不重讀意圖。
+    async fn supervisor_fixture(env: &crate::testing::Env, name: &str) -> String {
+        crate::supervisor::store::get_or_init(&env.app.db).await.unwrap();
+        let bot = crate::testing::claude_bot(&env.app, &env.project_id, name).await;
+        sqlx::query("UPDATE supervisors SET bot_id=?, desired_running=1 WHERE id=?").bind(&bot.id).bind(crate::supervisor::store::SUPERVISOR_ID).execute(&env.app.db).await.unwrap();
+        bot.id
+    }
+
+    fn starts(env: &crate::testing::Env) -> usize {
+        env.herdr.methods().iter().filter(|m| *m == "agent.start").count()
+    }
+
+    #[tokio::test]
+    async fn a_user_stop_during_the_wait_is_not_undone_by_the_verifier() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let bot = supervisor_fixture(&env, "agm-a").await;
+        let verifier = tokio::spawn(verify_supervisor_back_with(app.clone(), bot.clone(), "agm-a".into(), "batch-1".into(), Duration::from_millis(400), Duration::from_millis(50)));
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        // 使用者按了停止：意圖先寫進 DB（`stop_requested` 的第一步）。
+        crate::supervisor::store::set_desired_running(&app.db, false).await.unwrap();
+        verifier.await.unwrap();
+        assert_eq!(starts(&env), 0, "使用者明確停掉之後，舊批次的驗證任務不能把它拉回來");
+        assert!(db::active_run(&app.db, &bot).await.unwrap().is_none());
+    }
+
+    /// 等待期間總管被重新設定成別顆 bot：舊的驗證任務不能動已經不是總管的那顆。
+    #[tokio::test]
+    async fn a_verifier_for_a_bot_that_is_no_longer_the_supervisor_does_nothing() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let bot = supervisor_fixture(&env, "agm-b").await;
+        let other = crate::testing::claude_bot(&app, &env.project_id, "agm-other").await;
+        let verifier = tokio::spawn(verify_supervisor_back_with(app.clone(), bot.clone(), "agm-b".into(), "batch-2".into(), Duration::from_millis(400), Duration::from_millis(50)));
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        sqlx::query("UPDATE supervisors SET bot_id=? WHERE id=?").bind(&other.id).bind(crate::supervisor::store::SUPERVISOR_ID).execute(&app.db).await.unwrap();
+        verifier.await.unwrap();
+        assert_eq!(starts(&env), 0, "已經不是總管的 bot 不能被舊批次的驗證任務啟動");
+    }
+
+    /// 意圖沒變（仍要它跑）而它沒回來：照舊補啟動一次。
+    #[tokio::test]
+    async fn an_unchanged_intent_still_gets_its_one_retry() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let bot = supervisor_fixture(&env, "agm-c").await;
+        verify_supervisor_back_with(app.clone(), bot.clone(), "agm-c".into(), "batch-3".into(), Duration::from_millis(200), Duration::from_millis(50)).await;
+        assert_eq!(starts(&env), 1, "意圖沒變、沒回來：補啟動一次");
     }
 }
