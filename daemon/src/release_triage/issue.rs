@@ -202,8 +202,11 @@ pub async fn publish_version(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: &s
             Err(e) => return record_err(&issues, e).await,
         };
         let needle = format!("release-triage: {mk} -->");
-        let found: Option<(i64, String)> = serde_json::from_str::<Vec<serde_json::Value>>(listed.trim())
-            .map_err(|e| anyhow!("gh issue list 回的不是 JSON：{e}"))?
+        let parsed = match serde_json::from_str::<Vec<serde_json::Value>>(listed.trim()) {
+            Ok(v) => v,
+            Err(e) => return record_err(&issues, format!("gh issue list 回的不是 JSON：{e}")).await,
+        };
+        let found: Option<(i64, String)> = parsed
             .iter()
             .find(|v| v.get("body").and_then(|b| b.as_str()).is_some_and(|b| b.contains(&needle)))
             .and_then(|v| Some((v.get("number")?.as_i64()?, v.get("url")?.as_str()?.to_string())));
