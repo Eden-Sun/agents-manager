@@ -837,6 +837,9 @@ export const useStore = create<StoreState>((set, get) => ({
     lastRefreshError = null
     set({ stateStale: false })
     appliedStateSeq = seq
+    // 快照在飛時 WS 已推進到更新的 seq：那些 frame（例如 `bot_status`）先套用過了，這份較舊的快照
+    // 會把 run 狀態蓋回舊的。套完補抓一次；daemon 重啟（seq 變小）時下面會把 lastSeq 降下來，只多這一次。
+    const behindFrames = get().lastSeq > st.daemon_seq
     const runs: Record<string, Run | null> = {}
     for (const b of st.bots) runs[b.id] = st.runs.find((r) => r.bot_id === b.id) ?? null
     set((s) => {
@@ -908,6 +911,7 @@ export const useStore = create<StoreState>((set, get) => ({
       }
     }
     get().pruneUnread()
+    if (behindFrames) void get().refreshState()
     const sel = get().selectedBotId
     if (sel && !get().loadedBots[sel]) await get().loadMessages(sel)
     const proj = get().selectedProjectId

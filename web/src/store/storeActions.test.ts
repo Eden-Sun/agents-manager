@@ -915,3 +915,35 @@ test('放棄未知送達的回合連點兩下：只放棄一次', async () => {
   assert.equal(abandoned, 1)
   assert.deepEqual(noticeTexts(), [])
 })
+
+test('快照在飛時 WS 已推進到更新的 seq：套完舊快照要再抓一次，不能讓舊的 run 狀態留著', async () => {
+  seed()
+  useStore.setState({ lastSeq: 1000, runs: {} })
+  let stateFetches = 0
+  const snapshot = (seq: number, agent: string) => ({
+    daemon_seq: seq,
+    projects: [
+      {
+        id: 'p1',
+        path: '/p',
+        label: 'p',
+        bots: [{ id: 'b1', project_id: 'p1', name: 'b1', kind: 'claude', run: { id: 'r1', bot_id: 'b1', state: 'running', agent_status: agent } }],
+      },
+    ],
+  })
+  routeDaemon((req) => {
+    if (req.path.endsWith('/state')) {
+      stateFetches += 1
+      if (stateFetches === 1) {
+        // 快照是 seq 1000 時拍的；回應在路上時 `bot_status`（seq 1001）已經套用過。
+        useStore.setState({ lastSeq: 1001 })
+        return json(snapshot(1000, 'working'), 200)
+      }
+      return json(snapshot(1001, 'idle'), 200)
+    }
+    return json({ messages: [], turns: [], has_more: false }, 200)
+  })
+  await useStore.getState().refreshState()
+  assert.equal(stateFetches, 2, '比快照新的 frame 已經到了，要補抓一次')
+  assert.equal(useStore.getState().runs.b1?.agent_status, 'idle')
+})
