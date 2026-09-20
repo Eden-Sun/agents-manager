@@ -556,6 +556,12 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
     if (!pid) return
     const nextKind = defaultKindForProject(pid, tools, bots)
     setKind(nextKind)
+    // 換專案（可能換主機、換 kind）：跟 `pickKind` 一樣清掉上一個專案挑的欄位，不然會用 claude 的
+    // model／身份去建 codex 的 bot——`ApiModelFields` 只標「不支援」、不自動清，畫面上卻顯示預設值。
+    setIdentity('')
+    setModel(null)
+    setEffort(null)
+    setFast(false)
     if (!nameTouched.current) setName(uniqueBotName(nextKind, pid, bots))
   }, [pid])
 
