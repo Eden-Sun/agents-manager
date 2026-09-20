@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { PREVIEW_OFF, groupOthers, toPreview, toPreviewEvent } from './preview'
+import { PREVIEW_OFF, groupOthers, kindLabel, toPreview, toPreviewEvent } from './preview'
 
 test('toPreview: 沒開過／壞資料都是 off', () => {
   assert.deepEqual(toPreview({ status: 'off' }), PREVIEW_OFF)
@@ -39,8 +39,8 @@ test('toPreview: v2 的 source／candidates／others，壞項目丟掉', () => {
   })
   assert.equal(p.source, 'attached')
   assert.equal(p.pid, 4242)
-  assert.deepEqual(p.candidates, ['/a/web'])
-  assert.deepEqual(p.others, [{ port: 3001, dir: '/b/apps/web', pid: 9, relation: 'same_repo', repo: null }])
+  assert.deepEqual(p.candidates, [{ dir: '/a/web', command: null }])
+  assert.deepEqual(p.others, [{ port: 3001, dir: '/b/apps/web', pid: 9, relation: 'same_repo', kind: 'vite', repo: null }])
   assert.deepEqual(toPreview({ status: 'off' }).others, [])
   assert.equal(toPreview({ status: 'running', source: 'weird' }).source, null)
 })
@@ -60,4 +60,19 @@ test('v3 others：relation 分組固定順序、空組不出、缺 relation 照 
   assert.deepEqual(g[1].items.map((o) => o.port), [5173, 5300])
   assert.equal(g[2].items[0].repo, 'hermes')
   assert.deepEqual(groupOthers([]), [])
+})
+
+test('v4：candidates 可帶指令、others 帶 kind、kind 標籤', () => {
+  const p = toPreview({
+    status: 'off',
+    command: 'bun run dev',
+    candidates: [{ dir: '/a', command: 'bun run dev' }, { dir: '/b' }, '/c', { command: 'x' }],
+    others: [{ port: 3200, dir: '/w', kind: 'next', relation: 'same_dir' }],
+  })
+  assert.deepEqual(p.candidates, [{ dir: '/a', command: 'bun run dev' }, { dir: '/b', command: null }, { dir: '/c', command: null }])
+  assert.equal(p.command, 'bun run dev')
+  assert.equal(p.others[0].kind, 'next')
+  assert.equal(kindLabel('next'), 'Next.js')
+  assert.equal(kindLabel('unknown'), '其他')
+  assert.equal(kindLabel('foo'), 'Foo')
 })

@@ -1,9 +1,9 @@
 /**
- * 右半面板的「預覽」分頁（issue #253）：頂層 bot 的專案起 vite dev server，iframe 內嵌顯示。
+ * 右半面板的「預覽」分頁（issue #253）：頂層 bot 的專案起本機 dev server（vite／Next／…），iframe 內嵌顯示。
  * 狀態來自 store.previews（WS `preview_changed` 即時寫入）；進來與 daemon 重連時 GET 一次補齊 dir／error。
  */
 import { useCallback, useEffect, useState } from 'react'
-import { groupOthers, fetchPreview, type PreviewOther, type PreviewRelation, type StartPreviewOpts, previewApiMissing, PREVIEW_API_MISSING, previewUrl, startPreview, stopPreview, PREVIEW_OFF, type Preview } from '../api/preview'
+import { groupOthers, kindLabel, fetchPreview, type PreviewOther, type PreviewRelation, type StartPreviewOpts, previewApiMissing, PREVIEW_API_MISSING, previewUrl, startPreview, stopPreview, PREVIEW_OFF, type Preview } from '../api/preview'
 import { isMock } from '../api'
 import { ApiError } from '../api/types'
 import { useStore } from '../store/store'
@@ -13,18 +13,21 @@ import './previewPanel.css'
 interface PreviewErr {
   text: string
   tried: string[]
-  /** 偵測不到 vite 設定檔：只是「AG Man 自己起不了」，不是死路——下面的 others 照樣能接。 */
+  /** 偵測不到能起的 dev server：只是「AG Man 自己起不了」，不是死路——下面的 others 照樣能接。 */
   noConfig: boolean
 }
+
+/** daemon 的「找不到能起的」409：v1 叫 `no_vite_config`，v4 擴大後可能改名。 */
+const NO_DEV = new Set(['no_vite_config', 'no_dev_server', 'no_dev_command'])
 
 function startError(e: unknown): PreviewErr {
   const plain = (text: string): PreviewErr => ({ text, tried: [], noConfig: false })
   if (previewApiMissing(e)) return plain(PREVIEW_API_MISSING)
   if (e instanceof ApiError) {
     if (e.body.reason === 'not_top_level' || e.body.error === 'not_top_level') return plain('只有頂層 bot 能開預覽。')
-    if (e.body.reason === 'no_vite_config' || e.body.error === 'no_vite_config') {
+    if (NO_DEV.has(String(e.body.reason ?? e.body.error ?? ''))) {
       const tried = Array.isArray(e.body.tried) ? e.body.tried.map(String) : []
-      return { text: '這顆 bot 的目錄裡找不到 vite 設定檔，AG Man 沒辦法自己起。', tried, noConfig: true }
+      return { text: '這顆 bot 的目錄裡找不到可以起的 dev server（vite 設定檔或 package.json 的 dev script），AG Man 沒辦法自己起。', tried, noConfig: true }
     }
     return plain(e.message)
   }
@@ -52,8 +55,8 @@ function ErrNote({ err }: { err: PreviewErr }) {
   )
 }
 
-/** mock 模式沒有真的 vite：iframe 放一頁說明，截圖與手動驗才看得到「running」長相。 */
-const MOCK_DOC = `<!doctype html><meta charset="utf-8"><body style="font:14px system-ui;margin:0;display:grid;place-items:center;height:100vh;background:#f6f8fa;color:#1b2430"><div style="text-align:center"><h2 style="margin:0 0 6px">Vite dev server</h2><p style="margin:0;color:#5e6a78">（mock 預覽畫面）</p></div>`
+/** mock 模式沒有真的 dev server：iframe 放一頁說明，截圖與手動驗才看得到「running」長相。 */
+const MOCK_DOC = `<!doctype html><meta charset="utf-8"><body style="font:14px system-ui;margin:0;display:grid;place-items:center;height:100vh;background:#f6f8fa;color:#1b2430"><div style="text-align:center"><h2 style="margin:0 0 6px">Dev server</h2><p style="margin:0;color:#5e6a78">（mock 預覽畫面）</p></div>`
 
 const RELATION_TITLE: Record<PreviewRelation, string> = {
   same_dir: '這顆 bot 自己的目錄',
@@ -67,12 +70,12 @@ const RELATION_NOTE: Record<PreviewRelation, string> = {
   other: '不是這顆 bot 的程式碼',
 }
 
-/** 本機所有在跑的 vite，依 relation 分組；選了就 attach（斷開時不會關掉對方）。 */
+/** 本機所有在跑的 dev server，依 relation 分組；選了就 attach（斷開時不會關掉對方）。 */
 function OthersList({ others, busy, onAttach }: { others: PreviewOther[]; busy: boolean; onAttach: (port: number) => void }) {
   if (others.length === 0) return null
   return (
     <div className="preview-others">
-      <p className="preview-body">本機已開的 vite，選一個直接接上：</p>
+      <p className="preview-body">本機已開的 dev server，選一個直接接上：</p>
       {groupOthers(others).map((g) => (
         <section key={g.relation} className={`preview-group ${g.relation}`}>
           <h3 className="preview-group-title">
@@ -83,7 +86,7 @@ function OthersList({ others, busy, onAttach }: { others: PreviewOther[]; busy: 
             {g.items.map((o) => (
               <li key={o.port}>
                 <span className="preview-other-dir">
-                  :{o.port} · <code>{o.dir}</code>
+                  <span className="preview-kind">{kindLabel(o.kind)}</span> :{o.port} · <code>{o.dir}</code>
                   {o.repo ? <span className="preview-other-repo"> ({o.repo})</span> : null}
                 </span>
                 <button type="button" className="btn preview-btn" disabled={busy} onClick={() => onAttach(o.port)}>
@@ -168,15 +171,18 @@ export function PreviewPanel({ botId }: { botId: string }) {
   const busy = pending !== null
   const url = p.port ? previewUrl(p.port) : null
 
+  // 啟動按鈕會跑什麼：選中的候選目錄（沒挑＝第一個）＋它的指令；沒有候選時退回 daemon 回的 command。
+  const chosen = p.candidates.find((c) => c.dir === pickDir) ?? p.candidates[0] ?? null
+  const willRun = chosen ? { dir: chosen.dir, command: chosen.command ?? p.command } : p.dir ? { dir: p.dir, command: p.command } : null
   const startBlock = (
     <>
       {p.candidates.length > 1 ? (
         <label className="preview-pick">
           目錄
-          <select value={pickDir} onChange={(e) => setPickDir(e.target.value)} disabled={busy}>
-            {p.candidates.map((d) => (
-              <option key={d} value={d}>
-                {d}
+          <select value={chosen?.dir ?? ''} onChange={(e) => setPickDir(e.target.value)} disabled={busy}>
+            {p.candidates.map((c) => (
+              <option key={c.dir} value={c.dir}>
+                {c.dir}
               </option>
             ))}
           </select>
@@ -187,11 +193,16 @@ export function PreviewPanel({ botId }: { botId: string }) {
           type="button"
           className={`btn${p.others.length > 0 ? '' : ' primary'}`}
           disabled={busy || !connected}
-          onClick={() => void start(p.candidates.length > 1 ? { dir: pickDir || p.candidates[0] } : undefined)}
+          onClick={() => void start(p.candidates.length > 1 && chosen ? { dir: chosen.dir } : undefined)}
         >
           {pending === 'start' ? '啟動中…' : '啟動預覽'}
         </button>
       </div>
+      {willRun ? (
+        <p className="preview-willrun">
+          會在 <code>{willRun.dir}</code> 跑{willRun.command ? <> <code>{willRun.command}</code></> : ' dev server（指令由 daemon 依專案決定）'}
+        </p>
+      ) : null}
     </>
   )
 
@@ -203,7 +214,7 @@ export function PreviewPanel({ botId }: { botId: string }) {
             {url}
           </span>
           <span className="preview-src" title={p.dir ?? undefined}>
-            {attached ? `已接上既有的 vite（port ${p.port}）` : p.source === 'spawned' ? '由 AG Man 啟動' : ''}
+            {attached ? `已接上既有的 dev server（port ${p.port}）` : p.source === 'spawned' ? '由 AG Man 啟動' : ''}
           </span>
           <span className="spacer" />
           <button type="button" className="btn preview-btn" onClick={() => setNonce((n) => n + 1)}>
@@ -216,7 +227,7 @@ export function PreviewPanel({ botId }: { botId: string }) {
             type="button"
             className="btn preview-btn"
             disabled={busy}
-            title={attached ? '只斷開連結，不會關掉對方的 vite server' : undefined}
+            title={attached ? '只斷開連結，不會關掉對方的 dev server' : undefined}
             onClick={() => void stop()}
           >
             {pending === 'stop' ? (attached ? '中斷中…' : '停止中…') : attached ? '中斷連接' : '停止'}
@@ -242,10 +253,10 @@ export function PreviewPanel({ botId }: { botId: string }) {
             <p className="preview-body">
               {p.dir ? (
                 <>
-                  在 <code>{p.dir}</code> 起 vite（最多 60 秒）。
+                  在 <code>{p.dir}</code> 跑 {p.command ? <code>{p.command}</code> : 'dev server'}（最多 60 秒）。
                 </>
               ) : (
-                '起 vite dev server 中（最多 60 秒）。'
+                '起 dev server 中（最多 60 秒）。'
               )}
             </p>
             <progress className="preview-progress" aria-label="啟動中" />
@@ -278,7 +289,7 @@ export function PreviewPanel({ botId }: { botId: string }) {
           <>
             <h2 className="preview-title">預覽</h2>
             {p.others.length > 0 ? (
-              // 本機已有 vite 在跑：直接接上是主角，自己起放次要（偵測不到設定檔時只有這條路）。
+              // 本機已有 dev server 在跑：直接接上是主角，自己起放次要（偵測不到設定檔時只有這條路）。
               <>
                 <OthersList
                   others={p.others}
@@ -294,9 +305,9 @@ export function PreviewPanel({ botId }: { botId: string }) {
             ) : (
               <>
                 <p className="preview-body">
-                  替 {bot ? <b>{bot.name}</b> : '這顆 bot'} 的專案起 vite dev server，畫面直接顯示在這裡。會在{' '}
-                  <code>{bot?.cwd ?? '專案目錄'}</code> 或其 <code>web/</code>、<code>apps/*</code> 下找 <code>vite.config.*</code>。
-                  本機目前沒有偵測到在跑的 vite。
+                  替 {bot ? <b>{bot.name}</b> : '這顆 bot'} 的專案起 dev server（vite、Next 等），畫面直接顯示在這裡。會在{' '}
+                  <code>{bot?.cwd ?? '專案目錄'}</code> 底下找 <code>vite.config.*</code> 或帶 <code>dev</code> script 的 <code>package.json</code>。
+                  本機目前沒有偵測到在跑的 dev server。
                 </p>
                 {startBlock}
               </>
