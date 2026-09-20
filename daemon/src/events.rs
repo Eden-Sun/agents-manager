@@ -643,15 +643,7 @@ mod tests {
         assert!(!active().await && app.autostarted_hosts.lock().await.is_empty(), "失敗不算數：沒起、主機沒記成跑過");
 
         assert!(reconcile_and_autostart(app, LOCAL_HOST, true).await, "之後對帳成功");
-        let mut up = false;
-        for _ in 0..150 {
-            if active().await {
-                up = true;
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        assert!(up, "欠著的 autostart 在這補上");
+        assert!(crate::testing::eventually!(active().await), "欠著的 autostart 在這補上");
 
         // 再一次訂閱重建的對帳不能再起一次（一生一次；使用者停掉的就是靠這個不被重開）。
         assert!(reconcile_and_autostart(app, LOCAL_HOST, true).await);
@@ -687,12 +679,7 @@ mod tests {
         assert!(watching(&app, &pane).await, "run 還活著，watcher 仍在");
 
         sqlx::query("UPDATE runs SET state='exited' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
-        for _ in 0..250 {
-            if !watching(&app, &pane).await {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        let _ = crate::testing::eventually!(!watching(&app, &pane).await);
         assert!(!watching(&app, &pane).await, "確認 run 已結束才退出");
     }
 
@@ -721,12 +708,7 @@ mod tests {
         tt::make_table_readable(&app, "bots").await;
         assert_eq!(run_state(&app, &run).await, "running", "前提：這一刻沒收到");
 
-        for _ in 0..250 {
-            if run_state(&app, &run).await == "exited" && project_ws(&app, &e.project_id).await.is_none() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        let _ = crate::testing::eventually!(run_state(&app, &run).await == "exited" && project_ws(&app, &e.project_id).await.is_none());
         assert_eq!(run_state(&app, &run).await, "exited");
         assert_eq!(project_ws(&app, &e.project_id).await, None, "綁定清掉");
         assert_eq!(run_state(&app, &other_run).await, "running", "別的 workspace 不受影響");
@@ -741,12 +723,7 @@ mod tests {
         tt::make_table_unreadable(&app, "projects").await;
         handle_global(&app, LOCAL_HOST, "test", &ws_event("ws-9")).await;
         tt::make_table_readable(&app, "projects").await;
-        for _ in 0..250 {
-            if project_ws(&app, &e.project_id).await.is_none() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        let _ = crate::testing::eventually!(project_ws(&app, &e.project_id).await.is_none());
         assert_eq!(project_ws(&app, &e.project_id).await, None);
     }
 
@@ -771,12 +748,7 @@ mod tests {
         tt::make_table_readable(&app, "runs").await;
         assert_eq!(run_state(&app, &run).await, "running", "前提：這一刻沒收到");
 
-        for _ in 0..250 {
-            if run_state(&app, &run).await == "exited" && !watching(&app, &pane).await {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        let _ = crate::testing::eventually!(run_state(&app, &run).await == "exited" && !watching(&app, &pane).await);
         assert_eq!(run_state(&app, &run).await, "exited", "重試補上，不靠第二個事件");
         assert!(!watching(&app, &pane).await, "收斂之後才拆 watcher");
         // 重複的關閉事件是安全的。
