@@ -1874,6 +1874,8 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
 - **收掉**：`DELETE`、bot 被停止／重啟／刪除、§6.11 閒置收 bot（它們都走 `stop_locked`）一律先關預覽 pane 再動 agent 的 pane——
   預覽的 pane 跟 agent 同一個 tab，先收它，agent 的 pane 關掉時那個 tab 才會是空的、才會被一起關。
   收預覽是盡力而為，讀不到就記 log，不擋 bot 的停機。
+  **讀不到 run 不等於 bot 停了**（#299）：對帳與收預覽時讀 `active_run` 失敗（DB busy／I/O）是「不知道」——不關 pane、不標 `off`，列原樣留著等下次；
+  只有讀到 `Ok(None)` 才確定沒有 run（才跟著收、才退回管理 session 關 pane）。關 pane 的 session 不確定就不能標 `off`，否則 pane 與 port 變成沒人管的孤兒。
 - **鎖**：預覽操作共用一把全域鎖，**不拿 bot 鎖**（停機、刪除是在 bot 鎖裡呼叫進來的，再拿會自己等自己）。
 - **測試**：行程與 port 查詢走 `PreviewEnv`，測試注入決定性的假貨，不碰真 herdr、真行程、真 port（#211）。
 

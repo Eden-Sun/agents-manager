@@ -895,7 +895,11 @@ pub async fn start(app: &Arc<App>, bot_id: &str, req: StartReq) -> LcResult<Valu
 
 /// 斷開一列：`spawned` 關 pane，`attached` 什麼都不動（那顆 vite 是別人的），然後標 `off`。要在 [`gate`] 裡呼叫。
 async fn disconnect_locked(app: &Arc<App>, r: Row) -> Option<Row> {
-    close_row_pane(app, &r).await;
+    if !close_row_pane(app, &r).await {
+        // 不知道那顆 pane 屬於哪個 session（讀 run 失敗）：不關、也不標 off，留著下次再看。
+        tracing::warn!(bot = %r.bot_id, "preview: cannot tell which herdr session owns the pane; leaving the preview as is");
+        return Some(r);
+    }
     let off = Row { pane_id: None, status: Status::Off.as_str().into(), error: None, updated_at: db::now(), ..r };
     match put(&app.db, &off).await {
         Ok(()) => {
@@ -930,17 +934,24 @@ pub async fn stop_for_bot(app: &Arc<App>, bot_id: &str) {
     disconnect_locked(app, r).await;
 }
 
-async fn close_row_pane(app: &Arc<App>, r: &Row) {
+/// 關這一列的 pane；回 `false`＝**不知道**該用哪個 session 關（讀不到 run），什麼都沒動，呼叫端不可標 off。
+/// 讀 run 失敗（`Err`）不等於「bot 已停」：`Ok(None)` 才是確定沒有 run，才退回管理 session。
+async fn close_row_pane(app: &Arc<App>, r: &Row) -> bool {
     // 接上的那顆是別人開的 server：只斷開，絕不動它。
     if r.attached() {
-        return;
+        return true;
     }
-    let Some(pane) = r.pane_id.as_deref() else { return };
+    let Some(pane) = r.pane_id.as_deref() else { return true };
     let env = match db::active_run(&app.db, &r.bot_id).await {
         Ok(Some(run)) => env_for(app, &run).await.unwrap_or_else(|_| fallback_env(app)),
-        _ => fallback_env(app),
+        Ok(None) => fallback_env(app),
+        Err(e) => {
+            tracing::warn!(bot = %r.bot_id, error = %e, "preview: cannot read the active run while closing the preview pane");
+            return false;
+        }
     };
     env.close_pane(pane).await;
+    true
 }
 
 /// 開機對帳：`starting`／`running` 的列拿「pane 還在不在」＋「port 有沒有在 listen」對回去；還在 `starting` 的補上 watcher。
@@ -977,7 +988,15 @@ async fn refresh_locked(app: &Arc<App>, bot_id: &str) -> Option<Row> {
         return Some(r);
     }
     let attached = r.attached();
-    let run = db::active_run(&app.db, bot_id).await.ok().flatten();
+    // 讀不到 run（`Err`）不是「沒有 run」：那是不知道，什麼都不動、下次再看（關 pane 是破壞性的）。
+    let run = match db::active_run(&app.db, bot_id).await {
+        Ok(run) => run,
+        Err(e) if !attached => {
+            tracing::warn!(bot = bot_id, error = %e, "preview: cannot read the active run; leaving the preview as is");
+            return Some(r);
+        }
+        Err(_) => None,
+    };
     // bot 自己掛了或被停了：預覽跟著收，不留一顆沒人管的 vite。接上的只看它自己的 port，不看 bot。
     if run.is_none() && !attached {
         return disconnect_locked(app, r).await;
@@ -1011,8 +1030,8 @@ async fn refresh_locked(app: &Arc<App>, bot_id: &str) -> Option<Row> {
         }
         _ => None,
     };
-    if to == Status::Off {
-        close_row_pane(app, &r).await;
+    if to == Status::Off && !close_row_pane(app, &r).await {
+        return Some(r);
     }
     let pane_id = if to == Status::Off { None } else { r.pane_id.clone() };
     let updated = Row { status: to.as_str().into(), error, pane_id, port, updated_at: db::now(), ..r };
