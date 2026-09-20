@@ -470,3 +470,6 @@ daemon 這幾天把「寫不進 DB」改成 fail closed：外面的副作用做�
 - **手機主力區：4 顆一排的 grid、最多兩排、不橫捲（2026-09-20，#344 追加）**：手機（≤720px）的主力區不再是橫捲列，改成 `grid-template-columns: repeat(4, 1fr)`、往下換行、**最多 8 顆**，超過的直接不畫、不做「+N」展開——前 8 顆由使用者用拖曳決定（`lib/pinnedOrder.ts::PIN_GRID_MAX`）。
   名字長用省略號、4 顆等寬；星號、未讀數、狀態點不縮。其餘那組維持橫捲。桌機不變。
   被藏起來的主力仍在完整順序裡：拖到可見的最後面（或鍵盤 Ctrl+→ 移到第 8 位）會插在被藏起來的第一顆**前面**（`endBefore`），不會跳到它們後面去。截圖：`docs/screenshots/primary-order/grid-*.png`（剛好 8 顆、超過 8 顆）。
+- **手機主力晶片：★ 換成狀態燈（2026-09-20，#344 再追加）**：那一區全是釘選的，★ 每顆一樣、只佔寬度。空出來的位置放跟側欄同一顆的燈（`botLamp`，語意與顏色照 SPEC §2.2）：
+  idle 綠、working 藍且脈動、blocked 紅（加一圈光暈，並保留晶片本來的 needs-reply 樣式與 `!`）、unknown 黃灰、離線空心圈、斷線灰。原本晶片右側的狀態點是同一件事，在這一區隱藏。
+  未讀數字照舊並存；有未讀的晶片是 accent 底，藍色 working 燈會融進去，所以那種晶片的燈加白邊。燈是 `role="img"` 帶狀態文字，讀屏聽得到。桌機那列不變（★ 是分兩組的依據）。截圖：`docs/screenshots/primary-order/lamp-1-mobile-mixed.png`。

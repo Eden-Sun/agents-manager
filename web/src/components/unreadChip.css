@@ -520,3 +520,27 @@
     flex: none;
   }
 }
+
+/* 手機主力區的燈號（#344）：取代 ★，語意與顏色跟側欄一樣；右側原本的狀態點是同一件事，隱藏。 */
+@media (max-width: 720px) {
+  .unread-pin-grid .unread-chip .lamp {
+    width: 9px;
+    height: 9px;
+    margin-inline: 2px;
+  }
+
+  .unread-pin-grid .unread-chip-dot {
+    display: none;
+  }
+
+  /* 有未讀的晶片是 accent 底：藍色的 working 燈會融進去，加一圈白邊才看得到。 */
+  .unread-pin-grid .unread-chip.unread .lamp {
+    box-shadow: 0 0 0 2px #fff;
+  }
+
+  /* blocked 要一眼看出來：紅燈加一圈光暈，配上晶片本來的 needs-reply 樣式。 */
+  .unread-pin-grid .unread-chip .lamp-blocked,
+  .unread-pin-grid .unread-chip.unread .lamp-blocked {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--lamp-red) 30%, transparent);
+  }
+}

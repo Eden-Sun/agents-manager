@@ -20,7 +20,8 @@ import { clipAfterRows, lineBudget, moreTitle } from '../lib/chipOverflow'
 import { chipTracked } from '../lib/supervisorProject'
 import { PIN_GRID_MAX, sortPinned } from '../lib/pinnedOrder'
 import { useChipFlip } from './useChipFlip'
-import { orderedBotIds, useStore } from '../store/store'
+import { botLamp, orderedBotIds, useStore } from '../store/store'
+import { StatusLamp } from './StatusLamp'
 import { usePinnedDrag, type PinnedDnd } from './usePinnedDrag'
 import './unreadChip.css'
 
@@ -54,7 +55,13 @@ interface ChipItem {
   title: string
 }
 
-function Chip({ it, dnd }: { it: ChipItem; dnd?: PinnedDnd }) {
+/** 側欄同一顆燈（`botLamp`）：working 會脈動、blocked 紅、斷線灰。 */
+function ChipLamp({ id }: { id: string }) {
+  const lamp = useStore((s) => botLamp(s, id))
+  return <StatusLamp lamp={lamp} />
+}
+
+function Chip({ it, dnd, lamp }: { it: ChipItem; dnd?: PinnedDnd; lamp?: boolean }) {
   const drag = it.pinned ? dnd : undefined
   const dragging = drag?.dragId != null && drag.dragId !== it.id
   const shifted = dragging && drag.shifted.includes(it.id)
@@ -82,7 +89,10 @@ function Chip({ it, dnd }: { it: ChipItem; dnd?: PinnedDnd }) {
       onPointerDown={drag ? (e) => drag.onPointerDown(e, it.id) : undefined}
       onKeyDown={drag ? (e) => drag.onKeyDown(e, it.id) : undefined}
     >
-      {it.pinned ? (
+      {lamp ? (
+        // 手機主力區（#344）：整區都是釘選的，★ 每顆一樣只佔寬；改放側欄那顆燈號。
+        <ChipLamp id={it.id} />
+      ) : it.pinned ? (
         <span className="unread-chip-star" aria-hidden="true">
           ★
         </span>
@@ -266,7 +276,7 @@ function PinGrid({ items, dnd }: { items: ChipItem[]; dnd: PinnedDnd }) {
     <div className="unread-bar-wrap row">
       <div className="unread-pin-grid" role="status" aria-live="polite" aria-label="主力 bot">
         {items.map((it) => (
-          <Chip key={it.id} it={it} dnd={dnd} />
+          <Chip key={it.id} it={it} dnd={dnd} lamp />
         ))}
         <span className="sr-only" aria-live="polite">
           {dnd.announce}
