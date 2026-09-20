@@ -1,16 +1,13 @@
 //! 持久 intent（#355，設計見該票）：多步驟動作「已承諾、可能只做了一半」的紀錄。
 //!
-//! 動作在第一個不可逆步驟**之前**先 commit 一列 `pending`；正常完成標 `done`。daemon 中途死掉的話，開機由 recovery 讀這張表接續
-//! （P2 起逐條路徑接上；**這個模組目前只有表的操作，沒有任何路徑呼叫它**）。
+//! 動作在第一個不可逆步驟**之前**先 commit 一列 `pending`；正常完成標 `done`。daemon 中途死掉的話，開機由各路徑的 recovery 讀這張表接續：
+//! `restart_intents`（重啟）、`delete_intents`（delete_bot／delete_project）、`promote_intents`（promote）。這個模組只有表的操作。
 //!
 //! 規則（給之後的接線者）：
 //! - intent 的語意是「這件事**可能**做了任意一部分」，不是「已經做了」；續做必須同時處理「什麼都還沒做」。
-//! - 續做不靠 `step` 決定下一步，靠檢查世界（DB／herdr 的實際狀態）；`step` 只是顯示用的提示。
+//! - 續做靠檢查世界（DB／herdr 的實際狀態）決定下一步，不靠 intent 記到哪一步（`step` 欄位沒人寫，保留給之後顯示用）。
 //! - 認領用 CAS（[`claim`]）：多個行程／重入只有一個做得到。
 //! - 讀不到＝重試，不是「不用做」；超過 [`MAX_ATTEMPTS`] 或 `expires_at` 才 `failed`（並由呼叫端推 AGM inbox）。
-
-// P1：只有 `recent`（`GET /api/intents`）被用到，其餘等 P2 起逐條路徑接線。
-#![allow(dead_code)]
 
 use anyhow::Result;
 use serde_json::Value;
@@ -103,17 +100,6 @@ pub async fn claim(pool: &SqlitePool, id: &str, boot: &str) -> Result<bool> {
     .await?
     .rows_affected();
     Ok(n == 1)
-}
-
-/// 進度提示（顯示用，續做不靠它）。
-pub async fn set_step(pool: &SqlitePool, id: &str, step: &str) -> Result<()> {
-    sqlx::query("UPDATE intents SET step = ?, updated_at = ? WHERE id = ? AND status IN ('pending','running')")
-        .bind(step)
-        .bind(crate::db::now())
-        .bind(id)
-        .execute(pool)
-        .await?;
-    Ok(())
 }
 
 async fn finish(pool: &SqlitePool, id: &str, status: &str, err: Option<&str>) -> Result<bool> {
