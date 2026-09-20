@@ -1279,6 +1279,9 @@ struct Deadline {
     abort: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// 只有正式的 helper 看真的訊號；測試在同一個行程裡並行跑，不能共用那個全域。
     watch_signals: bool,
+    /// 啟動時的父行程（cargo shim）與讀「現在的父行程」的函式（測試可換）：shim 被單獨殺掉（`timeout 60 cargo test` 只殺 shim、
+    /// SIGKILL）時 helper 變孤兒，沒有人會再送訊號給它，遠端編譯會一路跑到 timeout_secs（#323）。父行程變了就當成被終止。
+    parent: Option<(i32, fn() -> i32)>,
 }
 
 /// 為什麼停：當成 `anyhow` 錯誤一路往上傳，[`run_offload`] 認得它。
@@ -1310,6 +1313,7 @@ impl Deadline {
             at: std::cell::Cell::new(None),
             abort: Default::default(),
             watch_signals: false,
+            parent: None,
         }
     }
 
@@ -1321,12 +1325,18 @@ impl Deadline {
     /// 正式 helper：也看真的終止訊號。
     fn watching_signals(mut self) -> Self {
         self.watch_signals = true;
+        self.parent = Some((unsafe { libc::getppid() }, || unsafe { libc::getppid() }));
         self
     }
 
     fn stop(&self) -> Option<Stopped> {
         if self.abort.load(std::sync::atomic::Ordering::SeqCst) {
             return Some(Stopped::Interrupted(libc::SIGTERM));
+        }
+        if let Some((orig, now)) = self.parent {
+            if now() != orig {
+                return Some(Stopped::Interrupted(libc::SIGTERM));
+            }
         }
         if self.watch_signals {
             let sig = SIGNALLED.load(std::sync::atomic::Ordering::SeqCst);
@@ -2201,6 +2211,22 @@ mod tests {
         flip.join().unwrap();
         assert!(matches!(err.downcast_ref::<Stopped>(), Some(Stopped::Interrupted(_))), "{err:#}");
         assert!(t0.elapsed() < std::time::Duration::from_secs(10), "{:?}", t0.elapsed());
+    }
+
+    /// #323：cargo shim 被單獨殺掉（沒有人會再送訊號）時，helper 要發現父行程沒了、把遠端收乾淨，不能孤兒似地跑到 timeout。
+    #[test]
+    fn an_orphaned_helper_stops_when_its_parent_shim_is_gone() {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("exec sleep 60");
+        let mut ctl = Deadline::new(0);
+        ctl.parent = Some((4242, || 1)); // 啟動時的父行程是 4242，現在變成 1（被 init 收養）
+        let t0 = std::time::Instant::now();
+        let err = Lease::start(cmd, LeaseToken::new(), &ctl).err().expect("interrupted");
+        assert!(matches!(err.downcast_ref::<Stopped>(), Some(Stopped::Interrupted(_))), "{err:#}");
+        assert!(t0.elapsed() < std::time::Duration::from_secs(10), "{:?}", t0.elapsed());
+        let mut same = Deadline::new(0);
+        same.parent = Some((7, || 7));
+        assert!(same.stop().is_none(), "父行程沒變就照常跑");
     }
 
     fn secret_dir() -> PathBuf {
