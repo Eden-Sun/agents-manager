@@ -80,7 +80,7 @@ fn now_str() -> String {
 }
 
 fn expires_at_after(cfg: &crate::config::BuildCfg) -> String {
-    (chrono::Utc::now() + chrono::Duration::seconds(cfg.lease_ttl_secs as i64)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    (chrono::Utc::now() + chrono::Duration::seconds(cfg.lease_ttl() as i64)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
 /// 收掉過期沒 renew 的 held 列。回傳收掉幾列——由呼叫端（acquire／sweep）決定要不要記 log。
@@ -293,7 +293,7 @@ pub async fn status(app: &Arc<App>) -> Result<Value> {
     Ok(json!({
         "max_concurrent": cfg.max_concurrent(),
         "cargo_jobs": cfg.cargo_jobs,
-        "lease_ttl_secs": cfg.lease_ttl_secs,
+        "lease_ttl_secs": cfg.lease_ttl(),
         "active": active,
         "slots": slots,
     }))
@@ -366,7 +366,7 @@ pub async fn post_acquire(State(app): State<Arc<App>>, headers: HeaderMap, Form(
     match acquire(&app, body.holder.trim(), bot_id.as_deref(), body.purpose.trim(), body.host.trim()).await.map_err(up)? {
         Acquired::Granted { token, expires_at } => {
             let cfg = app.cfg.get().await.build;
-            Ok(Json(json!({"granted": true, "token": token, "expires_at": expires_at, "cargo_jobs": cfg.cargo_jobs, "lease_ttl_secs": cfg.lease_ttl_secs})))
+            Ok(Json(json!({"granted": true, "token": token, "expires_at": expires_at, "cargo_jobs": cfg.cargo_jobs, "lease_ttl_secs": cfg.lease_ttl()})))
         }
         Acquired::Waiting { active, since } => {
             let cfg = app.cfg.get().await.build;
@@ -420,6 +420,17 @@ mod tests {
             })
             .await
             .unwrap();
+    }
+
+    /// #322：lease_ttl_secs=0 不能讓名額一建立就過期、被下一個 acquire 收掉——那樣 max_concurrent 就形同虛設。
+    #[tokio::test]
+    async fn a_zero_lease_ttl_does_not_let_everyone_in() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        set_max_concurrent(&app, 1).await;
+        app.cfg.update(|cfg| { cfg.build.lease_ttl_secs = 0; Ok(()) }).await.unwrap();
+        assert!(matches!(acquire(&app, "A:1", None, "test", "local").await.unwrap(), Acquired::Granted { .. }));
+        assert!(matches!(acquire(&app, "B:2", None, "test", "local").await.unwrap(), Acquired::Waiting { .. }), "TTL 0 不能讓第二個也拿到名額");
     }
 
     /// 核心驗收條件（issue #90）：N 個同時的 acquire，只有設定的名額數真的拿到，其餘回 waiting。

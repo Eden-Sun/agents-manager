@@ -470,7 +470,15 @@ fn default_build_lease_ttl_secs() -> u64 {
 /// 併發上限的下限：0 不是「停用排程」，是「誰都拿不到名額」，整台機器的受管建置會全部卡死。
 pub const MIN_BUILD_MAX_CONCURRENT: usize = 1;
 
+/// 名額租約 TTL 的下限（#322）：0 會讓每個 held 列一建立就過期，下一個 acquire 把它收掉，`max_concurrent` 形同虛設。
+pub const MIN_BUILD_LEASE_TTL_SECS: u64 = 10;
+
 impl BuildCfg {
+    /// 實際使用的租約 TTL（秒）：設定檔的值夾到 [`MIN_BUILD_LEASE_TTL_SECS`] 以上。
+    pub fn lease_ttl(&self) -> u64 {
+        self.lease_ttl_secs.max(MIN_BUILD_LEASE_TTL_SECS)
+    }
+
     /// 環境變數覆寫（`AM_BUILD_MAX_CONCURRENT`）；看不懂、0 一律不採用，回設定檔的值，設定檔也離譜才回預設。
     pub fn max_concurrent(&self) -> usize {
         resolve_build_max_concurrent(std::env::var("AM_BUILD_MAX_CONCURRENT").ok().as_deref(), self.max_concurrent)
