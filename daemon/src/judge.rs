@@ -160,7 +160,42 @@ struct Answer {
 
 /// 網頁「環境設定」貼進來的 key：寫到 `key_file`，權限 600（目錄 700）。先寫暫存檔再 rename，半截的檔不會被讀到。
 /// key 只落在這個檔裡——不進 config.toml、DB、log，也不會從任何 API 回出去。
+#[cfg(test)]
 pub fn write_key(path: &str, key: &str) -> Result<()> {
+    stage_key(path, key)?.publish()
+}
+
+/// 已寫好、fsync 過、還沒生效的新 key（0600 暫存檔）。`publish` 才原子換掉現行的 key 檔；
+/// 沒 publish 就 drop 會把暫存檔刪掉。設定頁「token＋開關」一起存時，先暫存、config 寫成功才 publish，
+/// config 失敗就不會留下一把已經生效的新 key（issue #342）。
+pub struct StagedKey {
+    tmp: std::path::PathBuf,
+    dest: std::path::PathBuf,
+    done: bool,
+}
+
+impl StagedKey {
+    /// 暫存檔路徑，給 `key_status` 之類的檢查用（不含 key 內容）。
+    pub fn staged_path(&self) -> &std::path::Path {
+        &self.tmp
+    }
+
+    pub fn publish(mut self) -> Result<()> {
+        std::fs::rename(&self.tmp, &self.dest)?;
+        self.done = true;
+        Ok(())
+    }
+}
+
+impl Drop for StagedKey {
+    fn drop(&mut self) {
+        if !self.done {
+            std::fs::remove_file(&self.tmp).ok();
+        }
+    }
+}
+
+pub fn stage_key(path: &str, key: &str) -> Result<StagedKey> {
     let key = key.trim();
     if key.is_empty() || key.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return Err(anyhow!("key must be one line without spaces"));
@@ -182,13 +217,13 @@ pub fn write_key(path: &str, key: &str) -> Result<()> {
         f.write_all(key.as_bytes())?;
         f.write_all(b"\n")?;
         f.sync_all()?;
-        std::fs::rename(&tmp, &path)?;
         Ok(())
     })();
-    if written.is_err() {
+    if let Err(e) = written {
         std::fs::remove_file(&tmp).ok();
+        return Err(e);
     }
-    written
+    Ok(StagedKey { tmp, dest: path, done: false })
 }
 
 /// key 檔現在能不能用；不能用的原因（不含 key 本身）。
@@ -586,6 +621,44 @@ mod tests {
         let off = put(Some(false), None, Some("  ")).await.unwrap().0;
         assert_eq!((off["enabled"].clone(), off["key_present"].clone()), (json!(false), json!(true)));
         assert_eq!(read_key(dir.join("key").to_str().unwrap()).unwrap(), "k-test-0004");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_failed_config_update_leaves_the_old_key_live_and_no_staged_file() {
+        use axum::extract::State;
+        let (app, dir) = app_with(false, &[], "http://127.0.0.1:9/unused").await;
+        let key = dir.join("key");
+        let keys = key.to_str().unwrap();
+        assert_eq!(read_key(keys).unwrap(), "k-test-0001");
+        // config.toml 被外面換成壞檔：ConfigStore::update 會在重讀時失敗
+        std::fs::write(dir.join("config.toml"), "this is = = not toml").unwrap();
+        // mtime 一定要跟 store 記的不同，否則不會重讀（時間解析度粗時會假綠／偶發紅）
+        let f = std::fs::OpenOptions::new().write(true).open(dir.join("config.toml")).unwrap();
+        f.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(60)).unwrap();
+        let body = http::SettingsBody { enabled: Some(true), projects: Some(vec!["p".into()]), token: Some("k-test-0009".into()) };
+        let err = http::put_settings(State(app.clone()), axum::Json(body)).await;
+        assert!(matches!(err, Err(crate::lifecycle::LcError::Upstream(_))), "config 失敗要回錯");
+        assert_eq!(read_key(keys).unwrap(), "k-test-0001", "config 失敗不可讓新 key 生效");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().ends_with(".tmp")).count(), 0, "暫存 key 要清掉");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_staged_key_is_inert_until_published() {
+        let dir = std::env::temp_dir().join(format!("am-judge-{}", crate::db::ulid()));
+        let path = dir.join("api-key");
+        let p = path.to_str().unwrap();
+        write_key(p, "k-old").unwrap();
+        drop(stage_key(p, "k-new").unwrap());
+        assert_eq!(read_key(p).unwrap(), "k-old");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "沒 publish 的暫存檔要刪");
+        assert!(stage_key(p, "two words").is_err());
+        let st = stage_key(p, "k-new").unwrap();
+        assert_eq!(read_key(p).unwrap(), "k-old");
+        assert_eq!(read_key(&st.staged_path().to_string_lossy()).unwrap(), "k-new");
+        st.publish().unwrap();
+        assert_eq!(read_key(p).unwrap(), "k-new");
         std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -75,12 +75,19 @@ pub(super) struct SettingsBody {
 /// 網頁「環境設定」存檔。改完當下生效（每次要問之前才讀設定與 key 檔），不用重啟。
 pub(super) async fn put_settings(State(app): State<Arc<App>>, Json(body): Json<SettingsBody>) -> Result<Json<Value>, LcError> {
     let key_file = app.cfg.get().await.judge.key_file;
-    if let Some(token) = body.token.as_deref().filter(|t| !t.trim().is_empty()) {
-        super::write_key(&key_file, token).map_err(|e| LcError::Bad(e.to_string()))?;
-    }
-    // 沒有可用的 key 就不給開：開了也只會每次記一筆 error。
+    // token 只先暫存（0600 暫存檔），config 寫成功之後才換掉現行的 key；config 失敗就整個丟掉，
+    // 不會有「回 5xx、新 key 卻已生效」的半套（issue #342）。
+    let staged = match body.token.as_deref().filter(|t| !t.trim().is_empty()) {
+        Some(token) => Some(super::stage_key(&key_file, token).map_err(|e| LcError::Bad(e.to_string()))?),
+        None => None,
+    };
+    // 沒有可用的 key 就不給開：開了也只會每次記一筆 error。有新 key 時檢查的是新 key（暫存檔）。
     if body.enabled == Some(true) {
-        if let Err(reason) = super::key_status(&key_file) {
+        let checked = match &staged {
+            Some(s) => super::key_status(&s.staged_path().to_string_lossy()),
+            None => super::key_status(&key_file),
+        };
+        if let Err(reason) = checked {
             return Err(LcError::Conflict(json!({"error": "needs_key", "reason": reason})));
         }
     }
@@ -90,6 +97,7 @@ pub(super) async fn put_settings(State(app): State<Arc<App>>, Json(body): Json<S
         ps.dedup();
         ps
     });
+    let prev = app.cfg.get().await.judge;
     app.cfg
         .update(move |c| {
             if let Some(enabled) = body.enabled {
@@ -102,5 +110,19 @@ pub(super) async fn put_settings(State(app): State<Arc<App>>, Json(body): Json<S
         })
         .await
         .map_err(|e| LcError::Upstream(e.to_string()))?;
+    if let Some(staged) = staged {
+        if let Err(e) = staged.publish() {
+            // config 已經寫了但 key 換不上去：把開關與專案範圍退回原值，不留「開著卻沒新 key」。
+            let _ = app
+                .cfg
+                .update(move |c| {
+                    c.judge.enabled = prev.enabled;
+                    c.judge.projects = prev.projects;
+                    Ok(())
+                })
+                .await;
+            return Err(LcError::Upstream(format!("key publish failed: {e}")));
+        }
+    }
     Ok(Json(settings_json(&app).await))
 }
