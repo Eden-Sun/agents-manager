@@ -62,6 +62,19 @@ case "$HEAD_SHA" in
 esac
 [ -x "$NEWBIN" ] || { log "ABORT: 找不到新 binary $NEWBIN"; exit 3; }
 
+# CD 信任閘門（SPEC §18.2d）：例行更新在申請核准前問過一次；這裡是最後一道——不經例行更新、由 bot 直接部署的
+# 那條路也得過。線上那一版（--old）→ 要換上去的 --sha 之間有外人的東西就不換。查不出來一樣不換。
+# 閘門優先用 install 在 AGM 目錄的那份：這支腳本是從「要部署的 checkout」跑的，同一個 checkout 裡的閘門不能算數。
+GATE="$AGM_DIR/bin/cd-trust-gate.py"
+[ -f "$GATE" ] || GATE="$(cd "$(dirname "$0")" && pwd)/cd-trust-gate.py"
+GH_BIN="${AGM_GH_BIN:-$(command -v gh 2>/dev/null || echo /opt/homebrew/bin/gh)}"
+GATE_FROM=$(git -C "$CHECKOUT" rev-parse "${OLD}^{commit}" 2>/dev/null) || { log "ABORT: 線上那一版 $OLD 不在 checkout 的歷史裡，信任閘門無從比對"; exit 3; }
+GATE_OUT=$("$PYTHON" "$GATE" check --repo "$CHECKOUT" --from "$GATE_FROM" --to "$HEAD_SHA" --state-dir "$AGM_DIR" --gh "$GH_BIN" 2>&1) || {
+    log "ABORT: CD 信任閘門沒過（${OLD}..${SHORT}）：$(printf '%s' "$GATE_OUT" | tr '\n' ';' | cut -c1-600)"
+    exit 3
+}
+log "cd trust gate passed (${OLD}..${SHORT})"
+
 cd "$AGM_REPO" || { log "ABORT: 進不去 $AGM_REPO"; exit 3; }
 BAK="target/release/agents-managerd.bak-$OLD"
 [ -e "$BAK" ] || cp -p target/release/agents-managerd "$BAK"

@@ -85,6 +85,27 @@ install -m 644 scripts/ops/daemon-update-task.md ~/.config/agents-manager/superv
 launchd：`com.agm.daemon-update` 改成每 5 分鐘跑一次（`StartInterval 300`），由腳本自己判斷
 「整點、集滿門檻，或等太久」；`AGM_BUILD_BOT`（必要）與 `AGM_REBUILD_THRESHOLD`／`AGM_REBUILD_MAX_WAIT_MIN`（可選）放 `EnvironmentVariables`。
 
+## cd-trust-gate.py（CD 信任閘門，SPEC §18.2d）
+
+正式 daemon 換版前，確認「線上那一版 → 要換上去的那一版」之間沒有外人的東西（fork PR 的 commit 或內容、名單外的作者、
+被改寫的歷史、動到部署鏈自己）。`daemon-update-kick.sh`（申請核准前）與 `daemon-swap.sh`（動 binary 前）都會呼叫它。
+
+```sh
+install -m 755 scripts/ops/cd-trust-gate.py ~/.config/agents-manager/supervisor/AGM/bin/   # 跟 kick 放一起；kick 找同目錄那份
+bash scripts/ops/cd-trust-gate_test.sh                                                      # 隔離測試（暫存 repo＋假 gh）
+```
+
+**kick 裝了新版卻沒裝閘門＝每輪都「查不出來」、不換版**（fail closed，連續幾輪會推 `check_failing`）。兩個一起裝。
+
+狀態檔都在 AGM 目錄：`cd-trust.allow`（允許的 email，第一次由線上那一版帶出來）、`cd-trust.protected`（額外要盯的路徑前綴，
+例如 `.github/`）、`cd-trust.approved`（放行紀錄）。被擋下時 inbox 會收到 `cd_untrusted`，裡面有原因與放行指令：
+
+```sh
+scripts/ops/cd-trust-gate.py approve --state-dir ~/.config/agents-manager/supervisor/AGM --note "看過 #123，是我請他改的" <完整 sha>
+```
+
+**approve 是給人按的**：bot 收到 `cd_untrusted` 要做的是回報使用者，不是自己放行。
+
 ## daemon-swap.sh（＋ daemon-start.py）
 
 建置 child 換 binary 用的那一段：拿 restart 窗口 → 備份 DB → 換 binary → 重啟 → 驗證 → 寫 `.built`。

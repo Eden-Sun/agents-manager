@@ -224,6 +224,22 @@ if [ -f "$STATE" ] && [ "$(cat "$STATE")" = "$HEAD_SHA" ]; then
   log "$HEAD_SHA 已經派過，跳過"; exit 0
 fi
 
+# CD 信任閘門（SPEC §18.2d）：已部署的那一版 → origin/main 之間有外人的東西（fork PR、名單外的作者、
+# 被改寫的歷史、動到閘門／CI 定義）就不換版，叫人來看。放在申請核准之前：不可信的範圍連核准都不該去要。
+# 沒有已部署基準（第一次）時無從比對，照舊往下走；那一趟本來就是人盯著做的。
+if [ -n "$BUILT_SHA" ]; then
+  GATE="$(cd "$(dirname "$0")" && pwd)/cd-trust-gate.py"
+  GH_BIN="${AGM_GH_BIN:-$(command -v gh 2>/dev/null || echo /opt/homebrew/bin/gh)}"   # launchd 的 PATH 沒有 Homebrew
+  GATE_FROM=$("$GIT" -C "$REPO" rev-parse "${BUILT_SHA}^{commit}")
+  GATE_OUT=$(python3 "$GATE" check --repo "$REPO" --from "$GATE_FROM" --to "$HEAD_SHA" --state-dir "$DIR" --gh "$GH_BIN" 2>&1)
+  case $? in
+    0) log "CD 信任閘門：${BUILT_SHA}..${HEAD_SHA} 可信" ;;
+    3) alert cd_untrusted "origin/main ${HEAD_SHA} 不換版：$(printf '%s' "$GATE_OUT" | tr '\n' ';' | cut -c1-600)。看過沒問題再 scripts/ops/cd-trust-gate.py approve --state-dir ${DIR} --note … <完整 sha>"
+       exit 0 ;;
+    *) note_fail "CD 信任閘門查不出來，這輪不換版：$(printf '%s' "$GATE_OUT" | tr '\n' ';' | cut -c1-300)"; exit 0 ;;
+  esac
+fi
+
 # 任務說明檔不在就不往下走：以前 `cat 任務檔 > $TMP || true` 吞掉失敗，會在拿到 rebuild 租約之後派出一則只有
 # 尾巴、沒有任何做法說明的交辦，建置 child 不知道要幹嘛，窗口卻被占住。要在申請核准、拿租約之前擋下。
 [ -f "$DIR/daemon-update-task.md" ] || { note_fail "找不到 ${DIR}/daemon-update-task.md，這輪不派（尚未申請核准或拿租約）"; exit 0; }

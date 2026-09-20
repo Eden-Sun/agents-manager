@@ -70,8 +70,16 @@ setup() { # setup <checkout 的 SCHEMA_VERSION> <DB 目前的 user_version>
   printf 'new-binary\n' > "$CHECKOUT/target/release/agents-managerd"; chmod +x "$CHECKOUT/target/release/agents-managerd"
   /usr/bin/git init -q "$CHECKOUT"
   ( cd "$CHECKOUT" && /usr/bin/git config user.email t@t && /usr/bin/git config user.name t \
-      && /usr/bin/git add -A && /usr/bin/git commit -qm init ) >/dev/null 2>&1
+      && /usr/bin/git commit -q --allow-empty -m deployed && /usr/bin/git add -A && /usr/bin/git commit -qm init ) >/dev/null 2>&1
   export SHA=$(/usr/bin/git -C "$CHECKOUT" rev-parse HEAD)
+  # 線上那一版＝前一個 commit；CD 信任閘門要它在 checkout 的歷史裡。假 gh：沒有 fork PR。
+  export OLD=$(/usr/bin/git -C "$CHECKOUT" rev-parse --short HEAD~1)
+  cat > "$ROOT/gh" <<'GHSTUB'
+#!/bin/bash
+case "$1" in pr) printf '[]' ;; api) printf '%s' "${STUB_GH_PULLS:-[]}" ;; esac
+GHSTUB
+  chmod +x "$ROOT/gh"
+  export AGM_GH_BIN="$ROOT/gh" CD_TRUST_SLUG="me/proj" STUB_GH_PULLS=""
 
   # 假 repo：線上那顆 binary（回滾點的內容）。
   printf 'old-binary\n' > "$AGM_REPO/target/release/agents-managerd"; chmod +x "$AGM_REPO/target/release/agents-managerd"
@@ -155,7 +163,7 @@ STUB
 
 teardown() { rm -rf "$ROOT"; }
 
-run() { bash "$SCRIPT" --sha "$SHA" --old oldsha --old-hash "$OLDHASH" --approval ap-1 --owner bot-me --checkout "$CHECKOUT" >/dev/null 2>&1; echo $?; }
+run() { bash "$SCRIPT" --sha "$SHA" --old "$OLD" --old-hash "$OLDHASH" --approval ap-1 --owner bot-me --checkout "$CHECKOUT" >/dev/null 2>&1; echo $?; }
 
 # 1. 一般情形（schema 沒升）：換 binary、重啟、驗證、寫 .built。
 setup 10 10
@@ -221,7 +229,7 @@ teardown
 
 # 7. 回滾點的 binary 對不上 sha256：換版前就停手。
 setup 10 10
-printf 'someone-elses-binary\n' > "$AGM_REPO/target/release/agents-managerd.bak-oldsha"
+printf 'someone-elses-binary\n' > "$AGM_REPO/target/release/agents-managerd.bak-$OLD"
 rc=$(run)
 check_eq "回滾點不對就中止（rc=3）" "3" "$rc"
 check "講出實際的 sha256" "不是 $OLDHASH" "$SWAP_LOG"
@@ -258,6 +266,25 @@ teardown
 check "啟動器用 setsid 脫離" "os.setsid()" "$HERE/daemon-start.py"
 check "啟動器會 fork，父行程先結束（job 才不會被 remove 殺到）" "os.fork()" "$HERE/daemon-start.py"
 check "啟動器丟掉 AM_DATA_DIR 等 pane 變數" "AM_DATA_DIR" "$HERE/daemon-start.py"
+
+
+# CD 信任閘門：要換上去的範圍裡有 fork PR 的 commit → 拿窗口之前就停手，binary 不動。
+setup 10 10
+export STUB_GH_PULLS='[{"number":7,"user":{"login":"mallory"},"head":{"repo":{"full_name":"mallory/proj"}}}]'
+rc=$(run)
+check_eq "fork PR 的 commit 不換版（rc=3）" "3" "$rc"
+check "講出是哪個 PR" "fork PR #7" "$SWAP_LOG"
+check_eq "binary 沒動" "old-binary" "$(cat "$AGM_REPO/target/release/agents-managerd")"
+check_no "連窗口都沒去拿" "lease acquire" "$AGM_DIR/calls.log"
+teardown
+
+# 線上那一版不在 checkout 的歷史裡：閘門無從比對，不換。
+setup 10 10
+OLD=notacommit
+rc=$(run)
+check_eq "基準不在歷史裡就中止（rc=3）" "3" "$rc"
+check "講清楚為什麼" "信任閘門無從比對" "$SWAP_LOG"
+teardown
 
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
