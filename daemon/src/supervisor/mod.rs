@@ -270,6 +270,29 @@ pub async fn assign(
                 json!({"assignment_id": a.id, "reason": "text_mismatch"}),
             ));
         }
+        // 同 id、同 text、同 bot 但會改變行為的欄位不同（#334）：回原筆 200 等於把新的意圖吞掉（本來要交辦卻是通知）。
+        let mut have_own = a.ownership();
+        let mut want_own = ownership.to_vec();
+        have_own.sort();
+        want_own.sort();
+        let mismatch = if (a.expects_review != 0) != expects_review {
+            Some("expects_review")
+        } else if have_own != want_own {
+            Some("ownership")
+        } else if a.mission_id.as_deref() != mission.map(|(m, _)| m) || a.mission_role.as_deref() != mission.map(|(_, r)| r) {
+            Some("mission")
+        } else if a.review_role.as_deref().unwrap_or("responder") != review_role.map_or("responder", roles::Role::as_str) {
+            // 沒寫＝協調者（跟 to_json 的預設同一個），明講 responder 的重送不算不同。
+            Some("review_role")
+        } else {
+            None
+        };
+        if let Some(field) = mismatch {
+            return Err(LcError::conflict(
+                "client_request_id already used with different settings",
+                json!({"assignment_id": a.id, "reason": "assignment_request_mismatch", "field": field}),
+            ));
+        }
         return Ok(a.to_json());
     }
 

@@ -1582,6 +1582,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 - `POST /api/supervisor/assignments {target_bot_id,text,client_request_id,source_turn_id?,ownership?:[path],kind?:"task"|"notice",expects_review?,mission_id?,role?,review_role?:"patrol"|"responder"}` → 一筆 assignment（多 `review_role`）：
   `{id,target_bot_id,client_request_id,turn_id,status,text,delivery,result,error,attempts,request_id,created_at,updated_at,completed_at,turn_status,evidence_complete,open,awaiting_review,
   review:{decision,by,at,reason,followup_assignment_id},follow_up_of,legacy_closed,ownership,ownership_conflicts,resume_at,quota_retries,next_attempt_at,conflict_since}`。
+  - **冪等**：同一個 `client_request_id` 只對應一件工作。內容完全一樣的重送回原筆；換 bot → 409、換 `text` → 409 `text_mismatch`、換會改變行為的欄位（`expects_review`／`ownership`／`mission_id`＋`role`／`review_role`）→ 409 `assignment_request_mismatch`＋`field`（不會靜默回原筆 200 把新的意圖吃掉）。
   - `status`：`queued` | `delivered` | `unknown`（還在跑）→ `awaiting_review` → `completed` | `failed` | `cancelled` | `superseded`；另有 `blocked`、`quota_blocked`（都算未結案）。
   - 對方正在回合中：排成 `queued` turn，交辦停在 `delivered`＋`delivery="queued"`，推一則 `assignment_queued`（只記錄、不叫醒），不算失敗也不結案。
   - 一直送不進去（連續 409）：從 `conflict_since`（這一輪第一次 409；進 `quota_blocked`、被窗口 hold、送達時清掉）起超過 `AM_DISPATCH_CONFLICT_GIVE_UP_MINS`（預設 30 分）改成 `blocked`＋inbox 的 `assignment_undeliverable`
