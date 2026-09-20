@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
+import { persistSetDiff } from '../store/sharedSet'
 import { BOT_NAME_HINT, isValidBotName } from '../lib/botName'
 import { useShallow } from 'zustand/react/shallow'
 import * as api from '../api'
@@ -908,7 +909,7 @@ export function Sidebar() {
       const next = new Set(prev)
       if (!next.delete(id)) next.add(id)
       try {
-        localStorage.setItem('am.collapsedChildren', JSON.stringify([...next]))
+        persistSetDiff('am.collapsedChildren', prev, next)
       } catch {
         /* 無痕視窗 / 關掉儲存：收合仍然有效，只是不跨重整記住 */
       }
@@ -933,7 +934,7 @@ export function Sidebar() {
         const next = new Set(prev)
         next.delete(selectedBotProject)
         try {
-          localStorage.setItem('am.collapsedProjects', JSON.stringify([...next]))
+          persistSetDiff('am.collapsedProjects', prev, next)
         } catch {
           /* 同上 */
         }
@@ -953,7 +954,7 @@ export function Sidebar() {
       const next = new Set(prev)
       if (!next.delete(id)) next.add(id)
       try {
-        localStorage.setItem('am.collapsedProjects', JSON.stringify([...next]))
+        persistSetDiff('am.collapsedProjects', prev, next)
       } catch {
         /* 同上：收合仍然有效，只是不跨重整記住 */
       }
