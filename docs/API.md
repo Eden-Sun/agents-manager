@@ -148,6 +148,8 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
 
 成功後推 `project_changed` / `bot_changed`。
 
+**`GET /api/intents`**（#355）：持久 intent 的最近 100 筆（含已結束的，新的先）`{intents:[{id,kind,subject_id,host,payload_json,step,status,owner_boot,attempts,last_error,created_at,updated_at,expires_at}]}`。唯讀；目前沒有路徑會寫它。
+
 **`POST /api/order`**：側欄排序 = config.toml 的陣列順序，`GET /api/state` 的順序就是權威（前端不另存）。只送要改的那一半；沒列到的維持原相對順序接在後面；
 config.toml 裡沒有的 id（child、已刪）忽略。成功推 `project_changed`。
 

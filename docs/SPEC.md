@@ -96,6 +96,10 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
     也就是說 `user_version` 是**最低相容 binary 的圍籬，不是 migration 帳本**：它只回答「哪些 binary 准開這個檔案」，
     不記錄跑過哪些步驟。等真的出現非 additive 的資料轉換（改欄位型別、拆表、改約束得重建表），再引入照順序執行的
     migration 框架。
+  - **持久 intent 與啟動版本（v13，#355）**：`intents` 表記「已承諾、可能只做了一半」的多步驟動作（restart／delete_bot／delete_project／promote），
+    daemon 中途死掉後開機由 `intents.rs` 接續（設計與階段見 #355）；同一目標同一種動作同時只能有一件開著（partial unique index `intents_one_open`），
+    認領用 CAS（`owner_boot`），補做失敗最多 5 次就 `failed`。`bots.launch_rev`／`runs.launch_rev` 是啟動相關設定的版本雜湊（NULL＝沒記，不誤報需重啟）。
+    **目前只有表與操作函式，沒有任何路徑寫它**（逐條接線見 #355 的 P2–P5）。
   - **什麼時候升 `SCHEMA_VERSION`**：migrate 建出來的任何 schema 物件變了就升——`db::SCHEMA`、ALTER 名單或任何一個
     子模組的 migrate，表、欄位、型別、預設值、約束、索引、trigger 內容（含由轉移表產生的守衛）都算；排版與 `--` 註解
     不算。不靠人記：`db::schema_guard` 的測試拿全新 DB 的 schema 指紋跟 `db::SCHEMA_HISTORY` 最後一行比，對不上就紅，
