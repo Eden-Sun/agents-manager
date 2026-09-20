@@ -383,8 +383,9 @@ pub async fn sweep(app: &Arc<App>, detector: &mut Detector) {
 
     for obs in plan.open {
         let detail: Value = serde_json::from_str(&obs.detail).unwrap_or_else(|_| json!({}));
+        // incident 與通知同一個交易（#319）：寫不進去就不開，下一輪 detector 重來。
         let Ok((incident, opened)) =
-            store::open_incident(&app.db, &obs.kind, &obs.resource, &obs.severity, &detail).await
+            store::open_incident_notifying(&app.db, &obs.kind, &obs.resource, &obs.severity, &detail, notifiable(&obs.kind, responder_configured)).await
         else {
             continue;
         };
@@ -392,36 +393,12 @@ pub async fn sweep(app: &Arc<App>, detector: &mut Detector) {
             continue;
         }
         tracing::warn!(kind = %obs.kind, resource = %obs.resource, severity = %obs.severity, "system incident opened");
-        if notifiable(&obs.kind, responder_configured) {
-            let _ = store::push_inbox(
-                &app.db,
-                &format!("incident:{}:opened", incident.id),
-                "incident_opened",
-                None,
-                None,
-                None,
-                &json!({"incident": incident.to_json()}),
-            )
-            .await;
-        }
         app.emit("supervisor_changed", json!({"incident": incident.to_json()})).await;
     }
 
     for (kind, resource) in plan.resolve {
-        let Ok(Some(incident)) = store::resolve_incident(&app.db, &kind, &resource).await else { continue };
+        let Ok(Some(incident)) = store::resolve_incident_notifying(&app.db, &kind, &resource, notifiable(&kind, responder_configured)).await else { continue };
         tracing::info!(kind = %kind, resource = %resource, "system incident resolved");
-        if notifiable(&kind, responder_configured) {
-            let _ = store::push_inbox(
-                &app.db,
-                &format!("incident:{}:resolved", incident.id),
-                "incident_resolved",
-                None,
-                None,
-                None,
-                &json!({"incident": incident.to_json()}),
-            )
-            .await;
-        }
         app.emit("supervisor_changed", json!({"incident": incident.to_json()})).await;
     }
 }
@@ -548,6 +525,35 @@ mod tests {
         // And once it can run again and still sees nothing, it resolves normally.
         let plan = d.plan(&[], &open, &[], &t, 5030);
         assert_eq!(plan.resolve.len(), 2);
+    }
+
+    /// incident 開起來與叫醒 AGM 的 `incident_opened` 同一個交易：通知寫不進去，incident 就不開（下一輪再來）。
+    /// 以前先 `open_incident`、再 `let _` 推事件；寫不進去時 incident 已是 open，之後每輪 `opened=false` 不再通知，
+    /// 一個真的系統故障就永遠沒人被告知。
+    #[tokio::test]
+    async fn an_incident_and_its_notification_land_together() {
+        use super::super::bot_requests::flow_tests;
+        use super::super::roles;
+        let app = flow_tests::app().await;
+        flow_tests::configure_responder(&app).await;
+        let max = app.cfg.get().await.supervisor.notify_max_attempts.max(1);
+        let stuck = store::push_inbox(&app.db, "health:y", "health_changed", None, None, None, &json!({})).await.unwrap().unwrap();
+        roles::classify(&app.db).await.unwrap();
+        sqlx::query("UPDATE supervisor_inbox SET notify_attempts=? WHERE id=?").bind(max).bind(&stuck).execute(&app.db).await.unwrap();
+        sqlx::query("CREATE TRIGGER no_incident_event BEFORE INSERT ON supervisor_inbox WHEN NEW.kind='incident_opened' BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END")
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        let mut d = Detector::default();
+        sweep(&app, &mut d).await;
+        assert!(store::open_incidents(&app.db).await.unwrap().is_empty(), "通知寫不進去：incident 不開，下一輪再來");
+
+        sqlx::query("DROP TRIGGER no_incident_event").execute(&app.db).await.unwrap();
+        sweep(&app, &mut d).await;
+        assert!(!store::open_incidents(&app.db).await.unwrap().is_empty(), "DB 好了：incident 開起來");
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE kind='incident_opened'").fetch_one(&app.db).await.unwrap();
+        assert_eq!(n, 1, "而且通知一則");
     }
 
     /// A blind pass must not restart a threshold that was already accumulating, or a fault
