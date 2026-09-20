@@ -67,7 +67,7 @@ STUB
   export STUB_ASSIGN_FAIL=""
 }
 
-teardown() { rm -rf "$ROOT"; unset AGM_BUILD_BOT AGM_TEST_MINUTE AGM_REBUILD_THRESHOLD AGM_REBUILD_MAX_WAIT_MIN; }
+teardown() { rm -rf "$ROOT"; unset AGM_FAIL_ALERT_AFTER AGM_BUILD_BOT AGM_TEST_MINUTE AGM_REBUILD_THRESHOLD AGM_REBUILD_MAX_WAIT_MIN; }
 
 check() { # check <描述> <要出現的字串> <檔案>
   if grep -q -- "$2" "$3" 2>/dev/null; then
@@ -135,6 +135,19 @@ setup
 export STUB_ASSIGN_FAIL=yes
 bash "$SCRIPT"
 check "派工失敗會交還窗口" "lease release rebuild" "$AGM_DIR/calls.log"
+teardown
+
+# 6b. 連續沒能完成：過閘的那幾輪累計，連續 N 輪推 ops_alert；非整點輪不動計數；完整跑完清零。
+setup
+export STUB_STATE='{"bots":[]}' AGM_FAIL_ALERT_AFTER=3
+bash "$SCRIPT"; AGM_TEST_MINUTE=37 bash "$SCRIPT"; bash "$SCRIPT"
+check_no "連續 2 輪（中間夾一輪非整點）還不喊人" "ops-alert" "$AGM_DIR/calls.log"
+bash "$SCRIPT"
+check "連續 3 個過閘輪推 check_failing" "ops-alert.*check_failing" "$AGM_DIR/calls.log"
+export STUB_STATE='{"bots":[{"id":"bot-build","name":"build"}]}'
+bash "$SCRIPT"
+[ ! -e "$AGM_DIR/daemon-update.fails" ] && { echo "ok   - 完整跑完一輪清零"; PASS=$((PASS + 1)); } || { echo "FAIL - 完整跑完一輪清零"; FAIL=$((FAIL + 1)); }
+unset AGM_FAIL_ALERT_AFTER
 teardown
 
 # 7. 沒設建置 child 就整支跳過——絕不改派給使用者的 bot。
