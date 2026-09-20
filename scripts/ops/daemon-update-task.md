@@ -42,12 +42,21 @@ AGM 定期交辦：正式 daemon（`target/release/agents-managerd serve`，監�
 回報：新 pid、binary 時間、上線的 commit 範圍（舊..新）、AGM 存活確認、有沒有回滾、寫進 .built 的 sha。
 
 ## 3b. 上線前對真 herdr 驗（2026-09-14 起，使用者要求）
-- build 前 `git -C <checkout> log -1 --format=%h` 必須等於本次要上的 commit；不等就重 fetch 再 build。
-- 重啟前用新 binary 對真 herdr 跑 `herdr pane read <任一 pane> --source recent_unwrapped --format ansi`，並送一則短自測 prompt 要 200／delivery ok；任何 409／invalid_request 都不准重啟。
-  **自測對象**（2026-09-18 AGM 裁示）：照 3-0 在回合內部署時，對自己送一定回 409 `a turn is already in flight`，那是結構性的、不算數；改送給 AGM 的 browser-gc child（bot `01M248GA4H1TAHJCZRKVR73S3C`），內容一句「[build 自測，回 ok 即可，不要做任何事]」。它剛好在跑例行回合而回 `a turn is already in flight` 就等它結束再送一次；其他 409 照舊不准重啟。
-- 重啟後立刻 `bin/agm lease status`：restart 必須 released（daemon 啟動會自動 release）；仍 held 就手動 release，不留保護期。
-  **交還窗口要出示 `--lease-token`**（SPEC §18.10）：那把 token 只在 `lease acquire` 的回應裡出現一次，這則交辦的末尾也會附上；
-  `lease status` 查不到它。真的拿不到（例如持有者的 pane 已經不在）就**回報請 AGM 代為 force**——`--force` 只有 AGM 角色做得到（你會拿到 403 `lease_force_forbidden`），AGM 做的時候會留稽核紀錄。
+
+**這一段由 `scripts/ops/daemon-swap.sh` 執行，不要自己另外跑。**（2026-09-20 事故：呼叫端把自己的
+pane id 寫死，pane 換過之後 `herdr pane read` 回 `pane_not_found`，卻照樣換了 binary；2026-09-16 也是
+同一個坑。）腳本在動 binary 之前會自己做完：
+
+- pane id **當場取**：先看 `$HERDR_PANE_ID`，沒有才 `herdr pane current`；不接受任何寫死或由呼叫端帶進來的值。
+- `herdr pane read <id> --source recent_unwrapped --format ansi`：rc≠0、或輸出含 `pane_not_found`／
+  `protocol_mismatch` → 以前置核對失敗（exit 3）中止，**binary 不動**。
+- 自測 prompt 送 AGM 的 browser-gc child：非 200 而且不是 `a turn is already in flight` → exit 3；
+  是 in flight 就等它跑完重送（有次數上限，用完仍送不進去一樣 exit 3）。
+
+build 前 `git -C <checkout> log -1 --format=%h` 必須等於本次要上的 commit；不等就重 fetch 再 build。
+
+重啟後 `bin/agm lease status`：restart 必須 released（daemon 啟動會自動 release）；仍 held 腳本會用 acquire
+當下拿到的 token 交還，不留保護期。真的拿不到 token（例如持有者的 pane 已經不在）就回報請 AGM 代為 `--force`。
 
 ## 3c. 核准綁申請者、一張核准一個窗口（3304f1a 起，2026-09-16）
 - 這則交辦末尾寫的 **owner 字串**（例如 `daemon-update-kick`）就是 kick 申請 rebuild 核准時的 `--requester`。之後所有 `lease acquire／renew／release` 的 `--owner`

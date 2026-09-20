@@ -58,7 +58,10 @@ setup() { # setup <checkout 的 SCHEMA_VERSION> <DB 目前的 user_version>
   export DAEMON_DB="$ROOT/am.sqlite3" DAEMON_LOG="$ROOT/daemon.log" SWAP_LOG="$ROOT/swap.log"
   export SWAP_SETTLE_SECS=0 SWAP_WINDOW_TRIES=1
   export AGM_BIN="$ROOT/bin/agm" SQLITE_BIN="$ROOT/bin/sqlite3" CURL_BIN="$ROOT/bin/curl"
-  export LAUNCHCTL_BIN="$ROOT/bin/launchctl" PGREP_BIN="$ROOT/bin/pgrep"
+  export LAUNCHCTL_BIN="$ROOT/bin/launchctl" PGREP_BIN="$ROOT/bin/pgrep" HERDR_BIN="$ROOT/bin/herdr"
+  export SWAP_PROBE_TRIES=2 SWAP_PROBE_BOT=bot-probe
+  export HERDR_PANE_ID="w1:pA"          # 預設：pane 裡本來就有；測 current 的 case 會 unset
+  export STUB_PANE_READ_OK=1 STUB_PANE_CURRENT="w1:pA" STUB_PROBE='200 {"delivery":"ok"}' 
   mkdir -p "$AGM_DIR" "$AGM_REPO/target/release" "$CHECKOUT/daemon/src" "$CHECKOUT/target/release" "$ROOT/bin"
 
   # 假 checkout：SCHEMA_HISTORY 的最後一項就是這顆 binary 認得的版本。
@@ -157,8 +160,34 @@ STUB
 #!/bin/bash
 echo 99999
 STUB
+
+  cat > "$ROOT/bin/probe" <<'STUB'
+#!/bin/bash
+echo "$*" >> "$AGM_DIR/probe.log"
+n=$(wc -l < "$AGM_DIR/probe.log" | tr -d ' ')
+if [ -n "$STUB_PROBE_FIRST_INFLIGHT" ] && [ "$n" = 1 ]; then
+  printf '409 {"error":"conflict","reason":"a turn is already in flight"}'; exit 0
+fi
+printf '%s' "$STUB_PROBE"
+STUB
+  export SWAP_PROBE_CMD="$ROOT/bin/probe"
+
+  cat > "$ROOT/bin/herdr" <<'STUB'
+#!/bin/bash
+echo "$*" >> "$AGM_DIR/herdr.log"
+case "$1 $2" in
+  "pane current") printf '{"result":{"pane":{"pane_id":"%s"}}}' "$STUB_PANE_CURRENT" ;;
+  "pane read")
+      # 只有「當下真的存在」的那個 pane 讀得到：預設是 HERDR_PANE_ID／current 回的那顆。
+      want="$STUB_PANE_CURRENT"   # 當下真的存在的那顆；別的 id（例如被寫死的舊 id）一律 not found
+      if [ -z "$STUB_PANE_READ_OK" ] || [ "$3" != "$want" ]; then
+        printf '{"error":{"code":"pane_not_found","message":"pane %s not found"}}' "$3"; exit 1
+      fi
+      printf 'some pane text' ;;
+esac
+STUB
   chmod +x "$ROOT/bin/"*
-  : > "$AGM_DIR/calls.log"; : > "$AGM_DIR/launchctl.log"
+  : > "$AGM_DIR/calls.log"; : > "$AGM_DIR/launchctl.log"; : > "$AGM_DIR/herdr.log"; : > "$AGM_DIR/probe.log"
 }
 
 teardown() { rm -rf "$ROOT"; }
@@ -285,6 +314,61 @@ rc=$(run)
 check_eq "基準不在歷史裡就中止（rc=3）" "3" "$rc"
 check "講清楚為什麼" "信任閘門無從比對" "$SWAP_LOG"
 teardown
+
+# 12. 3b：herdr pane read 讀不到 pane（pane 換過、或被寫死舊 id）→ exit 3，binary 不能被動。
+setup 10 10
+export HERDR_PANE_ID="w9:pSTALE"      # 一個已經不存在的舊 id（模擬寫死）
+rc=$(run)
+check_eq "pane 讀不到就中止（rc=3）" "3" "$rc"
+check "log 講出 pane_not_found" "pane_not_found" "$SWAP_LOG"
+check_no "沒有動 binary" "submit" "$AGM_DIR/launchctl.log"
+check_eq "線上 binary 沒被換掉" "old-binary" "$(cat "$AGM_REPO/target/release/agents-managerd")"
+teardown
+
+# 13. 3b：沒有 HERDR_PANE_ID 時，自己去問 `herdr pane current`，不是猜也不是用呼叫端的值。
+setup 10 10
+unset HERDR_PANE_ID
+rc=$(run)
+check_eq "問得到 current 就能往下走（rc=0）" "0" "$rc"
+check "有去問 pane current" "pane current" "$AGM_DIR/herdr.log"
+check "讀的是 current 回的那顆" "pane read w1:pA" "$AGM_DIR/herdr.log"
+teardown
+
+# 14. 3b：pane id 不接受呼叫端帶進來——腳本沒有這種參數，而且讀的一定是當下取到的那顆。
+setup 10 10
+rc=$(bash "$SCRIPT" --sha "$SHA" --old "$OLD" --old-hash "$OLDHASH" --approval ap-1 --owner bot-me --checkout "$CHECKOUT" --pane w9:pSTALE >/dev/null 2>&1; echo $?)
+check_eq "帶 --pane 會被拒（rc=2）" "2" "$rc"
+setup 10 10
+rc=$(run)
+check "讀的是環境變數那顆，不是舊的寫死值" "pane read w1:pA" "$AGM_DIR/herdr.log"
+check_no "不會去讀寫死的舊 id" "w169:pN" "$AGM_DIR/herdr.log"
+teardown
+
+# 15. 3b 自測 prompt：非 200 也不是 in flight → exit 3，不換 binary。
+setup 10 10
+export STUB_PROBE='409 {"error":"conflict","reason":"composer_unreadable"}'
+rc=$(run)
+check_eq "送不出去就中止（rc=3）" "3" "$rc"
+check "log 帶上回應" "composer_unreadable" "$SWAP_LOG"
+check_no "沒有動 binary" "submit" "$AGM_DIR/launchctl.log"
+teardown
+
+# 16. 3b 自測 prompt：對方正在跑回合 → 等它結束重送，不算失敗。
+setup 10 10
+export STUB_PROBE_FIRST_INFLIGHT=1
+rc=$(run)
+check_eq "in flight 會重送並繼續（rc=0）" "0" "$rc"
+check "重送過（送了兩次）" "bot-probe" "$AGM_DIR/probe.log"
+check "自測最後是通的" "3b self probe ok" "$SWAP_LOG"
+teardown
+
+# 17. 腳本本身：`$VAR` 後面直接接全形標點會被 `set -u` 當成變數名的一部分（2026-09-16／09-20／09-20 踩過三次）。
+if LC_ALL=C grep -nE '\$[A-Za-z_][A-Za-z0-9_]*[^ -~]' "$SCRIPT" > /tmp/daemon-swap-unbraced.$$ 2>/dev/null; then
+  echo "FAIL - 變數後面接非 ASCII 字元要用 \${VAR}"; sed 's/^/      /' /tmp/daemon-swap-unbraced.$$; FAIL=$((FAIL + 1))
+else
+  echo "ok   - 變數後面接非 ASCII 字元都有大括號"; PASS=$((PASS + 1))
+fi
+rm -f /tmp/daemon-swap-unbraced.$$
 
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
