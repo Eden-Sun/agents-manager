@@ -1420,6 +1420,11 @@ fn rsync_rsh(remote: &BuildRemoteCfg, has_password: bool, askpass: bool) -> Stri
     ssh
 }
 
+/// 同步原始碼時排除的東西（#328）。`target` 要**錨定在根**：不錨定的 `--exclude target` 會連 `src/target/mod.rs`、`crates/target/`、
+/// `tests/fixtures/target/` 這些原始碼一起濾掉，遠端編不過或行為不同。代價：巢狀的獨立 crate 建置輸出（`fuzz/target` 之類）
+/// 會被一起送（rsync 3.2 沒有 `--exclude-if-present`，認不出它們）；那是樹裡真實存在的東西，送過去不會錯。
+const RSYNC_EXCLUDES: [&str; 4] = ["--exclude", ".git", "--exclude", "/target"];
+
 fn sync_source(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, dir: &str, deadline: &Deadline) -> anyhow::Result<()> {
     if !has_program(&rsync_program()) {
         anyhow::bail!("remote Cargo requires `rsync` on the daemon host");
@@ -1451,7 +1456,7 @@ fn sync_source(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, dir: &str, 
     }
     let source = format!("{}/", cwd.to_string_lossy().trim_end_matches('/'));
     let dest = format!("{}@{}:{}/", remote.user, remote.host, dir.trim_end_matches('/'));
-    cmd.args(["-az", "--delete", "--exclude", ".git", "--exclude", "target", "-e", &ssh])
+    cmd.args(["-az", "--delete"]).args(RSYNC_EXCLUDES).args(["-e", &ssh])
         .arg(source)
         .arg(dest);
     let status = run_status(cmd, "rsync source", deadline)?;
@@ -1569,6 +1574,34 @@ fn run_offload(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, args: &[Str
 
 #[cfg(test)]
 mod tests {
+    /// #328：同步的排除規則不能濾掉名叫 target 的原始碼目錄，但根目錄的 target 仍不送。
+    #[test]
+    fn the_rsync_excludes_keep_source_dirs_named_target() {
+        if !has_program(&rsync_program()) {
+            return;
+        }
+        let base = std::env::temp_dir().join(format!("am-rsync-{}", std::process::id()));
+        let (src, dst) = (base.join("src"), base.join("dst"));
+        for d in ["src/target", "crates/target", "target/debug"] {
+            std::fs::create_dir_all(src.join(d)).unwrap();
+        }
+        std::fs::write(src.join("src/target/mod.rs"), "x").unwrap();
+        std::fs::write(src.join("crates/target/Cargo.toml"), "x").unwrap();
+        std::fs::write(src.join("target/debug/big"), "x").unwrap();
+        let st = Command::new(rsync_program())
+            .args(["-a", "--delete"])
+            .args(RSYNC_EXCLUDES)
+            .arg(format!("{}/", src.display()))
+            .arg(format!("{}/", dst.display()))
+            .output()
+            .unwrap();
+        assert!(st.status.success(), "{}", String::from_utf8_lossy(&st.stderr));
+        assert!(dst.join("src/target/mod.rs").exists(), "src/target 是原始碼，要送");
+        assert!(dst.join("crates/target/Cargo.toml").exists(), "crates/target 是 workspace 成員，要送");
+        assert!(!dst.join("target").exists(), "根目錄的 target 不送");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
     /// #329：手改 config 的極大 timeout_secs 不能讓 arm() 溢位 panic；單次 ssh 卡住要有上限。
     #[test]
     fn a_huge_timeout_does_not_panic_and_a_hung_ssh_is_bounded() {
