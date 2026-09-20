@@ -232,22 +232,15 @@ impl HostConn {
         let remote = format!("/bin/sh -c {}", sh_quote(&script));
         let mut cmd = tokio::process::Command::new("ssh");
         cmd.args(self.ssh_args()).arg(&cfg.ssh).arg(&remote);
-        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-        cmd.kill_on_drop(true);
-        let mut child = cmd.spawn().with_context(|| format!("spawn ssh {}", cfg.ssh))?;
-        if let Some(mut sin) = child.stdin.take() {
-            use tokio::io::AsyncWriteExt;
-            sin.write_all(data).await.with_context(|| format!("write {} to {}", path, cfg.ssh))?;
-            sin.shutdown().await.ok();
-        }
-        let out = tokio::time::timeout(SSH_PUT_TIMEOUT, child.wait_with_output())
+        let (out, wrote) = run_with_stdin(cmd, data, SSH_PUT_TIMEOUT)
             .await
-            .map_err(|_| anyhow::anyhow!("ssh to {} timed out writing {}", cfg.ssh, path))?
-            .with_context(|| format!("run ssh {}", cfg.ssh))?;
+            .with_context(|| format!("run ssh {}", cfg.ssh))?
+            .ok_or_else(|| anyhow::anyhow!("ssh to {} timed out writing {}", cfg.ssh, path))?;
         if !out.status.success() {
             let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
             bail!("ssh {} could not write {} ({}): {}", cfg.ssh, path, out.status, if err.is_empty() { "no stderr".into() } else { err });
         }
+        wrote.with_context(|| format!("write {} to {}", path, cfg.ssh))?;
         Ok(())
     }
 
@@ -258,22 +251,15 @@ impl HostConn {
         let remote = format!("/bin/sh -c {}", sh_quote(script));
         let mut cmd = tokio::process::Command::new("ssh");
         cmd.args(self.ssh_args()).arg(&cfg.ssh).arg(&remote);
-        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-        cmd.kill_on_drop(true);
-        let mut child = cmd.spawn().with_context(|| format!("spawn ssh {}", cfg.ssh))?;
-        if let Some(mut sin) = child.stdin.take() {
-            use tokio::io::AsyncWriteExt;
-            sin.write_all(data).await.with_context(|| format!("write stdin to {}", cfg.ssh))?;
-            sin.shutdown().await.ok();
-        }
-        let out = tokio::time::timeout(timeout, child.wait_with_output())
+        let (out, wrote) = run_with_stdin(cmd, data, timeout)
             .await
-            .map_err(|_| anyhow::anyhow!("ssh to {} timed out", cfg.ssh))?
-            .with_context(|| format!("run ssh {}", cfg.ssh))?;
+            .with_context(|| format!("run ssh {}", cfg.ssh))?
+            .ok_or_else(|| anyhow::anyhow!("ssh to {} timed out", cfg.ssh))?;
         if !out.status.success() {
             let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
             bail!("ssh {} failed ({}): {}", cfg.ssh, out.status, if err.is_empty() { "no stderr".into() } else { err });
         }
+        wrote.with_context(|| format!("write stdin to {}", cfg.ssh))?;
         Ok(String::from_utf8_lossy(&out.stdout).to_string())
     }
 
@@ -491,6 +477,37 @@ herdr session list 2>&1 | sed 's/^/AM_LIST /'
         }
         let _ = std::fs::remove_file(&ctl);
         let _ = std::fs::remove_file(short_dir(self.instance.as_deref()).join(format!("{}.sock", self.name)));
+    }
+}
+
+/// 把 `data` 餵進子行程的 stdin 並等它結束，**寫入與等待共用同一個 `timeout`**（#282）。
+/// 以前 `write_all` 在 timeout 外面：資料大於 pipe buffer、對端活著但不讀時，寫入永遠 pending，逾時根本不啟動。
+/// `None`＝逾時（`kill_on_drop` 會收掉 ssh）；`Some((輸出, 寫入結果))`——行程先退出時寫入會 EPIPE，
+/// 呼叫端先看 exit status／stderr（那才是原因），行程成功但寫入失敗才報寫入錯。
+async fn run_with_stdin(
+    mut cmd: tokio::process::Command,
+    data: &[u8],
+    timeout: Duration,
+) -> std::io::Result<Option<(std::process::Output, std::io::Result<()>)>> {
+    use tokio::io::AsyncWriteExt;
+    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.kill_on_drop(true);
+    let mut child = cmd.spawn()?;
+    let mut sin = child.stdin.take();
+    let write = async {
+        let r = match sin.as_mut() {
+            Some(s) => s.write_all(data).await,
+            None => Ok(()),
+        };
+        if let Some(mut s) = sin.take() {
+            s.shutdown().await.ok();
+        }
+        r
+    };
+    let run = async { tokio::join!(write, child.wait_with_output()) };
+    match tokio::time::timeout(timeout, run).await {
+        Err(_) => Ok(None),
+        Ok((wrote, out)) => Ok(Some((out?, wrote))),
     }
 }
 
@@ -865,6 +882,31 @@ mod tests {
             let p = dir.join(format!("{host_name}.{suffix}"));
             assert!(p.to_string_lossy().len() <= 100, "{suffix} 路徑超過 AF_UNIX 上限：{}", p.display());
         }
+    }
+
+    /// #282：對端活著但不讀 stdin（`sleep`），資料又大於 pipe buffer——寫入卡住時整個呼叫要在 timeout 內回「逾時」。
+    #[tokio::test]
+    async fn a_stalled_stdin_write_is_bounded_by_the_timeout() {
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c").arg("sleep 30");
+        let data = vec![7u8; 8 * 1024 * 1024];
+        let started = std::time::Instant::now();
+        let r = tokio::time::timeout(Duration::from_secs(10), run_with_stdin(cmd, &data, Duration::from_millis(500)))
+            .await
+            .expect("寫入卡住時 timeout 必須生效，不能整個呼叫掛住");
+        assert!(matches!(r, Ok(None)), "要回逾時：{r:?}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    /// 正常路徑：資料完整送到、輸出照拿。
+    #[tokio::test]
+    async fn stdin_data_reaches_the_child_and_its_output_comes_back() {
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c").arg("wc -c");
+        let data = vec![1u8; 300_000];
+        let (out, wrote) = run_with_stdin(cmd, &data, Duration::from_secs(10)).await.unwrap().unwrap();
+        wrote.unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "300000");
     }
 
     #[tokio::test]
