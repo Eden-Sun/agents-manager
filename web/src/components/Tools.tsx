@@ -7,11 +7,8 @@ import { missingTools, projectHostName, runningBotsOnHost, useStore } from '../s
 import { KindTag } from './KindTag'
 import './tools.css'
 
+import { hostLabel, relevantMissing } from './toolsHelpers'
 /** v4.0 agent-CLI detection and "install via a running bot": the daemon prompts that bot to install + log in inside its own pane. */
-
-export function hostLabel(host: string): string {
-  return host === 'local' ? '本機' : host
-}
 
 /** The install button: picks a running bot on that host. */
 export function InstallToolButton({ host, kind, small }: { host: string; kind: BotKind; small?: boolean }) {
@@ -127,17 +124,6 @@ function summarizeMissing(byHost: Map<string, BotKind[]>): string {
   const hostCount = entries.length
   const cliCount = entries.reduce((n, [, ks]) => n + ks.length, 0)
   return `${hostCount} 台主機缺少 ${cliCount} 個 CLI`
-}
-
-/** Missing tools that affect the current bot or group members. */
-export function relevantMissing(
-  all: { host: string; kind: BotKind }[],
-  focusHost: string | null | undefined,
-  focusKinds: BotKind[] | null | undefined,
-): { host: string; kind: BotKind }[] {
-  if (!focusHost || !focusKinds || focusKinds.length === 0) return []
-  const want = new Set(focusKinds)
-  return all.filter((m) => m.host === focusHost && want.has(m.kind))
 }
 
 /** Stable snapshot key — `missingTools()` returns fresh objects each call. */
