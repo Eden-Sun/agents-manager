@@ -120,7 +120,7 @@ log "== check"
 # 同一個 requester 對同一個 commit 只算一筆。**這支腳本自己的申請不算**（review2 2026-09-16）：算進去的話
 # 自己先申請、30 分鐘後自己觸發「等太久」，每 5 分鐘跑一輪、main 一動就再申請一筆，協調者每 5 分鐘被叫一次。
 # 自己有還在等的申請（pending／approved、沒過期）時另外照常每輪往下跑：在等 AGM 裁示或安全窗口，不必等整點。
-# 數不出來就當 0，也就是退回純整點的舊行為。
+# 數不出來＝未知，**不是 0**（#336）：這輪照常往下檢查並記成失敗（連續幾輪喊人），不退回純整點。
 THRESHOLD=${AGM_REBUILD_THRESHOLD:-3}
 MAX_WAIT_MIN=${AGM_REBUILD_MAX_WAIT_MIN:-30}
 MINUTE=$(( 10#${AGM_TEST_MINUTE:-$(date +%M)} ))   # AGM_TEST_MINUTE 只給隔離測試用
@@ -175,7 +175,10 @@ MINE=${REQUESTS##* }
 WAITED=${REQUESTS#* }
 WAITED=${WAITED%% *}
 REQUESTS=${REQUESTS%% *}
-case "$REQUESTS" in ''|*[!0-9]*) log "讀不到重建申請數，當 0"; REQUESTS=0 ;; esac
+# 讀不到＝未知，不是 0（#336）：當 0 會讓非整點那一輪落到下面「這輪不檢查」而靜默跳過，門檻／等太久／自己有核准在等
+# 三個「不等整點」的觸發全部失效。未知時這輪照常往下檢查（多檢查一次無害），並記成失敗，連續幾輪推 ops_alert。
+UNKNOWN=0
+case "$REQUESTS" in ''|*[!0-9]*) note_fail "讀不到重建申請數（approval list 壞了或格式不符）：這輪照常往下檢查，不當成沒人申請"; UNKNOWN=1; REQUESTS=0 ;; esac
 case "$WAITED" in ''|*[!0-9]*) WAITED=0 ;; esac
 case "$MINE" in 1) ;; *) MINE=0 ;; esac
 if [ "$REQUESTS" -ge "$THRESHOLD" ]; then
@@ -184,6 +187,8 @@ elif [ "$REQUESTS" -gt 0 ] && [ "$WAITED" -ge "$MAX_WAIT_MIN" ]; then
   log "最早一筆重建申請已等 ${WAITED} 分鐘（上限 ${MAX_WAIT_MIN}），不等整點（申請 ${REQUESTS}/${THRESHOLD}）"
 elif [ "$MINE" = 1 ]; then
   log "自己的重建核准還在等（裁示或安全窗口），不等整點（別人的申請 ${REQUESTS}/${THRESHOLD}）"
+elif [ "$UNKNOWN" = 1 ]; then
+  log "申請數未知，不等整點：這輪照常檢查"
 elif [ "$MINUTE" -ge 5 ]; then
   log "非整點且重建申請只有 ${REQUESTS}/${THRESHOLD}（最早一筆等了 ${WAITED} 分鐘），這輪不檢查"; exit 0
 fi

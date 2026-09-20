@@ -22,7 +22,7 @@
 建立時間晚於上次真的上線（`daemon-update.built` 的 mtime）、狀態是 `pending` 或 `approved`、**還沒過期**；
 `denied` 不算，同一個 requester 對同一個 commit 重複申請算一筆，**這支腳本自己（`AM_AGENT_NAME`）的申請不算**
 （review2 2026-09-16：算進去的話自己申請、30 分鐘後自己觸發「等太久」，每 5 分鐘一輪、main 一動就再對協調者開一筆）。bot 在對話裡的口頭申請由 AGM 補一筆
-approval，所以 approval 表就是唯一真相。數不出來（端點壞了、格式不符）就當 0，退回純整點的舊行為。
+approval，所以 approval 表就是唯一真相。數不出來（端點壞了、格式不符）＝未知，**不當 0**（#336）：這輪照常往下檢查、記成失敗，連續 `AGM_FAIL_ALERT_AFTER` 輪推 `ops_alert check_failing`。
 網頁左上角 RAM 那一格旁邊的 chip 顯示同一個數字（`web/src/api/rebuildRequests.ts`）。
 
 環境變數：
