@@ -2413,6 +2413,7 @@ async function identityAuth(set: SetFn, get: GetFn, host: string, identity: stri
 }
 
 let disconnect: (() => void) | null = null
+let openedOnce = false
 let quotaSweep: ReturnType<typeof setInterval> | null = null
 const QUOTA_SWEEP_MS = 5 * 60_000
 
@@ -2427,6 +2428,8 @@ function connectSocket(set: SetFn, get: GetFn) {
         set({ socket, stateStale: false })
         void get().refreshState()
         void get().refreshLoadedMissions()
+        if (openedOnce) void reloadLoadedConversations(get)
+        openedOnce = true
         flushUnsentReads()
         // 額度也整份重抓（取代，不合併）：WS 只會推「某個 key 更新了」，daemon 刪掉的 key 永遠不會
         // 通知。2026-09-14 daemon 重啟清掉 `codex:cc1` 之後，開著的分頁標題列仍一直顯示它。
@@ -2439,13 +2442,28 @@ function connectSocket(set: SetFn, get: GetFn) {
   })
 }
 
+function loadedBotIdsOf(get: GetFn): string[] {
+  return Object.keys(get().loadedBots).filter((botId) => get().loadedBots[botId])
+}
+
+/**
+ * 斷線重連後補訊息（#368）：daemon 重啟沒有世代標記，重連時新 daemon 的 seq 若已超過我們記的 `lastSeq`，
+ * 它會當成「只差幾則」照補，舊 daemon 尾巴那段訊息永遠不會來，也不會 `resync`。`refreshState` 只補狀態不補訊息，
+ * 所以重連（不是第一次連上）時已載入的對話一律重抓。
+ */
+export async function reloadLoadedConversations(get: GetFn): Promise<void> {
+  for (const botId of loadedBotIdsOf(get)) await get().loadMessages(botId)
+  const proj = get().selectedProjectId
+  if (proj) await get().loadGroupMessages(proj)
+}
+
 const resyncTrigger = (() => {
   let ctx: { set: SetFn; get: GetFn } | null = null
   const runner = createResyncRunner(async () => {
     const { set, get } = ctx!
     resetStateSeq()
     try {
-      const loadedBotIds = Object.keys(get().loadedBots).filter((botId) => get().loadedBots[botId])
+      const loadedBotIds = loadedBotIdsOf(get)
       await get().refreshState()
       await get().loadQuota()
       for (const botId of loadedBotIds) await get().loadMessages(botId)
