@@ -1018,3 +1018,21 @@ test('多分頁：這個分頁存草稿不能洗掉別的分頁剛存的草稿',
   useStore.getState().setDraft('bot:b1', '')
   assert.deepEqual(JSON.parse(localStorage.getItem('am.drafts')!), { 'bot:b9': '另一個分頁打的' }, '清掉自己的鍵，別人的留著')
 })
+
+test('送出時連線斷了（回應遺失）：再送同一句要沿用同一個 client_request_id（#367）', async () => {
+  seed()
+  let n = 0
+  routeDaemon(() => {
+    n += 1
+    if (n === 1) throw new TypeError('Failed to fetch')
+    return json({ turn_id: 't1', message_id: 'm1', delivery: 'ok' }, 200)
+  })
+  assert.equal(await useStore.getState().sendPrompt('b1', '跑測試'), false)
+  assert.equal(await useStore.getState().sendPrompt('b1', '跑測試'), true)
+  const crids = requests.filter((r) => r.path.endsWith('/prompt')).map((r) => (r.body as { client_request_id?: string }).client_request_id)
+  assert.equal(crids.length, 2)
+  assert.equal(crids[0], crids[1])
+  await useStore.getState().sendPrompt('b1', '跑測試')
+  const last = requests.filter((r) => r.path.endsWith('/prompt')).at(-1)!.body as { client_request_id?: string }
+  assert.notEqual(last.client_request_id, crids[0], '成功之後同一句是新的動作')
+})

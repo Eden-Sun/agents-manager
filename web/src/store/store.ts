@@ -1392,9 +1392,13 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   async sendPrompt(botId, text, attachments = [], sendNow = false, startIfStopped = false) {
-    const crid = api.newClientRequestId()
+    // 連線斷在 daemon 收下之後（回應遺失）：使用者會再按一次同一句，要拿同一個 crid，daemon 才認得是同一件事而不是再送一次。
+    // 只有「沒收到任何回覆」的失敗才沿用；daemon 明確回了（成功或 ApiError）就作廢，下一次是新的動作（#367）。
+    const reqKey = `send:${botId}:${sendNow ? 1 : 0}:${text}\u0000${attachments.join(',')}`
+    const crid = createRequestId(reqKey)
     try {
       const res = await api.sendPrompt(botId, text, crid, attachments, sendNow, startIfStopped)
+      settleCreateRequest(reqKey)
       // 送出鍵沒生效（not_sent）／不知道生效沒有（unknown）：這一則已是 failed、沒有照一般方式送出（#120）。
       const fell = sendNow ? sendNowFellThrough(res.send_now) : null
       if (fell) {
@@ -1425,6 +1429,7 @@ export const useStore = create<StoreState>((set, get) => ({
       set((s) => noteInFlightTurn(s, botId, res.turn_id, crid, get().runs[botId]?.id ?? null, delivery))
       return true
     } catch (e) {
+      if (e instanceof ApiError) settleCreateRequest(reqKey)
       // 送了、結果還沒寫進 DB（503）：不是沒送。回 false 會讓輸入框留著同一段字、排隊的被放回去，之後又送一次。
       const un = asUncommittedSend(e)
       if (un) {
