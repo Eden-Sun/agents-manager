@@ -903,6 +903,10 @@ async fn patch_project(
     Ok((StatusCode::OK, Json(json!({"project_id": id, "needs_restart": false}))).into_response())
 }
 
+async fn soft_delete_child(app: &Arc<App>, bot_id: &str) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE bots SET deleted_at=? WHERE id=? AND deleted_at IS NULL").bind(db::now()).bind(bot_id).execute(&app.db).await.map(|_| ())
+}
+
 async fn delete_project(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
     // 拿著專案裡每顆 bot 的 per-bot 鎖（start 用同一把）再確認都停了、再定案：鎖外檢查會跟 start 競爭，
     // 刪掉剛被重新啟動的 bot（sol 四輪）。依 id 排序拿鎖；其他路徑一次只拿一把，不會形成環。
@@ -927,21 +931,48 @@ async fn delete_project(State(app): State<Arc<App>>, Path(id): Path<String>) -> 
     // `deleted_at IS NULL`、project 卻已經軟刪的列：UI 看不到、reconcile 也掃不到（`live_bots_on_host`
     // 要求專案還活著），它們的 pane 與 hook 目錄從此沒人回收（review 2026-09-16）。
     // 鎖還在手上，順手比照 delete_bot 收掉。
+    // 專案已經在 config 裡定案刪除，之後不能再「一顆失敗就整段中止」：後面的 child 會永遠留在 `deleted_at IS NULL`，
+    // 使用者再按一次只會拿到 not_in_config（#284）。每顆各自試，寫不進去的背景重試到成功才 purge，最後仍回錯讓人知道。
+    let mut failed: Vec<db::Bot> = Vec::new();
     for bot in in_project.iter().filter(|b| b.managed_by != "user") {
         // 這個 UPDATE 以前用 `let _ =` 忽略結果：DB 寫不進去也照樣往下 purge，變成
-        // 「DB 說它還活著、runtime 目錄卻已經被砍光」，事後救不回來（issue #87）。失敗就整支
-        // API 一起失敗，purge 只能發生在 DB 已經確定寫成 deleted 之後。
-        sqlx::query("UPDATE bots SET deleted_at=? WHERE id=? AND deleted_at IS NULL")
-            .bind(db::now())
-            .bind(&bot.id)
-            .execute(&app.db)
-            .await
-            .map_err(any_err)?;
+        // 「DB 說它還活著、runtime 目錄卻已經被砍光」，事後救不回來（issue #87）。purge 只能發生在 DB 已經確定寫成 deleted 之後。
+        if let Err(e) = soft_delete_child(&app, &bot.id).await {
+            tracing::error!(bot = %bot.name, error = ?e, "project deleted but its child could not be soft-deleted; retrying in the background");
+            failed.push(bot.clone());
+            continue;
+        }
         lifecycle::purge_bot_dir(&app, &bot.id, &host).await;
         tracing::info!(bot = %bot.name, project = %id, "project deleted; its child bot went with it");
     }
+    let retry_failed = !failed.is_empty();
+    if retry_failed {
+        let (app2, host2) = (app.clone(), host.clone());
+        tokio::spawn(async move {
+            let mut pending = failed;
+            for attempt in 0.. {
+                tokio::time::sleep(crate::reconcile::recovery_retry_delay(attempt)).await;
+                let mut still = Vec::new();
+                for bot in pending {
+                    if soft_delete_child(&app2, &bot.id).await.is_ok() {
+                        lifecycle::purge_bot_dir(&app2, &bot.id, &host2).await;
+                    } else {
+                        still.push(bot);
+                    }
+                }
+                if still.is_empty() {
+                    app2.emit("project_changed", json!({})).await;
+                    return;
+                }
+                pending = still;
+            }
+        });
+    }
     drop(guards);
     app.emit("project_changed", json!({"project_id": id})).await;
+    if retry_failed {
+        return Err(any_err("project deleted, but some child bots could not be soft-deleted yet; retrying in the background"));
+    }
     Ok((StatusCode::OK, Json(json!({}))).into_response())
 }
 
@@ -3605,6 +3636,41 @@ mod delete_bot_tests {
         assert!(delete_project(State(app.clone()), Path(e.project_id.clone())).await.is_err(), "DB 寫不進去，API 不能回成功");
         assert!(dir.join("marker").exists(), "DB 寫不進去卻把 runtime 目錄砍了");
         assert!(db::bot(&app.db, &child).await.unwrap().unwrap().deleted_at.is_none(), "DB 沒寫成功，不該說它已經刪除");
+    }
+
+    /// #284：第一顆 child 的軟刪寫不進去時，後面的 child 仍要收掉，失敗的那顆背景重試到成功——專案已經定案刪除，
+    /// 使用者再按一次只會 not_in_config，不能留下永遠沒人回收的活 bot。
+    #[tokio::test]
+    async fn a_child_that_fails_to_soft_delete_does_not_strand_its_siblings() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let b1 = a_bot(&e, "alfa", "user").await;
+        in_config(&e, &[(&b1, "alfa")]).await;
+        let mut kids = vec![];
+        for n in ["alfa-k1", "alfa-k2", "alfa-k3"] {
+            kids.push(a_bot(&e, n, "child").await);
+        }
+        sqlx::query(&format!(
+            "CREATE TRIGGER am_test_fail_first BEFORE UPDATE OF deleted_at ON bots WHEN NEW.id = '{}' BEGIN SELECT RAISE(ABORT, 'boom'); END",
+            kids[0]
+        ))
+        .execute(&app.db)
+        .await
+        .unwrap();
+        assert!(delete_project(State(app.clone()), Path(e.project_id.clone())).await.is_err());
+        for k in &kids[1..] {
+            assert!(db::bot(&app.db, k).await.unwrap().unwrap().deleted_at.is_some(), "失敗的那顆後面的 child 也要收掉");
+        }
+        sqlx::query("DROP TRIGGER am_test_fail_first").execute(&app.db).await.unwrap();
+        let mut done = false;
+        for _ in 0..150 {
+            if db::bot(&app.db, &kids[0]).await.unwrap().unwrap().deleted_at.is_some() {
+                done = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(done, "寫得進去之後背景補上");
     }
 
     /// 死鎖回歸（sol 五輪）：child id 字典序**小於** parent。舊寫法 delete_bot 先持 parent、定案後才拿 child，
