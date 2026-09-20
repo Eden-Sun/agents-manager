@@ -203,7 +203,7 @@
 
 .unread-chip.current.waits-kids {
   border-color: var(--lamp-green);
-  box-shadow: inset 3px 0 0 var(--warn), inset 0 0 0 1px var(--lamp-green);
+  box-shadow: inset 3px 0 0 var(--lamp-green), inset 0 0 0 1px var(--lamp-green);
 }
 
 /* 紅／黃講「該做什麼」比「你在哪」重要：填色維持語意，左條疊上去。 */
@@ -213,10 +213,11 @@
   color: var(--danger);
 }
 
+/* 正在看＋等子 agent：綠框留著（你在這裡），顏色交給那顆黃點。 */
 .unread-chip.current.waits-kids {
-  background: var(--warn-soft);
-  border-color: var(--warn);
-  color: var(--warn);
+  background: var(--bg-hover);
+  border-color: var(--lamp-green);
+  color: var(--text);
 }
 
 /* `needs-reply`（不叫 `blocked`：styles.css 裸的 `.blocked` 會把晶片撐成 44px）：紅框紅字紅點。放 `.working` 之後，紅要蓋過中性灰。 */
@@ -254,11 +255,12 @@
   color: #fff;
 }
 
-/* 等子 agent：黃（2026-09-12 使用者：「等待 child 更好，用黃色」，紅只留給需要本人動手）。`--lamp-yellow` 只有 2.4:1 只能當點，字框用 `--warn`。 */
+/* 等子 agent：只有那顆點是黃的（2026-09-20 使用者：「不用整個換色，只要 progress ball」）。
+   底與框維持中性，晶片列才不會一半是黃的；紅（需要本人動手）仍然整顆換色。 */
 .unread-chip.waits-kids {
-  border-color: var(--warn);
-  background: var(--warn-soft);
-  color: var(--warn);
+  border-color: var(--border);
+  background: transparent;
+  color: var(--text-dim);
 }
 
 .unread-chip.waits-kids .unread-chip-dot {
