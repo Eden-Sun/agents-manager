@@ -983,12 +983,29 @@ async fn delete_project(State(app): State<Arc<App>>, Path(id): Path<String>) -> 
             }
         });
     }
+    // user bot 由 config 投影軟刪，但 bots/<id>/ 沒人清：本機要等下次開機、遠端永遠不掃（#313）。已確認皆無 active run、鎖在手。
+    // 只清「確定軟刪」的；讀不到就留著。清不掉（ssh 失敗等）不算成功，列進 kept_dirs。
+    let mut kept_dirs: Vec<Value> = Vec::new();
+    for bot in in_project.iter().filter(|b| b.managed_by == "user") {
+        match db::bot(&app.db, &bot.id).await {
+            Ok(Some(b)) if b.deleted_at.is_some() => {
+                if !lifecycle::purge_bot_dir(&app, &bot.id, &host).await {
+                    kept_dirs.push(json!({"bot_id": bot.id, "reason": "purge_failed"}));
+                }
+            }
+            _ => kept_dirs.push(json!({"bot_id": bot.id, "reason": "delete_state_unreadable"})),
+        }
+    }
     drop(guards);
     app.emit("project_changed", json!({"project_id": id})).await;
     if retry_failed {
         return Err(any_err("project deleted, but some child bots could not be soft-deleted yet; retrying in the background"));
     }
-    Ok((StatusCode::OK, Json(json!({}))).into_response())
+    let mut out = json!({});
+    if !kept_dirs.is_empty() {
+        out["kept_dirs"] = json!(kept_dirs);
+    }
+    Ok((StatusCode::OK, Json(out)).into_response())
 }
 
 #[derive(Deserialize)]
@@ -1545,7 +1562,9 @@ pub(crate) async fn delete_bot(State(app): State<Arc<App>>, Path(id): Path<Strin
     // 已經拿著全部的鎖：一律用 locked 版（stop_bot 會再拿同一把而卡死）。
     match stop_for_delete_locked(&app, &id).await {
         // Soft delete; the conversation and its messages stay.
-        Ok(()) => lifecycle::purge_bot_dir(&app, &id, &host).await,
+        Ok(()) => {
+            lifecycle::purge_bot_dir(&app, &id, &host).await;
+        }
         Err(why) => kept_dirs.push(json!({"bot_id": id, "reason": why})),
     }
     app.emit("bot_changed", json!({"bot_id": id})).await;
@@ -3777,6 +3796,30 @@ mod delete_bot_tests {
         delete_bot(State(app.clone()), Path(id.clone())).await.unwrap();
         assert_eq!(*outcome.lock().unwrap(), Some(false), "delete 還持著鎖的時候，restore 不能完成");
         restore_bot(State(app.clone()), Path(id.clone())).await.unwrap();
+    }
+
+    /// #313：刪專案要一併清掉 user bot 的 runtime 目錄；清不掉（遠端主機不明）不能當成清掉了。
+    #[tokio::test]
+    async fn deleting_a_project_purges_its_user_bot_dirs_and_reports_failures() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let b1 = a_bot(&e, "alfa", "user").await;
+        in_config(&e, &[(&b1, "alfa")]).await;
+        let dir = runtime_dir(&app, &b1);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("marker"), b"x").unwrap();
+        let out = body_of(delete_project(State(app.clone()), Path(e.project_id.clone())).await.unwrap()).await;
+        assert!(!dir.exists(), "user bot 的目錄要跟著清掉");
+        assert!(out.get("kept_dirs").is_none(), "{out}");
+
+        // 遠端專案、主機不明：ssh 清不了，不能回成「清掉了」。
+        let e2 = crate::testing::env().await;
+        let app2 = e2.app.clone();
+        let b2 = a_bot(&e2, "beta", "user").await;
+        in_config(&e2, &[(&b2, "beta")]).await;
+        sqlx::query("UPDATE projects SET host='ghost' WHERE id=?").bind(&e2.project_id).execute(&app2.db).await.unwrap();
+        let out = body_of(delete_project(State(app2.clone()), Path(e2.project_id.clone())).await.unwrap()).await;
+        assert_eq!(out["kept_dirs"], json!([{"bot_id": b2, "reason": "purge_failed"}]), "{out}");
     }
 
     /// 死鎖回歸（sol 五輪）：child id 字典序**小於** parent。舊寫法 delete_bot 先持 parent、定案後才拿 child，
