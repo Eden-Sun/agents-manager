@@ -4,6 +4,7 @@ import { createPortal } from 'react-dom'
 import type { BotKind, ModelInfo, PatchBotInput } from '../api/types'
 import { CLAUDE_EFFORT_OPTIONS, CODEX_EFFORT_OPTIONS, EFFORT_OPTIONS, FAST_TIER, HIDDEN_MODELS, MODEL_OPTIONS, effortLabel } from '../api/types'
 import { useMenuKeys } from '../hooks/useMenuKeys'
+import { modelSwitchPatch } from '../lib/modelSwitch'
 import { useStore } from '../store/store'
 import { KindTag } from './KindTag'
 import './modelPicker.css'
@@ -307,13 +308,8 @@ export function ModelQuickPicker({
       setOpen(false)
       return
     }
-    const next = models.find((m) => m.id === id)
-    const input: PatchBotInput = { model: id }
-    if (effort !== null && next && next.efforts.length > 0 && !next.efforts.includes(effort)) {
-      input.effort = next.default_effort
-    }
     setOpen(false)
-    void apply(input)
+    void apply(modelSwitchPatch({ effort, fast: bot.fast }, models, id, fromApi))
   }
 
   const pickEffort = (id: string | null) => {
