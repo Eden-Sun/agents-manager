@@ -2,7 +2,7 @@
 # Claude Code 換版就派 AGM 解析新版有什麼用得上的，結論當通知回給使用者（使用者 2026-09-16）。
 # launchd `com.agm.claude-release` 每 30 分鐘跑一次；唯讀，只派工，不 build 不重啟。
 #
-#   AGM_DIR、CLAUDE_VERSIONS_DIR、AGM_RELEASE_BOT 可覆寫（測試用）。
+#   AGM_DIR、CLAUDE_VERSIONS_DIR、AGM_RELEASE_BOT、AGM_FAIL_ALERT_AFTER 可覆寫（測試用）。
 set -u
 DIR="${AGM_DIR:-$HOME/.config/agents-manager/supervisor/AGM}"
 VERSIONS="${CLAUDE_VERSIONS_DIR:-$HOME/.local/share/claude/versions}"
@@ -26,6 +26,22 @@ alert() { # alert <reason> <detail>：一則 durable inbox 事件（同 source+r
   "$AGM" --compact ops-alert --source "$OWNER" --reason "$1" --detail "$2" >> "$LOG" 2>&1 ||
     log "推 ops-alert 失敗（舊 CLI 或 daemon 不在），只留在這份 log"
 }
+# 連續派不出去（assign 失敗、找不到派給誰）不能永遠只有 local log：連續 FAIL_ALERT_AFTER 輪推 ops_alert，派成功清零。
+FAILS="$DIR/claude-release.fails"
+FAIL_ALERT_AFTER=${AGM_FAIL_ALERT_AFTER:-4}   # 每 30 分鐘一輪＝連續約 2 小時
+ROUND_FAIL=""
+note_fail() { ROUND_FAIL="${ROUND_FAIL:-$1}"; log "$1"; }
+settle() { # 收尾結算：這輪有失敗就累計，否則（有換版且派成功，或沒換版）清零
+  if [ -n "$ROUND_FAIL" ]; then
+    _n=$(cat "$FAILS" 2>/dev/null)
+    case "$_n" in ''|*[!0-9]*) _n=0 ;; esac
+    _n=$((_n + 1)); echo "$_n" > "$FAILS"
+    [ "$_n" -ge "$FAIL_ALERT_AFTER" ] && alert dispatch_failing "Claude 換版通知連續 ${_n} 輪派不出去：${ROUND_FAIL}"
+  else
+    rm -f "$FAILS" 2>/dev/null
+  fi
+  return 0
+}
 LOCK="$DIR/claude-release.lock"
 LOCK_STALE_SECS=${AGM_LOCK_STALE_SECS:-120}    # 沒有 pid 可查時，超過這麼久就算殘留
 LOCK_HUNG_SECS=${AGM_LOCK_HUNG_SECS:-3600}     # 執行者還活著但卡了這麼久：喊人
@@ -42,7 +58,7 @@ except OSError:
   echo $(( $(date +%s) - _born ))
 }
 BODY=""
-cleanup() { rm -rf "$LOCK" 2>/dev/null || true; [ -n "$BODY" ] && rm -f "$BODY" 2>/dev/null; true; }
+cleanup() { settle; rm -rf "$LOCK" 2>/dev/null || true; [ -n "$BODY" ] && rm -f "$BODY" 2>/dev/null; true; }
 take_lock() { mkdir "$LOCK" 2>/dev/null && { echo "$$ $(date +%s)" > "$LOCK/owner"; trap cleanup EXIT; return 0; }; return 1; }
 if ! take_lock; then
   _pid=$(cut -d' ' -f1 "$LOCK/owner" 2>/dev/null)
@@ -96,7 +112,7 @@ d = json.load(open(sys.argv[1]))
 print(d.get("release_bot_id") or d.get("responder_bot_id") or "")
 ' "$DIR/runtime.json" 2>/dev/null)
 fi
-[ -n "$BOT" ] || { log "找不到要派給誰（AGM_RELEASE_BOT／runtime.json 的 release_bot_id 或 responder_bot_id），跳過"; exit 0; }
+[ -n "$BOT" ] || { note_fail "找不到要派給誰（AGM_RELEASE_BOT／runtime.json 的 release_bot_id 或 responder_bot_id），跳過"; exit 0; }
 
 BODY=$(mktemp -t agm-claude-release)
 {
@@ -112,5 +128,5 @@ if "$AGM" --compact assign --bot "$BOT" --review-by patrol --text-file "$BODY" \
   echo "$NEW" > "$STATE"
   log "Claude Code ${OLD} → ${NEW}：已派 AGM 解析"
 else
-  log "派工失敗（${OLD} → ${NEW}），下一輪再試"
+  note_fail "派工失敗（${OLD} → ${NEW}），下一輪再試"
 fi
