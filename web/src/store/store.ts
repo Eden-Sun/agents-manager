@@ -1,5 +1,6 @@
 /** Single Zustand store: server state from `GET /api/state` + `/ws`, plus UI state. Event flow / resync: SPEC §7.3. */
 
+import { gatewayErrText, networkErrText } from '../lib/netErr'
 import { draftsClearedElsewhere } from './draftSync'
 import { createResyncRunner } from './resyncQueue'
 import { createRequestId, settleCreateRequest } from '../lib/createRequestId'
@@ -636,7 +637,14 @@ export async function sendWithFreshRun(get: () => StoreState, botId: string, sen
 }
 
 function errText(e: unknown): string {
-  if (e instanceof ApiError) return `${reasonText(e)}（HTTP ${e.status}）`
+  const net = networkErrText(e)
+  if (net) return net
+  if (e instanceof ApiError) {
+    const human = typeof e.body.message === 'string' && e.body.message.trim() !== ''
+    const gw = gatewayErrText(e.status, human || typeof e.body.error === 'string')
+    if (gw) return gw
+    return `${reasonText(e)}（HTTP ${e.status}）`
+  }
   if (e instanceof Error) return e.message
   return String(e)
 }
