@@ -1,5 +1,5 @@
 import { LOCAL_HOST } from '../api/types'
-import { humanBytes } from './MemBadge'
+import { humanBytes } from './memFormat'
 import { browsersLine, TABS_WARN, tabsTotal } from '../lib/browserMem'
 import { useStore } from '../store/store'
 import { BrowserIcon } from './BrowserIcons'

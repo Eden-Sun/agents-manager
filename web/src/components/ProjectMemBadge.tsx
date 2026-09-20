@@ -1,5 +1,5 @@
 import { useStore } from '../store/store'
-import { humanBytes } from './MemBadge'
+import { humanBytes } from './memFormat'
 import './projectMemBadge.css'
 
 /**
