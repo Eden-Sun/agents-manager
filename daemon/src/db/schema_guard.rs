@@ -426,4 +426,17 @@ mod tests {
         pool.close().await;
         std::fs::remove_dir_all(&dir).unwrap();
     }
+
+    /// 指紋只取決於我們自己的輸入（`dump` 的文字＋自己寫的 FNV-1a，不是 `DefaultHasher`），跟機器、sqlite 版本、Rust 版本無關：
+    /// 對一份固定的物件清單要永遠算出同一個值。（2026-09-20 pin 測試在遠端 builder 上紅，查下來 macOS 與 linux 算出一樣的值，
+    /// 紅的原因是 a7dc0b74／4cbacecc 加了表沒升版——守衛沒壞，見 #363。）
+    #[test]
+    fn the_fingerprint_is_a_pure_function_of_our_own_ddl_text() {
+        let objs = vec![
+            SchemaObject { kind: "table".into(), name: "t".into(), table: "t".into(), sql: "CREATE TABLE t(a INTEGER)".into(), columns: vec!["a".into()], col_defs: vec![] },
+            SchemaObject { kind: "index".into(), name: "i".into(), table: "t".into(), sql: "CREATE INDEX i ON t(a)".into(), columns: vec![], col_defs: vec![] },
+        ];
+        assert_eq!(fingerprint(&objs), "6fc5e5287677b2e6");
+        assert_eq!(fingerprint(&objs), fingerprint(&objs.clone()));
+    }
 }
