@@ -1,5 +1,6 @@
 /** Single Zustand store: server state from `GET /api/state` + `/ws`, plus UI state. Event flow / resync: SPEC §7.3. */
 
+import { draftsClearedElsewhere } from './draftSync'
 import { createResyncRunner } from './resyncQueue'
 import { createRequestId, settleCreateRequest } from '../lib/createRequestId'
 import { groupSendDelivered } from './groupSend'
@@ -71,7 +72,7 @@ import {
   type ReadMark,
 } from './unread'
 import { fetchSupervisor } from '../api/supervisor'
-import { writeShared } from './mobilePreview'
+import { IN_MOBILE_PREVIEW, writeShared } from './mobilePreview'
 import { BOT_KINDS, LOCAL_HOST } from '../api/types'
 
 const sendMissionRequest = missionRequests(api.newClientRequestId)
@@ -3341,4 +3342,13 @@ export function groupComposerState(state: StoreState, projectId: string | null):
     return { disabled: true, reason: `專案內沒有可送訊息的 Bot（${first}）`, sendable }
   }
   return { disabled: false, reason: '', sendable }
+}
+
+// 多分頁：別的分頁送出（清掉草稿）時，這個分頁的輸入框也要跟著清，不然同一句會被再送一次（#369）。
+if (typeof window !== 'undefined' && typeof window.addEventListener === 'function' && !IN_MOBILE_PREVIEW) {
+  window.addEventListener('storage', (ev: StorageEvent) => {
+    if (ev.key !== DRAFTS_KEY) return
+    const gone = draftsClearedElsewhere(useStore.getState().drafts, ev.oldValue, ev.newValue)
+    for (const k of gone) useStore.setState((s) => ({ drafts: withoutKey(s.drafts, k), draftCursors: withoutKey(s.draftCursors, k) }))
+  })
 }
