@@ -110,6 +110,7 @@ function HostShellList({ host, connected }: { host: string; connected: boolean }
               type="button"
               className="icon-btn"
               disabled={ending}
+              aria-label="結束這個 shell"
               title="結束這個 shell"
               onClick={() => void endHostShell(host, sh.pane_id).then(() => setTick((t) => t + 1))}
             >
@@ -183,6 +184,7 @@ function HostRow({ name }: { name: string }) {
         <button
           type="button"
           className="icon-btn"
+          aria-label="刪除主機"
           title={projectCount > 0 ? '仍有 Project 使用這個主機' : '刪除主機'}
           onClick={() => setConfirmDelete(true)}
         >

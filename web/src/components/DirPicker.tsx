@@ -167,12 +167,13 @@ export function DirPicker({
       ) : null}
 
       <div className="dirpicker-top">
-        <button type="button" className="btn icon" title="上一層（←）" disabled={!listing?.parent || busy} onClick={up}>
+        <button type="button" className="btn icon" aria-label="上一層" title="上一層（←）" disabled={!listing?.parent || busy} onClick={up}>
           ↑
         </button>
         <button
           type="button"
           className="btn icon"
+          aria-label="家目錄"
           title="家目錄"
           disabled={busy}
           onClick={() => load(listing?.home || undefined)}
@@ -219,6 +220,7 @@ export function DirPicker({
             <button
               type="button"
               className="crumb-edit"
+              aria-label="手動輸入路徑"
               title="手動輸入路徑"
               disabled={busy}
               onClick={() => setEditing(true)}
