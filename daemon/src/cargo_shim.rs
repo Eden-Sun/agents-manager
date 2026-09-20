@@ -770,7 +770,7 @@ mod tests {
         fn install_slow_cargo(&self, secs: u32) {
             let d = self.dir.display();
             let body = format!(
-                "#!/bin/sh\n[ -z \"${{AM_TEST_FAST:-}}\" ] || exit 0\necho $$ > '{d}/cargo.pid'\n( exec /bin/sleep 300 ) >/dev/null 2>&1 &\necho $! > '{d}/rustc.pid'\ntouch '{d}/cargo.ready'\n/bin/sleep {secs}\nkill $(cat '{d}/rustc.pid') 2>/dev/null\necho done > '{d}/cargo.done'\nexit 0\n"
+                "#!/bin/sh\n[ -z \"${{AM_TEST_FAST:-}}\" ] || exit 0\necho $$ > '{d}/cargo.pid'\n( exec /bin/sleep 300 ) >/dev/null 2>&1 &\necho $! > '{d}/rustc.pid'\n/bin/sleep {secs} &\nw=$!\ntouch '{d}/cargo.ready'\nwait $w\nkill $(cat '{d}/rustc.pid') 2>/dev/null\necho done > '{d}/cargo.done'\nexit 0\n"
             );
             let path = self.dir.join("real/cargo");
             write_exec(&path, body);
@@ -956,6 +956,22 @@ esac"#
                 std::fs::read_to_string(&err_path).unwrap_or_default(),
                 status.code().unwrap_or(-1),
             )
+        }
+
+        /// 模擬「整個 pane 被關」：對整組 SIGKILL，**補到組裡一個行程都不剩**（issue #379）。
+        /// 單一一次 `killpg` 只送給當下的成員：某個成員正好在 fork 的那一瞬，子行程可能在訊號走完那份名單之後才進組
+        /// （macOS 上實測約 144 次並行跑會踩到 1 次），父親死了、子行程（`sleep 120`）成了活到天荒地老的孤兒。
+        /// 真的「關 pane」由終端一路殺到沒有為止；這條只補足測試的注入，不影響 `run_group` 對「shim 自己收乾淨」的斷言。
+        fn kill_group(&self, pgid: i32) {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                unsafe { libc::killpg(pgid, libc::SIGKILL) };
+                if group_members(pgid).is_empty() {
+                    return;
+                }
+                assert!(std::time::Instant::now() < deadline, "整組補殺了 10 秒還沒空：{:?}", group_members(pgid));
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
         }
 
         /// 這個 process group 在幾秒內要一個行程都不剩；剩下的補殺並讓測試失敗（issue #151 的回歸）。
@@ -1986,7 +2002,7 @@ esac"#,
         let (mut shim, group) = start_slow_shim(&s);
         assert_eq!(s.lease_dirs().len(), 1, "跑到一半應該有一個租約狀態目錄：{:?}", s.lease_dirs());
         // 整個 pane 被關：shim、續約守衛、cargo 都沒機會收尾。
-        unsafe { libc::killpg(group, libc::SIGKILL) };
+        s.kill_group(group);
         let _ = shim.wait();
         s.assert_group_gone(group);
         assert_eq!(s.lease_dirs().len(), 1, "被 SIGKILL 的 shim 沒機會清目錄（這就是要修的問題）：{:?}", s.lease_dirs());
@@ -2033,7 +2049,7 @@ esac"#,
         assert_eq!(s.lease_dirs(), mine, "cargo 還在用這個目錄，不能清");
 
         // 整組都沒了：沒人在用了，下一次呼叫才收得掉。
-        unsafe { libc::killpg(group, libc::SIGKILL) };
+        s.kill_group(group);
         s.assert_group_gone(group);
         run_the_next_shim(&s);
         assert!(s.lease_dirs().is_empty(), "{:?}", s.lease_dirs());
