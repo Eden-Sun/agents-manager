@@ -895,7 +895,8 @@ mod tests {
             .await
             .expect("寫入卡住時 timeout 必須生效，不能整個呼叫掛住");
         assert!(matches!(r, Ok(None)), "要回逾時：{r:?}");
-        assert!(started.elapsed() < Duration::from_secs(5));
+        // 對端 `sleep 30`：真的卡住會等滿 30 秒；上限只要低於它就分得出來，不必貼著名義時間（慢 runner 才不會翻紅）。
+        assert!(started.elapsed() < Duration::from_secs(25));
     }
 
     /// 正常路徑：資料完整送到、輸出照拿。
@@ -917,7 +918,7 @@ mod tests {
         let t0 = std::time::Instant::now();
         let r = sh_local(&script, Duration::from_millis(300)).await.unwrap();
         assert!(r.is_none(), "expected a timeout");
-        assert!(t0.elapsed() < Duration::from_secs(5));
+        assert!(t0.elapsed() < Duration::from_secs(25), "子行程 `sleep 30`：沒被逾時砍掉才會等滿");
         tokio::time::sleep(Duration::from_millis(200)).await;
         let ps = std::process::Command::new("/bin/ps").args(["-axo", "command"]).output().unwrap();
         let alive: Vec<&str> = std::str::from_utf8(&ps.stdout).unwrap().lines().filter(|l| l.contains(&marker) && !l.contains("ps ")).collect();

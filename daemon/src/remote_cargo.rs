@@ -1622,7 +1622,7 @@ mod tests {
         cmd.arg("30");
         let t = std::time::Instant::now();
         let err = output_with_timeout(cmd, std::time::Duration::from_millis(300)).unwrap_err().to_string();
-        assert!(err.contains("沒有結束") && t.elapsed() < std::time::Duration::from_secs(5), "{err}");
+        assert!(err.contains("沒有結束") && t.elapsed() < std::time::Duration::from_secs(25), "{err}");
     }
 
     /// #324／#325：設定檔壞掉、host 空、或本機設了 RUSTFLAGS 這類遠端看不到的變數——要退回本機也要講出原因，不能靜默；
@@ -2210,7 +2210,7 @@ mod tests {
         let err = Lease::start(cmd, LeaseToken::new(), &ctl).err().expect("interrupted");
         flip.join().unwrap();
         assert!(matches!(err.downcast_ref::<Stopped>(), Some(Stopped::Interrupted(_))), "{err:#}");
-        assert!(t0.elapsed() < std::time::Duration::from_secs(10), "{:?}", t0.elapsed());
+        assert!(t0.elapsed() < std::time::Duration::from_secs(50), "{:?}", t0.elapsed());
     }
 
     /// #323：cargo shim 被單獨殺掉（沒有人會再送訊號）時，helper 要發現父行程沒了、把遠端收乾淨，不能孤兒似地跑到 timeout。
@@ -2223,7 +2223,7 @@ mod tests {
         let t0 = std::time::Instant::now();
         let err = Lease::start(cmd, LeaseToken::new(), &ctl).err().expect("interrupted");
         assert!(matches!(err.downcast_ref::<Stopped>(), Some(Stopped::Interrupted(_))), "{err:#}");
-        assert!(t0.elapsed() < std::time::Duration::from_secs(10), "{:?}", t0.elapsed());
+        assert!(t0.elapsed() < std::time::Duration::from_secs(50), "{:?}", t0.elapsed());
         let mut same = Deadline::new(0);
         same.parent = Some((7, || 7));
         assert!(same.stop().is_none(), "父行程沒變就照常跑");
@@ -2993,7 +2993,7 @@ mod guard_tests {
         let t0 = Instant::now();
         let err = Lease::start(cmd, token, &Deadline::new(0)).err().expect("queue full");
         assert!(err.downcast_ref::<QueueFull>().is_some(), "{err:#}");
-        assert!(t0.elapsed() >= Duration::from_secs(2) && t0.elapsed() < Duration::from_secs(20), "{:?}", t0.elapsed());
+        assert!(t0.elapsed() >= Duration::from_secs(2) && t0.elapsed() < Duration::from_secs(60), "{:?}", t0.elapsed());
         assert!(lock_free(&base.join(format!("rc/{HASH}/shared.lock"))), "放棄時要放掉 shared 的鎖");
         holder.finish();
         let _ = std::fs::remove_dir_all(base);

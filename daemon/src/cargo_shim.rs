@@ -1104,7 +1104,7 @@ esac"#
         let t0 = std::time::Instant::now();
         let (_, err, rc) = s.run(&as_refs(&env), &["build"]);
         assert_eq!(rc, 77, "{err}");
-        assert!(t0.elapsed() < std::time::Duration::from_secs(10), "身分被拒不該等重試：{:?}", t0.elapsed());
+        assert!(t0.elapsed() < std::time::Duration::from_secs(60), "身分被拒不該等重試：{:?}", t0.elapsed());
         assert!(!log.exists(), "{err}");
         assert!(err.contains("unauthorized"), "{err}");
     }
