@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { RefObject } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { parseMentions, stripMentionsOf } from '../api/mentions'
@@ -8,6 +8,7 @@ import { attachCommandOf, botLamp, composerState, groupComposerState, projectHos
 import { useEnterToSend } from '../hooks/useEnterToSend'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { useComposerFocus } from '../hooks/useComposerFocus'
+import { mentionComboAttrs, mentionOptionId } from '../lib/mentionCombo'
 import { useRefocusAfterSend } from '../hooks/useRefocusAfterSend'
 import { AttachButton } from './AttachButton'
 import { AttachPicker, AttachTray, DropVeil, useAttachments, useDropTarget } from './Attachments'
@@ -284,6 +285,7 @@ function GroupComposer({
     return all.filter((c) => c.name.toLowerCase().startsWith(q))
   }, [mention, members])
   const showPop = popOpen && candidates.length > 0
+  const mentionListId = useId()
   const activeIdx = Math.min(active, Math.max(0, candidates.length - 1))
 
   const targets = useMemo(() => parseMentions(text, members), [text, members])
@@ -435,10 +437,11 @@ function GroupComposer({
       <div className="composer-box">
         <AttachPicker onFiles={files.add} disabled={state.disabled || sending || toAgm} />
         {showPop ? (
-          <ul className="mention-pop" role="listbox" aria-label="選擇收件 Bot">
+          <ul id={mentionListId} className="mention-pop" role="listbox" aria-label="選擇收件 Bot">
             {candidates.map((c, i) => (
               <li
                 key={c.name}
+                id={mentionOptionId(mentionListId, i)}
                 role="option"
                 aria-selected={i === activeIdx}
                 className={`mention-item${i === activeIdx ? ' active' : ''}`}
@@ -457,6 +460,7 @@ function GroupComposer({
         <textarea
           ref={ref}
           value={text}
+          {...mentionComboAttrs({ open: showPop, listId: mentionListId, activeIdx, count: candidates.length })}
           /* 連線斷了也讓人繼續打（草稿會存），只是送不出去。 */
           disabled={sending}
           placeholder={
