@@ -412,3 +412,13 @@ daemon 這幾天把「寫不進 DB」改成 fail closed：外面的副作用做�
   接上的預覽停止鍵改叫「中斷連接」並提示只斷開、不關對方的 server。`off` 時 `candidates` 多於一個給下拉選目錄；
   `others`（別份 checkout 的 vite）列出 port＋目錄並註明「看到的不是這顆 bot 的程式碼」，「還是接這個」送 `{mode:"attach", port}`。
   手機列寬不夠，網址讓給來源說明。
+- **v3：桌機改成 `.app` 最右邊獨立一欄（2026-09-20，#253）**：使用者要「檔案暫存的右邊再長一塊大區域」，所以預覽不再是主面板的分頁。
+  `.app` grid 變 `側欄 | main | 檔案暫存 | 預覽`（`PreviewColumn.tsx`，第四軌用 `auto`、欄寬由元件 inline 決定；手機預覽也開著時它的 213px 軌照舊）。
+  - **掛在 `main` 外**（同 ImageShelf）：換 bot 不 unmount，同一顆的 iframe 不重載；切對話／終端分頁也不動它。換到另一顆 bot 才換 iframe（`PreviewPanel` 以 bot id 為 key）。
+    選到子 agent／team 成員或專案群聊時整欄不存在（預覽只屬於頂層 bot）。
+  - **寬度可拖**：欄左緣 8px 的 `role="separator"` 手柄（Pointer capture，拖曳中 iframe 關 pointer-events，不然會被 iframe 吃掉事件），也可用 ←／→ 鍵每次 24px。
+    下限 320px、上限視窗 50%（再寬主面板擠得沒法用）、預設視窗 40%；放開才寫 localStorage（`am.previewCol.width`），視窗縮小時只在顯示端夾限、不改存的值。
+  - **可收合**：預設收合，原位置留一條 36px 的窄條與「◧」開關；展開狀態存 `am.previewCol.open`。預設收合是因為不是每個人每顆 bot 都要看預覽，別預設吃掉主面板的寬。
+  - **≤1024px（抽屜版面與手機）沒有這欄**，維持 ChatPanel 的「預覽」分頁：沒有空間開第四欄。桌機因此不再顯示那個分頁。
+  - **直接挑本機已開的 vite**：`others` 列出本機所有 listen 中的 vite，依 `relation` 分三組——這顆 bot 自己的目錄（`same_dir`，按鈕「接這個」）、同一個 repo 的其他 checkout（`same_repo`）、其他專案（`other`）；
+    後兩組標黃字「不是這顆 bot 的程式碼」，按鈕都叫「還是接這個」，送 `{mode:"attach", port}`。缺 `relation` 的舊回應照 `same_repo` 看。off 與 failed 兩種狀態都列。

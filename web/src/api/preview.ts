@@ -25,10 +25,24 @@ export interface Preview {
 }
 
 export type PreviewSource = 'spawned' | 'attached'
+/** v3：`same_dir` = 這顆 bot 自己的目錄；`same_repo` = 同 repo 的別份 checkout；`other` = 別的專案。 */
+export type PreviewRelation = 'same_dir' | 'same_repo' | 'other'
 export interface PreviewOther {
   port: number
   dir: string
   pid: number | null
+  relation: PreviewRelation
+  /** daemon 給的 repo 名（可能沒有）；分組標題退回目錄的最後一段。 */
+  repo: string | null
+}
+
+const RELATION_ORDER: readonly PreviewRelation[] = ['same_dir', 'same_repo', 'other']
+
+/** 依 relation 分組（固定順序，空組不出）。 */
+export function groupOthers(others: PreviewOther[]): { relation: PreviewRelation; items: PreviewOther[] }[] {
+  return RELATION_ORDER.map((relation) => ({ relation, items: others.filter((o) => o.relation === relation) })).filter(
+    (g) => g.items.length > 0,
+  )
 }
 
 export const PREVIEW_OFF: Preview = {
@@ -78,7 +92,10 @@ export function toPreview(v: unknown): Preview {
         if (!isRec(o)) return []
         const port = posInt(pick(o, 'port'))
         const dir = optStr(pick(o, 'dir'))
-        return port && dir ? [{ port, dir, pid: posInt(pick(o, 'pid')) }] : []
+        const rel = pick(o, 'relation')
+        // v2 的 daemon 只列同 repo 的別份 checkout、沒有 relation：照 same_repo 看；v3 判不出來的自己會給 other。
+        const relation: PreviewRelation = rel === 'same_dir' || rel === 'same_repo' || rel === 'other' ? rel : 'same_repo'
+        return port && dir ? [{ port, dir, pid: posInt(pick(o, 'pid')), relation, repo: optStr(pick(o, 'repo')) }] : []
       })
     })(),
   }

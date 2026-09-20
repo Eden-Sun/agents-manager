@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { PREVIEW_OFF, toPreview, toPreviewEvent } from './preview'
+import { PREVIEW_OFF, groupOthers, toPreview, toPreviewEvent } from './preview'
 
 test('toPreview: 沒開過／壞資料都是 off', () => {
   assert.deepEqual(toPreview({ status: 'off' }), PREVIEW_OFF)
@@ -40,7 +40,24 @@ test('toPreview: v2 的 source／candidates／others，壞項目丟掉', () => {
   assert.equal(p.source, 'attached')
   assert.equal(p.pid, 4242)
   assert.deepEqual(p.candidates, ['/a/web'])
-  assert.deepEqual(p.others, [{ port: 3001, dir: '/b/apps/web', pid: 9 }])
+  assert.deepEqual(p.others, [{ port: 3001, dir: '/b/apps/web', pid: 9, relation: 'same_repo', repo: null }])
   assert.deepEqual(toPreview({ status: 'off' }).others, [])
   assert.equal(toPreview({ status: 'running', source: 'weird' }).source, null)
+})
+
+test('v3 others：relation 分組固定順序、空組不出、缺 relation 照 same_repo', () => {
+  const p = toPreview({
+    status: 'off',
+    others: [
+      { port: 3001, dir: '/o/apps/web', relation: 'other', repo: 'hermes' },
+      { port: 5173, dir: '/r/web', relation: 'same_repo' },
+      { port: 5241, dir: '/me/web', relation: 'same_dir' },
+      { port: 5300, dir: '/old/web' },
+    ],
+  })
+  const g = groupOthers(p.others)
+  assert.deepEqual(g.map((x) => x.relation), ['same_dir', 'same_repo', 'other'])
+  assert.deepEqual(g[1].items.map((o) => o.port), [5173, 5300])
+  assert.equal(g[2].items[0].repo, 'hermes')
+  assert.deepEqual(groupOthers([]), [])
 })

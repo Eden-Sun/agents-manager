@@ -175,3 +175,29 @@
   min-width: 0;
   overflow-wrap: anywhere;
 }
+
+.preview-group {
+  margin-top: 8px;
+  text-align: left;
+}
+
+.preview-group-title {
+  margin: 0 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.preview-group-note {
+  margin-left: 8px;
+  font-weight: 400;
+  color: var(--warn);
+}
+
+.preview-group.same_dir .preview-group-note {
+  display: none;
+}
+
+.preview-other-repo {
+  color: var(--text-dim);
+}
