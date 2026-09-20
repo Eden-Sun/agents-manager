@@ -83,8 +83,8 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   `db::migrate` 自己的 SCHEMA／additive ALTER 包在一個 transaction 裡，中途失敗（例如舊資料違反新加的 UNIQUE INDEX）整批回滾，
   不留半套 schema；重跑冪等。子模組各自的 migration（`supervisor::store`、`read_marks`、`panes`、`herdr_maintenance`、
   `mission::store`）不在這個 transaction 裡，各自維護自己那張表，風險最高的「加欄＋回填」已經各自包了自己的 transaction。
-  - **schema 版本戳記**（issue #72）：`db::SCHEMA_VERSION` 存進 SQLite 內建的 `PRAGMA user_version`，跟上面那個
-    transaction 一起 commit／rollback。`migrate` 一開始先比對：DB 記的版本比這顆 binary 認得的還新（代表已經有更新版
+  - **schema 版本戳記**（issue #72）：`db::SCHEMA_VERSION` 存進 SQLite 內建的 `PRAGMA user_version`，在**全部**子模組 migrate 與 schema 漂移核對都通過之後
+    才蓋（#289；中途失敗時 DB 維持舊版本號，回滾用的舊 binary 才打得開）。`migrate` 一開始先比對：DB 記的版本比這顆 binary 認得的還新（代表已經有更新版
     daemon 動過這個檔案）就直接拒絕啟動，一個 SCHEMA／ALTER 都不碰；版本較舊或沒設過（既有 DB 的 `user_version` 預設
     0）一律照舊往下跑，成功後才蓋上這顆 binary 的版本號。**這不是「照順序執行第 N 號 migration」的機制**——`SCHEMA`／
     additive ALTER 名單本身已經是 `CREATE TABLE IF NOT EXISTS`／`has_column` 檢查過的冪等操作，天生可重入；拆成
