@@ -257,6 +257,18 @@ pub async fn prompt_relayed_queueable(
 /// `turns_client_req` 擋住「同一筆交辦重試疊出第二筆」——撞到就回原本的 409，讓呼叫端照舊退避。
 /// `prompt_text` 存要送的內容（含附件路徑展開後的樣子），與 queue flush 用的是同一欄。
 #[allow(clippy::too_many_arguments)]
+/// 排隊用的 INSERT 失敗怎麼回（#341）：只有唯一約束衝突（每個對話最多一筆 queued、同一個 client_request_id）才是「已經有一筆在排」的 409；
+/// 其他（SQLITE_BUSY、磁碟滿、schema 錯）是真的寫入失敗，照實回 502，不能偽裝成「已排隊」讓呼叫端以為送出去了、一直退避。
+pub(crate) fn queue_insert_error(bot_id: &str, conv: &str, e: sqlx::Error) -> LcError {
+    if e.as_database_error().is_some_and(|d| d.is_unique_violation()) {
+        tracing::info!(bot = %bot_id, error = %e, "另一筆 prompt 已經在排隊，這次回 409");
+        LcError::conflict("a turn is already queued for this bot", json!({"conversation_id": conv}))
+    } else {
+        tracing::error!(bot = %bot_id, error = %e, "排隊的 turn 寫不進去");
+        up(e)
+    }
+}
+
 async fn queue_for_next_turn(
     app: &Arc<App>,
     conv: &str,
@@ -282,9 +294,7 @@ async fn queue_for_next_turn(
     .execute(&mut *tx)
     .await;
     if let Err(e) = queued {
-        // 已經有一筆在排（這顆 bot 或這筆交辦）：照舊回 409，呼叫端退避後再問。
-        tracing::info!(bot = %bot_id, error = %e, "另一筆 prompt 已經在排隊，這次照舊回 409");
-        return Err(LcError::conflict("a turn is already queued for this bot", json!({"conversation_id": conv})));
+        return Err(queue_insert_error(bot_id, conv, e));
     }
     sqlx::query(
         "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, group_id, relay_from, created_at) VALUES (?,?,?,'user',?,'web',?,?,?)",
@@ -782,6 +792,24 @@ mod prompt_tests {
         bot_id: String,
         conv: String,
         run_id: String,
+    }
+
+    /// #341：排隊用的 turn INSERT 真的寫不進去（不是唯一約束衝突）不能被說成「已經有一筆在排」的 409；真的重複才是 409。
+    #[tokio::test]
+    async fn a_queue_insert_that_really_fails_is_not_reported_as_already_queued() {
+        let f = fixture("codex", "test").await;
+        let app = f.env.app.clone();
+        sqlx::query("CREATE TRIGGER am_test_no_turns BEFORE INSERT ON turns BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END")
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let err = queue_for_next_turn(&app, &f.conv, &f.bot_id, "x", "x", "c-fail", None, None).await.unwrap_err();
+        assert!(matches!(err, LcError::Upstream(_)), "真的寫入失敗要照實回，不是 409：{err:?}");
+        sqlx::query("DROP TRIGGER am_test_no_turns").execute(&app.db).await.unwrap();
+
+        queue_for_next_turn(&app, &f.conv, &f.bot_id, "one", "one", "c-1", None, None).await.unwrap();
+        let err = queue_for_next_turn(&app, &f.conv, &f.bot_id, "two", "two", "c-2", None, None).await.unwrap_err();
+        assert!(matches!(err, LcError::Conflict(_)), "真的已經有一筆在排才是 409：{err:?}");
     }
 
     async fn fixture(kind: &str, session: &str) -> Fixture {
