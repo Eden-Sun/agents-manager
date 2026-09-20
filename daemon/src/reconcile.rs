@@ -1107,13 +1107,7 @@ mod autostart_tests {
     }
 
     async fn eventually_running(app: &Arc<App>, bot: &str) -> bool {
-        for _ in 0..150 {
-            if running(app, bot).await {
-                return true;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-        false
+        crate::testing::eventually!(running(app, bot).await)
     }
 
     /// **#209.** 開機那一刻 bot 清單讀不到：以前變成空清單、一顆都不起，主機卻已經標成「跑過」——本機不會有下一次連上，
@@ -1379,20 +1373,7 @@ mod compat_tests {
         app.stall_timers.lock().await.get(run).copied()
     }
 
-    /// 等到條件成立（開機恢復的背景重試在測試裡 20ms 一輪），最多約 3 秒。巨集：條件裡要 `.await`。
-    macro_rules! eventually {
-        ($cond:expr) => {{
-            let mut ok = false;
-            for _ in 0..150 {
-                if $cond {
-                    ok = true;
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            }
-            ok
-        }};
-    }
+    use crate::testing::eventually;
 
     /// **#75 重開驗收**：開機那一次讀 `turns` 失敗（busy／I/O）。真相都還在 DB，但把它變回 poller／timer 的只有這一步——
     /// 以前讀不到就回 0／跳過，那個回合重啟後沒人盯，閒著的 bot 也不會再有事件叫醒排著的那一則。現在 DB 恢復之後，
@@ -2256,12 +2237,7 @@ mod compat_tests {
         // 窗口確定結束、pane 也沒回來：延後的那一輪自己補跑，照原規則退休（這之後沒有任何人叫 reconcile）。
         sqlx::query("DELETE FROM herdr_maintenance_unreadable").execute(&app.db).await.unwrap();
         maintenance_readable(&app, true).await;
-        for _ in 0..100 {
-            if retired(&app, &k1).await && retired(&app, &k2).await {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-        }
+        let _ = crate::testing::eventually!(retired(&app, &k1).await && retired(&app, &k2).await);
         for kid in [&k1, &k2] {
             assert!(retired(&app, kid).await, "確定沒在維護：延後的那一輪照原規則退休");
         }
@@ -2295,12 +2271,7 @@ mod compat_tests {
 
         // 寫得進去之後，延後的那一輪自己把它收掉並退休。
         sqlx::query("DROP TRIGGER exit_unwritable").execute(&app.db).await.unwrap();
-        for _ in 0..100 {
-            if retired(&app, &kid).await {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-        }
+        let _ = crate::testing::eventually!(retired(&app, &kid).await);
         assert!(retired(&app, &kid).await, "結束寫進去之後照原規則退休");
     }
 
@@ -2892,13 +2863,10 @@ mod compat_tests {
         // DB 恢復：延後的那一輪自己補跑，照 hint 認領，沒有鏈、沒有重複。
         sqlx::query("ALTER TABLE spawn_hints_unreadable RENAME TO spawn_hints").execute(&app.db).await.unwrap();
         let mut kids = Vec::new();
-        for _ in 0..100 {
+        let _ = crate::testing::eventually!({
             kids = children(app.clone()).await;
-            if kids.len() == 3 {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-        }
+            kids.len() == 3
+        });
         assert_eq!(kids.len(), 3, "剛好三顆：{kids:?}");
         for c in &kids {
             assert_eq!(c.parent_bot_id.as_deref(), Some(parent.as_str()), "{} 要掛在真正的父 bot 底下", c.name);
