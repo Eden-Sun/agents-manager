@@ -39,6 +39,15 @@ FAIL_ALERT_AFTER=${AGM_FAIL_ALERT_AFTER:-2}
 
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
 
+# 狀態檔一律先寫暫存檔再 rename（同一目錄＝同一檔案系統）：`echo > $STATE` 被中斷（斷電、SIGKILL）會留下空檔，
+# 空的狀態檔在這裡等於「第一次執行」，會漏掉一次該派的工。寫不成功就保留舊檔並回非 0。
+write_state() { # write_state <內容>
+  _t="$STATE.tmp.$$"
+  if printf '%s\n' "$1" > "$_t" 2>/dev/null && mv -f "$_t" "$STATE" 2>/dev/null; then return 0; fi
+  rm -rf "$_t" 2>/dev/null
+  return 1
+}
+
 [ -x "$AGM" ] || exit 0
 
 alert() { # alert <reason> <detail>：一則 durable inbox 事件（同 source+reason 每小時一則，daemon 去重）
@@ -194,7 +203,7 @@ BODY=$(mktemp -t agm-herdr-update); TMPS+=("$BODY")
 # （2026-09-16 claude-release-kick 出過這個事故，這裡照抄教訓）。
 if "$AGM" --compact assign --bot "$BOT" --review-by patrol --text-file "$BODY" \
      --request-id "agm-herdr-update-$LATEST_VERSION" >> "$LOG" 2>&1; then
-  echo "$LATEST_VERSION" > "$STATE"
+  write_state "$LATEST_VERSION" || log "寫不了狀態檔 ${STATE}（已派成功；下一輪同 request-id 由 daemon 去重）"
   ran_ok
   log "herdr ${INSTALLED} → ${LATEST_VERSION}：已派 AGM 解析"
 else
