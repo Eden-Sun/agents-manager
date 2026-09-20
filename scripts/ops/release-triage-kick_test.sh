@@ -70,7 +70,7 @@ PYEOF
 }
 teardown() {
   rm -rf "$ROOT"
-  unset AGM_DIR AGM_REPO AM_BINARY AGM_RELEASE_BOT AGM_TRIAGE_QUOTA_MAX AGM_LOCK_STALE_SECS AGM_LOCK_HUNG_SECS AGM_EXTRA_PATH
+  unset AGM_DIR AGM_REPO AM_BINARY AGM_RELEASE_BOT AGM_TRIAGE_QUOTA_MAX AGM_LOCK_STALE_SECS AGM_LOCK_HUNG_SECS AGM_EXTRA_PATH AGM_FAIL_ALERT_AFTER
   unset STUB_ASSIGN_FAIL STUB_QUOTA_FAIL STUB_QUOTA_JSON STUB_DISPATCHED_FAIL STUB_PUBLISH_JSON STUB_OLD_AGM
 }
 
@@ -304,6 +304,20 @@ check "失敗有記 log" "派工失敗" "$AGM_DIR/release-triage.log"
 export STUB_ASSIGN_FAIL=""
 bash "$SCRIPT"
 equals "下一輪重派（同一個 request-id）" "$(grep -c 'release-triage-claude-2.1.278' "$AGM_DIR/calls.log" | tr -d ' ')" "2"
+teardown
+
+# 10b. 連續派工失敗：一次不喊人，連續 N 輪推 ops_alert check_failing；成功一輪清零。
+setup
+mk_pending claude 2.1.278 2.1.278; mk_empty codex
+export STUB_ASSIGN_FAIL=1 AGM_FAIL_ALERT_AFTER=3
+bash "$SCRIPT"; bash "$SCRIPT"
+check_no "連續 2 輪還不喊人" "ops-alert" "$AGM_DIR/calls.log"
+bash "$SCRIPT"
+check "連續 3 輪推 check_failing" "ops-alert.*check_failing" "$AGM_DIR/calls.log"
+export STUB_ASSIGN_FAIL=""
+bash "$SCRIPT"
+[ ! -e "$AGM_DIR/release-triage.fails" ] && { echo "ok   - 完成一輪就清零"; PASS=$((PASS + 1)); } || { echo "FAIL - 完成一輪就清零"; FAIL=$((FAIL + 1)); }
+unset AGM_FAIL_ALERT_AFTER
 teardown
 
 # 11. 派給誰：release_bot_id ＞ responder；AGM_RELEASE_BOT 蓋過；都沒有就跳過。

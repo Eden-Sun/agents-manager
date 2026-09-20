@@ -12,7 +12,7 @@
 # （開頭自補 PATH；缺依賴不靜默，log＋ops_alert）。
 #
 #   AGM_DIR、AGM_REPO、AM_BINARY、AGM_RELEASE_BOT、AGM_TRIAGE_QUOTA_MAX、AGM_LOCK_STALE_SECS、
-#   AGM_LOCK_HUNG_SECS 可覆寫（測試用）。
+#   AGM_LOCK_HUNG_SECS、AGM_FAIL_ALERT_AFTER 可覆寫（測試用）。
 set -u
 PATH="${AGM_EXTRA_PATH-/opt/homebrew/bin:/usr/local/bin}:$PATH"; export PATH   # AGM_EXTRA_PATH 只給測試蓋掉
 
@@ -26,6 +26,9 @@ OWNER="${AM_AGENT_NAME:-release-triage-kick}"
 QUOTA_MAX="${AGM_TRIAGE_QUOTA_MAX:-85}"
 MAX_VERSIONS=5      # 一則交辦最多帶幾版
 MAX_ENTRIES=80      # 一則交辦 kept+unmatched 合計上限；超過的留給下一輪
+FAILS="$DIR/release-triage.fails"             # 連續幾輪沒能完成（完成一輪就清掉）
+FAIL_ALERT_AFTER=${AGM_FAIL_ALERT_AFTER:-4}   # 每 30 分鐘一輪＝連續約 2 小時
+ROUND_FAIL=""                                 # 這一輪有沒有出過「沒能完成」的事（收尾時統一結算）
 
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
 
@@ -38,10 +41,23 @@ alert() { # alert <reason> <detail>
     log "推 ops-alert 失敗（舊 CLI 或 daemon 不在），只留在這份 log"
 }
 
+# 連續沒能完成（check／assign／publish 失敗、找不到派給誰、binary 不在）不能永遠只有 local log：
+# 一次抖動不吵人，連續 FAIL_ALERT_AFTER 輪推 ops_alert，完成一輪清零（同 herdr-update-kick.sh）。
+bump_fail() { # bump_fail <訊息>
+  _n=$(cat "$FAILS" 2>/dev/null)
+  case "$_n" in ''|*[!0-9]*) _n=0 ;; esac
+  _n=$((_n + 1))
+  echo "$_n" > "$FAILS"
+  [ "$_n" -ge "$FAIL_ALERT_AFTER" ] && alert check_failing "上游新版分診連續 ${_n} 輪沒能完成：${1}"
+  return 0
+}
+note_fail() { ROUND_FAIL="${ROUND_FAIL:-$1}"; log "$1"; }   # 記 log，並讓收尾把這一輪算成失敗
+settle() { if [ -n "$ROUND_FAIL" ]; then bump_fail "$ROUND_FAIL"; else rm -f "$FAILS" 2>/dev/null; fi; }
+
 # launchd 的預設 PATH 不含 Homebrew；缺依賴不能只靜默 exit 0，否則「已排程」但永遠不做（#66 留言）。
 command -v python3 >/dev/null 2>&1 || { alert missing_dependency "找不到 python3（PATH=${PATH}），上游新版分診停住"; exit 0; }
 [ -f "$TASK" ] || { log "找不到 ${TASK}，跳過"; exit 0; }
-[ -x "$BIN" ] || { log "找不到 ${BIN}，跳過（需要先建好 release binary）"; exit 0; }
+[ -x "$BIN" ] || { log "找不到 ${BIN}，跳過（需要先建好 release binary）"; bump_fail "找不到 ${BIN}（需要先建好 release binary）"; exit 0; }
 
 # 鎖：兩個執行者同時派會送出重複交辦。鎖裡寫 pid 與時間（抄 daemon-update-kick.sh 的格式）：
 # SIGKILL／斷電那一輪 EXIT trap 沒跑，鎖會留在磁碟上——執行者不在就回收接手；還活著但卡太久才喊人。
@@ -61,7 +77,7 @@ except OSError:
   echo $(( $(date +%s) - _born ))
 }
 TMPS=()
-cleanup() { rm -rf "$LOCK" 2>/dev/null || true; [ ${#TMPS[@]} -gt 0 ] && rm -f "${TMPS[@]}" 2>/dev/null; true; }
+cleanup() { settle; rm -rf "$LOCK" 2>/dev/null || true; [ ${#TMPS[@]} -gt 0 ] && rm -f "${TMPS[@]}" 2>/dev/null; true; }
 take_lock() { mkdir "$LOCK" 2>/dev/null && { echo "$$ $(date +%s)" > "$LOCK/owner"; trap cleanup EXIT; return 0; }; return 1; }
 if ! take_lock; then
   _pid=$(cut -d' ' -f1 "$LOCK/owner" 2>/dev/null)
@@ -108,7 +124,7 @@ for KIND in claude codex; do
     [ -e "$NO_PUBLISH_NOTE" ] || { log "bin/agm 不認得 release-triage（舊版，exit 2），略過 publish 重試；換新 agm 後才會有效"; : > "$NO_PUBLISH_NOTE"; }
     break
   elif [ "$RC" -ne 0 ]; then
-    log "release-triage publish --kind ${KIND} 失敗（rc=${RC}）：$(printf '%s' "$OUT" | head -c 200)"
+    note_fail "release-triage publish --kind ${KIND} 失敗（rc=${RC}）：$(printf '%s' "$OUT" | head -c 200)"
     continue
   fi
   rm -f "$NO_PUBLISH_NOTE" 2>/dev/null
@@ -166,7 +182,7 @@ except Exception:
 for KIND in claude codex; do
   # 抓不到／CLI 壞掉就是這輪不做這個 kind，不當成「沒有新版」；另一個 kind 照跑。
   REPORT=$("$BIN" release-triage-check --kind "$KIND" --json 2>>"$LOG") || {
-    log "release-triage-check --kind ${KIND} 失敗，這輪跳過"; continue
+    note_fail "release-triage-check --kind ${KIND} 失敗，這輪跳過"; continue
   }
   # 只挑這一則交辦要帶的版本（最多 MAX_VERSIONS 版、kept+unmatched 合計 MAX_ENTRIES 條，順序照 JSON，
   # 第一版一定帶——單版超量也不能永遠卡住）。輸出第一行是這一批的 "to"，其後是精簡 JSON。
@@ -196,12 +212,12 @@ print(json.dumps(out, ensure_ascii=False, indent=2))
   case $RC in
     0) ;;
     3) continue ;;      # pending 是空的：安靜，不寫 log
-    *) log "release-triage-check --kind ${KIND} 的輸出看不懂（rc=${RC}），這輪跳過"; continue ;;
+    *) note_fail "release-triage-check --kind ${KIND} 的輸出看不懂（rc=${RC}），這輪跳過"; continue ;;
   esac
   TO=$(printf '%s\n' "$PICK" | head -1)
   PAYLOAD=$(printf '%s\n' "$PICK" | sed 1d)
 
-  [ -n "$BOT" ] || { log "找不到要派給誰（AGM_RELEASE_BOT／runtime.json 的 release_bot_id 或 responder_bot_id），跳過"; exit 0; }
+  [ -n "$BOT" ] || { note_fail "找不到要派給誰（AGM_RELEASE_BOT／runtime.json 的 release_bot_id 或 responder_bot_id），跳過"; exit 0; }
   quota_gate || exit 0
 
   BODY=$(mktemp -t agm-release-triage); TMPS+=("$BODY")
@@ -230,7 +246,7 @@ for p in json.load(sys.stdin)["pending"]:
         log "標記 dispatched 失敗（${KIND} → ${TO}），帳本仍是 pending；不重派"
     fi
   else
-    log "派工失敗（${KIND} → ${TO}），下一輪再試"
+    note_fail "派工失敗（${KIND} → ${TO}），下一輪再試"
   fi
 done
 exit 0
