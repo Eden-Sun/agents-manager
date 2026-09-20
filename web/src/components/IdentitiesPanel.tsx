@@ -248,6 +248,7 @@ function IdentityRow({ host, name }: { host: string; name: string }) {
       <button
         type="button"
         className="icon-btn"
+        aria-label={`刪除身份 ${name}`}
         title={used > 0 ? '仍有 Bot 使用這個身份' : '刪除身份'}
         onClick={() => setConfirmDelete(true)}
       >

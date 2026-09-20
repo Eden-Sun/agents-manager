@@ -274,6 +274,7 @@ export function BlockedChoices({
             <button
               type="button"
               className="bc-step"
+              aria-label="上一題"
               title="上一題（送 shift+tab）"
               disabled={Boolean(busy)}
               onClick={() => void step(-1)}
@@ -301,6 +302,7 @@ export function BlockedChoices({
             <button
               type="button"
               className="bc-step"
+              aria-label="下一題"
               title="下一題（送 tab）"
               disabled={Boolean(busy)}
               onClick={() => void step(1)}
