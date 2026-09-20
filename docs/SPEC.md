@@ -1930,6 +1930,10 @@ label = "foo@m4p"
    autostart（§6.1 第 6 步）只在這台**第一次**對帳成功後跑一次；之後的重連不再跑，使用者停掉的 bot 不會被重開。
 5. daemon 退出時 `ssh -O exit`；遠端 herdr 與 agent 保持存活。
 6. `App.hosts: HashMap<String, HostConn>`，`"local"` 為本機；一律 `app.herdr_for(project.host)`；pane watcher、fallback timer 以 `(host, pane_id)` 為鍵；對帳與全域訂閱逐 host。
+7. **外部觀測只在權威沒換時才發布**（issue #347）：偵測（`tools::detect`）、herdr CLI 版本、codex／claude／grok 額度探測都要花幾十秒，期間同名主機可能已重連（generation +1）、
+   改指到另一台（換連線物件）或被移除。這些觀測開始前先取 `HostFence`（連線物件＋generation＋序號），寫進 `app.tools`／`app.quotas` 前確認 `HostManager::is_current`，不是就整份丟掉
+   （`tools::Superseded`／額度探測回錯），**連身分清理與額度回填也不跑**——舊機器的事實不能覆寫新機器的。檢查與寫入 `app.tools` 在同一把鎖裡。
+   同一 generation 內重疊的偵測（連線時與別名輪詢）以序號定序：較晚開始的先寫完，較早開始的遲到就丟掉。
 
 ### 11.4 遠端 hook：herdr 事件 + spool 檔
 

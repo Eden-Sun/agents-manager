@@ -830,12 +830,15 @@ async fn run_local(script: &str, budget: Duration) -> Result<String> {
 }
 
 /// On error the cache is left untouched; the identity pass never fails the whole detection.
+///
+/// 偵測要花幾十秒，這中間同名主機可能已重連或改指到另一台（#347）：開頭先記下 [`crate::hosts::HostFence`]，
+/// 寫進 `app.tools` 前確認它還是這台主機的權威，不是就整個丟掉（[`Superseded`]）——舊機器的事實不能覆寫新機器的。
 pub async fn detect(app: &Arc<App>, host: &str) -> Result<HostTools> {
+    let fence = app.hosts.fence(host).await.ok_or_else(|| anyhow::anyhow!("unknown host `{host}`"))?;
     let out = if host == LOCAL_HOST {
         run_local(PROBE_SH, PROBE_TIMEOUT).await?
     } else {
-        let conn = app.hosts.get(host).await.ok_or_else(|| anyhow::anyhow!("unknown host `{host}`"))?;
-        conn.ssh_exec_path(PROBE_SH).await?
+        fence.conn().ssh_exec_path(PROBE_SH).await?
     };
     let tools = parse_probe(&out);
     let shell_identities = parse_shell_identities(&out);
@@ -843,7 +846,9 @@ pub async fn detect(app: &Arc<App>, host: &str) -> Result<HostTools> {
     let utc_offset_secs = parse_utc_offset(&out);
     let herdr_cli = parse_herdr_cli(&out);
     let ht = HostTools { tools, identities, shell_identities, utc_offset_secs, herdr_cli, checked_at: crate::db::now() };
-    install_host_tools(app, host, ht.clone()).await;
+    if !install_host_tools_fenced(app, host, ht.clone(), &fence).await {
+        return Err(anyhow::Error::new(Superseded { host: host.to_string() }));
+    }
     tracing::info!(
         host,
         tools = ?ht.tools.iter().map(|(k, t)| (k.clone(), t.installed, t.logged_in)).collect::<Vec<_>>(),
@@ -853,9 +858,42 @@ pub async fn detect(app: &Arc<App>, host: &str) -> Result<HostTools> {
     Ok(ht)
 }
 
+/// 偵測開始後主機已重連／改設定／被移除，或有更新的偵測先寫了：結果作廢，沒有動任何狀態。
+#[derive(Debug)]
+pub struct Superseded {
+    pub host: String,
+}
+
+impl std::fmt::Display for Superseded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "host `{}` was reconnected/reconfigured during detection; stale result discarded", self.host)
+    }
+}
+
+impl std::error::Error for Superseded {}
+
+/// [`install_host_tools`]，但只在 `fence` 仍是這台主機的權威、且沒有更新的偵測已經寫過時才寫；
+/// 檢查與寫入在同一把 `app.tools` 鎖裡，後續的身分清理／額度回填也只跟著成功的那次。回傳有沒有寫。
+pub(crate) async fn install_host_tools_fenced(app: &Arc<App>, host: &str, ht: HostTools, fence: &crate::hosts::HostFence) -> bool {
+    {
+        let mut tools = app.tools.lock().await;
+        if !app.hosts.is_current(fence).await || !fence.claim_publish() {
+            return false;
+        }
+        tools.insert(host.to_string(), ht);
+    }
+    follow_up_host_tools(app, host).await;
+    true
+}
+
 /// 偵測結果寫進 `app.tools`，以及寫完之後一定要跟著做的事（抽出來，測試不必真的跑 shell 探測）。
+#[cfg(test)]
 pub(crate) async fn install_host_tools(app: &Arc<App>, host: &str, ht: HostTools) {
     app.tools.lock().await.insert(host.to_string(), ht);
+    follow_up_host_tools(app, host).await;
+}
+
+async fn follow_up_host_tools(app: &Arc<App>, host: &str) {
     // 身分表剛更新：清掉 kind 不符的 identity 與它留下的 quota key（`identity_kind::cleanup_host`）。
     crate::identity_kind::cleanup_host(app, host).await;
     // 身分表齊了，重啟前停下的交辦這時才算得出正確的 quota key（每台主機每個行程只跑一次，review 2026-09-16 M3）。
@@ -872,6 +910,7 @@ pub fn spawn_detect(app: Arc<App>, host: String) {
                     crate::state::emit_host_changed(&app, &conn).await;
                 }
             }
+            Err(e) if e.is::<Superseded>() => tracing::info!(host, "{e}"),
             Err(e) => tracing::warn!(host, error = %e, "tool detection failed"),
         }
     });
@@ -1348,5 +1387,72 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
             identity_login_command("claude", &env).unwrap().rsplit_once(' ').unwrap().0,
             identity_logout_command("claude", &env).unwrap().rsplit_once(' ').unwrap().0
         );
+    }
+    fn host_cfg(ssh: &str) -> crate::config::HostCfg {
+        crate::config::HostCfg { name: "build1".into(), ssh: ssh.into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "agents-manager".into(), remote_path: String::new() }
+    }
+
+    fn ht_marked(marker: &str) -> HostTools {
+        HostTools {
+            tools: Default::default(),
+            identities: Default::default(),
+            shell_identities: Default::default(),
+            utc_offset_secs: None,
+            herdr_cli: Some(marker.into()),
+            checked_at: crate::db::now(),
+        }
+    }
+
+    async fn marker(app: &Arc<App>) -> Option<String> {
+        app.tools.lock().await.get("build1").and_then(|t| t.herdr_cli.clone())
+    }
+
+    /// #347：build1 先指到 A、慢偵測 T1 還在跑，主機改指到 B、T2 先寫完，T1 才回來——T1 的（A 的）結果必須丟掉。
+    #[tokio::test]
+    async fn a_detection_that_outlived_a_reconfigure_cannot_overwrite_the_new_hosts_tools() {
+        let app = crate::testing::env().await.app.clone();
+        app.hosts.insert_remote_for_test(host_cfg("target-a")).await;
+        let t1 = app.hosts.fence("build1").await.unwrap();
+        app.hosts.insert_remote_for_test(host_cfg("target-b")).await;
+        let t2 = app.hosts.fence("build1").await.unwrap();
+        assert!(install_host_tools_fenced(&app, "build1", ht_marked("B"), &t2).await);
+        assert!(!install_host_tools_fenced(&app, "build1", ht_marked("A"), &t1).await, "A 的舊偵測要被丟掉");
+        assert_eq!(marker(&app).await.as_deref(), Some("B"));
+    }
+
+    /// 明確重連只 bump generation（同一個連線物件）：重連前開始的偵測一樣作廢。
+    #[tokio::test]
+    async fn a_detection_that_outlived_a_reconnect_is_discarded() {
+        let app = crate::testing::env().await.app.clone();
+        let conn = app.hosts.insert_remote_for_test(host_cfg("target-a")).await;
+        let stale = app.hosts.fence("build1").await.unwrap();
+        conn.bump_generation_for_test();
+        assert!(!install_host_tools_fenced(&app, "build1", ht_marked("old"), &stale).await);
+        assert_eq!(marker(&app).await, None, "什麼都沒寫");
+        let fresh = app.hosts.fence("build1").await.unwrap();
+        assert!(install_host_tools_fenced(&app, "build1", ht_marked("new"), &fresh).await);
+    }
+
+    /// 同一個 generation 內重疊的兩次偵測（開機那次與別名輪詢）：後開始的先寫完，先開始的較晚回來不能蓋掉它。
+    #[tokio::test]
+    async fn an_older_overlapping_detection_cannot_overwrite_a_newer_one() {
+        let app = crate::testing::env().await.app.clone();
+        app.hosts.insert_remote_for_test(host_cfg("target-a")).await;
+        let older = app.hosts.fence("build1").await.unwrap();
+        let newer = app.hosts.fence("build1").await.unwrap();
+        assert!(install_host_tools_fenced(&app, "build1", ht_marked("newer"), &newer).await);
+        assert!(!install_host_tools_fenced(&app, "build1", ht_marked("older"), &older).await);
+        assert_eq!(marker(&app).await.as_deref(), Some("newer"));
+    }
+
+    /// 主機被移除之後回來的偵測不能把它的快取種回去。
+    #[tokio::test]
+    async fn a_detection_for_a_removed_host_is_discarded() {
+        let app = crate::testing::env().await.app.clone();
+        app.hosts.insert_remote_for_test(host_cfg("target-a")).await;
+        let fence = app.hosts.fence("build1").await.unwrap();
+        app.hosts.remove(&app, "build1").await;
+        assert!(!install_host_tools_fenced(&app, "build1", ht_marked("ghost"), &fence).await);
+        assert_eq!(marker(&app).await, None);
     }
 }

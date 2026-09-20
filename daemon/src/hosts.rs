@@ -118,6 +118,9 @@ pub struct HostConn {
     supervisor: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Bumped on every explicit reconnect so a stale supervisor exits.
     generation: std::sync::atomic::AtomicU64,
+    /// [`HostFence`] tickets handed out / the newest ticket whose result was published (issue #347).
+    fence_tickets: std::sync::atomic::AtomicU64,
+    fence_published: std::sync::atomic::AtomicU64,
     /// This daemon's instance slug at the time this host was (re)configured — namespaces the
     /// ctl/sock paths (issue #85). Unused for `local` (never spawns an SSH master).
     instance: Option<String>,
@@ -135,6 +138,8 @@ impl HostConn {
             master: Mutex::new(None),
             supervisor: Mutex::new(None),
             generation: std::sync::atomic::AtomicU64::new(0),
+            fence_tickets: std::sync::atomic::AtomicU64::new(0),
+            fence_published: std::sync::atomic::AtomicU64::new(0),
             instance: None,
         })
     }
@@ -151,12 +156,20 @@ impl HostConn {
             master: Mutex::new(None),
             supervisor: Mutex::new(None),
             generation: std::sync::atomic::AtomicU64::new(0),
+            fence_tickets: std::sync::atomic::AtomicU64::new(0),
+            fence_published: std::sync::atomic::AtomicU64::new(0),
             instance,
         })
     }
 
     pub fn is_local(&self) -> bool {
         self.cfg.is_none()
+    }
+
+    /// Test seam: what an explicit reconnect does to superseded observations.
+    #[cfg(test)]
+    pub(crate) fn bump_generation_for_test(&self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
     }
 
     pub fn is_connected(&self) -> bool {
@@ -594,6 +607,35 @@ fn spawn_supervisor(app: Arc<App>, conn: Arc<HostConn>, generation: u64) -> toki
     })
 }
 
+/// Authority token for an external observation of one host (issue #347): the connection object and its
+/// generation as they were **before** the probe started. The observation may publish (into `app.tools`,
+/// `app.quotas`…) only if [`HostManager::is_current`] still holds afterwards — a reconnect bumps the generation,
+/// a reconfigure replaces the connection, a removal drops it, and any of those means the result describes a
+/// machine that is no longer the authority for this host name. `ticket` orders overlapping observations within
+/// one generation: an older one finishing after a newer one has published is discarded.
+#[derive(Clone)]
+pub struct HostFence {
+    conn: Arc<HostConn>,
+    generation: u64,
+    ticket: u64,
+}
+
+impl HostFence {
+    pub fn conn(&self) -> &Arc<HostConn> {
+        &self.conn
+    }
+
+    /// Call while holding the lock of the state being published: true once per ticket, and never for a ticket
+    /// older than one that already published.
+    pub fn claim_publish(&self) -> bool {
+        if self.conn.fence_published.load(Ordering::SeqCst) >= self.ticket {
+            return false;
+        }
+        self.conn.fence_published.store(self.ticket, Ordering::SeqCst);
+        true
+    }
+}
+
 pub struct HostManager {
     conns: Mutex<HashMap<String, Arc<HostConn>>>,
 }
@@ -607,6 +649,27 @@ impl HostManager {
 
     pub async fn get(&self, name: &str) -> Option<Arc<HostConn>> {
         self.conns.lock().await.get(name).cloned()
+    }
+
+    /// Capture the current authority for `name` (see [`HostFence`]); `None` = no such host.
+    pub async fn fence(&self, name: &str) -> Option<HostFence> {
+        let conn = self.get(name).await?;
+        let generation = conn.generation.load(Ordering::SeqCst);
+        let ticket = conn.fence_tickets.fetch_add(1, Ordering::SeqCst) + 1;
+        Some(HostFence { conn, generation, ticket })
+    }
+
+    pub async fn is_current(&self, f: &HostFence) -> bool {
+        let same = self.conns.lock().await.get(&f.conn.name).is_some_and(|c| Arc::ptr_eq(c, &f.conn));
+        same && f.conn.generation.load(Ordering::SeqCst) == f.generation
+    }
+
+    /// Test seam: register a remote host without starting a supervisor (a reconfigure replaces it, like `apply_config`).
+    #[cfg(test)]
+    pub(crate) async fn insert_remote_for_test(&self, cfg: HostCfg) -> Arc<HostConn> {
+        let conn = HostConn::remote(cfg, None);
+        self.conns.lock().await.insert(conn.name.clone(), conn.clone());
+        conn
     }
 
     pub async fn client(&self, name: &str) -> Option<HerdrClient> {

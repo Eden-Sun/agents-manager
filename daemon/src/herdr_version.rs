@@ -27,13 +27,25 @@ pub fn for_host(conn: &crate::hosts::HostConn, connected: bool, detected: Option
 
 /// 重 ping＋重探 CLI 版本，有變就推 `host_changed`（#254）：herdr live-handoff 後 server 版本／protocol 換了，
 /// 或只換了 CLI，快取都會過期。`cli` 由呼叫端探（測試直接給）；讀不到＝None，不保留舊值。
+#[cfg(test)]
 pub async fn refresh_with(app: &std::sync::Arc<crate::state::App>, host: &str, cli: Option<String>) {
-    let Some(conn) = app.hosts.get(host).await else { return };
+    let Some(fence) = app.hosts.fence(host).await else { return };
+    refresh_with_fence(app, host, &fence, cli).await;
+}
+
+/// `cli` 是在 `fence` 之下量的：探測途中主機被重連／改指到另一台，就不能把它寫進現在那台的快取（#347，
+/// 否則 A 機的 CLI 版本會被掛到 B 機上，誤報或藏起 server/CLI 不一致）。
+pub async fn refresh_with_fence(app: &std::sync::Arc<crate::state::App>, host: &str, fence: &crate::hosts::HostFence, cli: Option<String>) {
+    let conn = fence.conn().clone();
     let connected = if conn.is_local() { app.connected.load(std::sync::atomic::Ordering::SeqCst) } else { conn.is_connected() };
     let before = for_host(&conn, connected, app.tools.lock().await.get(host));
     let _ = conn.client.ping().await;
     let after = {
         let mut tools = app.tools.lock().await;
+        if !app.hosts.is_current(fence).await {
+            tracing::info!(host, "herdr version probe superseded by a reconnect/reconfigure; discarded");
+            return;
+        }
         if let Some(t) = tools.get_mut(host) {
             t.herdr_cli = cli;
         }
@@ -46,8 +58,9 @@ pub async fn refresh_with(app: &std::sync::Arc<crate::state::App>, host: &str, c
 }
 
 pub async fn refresh(app: &std::sync::Arc<crate::state::App>, host: &str) {
+    let Some(fence) = app.hosts.fence(host).await else { return };
     let cli = crate::tools::probe_herdr_cli(app, host).await;
-    refresh_with(app, host, cli).await;
+    refresh_with_fence(app, host, &fence, cli).await;
 }
 
 const REFRESH_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
@@ -141,5 +154,20 @@ mod tests {
         super::refresh_with(app, "local", None).await;
         let v = for_host(&conn, true, app.tools.lock().await.get("local"));
         assert!(v["server_version"].is_null() && v["cli_version"].is_null());
+    }
+    /// #347：A 機量到的 CLI 版本，探測途中主機被換成 B，不能掛到 B 的快取上。
+    #[tokio::test]
+    async fn a_cli_version_measured_before_a_reconfigure_is_not_attached_to_the_new_host() {
+        let app = crate::testing::env().await.app.clone();
+        let cfg = |ssh: &str| crate::config::HostCfg { name: "build1".into(), ssh: ssh.into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "agents-manager".into(), remote_path: String::new() };
+        app.hosts.insert_remote_for_test(cfg("target-a")).await;
+        let fence = app.hosts.fence("build1").await.unwrap();
+        app.hosts.insert_remote_for_test(cfg("target-b")).await;
+        app.tools.lock().await.insert("build1".into(), crate::tools::HostTools {
+            tools: Default::default(), identities: Default::default(), shell_identities: Default::default(),
+            utc_offset_secs: None, herdr_cli: Some("herdr 0.9.1".into()), checked_at: crate::db::now(),
+        });
+        super::refresh_with_fence(&app, "build1", &fence, Some("herdr 0.8.2".into())).await;
+        assert_eq!(app.tools.lock().await["build1"].herdr_cli.as_deref(), Some("herdr 0.9.1"), "B 的快取不動");
     }
 }
