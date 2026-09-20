@@ -237,7 +237,9 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/supervisor/herdr-maintenance/open", post(crate::herdr_maintenance::open))
         .route("/supervisor/herdr-maintenance/end", post(crate::herdr_maintenance::end))
         .layer(axum::middleware::from_fn_with_state(app.clone(), auth))
-        .route("/session", get(get_session));
+        .route("/session", get(get_session))
+        // 沒這條路由的 /api/* 要回 JSON 404，不能掉到外層的 SPA fallback（200 的 index.html）。
+        .fallback(api_route_not_found);
 
     Router::new()
         .nest("/api", api)
@@ -252,6 +254,10 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/build-slots/release", post(crate::build_scheduler::post_release))
         .fallback(get(crate::assets::serve))
         .with_state(app)
+}
+
+async fn api_route_not_found() -> LcError {
+    LcError::NotFound("route".into())
 }
 
 /// SPEC §6.5d：shim 先報，hook 回音時補 `relay_from`，總管裁示才不像使用者打的。
@@ -4489,5 +4495,37 @@ mod relay_pane_host_tests {
         assert_eq!(code, StatusCode::OK, "DB 好了重送就成功");
         let host: String = sqlx::query_scalar("SELECT host FROM panes WHERE pane_id='w1-9'").fetch_one(&app.db).await.unwrap();
         assert_eq!(host, "local");
+    }
+}
+
+#[cfg(test)]
+mod unknown_api_route_tests {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn raw(app: std::sync::Arc<crate::state::App>, req: &str) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router = super::router(app);
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await
+        });
+        let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
+        c.write_all(format!("{req} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Length: 0\r\n\r\n").as_bytes()).await.unwrap();
+        let mut out = String::new();
+        c.read_to_string(&mut out).await.unwrap();
+        server.abort();
+        out
+    }
+
+    /// 打錯路徑（或新前端打舊 daemon 還沒有的端點）以前拿到 200 的 index.html：呼叫端看不出「沒這個端點」，
+    /// 而且不帶 token 也回 200。API.md §1：找不到是 404 JSON。
+    #[tokio::test]
+    async fn an_unknown_api_path_is_a_json_404_not_the_spa_shell() {
+        let env = crate::testing::env().await;
+        for req in ["GET /api/no-such-endpoint", "POST /api/no-such-endpoint", "GET /api/bots/x/no-such-sub"] {
+            let out = raw(env.app.clone(), req).await;
+            assert!(out.starts_with("HTTP/1.1 404"), "{req}: {out}");
+            assert!(out.contains("\"error\":\"not_found\""), "{req}: {out}");
+        }
     }
 }
