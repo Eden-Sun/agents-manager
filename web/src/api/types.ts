@@ -425,6 +425,8 @@ export interface GroupMessagesPage {
 /** SPEC §13.4 `POST /api/projects/:id/chat` */
 export interface GroupChatResult {
   group_id: string
+  /** false＝一顆都沒送到（全被跳過）；舊 daemon 沒有這欄，用 `sent.length` 判斷（見 `groupSendDelivered`）。 */
+  delivered?: boolean
   sent: { bot_id: string; bot_name: string; turn_id: string; message_id: string | null; delivery: TurnDelivery }[]
   skipped: { bot_id: string; bot_name: string; reason: GroupSkipReason; detail: string }[]
 }

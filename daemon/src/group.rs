@@ -238,10 +238,23 @@ pub async fn chat(
             lifecycle::prompt_grouped(app, &t.id, text, &crid, Some(&group_id), Some(&deliver), attachment_ids, None).await,
         );
         match sent_now {
-            Ok(out) => sent.push(json!({
+            Ok(out) => {
+                // 同一個 crid 之前對這顆寫過「未送達」note（當時沒在跑），這次送到了：note 已經不是事實，撤掉（#340）。
+                if let Ok(conv) = db::conversation_id(&app.db, &t.id).await {
+                    if let Err(e) = sqlx::query("DELETE FROM messages WHERE conversation_id = ? AND group_id = ? AND role = 'system'")
+                        .bind(&conv)
+                        .bind(&group_id)
+                        .execute(&app.db)
+                        .await
+                    {
+                        tracing::warn!(bot = %t.name, error = %e, "could not retire the stale skipped note");
+                    }
+                }
+                sent.push(json!({
                 "bot_id": t.id, "bot_name": t.name, "turn_id": out.turn_id,
                 "message_id": out.message_id, "delivery": out.delivery,
-            })),
+                }))
+            }
             Err(e) => {
                 let (code, human) = skip_reason(&e);
                 tracing::info!(bot = %t.name, code, reason = %human, "group chat: recipient skipped");
@@ -253,7 +266,8 @@ pub async fn chat(
             }
         }
     }
-    Ok(json!({"group_id": group_id, "project_id": project.id, "sent": sent, "skipped": skipped}))
+    // `delivered:false`＝一顆都沒送到（全被跳過）：仍是 200（各顆的「未送達」note 已記），但前端不該把它當成「送出去了」而清掉草稿（#340）。
+    Ok(json!({"group_id": group_id, "project_id": project.id, "delivered": !sent.is_empty(), "sent": sent, "skipped": skipped}))
 }
 
 async fn note_skipped(app: &Arc<App>, bot: &Member, group_id: &str, code: &str, human: &str) -> anyhow::Result<()> {
@@ -596,5 +610,34 @@ mod uncommitted_tests {
         assert_eq!(skipped.len(), 1, "{out}");
         assert_eq!(skipped[0]["bot_id"], stopped.id.as_str(), "{out}");
         assert_eq!(skipped[0]["reason"], "not_running", "{out}");
+    }
+
+    /// #340：一顆都沒送到要明說（delivered:false），前端才不會清掉草稿；重送後那顆送到了，先前的「未送達」note 要撤掉。
+    #[tokio::test]
+    async fn an_all_skipped_send_says_it_delivered_nothing_and_a_retry_retires_the_stale_note() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let stopped = tt::claude_bot(&app, &env.project_id, "grp-only").await;
+        let conv = db::conversation_id(&app.db, &stopped.id).await.unwrap();
+        env.herdr.live_pane("pane-api", tt::LivePane { width: Some(120), ..Default::default() });
+
+        let out = chat(&app, &env.project_id, "@all hi", "crid-none", &[]).await.ok().unwrap();
+        assert_eq!(out["delivered"], false, "{out}");
+        assert_eq!(out["sent"].as_array().unwrap().len(), 0);
+        assert_eq!(system_notes(&app, &conv).await.len(), 1, "有一則未送達 note");
+
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, pane_typed, started_at)
+             VALUES (?,?,'running','idle','ws-1','pane-api','api-bot','test',1,?)",
+        )
+        .bind(db::ulid())
+        .bind(&stopped.id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let out = chat(&app, &env.project_id, "@all hi", "crid-none", &[]).await.ok().unwrap();
+        assert_eq!(out["delivered"], true, "{out}");
+        assert!(system_notes(&app, &conv).await.is_empty(), "送到了，先前的未送達 note 要撤掉");
     }
 }
