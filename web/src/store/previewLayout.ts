@@ -1,11 +1,12 @@
 /**
- * 預覽欄（`components/PreviewColumn.tsx`，桌機 `.app` 最右邊那一欄）的版面偏好：是否展開、拖過的寬度。
+ * 預覽欄（`components/PreviewColumn.tsx`，桌機 `.app` 最右邊那一欄）的版面偏好：是否展開（每顆 parent bot 各記一份）、拖過的寬度（全域一份）。
  * localStorage、不進 zustand：純版面偏好（同 `mobilePreview.ts`）。
  */
 
 import { useSyncExternalStore } from 'react'
 
-const OPEN_KEY = 'am.previewCol.open'
+/** `{ [botId]: true }`；沒記＝收合。舊的全域旗標 `am.previewCol.open` 不遷移（各 bot 預設收合）。 */
+const OPEN_KEY = 'am.previewCol.openBots'
 const WIDTH_KEY = 'am.previewCol.width'
 const EVENT = 'am:preview-col'
 
@@ -24,11 +25,23 @@ export function clampPreviewWidth(w: number, viewport: number): number {
   return Math.min(max, Math.max(PREVIEW_COL_MIN, Math.round(w)))
 }
 
-function readOpen(): boolean {
+/** 壞資料一律當空；只認值為 `true` 的鍵。 */
+export function parseOpenMap(raw: string | null): Record<string, true> {
+  if (!raw) return {}
   try {
-    return window.localStorage.getItem(OPEN_KEY) === '1'
+    const v: unknown = JSON.parse(raw)
+    if (typeof v !== 'object' || v === null || Array.isArray(v)) return {}
+    return Object.fromEntries(Object.entries(v).filter(([, on]) => on === true)) as Record<string, true>
   } catch {
-    return false
+    return {}
+  }
+}
+
+function readOpenMap(): Record<string, true> {
+  try {
+    return parseOpenMap(window.localStorage.getItem(OPEN_KEY))
+  } catch {
+    return {}
   }
 }
 
@@ -51,8 +64,13 @@ function subscribe(onChange: () => void): () => void {
   }
 }
 
-export function usePreviewColOpen(): boolean {
-  return useSyncExternalStore(subscribe, readOpen, () => false)
+/** 這顆 bot 的預覽欄是否展開；snapshot 是布林，不會因別顆 bot 的變動重繪。 */
+export function usePreviewColOpen(botId: string | null): boolean {
+  return useSyncExternalStore(
+    subscribe,
+    () => (botId ? readOpenMap()[botId] === true : false),
+    () => false,
+  )
 }
 
 export function usePreviewColWidth(): number | null {
@@ -68,5 +86,10 @@ function write(key: string, value: string): void {
   window.dispatchEvent(new Event(EVENT))
 }
 
-export const setPreviewColOpen = (open: boolean) => write(OPEN_KEY, open ? '1' : '0')
+export function setPreviewColOpen(botId: string, open: boolean): void {
+  const map = readOpenMap()
+  if (open) map[botId] = true
+  else delete map[botId]
+  write(OPEN_KEY, JSON.stringify(map))
+}
 export const setPreviewColWidth = (w: number) => write(WIDTH_KEY, String(Math.round(w)))
