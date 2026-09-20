@@ -56,7 +56,7 @@ pub async fn receive(
             return (StatusCode::UNAUTHORIZED, Json(json!({"error": "unknown bot"})));
         }
     };
-    if token.is_empty() || token != expected {
+    if token.is_empty() || !crate::api::ct_eq(token, &expected) {
         return (StatusCode::UNAUTHORIZED, Json(json!({"error": "bad token"})));
     }
     let provider = if body.provider.is_empty() { provider } else { body.provider.clone() };

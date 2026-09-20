@@ -291,7 +291,7 @@ async fn relay_pane(
 ) -> (StatusCode, Json<Value>) {
     let token = headers.get("X-AM-Bot-Token").and_then(|v| v.to_str().ok()).unwrap_or("");
     let bot = match db::bot(&app.db, &body.bot_id).await {
-        Ok(Some(b)) if b.deleted_at.is_none() && !token.is_empty() && token == b.hook_token => b,
+        Ok(Some(b)) if b.deleted_at.is_none() && !token.is_empty() && ct_eq(token, &b.hook_token) => b,
         _ => return (StatusCode::UNAUTHORIZED, Json(json!({"error": "unknown bot or bad token"}))),
     };
     // 讀不到 host 就 503 讓 shim 重試：退回 local 會把遠端 pane id 寫進本機 namespace（#243）。
@@ -315,7 +315,7 @@ async fn relay_announce(
 ) -> (StatusCode, Json<Value>) {
     let token = headers.get("X-AM-Bot-Token").and_then(|v| v.to_str().ok()).unwrap_or("");
     let ok = match db::bot(&app.db, &body.bot_id).await {
-        Ok(Some(b)) if b.deleted_at.is_none() => !token.is_empty() && token == b.hook_token,
+        Ok(Some(b)) if b.deleted_at.is_none() => !token.is_empty() && ct_eq(token, &b.hook_token),
         _ => false,
     };
     if !ok {
@@ -442,13 +442,22 @@ fn origin_is_local(headers: &HeaderMap, _port: u16, allow_lan: bool) -> bool {
     matches!(host, "127.0.0.1" | "localhost" | "[::1]")
 }
 
+/// 常數時間比對 token：逐位元 OR 差異，不因第一個不同的位元組提早結束（長度不同直接不等，長度本來就不是祕密）。
+pub(crate) fn ct_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
 async fn auth(State(app): State<Arc<App>>, req: axum::extract::Request, next: Next) -> Response {
     let headers = req.headers().clone();
     if !origin_is_local(&headers, app.port, app.allow_lan) {
         return (StatusCode::FORBIDDEN, Json(json!({"error": "bad origin"}))).into_response();
     }
     let tok = headers.get("X-AM-Token").and_then(|v| v.to_str().ok()).unwrap_or("");
-    if tok != app.ui_token {
+    if !ct_eq(tok, &app.ui_token) {
         return (StatusCode::UNAUTHORIZED, Json(json!({"error": "missing or bad X-AM-Token"}))).into_response();
     }
     next.run(req).await
@@ -3106,7 +3115,7 @@ async fn ws_handler(
     if !origin_is_local(&headers, app.port, app.allow_lan) {
         return (StatusCode::FORBIDDEN, "bad origin").into_response();
     }
-    if q.get("token").map(|s| s.as_str()) != Some(app.ui_token.as_str()) {
+    if !ct_eq(q.get("token").map(|s| s.as_str()).unwrap_or(""), &app.ui_token) {
         return (StatusCode::UNAUTHORIZED, "bad token").into_response();
     }
     let since: Option<u64> = q.get("since").and_then(|s| s.parse().ok());
@@ -4620,5 +4629,20 @@ mod unknown_api_route_tests {
             assert!(out.starts_with("HTTP/1.1 404"), "{req}: {out}");
             assert!(out.contains("\"error\":\"not_found\""), "{req}: {out}");
         }
+    }
+}
+
+#[cfg(test)]
+mod ct_eq_tests {
+    use super::ct_eq;
+
+    #[test]
+    fn compares_whole_tokens_exactly() {
+        assert!(ct_eq("0123abcd", "0123abcd"));
+        assert!(!ct_eq("0123abcd", "0123abce"), "只差最後一位");
+        assert!(!ct_eq("0123abcd", "1123abcd"), "只差第一位");
+        assert!(!ct_eq("0123abcd", "0123abc"), "長度不同");
+        assert!(!ct_eq("", "x"));
+        assert!(ct_eq("", ""), "空對空只是函式本身的性質；呼叫端仍要先擋空 token");
     }
 }

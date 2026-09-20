@@ -342,13 +342,13 @@ async fn authenticate(app: &Arc<App>, headers: &HeaderMap, bot_id: Option<&str>)
     if let Some(id) = bot_id {
         if !bot_token.is_empty() {
             match crate::db::bot(&app.db, id).await.map_err(up)? {
-                Some(b) if b.deleted_at.is_none() && bot_token == b.hook_token => return Ok(Some(id.to_string())),
+                Some(b) if b.deleted_at.is_none() && crate::api::ct_eq(bot_token, &b.hook_token) => return Ok(Some(id.to_string())),
                 _ => {}
             }
         }
     }
     let ui_token = headers.get("X-AM-Token").and_then(|v| v.to_str().ok()).unwrap_or("");
-    if !ui_token.is_empty() && ui_token == app.ui_token {
+    if !ui_token.is_empty() && crate::api::ct_eq(ui_token, &app.ui_token) {
         return Ok(None);
     }
     Err(LcError::Forbidden(json!({"error": "unauthorized", "message": "need a matching X-AM-Bot-Token+bot_id, or X-AM-Token"})))
