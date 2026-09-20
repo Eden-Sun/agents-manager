@@ -490,3 +490,33 @@
     left: calc(100% + 6px);
   }
 }
+
+/* 手機主力區（#344）：固定 4 顆等寬一排、往下換行、最多兩排（8 顆，多的元件不畫）；不橫捲。 */
+@media (max-width: 720px) {
+  .unread-pin-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 4px;
+    padding: 4px 8px;
+    background: var(--bg-sunken);
+  }
+
+  .unread-pin-grid .unread-chip {
+    max-width: none;
+    min-width: 0;
+    width: 100%;
+    justify-content: center;
+  }
+
+  /* 名字長就省略號；星號、未讀數、狀態點固定寬度不縮。 */
+  .unread-pin-grid .unread-chip-name {
+    flex: 0 1 auto;
+    min-width: 0;
+  }
+
+  .unread-pin-grid .unread-chip-star,
+  .unread-pin-grid .unread-chip-n,
+  .unread-pin-grid .unread-chip-dot {
+    flex: none;
+  }
+}

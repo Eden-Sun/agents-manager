@@ -114,3 +114,16 @@ export function pickSlot(boxes: Box[], x: number, y: number, dragId: string, pre
   if (held && Math.abs(held.x - x) <= Math.abs(best.x - x) + DROP_STICKY_PX) best = held
   return { before: best.before, shift: row.slice(best.at).map((b) => b.id), after: best.at === row.length ? row[row.length - 1].id : null }
 }
+
+/** 手機主力區最多畫幾顆（4 顆一排、兩排）；超過的直接不畫，由使用者用拖曳決定前幾顆（#344）。 */
+export const PIN_GRID_MAX = 8
+
+/**
+ * 「放在畫面上最後一顆之後」對應的 `beforeId`：完整順序裡緊接在最後一顆可見晶片後面的那顆（沒有＝最後）。
+ * 主力區有上限時，被藏起來的晶片不能被拖過頭的那顆插到它們後面去。
+ */
+export function endBefore(full: string[], visible: string[]): string | null {
+  const last = visible[visible.length - 1]
+  const at = last === undefined ? -1 : full.indexOf(last)
+  return at < 0 ? null : (full[at + 1] ?? null)
+}

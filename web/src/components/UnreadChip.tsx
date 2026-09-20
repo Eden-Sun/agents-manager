@@ -17,7 +17,7 @@ import type { Bot } from '../api/types'
 import { useMediaQuery } from '../hooks/useMediaQuery'
 import { clipAfterRows, lineBudget, moreTitle } from '../lib/chipOverflow'
 import { chipTracked } from '../lib/supervisorProject'
-import { sortPinned } from '../lib/pinnedOrder'
+import { PIN_GRID_MAX, sortPinned } from '../lib/pinnedOrder'
 import { useChipFlip } from './useChipFlip'
 import { orderedBotIds, useStore } from '../store/store'
 import { usePinnedDrag, type PinnedDnd } from './usePinnedDrag'
@@ -196,7 +196,9 @@ export function UnreadChip() {
     () => sortPinned(bots.filter((b) => b.primary && !b.pending).map((b, i) => ({ id: b.id, position: b.primary_position, index: i }))).map((x) => x.id),
     [bots],
   )
-  const visiblePinned = useMemo(() => pinnedItems.map((it) => it.id), [pinnedItems])
+  // 手機：固定 4 顆一排、最多兩排，超過的不畫（使用者用拖曳決定前 8 顆）；桌機全畫。
+  const shownPinned = useMemo(() => (narrow ? pinnedItems.slice(0, PIN_GRID_MAX) : pinnedItems), [narrow, pinnedItems])
+  const visiblePinned = useMemo(() => shownPinned.map((it) => it.id), [shownPinned])
   const names = useMemo(() => Object.fromEntries(pinnedItems.map((it) => [it.id, it.name])), [pinnedItems])
   const dnd = usePinnedDrag(fullPinned, visiblePinned, names, movePrimary)
   const ordered = useMemo(() => [...pinnedItems, ...otherItems], [pinnedItems, otherItems])
@@ -211,7 +213,7 @@ export function UnreadChip() {
     return (
       <>
         <PinHint />
-        <ScrollRow items={pinnedItems} label="主力 bot" selectedBotId={selectedBotId} dnd={dnd} />
+        <PinGrid items={shownPinned} dnd={dnd} />
         <ScrollRow items={otherItems} label="在跑或剛完成的 bot" selectedBotId={selectedBotId} />
       </>
     )
@@ -251,6 +253,23 @@ export function UnreadChip() {
           {expanded ? '收合' : `+${hidden}`}
         </button>
       ) : null}
+    </div>
+  )
+}
+
+/** 手機的主力區：4 顆等寬一排、往下換行、最多兩排，不橫捲（#344）。 */
+function PinGrid({ items, dnd }: { items: ChipItem[]; dnd: PinnedDnd }) {
+  if (items.length === 0) return null
+  return (
+    <div className="unread-bar-wrap row">
+      <div className="unread-pin-grid" role="status" aria-live="polite" aria-label="主力 bot">
+        {items.map((it) => (
+          <Chip key={it.id} it={it} dnd={dnd} />
+        ))}
+        <span className="sr-only" aria-live="polite">
+          {dnd.announce}
+        </span>
+      </div>
     </div>
   )
 }
