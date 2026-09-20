@@ -717,6 +717,81 @@ async fn the_watcher_promotes_a_starting_preview_without_anyone_asking() {
     panic!("the watcher never noticed the port");
 }
 
+// ── #260：running 之後也有人看 ──
+
+#[tokio::test]
+async fn a_spawned_preview_whose_server_dies_after_running_fails_without_anyone_asking() {
+    let r = rig().await;
+    let bot = running_bot(&r, "alfa").await;
+    start(&r.e.app, &bot, StartReq::default()).await.unwrap();
+    r.fake.listen(5180);
+    assert!(spawn_watcher(r.e.app.clone(), bot.clone()));
+    assert!(testing::eventually!(row(&r.e.app.db, &bot).await.unwrap().unwrap().status == "running"));
+    // starting → running 之後監看還在（以前這裡就結束了）。
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(is_watched(&bot), "監看在 running 之後就結束了");
+    let seq = r.e.app.current_seq();
+    r.fake.unlisten(5180);
+    assert!(
+        testing::eventually!(row(&r.e.app.db, &bot).await.unwrap().unwrap().status == "failed"),
+        "vite 掛了（pane 還在、port 不再 listen），沒人 GET 就沒人發現"
+    );
+    assert!(r.e.app.current_seq() > seq, "preview_changed 有發出去");
+    // failed 是終點：監看結束，之後重試（POST）才會再掛一個。
+    assert!(testing::eventually!(!is_watched(&bot)));
+}
+
+#[tokio::test]
+async fn an_attached_preview_goes_off_by_itself_when_the_external_server_exits() {
+    let r = rig().await;
+    let bot = running_bot(&r, "alfa").await;
+    r.fake.vite(100, 5180, &web_dir(&r));
+    start(&r.e.app, &bot, req("attach", Some(5180), None)).await.unwrap();
+    assert!(spawn_watcher(r.e.app.clone(), bot.clone()));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(row(&r.e.app.db, &bot).await.unwrap().unwrap().status, "running");
+    r.fake.vite_exits(5180);
+    assert!(
+        testing::eventually!(row(&r.e.app.db, &bot).await.unwrap().unwrap().status == "off"),
+        "接上的 vite 結束了，沒人 GET 就沒人發現"
+    );
+    // 別人的 server：只斷開，沒有動任何 pane。
+    assert!(r.fake.closed.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn there_is_only_one_monitor_per_bot_and_a_finished_one_makes_room() {
+    let r = rig().await;
+    let bot = running_bot(&r, "alfa").await;
+    start(&r.e.app, &bot, StartReq::default()).await.unwrap();
+    assert!(spawn_watcher(r.e.app.clone(), bot.clone()));
+    // 重複的 GET／POST／開機對帳都會呼叫：不會再多一個。
+    assert!(!spawn_watcher(r.e.app.clone(), bot.clone()));
+    reconcile_all(&r.e.app).await;
+    assert!(!spawn_watcher(r.e.app.clone(), bot.clone()));
+    // 收掉預覽之後監看結束並註銷；下一顆預覽能重新掛。
+    stop_for_bot(&r.e.app, &bot).await;
+    assert!(testing::eventually!(!is_watched(&bot)));
+    start(&r.e.app, &bot, StartReq::default()).await.unwrap();
+    assert!(spawn_watcher(r.e.app.clone(), bot.clone()));
+}
+
+#[tokio::test]
+async fn startup_reconcile_also_monitors_a_preview_that_was_already_running() {
+    let r = rig().await;
+    let bot = running_bot(&r, "alfa").await;
+    start(&r.e.app, &bot, StartReq::default()).await.unwrap();
+    r.fake.listen(5180);
+    assert_eq!(status(&get(&r.e.app, &bot).await.unwrap()), "running");
+    // 「重啟」：記憶體歸零，DB 裡那一列是 running；重啟後掛回監看，之後掛掉照樣發現。
+    let app2 = testing::restart_app(&r.e).await;
+    *app2.preview_env.lock().unwrap() = Some(r.fake.clone());
+    reconcile_all(&app2).await;
+    assert!(is_watched(&bot), "重啟後 running 的預覽沒人看");
+    r.fake.unlisten(5180);
+    assert!(testing::eventually!(row(&app2.db, &bot).await.unwrap().unwrap().status == "failed"));
+}
+
 // ── #253 v2：接上既有的 vite ──
 
 fn web_dir(r: &Rig) -> String {

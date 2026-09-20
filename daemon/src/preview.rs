@@ -27,10 +27,15 @@ pub const PORT_START: u16 = 5180;
 pub const PORT_SPAN: u16 = 100;
 /// port 開始 listen 之前最多等多久，逾時轉 `failed`。
 pub const START_TIMEOUT_SECS: i64 = 60;
+/// 起動期間（`starting`）與已經在跑（`running`）的監看間隔：後者只是確認還活著，不必每秒打一輪 TCP／herdr。
 #[cfg(not(test))]
 const POLL: Duration = Duration::from_secs(1);
 #[cfg(test)]
 const POLL: Duration = Duration::from_millis(50);
+#[cfg(not(test))]
+const RUNNING_POLL: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const RUNNING_POLL: Duration = Duration::from_millis(100);
 const TAIL_LINES: u32 = 40;
 pub const SOURCE_SPAWNED: &str = "spawned";
 pub const SOURCE_ATTACHED: &str = "attached";
@@ -761,6 +766,11 @@ pub async fn get(app: &Arc<App>, bot_id: &str) -> LcResult<Value> {
     let _g = gate().lock().await;
     let r = refresh_locked(app, bot_id).await;
     let live = r.as_ref().is_some_and(|r| r.status().is_live());
+    // 舊 daemon 留下的、或監看掛掉的列：GET 補上（已經有就不會多一個）。
+    #[cfg(not(test))]
+    if live {
+        spawn_watcher(app.clone(), bot_id.to_string());
+    }
     decorated(app, &bot, r.map(|r| r.body()).unwrap_or_else(off_body), live).await
 }
 
@@ -806,6 +816,8 @@ pub async fn start(app: &Arc<App>, bot_id: &str, req: StartReq) -> LcResult<Valu
     if let Some(r) = refresh_locked(app, bot_id).await {
         if r.status().is_live() {
             if !explicit {
+                #[cfg(not(test))]
+                spawn_watcher(app.clone(), bot_id.to_string());
                 return decorated(app, &bot, r.body(), true).await;
             }
             disconnect_locked(app, r).await;
@@ -860,6 +872,8 @@ pub async fn start(app: &Arc<App>, bot_id: &str, req: StartReq) -> LcResult<Valu
         };
         put(&app.db, &r).await.map_err(up)?;
         emit_changed(app, &r).await;
+        #[cfg(not(test))]
+        spawn_watcher(app.clone(), bot_id.to_string());
         return decorated(app, &bot, r.body(), true).await;
     }
 
@@ -996,7 +1010,7 @@ pub async fn reconcile_all(app: &Arc<App>) {
     for r in rows {
         let _g = gate().lock().await;
         if let Some(now) = refresh_locked(app, &r.bot_id).await {
-            if now.status() == Status::Starting {
+            if now.status().is_live() {
                 spawn_watcher(app.clone(), r.bot_id.clone());
             }
         }
@@ -1084,21 +1098,60 @@ async fn refresh_locked(app: &Arc<App>, bot_id: &str) -> Option<Row> {
     }
 }
 
-/// 起動期間每秒看一次，離開 `starting` 就結束。
-fn spawn_watcher(app: Arc<App>, bot_id: String) {
+/// 已經有監看的 bot（一顆 bot 只有一個）。登記與註銷都在 [`gate`] 裡做：結束的那一拍決定「不用看了」到註銷之間
+/// 沒有人能插進來開新預覽，新預覽的 `spawn_watcher` 不會被舊的登記擋掉。
+fn watched() -> &'static std::sync::Mutex<HashSet<String>> {
+    static W: OnceLock<std::sync::Mutex<HashSet<String>>> = OnceLock::new();
+    W.get_or_init(Default::default)
+}
+
+/// 這顆 bot 的預覽現在有沒有人監看（測試用）。
+#[cfg(test)]
+fn is_watched(bot_id: &str) -> bool {
+    watched().lock().unwrap().contains(bot_id)
+}
+
+/// 監看一顆 `starting`／`running` 的預覽直到它離開這兩個狀態（`off`／`failed`／這列沒了）：`starting` 每秒、`running` 每 5 秒對一次帳
+/// （pane 還在嗎、port 還在 listen 嗎），server 半路掛掉不必等人 GET 才發現、前端也收得到 `preview_changed`。
+/// 同一顆 bot 只有一個；已經有就回 `false`。要在 [`gate`] 裡呼叫。
+fn spawn_watcher(app: Arc<App>, bot_id: String) -> bool {
+    if !watched().lock().unwrap().insert(bot_id.clone()) {
+        return false;
+    }
     tokio::spawn(async move {
+        struct Unwatch(Option<String>);
+        impl Drop for Unwatch {
+            fn drop(&mut self) {
+                if let Some(id) = &self.0 {
+                    watched().lock().unwrap().remove(id);
+                }
+            }
+        }
+        // 只在 panic 之類沒走到下面明確註銷的情況兜底；正常結束在 gate 裡註銷後解除，免得誤刪之後才登記的新監看。
+        let mut guard = Unwatch(Some(bot_id.clone()));
+        let mut wait = POLL;
         loop {
-            tokio::time::sleep(POLL).await;
+            tokio::time::sleep(wait).await;
             let _g = gate().lock().await;
-            match refresh_locked(&app, &bot_id).await {
-                Some(r) if r.status() == Status::Starting => {}
-                Some(_) => return,
+            let next = match refresh_locked(&app, &bot_id).await {
+                Some(r) if r.status().is_live() => Some(r.status()),
+                Some(_) => None,
                 // 讀不到這一列（暫時性）不是「這列沒了」：只有確定沒有這一列才結束。
-                None if row(&app.db, &bot_id).await.is_err() => {}
-                None => return,
+                None if row(&app.db, &bot_id).await.is_err() => Some(Status::Starting),
+                None => None,
+            };
+            match next {
+                Some(Status::Running) => wait = RUNNING_POLL,
+                Some(_) => wait = POLL,
+                None => {
+                    watched().lock().unwrap().remove(&bot_id);
+                    guard.0 = None;
+                    return;
+                }
             }
         }
     });
+    true
 }
 
 /// 挑 port 前一次問完整個窗口。

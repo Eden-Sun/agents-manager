@@ -1876,8 +1876,11 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   | `running` | pane 在、port 不再 listen | `failed`（server 自己掛了；`attached` 是 `off`） |
 
   herdr 沒回答（`pane_alive` 問不到）當「沒變」，不當「不在」。`failed` 之後再 `POST` 就是重試：舊 pane 已收、port 重挑。
-- **誰在看**：`POST` 之後有背景 watcher 每秒看一次，離開 `starting` 就結束；`GET` 與開機（`reconcile_all`）各做一次同樣的
-  對帳（pane 還在不在＋port 有沒有在 listen）。`running` 之後沒有常駐輪詢，server 半路掛掉要等下一次 `GET` 才會轉 `failed`。
+- **誰在看**（#260）：預覽在 `starting`／`running` 期間有一個常駐監看（一顆 bot 一個，登記在 `gate` 裡，重複的 `POST`／`GET`／開機對帳不會多掛）：
+  `starting` 每秒、`running` 每 5 秒對一次帳（pane 還在不在＋port 有沒有在 listen），離開這兩個狀態（`off`／`failed`／這列沒了）才結束。
+  server 半路掛掉（`spawned` 轉 `failed`、`attached` 轉 `off`）不必等人 `GET` 才發現，狀態一變就推 `preview_changed`。
+  `POST`（含接上既有的）、`GET` 看到還活著的列、開機（`reconcile_all`，含已經 `running` 的）都會確保監看存在。
+  暫時性的讀不到（DB／herdr）不會結束監看，見「收掉」。
   對帳時 bot 已經沒有 active run（自己退了）預覽也一併收成 `off`。
 - **收掉**：`DELETE`、bot 被停止／重啟／刪除、§6.11 閒置收 bot（它們都走 `stop_locked`）一律先關預覽 pane 再動 agent 的 pane——
   預覽的 pane 跟 agent 同一個 tab，先收它，agent 的 pane 關掉時那個 tab 才會是空的、才會被一起關。
