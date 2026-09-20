@@ -1051,7 +1051,11 @@ async fn sync_pane_model(app: &Arc<App>, host: &str, client: &crate::herdr::Herd
     // claude's argv rarely has `--effort`; resolve the account default like the "預設" hint does.
     if bot.kind == "claude" && effort.is_none() && bot.effort.is_none() {
         if let Some(alias) = model.as_deref().or(bot.model.as_deref()) {
-            effort = Some(crate::models::claude_default_effort(app, host, bot.identity.as_deref(), alias).await);
+            // 讀不到設定檔就留空、下一輪對帳再讀：記下內建預設值等於把猜的當成事實，之後沒人會再改它（#268）。
+            match crate::models::claude_default_effort(app, host, bot.identity.as_deref(), alias).await {
+                Ok(e) => effort = Some(e),
+                Err(e) => tracing::warn!(bot = %bot.name, host, error = %format!("{e:#}"), "cannot read the claude settings; child effort left unset"),
+            }
         }
     }
     let model = model.filter(|_| bot.model.is_none());
