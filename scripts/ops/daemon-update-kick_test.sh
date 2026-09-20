@@ -17,6 +17,7 @@ setup() {
   export AGM_DIR="$ROOT/agm" AGM_REPO="$ROOT/repo" AGM_BUILD_BOT="bot-build" AM_AGENT_NAME="test-owner"
   export AGM_TEST_MINUTE="00"   # 預設當成整點那一輪；門檻的 case 自己覆寫
   mkdir -p "$AGM_DIR/bin"
+  echo "TASK-BODY 建置說明" > "$AGM_DIR/daemon-update-task.md"
   printf '%s' '{"manager_bot_id":"bot-manager","bot_id":"legacy-not-manager"}' > "$AGM_DIR/runtime.json"
   # 一個有 origin/main 的最小 repo。
   /usr/bin/git init -q "$AGM_REPO"
@@ -148,6 +149,16 @@ export STUB_STATE='{"bots":[{"id":"bot-build","name":"build"}]}'
 bash "$SCRIPT"
 [ ! -e "$AGM_DIR/daemon-update.fails" ] && { echo "ok   - 完整跑完一輪清零"; PASS=$((PASS + 1)); } || { echo "FAIL - 完整跑完一輪清零"; FAIL=$((FAIL + 1)); }
 unset AGM_FAIL_ALERT_AFTER
+teardown
+
+# 6c. 任務說明檔不在：不申請核准、不拿租約、不派（以前會拿了租約派出一則沒有說明的交辦）。
+setup
+rm -f "$AGM_DIR/daemon-update-task.md"
+bash "$SCRIPT"
+check "任務檔不在有記 log" "daemon-update-task.md" "$AGM_DIR/daemon-update.log"
+check_no "不申請核准" "approval request" "$AGM_DIR/calls.log"
+check_no "不拿租約" "lease acquire" "$AGM_DIR/calls.log"
+check_no "不派工" "assign" "$AGM_DIR/calls.log"
 teardown
 
 # 7. 沒設建置 child 就整支跳過——絕不改派給使用者的 bot。
