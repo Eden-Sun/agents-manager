@@ -903,7 +903,7 @@ stall watchdog 的自動補送走同一條驗證路徑，次數記在 `turns.res
 4. 建全域事件連線與各 active Run 的狀態連線。
 5. 每個 bot 重放 spool。
 6. `autostart = true` 且無 active Run 的 bot 走 §6.2。**每台主機在這顆 daemon 的一生只跑一次，而且要那台的對帳成功**：
-   本機在開機對帳之後；遠端在那台連上並對帳成功之後（`reconcile::autostart_after_reconcile`）。對帳失敗那次不算數、下次連上再試；
+   本機在開機對帳之後；遠端在那台連上並對帳成功之後（`reconcile::autostart_after_reconcile`）。對帳失敗那次不算數，之後任一次成功的對帳補跑（supervisor 連上那次，或全域訂閱建好後的那次，#259）；
    ssh 斷線重連不再跑——`stop` 不改 `autostart`，使用者停掉的 bot 不能因為筆電睡醒重連就被重開（review 2026-09-16 core 5）。
    **讀不到不當成沒有**（#209）：bot 清單讀不到＝這一輪一顆都不起；某顆讀不到主機（不當成本機）或讀不到 active run（不當成沒在跑）
    就只跳過那顆。沒判斷完的部分背景照開機恢復的退避（§3.1）補到判斷完——本機不會有「下次連上」，不能只靠重連。主機照樣只算跑過
