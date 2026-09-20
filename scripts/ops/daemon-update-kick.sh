@@ -219,6 +219,10 @@ if [ -f "$STATE" ] && [ "$(cat "$STATE")" = "$HEAD_SHA" ]; then
   log "$HEAD_SHA 已經派過，跳過"; exit 0
 fi
 
+# 任務說明檔不在就不往下走：以前 `cat 任務檔 > $TMP || true` 吞掉失敗，會在拿到 rebuild 租約之後派出一則只有
+# 尾巴、沒有任何做法說明的交辦，建置 child 不知道要幹嘛，窗口卻被占住。要在申請核准、拿租約之前擋下。
+[ -f "$DIR/daemon-update-task.md" ] || { note_fail "找不到 ${DIR}/daemon-update-task.md，這輪不派（尚未申請核准或拿租約）"; exit 0; }
+
 # 建置 child 還在嗎（不在就跳過這輪，不改派）
 if ! "$AGM" --compact state | BOT="$BOT" python3 -c '
 import json,os,sys
