@@ -1455,7 +1455,8 @@ async fn notify(app: &Arc<App>) {
         tracing::debug!(interval, pending = pending.len(), "supervisor notify throttled; events stay pending");
         return;
     }
-    if super::manager_liveness(app, &manager).await.unwrap_or("stopped") != "idle" {
+    // 讀不到 liveness 時不送（不知道它有沒有空），事件留 pending 下一輪再送。
+    if !matches!(super::manager_liveness(app, &manager).await, Ok("idle")) {
         return;
     }
     let ids: Vec<String> = pending.iter().map(|e| e.id.clone()).collect();
@@ -1753,7 +1754,8 @@ pub async fn apply_quota_policy(app: &Arc<App>) -> Result<bool, LcError> {
     let sup = store::get_or_init(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     let Some(bot_id) = sup.bot_id.clone() else { return Ok(false) };
     let quota = manager_quota(app, &sup.identity).await;
-    let liveness = super::manager_liveness(app, &bot_id).await.unwrap_or("stopped");
+    // 讀不到 liveness 是 Err，不是 "stopped"：這一輪不做任何額度決策，DB 恢復後下一輪自然重來（#249）。
+    let liveness = super::manager_liveness(app, &bot_id).await?;
     match policy::decide(&sup, quota.as_ref(), liveness, chrono::Utc::now()) {
         policy::Decision::Keep => Ok(false),
         policy::Decision::Defer { model } => {
