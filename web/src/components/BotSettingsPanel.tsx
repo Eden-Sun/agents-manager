@@ -422,7 +422,8 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
         </button>
       </div>
 
-      {banner === 'restart' ? (
+      {/* 剛存完的提示之外，daemon 從資料算出「跑的還是舊設定」（#353）也要顯示：開面板時、回應掉了、重整之後都看得到。 */}
+      {banner === 'restart' || (banner === null && bot.needs_restart) ? (
         <div className="bs-banner warn" role="status">
           <span>已儲存，重啟 Bot 後生效（目前的 Run 仍跑在舊參數上）。</span>
           <button

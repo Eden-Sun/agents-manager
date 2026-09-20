@@ -69,6 +69,7 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
           "auto_approve": true,
           "primary": false,
           "primary_position": 0,
+          "needs_restart": false,
           "run": null,
           "asleep": null,
           "lamp": "offline",
@@ -152,6 +153,8 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
 
 **`POST /api/order`**：側欄排序 = config.toml 的陣列順序，`GET /api/state` 的順序就是權威（前端不另存）。只送要改的那一半；沒列到的維持原相對順序接在後面；
 config.toml 裡沒有的 id（child、已刪）忽略。成功推 `project_changed`。
+
+**`needs_restart`（`GET /api/state` 的 bot，#353）**：執行中的 CLI 載入的啟動設定（model／effort／fast／persona／instruction_files／args／identity／env／inject_hooks／auto_approve）跟現在存的不同＝`true`。從資料算：run 啟動時記下載入的版本（`runs.launch_rev`），bot 目前的版本對不上就是過期；`PATCH` 回應掉了、daemon 之後重啟，這個旗標都還在，重啟（新 run 載入新版本）或當場套用成功（`live_apply.applied`）才清掉。沒記版本的 run（adopt 來的、升版前的）不誤報，改設定的那一刻才開始追蹤。
 
 **`primary`（主力那列的固定順序，issue #344）**：bot id 陣列，位置（**1 起算**）寫進 `bots.primary_position`；沒點名的維持原值。
 只存 DB、不進 config.toml（同 `primary`：手機與桌機追的是同一組），所以只送 `primary` 的請求不碰 config.toml。`GET /api/state` 每顆 bot 有

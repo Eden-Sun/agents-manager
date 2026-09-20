@@ -565,6 +565,8 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
                 "primary": b.is_primary == 1,
                 // 主力那列的固定順序（#344）：1 起算，0＝沒排過；取消釘選不清。
                 "primary_position": b.primary_position,
+                // 執行中的 CLI 載入的啟動設定跟現在存的不同＝要重啟（#353）：從資料算，PATCH 回應掉了也看得到。
+                "needs_restart": run.as_ref().is_some_and(|r| crate::launch_rev::is_stale(b, r)),
                 "cwd": b.cwd,
                 "agent_name": run.as_ref().and_then(|r| r.agent_name.clone()).unwrap_or_else(|| crate::config::agent_name(&p.label, &b.id)),
                 "run": run,
@@ -1391,6 +1393,14 @@ async fn patch_bot(
         || b.env.is_some()
         || b.auto_approve.is_some()
         || b.inject_hooks.is_some();
+    // 改設定之前：active run 還沒記啟動版本就用「改之前」的補記，改完才看得出過期（#353）。
+    if restart_relevant {
+        if let (Some(r), Ok(Some(before))) = (&active, db::bot(&app.db, &id).await) {
+            if let Err(e) = crate::launch_rev::stamp_if_missing(&app.db, r, &before).await {
+                tracing::warn!(bot = %id, error = %e, "could not record the launch revision before a config change");
+            }
+        }
+    }
     let needs_restart = active.is_some() && restart_relevant;
     let kind = db::bot(&app.db, &id).await.map_err(any_err)?.map(|x| x.kind).ok_or_else(|| LcError::NotFound("bot".into()))?;
     let effort: Option<Option<String>> = match &b.effort {
@@ -1530,6 +1540,14 @@ async fn patch_bot(
         Some(reason) => reason.is_some(),
         None => needs_restart,
     };
+    // 當場套用成功：執行中的 CLI 已經載入新值，這個 run 的版本跟著更新，不然會被誤判成過期（#353）。
+    if matches!(&live, Some(None)) {
+        if let (Some(r), Ok(Some(now_bot))) = (&active, db::bot(&app.db, &id).await) {
+            if let Err(e) = crate::launch_rev::stamp(&app.db, &r.id, &crate::launch_rev::of(&now_bot)).await {
+                tracing::warn!(bot = %id, error = %e, "could not record the launch revision after a live apply");
+            }
+        }
+    }
     let mut out = json!({"needs_restart": needs_restart});
     if let Some(reason) = live {
         out["live_apply"] = json!({
@@ -4752,6 +4770,46 @@ mod instruction_files_tests {
             assert_eq!(shown(&e, &id).await, json!("claude-md"));
             assert_eq!(stored(&e, &id).await, (None, None));
         }
+    }
+
+    /// #353：改了要重啟才生效的設定，`needs_restart` 不能只存在 PATCH 的 HTTP 回應裡——回應掉了（或 daemon 之後重啟）
+    /// 就永遠沒人知道執行中的 CLI 還拿著舊設定。現在從資料算：run 啟動時記下載入的版本，bot 目前的版本對不上＝要重啟。
+    #[tokio::test]
+    async fn a_config_change_under_a_running_bot_stays_visible_after_the_patch_response_is_lost() {
+        let e = env().await;
+        seed_project(&e).await;
+        let id = add(&e, json!({"name": "a", "kind": "claude"})).await.unwrap();
+        let run = lifecycle::start_bot(&e.app, &id).await.unwrap();
+        let stamped: Option<String> = sqlx::query_scalar("SELECT launch_rev FROM runs WHERE id = ?").bind(&run).fetch_one(&e.app.db).await.unwrap();
+        assert!(stamped.is_some(), "run 啟動時記下載入的版本");
+        let needs = |e: &Env, id: String| {
+            let app = e.app.clone();
+            async move {
+                let st = state_json(&app).await.unwrap();
+                st["projects"].as_array().unwrap().iter().flat_map(|p| p["bots"].as_array().unwrap().clone()).find(|b| b["id"] == json!(id)).unwrap()["needs_restart"].clone()
+            }
+        };
+        assert_eq!(needs(&e, id.clone()).await, json!(false));
+
+        // 「回應掉了」：呼叫端沒拿到 needs_restart，我們也不看它——只看資料。
+        let _lost = patch(&e, &id, json!({"instruction_files": "managed-only"})).await.unwrap();
+        assert_eq!(needs(&e, id.clone()).await, json!(true), "改了設定、run 還是舊版：從資料看得出要重啟");
+
+        // 重啟＝新 run 載入新版本，不再過期。
+        lifecycle::restart_bot(&e.app, &id).await.unwrap();
+        assert_eq!(needs(&e, id.clone()).await, json!(false));
+
+        // 只改可以當場套用的欄位（claude 的 model → /model）：套用成功就是已生效，不能被誤判成過期。
+        let out = patch(&e, &id, json!({"model": "opus"})).await.unwrap();
+        if out.get("live_apply").is_some_and(|l| l["applied"] == json!(true)) {
+            assert_eq!(needs(&e, id.clone()).await, json!(false), "當場套用成功：run 的版本跟著更新");
+        }
+
+        // 升版前的舊 run（沒記版本）：改設定那一刻補記「改之前」的版本，之後照樣看得出。
+        sqlx::query("UPDATE runs SET launch_rev = NULL WHERE bot_id = ? AND state IN ('starting','running')").bind(&id).execute(&e.app.db).await.unwrap();
+        assert_eq!(needs(&e, id.clone()).await, json!(false), "沒記版本＝不誤報");
+        let _ = patch(&e, &id, json!({"persona": "換一份人設"})).await.unwrap();
+        assert_eq!(needs(&e, id.clone()).await, json!(true), "舊 run 也在改設定的那刻開始被追蹤");
     }
 
     /// 值不在 CLI 的選項裡（CLI 會當成它自己的預設＝改讀 AGENTS.md）、非 claude 的 bot、child bot 都是 400，而且什麼都不改。

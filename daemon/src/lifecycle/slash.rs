@@ -453,6 +453,7 @@ mod login_slash_tests {
             resume_outcome: None,
             agent_status_since: None,
             subagent_json: None,
+            launch_rev: None,
         }
     }
 

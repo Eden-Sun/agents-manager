@@ -13,6 +13,7 @@ mod identity_kind;
 mod intents;
 mod restart_intents;
 mod delete_intents;
+mod launch_rev;
 mod promote_intents;
 mod assets;
 mod attach;

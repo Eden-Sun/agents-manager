@@ -110,7 +110,9 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
     **已接線：`promote`**（#248）：停 child（回不去的一步）之前先 commit intent（payload＝新 bot id、名字、模型、session、複製了哪些檔）；承諾點＝目標 user bot 進 config。
     開機（`promote_intents::recover_host`）檢查：child 還在跑＝停 child 從沒發生→收回複製、`abandoned`（可原樣重送）；child 已停／已收掉→**往前補完、不回滾**
     （目標 bot 沒建就建、沒種 session 就種、沒起過就 native resume 起、收掉 child），每步先驗世界；補不成 5 次 `failed`＋AGM inbox。handler 活著時的失敗仍照原樣回滾並收成 `abandoned`。
-    其餘路徑（launch_rev）尚未接線（見 #355 的 P5）。
+    **機制 B：啟動版本（#353）**：`needs_restart` 從資料算——`launch_rev::of(bot)`（啟動相關設定正規化後的雜湊）在 run 啟動時記進 `runs.launch_rev`，
+    bot 目前的版本對不上 active run 記的＝過期，`GET /api/state` 的 bot 帶 `needs_restart`；PATCH 當場套用（slash）成功就更新該 run 的版本、沒記版本的舊 run 在改設定那刻補記「改之前」的版本；
+    web 的 Bot 設定面板開著時也顯示「需重啟」。`bots.launch_rev` 欄位 v13 一併加了但不用（現在的版本隨時可算）。
   - **什麼時候升 `SCHEMA_VERSION`**：migrate 建出來的任何 schema 物件變了就升——`db::SCHEMA`、ALTER 名單或任何一個
     子模組的 migrate，表、欄位、型別、預設值、約束、索引、trigger 內容（含由轉移表產生的守衛）都算；排版與 `--` 註解
     不算。不靠人記：`db::schema_guard` 的測試拿全新 DB 的 schema 指紋跟 `db::SCHEMA_HISTORY` 最後一行比，對不上就紅，
