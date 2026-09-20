@@ -70,6 +70,7 @@ struct Source {
 /// | 協調者補送 | `supervisor_inbox.notify_next_at` | 總管 tick |
 /// | 總管看門狗 | `supervisors.watchdog_next_at` | 總管 tick |
 /// | hook 事件 | `hook_events.next_attempt_at` | `hook_inbox::spawn_worker`（先 drain 再等） |
+/// | 遠端已刪 bot 目錄的清理 | `remote_bot_dir_purges`（欠著的從 DB 推導） | `remote_purge`：主機連上時掃一次＋每 5 分鐘 |
 const SOURCES: &[Source] = &[
     // 排隊中的 prompt：`next_flush_at IS NULL` 的也算——那是 AGM 派工排進來、等回合結束事件送的，
     // 一樣是「還沒發生的事」，而且它正是重啟後最容易被忘記的一種（5fe77d5 那條路）。
@@ -119,6 +120,16 @@ const SOURCES: &[Source] = &[
         attempts: "watchdog_attempts",
         error: "NULL",
         filter: "watchdog_next_at IS NOT NULL",
+    },
+    // 遠端已刪 bot 的目錄還沒清掉（#349）：欠著的清理從 DB 推導，這裡只列已經失敗過、記了原因的那些。
+    Source {
+        kind: "remote_bot_dir_purge",
+        from: "remote_bot_dir_purges",
+        id: "bot_id",
+        due: "next_attempt_at",
+        attempts: "attempts",
+        error: "last_error",
+        filter: "purged_at IS NULL",
     },
     Source {
         kind: "hook_event",

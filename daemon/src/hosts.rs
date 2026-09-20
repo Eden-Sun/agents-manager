@@ -210,6 +210,10 @@ impl HostConn {
     }
 
     pub async fn ssh_exec_timeout(&self, script: &str, timeout: Duration) -> Result<String> {
+        #[cfg(test)]
+        if let Some(f) = ssh_fake_for(&self.name) {
+            return f(script);
+        }
         let Some(cfg) = &self.cfg else { bail!("ssh_exec called on the local host") };
         let mut cmd = tokio::process::Command::new("ssh");
         cmd.args(self.ssh_args()).arg(&cfg.ssh).arg("/bin/sh").arg("-s");
@@ -556,6 +560,8 @@ fn spawn_supervisor(app: Arc<App>, conn: Arc<HostConn>, generation: u64) -> toki
                     crate::events::spawn_global_for_host(app.clone(), conn.name.clone()).await;
                     crate::hookrecv::replay_host(&app, &conn.name).await;
                     crate::tools::spawn_detect(app.clone(), conn.name.clone());
+                    // 刪除 handler 的一次性 ssh purge 若在送出前 daemon 就死了，這台的已刪 bot 目錄靠連上時再掃一次收掉（#349）。
+                    crate::remote_purge::spawn_sweep(app.clone(), conn.name.clone());
                     // daemon 升級後，長跑的遠端 bot 手上還是舊 shim：連上（重連也一樣）就補版，背景做、不擋連線（issue #124）。
                     crate::shim_refresh::spawn_remote_refresh(app.clone(), conn.name.clone());
                     // 開機那一輪跑的時候這台還沒連上，它的 autostart bot 因此從來沒被起過（review 2026-09-16）。
@@ -605,6 +611,22 @@ fn spawn_supervisor(app: Arc<App>, conn: Arc<HostConn>, generation: u64) -> toki
             backoff = (backoff * 2).min(BACKOFF_MAX);
         }
     })
+}
+
+/// Test seam: a fake "ssh" per host name, so remote-side effects (`rm -rf` of a bot dir …) can be observed without a network.
+#[cfg(test)]
+type SshFake = Arc<dyn Fn(&str) -> Result<String> + Send + Sync>;
+#[cfg(test)]
+static SSH_FAKES: std::sync::Mutex<Vec<(String, SshFake)>> = std::sync::Mutex::new(Vec::new());
+#[cfg(test)]
+pub(crate) fn set_ssh_fake(host: &str, f: impl Fn(&str) -> Result<String> + Send + Sync + 'static) {
+    let mut v = SSH_FAKES.lock().unwrap();
+    v.retain(|(h, _)| h != host);
+    v.push((host.to_string(), Arc::new(f)));
+}
+#[cfg(test)]
+fn ssh_fake_for(host: &str) -> Option<SshFake> {
+    SSH_FAKES.lock().unwrap().iter().find(|(h, _)| h == host).map(|(_, f)| f.clone())
 }
 
 /// Authority token for an external observation of one host (issue #347): the connection object and its

@@ -419,6 +419,7 @@ pub async fn purge_bot_dir(app: &Arc<App>, bot_id: &str, host: &str) -> bool {
     }
     let Some(conn) = app.hosts.get(host).await else {
         tracing::warn!(host, bot = %bot_id, "unknown host; remote bot dir left in place");
+        crate::remote_purge::record(app, bot_id, host, false, Some("unknown host")).await;
         return false;
     };
     let res = async {
@@ -430,10 +431,13 @@ pub async fn purge_bot_dir(app: &Arc<App>, bot_id: &str, host: &str) -> bool {
     match res {
         Ok(dir) => {
             tracing::info!(host, %dir, "removed remote bot config dir");
+            crate::remote_purge::record(app, bot_id, host, true, None).await;
             true
         }
         Err(e) => {
-            tracing::warn!(host, bot = %bot_id, error = %format!("{e:#}"), "could not remove remote bot config dir");
+            let msg = format!("{e:#}");
+            tracing::warn!(host, bot = %bot_id, error = %msg, "could not remove remote bot config dir");
+            crate::remote_purge::record(app, bot_id, host, false, Some(&msg)).await;
             false
         }
     }
