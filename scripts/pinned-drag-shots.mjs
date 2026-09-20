@@ -30,10 +30,11 @@ try {
   const first = before[0], last = before[before.length - 1]
   const mouse = (type, x, y, extra = {}) => send('Input.dispatchMouseEvent', { type, x, y, button: 'left', buttons: type === 'mouseReleased' ? 0 : 1, clickCount: 1, ...extra })
   await mouse('mousePressed', first.x + first.w / 2, first.y + first.h / 2)
-  const tx = last.x + last.w / 2 - 4, ty = last.y + last.h / 2
+  // 放開點故意不對準：落在最後一顆左邊約 18px（前一顆的右緣附近），仍要鎖定「最後一顆之前」這個落點（命中區放寬）。
+  const tx = last.x - 18, ty = last.y + last.h / 2 + 14
   for (let i = 1; i <= 12; i++) { await mouse('mouseMoved', first.x + first.w / 2 + ((tx - first.x - first.w / 2) * i) / 12, ty); await sleep(16) }
   await sleep(250)
-  await shot('2-dragging-lifted-with-gap', bar)
+  await shot('2-dragging-drop-slot-marked', bar)
   await mouse('mouseReleased', tx, ty)
   await sleep(70)
   await shot('3-release-sliding', bar)

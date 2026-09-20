@@ -8,7 +8,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { flushSync } from 'react-dom'
 import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from 'react'
-import { dropBefore, moveBefore, type Box } from '../lib/pinnedOrder'
+import { moveBefore, pickSlot, type Box } from '../lib/pinnedOrder'
 
 const MOUSE_SLOP = 5
 const TOUCH_SLOP = 10
@@ -20,6 +20,11 @@ export interface PinnedDnd {
   before: string | null | undefined
   /** 畫面上最後一顆主力晶片（放到最後面時在它右邊畫落點線）。 */
   lastId: string | null
+  /** 落點讓位：這些晶片往右推 `gap` px（同一行、落點之後的）。 */
+  shifted: string[]
+  gap: number
+  /** 落點在行尾時，那一行最後一顆（標示畫在它右邊）。 */
+  after: string | null
   /** 拖曳中的晶片跟著游標的位移（px，相對它原本的位置）；沒在拖＝0,0。 */
   offset: { x: number; y: number }
   /** 給 live region 的最新一句。 */
@@ -40,7 +45,9 @@ export function usePinnedDrag(
   names: Record<string, string>,
   commit: (order: string[]) => void,
 ): PinnedDnd {
-  const [drag, setDrag] = useState<{ id: string; before: string | null; ready: boolean; dx: number; dy: number } | null>(null)
+  const [drag, setDrag] = useState<{ id: string; before: string | null; ready: boolean; dx: number; dy: number; shift: string[]; after: string | null; gap: number } | null>(null)
+  // 上一個鎖定的落點（遲滯）。
+  const held = useRef<{ before: string | null | undefined }>({ before: undefined })
   const [announce, setAnnounce] = useState('')
   const suppress = useRef(false)
   // 事件處理在 window 上，讀最新的順序要靠 ref。
@@ -55,7 +62,10 @@ export function usePinnedDrag(
     const scope = from.closest('.unread-group, .unread-bar') ?? document
     return [...scope.querySelectorAll<HTMLElement>('.unread-chip.pinned[data-bot-id]')].map((c) => {
       const r = c.getBoundingClientRect()
-      return { id: c.dataset.botId ?? '', left: r.left, top: r.top, right: r.right, bottom: r.bottom }
+      // 量的是「沒被讓位推過」的位置：扣回它**目前實際**的 translateX（過渡到一半也對；減少動態時沒有位移就不扣）。
+      const t = getComputedStyle(c).transform
+      const back = t && t !== 'none' ? new DOMMatrixReadOnly(t).m41 : 0
+      return { id: c.dataset.botId ?? '', left: r.left - back, top: r.top, right: r.right - back, bottom: r.bottom }
     })
   }
 
@@ -71,7 +81,8 @@ export function usePinnedDrag(
     const begin = () => {
       dragging = true
       suppress.current = true
-      setDrag({ id, before: null, ready: false, dx: 0, dy: 0 })
+      held.current = { before: undefined }
+      setDrag({ id, before: null, ready: false, dx: 0, dy: 0, shift: [], after: null, gap: 0 })
       window.addEventListener('touchmove', stopTouchScroll, { passive: false })
     }
     const end = () => {
@@ -95,13 +106,16 @@ export function usePinnedDrag(
         if (far < MOUSE_SLOP) return
         begin()
       }
-      setDrag({ id, before: dropBefore(boxesOf(chip), ev.clientX, ev.clientY, id), ready: true, dx, dy })
+      const slot = pickSlot(boxesOf(chip), ev.clientX, ev.clientY, id, held.current.before)
+      const gap = Math.round(chip.getBoundingClientRect().width) + 8
+      held.current = { before: slot.before }
+      setDrag({ id, before: slot.before, ready: true, dx, dy, shift: slot.shift, after: slot.after, gap })
     }
     const up = (ev: PointerEvent) => {
       const was = dragging
       end()
       if (!was) return
-      const before = dropBefore(boxesOf(chip), ev.clientX, ev.clientY, id)
+      const before = pickSlot(boxesOf(chip), ev.clientX, ev.clientY, id, held.current.before).before
       const next = moveBefore(latest.current.fullOrder, id, before)
       // 同一次渲染收起拖曳狀態與套用新順序：分兩次渲染的話，中間那一格會讓晶片先「彈回原位」再滑去新位置（useChipFlip 量的是每次渲染後的位置）。
       flushSync(() => {
@@ -158,6 +172,6 @@ export function usePinnedDrag(
 
   const consumeClick = useCallback(() => suppress.current, [])
 
-  return { dragId: drag?.id ?? null, before: drag?.ready ? drag.before : undefined, offset: { x: drag?.dx ?? 0, y: drag?.dy ?? 0 },
+  return { dragId: drag?.id ?? null, before: drag?.ready ? drag.before : undefined, offset: { x: drag?.dx ?? 0, y: drag?.dy ?? 0 }, shifted: drag?.ready ? drag.shift : [], gap: drag?.gap ?? 0, after: drag?.ready ? drag.after : null,
     lastId: visibleOrder[visibleOrder.length - 1] ?? null, announce, onPointerDown, onKeyDown, consumeClick }
 }
