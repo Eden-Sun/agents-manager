@@ -264,7 +264,7 @@ pub fn sum_herdr(out: &str, host: &str) -> HostMem {
 }
 
 async fn sample_local(host: &str) -> HostMem {
-    let out = tokio::process::Command::new("/bin/sh").arg("-c").arg(sample_cmd()).output().await;
+    let out = crate::local_sh::output(&sample_cmd()).await;
     match out {
         Ok(o) if o.status.success() => sum_herdr(&String::from_utf8_lossy(&o.stdout), host),
         Ok(o) => HostMem {
