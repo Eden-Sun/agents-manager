@@ -1133,11 +1133,12 @@ Project 底下所有存活 bot 的訊息合併，以插入順序（`rowid`）倒
 `{ "text": "@all Reply with exactly GROUP-OK", "client_request_id": "…", "attachments"?: [...] }`。`client_request_id` 即 `group_id`；每個 bot 的 prompt 用 `<crid>:<bot_id>` 冪等，重送回同一組 `turn_id`、不重寫註記。此格式是群組未讀查詢的穩定候選契約；前端仍需以同回合 user 訊息的 `group_id` 核實群組來源。
 
 ```json
-200 { "group_id": "c-group-4", "project_id": "01M1...",
+200 { "group_id": "c-group-4", "project_id": "01M1...", "delivered": true,
       "sent": [ { "bot_id": "01M1...", "bot_name": "g-claude", "turn_id": "01M1...", "message_id": "01M1...", "delivery": "ok" } ],
       "skipped": [ { "bot_id": "01M1...", "bot_name": "g-codex", "reason": "not_running", "detail": "bot has no active run" } ] }
 ```
 
+- `delivered`：`sent` 是否非空。**一顆都沒送到（全被略過）仍回 200、`delivered:false`**（各顆的「未送達」note 已記）；前端該把它當成「沒送出」（保留草稿與附件、跳錯誤通知），不是成功。同一個 `client_request_id` 重送後某顆送到了，先前對它寫的「未送達」note 會被撤掉。
 - 部分略過仍 200。`sent[].delivery` 同 §5。`skipped[].reason`：`not_running`、`blocked`、`in_flight`、`unknown_delivery`、`conflict`、`not_found`、`bad_request`、`upstream`；
   `detail` 即單 bot prompt 的 409 reason。每個略過的 bot 對話多一則同 `group_id` 的 system 訊息（經 `message_added` 推）。
   **字已經送進去、送達結果寫不進 DB**（單 bot prompt 的 `503 delivery_state_uncommitted`，§5，#149）不是略過：那個收件人放進 `sent`，

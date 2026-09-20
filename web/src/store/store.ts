@@ -1,5 +1,6 @@
 /** Single Zustand store: server state from `GET /api/state` + `/ws`, plus UI state. Event flow / resync: SPEC §7.3. */
 
+import { groupSendDelivered } from './groupSend'
 import { create } from 'zustand'
 import * as api from '../api'
 import {
@@ -1035,6 +1036,11 @@ export const useStore = create<StoreState>((set, get) => ({
       })
       if (res.sent.some((x) => x.delivery === 'unknown')) {
         get().notify('error', '部分訊息送達狀態未知（delivery=unknown），該 bot 需先放棄該回合才能再送。')
+      }
+      if (!groupSendDelivered(res)) {
+        // 一顆都沒送到：回 null，輸入框才會保留草稿與附件（#340）。
+        get().notify('error', `一顆都沒送到，草稿已保留：${res.skipped.map((x) => `@${x.bot_name}（${x.detail || x.reason}）`).join('、')}`)
+        return null
       }
       if (res.skipped.length > 0) {
         get().notify('info', `未送達：${res.skipped.map((x) => `@${x.bot_name}（${x.detail || x.reason}）`).join('、')}`)
