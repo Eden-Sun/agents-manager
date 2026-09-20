@@ -477,6 +477,16 @@ async fn stale_split_keys(app: &Arc<App>, host: &str, kind: &str) -> Vec<String>
     stale
 }
 
+/// 外部探測的結果只在探測開始時記下的 `fence` 仍是這台主機的權威時才發布（#347）：探測途中同名主機被重連／改指到
+/// 另一台、或被移除，舊機器的額度就不能寫進新機器（或已移除主機）的 key。不是權威就回 `Err`、什麼都不寫。
+pub async fn set_fenced(app: &Arc<App>, host: &str, base: &str, q: Quota, fence: &crate::hosts::HostFence) -> Result<()> {
+    if !app.hosts.is_current(fence).await {
+        anyhow::bail!("host `{host}` was reconnected/reconfigured during the quota probe; stale reading discarded");
+    }
+    set(app, host, base, q).await;
+    Ok(())
+}
+
 pub async fn set(app: &Arc<App>, host: &str, base: &str, mut q: Quota) {
     q.host = host.to_string();
     let key = quota_key(host, base);
@@ -933,6 +943,7 @@ pub async fn refresh_codex_from_panes(app: &Arc<App>, host: &str) -> usize {
 
 /// `Ok(false)` = codex not installed there (quota stays null).
 pub async fn refresh_codex(app: &Arc<App>, host: &str) -> Result<bool> {
+    let fence = app.hosts.fence(host).await.ok_or_else(|| anyhow::anyhow!("unknown host `{host}`"))?;
     let r = crate::models::codex_rpc(app, host, "account/rateLimits/read", json!({})).await;
     let r = match r {
         Ok(v) => v,
@@ -941,7 +952,7 @@ pub async fn refresh_codex(app: &Arc<App>, host: &str) -> Result<bool> {
     };
     match quota_from_codex(&r) {
         Some(q) => {
-            set(app, host, "codex", q).await;
+            set_fenced(app, host, "codex", q, &fence).await?;
             Ok(true)
         }
         None => anyhow::bail!("unexpected rateLimits shape: {r}"),
@@ -1978,5 +1989,23 @@ mod tests {
         );
         assert_eq!(resolve_quota_base(&app, LOCAL_HOST, "claude", Some("cc0")).await.unwrap(), "claude", "偵測完：cc0 就是預設帳號");
         assert_eq!(resolve_quota_base(&app, LOCAL_HOST, "claude", Some("nobody")).await.unwrap(), "claude:nobody", "偵測完還查不到：照舊分開");
+    }
+    /// #347：探測途中同名主機被換掉，舊機器的額度不能寫進去（也不能把已移除主機的 key 種回來）。
+    #[tokio::test]
+    async fn a_quota_reading_from_a_superseded_host_probe_is_not_published() {
+        let app = crate::testing::env().await.app.clone();
+        let cfg = |ssh: &str| crate::config::HostCfg { name: "build1".into(), ssh: ssh.into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "agents-manager".into(), remote_path: String::new() };
+        app.hosts.insert_remote_for_test(cfg("target-a")).await;
+        let fence = app.hosts.fence("build1").await.unwrap();
+        let reading = || Quota {
+            five_hour: Some(Window { used_pct: 10.0, resets_at: None }), seven_day: None, fable: None, reset_credits: None,
+            limit_hit: None, plan: None, updated_at: crate::db::now(), source: "test".into(), account: None, host: "build1".into(),
+        };
+        app.hosts.insert_remote_for_test(cfg("target-b")).await;
+        assert!(set_fenced(&app, "build1", "codex", reading(), &fence).await.is_err());
+        assert!(app.quotas.lock().await.get("build1/codex").is_none());
+        let fresh = app.hosts.fence("build1").await.unwrap();
+        set_fenced(&app, "build1", "codex", reading(), &fresh).await.unwrap();
+        assert!(app.quotas.lock().await.get("build1/codex").is_some());
     }
 }

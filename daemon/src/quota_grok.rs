@@ -260,6 +260,7 @@ async fn client_for(app: &Arc<App>, host: &str) -> Result<HerdrClient> {
 /// `Ok(false)` = grok is not installed there (quota stays null).
 pub async fn refresh_grok(app: &Arc<App>, host: &str) -> Result<bool> {
     let _guard = crate::quota::probe_lock(host).await;
+    let fence = app.hosts.fence(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
     // The start-up poller can beat detection; empty cache = unknown, not missing.
     if !app.tools.lock().await.contains_key(host) {
         crate::tools::detect(app, host).await?;
@@ -294,8 +295,9 @@ pub async fn refresh_grok(app: &Arc<App>, host: &str) -> Result<bool> {
         tokio::time::sleep(Duration::from_millis(900)).await;
         last = client.pane_read(&pane_id, "visible", 120).await.map(|r| r.text).unwrap_or_default();
         if let Some(q) = parse_grok_usage(&last, Local::now()) {
-            crate::quota::set(app, host, "grok", q).await;
+            let published = crate::quota::set_fenced(app, host, "grok", q, &fence).await;
             drop(probe);
+            published?;
             return Ok(true);
         }
     }

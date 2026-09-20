@@ -467,6 +467,7 @@ async fn refresh_claude_account(
     env: BTreeMap<String, String>,
     with_usage: bool,
 ) -> Result<Option<ProbeOutcome>> {
+    let fence = app.hosts.fence(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
     if !app.tools.lock().await.contains_key(host) {
         crate::tools::detect(app, host).await?;
     }
@@ -520,6 +521,10 @@ async fn refresh_claude_account(
     let Some((auth, usage)) = got else {
         return Err(anyhow!("claude probe on {host} did not finish within {PROBE_TIMEOUT:?}; screen:\n{}", last.trim()));
     };
+    // 探測幾十秒，期間同名主機可能已換成另一台（#347）：整個結果作廢，不回登入狀態也不寫額度。
+    if !app.hosts.is_current(&fence).await {
+        return Err(anyhow!("host `{host}` was reconnected/reconfigured during the claude probe; stale result discarded"));
+    }
     let (logged_in, email, plan) = crate::tools::read_login_answer("claude", &auth);
     let mut out = ProbeOutcome { logged_in, email, plan: plan.clone(), quota: None };
     if !with_usage {
@@ -528,7 +533,7 @@ async fn refresh_claude_account(
     let parsed = parse_claude_usage_report(&usage, account).or_else(|| parse_claude_usage(&usage, Local::now(), account));
     if let Some(mut q) = parsed {
         q.plan = plan;
-        crate::quota::set(app, host, base_key, q.clone()).await;
+        crate::quota::set_fenced(app, host, base_key, q.clone(), &fence).await?;
         out.quota = Some(q);
     } else {
         tracing::debug!(host, account = ?account, logged_in = ?out.logged_in, usage = %usage.trim(), "claude `/usage` reported no plan lines");
