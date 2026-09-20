@@ -195,8 +195,8 @@ const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (11, "b2704fdf9aeb332c"),
     // issue #344：`bots.primary_position`（主力那列的固定順序）。
     (12, "dd16404b83c0823f"),
-    // issue #355：`intents`（持久 intent）、`bots.launch_rev`／`runs.launch_rev`（啟動版本雜湊）。
-    (13, "05c1dce04e940b94"),
+    // issue #355：`intents`（持久 intent）、`bots.launch_rev`／`runs.launch_rev`（啟動版本雜湊）；同版含 4cbacecc（#349）的 `remote_bot_dir_purges`（那顆沒升版）。
+    (13, "44c2487afdf01452"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
