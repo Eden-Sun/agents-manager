@@ -373,6 +373,7 @@ async fn apply_migrations(pool: &SqlitePool) -> Result<()> {
     crate::supervisor::store::migrate(pool).await?;
     crate::read_marks::migrate(pool).await?;
     crate::fork_ops::migrate(pool).await?;
+    crate::remote_purge::migrate(pool).await?;
     crate::panes::migrate(pool).await?;
     crate::herdr_maintenance::migrate(pool).await?;
     crate::mission::store::migrate(pool).await?;

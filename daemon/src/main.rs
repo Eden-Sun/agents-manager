@@ -25,6 +25,7 @@ mod due_actions;
 mod events;
 mod fork;
 mod fork_ops;
+mod remote_purge;
 mod promote;
 mod gh_auth;
 mod git_quick;
@@ -377,6 +378,7 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     build_info::mark_started(&app.data_dir);
     tools::spawn_alias_poller(app.clone());
     herdr_version::spawn_poller(app.clone());
+    remote_purge::spawn_poller(app.clone());
     quota::spawn_codex_poller(app.clone());
     memstat::spawn_poller(app.clone());
     quota_claude::spawn_claude_poller(app.clone());

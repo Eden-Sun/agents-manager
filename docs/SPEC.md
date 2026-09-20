@@ -1020,6 +1020,10 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run
    - 灰字（sent／queued 到模型收到之前）是 CLI 自己畫的，daemon 與前端都不模擬。
 
 ### 6.4 停止／刪除 Bot（per-bot 鎖內）
+- **遠端已刪 bot 的目錄靠 DB 推導的欠帳收**（issue #349，`daemon/src/remote_purge.rs`）：刪除 handler 的一次性 ssh purge 只在 handler 活著時有效；daemon 在「刪除已 commit、purge 還沒跑」之間死掉，
+  開機的 `purge_deleted_bot_dirs` 只掃本機 `data_dir/bots`、看不到遠端。所以欠的清理從 DB 推：`deleted_at` 非空的 bot ＋ 它專案列記的 host（專案軟刪後列還在）＋ 沒有「已清掉」記號（`remote_bot_dir_purges.purged_at`）。
+  主機連上（含重連）時背景掃一次，連著期間每 5 分鐘再掃；只有「確定軟刪」而且「確定沒有 active run」才 `rm -rf`（run 讀不到或還活著＝不刪，DB 讀不到＝什麼都不刪），host 只取專案列、**不明就不動，不退回本機**。
+  `purge_bot_dir` 的遠端分支把結果記進那張表（成功＝`purged_at`；失敗＝次數與原因，`due_actions` 的 `remote_bot_dir_purge` 看得到）；記號寫不進去只是下一輪重推導、再 `rm -rf` 一次（冪等）。
 - `interrupt`：`agent.send_keys [esc]`，Run 狀態不變。
   **按了 interrupt 之後，這顆 bot 排著的 queued 不立刻送**：先讓使用者拿回輸入框，規則見 §4.4a「使用者中斷之後，先讓使用者拿回輸入框」。
   - **Esc 與「把回合收成 failed」是兩半**（issue #147，`lifecycle::interruption`），中間不是同一個交易。鍵的結果分三種：
