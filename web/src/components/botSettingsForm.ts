@@ -86,3 +86,28 @@ export function computeBotPatch(
   }
   return patch
 }
+
+const SAVED_KEYS: readonly BotFormKey[] = ['name', 'model', 'effort', 'fast', 'persona', 'identity', 'instruction_files']
+
+/**
+ * `saved`（已存成功、store 還沒跟上的欄位）只該撐到 store 追上為止。留著不清的話，之後別處
+ * 把同一欄改掉（例如標題列的模型快速選單），面板仍照 `saved` 顯示舊值。
+ * store 的值等於存過的值就把那一欄從 `saved` 拿掉；沒有東西可拿就回傳同一個物件（讓 render 期 setState 不會迴圈）。
+ */
+export function pruneSaved(saved: PatchBotInput, bot: BotFormBase): PatchBotInput {
+  let next: PatchBotInput | null = null
+  for (const k of SAVED_KEYS) {
+    if (!(k in saved)) continue
+    const s = saved[k]
+    const caughtUp =
+      k === 'instruction_files'
+        ? bot.instruction_files !== null && (saved.instruction_files ?? INSTRUCTION_FILES_DEFAULT) === bot.instruction_files
+        : k === 'fast'
+          ? Boolean(saved.fast) === bot.fast
+          : (s ?? null) === (bot[k] ?? null)
+    if (!caughtUp) continue
+    if (!next) next = { ...saved }
+    delete next[k]
+  }
+  return next ?? saved
+}
