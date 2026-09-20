@@ -1,5 +1,5 @@
 import type { BrowserMem } from '../api/types'
-import { humanBytes } from '../components/MemBadge'
+import { humanBytes } from '../components/memFormat'
 
 /**
  * 瀏覽器分頁的警戒線（2026-09-08）：Chrome / ego 開到這個數量以上，RAM 通常就是被它們吃掉的，
