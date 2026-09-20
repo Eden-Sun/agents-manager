@@ -1632,6 +1632,9 @@ async fn restore_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Res
     if bot.managed_by != "user" {
         sqlx::query("UPDATE bots SET deleted_at = NULL WHERE id = ?").bind(&id).execute(&app.db).await.map_err(any_err)?;
     } else {
+        // 讀不懂的 args／env 不能當成空的寫回 config（#295）：env 可能帶帳號設定，還原後會以錯的身分起。
+        let args = serde_json::from_str(&bot.args_json).map_err(|e| LcError::conflict("bot args_json is unreadable; not restoring", json!({"bot_id": id, "error": e.to_string()})))?;
+        let env = serde_json::from_str(&bot.env_json).map_err(|e| LcError::conflict("bot env_json is unreadable; not restoring", json!({"bot_id": id, "error": e.to_string()})))?;
         let entry = crate::config::BotCfg {
             id: Some(bot.id.clone()),
             name: bot.name.clone(),
@@ -1641,13 +1644,13 @@ async fn restore_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Res
             fast: bot.fast != 0,
             persona: bot.persona.clone(),
             instruction_files: bot.instruction_files.clone(),
-            args: serde_json::from_str(&bot.args_json).unwrap_or_default(),
+            args,
             autostart: bot.autostart != 0,
             inject_hooks: bot.inject_hooks != 0,
             auto_approve: bot.auto_approve != 0,
             identity: bot.identity.clone(),
-            env: serde_json::from_str(&bot.env_json).unwrap_or_default(),
-            herdr_session: None,
+            env,
+            herdr_session: bot.herdr_session.clone(),
         };
         let pid = bot.project_id.clone();
         crate::projection::update_and_project(&app.cfg, &app.db, move |cfg| {
@@ -4434,6 +4437,29 @@ mod instruction_files_tests {
 
         assert_eq!(stored(&e, &id).await, (Some("claude-md-and-agents-md".into()), Some("claude-md-and-agents-md".into())));
         assert_eq!(shown(&e, &id).await, json!("claude-md-and-agents-md"));
+    }
+
+    /// #295：還原不能把讀不懂的 args／env 當成空的寫進 config，也不能把 herdr_session 洗成 NULL。
+    #[tokio::test]
+    async fn restoring_keeps_env_args_and_session_and_refuses_unreadable_json() {
+        let e = env().await;
+        seed_project(&e).await;
+        let id = add(&e, json!({"name": "keep2", "kind": "claude"})).await.unwrap();
+        delete_bot(State(e.app.clone()), Path(id.clone())).await.unwrap();
+        sqlx::query(r#"UPDATE bots SET herdr_session='sess', env_json='{"A":"1"}', args_json='["--x"]' WHERE id=?"#).bind(&id).execute(&e.app.db).await.unwrap();
+        restore_bot(State(e.app.clone()), Path(id.clone())).await.unwrap();
+        let cfg = e.app.cfg.get().await;
+        let b = cfg.projects[0].bots.iter().find(|b| b.id.as_deref() == Some(id.as_str())).unwrap();
+        assert_eq!(b.env.get("A").map(String::as_str), Some("1"));
+        assert_eq!(b.args, vec!["--x".to_string()]);
+        assert_eq!(b.herdr_session.as_deref(), Some("sess"));
+        assert_eq!(db::bot(&e.app.db, &id).await.unwrap().unwrap().herdr_session.as_deref(), Some("sess"));
+
+        delete_bot(State(e.app.clone()), Path(id.clone())).await.unwrap();
+        sqlx::query("UPDATE bots SET env_json='not json' WHERE id=?").bind(&id).execute(&e.app.db).await.unwrap();
+        assert!(restore_bot(State(e.app.clone()), Path(id.clone())).await.is_err(), "讀不懂的 env 不能還原成空的");
+        assert!(db::bot(&e.app.db, &id).await.unwrap().unwrap().deleted_at.is_some());
+        assert!(e.app.cfg.get().await.projects[0].bots.iter().all(|b| b.id.as_deref() != Some(id.as_str())));
     }
 
     /// 手改 config.toml 寫錯（拼錯的值、寫在 codex 上）：投影時丟掉、存 NULL，bot 讀釘住的 `claude-md`——
