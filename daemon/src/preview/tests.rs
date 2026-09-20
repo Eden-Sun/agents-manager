@@ -94,27 +94,85 @@ fn dirs(cwd: &str, files: &[&str], subs: &[(&str, &[&str])]) -> Result<Vec<PathB
 }
 
 #[test]
-fn detect_lists_root_then_web_then_apps_then_packages() {
+fn detect_lists_root_then_web_then_the_rest_by_depth_and_path() {
     let got = dirs(
         "/p",
         &["/p/vite.config.ts", "/p/web/vite.config.mts", "/p/apps/b/vite.config.js", "/p/apps/a/vite.config.mjs", "/p/packages/x/vite.config.ts"],
-        &[("/p/apps", &["/p/apps/b", "/p/apps/a", "/p/apps/none"]), ("/p/packages", &["/p/packages/x"])],
+        &[("/p", &["/p/packages", "/p/web", "/p/apps"]), ("/p/apps", &["/p/apps/b", "/p/apps/a", "/p/apps/none"]), ("/p/packages", &["/p/packages/x"])],
+    );
+    // 根目錄自己有設定就不再往裡面找（它底下的是它的一部分）。
+    assert_eq!(got.unwrap(), vec![PathBuf::from("/p")]);
+    let got = dirs(
+        "/p",
+        &["/p/web/vite.config.mts", "/p/apps/b/vite.config.js", "/p/apps/a/vite.config.mjs", "/p/packages/x/vite.config.ts"],
+        &[("/p", &["/p/packages", "/p/web", "/p/apps"]), ("/p/apps", &["/p/apps/b", "/p/apps/a", "/p/apps/none"]), ("/p/packages", &["/p/packages/x"])],
     )
     .unwrap();
-    let want: Vec<PathBuf> = ["/p", "/p/web", "/p/apps/a", "/p/apps/b", "/p/packages/x"].iter().map(PathBuf::from).collect();
+    let want: Vec<PathBuf> = ["/p/web", "/p/apps/a", "/p/apps/b", "/p/packages/x"].iter().map(PathBuf::from).collect();
     assert_eq!(got, want);
 }
 
 #[test]
-fn detect_finds_a_monorepo_app_and_reports_what_it_tried() {
-    let got = dirs("/p", &["/p/apps/web/vite.config.ts"], &[("/p/apps", &["/p/apps/web"])]).unwrap();
-    assert_eq!(got, vec![PathBuf::from("/p/apps/web")]);
+fn detect_finds_a_vite_three_levels_down_but_not_four() {
+    // wits-ops：專案是 wt，vite 在 wt/webui/apps/web。
+    let got = dirs(
+        "/wt",
+        &["/wt/webui/apps/web/vite.config.ts"],
+        &[("/wt", &["/wt/webui"]), ("/wt/webui", &["/wt/webui/apps"]), ("/wt/webui/apps", &["/wt/webui/apps/web"])],
+    );
+    assert_eq!(got.unwrap(), vec![PathBuf::from("/wt/webui/apps/web")]);
+    let deep = dirs(
+        "/wt",
+        &["/wt/a/b/c/web/vite.config.ts"],
+        &[("/wt", &["/wt/a"]), ("/wt/a", &["/wt/a/b"]), ("/wt/a/b", &["/wt/a/b/c"]), ("/wt/a/b/c", &["/wt/a/b/c/web"])],
+    );
+    assert!(deep.is_err(), "第四層不找");
+}
+
+#[test]
+fn detect_skips_dependency_build_hidden_and_worktree_dirs() {
+    let got = dirs(
+        "/p",
+        &[
+            "/p/node_modules/x/vite.config.ts",
+            "/p/.git/hooks/vite.config.ts",
+            "/p/.claude/worktrees/w/vite.config.ts",
+            "/p/target/vite.config.ts",
+            "/p/dist/vite.config.ts",
+            "/p/worktrees/w/vite.config.ts",
+            "/p/app/vite.config.ts",
+        ],
+        &[(
+            "/p",
+            &["/p/node_modules", "/p/.git", "/p/.claude", "/p/target", "/p/dist", "/p/worktrees", "/p/app"],
+        ), ("/p/node_modules", &["/p/node_modules/x"]), ("/p/.git", &["/p/.git/hooks"]), ("/p/worktrees", &["/p/worktrees/w"])],
+    );
+    assert_eq!(got.unwrap(), vec![PathBuf::from("/p/app")]);
+}
+
+#[test]
+fn detect_caps_candidates_and_directories_visited() {
+    let names: Vec<String> = (0..30).map(|i| format!("/p/app{i:02}")).collect();
+    let files: Vec<String> = names.iter().map(|n| format!("{n}/vite.config.ts")).collect();
+    let files: Vec<&str> = files.iter().map(String::as_str).collect();
+    let kids: Vec<&str> = names.iter().map(String::as_str).collect();
+    let got = dirs("/p", &files, &[("/p", &kids)]).unwrap();
+    assert_eq!(got.len(), MAX_CANDIDATES);
+    assert_eq!(got[0], PathBuf::from("/p/app00"), "排序後取前面的");
+    // 走過的目錄數有上限：一個超寬的目錄不會掃到天荒地老。
+    let wide: Vec<String> = (0..SEARCH_MAX_DIRS + 500).map(|i| format!("/p/d{i:05}")).collect();
+    let wide_refs: Vec<&str> = wide.iter().map(String::as_str).collect();
+    let last = format!("{}/vite.config.ts", wide.last().unwrap());
+    assert!(dirs("/p", &[last.as_str()], &[("/p", &wide_refs)]).is_err(), "超過上限的那些沒被走到");
+}
+
+#[test]
+fn detect_reports_what_it_tried() {
     let tried = dirs("/p", &[], &[]).unwrap_err();
-    assert_eq!(tried.len(), 10);
+    assert_eq!(tried.len(), 9);
     assert_eq!(tried[0], "/p/vite.config.ts");
     assert_eq!(tried[7], "/p/web/vite.config.mjs");
-    assert_eq!(tried[8], "/p/apps/*/vite.config.*");
-    assert_eq!(tried[9], "/p/packages/*/vite.config.*");
+    assert!(tried[8].starts_with("/p/**/vite.config.*"), "{}", tried[8]);
 }
 
 #[test]
@@ -398,7 +456,7 @@ async fn no_vite_config_lists_what_was_tried() {
     let bot = running_bot(&r, "alfa").await;
     let LcError::Conflict(v) = start(&r.e.app, &bot, StartReq::default()).await.unwrap_err() else { panic!() };
     assert_eq!(v["reason"], "no_vite_config");
-    assert_eq!(v["tried"].as_array().unwrap().len(), 10);
+    assert_eq!(v["tried"].as_array().unwrap().len(), 9);
     assert!(r.fake.spawns().is_empty());
 }
 
@@ -507,7 +565,7 @@ async fn another_checkout_is_listed_not_attached_and_a_spawn_follows() {
     let r = rig().await;
     r.fake.vite(1, 5173, "/somewhere/agents-manager-main/web");
     r.fake.repo("/somewhere/agents-manager-main/web", "/git/am/.git", None);
-    r.fake.repo(&web_dir(&r), "/git/am/.git", None);
+    r.fake.repo(&r.e.repo.to_string_lossy(), "/git/am/.git", None);
     let bot = running_bot(&r, "alfa").await;
     let body = start(&r.e.app, &bot, StartReq::default()).await.unwrap();
     assert_eq!(body["source"], "spawned");
@@ -661,6 +719,7 @@ fn relation_and_repo_name() {
 async fn others_lists_every_local_vite_with_its_relation() {
     let r = rig().await;
     let mine = web_dir(&r);
+    r.fake.repo(&r.e.repo.to_string_lossy(), "/git/am/.git", Some("git@h:me/am.git"));
     r.fake.repo(&mine, "/git/am/.git", Some("git@h:me/am.git"));
     r.fake.vite(9, 5299, &mine); // 這顆 bot 自己的目錄
     r.fake.vite(1, 5173, "/x/am-main/web"); // 同 repo 的另一個 worktree
@@ -713,4 +772,38 @@ async fn attach_accepts_a_vite_of_another_project_and_records_its_dir() {
     stop(&r.e.app, &bot).await.unwrap();
     let auto = start(&r.e.app, &bot, StartReq::default()).await.unwrap();
     assert_eq!(auto["source"], "spawned");
+}
+
+#[tokio::test]
+async fn a_bot_with_no_vite_config_still_gets_relations_from_its_own_dir() {
+    let r = rig().await;
+    std::fs::remove_file(r.e.repo.join("web/vite.config.ts")).unwrap();
+    let base = r.e.repo.to_string_lossy().into_owned();
+    r.fake.repo(&base, "/git/wt/.git", None);
+    r.fake.vite(3, 3001, "/x/wt/webui/apps/web");
+    r.fake.repo("/x/wt/webui/apps/web", "/git/wt/.git", None);
+    r.fake.vite(4, 3002, "/x/other/web");
+    r.fake.repo("/x/other/web", "/git/other/.git", None);
+    let bot = running_bot(&r, "alfa").await;
+    let off = get(&r.e.app, &bot).await.unwrap();
+    assert_eq!(off["candidates"], json!([]));
+    let rel: Vec<(&str, &str)> =
+        off["others"].as_array().unwrap().iter().map(|o| (o["relation"].as_str().unwrap(), o["repo"].as_str().unwrap())).collect();
+    assert_eq!(rel, vec![("same_repo", "wt"), ("other", "other")]);
+}
+
+#[tokio::test]
+async fn the_real_filesystem_search_finds_a_nested_app_and_skips_node_modules() {
+    let r = rig().await;
+    std::fs::remove_file(r.e.repo.join("web/vite.config.ts")).unwrap();
+    let app = r.e.repo.join("webui/apps/web");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::write(app.join("vite.config.ts"), "").unwrap();
+    let nm = r.e.repo.join("node_modules/pkg");
+    std::fs::create_dir_all(&nm).unwrap();
+    std::fs::write(nm.join("vite.config.js"), "").unwrap();
+    let bot = running_bot(&r, "alfa").await;
+    let body = start(&r.e.app, &bot, StartReq::default()).await.unwrap();
+    assert_eq!(body["dir"], app.to_string_lossy().as_ref());
+    assert_eq!(body["candidates"], json!([app.to_string_lossy()]));
 }

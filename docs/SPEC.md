@@ -1803,9 +1803,11 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   user 自己 `default` session 匯入的 bot 409 `default_session`（daemon 不往使用者的 session 多開 pane）。
   只給本機：iframe 連的是瀏覽器所在機器上的 port，遠端主機上的 vite 連不到，409 `remote_host`。
   bot 沒在跑（沒有 running 的 run／pane）409 `bot_not_running`：pane 要切在它旁邊。
-- **偵測**：目錄取 `bots.cwd`，沒有就用專案路徑；依序找 `<dir>`、`<dir>/web`、`<dir>/apps/*`、`<dir>/packages/*`
-  （後兩層各自照名字排序），有 `vite.config.{ts,mts,js,mjs}` 的全部列成**候選**（`candidates`），第一個是預設。
-  都沒有 409 `no_vite_config`，`tried` 列出試過的路徑（`apps/*`、`packages/*` 寫成樣式）。專案層的指令覆寫不在 v1。
+- **偵測**：目錄取 `bots.cwd`，沒有就用專案路徑；在它底下**有界地往下找**——最多 3 層（`<dir>` 是第 0 層）、最多走過 2000 個目錄、
+  最多留 20 個候選；有 `vite.config.{ts,mts,js,mjs}` 的全部列成**候選**（`candidates`），找到設定的目錄不再往裡面找。順序：`<dir>` 本身、
+  `<dir>/web`，其餘照（層數、路徑）排序，第一個是預設。略過隱藏目錄（`.git`、`.claude`…）與 `node_modules`、`target`、`dist`、
+  `build`、`worktrees`、`vendor`（別份 checkout 不是這顆 bot 的工作樹）；不跟 symlink。都沒有 409 `no_vite_config`，`tried`
+  列出試過的路徑（更深的寫成 `<dir>/**/vite.config.*（最多 3 層）`）。專案層的指令覆寫不在 v1。
 - **先接既有的**（2026-09-20 使用者：「有的已經啟動 vite 了，應該先自動偵測 vite 目錄」）：啟動前先掃本機在 listen 的
   vite 行程（`ps` 命令列有 `vite`／`…/vite`／`vite.js` 這個字，`vitest` 不算；再各問一次 `lsof`：listen port 與 cwd）。
   - cwd **正好是這顆 bot 的候選目錄**（同一份 checkout）→ 直接接上，不另起：`source: "attached"`、`status: running`、
@@ -1814,7 +1816,7 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
     `mode=attach` 直接挑任何一顆，包括別的專案（2026-09-20 使用者：「還要可以直接選擇本機已開的 vite」）。每筆
     `{port, dir, pid, relation, repo}`：`relation` 是 `same_dir`（cwd 正好是這顆 bot 的候選目錄）／`same_repo`（同一個 repo
     的別份 checkout：`git rev-parse --git-common-dir` 相同，或兩邊都有 `remote.origin.url` 而且相同）／`other`（別的專案；
-    判不出來——不是 git、git 讀不到——也退成 `other`）；`repo` 是給 UI 分組的 repo 名（common dir 是 `<repo>/.git` 就取
+    判不出來——不是 git、git 讀不到——也退成 `other`；這顆 bot 屬於哪個 repo 看它自己的工作目錄，跟有沒有找到 vite 設定無關）；`repo` 是給 UI 分組的 repo 名（common dir 是 `<repo>/.git` 就取
     `<repo>`，不是 git 用目錄名）。排序 same_dir、same_repo、other，各自依 port。非 `same_dir` 看到的不是這顆 bot 工作樹裡的程式碼，
     所以不自動接，UI 要標清楚。
   - **接上的只斷開、絕不砍人**：`DELETE`、bot 停止／刪除／閒置收掉時，`attached` 那列只標 `off`，不關任何 pane、不 kill 任何行程。

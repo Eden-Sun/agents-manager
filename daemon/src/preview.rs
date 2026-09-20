@@ -218,31 +218,67 @@ fn fallback_env(app: &Arc<App>) -> Arc<dyn PreviewEnv> {
 
 // ───────────────────────────── 純函式 ─────────────────────────────
 
-/// 候選目錄，依序：`<cwd>`、`<cwd>/web`、`<cwd>/apps/*`、`<cwd>/packages/*`（monorepo 常見；後兩層各自照名字排序），
-/// 只留下有 `vite.config.*` 的。全都沒有回試過的路徑（`apps/*`、`packages/*` 寫成樣式）。
+/// 往下找幾層（`<cwd>` 是第 0 層）。
+pub const SEARCH_DEPTH: usize = 3;
+/// 最多走過幾個目錄、最多列幾個候選：專案目錄底下可能是整個 monorepo 或一堆 worktree，不能無限掃。
+pub const SEARCH_MAX_DIRS: usize = 2000;
+pub const MAX_CANDIDATES: usize = 20;
+/// 不往裡面找的目錄名：相依套件、建置產物、worktree 目錄（那是別份 checkout，不是這顆 bot 的工作樹）。隱藏目錄（`.git`、`.claude`…）一律略過。
+const SKIP_DIRS: [&str; 6] = ["node_modules", "target", "dist", "build", "worktrees", "vendor"];
+
+fn skipped(name: &str) -> bool {
+    name.starts_with('.') || SKIP_DIRS.contains(&name)
+}
+
+/// 候選目錄：在 `<cwd>` 底下有界地找（最多 [`SEARCH_DEPTH`] 層、走過 [`SEARCH_MAX_DIRS`] 個目錄、留 [`MAX_CANDIDATES`] 個），
+/// 有 `vite.config.{ts,mts,js,mjs}` 的全列。順序：`<cwd>` 本身、`<cwd>/web`，其餘照（層數、路徑）排序。
+/// 找到設定的目錄不再往裡面找。全都沒有回試過的路徑。
 pub fn detect_dirs(
     cwd: &Path,
     exists: impl Fn(&Path) -> bool,
     subdirs: impl Fn(&Path) -> Vec<PathBuf>,
 ) -> Result<Vec<PathBuf>, Vec<String>> {
     let has_config = |dir: &Path| CONFIG_NAMES.iter().any(|n| exists(&dir.join(n)));
-    let mut dirs = vec![cwd.to_path_buf(), cwd.join("web")];
-    for group in ["apps", "packages"] {
-        let mut subs = subdirs(&cwd.join(group));
-        subs.sort();
-        dirs.extend(subs);
+    let mut found: Vec<(usize, PathBuf)> = Vec::new();
+    let mut level = vec![cwd.to_path_buf()];
+    let mut visited = 0usize;
+    for depth in 0..=SEARCH_DEPTH {
+        let mut next = Vec::new();
+        for dir in level {
+            if visited >= SEARCH_MAX_DIRS {
+                break;
+            }
+            visited += 1;
+            if has_config(&dir) {
+                found.push((depth, dir));
+                continue;
+            }
+            if depth == SEARCH_DEPTH {
+                continue;
+            }
+            let mut subs: Vec<PathBuf> = subdirs(&dir)
+                .into_iter()
+                .filter(|p| p.file_name().is_some_and(|n| !skipped(&n.to_string_lossy())))
+                .collect();
+            subs.sort();
+            next.extend(subs);
+        }
+        level = next;
     }
-    let found: Vec<PathBuf> = dirs.into_iter().filter(|d| has_config(d)).collect();
+    let web = cwd.join("web");
+    found.sort_by(|(da, a), (db, b)| {
+        let rank = |d: &PathBuf, depth: usize| if d == cwd { 0 } else if *d == web { 1 } else { 2 + depth };
+        rank(a, *da).cmp(&rank(b, *db)).then_with(|| a.cmp(b))
+    });
+    found.truncate(MAX_CANDIDATES);
     if !found.is_empty() {
-        return Ok(found);
+        return Ok(found.into_iter().map(|(_, d)| d).collect());
     }
     let mut tried = Vec::new();
     for dir in [cwd.to_path_buf(), cwd.join("web")] {
         tried.extend(CONFIG_NAMES.iter().map(|n| dir.join(n).to_string_lossy().into_owned()));
     }
-    for group in ["apps", "packages"] {
-        tried.push(cwd.join(group).join("*").join("vite.config.*").to_string_lossy().into_owned());
-    }
+    tried.push(cwd.join("**").join("vite.config.*").to_string_lossy().into_owned() + &format!("（最多 {SEARCH_DEPTH} 層）"));
     Err(tried)
 }
 
@@ -518,11 +554,19 @@ async fn top_level_bot(app: &Arc<App>, bot_id: &str) -> LcResult<db::Bot> {
 }
 
 /// 這顆 bot 的 vite 候選目錄（[`detect_dirs`] 對真的檔案系統）。
-async fn candidates_of(app: &Arc<App>, bot: &db::Bot) -> LcResult<Result<Vec<PathBuf>, Vec<String>>> {
+/// 這顆 bot 的工作目錄：`bots.cwd`，沒有就是專案路徑。找 vite 與判 repo 都從這裡出發。
+async fn base_dir(app: &Arc<App>, bot: &db::Bot) -> LcResult<String> {
     let project = db::project(&app.db, &bot.project_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("project".into()))?;
-    let cwd = bot.cwd.clone().filter(|c| !c.trim().is_empty()).unwrap_or(project.path);
+    Ok(bot.cwd.clone().filter(|c| !c.trim().is_empty()).unwrap_or(project.path))
+}
+
+async fn candidates_of(app: &Arc<App>, bot: &db::Bot) -> LcResult<Result<Vec<PathBuf>, Vec<String>>> {
+    let cwd = base_dir(app, bot).await?;
+    // 不跟 symlink：免得繞圈。
     let subdirs = |d: &Path| -> Vec<PathBuf> {
-        std::fs::read_dir(d).map(|it| it.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect()).unwrap_or_default()
+        std::fs::read_dir(d)
+            .map(|it| it.flatten().filter(|e| e.file_type().is_ok_and(|t| t.is_dir())).map(|e| e.path()).collect())
+            .unwrap_or_default()
     };
     Ok(detect_dirs(Path::new(&cwd), |p| p.is_file(), subdirs))
 }
@@ -539,10 +583,8 @@ async fn decorated(app: &Arc<App>, bot: &db::Bot, mut body: Value, live: bool) -
         };
         // 掃不到就當沒有：這只是「順便列出來」，不是決定。
         let scan = env.scan_vites().await.unwrap_or_default();
-        let mine = match cands.first() {
-            Some(c) => env.repo_key(&c.to_string_lossy()).await,
-            None => None,
-        };
+        // 這顆 bot 屬於哪個 repo 看它自己的目錄，跟找沒找到 vite.config 無關。
+        let mine = env.repo_key(&base_dir(app, bot).await?).await;
         for p in scan {
             let key = env.repo_key(&p.cwd).await;
             let relation = relation_of(&p, &cands, mine.as_ref(), key.as_ref());
