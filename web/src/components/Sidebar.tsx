@@ -54,6 +54,7 @@ import { InstallToolButton } from './Tools'
 import { UpdateBadge } from './UpdateBadge'
 import { runtimeKnown } from '../lib/runtimeDrift'
 import { syncKidsScroll, wheelKidsScroll } from '../lib/kidsScroll'
+import { createHitSearch } from '../lib/hitSearch'
 import { useWheelRef } from '../hooks/useWheelRef'
 import './sidebar.css'
 
@@ -955,27 +956,11 @@ export function Sidebar() {
   const [query, setQuery] = useState('')
   /** 內容命中問 daemon：debounce 250ms，seq 擋晚到的舊結果。 */
   const [hits, setHits] = useState<Record<string, MessageHit>>({})
-  const hitSeq = useRef(0)
+  const hitSearch = useMemo(() => createHitSearch(api.searchMessages, (r) => setHits(r ?? {})), [])
   useEffect(() => {
-    const q = query.trim()
-    if (!q) {
-      setHits({})
-      return
-    }
-    const mine = ++hitSeq.current
-    const id = setTimeout(() => {
-      void api
-        .searchMessages(q)
-        .then((r) => {
-          if (hitSeq.current === mine) setHits(r)
-        })
-        // 失敗時屬性搜尋照常。
-        .catch(() => {
-          if (hitSeq.current === mine) setHits({})
-        })
-    }, 250)
-    return () => clearTimeout(id)
-  }, [query])
+    hitSearch.run(query)
+    return () => hitSearch.cancel()
+  }, [query, hitSearch])
   const matches = (bot: Bot) => botMatches(useStore.getState(), bot, query) || bot.id in hits
   // 只數真的命中的，不含陪子 agent 顯示的父 bot。
   const matchCount = query ? bots.filter((b) => matches(b)).length : bots.length
