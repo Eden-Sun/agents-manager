@@ -27,7 +27,10 @@ pub const PORT_START: u16 = 5180;
 pub const PORT_SPAN: u16 = 100;
 /// port 開始 listen 之前最多等多久，逾時轉 `failed`。
 pub const START_TIMEOUT_SECS: i64 = 60;
+#[cfg(not(test))]
 const POLL: Duration = Duration::from_secs(1);
+#[cfg(test)]
+const POLL: Duration = Duration::from_millis(50);
 const TAIL_LINES: u32 = 40;
 pub const SOURCE_SPAWNED: &str = "spawned";
 pub const SOURCE_ATTACHED: &str = "attached";
@@ -71,8 +74,13 @@ pub trait PreviewEnv: Send + Sync {
     fn spawn<'a>(&'a self, target_pane: &'a str, cwd: &'a str, cmd: &'a str) -> BoxFuture<'a, anyhow::Result<String>>;
     fn pane_alive<'a>(&'a self, pane_id: &'a str) -> BoxFuture<'a, Option<bool>>;
     fn pane_tail<'a>(&'a self, pane_id: &'a str) -> BoxFuture<'a, String>;
-    /// 關 pane；那個 tab 因此空了就一起關。
-    fn close_pane<'a>(&'a self, pane_id: &'a str) -> BoxFuture<'a, ()>;
+    /// 關 pane；那個 tab 因此空了就一起關。回 `true`＝關掉了或確定本來就不在；`false`＝關不掉／問不到（不可當成已關）。
+    fn close_pane<'a>(&'a self, pane_id: &'a str) -> BoxFuture<'a, bool>;
+    /// 測試用：模擬「這顆 bot 的 herdr session 現在拿不到」。
+    #[cfg(test)]
+    fn resolvable(&self) -> bool {
+        true
+    }
     /// 本機這個 port 現在有沒有人在 listen。
     fn port_listening(&self, port: u16) -> BoxFuture<'_, bool>;
     /// 本機上在 listen 的 dev server：命令列對得上已知的 dev server，或行程 cwd 落在 `roots`（AG Man 認得的專案路徑）底下；
@@ -150,10 +158,16 @@ impl PreviewEnv for RealEnv {
             self.client.pane_read(pane_id, "recent", TAIL_LINES).await.map(|r| r.text).unwrap_or_default()
         })
     }
-    fn close_pane<'a>(&'a self, pane_id: &'a str) -> BoxFuture<'a, ()> {
+    fn close_pane<'a>(&'a self, pane_id: &'a str) -> BoxFuture<'a, bool> {
         Box::pin(async move {
-            if let Some(p) = self.client.pane_get(pane_id).await.ok().flatten() {
-                crate::lifecycle::close_pane_and_tab(&self.client, Some(&p.workspace_id), Some(&p.tab_id), pane_id).await;
+            match self.client.pane_get(pane_id).await {
+                Err(_) => false,
+                Ok(None) => true,
+                Ok(Some(p)) => {
+                    crate::lifecycle::close_pane_and_tab(&self.client, Some(&p.workspace_id), Some(&p.tab_id), pane_id).await;
+                    // 關指令的結果被吞掉了：再問一次，確定不在才算關掉。
+                    matches!(self.client.pane_get(pane_id).await, Ok(None))
+                }
             }
         })
     }
@@ -212,7 +226,7 @@ pub(crate) type EnvOverride = std::sync::Mutex<Option<Arc<dyn PreviewEnv>>>;
 async fn env_for(app: &Arc<App>, run: &db::Run) -> LcResult<Arc<dyn PreviewEnv>> {
     #[cfg(test)]
     if let Some(e) = app.preview_env.lock().unwrap().clone() {
-        return Ok(e);
+        return if e.resolvable() { Ok(e) } else { Err(LcError::Upstream("no Herdr session is available (test)".into())) };
     }
     let client = app
         .herdr_for_run(run)
@@ -228,6 +242,19 @@ fn fallback_env(app: &Arc<App>) -> Arc<dyn PreviewEnv> {
         return e;
     }
     Arc::new(RealEnv { client: app.herdr.clone(), app: app.clone() })
+}
+
+/// 這顆 bot 沒有 active run 時關舊 pane 用的 env：bot 自己設定的 session（不是猜管理 session）。
+/// 拿不到（bot／session 讀不到、herdr 沒連）＝`None`：不知道 pane 在哪個 session，呼叫端不可動它。
+async fn env_for_bot(app: &Arc<App>, bot_id: &str) -> Option<Arc<dyn PreviewEnv>> {
+    #[cfg(test)]
+    if let Some(e) = app.preview_env.lock().unwrap().clone() {
+        return e.resolvable().then_some(e);
+    }
+    let bot = db::bot(&app.db, bot_id).await.ok()??;
+    let session = app.session_for_bot(&bot, crate::config::LOCAL_HOST).await?;
+    let client = app.herdr_for_session(crate::config::LOCAL_HOST, &session).await?;
+    Some(Arc::new(RealEnv { client, app: app.clone() }))
 }
 
 // ───────────────────────────── 純函式 ─────────────────────────────
@@ -934,7 +961,7 @@ pub async fn stop_for_bot(app: &Arc<App>, bot_id: &str) {
     disconnect_locked(app, r).await;
 }
 
-/// 關這一列的 pane；回 `false`＝**不知道**該用哪個 session 關（讀不到 run），什麼都沒動，呼叫端不可標 off。
+/// 關這一列的 pane；回 `false`＝**沒關掉也沒確認它不在**（讀不到 run、拿不到那個 session 的 client、關指令失敗），呼叫端不可標 off。
 /// 讀 run 失敗（`Err`）不等於「bot 已停」：`Ok(None)` 才是確定沒有 run，才退回管理 session。
 async fn close_row_pane(app: &Arc<App>, r: &Row) -> bool {
     // 接上的那顆是別人開的 server：只斷開，絕不動它。
@@ -943,15 +970,18 @@ async fn close_row_pane(app: &Arc<App>, r: &Row) -> bool {
     }
     let Some(pane) = r.pane_id.as_deref() else { return true };
     let env = match db::active_run(&app.db, &r.bot_id).await {
-        Ok(Some(run)) => env_for(app, &run).await.unwrap_or_else(|_| fallback_env(app)),
-        Ok(None) => fallback_env(app),
+        Ok(Some(run)) => env_for(app, &run).await.ok(),
+        Ok(None) => env_for_bot(app, &r.bot_id).await,
         Err(e) => {
             tracing::warn!(bot = %r.bot_id, error = %e, "preview: cannot read the active run while closing the preview pane");
             return false;
         }
     };
-    env.close_pane(pane).await;
-    true
+    let Some(env) = env else {
+        tracing::warn!(bot = %r.bot_id, "preview: no herdr session available for the pane's owner; not closing through another session");
+        return false;
+    };
+    env.close_pane(pane).await
 }
 
 /// 開機對帳：`starting`／`running` 的列拿「pane 還在不在」＋「port 有沒有在 listen」對回去；還在 `starting` 的補上 watcher。
@@ -1002,7 +1032,14 @@ async fn refresh_locked(app: &Arc<App>, bot_id: &str) -> Option<Row> {
         return disconnect_locked(app, r).await;
     }
     let env = match (&run, attached) {
-        (Some(run), false) => env_for(app, run).await.ok()?,
+        (Some(run), false) => match env_for(app, run).await {
+            Ok(env) => env,
+            Err(e) => {
+                // 暫時拿不到 herdr：不知道，列原樣留著、下次再看（不是「沒有這列」，watcher 不可因此結束）。
+                tracing::warn!(bot = bot_id, error = ?e, "preview: no herdr session for the run; leaving the preview as is");
+                return Some(r);
+            }
+        },
         _ => fallback_env(app),
     };
     let mut port = r.port;
@@ -1034,7 +1071,7 @@ async fn refresh_locked(app: &Arc<App>, bot_id: &str) -> Option<Row> {
         return Some(r);
     }
     let pane_id = if to == Status::Off { None } else { r.pane_id.clone() };
-    let updated = Row { status: to.as_str().into(), error, pane_id, port, updated_at: db::now(), ..r };
+    let updated = Row { status: to.as_str().into(), error, pane_id, port, updated_at: db::now(), ..r.clone() };
     match put(&app.db, &updated).await {
         Ok(()) => {
             emit_changed(app, &updated).await;
@@ -1042,7 +1079,7 @@ async fn refresh_locked(app: &Arc<App>, bot_id: &str) -> Option<Row> {
         }
         Err(e) => {
             tracing::warn!(bot = bot_id, error = %e, "preview: cannot record the new preview status");
-            None
+            Some(r)
         }
     }
 }
@@ -1055,7 +1092,10 @@ fn spawn_watcher(app: Arc<App>, bot_id: String) {
             let _g = gate().lock().await;
             match refresh_locked(&app, &bot_id).await {
                 Some(r) if r.status() == Status::Starting => {}
-                _ => return,
+                Some(_) => return,
+                // 讀不到這一列（暫時性）不是「這列沒了」：只有確定沒有這一列才結束。
+                None if row(&app.db, &bot_id).await.is_err() => {}
+                None => return,
             }
         }
     });
