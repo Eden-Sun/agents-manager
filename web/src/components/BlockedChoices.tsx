@@ -309,6 +309,18 @@ export function BlockedChoices({
             </button>
           </div>
         ) : null}
+        {/* 問句上面的指令與警語：不給這段，`Do you want to proceed?` 根本看不出在核准什麼（2026-09-20 使用者）。 */}
+        {menu.context.length ? (
+          <pre className="bc-context">
+            {menu.context.map((l, i) => (
+              // 警語（`Dangerous rm …`）要看得出來：它常排在最後、又最容易被捲走。
+              <span key={`${i}-${l}`} className={/^\s*(dangerous|warning|⚠)/i.test(l) ? 'bc-ctx-warn' : undefined}>
+                {l}
+                {'\n'}
+              </span>
+            ))}
+          </pre>
+        ) : null}
         {menu.question ? <p className="bc-question">{menu.question}</p> : null}
       </div>
 
