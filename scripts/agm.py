@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import socket
@@ -212,10 +213,16 @@ class Client:
             )
         except socket.timeout:
             raise AgmError("timeout", f"{method} {path} 逾時（{self.timeout:g}s）", 5)
+        except (ConnectionError, http.client.HTTPException) as e:
+            # 回應讀到一半連線被掐斷：請求已經送出去了，對 mutation 是「送達未知」（#333）。
+            raise AgmError("connection_lost", f"{method} {path} 送出後連線中斷：{e}", 5)
         except urllib.error.URLError as e:
             # `reason` 可能是 socket.timeout 包起來的。
             if isinstance(e.reason, socket.timeout):
                 raise AgmError("timeout", f"{method} {path} 逾時（{self.timeout:g}s）", 5)
+            # 連線被拒／名字解不開：請求根本沒送出去，才是「連不上」。reset／對端沒回就關掉是送出後才斷（#333）。
+            if isinstance(e.reason, (ConnectionError, http.client.HTTPException)) and not isinstance(e.reason, ConnectionRefusedError):
+                raise AgmError("connection_lost", f"{method} {path} 送出後連線中斷：{e.reason}", 5)
             raise AgmError("connect_failed", f"連不上 daemon：{e.reason}", 6)
 
     def get(self, path: str, query: dict | None = None) -> object:
@@ -475,6 +482,8 @@ def _assign_text(args) -> str:
             text = Path(args.text_file).expanduser().read_text(encoding="utf-8")
         except OSError as e:
             raise AgmError("bad_args", f"讀不到 --text-file：{e.strerror}", 2)
+        except UnicodeDecodeError:
+            raise AgmError("bad_args", "--text-file 不是 UTF-8 文字", 2)
     else:
         text = args.text or ""
     text = text.strip()
@@ -520,7 +529,7 @@ def cmd_assign(client: Client, cfg: dict, args) -> object:
     try:
         return client.post("/api/supervisor/assignments", body)
     except AgmError as e:
-        if e.kind == "timeout":
+        if e.kind in ("timeout", "connection_lost"):
             # 送達未知。**不要**換一個 request id 重試——那會派出第二份同樣的工。
             raise AgmError(
                 "delivery_unknown",
@@ -611,7 +620,7 @@ def cmd_review(client: Client, cfg: dict, args) -> object:
     try:
         return client.post(path, body)
     except AgmError as e:
-        if e.kind == "timeout":
+        if e.kind in ("timeout", "connection_lost"):
             # 跟 assign 同一條規則：逾時是「送達未知」。決定本身是冪等的（同一個
             # decision 重送會回同一筆），followup 也綁同一個 request id，所以先對帳再重試。
             raise AgmError(
@@ -980,6 +989,8 @@ def _mission_text(args) -> str:
             text = Path(args.text_file).expanduser().read_text(encoding="utf-8")
         except OSError as e:
             raise AgmError("bad_args", f"讀不到 --text-file：{e.strerror}", 2)
+        except UnicodeDecodeError:
+            raise AgmError("bad_args", "--text-file 不是 UTF-8 文字", 2)
     else:
         text = args.text or ""
     if not text.strip():
@@ -1338,6 +1349,10 @@ def main(argv: list[str] | None = None) -> int:
         return e.exit_code
     except KeyboardInterrupt:
         return 130
+    except Exception as e:  # noqa: BLE001 — 兜底：輸出形狀要穩定，呼叫端會解析 stderr 的 JSON
+        json.dump({"error": "internal", "message": f"{type(e).__name__}: {e}"}, sys.stderr, ensure_ascii=False, indent=indent)
+        sys.stderr.write("\n")
+        return 1
     json.dump(out, sys.stdout, ensure_ascii=False, indent=indent, default=str)
     sys.stdout.write("\n")
     return 0
