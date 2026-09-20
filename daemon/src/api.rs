@@ -1633,6 +1633,9 @@ pub(crate) async fn descendant_children(app: &Arc<App>, root: &str) -> anyhow::R
 /// 刪除是軟的：寫回 config.toml 條目讓 projection 清 `deleted_at`；child bot 直接清欄位。
 /// 被 `purge_bot_dir` 砍掉的工作目錄下次啟動會重新產生。
 async fn restore_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
+    // 跟 delete_bot／start 同一把 per-bot 鎖（#301）：delete_bot 定案後才停機、purge，沒鎖的話還原會插進來，
+    // 事後被 purge 砍掉剛還原的 bot 的目錄與 run。
+    let _guard = app.bot_lock(&id).await.lock_owned().await;
     let bot = db::bot(&app.db, &id).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     if bot.deleted_at.is_none() {
         return Err(LcError::conflict("bot is not deleted", json!({"bot_id": id})));
@@ -3756,6 +3759,24 @@ mod delete_bot_tests {
         delete_project(State(app.clone()), Path(e.project_id.clone())).await.unwrap();
         assert!(restore_bot(State(app.clone()), Path(child.clone())).await.is_err());
         assert!(db::bot(&app.db, &child).await.unwrap().unwrap().deleted_at.is_some());
+    }
+
+    /// #301：delete_bot 定案後、停機／purge 之前，restore_bot 必須等鎖，不能插進來。
+    #[tokio::test]
+    async fn a_restore_waits_for_the_delete_that_holds_the_bot_lock() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let id = a_bot(&e, "alfa", "user").await;
+        in_config(&e, &[(&id, "alfa")]).await;
+        let outcome = Arc::new(std::sync::Mutex::new(None));
+        let (a, oid, o2) = (app.clone(), id.clone(), outcome.clone());
+        crate::lifecycle::race_point::arm("delete_bot_after_decided", &id, move || async move {
+            let r = tokio::time::timeout(std::time::Duration::from_millis(300), restore_bot(State(a), Path(oid))).await;
+            *o2.lock().unwrap() = Some(r.is_ok());
+        });
+        delete_bot(State(app.clone()), Path(id.clone())).await.unwrap();
+        assert_eq!(*outcome.lock().unwrap(), Some(false), "delete 還持著鎖的時候，restore 不能完成");
+        restore_bot(State(app.clone()), Path(id.clone())).await.unwrap();
     }
 
     /// 死鎖回歸（sol 五輪）：child id 字典序**小於** parent。舊寫法 delete_bot 先持 parent、定案後才拿 child，
