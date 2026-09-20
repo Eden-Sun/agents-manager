@@ -150,6 +150,7 @@ teardown
 setup
 cat > "$FAKEBIN/sccache" <<'EOF'
 #!/bin/bash
+[ "${1:-}" = "--show-stats" ] && exit 0
 exit 9
 EOF
 chmod +x "$FAKEBIN/sccache"
@@ -160,6 +161,35 @@ if [ "$code" -eq 9 ]; then
 else
   echo "FAIL - 結束碼變成 $code，應該是 9"; FAIL=$((FAIL + 1))
 fi
+teardown
+
+# 7. sccache 自己壞掉（連 --show-stats 都失敗）：退回直編 rustc，編譯照過（#376，檔頭承諾的行為）。
+setup
+cat > "$FAKEBIN/sccache" <<'EOF'
+#!/bin/bash
+echo "sccache $*" >> "$CALLS"
+exit 2
+EOF
+chmod +x "$FAKEBIN/sccache"
+PATH="$FAKEBIN" "$BASH_BIN" "$WRAPPER" "$FAKEBIN/rustc" -C incremental=/wt-a/inc --edition 2021 foo.rs
+code=$?
+[ "$code" -eq 0 ] && { echo "ok   - sccache 壞掉：exit 0"; PASS=$((PASS + 1)); } || { echo "FAIL - sccache 壞掉：exit ${code}，應該退回直編"; FAIL=$((FAIL + 1)); }
+check "sccache 壞掉：直編 rustc" "^rustc -C incremental=/wt-a/inc --edition 2021 foo.rs" "$CALLS"
+teardown
+
+# 8. sccache 健康、真正的編譯錯誤：不能被吞成成功，也不能退回直編再編一次（#376）。
+setup
+cat > "$FAKEBIN/sccache" <<'EOF'
+#!/bin/bash
+echo "sccache $*" >> "$CALLS"
+[ "${1:-}" = "--show-stats" ] && exit 0
+exit 1
+EOF
+chmod +x "$FAKEBIN/sccache"
+PATH="$FAKEBIN" "$BASH_BIN" "$WRAPPER" "$FAKEBIN/rustc" foo.rs
+code=$?
+[ "$code" -eq 1 ] && { echo "ok   - 編譯失敗：結束碼 1 原樣回傳"; PASS=$((PASS + 1)); } || { echo "FAIL - 編譯失敗：結束碼 ${code}，應該是 1"; FAIL=$((FAIL + 1)); }
+check_no "編譯失敗：不退回直編" "^rustc " "$CALLS"
 teardown
 
 echo "$PASS passed, $FAIL failed"
