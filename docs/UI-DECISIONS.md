@@ -432,3 +432,7 @@ daemon 這幾天把「寫不進 DB」改成 fail closed：外面的副作用做�
   即使 `candidates` 是空的、偵測失敗。`no_vite_config` 降為次要灰字（「AG Man 沒辦法自己起」），試過的路徑收進 `<details>`（可能十幾條會洗版）；
   「由 AG Man 另起一顆」收進摺疊，本機有 vite 在跑時自己起是次要路徑。面板容器改成可捲（原本 `margin:auto` 置中，清單一長上下會同時被切掉又不能捲）。
   進面板與狀態變化時都重打 GET：`DELETE` 只回 `{status:"off"}`，不重打的話清單會在停止後消失。
+- **v4：從「vite 預覽」擴大成「本機 dev server 預覽」（2026-09-20，#253）**：使用者的 :3200 是 Next，偵測寫死 vite 就看不到。UI 字眼全面改「dev server」（端點路徑 `/preview` 不變）。
+  清單每筆前面一顆 kind 標籤（Vite／Next.js／webpack／…，沒見過的名字首字大寫，`unknown` 顯示「其他」；舊 daemon 沒有 `kind` 就當 vite）。
+  「啟動預覽」旁一行小字寫清楚「會在 <目錄> 跑 <指令>」：目錄與指令取自選中的 `candidates`（v4 每筆可帶 `command`），沒有候選時用 daemon 回的 `command`；
+  兩者都沒有就只說「指令由 daemon 依專案決定」，不猜。`candidates` 同時吃字串與 `{dir, command}`。

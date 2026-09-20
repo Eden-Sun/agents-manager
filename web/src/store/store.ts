@@ -394,7 +394,7 @@ export interface StoreState {
 
   selectedBotId: string | null
   rightTab: RightTab
-  /** 預覽模式（issue #253）：每顆頂層 bot 的 vite 預覽；`preview_changed` 與面板的 GET／POST／DELETE 寫入。 */
+  /** 預覽模式（issue #253）：每顆頂層 bot 的 dev server 預覽；`preview_changed` 與面板的 GET／POST／DELETE 寫入。 */
   previews: Record<string, Preview>
   setPreview: (botId: string, p: Preview) => void
   settingsBotId: string | null

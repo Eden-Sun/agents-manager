@@ -1,5 +1,5 @@
 /**
- * 預覽模式的 API（issue #253）：頂層 bot 的專案 vite dev server。
+ * 預覽模式的 API（issue #253）：頂層 bot 的專案本機 dev server（vite／Next／…）。
  * 三個端點都回同一個形狀；`GET /api/state` 的 `bot.preview` 只帶 status／port。
  */
 import { rawTransport } from './index'
@@ -15,13 +15,21 @@ export interface Preview {
   pane_id: string | null
   error: string | null
   started_at: string | null
-  /** v2：`attached` = 接上本機已在跑的 vite（斷開不會 kill 它）；`spawned` = AG Man 自己起的；舊 daemon 沒有＝null。 */
+  /** v2：`attached` = 接上本機已在跑的 dev server（斷開不會 kill 它）；`spawned` = AG Man 自己起的；舊 daemon 沒有＝null。 */
   source: PreviewSource | null
   pid: number | null
-  /** v2：這顆 bot 的 vite 目錄候選（依序）。 */
-  candidates: string[]
-  /** v2：別份 checkout 已在跑的 vite；不自動接。 */
+  /** v2：這顆 bot 的 dev server 目錄候選（依序）；v4 起每筆可帶會用的指令。 */
+  candidates: PreviewCandidate[]
+  /** v4：實際跑的那一行指令（spawned）；舊 daemon 沒有＝null。 */
+  command: string | null
+  /** v2：本機在跑的 dev server（v3 起含別的 repo，帶 relation；v4 起帶 kind）。 */
   others: PreviewOther[]
+}
+
+export interface PreviewCandidate {
+  dir: string
+  /** v4：這個目錄會用的指令（`bun run dev`／`bunx vite`…）；沒有＝null。 */
+  command: string | null
 }
 
 export type PreviewSource = 'spawned' | 'attached'
@@ -32,6 +40,8 @@ export interface PreviewOther {
   dir: string
   pid: number | null
   relation: PreviewRelation
+  /** v4：`vite`／`next`／`webpack`／…／`unknown`；舊 daemon 沒有欄位＝`vite`（那時只認 vite）。 */
+  kind: string
   /** daemon 給的 repo 名（可能沒有）；分組標題退回目錄的最後一段。 */
   repo: string | null
 }
@@ -55,6 +65,7 @@ export const PREVIEW_OFF: Preview = {
   source: null,
   pid: null,
   candidates: [],
+  command: null,
   others: [],
 }
 
@@ -83,8 +94,15 @@ export function toPreview(v: unknown): Preview {
     pid: posInt(pick(v, 'pid')),
     candidates: (() => {
       const x = pick(v, 'candidates')
-      return Array.isArray(x) ? x.filter((d): d is string => typeof d === 'string' && d !== '') : []
+      if (!Array.isArray(x)) return []
+      return x.flatMap((c): PreviewCandidate[] => {
+        if (typeof c === 'string') return c ? [{ dir: c, command: null }] : []
+        if (!isRec(c)) return []
+        const dir = optStr(pick(c, 'dir'))
+        return dir ? [{ dir, command: optStr(pick(c, 'command')) }] : []
+      })
     })(),
+    command: optStr(pick(v, 'command')),
     others: (() => {
       const x = pick(v, 'others')
       if (!Array.isArray(x)) return []
@@ -95,7 +113,8 @@ export function toPreview(v: unknown): Preview {
         const rel = pick(o, 'relation')
         // v2 的 daemon 只列同 repo 的別份 checkout、沒有 relation：照 same_repo 看；v3 判不出來的自己會給 other。
         const relation: PreviewRelation = rel === 'same_dir' || rel === 'same_repo' || rel === 'other' ? rel : 'same_repo'
-        return port && dir ? [{ port, dir, pid: posInt(pick(o, 'pid')), relation, repo: optStr(pick(o, 'repo')) }] : []
+        const kind = optStr(pick(o, 'kind')) ?? 'vite'
+        return port && dir ? [{ port, dir, pid: posInt(pick(o, 'pid')), relation, kind, repo: optStr(pick(o, 'repo')) }] : []
       })
     })(),
   }
@@ -110,7 +129,7 @@ export function toPreviewEvent(data: unknown, prev: Preview): Preview {
     status,
     port: status === 'off' ? null : (n.port ?? prev.port),
     error: status === 'failed' ? prev.error : null,
-    ...(status === 'off' ? { pane_id: null, started_at: null, source: null, pid: null } : {}),
+    ...(status === 'off' ? { pane_id: null, started_at: null, source: null, pid: null, command: null } : {}),
   }
 }
 
@@ -150,3 +169,23 @@ export function previewUrl(port: number): string {
   return `http://${location.hostname}:${port}/`
 }
 
+
+const KIND_LABEL: Record<string, string> = {
+  vite: 'Vite',
+  next: 'Next.js',
+  webpack: 'webpack',
+  astro: 'Astro',
+  storybook: 'Storybook',
+  nuxt: 'Nuxt',
+  remix: 'Remix',
+  rsbuild: 'Rsbuild',
+  parcel: 'Parcel',
+  angular: 'Angular',
+  unknown: '其他',
+}
+
+/** 清單每筆的 kind 標籤；沒見過的名字照原樣首字大寫。 */
+export function kindLabel(kind: string): string {
+  const k = kind.trim().toLowerCase()
+  return KIND_LABEL[k] ?? (k ? k[0].toUpperCase() + k.slice(1) : KIND_LABEL.unknown)
+}

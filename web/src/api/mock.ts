@@ -2495,23 +2495,24 @@ export class MockTransport implements Transport {
   }
 
   /** 預覽模式（issue #253）：starting 1.2 秒後轉 running，跟 daemon 的 `preview_changed` 同形。 */
-  private previews = new Map<string, { status: string; port: number | null; dir: string | null; pane_id: string | null; error: string | null; started_at: string | null; source?: string | null; pid?: number | null }>()
+  private previews = new Map<string, { status: string; port: number | null; dir: string | null; pane_id: string | null; error: string | null; started_at: string | null; source?: string | null; pid?: number | null; command?: string | null }>()
 
   private previewOf(botId: string) {
     this.bot(botId)
     return { ...(this.previews.get(botId) ?? { status: 'off' }), ...this.previewHints(botId) }
   }
 
-  /** v2：候選目錄與別份 checkout 的 vite（只在沒接上／沒起時有意義）。 */
+  /** v2：候選目錄與本機在跑的 dev server（v4 含 kind／指令；只在沒接上／沒起時有意義）。 */
   private previewHints(botId: string) {
     const base = this.bot(botId).cwd ?? '/Users/m4p/project/agents-manager'
     return {
-      // am-claude-2 演「偵測不到 vite 設定檔、只有 others」（wits-ops 的情境）。
-      candidates: this.bot(botId).name === 'am-claude-2' ? [] : [`${base}/web`, `${base}/apps/web`],
+      // am-claude-2 演「偵測不到 dev server、只有 others」（wits-ops 的情境）。
+      candidates: this.bot(botId).name === 'am-claude-2' ? [] : [{ dir: `${base}/web`, command: 'bunx vite' }, { dir: `${base}/apps/web`, command: 'bun run dev' }],
       others: [
-        { port: 5241, dir: `${base}/web`, pid: 4101, relation: 'same_dir', repo: 'agents-manager' },
-        { port: 5173, dir: '/Users/m4p/project/agents-manager-main/web', pid: 4242, relation: 'same_repo', repo: 'agents-manager' },
-        { port: 3001, dir: '/Users/m4p/project/hermes-agents/projects/wt/webui/apps/web', pid: 4377, relation: 'other', repo: 'hermes-agents' },
+        { port: 5241, dir: `${base}/web`, pid: 4101, relation: 'same_dir', kind: 'vite', repo: 'agents-manager' },
+        { port: 5173, dir: '/Users/m4p/project/agents-manager-main/web', pid: 4242, relation: 'same_repo', kind: 'vite', repo: 'agents-manager' },
+        { port: 3001, dir: '/Users/m4p/project/hermes-agents/projects/wt/webui/apps/web', pid: 4377, relation: 'other', kind: 'vite', repo: 'hermes-agents' },
+        { port: 3200, dir: '/Users/m4p/project/hermes-agents/projects/wt/witsper-ops', pid: 44112, relation: 'other', kind: 'next', repo: 'witsper-ops' },
       ],
     }
   }
@@ -2533,20 +2534,20 @@ export class MockTransport implements Transport {
     if (cur && (cur.status === 'starting' || cur.status === 'running')) return cur
     if (bot.name === 'am-claude-2' && body.mode !== 'attach') {
       const b = bot.cwd ?? '/Users/m4p/project/agents-manager'
-      const tried = [b, `${b}/web`, ...['web', 'admin', 'docs', 'site', 'ui'].flatMap((n) => [`${b}/apps/${n}`, `${b}/packages/${n}`])].map((d) => `${d}/vite.config.{ts,mts,js,mjs}`)
+      const tried = [b, `${b}/web`, ...['web', 'admin', 'docs', 'site', 'ui'].flatMap((n) => [`${b}/apps/${n}`, `${b}/packages/${n}`])].map((d) => `${d}/vite.config.{ts,mts,js,mjs} 或 package.json 的 dev script`)
       throw new ApiError(409, { reason: 'no_vite_config', tried }, 'no_vite_config')
     }
     if (body.mode === 'attach') {
       const port = Number(body.port)
       const other = this.previewHints(botId).others.find((o) => o.port === port)
-      if (!other) throw new ApiError(409, { reason: 'not_vite_port' }, 'not_vite_port')
+      if (!other) throw new ApiError(409, { reason: 'not_dev_server' }, 'not_dev_server')
       return { ...this.setPreviewState(botId, { status: 'running', port, dir: other.dir, pane_id: null, error: null, started_at: now(), source: 'attached', pid: other.pid }), ...this.previewHints(botId) }
     }
     const used = new Set([...this.previews.values()].map((p) => p.port))
     let port = 5180
     while (used.has(port)) port += 1
     const dir = typeof body.dir === 'string' && body.dir ? body.dir : `${bot.cwd ?? '/Users/m4p/project/agents-manager'}/web`
-    const starting = this.setPreviewState(botId, { status: 'starting', port, dir, pane_id: `mock-pv-${port}`, error: null, started_at: now(), source: 'spawned', pid: null })
+    const starting = this.setPreviewState(botId, { status: 'starting', port, dir, pane_id: `mock-pv-${port}`, error: null, started_at: now(), source: 'spawned', pid: null, command: 'bunx vite' })
     setTimeout(() => {
       if (this.previews.get(botId)?.status === 'starting') this.setPreviewState(botId, { status: 'running' })
     }, 1200)
