@@ -26,7 +26,12 @@ pub(super) struct SchemaObject {
     sql: String,
     /// 只有表有：實際的欄位名。
     columns: Vec<String>,
+    /// 只有表有：每個欄位的（名字, 型別, NOT NULL, 預設值原文, 主鍵序），給漂移核對比型別與預設值（#307）。
+    col_defs: Vec<ColDef>,
 }
+
+/// `pragma_table_info` 的一列（不含 cid）。
+type ColDef = (String, String, i64, Option<String>, i64);
 
 /// 讀出這個 DB 的全部 schema 物件，照（種類, 名字）排好。SQLite 自己的（`sqlite_sequence`、`sqlite_stat1`、
 /// `sqlite_autoindex_*`——後者 `sql` 是 NULL）不算。
@@ -40,12 +45,13 @@ pub(super) async fn read_objects(pool: &SqlitePool) -> Result<Vec<SchemaObject>>
     .await?;
     let mut out = Vec::with_capacity(rows.len());
     for (kind, name, table, sql) in rows {
-        let columns = if kind == "table" {
-            sqlx::query_scalar("SELECT name FROM pragma_table_info(?)").bind(&name).fetch_all(pool).await?
+        let col_defs: Vec<ColDef> = if kind == "table" {
+            sqlx::query_as("SELECT name, type, \"notnull\", dflt_value, pk FROM pragma_table_info(?) ORDER BY cid").bind(&name).fetch_all(pool).await?
         } else {
             Vec::new()
         };
-        out.push(SchemaObject { kind, name, table, sql: normalize_sql(&sql), columns });
+        let columns = col_defs.iter().map(|c| c.0.clone()).collect();
+        out.push(SchemaObject { kind, name, table, sql: normalize_sql(&sql), columns, col_defs });
     }
     Ok(out)
 }
@@ -67,7 +73,7 @@ async fn expected() -> Result<&'static [SchemaObject]> {
 
 /// migrate 的最後一步：標準答案裡的每個物件，這個 DB 都要有，而且長得一樣。
 ///
-/// - 表：要在，標準答案的欄位一個都不能少。表本身的原文不比——舊 DB 的表是 `ALTER TABLE ADD COLUMN` 一欄一欄
+/// - 表：要在，標準答案的欄位一個都不能少，而且每欄的型別、NOT NULL、預設值、主鍵序要相同（#307）。表本身的原文不比——舊 DB 的表是 `ALTER TABLE ADD COLUMN` 一欄一欄
 ///   補出來的，原文跟全新建的本來就不同；約束（CHECK／UNIQUE）要改就得重建表，那是非 additive 的 migration，
 ///   `SCHEMA_VERSION` 的說明寫了到時候怎麼辦。
 /// - 索引、trigger、view：要在，而且正規化後的定義相同。`CREATE … IF NOT EXISTS` 不會改掉既有的定義，
@@ -94,6 +100,20 @@ fn drift(want: &[SchemaObject], have: &[SchemaObject]) -> Vec<String> {
                 .filter(|c| !h.columns.iter().any(|x| x.eq_ignore_ascii_case(c)))
                 .map(|c| format!("{}.{c}", w.name))
                 .collect();
+            // 欄位在，但型別／NOT NULL／預設值／主鍵不同（#307）：以前只比欄位名，這種漂移（例如舊 DB 的欄位是 TEXT、
+            // 程式以為 INTEGER DEFAULT 0）會一路放行，讀出來的值型別錯或預設值不同。
+            for wc in &w.col_defs {
+                let Some(hc) = h.col_defs.iter().find(|x| x.0.eq_ignore_ascii_case(&wc.0)) else { continue };
+                let (wt, ht) = (wc.1.to_ascii_uppercase(), hc.1.to_ascii_uppercase());
+                let (wd, hd) = (wc.3.as_deref().map(str::trim), hc.3.as_deref().map(str::trim));
+                if wt != ht || wc.2 != hc.2 || wd != hd || wc.4 != hc.4 {
+                    problems.push(format!(
+                        "表 {} 的欄位 {} 定義跟程式不同——這個資料庫：型別 `{}`、NOT NULL {}、預設 {:?}、主鍵序 {}；程式：型別 `{}`、NOT NULL {}、預設 {:?}、主鍵序 {}。\
+                         改型別／預設值要重建表，是非 additive 的 migration，請在 migrate 明確處理。",
+                        w.name, wc.0, hc.1, hc.2, hc.3, hc.4, wc.1, wc.2, wc.3, wc.4
+                    ));
+                }
+            }
             if !missing.is_empty() {
                 problems.push(format!(
                     "程式建的表有 {} 但這個資料庫沒有。CREATE TABLE IF NOT EXISTS 對既有 DB 不做事，\
@@ -331,6 +351,21 @@ mod tests {
         let err = open(&path).await.expect_err("少欄位的舊 DB 不該靜靜開起來").to_string();
         assert!(err.contains("schema drift") && err.contains("build_slots.purpose"), "{err}");
         assert!(err.contains("ALTER TABLE build_slots ADD COLUMN"), "要告訴人怎麼修：{err}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 欄位名都在，但型別或預設值跟程式不同：以前只比欄位名，這種漂移一路放行。
+    #[tokio::test]
+    async fn a_column_whose_type_or_default_drifted_is_caught_on_an_existing_db() {
+        let (dir, path) = tmp_db();
+        {
+            let pool = open(&path).await.unwrap();
+            sqlx::query("ALTER TABLE build_slots DROP COLUMN purpose").execute(&pool).await.unwrap();
+            sqlx::query("ALTER TABLE build_slots ADD COLUMN purpose BLOB DEFAULT 'zzz'").execute(&pool).await.unwrap();
+            pool.close().await;
+        }
+        let err = open(&path).await.expect_err("型別／預設值漂移不該靜靜開起來").to_string();
+        assert!(err.contains("schema drift") && err.contains("build_slots") && err.contains("purpose"), "{err}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
