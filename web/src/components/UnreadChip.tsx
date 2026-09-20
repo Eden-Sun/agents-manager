@@ -12,7 +12,7 @@
  * 排除（2026-09-10 使用者）：AGM 總管專案不算（例行 loop 會洗版），但 ★ 釘選不受影響；
  * 認 `GET /api/supervisor` 的 `project_id` 不認名字（2026-09-13 已從 `AGM` 改名 `AGM-DM-GRUP`）。
  */
-import { chipStateText } from '../lib/chipStateText'
+import { chipStateText, kidsText } from '../lib/chipStateText'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from 'react'
 import type { Bot } from '../api/types'
 import { useMediaQuery } from '../hooks/useMediaQuery'
@@ -52,8 +52,25 @@ interface ChipItem {
   unread: number
   needsReply: boolean
   waitsKids: boolean
+  /** parent_bot_id 指到這顆、且 working／blocked 的子 bot 數（#344 補充 4）；不受自己狀態影響。 */
+  kidsRunning: number
   working: boolean
   title: string
+}
+
+/** 子 agent 在跑：分叉圖示（形狀跟燈／點不同）＋多顆時的數字；文字說明在 `title` 與 sr-only。 */
+function KidsBadge({ n }: { n: number }) {
+  return (
+    <span className="unread-chip-kids" aria-hidden="true" title={kidsText(n)}>
+      <svg viewBox="0 0 12 12" width="11" height="11" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round">
+        <circle cx="3" cy="2.5" r="1.3" />
+        <circle cx="3" cy="9.5" r="1.3" />
+        <circle cx="9" cy="6" r="1.3" />
+        <path d="M3 3.8v4.4M3 6h4.7" />
+      </svg>
+      {n > 1 ? <span className="unread-chip-kids-n">{n > 9 ? '9+' : n}</span> : null}
+    </span>
+  )
 }
 
 /** 手機主力晶片只畫「值得注意」的狀態；idle（常態）、離線、啟動／停止中都不畫，全亮是雜訊（#344 補充 3）。 */
@@ -104,7 +121,8 @@ function Chip({ it, dnd, lamp }: { it: ChipItem; dnd?: PinnedDnd; lamp?: boolean
       <span className="unread-chip-name">{it.name}</span>
       {it.unread > 0 ? <span className="unread-chip-n" aria-hidden="true">{it.unread > 99 ? '99+' : it.unread}</span> : null}
       {it.working || it.needsReply || it.waitsKids ? <span className="unread-chip-dot" aria-hidden="true" /> : null}
-      <span className="sr-only">{chipStateText(it)}</span>
+      {it.kidsRunning > 0 ? <KidsBadge n={it.kidsRunning} /> : null}
+      <span className="sr-only">{chipStateText({ ...it, kids: it.kidsRunning })}</span>
     </button>
   )
 }
@@ -163,8 +181,8 @@ export function UnreadChip() {
 
   const items = useMemo(() => {
     const tracked = (b: Bot) => chipTracked(b, supervisorProjectId)
-    const waitsKids = (id: string) =>
-      bots.some((b) => b.parent_bot_id === id && (runs[b.id]?.agent_status === 'working' || runs[b.id]?.agent_status === 'blocked'))
+    const kidsRunning = (id: string) =>
+      bots.filter((b) => b.parent_bot_id === id && (runs[b.id]?.agent_status === 'working' || runs[b.id]?.agent_status === 'blocked')).length
     const hidden = new Set(hiddenBotIds)
     const out: ChipItem[] = []
     for (const b of bots) {
@@ -174,7 +192,8 @@ export function UnreadChip() {
       const n = botUnread[b.id] ?? 0
       const status = runs[b.id]?.agent_status
       const needsReply = status === 'blocked'
-      const kids = !needsReply && waitsKids(b.id)
+      const nKids = kidsRunning(b.id)
+      const kids = !needsReply && nKids > 0
       const current = b.id === selectedBotId
       const show = pinned || (tracked(b) && (n > 0 || b.id === keptId || status === 'working' || needsReply))
       if (!show) continue
@@ -189,8 +208,9 @@ export function UnreadChip() {
         unread: n,
         needsReply,
         waitsKids: kids,
+        kidsRunning: nKids,
         working: status === 'working',
-        title: botTitle(b.name, pinned, n, needsReply, kids, current),
+        title: botTitle(b.name, pinned, n, needsReply, kids, current) + (nKids > 0 ? `（${kidsText(nKids)}）` : ''),
       })
     }
     return out

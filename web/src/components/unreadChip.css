@@ -544,3 +544,20 @@
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--lamp-red) 30%, transparent);
   }
 }
+
+/* 子 agent 在跑（#344 補充 4）：分叉圖示（形狀跟燈／狀態點不同），多顆時帶數字；桌機與手機都畫。 */
+.unread-chip-kids {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  color: var(--lamp-blue);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+/* 有未讀的晶片是 accent 底：圖示改白色，才讀得出來。 */
+.unread-chip.unread .unread-chip-kids {
+  color: currentColor;
+}

@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { chipStateText } from './chipStateText.ts'
+import { chipStateText, kidsText } from './chipStateText.ts'
 
 // 晶片的狀態只靠紅點／黃點／數字：按鈕的可及名稱是「名字 3」，讀屏聽不出是未讀、還是要回答。
 test('需要回答排第一，且不重複念未讀數', () => {
@@ -13,4 +13,10 @@ test('未讀、等子 agent、執行中各自有字', () => {
 })
 test('沒有狀態就沒有字', () => {
   assert.equal(chipStateText({ needsReply: false, unread: 0, waitsKids: false, working: false }), '')
+})
+
+test('子 agent 在跑：跟自己的狀態並存，沒有自己的狀態也會念', () => {
+  assert.equal(chipStateText({ needsReply: false, unread: 0, waitsKids: false, working: false, kids: 2 }), '（2 個子 agent 在跑）')
+  assert.equal(chipStateText({ needsReply: false, unread: 0, waitsKids: false, working: true, kids: 1 }), '（執行中）（1 個子 agent 在跑）')
+  assert.equal(kidsText(3), '3 個子 agent 在跑')
 })
