@@ -1503,12 +1503,26 @@ pub(crate) async fn delete_bot(State(app): State<Arc<App>>, Path(id): Path<Strin
     let mut kept_dirs: Vec<Value> = Vec::new();
     for child in children {
         let settled = stop_for_delete_locked(&app, &child.id).await;
-        sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL")
-            .bind(db::now())
-            .bind(&child.id)
-            .execute(&app.db)
-            .await
-            .map_err(any_err)?;
+        // 定案之後不能因為某顆 child 的軟刪寫不進去就 early return（#296）：後面的 child 與母 bot 都還沒停，母 bot 已軟刪、
+        // 沒人會再處理它的 run。失敗就記成保留目錄、背景重試，其餘照做。
+        let settled = match soft_delete_child(&app, &child.id).await {
+            Ok(()) => settled,
+            Err(e) => {
+                tracing::error!(bot = %child.name, error = ?e, "child could not be soft-deleted; retrying in the background");
+                let (app2, cid, chost) = (app.clone(), child.id.clone(), host.clone());
+                tokio::spawn(async move {
+                    for attempt in 0.. {
+                        tokio::time::sleep(crate::reconcile::recovery_retry_delay(attempt)).await;
+                        if soft_delete_child(&app2, &cid).await.is_ok() {
+                            lifecycle::purge_bot_dir(&app2, &cid, &chost).await;
+                            app2.emit("bot_changed", json!({"bot_id": cid})).await;
+                            return;
+                        }
+                    }
+                });
+                Err("soft delete failed; retrying in the background")
+            }
+        };
         match settled {
             Ok(()) => {
                 let child_host = db::bot_host(&app.db, &child.id).await.unwrap_or_else(|_| host.clone());
@@ -3674,6 +3688,37 @@ mod delete_bot_tests {
         let mut done = false;
         for _ in 0..150 {
             if db::bot(&app.db, &kids[0]).await.unwrap().unwrap().deleted_at.is_some() {
+                done = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(done, "寫得進去之後背景補上");
+    }
+
+    /// #296：定案之後某顆 child 的軟刪寫不進去，不能 early return 把母 bot 的 run 留著不停。
+    #[tokio::test]
+    async fn a_child_soft_delete_failure_after_the_decision_does_not_strand_the_parent_run() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let parent = a_bot(&e, "alfa", "user").await;
+        in_config(&e, &[(&parent, "alfa")]).await;
+        let child = a_bot(&e, "alfa-kid", "child").await;
+        sqlx::query("UPDATE bots SET parent_bot_id = ? WHERE id = ?").bind(&parent).bind(&child).execute(&app.db).await.unwrap();
+        crate::testing::fake_run(&app, &parent).await;
+        sqlx::query(&format!(
+            "CREATE TRIGGER am_test_fail_kid BEFORE UPDATE OF deleted_at ON bots WHEN NEW.id = '{child}' BEGIN SELECT RAISE(ABORT, 'boom'); END"
+        ))
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let res = delete_bot(State(app.clone()), Path(parent.clone())).await;
+        assert!(res.is_ok(), "定案之後的失敗記進 kept_dirs，不能回錯：{:?}", res.err().map(|e| format!("{e:?}")));
+        assert!(db::active_run(&app.db, &parent).await.unwrap().is_none(), "母 bot 已刪，它的 run 一定要停");
+        sqlx::query("DROP TRIGGER am_test_fail_kid").execute(&app.db).await.unwrap();
+        let mut done = false;
+        for _ in 0..150 {
+            if db::bot(&app.db, &child).await.unwrap().unwrap().deleted_at.is_some() {
                 done = true;
                 break;
             }
