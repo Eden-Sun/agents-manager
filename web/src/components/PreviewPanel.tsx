@@ -82,7 +82,7 @@ function OthersList({
   others: PreviewOther[]
   root: string | null
   busy: boolean
-  onAttach: (port: number) => void
+  onAttach: (o: PreviewOther) => void
 }) {
   const [showAll, setShowAll] = useState(false)
   if (others.length === 0) return null
@@ -109,7 +109,7 @@ function OthersList({
                     disabled={busy}
                     title={`${o.dir}${o.pid ? ` · pid ${o.pid}` : ''}`}
                     aria-label={`接上 ${kindLabel(o.kind)} :${o.port} ${short}`}
-                    onClick={() => onAttach(o.port)}
+                    onClick={() => onAttach(o)}
                   >
                     <span className="preview-kind">{kindLabel(o.kind)}</span>
                     <span className="preview-row-port">:{o.port}</span>
@@ -321,7 +321,7 @@ export function PreviewPanel({ botId, headStart, headEnd }: { botId: string; hea
                 關閉
               </button>
             </div>
-            <OthersList others={p.others} root={root} busy={busy || !connected} onAttach={(port) => void start({ mode: 'attach', port })} />
+            <OthersList others={p.others} root={root} busy={busy || !connected} onAttach={(o) => void start({ mode: 'attach', port: o.port, pid: o.pid ?? undefined, dir: o.dir })} />
           </>
         ) : (
           <>
@@ -333,7 +333,7 @@ export function PreviewPanel({ botId, headStart, headEnd }: { botId: string; hea
                   others={p.others}
                   root={root}
                   busy={busy || !connected}
-                  onAttach={(port) => void start({ mode: 'attach', port })}
+                  onAttach={(o) => void start({ mode: 'attach', port: o.port, pid: o.pid ?? undefined, dir: o.dir })}
                 />
                 {err ? <ErrNote err={err} /> : null}
                 <details className="preview-spawn">

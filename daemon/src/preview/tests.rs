@@ -22,6 +22,8 @@ struct FakeEnv {
     unresolvable: std::sync::atomic::AtomicBool,
     /// 模擬 herdr 的關 pane 失敗。
     close_fails: std::sync::atomic::AtomicBool,
+    /// 模擬本機掃描失敗（問不到，不是「沒有」）。
+    scan_fails: std::sync::atomic::AtomicBool,
 }
 
 impl FakeEnv {
@@ -93,7 +95,12 @@ impl PreviewEnv for FakeEnv {
         Box::pin(async move { self.listening.lock().unwrap().contains(&port) })
     }
     fn scan_servers<'a>(&'a self, _roots: &'a [String]) -> BoxFuture<'a, Option<Vec<ViteProc>>> {
-        Box::pin(async move { Some(self.vites.lock().unwrap().clone()) })
+        Box::pin(async move {
+            if self.scan_fails.load(std::sync::atomic::Ordering::SeqCst) {
+                return None;
+            }
+            Some(self.vites.lock().unwrap().clone())
+        })
     }
     fn pane_ports<'a>(&'a self, pane_id: &'a str) -> BoxFuture<'a, Option<Vec<u16>>> {
         Box::pin(async move { Some(self.pane_ports.lock().unwrap().get(pane_id).cloned().unwrap_or_default()) })
@@ -799,7 +806,7 @@ fn web_dir(r: &Rig) -> String {
 }
 
 fn req(mode: &str, port: Option<u16>, dir: Option<&str>) -> StartReq {
-    StartReq { mode: Some(mode.into()), port, dir: dir.map(Into::into) }
+    StartReq { mode: Some(mode.into()), port, dir: dir.map(Into::into), pid: None }
 }
 
 #[tokio::test]
@@ -879,6 +886,75 @@ async fn attach_mode_needs_a_port_that_really_is_a_vite() {
     // 使用者明確選了別份 checkout 的：接。
     let body = start(&r.e.app, &bot, req("attach", Some(3001), None)).await.unwrap();
     assert_eq!((body["source"].as_str(), body["dir"].as_str()), (Some("attached"), Some("/somewhere/hermes/apps/web")));
+}
+
+// ── #258：接上的預覽綁的是那顆行程，不只是 port ──
+
+#[tokio::test]
+async fn an_attached_preview_does_not_silently_follow_an_unrelated_process_that_reused_the_port() {
+    let r = rig().await;
+    let bot = running_bot(&r, "alfa").await;
+    r.fake.vite(100, 5180, &web_dir(&r));
+    start(&r.e.app, &bot, req("attach", Some(5180), None)).await.unwrap();
+    assert_eq!(status(&get(&r.e.app, &bot).await.unwrap()), "running");
+    // 原本那顆結束、別的行程佔了同一個 port（別份 checkout 的 vite／不相干的本機服務）。
+    r.fake.vite_exits(5180);
+    r.fake.server(200, 5180, "/other/web", "vite");
+    let seq = r.e.app.current_seq();
+    assert_eq!(status(&get(&r.e.app, &bot).await.unwrap()), "off");
+    assert!(r.e.app.current_seq() > seq, "身分變了要推 preview_changed");
+    // 不相干的服務（掃不到是 dev server）也一樣。
+    r.fake.vite_exits(5180);
+    r.fake.vite(300, 5180, &web_dir(&r));
+    start(&r.e.app, &bot, req("attach", Some(5180), None)).await.unwrap();
+    r.fake.vite_exits(5180);
+    r.fake.listen(5180);
+    assert_eq!(status(&get(&r.e.app, &bot).await.unwrap()), "off");
+    assert!(r.fake.closed.lock().unwrap().is_empty(), "別人的 server 一律不動");
+}
+
+#[tokio::test]
+async fn an_attached_preview_follows_the_same_app_restarting_with_a_new_pid() {
+    let r = rig().await;
+    let bot = running_bot(&r, "alfa").await;
+    r.fake.vite(100, 5180, &web_dir(&r));
+    start(&r.e.app, &bot, req("attach", Some(5180), None)).await.unwrap();
+    // 同一個目錄的 vite 重啟（pid 換了、port 沒變）：仍是那個 app，沿用並記下新 pid。
+    r.fake.vite_exits(5180);
+    r.fake.vite(101, 5180, &web_dir(&r));
+    assert_eq!(status(&get(&r.e.app, &bot).await.unwrap()), "running");
+    assert_eq!(row(&r.e.app.db, &bot).await.unwrap().unwrap().pid, Some(101));
+    // 掃描失敗（問不到）不當成換人；掃得到而且 port 上沒有 dev server 才是換人了。
+    r.fake.scan_fails.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(status(&get(&r.e.app, &bot).await.unwrap()), "running");
+    r.fake.scan_fails.store(false, std::sync::atomic::Ordering::SeqCst);
+    r.fake.vites.lock().unwrap().clear();
+    assert_eq!(status(&get(&r.e.app, &bot).await.unwrap()), "off");
+}
+
+#[tokio::test]
+async fn a_stale_attach_selection_fails_instead_of_attaching_whatever_took_the_port() {
+    let r = rig().await;
+    let bot = running_bot(&r, "alfa").await;
+    r.fake.vite(100, 5180, &web_dir(&r));
+    // GET 看到 pid 100；POST 之前它結束、別份 checkout 的 vite 佔了 5180。
+    r.fake.vite_exits(5180);
+    r.fake.server(200, 5180, "/other/web", "vite");
+    let stale = StartReq { pid: Some(100), ..req("attach", Some(5180), Some(&web_dir(&r))) };
+    let LcError::Conflict(v) = start(&r.e.app, &bot, stale).await.unwrap_err() else { panic!("要 409") };
+    assert_eq!(v["reason"], "stale_selection");
+    assert!(row(&r.e.app.db, &bot).await.unwrap().is_none(), "不可留下接到別人的那一列");
+    // 只帶 dir 也對得上才接；pid／dir 都對就接。
+    let dir_only = req("attach", Some(5180), Some(&web_dir(&r)));
+    assert!(matches!(start(&r.e.app, &bot, dir_only).await.unwrap_err(), LcError::Conflict(_)));
+    let good = StartReq { pid: Some(200), ..req("attach", Some(5180), Some("/other/web")) };
+    assert_eq!(start(&r.e.app, &bot, good).await.unwrap()["pid"], 200);
+    // 同一個目錄、只是換了一顆行程：只帶 pid 也要擋（那是另一顆 server 了）。
+    r.fake.vite_exits(5180);
+    r.fake.vite(101, 5180, "/other/web");
+    let pid_only = StartReq { pid: Some(200), ..req("attach", Some(5180), None) };
+    let LcError::Conflict(v) = start(&r.e.app, &bot, pid_only).await.unwrap_err() else { panic!("要 409") };
+    assert_eq!(v["reason"], "stale_selection");
 }
 
 #[tokio::test]

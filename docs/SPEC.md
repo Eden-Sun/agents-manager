@@ -1856,6 +1856,11 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   - **接上的只斷開、絕不砍人**：`DELETE`、bot 停止／刪除／閒置收掉時，`attached` 那列只標 `off`，不關任何 pane、不 kill 任何行程。
     只有 `source: "spawned"`（自己起的）才關 pane。接上的 server 自己結束（port 不再 listen）→ 轉 `off`（不是 `failed`）；
     接上的預覽跟 bot 有沒有在跑無關，只看它自己的 port。
+  - **接上的綁行程，不只綁 port**（#258）：`running` 的 `attached` 列每次對帳，除了 port 有在 listen，還用同一份掃描核對那個 port 現在是誰：
+    pid 沒變＝同一顆；pid 變了但 cwd 相同（同一個 app 重啟）＝沿用這一列、換記新 pid；port 上不是掃得到的 dev server、或 cwd 不同＝別的行程接手了，
+    轉 `off`（推 `preview_changed`），不默默跟著它（iframe 不會悄悄變成別的服務）。掃描失敗（問不到）當「沒變」。
+    `mode=attach` 可帶 `pid`／`dir`（UI 一律帶清單上那顆的）：現在佔著那個 port 的行程對不上就 409 `stale_selection`。
+    **沒有**限制只能接同 repo 的：清單上任何一顆（含 `other`）都能明確接，是使用者要的（接 wits-ops 的 `next-server`）。
   - `POST` 的 `mode`：`auto`（預設）／`attach`（必須帶 `port`，且那個 port 真的是掃到的 dev server，否則 409 `not_vite`）／`spawn`
     （不管有沒有現成的都自己起）；`dir` 從 `candidates` 挑。明確指定（mode／port／dir 任何一個）而且已經有預覽在用時，先斷開舊的
     再照新的來；沒指定就原樣回舊的（冪等）。

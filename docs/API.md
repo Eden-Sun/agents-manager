@@ -461,17 +461,18 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
   `failed` 的 `error` 帶原因與 pane 最後 40 行。iframe 網址用 `http://${location.hostname}:${port}/`。
 
 ### `GET /api/bots/{id}/preview`
-先對一次帳（pane 還在不在、port 有沒有在 listen）再回，所以 `running` 的 server 半路掛掉，下一次 GET 就會看到 `failed`。
+先對一次帳（pane 還在不在、port 有沒有在 listen）再回。`running` 期間 daemon 也有常駐監看（SPEC §6.12），server 半路掛掉會自己轉 `failed`（`attached` 轉 `off`）並推 `preview_changed`，不必等 GET。
 
 ### `POST /api/bots/{id}/preview`
 冪等啟動：已經 `starting`／`running` 就原樣回；`failed`／`off` 重新起（重挑 port）。body 可省略，或：
 
 ```json
-{"mode": "auto | attach | spawn", "port": 5173, "dir": "/path/to/apps/site"}
+{"mode": "auto | attach | spawn", "port": 5173, "dir": "/path/to/apps/site", "pid": 4242}
 ```
 
 - `auto`（預設）：本機已經有 dev server 在跑、cwd 是這顆 bot 的候選目錄或工作目錄（`same_dir`）→ **接上，不另起**（`source: "attached"`）；沒有才自己起。
 - `attach`：必須帶 `port`，那個 port 要真的是掃到的 dev server（不是就 409 `not_vite`）；`others` 裡任何一顆（包括 `other`，別的專案）都能接，回應照實記 `source: "attached"` 與那顆的 `dir`／`pid`。
+  可以帶 `pid`、`dir`（UI 一律帶清單上那顆的）：掃到的那顆行程對不上就 409 `stale_selection`（GET 到 POST 之間 port 被別的行程接手了），不會默默接到別人。
 - `spawn`：不管有沒有現成的，自己起。`dir` 從 `candidates` 挑（不在裡面 400）。
 - 明確指定了 mode／port／dir 而且已經有預覽在用：先斷開舊的（`attached` 只斷開、`spawned` 關 pane）再照新的來。
 - `mode` 不合法、`attach` 沒帶 `port` 是 400。
@@ -488,6 +489,7 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 | `no_vite_config` | 找不到 vite 設定或帶 `dev` script 的 `package.json`（名字沿用）；`tried` 是試過的路徑 |
 | `no_free_port` | 5180 起的 100 顆都被佔了 |
 | `not_vite` | `mode=attach` 的 `port` 不是掃到的 dev server（body 帶 `port`） |
+| `stale_selection` | `mode=attach` 帶的 `pid`／`dir` 跟現在佔著那個 `port` 的行程對不上（body 帶現在的 `pid`／`dir`） |
 
 ### `DELETE /api/bots/{id}/preview`
 `spawned` 關 pane、放掉 port；`attached` **只斷開，絕不動對方的 server**。回 `{"status":"off"}`；沒開過也是。bot 被停止／重啟／刪除、§6.11 閒置收 bot 時 daemon 也會做同一件事。
