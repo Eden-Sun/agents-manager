@@ -113,15 +113,3 @@
   display: flex;
   gap: 6px;
 }
-
-.pane-close-modal {
-  max-width: 420px;
-  padding: 14px 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.pane-close-modal code {
-  overflow-wrap: anywhere;
-}
