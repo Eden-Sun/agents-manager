@@ -3732,3 +3732,25 @@ button.model-tag:hover:not(:disabled) {
 :root[data-theme="dark"] {
   color-scheme: dark;
 }
+
+/* 環境設定→顯示：螢幕保持亮著（`components/KeepAwakeToggle.tsx`）。 */
+.keep-awake {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 10px;
+}
+
+.keep-awake-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.keep-awake-note {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--text-faint);
+}
