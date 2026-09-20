@@ -951,6 +951,27 @@ pub fn is_temp_bot_name(mission_id: &str, name: &str) -> bool {
 }
 
 async fn cleanup_temp_bots(app: &Arc<App>, m: &store::Mission) -> Value {
+    cleanup_temp_bots_inner(app, m, false).await
+}
+
+/// 補收（issue #343）：結案當下的清理是結案之後才做、沒有重試，當機或一時讀不到狀態就會留下孤兒臨時 bot。
+/// 由 supervisor 的 tick 呼叫：從持久狀態找出「已結案卻還有活的臨時 bot」的任務，再走同一條 `cleanup_temp_bots`
+/// （同樣的歸屬三條件、同樣 fail-closed，冪等）。補收只在真的刪掉東西時寫時間軸事件——
+/// 還在跑或讀不到的每次都會再看一次，不能每 10 秒就寫一筆。
+pub async fn sweep_closed_mission_temp_bots(app: &Arc<App>) {
+    let missions = match store::closed_with_live_temp_bots(&app.db).await {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not list closed missions with leftover temp bots");
+            return;
+        }
+    };
+    for m in missions {
+        cleanup_temp_bots_inner(app, &m, true).await;
+    }
+}
+
+async fn cleanup_temp_bots_inner(app: &Arc<App>, m: &store::Mission, sweep: bool) -> Value {
     let assignments = match crate::supervisor::store::mission_assignments(&app.db, &m.id).await {
         Ok(a) => a,
         Err(e) => {
@@ -1004,7 +1025,12 @@ async fn cleanup_temp_bots(app: &Arc<App>, m: &store::Mission) -> Value {
         }
     }
     let out = json!({"deleted": deleted, "skipped": skipped});
-    if !deleted.is_empty() || !skipped.is_empty() {
+    if sweep {
+        if !deleted.is_empty() {
+            let names = deleted.iter().filter_map(|x| x["name"].as_str()).collect::<Vec<_>>().join("、");
+            let _ = store::add_event(&app.db, &m.id, "note", &format!("已補收臨時 bot：{names}"), Some(crate::agent_relay::DAEMON_SENDER), &out).await;
+        }
+    } else if !deleted.is_empty() || !skipped.is_empty() {
         let names = |v: &[Value]| v.iter().filter_map(|x| x["name"].as_str()).collect::<Vec<_>>().join("、");
         // 沒刪的要講理由（還在跑／讀不到狀態要的處置不一樣）；讀不到 bot 列時連名字都沒有，以 bot id 代替。
         let why = |v: &[Value]| {
@@ -3089,7 +3115,7 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let a = crate::supervisor::store::insert_assignment(&app.db, None, &bid, "crid-t-exec", "做 X", &[], None, true).await.unwrap();
+        let a = crate::supervisor::store::insert_assignment(&app.db, None, &bid, &format!("crid-t-{bid}"), "做 X", &[], None, true).await.unwrap();
         crate::supervisor::store::set_mission_link(&app.db, &a.id, mission_id, "executor").await.unwrap();
         sqlx::query("UPDATE supervisor_assignments SET status='completed' WHERE id=?").bind(&a.id).execute(&app.db).await.unwrap();
         (bid, run)
@@ -3146,6 +3172,51 @@ mod tests {
         let out = cleanup_temp_bots(&app, &mission).await;
         assert_eq!(out["deleted"][0]["bot_id"], bid.as_str(), "{out}");
         assert!(bot_deleted(&app, &bid).await);
+    }
+
+    /// #343：結案已經 commit、清理卻沒跑到（當機、讀不到狀態）——不必再打一次 complete，補收 sweep 自己把孤兒臨時 bot 收掉；
+    /// 還在跑的照舊留著（fail-closed）而且不重複寫事件；收完之後再掃一次什麼都不做（冪等）。
+    #[tokio::test]
+    async fn a_closed_mission_that_missed_its_cleanup_is_swept_later() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        crate::supervisor::store::get_or_init(&app.db).await.unwrap();
+        let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("sweep", "pr"))).await.unwrap();
+        let id = m["id"].as_str().unwrap().to_string();
+        let (idle_bot, _) = temp_bot_on(&app, &env.project_id, &id, false).await;
+        // 模擬「commit 之後、清理之前當機」：任務直接標成已完成，沒有經過 cleanup_temp_bots
+        sqlx::query("UPDATE missions SET completed_at=? WHERE id=?").bind(crate::db::now()).bind(&id).execute(&app.db).await.unwrap();
+        assert!(!bot_deleted(&app, &idle_bot).await);
+        let notes = |full: &Value| full["events"].as_array().unwrap().iter().filter(|e| e["kind"] == "note").count();
+
+        sweep_closed_mission_temp_bots(&app).await;
+        assert!(bot_deleted(&app, &idle_bot).await, "孤兒臨時 bot 要被補收");
+        let Json(full) = get_mission(State(app.clone()), Path(id.clone())).await.unwrap();
+        assert_eq!(notes(&full), 1, "補收留一筆時間軸紀錄");
+        sweep_closed_mission_temp_bots(&app).await;
+        let Json(full2) = get_mission(State(app.clone()), Path(id.clone())).await.unwrap();
+        assert_eq!(notes(&full2), 1, "冪等：再掃不重複處理");
+
+        // 還在跑的：留著、不寫事件（每個 tick 都會再看一次，不能洗版）
+        let Json(m2) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("sweep2", "pr"))).await.unwrap();
+        let id2 = m2["id"].as_str().unwrap().to_string();
+        let (busy_bot, run) = temp_bot_on(&app, &env.project_id, &id2, true).await;
+        sqlx::query("UPDATE missions SET cancelled_at=? WHERE id=?").bind(crate::db::now()).bind(&id2).execute(&app.db).await.unwrap();
+        sweep_closed_mission_temp_bots(&app).await;
+        sweep_closed_mission_temp_bots(&app).await;
+        assert!(!bot_deleted(&app, &busy_bot).await, "還在跑的不能刪");
+        let Json(full3) = get_mission(State(app.clone()), Path(id2.clone())).await.unwrap();
+        assert_eq!(notes(&full3), 0, "沒刪東西就不寫事件");
+        // run 收掉之後下一輪就補收
+        sqlx::query("UPDATE runs SET state='exited', ended_at=? WHERE id=?").bind(crate::db::now()).bind(&run).execute(&app.db).await.unwrap();
+        sweep_closed_mission_temp_bots(&app).await;
+        assert!(bot_deleted(&app, &busy_bot).await);
+
+        // 開著的任務底下的臨時 bot 不在補收範圍
+        let Json(m3) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("sweep3", "pr"))).await.unwrap();
+        let (open_bot, _) = temp_bot_on(&app, &env.project_id, m3["id"].as_str().unwrap(), false).await;
+        sweep_closed_mission_temp_bots(&app).await;
+        assert!(!bot_deleted(&app, &open_bot).await, "進行中的任務不動它的 bot");
     }
 
     /// `race_point` 是全域、以 bot id 為鍵：平行的兩個測試若拿到同一個 bot id，一個測試 arm 的「改表名注入讀取故障」

@@ -1906,6 +1906,8 @@ pub fn spawn(app: Arc<App>, generation: i64) {
                     super::responder::watchdog_tick(&app).await;
                     // 群組任務停在「輪到 AGM」很久沒動靜（重啟、回合中斷）：照持久狀態推出的下一步叫醒它（issue #74）。
                     crate::mission::workflow::wake_stalled(&app).await;
+                    // 結案時沒收乾淨的臨時 bot（當機、一時讀不到狀態、遠端斷線）在這裡補收（issue #343）。
+                    crate::mission::api::sweep_closed_mission_temp_bots(&app).await;
                     // 閒置太久的 bot 收起來省 RAM（§6.11）。巡邏自己節流成每分鐘一次，
                     // 而且丟到背景跑——停一顆最久要等 agent 十秒，不能卡住這條迴圈。
                     super::idle_sleep::tick(&app);
