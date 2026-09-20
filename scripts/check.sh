@@ -4,7 +4,7 @@
 #   scripts/check.sh            # OB + ops + web + daemon
 #   scripts/check.sh web        # bun install --frozen-lockfile、tsc、oxlint、bun test、vite build
 #   scripts/check.sh daemon     # cargo test -p agents-managerd（要先有 web/dist）
-#   scripts/check.sh ops        # scripts/ops/*_test.sh（AGM 運維腳本，假 agm／假 gh，不碰正式環境）
+#   scripts/check.sh ops        # scripts/*_test.sh 與 scripts/ops/*_test.sh（shell 腳本的隔離測試，假 agm／假 gh／假 sccache，不碰正式環境）
 #   scripts/check.sh ob         # 沒有被追蹤的 bytecode；OB queue/operator 與瀏覽器契約（隔離，不用登入）
 #   scripts/check.sh fmt        # cargo fmt --check（只報告，現況不乾淨）
 #   scripts/check.sh clippy     # cargo clippy（只報告，現況不乾淨）
@@ -69,7 +69,8 @@ check_ob() {
 
 check_ops() {
     local t
-    for t in scripts/ops/*_test.sh; do
+    # 新的 *_test.sh 放在 scripts/ 或 scripts/ops/ 就會被撈到；需要外部工具的測試自己 skip 並印原因。
+    for t in scripts/*_test.sh scripts/ops/*_test.sh; do
         step "ops: $t"
         bash "$t"
     done
