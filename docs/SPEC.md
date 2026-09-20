@@ -92,7 +92,7 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
     schema，且每次開機自我核對」（`db::schema_guard::check_drift`）比「另外維護一份『哪些 migration 跑過』的帳本」更難跟實際狀態
     脫鉤，跨檔案改寫全部子模組簽名的風險也不成比例於「舊 binary 開到新 schema」這個唯一還沒被擋住的漏洞。往回滾到較
     舊 binary：只要那顆 binary 的 `SCHEMA_VERSION` 沒有比 DB 記的更舊，就能正常開；比較舊就會在啟動時直接報錯退出
-    （不會把資料庫改壞，也不會用不懂的欄位硬跑）。
+    （不會把資料庫改壞，也不會用不懂的欄位硬跑）——所以升過版的 DB 要回滾，得連備份一起還原（流程見 §18.13）。
     也就是說 `user_version` 是**最低相容 binary 的圍籬，不是 migration 帳本**：它只回答「哪些 binary 准開這個檔案」，
     不記錄跑過哪些步驟。等真的出現非 additive 的資料轉換（改欄位型別、拆表、改約束得重建表），再引入照順序執行的
     migration 框架。
@@ -2301,7 +2301,7 @@ AGM 的運維職責以本節為準，不靠任何 bot 的記憶。persona 是同
   3. 沒有別的 bot 在 `working`，最多等 30 分鐘，超過回報延後。**換 binary 前一刻再查一次**；更好的是用 §18.10 的租約持有窗口。
   4. 備份舊 binary 為 `target/release/agents-managerd.bak`。
   5. 重啟後 30 秒內驗 `/api/session` 與 `agm health`。daemon 起來即自動釋放 `restart` 租約，被 hold 的交辦馬上派送——**重啟後無等待期**（§18.10）。
-  6. 60 秒內確認 `agm supervisor` 不是 stopped、running 名單沒少、沒有 bot 被無故關 pane。任一項不對用 `.bak` 回滾並回報。
+  6. 60 秒內確認 `agm supervisor` 不是 stopped、running 名單沒少、沒有 bot 被無故關 pane。任一項不對用 `.bak` 回滾並回報；這批若升了 `SCHEMA_VERSION`，DB 要連同備份一起還原（§18.13，只換 binary 會被版本閘擋下）。
   期間不要同時觸發 claude 更新批次重啟。
 - 動 migration 的版本：上線前對正式 DB 的副本跑一次 migrate，重建申請附 DB 備份步驟。
 
@@ -2734,7 +2734,17 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
 - incident 只在 `unavailable` 時開。恢復 remote session 由 AGM 在沒有回合衝突的窗口安排，daemon 不自己多開 session。
 
 ### 18.13 回滾限制
-supervisor 相關資料表與欄位都是 additive，`db::migrate` 重跑冪等。往回滾到較舊的 binary 時：
+**回滾 binary 不等於回滾 DB。** `db::SCHEMA_VERSION`（`PRAGMA user_version`）一旦被較新的 binary 蓋上，較舊的 binary 會被 §3.1 的版本閘
+在啟動時直接拒絕（「資料庫的 schema 版本是 N，這顆 daemon 只認得到 M」），即使欄位本身是 additive 也一樣——只換回 `.bak` binary 起不來。
+（2026-09 的 v7→v9→v10 部署就踩到。）所以凡是這批 SCHEMA_VERSION 有升的部署，流程是：
+1. **換 binary 之前**備份正式 DB：`sqlite3 ~/.config/agents-manager/agents-manager.sqlite3 ".backup ~/.config/agents-manager/agents-manager.sqlite3.bak-<YYYYmmdd-HHMM>"`
+   （正式檔是 `.sqlite3`；`agents-manager.db`／`am.db` 是 0 byte 空檔，不要備那個）。備份完先對**備份檔**跑
+   `sqlite3 <備份檔> "PRAGMA integrity_check"`（要回 `ok`）與 `PRAGMA user_version`（記下升級前的版本），回報路徑與大小。
+2. 需要回滾：先停 daemon（不要在它還開著 DB 時覆蓋檔案）→ 把 `agents-managerd.bak` 換回 → 用備份檔還原 `agents-manager.sqlite3`
+   （同時移走殘留的 `-wal`／`-shm`）→ 對還原後的檔案再跑一次 `PRAGMA integrity_check` 與 `PRAGMA user_version`，版本要 ≤ 舊 binary 的 `SCHEMA_VERSION` → 才啟動。
+3. 備份到回滾之間新寫入的資料（新 run、訊息、交辦）會隨還原消失；能不回滾就往前修。
+`db::migrate` 升版**中途失敗**時版本號不會被蓋（戳記在全部子模組 migrate 與漂移核對之後才寫，#289），那種情況換回舊 binary 即可，不必還原 DB。
+供參考——supervisor 相關資料表與欄位都是 additive，`db::migrate` 重跑冪等。往回滾到較舊的 binary（DB 已還原之後）時：
 - 舊 binary 不認得 `awaiting_review`／`blocked`／`superseded`／`quota_blocked`，這些交辦會從它的未結案清單消失（資料不刪）；回滾前先逐筆決定掉。
 - 舊的 `on_turn_done` 會把跑完的交辦直接寫成 `completed`，且不會標 `legacy_closed`。
 - 舊 binary 不看租約（restart 窗口不 hold 派工，也沒有 prompt 入場閘門）；舊的 `ensure_env` 會用內嵌版覆寫人設——回滾前先確認內嵌版就是要的那份。
@@ -3012,7 +3022,7 @@ supervisor 相關資料表與欄位都是 additive，`db::migrate` 重跑冪等�
 - **限制**：bot 繞過 shim 直接用真的 herdr 打進巡檢 pane、或 daemon 不在時 shim 退回直送，daemon 看到的是外部回合（當成使用者），會吃巡檢一回合。
   協調者已經併回巡檢的專案（見上方「一顆總管、一個專案」），所以 web 的「剛跑完」晶片列排除 `GET /api/supervisor` 的 `project_id` 時兩個角色一起排除。
 - **部署**（合入 main 後由 AGM 安排，不在程式裡自動做）：`agm responder setup` → 同步兩份 persona（§18.11，協調者走 `PUT /api/supervisor/responder/persona`）→
-  `agm responder start`。回滾到舊 binary：新欄位是 additive，舊 binary 忽略 `role`／`wake`，所有事件回到巡檢收；先停協調者。
+  `agm responder start`。回滾到舊 binary：新欄位是 additive，舊 binary 忽略 `role`／`wake`，所有事件回到巡檢收；先停協調者。DB 版本已升的話要一併還原備份（§18.13）。
 
 ## 附錄 A：herdr socket（0.8.2 / protocol 20）
 
