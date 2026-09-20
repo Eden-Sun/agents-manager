@@ -275,6 +275,8 @@ pub async fn ensure_env(app: &Arc<App>) -> Result<(String, String, Deployed), Lc
                         identity: None,
                         env: Default::default(),
                         herdr_session: None,
+                        create_request_id: None,
+                        create_fingerprint: None,
                     });
                     proj.bots.len() - 1
                 }

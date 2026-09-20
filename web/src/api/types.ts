@@ -594,6 +594,8 @@ export interface NewBotInput {
   persona?: string | null
   /** claude 才收；`null` / 省略 = `claude-md`。 */
   instruction_files?: InstructionFiles | null
+  /** 冪等鍵（#352）：回應遺失後同一個動作重送，daemon 拿回第一次建好的那顆而不是再建一顆；見 `lib/createRequestId.ts`。 */
+  client_request_id?: string
 }
 
 /** API.md v3.3：只送有變更的欄位；`null` 代表清除。 */

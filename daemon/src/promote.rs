@@ -316,6 +316,8 @@ pub async fn promote_bot(
             identity: child.identity.clone(),
             env: child.env(),
             herdr_session: None,
+            create_request_id: None,
+            create_fingerprint: None,
         });
         Ok(())
     })

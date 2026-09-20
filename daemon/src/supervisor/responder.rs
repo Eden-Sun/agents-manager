@@ -268,6 +268,8 @@ pub async fn ensure_env(
                         identity: None,
                         env: Default::default(),
                         herdr_session: None,
+                        create_request_id: None,
+                        create_fingerprint: None,
                     });
                     proj.bots.len() - 1
                 }

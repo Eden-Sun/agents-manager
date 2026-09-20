@@ -1,5 +1,6 @@
 /** Single Zustand store: server state from `GET /api/state` + `/ws`, plus UI state. Event flow / resync: SPEC §7.3. */
 
+import { createRequestId, settleCreateRequest } from '../lib/createRequestId'
 import { groupSendDelivered } from './groupSend'
 import { create } from 'zustand'
 import * as api from '../api'
@@ -1544,13 +1545,18 @@ export const useStore = create<StoreState>((set, get) => ({
     const key = `add-bot:${projectId}:${input.name}`
     if (get().busy[key]) return null
     set((st) => ({ busy: { ...st.busy, [key]: true } }))
+    // 冪等鍵（#352）：同一個動作（快速新增：專案＋kind＋身分，名字只是提示）失敗後重試沿用同一個鍵，成功才作廢。
+    const reqKey = input.name_auto ? `add:${projectId}:${input.kind}:${input.identity ?? ''}` : `add:${projectId}:${input.name}`
     try {
-      const { id, name } = await api.createBot(projectId, input)
+      const { id, name } = await api.createBot(projectId, { ...input, client_request_id: createRequestId(reqKey) })
+      settleCreateRequest(reqKey)
       await get().refreshState()
       if (id) set({ selectedBotId: id })
       get().notify('info', `已新增 Bot ${name}`)
       return id || null
     } catch (e) {
+      // daemon 說這個鍵已經是另一件事（例如設定變了）：作廢，下一次是新的動作。
+      if (String(e).includes('request_id_reused')) settleCreateRequest(reqKey)
       get().notify('error', errText(e))
       return null
     } finally {
@@ -1591,6 +1597,9 @@ export const useStore = create<StoreState>((set, get) => ({
     try {
       const created = await api.createBot(bot.project_id, {
         name,
+        // 名字是瀏覽器從舊清單算的：回應遺失後重送時清單已同步、算出來的名字會變，讓 daemon 往後找（也不算請求內容，#352）。
+        name_auto: true,
+        client_request_id: createRequestId(key),
         kind: bot.kind,
         model: bot.model,
         effort: bot.effort,
@@ -1605,6 +1614,7 @@ export const useStore = create<StoreState>((set, get) => ({
       // 舊版 `createBot` 回 id 字串，新版回 `{id, name}`；兩種都吃。
       const c = created as unknown as string | { id: string }
       const id = typeof c === 'string' ? c : c.id
+      settleCreateRequest(key)
       if (!id) {
         dropPlaceholder()
         return null

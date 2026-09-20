@@ -168,6 +168,12 @@ pub struct BotCfg {
     /// Set for bots imported from the local `default` session; others inherit the project's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub herdr_session: Option<String>,
+    /// 建這顆 bot 的那個請求的冪等鍵與指紋（`POST /api/projects/:id/bots` 的 `client_request_id`，#352）：回應遺失後原樣重送
+    /// 拿回同一顆而不是再建一顆。記在 config.toml（daemon 持久、瀏覽器重整與 daemon 重啟都在）；bot 刪掉就一起沒了。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub create_request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub create_fingerprint: Option<String>,
 }
 
 /// Lets several bots of one kind run under different accounts (`CLAUDE_CONFIG_DIR`, `GROK_HOME`).
