@@ -1393,20 +1393,29 @@ pub async fn replay_spool(app: &Arc<App>, bot_id: &str) -> Result<usize> {
     let _g = lock.lock().await;
     let dir = app.bot_dir(bot_id)?;
     let spool = dir.join("hook-spool.jsonl");
-    if !spool.exists() {
+    let staging = dir.join("hook-spool.jsonl.replaying");
+    // 上一輪崩在「收了一半」留下的 `.replaying` 就是唯一的副本：沒有新的 spool 也要處理它（#302）。
+    // 以前只看 spool 在不在，兩邊都沒新事件時它就一直躺在那裡，直到下一則 hook 失敗寫進 spool 才被併回來。
+    if !spool.exists() && !staging.exists() {
         return Ok(0);
     }
-    let staging = dir.join("hook-spool.jsonl.replaying");
-    // A leftover .replaying from a crash is merged back in first.
-    if staging.exists() {
-        let mut prev = std::fs::read_to_string(&staging).unwrap_or_default();
-        prev.push_str(&std::fs::read_to_string(&spool).unwrap_or_default());
+    if !spool.exists() {
+        // 只剩 `.replaying`：直接讀它。
+    } else if staging.exists() {
+        // 位元組層合併，不經 UTF-8：崩在半個多位元組字元上的 `.replaying` 以前 `read_to_string` 失敗、
+        // `unwrap_or_default` 成空字串，接著整份被新的 spool 覆蓋——舊事件就此消失。
+        let mut prev = std::fs::read(&staging)?;
+        // 崩在一行寫到一半時尾巴沒有換行：直接接上去，會跟新 spool 的第一行黏成一行、兩則一起解不開。
+        if prev.last().is_some_and(|b| *b != b'\n') {
+            prev.push(b'\n');
+        }
+        prev.extend(std::fs::read(&spool)?);
         std::fs::write(&staging, prev)?;
         std::fs::remove_file(&spool)?;
     } else {
         std::fs::rename(&spool, &staging)?;
     }
-    let text = std::fs::read_to_string(&staging)?;
+    let text = String::from_utf8_lossy(&std::fs::read(&staging)?).into_owned();
     let mut n = 0usize;
     for line in text.lines() {
         let line = line.trim();
@@ -3792,6 +3801,33 @@ mod host_unreadable_replay_tests {
 
     async fn inbox_rows(env: &tt::Env) -> i64 {
         sqlx::query_scalar("SELECT count(*) FROM hook_events").fetch_one(&env.app.db).await.unwrap()
+    }
+
+    /// #302：上一輪崩在收一半，留下 `.replaying`、沒有新的 spool——它是唯一的副本，這一輪要收進來。
+    #[tokio::test]
+    async fn a_leftover_replaying_file_with_no_new_spool_is_still_replayed() {
+        let env = tt::env().await;
+        let (bot, spool) = spooled(&env, "alfa").await;
+        let staging = spool.with_extension("jsonl.replaying");
+        std::fs::rename(&spool, &staging).unwrap();
+        assert_eq!(replay_spool(&env.app, &bot.id).await.unwrap(), 1, "只剩 .replaying 也要收");
+        assert!(!staging.exists());
+        assert_eq!(inbox_rows(&env).await, 1);
+    }
+
+    /// 合併走位元組：`.replaying` 尾巴是崩掉時寫到一半的多位元組字元，舊事件不能因此被新的 spool 蓋掉。
+    #[tokio::test]
+    async fn a_leftover_replaying_with_a_torn_utf8_tail_is_merged_not_overwritten() {
+        let env = tt::env().await;
+        let (bot, spool) = spooled(&env, "alfa").await;
+        let staging = spool.with_extension("jsonl.replaying");
+        let mut old = std::fs::read(&spool).unwrap();
+        old.extend_from_slice(&"{\"bot_id\":\"x\",\"note\":\"中".as_bytes()[..24]);
+        std::fs::write(&staging, old).unwrap();
+        let line = serde_json::json!({"bot_id": bot.id, "provider": "claude", "payload": {"hook_event_name": "Stop", "session_id": "s2"}});
+        std::fs::write(&spool, format!("{line}\n")).unwrap();
+        assert_eq!(replay_spool(&env.app, &bot.id).await.unwrap(), 2, "舊的一則加新的一則都要收");
+        assert_eq!(inbox_rows(&env).await, 2);
     }
 
     /// 每顆 bot 的 host 讀不到：修前退回 local，把（遠端 bot 的）本機 spool 當成它的收下；修後回錯、檔案原封不動。
