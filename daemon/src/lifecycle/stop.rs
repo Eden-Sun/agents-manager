@@ -383,23 +383,29 @@ pub async fn purge_deleted_bot_dirs(app: &Arc<App>) -> usize {
     removed
 }
 
-pub async fn purge_bot_dir(app: &Arc<App>, bot_id: &str, host: &str) {
+/// 回 `true`＝目錄確定沒了（含本來就不在）；`false`＝沒清成（id 不合法、主機不明、ssh 失敗、I/O 錯），呼叫端不能當成清掉了。
+pub async fn purge_bot_dir(app: &Arc<App>, bot_id: &str, host: &str) -> bool {
     if !valid_id(bot_id) {
         tracing::warn!(host, bot = %bot_id, "invalid bot id; bot config dir left in place");
-        return;
+        return false;
     }
     if host == LOCAL_HOST {
-        let Ok(dir) = app.bot_dir(bot_id) else { return };
-        match std::fs::remove_dir_all(&dir) {
-            Ok(()) => tracing::info!(dir = %dir.display(), "removed bot config dir"),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => tracing::warn!(dir = %dir.display(), error = %e, "could not remove bot config dir"),
-        }
-        return;
+        let Ok(dir) = app.bot_dir(bot_id) else { return false };
+        return match std::fs::remove_dir_all(&dir) {
+            Ok(()) => {
+                tracing::info!(dir = %dir.display(), "removed bot config dir");
+                true
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+            Err(e) => {
+                tracing::warn!(dir = %dir.display(), error = %e, "could not remove bot config dir");
+                false
+            }
+        };
     }
     let Some(conn) = app.hosts.get(host).await else {
         tracing::warn!(host, bot = %bot_id, "unknown host; remote bot dir left in place");
-        return;
+        return false;
     };
     let res = async {
         let p = remote_bot_dir(&conn, bot_id).await?;
@@ -408,8 +414,14 @@ pub async fn purge_bot_dir(app: &Arc<App>, bot_id: &str, host: &str) {
     }
     .await;
     match res {
-        Ok(dir) => tracing::info!(host, %dir, "removed remote bot config dir"),
-        Err(e) => tracing::warn!(host, bot = %bot_id, error = %format!("{e:#}"), "could not remove remote bot config dir"),
+        Ok(dir) => {
+            tracing::info!(host, %dir, "removed remote bot config dir");
+            true
+        }
+        Err(e) => {
+            tracing::warn!(host, bot = %bot_id, error = %format!("{e:#}"), "could not remove remote bot config dir");
+            false
+        }
     }
 }
 
