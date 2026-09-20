@@ -551,10 +551,11 @@ async fn report_missing(app: &Arc<App>, bot_id: &str) {
 
 /// 協調者的故障交給**巡檢**：它就是負責發現「有東西倒了」的那一個，而倒下的正是協調者自己。
 async fn report_gave_up(app: &Arc<App>, why: &str) {
-    let Ok(Some(at)) = roles::mark_watchdog_gave_up(&app.db, Role::Responder, why).await else { return };
-    tracing::error!(why, "AGM responder watchdog gave up");
-    let _ = roles::set_status_detail(&app.db, Role::Responder, Some(&format!("watchdog 已停止重試；請手動 responder-start。原因：{why}"))).await;
-    let _ = store::push_inbox(
+    // 標記＝「欠一則通知」，不是「已通知」（#251）：每個 GaveUp tick 都補一次，事件以標記時間為 key、
+    // INSERT OR IGNORE，所以補到成功為止、每一輪放棄只會有一則。
+    let _ = roles::mark_watchdog_gave_up(&app.db, Role::Responder, why).await;
+    let Some(at) = roles::get(&app.db, Role::Responder).await.ok().and_then(|r| r.watchdog_gave_up_at) else { return };
+    let pushed = store::push_inbox(
         &app.db,
         &format!("responder_watchdog:gave_up:{at}"),
         "responder_watchdog_gave_up",
@@ -564,6 +565,9 @@ async fn report_gave_up(app: &Arc<App>, why: &str) {
         &json!({"why": why, "gave_up_at": at, "action": "`bin/agm responder-start`；協調的事件留在 inbox，不會改由巡檢處理"}),
     )
     .await;
+    let Ok(Some(_)) = pushed else { return };
+    tracing::error!(why, "AGM responder watchdog gave up");
+    let _ = roles::set_status_detail(&app.db, Role::Responder, Some(&format!("watchdog 已停止重試；請手動 responder-start。原因：{why}"))).await;
     app.emit("supervisor_changed", json!({"responder": "watchdog_gave_up"})).await;
 }
 
@@ -1627,5 +1631,35 @@ mod flow_tests {
         // 決定與稽核在同一個 transaction：贏的那個一定留下一筆歷程。
         let history = store::approval_decisions(&app.db).await.unwrap();
         assert_eq!(history.get(&a.id).map(Vec::len), Some(1));
+    }
+}
+
+/// #251：協調者看門狗放棄的通知，寫不進 inbox 時不能永遠少一則。
+#[cfg(test)]
+mod gave_up_report_tests {
+    use super::*;
+    use crate::testing as tt;
+
+    #[tokio::test]
+    async fn a_failed_inbox_write_is_retried_until_exactly_one_event_exists() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        roles::get(&app.db, Role::Responder).await.unwrap();
+
+        tt::make_table_unreadable(&app, "supervisor_inbox").await;
+        report_gave_up(&app, "boom").await;
+        tt::make_table_readable(&app, "supervisor_inbox").await;
+        let at = roles::get(&app.db, Role::Responder).await.unwrap().watchdog_gave_up_at.expect("標記已經寫下");
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE kind='responder_watchdog_gave_up'").fetch_one(&app.db).await.unwrap();
+        assert_eq!(n, 0);
+
+        for _ in 0..3 {
+            report_gave_up(&app, "boom").await;
+        }
+        let keys: Vec<String> = sqlx::query_scalar("SELECT event_key FROM supervisor_inbox WHERE kind='responder_watchdog_gave_up'")
+            .fetch_all(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(keys, vec![format!("responder_watchdog:gave_up:{at}")]);
     }
 }
