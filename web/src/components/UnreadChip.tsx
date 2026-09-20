@@ -12,6 +12,7 @@
  * 排除（2026-09-10 使用者）：AGM 總管專案不算（例行 loop 會洗版），但 ★ 釘選不受影響；
  * 認 `GET /api/supervisor` 的 `project_id` 不認名字（2026-09-13 已從 `AGM` 改名 `AGM-DM-GRUP`）。
  */
+import { chipStateText } from '../lib/chipStateText'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from 'react'
 import type { Bot } from '../api/types'
 import { useMediaQuery } from '../hooks/useMediaQuery'
@@ -87,8 +88,9 @@ function Chip({ it, dnd }: { it: ChipItem; dnd?: PinnedDnd }) {
         </span>
       ) : null}
       <span className="unread-chip-name">{it.name}</span>
-      {it.unread > 0 ? <span className="unread-chip-n">{it.unread > 99 ? '99+' : it.unread}</span> : null}
+      {it.unread > 0 ? <span className="unread-chip-n" aria-hidden="true">{it.unread > 99 ? '99+' : it.unread}</span> : null}
       {it.working || it.needsReply || it.waitsKids ? <span className="unread-chip-dot" aria-hidden="true" /> : null}
+      <span className="sr-only">{chipStateText(it)}</span>
     </button>
   )
 }
