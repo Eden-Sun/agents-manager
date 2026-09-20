@@ -42,6 +42,9 @@ web/src/
 ## 讀程式看不出來的約定
 
 - **token**：啟動時打一次 `GET /api/session`，只存記憶體；不讀網址上的 `?token=`，`routeSync` 第一次 `replaceState` 時把它從網址拿掉。
+  **GET 撞 401 會自己重拿一次 token 再送一次**（single-flight，2026-09-20 使用者：blocked 面板卡在「讀取終端失敗：missing or bad X-AM-Token」，
+  只能重整）；重拿後仍 401 就照實丟。寫入請求（POST/PATCH…）不重送——401 時 daemon 沒跑到處理函式，但重送仍可能變成送兩次。
+  WS 連線前 token 是空的就先補一次再連。
 - **燈號前端自己算**（`normalize.lampOf`）：`bot_status` 事件只帶 run 不帶 lamp。與 SPEC §2.2 一處刻意不同——run 起跑 90 秒內
   `agent_status=unknown` 畫成 `starting`（claude 要約 20 秒才回第一個狀態）。
 - **送出**：前端產生 `client_request_id` 當冪等鍵；使用者氣泡不做本地暫存，一律等 `message_added`（以 message id 去重）。
