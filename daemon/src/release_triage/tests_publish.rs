@@ -254,6 +254,20 @@ async fn a_closed_issue_is_never_reopened_even_when_the_ledger_forgot_it() {
 }
 
 #[tokio::test]
+async fn a_non_json_issue_list_is_recorded_as_a_publish_error_not_thrown() {
+    let p = pool().await;
+    let gh = FakeGh::new("notjson");
+    seed(&p, &[("adopt", &[0], None)]).await;
+    std::fs::write(gh.dir.join("list.json"), "<html>502 Bad Gateway</html>").unwrap();
+    let o = issue::publish_version(&p, &gh.cfg(true), "claude", "2.1.277").await.unwrap();
+    assert!(matches!(&o, Outcome::Failed { error } if error.contains("不是 JSON")), "{o:?}");
+    let r = row(&p).await;
+    assert_eq!(r.status, Status::Judged);
+    assert!(r.publish_error.unwrap().contains("不是 JSON"), "health 要看得到原因");
+    assert_eq!(gh.count("issue create"), 0);
+}
+
+#[tokio::test]
 async fn gh_failure_leaves_the_row_judged_and_the_retry_only_reruns_publish() {
     let p = pool().await;
     let gh = FakeGh::new("fail");
