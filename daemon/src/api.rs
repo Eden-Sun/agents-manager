@@ -4278,6 +4278,17 @@ mod prompt_route_tests {
         assert_eq!(b3["reason"], "text_mismatch");
     }
 
+    /// 已刪除的 bot 不能收 prompt（送進使用者已經刪掉的 pane 還回 200）。
+    #[tokio::test]
+    async fn a_soft_deleted_bot_does_not_take_a_prompt() {
+        let e = crate::testing::env().await;
+        let bot = typed_bot(&e, "grok").await;
+        e.herdr.live_pane("pane-route", crate::testing::LivePane { width: Some(120), boxed: true, ..Default::default() });
+        sqlx::query("UPDATE bots SET deleted_at=? WHERE id=?").bind(db::now()).bind(&bot).execute(&e.app.db).await.unwrap();
+        let (status, body) = call(&e, &bot, "hello".into(), "del-1").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    }
+
     /// 輸入框有字是 HTTP 409、可重試，沒有建立 turn。
     #[tokio::test]
     async fn a_busy_composer_is_http_409_and_retryable() {

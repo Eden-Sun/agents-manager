@@ -470,7 +470,8 @@ async fn prompt_inner(
     if client_request_id.trim().is_empty() {
         return Err(LcError::Bad("client_request_id must not be empty".into()));
     }
-    let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
+    // 已軟刪的 bot 不收 prompt（#338）：pane 可能還活著（停機中、停機失敗保留 run），打進去是打進使用者已經刪掉的東西。
+    let bot = db::bot(&app.db, bot_id).await.map_err(up)?.filter(|b| b.deleted_at.is_none()).ok_or_else(|| LcError::NotFound("bot".into()))?;
     let conv = db::conversation_id(&app.db, bot_id).await.map_err(up)?;
     // Resolve first so an unknown id is a plain 400, not an undelivered turn.
     let files = crate::attach::resolve(app, bot_id, attachment_ids)
