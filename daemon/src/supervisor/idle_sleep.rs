@@ -1737,6 +1737,70 @@ mod tests {
         assert_left_running(&app, &bot, "交辦在最後一次判斷之後才出現").await;
     }
 
+    /// 「已標記」本身對外看得到（`/api/state` 的 asleep）：不該收的 bot 連標記都不能寫，不能只靠停機那一步的資料庫許可事後擋下來
+    /// （那樣標記會閃一下、收回去）。以下三條用 `idle_sleep.marked` 這個競態點有沒有被走到，釘住「標記之前」與「標記之後」各自的守衛。
+    fn watch_the_mark(bot: &str) -> Arc<AtomicBool> {
+        let hit = Arc::new(AtomicBool::new(false));
+        let h = hit.clone();
+        crate::lifecycle::race_point::arm("idle_sleep.marked", bot, move || async move { h.store(true, Ordering::SeqCst) });
+        hit
+    }
+
+    /// 事件流剛說它在忙（DB 還寫著 idle）：標記之前就要擋下，連標記都不寫。
+    #[tokio::test]
+    async fn a_bot_the_event_stream_says_is_busy_is_never_even_marked_asleep() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (bot, run) = idle_bot(&env, "nadia").await;
+        let stale = stale_cand(&app, &bot).await;
+        let hit = watch_the_mark(&bot);
+        observe_status(&run, "working");
+        sleep_one(&app, &stale, Some("sid-1".into()), 90).await;
+        assert!(!hit.load(Ordering::SeqCst), "標記之前就該擋下：連睡著的標記都不能寫");
+        assert_left_running(&app, &bot, "事件流說它在忙").await;
+    }
+
+    /// 寫完標記到停機之間事件流才說它開始忙：不停、把標記收回去。
+    #[tokio::test]
+    async fn a_busy_event_between_the_mark_and_the_stop_takes_the_mark_back() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (bot, run) = idle_bot(&env, "oscar").await;
+        let stale = stale_cand(&app, &bot).await;
+        let hit = Arc::new(AtomicBool::new(false));
+        let h = hit.clone();
+        crate::lifecycle::race_point::arm("idle_sleep.marked", &bot, move || async move {
+            h.store(true, Ordering::SeqCst);
+            observe_status(&run, "working");
+        });
+        sleep_one(&app, &stale, Some("sid-1".into()), 90).await;
+        assert!(hit.load(Ordering::SeqCst), "前提：走到了「已標記、還沒停」");
+        assert_left_running(&app, &bot, "標記之後事件流才說它開始忙").await;
+    }
+
+    /// 排隊中的訊息（判斷之後才進來）：鎖裡重讀就要擋下，標記之前。
+    #[tokio::test]
+    async fn a_queued_message_that_arrives_after_the_plan_is_never_marked_asleep() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (bot, run) = idle_bot(&env, "peggy").await;
+        let stale = stale_cand(&app, &bot).await;
+        let conv = db::conversation_id(&app.db, &bot).await.unwrap();
+        sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'web','queued','pending',?)")
+            .bind(db::ulid())
+            .bind(&conv)
+            .bind(&run)
+            // 排了很久（不是剛剛才進來）：這樣擋下它的是「有排隊中的訊息」這一項，不是「最後動作太新、還沒閒夠久」。
+            .bind((chrono::Utc::now() - chrono::Duration::minutes(120)).to_rfc3339())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let hit = watch_the_mark(&bot);
+        sleep_one(&app, &stale, Some("sid-1".into()), 90).await;
+        assert!(!hit.load(Ordering::SeqCst), "有排隊中的訊息：標記之前就該擋下");
+        assert_left_running(&app, &bot, "有排隊中的訊息").await;
+    }
+
     /// 背景工作那一項是鎖外問的（貴）、沿用到鎖裡，所以要證明沿用是安全的：判斷之後一個回合來了又走了
     /// （這正是「丟一個背景建置就結束回合」的形狀），「最後動作」被推到現在，這顆不再閒置，不收。
     #[tokio::test]
