@@ -652,6 +652,27 @@ pub fn eligible(args: &[String]) -> bool {
     false
 }
 
+/// 會改變 cargo 編譯／檢查結果、但遠端的 ssh session 看不到的本機環境變數（#325）。
+/// 例：`RUSTFLAGS="-D warnings" cargo clippy` 搬到遠端就沒有 `-D warnings`，遠端綠、本機會紅的假綠。
+/// 有設的話這次不轉遠端（退回本機，並講出來），不能悄悄用不同的設定驗。
+pub fn env_blocking_offload<I: IntoIterator<Item = (String, String)>>(vars: I) -> Option<String> {
+    const EXACT: [&str; 9] = [
+        "RUSTFLAGS",
+        "RUSTDOCFLAGS",
+        "CARGO_ENCODED_RUSTFLAGS",
+        "CARGO_ENCODED_RUSTDOCFLAGS",
+        "CARGO_TARGET_DIR",
+        "CARGO_BUILD_TARGET",
+        "CARGO_BUILD_RUSTFLAGS",
+        "CARGO_BUILD_RUSTDOCFLAGS",
+        "CARGO_INCREMENTAL",
+    ];
+    vars.into_iter()
+        .filter(|(_, v)| !v.is_empty())
+        .map(|(k, _)| k)
+        .find(|k| EXACT.contains(&k.as_str()) || k.starts_with("CARGO_PROFILE_") || k.starts_with("CARGO_FEATURE_") || (k.starts_with("CARGO_TARGET_") && k.ends_with("_RUSTFLAGS")))
+}
+
 fn fnv1a64(s: &str) -> u64 {
     let mut h = 0xcbf29ce484222325u64;
     for b in s.as_bytes() {
@@ -1431,21 +1452,49 @@ fn run_remote(remote: &BuildRemoteCfg, data_dir: &Path, lease: &Lease, sub: &str
 /// Entry point used by the installed cargo shim. Returns 125 when offload should not happen, so
 /// the shim can run the real local Cargo instead. Once a configured remote attempt starts, transport
 /// failures are errors (not silent local fallback) because callers must know what was actually verified.
-pub fn run_cli(config_path: &Path, data_dir: &Path, cwd: &Path, args: &[String]) -> i32 {
+/// `run_cli` 的決定：轉遠端（帶設定），或退回本機（帶要對使用者講的原因；`None`＝本來就沒啟用，不必講）。
+pub enum Offload {
+    Go(BuildRemoteCfg),
+    Local(Option<String>),
+}
+
+/// 決定這次要不要轉遠端（#324、#325）。設定檔存在卻讀不懂不能靜默退回本機（同 #138 類）：使用者以為在遠端編，實際整批在本機排隊。
+pub fn decide_offload(config_path: &Path, args: &[String], env: impl IntoIterator<Item = (String, String)>) -> Offload {
     if !eligible(args) {
-        return 125;
+        return Offload::Local(None);
     }
-    let cfg: ConfigFile = match std::fs::read_to_string(config_path)
-        .ok()
-        .and_then(|s| toml::from_str(&s).ok())
-    {
-        Some(c) => c,
-        None => return 125,
+    let text = match std::fs::read_to_string(config_path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Offload::Local(None),
+        Err(e) => return Offload::Local(Some(format!("讀不到設定檔 {}（{e}）", config_path.display()))),
+    };
+    let cfg: ConfigFile = match toml::from_str(&text) {
+        Ok(c) => c,
+        Err(e) => return Offload::Local(Some(format!("設定檔 {} 解析失敗（{e}）", config_path.display()))),
     };
     let remote = cfg.build.remote;
-    if !remote.enabled || remote.host.trim().is_empty() || remote.user.trim().is_empty() {
-        return 125;
+    if !remote.enabled {
+        return Offload::Local(None);
     }
+    if remote.host.trim().is_empty() || remote.user.trim().is_empty() {
+        return Offload::Local(Some("外部編譯啟用了但 host／user 是空的".into()));
+    }
+    if let Some(var) = env_blocking_offload(env) {
+        return Offload::Local(Some(format!("本機設了 {var}，遠端看不到它，結果會跟本機不一致")));
+    }
+    Offload::Go(remote)
+}
+
+pub fn run_cli(config_path: &Path, data_dir: &Path, cwd: &Path, args: &[String]) -> i32 {
+    let remote = match decide_offload(config_path, args, std::env::vars()) {
+        Offload::Go(r) => r,
+        Offload::Local(why) => {
+            if let Some(why) = why {
+                eprintln!("agents-manager: 這次 cargo 不轉外部編譯，改在本機跑：{why}");
+            }
+            return 125;
+        }
+    };
     eprintln!(
         "agents-manager: remote Cargo → {}@{}:{} ({})",
         remote.user, remote.host, remote.ssh_port, args.first().map(String::as_str).unwrap_or("")
@@ -1494,6 +1543,35 @@ fn run_offload(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, args: &[Str
 
 #[cfg(test)]
 mod tests {
+    /// #324／#325：設定檔壞掉、host 空、或本機設了 RUSTFLAGS 這類遠端看不到的變數——要退回本機也要講出原因，不能靜默；
+    /// 正常啟用且沒有這些變數才轉遠端；檔案不存在／沒啟用是本來就不轉，不必吵。
+    #[test]
+    fn the_offload_decision_never_falls_back_silently_when_something_is_wrong() {
+        let dir = std::env::temp_dir().join(format!("am-decide-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let args = vec!["test".to_string()];
+        let no_env = || Vec::<(String, String)>::new();
+        let write = |body: &str| {
+            let p = dir.join("c.toml");
+            std::fs::write(&p, body).unwrap();
+            p
+        };
+        let good = "[build.remote]\nenabled = true\nhost = \"h\"\nuser = \"u\"\n";
+        assert!(matches!(decide_offload(&write(good), &args, no_env()), Offload::Go(_)));
+        assert!(matches!(decide_offload(&dir.join("missing.toml"), &args, no_env()), Offload::Local(None)), "沒設定檔＝沒啟用，不吵");
+        assert!(matches!(decide_offload(&write("[build.remote]\nenabled = false\n"), &args, no_env()), Offload::Local(None)));
+        assert!(matches!(decide_offload(&write("[[["), &args, no_env()), Offload::Local(Some(_))), "壞掉的設定檔要講");
+        assert!(matches!(decide_offload(&write("[build.remote]\nenabled = true\n"), &args, no_env()), Offload::Local(Some(_))), "啟用卻沒 host／user 要講");
+        let env = vec![("RUSTFLAGS".to_string(), "-D warnings".to_string())];
+        match decide_offload(&write(good), &args, env) {
+            Offload::Local(Some(why)) => assert!(why.contains("RUSTFLAGS"), "{why}"),
+            _ => panic!("RUSTFLAGS 有設就不能轉遠端（遠端看不到，會假綠）"),
+        }
+        assert!(env_blocking_offload([("RUSTFLAGS".to_string(), String::new())]).is_none(), "空值不算");
+        assert!(env_blocking_offload([("PATH".to_string(), "/x".to_string())]).is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     use super::*;
 
     fn remote() -> BuildRemoteCfg {
