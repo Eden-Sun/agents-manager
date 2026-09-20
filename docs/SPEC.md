@@ -2872,6 +2872,9 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
    目標、名字以 `agm-mission-<id 尾 6 碼>-` 開頭、而且**確定**沒有進行中的 run；回應的 `temp_bots.skipped` 列出沒刪的與原因。
    `still_running` 的那幾顆先 `bot stop <id>` 再 `bot delete <id>`；`state_unreadable`（DB 讀不到它的 bot 列或 active run，daemon 不知道它還在不在跑，
    所以不刪、不停）等 DB 好了照同樣處置；刪除保留對話紀錄與 `mission_events` 作證據。
+   **結案那一刻沒收乾淨會自動補收**（issue #343）：清理在結案 commit 之後才做，當機或一時讀不到狀態時任務已經是終態、不會再打 complete。
+   supervisor tick 每輪從持久狀態（已結案任務 ＋ 交辦目標 bot 名字為 `agm-mission-*` 且未軟刪）找出還欠清理的任務，走同一條清理（同樣三個條件、fail-closed、冪等）；
+   重啟後照樣接得回去，不另開欠帳表。補收只在真的刪掉東西時寫一筆 note（`已補收臨時 bot`），還在跑或讀不到的每輪重看但不寫事件。
    所以第 2、4 步開臨時 bot 時**一定照這個命名**，否則收尾時不會被認出來。
 7. **撞額度換手（`mission_identity_switch`）**：那件交辦停在 `awaiting_review`／`identity_switch`。用 `to_identity`（與
    `model`）開新臨時 bot，對原交辦 `review followup`，文字帶進度摘要（已做／未做／未提交檔案、worktree 路徑）；

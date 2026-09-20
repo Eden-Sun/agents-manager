@@ -413,6 +413,23 @@ pub async fn open_unpaused(pool: &SqlitePool) -> Result<Vec<Mission>> {
     .await?)
 }
 
+/// 已結案（完成或取消）、底下還有活著的 `agm-mission-*` 名字的交辦目標 bot 的任務（issue #343）。
+/// 名字只是粗篩；真正的歸屬判定（`is_temp_bot_name` ＋ 是這個任務某件交辦的目標）在 `cleanup_temp_bots`。
+/// 從持久狀態推出「還欠一次清理」，不另開欠帳表：結案那一刻沒收乾淨（當機、讀不到 DB、遠端斷線）
+/// 之後由 sweeper 再收，重啟也照樣接得回去。
+pub async fn closed_with_live_temp_bots(pool: &SqlitePool) -> Result<Vec<Mission>> {
+    Ok(sqlx::query_as::<_, Mission>(
+        "SELECT DISTINCT m.* FROM missions m
+           JOIN supervisor_assignments a ON a.mission_id = m.id
+           JOIN bots b ON b.id = a.target_bot_id
+          WHERE (m.completed_at IS NOT NULL OR m.cancelled_at IS NOT NULL)
+            AND b.deleted_at IS NULL AND b.name LIKE 'agm-mission-%'
+          ORDER BY m.created_at, m.rowid",
+    )
+    .fetch_all(pool)
+    .await?)
+}
+
 /// 群組時間軸，最舊在前。同一毫秒的兩筆照**寫入順序**排：`created_at` 只到毫秒，一輪來回
 /// （round → round → paused → resumed）常常擠在同一格，而 `id` 是 ULID，同一毫秒內的亂數段不保證
 /// 遞增，以前用 `id` 當第二鍵，使用者看到的事件順序會偶爾倒過來（`a_mission_runs_through_its_gates_end_to_end`
