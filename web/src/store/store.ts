@@ -1,5 +1,6 @@
 /** Single Zustand store: server state from `GET /api/state` + `/ws`, plus UI state. Event flow / resync: SPEC §7.3. */
 
+import { createResyncRunner } from './resyncQueue'
 import { createRequestId, settleCreateRequest } from '../lib/createRequestId'
 import { groupSendDelivered } from './groupSend'
 import { create } from 'zustand'
@@ -2433,7 +2434,28 @@ function connectSocket(set: SetFn, get: GetFn) {
   })
 }
 
-let resyncPending = false
+const resyncTrigger = (() => {
+  let ctx: { set: SetFn; get: GetFn } | null = null
+  const runner = createResyncRunner(async () => {
+    const { set, get } = ctx!
+    resetStateSeq()
+    try {
+      const loadedBotIds = Object.keys(get().loadedBots).filter((botId) => get().loadedBots[botId])
+      await get().refreshState()
+      await get().loadQuota()
+      for (const botId of loadedBotIds) await get().loadMessages(botId)
+      const proj = get().selectedProjectId
+      if (proj) await get().loadGroupMessages(proj)
+      await get().refreshLoadedMissions()
+    } catch (e) {
+      reportStateRefreshError(set, get, e)
+    }
+  })
+  return (set: SetFn, get: GetFn) => {
+    ctx = { set, get }
+    runner()
+  }
+})()
 
 function viewingBot(s: StoreState, botId: string): boolean {
   return s.selectedBotId === botId && !s.selectedProjectId && !s.shellView
@@ -2477,24 +2499,7 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
   const data = frame.data
   switch (frame.type) {
     case 'resync': {
-      if (resyncPending) return
-      resyncPending = true
-      resetStateSeq()
-      void (async () => {
-        try {
-          const loadedBotIds = Object.keys(get().loadedBots).filter((botId) => get().loadedBots[botId])
-          await get().refreshState()
-          await get().loadQuota()
-          for (const botId of loadedBotIds) await get().loadMessages(botId)
-          const proj = get().selectedProjectId
-          if (proj) await get().loadGroupMessages(proj)
-          await get().refreshLoadedMissions()
-        } catch (e) {
-          reportStateRefreshError(set, get, e)
-        } finally {
-          resyncPending = false
-        }
-      })()
+      resyncTrigger(set, get)
       return
     }
     case 'daemon_status': {
