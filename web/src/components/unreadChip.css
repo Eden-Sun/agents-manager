@@ -173,7 +173,7 @@
   color: var(--text);
   /* 方角是主訊號（不靠顏色）；999px 圓角會把 inset 左條削成月牙（2026-09-12 實拍），收成 6px。 */
   border-radius: 6px;
-  box-shadow: inset 3px 0 0 var(--text);
+  box-shadow: inset 3px 0 0 var(--lamp-green);
   font-weight: 650;
   padding-left: 11px;
 }
@@ -182,7 +182,8 @@
 /* 使用中那顆加**綠色外框**（2026-09-13 使用者：「目前使用窗不夠明顯，要有綠色外框標注」）：綠在這列沒別的意思（藍未讀、紅要回答、黃等子 agent）。 */
 .unread-chip.current {
   border-color: var(--lamp-green);
-  box-shadow: inset 3px 0 0 var(--text), 0 0 0 1px var(--lamp-green);
+  /* 左條原本是石墨色，在 20px 藥丸上看起來像缺一角的黑底（2026-09-20 使用者）：跟外框同綠。 */
+  box-shadow: inset 3px 0 0 var(--lamp-green), 0 0 0 1px var(--lamp-green);
 }
 
 .unread-chip.current.unread {
