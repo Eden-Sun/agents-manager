@@ -731,6 +731,7 @@ herdr 進程樹佔多少常駐記憶體（SPEC §15）。
 ### `POST /api/mem/processes/kill`
 `{"host":"local","pid":59407,"signal":"TERM"}`（`signal` 只認 `TERM` / `KILL`，預設 TERM）→ `{"host","pid","signal","exe","freed_bytes"}`，並立刻推一次 `mem_updated`。
 送訊號前重新取樣判定：不在該主機 herdr 樹裡 400；就是 herdr 400；`owner == "bot"` → `409 {"reason":"bot_process","bot_id","message"}`（走 `POST /bots/{id}/stop`）。
+讀不到目標 pid 的環境變數（判不出是不是 bot 的行程）→ 502，不送訊號。
 
 ### `GET /api/mem/processes/pane?host=local&pane_id=wM:pB&socket=<socket_path>&lines=40`
 回那個 pane 現在畫面的字（`lines` 1–500），形狀同主機 shell 的 terminal，`source` 固定 `visible`，**不要求 pane 是 AG Man 開的**。只讀。
