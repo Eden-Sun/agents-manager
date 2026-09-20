@@ -232,13 +232,14 @@ pub async fn renew(app: &Arc<App>, holder: &str, token: &str) -> Result<Result<S
 
 /// 放：一律幂等（找不到、已經過期、token 對不上都當作「已經不是你的事了」，回成功——釋放路徑
 /// 不該因為競態或重送就報錯，讓呼叫端的 `trap ... EXIT` 永遠可以放心呼叫）。
-pub async fn release(app: &Arc<App>, holder: &str, token: &str) {
+pub async fn release(app: &Arc<App>, holder: &str, token: &str) -> Result<()> {
     let _g = app.build_slot_lock.lock().await;
-    let _ = sqlx::query("DELETE FROM build_slots WHERE holder = ? AND status = 'held' AND token = ?")
+    sqlx::query("DELETE FROM build_slots WHERE holder = ? AND status = 'held' AND token = ?")
         .bind(holder)
         .bind(token)
         .execute(&app.db)
-        .await;
+        .await?;
+    Ok(())
 }
 
 /// 收掉過期沒續約的 held 列，跟停止 poll 太久的 waiting 列。回傳 (held 收掉幾列, waiting 收掉幾列)。
@@ -385,9 +386,15 @@ pub async fn post_renew(State(app): State<Arc<App>>, Form(body): Form<RenewIn>) 
     }
 }
 
-pub async fn post_release(State(app): State<Arc<App>>, Form(body): Form<ReleaseIn>) -> Json<Value> {
-    release(&app, body.holder.trim(), &body.token).await;
-    Json(json!({"released": true}))
+pub async fn post_release(State(app): State<Arc<App>>, Form(body): Form<ReleaseIn>) -> (axum::http::StatusCode, Json<Value>) {
+    // 寫不進去不能回 released:true（#327）：名額會佔到 TTL，呼叫端要知道，才有機會重試；至少 log 留痕。
+    match release(&app, body.holder.trim(), &body.token).await {
+        Ok(()) => (axum::http::StatusCode::OK, Json(json!({"released": true}))),
+        Err(e) => {
+            tracing::error!(holder = %body.holder, error = ?e, "build scheduler: could not release a slot; it stays held until its lease expires");
+            (axum::http::StatusCode::SERVICE_UNAVAILABLE, Json(json!({"released": false})))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -433,6 +440,19 @@ mod tests {
         assert!(matches!(acquire(&app, "B:2", None, "test", "local").await.unwrap(), Acquired::Waiting { .. }), "TTL 0 不能讓第二個也拿到名額");
     }
 
+    /// #327：release 的 DB 寫失敗不能回 released:true（名額會佔到 TTL 而呼叫端以為已放）。
+    #[tokio::test]
+    async fn a_release_that_cannot_write_says_so() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let Acquired::Granted { token, .. } = acquire(&app, "A:1", None, "test", "local").await.unwrap() else { panic!() };
+        tt::make_table_unreadable(&app, "build_slots").await;
+        let (code, body) = post_release(State(app.clone()), Form(ReleaseIn { holder: "A:1".into(), token: token.clone() })).await;
+        tt::make_table_readable(&app, "build_slots").await;
+        assert_eq!(code, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body.0["released"], false);
+    }
+
     /// 核心驗收條件（issue #90）：N 個同時的 acquire，只有設定的名額數真的拿到，其餘回 waiting。
     #[tokio::test]
     async fn only_the_configured_number_of_concurrent_acquires_are_granted() {
@@ -466,7 +486,7 @@ mod tests {
         let Acquired::Granted { token, .. } = acquire(&app, "first", None, "test", "local").await.unwrap() else { panic!() };
         let Acquired::Waiting { .. } = acquire(&app, "second", None, "test", "local").await.unwrap() else { panic!("滿了應該要等") };
 
-        release(&app, "first", &token).await;
+        release(&app, "first", &token).await.unwrap();
         let Acquired::Granted { .. } = acquire(&app, "second", None, "test", "local").await.unwrap() else { panic!("放掉了，下一個該拿到") };
     }
 
@@ -555,14 +575,14 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         let Acquired::Waiting { .. } = acquire(&app, "c", None, "t", "local").await.unwrap() else { panic!() };
 
-        release(&app, "first", &first_token).await;
+        release(&app, "first", &first_token).await.unwrap();
 
         // 發問順序刻意倒過來：c 先問、b 再問、a 最後問——沒有一個排在 a 前面拿得到。
         let Acquired::Waiting { .. } = acquire(&app, "c", None, "t", "local").await.unwrap() else { panic!("c 排最後，不該搶到") };
         let Acquired::Waiting { .. } = acquire(&app, "b", None, "t", "local").await.unwrap() else { panic!("b 前面還有 a，不該搶到") };
         let Acquired::Granted { token: a_token, .. } = acquire(&app, "a", None, "t", "local").await.unwrap() else { panic!("a 排最早，該輪到它") };
 
-        release(&app, "a", &a_token).await;
+        release(&app, "a", &a_token).await.unwrap();
         let Acquired::Waiting { .. } = acquire(&app, "c", None, "t", "local").await.unwrap() else { panic!("c 還是排最後") };
         let Acquired::Granted { .. } = acquire(&app, "b", None, "t", "local").await.unwrap() else { panic!("該輪到 b 了") };
     }
@@ -581,7 +601,7 @@ mod tests {
 
         // dead-front 排最前面，但早就不再 poll 了。
         sqlx::query("UPDATE build_slots SET last_seen = '2020-01-01T00:00:00.000Z' WHERE holder = 'dead-front'").execute(&app.db).await.unwrap();
-        release(&app, "first", &token).await;
+        release(&app, "first", &token).await.unwrap();
 
         let Acquired::Granted { .. } = acquire(&app, "alive-second", None, "t", "local").await.unwrap() else {
             panic!("死掉的號碼牌不該永遠擋住後面活著的人")
