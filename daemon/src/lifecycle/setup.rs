@@ -797,12 +797,24 @@ pub(crate) async fn install_herdr_skill(app: &Arc<App>, bot: &db::Bot, project: 
     }
 }
 
-async fn install_herdr_skill_local(cfg_dir: Option<String>, agent_name: &str) -> anyhow::Result<()> {
-    let out = tokio::process::Command::new("herdr").arg("--skill").output().await?;
+/// start_bot 在 per-bot 鎖裡等這一步；herdr 卡住不能讓整顆 bot 永遠起不來。
+const HERDR_SKILL_TIMEOUT: Duration = Duration::from_secs(15);
+
+async fn herdr_skill_output(bin: &str, timeout: Duration) -> anyhow::Result<String> {
+    let out = tokio::time::timeout(
+        timeout,
+        tokio::process::Command::new(bin).arg("--skill").stdin(std::process::Stdio::null()).kill_on_drop(true).output(),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("`herdr --skill` 逾時（{}s）", timeout.as_secs_f32()))??;
     if !out.status.success() {
         anyhow::bail!("`herdr --skill` failed: {}", String::from_utf8_lossy(&out.stderr).trim());
     }
-    let doc = herdr_skill_doc(&String::from_utf8_lossy(&out.stdout), agent_name);
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+async fn install_herdr_skill_local(cfg_dir: Option<String>, agent_name: &str) -> anyhow::Result<()> {
+    let doc = herdr_skill_doc(&herdr_skill_output("herdr", HERDR_SKILL_TIMEOUT).await?, agent_name);
     let base = match cfg_dir {
         Some(d) if !d.trim().is_empty() => std::path::PathBuf::from(d),
         _ => dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home directory"))?.join(".claude"),
@@ -1690,5 +1702,35 @@ mod claude_settings_tests {
         let v = claude_settings("hook", "sl", false, "claude-md");
         assert_eq!(v["hooks"]["PostToolUse"][0]["matcher"], json!("Bash"));
         assert_eq!(v["hooks"]["PostToolUse"][0]["hooks"][0]["command"], "hook");
+    }
+}
+
+#[cfg(test)]
+mod herdr_skill_timeout_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    fn fake_herdr(body: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("am-skill-{}", crate::db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("herdr");
+        std::fs::write(&f, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+        f
+    }
+
+    /// herdr 卡住時 start_bot（持 per-bot 鎖）不能跟著永遠卡住；正常與失敗照舊。
+    #[tokio::test]
+    async fn a_hung_herdr_skill_command_times_out_instead_of_blocking_start() {
+        let hung = fake_herdr("sleep 30");
+        let t = std::time::Instant::now();
+        let err = herdr_skill_output(hung.to_str().unwrap(), Duration::from_millis(300)).await.unwrap_err().to_string();
+        assert!(t.elapsed() < Duration::from_secs(10), "沒有在期限內放棄");
+        assert!(err.contains("逾時"), "{err}");
+
+        let ok = fake_herdr("echo 'name: herdr'");
+        assert_eq!(herdr_skill_output(ok.to_str().unwrap(), Duration::from_secs(10)).await.unwrap().trim(), "name: herdr");
+        let bad = fake_herdr("echo boom >&2; exit 3");
+        assert!(herdr_skill_output(bad.to_str().unwrap(), Duration::from_secs(10)).await.unwrap_err().to_string().contains("boom"));
     }
 }
