@@ -3044,6 +3044,7 @@ impl Incident {
 ///
 /// Returns `(incident, opened)`. `opened == false` on every tick after the first, which is what
 /// keeps a five-hour outage at one notification instead of six hundred.
+#[cfg(test)]
 pub async fn open_incident(
     pool: &SqlitePool,
     kind: &str,
@@ -3051,7 +3052,21 @@ pub async fn open_incident(
     severity: &str,
     detail: &Value,
 ) -> Result<(Incident, bool)> {
+    open_incident_notifying(pool, kind, resource, severity, detail, false).await
+}
+
+/// [`open_incident`]；`notify` 時第一次開起來的同一個交易裡推 `incident_opened`（#319）：通知寫不進去，
+/// incident 就不開，下一輪 detector 重來——`opened` 只回 `true` 一次，先開後推的話寫不進去就永遠沒人被告知。
+pub async fn open_incident_notifying(
+    pool: &SqlitePool,
+    kind: &str,
+    resource: &str,
+    severity: &str,
+    detail: &Value,
+    notify: bool,
+) -> Result<(Incident, bool)> {
     let now = crate::db::now();
+    let mut tx = pool.begin().await?;
     let opened = sqlx::query(
         "INSERT OR IGNORE INTO supervisor_incidents
            (id, supervisor_id, kind, resource, severity, status, detail_json, occurrences, first_seen_at, last_seen_at)
@@ -3065,7 +3080,7 @@ pub async fn open_incident(
     .bind(detail.to_string())
     .bind(&now)
     .bind(&now)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?
     .rows_affected()
         > 0;
@@ -3080,7 +3095,7 @@ pub async fn open_incident(
         .bind(SUPERVISOR_ID)
         .bind(kind)
         .bind(resource)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
     }
     let row = sqlx::query_as::<_, Incident>(
@@ -3089,20 +3104,31 @@ pub async fn open_incident(
     .bind(SUPERVISOR_ID)
     .bind(kind)
     .bind(resource)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await?;
+    if opened && notify {
+        push_inbox_tx(&mut tx, &format!("incident:{}:opened", row.id), "incident_opened", None, None, None, &serde_json::json!({"incident": row.to_json()})).await?;
+    }
+    tx.commit().await?;
     Ok((row, opened))
 }
 
 /// The condition cleared. `Ok(None)` = there was nothing open, which is the ordinary case.
+#[cfg(test)]
 pub async fn resolve_incident(pool: &SqlitePool, kind: &str, resource: &str) -> Result<Option<Incident>> {
+    resolve_incident_notifying(pool, kind, resource, false).await
+}
+
+/// [`resolve_incident`]；`notify` 時同一個交易推 `incident_resolved`（#319），理由同 [`open_incident_notifying`]。
+pub async fn resolve_incident_notifying(pool: &SqlitePool, kind: &str, resource: &str, notify: bool) -> Result<Option<Incident>> {
+    let mut tx = pool.begin().await?;
     let row = sqlx::query_as::<_, Incident>(
         "SELECT * FROM supervisor_incidents WHERE supervisor_id=? AND kind=? AND resource=? AND status='open'",
     )
     .bind(SUPERVISOR_ID)
     .bind(kind)
     .bind(resource)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await?;
     let Some(row) = row else { return Ok(None) };
     let now = crate::db::now();
@@ -3110,12 +3136,16 @@ pub async fn resolve_incident(pool: &SqlitePool, kind: &str, resource: &str) -> 
         .bind(&now)
         .bind(&now)
         .bind(&row.id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
-    Ok(sqlx::query_as::<_, Incident>("SELECT * FROM supervisor_incidents WHERE id=?")
-        .bind(&row.id)
-        .fetch_optional(pool)
-        .await?)
+    let out = sqlx::query_as::<_, Incident>("SELECT * FROM supervisor_incidents WHERE id=?").bind(&row.id).fetch_optional(&mut *tx).await?;
+    if notify {
+        if let Some(inc) = &out {
+            push_inbox_tx(&mut tx, &format!("incident:{}:resolved", inc.id), "incident_resolved", None, None, None, &serde_json::json!({"incident": inc.to_json()})).await?;
+        }
+    }
+    tx.commit().await?;
+    Ok(out)
 }
 
 pub async fn open_incidents(pool: &SqlitePool) -> Result<Vec<Incident>> {
