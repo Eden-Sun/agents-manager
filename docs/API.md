@@ -68,6 +68,7 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
           "inject_hooks": true,
           "auto_approve": true,
           "primary": false,
+          "primary_position": 0,
           "run": null,
           "asleep": null,
           "lamp": "offline",
@@ -143,12 +144,17 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
 | POST | `/api/bots/{id}/fork` | `{"name"?}` | 見 §10.3b |
 | POST | `/api/bots/{id}/promote` | `{"name"?,"model"?,"effort"?}` | 子 agent 升級成頂層 bot，見 §10.3c |
 | DELETE | `/api/bots/{id}` | — | 見 §10.4 |
-| POST | `/api/order` | `{"projects"?:["pid",…],"bots"?:{"pid":["bot_id",…]}}` | `200 {"ok":true}`；兩個都沒有 400 |
+| POST | `/api/order` | `{"projects"?:["pid",…],"bots"?:{"pid":["bot_id",…]},"primary"?:["bot_id",…]}` | `200 {"ok":true}`；三個都沒有 400；`primary` 有未知（或已刪除）或重複的 bot id 也 400，一筆都不寫 |
 
 成功後推 `project_changed` / `bot_changed`。
 
 **`POST /api/order`**：側欄排序 = config.toml 的陣列順序，`GET /api/state` 的順序就是權威（前端不另存）。只送要改的那一半；沒列到的維持原相對順序接在後面；
 config.toml 裡沒有的 id（child、已刪）忽略。成功推 `project_changed`。
+
+**`primary`（主力那列的固定順序，issue #344）**：bot id 陣列，位置（**1 起算**）寫進 `bots.primary_position`；沒點名的維持原值。
+只存 DB、不進 config.toml（同 `primary`：手機與桌機追的是同一組），所以只送 `primary` 的請求不碰 config.toml。`GET /api/state` 每顆 bot 有
+`primary_position`（整數，`0`＝從沒排過）；主力那組照它由小到大排，`0` 的（例如舊資料）排在有排過的之後，同值照側欄順序。新釘選（`PATCH primary:true`）
+第一次釘時排到最後（全表 `max + 1`）；**取消釘選不清位置**，再釘回來位置還在。
 
 **`bot.primary`**、**`bot.auto_approve`** 等欄位語意見 §10。
 
@@ -964,7 +970,7 @@ env 前綴跟登入是同一段程式算出來的——少帶 `CLAUDE_CONFIG_DIR
 | `fast` | bool | §12.2 |
 | `auto_approve` | bool，預設 `true` | 注入略過權限確認的旗標：claude `--dangerously-skip-permissions`、codex `--yolo`、grok `--always-approve` |
 | `inject_hooks` | bool，預設 `true` | `false` 時回覆走終端備援 |
-| `primary` | bool，預設 `false` | 純顯示用釘選（標題列下面那一列排最前）。不影響 argv/env，永遠 `needs_restart:false`；不進 config.toml（`bots.is_primary`），child bot 也能釘，手機與電腦同步 |
+| `primary` | bool，預設 `false` | 純顯示用釘選（標題列下面那一列排最前）。不影響 argv/env，永遠 `needs_restart:false`；不進 config.toml（`bots.is_primary`），child bot 也能釘，手機與電腦同步；新釘的排到主力那列最後（`primary_position`，見 `POST /api/order`） |
 | `identity` / `env` | 見身份一節 | |
 | `persona` | §12.8 | |
 | `instruction_files` | string \| null（唯讀給 codex／grok） | claude 才有：這顆 bot 讀哪份專案指示檔，§12.8b。`GET /api/state` 永遠給有效值（沒設＝`claude-md`），codex／grok 是 `null` |

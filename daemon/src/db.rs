@@ -183,6 +183,8 @@ const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (10, "d17c9db38b9c22e7"),
     // issue #253 v4：`bot_previews.command`／`kind`（預覽擴大成本機 dev server）。
     (11, "b2704fdf9aeb332c"),
+    // issue #344：`bots.primary_position`（主力那列的固定順序）。
+    (12, "dd16404b83c0823f"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -341,6 +343,8 @@ async fn apply_migrations(pool: &SqlitePool) -> Result<()> {
         // 預覽擴大成本機 dev server（issue #253 v4）：實際跑的那一行與 dev server 種類。
         ("bot_previews", "command", "ALTER TABLE bot_previews ADD COLUMN command TEXT"),
         ("bot_previews", "kind", "ALTER TABLE bot_previews ADD COLUMN kind TEXT"),
+        // 主力那列的固定順序（issue #344）；舊列 0＝沒排過，排在有排過的之後。
+        ("bots", "primary_position", "ALTER TABLE bots ADD COLUMN primary_position INTEGER NOT NULL DEFAULT 0"),
     ] {
         if !has_column(&mut *tx, table, col).await? {
             sqlx::query(ddl).execute(&mut *tx).await.with_context(|| format!("add {table}.{col}"))?;
@@ -544,6 +548,8 @@ pub struct Bot {
     pub parent_bot_id: Option<String>,
     /// 使用者釘選的「主要執行的 bot」（見 SCHEMA 欄位註解）。
     pub is_primary: i64,
+    /// 主力那列的固定順序（issue #344）：1 起算，0＝從沒排過；取消釘選不清。純顯示，不進 config.toml。
+    pub primary_position: i64,
     #[serde(skip_serializing)]
     pub hook_token: String,
     pub deleted_at: Option<String>,

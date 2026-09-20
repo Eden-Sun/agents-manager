@@ -562,6 +562,8 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
                 "parent_bot_id": b.parent_bot_id,
                 // 使用者釘的主要 bot（純顯示）。
                 "primary": b.is_primary == 1,
+                // 主力那列的固定順序（#344）：1 起算，0＝沒排過；取消釘選不清。
+                "primary_position": b.primary_position,
                 "cwd": b.cwd,
                 "agent_name": run.as_ref().and_then(|r| r.agent_name.clone()).unwrap_or_else(|| crate::config::agent_name(&p.label, &b.id)),
                 "run": run,
@@ -1158,6 +1160,9 @@ struct SetOrder {
     /// config.toml 沒有的（child bot）忽略。
     #[serde(default)]
     bots: Option<BTreeMap<String, Vec<String>>>,
+    /// 主力那列的順序（#344）：bot id 的陣列，位置寫進 `bots.primary_position`（不進 config.toml）；沒點名的維持原值。
+    #[serde(default)]
+    primary: Option<Vec<String>>,
 }
 
 /// 沒被點名的（別的 client 剛新增的）維持原相對順序接在後面。
@@ -1177,23 +1182,33 @@ fn reorder_by<T>(items: &mut Vec<T>, want: &[String], id_of: impl Fn(&T) -> Opti
 }
 
 async fn set_order(State(app): State<Arc<App>>, Json(b): Json<SetOrder>) -> Result<Response, LcError> {
-    if b.projects.is_none() && b.bots.is_none() {
-        return Err(LcError::Bad("order: projects 或 bots 至少要有一個".into()));
+    if b.projects.is_none() && b.bots.is_none() && b.primary.is_none() {
+        return Err(LcError::Bad("order: projects、bots 或 primary 至少要有一個".into()));
     }
-    crate::projection::update_and_project(&app.cfg, &app.db, |cfg| {
-        if let Some(want) = &b.projects {
-            reorder_by(&mut cfg.projects, want, |p| p.id.clone());
-        }
-        if let Some(map) = &b.bots {
-            for p in cfg.projects.iter_mut() {
-                let Some(want) = p.id.as_deref().and_then(|id| map.get(id)) else { continue };
-                reorder_by(&mut p.bots, want, |x| x.id.clone());
+    // 先驗再動：點名了不存在的 bot，config 那邊的順序也不寫。
+    if let Some(ids) = &b.primary {
+        crate::primary_order::validate(&app.db, ids).await?;
+    }
+    // 只有主力順序（`primary`）的請求不碰 config.toml：它只存 DB。
+    if b.projects.is_some() || b.bots.is_some() {
+        crate::projection::update_and_project(&app.cfg, &app.db, |cfg| {
+            if let Some(want) = &b.projects {
+                reorder_by(&mut cfg.projects, want, |p| p.id.clone());
             }
-        }
-        Ok(())
-    })
-    .await
-    .map_err(projection_err)?;
+            if let Some(map) = &b.bots {
+                for p in cfg.projects.iter_mut() {
+                    let Some(want) = p.id.as_deref().and_then(|id| map.get(id)) else { continue };
+                    reorder_by(&mut p.bots, want, |x| x.id.clone());
+                }
+            }
+            Ok(())
+        })
+        .await
+        .map_err(projection_err)?;
+    }
+    if let Some(ids) = &b.primary {
+        crate::primary_order::write(&app.db, ids).await?;
+    }
     app.emit("project_changed", json!({"reason": "order"})).await;
     Ok((StatusCode::OK, Json(json!({"ok": true}))).into_response())
 }
@@ -1343,13 +1358,7 @@ async fn patch_bot(
     }
     // child bot 不在 config.toml，cfg.update 只會 404（2026-09-09 使用者：child 身分改不了）→ 直接改 DB。
     if let Some(pin) = b.is_primary {
-        let n = sqlx::query("UPDATE bots SET is_primary = ? WHERE id = ? AND deleted_at IS NULL")
-            .bind(pin as i64)
-            .bind(&id)
-            .execute(&app.db)
-            .await
-            .map_err(any_err)?
-            .rows_affected();
+        let n = crate::primary_order::set_pinned(&app.db, &id, pin).await.map_err(any_err)?;
         if n == 0 {
             return Err(LcError::NotFound("bot".into()));
         }
@@ -4720,5 +4729,29 @@ mod ct_eq_tests {
         assert!(!ct_eq("0123abcd", "0123abc"), "長度不同");
         assert!(!ct_eq("", "x"));
         assert!(ct_eq("", ""), "空對空只是函式本身的性質；呼叫端仍要先擋空 token");
+    }
+
+    #[tokio::test]
+    async fn post_order_with_primary_writes_positions_and_state_reports_them() {
+        use super::*;
+        let e = crate::testing::env().await;
+        let a = crate::testing::claude_bot(&e.app, &e.project_id, "a").await.id;
+        let b = crate::testing::claude_bot(&e.app, &e.project_id, "b").await.id;
+        let order = |ids: &[&str]| SetOrder { projects: None, bots: None, primary: Some(ids.iter().map(|s| s.to_string()).collect()) };
+        let resp = set_order(State(e.app.clone()), Json(order(&[&b, &a]))).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let state = state_json(&e.app).await.unwrap();
+        let bots = state["projects"][0]["bots"].as_array().unwrap().clone();
+        let pos = |id: &str| bots.iter().find(|x| x["id"] == id).unwrap()["primary_position"].as_i64().unwrap();
+        assert_eq!((pos(&b), pos(&a)), (1, 2));
+        // 未知 bot → 400，而且什麼都沒寫。
+        let err = set_order(State(e.app.clone()), Json(order(&[&a, "ghost"]))).await.unwrap_err();
+        assert!(matches!(err, LcError::Bad(_)));
+        let state = state_json(&e.app).await.unwrap();
+        let bots = state["projects"][0]["bots"].as_array().unwrap().clone();
+        assert_eq!(bots.iter().find(|x| x["id"] == a.as_str()).unwrap()["primary_position"], 2);
+        // 三個欄位都沒有仍是 400。
+        let none = SetOrder { projects: None, bots: None, primary: None };
+        assert!(matches!(set_order(State(e.app.clone()), Json(none)).await.unwrap_err(), LcError::Bad(_)));
     }
 }
