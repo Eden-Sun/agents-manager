@@ -539,11 +539,34 @@ pub fn probe_clippy(stdout: &str) -> Option<String> {
     stdout.lines().find_map(|l| l.trim().strip_prefix("CLIPPY=")).filter(|v| !v.is_empty()).map(str::to_string)
 }
 
+/// probe／安裝工具鏈這類「單次 ssh、收 stdout」的呼叫的上限（#329）：遠端卡住（NFS、hung sshd）時不能永遠佔著一條 API 請求執行緒。
+const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+const INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20 * 60);
+
+/// 同 `Command::output`，但超過 `limit` 就砍掉子行程並回錯。
+fn output_with_timeout(mut cmd: Command, limit: std::time::Duration) -> anyhow::Result<std::process::Output> {
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let child = cmd.spawn()?;
+    let pid = child.id() as i32;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+    match rx.recv_timeout(limit) {
+        Ok(out) => Ok(out?),
+        Err(_) => {
+            // 執行緒握著 Child；只能用 pid 砍（它還沒被收掉，pid 不會被回收重用）。
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+            anyhow::bail!("ssh 超過 {} 秒沒有結束，已中止", limit.as_secs())
+        }
+    }
+}
+
 fn probe(remote: &BuildRemoteCfg, data_dir: &Path) -> anyhow::Result<Value> {
     let pw = secret(data_dir, remote)?;
     let mut cmd = ssh_base(remote, pw.as_deref(), data_dir)?;
     cmd.arg(PROBE_SH);
-    let out = cmd.output()?;
+    let out = output_with_timeout(cmd, PROBE_TIMEOUT)?;
     if !out.status.success() {
         anyhow::bail!("ssh probe failed (exit {:?}): {}", out.status.code(), String::from_utf8_lossy(&out.stderr).trim());
     }
@@ -588,7 +611,7 @@ fn install_toolchain(remote: &BuildRemoteCfg, data_dir: &Path) -> anyhow::Result
     let pw = secret(data_dir, remote)?;
     let mut cmd = ssh_base(remote, pw.as_deref(), data_dir)?;
     cmd.arg(INSTALL_SH);
-    let out = cmd.output()?;
+    let out = output_with_timeout(cmd, INSTALL_TIMEOUT)?;
     let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
     if !out.status.success() {
@@ -1280,7 +1303,8 @@ impl Deadline {
     /// `limit_secs == 0`＝不設上限。時間從 [`Deadline::arm`] 起算，在那之前只看訊號。
     fn new(limit_secs: u64) -> Self {
         Deadline {
-            limit: (limit_secs > 0).then(|| std::time::Duration::from_secs(limit_secs)),
+            // 手改 config 的 u64::MAX 不能讓 `arm()` 的 Instant 加法溢位 panic（#329）；API 端本來就擋在 MAX_TIMEOUT_SECS。
+            limit: (limit_secs > 0).then(|| std::time::Duration::from_secs(limit_secs.min(MAX_TIMEOUT_SECS))),
             at: std::cell::Cell::new(None),
             abort: Default::default(),
             watch_signals: false,
@@ -1543,6 +1567,19 @@ fn run_offload(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, args: &[Str
 
 #[cfg(test)]
 mod tests {
+    /// #329：手改 config 的極大 timeout_secs 不能讓 arm() 溢位 panic；單次 ssh 卡住要有上限。
+    #[test]
+    fn a_huge_timeout_does_not_panic_and_a_hung_ssh_is_bounded() {
+        let d = Deadline::new(u64::MAX);
+        d.arm();
+        assert!(d.stop().is_none());
+        let mut cmd = Command::new("sleep");
+        cmd.arg("30");
+        let t = std::time::Instant::now();
+        let err = output_with_timeout(cmd, std::time::Duration::from_millis(300)).unwrap_err().to_string();
+        assert!(err.contains("沒有結束") && t.elapsed() < std::time::Duration::from_secs(5), "{err}");
+    }
+
     /// #324／#325：設定檔壞掉、host 空、或本機設了 RUSTFLAGS 這類遠端看不到的變數——要退回本機也要講出原因，不能靜默；
     /// 正常啟用且沒有這些變數才轉遠端；檔案不存在／沒啟用是本來就不轉，不必吵。
     #[test]
