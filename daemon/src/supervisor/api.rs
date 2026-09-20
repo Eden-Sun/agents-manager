@@ -930,7 +930,7 @@ pub async fn post_approval(State(app): State<Arc<App>>, Json(b): Json<ApprovalIn
         return Err(LcError::Bad(format!("purpose must be one of {:?}", super::maintenance::RESOURCES)));
     }
     let expires = b.expires_in_secs.map(iso_in);
-    let out = store::create_approval_superseding(
+    let out = store::create_approval_notifying(
         &app.db,
         &b.requester,
         &b.purpose,
@@ -961,17 +961,7 @@ pub async fn post_approval(State(app): State<Arc<App>>, Json(b): Json<ApprovalIn
     // 重送不再叫醒 AGM 一次，也不再推一次事件：它看到的還是同一筆。
     if out.created {
         // AGM decides these itself (CLAUDE.md, 2026-09-12): the request is put in front of it as an
-        // inbox event rather than sent to the user to relay.
-        let _ = store::push_inbox(
-            &app.db,
-            &format!("approval:{}:requested", a.id),
-            "approval_requested",
-            None,
-            None,
-            None,
-            &a.to_json(),
-        )
-        .await;
+        // inbox event rather than sent to the user to relay. 事件已在建立的同一個交易裡寫好（#320）。
         app.emit("supervisor_changed", json!({"approval": a.to_json()})).await;
     }
     if let Some(old) = out.superseded.as_deref() {
@@ -1553,6 +1543,37 @@ mod approval_decision_tests {
         assert_eq!(out["released"], true, "舊租約要還得了");
         app.db.close().await;
         std::fs::remove_dir_all(&app.data_dir).unwrap();
+    }
+
+    /// 申請與叫醒 AGM 的 `approval_requested` 同一個交易：通知寫不進去就整筆不成立（回錯、沒有 approval 列），
+    /// 申請者重送再來。以前先建 approval、再 `let _` 推事件；寫不進去時 approval 停在 pending、AGM 不知道要裁示，
+    /// 重送走冪等分支（`created=false`）又不會補推。
+    #[tokio::test]
+    async fn an_approval_and_its_notification_land_together() {
+        let app = app().await;
+        let ask = || ApprovalIn {
+            reason: None,
+            requester: "k8bw2f".into(),
+            purpose: "restart".into(),
+            scope: "daemon".into(),
+            target_commit: Some("ca7b22d".into()),
+            expires_in_secs: None,
+            request_id: Some("restart-atomic".into()),
+            supersedes: None,
+        };
+        sqlx::query("CREATE TRIGGER no_approval_event BEFORE INSERT ON supervisor_inbox WHEN NEW.kind='approval_requested' BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END")
+            .execute(&app.db)
+            .await
+            .unwrap();
+        assert!(post_approval(State(app.clone()), Json(ask())).await.is_err(), "通知寫不進去：回錯讓申請者重送");
+        assert!(store::approvals(&app.db, 10).await.unwrap().is_empty(), "沒有留下一筆沒人知道的 pending");
+
+        sqlx::query("DROP TRIGGER no_approval_event").execute(&app.db).await.unwrap();
+        let Json(ok) = post_approval(State(app.clone()), Json(ask())).await.unwrap();
+        assert_eq!(ok["created"], true);
+        let events: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE kind='approval_requested'").fetch_one(&app.db).await.unwrap();
+        assert_eq!(events, 1);
     }
 
     #[tokio::test]
