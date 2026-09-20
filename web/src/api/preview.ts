@@ -151,6 +151,8 @@ export interface StartPreviewOpts {
   mode?: 'auto' | 'attach' | 'spawn'
   port?: number
   dir?: string
+  /** `attach`：清單上那顆的 pid；帶了 daemon 會核對，port 已經換人就 409 `stale_selection`。 */
+  pid?: number
 }
 
 export async function startPreview(botId: string, opts?: StartPreviewOpts): Promise<Preview> {

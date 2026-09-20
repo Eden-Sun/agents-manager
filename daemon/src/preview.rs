@@ -780,6 +780,8 @@ pub struct StartReq {
     pub mode: Option<String>,
     pub port: Option<u16>,
     pub dir: Option<String>,
+    /// `mode=attach`：使用者挑的那顆的 pid。帶了就要對得上，否則 port 已經換人了（409 `stale_selection`）。
+    pub pid: Option<i32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -838,7 +840,15 @@ pub async fn start(app: &Arc<App>, bot_id: &str, req: StartReq) -> LcResult<Valu
         Mode::Attach => {
             let port = req.port.unwrap_or_default();
             let hit = scan.as_deref().unwrap_or_default().iter().find(|p| p.port == port).cloned();
-            Some(hit.ok_or_else(|| LcError::conflict("not_vite", json!({"bot_id": bot_id, "port": port})))?)
+            let hit = hit.ok_or_else(|| LcError::conflict("not_vite", json!({"bot_id": bot_id, "port": port})))?;
+            // 使用者挑的是清單上「那一顆」：GET 到 POST 之間 port 被別的行程接手時，失敗，不默默接到別人。
+            if req.pid.is_some_and(|pid| pid != hit.pid) || req.dir.as_deref().is_some_and(|d| norm(d) != norm(&hit.cwd)) {
+                return Err(LcError::conflict(
+                    "stale_selection",
+                    json!({"bot_id": bot_id, "port": port, "pid": hit.pid, "dir": hit.cwd}),
+                ));
+            }
+            Some(hit)
         }
         Mode::Auto => {
             let all = cands.clone().unwrap_or_default();
@@ -1057,6 +1067,8 @@ async fn refresh_locked(app: &Arc<App>, bot_id: &str) -> Option<Row> {
         _ => fallback_env(app),
     };
     let mut port = r.port;
+    // 接上的 server 換了行程（同 port 被別的行程接手）：見 [`attached_identity`]。
+    let mut rebind: Option<i64> = None;
     let (pane_alive, listening) = match (&r.pane_id, r.port) {
         (Some(p), Some(port)) => (env.pane_alive(p).await, env.port_listening(port as u16).await),
         // dev script 起的 server 自己挑 port：看這顆 pane 的行程樹實際 listen 到哪個（多個取最小的）。
@@ -1065,12 +1077,35 @@ async fn refresh_locked(app: &Arc<App>, bot_id: &str) -> Option<Row> {
             port = env.pane_ports(p).await.unwrap_or_default().first().map(|x| i64::from(*x));
             (alive, port.is_some())
         }
-        (None, Some(port)) if attached => (None, env.port_listening(port as u16).await),
+        (None, Some(port)) if attached => {
+            let mut up = env.port_listening(port as u16).await;
+            if up && r.status() == Status::Running {
+                match attached_identity(app, env.as_ref(), &r, port as u16).await {
+                    Identity::Lost => up = false,
+                    Identity::Rebound(pid) => rebind = Some(pid),
+                    Identity::Same | Identity::Unknown => {}
+                }
+            }
+            (None, up)
+        }
         (_, Some(port)) => (Some(false), env.port_listening(port as u16).await),
         _ => (Some(false), false),
     };
     let next = next_status(r.status(), attached, Observed { pane_alive, listening }, elapsed_secs(r.started_at.as_deref()));
-    let Next::To(to, why) = next else { return Some(r) };
+    let Next::To(to, why) = next else {
+        let Some(pid) = rebind else { return Some(r) };
+        let updated = Row { pid: Some(pid), updated_at: db::now(), ..r.clone() };
+        return match put(&app.db, &updated).await {
+            Ok(()) => {
+                emit_changed(app, &updated).await;
+                Some(updated)
+            }
+            Err(e) => {
+                tracing::warn!(bot = bot_id, error = %e, "preview: cannot record the re-attached pid");
+                Some(r)
+            }
+        };
+    };
     let error = match (to, why) {
         (Status::Failed, Some(why)) => {
             let tail = match &r.pane_id {
@@ -1095,6 +1130,28 @@ async fn refresh_locked(app: &Arc<App>, bot_id: &str) -> Option<Row> {
             tracing::warn!(bot = bot_id, error = %e, "preview: cannot record the new preview status");
             Some(r)
         }
+    }
+}
+
+/// 接上的 server 還是不是當初接的那一顆。
+enum Identity {
+    Same,
+    /// 同 port、同 cwd、仍是 dev server，只是 pid 變了（同一個 app 重啟）：沿用這一列，換記新 pid。
+    Rebound(i64),
+    /// port 現在是別的行程：不是 dev server，或 cwd 不同。不可默默跟著它，轉 `off`。
+    Lost,
+    /// 問不到（掃描失敗、列上沒有記 pid／dir）：當「沒變」。
+    Unknown,
+}
+
+async fn attached_identity(app: &Arc<App>, env: &dyn PreviewEnv, r: &Row, port: u16) -> Identity {
+    let (Some(pid), Some(dir)) = (r.pid, r.dir.as_deref()) else { return Identity::Unknown };
+    let Some(all) = env.scan_servers(&local_project_roots(app).await).await else { return Identity::Unknown };
+    match all.iter().find(|p| p.port == port) {
+        None => Identity::Lost,
+        Some(p) if i64::from(p.pid) == pid => Identity::Same,
+        Some(p) if norm(&p.cwd) == norm(dir) => Identity::Rebound(i64::from(p.pid)),
+        Some(_) => Identity::Lost,
     }
 }
 
