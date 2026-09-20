@@ -987,6 +987,8 @@ done
 [ "$swait" -eq 0 ] || echo "agents-manager: 等了 $swait 秒共用遠端 target 還沒空出來" >&2
 echo 'agents-manager: 這棵 worktree 的共用遠端 target 正被另一次呼叫使用，這次改用獨立目錄（冷編譯，結束就刪）' >&2
 hold "$root/$hash/$job" 0 8>>"$root/$hash/$job.lock"; rc=$?
+# 重導向先把 $job.lock 建出來，只有 hold 成功的尾端會刪它；73／74／75 路徑不刪就永遠留著、沒人 GC（#326）。
+rm -f "$root/$hash/$job.lock"
 case $rc in
   73) exit 0 ;;
   74) queue_full ;;
@@ -2983,6 +2985,18 @@ mod guard_tests {
         let mut shared_holder = guard(&base, HASH, "job-1-1");
         hang_up_while_queued(&base, HASH, Admission { shared_wait_secs: 120, ..QUICK });
         shared_holder.finish();
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// #326：冷編譯的 job 排隊中被掛斷（或 queue full），`job-*.lock` 不能留在遠端沒人收。
+    #[test]
+    fn a_queued_job_that_gives_up_leaves_no_lock_file_behind() {
+        let base = base();
+        let mut holder = guard_with(&base, HASH, "job-1-1", Admission { max: 1, ..QUICK });
+        hang_up_while_queued(&base, HASH, Admission { max: 1, queue_wait_secs: 120, ..QUICK });
+        let lock = base.join(format!("rc/{HASH}/job-2-2.lock"));
+        assert!(!lock.exists(), "排隊中放棄的 job 留下了 {}", lock.display());
+        holder.finish();
         let _ = std::fs::remove_dir_all(base);
     }
 
