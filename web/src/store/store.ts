@@ -2191,14 +2191,19 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   async controlMission(missionId, action) {
-    try {
-      // daemon 的 pause 必須帶 `reason`：以前送 `{}`，反序列化就 422，按鈕從上線起沒成功過（review3 c1 M4）。
-      const mission = await api.controlMission(missionId, action, action === 'pause' ? { reason: MISSION_USER_PAUSE } : undefined)
-      if (mission) set((s) => ({ missions: mergeMission(s.missions, mission) }))
-      await get().loadMission(missionId)
-    } catch (e) {
-      get().notify('error', `任務操作失敗：${errText(e)}`)
-    }
+    // 連點：第二下會撞「已經暫停／已經取消」的 409，跳一則多餘的失敗通知。
+    await guarded(
+      set,
+      get,
+      `mission:${missionId}`,
+      async () => {
+        // daemon 的 pause 必須帶 `reason`：以前送 `{}`，反序列化就 422，按鈕從上線起沒成功過（review3 c1 M4）。
+        const mission = await api.controlMission(missionId, action, action === 'pause' ? { reason: MISSION_USER_PAUSE } : undefined)
+        if (mission) set((s) => ({ missions: mergeMission(s.missions, mission) }))
+        await get().loadMission(missionId)
+      },
+      (e) => `任務操作失敗：${errText(e)}`,
+    )
   },
 
   async answerMission(missionId, text) {

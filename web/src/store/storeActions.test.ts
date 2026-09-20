@@ -947,3 +947,19 @@ test('快照在飛時 WS 已推進到更新的 seq：套完舊快照要再抓一
   assert.equal(stateFetches, 2, '比快照新的 frame 已經到了，要補抓一次')
   assert.equal(useStore.getState().runs.b1?.agent_status, 'idle')
 })
+
+test('任務「暫停」連點兩下：只送一次，不跳「任務操作失敗」', async () => {
+  seed()
+  useStore.setState({ missions: { p1: [{ id: 'm1', project_id: 'p1', status: 'open' } as Mission] } })
+  let pauses = 0
+  routeDaemon((r) => {
+    if (r.method === 'POST' && r.path.endsWith('/missions/m1/pause')) {
+      pauses += 1
+      return pauses === 1 ? json({ id: 'm1', project_id: 'p1', status: 'paused' }, 200) : json({ error: 'conflict', reason: 'already paused' }, 409)
+    }
+    return json({ id: 'm1', project_id: 'p1', status: 'paused', events: [], assignments: [], revisions: [], parent: null }, 200)
+  })
+  await Promise.all([useStore.getState().controlMission('m1', 'pause'), useStore.getState().controlMission('m1', 'pause')])
+  assert.equal(pauses, 1)
+  assert.deepEqual(noticeTexts(), [])
+})
