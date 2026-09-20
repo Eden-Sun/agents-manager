@@ -2165,7 +2165,7 @@ macOS `ps -Ewwo pid=,args=`，Linux `/proc/<pid>/environ`。
 只列 `claude`/`codex`/`grok`/`node`/`bash`/`zsh`/`sh`/`fish` 且 `subtree_bytes ≥ 8 MiB` 的，其餘併進父程序；依 `subtree_bytes` 排序（「砍這個能省多少」）。
 owner 格可點開唯讀的 pane 畫面（`GET /api/mem/processes/pane`，`pane.read visible`，每 2 秒重讀，不給打字）；bot 列不給看（有自己的終端分頁）。
 
-砍之前**一定重新取樣**再判定，不信前端送來的那列（pid 會回收）：不在樹裡 400、`herdr` 本身 400、`owner=bot` 409（走 `POST /bots/{id}/stop` 才會記錄）。砍完立刻取樣推 `mem_updated`。
+砍之前**一定重新取樣**再判定，不信前端送來的那列（pid 會回收）：不在樹裡 400、`herdr` 本身 400、`owner=bot` 409（走 `POST /bots/{id}/stop` 才會記錄）。目標 pid 的環境讀不到（`ps -E` 壞了、環境段空、Linux 的 `environ` 讀不了）時 owner 會退成 `unknown`，不能把它當「沒主人」放行——回 502、不送訊號。砍完立刻取樣推 `mem_updated`。
 
 ## 16. 從 shell 認出來的身份 cc0～cc6
 

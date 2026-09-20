@@ -353,17 +353,18 @@ pub async fn pane_preview(app: &Arc<App>, host: &str, pane_id: &str, socket: Opt
 }
 
 /// `Bot` is a 409, not a 400: the request is fine, the better door is `POST /bots/{id}/stop`.
+#[derive(Debug)]
 pub enum KillDenied {
     NotInTree,
     Herdr,
     Bot(String),
 }
 
-/// Re-samples instead of trusting the caller's list: pids are recycled, and a stale row must
-/// never let a `kill` escape the herdr trees.
-pub async fn kill(app: &Arc<App>, host: &str, pid: i32, signal: &str) -> anyhow::Result<Result<Value, KillDenied>> {
-    let out = dump(app, host).await?;
-    let (procs, raws) = scan(&out);
+/// 送訊號前的篩選（純函式，好測）：不在樹裡、herdr、bot 都擋。
+/// **讀不到這個 pid 的環境＝判不出是不是 bot 的行程**（`ps -E` 壞了、環境段整段空、Linux 的 `/proc/<pid>/environ` 讀不了），
+/// 這時 owner 會退成 `unknown`、被當成沒主人的行程放行，等於 bot 的 claude 就能被砍——所以直接不送。
+fn screen_kill(out: &str, pid: i32) -> anyhow::Result<Result<(String, u64), KillDenied>> {
+    let (procs, raws) = scan(out);
     let Some(raw) = raws.iter().find(|r| procs[r.p_index].pid == pid) else {
         return Ok(Err(KillDenied::NotInTree));
     };
@@ -373,6 +374,20 @@ pub async fn kill(app: &Arc<App>, host: &str, pid: i32, signal: &str) -> anyhow:
     if raw.owner == "bot" {
         return Ok(Err(KillDenied::Bot(raw.bot_id.clone().unwrap_or_default())));
     }
+    if !parse_env(split_sections(out).1).contains_key(&pid) {
+        anyhow::bail!("讀不到 pid {pid} 的環境變數，判不出它是不是 bot 的行程，不送訊號");
+    }
+    Ok(Ok((exe_name(&procs[raw.p_index].argv).to_string(), raw.subtree_bytes)))
+}
+
+/// Re-samples instead of trusting the caller's list: pids are recycled, and a stale row must
+/// never let a `kill` escape the herdr trees.
+pub async fn kill(app: &Arc<App>, host: &str, pid: i32, signal: &str) -> anyhow::Result<Result<Value, KillDenied>> {
+    let out = dump(app, host).await?;
+    let (exe, freed) = match screen_kill(&out, pid)? {
+        Ok(t) => t,
+        Err(d) => return Ok(Err(d)),
+    };
     let sig = if signal.eq_ignore_ascii_case("KILL") { "KILL" } else { "TERM" };
     let cmd = format!("kill -{sig} {pid}");
     let conn = app.hosts.get(host).await.ok_or_else(|| anyhow::anyhow!("unknown host `{host}`"))?;
@@ -385,9 +400,6 @@ pub async fn kill(app: &Arc<App>, host: &str, pid: i32, signal: &str) -> anyhow:
         conn.ssh_exec_path(&cmd).await?;
     }
 
-    let p = &procs[raw.p_index];
-    let freed = raw.subtree_bytes;
-    let exe = exe_name(&p.argv).to_string();
     // Update the badge now rather than up to 15s later.
     let snap = crate::memstat::sample(app).await;
     app.emit("mem_updated", json!(snap)).await;
@@ -536,5 +548,20 @@ mod tests {
         assert_eq!(find(402).unwrap().owner, "bot");
         assert_eq!(find(400).unwrap().owner, "herdr");
         assert_eq!(find(405).unwrap().owner, "pane");
+    }
+
+    /// 環境段讀不到（`ps -E` 壞了、Linux 的 environ 讀不了）：bot 的行程會被誤當成沒主人，所以不能送訊號。
+    #[test]
+    fn kill_refuses_when_the_target_env_was_not_read() {
+        let (tree, _) = DUMP.split_once("---AM-ENV---\n").unwrap();
+        let no_env_at_all = format!("{tree}---AM-ENV---\n");
+        let err = screen_kill(&no_env_at_all, 402).unwrap_err().to_string();
+        assert!(err.contains("環境"), "{err}");
+        // 只缺這個 pid 的那一行也一樣。
+        let missing_one = DUMP.replace("  402 claude HERDR_PANE_ID=w1:p1 AM_BOT_ID=b1\n", "");
+        assert!(screen_kill(&missing_one, 402).is_err());
+        // 讀得到、真的沒主人：照舊放行；bot 照舊 409。
+        assert!(matches!(screen_kill(DUMP, 407), Ok(Ok(_))));
+        assert!(matches!(screen_kill(DUMP, 402), Ok(Err(KillDenied::Bot(_)))));
     }
 }
