@@ -9,19 +9,47 @@ import { ApiError } from '../api/types'
 import { useStore } from '../store/store'
 import './previewPanel.css'
 
-/** 起 vite 失敗的 409：`no_vite_config` 的 body 帶試過哪些路徑。 */
-function startError(e: unknown): string {
-  if (previewApiMissing(e)) return PREVIEW_API_MISSING
+/** 錯誤訊息＋試過的路徑（路徑可能很長，收進可展開的細節）。 */
+interface PreviewErr {
+  text: string
+  tried: string[]
+  /** 偵測不到 vite 設定檔：只是「AG Man 自己起不了」，不是死路——下面的 others 照樣能接。 */
+  noConfig: boolean
+}
+
+function startError(e: unknown): PreviewErr {
+  const plain = (text: string): PreviewErr => ({ text, tried: [], noConfig: false })
+  if (previewApiMissing(e)) return plain(PREVIEW_API_MISSING)
   if (e instanceof ApiError) {
-    if (e.body.reason === 'not_top_level' || e.body.error === 'not_top_level') return '只有頂層 bot 能開預覽。'
-    const tried = e.body.tried
+    if (e.body.reason === 'not_top_level' || e.body.error === 'not_top_level') return plain('只有頂層 bot 能開預覽。')
     if (e.body.reason === 'no_vite_config' || e.body.error === 'no_vite_config') {
-      const list = Array.isArray(tried) ? tried.map(String).join('、') : ''
-      return `找不到 vite 設定檔${list ? `（試過：${list}）` : ''}。`
+      const tried = Array.isArray(e.body.tried) ? e.body.tried.map(String) : []
+      return { text: '這顆 bot 的目錄裡找不到 vite 設定檔，AG Man 沒辦法自己起。', tried, noConfig: true }
     }
-    return e.message
+    return plain(e.message)
   }
-  return e instanceof Error ? e.message : String(e)
+  return plain(e instanceof Error ? e.message : String(e))
+}
+
+/** 次要說明：降一級的小字，試過的路徑收進 <details>。 */
+function ErrNote({ err }: { err: PreviewErr }) {
+  return (
+    <div className={`preview-note${err.noConfig ? ' soft' : ' error'}`} role="alert">
+      <span>{err.text}</span>
+      {err.tried.length > 0 ? (
+        <details className="preview-tried">
+          <summary>試過的路徑（{err.tried.length}）</summary>
+          <ul>
+            {err.tried.map((t) => (
+              <li key={t}>
+                <code>{t}</code>
+              </li>
+            ))}
+          </ul>
+        </details>
+      ) : null}
+    </div>
+  )
 }
 
 /** mock 模式沒有真的 vite：iframe 放一頁說明，截圖與手動驗才看得到「running」長相。 */
@@ -77,7 +105,7 @@ export function PreviewPanel({ botId }: { botId: string }) {
   const connected = useStore((s) => s.connected)
   const notify = useStore((s) => s.notify)
   const [pending, setPending] = useState<'start' | 'stop' | null>(null)
-  const [err, setErr] = useState<string | null>(null)
+  const [err, setErr] = useState<PreviewErr | null>(null)
   // GET 失敗：不能拿 state 帶的 starting 當真，否則分頁會永遠卡在「啟動中」。
   const [loadFailed, setLoadFailed] = useState(false)
   // 「重新整理」換 key 強制重載 iframe；跨 origin 拿不到 contentWindow.location.reload。
@@ -89,6 +117,7 @@ export function PreviewPanel({ botId }: { botId: string }) {
     stored ?? (fromState ? { ...PREVIEW_OFF, status: fromState.status, port: fromState.port } : PREVIEW_OFF)
   const p: Preview = loadFailed && p0.status === 'starting' ? PREVIEW_OFF : p0
 
+  const seenStatus = stored?.status
   useEffect(() => {
     if (!connected) return
     let alive = true
@@ -106,7 +135,7 @@ export function PreviewPanel({ botId }: { botId: string }) {
     return () => {
       alive = false
     }
-  }, [botId, connected, setPreview])
+  }, [botId, connected, setPreview, seenStatus])
 
   const start = useCallback(async (opts?: StartPreviewOpts) => {
     setPending('start')
@@ -139,6 +168,33 @@ export function PreviewPanel({ botId }: { botId: string }) {
   const busy = pending !== null
   const url = p.port ? previewUrl(p.port) : null
 
+  const startBlock = (
+    <>
+      {p.candidates.length > 1 ? (
+        <label className="preview-pick">
+          目錄
+          <select value={pickDir} onChange={(e) => setPickDir(e.target.value)} disabled={busy}>
+            {p.candidates.map((d) => (
+              <option key={d} value={d}>
+                {d}
+              </option>
+            ))}
+          </select>
+        </label>
+      ) : null}
+      <div className="preview-actions">
+        <button
+          type="button"
+          className={`btn${p.others.length > 0 ? '' : ' primary'}`}
+          disabled={busy || !connected}
+          onClick={() => void start(p.candidates.length > 1 ? { dir: pickDir || p.candidates[0] } : undefined)}
+        >
+          {pending === 'start' ? '啟動中…' : '啟動預覽'}
+        </button>
+      </div>
+    </>
+  )
+
   if (p.status === 'running' && url) {
     return (
       <div className="preview-pane">
@@ -166,11 +222,7 @@ export function PreviewPanel({ botId }: { botId: string }) {
             {pending === 'stop' ? (attached ? '中斷中…' : '停止中…') : attached ? '中斷連接' : '停止'}
           </button>
         </div>
-        {err ? (
-          <div className="preview-note error" role="alert">
-            {err}
-          </div>
-        ) : null}
+        {err ? <ErrNote err={err} /> : null}
         <iframe
           key={nonce}
           className="preview-frame"
@@ -225,40 +277,33 @@ export function PreviewPanel({ botId }: { botId: string }) {
         ) : (
           <>
             <h2 className="preview-title">預覽</h2>
-            <p className="preview-body">
-              替 {bot ? <b>{bot.name}</b> : '這顆 bot'} 的專案起 vite dev server，畫面直接顯示在這裡。會在 <code>{bot?.cwd ?? '專案目錄'}</code> 或其{' '}
-              <code>web/</code> 下找 <code>vite.config.*</code>。
-            </p>
-            {p.candidates.length > 1 ? (
-              <label className="preview-pick">
-                目錄
-                <select value={pickDir} onChange={(e) => setPickDir(e.target.value)} disabled={busy}>
-                  {p.candidates.map((d) => (
-                    <option key={d} value={d}>
-                      {d}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            ) : null}
-            <div className="preview-actions">
-              <button
-                type="button"
-                className="btn primary"
-                disabled={busy || !connected}
-                onClick={() => void start(p.candidates.length > 1 ? { dir: pickDir || p.candidates[0] } : undefined)}
-              >
-                {pending === 'start' ? '啟動中…' : '啟動預覽'}
-              </button>
-            </div>
-            <OthersList others={p.others} busy={busy || !connected} onAttach={(port) => void start({ mode: 'attach', port })} />
+            {p.others.length > 0 ? (
+              // 本機已有 vite 在跑：直接接上是主角，自己起放次要（偵測不到設定檔時只有這條路）。
+              <>
+                <OthersList
+                  others={p.others}
+                  busy={busy || !connected}
+                  onAttach={(port) => void start({ mode: 'attach', port })}
+                />
+                {err ? <ErrNote err={err} /> : null}
+                <details className="preview-spawn">
+                  <summary>或由 AG Man 替 {bot ? bot.name : '這顆 bot'} 另起一顆</summary>
+                  {startBlock}
+                </details>
+              </>
+            ) : (
+              <>
+                <p className="preview-body">
+                  替 {bot ? <b>{bot.name}</b> : '這顆 bot'} 的專案起 vite dev server，畫面直接顯示在這裡。會在{' '}
+                  <code>{bot?.cwd ?? '專案目錄'}</code> 或其 <code>web/</code>、<code>apps/*</code> 下找 <code>vite.config.*</code>。
+                  本機目前沒有偵測到在跑的 vite。
+                </p>
+                {startBlock}
+              </>
+            )}
           </>
         )}
-        {err ? (
-          <div className="preview-note error" role="alert">
-            {err}
-          </div>
-        ) : null}
+        {err && !(p.status === 'off' && p.others.length > 0) ? <ErrNote err={err} /> : null}
       </div>
     </div>
   )

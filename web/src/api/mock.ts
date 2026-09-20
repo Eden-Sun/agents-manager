@@ -2506,7 +2506,8 @@ export class MockTransport implements Transport {
   private previewHints(botId: string) {
     const base = this.bot(botId).cwd ?? '/Users/m4p/project/agents-manager'
     return {
-      candidates: [`${base}/web`, `${base}/apps/web`],
+      // am-claude-2 演「偵測不到 vite 設定檔、只有 others」（wits-ops 的情境）。
+      candidates: this.bot(botId).name === 'am-claude-2' ? [] : [`${base}/web`, `${base}/apps/web`],
       others: [
         { port: 5241, dir: `${base}/web`, pid: 4101, relation: 'same_dir', repo: 'agents-manager' },
         { port: 5173, dir: '/Users/m4p/project/agents-manager-main/web', pid: 4242, relation: 'same_repo', repo: 'agents-manager' },
@@ -2530,6 +2531,11 @@ export class MockTransport implements Transport {
     }
     const cur = this.previews.get(botId)
     if (cur && (cur.status === 'starting' || cur.status === 'running')) return cur
+    if (bot.name === 'am-claude-2' && body.mode !== 'attach') {
+      const b = bot.cwd ?? '/Users/m4p/project/agents-manager'
+      const tried = [b, `${b}/web`, ...['web', 'admin', 'docs', 'site', 'ui'].flatMap((n) => [`${b}/apps/${n}`, `${b}/packages/${n}`])].map((d) => `${d}/vite.config.{ts,mts,js,mjs}`)
+      throw new ApiError(409, { reason: 'no_vite_config', tried }, 'no_vite_config')
+    }
     if (body.mode === 'attach') {
       const port = Number(body.port)
       const other = this.previewHints(botId).others.find((o) => o.port === port)
