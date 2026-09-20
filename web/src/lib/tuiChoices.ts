@@ -34,6 +34,12 @@ export interface TuiTab {
 export interface TuiChoiceMenu {
   /** 折行已接回；認不出問句是 `null`。 */
   question: string | null
+  /**
+   * 問句上面那一段（權限框的指令、`Dangerous rm …` 這類警語）逐行原樣，最多 `CONTEXT_LIMIT` 行。
+   * 2026-09-20 使用者：`Do you want to proceed?` 只剩一句問句，看不出在核准什麼就要人回答。
+   * 指令要對齊，所以不接折行、原樣給 UI 用等寬字畫。
+   */
+  context: string[]
   choices: TuiChoice[]
   /** 游標停在沒編號的 `Submit` 列時是 `-1`。 */
   cursor: number
@@ -56,6 +62,9 @@ const SCAN_LINES = 60
 
 /** 最後一個選項到畫面底之間最多幾行有字的東西（腳註、輸入框、狀態列）。 */
 const TAIL_LIMIT = 10
+
+/** 問句上面最多再帶幾行（指令框＋警語）；再多就是把整個 transcript 搬進來了。 */
+const CONTEXT_LIMIT = 14
 
 /** 兩個編號間最多夾幾行說明；再多就是別的東西混進來。 */
 const DETAIL_LIMIT = 8
@@ -248,6 +257,30 @@ export function parseChoiceMenu(text: string | null | undefined): TuiChoiceMenu 
     q--
   }
 
+  // 4b. 問句上面那一段：權限框的指令與警語。空白行不算結束（指令框跟警語之間就隔著空白），
+  // 遇到 transcript 行首符號、分隔線、分頁列或選項才停——那些是上一輪的東西。
+  const context: string[] = []
+  if (qs.length) {
+    let c = q
+    let blanks = 0
+    while (c >= 0 && context.length < CONTEXT_LIMIT) {
+      const s2 = lines[c]
+      if (isDivider(s2) || TRANSCRIPT.test(s2.trim()) || matchRow(c, s2) || parseTabs(s2)) break
+      if (s2.trim() === '') {
+        // 連兩個空白行＝上面是別的段落了。
+        if (++blanks > 1) break
+        if (context.length) context.unshift('')
+        c--
+        continue
+      }
+      blanks = 0
+      context.unshift(s2.replace(/\s+$/, ''))
+      c--
+    }
+    while (context.length && context[0].trim() === '') context.shift()
+    while (context.length && context[context.length - 1].trim() === '') context.pop()
+  }
+
   // 5. 分頁列（見 TAB_SCAN）。
   let tabLine = -1
   for (let i = rows[0].line - 1; i >= 0 && rows[0].line - i <= TAB_SCAN; i--) {
@@ -287,6 +320,7 @@ export function parseChoiceMenu(text: string | null | undefined): TuiChoiceMenu 
 
   return {
     question: qs.length ? qs.reduce((a, b) => joinWrapped(a, b), '') : null,
+    context,
     choices,
     cursor: rows.findIndex((r) => r.marker),
     footer,

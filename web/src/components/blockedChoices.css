@@ -7,6 +7,27 @@
 }
 
 /* 問題字級大半級，釘在主捲軸上緣：捲到第 5 項還看得到在回答什麼。 */
+/* 權限框的指令與警語（等寬、可捲）：問句只有「Do you want to proceed?」時，要靠這段才知道在批准什麼。 */
+.bc-context {
+  margin: 0;
+  padding: 6px 8px;
+  max-height: min(320px, 38vh);
+  overflow: auto;
+  border-left: 3px solid var(--border-strong);
+  background: var(--bg-sunken);
+  border-radius: var(--radius);
+  font: 11.5px/1.5 var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  color: var(--text-dim);
+  white-space: pre;
+}
+
+/* 警語那幾行（`Dangerous rm …`）：紅字粗體，捲到哪都認得出來。 */
+.bc-ctx-warn {
+  display: block;
+  color: var(--danger);
+  font-weight: 650;
+}
+
 .bc-question {
   margin: 0;
   font-size: 13.5px;

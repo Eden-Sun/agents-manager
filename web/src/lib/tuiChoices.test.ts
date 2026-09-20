@@ -316,3 +316,48 @@ test('答完進 review：自訂答案（含換行）讀得出來', () => {
   assert.ok(menu.review[1].answer.includes('第一行'))
   assert.ok(menu.review[1].answer.includes('第二行中文'))
 })
+
+/** 2026-09-20 w16A:pQ 真機：`Do you want to proceed?` 只有一句問句，看不出在核准什麼。 */
+const BASH_PERMISSION = `⏺ Bash(D=$(cat /tmp/.origin_dir); P=robinstech-com-tw
+      gcloud compute ssl-certificates create console-cf-origin-cert --project $P --global)
+  ⎿  Waiting…
+
+────────────────────────────────────────────────────────────────────────────────
+ Bash command
+
+   │ D=$(cat /tmp/.origin_dir); P=robinstech-com-tw
+   │ shred -u "$D"/origin.key 2>/dev/null || rm -f "$D"/*; rmdir "$D" 2>/dev/null
+   Install origin cert on LB and clean up key
+
+ │ Dangerous rm operation on possibly-empty variable path: "$D"/* in \`rm -f "$D"/*\`
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. No
+
+ Esc to cancel · Tab to amend
+`
+
+test('權限框：問句上面的指令與警語要一起帶出來（不然只剩 Do you want to proceed?）', () => {
+  const menu = parseChoiceMenu(BASH_PERMISSION)
+  assert.ok(menu)
+  assert.equal(menu.question, 'Do you want to proceed?')
+  assert.equal(menu.choices.length, 2)
+  const ctx = menu.context.join('\n')
+  assert.ok(ctx.includes('Dangerous rm operation'), ctx)
+  assert.ok(ctx.includes('shred -u'), ctx)
+  assert.ok(ctx.includes('Install origin cert on LB'), ctx)
+  // 上一輪的 transcript（⏺ / ⎿）不能被搬進來。
+  assert.ok(!ctx.includes('Waiting…'), ctx)
+  assert.ok(!ctx.includes('⏺'), ctx)
+  // 指令要保持逐行，不接成一長串。
+  assert.ok(menu.context.length >= 3)
+})
+
+test('問句正上方就是分隔線／transcript 時 context 是空的，畫面不會多一塊空框', () => {
+  const bare = ' Do you want to proceed?\n ❯ 1. Yes\n   2. No\n'
+  const menu = parseChoiceMenu(bare)
+  assert.ok(menu)
+  assert.equal(menu.question, 'Do you want to proceed?')
+  assert.deepEqual(menu.context, [])
+})
