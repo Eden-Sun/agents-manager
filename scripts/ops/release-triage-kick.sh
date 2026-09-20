@@ -32,7 +32,7 @@ ROUND_FAIL=""                                 # 這一輪有沒有出過「沒�
 
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
 
-[ -x "$AGM" ] || exit 0
+[ -x "$AGM" ] || { log "agm CLI 不在 ${AGM}，跳過"; exit 0; }
 
 # 卡住了、自己解不開時喊人：一則 durable inbox 事件（同 source+reason 每小時一則，daemon 去重）。
 alert() { # alert <reason> <detail>

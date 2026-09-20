@@ -48,7 +48,7 @@ write_state() { # write_state <內容>
   return 1
 }
 
-[ -x "$AGM" ] || exit 0
+[ -x "$AGM" ] || { log "agm CLI 不在 ${AGM}，跳過"; exit 0; }
 
 alert() { # alert <reason> <detail>：一則 durable inbox 事件（同 source+reason 每小時一則，daemon 去重）
   log "ALERT ${1}：${2}"

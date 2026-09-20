@@ -22,7 +22,7 @@ write_state() { # write_state <內容>
   return 1
 }
 
-[ -x "$AGM" ] || exit 0
+[ -x "$AGM" ] || { log "agm CLI 不在 ${AGM}，跳過"; exit 0; }
 [ -f "$TASK" ] || { log "找不到 ${TASK}，跳過"; exit 0; }
 [ -d "$VERSIONS" ] || { log "找不到版本目錄 ${VERSIONS}，跳過"; exit 0; }
 
