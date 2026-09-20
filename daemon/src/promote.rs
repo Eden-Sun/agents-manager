@@ -171,6 +171,42 @@ fn stage_transcript(src: &FsPath, dest_dir: &FsPath, session_id: &str) -> Result
     Ok(staged)
 }
 
+/// 把 session 記在 child 的 run 上。已經有記錄就必須是同一段 session、transcript 還在；否則不放行。
+async fn checkpoint_session(app: &Arc<App>, r: &db::Run, located: &Located) -> Result<(), String> {
+    let res = sqlx::query("UPDATE runs SET native_session_id = ?, transcript_path = ? WHERE id = ? AND (native_session_id IS NULL OR native_session_id = '')")
+        .bind(&located.session_id)
+        .bind(located.src.to_string_lossy().to_string())
+        .bind(&r.id)
+        .execute(&app.db)
+        .await
+        .map_err(|e| e.to_string())?;
+    if res.rows_affected() > 0 {
+        return Ok(());
+    }
+    // 沒更新到任何列：只有這個 run 早就記著同一段 session 才算數。
+    let (sid, path) = sqlx::query_as::<_, (Option<String>, Option<String>)>("SELECT native_session_id, transcript_path FROM runs WHERE id = ?")
+        .bind(&r.id)
+        .fetch_optional(&app.db)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "run 不見了".to_string())?;
+    match (sid, path) {
+        (Some(s), Some(p)) if s == located.session_id && FsPath::new(&p).is_file() => Ok(()),
+        _ => Err("child 的 run 上沒有可用的 session 記錄".to_string()),
+    }
+}
+
+/// 新 bot 起來之後才失敗的收回：停掉它、從 config 拿掉、複製的檔刪掉。回傳是否收乾淨。
+async fn roll_back_new_bot(app: &Arc<App>, new_id: &str, staged: &Staged) -> bool {
+    let _ = lifecycle::stop_bot(app, new_id).await;
+    let removed = crate::projection::delete_from_config(&app.cfg, &app.db, crate::projection::DeleteTarget::Bot(new_id)).await;
+    if removed.is_ok() {
+        staged.undo();
+    }
+    app.emit("bot_changed", json!({"bot_id": new_id})).await;
+    removed.is_ok()
+}
+
 /// `POST /api/bots/:id/promote` —— 見模組說明。
 pub async fn promote_bot(
     State(app): State<Arc<App>>,
@@ -243,12 +279,11 @@ pub async fn promote_bot(
 
     // 4. 停 child：先把 session 記在它的 run 上（讓這個請求停到一半還能重送），停不掉就收回複製、不動。
     if let Some(r) = &run {
-        let _ = sqlx::query("UPDATE runs SET native_session_id = ?, transcript_path = ? WHERE id = ? AND (native_session_id IS NULL OR native_session_id = '')")
-            .bind(&located.session_id)
-            .bind(located.src.to_string_lossy().to_string())
-            .bind(&r.id)
-            .execute(&app.db)
-            .await;
+        // 檢查點是停 child 的硬前提：寫不進去（或寫進去的不是這段 session）就收回複製、child 照跑，可重送。
+        if let Err(why) = checkpoint_session(&app, r, &located).await {
+            staged.undo();
+            return Err(refuse("promote_checkpoint_failed", json!({"message": why, "child_stopped": false})));
+        }
         let stopped = lifecycle::stop_bot_locked(&app, &id).await;
         let still = db::active_run(&app.db, &id).await;
         if stopped.is_err() || !matches!(still, Ok(None)) {
@@ -289,9 +324,6 @@ pub async fn promote_bot(
         staged.undo();
         return Err(refuse("promote_create_failed", json!({"message": e.to_string(), "child_stopped": run.is_some()})));
     }
-    let unwind = |staged: &Staged| {
-        staged.undo();
-    };
 
     // 種下 session：native resume 讀「這顆 bot 最近一個結束的 run 的 native_session_id」。
     let seeded = sqlx::query(
@@ -316,16 +348,11 @@ pub async fn promote_bot(
         }
     }
     if let Some(why) = failure {
-        // 收回：新 bot 從 config 拿掉（先停掉它可能起了一半的 run）、複製的檔刪掉；child 已經停了，紀錄還在，可以重送。
-        let _ = lifecycle::stop_bot(&app, &new_id).await;
-        let removed = crate::projection::delete_from_config(&app.cfg, &app.db, crate::projection::DeleteTarget::Bot(&new_id)).await;
-        if removed.is_ok() {
-            unwind(&staged);
-        }
-        app.emit("bot_changed", json!({"bot_id": new_id})).await;
+        // 收回：child 已經停了，紀錄還在，可以重送。
+        let rolled_back = roll_back_new_bot(&app, &new_id, &staged).await;
         return Err(refuse(
             "promote_start_failed",
-            json!({"message": why, "child_stopped": run.is_some(), "rolled_back": removed.is_ok()}),
+            json!({"message": why, "child_stopped": run.is_some(), "rolled_back": rolled_back}),
         ));
     }
 
@@ -335,10 +362,21 @@ pub async fn promote_bot(
         let _ = lifecycle::insert_message(&app, &conv, None, "system", &note, "system", false, None).await;
     }
 
-    // 7. 收掉 child 紀錄（它的 run 已經停了）。
-    if let Err(e) = sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL").bind(db::now()).bind(&id).execute(&app.db).await {
-        // 新 bot 已經在跑了：不能再收回，只能明講 child 那筆沒收掉（重送會因為名字／session 已在而擋下，請手動刪它）。
-        return Err(refuse("promote_child_not_removed", json!({"message": e.to_string(), "bot_id": new_id, "child_id": id})));
+    // 7. 收掉 child 紀錄（它的 run 已經停了）。瞬間的 DB 錯誤重試幾次；還是寫不進去就把新 bot 收回，
+    // 不留「兩顆都活著」的半套——child 已停、session 記在它的 run 上，同一個請求可以原樣重送。
+    let mut retired = Err(String::new());
+    for attempt in 0..3 {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        retired = sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL").bind(db::now()).bind(&id).execute(&app.db).await.map(|_| ()).map_err(|e| e.to_string());
+        if retired.is_ok() {
+            break;
+        }
+    }
+    if let Err(why) = retired {
+        let rolled_back = roll_back_new_bot(&app, &new_id, &staged).await;
+        return Err(refuse("promote_child_not_removed", json!({"message": why, "child_id": id, "rolled_back": rolled_back})));
     }
     lifecycle::purge_bot_dir(&app, &id, LOCAL_HOST).await;
     app.emit("bot_changed", json!({"bot_id": id})).await;
@@ -578,6 +616,40 @@ mod tests {
         let out = promote(&r, PromoteReq { name: Some("kid-top".into()), ..Default::default() }).await.unwrap();
         assert_eq!(out["promoted_from"]["session_id"], SID);
         assert!(r.dest().is_file());
+        assert_eq!(child_state(&r).await, (true, None));
+    }
+
+    /// 檢查點寫不進去：child 不能被停、複製收回、config 沒多一顆；修好後重送成功。
+    #[tokio::test]
+    async fn a_failed_checkpoint_leaves_the_child_running_and_can_be_retried() {
+        let r = rig(true).await;
+        sqlx::query("CREATE TRIGGER refuse_checkpoint BEFORE UPDATE OF native_session_id ON runs BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END").execute(&r.e.app.db).await.unwrap();
+        assert_eq!(reason(promote(&r, PromoteReq::default()).await.unwrap_err()), "promote_checkpoint_failed");
+        assert_eq!(child_state(&r).await, (false, Some("running".into())), "child 沒被停");
+        assert!(!r.dest().exists(), "複製收回");
+        assert!(cfg_bot_names(&r).await.is_empty());
+        sqlx::query("DROP TRIGGER refuse_checkpoint").execute(&r.e.app.db).await.unwrap();
+        promote(&r, PromoteReq { name: Some("kid-top".into()), ..Default::default() }).await.unwrap();
+        assert_eq!(child_state(&r).await, (true, None));
+    }
+
+    /// 最後收 child 紀錄寫不進去：新 bot 要收回（不留兩顆活的），child 已停、可重送。
+    #[tokio::test]
+    async fn a_failed_child_retirement_rolls_the_new_bot_back_instead_of_leaving_two() {
+        let r = rig(true).await;
+        let sql = format!("CREATE TRIGGER refuse_retire BEFORE UPDATE OF deleted_at ON bots WHEN NEW.id = '{}' BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END", r.child);
+        sqlx::query(&sql).execute(&r.e.app.db).await.unwrap();
+        let err = promote(&r, PromoteReq { name: Some("kid-top".into()), ..Default::default() }).await.unwrap_err();
+        assert_eq!(reason(err), "promote_child_not_removed");
+        assert!(cfg_bot_names(&r).await.is_empty(), "新 bot 收回");
+        assert!(!r.dest().exists());
+        let live: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bots WHERE deleted_at IS NULL AND managed_by = 'user'").fetch_one(&r.e.app.db).await.unwrap();
+        assert_eq!(live, 0, "沒有第二顆活的 bot");
+        let active: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE state IN ('running','starting') AND bot_id != ?").bind(&r.child).fetch_one(&r.e.app.db).await.unwrap();
+        assert_eq!(active, 0, "新 bot 的 run 已停");
+        assert_eq!(child_state(&r).await, (false, None));
+        sqlx::query("DROP TRIGGER refuse_retire").execute(&r.e.app.db).await.unwrap();
+        promote(&r, PromoteReq { name: Some("kid-top".into()), ..Default::default() }).await.unwrap();
         assert_eq!(child_state(&r).await, (true, None));
     }
 }
