@@ -3067,7 +3067,10 @@ mod tests {
     /// 任務底下掛一顆臨時 bot（交辦已結案，`still_running` 只看 run）；`running` 時帶一個進行中的 run。
     async fn temp_bot_on(app: &Arc<App>, project_id: &str, mission_id: &str, running: bool) -> (String, String) {
         let tail = mission_id[mission_id.len() - 6..].to_ascii_lowercase();
-        let (bid, run) = ("t-exec".to_string(), "run-t-exec".to_string());
+        // 每次一個獨一無二的 id：`race_point` 是全域的、以 bot id 為鍵，固定 id 會讓平行的另一個測試 arm 的
+        // 「改表名注入讀取故障」在這個測試的 cleanup 裡被觸發（CI 偶發 `no such table: runs`）。
+        let uniq = crate::db::ulid().to_ascii_lowercase();
+        let (bid, run) = (format!("t-exec-{uniq}"), format!("run-t-exec-{uniq}"));
         let now = crate::db::now();
         sqlx::query("INSERT INTO bots (id,project_id,name,kind,managed_by,hook_token,created_at) VALUES (?,?,?,'claude','child','t',?)")
             .bind(&bid)
@@ -3143,6 +3146,21 @@ mod tests {
         let out = cleanup_temp_bots(&app, &mission).await;
         assert_eq!(out["deleted"][0]["bot_id"], bid.as_str(), "{out}");
         assert!(bot_deleted(&app, &bid).await);
+    }
+
+    /// `race_point` 是全域、以 bot id 為鍵：平行的兩個測試若拿到同一個 bot id，一個測試 arm 的「改表名注入讀取故障」
+    /// 會在另一個測試的 cleanup 裡被觸發（CI 偶發 `no such table: runs`）。所以每個測試的臨時 bot id 必須各自獨一無二。
+    #[tokio::test]
+    async fn temp_bots_of_different_tests_never_share_an_id_or_a_race_point_key() {
+        let (e1, e2) = (crate::testing::env().await, crate::testing::env().await);
+        let mut ids = Vec::new();
+        for e in [&e1, &e2] {
+            crate::supervisor::store::get_or_init(&e.app.db).await.unwrap();
+            let Json(m) = post_mission(State(e.app.clone()), Path(e.project_id.clone()), Json(new_mission("uniq", "pr"))).await.unwrap();
+            let (bid, _) = temp_bot_on(&e.app, &e.project_id, m["id"].as_str().unwrap(), true).await;
+            ids.push(bid);
+        }
+        assert_ne!(ids[0], ids[1], "同一個 race_point 鍵會讓平行測試互相觸發對方的故障注入");
     }
 
     /// 連 bot 列都讀不到：認不出是不是臨時 bot，一顆都不刪，回應列出來（沒有名字就給 bot id），DB 好了下一次照常清。
