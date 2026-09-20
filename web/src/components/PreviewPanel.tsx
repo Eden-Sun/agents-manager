@@ -3,6 +3,7 @@
  * 狀態來自 store.previews（WS `preview_changed` 即時寫入）；進來與 daemon 重連時 GET 一次補齊 dir／error。
  */
 import { useCallback, useEffect, useState } from 'react'
+import { orderRows, showRepo } from '../lib/previewList'
 import { groupOthers, kindLabel, fetchPreview, type PreviewOther, type PreviewRelation, type StartPreviewOpts, previewApiMissing, PREVIEW_API_MISSING, previewUrl, startPreview, stopPreview, PREVIEW_OFF, type Preview } from '../api/preview'
 import { isMock } from '../api'
 import { ApiError } from '../api/types'
@@ -70,33 +71,65 @@ const RELATION_NOTE: Record<PreviewRelation, string> = {
   other: '不是這顆 bot 的程式碼',
 }
 
-/** 本機所有在跑的 dev server，依 relation 分組；選了就 attach（斷開時不會關掉對方）。 */
-function OthersList({ others, busy, onAttach }: { others: PreviewOther[]; busy: boolean; onAttach: (port: number) => void }) {
+/** 本機所有在跑的 dev server，依 relation 分組；一筆一行、整列可點＝接上（斷開時不會關掉對方）。unknown（多半是後端）預設收起。 */
+function OthersList({
+  others,
+  root,
+  busy,
+  onAttach,
+}: {
+  others: PreviewOther[]
+  root: string | null
+  busy: boolean
+  onAttach: (port: number) => void
+}) {
+  const [showAll, setShowAll] = useState(false)
   if (others.length === 0) return null
+  const groups = groupOthers(others).map((g) => ({ relation: g.relation, ...orderRows(g.items, root) }))
+  const hidden = groups.reduce((n, g) => n + g.unknown.length, 0)
   return (
     <div className="preview-others">
-      <p className="preview-body">本機已開的 dev server，選一個直接接上：</p>
-      {groupOthers(others).map((g) => (
-        <section key={g.relation} className={`preview-group ${g.relation}`}>
-          <h3 className="preview-group-title">
-            {RELATION_TITLE[g.relation]}
-            {RELATION_NOTE[g.relation] ? <span className="preview-group-note">{RELATION_NOTE[g.relation]}</span> : null}
-          </h3>
-          <ul>
-            {g.items.map((o) => (
-              <li key={o.port}>
-                <span className="preview-other-dir">
-                  <span className="preview-kind">{kindLabel(o.kind)}</span> :{o.port} · <code>{o.dir}</code>
-                  {o.repo ? <span className="preview-other-repo"> ({o.repo})</span> : null}
-                </span>
-                <button type="button" className="btn preview-btn" disabled={busy} onClick={() => onAttach(o.port)}>
-                  {g.relation === 'same_dir' ? '接這個' : '還是接這個'}
-                </button>
-              </li>
-            ))}
-          </ul>
-        </section>
-      ))}
+      <p className="preview-body">本機已開的 dev server，點一列直接接上：</p>
+      {groups.map((g) => {
+        const rows = showAll ? [...g.known, ...g.unknown] : g.known
+        if (rows.length === 0) return null
+        return (
+          <section key={g.relation} className={`preview-group ${g.relation}`}>
+            <h3 className="preview-group-title">
+              {RELATION_TITLE[g.relation]}
+              {RELATION_NOTE[g.relation] ? <span className="preview-group-note">{RELATION_NOTE[g.relation]}</span> : null}
+            </h3>
+            <ul>
+              {rows.map(({ o, short, sharedDir }) => (
+                <li key={o.port}>
+                  <button
+                    type="button"
+                    className="preview-row"
+                    disabled={busy}
+                    title={`${o.dir}${o.pid ? ` · pid ${o.pid}` : ''}`}
+                    aria-label={`接上 ${kindLabel(o.kind)} :${o.port} ${short}`}
+                    onClick={() => onAttach(o.port)}
+                  >
+                    <span className="preview-kind">{kindLabel(o.kind)}</span>
+                    <span className="preview-row-port">:{o.port}</span>
+                    <span className="preview-row-path">
+                      {short}
+                      {showRepo(o.repo, short) ? <span className="preview-other-repo"> ({o.repo})</span> : null}
+                    </span>
+                    {sharedDir ? <span className="preview-samedir">同目錄</span> : null}
+                    <span className="preview-row-act">{g.relation === 'same_dir' ? '接這個' : '還是接這個'}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )
+      })}
+      {hidden > 0 ? (
+        <button type="button" className="preview-more" aria-expanded={showAll} onClick={() => setShowAll((v) => !v)}>
+          {showAll ? '收起其他服務' : `顯示其他 ${hidden} 個服務`}
+        </button>
+      ) : null}
     </div>
   )
 }
@@ -115,6 +148,7 @@ export function PreviewPanel({ botId }: { botId: string }) {
   const [nonce, setNonce] = useState(0)
 
   // 首屏先用 /api/state 帶的簡版，GET 回來再蓋掉。
+  const root = useStore((s) => s.projects.find((x) => x.id === bot?.project_id)?.path ?? bot?.cwd ?? null)
   const fromState = bot?.preview
   const p0: Preview =
     stored ?? (fromState ? { ...PREVIEW_OFF, status: fromState.status, port: fromState.port } : PREVIEW_OFF)
@@ -283,7 +317,7 @@ export function PreviewPanel({ botId }: { botId: string }) {
                 關閉
               </button>
             </div>
-            <OthersList others={p.others} busy={busy || !connected} onAttach={(port) => void start({ mode: 'attach', port })} />
+            <OthersList others={p.others} root={root} busy={busy || !connected} onAttach={(port) => void start({ mode: 'attach', port })} />
           </>
         ) : (
           <>
@@ -293,6 +327,7 @@ export function PreviewPanel({ botId }: { botId: string }) {
               <>
                 <OthersList
                   others={p.others}
+                  root={root}
                   busy={busy || !connected}
                   onAttach={(port) => void start({ mode: 'attach', port })}
                 />

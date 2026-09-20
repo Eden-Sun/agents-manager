@@ -2505,11 +2505,16 @@ export class MockTransport implements Transport {
   /** v2：候選目錄與本機在跑的 dev server（v4 含 kind／指令；只在沒接上／沒起時有意義）。 */
   private previewHints(botId: string) {
     const base = this.bot(botId).cwd ?? '/Users/me/project/agents-manager'
+    const root = this.projects.find((p) => p.id === this.bot(botId).project_id)?.path ?? base
     return {
       // am-claude-2 演「偵測不到 dev server、只有 others」（wits-ops 的情境）。
       candidates: this.bot(botId).name === 'am-claude-2' ? [] : [{ dir: `${base}/web`, command: 'bunx vite' }, { dir: `${base}/apps/web`, command: 'bun run dev' }],
       others: [
         { port: 5241, dir: `${base}/web`, pid: 4101, relation: 'same_dir', kind: 'vite', repo: 'agents-manager' },
+        { port: 6006, dir: `${root}/web`, pid: 4102, relation: 'same_dir', kind: 'storybook', repo: 'agents-manager' },
+        { port: 3000, dir: `${root}/apps/admin-bff-hono`, pid: 4103, relation: 'same_dir', kind: 'unknown', repo: 'agents-manager' },
+        { port: 5556, dir: `${root}/apps/admin-bff-hono`, pid: 4104, relation: 'same_dir', kind: 'unknown', repo: 'agents-manager' },
+        { port: 4000, dir: `${root}/apps/ffi-server`, pid: 4105, relation: 'same_dir', kind: 'unknown', repo: 'agents-manager' },
         { port: 5173, dir: '/Users/me/project/agents-manager-main/web', pid: 4242, relation: 'same_repo', kind: 'vite', repo: 'agents-manager' },
         { port: 3001, dir: '/Users/me/project/example-agents/projects/wt/webui/apps/web', pid: 4377, relation: 'other', kind: 'vite', repo: 'example-agents' },
         { port: 3200, dir: '/Users/me/project/example-agents/projects/wt/example-ops', pid: 44112, relation: 'other', kind: 'next', repo: 'example-ops' },
