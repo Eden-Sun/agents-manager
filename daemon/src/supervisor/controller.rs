@@ -1982,13 +1982,10 @@ mod tests {
         respawn_with(&app, &FAST).await;
         assert_ne!(LIVE_GENERATION.load(std::sync::atomic::Ordering::SeqCst), GEN, "讀不到：這一刻還起不來");
         crate::testing::make_table_readable(&app, "supervisors").await;
-        for _ in 0..100 {
-            if LIVE_GENERATION.load(std::sync::atomic::Ordering::SeqCst) == GEN {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        panic!("讀得到之後 controller 仍沒被起（沒有重試）");
+        assert!(
+            crate::testing::eventually!(LIVE_GENERATION.load(std::sync::atomic::Ordering::SeqCst) == GEN),
+            "讀得到之後 controller 仍沒被起（沒有重試）"
+        );
     }
 
     /// 409 的退避要爬得過一個典型回合（10～20 分鐘），而且壞掉的環境變數不能把保險絲變成

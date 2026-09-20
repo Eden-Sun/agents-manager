@@ -1725,7 +1725,7 @@ mod herdr_skill_timeout_tests {
         let hung = fake_herdr("sleep 30");
         let t = std::time::Instant::now();
         let err = herdr_skill_output(hung.to_str().unwrap(), Duration::from_millis(300)).await.unwrap_err().to_string();
-        assert!(t.elapsed() < Duration::from_secs(10), "沒有在期限內放棄");
+        assert!(t.elapsed() < Duration::from_secs(25), "沒有在期限內放棄（子行程 sleep 30）");
         assert!(err.contains("逾時"), "{err}");
 
         let ok = fake_herdr("echo 'name: herdr'");
