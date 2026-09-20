@@ -1669,6 +1669,7 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   讀不到誰是總管（`supervisors`）時整批不開（回 502）：不知道是誰，就排不出「總管最後重啟」，也不會替它排「60 秒內回不來就再啟動」的檢查。
   「重看」到拿到 bot 鎖之間的毫秒級空檔也關掉了：批次帶 `StartOpts.require_idle`，`restart_bot_with`／`restart_child_in_pane_with` **拿到鎖之後、送 ctrl+c 之前**
   再看一次（沒 run、非 running、working、blocked、非 idle、有 in-flight turn），不閒置回 409 `not_idle`（`busy` 帶上面的代碼），什麼都不動。使用者自己按的單顆重啟不帶這個旗標。
+  這一次看完到記 `stopping` 之間使用者直接在 pane 裡打字（`handle_status` 不拿 bot 鎖）也擋得住（#346）：`require_idle` 的停機許可跟閒置回收（§6.11，#144）同一句 UPDATE——`state='running' AND agent_status='idle'` 且沒有 in-flight turn 才記 `stopping`，輸了回 409 `not_idle`、不送 ctrl+c（排隊中的訊息不擋，`restart_hold` 保留它們；閒置回收才擋）。
 - **同時只准一批**：已經有一批在跑時再按，回那一批的 `batch_id`（`already_running: true`、`total: 0`），不另開一份重疊的清單。
 - **執行**：序列、一顆一顆，每顆 `lifecycle::restart_bot_with(StartOpts { resume_native: true, require_idle: true })`——stop 與 start 在**同一次持有 bot 鎖**裡做完
   （中間有空檔時，拿鎖前讀了 agent 清單的 reconcile 會搶進來把剛停掉的 agent 收編成新 run，start 就以 `active run already exists` 放棄，bot 從此沒人拉起）。
