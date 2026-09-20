@@ -535,15 +535,26 @@ fn instruction_files_of(bot: &db::Bot) -> &'static str {
 
 
 /// Write a file only its owner can read (0600): bot settings may carry secrets.
+/// 先寫 0600 的暫存檔再 rename 蓋過去：新內容永遠不會進到既有（可能是 0644 的）inode，
+/// 成功回傳就代表最終檔是 0600；任何一步失敗都回錯並刪掉暫存檔，舊檔維持原樣。
 fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::io::Write as _;
-        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
-        let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
-        f.write_all(bytes)?;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-        return Ok(());
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let tmp = dir.join(format!(".{name}.{}.tmp", crate::db::ulid()));
+        let written = (|| -> std::io::Result<()> {
+            let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+            f.write_all(bytes)?;
+            f.sync_all()?;
+            std::fs::rename(&tmp, path)
+        })();
+        if written.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        return written;
     }
     #[cfg(not(unix))]
     std::fs::write(path, bytes)
@@ -1000,6 +1011,31 @@ mod hook_cmd_parts_tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"{}");
         assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_private_replaces_atomically_and_cleans_up_on_failure() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("am-wp-atomic-{}", crate::db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.json");
+        let alias = dir.join("alias.json");
+        std::fs::write(&path, b"old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::hard_link(&path, &alias).unwrap();
+        write_private(&path, b"new-secret").unwrap();
+        // 舊 inode（另一個名字指著它）不能被寫進新內容，也不能被改權限之外的動作影響
+        assert_eq!(std::fs::read(&alias).unwrap(), b"old", "不可在舊 inode 上原地截斷寫入");
+        assert_eq!(std::fs::read(&path).unwrap(), b"new-secret");
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        // 發布失敗（目的地是非空目錄）：回錯、不留暫存檔
+        let bad = dir.join("d");
+        std::fs::create_dir_all(bad.join("x")).unwrap();
+        assert!(write_private(&bad, b"secret").is_err());
+        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().to_string()).filter(|n| n.ends_with(".tmp")).collect();
+        assert!(left.is_empty(), "暫存檔要清掉：{left:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
