@@ -104,7 +104,7 @@ bash scripts/ops/cd-trust-gate_test.sh                                          
 scripts/ops/cd-trust-gate.py approve --state-dir ~/.config/agents-manager/supervisor/AGM --note "看過 #123，是我請他改的" <完整 sha>
 ```
 
-**approve 是給人按的**：bot 收到 `cd_untrusted` 要做的是回報使用者，不是自己放行。
+**放行的決定只能來自使用者**：使用者自己跑，或 AGM 協調者憑使用者的明確原話代跑（`--note` 寫 message id 與原文、只放指名的那幾顆、不動 allow／protected，細節見 SPEC §18.2d）。其他 bot 收到 `cd_untrusted` 一律回報，不放行。
 
 ## daemon-swap.sh（＋ daemon-start.py）
 
