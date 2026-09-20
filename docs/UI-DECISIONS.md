@@ -460,3 +460,5 @@ daemon 這幾天把「寫不進 DB」改成 fail closed：外面的副作用做�
 - **鍵盤替代**：聚焦主力晶片後 `Ctrl+←／→` 移一格（不動的頭尾會說「已經在最前／後面」），移完焦點留在原晶片，並用 live region 報「X 移到主力第 n 位，共 m 位」。
   每顆主力晶片 `aria-describedby` 指到一段畫面上看不到的說明（可拖曳、Ctrl+方向鍵、觸控長按）。
 - 截圖：`docs/screenshots/primary-order/`（拖曳前、拖曳中、拖曳後、手機）。
+- **拖曳動畫（2026-09-20 使用者要求強化）**：抓起來時晶片浮起（放大 1.06、陰影＋主色外框）並**跟著游標**（inline `transform`，不吃游標事件，落點靠座標算）；原位留空，旁邊的晶片在落點讓出 14px 缺口（`margin` 過渡 0.16s，後面的自然滑開）加一條主色線；放開時同一次渲染（`flushSync`）收起拖曳並套用新順序，`components/useChipFlip.ts` 用 FLIP 讓每顆晶片從舊位置滑進新格（0.22s，被拖的那顆從放開的地方滑進去）。**`prefers-reduced-motion: reduce`：不位移、不縮放、不做缺口，落點只剩主色線，換位瞬間完成。**
+  失敗的通知帶 daemon 的原因（舊 daemon 不認得 `primary` 會回 400），不只說「沒收到」。截圖：`docs/screenshots/pinned-drag/`（`scripts/pinned-drag-shots.mjs`，mock 模式）。

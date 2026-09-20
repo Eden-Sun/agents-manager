@@ -404,15 +404,48 @@
 }
 
 .unread-chip.dragging {
-  opacity: 0.45;
+  /* 抓起來：浮起（陰影＋放大，位移由 inline transform 跟著游標）、蓋過旁邊的晶片、不吃游標事件（落點靠座標算，不靠 hover）。 */
+  position: relative;
+  z-index: 20;
   cursor: grabbing;
+  pointer-events: none;
+  opacity: 0.96;
+  background: var(--bg-panel);
+  border-color: var(--accent);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.28), 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent);
+  transition: box-shadow 0.12s ease, opacity 0.12s ease;
 }
 
-/* 放開會插在這顆前面：左緣一條主色線。 */
+/* 放開會插在這顆前面／最後一顆後面：旁邊的晶片讓出一個缺口（margin 過渡，後面的自然跟著滑），缺口邊緣一條主色線。 */
+.unread-chip.pinned {
+  transition: margin 0.16s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
 .unread-chip.drop-before {
-  box-shadow: -3px 0 0 0 var(--accent);
+  margin-left: 14px;
+  box-shadow: -8px 0 0 -5px var(--accent);
 }
 
 .unread-chip.drop-after {
-  box-shadow: 3px 0 0 0 var(--accent);
+  margin-right: 14px;
+  box-shadow: 8px 0 0 -5px var(--accent);
+}
+
+/* 減少動態：不位移、不縮放、不做缺口過渡；落點仍用主色線標示。 */
+@media (prefers-reduced-motion: reduce) {
+  .unread-chip.pinned {
+    transition: none;
+  }
+  .unread-chip.dragging {
+    transition: none;
+    transform: none !important;
+  }
+  .unread-chip.drop-before {
+    margin-left: 0;
+    box-shadow: -3px 0 0 0 var(--accent);
+  }
+  .unread-chip.drop-after {
+    margin-right: 0;
+    box-shadow: 3px 0 0 0 var(--accent);
+  }
 }

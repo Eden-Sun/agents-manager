@@ -6,6 +6,7 @@
  * 順序計算在 `lib/pinnedOrder.ts`（純函式、有測試）。
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { flushSync } from 'react-dom'
 import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from 'react'
 import { dropBefore, moveBefore, type Box } from '../lib/pinnedOrder'
 
@@ -19,6 +20,8 @@ export interface PinnedDnd {
   before: string | null | undefined
   /** 畫面上最後一顆主力晶片（放到最後面時在它右邊畫落點線）。 */
   lastId: string | null
+  /** 拖曳中的晶片跟著游標的位移（px，相對它原本的位置）；沒在拖＝0,0。 */
+  offset: { x: number; y: number }
   /** 給 live region 的最新一句。 */
   announce: string
   onPointerDown: (e: ReactPointerEvent<HTMLElement>, id: string) => void
@@ -37,7 +40,7 @@ export function usePinnedDrag(
   names: Record<string, string>,
   commit: (order: string[]) => void,
 ): PinnedDnd {
-  const [drag, setDrag] = useState<{ id: string; before: string | null; ready: boolean } | null>(null)
+  const [drag, setDrag] = useState<{ id: string; before: string | null; ready: boolean; dx: number; dy: number } | null>(null)
   const [announce, setAnnounce] = useState('')
   const suppress = useRef(false)
   // 事件處理在 window 上，讀最新的順序要靠 ref。
@@ -68,7 +71,7 @@ export function usePinnedDrag(
     const begin = () => {
       dragging = true
       suppress.current = true
-      setDrag({ id, before: null, ready: false })
+      setDrag({ id, before: null, ready: false, dx: 0, dy: 0 })
       window.addEventListener('touchmove', stopTouchScroll, { passive: false })
     }
     const end = () => {
@@ -92,16 +95,19 @@ export function usePinnedDrag(
         if (far < MOUSE_SLOP) return
         begin()
       }
-      setDrag({ id, before: dropBefore(boxesOf(chip), ev.clientX, ev.clientY, id), ready: true })
+      setDrag({ id, before: dropBefore(boxesOf(chip), ev.clientX, ev.clientY, id), ready: true, dx, dy })
     }
     const up = (ev: PointerEvent) => {
       const was = dragging
       end()
       if (!was) return
       const before = dropBefore(boxesOf(chip), ev.clientX, ev.clientY, id)
-      setDrag(null)
       const next = moveBefore(latest.current.fullOrder, id, before)
-      if (next) latest.current.commit(next)
+      // 同一次渲染收起拖曳狀態與套用新順序：分兩次渲染的話，中間那一格會讓晶片先「彈回原位」再滑去新位置（useChipFlip 量的是每次渲染後的位置）。
+      flushSync(() => {
+        setDrag(null)
+        if (next) latest.current.commit(next)
+      })
       // click 事件在 pointerup 之後同一個 task 內觸發；下一個 task 再放行。
       setTimeout(() => {
         suppress.current = false
@@ -152,6 +158,6 @@ export function usePinnedDrag(
 
   const consumeClick = useCallback(() => suppress.current, [])
 
-  return { dragId: drag?.id ?? null, before: drag?.ready ? drag.before : undefined,
+  return { dragId: drag?.id ?? null, before: drag?.ready ? drag.before : undefined, offset: { x: drag?.dx ?? 0, y: drag?.dy ?? 0 },
     lastId: visibleOrder[visibleOrder.length - 1] ?? null, announce, onPointerDown, onKeyDown, consumeClick }
 }
