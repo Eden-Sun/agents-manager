@@ -452,6 +452,15 @@ pub async fn emit_host_changed(app: &Arc<App>, conn: &HostConn) {
     }
 }
 
+/// 丟掉 `Child` 不會 wait：行程結束後在 daemon 存活期間留 zombie（#287）。另起 thread 等它，結束就收掉。
+pub fn reap_in_background(mut child: std::process::Child) {
+    std::thread::spawn(move || {
+        if let Err(error) = child.wait() {
+            tracing::warn!(?error, "failed waiting for spawned child");
+        }
+    });
+}
+
 /// Ensure the named herdr session's socket is reachable, spawning a headless server if not.
 pub async fn ensure_session(session: &str, log_dir: &PathBuf) -> Result<HerdrClient> {
     let sock = HerdrClient::session_socket(session);
@@ -475,12 +484,7 @@ pub async fn ensure_session(session: &str, log_dir: &PathBuf) -> Result<HerdrCli
     // foreground process group.
     #[cfg(unix)]
     cmd.process_group(0);
-    let mut child = cmd.spawn()?;
-    std::thread::spawn(move || {
-        if let Err(error) = child.wait() {
-            tracing::warn!(?error, "failed waiting for herdr server");
-        }
-    });
+    reap_in_background(cmd.spawn()?);
     for _ in 0..50 {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         if client.ping().await.is_ok() {
@@ -543,5 +547,22 @@ mod host_unreadable_tests {
         }
         app.emit_bot_status(&bot.id).await;
         assert_eq!(rx.try_recv().unwrap().data["host"], "local", "讀得到才發");
+    }
+}
+
+#[cfg(test)]
+mod reap_tests {
+    /// #287：detach 出去的行程結束後不能留 zombie。`ps -o stat=` 對 zombie 印 `Z`，收掉之後 ps 找不到這個 pid。
+    #[tokio::test]
+    async fn a_detached_child_is_reaped_after_it_exits() {
+        let child = std::process::Command::new("/bin/sh").args(["-c", "exit 0"]).spawn().unwrap();
+        let pid = child.id();
+        super::reap_in_background(child);
+        let gone = crate::testing::eventually!(!std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+            .unwrap_or(false));
+        assert!(gone, "結束的子行程沒被 wait，留成 zombie");
     }
 }

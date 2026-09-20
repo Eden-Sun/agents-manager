@@ -275,7 +275,7 @@ async fn probe_client() -> Result<HerdrClient> {
     if client.ping().await.is_ok() {
         return Ok(client);
     }
-    std::process::Command::new("/bin/sh")
+    let child = std::process::Command::new("/bin/sh")
         .arg("-lc")
         .arg(format!("exec herdr --session {PROBE_SESSION} server"))
         .stdin(std::process::Stdio::null())
@@ -283,6 +283,7 @@ async fn probe_client() -> Result<HerdrClient> {
         .stderr(std::process::Stdio::null())
         .spawn()
         .map_err(|e| anyhow!("could not start the `{PROBE_SESSION}` herdr session: {e}"))?;
+    crate::state::reap_in_background(child);
     for _ in 0..30 {
         tokio::time::sleep(Duration::from_millis(500)).await;
         if client.ping().await.is_ok() {
