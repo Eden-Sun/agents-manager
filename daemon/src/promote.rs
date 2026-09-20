@@ -207,6 +207,30 @@ async fn roll_back_new_bot(app: &Arc<App>, new_id: &str, staged: &Staged) -> boo
     removed.is_ok()
 }
 
+/// 升級出來的 user bot 的設定（設定從 child 帶：模型、強度、身分；args 不帶——那是收編時看到的舊 argv）。
+/// handler 與開機補完（`promote_intents`）共用同一份，補完出來的跟 handler 做的一模一樣。
+pub(crate) fn user_bot_cfg(child: &db::Bot, new_id: &str, name: &str, model: &Option<String>, effort: &Option<String>) -> BotCfg {
+    BotCfg {
+        id: Some(new_id.to_string()),
+        name: name.to_string(),
+        kind: "claude".into(),
+        model: model.clone(),
+        effort: effort.clone(),
+        fast: false,
+        persona: child.persona.clone(),
+        instruction_files: child.instruction_files.clone(),
+        args: vec![],
+        autostart: false,
+        inject_hooks: true,
+        auto_approve: child.auto_approve != 0,
+        identity: child.identity.clone(),
+        env: child.env(),
+        herdr_session: None,
+        create_request_id: None,
+        create_fingerprint: None,
+    }
+}
+
 /// `POST /api/bots/:id/promote` —— 見模組說明。
 pub async fn promote_bot(
     State(app): State<Arc<App>>,
@@ -277,55 +301,62 @@ pub async fn promote_bot(
     // 3. 複製 transcript。
     let staged = stage_transcript(&located.src, &dest_dir, &located.session_id)?;
 
+    // 持久 intent（#355 P4）：第一個回不去的一步（停 child）**之前**先 commit；承諾點＝目標 user bot 進 config。承諾點之後 daemon 死掉，
+    // 開機由 `promote_intents::recover_host` **往前補完**（不回滾，使用者 2026-09-20 裁示）；停 child 之前死掉＝`abandoned`（收回複製）。寫不進去就不繼續。
+    let new_id = db::ulid();
+    let payload = json!({
+        "child_id": id, "new_id": new_id, "project_id": child.project_id, "name": name, "model": model, "effort": effort,
+        "session_id": located.session_id, "dest": staged.dest.to_string_lossy(),
+        "created": staged.created.iter().map(|p| p.to_string_lossy().to_string()).collect::<Vec<_>>(),
+    });
+    let intent = match crate::delete_intents::begin(&app, "promote", &id, LOCAL_HOST, &payload).await {
+        Ok(i) => i,
+        Err(e) => {
+            staged.undo();
+            return Err(e);
+        }
+    };
+    #[cfg(test)]
+    lifecycle::race_point::hit("promote_after_intent", &id).await;
+
     // 4. 停 child：先把 session 記在它的 run 上（讓這個請求停到一半還能重送），停不掉就收回複製、不動。
     if let Some(r) = &run {
         // 檢查點是停 child 的硬前提：寫不進去（或寫進去的不是這段 session）就收回複製、child 照跑，可重送。
         if let Err(why) = checkpoint_session(&app, r, &located).await {
             staged.undo();
-            return Err(refuse("promote_checkpoint_failed", json!({"message": why, "child_stopped": false})));
+            crate::delete_intents::abandon(&app, &intent, "checkpoint failed; rolled back").await;
+        return Err(refuse("promote_checkpoint_failed", json!({"message": why, "child_stopped": false})));
         }
         let stopped = lifecycle::stop_bot_locked(&app, &id).await;
         let still = db::active_run(&app.db, &id).await;
         if stopped.is_err() || !matches!(still, Ok(None)) {
             staged.undo();
+        crate::delete_intents::abandon(&app, &intent, "stop failed; rolled back").await;
             return Err(refuse("stop_failed", json!({"message": "子 agent 停不掉，什麼都沒動。"})));
         }
     }
+    #[cfg(test)]
+    lifecycle::race_point::hit("promote_after_stop", &id).await;
 
-    // 5. 建 user bot（設定從 child 帶：模型、強度、身分；args 不帶——那是收編時看到的舊 argv）。
-    let new_id = db::ulid();
+    // 5. 建 user bot（設定見 `user_bot_cfg`）。
     let created = crate::projection::update_and_project(&app.cfg, &app.db, |cfg| {
         let p = cfg
             .projects
             .iter_mut()
             .find(|p| p.id.as_deref() == Some(child.project_id.as_str()))
             .ok_or_else(|| anyhow::anyhow!("not-in-config"))?;
-        p.bots.push(BotCfg {
-            id: Some(new_id.clone()),
-            name: name.clone(),
-            kind: "claude".into(),
-            model: model.clone(),
-            effort: effort.clone(),
-            fast: false,
-            persona: child.persona.clone(),
-            instruction_files: child.instruction_files.clone(),
-            args: vec![],
-            autostart: false,
-            inject_hooks: true,
-            auto_approve: child.auto_approve != 0,
-            identity: child.identity.clone(),
-            env: child.env(),
-            herdr_session: None,
-            create_request_id: None,
-            create_fingerprint: None,
-        });
+        p.bots.push(user_bot_cfg(&child, &new_id, &name, &model, &effort));
         Ok(())
     })
     .await;
     if let Err(e) = created {
         staged.undo();
+        crate::delete_intents::abandon(&app, &intent, "create failed; rolled back").await;
         return Err(refuse("promote_create_failed", json!({"message": e.to_string(), "child_stopped": run.is_some()})));
     }
+
+    #[cfg(test)]
+    lifecycle::race_point::hit("promote_after_create", &id).await;
 
     // 種下 session：native resume 讀「這顆 bot 最近一個結束的 run 的 native_session_id」。
     let seeded = sqlx::query(
@@ -352,11 +383,15 @@ pub async fn promote_bot(
     if let Some(why) = failure {
         // 收回：child 已經停了，紀錄還在，可以重送。
         let rolled_back = roll_back_new_bot(&app, &new_id, &staged).await;
+        crate::delete_intents::abandon(&app, &intent, "start failed; rolled back").await;
         return Err(refuse(
             "promote_start_failed",
             json!({"message": why, "child_stopped": run.is_some(), "rolled_back": rolled_back}),
         ));
     }
+
+    #[cfg(test)]
+    lifecycle::race_point::hit("promote_after_start", &id).await;
 
     // 分叉前的訊息留在 child 那顆的紀錄裡；新 bot 的對話寫一則說明。
     if let Ok(conv) = db::conversation_id(&app.db, &new_id).await {
@@ -378,9 +413,11 @@ pub async fn promote_bot(
     }
     if let Err(why) = retired {
         let rolled_back = roll_back_new_bot(&app, &new_id, &staged).await;
+        crate::delete_intents::abandon(&app, &intent, "child not removed; rolled back").await;
         return Err(refuse("promote_child_not_removed", json!({"message": why, "child_id": id, "rolled_back": rolled_back})));
     }
     lifecycle::purge_bot_dir(&app, &id, LOCAL_HOST).await;
+    crate::delete_intents::complete(&app, &intent).await;
     app.emit("bot_changed", json!({"bot_id": id})).await;
     app.emit("bot_changed", json!({"bot_id": new_id})).await;
     app.emit("project_changed", json!({"project_id": child.project_id})).await;
@@ -653,5 +690,103 @@ mod tests {
         sqlx::query("DROP TRIGGER refuse_retire").execute(&r.e.app.db).await.unwrap();
         promote(&r, PromoteReq { name: Some("kid-top".into()), ..Default::default() }).await.unwrap();
         assert_eq!(child_state(&r).await, (true, None));
+    }
+
+    // ---- #355 P4：promote 在承諾點前後行程死掉，開機補完 ----
+
+    /// 模擬行程死亡：promote 走到 `point` 就卡住，再把整個 future abort 掉。
+    async fn die_at(r: &Rig, point: &'static str) {
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let r2 = reached.clone();
+        lifecycle::race_point::arm(point, &r.child, move || async move {
+            r2.notify_one();
+            std::future::pending::<()>().await
+        });
+        let (app, id) = (r.e.app.clone(), r.child.clone());
+        let h = tokio::spawn(async move { promote_bot(State(app), Path(id), None).await.map(|_| ()) });
+        reached.notified().await;
+        h.abort();
+        let _ = h.await;
+    }
+
+    async fn intent_status(app: &Arc<App>, child: &str) -> Vec<String> {
+        sqlx::query_scalar("SELECT status FROM intents WHERE subject_id = ? ORDER BY created_at").bind(child).fetch_all(&app.db).await.unwrap()
+    }
+
+    /// #248：停 child 之後（承諾點前後三個位置）行程死掉。以前留下「child 已停、目標 bot 半建」的半套；現在開機往前補完：
+    /// 結果跟沒中斷一樣——child 收掉、新 user bot 以 --resume 起來、session 只種一次，補兩次也一樣。
+    #[tokio::test]
+    async fn a_promote_killed_after_the_child_stopped_is_completed_on_boot() {
+        for point in ["promote_after_stop", "promote_after_create", "promote_after_start"] {
+            let r = rig(true).await;
+            die_at(&r, point).await;
+            assert_eq!(intent_status(&r.e.app, &r.child).await, vec!["running"], "{point}：intent 還開著");
+
+            let app2 = crate::testing::restart_app(&r.e).await;
+            crate::promote_intents::recover_host(&app2, LOCAL_HOST).await;
+            let (deleted, _) = {
+                let d: Option<String> = sqlx::query_scalar("SELECT deleted_at FROM bots WHERE id = ?").bind(&r.child).fetch_one(&app2.db).await.unwrap();
+                (d.is_some(), ())
+            };
+            assert!(deleted, "{point}：child 收掉了");
+            let new_bots = app2.cfg.get().await.projects[0].bots.clone();
+            assert_eq!(new_bots.len(), 1, "{point}：config 裡只有一顆新的 user bot");
+            let new_id = new_bots[0].id.clone().unwrap();
+            assert!(db::active_run(&app2.db, &new_id).await.unwrap().is_some(), "{point}：新 bot 起來了");
+            assert_eq!(intent_status(&app2, &r.child).await, vec!["done"], "{point}");
+            let runs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE bot_id = ?").bind(&new_id).fetch_one(&app2.db).await.unwrap();
+            crate::promote_intents::recover_host(&app2, LOCAL_HOST).await;
+            tokio::join!(crate::promote_intents::recover_host(&app2, LOCAL_HOST), crate::promote_intents::recover_host(&app2, LOCAL_HOST));
+            let runs_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE bot_id = ?").bind(&new_id).fetch_one(&app2.db).await.unwrap();
+            assert_eq!(runs, runs_after, "{point}：冪等，沒有多種／多起");
+            assert_eq!(app2.cfg.get().await.projects[0].bots.len(), 1, "{point}：沒有多建");
+        }
+    }
+
+    /// 承諾之前（intent 寫了、child 還沒停）死掉：收回複製、abandoned，child 照跑，可原樣重送。
+    #[tokio::test]
+    async fn a_promote_killed_before_the_child_was_stopped_is_abandoned_and_the_copy_removed() {
+        let r = rig(true).await;
+        die_at(&r, "promote_after_intent").await;
+        assert!(r.dest().exists(), "死的當下複製還在");
+        let app2 = crate::testing::restart_app(&r.e).await;
+        crate::promote_intents::recover_host(&app2, LOCAL_HOST).await;
+        assert_eq!(intent_status(&app2, &r.child).await, vec!["abandoned"]);
+        assert!(!r.dest().exists(), "複製收回");
+        let deleted: Option<String> = sqlx::query_scalar("SELECT deleted_at FROM bots WHERE id = ?").bind(&r.child).fetch_one(&app2.db).await.unwrap();
+        assert!(deleted.is_none() && db::active_run(&app2.db, &r.child).await.unwrap().is_some(), "child 照跑");
+    }
+
+    /// 補不成（新 bot 接不回原對話）：5 次後 failed＋AGM inbox，不回滾（child 已停、session 記著）。
+    #[tokio::test]
+    async fn a_promote_that_cannot_be_completed_gives_up_and_tells_agm() {
+        let r = rig(true).await;
+        die_at(&r, "promote_after_stop").await;
+        // 之後 native resume 一定接不回：複製過去的 transcript 沒了。
+        let _ = std::fs::remove_file(r.dest());
+        let app2 = crate::testing::restart_app(&r.e).await;
+        crate::promote_intents::recover_host(&app2, LOCAL_HOST).await;
+        let mut st = vec![];
+        for _ in 0..200 {
+            st = intent_status(&app2, &r.child).await;
+            if st == vec!["failed"] {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert_eq!(st, vec!["failed"]);
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE kind = 'intent_failed' AND bot_id = ?").bind(&r.child).fetch_one(&app2.db).await.unwrap();
+        assert_eq!(n, 1, "AGM inbox 有一則 intent_failed");
+    }
+
+    /// intent 寫不進去＝什麼都還沒停：不能繼續（child 照跑、複製收回）。
+    #[tokio::test]
+    async fn a_promote_that_cannot_record_its_intent_stops_nothing() {
+        let r = rig(true).await;
+        sqlx::query("CREATE TRIGGER am_test_no_intents BEFORE INSERT ON intents BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END").execute(&r.e.app.db).await.unwrap();
+        assert!(promote(&r, PromoteReq::default()).await.is_err());
+        let (deleted, run) = child_state(&r).await;
+        assert!(!deleted && run.is_some(), "child 照跑");
+        assert!(!r.dest().exists(), "複製收回");
     }
 }

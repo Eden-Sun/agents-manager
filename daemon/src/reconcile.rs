@@ -100,6 +100,7 @@ pub async fn autostart_after_reconcile(app: &Arc<App>, host: &str, reconciled: b
     // 每次對帳成功都做（重啟 intent 隨時可能產生），不受下面「每台主機一生一次」限制。
     crate::restart_intents::recover_host(app, host).await;
     crate::delete_intents::recover_host(app, host).await;
+    crate::promote_intents::recover_host(app, host).await;
     if !app.autostarted_hosts.lock().await.insert(host.to_string()) {
         tracing::info!(host, "autostart already ran for this host in this daemon's lifetime; not restarting stopped bots");
         return false;
