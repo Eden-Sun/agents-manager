@@ -134,5 +134,12 @@ equals "尾端帶斜線的正確路徑照跑 exit 0" "$(AM_OUTBOX_ROOT="$OB/" ru
 gone   "尾端帶斜線的正確路徑照刪" "$OB/botA/old.txt"
 teardown
 
+# 帶 .. 的路徑前綴上像 outbox，實際指到別處（#373）。
+setup
+mkdir -p "$HOME/.ssh/keys"; echo x > "$HOME/.ssh/keys/old"; old "$HOME/.ssh/keys/old"
+equals "帶 .. 的路徑 exit 1" "$(AM_OUTBOX_ROOT="$OB/../../../.ssh" run)" "1"
+exists "帶 .. 指到 outbox 之外的過期檔不刪" "$HOME/.ssh/keys/old"
+teardown
+
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

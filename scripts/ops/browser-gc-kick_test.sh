@@ -137,6 +137,15 @@ check "收掉了" "reap headless pid 701" "$LOG"
 exists "但不在 /tmp/am-* 的目錄不刪" "$ROOT/keepme/Local State"
 teardown
 
+# 4b. --user-data-dir 帶 ..：前綴像 /tmp/am-* 但實際指到別處，行程照收、目錄不刪（#373）。
+setup
+mkdir -p "$TMPD/am-x" "$TMPD/victim"; touch "$TMPD/victim/Local State"
+chrome 702 1 "10:00" 9402 "$TMPD/am-x/../victim"
+run >/dev/null
+check  "帶 .. 的照樣收行程" "reap headless pid 702" "$LOG"
+exists "帶 .. 指到 am-* 之外的目錄不刪" "$TMPD/victim/Local State"
+teardown
+
 # 5. profile 目錄清理：只刪「像 profile＋沒人用＋1 小時沒動」的 /tmp/am-*。
 setup
 mkprofile "$TMPD/am-old-localstate"
