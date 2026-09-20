@@ -25,6 +25,9 @@ CURL="${CURL_BIN:-curl}"
 LAUNCHCTL="${LAUNCHCTL_BIN:-launchctl}"
 PGREP="${PGREP_BIN:-pgrep}"
 PYTHON="${PYTHON_BIN:-python3}"
+HERDR="${HERDR_BIN:-herdr}"
+PROBE_BOT="${SWAP_PROBE_BOT:-01M248GA4H1TAHJCZRKVR73S3C}"   # AGM 的 browser-gc child（3b 自測對象）
+PROBE_TRIES="${SWAP_PROBE_TRIES:-12}"   # 對方正在跑回合時，等它結束重送的次數上限
 SETTLE="${SWAP_SETTLE_SECS:-45}"          # 重啟後等多久再看 supervisor／名單（測試會調小）
 WINDOW_TRIES="${SWAP_WINDOW_TRIES:-1}"    # 拿不到窗口時重試幾次（呼叫端通常自己輪詢）
 
@@ -50,6 +53,26 @@ log() { echo "$(date '+%F %T') $*" | tee -a "$LOG"; }
 agm() { "$AGM_BIN" --compact "$@"; }
 dpid() { "$PGREP" -f '^\./target/release/agents-managerd serve$' | head -1; }
 api() { "$CURL" -sf -o /dev/null "http://127.0.0.1:$PORT$1"; }
+agm_probe() { # agm_probe <bot id> → "<http code> <body>"
+    # 測試用：注入一支假的送達器，才不用真的打 daemon。
+    [ -n "${SWAP_PROBE_CMD:-}" ] && { "$SWAP_PROBE_CMD" "$1"; return; }
+    "$PYTHON" - "$1" "$PORT" "$OWNER" <<'PY'
+import json, sys, urllib.request
+bot, port, owner = sys.argv[1], sys.argv[2], sys.argv[3]
+base = f"http://127.0.0.1:{port}"
+tok = json.load(urllib.request.urlopen(base + "/api/session"))["token"]
+body = {"text": "[build 自測，回 ok 即可，不要做任何事]", "relay_from": owner}
+req = urllib.request.Request(base + f"/api/bots/{bot}/prompt", data=json.dumps(body).encode(),
+                             headers={"X-AM-Token": tok, "Content-Type": "application/json"}, method="POST")
+try:
+    r = urllib.request.urlopen(req)
+    print(r.status, r.read().decode("utf-8", "replace")[:200])
+except urllib.error.HTTPError as e:
+    print(e.code, e.read().decode("utf-8", "replace")[:200])
+except Exception as e:
+    print("000", e)
+PY
+}
 
 NEWBIN="$CHECKOUT/target/release/agents-managerd"
 SHORT=$(echo "$SHA" | cut -c1-8)
@@ -96,6 +119,44 @@ esac
 PRE_UV=$("$SQLITE" "$DB" "pragma user_version")
 BUMPED=no; [ "$EXP_UV" != "$PRE_UV" ] && BUMPED=yes
 log "schema: checkout SCHEMA_VERSION=$EXP_UV, db user_version=$PRE_UV, bumped=$BUMPED"
+
+# ── 1b. 3b：對真 herdr 驗（換 binary 之前，腳本自己做，不由呼叫端帶值）──────────
+# pane id 一律當場取：${HERDR_PANE_ID}（pane 裡本來就有），沒有才 `herdr pane current`。
+# 2026-09-16 與 2026-09-20 兩次都是呼叫端把自己的 pane id 寫死，pane 換了以後讀到
+# pane_not_found；第二次還照樣換了 binary。所以這一段不接受外部傳進來的 pane id。
+PANE="${HERDR_PANE_ID:-}"
+if [ -z "$PANE" ]; then
+    PANE=$("$HERDR" pane current 2>/dev/null | "$PYTHON" -c 'import json,sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print(""); raise SystemExit
+print(((d.get("result") or {}).get("pane") or {}).get("pane_id") or ((d.get("result") or {}).get("pane") or {}).get("id") or "")')
+fi
+[ -n "$PANE" ] || { log "ABORT: 取不到自己的 pane id（HERDR_PANE_ID 沒設，herdr pane current 也讀不到）"; exit 3; }
+READ=$("$HERDR" pane read "$PANE" --source recent_unwrapped --format ansi --lines 2 2>&1); RRC=$?
+case "$RRC:$READ" in
+    0:*pane_not_found*|0:*protocol_mismatch*|[!0]*)
+        log "ABORT: herdr pane read $PANE rc=${RRC}：$(printf '%s' "$READ" | tr -d '\n' | head -c 160)"; exit 3 ;;
+esac
+log "3b herdr pane read $PANE ok"
+
+# 自測 prompt：對方正在跑回合（a turn is already in flight）是結構性的，等它結束重送；
+# 其他非 200 一律當成送達線有問題，不換 binary。
+i=0
+while [ "$i" -lt "$PROBE_TRIES" ]; do
+    i=$((i + 1))
+    PROBE=$(agm_probe "$PROBE_BOT")
+    case "$PROBE" in
+        200*) break ;;
+        *"a turn is already in flight"*) sleep 10 ;;
+        *) log "ABORT: 自測 prompt 回 $(printf '%s' "$PROBE" | head -c 160)"; exit 3 ;;
+    esac
+done
+case "$PROBE" in
+    200*) log "3b self probe ok: $(printf '%s' "$PROBE" | head -c 120)" ;;
+    *) log "ABORT: 自測對象一直在跑回合，送不進去"; exit 3 ;;
+esac
 
 # ── 2. 拿 restart 窗口，換 binary 前一刻再查一次（§3a）────────────────────────
 TOKEN=""; FENCE=""
