@@ -835,7 +835,7 @@ pub async fn start(app: &Arc<App>, bot_id: &str, req: StartReq) -> LcResult<Valu
     let no_config = |tried: Vec<String>| LcError::conflict("no_vite_config", json!({"bot_id": bot_id, "tried": tried}));
     let run = db::active_run(&app.db, bot_id).await.map_err(up)?;
     let env = match &run {
-        Some(run) => env_for(app, run).await.unwrap_or_else(|_| fallback_env(app)),
+        Some(run) => env_for(app, run).await?,
         None => fallback_env(app),
     };
     // 掃不到只影響「自動接」，不擋 spawn；明確要求 attach 時掃不到就是失敗。
