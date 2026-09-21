@@ -656,6 +656,13 @@ user 文字先照 CLI 自己的拆法還原（`lifecycle::pasted_content`，只�
   DB 存 `delivery='ok'`＋`turns.delivery_verified=0`（`delivery` 的 CHECK 只有原本四種狀態，不改表），API 回
   `"delivery":"unverified"`，AGM 交辦記成 `delivery=unverified`，UI 在使用者泡泡上標「未驗證送達」。它照常掛 stall
   與進度輪詢、Enter 補送，但**絕不自動重送**（可能已經被收下）。
+- **長段貼上要拆段送**（issue #382，2026-09-21 實測 herdr 0.9.1＋claude）：一次 `pane.send_text` 超過約 1024 位元組（≥ 1024 B 就中；≤ 1020 B 完整），
+  **最前面的 1024 位元組不見了**，只剩尾巴進框（1048 B 只剩最後 4 行、1804 B 只剩最後 46 行；使用者 58 行的數字清單就這樣只送到最後 3 行，
+  泡泡卻顯示整段）。`HerdrClient::pane_send_text` 一律拆成每段 ≤ 1000 B（優先在換行後切、不切斷多位元組字元）依序送——
+  所有走 `pane.send_text` 的路（打字送出、`POST /bots/:id/text`、主機 shell）一次補齊；claude 收到的與原文逐字相同（3604 B／4 段實測）。
+  拆段後最後一段若 ≤ 800 字不會被 claude 摺起來，框可以比預設的 24 列高：打字之後看框改用 `box_state_within(…, 24 + 這段字的列數)`，
+  否則框頂的 `❯` 找不到、判成讀不出來而不按 Enter。第二層：按 Enter 之前框裡若**看得出缺了開頭**（`paste_check::paste_truncated`，只認 claude、
+  框裡是摺起來的佔位或太高找不到就不判），改送 `ctrl+c` 清框並回 `NotAttempted{paste_truncated, retry:true}`（409，一個字都沒到 agent）；清不掉才是 `Unproven`。
 - **Enter 補送認得摺起來的貼上**（2026-09-19）：claude 把長段貼上摺成 `[Pasted text #N +M lines]`，框裡看不到原文。
   框裡**只有**這一個佔位、且 M 等於送出字的換行數，就當成我們那則還沒送出、照樣補 Enter；行數對不上或後面還有字
   （使用者自己貼的／正在打的）不動。以前比對原文落空、重送又因框不空被擋，12 秒後直接判 stall——AM-1-XH 就這樣

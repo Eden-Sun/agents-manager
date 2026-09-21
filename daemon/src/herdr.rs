@@ -464,8 +464,11 @@ impl HerdrClient {
     }
 
     /// Literal text, no Enter. Used by the grok quota probe (SPEC §12.4).
+    /// 一次 `pane.send_text` 超過約 1024 B，herdr 0.9.1 會丟掉最前面的 1024 B（#382），所以拆成小段依序送。
     pub async fn pane_send_text(&self, pane_id: &str, text: &str) -> Result<()> {
-        self.call("pane.send_text", json!({"pane_id": pane_id, "text": text})).await?;
+        for piece in split_paste(text, SEND_TEXT_CHUNK) {
+            self.call("pane.send_text", json!({"pane_id": pane_id, "text": piece})).await?;
+        }
         Ok(())
     }
 
@@ -622,6 +625,45 @@ fn is_not_found(e: &anyhow::Error) -> bool {
         .unwrap_or(false)
 }
 
+/// `pane.send_text` 一段最多幾位元組（#382）。實測（2026-09-21，herdr 0.9.1＋claude）：單段 ≤ 1020 B 完整、
+/// ≥ 1024 B 前面 1024 B 不見；1000 B 一段連續送 4 次（3604 B），claude 收到的與原文逐字相同。
+/// 一段 > 800 字時 claude 會把它摺成 `[Pasted text #N +M lines]`，輸入框才不會被長段貼上撐高。
+const SEND_TEXT_CHUNK: usize = 1000;
+
+/// 把貼上的字拆成每段 ≤ `max` 位元組：盡量在換行之後切（一行放不下才在字元邊界硬切，不切斷多位元組字元），
+/// 依序接起來就是原文。空字串沒有片段。
+fn split_paste(text: &str, max: usize) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    for line in text.split_inclusive('\n') {
+        let end_of_line = start_of(text, line) + line.len();
+        // 這一行放進目前這段會超過：先把目前這段收掉。
+        while end_of_line - start > max {
+            let line_start = start_of(text, line);
+            if line_start > start {
+                out.push(&text[start..line_start]);
+                start = line_start;
+                continue;
+            }
+            let mut cut = start + max;
+            while !text.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            out.push(&text[start..cut]);
+            start = cut;
+        }
+    }
+    if start < text.len() {
+        out.push(&text[start..]);
+    }
+    out
+}
+
+/// `line` 是 `text` 的子切片：它在 `text` 裡的起點。
+fn start_of(text: &str, line: &str) -> usize {
+    line.as_ptr() as usize - text.as_ptr() as usize
+}
+
 #[cfg(test)]
 mod arg_tests {
     use super::{fit_command_line, fold_newlines, MAX_COMMAND_BYTES};
@@ -681,5 +723,44 @@ mod arg_tests {
         for s in ["--append-system-prompt", "with `backtick` and 'quote' and \"dq\"", "#1 中文與符號、《》", ""] {
             assert_eq!(fold_newlines(s), s, "{s}");
         }
+    }
+}
+
+#[cfg(test)]
+mod split_paste_tests {
+    use super::{split_paste, SEND_TEXT_CHUNK};
+
+    /// #382：拆完依序接起來一定是原文，每段都不超過上限；空字串沒有片段。
+    #[test]
+    fn pieces_rebuild_the_text_and_respect_the_limit() {
+        let mut cases = vec![String::new(), "短".into(), "a\n".into(), "\n\n\n".into(), "x".repeat(1300), "你".repeat(500)];
+        cases.push((0..58).map(|i| format!("2026081{}0{:08}", i % 10, i * 7919)).collect::<Vec<_>>().join("\n") + "\n\n以上用換行號");
+        cases.push(format!("{}\n{}\n{}", "a".repeat(700), "b".repeat(10), "c".repeat(511)));
+        for text in cases {
+            for max in [4, 7, 1000] {
+                let pieces = split_paste(&text, max);
+                assert_eq!(pieces.concat(), text, "max {max}");
+                assert!(pieces.iter().all(|p| !p.is_empty() && p.len() <= max), "max {max}: {:?}", pieces.iter().map(|p| p.len()).collect::<Vec<_>>());
+            }
+        }
+        assert!(split_paste("", SEND_TEXT_CHUNK).is_empty());
+    }
+
+    /// 在換行之後切：不把一行數字從中間剖開（放得進一段的行不被切）。
+    #[test]
+    fn a_line_that_fits_is_never_cut() {
+        let text = (0..58).map(|i| format!("2026081{}0{:08}\n", i % 10, i * 7919)).collect::<String>();
+        let pieces = split_paste(&text, 100);
+        assert!(pieces.len() > 5);
+        assert!(pieces.iter().all(|p| p.ends_with('\n') && p.len() <= 100), "{pieces:?}");
+    }
+
+    /// 一行比上限長才硬切，而且切在字元邊界（中文一個字三個位元組）。
+    #[test]
+    fn an_overlong_line_is_cut_on_a_char_boundary() {
+        let text = "你好".repeat(10);
+        let pieces = split_paste(&text, 7);
+        assert_eq!(pieces.concat(), text);
+        assert!(pieces.iter().all(|p| p.len() <= 7 && std::str::from_utf8(p.as_bytes()).is_ok()));
     }
 }

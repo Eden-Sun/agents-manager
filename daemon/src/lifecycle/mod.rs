@@ -42,6 +42,7 @@ mod interruption;
 mod owed_delivery;
 /// claude 把貼上的 prompt 包成 `<pasted_content>` 寫進 transcript（#218）。
 pub(crate) mod pasted_content;
+mod paste_check;
 mod transitions;
 /// issue #81 探索用的原型；`#[cfg(test)]` 整個檔案只在 `cargo test` 底下編，不進正式二進位
 /// （見檔案頂端的說明與 docs/CLAUDE-NATIVE-TRANSPORT.md）。

@@ -384,7 +384,7 @@ struct ComposerRow {
 
 /// The last row near the bottom whose first visible glyph is the kind's composer marker.
 fn composer_row(kind: &str, lines: &[&str]) -> Option<usize> {
-    locate_composer(kind, lines, false).map(|c| c.idx)
+    locate_composer(kind, lines, false, COMPOSER_TAIL).map(|c| c.idx)
 }
 
 /// codex (gpt-6-astra and later) animates braille particles (`⠁⠂⠄⠈⠐⠠⢀`) across its composer and
@@ -403,9 +403,9 @@ fn blank_particles(cells: Vec<Cell>, drop: bool) -> Vec<Cell> {
     cells.into_iter().map(|c| if is_particle(&c) { Cell { ch: ' ', dim: false, fg: false, fg_rgb: None, bg_rgb: None } } else { c }).collect()
 }
 
-fn locate_composer(kind: &str, lines: &[&str], drop_particles: bool) -> Option<ComposerRow> {
+fn locate_composer(kind: &str, lines: &[&str], drop_particles: bool, tail: usize) -> Option<ComposerRow> {
     let glyph = composer_glyph(kind)?;
-    let from = lines.len().saturating_sub(COMPOSER_TAIL);
+    let from = lines.len().saturating_sub(tail);
     (from..lines.len()).rev().find_map(|idx| {
         let cells = blank_particles(styled_cells(lines[idx]), drop_particles);
         let mut i = cells.iter().position(|c| !c.ch.is_whitespace())?;
@@ -444,11 +444,17 @@ fn locate_composer(kind: &str, lines: &[&str], drop_particles: bool) -> Option<C
 /// **entirely dim** (a placeholder or suggested prompt, whatever it says), which only a styled (`format: ansi`) read can show. A plain-text read never
 /// accepts a placeholder: the same words could have been typed (sol review round nine #2).
 pub(crate) fn box_state(kind: &str, screen: &str) -> BoxState {
+    box_state_within(kind, screen, COMPOSER_TAIL)
+}
+
+/// [`box_state`]，但輸入框可以高到 `tail` 列。剛貼上一段我們自己知道有幾列的字：拆成小段貼進去時最後一段可能沒被摺起來，
+/// 框有那段這麼高（#382），預設的 24 列找不到框頂的 `❯` 就會判成讀不出來、不按 Enter。
+pub(crate) fn box_state_within(kind: &str, screen: &str, tail: usize) -> BoxState {
     let lines: Vec<&str> = screen.lines().collect();
     // codex's braille animation is only separable from typed text on a styled read (see
     // `is_particle`); a plain read is never relaxed.
     let particles = kind == "codex" && screen.contains("\u{1b}[");
-    let Some(c) = locate_composer(kind, &lines, particles) else { return BoxState::Unready };
+    let Some(c) = locate_composer(kind, &lines, particles, tail) else { return BoxState::Unready };
     let mut content = c.after_glyph;
     if matches!(content.first(), Some((' ' | '\u{a0}', _))) {
         content.remove(0);
@@ -475,8 +481,8 @@ pub(crate) fn box_state(kind: &str, screen: &str) -> BoxState {
         .map(|r| blank_particles(styled_cells(r), particles).into_iter().map(|c| c.ch).collect())
         .collect();
     let edge = match (kind, c.boxed) {
-        (_, true) => rest.iter().take(COMPOSER_TAIL).position(|r| is_box_bottom(r)),
-        ("claude", false) => rest.iter().take(COMPOSER_TAIL).position(|r| is_rule_row(r)),
+        (_, true) => rest.iter().take(tail).position(|r| is_box_bottom(r)),
+        ("claude", false) => rest.iter().take(tail).position(|r| is_rule_row(r)),
         // codex draws no frame: the composer ends at the first row that is not an indented
         // continuation (a blank row, the status line, or the end of the screen).
         ("codex", false) => Some(rest.iter().position(|r| r.trim().is_empty() || !r.starts_with("  ")).unwrap_or(rest.len())),
@@ -995,6 +1001,11 @@ pub(crate) enum Typing {
     Done(Delivered),
 }
 
+/// 剛貼進去的 `text` 讓框最多多高：預設的 24 列加上它自己的列數（上限 300，`read_composer` 只讀 400 列）。
+fn typed_tail(text: &str) -> usize {
+    super::poller::COMPOSER_TAIL + (text.matches('\n').count() + 1).min(300)
+}
+
 /// 打字、看框（必要時重貼一次），停在送出鍵之前。插隊送出要在送出鍵上判斷有沒有打斷（#120），所以跟按鍵分開。
 pub(crate) async fn type_text(
     client: &HerdrClient,
@@ -1018,7 +1029,7 @@ pub(crate) async fn type_text(
     client.pane_send_text(&pane, text).await?;
     tokio::time::sleep(Duration::from_millis(TYPE_SETTLE_MS)).await;
     let mut seen = read().await?;
-    let box_empty = box_state(&bot.kind, &seen) == BoxState::Empty;
+    let box_empty = box_state_within(&bot.kind, &seen, typed_tail(text)) == BoxState::Empty;
     let evidence_grew = evidence(&bot.kind, &proof, offset, &seen, text)? > baseline;
     if should_repaste(&proof, box_empty, evidence_grew) {
         tracing::warn!(run = %run.id, bot = %bot.name, "the paste did not reach the composer; pasting once more");
@@ -1032,7 +1043,19 @@ pub(crate) async fn type_text(
         tokio::time::sleep(Duration::from_millis(TYPE_SETTLE_MS)).await;
         seen = read().await?;
     }
-    match box_state(&bot.kind, &seen) {
+    match box_state_within(&bot.kind, &seen, typed_tail(text)) {
+        // #382：框裡缺了開頭。按 Enter 送出去的就是半段——清框、明講沒送出（框清乾淨了才算一個字都沒到 agent）。
+        BoxState::NonEmpty if super::paste_check::paste_truncated(&bot.kind, &seen, text) => {
+            tracing::warn!(run = %run.id, bot = %bot.name, "the composer lost the head of the paste; clearing it instead of sending half");
+            client.pane_send_keys(&pane, &["ctrl+c"]).await?;
+            tokio::time::sleep(Duration::from_millis(TYPE_SETTLE_MS)).await;
+            let cleared = box_state_within(&bot.kind, &read().await?, typed_tail(text)) == BoxState::Empty;
+            return Ok(Typing::Done(if cleared {
+                Delivered::NotAttempted { reason: "paste_truncated", retry: true }
+            } else {
+                Delivered::Unproven("paste_truncated_uncleared")
+            }));
+        }
         BoxState::NonEmpty => {}
         BoxState::Empty if proof != Proof::Unverified && evidence(&bot.kind, &proof, offset, &seen, text)? > baseline => {
             return Ok(Typing::Done(Delivered::Submitted));
@@ -1069,7 +1092,7 @@ pub(crate) async fn confirm_submitted(
             tracing::warn!(run = %run.id, bot = %bot.name, "the session changed while delivering; the transcript proof no longer applies");
             return Ok(Delivered::Unproven("session_changed"));
         }
-        match box_state(&bot.kind, &now) {
+        match box_state_within(&bot.kind, &now, typed_tail(text)) {
             // No evidence to wait for: the box took the paste and emptied on Enter. That is all
             // that can be said, and it is said as `Unverified`, not as a proven delivery.
             BoxState::Empty if *proof == Proof::Unverified => {
@@ -1094,7 +1117,7 @@ pub(crate) async fn confirm_submitted(
             _ => {}
         }
     }
-    let why = match box_state(&bot.kind, &read().await?) {
+    let why = match box_state_within(&bot.kind, &read().await?, typed_tail(text)) {
         BoxState::NonEmpty => "still_in_box",
         BoxState::Unready => "composer_unreadable",
         BoxState::Empty => "not_proven_submitted",
@@ -1125,7 +1148,7 @@ pub(crate) async fn submit_landed(app: &Arc<App>, client: &HerdrClient, run: &db
             return Landed::Yes(Delivered::Submitted);
         }
         let Ok(now) = read_composer(client, &t.pane).await else { continue };
-        match box_state(&bot.kind, &now) {
+        match box_state_within(&bot.kind, &now, typed_tail(text)) {
             BoxState::NonEmpty => return Landed::No,
             BoxState::Empty if t.proof == Proof::Unverified => return Landed::Yes(Delivered::Unverified),
             BoxState::Empty if t.proof == Proof::EchoRow && evidence(&bot.kind, &t.proof, t.offset, &now, text).is_ok_and(|n| n > t.baseline) => {
