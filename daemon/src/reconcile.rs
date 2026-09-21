@@ -341,6 +341,66 @@ fn child_name_from_agent(name: &str) -> String {
     }
 }
 
+/// Herdr normally tells us the CLI kind.  During launch it can report an agent before that
+/// field is populated, so use the foreground executable as a deterministic fallback instead of
+/// permanently inheriting the parent's kind.
+fn known_kind(value: Option<&str>) -> Option<&'static str> {
+    let value = value?.trim().to_ascii_lowercase();
+    crate::config::KINDS.iter().copied().find(|kind| *kind == value)
+}
+
+fn kind_from_argv(argv: &[String]) -> Option<&'static str> {
+    let executable = argv.first()?.rsplit('/').next();
+    known_kind(executable)
+}
+
+async fn child_kind(client: &crate::herdr::HerdrClient, agent: &crate::herdr::AgentInfo, fallback: &str) -> String {
+    if let Some(kind) = known_kind(agent.agent.as_deref()) {
+        return kind.to_string();
+    }
+    if let Ok(processes) = client.pane_process_info(&agent.pane_id).await {
+        if let Some(kind) = processes.iter().find_map(|p| kind_from_argv(&p.argv)) {
+            return kind.to_string();
+        }
+    }
+    fallback.to_string()
+}
+
+/// A child can be adopted one pass before Herdr has filled `agent`.  Once the real kind is
+/// visible, correct the persisted row even though it is already a claimed child.  Reset all
+/// kind-dependent observations so the next pane probe uses the new CLI's env and argv rules.
+async fn refresh_child_kind(app: &Arc<App>, bot: &mut db::Bot, pane_id: &str, kind: &str) -> anyhow::Result<()> {
+    if bot.managed_by != "child" || bot.kind == kind {
+        return Ok(());
+    }
+    let changed = sqlx::query(
+        "UPDATE bots SET kind = ?, identity = NULL, model = NULL, effort = NULL, fast = 0
+         WHERE id = ? AND managed_by = 'child'",
+    )
+    .bind(kind)
+    .bind(&bot.id)
+    .execute(&app.db)
+    .await?;
+    if changed.rows_affected() == 0 {
+        return Ok(());
+    }
+    sqlx::query(
+        "UPDATE runs SET runtime_model = NULL, runtime_effort = NULL, runtime_fast = NULL
+         WHERE bot_id = ? AND state IN ('starting','running','stopping')",
+    )
+    .bind(&bot.id)
+    .execute(&app.db)
+    .await?;
+    crate::pane_identity::reset_probe(&bot.id, pane_id);
+    bot.kind = kind.to_string();
+    bot.identity = None;
+    bot.model = None;
+    bot.effort = None;
+    bot.fast = 0;
+    app.emit("bot_changed", json!({"bot_id": bot.id})).await;
+    Ok(())
+}
+
 /// 子 agent 的 agent 不在了，能不能照 #60 退休它（#191）。兩條退休路徑共用這一支，免得一邊修、一邊漏。
 ///
 /// 只有**確定沒在維護**才可以：herdr 重啟的那幾分鐘正是所有 pane 同時消失的時候，這時讀不到維護狀態就當成
@@ -459,6 +519,7 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
     let mut claimed: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut parents: Vec<Parent> = Vec::new();
     for bot in bots {
+        let mut bot = bot;
         // Default-session bots are default_session::sync's; absent from our agent.list ≠ exited.
         if bot.herdr_session.as_deref().map(|s| s != session).unwrap_or(false) {
             continue;
@@ -565,6 +626,12 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
                         found_name = None;
                     }
                 }
+            }
+        }
+        if bot.managed_by == "child" {
+            if let Some(agent) = found.as_ref() {
+                let kind = child_kind(&client, agent, &bot.kind).await;
+                refresh_child_kind(app, &mut bot, &agent.pane_id, &kind).await?;
             }
         }
         // A bot only owns a tab while herdr still lists its agent.
@@ -778,12 +845,7 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
                 if crate::config::valid_bot_name(suffix) { suffix.to_string() } else { child_name_from_agent(name) }
             }
         };
-        let kind = agent
-            .agent
-            .as_deref()
-            .filter(|k| crate::config::valid_kind(k))
-            .unwrap_or(parent.kind.as_str())
-            .to_string();
+        let kind = child_kind(&client, agent, &parent.kind).await;
         // One failed child is logged and skipped; a `?` here aborted the whole host (review 2026-09-12 #2).
         match adopt_child(app, host, &client, &session, agent, name, parent, &child_name, &kind).await {
             Ok(bot_id) => {
@@ -899,8 +961,18 @@ async fn adopt_child(
             }
             // kind 換了就把舊 identity 丟掉（SQLite 的 SET 右邊讀的是舊列值）：身分有 kind，
             // 換成別的 CLI 之後那個身分就不適用了（`identity_kind`）。
-            sqlx::query("UPDATE bots SET cwd = COALESCE(?, cwd), identity = CASE WHEN kind = ? THEN identity ELSE NULL END, kind = ? WHERE id = ?")
+            sqlx::query(
+                "UPDATE bots SET cwd = COALESCE(?, cwd),
+                   identity = CASE WHEN kind = ? THEN identity ELSE NULL END,
+                   model = CASE WHEN kind = ? THEN model ELSE NULL END,
+                   effort = CASE WHEN kind = ? THEN effort ELSE NULL END,
+                   fast = CASE WHEN kind = ? THEN fast ELSE 0 END,
+                   kind = ? WHERE id = ?",
+            )
                 .bind(agent.cwd.clone())
+                .bind(kind)
+                .bind(kind)
+                .bind(kind)
                 .bind(kind)
                 .bind(kind)
                 .bind(&id)
@@ -1038,7 +1110,7 @@ async fn sync_pane_model(app: &Arc<App>, host: &str, client: &crate::herdr::Herd
     // Pick the process that looks like the CLI (not `git`, a pager, `caffeinate`), else the first.
     let cli = procs
         .iter()
-        .find(|p| p.argv.first().map(|a| a.contains(bot.kind.as_str())).unwrap_or(false))
+        .find(|p| kind_from_argv(&p.argv) == Some(bot.kind.as_str()))
         .or_else(|| procs.iter().find(|p| !p.argv.is_empty()));
     if want_identity {
         crate::pane_identity::sync_child_identity(app, host, bot, &agent.pane_id, cli.and_then(|p| p.pid)).await;
@@ -1048,6 +1120,9 @@ async fn sync_pane_model(app: &Arc<App>, host: &str, client: &crate::herdr::Herd
     }
     let argv: &[String] = cli.map(|p| p.argv.as_slice()).unwrap_or(&[]);
     let (mut model, mut effort) = crate::models::model_effort_from_argv(&bot.kind, argv);
+    let fast = crate::models::fast_from_argv(&bot.kind, argv)
+        .filter(|fast| *fast && bot.fast == 0)
+        .map(|_| 1_i64);
     if bot.kind == "grok" && (model.is_none() || effort.is_none()) {
         let (tm, te) = crate::models::grok_title_model_effort(agent.terminal_title_stripped.as_deref().unwrap_or(""));
         model = model.or(tm);
@@ -1065,12 +1140,13 @@ async fn sync_pane_model(app: &Arc<App>, host: &str, client: &crate::herdr::Herd
     }
     let model = model.filter(|_| bot.model.is_none());
     let effort = effort.filter(|_| bot.effort.is_none());
-    if model.is_none() && effort.is_none() {
+    if model.is_none() && effort.is_none() && fast.is_none() {
         return;
     }
-    if let Err(e) = sqlx::query("UPDATE bots SET model = COALESCE(?, model), effort = COALESCE(?, effort) WHERE id = ?")
+    if let Err(e) = sqlx::query("UPDATE bots SET model = COALESCE(?, model), effort = COALESCE(?, effort), fast = COALESCE(?, fast) WHERE id = ?")
         .bind(&model)
         .bind(&effort)
+        .bind(fast)
         .bind(&bot.id)
         .execute(&app.db)
         .await
@@ -1078,7 +1154,7 @@ async fn sync_pane_model(app: &Arc<App>, host: &str, client: &crate::herdr::Herd
         tracing::warn!(bot = %bot.name, error = ?e, "cannot record the model a child agent is running");
         return;
     }
-    tracing::info!(bot = %bot.name, pane = %agent.pane_id, ?model, ?effort, "reconcile: read the child's model off its argv");
+    tracing::info!(bot = %bot.name, pane = %agent.pane_id, ?model, ?effort, ?fast, "reconcile: read the child's model off its argv");
     app.emit("bot_changed", json!({"bot_id": bot.id})).await;
 }
 
@@ -1203,7 +1279,7 @@ mod compat_tests {
     use crate::db;
     use crate::state::App;
     use crate::testing as tt;
-    use serde_json::json;
+    use serde_json::{json, Value};
     use std::sync::Arc;
 
     async fn a_bot(env: &tt::Env, name: &str) -> String {
@@ -2448,6 +2524,178 @@ mod compat_tests {
             env: claude_env(dir),
             args: vec![],
         }
+    }
+
+    fn codex_identity(name: &str, dir: &str) -> crate::config::IdentityCfg {
+        crate::config::IdentityCfg {
+            name: name.into(),
+            kind: "codex".into(),
+            host: None,
+            env: std::collections::BTreeMap::from([("CODEX_HOME".into(), dir.into())]),
+            args: vec![],
+        }
+    }
+
+    async fn configure_cross_kind_identities(app: &Arc<App>) {
+        app.cfg
+            .update(|c| {
+                c.identities = vec![
+                    claude_identity("cc1", "/tmp/.claude-cc1"),
+                    codex_identity("cx1", "/tmp/.codex-cx1"),
+                ];
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    fn codex_argv() -> [&'static str; 7] {
+        [
+            "codex",
+            "-m",
+            "gpt-5.6-sol",
+            "-c",
+            "model_reasoning_effort=\"max\"",
+            "-c",
+            "service_tier=\"priority\"",
+        ]
+    }
+
+    /// Herdr can list the pane before it has filled `agent`.  The process is still enough to
+    /// classify the child on the first pass, and its own CODEX_HOME must win over the Claude
+    /// parent's inherited identity.
+    #[tokio::test]
+    async fn a_codex_child_is_classified_from_argv_before_herdr_reports_its_kind() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        configure_cross_kind_identities(&app).await;
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let child_pane = client.pane_split(&root.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
+        let parent = a_bot(&env, "alfa").await;
+        sqlx::query("UPDATE bots SET identity = 'cc1' WHERE id = ?").bind(&parent).execute(&app.db).await.unwrap();
+        let parent_agent = crate::config::agent_name("proj", &parent);
+        let child_agent = format!("{parent_agent}-codex");
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, tab_id, pane_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','idle',?,?,?,?,'test',?)",
+        )
+        .bind(db::ulid())
+        .bind(&parent)
+        .bind(&ws.workspace_id)
+        .bind(&root.tab_id)
+        .bind(&root.pane_id)
+        .bind(&parent_agent)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        *env.herdr.agents.lock().unwrap() = vec![
+            json!({"name": parent_agent, "agent": "claude", "agent_status": "idle",
+                   "workspace_id": ws.workspace_id, "tab_id": root.tab_id, "pane_id": root.pane_id, "cwd": "/tmp/p"}),
+            json!({"name": child_agent, "agent": null, "agent_status": "working",
+                   "workspace_id": ws.workspace_id, "tab_id": child_pane.tab_id, "pane_id": child_pane.pane_id, "cwd": "/tmp/p"}),
+        ];
+        let argv = codex_argv();
+        env.herdr.set_argv(&child_pane.pane_id, &argv);
+        env.herdr.set_pid(&child_pane.pane_id, 7901);
+        let fake = Arc::new(FakeProcEnv {
+            envs: std::collections::BTreeMap::from([(
+                7901,
+                std::collections::BTreeMap::from([("CODEX_HOME".into(), "/tmp/.codex-cx1".into())]),
+            )]),
+            asked: std::sync::Mutex::new(Vec::new()),
+        });
+        app.proc_env.set(fake);
+
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+
+        let child = sqlx::query_as::<_, db::Bot>("SELECT * FROM bots WHERE parent_bot_id = ?")
+            .bind(&parent)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(child.kind, "codex");
+        assert_eq!(child.identity.as_deref(), Some("cx1"));
+        assert_eq!(child.model.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(child.effort.as_deref(), Some("max"));
+        assert_eq!(child.fast, 1);
+    }
+
+    /// If both Herdr's kind and the process argv were unavailable at adoption time, the later
+    /// agent-list update still has to repair an already-claimed child and re-run CODEX_HOME.
+    #[tokio::test]
+    async fn a_late_herdr_kind_repairs_an_existing_child_and_its_identity() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        configure_cross_kind_identities(&app).await;
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let child_pane = client.pane_split(&root.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
+        let parent = a_bot(&env, "alfa").await;
+        sqlx::query("UPDATE bots SET identity = 'cc1' WHERE id = ?").bind(&parent).execute(&app.db).await.unwrap();
+        let parent_agent = crate::config::agent_name("proj", &parent);
+        let child_agent = format!("{parent_agent}-codex");
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, tab_id, pane_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','idle',?,?,?,?,'test',?)",
+        )
+        .bind(db::ulid())
+        .bind(&parent)
+        .bind(&ws.workspace_id)
+        .bind(&root.tab_id)
+        .bind(&root.pane_id)
+        .bind(&parent_agent)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        *env.herdr.agents.lock().unwrap() = vec![
+            json!({"name": parent_agent, "agent": "claude", "agent_status": "idle",
+                   "workspace_id": ws.workspace_id, "tab_id": root.tab_id, "pane_id": root.pane_id, "cwd": "/tmp/p"}),
+            json!({"name": child_agent, "agent": null, "agent_status": "working",
+                   "workspace_id": ws.workspace_id, "tab_id": child_pane.tab_id, "pane_id": child_pane.pane_id, "cwd": "/tmp/p"}),
+        ];
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+        let first = sqlx::query_as::<_, db::Bot>("SELECT * FROM bots WHERE parent_bot_id = ?")
+            .bind(&parent)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(first.kind, "claude", "前提：第一輪沒有 kind／argv，只能暫時退回 parent");
+        assert_eq!(first.identity.as_deref(), Some("cc1"));
+
+        let argv = codex_argv();
+        env.herdr.set_argv(&child_pane.pane_id, &argv);
+        env.herdr.set_pid(&child_pane.pane_id, 7902);
+        env.herdr
+            .agents
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|a| a.get("name").and_then(Value::as_str) == Some(child_agent.as_str()))
+            .unwrap()["agent"] = json!("codex");
+        let fake = Arc::new(FakeProcEnv {
+            envs: std::collections::BTreeMap::from([(
+                7902,
+                std::collections::BTreeMap::from([("CODEX_HOME".into(), "/tmp/.codex-cx1".into())]),
+            )]),
+            asked: std::sync::Mutex::new(Vec::new()),
+        });
+        app.proc_env.set(fake);
+
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+
+        let child = sqlx::query_as::<_, db::Bot>("SELECT * FROM bots WHERE parent_bot_id = ?")
+            .bind(&parent)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(child.kind, "codex");
+        assert_eq!(child.identity.as_deref(), Some("cx1"));
+        assert_eq!(child.model.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(child.effort.as_deref(), Some("max"));
+        assert_eq!(child.fast, 1);
     }
 
     /// A child's **account** is not its parent's (SPEC §16.6): read it off its own pane's process.
