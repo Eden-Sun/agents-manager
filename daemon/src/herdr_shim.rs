@@ -36,6 +36,11 @@ am_real_herdr() {
     }
 }
 
+# PATH 去重，保留第一次出現的順序（#389）：每一代子 agent 把母代的 PATH 往下傳、外掛又補一次，一代比一代長。
+am_dedupe_path() {
+    printf '%s' "$1" | tr ':' '\n' | awk '!seen[$0]++' | paste -sd: -
+}
+
 # 帳號／hook 的保留清單：pane split／tab create／workspace create 補 `--env` 用（am_forward_with_env），
 # agent start 沒有 `--env` 時補 export 用（am_reexport_env_before_start，issue #57）。單一清單，兩邊不會走鐘。
 #
@@ -156,14 +161,34 @@ am_agent_start() {
 am_reexport_env_before_start() {
     _pane=$1
     [ -n "$_pane" ] || return 0
+    _body=""
     _line=""
     for _k in $AM_RESERVED_ENV_KEYS AM_INSTANCE AM_DATA_DIR; do
         eval "_v=\${$_k:-}"
         [ -n "$_v" ] || continue
+        [ "$_k" != PATH ] || _v=$(am_dedupe_path "$_v")
         _esc=$(printf '%s' "$_v" | sed "s/'/'\\\\''/g")
+        _body="${_body}export $_k='$_esc'
+"
         _line="${_line}export $_k='$_esc'; "
     done
-    [ -n "$_line" ] || return 0
+    [ -n "$_body" ] || return 0
+    # #389：整串 export 一行行打進 pane 會灌滿終端畫面（沒 hook 的 bot 靠快照補回覆也會讀到）。
+    # 寫進 0600 暫存檔，pane 只收一行 ` . '<檔>' && rm -f '<檔>'`（行首空白：不進 shell history）。
+    # 暫存檔放 $TMPDIR（不能是 scratchpad／outbox）或 /tmp；寫不出來才退回舊的逐行 export，環境不能丟。
+    _dir=${TMPDIR:-/tmp}
+    case "$_dir" in
+        *scratchpad* | */outbox/* | */outbox) _dir=/tmp ;;
+    esac
+    _f=$(umask 077; mktemp "${_dir%/}/am-env.XXXXXX" 2>/dev/null) || _f=""
+    if [ -n "$_f" ] && printf '%s' "$_body" > "$_f" 2>/dev/null; then
+        chmod 600 "$_f" 2>/dev/null
+        _qf=$(printf '%s' "$_f" | sed "s/'/'\\\\''/g")
+        "$AM_HERDR" pane send-text "$_pane" " . '$_qf' && rm -f '$_qf'
+" >/dev/null 2>&1
+        return 0
+    fi
+    [ -z "$_f" ] || rm -f "$_f"
     "$AM_HERDR" pane send-text "$_pane" "$_line
 " >/dev/null 2>&1
 }
@@ -396,6 +421,7 @@ am_forward_with_env() {
     for _k in $AM_RESERVED_ENV_KEYS; do
         eval "_v=\${$_k:-}"
         [ -n "$_v" ] || continue
+        [ "$_k" != PATH ] || _v=$(am_dedupe_path "$_v")
         case " $_seen " in
             *" $_k "*) continue ;;
         esac
@@ -544,6 +570,27 @@ mod tests {
         }
 
         /// 同 [`Sandbox::run`]，另外回 shim 的結束碼。
+        /// `pane send-text` 那一次呼叫（#389）：`(pane, 送進去的文字)`。env 補送一律只有一次呼叫。
+        fn sent_text(&self) -> (String, String) {
+            let sent = std::fs::read_to_string(self.dir.join("sendtext.log")).unwrap_or_default();
+            let calls: Vec<&str> = sent.split("---\n").filter(|c| !c.trim().is_empty()).collect();
+            assert_eq!(calls.len(), 1, "只補一次：{sent}");
+            let lines: Vec<&str> = calls[0].lines().collect();
+            assert_eq!(&lines[..2], ["pane", "send-text"], "{lines:?}");
+            (lines[2].to_string(), lines[3..].join("\n"))
+        }
+
+        /// 只送一行 ` . '<檔>' && rm -f '<檔>'`，回暫存檔內容（檔案模式要是 0600）。
+        fn sourced_env(&self) -> (String, String) {
+            use std::os::unix::fs::PermissionsExt;
+            let (pane, text) = self.sent_text();
+            assert!(text.starts_with(" . '") && text.ends_with("\n") && text.matches('\n').count() == 1, "只送一行 source：{text:?}");
+            let file = text.trim_end().strip_prefix(" . '").unwrap().split("' && rm -f '").next().unwrap().to_string();
+            assert_eq!(text, format!(" . '{file}' && rm -f '{file}'\n"), "{text:?}");
+            assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600, "暫存檔要 0600");
+            (pane, std::fs::read_to_string(&file).unwrap())
+        }
+
         fn run_full(&self, env: &[(&str, &str)], args: &[&str]) -> (Vec<String>, String, i32) {
             self.run_with_path(None, None, env, args)
         }
@@ -705,9 +752,10 @@ mod tests {
             ("AM_DAEMON_EXE", "/opt/am/agents-managerd"),
             ("AM_CONFIG_PATH", "/home/u/.config/agents-manager/config.toml"),
             ("AM_TEST_SENDTEXT_LOG", log.to_str().unwrap()),
+            ("TMPDIR", s.dir.to_str().unwrap()),
         ];
         s.run(&env, &["agent", "start", "kid", "--kind", "claude", "--pane", "w1:p9"]);
-        let sent = std::fs::read_to_string(&log).unwrap();
+        let (_, sent) = s.sourced_env();
         assert!(sent.contains("export AM_DAEMON_EXE='/opt/am/agents-managerd'"), "{sent}");
         assert!(sent.contains("export AM_CONFIG_PATH='/home/u/.config/agents-manager/config.toml'"), "{sent}");
     }
@@ -1275,21 +1323,17 @@ mod tests {
             ("AM_INSTANCE", "a1b2"),
             ("AM_DATA_DIR", "/data/iso"),
             ("AM_TEST_SENDTEXT_LOG", log.to_str().unwrap()),
+            ("TMPDIR", s.dir.to_str().unwrap()),
         ];
         let (out, _) = s.run(&env, &["agent", "start", "kid", "--kind", "claude", "--pane", "w1:p9"]);
         assert_eq!(out, ["agent", "start", "p-1-kid", "--kind", "claude", "--pane", "w1:p9"], "agent start 的 argv 不變（herdr 沒有 --env）");
-        let sent = std::fs::read_to_string(&log).unwrap();
-        let calls: Vec<&str> = sent.split("---\n").filter(|c| !c.trim().is_empty()).collect();
-        assert_eq!(calls.len(), 1, "只補一次：{sent}");
-        let lines: Vec<&str> = calls[0].lines().collect();
-        assert_eq!(&lines[..3], ["pane", "send-text", "w1:p9"], "補的是 --pane 指到的目標：{lines:?}");
-        let text = lines[3..].join("\n");
+        let (pane, text) = s.sourced_env();
+        assert_eq!(pane, "w1:p9", "補的是 --pane 指到的目標");
         assert!(text.contains("export CLAUDE_CONFIG_DIR='/home/u/.claude-cc2'"), "{text}");
         assert!(text.contains("export AM_BOT_ID='b1'"), "{text}");
         assert!(text.contains("export AM_HOOK_TOKEN='tok'"), "{text}");
         assert!(text.contains("export AM_INSTANCE='a1b2'"), "隔離實例的保留變數也補：{text}");
         assert!(text.contains("export AM_DATA_DIR='/data/iso'"), "{text}");
-        assert!(text.ends_with('\n'), "trailing newline 讓 pty 送出這行：{text:?}");
     }
 
     /// 值裡有單引號要逃脫，不然那個 export 的邊界會斷在半路。
@@ -1297,10 +1341,73 @@ mod tests {
     fn agent_start_reexport_escapes_single_quotes_in_values() {
         let s = Sandbox::new();
         let log = s.dir.join("sendtext.log");
-        let env = [("AM_AGENT_NAME", "p-1"), ("AM_OUTBOX", "/data/o'tbox"), ("AM_TEST_SENDTEXT_LOG", log.to_str().unwrap())];
+        let env = [("AM_AGENT_NAME", "p-1"), ("AM_OUTBOX", "/data/o'tbox"), ("AM_TEST_SENDTEXT_LOG", log.to_str().unwrap()), ("TMPDIR", s.dir.to_str().unwrap())];
         s.run(&env, &["agent", "start", "kid", "--kind", "claude", "--pane", "w1:p9"]);
-        let sent = std::fs::read_to_string(&log).unwrap();
+        let (_, sent) = s.sourced_env();
         assert!(sent.contains(r"export AM_OUTBOX='/data/o'\''tbox'"), "{sent}");
+        // 暫存檔路徑本身含單引號也不會斷在半路。
+        let quoted = s.dir.join("q'dir");
+        std::fs::create_dir_all(&quoted).unwrap();
+        std::fs::remove_file(&log).unwrap();
+        let env = [("AM_AGENT_NAME", "p-1"), ("AM_BOT_ID", "b1"), ("AM_TEST_SENDTEXT_LOG", log.to_str().unwrap()), ("TMPDIR", quoted.to_str().unwrap())];
+        s.run(&env, &["agent", "start", "kid", "--kind", "claude", "--pane", "w1:p9"]);
+        let (_, sent) = s.sent_text();
+        assert!(sent.starts_with(" . '") && sent.contains(r"q'\''dir"), "{sent}");
+    }
+
+    /// #389：PATH 去重（保留第一次出現的順序），而且 send-text 沒有整串 export 的痕跡；其他變數照舊完整。
+    #[test]
+    fn agent_start_env_file_dedupes_path_and_keeps_every_other_variable() {
+        let s = Sandbox::new();
+        let log = s.dir.join("sendtext.log");
+        let base = format!("{}:{}:/usr/bin:/bin", s.dir.join("bin").display(), s.dir.join("real").display());
+        let fat = format!("{base}:/opt/vercel/0.49.1:/opt/ts:/opt/vercel/0.49.1:{base}:/opt/vercel/0.49.2:/opt/ts");
+        let env = [
+            ("PATH", fat.as_str()),
+            ("AM_AGENT_NAME", "p-1"),
+            ("AM_BOT_ID", "b1"),
+            ("CODEX_HOME", "/home/u/.codex"),
+            ("CLAUDE_CONFIG_DIR", "/home/u/.claude-cc2"),
+            ("AM_TEST_SENDTEXT_LOG", log.to_str().unwrap()),
+            ("TMPDIR", s.dir.to_str().unwrap()),
+        ];
+        s.run(&env, &["agent", "start", "kid", "--kind", "claude", "--pane", "w1:p9"]);
+        let (_, body) = s.sourced_env();
+        let want = format!("{base}:/opt/vercel/0.49.1:/opt/ts:/opt/vercel/0.49.2");
+        assert!(body.contains(&format!("export PATH='{want}'\n")), "{body}");
+        for kv in ["AM_BOT_ID='b1'", "CODEX_HOME='/home/u/.codex'", "CLAUDE_CONFIG_DIR='/home/u/.claude-cc2'", "AM_AGENT_NAME='p-1'"] {
+            assert!(body.contains(&format!("export {kv}\n")), "{kv} 要完整帶到：{body}");
+        }
+        let (_, on_screen) = s.sent_text();
+        assert!(!on_screen.contains("export") && !on_screen.contains("/opt/"), "畫面上只有 source 一行：{on_screen}");
+    }
+
+    /// 暫存檔不准放 scratchpad／outbox：`$TMPDIR` 指到那裡就改用 /tmp。
+    #[test]
+    fn the_env_file_never_lands_in_a_scratchpad_or_outbox() {
+        for bad in ["scratchpad", "outbox/bot1"] {
+            let s = Sandbox::new();
+            let log = s.dir.join("sendtext.log");
+            let dir = s.dir.join(bad);
+            std::fs::create_dir_all(&dir).unwrap();
+            let env = [("AM_AGENT_NAME", "p-1"), ("AM_BOT_ID", "b1"), ("AM_TEST_SENDTEXT_LOG", log.to_str().unwrap()), ("TMPDIR", dir.to_str().unwrap())];
+            s.run(&env, &["agent", "start", "kid", "--kind", "claude", "--pane", "w1:p9"]);
+            let (_, text) = s.sent_text();
+            assert!(text.starts_with(" . '/tmp/am-env."), "{bad}：{text}");
+            let file = text.trim().strip_prefix(". '").unwrap().split('\'').next().unwrap().to_string();
+            let _ = std::fs::remove_file(file);
+        }
+    }
+
+    /// 暫存檔寫不出來（目錄不存在）：退回逐行 export，環境不能丟。
+    #[test]
+    fn an_unwritable_env_file_falls_back_to_inline_exports() {
+        let s = Sandbox::new();
+        let log = s.dir.join("sendtext.log");
+        let env = [("AM_AGENT_NAME", "p-1"), ("AM_BOT_ID", "b1"), ("AM_TEST_SENDTEXT_LOG", log.to_str().unwrap()), ("TMPDIR", "/nonexistent-am-dir")];
+        s.run(&env, &["agent", "start", "kid", "--kind", "claude", "--pane", "w1:p9"]);
+        let text = s.sent_text().1;
+        assert!(text.contains("export AM_BOT_ID='b1'; "), "{text}");
     }
 
     /// `--pane` 沒給（herdr 自己會因為缺必要旗標報錯）：shim 沒有目標可補，不猜、不炸。
