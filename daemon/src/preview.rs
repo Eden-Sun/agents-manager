@@ -1201,12 +1201,21 @@ fn spawn_watcher(app: Arc<App>, bot_id: String) -> bool {
         loop {
             tokio::time::sleep(wait).await;
             let _g = gate().lock().await;
-            let next = match refresh_locked(&app, &bot_id).await {
-                Some(r) if r.status().is_live() => Some(r.status()),
-                Some(_) => None,
-                // 讀不到這一列（暫時性）不是「這列沒了」：只有確定沒有這一列才結束。
-                None if row(&app.db, &bot_id).await.is_err() => Some(Status::Starting),
-                None => None,
+            #[cfg(test)]
+            tick(&bot_id);
+            // 只讀**一次**決定要不要結束：以前是 refresh 讀不到之後再讀一次確認，兩次之間 DB 恢復了就把暫時性的錯誤誤判成
+            // 「這列沒了」、監看無聲結束（整套平行跑時偶發，`the_starting_watcher_survives_an_unreadable_preview_row`）。
+            let next = match row(&app.db, &bot_id).await {
+                // 讀不到這一列（暫時性）不是「這列沒了」：只有確定沒有這一列、或它已經不是在監看的狀態才結束。
+                Err(_) => Some(Status::Starting),
+                Ok(None) => None,
+                Ok(Some(r)) if !r.status().is_live() => None,
+                Ok(Some(seen)) => match refresh_locked(&app, &bot_id).await {
+                    Some(r) if r.status().is_live() => Some(r.status()),
+                    Some(_) => None,
+                    // 剛看到它是活的：refresh 讀不到或寫不進去（暫時性），下一輪再看；這列不會消失。
+                    None => Some(seen.status()),
+                },
             };
             match next {
                 Some(Status::Running) => wait = RUNNING_POLL,
@@ -1220,6 +1229,23 @@ fn spawn_watcher(app: Arc<App>, bot_id: String) -> bool {
         }
     });
     true
+}
+
+/// 測試用：監看迴圈每一輪記一次，讓測試等「它真的輪過幾次」而不是睡一段固定時間。
+#[cfg(test)]
+fn ticks() -> &'static std::sync::Mutex<HashMap<String, u64>> {
+    static T: OnceLock<std::sync::Mutex<HashMap<String, u64>>> = OnceLock::new();
+    T.get_or_init(Default::default)
+}
+
+#[cfg(test)]
+fn tick(bot_id: &str) {
+    *ticks().lock().unwrap().entry(bot_id.to_string()).or_default() += 1;
+}
+
+#[cfg(test)]
+pub(crate) fn watcher_ticks(bot_id: &str) -> u64 {
+    ticks().lock().unwrap().get(bot_id).copied().unwrap_or(0)
 }
 
 /// 挑 port 前一次問完整個窗口。

@@ -1786,12 +1786,14 @@ esac
     #[test]
     fn a_shim_whose_caller_is_gone_stops_waiting_for_a_slot() {
         let s = Sandbox::new();
-        s.install_fake_curl(
+        // 每一輪 acquire 記一行：判定「shim 有沒有發現呼叫端不在了」用**輪數**，不用牆鐘時間（整套平行跑時機器忙，同樣的一輪可以慢十倍）。
+        s.install_fake_curl(&format!(
             r#"case "$*" in
-  *acquire*) printf '{"granted":false,"active":2,"retry_after_secs":0}' ;;
-  *) printf '{}' ;;
+  *acquire*) echo x >> '{}'; printf '{{"granted":false,"active":2,"retry_after_secs":0}}' ;;
+  *) printf '{{}}' ;;
 esac"#,
-        );
+            s.dir.join("acquire.log").display()
+        ));
         let env = lease_env(&s);
         // 外層是 `sh -c`（不是 shim 本身），所以不走 `s.command()`——但同樣清掉呼叫端所有的 `AM_*`。
         let mut cmd = Command::new("sh");
@@ -1811,15 +1813,32 @@ esac"#,
         let (mut outer, _, err_path) = s.start_group(&mut cmd, false);
         let group = outer.id() as i32;
         assert!(outer.wait().unwrap().success());
-        // 整組（含 shim）要自己收掉；卡住的話補殺並讓測試失敗，訊息附上 shim 講過的話。
-        let waited = std::time::Instant::now();
-        while !group_members(group).is_empty() && waited.elapsed() < std::time::Duration::from_secs(40) {
+        // 整組（含 shim）要自己收掉。外層已經被收走，從這一刻起 shim 只要再問一輪 acquire 就該發現呼叫端不在了：
+        // 判準是「之後又問了幾輪」（事件驅動、跟機器忙不忙無關），不是「等了幾秒」。牆鐘只留一個給真正卡死的後盾：
+        // 這麼久**一輪都沒有進展**、也沒退出，才算卡住。
+        let rounds = || std::fs::read_to_string(s.dir.join("acquire.log")).map(|t| t.lines().count()).unwrap_or(0);
+        const MAX_ROUNDS_AFTER_GONE: usize = 25;
+        let at_gone = rounds();
+        let (mut last, mut moved) = (at_gone, std::time::Instant::now());
+        let mut verdict = None;
+        while !group_members(group).is_empty() {
+            let n = rounds();
+            if n - at_gone > MAX_ROUNDS_AFTER_GONE {
+                verdict = Some(format!("呼叫端不在之後 shim 又問了 {} 輪 acquire 還沒退出", n - at_gone));
+                break;
+            }
+            if n != last {
+                (last, moved) = (n, std::time::Instant::now());
+            } else if moved.elapsed() > std::time::Duration::from_secs(120) {
+                verdict = Some(format!("shim 卡住了：120 秒一輪 acquire 都沒有（共 {} 輪）也沒退出", n - at_gone));
+                break;
+            }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         let left = group_members(group);
         unsafe { libc::killpg(group, libc::SIGKILL) };
         let said = std::fs::read_to_string(&err_path).unwrap_or_default();
-        assert!(left.is_empty(), "呼叫端不在了，shim 還在等名額：{left:?}\n{said}");
+        assert!(left.is_empty(), "呼叫端不在了，shim 還在等名額（{}）：{left:?}\n{said}", verdict.unwrap_or_default());
         // 光看「行程消失了」不夠（機器上可能有別的東西在清孤兒）：shim 要**自己**講一句並退出，才是它自己發現的。
         assert!(said.contains("呼叫端已經結束"), "shim 要自己發現呼叫端不在了，而不是被別人殺掉：{said}");
     }
