@@ -208,7 +208,7 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   child 建立線同樣保留：herdr shim 在會建 pane 的 `pane split`／`tab create`／`workspace create`（及 `pane new`）剝掉呼叫者自帶的 `--env AM_INSTANCE=…`／`--env AM_DATA_DIR=…`（含 `--env=` 寫法），再照母 pane 的實際值補，母 pane 沒有就不帶。
   `agent start` 的 argv **只剝不補**：herdr 0.8.2 的 `agent start` 沒有 `--env`，補上去就是未知旗標；`--` 之後是 agent CLI 自己的參數，原樣保留。
   但它假設「目標 `--pane` 是 `pane split` 剛開的、帳號早注入了」——漏了那一步或重用一顆沒走過那條路的舊 pane 時，子 agent 會默默吃到預設帳號（issue #57）。
-  所以 `agent start` 前另外對 `--pane` 指到的 pane `pane send-text` 一行 `export KEY='value'; …`（含 `AM_INSTANCE`／`AM_DATA_DIR`），
+  所以 `agent start` 前另外補 `export KEY='value'`（含 `AM_INSTANCE`／`AM_DATA_DIR`）——**寫進 0600 暫存檔，pane 只收一行 ` . '<檔>' && rm -f '<檔>'`**（#389，見 §6.5b），
   補的是母 pane 目前的實際值，跟 `agent.start` 前補 PATH（`start_inner`）同一招：pty 會緩衝，pane 還沒起殻也不怕；pane 早有正確值時只是重覆設一次。
   `worktree create/open` 也會開 workspace，但沒有 `--env`：那個 root pane 由 herdr server 開、拿不到任何 `AM_*`，hook 不會觸發（dispatcher 要 `AM_BOT_ID`＋`AM_HOOK_TOKEN`），所以不會送錯實例，只是不被追蹤。
 - **路徑解析不猜**：`normalize` 逐段 canonicalize，只有「這一段真的不存在」才當成還沒建立的尾巴；dangling symlink、symlink 迴圈等解析失敗一律拒絕啟動，不會被下一個 `..` pop 掉而錯映到別的目錄。
@@ -1240,8 +1240,14 @@ pane 打 `cargo` 就 permission denied）時，只 chmod 回 0755，不重寫內
   子 agent 自己寫的一律尊重（`--model`、codex/grok 的 `-m`、codex 的 `-c model=` / `-c model_reasoning_effort=`）。
   **帳號／hook 補救（issue #57）**：`agent start` 沒有 `--env`，只能假設 `--pane` 指到的 pane 是 `pane split` 剛開的、帳號早注入了；
   這假設一旦不成立（漏了 pane split、重用一顆沒走過那條路的舊 pane），子 agent 就默默吃到預設帳號。`exec` 真的 `agent start` 之前，
-  先對那個 `--pane` `pane send-text` 一行 `export KEY='value'; …`（與下面 `pane split` 同一份保留清單，含 `AM_INSTANCE`／`AM_DATA_DIR`），
+  先把 `export KEY='value'`（與下面 `pane split` 同一份保留清單，含 `AM_INSTANCE`／`AM_DATA_DIR`）寫進一個 **0600 暫存檔**，
+  對那個 `--pane` 只 `pane send-text` 一行 ` . '<檔>' && rm -f '<檔>'`（**行首空白**：不進 shell history；單引號逃脫，路徑含 `'` 也不斷）。
+  #389 之前是整串 export 一行行打進 shell，全留在終端畫面上，「完整終端畫面」被灌滿，沒 hook 的 bot 靠快照補回覆也會讀到。
   補的是這個母 pane 目前的實際值；pane 早有正確值時只是重覆設一次，無害。
+  - **PATH 去重**（保留第一次出現的順序，`am_dedupe_path`）：補送與 `pane split`／`tab create` 的 `--env PATH=…` 都先去重——
+    每一代子 agent 把母代的 PATH 往下傳、外掛又補一次，不去重會一代比一代長；`AM_*`／`CLAUDE_CONFIG_DIR`／`CODEX_HOME` 照舊完整帶到。
+  - 暫存檔放 `$TMPDIR`（指到 scratchpad 或 outbox 就改 `/tmp`；那兩處會被當成給使用者的檔案），`umask 077`＋`chmod 600`。
+    寫不出來（目錄不存在、唯讀）才退回舊的逐行 export——環境不能丟。source 失敗時檔案不刪（`&&`），方便查。
 - `herdr pane split` / `pane new` / `tab create`：原樣轉發並補 `--env`，帶下 `CLAUDE_CONFIG_DIR`、`CODEX_HOME`、`AM_BOT_ID`、`AM_HOOK_TOKEN`、`AM_PORT`、`AM_RUN_ID`、
   `AM_AGENT_NAME`、`AM_KIND`、`AM_MODEL`、`AM_EFFORT`、`AM_PROJECT_ID`、`AM_WORKSPACE_ID`、`AM_OUTBOX`、`AM_DAEMON_EXE`、`AM_CONFIG_PATH`、`AM_REAL_HERDR`、`PATH`——herdr 的 pane 是 **server** 生的、不繼承呼叫端 shell，沒這段子 pane 會用預設帳號起來、拿不到 hook token。
   `AM_DAEMON_EXE`／`AM_CONFIG_PATH`（issue #138）是 cargo shim 把 check／test／clippy 轉到外部編譯主機（#104）的前提：漏了它們，每個子 agent 的 cargo 都靜默留在本機。
