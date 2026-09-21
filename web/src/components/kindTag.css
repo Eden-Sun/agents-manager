@@ -94,3 +94,54 @@
   font-size: 11px;
   color: var(--text-dim);
 }
+
+/* codex fast：logo 右下角疊一個閃電（2026-09-22 使用者：「給 codex 的 fast 一個閃電明顯的標示在 logo 上」）。
+   琥珀色＋深色描邊，淺底深底都跳得出來；不改 logo 本身的品牌綠。 */
+.kind-tag.fast,
+.mobile-kind-icon.fast {
+  position: relative;
+  overflow: visible;
+}
+
+.kind-fast {
+  position: absolute;
+  right: -5px;
+  bottom: -5px;
+  display: inline-flex;
+  width: 12px;
+  height: 12px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--bg-panel, #fff);
+  box-shadow: 0 0 0 1px var(--border);
+  pointer-events: none;
+}
+
+.kind-fast svg {
+  display: block;
+  width: 8px;
+  height: 11px;
+  fill: #f5a800;
+  stroke: #7a4f00;
+  stroke-width: 0.8;
+  stroke-linejoin: round;
+}
+
+/* 桌機：讓出閃電的位置，不壓到右邊 model chip 的框。要比 styles.css 的 `.bot-head .main-title-sub > .kind-tag`
+   （margin-right: -3px）多一個 class——元件 CSS 比 styles.css 先載入，同特異度會輸。 */
+.bot-head .main-title-sub > .kind-tag.fast {
+  margin-right: 6px;
+}
+
+/* 手機：logo 那一行底下緊貼額度列，閃電放右下會被額度列蓋掉（2026-09-22 實測）——改放右上，並讓出右邊的字。 */
+.mobile-kind-icon.fast {
+  z-index: 1;
+  margin-right: 6px;
+}
+
+.mobile-kind-icon.fast .kind-fast {
+  top: -5px;
+  bottom: auto;
+  right: -7px;
+}

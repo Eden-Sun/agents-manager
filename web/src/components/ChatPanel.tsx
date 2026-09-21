@@ -37,7 +37,7 @@ import { GearIcon, GitIcon } from './Icons'
 import { useShelfSink } from './useShelfSink'
 import { IssuesBar } from './IssuesBar'
 import { GitBar } from './GitBar'
-import { KindIcon, KindTag } from './KindTag'
+import { FastBolt, KindIcon, KindTag } from './KindTag'
 import { Modal } from './Modal'
 import { ModelQuickPicker } from './ModelPicker'
 import { RuntimeDriftBadge } from './RuntimeDriftBadge'
@@ -1173,6 +1173,8 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
     }),
   )
   const modelExtra = modelExtraOf(statusInfo)
+  // logo 上的閃電跟 model chip 的「· fast」同一個來源：正在跑的那一份，不是設定值（設定改了還沒重啟時兩者不同）。
+  const codexFast = bot?.kind === 'codex' && Boolean(statusInfo?.fast_mode)
   // Held here (not in the composer) so a drop anywhere in the chat area is accepted.
   const files = useAttachments(botId, botId)
   const drop = useDropTarget(files.add, !botId)
@@ -1284,7 +1286,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           {/* `bot.model` null = CLI 預設，退回 statusLine 回報的實際模型。第二行：標題列已被額度條佔滿（2026-09-10 實測）。 */}
           {phone ? (
             <div className="mobile-bot-version" title={`${bot.kind} · ${statusInfo?.version ?? '版本未回報'}`}>
-              <span className={`mobile-kind-icon ${bot.kind}`} role="img" aria-label={bot.kind}><KindIcon kind={bot.kind} /></span>
+              <span className={`mobile-kind-icon ${bot.kind}${codexFast ? ' fast' : ''}`} role="img" aria-label={codexFast ? `${bot.kind}（fast）` : bot.kind}><KindIcon kind={bot.kind} />{codexFast ? <FastBolt /> : null}</span>
               {bot.model || statusInfo?.model_name ? (
                 <span className="mobile-bot-model">
                   {shortModel(bot.kind, bot.model ?? statusInfo?.model_name ?? null)}
@@ -1300,7 +1302,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             <BlockedBadge botId={botId} onOpen={openBlockedFull} />
             {/* 同理：名字列會整顆剪掉，使用者「額度用盡卻沒看到任何提示」（2026-09-12）。 */}
             <TurnErrorBadge botId={botId} />
-            <KindTag kind={bot.kind} />
+            <KindTag kind={bot.kind} fast={codexFast} />
             {bot.model || statusInfo?.model_name ? (
               <ModelQuickPicker
                 botId={botId}

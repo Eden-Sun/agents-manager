@@ -37,16 +37,42 @@ export function KindIcon({ kind }: { kind: BotKind }) {
   }
 }
 
-export function KindTag({ kind, title, className }: { kind: BotKind; title?: string; className?: string }) {
+/**
+ * codex 開著 fast（priority service tier）時疊在 logo 右下角的閃電（2026-09-22 使用者：「給 codex 的 fast
+ * 一個閃電明顯的標示在 logo 上」）。fast 的額度燒得快，只寫在 model chip 尾巴的「· fast」太容易漏看。
+ */
+export function FastBolt() {
+  return (
+    <span className="kind-fast" aria-hidden="true">
+      <svg viewBox="0 0 10 14" width="1em" height="1em">
+        <path d="M6.2.6 1 8h3.2L3.4 13.4 9 5.6H5.6L6.2.6Z" />
+      </svg>
+    </span>
+  )
+}
+
+export function KindTag({
+  kind,
+  title,
+  className,
+  fast = false,
+}: {
+  kind: BotKind
+  title?: string
+  className?: string
+  /** 正在跑的 codex 是 fast：logo 上疊一個閃電。 */
+  fast?: boolean
+}) {
   const mode = useStore((s) => s.kindDisplay)
   return (
     <span
-      className={`kind-tag ${kind}${mode === 'icon' ? ' icon' : ''}${className ? ` ${className}` : ''}`}
-      title={title ?? KIND_DESC[kind]}
-      aria-label={KIND_LABEL[kind]}
+      className={`kind-tag ${kind}${mode === 'icon' ? ' icon' : ''}${fast ? ' fast' : ''}${className ? ` ${className}` : ''}`}
+      title={fast ? `${title ?? KIND_DESC[kind]}\nfast 開著（priority tier）：回得快，額度也燒得快` : (title ?? KIND_DESC[kind])}
+      aria-label={fast ? `${KIND_LABEL[kind]}（fast）` : KIND_LABEL[kind]}
       role="img"
     >
       {mode === 'icon' ? <KindIcon kind={kind} /> : KIND_LABEL[kind]}
+      {fast ? <FastBolt /> : null}
     </span>
   )
 }
