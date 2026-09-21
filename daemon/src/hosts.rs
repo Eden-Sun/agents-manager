@@ -765,7 +765,16 @@ impl HostManager {
         c.kill_master().await;
         c.connected.store(false, Ordering::SeqCst);
         // Stale `<gone>/claude` quota rows would read as local downstream — SPEC §14.
-        app.quotas.lock().await.retain(|k, _| !k.starts_with(&format!("{name}/")));
+        let prefix = format!("{name}/");
+        let removed: Vec<String> = {
+            let mut quotas = app.quotas.lock().await;
+            let removed = quotas.keys().filter(|k| k.starts_with(&prefix)).cloned().collect();
+            quotas.retain(|k, _| !k.starts_with(&prefix));
+            removed
+        };
+        for key in removed {
+            crate::quota::forget(app, &key).await;
+        }
         app.emit("host_changed", json!({"name": name, "connected": false, "error": "removed"})).await;
         crate::state::emit_daemon_status(app).await;
         tracing::info!(host = %name, "host removed");

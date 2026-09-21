@@ -7,7 +7,7 @@ use crate::config::LOCAL_HOST;
 use crate::state::App;
 use anyhow::Result;
 use serde::ser::SerializeStruct;
-use serde::{Serialize, Serializer};
+use serde::{Deserialize, Serialize, Serializer};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -291,7 +291,7 @@ pub async fn pollable_hosts(app: &Arc<App>) -> Vec<String> {
         .collect()
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Window {
     pub used_pct: f64,
     pub resets_at: Option<String>,
@@ -325,7 +325,7 @@ impl Serialize for Window {
 
 /// Codex 的額度重置券（`rateLimitResetCredits`）：額度用完時使用者唯一能做的事，所以要看得到
 /// （2026-09-10 使用者）。daemon 只讀不用。
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ResetCredits {
     pub available: i64,
     pub title: Option<String>,
@@ -334,7 +334,7 @@ pub struct ResetCredits {
 
 /// CLI 印的上限橫幅。credits 用完時 5h／7d 速率窗可以是滿的（2026-09-12 使用者：量表全滿卻一直
 /// hit limit），所以單獨記且**黏住**：[`set`] 沿用舊值，直到 `until` 過了或下一回合跑成功。
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LimitHit {
     pub message: String,
     /// 沒寫時間就 `None`，只能等下一次成功的回合清掉。
@@ -347,7 +347,7 @@ pub struct LimitHit {
     pub bucket: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Quota {
     pub five_hour: Option<Window>,
     pub seven_day: Option<Window>,
@@ -361,6 +361,85 @@ pub struct Quota {
     pub account: Option<String>,
     /// Parsers build `local`; [`set`] stamps the real host so no caller can forget it.
     pub host: String,
+}
+
+/// DB 裡的額度讀數不是派工判準；它只在開機時先填回畫面，第一次新的探測成功後才變成 fresh。
+/// `Quota` 本身不帶 stale，避免把顯示用的狀態帶進 daemon 內部所有額度判斷。
+pub async fn load_cache(app: &Arc<App>) -> Result<usize> {
+    let rows: Vec<(String, String, String)> = sqlx::query_as("SELECT key, quota_json, updated_at FROM quota_cache")
+        .fetch_all(&app.db)
+        .await?;
+    let mut restored = Vec::new();
+    for (key, raw, updated_at) in rows {
+        let mut q: Quota = match serde_json::from_str(&raw) {
+            Ok(q) => q,
+            Err(e) => {
+                tracing::warn!(key, error = %e, "ignoring an invalid cached quota");
+                continue;
+            }
+        };
+        // Cache rows can outlive the reset. Keep the existing limit-hit expiry rule at boot too,
+        // so an old "用完了" marker never blocks work while the first fresh probe is pending.
+        if limit_hit_expired(q.limit_hit.as_ref()) {
+            q.limit_hit = None;
+        }
+        q.updated_at = if updated_at.trim().is_empty() { q.updated_at } else { updated_at };
+        q.host = key.split_once('/').map_or(LOCAL_HOST, |(host, _)| host).to_string();
+        restored.push((key, q));
+    }
+
+    let count = restored.len();
+    let mut quotas = app.quotas.lock().await;
+    let mut stale = app.quota_stale.lock().await;
+    for (key, q) in restored {
+        quotas.insert(key.clone(), q);
+        stale.insert(key);
+    }
+    Ok(count)
+}
+
+async fn persist_cache(app: &Arc<App>, key: &str, q: &Quota) {
+    let raw = match serde_json::to_string(q) {
+        Ok(raw) => raw,
+        Err(e) => {
+            tracing::warn!(key, error = %e, "cannot serialize quota cache");
+            return;
+        }
+    };
+    if let Err(e) = sqlx::query(
+        "INSERT INTO quota_cache (key, quota_json, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET quota_json=excluded.quota_json, updated_at=excluded.updated_at
+         WHERE excluded.updated_at >= quota_cache.updated_at",
+    )
+    .bind(key)
+    .bind(raw)
+    .bind(&q.updated_at)
+    .execute(&app.db)
+    .await
+    {
+        tracing::warn!(key, error = %e, "cannot persist quota cache");
+    }
+}
+
+async fn delete_cache(app: &Arc<App>, key: &str) {
+    if let Err(e) = sqlx::query("DELETE FROM quota_cache WHERE key = ?").bind(key).execute(&app.db).await {
+        tracing::warn!(key, error = %e, "cannot delete quota cache");
+    }
+}
+
+/// Remove a quota key that no longer belongs to a live identity/host, including its restart cache.
+pub async fn forget(app: &Arc<App>, key: &str) {
+    app.quotas.lock().await.remove(key);
+    app.quota_stale.lock().await.remove(key);
+    delete_cache(app, key).await;
+}
+
+fn quota_value(q: &Quota, stale: bool) -> Value {
+    let mut value = serde_json::to_value(q).unwrap_or(Value::Null);
+    if let Some(object) = value.as_object_mut() {
+        object.insert("stale".into(), Value::Bool(stale));
+    }
+    value
 }
 
 fn unix_to_rfc3339(v: Option<&Value>) -> Option<String> {
@@ -549,7 +628,18 @@ pub async fn set(app: &Arc<App>, host: &str, base: &str, mut q: Quota) {
 
     quotas.insert(key.clone(), q.clone());
     drop(quotas);
-    app.emit("quota_updated", json!({"kind": key, "host": host, "quota": q})).await;
+    {
+        let mut stale_flags = app.quota_stale.lock().await;
+        stale_flags.remove(&key);
+        for old in &stale {
+            stale_flags.remove(old);
+        }
+    }
+    for old in &stale {
+        delete_cache(app, old).await;
+    }
+    persist_cache(app, &key, &q).await;
+    app.emit("quota_updated", json!({"kind": key, "host": host, "quota": quota_value(&q, false)})).await;
 }
 
 fn parse_utc(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
@@ -676,7 +766,9 @@ pub async fn clear_limit_hit(app: &Arc<App>, host: &str, base: &str) {
     q.limit_hit = None;
     let out = q.clone();
     drop(quotas);
-    app.emit("quota_updated", json!({"kind": key, "host": host, "quota": out})).await;
+    let stale = app.quota_stale.lock().await.contains(&key);
+    persist_cache(app, &key, &out).await;
+    app.emit("quota_updated", json!({"kind": key, "host": host, "quota": quota_value(&out, stale)})).await;
 }
 
 /// 重啟後的回填來源：這一格的撞限是從「還在等額度的交辦」推回來的，不是誰真的看到橫幅。
@@ -732,7 +824,9 @@ pub async fn seed_limit_hit(app: &Arc<App>, host: &str, base: &str, until: &str,
     let out = q.clone();
     quotas.insert(key.clone(), q);
     drop(quotas);
-    app.emit("quota_updated", json!({"kind": key, "host": host, "quota": out})).await;
+    let stale = app.quota_stale.lock().await.contains(&key);
+    persist_cache(app, &key, &out).await;
+    app.emit("quota_updated", json!({"kind": key, "host": host, "quota": quota_value(&out, stale)})).await;
     true
 }
 
@@ -783,26 +877,29 @@ pub async fn restore_limit_hit(app: &Arc<App>, host: &str, base: &str, hit: Limi
     let out = q.clone();
     quotas.insert(key.clone(), q);
     drop(quotas);
-    app.emit("quota_updated", json!({"kind": key, "host": host, "quota": out})).await;
+    let stale = app.quota_stale.lock().await.contains(&key);
+    persist_cache(app, &key, &out).await;
+    app.emit("quota_updated", json!({"kind": key, "host": host, "quota": quota_value(&out, stale)})).await;
     true
 }
 
 /// Base kinds always present per host (empty bars before first report); orphan-host keys dropped.
 pub async fn snapshot(app: &Arc<App>) -> Value {
     let hosts = app.hosts.names().await;
-    let q = app.quotas.lock().await;
+    let q = app.quotas.lock().await.clone();
+    let stale = app.quota_stale.lock().await.clone();
     let mut m = serde_json::Map::new();
     for h in &hosts {
         for k in crate::config::KINDS {
             let key = quota_key(h, k);
-            m.insert(key.clone(), q.get(&key).map(|x| json!(x)).unwrap_or(Value::Null));
+            m.insert(key.clone(), q.get(&key).map(|x| quota_value(x, stale.contains(&key))).unwrap_or(Value::Null));
         }
     }
     for (k, v) in q.iter() {
         // Otherwise read as a local key downstream.
         let orphan = k.contains('/') && host_of_key(k, &hosts).0 == LOCAL_HOST;
         if !orphan {
-            m.insert(k.clone(), json!(v));
+            m.insert(k.clone(), quota_value(v, stale.contains(k)));
         }
     }
     json!({"kinds": Value::Object(m)})
@@ -1821,6 +1918,57 @@ mod tests {
         assert_eq!(kinds["claude:cc1"]["host"], "local");
         assert!(!kinds.contains_key("gone/claude"), "orphan host key was kept");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// issue #392：讀數寫入快取，重啟後先以 stale 回填；新的探測成功後才恢復 fresh，過期的舊撞限也不能卡住派送。
+    #[tokio::test]
+    async fn quota_cache_survives_restart_as_stale_until_a_fresh_reading_arrives() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let reading = |used_pct: f64, limit_hit: Option<LimitHit>| Quota {
+            five_hour: Some(Window { used_pct, resets_at: Some("2099-01-01T00:00:00Z".into()) }),
+            seven_day: Some(Window { used_pct: 20.0, resets_at: Some("2099-01-07T00:00:00Z".into()) }),
+            fable: None,
+            reset_credits: None,
+            limit_hit,
+            plan: Some("test".into()),
+            updated_at: crate::db::now(),
+            source: "test".into(),
+            account: None,
+            host: LOCAL_HOST.into(),
+        };
+
+        set(&app, LOCAL_HOST, "claude", reading(41.0, None)).await;
+        let restarted = crate::testing::restart_app(&env).await;
+        assert_eq!(load_cache(&restarted).await.unwrap(), 1);
+        assert_eq!(restarted.quotas.lock().await["claude"].five_hour.as_ref().unwrap().used_pct, 41.0);
+        assert_eq!(snapshot(&restarted).await["kinds"]["claude"]["stale"], true);
+
+        let fresh = reading(52.0, None);
+        set(&restarted, LOCAL_HOST, "claude", fresh).await;
+        assert_eq!(snapshot(&restarted).await["kinds"]["claude"]["stale"], false);
+        assert_eq!(restarted.quotas.lock().await["claude"].five_hour.as_ref().unwrap().used_pct, 52.0);
+
+        // 模擬快取裡還留著一筆已過 reset 的舊「用完了」；開機回填時照既有規則清掉，不能阻擋新的工作。
+        let expired = reading(
+            99.0,
+            Some(LimitHit {
+                message: "old limit".into(),
+                until: Some("2000-01-01T00:00:00Z".into()),
+                at: "1999-12-31T00:00:00Z".into(),
+                bucket: None,
+            }),
+        );
+        sqlx::query("UPDATE quota_cache SET quota_json = ?, updated_at = ? WHERE key = ?")
+            .bind(serde_json::to_string(&expired).unwrap())
+            .bind(&expired.updated_at)
+            .bind("claude")
+            .execute(&restarted.db)
+            .await
+            .unwrap();
+        let after_expiry = crate::testing::restart_app(&env).await;
+        load_cache(&after_expiry).await.unwrap();
+        assert!(after_expiry.quotas.lock().await["claude"].limit_hit.is_none());
     }
 
     #[test]

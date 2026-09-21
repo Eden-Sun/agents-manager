@@ -770,6 +770,7 @@ export function toKindQuota(v: unknown, key?: string): KindQuota | null {
     limit_hit: toLimitHit(pick(v, 'limit_hit')),
     plan: optStr(pick(v, 'plan')),
     updated_at: str(pick(v, 'updated_at')),
+    stale: bool(pick(v, 'stale'), false),
     host: str(pick(v, 'host'), hostOfQuotaKey(key ?? '')),
   }
 }

@@ -2188,6 +2188,7 @@ API：`GET /api/projects/:id/messages`、`POST /api/projects/:id/chat`（`API.md
 - map key：本機裸的 `claude` / `claude:cc1` / `codex` / `grok`；遠端加前綴 `m4p/claude`、`m4p/claude:cc1`…（與 `GET /api/models` 的 `host/kind` 快取同形；host 名不含 `/`、`:`，拆得回來）。
 - 每筆多 `host` 欄位。`quota::set(app, host, base_key, q)` 統一蓋章：呼叫端只給裸 key，沒有路徑能把遠端讀數存進本機那列。
 - 刪主機連同它的額度列；`GET /api/quota` 丟掉不屬於現存主機的 `<host>/…` key。
+- **重啟先顯示上一輪**（issue #392）：每次 `quota::set` 收到新的讀數，都把完整 `Quota` JSON、key 與 `updated_at` 寫進 DB 的 `quota_cache`。daemon 開機先載入仍存在的列到 `App.quotas`，但只標顯示用的 `stale = true`；第一次新的探測成功後才清除 stale 並覆寫快取。開機載入時照 `limit_hit_expired` 清掉已過 `until` 的舊撞限，不把舊讀數當成新的派工證據。
 
 ### 14.2 三個來源都跟著主機走
 - **codex**：`codex_rpc(app, host, "account/rateLimits/read")`，遠端走 `ssh_exec_path`。另外每 60 秒讀 running codex pane 底下的狀態列（`5h 90% left · weekly 48% left`，`source=codex-statusline`；app-server 每 5 分鐘才問一次、而且落後），寫同一把 key——狀態列是 CLI 當下拿來擋人的依據，但它是**畫面**，數字停在那顆 pane 最後一回合（`screen_at`＝最後一回合結束時間）：
@@ -2208,6 +2209,8 @@ API：`GET /api/projects/:id/messages`、`POST /api/projects/:id/chat`（`API.md
   只在這支 throwaway probe 的命令列加，一般 managed bot 的啟動指令是完全分開的路徑（`lifecycle/start.rs`），工具可用性不受影響。
 - **grok `/usage` 探測**：§12.6 的 TUI 流程。
 - 兩者本機開在專屬 `am-quota` session；遠端借 **daemon 在那台的 named session**（遠端只有一條轉發 socket，再開 session 要多一條轉發）。
+
+額度快取只改善可見性，不改額度判斷的來源優先序：快取中的 `stale` 讀數仍保留畫面與重置時間，但新探測回來以前不能被解讀成「剛確認」；`limit_hit` 的到期與清除規則照 §12.4。
   label 是 `am-quota-claude*` / `am-quota-grok`、agent 名 `amquota<6碼>`（不在 DB）；`sweep_stale()` 掃本機 `am-quota` 與每台已連線主機的 session。
   cwd 與 identity env 的 `~` 用那台主機的 `$HOME`（`HostConn::home()`）。
 

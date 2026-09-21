@@ -102,6 +102,8 @@ pub struct App {
     pub models_cache: Mutex<HashMap<String, (std::time::Instant, Value)>>,
     /// v4.0: quota per kind key (`codex`, `claude`, `claude:<identity>`).
     pub quotas: Mutex<std::collections::BTreeMap<String, crate::quota::Quota>>,
+    /// 額度讀數是開機從 `quota_cache` 回填的，直到下一次探測前只供顯示，不能當成新證據。
+    pub quota_stale: Mutex<std::collections::BTreeSet<String>>,
     /// v4.0: per-host CLI detection (`hosts[].tools`), refreshed on every (re)connect.
     pub tools: Mutex<HashMap<String, crate::tools::HostTools>>,
     /// Claude Code CHANGELOG.md 全文快取（`GET /api/changelog`，10 分鐘）。
@@ -189,6 +191,7 @@ impl App {
             survey_revisions: Mutex::new(HashMap::new()),
             models_cache: Mutex::new(HashMap::new()),
             quotas: Mutex::new(std::collections::BTreeMap::new()),
+            quota_stale: Mutex::new(std::collections::BTreeSet::new()),
             tools: Mutex::new(HashMap::new()),
             changelog: Default::default(),
             github: Mutex::new(HashMap::new()),

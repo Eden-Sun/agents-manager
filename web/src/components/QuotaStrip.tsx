@@ -121,11 +121,29 @@ function fmtTime(iso: string | null | undefined): string {
   return d.toLocaleString([], { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
 }
 
+function staleAge(iso: string, now: number): string {
+  const at = Date.parse(iso)
+  if (Number.isNaN(at)) return ''
+  const minutes = Math.max(0, Math.floor((now - at) / 60_000))
+  if (minutes < 1) return '不到 1 分鐘'
+  if (minutes < 60) return `${minutes} 分鐘`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours} 小時${minutes % 60 ? `${minutes % 60} 分鐘` : ''}`
+  const days = Math.floor(hours / 24)
+  return `${days} 天${hours % 24 ? `${hours % 24} 小時` : ''}`
+}
+
+function staleSuffix(q: KindQuota | null, now: number): string {
+  if (!q?.stale) return ''
+  const age = staleAge(q.updated_at, now)
+  return `（上次讀數${age ? `，${age}前` : ''}）`
+}
+
 function entryLabel(entry: QuotaEntry): string {
   return entry.identity ? `${KIND_LABEL[entry.kind]} · ${entry.identity}` : KIND_LABEL[entry.kind]
 }
 
-function label(entry: QuotaEntry, q: KindQuota | null, loggedOut = false): string {
+function label(entry: QuotaEntry, q: KindQuota | null, loggedOut = false, now = Date.now()): string {
   const parts = [entryLabel(entry)]
   const five = remaining(q?.five_hour)
   const seven = remaining(q?.seven_day)
@@ -145,6 +163,7 @@ function label(entry: QuotaEntry, q: KindQuota | null, loggedOut = false): strin
     )
   }
   if (q?.fable?.resets_at) parts.push(`Fable ${fmtTime(q.fable.resets_at)} 重置`)
+  if (q?.stale) parts.push(staleSuffix(q, now))
   return parts.join('，')
 }
 
@@ -452,7 +471,7 @@ function Gauge({
       })
     }
   }
-  const title = `${hostLabel(host)} · ${label(entry, q, loggedOut)}`
+  const title = `${hostLabel(host)} · ${label(entry, q, loggedOut, now)}`
   const off = isQuotaDisabled(disabledMap, quotaDisableKey(host, entry.kind, entry.identity))
   const withOff = off ? `${title}（已暫時停用，底下的 Bot 收在側欄外）` : title
   // 量表是速率視窗，codex credits 用完時仍滿格卻一直 hit limit，所以畫在格子上（2026-09-12 使用者）。
@@ -463,7 +482,7 @@ function Gauge({
 
   return (
     <span
-      className={`quota-hp ${entry.kind} ${worst(q)}${focused ? ' focused' : ''}${borderWindows.length ? ' quota-framed' : ''}${off ? ' off' : ''}${blocked ? ' quota-blocked' : ''}`}
+      className={`quota-hp ${entry.kind} ${worst(q)}${focused ? ' focused' : ''}${borderWindows.length ? ' quota-framed' : ''}${off ? ' off' : ''}${blocked ? ' quota-blocked' : ''}${q?.stale ? ' stale' : ''}`}
       title={blocked ? `${accessibleTitle}\n\n${blockedLine(blocked)}` : accessibleTitle}
       aria-current={focused ? 'true' : undefined}
       // input／button 的點擊放行，否則量表按鈕會一次開一次關。
@@ -749,6 +768,7 @@ function PopRow({ entry, host }: { entry: QuotaEntry; host: string }) {
         {q?.plan ? <span className="quota-plan">{q.plan}</span> : null}
         <DisableToggle on={off} label={entryLabel(entry)} onToggle={toggle} />
       </div>
+      {q?.stale ? <p className="quota-stale-note">{staleSuffix(q, now)}，新的探測回來後會更新</p> : null}
       {!supported ? (
         <p className="quota-pop-note">CLI 不支援額度查詢</p>
       ) : !known || (five === null && seven === null) ? (
