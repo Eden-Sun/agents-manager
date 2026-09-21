@@ -98,6 +98,9 @@ pub struct LivePane {
     pub strips_on_enter: Option<fn(char) -> bool>,
     /// 上面那個 review 提示（畫在框的下緣之後）。
     pub notice: Option<String>,
+    /// 真的 herdr 0.9.1＋claude（2026-09-21 實測，#382）：一次 `pane.send_text` 超過這麼多位元組時，
+    /// **最前面的這麼多位元組不見了**，只剩後面的進到框裡。`Some(1024)` 重現那個行為。
+    pub send_text_drops_head_over: Option<usize>,
 }
 
 /// 框裡的字送出去：進 transcript，有 transcript 檔就照 claude 的格式補一筆 user entry。
@@ -533,9 +536,23 @@ impl MockHerdr {
                             let pid = wid_of("pane_id");
                             let text = params.get("text").and_then(Value::as_str).unwrap_or("").to_string();
                             if let Some(p) = st.live.lock().unwrap().get_mut(&pid) {
+                                let text = match p.send_text_drops_head_over {
+                                    Some(cap) if text.len() > cap => {
+                                        let mut cut = cap;
+                                        while !text.is_char_boundary(cut) {
+                                            cut += 1;
+                                        }
+                                        text[cut..].to_string()
+                                    }
+                                    _ => text,
+                                };
                                 if !p.swallow_text {
-                                    for line in text.split('\n') {
-                                        p.composer.push(line.to_string());
+                                    // 游標一直停在框的最後一列尾巴：下一段的第一行接在後面（貼上被拆成好幾段時）。
+                                    for (n, line) in text.split('\n').enumerate() {
+                                        match p.composer.last_mut() {
+                                            Some(last) if n == 0 => last.push_str(line),
+                                            _ => p.composer.push(line.to_string()),
+                                        }
                                     }
                                 }
                             }
