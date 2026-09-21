@@ -731,14 +731,18 @@ async fn the_starting_watcher_survives_an_unreadable_preview_row() {
     let r = rig().await;
     let bot = running_bot(&r, "alfa").await;
     start(&r.e.app, &bot, StartReq::default()).await.unwrap();
-    sqlx::query("ALTER TABLE bot_previews RENAME TO bot_previews_broken").execute(&r.e.app.db).await.unwrap();
-    spawn_watcher(r.e.app.clone(), bot.clone());
-    tokio::time::sleep(Duration::from_millis(400)).await;
-    sqlx::query("ALTER TABLE bot_previews_broken RENAME TO bot_previews").execute(&r.e.app.db).await.unwrap();
+    // 用 testing 的注入（先刷新同一條連線的 schema 快取再 ALTER）：裸 ALTER 會隨機抽到沒看過上一次改動的連線而 `no such table`。
+    testing::make_table_unreadable(&r.e.app, "bot_previews").await;
+    let before = watcher_ticks(&bot);
+    assert!(spawn_watcher(r.e.app.clone(), bot.clone()));
+    // 等它在讀不到的期間**真的輪過幾次**（事件），不是睡一段固定時間就當作有輪過。
+    assert!(testing::eventually!(watcher_ticks(&bot) >= before + 3), "watcher 沒有在讀不到的期間輪過");
+    assert!(is_watched(&bot), "讀不到那一列（暫時性）時 watcher 就結束了");
+    testing::make_table_readable(&r.e.app, "bot_previews").await;
     r.fake.listen(5180);
     assert!(
         testing::eventually!(row(&r.e.app.db, &bot).await.unwrap().unwrap().status == "running"),
-        "讀不到那一列（暫時性）時 watcher 就結束了"
+        "恢復之後 watcher 要接著把它推到 running"
     );
 }
 
