@@ -685,14 +685,15 @@ mod tests {
             // 修正前的 shim 不會停掉它們：別讓失敗的測試留下五分鐘的孤兒 sleep。
             for f in ["cargo.pid", "rustc.pid"] {
                 if let Some(pid) = self.pid(f) {
-                    unsafe { libc::kill(pid, libc::SIGKILL) };
+                    self.kill_if_ours(pid);
                 }
             }
             for pid in self.spawned() {
-                unsafe { libc::kill(pid, libc::SIGKILL) };
+                self.kill_if_ours(pid);
             }
-            for g in self.groups.lock().unwrap().iter() {
-                unsafe { libc::killpg(*g, libc::SIGKILL) };
+            let groups = self.groups.lock().unwrap().clone();
+            for g in groups {
+                self.kill_group_if_ours(g);
             }
             let _ = std::fs::remove_dir_all(&self.dir);
         }
@@ -902,6 +903,33 @@ esac"#
             v
         }
 
+        /// 這個 pid 現在所在的 process group（`ps`）；不在了回 `None`。
+        fn pgid_of(pid: i32) -> Option<i32> {
+            let out = Command::new("ps").args(["-p", &pid.to_string(), "-o", "pgid="]).output().ok()?;
+            String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+        }
+
+        /// 只在這個 pid **現在還在我們起過的 process group 裡**才送 KILL。
+        ///
+        /// pid／pgid 是全機共用、會回收的資源：整樹平行時光是 cargo_shim 的測試就每秒 fork 上萬次，macOS 的 pid 每隔幾秒就繞一圈。
+        /// 記在檔案或清單裡的舊 pid 過一會兒可能已經是別人的（別的測試的 shim、甚至不相干的行程），盲目 `kill` 會把它們殺掉——
+        /// 被殺的 shim 留下自己的續約守衛與 `sleep 60`（孤兒），整樹偶發紅（`a_guard_stopped_right_after_it_starts…`）。
+        /// 送訊號前先確認它還在我們記下的某個 group 裡。
+        fn kill_if_ours(&self, pid: i32) {
+            if Self::pgid_of(pid).is_some_and(|g| self.groups.lock().unwrap().contains(&g)) {
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+            }
+        }
+
+        /// [`Self::kill_if_ours`] 的 process group 版：組裡有任何成員的指令列含沙盒目錄才殺（shim 與它的守衛都是 `<沙盒>/bin/cargo`）。
+        /// 整組都不含（例如只剩自己會結束的孤兒 `sleep`）就不動：那個 group id 可能已經是別人的。
+        fn kill_group_if_ours(&self, pgid: i32) {
+            let dir = self.dir.to_string_lossy();
+            if group_members(pgid).iter().any(|(_, c)| c.contains(dir.as_ref())) {
+                unsafe { libc::killpg(pgid, libc::SIGKILL) };
+            }
+        }
+
         /// `spawned.pids` 記下的所有 pid。
         fn spawned(&self) -> Vec<i32> {
             std::fs::read_to_string(self.dir.join("spawned.pids")).unwrap_or_default().lines().filter_map(|l| l.trim().parse().ok()).collect()
@@ -945,7 +973,7 @@ esac"#
                     break st;
                 }
                 if started.elapsed() > std::time::Duration::from_secs(120) {
-                    unsafe { libc::killpg(pgid, libc::SIGKILL) };
+                    self.kill_group_if_ours(pgid);
                     panic!("shim 跑了 120 秒還沒結束（卡在等名額？）：{}", std::fs::read_to_string(&err_path).unwrap_or_default());
                 }
                 std::thread::sleep(std::time::Duration::from_millis(20));
@@ -965,7 +993,7 @@ esac"#
         fn kill_group(&self, pgid: i32) {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
             loop {
-                unsafe { libc::killpg(pgid, libc::SIGKILL) };
+                self.kill_group_if_ours(pgid);
                 if group_members(pgid).is_empty() {
                     return;
                 }
@@ -985,7 +1013,7 @@ esac"#
                     return;
                 }
                 if std::time::Instant::now() > deadline {
-                    unsafe { libc::killpg(pgid, libc::SIGKILL) };
+                    self.kill_group_if_ours(pgid);
                     panic!("shim 結束後還留下行程（孤兒）：{left:?}");
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));
@@ -1836,7 +1864,7 @@ esac"#,
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         let left = group_members(group);
-        unsafe { libc::killpg(group, libc::SIGKILL) };
+        s.kill_group_if_ours(group);
         let said = std::fs::read_to_string(&err_path).unwrap_or_default();
         assert!(left.is_empty(), "呼叫端不在了，shim 還在等名額（{}）：{left:?}\n{said}", verdict.unwrap_or_default());
         // 光看「行程消失了」不夠（機器上可能有別的東西在清孤兒）：shim 要**自己**講一句並退出，才是它自己發現的。
@@ -1877,7 +1905,7 @@ esac"#,
         // cargo 也沒了（連它前景那顆 `sleep 120` 一起收掉）：迴圈放掉名額、收掉狀態目錄、自己結束。
         for f in ["cargo.pid", "rustc.pid"] {
             if let Some(p) = s.pid(f) {
-                unsafe { libc::kill(p, libc::SIGKILL) };
+                s.kill_if_ours(p);
             }
         }
         for (pid, cmd) in group_members(group) {
