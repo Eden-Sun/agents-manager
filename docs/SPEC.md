@@ -230,6 +230,20 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   對 running 的 claude run `pane.read visible 80`，認到就寫 `runs.update_notice` 並推 `bot_status`，消失就清 NULL（讀不到畫面不清）；不限 idle。
   認法（`tui_prompts::update_notice`）：兩段字都要中，**且只看最下面 6 行非空白**（正文引用這兩句時會誤中）。存在 run 上：重啟（套用更新本身）後的新 run 本來就沒有。
   畫面上讀不到那句時退到版本比對：statusLine 的 `version`（process 在跑的）對 `claude --version`（磁碟上的），磁碟較新才算；磁碟版本每台主機快取 5 分鐘。
+- **codex 更新通知**（issue #388，2026-09-21 使用者截圖：codex 畫面有 `✨ Update available! 0.154.0 -> 0.155.1` 卻沒有任何徽章）：`update_watch`
+  同一支巡邏也巡 running 的 codex run（`daemon/src/codex_update.rs`）。**跟 claude 相反：claude 是新版已經下載好、重啟就換；codex 是新版還沒安裝**，
+  要先跑安裝指令再重啟——所以通知文字寫明「需安裝後重啟」，**安裝本身不自動跑**（照舊要人或 AGM 核准）。
+  - 認得兩種畫面寫法，都是同一句 `✨ Update available! <a> -> <b>`（`->`／`→`／`=>`，窄 pane 折行也讀得到），而且**緊接著要有**：
+    ① 啟動時的**互動選單**（`1. Update now (…)`＋`2. Skip`，還有 `3. Skip until next version`），或 ② **非互動方框**（`Run sh -c '…install.sh…' to update.`）。
+    光有那句（對話裡引用、不在行首）不算。方框印在 session 開頭，之後會被對話推出畫面。
+  - `runs.update_notice` 的字：`codex 有新版 <a> → <b>，需安裝後重啟`（`a` 讀不到時省略）；磁碟上已經是新版、這個 run 還跑舊的：
+    `codex 有新版 <disk>（這個 run 跑的是 <running>），已安裝，重啟套用`。一律以 `codex 有新版` 開頭。
+  - **版本比對補位**（畫面被推掉時）：磁碟版本 = `codex --version`（每台主機快取 5 分鐘）；跑著的版本 = 啟動畫面 `OpenAI Codex (v…)` 或提示句的 `<a>`，
+    看到就記在記憶體（掛 run，run 重啟後是新的）。磁碟比跑著的新 → 「已安裝，重啟套用」。優先序：磁碟已是新版 → 畫面上的提示 → 既有的「需安裝」通知。
+    提示被推掉、或選了 Skip，都不代表新版不存在，所以「需安裝」通知**不會**因畫面沒了就清掉，只在 run 重啟（新 run 本來就沒有）或磁碟裝好（改成「已安裝，重啟套用」）時變。
+    跑著的版本從沒看到過、畫面也沒提示時什麼都不寫（不知道就不猜）。
+  - **批次重啟不收 codex**（§6.9：候選只收 kind 是 claude）：重啟一顆沒裝新版的 codex 換不到任何東西。web 的更新徽章對 codex 說明要先安裝，
+    裝好（通知寫「已安裝」）才是「重啟套用」。
 
 ### 3.2 前端
 
@@ -1693,7 +1707,7 @@ default Bot 的 prompt／keys／terminal 讀取依 Run 的 session 回到 defaul
 claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
 
 - 入口：`POST /api/bots/restart-idle`（無 body），**立刻回計畫**，重啟在背景跑（一顆 `stop_bot` 最久等 10 秒）。
-- 挑選（`bulk_restart::plan`，純函式有測試）：候選 = kind 是 claude 且 run 帶非空 `update_notice`；非候選的連「跳過」都不列。候選依序判斷：
+- 挑選（`bulk_restart::plan`，純函式有測試）：候選 = kind 是 claude 且 run 帶非空 `update_notice`（**codex 的通知不算**：它的新版還沒安裝，重啟換不到，§3.1）；非候選的連「跳過」都不列。候選依序判斷：
 
   | 條件 | `reason` | 動作 |
   |---|---|---|

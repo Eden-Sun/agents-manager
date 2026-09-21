@@ -40,12 +40,18 @@ export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; varian
   if (!notice) return null
 
   const busy = run?.agent_status === 'working' || run?.agent_status === 'blocked'
+  // codex 的新版通常還沒安裝（issue #388）：重啟換不到任何東西，先講清楚要裝；裝好之後（通知寫「已安裝」）才是重啟套用。
+  const needsInstall = botKind !== 'claude' && !notice.includes('已安裝')
   const restart = () => {
+    if (needsInstall) {
+      setConfirming(false)
+      return
+    }
     setConfirming(false)
     setRestarting(true)
     void restartBot(botId).then((ok) => {
       setRestarting(false)
-      if (ok) notify('info', `${botName} 已用新版 claude 重新啟動`)
+      if (ok) notify('info', `${botName} 已用新版 ${botKind} 重新啟動`)
     })
   }
 
@@ -73,6 +79,9 @@ export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; varian
   const confirmDialog = (
     <ConfirmRestart
       open={confirming}
+      kind={botKind}
+      notice={notice}
+      needsInstall={needsInstall}
       name={botName}
       busy={busy}
       asking={asking}
@@ -161,6 +170,9 @@ export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; varian
 /** 確認框：changelog 在上，忙碌警語在下。 */
 function ConfirmRestart({
   open,
+  kind,
+  notice,
+  needsInstall,
   name,
   busy,
   asking,
@@ -170,6 +182,9 @@ function ConfirmRestart({
   onAskAgm,
 }: {
   open: boolean
+  kind: string
+  notice: string
+  needsInstall: boolean
   name: string
   busy: boolean
   asking: boolean
@@ -181,23 +196,28 @@ function ConfirmRestart({
   return (
     <ConfirmDialog
       open={open}
-      title="套用 claude 更新？"
+      title={needsInstall ? `${kind} 有新版，還沒安裝` : `套用 ${kind} 更新？`}
       body={
         <>
           {changelog}
-          {busy ? (
+          {needsInstall ? (
             <p>
-              <strong>{name}</strong> 正在忙，現在重啟會打斷這一回合。新版 claude 會 <code>--resume</code>{' '}
+              {notice}。重啟 <strong>{name}</strong> 換不到新版：請先在終端跑 {kind} 的安裝指令（畫面上那句 <code>Run … to update</code>，或選單的
+              <code>Update now</code>），裝好之後這裡會改成「重啟套用」。AG Man 不會自動安裝。
+            </p>
+          ) : busy ? (
+            <p>
+              <strong>{name}</strong> 正在忙，現在重啟會打斷這一回合。新版 {kind} 會 <code>--resume</code>{' '}
               接著同一個 session 跑，但這一輪沒說完的話會斷在那裡。
             </p>
           ) : (
             <p>
-              重啟 <strong>{name}</strong> 會用新版 claude 接著跑（session 會 <code>--resume</code>，上下文不會掉）。
+              重啟 <strong>{name}</strong> 會用新版 {kind} 接著跑（session 會 <code>--resume</code>，上下文不會掉）。
             </p>
           )}
         </>
       }
-      confirmLabel="重啟套用"
+      confirmLabel={needsInstall ? '知道了' : '重啟套用'}
       secondaryLabel={onAskAgm ? (asking ? '派工中…' : '請 AGM 解析') : undefined}
       secondaryDisabled={asking}
       onSecondary={onAskAgm}
