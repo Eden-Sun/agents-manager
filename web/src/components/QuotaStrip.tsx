@@ -741,7 +741,7 @@ function PopRow({ entry, host }: { entry: QuotaEntry; host: string }) {
       }}
     >
       <div className="quota-pop-head">
-        <span className="quota-kind" aria-hidden="true">
+        <span className={`quota-kind ${entry.kind}`} aria-hidden="true">
           <KindIcon kind={entry.kind} />
         </span>
         <span className="quota-name">{entryLabel(entry)}</span>
