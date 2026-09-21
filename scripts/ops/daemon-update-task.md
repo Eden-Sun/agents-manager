@@ -52,6 +52,9 @@ pane id 寫死，pane 換過之後 `herdr pane read` 回 `pane_not_found`，卻�
   `protocol_mismatch` → 以前置核對失敗（exit 3）中止，**binary 不動**。
 - 自測 prompt 送 AGM 的 browser-gc child：非 200 而且不是 `a turn is already in flight` → exit 3；
   是 in flight 就等它跑完重送（有次數上限，用完仍送不進去一樣 exit 3）。
+- 自測送出後，**等那個回合收尾再拿窗口**（輪詢 `lease safety`，看自測對象不在 in_flight／working／delivering；
+  預設 `SWAP_PROBE_SETTLE_TRIES=12` × `SWAP_PROBE_SETTLE_WAIT_SECS=5`）。不等的話第一次 acquire 一定 409
+  not_idle 而且 working 名單是空的——腳本自己擋自己（2026-09-21 連兩趟）。等滿上限照樣往下走，交給窗口重試。
 
 build 前 `git -C <checkout> log -1 --format=%h` 必須等於本次要上的 commit；不等就重 fetch 再 build。
 

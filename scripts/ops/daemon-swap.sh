@@ -32,6 +32,8 @@ SETTLE="${SWAP_SETTLE_SECS:-45}"          # 重啟後等多久再看 supervisor�
 WINDOW_TRIES="${SWAP_WINDOW_TRIES:-12}"   # 拿不到窗口時重試幾次（12 × 15 秒＝3 分鐘；一次 409 就 DEFER 會
                                           # 讓「某顆 bot 剛好翻回 working 那一瞬」變成整趟白跑，2026-09-21 實際發生過）
 WINDOW_WAIT="${SWAP_WINDOW_WAIT_SECS:-15}"
+SETTLE_TRIES="${SWAP_PROBE_SETTLE_TRIES:-12}"      # 自測回合收尾最多等幾次（12 × 5 秒＝1 分鐘）
+SETTLE_WAIT="${SWAP_PROBE_SETTLE_WAIT_SECS:-5}"
 
 SHA=""; OLD=""; OLDHASH=""; APPROVAL=""; OWNER=""; CHECKOUT=""
 while [ $# -gt 0 ]; do
@@ -147,6 +149,30 @@ case "$PROBE" in
     *) log "ABORT: 自測對象一直在跑回合，送不進去"; exit 3 ;;
 esac
 
+# 等自測那個回合收尾再拿窗口：它還在飛的時候 acquire 一定吃 409 not_idle（working 名單還是空的），
+# 等於腳本自己擋自己——2026-09-21 連兩趟第 1 次 acquire 都是這樣被拒。上限用完就照樣往下走，
+# 交給下面的窗口重試處理，不在這裡 DEFER。
+i=0; SETTLED=no
+while [ "$i" -lt "$SETTLE_TRIES" ]; do
+    i=$((i + 1))
+    BUSY=$(agm lease safety --approval "$APPROVAL" --owner "$OWNER" --exclude-bot "$OWNER" 2>/dev/null \
+        | "$PYTHON" -c 'import json,sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print("unknown"); raise SystemExit
+ids = {x.get("bot_id") for k in ("in_flight", "working", "delivering") for x in d.get(k) or [] if isinstance(x, dict)}
+print("yes" if sys.argv[1] in ids else "no")' "$PROBE_BOT")
+    case "$BUSY" in
+        no) SETTLED=yes; break ;;
+        unknown) log "3b 自測回合狀態讀不到，直接去拿窗口"; break ;;
+    esac
+    [ "$i" -eq 1 ] && log "等自測回合收尾（$PROBE_BOT 還在飛）"
+    [ "$i" -lt "$SETTLE_TRIES" ] && sleep "$SETTLE_WAIT"
+done
+[ "$SETTLED" = yes ] && log "3b self probe turn settled (check $i/$SETTLE_TRIES)"
+[ "$BUSY" = yes ] && log "自測回合等了 $SETTLE_TRIES 次還在飛，照樣去拿窗口（被拒會重試）"
+
 # ── 2. 拿 restart 窗口，換 binary 前一刻再查一次（§3a）────────────────────────
 TOKEN=""; FENCE=""
 i=0
@@ -170,7 +196,11 @@ except Exception:
 det = d.get("detail") or {}
 bits = [det.get("reason") or det.get("error") or d.get("error") or ""]
 w = [x.get("name") for x in (det.get("safety") or {}).get("working") or []]
-if w: bits.append("working=" + ",".join(str(n) for n in w))
+if w:
+    bits.append("working=" + ",".join(str(n) for n in w))
+else:
+    fl = [str(x.get("bot_id")) for x in (det.get("safety") or {}).get("in_flight") or []]
+    bits.append("working=(空，可能是自測回合" + (" in_flight=" + ",".join(fl) if fl else "") + ")")
 if det.get("escalates_at"): bits.append("escalates_at=" + str(det["escalates_at"]))
 print(" ".join(b for b in bits if b))')
     log "no window yet (try $i/$WINDOW_TRIES) reason=${WHY:-unparsed}: $(printf '%s' "$OUT" | tr -d '\n' | head -c 200)"
