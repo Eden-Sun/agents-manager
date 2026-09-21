@@ -1080,7 +1080,12 @@ async fn refresh_locked(app: &Arc<App>, bot_id: &str) -> Option<Row> {
         // dev script 起的 server 自己挑 port：看這顆 pane 的行程樹實際 listen 到哪個（多個取最小的）。
         (Some(p), None) if !attached => {
             let alive = env.pane_alive(p).await;
-            port = env.pane_ports(p).await.unwrap_or_default().first().map(|x| i64::from(*x));
+            let ports = env.pane_ports(p).await;
+            // pane_ports 的 None 是「問不到」，不能當成空集合讓 starting 超時失敗；pane_alive 已知關閉仍照常失敗。
+            if ports.is_none() && alive != Some(false) {
+                return Some(r);
+            }
+            port = ports.unwrap_or_default().first().map(|x| i64::from(*x));
             (alive, port.is_some())
         }
         (None, Some(port)) if attached => {

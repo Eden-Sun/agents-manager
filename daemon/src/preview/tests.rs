@@ -24,6 +24,8 @@ struct FakeEnv {
     close_fails: std::sync::atomic::AtomicBool,
     /// 模擬本機掃描失敗（問不到，不是「沒有」）。
     scan_fails: std::sync::atomic::AtomicBool,
+    /// 模擬讀不到 dev script 行程樹的 listen ports。
+    pane_ports_fails: std::sync::atomic::AtomicBool,
 }
 
 impl FakeEnv {
@@ -103,7 +105,12 @@ impl PreviewEnv for FakeEnv {
         })
     }
     fn pane_ports<'a>(&'a self, pane_id: &'a str) -> BoxFuture<'a, Option<Vec<u16>>> {
-        Box::pin(async move { Some(self.pane_ports.lock().unwrap().get(pane_id).cloned().unwrap_or_default()) })
+        Box::pin(async move {
+            if self.pane_ports_fails.load(std::sync::atomic::Ordering::SeqCst) {
+                return None;
+            }
+            Some(self.pane_ports.lock().unwrap().get(pane_id).cloned().unwrap_or_default())
+        })
     }
     fn repo_key<'a>(&'a self, dir: &'a str) -> BoxFuture<'a, Option<RepoKey>> {
         Box::pin(async move { self.repos.lock().unwrap().get(dir).cloned() })
@@ -1213,6 +1220,23 @@ async fn a_dev_script_that_never_listens_fails_after_60s_with_the_pane_tail() {
     let body = get(&r.e.app, &bot).await.unwrap();
     assert_eq!(status(&body), "failed");
     assert!(body["error"].as_str().unwrap().contains("script dev exited"));
+}
+
+#[tokio::test]
+async fn an_unreadable_dev_script_ports_read_does_not_count_as_a_timeout() {
+    let r = rig().await;
+    write_pkg(&r.e.repo.join("web"), Some("vite"));
+    let bot = running_bot(&r, "alfa").await;
+    let body = start(&r.e.app, &bot, StartReq::default()).await.unwrap();
+    let pane = body["pane_id"].as_str().unwrap().to_string();
+    let old = (chrono::Utc::now() - chrono::Duration::seconds(61)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    sqlx::query("UPDATE bot_previews SET started_at = ? WHERE bot_id = ?").bind(old).bind(&bot).execute(&r.e.app.db).await.unwrap();
+    r.fake.pane_ports_fails.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let body = get(&r.e.app, &bot).await.unwrap();
+    assert_eq!(status(&body), "starting", "讀不到實際 ports 不能當成 60 秒都沒 listen");
+    assert_eq!(body["pane_id"], pane);
+    assert_eq!(body["port"], Value::Null);
 }
 
 #[tokio::test]
