@@ -29,7 +29,9 @@ HERDR="${HERDR_BIN:-herdr}"
 PROBE_BOT="${SWAP_PROBE_BOT:-01M248GA4H1TAHJCZRKVR73S3C}"   # AGM 的 browser-gc child（3b 自測對象）
 PROBE_TRIES="${SWAP_PROBE_TRIES:-12}"   # 對方正在跑回合時，等它結束重送的次數上限
 SETTLE="${SWAP_SETTLE_SECS:-45}"          # 重啟後等多久再看 supervisor／名單（測試會調小）
-WINDOW_TRIES="${SWAP_WINDOW_TRIES:-1}"    # 拿不到窗口時重試幾次（呼叫端通常自己輪詢）
+WINDOW_TRIES="${SWAP_WINDOW_TRIES:-12}"   # 拿不到窗口時重試幾次（12 × 15 秒＝3 分鐘；一次 409 就 DEFER 會
+                                          # 讓「某顆 bot 剛好翻回 working 那一瞬」變成整趟白跑，2026-09-21 實際發生過）
+WINDOW_WAIT="${SWAP_WINDOW_WAIT_SECS:-15}"
 
 SHA=""; OLD=""; OLDHASH=""; APPROVAL=""; OWNER=""; CHECKOUT=""
 while [ $# -gt 0 ]; do
@@ -160,10 +162,21 @@ l = d.get("lease") or {}
 print(l.get("held"), l.get("fence"), d.get("lease_token") or l.get("lease_token") or "-")')
     HELD=$(echo "$PARSED" | cut -d' ' -f1); FENCE=$(echo "$PARSED" | cut -d' ' -f2); TOKEN=$(echo "$PARSED" | cut -d' ' -f3)
     [ "$HELD" = True ] && break
-    log "no window yet: $(printf '%s' "$OUT" | tr -d '\n' | head -c 200)"
-    [ "$i" -lt "$WINDOW_TRIES" ] && sleep 15
+    WHY=$(printf '%s' "$OUT" | "$PYTHON" -c 'import json,sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print(""); raise SystemExit
+det = d.get("detail") or {}
+bits = [det.get("reason") or det.get("error") or d.get("error") or ""]
+w = [x.get("name") for x in (det.get("safety") or {}).get("working") or []]
+if w: bits.append("working=" + ",".join(str(n) for n in w))
+if det.get("escalates_at"): bits.append("escalates_at=" + str(det["escalates_at"]))
+print(" ".join(b for b in bits if b))')
+    log "no window yet (try $i/$WINDOW_TRIES) reason=${WHY:-unparsed}: $(printf '%s' "$OUT" | tr -d '\n' | head -c 200)"
+    [ "$i" -lt "$WINDOW_TRIES" ] && sleep "$WINDOW_WAIT"
 done
-[ "$HELD" = True ] || { log "DEFER: 拿不到 restart 窗口"; exit 4; }
+[ "$HELD" = True ] || { log "DEFER: 拿不到 restart 窗口（試了 $WINDOW_TRIES 次，最後 reason=${WHY:-unparsed}）"; exit 4; }
 log "restart lease fence=$FENCE token=$([ "$TOKEN" != - ] && echo saved || echo MISSING)"
 
 SAFE=$(agm lease safety --approval "$APPROVAL" --owner "$OWNER" --exclude-bot "$OWNER" | "$PYTHON" -c 'import json,sys

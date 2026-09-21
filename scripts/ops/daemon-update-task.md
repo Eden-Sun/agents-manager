@@ -89,6 +89,11 @@ scripts/ops/daemon-swap.sh \
 - **升過 schema 的失敗預設往前修**（沿用新 binary 重起，exit 6），只有新 binary 真的起不來才還原 binary 與 DB（exit 7）。
 - 啟動走 `launchctl submit` ＋ fork/setsid 啟動器：daemon 是 ppid=1、**nice 0**；在 pane 裡直接背景起會繼承 pane 忙碌時的 nice 5，而且降不回去。
 
+**窗口輪詢**：腳本自己會重試拿窗口，預設 `SWAP_WINDOW_TRIES=12`、間隔 `SWAP_WINDOW_WAIT_SECS=15`（共約 3 分鐘）
+才 DEFER——某顆 bot 剛好在那一瞬翻回 working 是常態，一次 409 就放棄會讓整趟白跑（2026-09-21 發生過）。
+要等更久由呼叫端自己輪詢 `lease safety`，或把 `SWAP_WINDOW_TRIES` 調大。被拒時 log 會寫出 `detail.reason`
+（例如 `reason=not_idle working=…`），不用再從截短的原文猜。
+
 離開碼：0 成功、3 前置核對失敗（checkout／回滾點／讀不到 schema 版本）、4 沒窗口或複查不安全、
 5 備份有問題、6 往前修後停在新 binary、7 已回滾。窗口要自己等的話由呼叫端輪詢 `lease safety`，
 拿到窗口那一刻再呼叫這支（它自己也會再查一次 §3a）。
