@@ -2,7 +2,19 @@
 
 步驟：
 1. ego lite（**兩個條件都要滿足才關**：`ownership=agent` **且** 最近 2 小時無活動；擁有它的 bot 若 `working`／有未結案交辦一律不關。2026-09-13 12:00 把建立不到 1 小時、驗收 bot 還在用的 task space 61/62 關掉是錯的）：用 `ego-browser nodejs` 跑 `listTaskSpaces()`。對每個 task space：
-   - `ownership` 為 `agent`、且沒有正在進行的 assignment／最近 2 小時無活動 → `completeTaskSpace(id, { keep: false })` 關掉。
+   - `ownership` 為 `agent`、且沒有正在進行的 assignment／最近 2 小時無活動 → 關掉，**做法如下（不要再用 `completeTaskSpace(id, { keep: false })`）**：
+     2026-09-19 的 id 3、09-21 的 id 27／34 都是呼叫後沒關掉、`ownership` 反而從 `agent` 變成 `user`——那個呼叫在現行 ego-browser 等於把 task space **交給使用者**。
+     原因：分頁是別的 process 開的，對你這個 process 來說是「未受管理」的分頁；ego-browser 會保護未受管理的分頁，`keep` 留空也不會關整個 space。正確順序：
+     ```js
+     const task = await takeOverTaskSpace(id);            // 接手這個 agent-owned space
+     for (const t of await task.tabs()) {
+       if (!t.label && t.openedBy !== "unknown") await task.adopt(t.page);   // agent 開的才收編；openedBy 是 unknown 的當成使用者的，不收編
+     }
+     const r = await task.finish({ keep: [] });           // keep 必須是陣列（或 "all"），不是 false
+     console.log(JSON.stringify(r));
+     ```
+     （2026-09-21 id 36 實測有效：`closedSpace: true`。）做完**等 5 秒**再 `listTaskSpaces()` 驗一次——清單更新有延遲，剛關完立刻查可能短暫仍列出、`ownership` 顯示 `user`，幾秒後才消失；那個 id 還在、或 `ownership` 變成 `user`，就照實回報「沒關成」並附 `finish()` 的回傳，**不要重試、不要再動它**（`ownership=user` 一律不動）。
+     有 `openedBy: "unknown"` 的分頁時 space 本來就不會整個關掉，那是設計，回報寫明剩哪幾個分頁即可。
    - `ownership` 為 `user` 或 `agentDelegatedToUser` → 一律不動。
    - **名稱是「ChatGPT 決策顧問」的 task space 與它的分頁 → 一律不動**，不論 `ownership=agent`、閒置多久（使用者 2026-09-15：它是各 bot 問 ChatGPT 的固定對話，見 repo `docs/CHATGPT-CONSULT.md`）。
      下面「CLI 卡死重開 ego lite」會連它一起關：回報寫一行即可，不用手動復原（下次 `scripts/chatgpt-consult.sh` 會照 `~/.config/agents-manager/chatgpt-consult.json` 回到同一個對話）。
