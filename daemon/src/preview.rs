@@ -822,7 +822,13 @@ pub async fn start(app: &Arc<App>, bot_id: &str, req: StartReq) -> LcResult<Valu
                 spawn_watcher(app.clone(), bot_id.to_string());
                 return decorated(app, &bot, r.body(), true).await;
             }
-            disconnect_locked(app, r).await;
+            match disconnect_locked(app, r).await {
+                Some(stopped) if !stopped.status().is_live() => {}
+                _ => {
+                    // 明確切換不能把舊 pane 關掉時，不能繼續起第二顆，否則會留下孤兒 server。
+                    return Err(LcError::conflict("preview_stop_failed", json!({"bot_id": bot_id})));
+                }
+            }
         }
     }
     let cands = candidates_of(app, &bot).await?;
