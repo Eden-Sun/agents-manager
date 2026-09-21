@@ -528,6 +528,19 @@
   min-height: 22px;
 }
 
+/* 展開後的額度卡：kind logo 跟額度列、標題列一樣吃品牌色（2026-09-22 使用者：「額度圖裡 kind logo 也該有顏色」）。 */
+.quota-pop-head .quota-kind.claude {
+  color: var(--kind-claude);
+}
+
+.quota-pop-head .quota-kind.codex {
+  color: var(--kind-codex);
+}
+
+.quota-pop-head .quota-kind.grok {
+  color: var(--kind-grok);
+}
+
 .quota-plan {
   margin-left: auto;
   font-size: 11px;
