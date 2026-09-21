@@ -46,7 +46,7 @@ pub async fn recover_host(app: &Arc<App>, host: &str) {
     let open = match intents::open(&app.db).await {
         Ok(v) => {
             // 過期被收掉的、或別人收尾的：它們的開機 hold 不用再留（#378）。
-            lifecycle::restart_hold::retain_open(&v.iter().map(|i| i.id.clone()).collect());
+            lifecycle::restart_hold::retain_open(app, &v.iter().map(|i| i.id.clone()).collect());
             v
         }
         Err(e) => {
@@ -74,7 +74,7 @@ pub async fn recover_host(app: &Arc<App>, host: &str) {
             let (app, id) = (app.clone(), i.id.clone());
             tokio::spawn(async move { retry_loop(&app, &id).await });
         } else {
-            lifecycle::restart_hold::release_intent(&i.id);
+            lifecycle::restart_hold::release_intent(app, &i.id);
         }
     }
 }
@@ -83,7 +83,7 @@ async fn retry_loop(app: &Arc<App>, id: &str) {
     for attempt in 0.. {
         tokio::time::sleep(crate::reconcile::recovery_retry_delay(attempt)).await;
         if drive_once(app, id).await == Outcome::Finished {
-            lifecycle::restart_hold::release_intent(id);
+            lifecycle::restart_hold::release_intent(app, id);
             return;
         }
     }
@@ -93,7 +93,7 @@ async fn drive(app: &Arc<App>, id: &str) {
     if let Outcome::Retry(_) = drive_once(app, id).await {
         retry_loop(app, id).await;
     } else {
-        lifecycle::restart_hold::release_intent(id);
+        lifecycle::restart_hold::release_intent(app, id);
     }
 }
 
@@ -257,7 +257,7 @@ mod tests {
         assert_eq!(run_state(&e.app, &run1).await, "stopped");
 
         let app2 = tt::restart_app(&e).await;
-        lifecycle::restart_hold::adopt_open_intents(&app2.db).await;
+        lifecycle::restart_hold::adopt_open_intents(&app2).await;
         assert!(lifecycle::restart_hold::in_progress(&bot.id), "開機接回 hold");
         // recovery 之前：對帳收尾／回合結束事件／定時 sweeper 的撤孤兒路徑。
         assert!(lifecycle::revoke_orphaned_queued_turns(&app2, &bot.id, "它的 run 已經結束").await.is_empty());
@@ -272,6 +272,28 @@ mod tests {
         assert!(db::active_run(&app2.db, &bot.id).await.unwrap().is_some(), "recovery 把 bot 補起來");
         assert!(!lifecycle::restart_hold::in_progress(&bot.id), "intent 收尾後 hold 放掉");
         assert_ne!(st(turn.clone()).await, "failed", "排著的派工留給新 run，沒有被撤");
+    }
+
+    /// 另一個 DB 的 `recover_host`（測試共用行程；也就是「別人的 intent 表」）不能把我們接回的 hold 放掉：
+    /// `retain_open` 只對同一個資料目錄的 intent 下判斷。以前它清掉所有不在「自己那份開著的名單」的 hold，
+    /// 整樹平行時另一條測試的 `recover_host` 剛好夾在中間，`a_queued_prompt_survives…` 就偶發紅。
+    #[tokio::test]
+    async fn another_apps_recovery_never_releases_our_boot_holds() {
+        let e = tt::env().await;
+        let (bot, _run1) = running_bot(&e, "held").await;
+        die_at(&e, &bot.id, "restart_after_stop").await;
+        let app2 = tt::restart_app(&e).await;
+        lifecycle::restart_hold::adopt_open_intents(&app2).await;
+        assert!(lifecycle::restart_hold::in_progress(&bot.id));
+
+        // 另一個完全獨立的 App（自己的 DB、沒有任何開著的 intent）跑一輪 recovery。
+        let other = tt::env().await;
+        recover_host(&other.app, LOCAL_HOST).await;
+        assert!(lifecycle::restart_hold::in_progress(&bot.id), "別人的 recovery 不能放掉我們的 hold");
+
+        // 自己的 recovery 收尾之後才放。
+        recover_host(&app2, LOCAL_HOST).await;
+        assert!(!lifecycle::restart_hold::in_progress(&bot.id));
     }
 
     /// 承諾點之前（intent 寫了、stop 還沒記）死掉：世界沒變，abandoned，bot 照舊在跑、不多起。

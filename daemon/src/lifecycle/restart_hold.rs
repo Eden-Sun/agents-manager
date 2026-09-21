@@ -47,21 +47,23 @@ impl Drop for Hold {
     }
 }
 
-/// 開機接回的 hold：intent id → 憑證。`recover_host` 收掉那件 intent 才放。
-fn adopted() -> &'static Mutex<HashMap<String, Hold>> {
-    static M: OnceLock<Mutex<HashMap<String, Hold>>> = OnceLock::new();
+/// 開機接回的 hold：(資料目錄, intent id) → 憑證。`recover_host` 收掉那件 intent 才放。
+/// 帶資料目錄是因為「只留還開著的」（[`retain_open`]）只能對**同一個 DB** 的 intent 下判斷：測試共用同一個行程，
+/// 另一個 App 的 `recover_host` 看到的開著的 intent 不含我們的，不能因此把我們的 hold 放掉（整樹負載下偶發紅）。
+fn adopted() -> &'static Mutex<HashMap<(String, String), Hold>> {
+    static M: OnceLock<Mutex<HashMap<(String, String), Hold>>> = OnceLock::new();
     M.get_or_init(Default::default)
 }
 
 /// 開機（**對帳之前**）把還開著的 `restart` intent 各灌一個 hold。讀不到 DB 只能記 log（此時什麼都撤不了以外的事無從判斷），
 /// 之後 `recover_host` 照樣會補完，只是這段視窗沒有保護。
-pub(crate) async fn adopt_open_intents(pool: &sqlx::SqlitePool) {
-    match crate::intents::open(pool).await {
+pub(crate) async fn adopt_open_intents(app: &crate::state::App) {
+    match crate::intents::open(&app.db).await {
         Ok(open) => {
             for i in open.into_iter().filter(|i| i.kind == "restart") {
                 let hold = begin(&i.subject_id);
                 if let Ok(mut m) = adopted().lock() {
-                    m.entry(i.id).or_insert(hold);
+                    m.entry((owner(app), i.id)).or_insert(hold);
                 }
             }
         }
@@ -70,17 +72,22 @@ pub(crate) async fn adopt_open_intents(pool: &sqlx::SqlitePool) {
 }
 
 /// 那件 intent 已經收尾：放掉它的 hold（沒有就什麼都不做）。
-pub(crate) fn release_intent(intent_id: &str) {
-    let hold = adopted().lock().ok().and_then(|mut m| m.remove(intent_id));
+pub(crate) fn release_intent(app: &crate::state::App, intent_id: &str) {
+    let hold = adopted().lock().ok().and_then(|mut m| m.remove(&(owner(app), intent_id.to_string())));
     drop(hold);
 }
 
+fn owner(app: &crate::state::App) -> String {
+    app.data_dir.display().to_string()
+}
+
 /// 只留還開著的 intent 的 hold；其餘（例如過期被收掉的）放掉。
-pub(crate) fn retain_open(open_ids: &std::collections::HashSet<String>) {
+pub(crate) fn retain_open(app: &crate::state::App, open_ids: &std::collections::HashSet<String>) {
+    let me = owner(app);
     let gone: Vec<Hold> = match adopted().lock() {
         Ok(mut m) => {
-            let ids: Vec<String> = m.keys().filter(|k| !open_ids.contains(*k)).cloned().collect();
-            ids.into_iter().filter_map(|k| m.remove(&k)).collect()
+            let keys: Vec<(String, String)> = m.keys().filter(|(o, id)| *o == me && !open_ids.contains(id)).cloned().collect();
+            keys.into_iter().filter_map(|k| m.remove(&k)).collect()
         }
         Err(_) => return,
     };
