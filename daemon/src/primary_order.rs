@@ -50,12 +50,16 @@ pub async fn validate(db: &SqlitePool, ids: &[String]) -> Result<(), LcError> {
 pub async fn write(db: &SqlitePool, ids: &[String]) -> Result<(), LcError> {
     let mut tx = db.begin().await.map_err(up)?;
     for (i, id) in ids.iter().enumerate() {
-        sqlx::query("UPDATE bots SET primary_position = ? WHERE id = ? AND deleted_at IS NULL")
+        let changed = sqlx::query("UPDATE bots SET primary_position = ? WHERE id = ? AND deleted_at IS NULL")
             .bind(i as i64 + 1)
             .bind(id)
             .execute(&mut *tx)
             .await
             .map_err(up)?;
+        // validate 與這個交易之間仍可能有人刪 bot；0 列不能當成功，否則前面的順序會半套 commit。
+        if changed.rows_affected() != 1 {
+            return Err(LcError::Bad(format!("order: 未知的 bot `{id}`")));
+        }
     }
     tx.commit().await.map_err(up)
 }
