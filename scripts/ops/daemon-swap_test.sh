@@ -58,6 +58,9 @@ setup() { # setup <checkout 的 SCHEMA_VERSION> <DB 目前的 user_version>
   export DAEMON_DB="$ROOT/am.sqlite3" DAEMON_LOG="$ROOT/daemon.log" SWAP_LOG="$ROOT/swap.log"
   export SWAP_SETTLE_SECS=0 SWAP_WINDOW_TRIES=3 SWAP_WINDOW_WAIT_SECS=0
   export STUB_ACQUIRE_FAIL_TIMES=0   # 前幾次 acquire 回 409（模擬瞬間有人在跑）
+  export STUB_ACQUIRE_EMPTY_WORKING=""   # 設了：那幾次 409 的 working 名單是空的
+  export STUB_PROBE_INFLIGHT_TIMES=0     # 前幾次 lease safety 裡自測對象還在 in_flight
+  export SWAP_PROBE_SETTLE_TRIES=5 SWAP_PROBE_SETTLE_WAIT_SECS=0
   export AGM_BIN="$ROOT/bin/agm" SQLITE_BIN="$ROOT/bin/sqlite3" CURL_BIN="$ROOT/bin/curl"
   export LAUNCHCTL_BIN="$ROOT/bin/launchctl" PGREP_BIN="$ROOT/bin/pgrep" HERDR_BIN="$ROOT/bin/herdr"
   export SWAP_PROBE_TRIES=2 SWAP_PROBE_BOT=bot-probe
@@ -105,13 +108,26 @@ for a in "$@"; do
 done
 case "$sub:$op" in
   lease:acquire)
+      # 自測回合還在飛就拿不到窗口（跟正式 daemon 一樣：in_flight 擋，working 名單是空的）。
+      # 時間用「查過幾次 safety＋要過幾次窗口」來代表：每問一次，自測回合就往收尾推進一步。
+      safeties=$(grep -cE "lease (safety|acquire restart)" "$AGM_DIR/calls.log" 2>/dev/null); safeties=${safeties:-0}
+      if [ "${STUB_PROBE_INFLIGHT_TIMES:-0}" -ge "$safeties" ] && [ "${STUB_PROBE_INFLIGHT_TIMES:-0}" -gt 0 ]; then
+        printf '{"error":"http_error","status":409,"detail":{"error":"conflict","reason":"not_idle","safety":{"working":[],"in_flight":[{"bot_id":"bot-probe"}]}}}'
+        exit 1
+      fi
       tries=$(grep -c "lease acquire restart" "$AGM_DIR/calls.log" 2>/dev/null); tries=${tries:-0}
       if [ "${STUB_ACQUIRE_FAIL_TIMES:-0}" -ge "$tries" ] && [ "${STUB_ACQUIRE_FAIL_TIMES:-0}" -gt 0 ]; then
-        printf '{"error":"http_error","status":409,"detail":{"error":"conflict","reason":"not_idle","escalates_at":"2026-09-21T01:31:00Z","safety":{"working":[{"name":"busy-bot"}]}}}'
+        if [ -n "$STUB_ACQUIRE_EMPTY_WORKING" ]; then
+          printf '{"error":"http_error","status":409,"detail":{"error":"conflict","reason":"not_idle","safety":{"working":[],"in_flight":[{"bot_id":"bot-probe"}]}}}'
+        else
+          printf '{"error":"http_error","status":409,"detail":{"error":"conflict","reason":"not_idle","escalates_at":"2026-09-21T01:31:00Z","safety":{"working":[{"name":"busy-bot"}]}}}'
+        fi
         exit 1
       fi
       printf '{"lease":{"held":%s,"fence":9},"lease_token":"tok-1"}' "$STUB_ACQUIRE_HELD" ;;
-  lease:safety)  printf '{"safe":%s,"working":[],"delivering":[]}' "$STUB_SAFE" ;;
+  lease:safety)  n=$(grep -cE "lease (safety|acquire restart)" "$AGM_DIR/calls.log"); fl=""
+                 [ "${STUB_PROBE_INFLIGHT_TIMES:-0}" -ge "$n" ] && fl='{"bot_id":"bot-probe","turn_id":"t-1"}'
+                 printf '{"safe":%s,"working":[],"delivering":[],"in_flight":[%s]}' "$STUB_SAFE" "$fl" ;;
   lease:status)  printf '{"leases":[{"resource":"restart","held":%s}]}' "$STUB_RESTART_HELD" ;;
   lease:release) printf '{"released":true}' ;;
   health:*)      [ -n "$STUB_HEALTH_OK" ] || exit 1; printf '{"status":"healthy"}' ;;
@@ -375,6 +391,35 @@ teardown
 # 20. 預設值：腳本自己的預設是重試 12 次、間隔 15 秒，不是只試一次。
 check "SWAP_WINDOW_TRIES 預設 12" 'SWAP_WINDOW_TRIES:-12' "$SCRIPT"
 check "間隔預設 15 秒" 'SWAP_WINDOW_WAIT_SECS:-15' "$SCRIPT"
+
+# 21. 3b 自測回合還在飛：先等它收尾再拿窗口，不應該自己擋自己吃一次 409。
+setup 10 10
+export STUB_PROBE_INFLIGHT_TIMES=2
+rc=$(run)
+check_eq "等自測回合收尾後成功（rc=0）" "0" "$rc"
+check "有等自測回合" "等自測回合收尾（bot-probe 還在飛）" "$SWAP_LOG"
+check "第 3 次查就收尾了" "3b self probe turn settled (check 3/5)" "$SWAP_LOG"
+check_no "沒有吃 409" "no window yet" "$SWAP_LOG"
+check_eq "窗口只要了一次" "1" "$(grep -c "lease acquire restart" "$AGM_DIR/calls.log")"
+teardown
+
+# 22. 409 但 working 名單是空的：log 要註明可能是自測回合，並帶上 in_flight 是誰。
+setup 10 10
+export STUB_ACQUIRE_FAIL_TIMES=1 STUB_ACQUIRE_EMPTY_WORKING=1
+rc=$(run)
+check_eq "重試後成功（rc=0）" "0" "$rc"
+check "空名單註明可能是自測回合" "reason=not_idle working=(空，可能是自測回合 in_flight=bot-probe)" "$SWAP_LOG"
+teardown
+
+# 23. 自測回合一直不收尾：等到上限就照樣去拿窗口（交給窗口重試），不在這裡卡死或中止。
+setup 10 10
+export STUB_PROBE_INFLIGHT_TIMES=6
+rc=$(run)
+check_eq "上限用完仍繼續，窗口重試接手（rc=0）" "0" "$rc"
+check "講清楚等滿了" "自測回合等了 5 次還在飛" "$SWAP_LOG"
+check "那次 409 有註明可能是自測回合" "no window yet (try 1/3) reason=not_idle working=(空，可能是自測回合" "$SWAP_LOG"
+check "預設等 12 次" 'SWAP_PROBE_SETTLE_TRIES:-12' "$SCRIPT"
+teardown
 
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
