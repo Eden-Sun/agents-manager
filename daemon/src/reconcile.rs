@@ -452,7 +452,22 @@ fn schedule_deferred_pass(app: &Arc<App>, host: &str) {
     });
 }
 
+/// 同一台主機的對帳**一輪一輪來**：事件驅動的一輪與延後補跑的一輪（`schedule_deferred_pass`）在負載高時會重疊，後到的那一輪
+/// `claimed` 讀在前一輪認領之前、spawn hint 卻讀在前一輪 `consume` 之後，就退回同 tab 推斷——已經認領的子 agent 又掛到別顆底下、
+/// 因為短名字被占用長出重複 bot（`proj-xxxx-k2`）。key 帶資料目錄：測試共用同一個行程，不同的 App 不能互相排隊。
+async fn host_pass_lock(app: &Arc<App>, host: &str) -> Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> = std::sync::OnceLock::new();
+    let key = format!("{}\u{0}{host}", app.data_dir.display());
+    LOCKS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner()).entry(key).or_default().clone()
+}
+
 pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
+    let lock = host_pass_lock(app, host).await;
+    let _pass = lock.lock().await;
+    reconcile_host_locked(app, host).await
+}
+
+async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<()> {
     let Some(session) = app.session_for_host(host).await else {
         anyhow::bail!("unknown host `{host}`");
     };
@@ -3246,6 +3261,63 @@ mod compat_tests {
             assert_eq!(c.parent_bot_id.as_deref(), Some(parent.as_str()), "{} 要掛在真正的父 bot 底下", c.name);
         }
         assert_eq!(kids.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["k1", "k2", "k3"], "短名字都取得到：parent 沒選錯");
+    }
+
+    /// 兩輪對帳同時跑（事件驅動的一輪＋延後補跑的一輪，負載一高就會重疊）：後到的那一輪 `claimed` 讀在前一輪認領之前、
+    /// hint 卻讀在前一輪 `consume` 之後，就退回同 tab 推斷，把已經認領的子 agent 又掛到別顆底下、長出重複 bot。
+    /// 同一台主機的對帳要一輪一輪來：不論幾輪同時進來，都只認領一次、掛對 parent。
+    #[tokio::test]
+    async fn overlapping_reconcile_passes_never_adopt_the_same_child_twice() {
+        for round in 0..8 {
+            let env = tt::env().await;
+            let app = env.app.clone();
+            let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+            let (ws, root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+            let parent = a_bot(&env, "alfa").await;
+            let parent_agent = crate::config::agent_name("proj", &parent);
+            sqlx::query(
+                "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, tab_id, agent_name, herdr_session, started_at)
+                 VALUES (?,?,'running','idle',?,?,?,?,'test',?)",
+            )
+            .bind(db::ulid())
+            .bind(&parent)
+            .bind(&ws.workspace_id)
+            .bind(&root.pane_id)
+            .bind(&root.tab_id)
+            .bind(&parent_agent)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+            let p1 = client.tab_create(&ws.workspace_id, "/tmp/p", "kids", json!({})).await.unwrap();
+            let p2 = client.pane_split(&p1.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
+            let p3 = client.pane_split(&p2.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
+            let agent_json = |name: &str, pane: &crate::herdr::PaneInfo| {
+                json!({"name": name, "agent": "claude", "agent_status": "idle",
+                       "workspace_id": ws.workspace_id, "tab_id": pane.tab_id, "pane_id": pane.pane_id, "cwd": "/tmp/p"})
+            };
+            let mut agents = vec![agent_json(&parent_agent, &root)];
+            for (i, p) in [&p1, &p2, &p3].into_iter().enumerate() {
+                crate::spawn_hints::record(&app, &parent, &p.pane_id).await.unwrap();
+                agents.push(agent_json(&format!("{parent_agent}-k{}", i + 1), p));
+            }
+            *env.herdr.agents.lock().unwrap() = agents;
+
+            let host = crate::config::LOCAL_HOST;
+            let (a, b, c, d) = tokio::join!(
+                super::reconcile_host(&app, host),
+                super::reconcile_host(&app, host),
+                super::reconcile_host(&app, host),
+                super::reconcile_host(&app, host)
+            );
+            for r in [a, b, c, d] {
+                r.unwrap();
+            }
+            let kids: Vec<db::Bot> =
+                sqlx::query_as("SELECT * FROM bots WHERE parent_bot_id IS NOT NULL ORDER BY name").fetch_all(&app.db).await.unwrap();
+            assert_eq!(kids.iter().map(|k| k.name.as_str()).collect::<Vec<_>>(), ["k1", "k2", "k3"], "第 {round} 輪：不重複認領：{kids:?}");
+            assert!(kids.iter().all(|k| k.parent_bot_id.as_deref() == Some(parent.as_str())), "第 {round} 輪：都掛在真正的父 bot 底下：{kids:?}");
+        }
     }
 
     /// 對照組（issue #94）：跟上面完全同樣的場景，但**不送任何 hint**——證明 hook 缺席時，舊的（有缺陷
