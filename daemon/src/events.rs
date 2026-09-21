@@ -398,7 +398,7 @@ pub async fn unwatch_pane_on_session(app: &Arc<App>, host: &str, session: &str, 
 }
 
 pub(crate) async fn handle_status(app: &Arc<App>, host: &str, session: &str, ev: &crate::herdr::Event) {
-    handle_status_try(app, host, session, ev, 0).await
+    handle_status_try(app, host, session, ev, 0, None).await
 }
 
 /// 同一個 pane 最新的狀態事件是第幾則：讀不到 run 而延後重放的那一則，只在它之後沒有更新的事件時才算數（#192）。
@@ -431,11 +431,19 @@ fn replay_status_later(app: &Arc<App>, host: &str, session: &str, ev: &crate::he
         if status_seq().lock().unwrap().get(&key) != Some(&seq) {
             return;
         }
-        handle_status_try(&app, &host, &session, &ev, attempt + 1).await;
+        handle_status_try(&app, &host, &session, &ev, attempt + 1, Some(seq)).await;
     });
 }
 
-async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate::herdr::Event, attempt: usize) {
+/// 同一個 pane 的狀態事件**一則一則寫**（#192 的補洞）：重放的那一則在「讀 run 到寫狀態」之間，較新的事件可能整則跑完，
+/// 重放這時再把舊狀態寫回去就把新的蓋掉（`blocked` 蓋掉已經回答的 `idle`）。所以讀 run、比對「我還是不是最新」、寫狀態
+/// 這一段在 pane 的鎖裡做；較新的事件一到就先登記序號（鎖之前），拿到鎖的重放看到序號變了就放棄。
+fn pane_status_lock(key: &PaneKey) -> Arc<tokio::sync::Mutex<()>> {
+    static M: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<PaneKey, Arc<tokio::sync::Mutex<()>>>>> = std::sync::OnceLock::new();
+    M.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner()).entry(key.clone()).or_default().clone()
+}
+
+async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate::herdr::Event, attempt: usize, replay_seq: Option<u64>) {
     let name = norm(&ev.event);
     if name != "pane_agent_status_changed" {
         tracing::trace!(event = %ev.event, "unhandled pane event");
@@ -451,12 +459,21 @@ async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate
         .to_string();
     tracing::info!(host, session, pane_id, status = %status, "pane.agent_status_changed");
     let key: PaneKey = (host.to_string(), session.to_string(), pane_id.to_string());
-    let seq = {
-        let mut m = status_seq().lock().unwrap();
-        let n = m.entry(key.clone()).or_insert(0);
-        *n += 1;
-        *n
+    // 重放的那一則不是新事件：沿用原來的序號，不能把自己登記成「最新」。
+    let seq = match replay_seq {
+        Some(seq) => seq,
+        None => {
+            let mut m = status_seq().lock().unwrap();
+            let n = m.entry(key.clone()).or_insert(0);
+            *n += 1;
+            *n
+        }
     };
+    let pane_lock = pane_status_lock(&key);
+    let write_guard = pane_lock.lock().await;
+    if replay_seq.is_some() && status_seq().lock().unwrap().get(&key) != Some(&seq) {
+        return;
+    }
 
     let fallback = app.session_for_host(host).await.unwrap_or_default();
     // 讀不到不等於這個 pane 沒有 run（#192）：以前讀取錯誤被當成空集合、整則事件丟掉。對 working／idle 之後的對帳還補得回來，
@@ -488,6 +505,7 @@ async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate
             tracing::warn!(run = %run.id, status = %status, error = ?e, "could not persist the agent status");
         }
     }
+    drop(write_guard);
     app.emit_bot_status(&run.bot_id).await;
 
     // The agent reacted to the prompt: the stall watchdog is no longer needed.
@@ -710,6 +728,7 @@ mod tests {
         // 前提（這一刻沒收到）要在 bots **還讀不到的時候**看（runs 本身讀得到）：一旦讀得到，背景重試隨時會收斂，
         // 高負載下測試這邊晚一步再看就會看到已經收好的結果。
         assert_eq!(run_state(&app, &run).await, "running", "前提：這一刻沒收到");
+        tt::make_table_readable(&app, "bots").await;
 
         let _ = crate::testing::eventually!(run_state(&app, &run).await == "exited" && project_ws(&app, &e.project_id).await.is_none());
         assert_eq!(run_state(&app, &run).await, "exited");
@@ -730,6 +749,36 @@ mod tests {
         assert_eq!(project_ws(&app, &e.project_id).await, None);
     }
 
+    /// #192 重放的補洞：舊的 `blocked` 重放已經過了「我還是最新嗎」那一關、正在讀 run 的時候，較新的 `idle` 整則跑完，
+    /// 重放接著把 `blocked` 寫回去，蓋掉已經回答的 `idle`（整樹高負載下 `a_replayed_status_event_never_overwrites_a_newer_one` 偶發紅）。
+    /// 這裡把「較新的事件先進來、舊重放後拿到 pane 的鎖」的順序做成確定的：舊重放拿到鎖之後要重新比對序號，不能寫。
+    #[tokio::test]
+    async fn a_stale_replay_that_gets_the_pane_after_a_newer_event_writes_nothing() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let bot = tt::claude_bot(&app, &e.project_id, "stale-replay").await;
+        tt::fake_run(&app, &bot.id).await; // agent_status = idle
+        let pane = format!("pane-{}", bot.id);
+        let ev = |status: &str| crate::herdr::Event {
+            event: "pane_agent_status_changed".into(),
+            data: json!({"pane_id": pane, "agent_status": status}),
+        };
+        let stored = || async { sqlx::query_scalar::<_, String>("SELECT agent_status FROM runs WHERE bot_id=?").bind(&bot.id).fetch_one(&app.db).await.unwrap() };
+        let key: PaneKey = (LOCAL_HOST.to_string(), "test".to_string(), pane.clone());
+        // 舊的 blocked 事件是這個 pane 的第 1 則（讀不到 run、排了重放）。
+        status_seq().lock().unwrap().insert(key.clone(), 1);
+
+        let held = pane_status_lock(&key).lock_owned().await;
+        let newer = { let (app, ev) = (app.clone(), ev("idle")); tokio::spawn(async move { handle_status(&app, LOCAL_HOST, "test", &ev).await }) };
+        let _ = crate::testing::eventually!(status_seq().lock().unwrap().get(&key) == Some(&2));
+        let replay = { let (app, ev) = (app.clone(), ev("blocked")); tokio::spawn(async move { handle_status_try(&app, LOCAL_HOST, "test", &ev, 1, Some(1)).await }) };
+        tokio::task::yield_now().await;
+        drop(held);
+        newer.await.unwrap();
+        replay.await.unwrap();
+        assert_eq!(stored().await, "idle", "較新的 idle 不能被舊的 blocked 重放蓋掉");
+    }
+
     fn close_event(pane: &str) -> crate::herdr::Event {
         crate::herdr::Event { event: "pane.closed".into(), data: json!({"pane_id": pane}) }
     }
@@ -747,7 +796,7 @@ mod tests {
 
         tt::make_table_unreadable(&app, "runs").await;
         handle_global(&app, LOCAL_HOST, "test", &close_event(&pane)).await;
-        assert!(watching(&app, &pane).await, "讀不到 run 時不能拆 watcher");
+        assert!(watching(&app, &pane).await, "讀不到 run 時不能拆 watcher（也就是這一刻沒收到）");
         tt::make_table_readable(&app, "runs").await;
 
         let _ = crate::testing::eventually!(run_state(&app, &run).await == "exited" && !watching(&app, &pane).await);
