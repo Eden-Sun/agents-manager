@@ -172,6 +172,12 @@ pub fn probe_due(bot_id: &str, pane_id: &str) -> bool {
     !probed().lock().unwrap().contains(&probe_key(bot_id, pane_id))
 }
 
+/// A child's CLI kind can become known after the first reconcile pass.  An identity probe made
+/// while the row still carried the parent's kind must not suppress the probe for the child's kind.
+pub fn reset_probe(bot_id: &str, pane_id: &str) {
+    probed().lock().unwrap().remove(&probe_key(bot_id, pane_id));
+}
+
 fn probe_key(bot_id: &str, pane_id: &str) -> String {
     format!("{bot_id}\u{1}{pane_id}")
 }
