@@ -707,7 +707,8 @@ mod tests {
 
         tt::make_table_unreadable(&app, "bots").await;
         handle_global(&app, LOCAL_HOST, "test", &ws_event("ws-1")).await;
-        tt::make_table_readable(&app, "bots").await;
+        // 前提（這一刻沒收到）要在 bots **還讀不到的時候**看（runs 本身讀得到）：一旦讀得到，背景重試隨時會收斂，
+        // 高負載下測試這邊晚一步再看就會看到已經收好的結果。
         assert_eq!(run_state(&app, &run).await, "running", "前提：這一刻沒收到");
 
         let _ = crate::testing::eventually!(run_state(&app, &run).await == "exited" && project_ws(&app, &e.project_id).await.is_none());
@@ -748,7 +749,6 @@ mod tests {
         handle_global(&app, LOCAL_HOST, "test", &close_event(&pane)).await;
         assert!(watching(&app, &pane).await, "讀不到 run 時不能拆 watcher");
         tt::make_table_readable(&app, "runs").await;
-        assert_eq!(run_state(&app, &run).await, "running", "前提：這一刻沒收到");
 
         let _ = crate::testing::eventually!(run_state(&app, &run).await == "exited" && !watching(&app, &pane).await);
         assert_eq!(run_state(&app, &run).await, "exited", "重試補上，不靠第二個事件");
