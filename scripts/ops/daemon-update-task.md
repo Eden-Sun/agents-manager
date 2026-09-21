@@ -7,8 +7,10 @@ AGM 定期交辦：正式 daemon（`target/release/agents-managerd serve`，監�
 2. 整樹 `cargo test` 全過；只含本次 tree 的 `cargo check -p agents-managerd` 與 web `tsc` 通過。
 3. 等到**沒有其他 bot 在 working** 再重啟：看 `bin/agm --compact state` 的 `run.agent_status`，只有 `working`
    算數，**`blocked` 不算**（那是在等使用者回答、可能好幾小時，而重啟不動 pane，原 pane 重啟本來就跳過 blocked）。
-   不要用 `bin/agm health` 的 `bots.busy`——那個數字把 blocked 也算進去。有人在 working 就等，最多等 30 分鐘，
-   超過回報「延後」不要硬重啟。
+   不要用 `bin/agm health` 的 `bots.busy`——那個數字把 blocked 也算進去。有人在 working 就等。
+   **等滿 30 分鐘之後以 `lease safety` 為準**（2026-09-21 AGM 裁示）：restart 核准等滿 1800 秒會 escalated，此時 working 不再擋，
+   只剩送達中（delivering）、別人握著的租約、讀不到的 pane 會擋。`lease safety` 回 `safe=true` 就可以照流程換版，
+   回報寫明「escalated 後換版、當時還在 working 的是哪幾顆」；`safe=false` 才回報「延後」。不要在 `safe=false` 時硬重啟。
 3-0. **restart 窗口可以在回合內拿**（2026-09-18 起）：`lease acquire restart` 放過申請者自己那顆 bot 的送達臨界區，
    所以不必為了拿窗口把建置或部署腳本丟到背景再結束回合（那違反 6a）。條件：`--owner` ＝核准的 `--requester`，
    `--exclude-bot` 只帶**自己這顆 bot 的 id**；帶別顆會 409 `exclude_not_requester`。別的 bot 還在送達臨界區時照樣拿不到，等它。
