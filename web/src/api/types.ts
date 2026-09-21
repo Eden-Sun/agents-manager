@@ -297,6 +297,8 @@ export interface Run {
   runtime_model: string | null
   runtime_effort: string | null
   runtime_fast: boolean | null
+  /** issue #238：啟動時使用的身份；空字串＝本機預設帳號，`null`＝不知道（收編 pane／舊列）。 */
+  runtime_identity: string | null
   native_session_id: string | null
   transcript_path: string | null
   started_at: string

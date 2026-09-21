@@ -56,7 +56,7 @@ import { UpdateAllBanner } from './UpdateAllBanner'
 import { ApiModelFields } from './ModelPicker'
 import { InstallToolButton } from './Tools'
 import { UpdateBadge } from './UpdateBadge'
-import { runtimeKnown } from '../lib/runtimeDrift'
+import { runtimeIdentity, runtimeSettingsKnown } from '../lib/runtimeDrift'
 import { syncKidsScroll, wheelKidsScroll } from '../lib/kidsScroll'
 import { createHitSearch } from '../lib/hitSearch'
 import { useWheelRef } from '../hooks/useWheelRef'
@@ -151,6 +151,7 @@ function BotRow({
   onStep: (botId: string, dir: -1 | 1) => void
 }) {
   const bot = useStore((s) => s.bots.find((b) => b.id === botId))
+  const run = useStore((s) => s.runs[botId] ?? null)
   const lamp = useStore((s) => botLamp(s, botId))
   // 額度 critical 時整列反灰＋警語（API.md §12.4）。botQuotaWarning 每次回新物件，不 useShallow 會無限重繪。
   const quotaWarning = useStore(
@@ -168,7 +169,7 @@ function BotRow({
       const b = s.bots.find((x) => x.id === botId)
       // 同 ModelTag：run 報的模型優先。
       const run = s.runs[botId] ?? null
-      const model = run?.status?.model_name ?? (runtimeKnown(run) ? run!.runtime_model : (b?.model ?? null))
+      const model = run?.status?.model_name ?? (runtimeSettingsKnown(run) ? run!.runtime_model : (b?.model ?? null))
       if (!b) return null
       const host = projectHostName(s, b.project_id)
       return botQuotaLevel(s.quota, b.kind, b.identity, host, model, quotaClaimants(s, host))
@@ -203,6 +204,8 @@ function BotRow({
   )
   // 回合被 API 斷線截斷：燈號仍是綠的，只有這個說「其實沒做完」。
   const turnError = useStore((s) => s.runs[botId]?.turn_error ?? null)
+  const runningIdentity = runtimeIdentity(run)
+  const identityUnknown = Boolean(run && (run.state === 'running' || run.state === 'starting') && run.runtime_identity === null)
 
   if (!bot) return null
   // 佔位列：daemon 還沒建好，不能點、不能拖。
@@ -365,11 +368,21 @@ function BotRow({
               className="identity-diverged"
               title={`底下有子 bot 用別的帳號（母 ${bot.identity ?? 'cc0'}、子 ${divergedChildren.identities}：${divergedChildren.names}）——額度分開算，注意別把那個帳號用光`}
             >
-              <IdentityBadge name={bot.identity} showDefault kind={bot.kind} />
+              <IdentityBadge
+                name={runningIdentity === undefined ? bot.identity : runningIdentity}
+                showDefault
+                kind={bot.kind}
+                unknown={identityUnknown}
+              />
               <span className="identity-diverged-mark" aria-hidden="true">{divergedChildren.identities}</span>
             </span>
           ) : (
-            <IdentityBadge name={bot.identity} showDefault kind={bot.kind} />
+            <IdentityBadge
+              name={runningIdentity === undefined ? bot.identity : runningIdentity}
+              showDefault
+              kind={bot.kind}
+              unknown={identityUnknown}
+            />
           )}
           {quotaWarning ? (
             // critical 警語取代模型標籤（側欄窄）；截斷時看 title。

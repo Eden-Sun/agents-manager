@@ -13,11 +13,21 @@ export function IdentityBadge({
   name,
   showDefault,
   kind,
+  unknown,
 }: {
   name: string | null
   showDefault?: boolean
   kind?: BotKind
+  /** active run 有但 daemon 沒記 runtime_identity；不要拿設定值冒充實際值。 */
+  unknown?: boolean
 }) {
+  if (unknown) {
+    return (
+      <span className="identity-badge is-unknown" title="身份：未知（這個 Run 沒有記錄啟動身份）">
+        未知
+      </span>
+    )
+  }
   // 沒指定身份也要標出來，不然本機預設和 cc1 在列表上長得一樣。
   if (!name) {
     if (!showDefault) return null

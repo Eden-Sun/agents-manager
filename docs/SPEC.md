@@ -512,7 +512,7 @@ claude 連線在回應中途掉了時，pane 只多一行 `⏺ API Error: Connec
 - **保留**：處理完的列留 24 小時供查「這則到底進來過沒有」，之後由 worker 順手刪掉。
 - **StatusLine 不進來**：它是單槽、最新的贏的重繪訊號（遠端就是寫 `hook-status.json`，不是 spool 佇列），送端 `statusline_cmd` fire-and-forget 不看回應也不重送。每次重繪寫一列只換來大量寫入，換不到任何保證；掉一格的代價就是晚一次重繪。
 
-### 4.4a 模型／強度／fast：runtime 與設定
+### 4.4a 模型／強度／fast／身份：runtime 與設定
 
 `bots.model` / `effort` / `fast` 是**設定**，不等於 bot 現在真的在跑的東西。
 
@@ -530,6 +530,7 @@ claude 連線在回應中途掉了時，pane 只多一行 `⏺ API Error: Connec
   agent 就緒後讀框底，跟 `bots.effort` 不同就送 `/effort <level>`（已相符不打字，免得 `pane_typed` 改 prompt 路徑）。
 - **收編的 pane**三欄是 NULL = 不知道，UI 不比也不標。codex 例外：它把三個值印在狀態列上，reconcile 讀那行補 NULL（`reconcile::fill_codex_runtime`）——
   否則 UI 會拿 bots 頂上，而 `/fast` 是開關，不知道的 tier 等於切不掉。
+- **身份也記 runtime**：`runs.runtime_identity` 的空字串是已知的本機預設帳號，`NULL` 是收編 pane／舊列而不知道，前端只在有值時拿它與 `bot.identity` 比；身份不同時身份徽章顯示實際值，設定值放在 drift 說明。
 - **UI 一律顯示 runtime**；設定 ≠ runtime 時多一顆「需重啟」chip（`POST /api/bots/{id}/restart`）。不准靜靜顯示還沒生效的值。
 - **codex 的 fast 兩個方向都送**：少送 `service_tier` 等於「聽 `~/.codex/config.toml`」，而那裡常寫著 `fast`。所以一律帶 `-c service_tier="priority"`（勾）或
   `-c service_tier=""`（沒勾）。`priority` 是 `model/list` 唯一廣告的 tier，TUI 顯示為 `fast`。model／effort 不這樣做：它們的「不指定」在 UI 上就寫「使用 CLI 預設」。

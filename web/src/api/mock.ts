@@ -50,6 +50,8 @@ interface MockRun {
   runtime_model: string | null
   runtime_effort: string | null
   runtime_fast: boolean
+  /** 空字串＝本機預設帳號；null＝不知道。 */
+  runtime_identity: string | null
   started_at: string
   ended_at: string | null
   /** `agent_status` 最後一次真的改變的時間，只有 `setAgentStatus` 會動它（issue #93）。 */
@@ -2095,6 +2097,13 @@ export class MockTransport implements Transport {
               primary: b.is_primary === 1,
               primary_position: b.primary_position ?? 0,
               cwd: b.cwd,
+              // #353：mock 也從目前 run 的啟動值投影 needs_restart，讓設定面板與真 daemon 同步。
+              needs_restart:
+                run !== null &&
+                (run.runtime_model !== b.model ||
+                  run.runtime_effort !== b.effort ||
+                  run.runtime_fast !== (b.fast === 1) ||
+                  (run.runtime_identity !== null && (run.runtime_identity || null) !== b.identity)),
               // 同 daemon：`slug(label)-<bot id 末 6 碼>`。
               agent_name: `${p.label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'b'}-${b.id.slice(-6).toLowerCase()}`,
               run,
@@ -2468,6 +2477,7 @@ export class MockTransport implements Transport {
       runtime_model: bot.model,
       runtime_effort: bot.effort,
       runtime_fast: bot.fast === 1,
+      runtime_identity: bot.identity ?? '',
       agent_status_since: now(),
       started_at: now(),
       ended_at: null,

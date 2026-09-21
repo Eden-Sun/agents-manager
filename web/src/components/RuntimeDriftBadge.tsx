@@ -5,7 +5,8 @@ import { driftLine, runtimeDrift } from '../lib/runtimeDrift'
 
 /**
  * 「設定改了，但 bot 還跑在舊值上」的常駐 chip，點下去重啟（SPEC §4.4a）。
- * codex 的模型／強度／fast 只在啟動時吃得到，比對的是 `run.runtime_*` 與設定。
+ * 啟動相關欄位只在啟動時吃得到，比對的是 daemon 記下的 `run.runtime_*` 與設定；
+ * daemon 的 `bot.needs_restart` 仍是全域重啟狀態的唯一來源，這顆只列已知欄位細節。
  */
 export function RuntimeDriftBadge({ botId }: { botId: string }) {
   const bot = useStore((s) => s.bots.find((b) => b.id === botId) ?? null)

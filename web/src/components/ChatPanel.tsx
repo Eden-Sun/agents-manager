@@ -44,7 +44,7 @@ import { RuntimeDriftBadge } from './RuntimeDriftBadge'
 import { trimClippedTail } from '../lib/statusLineTail'
 import { quotedFrom } from '../lib/agmQuote'
 import { relayPreview } from '../lib/relayPreview'
-import { runtimeKnown } from '../lib/runtimeDrift'
+import { runtimeIdentity, runtimeSettingsKnown } from '../lib/runtimeDrift'
 import { shortModel } from '../lib/shortModel'
 import { MemBadge } from './MemBadge'
 import { QuotaStrip } from './QuotaStrip'
@@ -1116,6 +1116,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   const botId = useStore((s) => s.selectedBotId)
   const bot = useStore((s) => s.bots.find((b) => b.id === s.selectedBotId) ?? null)
   const run = useStore((s) => (s.selectedBotId ? (s.runs[s.selectedBotId] ?? null) : null))
+  const runningIdentity = runtimeIdentity(run)
   // 這顆 bot 的未讀：看著就清掉，只在人離開時亮。
   const headUnread = useStore((s) => (s.selectedBotId ? (s.botUnread[s.selectedBotId] ?? 0) : 0))
   const phone = useMediaQuery(PHONE_QUERY)
@@ -1152,12 +1153,14 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
       if (b.kind === 'claude') return null
       // 額度按主機分（SPEC §14）：狀態列講的是這隻 bot，就看它那台的列。
       const host = projectHostName(s, b.project_id)
-      const key = quotaKey(host, b.identity ? `${b.kind}:${b.identity}` : b.kind)
+      const liveIdentity = runtimeIdentity(r)
+      const identity = liveIdentity === undefined ? b.identity : liveIdentity
+      const key = quotaKey(host, identity ? `${b.kind}:${identity}` : b.kind)
       const q = s.quota[key] ?? s.quota[quotaKey(host, b.kind)] ?? null
       const tool = toolsOfHost(s, host)[b.kind]
       const path = s.projects.find((p) => p.id === b.project_id)?.path ?? null
       // SPEC §4.4a：用 run 實際啟動值（`run.runtime_*`），不是下次啟動才生效的 bot 設定。
-      const live = runtimeKnown(r)
+      const live = runtimeSettingsKnown(r)
       return derivedStatus(
         b.kind,
         live ? r!.runtime_model : b.model,
@@ -1348,7 +1351,11 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           </>
         ) : null}
         <span className="spacer" />
-        <QuotaStrip focusKind={bot.kind} focusIdentity={bot.identity} host={hostName} />
+        <QuotaStrip
+          focusKind={bot.kind}
+          focusIdentity={runningIdentity === undefined ? bot.identity : runningIdentity}
+          host={hostName}
+        />
         {/* 遠端才掛：本機的數字固定在左上角，這裡再放一次只是重複。 */}
         <MemBadge host={hostName} onlyRemote />
         {/* UI-DECISIONS〈無障礙語意（#11）〉。 */}

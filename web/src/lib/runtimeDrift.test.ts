@@ -4,7 +4,7 @@ import type { Bot, Run } from '../api/types.ts'
 import { driftTitle, runtimeDrift, runtimeKnown } from './runtimeDrift.ts'
 
 const bot = (over: Partial<Bot> = {}): Bot =>
-  ({ id: 'b1', kind: 'codex', model: 'gpt-5.6-luna', effort: 'high', fast: true, ...over }) as Bot
+  ({ id: 'b1', kind: 'codex', model: 'gpt-5.6-luna', effort: 'high', fast: true, identity: null, ...over }) as Bot
 
 const run = (over: Partial<Run> = {}): Run =>
   ({
@@ -15,6 +15,7 @@ const run = (over: Partial<Run> = {}): Run =>
     runtime_model: 'gpt-5.6-luna',
     runtime_effort: 'high',
     runtime_fast: true,
+    runtime_identity: '',
     ...over,
   }) as Run
 
@@ -45,8 +46,32 @@ test('fast 只有 codex 會變成啟動旗標，其他 kind 不比', () => {
   assert.deepEqual(runtimeDrift(bot({ kind: 'grok', fast: false }), run({ runtime_fast: true })), [])
 })
 
+test('身份相同時不標 drift，即使其他 runtime 欄位未知', () => {
+  const actual = run({ runtime_model: null, runtime_effort: null, runtime_fast: null, runtime_identity: 'cc1' })
+  assert.equal(runtimeKnown(actual), true)
+  assert.deepEqual(runtimeDrift(bot({ identity: 'cc1' }), actual), [])
+})
+
+test('身份不同時標出實際帳號與設定帳號', () => {
+  const d = runtimeDrift(
+    bot({ kind: 'claude', identity: 'cc1' }),
+    run({ runtime_model: null, runtime_effort: null, runtime_fast: null, runtime_identity: '' }),
+  )
+  assert.equal(d.length, 1)
+  assert.equal(d[0].field, 'identity')
+  assert.equal(d[0].label, '帳號')
+  assert.equal(d[0].running, 'cc0')
+  assert.equal(d[0].configured, 'cc1')
+})
+
+test('runtime_identity 為 null 時身份未知，不猜也不標 drift', () => {
+  const unknown = run({ runtime_model: null, runtime_effort: null, runtime_fast: null, runtime_identity: null })
+  assert.equal(runtimeKnown(unknown), false)
+  assert.deepEqual(runtimeDrift(bot({ identity: 'cc1' }), unknown), [])
+})
+
 test('不知道 runtime 就不要猜：收編的 pane、沒在跑的 run', () => {
-  const unknown = run({ runtime_model: null, runtime_effort: null, runtime_fast: null })
+  const unknown = run({ runtime_model: null, runtime_effort: null, runtime_fast: null, runtime_identity: null })
   assert.equal(runtimeKnown(unknown), false)
   assert.deepEqual(runtimeDrift(bot({ effort: 'low' }), unknown), [])
   assert.deepEqual(runtimeDrift(bot({ effort: 'low' }), run({ state: 'stopped' })), [])
