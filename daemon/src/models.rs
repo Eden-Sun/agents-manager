@@ -480,6 +480,49 @@ pub fn model_effort_from_argv(kind: &str, argv: &[String]) -> (Option<String>, O
     (model, effort)
 }
 
+/// Read codex's Fast service tier from an adopted pane.  `service_tier=priority` is the argv
+/// equivalent of `/fast`; an empty/default tier is explicitly not Fast.  Unknown values stay
+/// unknown rather than turning a guessed value into persisted state.
+pub fn fast_from_argv(kind: &str, argv: &[String]) -> Option<bool> {
+    if kind != "codex" {
+        return None;
+    }
+    let assignment = |s: &str| -> Option<String> {
+        let (key, value) = s.split_once('=')?;
+        (key.trim() == "service_tier").then(|| value.trim().trim_matches('"').trim_matches('\'').to_ascii_lowercase())
+    };
+    let mut i = 0;
+    let mut tier = None;
+    while i < argv.len() {
+        let arg = argv[i].as_str();
+        let (flag, inline) = match arg.split_once('=') {
+            Some((f, v)) if f.starts_with('-') => (f, Some(v.to_string())),
+            _ => (arg, None),
+        };
+        if matches!(flag, "-c" | "--config") {
+            let value = inline.or_else(|| argv.get(i + 1).and_then(|v| {
+                if v.starts_with('-') {
+                    None
+                } else {
+                    i += 1;
+                    Some(v.clone())
+                }
+            }));
+            if let Some(value) = value {
+                if let Some(value) = assignment(&value) {
+                    tier = Some(value);
+                }
+            }
+        }
+        i += 1;
+    }
+    match tier.as_deref() {
+        Some("priority") | Some("fast") => Some(true),
+        Some("") | Some("default") | Some("standard") => Some(false),
+        _ => None,
+    }
+}
+
 /// grok's fallback when argv says nothing: before it renames itself to a task, the terminal
 /// title is `Grok 4.6 (xhigh)`.
 pub fn grok_title_model_effort(title: &str) -> (Option<String>, Option<String>) {
@@ -589,6 +632,12 @@ mod tests {
             ),
             (Some("gpt-5.6-sol".into()), Some("max".into()))
         );
+        assert_eq!(
+            fast_from_argv("codex", &argv(&["codex", "-c", "service_tier=\"priority\""])),
+            Some(true)
+        );
+        assert_eq!(fast_from_argv("codex", &argv(&["codex", "-c", "service_tier=\"\""])), Some(false));
+        assert_eq!(fast_from_argv("claude", &argv(&["claude", "-c", "service_tier=\"priority\""])), None);
     }
 
     /// Nothing is guessed: a bare CLI stays unset, and an effort the kind does not accept
