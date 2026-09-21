@@ -373,15 +373,17 @@ async fn refresh_child_kind(app: &Arc<App>, bot: &mut db::Bot, pane_id: &str, ki
     if bot.managed_by != "child" || bot.kind == kind {
         return Ok(());
     }
+    let mut tx = app.db.begin().await?;
     let changed = sqlx::query(
         "UPDATE bots SET kind = ?, identity = NULL, model = NULL, effort = NULL, fast = 0
          WHERE id = ? AND managed_by = 'child'",
     )
     .bind(kind)
     .bind(&bot.id)
-    .execute(&app.db)
+    .execute(&mut *tx)
     .await?;
     if changed.rows_affected() == 0 {
+        tx.rollback().await?;
         return Ok(());
     }
     sqlx::query(
@@ -389,8 +391,9 @@ async fn refresh_child_kind(app: &Arc<App>, bot: &mut db::Bot, pane_id: &str, ki
          WHERE bot_id = ? AND state IN ('starting','running','stopping')",
     )
     .bind(&bot.id)
-    .execute(&app.db)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     crate::pane_identity::reset_probe(&bot.id, pane_id);
     bot.kind = kind.to_string();
     bot.identity = None;
@@ -2696,6 +2699,86 @@ mod compat_tests {
         assert_eq!(child.model.as_deref(), Some("gpt-5.6-sol"));
         assert_eq!(child.effort.as_deref(), Some("max"));
         assert_eq!(child.fast, 1);
+    }
+
+    /// Changing a child's kind invalidates both its bot observations and its active run's
+    /// observations.  A failed second write must not leave the first write committed, or the
+    /// next reconcile will see the new kind and never retry the runtime reset.
+    #[tokio::test]
+    async fn a_kind_repair_does_not_leave_bot_and_run_observations_half_updated() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        configure_cross_kind_identities(&app).await;
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let child_pane = client.pane_split(&root.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
+
+        let parent = a_bot(&env, "alfa").await;
+        sqlx::query("UPDATE bots SET identity = 'cc1' WHERE id = ?").bind(&parent).execute(&app.db).await.unwrap();
+        let parent_agent = crate::config::agent_name("proj", &parent);
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, tab_id, pane_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','idle',?,?,?,?,'test',?)",
+        )
+        .bind(db::ulid())
+        .bind(&parent)
+        .bind(&ws.workspace_id)
+        .bind(&root.tab_id)
+        .bind(&root.pane_id)
+        .bind(&parent_agent)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        let child_agent = format!("{parent_agent}-codex");
+        let (child, child_run) = a_child(
+            &env,
+            &parent,
+            "codex",
+            &child_agent,
+            &ws.workspace_id,
+            &child_pane.tab_id,
+            &child_pane.pane_id,
+        )
+        .await;
+        sqlx::query("UPDATE bots SET identity='cc1', model='old-model', effort='old-effort', fast=1 WHERE id=?")
+            .bind(&child)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE runs SET runtime_model='old-model', runtime_effort='old-effort', runtime_fast=1 WHERE id=?")
+            .bind(&child_run)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        sqlx::query(&format!(
+            "CREATE TRIGGER refuse_runtime_reset BEFORE UPDATE OF runtime_model ON runs
+             WHEN OLD.id = '{child_run}' AND NEW.runtime_model IS NULL
+             BEGIN SELECT RAISE(ABORT, 'runtime reset unavailable'); END"
+        ))
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        *env.herdr.agents.lock().unwrap() = vec![
+            json!({"name": parent_agent, "agent": "claude", "agent_status": "idle",
+                   "workspace_id": ws.workspace_id, "tab_id": root.tab_id, "pane_id": root.pane_id, "cwd": "/tmp/p"}),
+            json!({"name": child_agent, "agent": "codex", "agent_status": "working",
+                   "workspace_id": ws.workspace_id, "tab_id": child_pane.tab_id, "pane_id": child_pane.pane_id, "cwd": "/tmp/p"}),
+        ];
+
+        assert!(super::reconcile_host(&app, crate::config::LOCAL_HOST).await.is_err(), "runtime reset failure must be retryable");
+        let bot = sqlx::query_as::<_, db::Bot>("SELECT * FROM bots WHERE id=?").bind(&child).fetch_one(&app.db).await.unwrap();
+        assert_eq!(bot.kind, "claude", "failed runtime reset must roll back the kind change");
+        assert_eq!(bot.identity.as_deref(), Some("cc1"));
+        assert_eq!(bot.model.as_deref(), Some("old-model"));
+        assert_eq!(bot.effort.as_deref(), Some("old-effort"));
+        assert_eq!(bot.fast, 1);
+        let run = run_of(&app, &child).await.unwrap();
+        assert_eq!(run.runtime_model.as_deref(), Some("old-model"));
+        assert_eq!(run.runtime_effort.as_deref(), Some("old-effort"));
+        assert_eq!(run.runtime_fast, Some(1));
     }
 
     /// A child's **account** is not its parent's (SPEC §16.6): read it off its own pane's process.
