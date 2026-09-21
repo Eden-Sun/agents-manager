@@ -7,7 +7,7 @@ import { isSurvey } from '../lib/choiceDraft'
 import { surveyDraftAllowed } from '../store/mobilePreview'
 import { BlockedDraft } from './BlockedDraft'
 import { CodexUpdateHint } from './CodexUpdateHint'
-import { linkifyTerm } from './TermLinks'
+import { linkifyTerm } from './termLinks'
 import { useTermWrap } from './termWrap'
 import './blockedPanel.css'
 

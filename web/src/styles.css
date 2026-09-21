@@ -3157,7 +3157,7 @@ button.model-tag:hover:not(:disabled) {
   min-height: 200px;
 }
 
-/* 終端 URL（TermLinks.tsx）：點一下複製不開分頁——登入連結貼到別處才是使用者要的。 */
+/* 終端 URL（termLinks.tsx）：點一下複製不開分頁——登入連結貼到別處才是使用者要的。 */
 
 .term-link {
   all: unset;

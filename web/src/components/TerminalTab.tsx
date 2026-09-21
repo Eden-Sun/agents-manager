@@ -3,7 +3,7 @@ import { useScrollTail } from '../hooks/useScrollTail'
 import { movePaneToTab } from '../api'
 import type { TerminalSnapshot } from '../api/types'
 import { useStore } from '../store/store'
-import { linkifyTerm } from './TermLinks'
+import { linkifyTerm } from './termLinks'
 import { setTermWrap, useTermWrap } from './termWrap'
 import './terminalTab.css'
 
