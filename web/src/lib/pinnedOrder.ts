@@ -11,9 +11,13 @@ export interface Positioned {
   index: number
 }
 
-/** 主力組排序：`primary_position` 小的在前，同值照原順序（未拖過時 daemon 全給 0＝維持側欄順序）。 */
+/** 主力組排序：已指派位置小的在前；0 代表尚未排序，排在最後；同值照原順序。 */
 export function sortPinned<T extends Positioned>(items: T[]): T[] {
-  return [...items].sort((a, b) => a.position - b.position || a.index - b.index)
+  return [...items].sort((a, b) => {
+    const aPosition = a.position === 0 ? Number.POSITIVE_INFINITY : a.position
+    const bPosition = b.position === 0 ? Number.POSITIVE_INFINITY : b.position
+    return aPosition - bPosition || a.index - b.index
+  })
 }
 
 /** 把 `id` 移到 `beforeId` 前面（null＝最後）；沒有變動回 null。 */
