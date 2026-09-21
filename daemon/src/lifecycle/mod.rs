@@ -12,6 +12,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 mod messages;
+pub(crate) mod relay_watch;
+pub(crate) mod dead_panes;
 mod queue;
 mod setup;
 mod start;
