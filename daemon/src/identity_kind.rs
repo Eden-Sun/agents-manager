@@ -94,6 +94,7 @@ pub async fn cleanup_host(app: &Arc<App>, host: &str) -> (usize, usize) {
         }
     }
     for k in &removed {
+        crate::quota::forget(app, k).await;
         tracing::info!(host, key = %k, "removed a quota key for an identity of another kind");
         app.emit("quota_updated", serde_json::json!({"kind": k, "host": host, "quota": null})).await;
     }

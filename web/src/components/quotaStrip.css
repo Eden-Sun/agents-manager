@@ -113,6 +113,18 @@
   transition: background 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
 }
 
+/* #392：開機先畫 DB 裡的上一輪讀數，不要把等待探測誤畫成斜線空白；淡色＋標題／明細的年齡表示它仍是 stale。 */
+.quota-hp.stale {
+  opacity: 0.64;
+  filter: saturate(0.72);
+}
+
+.quota-pop .quota-stale-note {
+  margin: 2px 0 6px;
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
 /* 只染 1px 透明外框的左邊，拿掉 gap 後格寬不變；選取格整圈上色會蓋掉這條。 */
 
 .quota-hp + .quota-hp {

@@ -334,6 +334,10 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     if let Some(local) = app.hosts.get("local").await {
         local.connected.store(true, std::sync::atomic::Ordering::SeqCst);
     }
+    // #392：先把上一次額度讀數放回記憶體，API 開始服務時就能畫出 stale 的量表；新的探測回來後由 quota::set 蓋掉。
+    if let Err(e) = quota::load_cache(&app).await {
+        tracing::warn!(error = ?e, "quota cache load failed; waiting for the first probe");
+    }
 
     // #378: 被打斷的重啟在 recovery 補完之前，對帳收尾舊 run 不能把它排著的派工當孤兒撤掉。
     lifecycle::restart_hold::adopt_open_intents(&app.db).await;

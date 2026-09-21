@@ -787,6 +787,8 @@ export interface KindQuota {
   limit_hit: QuotaLimitHit | null
   plan: string | null
   updated_at: string
+  /** daemon 重啟後從上一輪讀數回填；新的探測回來前仍可顯示但不是 fresh。 */
+  stale: boolean
   /** `local` 或 `hosts[].name` */
   host: string
 }

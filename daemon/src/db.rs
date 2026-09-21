@@ -159,6 +159,12 @@ CREATE TABLE IF NOT EXISTS intents (
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL, expires_at TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS intents_one_open ON intents(kind, subject_id) WHERE status IN ('pending','running');
+-- 額度最後一次探測結果（issue #392）；daemon 重啟後先顯示這份，API 會標成 stale。
+CREATE TABLE IF NOT EXISTS quota_cache (
+  key TEXT PRIMARY KEY,
+  quota_json TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 "#;
 
 /// 這個 binary 認得的 schema 版本，存在 SQLite 內建的 `PRAGMA user_version`（跟資料庫檔案綁在一起，
@@ -197,6 +203,8 @@ const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (12, "dd16404b83c0823f"),
     // issue #355：`intents`（持久 intent）、`bots.launch_rev`／`runs.launch_rev`（啟動版本雜湊）；同版含 4cbacecc（#349）的 `remote_bot_dir_purges`（那顆沒升版）。
     (13, "44c2487afdf01452"),
+    // issue #392：`quota_cache`（重啟後先顯示上一次的額度讀數）。
+    (14, "0cb16547e439691a"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -1542,4 +1550,3 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
-
