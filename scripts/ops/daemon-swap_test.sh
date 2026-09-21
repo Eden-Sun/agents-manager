@@ -56,7 +56,8 @@ setup() { # setup <checkout 的 SCHEMA_VERSION> <DB 目前的 user_version>
   ROOT=$(mktemp -d); export ROOT
   export AGM_DIR="$ROOT/agm" AGM_REPO="$ROOT/repo" CHECKOUT="$ROOT/checkout"
   export DAEMON_DB="$ROOT/am.sqlite3" DAEMON_LOG="$ROOT/daemon.log" SWAP_LOG="$ROOT/swap.log"
-  export SWAP_SETTLE_SECS=0 SWAP_WINDOW_TRIES=1
+  export SWAP_SETTLE_SECS=0 SWAP_WINDOW_TRIES=3 SWAP_WINDOW_WAIT_SECS=0
+  export STUB_ACQUIRE_FAIL_TIMES=0   # 前幾次 acquire 回 409（模擬瞬間有人在跑）
   export AGM_BIN="$ROOT/bin/agm" SQLITE_BIN="$ROOT/bin/sqlite3" CURL_BIN="$ROOT/bin/curl"
   export LAUNCHCTL_BIN="$ROOT/bin/launchctl" PGREP_BIN="$ROOT/bin/pgrep" HERDR_BIN="$ROOT/bin/herdr"
   export SWAP_PROBE_TRIES=2 SWAP_PROBE_BOT=bot-probe
@@ -103,7 +104,13 @@ for a in "$@"; do
   if [ -z "$sub" ]; then sub="$a"; elif [ -z "$op" ]; then op="$a"; fi
 done
 case "$sub:$op" in
-  lease:acquire) printf '{"lease":{"held":%s,"fence":9},"lease_token":"tok-1"}' "$STUB_ACQUIRE_HELD" ;;
+  lease:acquire)
+      tries=$(grep -c "lease acquire restart" "$AGM_DIR/calls.log" 2>/dev/null); tries=${tries:-0}
+      if [ "${STUB_ACQUIRE_FAIL_TIMES:-0}" -ge "$tries" ] && [ "${STUB_ACQUIRE_FAIL_TIMES:-0}" -gt 0 ]; then
+        printf '{"error":"http_error","status":409,"detail":{"error":"conflict","reason":"not_idle","escalates_at":"2026-09-21T01:31:00Z","safety":{"working":[{"name":"busy-bot"}]}}}'
+        exit 1
+      fi
+      printf '{"lease":{"held":%s,"fence":9},"lease_token":"tok-1"}' "$STUB_ACQUIRE_HELD" ;;
   lease:safety)  printf '{"safe":%s,"working":[],"delivering":[]}' "$STUB_SAFE" ;;
   lease:status)  printf '{"leases":[{"resource":"restart","held":%s}]}' "$STUB_RESTART_HELD" ;;
   lease:release) printf '{"released":true}' ;;
@@ -344,6 +351,30 @@ else
   echo "ok   - 變數後面接非 ASCII 字元都有大括號"; PASS=$((PASS + 1))
 fi
 rm -f /tmp/daemon-swap-unbraced.$$
+
+# 18. 窗口：第一次 409（瞬間有人在跑）不該整趟白跑——腳本自己重試，第二次拿到就繼續。
+setup 10 10
+export STUB_ACQUIRE_FAIL_TIMES=1
+rc=$(run)
+check_eq "重試後成功（rc=0）" "0" "$rc"
+check "被拒那次有記下 reason" "no window yet (try 1/3) reason=not_idle" "$SWAP_LOG"
+check "reason 帶上是誰在跑" "working=busy-bot" "$SWAP_LOG"
+check "第二次就拿到窗口" "restart lease fence=9" "$SWAP_LOG"
+teardown
+
+# 19. 窗口：一直 409 → 試滿次數才 DEFER，而且 DEFER 那行要看得出 reason（不是只有 escalate_after_secs）。
+setup 10 10
+export STUB_ACQUIRE_FAIL_TIMES=99
+rc=$(run)
+check_eq "一直拿不到就 DEFER（rc=4）" "4" "$rc"
+check "DEFER 記下最後的 reason" "DEFER: 拿不到 restart 窗口（試了 3 次，最後 reason=not_idle" "$SWAP_LOG"
+check "試滿設定的次數" "try 3/3" "$SWAP_LOG"
+check_no "沒有動 binary" "submit" "$AGM_DIR/launchctl.log"
+teardown
+
+# 20. 預設值：腳本自己的預設是重試 12 次、間隔 15 秒，不是只試一次。
+check "SWAP_WINDOW_TRIES 預設 12" 'SWAP_WINDOW_TRIES:-12' "$SCRIPT"
+check "間隔預設 15 秒" 'SWAP_WINDOW_WAIT_SECS:-15' "$SCRIPT"
 
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
