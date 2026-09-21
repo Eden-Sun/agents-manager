@@ -120,11 +120,31 @@
 }
 
 /* 目前那格桌機不做成第二張卡片：旁邊若有 limit_hit 紅框，淡底圓角會互打（2026-09-16）。
-   選取只加重名字；手機仍用 `.quota-framed` 的上下邊框量表。 */
+   手機用 `.quota-framed` 的上下邊框量表。 */
 
 .quota-hp.focused {
   border-color: transparent;
   background: transparent;
+}
+
+/* 桌機也要標出「畫面在哪顆 bot」（2026-09-21 使用者：桌機板也要同手機板）。只在底部畫一條 accent 線、
+   不鋪底色：紅框（limit_hit）與這條線不同軸，兩個同時出現也讀得出來，不會互相蓋。 */
+
+@media (width > 640px) {
+  .quota-hp.focused {
+    position: relative;
+  }
+
+  .quota-hp.focused::after {
+    content: '';
+    position: absolute;
+    left: 4px;
+    right: 4px;
+    bottom: -2px;
+    height: 2px;
+    border-radius: 1px;
+    background: var(--accent);
+  }
 }
 
 /* 上邊 5H、下邊 7D 表示剩餘量。2026-09-11 起**只有手機**掛 `.quota-framed`（桌機已有 bar 與數字，重畫是重複）。 */
