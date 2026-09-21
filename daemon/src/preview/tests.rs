@@ -386,6 +386,18 @@ async fn start_opens_a_pane_next_to_the_bot_in_the_detected_dir() {
 }
 
 #[tokio::test]
+async fn start_does_not_spawn_through_the_fallback_when_the_owner_session_is_unreadable() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let r = rig().await;
+    let bot = running_bot(&r, "alfa").await;
+    r.fake.unresolvable.store(true, SeqCst);
+
+    assert!(start(&r.e.app, &bot, StartReq::default()).await.is_err(), "拿不到 owner session 不能假裝成功");
+    assert!(r.fake.spawns().is_empty(), "不能退回管理 session 在錯的 pane 起 server");
+    assert!(row(&r.e.app.db, &bot).await.unwrap().is_none(), "失敗不能留下半套 preview row");
+}
+
+#[tokio::test]
 async fn start_is_idempotent_while_starting_or_running() {
     let r = rig().await;
     let bot = running_bot(&r, "alfa").await;
