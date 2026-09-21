@@ -387,6 +387,8 @@ export function toRun(v: unknown, botId?: string): Run | null {
     runtime_model: optStr(pick(v, 'runtime_model')),
     runtime_effort: optStr(pick(v, 'runtime_effort')),
     runtime_fast: pick(v, 'runtime_fast') == null ? null : bool(pick(v, 'runtime_fast')),
+    // 空字串是 daemon 明確記下的本機預設身份，不能用 optStr 折成「未知」的 null。
+    runtime_identity: typeof pick(v, 'runtime_identity') === 'string' ? (pick(v, 'runtime_identity') as string) : null,
     native_session_id: optStr(v.native_session_id),
     transcript_path: optStr(v.transcript_path),
     started_at: str(v.started_at),

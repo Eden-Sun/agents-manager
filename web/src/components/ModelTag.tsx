@@ -1,7 +1,7 @@
 import { useStore } from '../store/store'
 import { effortLabel } from '../api/types'
 import { shortModel } from '../lib/shortModel'
-import { driftTitle, runtimeDrift, runtimeKnown } from '../lib/runtimeDrift'
+import { driftTitle, runtimeDrift, runtimeSettingsKnown } from '../lib/runtimeDrift'
 
 /**
  * The model a bot is on, with its reasoning effort. Separator `-` (`opus-高`) is user-specified — do not
@@ -13,9 +13,9 @@ export function ModelTag({ botId }: { botId: string }) {
   const reported = useStore((s) => s.runs[botId]?.status ?? null)
   if (!bot) return null
 
-  // SPEC §4.4a：顯示現在在跑什麼——CLI 回報 → `run.runtime_*` → `bots` 設定。
+  // SPEC §4.4a：顯示現在在跑什麼——CLI 回報 → `run.runtime_*` → `bots` 設定；drift 只做欄位說明。
   const drift = runtimeDrift(bot, run)
-  const live = runtimeKnown(run)
+  const live = runtimeSettingsKnown(run)
   const effort = reported?.effort ?? (live ? run!.runtime_effort : bot.effort)
   const chipExtra = effort ? effortLabel(effort) : ''
   const fast = reported?.fast_mode ?? (live ? (run!.runtime_fast ?? bot.fast) : bot.fast)

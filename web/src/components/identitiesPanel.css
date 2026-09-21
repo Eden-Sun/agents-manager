@@ -21,6 +21,13 @@
   font-weight: 500;
 }
 
+.identity-badge.is-unknown {
+  background: transparent;
+  color: var(--text-faint);
+  border-color: var(--border);
+  font-weight: 500;
+}
+
 .identity-row {
   display: flex;
   align-items: flex-start;
