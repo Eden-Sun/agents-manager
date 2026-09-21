@@ -1100,7 +1100,11 @@ async fn sync_pane_model(app: &Arc<App>, host: &str, client: &crate::herdr::Herd
     }
     let want_model = bot.model.is_none() || bot.effort.is_none();
     let want_identity = crate::pane_identity::probe_due(&bot.id, &agent.pane_id);
-    if !want_model && !want_identity {
+    // #393：子 agent 用 `-c service_tier="priority"` 起的，bots.fast 也要記成 1。model／effort 已有值時上面的
+    // `want_model` 是 false，fast 就永遠沒被補到，UI 平白亮「fast 需重啟」。只在剛收編的窗口內補（不然使用者
+    // 之後把 fast 關掉、argv 還是 priority，這裡會反過來把它改回去）。
+    let want_fast = bot.kind == "codex" && bot.fast == 0 && fresh_adoption(app, &bot.id).await;
+    if !want_model && !want_identity && !want_fast {
         return;
     }
     let procs = match client.pane_process_info(&agent.pane_id).await {
@@ -1118,7 +1122,7 @@ async fn sync_pane_model(app: &Arc<App>, host: &str, client: &crate::herdr::Herd
     if want_identity {
         crate::pane_identity::sync_child_identity(app, host, bot, &agent.pane_id, cli.and_then(|p| p.pid)).await;
     }
-    if !want_model {
+    if !want_model && !want_fast {
         return;
     }
     let argv: &[String] = cli.map(|p| p.argv.as_slice()).unwrap_or(&[]);
@@ -1159,6 +1163,40 @@ async fn sync_pane_model(app: &Arc<App>, host: &str, client: &crate::herdr::Herd
     }
     tracing::info!(bot = %bot.name, pane = %agent.pane_id, ?model, ?effort, ?fast, "reconcile: read the child's model off its argv");
     app.emit("bot_changed", json!({"bot_id": bot.id})).await;
+}
+
+/// 收編後這段時間內才會從 argv 補 fast（見 `sync_pane_model`）。
+const FRESH_ADOPTION_WINDOW: chrono::Duration = chrono::Duration::minutes(10);
+
+/// 純判斷：run 是 `started_at`、現在 `now`，還在收編窗口內嗎？讀不懂時間就當不在窗口內。
+fn within_fresh_window(started_at: &str, now: chrono::DateTime<chrono::Utc>) -> bool {
+    chrono::DateTime::parse_from_rfc3339(started_at)
+        .map(|t| now.signed_duration_since(t.with_timezone(&chrono::Utc)) < FRESH_ADOPTION_WINDOW)
+        .unwrap_or(false)
+}
+
+async fn fresh_adoption(app: &Arc<App>, bot_id: &str) -> bool {
+    match db::active_run(&app.db, bot_id).await {
+        Ok(Some(run)) => within_fresh_window(&run.started_at, chrono::Utc::now()),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod fast_adoption_tests {
+    use super::within_fresh_window;
+    use chrono::{Duration, Utc};
+
+    /// #393：收編後 10 分鐘內才從 argv 補 fast；之後使用者改的設定不能被 argv 蓋回去。
+    #[test]
+    fn only_a_recently_adopted_run_may_take_fast_from_its_argv() {
+        let now = Utc::now();
+        let at = |mins: i64| (now - Duration::minutes(mins)).to_rfc3339();
+        assert!(within_fresh_window(&at(1), now));
+        assert!(within_fresh_window(&at(9), now));
+        assert!(!within_fresh_window(&at(11), now));
+        assert!(!within_fresh_window("not a time", now), "讀不懂就不補");
+    }
 }
 
 #[cfg(test)]

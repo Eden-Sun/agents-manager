@@ -1539,6 +1539,12 @@ async fn patch_bot(
     } else {
         None
     };
+    // codex 的 fast（也含 model／effort）忙的時候不重啟：記下來，下一次 idle 再套（#393，lifecycle/deferred_live.rs）。
+    let deferred = kind == "codex"
+        && matches!(&live, Some(Some(why)) if lifecycle::is_busy_reason(why));
+    if deferred {
+        lifecycle::defer_live(&id, &live_fields);
+    }
     let needs_restart = match &live {
         Some(reason) => reason.is_some(),
         None => needs_restart,
@@ -1556,6 +1562,7 @@ async fn patch_bot(
         out["live_apply"] = json!({
             "fields": live_fields,
             "applied": reason.is_none(),
+            "deferred": deferred,
             "reason": reason,
         });
     }

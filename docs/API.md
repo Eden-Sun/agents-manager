@@ -995,12 +995,17 @@ body 所有欄位可省；`model`、`identity` 傳 `null` 或 `""` 清除；`env
 ```
 
 回 `200 {"needs_restart": bool}`，成功推 `bot_changed`。真的試過「當場套用」時多一個
-`live_apply: {fields, applied, reason}`（2026-09-13）：`reason` 是機器可讀 key——
+`live_apply: {fields, applied, deferred, reason}`（2026-09-13；`deferred` 是 #393）：`reason` 是機器可讀 key——
 `bot_missing` / `no_active_run` / `slash_gate: <not_running|agent_busy|turn_in_flight|no_pane>` /
 `no_herdr_client` / `<field>_cleared_to_default` / `no_slash_command_for_<field>` / `slash_send_failed` /
-`not_a_single_field`，codex 另有 `codex: <picker_failed|unknown_fast_tier|fast_toggle_failed|no_status_line|
+`not_a_single_field`，codex 另有 `codex: <picker_failed|fast_toggle_failed|no_status_line|
 readback_model_mismatch|readback_effort_mismatch|readback_fast_mismatch>`。以前失敗是**靜默**的：
 只回 `needs_restart: true`、log 也沒寫，「codex 改 effort 明明不用重啟，為什麼又重啟」查不出來。
+
+**codex 忙的時候（#393）**：`reason` 是 `slash_gate: agent_busy` 或 `slash_gate: turn_in_flight` 時，`live_apply.deferred: true`——daemon 把要套的欄位記在記憶體，
+等這顆 bot 下一次 `pane_agent_status_changed → idle` 再走同一條 `apply_live_setting`（成功會蓋 `launch_rev` 並推 `bot_changed`，失敗就留著「需重啟」）。
+`needs_restart` 在那之前仍是 `true`。記憶體裡的排程 daemon 重啟就沒了，UI 的落差徽章仍在，再按一次「當場套用」（重送同一個 `fast`，冪等）即可。
+codex 的 `fast` **不再因為不知道現況而拒絕**（拿掉 `unknown_fast_tier`）：見 SPEC §4.4a。
 
 - **`needs_restart: true`**：有 active Run 且動到影響啟動 argv/env 的欄位（`model`、`effort`、`fast`、`args`、`identity`、`env`、`auto_approve`、`inject_hooks`、`persona`、`instruction_files`）。
   沒有 active Run，或只改 `name` / `autostart` / `primary` → `false`。前端顯示「需要重新啟動」並提供 §10.3。

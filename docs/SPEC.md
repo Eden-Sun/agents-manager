@@ -554,7 +554,12 @@ claude 連線在回應中途掉了時，pane 只多一行 `⏺ API Error: Connec
 **codex 即時套用**（`codex_live.rs`）：
 - `/model` **不吃參數**（帶參數會被當 prompt 送出）。空 `/model` + Enter → `Select Model and Effort` 編號選單 → 選模型 → `Select Reasoning Level` → 選強度，
   印 `• Model changed to …`。`Max`/`Ultra` 在 `More reasoning…` 底下。只改強度也要先選模型（沒指定時選 `(current)`）。
-- `/fast` 是開關，只在現有 tier ≠ 目標時按；`runtime_fast` 為 NULL 時讀狀態列。PATCH 的 live 欄位閘門要把 `fast` 算進去。
+- `/fast` 是開關，PATCH 的 live 欄位閘門要把 `fast` 算進去。**`/fast on`／`/fast off` 不是 slash 形式**（2026-09-22，0.154.0，隔離的 `CODEX_HOME` 實測）：
+  裸 `/fast` 回 `Service tier set to priority`／`… default`（狀態列 `fast` 字樣隨之出現／消失），而 `/fast on` 會被當一般 prompt 送給模型、模型跑去查文件。
+  所以目標 tier 一律靠「先讀狀態列（沒有再用 `runtime_fast`）→ 不同才按一下」（`codex_live::fast_plan`）；兩者都讀不到（以前直接拒絕 `unknown_fast_tier`）就按一下、讀回、方向錯才按回來（`needs_second_toggle`）；最後照舊讀回驗證。
+- **忙的時候不重啟**（#393）：bot 在 working／blocked／有回合在飛，`PATCH` 不回退成重啟，而是把欄位記進 `lifecycle/deferred_live.rs`（只在記憶體），下一次 idle 邊（`events.rs`）再套；套成功蓋 `launch_rev`、推 `bot_changed`，套不上才留下重啟徽章。
+- **子 agent 的 fast 從 argv 補**（#393）：收編的 codex 子 agent 若 argv 有 `-c service_tier="priority"`，`bots.fast` 記成 1，UI 就不會平白亮「fast 需重啟」。`sync_pane_model` 原本只在 model／effort 為 NULL 時才看 argv，
+  model／effort 已有值（例如 fork 時帶入）的子 agent 永遠補不到；現在**收編後 10 分鐘內**也補 fast。刻意限縮在窗口內：`bots.fast=0` 分不出「沒設」與「使用者關掉了」，窗口外補會把使用者之後關掉的 fast 蓋回去。
 - **選單一律用讀的**：號碼、順序、`(default)`/`(current)` 會跑；每步回讀 pane，比對「號碼後到兩個空白為止」的 label（說明文字會含別的模型名）。
 - **最後回讀狀態列**（`<model> [<effort>] [fast] · <cwd> · Context …`）確認；`runtime_*` 存讀到的值，對不上回 `needs_restart`。
 - codex 會把選擇存成帳號預設（寫 `~/.codex/config.toml`），是 CLI 行為。

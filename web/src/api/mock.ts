@@ -2344,7 +2344,22 @@ export class MockTransport implements Transport {
     /** 改的欄位全在 `fields` 內。 */
     const within = (...fields: string[]) => LAUNCH_FIELDS.filter((k) => !fields.includes(k)).every((k) => b[k] === undefined)
     // SPEC §4.4a：codex `/model`、`/fast` 執行中可換（daemon 操作 TUI 再回讀），不用重啟。
-    if (needs_restart && bot.kind === 'codex' && within('model', 'effort', 'fast')) needs_restart = false
+    // #393：codex 忙的時候不重啟——排到下次 idle 再套（daemon lifecycle/deferred_live.rs）；mock 4 秒後演「閒下來了」。
+    let deferred = false
+    if (needs_restart && bot.kind === 'codex' && within('model', 'effort', 'fast')) {
+      if (run && (run.agent_status === 'working' || run.agent_status === 'blocked')) {
+        deferred = true
+        const runId = run.id
+        setTimeout(() => {
+          const r = this.runs.find((x) => x.id === runId)
+          if (!r) return
+          r.runtime_model = bot.model
+          r.runtime_effort = bot.effort
+          r.runtime_fast = bot.fast === 1
+          this.emitBotStatus(id)
+        }, 4000)
+      } else needs_restart = false
+    }
     if (needs_restart && bot.kind === 'grok' && only('effort') && bot.effort) needs_restart = false
     if (needs_restart && bot.kind === 'grok' && (only('model') || only('model', 'effort')) && bot.model) needs_restart = false
     if (needs_restart && bot.kind === 'claude' && only('model') && bot.model) needs_restart = false
@@ -2356,7 +2371,11 @@ export class MockTransport implements Transport {
       if (b.fast !== undefined) run.runtime_fast = bot.fast === 1
     }
     if (run) this.emitBotStatus(id)
-    return { needs_restart }
+    const touchedLive = bot.kind === 'codex' && run !== undefined && within('model', 'effort', 'fast') && ['model', 'effort', 'fast'].some((k) => b[k] !== undefined)
+    return {
+      needs_restart,
+      ...(touchedLive ? { live_apply: { fields: ['fast'], applied: !deferred, deferred, reason: deferred ? 'slash_gate: agent_busy' : null } } : {}),
+    }
   }
 
   private restart(botId: string) {

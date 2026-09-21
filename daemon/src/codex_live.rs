@@ -3,8 +3,13 @@
 //! Unlike claude/grok, codex 0.153.4 (verified 2026-09-09) has no one-line form:
 //! * `/model` takes **no arguments** (`/model x high` becomes a prompt); bare `/model` opens two
 //!   numbered pickers (model, then reasoning level), so even an effort-only change picks a model.
-//! * `/fast` is a plain **toggle**, so it may only be sent when `runs.runtime_fast` says the
-//!   current tier is wrong.
+//! * `/fast` is a plain **toggle** (2026-09-22, 0.154.0, measured in a scratch `CODEX_HOME`):
+//!   bare `/fast` answers `Service tier set to priority` / `… default`, but `/fast on` and
+//!   `/fast off` are NOT slash forms — the TUI submits them as an ordinary prompt and the model
+//!   goes off to read the docs. So the target tier is reached by reading the status line first
+//!   ([`fast_plan`]) and toggling only when it is wrong; when the tier cannot be read, toggle
+//!   once, read back, and toggle back if it landed the wrong way round. Either way the read-back
+//!   still proves the result, and nothing is refused for an unknown starting tier.
 //!
 //! Picker contents/order and `(default)`/`(current)` markers vary by account, so every step reads
 //! the pane back and matches on text. codex saves the choice as the account default in
@@ -302,6 +307,32 @@ async fn toggle_fast(client: &HerdrClient, pane_id: &str) -> bool {
     true
 }
 
+/// What to do to reach `want` given what we know about the current tier (`fast` on the status line,
+/// else `runs.runtime_fast`). `/fast on|off` is not a slash form (see the module docs), so the
+/// only tool is the toggle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FastPlan {
+    /// Already there: send nothing.
+    Keep,
+    /// Known wrong: one toggle.
+    Toggle,
+    /// Unknown start: one toggle, read back, toggle again only if it landed on the wrong side.
+    ToggleThenCheck,
+}
+
+pub fn fast_plan(now: Option<bool>, want: bool) -> FastPlan {
+    match now {
+        Some(n) if n == want => FastPlan::Keep,
+        Some(_) => FastPlan::Toggle,
+        None => FastPlan::ToggleThenCheck,
+    }
+}
+
+/// After the first toggle of [`FastPlan::ToggleThenCheck`]: is a second one needed?
+pub fn needs_second_toggle(seen: Option<bool>, want: bool) -> bool {
+    matches!(seen, Some(n) if n != want)
+}
+
 /// On `Err` the caller keeps `needs_restart: true`.
 pub async fn apply(
     client: &HerdrClient,
@@ -319,10 +350,25 @@ pub async fn apply(
     }
     if fields.contains(&"fast") {
         let want = bot.fast != 0;
-        // Unknown current tier: a toggle could turn it the wrong way round, so refuse.
-        let Some(now) = was_fast else { return Err("unknown_fast_tier") };
-        if now != want && !toggle_fast(client, pane_id).await {
-            return Err("fast_toggle_failed");
+        // The screen is the truth about the tier right now; `runs.runtime_fast` may be stale.
+        let now = parse_status_line(&read(client, pane_id).await).map(|r| r.fast).or(was_fast);
+        match fast_plan(now, want) {
+            FastPlan::Keep => {}
+            FastPlan::Toggle => {
+                if !toggle_fast(client, pane_id).await {
+                    return Err("fast_toggle_failed");
+                }
+            }
+            FastPlan::ToggleThenCheck => {
+                if !toggle_fast(client, pane_id).await {
+                    return Err("fast_toggle_failed");
+                }
+                tokio::time::sleep(Duration::from_millis(900)).await;
+                let seen = parse_status_line(&read(client, pane_id).await).map(|r| r.fast);
+                if needs_second_toggle(seen, want) && !toggle_fast(client, pane_id).await {
+                    return Err("fast_toggle_failed");
+                }
+            }
         }
     }
     // Read-back (SPEC §4.4a).
@@ -347,6 +393,26 @@ pub async fn apply(
 
 #[cfg(test)]
 mod tests {
+    use super::{fast_plan, needs_second_toggle, FastPlan};
+
+    /// #393：`/fast on|off` 不是 slash 形式（0.154.0 實測會被當一般 prompt 送給模型），所以只能靠開關＋讀畫面。
+    /// 已知現況就只在不對時按一下；未知現況以前直接拒絕（unknown_fast_tier），現在先按一下、讀回、方向錯才再按。
+    #[test]
+    fn the_plan_toggles_only_when_the_tier_is_known_to_be_wrong() {
+        assert_eq!(fast_plan(Some(true), true), FastPlan::Keep);
+        assert_eq!(fast_plan(Some(false), false), FastPlan::Keep);
+        assert_eq!(fast_plan(Some(false), true), FastPlan::Toggle);
+        assert_eq!(fast_plan(Some(true), false), FastPlan::Toggle);
+        assert_eq!(fast_plan(None, true), FastPlan::ToggleThenCheck, "不知道現況也不拒絕");
+    }
+
+    #[test]
+    fn an_unknown_start_toggles_back_only_when_the_first_toggle_went_the_wrong_way() {
+        assert!(!needs_second_toggle(Some(true), true), "第一下就到了");
+        assert!(needs_second_toggle(Some(false), true), "本來就是開的，按一下變關了：要按回來");
+        assert!(!needs_second_toggle(None, true), "讀不到就不再亂按，讓讀回驗證報錯");
+    }
+
     /// 2026-09-14 實況：fork 起來的 codex 狀態列沒有 `Context` 那段，照樣要讀得到剩餘額度。
     /// #321：畫面上方有一行開頭是 `·`、又含 `Context` 的字（bot 印的、或別的 chrome），以前 `parts.next()?` 直接讓整個函式
     /// 回 None，下面真正的狀態列讀不到——改模型／強度的讀回驗證就誤判成「沒落地」。

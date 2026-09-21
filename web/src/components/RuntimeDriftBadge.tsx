@@ -1,7 +1,8 @@
 import { useState } from 'react'
 import { useStore } from '../store/store'
 import { ConfirmDialog } from './ConfirmDialog'
-import { driftLine, runtimeDrift } from '../lib/runtimeDrift'
+import * as api from '../api'
+import { driftLine, isFastOnlyDrift, runtimeDrift } from '../lib/runtimeDrift'
 
 /**
  * 「設定改了，但 bot 還跑在舊值上」的常駐 chip，點下去重啟（SPEC §4.4a）。
@@ -15,11 +16,41 @@ export function RuntimeDriftBadge({ botId }: { botId: string }) {
   const notify = useStore((s) => s.notify)
   const [restarting, setRestarting] = useState(false)
   const [confirming, setConfirming] = useState(false)
+  // codex 的 fast（#393）：按下去當場套用；bot 忙就排到下次 idle，這時徽章改寫「待套用」。
+  const refreshState = useStore((s) => s.refreshState)
+  const [applying, setApplying] = useState(false)
+  const [queued, setQueued] = useState(false)
 
   const drift = runtimeDrift(bot, run)
   if (!bot || !drift.length) return null
 
   const busy = run?.agent_status === 'working' || run?.agent_status === 'blocked'
+  const fastOnly = isFastOnlyDrift(bot.kind, drift)
+  // 重送同一個 fast 值：冪等，daemon 會當場套用、忙就排到 idle、都不行才回 needs_restart。
+  const applyFast = async () => {
+    setApplying(true)
+    try {
+      const res = await api.patchBot(botId, { fast: bot.fast })
+      await refreshState()
+      const la = res.live_apply
+      if (la?.applied) {
+        setQueued(false)
+        notify('info', `${bot.name} 的 fast 已套用，沒有重啟`)
+      } else if (la?.deferred) {
+        setQueued(true)
+        notify('info', `${bot.name} 正在忙，閒下來會自動套用 fast`)
+      } else {
+        // 套不上（不是忙、是別的原因）：退回重啟，維持原本的確認流程。
+        setQueued(false)
+        if (busy) setConfirming(true)
+        else restart()
+      }
+    } catch (e) {
+      notify('error', `fast 套用失敗：${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setApplying(false)
+    }
+  }
   const restart = () => {
     setConfirming(false)
     setRestarting(true)
@@ -33,12 +64,24 @@ export function RuntimeDriftBadge({ botId }: { botId: string }) {
     <>
       <button
         type="button"
-        className={`update-badge drift-badge${restarting ? ' busy' : ''}`}
-        disabled={restarting}
-        title={`${drift.map(driftLine).join('\n')}\n${bot.kind} 只有啟動時吃得到這些設定，重啟才會換過去${busy ? '\n它正在忙，會先問一句' : ''}`}
-        onClick={() => (busy ? setConfirming(true) : restart())}
+        className={`update-badge drift-badge${restarting || applying ? ' busy' : ''}`}
+        disabled={restarting || applying}
+        title={
+          fastOnly
+            ? `${drift.map(driftLine).join('\n')}\ncodex 的 fast 可以當場切換，不用重啟${busy ? '\n它正在忙：會排到下一次閒下來再套' : ''}`
+            : `${drift.map(driftLine).join('\n')}\n${bot.kind} 只有啟動時吃得到這些設定，重啟才會換過去${busy ? '\n它正在忙，會先問一句' : ''}`
+        }
+        onClick={() => (fastOnly ? void applyFast() : busy ? setConfirming(true) : restart())}
       >
-        {restarting ? '重啟中…' : `⟳ ${drift.map((d) => d.label).join('、')}需重啟`}
+        {restarting
+          ? '重啟中…'
+          : applying
+            ? '套用中…'
+            : fastOnly
+              ? queued
+                ? '⏳ fast 待套用（忙，閒下來自動套）'
+                : '⟳ fast 當場套用'
+              : `⟳ ${drift.map((d) => d.label).join('、')}需重啟`}
       </button>
       <ConfirmDialog
         open={confirming}
