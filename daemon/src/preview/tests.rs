@@ -392,6 +392,21 @@ async fn start_is_idempotent_while_starting_or_running() {
 }
 
 #[tokio::test]
+async fn an_explicit_restart_does_not_spawn_when_the_existing_preview_cannot_be_closed() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let r = rig().await;
+    let bot = running_bot(&r, "alfa").await;
+    start(&r.e.app, &bot, StartReq::default()).await.unwrap();
+    r.fake.close_fails.store(true, SeqCst);
+
+    let err = start(&r.e.app, &bot, StartReq { mode: Some("spawn".into()), ..StartReq::default() }).await.unwrap_err();
+    let LcError::Conflict(body) = err else { panic!("關不掉舊預覽時要拒絕換開：{err:?}") };
+    assert_eq!(body["reason"], "preview_stop_failed");
+    assert_eq!(r.fake.spawns().len(), 1, "不能在舊 pane 還活著時再開一顆");
+    assert_eq!(row(&r.e.app.db, &bot).await.unwrap().unwrap().status, "starting");
+}
+
+#[tokio::test]
 async fn two_bots_get_different_ports() {
     let r = rig().await;
     let a = running_bot(&r, "alfa").await;
