@@ -1280,6 +1280,15 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
 3. 回音從 hook 回來時用 run 的 `agent_name` 認領：忽略所有空白（TUI 任意折行），長度取兩邊較短者且至少 12 字元；更短就要完全一樣。
    認到就在**插入當下**寫 `relay_from`（事後補的話 `message_added` 已經推出去了）。
 4. 認不出來維持 NULL = 使用者自己打的。寧可少標，不把使用者的話說成別人送的。
+5. **announce 之後盯收件方**（#380，`lifecycle::relay_watch`）：`to_agent`（agent 名、pane id、bot 名）對得到一顆在跑的 bot 時，
+   daemon 立刻開一個進行中的 `external` 回合（使用者訊息帶 `relay_from`；收件方已有回合在飛就不開），側欄與標題列看得出在跑，
+   收尾照既有 hook／終端備援。同時背景每 2 秒看一次那顆 pane：宣告的字還留在輸入列（`composer_holds_prompt`，比對文字）、
+   agent 仍 idle 滿 4 秒就補一次 Enter（最多 2 次；使用者自己打的字不是宣告的那句，不動）；agent 開始 working 或回合被收掉就收工；
+   補 Enter 前先確認 pane 還在（`pane.get` 回 `pane_not_found`＝收件方死了：收掉那顆 run、不重試、announce 時也不開回合）；
+   補完 Enter 而 pane 的 revision 沒變＝鍵沒送到那個行程，不再重試。
+   90 秒內字既沒進輸入列、agent 也沒接手，回合標 `failed` 並留一則系統說明。
+   **死 pane 的 run**（`lifecycle::dead_panes`，隨 60 秒的 stuck-turn sweeper 跑）：herdr 明確回 `pane_not_found` 的 running run 收成 exited，
+   不看 RPC 失敗（不是證據）、herdr 計畫中的維護期間不動（§6.5.2）；補上對帳只在開機／重連／事件時才跑、pane-exit 事件漏了就一直畫成活的那個洞。盯梢的時間由呼叫端傳入、pane 走 herdr client，測試不睡覺。
 
 ### 6.5e shell／服務 pane 的歸屬與生命週期（2026-09-16 使用者交辦；AGM 2026-09-16 review 通過，實作另行派工）
 

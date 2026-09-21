@@ -350,6 +350,9 @@ async fn relay_announce(
         Err(e) => return unavailable(format!("{e:?}")),
     }
     crate::agent_relay::announce(&body.bot_id, &body.to_agent, &body.text);
+    // #380：收件方 UI 看得出在跑，字卡在輸入列時補 Enter；背景做，不拖慢 shim 的直送。
+    let (app2, from, to, text) = (app.clone(), body.bot_id.clone(), body.to_agent.clone(), body.text.clone());
+    tokio::spawn(async move { crate::lifecycle::relay_watch::on_announce(&app2, &from, &to, &text).await });
     (StatusCode::OK, Json(json!({})))
 }
 
