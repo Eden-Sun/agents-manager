@@ -1429,7 +1429,7 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
 | `status_line` | 使用者自己的 claude `statusLine` 命令輸出（ANSI 已去）。daemon 的 `agents-managerd statusline` 代跑它並把同一份輸出放進 POST `/hook/claude` 的 payload。只有 claude；沒設 `statusLine.command` 為 `null`；變了才寫 |
 | `status_json` | statusLine 壓縮前的原始 JSON（`transcript_path` 以外整份），daemon 補 `account_email`（讀該身份設定目錄 `.claude.json` 的 `oauthAccount.emailAddress`）。變了才寫 |
 | `herdr_session` | bot 與 run 都有；一般為 `null`（沿用 host 設定），從本機 `default` session 採用的是 `"default"`（SPEC §6.5.1） |
-| `update_notice` | 等重啟套用的 claude 更新，固定字串 `"Update installed · Restart to update"` 或 `null`（SPEC §3.1）。單顆套用 `POST /bots/{id}/restart`，全部 `POST /bots/restart-idle` |
+| `update_notice` | 有新版等著處理，或 `null`（SPEC §3.1）。claude：固定字串 `"Update installed · Restart to update"`（已下載，重啟就換）；單顆套用 `POST /bots/{id}/restart`，全部 `POST /bots/restart-idle`。**codex**（issue #388）：以 `codex 有新版` 開頭，`codex 有新版 0.154.0 → 0.155.1，需安裝後重啟`（**還沒安裝**，重啟換不到；要先裝）或 `codex 有新版 0.155.1（這個 run 跑的是 0.154.0），已安裝，重啟套用`；`POST /bots/restart-idle` **不收** codex，只有單顆 `restart` |
 | `runtime_model` / `runtime_effort` / `runtime_fast` | run **實際**在跑的值（SPEC §4.4a），跟 `bot.*`（下次啟動的設定）分開。三個都 `null` = 不知道（收編的 pane），前端不比對不標 |
 | `runtime_identity` | run 用哪個身分起來的（issue #238）：`""`＝沒有身分（預設帳號）、`null`＝不知道（收編的 pane、升級前的舊列）。改了 `bot.identity` 之後、重啟之前兩者不同；額度一律記在這個身分上 |
 | `turn_error` | 上一回合被 API 中斷或額度拒絕時 pane 上那行原文，否則 `null`；下一回合開始清回（SPEC §4.3a）。命中時對話多一則釘在回合上的 system 訊息（`incomplete = 1`、附 `terminal_snapshot`），回合還 in_flight 就收成 failed。重送就是再 `POST /prompt` 最後一則 user 訊息 |
