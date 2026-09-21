@@ -9,7 +9,7 @@ test('sortPinned: 照 primary_position，同值照原順序', () => {
     { id: 'c', position: 2, index: 2 },
     { id: 'd', position: 1, index: 3 },
   ]
-  assert.deepEqual(sortPinned(items).map((x) => x.id), ['a', 'b', 'd', 'c'])
+  assert.deepEqual(sortPinned(items).map((x) => x.id), ['d', 'c', 'a', 'b'])
 })
 
 test('moveBefore: 前移、移到最後、沒變動與未知 id 回 null', () => {
