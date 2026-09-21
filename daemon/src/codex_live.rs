@@ -66,6 +66,47 @@ pub fn parse_status_line(screen: &str) -> Option<CodexRuntime> {
     out
 }
 
+/// 以畫面上的狀態列校正 `runs.runtime_*`（SPEC §4.4a）。回傳 `true` = 有改動。
+/// * 讀不到狀態列（選單開著、畫面被清、CLI 剛啟動）什麼都不動：讀不到不是 fast=false。
+/// * 讀得到就一律以它為準：狀態列有 `fast` 字樣 = 開，**整行讀得到卻沒有 = 關**（tier 關掉時 codex 省略那個字）。
+///   使用者在 TUI 手打 `/fast`、`/model`，或當場套用中途失敗，都會讓啟動時記下的值過期。
+pub async fn correct_runtime_from_screen(app: &crate::state::App, run_id: &str, screen: &str) -> bool {
+    let Some(seen) = parse_status_line(screen) else { return false };
+    let Ok(Some(run)) = db::run(&app.db, run_id).await else { return false };
+    let same = run.runtime_model.as_deref() == Some(seen.model.as_str())
+        && run.runtime_effort == seen.effort
+        && run.runtime_fast == Some(i64::from(seen.fast));
+    if same {
+        return false;
+    }
+    let wrote = sqlx::query("UPDATE runs SET runtime_model = ?, runtime_effort = ?, runtime_fast = ? WHERE id = ?")
+        .bind(&seen.model)
+        .bind(&seen.effort)
+        .bind(i64::from(seen.fast))
+        .bind(run_id)
+        .execute(&app.db)
+        .await
+        .is_ok();
+    if wrote {
+        app.emit_bot_status(&run.bot_id).await;
+        tracing::info!(run = %run_id, model = %seen.model, effort = ?seen.effort, fast = seen.fast,
+                       "codex runtime corrected from the status line");
+    }
+    wrote
+}
+
+/// 巡邏用：拿 bot 鎖（當場套用握著同一把，不會讀到選單畫到一半），重讀畫面再校正。
+pub async fn sync_runtime(app: &std::sync::Arc<crate::state::App>, client: &HerdrClient, bot_id: &str, run_id: &str, pane_id: &str) {
+    let lock = app.bot_lock(bot_id).await;
+    let _g = lock.lock().await;
+    // 鎖裡重查：等鎖的時候這個 run 可能已經被換掉。
+    if !matches!(db::active_run(&app.db, bot_id).await, Ok(Some(r)) if r.id == run_id) {
+        return;
+    }
+    let Ok(read) = client.pane_read(pane_id, "visible", 60).await else { return };
+    correct_runtime_from_screen(app, run_id, &read.text).await;
+}
+
 /// codex status line 上的額度剩餘量：CLI 當下的數字，比每 5 分鐘輪詢的 `account/rateLimits/read`
 /// 新（2026-09-13 使用者截圖兩者差一整輪）。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -324,6 +365,52 @@ mod tests {
     }
 
     use super::*;
+
+    async fn run_with_runtime(env: &crate::testing::Env, fast: i64) -> String {
+        let bot = crate::testing::claude_bot(&env.app, &env.project_id, "payload").await;
+        let run = crate::testing::fake_run(&env.app, &bot.id).await;
+        sqlx::query("UPDATE runs SET runtime_model='gpt-5.6-luna', runtime_effort='max', runtime_fast=? WHERE id=?")
+            .bind(fast)
+            .bind(&run)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        run
+    }
+
+    async fn fast_of(env: &crate::testing::Env, run: &str) -> Option<i64> {
+        db::run(&env.app.db, run).await.unwrap().unwrap().runtime_fast
+    }
+
+    /// 2026-09-22 使用者：標題列寫 fast，codex 狀態列其實沒有 fast。啟動時記的 1 之後沒人改。
+    #[tokio::test]
+    async fn a_status_line_without_fast_corrects_a_stale_runtime_fast() {
+        let env = crate::testing::env().await;
+        let run = run_with_runtime(&env, 1).await;
+        let screen = "› Ask Codex\n\n  gpt-5.6-luna max · ~/project/hermes-agents · Context 43% used · 5h 12% left\n";
+        assert!(correct_runtime_from_screen(&env.app, &run, screen).await);
+        assert_eq!(fast_of(&env, &run).await, Some(0));
+    }
+
+    #[tokio::test]
+    async fn a_status_line_with_fast_corrects_the_other_way() {
+        let env = crate::testing::env().await;
+        let run = run_with_runtime(&env, 0).await;
+        let screen = "  gpt-5.6-luna max fast · /tmp · Context 43% used · 5h 12% left\n";
+        assert!(correct_runtime_from_screen(&env.app, &run, screen).await);
+        assert_eq!(fast_of(&env, &run).await, Some(1));
+    }
+
+    /// 讀不到狀態列（選單開著、畫面被清）不能當成 fast=false。
+    #[tokio::test]
+    async fn an_unreadable_screen_leaves_the_runtime_alone() {
+        let env = crate::testing::env().await;
+        let run = run_with_runtime(&env, 1).await;
+        for screen in ["", "› Ask Codex to do anything\n", MODEL_MENU] {
+            assert!(!correct_runtime_from_screen(&env.app, &run, screen).await, "{screen:?}");
+        }
+        assert_eq!(fast_of(&env, &run).await, Some(1));
+    }
 
     /// Real pane text, codex 0.153.4 (2026-09-09).
     const STATUS: &str = "\

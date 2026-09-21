@@ -61,6 +61,10 @@ async fn sweep(app: &Arc<App>) {
         let Some(client) = app.herdr_for_run(&run).await else { continue };
         // 讀不到畫面就跳過，不要把已經看到的通知清掉。
         let Ok(read) = client.pane_read(&pane, "visible", 80).await else { continue };
+        if kind == "codex" {
+            // 狀態列是 runtime 的權威，每輪校正（讀不到就不動）。
+            crate::codex_live::sync_runtime(app, &client, &run.bot_id, &run.id, &pane).await;
+        }
         let seen = if kind == "codex" {
             // 讀不到 host 就整輪跳過、不動既有通知（#243 的同一條理由）。
             let Ok(host) = db::bot_host(&app.db, &run.bot_id).await else { continue };
