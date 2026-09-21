@@ -2363,19 +2363,8 @@ AGM 的運維職責以本節為準，不靠任何 bot 的記憶。persona 是同
   期間不要同時觸發 claude 更新批次重啟。
 - 動 migration 的版本：上線前對正式 DB 的副本跑一次 migrate，重建申請附 DB 備份步驟。
 
-### 18.2d CD 信任閘門：外人的 commit 不進正式 binary（使用者 2026-09-20）
-repo 是公開的，任何人都能開 PR；main 只有 owner 推得進去，但這台機器上的 bot 都帶著 owner 的 gh 身分。被 PR／issue／留言裡的字騙去 merge 或 cherry-pick 一個 fork PR，那些 commit 就會照例行更新被建成 binary、以使用者身分在這台機器上跑。`scripts/ops/cd-trust-gate.py` 在部署前用確定性的規則擋下來，叫人看。
-- **兩個入口都過閘門**：`daemon-update-kick.sh` 在**申請核准之前**（不可信的範圍連核准都不去要）；`daemon-swap.sh` 在**拿窗口、動 binary 之前**（bot 不經例行更新直接部署的那條路）。比的範圍是「線上那一版 → 要換上去的那一版」。
-- **規則**（一條不過就不換版；已 approve 的 commit 略過 2～5）：
-  1. 線上那一版必須是新版的祖先（歷史沒被改寫）。
-  2. 作者與 committer 的 email 都在 `<AGM 目錄>/cd-trust.allow`。檔案不在時由線上那一版的 commit 帶出來。email 可偽造，這條只擋沒在裝的。
-  3. GitHub 說這個 commit 屬於 fork 來的 PR（head repo 不是本 repo，或 fork 已刪）。
-  4. patch-id 跟任何一個 fork PR 裡的 commit 相同——cherry-pick／rebase 後直接推 main 的，GitHub 不會關聯到 PR，所以另外比內容。
-  5. 動到部署鏈自己：閘門、它的測試、`daemon-swap.sh`、`daemon-start.py`。要多盯的前綴（例如 `.github/`）寫在 `cd-trust.protected`，一行一個，只能加。
-- **結果**：擋下 → kick 推 `ops-alert`（reason `cd_untrusted`，帶原因）並且不申請核准；swap `ABORT` rc=3、binary 不動。**查不出來（gh 不通、基準不在歷史裡）一樣不換**：kick 記成這輪失敗，連續幾輪照既有規則推 `check_failing`。沒有已部署基準（第一次）時 kick 無從比對、照舊往下走。
-- **放行**：使用者看過之後 `scripts/ops/cd-trust-gate.py approve --state-dir <AGM 目錄> --note "為什麼" <完整 40 碼 sha>…`，記在 `cd-trust.approved`（JSONL，附時間與說明）。**放行的決定只能來自使用者**：可以使用者自己跑，也可以由 AGM 協調者代跑，但代跑必須同時滿足——（a）有使用者的明確原話（`user` 角色、沒有 `relay_from` 的訊息），`--note` 寫明該 message id 與原文；（b）只放行原話所指、且這次 `cd_untrusted` 列出來的那幾顆，不順手多放；（c）不動 `cd-trust.allow` 與 `cd-trust.protected`。其他 bot（含建置 child、被擋的那個 commit 的作者）一律不得 approve，收到 `cd_untrusted` 就回報。原因含「fork PR」或「名單外的作者」時，協調者要先把是哪個 PR／誰寫的原樣轉述給使用者，拿到的原話要對得上那個 PR，不能只憑一句泛稱的同意。
-- **安裝**：閘門跟 kick 一樣手動 install 到 `<AGM 目錄>/bin/`。swap 優先用 install 的那份，因為它自己是從「要部署的 checkout」跑的，同一個 checkout 裡的閘門不能算數。
-- **邊界**：這台機器上的 shell 都改得了 AGM 目錄裡的檔、也繞得過這兩支腳本。閘門是偵測＋停手＋叫人，不是沙箱；它不處理 bot 讀到外人文字被帶偏這件事本身，只保證帶偏的結果進不了正式 binary 而沒人知道。
+### 18.2d 決策紀錄：不設 CD 信任閘門（使用者 2026-09-21）
+2026-09-20 加過一道部署前檢查（`cd-trust-gate.py`，`1f90b510`）：線上版 → 要部署的版本之間有 fork PR 的 commit／內容、名單外作者、被改寫的歷史或動到部署鏈就不換版。2026-09-21 依使用者指示整個拿掉（message `01M30N2VY76AG24B018GFY7FTF`，原話：「拿掉CD信任閘門這功能，沒有，沒有對self-hosting設定cicd，故沒有安全疑慮」）。理由：這台機器沒有對 self-hosting 設 CI/CD、不會自動部署外部貢獻；CI 在 GitHub 代管 runner 上跑，main 只有 owner 推得進去。不保留成可關的選項或警告模式。要重提得先有新的威脅（例如加了 self-hosted runner，或開放外部 collaborator）。
 
 ### 18.2a 已安裝的 `bin/agm` 跟著換版；ops 腳本仍要手動裝
 

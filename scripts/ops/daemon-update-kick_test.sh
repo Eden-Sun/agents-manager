@@ -66,14 +66,6 @@ STUB
   export STUB_APPROVAL='{"id":"ap-1","status":"pending"}'
   export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"approved"}]}'
   export STUB_ASSIGN_FAIL=""
-  # CD 信任閘門用的假 gh：沒有 fork PR、沒有任何 commit 屬於 PR。要測擋下的 case 自己換掉 STUB_GH_PULLS／STUB_GH_FAIL。
-  cat > "$ROOT/gh" <<'GHSTUB'
-#!/bin/bash
-[ -n "${STUB_GH_FAIL:-}" ] && { echo "HTTP 502" >&2; exit 1; }
-case "$1" in pr) printf '[]' ;; api) printf '%s' "${STUB_GH_PULLS:-[]}" ;; esac
-GHSTUB
-  chmod +x "$ROOT/gh"
-  export AGM_GH_BIN="$ROOT/gh" CD_TRUST_SLUG="me/proj" STUB_GH_PULLS="" STUB_GH_FAIL=""
 }
 
 teardown() { rm -rf "$ROOT"; unset AGM_FAIL_ALERT_AFTER AGM_BUILD_BOT AGM_TEST_MINUTE AGM_REBUILD_THRESHOLD AGM_REBUILD_MAX_WAIT_MIN; }
@@ -680,38 +672,6 @@ export AGM_TEST_MINUTE="37" AGM_FAIL_ALERT_AFTER=1
 export STUB_APPROVAL_LIST='not json at all'
 bash "$SCRIPT"
 check "讀不到申請數算失敗、連續幾輪會喊人" "ops-alert.*check_failing" "$AGM_DIR/calls.log"
-teardown
-
-
-# CD 信任閘門：已部署的版本之後混進 fork PR 的 commit → 不申請核准、不派工，推 cd_untrusted。
-setup
-/usr/bin/git -C "$AGM_REPO" rev-parse --short HEAD > "$AGM_DIR/daemon-update.built"
-( cd "$AGM_REPO" && echo y > daemon/main.rs && /usr/bin/git commit -qam "helpful fix" && /usr/bin/git update-ref refs/remotes/origin/main HEAD ) >/dev/null
-export STUB_GH_PULLS='[{"number":7,"user":{"login":"mallory"},"head":{"repo":{"full_name":"mallory/proj"}}}]'
-bash "$SCRIPT"
-check "fork PR 的 commit 會喊人" "ops-alert --source test-owner --reason cd_untrusted" "$AGM_DIR/calls.log"
-check "喊的內容指出是哪個 PR" "fork PR #7" "$AGM_DIR/daemon-update.log"
-check_no "不可信就不申請核准" "approval request" "$AGM_DIR/calls.log"
-check_no "不可信就不派工" "assign --bot" "$AGM_DIR/calls.log"
-teardown
-
-# 同樣的範圍、gh 沒說它是 fork PR：照常走。
-setup
-/usr/bin/git -C "$AGM_REPO" rev-parse --short HEAD > "$AGM_DIR/daemon-update.built"
-( cd "$AGM_REPO" && echo y > daemon/main.rs && /usr/bin/git commit -qam "own fix" && /usr/bin/git update-ref refs/remotes/origin/main HEAD ) >/dev/null
-bash "$SCRIPT"
-check "可信的範圍記一筆" "CD 信任閘門：.* 可信" "$AGM_DIR/daemon-update.log"
-check "可信就照常派工" "已派工 agm-daemon-update-" "$AGM_DIR/daemon-update.log"
-teardown
-
-# gh 不通＝查不出來：不換版，算一輪失敗（連續幾輪會推 check_failing），不當成可信。
-setup
-/usr/bin/git -C "$AGM_REPO" rev-parse --short HEAD > "$AGM_DIR/daemon-update.built"
-( cd "$AGM_REPO" && echo y > daemon/main.rs && /usr/bin/git commit -qam "own fix" && /usr/bin/git update-ref refs/remotes/origin/main HEAD ) >/dev/null
-export STUB_GH_FAIL=1
-bash "$SCRIPT"
-check "查不出來就不換版" "CD 信任閘門查不出來" "$AGM_DIR/daemon-update.log"
-check_no "查不出來不申請核准" "approval request" "$AGM_DIR/calls.log"
 teardown
 
 echo "$PASS passed, $FAIL failed"
