@@ -544,6 +544,8 @@ claude 連線在回應中途掉了時，pane 只多一行 `⏺ API Error: Connec
   agent 就緒後讀框底，跟 `bots.effort` 不同就送 `/effort <level>`（已相符不打字，免得 `pane_typed` 改 prompt 路徑）。
 - **收編的 pane**三欄是 NULL = 不知道，UI 不比也不標。codex 例外：它把三個值印在狀態列上，reconcile 讀那行補 NULL（`reconcile::fill_codex_runtime`）——
   否則 UI 會拿 bots 頂上，而 `/fast` 是開關，不知道的 tier 等於切不掉。
+  **之後也持續校正**（`codex_live::sync_runtime`，跟 `update_watch` 同一個 30 秒巡邏、拿 bot 鎖）：狀態列讀得到就以它為準，有 `fast` 字樣＝開，整行讀得到卻沒有＝關（codex 關掉時省略那個字）；
+  讀不到（選單開著、畫面被清）什麼都不動，不把讀不到當成 fast=false。使用者在 TUI 手打 `/fast`／`/model`，或當場套用中途失敗，都不會讓標題列的 fast 與「需重啟」chip 卡在啟動時的舊值。
 - **身份也記 runtime**：`runs.runtime_identity` 的空字串是已知的本機預設帳號，`NULL` 是收編 pane／舊列而不知道，前端只在有值時拿它與 `bot.identity` 比；身份不同時身份徽章顯示實際值，設定值放在 drift 說明。
 - **UI 一律顯示 runtime**；設定 ≠ runtime 時多一顆「需重啟」chip（`POST /api/bots/{id}/restart`）。不准靜靜顯示還沒生效的值。
 - **codex 的 fast 兩個方向都送**：少送 `service_tier` 等於「聽 `~/.codex/config.toml`」，而那裡常寫著 `fast`。所以一律帶 `-c service_tier="priority"`（勾）或
