@@ -1757,17 +1757,23 @@ mod herdr_skill_timeout_tests {
     }
 
     /// herdr 卡住時 start_bot（持 per-bot 鎖）不能跟著永遠卡住；正常與失敗照舊。
+    ///
+    /// 「不卡住」的判準是**子行程還在睡的時候呼叫就回來了**（睡 120 秒、要在 100 秒內回），不是「多快回來」：
+    /// 整樹在高負載下（load average 60～150）spawn 一個 `sh` 腳本就可能慢過好幾秒，正常／失敗那兩條的 `timeout` 只是放棄的上限
+    /// （給足 10 分鐘），不是成功的條件——以前用 10 秒，負載一高 `bad` 那條回的是「逾時」而不是腳本的 stderr（部署 a43f6846 時整樹 1 敗）。
     #[tokio::test]
     async fn a_hung_herdr_skill_command_times_out_instead_of_blocking_start() {
-        let hung = fake_herdr("sleep 30");
+        const GIVE_UP: Duration = Duration::from_secs(600);
+        let hung = fake_herdr("sleep 120");
         let t = std::time::Instant::now();
         let err = herdr_skill_output(hung.to_str().unwrap(), Duration::from_millis(300)).await.unwrap_err().to_string();
-        assert!(t.elapsed() < Duration::from_secs(25), "沒有在期限內放棄（子行程 sleep 30）");
+        assert!(t.elapsed() < Duration::from_secs(100), "沒有在子行程睡完之前放棄（子行程 sleep 120）");
         assert!(err.contains("逾時"), "{err}");
 
         let ok = fake_herdr("echo 'name: herdr'");
-        assert_eq!(herdr_skill_output(ok.to_str().unwrap(), Duration::from_secs(10)).await.unwrap().trim(), "name: herdr");
+        assert_eq!(herdr_skill_output(ok.to_str().unwrap(), GIVE_UP).await.unwrap().trim(), "name: herdr");
         let bad = fake_herdr("echo boom >&2; exit 3");
-        assert!(herdr_skill_output(bad.to_str().unwrap(), Duration::from_secs(10)).await.unwrap_err().to_string().contains("boom"));
+        let err = herdr_skill_output(bad.to_str().unwrap(), GIVE_UP).await.unwrap_err().to_string();
+        assert!(err.contains("boom"), "{err}");
     }
 }
