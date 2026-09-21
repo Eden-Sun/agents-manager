@@ -624,6 +624,8 @@ export interface PatchBotInput {
 /** `needs_restart = true`：已寫入 config，但目前的 Run 仍跑舊參數，要 restart 才生效。 */
 export interface PatchBotResult {
   needs_restart: boolean
+  /** 只有真的試過當場套用才有（codex model／effort／fast，SPEC §4.4a）。`deferred`＝bot 正忙、排到下次 idle 再套（#393）。 */
+  live_apply?: { applied: boolean; deferred: boolean; reason: string | null }
 }
 
 /** grok 的靜態 effort（`GET /api/models` 失敗時退回）。 */

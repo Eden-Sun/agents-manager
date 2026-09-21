@@ -97,3 +97,11 @@ export function driftTitle(drift: RuntimeDriftField[]): string {
   if (!drift.length) return ''
   return `${drift.map(driftLine).join('\n')}\n重啟這顆 bot 才會換成設定的值。`
 }
+
+/**
+ * 落差只有 codex 的 fast：TUI 的 `/fast` 一個鍵就能切、不必重啟（#393），徽章改走「當場套用」。
+ * 混著模型／強度／帳號的落差照舊走重啟。
+ */
+export function isFastOnlyDrift(kind: string, drift: RuntimeDriftField[]): boolean {
+  return kind === 'codex' && drift.length > 0 && drift.every((d) => d.field === 'fast')
+}

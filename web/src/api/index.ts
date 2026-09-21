@@ -385,7 +385,11 @@ export async function createBot(projectId: string, input: NewBotInput): Promise<
 export async function patchBot(botId: string, input: PatchBotInput): Promise<PatchBotResult> {
   const raw = await transport.request('PATCH', `/bots/${encodeURIComponent(botId)}`, input)
   const o = isRec(raw) ? raw : {}
-  return { needs_restart: o.needs_restart === true || o.restart_required === true }
+  const la = isRec(o.live_apply) ? o.live_apply : null
+  return {
+    needs_restart: o.needs_restart === true || o.restart_required === true,
+    ...(la ? { live_apply: { applied: la.applied === true, deferred: la.deferred === true, reason: typeof la.reason === 'string' ? la.reason : null } } : {}),
+  }
 }
 
 /** 側欄排序（API.md §5.4），存 config.toml 讓各裝置共用同一份；`primary` 是主力那列的順序（#344，存 DB）。 */

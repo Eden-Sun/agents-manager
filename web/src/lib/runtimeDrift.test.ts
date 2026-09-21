@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import type { Bot, Run } from '../api/types.ts'
-import { driftTitle, runtimeDrift, runtimeKnown } from './runtimeDrift.ts'
+import { driftTitle, isFastOnlyDrift, runtimeDrift, runtimeKnown } from './runtimeDrift.ts'
 
 const bot = (over: Partial<Bot> = {}): Bot =>
   ({ id: 'b1', kind: 'codex', model: 'gpt-5.6-luna', effort: 'high', fast: true, identity: null, ...over }) as Bot
@@ -76,4 +76,15 @@ test('不知道 runtime 就不要猜：收編的 pane、沒在跑的 run', () =>
   assert.deepEqual(runtimeDrift(bot({ effort: 'low' }), unknown), [])
   assert.deepEqual(runtimeDrift(bot({ effort: 'low' }), run({ state: 'stopped' })), [])
   assert.deepEqual(runtimeDrift(bot(), null), [])
+})
+
+test('#393：只有 codex 的 fast 落差才走當場套用；混了別的欄位、或不是 codex 仍走重啟', () => {
+  const r = run({ runtime_fast: true })
+  const fastOnly = runtimeDrift(bot({ fast: false }), r)
+  assert.deepEqual(fastOnly.map((d) => d.field), ['fast'])
+  assert.equal(isFastOnlyDrift('codex', fastOnly), true)
+  assert.equal(isFastOnlyDrift('claude', fastOnly), false)
+  const mixed = runtimeDrift(bot({ fast: false, effort: 'low' }), r)
+  assert.equal(isFastOnlyDrift('codex', mixed), false)
+  assert.equal(isFastOnlyDrift('codex', []), false)
 })
