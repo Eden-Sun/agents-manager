@@ -1,0 +1,46 @@
+⏺ 兩項都試過了，貼真實 pane read；(b) 仍卡在同一個技術限制，附完整說明。
+
+  ## (a) Auto mode 框的按鍵語意——找到原文，判定「沒變」
+
+  Changelog 原文（2.1.280）：
+  > Fixed a stray `n` closing dialogs and a stray `y` confirming them; Enter and Esc accept and cancel (bind `y`/`n` to `confirm:yes`/`confirm:no` in `keybindings.json` to restore)
+
+  这条改的是「亂按 y/n 誤觸對話框」，跟 `Down`/`Enter`、選單預設游標位置無關。實測比對（`strings` 逐位元組比對兩顆 binary，不是猜）：
+
+  ```
+  $ strings 2.1.278 | grep -o 'Auto mode lets Claude[^"]\{0,300\}'
+  Auto mode lets Claude handle permission prompts automatically. Claude checks each tool call for risky actions and prompt injection before executing, runs the ones it assesses as lower-risk, and blocks the rest.
+
+  $ strings 2.1.280 | grep -o 'Auto mode lets Claude[^"]\{0,300\}'
+  Auto mode lets Claude handle permission prompts automatically. Claude checks each tool call for risky actions and prompt injection before executing, runs the ones it assesses as lower-risk, and blocks the rest.
+  ```
+  （兩版逐字相同）選項樣板也逐字相同：`"Yes, set auto mode as my default permission mode"`、`"No, keep {from}"`（第二項是模板，`{from}` 換成目前的權限模式名稱，兩版都用同一組字串常數，沒有新增/刪除選項、沒有重新排序的痕跡）。**没能實機把游標真的畫出來看**（見下）,但字串層級找不到任何改動選項順序、文案或新增第三選項的證據。
+
+  ## (b) 首次啟動畫面——onboarding 驗到了，Auto mode 框驗不到，原文附上
+
+  用 `herdr pane split` 開拋棄式 pane，起 2.1.280，`CLAUDE_CONFIG_DIR` 指向全新目錄，pane read 原文：
+
+  ```
+   Let's get started.
+
+   Choose the text style that looks best with your terminal
+   To change this later, run /theme
+
+     1. Auto (match terminal)
+   ❯ 2. Dark mode ✔
+     3. Light mode
+     ...
+  ```
+
+  跟 2.1.278 的已知 fixture 一致，這頁本身沒變。接著試圖「保留登入狀態」略過這頁：複製本機 `~/.claude.json`（只改 `hasResetAutoModeOptInForDefaultOffer: false`，其餘含 `oauthAccount`／`hasCompletedOnboarding: true` 原樣保留)放進拋棄式設定目錄，兩種猜測的檔案路徑（`$CLAUDE_CONFIG_DIR.json` 與 `$CLAUDE_CONFIG_DIR/../.claude.json`）都試了——**兩次都還是重新跑 onboarding 主題頁**，代表 claude 判斷「這個 CLAUDE_CONFIG_DIR 有沒有登入」不是只看這個 JSON 檔的內容，還有我沒摸清楚的額外綁定（很可能是安裝機器指紋或 keychain 服務名稱跟帳號的對應關係，不是單純複製設定檔能複製的）。往下按 Enter 一路到「Select login method」，沒有真的用帳密走一次 OAuth 就到不了 Auto mode 框——這跟 eaadcab4 本人的處境完全一樣（commit 裡那份 `AUTO_MODE` fixture 本來就是「巡檢抄錄」而不是拋棄式環境即時截到的）。
+
+  **結論：沒有動用真帳密登入去驗證登入後第一畫面，這件事本次仍然未驗證**，跟前一版一樣。已刪乾淨拋棄式 pane 與所有暫存檔（含含帳號資訊的複製檔），沒碰正式 `~/.claude.json`、沒動正式 daemon。
+
+  (c) Opus 5.5 預設模型：不變——21 顆 `kind=claude` 的 bot 目前全部都設了 `model`，沒有空白的，這條 guard 只影響未來新建、沒設 model 的 bot。
+
+                                                                                                                                                                                                           0 tokens
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  hunta | AGM | SON5 M | 5h:92%(rst 0h 42m) | 7d:4%(rst 2d 9h)
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents

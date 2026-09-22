@@ -135,10 +135,23 @@ pub fn is_feedback_survey(screen: &str) -> bool {
 /// 選單上、回合永遠掛著，所以 [`crate::lifecycle`] 送前先看，中了回 409 `needs_login`。
 pub fn is_login_menu(screen: &str) -> bool {
     // 標題允許窄 pane 折行（`Select login` / ` method:`），但選項一定要自己成行——句子裡提到
-    // 「select login method」的正文不算（[`norm_line`]）。
-    let lines: Vec<String> = screen.lines().map(norm_line).collect();
-    flatten(screen).contains("select login method")
+    // 「select login method」的正文不算（[`norm_line`]）。只看最底 [`MENU_TAIL_LINES`] 行、而且輸入列不能空著：
+    // bot 在回報裡逐行引用這個選單（2026-09-22 triage bot 貼了 2.1.280 的 onboarding 原文），正文在上面、
+    // 底下是空的輸入列，那不是選單（同 [`is_switch_model_dialog`] 2026-09-18 的教訓）。
+    let Some(tail_raw) = menu_tail(screen) else { return false };
+    let lines: Vec<String> = tail_raw.iter().map(|l| norm_line(l)).collect();
+    flatten(&tail_raw.join("\n")).contains("select login method")
         && (line_starts_with(&lines, "1. claude account with subscription") || line_starts_with(&lines, "2. anthropic console account"))
+}
+
+/// 開場選單（登入／onboarding 主題）連同底下的預覽與提示最多這麼高；再往上是正文。
+const MENU_TAIL_LINES: usize = 20;
+
+/// 畫面最底 [`MENU_TAIL_LINES`] 個非空行；輸入列空著（[`composer_is_idle`]）就回 `None`——那時畫面上不可能有選單在擋。
+fn menu_tail(screen: &str) -> Option<Vec<&str>> {
+    let raw: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
+    let tail = raw[raw.len().saturating_sub(MENU_TAIL_LINES)..].to_vec();
+    (!composer_is_idle(&tail)).then_some(tail)
 }
 
 /// claude 狀態列靠右的 `✔ Update installed · Restart to update`。回固定字而非整行：左半是每回合
@@ -189,8 +202,10 @@ pub fn is_auto_mode_offer(screen: &str) -> bool {
 /// 七個主題選項。跟登入選單同一類：交給人處理（409 `needs_login`），不自動按——按了下一頁就是登入選單，
 /// 一樣要人。真畫面在 `lifecycle/fixtures/claude-2.1.278-onboarding-theme.txt`（2026-09-22）。
 pub fn is_onboarding_theme(screen: &str) -> bool {
-    let lines: Vec<String> = screen.lines().map(norm_line).collect();
-    flatten(screen).contains("choose the text style that looks best with your terminal")
+    // 同 [`is_login_menu`]：只看最底幾行、輸入列不能空著（2026-09-22 triage bot 在回報裡引了整頁原文，每次送交辦都被判 needs_login）。
+    let Some(tail_raw) = menu_tail(screen) else { return false };
+    let lines: Vec<String> = tail_raw.iter().map(|l| norm_line(l)).collect();
+    flatten(&tail_raw.join("\n")).contains("choose the text style that looks best with your terminal")
         && line_starts_with(&lines, "1. auto (match terminal)")
         && (line_starts_with(&lines, "2. dark mode") || line_starts_with(&lines, "3. light mode"))
 }
@@ -293,6 +308,9 @@ pub(crate) mod screens {
 ";
 
     pub const ONBOARDING_THEME: &str = include_str!("lifecycle/fixtures/claude-2.1.278-onboarding-theme.txt");
+    /// 2026-09-22 triage bot（2.1.280）的真回報：正文逐行引了 onboarding 主題頁原文，底下是空的輸入列＋statusline。
+    /// daemon 對它每次送交辦都回 needs_login，交辦停在 queued。
+    pub const REPORT_QUOTING_ONBOARDING: &str = include_str!("lifecycle/fixtures/claude-2.1.280-report-quoting-onboarding.txt");
 }
 
 #[cfg(test)]
@@ -493,7 +511,7 @@ pub fn is_feedback_survey(screen: &str) -> bool {
         assert!(update_notice("").is_none());
     }
 
-    use super::screens::{AUTO_MODE, ONBOARDING_THEME};
+    use super::screens::{AUTO_MODE, ONBOARDING_THEME, REPORT_QUOTING_ONBOARDING};
 
     #[test]
     fn the_auto_mode_offer_is_recognised_and_quotes_are_not() {
@@ -510,6 +528,18 @@ pub fn is_feedback_survey(screen: &str) -> bool {
         assert!(!is_login_menu(ONBOARDING_THEME));
         assert!(!is_onboarding_theme("⏺ run /theme to choose the text style that looks best with your terminal\n❯\n"));
         assert!(!is_auto_mode_offer(ONBOARDING_THEME));
+    }
+
+    /// 正文引了整頁原文、輸入列空著：不是選單。登入選單同一條規則。
+    #[test]
+    fn a_report_that_quotes_the_onboarding_page_is_not_the_page() {
+        assert!(!is_onboarding_theme(REPORT_QUOTING_ONBOARDING));
+        assert!(!is_login_menu(REPORT_QUOTING_ONBOARDING));
+        let quoted_login = format!("⏺ 登入選單長這樣：\n  Select login method:\n  ❯ 1. Claude account with subscription · Pro, Max\n    2. Anthropic Console account · API usage billing\n{}", IDLE_CLAUDE);
+        assert!(!is_login_menu(&quoted_login));
+        // 引文在正文上方、底下正在跑（沒有空輸入列）：選單不在最底幾行，也不算。
+        let far_above = format!("{}\n{}", REPORT_QUOTING_ONBOARDING.split("0 tokens").next().unwrap(), "  ⏺ Bash(cargo test)\n  ⎿  running…\n".repeat(12));
+        assert!(!is_onboarding_theme(&far_above));
     }
 
     const IDLE_CLAUDE: &str = "────────────────────\n❯\n────────────────────\n  15m2dg | agents-manager | Opus 5 31% | 5h:96%\n";
