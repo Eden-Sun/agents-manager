@@ -56,12 +56,29 @@ test('回合還在飛的即使 idle 也不動；starting / stopping 同理', () 
   )
 })
 
-test('沒有更新在等、不是 claude、沒在跑的都不進帳', () => {
-  const bots = [bot('cx', { kind: 'codex' }), bot('clean'), bot('stopped')]
-  const runs = { cx: run('cx'), clean: run('clean', { update_notice: null }) }
+test('沒有更新在等、grok、沒在跑的都不進帳', () => {
+  const bots = [bot('gk', { kind: 'grok' }), bot('clean'), bot('stopped')]
+  const runs = { gk: run('gk'), clean: run('clean', { update_notice: null }) }
   const c = updateBatchCounts(bots, runs, none)
   assert.deepEqual(c.ready, [])
   assert.deepEqual(c.busy, [])
+})
+
+test('2026-09-22：codex 磁碟已裝好新版跟 claude 一樣可以重啟；還沒裝的算「在忙」不算消失', () => {
+  const bots = [bot('cx-ok', { kind: 'codex' }), bot('cx-wait', { kind: 'codex' })]
+  const runs = {
+    'cx-ok': run('cx-ok', { update_notice: 'codex 有新版 0.154.0（這個 run 跑的是 0.154.0），已安裝，重啟套用' }),
+    'cx-wait': run('cx-wait', { update_notice: 'codex 有新版 0.154.0 → 0.155.1，需安裝後重啟' }),
+  }
+  const c = updateBatchCounts(bots, runs, none)
+  assert.deepEqual(
+    c.ready.map((x) => x.name),
+    ['cx-ok'],
+  )
+  assert.deepEqual(
+    c.busy.map((x) => [x.name, x.why]),
+    [['cx-wait', '新版還沒裝，要先手動安裝才能套用']],
+  )
 })
 
 test('子 agent 也歸這顆按鈕管（587b07f：在自己的 pane 裡 exit + resume）', () => {

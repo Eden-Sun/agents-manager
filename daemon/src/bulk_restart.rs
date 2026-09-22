@@ -1,7 +1,14 @@
-//! 一鍵把「等著套用 claude 更新」的閒置 bot 全部 exit + resume（SPEC §6.9）。
+//! 一鍵把「等著套用更新」的閒置 bot 全部 exit + resume（SPEC §6.9）。
 //!
 //! 跑的部分疊在既有單顆路徑（stop + `resume_native` start）上，沒有另一套啟動流程。
-//! 挑的規則刻意保守：只動帶著 update_notice 的閒置 claude——批次最不能做的就是砍掉使用者正在等的回合。
+//! 挑的規則刻意保守：只動帶著 update_notice 的閒置 claude／codex——批次最不能做的就是砍掉使用者正在等的回合。
+//!
+//! **codex 也進批次，但只收「磁碟已裝好」的那一種**（2026-09-22，issue「codex 有更新怎沒出現在
+//! header」）：codex 的更新通知有兩種文案（`codex_update.rs`）——磁碟已經裝好、這個 run 還跑舊版
+//! （notice 含「已安裝」）跟 claude 完全一樣，重啟就換，可以進批次；新版**還沒安裝**（notice 含
+//! 「需安裝」）重啟一顆沒裝新版的 codex 換不到任何東西，所以仍然不進批次自動重啟，但要留在候選名單
+//! 裡、標成「需要手動安裝」才會出現在 header 與批次框（`Skip::NeedsManualInstall`），不能像以前那樣
+//! 整顆連候選都不算、在 header 上完全消失。
 
 use crate::db;
 use crate::lifecycle::{self, LcError, StartOpts};
@@ -20,6 +27,8 @@ pub struct Cand {
     pub state: String,
     pub agent_status: String,
     pub has_update: bool,
+    /// codex 專屬：notice 說的是「還沒裝，要先手動裝」而不是「已經裝好，重啟就換」。
+    pub needs_manual_install: bool,
     pub turn_in_flight: bool,
     /// 使用者自己的 herdr `default` session（SPEC §6.5.1）：daemon 只觀察，不開、不關它的 pane。
     pub default_session: bool,
@@ -34,6 +43,8 @@ pub enum Skip {
     Blocked,
     UnknownStatus,
     TurnInFlight,
+    /// codex 新版還沒安裝，重啟一顆沒裝新版的 codex 換不到任何東西——要先手動跑 notice 裡的安裝指令。
+    NeedsManualInstall,
     /// 排到它的時候已經不用重啟了：更新套用過、run 不在了、bot 被刪了。
     NoLongerPending,
     /// 輪到它時 DB 讀不到它的狀態（一時忙、I/O 錯）：不知道≠不用重啟，這次先不動，更新還在等（#188）。
@@ -49,6 +60,7 @@ impl Skip {
             Skip::Blocked => "blocked",
             Skip::UnknownStatus => "unknown_status",
             Skip::TurnInFlight => "turn_in_flight",
+            Skip::NeedsManualInstall => "needs_manual_install",
             Skip::NoLongerPending => "no_longer_pending",
             Skip::StateUnreadable => "state_unreadable",
         }
@@ -62,21 +74,26 @@ impl Skip {
             Skip::Blocked => "卡在提問，等人回答",
             Skip::UnknownStatus => "狀態不明，不確定它在不在忙",
             Skip::TurnInFlight => "還有一回合沒收掉",
+            Skip::NeedsManualInstall => "新版還沒裝，要先手動安裝（見更新提示裡的指令）才能重啟套用",
             Skip::NoLongerPending => "排到它時已經不用重啟了（更新套用過或 run 不在了）",
             Skip::StateUnreadable => "讀不到它的狀態，這次沒動它；更新還在等，稍後再按一次",
         }
     }
 }
 
-/// 非候選連「跳過」都不列，免得淹掉真正要看的那幾行。
+/// 非候選連「跳過」都不列，免得淹掉真正要看的那幾行。只有 claude／codex 會被 `update_watch` 寫
+/// `update_notice`（grok 沒有這條巡邏），但這裡仍明講而不是「任何 kind 都算」，跟寫入端的假設對齊。
 pub fn is_candidate(c: &Cand) -> bool {
-    c.kind == "claude" && c.has_update
+    matches!(c.kind.as_str(), "claude" | "codex") && c.has_update
 }
 
 /// 這顆候選為什麼不能動；`None`＝可以重啟。順序即優先序，回報理由取第一個命中的（使用者最該先處理的那件）。
 /// 計畫時用一次，**輪到它真的要重啟前再用一次**（[`run_batch`]）。
 pub fn skip_reason(c: &Cand) -> Option<Skip> {
-    if c.default_session {
+    if c.needs_manual_install {
+        // 跟下面幾條「暫時不能動」不同，這條是「重啟了也沒用」，排最前面。
+        Some(Skip::NeedsManualInstall)
+    } else if c.default_session {
         // SPEC §6.5.1：重啟會關掉使用者自己的 pane（2026-09-12 review #4）。
         Some(Skip::DefaultSession)
     } else if c.state != "running" {
@@ -108,6 +125,7 @@ pub fn plan(cands: &[Cand]) -> (Vec<&Cand>, Vec<(&Cand, Skip)>) {
 }
 
 async fn cand_of(app: &Arc<App>, run: &db::Run, bot: &db::Bot) -> anyhow::Result<Cand> {
+    let notice = run.update_notice.as_deref().unwrap_or("");
     Ok(Cand {
         bot_id: bot.id.clone(),
         name: bot.name.clone(),
@@ -115,7 +133,8 @@ async fn cand_of(app: &Arc<App>, run: &db::Run, bot: &db::Bot) -> anyhow::Result
         managed_by: bot.managed_by.clone(),
         state: run.state.clone(),
         agent_status: run.agent_status.clone(),
-        has_update: run.update_notice.as_deref().is_some_and(|s| !s.trim().is_empty()),
+        has_update: !notice.trim().is_empty(),
+        needs_manual_install: bot.kind == "codex" && notice.contains("需安裝"),
         turn_in_flight: db::in_flight_turn(&app.db, &run.id).await?.is_some(),
         default_session: lifecycle::in_default_session(run) || bot.herdr_session.as_deref() == Some("default"),
     })
@@ -522,6 +541,7 @@ mod tests {
             state: state.into(),
             agent_status: status.into(),
             has_update,
+            needs_manual_install: false,
             turn_in_flight: in_flight,
             default_session: false,
         }
@@ -570,7 +590,7 @@ mod tests {
     #[test]
     fn non_candidates_are_not_reported_at_all() {
         let cands = vec![
-            cand("cx", "codex", "running", "idle", true, false),
+            // grok 沒有 update_notice 這條巡邏，就算硬塞 has_update 也不算候選（跟寫入端假設對齊）。
             cand("gk", "grok", "running", "working", true, false),
             cand("cl-no-update", "claude", "running", "idle", false, false),
             cand("cl-yes", "claude", "running", "idle", true, false),
@@ -579,7 +599,29 @@ mod tests {
         assert_eq!(go.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["cl-yes"]);
         assert!(skip.is_empty(), "{skip:?}");
         assert!(!is_candidate(&cands[0]));
-        assert!(!is_candidate(&cands[2]));
+        assert!(!is_candidate(&cands[1]));
+    }
+
+    /// 2026-09-22：codex 磁碟上已裝好新版（notice 含「已安裝」）跟 claude 一樣可以進批次——
+    /// 以前整個 kind 被擋在候選之外，這種已經能重啟套用的也一起消失在 header 上。
+    #[test]
+    fn a_codex_with_the_update_already_installed_joins_the_batch_like_claude() {
+        let cx = cand("cx", "codex", "running", "idle", true, false);
+        assert!(is_candidate(&cx));
+        let (go, skip) = plan(std::slice::from_ref(&cx));
+        assert_eq!(go.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["cx"]);
+        assert!(skip.is_empty());
+    }
+
+    /// codex 新版還沒裝（notice 含「需安裝」）：**是候選**（header 要看得到），但重啟了也換不到任何
+    /// 東西，所以跳過並講清楚原因，不是像 claude 那樣直接排進批次，也不是整顆消失。
+    #[test]
+    fn a_codex_that_still_needs_a_manual_install_is_skipped_with_a_clear_reason() {
+        let cx = Cand { needs_manual_install: true, ..cand("cx", "codex", "running", "idle", true, false) };
+        assert!(is_candidate(&cx));
+        let (go, skip) = plan(std::slice::from_ref(&cx));
+        assert!(go.is_empty());
+        assert_eq!(skip[0].1, Skip::NeedsManualInstall);
     }
 
     /// 2026-09-12 使用者：三顆子 agent 全被跳過，更新永遠套不上去。
