@@ -1031,9 +1031,9 @@ listen port 只在本機算（pane 行程樹的 pid 對 `lsof -nP -iTCP -sTCP:LI
   `GET /build-slots` 看）。
 - **FIFO（2026-09-18 使用者交辦，實測手工 `cargo-slot.sh` 舊版每個等待者各自搶會餓死——有一個等了 74 分鐘還沒輪到）**：
   名額空出來時，只有排隊排最早的那個 holder 拿得到，其他人這一刻剛好也在問、名額也剛好空著一樣要等。
-  佇列順序＝`(since, holder)` 字典序，`since` 是這個 holder**第一次**排進 waiting 的時間（重試不會歸零）；
-  `since` 相同（毫秒級撞期）時比 `holder` 當穩定的第二排序鍵。跟 `cargo-slot.sh` 的號碼牌是同一個道理，只是這裡
-  拿 `build_slots.since` 當號碼牌，不必另開一張表——`acquire` 額滿或前面有人排隊都會先確保自己有一列 `waiting`。
+  `since` 是這個 holder**第一次**排進 waiting 的時間（重試不會歸零），供畫面顯示；獨立的 `queue_order` 記錄實際進場順序，
+  因此毫秒級的 `since` 撞期不會改按 holder 名稱排序。`acquire` 額滿或前面有人排隊都會先確保自己有一列 `waiting`，
+  並保留原本的 `queue_order`。
 - **名額是 TTL 租的，不是等建置跑完才還**：拿到之後 shim 背景續約（間隔取 TTL 的 1/3），跑多久都行，只要續約還在動；
   停止續約（持有者掛了、pane 被砍、行程被殺）超過 TTL 就被下一次 acquire 或背景 sweep 收回——不用去猜「這個 pid 還活著嗎」
   （這個 codebase 本來就沒有 PID liveness 檢查，見 `pane_identity.rs` 讀的是帳號不是死活；TTL 到期是唯一的死活判準）。
