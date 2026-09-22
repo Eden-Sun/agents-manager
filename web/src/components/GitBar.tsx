@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import * as api from '../api'
 import type { GitSummary } from '../api'
 import { ApiError } from '../api/types'
+import { createLatestOnly } from '../lib/latestOnly'
 import { useStore } from '../store/store'
 import './gitBar.css'
 
@@ -22,19 +23,32 @@ function errText(e: unknown): string {
 
 export function GitBar({ projectId }: { projectId: string }) {
   const notify = useStore((s) => s.notify)
-  const [sum, setSum] = useState<GitSummary | null>(null)
+  const [summaryFor, setSummaryFor] = useState<{ projectId: string; summary: GitSummary } | null>(null)
   const [busy, setBusy] = useState<'commit' | 'push' | 'pull' | null>(null)
   const [composing, setComposing] = useState(false)
   const [msg, setMsg] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
+  const latestRefresh = useRef(createLatestOnly()).current
+  const currentProjectId = useRef(projectId)
+  const sum = summaryFor?.projectId === projectId ? summaryFor.summary : null
+
+  useEffect(() => {
+    currentProjectId.current = projectId
+  }, [projectId])
 
   const refresh = useCallback(async () => {
+    // A late action from the previous project must not invalidate its successor's poll.
+    if (currentProjectId.current !== projectId) return
+    const request = latestRefresh.begin()
     try {
-      setSum(await api.fetchGit(projectId))
+      const summary = await api.fetchGit(projectId)
+      if (currentProjectId.current === projectId && latestRefresh.isCurrent(request)) {
+        setSummaryFor({ projectId, summary })
+      }
     } catch {
       // 讀不到就維持上一次的值；下一輪再試。
     }
-  }, [projectId])
+  }, [latestRefresh, projectId])
 
   useEffect(() => {
     let alive = true
