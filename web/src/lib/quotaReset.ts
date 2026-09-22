@@ -46,10 +46,11 @@ export function resetBadge(
   rule: ResetRule = RULE_5H,
 ): string | null {
   if (remainingPct === null || remainingPct === undefined) return null
+  if (!Number.isFinite(remainingPct) || !Number.isFinite(now)) return null
   if (rule.belowPct === null ? remainingPct > 0 : remainingPct >= rule.belowPct) return null
   if (!resetsAt) return null
   const t = new Date(resetsAt).getTime()
-  if (Number.isNaN(t)) return null
+  if (!Number.isFinite(t)) return null
   const left = t - now
   if (left <= 0 || left > rule.soonMs) return null
   return short(left)
