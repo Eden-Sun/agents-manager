@@ -1169,7 +1169,9 @@ herdr server 重啟會讓**所有** pane 同時消失。照 §6.5 的規則，�
 升級窗口完成後，依序以新 binary 執行 `codesign -dv` 取 identifier、用不需 sudo 的
 `plutil -p /Library/Preferences/com.apple.networkextension.plist` 查該 identifier、再用 node 連區網
 （預設例：`192.168.1.1:80`）。可用 `scripts/ops/herdr-lan-check.sh`，三步各自回報；node 不在時明確 `SKIP`，
-不算通過。live-handoff 與 `launchctl submit` 起的全新 server 都**不會**讓授權出現；要使用者在
+不算通過。**不帶參數時驗的是正在跑的 herdr server 的執行檔**（`ps` 找 argv[0] 是 herdr、參數有 `server` 的行程，`lsof` 的 txt 解出實際路徑；
+好幾顆跑不同路徑就逐一驗、任何一顆沒授權就 FAIL），沒有 server 才退回 `/opt/homebrew/bin/herdr` 並解 symlink——
+不是 PATH 上第一顆：2026-09-22 PATH 上有另一份簽章不同的 0.9.1 副本，照 PATH 選會誤判 FAIL。live-handoff 與 `launchctl submit` 起的全新 server 都**不會**讓授權出現；要使用者在
 「系統設定 → 隱私權與安全性 → 本機網路」允許，或在真正的 launchd bootstrap 後按下詢問的允許。
 任何一步沒通或 skip 都停下，回報「需要使用者授權本機網路」，不要靠重啟硬試；授權完成後從同一個 herdr pane 重跑，
 通過前不得宣告升級完成。
