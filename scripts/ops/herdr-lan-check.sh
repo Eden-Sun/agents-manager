@@ -13,12 +13,28 @@ NODE="${NODE_BIN:-node}"
 FAILED=0
 SKIPPED=0
 
+# 不帶參數時找真的 binary，不是 PATH 最前面那個：daemon 起的 bot pane 裡 `command -v herdr` 抓到的是
+# per-bot shim（~/.config/agents-manager/bots/<id>/bin/herdr，一支沒簽章的 sh 腳本），codesign 會回
+# "not signed at all" 而誤判 FAIL。跳過所有 shim（AM 的 bots/*/bin、或檔頭是 shell 腳本的），並解開 symlink
+# （/opt/homebrew/bin/herdr → Cellar），授權表記的是真 binary 的 identifier。
+is_shim() { # is_shim <path> → 0＝這是 shim／腳本，不是要驗的 binary
+  case "$1" in */.config/agents-manager/bots/*/bin/herdr) return 0 ;; esac
+  head -c 2 "$1" 2>/dev/null | grep -q '^#!'
+}
 if [ -z "$BINARY" ]; then
-  BINARY=$(command -v herdr 2>/dev/null || true)
+  _saved_ifs=$IFS; IFS=:
+  for _dir in $PATH; do
+    _cand="${_dir:-.}/herdr"
+    [ -x "$_cand" ] || continue
+    is_shim "$_cand" && continue
+    BINARY=$(readlink -f "$_cand" 2>/dev/null || echo "$_cand")
+    break
+  done
+  IFS=$_saved_ifs
 fi
 
 if [ -z "$BINARY" ]; then
-  echo "1/3 identifier: FAIL 找不到要驗證的 herdr binary（請把新 binary 路徑當第一個參數）"
+  echo "1/3 identifier: FAIL PATH 上找不到真的 herdr binary（只有 shim 或沒有）；請把新 binary 路徑當第一個參數，例如 /opt/homebrew/bin/herdr"
   FAILED=1
 else
   SIGNATURE=$("$CODESIGN" -dv "$BINARY" 2>&1)
@@ -27,7 +43,7 @@ else
   if [ "$CODESIGN_RC" -eq 0 ] && [ -n "$IDENTIFIER" ]; then
     echo "1/3 identifier: $IDENTIFIER"
   else
-    echo "1/3 identifier: FAIL codesign -dv 無法取出 identifier（$BINARY）"
+    echo "1/3 identifier: FAIL codesign -dv 無法取出 identifier（${BINARY}）"
     [ -n "$SIGNATURE" ] && printf '%s\n' "$SIGNATURE" >&2
     IDENTIFIER=""
     FAILED=1
@@ -38,13 +54,13 @@ if ! command -v "$PLUTIL" >/dev/null 2>&1; then
   echo "2/3 authorization: FAIL 找不到 plutil（不使用 sudo；授權表應可唯讀讀取）"
   FAILED=1
 elif [ ! -r "$AUTH_PLIST" ]; then
-  echo "2/3 authorization: FAIL 讀不到 $AUTH_PLIST（不使用 sudo）"
+  echo "2/3 authorization: FAIL 讀不到 ${AUTH_PLIST}（不使用 sudo）"
   FAILED=1
 else
   AUTH_OUTPUT=$("$PLUTIL" -p "$AUTH_PLIST" 2>&1)
   PLUTIL_RC=$?
   if [ "$PLUTIL_RC" -ne 0 ]; then
-    echo "2/3 authorization: FAIL plutil -p 讀取 $AUTH_PLIST 失敗"
+    echo "2/3 authorization: FAIL plutil -p 讀取 ${AUTH_PLIST} 失敗"
     printf '%s\n' "$AUTH_OUTPUT" >&2
     FAILED=1
   elif [ -n "$IDENTIFIER" ] && printf '%s\n' "$AUTH_OUTPUT" | grep -F -- "$IDENTIFIER" >/dev/null 2>&1; then
@@ -84,9 +100,9 @@ socket.once("error", (error) => finish(1, `node ${error.code || error.message}`)
   NODE_RC=$?
   NODE_DETAIL=$(printf '%s\n' "$NODE_OUTPUT" | tr '\n' ' ' | sed 's/[[:space:]]*$//')
   if [ "$NODE_RC" -eq 0 ]; then
-    echo "3/3 LAN: $NODE_DETAIL ($HOST:$PORT)"
+    echo "3/3 LAN: ${NODE_DETAIL} (${HOST}:${PORT})"
   else
-    echo "3/3 LAN: FAIL $NODE_DETAIL ($HOST:$PORT)"
+    echo "3/3 LAN: FAIL ${NODE_DETAIL} (${HOST}:${PORT})"
     FAILED=1
   fi
 fi

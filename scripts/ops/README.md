@@ -167,7 +167,7 @@ install -m 755 scripts/ops/herdr-lan-check.sh ~/.config/agents-manager/superviso
 ```
 
 升級核准後的完整人工步驟見 [`herdr-upgrade-runbook.md`](herdr-upgrade-runbook.md)。其中
-`herdr-lan-check.sh` 必須從 herdr pane 執行：它用新 binary 的 `codesign -dv` identifier 查
+`herdr-lan-check.sh` 必須從 herdr pane 執行，**第一個參數寫真 binary 的路徑**（`/opt/homebrew/bin/herdr`）：不帶參數時它會跳過 PATH 上的 per-bot shim（`~/.config/agents-manager/bots/*/bin/herdr`，沒簽章）與 shell 腳本、解開 symlink，但 PATH 上只有 shim 時就是明確 FAIL。它用新 binary 的 `codesign -dv` identifier 查
 `/Library/Preferences/com.apple.networkextension.plist`，再用 node 連區網；Apple 內建 nc、python3、curl
 不能代驗。任何失敗或 node 缺少都停下，請使用者授權「本機網路」，不要靠重啟硬試。
 

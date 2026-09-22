@@ -197,7 +197,7 @@ BODY=$(mktemp -t agm-herdr-update); TMPS+=("$BODY")
   printf '%s' "$BRIEF"
   printf '\n---\n本機 `herdr --version`：%s ｜ 最新穩定版（gh release list -R %s）：%s\nCHANGELOG：%s\n' \
     "$INSTALLED_LINE" "$HERDR_REPO" "$LATEST_TAG" "$CHANGELOG_URL"
-  printf '\n--- 升級後強制驗收 ---\n核准並完成 herdr 維護窗口後，依 scripts/ops/herdr-upgrade-runbook.md：從 herdr pane 跑 herdr-lan-check.sh。必須用新 binary 的 codesign -dv identifier 查本機網路授權表，再用 node 連區網；Apple 內建 nc、python3、curl 不可代驗。任何失敗或 node 缺少都停下，回報「需要使用者授權本機網路」，不要靠重啟硬試。\n'
+  printf '\n--- 升級後強制驗收 ---\n核准並完成 herdr 維護窗口後，依 scripts/ops/herdr-upgrade-runbook.md：從 herdr pane 跑 `bash scripts/ops/herdr-lan-check.sh /opt/homebrew/bin/herdr`（第一個參數一定要寫真 binary 的路徑；不帶參數在 bot pane 裡會抓到沒簽章的 per-bot shim）。必須用新 binary 的 codesign -dv identifier 查本機網路授權表，再用 node 連區網；Apple 內建 nc、python3、curl 不可代驗。任何失敗或 node 缺少都停下，回報「需要使用者授權本機網路」，不要靠重啟硬試。\n'
 } > "$BODY"
 
 # 旗標是 `--request-id`（不是 --client-request-id）：拼錯 argparse 直接 exit 2
