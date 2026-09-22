@@ -255,26 +255,20 @@ am_lease_lost() {
     return 0
 }
 
-# 可以被 TERM 打斷的 `sleep`：`_release` 殺守衛（子 shell）時，它手上的 `sleep N` 不會變成孤兒（行程數是全機共用的資源，
-# 每次 cargo 都留一顆 `sleep 60` 的孤兒，很快就把機器的行程表塞滿——issue #151）。
+# 守衛的睡覺：**前景一秒一秒睡**，每一秒看一次「shim 還要不要我」（`_state` 目錄還在不在）。
 #
-# **TERM 落在 fork 與記下 pid 之間也不能留孤兒**（issue #189）：`sleep &` 之後、`_ls_pid=$!` 之前的縫裡收到 TERM，handler 不知道要殺誰、
-# 守衛一退出那顆 `sleep` 就成了孤兒（快速跑完的 cargo 讓 `_release` 在守衛才剛起來時就送 TERM，負載一高就踩到；實測 480 次快跑留下 2～3 顆）。
-# 所以縫裡（`_ls_gap`）handler 只記下 `_lw_term`、不退出，縫過了再由這裡殺掉手上的 sleep 並退出；縫外 handler 直接殺 `_ls_pid` 並退出。
-# **殺它要用 KILL**：剛 fork 出來、還沒 exec 的 sleep 仍帶著守衛的 TERM handler，TERM 會被那個 handler 吞掉（只設旗標）、exec 之後就沒了，
-# sleep 照睡 60 秒；KILL 不能被接住。sleep 沒有任何東西要收尾。
+# 以前是背景 `sleep N &` 加 `wait`、靠 `_release` 的 TERM 叫醒（issue #151、#189）：`sleep 60` 的孤兒要靠一大串補丁（TERM 落在 fork 與記下 pid
+# 之間、剛 fork 出來的 sleep 帶著守衛的 handler…），整樹高負載下仍然每一萬次快跑漏一顆——**TERM 本身會掉**：訊號落在守衛剛起來、
+# 還在初始化的那一瞬間，或落在 `wait` 剛要睡下去之前（經典的 lost wakeup，bash 3.2／bash 5／dash 都實測會漏），守衛從此不知道自己被叫過，
+# 帶著 `sleep 60` 活到天荒地老。TERM 只能當「快一點結束」的提示，不能是唯一的機制：`_release` 一定會把 `$_state` 整個刪掉，
+# 守衛每秒看到目錄不在就自己結束，最壞多活一秒；前景的 `sleep 1` 沒有孤兒問題（守衛死了它自己一秒內就結束）。
 am_lease_sleep() {
-    _ls_pid=""
-    _ls_gap=1
-    sleep "$1" &
-    _ls_pid=$!
-    _ls_gap=""
-    if [ -n "$_lw_term" ]; then
-        kill -KILL "$_ls_pid" 2>/dev/null
-        exit 0
-    fi
-    wait "$_ls_pid"
-    _ls_pid=""
+    _ls_i=0
+    while [ "$_ls_i" -lt "$1" ]; do
+        sleep 1
+        _ls_i=$((_ls_i + 1))
+        [ -d "$_state" ] || exit 0
+    done
 }
 
 # 背景執行：續約，並判斷租約還在不在。
@@ -288,15 +282,14 @@ am_lease_sleep() {
 am_lease_watch() {
     _lw_shim=$$
     trap ':' HUP
-    _ls_pid=""
-    _ls_gap=""
-    _lw_term=""
-    trap 'if [ -n "$_ls_gap" ]; then _lw_term=1; else [ -z "$_ls_pid" ] || kill -KILL "$_ls_pid" 2>/dev/null; exit 0; fi' TERM
+    # TERM 只是「快一點結束」的提示（會掉，見 am_lease_sleep）；前景的 `sleep 1` 結束後才會處理，最多一秒。
+    trap 'exit 0' TERM
     # 續約請求的逾時：隔多久續一次的一半，夾在 1～5 秒（正常的 TTL 下就是 5 秒）。
     _lw_m=$((_renew_every / 2))
     [ "$_lw_m" -ge 1 ] || _lw_m=1
     [ "$_lw_m" -le 5 ] || _lw_m=5
     while :; do
+        [ -d "$_state" ] || return 0
         am_lease_sleep "$_renew_every"
         # shim 本身死了（被 SIGKILL，`trap` 沒機會跑）：沒有人會來放名額。cargo 還在跑就繼續續約
         # （它還在用容量，租約不能先掉）；cargo 也沒了就把名額放掉、收掉狀態目錄、自己結束——
@@ -978,7 +971,7 @@ esac"#
                 }
                 std::thread::sleep(std::time::Duration::from_millis(20));
             };
-            self.assert_group_gone(pgid);
+            self.assert_group_gone_noting(pgid, &format!("shim 的結束狀態：{status:?}\nshim 的 stderr：{}", std::fs::read_to_string(&err_path).unwrap_or_default()));
             (
                 std::fs::read_to_string(&out_path).unwrap_or_default(),
                 std::fs::read_to_string(&err_path).unwrap_or_default(),
@@ -1004,6 +997,11 @@ esac"#
 
         /// 這個 process group 在幾秒內要一個行程都不剩；剩下的補殺並讓測試失敗（issue #151 的回歸）。
         fn assert_group_gone(&self, pgid: i32) {
+            self.assert_group_gone_noting(pgid, "");
+        }
+
+        /// 同上；失敗訊息多帶 `note`（shim 是怎麼結束的：被訊號殺掉跟自己退出，原因完全不同）與那一組的完整 `ps`。
+        fn assert_group_gone_noting(&self, pgid: i32, note: &str) {
             // 正常情況下一兩個 50ms 就空了；上限放寬到 40 秒是因為本機常常同時有很多人在編譯（行程表塞滿時 fork 都會失敗），
             // 只有真的留下行程的失敗路徑才會等滿（壓測 40 個並行 shim，最慢的要 7 秒才起來）。
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(40);
@@ -1013,8 +1011,9 @@ esac"#
                     return;
                 }
                 if std::time::Instant::now() > deadline {
+                    let ps = Command::new("/bin/ps").args(["-o", "pid,ppid,pgid,stat,etime,wchan,command", "-g", &pgid.to_string()]).output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
                     self.kill_group_if_ours(pgid);
-                    panic!("shim 結束後還留下行程（孤兒）：{left:?}");
+                    panic!("shim 結束後還留下行程（孤兒）：{left:?}\n{note}\n{ps}");
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
@@ -1652,6 +1651,11 @@ esac
     }
 
     /// 這台機器上有的 shell（沒有的略過）。macOS 的 `/bin/sh`／`/bin/bash` 是 3.2——腳本改動要在那個版本也驗。
+    /// 守衛測試每個執行緒跑幾次；`AM_TEST_GUARD_ITERS` 可以拉高（壓測找極低機率的競態用）。
+    fn guard_iterations() -> usize {
+        std::env::var("AM_TEST_GUARD_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(60)
+    }
+
     fn shells() -> Vec<&'static str> {
         ["/bin/sh", "/bin/bash", "/bin/dash"].into_iter().filter(|p| std::path::Path::new(p).exists()).collect()
     }
@@ -1898,7 +1902,11 @@ esac"#,
         let _ = shim.wait();
         let renews = || std::fs::read_to_string(s.dir.join("curl.log")).unwrap().matches("/renew").count();
         let before = renews();
-        std::thread::sleep(std::time::Duration::from_millis(600));
+        // 等下一次續約這個**事件**（守衛一秒一秒睡，虛擬時鐘下一次續約要幾秒真時間）；30 秒只是放棄的上限。
+        let up = std::time::Instant::now();
+        while renews() <= before && up.elapsed() < std::time::Duration::from_secs(30) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
         assert!(renews() > before, "cargo 還活著：續約要繼續（它還在用容量）");
         assert!(!group_members(group).is_empty(), "續約迴圈還在");
 
@@ -2006,7 +2014,7 @@ esac"#,
                         let s = Sandbox::new();
                         s.install_lease_curl(180); // renew 間隔 60 秒：守衛的 `sleep 60`
                         let env = lease_env(&s);
-                        for i in 0..60 {
+                        for i in 0..guard_iterations() {
                             // 預設的假 cargo 立刻退 0：租約才剛拿到、守衛才剛起來。
                             let (_, err, rc) = s.run_in(Some(sh), &as_refs(&env), &["check"]);
                             assert_eq!(rc, 0, "{sh} 第 {i} 次：{err}");
