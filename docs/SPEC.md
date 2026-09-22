@@ -1625,6 +1625,7 @@ AGM 的運維職責以本節為準，不靠任何 bot 的記憶。persona 是同
   6. 60 秒內確認 `agm supervisor` 不是 stopped、running 名單沒少、沒有 bot 被無故關 pane。任一項不對用 `.bak` 回滾並回報。
   期間不要同時觸發 claude 更新批次重啟。
 - 動 migration 的版本：上線前對正式 DB 的副本跑一次 migrate，重建申請附 DB 備份步驟。
+- **一次性維運 job 不能用 `launchctl submit`**：submitted job 會被 launchd 推定為 `KeepAlive`，即使腳本 exit 0 也會重啟；2026-09-22 曾因此讓 Herdr 每約 17 秒全量重啟一次，CLI 在 shutdown window 回 `server_unavailable`。一次性工作直接以前景／既有 ops 腳本執行；若非用 launchd 不可，必須使用明寫 `KeepAlive=false` 的 plist、singleton lock，且完成後 `bootout`。Herdr 維運不得以廣域 `pkill -f 'herdr.*server'` 掃掉不在目標內的 session。驗收除 API health 外，還要確認 helper label 不存在，等待至少 20 秒核對 server PID 穩定，再實際做一次 `herdr pane read`。
 
 ### 18.2a 已安裝的 `bin/agm` 跟著換版；ops 腳本仍要手動裝
 

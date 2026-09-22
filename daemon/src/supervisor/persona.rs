@@ -185,4 +185,16 @@ mod tests {
             "the persona should still be embedded; if that changed, update BUILD_INPUTS and this test. found: {found:?}"
         );
     }
+
+    /// This guard was added after a one-shot `launchctl submit` job was inferred as KeepAlive
+    /// and restarted every Herdr session roughly every 17 seconds. The operational rule must
+    /// remain in the text actually embedded into AGM, not only in the prose spec.
+    #[test]
+    fn supervisor_persona_forbids_keepalive_one_shot_jobs() {
+        let persona = crate::supervisor::setup::persona_body();
+        assert!(persona.contains("禁止用 `launchctl submit`"));
+        assert!(persona.contains("KeepAlive=false"));
+        assert!(persona.contains("等待至少 20 秒"));
+        assert!(persona.contains("`herdr pane read` 成功"));
+    }
 }
