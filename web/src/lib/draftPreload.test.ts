@@ -104,6 +104,21 @@ test('「重新讀取」換一份新的；舊持有者放掉不會把新的丟�
   assert.equal(s1.calls, 1)
 })
 
+test('restart 後舊 handle 與新 handle 都能釋放新 entry 的引用', async () => {
+  const s1 = starter()
+  const old = acquirePreload('b1:q', s1.start)
+  const s2 = starter()
+  const fresh = restartPreload('b1:q', s2.start)
+
+  old.release()
+  await tick()
+  assert.ok(hasPreload('b1:q'), '新 handle 還持有時要保留 entry')
+
+  fresh.release()
+  await tick()
+  assert.equal(hasPreload('b1:q'), false, '最後一個 handle 放掉後要清除新 entry')
+})
+
 test('不同 bot 或不同問卷各跑各的', () => {
   const s = starter()
   acquirePreload('b1:q1', s.start)

@@ -11,10 +11,15 @@ export type StartPreload = (onProgress: Progress) => Promise<Draft | null>
 
 interface Entry {
   job: Promise<Draft | null>
-  refs: number
+  refState: RefState
   listeners: Set<Progress>
   last: { done: number; total: number } | null
   drop: ReturnType<typeof setTimeout> | null
+}
+
+interface RefState {
+  count: number
+  current: Entry | null
 }
 
 export interface PreloadHandle {
@@ -24,21 +29,25 @@ export interface PreloadHandle {
 
 const entries = new Map<string, Entry>()
 
-function begin(key: string, start: StartPreload): Entry {
-  const entry: Entry = { job: Promise.resolve(null), refs: 0, listeners: new Set(), last: null, drop: null }
+function begin(key: string, start: StartPreload, refState: RefState = { count: 0, current: null }): Entry {
+  const entry: Entry = { job: Promise.resolve(null), refState, listeners: new Set(), last: null, drop: null }
+  refState.current = entry
   entry.job = start((done, total) => {
     entry.last = { done, total }
     for (const l of entry.listeners) l(done, total)
   })
   void entry.job.then((d) => {
-    if (d === null && entries.get(key) === entry) entries.delete(key)
+    if (d === null && entries.get(key) === entry) {
+      entries.delete(key)
+      if (refState.current === entry) refState.current = null
+    }
   })
   entries.set(key, entry)
   return entry
 }
 
 function attach(key: string, entry: Entry, onProgress?: Progress): PreloadHandle {
-  entry.refs += 1
+  entry.refState.count += 1
   if (entry.drop !== null) {
     clearTimeout(entry.drop)
     entry.drop = null
@@ -54,11 +63,17 @@ function attach(key: string, entry: Entry, onProgress?: Progress): PreloadHandle
       if (released) return
       released = true
       if (onProgress) entry.listeners.delete(onProgress)
-      entry.refs -= 1
-      if (entry.refs > 0) return
-      entry.drop = setTimeout(() => {
-        entry.drop = null
-        if (entry.refs === 0 && entries.get(key) === entry) entries.delete(key)
+      const refState = entry.refState
+      refState.count -= 1
+      if (refState.count > 0) return
+      const current = refState.current
+      if (!current) return
+      current.drop = setTimeout(() => {
+        current.drop = null
+        if (refState.count === 0 && refState.current === current && entries.get(key) === current) {
+          entries.delete(key)
+          refState.current = null
+        }
       }, 0)
     },
   }
@@ -73,15 +88,17 @@ export function acquirePreload(key: string, start: StartPreload, onProgress?: Pr
 export function restartPreload(key: string, start: StartPreload, onProgress?: Progress): PreloadHandle {
   const old = entries.get(key)
   if (old?.drop !== null && old?.drop !== undefined) clearTimeout(old.drop)
-  const entry = begin(key, start)
-  // 搬計數：舊持有者放掉時不該把新的丟掉。
-  if (old) entry.refs = old.refs
+  // Handles from older jobs still release into this shared lifecycle.
+  const entry = begin(key, start, old?.refState)
   return attach(key, entry, onProgress)
 }
 
 /** 測試用。 */
 export function resetPreloads() {
-  for (const e of entries.values()) if (e.drop !== null) clearTimeout(e.drop)
+  for (const e of entries.values()) {
+    if (e.drop !== null) clearTimeout(e.drop)
+    e.refState.current = null
+  }
   entries.clear()
 }
 
