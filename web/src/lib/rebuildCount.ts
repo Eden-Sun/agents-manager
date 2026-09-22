@@ -32,8 +32,7 @@ export const KICK_REQUESTER = 'daemon-update-kick'
 /** 還在等的那幾筆（新的在前），已去重。`since` = 上次上線時間（RFC3339），`null` = 不濾。`now` 給測試用。 */
 export function pendingRebuilds(rows: RebuildRequest[], since?: string | null, now: number = Date.now()): RebuildRequest[] {
   const cut = since ? Date.parse(since) : NaN
-  const seen = new Set<string>()
-  const out: RebuildRequest[] = []
+  const eligible: RebuildRequest[] = []
   for (const r of rows) {
     if (r.status !== 'pending' && r.status !== 'approved') continue
     // 過期的沒有人會拿去 acquire 窗口，腳本也不算它。時間壞掉的留著（跟下面同一個取捨）。
@@ -47,12 +46,29 @@ export function pendingRebuilds(rows: RebuildRequest[], since?: string | null, n
       const at = Date.parse(r.created_at)
       if (!Number.isNaN(at) && at <= cut) continue
     }
-    const key = `${r.requester} ${r.target_commit}`
-    if (seen.has(key)) continue
-    seen.add(key)
-    out.push(r)
+    eligible.push(r)
   }
-  return out.sort((a, b) => b.created_at.localeCompare(a.created_at))
+
+  // 先依實際時間排序，再去重：同 requester／commit 的最新申請要勝過較早但先到的資料列。
+  // 壞時間仍保留並排在可解析時間之後；兩筆都壞時沿用字串順序。
+  eligible.sort((a, b) => {
+    const aTime = Date.parse(a.created_at)
+    const bTime = Date.parse(b.created_at)
+    const aValid = !Number.isNaN(aTime)
+    const bValid = !Number.isNaN(bTime)
+    if (aValid && bValid) return bTime - aTime
+    if (aValid) return -1
+    if (bValid) return 1
+    return b.created_at.localeCompare(a.created_at)
+  })
+
+  const seen = new Set<string>()
+  return eligible.filter((r) => {
+    const key = `${r.requester} ${r.target_commit}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
 }
 
 /** 最早那筆還在等的申請等了幾分鐘（沒有、或時間壞掉就是 0）。`now` 給測試用。 */
