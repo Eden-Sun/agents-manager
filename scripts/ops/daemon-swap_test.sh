@@ -311,6 +311,17 @@ teardown
 check "啟動器用 setsid 脫離" "os.setsid()" "$HERE/daemon-start.py"
 check "啟動器會 fork，父行程先結束（job 才不會被 remove 殺到）" "os.fork()" "$HERE/daemon-start.py"
 check "啟動器丟掉 AM_DATA_DIR 等 pane 變數" "AM_DATA_DIR" "$HERE/daemon-start.py"
+# 真的跑一次啟動器：假 binary 把環境倒出來。launchd 給的最小 PATH 要被換成含 Homebrew 的那組，AM_* 要被丟掉。
+STARTER_ROOT=$(mktemp -d)
+mkdir -p "$STARTER_ROOT/target/release"
+printf '%s\n' '#!/bin/sh' 'env > "$STARTER_ENV_DUMP"' > "$STARTER_ROOT/target/release/agents-managerd"
+chmod +x "$STARTER_ROOT/target/release/agents-managerd"
+STARTER_ENV_DUMP="$STARTER_ROOT/env" AM_DATA_DIR=/should/be/dropped PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME="$STARTER_ROOT/home" \
+  /usr/bin/python3 "$HERE/daemon-start.py" "$STARTER_ROOT" "$STARTER_ROOT/daemon.log"
+for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$STARTER_ROOT/env" ] && break; sleep 0.2; done
+check "啟動器帶出的 PATH 含 /opt/homebrew/bin" "^PATH=$STARTER_ROOT/home/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin$" "$STARTER_ROOT/env"
+check_no "啟動器真的丟掉 AM_DATA_DIR" "^AM_DATA_DIR=" "$STARTER_ROOT/env"
+rm -rf "$STARTER_ROOT"
 
 
 # 12. 3b：herdr pane read 讀不到 pane（pane 換過、或被寫死舊 id）→ exit 3，binary 不能被動。
