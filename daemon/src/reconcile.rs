@@ -409,6 +409,18 @@ async fn refresh_child_kind(app: &Arc<App>, bot: &mut db::Bot, pane_id: &str, ki
 /// 只有**確定沒在維護**才可以：herdr 重啟的那幾分鐘正是所有 pane 同時消失的時候，這時讀不到維護狀態就當成
 /// 「沒在維護」，子 bot 被軟刪，pane 回來之後也接不回原對話與血緣。讀不到＝這一輪留著、晚一點再看。
 async fn may_retire_child(app: &Arc<App>, host: &str, bot: &db::Bot) -> bool {
+    match crate::child_reconcile_safety::retirement_block(&app.db, &bot.id).await {
+        Ok(Some(reason)) => {
+            tracing::info!(host, bot = %bot.name, reason, "reconcile: child kept by a persisted restore/restart guard");
+            return false;
+        }
+        Ok(None) => {}
+        Err(e) => {
+            tracing::warn!(host, bot = %bot.name, error = ?e, "reconcile: cannot read child retirement guards; child kept this pass");
+            schedule_deferred_pass(app, host);
+            return false;
+        }
+    }
     match crate::herdr_maintenance::active(app).await {
         Ok(None) => true,
         Ok(Some(_)) => {

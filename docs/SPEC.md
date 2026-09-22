@@ -1209,7 +1209,7 @@ hint 可用，退回規則 2／3——這條沒有、也不打算改掉子代 ho
 子 bot `name`：有前綴取字尾，否則用 herdr agent 名（去空白與 `@,:;`、截 32 字）。字尾在專案裡已被別人用掉時改存完整 herdr agent 名（herdr 保證唯一）。
 每顆認領各自成敗：失敗只 log 跳過，不中止整台主機的對帳。
 
-**子 agent 退役**：子 agent 只活在它的 pane 裡，pane 沒了就退役（`bots.deleted_at`，對話保留）。**還原**走既有的 `POST /api/bots/{id}/restore`（API §10.4a；子 agent 只清 `deleted_at`、不開 run；CLI `agm bot restore <id>`），不直接改 DB（2026-09-22：herdr 全重啟後 pvw／insurer2 被退役，父 bot 只能 UPDATE 正式 DB）。**子 agent 的 `start`／`restart` 一律 409 `child_restart_forbidden`**：pane 是父 bot 用 herdr 開的，daemon 不代開、也不原地重啟（對子 agent 下 restart 而 pane 已不在，反而讓 reconcile 把它退役）；一鍵重啟（§6.9）的內部原地重啟不受影響。兩條路都要接：reconcile 發現 run 在、agent 不見；
+**子 agent 退役**：子 agent 只活在它的 pane 裡，pane 沒了就退役（`bots.deleted_at`，對話保留）。**還原**走既有的 `POST /api/bots/{id}/restore`（API §10.4a；子 agent 只清 `deleted_at`、不開 run；CLI `agm bot restore <id>`），不直接改 DB（2026-09-22：herdr 全重啟後 pvw／insurer2 被退役，父 bot 只能 UPDATE 正式 DB）。**子 agent 的 `start`／`restart` 一律 409 `child_restart_forbidden`**：pane 是父 bot 用 herdr 開的，daemon 不代開、也不原地重啟（對子 agent 下 restart 而 pane 已不在，反而讓 reconcile 把它退役）；一鍵重啟（§6.9）也跳過子 agent（`skipped` 理由 `child`，2026-09-22）。兩條路都要接：reconcile 發現 run 在、agent 不見；
 以及 `pane_closed` 事件**先**結束 run、reconcile 後到——bot 沒有 active run、herdr 清單找不到它、且至少有一個已結束的 run，一樣退役。
 herdr 還列著這個 agent（pane 被搬走）的不算，會被重新收編。`pane_closed` 結束的是子 agent 的 run 時，2 秒後自己排一次 reconcile。
 
@@ -1766,7 +1766,11 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   與 `POST /bots/:id/restart` 的差別只有這個旗標（那條是重新開始）。
   - **沒寫過 transcript 的 session 不續接**：沒被 prompt 過的 claude `--resume` 會 `No conversation found` 立刻退出。本機 hook 回報的 `transcript_path` 不存在時改開新對話
     （`member_context_lost("transcript_missing")`）。
-  - **子 agent**不能照一般路徑重開 pane，改走 `lifecycle::restart_child_in_pane`：送 `ctrl+c` 讓 agent 退出、**不關 pane**，同 agent 名在同 pane `agent.start`，
+  - **子 agent 一律跳過**（`skipped` 理由 `child`，2026-09-22）：pane 是父 bot 用 herdr 開的，由父 bot 重開。2026-09-12 曾把子 agent 納入原地重啟，
+    2026-09-22 的 2.1.280 rollout 對 pvd／rh 原地重啟時 herdr 回 `agent_name_taken`（舊 agent 仍掛在原 pane、Done），接著 reconcile 把兩顆退役軟刪——
+    這條路的失敗模式是「弄丟子 agent」，不值得。輪到它時重讀一次 bot 列，計畫之後才被認領成 child 的也跳過。
+    `lifecycle::restart_child_in_pane` 保留但批次不再呼叫；它遇到 `agent_name_taken` 時把新 run 當成收編記 `running`、回 409 `agent_name_taken`、不留成「沒有 active run」（那會被 reconcile 退役）。
+  - （舊）子 agent 原地重啟的做法，供 `restart_child_in_pane` 參考：送 `ctrl+c` 讓 agent 退出、**不關 pane**，同 agent 名在同 pane `agent.start`，
     帶 `--resume <上一個 session>`、bots 上的模型／強度與 `auto_approve` 旗標（pane shell 裡的帳號與 shim 不變）。過程中 pane 不見 → run 標 exited 不重開。
     agent 10 秒內沒退出 → 回 502、不動 pane，run 從 `stopping` **放回 `running`**（agent 還在）。單顆 `POST /api/bots/{id}/restart`／`start` 對子 agent **不走**這條、直接 409 `child_restart_forbidden`（§6.5a，2026-09-22）；原地重啟只給一鍵重啟用。
     舊 run 的 `running → stopping → stopped` 與新 run 的 `starting → running` 走 §6.4 stop 同一套 CAS（#146）：`stopping` 寫不進去就不動子 agent；

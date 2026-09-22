@@ -1064,6 +1064,14 @@ pub(crate) async fn restart_start(app: &Arc<App>, bot_id: &str, opts: StartOpts)
     }
 }
 
+/// herdr `agent.start` 回「名字被占」：原 pane 的舊 agent 還在（狀態 Done、名字沒釋放）。
+fn agent_name_taken(e: &anyhow::Error) -> bool {
+    if let Some(h) = e.downcast_ref::<crate::herdr::HerdrError>() {
+        return h.code == "agent_name_taken";
+    }
+    e.to_string().contains("agent_name_taken")
+}
+
 /// 子 agent 原地重啟（SPEC §6.5a / §6.9）：在它自己的 pane 裡 `ctrl+c` 收掉、**不關 pane**，
 /// 同名 `agent.start --resume <上一個 session>`。pane 是父 agent 開的，且 shell 裡的環境
 /// （`CLAUDE_CONFIG_DIR`、shim）daemon 重建不了。沒注入 hook，回覆照舊走終端快照。
@@ -1092,6 +1100,12 @@ pub async fn restart_child_in_pane_with(app: &Arc<App>, bot_id: &str, require_id
     let host = db::bot_host(&app.db, bot_id).await.map_err(up)?;
     let client = client_for_run(app, &run).await?;
     let agent = run.agent_name.clone().unwrap_or_else(|| bot.name.clone());
+
+    // A concurrent reconcile can observe the gap after the old agent exits but before agent.start
+    // replies. Guard that hand-off; agent_name_taken below upgrades the temporary guard permanently.
+    crate::child_reconcile_safety::record_retirement_grace(&app.db, bot_id)
+        .await
+        .map_err(|e| LcError::Upstream(format!("cannot record child restart grace: {e:#}")))?;
 
     // 鎖裡看過閒置、還沒記 `stopping` 的那一瞬（測試在這裡讓使用者剛好開始打字）。
     #[cfg(test)]
@@ -1239,7 +1253,21 @@ pub async fn restart_child_in_pane_with(app: &Arc<App>, bot_id: &str, require_id
                 tracing::debug!(bot = %bot.name, attempt, error = %e, "子 agent 的 pane 還沒回到可用的 shell");
                 tokio::time::sleep(Duration::from_millis(300 + 200 * u64::from(attempt))).await;
             }
+            Err(e) if agent_name_taken(&e) => {
+                // 舊 agent 還掛在原 pane（Done、名字沒釋放）：agent 其實還在，新 run 當成收編、記 running；
+                // 不能留成「沒有 active run」——那樣 reconcile 會把子 agent 退役軟刪（2026-09-22 rollout：pvd／rh）。
+                crate::child_reconcile_safety::hold_after_name_taken(&app.db, bot_id, &agent)
+                    .await
+                    .map_err(|write| LcError::Upstream(format!("herdr returned agent_name_taken, and the child retirement reason could not be recorded: {write:#}")))?;
+                let _ = super::run_state::transition(&app.db, &run_id, &["starting"], "running", None).await;
+                app.emit_bot_status(bot_id).await;
+                tracing::warn!(bot = %bot.name, run = %run_id, "子 agent 重啟：herdr 說名字還被原 pane 的舊 agent 占著；當作沒重啟、保留 bot");
+                return Err(LcError::conflict("agent_name_taken", json!({"bot_id": bot_id, "run_id": run_id, "message": "舊 agent 還在原 pane，沒有重啟；由父 bot 用 herdr 重開"})));
+            }
             Err(e) => {
+                crate::child_reconcile_safety::clear_retirement_grace(&app.db, bot_id)
+                    .await
+                    .map_err(|write| LcError::Upstream(format!("child restart failed and its grace could not be cleared: {write:#}")))?;
                 mark_run_exited(app, &run_id, "子 agent 重啟時 agent.start 失敗").await;
                 app.emit_bot_status(bot_id).await;
                 return Err(up(e));
@@ -1271,6 +1299,12 @@ pub async fn restart_child_in_pane_with(app: &Arc<App>, bot_id: &str, require_id
                 e,
             ));
         }
+    }
+    if let Err(e) = crate::child_reconcile_safety::clear_after_successful_restart(&app.db, bot_id).await {
+        tracing::warn!(bot = bot_id, error = %e, "child restart succeeded but its prior agent_name_taken hold could not be cleared");
+    }
+    if let Err(e) = crate::child_reconcile_safety::clear_retirement_grace(&app.db, bot_id).await {
+        tracing::warn!(bot = bot_id, error = %e, "child restart succeeded but its hand-off grace could not be cleared");
     }
     let until = [AgentStatus::Idle, AgentStatus::Done, AgentStatus::Blocked];
     if let Err(e) = client.agent_wait(&agent, &until, 60_000).await {

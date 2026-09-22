@@ -22,6 +22,7 @@ mod changelog;
 mod claude_review;
 mod codex_update;
 mod child_alerts;
+mod child_reconcile_safety;
 mod codex_live;
 mod config;
 mod capture;
