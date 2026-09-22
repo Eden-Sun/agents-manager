@@ -796,6 +796,8 @@ rustup 的 minimal profile 不含它——UI 據此提示「按安裝補上」�
 
 - 拿到：`200 {"granted":true,"token","expires_at","cargo_jobs","lease_ttl_secs"}`。同一個 `holder` 對已經握著、
   沒過期的名額重 call 是幂等的，回同一份憑證。
+- Bot token 只能重用該 bot 自己的 `holder`；若該字串已屬於另一顆 bot（或人工呼叫），回 `403`
+  `{"reason":"holder_bot_mismatch"}`，不會交出名額憑證或改動排隊位置。`X-AM-Token` 是人工／管理 bypass。
 - 額滿或還沒輪到：`200 {"granted":false,"active","max_concurrent","since","retry_after_secs"}`——**這是正常的等待
   狀態，不是錯誤**，回 200 不是 4xx／5xx；呼叫端照 `retry_after_secs` 再問一次。**FIFO**（SPEC §6.5g）：名額空出
   來時只給排隊排最早的 holder（`since` 最早，同值比 `holder`），就算這一刻剛好也在問、名額也剛好空著一樣要等。

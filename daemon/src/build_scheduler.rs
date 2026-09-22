@@ -63,6 +63,7 @@ const SWEEP_EVERY: Duration = Duration::from_secs(30);
 #[derive(Debug, Clone, sqlx::FromRow)]
 struct SlotRow {
     token: String,
+    bot_id: Option<String>,
     status: String,
     since: String,
     expires_at: Option<String>,
@@ -73,6 +74,8 @@ struct SlotRow {
 pub enum Acquired {
     Granted { token: String, expires_at: String },
     Waiting { active: usize, since: String },
+    /// A bot tried to reuse a holder row owned by another bot (or by a manual caller).
+    HolderOwnedByAnotherBot,
 }
 
 fn now_str() -> String {
@@ -138,10 +141,18 @@ pub async fn acquire(app: &Arc<App>, holder: &str, bot_id: Option<&str>, purpose
     reap_expired_held(&app.db, &now).await?;
     reap_stale_waiting(&app.db).await?;
 
-    let existing: Option<SlotRow> = sqlx::query_as("SELECT token, status, since, expires_at FROM build_slots WHERE holder = ?")
+    let existing: Option<SlotRow> = sqlx::query_as("SELECT token, bot_id, status, since, expires_at FROM build_slots WHERE holder = ?")
         .bind(holder)
         .fetch_optional(&app.db)
         .await?;
+    // `holder` comes from the caller, so it cannot establish identity by itself. Otherwise any
+    // authenticated bot can repeat another bot's holder and recover its live lease token, or
+    // overwrite its queued row. UI-token callers are the explicit manual/admin bypass.
+    if let (Some(caller_bot_id), Some(row)) = (bot_id, existing.as_ref()) {
+        if row.bot_id.as_deref() != Some(caller_bot_id) {
+            return Ok(Acquired::HolderOwnedByAnotherBot);
+        }
+    }
     // 已經握著且沒過期：把同一份憑證還回去，重call（例如逾時後重問一次）安全。FIFO 不擋自己已經有的名額。
     if let Some(row) = &existing {
         if row.status == "held" {
@@ -208,7 +219,7 @@ pub async fn renew(app: &Arc<App>, holder: &str, token: &str) -> Result<Result<S
     let _g = app.build_slot_lock.lock().await;
     let cfg = app.cfg.get().await.build;
     let now = now_str();
-    let row: Option<SlotRow> = sqlx::query_as("SELECT token, status, since, expires_at FROM build_slots WHERE holder = ?")
+    let row: Option<SlotRow> = sqlx::query_as("SELECT token, bot_id, status, since, expires_at FROM build_slots WHERE holder = ?")
         .bind(holder)
         .fetch_optional(&app.db)
         .await?;
@@ -388,6 +399,11 @@ pub async fn post_acquire(State(app): State<Arc<App>>, headers: HeaderMap, Form(
             let cfg = app.cfg.get().await.build;
             Ok(Json(json!({"granted": false, "active": active, "max_concurrent": cfg.max_concurrent(), "since": since, "retry_after_secs": 5})))
         }
+        Acquired::HolderOwnedByAnotherBot => Err(LcError::Forbidden(json!({
+            "error": "forbidden",
+            "reason": "holder_bot_mismatch",
+            "message": "a bot may only reuse its own build slot holder",
+        }))),
     }
 }
 
@@ -415,6 +431,7 @@ pub async fn post_release(State(app): State<Arc<App>>, Form(body): Form<ReleaseI
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::response::IntoResponse;
     use crate::testing as tt;
 
     async fn a_bot(env: &tt::Env, hook_token: &str) -> String {
@@ -714,5 +731,82 @@ mod tests {
             post_acquire(State(app.clone()), h, Form(AcquireIn { holder: "b3".into(), bot_id: None, purpose: "".into(), host: "local".into() })).await,
             Err(LcError::Forbidden(_))
         ));
+    }
+
+    /// A holder string is caller-chosen and must not let one bot recover another bot's lease token
+    /// or take over its FIFO position.
+    #[tokio::test]
+    async fn a_bot_cannot_reuse_another_bots_build_slot_holder() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        set_max_concurrent(&app, 1).await;
+        let owner_id = a_bot(&env, "owner-token").await;
+        let attacker_id = a_bot(&env, "attacker-token").await;
+
+        let owner = post_acquire(
+            State(app.clone()),
+            auth_headers(Some("owner-token"), None),
+            Form(AcquireIn { holder: "shared-holder".into(), bot_id: Some(owner_id.clone()), purpose: "owner".into(), host: "local".into() }),
+        )
+        .await
+        .unwrap();
+        let owner_token = owner.0["token"].as_str().unwrap().to_string();
+
+        let denied = post_acquire(
+            State(app.clone()),
+            auth_headers(Some("attacker-token"), None),
+            Form(AcquireIn {
+                holder: "shared-holder".into(),
+                bot_id: Some(attacker_id.clone()),
+                purpose: "take owner lease".into(),
+                host: "local".into(),
+            }),
+        )
+        .await
+        .unwrap_err()
+        .into_response();
+        assert_eq!(denied.status(), axum::http::StatusCode::FORBIDDEN);
+
+        // The owner still gets the same secret; the attacker did not replace the row.
+        let owner_again = post_acquire(
+            State(app.clone()),
+            auth_headers(Some("owner-token"), None),
+            Form(AcquireIn { holder: "shared-holder".into(), bot_id: Some(owner_id.clone()), purpose: "owner".into(), host: "local".into() }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(owner_again.0["token"].as_str(), Some(owner_token.as_str()));
+
+        // The same check protects queued rows: a bot cannot replace another bot's saved queue entry.
+        release(&app, "shared-holder", &owner_token).await.unwrap();
+        let blocker = acquire(&app, "blocker", None, "test", "local").await.unwrap();
+        let Acquired::Waiting { .. } = acquire(&app, "queued-holder", Some(&owner_id), "owner", "local").await.unwrap() else {
+            panic!("the owner's second holder should wait")
+        };
+        let denied = post_acquire(
+            State(app.clone()),
+            auth_headers(Some("attacker-token"), None),
+            Form(AcquireIn {
+                holder: "queued-holder".into(),
+                bot_id: Some(attacker_id),
+                purpose: "take queue position".into(),
+                host: "local".into(),
+            }),
+        )
+        .await
+        .unwrap_err()
+        .into_response();
+        assert_eq!(denied.status(), axum::http::StatusCode::FORBIDDEN);
+
+        let queued_owner: Option<String> = sqlx::query_scalar("SELECT bot_id FROM build_slots WHERE holder = 'queued-holder'")
+            .fetch_optional(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(queued_owner.as_deref(), Some(owner_id.as_str()));
+        if let Acquired::Granted { token, .. } = blocker {
+            release(&app, "blocker", &token).await.unwrap();
+        } else {
+            panic!("the blocker should hold the only slot")
+        }
     }
 }
