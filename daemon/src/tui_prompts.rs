@@ -172,6 +172,29 @@ pub fn is_switch_model_dialog(screen: &str) -> bool {
     titled && line_starts_with(&tail, "1. yes, switch to") && line_starts_with(&tail, "2. no, go back")
 }
 
+/// Claude Code 2.1.278 首次啟動的「Auto mode」推銷框（2026-09-22 build child 卡在這裡半小時：herdr 判 idle、
+/// 交辦 queued 不送，排隊逾時被撤回、租約過期）。兩個選項各自成行才算；同 [`is_switch_model_dialog`]，
+/// 輸入列空著就不是框。第二個選項「keep bypass permissions」是我們要的，呼叫端送 Down＋Enter。
+pub fn is_auto_mode_offer(screen: &str) -> bool {
+    let raw: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
+    let tail_raw = &raw[raw.len().saturating_sub(DIALOG_TAIL_LINES)..];
+    if composer_is_idle(tail_raw) {
+        return false;
+    }
+    let tail: Vec<String> = tail_raw.iter().map(|l| norm_line(l)).collect();
+    line_starts_with(&tail, "yes, set auto mode as my default permission mode") && line_starts_with(&tail, "no, keep bypass permissions")
+}
+
+/// onboarding 第一頁（`hasCompletedOnboarding` 被清掉、或全新的 `CLAUDE_CONFIG_DIR`）：「Choose the text style…」
+/// 七個主題選項。跟登入選單同一類：交給人處理（409 `needs_login`），不自動按——按了下一頁就是登入選單，
+/// 一樣要人。真畫面在 `lifecycle/fixtures/claude-2.1.278-onboarding-theme.txt`（2026-09-22）。
+pub fn is_onboarding_theme(screen: &str) -> bool {
+    let lines: Vec<String> = screen.lines().map(norm_line).collect();
+    flatten(screen).contains("choose the text style that looks best with your terminal")
+        && line_starts_with(&lines, "1. auto (match terminal)")
+        && (line_starts_with(&lines, "2. dark mode") || line_starts_with(&lines, "3. light mode"))
+}
+
 /// grok 1.0.34 開在沒信任過的目錄時跳「Do you trust the contents of this directory?」（y／n），
 /// herdr 看不出是對話框，prompt 打進去會被吃掉（2026-09-17 使用者截圖，報 composer_unreadable）。
 pub fn is_grok_trust_dialog(screen: &str) -> bool {
@@ -199,7 +222,7 @@ pub async fn stuck_at_login(app: &Arc<App>, run: &db::Run) -> bool {
     let Some(pane) = run.pane_id.clone() else { return false };
     let Some(client) = app.herdr_for_run(run).await else { return false };
     match client.pane_read(&pane, "visible", 80).await {
-        Ok(r) => is_login_menu(&r.text),
+        Ok(r) => is_login_menu(&r.text) || is_onboarding_theme(&r.text),
         Err(_) => false,
     }
 }
@@ -248,6 +271,28 @@ pub fn spawn_survey_watcher(app: Arc<App>) {
             }
         }
     });
+}
+
+
+/// 測試共用的真畫面／抄錄畫面（`lifecycle::prompt` 的整合測試也用）。
+#[cfg(test)]
+pub(crate) mod screens {
+    /// 2026-09-22 build child 停在這裡的畫面（巡檢抄錄的原文，選項與提示逐字；框線照 2.1.278 的樣子）。
+    pub const AUTO_MODE: &str = "\
+ ╭──────────────────────────────────────────────────────────────────────────────╮
+ │ Auto mode lets Claude handle permission prompts automatically. Claude will   │
+ │ check each action against your settings and only ask when something looks    │
+ │ risky.                                                                       │
+ │                                                                              │
+ │ ❯ Yes, set auto mode as my default permission mode                           │
+ │   No, keep bypass permissions                                                │
+ │                                                                              │
+ │ Enter to confirm · Esc to cancel                                             │
+ ╰──────────────────────────────────────────────────────────────────────────────╯
+  build | agents-manager | Opus 5 | 5h:96%
+";
+
+    pub const ONBOARDING_THEME: &str = include_str!("lifecycle/fixtures/claude-2.1.278-onboarding-theme.txt");
 }
 
 #[cfg(test)]
@@ -447,4 +492,25 @@ pub fn is_feedback_survey(screen: &str) -> bool {
         assert!(update_notice(&quoted).is_none());
         assert!(update_notice("").is_none());
     }
+
+    use super::screens::{AUTO_MODE, ONBOARDING_THEME};
+
+    #[test]
+    fn the_auto_mode_offer_is_recognised_and_quotes_are_not() {
+        assert!(is_auto_mode_offer(AUTO_MODE));
+        // 正文引了兩個選項、但輸入列空著＝沒有框。
+        let quoted = format!("⏺ 2.1.278 的框長這樣：\n  Yes, set auto mode as my default permission mode\n  No, keep bypass permissions\n{}", IDLE_CLAUDE);
+        assert!(!is_auto_mode_offer(&quoted));
+        assert!(!is_auto_mode_offer(SWITCH_MODEL) && !is_auto_mode_offer(PERMISSION));
+    }
+
+    #[test]
+    fn the_onboarding_theme_page_counts_as_stuck_at_login_not_a_dialog_to_answer() {
+        assert!(is_onboarding_theme(ONBOARDING_THEME), "真畫面（2.1.278，全新 CLAUDE_CONFIG_DIR）");
+        assert!(!is_login_menu(ONBOARDING_THEME));
+        assert!(!is_onboarding_theme("⏺ run /theme to choose the text style that looks best with your terminal\n❯\n"));
+        assert!(!is_auto_mode_offer(ONBOARDING_THEME));
+    }
+
+    const IDLE_CLAUDE: &str = "────────────────────\n❯\n────────────────────\n  15m2dg | agents-manager | Opus 5 31% | 5h:96%\n";
 }
