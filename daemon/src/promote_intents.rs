@@ -132,6 +132,10 @@ async fn resume(app: &Arc<App>, intent: &Intent) -> Result<(), String> {
     // 2. 沒種過 session 就種（native resume 讀「最近一個結束的 run 的 native_session_id」）。
     let runs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE bot_id = ?").bind(&new_id).fetch_one(&app.db).await.map_err(|x| x.to_string())?;
     if runs == 0 {
+        // This row is a terminal marker for the session that is about to be resumed. Keep both
+        // timestamps identical: the check below uses `started_at == ended_at` to distinguish this
+        // seed row from a run that was actually started.
+        let seeded_at = db::now();
         sqlx::query(
             "INSERT INTO runs (id, bot_id, state, agent_status, native_session_id, transcript_path, started_at, ended_at)
              VALUES (?,?,'stopped','idle',?,?,?,?)",
@@ -140,8 +144,8 @@ async fn resume(app: &Arc<App>, intent: &Intent) -> Result<(), String> {
         .bind(&new_id)
         .bind(&session_id)
         .bind(&dest)
-        .bind(db::now())
-        .bind(db::now())
+        .bind(&seeded_at)
+        .bind(&seeded_at)
         .execute(&app.db)
         .await
         .map_err(|x| format!("cannot seed the session: {x}"))?;
