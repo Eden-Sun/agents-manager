@@ -47,3 +47,47 @@ test('daemon 拒絕（舊版不認得 primary → 400）：回捲，並把原因
   assert.match(notice.text, /主力順序沒存起來/)
   assert.match(notice.text, /400|至少要有一個/, `通知要帶 daemon 的原因：${notice.text}`)
 })
+
+test('兩次主力排序請求亂序完成時，較新的順序不能被舊請求覆蓋（#391）', async () => {
+  useStore.setState({ bots: [bot('a', 0), bot('b', 1), bot('c', 2)], notices: [] })
+  const calls: { url: string; method: string; body: unknown }[] = []
+  let serverOrder = ['a', 'b', 'c']
+  let releaseFirst!: () => void
+  let firstStarted!: () => void
+  const firstCallStarted = new Promise<void>((resolve) => {
+    firstStarted = resolve
+  })
+  const firstResponse = new Promise<void>((resolve) => {
+    releaseFirst = resolve
+  })
+  globalThis.fetch = (async (input: string, init?: RequestInit) => {
+    const body = init?.body ? JSON.parse(String(init.body)) : undefined
+    calls.push({ url: String(input), method: init?.method ?? 'GET', body })
+    if (calls.length === 1) {
+      firstStarted()
+      await firstResponse
+    }
+    serverOrder = (body as { primary: string[] }).primary
+    return {
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      text: async () => JSON.stringify({ ok: true }),
+    } as unknown as Response
+  }) as unknown as typeof fetch
+
+  useStore.getState().movePrimary(['c', 'a', 'b'])
+  useStore.getState().movePrimary(['b', 'c', 'a'])
+  await firstCallStarted
+  assert.equal(calls.length, 1, '第二筆必須等第一筆 POST 回應後才開始')
+
+  releaseFirst()
+  await settle()
+  assert.deepEqual(
+    calls.map((c) => c.body),
+    [{ primary: ['c', 'a', 'b'] }, { primary: ['b', 'c', 'a'] }],
+    '同一排序範圍的 POST 要照拖曳順序送出',
+  )
+  assert.deepEqual(serverOrder, ['b', 'c', 'a'], '最後落庫的必須是較新的順序')
+  assert.deepEqual(positions(), { a: 2, b: 0, c: 1 }, '畫面也維持最後一次拖曳')
+})
