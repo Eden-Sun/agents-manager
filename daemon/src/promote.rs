@@ -359,6 +359,10 @@ pub async fn promote_bot(
     lifecycle::race_point::hit("promote_after_create", &id).await;
 
     // 種下 session：native resume 讀「這顆 bot 最近一個結束的 run 的 native_session_id」。
+    // This row is a terminal marker for the session that is about to be resumed. Keep both
+    // timestamps identical: recovery uses `started_at == ended_at` to distinguish this seed
+    // row from a run that was actually started.
+    let seeded_at = db::now();
     let seeded = sqlx::query(
         "INSERT INTO runs (id, bot_id, state, agent_status, native_session_id, transcript_path, started_at, ended_at)
          VALUES (?,?,'stopped','idle',?,?,?,?)",
@@ -367,8 +371,8 @@ pub async fn promote_bot(
     .bind(&new_id)
     .bind(&located.session_id)
     .bind(staged.dest.to_string_lossy().to_string())
-    .bind(db::now())
-    .bind(db::now())
+    .bind(&seeded_at)
+    .bind(&seeded_at)
     .execute(&app.db)
     .await;
     let mut failure: Option<String> = seeded.err().map(|e| e.to_string());
@@ -746,6 +750,12 @@ mod tests {
                     .bind(&new_id).fetch_all(&app2.db).await.unwrap();
                 panic!("{point}：新 bot 起來了 —— intent={intent_row:?} runs={runs_dump:?}");
             }
+            let seed_times: (String, String) = sqlx::query_as("SELECT started_at, ended_at FROM runs WHERE bot_id = ? AND state = 'stopped'")
+                .bind(&new_id)
+                .fetch_one(&app2.db)
+                .await
+                .unwrap();
+            assert_eq!(seed_times.0, seed_times.1, "{point}：session seed 必須標成尚未啟動的 terminal run");
             let _ = crate::testing::eventually!(intent_status(&app2, &r.child).await == vec!["done"]);
             assert_eq!(intent_status(&app2, &r.child).await, vec!["done"], "{point}");
             let runs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE bot_id = ?").bind(&new_id).fetch_one(&app2.db).await.unwrap();
