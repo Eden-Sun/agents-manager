@@ -2839,12 +2839,23 @@ async fn delete_identity(
 struct StartQuery {
     /// `native`：接回 DB 記的原生對話；接不回回 409 `resumed:false`，**不會**默默開新對話。
     resume: Option<String>,
+    /// 跟 `resume=native` 一起：不看 DB，接這一段 session（救援用；只有 `bin/agm` 露出這個旗標）。
+    session: Option<String>,
 }
 
 fn resume_opts(q: &StartQuery) -> Result<lifecycle::StartOpts, LcError> {
+    let session = q.session.as_deref().map(str::trim).filter(|v| !v.is_empty());
     match q.resume.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        None if session.is_some() => Err(LcError::Bad("`session` needs `resume=native`".into())),
         None => Ok(lifecycle::StartOpts::default()),
-        Some("native") => Ok(lifecycle::StartOpts { resume_native: true, resume_required: true, ..Default::default() }),
+        Some("native") => {
+            if let Some(s) = session {
+                if s.len() > 128 || !s.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)) {
+                    return Err(LcError::Bad("`session` must be a plain session id".into()));
+                }
+            }
+            Ok(lifecycle::StartOpts { resume_native: true, resume_required: true, resume_session: session.map(str::to_string), ..Default::default() })
+        }
         Some(other) => Err(LcError::Bad(format!("unknown resume mode `{other}` (only `native`)"))),
     }
 }
@@ -4558,12 +4569,25 @@ mod resume_query_tests {
 
     #[test]
     fn only_native_is_a_resume_mode_and_it_is_strict() {
-        let q = |v: Option<&str>| StartQuery { resume: v.map(str::to_string) };
+        let q = |v: Option<&str>| StartQuery { resume: v.map(str::to_string), session: None };
         assert_eq!(resume_opts(&q(None)).unwrap(), lifecycle::StartOpts::default(), "預設行為不變");
         assert_eq!(resume_opts(&q(Some(""))).unwrap(), lifecycle::StartOpts::default());
         let native = resume_opts(&q(Some("native"))).unwrap();
         assert!(native.resume_native && native.resume_required, "native 一定是「接不回就不啟動」");
         assert!(matches!(resume_opts(&q(Some("fresh"))), Err(LcError::Bad(_))));
+    }
+
+    /// `session=<id>` 只跟 `resume=native` 一起收，而且只收乾淨的 id（救援路徑，2026-09-22）。
+    #[test]
+    fn an_explicit_session_rides_only_on_native_and_must_be_plain() {
+        let q = |r: Option<&str>, s: Option<&str>| StartQuery { resume: r.map(str::to_string), session: s.map(str::to_string) };
+        let o = resume_opts(&q(Some("native"), Some(" 246fcf93-af39-48d3-8041-b27df5a91958 "))).unwrap();
+        assert_eq!(o.resume_session.as_deref(), Some("246fcf93-af39-48d3-8041-b27df5a91958"));
+        assert!(o.resume_native && o.resume_required);
+        assert!(resume_opts(&q(Some("native"), Some(""))).unwrap().resume_session.is_none());
+        assert!(matches!(resume_opts(&q(None, Some("abc"))), Err(LcError::Bad(_))), "沒有 native 不收 session");
+        assert!(matches!(resume_opts(&q(Some("native"), Some("a b"))), Err(LcError::Bad(_))));
+        assert!(matches!(resume_opts(&q(Some("native"), Some("../x"))), Err(LcError::Bad(_))));
     }
 
     #[tokio::test]
@@ -4659,7 +4683,7 @@ mod started_json_tests {
             .execute(&app.db)
             .await
             .unwrap();
-        let resp = start_bot(State(app.clone()), Path(bot.id.clone()), Query(StartQuery { resume: None })).await.unwrap();
+        let resp = start_bot(State(app.clone()), Path(bot.id.clone()), Query(StartQuery { resume: None, session: None })).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body: Value = serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap()).unwrap();
         let run = db::active_run(&app.db, &bot.id).await.unwrap().expect("叫醒了");

@@ -252,6 +252,7 @@ Vite + React + TypeScript + Zustand，只做 daemon 狀態的投影；正式版 
 ## 4. 回覆擷取
 
 ### 4.1 主要來源：hooks / notify（每次啟動注入，不改使用者全域設定）
+- **provider 要等於 bot 的 kind**（2026-09-22）：hook 的路由只靠 `bot_id`＋`hook_token`，而這兩個是 pane 環境變數、任何子行程都繼承得到；claude bot 的 pane 裡跑 `codex exec` 帶 notify，codex 的 thread-id 就會被記成這顆 claude bot 的 `native_session_id` 還標 `verified`，之後 `--resume` 一個不存在的 id 立刻退出。所以 `/hook/{provider}` 與 spool 重播都先比 provider 與 `bots.kind`，不一致就丟掉（HTTP 409 `provider_mismatch`）。救援路徑：`?resume=native&session=<id>` 指名接回真正那段。
 
 **Claude Code**：`--settings <abs>`，檔案 `~/.config/agents-manager/bots/<bot_id>/claude-settings.json`，註冊 `SessionStart`、`Stop`、`StopFailure`、
 `SubagentStart`、`SubagentStop` 五個 hook，command 為 `/abs/agents-managerd hook claude --bot <bot_id> --token <t> --port <port>`

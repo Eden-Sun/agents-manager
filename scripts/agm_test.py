@@ -835,6 +835,13 @@ class MiscCommandTest(CliCase):
         self.assertEqual(err["status"], 409)
         self.assertEqual((err["detail"]["resumed"], err["detail"]["session_id"]), (False, "s-9"))
 
+    def test_bot_resume_with_an_explicit_session_goes_in_the_query(self):
+        FakeDaemon.routes["POST /api/bots/b1/start"] = (200, {"resumed": True, "session_id": "246fcf93-af39"})
+        out = self.ok("bot", "start", "b1", "--resume", "native", "--session", "246fcf93-af39")
+        self.assertEqual(FakeDaemon.seen[-1]["path"], "/api/bots/b1/start?resume=native&session=246fcf93-af39")
+        self.assertEqual(out["session_id"], "246fcf93-af39")
+        self.assertNotEqual(self.run_cli("bot", "start", "b1", "--session", "246fcf93-af39")[0], 0, "沒有 --resume 不收 --session")
+
     def test_bot_resume_rejects_other_ops_and_modes(self):
         self.assertNotEqual(self.run_cli("bot", "stop", "b1", "--resume", "native")[0], 0)
         self.assertNotEqual(self.run_cli("bot", "restart", "b1", "--resume", "fresh")[0], 0)
