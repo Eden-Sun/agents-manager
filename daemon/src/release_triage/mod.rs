@@ -230,7 +230,13 @@ fn pending_out(version: &str, entries: &[Entry]) -> PendingVersion {
 ///   （磁碟上的版本）記成 `empty` 基準、不回 pending（不為安裝當下已經在的版本派工）。
 /// - `to`：feed 裡最新的正式版。`(from, to]` 之間每一版各自一列；已在帳本的版本不重算（規則改了也不追溯，
 ///   要重來就明確給 `--since`）。
-/// - `pending`：`(from, to]` 裡帳本狀態是 `pending` 的版本，舊的在前。
+/// - `pending`：帳本裡狀態是 `pending`、版本 `<= to` 的所有列，舊的在前——**不**額外拿 `from` 當下界
+///   （2026-09-22 修：`from` 就是「帳本已分診的最大版本」，等於剛插入的那一版自己；插入與那一版的
+///   派工是兩個獨立步驟，kick 派工失敗〔額度、網路、`agm assign` 掛掉〕時那一版仍是 `pending`，
+///   但只要它已經是 ledger max，下一輪的 `from == to == 那一版`，`v > from_v` 就會把它自己排除在外，
+///   從此永遠不會再出現在 `pending` 裡——codex 0.155.0／0.155.1 卡了三天沒人分析就是這個洞：
+///   `release-triage-check` 第一次成功抓到並插入，那一輪派工沒能完成，之後每一輪都因為這個邊界值把
+///   它們濾掉，鎖與額度都正常、log 也不再報錯，帳本卻永遠停在 `pending`）。
 pub async fn check(pool: &SqlitePool, kind: &str, all: &[Section], installed: Option<&str>, since: Option<&str>) -> Result<CheckReport> {
     if !rules::supported(kind) {
         bail!("`{kind}` 沒有分診規則（目前只有 claude、codex）");
@@ -258,11 +264,10 @@ pub async fn check(pool: &SqlitePool, kind: &str, all: &[Section], installed: Op
         ledger::insert_version(pool, kind, &sec.version, &entries).await?;
     }
     let mut pending: Vec<PendingVersion> = Vec::new();
-    let from_v = changelog::parse_version(&from);
     let to_v = changelog::parse_version(&to);
     for row in ledger::rows_with_status(pool, kind, ledger::Status::Pending).await? {
         let v = changelog::parse_version(&row.version);
-        if v > from_v && v <= to_v {
+        if v <= to_v {
             pending.push(pending_out(&row.version, &row.entries));
         }
     }

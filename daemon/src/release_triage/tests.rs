@@ -166,21 +166,33 @@ async fn replay_2_1_275_to_278_gives_a_row_per_version_and_276_is_empty() {
     assert!(pv["unmatched"].is_array() && pv["dropped_count"].is_number());
 }
 
+/// 2026-09-22 修：以前 `pending` 額外拿 `from`（＝帳本已分診的最大版本）當下界，一版剛插入、
+/// 派工還沒做完時，`from` 已經等於它自己，`v > from_v` 立刻把它濾掉——codex 0.155.0／0.155.1
+/// 卡了三天沒人分析就是這個洞：`check` 成功插入、那一輪派工沒完成（額度／網路／`agm assign` 掛），
+/// 之後每一輪都因為這個邊界值把它們排除，帳本永遠停在 `pending`，log 卻不再報錯。
+/// 正確語意：`pending` 是「帳本裡狀態還是 pending、版本 `<= to` 的所有列」，跟 `from` 無關；
+/// 沒派工、狀態沒變，重跑幾次都該列出一樣的東西。
 #[tokio::test]
-async fn rerun_is_idempotent_and_ledger_max_version_becomes_the_new_from() {
+async fn rerun_before_dispatch_still_reports_the_same_pending_versions() {
     let p = pool().await;
     let all = claude_sections();
     let first = check(&p, "claude", &all, None, Some("2.1.275")).await.unwrap();
+    assert_eq!(first.pending.len(), 2);
+    // 還沒派工就重跑（沒有 `agm assign`／`release-triage dispatched` 介入）：
+    // 兩版還是 pending，理應照樣列出，不能因為 `from` 已經追上這一版就消失。
     let second = check(&p, "claude", &all, None, None).await.unwrap();
     assert_eq!(second.from, "2.1.278", "from＝帳本已分診的最大版本");
-    assert!(second.pending.is_empty(), "from 之後沒有新版");
-    // 派出去之後就不再是 pending；重跑 --since 也不會重複派。
+    assert_eq!(
+        second.pending.iter().map(|v| v.version.as_str()).collect::<Vec<_>>(),
+        first.pending.iter().map(|v| v.version.as_str()).collect::<Vec<_>>(),
+        "沒派工、狀態沒變，兩次列出來的應該一樣"
+    );
+    // 派出去之後才不再是 pending；重跑 --since 也不會重複派。
     let both = ["2.1.277".to_string(), "2.1.278".to_string()];
     assert_eq!(ledger::mark_dispatched(&p, "claude", &both).await.unwrap(), 2);
     assert_eq!(ledger::mark_dispatched(&p, "claude", &both).await.unwrap(), 0, "CAS：已 dispatched 的不再動");
-    let again = check(&p, "claude", &all, None, Some("2.1.275")).await.unwrap();
-    assert!(again.pending.is_empty());
-    assert_eq!(first.pending.len(), 2);
+    let third = check(&p, "claude", &all, None, Some("2.1.275")).await.unwrap();
+    assert!(third.pending.is_empty(), "已經 dispatched，不再是 pending");
 }
 
 #[tokio::test]
