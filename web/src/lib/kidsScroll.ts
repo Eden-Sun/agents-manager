@@ -7,14 +7,30 @@
  *   底、拖著整組一起停，看不完最長那列。
  */
 const SEL = '.bot-row.compact > .bot-main'
+const pendingProgrammaticScroll = new WeakMap<HTMLElement, number>()
+
+function setScrollLeft(el: HTMLElement, x: number) {
+  const max = Math.max(0, el.scrollWidth - el.clientWidth)
+  const target = Math.min(max, Math.max(0, x))
+  if (Math.abs(el.scrollLeft - target) <= 0.5) return
+  // `scroll` is delivered after setting scrollLeft. Remember the clamped destination so its event
+  // cannot be mistaken for a user scroll and feed a shorter row's smaller maximum back upstream.
+  pendingProgrammaticScroll.set(el, target)
+  el.scrollLeft = target
+}
 
 export function syncKidsScroll(e: { currentTarget: HTMLElement }) {
   const me = e.currentTarget
+  const pending = pendingProgrammaticScroll.get(me)
+  if (pending !== undefined) {
+    pendingProgrammaticScroll.delete(me)
+    if (Math.abs(me.scrollLeft - pending) <= 0.5) return
+  }
   const kids = me.closest('.bot-kids')
   if (!kids) return
   const x = me.scrollLeft
   for (const el of kids.querySelectorAll<HTMLElement>(SEL)) {
-    if (el !== me && Math.abs(el.scrollLeft - x) > 0.5) el.scrollLeft = x
+    if (el !== me) setScrollLeft(el, x)
   }
 }
 
@@ -30,5 +46,5 @@ export function wheelKidsScroll(e: { currentTarget: HTMLElement; deltaX: number;
   const next = Math.min(max, Math.max(0, cur + dx))
   if (next === cur) return
   e.preventDefault()
-  for (const el of rows) el.scrollLeft = next
+  for (const el of rows) setScrollLeft(el, next)
 }
