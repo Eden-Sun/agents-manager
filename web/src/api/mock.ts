@@ -326,7 +326,9 @@ const MODELS: Record<BotKind, Rec[]> = {
     },
   ],
   grok: [
-    { id: 'grok-4.6', display_name: 'Grok 4.6', description: 'grok CLI 預設', is_default: true, default_effort: 'high', efforts: ['low', 'medium', 'high', 'xhigh'], service_tiers: [] },
+    { id: 'grok-4.7', display_name: 'Grok 4.7', description: 'grok CLI 預設', is_default: true, default_effort: 'high', efforts: ['low', 'medium', 'high', 'xhigh'], service_tiers: [] },
+    { id: 'grok-4.7-build-fast', display_name: 'Grok 4.7 Fast', description: '較快變體', is_default: false, default_effort: 'high', efforts: ['low', 'medium', 'high', 'xhigh'], service_tiers: [] },
+    { id: 'grok-4.6', display_name: 'Grok 4.6', description: '上一代', is_default: false, default_effort: 'high', efforts: ['low', 'medium', 'high', 'xhigh'], service_tiers: [] },
     { id: 'grok-4.5', display_name: 'Grok 4.5', description: '上一代', is_default: false, default_effort: 'high', efforts: ['low', 'medium', 'high'], service_tiers: [] },
   ],
 }
