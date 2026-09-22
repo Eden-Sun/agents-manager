@@ -17,7 +17,8 @@ test('「開始跑」的起點：daemon 的 agent_status_since 優先，turn 時
     { status: 'in_flight', created_at: '2026-09-18T00:00:03.000Z' },
   ]
   // 有 agent_status_since：就算 turn 也有紀錄，還是以 daemon 觀察到「持續 working」的時間為準。
-  assert.equal(activityStartedAt('2026-09-18T00:00:00.000Z', turns), '2026-09-18T00:00:00.000Z')
+  const statusSince = '2026-09-18T00:00:10.250+00:00'
+  assert.equal(activityStartedAt(statusSince, turns), statusSince)
   // 沒有 agent_status_since（升級前的舊列）：退回最早那筆 in_flight turn，不是隨便一筆。
   assert.equal(activityStartedAt(null, turns), '2026-09-18T00:00:03.000Z')
   assert.equal(activityStartedAt(undefined, turns), '2026-09-18T00:00:03.000Z')
@@ -30,4 +31,28 @@ test('「開始跑」的起點：daemon 的 agent_status_since 優先，turn 時
     ),
     null,
   )
+})
+
+test('最早 in_flight turn 依實際時間比較時區偏移與小數秒，並回傳原始 timestamp', () => {
+  const earlier = '2026-09-18T01:00:00.050+02:00'
+  const later = '2026-09-18T00:00:00.1Z'
+  assert.equal(
+    activityStartedAt(null, [
+      { status: 'in_flight', created_at: later },
+      { status: 'in_flight', created_at: earlier },
+    ]),
+    earlier,
+  )
+})
+
+test('無效的 in_flight timestamp 會被略過；沒有有效時間時回傳 null', () => {
+  const valid = '2026-09-18T00:00:00.000Z'
+  assert.equal(
+    activityStartedAt(null, [
+      { status: 'in_flight', created_at: valid },
+      { status: 'in_flight', created_at: '' },
+    ]),
+    valid,
+  )
+  assert.equal(activityStartedAt(null, [{ status: 'in_flight', created_at: '' }]), null)
 })

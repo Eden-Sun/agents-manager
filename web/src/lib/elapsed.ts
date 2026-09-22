@@ -23,8 +23,15 @@ export function activityStartedAt(
 ): string | null {
   if (agentStatusSince) return agentStatusSince
   let start: string | null = null
+  let startMs: number | null = null
   for (const t of turns) {
-    if (t.status === 'in_flight' && (!start || t.created_at < start)) start = t.created_at
+    if (t.status !== 'in_flight') continue
+    const createdAtMs = Date.parse(t.created_at)
+    if (!Number.isFinite(createdAtMs)) continue
+    if (startMs === null || createdAtMs < startMs) {
+      start = t.created_at
+      startMs = createdAtMs
+    }
   }
   return start
 }
