@@ -4816,6 +4816,20 @@ mod instruction_files_tests {
         }
     }
 
+    #[tokio::test]
+    async fn patch_accepts_full_claude_model_names_and_codex_catalog_models() {
+        let e = env().await;
+        seed_project(&e).await;
+        let claude = add(&e, json!({"name": "claude", "kind": "claude"})).await.unwrap();
+        let codex = add(&e, json!({"name": "codex", "kind": "codex"})).await.unwrap();
+
+        for (id, model) in [(&claude, "claude-opus-5-5"), (&codex, "gpt-6-luna")] {
+            let out = patch(&e, id, json!({"model": model})).await.unwrap();
+            assert_eq!(out["needs_restart"], json!(false), "idle bot accepts {model}: {out}");
+            assert_eq!(db::bot(&e.app.db, id).await.unwrap().unwrap().model.as_deref(), Some(model));
+        }
+    }
+
     /// #353：改了要重啟才生效的設定，`needs_restart` 不能只存在 PATCH 的 HTTP 回應裡——回應掉了（或 daemon 之後重啟）
     /// 就永遠沒人知道執行中的 CLI 還拿著舊設定。現在從資料算：run 啟動時記下載入的版本，bot 目前的版本對不上＝要重啟。
     #[tokio::test]

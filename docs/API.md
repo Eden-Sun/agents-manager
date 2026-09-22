@@ -1009,6 +1009,8 @@ body 所有欄位可省；`model`、`identity` 傳 `null` 或 `""` 清除；`env
 { "name": "am-codex", "model": "gpt-5.5", "effort": "high", "fast": false, "args": ["--search"], "autostart": false, "auto_approve": true, "inject_hooks": true, "identity": "cc1", "env": {"FOO": "bar"}, "primary": false, "persona": "…", "instruction_files": "claude-md-and-agents-md" }
 ```
 
+AGM CLI 可用 `agm bot set <bot_id> [--model M] [--effort E] [--identity I]` 更新這三欄；只會 PATCH 命令列有帶的欄位，至少要帶一欄。成功時完整輸出 daemon 回應（包括 `needs_restart` 與可能出現的 `live_apply`）；4xx／5xx 以 CLI 結構化錯誤輸出至 stderr 並以非 0 退出。
+
 回 `200 {"needs_restart": bool}`，成功推 `bot_changed`。真的試過「當場套用」時多一個
 `live_apply: {fields, applied, deferred, reason}`（2026-09-13；`deferred` 是 #393）：`reason` 是機器可讀 key——
 `bot_missing` / `no_active_run` / `slash_gate: <not_running|agent_busy|turn_in_flight|no_pane>` /
@@ -1230,6 +1232,8 @@ Project 底下所有存活 bot 的訊息合併，以插入順序（`rowid`）倒
 | `codex` | `codex-app-server` | `codex app-server` JSON-RPC `model/list` | 每個模型的 `supportedReasoningEfforts` | 每個模型的 `serviceTiers`（目前只有 `priority` = Fast） |
 | `grok` | `grok-cli` | `grok models` + `~/.grok/models_cache.json` 的 per-model `reasoning_efforts`（無 cache 退回 low/medium/high） | 依模型 | `[]` |
 | `claude` | `static` | `opus / sonnet / haiku / fable` | 每個 alias 都是 `low…max` 五級 | `[]` |
+
+`GET /api/models` 提供可選 alias 清單；bot 的 `model` 設定則會原樣交給對應 CLI。Claude 可設定 alias（例如 `opus`）或完整 CLI 模型名（例如 `claude-opus-5-5`），完整名稱不必出現在 alias 清單；Codex 的模型名（例如 `gpt-6-luna`）同樣原樣交給 `-m`。CLI 不會先以 `/api/models` 限制 PATCH 的模型字串。
 
 - `default_effort`：codex/grok 是模型回報的值（可能 `null`）；claude 一律有值——帳號 `settings.json` 的 per-model 覆寫 > `effortLevel` > 內建 `"high"`。
 - `display_name` / `description` 可能為空字串。

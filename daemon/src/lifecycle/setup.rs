@@ -1101,6 +1101,15 @@ mod model_args_tests {
     }
 
     #[test]
+    fn full_claude_model_ids_and_codex_catalog_models_are_passed_verbatim() {
+        assert_eq!(model_args(&bot("claude", Some("claude-opus-5-5"), None, false)), vec!["--model", "claude-opus-5-5"]);
+        assert_eq!(
+            model_args(&bot("codex", Some("gpt-6-luna"), None, false)),
+            vec!["-m", "gpt-6-luna", "-c", "service_tier=\"\""]
+        );
+    }
+
+    #[test]
     fn grok_keeps_reasoning_effort_and_ignores_fast() {
         let a = model_args(&bot("grok", Some("grok-4.6"), Some("low"), true));
         assert_eq!(a, vec!["-m", "grok-4.6", "--reasoning-effort", "low"]);
