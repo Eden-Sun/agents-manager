@@ -11,6 +11,7 @@ import {
   keysToMove,
   MULTI_TYPE_HINT,
   parseChoiceMenu,
+  sameChoices,
   type TuiChoiceMenu,
   type WalkTarget,
 } from './tuiChoices.ts'
@@ -70,7 +71,7 @@ export async function moveTab(io: Io, dir: 1 | -1, from: TuiChoiceMenu): Promise
     for (let i = 0; i < SETTLE_TRIES; i++) {
       await io.wait(SETTLE_STEP)
       const now = await io.read()
-      if (now && (now.question !== from.question || now.review.length !== from.review.length)) return now
+      if (now && (!sameChoices(from, now) || now.review.length !== from.review.length)) return now
     }
   }
   return null
