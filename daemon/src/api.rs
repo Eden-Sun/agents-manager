@@ -2889,6 +2889,7 @@ async fn started_json(app: &Arc<App>, run_id: &str, opts: &lifecycle::StartOpts)
 }
 
 async fn start_bot(State(app): State<Arc<App>>, Path(id): Path<String>, Query(q): Query<StartQuery>) -> Result<Response, LcError> {
+    refuse_child_restart(&app, &id).await?;
     // 被 AGM 因為閒置收起來的（§6.11）一律走續接：使用者按「啟動」要的是把剛剛那顆帶著對話的
     // bot 叫回來，不是開一段新的空白對話。
     if crate::supervisor::idle_sleep::wake(&app, &id, "使用者按了啟動")
@@ -2907,6 +2908,20 @@ async fn start_bot(State(app): State<Arc<App>>, Path(id): Path<String>, Query(q)
     Ok((StatusCode::OK, Json(started_json(&app, &run_id, &opts).await?)).into_response())
 }
 
+/// 子 agent（`parent_bot_id` 非空）一律由父 bot 用 herdr 重開，daemon 的 start／restart 不收（SPEC §6.5a，
+/// 2026-09-22：herdr 全重啟後對子 agent 下 restart，pane 已不在，原地重啟反而讓 reconcile 把它退役軟刪）。
+/// 一鍵重啟（§6.9）走的是 `bulk_restart` 內部的原地重啟，不經這裡。
+async fn refuse_child_restart(app: &Arc<App>, id: &str) -> Result<(), LcError> {
+    let Some(bot) = db::bot(&app.db, id).await.map_err(any_err)? else { return Ok(()) };
+    match bot.parent_bot_id.as_deref().filter(|p| !p.is_empty()) {
+        Some(parent) => Err(LcError::conflict(
+            "child_restart_forbidden",
+            json!({"bot_id": id, "parent_bot_id": parent, "message": "子 agent 一律由父 bot 用 herdr 重開；被軟刪的先 POST /api/bots/{id}/restore（§10.4a）"}),
+        )),
+        None => Ok(()),
+    }
+}
+
 /// 這顆 daemon 支援哪些要先確認才能用的能力（例如升級腳本在停 herdr 前要確定 `resume_native_start`）。
 async fn get_capabilities() -> Json<Value> {
     Json(json!({"capabilities": ["resume_native_start", "herdr_maintenance"]}))
@@ -2920,14 +2935,9 @@ async fn restart_idle_bots(State(app): State<Arc<App>>) -> Result<Response, LcEr
 
 async fn restart_bot(State(app): State<Arc<App>>, Path(id): Path<String>, Query(q): Query<StartQuery>) -> Result<Response, LcError> {
     let opts = resume_opts(&q)?;
-    // 子 agent 的 pane 是父開的，stop + start 會被拒（SPEC §6.5a），改在原 pane 裡 exit + resume（本來就接回）。
-    let child = db::bot(&app.db, &id).await.map_err(any_err)?.is_some_and(|b| b.managed_by == "child");
-    let body = if child {
-        json!({"run_id": lifecycle::restart_child_in_pane(&app, &id).await?})
-    } else {
-        let run_id = lifecycle::restart_bot_with(&app, &id, opts.clone()).await?;
-        started_json(&app, &run_id, &opts).await?
-    };
+    refuse_child_restart(&app, &id).await?;
+    let run_id = lifecycle::restart_bot_with(&app, &id, opts.clone()).await?;
+    let body = started_json(&app, &run_id, &opts).await?;
     app.emit("bot_changed", json!({"bot_id": id})).await;
     Ok((StatusCode::OK, Json(body)).into_response())
 }
@@ -5233,5 +5243,62 @@ mod create_bot_idempotency_tests {
         create(&e, json!({"name": "x", "name_auto": true, "kind": "claude"})).await.unwrap();
         create(&e, json!({"name": "x", "name_auto": true, "kind": "claude"})).await.unwrap();
         assert_eq!(bots_in_config(&e).await, 2);
+    }
+}
+
+#[cfg(test)]
+mod child_restore_tests {
+    //! SPEC §6.5a：被軟刪的子 agent 走既有的 `POST /bots/{id}/restore`（§10.4a）還原，不直接改 DB；
+    //! 子 agent 的 start／restart 一律 409 `child_restart_forbidden`。
+    use super::*;
+    use crate::lifecycle::restart_kind_tests::live_child;
+    use crate::testing as tt;
+
+    async fn soft_delete(app: &Arc<App>, id: &str) {
+        sqlx::query("UPDATE bots SET deleted_at=? WHERE id=?").bind(db::now()).bind(id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET state='exited', ended_at=? WHERE bot_id=?").bind(db::now()).bind(id).execute(&app.db).await.unwrap();
+    }
+
+    fn conflict_reason(err: LcError) -> String {
+        match err {
+            LcError::Conflict(v) => v["reason"].as_str().unwrap_or("").to_string(),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_soft_deleted_child_is_restored_without_a_run() {
+        let e = tt::env().await;
+        let kid = live_child(&e, "pvw").await;
+        soft_delete(&e.app, &kid.id).await;
+        let resp = restore_bot(State(e.app.clone()), Path(kid.id.clone())).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let b = db::bot(&e.app.db, &kid.id).await.unwrap().unwrap();
+        assert!(b.deleted_at.is_none() && b.managed_by == "child" && b.parent_bot_id.is_some());
+        assert!(db::active_run(&e.app.db, &kid.id).await.unwrap().is_none(), "restore 不開 run");
+    }
+
+    #[tokio::test]
+    async fn restore_refuses_a_live_child_and_a_taken_name() {
+        let e = tt::env().await;
+        let kid = live_child(&e, "dup").await;
+        assert!(conflict_reason(restore_bot(State(e.app.clone()), Path(kid.id.clone())).await.unwrap_err()).contains("not deleted"));
+        soft_delete(&e.app, &kid.id).await;
+        // 同名的另一顆活 child（例如父 bot 已經用 herdr 重開了一顆）。
+        sqlx::query("INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, managed_by, parent_bot_id, created_at)
+                     SELECT ?, project_id, name, kind, '[]', 0, 0, 'tok2', 'child', parent_bot_id, ? FROM bots WHERE id=?")
+            .bind(db::ulid()).bind(db::now()).bind(&kid.id).execute(&e.app.db).await.unwrap();
+        assert!(conflict_reason(restore_bot(State(e.app.clone()), Path(kid.id.clone())).await.unwrap_err()).contains("already in use"));
+        assert!(matches!(restore_bot(State(e.app.clone()), Path("nope".into())).await.unwrap_err(), LcError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn start_and_restart_refuse_children() {
+        let e = tt::env().await;
+        let kid = live_child(&e, "kid").await;
+        let q = || Query(StartQuery { resume: None, session: None });
+        assert_eq!(conflict_reason(restart_bot(State(e.app.clone()), Path(kid.id.clone()), q()).await.unwrap_err()), "child_restart_forbidden");
+        assert_eq!(conflict_reason(start_bot(State(e.app.clone()), Path(kid.id.clone()), q()).await.unwrap_err()), "child_restart_forbidden");
+        assert!(db::active_run(&e.app.db, &kid.id).await.unwrap().is_some(), "子 agent 的 run 一根毛都不能動");
     }
 }
