@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { commit, pageNeedsCommit, preload, radioPick, samePage, togglesFor, wantOf, type Io } from './choiceDraft.ts'
+import { commit, moveTab, pageNeedsCommit, preload, radioPick, samePage, togglesFor, wantOf, type Io } from './choiceDraft.ts'
 import { parseChoiceMenu, typedAnswerHere } from './tuiChoices.ts'
 
 /**
@@ -128,6 +128,30 @@ test('假 TUI 自己畫得出來的畫面，parseChoiceMenu 認得（三個分�
   assert.equal(m.multi, true)
   assert.equal(m.choices.length, 4)
   assert.ok(m.submit)
+})
+
+test('相同題目但選項不同仍算翻頁，單頁游標移動不算', async () => {
+  const from = parseChoiceMenu(new FakeTui().screen())
+  assert.ok(from)
+  const cursorMoved = { ...from, cursor: from.cursor + 1 }
+  const next = {
+    ...from,
+    choices: from.choices.map((choice, i) => (i === 0 ? { ...choice, title: '同題目但不同選項' } : choice)),
+  }
+  let visible = from
+  const sent: string[] = []
+  const io: Io = {
+    read: async () => visible,
+    send: async (keys) => {
+      sent.push(...keys)
+      visible = keys[0] === 'right' ? cursorMoved : next
+    },
+    wait: async () => {},
+    paste: async () => {},
+  }
+
+  assert.deepEqual(await moveTab(io, 1, from), next)
+  assert.deepEqual(sent, ['right', 'tab'])
 })
 
 test('預載把三頁都讀回來，而且走完停回原本那一頁', async () => {
