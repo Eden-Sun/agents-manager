@@ -255,18 +255,41 @@ am_lease_lost() {
     return 0
 }
 
-# 守衛的睡覺：**前景一秒一秒睡**，每一秒看一次「shim 還要不要我」（`_state` 目錄還在不在）。
+# 守衛的睡覺：背景 `sleep N &` 加 `wait`（issue #151、#189、#396）——**不是前景 `sleep`**：
+# POSIX 的 trap 對正在跑的前景指令是**延後**執行的（要等那個前景指令跑完，shell 才回頭處理 trap），
+# 所以前景 `sleep N` 收到 TERM 不會提早結束，反而要睡好睡滿；同一支 shim 的 stdout／stderr 又被這個背景守衛
+# 原封不動繼承著，`Command::output()`（daemon 或任何呼叫端）要等**所有**繼承這兩支管線的行程都關閉它們才會返回——
+# 一顆睡好睡滿才退出的守衛，就等於讓呼叫端也多等那一整段（#396：整樹高負載下，一支立刻退出的 `cargo check`
+# 卻要 10 秒才真的收工，正是分成前景大段睡覺踩出來的）。
 #
-# 以前是背景 `sleep N &` 加 `wait`、靠 `_release` 的 TERM 叫醒（issue #151、#189）：`sleep 60` 的孤兒要靠一大串補丁（TERM 落在 fork 與記下 pid
-# 之間、剛 fork 出來的 sleep 帶著守衛的 handler…），整樹高負載下仍然每一萬次快跑漏一顆——**TERM 本身會掉**：訊號落在守衛剛起來、
-# 還在初始化的那一瞬間，或落在 `wait` 剛要睡下去之前（經典的 lost wakeup，bash 3.2／bash 5／dash 都實測會漏），守衛從此不知道自己被叫過，
-# 帶著 `sleep 60` 活到天荒地老。TERM 只能當「快一點結束」的提示，不能是唯一的機制：`_release` 一定會把 `$_state` 整個刪掉，
-# 守衛每秒看到目錄不在就自己結束，最壞多活一秒；前景的 `sleep 1` 沒有孤兒問題（守衛死了它自己一秒內就結束）。
+# 背景 `sleep &` + `wait` 沒有這個問題：`wait` 在等一顆背景工作時，POSIX shell 會**立刻**回應 trap（不像前景指令
+# 要等它跑完），trap 直接 `kill -KILL` 那顆背景 sleep（KILL 送到就是送到，不能被接住或延後），對方馬上結束、
+# 管線馬上關掉。但 TERM 本身還是可能在極端負載下掉（fork 與記下 pid 之間的縫、或 shell 版本本身的競態，
+# 三種殼實測都會漏、稱不上罕見）：那個縫用 `_ls_gap` 記下來，縫過了照樣補殺。
+#
+# **加一層分段當安全網**：`AM_LEASE_SLEEP_CHUNK`（預設 10 秒）把一次 `am_lease_sleep` 拆成好幾段背景 sleep，
+# 每段之間看一次 `$_state` 還在不在——TERM 真的整個漏光時（`_lw_term` 都沒設到），最壞也只會多活一段，
+# 不會像最早的版本那樣抱著孤兒 `sleep` 活到天荒地老。這一層本身**不影響**正常（收到 TERM）路徑的速度：
+# 常態下 `wait` 一收到訊號就交出控制權，不需要等到某一段睡滿。
+AM_LEASE_SLEEP_CHUNK=${AM_LEASE_SLEEP_CHUNK:-10}
+
 am_lease_sleep() {
-    _ls_i=0
-    while [ "$_ls_i" -lt "$1" ]; do
-        sleep 1
-        _ls_i=$((_ls_i + 1))
+    _ls_left=$1
+    while [ "$_ls_left" -gt 0 ]; do
+        _ls_step=$_ls_left
+        [ "$_ls_step" -le "$AM_LEASE_SLEEP_CHUNK" ] || _ls_step=$AM_LEASE_SLEEP_CHUNK
+        _ls_pid=""
+        _ls_gap=1
+        sleep "$_ls_step" &
+        _ls_pid=$!
+        _ls_gap=""
+        if [ -n "$_lw_term" ]; then
+            kill -KILL "$_ls_pid" 2>/dev/null
+            exit 0
+        fi
+        wait "$_ls_pid"
+        _ls_pid=""
+        _ls_left=$((_ls_left - _ls_step))
         [ -d "$_state" ] || exit 0
     done
 }
@@ -282,8 +305,10 @@ am_lease_sleep() {
 am_lease_watch() {
     _lw_shim=$$
     trap ':' HUP
-    # TERM 只是「快一點結束」的提示（會掉，見 am_lease_sleep）；前景的 `sleep 1` 結束後才會處理，最多一秒。
-    trap 'exit 0' TERM
+    _ls_pid=""
+    _ls_gap=""
+    _lw_term=""
+    trap 'if [ -n "$_ls_gap" ]; then _lw_term=1; else [ -z "$_ls_pid" ] || kill -KILL "$_ls_pid" 2>/dev/null; exit 0; fi' TERM
     # 續約請求的逾時：隔多久續一次的一半，夾在 1～5 秒（正常的 TTL 下就是 5 秒）。
     _lw_m=$((_renew_every / 2))
     [ "$_lw_m" -ge 1 ] || _lw_m=1
