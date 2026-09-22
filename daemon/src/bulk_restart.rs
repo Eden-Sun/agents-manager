@@ -24,6 +24,8 @@ pub struct Cand {
     pub name: String,
     pub kind: String,
     pub managed_by: String,
+    /// 子 agent（`managed_by = child` 或 `parent_bot_id` 非空）：pane 是父 bot 用 herdr 開的，批次不動它（SPEC §6.5a）。
+    pub child: bool,
     pub state: String,
     pub agent_status: String,
     pub has_update: bool,
@@ -37,6 +39,9 @@ pub struct Cand {
 /// `code` 給 API / 前端比對，`label` 給人看。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Skip {
+    /// 子 agent：由父 bot 用 herdr 重開，daemon 不動（2026-09-22 rollout 對 pvd／rh 下 restart，herdr 回 agent_name_taken，
+    /// 兩顆被 reconcile 退役軟刪）。
+    Child,
     DefaultSession,
     NotRunning,
     Working,
@@ -54,6 +59,7 @@ pub enum Skip {
 impl Skip {
     pub fn code(self) -> &'static str {
         match self {
+            Skip::Child => "child",
             Skip::DefaultSession => "default_session",
             Skip::NotRunning => "not_running",
             Skip::Working => "working",
@@ -68,6 +74,7 @@ impl Skip {
 
     pub fn label(self) -> &'static str {
         match self {
+            Skip::Child => "子 agent：由父 bot 用 herdr 重開，daemon 不動它的 pane（SPEC §6.5a）",
             Skip::DefaultSession => "在你自己的 herdr default session 裡，daemon 不動它的 pane",
             Skip::NotRunning => "還在啟動或關閉中",
             Skip::Working => "正在跑，重啟會把這一回合砍掉",
@@ -90,7 +97,10 @@ pub fn is_candidate(c: &Cand) -> bool {
 /// 這顆候選為什麼不能動；`None`＝可以重啟。順序即優先序，回報理由取第一個命中的（使用者最該先處理的那件）。
 /// 計畫時用一次，**輪到它真的要重啟前再用一次**（[`run_batch`]）。
 pub fn skip_reason(c: &Cand) -> Option<Skip> {
-    if c.needs_manual_install {
+    if c.child {
+        // 不是「暫時不能動」：子 agent 一律不由 daemon 重啟（SPEC §6.5a，2026-09-22）。
+        Some(Skip::Child)
+    } else if c.needs_manual_install {
         // 跟下面幾條「暫時不能動」不同，這條是「重啟了也沒用」，排最前面。
         Some(Skip::NeedsManualInstall)
     } else if c.default_session {
@@ -111,7 +121,8 @@ pub fn skip_reason(c: &Cand) -> Option<Skip> {
     }
 }
 
-/// 子 agent 也進來，走 [`crate::lifecycle::restart_child_in_pane`]（2026-09-12 使用者：三顆子 agent 全被跳過）。
+/// 子 agent 列在跳過名單（`Skip::Child`）而不是候選：2026-09-12 曾把它們納入原地重啟，2026-09-22 rollout 證明
+/// 那條路會把子 agent 弄到退役（herdr 回 agent_name_taken → 軟刪）；改回由父 bot 用 herdr 重開（SPEC §6.5a）。
 pub fn plan(cands: &[Cand]) -> (Vec<&Cand>, Vec<(&Cand, Skip)>) {
     let mut go = Vec::new();
     let mut skip = Vec::new();
@@ -131,6 +142,7 @@ async fn cand_of(app: &Arc<App>, run: &db::Run, bot: &db::Bot) -> anyhow::Result
         name: bot.name.clone(),
         kind: bot.kind.clone(),
         managed_by: bot.managed_by.clone(),
+        child: bot.managed_by == "child" || bot.parent_bot_id.as_deref().is_some_and(|p| !p.is_empty()),
         state: run.state.clone(),
         agent_status: run.agent_status.clone(),
         has_update: !notice.trim().is_empty(),
@@ -356,18 +368,17 @@ async fn restart_resuming(app: &Arc<App>, bot_id: &str) -> Restarted {
     let lookup = db::bot(&app.db, bot_id).await;
     #[cfg(test)]
     crate::lifecycle::race_point::hit("bulk_restart_after_lookup", bot_id).await;
-    let child = match lookup {
-        Ok(Some(bot)) => bot.managed_by == "child",
+    match lookup {
+        Ok(Some(bot)) if bot.managed_by == "child" || bot.parent_bot_id.as_deref().is_some_and(|p| !p.is_empty()) => {
+            // 輪到它時再看一次（計畫之後才被認領成 child 的也擋）：子 agent 一律不由 daemon 重啟（SPEC §6.5a）。
+            return Restarted::Busy(Skip::Child);
+        }
+        Ok(Some(_)) => {}
         Ok(None) => return Restarted::Busy(Skip::NoLongerPending),
         Err(e) => return Restarted::Failed(anyhow::anyhow!("讀不到 bot 的類別，這次沒有動它（重啟要靠它決定走哪一條路）：{e:#}")),
-    };
-    // 子 agent 的 pane 是父 agent 開的：關掉再開等於搬家，所以原地重啟。
-    let res = if child {
-        lifecycle::restart_child_in_pane_with(app, bot_id, true).await
-    } else {
-        // One lock hold for both halves — closes the 2026-09-10 23:02 race (see `restart_bot_with`).
-        lifecycle::restart_bot_with(app, bot_id, StartOpts { resume_native: true, require_idle: true, ..Default::default() }).await
-    };
+    }
+    // One lock hold for both halves — closes the 2026-09-10 23:02 race (see `restart_bot_with`).
+    let res = lifecycle::restart_bot_with(app, bot_id, StartOpts { resume_native: true, require_idle: true, ..Default::default() }).await;
     match res {
         Ok(run_id) => Restarted::Ok(run_id),
         Err(e) => match busy_skip(&e) {
@@ -538,6 +549,7 @@ mod tests {
             name: name.into(),
             kind: kind.into(),
             managed_by: "user".into(),
+            child: false,
             state: state.into(),
             agent_status: status.into(),
             has_update,
@@ -624,15 +636,16 @@ mod tests {
         assert_eq!(skip[0].1, Skip::NeedsManualInstall);
     }
 
-    /// 2026-09-12 使用者：三顆子 agent 全被跳過，更新永遠套不上去。
+    /// 2026-09-22：子 agent 列在跳過名單，理由 `child`，由父 bot 用 herdr 重開（推翻 2026-09-12 的「子 agent 也進來」）。
     #[test]
-    fn children_join_the_batch() {
-        let kid = Cand { managed_by: "child".into(), ..cand("kid", "claude", "running", "idle", true, false) };
+    fn children_are_listed_as_skipped_not_restarted() {
+        let kid = Cand { managed_by: "child".into(), child: true, ..cand("kid", "claude", "running", "idle", true, false) };
         let mine = cand("mine", "claude", "running", "idle", true, false);
         let cands = [kid, mine];
         let (go, skip) = plan(&cands);
-        assert_eq!(go.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["kid", "mine"]);
-        assert!(skip.is_empty(), "{skip:?}");
+        assert_eq!(go.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["mine"]);
+        assert_eq!(skip.iter().map(|(c, w)| (c.name.as_str(), *w)).collect::<Vec<_>>(), [("kid", Skip::Child)]);
+        assert_eq!(Skip::Child.code(), "child");
     }
 
     /// SPEC §6.5.1：重啟會關掉使用者的終端（2026-09-12 review #4）。
@@ -646,11 +659,11 @@ mod tests {
     }
 
     #[test]
-    fn a_busy_child_is_still_skipped_for_being_busy() {
-        let kid = Cand { managed_by: "child".into(), ..cand("kid", "claude", "running", "working", true, false) };
+    fn a_busy_child_is_skipped_for_being_a_child_first() {
+        let kid = Cand { managed_by: "child".into(), child: true, ..cand("kid", "claude", "running", "working", true, false) };
         let (go, skip) = plan(std::slice::from_ref(&kid));
         assert!(go.is_empty());
-        assert_eq!(skip[0].1, Skip::Working);
+        assert_eq!(skip[0].1, Skip::Child);
     }
 
     #[test]
@@ -786,8 +799,8 @@ mod tests {
             Restarted::Busy(_) => panic!("讀不到分類是失敗，不是跳過"),
         }
         crate::lifecycle::restart_kind_tests::assert_child_untouched(&env, &kid).await;
-        // 對照：DB 好了，同一顆走子 agent 的原地重啟（不是一般路徑）。
-        assert!(db::bot(&app.db, &kid.id).await.unwrap().is_some_and(|b| b.managed_by == "child"));
+        // 對照：DB 好了，同一顆以 child 跳過（不是一般路徑）。
+        assert!(matches!(restart_resuming(&app, &kid.id).await, Restarted::Busy(Skip::Child)));
     }
 
     /// 驗收二：child 只走原地重啟、一般 bot 照舊 stop + start；分類的那顆已經不在了是跳過。
@@ -797,13 +810,16 @@ mod tests {
         let app = env.app.clone();
         let kid = crate::lifecycle::restart_kind_tests::live_child(&env, "ui").await;
         let since = env.herdr.methods().len();
+        // 子 agent：輪到它時跳過（Skip::Child），一個 herdr 呼叫都沒有、run 不動、bot 不被軟刪（2026-09-22 rollout 的事故）。
         match restart_resuming(&app, &kid.id).await {
-            Restarted::Ok(run_id) => assert_ne!(run_id, kid.run_id, "原地重啟換了一個新的 run"),
-            Restarted::Failed(e) => panic!("子 agent 應該在原 pane 裡回來：{e:#}"),
-            Restarted::Busy(w) => panic!("不該被跳過：{}", w.code()),
+            Restarted::Busy(Skip::Child) => {}
+            Restarted::Busy(w) => panic!("子 agent 必須以 child 跳過，不是 {}", w.code()),
+            Restarted::Ok(_) => panic!("子 agent 不能被重啟"),
+            Restarted::Failed(e) => panic!("子 agent 應該是跳過，不是失敗：{e:#}"),
         }
-        let calls = env.herdr.methods();
-        assert!(!calls[since..].iter().any(|m| m == "pane.close"), "子 agent 的 pane 不能被關：{:?}", &calls[since..]);
+        assert_eq!(env.herdr.methods().len(), since, "子 agent 沒有任何 herdr 呼叫");
+        crate::lifecycle::restart_kind_tests::assert_child_untouched(&env, &kid).await;
+        assert!(db::bot(&app.db, &kid.id).await.unwrap().unwrap().deleted_at.is_none());
         assert!(env.herdr.tab(&kid.tab_id).unwrap().panes.contains(&kid.pane_id));
 
         // 一般 bot：stop + start（這裡身分不存在，start 一定失敗，證明走的是 restart_bot_with 那一條）。
@@ -816,6 +832,66 @@ mod tests {
         }
         // 不存在的 bot：排到它時已經不用重啟，是跳過。
         assert!(matches!(restart_resuming(&app, "no-such-bot").await, Restarted::Busy(Skip::NoLongerPending)));
+    }
+
+
+    /// herdr 回 agent_name_taken（舊 agent 還掛在原 pane）：不能留成「沒有 active run」讓 reconcile 退役軟刪（2026-09-22）。
+    #[tokio::test]
+    async fn a_name_taken_restart_keeps_the_child_alive_with_a_running_run() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let kid = crate::lifecycle::restart_kind_tests::live_child(&env, "pvd").await;
+        env.herdr.fail_next("agent.start", crate::testing::Fault::RefuseWith("agent_name_taken"));
+        let err = lifecycle::restart_child_in_pane_with(&app, &kid.id, true).await.expect_err("名字被占，重啟沒成功");
+        match err {
+            lifecycle::LcError::Conflict(v) => assert_eq!(v["reason"], "agent_name_taken", "{v}"),
+            other => panic!("{other:?}"),
+        }
+        let bot = db::bot(&app.db, &kid.id).await.unwrap().unwrap();
+        assert!(bot.deleted_at.is_none(), "bot 不能被軟刪");
+        let run = db::active_run(&app.db, &kid.id).await.unwrap().expect("要有 active run，reconcile 才不會把它當退役");
+        assert_eq!(run.state, "running");
+        assert!(env.herdr.tab(&kid.tab_id).unwrap().panes.contains(&kid.pane_id), "pane 沒被關");
+
+        // Expire the temporary restart hand-off guard so this specifically exercises the permanent name-taken hold.
+        sqlx::query("UPDATE supervisor_notes SET body='2000-01-01T00:00:00.000Z' WHERE supervisor_id=? AND kind='child_retirement_grace'")
+            .bind(&kid.id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        crate::reconcile::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+        let bot = db::bot(&app.db, &kid.id).await.unwrap().unwrap();
+        assert!(bot.deleted_at.is_none(), "reconcile must not retire a child after agent_name_taken");
+        let reason: String = sqlx::query_scalar("SELECT body FROM supervisor_notes WHERE supervisor_id=? AND kind='child_retirement_hold' ORDER BY created_at DESC, rowid DESC LIMIT 1")
+            .bind(&kid.id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert!(reason.contains("agent_name_taken") && reason.contains("ownership is uncertain"), "persist the fail-closed reason: {reason}");
+    }
+
+    #[tokio::test]
+    async fn spawn_reports_a_child_as_skipped() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let kid = crate::lifecycle::restart_kind_tests::live_child(&env, "rh").await;
+        // The explicit parent relationship alone is enough to make it a child, even if managed_by drifted.
+        sqlx::query("UPDATE bots SET managed_by='user' WHERE id=?").bind(&kid.id).execute(&app.db).await.unwrap();
+        mark_update_pending(&app, &kid.run_id).await;
+        let mut events = app.subscribe();
+
+        let result = spawn(&app).await.unwrap();
+        assert_eq!(result["total"], 0);
+        assert!(result["planned"].as_array().unwrap().is_empty());
+        let skipped = result["skipped"].as_array().unwrap();
+        assert_eq!(skipped.len(), 1, "{result}");
+        assert_eq!(skipped[0]["bot_id"], kid.id);
+        assert_eq!(skipped[0]["reason"], "child");
+        assert!(skipped[0]["reason_label"].as_str().unwrap().contains("父 bot"));
+        let done = events.try_recv().expect("empty batch emits done");
+        assert_eq!(done.kind, "bots_restart_done");
+        assert_eq!(done.data["skipped"][0]["bot_id"], kid.id);
+        assert_eq!(done.data["skipped"][0]["reason"], "child");
     }
 
     /// 驗收四：批次裡一顆分類失敗不中斷整批——它與後面那顆各自列在 `failed`，子 agent 沒被動、也沒有被記成跳過。
@@ -851,13 +927,18 @@ mod tests {
             }
         }
         let done = done.expect("done 一定會送");
+        // 2026-09-22 起輪到它時先重讀狀態：讀不到就是「這次沒動它」（state_unreadable），讀到了就是 child——
+        // 兩種都在 skipped、都不動它；後面那顆照跑、照列在 failed。
         let failed = done["failed"].as_array().unwrap();
-        assert_eq!(failed.len(), 2, "{done}");
-        assert_eq!(failed[0]["bot_id"], kid.id.as_str());
-        assert!(failed[0]["error"].as_str().unwrap().contains("讀不到 bot 的類別"), "{done}");
-        assert_eq!(failed[1]["bot_id"], other.as_str(), "後面那顆照跑、照列");
-        assert!(done["ok"].as_array().unwrap().is_empty() && done["skipped"].as_array().unwrap().is_empty(), "{done}");
+        assert_eq!(failed.len(), 1, "{done}");
+        assert_eq!(failed[0]["bot_id"], other.as_str(), "後面那顆照跑、照列");
+        let skipped = done["skipped"].as_array().unwrap();
+        assert_eq!(skipped.len(), 1, "{done}");
+        assert_eq!(skipped[0]["bot_id"], kid.id.as_str());
+        assert!(matches!(skipped[0]["reason"].as_str(), Some("state_unreadable" | "child")), "{done}");
+        assert!(done["ok"].as_array().unwrap().is_empty(), "{done}");
         crate::lifecycle::restart_kind_tests::assert_child_untouched(&env, &kid).await;
+        assert!(db::bot(&app.db, &kid.id).await.unwrap().unwrap().deleted_at.is_none());
     }
 
     /// 輪到它時 DB 讀不到它的狀態：是「這次沒動它」，不是「已經不用重啟」（那會讓人以為更新套上了）。

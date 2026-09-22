@@ -169,7 +169,7 @@ config.toml 裡沒有的 id（child、已刪）忽略。成功推 `project_chang
 |---|---|---|---|
 | POST | `/api/bots/{id}/start` | — | `200 {"run_id"}`；已有 active Run → `409 {"reason":"active run already exists","run_id"}`；`herdr_session = "default"` 的 bot（SPEC §6.5.1）→ `409 {"reason":"default_session"}`；herdr 失敗 502；agent 起來了但 `running` 寫不進去 → `503 start_state_uncommitted`（SPEC §6.2 第 7 步） |
 | POST | `/api/bots/{id}/start?resume=native` | — | 接回 DB 記的原生對話（SPEC §6.5.2）：`200 {"run_id","resumed","session_id","resume_outcome"}`（`resumed` 照 `runs.resume_outcome` 說：`verified`→`true`＋回報的 session；`mismatch`→`false`、`session_id:null`；還沒回報或 `unverified`→`true`＋帶出去的 session；這次沒帶 `--resume`→`false`。不看 SessionStart 一到就清掉的 `resume_session_id`，issue #107）；接不回**不啟動**、不開新對話 → `409 {"reason":"cannot_resume","resumed":false,"resume_reason":"no_session_id"|"transcript_missing"|"unsupported_kind","bot_id"}`，由呼叫端決定要不要改成不帶 `resume` 重送。`resume` 只認 `native`，其他值 400。**救援**：`&session=<id>` 指名接回這一段、不看 DB 記的（DB 被別種 provider 的 hook 蓋錯時，2026-09-22）；只跟 `resume=native` 一起收、只收 `[A-Za-z0-9._-]{1,128}`，否則 400；只有 `bin/agm bot start|restart --resume native --session <id>` 露出，網頁沒有 |
-| POST | `/api/bots/{id}/start`／`restart`（子 agent） | — | `parent_bot_id` 非空一律 `409 {"reason":"child_restart_forbidden","parent_bot_id"}`：子 agent 由父 bot 用 herdr 重開，daemon 不代開（2026-09-22）。一鍵重啟（§6.9）走內部原地重啟，不受影響 |
+| POST | `/api/bots/{id}/start`／`restart`（子 agent） | — | `parent_bot_id` 非空一律 `409 {"reason":"child_restart_forbidden","parent_bot_id"}`：子 agent 由父 bot 用 herdr 重開，daemon 不代開（2026-09-22）。一鍵重啟（§6.9）也把子 agent 列在 `skipped`（理由 `child`） |
 | POST | `/api/bots/{id}/stop` | — | `200 {}`；沒有 Run（或讀完之後已被 pane-exit 收掉）→ `204`。default session 的 bot 只送 ctrl+c、不關 pane。`stopping` 寫不進去 → 502，什麼都沒動；in-flight Turn 寫不進 failed → `503 {"error":"turn_state_unwritable","run_id","turn_id","retryable":true}`＋`Retry-After`，什麼都沒動（run 放回 running）；agent 沒停下來或問不到 herdr → `502`，message 以 `stop_not_confirmed` 開頭，run 不記成停止（還活著就放回 running）；停了但 `stopped` 寫不進去 → `503 stop_state_uncommitted`（SPEC §6.4） |
 | POST | `/api/bots/{id}/interrupt` | `{"turn_id"?}` | `200 {}`（送 `esc`，in-flight Turn 標 failed）；herdr 拒收 `esc` → 502，Turn 維持 in-flight；`esc` 送出但 herdr 沒回：本機 claude／codex 的 log 裡已經有這次的中斷紀錄 → 照 `200 {}`（#223：claude 2.1.276+ 按 Esc 不送任何 hook），還看不到 → `409 {"reason":"interrupt_unconfirmed","turn_id","esc_sent":"unknown","retryable":true}`，Turn 維持 in-flight、等 log 裡的中斷紀錄（或回聲）；`esc` 生效但 Turn 狀態寫不進去 → `503 {"error":"interrupt_state_uncommitted","run_id","turn_id","esc_sent":true,"retryable":true}`（daemon 自己補，重試不再按 `esc`）；帶 `turn_id` 而那一筆已不在飛 → `409 {"reason":"turn_not_in_flight","turn_id","in_flight_turn_id","esc_sent":false}`，不按 `esc`。見 SPEC §6.4 |
 | POST | `/api/bots/{id}/abort` | — | `200 {"aborted":["<turn_id>",…],"keys_sent":true,"key_error":null}`，見 §4.2 |
@@ -1084,6 +1084,9 @@ codex 的 `fast` **不再因為不知道現況而拒絕**（拿掉 `unknown_fast
 202 { "batch_id": "01M2…", "total": 2,
       "planned": [{"bot_id":"01M1…","name":"am-claude"}, {"bot_id":"01M1…","name":"C1-fable"}],
       "skipped": [{"bot_id":"01M1…","name":"am-claude-2","reason":"working","reason_label":"正在跑，重啟會把這一回合砍掉"}] }
+```
+`reason`：`child`（子 agent，由父 bot 用 herdr 重開，SPEC §6.5a；2026-09-22）、`default_session`、`not_running`、`working`、`blocked`、`unknown_status`、`turn_in_flight`、`needs_manual_install`、`no_longer_pending`、`state_unreadable`。
+```
 ```
 
 - **202**：回的是計畫，重啟在背景一顆一顆跑。`total = 0` 也是 202，並立刻推 `bots_restart_done`。
