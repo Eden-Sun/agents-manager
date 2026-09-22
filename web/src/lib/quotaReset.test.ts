@@ -38,3 +38,15 @@ test('週窗口 24 小時內就寫倒數（使用者 2026-09-17）', () => {
   assert.equal(resetBadge(0, inHours(4), now), null)
   assert.equal(resetBadge(5, inHours(1), now), null)
 })
+
+test('remainingPct 與 now 必須是有限數值才顯示倒數', () => {
+  for (const remainingPct of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+    assert.equal(resetBadge(remainingPct, at(3, 25), now), null, `5h remainingPct=${remainingPct}`)
+    assert.equal(resetBadge(remainingPct, at(3, 25), now, RULE_WEEKLY), null, `weekly remainingPct=${remainingPct}`)
+  }
+
+  for (const invalidNow of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+    assert.equal(resetBadge(0, at(3, 25), invalidNow), null, `5h now=${invalidNow}`)
+    assert.equal(resetBadge(9, at(3, 25), invalidNow, RULE_WEEKLY), null, `weekly now=${invalidNow}`)
+  }
+})
