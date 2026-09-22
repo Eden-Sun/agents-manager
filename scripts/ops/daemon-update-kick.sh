@@ -494,7 +494,12 @@ TMP=$(mktemp)
 cat "$DIR/daemon-update-task.md" > "$TMP" 2>/dev/null || true
 {
   printf '\n---\n'
-  printf 'origin/main %s。核准 %s，rebuild 租約 fence %s（owner %s）。\n' "$HEAD_SHA" "$APPROVAL" "$LEASE" "$OWNER"
+  # 派工目標是**核准的那個 commit**，不是派工當下的 HEAD：兩者不同時（沿用核准的 docs-only 情形）建 HEAD 等於
+  # 建一個沒審過的版本（2026-09-22：核准 513f2320、建了 69010d72）。HEAD 動到要建的東西時上面已改成重新申請，不會到這裡。
+  printf '要建、要重啟的 commit：%s（核准 %s 針對的就是它）。rebuild 租約 fence %s（owner %s）。\n' "$APPR_COMMIT" "$APPROVAL" "$LEASE" "$OWNER"
+  if [ "$APPR_COMMIT" != "$HEAD_SHA" ]; then
+    printf 'origin/main 現在是 %s，多出來的 commit 只動到不進 binary 的檔；仍然 checkout %s 來建，restart 核准也申請 %s，不要拿 HEAD。\n' "$HEAD_SHA" "$APPR_COMMIT" "$APPR_COMMIT"
+  fi
   [ -n "$ESC_NOTE" ] && printf '%s\n' "$ESC_NOTE"
   # shellcheck disable=SC2016  # 單引號是刻意的：反引號與 %s 都是要原樣印出去的文字
   printf '做完請回報，並用 `bin/agm lease release rebuild --owner %s --fence %s%s` 交還窗口；\n' "$OWNER" "$LEASE" "$TOKEN_TEXT"
@@ -502,10 +507,10 @@ cat "$DIR/daemon-update-task.md" > "$TMP" 2>/dev/null || true
   printf '需要重啟正式 daemon 另外申請 restart 核准與租約，替換前請 AGM 重驗所有使用者與排程回合。\n'
 } >> "$TMP"
 if "$AGM" --compact assign --bot "$BOT" --text-file "$TMP" \
-     --request-id "agm-daemon-update-$HEAD_SHA" ${REVIEW[@]+"${REVIEW[@]}"} \
+     --request-id "agm-daemon-update-$APPR_COMMIT" ${REVIEW[@]+"${REVIEW[@]}"} \
      --owns daemon --owns web --owns Cargo.lock >> "$LOG" 2>&1; then
   echo "$HEAD_SHA" > "$STATE"
-  log "已派工 agm-daemon-update-$HEAD_SHA"
+  log "已派工 agm-daemon-update-${APPR_COMMIT}（origin/main ${HEAD_SHA}）"
 else
   note_fail "派工失敗，交還窗口"
   # shellcheck disable=SC2086  # TOKEN_ARG 是刻意要拆成兩個參數的（沒有 token 時是空字串）
