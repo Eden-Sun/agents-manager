@@ -1612,8 +1612,11 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   async loadQuota() {
+    const epoch = nextQuotaSnapshotEpoch()
     try {
-      set({ quota: await api.fetchQuota() })
+      const quota = await api.fetchQuota()
+      if (epoch !== quotaSnapshotEpoch) return
+      set({ quota })
     } catch {
       /* keep what it had */
     }
@@ -2170,6 +2173,12 @@ async function identityAuth(set: SetFn, get: GetFn, host: string, identity: stri
 let disconnect: (() => void) | null = null
 let quotaSweep: ReturnType<typeof setInterval> | null = null
 const QUOTA_SWEEP_MS = 5 * 60_000
+/** 只套用最新 quota snapshot；較舊的 GET 不得蓋掉後來的 GET 或 WS 更新。 */
+let quotaSnapshotEpoch = 0
+function nextQuotaSnapshotEpoch(): number {
+  quotaSnapshotEpoch += 1
+  return quotaSnapshotEpoch
+}
 
 function connectSocket(set: SetFn, get: GetFn) {
   disconnect?.()
@@ -2474,6 +2483,7 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
       // v4.0: `{kind, host, quota}` (or a whole `{kinds}` map). `kind` 是完整的 map key，
       // 遠端主機帶 `<host>/` 前綴（SPEC §14）。
       if (!isRec(data)) return
+      nextQuotaSnapshotEpoch()
       const kinds = pick(data, 'kinds')
       if (isRec(kinds)) {
         set((s) => ({
