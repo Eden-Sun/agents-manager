@@ -1159,6 +1159,20 @@ herdr server 重啟會讓**所有** pane 同時消失。照 §6.5 的規則，�
 5. herdr 自己的 `[session] resume_agents_on_restore` 要關掉：它會在 pane 裡打不帶 daemon 參數（`--settings`、權限旗標、帳號環境）的 `claude --resume`，
    跟 daemon 的接回撞成兩份。子 agent 仍由父 agent 重開（`start` 對子 agent 一律拒絕，§6.5a）。
 
+**升級後本機網路驗收（2026-09-22）**：herdr 是 Homebrew 的 adhoc 簽章，每次升級簽章 identifier 都換：
+0.8.2＝`herdr-c2fd8e7c703fc4e`，0.9.1＝`herdr-1672acdeb8e5ac40`。macOS「本機網路」授權綁 identifier；
+9/20 升 0.9.1 後，herdr 底下所有非 Apple 程式（node、psql、bun）連區網都 EHOSTUNREACH，直到 09-22
+授權表出現 0.9.1 的項目才恢復。Apple 內建的 `/usr/bin/nc`、`/usr/bin/python3`、curl 不受本機網路權限約束、
+一定會通，**不能拿來驗**；必須從 herdr pane 用 node（或 Homebrew 的 psql）連區網主機。
+
+升級窗口完成後，依序以新 binary 執行 `codesign -dv` 取 identifier、用不需 sudo 的
+`plutil -p /Library/Preferences/com.apple.networkextension.plist` 查該 identifier、再用 node 連區網
+（預設例：`192.168.1.1:80`）。可用 `scripts/ops/herdr-lan-check.sh`，三步各自回報；node 不在時明確 `SKIP`，
+不算通過。live-handoff 與 `launchctl submit` 起的全新 server 都**不會**讓授權出現；要使用者在
+「系統設定 → 隱私權與安全性 → 本機網路」允許，或在真正的 launchd bootstrap 後按下詢問的允許。
+任何一步沒通或 skip 都停下，回報「需要使用者授權本機網路」，不要靠重啟硬試；授權完成後從同一個 herdr pane 重跑，
+通過前不得宣告升級完成。
+
 ### 6.5a 子 agent 認領（提示優先，其次血緣）
 
 一個 bot 一個 tab。對帳的逐 bot 迴圈走完後，`agent.list` 裡**沒有 bot 認領**的 agent 依序試三條線索：
