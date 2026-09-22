@@ -566,10 +566,13 @@ codex 的「這一版該不該採用／要提防什麼」走**另一條已經支
 `state`：`none`（還沒派，UI 顯示按鈕）｜`pending`（派了還沒結論）｜`done`（`result` 就是結論原文）。
 只有空白的回覆算 `pending`——對方還沒講東西不該顯示成有結論。
 
-結論從**收件匣事件的回合**讀（`supervisor_inbox.notify_turn_id` → 那個回合的最後一則 assistant 訊息），
-不是從 assignment：派給 AGM 角色（協調者／巡檢）的工作一律走交接佇列，那條路**不會產生 assignment**，
-`result` 永遠是空的（2026-09-19 上線後實測，視窗一直停在「還沒派」）。按鈕派的（`…-ui`）與 kick 派的
-（不帶 `-ui`）兩個 crid 都查，同一版誰先派結論都算數。
+**先看 assignment，沒有能用的才退回收件匣事件**（issue #394，2026-09-23）：目標若是一般 bot（不是走交接
+佇列的 AGM 角色），派的是 `supervisor_assignments`，不是收件匣事件；沿 `followup_assignment_id`（換手／
+接續重派）走到鏈尾——`completed` 就是 `done`＋`result`，還活著（`queued`／`delivered`／`awaiting_review`／
+`blocked`／`quota_blocked`）是 `pending`，鏈尾是 `superseded`／`failed`／`cancelled`（真的死路）就當沒有這條，
+繼續查下一個 crid。按鈕派的（`…-ui`）與 kick 派的（不帶 `-ui`）兩個 crid 都查，同一版誰先有結論都算數。
+兩邊都沒有能用的 assignment，才退到收件匣事件那條路：`supervisor_inbox.notify_turn_id` → 那個回合的最後
+一則 assistant 訊息（派給 AGM 角色一律走交接佇列，不會有 assignment，2026-09-19 上線後實測踩過）。
 
 ### `POST /api/claude-update/review`
 `{host?, from?, to?}`（預設 `host=local`、`to`＝磁碟上那一版）。把這一版的 changelog 組成交辦派給**協調者**，
@@ -587,6 +590,10 @@ codex 的「這一版該不該採用／要提防什麼」走**另一條已經支
 - 按鈕用**自己的** `client_request_id`：`agm-claude-release-<版本>-ui`（kick 用不帶 `-ui` 的那個）。
   分開是因為 kick 走 AGM 收件匣的 `bot_request`，那條路沒有 assignment，**結論無處可讀**；走自己的交辦
   才有 `result` 能回填到更新框。同一版重按仍然只有一筆，回應帶 `duplicate:true` 與當下的 `review` 狀態。
+- **冪等判斷跟 `GET` 是同一套**（issue #394）：那個 crid 沿 supersede 鏈還活著或已完成，就直接回它
+  （`duplicate:true`），不重派；**全部都是 superseded／failed（鏈走到死路）才真的重派**——這時候原本的
+  `…-ui` crid 已經被死掉的那筆佔住，換一個沒人用過的（`…-ui-r2`、`…-ui-r3`…），並把新的一筆接在死路
+  的鏈尾之後（`follow_up_of`）：不接的話，下次 `GET` 沿舊 crid 找還是只會走到那條死路，看不到新派的這筆。
 - （舊行為，仍保留在回應裡）`client_request_id` 曾與 kick 共用 `agm-claude-release-<版本>`。同一版已經派過時**在送出之前**
   就回 `duplicate:true`——**兩個地方都查**：既有的 assignment（回 `assignment_id`），以及 AGM 收件匣裡同一個
   crid 的 `bot_request`（回 `inbox_event_id`；kick 是走收件匣派的，那一步還沒有 assignment，不查就會撞上

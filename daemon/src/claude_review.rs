@@ -165,6 +165,27 @@ pub fn request_id(to: &str) -> String {
     format!("agm-claude-release-{to}")
 }
 
+/// 這次要怎麼派：第一次是 [`ui_request_id`]、沒有父筆；那個 crid 已經被（一定是死路的——走到這裡代表
+/// [`review_state`] 判定沒有活著或完成的）舊 assignment 佔住時，`assign()` 靠 crid 冪等地回那一筆舊的，
+/// 等於什麼都沒送出去（issue #394 的重按沒反應）。這時候：①換一個沒人用過的 crid（`-r2`、`-r3`…）；
+/// ②把新的一筆接在死路的鏈尾之後（`follow_up_of`）——不這樣接的話，下次 [`review_state`] 沿舊 crid 找
+/// 還是只會走到那條死路，看不到新派的這筆（換 crid 不等於換得到「查得到」）。
+async fn redispatch_target(app: &Arc<App>, to: &str) -> (String, Option<String>) {
+    let base = ui_request_id(to);
+    let Some(head) = crate::supervisor::store::assignment_by_crid(&app.db, &base).await.ok().flatten() else {
+        return (base, None);
+    };
+    let tail = latest_in_chain(app, head).await;
+    for n in 2..1000 {
+        let candidate = format!("{base}-r{n}");
+        if crate::supervisor::store::assignment_by_crid(&app.db, &candidate).await.ok().flatten().is_none() {
+            return (candidate, Some(tail.id));
+        }
+    }
+    // 一千次重派？不會真的發生；有個終點比 panic 或死迴圈安全。
+    (format!("{base}-r{}", crate::db::now()), Some(tail.id))
+}
+
 /// 使用者按鈕派的那一筆。
 ///
 /// **跟 kick 分開**（2026-09-19 使用者：「解析結果直接在更新視窗 show 出」）：kick 走的是 AGM 的
@@ -175,7 +196,7 @@ pub fn ui_request_id(to: &str) -> String {
     format!("agm-claude-release-{to}-ui")
 }
 
-/// 這一版的解析現在到哪了：`none`（還沒派）／`pending`（派了還沒結論）／`done`（有結論）。
+/// 這一版的解析現在到哪了：`none`（還沒派，或全部都被取代／失敗，可以重派）／`pending`（派了還沒結論）／`done`（有結論）。
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ReviewState {
     pub state: &'static str,
@@ -187,13 +208,65 @@ pub struct ReviewState {
     pub result: Option<String>,
 }
 
+/// 沿 `followup_assignment_id` 一路走到鏈尾（沒有 followup 的那一筆）。重試（換手、撞限接回）
+/// 都是同一個 `client_request_id` 建一筆新的、把舊的標成 `superseded` 並用這個欄位指過去
+/// （`supervisor::store::review_with_followup`）；鏈可能好幾層（`-ui` → `-ui-f1` → `-ui-f2`…）。
+async fn latest_in_chain(app: &Arc<App>, a: crate::supervisor::store::Assignment) -> crate::supervisor::store::Assignment {
+    let mut cur = a;
+    // 鏈本身沒有理論上限，用個保守的圈數擋掉萬一寫壞的環（不讓這支請求掛住）。
+    for _ in 0..50 {
+        let Some(next_id) = cur.followup_assignment_id.clone() else { break };
+        match crate::supervisor::store::assignment(&app.db, &next_id).await {
+            Ok(Some(next)) => cur = next,
+            _ => break,
+        }
+    }
+    cur
+}
+
+/// assignment 這條路能不能給出一個 [`ReviewState`]：`completed` → `done`；還活著（`OPEN_STATES`）→
+/// `pending`；其餘（`superseded`／`failed`／`cancelled`…鏈尾走到這裡就是真的死路）→ `None`，
+/// 呼叫端當「這一版還沒有能用的交辦」，允許重派。
+async fn state_from_assignment(app: &Arc<App>, a: &crate::supervisor::store::Assignment) -> Option<ReviewState> {
+    let target_bot_name = crate::db::bot(&app.db, &a.target_bot_id).await.ok().flatten().map(|x| x.name);
+    if a.status == "completed" {
+        return Some(ReviewState {
+            state: "done",
+            assignment_id: Some(a.id.clone()),
+            target_bot_name,
+            asked_at: Some(a.created_at.clone()),
+            answered_at: a.completed_at.clone(),
+            result: a.result.clone(),
+        });
+    }
+    if crate::supervisor::store::OPEN_STATES.contains(&a.status.as_str()) {
+        return Some(ReviewState {
+            state: "pending",
+            assignment_id: Some(a.id.clone()),
+            target_bot_name,
+            asked_at: Some(a.created_at.clone()),
+            answered_at: None,
+            result: None,
+        });
+    }
+    None
+}
+
 /// 讀這一版的解析狀態。`GET /api/claude-update/review` 與 POST 的回應都用它。
 ///
-/// 結論從**收件匣事件的回合**讀，不是從 assignment：派給 AGM 角色（協調者／巡檢）的工作一律走
-/// 交接佇列（`supervisor::assign` → `bot_requests::queue`），根本不會有 assignment，`result` 永遠
-/// 是空的——2026-09-19 上線後實測，視窗一直停在「還沒派」。那筆事件處理完會帶 `notify_turn_id`，
-/// 對方在那個回合裡講的話就是結論。
+/// 先看 assignment（使用者按鈕、或 `claude-release-kick.sh` 派的都各自有一筆），沿 supersede 鏈
+/// 找到最新那一筆——2026-09-23 實測：原本只認收件匣事件，目標若是一般 bot（不是走交接佇列的
+/// AGM 角色）根本不會有那則事件，永遠回 `none`；重按也被舊的（已 superseded）那筆擋住冪等，
+/// 派不出新的（issue #394）。assignment 找不到能用的（都是 superseded／failed，或整個沒派過）
+/// 才退回收件匣那條路：派給 AGM 角色的工作走交接佇列，沒有 assignment，結論在那個回合的訊息裡。
 pub async fn review_state(app: &Arc<App>, to: &str) -> ReviewState {
+    for crid in [ui_request_id(to), request_id(to)] {
+        let Ok(Some(a)) = crate::supervisor::store::assignment_by_crid(&app.db, &crid).await else { continue };
+        let latest = latest_in_chain(app, a).await;
+        if let Some(state) = state_from_assignment(app, &latest).await {
+            return state;
+        }
+    }
     // 自己派的那筆優先；沒有就看 kick 派的（同一版，結論一樣算數）。
     let mut row: Option<(String, Option<String>, Option<String>, String)> = None;
     for crid in [ui_request_id(to), request_id(to)] {
@@ -301,12 +374,11 @@ pub async fn post_review(State(app): State<Arc<App>>, Json(b): Json<ReviewIn>) -
                    "message": "找不到 claude-release-task.md（AGM 目錄或 repo 的 scripts/ops/ 都沒有）。照 scripts/ops/README.md 安裝之後再按一次。"}),
         ));
     };
-    let crid = ui_request_id(&to);
-    // 這一版已經派過（使用者剛按過）：**直接回既有那一筆**，不要再送一次。
-    // `post_assignment` 對「同一個 crid、不同正文」是 409 `text_mismatch`，而 kick 與這顆按鈕的正文
-    // 本來就差一句觸發來源——不短路的話，kick 先派過再按按鈕會變成錯誤，而不是「已經派過」
-    // （協調者 2026-09-19）。
-    // 已經有自己的那一筆就回它（含目前的解析狀態），不再派第二次。
+    // 這一版已經有能用的交辦了（自己派的、kick 派的，或 assignment 的 supersede 鏈上最新那一筆還活著／
+    // 已完成）：**直接回它**，不要再送一次。冪等判斷跟 [`review_state`] 是同一套（issue #394：原本各查
+    // 各的，assignment 完成了視窗卻還在說「還沒派」）。全部都是 superseded／failed（鏈走到死路）才重派——
+    // `post_assignment` 對「同一個 crid、不同正文」是 409 `text_mismatch`，而 kick 與這顆按鈕的正文本來
+    // 就差一句觸發來源，不短路的話會變成錯誤而不是「已經派過」（協調者 2026-09-19）。
     let state = review_state(&app, &to).await;
     if state.state != "none" {
         return Ok(Json(json!({
@@ -317,6 +389,7 @@ pub async fn post_review(State(app): State<Arc<App>>, Json(b): Json<ReviewIn>) -
             "sections": reply.sections.len(),
         })));
     }
+    let (crid, follow_up_of) = redispatch_target(&app, &to).await;
     let text = task_text(
         &task_md,
         &to,
@@ -325,26 +398,24 @@ pub async fn post_review(State(app): State<Arc<App>>, Json(b): Json<ReviewIn>) -
         &reply.source_url,
         &versions_dir(),
     );
-    let out = crate::supervisor::api::post_assignment(
-        State(app.clone()),
-        axum::http::HeaderMap::new(),
-        Json(crate::supervisor::api::AssignIn {
-            target_bot_id: target.id.clone(),
-            text,
-            client_request_id: crid.clone(),
-            source_turn_id: None,
-            ownership: Vec::new(),
-            kind: None,
-            expects_review: None,
-            review_role: None,
-            mission_id: None,
-            role: None,
-            ack: false,
-            reply_to: None,
-        }),
+    // 直接走 `supervisor::assign`（不是 `post_assignment` 那層 HTTP handler）：重派時要把新的一筆接在
+    // 死路的鏈尾之後（`follow_up_of`），`AssignIn` 沒有這個欄位——那是給外部呼叫端用的，這個接續是
+    // daemon 自己內部判斷出來的，不該讓使用者也塞得進去。
+    crate::supervisor::assign(
+        &app,
+        &target.id,
+        &text,
+        &crid,
+        None,
+        &[],
+        follow_up_of.as_deref(),
+        true,
+        None,
+        None,
+        None,
+        crate::supervisor::bot_requests::ReplyMark::default(),
     )
     .await?;
-    let _ = out;
     Ok(Json(json!({
         "version": to,
         "from_version": reply.from_version,
@@ -558,6 +629,141 @@ mod tests {
         assert_eq!(inbox_event_for(&app, "2.1.277").await.as_deref(), Some(id.as_str()));
         // 別的版本不受影響。
         assert!(inbox_event_for(&app, "2.1.278").await.is_none());
+    }
+
+    /// bots 資料表插一顆最基本的 claude bot，供這幾條測試建 assignment 用。
+    async fn a_bot(app: &Arc<App>, project_id: &str, id: &str) {
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, created_at)
+             VALUES (?,?,?,'claude','[]',0,1,?,?)",
+        )
+        .bind(id).bind(project_id).bind(id).bind(format!("tok-{id}")).bind(crate::db::now())
+        .execute(&app.db).await.unwrap();
+    }
+
+    /// issue #394 情境 1：目標是一般 bot，走 `supervisor_assignments`，**沒有**收件匣事件那條路。
+    /// 舊版只讀收件匣，這種目標永遠回 `none`，結論顯示不出來。
+    #[tokio::test]
+    async fn an_assignment_with_no_inbox_event_still_reports_its_state() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        a_bot(&app, &e.project_id, "resp1").await;
+        a_bot(&app, &e.project_id, "patrol1").await;
+        crate::supervisor::store::get_or_init(&app.db).await.unwrap();
+        sqlx::query("UPDATE supervisors SET bot_id='patrol1' WHERE id=?")
+            .bind(crate::supervisor::store::SUPERVISOR_ID).execute(&app.db).await.unwrap();
+
+        assert_eq!(review_state(&app, "2.1.280").await.state, "none");
+
+        crate::supervisor::assign(
+            &app, "resp1", "解析一下", &ui_request_id("2.1.280"), None, &[], None, true, None, None, None,
+            crate::supervisor::bot_requests::ReplyMark::default(),
+        )
+        .await
+        .unwrap();
+        let pending = review_state(&app, "2.1.280").await;
+        assert_eq!(pending.state, "pending");
+        assert_eq!(pending.target_bot_name.as_deref(), Some("resp1"));
+        assert!(pending.result.is_none());
+
+        let a = existing_for(&app, "2.1.280").await.unwrap();
+        assert!(a.is_none(), "existing_for 只查 kick 那個 crid，這筆是按鈕自己的 -ui");
+        let mine = crate::supervisor::store::assignment_by_crid(&app.db, &ui_request_id("2.1.280")).await.unwrap().unwrap();
+        sqlx::query("UPDATE supervisor_assignments SET status='completed', result=?, completed_at=? WHERE id=?")
+            .bind("2.1.280 沒有值得跟進的東西。").bind(crate::db::now()).bind(&mine.id)
+            .execute(&app.db).await.unwrap();
+        let done = review_state(&app, "2.1.280").await;
+        assert_eq!(done.state, "done");
+        assert_eq!(done.result.as_deref(), Some("2.1.280 沒有值得跟進的東西。"));
+        assert_eq!(done.assignment_id.as_deref(), Some(mine.id.as_str()));
+    }
+
+    /// issue #394 情境 2：`-ui` 被 supersede 成 `-ui-f1`（不同 crid，靠 `followup_assignment_id` 串起來），
+    /// `-ui-f1` 已經 completed。按鈕要沿鏈找到它，不能停在已經 superseded 的原筆。
+    #[tokio::test]
+    async fn a_supersede_chain_reports_the_completed_leaf_not_the_superseded_head() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        a_bot(&app, &e.project_id, "resp1").await;
+        a_bot(&app, &e.project_id, "patrol1").await;
+        crate::supervisor::store::get_or_init(&app.db).await.unwrap();
+        sqlx::query("UPDATE supervisors SET bot_id='patrol1' WHERE id=?")
+            .bind(crate::supervisor::store::SUPERVISOR_ID).execute(&app.db).await.unwrap();
+
+        crate::supervisor::assign(
+            &app, "resp1", "解析一下", &ui_request_id("2.1.280"), None, &[], None, true, None, None, None,
+            crate::supervisor::bot_requests::ReplyMark::default(),
+        )
+        .await
+        .unwrap();
+        let head = crate::supervisor::store::assignment_by_crid(&app.db, &ui_request_id("2.1.280")).await.unwrap().unwrap();
+
+        let leaf_crid = format!("{}-f1", ui_request_id("2.1.280"));
+        crate::supervisor::assign(
+            &app, "resp1", "解析一下（接續）", &leaf_crid, None, &[], Some(&head.id), true, None, None, None,
+            crate::supervisor::bot_requests::ReplyMark::default(),
+        )
+        .await
+        .unwrap();
+        let leaf = crate::supervisor::store::assignment_by_crid(&app.db, &leaf_crid).await.unwrap().unwrap();
+        assert_ne!(leaf.id, head.id, "不同 crid、不同 assignment，靠 followup_assignment_id 串");
+
+        sqlx::query("UPDATE supervisor_assignments SET status='superseded', followup_assignment_id=? WHERE id=?")
+            .bind(&leaf.id).bind(&head.id)
+            .execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE supervisor_assignments SET status='completed', result=?, completed_at=? WHERE id=?")
+            .bind("2.1.280 -ui-f1 的結論").bind(crate::db::now()).bind(&leaf.id)
+            .execute(&app.db).await.unwrap();
+
+        let state = review_state(&app, "2.1.280").await;
+        assert_eq!(state.state, "done");
+        assert_eq!(state.assignment_id.as_deref(), Some(leaf.id.as_str()), "要回鏈尾那一筆，不是已經 superseded 的原筆");
+        assert_eq!(state.result.as_deref(), Some("2.1.280 -ui-f1 的結論"));
+    }
+
+    /// issue #394 情境 3：全部（-ui 與 kick 的兩條鏈）都是 superseded／failed，沒有活著或完成的——
+    /// 重按不能被舊的（已死）那筆冪等擋住，要真的派出新的一筆。
+    #[tokio::test]
+    async fn all_superseded_lets_the_button_dispatch_again() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        a_bot(&app, &e.project_id, "resp1").await;
+        a_bot(&app, &e.project_id, "patrol1").await;
+        crate::supervisor::store::get_or_init(&app.db).await.unwrap();
+        sqlx::query("UPDATE supervisors SET bot_id='patrol1' WHERE id=?")
+            .bind(crate::supervisor::store::SUPERVISOR_ID).execute(&app.db).await.unwrap();
+
+        crate::supervisor::assign(
+            &app, "resp1", "解析一下", &ui_request_id("2.1.280"), None, &[], None, true, None, None, None,
+            crate::supervisor::bot_requests::ReplyMark::default(),
+        )
+        .await
+        .unwrap();
+        let head = crate::supervisor::store::assignment_by_crid(&app.db, &ui_request_id("2.1.280")).await.unwrap().unwrap();
+        // 鏈尾是 failed（不是 completed）：整條路都死了，不是「還活著」也不是「有結論」。
+        sqlx::query("UPDATE supervisor_assignments SET status='failed' WHERE id=?").bind(&head.id).execute(&app.db).await.unwrap();
+
+        let state = review_state(&app, "2.1.280").await;
+        assert_eq!(state.state, "none", "全部都死了，等同沒派過，允許重按");
+
+        // 重派：換一個沒人用過的 crid，原本那個 `-ui` 已經被死掉的那筆佔住，沿用它只會被 `assign()`
+        // 的 crid 冪等擋住、悄悄回那筆死的（issue #394 的重按沒反應）；而且要接在死路的鏈尾之後，
+        // 不然下次 review_state 沿舊 crid 找還是只走到那條死路，看不到新派的這筆。
+        let (crid, follow_up_of) = redispatch_target(&app, "2.1.280").await;
+        assert_ne!(crid, ui_request_id("2.1.280"));
+        assert_eq!(crid, format!("{}-r2", ui_request_id("2.1.280")));
+        assert_eq!(follow_up_of.as_deref(), Some(head.id.as_str()), "接在死路的鏈尾之後");
+        assert!(crate::supervisor::store::assignment_by_crid(&app.db, &crid).await.unwrap().is_none(), "確實是沒人用過的 crid");
+
+        crate::supervisor::assign(
+            &app, "resp1", "重新解析一下", &crid, None, &[], follow_up_of.as_deref(), true, None, None, None,
+            crate::supervisor::bot_requests::ReplyMark::default(),
+        )
+        .await
+        .expect("要能真的派出新的一筆");
+        let after = review_state(&app, "2.1.280").await;
+        assert_eq!(after.state, "pending", "沿著原本的 crid 就找得到新派的這筆（接在鏈尾之後）");
+        assert_eq!(after.assignment_id.as_deref(), Some(crate::supervisor::store::assignment_by_crid(&app.db, &crid).await.unwrap().unwrap().id.as_str()));
     }
 
     /// 巡檢絕不會被選成目標；誰都沒設時回 `None`（呼叫端據此回 409）。
