@@ -169,6 +169,7 @@ config.toml 裡沒有的 id（child、已刪）忽略。成功推 `project_chang
 |---|---|---|---|
 | POST | `/api/bots/{id}/start` | — | `200 {"run_id"}`；已有 active Run → `409 {"reason":"active run already exists","run_id"}`；`herdr_session = "default"` 的 bot（SPEC §6.5.1）→ `409 {"reason":"default_session"}`；herdr 失敗 502；agent 起來了但 `running` 寫不進去 → `503 start_state_uncommitted`（SPEC §6.2 第 7 步） |
 | POST | `/api/bots/{id}/start?resume=native` | — | 接回 DB 記的原生對話（SPEC §6.5.2）：`200 {"run_id","resumed","session_id","resume_outcome"}`（`resumed` 照 `runs.resume_outcome` 說：`verified`→`true`＋回報的 session；`mismatch`→`false`、`session_id:null`；還沒回報或 `unverified`→`true`＋帶出去的 session；這次沒帶 `--resume`→`false`。不看 SessionStart 一到就清掉的 `resume_session_id`，issue #107）；接不回**不啟動**、不開新對話 → `409 {"reason":"cannot_resume","resumed":false,"resume_reason":"no_session_id"|"transcript_missing"|"unsupported_kind","bot_id"}`，由呼叫端決定要不要改成不帶 `resume` 重送。`resume` 只認 `native`，其他值 400。**救援**：`&session=<id>` 指名接回這一段、不看 DB 記的（DB 被別種 provider 的 hook 蓋錯時，2026-09-22）；只跟 `resume=native` 一起收、只收 `[A-Za-z0-9._-]{1,128}`，否則 400；只有 `bin/agm bot start|restart --resume native --session <id>` 露出，網頁沒有 |
+| POST | `/api/bots/{id}/start`／`restart`（子 agent） | — | `parent_bot_id` 非空一律 `409 {"reason":"child_restart_forbidden","parent_bot_id"}`：子 agent 由父 bot 用 herdr 重開，daemon 不代開（2026-09-22）。一鍵重啟（§6.9）走內部原地重啟，不受影響 |
 | POST | `/api/bots/{id}/stop` | — | `200 {}`；沒有 Run（或讀完之後已被 pane-exit 收掉）→ `204`。default session 的 bot 只送 ctrl+c、不關 pane。`stopping` 寫不進去 → 502，什麼都沒動；in-flight Turn 寫不進 failed → `503 {"error":"turn_state_unwritable","run_id","turn_id","retryable":true}`＋`Retry-After`，什麼都沒動（run 放回 running）；agent 沒停下來或問不到 herdr → `502`，message 以 `stop_not_confirmed` 開頭，run 不記成停止（還活著就放回 running）；停了但 `stopped` 寫不進去 → `503 stop_state_uncommitted`（SPEC §6.4） |
 | POST | `/api/bots/{id}/interrupt` | `{"turn_id"?}` | `200 {}`（送 `esc`，in-flight Turn 標 failed）；herdr 拒收 `esc` → 502，Turn 維持 in-flight；`esc` 送出但 herdr 沒回：本機 claude／codex 的 log 裡已經有這次的中斷紀錄 → 照 `200 {}`（#223：claude 2.1.276+ 按 Esc 不送任何 hook），還看不到 → `409 {"reason":"interrupt_unconfirmed","turn_id","esc_sent":"unknown","retryable":true}`，Turn 維持 in-flight、等 log 裡的中斷紀錄（或回聲）；`esc` 生效但 Turn 狀態寫不進去 → `503 {"error":"interrupt_state_uncommitted","run_id","turn_id","esc_sent":true,"retryable":true}`（daemon 自己補，重試不再按 `esc`）；帶 `turn_id` 而那一筆已不在飛 → `409 {"reason":"turn_not_in_flight","turn_id","in_flight_turn_id","esc_sent":false}`，不按 `esc`。見 SPEC §6.4 |
 | POST | `/api/bots/{id}/abort` | — | `200 {"aborted":["<turn_id>",…],"keys_sent":true,"key_error":null}`，見 §4.2 |
@@ -1038,7 +1039,7 @@ codex 的 `fast` **不再因為不知道現況而拒絕**（拿掉 `unknown_fast
 
 ### 10.3 `POST /api/bots/{id}/restart`
 有 Run 先 stop（ctrl+c ×2、逾時關 pane）再 start → `200 {"run_id"}`（新 Run）。沒有 Run 也可呼叫（= start）。錯誤同 start，另加 stop 那一半的錯誤（同 `POST /stop`）。過程推 `bot_status`。
-子 agent 在原 pane 重開（SPEC §6.9）。
+子 agent（`parent_bot_id` 非空）不收：`409 {"reason":"child_restart_forbidden","parent_bot_id"}`，由父 bot 用 herdr 重開（SPEC §6.5a）；`start` 同。
 `?resume=native`：同 start 的語意，**停之前**就判斷接不接得回（看現在這個 Run 的 session）；接不回回 `409 cannot_resume`，原本的 agent 不會被停。預設（不帶）行為不變。
 重啟期間這顆 bot 排著的 queued（AGM 派工）**不撤**，留給新的 Run 送；重啟沒能把 bot 開回來才撤（SPEC §4.4a「重啟不是停」，issue #106）。
 停掉了卻沒能開回來時，舊 Run 改標 `exited`；改標寫不進 DB 回 `503 {"error":"restart_state_uncommitted","run_id":<舊 Run>,"retryable":true,"message","detail","start_error"}`（`start_error` 是 start 那一半的錯），已排重試（SPEC §6.4）。
@@ -1680,7 +1681,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
   `POST /api/supervisor/assignments` 對角色 bot 的交接同樣收 `ack`／`reply_to`；對一般 bot 的交辦帶它們 → 400。
 
 ### `bin/agm`
-`scripts/agm.py` 由 `include_str!` 編進 daemon，`setup` 時寫成 `<cwd>/bin/agm`。子命令：`state`、`supervisor`、`search`、`messages`、`bot`（`start`／`stop`／`restart`／`create`／`delete`；`start`／`restart` 收 `--resume native` → `?resume=native`，回應原樣印出）、
+`scripts/agm.py` 由 `include_str!` 編進 daemon，`setup` 時寫成 `<cwd>/bin/agm`。子命令：`state`、`supervisor`、`search`、`messages`、`bot`（`start`／`stop`／`restart`／`create`／`delete`／`restore`；`start`／`restart` 收 `--resume native` → `?resume=native`，回應原樣印出）、
 `assign`（含 `--notice`、`--mission`／`--role`、`--review-by patrol|responder`、交接用的 `--ack`／`--reply-to <event_id>`）、`assignments`、`inbox`（`--all`、`--limit`、`--role patrol|responder|mine`）、`ack`、`handoff`、`quota`、`health`、`lease`、`mission`、
 `whoami`、`responder`（`show`／`setup`／`start`／`stop`）、`persona --role responder`；輸出一律 JSON。
 執行期設定讀 `<cwd>/runtime.json`：`{daemon_url, manager_bot_id, responder_bot_id, bot_id, role, self_bot_id, data_dir, supervisor_id, remote_name}`（巡檢目錄的 `responder_bot_id` 在沒有協調者時是 `null`）；**沒有 token**，CLI 執行期 `GET /api/session` 取；`daemon_url` 只接受 loopback。

@@ -1044,6 +1044,9 @@ def cmd_bot(client: Client, cfg: dict, args) -> object:
     if args.op == "delete":
         # 軟刪：先停 pane，再從設定拿掉；它開的子 agent 一起收，對話紀錄保留。
         return client.delete(f"/api/bots/{urllib.parse.quote(args.bot_id)}")
+    if args.op == "restore":
+        # 還原被軟刪的 bot（API §10.4a；子 agent 只清 deleted_at、不開 run，pane 由父 bot 用 herdr 重開）。
+        return client.post(f"/api/bots/{urllib.parse.quote(args.bot_id)}/restore", {})
     path = f"/api/bots/{urllib.parse.quote(args.bot_id)}/{args.op}"
     # `--resume native`：接回 DB 記的原生對話（接不回 daemon 回 409 resumed:false，不會默默開新的）。
     # 回應原樣印出——resumed／session_id／resume_outcome 就是呼叫端要看的。
@@ -1350,9 +1353,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--as-daemon", dest="as_daemon", action="store_true", help="event/complete/deliver：來源標成 daemon 而不是總管")
     s.set_defaults(func=cmd_mission)
 
-    s = sub.add_parser("bot", help="管理 bot：start / stop / restart / create / delete")
-    s.add_argument("op", choices=["start", "stop", "restart", "create", "delete"])
-    s.add_argument("bot_id", nargs="?", help="start/stop/restart/delete 的目標（delete＝停 pane 並軟刪，子 agent 一起收）")
+    s = sub.add_parser("bot", help="管理 bot：start / stop / restart / create / delete / restore")
+    s.add_argument("op", choices=["start", "stop", "restart", "create", "delete", "restore"])
+    s.add_argument("bot_id", nargs="?", help="start/stop/restart/delete/restore 的目標（delete＝停 pane 並軟刪，子 agent 一起收；restore＝還原被軟刪的子 agent，不開 run）")
     s.add_argument("--project", help="create：所屬 project id")
     s.add_argument("--name", help="create：bot 名稱")
     s.add_argument("--kind", help="create：claude / codex / grok")

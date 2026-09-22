@@ -842,6 +842,13 @@ class MiscCommandTest(CliCase):
         self.assertEqual(out["session_id"], "246fcf93-af39")
         self.assertNotEqual(self.run_cli("bot", "start", "b1", "--session", "246fcf93-af39")[0], 0, "沒有 --resume 不收 --session")
 
+    def test_bot_restore_posts_to_the_restore_route(self):
+        FakeDaemon.routes["POST /api/bots/kid/restore"] = (200, {"bot": {"id": "kid"}})
+        self.assertEqual(self.ok("bot", "restore", "kid")["bot"]["id"], "kid")
+        self.assertEqual((FakeDaemon.seen[-1]["path"], FakeDaemon.seen[-1]["body"]), ("/api/bots/kid/restore", {}))
+        FakeDaemon.routes["POST /api/bots/kid/restore"] = (409, {"error": "conflict", "reason": "bot is not deleted"})
+        self.assertEqual(self.bad("bot", "restore", "kid")["status"], 409)
+
     def test_bot_resume_rejects_other_ops_and_modes(self):
         self.assertNotEqual(self.run_cli("bot", "stop", "b1", "--resume", "native")[0], 0)
         self.assertNotEqual(self.run_cli("bot", "restart", "b1", "--resume", "fresh")[0], 0)
