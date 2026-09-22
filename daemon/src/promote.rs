@@ -732,7 +732,21 @@ mod tests {
             let new_bots = app2.cfg.get().await.projects[0].bots.clone();
             assert_eq!(new_bots.len(), 1, "{point}：config 裡只有一顆新的 user bot");
             let new_id = new_bots[0].id.clone().unwrap();
-            assert!(db::active_run(&app2.db, &new_id).await.unwrap().is_some(), "{point}：新 bot 起來了");
+            // `recover_host` 只同步跑第一次嘗試；那一次若因為暫時原因（例如高負載下的一次性錯誤）失敗，
+            // intent 仍是 `running`、背景的重試迴圈才會真的把 native resume 起起來（`drive_once` 回 `Retry`
+            // 時 `recover_host` 會 spawn `retry_loop`，不等它）。等的是這個**最後一個副作用**（run 起來），
+            // 不是固定睡一段時間；已經成功的話這裡幾乎立刻就過。
+            let ok = crate::testing::eventually!(db::active_run(&app2.db, &new_id).await.unwrap().is_some());
+            if !ok {
+                // 30 秒都等不到：把 intent 記的重試狀態與 last_error 一起丟進斷言訊息（整樹高負載下曾經連著重試都失敗過一次，
+                // 沒抓到根因；下次真的再紅，訊息裡就有東西可查，不用只看到「新 bot 起來了」）。
+                let intent_row: Option<(String, i64, Option<String>)> = sqlx::query_as("SELECT status, attempts, last_error FROM intents WHERE subject_id=?")
+                    .bind(&r.child).fetch_optional(&app2.db).await.unwrap();
+                let runs_dump: Vec<(String, String, Option<String>)> = sqlx::query_as("SELECT id, state, ended_at FROM runs WHERE bot_id=?")
+                    .bind(&new_id).fetch_all(&app2.db).await.unwrap();
+                panic!("{point}：新 bot 起來了 —— intent={intent_row:?} runs={runs_dump:?}");
+            }
+            let _ = crate::testing::eventually!(intent_status(&app2, &r.child).await == vec!["done"]);
             assert_eq!(intent_status(&app2, &r.child).await, vec!["done"], "{point}");
             let runs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE bot_id = ?").bind(&new_id).fetch_one(&app2.db).await.unwrap();
             crate::promote_intents::recover_host(&app2, LOCAL_HOST).await;
