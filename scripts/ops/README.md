@@ -163,7 +163,13 @@ herdr 有新版時整理出「對我們有沒有用、會不會壞」，派給 A
 
 ```sh
 install -m 755 scripts/ops/herdr-update-kick.sh ~/.config/agents-manager/supervisor/AGM/bin/
+install -m 755 scripts/ops/herdr-lan-check.sh ~/.config/agents-manager/supervisor/AGM/bin/
 ```
+
+升級核准後的完整人工步驟見 [`herdr-upgrade-runbook.md`](herdr-upgrade-runbook.md)。其中
+`herdr-lan-check.sh` 必須從 herdr pane 執行：它用新 binary 的 `codesign -dv` identifier 查
+`/Library/Preferences/com.apple.networkextension.plist`，再用 node 連區網；Apple 內建 nc、python3、curl
+不能代驗。任何失敗或 node 缺少都停下，請使用者授權「本機網路」，不要靠重啟硬試。
 
 launchd plist 範例（`~/Library/LaunchAgents/com.agm.herdr-update.plist`；**必須帶 `EnvironmentVariables.PATH`**，launchd 預設 PATH 不含 `/opt/homebrew/bin`，herdr／gh 在那裡，herdr 也可能在 `~/.local/bin`；腳本開頭另外自補一次）：
 

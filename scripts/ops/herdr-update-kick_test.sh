@@ -170,6 +170,8 @@ check "旗標是 --request-id" "\-\-request-id agm-herdr-update-0.9.0" "$AGM_DIR
 check "交辦給巡檢驗收" "\-\-review-by patrol" "$AGM_DIR/calls.log"
 check "交辦帶版本差異" "0.8.2 → 0.9.0" "$AGM_DIR/assign-body.txt"
 check "交辦帶 CHANGELOG 原文" "修了一堆繞路" "$AGM_DIR/assign-body.txt"
+check "交辦帶升級後本機網路驗收" "herdr-lan-check.sh" "$AGM_DIR/assign-body.txt"
+check "交辦禁止 Apple 工具代驗" "Apple 內建 nc" "$AGM_DIR/assign-body.txt"
 equals "state 寫入" "$(cat "$AGM_DIR/herdr-update.last")" "0.9.0"
 teardown
 
