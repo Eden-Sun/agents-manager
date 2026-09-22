@@ -337,6 +337,20 @@ pub(crate) async fn pane_ready_for_prompt(app: &Arc<App>, bot: &db::Bot, run: &d
         if let Some(pane) = run.pane_id.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
             if let Ok(client) = client_for_run(app, run).await {
                 if let Ok(r) = client.pane_read(pane, "visible", 60).await {
+                    // 2.1.278 首次啟動的「Auto mode」推銷框：herdr 判 idle，prompt 會打進框裡（2026-09-22 build child
+                    // 卡了半小時）。替它選第二項「No, keep bypass permissions」——bot 本來就是 bypass 起的；還在就講清楚。
+                    if crate::tui_prompts::is_auto_mode_offer(&r.text) {
+                        let _ = client.pane_send_keys(pane, &["Down", "Enter"]).await;
+                        tokio::time::sleep(Duration::from_millis(900)).await;
+                        let still = matches!(client.pane_read(pane, "visible", 60).await,
+                            Ok(r2) if crate::tui_prompts::is_auto_mode_offer(&r2.text));
+                        if still {
+                            let hint = "claude 2.1.278 的「Auto mode」框擋在輸入列前面，自動選「No, keep bypass permissions」沒有關掉。請到「終端」分頁選第 2 項再送一次。";
+                            let _ = insert_message(app, conv, None, "system", hint, "system", false, None).await;
+                            return Err(LcError::conflict("dialog_open", json!({"run_id": run.id, "message": hint})));
+                        }
+                        tracing::info!(run = %run.id, "answered claude's auto-mode offer (keep bypass) before delivering a prompt");
+                    }
                     if crate::tui_prompts::is_switch_model_dialog(&r.text) {
                         let _ = client.pane_send_keys(pane, &["Escape"]).await;
                         tokio::time::sleep(Duration::from_millis(700)).await;
@@ -1382,6 +1396,42 @@ mod prompt_tests {
         assert_eq!(event.turn_id, out.turn_id);
         assert_eq!((event.status.as_str(), event.delivery.as_str()), ("failed", "failed"));
     }
+
+    /// 2.1.278 首次啟動的「Auto mode」框（2026-09-22）：送 Down＋Enter 選 keep bypass；mock 的畫面不會因為按鍵改變，
+    /// 所以這裡驗的是「按了對的鍵、還在就 409 dialog_open、沒把 prompt 打進框裡」。
+    #[tokio::test]
+    async fn the_auto_mode_offer_is_answered_with_keep_bypass_and_still_open_is_a_409() {
+        let f = fixture("claude", "test").await;
+        let app = f.env.app.clone();
+        sqlx::query("UPDATE runs SET pane_id='pane-prompt-test' WHERE id=?").bind(&f.run_id).execute(&app.db).await.unwrap();
+        f.env.herdr.set_screen("pane-prompt-test", crate::tui_prompts::screens::AUTO_MODE);
+        let bot = db::bot(&app.db, &f.bot_id).await.unwrap().unwrap();
+        let run = db::active_run(&app.db, &f.bot_id).await.unwrap().unwrap();
+        let err = pane_ready_for_prompt(&app, &bot, &run, &f.conv).await.unwrap_err();
+        match err {
+            LcError::Conflict(v) => assert_eq!(v["reason"], "dialog_open", "{v}"),
+            other => panic!("{other:?}"),
+        }
+        let keys: Vec<String> = f.env.herdr.calls_to("pane.send_keys").iter().filter_map(|p| p.get("keys").and_then(|k| serde_json::to_string(k).ok())).collect();
+        assert_eq!(keys, vec![r#"["Down","Enter"]"#.to_string()], "先替它選第二項 keep bypass");
+    }
+
+    /// onboarding 的主題頁跟登入選單同一類：交給人（needs_login），一個鍵都不按。
+    #[tokio::test]
+    async fn the_onboarding_theme_page_is_needs_login_and_nothing_is_pressed() {
+        let f = fixture("claude", "test").await;
+        let app = f.env.app.clone();
+        sqlx::query("UPDATE runs SET pane_id='pane-prompt-test' WHERE id=?").bind(&f.run_id).execute(&app.db).await.unwrap();
+        f.env.herdr.set_screen("pane-prompt-test", crate::tui_prompts::screens::ONBOARDING_THEME);
+        let bot = db::bot(&app.db, &f.bot_id).await.unwrap().unwrap();
+        let run = db::active_run(&app.db, &f.bot_id).await.unwrap().unwrap();
+        match pane_ready_for_prompt(&app, &bot, &run, &f.conv).await.unwrap_err() {
+            LcError::Conflict(v) => assert_eq!(v["reason"], "needs_login", "{v}"),
+            other => panic!("{other:?}"),
+        }
+        assert!(f.env.herdr.calls_to("pane.send_keys").is_empty());
+    }
+
 }
 
 #[cfg(test)]
