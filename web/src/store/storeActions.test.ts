@@ -15,6 +15,22 @@ const bot = (id: string, extra: Partial<Bot> = {}) =>
 const project = () => ({ id: 'p1', label: 'p', path: '/p', host: 'local' }) as Project
 const json = (body: unknown, status: number) => new Response(JSON.stringify(body), { status })
 
+function deferredJson(status = 200) {
+  let finish!: (body: unknown) => void
+  const response = new Response(
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        finish = (body) => {
+          controller.enqueue(new TextEncoder().encode(JSON.stringify(body)))
+          controller.close()
+        }
+      },
+    }),
+    { status, headers: { 'content-type': 'application/json' } },
+  )
+  return { response, finish }
+}
+
 function seed() {
   reset()
   useStore.setState({
@@ -38,6 +54,30 @@ function seed() {
 
 const settle = () => new Promise((r) => setTimeout(r, 10))
 const noticeTexts = () => useStore.getState().notices.map((n) => n.text)
+
+test('overlapping quota snapshots keep the newer response', async () => {
+  seed()
+  useStore.setState({ quota: {} })
+  const stale = deferredJson()
+  let quotaCalls = 0
+  const quota = (used_pct: number) => ({ kinds: { claude: { five_hour: { used_pct } } } })
+  routeDaemon((req) => {
+    if (req.path === '/api/quota') {
+      quotaCalls += 1
+      return quotaCalls === 1 ? stale.response : json(quota(90), 200)
+    }
+    return json({}, 200)
+  })
+
+  const oldLoad = useStore.getState().loadQuota()
+  assert.equal(quotaCalls, 1)
+  await useStore.getState().loadQuota()
+  assert.equal(useStore.getState().quota.claude?.five_hour?.used_pct, 90)
+
+  stale.finish(quota(10))
+  await oldLoad
+  assert.equal(useStore.getState().quota.claude?.five_hour?.used_pct, 90)
+})
 
 test('任務被清掉：收掉那一張卡，其他任務與「交給 AGM」不受影響', async () => {
   seed()
