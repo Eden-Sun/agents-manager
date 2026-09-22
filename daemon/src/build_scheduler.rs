@@ -34,6 +34,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub async fn migrate(pool: &SqlitePool) -> Result<()> {
+    let mut tx = pool.begin().await?;
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS build_slots (
            holder TEXT PRIMARY KEY,
@@ -44,12 +45,34 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
            host TEXT NOT NULL DEFAULT 'local',
            status TEXT NOT NULL, -- 'held' | 'waiting'
            since TEXT NOT NULL,
+           queue_order INTEGER NOT NULL DEFAULT 0,
            last_seen TEXT NOT NULL,
            expires_at TEXT
          )",
     )
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    // `since` is millisecond precision and can collide for arrivals serialized through acquire.
+    // Older databases used holder as a tie-breaker; backfill that stable ordering once, then keep
+    // a persisted ordinal for every new queue entry.
+    if !crate::db::has_column(&mut *tx, "build_slots", "queue_order").await? {
+        sqlx::query("ALTER TABLE build_slots ADD COLUMN queue_order INTEGER NOT NULL DEFAULT 0")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "UPDATE build_slots
+             SET queue_order = (
+               SELECT COUNT(*) FROM build_slots AS earlier
+               WHERE earlier.status = 'waiting'
+                 AND (earlier.since < build_slots.since
+                   OR (earlier.since = build_slots.since AND earlier.holder <= build_slots.holder))
+             )
+             WHERE status = 'waiting'",
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
     Ok(())
 }
 
@@ -65,6 +88,7 @@ struct SlotRow {
     token: String,
     status: String,
     since: String,
+    queue_order: i64,
     expires_at: Option<String>,
 }
 
@@ -104,19 +128,29 @@ async fn reap_stale_waiting(pool: &SqlitePool) -> Result<u64> {
 }
 
 /// 插一列（或覆寫既有的同名列）成 `waiting`；`since` 是排隊起點，呼叫端負責決定（保留舊的、還是這一刻）。
-async fn mark_waiting(app: &Arc<App>, holder: &str, bot_id: Option<&str>, purpose: &str, host: &str, since: &str, now: &str) -> Result<()> {
+async fn mark_waiting(
+    app: &Arc<App>,
+    holder: &str,
+    bot_id: Option<&str>,
+    purpose: &str,
+    host: &str,
+    since: &str,
+    queue_order: i64,
+    now: &str,
+) -> Result<()> {
     sqlx::query(
-        "INSERT INTO build_slots (holder, token, bot_id, purpose, host, status, since, last_seen, expires_at)
-         VALUES (?,'',?,?,?, 'waiting', ?, ?, NULL)
+        "INSERT INTO build_slots (holder, token, bot_id, purpose, host, status, since, queue_order, last_seen, expires_at)
+         VALUES (?,'',?,?,?, 'waiting', ?, ?, ?, NULL)
          ON CONFLICT(holder) DO UPDATE SET
            bot_id = excluded.bot_id, purpose = excluded.purpose, host = excluded.host,
-           status = 'waiting', last_seen = excluded.last_seen, expires_at = NULL",
+           status = 'waiting', queue_order = excluded.queue_order, last_seen = excluded.last_seen, expires_at = NULL",
     )
     .bind(holder)
     .bind(bot_id)
     .bind(purpose)
     .bind(host)
     .bind(since)
+    .bind(queue_order)
     .bind(now)
     .execute(&app.db)
     .await?;
@@ -128,8 +162,8 @@ async fn mark_waiting(app: &Arc<App>, holder: &str, bot_id: Option<&str>, purpos
 ///
 /// **FIFO**（2026-09-18 使用者交辦；手工 `cargo-slot.sh` 的舊版每個等待者各自搶，實測有人餓死 74 分鐘）：
 /// 名額空出來時，只有排隊排最早的那個 holder 可以真的拿到，其他人就算這一刻也在問、名額也空著，一樣要等——
-/// 跟 `cargo-slot.sh` 的號碼牌是同一個道理，只是這裡用 `build_slots.since` 當號碼牌，不需要另開一張表。
-/// 佇列順序＝`(since, holder)` 字典序（`since` 相同——理論上毫秒級撞期——用 `holder` 當穩定的第二排序鍵）。
+/// 跟 `cargo-slot.sh` 的號碼牌是同一個道理。`since` 保留排隊起點給人看；獨立的 `queue_order` 才是號碼牌，
+/// 不會因毫秒級的 `since` 撞期而改按 holder 名稱排序。
 pub async fn acquire(app: &Arc<App>, holder: &str, bot_id: Option<&str>, purpose: &str, host: &str) -> Result<Acquired> {
     let _g = app.build_slot_lock.lock().await;
     let cfg = app.cfg.get().await.build;
@@ -138,7 +172,7 @@ pub async fn acquire(app: &Arc<App>, holder: &str, bot_id: Option<&str>, purpose
     reap_expired_held(&app.db, &now).await?;
     reap_stale_waiting(&app.db).await?;
 
-    let existing: Option<SlotRow> = sqlx::query_as("SELECT token, status, since, expires_at FROM build_slots WHERE holder = ?")
+    let existing: Option<SlotRow> = sqlx::query_as("SELECT token, status, since, queue_order, expires_at FROM build_slots WHERE holder = ?")
         .bind(holder)
         .fetch_optional(&app.db)
         .await?;
@@ -156,25 +190,31 @@ pub async fn acquire(app: &Arc<App>, holder: &str, bot_id: Option<&str>, purpose
     let held: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM build_slots WHERE status = 'held'").fetch_one(&app.db).await?;
     // 排隊起點：已經在等的人保留原本的 `since`（重試不該讓排隊起點歸零），第一次來的人以「現在」當自己的號碼牌。
     let my_since = existing.as_ref().filter(|r| r.status == "waiting").map(|r| r.since.clone()).unwrap_or_else(|| now.clone());
+    let my_queue_order = match existing.as_ref().filter(|r| r.status == "waiting").map(|r| r.queue_order) {
+        Some(order) => order,
+        None => sqlx::query_scalar("SELECT COALESCE(MAX(queue_order), 0) + 1 FROM build_slots WHERE status = 'waiting'")
+            .fetch_one(&app.db)
+            .await?,
+    };
 
     if (held as usize) < max {
         // 名額空著，但要先看看排在自己前面的人（排除自己那一列）——有更早的號碼牌就不能插隊，
         // 即使這一刻剛好是自己在問、名額也剛好空著。
-        let ahead: Option<(String, String)> =
-            sqlx::query_as("SELECT since, holder FROM build_slots WHERE status = 'waiting' AND holder != ? ORDER BY since, holder LIMIT 1")
+        let ahead: Option<i64> =
+            sqlx::query_scalar("SELECT queue_order FROM build_slots WHERE status = 'waiting' AND holder != ? ORDER BY queue_order LIMIT 1")
                 .bind(holder)
                 .fetch_optional(&app.db)
                 .await?;
-        let someone_is_ahead = ahead.is_some_and(|(ahead_since, ahead_holder)| (ahead_since.as_str(), ahead_holder.as_str()) < (my_since.as_str(), holder));
+        let someone_is_ahead = ahead.is_some_and(|ahead_order| ahead_order < my_queue_order);
         if !someone_is_ahead {
             let token = crate::db::ulid();
             let expires_at = expires_at_after(&cfg);
             sqlx::query(
-                "INSERT INTO build_slots (holder, token, bot_id, purpose, host, status, since, last_seen, expires_at)
-                 VALUES (?,?,?,?,?, 'held', ?, ?, ?)
+                "INSERT INTO build_slots (holder, token, bot_id, purpose, host, status, since, queue_order, last_seen, expires_at)
+                 VALUES (?,?,?,?,?, 'held', ?, 0, ?, ?)
                  ON CONFLICT(holder) DO UPDATE SET
                    token = excluded.token, bot_id = excluded.bot_id, purpose = excluded.purpose, host = excluded.host,
-                   status = 'held', since = excluded.since, last_seen = excluded.last_seen, expires_at = excluded.expires_at",
+                   status = 'held', since = excluded.since, queue_order = 0, last_seen = excluded.last_seen, expires_at = excluded.expires_at",
             )
             .bind(holder)
             .bind(&token)
@@ -190,7 +230,7 @@ pub async fn acquire(app: &Arc<App>, holder: &str, bot_id: Option<&str>, purpose
         }
     }
 
-    mark_waiting(app, holder, bot_id, purpose, host, &my_since, &now).await?;
+    mark_waiting(app, holder, bot_id, purpose, host, &my_since, my_queue_order, &now).await?;
     Ok(Acquired::Waiting { active: held as usize, since: my_since })
 }
 
@@ -208,7 +248,7 @@ pub async fn renew(app: &Arc<App>, holder: &str, token: &str) -> Result<Result<S
     let _g = app.build_slot_lock.lock().await;
     let cfg = app.cfg.get().await.build;
     let now = now_str();
-    let row: Option<SlotRow> = sqlx::query_as("SELECT token, status, since, expires_at FROM build_slots WHERE holder = ?")
+    let row: Option<SlotRow> = sqlx::query_as("SELECT token, status, since, queue_order, expires_at FROM build_slots WHERE holder = ?")
         .bind(holder)
         .fetch_optional(&app.db)
         .await?;
@@ -278,7 +318,7 @@ pub async fn status(app: &Arc<App>) -> Result<Value> {
     let cfg = app.cfg.get().await.build;
     reap_expired_held(&app.db, &now_str()).await?;
     let rows: Vec<StatusRow> = sqlx::query_as(
-        "SELECT holder, status, bot_id, purpose, host, since, last_seen, expires_at FROM build_slots ORDER BY since",
+        "SELECT holder, status, bot_id, purpose, host, since, last_seen, expires_at FROM build_slots ORDER BY since, queue_order, holder",
     )
     .fetch_all(&app.db)
     .await?;
@@ -554,6 +594,84 @@ mod tests {
         release(&app, "a", &a_token).await;
         let Acquired::Waiting { .. } = acquire(&app, "c", None, "t", "local").await.unwrap() else { panic!("c 還是排最後") };
         let Acquired::Granted { .. } = acquire(&app, "b", None, "t", "local").await.unwrap() else { panic!("該輪到 b 了") };
+    }
+
+    /// Millisecond timestamps can collide for separate arrivals. FIFO must keep the acquisition
+    /// order even when the display timestamp is identical and holder names sort in the opposite order.
+    #[tokio::test]
+    async fn equal_since_timestamps_do_not_reorder_waiters_by_holder_name() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        set_max_concurrent(&app, 1).await;
+
+        let Acquired::Granted { token, .. } = acquire(&app, "first", None, "t", "local").await.unwrap() else { panic!() };
+        let Acquired::Waiting { .. } = acquire(&app, "z-first", None, "t", "local").await.unwrap() else { panic!() };
+        let Acquired::Waiting { .. } = acquire(&app, "m-second", None, "t", "local").await.unwrap() else { panic!() };
+        let Acquired::Waiting { .. } = acquire(&app, "a-third", None, "t", "local").await.unwrap() else { panic!() };
+
+        // Simulate arrivals in one clock tick; the lexical holder order deliberately disagrees with FIFO.
+        sqlx::query("UPDATE build_slots SET since = '2026-09-23T00:00:00.000Z' WHERE status = 'waiting'")
+            .execute(&app.db)
+            .await
+            .unwrap();
+        release(&app, "first", &token).await;
+
+        let Acquired::Waiting { .. } = acquire(&app, "a-third", None, "t", "local").await.unwrap() else {
+            panic!("the last waiter must not jump ahead because its holder sorts first")
+        };
+        let Acquired::Waiting { .. } = acquire(&app, "m-second", None, "t", "local").await.unwrap() else {
+            panic!("the middle waiter must stay behind the first waiter")
+        };
+        let Acquired::Granted { token: z_token, .. } = acquire(&app, "z-first", None, "t", "local").await.unwrap() else {
+            panic!("the first waiter must keep its place when timestamps tie")
+        };
+
+        release(&app, "z-first", &z_token).await;
+        let Acquired::Waiting { .. } = acquire(&app, "a-third", None, "t", "local").await.unwrap() else { panic!() };
+        let Acquired::Granted { .. } = acquire(&app, "m-second", None, "t", "local").await.unwrap() else {
+            panic!("the second waiter must be next")
+        };
+    }
+
+    #[tokio::test]
+    async fn migration_backfills_legacy_waiters_once() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        sqlx::query("ALTER TABLE build_slots DROP COLUMN queue_order")
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        for holder in ["z-first", "a-second"] {
+            sqlx::query(
+                "INSERT INTO build_slots (holder, token, purpose, host, status, since, last_seen, expires_at)
+                 VALUES (?, '', 'test', 'local', 'waiting', '2026-09-23T00:00:00.000Z', ?, NULL)",
+            )
+            .bind(holder)
+            .bind(crate::db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        }
+
+        migrate(&app.db).await.unwrap();
+        let rows: Vec<(String, i64)> = sqlx::query_as("SELECT holder, queue_order FROM build_slots ORDER BY queue_order")
+            .fetch_all(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(rows, vec![("a-second".into(), 1), ("z-first".into(), 2)]);
+
+        // Startup is repeatable and must not recalculate queue positions after the initial backfill.
+        sqlx::query("UPDATE build_slots SET queue_order = 9 WHERE holder = 'a-second'")
+            .execute(&app.db)
+            .await
+            .unwrap();
+        migrate(&app.db).await.unwrap();
+        let order: i64 = sqlx::query_scalar("SELECT queue_order FROM build_slots WHERE holder = 'a-second'")
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(order, 9);
     }
 
     /// 排最前面的號碼牌死了（不再 poll）：不能永遠擋住後面活著的人（使用者實測手工腳本的舊版本會餓死 74 分鐘）。
