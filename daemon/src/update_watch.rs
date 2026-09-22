@@ -222,9 +222,11 @@ mod tests {
         assert!(n.contains("0.151.2") && n.contains("0.150.0"), "{n}");
     }
 
-    /// claude 的批次 exit＋resume 不收 codex：重啟一顆沒裝新版的 codex 換不到任何東西。
+    /// codex 新版**還沒安裝**時：批次不會自動重啟它（重啟一顆沒裝新版的 codex 換不到任何東西），
+    /// 但它仍是候選——header 要看得到，只是被跳過並講清楚原因（2026-09-22：以前整顆連候選都不算，
+    /// 這種還沒裝的 codex 有更新在 header 上完全消失，使用者以為只有 claude 會被巡）。
     #[tokio::test]
-    async fn a_codex_notice_never_makes_the_run_a_bulk_restart_candidate() {
+    async fn a_codex_notice_needing_install_is_a_candidate_but_is_skipped_not_restarted() {
         let _serial = serial().lock().await;
         let e = crate::testing::env().await;
         let (bot, run, pane) = codex_bot_with_run(&e).await;
@@ -234,8 +236,10 @@ mod tests {
         assert!(notice_of(&e.app, &run).await.is_some());
         let cands = crate::bulk_restart::candidates(&e.app).await.unwrap();
         let mine = cands.iter().find(|c| c.bot_id == bot).expect("候選清單有它");
-        assert!(mine.has_update && !crate::bulk_restart::is_candidate(mine), "有通知也不是批次候選");
+        assert!(mine.has_update && mine.needs_manual_install && crate::bulk_restart::is_candidate(mine));
         let (go, skip) = crate::bulk_restart::plan(&cands);
-        assert!(go.iter().all(|c| c.bot_id != bot) && skip.iter().all(|(c, _)| c.bot_id != bot));
+        assert!(go.iter().all(|c| c.bot_id != bot), "不會被自動重啟");
+        let (_, why) = skip.iter().find(|(c, _)| c.bot_id == bot).expect("要在跳過清單裡才會出現在 header");
+        assert_eq!(*why, crate::bulk_restart::Skip::NeedsManualInstall);
     }
 }

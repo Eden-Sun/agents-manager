@@ -1709,21 +1709,28 @@ default Bot 的 prompt／keys／terminal 讀取依 Run 的 session 回到 defaul
 5. external：建 Turn（`origin=external`、`completed`）+ user Message（Codex 取 `input-messages`；Claude 沒有就省略）+ assistant Message。
 6. 推 WS `message_added` / `turn_updated`。
 
-### 6.9 一鍵套用 claude 更新（批次 exit + resume）
+### 6.9 一鍵套用更新（批次 exit + resume）
 
 claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
 
 - 入口：`POST /api/bots/restart-idle`（無 body），**立刻回計畫**，重啟在背景跑（一顆 `stop_bot` 最久等 10 秒）。
-- 挑選（`bulk_restart::plan`，純函式有測試）：候選 = kind 是 claude 且 run 帶非空 `update_notice`（**codex 的通知不算**：它的新版還沒安裝，重啟換不到，§3.1）；非候選的連「跳過」都不列。候選依序判斷：
+- 挑選（`bulk_restart::plan`，純函式有測試）：候選 = kind 是 claude／codex 且 run 帶非空 `update_notice`；非候選的連「跳過」都不列。候選依序判斷：
 
   | 條件 | `reason` | 動作 |
   |---|---|---|
+  | codex 的通知是「需安裝」（新版還沒裝，重啟換不到任何東西，見 `codex_update.rs`） | `needs_manual_install` | 跳過 |
   | run 或 bot 的 `herdr_session = 'default'` | `default_session` | 跳過 |
   | `runs.state != 'running'` | `not_running` | 跳過 |
   | `agent_status = 'working'` / `'blocked'` | `working` / `blocked` | 跳過 |
   | `agent_status` 不是 `idle` | `unknown_status` | 跳過 |
   | 還有 `in_flight` Turn | `turn_in_flight` | 跳過 |
   | 以上都不中 | — | 重啟 |
+
+  **2026-09-22 修**：以前候選直接限定 `kind == claude`，codex 有更新時整顆連候選都不算，`header`／批次框
+  上完全看不到（使用者：「codex 有更新怎沒出現在 header」）。codex 的更新通知本來就分兩種
+  （`codex_update.rs`）：磁碟**已經裝好**、這個 run 還跑舊版（notice 含「已安裝」）跟 claude 一樣重啟就換，
+  現在會一起進批次；新版**還沒安裝**（notice 含「需安裝」）重啟換不到東西，改成「是候選但被跳過」而不是
+  「整個不算」——一樣會出現在 header 與確認框的跳過名單裡，講清楚要先手動安裝，不會像以前那樣默默消失。
 
   刻意保守：批次最不能做的就是砍掉使用者正在等的回合。
   **輪到那一顆真的要重啟前再判斷一次**（`bulk_restart::recheck`，同一張表，外加「已經不是候選」→ `no_longer_pending`）：計畫是按下去那一刻的快照，

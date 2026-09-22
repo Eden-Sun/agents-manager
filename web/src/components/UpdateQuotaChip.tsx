@@ -43,10 +43,14 @@ export function UpdateQuotaChip() {
   const [asking, setAsking] = useState(false)
   const [reviewKey, setReviewKey] = useState(0)
   const notify = useStore((s) => s.notify)
-  // changelog 用第一顆等著套用的 bot 所在主機與它跑著的版本；同一台的 claude 都是同一份。
+  // changelog 用第一顆等著套用的 bot 所在主機、kind 與它跑著的版本；同一台同 kind 都是同一份。
   const changelogHost = useStore((s) => {
     const first = updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null).ready[0]?.botId
     return projectHostName(s, s.bots.find((b) => b.id === first)?.project_id ?? null)
+  })
+  const changelogKind = useStore((s) => {
+    const first = updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null).ready[0]?.botId
+    return s.bots.find((b) => b.id === first)?.kind ?? 'claude'
   })
   const changelogFrom = useStore((s) => {
     const first = updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null).ready[0]?.botId
@@ -77,11 +81,11 @@ export function UpdateQuotaChip() {
 
   if (readyCount === 0 && busyCount === 0) return null
 
-  const busyNote = busyCount > 0 ? `\n${busyCount} 顆在忙，會先跳過：\n${busyLines}` : ''
+  const busyNote = busyCount > 0 ? `\n${busyCount} 顆在忙（或還沒手動安裝），會先跳過：\n${busyLines}` : ''
   const label =
     readyCount === 0
-      ? 'claude 有更新，但這些 Bot 現在都在忙——等它們停下來再按'
-      : `claude 有更新 · 重啟 ${readyCount} 顆閒置的 Bot（結束目前的 agent，再用同一個 session --resume 接回來，上下文不會掉）`
+      ? '有 CLI 更新，但這些 Bot 現在都在忙或還沒手動安裝——處理完再按'
+      : `有 CLI 更新 · 重啟 ${readyCount} 顆閒置的 Bot（結束目前的 agent，再用同一個 session --resume 接回來，上下文不會掉）`
 
   return (
     <>
@@ -100,13 +104,15 @@ export function UpdateQuotaChip() {
       </button>
       <ConfirmDialog
         open={confirming}
-        title="重啟這些 Bot 來套用 claude 更新？"
+        title="重啟這些 Bot 來套用更新？"
         body={
           <>
             {confirming ? (
               <div className="update-split">
-                <UpdateChangelog kind="claude" host={changelogHost} from={changelogFrom} />
-                <AgmReviewBox host={changelogHost} from={changelogFrom} refreshKey={reviewKey} />
+                <UpdateChangelog kind={changelogKind} host={changelogHost} from={changelogFrom} />
+                {/* AGM 解析目前只有 claude 這條路（/api/claude-update/review 尚未支援 codex）；
+                    codex 只顯示 changelog，不冒充 claude 的解析結論。 */}
+                {changelogKind === 'claude' ? <AgmReviewBox host={changelogHost} from={changelogFrom} refreshKey={reviewKey} /> : null}
               </div>
             ) : null}
             <p>
@@ -133,10 +139,11 @@ export function UpdateQuotaChip() {
         confirmLabel={`重啟 ${readyCount} 顆`}
         // 批次框跟單顆框同一顆按鈕：claude 更新的解析是**版本層級**的事，跟要重啟幾顆無關。
         // 單顆的 chip 在批次蓋得到時會自己隱藏，所以只做在 UpdateBadge 上等於多數情況看不到
-        // （使用者 2026-09-19：「還是沒見按鈕」）。
-        secondaryLabel={asking ? '派工中…' : '請 AGM 解析'}
+        // （使用者 2026-09-19：「還是沒見按鈕」）。「請 AGM 解析」目前只有 claude 這條路，見上面
+        // `AgmReviewBox` 的註解——codex 的批次沒有這顆按鈕，不是漏做。
+        secondaryLabel={changelogKind === 'claude' ? (asking ? '派工中…' : '請 AGM 解析') : undefined}
         secondaryDisabled={asking}
-        onSecondary={() => {
+        onSecondary={changelogKind === 'claude' ? () => {
           setAsking(true)
           void api
             .requestClaudeUpdateReview({ host: changelogHost, from: changelogFrom })
@@ -152,7 +159,7 @@ export function UpdateQuotaChip() {
             })
             .catch((e: unknown) => notify('error', `派不出去：${reviewErr(e)}`))
             .finally(() => setAsking(false))
-        }}
+        } : undefined}
         width={440}
         onCancel={() => setConfirming(false)}
         onConfirm={() => {

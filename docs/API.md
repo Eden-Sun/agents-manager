@@ -546,6 +546,12 @@ adopt 之後孤兒通知標記會清掉。pane 不存在 404、`owner_bot_id` �
 
 ## 請 AGM 解析 claude 新版（使用者 2026-09-19）
 
+**目前只有 claude**：這支端點沒有 `kind` 參數，永遠讀／派 claude 的 changelog。批次更新框
+（`UpdateQuotaChip.tsx`）2026-09-22 起也收 codex（SPEC §6.9），但只在 `changelogKind === 'claude'` 時
+才畫「請 AGM 解析」按鈕與 `AgmReviewBox`——codex 的批次只顯示 changelog，不冒充 claude 的解析結論。
+codex 的「這一版該不該採用／要提防什麼」走**另一條已經支援兩種 kind 的機制**：§18.2c 的上游新版分診
+（`release_triage`，結論開 GitHub issue，不是這個對話框），擴充這支端點支援 codex 留待之後有需求再做。
+
 ### `GET /api/claude-update/review`
 這一版的 AGM 解析到哪了——更新框一打開就讀，**有結論就直接印在框裡**（使用者 2026-09-19：不要只給一句
 「結論會回到這裡」）。`?host=`／`?to=` 可指定，預設本機與磁碟上那一版。
