@@ -74,6 +74,9 @@ class FakeDaemon(BaseHTTPRequestHandler):
     def do_PUT(self):  # noqa: N802
         self._run("PUT")
 
+    def do_PATCH(self):  # noqa: N802
+        self._run("PATCH")
+
     def do_DELETE(self):  # noqa: N802
         self._run("DELETE")
 
@@ -801,6 +804,31 @@ class MiscCommandTest(CliCase):
 
     def test_bot_create_needs_project_and_name(self):
         self.assertEqual(self.bad("bot", "create")["error"], "bad_args")
+
+    def test_bot_set_patches_only_supplied_fields_and_preserves_daemon_response(self):
+        response = {"needs_restart": True, "live_apply": {"applied": False, "reason": "busy"}}
+        FakeDaemon.routes["PATCH /api/bots/b1"] = (200, response)
+        self.assertEqual(self.ok("bot", "set", "b1", "--model", "claude-opus-5-5", "--identity", "cc1"), response)
+        self.assertEqual(FakeDaemon.seen[-1]["method"], "PATCH")
+        self.assertEqual(FakeDaemon.seen[-1]["path"], "/api/bots/b1")
+        self.assertEqual(FakeDaemon.seen[-1]["body"], {"model": "claude-opus-5-5", "identity": "cc1"})
+
+    def test_bot_set_sends_only_effort_when_that_is_the_only_option(self):
+        FakeDaemon.routes["PATCH /api/bots/b1"] = (200, {"needs_restart": False})
+        self.ok("bot", "set", "b1", "--effort", "high")
+        self.assertEqual(FakeDaemon.seen[-1]["body"], {"effort": "high"})
+
+    def test_bot_set_http_errors_are_structured_for_client_and_server_errors(self):
+        for status in (422, 503):
+            with self.subTest(status=status):
+                FakeDaemon.routes["PATCH /api/bots/b1"] = (status, {"error": "rejected", "reason": "invalid setting"})
+                err = self.bad("bot", "set", "b1", "--model", "opus")
+                self.assertEqual(err["error"], "http_error")
+                self.assertEqual(err["status"], status)
+                self.assertEqual(err["detail"]["reason"], "invalid setting")
+
+    def test_bot_set_requires_at_least_one_field(self):
+        self.assertEqual(self.bad("bot", "set", "b1")["error"], "bad_args")
 
     def test_bot_delete_uses_http_delete(self):
         FakeDaemon.routes["DELETE /api/bots/b9"] = (200, {"removed_children": []})
