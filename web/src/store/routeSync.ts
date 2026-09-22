@@ -53,11 +53,28 @@ const here = () => location.pathname + location.search
 let started = false
 /** 初始路由套用完前一律 replace：開頁不該先留一格空白歷史。 */
 let booted = false
-/** 網址 → store 套用中，不回寫。 */
-let applying = false
+/** 每次 URL 導覽遞增；較舊的 async 套用不能再碰 store 或 URL。 */
+let routeRequestVersion = 0
+/** 目前由 URL 套用 store 的版本；舊請求不能替新請求解除 applying。 */
+let applyingVersion: number | null = null
+/** 擋住 applyRoute 自己的 store 更新被當成新的 UI 導覽。 */
+let routeMutation = false
+let observedStoreRoute: string | null = null
 let lastRoute: Route = { kind: 'home' }
 let drawerOpen = false
 let closeDrawer: (() => void) | null = null
+
+const storeRouteKey = (s: StoreState) => buildRoute(routeOf(s))
+
+function updateStoreFromRoute(update: () => void) {
+  routeMutation = true
+  try {
+    update()
+  } finally {
+    routeMutation = false
+    observedStoreRoute = storeRouteKey(useStore.getState())
+  }
+}
 
 function syncNow(force?: 'replace') {
   const r = routeOf(useStore.getState())
@@ -83,53 +100,71 @@ function syncNow(force?: 'replace') {
 function backHome(why: string) {
   const s = useStore.getState()
   s.notify('info', `${why}，已回到首頁。`)
-  s.selectBot(null)
+  updateStoreFromRoute(() => s.selectBot(null))
 }
 
 /** 網址 → store。連結會過期，找不到就回首頁並說一聲，別靜靜停在空畫面。 */
-async function applyRoute(r: Route) {
+async function applyRoute(r: Route, version: number) {
+  const isCurrent = () => version === routeRequestVersion
+  if (!isCurrent()) return
   const s = useStore.getState()
   switch (r.kind) {
     case 'home':
-      s.selectBot(null)
+      updateStoreFromRoute(() => s.selectBot(null))
       return
     case 'bot': {
       if (!s.bots.some((b) => b.id === r.botId)) return backHome('這個 Bot 已經不在了')
       if (r.settings) {
-        s.openSettings(r.botId)
+        updateStoreFromRoute(() => s.openSettings(r.botId))
         return
       }
-      s.selectBot(r.botId)
-      if (r.tab === 'terminal') s.setRightTab('terminal')
+      updateStoreFromRoute(() => s.selectBot(r.botId))
+      if (r.tab === 'terminal') updateStoreFromRoute(() => s.setRightTab('terminal'))
       return
     }
     case 'project':
       if (!s.projects.some((p) => p.id === r.projectId)) return backHome('這個專案已經不在了')
-      s.selectProject(r.projectId)
+      updateStoreFromRoute(() => s.selectProject(r.projectId))
       return
     case 'shell': {
       try {
         // pane 活不過 daemon 重啟，要對現況；順便補回網址裡沒有的 `cwd`。
-        const shell = (await api.fetchHostShells(r.host)).find((x) => x.pane_id === r.paneId)
-        if (shell) return s.viewHostShell(shell)
+        const shells = await api.fetchHostShells(r.host)
+        if (!isCurrent()) return
+        const shell = shells.find((x) => x.pane_id === r.paneId)
+        if (shell) {
+          updateStoreFromRoute(() => s.viewHostShell(shell))
+          return
+        }
         // 選單點進去的 pane（§6.5e）不在「自己開的」那份裡；它記在 daemon 的 pane 表，活得過重啟。
-        const traced = (await api.fetchAllPanes()).find((x) => x.host === r.host && x.pane_id === r.paneId)
+        const panes = await api.fetchAllPanes()
+        if (!isCurrent()) return
+        const traced = panes.find((x) => x.host === r.host && x.pane_id === r.paneId)
         if (!traced) return backHome('這個 shell 已經關掉了')
-        s.viewPane(traced)
+        updateStoreFromRoute(() => s.viewPane(traced))
       } catch {
-        backHome('讀不到這台主機的 shell')
+        if (isCurrent()) backHome('讀不到這台主機的 shell')
       }
       return
     }
   }
 }
 
+function applyAndSync(r: Route, finish: () => void) {
+  const version = ++routeRequestVersion
+  applyingVersion = version
+  void applyRoute(r, version).finally(() => {
+    if (version !== routeRequestVersion) return
+    applyingVersion = null
+    finish()
+  })
+}
+
 /** 結束後再對一次帳（例如回了首頁，網址要跟著變）。 */
 function run(r: Route) {
-  applying = true
-  void applyRoute(r).finally(() => {
-    applying = false
+  applyAndSync(r, () => {
     syncNow('replace')
+    booted = true
   })
 }
 
@@ -153,11 +188,28 @@ export function startRouteSync() {
   started = true
   const initial = parseRoute(location.pathname)
   lastRoute = initial
+  observedStoreRoute = storeRouteKey(useStore.getState())
   window.addEventListener('popstate', onPop)
 
   let pending: Route | null = initial
   useStore.subscribe((s) => {
-    if (applying) return
+    const currentStoreRoute = storeRouteKey(s)
+    if (routeMutation) {
+      observedStoreRoute = currentStoreRoute
+      return
+    }
+    if (applyingVersion !== null) {
+      if (currentStoreRoute !== observedStoreRoute) {
+        // Store navigation (for example a sidebar bot click) supersedes the pending URL lookup.
+        routeRequestVersion += 1
+        applyingVersion = null
+        observedStoreRoute = currentStoreRoute
+        if (!booted) booted = true
+        syncNow()
+      }
+      return
+    }
+    observedStoreRoute = currentStoreRoute
     if (pending) {
       // 清單到齊才判斷得出網址指的東西還在不在。
       if (!s.ready) return
@@ -165,9 +217,7 @@ export function startRouteSync() {
       pending = null
       // `/` 就尊重 localStorage 還原的選取，由 `syncNow` 寫成網址。
       if (r.kind !== 'home') {
-        applying = true
-        void applyRoute(r).finally(() => {
-          applying = false
+        applyAndSync(r, () => {
           syncNow()
           booted = true
         })
