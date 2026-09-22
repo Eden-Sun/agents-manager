@@ -189,7 +189,7 @@ export function ApiModelFields({
       ) : null}
       {kind === 'grok' && !fromApi && !loading ? (
         <span className="hint">
-          <KindTag kind="grok" /> `grok models` 清單無法取得，顯示內建的 grok-4.6 / grok-4.5
+          <KindTag kind="grok" /> `grok models` 清單無法取得，顯示內建的 grok-4.7 / grok-4.7-build-fast / grok-4.6 / grok-4.5
         </span>
       ) : null}
     </>

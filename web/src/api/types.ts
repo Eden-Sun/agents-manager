@@ -645,8 +645,8 @@ export const MODEL_OPTIONS: Record<BotKind, readonly string[]> = {
   claude: ['haiku', 'sonnet', 'opus', 'fable'],
   // 順序同 claude（2026-09-09 使用者決定）；gpt-5.5 拿掉（2026-09-09）。
   codex: ['gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol', 'gpt-6-astra'],
-  // `grok models`（grok 1.0.13，2026-09-06）
-  grok: ['grok-4.6', 'grok-4.5'],
+  // `grok models`（grok 1.0.40，2026-09-22）
+  grok: ['grok-4.7', 'grok-4.7-build-fast', 'grok-4.6', 'grok-4.5'],
 }
 
 /**
