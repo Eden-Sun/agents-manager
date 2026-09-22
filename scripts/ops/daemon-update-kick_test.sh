@@ -610,6 +610,13 @@ check_no "docs-only 不重新申請" "approval request" "$AGM_DIR/calls.log"
 check "沿用原核准、commit 對原本那顆" "lease acquire rebuild --approval ap-1 --commit $H1" "$AGM_DIR/calls.log"
 check "log 寫明沿用" "只動到不進 binary 的檔，沿用核准 ap-1" "$AGM_DIR/daemon-update.log"
 check "照常派工" "已派工" "$AGM_DIR/daemon-update.log"
+# HEAD 在核准後前進：派工目標必須是核准的那顆，不得派 HEAD（2026-09-22 核准 513f2320、建了 69010d72）。
+H2=$(cd "$AGM_REPO" && /usr/bin/git rev-parse HEAD)
+check "交辦正文指名核准的 commit" "要建、要重啟的 commit：${H1}（核准 ap-1 針對的就是它）" "$AGM_DIR/assign-body.txt"
+check "交辦正文說明 HEAD 不是目標" "仍然 checkout $H1 來建，restart 核准也申請 $H1" "$AGM_DIR/assign-body.txt"
+check_no "交辦正文不把 HEAD 當目標" "要建、要重啟的 commit：$H2" "$AGM_DIR/assign-body.txt"
+check "request-id 用核准的 commit" "request-id agm-daemon-update-$H1" "$AGM_DIR/calls.log"
+check_no "request-id 不用 HEAD" "request-id agm-daemon-update-$H2" "$AGM_DIR/calls.log"
 teardown
 
 # 29. main 動到要建的東西：新申請取代舊的（--supersedes），等待時間由 daemon 接過去。
