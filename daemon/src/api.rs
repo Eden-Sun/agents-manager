@@ -1794,6 +1794,9 @@ async fn restore_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Res
         if !project_live || !parent_live {
             return Err(LcError::conflict("the project or parent bot of this child is deleted", json!({"bot_id": id})));
         }
+        // A child restored by AGM is reopened by its parent in the existing pane; allow ten minutes
+        // for that asynchronous hand-off before reconcile applies the normal retirement rule.
+        crate::child_reconcile_safety::record_retirement_grace(&app.db, &id).await.map_err(any_err)?;
         sqlx::query("UPDATE bots SET deleted_at = NULL WHERE id = ?").bind(&id).execute(&app.db).await.map_err(any_err)?;
     } else {
         // 讀不懂的 args／env 不能當成空的寫回 config（#295）：env 可能帶帳號設定，還原後會以錯的身分起。
@@ -5290,6 +5293,28 @@ mod child_restore_tests {
         let b = db::bot(&e.app.db, &kid.id).await.unwrap().unwrap();
         assert!(b.deleted_at.is_none() && b.managed_by == "child" && b.parent_bot_id.is_some());
         assert!(db::active_run(&e.app.db, &kid.id).await.unwrap().is_none(), "restore 不開 run");
+        // Herdr has not reopened the child yet; a reconcile in this window must preserve its row/history.
+        *e.herdr.agents.lock().unwrap() = Vec::new();
+        crate::reconcile::reconcile_host(&e.app, crate::config::LOCAL_HOST).await.unwrap();
+        assert!(db::bot(&e.app.db, &kid.id).await.unwrap().unwrap().deleted_at.is_none(), "restore grace keeps the original child row");
+    }
+
+    #[tokio::test]
+    async fn an_unreopened_restored_child_is_retired_after_its_grace_expires() {
+        let e = tt::env().await;
+        let kid = live_child(&e, "pvw-expired").await;
+        soft_delete(&e.app, &kid.id).await;
+        restore_bot(State(e.app.clone()), Path(kid.id.clone())).await.unwrap();
+        *e.herdr.agents.lock().unwrap() = Vec::new();
+        sqlx::query("UPDATE supervisor_notes SET body='2000-01-01T00:00:00.000Z' WHERE supervisor_id=? AND kind='child_retirement_grace'")
+            .bind(&kid.id)
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+
+        crate::reconcile::reconcile_host(&e.app, crate::config::LOCAL_HOST).await.unwrap();
+
+        assert!(db::bot(&e.app.db, &kid.id).await.unwrap().unwrap().deleted_at.is_some(), "expired grace restores the existing retirement rule");
     }
 
     #[tokio::test]

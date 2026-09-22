@@ -18,11 +18,23 @@ async fn note(pool: &SqlitePool, bot_id: &str, kind: &str, body: &str) -> Result
 }
 
 pub async fn hold_after_name_taken(pool: &SqlitePool, bot_id: &str, agent: &str) -> Result<()> {
-    note(pool, bot_id, "child_retirement_hold", &format!("agent_name_taken: herdr refused to start `{agent}`; ownership is uncertain")).await
+    note(
+        pool,
+        bot_id,
+        "child_retirement_hold",
+        &format!("agent_name_taken: herdr refused to start `{agent}`; ownership is uncertain"),
+    )
+    .await
 }
 
 pub async fn clear_after_successful_restart(pool: &SqlitePool, bot_id: &str) -> Result<()> {
-    note(pool, bot_id, "child_retirement_hold", "cleared: a later in-pane restart succeeded").await
+    note(
+        pool,
+        bot_id,
+        "child_retirement_hold",
+        "cleared: a later in-pane restart succeeded",
+    )
+    .await
 }
 
 pub async fn record_retirement_grace(pool: &SqlitePool, bot_id: &str) -> Result<String> {
@@ -56,7 +68,9 @@ pub async fn retirement_block(pool: &SqlitePool, bot_id: &str) -> Result<Option<
     .await?;
     if let Some(until) = grace {
         if crate::db::cmp_ts(&until, &crate::db::now()).is_gt() {
-            return Ok(Some(format!("restored child grace period ends at {until}")));
+            return Ok(Some(format!(
+                "child retirement grace period ends at {until}"
+            )));
         }
     }
 

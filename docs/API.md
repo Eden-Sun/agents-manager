@@ -1049,7 +1049,7 @@ codex 的 `fast` **不再因為不知道現況而拒絕**（拿掉 `unknown_fast
 
 ### 10.3 `POST /api/bots/{id}/restart`
 有 Run 先 stop（ctrl+c ×2、逾時關 pane）再 start → `200 {"run_id"}`（新 Run）。沒有 Run 也可呼叫（= start）。錯誤同 start，另加 stop 那一半的錯誤（同 `POST /stop`）。過程推 `bot_status`。
-子 agent（`parent_bot_id` 非空）不收：`409 {"reason":"child_restart_forbidden","parent_bot_id"}`，由父 bot 用 herdr 重開（SPEC §6.5a）；`start` 同。
+子 agent（`parent_bot_id` 非空）不收：`409 {"reason":"child_restart_forbidden","parent_bot_id"}`，由父 bot 用 herdr 重開（SPEC §6.5a）；`start` 同。內部原地重啟若 herdr 回 `agent_name_taken`，daemon 把新 run 留為 `running`、記下保護原因，回 `409 {"reason":"agent_name_taken","bot_id","run_id","message"}`；reconcile 不會因此軟刪 bot。
 `?resume=native`：同 start 的語意，**停之前**就判斷接不接得回（看現在這個 Run 的 session）；接不回回 `409 cannot_resume`，原本的 agent 不會被停。預設（不帶）行為不變。
 重啟期間這顆 bot 排著的 queued（AGM 派工）**不撤**，留給新的 Run 送；重啟沒能把 bot 開回來才撤（SPEC §4.4a「重啟不是停」，issue #106）。
 停掉了卻沒能開回來時，舊 Run 改標 `exited`；改標寫不進 DB 回 `503 {"error":"restart_state_uncommitted","run_id":<舊 Run>,"retryable":true,"message","detail","start_error"}`（`start_error` 是 start 那一半的錯），已排重試（SPEC §6.4）。
@@ -1086,9 +1086,6 @@ codex 的 `fast` **不再因為不知道現況而拒絕**（拿掉 `unknown_fast
       "skipped": [{"bot_id":"01M1…","name":"am-claude-2","reason":"working","reason_label":"正在跑，重啟會把這一回合砍掉"}] }
 ```
 `reason`：`child`（子 agent，由父 bot 用 herdr 重開，SPEC §6.5a；2026-09-22）、`default_session`、`not_running`、`working`、`blocked`、`unknown_status`、`turn_in_flight`、`needs_manual_install`、`no_longer_pending`、`state_unreadable`。
-```
-```
-
 - **202**：回的是計畫，重啟在背景一顆一顆跑。`total = 0` 也是 202，並立刻推 `bots_restart_done`。
 - 已經有一批在跑：`202 {"batch_id": <那一批>, "total": 0, "planned": [], "skipped": [], "already_running": true}`，不另開一批、不推新的 `done`，進度照那一批的事件。
 - 每顆 `restart_bot_with(resume_native)`，claude 拿到 `--resume <上一個 session>`（上下文不掉）；本機找不到 `transcript_path` 時開新對話。
@@ -1125,7 +1122,7 @@ WS：每顆兩次 `bots_restart_progress`（`restarting`，然後 `ok` / `failed
 - daemon 啟動時掃一次 `bots/`，只刪 DB 裡已 `deleted_at` 且沒有 active Run 的 hook 材料目錄。
 
 ### 10.4a `POST /api/bots/{id}/restore`
-軟刪復原：`200 {"bot_id"}`，推 `bot_changed` / `project_changed`。child 直接清 `deleted_at`；user bot 把 config.toml 那一筆加回去再投影。
+軟刪復原：`200 {"bot_id"}`，推 `bot_changed` / `project_changed`。child 直接清 `deleted_at`；user bot 把 config.toml 那一筆加回去再投影。child 還原後不立即建立 run；daemon 給它十分鐘讓父 bot 在原 pane 重開。這段期間 reconcile 不會只因沒有 active run 而退休；寬限期過後仍未回來就照原規則退休。到期時間與 `agent_name_taken` 保護原因記在 `supervisor_notes`，daemon 重啟後仍有效。
 
 | 狀況 | 回應 |
 |---|---|
