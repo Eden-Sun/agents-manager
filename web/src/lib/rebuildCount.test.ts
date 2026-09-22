@@ -27,12 +27,32 @@ test('同一個 requester 對同一個 commit 只算一筆', () => {
   assert.equal(pendingRebuilds(rows).length, 2)
 })
 
+test('同 requester 與 commit 保留較新的申請，最早等待時間也不被舊筆拉長', () => {
+  const now = Date.parse('2026-09-15T12:00:00.000Z')
+  const rows = [
+    row({ id: 'old', created_at: '2026-09-15T10:00:00.000Z' }),
+    row({ id: 'new', created_at: '2026-09-15T11:30:00.000Z' }),
+  ]
+
+  const pending = pendingRebuilds(rows, null, now)
+  assert.deepEqual(pending.map((r) => r.id), ['new'])
+  assert.equal(oldestWaitMinutes(pending, now), 30)
+})
+
 test('新的排前面：chip 點開先看到最新那筆', () => {
   const rows = [
     row({ id: 'old', created_at: '2026-09-14T00:00:00.000Z' }),
     row({ id: 'new', requester: 'bot-9', created_at: '2026-09-14T02:00:00.000Z' }),
   ]
   assert.deepEqual(pendingRebuilds(rows).map((r) => r.id), ['new', 'old'])
+})
+
+test('created_at 含不同時區偏移時，依實際時間排序', () => {
+  const rows = [
+    row({ id: 'older', requester: 'bot-old', created_at: '2026-09-15T03:00:00+03:00' }),
+    row({ id: 'newer', requester: 'bot-new', created_at: '2026-09-15T00:30:00Z' }),
+  ]
+  assert.deepEqual(pendingRebuilds(rows).map((r) => r.id), ['newer', 'older'])
 })
 
 test('上次上線之前建立的申請不算（daemon 有 last_deploy 時）', () => {
