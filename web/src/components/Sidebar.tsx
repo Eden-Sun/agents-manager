@@ -6,6 +6,7 @@ import * as api from '../api'
 import { MOCK_MODE } from '../api'
 import type { Bot, BotKind, Lamp, MessageHit } from '../api/types'
 import { BOT_KINDS, LOCAL_HOST } from '../api/types'
+import { identityBadgeVisible } from '../lib/identityBadgeVisible'
 import {
   adjacentBotId,
   botLamp,
@@ -206,6 +207,18 @@ function BotRow({
   const turnError = useStore((s) => s.runs[botId]?.turn_error ?? null)
   const runningIdentity = runtimeIdentity(run)
   const identityUnknown = Boolean(run && (run.state === 'running' || run.state === 'starting') && run.runtime_identity === null)
+  // 這個 kind 在這台主機上只有一個帳號時整顆晶片都不畫（連「未知」「預設」都不畫，2026-09-22 使用者）：
+  // 晶片是為了分辨同一個 CLI 的兩個帳號，只有一個時它只是雜訊。
+  const showIdentity = useStore(
+    useShallow((s) => {
+      const b = s.bots.find((x) => x.id === botId)
+      if (!b) return false
+      const host = projectHostName(s, b.project_id)
+      const hostIds = identitiesOfHost(s.identities, host === LOCAL_HOST ? s.localIdentityStatus : {}, host)
+      const used = s.bots.filter((x) => x.kind === b.kind && projectHostName(s, x.project_id) === host).map((x) => x.identity)
+      return identityBadgeVisible(b.kind, hostIds, used)
+    }),
+  )
 
   if (!bot) return null
   // 佔位列：daemon 還沒建好，不能點、不能拖。
@@ -363,7 +376,7 @@ function BotRow({
         ) : null}
         <span className="bot-sub">
           {/* 身份一定要標，同 CLI 兩帳號才分得出來。 */}
-          {divergedChildren ? (
+          {!showIdentity ? null : divergedChildren ? (
             <span
               className="identity-diverged"
               title={`底下有子 bot 用別的帳號（母 ${bot.identity ?? 'cc0'}、子 ${divergedChildren.identities}：${divergedChildren.names}）——額度分開算，注意別把那個帳號用光`}
