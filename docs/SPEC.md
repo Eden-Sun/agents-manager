@@ -2501,6 +2501,13 @@ daemon 驗過才收（每個 kept／unmatched 都有 verdict、提案只引用 g
 
 `gh auth status` 失敗露在 `/api/supervisor/health` 的 `release_triage`（`{gh_auth_ok, gh_auth_error}`；`publish = false` 時為 `null`、不碰 gh；結果快取 60 秒）。`publish` 重試沒有 daemon 內定時器，由 kick 呼叫上述端點。
 
+**`pending` 不能拿 `from` 當下界（2026-09-22 修）**：`from` 就是「帳本裡已分診（含插入但還沒派）的最大版本」；
+一版剛被 `check` 插入、那一輪的派工（額度閘門、`agm assign` 失敗）沒能完成時，它已經是 ledger max，
+下一輪 `from == to ==` 它自己，若拿 `v > from_v` 當 `pending` 的下界就會把它自己永遠濾掉——codex
+0.155.0／0.155.1 卡了三天沒人分析（鎖、額度、log 都正常）就是這個洞。改成單純「帳本裡狀態還是
+`pending`、版本 `<= to` 的所有列」，不再看 `from`；`from` 只用來決定這一輪要不要 `pick_sections`
+插入新段落，不再參與已插入版本的可見性判斷。
+
 ### 18.3 喚醒 AGM 的節流
 巡檢：`[supervisor] notify_interval_secs`（預設 600），規則見 §5；只有 `wake=1` 的事件會開一次喚醒，送前合併重複（§18.15）。協調者：短窗批次（§18.15）。
 API 端狀態機見 `API.md` 的 `GET /api/supervisor/inbox`。
