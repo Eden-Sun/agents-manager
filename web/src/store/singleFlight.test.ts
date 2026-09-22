@@ -57,6 +57,57 @@ test('singleFlight: a rejected run clears inflight so the next call runs again',
   assert.equal(n, 2)
 })
 
+test('singleFlight: a queued trailing run still runs after a rejection and preserves the flight error', async () => {
+  const gates: ReturnType<typeof deferred>[] = []
+  const failure = new Error('first run failed')
+  let runs = 0
+  const refresh = singleFlight(() => {
+    runs++
+    const gate = deferred()
+    gates.push(gate)
+    return gate.promise
+  })
+  const p1 = refresh()
+  const p2 = refresh()
+  const outcome = p1.then(
+    () => ({ status: 'resolved' as const }),
+    (error: unknown) => ({ status: 'rejected' as const, error }),
+  )
+  assert.equal(p1, p2)
+
+  gates[0].reject(failure)
+  await new Promise((r) => setImmediate(r))
+  assert.equal(runs, 2, 'the queued refresh must run even though the first run rejected')
+
+  gates[1].resolve()
+  assert.deepEqual(await outcome, { status: 'rejected', error: failure })
+})
+
+test('singleFlight: onError still handles a failed run and lets the trailing run settle the flight', async () => {
+  const gates: ReturnType<typeof deferred>[] = []
+  const failure = new Error('handled failure')
+  const errors: unknown[] = []
+  let runs = 0
+  const refresh = singleFlight(
+    () => {
+      runs++
+      const gate = deferred()
+      gates.push(gate)
+      return gate.promise
+    },
+    (error) => errors.push(error),
+  )
+  const p1 = refresh()
+  const p2 = refresh()
+
+  gates[0].reject(failure)
+  await new Promise((r) => setImmediate(r))
+  assert.equal(runs, 2)
+  gates[1].resolve()
+  await Promise.all([p1, p2])
+  assert.deepEqual(errors, [failure])
+})
+
 test('acceptStateSeq drops older snapshots and keeps newer / equal ones', () => {
   assert.equal(acceptStateSeq(10, 12), 12)
   assert.equal(acceptStateSeq(10, 10), 10)

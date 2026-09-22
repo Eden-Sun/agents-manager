@@ -11,15 +11,17 @@ export function singleFlight(run: () => Promise<void>, onError?: (e: unknown) =>
       return inflight
     }
     inflight = (async () => {
+      let failure: { error: unknown } | null = null
       do {
         again = false
         try {
           await run()
         } catch (e) {
-          if (!onError) throw e
-          onError(e)
+          if (onError) onError(e)
+          else failure ??= { error: e }
         }
       } while (again)
+      if (failure) throw failure.error
     })().finally(() => {
       inflight = null
     })
