@@ -817,6 +817,27 @@ class MiscCommandTest(CliCase):
     def test_bot_restart(self):
         FakeDaemon.routes["POST /api/bots/b1/restart"] = (200, {"run_id": "r1"})
         self.assertEqual(self.ok("bot", "restart", "b1")["run_id"], "r1")
+        self.assertEqual(FakeDaemon.seen[-1]["path"], "/api/bots/b1/restart", "沒帶 --resume 就沒有 query")
+
+    def test_bot_restart_resume_native_goes_in_the_query_and_the_answer_is_passed_through(self):
+        FakeDaemon.routes["POST /api/bots/b1/restart"] = (200, {"run_id": "r1", "resumed": True, "session_id": "s-9", "resume_outcome": "native"})
+        out = self.ok("bot", "restart", "b1", "--resume", "native")
+        self.assertEqual(FakeDaemon.seen[-1]["path"], "/api/bots/b1/restart?resume=native")
+        self.assertEqual(FakeDaemon.seen[-1]["body"], {})
+        self.assertEqual((out["resumed"], out["session_id"]), (True, "s-9"))
+        FakeDaemon.routes["POST /api/bots/b1/start"] = (200, {"resumed": True})
+        self.ok("bot", "start", "b1", "--resume", "native")
+        self.assertEqual(FakeDaemon.seen[-1]["path"], "/api/bots/b1/start?resume=native")
+
+    def test_bot_resume_native_conflict_is_a_structured_error(self):
+        FakeDaemon.routes["POST /api/bots/b1/restart"] = (409, {"error": "resume_failed", "resumed": False, "session_id": "s-9"})
+        err = self.bad("bot", "restart", "b1", "--resume", "native")
+        self.assertEqual(err["status"], 409)
+        self.assertEqual((err["detail"]["resumed"], err["detail"]["session_id"]), (False, "s-9"))
+
+    def test_bot_resume_rejects_other_ops_and_modes(self):
+        self.assertNotEqual(self.run_cli("bot", "stop", "b1", "--resume", "native")[0], 0)
+        self.assertNotEqual(self.run_cli("bot", "restart", "b1", "--resume", "fresh")[0], 0)
 
     def test_http_error_is_structured_and_non_zero(self):
         FakeDaemon.routes["GET /api/supervisor/handoff"] = (409, {"error": "conflict", "reason": "忙碌中"})

@@ -1044,7 +1044,14 @@ def cmd_bot(client: Client, cfg: dict, args) -> object:
     if args.op == "delete":
         # 軟刪：先停 pane，再從設定拿掉；它開的子 agent 一起收，對話紀錄保留。
         return client.delete(f"/api/bots/{urllib.parse.quote(args.bot_id)}")
-    return client.post(f"/api/bots/{urllib.parse.quote(args.bot_id)}/{args.op}", {})
+    path = f"/api/bots/{urllib.parse.quote(args.bot_id)}/{args.op}"
+    # `--resume native`：接回 DB 記的原生對話（接不回 daemon 回 409 resumed:false，不會默默開新的）。
+    # 回應原樣印出——resumed／session_id／resume_outcome 就是呼叫端要看的。
+    if getattr(args, "resume", None):
+        if args.op not in ("start", "restart"):
+            raise AgmError("bad_args", "--resume 只有 bot start / restart 收", 2)
+        path = f"{path}?{urllib.parse.urlencode({'resume': args.resume})}"
+    return client.post(path, {})
 
 
 # ------------------------------------------------------------------ 參數解析
@@ -1346,6 +1353,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--model")
     s.add_argument("--effort")
     s.add_argument("--identity")
+    s.add_argument("--resume", choices=["native"], help="start/restart：接回 DB 記的原生對話（?resume=native）；接不回是 409 resumed:false")
     s.set_defaults(func=cmd_bot)
 
     return p
