@@ -52,7 +52,38 @@ export function withoutPane(lists: PaneLists, host: string, paneId: string): Pan
 /** 同一顆 pane 換成 daemon 剛回的那一列（例如關閉被 409 擋下、附上的最新 kind／port）。 */
 export function withPane(lists: PaneLists, fresh: ProjectPane): PaneLists {
   const same = (p: ProjectPane) => p.host === fresh.host && p.pane_id === fresh.pane_id
+  const projectId = fresh.project_id || null
+  let placed = false
   const sidePanes: Record<string, ProjectPane[]> = {}
-  for (const [pid, list] of Object.entries(lists.sidePanes)) sidePanes[pid] = list.map((p) => (same(p) ? fresh : p))
-  return { sidePanes, unownedPanes: lists.unownedPanes.map((p) => (same(p) ? fresh : p)) }
+  for (const [pid, list] of Object.entries(lists.sidePanes)) {
+    const next: ProjectPane[] = []
+    for (const p of list) {
+      if (!same(p)) {
+        next.push(p)
+      } else if (pid === projectId && !placed) {
+        // 如果目的清單已有這顆 pane，沿用它的位置；其他清單的舊副本都移除。
+        next.push(fresh)
+        placed = true
+      }
+    }
+    if (pid === projectId && !placed) {
+      next.push(fresh)
+      placed = true
+    }
+    if (next.length > 0) sidePanes[pid] = next
+  }
+  if (projectId && !placed) sidePanes[projectId] = [...(sidePanes[projectId] ?? []), fresh]
+
+  const unownedPanes: ProjectPane[] = []
+  for (const p of lists.unownedPanes) {
+    if (!same(p)) {
+      unownedPanes.push(p)
+    } else if (!projectId && !placed) {
+      // 未歸屬清單也保留原位置，並移除剩餘重複列。
+      unownedPanes.push(fresh)
+      placed = true
+    }
+  }
+  if (!projectId && !placed) unownedPanes.push(fresh)
+  return { sidePanes, unownedPanes }
 }
