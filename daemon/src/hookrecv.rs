@@ -39,6 +39,11 @@ pub struct HookBody {
 /// 回 200 再掉事件是無聲的資料遺失，回 503 只是讓那則事件多繞一趟 spool。
 ///
 /// StatusLine 例外，照舊 fire-and-forget（理由見 [`crate::hook_inbox`]）。
+/// hook 的 provider（URL 那一段或 body 的 `provider`）必須就是這顆 bot 的 kind。空的 kind（舊資料）不擋。
+pub(crate) fn provider_matches_kind(provider: &str, kind: &str) -> bool {
+    kind.is_empty() || provider.eq_ignore_ascii_case(kind)
+}
+
 pub async fn receive(
     State(app): State<Arc<App>>,
     Path(provider): Path<String>,
@@ -60,6 +65,14 @@ pub async fn receive(
         return (StatusCode::GONE, Json(json!({"error": "bot deleted"})));
     }
     let provider = if body.provider.is_empty() { provider } else { body.provider.clone() };
+    // provider 要跟這顆 bot 的 kind 一致：claude bot 的 pane 裡跑 `codex exec -c notify=[… --bot $AM_BOT_ID …]`，
+    // token／run id 都是從 pane 環境繼承來的、全對，codex 的 thread-id 就被當成這顆 claude bot 的 session
+    // 記成 native_session_id 還標 verified（2026-09-22 AM-issuers-XH：DB 記了一個不存在的 UUIDv7，
+    // restart --resume native 兩次都起不來）。
+    if !provider_matches_kind(&provider, &bot.kind) {
+        tracing::warn!(bot = %bot.name, kind = %bot.kind, %provider, "hook from another provider; ignored");
+        return (StatusCode::CONFLICT, Json(json!({"error": "provider_mismatch", "bot_kind": bot.kind, "provider": provider})));
+    }
     let mut b = body;
     b.provider = provider;
 
@@ -687,6 +700,11 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
     // A3: also guards the spool-replay path, where nothing checked the token.
     if bot.deleted_at.is_some() {
         tracing::info!(bot = %bot.name, "hook for a deleted bot; ignored");
+        return Ok(());
+    }
+    // spool 重播的那條路也要擋（`receive` 已經擋過一次，但舊 spool 裡可能還躺著別種 provider 的）。
+    if !provider_matches_kind(&body.provider, &bot.kind) {
+        tracing::warn!(bot = %bot.name, kind = %bot.kind, provider = %body.provider, "hook from another provider; ignored");
         return Ok(());
     }
     let conv = db::conversation_id(&app.db, &bot.id).await?;
@@ -3662,6 +3680,27 @@ mod resume_tests {
 
     async fn remaining(e: &Env, run: &db::Run) -> Option<String> {
         sqlx::query_scalar("SELECT resume_session_id FROM runs WHERE id=?").bind(&run.id).fetch_one(&e.app.db).await.unwrap()
+    }
+
+    /// claude bot 的 pane 裡跑的 `codex exec` 帶著繼承來的 AM_BOT_ID／token／run id 送 notify：thread-id 不是這顆
+    /// bot 的 session，不能拿去對 `resume_session_id`、更不能寫進 native_session_id（2026-09-22 AM-issuers-XH）。
+    #[tokio::test]
+    async fn a_hook_from_another_provider_cannot_claim_this_bots_session() {
+        let (e, bot, run) = fixture().await;
+        let body = HookBody {
+            bot_id: bot.id.clone(),
+            provider: "codex".into(),
+            payload: json!({"type": "agent-turn-complete", "thread-id": "01a0b8c6-e80a-7360-87e7-405fd448490f", "turn-id": "t1", "last-assistant-message": "done"}),
+            ..serde_json::from_value(json!({"bot_id": ""})).unwrap()
+        };
+        process_locked(&e.app, &body).await.unwrap();
+        assert_eq!(remaining(&e, &run).await.as_deref(), Some("native-expected"), "標記被別種 provider 消耗掉了");
+        let (native, outcome): (Option<String>, Option<String>) =
+            sqlx::query_as("SELECT native_session_id, resume_outcome FROM runs WHERE id=?").bind(&run.id).fetch_one(&e.app.db).await.unwrap();
+        assert_eq!((native, outcome), (None, None));
+        // 同一顆的 claude hook 照常。
+        assert!(provider_matches_kind("claude", "claude") && provider_matches_kind("Claude", "claude") && provider_matches_kind("codex", ""));
+        assert!(!provider_matches_kind("codex", "claude") && !provider_matches_kind("grok", "codex"));
     }
 
     #[tokio::test]

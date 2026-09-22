@@ -1047,10 +1047,16 @@ def cmd_bot(client: Client, cfg: dict, args) -> object:
     path = f"/api/bots/{urllib.parse.quote(args.bot_id)}/{args.op}"
     # `--resume native`：接回 DB 記的原生對話（接不回 daemon 回 409 resumed:false，不會默默開新的）。
     # 回應原樣印出——resumed／session_id／resume_outcome 就是呼叫端要看的。
+    if getattr(args, "session", None) and not getattr(args, "resume", None):
+        raise AgmError("bad_args", "--session 要跟 --resume native 一起用", 2)
     if getattr(args, "resume", None):
         if args.op not in ("start", "restart"):
             raise AgmError("bad_args", "--resume 只有 bot start / restart 收", 2)
-        path = f"{path}?{urllib.parse.urlencode({'resume': args.resume})}"
+        query = {"resume": args.resume}
+        if getattr(args, "session", None):
+            # 救援：DB 記錯 session 時指名接回哪一段（只有 agm 露出；網頁沒有）。
+            query["session"] = args.session
+        path = f"{path}?{urllib.parse.urlencode(query)}"
     return client.post(path, {})
 
 
@@ -1354,6 +1360,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--effort")
     s.add_argument("--identity")
     s.add_argument("--resume", choices=["native"], help="start/restart：接回 DB 記的原生對話（?resume=native）；接不回是 409 resumed:false")
+    s.add_argument("--session", help="跟 --resume native 一起：不看 DB，指名接回這一段 session id（DB 記錯時的救援路徑）")
     s.set_defaults(func=cmd_bot)
 
     return p

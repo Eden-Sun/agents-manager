@@ -21,6 +21,9 @@ pub struct StartOpts {
     pub resume_required: bool,
     pub fork_session: Option<String>,
     pub require_idle: bool,
+    /// 跟 `resume_native` 一起用：不看 DB 記的 session，改接這一段（`?resume=native&session=<id>`）。
+    /// 救援用：DB 記錯（例如 2026-09-22 被 codex 子行程的 thread-id 蓋掉）時，讓 AGM 指名接回真正的對話。
+    pub resume_session: Option<String>,
 }
 
 /// 這顆 bot 現在為什麼不能被重啟；`None` ＝ 閒置。呼叫端持 bot 鎖。理由的代碼與 `bulk_restart::Skip` 一致。
@@ -77,7 +80,7 @@ pub async fn start_bot_locked_with(app: &Arc<App>, bot_id: &str, opts: StartOpts
     // 要求接回原對話：在任何副作用（run 列、pane、shim）之前就判斷，接不回就整個不啟動。
     if opts.resume_native && opts.resume_required {
         let host = db::bot_host(&app.db, bot_id).await.map_err(up)?;
-        if let Err(why) = native_resume_plan(app, &bot, &host, false).await? {
+        if let Err(why) = native_resume_plan(app, &bot, &host, false, opts.resume_session.as_deref()).await? {
             return Err(cannot_resume(bot_id, why));
         }
     }
@@ -231,8 +234,21 @@ pub(crate) async fn native_resume_plan(
     bot: &db::Bot,
     host: &str,
     include_active: bool,
+    override_session: Option<&str>,
 ) -> LcResult<Result<(String, Vec<String>), &'static str>> {
-    let last = if include_active {
+    let last = if let Some(sid) = override_session {
+        // 指名的 session：transcript 路徑盡量從記過這段的 run 帶出來（換身分時要複製），沒有就讓 CLI 自己找。
+        let transcript: Option<String> = sqlx::query_scalar(
+            "SELECT transcript_path FROM runs WHERE bot_id = ? AND native_session_id = ? AND transcript_path IS NOT NULL
+              ORDER BY started_at DESC LIMIT 1",
+        )
+        .bind(&bot.id)
+        .bind(sid)
+        .fetch_optional(&app.db)
+        .await
+        .map_err(up)?;
+        Some((sid.to_string(), transcript))
+    } else if include_active {
         sqlx::query_as::<_, (String, Option<String>)>(
             "SELECT native_session_id, transcript_path FROM runs
               WHERE bot_id = ? AND native_session_id IS NOT NULL ORDER BY started_at DESC LIMIT 1",
@@ -634,7 +650,7 @@ async fn start_inner(
     // Reopen only: resolve the previous native session after preflight. The requested id is
     // persisted before `agent.start`; hookrecv uses it to detect a provider that ignored resume.
     let resume = if opts.resume_native {
-        match native_resume_plan(app, bot, &host, false).await? {
+        match native_resume_plan(app, bot, &host, false, opts.resume_session.as_deref()).await? {
             Ok(plan) => Some(plan),
             // 預設退回開新對話；`resume_required` 的呼叫在前面就擋掉了。
             Err(why) => {
@@ -910,7 +926,7 @@ pub async fn restart_bot_with(app: &Arc<App>, bot_id: &str, opts: StartOpts) -> 
     // 停之前就確定接得回，免得 ctrl+c 掉之後才發現只能開新對話。
     if opts.resume_native && opts.resume_required {
         let host = db::bot_host(&app.db, bot_id).await.map_err(up)?;
-        if let Err(why) = native_resume_plan(app, &bot, &host, true).await? {
+        if let Err(why) = native_resume_plan(app, &bot, &host, true, opts.resume_session.as_deref()).await? {
             return Err(cannot_resume(bot_id, why));
         }
     }
@@ -1302,6 +1318,23 @@ mod resume_args_tests {
         assert_eq!(resume_args_by_kind("claude", ""), Err("no_session_id"));
     }
 
+    /// 指名的 session 優先於 DB 記的那段（DB 記錯時的救援路徑，2026-09-22）：`--resume <指名的>`，
+    /// `resume_session_id` 也是它，之後 SessionStart 回報的就拿它來對。
+    #[tokio::test]
+    async fn an_explicit_session_overrides_the_recorded_one() {
+        let e = env().await;
+        let bot = claude_bot(&e.app, &e.project_id, "rescued").await;
+        let plan = super::native_resume_plan(&e.app, &bot, crate::config::LOCAL_HOST, false, Some("246fcf93-real")).await.unwrap().unwrap();
+        assert_eq!(plan.0, "246fcf93-real");
+        assert!(plan.1.iter().any(|a| a == "246fcf93-real") && plan.1.iter().any(|a| a == "--resume"), "{:?}", plan.1);
+        // DB 記了另一段（錯的）也不影響。
+        sqlx::query("INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, started_at, ended_at, native_session_id)
+                     VALUES (?,?,'exited','idle','ws-1','p-old',?,?, '01a0b8c6-wrong')")
+            .bind(db::ulid()).bind(&bot.id).bind(db::now()).bind(db::now()).execute(&e.app.db).await.unwrap();
+        assert_eq!(super::native_resume_plan(&e.app, &bot, crate::config::LOCAL_HOST, false, Some("246fcf93-real")).await.unwrap().unwrap().0, "246fcf93-real");
+        assert_eq!(super::native_resume_plan(&e.app, &bot, crate::config::LOCAL_HOST, false, None).await.unwrap().unwrap().0, "01a0b8c6-wrong");
+    }
+
     /// Continuation is opt-in: only `resume_native` gets `--resume <id>`.
     #[tokio::test]
     async fn native_resume_is_opt_in() {
@@ -1498,7 +1531,7 @@ mod resume_args_tests {
             .unwrap();
 
             let bot = db::bot(&e.app.db, &pm.id).await.unwrap().unwrap();
-            let plan = native_resume_plan(&e.app, &bot, LOCAL_HOST, false).await.unwrap();
+            let plan = native_resume_plan(&e.app, &bot, LOCAL_HOST, false, None).await.unwrap();
             let (sid, args) = plan.expect("resumable");
             assert_eq!(sid, "sid-same");
             assert!(args.windows(2).any(|w| w == ["--resume", "sid-same"]));
@@ -1534,7 +1567,7 @@ mod resume_args_tests {
             .unwrap();
 
             let bot = db::bot(&e.app.db, &pm.id).await.unwrap().unwrap();
-            let plan = native_resume_plan(&e.app, &bot, LOCAL_HOST, false).await.unwrap();
+            let plan = native_resume_plan(&e.app, &bot, LOCAL_HOST, false, None).await.unwrap();
             let (sid, args) = plan.expect("resumable after copy");
             assert_eq!(sid, "sid-move");
             assert!(args.windows(2).any(|w| w == ["--resume", "sid-move"]));
@@ -1567,7 +1600,7 @@ mod resume_args_tests {
             .unwrap();
 
             let bot = db::bot(&e.app.db, &pm.id).await.unwrap().unwrap();
-            let plan = native_resume_plan(&e.app, &bot, LOCAL_HOST, false).await.unwrap();
+            let plan = native_resume_plan(&e.app, &bot, LOCAL_HOST, false, None).await.unwrap();
             assert_eq!(plan, Err("transcript_missing"));
         }
     }
@@ -1720,7 +1753,7 @@ mod resume_args_tests {
             .unwrap();
 
             let bot = db::bot(&e.app.db, &pm.id).await.unwrap().unwrap();
-            let plan = native_resume_plan(&e.app, &bot, "no-such-host", false).await.unwrap();
+            let plan = native_resume_plan(&e.app, &bot, "no-such-host", false, None).await.unwrap();
             assert_eq!(plan, Err("transcript_missing"));
         }
 
@@ -1760,7 +1793,7 @@ mod resume_args_tests {
             .unwrap();
 
             let bot = db::bot(&e.app.db, &pm.id).await.unwrap().unwrap();
-            let plan = tokio::time::timeout(Duration::from_secs(20), native_resume_plan(&e.app, &bot, "unreachable-box", false))
+            let plan = tokio::time::timeout(Duration::from_secs(20), native_resume_plan(&e.app, &bot, "unreachable-box", false, None))
                 .await
                 .expect("連不上要快速失敗，不能卡住整個重啟流程")
                 .unwrap();
