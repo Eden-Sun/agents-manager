@@ -159,7 +159,8 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   `projection::validate` 乾跑 → 原子寫入（唯一暫存檔 + `rename`）」。
   **每次寫入與外部改動都記 log**（issue #406）：寫出去記 INFO `config.toml written`；重讀時內容跟 daemon 記得的不同（＝不是 daemon 自己寫的）記 WARN
   `config.toml changed outside this daemon`。兩者都帶呼叫位置（`#[track_caller]`，`projection` 的公開函式把自己的呼叫端傳下來）、觸發它的 HTTP 請求
-  （`api::auth` 對非 GET 請求設的 task-local：method／path／對端／User-Agent／Origin／Referer／`X-AM-Caller`，不含 token）、前後 bot／專案數、被拿掉與新增的 id、檔案 mtime 與大小。
+  （`api::auth` 對非 GET 請求設的 task-local：method／path／對端／User-Agent／Origin／Referer，不含 token；身分分兩格——`bot=` 是驗過的
+  （`X-AM-Bot-Id` ＋ 對得上的 `X-AM-Bot-Token`），`caller_self_reported=` 是 `X-AM-Caller` 那個**自稱**的字串，誰都寫得出來，不能當證據）、前後 bot／專案數、被拿掉與新增的 id、檔案 mtime 與大小。
   刪除 API 另記 WARN `bot delete requested` 並把同一段呼叫端寫進 delete intent 的 `requested_by`（DB 裡查得到）。13:28Z 那次就是只有投影那行 `soft-deleted`，最後只能從 `intents` 表反推是刪除 API，呼叫端至今不明。mtime 只作為變更觀測，不能當唯一重讀條件，因為檔案系統可能保留或降低 mtime 精度。
   驗不過就直接回錯誤，**config.toml 一個字都不動**，
   記憶體裡那份也不變；錯誤訊息保留原因並附「（config.toml 未變更）」，recovery path 就是改個合法的值再送一次。
@@ -207,8 +208,10 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   `stop_not_confirmed` / `run_state_unreadable` / `run_still_active`）——刪除本身已經定案（bot 已軟刪），所以回 200 而不是錯誤；下次開機的清掃在 run 確定結束後把目錄收掉。
   **開機的殘留清掃**（`purge_deleted_bot_dirs`，reconcile／rearm 之後跑一次）只收「確定軟刪」而且「確定沒有 active run」的 `bots/<id>/`；沒有 bot 認領的目錄不碰。
   **「清目錄」＝搬進回收區，不是刪**（issue #406）：本機的 `bots/<id>/` 搬到 `<資料目錄>/bots-trash/<id>.<毫秒>/`，`POST /api/bots/:id/restore` 時若 `bots/<id>/` 不在就把最新那份搬回來；
-  開機清掃順便刪掉放超過 7 天的（看名字裡的時間，`rename` 不更新目錄 mtime）。軟刪本來就是為了能還原，目錄卻是當場 `remove_dir_all`——誤刪時 bot 列與 config 救得回來，
-  spool 裡還沒重放的 hook、手動放的檔就沒了。取捨：多佔 7 天的磁碟（bot 目錄是 KB 級）。
+  本機回收區的清理有兩道、跑兩處：**過期**（放超過 7 天，看名字裡的時間，`rename` 不更新目錄 mtime）與**總量上限**（整個 `bots-trash/` 超過 2 GB 就從最舊的開始清到降下來，
+  最新那一份永遠留著）；開機清掃跑一次，另外 `bot_trash::spawn_gc` 每天再跑一次——只靠開機那一次不夠，daemon 常駐好幾天回收區會一路長。
+  名字看不懂的檔案／目錄一律不碰。軟刪本來就是為了能還原，目錄卻是當場 `remove_dir_all`——誤刪時 bot 列與 config 救得回來，
+  spool 裡還沒重放的 hook、手動放的檔就沒了。取捨：多佔最多 7 天／2 GB 的磁碟（bot 目錄通常是 KB 級）。
   **遠端同一套**（issue #411，`daemon/src/remote_trash.rs`）：遠端的 `bots/<id>/` 由 ssh `mv` 到同一個遠端根（§3.1 遠端分實例）底下的 `bots-trash/<id>.<毫秒>/`；還原時 ssh 搬回最新那份（`bots/<id>/` 已在就不動，ssh 等 10 秒，搬不回來不擋還原、只記 warn），並清掉那顆的 `remote_bot_dir_purges` 記號；主機連上（開機、重連）時清掉遠端放超過 7 天的。
   bot 列或 active run 讀不到（DB 一時忙、I/O 錯）＝還不知道：目錄留著、記一行 warn，下次開機再判斷——清理可重入，刪掉還在跑的 bot 的 hook／shim／spool 補不回來（#187）。
   `DELETE /api/projects/:id` 依 id 排序拿齊專案內每顆 bot 的 per-bot 鎖，**在鎖內**重驗都已停止再定案；TOML 裡多出沒鎖住的 bot（剛建立、可能正要啟動）就 409 `delete_refused`。

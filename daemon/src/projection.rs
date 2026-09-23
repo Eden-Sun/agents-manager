@@ -546,7 +546,10 @@ async fn recently_removed_bots(pool: &SqlitePool) -> Result<usize> {
 async fn alert_on_refusal(pool: &SqlitePool, e: &anyhow::Error) {
     let Some(r) = e.downcast_ref::<ProjectionRefused>() else { return };
     let reason = if r.supervisor_children.is_empty() { "projection_removal_refused" } else { "supervisor_bot_removal_refused" };
-    crate::supervisor_owned::alert(pool, reason, &format!("{}（呼叫端：{}）", r.detail, crate::config_audit::http_caller())).await;
+    // dedupe 的 subject＝這次要被拿掉的那幾顆（review d77434c0 #4）：換一批 bot 就是另一則，同一批連續投影才收斂。
+    let subject = if r.supervisor_children.is_empty() { r.bots.join("+") } else { r.supervisor_children.join("+") };
+    crate::supervisor_owned::alert(pool, reason, &subject, &format!("{}（呼叫端：{}）", r.detail, crate::config_audit::http_caller()))
+        .await;
 }
 
 /// 大量軟刪閘門的純判斷（2026-09-14 事故）：`next` 的活列相對於 DB 快照，是不是「config 空了但 DB 還有列」
