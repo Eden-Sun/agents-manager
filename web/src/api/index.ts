@@ -404,8 +404,11 @@ export async function patchBot(botId: string, input: PatchBotInput): Promise<Pat
 }
 
 /** 側欄排序（API.md §5.4），存 config.toml 讓各裝置共用同一份；`primary` 是主力那列的順序（#344，存 DB）。 */
-export async function saveOrder(input: { projects?: string[]; bots?: Record<string, string[]>; primary?: string[] }): Promise<void> {
-  await transport.request('POST', '/order', input)
+export async function saveOrder(
+  input: { projects?: string[]; bots?: Record<string, string[]>; primary?: string[] },
+  signal?: AbortSignal,
+): Promise<void> {
+  await transport.request('POST', '/order', input, signal)
 }
 
 /** API.md §fork：從頂層 bot 分出新 bot，CLI 接續來源的對話脈絡。建好但沒起來時 `start_error` 有值。 */

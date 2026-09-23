@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { useStore } from './store.ts'
+import { setOrderSaveTimeoutForTest, useStore } from './store.ts'
 
 type Bot = ReturnType<typeof useStore.getState>['bots'][number]
 const bot = (id: string, position: number) => ({ ...({} as Bot), id, project_id: 'p1', primary: true, primary_position: position })
@@ -53,13 +53,19 @@ test('daemon 拒絕（舊版不認得 primary → 400）：回捲，並把原因
  * `fail[i]` 為真就回 502 不落庫。回傳 daemon 目前存的主力順序與收到的請求序。
  */
 function stubDaemon(delays: number[], fail: boolean[] = []) {
-  const server = { order: null as string[] | null, arrived: [] as string[][] }
+  const server = { order: null as string[] | null, arrived: [] as string[][], signals: [] as (AbortSignal | null)[] }
   let n = 0
   globalThis.fetch = (async (input: string, init?: RequestInit) => {
     const i = n++
     const body = init?.body ? JSON.parse(String(init.body)) : undefined
     if (String(input) === '/api/order') {
-      await new Promise((r) => setTimeout(r, delays[i] ?? 0))
+      server.signals.push(init?.signal ?? null)
+      const signal = init?.signal
+      await new Promise((resolve, reject) => {
+        // Infinity＝daemon 永遠不回；跟真的 fetch 一樣，只有 signal 中止時才會 reject。
+        if (delays[i] !== Infinity) setTimeout(resolve, delays[i] ?? 0)
+        signal?.addEventListener('abort', () => reject(signal.reason))
+      })
       if (fail[i]) return { ok: false, status: 502, statusText: '502', text: async () => JSON.stringify({ error: 'upstream', message: 'daemon rebuilding' }) } as unknown as Response
       server.order = body.primary
       server.arrived.push(body.primary)
@@ -104,4 +110,38 @@ test('兩次主力排序、較舊的成功而較新的失敗：回到 daemon 存
   const notice = useStore.getState().notices.find((x) => x.kind === 'error')
   assert.ok(notice, '要跳錯誤通知')
   assert.match(notice.text, /主力順序沒存起來.*daemon rebuilding/)
+})
+
+/** #391 追加：transport 沒有逾時，前一個 POST 永遠不回的話，同範圍後面的存檔不能跟著永遠排隊。 */
+test('前一個主力排序 POST 永遠不回：逾時後中止它、送出下一個，最後是新的順序', async () => {
+  setOrderSaveTimeoutForTest(40)
+  try {
+    useStore.setState({ bots: [bot('a', 0), bot('b', 1), bot('c', 2)], notices: [] })
+    const server = stubDaemon([Infinity, 0])
+    useStore.getState().movePrimary(['c', 'a', 'b'])
+    useStore.getState().movePrimary(['b', 'c', 'a'])
+    await new Promise((r) => setTimeout(r, 150))
+    assert.deepEqual(server.order, ['b', 'c', 'a'], `逾時後要送出下一個；抵達序 ${JSON.stringify(server.arrived)}`)
+    assert.equal(server.signals[0]?.aborted, true, '卡住的那個要真的中止，不然它晚到一樣會蓋掉新順序')
+    assert.deepEqual(positions(), { b: 0, c: 1, a: 2 })
+    assert.equal(useStore.getState().notices.filter((x) => x.kind === 'error').length, 0, '較舊的逾時被較新的成功取代，不跳錯誤')
+  } finally {
+    setOrderSaveTimeoutForTest(15_000)
+  }
+})
+
+test('只有一個主力排序 POST 且永遠不回：逾時當失敗，回捲並說是逾時', async () => {
+  setOrderSaveTimeoutForTest(40)
+  try {
+    useStore.setState({ bots: [bot('a', 0), bot('b', 1), bot('c', 2)], notices: [] })
+    stubDaemon([Infinity])
+    useStore.getState().movePrimary(['c', 'a', 'b'])
+    await new Promise((r) => setTimeout(r, 120))
+    assert.deepEqual(positions(), { a: 0, b: 1, c: 2 }, '逾時＝沒存起來，要回到原本的順序')
+    const notice = useStore.getState().notices.find((x) => x.kind === 'error')
+    assert.ok(notice, '要跳錯誤通知')
+    assert.match(notice.text, /主力順序沒存起來.*逾時/)
+  } finally {
+    setOrderSaveTimeoutForTest(15_000)
+  }
 })
