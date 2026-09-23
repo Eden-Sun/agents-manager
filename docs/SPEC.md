@@ -154,8 +154,9 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
     在 `timestamp_compat_tests` 的 `CANONICAL_ONLY` 各列理由。
   有測試掃原始碼擋著（新寫一個裸字串比較會紅），也有用**兩種格式混存**的資料打真判斷的測試（同一秒內、跨種類、`+08:00`）。
 - **權威劃分**：TOML 是 Project／Bot 期望設定的唯一權威；SQLite 存 Run／Turn／Message／Conversation／hook token／workspace 映射。啟動與每次寫回 TOML 後做 TOML→SQLite 投影（依 id upsert；TOML 移除的 bot 標 `deleted_at`，保留歷史）。
-- **落盤前先驗投影**（issue #73）：`ConfigStore::update` 的順序是「重讀（mtime 變了）→ 在記憶體套用修改 →
-  `projection::validate` 乾跑 → 原子寫入（暫存檔 + `rename`）」。驗不過就直接回錯誤，**config.toml 一個字都不動**，
+- **落盤前先驗投影**（issue #73）：`ConfigStore::update` 的順序是「每次先重讀磁碟上的最新版 → 在記憶體套用修改 →
+  `projection::validate` 乾跑 → 原子寫入（唯一暫存檔 + `rename`）」。mtime 只作為變更觀測，不能當唯一重讀條件，因為檔案系統可能保留或降低 mtime 精度。
+  驗不過就直接回錯誤，**config.toml 一個字都不動**，
   記憶體裡那份也不變；錯誤訊息保留原因並附「（config.toml 未變更）」，recovery path 就是改個合法的值再送一次。
   以前只在投影當下驗，而投影跑在 config 已經落盤之後：一筆會被擋的修改先把 TOML 改壞，API 回了錯，現場卻已經變了，
   daemon 下次啟動才爆。`validate` 是純函式（bot／專案 id 格式、bot 名字、kind、identity 綁定與 kind 相符、identity 名字與 kind），
@@ -173,8 +174,9 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   不必為「這次會不會踩到」另外分岔。
   沒有伴隨 mutation 的重投（daemon 啟動的 `project_config_at_startup`、supervisor 背景巡邏定期把既有 config 套進 DB）
   不算 mutation，繼續用 `project_config`：那是把既有 config 重新套進 DB，不是「這次要不要寫」的判斷。
-- **投影不得大量軟刪**（2026-09-14 事故）：一次要軟刪的 bot／專案超過 3 列、或超過現有的 30%（兩列以上才算），或 config 裡一個專案都沒有而 DB 還有列 → **在任何寫入之前**拒絕整次投影並記 `error`，daemon 不啟動。
-  啟動與 runtime 的**每一次**重投都走閘門：`ConfigStore::update` 會在磁碟 mtime 變了時重讀，「外面把 TOML 換掉／清空，再由 API 或總管觸發重投」是同一條事故路徑。
+- **投影防止意外軟刪**（2026-09-14、2026-09-23 事故）：隱式投影（啟動、重投、設定 mutation）一次要軟刪超過 **1 顆 user bot**、超過 **3 個 project**，或超過現有同類列的 **30%**（兩列以上才算），或 config 裡一個專案都沒有而 DB 還有列 → **在任何寫入之前**拒絕整次投影、記 `WARN`，不做任何軟刪，等待人工確認。bot 的上限設為 1，是因為單筆隱式刪除常見，兩筆同時消失已足以指向設定檔快照遺失（本次 `build` 與 triage bot 同時消失）。
+  超過一顆 bot 的上限以及 supervisor child 保護不受 `AM_ALLOW_BULK_DELETE=1` 啟動覆寫影響；該覆寫仍只適用其他既有的大量 project／空 config 保護。明確的 DELETE API 仍依其逐筆授權路徑處理。這些檢查涵蓋寫入前與投影當下，確保設定與 DB 都不會因隱式投影而留下半套狀態。
+  啟動與 runtime 的**每一次**重投都走閘門：`ConfigStore::update` 每次更新都從磁碟重讀，「外面把 TOML 換掉／清空，再由 API 或總管觸發重投」是同一條事故路徑。
   DB 的活列＝上一次投影的結果，所以「config 空了但 DB 還有列」必然是拿錯 config／被換掉的檔案。
   經過 `update_and_project` 的 mutation 閘門擋下來時回 **409 `projection_refused`**（帶會被軟刪的 bot／專案名字，與
   `config_written: false`——寫檔前就被擋，這次的變更沒有進 config.toml，改一下範圍或處理完 DB 落差直接重送同一個請求即可），

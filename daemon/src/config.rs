@@ -4,7 +4,7 @@
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn default_listen() -> String {
     "127.0.0.1:7788".to_string()
@@ -831,11 +831,14 @@ impl ConfigStore {
         G: FnOnce(&ConfigFile) -> Result<()>,
     {
         let mut g = self.inner.lock().await;
-        let on_disk = std::fs::metadata(&self.path).ok().and_then(|m| m.modified().ok());
-        if self.path.exists() && on_disk != g.mtime {
+        if self.path.exists() {
+            // Always merge from the current file: filesystems can preserve/coarsen mtimes, so
+            // comparing metadata alone can miss a completed external atomic replacement.
             let (cfg, mtime) = read_file(&self.path)
                 .context("config.toml changed on disk and could not be re-read")?;
-            tracing::info!("config.toml changed on disk; reloaded before applying update");
+            if mtime != g.mtime || cfg != g.cfg {
+                tracing::info!("config.toml changed on disk; reloaded before applying update");
+            }
             g.cfg = cfg;
             g.mtime = mtime;
         }
@@ -889,9 +892,17 @@ fn read_file(path: &Path) -> Result<(ConfigFile, Option<SystemTime>)> {
 /// Full serde re-serialization: comments are lost.
 pub fn write_atomic(path: &Path, cfg: &ConfigFile) -> Result<()> {
     let text = toml::to_string_pretty(cfg)?;
-    let tmp = path.with_extension("toml.tmp");
-    std::fs::write(&tmp, text)?;
-    std::fs::rename(&tmp, path)?;
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let tmp = path.with_extension(format!("toml.{}.{}.tmp", std::process::id(), nonce));
+    let result = (|| -> Result<()> {
+        std::fs::write(&tmp, text)?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result?;
     Ok(())
 }
 
@@ -1149,6 +1160,39 @@ label = "external"
         assert_eq!(cfg.server.herdr_session, "closure");
         assert_eq!(cfg.projects[0].label, "external");
         assert_eq!(cfg.projects[0].path, "/tmp/external");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn update_preserves_external_bots_even_when_the_file_mtime_did_not_change() {
+        let (dir, path) = temp_config();
+        std::fs::write(
+            &path,
+            "[server]\nlisten = '127.0.0.1:7788'\n\n[[projects]]\nid = 'p1'\npath = '/tmp/one'\nlabel = 'one'\nhost = 'local'\n\n[[projects.bots]]\nid = 'b1'\nname = 'one'\nkind = 'claude'\n",
+        )
+        .unwrap();
+        let store = ConfigStore::load(path.clone()).await.unwrap();
+        let original_mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+
+        std::fs::write(
+            &path,
+            "[server]\nlisten = '127.0.0.1:7788'\n\n[[projects]]\nid = 'p1'\npath = '/tmp/one'\nlabel = 'one'\nhost = 'local'\n\n[[projects.bots]]\nid = 'b1'\nname = 'one'\nkind = 'claude'\n\n[[projects.bots]]\nid = 'b2'\nname = 'build'\nkind = 'claude'\n",
+        )
+        .unwrap();
+        std::fs::OpenOptions::new().write(true).open(&path).unwrap().set_modified(original_mtime).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), original_mtime, "fixture models a stale mtime snapshot");
+
+        store
+            .update(|cfg| {
+                cfg.server.herdr_session = "updated".into();
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let cfg = store.get().await;
+        assert_eq!(cfg.server.herdr_session, "updated");
+        assert_eq!(cfg.projects[0].bots.iter().map(|b| b.id.as_deref()).collect::<Vec<_>>(), vec![Some("b1"), Some("b2")]);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
