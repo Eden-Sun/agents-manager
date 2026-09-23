@@ -598,6 +598,13 @@ pub(crate) async fn pane_env(
     if let Some(e) = bot.effort.as_deref().filter(|e| !e.trim().is_empty()) {
         env.insert("AM_EFFORT".into(), json!(e));
     }
+    let home = match app.hosts.get(host).await {
+        Some(c) => c.home().await.unwrap_or_else(|e| {
+            tracing::warn!(host, error = %e, "could not resolve the host's home; leaving $HOME unexpanded");
+            "$HOME".to_string()
+        }),
+        None => dirs::home_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
+    };
     if let Some(dir) = shim_dir {
     // Best effort only: the login shell's profile (`path_helper`, `brew shellenv`) pushes us back;
     // `start_inner` re-prepends in the pane's shell, which is what actually wins.
@@ -605,7 +612,15 @@ pub(crate) async fn pane_env(
         // 裡啟動的，它的 `PATH` 前面就掛著那顆 bot 的 shim，照抄進來就是 2026-09-18 的巢狀死鎖。
         let path = match std::env::var("PATH") {
             Ok(p) if host == LOCAL_HOST => crate::shim_path::prepend_own_shim_dir(&p, dir),
-            _ => format!("{dir}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"),
+            // 遠端：herdr 照字面設 env，所以 `remote_path`（CLI 裝在 `~/.local/bin` 之類）要在這裡展開接上。
+            // 漏掉的話 pane 裡 `claude: command not found`，preflight 卻會過（它走 `ssh_exec_path`）——#92 live-SSH 撞到的。
+            _ => {
+                let rp = app.hosts.get(host).await.and_then(|c| c.cfg.as_ref().map(|c| c.remote_path.clone())).unwrap_or_default();
+                let mut dirs = vec![dir.to_string()];
+                dirs.extend(crate::hosts::remote_path_dirs(&rp, &home));
+                dirs.extend(["/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"].map(String::from));
+                dirs.join(":")
+            }
         };
         env.insert("PATH".into(), json!(path));
     }
@@ -632,14 +647,6 @@ pub(crate) async fn pane_env(
     if bot.kind == "claude" {
         env.insert("CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION".into(), json!("false"));
     }
-
-    let home = match app.hosts.get(host).await {
-        Some(c) => c.home().await.unwrap_or_else(|e| {
-            tracing::warn!(host, error = %e, "could not resolve the host's home; leaving $HOME unexpanded");
-            "$HOME".to_string()
-        }),
-        None => dirs::home_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
-    };
 
     // Identities are per host (SPEC §16): `cc1` means that machine's config dir.
     if let Some(idn) = bot.identity.as_deref().filter(|s| !s.is_empty()) {
@@ -853,7 +860,8 @@ async fn install_herdr_skill_remote(
     cfg_dir: Option<String>,
     agent_name: &str,
 ) -> anyhow::Result<()> {
-    let raw = conn.ssh_exec("herdr --skill").await?;
+    // herdr 常在 `remote_path` 裡（`~/.local/bin`）：非互動 ssh 的 PATH 沒有它，要走 `ssh_exec_path`。
+    let raw = conn.ssh_exec_path("herdr --skill").await?;
     if !raw.contains("name:") {
         anyhow::bail!("`herdr --skill` on `{}` did not look like a skill file", conn.name);
     }
@@ -1620,6 +1628,37 @@ mod pane_env_tests {
         let bot = db::bot(&env.app.db, &bot.id).await.unwrap().unwrap();
         let e = pane_env(&env.app, &bot, LOCAL_HOST, "run-1", "proj-alfa", None).await;
         assert_eq!(e["CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"], json!("true"), "使用者自己要開就尊重");
+    }
+
+    /// #92 live-SSH：CLI 只裝在遠端的 `~/.local/bin`（`remote_path` 就是為這個設的），pane 的 PATH 卻寫死成
+    /// `<shim>:/usr/local/bin:…`，claude 起不來（`command not found`）。遠端 pane 的 PATH 要照 host 的 `remote_path`，
+    /// 開頭的 `$HOME`／`~` 展開成那台的 home（herdr 照字面設 env，不經 shell）。
+    #[tokio::test]
+    async fn a_remote_pane_path_keeps_the_hosts_remote_path() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "alfa").await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener); // 沒人在聽：連線一定失敗，不會碰到真的主機。
+        let host_cfg = crate::config::HostCfg {
+            name: "box".into(),
+            ssh: "127.0.0.1".into(),
+            ssh_port: port,
+            ssh_opts: vec!["-o".into(), "ConnectTimeout=2".into()],
+            herdr_session: "agents-manager".into(),
+            remote_path: "/opt/tools/bin:$HOME/.local/bin".into(),
+        };
+        env.app.hosts.apply_config(&env.app, &[host_cfg]).await;
+        *env.app.hosts.get("box").await.unwrap().remote_home.lock().await = Some("/home/u".into());
+
+        let shim = "/home/u/.config/agents-manager/bots/B/bin";
+        let e = pane_env(&env.app, &bot, "box", "run-1", "proj-alfa", Some(shim)).await;
+        assert_eq!(
+            e["PATH"],
+            json!(format!("{shim}:/opt/tools/bin:/home/u/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")),
+            "shim 最前、接著 remote_path、最後系統目錄"
+        );
+        env.app.hosts.remove(&env.app, "box").await;
     }
 
     /// hook 打不通時會 spool 到 `AM_DATA_DIR`；沒注入的話隔離跑的 bot 會把檔案丟進正式資料目錄，

@@ -106,6 +106,26 @@ pub fn remote_path_prefix(remote_path: &str) -> String {
     format!("export PATH={}:\"$PATH\"\n", entries.join(":"))
 }
 
+/// `remote_path` 拆成 PATH 片段給 pane env 用（herdr 照字面設 env、不經 shell）：規則同
+/// [`remote_path_prefix`]——只有項目**開頭**的 `$HOME`／`${HOME}`／`~` 換成那台的 home，其餘照字面。
+pub fn remote_path_dirs(remote_path: &str, home: &str) -> Vec<String> {
+    remote_path
+        .trim()
+        .split(':')
+        .filter(|e| !e.is_empty())
+        .map(|e| {
+            for h in ["${HOME}", "$HOME", "~"] {
+                if let Some(rest) = e.strip_prefix(h) {
+                    if rest.is_empty() || rest.starts_with('/') {
+                        return format!("{home}{rest}");
+                    }
+                }
+            }
+            e.to_string()
+        })
+        .collect()
+}
+
 pub struct HostConn {
     pub name: String,
     /// `None` for `local`.
@@ -935,6 +955,16 @@ mod tests {
     }
 
     /// #241：`$HOME/.local/bin` 以前整串單引號、字面 `$HOME` 進 PATH，遠端找不到 herdr。
+    #[test]
+    fn remote_path_dirs_expand_only_a_leading_home() {
+        assert!(remote_path_dirs("", "/home/u").is_empty());
+        assert_eq!(
+            remote_path_dirs("/opt/homebrew/bin:$HOME/.local/bin:${HOME}/b:~/c:~", "/home/u"),
+            ["/opt/homebrew/bin", "/home/u/.local/bin", "/home/u/b", "/home/u/c", "/home/u"]
+        );
+        assert_eq!(remote_path_dirs("/x/$HOME/bin:$HOMEX/bin:~u/bin", "/home/u"), ["/x/$HOME/bin", "$HOMEX/bin", "~u/bin"]);
+    }
+
     #[test]
     fn remote_path_expands_a_leading_home_and_splits_on_colon() {
         assert_eq!(remote_path_prefix("$HOME/.local/bin"), "export PATH=\"$HOME\"'/.local/bin':\"$PATH\"\n");

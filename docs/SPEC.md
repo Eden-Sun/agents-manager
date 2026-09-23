@@ -2079,7 +2079,7 @@ name = "m4p"                       # [a-z][a-z0-9_-]{0,31}；"local" 保留給�
 ssh = "m4p@100.112.229.82"         # 可用 ssh_config 別名
 ssh_port = 22
 herdr_session = "agents-manager"   # 遠端 named session（絕不用遠端 default session）
-remote_path = "/opt/homebrew/bin:$HOME/.local/bin"   # 非互動 ssh shell 缺的 PATH，前置
+remote_path = "/opt/homebrew/bin:$HOME/.local/bin"   # 非互動 ssh shell 缺的 PATH，前置；bot pane 的 PATH 也接它（shim 之後、系統目錄之前）
 
 [[projects]]
 host = "m4p"                       # 缺省 = 本機
@@ -3257,7 +3257,7 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
 
 ## 附錄 E：遠端環境事實
 
-- 非互動 ssh shell 的 PATH 只有 `/usr/bin:/bin:/usr/sbin:/sbin`（herdr 在 `/opt/homebrew/bin`，claude/codex 在 `~/.local/bin`），所以要 `remote_path`；pane 內是互動 shell，PATH 正常。
+- 非互動 ssh shell 的 PATH 只有 `/usr/bin:/bin:/usr/sbin:/sbin`（herdr 在 `/opt/homebrew/bin`，claude/codex 在 `~/.local/bin`），所以要 `remote_path`。pane 內的 PATH **不能**靠互動 shell 補：daemon 在 pane env 設了 PATH（shim 目錄在最前），Ubuntu 上 herdr 開的 bash 也不是 login shell、不讀 `~/.profile`，所以 pane env 的 PATH 是 `<shim>:<remote_path 各項>:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`，`remote_path` 開頭的 `$HOME`／`~` 由 daemon 展開成那台的 home（herdr 照字面設 env）。以前漏接 `remote_path`，claude 只裝在 `~/.local/bin` 的主機 bot 起不來（`claude: command not found`，preflight 走 `ssh_exec_path` 反而會過；#92 live-SSH）。
 - `ssh -N -M -S <ctl> -L <local.sock>:<remote herdr.sock>` 轉發後本機 `HerdrClient` 全部 RPC 與事件訂閱可用；AF_UNIX 路徑過長會 `path too long`。
 - **Keychain**：ssh 下 `security find-generic-password -s "Claude Code-credentials"` 失敗（36），同一指令在 `launchctl bootstrap gui/<uid>` 的 LaunchAgent 內成功。
   只有 Keychain 憑證（沒有 `.credentials.json`）的身份在 ssh 起的 herdr 底下會「Not logged in」。
