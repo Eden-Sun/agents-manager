@@ -18,7 +18,7 @@ import urllib.error
 import urllib.request
 
 URL = "https://api.typesafe.ai/v1/systemone"
-MODEL = "jev-1.13.0"
+MODEL = os.environ.get("JEV_MODEL", "jev-1.13.0")  # #267：GET /v1/models 現在只列 jev-latest／jev-preview
 MAX_CALLS = 50
 TIMEOUT = 30
 # python.org 的 macOS build 沒帶 CA；用系統那份，不關驗證。
