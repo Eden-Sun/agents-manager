@@ -324,6 +324,8 @@ export function BlockedChoices({
           </pre>
         ) : null}
         {menu.question ? <p className="bc-question">{menu.question}</p> : null}
+        {/* 問句底下的條列說明（`Try the new fullscreen renderer?` 的三行 `·`），照畫面順序排在問句後面。 */}
+        {menu.notes.length ? <pre className="bc-context bc-notes">{menu.notes.join('\n')}</pre> : null}
       </div>
 
       {/* review 頁「每題 → 目前答案」，點一題跳回去改（2026-09-12 第七輪）。 */}

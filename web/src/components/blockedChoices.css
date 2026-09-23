@@ -28,6 +28,11 @@
   font-weight: 650;
 }
 
+/* 問句底下的條列說明是散文，手機上要折行，不像指令要逐字對齊。 */
+.bc-notes {
+  white-space: pre-wrap;
+}
+
 .bc-question {
   margin: 0;
   font-size: 13.5px;

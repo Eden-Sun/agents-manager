@@ -40,6 +40,11 @@ export interface TuiChoiceMenu {
    * 指令要對齊，所以不接折行、原樣給 UI 用等寬字畫。
    */
   context: string[]
+  /**
+   * 問句跟選項之間的條列說明（claude 2.1.280 `Try the new fullscreen renderer?` 底下那三行 `·`），逐行、去掉共同縮排。
+   * 畫在問句下面；沒有是空陣列。
+   */
+  notes: string[]
   choices: TuiChoice[]
   /** 游標停在沒編號的 `Submit` 列時是 `-1`。 */
   cursor: number
@@ -80,6 +85,14 @@ const FOOTER = /enter to select|to navigate|esc to cancel/i
 
 /** claude 工具呼叫的行首符號：往上找問題撞到就停。 */
 const TRANSCRIPT = /^[⏺⎿✽·✢✻✶*]/
+
+/**
+ * 條列說明（`  · Flicker-free output`）：**縮排過**的 `·`／`•` 加空白。claude 的 spinner／完成列
+ * （`· Thinking…`、`✻ Cooked for 21s`）貼齊行首，所以 trim 之前看縮排就分得開。
+ */
+const BULLET = /^\s+[·•]\s/
+
+const ASKS = /[?？]$/
 
 const TAB_MARK = /([☒☑☐✔✓])\s*([^☒☑☐✔✓←→]+)/g
 
@@ -154,6 +167,32 @@ function parseTabs(s: string): TuiTab[] | null {
     out.push({ label, done: m[1] === '☒' || m[1] === '☑', submit: /^submit$/i.test(label) })
   }
   return out.length >= 2 ? out : null
+}
+
+/**
+ * 問句跟選項之間夾著條列說明時（2026-09-24 使用者截圖，claude 2.1.280），往上掃第一行就撞到 `·` 而停，題目變 `null`。
+ * 改在「分隔線 → 第一個選項」這一塊裡找最靠近選項、以問號結尾的非條列行，回它的行號；沒有回 -1。
+ * 一定要碰到分隔線才算：先撞到 transcript、分頁列或別的選項＝已經走出這個提示框，上面的問句是上一輪的。
+ */
+function askedAbove(lines: string[], top: number): number {
+  let found = -1
+  for (let i = top - 1; i >= 0 && top - i <= CONTEXT_LIMIT; i--) {
+    const s = lines[i]
+    if (isDivider(s)) return found
+    if (BULLET.test(s)) continue
+    if (TRANSCRIPT.test(s.trim()) || matchRow(i, s) || parseTabs(s)) return -1
+    if (found < 0 && ASKS.test(s.trim())) found = i
+  }
+  return -1
+}
+
+/** 去掉共同縮排、頭尾空白行；條列說明要對齊，所以不接折行。 */
+function dedentBlock(block: string[]): string[] {
+  const out = block.map((l) => l.replace(/\s+$/, ''))
+  while (out.length && !out[0]) out.shift()
+  while (out.length && !out[out.length - 1]) out.pop()
+  const pad = Math.min(...out.filter(Boolean).map(indentOf))
+  return out.map((l) => l.slice(Math.min(pad, indentOf(l))))
 }
 
 /** 認不出來回 `null`，呼叫端畫按鍵面板，不要猜。 */
@@ -257,6 +296,22 @@ export function parseChoiceMenu(text: string | null | undefined): TuiChoiceMenu 
     q--
   }
 
+  // 4a. 掃到的不是問句（`null`，或夾在中間的說明）：到分隔線為止的區塊裡有問號結尾的行，就以它為題，
+  // 它跟選項之間的東西當 notes。沒有問號照舊。
+  let notes: string[] = []
+  if (!ASKS.test(qs[qs.length - 1] ?? '')) {
+    const asked = askedAbove(lines, rows[0].line)
+    if (asked >= 0) {
+      qs.length = 0
+      q = asked
+      while (q >= 0 && qs.length < 4 && lines[q].trim() && !isDivider(lines[q]) && !BULLET.test(lines[q])) {
+        qs.unshift(lines[q].trim())
+        q--
+      }
+      notes = dedentBlock(lines.slice(asked + 1, rows[0].line))
+    }
+  }
+
   // 4b. 問句上面那一段：權限框的指令與警語。空白行不算結束（指令框跟警語之間就隔著空白），
   // 遇到 transcript 行首符號、分隔線、分頁列或選項才停——那些是上一輪的東西。
   const context: string[] = []
@@ -321,6 +376,7 @@ export function parseChoiceMenu(text: string | null | undefined): TuiChoiceMenu 
   return {
     question: qs.length ? qs.reduce((a, b) => joinWrapped(a, b), '') : null,
     context,
+    notes,
     choices,
     cursor: rows.findIndex((r) => r.marker),
     footer,

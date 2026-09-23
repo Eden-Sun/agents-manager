@@ -122,6 +122,12 @@
   - **問句上面那一段照樣要給**（2026-09-20 使用者：「沒 parse 到問題就問 user」）：權限框只有 `Do you want to proceed?` 時，光看問句不知道在核准什麼。
     `menu.context` 帶問句上方最多 14 行（指令框、說明、`Dangerous rm …` 警語）逐行原樣，等寬字、可捲、最高 `min(320px, 38vh)`；警語那幾行畫成紅字。
     往上收到 transcript 行首符號（⏺ ⎿）、分隔線、分頁列或上一個選項就停，不把上一輪的內容搬進來。
+  - **問句跟選項之間夾著條列說明也要認得題目**（2026-09-24 使用者截圖，claude 2.1.280 `Try the new fullscreen renderer?` 底下三行 `·`）：
+    從選項往上掃第一行就撞到 `·`（跟 spinner 同一個符號）而停，題目變成空的。往上掃到的不是問號結尾時，改在「分隔線 → 第一個選項」這一塊裡
+    找最靠近選項、以 `?`／`？` 結尾的非條列行當題目，它跟選項之間的條列放 `menu.notes`，畫在問句**下面**（照畫面順序，可折行）。
+    縮排過的 `·`／`•` 才是條列，貼齊行首的是 spinner／transcript；沒碰到分隔線就先撞到 transcript、分頁列或別的選項＝不在同一個提示框裡，不找，
+    免得把上一輪的問句抓成題目。截圖：`docs/screenshots/blocked-question-bullets/`（`before-1440` 是修正前，重現使用者那張）。
+    ![修正前](screenshots/blocked-question-bullets/before-1440.png) ![修正後](screenshots/blocked-question-bullets/after-1440.png) ![手機](screenshots/blocked-question-bullets/after-390.png)
   - 單選送 ↓／↑ × n ＋ Enter（送前重讀畫面，選項變了就不送）；單選問卷用 radio。
   - **多分頁／複選問卷走草稿模式**（`lib/choiceDraft.ts`，使用者指定「先讀完、離線作答、最後一次送出」）：只用導覽鍵預載每一頁 →
     本地作答不碰終端 → 送出時逐頁比對、只送差集、對不上就停。review 頁畫分頁列與「每題 → 答案」，點題目回那頁改。換頁送 ←／→，不送會改答案的鍵。
