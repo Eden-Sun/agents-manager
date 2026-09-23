@@ -6,7 +6,7 @@
   python3 jev_replay.py report results_a.jsonl
 
 cases 每列：{"id", "state", "questions", "labels": {qid: 標準答案}, "meta": {...}}
-  noul 的標準答案是 true/false；choice 是選項名。
+  noul 的標準答案是 true/false；choice 是選項名；score 是等級整數（criteria 的索引）。
 """
 import json
 import os
@@ -94,7 +94,24 @@ def report(path, group_key=None):
             pairs = [(r, r["answers"][q]) for r in rs if q in r["labels"] and q in (r["answers"] or {})]
             if not pairs:
                 continue
-            if pairs[0][1]["type"] == "noul":
+            if pairs[0][1]["type"] == "score":
+                # (預測分數, 標籤等級, confidence, row)
+                sv = [(a["score"], float(r["labels"][q]), a.get("confidence", 0), r) for r, a in pairs]
+                top = len(pairs[0][1]["legend"]) - 1
+                mae = sum(abs(s - y) for s, y, _, _ in sv) / len(sv)
+                exact = sum(round(s) == y for s, y, _, _ in sv) / len(sv)
+                print("  %s score n=%d mae=%.2f 四捨五入命中=%.2f（0–%d 級）" % (q, len(sv), mae, exact, top))
+                for lv in range(top + 1):
+                    b = [s for s, y, _, _ in sv if y == lv]
+                    if b:
+                        print("     標籤=%d n=%d 預測 min/中位/max=%.2f/%.2f/%.2f" % (lv, len(b), min(b), statistics.median(b), max(b)))
+                for lo, hi in ((0, .5), (.5, .8), (.8, 1.01)):
+                    b = [abs(s - y) for s, y, c, _ in sv if lo <= c < hi]
+                    if b:
+                        print("     conf∈[%.1f,%.1f) n=%d mae=%.2f" % (lo, min(hi, 1), len(b), sum(b) / len(b)))
+                for s, y, c, r in sorted(sv, key=lambda x: -abs(x[0] - x[1]))[:6]:
+                    print("     Δ%.2f %s 預測=%.2f label=%d conf=%.2f" % (abs(s - y), r["id"], s, int(y), c))
+            elif pairs[0][1]["type"] == "noul":
                 # (預測機率, 真值)
                 pv = [(a["noul"], bool(r["labels"][q])) for r, a in pairs]
                 acc = sum((p >= .5) == y for p, y in pv) / len(pv)
