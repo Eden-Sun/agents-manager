@@ -39,6 +39,33 @@ export function clipAfterRows(
   return { hidden, visibleBottom }
 }
 
+/** 晶片的排版位置（`HTMLElement` 的 `offsetTop`／`offsetHeight` 就符合）。 */
+export interface LayoutBox {
+  offsetTop: number
+  offsetHeight: number
+}
+
+/**
+ * 組內每顆晶片的上下緣，量**排版位置**（offset*），不量 `getBoundingClientRect`。
+ * 後者含 transform：主力換位的 FLIP 動畫、拖曳讓位都用 transform，動畫中的晶片被量成在別的行，
+ * 裁切跟著變 → 晶片又位移 → 又播 FLIP……量測與動畫互相回授，整列高度在兩三種之間來回跳，
+ * 下面的資訊列被畫成上下兩份殘影（2026-09-23 使用者截圖）。排版位置不受 transform 與裁切影響，同一個寬度只有一個答案。
+ */
+export function layoutBoxes(chips: LayoutBox[], groupTop: number): { top: number; bottom: number }[] {
+  return chips.map((c) => ({ top: c.offsetTop - groupTop, bottom: c.offsetTop - groupTop + c.offsetHeight }))
+}
+
+/**
+ * 主力晶片的 FLIP 只在**順序真的變了**時播（拖放、鍵盤移位）。視窗寬度、`+N` 出現、裁切改變造成的換行也會讓晶片
+ * 位移，那不是換位；以前照樣播 220ms 的滑動，跟上面的量測串成振盪。
+ */
+export function orderChanged(prev: string[], next: string[]): boolean {
+  const common = new Set(prev.filter((id) => next.includes(id)))
+  const a = prev.filter((id) => common.has(id))
+  const b = next.filter((id) => common.has(id))
+  return a.some((id, i) => id !== b[i])
+}
+
 /** 收合時會被藏起來的晶片（回傳索引）：兩組各自算，組內規則同 [`clipAfterRows`]。 */
 export function hiddenChipIndexes(boxes: ChipBox[]): number[] {
   const budget = lineBudget(boxes.some((b) => b.pinned), boxes.some((b) => !b.pinned))
