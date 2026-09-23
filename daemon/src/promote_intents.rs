@@ -84,6 +84,31 @@ fn s(p: &serde_json::Value, k: &str) -> Option<String> {
     p.get(k).and_then(|v| v.as_str()).map(str::to_string)
 }
 
+/// 種下 native resume 要讀的那一列（handler 與開機補完共用）。**`started_at` 與 `ended_at` 必須是同一個值**：
+/// 補完靠 `ended_at = started_at` 認出「這列是種的、這顆還沒真的起過」。以前兩欄各叫一次 `db::now()`，
+/// 兩次呼叫跨過毫秒邊界時這列就像「起過又停了」，補完跳過 native resume、直接收 child 記 `done`——
+/// 目標 bot 從沒起來、transcript 不見也照樣 `done`（#401）。`child_id` 只是測試注入點的鍵。
+pub(crate) async fn seed_session_run(pool: &sqlx::SqlitePool, child_id: &str, new_id: &str, session_id: &str, dest: &str) -> sqlx::Result<()> {
+    let at = db::now();
+    #[cfg(test)]
+    lifecycle::race_point::hit("promote_seed", child_id).await;
+    #[cfg(not(test))]
+    let _ = child_id;
+    sqlx::query(
+        "INSERT INTO runs (id, bot_id, state, agent_status, native_session_id, transcript_path, started_at, ended_at)
+         VALUES (?,?,'stopped','idle',?,?,?,?)",
+    )
+    .bind(db::ulid())
+    .bind(new_id)
+    .bind(session_id)
+    .bind(dest)
+    .bind(&at)
+    .bind(&at)
+    .execute(pool)
+    .await
+    .map(|_| ())
+}
+
 async fn resume(app: &Arc<App>, intent: &Intent) -> Result<(), String> {
     let e = |e: anyhow::Error| format!("db: {e:#}");
     let child_id = intent.subject_id.clone();
@@ -132,19 +157,7 @@ async fn resume(app: &Arc<App>, intent: &Intent) -> Result<(), String> {
     // 2. 沒種過 session 就種（native resume 讀「最近一個結束的 run 的 native_session_id」）。
     let runs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE bot_id = ?").bind(&new_id).fetch_one(&app.db).await.map_err(|x| x.to_string())?;
     if runs == 0 {
-        sqlx::query(
-            "INSERT INTO runs (id, bot_id, state, agent_status, native_session_id, transcript_path, started_at, ended_at)
-             VALUES (?,?,'stopped','idle',?,?,?,?)",
-        )
-        .bind(db::ulid())
-        .bind(&new_id)
-        .bind(&session_id)
-        .bind(&dest)
-        .bind(db::now())
-        .bind(db::now())
-        .execute(&app.db)
-        .await
-        .map_err(|x| format!("cannot seed the session: {x}"))?;
+        seed_session_run(&app.db, &child_id, &new_id, &session_id, &dest).await.map_err(|x| format!("cannot seed the session: {x}"))?;
     }
     // 3. 還沒起過（沒有 active run、也沒有一個真的起過的 run；種下的那列 started_at＝ended_at）就 native resume 起。
     let started_before: i64 =
