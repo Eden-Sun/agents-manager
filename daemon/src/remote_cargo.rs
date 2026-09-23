@@ -1526,7 +1526,17 @@ pub fn decide_offload(config_path: &Path, args: &[String], env: impl IntoIterato
     Offload::Go(remote)
 }
 
-pub fn run_cli(config_path: &Path, data_dir: &Path, cwd: &Path, args: &[String]) -> i32 {
+/// `--data-dir` 沒給時的資料目錄（issue #417）：跟 daemon 帶 `--config` 啟動時同一套規則
+/// （`[server] data_dir` > 設定檔所在目錄）。`scripts/check.sh` 為了不讓測試讀到正式資料目錄會
+/// `env -u AM_DATA_DIR`，shim 因此不再把它當成轉遠端的前提；密碼檔在哪由設定檔說了算。
+pub fn resolve_data_dir(config_path: &Path, given: Option<&Path>) -> anyhow::Result<PathBuf> {
+    match given.filter(|d| !d.as_os_str().is_empty()) {
+        Some(d) => Ok(d.to_path_buf()),
+        None => crate::startup::data_dir(config_path, true, crate::startup::peek_data_dir(config_path).as_deref(), None),
+    }
+}
+
+pub fn run_cli(config_path: &Path, data_dir: Option<&Path>, cwd: &Path, args: &[String]) -> i32 {
     let remote = match decide_offload(config_path, args, std::env::vars()) {
         Offload::Go(r) => r,
         Offload::Local(why) => {
@@ -1536,6 +1546,14 @@ pub fn run_cli(config_path: &Path, data_dir: &Path, cwd: &Path, args: &[String])
             return 125;
         }
     };
+    let data_dir = match resolve_data_dir(config_path, data_dir) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("agents-manager: 這次 cargo 不轉外部編譯，改在本機跑：從設定檔 {} 推不出資料目錄（{e:#}）", config_path.display());
+            return 125;
+        }
+    };
+    let data_dir = data_dir.as_path();
     eprintln!(
         "agents-manager: remote Cargo → {}@{}:{} ({})",
         remote.user, remote.host, remote.ssh_port, args.first().map(String::as_str).unwrap_or("")
@@ -1623,6 +1641,24 @@ mod tests {
         let t = std::time::Instant::now();
         let err = output_with_timeout(cmd, std::time::Duration::from_millis(300)).unwrap_err().to_string();
         assert!(err.contains("沒有結束") && t.elapsed() < std::time::Duration::from_secs(25), "{err}");
+    }
+
+    /// #417：shim 在 `AM_DATA_DIR` 被清掉時（`scripts/check.sh`）不帶 `--data-dir`，helper 要照 daemon 的規則從設定檔推：
+    /// 密碼檔在資料目錄裡，推錯就是認證失敗。給了就照用。
+    #[test]
+    fn without_a_data_dir_the_helper_resolves_it_from_the_config_like_the_daemon() {
+        let base = std::env::temp_dir().join(format!("am-r417-{}", crate::db::ulid()));
+        let (beside, custom) = (base.join("conf"), base.join("conf/data"));
+        std::fs::create_dir_all(&custom).unwrap();
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap();
+        let cfg = beside.join("config.toml");
+        std::fs::write(&cfg, "[build.remote]\nenabled = true\n").unwrap();
+        assert_eq!(canon(&resolve_data_dir(&cfg, None).unwrap()), canon(&beside), "沒寫 [server] data_dir：設定檔所在目錄");
+        assert_eq!(canon(&resolve_data_dir(&cfg, Some(Path::new(""))).unwrap()), canon(&beside), "空字串當沒給");
+        std::fs::write(&cfg, "[server]\ndata_dir = \"data\"\n").unwrap();
+        assert_eq!(canon(&resolve_data_dir(&cfg, None).unwrap()), canon(&custom), "[server] data_dir 優先");
+        assert_eq!(resolve_data_dir(&cfg, Some(&base)).unwrap(), base, "給了就照用");
+        std::fs::remove_dir_all(&base).ok();
     }
 
     /// #324／#325：設定檔壞掉、host 空、或本機設了 RUSTFLAGS 這類遠端看不到的變數——要退回本機也要講出原因，不能靜默；

@@ -100,13 +100,14 @@ am_remote_cargo_eligible() {
     esac
 }
 
-# 外部編譯（`remote-cargo` helper）需要的三樣東西；缺哪個就回哪個的名字，空字串＝齊了。
+# 外部編譯（`remote-cargo` helper）需要的兩樣東西；缺哪個就回哪個的名字，空字串＝齊了。
 # `AM_DAEMON_EXE` 指到的檔案不能執行（binary 被換掉／搬走）也算缺。
+# `AM_DATA_DIR` 不在裡面（issue #417）：`scripts/check.sh` 為了不讓測試吃到正式資料目錄會清掉它，
+# 當成前提的話每一次 check.sh 都退回本機排隊；沒有就不帶 `--data-dir`，helper 從設定檔推。
 am_remote_cargo_missing() {
     _miss=""
     { [ -n "${AM_DAEMON_EXE:-}" ] && [ -x "$AM_DAEMON_EXE" ]; } || _miss="$_miss AM_DAEMON_EXE"
     [ -n "${AM_CONFIG_PATH:-}" ] || _miss="$_miss AM_CONFIG_PATH"
-    [ -n "${AM_DATA_DIR:-}" ] || _miss="$_miss AM_DATA_DIR"
     printf '%s' "${_miss# }"
 }
 
@@ -452,7 +453,11 @@ am_cargo() {
         if [ -n "$_remote_missing" ]; then
             printf 'agents-manager: 外部編譯沒有啟用：這個 pane 缺 %s（沒設，或指到的檔案不能執行），這次 %s 在本機跑\n' "$_remote_missing" "${_sub:-cargo}" >&2
         else
-            "$AM_DAEMON_EXE" remote-cargo --config "$AM_CONFIG_PATH" --data-dir "$AM_DATA_DIR" --cwd "$PWD" -- "$@"
+            if [ -n "${AM_DATA_DIR:-}" ]; then
+                "$AM_DAEMON_EXE" remote-cargo --config "$AM_CONFIG_PATH" --data-dir "$AM_DATA_DIR" --cwd "$PWD" -- "$@"
+            else
+                "$AM_DAEMON_EXE" remote-cargo --config "$AM_CONFIG_PATH" --cwd "$PWD" -- "$@"
+            fi
             _remote_rc=$?
             [ "$_remote_rc" -eq 125 ] || exit "$_remote_rc"
         fi
@@ -881,7 +886,7 @@ esac"#
         }
 
         /// 假的 `remote-cargo` helper（`AM_DAEMON_EXE`）：先把收到的 argv 記進 `helper.log`，再照 `body` 跑。
-        /// 回傳 pane 環境裡要帶的三個變數（`AM_DAEMON_EXE`／`AM_CONFIG_PATH`／`AM_DATA_DIR`——缺哪個 shim 都不會轉遠端）。
+        /// 回傳 pane 環境裡通常帶的三個變數（`AM_DAEMON_EXE`／`AM_CONFIG_PATH` 缺一個 shim 就不轉遠端；`AM_DATA_DIR` 可缺，issue #417）。
         fn install_fake_helper(&self, body: &str) -> Vec<(&'static str, String)> {
             let helper = self.dir.join("fake-helper");
             write_exec(&helper, format!("#!/bin/sh\necho \"$*\" >> '{}/helper.log'\n{body}\n", self.dir.display()));
@@ -1387,9 +1392,10 @@ esac
         assert!(calls.contains("release"), "結束要放：{calls}");
     }
 
-    /// issue #138：check／test／clippy 該轉到外部編譯主機、卻因為 pane 缺 `AM_DAEMON_EXE`／`AM_CONFIG_PATH`／
-    /// `AM_DATA_DIR`（或 helper 不能執行）而退回本機時，要講出來，不能靜默——靜默的結果就是整批子 agent 的
+    /// issue #138：check／test／clippy 該轉到外部編譯主機、卻因為 pane 缺 `AM_DAEMON_EXE`／`AM_CONFIG_PATH`
+    /// （或 helper 不能執行）而退回本機時，要講出來，不能靜默——靜默的結果就是整批子 agent 的
     /// 編譯都塞在本機排隊，沒有人知道 #104 根本沒生效。build 這類本來就不 offload 的不吵。
+    /// `AM_DATA_DIR` 不是前提（issue #417），見下一條。
     #[test]
     fn falling_back_to_local_for_a_missing_offload_variable_says_which_one() {
         let s = Sandbox::new();
@@ -1411,13 +1417,14 @@ esac
         let helper = s.dir.join("fake-helper");
         write_exec(&helper, "#!/bin/sh\nexit 125\n");
         let helper_path = helper.to_str().unwrap();
-        // 什麼都沒有：一次講清楚缺哪三個。
+        // 什麼都沒有：一次講清楚缺哪兩個。
         let (_, err, rc) = s.run(&base(log, &[]), &["check", "-p", "agents-managerd"]);
         assert_eq!(rc, 0, "{err}");
         assert!(err.contains("外部編譯沒有啟用"), "{err}");
-        for k in ["AM_DAEMON_EXE", "AM_CONFIG_PATH", "AM_DATA_DIR"] {
+        for k in ["AM_DAEMON_EXE", "AM_CONFIG_PATH"] {
             assert!(err.contains(k), "要點名缺 {k}：{err}");
         }
+        assert!(!err.contains("AM_DATA_DIR"), "AM_DATA_DIR 不是前提（#417）：{err}");
         assert!(std::fs::read_to_string(&cargo_log).unwrap().contains("agents-managerd"), "照樣在本機跑");
         // 只缺一個：只點那一個。
         let (_, err, _) = s.run(&base(log, &[("AM_DAEMON_EXE", helper_path), ("AM_DATA_DIR", "/tmp")]), &["clippy"]);
@@ -1428,13 +1435,66 @@ esac
         // build／run 本來就不 offload：不吵。
         let (_, err, _) = s.run(&base(log, &[]), &["build", "--release"]);
         assert!(!err.contains("外部編譯"), "{err}");
-        // 三個都齊：不提示（helper 會自己決定要不要轉；這裡假 helper 回 125＝退回本機）。
-        let (_, err, rc) = s.run(
-            &base(log, &[("AM_DAEMON_EXE", helper_path), ("AM_CONFIG_PATH", "/tmp/c.toml"), ("AM_DATA_DIR", "/tmp")]),
-            &["check"],
-        );
+        // 兩個都齊：不提示（helper 會自己決定要不要轉；這裡假 helper 回 125＝退回本機）。
+        let (_, err, rc) = s.run(&base(log, &[("AM_DAEMON_EXE", helper_path), ("AM_CONFIG_PATH", "/tmp/c.toml")]), &["check"]);
         assert_eq!(rc, 0, "{err}");
         assert!(!err.contains("外部編譯沒有啟用"), "齊全就不提示：{err}");
+    }
+
+    /// issue #417：`scripts/check.sh` 為了不讓 daemon 測試吃到 pane 注入的正式資料目錄而 `env -u AM_DATA_DIR`，
+    /// shim 以前把 `AM_DATA_DIR` 當轉遠端的前提，於是每一次 `scripts/check.sh daemon` 都退回本機排那 2 個名額，
+    /// 外部編譯主機整段閒著。改成：沒有 `AM_DATA_DIR` 照樣交給 helper，只是不帶 `--data-dir`（helper 從設定檔推）。
+    ///
+    /// 根因是「改 env 的人（check.sh）」跟「讀 env 的人（shim）」各改各的（同 #138），所以這條直接拿
+    /// `check.sh` 裡**實際那一行**的 `env …` 前綴去跑 shim：要轉得到 helper，而且 helper 以下（含退回本機時
+    /// 的 cargo）都看不到 `AM_DATA_DIR`——隔離那一半也釘住，免得有人用「刪掉 `-u AM_DATA_DIR`」來修。
+    #[test]
+    fn the_check_script_env_still_offloads_without_leaking_the_data_dir() {
+        // 執行期讀，不 include_str!：那會讓 check.sh 變成 binary 的建置輸入（`persona::BUILD_INPUTS` 的測試會擋）。
+        let check_sh = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/check.sh")).expect("讀 scripts/check.sh");
+        let env_line = check_sh
+            .lines()
+            .map(str::trim)
+            .find(|l| l.starts_with("env ") && l.contains("cargo test -p agents-managerd"))
+            .expect("check.sh 要用 env … cargo test -p agents-managerd 跑 daemon 測試");
+        let prefix: Vec<&str> = env_line.split(" cargo ").next().unwrap().split_whitespace().skip(1).collect();
+        assert!(prefix.windows(2).any(|w| w == ["-u", "AM_DATA_DIR"]), "測試不能吃到正式資料目錄：{env_line}");
+
+        let s = Sandbox::new();
+        s.install_fake_curl(r#"printf '{"granted":true,"token":"tok-1","cargo_jobs":2,"lease_ttl_secs":30}'"#);
+        let cargo_log = s.dir.join("cargo.log");
+        // helper 記下自己看到的 AM_DATA_DIR 後回 125（退回本機），順便驗本機那顆 cargo 也看不到。
+        let helper_env = s.install_fake_helper(&format!("echo \"data_dir=${{AM_DATA_DIR-unset}}\" >> '{}/helper.log'\nexit 125", s.dir.display()));
+        let pane: Vec<(&str, &str)> = helper_env
+            .iter()
+            .map(|(k, v)| (*k, v.as_str()))
+            .chain([("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_PORT", "1"), ("AM_TEST_FAKE_CARGO_LOG", cargo_log.to_str().unwrap())])
+            .collect();
+        assert!(pane.iter().any(|(k, _)| *k == "AM_DATA_DIR"), "pane 本來就有 AM_DATA_DIR");
+        let mut cmd = Command::new("/usr/bin/env");
+        cmd.args(&prefix).arg(s.dir.join("bin/cargo")).args(["test", "-p", "agents-managerd", "--locked"]);
+        cmd.env("PATH", format!("{}:{}:/usr/bin:/bin", s.dir.join("bin").display(), s.dir.join("real").display()));
+        for (key, _) in std::env::vars() {
+            if key.starts_with("AM_") {
+                cmd.env_remove(key);
+            }
+        }
+        for (k, v) in &pane {
+            cmd.env(k, v);
+        }
+        let (_, err, rc) = s.run_group(cmd, None);
+        assert_eq!(rc, 0, "{err}");
+        assert!(!err.contains("外部編譯沒有啟用"), "check.sh 的環境要轉得到外部編譯：{err}");
+        let helper = std::fs::read_to_string(s.dir.join("helper.log")).expect("helper 要被叫到");
+        assert!(helper.contains("remote-cargo --config /tmp/c.toml --cwd"), "{helper}");
+        assert!(!helper.contains("--data-dir"), "沒有 AM_DATA_DIR 就不帶 --data-dir：{helper}");
+        assert!(helper.contains("data_dir=unset"), "helper 看不到正式資料目錄：{helper}");
+        assert!(std::fs::read_to_string(&cargo_log).unwrap().contains("agents-managerd"), "helper 回 125 就在本機跑");
+
+        // 有 AM_DATA_DIR（一般 pane 直接跑 cargo）照舊帶 --data-dir。
+        let (_, err, rc) = s.run(&pane, &["clippy"]);
+        assert_eq!(rc, 0, "{err}");
+        assert!(std::fs::read_to_string(s.dir.join("helper.log")).unwrap().contains("--data-dir /tmp --cwd"));
     }
 
     /// issue #155：會轉到外部編譯主機的 check／test／clippy **不佔本機的建置名額**——本機名額管的是本機的 RAM，
