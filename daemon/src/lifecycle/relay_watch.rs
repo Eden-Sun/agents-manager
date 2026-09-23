@@ -126,7 +126,9 @@ pub(crate) async fn step(app: &Arc<App>, w: &mut Watch, now: Instant) -> Step {
     }
     let Ok(Some(bot)) = db::bot(&app.db, &w.bot_id).await else { return Step::Done };
     let read = match (run.pane_id.as_deref(), client_for_run(app, &run).await) {
-        (Some(pane), Ok(client)) => client.pane_read(pane, "visible", 80).await.ok().map(|r| (client, pane.to_string(), r.text)),
+        (Some(pane), Ok(client)) => {
+            super::delivery::read_styled(&client, pane, "visible", 80).await.ok().map(|text| (client, pane.to_string(), text))
+        }
         _ => None,
     };
     let held = read.as_ref().is_some_and(|(_, _, screen)| composer_holds_prompt(&bot.kind, screen, &w.text));
