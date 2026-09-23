@@ -491,7 +491,7 @@
   }
 }
 
-/* 手機主力區（#344）：固定 4 顆等寬一排、往下換行、最多兩排（8 顆，多的元件不畫）；不橫捲。 */
+/* 手機主力區（#344）：固定 4 顆等寬一排、往下換行；收合時兩排，超過 8 顆第 8 格是「+N」（點了展開，2026-09-23）；不橫捲。 */
 @media (max-width: 720px) {
   .unread-pin-grid {
     display: grid;
@@ -560,4 +560,13 @@
 /* 有未讀的晶片是 accent 底：圖示改白色，才讀得出來。 */
 .unread-chip.unread .unread-chip-kids {
   color: currentColor;
+}
+
+/* 手機主力區的「+N」／「收合」格：跟晶片同尺寸，虛線框表示這格不是 bot。藏起來的有要回答／未讀時吃同一組狀態色。 */
+@media (max-width: 720px) {
+  .unread-pin-grid .unread-chip.pin-more {
+    border-style: dashed;
+    font-variant-numeric: tabular-nums;
+    cursor: pointer;
+  }
 }

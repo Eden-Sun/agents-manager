@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { PIN_GRID_MAX, dropBefore, endBefore, moveBefore, moveStep, pickSlot, sortPinned, DROP_STICKY_PX, type Box } from './pinnedOrder'
+import { PIN_GRID_MAX, dropBefore, endBefore, moveBefore, moveStep, pickSlot, pinGridLayout, sortPinned, DROP_STICKY_PX, type Box } from './pinnedOrder'
 
 test('sortPinned: 照 primary_position，同值照原順序', () => {
   const items = [
@@ -78,4 +78,13 @@ test('endBefore: 拖到可見的最後面＝插在被藏起來的第一顆之前
   assert.equal(endBefore(full, full), null)
   assert.equal(endBefore(full, []), null)
   assert.equal(PIN_GRID_MAX, 8)
+})
+
+test('手機主力區：放得下全畫；超過 8 顆收合時畫 7 顆＋「+N」，展開全畫並可收合', () => {
+  assert.deepEqual(pinGridLayout(0, false), { shown: 0, more: 0, collapsible: false })
+  assert.deepEqual(pinGridLayout(8, false), { shown: 8, more: 0, collapsible: false }, '剛好 8 顆不需要 +N')
+  assert.deepEqual(pinGridLayout(9, false), { shown: 7, more: 2, collapsible: false }, '第 8 格讓給 +2，藏 2 顆')
+  assert.deepEqual(pinGridLayout(11, false), { shown: 7, more: 4, collapsible: false })
+  assert.deepEqual(pinGridLayout(11, true), { shown: 11, more: 0, collapsible: true })
+  assert.deepEqual(pinGridLayout(8, true), { shown: 8, more: 0, collapsible: false }, '沒東西可收合就不給收合格')
 })
