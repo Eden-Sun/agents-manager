@@ -317,7 +317,7 @@ mod delivery_tests {
         assert_eq!(stored(&f, &queued.turn_id).await, ("派工內容".to_string(), dirty.to_string()));
 
         let idle = tt::claude_bot(&app, &f.env.project_id, "not-running").await;
-        let waiting = super::super::start_send::prompt_starting(&app, &idle.id, dirty, "crid-waiting", &[], None).await.unwrap();
+        let waiting = super::super::start_send::prompt_starting(&app, &idle.id, dirty, "crid-waiting", &[], super::super::RelaySrc::default()).await.unwrap();
         assert_eq!(stored(&f, &waiting.turn_id).await, ("派工內容".to_string(), dirty.to_string()));
     }
 

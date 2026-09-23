@@ -61,13 +61,18 @@ agm_probe() { # agm_probe <bot id> → "<http code> <body>"
     # 測試用：注入一支假的送達器，才不用真的打 daemon。
     [ -n "${SWAP_PROBE_CMD:-}" ] && { "$SWAP_PROBE_CMD" "$1"; return; }
     "$PYTHON" - "$1" "$PORT" "$OWNER" <<'PY'
-import json, sys, urllib.request
+import json, os, sys, urllib.request
 bot, port, owner = sys.argv[1], sys.argv[2], sys.argv[3]
 base = f"http://127.0.0.1:{port}"
 tok = json.load(urllib.request.urlopen(base + "/api/session"))["token"]
 body = {"text": "[build 自測，回 ok 即可，不要做任何事]", "relay_from": owner}
+headers = {"X-AM-Token": tok, "Content-Type": "application/json"}
+# relay_from 要有 owner 自己的 bot token 才算驗證過（issue #339）。只在 owner 自己的 pane 裡跑時帶——
+# 別顆的 token 配 owner 的名字會被 403；launchd 裡沒有 token 就不帶，daemon 照收、標「未驗證」。
+if os.environ.get("AM_BOT_ID") == owner and os.environ.get("AM_HOOK_TOKEN"):
+    headers["X-AM-Bot-Token"] = os.environ["AM_HOOK_TOKEN"]
 req = urllib.request.Request(base + f"/api/bots/{bot}/prompt", data=json.dumps(body).encode(),
-                             headers={"X-AM-Token": tok, "Content-Type": "application/json"}, method="POST")
+                             headers=headers, method="POST")
 try:
     r = urllib.request.urlopen(req)
     print(r.status, r.read().decode("utf-8", "replace")[:200])

@@ -44,6 +44,7 @@ import { ModelQuickPicker } from './ModelPicker'
 import { RuntimeDriftBadge } from './RuntimeDriftBadge'
 import { trimClippedTail } from '../lib/statusLineTail'
 import { quotedFrom } from '../lib/agmQuote'
+import { relaySource } from '../lib/relaySource'
 import { relayPreview } from '../lib/relayPreview'
 import { runtimeIdentity, runtimeSettingsKnown } from '../lib/runtimeDrift'
 import { shortModel } from '../lib/shortModel'
@@ -87,22 +88,17 @@ function systemNoticeText(content: string): string {
 }
 
 /** `relay_from` 有值＝別的 bot 代為交辦，不標會被當成使用者自己派的工；對不到 bot 就退回 ID。 */
-const RelayFrom = memo(function RelayFrom({ fromId, toId }: { fromId: string; toId: string | null }) {
+const RelayFrom = memo(function RelayFrom({ fromId, toId, unverified }: { fromId: string; toId: string | null; unverified: boolean }) {
   const names = useStore(
     useShallow((s) => ({
       from: s.bots.find((b) => b.id === fromId)?.name ?? '',
       to: toId ? (s.bots.find((b) => b.id === toId)?.name ?? '') : '',
     })),
   )
-  // `daemon` 是哨符不是 bot id（`agent_relay::DAEMON_SENDER`）：排程／daemon 自發，沒有人按過。
-  const daemon = fromId === 'daemon'
+  const label = relaySource({ fromId, fromName: names.from, toName: names.to, unverified })
   return (
-    <span
-      className={`msg-targets relay${names.from ? '' : ' daemon'}`}
-      title={daemon ? 'daemon 自動觸發的訊息（排程／自動化，不是人送的）' : '由其他 agent 代為交辦的訊息（不是你送的）'}
-    >
-      {daemon ? 'daemon 自動觸發' : names.from || fromId}
-      {!daemon && names.to ? ` → ${names.to}` : ''}
+    <span className={`msg-targets relay${names.from ? '' : ' daemon'}${unverified ? ' unverified' : ''}`} title={label.title}>
+      {label.text}
     </span>
   )
 })
@@ -156,7 +152,7 @@ export const Bubble = memo(function Bubble({
               {from}
             </span>
           ) : null}
-          {msg.role === 'user' && msg.relay_from ? <RelayFrom fromId={msg.relay_from} toId={msg.bot_id ?? null} /> : null}
+          {msg.role === 'user' && msg.relay_from ? <RelayFrom fromId={msg.relay_from} toId={msg.bot_id ?? null} unverified={msg.relay_unverified === true} /> : null}
           {quoted ? (
             <span className="msg-targets relay quoted" title={`這一則的內容來自 ${quoted}，不是使用者自己打的`}>
               {quoted}（轉述）

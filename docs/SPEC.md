@@ -1390,6 +1390,16 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
    90 秒內字既沒進輸入列、agent 也沒接手，回合標 `failed` 並留一則系統說明。
    **死 pane 的 run**（`lifecycle::dead_panes`，隨 60 秒的 stuck-turn sweeper 跑）：herdr 明確回 `pane_not_found` 的 running run 收成 exited，
    不看 RPC 失敗（不是證據）、herdr 計畫中的維護期間不動（§6.5.2）；補上對帳只在開機／重連／事件時才跑、pane-exit 事件漏了就一直畫成活的那個洞。盯梢的時間由呼叫端傳入、pane 走 herdr client，測試不睡覺。
+6. **`POST /api/bots/{id}/prompt` 的 `relay_from` 要跟呼叫者自己的身分綁在一起**（issue #339，`relay_auth.rs`）：那支 API 只要 UI token，
+   而本機任何行程都拿得到 UI token，「relay_from 指到一顆活著的 bot」證明不了是誰送的。證明用那顆 bot 自己的 hook token
+   （`X-AM-Bot-Token`＝pane 的 `AM_HOOK_TOKEN`，跟 `/relay/announce`、build slot 同一個；一顆 bot 一個、永不換）。
+   帶了但不是那顆的 → 403 `relay_from_mismatch`（只可能是冒名）；`relay_from:"daemon"` 從 HTTP 進來一律 403 `relay_from_reserved`——
+   daemon 自己的訊息（通知、digest、child 警示、派工）都在行程內直接寫，不走 HTTP，而 `daemon` 會繞過 AGM 協調者的收件匣（§18.15）。
+   **沒帶** token 是相容期：照收，訊息記 `relay_unverified = 1`，UI 在來源旁寫「（未驗證）」，daemon.log 記一行 warn（只記被冒名的 bot id）。
+   相容期的理由是不帶 token 的既有呼叫端一被 403 就會誤判失敗：換版腳本 `daemon-swap.sh` 的自測 prompt（失敗會觸發回滾；已改成在 owner 自己的 pane 裡帶 token）、
+   資料目錄裡的一次性維運腳本、照慣例手打 curl 的 bot。移除條件與清點方式見 #410。
+   信任邊界照實寫：hook token 也在同一個 unix 使用者讀得到的檔案裡（bot 目錄的 settings），這一層擋的是「以為可以代別人發言」的 agent 與誤用，
+   不是同機的惡意行程。mission 端點的 `relay_from` 還沒套這一層（#409）。
 
 ### 6.5e shell／服務 pane 的歸屬與生命週期（2026-09-16 使用者交辦；AGM 2026-09-16 review 通過，實作另行派工）
 

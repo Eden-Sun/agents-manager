@@ -411,6 +411,8 @@ export interface Message {
   attachments: Attachment[]
   /** null = 使用者 / daemon 自己 */
   relay_from: string | null
+  /** true = `relay_from` 是寄件端自稱、沒帶它的 bot token 證明（issue #339 相容期）；來源標旁寫「未驗證」。 */
+  relay_unverified?: boolean
   /** `terminal_fallback` 當下的整個 pane 畫面；`content` 裁錯時真正的回覆還在這裡。其他來源為 null。 */
   terminal_snapshot: string | null
   created_at: string
