@@ -214,7 +214,7 @@ pub(crate) fn user_bot_cfg(child: &db::Bot, new_id: &str, name: &str, model: &Op
         id: Some(new_id.to_string()),
         name: name.to_string(),
         kind: "claude".into(),
-        model: model.clone(),
+        model: model.as_deref().map(|m| crate::models::canonical_model("claude", m).to_string()),
         effort: effort.clone(),
         fast: false,
         persona: child.persona.clone(),
@@ -285,7 +285,9 @@ pub async fn promote_bot(
         // 預設沿用 child 的名字，而它自己還占著這個名字（同專案 live 唯一），所以退到 `-N`。
         crate::api::next_free_name(&wanted, &taken)
     };
-    let model = req.model.as_deref().map(str::trim).filter(|m| !m.is_empty()).map(String::from).or_else(|| child.model.clone());
+    let requested_model = req.model.as_deref().map(str::trim).filter(|m| !m.is_empty()).or(child.model.as_deref());
+    let remapped_model = requested_model.and_then(|m| crate::models::remap_deprecated_model("claude", m).map(|to| (m.to_string(), to.to_string())));
+    let model = requested_model.map(|m| crate::models::canonical_model("claude", m).to_string());
     let effort = crate::config::normalize_effort("claude", req.effort.as_deref().or(child.effort.as_deref())).map_err(LcError::Bad)?;
 
     // 找 session：活著就看 pane 的行程；已經停了（上一次做到一半）就用記下來的。
@@ -422,15 +424,19 @@ pub async fn promote_bot(
     app.emit("bot_changed", json!({"bot_id": new_id})).await;
     app.emit("project_changed", json!({"project_id": child.project_id})).await;
 
-    Ok((
-        StatusCode::OK,
-        Json(json!({
+    let mut response = json!({
             "bot_id": new_id,
             "name": name,
             "promoted_from": {"bot_id": id, "session_id": located.session_id},
             "transcript_path": staged.dest.to_string_lossy(),
             "run_id": run_id,
-        })),
+        });
+    if let Some((from, to)) = remapped_model {
+        response["remapped"] = json!({"model": {"from": from, "to": to}});
+    }
+    Ok((
+        StatusCode::OK,
+        Json(response),
     )
         .into_response())
 }
@@ -556,8 +562,9 @@ mod tests {
     #[tokio::test]
     async fn a_child_becomes_a_top_level_bot_on_the_same_session() {
         let r = rig(true).await;
-        let out = promote(&r, PromoteReq { name: Some("kid-top".into()), ..Default::default() }).await.unwrap();
+        let out = promote(&r, PromoteReq { name: Some("kid-top".into()), model: Some("opus".into()), ..Default::default() }).await.unwrap();
         assert_eq!(out["name"], "kid-top");
+        assert_eq!(out["remapped"]["model"]["to"], "claude-opus-5-5");
         assert_eq!(out["promoted_from"]["session_id"], SID);
         assert!(out["run_id"].is_string(), "{out}");
         let new_id = out["bot_id"].as_str().unwrap().to_string();
@@ -568,7 +575,7 @@ mod tests {
 
         let bots = r.e.app.cfg.get().await.projects[0].bots.clone();
         let cfg = bots.iter().find(|b| b.id.as_deref() == Some(&new_id)).expect("進了 config.toml");
-        assert_eq!((cfg.model.as_deref(), cfg.identity.as_deref(), cfg.inject_hooks), (Some("opus"), Some("cc-a"), true));
+        assert_eq!((cfg.model.as_deref(), cfg.identity.as_deref(), cfg.inject_hooks), (Some("claude-opus-5-5"), Some("cc-a"), true));
         let row = db::bot(&r.e.app.db, &new_id).await.unwrap().unwrap();
         assert_eq!(row.managed_by, "user");
         assert!(row.parent_bot_id.is_none());

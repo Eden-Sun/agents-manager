@@ -140,14 +140,16 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
 | POST | `/api/projects` | `{"path":"/abs/or/~/path","label"?:"foo","host"?:"m4p"}`（`label` 預設目錄名） | `200 {"project_id"}`；路徑不存在 400；重複 409 |
 | DELETE | `/api/projects/{id}` | — | `200 {}`；仍有 active Run → 409 |
 | PATCH | `/api/projects/{id}` | `{"label":"新名字"}` | `200 {"project_id","needs_restart":false}`；trim 後為空 400。不擋 active run（agent 身分取自 bot id，label 只影響**下次啟動**的 `agent_name` slug） |
-| POST | `/api/projects/{id}/bots` | `{"name","kind":"claude"\|"codex"\|"grok","args":[],"autostart":false,"inject_hooks":true,"name_auto":false, model?, effort?, fast?, identity?, persona?, instruction_files?, auto_approve?, client_request_id?}` | `200 {"bot_id","name"}`；名稱重複 409，`instruction_files` 不合法 400（§12.8b），但 `name_auto:true` 時自動往後找 `<base>-<n>`（回應 `name` 是實際用的）。**`client_request_id`（冪等鍵，1..128 個 `[A-Za-z0-9-_.:]`，#352）**：同一個專案裡同一個鍵＋同樣的請求內容重送（回應遺失後重試），回第一次建好的那顆 `{"bot_id","name","replayed":true}`，不再建第二顆；同一個鍵換了請求內容（`name_auto:true` 時 `name` 只是提示、不算內容）回 409 `request_id_reused`（帶原本那顆的 `bot_id`）；沒帶＝照舊每次都建。鍵記在 config.toml 該 bot 的 `create_request_id`／`create_fingerprint`（daemon 持久，bot 刪除即失效） |
-| PATCH | `/api/bots/{id}` | 見 §10.2 | `200 {"needs_restart":bool}` |
+| POST | `/api/projects/{id}/bots` | `{"name","kind":"claude"\|"codex"\|"grok","args":[],"autostart":false,"inject_hooks":true,"name_auto":false, model?, effort?, fast?, identity?, persona?, instruction_files?, auto_approve?, client_request_id?}` | `200 {"bot_id","name"}`；名稱重複 409，`instruction_files` 不合法 400（§12.8b），但 `name_auto:true` 時自動往後找 `<base>-<n>`（回應 `name` 是實際用的）。提交已禁用模型時仍成功，並回 `remapped`（見下）。**`client_request_id`（冪等鍵，1..128 個 `[A-Za-z0-9-_.:]`，#352）**：同一個專案裡同一個鍵＋同樣的請求內容重送（回應遺失後重試），回第一次建好的那顆 `{"bot_id","name","replayed":true}`，不再建第二顆；同一個鍵換了請求內容（`name_auto:true` 時 `name` 只是提示、不算內容）回 409 `request_id_reused`（帶原本那顆的 `bot_id`）；沒帶＝照舊每次都建。鍵記在 config.toml 該 bot 的 `create_request_id`／`create_fingerprint`（daemon 持久，bot 刪除即失效） |
+| PATCH | `/api/bots/{id}` | 見 §10.2 | `200 {"needs_restart":bool}`；提交已禁用模型時另帶 `remapped` |
 | POST | `/api/bots/{id}/fork` | `{"name"?}` | 見 §10.3b |
-| POST | `/api/bots/{id}/promote` | `{"name"?,"model"?,"effort"?}` | 子 agent 升級成頂層 bot，見 §10.3c |
+| POST | `/api/bots/{id}/promote` | `{"name"?,"model"?,"effort"?}` | 子 agent 升級成頂層 bot，見 §10.3c；停用模型被替換時回 `remapped` |
 | DELETE | `/api/bots/{id}` | — | 見 §10.4 |
 | POST | `/api/order` | `{"projects"?:["pid",…],"bots"?:{"pid":["bot_id",…]},"primary"?:["bot_id",…]}` | `200 {"ok":true}`；三個都沒有 400；`primary` 有未知（或已刪除）或重複的 bot id 也 400，一筆都不寫；**`primary` 不能跟 `projects`／`bots` 混送**（前者只存 DB、後者寫 config.toml，兩個 store 不可能同一個交易）：混送 400、什麼都不寫，分成兩次（#350） |
 
 成功後推 `project_changed` / `bot_changed`。
+
+**停用模型的回應（#400）**：POST create 與 PATCH model 若輸入剛好等於停用值，回應帶 `"remapped":{"model":{"from":"gpt-5.6-luna","to":"gpt-6-luna"}}` 或 `"remapped":{"model":{"from":"opus","to":"claude-opus-5-5"}}`。其他回應不含 `remapped`；同一欄位的 PATCH 只會回報實際替換的值。
 
 **`GET /api/intents`**（#355）：持久 intent 的最近 100 筆（含已結束的，新的先）`{intents:[{id,kind,subject_id,host,payload_json,step,status,owner_boot,attempts,last_error,created_at,updated_at,expires_at}]}`。唯讀；`restart`／`delete_bot`／`delete_project`／`promote` 會寫（見 SPEC §3.1 的持久 intent）。
 
@@ -1074,7 +1076,7 @@ codex 的 `fast` **不再因為不知道現況而拒絕**（拿掉 `unknown_fast
 把子 agent（`managed_by="child"`）升級成頂層 bot（`managed_by="user"`、進 config.toml），**保留同一段 claude 對話**（SPEC §6.10a，issue #248）。body 可省略：`name`（省略＝沿用 child 的名字，它自己還占著就加 `-N`）、`model`、`effort`（省略＝沿用 child 的）。
 - 只收 claude、本機、自己沒有子 agent 的 child。session 從 pane 裡活著的 claude 行程找（`<CLAUDE_CONFIG_DIR>/sessions/<pid>.json` 的 `sessionId`）；child 已停時用上一次做到一半記在它 run 上的 session。
 - 步驟與收回：transcript **複製**（不搬、不覆寫）到新 bot cwd（專案路徑）對應的 `projects/` 目錄 → 停 child → 建 user bot → 種下 session → `resume=native` 啟動（接不回就不啟動）→ 收掉 child 紀錄。停不掉、建不成或啟動失敗都不留第二顆 bot：複製的檔與新 bot 收回。停掉 child 之後不可逆（它的 pane 是母 agent 開的），失敗回應帶 `child_stopped:true`，同一個請求可原樣再送。
-- `200 {"bot_id","name","promoted_from":{"bot_id","session_id"},"transcript_path","run_id"}`。推 `bot_changed`（新舊兩顆）、`project_changed`。
+- `200 {"bot_id","name","promoted_from":{"bot_id","session_id"},"transcript_path","run_id"}`；模型剛好是已停用值時另回 `remapped.model.from/to`（§3）。推 `bot_changed`（新舊兩顆）、`project_changed`。
 - 錯誤：來源不存在 404；名字不合法 400；`409 reason`：`not_child`、`unsupported_kind`、`remote_not_supported`、`default_session`、`has_children`、`bot name already in use`（明給的名字撞名）、`session_not_found`、`session_ambiguous`、`transcript_exists`（目標已有不同內容的同名檔）、`transcript_copy_failed`、`stop_failed`、`promote_checkpoint_failed`（session 記不進 child 的 run：child 照跑、什麼都不動）、`promote_create_failed`、`promote_start_failed`（`rolled_back`、`child_stopped`）、`promote_child_not_removed`（最後收 child 紀錄重試 3 次仍寫不進去：新 bot 已收回、`rolled_back` 表示是否收乾淨，child 已停、可原樣重送）、`not_in_config`。
 
 ### 10.3a `POST /api/bots/restart-idle`

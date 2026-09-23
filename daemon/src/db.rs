@@ -205,6 +205,8 @@ const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (13, "44c2487afdf01452"),
     // issue #392：`quota_cache`（重啟後先顯示上一次的額度讀數）。
     (14, "0cb16547e439691a"),
+    // issue #400：data-only model rewrite, so the schema fingerprint stays the same; includes deleted rows.
+    (15, "0cb16547e439691a"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -389,6 +391,11 @@ async fn apply_migrations(pool: &SqlitePool) -> Result<()> {
     )
     .await
     .context("create runs_agent_status_since trigger")?;
+    // Data-only migration; exact comparisons preserve explicitly versioned Claude ids.
+    sqlx::query("UPDATE bots SET model='gpt-6-luna' WHERE kind='codex' AND model='gpt-5.6-luna'")
+        .execute(&mut *tx).await.context("remap retired Codex model")?;
+    sqlx::query("UPDATE bots SET model='claude-opus-5-5' WHERE kind='claude' AND model='opus'")
+        .execute(&mut *tx).await.context("remap retired Claude alias")?;
     // Turn 狀態轉移的單一權威（issue #68）：合法邊只定義在 `lifecycle::turn_controller::LEGAL_EDGES`，
     // trigger 由它生成。二十來處 `UPDATE turns SET status` 各自帶的 CAS guard 照舊，這是它們的下限，
     // 而且未來新寫的路徑繞不過去——終局的回合不可能被改回進行中。
@@ -1305,6 +1312,38 @@ mod tests {
         let p2 = open(&file).await.unwrap();
         assert_eq!(columns(&p2, "bots").await, before);
         p2.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn v15_remaps_deprecated_models_including_soft_deleted_bots_idempotently() {
+        let dir = tmp_dir();
+        let pool = open(&dir.join("model-remap.sqlite3")).await.unwrap();
+        sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES ('p','/tmp','p',?)").bind(now()).execute(&pool).await.unwrap();
+        for (id, kind, model, deleted) in [
+            ("c1", "codex", "gpt-5.6-luna", None),
+            ("c2", "codex", "gpt-5.6-luna", Some(now())),
+            ("a1", "claude", "opus", None),
+            ("a2", "claude", "claude-opus-4-1", None),
+        ] {
+            sqlx::query("INSERT INTO bots (id,project_id,name,kind,model,hook_token,deleted_at,created_at) VALUES (?,'p',?,?,?,'t',?,?)")
+                .bind(id).bind(id).bind(kind).bind(model).bind(deleted).bind(now()).execute(&pool).await.unwrap();
+        }
+        sqlx::query("PRAGMA user_version = 14").execute(&pool).await.unwrap();
+        migrate(&pool).await.unwrap();
+        let values: Vec<(String, Option<String>)> = sqlx::query_as("SELECT id,model FROM bots ORDER BY id").fetch_all(&pool).await.unwrap();
+        assert_eq!(values, vec![
+            ("a1".into(), Some("claude-opus-5-5".into())),
+            ("a2".into(), Some("claude-opus-4-1".into())),
+            ("c1".into(), Some("gpt-6-luna".into())),
+            ("c2".into(), Some("gpt-6-luna".into())),
+        ]);
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version").fetch_one(&pool).await.unwrap();
+        assert_eq!(version, 15);
+        migrate(&pool).await.unwrap();
+        let again: Vec<(String, Option<String>)> = sqlx::query_as("SELECT id,model FROM bots ORDER BY id").fetch_all(&pool).await.unwrap();
+        assert_eq!(again, values);
+        pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     }
 

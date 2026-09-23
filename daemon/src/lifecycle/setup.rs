@@ -917,6 +917,7 @@ pub(crate) async fn effort_checked(app: &Arc<App>, bot: &db::Bot, host: &str) ->
 pub(crate) fn model_args(bot: &db::Bot) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     if let Some(m) = bot.model.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let m = crate::models::canonical_model(&bot.kind, m);
         match bot.kind.as_str() {
             "claude" => out.extend(["--model".to_string(), m.to_string()]),
             "codex" | "grok" => out.extend(["-m".to_string(), m.to_string()]),
@@ -1091,7 +1092,7 @@ mod model_args_tests {
         let b = bot("codex", Some("gpt-5.6-luna"), Some("xhigh"), true);
         let args = model_args(&b);
         let (model, effort) = crate::models::model_effort_from_argv("codex", &args);
-        assert_eq!(model.as_deref(), Some("gpt-5.6-luna"));
+        assert_eq!(model.as_deref(), Some("gpt-6-luna"));
         assert_eq!(effort.as_deref(), Some("xhigh"));
         assert!(args.iter().any(|a| a.contains("service_tier=\"priority\"")), "fast is a flag we can read back");
         // CLI defaults read back as neither (not 「設定與實際不符」); an empty tier reads as not-fast.
@@ -1110,6 +1111,13 @@ mod model_args_tests {
     }
 
     #[test]
+    fn retired_models_are_rewritten_before_start_args_but_other_versions_stay_verbatim() {
+        assert_eq!(model_args(&bot("codex", Some("gpt-5.6-luna"), None, false)), vec!["-m", "gpt-6-luna", "-c", "service_tier=\"\""]);
+        assert_eq!(model_args(&bot("claude", Some("opus"), None, false)), vec!["--model", "claude-opus-5-5"]);
+        assert_eq!(model_args(&bot("claude", Some("claude-opus-4-1"), None, false)), vec!["--model", "claude-opus-4-1"]);
+    }
+
+    #[test]
     fn grok_keeps_reasoning_effort_and_ignores_fast() {
         let a = model_args(&bot("grok", Some("grok-4.6"), Some("low"), true));
         assert_eq!(a, vec!["-m", "grok-4.6", "--reasoning-effort", "low"]);
@@ -1119,7 +1127,7 @@ mod model_args_tests {
     #[test]
     fn claude_gets_effort_but_not_fast() {
         let a = model_args(&bot("claude", Some("opus"), Some("high"), true));
-        assert_eq!(a, vec!["--model", "opus", "--effort", "high"]);
+        assert_eq!(a, vec!["--model", "claude-opus-5-5", "--effort", "high"]);
         let a = model_args(&bot("claude", None, Some("MAX"), false));
         assert_eq!(a, vec!["--effort", "max"], "the level goes out lowercase");
         assert!(model_args(&bot("claude", None, None, true)).is_empty());

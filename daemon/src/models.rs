@@ -114,6 +114,9 @@ pub fn codex_models_from_rpc(result: &Value) -> Vec<Value> {
             arr.iter()
                 .filter_map(|m| {
                     let id = m.get("id")?.as_str()?.to_string();
+                    if id == "gpt-5.6-luna" {
+                        return None;
+                    }
                     let efforts: Vec<String> = m
                         .get("supportedReasoningEfforts")
                         .and_then(|v| v.as_array())
@@ -147,6 +150,19 @@ pub fn codex_models_from_rpc(result: &Value) -> Vec<Value> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Map only explicitly retired aliases. Full versioned model ids are user choices and stay intact.
+pub fn remap_deprecated_model(kind: &str, model: &str) -> Option<&'static str> {
+    match (kind, model) {
+        ("codex", "gpt-5.6-luna") => Some("gpt-6-luna"),
+        ("claude", "opus") => Some("claude-opus-5-5"),
+        _ => None,
+    }
+}
+
+pub fn canonical_model<'a>(kind: &str, model: &'a str) -> &'a str {
+    remap_deprecated_model(kind, model).unwrap_or(model)
 }
 
 /// Lines: `Default model: grok-4.5`, then `  - grok-4.6` or `  * grok-4.5 (default)`.
@@ -475,7 +491,7 @@ pub fn model_effort_from_argv(kind: &str, argv: &[String]) -> (Option<String>, O
         }
         i += 1;
     }
-    let model = model.map(|m| m.trim().to_string()).filter(|m| !m.is_empty());
+    let model = model.map(|m| crate::models::canonical_model(kind, m.trim()).to_string()).filter(|m| !m.is_empty());
     let effort = effort.and_then(|e| crate::config::normalize_effort(kind, Some(&e)).ok().flatten());
     (model, effort)
 }
@@ -615,7 +631,7 @@ mod tests {
         let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert_eq!(
             model_effort_from_argv("claude", &argv(&["claude", "--dangerously-skip-permissions", "--model", "opus"])),
-            (Some("opus".into()), None)
+            (Some("claude-opus-5-5".into()), None)
         );
         assert_eq!(
             model_effort_from_argv("grok", &argv(&["grok", "--always-approve", "-m", "grok-4.6", "--reasoning-effort", "high"])),
@@ -786,6 +802,37 @@ mod tests {
         assert_eq!(m[0]["default_effort"], "low");
         assert_eq!(m[0]["efforts"], json!(["low", "ultra"]));
         assert_eq!(m[0]["service_tiers"][0]["id"], "priority");
+    }
+
+    #[test]
+    fn deprecated_models_are_remapped_only_on_exact_matches() {
+        assert_eq!(remap_deprecated_model("codex", "gpt-5.6-luna"), Some("gpt-6-luna"));
+        assert_eq!(remap_deprecated_model("codex", "gpt-5.6-luna-extra"), None);
+        assert_eq!(remap_deprecated_model("claude", "opus"), Some("claude-opus-5-5"));
+        assert_eq!(remap_deprecated_model("claude", "claude-opus-4-1"), None);
+        assert_eq!(remap_deprecated_model("claude", "claude-opus-5-5"), None);
+    }
+
+    #[test]
+    fn adopted_child_argv_model_is_canonicalized_only_for_retired_exact_names() {
+        let argv = |model: &str| vec!["codex".into(), "-m".into(), model.into()];
+        assert_eq!(model_effort_from_argv("codex", &argv("gpt-5.6-luna")).0.as_deref(), Some("gpt-6-luna"));
+        let argv = vec!["claude".into(), "--model".into(), "opus".into()];
+        assert_eq!(model_effort_from_argv("claude", &argv).0.as_deref(), Some("claude-opus-5-5"));
+        let argv = vec!["claude".into(), "--model".into(), "claude-opus-4-1".into()];
+        assert_eq!(model_effort_from_argv("claude", &argv).0.as_deref(), Some("claude-opus-4-1"));
+    }
+
+    #[test]
+    fn codex_model_catalog_hides_the_deprecated_luna_exactly() {
+        let r = json!({"data": [
+            {"id": "gpt-5.6-luna", "displayName": "Old"},
+            {"id": "gpt-5.6-luna-preview", "displayName": "Other"},
+            {"id": "gpt-6-luna", "displayName": "New"}
+        ]});
+        let mapped = codex_models_from_rpc(&r);
+        let ids: Vec<_> = mapped.iter().map(|m| m["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["gpt-5.6-luna-preview", "gpt-6-luna"]);
     }
 
     #[test]

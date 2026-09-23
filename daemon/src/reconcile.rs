@@ -2490,7 +2490,7 @@ mod compat_tests {
             .await
             .expect("the child was adopted");
         assert_eq!(kid.name, "lastq");
-        assert_eq!(kid.model.as_deref(), Some("opus"), "read off `--model`");
+        assert_eq!(kid.model.as_deref(), Some("claude-opus-5-5"), "read off `--model` after exact retired-alias mapping");
         assert_eq!(kid.effort.as_deref(), Some("high"), "read off `--effort`");
         assert_eq!(kid.inject_hooks, 0, "still no hooks: 對話 comes from the terminal");
 
@@ -2927,7 +2927,7 @@ mod compat_tests {
         let head_bot = kid("head").await;
         assert_eq!(head_bot.managed_by, "child");
         assert_eq!(head_bot.identity.as_deref(), Some("cc2"), "read off its own pane's CLAUDE_CONFIG_DIR");
-        assert_eq!(head_bot.model.as_deref(), Some("opus"), "the same process_info still fills the model");
+        assert_eq!(head_bot.model.as_deref(), Some("claude-opus-5-5"), "the same process_info still fills the model through the shared mapping");
 
         // An unclaimed directory is no answer: the inherited value stays.
         assert_eq!(kid("lost").await.identity.as_deref(), Some("cc1"));

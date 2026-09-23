@@ -532,6 +532,17 @@ claude 連線在回應中途掉了時，pane 只多一行 `⏺ API Error: Connec
 
 ### 4.4a 模型／強度／fast／身份：runtime 與設定
 
+#### 停用模型的強制替換（#400）
+
+所有接收、投影、啟動或收編模型名稱的路徑都呼叫共用的精確比對規則；只有完整字串相等才改寫：
+
+| kind | 停用的輸入 | 強制使用 | 其餘版本名稱 |
+|---|---|---|---|
+| codex | `gpt-5.6-luna` | `gpt-6-luna` | 原樣保留 |
+| claude | `opus` | `claude-opus-5-5` | 原樣保留，包括 `claude-opus-4-1` 及其他 `claude-opus-*` 完整名 |
+
+create／PATCH／promote 回應以 `remapped.model.from/to` 說明實際替換；`GET /api/models?kind=codex` 不列出 `gpt-5.6-luna`。啟動舊 DB 設定、採納子 agent argv、config.toml 投影與 responder/supervisor 的啟動設定都套用同一 helper。schema v15 將 `bots.model` 的既有精確舊值改寫，包含軟刪列；資料 migration 可重複執行。額度與 runtime 探測到明確版本 id 時不做前綴推測或降版。
+
 `bots.model` / `effort` / `fast` 是**設定**，不等於 bot 現在真的在跑的東西。
 
 | kind | 執行中改 | 怎麼套用 |

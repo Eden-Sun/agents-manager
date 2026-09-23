@@ -1059,6 +1059,14 @@ async fn check_identity(app: &Arc<App>, host: &str, identity: &Option<String>, k
     Ok(Some(name))
 }
 
+fn remap_model(kind: &str, model: Option<&str>) -> (Option<String>, Option<Value>) {
+    let Some(model) = model.map(str::trim).filter(|m| !m.is_empty()) else { return (None, None) };
+    match crate::models::remap_deprecated_model(kind, model) {
+        Some(to) => (Some(to.to_string()), Some(json!({"model": {"from": model, "to": to}}))),
+        None => (Some(model.to_string()), None),
+    }
+}
+
 async fn create_bot(
     State(app): State<Arc<App>>,
     Path(pid): Path<String>,
@@ -1077,6 +1085,7 @@ async fn create_bot(
         .map(|p| p.host)
         .unwrap_or_else(|| crate::config::LOCAL_HOST.to_string());
     let identity = check_identity(&app, &host, &b.identity, &b.kind).await?;
+    let (model, remapped) = remap_model(&b.kind, b.model.as_deref());
     let effort = crate::config::normalize_effort(&b.kind, b.effort.as_deref()).map_err(LcError::Bad)?;
     let instruction_files = crate::config::normalize_instruction_files(&b.kind, b.instruction_files.as_deref()).map_err(LcError::Bad)?;
     let env: BTreeMap<String, String> = b.env.clone().unwrap_or_default();
@@ -1095,7 +1104,7 @@ async fn create_bot(
             if b.name_auto { Value::Null } else { json!(b.name) },
             b.name_auto,
             b.kind,
-            b.model.as_deref().map(str::trim).filter(|m| !m.is_empty()),
+            model,
             effort,
             b.fast,
             b.persona.as_deref().filter(|s| !s.trim().is_empty()),
@@ -1142,7 +1151,7 @@ async fn create_bot(
             id: Some(id.clone()),
             name,
             kind: b.kind.clone(),
-            model: b.model.clone().map(|m| m.trim().to_string()).filter(|m| !m.is_empty()),
+            model: model.clone(),
             effort: effort.clone(),
             fast: b.fast,
             persona: b.persona.clone().filter(|s| !s.trim().is_empty()),
@@ -1176,11 +1185,15 @@ async fn create_bot(
     }
     if let Some((bot_id, name)) = replayed.into_inner().unwrap() {
         // 重送：拿回原本那顆，什麼都沒新建、不推事件。
-        return Ok((StatusCode::OK, Json(json!({"bot_id": bot_id, "name": name, "replayed": true}))).into_response());
+        let mut body = json!({"bot_id": bot_id, "name": name, "replayed": true});
+        if let Some(value) = &remapped { body["remapped"] = value.clone(); }
+        return Ok((StatusCode::OK, Json(body)).into_response());
     }
     app.emit("bot_changed", json!({"bot_id": id})).await;
     let name = used_name.into_inner().unwrap_or_default();
-    Ok((StatusCode::OK, Json(json!({"bot_id": id, "name": name}))).into_response())
+    let mut body = json!({"bot_id": id, "name": name});
+    if let Some(value) = remapped { body["remapped"] = value; }
+    Ok((StatusCode::OK, Json(body)).into_response())
 }
 
 /// `cc1-1` → `cc1-2`; `review` → `review-2`. Trims the base to stay within 32 chars.
@@ -1371,7 +1384,7 @@ async fn patch_unprojected_bot(app: &Arc<App>, id: &str, b: &PatchBot, effort: &
 async fn patch_bot(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
-    Json(b): Json<PatchBot>,
+    Json(mut b): Json<PatchBot>,
 ) -> Result<Response, LcError> {
     let active = db::active_run(&app.db, &id).await.map_err(any_err)?;
     if let Some(n) = &b.name {
@@ -1408,6 +1421,14 @@ async fn patch_bot(
     }
     let needs_restart = active.is_some() && restart_relevant;
     let kind = db::bot(&app.db, &id).await.map_err(any_err)?.map(|x| x.kind).ok_or_else(|| LcError::NotFound("bot".into()))?;
+    let (model, remapped) = match &b.model {
+        Some(value) => {
+            let (model, remapped) = remap_model(&kind, value.as_deref());
+            b.model = Some(model.clone());
+            (Some(model), remapped)
+        }
+        None => (None, None),
+    };
     let effort: Option<Option<String>> = match &b.effort {
         None => None,
         Some(e) => Some(crate::config::normalize_effort(&kind, e.as_deref()).map_err(LcError::Bad)?),
@@ -1468,8 +1489,8 @@ async fn patch_bot(
         if let Some(e) = &b.env {
             bot.env = e.clone();
         }
-        if let Some(m) = &b.model {
-            bot.model = m.clone().map(|x| x.trim().to_string()).filter(|x| !x.is_empty());
+        if b.model.is_some() {
+            bot.model = model.clone().flatten();
         }
         if let Some(e) = &effort {
             bot.effort = e.clone();
@@ -1560,6 +1581,7 @@ async fn patch_bot(
         }
     }
     let mut out = json!({"needs_restart": needs_restart});
+    if let Some(value) = remapped { out["remapped"] = value; }
     if let Some(reason) = live {
         out["live_apply"] = json!({
             "fields": live_fields,
@@ -4758,6 +4780,40 @@ mod instruction_files_tests {
         (in_cfg, db::bot(&e.app.db, id).await.unwrap().unwrap().instruction_files)
     }
 
+    #[tokio::test]
+    async fn deprecated_models_are_remapped_at_create_and_patch_and_response_says_so() {
+        let e = env().await;
+        seed_project(&e).await;
+        let create = create_bot(
+            State(e.app.clone()),
+            Path(e.project_id.clone()),
+            Json(serde_json::from_value(json!({"name":"old-codex", "kind":"codex", "model":"gpt-5.6-luna"})).unwrap()),
+        ).await.unwrap();
+        let created: Value = serde_json::from_slice(&axum::body::to_bytes(create.into_body(), 1 << 20).await.unwrap()).unwrap();
+        assert_eq!(created["remapped"]["model"]["from"], "gpt-5.6-luna");
+        assert_eq!(created["remapped"]["model"]["to"], "gpt-6-luna");
+        let codex_id = created["bot_id"].as_str().unwrap();
+        assert_eq!(db::bot(&e.app.db, codex_id).await.unwrap().unwrap().model.as_deref(), Some("gpt-6-luna"));
+
+        let create_claude = create_bot(
+            State(e.app.clone()),
+            Path(e.project_id.clone()),
+            Json(serde_json::from_value(json!({"name":"old-claude-create", "kind":"claude", "model":"opus"})).unwrap()),
+        ).await.unwrap();
+        let created_claude: Value = serde_json::from_slice(&axum::body::to_bytes(create_claude.into_body(), 1 << 20).await.unwrap()).unwrap();
+        assert_eq!(created_claude["remapped"]["model"]["to"], "claude-opus-5-5");
+        assert_eq!(db::bot(&e.app.db, created_claude["bot_id"].as_str().unwrap()).await.unwrap().unwrap().model.as_deref(), Some("claude-opus-5-5"));
+
+        let claude_id = add(&e, json!({"name":"old-claude", "kind":"claude"})).await.unwrap();
+        let patched = patch(&e, &claude_id, json!({"model":"opus"})).await.unwrap();
+        assert_eq!(patched["remapped"]["model"]["from"], "opus");
+        assert_eq!(patched["remapped"]["model"]["to"], "claude-opus-5-5");
+        assert_eq!(db::bot(&e.app.db, &claude_id).await.unwrap().unwrap().model.as_deref(), Some("claude-opus-5-5"));
+        let exact = patch(&e, &claude_id, json!({"model":"claude-opus-4-1"})).await.unwrap();
+        assert!(exact.get("remapped").is_none(), "versioned model was explicitly chosen: {exact}");
+        assert_eq!(db::bot(&e.app.db, &claude_id).await.unwrap().unwrap().model.as_deref(), Some("claude-opus-4-1"));
+    }
+
     /// 最近一次 `agent.start` 的 `--settings` 檔案內容：daemon 真的交給 claude 的那包設定。
     fn settings_of_last_start(e: &Env) -> Value {
         let call = e.herdr.calls_to("agent.start").pop().expect("有起過 agent");
@@ -5166,7 +5222,7 @@ mod mixed_store_tests {
         patch(&e, &id, json!({"primary": true})).await.unwrap();
         assert_eq!(pin_state(&e, &id).await.0, 1);
         patch(&e, &id, json!({"model": "opus"})).await.unwrap();
-        assert_eq!(model_of(&e, &id).await.as_deref(), Some("opus"));
+        assert_eq!(model_of(&e, &id).await.as_deref(), Some("claude-opus-5-5"));
     }
 
     #[tokio::test]
