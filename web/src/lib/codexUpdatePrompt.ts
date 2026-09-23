@@ -9,6 +9,7 @@ export interface CodexUpdatePrompt {
 
 const LINE = /update available!?\s*[:\s]\s*v?(\d+(?:\.\d+)+)\s*(?:->|→|=>)\s*v?(\d+(?:\.\d+)+)/i
 const ONLY_TO = /update available!?\s*[:\s]\s*v?(\d+(?:\.\d+)+)/i
+const ARROW = /^(?:->|→|=>)/
 
 /** 讀不出來回 null：寧可不顯示，也不拿錯版本查 changelog。 */
 export function parseCodexUpdatePrompt(text: string | null | undefined): CodexUpdatePrompt | null {
@@ -16,5 +17,7 @@ export function parseCodexUpdatePrompt(text: string | null | undefined): CodexUp
   const both = LINE.exec(text)
   if (both) return { from: both[1], to: both[2] }
   const only = ONLY_TO.exec(text)
+  // 雙版本目標壞掉時，不能把箭頭前的舊版降級成目標版。
+  if (only && ARROW.test(text.slice(only.index + only[0].length).trimStart())) return null
   return only ? { from: null, to: only[1] } : null
 }
