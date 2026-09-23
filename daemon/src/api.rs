@@ -159,6 +159,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/models", get(get_models))
         .route("/changelog", get(get_changelog))
         .route("/quota", get(get_quota))
+        .route("/quota/probe", post(probe_quota))
         // issue #90：build scheduler 的唯讀現況（UI 用一般 X-AM-Token）。acquire／renew／release 見下方
         // 的 `/build-slots/*`（不在 `/api` 底下：bot 的 pane 只有自己的 hook token，拿不到這個）。
         .route("/build-slots", get(crate::build_scheduler::get_status))
@@ -2621,6 +2622,28 @@ async fn get_quota(State(app): State<Arc<App>>, Query(q): Query<HashMap<String, 
         resp.headers_mut().insert("x-am-quota-refresh", axum::http::HeaderValue::from_static("pending"));
     }
     Ok(resp)
+}
+
+/// `POST /api/quota/probe?kind=claude&account=cc0[&host=]`（#404）：強制重跑那個帳號的 `/usage`，
+/// 結果（`source=claude-usage`）直接覆寫 cache——statusLine 的守衛擋不下來的錯值，人手動校正的出口。
+async fn probe_quota(State(app): State<Arc<App>>, Query(q): Query<HashMap<String, String>>) -> Result<Json<Value>, LcError> {
+    let kind = q.get("kind").map(String::as_str).unwrap_or("claude");
+    if kind != "claude" {
+        return Err(LcError::Bad(format!("kind `{kind}` has no forced usage probe; only `claude`")));
+    }
+    let host = q.get("host").map(String::as_str).filter(|h| !h.is_empty()).unwrap_or(LOCAL_HOST);
+    if app.hosts.get(host).await.is_none() {
+        return Err(LcError::NotFound("host".into()));
+    }
+    let account = q.get("account").map(|a| a.trim()).filter(|a| !a.is_empty());
+    match crate::quota_claude::force_probe(&app, host, account).await {
+        Ok((key, quota)) => Ok(Json(json!({"key": key, "quota": crate::quota::quota_value(&quota, false)}))),
+        Err(crate::quota_claude::ForceProbeError::UnknownAccount) => Err(LcError::NotFound("identity".into())),
+        Err(crate::quota_claude::ForceProbeError::NotInstalled) => {
+            Err(LcError::conflict("claude_not_installed", json!({"host": host})))
+        }
+        Err(crate::quota_claude::ForceProbeError::Failed(m)) => Err(LcError::Upstream(m)),
+    }
 }
 
 #[cfg(test)]

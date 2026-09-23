@@ -1306,10 +1306,14 @@ Project 底下所有存活 bot 的訊息合併，以插入順序（`rowid`）倒
 - `?refresh=1`：立刻重讀 `local` + 每台已連線遠端（各主機併發、同一台三個 kind 也併發；claude 探測最久 40 秒、grok 25 秒）；`&host=` 只重讀那台（不存在 404）。
   最多等 20 秒就回當下的快照；還沒跑完的探測留在背景（跑完照樣推 `quota_updated`），回應帶 header `X-AM-Quota-Refresh: pending`。
 - 背景輪詢：codex 5 分、claude 60 秒、grok 30 秒，每輪各主機併發。
+- `POST /api/quota/probe?kind=claude&account=<身分>&host=<name>`：**強制**重跑那個帳號的 `claude -p "/usage"`，結果（`source=claude-usage`）直接覆寫 cache、推 `quota_updated`。
+  給人校正 statusLine 守衛擋不下來的錯值（SPEC §14.2）；不看失敗退避、不看「statusLine 很新就跳過」、停用的身分照探。`kind` 省略＝`claude`，目前也只收 `claude`（其他 400）；
+  `account` 省略＝預設帳號，共用預設帳號的身分（cc0、只帶 `ANTHROPIC_API_KEY` 的）都探裸 `claude` 那一格；`host` 省略＝本機。要先等那台的 `probe_lock`（背景輪詢正在一個一個探身分時得排隊），再加上探測本身最久 40 秒。
+  成功 `200 {"key":"claude","quota":{…同上一格的形狀…}}`；沒這台主機 `404 {"what":"host"}`、沒這個 claude 身分 `404 {"what":"identity"}`、那台沒裝 claude `409 {"reason":"claude_not_installed"}`、探測失敗或沒讀到額度列 502。
 - `source`：
   - `codex-app-server`：每 5 分鐘 `account/rateLimits/read`（遠端 ssh）。
   - `codex-statusline`：同一輪讀每個 running codex pane 底下 `… · 5h 90% left · weekly 48% left`，寫同一把 key（畫面比 app-server 目前這個窗還舊就不採用，同一個窗只增不減，見 SPEC §14.2）；只有剩餘 %，`resets_at`／`reset_credits`／`limit_hit` 沿用前一份。
-  - `statusline`：claude bot 對話中，daemon 注入的 `statusLine` 把 `rate_limits.five_hour/seven_day` POST 到 `/hook/claude`（`hook_event_name = "StatusLine"`，不建 Turn）。
+  - `statusline`：claude bot 對話中，daemon 注入的 `statusLine` 把 `rate_limits.five_hour/seven_day` POST 到 `/hook/claude`（`hook_event_name = "StatusLine"`，不建 Turn）。多個 session 共用帳號時以 5h 窗判斷誰比較新，舊快照整筆丟掉（SPEC §14.2）。
   - `claude-usage`：背景 pane 探測 `claude auth status --json` + `claude -p "/usage"`（SPEC §14.2），純文字一行一個桶，依序對應 `five_hour` / `seven_day` / `fable`
     （`Current session` / `Current week (all models)` / `Current week (Fable)`，其他 model 週列忽略）；`plan` 取 `subscriptionType`。
     每個有獨立 `CLAUDE_CONFIG_DIR` 的身份各探一次（該主機清單，含 shell `ccN`）；60 秒內剛被 statusLine 更新**且**登入狀態已知的跳過；沒登入的 park 30 分鐘、其他失敗 5 分鐘。
