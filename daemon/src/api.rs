@@ -116,6 +116,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/bots/{id}/fork", post(crate::fork::fork_bot))
         .route("/bots/{id}/promote", post(crate::promote::promote_bot))
         .route("/bots/{id}/stop", post(stop_bot))
+        .route("/bots/{id}/rewind", post(crate::rewind::post_rewind))
         .route("/bots/{id}/preview", get(preview_get).post(preview_start).delete(preview_stop))
         .route("/bots/{id}/interrupt", post(interrupt_bot))
         .route("/bots/{id}/login", post(login_bot))

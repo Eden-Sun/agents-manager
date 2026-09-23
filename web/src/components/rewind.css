@@ -1,0 +1,46 @@
+/* 對話倒回（SPEC §6.13）。 */
+.msg-rewind {
+  flex: none;
+  padding: 0 5px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: none;
+  color: var(--text-faint);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.45;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+
+/* 平常藏著，免得每則使用者訊息都多一顆按鈕；滑過那則、鍵盤聚焦、觸控裝置（沒有 hover）才出現。 */
+.msg:hover .msg-rewind,
+.msg-rewind:focus-visible,
+.msg-rewind.busy {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .msg-rewind {
+    opacity: 1;
+  }
+}
+
+.msg-rewind:hover:not(:disabled) {
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.msg-rewind:disabled {
+  cursor: not-allowed;
+}
+
+/* 被倒掉的：留著可以回頭看，但一眼看得出不在脈絡裡。 */
+.msg.rewound .bubble {
+  opacity: 0.5;
+}
+
+.src-tag.rewound-tag {
+  border-style: dashed;
+}

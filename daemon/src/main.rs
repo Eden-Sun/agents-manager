@@ -72,6 +72,7 @@ mod quota_claude;
 mod release_triage;
 mod quota_grok;
 mod read_marks;
+mod rewind;
 mod remote_cargo;
 mod reconcile;
 mod spawn_hints;

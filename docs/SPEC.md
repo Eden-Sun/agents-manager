@@ -2010,6 +2010,32 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
 - **鎖**：預覽操作共用一把全域鎖，**不拿 bot 鎖**（停機、刪除是在 bot 鎖裡呼叫進來的，再拿會自己等自己）。
 - **測試**：行程與 port 查詢走 `PreviewEnv`，測試注入決定性的假貨，不碰真 herdr、真行程、真 port（#211）。
 
+### 6.13 對話倒回（rewind，issue #405，2026-09-23）
+
+> 使用者：「我問錯了一個問題，我要加入 claude 的 rewind 功能讓對話可以倒車而不汙染 context」。
+
+- **入口**：網頁上 claude bot 的使用者訊息，滑過（觸控裝置常駐）出現「↶ 倒回這裡」→ 確認框（寫明這則之後幾則會拿掉、檔案不還原）→
+  `POST /api/bots/{id}/rewind`（`daemon/src/rewind.rs`）。成功後那則的原文接回網頁輸入框**最前面**（原本打到一半的字留著），畫面上那則與之後收成淡色＋「已倒回」。
+- **範圍**：只收 claude；codex／grok 409 `unsupported_kind`。子 agent 也可以（daemon 本來就對子 agent 的 pane 打字）；從使用者自己 default session 匯入的
+  不行（§6.5.1：只看不代打）。bot 要在跑而且**閒著**（idle、沒有在飛或排隊的回合）；從檢查到打完字都**持 bot 鎖**，期間 prompt 進不來。群組發言（`group_id`）網頁不給按。
+- **做法：驅動 TUI 自己的 `/rewind`**（使用者 2026-09-23 裁示）。同一個 session、同一個 jsonl 內分支：session id 不變、不多一個檔、**不重啟**，被倒掉的原文 CLI 會自己放回輸入列。
+  不用的做法：`--resume-session-at`（2.1.280 只在 print 模式生效，help 原文「Ignored outside print mode」）；daemon 自己截斷 transcript 另存新 session 再 `--resume`
+  （要理解 transcript 格式、要重啟、換 session id——#405 第一版，已放棄）。
+- **每一步讀畫面確認才按下一步**（claude 2.1.280 實機畫面：`daemon/src/rewind/claude_2.1.280_rewind_*.txt`）：
+  1. 輸入列要空、畫面上沒有開著的 rewind 選單，否則 409 `composer_busy`／`rewind_ui_open`，一個字都不打。
+  2. 打 `/rewind`、Enter，等選單出現（`Rewind` 標題以下有 `Enter to continue · Esc to cancel` 與 `❯` 游標）；5 秒內沒出現 → 清掉打進去的 `/rewind`，409 `menu_not_shown`。
+  3. 選單由舊到新、最下面是 `(current)`，每則只顯示第一行（多行的加 `…`、太長的在欄寬截斷加 `…`）。一格一格往上（`Up`），每按一下等畫面真的變了再讀游標那一則，
+     第一行對得上目標就停；同一句（第一行一樣）在網頁上較新的還有幾則，就先跳過幾則。游標不再移動＝到頂了還沒找到 → Esc 退出，409 `not_in_menu`。
+  4. Enter 進確認頁：`│ <原文>` 印出那一則。**比對原文**：去掉所有空白（折行、換行不算差異）與 `[Image #N]` 佔位後要一模一樣；確認頁對長的訊息只印前 4 行或約 6 個折行、
+     **沒有截斷記號**，所以只對到前綴時要至少 4 行才算（比這短卻只是前綴＝另一則）。對不上 → Esc 兩下退出，409 `text_mismatch`（帶畫面上的字）；游標不在
+     `1. Restore conversation` → 一樣退出，409 `restore_not_selected`。**沒確認過絕不選 Restore。**
+  5. Enter 選 Restore，等畫面離開 rewind（6 秒）；沒離開 → 409 `rewind_unconfirmed`（不知道倒了沒有，訊息不標）。
+  6. **pane 的輸入列清掉**：CLI 放回輸入列的原文由 daemon 按 `ctrl+c` 清掉，原文改交給網頁的輸入框——留在 pane 裡的話，下一則打進去的 prompt 會接在它後面。
+     輸入列裡的不是那一則就不清，回應 `pane_cleared: false`，網頁通知叫人到終端清。
+  - 打字前先記 `runs.pane_typed`（同 §4.4a 的 slash 指令：直接對 pane 打過字的 run 之後的 prompt 走打字路線）；記不下來就不打。
+- **標記**：`messages.rewound_at`——那則與之後的（同一個 conversation、rowid 不小於它）標上時間，**不刪**；對話加一則 system 說明。推 WS `messages_rewound`。
+- **不做的**：`Summarize from here／up to here`、還原程式碼（`--rewind-files`）、codex／grok。
+
 ## 7. API
 
 完整契約在 `API.md`；這裡只記存取控制與 WS 語意。

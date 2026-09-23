@@ -1,0 +1,40 @@
+
+
+❯ Remember the word APPLE. Reply with just OK.
+
+  Wrote 1 memory
+
+⏺ OK
+
+❯ Second prompt, line one.
+  Line two mentions BANANA.
+  Reply with just OK.
+
+  Wrote 1 memory
+
+⏺ OK
+
+❯ Third prompt is deliberately long so that the rewind menu has to truncate it: it talks about cherries, dates,
+  elderberries, figs, grapes, honeydew melons, kiwis, lemons, mangoes, nectarines, oranges, papayas and quinces, and
+  then finally asks you to reply with just OK.
+
+  Wrote 1 memory
+
+⏺ OK
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+   Rewind
+
+   Confirm you want to restore the conversation to the point before you sent this message:
+
+   │ Second prompt, line one.
+   │ Line two mentions BANANA.
+   │ Reply with just OK.
+   │ (42s ago)
+
+   The conversation will be forked.
+   The code will be unchanged.
+
+   ❯ 1. Restore conversation
+     2. Summarize from here
+     3. Summarize up to here
+     4. Never mind
