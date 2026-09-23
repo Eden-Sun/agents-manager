@@ -214,7 +214,7 @@ config.toml 裡沒有的 id（child、已刪）忽略。成功推 `project_chang
 `POST /api/bots/{id}/prompt`
 
 ```json
-{ "text": "Reply with exactly PONG", "client_request_id": "<前端產生的唯一字串>", "relay_from": "<bot id> | \"daemon\"", "attachments"?: ["<attachment id>"], "send_now"?: true, "start_if_stopped"?: true }
+{ "text": "Reply with exactly PONG", "client_request_id": "<前端產生的唯一字串>", "relay_from": "<自己的 bot id>", "attachments"?: ["<attachment id>"], "send_now"?: true, "start_if_stopped"?: true }
 ```
 
 - `relay_from` 省略 = **使用者自己打的**。另一顆 bot 轉述帶它自己的 `bot_id`，**並帶 header `X-AM-Bot-Token: <那顆 bot 的 hook token>`**（pane 環境的 `AM_HOOK_TOKEN`）證明是本人（issue #339，SPEC §6.5d）：
@@ -223,10 +223,16 @@ config.toml 裡沒有的 id（child、已刪）忽略。成功推 `project_chang
   |---|---|---|
   | 省略 | — | 照舊（使用者本人） |
   | `"daemon"` | 任何 | **403** `{"error":"forbidden","reason":"relay_from_reserved"}`：daemon 自己的訊息不走 HTTP |
-  | 不存在／已刪的 bot | 任何 | 400 |
+  | **＝路徑上那顆收件 bot** | 任何 | **400** `{"error":"bad_request","reason":"relay_self","relay_from"}`：自己送給自己沒有「來源」可標 |
   | bot | 那顆的 token | 照舊，記成已驗證 |
-  | bot | 有帶、但不是那顆的 | **403** `{"error":"forbidden","reason":"relay_from_mismatch"}`，什麼都不寫 |
+  | bot | **有帶**、但對不上（別顆的／空字串／非 UTF-8） | **403** `{"error":"forbidden","reason":"relay_from_mismatch"}`，什麼都不寫 |
+  | 不存在／已刪的 bot | **有帶** | **403** 同上（不回 400） |
   | bot | 沒帶 | **相容期**（#410 移除）：照收，訊息的 `relay_unverified = 1`，UI 標「未驗證」 |
+  | 不存在／已刪的 bot | 沒帶 | 400 |
+
+  「有帶但對不上」與「有帶但 bot 不存在」回**同一個** 403：分成 403／400 等於讓帶錯 token 的呼叫端
+  拿狀態碼當神諭，一個一個試出某個 bot id 存不存在。空字串與非 UTF-8 的 token 算「有帶」而不是「沒帶」——
+  否則送一個 `X-AM-Bot-Token:` 空 header 就能走進相容期冒名放行。
 
   寫入 `messages.relay_from`（與 `relay_unverified`），UI 據此畫「誰 → 誰」。
 - `client_request_id` 可省（daemon 補），建議自帶：同 id 重送回同一個 `turn_id`（即使已有新 Turn 在飛）。

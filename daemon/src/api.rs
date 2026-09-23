@@ -3109,8 +3109,8 @@ async fn prompt_bot(
 ) -> Result<Response, LcError> {
     let given_crid = b.client_request_id.clone();
     let crid = b.client_request_id.unwrap_or_else(db::ulid);
-    // relay_from 要跟呼叫者自己的 bot token 對得上；daemon 哨符不收（issue #339，`relay_auth`）。
-    let relay = crate::relay_auth::authenticate(&app, &headers, b.relay_from.as_deref()).await?;
+    // relay_from 要跟呼叫者自己的 bot token 對得上；daemon 哨符與「自己送給自己」都不收（issue #339，`relay_auth`）。
+    let relay = crate::relay_auth::authenticate(&app, &headers, b.relay_from.as_deref(), &id).await?;
     // bot 寫給 AGM 的申請不直接開回合：排進協調者的佇列，回 202（SPEC §18.15）。
     if let Some(r) = &relay {
         let mark = crate::supervisor::bot_requests::ReplyMark { ack: b.ack, reply_to: b.reply_to.as_deref() };
@@ -5460,6 +5460,7 @@ mod relay_from_auth_tests {
     struct Fx {
         e: crate::testing::Env,
         alfa: String,
+        bravo: String,
         target: String,
     }
 
@@ -5485,7 +5486,30 @@ mod relay_from_auth_tests {
         .await
         .unwrap();
         e.herdr.live_pane("pane-relay", crate::testing::LivePane { width: Some(120), boxed: true, ..Default::default() });
-        Fx { e, alfa: ids[0].clone(), target }
+        Fx { e, alfa: ids[0].clone(), bravo: ids[1].clone(), target }
+    }
+
+    /// `send` 只做得出「有帶一個合法字串」與「完全不帶」。空字串與非 UTF-8 的 header 值要另外拼。
+    async fn send_raw_token(app: &Arc<App>, to: &str, relay_from: &str, raw: &[u8], crid: &str) -> (StatusCode, Value) {
+        let mut h = HeaderMap::new();
+        h.insert("X-AM-Bot-Token", axum::http::HeaderValue::from_bytes(raw).unwrap());
+        let body = PromptIn {
+            text: "幫我看一下".into(),
+            client_request_id: Some(crid.into()),
+            attachments: vec![],
+            relay_from: Some(relay_from.into()),
+            ack: false,
+            reply_to: None,
+            send_now: false,
+            start_if_stopped: false,
+        };
+        let resp = match prompt_bot(State(app.clone()), Path(to.to_string()), h, Json(body)).await {
+            Ok(r) => r,
+            Err(err) => err.into_response(),
+        };
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
     }
 
     async fn send(app: &Arc<App>, to: &str, relay_from: &str, token: Option<&str>, crid: &str) -> (StatusCode, Value) {
@@ -5613,5 +5637,65 @@ mod relay_from_auth_tests {
             .await
             .unwrap();
         assert_eq!(verified, vec![true, false]);
+    }
+
+    // --------------------------------------------- review 7ed32d94：同一張 #339 的收尾
+
+    /// 「有帶 `X-AM-Bot-Token` 但值是空的／非 UTF-8」以前掉進「沒帶」那一格，於是送一個壞掉的
+    /// header 就能走相容期冒名放行。有帶就得對得上：一律 403，一個字都不寫。
+    #[tokio::test]
+    async fn a_present_but_unusable_token_is_a_mismatch_not_a_missing_one() {
+        let f = fx().await;
+        // 空字串、只有空白、非 UTF-8（0xff 不是合法 UTF-8，但是合法的 header 位元組）。
+        for (raw, label) in [(&b""[..], "empty"), (&b"   "[..], "blank"), (&b"\xff\xfe"[..], "not-utf8")] {
+            let (status, body) = send_raw_token(&f.e.app, &f.target, &f.alfa, raw, label).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{label}: {body}");
+            assert_eq!(body["reason"], "relay_from_mismatch", "{label}: {body}");
+        }
+        assert_eq!(counts(&f.e.app).await, (0, 0), "三種壞 token 都不能留下 turn 或訊息");
+    }
+
+    /// 帶錯 token 的呼叫端不該從狀態碼讀出「這個 bot id 存不存在」：不存在／已刪的 relay_from
+    /// 以前先查 bot 回 400、存在的才 403，一個一個試就掃得出 id。有帶 token 就一律先 403。
+    #[tokio::test]
+    async fn a_wrong_token_never_reveals_whether_the_bot_exists() {
+        let f = fx().await;
+        let gone = crate::testing::claude_bot(&f.e.app, &f.e.project_id, "gone").await;
+        sqlx::query("UPDATE bots SET deleted_at=? WHERE id=?").bind(db::now()).bind(&gone.id).execute(&f.e.app.db).await.unwrap();
+
+        let mut seen = vec![];
+        for (from, crid) in [(f.alfa.as_str(), "probe-live"), ("01MNOSUCHBOTIDATALL0000000", "probe-absent"), (gone.id.as_str(), "probe-deleted")] {
+            let (status, body) = send(&f.e.app, &f.target, from, Some("tok-bravo"), crid).await;
+            seen.push((status, body["reason"].as_str().unwrap_or_default().to_string()));
+        }
+        assert_eq!(
+            seen,
+            vec![(StatusCode::FORBIDDEN, "relay_from_mismatch".to_string()); 3],
+            "活著的、不存在的、已刪的：帶錯 token 一律同一個回應"
+        );
+        assert_eq!(counts(&f.e.app).await, (0, 0));
+
+        // 沒帶 token 的相容期照舊是 400（那條路沒有 token 可以對，也沒有神諭可讀）。
+        let (status, _) = send(&f.e.app, &f.target, "01MNOSUCHBOTIDATALL0000000", None, "absent-nosig").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    /// 票上要的 sender ≠ target：`relay_from` 指向收件的那顆 bot 自己，UI 會畫出「A → A」，
+    /// 而「這句話不是你自己想的」對自己沒有意義。400 `relay_self`，什麼都不寫。
+    #[tokio::test]
+    async fn a_bot_cannot_relay_a_message_to_itself() {
+        let f = fx().await;
+        // 連帶對自己那顆的正確 token 也不行：驗得出身分不代表這個來源標示講得通。
+        sqlx::query("UPDATE bots SET hook_token='tok-target' WHERE id=?").bind(&f.target).execute(&f.e.app.db).await.unwrap();
+        for (token, crid) in [(None, "self-none"), (Some("tok-target"), "self-signed")] {
+            let (status, body) = send(&f.e.app, &f.target, &f.target, token, crid).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{token:?}: {body}");
+            assert_eq!(body["reason"], "relay_self", "{token:?}: {body}");
+        }
+        assert_eq!(counts(&f.e.app).await, (0, 0), "自己送給自己不留 turn、不留訊息");
+
+        // 送給**別顆** bot 照舊通：擋的是 from == to，不是「有 relay_from」。
+        let (status, body) = send(&f.e.app, &f.target, &f.bravo, Some("tok-bravo"), "self-ok").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
     }
 }

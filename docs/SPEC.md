@@ -1049,7 +1049,8 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run
    **判斷不了就不判**（#193）：送了什麼、run／turn／bot、重送額度讀不到或寫不進去，這一輪不判失敗，隔 10 秒整輪再看；
    補送按過鍵證明不了、`delivery='unknown'` 卻寫不進去就欠著，每一輪先補，補上之前不判（打過的字可能已經被收下）。
    中性敘述並原樣引用含 `Not logged in`／`/login`／`unlock-keychain`／`usage limit`／`limit` 的行（提示 ssh 下 macOS Keychain 可能讀不到）。
-8. 請求可帶 `relay_from`（bot id 或 `"daemon"`），記下這則是誰轉述的，UI 據此不把它算成使用者發言。
+8. 請求可帶 `relay_from`（**另一顆** bot 的 id，不是收件的那顆，也不是 `"daemon"`——見 §6.5d 第 6 點），
+   記下這則是誰轉述的，UI 據此不把它算成使用者發言。daemon 自己轉述的 `"daemon"` 在行程內直接寫，不經這條 API。
 8a. **送進 claude pane 的字先清過**（#205，`lifecycle::pane_text`）：claude 2.1.277 起，prompt 裡有隱形的格式字元時 CLI 按 Enter 不送出，
    而是把它們拿掉、清過的字留在框裡，顯示 `Removed N invisible character(s) · review and press Enter to send`；更早的版本收到終端色碼（`ESC[`）
    會整顆 TUI 崩潰。daemon 靠 transcript 裡**逐字相同**的那一則認送達，所以要送的字（`prompt_inner`／`start_send` 算出的 deliver）先清成 CLI
@@ -1398,6 +1399,11 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
    **沒帶** token 是相容期：照收，訊息記 `relay_unverified = 1`，UI 在來源旁寫「（未驗證）」，daemon.log 記一行 warn（只記被冒名的 bot id）。
    相容期的理由是不帶 token 的既有呼叫端一被 403 就會誤判失敗：換版腳本 `daemon-swap.sh` 的自測 prompt（失敗會觸發回滾；已改成在 owner 自己的 pane 裡帶 token）、
    資料目錄裡的一次性維運腳本、照慣例手打 curl 的 bot。移除條件與清點方式見 #410。
+   **「有帶」看的是 header 在不在**，不是值好不好：空字串與非 UTF-8 的 `X-AM-Bot-Token` 算有帶而且對不上 → 403，
+   不然送一個空 header 就能走進相容期冒名放行。**帶了 token 而對不上時一律先 403**，不先查 bot 回 400——
+   按「bot 存不存在」分成 400／403 會讓狀態碼變成探測 bot id 的神諭（沒帶 token 的相容期照舊 400，那條路沒有 token 可對）。
+   **`relay_from` 不能是收件的那顆 bot 自己** → 400 `relay_self`：`relay_from` 的意思是「這句話不是收件者自己想的」，
+   指向本人就沒有來源可標，UI 會畫出「A → A」；daemon 的 child 警示是 child → 母代，本來就是兩顆不同的 bot。
    信任邊界照實寫：hook token 也在同一個 unix 使用者讀得到的檔案裡（bot 目錄的 settings），這一層擋的是「以為可以代別人發言」的 agent 與誤用，
    不是同機的惡意行程。mission 端點的 `relay_from` 還沒套這一層（#409）。
 
@@ -3192,7 +3198,8 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
   （`retryable:true`），shim 看到就明確失敗（exit 75）、不直送——直送會繞過 durable inbox、去重與 wake／ack 語意。只有連線根本沒建立（curl 7）才照舊直送；回覆不明、非 2xx、身分被拒都不直送（§6.5b／§18.15）。
   去重鍵：有 `client_request_id` 用它，沒有就用寄件者＋內容指紋＋十分鐘一格——後者只擋**還沒結案**的那一筆：前一筆已經 `handled` 之後同一句再送是新的申請，換 `#2`、`#3` 的鍵重新入列（review 2026-09-16 c3 L1）。指紋 = 收件角色＋目標＋正文（逐字，不做空白正規化，縮排差一格就是不同內容）＋附件；
   同一個 id 換了內容不是重播，回 409 `request_mismatch` 且什麼都不寫——否則第二次申請會被讀成「送到了」而靜靜消失。
-  一般 bot → 協調者；巡檢 ↔ 協調者互相交接給對方。不攔：使用者（沒有 `relay_from`）、`relay_from=daemon`、目標不是角色 bot、協調者未建立。
+  一般 bot → 協調者；巡檢 ↔ 協調者互相交接給對方。不攔：使用者（沒有 `relay_from`）、daemon 自己在行程內寫的（`DAEMON_SENDER`）、目標不是角色 bot、協調者未建立。
+  （`relay_from=daemon` 走不進 `POST /prompt`——那條路一律 403 `relay_from_reserved`，§6.5d 第 6 點；這裡說的是行程內的呼叫。）
 - **角色之間的交接**：`assign` 的目標是另一個角色 bot 時，**不是交辦**——不建交辦列、不開回合，而是走同一條佇列
   （回 `{kind:"handover", routed, queued, duplicate, wake, inbox_event_id}`），批次、節流與「回覆不再叫醒對方」只有一份規則。
   對自己的角色下交辦仍是 400。排隊中的交辦若目標在期間變成角色 bot，`dispatch` 停手並記 `dispatch_failed`，不直接打進對方 pane。
