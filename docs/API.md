@@ -247,7 +247,7 @@ daemon 自己補（定時重試、下一則 prompt、回合 hook）；同一個 
 | `"not_sent"` | send-now 鍵沒有生效（打字沒回應、打完框是空的、herdr 拒收那顆鍵）：進行中的回合照常，這一則 `delivery:"failed"`，字可能還留在終端的輸入框 |
 | `"unknown"` | 不知道 send-now 鍵有沒有生效：進行中的回合**不收**、等證據，這一則 `delivery:"unknown"`（turn 本身是 failed，不佔 in-flight） |
 
-送出鍵之前就被擋下（框裡有字、讀不到、herdr 拒收打字 `pane_send_refused`）→ 可重試的 `409 {"sent":false}`、不留任何列，進行中的回合不動。
+送出鍵之前就被擋下（框裡有字——marker 那一列只有空白不算，那是終端留下的 padding；讀不到、herdr 拒收打字 `pane_send_refused`）→ 可重試的 `409 {"sent":false}`、不留任何列，進行中的回合不動。
 送出鍵生效但狀態寫不進去 → `503 {"error":"send_now_state_uncommitted","turn_id","interrupted_turn_id","sent":true,"retryable":true}`：
 daemon 自己補，用同一個 `client_request_id` 重送拿到的是這一則、不會再打一次。見 SPEC §6.3 第 9 點。
 

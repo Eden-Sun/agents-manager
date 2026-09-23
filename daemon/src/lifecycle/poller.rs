@@ -2358,12 +2358,12 @@ mod issue_17_tests {
         assert_eq!(count(&f, "pane.send_keys"), 0);
     }
 
-    /// 框裡有任何東西（含只有空白、空白第二行、行尾空白草稿、建議句）都不代送，而且零寫入（第七輪 #1）。
+    /// 框裡有任何東西（空白第二行、行尾空白草稿、建議句）都不代送，而且零寫入（第七輪 #1）。
+    /// marker 那一列只有空白**不算**：那是終端留下的 padding（2026-09-23，`/model` 套用後每顆閒置 bot 都 composer_busy）。
     #[tokio::test]
     async fn anything_in_the_box_is_left_alone_with_zero_writes() {
         let cases: Vec<(Vec<String>, &str)> = vec![
             (vec!["我自己在打的草稿".into()], "草稿"),
-            (vec![" ".into()], "只有一個空白（marker 後多一格）"),
             (vec!["".into(), "".into()], "空白第二行"),
             (vec!["draft with trailing spaces  ".into()], "行尾空白草稿"),
             (vec!["Reply with PONG please".into()], "跟要送的一模一樣"),
@@ -3301,8 +3301,10 @@ mod lost_prompt_tests {
         assert_eq!(box_state("claude", &dim), BoxState::Empty);
         let typed = EFFORT_MAX_LOST.replacen("\n❯\n", "\n❯ Try \"refactor\" please\n", 1);
         assert_eq!(box_state("claude", &typed), BoxState::NonEmpty);
+        // marker 後只有空白是終端留下的 padding（2026-09-23：`/model` 套用後 `❯ ` 後面跟著二十幾個空格，閒置的 bot
+        // 全被回 composer_busy）；真的只打了一格再送 prompt，最多是 prompt 前面多一個空白。
         let one_space = EFFORT_MAX_LOST.replacen("\n❯\n", "\n❯  \n", 1);
-        assert_eq!(box_state("claude", &one_space), BoxState::NonEmpty, "使用者真的打了一格");
+        assert_eq!(box_state("claude", &one_space), BoxState::Empty, "只有空白是 padding");
     }
 
     #[test]
