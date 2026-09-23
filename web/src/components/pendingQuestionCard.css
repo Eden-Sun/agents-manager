@@ -1,0 +1,56 @@
+/* 從 transcript 讀出來的題目（`PendingQuestionCard.tsx`）：跟 blocked 面板同一個紅系底，題目字級最大。 */
+.pending-q {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--danger);
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+}
+
+.pending-q-src,
+.pending-q-note {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.pending-q-header {
+  align-self: flex-start;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.pending-q-text {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.pending-q-opts {
+  margin: 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.pending-q-label {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.pending-q-desc {
+  display: block;
+  color: var(--text-dim);
+}

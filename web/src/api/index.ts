@@ -231,6 +231,17 @@ export async function closePane(paneId: string, host: string, confirm: boolean):
   await transport.request('POST', `/panes/${encodeURIComponent(paneId)}/close?${q}`)
 }
 
+/** claude 停在 AskUserQuestion 時 transcript 裡的題目（`lib/pendingQuestion.ts`）。舊 daemon 沒這支（404／405）就當沒有。 */
+export async function fetchPendingQuestion(botId: string): Promise<unknown> {
+  try {
+    const raw = await transport.request('GET', `/bots/${encodeURIComponent(botId)}/pending-question`)
+    return isRec(raw) ? raw.questions : null
+  } catch (e) {
+    if (e instanceof ApiError && (e.status === 404 || e.status === 405)) return null
+    throw e
+  }
+}
+
 export async function fetchTerminal(
   botId: string,
   source: TerminalSource,
