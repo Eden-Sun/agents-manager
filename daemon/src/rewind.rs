@@ -228,8 +228,10 @@ pub struct HerdrPane {
 }
 
 impl Pane for HerdrPane {
+    /// 帶樣式讀（`format: ansi`）：跟其他看輸入列的地方同一支（7178806b）。純文字分不出 claude 2.1.280 輸入列裡 dim 的
+    /// 「建議下一句」和使用者打的字，會把建議句當成有字、擋成 `composer_busy`。
     fn read(&self) -> BoxFuture<'_, anyhow::Result<String>> {
-        Box::pin(async move { Ok(self.client.pane_read(&self.pane_id, "visible", 80).await?.text) })
+        Box::pin(async move { lifecycle::read_styled(&self.client, &self.pane_id, "visible", 80).await })
     }
     fn send_text<'a>(&'a self, text: &'a str) -> BoxFuture<'a, anyhow::Result<()>> {
         Box::pin(async move { self.client.pane_send_text(&self.pane_id, text).await })
@@ -295,8 +297,14 @@ pub struct Done {
     pub pane_cleared: bool,
 }
 
+/// 讀到的畫面（可能帶樣式）→ 下面所有判讀用的純文字：去掉樣式，輸入列裡只有 dim 建議句時把它抹掉
+/// （`delivery::plain_without_hints`，跟送達、補 Enter、清框同一套）。有真的字就原樣留著。
+pub fn screen_text(raw: &str) -> String {
+    lifecycle::plain_without_hints("claude", raw)
+}
+
 async fn read(pane: &dyn Pane) -> Result<String, Fail> {
-    pane.read().await.map_err(|e| Fail::Pane(e.to_string()))
+    pane.read().await.map(|raw| screen_text(&raw)).map_err(|e| Fail::Pane(e.to_string()))
 }
 
 async fn keys(pane: &dyn Pane, k: &[&str]) -> Result<(), Fail> {
@@ -321,7 +329,7 @@ async fn wait_for<T>(pane: &dyn Pane, ms: u64, mut f: impl FnMut(&str) -> Option
 /// 退出 rewind：Esc 到畫面離開選單／確認頁為止（確認頁要兩下）。
 async fn back_out(pane: &dyn Pane) {
     for _ in 0..3 {
-        match pane.read().await {
+        match read(pane).await {
             Ok(s) if !in_rewind_ui(&s) => return,
             Err(_) => return,
             _ => {}

@@ -17,6 +17,8 @@ const REFILLED: &str = include_str!("claude_2.1.280_rewind_restored_composer_ref
 const CLEARED: &str = include_str!("claude_2.1.280_rewind_restored_composer_cleared.txt");
 const CONFIRM_14_ROWS: &str = include_str!("claude_2.1.280_rewind_confirm_options_cut_off_14rows.txt");
 const REFILLED_TAIL: &str = include_str!("claude_2.1.280_rewind_restored_composer_tail_14rows.txt");
+/// 7178806b 的實機畫面（帶樣式）：輸入列只有 dim 的「建議下一句」`Initialize git`。
+const SUGGESTION: &str = include_str!("../lifecycle/fixtures/claude-2.1.280-prompt-suggestion.ansi");
 
 const SECOND: &str = "Second prompt, line one.\nLine two mentions BANANA.\nReply with just OK.";
 const THIRD: &str = "Third prompt is deliberately long so that the rewind menu has to truncate it: it talks about cherries, dates, elderberries, figs, grapes, honeydew melons, kiwis, lemons, mangoes, nectarines, oranges, papayas and quinces, and then finally asks you to reply with just OK.";
@@ -93,6 +95,18 @@ fn the_refilled_composer_is_seen_and_cleared() {
     assert!(!in_rewind_ui(REFILLED_TAIL));
 }
 
+/// dim 的建議句不是字：倒回照樣可以開始；同一個位置換成正常樣式（使用者真的打的）就還是有字。
+#[test]
+fn a_dim_suggestion_is_an_empty_composer_but_typed_text_is_not() {
+    assert!(SUGGESTION.contains("\u{1b}[2mInitialize git"), "fixture 形狀變了");
+    assert_eq!(lifecycle::composer_text("claude", &screen_text(SUGGESTION)), None, "建議句＝空的輸入列");
+    let agm = SUGGESTION.replace("Initialize git", "重建 release 並重啟 daemon");
+    assert_eq!(lifecycle::composer_text("claude", &screen_text(&agm)), None);
+    let typed = SUGGESTION.replace("\u{1b}[2mInitialize git", "Initialize git");
+    assert!(lifecycle::composer_text("claude", &screen_text(&typed)).is_some(), "非 dim＝打的字");
+    assert!(!screen_text(SUGGESTION).contains('\u{1b}'), "判讀用的畫面沒有樣式碼");
+}
+
 #[test]
 fn squash_ignores_whitespace_and_image_placeholders() {
     assert_eq!(squash("a b\n c"), "abc");
@@ -127,6 +141,8 @@ struct Faults {
     ctrl_c_hint_reads: usize,
     /// 輸入列只畫得下最後幾行（矮 pane 放回長訊息時，實機只看得到尾巴）。
     composer_tail: Option<usize>,
+    /// 畫面帶樣式（herdr `format: ansi` 讀到的樣子）：每一列前後有樣式碼，輸入列空著時畫 dim 的這句建議。
+    styled_hint: Option<String>,
 }
 
 struct FakeTui {
@@ -289,7 +305,22 @@ impl FakeTui {
 
 impl Pane for FakeTui {
     fn read(&self) -> BoxFuture<'_, anyhow::Result<String>> {
-        Box::pin(async move { Ok(self.render()) })
+        Box::pin(async move {
+            let plain = self.render();
+            let Some(hint) = self.faults.styled_hint.clone() else { return Ok(plain) };
+            // 跟實機一樣：空的輸入列是 `❯` NBSP 再接 dim 的建議句；其他列前後包樣式碼。
+            Ok(plain
+                .lines()
+                .map(|l| {
+                    if l == "❯" {
+                        format!("❯\u{a0}\u{1b}[0m\u{1b}[2m{hint}\u{1b}[0m")
+                    } else {
+                        format!("\u{1b}[0m\u{1b}[38;2;136;136;136m{l}\u{1b}[0m")
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n"))
+        })
     }
     fn send_text<'a>(&'a self, text: &'a str) -> BoxFuture<'a, anyhow::Result<()>> {
         Box::pin(async move {
@@ -362,6 +393,36 @@ async fn it_waits_for_the_ctrl_c_hint_to_go_away_before_returning() {
     drive(tui.as_ref(), SECOND, 0).await.unwrap();
     assert_eq!(*tui.hint_left.lock().unwrap(), 0, "回來的時候提示已經不在了");
     assert!(!tui.render().contains("Press Ctrl-C again"));
+}
+
+/// 帶樣式的畫面、輸入列畫著 dim 的建議句（2026-09-24 AGM：上線前的版本讀純文字，會把它當成有字擋掉）：照樣倒得成，
+/// 選單、確認頁、倒回後的輸入列都讀得懂。
+#[tokio::test]
+async fn a_styled_screen_with_a_dim_suggestion_can_still_rewind() {
+    let tui = FakeTui::new(&[A, SECOND, C], Faults { styled_hint: Some("重建 release 並重啟 daemon".into()), ..Default::default() });
+    let done = drive(tui.as_ref(), SECOND, 0).await.unwrap();
+    assert!(done.pane_cleared);
+    assert_eq!(tui.restored(), Some(1));
+}
+
+/// 帶樣式的畫面、輸入列裡是真的字（沒有 dim）：還是 `composer_busy`，一個字都不打。
+#[tokio::test]
+async fn a_styled_screen_with_typed_text_is_still_busy() {
+    let tui = FakeTui::new(&[A, SECOND], Faults { styled_hint: Some("unused".into()), composer: Some("half typed".into()), ..Default::default() });
+    assert_eq!(drive(tui.as_ref(), SECOND, 0).await.unwrap_err(), Fail::ComposerBusy);
+    assert!(tui.log().is_empty());
+}
+
+/// 真的 pane 要帶樣式讀（`format: ansi`），不然分不出建議句。
+#[tokio::test]
+async fn the_real_pane_is_read_with_styles() {
+    let e = tt::env().await;
+    e.herdr.set_screen("w1:p1", SUGGESTION);
+    let pane = HerdrPane { client: e.app.herdr.clone(), pane_id: "w1:p1".into() };
+    let raw = pane.read().await.unwrap();
+    let read = e.herdr.calls_to("pane.read").pop().expect("pane.read");
+    assert_eq!(read["format"], "ansi", "{read}");
+    assert_eq!(lifecycle::composer_text("claude", &screen_text(&raw)), None, "讀回來的建議句判成空的輸入列");
 }
 
 /// 確認頁的字對不上：Esc 退出，**絕不選 Restore**。
