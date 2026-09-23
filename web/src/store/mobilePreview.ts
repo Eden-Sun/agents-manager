@@ -8,6 +8,37 @@ import { useSyncExternalStore } from 'react'
 const KEY = 'am.mobilePreview.open'
 /** 同 tab 內同步（`storage` 事件只送其他 tab）。 */
 const EVENT = 'am:mobile-preview'
+/** 最近一次本分頁／storage 事件的值；持久化失敗時不能再讀回舊值。 */
+let memoryOpen: boolean | null = null
+let storageListenerWindow: Window | null = null
+
+function syncFromStorage(event: StorageEvent): void {
+  if (event.key !== KEY && event.key !== null) return
+  let localArea = event.storageArea === null
+  if (!localArea) {
+    try {
+      localArea = event.storageArea === window.localStorage
+    } catch {
+      // The event still carries the new value when this context cannot access storage.
+      localArea = true
+    }
+  }
+  if (!localArea) return
+
+  try {
+    memoryOpen = window.localStorage.getItem(KEY) === '1'
+  } catch {
+    memoryOpen = event.key === null ? false : event.newValue === '1'
+  }
+}
+
+/** Keep the per-realm fallback current even while React has no active subscriber. */
+function watchStorage(): void {
+  if (typeof window === 'undefined' || storageListenerWindow === window) return
+  storageListenerWindow?.removeEventListener('storage', syncFromStorage)
+  storageListenerWindow = window
+  window.addEventListener('storage', syncFromStorage)
+}
 
 /**
  * iframe 裡的同一個 app 不再開巢狀預覽；只在載入時讀，`routeSync` 改寫網址也不受影響。
@@ -49,7 +80,9 @@ export const MOBILE_PREVIEW_H = 852
 /** 顯示縮一半（2026-09-13 使用者：占桌機太多寬度）；scale 不改 iframe 視窗尺寸。 */
 export const MOBILE_PREVIEW_SCALE = 0.5
 
-function read(): boolean {
+export function readMobilePreviewOpen(): boolean {
+  watchStorage()
+  if (memoryOpen !== null) return memoryOpen
   try {
     return window.localStorage.getItem(KEY) === '1'
   } catch {
@@ -57,7 +90,8 @@ function read(): boolean {
   }
 }
 
-function subscribe(onChange: () => void): () => void {
+export function subscribeMobilePreviewOpen(onChange: () => void): () => void {
+  watchStorage()
   window.addEventListener(EVENT, onChange)
   window.addEventListener('storage', onChange)
   return () => {
@@ -68,15 +102,17 @@ function subscribe(onChange: () => void): () => void {
 
 /** 在預覽自己裡面一律 `false`。 */
 export function useMobilePreviewOpen(): boolean {
-  const on = useSyncExternalStore(subscribe, read, () => false)
+  const on = useSyncExternalStore(subscribeMobilePreviewOpen, readMobilePreviewOpen, () => false)
   return on && !IN_MOBILE_PREVIEW
 }
 
 export function setMobilePreviewOpen(open: boolean): void {
+  watchStorage()
+  memoryOpen = open
   try {
     window.localStorage.setItem(KEY, open ? '1' : '0')
   } catch {
-    // 無痕寫不進去：這一輪仍要生效，照樣發事件。
+    // 無痕寫不進去：snapshot 仍讀 memoryOpen，照樣發事件。
   }
   window.dispatchEvent(new Event(EVENT))
 }
