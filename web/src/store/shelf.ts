@@ -62,6 +62,14 @@ function isImage(file: File): boolean {
 
 let seq = 0
 
+function newShelfKey(): string {
+  // randomUUID is secure-context-only; getRandomValues also works when the app is served over HTTP LAN.
+  const bytes = crypto.getRandomValues(new Uint8Array(16))
+  const random = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
+  seq += 1
+  return `s-${random}-${seq.toString(36)}`
+}
+
 export const useShelf = create<ShelfState>((set, get) => ({
   items: [],
   sink: null,
@@ -81,9 +89,10 @@ export const useShelf = create<ShelfState>((set, get) => ({
         continue
       }
       room -= 1
-      seq += 1
       accepted.push({
-        key: `s${seq}`,
+        // Keep new keys out of the legacy s1/s2/... namespace so an add before IDB restore
+        // cannot overwrite or hide a persisted item with the same counter key.
+        key: newShelfKey(),
         file,
         name: file.name || '檔案',
         size: file.size,
@@ -126,8 +135,6 @@ export const useShelf = create<ShelfState>((set, get) => ({
       const back: ShelfItem[] = []
       for (const it of items) {
         if (have.has(it.key) || s.items.length + back.length >= SHELF_MAX) continue
-        const n = Number(it.key.replace(/^s/, ''))
-        if (Number.isFinite(n) && n > seq) seq = n
         back.push({
           key: it.key,
           file: it.file,
