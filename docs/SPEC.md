@@ -699,8 +699,18 @@ user 文字先照 CLI 自己的拆法還原（`lifecycle::pasted_content`，只�
   泡泡卻顯示整段）。`HerdrClient::pane_send_text` 一律拆成每段 ≤ 1000 B（優先在換行後切、不切斷多位元組字元）依序送——
   所有走 `pane.send_text` 的路（打字送出、`POST /bots/:id/text`、主機 shell）一次補齊；claude 收到的與原文逐字相同（3604 B／4 段實測）。
   拆段後最後一段若 ≤ 800 字不會被 claude 摺起來，框可以比預設的 24 列高：打字之後看框改用 `box_state_within(…, 24 + 這段字的列數)`，
-  否則框頂的 `❯` 找不到、判成讀不出來而不按 Enter。第二層：按 Enter 之前框裡若**看得出缺了開頭**（`paste_check::paste_truncated`，只認 claude、
-  框裡是摺起來的佔位或太高找不到就不判），改送 `ctrl+c` 清框並回 `NotAttempted{paste_truncated, retry:true}`（409，一個字都沒到 agent）；清不掉才是 `Unproven`。
+  否則框頂的 `❯` 找不到、判成讀不出來而不按 Enter。第二層：按 Enter 之前框裡若**看得出缺了開頭**（`paste_check::lost_head`，只認 claude、
+  框裡有摺起來的佔位或找不到框就不判），改送 `ctrl+c` 清框並回 `NotAttempted{paste_truncated, retry:true}`（409，一個字都沒到 agent）；清不掉才是 `Unproven`。
+- **看不到開頭不等於缺頭**（issue #403，2026-09-23 獨立 herdr session＋真 claude 2.1.280 實測）：分段貼上 claude 不一定摺起來，
+  框最多畫 `floor(畫面列數/2) − 5` 列（20/24/26/30/40/50/55 列 → 5/7/8/10/15/20/22），超過就捲動、只畫最後幾列、游標在尾端，上緣沒有捲動記號。
+  所以缺開頭時再看兩件事：框的列數到了上限（畫面列數取 `pane.get` 的 `scroll.viewport_rows`，只在看不到開頭時才多問這一次），
+  而且框裡的字（去空白）是送出文字的連續尾段——兩者都成立就是框太矮，照常按 Enter、交給 transcript 證據；
+  框沒滿卻缺開頭才是 #382。列數讀不到時不能斷定框滿了，照缺頭處理（清框、下一輪重試），寧可晚一輪也不送半段。
+  框從最下面的 `❯` 讀到下緣分隔線、空白列也算（部署交辦那種有空行的 prompt），往上找的範圍跟著這段字的列數走，
+  不再靠「框高過 24 列、`❯` 落在範圍外就當空框」的巧合（browser-gc 換成 8 列的框就連續 blocked 了 7 次）。
+  約 7 千字、有空行的 prompt 貼進 8 列的框，真 claude 收到的與原文逐字相同。
+  **不改用 bracketed paste**：自己包 `\e[200~`…`\e[201~` 分段送，claude 會摺成一個佔位，但 transcript 裡被包進 `<pasted_content …>` 標籤，
+  內容不再等於送出的字，agent 也會把它當成使用者貼上的資料而不是指令。
 - **Enter 補送認得摺起來的貼上**（2026-09-19）：claude 把長段貼上摺成 `[Pasted text #N +M lines]`，框裡看不到原文。
   框裡**只有**這一個佔位、且 M 等於送出字的換行數，就當成我們那則還沒送出、照樣補 Enter；行數對不上或後面還有字
   （使用者自己貼的／正在打的）不動。以前比對原文落空、重送又因框不空被擋，12 秒後直接判 stall——AM-1-XH 就這樣

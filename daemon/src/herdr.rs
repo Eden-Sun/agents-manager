@@ -72,6 +72,14 @@ pub struct PaneInfo {
     pub agent_status: Option<AgentStatus>,
     #[serde(default)]
     pub revision: u64,
+    #[serde(default)]
+    pub scroll: Option<PaneScroll>,
+}
+
+/// `pane.get` 的 `scroll`：`viewport_rows` 是畫面的列數（#403：正式 herdr 0.9.1 上跟 `visible` 讀到的列數一致）。
+#[derive(Debug, Clone, Deserialize)]
+pub struct PaneScroll {
+    pub viewport_rows: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -386,6 +394,11 @@ impl HerdrClient {
             Err(e) if is_not_found(&e) => Ok(None),
             Err(e) => Err(e),
         }
+    }
+
+    /// 畫面有幾列；pane 不在或 herdr 沒回 `scroll` 時 `None`。
+    pub async fn pane_viewport_rows(&self, pane_id: &str) -> Result<Option<u32>> {
+        Ok(self.pane_get(pane_id).await?.and_then(|p| p.scroll?.viewport_rows))
     }
 
     /// Deliberately uncalled: bots get tabs ([`Self::tab_create`]), since panes share width.
