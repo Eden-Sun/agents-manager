@@ -21,7 +21,8 @@ export function shouldFetchModels(
 ): boolean {
   if (cached === undefined) return true
   if (cached !== null) return false
-  return failedAt === undefined || now - failedAt >= MODELS_RETRY_MS
+  if (failedAt === undefined || failedAt > now) return true
+  return now - failedAt >= MODELS_RETRY_MS
 }
 
 /** 含失敗紀錄。 */
