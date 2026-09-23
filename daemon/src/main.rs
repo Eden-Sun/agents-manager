@@ -198,8 +198,9 @@ enum Cmd {
     RemoteCargo {
         #[arg(long)]
         config: PathBuf,
+        /// 沒給就從 `--config` 推（issue #417：`scripts/check.sh` 會清掉 `AM_DATA_DIR`）。
         #[arg(long)]
-        data_dir: PathBuf,
+        data_dir: Option<PathBuf>,
         #[arg(long)]
         cwd: PathBuf,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -220,7 +221,7 @@ fn main() {
             std::process::exit(0);
         }
         Cmd::RemoteCargo { config, data_dir, cwd, cargo_args } => {
-            std::process::exit(remote_cargo::run_cli(&config, &data_dir, &cwd, &cargo_args));
+            std::process::exit(remote_cargo::run_cli(&config, data_dir.as_deref(), &cwd, &cargo_args));
         }
         Cmd::HerdrUpdateCheck { installed, latest, changelog_file, last_notified } => {
             let md = std::fs::read_to_string(&changelog_file).unwrap_or_else(|e| {

@@ -19,7 +19,9 @@
 # - daemon 用 rust-embed 把 web/dist 編進二進位，所以 web 要先 build。
 # - daemon 的測試會讀 AM_MODEL / AM_EFFORT（herdr shim 的沿用邏輯），在 bot 的 pane
 #   裡跑時這兩個有值會讓測試結果不同，這裡一律清掉。AM_DATA_DIR 也一樣：本機 bot 的 pane
-#   都被注入正式資料目錄，測試（hook spool 的預設目錄等）不該吃到它。
+#   都被注入正式資料目錄，測試（hook spool 的預設目錄等）不該吃到它。清掉它不影響外部編譯
+#   （issue #417）：cargo shim 只要 AM_DAEMON_EXE／AM_CONFIG_PATH，資料目錄由 helper 從設定檔推。
+#   AM_DAEMON_EXE／AM_CONFIG_PATH 不能清，清了就退回本機排那 2 個名額。
 # - 只做檢查，不改任何檔案（fmt 用 --check）。
 set -euo pipefail
 

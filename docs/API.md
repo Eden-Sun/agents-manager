@@ -662,8 +662,10 @@ codex 的「這一版該不該採用／要提防什麼」走**另一條已經支
 
 把 `check`／`test`／`clippy` 丟到一台 SSH 主機跑；`build`／`run` 留本機（Linux/x86_64 的產物在 macOS/aarch64 上不能用）。
 
-shim 轉遠端要 pane 裡有 `AM_DAEMON_EXE`、`AM_CONFIG_PATH`、`AM_DATA_DIR`（`AM_DAEMON_EXE` 指到的檔案還要能執行）。缺任何一個時
+shim 轉遠端要 pane 裡有 `AM_DAEMON_EXE`、`AM_CONFIG_PATH`（`AM_DAEMON_EXE` 指到的檔案還要能執行）。缺任何一個時
 **不再靜默退回本機**：stderr 印一行 `外部編譯沒有啟用：這個 pane 缺 <名字>……這次 <子指令> 在本機跑`，缺哪個講哪個。
+`AM_DATA_DIR` **不是**前提（issue #417）：有就帶 `--data-dir`，沒有（`scripts/check.sh` 為了測試隔離會清掉它）就不帶，
+`agents-managerd remote-cargo` 照 daemon 帶 `--config` 時的規則（`[server] data_dir` > 設定檔所在目錄）推出來找密碼檔；推不出來回 125 退回本機並講原因。
 
 遠端工作目錄（issue #141，`remote_cargo.rs`）：`<remote_root>/<worktree 路徑的 fnv1a64>/` 底下，
 - `shared/`：同一棵 worktree 共用的原始碼＋`target/`，用完保留，下次 rsync 只傳差異、cargo 增量編譯。旁邊的
