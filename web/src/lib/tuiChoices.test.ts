@@ -361,3 +361,94 @@ test('問句正上方就是分隔線／transcript 時 context 是空的，畫面
   assert.equal(menu.question, 'Do you want to proceed?')
   assert.deepEqual(menu.context, [])
 })
+
+/** 2026-09-24 使用者截圖（claude 2.1.280）：問句跟選項之間夾著空白行＋`·` 條列說明，網頁只剩 1／2 兩個選項。 */
+const FULLSCREEN_OFFER = readFileSync(new URL('./__fixtures__/fullscreen-offer.txt', import.meta.url), 'utf8')
+
+test('問句跟選項中間夾著 · 條列說明：問題照樣讀得到，條列放進 notes', () => {
+  const menu = parseChoiceMenu(FULLSCREEN_OFFER)
+  assert.ok(menu)
+  assert.equal(menu.question, 'Try the new fullscreen renderer?')
+  assert.deepEqual(menu.notes, [
+    '· Flicker-free output',
+    '· Mouse support – click to move your cursor or expand results',
+    '· Selected text auto-copies to your clipboard',
+  ])
+  // 分隔線上面是上一輪的 transcript，不能被搬進來。
+  assert.deepEqual(menu.context, [])
+  assert.deepEqual(
+    menu.choices.map((c) => c.title),
+    ['Yes, try it', 'Not now'],
+  )
+  assert.equal(menu.cursor, 0)
+})
+
+test('條列說明往上沒有分隔線（不在同一個提示框裡）：不跨過去找問句，照舊是 null', () => {
+  // 上一輪 transcript 的問句不能被抓成這份選單的題目。
+  const noDivider = FULLSCREEN_OFFER.replace(/─+\n/, '')
+  const menu = parseChoiceMenu(noDivider)
+  assert.ok(menu)
+  assert.equal(menu.question, null)
+  assert.deepEqual(menu.notes, [])
+})
+
+test('上一輪回覆的 ⏺ 已捲出畫面、只剩它的問句：沒有分隔線就不算題目', () => {
+  const screen = `  要不要順便把舊的也清掉？
+
+  · 第一點
+  · 第二點
+
+❯ 1. Yes
+  2. No
+`
+  const menu = parseChoiceMenu(screen)
+  assert.ok(menu)
+  assert.equal(menu.question, null)
+  assert.deepEqual(menu.notes, [])
+})
+
+test('分隔線上面 transcript 裡的問句不算：區塊內沒有問號就照舊', () => {
+  const screen = `⏺ 要我順便把舊的也清掉嗎？
+
+────────────────────────────────────────
+  · 第一點
+  · 第二點
+
+❯ 1. Yes
+  2. No
+`
+  const menu = parseChoiceMenu(screen)
+  assert.ok(menu)
+  assert.equal(menu.question, null)
+  assert.deepEqual(menu.notes, [])
+})
+
+test('行首的 · 是 transcript（spinner／工具輸出），不是條列：分隔線下夾著它就不找', () => {
+  const screen = `────────────────────────────────────────
+  Try it?
+
+· Thinking…
+
+❯ 1. Yes
+  2. No
+`
+  const menu = parseChoiceMenu(screen)
+  assert.ok(menu)
+  assert.equal(menu.question, null)
+})
+
+test('既有畫面（AskUserQuestion、權限框、多分頁、review）沒有 notes，題目不變', () => {
+  const cases: [string, string, string | null][] = [
+    ['CARBIS', CARBIS, 'robinstech-carbis-web 要先推進哪一塊？'],
+    ['MULTI', MULTI, '除了看文章，還需要哪些功能？（這些是決定能不能純静態的關鍵）'],
+    ['REVIEW', REVIEW, 'Ready to submit your answers?'],
+    ['BASH_PERMISSION', BASH_PERMISSION, 'Do you want to proceed?'],
+  ]
+  for (const [name, text, question] of cases) {
+    const menu = parseChoiceMenu(text)
+    assert.ok(menu, name)
+    assert.equal(menu.question, question, name)
+    assert.deepEqual(menu.notes, [], name)
+  }
+  for (const text of [OPU_RADIO, TYPE_IDLE, TYPE_TYPED, TYPE_REVIEW]) assert.deepEqual(parseChoiceMenu(text)?.notes, [])
+})

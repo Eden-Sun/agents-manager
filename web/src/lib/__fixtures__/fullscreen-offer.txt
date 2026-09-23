@@ -1,0 +1,15 @@
+  ⎿  Stop hook error: Failed with non-blocking status code: EAGAIN: resource temporarily unavailable, read
+
+✻ Cooked for 21s · done 01:40
+
+────────────────────────────────────────────────────────────────────────────────
+  Try the new fullscreen renderer?
+
+  · Flicker-free output
+  · Mouse support – click to move your cursor or expand results
+  · Selected text auto-copies to your clipboard
+
+❯ 1. Yes, try it
+  2. Not now
+
+  Enter to confirm · Esc to cancel

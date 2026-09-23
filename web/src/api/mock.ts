@@ -25,6 +25,23 @@ const MOCK_TINY_ASK_SCREEN = [
   'Enter to select · ↑/↓ to navigate · Esc to cancel',
 ]
 
+/** 2026-09-24 真機（claude 2.1.280）：問句跟選項之間夾著 `·` 條列說明（`__amMock.bulletAsk()`）。 */
+const MOCK_BULLET_ASK_SCREEN = [
+  '✻ Cooked for 21s · done 01:40',
+  '',
+  '──────────────────────────────────────────────────────────────',
+  '  Try the new fullscreen renderer?',
+  '',
+  '  · Flicker-free output',
+  '  · Mouse support – click to move your cursor or expand results',
+  '  · Selected text auto-copies to your clipboard',
+  '',
+  '❯ 1. Yes, try it',
+  '  2. Not now',
+  '',
+  '  Enter to confirm · Esc to cancel',
+]
+
 /** 同一題在 transcript 裡的樣子（daemon `GET /api/bots/{id}/pending-question`）。 */
 const MOCK_TINY_ASK_QUESTIONS = [
   {
@@ -3032,6 +3049,19 @@ export class MockTransport implements Transport {
   /** Public so the dev helper can force a blocked state without a prompt. */
   /** 走 tinyask 情境的 bot：畫面是裁過的選單、pending-question 回原題。 */
   private tinyAsk = new Set<string>()
+  private bulletAsk = new Set<string>()
+
+  /** 問句跟選項之間夾著條列說明的畫面（沒有 pending-question：這不是 AskUserQuestion）。回 bot id。 */
+  enterBulletAsk(botId?: string): string | null {
+    const running = botId && this.activeRun(botId) ? botId : this.bots.find((b) => b.kind === 'claude' && this.activeRun(b.id))?.id
+    const toStart = running ? null : (botId ?? this.bots.find((b) => b.kind === 'claude')?.id)
+    if (toStart) this.start(toStart)
+    const id = running ?? toStart
+    if (!id) return null
+    this.bulletAsk.add(id)
+    setTimeout(() => this.enterBlocked(id), toStart ? 2500 : 0)
+    return id
+  }
 
   private pendingQuestion(botId: string) {
     const run = this.activeRun(botId)
@@ -3073,6 +3103,7 @@ export class MockTransport implements Transport {
     const keys = (Array.isArray(b.keys) ? b.keys : []).map(String)
     if (run.agent_status === 'blocked') {
       this.tinyAsk.delete(botId)
+      this.bulletAsk.delete(botId)
       const affirm = keys.some((k) => ['y', 'enter', 'Enter'].includes(k))
       if (affirm) {
         setAgentStatus(run, 'working')
@@ -3425,6 +3456,8 @@ export class MockTransport implements Transport {
     const body =
       status === 'blocked' && this.tinyAsk.has(botId)
         ? MOCK_TINY_ASK_SCREEN
+        : status === 'blocked' && this.bulletAsk.has(botId)
+        ? MOCK_BULLET_ASK_SCREEN
         : status === 'blocked'
         ? [
             '⏺ Bash(rm -rf ./target/debug)',
@@ -3502,6 +3535,9 @@ function installDevHelpers(mock: MockTransport) {
     block: (botIdOrName: string) => mock.enterBlocked(mock.botIdByName(botIdOrName) ?? botIdOrName),
     /** 題目被裁掉的 AskUserQuestion（pane 太矮）：畫面只剩選項，題目只能從 pending-question 讀。回 bot id。 */
     tinyAsk: (botIdOrName?: string) => mock.enterTinyAsk(botIdOrName ? (mock.botIdByName(botIdOrName) ?? botIdOrName) : undefined),
+    /** 問句跟選項之間夾著 `·` 條列說明（claude 2.1.280 fullscreen renderer 邀請）。回 bot id。 */
+    bulletAsk: (botIdOrName?: string) =>
+      mock.enterBulletAsk(botIdOrName ? (mock.botIdByName(botIdOrName) ?? botIdOrName) : undefined),
     disconnect: () => mock.setConnected(false),
     reconnect: () => mock.setConnected(true),
     hostDown: (name: string) => mock.setHostConnected(name, false),
