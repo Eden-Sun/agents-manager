@@ -1,10 +1,11 @@
 /**
  * 桌機晶片列收合時哪幾顆藏進 `+N`（`UnreadChip.tsx`）。
  *
- * ★ 主力一組、其餘一組，各自換行（2026-09-15 使用者）。兩組都有東西時**各佔一行**，只有一組時那組最多兩行。
+ * ★ 主力一組、其餘一組，各自換行（2026-09-15 使用者），各自有行數上限：主力最多三行（2026-09-23 使用者：
+ * 「主力區可以到三排 12 個，超過才要」）；其餘那組在主力也在時一行、只有它時兩行。
  * 以前是整列裁兩行：主力多到占滿兩行時，沒釘的「要你回答」被擠到第三行、收進 `+N`，提示還說「都是比較不急的」
- * ——跟 2026-09-12 錯過 blocked bot 的事故同形（review3 c4 L2）。組內已照緊急度排好，所以每組藏掉的一定是
- * 該組最不急的；兩組之間不比，提示就照實際藏起來的寫。
+ * ——跟 2026-09-12 錯過 blocked bot 的事故同形（review3 c4 L2）。所以主力再多也只吃自己的額度，擠不掉其餘那組。
+ * 組內已照緊急度排好，所以每組藏掉的一定是該組最不急的；兩組之間不比，提示就照實際藏起來的寫。
  */
 export interface ChipBox {
   pinned: boolean
@@ -14,9 +15,9 @@ export interface ChipBox {
   bottom?: number
 }
 
-/** 每一組收合時能佔幾行。 */
-export function lineBudget(hasPinned: boolean, hasOthers: boolean): number {
-  return hasPinned && hasOthers ? 1 : 2
+/** 每一組收合時能佔幾行：主力固定三行；其餘那組看主力在不在（在就一行，不在就兩行）。 */
+export function lineBudget(hasPinned: boolean): { pinned: number; others: number } {
+  return { pinned: 3, others: hasPinned ? 1 : 2 }
 }
 
 /**
@@ -68,11 +69,11 @@ export function orderChanged(prev: string[], next: string[]): boolean {
 
 /** 收合時會被藏起來的晶片（回傳索引）：兩組各自算，組內規則同 [`clipAfterRows`]。 */
 export function hiddenChipIndexes(boxes: ChipBox[]): number[] {
-  const budget = lineBudget(boxes.some((b) => b.pinned), boxes.some((b) => !b.pinned))
+  const budget = lineBudget(boxes.some((b) => b.pinned))
   const out: number[] = []
   for (const pinned of [true, false]) {
     const idx = boxes.map((b, i) => ({ b, i })).filter((x) => x.b.pinned === pinned)
-    for (const at of clipAfterRows(idx.map((x) => x.b), budget).hidden) out.push(idx[at].i)
+    for (const at of clipAfterRows(idx.map((x) => x.b), pinned ? budget.pinned : budget.others).hidden) out.push(idx[at].i)
   }
   return out.sort((a, b) => a - b)
 }

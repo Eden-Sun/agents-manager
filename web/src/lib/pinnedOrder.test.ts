@@ -77,14 +77,15 @@ test('endBefore: 拖到可見的最後面＝插在被藏起來的第一顆之前
   assert.equal(endBefore(full, ['a', 'b', 'c']), 'd')
   assert.equal(endBefore(full, full), null)
   assert.equal(endBefore(full, []), null)
-  assert.equal(PIN_GRID_MAX, 8)
+  assert.equal(PIN_GRID_MAX, 12)
 })
 
-test('手機主力區：放得下全畫；超過 8 顆收合時畫 7 顆＋「+N」，展開全畫並可收合', () => {
+test('手機主力區：三排 12 顆放得下全畫；超過收合時畫 11 顆＋「+N」，展開全畫並可收合', () => {
   assert.deepEqual(pinGridLayout(0, false), { shown: 0, more: 0, collapsible: false })
-  assert.deepEqual(pinGridLayout(8, false), { shown: 8, more: 0, collapsible: false }, '剛好 8 顆不需要 +N')
-  assert.deepEqual(pinGridLayout(9, false), { shown: 7, more: 2, collapsible: false }, '第 8 格讓給 +2，藏 2 顆')
-  assert.deepEqual(pinGridLayout(11, false), { shown: 7, more: 4, collapsible: false })
-  assert.deepEqual(pinGridLayout(11, true), { shown: 11, more: 0, collapsible: true })
-  assert.deepEqual(pinGridLayout(8, true), { shown: 8, more: 0, collapsible: false }, '沒東西可收合就不給收合格')
+  assert.deepEqual(pinGridLayout(9, false), { shown: 9, more: 0, collapsible: false }, '舊上限 8 以上、12 以內不收')
+  assert.deepEqual(pinGridLayout(12, false), { shown: 12, more: 0, collapsible: false }, '剛好 12 顆不需要 +N')
+  assert.deepEqual(pinGridLayout(13, false), { shown: 11, more: 2, collapsible: false }, '第 12 格讓給 +2，藏 2 顆')
+  assert.deepEqual(pinGridLayout(15, false), { shown: 11, more: 4, collapsible: false })
+  assert.deepEqual(pinGridLayout(13, true), { shown: 13, more: 0, collapsible: true })
+  assert.deepEqual(pinGridLayout(12, true), { shown: 12, more: 0, collapsible: false }, '沒東西可收合就不給收合格')
 })
