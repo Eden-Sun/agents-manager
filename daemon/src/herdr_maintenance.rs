@@ -85,8 +85,8 @@ async fn close(app: &Arc<App>, w: &Window, kind: &str, actor: &str, reason: Opti
 
 /// 維護期間被標 exited、到現在還沒有 active run 的子 agent：照原規則退休（跟 reconcile 平常做的一樣）。
 async fn retire_unreturned_children(app: &Arc<App>, since: &str) -> Result<Vec<String>> {
-    let kids: Vec<(String, String, String)> = sqlx::query_as(
-        "SELECT b.id, b.name, b.project_id FROM bots b
+    let kids: Vec<(String, String)> = sqlx::query_as(
+        "SELECT b.id, b.name FROM bots b
           WHERE b.managed_by = 'child' AND b.deleted_at IS NULL
             AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.bot_id = b.id AND r.state IN ('starting','running','stopping'))
             AND EXISTS (SELECT 1 FROM runs r WHERE r.bot_id = b.id AND r.ended_at >= ?)",
@@ -95,11 +95,13 @@ async fn retire_unreturned_children(app: &Arc<App>, since: &str) -> Result<Vec<S
     .fetch_all(&app.db)
     .await?;
     let mut names = Vec::new();
-    for (id, name, project_id) in kids {
-        sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL").bind(crate::db::now()).bind(&id).execute(&app.db).await?;
-        app.emit("project_changed", json!({"project_id": project_id})).await;
-        tracing::info!(bot = %name, "herdr maintenance over: child never came back, retired");
-        names.push(name);
+    for (id, name) in kids {
+        // 走退役的唯一入口（#413）：記呼叫端；AGM 的 child 不在這裡被隱式退役，擋下來、推一則給巡檢。
+        use crate::child_retire::{retire, Mode, Outcome};
+        if retire(app, &id, "herdr_maintenance_closed", Mode::Implicit).await? == Outcome::Retired {
+            tracing::info!(bot = %name, "herdr maintenance over: child never came back, retired");
+            names.push(name);
+        }
     }
     Ok(names)
 }
@@ -331,6 +333,35 @@ mod tests {
         assert!(deleted(&app, &lost).await, "維護結束仍沒接回：照原規則退休");
         assert!(!deleted(&app, &back).await, "接回來的留著");
         assert!(!deleted(&app, &before).await, "不回頭清舊帳");
+    }
+
+    /// **#413，第三條路**：維護窗口收尾也直接 `UPDATE bots SET deleted_at`。AGM 專案底下的 child
+    /// （`agm_headers` 把 `p-agm` 註冊成總管與巡檢的專案）不軟刪，改推 `child_retire_refused` 給巡檢；
+    /// 一般專案的 child 照舊退役，`retired_children` 也只算真的退役的那些。
+    #[tokio::test]
+    async fn an_agm_child_is_not_retired_when_the_maintenance_window_closes() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let h = agm_headers(&app).await;
+        let _ = open(State(app.clone()), h.clone(), open_in(10)).await.unwrap();
+        let agm_kid = child_with_ended_run(&env, &crate::db::now()).await;
+        sqlx::query("UPDATE bots SET project_id = 'p-agm' WHERE id = ?").bind(&agm_kid).execute(&app.db).await.unwrap();
+        let user_kid = child_with_ended_run(&env, &crate::db::now()).await;
+
+        let v = end(State(app.clone()), h, None).await.unwrap().0;
+
+        assert!(!deleted(&app, &agm_kid).await, "AGM 專案底下的 child 沒有被隱式軟刪");
+        assert!(deleted(&app, &user_kid).await, "一般專案的 child 照舊退役");
+        assert_eq!(v["retired_children"].as_array().unwrap().len(), 1, "只算真的退役的：{v}");
+        let refusals: Vec<(Option<String>, String)> =
+            sqlx::query_as("SELECT bot_id, payload_json FROM supervisor_inbox WHERE kind = 'child_retire_refused'")
+                .fetch_all(&app.db)
+                .await
+                .unwrap();
+        assert_eq!(refusals.len(), 1, "{refusals:?}");
+        assert_eq!(refusals[0].0.as_deref(), Some(agm_kid.as_str()));
+        assert!(refusals[0].1.contains("herdr_maintenance_closed"), "帶原因：{}", refusals[0].1);
+        assert!(refusals[0].1.contains("AGM 專案裡的常駐工人"), "帶角色：{}", refusals[0].1);
     }
 
     /// #75 重開：開機接手窗口那一次讀不到，不算接手過。窗口在這之間已經到期：背景重試讀到之後照樣收尾（寫 note、退休

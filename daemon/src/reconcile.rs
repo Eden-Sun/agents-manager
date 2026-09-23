@@ -404,6 +404,15 @@ async fn refresh_child_kind(app: &Arc<App>, bot: &mut db::Bot, pane_id: &str, ki
     Ok(())
 }
 
+/// 兩條退休路徑真正寫 `deleted_at` 的地方：走 `child_retire` 的唯一入口（#413：記呼叫端；AGM 的 child 不隱式退役）。
+/// 讀不到誰是 AGM 的就排延後那一輪再看。
+async fn retire_child(app: &Arc<App>, host: &str, bot: &db::Bot, why: &'static str) -> Result<()> {
+    if crate::child_retire::retire(app, &bot.id, why, crate::child_retire::Mode::Implicit).await? == crate::child_retire::Outcome::Unreadable {
+        schedule_deferred_pass(app, host);
+    }
+    Ok(())
+}
+
 /// 子 agent 的 agent 不在了，能不能照 #60 退休它（#191）。兩條退休路徑共用這一支，免得一邊修、一邊漏。
 ///
 /// 只有**確定沒在維護**才可以：herdr 重啟的那幾分鐘正是所有 pane 同時消失的時候，這時讀不到維護狀態就當成
@@ -756,13 +765,7 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<()> {
                     tracing::warn!(host, bot = %bot.name, run = %run.id, "reconcile: the run's exit was not recorded; bot left as is, will look again");
                     schedule_deferred_pass(app, host);
                 } else if bot.managed_by == "child" && may_retire_child(app, host, &bot).await {
-                    sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?")
-                        .bind(db::now())
-                        .bind(&bot.id)
-                        .execute(&app.db)
-                        .await?;
-                    app.emit("project_changed", json!({"project_id": bot.project_id})).await;
-                    tracing::info!(host, bot = %bot.name, "reconcile: spawned child retired with its pane");
+                    retire_child(app, host, &bot, "reconcile_agent_gone").await?;
                 }
             }
             (None, Some(agent)) => {
@@ -813,13 +816,7 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<()> {
                     .fetch_one(&app.db)
                     .await?;
                     if ended > 0 {
-                        sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL")
-                            .bind(db::now())
-                            .bind(&bot.id)
-                            .execute(&app.db)
-                            .await?;
-                        app.emit("project_changed", json!({"project_id": bot.project_id})).await;
-                        tracing::info!(host, bot = %bot.name, "reconcile: spawned child retired — its run had already ended and herdr no longer lists its agent");
+                        retire_child(app, host, &bot, "reconcile_run_already_ended").await?;
                     }
                 }
             }
@@ -2388,6 +2385,94 @@ mod compat_tests {
         for kid in [&k1, &k2] {
             assert!(retired(&app, kid).await, "確定沒在維護：延後的那一輪照原規則退休");
         }
+    }
+
+    /// AGM 的 child 掛在哪一顆 parent 底下（`supervisors.bot_id`）。專案留空，免得同一個測試專案裡的一般 child 也被算進去。
+    async fn an_agm_parent(env: &tt::Env, name: &str) -> String {
+        let id = a_bot(env, name).await;
+        sqlx::query("INSERT INTO supervisors (id, bot_id, project_id, created_at, updated_at) VALUES ('AGM', ?, '', 't', 't')")
+            .bind(&id)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        id
+    }
+
+    async fn retire_refusals(app: &Arc<App>) -> Vec<(Option<String>, String)> {
+        sqlx::query_as("SELECT bot_id, payload_json FROM supervisor_inbox WHERE kind = 'child_retire_refused'")
+            .fetch_all(&app.db)
+            .await
+            .unwrap()
+    }
+
+    /// **#413，第一條路**（`(Some(run), None)`：run 還開著、herdr 不列這個 agent 了）。
+    /// #406 只擋了刪除 API；隱式退役直接 `UPDATE bots SET deleted_at`，AGM 的 build／triage 開的 child
+    /// 就這樣消失而且沒有任何紀錄。現在擋下來、推一則給巡檢；一般專案的 child 照舊退役。
+    #[tokio::test]
+    async fn an_agm_child_is_not_retired_when_its_agent_is_gone() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, _root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let agm = an_agm_parent(&env, "agm-build").await;
+        let user = a_bot(&env, "alfa").await;
+        let pa = client.tab_create(&ws.workspace_id, "/tmp/p", "k-agm", json!({})).await.unwrap();
+        let pu = client.tab_create(&ws.workspace_id, "/tmp/p", "k-user", json!({})).await.unwrap();
+        let (agm_kid, agm_run) =
+            a_child(&env, &agm, "k-agm", &format!("{}-k", crate::config::agent_name("proj", &agm)), &ws.workspace_id, &pa.tab_id, &pa.pane_id).await;
+        let (user_kid, _) =
+            a_child(&env, &user, "k-user", &format!("{}-k", crate::config::agent_name("proj", &user)), &ws.workspace_id, &pu.tab_id, &pu.pane_id).await;
+        // run 留著開著，只讓 herdr 不再列這兩個 agent。
+        env.herdr.agents.lock().unwrap().clear();
+        client.pane_close(&pa.pane_id).await.unwrap();
+        client.pane_close(&pu.pane_id).await.unwrap();
+
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+
+        assert!(!retired(&app, &agm_kid).await, "AGM 的 child 沒有被隱式軟刪");
+        assert!(retired(&app, &user_kid).await, "一般專案的 child 照舊退役");
+        let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(&agm_run).fetch_one(&app.db).await.unwrap();
+        assert_eq!(state, "exited", "擋的只有軟刪：run 照樣收掉");
+        let refusals = retire_refusals(&app).await;
+        assert_eq!(refusals.len(), 1, "只有 AGM 那顆推了通知：{refusals:?}");
+        assert_eq!(refusals[0].0.as_deref(), Some(agm_kid.as_str()));
+        assert!(refusals[0].1.contains("reconcile_agent_gone"), "帶原因：{}", refusals[0].1);
+        assert!(refusals[0].1.contains("AGM 開出去的子 agent"), "帶角色：{}", refusals[0].1);
+        // 同一顆、同一輪不會越推越多（同一個小時同一把鑰匙）。
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+        assert!(!retired(&app, &agm_kid).await);
+        assert_eq!(retire_refusals(&app).await.len(), 1, "同一小時只推一次");
+    }
+
+    /// **#413，第二條路**（`(None, None)`：`pane_closed` 早就把 run 收掉了，herdr 也不列它）。
+    #[tokio::test]
+    async fn an_agm_child_is_not_retired_when_its_run_already_ended() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, _root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let agm = an_agm_parent(&env, "agm-build").await;
+        let user = a_bot(&env, "alfa").await;
+        let pa = client.tab_create(&ws.workspace_id, "/tmp/p", "k-agm", json!({})).await.unwrap();
+        let pu = client.tab_create(&ws.workspace_id, "/tmp/p", "k-user", json!({})).await.unwrap();
+        let (agm_kid, agm_run) =
+            a_child(&env, &agm, "k-agm", &format!("{}-k", crate::config::agent_name("proj", &agm)), &ws.workspace_id, &pa.tab_id, &pa.pane_id).await;
+        let (user_kid, user_run) =
+            a_child(&env, &user, "k-user", &format!("{}-k", crate::config::agent_name("proj", &user)), &ws.workspace_id, &pu.tab_id, &pu.pane_id).await;
+        client.pane_close(&pa.pane_id).await.unwrap();
+        client.pane_close(&pu.pane_id).await.unwrap();
+        env.herdr.agents.lock().unwrap().clear();
+        crate::lifecycle::mark_run_exited(&app, &agm_run, "pane exited").await;
+        crate::lifecycle::mark_run_exited(&app, &user_run, "pane exited").await;
+
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+
+        assert!(!retired(&app, &agm_kid).await, "AGM 的 child 沒有被隱式軟刪");
+        assert!(retired(&app, &user_kid).await, "一般專案的 child 照舊退役");
+        let refusals = retire_refusals(&app).await;
+        assert_eq!(refusals.len(), 1, "{refusals:?}");
+        assert_eq!(refusals[0].0.as_deref(), Some(agm_kid.as_str()));
+        assert!(refusals[0].1.contains("reconcile_run_already_ended"), "帶原因：{}", refusals[0].1);
     }
 
     /// #191 同一條：run 的結束寫不進去時，DB 裡它還在跑——這時把子 bot 軟刪，就是一顆刪掉的 bot 掛著活的 run。
