@@ -156,7 +156,11 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   有測試掃原始碼擋著（新寫一個裸字串比較會紅），也有用**兩種格式混存**的資料打真判斷的測試（同一秒內、跨種類、`+08:00`）。
 - **權威劃分**：TOML 是 Project／Bot 期望設定的唯一權威；SQLite 存 Run／Turn／Message／Conversation／hook token／workspace 映射。啟動與每次寫回 TOML 後做 TOML→SQLite 投影（依 id upsert；TOML 移除的 bot 標 `deleted_at`，保留歷史）。
 - **落盤前先驗投影**（issue #73）：`ConfigStore::update` 的順序是「每次先重讀磁碟上的最新版 → 在記憶體套用修改 →
-  `projection::validate` 乾跑 → 原子寫入（唯一暫存檔 + `rename`）」。mtime 只作為變更觀測，不能當唯一重讀條件，因為檔案系統可能保留或降低 mtime 精度。
+  `projection::validate` 乾跑 → 原子寫入（唯一暫存檔 + `rename`）」。
+  **每次寫入與外部改動都記 log**（issue #406）：寫出去記 INFO `config.toml written`；重讀時內容跟 daemon 記得的不同（＝不是 daemon 自己寫的）記 WARN
+  `config.toml changed outside this daemon`。兩者都帶呼叫位置（`#[track_caller]`，`projection` 的公開函式把自己的呼叫端傳下來）、觸發它的 HTTP 請求
+  （`api::auth` 對非 GET 請求設的 task-local：method／path／對端／User-Agent／Origin／Referer／`X-AM-Caller`，不含 token）、前後 bot／專案數、被拿掉與新增的 id、檔案 mtime 與大小。
+  刪除 API 另記 WARN `bot delete requested` 並把同一段呼叫端寫進 delete intent 的 `requested_by`（DB 裡查得到）。13:28Z 那次就是只有投影那行 `soft-deleted`，最後只能從 `intents` 表反推是刪除 API，呼叫端至今不明。mtime 只作為變更觀測，不能當唯一重讀條件，因為檔案系統可能保留或降低 mtime 精度。
   驗不過就直接回錯誤，**config.toml 一個字都不動**，
   記憶體裡那份也不變；錯誤訊息保留原因並附「（config.toml 未變更）」，recovery path 就是改個合法的值再送一次。
   以前只在投影當下驗，而投影跑在 config 已經落盤之後：一筆會被擋的修改先把 TOML 改壞，API 回了錯，現場卻已經變了，
@@ -179,6 +183,13 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   超過一顆 bot 的上限以及 supervisor child 保護不受 `AM_ALLOW_BULK_DELETE=1` 啟動覆寫影響；該覆寫仍只適用其他既有的大量 project／空 config 保護。明確的 DELETE API 仍依其逐筆授權路徑處理。這些檢查涵蓋寫入前與投影當下，確保設定與 DB 都不會因隱式投影而留下半套狀態。
   啟動與 runtime 的**每一次**重投都走閘門：`ConfigStore::update` 每次更新都從磁碟重讀，「外面把 TOML 換掉／清空，再由 API 或總管觸發重投」是同一條事故路徑。
   DB 的活列＝上一次投影的結果，所以「config 空了但 DB 還有列」必然是拿錯 config／被換掉的檔案。
+  **AGM 的 bot 一律不隱式刪、刪除 API 要明講**（issue #406，2026-09-23 13:28Z 再發：`build` 與 `agm-pxf2pv-triage` 被兩次 `DELETE /api/bots/:id` 刪掉）：
+  「AGM 的 bot」＝`supervisors`／`supervisor_roles` 的 bot 本身、parent 是它們的、**或在它們的專案裡**（`project_id`，即 `supervisor/*` 那個目錄）。
+  只認 parent 是 #398 沒擋到的原因：AGM 的固定工人（build／triage／browser-gc／responder）都是 `managed_by=user`、`parent_bot_id=NULL`，直接放在總管專案底下。
+  隱式投影遇到就拒絕（沒有放行開關）；刪除 API 沒帶 `?confirm=supervisor` 就 409 `supervisor_owned`、什麼都不動（`delete_bot_http`／`delete_project_http` 在拿鎖、寫 intent 之前擋）。
+  daemon 內部的刪除（mission 收自己開的臨時 bot）直接呼叫核心，不過這道閘。兩條被擋時都推一筆 `ops_alert`（`source=daemon`，同一小時同一原因只推一次）給巡檢，detail 帶呼叫端——不准靜默刪，也不准靜默擋。
+  **「一次最多 1 顆」跨投影累計**：隱式投影要軟刪 bot 時，把前 60 秒（`REMOVAL_WINDOW_SECS`）內已經軟刪的 user bot（不論投影或刪除 API 刪的）一起算，超過 1 顆就拒絕並推 `ops_alert`。
+  只看單次投影的話，config 被連續改兩次、兩次投影各少 1 顆就繞過去了。計數直接讀 DB 的 `deleted_at`（跨重啟、跨呼叫端同一份帳，不另記）；代價是刪除 API 剛刪完一顆的 60 秒內，隱式投影再少一顆也會被擋——那種巧合本來就該有人看。
   經過 `update_and_project` 的 mutation 閘門擋下來時回 **409 `projection_refused`**（帶會被軟刪的 bot／專案名字，與
   `config_written: false`——寫檔前就被擋，這次的變更沒有進 config.toml，改一下範圍或處理完 DB 落差直接重送同一個請求即可），
   不是 502。啟動與背景重投（沒有伴隨使用者 mutation 的那類）仍是舊行為：`config_written: true`（帶
@@ -194,7 +205,10 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   只在「停機成功、而且停完再讀一次確定沒有 active run」時才 purge。停機失敗（主機連不上、agent 沒退出）時 run 照舊強制收成 `exited`（已軟刪的 bot 不進對帳，不收就沒有人收），
   但停機沒有確認、agent 可能還活著，目錄留著；讀不到 run、或收完 run 仍是 active（`exited` 寫不進去）也留著。留著的列在回應的 `kept_dirs`（`reason` 是
   `stop_not_confirmed` / `run_state_unreadable` / `run_still_active`）——刪除本身已經定案（bot 已軟刪），所以回 200 而不是錯誤；下次開機的清掃在 run 確定結束後把目錄收掉。
-  **開機的殘留清掃**（`purge_deleted_bot_dirs`，reconcile／rearm 之後跑一次）只刪「確定軟刪」而且「確定沒有 active run」的 `bots/<id>/`；沒有 bot 認領的目錄不碰。
+  **開機的殘留清掃**（`purge_deleted_bot_dirs`，reconcile／rearm 之後跑一次）只收「確定軟刪」而且「確定沒有 active run」的 `bots/<id>/`；沒有 bot 認領的目錄不碰。
+  **「清目錄」＝搬進回收區，不是刪**（issue #406）：本機的 `bots/<id>/` 搬到 `<資料目錄>/bots-trash/<id>.<毫秒>/`，`POST /api/bots/:id/restore` 時若 `bots/<id>/` 不在就把最新那份搬回來；
+  開機清掃順便刪掉放超過 7 天的（看名字裡的時間，`rename` 不更新目錄 mtime）。軟刪本來就是為了能還原，目錄卻是當場 `remove_dir_all`——誤刪時 bot 列與 config 救得回來，
+  spool 裡還沒重放的 hook、手動放的檔就沒了。取捨：多佔 7 天的磁碟（bot 目錄是 KB 級）；遠端主機照舊在遠端 `rm -rf`（遠端還原要走 ssh，這次不做）。
   bot 列或 active run 讀不到（DB 一時忙、I/O 錯）＝還不知道：目錄留著、記一行 warn，下次開機再判斷——清理可重入，刪掉還在跑的 bot 的 hook／shim／spool 補不回來（#187）。
   `DELETE /api/projects/:id` 依 id 排序拿齊專案內每顆 bot 的 per-bot 鎖，**在鎖內**重驗都已停止再定案；TOML 裡多出沒鎖住的 bot（剛建立、可能正要啟動）就 409 `delete_refused`。
   **鎖順序**：刪除是唯一會同時持多把 per-bot 鎖的路徑，兩支 DELETE 都「依 id 排序、一次拿齊」（`DELETE /api/bots/:id` 拿 parent＋所有 descendants，拿鎖途中若認領了新 child 就全放掉重來，三次後 409 `children_changed`），再用 locked 版停機；持一把再補拿另一把會與另一支互等成死鎖（ULID 不保證 parent 比 child 小）。

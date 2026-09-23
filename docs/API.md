@@ -1146,17 +1146,21 @@ WS：每顆兩次 `bots_restart_progress`（`restarting`，然後 `ok` / `failed
 
 `done` 的三張清單是權威（補齊漏掉的 progress）；用 `batch_id` 擋掉別的分頁那一批。
 
-### 10.4 `DELETE /api/bots/{id}`
+### 10.4 `DELETE /api/bots/{id}[?confirm=supervisor]`
 `200 {}`（有連帶刪子 agent 時 `{"removed_children":["<bot_id>",…]}`；有沒清掉的 runtime 目錄時另帶 `"kept_dirs":[{"bot_id","reason"}]`）。
 `kept_dirs[].reason`：`stop_not_confirmed`（停機失敗，run 已強制收成 `exited` 但 agent 可能還活著）、`run_state_unreadable`（讀不到 active run）、
 `run_still_active`（收完 run 仍是 active）——都表示 bot 已軟刪、只有目錄留著，下次開機的清掃在 run 確定結束後收（SPEC §3.1）。
 定案之前讀不到 bot 或 child 的 active run → 502，什麼都不動，可原樣重試。
 
 - 流程：有 active Run 先 stop（host 連不上送不出去時 run 直接標 `exited` 照常刪）→ 從 config.toml 移除 → `bots.deleted_at`（**對話與訊息保留**，`GET /api/bots/{id}/messages` 仍讀得到）→
-  刪 `~/.config/agents-manager/bots/<bot_id>/`（遠端 ssh `rm -rf`，失敗只 log）。
+  把 `~/.config/agents-manager/bots/<bot_id>/` 搬進 `bots-trash/<bot_id>.<毫秒>/`（還原時搬回、7 天後開機清掉；遠端照舊 ssh `rm -rf`，失敗只 log）。
+- **AGM 的 bot 要明講**（issue #406）：bot 是總管／角色本身、parent 是它們、或在總管／角色的專案裡，沒帶 `?confirm=supervisor` →
+  `409 {"reason":"supervisor_owned","bot_id","name","message"}`，什麼都不動，並推一筆 `ops_alert` 給巡檢。`DELETE /api/projects/{id}` 同一條（專案是總管的、或裡面有 AGM 的 bot），409 帶 `project_id`。
+  `bin/agm bot delete <id> --confirm-supervisor` 帶這個參數。
+- 呼叫端（method／path／對端位址／User-Agent／Origin／Referer／`X-AM-Caller`）記進 daemon.log 與 delete intent 的 `requested_by`；腳本可以自帶 `X-AM-Caller: <名字>` 讓紀錄一眼認得出是誰。
 - **子 agent 一起刪**：`managed_by = "child"` 且 `parent_bot_id` 指到它的（含孫代），最深的先。每顆各推 `bot_changed`。
 - 找不到 404。
-- daemon 啟動時掃一次 `bots/`，只刪 DB 裡已 `deleted_at` 且沒有 active Run 的 hook 材料目錄。
+- daemon 啟動時掃一次 `bots/`，只把 DB 裡已 `deleted_at` 且沒有 active Run 的 hook 材料目錄搬進 `bots-trash/`。
 
 ### 10.4a `POST /api/bots/{id}/restore`
 軟刪復原：`200 {"bot_id"}`，推 `bot_changed` / `project_changed`。child 直接清 `deleted_at`；user bot 把 config.toml 那一筆加回去再投影。child 還原後不立即建立 run；daemon 給它十分鐘讓父 bot 在原 pane 重開。這段期間 reconcile 不會只因沒有 active run 而退休；寬限期過後仍未回來就照原規則退休。到期時間與 `agent_name_taken` 保護原因記在 `supervisor_notes`，daemon 重啟後仍有效。

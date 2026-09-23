@@ -44,6 +44,7 @@ class FakeDaemon(BaseHTTPRequestHandler):
         type(self).seen.append({
             "method": method, "path": path, "token": self.headers.get("X-AM-Token"), "body": body,
             "bot_id": self.headers.get("X-AM-Bot-Id"), "bot_token": self.headers.get("X-AM-Bot-Token"),
+            "caller": self.headers.get("X-AM-Caller"),
         })
         if path in type(self).slow:
             time.sleep(1.5)
@@ -835,6 +836,14 @@ class MiscCommandTest(CliCase):
         self.assertEqual(self.ok("bot", "delete", "b9"), {"removed_children": []})
         self.assertEqual([r["method"] for r in FakeDaemon.seen if r["path"] == "/api/bots/b9"], ["DELETE"])
         self.assertEqual(self.bad("bot", "delete")["error"], "bad_args")
+
+    def test_bot_delete_confirm_supervisor_goes_in_the_query_and_every_call_names_agm(self):
+        FakeDaemon.routes["DELETE /api/bots/build"] = (200, {"removed_children": []})
+        self.ok("bot", "delete", "build", "--confirm-supervisor")
+        self.assertEqual(FakeDaemon.seen[-1]["path"], "/api/bots/build?confirm=supervisor")
+        self.assertEqual(FakeDaemon.seen[-1]["caller"], "agm")
+        self.ok("bot", "delete", "build")
+        self.assertEqual(FakeDaemon.seen[-1]["path"], "/api/bots/build", "沒帶旗標就不帶 confirm")
 
     def test_bot_delete_conflict_is_a_structured_error(self):
         FakeDaemon.routes["DELETE /api/bots/tm"] = (409, {"error": "conflict", "reason": "all bots must be stopped first"})

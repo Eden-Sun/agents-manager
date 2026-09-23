@@ -386,13 +386,17 @@ pub async fn purge_deleted_bot_dirs(app: &Arc<App>) -> usize {
                 continue;
             }
         }
-        match std::fs::remove_dir_all(entry.path()) {
-            Ok(()) => removed += 1,
-            Err(e) => tracing::warn!(dir = %entry.path().display(), error = %e, "could not remove a deleted bot's directory"),
+        match crate::bot_trash::move_in(&app.data_dir, &id, &entry.path()) {
+            Ok(_) => removed += 1,
+            Err(e) => tracing::warn!(dir = %entry.path().display(), error = %e, "could not move a deleted bot's directory to bots-trash"),
         }
     }
     if removed > 0 {
-        tracing::info!(removed, "removed bots/<id>/ directories left behind by deleted bots");
+        tracing::info!(removed, "moved bots/<id>/ directories left behind by deleted bots to bots-trash");
+    }
+    let expired = crate::bot_trash::gc(&app.data_dir, std::time::Duration::from_secs(crate::bot_trash::KEEP_DAYS * 86_400));
+    if expired > 0 {
+        tracing::info!(expired, days = crate::bot_trash::KEEP_DAYS, "removed expired bots-trash entries");
     }
     removed
 }
@@ -405,14 +409,15 @@ pub async fn purge_bot_dir(app: &Arc<App>, bot_id: &str, host: &str) -> bool {
     }
     if host == LOCAL_HOST {
         let Ok(dir) = app.bot_dir(bot_id) else { return false };
-        return match std::fs::remove_dir_all(&dir) {
-            Ok(()) => {
-                tracing::info!(dir = %dir.display(), "removed bot config dir");
+        // 搬進回收區而不是刪（issue #406）：restore 時搬得回來。
+        return match crate::bot_trash::move_in(&app.data_dir, bot_id, &dir) {
+            Ok(Some(to)) => {
+                tracing::info!(dir = %dir.display(), trash = %to.display(), "moved bot config dir to bots-trash");
                 true
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+            Ok(None) => true,
             Err(e) => {
-                tracing::warn!(dir = %dir.display(), error = %e, "could not remove bot config dir");
+                tracing::warn!(dir = %dir.display(), error = %e, "could not move bot config dir to bots-trash");
                 false
             }
         };

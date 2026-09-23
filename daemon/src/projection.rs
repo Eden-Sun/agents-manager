@@ -9,6 +9,7 @@ use anyhow::{bail, Result};
 use rand::Rng;
 use sqlx::SqlitePool;
 use std::collections::HashSet;
+use std::panic::Location;
 
 pub fn new_token() -> String {
     let mut rng = rand::thread_rng();
@@ -23,17 +24,29 @@ static PROJECTION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 ///
 /// 帶大量軟刪的閘門：啟動與 runtime 的每一次重投都走這條。`ConfigStore::update` 每次都從磁碟重讀，
 /// 所以「外面把 TOML 換掉／清空，再由 API 或總管觸發重投」也是事故路徑，不能只擋啟動。
-pub async fn project_config(store: &ConfigStore, pool: &SqlitePool) -> Result<()> {
-    let _g = PROJECTION.lock().await;
-    project_inner(store, pool, None, false).await
+#[track_caller]
+pub fn project_config<'a>(store: &'a ConfigStore, pool: &'a SqlitePool) -> impl std::future::Future<Output = Result<()>> + 'a {
+    let at = Location::caller();
+    async move {
+        let _g = PROJECTION.lock().await;
+        project_inner(at, store, pool, None, false).await
+    }
 }
 
 /// 啟動時那一次投影。`allow_bulk`＝使用者帶 `AM_ALLOW_BULK_DELETE=1` 重啟 daemon（`serve` 啟動時讀一次 env）：
 /// **只放行這一次**。之後 runtime 的每次重投都不吃這個 env——閘門下沉到每次投影之後，env 一直留在行程裡，
 /// 「放行一次」就變成整個行程期間放行，config 再被外部換掉時只記 warn 就照刪（review3 c3 L7）。
-pub async fn project_config_at_startup(store: &ConfigStore, pool: &SqlitePool, allow_bulk: bool) -> Result<()> {
-    let _g = PROJECTION.lock().await;
-    project_inner(store, pool, None, allow_bulk).await
+#[track_caller]
+pub fn project_config_at_startup<'a>(
+    store: &'a ConfigStore,
+    pool: &'a SqlitePool,
+    allow_bulk: bool,
+) -> impl std::future::Future<Output = Result<()>> + 'a {
+    let at = Location::caller();
+    async move {
+        let _g = PROJECTION.lock().await;
+        project_inner(at, store, pool, None, allow_bulk).await
+    }
 }
 
 /// `serve` 啟動時讀一次；其他地方不讀。
@@ -84,14 +97,24 @@ pub struct ProjectionRefused {
 
 /// 刪除的單一臨界區：重讀 config → 確認目標此刻在 TOML → 算出實際要拿掉的 id → 閘門（寫入前）→
 /// 寫 config → 投影。呼叫端（API）在這之前拿好 per-bot 鎖、在這之後才停機，所以拒絕一定發生在任何東西被停之前。
-pub async fn delete_from_config(store: &ConfigStore, pool: &SqlitePool, target: DeleteTarget<'_>) -> Result<Deleting> {
+#[track_caller]
+pub fn delete_from_config<'a>(
+    store: &'a ConfigStore,
+    pool: &'a SqlitePool,
+    target: DeleteTarget<'a>,
+) -> impl std::future::Future<Output = Result<Deleting>> + 'a {
+    let at = Location::caller();
+    async move { delete_from_config_at(at, store, pool, target).await }
+}
+
+async fn delete_from_config_at(at: &'static Location<'static>, store: &ConfigStore, pool: &SqlitePool, target: DeleteTarget<'_>) -> Result<Deleting> {
     let _g = PROJECTION.lock().await;
     // 臨界區內 DB 的 user bot／project 只有投影會改，所以這份快照在寫 config 之前都成立。
     let db_bots: Vec<db::Bot> =
         db::live_bots(pool).await?.into_iter().filter(|b| b.managed_by == "user").collect();
     let db_projects = db::live_projects(pool).await?;
     let allow = store
-        .update(|cfg| {
+        .update_guarded_at(at, |cfg| {
             let allow = match target {
                 DeleteTarget::Project { id, held } => {
                     let p = cfg
@@ -136,9 +159,9 @@ pub async fn delete_from_config(store: &ConfigStore, pool: &SqlitePool, target: 
             }
             *cfg = next;
             Ok(allow)
-        })
+        }, |_| Ok(()))
         .await?;
-    project_inner(store, pool, Some(&allow), false).await?;
+    project_inner(at, store, pool, Some(&allow), false).await?;
     Ok(allow)
 }
 
@@ -246,13 +269,27 @@ fn check(cfg: &crate::config::ConfigFile) -> Result<()> {
 /// 取代「呼叫端先 `ConfigStore::update` 落盤、再另外呼叫 `project_config` 投影」那個兩段式：中間那個縫隙
 /// 會讓一筆會被大量軟刪閘門擋下的修改先把 TOML 改壞（`config_written: true`），DB 卻沒套用——閘門本身
 /// 需要 DB 快照才判得出來，以前只能等寫完檔、真正投影時才問。這裡在寫檔前用同一把 `PROJECTION` 鎖把
-/// DB 快照查出來，交給 [`ConfigStore::update_guarded`] 的 `guard` 做同步比對；驗不過就直接回錯誤，
+/// DB 快照查出來，交給 [`ConfigStore::update_guarded_at`] 的 `guard` 做同步比對；驗不過就直接回錯誤，
 /// `next` 被丟掉、檔案與 DB 都不動。
 ///
 /// 只給「這次呼叫本身就是一筆 mutation」的呼叫端用（目前是 API 的 Project／Bot 寫入端點）。
 /// 沒有伴隨 mutation 的重投（啟動時的 `project_config_at_startup`、背景巡邏的定期 reproject）不走這裡：
 /// 那些是把既有 config 套進 DB，不是「這次要不要寫」的判斷，繼續用 `project_config`。
-pub async fn update_and_project<F, T>(store: &ConfigStore, pool: &SqlitePool, f: F) -> Result<T>
+#[track_caller]
+pub fn update_and_project<'a, F, T>(
+    store: &'a ConfigStore,
+    pool: &'a SqlitePool,
+    f: F,
+) -> impl std::future::Future<Output = Result<T>> + 'a
+where
+    F: FnOnce(&mut crate::config::ConfigFile) -> Result<T> + 'a,
+    T: 'a,
+{
+    let at = Location::caller();
+    async move { update_and_project_at(at, store, pool, f).await }
+}
+
+async fn update_and_project_at<F, T>(at: &'static Location<'static>, store: &ConfigStore, pool: &SqlitePool, f: F) -> Result<T>
 where
     F: FnOnce(&mut crate::config::ConfigFile) -> Result<T>,
 {
@@ -260,27 +297,36 @@ where
     let db_bots: Vec<db::Bot> =
         db::live_bots(pool).await?.into_iter().filter(|b| b.managed_by == "user").collect();
     let db_projects = db::live_projects(pool).await?;
-    let supervisor_ids = supervisor_bot_ids(pool).await?;
+    let owned = crate::supervisor_owned::load(pool).await?;
+    let recent = recently_removed_bots(pool).await?;
     let out = store
-        .update_guarded(f, |next| {
+        .update_guarded_at(at, f, |next| {
             let (live_projects, live_bots) = live_ids(next);
-            match bulk_removal_check(&db_bots, &db_projects, &live_projects, &live_bots, &supervisor_ids) {
+            match bulk_removal_check(&db_bots, &db_projects, &live_projects, &live_bots, &owned, recent) {
                 Ok(()) => Ok(()),
                 Err(refused) => {
-                    tracing::warn!("拒絕投影 config.toml；本次不執行軟刪：{}", refused.detail);
+                    tracing::warn!(caller = %at, http = %crate::config_audit::http_caller(), "拒絕投影 config.toml；本次不執行軟刪：{}", refused.detail);
                     Err(anyhow::Error::new(refused))
                 }
             }
         })
-        .await?;
+        .await;
+    let out = match out {
+        Ok(v) => v,
+        Err(e) => {
+            alert_on_refusal(pool, &e).await;
+            return Err(e);
+        }
+    };
     // 寫檔已經過了同一份閘門，這裡是投影（`delete_from_config` 也是同一個形狀：拿著 `_g` 直接叫
     // `project_inner`，不重新拿鎖）。DB 沒被別人動過（還在臨界區內），所以 `project_inner` 自己那次
     // `guard_removals` 一定過，純粹是既有流程（補 id、upsert、soft-delete）的重用。
-    project_inner(store, pool, None, false).await?;
+    project_inner(at, store, pool, None, false).await?;
     Ok(out)
 }
 
 async fn project_inner(
+    at: &'static Location<'static>,
     store: &ConfigStore,
     pool: &SqlitePool,
     allow: Option<&Deleting>,
@@ -291,9 +337,11 @@ async fn project_inner(
     let db_bots: Vec<db::Bot> =
         db::live_bots(pool).await?.into_iter().filter(|b| b.managed_by == "user").collect();
     let db_projects = db::live_projects(pool).await?;
-    let supervisor_ids = if allow.is_none() { supervisor_bot_ids(pool).await? } else { HashSet::new() };
+    let owned = if allow.is_none() { crate::supervisor_owned::load(pool).await? } else { Default::default() };
+    let recent = if allow.is_none() { recently_removed_bots(pool).await? } else { 0 };
     let changed = store
-        .update_guarded(
+        .update_guarded_at(
+            at,
             |cfg| {
                 let mut dirty = false;
                 for p in cfg.projects.iter_mut() {
@@ -325,7 +373,7 @@ async fn project_inner(
                     return Ok(());
                 }
                 let (live_projects, live_bots) = live_ids(next);
-                match bulk_removal_check(&db_bots, &db_projects, &live_projects, &live_bots, &supervisor_ids) {
+                match bulk_removal_check(&db_bots, &db_projects, &live_projects, &live_bots, &owned, recent) {
                     Ok(()) => Ok(()),
                     Err(refused)
                         if allow_bulk && refused.supervisor_children.is_empty() && !refused.bot_limit_exceeded =>
@@ -334,13 +382,20 @@ async fn project_inner(
                         Ok(())
                     }
                     Err(refused) => {
-                        tracing::warn!("拒絕投影 config.toml；本次不執行軟刪：{}", refused.detail);
+                        tracing::warn!(caller = %at, http = %crate::config_audit::http_caller(), "拒絕投影 config.toml；本次不執行軟刪：{}", refused.detail);
                         Err(anyhow::Error::new(refusal_with_guidance(refused)))
                     }
                 }
             },
         )
-        .await?;
+        .await;
+    let changed = match changed {
+        Ok(v) => v,
+        Err(e) => {
+            alert_on_refusal(pool, &e).await;
+            return Err(e);
+        }
+    };
     if changed {
         tracing::info!("config.toml: filled in missing ids / canonical paths");
     }
@@ -352,7 +407,10 @@ async fn project_inner(
         cfg.projects.iter().flat_map(|p| p.bots.iter()).filter_map(|b| b.id.clone()).collect();
 
     // 任何寫入之前先擋：投錯 DB／被換掉的 config 長得就像「config 裡什麼都沒有」。
-    guard_removals(pool, &live_projects, &live_bots, allow, allow_bulk).await?;
+    if let Err(e) = guard_removals(pool, &live_projects, &live_bots, allow, allow_bulk).await {
+        alert_on_refusal(pool, &e).await;
+        return Err(e);
+    }
 
     for (p_at, p) in cfg.projects.iter().enumerate() {
         let pid = p.id.clone().unwrap();
@@ -420,7 +478,7 @@ async fn project_inner(
         }
         if !live_bots.contains(&b.id) {
             sqlx::query("UPDATE bots SET deleted_at=? WHERE id=?").bind(&now).bind(&b.id).execute(pool).await?;
-            tracing::info!(bot = %b.name, "bot removed from config.toml; soft-deleted");
+            tracing::info!(bot = %b.name, bot_id = %b.id, caller = %at, http = %crate::config_audit::http_caller(), "bot removed from config.toml; soft-deleted");
         }
     }
     for p in db::live_projects(pool).await? {
@@ -471,13 +529,24 @@ fn refusal_with_guidance(mut refused: ProjectionRefused) -> ProjectionRefused {
     refused
 }
 
-async fn supervisor_bot_ids(pool: &SqlitePool) -> Result<HashSet<String>> {
-    let mut ids = HashSet::new();
-    for table in ["supervisors", "supervisor_roles"] {
-        let query = format!("SELECT bot_id FROM {table}");
-        ids.extend(sqlx::query_scalar::<_, String>(&query).fetch_all(pool).await?);
-    }
-    Ok(ids)
+/// 「一次最多軟刪 1 顆」的計數窗口（issue #406）：只看單次投影的話，config 被連續改兩次、兩次投影各少 1 顆就繞過去了。
+/// 窗口內已經軟刪過的 user bot（不論是投影還是刪除 API 刪的）都算進這一次的額度。
+pub const REMOVAL_WINDOW_SECS: i64 = 60;
+
+/// 窗口內軟刪的 user bot 數。直接讀 DB 的 `deleted_at`：跨重啟、跨呼叫端都是同一份帳，也不需要另外記。
+async fn recently_removed_bots(pool: &SqlitePool) -> Result<usize> {
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bots WHERE managed_by = 'user' AND deleted_at IS NOT NULL AND deleted_at >= ?")
+        .bind(db::iso_in(-REMOVAL_WINDOW_SECS))
+        .fetch_one(pool)
+        .await?;
+    Ok(n as usize)
+}
+
+/// 投影被擋下來＝有東西想刪 bot 而 daemon 沒照做：推 `ops_alert` 給巡檢，不能只留一行 log（issue #406）。
+async fn alert_on_refusal(pool: &SqlitePool, e: &anyhow::Error) {
+    let Some(r) = e.downcast_ref::<ProjectionRefused>() else { return };
+    let reason = if r.supervisor_children.is_empty() { "projection_removal_refused" } else { "supervisor_bot_removal_refused" };
+    crate::supervisor_owned::alert(pool, reason, &format!("{}（呼叫端：{}）", r.detail, crate::config_audit::http_caller())).await;
 }
 
 /// 大量軟刪閘門的純判斷（2026-09-14 事故）：`next` 的活列相對於 DB 快照，是不是「config 空了但 DB 還有列」
@@ -488,34 +557,37 @@ fn bulk_removal_check(
     db_projects: &[db::Project],
     live_projects: &HashSet<String>,
     live_bots: &HashSet<String>,
-    supervisor_ids: &HashSet<String>,
+    owned: &crate::supervisor_owned::Owned,
+    recently_removed: usize,
 ) -> Result<(), ProjectionRefused> {
     let (gone_bots, gone_projects) = removals(db_bots, db_projects, live_projects, live_bots, None);
-    let supervisor_children: Vec<String> = db_bots
-        .iter()
-        .filter(|b| !live_bots.contains(&b.id) && b.parent_bot_id.as_ref().is_some_and(|id| supervisor_ids.contains(id)))
-        .map(|b| b.name.clone())
-        .collect();
+    // AGM 的 bot（總管／角色本身、它們的 child、總管專案裡的工人）：隱式投影一律不刪（issue #406）。
+    let supervisor_children: Vec<String> =
+        db_bots.iter().filter(|b| !live_bots.contains(&b.id) && owned.owns(b)).map(|b| b.name.clone()).collect();
     if gone_bots.is_empty() && gone_projects.is_empty() {
         return Ok(());
     }
     let empty_config = live_projects.is_empty();
-    let bot_limit_exceeded = gone_bots.len() > MAX_REMOVED_BOTS;
-    let bulk = too_many(gone_bots.len(), db_bots.len(), MAX_REMOVED_BOTS)
+    // 窗口內已經刪掉的也算：兩次投影各刪 1 顆＝這一次要刪第 2 顆。
+    let bots_in_window = if gone_bots.is_empty() { 0 } else { gone_bots.len() + recently_removed };
+    let bot_limit_exceeded = bots_in_window > MAX_REMOVED_BOTS;
+    let bulk = too_many(bots_in_window, db_bots.len() + recently_removed, MAX_REMOVED_BOTS)
         || too_many(gone_projects.len(), db_projects.len(), MAX_REMOVED_PROJECTS);
     if !empty_config && !bulk && supervisor_children.is_empty() {
         return Ok(());
     }
     let why = if !supervisor_children.is_empty() {
-        "config.toml 遺漏 supervisor child"
+        "config.toml 遺漏 AGM 的 bot"
     } else if empty_config {
         "config.toml 沒有任何專案"
+    } else if recently_removed > 0 && gone_bots.len() <= MAX_REMOVED_BOTS {
+        "前 60 秒內已經軟刪過 bot，這次又要再刪"
     } else {
         "一次少掉太多列"
     };
     Err(ProjectionRefused {
         detail: format!(
-            "{why}，但 DB 裡有 {} 顆 bot／{} 個專案：會軟刪 {} 顆 bot（{}）與 {} 個專案（{}）；supervisor child：{}",
+            "{why}，但 DB 裡有 {} 顆 bot／{} 個專案：會軟刪 {} 顆 bot（{}）與 {} 個專案（{}）；前 {REMOVAL_WINDOW_SECS} 秒內已軟刪 {recently_removed} 顆；AGM 的 bot：{}",
             db_bots.len(),
             db_projects.len(),
             gone_bots.len(),
@@ -546,7 +618,6 @@ async fn guard_removals(
     let db_bots: Vec<db::Bot> =
         db::live_bots(pool).await?.into_iter().filter(|b| b.managed_by == "user").collect();
     let db_projects = db::live_projects(pool).await?;
-    let supervisor_ids = supervisor_bot_ids(pool).await?;
 
     // 刪除模式：授權名單以外只要還有一列會不見就拒絕，不看門檻、也不吃 env 放行
     // （`delete_from_config` 在寫檔前已經擋過一次，這裡是投影當下的最後一道）。
@@ -566,7 +637,9 @@ async fn guard_removals(
         return Err(anyhow::Error::new(DeleteRefused(detail)));
     }
 
-    match bulk_removal_check(&db_bots, &db_projects, live_projects, live_bots, &supervisor_ids) {
+    let owned = crate::supervisor_owned::load(pool).await?;
+    let recent = recently_removed_bots(pool).await?;
+    match bulk_removal_check(&db_bots, &db_projects, live_projects, live_bots, &owned, recent) {
         Ok(()) => Ok(()),
         Err(refused) if allow_bulk && refused.supervisor_children.is_empty() && !refused.bot_limit_exceeded => {
             tracing::warn!("{ALLOW_BULK_ENV}=1：照使用者確認的做大量軟刪（{}）", refused.detail);
@@ -837,7 +910,7 @@ mod tests {
     /// issue #73 reopen：`update_and_project` 把 DB-backed 的大量軟刪閘門搬到落盤之前。以前只有
     /// `project_inner`（投影當下）會問，這裡驗的是「commit 之前就先問」這件事本身——`f` 只是把 bot 列表
     /// 換成一份會踩到閘門的（相對 DB 少了 3 顆），不代表任何一支真的存在的 API：目的是釘住
-    /// `ConfigStore::update_guarded` 的 `guard` 真的接在寫檔前，不是形式上傳進去卻沒生效。
+    /// `ConfigStore::update_guarded_at` 的 `guard` 真的接在寫檔前，不是形式上傳進去卻沒生效。
     #[tokio::test]
     async fn update_and_project_refuses_a_bulk_removal_before_writing() {
         let dir = std::env::temp_dir().join(format!("am-uap-refuse-{}", db::ulid()));
@@ -1060,5 +1133,83 @@ mod tests {
             assert!(error.contains("invalid bot id"), "{error}");
             assert!(error.contains("worker") && error.contains("demo"), "{error}");
         }
+    }
+
+    // ---- issue #406 ----
+
+    async fn ops_alerts(pool: &SqlitePool) -> Vec<String> {
+        sqlx::query_scalar("SELECT payload_json FROM supervisor_inbox WHERE kind = 'ops_alert' ORDER BY created_at")
+            .fetch_all(pool)
+            .await
+            .unwrap()
+    }
+
+    /// 13:28Z 那兩顆的形狀：`managed_by=user`、`parent_bot_id=NULL`，只是放在總管的專案裡。#398 的 parent 判斷認不出來。
+    #[tokio::test]
+    async fn a_bot_in_the_supervisor_project_is_never_soft_deleted_and_raises_an_ops_alert() {
+        let (dir, store, pool) = seeded("agm-project-bot", &["agm", "build", "triage", "other"]).await;
+        sqlx::query("INSERT INTO supervisors (id, bot_id, project_id, created_at, updated_at) VALUES ('AGM', 'agm', 'p1', 't', 't')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(db::bot(&pool, "build").await.unwrap().unwrap().parent_bot_id.is_none(), "fixture：沒有 parent");
+
+        std::fs::write(&store.path, config_text(&["agm", "triage", "other"])).unwrap();
+        let err = project_config(&store, &pool).await.unwrap_err();
+        let refused = err.downcast_ref::<ProjectionRefused>().expect("ProjectionRefused");
+        assert_eq!(refused.supervisor_children, vec!["build".to_string()], "{err}");
+        assert_eq!(db::live_bots(&pool).await.unwrap().len(), 4, "一顆都不能少");
+        let alerts = ops_alerts(&pool).await;
+        assert_eq!(alerts.len(), 1, "{alerts:?}");
+        assert!(alerts[0].contains("supervisor_bot_removal_refused") && alerts[0].contains("build"), "{alerts:?}");
+
+        pool.close().await;
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 「一次最多 1 顆」要跨投影累計：config 被改兩次、兩次投影各少 1 顆，第 2 顆要被擋。
+    #[tokio::test]
+    async fn two_single_removals_inside_the_window_are_counted_together() {
+        let (dir, store, pool) = seeded("window", &["b1", "b2", "b3", "b4", "b5", "b6"]).await;
+
+        std::fs::write(&store.path, config_text(&["b2", "b3", "b4", "b5", "b6"])).unwrap();
+        project_config(&store, &pool).await.expect("第 1 顆照刪");
+        std::fs::write(&store.path, config_text(&["b3", "b4", "b5", "b6"])).unwrap();
+        let err = project_config(&store, &pool).await.unwrap_err();
+        let refused = err.downcast_ref::<ProjectionRefused>().expect("ProjectionRefused");
+        assert!(refused.bot_limit_exceeded && refused.bots == vec!["b2".to_string()], "{err}");
+        assert!(db::bot(&pool, "b2").await.unwrap().unwrap().deleted_at.is_none(), "第 2 顆不能刪");
+        assert!(ops_alerts(&pool).await.iter().any(|a| a.contains("projection_removal_refused")));
+
+        // 窗口過了（把第 1 顆的 deleted_at 往前推）就又能刪 1 顆。
+        sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = 'b1'").bind(db::iso_in(-(REMOVAL_WINDOW_SECS + 5))).execute(&pool).await.unwrap();
+        project_config(&store, &pool).await.expect("窗口外");
+        assert!(db::bot(&pool, "b2").await.unwrap().unwrap().deleted_at.is_some());
+
+        pool.close().await;
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 外面改掉 config.toml：重讀時要記 WARN 與被拿掉的 id；daemon 自己寫的要記呼叫位置與前後 bot 數。
+    #[tokio::test(flavor = "current_thread")]
+    async fn external_rewrites_and_own_writes_are_both_logged() {
+        let (dir, store, pool) = seeded("audit", &["b1", "b2", "b3"]).await;
+        let (logs, _guard) = crate::config_audit::capture::start();
+
+        std::fs::write(&store.path, config_text(&["b1", "b3"])).unwrap();
+        store.update(|cfg| {
+            cfg.projects[0].label = "renamed".into();
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let text = logs.text();
+        let external = text.lines().find(|l| l.contains("config.toml changed outside this daemon")).unwrap_or_else(|| panic!("{text}"));
+        assert!(external.contains("WARN") && external.contains("b2(b2)") && external.contains("bots_before=3") && external.contains("bots_after=2"), "{external}");
+        let written = text.lines().find(|l| l.contains("config.toml written")).unwrap_or_else(|| panic!("{text}"));
+        assert!(written.contains("projection.rs:") && written.contains("bots_after=2") && written.contains("size="), "{written}");
+        drop(pool);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

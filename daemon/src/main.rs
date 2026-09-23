@@ -4,6 +4,7 @@
 //!   serve                       run the daemon (REST + WS + hook receiver)
 //!   hook claude|codex ...       the tiny process agent CLIs invoke; always exits 0
 
+mod bot_trash;
 mod build_info;
 mod build_scheduler;
 mod cargo_shim;
@@ -26,6 +27,7 @@ mod child_alerts;
 mod child_reconcile_safety;
 mod codex_live;
 mod config;
+mod config_audit;
 mod capture;
 mod default_session;
 mod db;
@@ -78,6 +80,7 @@ mod reconcile;
 mod spawn_hints;
 mod state;
 mod supervisor;
+mod supervisor_owned;
 mod supervisor_evidence;
 mod startup;
 mod statusline_cmd;

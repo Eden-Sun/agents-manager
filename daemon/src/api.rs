@@ -70,7 +70,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/projects", post(create_project))
         .route("/order", post(set_order))
         .route("/intents", get(list_intents))
-        .route("/projects/{id}", patch(patch_project).delete(delete_project))
+        .route("/projects/{id}", patch(patch_project).delete(delete_project_http))
         .route("/projects/{id}/bots", post(create_bot))
         .route("/projects/{id}/messages", get(get_project_messages))
         // §6.5e：非 agent 的 shell／服務 pane。
@@ -108,7 +108,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/projects/{id}/git/pull", post(git_pull))
         .route("/projects/{id}/issues", get(get_issues))
         .route("/projects/{id}/issues/{number}", get(get_issue))
-        .route("/bots/{id}", patch(patch_bot).delete(delete_bot))
+        .route("/bots/{id}", patch(patch_bot).delete(delete_bot_http))
         // SPEC §6.9；放在 `{id}` 那組前面，否則 `restart-idle` 會被當成 bot id。
         .route("/bots/restart-idle", post(restart_idle_bots))
         .route("/bots/{id}/start", post(start_bot))
@@ -467,7 +467,12 @@ async fn auth(State(app): State<Arc<App>>, req: axum::extract::Request, next: Ne
     if !ct_eq(tok, &app.ui_token) {
         return (StatusCode::UNAUTHORIZED, Json(json!({"error": "missing or bad X-AM-Token"}))).into_response();
     }
-    next.run(req).await
+    // 會改東西的請求記下是誰發的：config.toml 的寫入 log 與刪除 intent 要引用（issue #406）。
+    if matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS) {
+        return next.run(req).await;
+    }
+    let caller = crate::config_audit::describe_request(&req);
+    crate::config_audit::HTTP_CALLER.scope(caller, next.run(req)).await
 }
 
 async fn get_session(
@@ -935,6 +940,23 @@ pub(crate) async fn soft_delete_child(app: &Arc<App>, bot_id: &str) -> Result<()
     sqlx::query("UPDATE bots SET deleted_at=? WHERE id=? AND deleted_at IS NULL").bind(db::now()).bind(bot_id).execute(&app.db).await.map(|_| ())
 }
 
+/// `?confirm=supervisor`：刪 AGM 的 bot／專案要明講（issue #406）。
+#[derive(Deserialize, Default)]
+pub(crate) struct DeleteQuery {
+    pub(crate) confirm: Option<String>,
+}
+
+/// HTTP 進來的刪除先過 AGM 閘門；daemon 內部（mission 收臨時 bot）直接叫 `delete_bot`／`delete_project`。
+async fn delete_project_http(State(app): State<Arc<App>>, Path(id): Path<String>, Query(q): Query<DeleteQuery>) -> Result<Response, LcError> {
+    crate::supervisor_owned::guard_project_delete(&app.db, &id, q.confirm.as_deref()).await?;
+    delete_project(State(app), Path(id)).await
+}
+
+pub(crate) async fn delete_bot_http(State(app): State<Arc<App>>, Path(id): Path<String>, Query(q): Query<DeleteQuery>) -> Result<Response, LcError> {
+    crate::supervisor_owned::guard_bot_delete(&app.db, &id, q.confirm.as_deref()).await?;
+    delete_bot(State(app), Path(id)).await
+}
+
 async fn delete_project(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
     // 拿著專案裡每顆 bot 的 per-bot 鎖（start 用同一把）再確認都停了、再定案：鎖外檢查會跟 start 競爭，
     // 刪掉剛被重新啟動的 bot（sol 四輪）。依 id 排序拿鎖；其他路徑一次只拿一把，不會形成環。
@@ -954,7 +976,10 @@ async fn delete_project(State(app): State<Arc<App>>, Path(id): Path<String>) -> 
     let held: std::collections::HashSet<String> = ids.iter().cloned().collect();
     // 持久 intent（#355 P3）：定案**之前**先 commit（payload＝當時的 bot 快照）；定案之後 daemon 死掉，開機由 `delete_intents::recover_host` 補完。
     let snapshot: Vec<Value> = in_project.iter().map(|b| json!({"id": b.id, "managed_by": b.managed_by})).collect();
-    let intent = crate::delete_intents::begin(&app, "delete_project", &id, &host, &json!({"bots": snapshot})).await?;
+    let requested_by = crate::config_audit::http_caller();
+    tracing::warn!(project_id = %id, http = %requested_by, "project delete requested");
+    let intent = crate::delete_intents::begin(&app, "delete_project", &id, &host, &json!({"bots": snapshot, "requested_by": requested_by}))
+        .await?;
     #[cfg(test)]
     crate::lifecycle::race_point::hit("delete_after_intent", &id).await;
     if let Err(e) = delete_in_config(&app, crate::projection::DeleteTarget::Project { id: &id, held: &held }).await {
@@ -1649,7 +1674,11 @@ pub(crate) async fn delete_bot(State(app): State<Arc<App>>, Path(id): Path<Strin
     // 所以不會留下「已停、未刪」。（child 由母 agent 開，daemon 本來就重開不了它，事後回滾做不到。）
     // 持久 intent（#355 P3）：定案**之前**先 commit（payload＝當時的 child 快照，深的先）；定案之後 daemon 死掉，開機由 `delete_intents::recover_host` 補完。
     let snapshot: Vec<Value> = children.iter().map(|c| json!({"id": c.id, "managed_by": c.managed_by})).collect();
-    let intent = crate::delete_intents::begin(&app, "delete_bot", &id, &host, &json!({"bots": snapshot})).await?;
+    // 誰按的刪除：留在 log 與 intent（DB）裡，事後查得到（issue #406：13:28Z 那兩筆就是查不到）。
+    let requested_by = crate::config_audit::http_caller();
+    tracing::warn!(bot = %bot.name, bot_id = %id, http = %requested_by, "bot delete requested");
+    let intent =
+        crate::delete_intents::begin(&app, "delete_bot", &id, &host, &json!({"bots": snapshot, "requested_by": requested_by})).await?;
     #[cfg(test)]
     crate::lifecycle::race_point::hit("delete_after_intent", &id).await;
     let decided: Result<(), LcError> = if bot.managed_by == "child" {
@@ -1788,7 +1817,7 @@ pub(crate) async fn descendant_children(app: &Arc<App>, root: &str) -> anyhow::R
 
 /// 刪除是軟的：寫回 config.toml 條目讓 projection 清 `deleted_at`；child bot 直接清欄位。
 /// 被 `purge_bot_dir` 砍掉的工作目錄下次啟動會重新產生。
-async fn restore_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
+pub(crate) async fn restore_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
     // 跟 delete_bot／start 同一把 per-bot 鎖（#301）：delete_bot 定案後才停機、purge，沒鎖的話還原會插進來，
     // 事後被 purge 砍掉剛還原的 bot 的目錄與 run。
     let _guard = app.bot_lock(&id).await.lock_owned().await;
@@ -1860,6 +1889,14 @@ async fn restore_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Res
         })
         .await
         .map_err(projection_err)?;
+    }
+    // 刪除時搬進回收區的目錄搬回來（issue #406）。本機才有；搬不回來不擋還原（下次啟動會重建需要的檔）。
+    if let Ok(dir) = app.bot_dir(&id) {
+        match crate::bot_trash::restore(&app.data_dir, &id, &dir) {
+            Ok(Some(from)) => tracing::info!(bot = %id, from = %from.display(), "restored bot config dir from bots-trash"),
+            Ok(None) => {}
+            Err(e) => tracing::warn!(bot = %id, error = %e, "could not restore bot config dir from bots-trash"),
+        }
     }
     app.emit("bot_changed", json!({"bot_id": id})).await;
     app.emit("project_changed", json!({"project_id": bot.project_id})).await;
