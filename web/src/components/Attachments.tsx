@@ -132,7 +132,7 @@ export function ImageIcon() {
 
 /** Object URL per attachment id, shared across bubbles. */
 const urlCache = new Map<string, Promise<string>>()
-/** LRU 上限：每個 object URL 釘住最大 12 MB Blob；已解碼的 `<img>` 不受 revoke 影響。 */
+/** LRU 上限：每個 object URL 釘住最大 50 MB Blob；已解碼的 `<img>` 不受 revoke 影響。 */
 const URL_CACHE_MAX = 64
 
 function storedUrl(id: string): Promise<string> {
