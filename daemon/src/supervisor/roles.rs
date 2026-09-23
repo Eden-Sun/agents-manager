@@ -208,8 +208,9 @@ fn known_route(kind: &str, payload: &Value, review_role: Option<&str>) -> Option
             r(Role::Responder, kind == "incident_opened")
         }
         // 系統層的故障：巡檢收、叫醒。`ops_alert` 是排程腳本自己喊的（例行更新卡住），也是巡檢的事。
+        // `judge_stuck_screen`：prompt 排著送不出去、畫面底部疑似有 daemon 不認得的框（SPEC §4.3c），要人去終端看一眼。
         "ops_alert" | "incident_opened" | "responder_watchdog_gave_up" | "responder_bot_missing" | "bot_restart_failed" | "intent_failed"
-        | "supervisor_restart_retry" | "agm_cli_stale" | "pane_unowned" | "pane_orphaned" => r(Role::Patrol, true),
+        | "supervisor_restart_retry" | "agm_cli_stale" | "pane_unowned" | "pane_orphaned" | "judge_stuck_screen" => r(Role::Patrol, true),
         // 恢復不叫醒人：開的那一筆已經叫過，關掉只要記下來。
         "incident_resolved" => r(Role::Patrol, false),
         // 協調者那一半也算：它倒了或在等額度，能發現的只有巡檢（review 2026-09-16 #7）。
