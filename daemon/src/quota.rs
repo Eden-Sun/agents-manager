@@ -574,6 +574,14 @@ pub async fn set(app: &Arc<App>, host: &str, base: &str, mut q: Quota) {
     let brings_its_own_hit = q.limit_hit.is_some();
     let fresh = q.clone();
     let mut quotas = app.quotas.lock().await;
+    if q.source == "statusline" {
+        if let Some(previous) = quotas.get(&key) {
+            if let Some((bucket, previous_reset, incoming_reset)) = guard_statusline_windows(previous, &mut q, chrono::Utc::now()) {
+                tracing::debug!(host, key, bucket, previous_reset, incoming_reset, "discarded a stale Claude statusline quota snapshot");
+                return;
+            }
+        }
+    }
     for k in &stale {
         if quotas.remove(k).is_some() {
             tracing::info!(host, stale = %k, bare = %key, "dropped a split quota key that now resolves to the bare key");
@@ -640,6 +648,35 @@ pub async fn set(app: &Arc<App>, host: &str, base: &str, mut q: Quota) {
     }
     persist_cache(app, &key, &q).await;
     app.emit("quota_updated", json!({"kind": key, "host": host, "quota": quota_value(&q, false)})).await;
+}
+
+/// Compare Claude statusLine windows with the value already stored under a shared account key.
+/// Other sources (especially the active `/usage` probe) bypass this guard.
+fn guard_statusline_windows(
+    existing: &Quota,
+    incoming: &mut Quota,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<(&'static str, String, String)> {
+    for (bucket, old, new) in [
+        ("five_hour", &existing.five_hour, &mut incoming.five_hour),
+        ("seven_day", &existing.seven_day, &mut incoming.seven_day),
+        ("fable", &existing.fable, &mut incoming.fable),
+    ] {
+        let (Some(old), Some(new)) = (old.as_ref(), new.as_mut()) else { continue };
+        let (Some(old_at), Some(new_at)) = (
+            old.resets_at.as_deref().and_then(parse_utc),
+            new.resets_at.as_deref().and_then(parse_utc),
+        ) else {
+            continue;
+        };
+        if old_at > now && new_at < old_at {
+            return Some((bucket, old.resets_at.clone().unwrap(), new.resets_at.clone().unwrap()));
+        }
+        if new_at == old_at {
+            new.used_pct = new.used_pct.max(old.used_pct);
+        }
+    }
+    None
 }
 
 fn parse_utc(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
@@ -1090,6 +1127,55 @@ pub fn spawn_codex_poller(app: Arc<App>) {
 
 #[cfg(test)]
 mod tests {
+    /// 多個 Claude session 共用一把帳號 key；較晚收到的舊窗狀態列不能蓋掉重置後的讀數。
+    #[tokio::test]
+    async fn an_old_statusline_snapshot_cannot_replace_newer_quota_windows() {
+        let app = crate::testing::env().await.app.clone();
+        let now = chrono::Utc::now();
+        let window = |used_pct, resets_at| Window { used_pct, resets_at: Some(iso(resets_at)) };
+        let mut current = codex_q("statusline", None);
+        current.five_hour = Some(window(0.0, now + chrono::Duration::hours(4)));
+        current.seven_day = Some(window(0.0, now + chrono::Duration::days(6)));
+        current.fable = Some(window(0.0, now + chrono::Duration::days(6)));
+        current.source = "statusline".into();
+        set(&app, LOCAL_HOST, "claude", current).await;
+
+        let mut stale = codex_q("statusline", None);
+        stale.five_hour = Some(window(99.0, now + chrono::Duration::hours(3)));
+        stale.seven_day = Some(window(99.0, now + chrono::Duration::days(5)));
+        stale.fable = Some(window(99.0, now + chrono::Duration::days(5)));
+        stale.source = "statusline".into();
+        set(&app, LOCAL_HOST, "claude", stale).await;
+
+        let q = app.quotas.lock().await.get("claude").cloned().unwrap();
+        assert_eq!(q.five_hour.as_ref().unwrap().used_pct, 0.0);
+        assert_eq!(q.seven_day.as_ref().unwrap().used_pct, 0.0);
+        assert_eq!(q.fable.as_ref().unwrap().used_pct, 0.0);
+    }
+
+    #[tokio::test]
+    async fn a_same_window_statusline_cannot_decrease_usage_but_usage_probe_can_correct_it() {
+        let app = crate::testing::env().await.app.clone();
+        let reset = chrono::Utc::now() + chrono::Duration::hours(4);
+        let mut current = codex_q("statusline", None);
+        current.five_hour = Some(Window { used_pct: 40.0, resets_at: Some(iso(reset)) });
+        current.source = "statusline".into();
+        set(&app, LOCAL_HOST, "claude", current).await;
+
+        let mut stale = codex_q("statusline", None);
+        stale.five_hour = Some(Window { used_pct: 10.0, resets_at: Some(iso(reset)) });
+        stale.source = "statusline".into();
+        set(&app, LOCAL_HOST, "claude", stale).await;
+        assert_eq!(app.quotas.lock().await.get("claude").unwrap().five_hour.as_ref().unwrap().used_pct, 40.0);
+
+        let mut probe = codex_q("claude-usage", None);
+        probe.five_hour = Some(Window { used_pct: 12.0, resets_at: Some(iso(reset)) });
+        set(&app, LOCAL_HOST, "claude", probe).await;
+        let q = app.quotas.lock().await.get("claude").cloned().unwrap();
+        assert_eq!(q.source, "claude-usage");
+        assert_eq!(q.five_hour.as_ref().unwrap().used_pct, 12.0);
+    }
+
     /// 狀態列是剩餘、存的是已用；不可洗掉 `resets_at`（2026-09-13 使用者：量表停在舊數字）。
     #[tokio::test]
     async fn the_status_line_updates_the_numbers_without_losing_the_reset_time() {

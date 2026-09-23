@@ -2229,7 +2229,7 @@ API：`GET /api/projects/:id/messages`、`POST /api/projects/:id/chat`（`API.md
 - **codex**：`codex_rpc(app, host, "account/rateLimits/read")`，遠端走 `ssh_exec_path`。另外每 60 秒讀 running codex pane 底下的狀態列（`5h 90% left · weekly 48% left`，`source=codex-statusline`；app-server 每 5 分鐘才問一次、而且落後），寫同一把 key——狀態列是 CLI 當下拿來擋人的依據，但它是**畫面**，數字停在那顆 pane 最後一回合（`screen_at`＝最後一回合結束時間）：
   這個行程裡看著它變了就照寫；其他時候比對 app-server 的重置時間，畫面比現在這個窗的起點（`resets_at − 窗長`）還舊就不採用（閒著的 pane 不能把剛重置的量表蓋回見底），
   在同一個窗裡則只增不減（app-server 落後時補上，2026-09-15 使用者症狀）；還沒有重置時間時只收這個行程第一次看到的畫面（review 2026-09-16）。同帳號有多顆 pane 時先讀最近有回合的那顆，讀不到狀態列（壓縮對話中、捲動中）就換下一顆（2026-09-15 使用者：pane 寫 93% left、header 還是 100）；它沒有重置時間，`resets_at`／`reset_credits`／`limit_hit` 沿用前一份。
-- **claude statusLine**：hook 進來時查 `bot_host(bot_id)` 寫進那台的列（遠端經 §11.4.5 的單槽檔）。有 bot 在對話的帳號就有即時數字。
+- **claude statusLine**：hook 進來時查 `bot_host(bot_id)` 寫進那台的列（遠端經 §11.4.5 的單槽檔）。有 bot 在對話的帳號就有即時數字。多個 session 共用同一帳號時，各自的 statusLine 都會送 `rate_limits`；同一把額度 key 不以「最後到達」作新舊判準：對 5h、7d、Fable 各自比較 `resets_at`，只要既有桶的重置時間仍在未來，而新快照該桶的重置時間更早，就整筆丟棄並記 debug。相同重置時刻視為同一窗，逐桶保留較大的 `used_pct`；較晚的新窗照收。reset 時間缺失或不能解析時維持原寫入行為。此守衛只套用 `source=statusline`，`claude-usage` 探測可直接發布讀數校正；新 statusLine 遇到舊的 `/usage` 窗仍會依相同 reset 規則被攔。Codex pane 狀態列另有依回合時間與 app-server reset 窗判斷的守衛，無 reset 時只接受行程內首次畫面，不能用舊 pane 畫面覆蓋新窗。
 - **claude `/usage` 探測**：在用完即丟的 pane 跑一行 `claude auth status --json` 接 `claude -p "/usage"`，輸出以 `AM_AUTH_BEGIN` / `AM_AUTH_END` / `AM_USAGE_DONE=` 標記包起來，
   `pane.read recent_unwrapped` 等到最後標記（逾時 40 秒）。`-p` 印純文字、不會有 TUI 對話框或信任視窗；同一次探測順便拿到該身份的登入狀態、`account`、`plan`
   （claude 身份不經 ssh 探登入：非登入 ssh 讀不到 Keychain）。沒登入的身份 park 30 分鐘，其他失敗 5 分鐘；失敗後才開始有 statusLine 或 run 的帳號沒登入那段也只等 5 分鐘。
