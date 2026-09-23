@@ -40,7 +40,7 @@ check_file() { # check_file <描述> <檔案應該存在?yes/no> <路徑>
   if [ "$got" = "$2" ]; then
     echo "ok   - $1"; PASS=$((PASS + 1))
   else
-    echo "FAIL - $1（存在=$got，預期=$2：$3）"; FAIL=$((FAIL + 1))
+    echo "FAIL - $1（存在=${got}，預期=$2：$3）"; FAIL=$((FAIL + 1))
   fi
 }
 

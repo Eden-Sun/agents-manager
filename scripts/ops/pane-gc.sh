@@ -27,7 +27,7 @@ for p in json.load(sys.stdin)["result"]["panes"]: print(p["pane_id"])'); do
   info=$(herdr pane process-info --pane "$pid_pane" 2>/dev/null)
   if [ -z "$info" ] || ! echo "$info" | grep -q '"foreground_processes"'; then
     if herdr pane get "$pid_pane" 2>&1 | grep -q pane_not_found; then
-      echo "  ghost pane $pid_pane（list 有、get 找不到）" >> "$LOG"; ghost=$((ghost+1))
+      echo "  ghost pane ${pid_pane}（list 有、get 找不到）" >> "$LOG"; ghost=$((ghost+1))
     fi
     continue
   fi
@@ -47,7 +47,7 @@ except Exception:
   secs=$(etime_secs "$fpid")
   if [ -n "$secs" ] && [ "$secs" -ge "$MAX_AGE" ]; then
     herdr pane close "$pid_pane" >/dev/null 2>&1 \
-      && { echo "  close pane $pid_pane（$cmd 卡了 ${secs}s）" >> "$LOG"; closed=$((closed+1)); }
+      && { echo "  close pane ${pid_pane}（$cmd 卡了 ${secs}s）" >> "$LOG"; closed=$((closed+1)); }
   fi
 done
-echo "pane：關掉 $closed／幽靈 $ghost" >> "$LOG"
+echo "pane：關掉 ${closed}／幽靈 $ghost" >> "$LOG"

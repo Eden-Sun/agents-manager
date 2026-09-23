@@ -142,7 +142,7 @@ code=$?
 if [ "$code" -eq 7 ]; then
   echo "ok   - 結束碼原樣回傳（沒裝 sccache 這條路徑）"; PASS=$((PASS + 1))
 else
-  echo "FAIL - 結束碼變成 $code，應該是 7"; FAIL=$((FAIL + 1))
+  echo "FAIL - 結束碼變成 ${code}，應該是 7"; FAIL=$((FAIL + 1))
 fi
 teardown
 
@@ -159,7 +159,7 @@ code=$?
 if [ "$code" -eq 9 ]; then
   echo "ok   - 結束碼原樣回傳（有 sccache 這條路徑）"; PASS=$((PASS + 1))
 else
-  echo "FAIL - 結束碼變成 $code，應該是 9"; FAIL=$((FAIL + 1))
+  echo "FAIL - 結束碼變成 ${code}，應該是 9"; FAIL=$((FAIL + 1))
 fi
 teardown
 
