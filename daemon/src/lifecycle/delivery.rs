@@ -26,7 +26,8 @@ use std::time::Duration;
 pub(crate) enum BoxState {
     /// Exactly the bare marker row, with the box's own rule directly under it.
     Empty,
-    /// Anything else in the box — a draft, a lone space, a blank second line, a suggestion.
+    /// Anything else in the box — a draft, a blank second line, a non-hint suggestion. Trailing blanks on the
+    /// marker row are padding, not content.
     NonEmpty,
     /// No readable composer on this screen.
     Unready,
@@ -458,7 +459,7 @@ pub(crate) fn box_state_within(kind: &str, screen: &str, tail: usize) -> BoxStat
     // `is_particle`); a plain read is never relaxed.
     let particles = kind == "codex" && screen.contains("\u{1b}[");
     let Some(c) = locate_composer(kind, &lines, particles, tail) else { return BoxState::Unready };
-    let content = marker_row_content(&c, particles);
+    let content = marker_row_content(kind, &c, particles);
     // Anything the TUI draws as a hint after the marker is its own — `Try "…"`, codex's example
     // prompts, claude's suggested next prompt — never typed text, whatever the words say. One
     // visible non-hint character makes it a draft (sol review round nine #2).
@@ -493,14 +494,18 @@ pub(crate) fn box_state_within(kind: &str, screen: &str, tail: usize) -> BoxStat
 }
 
 /// What the marker row holds after the glyph: the one separator after it dropped (a space, or the
-/// no-break space claude draws), and inside a box — or with codex's particles erased — the
-/// trailing padding too.
-fn marker_row_content(c: &ComposerRow, particles: bool) -> Vec<(char, bool)> {
+/// no-break space claude draws), and the trailing padding too — the box's own, the cells codex's
+/// particles sat on, and on claude's unboxed row the blank cells the terminal keeps after a longer row
+/// was drawn there. 2026-09-23：`/model …` 套用後的畫面，輸入列是 `❯ ` 加二十幾個普通空格，只有 boxed／codex 才剝
+/// padding，claude 被當成草稿回 composer_busy，閒著的 bot 從網頁送不進字
+/// （真畫面：fixtures/claude-2.1.28x-composer-padding-after-model.ansi）。
+fn marker_row_content(kind: &str, c: &ComposerRow, particles: bool) -> Vec<(char, bool)> {
     let mut content = c.after_glyph.clone();
     if matches!(content.first(), Some((' ' | '\u{a0}', _))) {
         content.remove(0);
     }
-    if c.boxed || particles {
+    // codex 的純文字讀法不放寬（分不出點字是不是打的，sol 第九輪 #2）：只有 boxed／有點字／claude 才剝 padding。
+    if c.boxed || particles || kind == "claude" {
         while matches!(content.last(), Some((ch, _)) if ch.is_whitespace()) {
             content.pop();
         }
@@ -546,7 +551,7 @@ pub(crate) fn plain_without_hints(kind: &str, screen: &str) -> String {
     let particles = kind == "codex";
     let mut plain: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
     if let Some(c) = locate_composer(kind, &lines, particles, COMPOSER_TAIL) {
-        let content = marker_row_content(&c, particles);
+        let content = marker_row_content(kind, &c, particles);
         if let Some(n) = hint_rows(&c, &content, &lines, particles) {
             let cells = blank_particles(styled_cells(lines[c.idx]), particles);
             let glyph = composer_glyph(kind);
@@ -1363,6 +1368,19 @@ mod tests {
         assert_eq!(box_state("codex", CODEX_PARTICLES_DRAFT), BoxState::NonEmpty, "點字底紋＋真草稿");
     }
 
+
+    /// 2026-09-23 真畫面（claude 2.1.28x，`/model claude-opus-5-5` 套用後閒置）：輸入列是 `❯ ` 加一串普通空格——
+    /// 終端留下的 padding。之前被當成草稿回 composer_busy，使用者從網頁送不進字。
+    #[test]
+    fn a_claude_composer_padded_with_blank_cells_after_a_model_switch_is_empty() {
+        const SCREEN: &str = include_str!("fixtures/claude-2.1.28x-composer-padding-after-model.ansi");
+        assert_eq!(box_state("claude", SCREEN), BoxState::Empty);
+        // 同一個畫面把 padding 換成一個真的字：還是草稿。
+        let typed = SCREEN.replacen("❯\u{a0}   ", "❯\u{a0}x  ", 1);
+        assert_ne!(typed, SCREEN);
+        assert_eq!(box_state("claude", &typed), BoxState::NonEmpty);
+    }
+
     #[test]
     fn braille_is_only_ignored_when_it_is_a_coloured_codex_particle() {
         // 純文字讀法不放寬：分不出點字是不是打的（sol 第九輪 #2）。
@@ -1485,15 +1503,14 @@ mod tests {
     fn only_the_exact_empty_shape_is_an_empty_box() {
         let empty = screen(&["⏺ 先前的回覆"], &[]);
         assert_eq!(box_state("claude", &empty), BoxState::Empty);
-        let table: &[(&str, &str)] = &[
-            ("❯  ", "marker 後多一個空白"),
-            ("❯ x", "有字"),
-            ("❯   ", "只有空白"),
-        ];
-        for (row, why) in table {
+        // marker 後只有空白是終端留下的 padding，不是草稿（2026-09-23：`/model` 套用後 `❯ ` 後面跟著二十幾個空格，
+        // 閒置的 bot 全被回 composer_busy）。真的打了一個空白再送 prompt，最多是 prompt 前面多一個空白。
+        for (row, why) in [("❯  ", "marker 後多一個空白"), ("❯   ", "只有空白")] {
             let s = empty.replacen("❯\n", &format!("{row}\n"), 1);
-            assert_eq!(box_state("claude", &s), BoxState::NonEmpty, "{why}");
+            assert_eq!(box_state("claude", &s), BoxState::Empty, "{why}");
         }
+        let typed = empty.replacen("❯\n", "❯ x\n", 1);
+        assert_eq!(box_state("claude", &typed), BoxState::NonEmpty, "有字");
         let blank_second = empty.replacen("❯\n", "❯\n  \n", 1);
         assert_eq!(box_state("claude", &blank_second), BoxState::NonEmpty, "空白第二行");
         let second_line = empty.replacen("❯\n", "❯\n  草稿\n", 1);
@@ -1512,8 +1529,12 @@ mod tests {
         assert_eq!(box_state("claude", &mixed), BoxState::NonEmpty, "混進非 dim 字");
         let dim_codex = "› \u{1b}[2mSomething codex suggests\u{1b}[0m\n\ngpt-6-astra low · ~/proj\n";
         assert_eq!(box_state("codex", dim_codex), BoxState::Empty, "codex 任何 dim 提示");
+        // 只有空白（dim 或不 dim）是終端留下的 padding，不是草稿（2026-09-23 之前這裡當 NonEmpty，
+        // 讓 /model 套用後的閒置 bot 全部 composer_busy）。
         let dim_spaces = empty.replacen("❯\n", "❯ \u{1b}[2m  \u{1b}[0m\n", 1);
-        assert_eq!(box_state("claude", &dim_spaces), BoxState::NonEmpty, "只有空白不算提示");
+        assert_eq!(box_state("claude", &dim_spaces), BoxState::Empty, "只有空白是 padding");
+        let plain_spaces = empty.replacen("❯\n", "❯\u{a0}                      \n", 1);
+        assert_eq!(box_state("claude", &plain_spaces), BoxState::Empty, "普通空格的 padding");
         let past_placeholder = empty.replacen("❯\n", "❯ Try \"fix lint errors\" now\n", 1);
         assert_eq!(box_state("claude", &past_placeholder), BoxState::NonEmpty);
         assert_eq!(box_state("claude", "Select login method:\n  1. Claude account\n"), BoxState::Unready);
