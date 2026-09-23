@@ -527,3 +527,12 @@ daemon 這幾天把「寫不進 DB」改成 fail closed：外面的副作用做�
 - **原文接回網頁輸入框最前面**，不覆蓋原本打到一半的字（沿用 `prependDraft`）。CLI 也會把原文放回終端的輸入列，那一份 daemon 清掉——兩邊都留會讓下一則接在它後面；清不掉時通知叫人去終端清。
 - 截圖：`docs/screenshots/rewind/`（`scripts/rewind-shots.mjs`，mock 模式；`MOBILE=1` 出手機那組）。
   ![滑過出現按鈕](screenshots/rewind/1-hover-shows-button.png) ![確認框](screenshots/rewind/2-confirm.png) ![倒回後](screenshots/rewind/3-after-rewound-and-refilled.png) ![手機倒回後](screenshots/rewind/m3-after.png)
+
+## 刪 AGM 的 bot 要第二次確認（2026-09-24，issue #406）
+
+daemon 對 AGM 的 bot（總管／角色本身、它們的 child、總管專案裡的工人）的刪除回 409 `supervisor_owned`，要帶 `?confirm=supervisor` 才刪。
+網頁不能因此變死路（09-23 13:28Z 那兩刀很可能就是從網頁按的），所以一般的「刪除 Bot」確認之後若收到這個 409，**不跳錯誤通知**，改跳第二個確認框
+「這是 AGM 的 Bot」：寫名稱與 daemon 給的角色（`role`），說明「刪了 AGM 可能會壞」。焦點照確認框慣例落在「取消」；取消什麼都不送，
+「仍要刪除」才帶參數重送，成功後照常是帶「復原」的通知。判斷集中在 `lib/agmDelete.ts`，框是 `AgmDeleteConfirm`（掛在 App 根層，側欄 ⋯ 與 Bot 設定兩個入口共用）。
+不在第一個框就先問：前端不知道哪些 bot 算 AGM 的（那是 daemon 查 supervisor 表才知道的），照 409 走才不會兩邊規則分岔。
+![桌機](screenshots/agm-delete-confirm/1-agm-confirm-1280.png) ![手機](screenshots/agm-delete-confirm/m1-agm-confirm-390.png)
