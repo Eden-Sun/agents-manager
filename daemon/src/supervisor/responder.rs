@@ -178,7 +178,8 @@ pub async fn ensure_env(
 ) -> Result<(String, String, super::setup::Deployed), LcError> {
     let row = roles::get(&app.db, Role::Responder).await.map_err(up)?;
     let identity = identity.map(str::trim).filter(|s| !s.is_empty()).unwrap_or(&row.identity).to_string();
-    let model = model.map(str::trim).filter(|s| !s.is_empty()).unwrap_or(&row.model).to_string();
+    let model = model.map(str::trim).filter(|s| !s.is_empty()).unwrap_or(&row.model);
+    let model = crate::models::canonical_model("claude", model).to_string();
     let effort = effort.map(str::trim).filter(|s| !s.is_empty()).unwrap_or(&row.effort).to_string();
     // 這三個值會直接變成 CLI 的 argv。不驗的話，一句 `--dangerously-skip-permissions` 或一段空白
     // 就能從 setup 的欄位混進命令列；模型名單會隨 CLI 改版變動，所以驗的是**形狀**不是白名單。

@@ -156,7 +156,8 @@ async fn finish(app: &Arc<App>, mut op: ForkOp) -> Result<Response, LcError> {
                 .iter()
                 .position(|b| b.id.as_deref() == Some(source.id.as_str()))
                 .ok_or_else(|| anyhow::anyhow!("not-in-config"))?;
-            let src: BotCfg = p.bots[at].clone();
+            let mut src: BotCfg = p.bots[at].clone();
+            src.model = src.model.as_deref().map(|m| crate::models::canonical_model(&src.kind, m).to_string());
             let taken = |n: &str| p.bots.iter().any(|x| x.name == n);
             let name = if taken(&wanted) { crate::api::next_free_name(&wanted, &taken) } else { wanted.clone() };
             *used_name.lock().unwrap() = name.clone();
@@ -374,7 +375,7 @@ mod tests {
         let cfg = e.app.cfg.get().await;
         let bots = &cfg.projects[0].bots;
         let (s, f) = (bots.iter().find(|b| b.id.as_deref() == Some(&src)).unwrap(), bots.iter().find(|b| b.id.as_deref() == Some(&new_id)).unwrap());
-        assert_eq!((f.kind.as_str(), f.model.as_deref(), f.persona.as_deref()), ("claude", Some("opus"), Some("審稿人")));
+        assert_eq!((f.kind.as_str(), f.model.as_deref(), f.persona.as_deref()), ("claude", Some("claude-opus-5-5"), Some("審稿人")));
         assert_eq!(f.env.get("FOO").map(String::as_str), Some("bar"));
         assert!(!f.autostart, "fork 不抄 autostart");
         assert!(s.autostart, "來源不動");

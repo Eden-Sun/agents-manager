@@ -19,15 +19,9 @@ pub const PERSONA_DOC: &str = include_str!("../../../docs/goals/agm-supervisor-p
 pub const BOT_NAME: &str = "AGM";
 pub const REMOTE_NAME: &str = "AGM";
 
-/// `fable` / `opus` are the two candidates the plan fixes. The alias — not a pinned
-/// `claude-<x>-5.y` id — is what goes on the command line: the concrete id behind each alias
-/// moves with the CLI, and a supervisor that stops starting after a model release is worse
-/// than one that follows the alias.
+/// Resolve the supervisor candidate and apply the shared retired-model policy before launch.
 pub fn model_arg(candidate: &str) -> &'static str {
-    match candidate {
-        "opus" => "opus",
-        _ => "fable",
-    }
+    crate::models::canonical_model("claude", if candidate == "opus" { "opus" } else { "fable" })
 }
 
 pub fn other_candidate(candidate: &str) -> &'static str {
@@ -335,7 +329,7 @@ mod tests {
     #[test]
     fn candidates_stay_aliases_so_a_model_release_cannot_strand_the_supervisor() {
         assert_eq!(model_arg("fable"), "fable");
-        assert_eq!(model_arg("opus"), "opus");
+        assert_eq!(model_arg("opus"), "claude-opus-5-5");
         assert_eq!(other_candidate("fable"), "opus");
         assert_eq!(other_candidate("opus"), "fable");
     }

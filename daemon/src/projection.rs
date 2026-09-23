@@ -387,7 +387,7 @@ async fn project_inner(
             .bind(&pid)
             .bind(&b.name)
             .bind(&b.kind)
-            .bind(b.model.as_deref().filter(|s| !s.trim().is_empty()))
+            .bind(b.model.as_deref().filter(|s| !s.trim().is_empty()).map(|m| crate::models::canonical_model(&b.kind, m.trim())))
             // v4.0: effort is kind-dependent; a hand-edited value that the kind rejects is dropped.
             .bind(crate::config::normalize_effort(&b.kind, b.effort.as_deref()).unwrap_or(None))
             .bind(b.fast as i64)
@@ -687,6 +687,20 @@ mod tests {
     async fn project_text(path: &std::path::Path, pool: &SqlitePool, text: &str) -> Result<()> {
         std::fs::write(path, text).unwrap();
         project_config(&ConfigStore::load(path.to_path_buf()).await.unwrap(), pool).await
+    }
+
+    #[tokio::test]
+    async fn projection_canonicalizes_retired_config_models_but_preserves_explicit_versions() {
+        let dir = std::env::temp_dir().join(format!("am-projection-models-{}", db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let text = "[server]\nlisten='127.0.0.1:7788'\n[[projects]]\nid='p1'\npath='/tmp'\nlabel='p'\nhost='local'\n[[projects.bots]]\nid='c'\nname='c'\nkind='codex'\nmodel='gpt-5.6-luna'\n[[projects.bots]]\nid='a'\nname='a'\nkind='claude'\nmodel='claude-opus-4-1'\n[[projects.bots]]\nid='alias'\nname='alias'\nkind='claude'\nmodel='opus'\n";
+        let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
+        project_text(&path, &pool, text).await.unwrap();
+        let models: Vec<(String, Option<String>)> = sqlx::query_as("SELECT id,model FROM bots ORDER BY id").fetch_all(&pool).await.unwrap();
+        assert_eq!(models, vec![("a".into(), Some("claude-opus-4-1".into())), ("alias".into(), Some("claude-opus-5-5".into())), ("c".into(), Some("gpt-6-luna".into()))]);
+        pool.close().await;
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// review 2026-09-16 core 6：跨主機同名、不同 kind 的身份。API 分主機放行並寫進 config，投影卻只看名字、
