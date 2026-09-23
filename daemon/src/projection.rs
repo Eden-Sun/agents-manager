@@ -21,8 +21,8 @@ static PROJECTION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Fill in missing ids (writing them back to the TOML) and upsert everything into SQLite.
 ///
-/// 帶大量軟刪的閘門：啟動與 runtime 的每一次重投都走這條。`ConfigStore::update` 會在磁碟 mtime 變了
-/// 時重讀，所以「外面把 TOML 換掉／清空，再由 API 或總管觸發重投」也是事故路徑，不能只擋啟動。
+/// 帶大量軟刪的閘門：啟動與 runtime 的每一次重投都走這條。`ConfigStore::update` 每次都從磁碟重讀，
+/// 所以「外面把 TOML 換掉／清空，再由 API 或總管觸發重投」也是事故路徑，不能只擋啟動。
 pub async fn project_config(store: &ConfigStore, pool: &SqlitePool) -> Result<()> {
     let _g = PROJECTION.lock().await;
     project_inner(store, pool, None, false).await
@@ -76,6 +76,10 @@ pub struct ProjectionRefused {
     /// 這次會被軟刪掉的 bot／專案名字，讓人知道要去 config.toml 補回哪幾列。
     pub bots: Vec<String>,
     pub projects: Vec<String>,
+    /// Supervisor-owned child bot names: these can never be removed by an implicit projection.
+    pub supervisor_children: Vec<String>,
+    /// Bot-count limit violations are never waived by AM_ALLOW_BULK_DELETE.
+    pub bot_limit_exceeded: bool,
 }
 
 /// 刪除的單一臨界區：重讀 config → 確認目標此刻在 TOML → 算出實際要拿掉的 id → 閘門（寫入前）→
@@ -256,10 +260,17 @@ where
     let db_bots: Vec<db::Bot> =
         db::live_bots(pool).await?.into_iter().filter(|b| b.managed_by == "user").collect();
     let db_projects = db::live_projects(pool).await?;
+    let supervisor_ids = supervisor_bot_ids(pool).await?;
     let out = store
         .update_guarded(f, |next| {
             let (live_projects, live_bots) = live_ids(next);
-            bulk_removal_check(&db_bots, &db_projects, &live_projects, &live_bots).map_err(anyhow::Error::new)
+            match bulk_removal_check(&db_bots, &db_projects, &live_projects, &live_bots, &supervisor_ids) {
+                Ok(()) => Ok(()),
+                Err(refused) => {
+                    tracing::warn!("拒絕投影 config.toml；本次不執行軟刪：{}", refused.detail);
+                    Err(anyhow::Error::new(refused))
+                }
+            }
         })
         .await?;
     // 寫檔已經過了同一份閘門，這裡是投影（`delete_from_config` 也是同一個形狀：拿著 `_g` 直接叫
@@ -276,35 +287,59 @@ async fn project_inner(
     allow_bulk: bool,
 ) -> Result<()> {
     // 1. fill in ids / canonicalize paths, write back only if something changed.
-    //    合法性不在這裡查：`ConfigStore::update` 落盤前會對**改完之後**的整份 config 跑 `validate`
-    //    （issue #73），所以這個 closure 只負責補值。
+    //    連帶在落盤前套用刪除閘門：補 id 的寫回也不能先於拒絕決定。
+    let db_bots: Vec<db::Bot> =
+        db::live_bots(pool).await?.into_iter().filter(|b| b.managed_by == "user").collect();
+    let db_projects = db::live_projects(pool).await?;
+    let supervisor_ids = if allow.is_none() { supervisor_bot_ids(pool).await? } else { HashSet::new() };
     let changed = store
-        .update(|cfg| {
-            let mut dirty = false;
-            for p in cfg.projects.iter_mut() {
-                if p.id.is_none() {
-                    p.id = Some(db::ulid());
-                    dirty = true;
-                }
-                // Only local paths can be canonicalized here; a remote path was already
-                // canonicalized on its host when the project was created (SPEC §11.6).
-                if p.host == crate::config::LOCAL_HOST {
-                    if let Ok(c) = canonical_path(&p.path) {
-                        if c != p.path {
-                            p.path = c;
+        .update_guarded(
+            |cfg| {
+                let mut dirty = false;
+                for p in cfg.projects.iter_mut() {
+                    if p.id.is_none() {
+                        p.id = Some(db::ulid());
+                        dirty = true;
+                    }
+                    // Only local paths can be canonicalized here; a remote path was already
+                    // canonicalized on its host when the project was created (SPEC §11.6).
+                    if p.host == crate::config::LOCAL_HOST {
+                        if let Ok(c) = canonical_path(&p.path) {
+                            if c != p.path {
+                                p.path = c;
+                                dirty = true;
+                            }
+                        }
+                    }
+                    for b in p.bots.iter_mut() {
+                        if b.id.is_none() {
+                            b.id = Some(db::ulid());
                             dirty = true;
                         }
                     }
                 }
-                for b in p.bots.iter_mut() {
-                    if b.id.is_none() {
-                        b.id = Some(db::ulid());
-                        dirty = true;
+                Ok(dirty)
+            },
+            |next| {
+                if allow.is_some() {
+                    return Ok(());
+                }
+                let (live_projects, live_bots) = live_ids(next);
+                match bulk_removal_check(&db_bots, &db_projects, &live_projects, &live_bots, &supervisor_ids) {
+                    Ok(()) => Ok(()),
+                    Err(refused)
+                        if allow_bulk && refused.supervisor_children.is_empty() && !refused.bot_limit_exceeded =>
+                    {
+                        tracing::warn!("{ALLOW_BULK_ENV}=1：照使用者確認的做大量軟刪（{}）", refused.detail);
+                        Ok(())
+                    }
+                    Err(refused) => {
+                        tracing::warn!("拒絕投影 config.toml；本次不執行軟刪：{}", refused.detail);
+                        Err(anyhow::Error::new(refusal_with_guidance(refused)))
                     }
                 }
-            }
-            Ok(dirty)
-        })
+            },
+        )
         .await?;
     if changed {
         tracing::info!("config.toml: filled in missing ids / canonical paths");
@@ -396,15 +431,17 @@ async fn project_inner(
     Ok(())
 }
 
-/// 一次從 config 消失超過這麼多列，就不是「使用者刪了一顆」，而是投影投錯了 DB。
-const MAX_REMOVED: usize = 3;
-/// 或是一口氣少掉三成以上；兩顆以上才算，免得「三顆刪一顆」這種正常操作被擋。
+/// Implicit projection may retire at most one user bot at a time; explicit DELETE has its own authorization.
+const MAX_REMOVED_BOTS: usize = 1;
+/// Projects retain the previous count limit. The ratio also catches large drops from larger configurations.
+const MAX_REMOVED_PROJECTS: usize = 3;
+/// A drop above thirty percent is suspicious; single-row changes are allowed by the ratio rule.
 const MAX_REMOVED_RATIO: f64 = 0.30;
 /// 真的要刪這麼多（人已確認）時，帶這個 env 重啟 daemon：只放行啟動那一次投影。
 pub const ALLOW_BULK_ENV: &str = "AM_ALLOW_BULK_DELETE";
 
-fn too_many(gone: usize, total: usize) -> bool {
-    gone > MAX_REMOVED || (gone > 1 && gone as f64 > total as f64 * MAX_REMOVED_RATIO)
+fn too_many(gone: usize, total: usize, max_removed: usize) -> bool {
+    gone > max_removed || (gone > 1 && gone as f64 > total as f64 * MAX_REMOVED_RATIO)
 }
 
 fn some_names(names: &[String]) -> String {
@@ -416,6 +453,33 @@ fn some_names(names: &[String]) -> String {
     }
 }
 
+fn refusal_with_guidance(mut refused: ProjectionRefused) -> ProjectionRefused {
+    let hint = if !refused.supervisor_children.is_empty() {
+        "補回 supervisor child 的設定列或先由人工確認處理；AM_ALLOW_BULK_DELETE 不會放行 supervisor child.".to_string()
+    } else if refused.bot_limit_exceeded {
+        "本次 bot 軟刪數超過隱式投影上限；請修復 config.toml 後重試，AM_ALLOW_BULK_DELETE 不會放行 bot 刪除.".to_string()
+    } else {
+        format!(
+            "確認過真的要刪，就帶 {ALLOW_BULK_ENV}=1 重啟 daemon（只放行啟動時那一次投影，之後的重投照樣擋）。"
+        )
+    };
+    refused.detail = format!(
+        "拒絕投影 config.toml：{}。這通常是 daemon 開錯資料目錄或 config.toml 被外部改寫；\
+         先確認 --config 與資料目錄（見 startup.rs）。{}",
+        refused.detail, hint
+    );
+    refused
+}
+
+async fn supervisor_bot_ids(pool: &SqlitePool) -> Result<HashSet<String>> {
+    let mut ids = HashSet::new();
+    for table in ["supervisors", "supervisor_roles"] {
+        let query = format!("SELECT bot_id FROM {table}");
+        ids.extend(sqlx::query_scalar::<_, String>(&query).fetch_all(pool).await?);
+    }
+    Ok(ids)
+}
+
 /// 大量軟刪閘門的純判斷（2026-09-14 事故）：`next` 的活列相對於 DB 快照，是不是「config 空了但 DB 還有列」
 /// 或「一次少掉太多列」。不碰 DB／檔案，只比對兩份已經算好的集合——commit 前（`update_and_project`）與
 /// 投影當下（`guard_removals`）共用同一份規則，兩邊差在「什麼時候問」，不是「怎麼判」。
@@ -424,29 +488,46 @@ fn bulk_removal_check(
     db_projects: &[db::Project],
     live_projects: &HashSet<String>,
     live_bots: &HashSet<String>,
+    supervisor_ids: &HashSet<String>,
 ) -> Result<(), ProjectionRefused> {
     let (gone_bots, gone_projects) = removals(db_bots, db_projects, live_projects, live_bots, None);
+    let supervisor_children: Vec<String> = db_bots
+        .iter()
+        .filter(|b| !live_bots.contains(&b.id) && b.parent_bot_id.as_ref().is_some_and(|id| supervisor_ids.contains(id)))
+        .map(|b| b.name.clone())
+        .collect();
     if gone_bots.is_empty() && gone_projects.is_empty() {
         return Ok(());
     }
     let empty_config = live_projects.is_empty();
-    let bulk = too_many(gone_bots.len(), db_bots.len()) || too_many(gone_projects.len(), db_projects.len());
-    if !empty_config && !bulk {
+    let bot_limit_exceeded = gone_bots.len() > MAX_REMOVED_BOTS;
+    let bulk = too_many(gone_bots.len(), db_bots.len(), MAX_REMOVED_BOTS)
+        || too_many(gone_projects.len(), db_projects.len(), MAX_REMOVED_PROJECTS);
+    if !empty_config && !bulk && supervisor_children.is_empty() {
         return Ok(());
     }
-    let why = if empty_config { "config.toml 沒有任何專案" } else { "一次少掉太多列" };
+    let why = if !supervisor_children.is_empty() {
+        "config.toml 遺漏 supervisor child"
+    } else if empty_config {
+        "config.toml 沒有任何專案"
+    } else {
+        "一次少掉太多列"
+    };
     Err(ProjectionRefused {
         detail: format!(
-            "{why}，但 DB 裡有 {} 顆 bot／{} 個專案：會軟刪 {} 顆 bot（{}）與 {} 個專案（{}）",
+            "{why}，但 DB 裡有 {} 顆 bot／{} 個專案：會軟刪 {} 顆 bot（{}）與 {} 個專案（{}）；supervisor child：{}",
             db_bots.len(),
             db_projects.len(),
             gone_bots.len(),
             some_names(&gone_bots),
             gone_projects.len(),
             some_names(&gone_projects),
+            some_names(&supervisor_children),
         ),
         bots: gone_bots,
         projects: gone_projects,
+        supervisor_children,
+        bot_limit_exceeded,
     })
 }
 
@@ -465,6 +546,7 @@ async fn guard_removals(
     let db_bots: Vec<db::Bot> =
         db::live_bots(pool).await?.into_iter().filter(|b| b.managed_by == "user").collect();
     let db_projects = db::live_projects(pool).await?;
+    let supervisor_ids = supervisor_bot_ids(pool).await?;
 
     // 刪除模式：授權名單以外只要還有一列會不見就拒絕，不看門檻、也不吃 env 放行
     // （`delete_from_config` 在寫檔前已經擋過一次，這裡是投影當下的最後一道）。
@@ -484,25 +566,15 @@ async fn guard_removals(
         return Err(anyhow::Error::new(DeleteRefused(detail)));
     }
 
-    match bulk_removal_check(&db_bots, &db_projects, live_projects, live_bots) {
+    match bulk_removal_check(&db_bots, &db_projects, live_projects, live_bots, &supervisor_ids) {
         Ok(()) => Ok(()),
-        Err(refused) if allow_bulk => {
+        Err(refused) if allow_bulk && refused.supervisor_children.is_empty() && !refused.bot_limit_exceeded => {
             tracing::warn!("{ALLOW_BULK_ENV}=1：照使用者確認的做大量軟刪（{}）", refused.detail);
             Ok(())
         }
         Err(refused) => {
-            tracing::error!("拒絕投影 config.toml：{}", refused.detail);
-            Err(anyhow::Error::new(ProjectionRefused {
-                detail: format!(
-                    "拒絕投影 config.toml：{}。\
-                     這通常是 daemon 開錯資料目錄（同一顆 DB 被另一份 config 投影），不是有人刪了 bot；\
-                     先確認 --config 與資料目錄（見 startup.rs）。確認過真的要刪，就帶 {ALLOW_BULK_ENV}=1 重啟 daemon\
-                     （只放行啟動時那一次投影，之後的重投照樣擋）。",
-                    refused.detail
-                ),
-                bots: refused.bots,
-                projects: refused.projects,
-            }))
+            tracing::warn!("拒絕投影 config.toml；本次不執行軟刪：{}", refused.detail);
+            Err(anyhow::Error::new(refusal_with_guidance(refused)))
         }
     }
 }
@@ -648,9 +720,9 @@ mod tests {
 
     use super::BULK_ENV;
 
-    /// 2026-09-14：第二顆 daemon 用 /tmp 的空 config 開到正式 DB，8 秒軟刪 15 顆 bot／6 個專案。
+    /// 2026-09-14：第二顆 daemon 用 /tmp 的空 config 開到正式 DB，曾經軟刪 15 顆 bot／6 個專案。
     #[tokio::test]
-    async fn refuses_an_empty_config_over_a_populated_db() {
+    async fn bulk_override_never_bypasses_the_bot_count_limit() {
         let _env = BULK_ENV.lock().await;
         let dir = std::env::temp_dir().join(format!("am-projection-bulk-{}", db::ulid()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -668,17 +740,20 @@ mod tests {
         assert_eq!(db::live_bots(&pool).await.unwrap().len(), 4, "拒絕投影時一列都不能動");
         assert_eq!(db::live_projects(&pool).await.unwrap().len(), 1);
 
-        // 人確認過、帶 env 重啟：啟動那一次投影放行。
-        project_config_at_startup(&ConfigStore::load(path.clone()).await.unwrap(), &pool, true).await.unwrap();
-        assert_eq!(db::live_bots(&pool).await.unwrap().len(), 0);
-        assert_eq!(db::live_projects(&pool).await.unwrap().len(), 0);
+        // 人確認過、帶 env 重啟也不能一次軟刪多顆 bot。
+        let err = project_config_at_startup(&ConfigStore::load(path.clone()).await.unwrap(), &pool, true)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("不會放行 bot 刪除"), "{err}");
+        assert_eq!(db::live_bots(&pool).await.unwrap().len(), 4);
+        assert_eq!(db::live_projects(&pool).await.unwrap().len(), 1);
 
         pool.close().await;
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// `AM_ALLOW_BULK_DELETE=1` 只放行啟動那一次（review3 c3 L7）：env 留在行程裡，之後 config 被外部換掉、
-    /// 再由 API／總管觸發的重投照樣要擋，不能只記 warn 就照刪。
+    /// `AM_ALLOW_BULK_DELETE=1` 只放行啟動那一次的空 config（單 bot）；runtime 重投照樣要擋。
     #[tokio::test]
     async fn the_bulk_allowance_does_not_outlive_the_startup_projection() {
         let _env = BULK_ENV.lock().await;
@@ -686,20 +761,22 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
         let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
-        std::fs::write(&path, config_text(&["b1", "b2", "b3", "b4", "b5"])).unwrap();
+        std::fs::write(&path, config_text(&["b1"])).unwrap();
         let store = ConfigStore::load(path.clone()).await.unwrap();
         project_config(&store, &pool).await.unwrap();
 
-        // 使用者手改 config 刪掉 4 顆，帶 env 重啟：啟動投影放行。
-        std::fs::write(&path, config_text(&["b1"])).unwrap();
+        // 使用者清空 config，帶 env 重啟：空設定的舊式明確覆寫仍放行一顆 bot。
+        std::fs::write(&path, "[server]\nlisten = '127.0.0.1:7788'\n").unwrap();
         let store = ConfigStore::load(path.clone()).await.unwrap();
         std::env::set_var(ALLOW_BULK_ENV, "1");
         assert!(bulk_delete_allowed_by_env());
         let started = project_config_at_startup(&store, &pool, bulk_delete_allowed_by_env()).await;
         started.unwrap();
-        assert_eq!(db::live_bots(&pool).await.unwrap().len(), 1);
+        assert_eq!(db::live_bots(&pool).await.unwrap().len(), 0);
 
-        // 同一個行程、env 還在：config 被外面換成空的，runtime 重投照樣拒絕。
+        // DB 有一顆 bot 時，外部清空後 runtime 重投不能靠 process env 放行。
+        std::fs::write(&path, config_text(&["b1"])).unwrap();
+        project_config_at_startup(&ConfigStore::load(path.clone()).await.unwrap(), &pool, false).await.unwrap();
         std::fs::write(&path, "[server]\nlisten = '127.0.0.1:7788'\n").unwrap();
         store.update(|_| Ok(())).await.unwrap();
         let out = project_config(&store, &pool).await;
@@ -713,7 +790,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// runtime 也要擋：外面把 TOML 換掉／清空，`ConfigStore::update` 會在 mtime 變了時重讀，
+    /// runtime 也要擋：外面把 TOML 換掉／清空，`ConfigStore::update` 每次都重讀，
     /// 再由 API／總管觸發重投——不擋的話事故路徑只是換個入口（sol 複審 2026-09-14）。
     #[tokio::test]
     async fn a_config_swapped_under_a_running_daemon_is_refused() {
@@ -767,6 +844,46 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before_text, "TOML 一個字都不能動");
         assert_eq!(store.get().await.projects[0].bots.len(), 4, "記憶體裡那份也不能變");
         assert_eq!(db::live_bots(&pool).await.unwrap().len(), 4, "DB 不該被動到");
+
+        pool.close().await;
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn refuses_two_missing_bots_even_when_the_ratio_is_below_thirty_percent() {
+        let dir = std::env::temp_dir().join(format!("am-projection-two-missing-{}", db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
+        let all = ["b1", "b2", "b3", "b4", "b5", "b6", "b7", "b8", "b9", "b10"];
+        project_text(&path, &pool, &config_text(&all)).await.unwrap();
+
+        let err = project_text(&path, &pool, &config_text(&all[..8])).await.unwrap_err().to_string();
+        assert!(err.contains("拒絕投影") && err.contains("2 顆 bot"), "{err}");
+        assert_eq!(db::live_bots(&pool).await.unwrap().len(), 10, "一次少兩顆也不可軟刪");
+
+        pool.close().await;
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn refuses_to_soft_delete_a_supervisor_child_even_with_startup_bulk_override() {
+        let dir = std::env::temp_dir().join(format!("am-projection-supervisor-child-{}", db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
+        project_text(&path, &pool, &config_text(&["supervisor", "build"])).await.unwrap();
+        sqlx::query("UPDATE bots SET parent_bot_id = 'supervisor' WHERE id = 'build'").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO supervisors (id, bot_id, created_at, updated_at) VALUES ('sup', 'supervisor', 't', 't')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        std::fs::write(&path, config_text(&["supervisor"])).unwrap();
+        let store = ConfigStore::load(path.clone()).await.unwrap();
+        let err = project_config_at_startup(&store, &pool, true).await.unwrap_err().to_string();
+        assert!(err.contains("supervisor child") && err.contains("build"), "{err}");
+        assert_eq!(db::live_bots(&pool).await.unwrap().len(), 2, "明確 bulk override 也不能刪 supervisor child");
 
         pool.close().await;
         std::fs::remove_dir_all(&dir).unwrap();
@@ -908,12 +1025,13 @@ mod tests {
 
     #[test]
     fn the_threshold_lets_normal_deletes_through() {
-        assert!(!too_many(1, 1));
-        assert!(!too_many(1, 20));
-        assert!(!too_many(3, 20));
-        assert!(too_many(4, 20));
-        assert!(too_many(2, 4));
-        assert!(too_many(15, 15));
+        assert!(!too_many(1, 20, MAX_REMOVED_BOTS));
+        assert!(too_many(2, 20, MAX_REMOVED_BOTS));
+        assert!(!too_many(1, 1, MAX_REMOVED_PROJECTS));
+        assert!(!too_many(3, 20, MAX_REMOVED_PROJECTS));
+        assert!(too_many(4, 20, MAX_REMOVED_PROJECTS));
+        assert!(too_many(2, 4, MAX_REMOVED_PROJECTS));
+        assert!(too_many(15, 15, MAX_REMOVED_PROJECTS));
     }
 
     #[tokio::test]

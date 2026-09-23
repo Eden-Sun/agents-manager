@@ -632,7 +632,7 @@ mod cfg_err_tests {
     ///
     /// 混進 502（「herdr／DB 出錯」）的話，呼叫端分不出「改一下再送」跟「ssh 斷了、等一下重試」。
     /// 觸發路徑是真的會發生的那條：外面把 config.toml 換成不合法的檔案，下一次寫設定時
-    /// `ConfigStore::update` 比 mtime 重讀、套用、驗不過。
+    /// `ConfigStore::update` 重讀最新版、套用、驗不過。
     #[tokio::test]
     async fn an_invalid_config_is_a_400_that_says_nothing_was_written() {
         let env = crate::testing::env().await;
@@ -673,6 +673,8 @@ mod cfg_err_tests {
             detail: "test detail".into(),
             bots: vec!["b1".into()],
             projects: vec![],
+            supervisor_children: vec![],
+            bot_limit_exceeded: false,
         };
         match super::projection_err(anyhow::Error::new(refused)) {
             crate::lifecycle::LcError::Conflict(body) => {
@@ -2362,7 +2364,7 @@ mod project_tests {
         crate::projection::project_config(&app.cfg, &app.db).await.unwrap();
         assert_eq!(db::live_bots(&app.db).await.unwrap().len(), 4);
 
-        // 外面把 config.toml 換掉：只剩 1 顆 bot。`ConfigStore::update` 之後會比 mtime 重讀，這裡先強迫
+        // 外面把 config.toml 換掉：只剩 1 顆 bot。`ConfigStore::update` 會先重讀最新版，這裡先強迫
         // 重讀一次（不改任何東西，跟 projection.rs 的 `a_config_swapped_under_a_running_daemon_is_refused` 同一招）。
         let reduced = format!(
             "[server]\nlisten = '127.0.0.1:7788'\n\n[[projects]]\nid = '{pid}'\npath = '{repo}'\nlabel = 'proj'\nhost = 'local'\n\n[[projects.bots]]\nid = 'b1'\nname = 'b1'\nkind = 'claude'\n"
