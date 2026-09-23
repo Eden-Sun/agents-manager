@@ -1209,8 +1209,11 @@ herdr server 重啟會讓**所有** pane 同時消失。照 §6.5 的規則，�
    回報 session。claude 的 `SessionStart` hook 帶的 session 跟 `runs.resume_session_id` 一樣記 `runs.resume_outcome='verified'`，
    不一樣記 `mismatch` 並插 `context_lost` 說明（CLI 默默開了新對話）；兩者都是結論，排隊的 prompt 隨即放行（hook 處理完就叫醒 flush）。
    還沒結論時：排隊的 flush 留在佇列（不花重試額度、掛 timer 到期再來）；直接送入的 AGM 派工排進佇列，其他送入回
-   `409 resume_unverified`（API §5）。最多等 120 秒（`VERIFY_WINDOW`，從 `runs.started_at` 算，涵蓋遠端 hook 走 spool 的 30 秒掃描）；
-   到期是**刻意的退路**：記 `unverified`、對話插一則「確認不了接回的是不是同一段」、放行——hook 壞掉的 bot 不能永遠收不到訊息，
+   `409 resume_unverified`（API §5）。最多等 120 秒（`VERIFY_WINDOW`，從 `runs.started_at` 算，涵蓋遠端 hook 走 spool 的 30 秒掃描）。
+   **人擋著的時間不算**：pane 停在要人回答的提示時（`runs.agent_status='blocked'`，例如新的設定目錄還沒信任過專案目錄）
+   CLI 根本還沒開始跑，不可能有回報——這段永遠不到期；狀態真的變了之後（`runs.agent_status_since`，issue #93）還要再給
+   `UNBLOCK_GRACE`＝60 秒，讓遠端那一行 `SessionStart` 走完一輪 spool 掃描。三個期限取最晚的那個。
+   到期是**刻意的退路**：記 `unverified`、對話插一則「確認不了接回的是不是同一段」（附實際等了幾秒）、放行——hook 壞掉的 bot 不能永遠收不到訊息，
    也不假裝驗過了；之後才到的回報照樣比對，對不上一樣插 `context_lost`。到期時間存在 DB（`started_at`），daemon 重啟後不另外接：
    `rearm_queue_retries` 本來就把每一筆 queued 叫醒一次，flush 走到閘門照原本的到期時間重掛 timer。
    只有 claude＋`inject_hooks` 的 run 等：codex／grok 要等第一個回合結束才回報 session（`hookrecv`），在這裡等只會死結；
