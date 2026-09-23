@@ -230,6 +230,12 @@ impl HostConn {
     }
 
     pub async fn ssh_exec_timeout(&self, script: &str, timeout: Duration) -> Result<String> {
+        // 假貨是同步的，永遠不會把控制權交回 executor，所以「主機收下 TCP 但不回話」這種**逾時**光靠假貨測不到
+        // （`tokio::time::timeout` 是合作式的）。這個延遲是真的 await point，讓呼叫端的上限測得出來（#407 review）。
+        #[cfg(test)]
+        if let Some(d) = ssh_delay_for(&self.name) {
+            tokio::time::sleep(d).await;
+        }
         #[cfg(test)]
         if let Some(f) = ssh_fake_for(&self.name) {
             return f(script);
@@ -647,6 +653,21 @@ pub(crate) fn set_ssh_fake(host: &str, f: impl Fn(&str) -> Result<String> + Send
 #[cfg(test)]
 fn ssh_fake_for(host: &str) -> Option<SshFake> {
     SSH_FAKES.lock().unwrap().iter().find(|(h, _)| h == host).map(|(_, f)| f.clone())
+}
+
+/// Test seam: make every ssh leg to this host take that long *asynchronously* — a host that accepts the
+/// connection and then says nothing. Pair it with [`set_ssh_fake`] for what the reply would have been.
+#[cfg(test)]
+static SSH_DELAYS: std::sync::Mutex<Vec<(String, Duration)>> = std::sync::Mutex::new(Vec::new());
+#[cfg(test)]
+pub(crate) fn set_ssh_delay(host: &str, d: Duration) {
+    let mut v = SSH_DELAYS.lock().unwrap();
+    v.retain(|(h, _)| h != host);
+    v.push((host.to_string(), d));
+}
+#[cfg(test)]
+fn ssh_delay_for(host: &str) -> Option<Duration> {
+    SSH_DELAYS.lock().unwrap().iter().find(|(h, _)| h == host).map(|(_, d)| *d)
 }
 
 /// Authority token for an external observation of one host (issue #347): the connection object and its

@@ -413,8 +413,20 @@ pub(crate) async fn pane_ready_for_prompt(app: &Arc<App>, bot: &db::Bot, run: &d
             if let Ok(client) = client_for_run(app, run).await {
                 if let Ok(r) = client.pane_read(pane, "visible", 60).await {
                     if crate::tui_prompts::is_grok_trust_dialog(&r.text) {
-                        for w in crate::trust::pretrust_bots(app, std::slice::from_ref(bot)).await {
-                            tracing::warn!(bot = %bot.name, warning = %w, "could not record grok folder trust");
+                        // #407 review：這裡本來固定寫 daemon 這台的 `~/.grok`，遠端 grok 的信任紀錄在**那台**，
+                        // 寫本機的等於沒寫。改走跟 `start_inner` 同一條（`pretrust_for_start`，遠端經 ssh）。
+                        let host = db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| crate::config::LOCAL_HOST.to_string());
+                        let cwd = match bot.cwd.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                            Some(c) => c.to_string(),
+                            // `bot_cwd` 的規則：bot 沒有自己的 cwd 就是專案目錄，grok 開在那裡。
+                            None => db::project(&app.db, &bot.project_id).await.ok().flatten().map(|p| p.path).unwrap_or_default(),
+                        };
+                        if cwd.is_empty() {
+                            tracing::warn!(bot = %bot.name, host, "grok 的信任目錄查不出來，只能按 y");
+                        } else {
+                            for w in crate::trust::pretrust_for_start(app, bot, &host, &cwd).await {
+                                tracing::warn!(bot = %bot.name, host, cwd, warning = %w, "could not record grok folder trust");
+                            }
                         }
                         let _ = client.pane_send_keys(pane, &["y"]).await;
                         tokio::time::sleep(Duration::from_millis(1200)).await;
