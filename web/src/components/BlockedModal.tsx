@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useChoiceMenu } from '../hooks/useChoiceMenu'
+import { usePendingQuestion } from '../hooks/usePendingQuestion'
+import { questionVisibleOnScreen } from '../lib/pendingQuestion'
+import { PendingQuestionCard } from './PendingQuestionCard'
 import { herdrKeyFromEvent, KEYPAD, usePaneKeys } from '../hooks/usePaneKeys'
 import { useTerminalSnapshot } from '../hooks/useTerminalSnapshot'
 import { useDialogFocus } from '../hooks/useDialogFocus'
@@ -24,6 +27,9 @@ export function BlockedModal({ botId, onClose }: { botId: string; onClose: () =>
   const { snap, err, refresh } = useTerminalSnapshot(botId, { source: 'visible', lines: 200 })
   const press = usePaneKeys(botId, refresh)
   const menu = useChoiceMenu(botId, snap?.text)
+  // 畫面上看不到題目（pane 太矮、claude 把選單裁掉）時，從 transcript 補題目（2026-09-23 使用者）。
+  const pending = usePendingQuestion(botId, false)
+  const showPending = pending.length > 0 && !questionVisibleOnScreen(pending, menu?.question)
   /** 選單模式預設只留問題與選項；終端原文、整排按鍵與鍵盤直通收在這顆開關後面。 */
   const [extras, setExtras] = useState(false)
   const showRaw = !menu || extras
@@ -109,6 +115,8 @@ export function BlockedModal({ botId, onClose }: { botId: string; onClose: () =>
         ) : null}
 
         <CodexUpdateHint botId={botId} text={snap?.text} onAnswered={refresh} />
+
+        {showPending ? <PendingQuestionCard questions={pending} /> : null}
 
         {/* 選單模式只有一條主捲軸，問題行釘在上緣：兩塊各自捲在手機上分不清（2026-09-12 第二輪回饋第 4 點）。 */}
         {menu ? (

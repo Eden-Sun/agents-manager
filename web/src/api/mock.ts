@@ -10,6 +10,35 @@ import type { BotKind } from './types'
 import type { HttpMethod, SocketHandlers, Transport } from './transport'
 
 /** 未知 kind 一律當 claude（與 daemon 的 400 不同，mock 寬鬆處理）。 */
+/** 2026-09-23 真機（pane 只有 14 行）：claude 把 AskUserQuestion 的題目裁掉，只剩捲動中的選項。 */
+const MOCK_TINY_ASK_SCREEN = [
+  '',
+  '❯ 1. 內網 http (Recommended)',
+  '     改 console：production 允許連私有網段的 http。流量留在 VPC 內、不出公網。',
+  '  2. 公網 https，拿掉 IP 白名單',
+  '     prod 改用 https://rpa-hub.example.com，並拿掉 IP 白名單，只靠 API key＋限流。',
+  '↓ 3. 公網 https＋固定出口 IP',
+  '     Cloud NAT 改用固定 IP，把該 IP 加進白名單。安全面最好，但最慢。',
+  '──────────────────────────────────────────────────────────────',
+  '  5. Chat about this',
+  '',
+  'Enter to select · ↑/↓ to navigate · Esc to cancel',
+]
+
+/** 同一題在 transcript 裡的樣子（daemon `GET /api/bots/{id}/pending-question`）。 */
+const MOCK_TINY_ASK_QUESTIONS = [
+  {
+    question: 'prod console 連 prod RPA 要走哪條路？（現在失敗是因為 console 規定 RPA 位址必須 https，我設了內網 http）',
+    header: '連線方式',
+    multiSelect: false,
+    options: [
+      { label: '內網 http (Recommended)', description: '改 console：production 允許連私有網段的 http。流量留在 VPC 內、不出公網。' },
+      { label: '公網 https，拿掉 IP 白名單', description: 'prod 改用 https，並拿掉 IP 白名單，只靠 API key＋限流。' },
+      { label: '公網 https＋固定出口 IP', description: 'Cloud NAT 改用固定 IP，把該 IP 加進白名單。安全面最好，但最慢。' },
+    ],
+  },
+]
+
 function toKind(v: unknown): BotKind {
   return BOT_KINDS.includes(v as BotKind) ? (v as BotKind) : 'claude'
 }
@@ -859,6 +888,7 @@ export class MockTransport implements Transport {
       if (method === 'GET' && action === 'terminal') {
         return this.terminal(botId, q.get('source') ?? 'visible', Number(q.get('lines') ?? 40))
       }
+      if (method === 'GET' && action === 'pending-question') return this.pendingQuestion(botId)
       if (method === 'POST') {
         if (action === 'start') {
           const r = this.start(botId)
@@ -2808,7 +2838,11 @@ export class MockTransport implements Transport {
     this.emitBotStatus(botId)
 
     const lowered = text.toLowerCase()
-    if (lowered.includes('blocked') || lowered.includes('rm -rf')) {
+    if (lowered.includes('tinyask')) {
+      // pane 太矮、claude 把 AskUserQuestion 的題目裁掉（2026-09-23 真機）：畫面只剩選項，題目只在 transcript。
+      this.tinyAsk.add(botId)
+      setTimeout(() => this.enterBlocked(botId), 900)
+    } else if (lowered.includes('blocked') || lowered.includes('rm -rf')) {
       setTimeout(() => this.enterBlocked(botId), 900)
     } else if (lowered.includes('retry')) {
       // CLI retrying upstream: turn stays in flight, only signal is `turn_progress.alert`.
@@ -2977,6 +3011,32 @@ export class MockTransport implements Transport {
   }
 
   /** Public so the dev helper can force a blocked state without a prompt. */
+  /** 走 tinyask 情境的 bot：畫面是裁過的選單、pending-question 回原題。 */
+  private tinyAsk = new Set<string>()
+
+  private pendingQuestion(botId: string) {
+    const run = this.activeRun(botId)
+    if (!run || run.agent_status !== 'blocked' || !this.tinyAsk.has(botId)) return { questions: null }
+    return { questions: MOCK_TINY_ASK_QUESTIONS }
+  }
+
+  /** 沒指定、或指定的那顆沒在跑：挑第一顆在跑的 claude。回實際用的 bot id（沒有就 null）。 */
+  enterTinyAsk(botId?: string): string | null {
+    let target =
+      botId && this.activeRun(botId) ? botId : this.bots.find((b) => b.kind === 'claude' && this.activeRun(b.id))?.id
+    // 一顆在跑的都沒有：起一顆 claude，等它跑起來再卡住。
+    const toStart = target ? null : (botId ?? this.bots.find((b) => b.kind === 'claude')?.id)
+    if (toStart) {
+      this.start(toStart)
+      target = toStart
+    }
+    if (!target) return null
+    const id = target
+    this.tinyAsk.add(id)
+    setTimeout(() => this.enterBlocked(id), toStart ? 2500 : 0)
+    return id
+  }
+
   enterBlocked(botId: string) {
     const run = this.activeRun(botId)
     if (!run) return
@@ -2993,6 +3053,7 @@ export class MockTransport implements Transport {
     }
     const keys = (Array.isArray(b.keys) ? b.keys : []).map(String)
     if (run.agent_status === 'blocked') {
+      this.tinyAsk.delete(botId)
       const affirm = keys.some((k) => ['y', 'enter', 'Enter'].includes(k))
       if (affirm) {
         setAgentStatus(run, 'working')
@@ -3343,7 +3404,9 @@ export class MockTransport implements Transport {
           ]
         : []
     const body =
-      status === 'blocked'
+      status === 'blocked' && this.tinyAsk.has(botId)
+        ? MOCK_TINY_ASK_SCREEN
+        : status === 'blocked'
         ? [
             '⏺ Bash(rm -rf ./target/debug)',
             '  ⎿  這個指令會刪除建置產物。',
@@ -3418,6 +3481,8 @@ function installDevHelpers(mock: MockTransport) {
     resync: () => mock.forceResync(),
     dropSocket: () => mock.dropSocket(),
     block: (botIdOrName: string) => mock.enterBlocked(mock.botIdByName(botIdOrName) ?? botIdOrName),
+    /** 題目被裁掉的 AskUserQuestion（pane 太矮）：畫面只剩選項，題目只能從 pending-question 讀。回 bot id。 */
+    tinyAsk: (botIdOrName?: string) => mock.enterTinyAsk(botIdOrName ? (mock.botIdByName(botIdOrName) ?? botIdOrName) : undefined),
     disconnect: () => mock.setConnected(false),
     reconnect: () => mock.setConnected(true),
     hostDown: (name: string) => mock.setHostConnected(name, false),

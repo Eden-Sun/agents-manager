@@ -130,6 +130,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/bots/{id}/text", post(text_bot))
         .route("/bots/{id}/messages", get(get_messages))
         .route("/bots/{id}/terminal", get(get_terminal))
+        .route("/bots/{id}/pending-question", get(crate::pending_question::get_pending_question))
         .route("/bots/{id}/local-image", get(crate::local_image::get))
         // bot 交給使用者的檔案（§6.5f）：只讀 outbox。scratchpad 不再給使用者，舊路徑明確 404。
         .route("/bots/{id}/outbox", get(crate::outbox::list))

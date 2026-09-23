@@ -9,6 +9,7 @@ mod build_scheduler;
 mod cargo_shim;
 mod agent_relay;
 mod api;
+mod pending_question;
 mod identity_kind;
 mod intents;
 mod restart_intents;

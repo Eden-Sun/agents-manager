@@ -358,6 +358,11 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 
 `GET /api/bots/{id}/terminal?source=visible&lines=200`：`source ∈ visible | recent | recent_unwrapped | detection`（預設 `visible`），`lines` 1–2000。無 active Run → 404。
 
+`GET /api/bots/{id}/pending-question`：claude 停在 `AskUserQuestion` 時，從 transcript 讀出**還沒被回答**的那一題（最後一個 `tool_use`、之後沒有同 `tool_use_id` 的 `tool_result`）：
+`200 {"questions": [{question, header, multiSelect, options:[{label, description}]}] | null}`。只讀 transcript 最後 512 KiB。
+遠端、非 claude、沒有 transcript、沒在等題目都回 `{"questions": null}`（不是錯誤，前端照舊用畫面）。bot 或 active Run 不存在 404。
+用途：pane 太矮時 claude 會把自己的選單裁掉，題目那一行根本沒畫出來（2026-09-23 使用者：「為什麼看不見題目」）。
+
 ```json
 { "bot_id": "01M1...", "run_id": "01M1...", "pane_id": "w1:p2", "source": "visible", "text": "……已去 ANSI……", "revision": 42, "truncated": false, "agent_status": "blocked" }
 ```
