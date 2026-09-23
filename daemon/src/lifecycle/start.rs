@@ -692,12 +692,9 @@ async fn start_inner(
     let cwd = bot_cwd(bot, project);
     // A new dir opens on "trust this project?" with the cursor on *No*: claude quits, codex eats
     // the first message. Record trust first (local, only when not yet trusted).
-    if project.host == LOCAL_HOST {
-        let mut b = bot.clone();
-        b.cwd = Some(cwd.to_string());
-        for w in crate::trust::pretrust_bots(app, std::slice::from_ref(&b)).await {
-            tracing::warn!(bot = %bot.name, cwd, warning = %w, "could not pre-trust the working directory");
-        }
+    // 遠端也要（#407）：換身分＝換一個從沒信任過的設定目錄，不寫的話每次都停在提示上等人按。
+    for w in crate::trust::pretrust_for_start(app, bot, &project.host, cwd).await {
+        tracing::warn!(bot = %bot.name, cwd, warning = %w, "could not pre-trust the working directory");
     }
 
     // 2. workspace
