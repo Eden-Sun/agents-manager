@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { clipAfterRows, hiddenChipIndexes, lineBudget, moreTitle, type ChipBox } from './chipOverflow.ts'
+import { clipAfterRows, hiddenChipIndexes, layoutBoxes, lineBudget, moreTitle, orderChanged, type ChipBox } from './chipOverflow.ts'
 
 const row = (pinned: boolean, tops: number[]): ChipBox[] => tops.map((top) => ({ pinned, top }))
 
@@ -40,4 +40,33 @@ test('裁切高度是量出來的：看得到的最後一行的下緣（晶片�
   // 晶片變高（星號與徽章）：裁切位置跟著變，不是寫死的 46px。
   const taller = [0, 34].map((top) => ({ top, bottom: top + 28 }))
   assert.equal(clipAfterRows(taller, 1).visibleBottom, 28)
+})
+
+/** 假晶片：排版位置（offset*）＋ FLIP 動畫中的 transform 位移（只反映在 getBoundingClientRect）。 */
+const chip = (offsetTop: number, animDy = 0) => ({
+  offsetTop,
+  offsetHeight: 22,
+  getBoundingClientRect: () => ({ top: offsetTop + animDy, bottom: offsetTop + animDy + 22 }),
+})
+
+test('動畫中的晶片照排版位置量：裁切不隨 transform 來回翻（2026-09-23 殘影）', () => {
+  // 組的上緣在 40；兩行，一行收合（兩組都在）。第 3 顆正從下一行滑上來（FLIP translate +28）。
+  const still = [chip(41), chip(41), chip(69)]
+  const moving = [chip(41), chip(41), chip(69, -28)]
+  const want = clipAfterRows(layoutBoxes(still, 40), 1)
+  assert.deepEqual(want, { hidden: [2], visibleBottom: 23 })
+  // 同一個寬度、同一份排版，不管動畫播到哪一幀都得到同一個答案——否則 +N／裁切高度每幀跳，資訊列被拖出殘影。
+  for (const dy of [-28, -14, -3, 0, 5]) {
+    assert.deepEqual(clipAfterRows(layoutBoxes([chip(41), chip(41), chip(69, dy)], 40), 1), want, `動畫位移 ${dy}px`)
+  }
+  assert.deepEqual(clipAfterRows(layoutBoxes(moving, 40), 1), want)
+})
+
+test('FLIP 只在順序變了時播：換行、+N 出現、晶片增減不算換位', () => {
+  assert.equal(orderChanged(['a', 'b', 'c'], ['a', 'b', 'c']), false, '只是換行（寬度變了）')
+  assert.equal(orderChanged(['a', 'b', 'c'], ['a', 'b']), false, '少一顆')
+  assert.equal(orderChanged(['a', 'c'], ['a', 'b', 'c']), false, '多一顆（插在中間）')
+  assert.equal(orderChanged([], ['a', 'b']), false, '第一次畫')
+  assert.equal(orderChanged(['a', 'b', 'c'], ['b', 'a', 'c']), true, '拖放換位')
+  assert.equal(orderChanged(['a', 'b', 'c'], ['a', 'c', 'x', 'b']), true, '換位同時多一顆')
 })

@@ -16,7 +16,7 @@ import { chipStateText, kidsText } from '../lib/chipStateText'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from 'react'
 import type { Bot } from '../api/types'
 import { useMediaQuery } from '../hooks/useMediaQuery'
-import { clipAfterRows, lineBudget, moreTitle } from '../lib/chipOverflow'
+import { clipAfterRows, layoutBoxes, lineBudget, moreTitle } from '../lib/chipOverflow'
 import { chipTracked } from '../lib/supervisorProject'
 import { pinGridLayout, sortPinned } from '../lib/pinnedOrder'
 import { useChipFlip } from './useChipFlip'
@@ -403,12 +403,7 @@ function useOverflowChips(
     let at = 0
     for (const g of groups) {
       const chips = [...g.querySelectorAll<HTMLElement>('.unread-chip')]
-      const top = g.getBoundingClientRect().top
-      const boxes = chips.map((c) => {
-        const r = c.getBoundingClientRect()
-        return { top: Math.round(r.top - top), bottom: r.bottom - top }
-      })
-      const cut = clipAfterRows(boxes, budget)
+      const cut = clipAfterRows(layoutBoxes(chips, g.offsetTop), budget)
       for (const i of cut.hidden) ids.push(ordered[at + i]?.id ?? '')
       if (cut.hidden.length > 0) {
         px[g.dataset.group ?? 'others'] = Math.ceil(cut.visibleBottom + parseFloat(getComputedStyle(g).paddingBottom || '0'))

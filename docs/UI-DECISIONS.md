@@ -76,6 +76,10 @@
   ![手機兩排各有箭頭](screenshots/fix3-web3/mock-mobile-two-rows-arrows.png)
 - 手機：每一排都是單行橫捲、**位置固定照側欄順序，不照緊急度重排**（使用者指定），有 ◂ ▸ 與 scroll shadow，正在看的那顆自動捲進畫面。
 - 狀態 class 不叫 `blocked`（`styles.css` 有一條裸的 `.blocked` 會撞到），用 `needs-reply`／`quota-blocked`。
+- 桌機收合的行數用**排版位置**（`offsetTop`）量，主力的 FLIP 只在順序真的變了時播（`lib/chipOverflow.ts` 的 `layoutBoxes`／`orderChanged`）。
+  以前 bot 狀態一變、晶片變寬換行就播 FLIP，量測又吃到動畫中的 transform，裁切在 13／43／63／91px 之間每幀亂跳，
+  底下的資訊列被拍成上下兩份殘影（2026-09-23 使用者照片）。
+  ![修正前：主力整行被裁掉](screenshots/chip-flap/before-1041.png) ![修正後](screenshots/chip-flap/after-1041.png)
 
 ## 額度
 
