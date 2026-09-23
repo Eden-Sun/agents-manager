@@ -744,11 +744,17 @@ const orderSaveGen = new Map<string, number>()
  * 並行送的話先發的舊順序可能晚到、蓋掉 daemon 已存的新順序，兩邊都 200 所以不會有任何提示（#391）。
  */
 const orderSaveTail = new Map<string, Promise<void>>()
+/** 一個 order POST 最多等多久；transport 本身沒有逾時，卡住的一個會讓同範圍後面的存檔永遠排隊（#391）。 */
+let orderSaveTimeoutMs = 15_000
+export function setOrderSaveTimeoutForTest(ms: number) {
+  orderSaveTimeoutMs = ms
+}
 function saveOrderTracked(key: string, input: Parameters<typeof api.saveOrder>[0], onFail: (e?: unknown) => void) {
   orderSavesInFlight += 1
   const gen = (orderSaveGen.get(key) ?? 0) + 1
   orderSaveGen.set(key, gen)
-  const send = () => api.saveOrder(input)
+  // 計時從真的送出才開始（排隊等前一個的時間不算）；逾時會中止 fetch、照一般失敗處理，下一個才接著送。
+  const send = () => api.saveOrder(input, AbortSignal.timeout(orderSaveTimeoutMs))
   const done = (orderSaveTail.get(key) ?? Promise.resolve())
     .then(send, send)
     .catch((e) => {

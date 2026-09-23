@@ -13,7 +13,8 @@ export interface SocketHandlers {
 export interface Transport {
   readonly mock: boolean
   session: () => Promise<string>
-  request: (method: HttpMethod, path: string, body?: unknown) => Promise<unknown>
+  /** `signal`：呼叫端自己決定要不要逾時／中止；transport 本身不設逾時。 */
+  request: (method: HttpMethod, path: string, body?: unknown, signal?: AbortSignal) => Promise<unknown>
   upload: (path: string, file: Blob) => Promise<unknown>
   /** Attachments need the token header, which `<img src>` can't carry — so fetch and blob-URL. */
   blobUrl: (path: string) => Promise<string>
@@ -84,7 +85,7 @@ export class HttpTransport implements Transport {
     return token
   }
 
-  async request(method: HttpMethod, path: string, body?: unknown): Promise<unknown> {
+  async request(method: HttpMethod, path: string, body?: unknown, signal?: AbortSignal): Promise<unknown> {
     const send = (tok: string) => {
       const headers: Record<string, string> = { Accept: 'application/json' }
       if (tok) headers['X-AM-Token'] = tok
@@ -93,6 +94,7 @@ export class HttpTransport implements Transport {
         method,
         headers,
         body: body === undefined ? undefined : JSON.stringify(body),
+        signal,
       })
     }
     // 只有 GET 敢重試：POST/PATCH 401 時 daemon 根本沒跑到處理函式，但重送一次仍可能重複送出。
