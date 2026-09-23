@@ -185,8 +185,20 @@ pub(crate) mod capture {
         }
     }
 
+    /// 行程裡永遠活著的第二個 dispatcher（什麼都不收）。
+    ///
+    /// tracing-core 0.1.36 只註冊過一個 dispatcher 時走 `Rebuilder::JustOne`（callsite.rs 的 `rebuilder`／`for_each`）：
+    /// 新 callsite 的 interest 是拿**註冊它的那條執行緒**的 default 算的。這個 binary 裡只有捕捉用 `set_default`，
+    /// 所以捕捉期間別的測試執行緒第一次打到 `log_write` 之類的 callsite，會用它自己的 NoSubscriber 算出 `never` 並快取住，
+    /// 之後這條執行緒的事件就再也收不到（CI run 35890397719；flaky-sweep 120 輪紅 8 輪）。
+    /// 多一個一直活著的 dispatcher，註冊表就不會是「只有一個」，callsite 的 interest 一律對整張表算（有鎖、不看執行緒），
+    /// 兩者合起來是 `sometimes`，每個事件照常問目前執行緒的 subscriber。production 用全域 subscriber，沒有這個問題。
+    static KEEP_REGISTRY_PLURAL: std::sync::OnceLock<tracing::Dispatch> = std::sync::OnceLock::new();
+
     /// 回傳一個只在 `guard` 活著的期間生效的 subscriber（`set_default` 綁在目前執行緒；測試要用 current_thread runtime）。
     pub fn start() -> (Buf, tracing::subscriber::DefaultGuard) {
+        // 一定要在 `set_default` 之前：註冊自己那一刻表裡就已經有兩個，`has_just_one` 才會是 false。
+        KEEP_REGISTRY_PLURAL.get_or_init(|| tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()));
         let buf = Buf::default();
         let sub = tracing_subscriber::fmt().with_writer(buf.clone()).with_ansi(false).with_max_level(tracing::Level::DEBUG).finish();
         (buf.clone(), tracing::subscriber::set_default(sub))
@@ -210,6 +222,19 @@ mod tests {
         assert_eq!(d.removed_bots, vec!["b1(build)".to_string()]);
         assert_eq!(d.added_bots, vec!["b3(new)".to_string()]);
         assert!(d.removed_projects.is_empty() && d.added_projects.is_empty());
+    }
+
+    /// CI run 35890397719 那條偶發紅的確定性重現：捕捉進行中，**另一條執行緒先第一次**打到某個 callsite
+    /// （全樹很多測試都會寫 config，`log_write` 的 callsite 常常是別人先打到），這條執行緒之後打同一個 callsite 還是要收得到。
+    #[test]
+    fn a_callsite_first_hit_on_another_thread_while_capturing_still_reaches_the_capture() {
+        fn probe() {
+            tracing::info!("capture-probe-7f3a");
+        }
+        let (buf, _guard) = capture::start();
+        std::thread::spawn(probe).join().unwrap();
+        probe();
+        assert!(buf.text().contains("capture-probe-7f3a"), "別的執行緒先註冊的 callsite 被快取成 never：{:?}", buf.text());
     }
 
     #[tokio::test(flavor = "current_thread")]
