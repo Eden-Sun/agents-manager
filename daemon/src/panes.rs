@@ -202,9 +202,39 @@ pub struct Observed {
     pub ports: Vec<u16>,
 }
 
-/// 掃一台主機的非 agent pane，寫進 `panes`。`snapshot_panes` 是 `session.snapshot` 的 `panes` 陣列
-/// （已經含 `agent`），所以不用再打一次 RPC。
-pub async fn scan_host(app: &Arc<App>, host: &str, snapshot_panes: &[Value]) -> Result<ScanOutcome> {
+/// daemon 自己開的探測 workspace（`quota_claude` 的 `am-quota-claude[-<身分>]`、`quota_grok` 的 `am-quota-grok`）
+/// 的 label 前綴。遠端主機沒有獨立的 `am-quota` session，探測借 daemon 的主 session 開、幾秒後關；
+/// 那幾秒它是一顆前景跑著 claude 的 shell，不排除的話會被當成沒歸屬的 service pane 推 `pane_unowned`（#408）。
+pub const DAEMON_PROBE_WORKSPACE_PREFIX: &str = "am-quota-";
+
+pub fn is_daemon_probe_workspace(label: Option<&str>) -> bool {
+    label.is_some_and(|l| l.starts_with(DAEMON_PROBE_WORKSPACE_PREFIX))
+}
+
+/// 掃一台主機的非 agent pane，寫進 `panes`。唯一的入口：從 `session.snapshot` 取 `panes`，
+/// 先拿掉 daemon 自己開的探測 workspace 裡的 pane（label 在同一份 snapshot 的 `workspaces` 上）。
+pub async fn scan_snapshot(app: &Arc<App>, host: &str, snapshot: &Value) -> Result<ScanOutcome> {
+    let probe_ws: std::collections::HashSet<&str> = snapshot
+        .get("workspaces")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|w| is_daemon_probe_workspace(label_of(w)))
+        .filter_map(|w| w.get("workspace_id").and_then(Value::as_str))
+        .collect();
+    let panes: Vec<Value> = snapshot
+        .get("panes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|p| !p.get("workspace_id").and_then(Value::as_str).is_some_and(|w| probe_ws.contains(w)))
+        .cloned()
+        .collect();
+    scan_host(app, host, &panes).await
+}
+
+/// `snapshot_panes` 是 `session.snapshot` 的 `panes` 陣列（已經含 `agent`），所以不用再打一次 RPC。
+async fn scan_host(app: &Arc<App>, host: &str, snapshot_panes: &[Value]) -> Result<ScanOutcome> {
     // 對帳那一輪與定期那一輪不交錯寫同一張表（兩邊的 DELETE 會互相把對方剛記的列刪掉）。
     static SCAN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _one_at_a_time = SCAN.lock().await;
@@ -252,10 +282,10 @@ pub async fn rescan(app: &Arc<App>, host: &str) -> Result<ScanOutcome> {
     let (client, _) = crate::api::shell::client_for(app, host).await.map_err(|e| anyhow::anyhow!("{e:?}"))?;
     let snapshot = client.snapshot().await?;
     // 同 reconcile 的規則：連 key 都沒有＝不認得的形狀，當成空的會把整台的列清光。
-    let Some(panes) = snapshot.get("panes").and_then(Value::as_array) else {
+    if !snapshot.get("panes").is_some_and(Value::is_array) {
         anyhow::bail!("session.snapshot on host `{host}` has no `panes`; skipping the pane scan");
-    };
-    scan_host(app, host, panes).await
+    }
+    scan_snapshot(app, host, &snapshot).await
 }
 
 pub fn spawn_scanner(app: Arc<App>) {
@@ -1360,6 +1390,24 @@ mod tests {
         let flags: Vec<(bool, bool)> =
             unowned["panes"].as_array().unwrap().iter().map(|p| (p["scratch"].as_bool().unwrap(), p["read_only"].as_bool().unwrap())).collect();
         assert_eq!(flags, vec![(true, false), (false, false)]);
+        std::fs::remove_dir_all(&app.data_dir).ok();
+    }
+
+    /// #408：daemon 自己開的探測 workspace（遠端借主 session 開、幾秒後關）不進 `panes`，也就不推 `pane_unowned`；
+    /// 同一輪使用者自己的 pane 照常記、照常通知。
+    #[tokio::test]
+    async fn the_daemons_own_probe_workspace_is_not_scanned_or_reported() {
+        let app = app().await;
+        let probe = json!({"pane_id": "wQ:p1", "workspace_id": "wQ", "tab_id": "wQ:t1", "cwd": "/home/u", "agent": null, "revision": 1});
+        let snapshot = json!({
+            "workspaces": [{"workspace_id": "w1", "label": "proj"}, {"workspace_id": "wQ", "label": "am-quota-claude-zz92la"}],
+            "panes": [pane("w1:pB", None, 1), probe],
+        });
+        let scan = scan_snapshot(&app, "zz92", &snapshot).await.unwrap();
+        assert_eq!(scan.panes, 1, "只收使用者那顆");
+        let ids: Vec<String> = sqlx::query_scalar("SELECT pane_id FROM panes ORDER BY pane_id").fetch_all(&app.db).await.unwrap();
+        assert_eq!(ids, vec!["w1:pB".to_string()], "探測 pane 不進表");
+        assert_eq!(notify_unowned_and_orphans(&app, "zz92").await.unwrap(), 1, "只有使用者那顆推 pane_unowned");
         std::fs::remove_dir_all(&app.data_dir).ok();
     }
 

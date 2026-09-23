@@ -350,6 +350,16 @@ impl MockHerdr {
                                 None => json!({"id": id, "error": {"code": "not_found", "message": "no such workspace"}}),
                             }
                         }
+                        "workspace.list" => {
+                            let wss: Vec<Value> = st
+                                .workspaces
+                                .lock()
+                                .unwrap()
+                                .iter()
+                                .map(|(w, l)| json!({"workspace_id": w, "label": l, "pane_count": 1}))
+                                .collect();
+                            json!({"id": id, "result": {"type": "workspace_list", "workspaces": wss}})
+                        }
                         "workspace.close" => {
                             let wid = wid_of("workspace_id");
                             st.workspaces.lock().unwrap().remove(&wid);
@@ -477,8 +487,8 @@ impl MockHerdr {
                                 .workspaces
                                 .lock()
                                 .unwrap()
-                                .keys()
-                                .map(|w| json!({"workspace_id": w}))
+                                .iter()
+                                .map(|(w, l)| json!({"workspace_id": w, "label": l}))
                                 .collect();
                             json!({"id": id, "result": {"type": "session_snapshot", "snapshot":
                                 {"workspaces": wss, "panes": panes,

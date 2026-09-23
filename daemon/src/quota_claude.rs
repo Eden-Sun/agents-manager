@@ -305,12 +305,7 @@ pub async fn sweep_stale(app: &Arc<App>) {
     }
     for c in clients {
         let Ok(list) = c.workspace_list().await else { continue };
-        for ws in list.iter().filter(|w| {
-            w.label
-                .as_deref()
-                .map(|l| l == PROBE_LABEL_PREFIX || l.starts_with(&format!("{PROBE_LABEL_PREFIX}-")))
-                .unwrap_or(false)
-        }) {
+        for ws in list.iter().filter(|w| w.label.as_deref().is_some_and(is_probe_label)) {
             match c.workspace_close(&ws.workspace_id).await {
                 Ok(()) => tracing::info!(workspace = %ws.workspace_id, "closed a stale claude quota probe"),
                 Err(e) => tracing::warn!(workspace = %ws.workspace_id, error = %e, "stale claude probe not closed"),
@@ -458,6 +453,77 @@ async fn send_line(client: &HerdrClient, pane_id: &str, line: &str) -> Result<()
     client.pane_send_keys(pane_id, &["Enter"]).await
 }
 
+/// 上一輪 `workspace.close` 失敗（ssh 斷一下）留下的 claude 探測 workspace：開新的之前先收，
+/// 不然要等 daemon 重啟的 [`sweep_stale`] 才收，中間每一輪都可能再多留一個（#408）。
+/// 呼叫端握著這台的 `probe_lock`，同一台同時只有一個 claude 探測在跑，所以此刻同前綴的一定是殘留。
+async fn sweep_leftovers(client: &HerdrClient) {
+    let list = match client.workspace_list().await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::debug!(error = %e, "claude probe: could not list workspaces to sweep leftovers");
+            return;
+        }
+    };
+    for ws in list.iter().filter(|w| w.label.as_deref().is_some_and(is_probe_label)) {
+        match client.workspace_close(&ws.workspace_id).await {
+            Ok(()) => tracing::info!(workspace = %ws.workspace_id, "closed a leftover claude quota probe"),
+            Err(e) => tracing::warn!(workspace = %ws.workspace_id, error = %e, "leftover claude probe not closed"),
+        }
+    }
+}
+
+fn is_probe_label(l: &str) -> bool {
+    l == PROBE_LABEL_PREFIX || l.starts_with(&format!("{PROBE_LABEL_PREFIX}-"))
+}
+
+/// [`run_probe_pane`] 的結果：打完指令後讀到兩段輸出，或時間到了（帶最後一次讀到的畫面）。
+#[derive(Debug)]
+enum PaneRun {
+    Done(String, String),
+    TimedOut(String),
+}
+
+/// 在 `client` 上開一個探測 workspace、打 `cmd`、等到標記或 `timeout`。不論成功、RPC 失敗、逾時，
+/// 或整個 future 被丟棄（[`Probe`] 的 `Drop`），這個 workspace 都會關掉（#408）。
+async fn run_probe_pane(
+    client: &HerdrClient,
+    cwd: &str,
+    label: &str,
+    env_json: Value,
+    cmd: &str,
+    timeout: Duration,
+) -> Result<PaneRun> {
+    sweep_leftovers(client).await;
+    let (ws, pane) = client.workspace_create(cwd, label, env_json).await?;
+    let probe = Probe { client: client.clone(), workspace_id: ws.workspace_id.clone(), closed: false };
+    let pane_id = pane.pane_id.clone();
+
+    // workspace.create can return before the shell takes input; a line typed too early is lost, so retype.
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    let mut sends = 1u32;
+    let mut sent_at = tokio::time::Instant::now();
+    send_line(client, &pane_id, cmd).await?;
+
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut last = String::new();
+    while tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        last = client.pane_read(&pane_id, "recent_unwrapped", 400).await.map(|r| r.text).unwrap_or_default();
+        if let Some((auth, usage)) = split_probe_output(&last) {
+            probe.close().await;
+            return Ok(PaneRun::Done(auth, usage));
+        }
+        if sends < 3 && !last.contains(AUTH_BEGIN) && sent_at.elapsed() > Duration::from_secs(5) {
+            tracing::debug!(label, sends, "claude probe pane swallowed the command; retyping");
+            let _ = send_line(client, &pane_id, cmd).await;
+            sends += 1;
+            sent_at = tokio::time::Instant::now();
+        }
+    }
+    probe.close().await;
+    Ok(PaneRun::TimedOut(last))
+}
+
 /// `Ok(None)` = claude not installed. Caller must hold [`crate::quota::probe_lock`] for that host.
 async fn refresh_claude_account(
     app: &Arc<App>,
@@ -488,38 +554,12 @@ async fn refresh_claude_account(
         _ => PROBE_LABEL_PREFIX.to_string(),
     };
     let env_json = Value::Object(env.iter().map(|(k, v)| (k.clone(), json!(v))).collect());
-    let (ws, pane) = client.workspace_create(&cwd, &label, env_json).await?;
-    let probe = Probe { client: client.clone(), workspace_id: ws.workspace_id.clone(), closed: false };
-    let pane_id = pane.pane_id.clone();
     let cmd = probe_command(&bin, &env, with_usage);
-
-    // workspace.create can return before the shell takes input; a line typed too early is lost, so retype.
-    tokio::time::sleep(Duration::from_millis(700)).await;
-    let mut sends = 1u32;
-    let mut sent_at = tokio::time::Instant::now();
-    send_line(&client, &pane_id, &cmd).await?;
-
-    let deadline = tokio::time::Instant::now() + PROBE_TIMEOUT;
-    let mut last = String::new();
-    let mut got = None;
-    while tokio::time::Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(700)).await;
-        last = client.pane_read(&pane_id, "recent_unwrapped", 400).await.map(|r| r.text).unwrap_or_default();
-        if let Some(v) = split_probe_output(&last) {
-            got = Some(v);
-            break;
+    let (auth, usage) = match run_probe_pane(&client, &cwd, &label, env_json, &cmd, PROBE_TIMEOUT).await? {
+        PaneRun::Done(auth, usage) => (auth, usage),
+        PaneRun::TimedOut(last) => {
+            return Err(anyhow!("claude probe on {host} did not finish within {PROBE_TIMEOUT:?}; screen:\n{}", last.trim()))
         }
-        if sends < 3 && !last.contains(AUTH_BEGIN) && sent_at.elapsed() > Duration::from_secs(5) {
-            tracing::debug!(host, sends, "claude probe pane swallowed the command; retyping");
-            let _ = send_line(&client, &pane_id, &cmd).await;
-            sends += 1;
-            sent_at = tokio::time::Instant::now();
-        }
-    }
-    probe.close().await;
-
-    let Some((auth, usage)) = got else {
-        return Err(anyhow!("claude probe on {host} did not finish within {PROBE_TIMEOUT:?}; screen:\n{}", last.trim()));
     };
     // 探測幾十秒，期間同名主機可能已換成另一台（#347）：整個結果作廢，不回登入狀態也不寫額度。
     if !app.hosts.is_current(&fence).await {
@@ -948,6 +988,104 @@ pub fn spawn_claude_poller(app: Arc<App>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #408：假 herdr 上跑 [`run_probe_pane`]；回傳 herdr 此刻還開著的 workspace label（Drop 的關閉是 spawn 出去的，等它一下）。
+    mod probe_workspace {
+        use super::*;
+        use crate::testing::{Fault, MockHerdr};
+
+        fn herdr() -> (MockHerdr, HerdrClient, std::path::PathBuf) {
+            let dir = std::env::temp_dir().join(format!("am-qc-{}", crate::db::ulid()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let sock = dir.join("herdr.sock");
+            (MockHerdr::start(sock.clone()), HerdrClient::new(sock), dir)
+        }
+
+        async fn open_labels(h: &MockHerdr, want: usize) -> Vec<String> {
+            for _ in 0..40 {
+                if h.workspaces.lock().unwrap().len() <= want {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            h.workspaces.lock().unwrap().values().cloned().collect()
+        }
+
+        fn finished_screen() -> String {
+            format!("{AUTH_BEGIN}\n{{\"loggedIn\":true}}\n{AUTH_END}\nTotal cost: $0\n{USAGE_DONE}0\n")
+        }
+
+        const LABEL: &str = "am-quota-claude-zz92la";
+
+        #[tokio::test]
+        async fn a_finished_probe_closes_its_workspace() {
+            let (h, c, dir) = herdr();
+            h.set_screen("*", &finished_screen());
+            let out = run_probe_pane(&c, "/tmp", LABEL, json!({}), "true", Duration::from_secs(5)).await.unwrap();
+            assert!(matches!(out, PaneRun::Done(ref a, _) if a.contains("loggedIn")), "{out:?}");
+            assert_eq!(open_labels(&h, 0).await, Vec::<String>::new(), "成功也要關");
+            std::fs::remove_dir_all(dir).ok();
+        }
+
+        #[tokio::test]
+        async fn a_failed_rpc_still_closes_its_workspace() {
+            let (h, c, dir) = herdr();
+            h.fail_next("pane.send_text", Fault::Refuse);
+            assert!(run_probe_pane(&c, "/tmp", LABEL, json!({}), "true", Duration::from_secs(5)).await.is_err());
+            assert_eq!(open_labels(&h, 0).await, Vec::<String>::new(), "打字失敗（`?` 提早返回）也要關");
+            std::fs::remove_dir_all(dir).ok();
+        }
+
+        #[tokio::test]
+        async fn a_timed_out_probe_closes_its_workspace() {
+            let (h, c, dir) = herdr();
+            let out = run_probe_pane(&c, "/tmp", LABEL, json!({}), "true", Duration::from_millis(800)).await.unwrap();
+            assert!(matches!(out, PaneRun::TimedOut(_)), "{out:?}");
+            assert_eq!(open_labels(&h, 0).await, Vec::<String>::new(), "逾時也要關");
+            std::fs::remove_dir_all(dir).ok();
+        }
+
+        /// 外層（`force_probe` 的逾時、整個輪詢被取消）把 future 丟掉：`Drop` 補關。
+        #[tokio::test]
+        async fn a_dropped_probe_closes_its_workspace() {
+            let (h, c, dir) = herdr();
+            let cut = tokio::time::timeout(
+                Duration::from_millis(300),
+                run_probe_pane(&c, "/tmp", LABEL, json!({}), "true", Duration::from_secs(5)),
+            )
+            .await;
+            assert!(cut.is_err(), "還在等殼起來就被丟掉");
+            assert_eq!(open_labels(&h, 0).await, Vec::<String>::new(), "被丟掉的 future 也要關");
+            std::fs::remove_dir_all(dir).ok();
+        }
+
+        /// 上一輪 `workspace.close` 失敗（ssh 斷一下）留下的殘留，不能等 daemon 重啟才收：下一輪開新的之前先收。
+        /// 別人的 workspace（使用者的、grok 探測的）不碰。
+        #[tokio::test]
+        async fn a_leftover_from_a_failed_close_is_swept_by_the_next_probe() {
+            let (h, c, dir) = herdr();
+            c.workspace_create("/tmp", "proj", json!({})).await.unwrap();
+            c.workspace_create("/tmp", "am-quota-grok", json!({})).await.unwrap();
+            h.set_screen("*", &finished_screen());
+            h.fail_next("workspace.close", Fault::Refuse);
+            run_probe_pane(&c, "/tmp", LABEL, json!({}), "true", Duration::from_secs(5)).await.unwrap();
+            let mut left = open_labels(&h, 3).await;
+            left.sort();
+            assert_eq!(left, vec!["am-quota-claude-zz92la", "am-quota-grok", "proj"], "前提：這一輪的 close 被拒");
+
+            run_probe_pane(&c, "/tmp", "am-quota-claude", json!({}), "true", Duration::from_secs(5)).await.unwrap();
+            let mut left = open_labels(&h, 2).await;
+            left.sort();
+            assert_eq!(left, vec!["am-quota-grok", "proj"], "殘留與這一輪的都收掉，別人的不動");
+            std::fs::remove_dir_all(dir).ok();
+        }
+
+        #[test]
+        fn the_probe_labels_are_the_ones_the_pane_scan_leaves_out() {
+            assert!(crate::panes::is_daemon_probe_workspace(Some(PROBE_LABEL_PREFIX)));
+            assert!(crate::panes::is_daemon_probe_workspace(Some(&format!("{PROBE_LABEL_PREFIX}-cc1"))));
+        }
+    }
 
     /// 停用的身份不再探測，但**還在跑的例外**：停用是「別再挑它」，不是把正在用的額度弄瞎。
     #[test]
