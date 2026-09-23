@@ -380,6 +380,8 @@ struct ComposerRow {
     boxed: bool,
     /// Characters after the marker glyph (box edge removed), with their dim flag.
     after_glyph: Vec<(char, bool)>,
+    /// The marker glyph's own cell: the colour real text is drawn in ([`is_hint_cell`]).
+    marker: Option<Cell>,
 }
 
 /// The last row near the bottom whose first visible glyph is the kind's composer marker.
@@ -429,6 +431,7 @@ fn locate_composer(kind: &str, lines: &[&str], drop_particles: bool, tail: usize
             idx,
             boxed,
             after_glyph: cells[i + 1..end].iter().map(|c| (c.ch, is_hint_cell(c, marker.as_ref()))).collect(),
+            marker,
         })
     })
 }
@@ -455,28 +458,21 @@ pub(crate) fn box_state_within(kind: &str, screen: &str, tail: usize) -> BoxStat
     // `is_particle`); a plain read is never relaxed.
     let particles = kind == "codex" && screen.contains("\u{1b}[");
     let Some(c) = locate_composer(kind, &lines, particles, tail) else { return BoxState::Unready };
-    let mut content = c.after_glyph;
-    if matches!(content.first(), Some((' ' | '\u{a0}', _))) {
-        content.remove(0);
-    }
-    // With the particles erased, what trails the marker row is the composer's own padding.
-    if c.boxed || particles {
-        while matches!(content.last(), Some((ch, _)) if ch.is_whitespace()) {
-            content.pop();
-        }
-    }
-    let text: String = content.iter().map(|(ch, _)| *ch).collect();
-    // Anything the TUI draws dim after the marker is its own hint — `Try "…"`, codex's example
+    let content = marker_row_content(&c, particles);
+    // Anything the TUI draws as a hint after the marker is its own — `Try "…"`, codex's example
     // prompts, claude's suggested next prompt — never typed text, whatever the words say. One
-    // visible non-dim character makes it a draft (sol review round nine #2).
-    let visible: Vec<bool> = content.iter().filter(|(ch, _)| !ch.is_whitespace()).map(|(_, dim)| *dim).collect();
-    let dim_placeholder = !visible.is_empty() && visible.iter().all(|dim| *dim);
-    if !(text.is_empty() || dim_placeholder) {
-        return BoxState::NonEmpty;
-    }
-    // Where the frame closes. Any row between the marker row and that edge is more of the
-    // composer — a blank second line is still something typed.
-    let rest: Vec<String> = lines[c.idx + 1..]
+    // visible non-hint character makes it a draft (sol review round nine #2).
+    let skip = if content.is_empty() {
+        0
+    } else {
+        match hint_rows(&c, &content, &lines, particles) {
+            Some(n) => n,
+            None => return BoxState::NonEmpty,
+        }
+    };
+    // Where the frame closes. Any row between the marker row (and the hint's own wrapped rows)
+    // and that edge is more of the composer — a blank second line is still something typed.
+    let rest: Vec<String> = lines[c.idx + 1 + skip..]
         .iter()
         .map(|r| blank_particles(styled_cells(r), particles).into_iter().map(|c| c.ch).collect())
         .collect();
@@ -494,6 +490,74 @@ pub(crate) fn box_state_within(kind: &str, screen: &str, tail: usize) -> BoxStat
         // An empty-looking marker row with no frame under it: not a screen we know.
         None => BoxState::Unready,
     }
+}
+
+/// What the marker row holds after the glyph: the one separator after it dropped (a space, or the
+/// no-break space claude draws), and inside a box — or with codex's particles erased — the
+/// trailing padding too.
+fn marker_row_content(c: &ComposerRow, particles: bool) -> Vec<(char, bool)> {
+    let mut content = c.after_glyph.clone();
+    if matches!(content.first(), Some((' ' | '\u{a0}', _))) {
+        content.remove(0);
+    }
+    if c.boxed || particles {
+        while matches!(content.last(), Some((ch, _)) if ch.is_whitespace()) {
+            content.pop();
+        }
+    }
+    content
+}
+
+/// 「輸入框裡只有 TUI 自己畫的提示」的唯一一份判斷（佔位字、claude／codex 的「建議下一句」、grok 的灰字建議；
+/// 提示＝[`is_hint_cell`]：SGR 2 dim，或比同一列 marker 更貼近背景的顏色）。[`box_state`] 與 [`plain_without_hints`] 都走這裡。
+///
+/// marker 那一列看得見的字**全部**是提示才算，一個非提示字（使用者開始打字的那一幀）就是草稿 → `None`。
+/// 是提示時回底下還有幾列續行也只有提示字（建議句在窄 pane 折成兩列）；碰到框的下緣就停。
+/// 純文字讀沒有樣式，`is_hint_cell` 永遠不成立：看不出 dim 就不放寬（使用者可能真的打了一模一樣的字）。
+fn hint_rows(c: &ComposerRow, content: &[(char, bool)], lines: &[&str], particles: bool) -> Option<usize> {
+    let visible: Vec<bool> = content.iter().filter(|(ch, _)| !ch.is_whitespace()).map(|(_, hint)| *hint).collect();
+    if visible.is_empty() || !visible.iter().all(|hint| *hint) {
+        return None;
+    }
+    let more = lines[c.idx + 1..]
+        .iter()
+        .take_while(|r| {
+            let cells = blank_particles(styled_cells(r), particles);
+            let row: String = cells.iter().map(|x| x.ch).collect();
+            if is_rule_row(&row) || is_box_bottom(&row) {
+                return false;
+            }
+            let shown: Vec<&Cell> = cells.iter().filter(|x| !x.ch.is_whitespace() && x.ch != '│').collect();
+            !shown.is_empty() && shown.iter().all(|x| is_hint_cell(x, c.marker.as_ref()))
+        })
+        .count();
+    Some(more)
+}
+
+/// 給用純文字判斷輸入框的地方（`poller::composer_text`、`tui_prompts::composer_is_idle`…）的同一支判斷：
+/// `format: ansi` 讀到的畫面去掉樣式，而且輸入框裡只有提示（[`hint_rows`]）時把提示抹掉——marker 那一列只留 marker，
+/// 提示折出來的續行整列拿掉——得到的就是「使用者什麼都沒打」的那個畫面。框裡有真的字就只去樣式、內容原樣保留。
+/// 純文字讀（沒有 ESC）原樣回傳。
+pub(crate) fn plain_without_hints(kind: &str, screen: &str) -> String {
+    if !screen.contains('\u{1b}') {
+        return screen.to_string();
+    }
+    let lines: Vec<&str> = screen.lines().collect();
+    let particles = kind == "codex";
+    let mut plain: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
+    if let Some(c) = locate_composer(kind, &lines, particles, COMPOSER_TAIL) {
+        let content = marker_row_content(&c, particles);
+        if let Some(n) = hint_rows(&c, &content, &lines, particles) {
+            let cells = blank_particles(styled_cells(lines[c.idx]), particles);
+            let glyph = composer_glyph(kind);
+            let at = cells.iter().position(|x| Some(x.ch) == glyph).unwrap_or(0);
+            let row: String =
+                cells.iter().enumerate().map(|(i, x)| if i > at && is_hint_cell(x, c.marker.as_ref()) { ' ' } else { x.ch }).collect();
+            plain[c.idx] = if c.boxed { row } else { row.trim_end().to_string() };
+            plain.drain(c.idx + 1..c.idx + 1 + n);
+        }
+    }
+    plain.join("\n")
 }
 
 fn continuation_row(row: &str) -> bool {
@@ -745,7 +809,14 @@ pub(crate) fn should_warn_plain_for_ansi(pane: &str) -> bool {
 /// Read the pane for the composer checks: styled when herdr can, plain when it cannot. A plain
 /// read is the fail-closed fallback — no dim flags, so a placeholder simply reads as `NonEmpty`.
 async fn read_composer(client: &HerdrClient, pane: &str) -> anyhow::Result<String> {
-    match client.pane_read_ansi(pane, SCAN_SOURCE, DELIVER_SCAN_LINES).await {
+    read_styled(client, pane, SCAN_SOURCE, DELIVER_SCAN_LINES).await
+}
+
+/// A pane read with styling kept (`format: ansi`), falling back to the plain read on a herdr without
+/// it. Every check of "is there something in the input box" reads this way: only styling tells the
+/// TUI's own hint from typed text ([`plain_without_hints`]).
+pub(crate) async fn read_styled(client: &HerdrClient, pane: &str, source: &str, lines: u32) -> anyhow::Result<String> {
+    match client.pane_read_ansi(pane, source, lines).await {
         Ok(r) => {
             // A herdr that ignores the parameter answers `format: text`: the read is still usable
             // (placeholders just read as busy), but say so, or the downgrade is invisible.
@@ -758,7 +829,7 @@ async fn read_composer(client: &HerdrClient, pane: &str) -> anyhow::Result<Strin
             if should_warn_plain_for_ansi(pane) {
                 tracing::warn!(pane, error = %e, "herdr has no styled pane.read; using the plain read");
             }
-            Ok(client.pane_read(pane, SCAN_SOURCE, DELIVER_SCAN_LINES).await?.text)
+            Ok(client.pane_read(pane, source, lines).await?.text)
         }
         Err(e) => Err(e),
     }
@@ -1344,6 +1415,61 @@ mod tests {
         let got = styled_cells("a\u{1b}[38;5;2mb\u{1b}[39mc\u{1b}[31md\u{1b}[0me\u{1b}[48;2;1;2;3mf");
         let fg: Vec<(char, bool)> = got.iter().map(|c| (c.ch, c.fg)).collect();
         assert_eq!(fg, vec![('a', false), ('b', true), ('c', false), ('d', true), ('e', false), ('f', false)]);
+    }
+
+    const CLAUDE_280_SUGGESTION: &str = include_str!("fixtures/claude-2.1.280-prompt-suggestion.ansi");
+
+    /// Claude Code 2.1.280 的「建議下一句」（prompt suggestion）：`❯` ＋ NBSP ＋ `\x1b[0m` ＋ `\x1b[2m…\x1b[0m`。
+    /// 真畫面（2026-09-23 在獨立 herdr session 裡開 claude 抓的 `recent-unwrapped` ansi 讀）要讀成空框；
+    /// 2026-09-23 AM-2-M 就是被這一行擋成 409 `composer_busy`（「bot 的輸入框裡有字」）。
+    #[test]
+    fn claude_280_prompt_suggestion_is_an_empty_box() {
+        assert!(CLAUDE_280_SUGGESTION.contains("❯\u{a0}\u{1b}[0m\u{1b}[2mInitialize git\u{1b}[0m"), "fixture 形狀變了");
+        assert_eq!(box_state("claude", CLAUDE_280_SUGGESTION), BoxState::Empty, "真畫面的建議句");
+        // AGM 從 AM-2-M 讀到的那一行，逐位元組。
+        let agm = CLAUDE_280_SUGGESTION.replace("Initialize git", "推給agm強制部署");
+        assert_eq!(box_state("claude", &agm), BoxState::Empty, "AM-2-M 那一句");
+        // 使用者真的打的字：同一個位置、沒有 dim。
+        let typed = CLAUDE_280_SUGGESTION.replace("\u{1b}[2mInitialize git", "Initialize git");
+        assert_eq!(box_state("claude", &typed), BoxState::NonEmpty, "非 dim＝打的字");
+        // 混合：dim 的建議後面接一個正常字（使用者在建議句上開始打字的那一幀）。
+        let mixed = CLAUDE_280_SUGGESTION.replace("Initialize git\u{1b}[0m", "Initialize git\u{1b}[0mx");
+        assert_eq!(box_state("claude", &mixed), BoxState::NonEmpty, "同一行混了正常字");
+        let mixed_front = CLAUDE_280_SUGGESTION.replace("\u{1b}[2mInitialize", "x\u{1b}[2mInitialize");
+        assert_eq!(box_state("claude", &mixed_front), BoxState::NonEmpty, "正常字在前");
+    }
+
+    /// 讀純文字判斷輸入框的地方（`composer_text`、`tui_prompts::composer_is_idle`）跟 [`box_state`] 同一個結論：
+    /// 只有建議句＝空輸入列；真的字、混了一個正常字＝原樣保留。
+    #[test]
+    fn plain_checks_see_a_suggestion_only_box_as_empty() {
+        let plain = plain_without_hints("claude", CLAUDE_280_SUGGESTION);
+        assert!(!plain.contains('\u{1b}') && !plain.contains("Initialize git"), "{plain}");
+        let lines: Vec<&str> = plain.lines().collect();
+        assert!(crate::tui_prompts::composer_is_idle(&lines), "{plain}");
+        assert_eq!(crate::lifecycle::poller::composer_text("claude", CLAUDE_280_SUGGESTION), None);
+
+        let typed = CLAUDE_280_SUGGESTION.replace("\u{1b}[2mInitialize git", "Initialize git");
+        assert_eq!(crate::lifecycle::poller::composer_text("claude", &typed).as_deref(), Some("Initialize git"));
+        let mixed = CLAUDE_280_SUGGESTION.replace("Initialize git\u{1b}[0m", "Initialize git\u{1b}[0mx");
+        assert!(plain_without_hints("claude", &mixed).contains("Initialize gitx"), "混了正常字就整句保留");
+        // 純文字讀看不出 dim：不放寬。
+        let bare = strip_ansi(CLAUDE_280_SUGGESTION);
+        assert_eq!(plain_without_hints("claude", &bare), bare);
+    }
+
+    /// 建議句在窄 pane 折成兩列：續行一樣只有提示字，整個框還是空的；續行上有一個正常字就是草稿。
+    #[test]
+    fn a_suggestion_wrapped_onto_a_second_row_is_still_an_empty_box() {
+        let two = CLAUDE_280_SUGGESTION.replace(
+            "\u{1b}[2mInitialize git\u{1b}[0m",
+            "\u{1b}[2mInitialize a git repository and\u{1b}[0m\r\n  \u{1b}[2mcommit notes.txt\u{1b}[0m",
+        );
+        assert_eq!(box_state("claude", &two), BoxState::Empty);
+        assert!(!plain_without_hints("claude", &two).contains("commit notes"));
+        let typed_second = two.replace("\u{1b}[2mcommit notes.txt", "commit notes.txt");
+        assert_eq!(box_state("claude", &typed_second), BoxState::NonEmpty);
+        assert!(plain_without_hints("claude", &typed_second).contains("commit notes.txt"));
     }
 
     /// 只有已知的空框形狀才算空：任何額外位元組、任何續行（含空白列）都是非空（第七輪 #1）。

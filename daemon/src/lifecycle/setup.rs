@@ -625,6 +625,13 @@ pub(crate) async fn pane_env(
     }
     env.insert("CLAUDE_CODE_CHILD_SESSION".into(), json!(""));
     env.insert("CLAUDECODE".into(), json!(""));
+    // claude 2.1.280 回合結束後在輸入框畫一句 dim 的「建議下一句」（prompt suggestion），Esc／Ctrl-U／Ctrl-C 都清不掉；
+    // 讀純文字的檢查會當成有人在打字（2026-09-23 AM-2-M 被擋成 409 composer_busy）。`--prompt-suggestions` 只收
+    // `--print`＋stream-json，互動模式帶了會直接起不來，所以用 env（2.1.280 實測 "false" 關得掉）。本機遠端同一份 pane env；
+    // 放在 identity／bot env 之前：真的想要建議句的人可以在 bot env 蓋回去。
+    if bot.kind == "claude" {
+        env.insert("CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION".into(), json!("false"));
+    }
 
     let home = match app.hosts.get(host).await {
         Some(c) => c.home().await.unwrap_or_else(|e| {
@@ -1588,6 +1595,31 @@ mod pane_env_tests {
         assert_eq!(e["AM_OUTBOX"], json!(want.to_string_lossy()), "bot.env 蓋不過去");
         assert_eq!(e["FOO"], json!("kept"));
         assert!(pane_env(&env.app, &bot, "box", "run-1", "proj-alfa", None).await.get("AM_OUTBOX").is_none(), "遠端也不留自訂的假路徑");
+    }
+
+    /// claude 2.1.280 的「建議下一句」本機、遠端都關掉（env，不是 `--prompt-suggestions`：那個旗標只收 `--print`）；
+    /// 別的 kind 不帶；bot env 可以蓋回去。
+    #[tokio::test]
+    async fn claude_panes_start_with_prompt_suggestions_off() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "alfa").await;
+        for host in [LOCAL_HOST, "box"] {
+            let e = pane_env(&env.app, &bot, host, "run-1", "proj-alfa", None).await;
+            assert_eq!(e["CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"], json!("false"), "{host}");
+        }
+        let mut codex = bot.clone();
+        codex.kind = "codex".into();
+        assert!(pane_env(&env.app, &codex, LOCAL_HOST, "run-1", "proj-alfa", None).await.get("CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION").is_none());
+
+        sqlx::query("UPDATE bots SET env_json = ? WHERE id = ?")
+            .bind(r#"{"CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION":"true"}"#)
+            .bind(&bot.id)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        let bot = db::bot(&env.app.db, &bot.id).await.unwrap().unwrap();
+        let e = pane_env(&env.app, &bot, LOCAL_HOST, "run-1", "proj-alfa", None).await;
+        assert_eq!(e["CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"], json!("true"), "使用者自己要開就尊重");
     }
 
     /// hook 打不通時會 spool 到 `AM_DATA_DIR`；沒注入的話隔離跑的 bot 會把檔案丟進正式資料目錄，

@@ -559,8 +559,8 @@ async fn clear_restored_prompt(client: &HerdrClient, run: &db::Run, bot: &db::Bo
     }
     let Some(pane) = run.pane_id.as_deref() else { return };
     tokio::time::sleep(Duration::from_millis(400)).await;
-    let Ok(read) = client.pane_read(pane, "visible", 80).await else { return };
-    if composer_text(&bot.kind, &read.text).is_none() {
+    let Ok(screen) = super::delivery::read_styled(client, pane, "visible", 80).await else { return };
+    if composer_text(&bot.kind, &screen).is_none() {
         return;
     }
     match client.pane_send_keys(pane, &["ctrl+c"]).await {

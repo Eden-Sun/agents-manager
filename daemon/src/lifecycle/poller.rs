@@ -643,7 +643,13 @@ fn is_rule_row(s: &str) -> bool {
 
 /// Text in the input box, or `None` when empty / no known marker. Searched from the bottom; an
 /// empty box is `pane_awaits_input`'s job, else we'd walk back to an accepted prompt's echo.
+///
+/// A styled (`format: ansi`) read is judged through `delivery::plain_without_hints` first: a box
+/// holding only the TUI's own hint (claude 2.1.280's dim suggested next prompt) is an empty box here
+/// too, the same verdict the delivery check gives.
 pub(crate) fn composer_text(kind: &str, screen: &str) -> Option<String> {
+    let plain = super::delivery::plain_without_hints(kind, screen);
+    let screen = plain.as_str();
     let marker = prompt_echo_prefix(kind)?.trim_end();
     if pane_awaits_input(kind, screen) {
         return None;
@@ -726,8 +732,8 @@ async fn nudge_unsent_prompt(app: &Arc<App>, run_id: &str, turn_id: &str, sent: 
     let Some(bot) = db::bot(&app.db, &run.bot_id).await? else { return Ok(false) };
     let Some(pane) = run.pane_id.clone() else { return Ok(false) };
     let Ok(client) = client_for_run(app, &run).await else { return Ok(false) };
-    let Ok(read) = client.pane_read(&pane, "visible", 80).await else { return Ok(false) };
-    if !sent.iter().any(|p| composer_holds_prompt(&bot.kind, &read.text, p)) {
+    let Ok(screen) = super::delivery::read_styled(&client, &pane, "visible", 80).await else { return Ok(false) };
+    if !sent.iter().any(|p| composer_holds_prompt(&bot.kind, &screen, p)) {
         return Ok(false);
     }
     if let Err(e) = client.pane_send_keys(&pane, &["Enter"]).await {
@@ -2023,6 +2029,23 @@ mod issue_17_tests {
         .unwrap();
         env.herdr.set_screen("pane-17", screen);
         Fixture { env, bot_id, conversation_id, run_id, turn_id }
+    }
+
+    /// 補 Enter 的看門狗（「字還在框裡就再按一次 Enter」）不能把 claude 2.1.280 的 dim「建議下一句」當成我們沒送出的字：
+    /// 建議句常常就是剛送過的那一句（2026-09-23 AM-2-M 框裡是 09-20 送過的舊 prompt）。真的打在框裡的字照樣補 Enter。
+    #[tokio::test]
+    async fn the_enter_nudge_ignores_a_dim_suggestion_that_repeats_the_prompt() {
+        const RULE: &str = "────────────────────────";
+        let frame = |row: &str| format!("⏺ PONG\n\u{1b}[0m\u{1b}[38;2;136;136;136m{RULE}\u{1b}[0m\n{row}\n\u{1b}[0m\u{1b}[38;2;136;136;136m{RULE}\u{1b}[0m\n  status\n");
+        let sent = vec!["Reply with PONG".to_string()];
+        let ghost = frame("❯\u{a0}\u{1b}[0m\u{1b}[2mReply with PONG\u{1b}[0m");
+        let f = fixture("claude", &ghost).await;
+        assert!(!nudge_unsent_prompt(&f.env.app, &f.run_id, &f.turn_id, &sent).await.unwrap(), "建議句不是沒送出的字");
+        assert!(!f.env.herdr.methods().iter().any(|m| m == "pane.send_keys"), "不按 Enter");
+
+        let typed = frame("❯\u{a0}Reply with PONG");
+        let f = fixture("claude", &typed).await;
+        assert!(nudge_unsent_prompt(&f.env.app, &f.run_id, &f.turn_id, &sent).await.unwrap(), "真的留在框裡的字要補 Enter");
     }
 
     async fn event_kinds(mut rx: tokio::sync::broadcast::Receiver<crate::state::WsEvent>) -> Vec<String> {

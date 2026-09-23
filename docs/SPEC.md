@@ -724,6 +724,16 @@ user 文字先照 CLI 自己的拆法還原（`lifecycle::pasted_content`，只�
 在 SGR `2`（dim）底下就是 TUI 自己畫的提示，不看字面內容（`38`/`48` 顏色參數裡的 `2` 不算）；讀不到樣式、只有空白、或任一可見字元非 dim，一律當成非空。
 「建議下一句」是 **provider 行為**、不是穩定介面：claude 2.1.269 起中／日／泰文 prompt 也會出建議句（之前那幾種語言的建議被丟掉，是 CLI 修了 bug 才冒出來，
 2026-09-14 的 dim 建議句 409 就是它，55deeb5 修）。內容、語言、出現時機以後還會變，所以只能看 dim 樣式判斷，不要加字面或語言的特例。
+**「只有提示」的判斷只有一份**（2026-09-23，AM-2-M 被 claude 2.1.280 的建議句擋成 409）：`delivery::hint_rows`——marker 列後看得見的字**全部**是提示
+（`is_hint_cell`：SGR 2 dim，或比 marker 更貼近背景的顏色）才算，一個正常字（使用者在建議句上開始打字那一幀）就是草稿；建議句在窄 pane
+折成兩列時，底下同樣只有提示字的續行也算提示。送達前的空框檢查（`box_state`）與所有用純文字看輸入框的地方都走它：後者一律改用 styled 讀
+（`delivery::read_styled`）再經 `plain_without_hints` 把提示抹掉，得到「什麼都沒打」的畫面——`poller::composer_text`（補 Enter 的看門狗、
+`relay_watch` 的補 Enter、`stop` 中斷後清框的 `ctrl+c`、`paste_check`）與 `judge::stuck`（`tui_prompts::composer_is_idle`）。以前它們讀純文字，
+建議句常常就是剛送過的那一句，會被當成「我們的字還留在框裡」去補 Enter、或被當成框擋著去問 Jev。
+實測 claude 2.1.280：只有建議句時按 Enter **不會**送出建議句（daemon 按 Enter 不會誤送它）。
+**啟動時就關掉建議句**：claude 的 pane env 帶 `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false`（本機、遠端同一份 `pane_env`；herdr shim 傳給子 pane；
+放在 identity／bot env 之前，bot env 可以蓋回去）。不用 `--prompt-suggestions false`：那個旗標只收 `--print --output-format stream-json`，
+互動模式帶了 claude 直接起不來（2.1.280 實測，`"false"` 確實關得掉、`"true"` 會畫出建議句）。只對新開的 run 有效，既有的 pane 靠上面的判斷。
 **codex 的點字動畫**（v0.154.0／gpt-6-astra 起）：輸入列與上下各一列撒著會動的點字 `⠁⠂⠄⠈⠐⠠⢀`（U+2800–U+28FF），每顆都帶自己的前景色、不是 dim，而且蓋在空白格上——包括 `›` 後那一格、草稿字與字之間的空格。只有 **codex＋styled 讀法**時，帶前景色、非 dim 的點字視同原本那格空白：marker 列擦掉點字後只剩 dim 內容或空白就是空框，下一列只剩縮排與點字就算空白列。沒有顏色或 dim 的點字、任何一般字元照樣是內容；純文字讀法不放寬（分不出是不是打的）；claude／grok 不套這條。真畫面 fixture：`daemon/src/lifecycle/fixtures/codex_astra_particles_{empty,draft}.ansi`。
 
 herdr 回錯且訊息明確提到 `format`（舊版或遠端不認得這個參數）時退回純文字讀法——沒有樣式可看，佔位字自然判非空；herdr

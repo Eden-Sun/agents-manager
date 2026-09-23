@@ -81,13 +81,15 @@ pub async fn inspect(app: &Arc<App>, c: &Stuck) -> Result<Option<f64>> {
         return Ok(None);
     }
     let Some(client) = app.herdr_for_run(&run).await else { return Ok(None) };
-    let read = client.pane_read(&c.pane_id, "visible", 60).await?;
-    let lines: Vec<&str> = read.text.lines().collect();
+    // 樣式讀：輸入框裡只有 claude 的「建議下一句」（dim）時是空輸入列，不是框在擋（`plain_without_hints`）。
+    let styled = crate::lifecycle::read_styled(&client, &c.pane_id, "visible", 60).await?;
+    let text = crate::lifecycle::plain_without_hints(&bot.kind, &styled);
+    let lines: Vec<&str> = text.lines().collect();
     // 輸入列空著＝沒有框在擋；那是別的問題（例如 flush 沒被叫醒），不是這裡要看的。
     if crate::tui_prompts::composer_is_idle(&lines) {
         return Ok(None);
     }
-    let tail = super::tail(&read.text);
+    let tail = super::tail(&text);
     let digest = fingerprint(&tail);
     // 同一個 run、同一個畫面只問一次。
     let seen: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM judge_shadow WHERE run_id = ? AND regex_verdict = 'stuck_queued' AND matched_line = ?")
