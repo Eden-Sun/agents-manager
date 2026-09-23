@@ -3338,7 +3338,7 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
 - `ssh -N -M -S <ctl> -L <local.sock>:<remote herdr.sock>` 轉發後本機 `HerdrClient` 全部 RPC 與事件訂閱可用；AF_UNIX 路徑過長會 `path too long`。
 - **Keychain**：ssh 下 `security find-generic-password -s "Claude Code-credentials"` 失敗（36），同一指令在 `launchctl bootstrap gui/<uid>` 的 LaunchAgent 內成功。
   只有 Keychain 憑證（沒有 `.credentials.json`）的身份在 ssh 起的 herdr 底下會「Not logged in」。
-- 遠端 claude 首次在某目錄啟動會出 trust 提示（`blocked`），游標在「No, exit」，要 `down` + `enter`。daemon 啟動 bot 前會先替它寫好信任（#407，`trust::pretrust_for_start`）：本機直接寫檔；遠端經 ssh 讀那台身分設定目錄的檔、用同一套 merge 合併、寫回前比對 `cksum`（claude 自己在中間改過檔就重讀再合併，最多三次），暫存檔＋`mv`，權限照原檔。換身分＝換一個從沒信任過的設定目錄，沒有這一步的話，每次遠端換身分都會停在這個提示上，SessionStart 送不出來、resume 驗證跟著卡住。寫不進去只記 warn、不擋啟動（跟本機一樣）。
+- 遠端 claude 首次在某目錄啟動會出 trust 提示（`blocked`），游標在「No, exit」，要 `down` + `enter`。daemon 啟動 bot 前會先替它寫好信任（#407，`trust::pretrust_for_start`）：本機直接寫檔；遠端經 ssh 讀那台身分設定目錄的檔、用同一套 merge 合併、寫回前比對 `cksum`（claude 自己在中間改過檔就重讀再合併一次），暫存檔＋`mv`＋`trap` 收暫存檔，權限照原檔。鍵一律用**遠端**的 `pwd -P`（跟讀檔同一趟 ssh 拿回來）：worktree／symlink／`/tmp`→`/private/tmp` 照字面寫只會多一個沒用的鍵。已經信任的只花讀的那一趟。整段有 8 秒總上限（`REMOTE_BUDGET`）：主機 TCP 收下但不回話時，每趟 ssh 會等滿 30 秒，不設上限每次遠端啟動要多等好幾分鐘——超時只記 warn、照樣開 pane。換身分＝換一個從沒信任過的設定目錄，沒有這一步的話，每次遠端換身分都會停在這個提示上，SessionStart 送不出來、resume 驗證跟著卡住。寫不進去只記 warn、不擋啟動（跟本機一樣）。
 - 使用者權限的測試 sshd：`/usr/sbin/sshd -f <cfg>`（`Port 2222`、`ListenAddress 127.0.0.1`、自產 HostKey、`AuthorizedKeysFile`、`StrictModes no`、
   `AllowStreamLocalForwarding yes`、`StreamLocalBindUnlink yes`、`UsePAM no`），不需 sudo。
 - herdr 官方 integration（`herdr integration install claude|grok`）只在 SessionStart 呼叫 `pane.report_agent_session`，狀態交給終端偵測，`seq` 用 `time.time_ns()`。
