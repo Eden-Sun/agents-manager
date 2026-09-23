@@ -47,3 +47,61 @@ test('daemon 拒絕（舊版不認得 primary → 400）：回捲，並把原因
   assert.match(notice.text, /主力順序沒存起來/)
   assert.match(notice.text, /400|至少要有一個/, `通知要帶 daemon 的原因：${notice.text}`)
 })
+
+/**
+ * 模擬 daemon：每個 `/api/order` POST 在「抵達」時落庫；`delays[i]` 是第 i 個請求在路上走多久，
+ * `fail[i]` 為真就回 502 不落庫。回傳 daemon 目前存的主力順序與收到的請求序。
+ */
+function stubDaemon(delays: number[], fail: boolean[] = []) {
+  const server = { order: null as string[] | null, arrived: [] as string[][] }
+  let n = 0
+  globalThis.fetch = (async (input: string, init?: RequestInit) => {
+    const i = n++
+    const body = init?.body ? JSON.parse(String(init.body)) : undefined
+    if (String(input) === '/api/order') {
+      await new Promise((r) => setTimeout(r, delays[i] ?? 0))
+      if (fail[i]) return { ok: false, status: 502, statusText: '502', text: async () => JSON.stringify({ error: 'upstream', message: 'daemon rebuilding' }) } as unknown as Response
+      server.order = body.primary
+      server.arrived.push(body.primary)
+    }
+    return { ok: true, status: 200, statusText: '200', text: async () => '{"ok":true}' } as unknown as Response
+  }) as unknown as typeof fetch
+  return server
+}
+
+/** #391：快速拖兩次，第一個 POST 在路上慢、第二個先到——daemon 最後不能是舊順序。 */
+test('兩次主力排序請求亂序完成時，較新的順序不能被舊請求覆蓋', async () => {
+  useStore.setState({ bots: [bot('a', 0), bot('b', 1), bot('c', 2)], notices: [] })
+  const server = stubDaemon([30, 0])
+  useStore.getState().movePrimary(['c', 'a', 'b'])
+  useStore.getState().movePrimary(['b', 'c', 'a'])
+  await new Promise((r) => setTimeout(r, 80))
+  assert.deepEqual(server.order, ['b', 'c', 'a'], `daemon 最後要是較新的順序；抵達序 ${JSON.stringify(server.arrived)}`)
+  assert.deepEqual(positions(), { b: 0, c: 1, a: 2 }, '畫面維持較新的順序')
+  assert.equal(useStore.getState().notices.filter((x) => x.kind === 'error').length, 0, '兩次都成功，不該有錯誤通知')
+})
+
+/** #275 在主力上的同一件事：舊的晚到失敗，不能把已存成功的新順序退回去。 */
+test('兩次主力排序、較舊的失敗而較新的成功：不回捲、不跳錯誤', async () => {
+  useStore.setState({ bots: [bot('a', 0), bot('b', 1), bot('c', 2)], notices: [] })
+  const server = stubDaemon([30, 0], [true, false])
+  useStore.getState().movePrimary(['c', 'a', 'b'])
+  useStore.getState().movePrimary(['b', 'c', 'a'])
+  await new Promise((r) => setTimeout(r, 80))
+  assert.deepEqual(server.order, ['b', 'c', 'a'])
+  assert.deepEqual(positions(), { b: 0, c: 1, a: 2 }, '較新的樂觀順序已經落庫，不能被舊失敗回捲')
+  assert.equal(useStore.getState().notices.filter((x) => x.kind === 'error').length, 0)
+})
+
+test('兩次主力排序、較舊的成功而較新的失敗：回到 daemon 存下的那一份，並講原因', async () => {
+  useStore.setState({ bots: [bot('a', 0), bot('b', 1), bot('c', 2)], notices: [] })
+  const server = stubDaemon([30, 0], [false, true])
+  useStore.getState().movePrimary(['c', 'a', 'b'])
+  useStore.getState().movePrimary(['b', 'c', 'a'])
+  await new Promise((r) => setTimeout(r, 80))
+  assert.deepEqual(server.order, ['c', 'a', 'b'])
+  assert.deepEqual(positions(), { c: 0, a: 1, b: 2 }, '畫面要跟 daemon 存的一致')
+  const notice = useStore.getState().notices.find((x) => x.kind === 'error')
+  assert.ok(notice, '要跳錯誤通知')
+  assert.match(notice.text, /主力順序沒存起來.*daemon rebuilding/)
+})

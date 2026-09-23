@@ -738,18 +738,26 @@ function flushUnsentReads() {
 let orderSavesInFlight = 0
 /** 每個排序範圍（專案／某專案的 bot／主力）最新一次存檔的代次；晚到的舊失敗不准回滾較新的結果（#275）。 */
 const orderSaveGen = new Map<string, number>()
+/**
+ * 同一排序範圍的存檔排成一條：前一個 POST 結束（不論成敗）才送下一個。每個 POST 都是整份順序、後到的贏，
+ * 並行送的話先發的舊順序可能晚到、蓋掉 daemon 已存的新順序，兩邊都 200 所以不會有任何提示（#391）。
+ */
+const orderSaveTail = new Map<string, Promise<void>>()
 function saveOrderTracked(key: string, input: Parameters<typeof api.saveOrder>[0], onFail: (e?: unknown) => void) {
   orderSavesInFlight += 1
   const gen = (orderSaveGen.get(key) ?? 0) + 1
   orderSaveGen.set(key, gen)
-  void api
-    .saveOrder(input)
+  const send = () => api.saveOrder(input)
+  const done = (orderSaveTail.get(key) ?? Promise.resolve())
+    .then(send, send)
     .catch((e) => {
       if (orderSaveGen.get(key) === gen) onFail(e)
     })
     .finally(() => {
       orderSavesInFlight -= 1
+      if (orderSaveTail.get(key) === done) orderSaveTail.delete(key)
     })
+  orderSaveTail.set(key, done)
 }
 
 /**
