@@ -18,7 +18,7 @@ import type { Bot } from '../api/types'
 import { useMediaQuery } from '../hooks/useMediaQuery'
 import { clipAfterRows, lineBudget, moreTitle } from '../lib/chipOverflow'
 import { chipTracked } from '../lib/supervisorProject'
-import { PIN_GRID_MAX, sortPinned } from '../lib/pinnedOrder'
+import { pinGridLayout, sortPinned } from '../lib/pinnedOrder'
 import { useChipFlip } from './useChipFlip'
 import { botLamp, orderedBotIds, useStore } from '../store/store'
 import { StatusLamp } from './StatusLamp'
@@ -232,8 +232,14 @@ export function UnreadChip() {
     () => sortPinned(bots.filter((b) => b.primary && !b.pending).map((b, i) => ({ id: b.id, position: b.primary_position, index: i }))).map((x) => x.id),
     [bots],
   )
-  // 手機：固定 4 顆一排、最多兩排，超過的不畫（使用者用拖曳決定前 8 顆）；桌機全畫。
-  const shownPinned = useMemo(() => (narrow ? pinnedItems.slice(0, PIN_GRID_MAX) : pinnedItems), [narrow, pinnedItems])
+  // 手機：4 顆一排、收合時兩排；超過 8 顆時第 8 格是「+N」，點了展開全部（`pinGridLayout`）。桌機全畫。
+  const [pinExpanded, setPinExpanded] = useState(false)
+  const pinLayout = pinGridLayout(pinnedItems.length, pinExpanded)
+  const shownPinned = useMemo(
+    () => (narrow ? pinnedItems.slice(0, pinLayout.shown) : pinnedItems),
+    [narrow, pinnedItems, pinLayout.shown],
+  )
+  const hiddenPinned = useMemo(() => (narrow ? pinnedItems.slice(pinLayout.shown) : []), [narrow, pinnedItems, pinLayout.shown])
   const visiblePinned = useMemo(() => shownPinned.map((it) => it.id), [shownPinned])
   const names = useMemo(() => Object.fromEntries(pinnedItems.map((it) => [it.id, it.name])), [pinnedItems])
   const dnd = usePinnedDrag(fullPinned, visiblePinned, names, movePrimary)
@@ -249,7 +255,13 @@ export function UnreadChip() {
     return (
       <>
         <PinHint />
-        <PinGrid items={shownPinned} dnd={dnd} />
+        <PinGrid
+          items={shownPinned}
+          dnd={dnd}
+          hidden={hiddenPinned}
+          collapsible={pinLayout.collapsible}
+          onToggle={() => setPinExpanded((v) => !v)}
+        />
         <ScrollRow items={otherItems} label="在跑或剛完成的 bot" selectedBotId={selectedBotId} />
       </>
     )
@@ -294,14 +306,46 @@ export function UnreadChip() {
 }
 
 /** 手機的主力區：4 顆等寬一排、往下換行、最多兩排，不橫捲（#344）。 */
-function PinGrid({ items, dnd }: { items: ChipItem[]; dnd: PinnedDnd }) {
+function PinGrid({
+  items,
+  dnd,
+  hidden = [],
+  collapsible = false,
+  onToggle,
+}: {
+  items: ChipItem[]
+  dnd: PinnedDnd
+  /** 收合時藏起來的主力（第 8 格變成「+N」）。 */
+  hidden?: ChipItem[]
+  /** 展開中：最後多一格「收合」。 */
+  collapsible?: boolean
+  onToggle?: () => void
+}) {
   if (items.length === 0) return null
+  // 藏起來的裡面有要你回答／未讀，+N 就吃那個顏色，不然看不出被藏的那顆在等你（跟桌機 `+N` 的提示同一個規則）。
+  const moreState = hidden.some((h) => h.needsReply) ? ' needs-reply' : hidden.some((h) => h.unread > 0) ? ' unread' : ''
   return (
     <div className="unread-bar-wrap row">
       <div className="unread-pin-grid" role="status" aria-live="polite" aria-label="主力 bot">
         {items.map((it) => (
           <Chip key={it.id} it={it} dnd={dnd} lamp />
         ))}
+        {hidden.length > 0 ? (
+          <button
+            type="button"
+            className={`unread-chip pin-more${moreState}`}
+            title={moreTitle(hidden)}
+            aria-label={`${moreTitle(hidden)}：${hidden.map((h) => h.name).join('、')}`}
+            aria-expanded={false}
+            onClick={onToggle}
+          >
+            <span className="unread-chip-name">+{hidden.length}</span>
+          </button>
+        ) : collapsible ? (
+          <button type="button" className="unread-chip pin-more" aria-expanded title="收合成兩排" onClick={onToggle}>
+            <span className="unread-chip-name">收合</span>
+          </button>
+        ) : null}
         <span className="sr-only" aria-live="polite">
           {dnd.announce}
         </span>
