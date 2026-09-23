@@ -334,7 +334,8 @@ codex 的 rollout 還沒寫出來時先放回等 3 次（只算這個原因，�
       "relay_from": null,
       "attachments": [],
       "created_at": "2026-09-05T15:31:00.000Z",
-      "updated_at": null
+      "updated_at": null,
+      "rewound_at": null
     }
   ],
   "turns": [
@@ -353,6 +354,34 @@ codex 的 rollout 還沒寫出來時先放回等 3 次（只算這個原因，�
 
 `turns` 為最近 `limit+1` 筆（時間倒序），用來判斷回合是否還在跑與 delivery 警示。
 UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終端備援 · 可能不完整」；`system` 灰字系統列。
+`rewound_at`：被對話倒回（§6.1）拿掉的時間，`null`＝還在 CLI 的對話脈絡裡。標記不刪，UI 收成淡色＋「已倒回」。
+
+### 6.1 對話倒回 `POST /api/bots/{id}/rewind`（SPEC §6.13，issue #405）
+`{"message_id": "<messages.id>"}`：在 bot 的終端驅動 claude 自己的 `/rewind`，把對話倒回到這則**使用者訊息送出之前**——這則與之後的問答都不在 CLI 的 context 裡，
+不重啟、session id 不變，程式碼與檔案不動。每一步讀畫面確認；確認頁的原文對不上就 Esc 退出、回 409，不會在沒確認的情況下選 Restore。
+成功後那則與之後的訊息標上 `rewound_at`，對話多一則 system 說明。
+
+```json
+{"rewound": true, "message_id": "01M…", "text": "<那則的原文，回填輸入框用>", "hidden": 4, "pane_cleared": true}
+```
+
+`pane_cleared: false`：CLI 放回終端輸入列的那段沒清掉（輸入列裡的不是那一則），送下一則之前要到終端清。
+
+| 狀態 | `reason` | 意思 |
+|---|---|---|
+| 404 | `what: bot`／`message` | 沒有這顆 bot；或訊息不存在／不是這顆 bot 的 |
+| 409 | `unsupported_kind` | 不是 claude（codex／grok 沒有對應的 `/rewind`） |
+| 409 | `default_session` | 從使用者自己 default session 匯入的 bot：只看不代打 |
+| 409 | `not_a_user_message`／`already_rewound` | 只能倒回到還沒被倒掉的使用者訊息 |
+| 409 | `not_running`／`not_idle`（`busy`：`working`／`blocked`／`unknown_status`／`turn_in_flight`／`queued_turn`）／`no_pane` | 要閒著、有 pane 的 run（在 bot 鎖裡查） |
+| 409 | `composer_busy`／`rewind_ui_open` | 終端輸入列有字、或 rewind 選單本來就開著：一個字都沒打 |
+| 409 | `menu_not_shown` | 打了 `/rewind` 選單沒出來（已清掉打進去的字） |
+| 409 | `not_in_menu` | 選單裡找不到這則（更早的 session、沒落地）；已退出 |
+| 409 | `confirm_not_shown`／`text_mismatch`／`restore_not_selected` | 確認頁沒出來、印的不是這則（body 的 `message` 帶畫面上的字）、游標不在 Restore；已退出，沒倒 |
+| 409 | `rewind_unconfirmed` | 按了 Restore 畫面沒離開選單：不知道倒了沒有，訊息沒標 |
+| 502 | — | 讀不到或打不進終端（herdr） |
+
+409 都帶給使用者看的 `message`。成功推 WS `messages_rewound`。
 
 ## 7. 終端快照
 
@@ -378,6 +407,7 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 |---|---|
 | `bot_status` | `{"bot_id", "host":"local"\|"<name>", "run": <run 物件或 null>, "connected"}`（`connected` 是該 bot 所屬 host 的連線狀態） |
 | `message_added` | `{"bot_id", "message": <message 物件>}` |
+| `messages_rewound` | `{"bot_id", "message_id", "rewound_at"}`：這則與之後的訊息被對話倒回標掉（§6.1） |
 | `turn_updated` | `{"bot_id", "turn": <turn 物件>}` |
 | `turn_progress` | 即時輸出，見「WS `turn_progress`」 |
 | `project_changed` | `{"project_id"}`（或 `{}`） |

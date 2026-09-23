@@ -270,7 +270,7 @@ async fn send_slash_line(client: &HerdrClient, pane_id: &str, line: &str) -> LcR
 /// 第一則又走回已知會失效的那條路（sol review 2026-09-14 #3）。
 /// 打字之前先把記號寫進 DB；寫不進去就**不要打**——打完卻沒記住，下一則與重啟後又會走回會吞訊息的
 /// `agent.prompt`（sol review 第三輪 #2）。行程內的備份記號同時記上，這次啟動內不會忘。
-async fn mark_pane_typed(app: &Arc<App>, run_id: &str) -> Result<(), String> {
+pub(crate) async fn mark_pane_typed(app: &Arc<App>, run_id: &str) -> Result<(), String> {
     crate::lifecycle::remember_pane_typed(run_id);
     db::set_pane_typed(&app.db, run_id).await.map_err(|e| {
         tracing::warn!(run = run_id, error = %e, "could not record that the daemon types into this pane; not typing");

@@ -1,0 +1,14 @@
+
+⏺ OK
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+   Rewind
+
+   Confirm you want to restore the conversation to the point before you sent this message:
+
+   │ Second prompt, line one.
+   │ Line two mentions BANANA.
+   │ Reply with just OK.
+   │ (21m ago)
+
+   The conversation will be forked.
+   The code will be unchanged.

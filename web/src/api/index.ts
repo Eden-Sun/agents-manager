@@ -444,6 +444,16 @@ export async function restartBot(botId: string, resumeNative?: boolean): Promise
   return isRec(raw) ? str(pick(raw, 'run_id')) : ''
 }
 
+/**
+ * `POST /bots/:id/rewind`（SPEC §6.13）：在終端驅動 claude 的 `/rewind`，倒回到這則使用者訊息送出之前；
+ * `text` 是那則的原文（回填輸入框用）；`pane_cleared: false`＝CLI 放回終端輸入列的那段沒清掉。
+ */
+export async function rewindBot(botId: string, messageId: string): Promise<{ text: string; hidden: number; paneCleared: boolean }> {
+  const raw = await transport.request('POST', `/bots/${encodeURIComponent(botId)}/rewind`, { message_id: messageId })
+  const o = isRec(raw) ? raw : {}
+  return { text: str(pick(o, 'text')), hidden: num(pick(o, 'hidden'), 0), paneCleared: pick(o, 'pane_cleared') !== false }
+}
+
 /** SPEC §6.9. 只回計畫；實際重啟在背景跑，進度走 WS `bots_restart_progress` / `bots_restart_done`。 */
 export async function restartIdleBots(): Promise<RestartPlan> {
   const raw = await transport.request('POST', '/bots/restart-idle')

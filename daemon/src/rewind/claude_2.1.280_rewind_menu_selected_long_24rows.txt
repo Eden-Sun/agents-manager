@@ -1,0 +1,24 @@
+  multi line 26 of the thirty line prompt
+  multi line 27 of the thirty line prompt
+  multi line 28 of the thirty line prompt
+  multi line 29 of the thirty line prompt
+  Reply with just OK.
+
+⏺ OK
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+   Rewind
+
+   Restore the code and/or conversation to the point before…
+
+    ↑ 2 more above
+
+     Third prompt is deliberately long so that the rewind menu has to truncate it: it talks ab…
+     ⚠ No code restore
+
+   ❯ word0 word1 word2 word3 word4 word5 word6 word7 word8 word9 word10 word11 word12 word13 w…
+     ⚠ No code restore
+
+
+    ↓ 2 more below
+
+   Enter to continue · Esc to cancel

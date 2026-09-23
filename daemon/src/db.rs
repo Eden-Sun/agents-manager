@@ -207,6 +207,8 @@ const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (14, "0cb16547e439691a"),
     // issue #400：data-only model rewrite, so the schema fingerprint stays the same; includes deleted rows.
     (15, "0cb16547e439691a"),
+    // issue #405：`messages.rewound_at`（對話倒回標掉的訊息，標記不刪）。
+    (16, "cd536b2d4cda75e5"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -367,6 +369,8 @@ async fn apply_migrations(pool: &SqlitePool) -> Result<()> {
         ("bot_previews", "kind", "ALTER TABLE bot_previews ADD COLUMN kind TEXT"),
         // 主力那列的固定順序（issue #344）；舊列 0＝沒排過，排在有排過的之後。
         ("bots", "primary_position", "ALTER TABLE bots ADD COLUMN primary_position INTEGER NOT NULL DEFAULT 0"),
+        // 對話倒回（issue #405）：被倒掉的訊息標記不刪；舊列 NULL＝沒被倒掉。
+        ("messages", "rewound_at", "ALTER TABLE messages ADD COLUMN rewound_at TEXT"),
         // 啟動相關設定的版本雜湊（#355 機制 B／#353）：`bots.launch_rev`＝目前設定的版本，`runs.launch_rev`＝這個 run 啟動時載入的版本；
         // NULL＝沒記（舊資料，視為相同、不誤報「需重啟」）。P1 只加欄位、沒有人讀寫。
         ("bots", "launch_rev", "ALTER TABLE bots ADD COLUMN launch_rev TEXT"),
@@ -730,6 +734,9 @@ pub struct Message {
     pub relay_from: Option<String>,
     pub created_at: String,
     pub updated_at: Option<String>,
+    /// 對話倒回（`rewind.rs`）標掉的時間：這一則已經不在 CLI 的對話脈絡裡了。標記不刪，NULL＝還在。
+    #[sqlx(default)]
+    pub rewound_at: Option<String>,
 }
 
 #[derive(Debug, Clone, FromRow, serde::Serialize)]
@@ -1339,7 +1346,8 @@ mod tests {
             ("c2".into(), Some("gpt-6-luna".into())),
         ]);
         let version: i64 = sqlx::query_scalar("PRAGMA user_version").fetch_one(&pool).await.unwrap();
-        assert_eq!(version, 15);
+        // 蓋的是這顆 binary 的版本（之後再升版也一樣），不是寫死 15。
+        assert_eq!(version, SCHEMA_VERSION);
         migrate(&pool).await.unwrap();
         let again: Vec<(String, Option<String>)> = sqlx::query_as("SELECT id,model FROM bots ORDER BY id").fetch_all(&pool).await.unwrap();
         assert_eq!(again, values);

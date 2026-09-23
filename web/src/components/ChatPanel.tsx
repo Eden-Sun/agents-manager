@@ -31,6 +31,7 @@ import { onTabListKeyDown } from './tabKeys'
 import { CopyChip } from './CopyChip'
 import { HostBadge } from './HostsPanel'
 import { UpdateBadge } from './UpdateBadge'
+import { RewindButton, RewoundTag } from './RewindButton'
 import { TurnErrorBadge } from './TurnErrorBadge'
 import { HostShellPanel } from './HostShellPanel'
 import { GearIcon, GitIcon } from './Icons'
@@ -146,7 +147,7 @@ export const Bubble = memo(function Bubble({
 
   return (
     /* `data-msg-id`：從清單外（浮窗）指回這則訊息的把手。 */
-    <article className={`msg ${msg.role}${rail ? ' rail' : ''}${daemonNotice ? ' daemon-notice' : ''}${flash ? ' flash' : ''}`} data-msg-id={msg.id}>
+    <article className={`msg ${msg.role}${rail ? ' rail' : ''}${daemonNotice ? ' daemon-notice' : ''}${flash ? ' flash' : ''}${msg.rewound_at ? ' rewound' : ''}`} data-msg-id={msg.id}>
       <div className="msg-meta msg-meta-above">
         <div className="msg-meta-left">
           {kind ? <span className={`kind-mark ${kind}`} aria-hidden="true" /> : null}
@@ -178,7 +179,9 @@ export const Bubble = memo(function Bubble({
             </span>
           ) : null}
           {fallback || msg.incomplete ? <span className="meta-warn">可能不完整</span> : null}
+          {msg.rewound_at ? <RewoundTag at={msg.rewound_at} /> : null}
         </div>
+        {msg.role === 'user' ? <RewindButton msg={msg} /> : null}
         {/* 會自動重送的那種只放 hover：有安全網，不該佔使用者的注意力（AGM 2026-09-16）。 */}
         {system ? null : (
           <time

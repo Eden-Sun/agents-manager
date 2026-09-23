@@ -513,3 +513,12 @@ daemon 這幾天把「寫不進 DB」改成 fail closed：外面的副作用做�
   （舊的 `waitsKids` 在自己要回答時會被壓掉，這個不會）。符號是一個小的分叉圖示（形狀跟燈、狀態點都不同，不是同一顆燈換色），多顆時帶數字（>9 顯示 `9+`），畫在晶片最右；桌機與手機都畫。
   自己 idle 時只有這個圖示（idle 燈照補充 3 不畫），自己 working 又有子在跑就兩個都看得到。`title` 與 sr-only 文字都加「N 個子 agent 在跑」（`lib/chipStateText.ts::kidsText`，有測試）。
   有未讀的晶片是 accent 底，圖示改跟字同色。截圖：`docs/screenshots/primary-order/kids-1-desktop.png`、`kids-2-mobile.png`。
+
+## 對話倒回：使用者訊息上的「倒回這裡」（2026-09-23，issue #405）
+- **按鈕藏到滑過才出現**（`components/RewindButton.tsx`＋`rewind.css`）：每則使用者訊息都常駐一顆會太吵；滑過那則、鍵盤聚焦、倒回中才出現。觸控裝置（`hover: none`）沒有滑過，常駐。
+  不能按（沒在跑、正在跑、卡提問）時照樣畫但 disabled，tooltip 講原因——比「按鈕消失」好懂。codex／grok、default session、回覆、群組發言不畫（子 agent 有）。
+- **一定先確認**：倒回會拿掉這則之後的問答，按錯代價大。確認框寫出會拿掉幾則、在終端用 claude 的 /rewind（不重啟）、檔案不還原；確認鈕用 danger 樣式。
+- **被倒掉的不藏、收成淡色＋「已倒回」**：紀錄要能回頭看（例如想起來那一輪其實有用的一段）；藏起來會讓人以為訊息不見了。
+- **原文接回網頁輸入框最前面**，不覆蓋原本打到一半的字（沿用 `prependDraft`）。CLI 也會把原文放回終端的輸入列，那一份 daemon 清掉——兩邊都留會讓下一則接在它後面；清不掉時通知叫人去終端清。
+- 截圖：`docs/screenshots/rewind/`（`scripts/rewind-shots.mjs`，mock 模式；`MOBILE=1` 出手機那組）。
+  ![滑過出現按鈕](screenshots/rewind/1-hover-shows-button.png) ![確認框](screenshots/rewind/2-confirm.png) ![倒回後](screenshots/rewind/3-after-rewound-and-refilled.png) ![手機倒回後](screenshots/rewind/m3-after.png)

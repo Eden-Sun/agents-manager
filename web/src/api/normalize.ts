@@ -466,6 +466,7 @@ export function toMessage(v: unknown, botId?: string): Message | null {
     relay_from: optStr(pick(v, 'relay_from')),
     terminal_snapshot: optStr(pick(v, 'terminal_snapshot')),
     created_at: str(v.created_at),
+    rewound_at: optStr(pick(v, 'rewound_at')),
   }
 }
 

@@ -1,0 +1,24 @@
+  multi line 27 of the thirty line prompt
+  multi line 28 of the thirty line prompt
+  multi line 29 of the thirty line prompt
+  Reply with just OK.
+
+⏺ OK
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+   Rewind
+
+   Confirm you want to restore the conversation to the point before you sent this message:
+
+   │ multi line 0 of the thirty line prompt
+   │ multi line 1 of the thirty line prompt
+   │ multi line 2 of the thirty line prompt
+   │ multi line 3 of the thirty line prompt
+   │ (13s ago)
+
+   The conversation will be forked.
+   The code will be unchanged.
+
+   ❯ 1. Restore conversation
+     2. Summarize from here
+     3. Summarize up to here
+     4. Never mind

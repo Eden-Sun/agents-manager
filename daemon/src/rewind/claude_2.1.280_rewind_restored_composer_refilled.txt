@@ -1,0 +1,29 @@
+
+ ▐▛███▛█   Claude Code v2.1.280
+▝▜██████▀  Haiku 4.5 · Claude Max
+  ▝▝ ▝▝    /…/project
+
+
+❯ Remember the word APPLE. Reply with just OK.
+
+  Wrote 1 memory
+
+⏺ OK
+
+❯ Second prompt, line one.
+  Line two mentions BANANA.
+  Reply with just OK.
+
+  Wrote 1 memory
+
+⏺ OK
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ Third prompt is deliberately long so that the rewind menu has to truncate it: it talks about
+  cherries, dates, elderberries, figs, grapes, honeydew melons, kiwis, lemons, mangoes,
+  nectarines, oranges, papayas and quinces, and then finally asks you to reply with just OK.
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  user | proj | HAI4.5 14% | 5h:97%(rst 4h 30m) | 7d:85%(rst 1d 15h)
+  ⏵⏵ bypass permissions on (shift+tab to cycle)

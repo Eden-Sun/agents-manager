@@ -36,6 +36,7 @@ import type { ProjectPane } from '../api'
 import { joinRunningBatch, restartProgress } from './restartBatch'
 import { dropHostModels, modelsKey, shouldFetchModels, type ModelsCache } from './modelsCache'
 import { MESSAGE_CAP, byId, byTime, capList, insertSorted, pruneTurns } from './lists'
+import { markRewound } from '../lib/rewind'
 import { acceptStateSeq, singleFlight } from './singleFlight'
 import { quotaForIdentity } from './quotaLookup'
 import { botStatusConnTarget } from './botStatusConn'
@@ -2643,6 +2644,18 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
           noteGroupCompletion(set, get, botId, latest, key, latest ? map[latest] : null)
         }
       }
+      return
+    }
+    // SPEC §6.13：那則與之後的標成倒回（不刪，畫面收成「已倒回」）。
+    case 'messages_rewound': {
+      const botId = frameBotId(data)
+      const id = isRec(data) ? str(pick(data, 'message_id')) : ''
+      if (!botId || !id) return
+      const at = (isRec(data) && str(pick(data, 'rewound_at'))) || new Date().toISOString()
+      set((s) => {
+        const next = markRewound(s.messages[botId] ?? [], id, at)
+        return next ? { messages: { ...s.messages, [botId]: next } } : {}
+      })
       return
     }
     case 'message_added': {

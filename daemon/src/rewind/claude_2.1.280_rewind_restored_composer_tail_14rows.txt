@@ -1,0 +1,12 @@
+  word194 word195 word196 word197 word198 word199 word200 word201 word202 word203 word204 word205 word206
+  word207 word208 word209 word210 word211 word212 word213 word214 word215 word216 word217 word218 word219
+  reply OK
+
+⏺ OK
+                                                                                    ctrl+g to edit in Vim
+───────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ multi line 28 of the thirty line prompt
+  multi line 29 of the thirty line prompt
+  Reply with just OK.
+───────────────────────────────────────────────────────────────────────────────────────────────────────────
+  user | proj | HAI4.5 15% | 5h:96%(rst 4h 12m) | 7d:85%(rst 1d 14h)

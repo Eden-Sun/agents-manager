@@ -131,6 +131,8 @@ interface MockTurn {
 
 interface MockMessage {
   id: string
+  /** SPEC §6.13 */
+  rewound_at?: string | null
   conversation_id: string
   turn_id: string | null
   bot_id: string
@@ -897,6 +899,7 @@ export class MockTransport implements Transport {
         }
         if (action === 'stop') return this.stop(botId)
         if (action === 'restart') return this.restart(botId)
+        if (action === 'rewind') return this.rewind(botId, b)
         if (action === 'fork') return this.fork(botId, b)
         if (action === 'promote') return this.promote(botId, b)
         if (action === 'interrupt') return this.interrupt(botId)
@@ -2408,6 +2411,22 @@ export class MockTransport implements Transport {
       needs_restart,
       ...(touchedLive ? { live_apply: { fields: ['fast'], applied: !deferred, deferred, reason: deferred ? 'slash_gate: agent_busy' : null } } : {}),
     }
+  }
+
+  /** SPEC §6.13：那則與之後的標成倒回、回原文；mock 沒有終端可以按 /rewind。 */
+  private rewind(botId: string, b: Rec) {
+    const bot = this.bot(botId)
+    if (bot.kind !== 'claude') throw new ApiError(409, { reason: 'unsupported_kind', message: '只有 claude 能倒回。' }, 'conflict')
+    const id = typeof b.message_id === 'string' ? b.message_id : ''
+    const mine = this.messages.filter((m) => m.bot_id === botId)
+    const i = mine.findIndex((m) => m.id === id)
+    if (i < 0) throw new ApiError(404, { error: 'not_found', what: 'message' }, 'not found')
+    if (mine[i].role !== 'user') throw new ApiError(409, { reason: 'not_a_user_message', message: '只能倒回到一則使用者訊息。' }, 'conflict')
+    const at = now()
+    const hit = mine.slice(i).filter((m) => !m.rewound_at)
+    for (const m of hit) m.rewound_at = at
+    this.emit('messages_rewound', { bot_id: botId, message_id: id, rewound_at: at })
+    return { rewound: true, message_id: id, text: mine[i].content, hidden: hit.length, pane_cleared: true }
   }
 
   private restart(botId: string) {

@@ -414,6 +414,8 @@ export interface Message {
   /** `terminal_fallback` 當下的整個 pane 畫面；`content` 裁錯時真正的回覆還在這裡。其他來源為 null。 */
   terminal_snapshot: string | null
   created_at: string
+  /** 對話倒回（SPEC §6.13）標掉的時間：這一則已不在 CLI 的對話脈絡裡。沒有＝還在。 */
+  rewound_at?: string | null
 }
 
 /** SPEC §13.4 `GET /api/projects/:id/messages` */
