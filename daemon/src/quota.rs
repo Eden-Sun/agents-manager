@@ -434,7 +434,7 @@ pub async fn forget(app: &Arc<App>, key: &str) {
     delete_cache(app, key).await;
 }
 
-fn quota_value(q: &Quota, stale: bool) -> Value {
+pub(crate) fn quota_value(q: &Quota, stale: bool) -> Value {
     let mut value = serde_json::to_value(q).unwrap_or(Value::Null);
     if let Some(object) = value.as_object_mut() {
         object.insert("stale".into(), Value::Bool(stale));
@@ -650,6 +650,39 @@ pub async fn set(app: &Arc<App>, host: &str, base: &str, mut q: Quota) {
     app.emit("quota_updated", json!({"kind": key, "host": host, "quota": quota_value(&q, false)})).await;
 }
 
+/// 兩個 `resets_at` 差這麼多以內算同一個窗：`/usage` 的結構化時間帶毫秒（`…:00.594Z`），statusLine 是整秒。
+/// 相鄰兩個窗的重置時間至少差 5 小時，幾分鐘的容忍不會把兩個窗併成一個。
+const SAME_WINDOW_SLACK: chrono::Duration = chrono::Duration::minutes(5);
+
+fn same_window(a: chrono::DateTime<chrono::Utc>, b: chrono::DateTime<chrono::Utc>) -> bool {
+    (a - b).abs() <= SAME_WINDOW_SLACK
+}
+
+/// 這份 statusLine 讀數跟 cache 裡那份比，誰是比較新的 API 回應（#404）。
+///
+/// 同一個帳號的 5h 窗是一個單調的時鐘：`(resets_at, used_pct)` 只會往前走，每個 API 回應都帶，而 statusLine 報的是
+/// **那顆 session 最後一次 API 回應**的數字——閒置的 session 一直重畫同一份舊快照。所以：
+/// - cache 的 5h 窗還沒結束，這份卻沒有 5h（claude 不帶已經結束的窗＝它最後一次回合在更早的窗裡）、5h 是更早的窗、
+///   或同窗但 5h 用量比較低 → `Less`（比較舊）。
+/// - 5h 是更晚的窗、或同窗用量比較高 → `Greater`（比較新）。
+/// - 同窗同用量 → `Equal`；兩邊都說不出有效的 5h 窗 → `None`（無從比較）。
+fn statusline_freshness(existing: &Quota, incoming: &Quota, now: chrono::DateTime<chrono::Utc>) -> Option<std::cmp::Ordering> {
+    use std::cmp::Ordering::{Greater, Less};
+    let at = |w: &Window| w.resets_at.as_deref().and_then(parse_utc);
+    let old = existing.five_hour.as_ref().and_then(|w| Some((w.used_pct, at(w)?)));
+    let old_current = old.is_some_and(|(_, t)| t > now);
+    let Some(new) = incoming.five_hour.as_ref() else {
+        return old_current.then_some(Less);
+    };
+    let new_at = at(new)?;
+    match old {
+        Some((old_used, old_at)) if same_window(old_at, new_at) => new.used_pct.partial_cmp(&old_used),
+        Some((_, old_at)) if new_at > old_at => Some(Greater),
+        Some(_) => old_current.then_some(Less),
+        None => (new_at > now).then_some(Greater),
+    }
+}
+
 /// Compare Claude statusLine windows with the value already stored under a shared account key.
 /// Other sources (especially the active `/usage` probe) bypass this guard.
 fn guard_statusline_windows(
@@ -657,6 +690,11 @@ fn guard_statusline_windows(
     incoming: &mut Quota,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Option<(&'static str, String, String)> {
+    let freshness = statusline_freshness(existing, incoming, now);
+    if freshness == Some(std::cmp::Ordering::Less) {
+        let reset = |q: &Quota| q.five_hour.as_ref().and_then(|w| w.resets_at.clone()).unwrap_or_else(|| "none".into());
+        return Some(("five_hour", reset(existing), reset(incoming)));
+    }
     for (bucket, old, new) in [
         ("five_hour", &existing.five_hour, &mut incoming.five_hour),
         ("seven_day", &existing.seven_day, &mut incoming.seven_day),
@@ -669,11 +707,13 @@ fn guard_statusline_windows(
         ) else {
             continue;
         };
-        if old_at > now && new_at < old_at {
+        if same_window(old_at, new_at) {
+            // 分不出誰新時才同窗取大；5h 證明這份比較新就照寫，帳號在窗內被重置（resets_at 不變）時才降得下來（#404）。
+            if freshness != Some(std::cmp::Ordering::Greater) {
+                new.used_pct = new.used_pct.max(old.used_pct);
+            }
+        } else if old_at > now && new_at < old_at {
             return Some((bucket, old.resets_at.clone().unwrap(), new.resets_at.clone().unwrap()));
-        }
-        if new_at == old_at {
-            new.used_pct = new.used_pct.max(old.used_pct);
         }
     }
     None
@@ -1174,6 +1214,88 @@ mod tests {
         let q = app.quotas.lock().await.get("claude").cloned().unwrap();
         assert_eq!(q.source, "claude-usage");
         assert_eq!(q.five_hour.as_ref().unwrap().used_pct, 12.0);
+    }
+
+    /// 一顆 claude session 的 statusLine：`five` 是 5h 窗 (已用, 重置)，沒有就是那顆最後一次 API 回合落在已結束的窗裡。
+    fn claude_statusline(five: Option<(f64, chrono::DateTime<chrono::Utc>)>, seven: (f64, chrono::DateTime<chrono::Utc>)) -> Quota {
+        let mut q = codex_q("statusline", None);
+        q.five_hour = five.map(|(used_pct, at)| Window { used_pct, resets_at: Some(iso(at)) });
+        q.seven_day = Some(Window { used_pct: seven.0, resets_at: Some(iso(seven.1)) });
+        q
+    }
+
+    async fn claude_seven_day(app: &Arc<App>) -> f64 {
+        app.quotas.lock().await.get("claude").unwrap().seven_day.as_ref().unwrap().used_pct
+    }
+
+    /// #404（2026-09-23 14:04Z 誤報 critical）：cc0 的 17 個 session 報 7d 12%，一個閒置很久的 session 報 97%，
+    /// **同一個** 7d resets_at。它的 payload 沒有 5h 窗（最後一次 API 回合在已結束的 5h 窗裡），#399 的「5h 較舊就丟」
+    /// 比不到；同窗取 max 就把 97 鎖住，其餘 17 個永遠壓不回去。它先到、夾在中間、最後到都一樣要是 12。
+    #[tokio::test]
+    async fn one_idle_session_cannot_lock_the_seven_day_window_high() {
+        let now = chrono::Utc::now();
+        let five_reset = now + chrono::Duration::hours(3);
+        let seven_reset = now + chrono::Duration::days(2);
+        let fresh = || claude_statusline(Some((6.0, five_reset)), (12.0, seven_reset));
+        for idle in [
+            claude_statusline(None, (97.0, seven_reset)),
+            // 同一個 5h 窗、但 5h 用量比較低：也是比較舊的回合。
+            claude_statusline(Some((2.0, five_reset)), (97.0, seven_reset)),
+        ] {
+            for position in [0, 9, 17] {
+                let app = crate::testing::env().await.app.clone();
+                for i in 0..18 {
+                    let q = if i == position { idle.clone() } else { fresh() };
+                    set(&app, LOCAL_HOST, "claude", q).await;
+                }
+                assert_eq!(claude_seven_day(&app).await, 12.0, "閒置 session 排在第 {position} 個：{idle:?}");
+            }
+        }
+    }
+
+    /// 已經被鎖在高值（例如 5h 窗全過期時收進來的舊讀數）也不是永久的：任何一筆 5h 比較新的讀數就照實寫回來。
+    #[tokio::test]
+    async fn a_fresher_five_hour_reading_releases_a_high_seven_day_value() {
+        let app = crate::testing::env().await.app.clone();
+        let now = chrono::Utc::now();
+        let seven_reset = now + chrono::Duration::days(2);
+        let five_reset = now + chrono::Duration::hours(3);
+        // 沒人用了 5 小時：沒有有效的 5h 窗可比，照舊收（同窗取大）。
+        set(&app, LOCAL_HOST, "claude", claude_statusline(None, (97.0, seven_reset))).await;
+        assert_eq!(claude_seven_day(&app).await, 97.0);
+        set(&app, LOCAL_HOST, "claude", claude_statusline(Some((1.0, five_reset)), (12.0, seven_reset))).await;
+        assert_eq!(claude_seven_day(&app).await, 12.0, "開了新 5h 窗的讀數比較新");
+        set(&app, LOCAL_HOST, "claude", claude_statusline(Some((1.0, five_reset)), (13.0, seven_reset))).await;
+        set(&app, LOCAL_HOST, "claude", claude_statusline(Some((1.0, five_reset)), (12.0, seven_reset))).await;
+        assert_eq!(claude_seven_day(&app).await, 13.0, "5h 一樣新時分不出先後，同窗照舊取大");
+        set(&app, LOCAL_HOST, "claude", claude_statusline(Some((3.0, five_reset)), (12.5, seven_reset))).await;
+        assert_eq!(claude_seven_day(&app).await, 12.5, "5h 用量比較高＝比較新的回合，可以往下修");
+    }
+
+    /// `/usage` 的結構化 resets_at 帶毫秒（`…:00.594Z`），statusLine 是整秒：同一個窗，不能被當成「比較舊的窗」丟掉，
+    /// 也不能把 statusLine 當成比較新的窗。探測之後，閒置 session 的舊讀數一樣不能把它蓋回高值。
+    #[tokio::test]
+    async fn a_usage_probe_and_the_statusline_agree_on_the_window_despite_millisecond_jitter() {
+        let app = crate::testing::env().await.app.clone();
+        let now = chrono::Utc::now();
+        let five_reset = now + chrono::Duration::hours(3);
+        let seven_reset = now + chrono::Duration::days(2);
+        let jitter = chrono::Duration::milliseconds(594);
+        set(&app, LOCAL_HOST, "claude", claude_statusline(None, (97.0, seven_reset))).await;
+        let mut probe = codex_q("claude-usage", None);
+        probe.five_hour = Some(Window { used_pct: 6.0, resets_at: Some(iso(five_reset + jitter)) });
+        probe.seven_day = Some(Window { used_pct: 12.0, resets_at: Some(iso(seven_reset + jitter)) });
+        set(&app, LOCAL_HOST, "claude", probe).await;
+        assert_eq!(claude_seven_day(&app).await, 12.0, "探測直接覆寫");
+
+        set(&app, LOCAL_HOST, "claude", claude_statusline(None, (97.0, seven_reset))).await;
+        set(&app, LOCAL_HOST, "claude", claude_statusline(Some((5.0, five_reset)), (97.0, seven_reset))).await;
+        assert_eq!(claude_seven_day(&app).await, 12.0, "比探測舊的 statusLine 不能把 97 蓋回來");
+
+        set(&app, LOCAL_HOST, "claude", claude_statusline(Some((7.0, five_reset)), (13.0, seven_reset))).await;
+        let q = app.quotas.lock().await.get("claude").cloned().unwrap();
+        assert_eq!(q.source, "statusline", "同窗、5h 比探測多：比較新的讀數要收");
+        assert_eq!(q.seven_day.as_ref().unwrap().used_pct, 13.0);
     }
 
     /// 狀態列是剩餘、存的是已用；不可洗掉 `resets_at`（2026-09-13 使用者：量表停在舊數字）。

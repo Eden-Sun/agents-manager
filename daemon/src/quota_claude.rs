@@ -872,6 +872,59 @@ pub async fn refresh_claude(app: &Arc<App>, host: &str) -> Result<bool> {
     Ok(any || !saw_missing)
 }
 
+/// [`force_probe`] 失敗的種類：API 要分得出「沒這個身分」「沒裝 claude」「探了但沒讀到」。
+#[derive(Debug)]
+pub enum ForceProbeError {
+    UnknownAccount,
+    NotInstalled,
+    Failed(String),
+}
+
+/// 強制探哪一個 target：`account` 省略＝裸的預設帳號；共用預設帳號的身分（含只問登入的那種）額度都記在裸 `claude`，
+/// 所以也探裸的那一趟。
+fn forced_target(targets: Vec<Target>, account: Option<&str>) -> Option<Target> {
+    let bare = |t: &Target| t.key == "claude";
+    let Some(name) = account else { return targets.into_iter().find(bare) };
+    let own = targets.iter().position(|t| t.names.iter().any(|n| n == name))?;
+    if targets[own].login_only {
+        return targets.into_iter().find(bare);
+    }
+    targets.into_iter().nth(own)
+}
+
+/// 強制重跑一個帳號的 `/usage`，結果（`source=claude-usage`）直接寫進 cache、蓋掉 statusLine 的值（#404）。
+/// 給人手動校正 cache 用：不看失敗退避、不看「statusLine 很新就跳過」、停用的身分照探。回 `(quota key, 寫進去的那份)`。
+pub async fn force_probe(app: &Arc<App>, host: &str, account: Option<&str>) -> Result<(String, Quota), ForceProbeError> {
+    let _guard = crate::quota::probe_lock(host).await;
+    let home = host_home(app, host).await;
+    let identities = crate::tools::identities_for_host(app, host).await;
+    let (logins, live, statusline_keys) = (BTreeMap::new(), Default::default(), Default::default());
+    let input = PlanInput { host, home: &home, identities: &identities, logins: &logins, live: &live, off: &[], unnamed_running: true, statusline_keys: &statusline_keys };
+    let t = forced_target(plan_targets(&input, |_, _, _| false), account).ok_or(ForceProbeError::UnknownAccount)?;
+    let full = crate::quota::quota_key(host, &t.key);
+    let o = match refresh_claude_account(app, host, &t.key, t.account.as_deref(), t.env, true).await {
+        Ok(Some(o)) => o,
+        Ok(None) => return Err(ForceProbeError::NotInstalled),
+        Err(e) => return Err(ForceProbeError::Failed(e.to_string())),
+    };
+    let mut touched = false;
+    for name in &t.names {
+        touched |= crate::tools::record_identity_login(app, host, name, o.logged_in, o.email.clone(), o.plan.clone()).await;
+    }
+    if touched {
+        if let Some(conn) = app.hosts.get(host).await {
+            crate::state::emit_host_changed(app, &conn).await;
+        }
+    }
+    let Some(q) = o.quota else {
+        return Err(ForceProbeError::Failed(format!("claude `/usage` reported no plan lines (logged_in = {:?})", o.logged_in)));
+    };
+    unpark(&full);
+    mark_usage_seen(&full);
+    let stored = app.quotas.lock().await.get(&full).cloned().unwrap_or(q);
+    Ok((full, stored))
+}
+
 pub fn spawn_claude_poller(app: Arc<App>) {
     tokio::spawn(async move {
         sweep_stale(&app).await;
@@ -1270,6 +1323,34 @@ AM_USAGE_DONE=0
         let cmd = probe_command("/bin/claude", &ts[1].env, false);
         assert!(cmd.contains("auth status --json") && !cmd.contains("/usage"), "只問登入，不跑 /usage：{cmd}");
         assert_eq!(crate::quota::quota_base_default_aware("claude", Some("api"), crate::quota::identity_shares_default("claude", &identities[1].env)), "claude", "額度落點規則不變");
+    }
+
+    /// #404：`POST /api/quota/probe` 探的是那個身分的**額度落點**：cc0／只帶 API key 的身分都記在裸 `claude`，
+    /// 有自己 `CLAUDE_CONFIG_DIR` 的探自己那一格；沒這個身分就沒有 target（API 回 404）。
+    #[test]
+    fn a_forced_probe_targets_where_that_accounts_quota_is_stored() {
+        let identities = vec![
+            ident("cc0", &[]),
+            ident("cc1", &[("CLAUDE_CONFIG_DIR", "$HOME/.claude-cc1")]),
+            ident("api", &[("ANTHROPIC_API_KEY", "sk-test")]),
+        ];
+        let (logins, live, statusline) = (BTreeMap::new(), Default::default(), Default::default());
+        let input = PlanInput { host: "local", home: "/h", identities: &identities, logins: &logins, live: &live, off: &[], unnamed_running: true, statusline_keys: &statusline };
+        let pick = |account: Option<&str>| forced_target(plan_targets(&input, |_, _, _| false), account).map(|t| (t.key, t.login_only, t.env.len()));
+        assert_eq!(pick(None), Some(("claude".into(), false, 0)));
+        assert_eq!(pick(Some("cc0")), Some(("claude".into(), false, 0)));
+        assert_eq!(pick(Some("cc1")), Some(("claude:cc1".into(), false, 1)));
+        assert_eq!(pick(Some("api")), Some(("claude".into(), false, 0)), "額度在裸 claude：探預設帳號的 /usage，不是只問登入");
+        assert_eq!(pick(Some("cc9")), None);
+    }
+
+    /// 沒這個身分：什麼都不探、不開 pane，直接回 `UnknownAccount`（API 404）。
+    #[tokio::test]
+    async fn a_forced_probe_of_an_unknown_account_opens_nothing() {
+        let app = crate::testing::env().await.app.clone();
+        let got = force_probe(&app, LOCAL_HOST, Some("cc9")).await;
+        assert!(matches!(got, Err(ForceProbeError::UnknownAccount)), "{got:?}");
+        assert!(app.quotas.lock().await.is_empty());
     }
 
     /// L4（review 2026-09-16）：共用預設帳號的身分（cc0）停用了、沒有 run，也沒有不帶身分的 claude bot 在跑，
