@@ -361,18 +361,7 @@ pub async fn promote_bot(
     lifecycle::race_point::hit("promote_after_create", &id).await;
 
     // 種下 session：native resume 讀「這顆 bot 最近一個結束的 run 的 native_session_id」。
-    let seeded = sqlx::query(
-        "INSERT INTO runs (id, bot_id, state, agent_status, native_session_id, transcript_path, started_at, ended_at)
-         VALUES (?,?,'stopped','idle',?,?,?,?)",
-    )
-    .bind(db::ulid())
-    .bind(&new_id)
-    .bind(&located.session_id)
-    .bind(staged.dest.to_string_lossy().to_string())
-    .bind(db::now())
-    .bind(db::now())
-    .execute(&app.db)
-    .await;
+    let seeded = crate::promote_intents::seed_session_run(&app.db, &id, &new_id, &located.session_id, &staged.dest.to_string_lossy()).await;
     let mut failure: Option<String> = seeded.err().map(|e| e.to_string());
     let mut run_id = None;
     if failure.is_none() {
@@ -785,6 +774,8 @@ mod tests {
         die_at(&r, "promote_after_stop").await;
         // 之後 native resume 一定接不回：複製過去的 transcript 沒了。
         let _ = std::fs::remove_file(r.dest());
+        // #401：種 run 的時間戳之後拉開一段，確定性地跨過毫秒邊界（以前兩欄各叫一次 now()，偶發被當成「起過了」→ done）。
+        straddle_the_seed(&r);
         let app2 = crate::testing::restart_app(&r.e).await;
         crate::promote_intents::recover_host(&app2, LOCAL_HOST).await;
         let mut st = vec![];
@@ -798,6 +789,26 @@ mod tests {
         assert_eq!(st, vec!["failed"]);
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE kind = 'intent_failed' AND bot_id = ?").bind(&r.child).fetch_one(&app2.db).await.unwrap();
         assert_eq!(n, 1, "AGM inbox 有一則 intent_failed");
+    }
+
+    /// 種 run 取了時間戳之後停 5ms 再寫：跨過毫秒邊界是確定的，不靠整樹負載碰運氣。
+    fn straddle_the_seed(r: &Rig) {
+        lifecycle::race_point::arm("promote_seed", &r.child, || async { tokio::time::sleep(std::time::Duration::from_millis(5)).await });
+    }
+
+    /// #401：種 run 跨過毫秒邊界時，補完仍要把目標 bot 真的以 native resume 起起來，不能直接記 done。
+    #[tokio::test]
+    async fn a_seed_straddling_a_millisecond_still_starts_the_promoted_bot() {
+        let r = rig(true).await;
+        die_at(&r, "promote_after_stop").await;
+        straddle_the_seed(&r);
+        let app2 = crate::testing::restart_app(&r.e).await;
+        crate::promote_intents::recover_host(&app2, LOCAL_HOST).await;
+        let new_id = app2.cfg.get().await.projects[0].bots[0].id.clone().unwrap();
+        let seeded: (String, String) = sqlx::query_as("SELECT started_at, ended_at FROM runs WHERE bot_id = ? AND pane_id IS NULL").bind(&new_id).fetch_one(&app2.db).await.unwrap();
+        assert_eq!(seeded.0, seeded.1, "種的那列兩欄同一個時間戳");
+        assert!(crate::testing::eventually!(db::active_run(&app2.db, &new_id).await.unwrap().is_some()), "目標 bot 真的起來了");
+        assert!(crate::testing::eventually!(intent_status(&app2, &r.child).await == vec!["done"]));
     }
 
     /// intent 寫不進去＝什麼都還沒停：不能繼續（child 照跑、複製收回）。
