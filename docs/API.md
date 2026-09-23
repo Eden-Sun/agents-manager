@@ -312,7 +312,7 @@ prompt 改成打字進 pane 並以無損證據確認。**一個字都沒打時�
 | 422 | `{"error":"delivery_unprovable","reason":"prompt_too_long_to_prove","sent":false,"run_id"}` | 超過 20 萬字，不打。 |
 | 409 | `{"reason":"maintenance_window","resource":"restart","held_by","fence","expires_at","retry_after_secs","retryable":true,"sent":false,"message"}` | 有人握著會中斷 pane 的維護窗口（SPEC §18.10），daemon 這一側不送新的 prompt，連 turn 都不建。窗口 release 或到期就自動恢復，同一個 `client_request_id` 原樣重送即可。AGM 派工不走這個 409——它在 `controller::dispatch` 就被 hold 在佇列裡。 |
 | 503 | `{"reason":"maintenance_state_unavailable","resource":"restart","retry_after_secs","retryable":true,"sent":false,"message"}`（帶 `Retry-After` header） | **讀不到**維護窗口的狀態（DB 出錯、租約那一列解不開、沒放掉卻沒有讀得懂的到期時間，issue #127）——觀測不到租約不等於沒有租約，所以照窗口處理：不送任何字、連 turn 都不留（已 commit 的那一筆會撤回）。跟上一列 409 `maintenance_window`（**確定**有人握著）分得開；DB 一恢復就重新判斷，同一個 `client_request_id` 原樣重送即可。AGM 派工不回這個 503——留在佇列。 |
-| 409 | `{"reason":"resume_unverified","run_id","session_id","retry_after_s"}` | 這個 run 是 `--resume` 接回來的 claude，還沒收到它回報 session（SessionStart hook），不知道接回的是不是原本那段對話（issue #92，SPEC §6.5.2 第 4 點）。連 turn 都不建；回報一到、或等滿 120 秒（刻意放行並在對話插說明）就恢復，同一個 `client_request_id` 原樣重送即可。AGM 派工不回這個 409——排進佇列等驗證。 |
+| 409 | `{"reason":"resume_unverified","run_id","session_id","retry_after_s"}` | 這個 run 是 `--resume` 接回來的 claude，還沒收到它回報 session（SessionStart hook），不知道接回的是不是原本那段對話（issue #92，SPEC §6.5.2 第 4 點）。連 turn 都不建；回報一到、或等滿 120 秒（刻意放行並在對話插說明）就恢復，同一個 `client_request_id` 原樣重送即可。等的時間可能更長：pane 停在要人回答的提示（信任目錄）那段不算，按掉之後還會再給 60 秒讓遠端的回報走完一輪 spool 掃描——照 `retry_after_s` 再問就好。AGM 派工不回這個 409——排進佇列等驗證。 |
 
 turn 已經建好、還沒打第一個字時 run 就結束（`mark_run_exited` 把它標 failed 並插「run ended」說明）：撤回撤不掉，這時
 **不刪任何東西**，回 `200` 那筆 turn 的現況（訊息與說明都留著），跟用同一個 `client_request_id` 重送拿到的回應一致，不回可重試的 409。

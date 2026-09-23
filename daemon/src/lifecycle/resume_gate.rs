@@ -13,7 +13,8 @@
 //!   codex／grok 本來就要等第一個回合結束才回報 session（`hookrecv` 的既有規則），不在這裡等——等下去
 //!   只會死結：沒有回合就沒有回報，沒有回報就不給回合。
 //! - **等到什麼時候**：`SessionStart` 來了就放行（對上或對不上都是結論，對不上的那則說明會先進聊天室）；
-//!   最多等 [`VERIFY_WINDOW`]，從 `runs.started_at` 算。到期是**刻意的退路**：記 `resume_outcome='unverified'`、
+//!   最多等 [`VERIFY_WINDOW`]，從 `runs.started_at` 算——但 pane 停在要人回答的提示（信任目錄）時那段不算，
+//!   人按掉之後還要再給 [`UNBLOCK_GRACE`]（遠端回報要走一輪 spool 掃描）。到期是**刻意的退路**：記 `resume_outcome='unverified'`、
 //!   在聊天室留一則看得見的說明、然後放行——hook 壞掉的 bot 不能因此永遠收不到訊息，但也不能假裝驗過了。
 //!   之後才到的 `SessionStart` 照樣會被比對，對不上一樣會留 `context_lost`。
 //! - **擋的是什麼**：排隊的 flush（`queue::flush_queued_locked`，不花重試額度，掛 timer 到期再來）與直接送入
@@ -27,6 +28,16 @@ use super::*;
 /// 從 run 開始到 `SessionStart` 進到 daemon 最多等多久。本機通常幾秒；遠端 hook 寫在那台的 spool，
 /// 要等 30 秒一輪的掃描（SPEC §11.4.4）撈回來，再加上 CLI 自己的啟動時間（`start_inner` 最多等 60 秒 ready）。
 pub(crate) const VERIFY_WINDOW: Duration = Duration::from_secs(120);
+
+/// pane 停在要人回答的提示（信任目錄／權限）時，CLI 還沒真的開始跑，`SessionStart` 不可能送出來——那段
+/// 時間不算進 [`VERIFY_WINDOW`]。人按下去之後，回報還要走一趟遠端 spool 掃描（30 秒一輪）才回得到 daemon，
+/// 所以狀態真的變了之後至少再等這麼久才肯走退路。
+///
+/// #92 的 live-SSH 端到端撞到的就是這個：換身分之後的新設定目錄沒信任過專案目錄，遠端的 claude 停在
+/// 「❯ No, exit」等了四分半（`agent_status='blocked'`）。窗口是從 `runs.started_at` 算的，早就過了；
+/// 人一按下去、`blocked → idle` 那一瞬 flush 回來，閘門會當場記 `unverified`、在聊天室留一則說錯話的
+/// 提醒，然後把排著的派工送進一段還沒確認的對話——而真正的 `SessionStart` 下一輪掃描就到了。
+pub(crate) const UNBLOCK_GRACE: Duration = Duration::from_secs(60);
 
 /// 這一刻該不該讓 prompt 進去。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,25 +61,39 @@ pub(crate) fn decide(bot: &db::Bot, run: &db::Run, now: chrono::DateTime<chrono:
     if run.resume_outcome.is_some() {
         return Gate::Open;
     }
-    match remaining(&run.started_at, now) {
+    // 三個期限取最晚的那個；全都過了才算到期（見 [`UNBLOCK_GRACE`]）。
+    let left = [
+        remaining(&run.started_at, VERIFY_WINDOW, now),
+        // 還卡在要人回答的提示：不可能有回報，永遠不到期。
+        (run.agent_status == "blocked").then_some(UNBLOCK_GRACE),
+        // 狀態剛真的變過（例如人剛把信任提示按掉）：留一輪遠端 spool 掃描的時間再說。
+        // `agent_status_since` 是 daemon 自己記的變更時刻（issue #93），NULL＝沒變過或升級前的舊列，不額外延。
+        run.agent_status_since.as_deref().and_then(|since| remaining(since, UNBLOCK_GRACE, now)),
+    ]
+    .into_iter()
+    .flatten()
+    .max();
+    match left {
         Some(left) => Gate::Waiting { expected: expected.to_string(), left },
         None => Gate::Expired { expected: expected.to_string() },
     }
 }
 
-/// 還要等多久；`None` ＝已經到期。`started_at` 讀不懂就當到期：寧可走退路（會留說明），也不要永遠卡住。
-fn remaining(started_at: &str, now: chrono::DateTime<chrono::Utc>) -> Option<Duration> {
-    let started = chrono::DateTime::parse_from_rfc3339(started_at).ok()?.with_timezone(&chrono::Utc);
-    let deadline = started + chrono::Duration::from_std(VERIFY_WINDOW).ok()?;
+/// 從 `from` 起算 `window` 還剩多久；`None` ＝已經到期。時間讀不懂就當到期：寧可走退路（會留說明），
+/// 也不要永遠卡住。
+fn remaining(from: &str, window: Duration, now: chrono::DateTime<chrono::Utc>) -> Option<Duration> {
+    let started = chrono::DateTime::parse_from_rfc3339(from).ok()?.with_timezone(&chrono::Utc);
+    let deadline = started + chrono::Duration::from_std(window).ok()?;
     (deadline - now).to_std().ok().filter(|d| !d.is_zero())
 }
 
 /// 呼叫端用這支：`Expired` 在這裡落地（CAS 寫 `resume_outcome='unverified'`＋系統訊息，同一個交易、只寫一次），
 /// 然後當成 `Open` 回去。呼叫端持 bot 鎖。
 pub(crate) async fn check(app: &Arc<App>, bot: &db::Bot, run: &db::Run, conv: &str) -> Gate {
-    match decide(bot, run, chrono::Utc::now()) {
+    let now = chrono::Utc::now();
+    match decide(bot, run, now) {
         Gate::Expired { expected } => {
-            if let Err(e) = give_up_waiting(app, bot, run, conv, &expected).await {
+            if let Err(e) = give_up_waiting(app, bot, run, conv, &expected, waited_secs(&run.started_at, now)).await {
                 // 寫不進去也要放行：卡在這裡比少一則說明更糟，下一次呼叫會再試著寫。
                 tracing::warn!(bot = %bot.name, run = %run.id, error = %e, "could not record the unverified resume");
             }
@@ -78,7 +103,23 @@ pub(crate) async fn check(app: &Arc<App>, bot: &db::Bot, run: &db::Run, conv: &s
     }
 }
 
-async fn give_up_waiting(app: &Arc<App>, bot: &db::Bot, run: &db::Run, conv: &str, expected: &str) -> anyhow::Result<()> {
+/// 這個 run 從開始到現在等了幾秒（`started_at` 讀不懂就退回窗口長度）。等的時間可能比 [`VERIFY_WINDOW`]
+/// 長（[`UNBLOCK_GRACE`]），說明裡要講真的等了多久，不要背一個固定數字。
+fn waited_secs(started_at: &str, now: chrono::DateTime<chrono::Utc>) -> u64 {
+    chrono::DateTime::parse_from_rfc3339(started_at)
+        .ok()
+        .and_then(|t| (now - t.with_timezone(&chrono::Utc)).to_std().ok())
+        .map_or(VERIFY_WINDOW.as_secs(), |d| d.as_secs())
+}
+
+async fn give_up_waiting(
+    app: &Arc<App>,
+    bot: &db::Bot,
+    run: &db::Run,
+    conv: &str,
+    expected: &str,
+    waited: u64,
+) -> anyhow::Result<()> {
     let mut tx = app.db.begin().await?;
     let marked = sqlx::query(
         "UPDATE runs SET resume_outcome = 'unverified'
@@ -92,9 +133,8 @@ async fn give_up_waiting(app: &Arc<App>, bot: &db::Bot, run: &db::Run, conv: &st
         return Ok(());
     }
     let note = format!(
-        "⚠️ 用 `--resume` 接回原本的對話（session `{expected}`）之後，{} 秒內沒有收到 claude 回報的 session，\
-         確認不了接回的是不是同一段。排隊的訊息照常送出；之後如果回報的 session 對不上，會再另外提醒。",
-        VERIFY_WINDOW.as_secs()
+        "⚠️ 用 `--resume` 接回原本的對話（session `{expected}`）之後，{waited} 秒內沒有收到 claude 回報的 session，\
+         確認不了接回的是不是同一段。排隊的訊息照常送出；之後如果回報的 session 對不上，會再另外提醒。"
     );
     let msg = insert_message_tx(&mut tx, conv, None, "system", &note, "system", false, None).await?;
     tx.commit().await?;
@@ -389,6 +429,83 @@ mod tests {
         assert_eq!(turn(&app, &out.turn_id).await.status, "queued");
         assert!(!e.herdr.methods().iter().any(|m| m == "pane.send_text" || m == "agent.prompt"), "一個字都沒打");
         assert!(queue_retry_timer_armed(&bot.id), "驗證到期時 flush 會回來");
+        forget_queue_retry_timer(&bot.id);
+    }
+
+    /// #92 live-SSH（2026-09-23）：換身分之後的新設定目錄沒信任過專案目錄，遠端的 claude 停在信任提示
+    /// （`agent_status='blocked'`）四分半。窗口是從 `runs.started_at` 算的，這段時間 CLI 根本還沒起來、
+    /// 不可能有回報——不能讓它燒掉窗口，人按掉之後也要留一輪遠端 spool 掃描的時間。
+    #[tokio::test]
+    async fn a_pane_waiting_on_a_human_does_not_burn_the_verify_window() {
+        let t0 = "2026-09-23T16:00:00.000Z";
+        let (_e, bot, run) = bot_and_run("claude", 1, Some("s-1"), t0).await;
+        let long_after = at("2026-09-23T16:10:00Z"); // 窗口（120 秒）早就過了
+        assert_eq!(decide(&bot, &run, long_after), Gate::Expired { expected: "s-1".into() }, "沒卡住、狀態也沒變過：照原本的期限");
+
+        let mut blocked = run.clone();
+        blocked.agent_status = "blocked".into();
+        assert_eq!(
+            decide(&bot, &blocked, long_after),
+            Gate::Waiting { expected: "s-1".into(), left: UNBLOCK_GRACE },
+            "還在等人按信任提示：不可能有回報，不算到期"
+        );
+
+        // 人按下去了：`blocked → idle`，trigger 蓋上 `agent_status_since`（issue #93）。
+        let mut unblocked = run.clone();
+        unblocked.agent_status_since = Some("2026-09-23T16:09:50.000Z".into());
+        assert_eq!(
+            decide(&bot, &unblocked, long_after),
+            Gate::Waiting { expected: "s-1".into(), left: Duration::from_secs(50) },
+            "剛按掉：遠端的 SessionStart 還在 spool 裡，再等一輪掃描"
+        );
+        unblocked.agent_status_since = Some("2026-09-23T16:08:30.000Z".into());
+        assert_eq!(decide(&bot, &unblocked, long_after), Gate::Expired { expected: "s-1".into() }, "寬限也過了：照樣走退路");
+
+        let mut garbled = run.clone();
+        garbled.agent_status_since = Some("not a time".into());
+        assert_eq!(decide(&bot, &garbled, long_after), Gate::Expired { expected: "s-1".into() }, "讀不懂不延");
+    }
+
+    /// 同一件事整條走一遍（live 那次因為 #407 的信任提示，`resume_unverified` 這條路在遠端量不到）：
+    /// 信任提示卡了十分鐘 → 人按掉 → flush 回來。閘門不能當場記 `unverified`、不能留說明、也不能把排著的
+    /// 派工送進去；等 spool 裡那一行 `SessionStart` 回來才 `verified`、才放行。
+    #[tokio::test]
+    async fn answering_a_trust_prompt_does_not_immediately_give_up_on_the_resume() {
+        let long_ago = db::iso_at(chrono::Utc::now() - chrono::Duration::seconds(600));
+        let (e, bot, run) = bot_and_run("claude", 1, Some("s-trust"), &long_ago).await;
+        let app = e.app.clone();
+        let queued = queue_one(&app, &bot.id, "換身分之後排著的派工").await;
+        // 十分鐘都卡在信任提示，然後人按下去：`blocked → idle` 讓 trigger 蓋上 `agent_status_since`。
+        for st in ["blocked", "idle"] {
+            sqlx::query("UPDATE runs SET agent_status = ? WHERE id = ?").bind(st).bind(&run.id).execute(&app.db).await.unwrap();
+        }
+        let run = db::active_run(&app.db, &bot.id).await.unwrap().unwrap();
+        assert!(run.agent_status_since.is_some(), "trigger 有蓋上狀態變更時刻");
+        forget_queue_retry_timer(&bot.id);
+
+        flush_queued_locked(&app, &bot.id).await.unwrap();
+        let t = turn(&app, &queued).await;
+        assert_eq!((t.status.as_str(), t.flush_retries), ("queued", 0), "剛按掉信任提示：還不能算放棄，派工留在佇列");
+        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        let (outcome, notes): (Option<String>, i64) = (
+            sqlx::query_scalar("SELECT resume_outcome FROM runs WHERE id=?").bind(&run.id).fetch_one(&app.db).await.unwrap(),
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE conversation_id=? AND role='system'")
+                .bind(&conv)
+                .fetch_one(&app.db)
+                .await
+                .unwrap(),
+        );
+        assert_eq!(outcome, None, "沒有結論就不能寫 unverified");
+        assert_eq!(notes, 0, "也不能留那則說錯話的提醒");
+        assert!(queue_retry_timer_armed(&bot.id), "掛 timer 等那一行回來");
+
+        // 下一輪 spool 掃描把 `SessionStart` 撈回來。
+        session_start(&app, &bot.id, &run.id, "s-trust").await;
+        let outcome: Option<String> = sqlx::query_scalar("SELECT resume_outcome FROM runs WHERE id=?").bind(&run.id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(outcome.as_deref(), Some("verified"), "接回的就是原本那段");
+        forget_queue_retry_timer(&bot.id);
+        flush_queued_locked(&app, &bot.id).await.unwrap();
+        assert!(went_past_the_gate(&turn(&app, &queued).await), "驗證過了才送");
         forget_queue_retry_timer(&bot.id);
     }
 
