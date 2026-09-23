@@ -1489,6 +1489,7 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
 
 ## 撞限第二意見帳本 `/api/judge/shadow`（SPEC §4.3c，issue #240）
 - `GET /api/judge/shadow?limit=`（預設 200、上限 1000）→ `{enabled, projects, model, rows:[{id,at,bot_id,run_id,kind,matched_line,composer_idle,regex_verdict,jev_is_live_ui,model,ms,input_tokens,error,cleared_at}]}`，新的在前。唯讀；`matched_line` 是遮罩後的；key 與 `key_file` 不回。
+  `regex_verdict`：`limit_hit`（撞限第二意見，`jev_is_live_ui`＝那一行是介面畫的機率）或 `stuck_queued`（卡在不認識的畫面，SPEC §4.3c；`jev_is_live_ui`＝畫面底部有框在等人的機率、`matched_line`＝畫面尾段指紋）。後者 ≥0.7 推 inbox `judge_stuck_screen`（payload `{bot_id,bot_name,kind,run_id,turn_id,waited_secs,probability,screen_tail,action}`）。
 
 - `GET /api/judge/settings` → `{enabled, projects, model, key_present, key_error}`。key 永遠不回。
 - `PUT /api/judge/settings {enabled?, projects?, token?}` → 同上。`token` 非空＝寫進 key 檔（600）、空或省略＝不動；`projects` 是專案 id 或 label，去空白、去重；`enabled:true` 而沒有可用的 key → 409 `{error:"needs_key", reason}`；`token` 含空白／控制字元 → 400。存檔當下生效。token 與 `enabled`／`projects` 一起存是一個整體：token 先寫成暫存檔（600），config 寫成功才原子換掉現行 key；config 失敗（5xx）舊 key 與 config 都不變，換 key 失敗則把 config 退回原值。

@@ -497,6 +497,7 @@ claude 連線在回應中途掉了時，pane 只多一行 `⏺ API Error: Connec
 - **在 bot 鎖外問**：命中當下只複製畫面，另起 task 去問（一次約 0.6 秒）。
 - **帳本 `judge_shadow`**：遮罩後的命中行、`composer_idle`、`jev_is_live_ui`（機率）、模型、耗時、input tokens、錯誤、`cleared_at`。不存畫面全文。`cleared_at` 是這顆 bot 的撞限之後被成功回合清掉的時刻——撞限後幾分鐘內就被清掉＝當時其實沒撞限，這就是事後對帳的標籤。
 - **設定入口**：網頁「環境設定 → Jev 第二意見」（或 `PUT /api/judge/settings`）：貼 API key、開關、勾專案。存檔當下生效，不用重啟。貼進來的 key 由 daemon 寫到 `key_file`（600），不進 `config.toml`，任何 API 都不回 key，只回 `key_present`／`key_error`。沒有可用的 key 時不給開（409 `needs_key`）。
+- **第二個場景：卡在不認識的畫面**（2026-09-23，`judge::stuck`）。有 prompt 排在 `queued`、bot 的 run 是 `running`／`idle`、排了超過 180 秒還沒送出去（2.1.278「Auto mode」推銷框那次的形狀：daemon 什麼都沒說，等 30 分鐘把交辦撤回）。控制迴圈每拍掃一次：輸入列空著的不問（那不是框在擋）；問 Jev「畫面底部是不是有介面自己畫的選單／確認框在等人選」，同一個 run 同一個畫面（尾段指紋）只問一次，答案寫進 `judge_shadow`（`regex_verdict='stuck_queued'`，`matched_line` 放指紋）。機率 ≥0.7 推一則 inbox `judge_stuck_screen`（巡檢收；payload 帶 bot、turn、等了多久、機率、遮罩後的畫面尾段），**不按任何鍵**——regex 認得的框各有自己的處理，這條只管「daemon 不認得的」。同一個 `[judge]` 開關與專案名單。
 - 模型釘 `jev-1.13.0`。離線量測與題目來源在 `reports/jev-spike/`。Jev 的答案目前**不**作為否決票；要升級得先看帳本的數字。
 
 ### 4.4 hook 子命令（`agents-managerd hook claude|codex|grok`）最低契約

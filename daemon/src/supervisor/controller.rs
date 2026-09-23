@@ -1892,6 +1892,7 @@ pub fn spawn(app: Arc<App>, generation: i64) {
                     reconcile(&app).await;
                     resume_quota_blocked(&app).await;
                     block_stale_queues(&app).await;
+                    crate::judge::stuck::sweep(&app).await;
                     drain_queue(&app).await;
                     // Before pushing anything new: give back the notifications that went out
                     // and were never answered. A delivered event nobody acked is still owed.

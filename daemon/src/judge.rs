@@ -19,6 +19,7 @@ use crate::config::JudgeCfg;
 use crate::state::App;
 
 pub mod http;
+pub mod stuck;
 
 const TAIL_LINES: usize = 60;
 const TAIL_CHARS: usize = 6000;
@@ -232,7 +233,7 @@ pub fn key_status(path: &str) -> std::result::Result<(), String> {
 }
 
 /// 檔案權限對 group／other 開著就拒用：key 不該是別人讀得到的。
-fn read_key(path: &str) -> Result<String> {
+pub(crate) fn read_key(path: &str) -> Result<String> {
     let path = crate::config::expand_home(path, &std::env::var("HOME").unwrap_or_default());
     let meta = std::fs::metadata(&path).map_err(|e| anyhow!("key file unreadable: {e}"))?;
     #[cfg(unix)]
@@ -251,8 +252,15 @@ fn read_key(path: &str) -> Result<String> {
     Ok(key.to_string())
 }
 
+/// 給 `stuck` 用的通用回答：某一題 noul 的機率。
+pub(crate) struct NoulAnswer {
+    pub value: f64,
+    pub model: Option<String>,
+    pub input_tokens: Option<i64>,
+}
+
 /// 一次就好：逾時、429、5xx 都只記一筆 error，不重試——shadow 少一筆無所謂，不值得佔連線。
-async fn ask(cfg: &JudgeCfg, key: &str, body: &Value) -> Result<Answer> {
+pub(crate) async fn ask_noul(cfg: &JudgeCfg, key: &str, body: &Value, question: &str) -> Result<NoulAnswer> {
     let client = reqwest::Client::builder().timeout(Duration::from_millis(cfg.timeout_ms)).build()?;
     let resp = client.post(&cfg.endpoint).bearer_auth(key).json(body).send().await.map_err(|e| anyhow!("request failed: {}", e.without_url()))?;
     let status = resp.status();
@@ -260,8 +268,13 @@ async fn ask(cfg: &JudgeCfg, key: &str, body: &Value) -> Result<Answer> {
         return Err(anyhow!("http {}", status.as_u16()));
     }
     let v: Value = resp.json().await?;
-    let is_live_ui = v["answers"]["is_live_ui"]["noul"].as_f64().ok_or_else(|| anyhow!("no noul in the answer"))?;
-    Ok(Answer { is_live_ui, model: v["model"].as_str().map(str::to_string), input_tokens: v["usage"]["input_tokens"].as_i64() })
+    let value = v["answers"][question]["noul"].as_f64().ok_or_else(|| anyhow!("no noul in the answer"))?;
+    Ok(NoulAnswer { value, model: v["model"].as_str().map(str::to_string), input_tokens: v["usage"]["input_tokens"].as_i64() })
+}
+
+async fn ask(cfg: &JudgeCfg, key: &str, body: &Value) -> Result<Answer> {
+    let a = ask_noul(cfg, key, body, "is_live_ui").await?;
+    Ok(Answer { is_live_ui: a.value, model: a.model, input_tokens: a.input_tokens })
 }
 
 /// 題目照 spike（`reports/jev-spike/build_cases_b.py`）量過的那一版，多一個 `composer_idle`。用真的 Jev 重跑
@@ -285,7 +298,7 @@ fn request_body(model: &str, kind: &str, matched: &str, screen: &str, composer_i
     })
 }
 
-fn tail(screen: &str) -> String {
+pub(crate) fn tail(screen: &str) -> String {
     let lines: Vec<&str> = screen.lines().collect();
     let from = lines.len().saturating_sub(TAIL_LINES);
     let mut out = mask(&lines[from..].join("\n"));
