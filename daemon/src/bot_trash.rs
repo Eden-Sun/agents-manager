@@ -2,13 +2,30 @@
 //!
 //! 軟刪本來就是為了能還原（對話、設定都留著），偏偏 `bots/<id>/` 是當場 `remove_dir_all`——2026-09-23 13:28Z
 //! `build` 與 triage 被誤刪時，AGM 還原得回 bot 列與 config，目錄裡的東西（spool 裡還沒重放的 hook、shim、
-//! 手動放的檔）就沒了。搬走而不是刪：`POST /api/bots/{id}/restore` 時搬回來；開機時把放超過 [`KEEP_DAYS`] 天的清掉。
+//! 手動放的檔）就沒了。搬走而不是刪：`POST /api/bots/{id}/restore` 時搬回來；放超過 [`KEEP_DAYS`] 天、
+//! 或整個回收區超過 [`MAX_BYTES`] 就清掉（最舊的先）。
 //! 這裡只管本機；遠端目錄的回收區在 `remote_trash`（#411）。
+//!
+//! 清理跑兩處：開機的清掃（`purge_deleted_bot_dirs`）與 [`spawn_gc`] 每天一次。只靠開機那一次不夠——
+//! daemon 常駐好幾天很常見，回收區會一路長（review d77434c0 #2）。
 
+use crate::state::App;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 
 /// 回收區保留幾天。
 pub const KEEP_DAYS: u64 = 7;
+
+/// 回收區的總量上限。超過就從最舊的開始清，直到降到上限以下——時間上限擋不住「短時間刪掉一堆大目錄」。
+pub const MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// 例行清理的間隔。
+const GC_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
+
+pub fn keep_duration() -> Duration {
+    Duration::from_secs(KEEP_DAYS * 86_400)
+}
 
 pub fn root(data_dir: &Path) -> PathBuf {
     data_dir.join("bots-trash")
@@ -58,23 +75,89 @@ pub fn restore(data_dir: &Path, bot_id: &str, dir: &Path) -> std::io::Result<Opt
     Ok(Some(src))
 }
 
-/// 開機清掉放超過 `keep` 的（看名字裡的時間，不看 mtime：`rename` 不會更新目錄的 mtime）。
-pub fn gc(data_dir: &Path, keep: std::time::Duration) -> usize {
-    let Ok(entries) = std::fs::read_dir(root(data_dir)) else { return 0 };
-    let cutoff = now_ms().saturating_sub(keep.as_millis());
-    let mut removed = 0;
-    for e in entries.flatten() {
-        let Some(ms) = e.file_name().to_str().and_then(|n| n.rsplit_once('.')).and_then(|(_, t)| t.parse::<u128>().ok()) else {
-            continue;
-        };
-        if ms <= cutoff {
-            match std::fs::remove_dir_all(e.path()) {
-                Ok(()) => removed += 1,
-                Err(err) => tracing::warn!(dir = %e.path().display(), error = %err, "could not remove an expired bots-trash entry"),
-            }
+/// 回收區裡的每一份：`(搬進來的毫秒, 路徑, 佔用位元組)`，最舊的在前。名字看不懂的（別人放的檔）不理。
+fn entries(data_dir: &Path) -> Vec<(u128, PathBuf, u64)> {
+    let Ok(dir) = std::fs::read_dir(root(data_dir)) else { return Vec::new() };
+    let mut out: Vec<(u128, PathBuf, u64)> = dir
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_str()?.to_string();
+            let ms: u128 = name.rsplit_once('.')?.1.parse().ok()?;
+            let path = e.path();
+            let size = dir_size(&path);
+            Some((ms, path, size))
+        })
+        .collect();
+    out.sort_by_key(|(ms, _, _)| *ms);
+    out
+}
+
+/// 目錄佔用的位元組（遞迴，只算檔案；讀不到的當 0——清理的判斷寧可低估也不要因為一個壞檔就整批不清）。
+fn dir_size(path: &Path) -> u64 {
+    let Ok(md) = std::fs::symlink_metadata(path) else { return 0 };
+    if !md.is_dir() {
+        return md.len();
+    }
+    let Ok(entries) = std::fs::read_dir(path) else { return 0 };
+    entries.flatten().map(|e| dir_size(&e.path())).sum()
+}
+
+fn remove(path: &Path) -> bool {
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => true,
+        Err(err) => {
+            tracing::warn!(dir = %path.display(), error = %err, "could not remove a bots-trash entry");
+            false
         }
     }
-    removed
+}
+
+/// 清掉放超過 `keep` 的（看名字裡的時間，不看 mtime：`rename` 不會更新目錄的 mtime）。
+pub fn gc(data_dir: &Path, keep: Duration) -> usize {
+    gc_with_cap(data_dir, keep, MAX_BYTES).0
+}
+
+/// 兩道一起跑：先清過期的，再看總量——還超過 `max_bytes` 就從**最舊的**開始清到降下來。
+/// 回傳 `(過期清掉幾份, 因為超量再清掉幾份)`。
+pub fn gc_with_cap(data_dir: &Path, keep: Duration, max_bytes: u64) -> (usize, usize) {
+    let cutoff = now_ms().saturating_sub(keep.as_millis());
+    let mut live: Vec<(u128, PathBuf, u64)> = Vec::new();
+    let (mut expired, mut evicted) = (0, 0);
+    for (ms, path, size) in entries(data_dir) {
+        if ms <= cutoff && remove(&path) {
+            expired += 1;
+        } else {
+            live.push((ms, path, size));
+        }
+    }
+    let mut total: u64 = live.iter().map(|(_, _, size)| *size).sum();
+    // 最舊的先走；最新那一份永遠留著（剛刪掉的那顆才是最可能要還原的，留著才有意義）。
+    for (_, path, size) in live.iter().take(live.len().saturating_sub(1)) {
+        if total <= max_bytes {
+            break;
+        }
+        if remove(path) {
+            evicted += 1;
+            total = total.saturating_sub(*size);
+        }
+    }
+    if evicted > 0 {
+        tracing::warn!(evicted, total, max_bytes, "bots-trash is over its size cap; removed the oldest entries");
+    }
+    (expired, evicted)
+}
+
+/// 每天清一次：開機那一次之外，常駐好幾天的 daemon 也要收（review d77434c0 #2）。
+pub fn spawn_gc(app: Arc<App>) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(GC_EVERY).await;
+            let (expired, evicted) = gc_with_cap(&app.data_dir, keep_duration(), MAX_BYTES);
+            if expired > 0 || evicted > 0 {
+                tracing::info!(expired, evicted, days = KEEP_DAYS, "daily bots-trash sweep");
+            }
+        }
+    });
 }
 
 #[cfg(test)]
@@ -98,5 +181,72 @@ mod tests {
         assert_eq!(gc(&data, std::time::Duration::ZERO), 1);
         assert_eq!(restore(&data, "b1", &dir).unwrap(), None, "過期清掉之後沒得還原");
         std::fs::remove_dir_all(data).unwrap();
+    }
+
+    /// 在回收區放一份指定大小、指定「搬進來時刻」的目錄。
+    fn seed(data: &Path, bot: &str, ms: u128, bytes: usize) -> PathBuf {
+        let p = root(data).join(format!("{bot}.{ms}"));
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::write(p.join("blob"), vec![b'x'; bytes]).unwrap();
+        p
+    }
+
+    /// review d77434c0 #2：時間上限擋不住「短時間刪掉一堆」。超過總量就從最舊的開始清，
+    /// 最新那一份留著（剛刪掉的那顆才是最可能要還原的）。
+    #[test]
+    fn the_oldest_entries_go_first_once_the_trash_is_over_its_size_cap() {
+        let data = std::env::temp_dir().join(format!("am-trash-cap-{}", crate::db::ulid()));
+        let now = now_ms();
+        let old = seed(&data, "b1", now - 3_000, 4_000);
+        let mid = seed(&data, "b2", now - 2_000, 4_000);
+        let new = seed(&data, "b3", now - 1_000, 4_000);
+
+        // 沒超量就一個都不動（keep 很長，沒有東西過期）。
+        assert_eq!(gc_with_cap(&data, Duration::from_secs(3600), 100_000), (0, 0));
+        assert!(old.exists() && mid.exists() && new.exists());
+
+        // 上限只容得下一份：最舊的兩份走，最新那份留著。
+        assert_eq!(gc_with_cap(&data, Duration::from_secs(3600), 5_000), (0, 2));
+        assert!(!old.exists() && !mid.exists(), "最舊的先清");
+        assert!(new.exists(), "最新那一份永遠留著");
+        std::fs::remove_dir_all(&data).unwrap();
+    }
+
+    /// 過期的先清；清完還超量才輪到按時間淘汰，兩個數字分開回報。
+    #[test]
+    fn expiry_runs_before_the_size_cap() {
+        let data = std::env::temp_dir().join(format!("am-trash-both-{}", crate::db::ulid()));
+        let now = now_ms();
+        seed(&data, "b1", now - 10_000, 4_000); // 過期
+        let mid = seed(&data, "b2", now - 2_000, 4_000);
+        let new = seed(&data, "b3", now - 1_000, 4_000);
+
+        assert_eq!(gc_with_cap(&data, Duration::from_millis(5_000), 5_000), (1, 1));
+        assert!(!mid.exists() && new.exists());
+        assert_eq!(entries(&data).len(), 1);
+        std::fs::remove_dir_all(&data).unwrap();
+    }
+
+    /// 名字看不懂的（別人放進來的檔案、暫存）一律不碰，免得清理誤傷。
+    #[test]
+    fn entries_with_unparseable_names_are_never_touched() {
+        let data = std::env::temp_dir().join(format!("am-trash-alien-{}", crate::db::ulid()));
+        std::fs::create_dir_all(root(&data).join("not-a-trash-entry")).unwrap();
+        std::fs::write(root(&data).join("README"), "x").unwrap();
+
+        assert_eq!(gc_with_cap(&data, Duration::ZERO, 0), (0, 0));
+        assert!(root(&data).join("not-a-trash-entry").exists() && root(&data).join("README").exists());
+        std::fs::remove_dir_all(&data).unwrap();
+    }
+
+    #[test]
+    fn dir_size_adds_up_nested_files() {
+        let data = std::env::temp_dir().join(format!("am-trash-size-{}", crate::db::ulid()));
+        let d = data.join("x");
+        std::fs::create_dir_all(d.join("a/b")).unwrap();
+        std::fs::write(d.join("a/one"), vec![b'x'; 10]).unwrap();
+        std::fs::write(d.join("a/b/two"), vec![b'x'; 5]).unwrap();
+        assert_eq!(dir_size(&d), 15);
+        std::fs::remove_dir_all(&data).unwrap();
     }
 }

@@ -394,9 +394,10 @@ pub async fn purge_deleted_bot_dirs(app: &Arc<App>) -> usize {
     if removed > 0 {
         tracing::info!(removed, "moved bots/<id>/ directories left behind by deleted bots to bots-trash");
     }
-    let expired = crate::bot_trash::gc(&app.data_dir, std::time::Duration::from_secs(crate::bot_trash::KEEP_DAYS * 86_400));
-    if expired > 0 {
-        tracing::info!(expired, days = crate::bot_trash::KEEP_DAYS, "removed expired bots-trash entries");
+    // 過期的與超出總量上限的一起收（review d77434c0 #2）；常駐的 daemon 另外由 `bot_trash::spawn_gc` 每天再跑一次。
+    let (expired, evicted) = crate::bot_trash::gc_with_cap(&app.data_dir, crate::bot_trash::keep_duration(), crate::bot_trash::MAX_BYTES);
+    if expired > 0 || evicted > 0 {
+        tracing::info!(expired, evicted, days = crate::bot_trash::KEEP_DAYS, "removed expired or over-cap bots-trash entries");
     }
     removed
 }

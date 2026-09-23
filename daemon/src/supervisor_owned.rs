@@ -61,19 +61,25 @@ impl Owned {
     }
 }
 
-/// 推一筆 `ops_alert` 給巡檢（同一小時同一個原因只推一次）。推不進去只記 log：擋下本身已經做完了。
-pub async fn alert(pool: &SqlitePool, reason: &str, detail: &str) {
+/// 推一筆 `ops_alert` 給巡檢。推不進去只記 log：擋下本身已經做完了。
+///
+/// dedupe 的鍵帶 `subject`（被擋的那顆 bot／那個專案，review d77434c0 #4）：`push_inbox` 是
+/// `INSERT OR IGNORE`，只用 `reason:hour` 的話，同一小時第二顆被擋的 bot 就只剩一行 log、inbox 沒有——
+/// 13:28Z 那次正好是 4 秒內兩顆，會漏掉第二顆。同一顆連按才收斂成一則。
+pub async fn alert(pool: &SqlitePool, reason: &str, subject: &str, detail: &str) {
     let hour = db::now().get(..13).unwrap_or_default().to_string();
-    let key = format!("ops_alert:daemon:{reason}:{hour}");
+    let subject: String = subject.chars().filter(|c| !c.is_control() && *c != ':').take(80).collect();
+    let key = format!("ops_alert:daemon:{reason}:{subject}:{hour}");
     let payload = json!({
         "source": "daemon",
         "reason": reason,
+        "subject": subject,
         "detail": detail,
         "action": "有東西要刪 AGM 的 bot，daemon 已擋下、什麼都沒刪：查 detail 裡的呼叫端與 config.toml 寫入紀錄（daemon.log 搜 `config.toml written`），確認是不是該刪；真的要刪就 `agm bot delete <id> --confirm-supervisor`",
     });
     match crate::supervisor::store::push_inbox(pool, &key, "ops_alert", None, None, None, &payload).await {
-        Ok(_) => tracing::warn!(reason, detail, "refused to delete an AGM bot; ops_alert queued"),
-        Err(e) => tracing::error!(reason, detail, error = %e, "refused to delete an AGM bot; ops_alert could not be queued"),
+        Ok(_) => tracing::warn!(reason, subject, detail, "refused to delete an AGM bot; ops_alert queued"),
+        Err(e) => tracing::error!(reason, subject, detail, error = %e, "refused to delete an AGM bot; ops_alert could not be queued"),
     }
 }
 
@@ -87,8 +93,14 @@ pub async fn guard_bot_delete(pool: &SqlitePool, bot_id: &str, confirm: Option<&
         return Ok(());
     }
     let role = owned.role(&bot);
-    refuse_unless_confirmed(pool, confirm, &format!("bot `{}`（{}，{role}）", bot.name, bot.id), json!({"bot_id": bot.id, "name": bot.name, "role": role}))
-        .await
+    refuse_unless_confirmed(
+        pool,
+        confirm,
+        &bot.id,
+        &format!("bot `{}`（{}，{role}）", bot.name, bot.id),
+        json!({"bot_id": bot.id, "name": bot.name, "role": role}),
+    )
+    .await
 }
 
 /// 刪整個專案：專案本身是總管／角色的專案，或裡面有任何一顆 AGM 的 bot。
@@ -99,12 +111,13 @@ pub async fn guard_project_delete(pool: &SqlitePool, project_id: &str, confirm: 
     if !owned.project_ids.contains(project_id) && !bots.iter().any(|b| b.project_id == project_id && owned.owns(b)) {
         return Ok(());
     }
-    refuse_unless_confirmed(pool, confirm, &format!("專案 `{project_id}`"), json!({"project_id": project_id})).await
+    refuse_unless_confirmed(pool, confirm, project_id, &format!("專案 `{project_id}`"), json!({"project_id": project_id})).await
 }
 
 async fn refuse_unless_confirmed(
     pool: &SqlitePool,
     confirm: Option<&str>,
+    subject: &str,
     what: &str,
     extra: serde_json::Value,
 ) -> Result<(), crate::lifecycle::LcError> {
@@ -113,7 +126,8 @@ async fn refuse_unless_confirmed(
         tracing::warn!(what = %what, http = %by, "deleting an AGM bot/project with confirm=supervisor");
         return Ok(());
     }
-    alert(pool, "supervisor_bot_delete_refused", &format!("刪除 API 要刪 AGM 的 {what}，沒帶 confirm={CONFIRM}，已拒絕；呼叫端：{by}")).await;
+    alert(pool, "supervisor_bot_delete_refused", subject, &format!("刪除 API 要刪 AGM 的 {what}，沒帶 confirm={CONFIRM}，已拒絕；呼叫端：{by}"))
+        .await;
     let mut body = extra;
     body["message"] = json!(format!("{what} 屬於 AGM（總管／角色本身、它們的 child、或在總管專案裡）；確定要刪請帶 ?confirm={CONFIRM}"));
     Err(crate::lifecycle::LcError::conflict("supervisor_owned", body))
@@ -124,7 +138,7 @@ pub const CONFIRM: &str = "supervisor";
 
 #[cfg(test)]
 mod tests {
-    use crate::api::{delete_bot, delete_bot_http, restore_bot, DeleteQuery};
+    use crate::api::{delete_bot, delete_bot_http, delete_project_http, restore_bot, DeleteQuery};
     use crate::db;
     use crate::lifecycle::LcError;
     use axum::extract::{Path, Query, State};
@@ -168,7 +182,27 @@ mod tests {
         cfg.projects.iter().flat_map(|p| p.bots.iter()).any(|b| b.id.as_deref() == Some(id))
     }
 
-    const CALLER: &str = "DELETE /api/bots/x peer=10.0.0.9:51234 ua=phone-safari origin=- referer=- caller=-";
+    const CALLER: &str = "DELETE /api/bots/x peer=10.0.0.9:51234 ua=phone-safari origin=- referer=- bot=- caller_self_reported=-";
+
+    /// 把 AGM 登記在這個專案上（`build`／`triage` 就是這樣掛著的）。
+    async fn agm_owns_project(app: &std::sync::Arc<crate::state::App>, project_id: &str) {
+        sqlx::query("INSERT INTO supervisors (id, bot_id, project_id, created_at, updated_at) VALUES ('AGM', 'agm-bot', ?, 't', 't')")
+            .bind(project_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+    }
+
+    async fn intents_for(app: &std::sync::Arc<crate::state::App>, subject: &str) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM intents WHERE subject_id = ?").bind(subject).fetch_one(&app.db).await.unwrap()
+    }
+
+    async fn ops_alerts(app: &std::sync::Arc<crate::state::App>) -> Vec<String> {
+        sqlx::query_scalar("SELECT payload_json FROM supervisor_inbox WHERE kind = 'ops_alert' ORDER BY rowid")
+            .fetch_all(&app.db)
+            .await
+            .unwrap()
+    }
 
     /// 13:28Z 那一刀：AGM 專案裡、沒有 parent 的 user bot，被 `DELETE /api/bots/{id}` 直接刪。沒帶 confirm 要 409＋ops_alert，什麼都不動；
     /// 帶了才刪，而且 intent 記得是誰刪的。
@@ -229,5 +263,99 @@ mod tests {
 
         restore_bot(State(app.clone()), Path(id.clone())).await.unwrap();
         assert_eq!(std::fs::read_to_string(dir.join("spool/pending.json")).unwrap(), "{\"hook\":1}", "還原把目錄搬回來");
+    }
+
+    /// review d77434c0 #1：`guard_project_delete` 與它在 `delete_project_http` 的接線本來沒有任何測試蓋到——
+    /// 整條拿掉也不會紅。AGM 的專案 DELETE 要 409 `supervisor_owned`，而且**什麼都不動**：沒開 intent、沒有人被軟刪。
+    #[tokio::test]
+    async fn the_delete_api_refuses_the_agm_project_unless_confirmed() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let build = a_user_bot(&e, "build").await;
+        agm_owns_project(&app, &e.project_id).await;
+
+        let refused = crate::config_audit::HTTP_CALLER
+            .scope(CALLER.into(), delete_project_http(State(app.clone()), Path(e.project_id.clone()), Query(DeleteQuery::default())))
+            .await
+            .unwrap_err();
+
+        match refused {
+            LcError::Conflict(body) => {
+                assert_eq!(body["reason"], "supervisor_owned", "{body}");
+                assert_eq!(body["project_id"], e.project_id, "{body}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(db::project(&app.db, &e.project_id).await.unwrap().unwrap().deleted_at.is_none(), "專案沒刪");
+        assert!(db::bot(&app.db, &build).await.unwrap().unwrap().deleted_at.is_none(), "裡面的 bot 沒刪");
+        assert!(in_config(&app.cfg.get().await, &build), "config 沒動");
+        assert_eq!(intents_for(&app, &e.project_id).await, 0, "定案之前就擋下來了，不該留 intent");
+        let alerts = ops_alerts(&app).await;
+        assert!(alerts.len() == 1 && alerts[0].contains(&e.project_id) && alerts[0].contains("10.0.0.9"), "{alerts:?}");
+
+        // 明講了就刪得掉：閘門擋的是「沒說清楚」，不是「永遠不准」。
+        let q = Query(DeleteQuery { confirm: Some(super::CONFIRM.into()) });
+        crate::config_audit::HTTP_CALLER
+            .scope(CALLER.into(), delete_project_http(State(app.clone()), Path(e.project_id.clone()), q))
+            .await
+            .unwrap();
+        assert!(db::project(&app.db, &e.project_id).await.unwrap().unwrap().deleted_at.is_some());
+    }
+
+    /// 專案本身不是 AGM 的，但裡面住著一顆 AGM 的 child：一樣要擋（`owns` 的第二條）。
+    #[tokio::test]
+    async fn a_project_holding_an_agm_child_is_refused_too() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let kid = a_user_bot(&e, "agm-kid").await;
+        sqlx::query("INSERT INTO supervisors (id, bot_id, project_id, created_at, updated_at) VALUES ('AGM', 'agm-bot', 'elsewhere', 't', 't')")
+            .execute(&app.db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE bots SET parent_bot_id = 'agm-bot' WHERE id = ?").bind(&kid).execute(&app.db).await.unwrap();
+
+        let refused = crate::config_audit::HTTP_CALLER
+            .scope(CALLER.into(), delete_project_http(State(app.clone()), Path(e.project_id.clone()), Query(DeleteQuery::default())))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(&refused, LcError::Conflict(b) if b["reason"] == "supervisor_owned"), "{refused:?}");
+        assert_eq!(intents_for(&app, &e.project_id).await, 0);
+    }
+
+    /// 跟 AGM 無關的專案照樣刪得掉：閘門不能把所有刪除都擋住。
+    #[tokio::test]
+    async fn an_ordinary_project_is_not_affected_by_the_guard() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let id = a_user_bot(&e, "alfa").await;
+
+        delete_project_http(State(app.clone()), Path(e.project_id.clone()), Query(DeleteQuery::default())).await.unwrap();
+
+        assert!(db::bot(&app.db, &id).await.unwrap().unwrap().deleted_at.is_some());
+        assert!(ops_alerts(&app).await.is_empty(), "沒擋任何東西就不該吵巡檢");
+    }
+
+    /// review d77434c0 #4：同一小時第二顆被擋的 bot 也要有 inbox（13:28Z 那次是 4 秒內兩顆）。
+    /// dedupe 收斂的範圍是「同一顆連按」，不是「同一小時」。
+    #[tokio::test]
+    async fn each_refused_bot_gets_its_own_alert_within_the_same_hour() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let build = a_user_bot(&e, "build").await;
+        let triage = a_user_bot(&e, "agm-pxf2pv-triage").await;
+        agm_owns_project(&app, &e.project_id).await;
+
+        for id in [&build, &triage, &build] {
+            crate::config_audit::HTTP_CALLER
+                .scope(CALLER.into(), delete_bot_http(State(app.clone()), Path(id.clone()), Query(DeleteQuery::default())))
+                .await
+                .unwrap_err();
+        }
+
+        let alerts = ops_alerts(&app).await;
+        assert_eq!(alerts.len(), 2, "兩顆各一則、同一顆連按收斂成一則：{alerts:?}");
+        assert!(alerts.iter().any(|a| a.contains(&build)), "{alerts:?}");
+        assert!(alerts.iter().any(|a| a.contains(&triage)), "{alerts:?}");
     }
 }
