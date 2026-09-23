@@ -1480,7 +1480,7 @@ body 直接是檔案位元組（**不是** multipart），`Content-Type` 就是�
 
 - 檔案落在 `<project.path>/.agents-manager/attachments/`（agent cwd 之內，沙箱化的 CLI 才讀得到），該目錄自動寫一個 `*` 的 `.gitignore`。
 - 遠端專案經 ssh（`hosts.rs::ssh_put`）寫到遠端同路徑，daemon 另存本機副本供縮圖。
-- 不看 mime（2026-09-14 前只收 `image/*`）。空 body、超過 12 MB 或其他輸入錯誤 400；超過 12 MB + 4 KiB 由 body limit 回 413（無 JSON）；bot／project 不存在 404。
+- 不看 mime（2026-09-14 前只收 `image/*`）。空 body、超過 50 MB 或其他輸入錯誤 400；超過 50 MB + 4 KiB 由 body limit 回 413（無 JSON）；bot／project 不存在 404。
 
 #### 落地是 staging-first（issue #88，2026-09-18）
 `attachments.state`：`staging` → `ready`／`failed`。`save()` 先用 `state='staging'` 插入一筆**帶著意圖路徑**的

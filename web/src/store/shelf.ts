@@ -7,10 +7,10 @@
 
 import { create } from 'zustand'
 
-/** Must equal daemon `attach::MAX_BYTES`; shared with `Attachments.tsx`. */
-export const MAX_BYTES = 12 * 1024 * 1024
+/** Must equal daemon `attach::MAX_BYTES`（50 MiB，2026-09-24 使用者）; shared with `Attachments.tsx`. */
+export const MAX_BYTES = 50 * 1024 * 1024
 
-/** The shelf outlives a send, so it needs its own cap (24 × 12MB worst case in memory). */
+/** The shelf outlives a send, so it needs its own cap (24 × 50MB worst case; `File`s from pickers/drops are disk-backed, not held in RAM). */
 export const SHELF_MAX = 24
 
 /** Counted from when parked (SPEC: 30 分鐘). */

@@ -24,8 +24,8 @@ use crate::config::{valid_id, ID_RE};
 use crate::hosts::{sh_quote, HostConn};
 use crate::state::App;
 
-/// Retina screenshot fits; an ssh push stays sub-second.
-pub const MAX_BYTES: usize = 12 * 1024 * 1024;
+/// 單檔上限 50 MiB（2026-09-24 使用者：「網頁上傳最大 50mb 而不是 12」）；前端 `store/shelf.ts::MAX_BYTES` 必須同值。
+pub const MAX_BYTES: usize = 50 * 1024 * 1024;
 
 const SUBDIR: &str = ".agents-manager/attachments";
 
