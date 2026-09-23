@@ -25,6 +25,7 @@ mod claude_review;
 mod codex_update;
 mod child_alerts;
 mod child_reconcile_safety;
+mod child_retire;
 mod codex_live;
 mod config;
 mod config_audit;

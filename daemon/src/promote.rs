@@ -397,7 +397,7 @@ pub async fn promote_bot(
         if attempt > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
-        retired = sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL").bind(db::now()).bind(&id).execute(&app.db).await.map(|_| ()).map_err(|e| e.to_string());
+        retired = crate::child_retire::retire(&app, &id, "promoted", crate::child_retire::Mode::Explicit).await.map(|_| ()).map_err(|e| e.to_string());
         if retired.is_ok() {
             break;
         }
@@ -575,6 +575,17 @@ mod tests {
         assert_eq!(resume.as_deref(), Some(SID));
 
         assert_eq!(child_state(&r).await, (true, None), "child 收掉、沒有活的 run");
+    }
+
+    /// #413：收掉 child 走退役的唯一入口，log 留得下是 promote 收的、從哪一行。
+    #[tokio::test]
+    async fn retiring_the_promoted_child_is_logged_with_its_reason() {
+        let r = rig(true).await;
+        let (buf, _guard) = crate::config_audit::capture::start();
+        promote(&r, PromoteReq { name: Some("kid-top".into()), ..Default::default() }).await.unwrap();
+        let log = buf.text();
+        let line = log.lines().find(|l| l.contains("child retired")).unwrap_or_else(|| panic!("no retire line: {log}"));
+        assert!(line.contains("why=\"promoted\"") && line.contains(&r.child) && line.contains("promote.rs:"), "{line}");
     }
 
     #[tokio::test]

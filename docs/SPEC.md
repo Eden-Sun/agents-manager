@@ -1262,6 +1262,7 @@ hint 可用，退回規則 2／3——這條沒有、也不打算改掉子代 ho
 **子 agent 退役**：子 agent 只活在它的 pane 裡，pane 沒了就退役（`bots.deleted_at`，對話保留）。**還原**走既有的 `POST /api/bots/{id}/restore`（API §10.4a；子 agent 不開 run；CLI `agm bot restore <id>`），不直接改 DB。還原後記十分鐘寬限期：這段期間 reconcile 不會只因沒有 active run 而退休，讓父 bot 有時間用 herdr 在原 pane 重開；寬限期到仍未回來就照原規則退休。寬限期存於 `supervisor_notes`，daemon 重啟後仍有效（#397）。**子 agent 的 `start`／`restart` 一律 409 `child_restart_forbidden`**：pane 是父 bot 用 herdr 開的，daemon 不代開、也不原地重啟（對子 agent 下 restart 而 pane 已不在，反而讓 reconcile 把它退役）；一鍵重啟（§6.9）也跳過子 agent（`skipped` 理由 `child`，2026-09-22）。若內部原地重啟收到 herdr 的 `agent_name_taken`，回錯並記下永久保護原因；新 run 保持 active，reconcile 不會把它解讀成 bot 消失（#396）。兩條路都要接：reconcile 發現 run 在、agent 不見；
 以及 `pane_closed` 事件**先**結束 run、reconcile 後到——bot 沒有 active run、herdr 清單找不到它、且至少有一個已結束的 run，一樣退役。
 herdr 還列著這個 agent（pane 被搬走）的不算，會被重新收編。`pane_closed` 結束的是子 agent 的 run 時，2 秒後自己排一次 reconcile。
+**AGM 的子 agent 不隱式退役**（#413）：上面兩條路與維護窗口收尾（§6.5.2）退役前，都要先過 §3.1「AGM 的 bot 一律不隱式刪」那份 `supervisor_owned` 判斷——目標是總管／角色本身、它們的 child、或總管專案底下的 bot 時**不軟刪**，改推一則 `child_retire_refused` 給巡檢（帶 bot、退役原因與最後一個 run 的 pane 狀態），由人決定要不要真的刪（`agm bot delete <id> --confirm-supervisor`）。同一顆同一小時只推一次。讀不到「誰是 AGM 的」也不退役，下一輪再看。一般專案的子 agent 行為不變。這三條與 promote（§6.10a，含開機補完）寫 `deleted_at` 一律走同一個退役入口（`child_retire`），每次都記一行 `child retired`：原因（`reconcile_agent_gone`／`reconcile_run_already_ended`／`herdr_maintenance_closed`／`promoted`／`promote_recovered`）、程式呼叫位置、HTTP 呼叫端（背景是 `-`）；promote 是明講的動作，只記不擋。
 
 ### 6.5a-1 子 agent 卡住時通知父 agent（`child_alerts`，使用者 2026-09-18）
 

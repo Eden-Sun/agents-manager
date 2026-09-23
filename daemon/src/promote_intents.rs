@@ -169,12 +169,9 @@ async fn resume(app: &Arc<App>, intent: &Intent) -> Result<(), String> {
     }
     // 4. 收掉 child 紀錄（它的 run 已經停了）。
     if child_live {
-        sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL")
-            .bind(db::now())
-            .bind(&child_id)
-            .execute(&app.db)
+        crate::child_retire::retire(app, &child_id, "promote_recovered", crate::child_retire::Mode::Explicit)
             .await
-            .map_err(|x| format!("cannot retire the child: {x}"))?;
+            .map_err(|x| format!("cannot retire the child: {x:#}"))?;
         lifecycle::purge_bot_dir(app, &child_id, LOCAL_HOST).await;
     }
     app.emit("bot_changed", json!({"bot_id": child_id})).await;
