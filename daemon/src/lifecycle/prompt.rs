@@ -224,6 +224,20 @@ pub async fn prompt_with(
     prompt_grouped(app, bot_id, text, client_request_id, None, None, attachment_ids, None).await
 }
 
+/// 訊息上記的來源（`messages.relay_from`／`relay_unverified`）。daemon 自己寫的來源一律可信；
+/// 只有 `POST /bots/{id}/prompt` 的相容期（沒帶 bot token，`relay_auth`）會是未驗證（issue #339）。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RelaySrc<'a> {
+    pub from: Option<&'a str>,
+    pub unverified: bool,
+}
+
+impl<'a> RelaySrc<'a> {
+    pub fn trusted(from: Option<&'a str>) -> Self {
+        Self { from, unverified: false }
+    }
+}
+
 /// 同 `prompt_with`，記下 `relay_from`（bot id 或哨符 `daemon`）；UI 靠它把泡泡畫在左邊。
 pub async fn prompt_relayed(
     app: &Arc<App>,
@@ -234,6 +248,19 @@ pub async fn prompt_relayed(
     relay_from: Option<&str>,
 ) -> LcResult<PromptOut> {
     prompt_grouped(app, bot_id, text, client_request_id, None, None, attachment_ids, relay_from).await
+}
+
+/// `POST /bots/{id}/prompt`：一般送出（`send_now=false`）或插隊送出，來源已由 `relay_auth` 驗過（issue #339）。
+pub async fn prompt_from_api(
+    app: &Arc<App>,
+    bot_id: &str,
+    text: &str,
+    client_request_id: &str,
+    attachment_ids: &[String],
+    relay: RelaySrc<'_>,
+    send_now: bool,
+) -> LcResult<PromptOut> {
+    prompt_inner(app, bot_id, text, client_request_id, None, None, attachment_ids, relay, false, Admission::Gated, send_now).await
 }
 
 /// AGM 派工專用：對方正在回合中時**排隊**而不是 409（AGM 2026-09-16 裁示）。
@@ -248,7 +275,7 @@ pub async fn prompt_relayed_queueable(
     client_request_id: &str,
     relay_from: Option<&str>,
 ) -> LcResult<PromptOut> {
-    prompt_inner(app, bot_id, text, client_request_id, None, None, &[], relay_from, true, Admission::Gated, false).await
+    prompt_inner(app, bot_id, text, client_request_id, None, None, &[], RelaySrc::trusted(relay_from), true, Admission::Gated, false).await
 }
 
 /// 排一筆 `queued` turn 等下一回合（只有 AGM 派工走這裡）。
@@ -277,7 +304,7 @@ async fn queue_for_next_turn(
     deliver: &str,
     client_request_id: &str,
     group_id: Option<&str>,
-    relay_from: Option<&str>,
+    relay: RelaySrc<'_>,
 ) -> LcResult<PromptOut> {
     let turn_id = db::ulid();
     let msg_id = db::ulid();
@@ -297,14 +324,15 @@ async fn queue_for_next_turn(
         return Err(queue_insert_error(bot_id, conv, e));
     }
     sqlx::query(
-        "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, group_id, relay_from, created_at) VALUES (?,?,?,'user',?,'web',?,?,?)",
+        "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, group_id, relay_from, relay_unverified, created_at) VALUES (?,?,?,'user',?,'web',?,?,?,?)",
     )
     .bind(&msg_id)
     .bind(conv)
     .bind(&turn_id)
     .bind(text)
     .bind(group_id)
-    .bind(relay_from)
+    .bind(relay.from)
+    .bind(relay.unverified)
     .bind(db::now())
     .execute(&mut *tx)
     .await
@@ -418,7 +446,7 @@ pub async fn prompt_grouped(
     attachment_ids: &[String],
     relay_from: Option<&str>,
 ) -> LcResult<PromptOut> {
-    prompt_inner(app, bot_id, text, client_request_id, group_id, deliver, attachment_ids, relay_from, false, Admission::Gated, false).await
+    prompt_inner(app, bot_id, text, client_request_id, group_id, deliver, attachment_ids, RelaySrc::trusted(relay_from), false, Admission::Gated, false).await
 }
 
 /// 插隊送出（issue #103）：照舊寫 turn／訊息進資料庫，但**不等 idle**——對 pane 送 claude 2.1.275 的
@@ -426,7 +454,8 @@ pub async fn prompt_grouped(
 /// `failed`（`fail_in_flight`），不留一個永遠 `in_flight` 的回合。
 ///
 /// 不合資格（不是 claude、CLI 比 2.1.275 舊、版本還不知道）時**不插隊**：照原本的路走，忙的話一樣
-/// 回 409，只是 body 多帶 `send_now_refused` 說清楚為什麼沒插隊。
+/// 回 409，只是 body 多帶 `send_now_refused` 說清楚為什麼沒插隊。API 走 [`prompt_from_api`]；這支是測試用的捷徑。
+#[cfg(test)]
 pub async fn prompt_send_now(
     app: &Arc<App>,
     bot_id: &str,
@@ -435,7 +464,7 @@ pub async fn prompt_send_now(
     attachment_ids: &[String],
     relay_from: Option<&str>,
 ) -> LcResult<PromptOut> {
-    prompt_inner(app, bot_id, text, client_request_id, None, None, attachment_ids, relay_from, false, Admission::Gated, true).await
+    prompt_from_api(app, bot_id, text, client_request_id, attachment_ids, RelaySrc::trusted(relay_from), true).await
 }
 
 /// daemon 自己的控制面 prompt（AGM／協調者啟動時的握手）：不受維護窗口的入場閘門管（issue #86）。
@@ -447,7 +476,7 @@ pub async fn prompt_control_plane(
     client_request_id: &str,
     relay_from: Option<&str>,
 ) -> LcResult<PromptOut> {
-    prompt_inner(app, bot_id, text, client_request_id, None, None, &[], relay_from, false, Admission::ControlPlane, false).await
+    prompt_inner(app, bot_id, text, client_request_id, None, None, &[], RelaySrc::trusted(relay_from), false, Admission::ControlPlane, false).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -459,8 +488,8 @@ async fn prompt_inner(
     group_id: Option<&str>,
     deliver: Option<&str>,
     attachment_ids: &[String],
-    // `None` = 使用者自己在畫面上打的。
-    relay_from: Option<&str>,
+    // `from: None` = 使用者自己在畫面上打的。
+    relay: RelaySrc<'_>,
     // 對方回合中時排隊而不是 409。只有 AGM 派工會給 true。
     queue_if_busy: bool,
     // 維護窗口的入場閘門要不要管這一則（issue #86）。
@@ -545,7 +574,7 @@ async fn prompt_inner(
         Some(t) if send_now_ok => Some(t),
         Some(t) => {
             if queue_if_busy {
-                return queue_for_next_turn(app, &conv, bot_id, text, &deliver, client_request_id, group_id, relay_from).await;
+                return queue_for_next_turn(app, &conv, bot_id, text, &deliver, client_request_id, group_id, relay).await;
             }
             let mut detail = json!({"turn_id": t.id});
             if let Some(r) = refused {
@@ -570,7 +599,7 @@ async fn prompt_inner(
     // AGM 派工排進佇列（驗證完或到期由 flush 送）；其他送入跟「對方回合中」一樣回可重試的 409。
     if let super::resume_gate::Gate::Waiting { expected, left } = super::resume_gate::check(app, &bot, &run, &conv).await {
         if queue_if_busy {
-            let out = queue_for_next_turn(app, &conv, bot_id, text, &deliver, client_request_id, group_id, relay_from).await?;
+            let out = queue_for_next_turn(app, &conv, bot_id, text, &deliver, client_request_id, group_id, relay).await?;
             schedule_flush_retry(app, bot_id, left);
             return Ok(out);
         }
@@ -582,7 +611,7 @@ async fn prompt_inner(
     // AGM 派工遇到「使用者剛按 Esc」：一樣先讓使用者拿回輸入框——排進佇列，寬限到了才送（§4.4a）。
     if queue_if_busy {
         if let Some(wait) = super::interrupt_grace::hold(app, &bot, &run, &conv).await {
-            let out = queue_for_next_turn(app, &conv, bot_id, text, &deliver, client_request_id, group_id, relay_from).await?;
+            let out = queue_for_next_turn(app, &conv, bot_id, text, &deliver, client_request_id, group_id, relay).await?;
             schedule_flush_retry(app, bot_id, wait);
             return Ok(out);
         }
@@ -639,14 +668,15 @@ async fn prompt_inner(
     .map_err(up)?;
     let msg_id = db::ulid();
     sqlx::query(
-        "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, group_id, relay_from, created_at) VALUES (?,?,?,'user',?,'web',?,?,?)",
+        "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, group_id, relay_from, relay_unverified, created_at) VALUES (?,?,?,'user',?,'web',?,?,?,?)",
     )
     .bind(&msg_id)
     .bind(&conv)
     .bind(&turn_id)
     .bind(text)
     .bind(group_id)
-    .bind(relay_from)
+    .bind(relay.from)
+    .bind(relay.unverified)
     .bind(db::now())
     .execute(&mut *tx)
     .await
@@ -817,12 +847,12 @@ mod prompt_tests {
             .execute(&app.db)
             .await
             .unwrap();
-        let err = queue_for_next_turn(&app, &f.conv, &f.bot_id, "x", "x", "c-fail", None, None).await.unwrap_err();
+        let err = queue_for_next_turn(&app, &f.conv, &f.bot_id, "x", "x", "c-fail", None, RelaySrc::default()).await.unwrap_err();
         assert!(matches!(err, LcError::Upstream(_)), "真的寫入失敗要照實回，不是 409：{err:?}");
         sqlx::query("DROP TRIGGER am_test_no_turns").execute(&app.db).await.unwrap();
 
-        queue_for_next_turn(&app, &f.conv, &f.bot_id, "one", "one", "c-1", None, None).await.unwrap();
-        let err = queue_for_next_turn(&app, &f.conv, &f.bot_id, "two", "two", "c-2", None, None).await.unwrap_err();
+        queue_for_next_turn(&app, &f.conv, &f.bot_id, "one", "one", "c-1", None, RelaySrc::default()).await.unwrap();
+        let err = queue_for_next_turn(&app, &f.conv, &f.bot_id, "two", "two", "c-2", None, RelaySrc::default()).await.unwrap_err();
         assert!(matches!(err, LcError::Conflict(_)), "真的已經有一筆在排才是 409：{err:?}");
     }
 

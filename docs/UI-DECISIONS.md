@@ -10,6 +10,9 @@
   `AGM → x`（`relay_from` 是 bot id）、`x（轉述）`（沒有 `relay_from` 但第一行是 `AGM …：`／`[AGM …]`／`[來自 <bot> / <agent>]`，
   見 `lib/agmQuote.ts`，只認開頭、寧可漏認）、`daemon 自動觸發`（`relay_from = "daemon"`）、`[AG Man 通知]` 黃槓。
   群組時間軸上 `relay_from` 有值就不再畫「你 →」。CSS 用 `:has(.msg-targets.relay)` 認，不另寫邏輯。
+  `relay_unverified`（寄件端自稱那顆 bot、沒帶它的 bot token，issue #339 相容期）在來源後面加「（未驗證）」文字、tooltip 講原因；
+  不另上色——位置照舊靠左（本來就不是使用者），靠文字分辨，免得跟「紅＝要你動手」混在一起（`lib/relaySource.ts`）。
+  ![桌機](screenshots/relay-auth/desktop-1440.png) ![手機](screenshots/relay-auth/phone-390.png)
 - **紅色只代表「要你本人動手」**（blocked、回合被中斷、需要回應）；黃＝在等（子 agent、額度）；綠＝好消息（有新版、目前使用中外框）；
   藍（accent）＝未讀／可操作。狀態不能只靠顏色：一律還有文字、形狀或記號。
 - 燈號說「現在在做什麼」，徽章說「還沒看過幾個回合」——兩個獨立記號，不互相染色。

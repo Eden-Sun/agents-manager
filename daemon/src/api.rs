@@ -3109,31 +3109,21 @@ async fn prompt_bot(
 ) -> Result<Response, LcError> {
     let given_crid = b.client_request_id.clone();
     let crid = b.client_request_id.unwrap_or_else(db::ulid);
-    // 只收存在的 bot 或哨符 daemon：隨便填等於讓呼叫端冒名。
-    let relay_from = match b.relay_from.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        None => None,
-        Some(crate::agent_relay::DAEMON_SENDER) => Some(crate::agent_relay::DAEMON_SENDER.to_string()),
-        Some(from) => match db::bot(&app.db, from).await.map_err(any_err)? {
-            Some(b) if b.deleted_at.is_none() => Some(b.id),
-            _ => return Err(LcError::Bad(format!("relay_from must be a live bot id or `{}`", crate::agent_relay::DAEMON_SENDER))),
-        },
-    };
+    // relay_from 要跟呼叫者自己的 bot token 對得上；daemon 哨符不收（issue #339，`relay_auth`）。
+    let relay = crate::relay_auth::authenticate(&app, &headers, b.relay_from.as_deref()).await?;
     // bot 寫給 AGM 的申請不直接開回合：排進協調者的佇列，回 202（SPEC §18.15）。
-    if let Some(from) = relay_from.as_deref().filter(|f| *f != crate::agent_relay::DAEMON_SENDER) {
-        let token = headers.get("X-AM-Bot-Token").and_then(|v| v.to_str().ok());
-        let verified = crate::supervisor::bot_requests::sender_verified(&app, token, from).await;
+    if let Some(r) = &relay {
         let mark = crate::supervisor::bot_requests::ReplyMark { ack: b.ack, reply_to: b.reply_to.as_deref() };
-        let queued = crate::supervisor::bot_requests::intercept(&app, &id, from, &b.text, given_crid.as_deref(), &b.attachments, verified, "api", mark);
+        let queued = crate::supervisor::bot_requests::intercept(&app, &id, &r.from, &b.text, given_crid.as_deref(), &b.attachments, !r.unverified, "api", mark);
         if let Some(v) = queued.await? {
             return Ok((StatusCode::ACCEPTED, Json(v)).into_response());
         }
     }
-    let out = if b.send_now {
-        lifecycle::prompt_send_now(&app, &id, &b.text, &crid, &b.attachments, relay_from.as_deref()).await?
-    } else if b.start_if_stopped {
-        lifecycle::prompt_starting(&app, &id, &b.text, &crid, &b.attachments, relay_from.as_deref()).await?
+    let src = lifecycle::RelaySrc { from: relay.as_ref().map(|r| r.from.as_str()), unverified: relay.as_ref().is_some_and(|r| r.unverified) };
+    let out = if b.start_if_stopped && !b.send_now {
+        lifecycle::prompt_starting(&app, &id, &b.text, &crid, &b.attachments, src).await?
     } else {
-        lifecycle::prompt_relayed(&app, &id, &b.text, &crid, &b.attachments, relay_from.as_deref()).await?
+        lifecycle::prompt_from_api(&app, &id, &b.text, &crid, &b.attachments, src, b.send_now).await?
     };
     Ok((StatusCode::OK, Json(out)).into_response())
 }
@@ -5459,5 +5449,169 @@ mod child_restore_tests {
         assert_eq!(conflict_reason(restart_bot(State(e.app.clone()), Path(kid.id.clone()), q()).await.unwrap_err()), "child_restart_forbidden");
         assert_eq!(conflict_reason(start_bot(State(e.app.clone()), Path(kid.id.clone()), q()).await.unwrap_err()), "child_restart_forbidden");
         assert!(db::active_run(&e.app.db, &kid.id).await.unwrap().is_some(), "子 agent 的 run 一根毛都不能動");
+    }
+}
+
+/// #339：`relay_from` 要跟呼叫者自己的身分綁在一起（`relay_auth`）。走真的 `prompt_bot` handler。
+#[cfg(test)]
+mod relay_from_auth_tests {
+    use super::*;
+
+    struct Fx {
+        e: crate::testing::Env,
+        alfa: String,
+        target: String,
+    }
+
+    /// 寄件的 `alfa`（token `tok-alfa`）、收件的 `target`（grok、閒著、pane 活著）、旁觀的 `bravo`（`tok-bravo`）。
+    async fn fx() -> Fx {
+        let e = crate::testing::env().await;
+        let mut ids = vec![];
+        for name in ["alfa", "bravo", "target"] {
+            let b = crate::testing::claude_bot(&e.app, &e.project_id, name).await;
+            sqlx::query("UPDATE bots SET hook_token=? WHERE id=?").bind(format!("tok-{name}")).bind(&b.id).execute(&e.app.db).await.unwrap();
+            ids.push(b.id);
+        }
+        let target = ids[2].clone();
+        sqlx::query("UPDATE bots SET kind='grok' WHERE id=?").bind(&target).execute(&e.app.db).await.unwrap();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, pane_typed, started_at)
+             VALUES (?,?,'running','idle','ws-1','pane-relay','target','test',1,?)",
+        )
+        .bind(db::ulid())
+        .bind(&target)
+        .bind(db::now())
+        .execute(&e.app.db)
+        .await
+        .unwrap();
+        e.herdr.live_pane("pane-relay", crate::testing::LivePane { width: Some(120), boxed: true, ..Default::default() });
+        Fx { e, alfa: ids[0].clone(), target }
+    }
+
+    async fn send(app: &Arc<App>, to: &str, relay_from: &str, token: Option<&str>, crid: &str) -> (StatusCode, Value) {
+        let mut h = HeaderMap::new();
+        if let Some(t) = token {
+            h.insert("X-AM-Bot-Token", t.parse().unwrap());
+        }
+        let body = PromptIn {
+            text: "幫我看一下".into(),
+            client_request_id: Some(crid.into()),
+            attachments: vec![],
+            relay_from: Some(relay_from.into()),
+            ack: false,
+            reply_to: None,
+            send_now: false,
+            start_if_stopped: false,
+        };
+        let resp = match prompt_bot(State(app.clone()), Path(to.to_string()), h, Json(body)).await {
+            Ok(r) => r,
+            Err(err) => err.into_response(),
+        };
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    async fn counts(app: &Arc<App>) -> (i64, i64) {
+        let t = sqlx::query_scalar("SELECT COUNT(*) FROM turns").fetch_one(&app.db).await.unwrap();
+        let m = sqlx::query_scalar("SELECT COUNT(*) FROM messages").fetch_one(&app.db).await.unwrap();
+        (t, m)
+    }
+
+    async fn stored(app: &Arc<App>, message_id: &str) -> (Option<String>, i64) {
+        sqlx::query_as("SELECT relay_from, relay_unverified FROM messages WHERE id=?").bind(message_id).fetch_one(&app.db).await.unwrap()
+    }
+
+    /// issue 的紅測試：拿自己（bravo）的 token 冒 alfa 的名 → 403，一個字都沒寫。
+    #[tokio::test]
+    async fn another_bots_token_cannot_speak_as_alfa() {
+        let f = fx().await;
+        let (status, body) = send(&f.e.app, &f.target, &f.alfa, Some("tok-bravo"), "mismatch").await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(body["reason"], "relay_from_mismatch");
+        assert_eq!(counts(&f.e.app).await, (0, 0), "被拒的冒名不留 turn、不留訊息");
+    }
+
+    /// `daemon` 是 daemon 自己的哨符：HTTP 帶進來一律 403（帶什麼 token 都一樣）。
+    #[tokio::test]
+    async fn nobody_can_claim_to_be_the_daemon_over_http() {
+        let f = fx().await;
+        for (token, crid) in [(None, "d-none"), (Some("tok-alfa"), "d-alfa")] {
+            let (status, body) = send(&f.e.app, &f.target, crate::agent_relay::DAEMON_SENDER, token, crid).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{token:?}: {body}");
+            assert_eq!(body["reason"], "relay_from_reserved");
+        }
+        assert_eq!(counts(&f.e.app).await, (0, 0));
+    }
+
+    /// 帶自己的 token：照送，記成已驗證。
+    #[tokio::test]
+    async fn a_bot_with_its_own_token_is_a_verified_relay() {
+        let f = fx().await;
+        let (status, body) = send(&f.e.app, &f.target, &f.alfa, Some("tok-alfa"), "verified").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(stored(&f.e.app, body["message_id"].as_str().unwrap()).await, (Some(f.alfa.clone()), 0));
+    }
+
+    /// 相容期：沒帶 token 的既有呼叫端（daemon-swap.sh 換版自測、手打 curl）照收，但記成未驗證，
+    /// 推給前端的那一則也帶著這個標記（不能先畫成已驗證、事後才改）。
+    #[tokio::test]
+    async fn an_unsigned_relay_still_goes_through_but_is_marked_unverified() {
+        let f = fx().await;
+        let mut rx = f.e.app.subscribe();
+        let (status, body) = send(&f.e.app, &f.target, &f.alfa, None, "unsigned").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let id = body["message_id"].as_str().unwrap().to_string();
+        assert_eq!(stored(&f.e.app, &id).await, (Some(f.alfa.clone()), 1));
+        let mut pushed = None;
+        while let Ok(ev) = rx.try_recv() {
+            if ev.kind == "message_added" && ev.data["message"]["id"] == json!(id) {
+                pushed = Some(ev.data["message"]["relay_unverified"].clone());
+            }
+        }
+        assert_eq!(pushed, Some(json!(1)), "message_added 就要帶未驗證標記");
+    }
+
+    /// `start_if_stopped`（另一個寫訊息的地方）一樣記標記。
+    #[tokio::test]
+    async fn the_start_if_stopped_path_keeps_the_mark_too() {
+        let f = fx().await;
+        let stopped = crate::testing::claude_bot(&f.e.app, &f.e.project_id, "sleeper").await;
+        let body = PromptIn {
+            text: "起來後看一下".into(),
+            client_request_id: Some("sis".into()),
+            attachments: vec![],
+            relay_from: Some(f.alfa.clone()),
+            ack: false,
+            reply_to: None,
+            send_now: false,
+            start_if_stopped: true,
+        };
+        let resp = prompt_bot(State(f.e.app.clone()), Path(stopped.id.clone()), HeaderMap::new(), Json(body)).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        let out: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(out["delivery"], "queued", "{out}");
+        assert_eq!(stored(&f.e.app, out["message_id"].as_str().unwrap()).await, (Some(f.alfa.clone()), 1));
+    }
+
+    /// 寫給 AGM（協調者存在）的申請：對不上的 token 一樣 403、不進收件匣；沒帶照舊排進去、記 `sender_verified:false`。
+    #[tokio::test]
+    async fn requests_to_agm_follow_the_same_rule() {
+        use crate::supervisor::bot_requests::flow_tests::{app, configure_responder};
+        let app = app().await;
+        configure_responder(&app).await;
+        let inbox = || async { sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM supervisor_inbox").fetch_one(&app.db).await.unwrap() };
+        let (status, body) = send(&app, "patrol", "w1", Some("tok-w2"), "agm-mismatch").await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(inbox().await, 0);
+        let (status, body) = send(&app, "patrol", "w1", Some("tok-w1"), "agm-signed").await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+        let (status, body) = send(&app, "patrol", "w1", None, "agm-unsigned").await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+        let verified: Vec<bool> = sqlx::query_scalar("SELECT json_extract(payload_json,'$.sender_verified') FROM supervisor_inbox ORDER BY created_at, id")
+            .fetch_all(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(verified, vec![true, false]);
     }
 }

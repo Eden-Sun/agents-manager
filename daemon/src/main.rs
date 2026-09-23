@@ -77,6 +77,7 @@ mod read_marks;
 mod rewind;
 mod remote_cargo;
 mod reconcile;
+mod relay_auth;
 mod spawn_hints;
 mod state;
 mod supervisor;

@@ -209,6 +209,8 @@ const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (15, "0cb16547e439691a"),
     // issue #405：`messages.rewound_at`（對話倒回標掉的訊息，標記不刪）。
     (16, "cd536b2d4cda75e5"),
+    // issue #339：`messages.relay_unverified`（沒帶 bot token 自稱的 relay_from）。
+    (17, "b9b1eb7d09e3cb5b"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -375,6 +377,8 @@ async fn apply_migrations(pool: &SqlitePool) -> Result<()> {
         // NULL＝沒記（舊資料，視為相同、不誤報「需重啟」）。P1 只加欄位、沒有人讀寫。
         ("bots", "launch_rev", "ALTER TABLE bots ADD COLUMN launch_rev TEXT"),
         ("runs", "launch_rev", "ALTER TABLE runs ADD COLUMN launch_rev TEXT"),
+        // issue #339：`relay_from` 是呼叫端自稱、沒帶自己的 bot token 證明（相容期）＝1。舊列 0＝不是這條路寫的。
+        ("messages", "relay_unverified", "ALTER TABLE messages ADD COLUMN relay_unverified INTEGER NOT NULL DEFAULT 0"),
     ] {
         if !has_column(&mut *tx, table, col).await? {
             sqlx::query(ddl).execute(&mut *tx).await.with_context(|| format!("add {table}.{col}"))?;
@@ -732,6 +736,9 @@ pub struct Message {
     pub attachments_json: Option<String>,
     /// NULL = the user typed it.
     pub relay_from: Option<String>,
+    /// 1 = `relay_from` 是呼叫端自稱、沒有 bot token 證明（issue #339 相容期）；前端在來源旁標「未驗證」。
+    #[sqlx(default)]
+    pub relay_unverified: i64,
     pub created_at: String,
     pub updated_at: Option<String>,
     /// 對話倒回（`rewind.rs`）標掉的時間：這一則已經不在 CLI 的對話脈絡裡了。標記不刪，NULL＝還在。

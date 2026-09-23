@@ -38,15 +38,15 @@ pub async fn prompt_starting(
     text: &str,
     client_request_id: &str,
     attachment_ids: &[String],
-    relay_from: Option<&str>,
+    relay: RelaySrc<'_>,
 ) -> LcResult<PromptOut> {
     let accepted = {
         let lock = app.bot_lock(bot_id).await;
         let _g = lock.lock().await;
-        accept_locked(app, bot_id, text, client_request_id, attachment_ids, relay_from).await?
+        accept_locked(app, bot_id, text, client_request_id, attachment_ids, relay).await?
     };
     match accepted {
-        Accepted::Normal => prompt_relayed(app, bot_id, text, client_request_id, attachment_ids, relay_from).await,
+        Accepted::Normal => prompt_from_api(app, bot_id, text, client_request_id, attachment_ids, relay, false).await,
         Accepted::Queued(out, mark) => {
             if let Some(mark) = mark {
                 spawn_start(app, bot_id, mark);
@@ -62,7 +62,7 @@ async fn accept_locked(
     text: &str,
     client_request_id: &str,
     attachment_ids: &[String],
-    relay_from: Option<&str>,
+    relay: RelaySrc<'_>,
 ) -> LcResult<Accepted> {
     if client_request_id.trim().is_empty() {
         return Err(LcError::Bad("client_request_id must not be empty".into()));
@@ -121,13 +121,14 @@ async fn accept_locked(
         return Err(super::prompt::queue_insert_error(bot_id, &conv, e));
     }
     sqlx::query(
-        "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, relay_from, created_at) VALUES (?,?,?,'user',?,'web',?,?)",
+        "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, relay_from, relay_unverified, created_at) VALUES (?,?,?,'user',?,'web',?,?,?)",
     )
     .bind(&msg_id)
     .bind(&conv)
     .bind(&turn_id)
     .bind(text)
-    .bind(relay_from)
+    .bind(relay.from)
+    .bind(relay.unverified)
     .bind(db::now())
     .execute(&mut *tx)
     .await
@@ -483,14 +484,14 @@ mod tests {
         let e = tt::env().await;
         let app = e.app.clone();
         let bot = tt::claude_bot(&app, &e.project_id, "stopped").await;
-        let out = prompt_starting(&app, &bot.id, TEXT, "crid-1", &[], None).await.unwrap();
+        let out = prompt_starting(&app, &bot.id, TEXT, "crid-1", &[], RelaySrc::default()).await.unwrap();
         assert_eq!(out.delivery, "queued");
         let t = turn_of(&app, "crid-1").await;
         assert_eq!((t.status.as_str(), t.run_id.as_deref(), t.awaits_start, t.prompt_text.as_deref()), ("queued", None, 1, Some(TEXT)));
         assert_eq!(count(&app, "SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='user'", &t.id).await, 1);
         assert_eq!(started(&e), 0, "請求裡不等啟動（啟動是背景的副作用）");
 
-        let again = prompt_starting(&app, &bot.id, TEXT, "crid-1", &[], None).await.unwrap();
+        let again = prompt_starting(&app, &bot.id, TEXT, "crid-1", &[], RelaySrc::default()).await.unwrap();
         assert_eq!((again.turn_id.as_str(), again.delivery.as_str()), (t.id.as_str(), "queued"), "同一個請求回同一筆");
         assert_eq!(count(&app, "SELECT COUNT(*) FROM messages WHERE role='user' AND content=?", TEXT).await, 1, "沒有多一則");
 
@@ -512,7 +513,7 @@ mod tests {
         let far = db::ulid();
         sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?, '/r/p', 'r', 'far', ?)").bind(&far).bind(db::now()).execute(&app.db).await.unwrap();
         let bot = tt::claude_bot(&app, &far, "remote-waiting").await;
-        prompt_starting(&app, &bot.id, TEXT, "crid-far", &[], None).await.unwrap();
+        prompt_starting(&app, &bot.id, TEXT, "crid-far", &[], RelaySrc::default()).await.unwrap();
 
         sqlx::query("ALTER TABLE projects RENAME TO projects_unreadable").execute(&app.db).await.unwrap();
         assert_eq!(resume_after_boot(&app, LOCAL_HOST).await, 0, "讀不到主機：不當成本機的替它起");
@@ -530,7 +531,7 @@ mod tests {
         let bot = tt::claude_bot(&app, &e.project_id, "no-identity").await;
         // 這台沒有這個身分：`start_bot` 在碰任何 pane 之前就 409。
         sqlx::query("UPDATE bots SET identity='ghost' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
-        prompt_starting(&app, &bot.id, TEXT, "crid-fail", &[], None).await.unwrap();
+        prompt_starting(&app, &bot.id, TEXT, "crid-fail", &[], RelaySrc::default()).await.unwrap();
         {
             // 正在替它起（run 還沒建出來）：不拿 bot 鎖的定時掃描剛好跑過，不能把原因寫成「run 已經結束」。
             let _mark = Starting::begin(&bot.id).expect("沒有別人在起");
@@ -564,7 +565,7 @@ mod tests {
         let e = tt::env().await;
         let app = e.app.clone();
         let bot = tt::claude_bot(&app, &e.project_id, "withdraw").await;
-        prompt_starting(&app, &bot.id, TEXT, "crid-w", &[], None).await.unwrap();
+        prompt_starting(&app, &bot.id, TEXT, "crid-w", &[], RelaySrc::default()).await.unwrap();
         let t = turn_of(&app, "crid-w").await;
         let run = tt::fake_run(&app, &bot.id).await;
         sqlx::query("UPDATE turns SET status='in_flight', run_id=? WHERE id=?").bind(&run).bind(&t.id).execute(&app.db).await.unwrap();
@@ -593,7 +594,7 @@ mod tests {
         let bot = tt::claude_bot(&app, &e.project_id, "run-ended").await;
         let run = tt::fake_run(&app, &bot.id).await;
         sqlx::query("UPDATE runs SET state='starting' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
-        let out = prompt_starting(&app, &bot.id, TEXT, "crid-run", &[], None).await.unwrap();
+        let out = prompt_starting(&app, &bot.id, TEXT, "crid-run", &[], RelaySrc::default()).await.unwrap();
         assert_eq!(out.delivery, "queued", "run 還在 starting：一樣先收下（有人在起它，不必再踢一次）");
 
         crate::lifecycle::mark_run_exited(&app, &run, "pane 不見了").await;
@@ -620,7 +621,7 @@ mod tests {
         let bot = tt::claude_bot(&app, &e.project_id, "stop-lost").await;
         let run = tt::fake_run(&app, &bot.id).await;
         sqlx::query("UPDATE runs SET state='starting' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
-        prompt_starting(&app, &bot.id, TEXT, "crid-stop-lost", &[], None).await.unwrap();
+        prompt_starting(&app, &bot.id, TEXT, "crid-stop-lost", &[], RelaySrc::default()).await.unwrap();
         let t = turn_of(&app, "crid-stop-lost").await;
         sqlx::query("UPDATE runs SET state='running' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
         sqlx::query(&format!(
@@ -662,7 +663,7 @@ mod tests {
         let running = tt::claude_bot(&app, &e.project_id, "running").await;
         tt::fake_run(&app, &running.id).await;
         // 假的 run 沒有 transcript：一般那條路照它自己的規則回 409 `transcript_not_ready`——重點是沒有被「收下再啟動」。
-        let normal = prompt_starting(&app, &running.id, "照常送", "crid-running", &[], None).await;
+        let normal = prompt_starting(&app, &running.id, "照常送", "crid-running", &[], RelaySrc::default()).await;
         assert!(
             matches!(&normal, Err(LcError::Conflict(v)) if v["reason"] == "transcript_not_ready"),
             "在跑的 bot 照一般的路：{normal:?}"
@@ -681,11 +682,11 @@ mod tests {
         .execute(&app.db)
         .await
         .unwrap();
-        let bad = prompt_starting(&app, &stopped.id, TEXT, "crid-bad", &["nope".to_string()], None).await;
+        let bad = prompt_starting(&app, &stopped.id, TEXT, "crid-bad", &["nope".to_string()], RelaySrc::default()).await;
         assert!(matches!(bad, Err(LcError::Bad(_))));
         assert_eq!(count(&app, "SELECT COUNT(*) FROM turns WHERE client_request_id=?", "crid-bad").await, 0, "認不得的附件：什麼都沒寫");
 
-        let out = prompt_starting(&app, &stopped.id, TEXT, "crid-att", std::slice::from_ref(&att), None).await.unwrap();
+        let out = prompt_starting(&app, &stopped.id, TEXT, "crid-att", std::slice::from_ref(&att), RelaySrc::default()).await.unwrap();
         let bound: Option<String> = sqlx::query_scalar("SELECT message_id FROM attachments WHERE id=?").bind(&att).fetch_one(&app.db).await.unwrap();
         assert_eq!(bound.as_deref(), Some(out.message_id.as_str()), "附件綁在這一則上");
         let t = turn_of(&app, "crid-att").await;
@@ -700,7 +701,7 @@ mod tests {
         let e = tt::env().await;
         let app = e.app.clone();
         let bot = tt::claude_bot(&app, &e.project_id, "uncommitted").await;
-        prompt_starting(&app, &bot.id, TEXT, "crid-u", &[], None).await.unwrap();
+        prompt_starting(&app, &bot.id, TEXT, "crid-u", &[], RelaySrc::default()).await.unwrap();
         super::super::run_state::refuse_run_state(&app, "running").await;
         start_for_waiting(&app, &bot.id).await;
         let t = turn_of(&app, "crid-u").await;
@@ -743,7 +744,7 @@ mod tests {
             .execute(&app.db)
             .await
             .unwrap();
-        prompt_starting(&app, &bot.id, TEXT, "crid-sleep", &[], None).await.unwrap();
+        prompt_starting(&app, &bot.id, TEXT, "crid-sleep", &[], RelaySrc::default()).await.unwrap();
         super::super::run_state::refuse_run_state(&app, "running").await;
         start_for_waiting(&app, &bot.id).await;
         assert_eq!(turn_of(&app, "crid-sleep").await.start_error, None, "叫醒時 agent 起來了：不是沒能啟動");
@@ -761,7 +762,7 @@ mod tests {
         let e = tt::env().await;
         let app = e.app.clone();
         let bot = tt::claude_bot(&app, &e.project_id, "boot-start").await;
-        prompt_starting(&app, &bot.id, TEXT, "crid-e2e", &[], None).await.unwrap();
+        prompt_starting(&app, &bot.id, TEXT, "crid-e2e", &[], RelaySrc::default()).await.unwrap();
 
         let app = tt::restart_app(&e).await;
         assert_eq!(resume_after_boot(&app, LOCAL_HOST).await, 1);
@@ -782,7 +783,7 @@ mod tests {
         assert_eq!((t.status.as_str(), t.run_id.as_deref()), ("in_flight", Some(run.id.as_str())));
         assert_eq!(sent(), 1, "送出，只送一次");
 
-        let again = prompt_starting(&app, &bot.id, TEXT, "crid-e2e", &[], None).await.unwrap();
+        let again = prompt_starting(&app, &bot.id, TEXT, "crid-e2e", &[], RelaySrc::default()).await.unwrap();
         assert_eq!(again.turn_id, t.id, "同一個請求重送：回同一筆，不再開一則");
         start_for_waiting(&app, &bot.id).await;
         flush_queued_locked(&app, &bot.id).await.unwrap();
