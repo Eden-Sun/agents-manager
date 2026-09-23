@@ -24,6 +24,17 @@ test('shouldFetchModels: a failure is retried only after the cooldown (issue #26
   assert.equal(shouldFetchModels(null, undefined, at), true)
 })
 
+test('shouldFetchModels: a future failure time after a clock rollback is retryable immediately', () => {
+  const now = 100_000
+  const failedAt = now + MODELS_RETRY_MS * 2
+  assert.equal(shouldFetchModels(null, failedAt, now), true)
+
+  // If that retry fails, loadModels records a fresh Date.now; the regular cooldown still applies.
+  assert.equal(shouldFetchModels(null, now, now + 1), false)
+  assert.equal(shouldFetchModels(null, now, now + MODELS_RETRY_MS - 1), false)
+  assert.equal(shouldFetchModels(null, now, now + MODELS_RETRY_MS), true)
+})
+
 test('dropHostModels removes only that host, keeps identity of untouched cache', () => {
   const cache = { 'claude@m4p@': null, 'codex@m4p@a': [], 'claude@local@': [], 'claude@other@': null }
   const next = dropHostModels(cache, 'm4p')
