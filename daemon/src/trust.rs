@@ -176,6 +176,19 @@ fn write_atomic(path: &Path, text: &str) -> Result<()> {
     res.with_context(|| format!("writing {}", path.display()))
 }
 
+/// `None` when already trusted (or the kind has no gate).
+fn merged(kind: &str, existing: &str, paths: &[String]) -> Result<Option<String>> {
+    match kind {
+        "claude" => claude_merge(existing, paths),
+        "codex" => codex_merge(existing, paths),
+        "grok" => {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+            grok_merge(existing, paths, now)
+        }
+        _ => Ok(None),
+    }
+}
+
 /// No-op (file not rewritten) when already trusted.
 pub fn mark_trusted(kind: &str, store: &Path, paths: &[String]) -> Result<bool> {
     let existing = match std::fs::read_to_string(store) {
@@ -183,28 +196,19 @@ pub fn mark_trusted(kind: &str, store: &Path, paths: &[String]) -> Result<bool> 
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(e).with_context(|| format!("reading {}", store.display())),
     };
-    let next = match kind {
-        "claude" => claude_merge(&existing, paths)?,
-        "codex" => codex_merge(&existing, paths)?,
-        "grok" => {
-            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
-            grok_merge(&existing, paths, now)?
-        }
-        _ => None,
-    };
-    let Some(next) = next else { return Ok(false) };
+    let Some(next) = merged(kind, &existing, paths)? else { return Ok(false) };
     write_atomic(store, &next)?;
     tracing::info!(kind, store = %store.display(), ?paths, "pre-trusted agent workspace directories");
     Ok(true)
 }
 
 /// Identity env then bot env (`lifecycle::pane_env` minus daemon vars, which name no config dir).
-async fn config_env(app: &Arc<App>, bot: &db::Bot, home: &str) -> BTreeMap<String, String> {
+async fn config_env(app: &Arc<App>, bot: &db::Bot, host: &str, home: &str) -> BTreeMap<String, String> {
     let mut env: BTreeMap<String, String> = BTreeMap::new();
     // `identity_for_host`, not `cfg.identities`: shell-discovered `ccN` (SPEC §16) aren't in
     // config.toml, which once sent cc2's record to the wrong file (2026-09-08).
     if let Some(name) = bot.identity.as_deref().filter(|s| !s.is_empty()) {
-        if let Some(id) = crate::tools::identity_for_host(app, crate::config::LOCAL_HOST, name).await {
+        if let Some(id) = crate::tools::identity_for_host(app, host, name).await {
             for (k, v) in &id.env {
                 env.insert(k.clone(), expand_home(v, home));
             }
@@ -217,7 +221,7 @@ async fn config_env(app: &Arc<App>, bot: &db::Bot, home: &str) -> BTreeMap<Strin
 }
 
 /// Best effort: returns one error per store rather than refusing the start.
-/// **Local host only** — remote bots would need this written over ssh.
+/// Local host; remote bots go through [`pretrust_bots_remote`].
 pub async fn pretrust_bots(app: &Arc<App>, bots: &[db::Bot]) -> Vec<String> {
     let Some(home) = dirs::home_dir() else {
         return vec!["no home directory; cannot pre-trust the working directory".into()];
@@ -228,7 +232,7 @@ pub async fn pretrust_bots(app: &Arc<App>, bots: &[db::Bot]) -> Vec<String> {
     let mut jobs: BTreeMap<PathBuf, (String, BTreeSet<String>)> = BTreeMap::new();
     for b in bots {
         let Some(cwd) = b.cwd.as_deref().map(str::trim).filter(|s| !s.is_empty()) else { continue };
-        let env = config_env(app, b, &home).await;
+        let env = config_env(app, b, crate::config::LOCAL_HOST, &home).await;
         let Some(store) = store_path(&b.kind, &env, &home) else { continue };
         jobs.entry(store).or_insert_with(|| (b.kind.clone(), BTreeSet::new())).1.insert(canonical(cwd));
     }
@@ -241,6 +245,81 @@ pub async fn pretrust_bots(app: &Arc<App>, bots: &[db::Bot]) -> Vec<String> {
         }
     }
     errors
+}
+
+/// `start_inner` 在開 pane 之前呼叫：本機寫檔，遠端經 ssh（#407）。best effort，回傳每個失敗的說明。
+pub async fn pretrust_for_start(app: &Arc<App>, bot: &db::Bot, host: &str, cwd: &str) -> Vec<String> {
+    let mut b = bot.clone();
+    b.cwd = Some(cwd.to_string());
+    if host == crate::config::LOCAL_HOST {
+        pretrust_bots(app, std::slice::from_ref(&b)).await
+    } else {
+        pretrust_bots_remote(app, host, std::slice::from_ref(&b)).await
+    }
+}
+
+/// 同 [`pretrust_bots`]，檔案在遠端：經 ssh 讀、在這裡合併（規則只有一份）、再經 ssh 寫回（#407）。
+/// 路徑不在本機 canonicalize：遠端專案的 path 建立時就是那台的 canonical path（`remote_canonical_dir`）。
+pub async fn pretrust_bots_remote(app: &Arc<App>, host: &str, bots: &[db::Bot]) -> Vec<String> {
+    let Some(conn) = app.hosts.get(host).await else { return vec![format!("unknown host `{host}`")] };
+    let home = match conn.home().await {
+        Ok(h) => h,
+        Err(e) => return vec![format!("{host}: cannot resolve the remote home: {e:#}")],
+    };
+    let mut jobs: BTreeMap<PathBuf, (String, BTreeSet<String>)> = BTreeMap::new();
+    for b in bots {
+        let Some(cwd) = b.cwd.as_deref().map(str::trim).filter(|s| !s.is_empty()) else { continue };
+        let env = config_env(app, b, host, &home).await;
+        let Some(store) = store_path(&b.kind, &env, &home) else { continue };
+        jobs.entry(store).or_insert_with(|| (b.kind.clone(), BTreeSet::new())).1.insert(cwd.to_string());
+    }
+    let mut errors = Vec::new();
+    for (store, (kind, paths)) in jobs {
+        let paths: Vec<String> = paths.into_iter().collect();
+        let store = store.to_string_lossy().into_owned();
+        if let Err(e) = mark_trusted_remote(&conn, &kind, &store, &paths).await {
+            errors.push(format!("{host}:{store}: {e:#}"));
+        }
+    }
+    errors
+}
+
+/// 讀 → 合併 → 寫回，寫之前比對 `cksum`：CLI 自己在中間改過檔（claude 常寫 `.claude.json`）就放棄這次、重讀再合併，
+/// 不拿舊內容蓋掉。暫存檔＋`mv`，權限照原檔（新檔 0600，跟 `.claude.json` 一樣）。
+async fn mark_trusted_remote(conn: &crate::hosts::HostConn, kind: &str, store: &str, paths: &[String]) -> Result<bool> {
+    use crate::hosts::sh_quote;
+    let f = sh_quote(store);
+    for _ in 0..3 {
+        let read = format!(
+            "F={f}\nif [ -f \"$F\" ]; then printf 'AM_SUM=%s\\n' \"$(cksum < \"$F\")\"; cat \"$F\"; else printf 'AM_SUM=missing\\n'; fi\n"
+        );
+        let out = conn.ssh_exec(&read).await?;
+        let (head, existing) = out.split_once('\n').unwrap_or((out.as_str(), ""));
+        let sum = head.strip_prefix("AM_SUM=").ok_or_else(|| anyhow!("unexpected reply reading {store}: {head}"))?;
+        let Some(next) = merged(kind, existing, paths)? else { return Ok(false) };
+        let body = next.strip_suffix('\n').unwrap_or(&next);
+        let mut delim = String::from("AM_TRUST_EOF");
+        while body.contains(&delim) {
+            delim.push('_');
+        }
+        let write = format!(
+            "set -e\nF={f}\nD=$(dirname \"$F\")\nmkdir -p \"$D\"\ncur=missing\nif [ -f \"$F\" ]; then cur=$(cksum < \"$F\"); fi\n\
+             if [ \"$cur\" != {sum} ]; then printf 'AM_TRUST_CHANGED\\n'; exit 0; fi\n\
+             T=\"$D/.$(basename \"$F\").am-trust.$$.tmp\"\numask 077\ncat > \"$T\" <<'{delim}'\n{body}\n{delim}\n\
+             if [ -f \"$F\" ]; then chmod \"$(stat -c %a \"$F\" 2>/dev/null || stat -f %Lp \"$F\")\" \"$T\" 2>/dev/null || true; fi\n\
+             mv -f \"$T\" \"$F\"\nprintf 'AM_TRUST_OK\\n'\n",
+            sum = sh_quote(sum),
+        );
+        let out = conn.ssh_exec(&write).await?;
+        if out.contains("AM_TRUST_OK") {
+            tracing::info!(host = %conn.name, kind, store, ?paths, "pre-trusted agent workspace directories on the remote");
+            return Ok(true);
+        }
+        if !out.contains("AM_TRUST_CHANGED") {
+            bail!("writing {store} did not confirm: {}", out.trim());
+        }
+    }
+    bail!("{store} kept changing while pre-trusting it")
 }
 
 #[cfg(test)]
@@ -467,3 +546,169 @@ trust_level = "trusted"
     }
 }
 
+
+/// #407：遠端也要預先信任。ssh 換成「在本機 `/bin/sh` 跑那段腳本」，暫存目錄當遠端家目錄——腳本真的被執行，
+/// 讀寫的是真的檔案，不是只比對字串。
+#[cfg(test)]
+mod remote_tests {
+    use super::*;
+    use crate::testing as tt;
+    use std::io::Write;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const CWD: &str = "/home/ubuntu/zz-proj";
+
+    fn run_sh(script: &str) -> Result<String> {
+        let mut child = std::process::Command::new("/bin/sh")
+            .arg("-s")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()?;
+        child.stdin.take().unwrap().write_all(script.as_bytes())?;
+        let out = child.wait_with_output()?;
+        if !out.status.success() {
+            bail!("sh failed: {}", String::from_utf8_lossy(&out.stderr));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
+    /// 遠端主機＋兩個只在那台的 claude 身分（各自的 `CLAUDE_CONFIG_DIR`）。ssh 假貨以主機名為鍵、是全域的：
+    /// 每個測試用自己的主機名，平行跑才不會互蓋。
+    async fn remote_env(host: &'static str) -> (tt::Env, PathBuf) {
+        let env = tt::env().await;
+        let home = env.dir.join("remote-home");
+        std::fs::create_dir_all(&home).unwrap();
+        let cfg = crate::config::HostCfg {
+            name: host.into(),
+            ssh: host.into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "agents-manager".into(),
+            remote_path: String::new(),
+        };
+        let conn = env.app.hosts.insert_remote_for_test(cfg).await;
+        *conn.remote_home.lock().await = Some(home.to_string_lossy().into_owned());
+        env.app
+            .cfg
+            .update(|c| {
+                for n in ["ra", "rb"] {
+                    c.identities.push(crate::config::IdentityCfg {
+                        name: n.into(),
+                        kind: "claude".into(),
+                        host: Some(host.into()),
+                        env: [("CLAUDE_CONFIG_DIR".to_string(), format!("$HOME/.claude-{n}"))].into(),
+                        args: vec![],
+                    });
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+        (env, home)
+    }
+
+    async fn bot_on(env: &tt::Env, identity: &str) -> db::Bot {
+        let bot = tt::claude_bot(&env.app, &env.project_id, "remote").await;
+        switch(env, &bot.id, identity).await
+    }
+
+    async fn switch(env: &tt::Env, bot_id: &str, identity: &str) -> db::Bot {
+        let bot = db::bot(&env.app.db, bot_id).await.unwrap().unwrap();
+        sqlx::query("UPDATE bots SET identity = ? WHERE id = ?").bind(identity).bind(&bot.id).execute(&env.app.db).await.unwrap();
+        db::bot(&env.app.db, &bot.id).await.unwrap().unwrap()
+    }
+
+    fn trusted(store: &Path) -> Value {
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(store).unwrap()).unwrap();
+        v["projects"][CWD][CLAUDE_KEY].clone()
+    }
+
+    /// 換身分＝換到一個從沒用過（目錄都還沒有）的設定目錄：照樣寫進**那個**目錄的 `.claude.json`。
+    #[tokio::test]
+    async fn switching_a_remote_bot_to_a_never_used_identity_pre_trusts_its_config_dir() {
+        const HOST: &str = "trustbox-switch";
+        let (env, home) = remote_env(HOST).await;
+        crate::hosts::set_ssh_fake(HOST, run_sh);
+
+        let bot = bot_on(&env, "ra").await;
+        assert!(pretrust_for_start(&env.app, &bot, HOST, CWD).await.is_empty());
+        assert_eq!(trusted(&home.join(".claude-ra/.claude.json")), json!(true));
+
+        let bot = switch(&env, &bot.id, "rb").await;
+        assert!(!home.join(".claude-rb").exists(), "前提：B 的目錄還不存在");
+        let errs = pretrust_for_start(&env.app, &bot, HOST, CWD).await;
+        assert!(errs.is_empty(), "{errs:?}");
+        assert_eq!(trusted(&home.join(".claude-rb/.claude.json")), json!(true), "換過去的身分也信任了");
+        assert!(!home.join(".claude.json").exists(), "沒寫到預設帳號的檔");
+    }
+
+    /// 既有的 `.claude.json` 其他欄位原樣；已經信任時不重寫。
+    #[tokio::test]
+    async fn remote_pre_trust_keeps_the_rest_of_the_file_and_skips_when_already_trusted() {
+        const HOST: &str = "trustbox-keep";
+        let (env, home) = remote_env(HOST).await;
+        let writes = Arc::new(AtomicUsize::new(0));
+        let w = writes.clone();
+        crate::hosts::set_ssh_fake(HOST, move |script| {
+            if script.contains("AM_TRUST_OK") {
+                w.fetch_add(1, Ordering::SeqCst);
+            }
+            run_sh(script)
+        });
+        let store = home.join(".claude-ra/.claude.json");
+        std::fs::create_dir_all(store.parent().unwrap()).unwrap();
+        std::fs::write(&store, r#"{"hasCompletedOnboarding":true,"oauthAccount":{"x":1},"projects":{"/other":{"allowedTools":["Bash"]}}}"#).unwrap();
+
+        let bot = bot_on(&env, "ra").await;
+        assert!(pretrust_for_start(&env.app, &bot, HOST, CWD).await.is_empty());
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&store).unwrap()).unwrap();
+        assert_eq!(v["hasCompletedOnboarding"], json!(true));
+        assert_eq!(v["oauthAccount"], json!({"x": 1}));
+        assert_eq!(v["projects"]["/other"], json!({"allowedTools": ["Bash"]}));
+        assert_eq!(v["projects"][CWD][CLAUDE_KEY], json!(true));
+        assert_eq!(writes.load(Ordering::SeqCst), 1);
+
+        assert!(pretrust_for_start(&env.app, &bot, HOST, CWD).await.is_empty());
+        assert_eq!(writes.load(Ordering::SeqCst), 1, "已經信任了就不再寫");
+    }
+
+    /// 讀和寫之間 claude 自己改了檔（它常寫 `.claude.json`）：不能拿舊內容蓋掉，重讀再合併。
+    #[tokio::test]
+    async fn remote_pre_trust_does_not_clobber_a_concurrent_write() {
+        const HOST: &str = "trustbox-race";
+        let (env, home) = remote_env(HOST).await;
+        let store = home.join(".claude-ra/.claude.json");
+        std::fs::create_dir_all(store.parent().unwrap()).unwrap();
+        std::fs::write(&store, r#"{"numStartups":1}"#).unwrap();
+        let raced = Arc::new(AtomicUsize::new(0));
+        let (r, st) = (raced.clone(), store.clone());
+        crate::hosts::set_ssh_fake(HOST, move |script| {
+            if script.contains("AM_TRUST_OK") && r.fetch_add(1, Ordering::SeqCst) == 0 {
+                std::fs::write(&st, r#"{"numStartups":2,"tipsHistory":{"a":1}}"#).unwrap();
+            }
+            run_sh(script)
+        });
+
+        let bot = bot_on(&env, "ra").await;
+        let errs = pretrust_for_start(&env.app, &bot, HOST, CWD).await;
+        assert!(errs.is_empty(), "{errs:?}");
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&store).unwrap()).unwrap();
+        assert_eq!(v["numStartups"], json!(2), "中途寫進去的留著");
+        assert_eq!(v["tipsHistory"], json!({"a": 1}));
+        assert_eq!(v["projects"][CWD][CLAUDE_KEY], json!(true));
+    }
+
+    /// ssh 失敗是警告，不擋啟動（跟本機一樣 best effort），也不會寫出半個檔。
+    #[tokio::test]
+    async fn an_unreachable_remote_is_a_warning_not_a_failure() {
+        const HOST: &str = "trustbox-down";
+        let (env, home) = remote_env(HOST).await;
+        crate::hosts::set_ssh_fake(HOST, |_| bail!("ssh: connect to host: Connection refused"));
+        let bot = bot_on(&env, "ra").await;
+        let errs = pretrust_for_start(&env.app, &bot, HOST, CWD).await;
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(errs[0].contains("Connection refused"), "{errs:?}");
+        assert!(!home.join(".claude-ra").exists());
+    }
+}
