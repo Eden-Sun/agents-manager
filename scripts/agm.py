@@ -1029,8 +1029,20 @@ def _with_relay(body: dict, cfg: dict, args) -> None:
     body["relay_from"] = manager
 
 
+# 強制 `/usage` 探測：daemon 要先等同一台的 probe_lock（背景輪詢一個一個探身分時會佔著），再自己探最久 40 秒。
+QUOTA_PROBE_TIMEOUT = 300.0
+
+
 def cmd_quota(client: Client, cfg: dict, args) -> object:
-    return client.get("/api/quota")
+    if not getattr(args, "probe", False):
+        if args.account or args.host:
+            raise AgmError("bad_args", "--account／--host 只配 --probe 用", 2)
+        return client.get("/api/quota")
+    # 蓋掉 statusLine 鎖住的錯值（#404）：結果 source=claude-usage，直接寫進 cache。
+    query = {k: v for k, v in (("kind", args.kind), ("account", args.account), ("host", args.host)) if v}
+    if client.timeout == DEFAULT_TIMEOUT:
+        client.timeout = QUOTA_PROBE_TIMEOUT
+    return client.post(f"/api/quota/probe?{urllib.parse.urlencode(query)}")
 
 
 def cmd_bot(client: Client, cfg: dict, args) -> object:
@@ -1318,7 +1330,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--summary-file")
     s.set_defaults(func=cmd_handoff)
 
-    s = sub.add_parser("quota", help="各身分的額度狀態")
+    s = sub.add_parser("quota", help="各身分的額度狀態；--probe 強制重跑 /usage 並覆寫 cache")
+    s.add_argument("--probe", action="store_true", help="強制重跑該帳號的 /usage，結果蓋掉 statusLine 的值")
+    s.add_argument("--kind", default="claude", choices=["claude"], help="目前只有 claude 有強制探測")
+    s.add_argument("--account", help="身分名（cc0、cc1…）；省略＝預設帳號")
+    s.add_argument("--host", help="主機名；省略＝本機")
     s.set_defaults(func=cmd_quota)
 
     s = sub.add_parser(

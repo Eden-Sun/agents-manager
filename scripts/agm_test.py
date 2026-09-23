@@ -1155,5 +1155,43 @@ class HelpTest(unittest.TestCase):
         self.assertIn("不要", text)
 
 
+class QuotaCommandTest(CliCase):
+    def test_plain_quota_only_reads(self):
+        FakeDaemon.routes["GET /api/quota"] = (200, {"claude": None})
+        self.assertEqual(self.ok("quota"), {"claude": None})
+        self.assertEqual([(r["method"], r["path"]) for r in FakeDaemon.seen if r["path"] != "/api/session"], [("GET", "/api/quota")])
+
+    def test_probe_posts_kind_account_and_host(self):
+        """#404：statusLine 鎖住的錯值要有手動出口——強制探測、結果直接覆寫 cache。"""
+        FakeDaemon.routes["POST /api/quota/probe"] = (200, {"key": "claude", "quota": {"source": "claude-usage"}})
+        out = self.ok("quota", "--probe", "--account", "cc0")
+        self.assertEqual(out["quota"]["source"], "claude-usage")
+        self.ok("quota", "--probe", "--account", "cc1", "--host", "m4p")
+        posts = [r for r in FakeDaemon.seen if r["method"] == "POST"]
+        self.assertEqual(len(posts), 2)
+        self.assertEqual(urllib.parse.parse_qs(urllib.parse.urlsplit(posts[0]["path"]).query), {"kind": ["claude"], "account": ["cc0"]})
+        self.assertEqual(
+            urllib.parse.parse_qs(urllib.parse.urlsplit(posts[1]["path"]).query),
+            {"kind": ["claude"], "account": ["cc1"], "host": ["m4p"]},
+        )
+        self.assertEqual(posts[0]["token"], TOKEN)
+
+    def test_probe_without_account_asks_for_the_default_account(self):
+        FakeDaemon.routes["POST /api/quota/probe"] = (200, {"key": "claude"})
+        self.ok("quota", "--probe")
+        post = [r for r in FakeDaemon.seen if r["method"] == "POST"][0]
+        self.assertEqual(post["path"], "/api/quota/probe?kind=claude")
+
+    def test_probe_failure_surfaces_the_daemon_error(self):
+        FakeDaemon.routes["POST /api/quota/probe"] = (404, {"error": "not_found", "what": "identity"})
+        err = self.bad("quota", "--probe", "--account", "cc9")
+        self.assertIn("identity", json.dumps(err))
+
+    def test_account_without_probe_is_a_usage_error(self):
+        err = self.bad("quota", "--account", "cc0")
+        self.assertEqual(err["error"], "bad_args")
+        self.assertFalse([r for r in FakeDaemon.seen if r["path"] != "/api/session"], "用法錯誤不該打任何 API")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -1706,7 +1706,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 
 ### `bin/agm`
 `scripts/agm.py` 由 `include_str!` 編進 daemon，`setup` 時寫成 `<cwd>/bin/agm`。子命令：`state`、`supervisor`、`search`、`messages`、`bot`（`start`／`stop`／`restart`／`create`／`delete`／`restore`；`start`／`restart` 收 `--resume native` → `?resume=native`，回應原樣印出）、
-`assign`（含 `--notice`、`--mission`／`--role`、`--review-by patrol|responder`、交接用的 `--ack`／`--reply-to <event_id>`）、`assignments`、`inbox`（`--all`、`--limit`、`--role patrol|responder|mine`）、`ack`、`handoff`、`quota`、`health`、`lease`、`mission`、
+`assign`（含 `--notice`、`--mission`／`--role`、`--review-by patrol|responder`、交接用的 `--ack`／`--reply-to <event_id>`）、`assignments`、`inbox`（`--all`、`--limit`、`--role patrol|responder|mine`）、`ack`、`handoff`、`quota`（`--probe [--account ccN] [--host h]` → `POST /api/quota/probe`）、`health`、`lease`、`mission`、
 `whoami`、`responder`（`show`／`setup`／`start`／`stop`）、`persona --role responder`；輸出一律 JSON。
 執行期設定讀 `<cwd>/runtime.json`：`{daemon_url, manager_bot_id, responder_bot_id, bot_id, role, self_bot_id, data_dir, supervisor_id, remote_name}`（巡檢目錄的 `responder_bot_id` 在沒有協調者時是 `null`）；**沒有 token**，CLI 執行期 `GET /api/session` 取；`daemon_url` 只接受 loopback。
 `role` 缺省＝`patrol`。環境 `AM_BOT_ID` 等於 `self_bot_id` 時，API 請求另帶 `X-AM-Bot-Id`／`X-AM-Bot-Token`（`AM_HOOK_TOKEN`）證明角色；mission 回報的 `relay_from` 用 `self_bot_id`。
