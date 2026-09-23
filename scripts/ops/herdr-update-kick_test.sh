@@ -324,7 +324,7 @@ check "binary 不在就跳過" "找不到" "$AGM_DIR/herdr-update.log"
 check_no "binary 不在不派" "assign" "$AGM_DIR/calls.log"
 teardown
 
-# 13. 第一次跑（沒有 $STATE，`LAST_ARGS` 是空陣列）要用系統的 `/bin/bash` 跑：launchd 就是這樣呼叫，
+# 13. 第一次跑（沒有 ${STATE}，`LAST_ARGS` 是空陣列）要用系統的 `/bin/bash` 跑：launchd 就是這樣呼叫，
 # macOS 內建那顆還是 3.2，`set -u` 對空陣列的 `"${arr[@]}"` 會直接 unbound variable 死掉（跟
 # daemon-update-kick.sh 的 `${REVIEW[@]+"${REVIEW[@]}"}` 是同一個坑）；PATH 上的新版 bash 不會踩到，
 # 所以其餘測試用 `bash "$SCRIPT"` 測不出這個回歸。

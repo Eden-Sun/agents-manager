@@ -28,26 +28,26 @@ reap_headless() {
     dir=$(echo "$line" | sed -n 's/.*--user-data-dir=\([^ ]*\).*/\1/p')
     port=$(echo "$line" | sed -n 's/.*--remote-debugging-port=\([0-9]*\).*/\1/p')
     if [ "$ppid" != "1" ]; then
-      echo "  keep headless pid $pid（父程序 $ppid 還活著）dir=$dir" >> "$LOG"; kept=$((kept+1)); continue
+      echo "  keep headless pid ${pid}（父程序 $ppid 還活著）dir=$dir" >> "$LOG"; kept=$((kept+1)); continue
     fi
     if [ -n "$port" ] && [ "$(lsof -nP -iTCP:"$port" -sTCP:ESTABLISHED 2>/dev/null | grep -c ESTABLISHED)" -gt 0 ]; then
-      echo "  keep headless pid $pid（port $port 上有 CDP 連線，正在用）dir=$dir" >> "$LOG"; kept=$((kept+1)); continue
+      echo "  keep headless pid ${pid}（port $port 上有 CDP 連線，正在用）dir=$dir" >> "$LOG"; kept=$((kept+1)); continue
     fi
     # 算不出年齡就當成「剛起」保守保留，寧可下一輪再收。
     if [ -z "${secs:-}" ] || [ "$secs" -lt 120 ]; then
-      echo "  keep headless pid $pid（剛起 ${secs}s，client 可能還沒連上）dir=$dir" >> "$LOG"; kept=$((kept+1)); continue
+      echo "  keep headless pid ${pid}（剛起 ${secs}s，client 可能還沒連上）dir=$dir" >> "$LOG"; kept=$((kept+1)); continue
     fi
     kill -TERM "$pid" 2>/dev/null
     sleep 3
     kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null
-    echo "  reap headless pid $pid（孤兒、無 CDP 連線、活了 ${secs:-?}s）dir=$dir" >> "$LOG"
+    echo "  reap headless pid ${pid}（孤兒、無 CDP 連線、活了 ${secs:-?}s）dir=$dir" >> "$LOG"
     # 帶 .. 的不刪：/tmp/am-x/../../foo 前綴上像 /tmp/am-*，實際指到別處（#373）。
     case "$dir" in *..*) ;; /tmp/am-*) rm -rf "$dir" && echo "    rm -rf $dir" >> "$LOG";; esac
     reaped=$((reaped+1))
   done <<EOF2
 $(ps -axo pid,ppid,command | grep 'Google Chrome' | grep -- '--headless' | grep -v -- '--type=' | grep -v grep)
 EOF2
-  echo "headless Chrome：收掉 $reaped／保留 $kept" >> "$LOG"
+  echo "headless Chrome：收掉 ${reaped}／保留 $kept" >> "$LOG"
 }
 
 # 沒有 Chrome 在用的 /tmp/am-* profile 目錄（上次跑完沒刪的殘留）。1 小時內動過的不碰，
@@ -64,7 +64,7 @@ reap_profiles() {
     echo "$live" | grep -qx "$d" && continue
     [ -n "$(find "$d" -maxdepth 0 -mmin -60 2>/dev/null)" ] && continue
     sz=$(du -sk "$d" 2>/dev/null | awk '{print $1}')
-    rm -rf "$d" && { echo "  rm -rf $d（${sz}KB，沒有 Chrome 在用）" >> "$LOG"; n=$((n+1)); }
+    rm -rf "$d" && { echo "  rm -rf ${d}（${sz}KB，沒有 Chrome 在用）" >> "$LOG"; n=$((n+1)); }
   done
   echo "profile 目錄：刪掉 $n 個" >> "$LOG"
 }

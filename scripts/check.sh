@@ -4,7 +4,7 @@
 #   scripts/check.sh            # OB + ops + web + daemon
 #   scripts/check.sh web        # bun install --frozen-lockfile、tsc、oxlint、bun test、vite build
 #   scripts/check.sh daemon     # cargo test -p agents-managerd（要先有 web/dist）
-#   scripts/check.sh ops        # scripts/*_test.sh 與 scripts/ops/*_test.sh（shell 腳本的隔離測試，假 agm／假 gh／假 sccache，不碰正式環境）
+#   scripts/check.sh ops        # shell 變數寫法的 lint，加上 scripts/*_test.sh 與 scripts/ops/*_test.sh（shell 腳本的隔離測試，假 agm／假 gh／假 sccache，不碰正式環境）
 #   scripts/check.sh ob         # 沒有被追蹤的 bytecode；OB queue/operator 與瀏覽器契約（隔離，不用登入）
 #   scripts/check.sh fmt        # cargo fmt --check（只報告，現況不乾淨）
 #   scripts/check.sh clippy     # cargo clippy（只報告，現況不乾淨）
@@ -69,6 +69,10 @@ check_ob() {
 
 check_ops() {
     local t
+    # macOS 的 bash 3.2 會把變數名後面緊接的全形標點併進變數名，set -u 下直接 unbound
+    # variable 而中止（issue #412，三天內踩到三次）。修法一律是 ${VAR}。
+    step "ops: shell 變數後面緊接非 ASCII 字元"
+    scripts/ops/lint-shell-vars.sh
     # 新的 *_test.sh 放在 scripts/ 或 scripts/ops/ 就會被撈到；需要外部工具的測試自己 skip 並印原因。
     for t in scripts/*_test.sh scripts/ops/*_test.sh; do
         step "ops: $t"
