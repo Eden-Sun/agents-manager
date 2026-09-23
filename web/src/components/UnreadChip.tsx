@@ -4,10 +4,10 @@
  * 排序＝緊急度（2026-09-12 使用者／AGM，推翻 9/11 分組）：needs-reply → 未讀 → waits-kids → current → 其餘；
  * 同級照 `bots` 順序。不分組標籤：分組會把第 9 顆 needs-reply 擠出視野（使用者 2026-09-12 錯過 blocked bot）。
  * 手機不排序（2026-09-13 使用者：「手機版星號列不要任意改變順序」）：單行橫捲靠位置肌肉記憶。
- * 版面（同日）：桌機換行最多兩行、`+N` 展開；手機單行橫捲要看得出能捲（陰影＋◂ ▸、滾輪映射、scroll-snap）。
+ * 版面（同日）：桌機換行、有行數上限（主力三行，其餘一到兩行，2026-09-23）、`+N` 展開；手機單行橫捲要看得出能捲（陰影＋◂ ▸、滾輪映射、scroll-snap）。
  * 兩排（2026-09-15 使用者：「非標主力之現執行中與剛完成的 bot 要出現在主力的下一排」）：★ 主力一排，
- * 沒釘的（在跑、剛跑完、要回答）一定換到下一排；各排裡照上面的排序。桌機收合時兩組都在就各佔一行，
- * 主力再多也擠不掉沒釘的「要你回答」（`lib/chipOverflow.ts`）。手機單行橫捲放不下兩排，照同樣分組
+ * 沒釘的（在跑、剛跑完、要回答）一定換到下一排；各排裡照上面的排序。桌機收合時主力最多三行、
+ * 其餘那組照舊一行（只有它時兩行），主力再多也擠不掉沒釘的「要你回答」（`lib/chipOverflow.ts`）。手機單行橫捲放不下兩排，照同樣分組
  * 分成上下兩排，各自橫捲（2026-09-16 使用者：「已完成放下一排，方便我點選」）。
  * 排除（2026-09-10 使用者）：AGM 總管專案不算（例行 loop 會洗版），但 ★ 釘選不受影響；
  * 認 `GET /api/supervisor` 的 `project_id` 不認名字（2026-09-13 已從 `AGM` 改名 `AGM-DM-GRUP`）。
@@ -232,7 +232,7 @@ export function UnreadChip() {
     () => sortPinned(bots.filter((b) => b.primary && !b.pending).map((b, i) => ({ id: b.id, position: b.primary_position, index: i }))).map((x) => x.id),
     [bots],
   )
-  // 手機：4 顆一排、收合時兩排；超過 8 顆時第 8 格是「+N」，點了展開全部（`pinGridLayout`）。桌機全畫。
+  // 手機：4 顆一排、收合時三排；超過 12 顆時第 12 格是「+N」，點了展開全部（`pinGridLayout`）。桌機全畫。
   const [pinExpanded, setPinExpanded] = useState(false)
   const pinLayout = pinGridLayout(pinnedItems.length, pinExpanded)
   const shownPinned = useMemo(
@@ -266,7 +266,7 @@ export function UnreadChip() {
       </>
     )
   }
-  // 主力一組、其餘一組，各自換行、各自裁切；收合時兩組都在就各佔一行，只有一組時最多兩行（`lib/chipOverflow.ts`）。
+  // 主力一組、其餘一組，各自換行、各自裁切；收合時主力最多三行，其餘那組在主力也在時一行、只有它時兩行（`lib/chipOverflow.ts`）。
   return (
     <div className="unread-bar-wrap">
       <PinHint />
@@ -295,7 +295,7 @@ export function UnreadChip() {
           type="button"
           className="unread-bar-more"
           aria-expanded={expanded}
-          title={expanded ? '收合成兩行' : moreTitle(hiddenItems)}
+          title={expanded ? '收合' : moreTitle(hiddenItems)}
           onClick={() => setExpanded((v) => !v)}
         >
           {expanded ? '收合' : `+${hidden}`}
@@ -305,7 +305,7 @@ export function UnreadChip() {
   )
 }
 
-/** 手機的主力區：4 顆等寬一排、往下換行、最多兩排，不橫捲（#344）。 */
+/** 手機的主力區：4 顆等寬一排、往下換行、收合時最多三排，不橫捲（#344）。 */
 function PinGrid({
   items,
   dnd,
@@ -315,7 +315,7 @@ function PinGrid({
 }: {
   items: ChipItem[]
   dnd: PinnedDnd
-  /** 收合時藏起來的主力（第 8 格變成「+N」）。 */
+  /** 收合時藏起來的主力（第 12 格變成「+N」）。 */
   hidden?: ChipItem[]
   /** 展開中：最後多一格「收合」。 */
   collapsible?: boolean
@@ -342,7 +342,7 @@ function PinGrid({
             <span className="unread-chip-name">+{hidden.length}</span>
           </button>
         ) : collapsible ? (
-          <button type="button" className="unread-chip pin-more" aria-expanded title="收合成兩排" onClick={onToggle}>
+          <button type="button" className="unread-chip pin-more" aria-expanded title="收合成三排" onClick={onToggle}>
             <span className="unread-chip-name">收合</span>
           </button>
         ) : null}
@@ -397,13 +397,13 @@ function useOverflowChips(
     }
     const groups = [...bar.querySelectorAll<HTMLElement>('.unread-group')]
     const has = (name: GroupName) => groups.some((g) => g.dataset.group === name)
-    const budget = lineBudget(has('pinned'), has('others'))
+    const budget = lineBudget(has('pinned'))
     const ids: string[] = []
     const px: Record<string, number> = { pinned: 0, others: 0 }
     let at = 0
     for (const g of groups) {
       const chips = [...g.querySelectorAll<HTMLElement>('.unread-chip')]
-      const cut = clipAfterRows(layoutBoxes(chips, g.offsetTop), budget)
+      const cut = clipAfterRows(layoutBoxes(chips, g.offsetTop), g.dataset.group === 'pinned' ? budget.pinned : budget.others)
       for (const i of cut.hidden) ids.push(ordered[at + i]?.id ?? '')
       if (cut.hidden.length > 0) {
         px[g.dataset.group ?? 'others'] = Math.ceil(cut.visibleBottom + parseFloat(getComputedStyle(g).paddingBottom || '0'))

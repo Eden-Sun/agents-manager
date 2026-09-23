@@ -4,19 +4,23 @@ import { clipAfterRows, hiddenChipIndexes, layoutBoxes, lineBudget, moreTitle, o
 
 const row = (pinned: boolean, tops: number[]): ChipBox[] => tops.map((top) => ({ pinned, top }))
 
-test('主力占滿兩行時，沒釘的要回答仍在第二行，不被收進 +N（review3 c4 L2）', () => {
-  // 7 顆主力（一行放 6 顆 → 兩行），第 8 顆是沒釘、停在提示上的 bot（換到下一行）。
-  const boxes = [...row(true, [0, 0, 0, 0, 0, 0, 28]), ...row(false, [56])]
+test('主力占滿三行時，沒釘的要回答仍在自己那一行，不被收進 +N（review3 c4 L2）', () => {
+  // 13 顆主力（一行放 4 顆 → 四行），第 14 顆是沒釘、停在提示上的 bot（換到下一行）。
+  const boxes = [...row(true, [0, 0, 0, 0, 28, 28, 28, 28, 56, 56, 56, 56, 84]), ...row(false, [112])]
   const hidden = hiddenChipIndexes(boxes)
-  assert.deepEqual(hidden, [6], '藏的是溢出第一行的主力')
-  assert.ok(!hidden.includes(7), '沒釘的那組第一行照樣看得到')
+  assert.deepEqual(hidden, [12], '藏的是溢出第三行的主力')
+  assert.ok(!hidden.includes(13), '沒釘的那組第一行照樣看得到')
 })
 
-test('只有一組時那組最多兩行；兩組都在時各一行', () => {
-  assert.equal(lineBudget(true, false), 2)
-  assert.equal(lineBudget(false, true), 2)
-  assert.equal(lineBudget(true, true), 1)
-  assert.deepEqual(hiddenChipIndexes(row(true, [0, 0, 28, 28, 56])), [4])
+test('主力最多三行（2026-09-23 使用者）；其餘那組在主力也在時一行、只有它時兩行', () => {
+  assert.deepEqual(lineBudget(true), { pinned: 3, others: 1 })
+  assert.deepEqual(lineBudget(false), { pinned: 3, others: 2 })
+  // 主力邊界：剛好三行不收；第四行才收。
+  assert.deepEqual(hiddenChipIndexes(row(true, [0, 0, 28, 28, 56, 56])), [], '三行放得下就不出 +N')
+  assert.deepEqual(hiddenChipIndexes(row(true, [0, 0, 28, 28, 56, 56, 84])), [6])
+  assert.deepEqual(hiddenChipIndexes([...row(true, [0, 28, 56]), ...row(false, [84])]), [], '主力三行＋其餘一行都看得到')
+  assert.deepEqual(hiddenChipIndexes([...row(true, [0, 28, 56, 84]), ...row(false, [112, 140])]), [3, 5])
+  // 其餘那組照舊。
   assert.deepEqual(hiddenChipIndexes(row(false, [0, 28, 56, 56])), [2, 3])
   assert.deepEqual(hiddenChipIndexes([...row(true, [0, 0]), ...row(false, [28, 28, 56, 84])]), [4, 5])
   assert.deepEqual(hiddenChipIndexes([...row(true, [0]), ...row(false, [28])]), [])

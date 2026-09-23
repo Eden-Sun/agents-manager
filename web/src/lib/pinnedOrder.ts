@@ -119,14 +119,15 @@ export function pickSlot(boxes: Box[], x: number, y: number, dragId: string, pre
   return { before: best.before, shift: row.slice(best.at).map((b) => b.id), after: best.at === row.length ? row[row.length - 1].id : null }
 }
 
-/** 手機主力區收合時佔幾格（4 顆一排、兩排）；超過時最後一格讓給「+N」（#344；+N 見 `pinGridLayout`）。 */
-export const PIN_GRID_MAX = 8
+/** 手機主力區收合時佔幾格（4 顆一排、三排）；超過時最後一格讓給「+N」（#344；+N 見 `pinGridLayout`）。 */
+export const PIN_GRID_MAX = 12
 
 /**
  * 手機主力區要畫幾顆、「+N」寫多少（2026-09-23 使用者：「手機版 header 主力只兩排，多的呢」）。
  *
- * 放得下（≤ 8）就全畫、不出 +N。超過時收合狀態只畫前 7 顆，第 8 格是「+N」（N＝藏起來的顆數），
- * 點了展開成全部；展開時全畫，另外給一格「收合」。順序仍由拖曳決定，所以前 7 顆就是使用者排在最前面的。
+ * 放得下（≤ 12，4×3）就全畫、不出 +N（2026-09-23 使用者：「主力區可以到三排 12 個，超過才要」）。超過時收合狀態
+ * 只畫前 11 顆，第 12 格是「+N」（N＝藏起來的顆數），點了展開成全部；展開時全畫，另外給一格「收合」。
+ * 順序仍由拖曳決定，所以前 11 顆就是使用者排在最前面的。
  */
 export function pinGridLayout(count: number, expanded: boolean): { shown: number; more: number; collapsible: boolean } {
   if (count <= PIN_GRID_MAX) return { shown: count, more: 0, collapsible: false }
