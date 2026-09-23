@@ -1114,9 +1114,17 @@ pub(crate) async fn type_text(
         tokio::time::sleep(Duration::from_millis(TYPE_SETTLE_MS)).await;
         seen = read().await?;
     }
-    match box_state_within(&bot.kind, &seen, typed_tail(text)) {
-        // #382：框裡缺了開頭。按 Enter 送出去的就是半段——清框、明講沒送出（框清乾淨了才算一個字都沒到 agent）。
-        BoxState::NonEmpty if super::paste_check::paste_truncated(&bot.kind, &seen, text) => {
+    let state = box_state_within(&bot.kind, &seen, typed_tail(text));
+    let truncated = match super::paste_check::lost_head(&bot.kind, &seen, text, typed_tail(text)) {
+        // 框滿不滿要看畫面有幾列（#403）；只在看不到開頭時才多問一次。
+        Some(lost) if state == BoxState::NonEmpty => {
+            lost.truncated(client.pane_viewport_rows(&pane).await.ok().flatten().map(|r| r as usize))
+        }
+        _ => false,
+    };
+    match state {
+        // #382：框沒滿卻缺了開頭。按 Enter 送出去的就是半段——清框、明講沒送出（框清乾淨了才算一個字都沒到 agent）。
+        BoxState::NonEmpty if truncated => {
             tracing::warn!(run = %run.id, bot = %bot.name, "the composer lost the head of the paste; clearing it instead of sending half");
             client.pane_send_keys(&pane, &["ctrl+c"]).await?;
             tokio::time::sleep(Duration::from_millis(TYPE_SETTLE_MS)).await;

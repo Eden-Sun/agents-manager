@@ -632,12 +632,12 @@ const COMPOSER_HEAD: usize = 12;
 /// Never match on a fragment this short — a two-character prompt is in every screen.
 const COMPOSER_HEAD_MIN: usize = 4;
 
-fn undecorate_row(line: &str) -> String {
+pub(crate) fn undecorate_row(line: &str) -> String {
     let s = strip_grok_decor(line);
     s.trim().trim_start_matches('│').trim_end_matches('│').trim().to_string()
 }
 
-fn is_rule_row(s: &str) -> bool {
+pub(crate) fn is_rule_row(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| "─━-=_╭╮╰╯".contains(c))
 }
 

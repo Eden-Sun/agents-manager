@@ -101,6 +101,9 @@ pub struct LivePane {
     /// 真的 herdr 0.9.1＋claude（2026-09-21 實測，#382）：一次 `pane.send_text` 超過這麼多位元組時，
     /// **最前面的這麼多位元組不見了**，只剩後面的進到框裡。`Some(1024)` 重現那個行為。
     pub send_text_drops_head_over: Option<usize>,
+    /// 畫面列數（`pane.get` 的 `scroll.viewport_rows`）。有值時 claude 的框照真 claude 2.1.280 的樣子
+    /// 最多畫 `rows/2 - 5` 列、只留最後幾列（#403）；`None` 時整段都畫、`pane.get` 不回 `scroll`。
+    pub rows: Option<u32>,
 }
 
 /// 框裡的字送出去：進 transcript，有 transcript 檔就照 claude 的格式補一筆 user entry。
@@ -180,10 +183,11 @@ impl LivePane {
                 Some(s) => out.push_str(&format!("❯\u{a0}\u{1b}[2m{s}\u{1b}[0m\n")),
                 None => out.push_str("❯\n"),
             },
-            Some((first, rest)) => {
-                out.push_str(&format!("❯ {first}\n"));
-                for r in rest {
-                    out.push_str(&format!("  {r}\n"));
+            Some(_) => {
+                let max = self.rows.map_or(usize::MAX, |r| crate::lifecycle::paste_check::claude_box_max_rows(r as usize).max(1));
+                let shown = &self.composer[self.composer.len().saturating_sub(max)..];
+                for (n, r) in shown.iter().enumerate() {
+                    out.push_str(&format!("{}{r}\n", if n == 0 { "❯ " } else { "  " }));
                 }
             }
         }
@@ -232,8 +236,12 @@ impl MockState {
             Some(a) => (a.get("agent").cloned().unwrap_or(Value::Null), a.get("agent_status").cloned().unwrap_or(Value::Null)),
             None => (Value::Null, Value::Null),
         };
-        json!({"pane_id": pane_id, "workspace_id": tab.workspace_id, "tab_id": tab.tab_id,
-               "cwd": cwd.cloned().unwrap_or(Value::Null), "agent": agent, "agent_status": status})
+        let mut v = json!({"pane_id": pane_id, "workspace_id": tab.workspace_id, "tab_id": tab.tab_id,
+               "cwd": cwd.cloned().unwrap_or(Value::Null), "agent": agent, "agent_status": status});
+        if let Some(rows) = self.live.lock().unwrap().get(pane_id).and_then(|p| p.rows) {
+            v["scroll"] = json!({"offset_from_bottom": 0, "max_offset_from_bottom": 0, "viewport_rows": rows});
+        }
+        v
     }
     fn tab_json(t: &MockTab) -> Value {
         json!({"tab_id": t.tab_id, "workspace_id": t.workspace_id, "label": t.label,
@@ -412,6 +420,11 @@ impl MockHerdr {
                             match st.find_pane(&pid) {
                                 Some(t) => json!({"id": id, "result": {"type": "pane_info",
                                     "pane": st.pane_json(&pid, &t, None)}}),
+                                // 只用 `live_pane` 種、沒掛在 tab 上的 pane：照樣回得出畫面列數（#403）。
+                                None if st.live.lock().unwrap().get(&pid).is_some_and(|p| p.rows.is_some()) => {
+                                    let t = MockTab { tab_id: "w0:t0".into(), workspace_id: "w0".into(), label: String::new(), panes: vec![] };
+                                    json!({"id": id, "result": {"type": "pane_info", "pane": st.pane_json(&pid, &t, None)}})
+                                }
                                 None => json!({"id": id, "error": {"code": "pane_not_found", "message": pid}}),
                             }
                         }
