@@ -10,7 +10,7 @@ import type { Attachment } from '../api/types'
 import { useDialogFocus } from '../hooks/useDialogFocus'
 import './attachments.css'
 
-import { formatSize, type Pending } from './attachmentsHelpers'
+import { formatSize, sizeLabel, type Pending } from './attachmentsHelpers'
 
 export function DropVeil({ label = '放開以附加檔案' }: { label?: string }) {
   return (
@@ -35,7 +35,7 @@ export function AttachTray({ items, onRemove, disabled }: { items: Pending[]; on
         <div className="attach-peek" aria-hidden="true">
           <img src={peeked.previewUrl} alt="" />
           <span className="attach-peek-cap">
-            {peeked.name} · {formatSize(peeked.size)}
+            {peeked.name} · {sizeLabel(peeked.size, peeked.originalSize)}
           </span>
         </div>
       ) : null}
@@ -56,7 +56,7 @@ export function AttachTray({ items, onRemove, disabled }: { items: Pending[]; on
               <FileIcon />
             </span>
           )}
-          <span className="attach-thumb-name" title={`${it.name} · ${formatSize(it.size)}`}>
+          <span className="attach-thumb-name" title={`${it.name} · ${sizeLabel(it.size, it.originalSize)}`}>
             {it.name}
           </span>
           {it.id ? null : it.error ? <span className="attach-thumb-state err">失敗</span> : <span className="attach-thumb-state">上傳中…</span>}

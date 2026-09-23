@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState }
 import type { DragEvent } from 'react'
 import * as api from '../api'
 import type { Attachment } from '../api/types'
+import { compressible, compressImage } from '../lib/imageCompress'
 import { MAX_BYTES, SHELF_MIME, shelfFilesFor } from '../store/shelf'
 import { useStore } from '../store/store'
 
@@ -11,7 +12,10 @@ export interface Pending {
   /** 名稱｜大小｜修改時間，擋重複用。 */
   fp: string
   name: string
+  /** 實際上傳的大小（圖片壓縮後的）。 */
   size: number
+  /** 壓縮前的大小；沒壓（非圖片、GIF、壓了沒變小）就沒有。 */
+  originalSize?: number
   /** An image is drawn as a thumbnail; anything else as an icon card. */
   isImage: boolean
   /** Local preview for an image; `''` for everything else (no blob held for nothing). */
@@ -22,6 +26,7 @@ export interface Pending {
 
 type PendingAction =
   | { type: 'add'; item: Pending }
+  | { type: 'compressed'; key: string; name: string; size: number }
   | { type: 'uploaded'; key: string; id: string }
   | { type: 'failed'; key: string; error: string }
   | { type: 'remove'; key: string }
@@ -31,6 +36,8 @@ function pendingReducer(items: Pending[], action: PendingAction): Pending[] {
   switch (action.type) {
     case 'add':
       return [...items, action.item]
+    case 'compressed':
+      return items.map((it) => (it.key === action.key ? { ...it, name: action.name, originalSize: it.size, size: action.size } : it))
     case 'uploaded':
       return items.map((it) => (it.key === action.key ? { ...it, id: action.id } : it))
     case 'failed':
@@ -50,6 +57,11 @@ export function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+/** 卡片上的大小：壓過的連原檔一起寫，看得出省了多少。 */
+export function sizeLabel(size: number, originalSize?: number): string {
+  return originalSize && originalSize !== size ? `${formatSize(size)}（原 ${formatSize(originalSize)}）` : formatSize(size)
 }
 
 /** Composer attachment state for one draft. `uploadTo`: any group member works (attachments are project-scoped). */
@@ -98,7 +110,8 @@ export function useAttachments(uploadTo: string | null, resetKey: string | null)
         seen.current.add(fp)
         seq.current += 1
         const key = `a${seq.current}`
-        if (file.size > MAX_BYTES) {
+        // 圖片先壓再比上限（`lib/imageCompress.ts`）：手機原圖超過上限，壓完多半放得下。
+        if (file.size > MAX_BYTES && !compressible(file.type)) {
           notify('error', `「${file.name}」有 ${formatSize(file.size)}，超過 ${formatSize(MAX_BYTES)} 上限。`)
           continue
         }
@@ -106,8 +119,12 @@ export function useAttachments(uploadTo: string | null, resetKey: string | null)
         const previewUrl = isImage ? URL.createObjectURL(file) : ''
         if (previewUrl) urls.current.add(previewUrl)
         dispatch({ type: 'add', item: { key, fp, name: file.name || '檔案', size: file.size, isImage, previewUrl, id: null, error: null } })
-        void api
-          .uploadAttachment(uploadTo, file)
+        void compressImage(file)
+          .then((out) => {
+            if (out.size > MAX_BYTES) throw new Error(`有 ${formatSize(out.size)}，超過 ${formatSize(MAX_BYTES)} 上限`)
+            if (out !== file) dispatch({ type: 'compressed', key, name: out.name, size: out.size })
+            return api.uploadAttachment(uploadTo, out)
+          })
           .then((a: Attachment) => {
             dispatch({ type: 'uploaded', key, id: a.id })
           })
