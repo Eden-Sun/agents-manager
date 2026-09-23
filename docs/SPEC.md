@@ -2338,6 +2338,10 @@ API：`GET /api/projects/:id/messages`、`POST /api/projects/:id/chat`（`API.md
 
 額度快取只改善可見性，不改額度判斷的來源優先序：快取中的 `stale` 讀數仍保留畫面與重置時間，但新探測回來以前不能被解讀成「剛確認」；`limit_hit` 的到期與清除規則照 §12.4。
   label 是 `am-quota-claude*` / `am-quota-grok`、agent 名 `amquota<6碼>`（不在 DB）；`sweep_stale()` 掃本機 `am-quota` 與每台已連線主機的 session。
+  claude 探測的 workspace 在成功、RPC 失敗、逾時與 future 被丟棄（guard 的 `Drop`）時都會關；`workspace.close` 本身失敗留下的，
+  下一輪開新的之前先收掉同前綴的（呼叫端握著那台的 `probe_lock`，此刻同前綴的一定是殘留），不等 daemon 重啟（#408）。
+  `am-quota-` 前綴的 workspace 是 daemon 自己的：§6.5e 的 pane 掃描（`panes::scan_snapshot`）照同一份 snapshot 的 workspace label
+  整個跳過，不進 `panes`、不推 `pane_unowned`——遠端借主 session 開的那幾秒，它就是一顆前景跑 claude 的 shell。
   cwd 與 identity env 的 `~` 用那台主機的 `$HOME`（`HostConn::home()`）。
 
 ### 14.3 輪詢
