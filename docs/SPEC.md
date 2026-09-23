@@ -2036,7 +2036,8 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   不用的做法：`--resume-session-at`（2.1.280 只在 print 模式生效，help 原文「Ignored outside print mode」）；daemon 自己截斷 transcript 另存新 session 再 `--resume`
   （要理解 transcript 格式、要重啟、換 session id——#405 第一版，已放棄）。
 - **每一步讀畫面確認才按下一步**（claude 2.1.280 實機畫面：`daemon/src/rewind/claude_2.1.280_rewind_*.txt`）：
-  1. 輸入列要空、畫面上沒有開著的 rewind 選單，否則 409 `composer_busy`／`rewind_ui_open`，一個字都不打。
+  1. 輸入列要空、畫面上沒有開著的 rewind 選單，否則 409 `composer_busy`／`rewind_ui_open`，一個字都不打。畫面一律帶樣式讀（`read_styled`）再經
+     `plain_without_hints` 判讀，跟送達、補 Enter、清框同一套：輸入列裡 dim 的「建議下一句」（claude 2.1.280）不算字。
   2. 打 `/rewind`、Enter，等選單出現（`Rewind` 標題以下有 `Enter to continue · Esc to cancel` 與 `❯` 游標）；5 秒內沒出現 → 清掉打進去的 `/rewind`，409 `menu_not_shown`。
   3. 選單由舊到新、最下面是 `(current)`，每則只顯示第一行（多行的加 `…`、太長的在欄寬截斷加 `…`）。一格一格往上（`Up`），每按一下等畫面真的變了再讀游標那一則，
      第一行對得上目標就停；同一句（第一行一樣）在網頁上較新的還有幾則，就先跳過幾則。游標不再移動＝到頂了還沒找到 → Esc 退出，409 `not_in_menu`。
