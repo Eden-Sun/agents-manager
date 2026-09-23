@@ -812,20 +812,27 @@ impl ConfigStore {
         self.inner.lock().await.cfg.clone()
     }
 
-    pub async fn update<F, T>(&self, f: F) -> Result<T>
+    /// `#[track_caller]`：寫入／重讀的 log 要記是哪一段程式叫的（issue #406）。async fn 不能掛
+    /// track_caller，所以是回 future 的一般函式，呼叫端照樣 `.await`。
+    #[track_caller]
+    pub fn update<'a, F, T>(&'a self, f: F) -> impl std::future::Future<Output = Result<T>> + 'a
     where
-        F: FnOnce(&mut ConfigFile) -> Result<T>,
+        F: FnOnce(&mut ConfigFile) -> Result<T> + 'a,
+        T: 'a,
     {
-        self.update_guarded(f, |_next| Ok(())).await
+        let at = std::panic::Location::caller();
+        async move { self.update_guarded_at(at, f, |_next| Ok(())).await }
     }
 
     /// 跟 [`Self::update`] 一樣的「重讀 → 套用 → 驗證 → 寫入」，多一道 `guard`：驗證過的 `next`
     /// 落盤之前再跑一次額外檢查，驗不過一樣直接回錯誤、檔案一個字都不動（issue #73 reopen）。
     ///
     /// 給需要 DB 才判得出來的規則用（`projection::update_and_project` 的大量軟刪閘門）：那類檢查得先在
-    /// 呼叫端把 DB 快照查出來，再用同步的 `guard` 帶進來比對——`update_guarded` 本身不碰 DB，也不知道
+    /// 呼叫端把 DB 快照查出來，再用同步的 `guard` 帶進來比對——`update_guarded_at` 本身不碰 DB，也不知道
     /// 什麼時候該問誰，只負責「套用與驗證都過了才寫檔」這個順序不能亂。
-    pub async fn update_guarded<F, T, G>(&self, f: F, guard: G) -> Result<T>
+    ///
+    /// `at`＝要記進 log 的呼叫位置（`projection` 的公開函式把自己的呼叫端傳下來，issue #406）。
+    pub async fn update_guarded_at<F, T, G>(&self, at: &'static std::panic::Location<'static>, f: F, guard: G) -> Result<T>
     where
         F: FnOnce(&mut ConfigFile) -> Result<T>,
         G: FnOnce(&ConfigFile) -> Result<()>,
@@ -836,8 +843,11 @@ impl ConfigStore {
             // comparing metadata alone can miss a completed external atomic replacement.
             let (cfg, mtime) = read_file(&self.path)
                 .context("config.toml changed on disk and could not be re-read")?;
-            if mtime != g.mtime || cfg != g.cfg {
-                tracing::info!("config.toml changed on disk; reloaded before applying update");
+            // daemon 自己寫完會把記憶體那份換成寫出去的內容，所以內容對不上＝別人改的（issue #406）。
+            if cfg != g.cfg {
+                crate::config_audit::log_external_change(at, &self.path, &g.cfg, &cfg);
+            } else if mtime != g.mtime {
+                crate::config_audit::log_reload_unchanged(at, &self.path);
             }
             g.cfg = cfg;
             g.mtime = mtime;
@@ -858,6 +868,7 @@ impl ConfigStore {
         if next != g.cfg {
             write_atomic(&self.path, &next)?;
             g.mtime = std::fs::metadata(&self.path).ok().and_then(|m| m.modified().ok());
+            crate::config_audit::log_write(at, &self.path, &g.cfg, &next);
         }
         g.cfg = next;
         Ok(out)

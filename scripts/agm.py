@@ -196,6 +196,8 @@ class Client:
             headers["Content-Type"] = "application/json"
         if auth:
             headers["X-AM-Token"] = self.token()
+            # daemon 把寫入型請求的呼叫端記進 log／刪除 intent（issue #406）：自報是 agm，事後查得出來。
+            headers["X-AM-Caller"] = "agm"
             headers.update(self._extra)
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
@@ -1063,7 +1065,9 @@ def cmd_bot(client: Client, cfg: dict, args) -> object:
         return client.patch(f"/api/bots/{urllib.parse.quote(args.bot_id)}", body)
     if args.op == "delete":
         # 軟刪：先停 pane，再從設定拿掉；它開的子 agent 一起收，對話紀錄保留。
-        return client.delete(f"/api/bots/{urllib.parse.quote(args.bot_id)}")
+        # AGM 的 bot（總管專案裡的、總管的 child）不帶 --confirm-supervisor 會 409 supervisor_owned（issue #406）。
+        query = "?confirm=supervisor" if getattr(args, "confirm_supervisor", False) else ""
+        return client.delete(f"/api/bots/{urllib.parse.quote(args.bot_id)}{query}")
     if args.op == "restore":
         # 還原被軟刪的 bot（API §10.4a；子 agent 只清 deleted_at、不開 run，pane 由父 bot 用 herdr 重開）。
         return client.post(f"/api/bots/{urllib.parse.quote(args.bot_id)}/restore", {})
@@ -1388,6 +1392,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--identity")
     s.add_argument("--resume", choices=["native"], help="start/restart：接回 DB 記的原生對話（?resume=native）；接不回是 409 resumed:false")
     s.add_argument("--session", help="跟 --resume native 一起：不看 DB，指名接回這一段 session id（DB 記錯時的救援路徑）")
+    s.add_argument("--confirm-supervisor", dest="confirm_supervisor", action="store_true",
+                   help="delete：確定要刪 AGM 的 bot（總管專案裡的、總管的 child）；沒帶會 409 supervisor_owned")
     s.set_defaults(func=cmd_bot)
 
     return p
