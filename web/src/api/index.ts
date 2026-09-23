@@ -488,8 +488,9 @@ export function toRestartSkips(v: unknown): RestartSkip[] {
   )
 }
 
-export async function deleteBot(botId: string): Promise<void> {
-  await transport.request('DELETE', `/bots/${encodeURIComponent(botId)}`)
+/** `confirmSupervisor`：刪 AGM 的 bot 要明講（daemon 否則 409 `supervisor_owned`，issue #406）。 */
+export async function deleteBot(botId: string, opts: { confirmSupervisor?: boolean } = {}): Promise<void> {
+  await transport.request('DELETE', `/bots/${encodeURIComponent(botId)}${opts.confirmSupervisor ? '?confirm=supervisor' : ''}`)
 }
 
 export async function startBot(botId: string): Promise<string> {

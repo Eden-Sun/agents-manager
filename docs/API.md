@@ -1165,8 +1165,8 @@ WS：每顆兩次 `bots_restart_progress`（`restarting`，然後 `ok` / `failed
 - 流程：有 active Run 先 stop（host 連不上送不出去時 run 直接標 `exited` 照常刪）→ 從 config.toml 移除 → `bots.deleted_at`（**對話與訊息保留**，`GET /api/bots/{id}/messages` 仍讀得到）→
   把 `~/.config/agents-manager/bots/<bot_id>/` 搬進 `bots-trash/<bot_id>.<毫秒>/`（還原時搬回、7 天後開機清掉；遠端照舊 ssh `rm -rf`，失敗只 log）。
 - **AGM 的 bot 要明講**（issue #406）：bot 是總管／角色本身、parent 是它們、或在總管／角色的專案裡，沒帶 `?confirm=supervisor` →
-  `409 {"reason":"supervisor_owned","bot_id","name","message"}`，什麼都不動，並推一筆 `ops_alert` 給巡檢。`DELETE /api/projects/{id}` 同一條（專案是總管的、或裡面有 AGM 的 bot），409 帶 `project_id`。
-  `bin/agm bot delete <id> --confirm-supervisor` 帶這個參數。
+  `409 {"reason":"supervisor_owned","bot_id","name","role","message"}`（`role`：`AGM 總管（巡檢）`／`AGM 協調者`／`AGM 開出去的子 agent`／`AGM 專案裡的常駐工人`），什麼都不動，並推一筆 `ops_alert` 給巡檢。`DELETE /api/projects/{id}` 同一條（專案是總管的、或裡面有 AGM 的 bot），409 帶 `project_id`。
+  `bin/agm bot delete <id> --confirm-supervisor` 帶這個參數；網頁收到這個 409 會跳第二次確認框（寫名稱與 `role`），按確認才帶參數重送。
 - 呼叫端（method／path／對端位址／User-Agent／Origin／Referer／`X-AM-Caller`）記進 daemon.log 與 delete intent 的 `requested_by`；腳本可以自帶 `X-AM-Caller: <名字>` 讓紀錄一眼認得出是誰。
 - **子 agent 一起刪**：`managed_by = "child"` 且 `parent_bot_id` 指到它的（含孫代），最深的先。每顆各推 `bot_changed`。
 - 找不到 404。

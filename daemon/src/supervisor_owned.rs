@@ -14,23 +14,30 @@ use crate::db;
 use anyhow::Result;
 use serde_json::json;
 use sqlx::SqlitePool;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Default, Clone)]
 pub struct Owned {
     bot_ids: HashSet<String>,
     project_ids: HashSet<String>,
+    /// 總管／角色本身的 bot id → 給人看的角色名（網頁的二次確認框要寫「這顆是 AGM 的什麼」）。
+    roles: HashMap<String, &'static str>,
 }
 
 pub async fn load(pool: &SqlitePool) -> Result<Owned> {
     let mut o = Owned::default();
-    for table in ["supervisors", "supervisor_roles"] {
-        let rows: Vec<(Option<String>, Option<String>)> =
-            sqlx::query_as(&format!("SELECT bot_id, project_id FROM {table}")).fetch_all(pool).await?;
-        for (bot, project) in rows {
-            o.bot_ids.extend(bot.filter(|s| !s.is_empty()));
-            o.project_ids.extend(project.filter(|s| !s.is_empty()));
+    // `supervisors` 那一列就是巡檢本人；`supervisor_roles.role` 是 'patrol' | 'responder'。
+    let sup: Vec<(Option<String>, Option<String>)> = sqlx::query_as("SELECT bot_id, project_id FROM supervisors").fetch_all(pool).await?;
+    let roles: Vec<(Option<String>, Option<String>, String)> =
+        sqlx::query_as("SELECT bot_id, project_id, role FROM supervisor_roles").fetch_all(pool).await?;
+    let rows = sup.into_iter().map(|(b, p)| (b, p, "patrol".to_string())).chain(roles);
+    for (bot, project, role) in rows {
+        if let Some(bot) = bot.filter(|s| !s.is_empty()) {
+            let label = if role == "responder" { "AGM 協調者" } else { "AGM 總管（巡檢）" };
+            o.roles.entry(bot.clone()).or_insert(label);
+            o.bot_ids.insert(bot);
         }
+        o.project_ids.extend(project.filter(|s| !s.is_empty()));
     }
     Ok(o)
 }
@@ -40,6 +47,17 @@ impl Owned {
         self.bot_ids.contains(&b.id)
             || b.parent_bot_id.as_ref().is_some_and(|p| self.bot_ids.contains(p))
             || self.project_ids.contains(&b.project_id)
+    }
+
+    /// 這顆在 AGM 裡是什麼（只對 [`Self::owns`] 為真的 bot 有意義）。
+    pub fn role(&self, b: &db::Bot) -> &'static str {
+        if let Some(r) = self.roles.get(&b.id) {
+            r
+        } else if b.parent_bot_id.as_ref().is_some_and(|p| self.bot_ids.contains(p)) {
+            "AGM 開出去的子 agent"
+        } else {
+            "AGM 專案裡的常駐工人"
+        }
     }
 }
 
@@ -64,10 +82,13 @@ pub async fn alert(pool: &SqlitePool, reason: &str, detail: &str) {
 pub async fn guard_bot_delete(pool: &SqlitePool, bot_id: &str, confirm: Option<&str>) -> Result<(), crate::lifecycle::LcError> {
     let up = |e: anyhow::Error| crate::lifecycle::LcError::Upstream(format!("{e:#}"));
     let Some(bot) = db::bot(pool, bot_id).await.map_err(up)? else { return Ok(()) };
-    if bot.deleted_at.is_some() || !load(pool).await.map_err(up)?.owns(&bot) {
+    let owned = load(pool).await.map_err(up)?;
+    if bot.deleted_at.is_some() || !owned.owns(&bot) {
         return Ok(());
     }
-    refuse_unless_confirmed(pool, confirm, &format!("bot `{}`（{}）", bot.name, bot.id), json!({"bot_id": bot.id, "name": bot.name})).await
+    let role = owned.role(&bot);
+    refuse_unless_confirmed(pool, confirm, &format!("bot `{}`（{}，{role}）", bot.name, bot.id), json!({"bot_id": bot.id, "name": bot.name, "role": role}))
+        .await
 }
 
 /// 刪整個專案：專案本身是總管／角色的專案，或裡面有任何一顆 AGM 的 bot。
@@ -167,7 +188,10 @@ mod tests {
             .await
             .unwrap_err();
         match refused {
-            LcError::Conflict(body) => assert_eq!(body["reason"], "supervisor_owned", "{body}"),
+            LcError::Conflict(body) => {
+                assert_eq!(body["reason"], "supervisor_owned", "{body}");
+                assert_eq!(body["role"], "AGM 專案裡的常駐工人", "網頁的二次確認框要寫角色：{body}");
+            }
             other => panic!("{other:?}"),
         }
         assert!(db::bot(&app.db, &build).await.unwrap().unwrap().deleted_at.is_none(), "沒刪");

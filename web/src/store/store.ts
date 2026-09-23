@@ -76,6 +76,7 @@ import {
 import { fetchSupervisor } from '../api/supervisor'
 import { IN_MOBILE_PREVIEW, writeShared } from './mobilePreview'
 import { BOT_KINDS, LOCAL_HOST } from '../api/types'
+import { supervisorOwnedAsk, type AgmDeleteAsk } from '../lib/agmDelete'
 
 const sendMissionRequest = missionRequests(api.newClientRequestId)
 const missionLoads = new Map<string, () => Promise<void>>()
@@ -492,7 +493,10 @@ export interface StoreState {
   /** null = 沒有批次在跑，也沒有摘要要看。 */
   restartBatch: RestartBatch | null
   clearRestartBatch: () => void
-  removeBot: (botId: string) => Promise<void>
+  removeBot: (botId: string, opts?: { confirmSupervisor?: boolean }) => Promise<void>
+  /** 刪除被 daemon 以「這是 AGM 的 bot」擋下，等使用者第二次確認（issue #406）；null＝沒有在問。 */
+  agmDeleteAsk: AgmDeleteAsk | null
+  cancelAgmDelete: () => void
   removeProject: (projectId: string) => Promise<void>
   readTerminal: (botId: string, source: TerminalSource, lines: number) => ReturnType<typeof api.fetchTerminal>
 
@@ -825,6 +829,7 @@ export const useStore = create<StoreState>((set, get) => ({
   missionsCapped: {},
   shellView: initialShellView,
   supervisorProjectId: null,
+  agmDeleteAsk: null,
 
   selectedBotId: initialSelection.botId,
   rightTab: 'chat',
@@ -1792,7 +1797,11 @@ export const useStore = create<StoreState>((set, get) => ({
     })
   },
 
-  async removeBot(botId) {
+  cancelAgmDelete() {
+    set({ agmDeleteAsk: null })
+  },
+
+  async removeBot(botId, opts = {}) {
     // SPEC: selection moves to the next bot in the same project, else null.
     await guarded(set, get, `remove:${botId}`, async () => {
       const s0 = get()
@@ -1802,7 +1811,7 @@ export const useStore = create<StoreState>((set, get) => ({
       const next = (siblings[i + 1] ?? siblings[i - 1] ?? null)?.id ?? null
       const name = bot?.name ?? 'Bot'
       try {
-        await api.deleteBot(botId)
+        await api.deleteBot(botId, opts)
         // 軟刪除（只設 `deleted_at`），所以復原是真的復原。
         get().notify('info', `已刪除 ${name}`, {
           label: '復原',
@@ -1834,7 +1843,10 @@ export const useStore = create<StoreState>((set, get) => ({
           set({ selectedBotId: null })
         }
       } catch (e) {
-        get().notify('error', errText(e))
+        // AGM 的 bot：不是失敗，是要再問一次（`AgmDeleteConfirm`）。
+        const ask = opts.confirmSupervisor ? null : supervisorOwnedAsk(e, botId, name)
+        if (ask) set({ agmDeleteAsk: ask })
+        else get().notify('error', errText(e))
       }
     })
   },

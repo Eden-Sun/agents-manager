@@ -33,6 +33,7 @@ function seed() {
     missionsCapped: {},
     selectedBotId: null,
     selectedProjectId: null,
+    agmDeleteAsk: null,
   })
 }
 
@@ -580,6 +581,43 @@ test('刪 Bot 成功：只跳一張帶「復原」的通知，不重複跳第二
   assert.equal(notices.length, 1, `應該只有一張通知，實際：${JSON.stringify(notices.map((n) => n.text))}`)
   assert.match(notices[0].text, /已刪除/)
   assert.ok(notices[0].action, '這張通知要帶「復原」')
+})
+
+/** issue #406：刪 AGM 的 bot 被 daemon 409 `supervisor_owned` 擋下——不是錯誤通知，是第二次確認；取消什麼都不送。 */
+test('刪 AGM 的 Bot：409 supervisor_owned 改問第二次，取消就什麼都不做', async () => {
+  seed()
+  const agm = { error: 'conflict', reason: 'supervisor_owned', bot_id: 'b1', name: 'build', role: 'AGM 專案裡的常駐工人', message: '…' }
+  routeDaemon((r) => (r.method === 'DELETE' ? json(agm, 409) : json({}, 200)))
+  await useStore.getState().removeBot('b1')
+  assert.deepEqual(useStore.getState().agmDeleteAsk, { botId: 'b1', name: 'build', role: 'AGM 專案裡的常駐工人' })
+  assert.deepEqual(noticeTexts(), [], '不跳錯誤通知')
+  assert.deepEqual(requests.filter((r) => r.method === 'DELETE').map((r) => r.path), ['/api/bots/b1'], '第一次不帶 confirm')
+
+  useStore.getState().cancelAgmDelete()
+  assert.equal(useStore.getState().agmDeleteAsk, null)
+  assert.equal(requests.filter((r) => r.method === 'DELETE').length, 1, '取消不再送')
+})
+
+test('刪 AGM 的 Bot：第二次確認才帶 ?confirm=supervisor 重送，成功照常帶「復原」', async () => {
+  seed()
+  routeDaemon((r) =>
+    r.method === 'DELETE' && !r.path.includes('confirm=supervisor')
+      ? json({ error: 'conflict', reason: 'supervisor_owned', bot_id: 'b1', name: 'build', role: 'AGM 協調者' }, 409)
+      : json({}, 200),
+  )
+  await useStore.getState().removeBot('b1')
+  assert.ok(useStore.getState().agmDeleteAsk)
+  await useStore.getState().removeBot('b1', { confirmSupervisor: true })
+  assert.deepEqual(requests.filter((r) => r.method === 'DELETE').map((r) => r.path), ['/api/bots/b1', '/api/bots/b1?confirm=supervisor'])
+  assert.match(noticeTexts().join('\n'), /已刪除/)
+})
+
+test('刪 AGM 的 Bot：帶了 confirm 還被擋（不該發生）就報錯，不會再問一輪', async () => {
+  seed()
+  routeDaemon((r) => (r.method === 'DELETE' ? json({ error: 'conflict', reason: 'supervisor_owned', name: 'build' }, 409) : json({}, 200)))
+  await useStore.getState().removeBot('b1', { confirmSupervisor: true })
+  assert.equal(useStore.getState().agmDeleteAsk, null)
+  assert.match(noticeTexts().join('\n'), /supervisor_owned/)
 })
 
 /** 復原撞名 409：現況 `restoreBot` 吞掉錯誤，通知上按「復原」沒有任何回饋。 */
