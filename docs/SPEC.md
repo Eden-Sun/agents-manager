@@ -2060,12 +2060,16 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   1. **能指定就指定**：`allow_lan` 關著而且認得出框架時，`bun run dev` 後面接 `-- <旗標> 127.0.0.1`（vite 是 `--host`、
      next 是 `-H`）。旗標一個框架一個樣，**送錯會讓 dev server 以未知參數直接退出**，所以只列有把握的那兩個；
      其餘（與 `kind=unknown`）原樣送，交給第 2 道。
-  2. **一律驗**：轉成 `running` 的**那一拍**量一次這顆 pane 行程樹**實際 listen 的位址**（`lsof`，`*`＝全部介面）。
+  2. **一律驗，而且一直驗**：量的是這顆 pane 行程樹**實際 listen 的位址**（`lsof`，`*`＝全部介面）。
      `allow_lan` 關著卻有任何一個綁在 loopback 以外 → `failed`（error 寫出是哪個位址），而且**把 pane 關掉**——
      一般的 `failed` 把 pane 留著給人看錯誤（重試時才收），這一種不行，那顆 server 還活著、還在對外聽。
      關不掉也照樣記 `failed`（不能繼續說它 `running`），pane 留給重試收。
-     只在那一拍量，之後每一拍維持原本的便宜檢查（不為此一直跑 `lsof`）；量不到（`lsof` 讀不到）**不算違規**：
-     跟這個模組其他地方同一條原則，讀不到是「不知道」，不下結論。
+     **什麼時候量**（issue #452）：轉成 `running` 的那一拍一定量；之後 `running` 期間每 60 秒
+     （`preview_bind::RECHECK_EVERY_MS`）再量一次，其餘每一拍維持原本的便宜檢查（一次 TCP connect）。
+     只在轉進來那一拍量是不夠的——起來時綁 loopback、之後才改綁對外的 server（設定檔改了自己重啟、
+     dev script 內部重啟）從此不會再被看一眼，`allow_lan` 關著也一路顯示 `running`。
+     量位址要多跑一趟 `lsof`，所以是「每 60 秒」而不是「每一拍」。預覽離開 `running` 就忘掉這個節奏。
+     量不到（`lsof` 讀不到）**不算違規**：跟這個模組其他地方同一條原則，讀不到是「不知道」，不下結論。
      只管 `source=spawned` 的：`attached` 是使用者明確挑的別人的 server，綁哪裡不是我們的事，也不准去關它。
 - **狀態**（`bot_previews` 一顆 bot 一列，另有 `source`／`pid`／`command`／`kind`；沒有列＝`off`）：
 

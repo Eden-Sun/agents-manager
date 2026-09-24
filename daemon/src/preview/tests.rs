@@ -1289,6 +1289,61 @@ async fn a_dev_server_that_binds_a_public_address_fails_and_its_pane_is_closed()
     assert_eq!(seen["pane_id"], Value::Null);
 }
 
+/// issue #452：起來時綁 loopback、**之後**才改綁對外的 server（設定檔改了自己重啟、dev script 內部重啟），
+/// 原本永遠不會再被看一眼——bind 檢查只在 `starting → running` 那一拍跑。`running` 期間也要驗。
+#[tokio::test]
+async fn a_dev_server_that_rebinds_to_a_public_address_later_is_caught_too() {
+    let r = rig().await;
+    std::fs::remove_file(r.e.repo.join("web/vite.config.ts")).unwrap();
+    write_pkg(&r.e.repo, Some("vite"));
+    let bot = running_bot(&r, "alfa").await;
+    let pane = start(&r.e.app, &bot, StartReq::default()).await.unwrap()["pane_id"].as_str().unwrap().to_string();
+
+    // 第一拍乖乖綁 loopback：running，pane 留著。
+    r.fake.pane_listens_on(&pane, "127.0.0.1", 3200);
+    assert_eq!(status(&get(&r.e.app, &bot).await.unwrap()), "running");
+    assert!(r.fake.closed.lock().unwrap().is_empty());
+
+    // 之後才多綁一個對外位址（同一個 port）：下一次重驗就要抓到。
+    r.fake.pane_listens_on(&pane, "*", 3200);
+    let seen = get(&r.e.app, &bot).await.unwrap();
+
+    assert_eq!(status(&seen), "failed", "起來之後才改綁對外也要擋：{seen}");
+    assert!(seen["error"].as_str().unwrap_or_default().contains('*'), "{seen}");
+    assert_eq!(r.fake.closed.lock().unwrap().clone(), vec![pane], "那顆 server 正在對外聽，pane 要收掉");
+}
+
+/// `running` 期間一直綁 loopback 的，重驗幾次都不能被判失敗（這道檢查不能自己製造 flaky）。
+#[tokio::test]
+async fn repeated_rechecks_never_fail_a_loopback_preview() {
+    let r = rig().await;
+    std::fs::remove_file(r.e.repo.join("web/vite.config.ts")).unwrap();
+    write_pkg(&r.e.repo, Some("vite"));
+    let bot = running_bot(&r, "alfa").await;
+    let pane = start(&r.e.app, &bot, StartReq::default()).await.unwrap()["pane_id"].as_str().unwrap().to_string();
+    r.fake.pane_listens_on(&pane, "127.0.0.1", 3200);
+
+    for i in 0..5 {
+        assert_eq!(status(&get(&r.e.app, &bot).await.unwrap()), "running", "第 {i} 次重驗");
+    }
+    assert!(r.fake.closed.lock().unwrap().is_empty());
+}
+
+/// 接上別人的 server：`running` 期間也一樣不管它綁哪裡、更不准去關它（#434 的界線，重驗不能把它拉進來）。
+#[tokio::test]
+async fn rechecks_never_touch_an_attached_server() {
+    let r = rig().await;
+    let base = r.e.repo.to_string_lossy().into_owned();
+    r.fake.vite(44112, 3300, &base);
+    let bot = running_bot(&r, "alfa").await;
+    assert_eq!(start(&r.e.app, &bot, req("attach", Some(3300), None)).await.unwrap()["source"], "attached");
+
+    for _ in 0..3 {
+        assert_eq!(status(&get(&r.e.app, &bot).await.unwrap()), "running");
+    }
+    assert!(r.fake.closed.lock().unwrap().is_empty(), "別人的 server 一根毛都不能動");
+}
+
 /// 綁 loopback 的照常 running——這道檢查不能把正常的預覽擋掉。
 #[tokio::test]
 async fn a_loopback_dev_server_is_not_affected_by_the_bind_check() {
