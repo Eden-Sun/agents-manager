@@ -939,11 +939,34 @@ fn iso_in(secs: i64) -> String {
     crate::db::iso_in(secs)
 }
 
+/// 這筆申請的 `requester` 是不是真的是呼叫端本人（issue #436）。
+///
+/// **驗過就必須是自己**：帶著 `X-AM-Bot-Id`＋自己的 hook token 來申請，卻把 `requester` 填成別人，
+/// 一律 403——不是默默改寫成驗過的那顆。改寫看起來比較體貼，但 `requester` 之後要跟 `lease acquire`
+/// 的 `--owner` **逐字相等**（`maintenance.rs` 的 `approval_owner_mismatch`），而那串字只有呼叫端
+/// 自己知道會填什麼形式（bot id／bot 名／herdr agent 名三種都合法，`requester_bot_id` 三種都認）。
+/// 我們改寫＝讓它後面開不了窗口，還很難查。
+///
+/// 沒帶身分的照收（`daemon-update-kick.sh` 這類 launchd 腳本就是這樣申請的），只是記成沒驗過。
+async fn requester_claim(app: &Arc<App>, headers: &HeaderMap, requester: &str) -> Result<bool, LcError> {
+    let Some(caller) = super::bot_requests::verified_bot_id(app, headers).await? else { return Ok(true) };
+    if super::maintenance::requester_bot_id(app, requester).await.as_deref() == Some(caller.as_str()) {
+        return Ok(false);
+    }
+    Err(LcError::Forbidden(json!({
+        "error": "forbidden",
+        "reason": "requester_not_the_caller",
+        "message": "帶了 X-AM-Bot-Id 就只能用自己的名義申請：requester 要是你這顆 bot（id、bot 名或 agent 名都行）",
+        "requester": requester,
+    })))
+}
+
 /// Ask for a rebuild / restart window. Creates a `pending` record; AGM decides it.
-pub async fn post_approval(State(app): State<Arc<App>>, Json(b): Json<ApprovalIn>) -> Result<Json<Value>, LcError> {
+pub async fn post_approval(State(app): State<Arc<App>>, headers: HeaderMap, Json(b): Json<ApprovalIn>) -> Result<Json<Value>, LcError> {
     if !super::maintenance::RESOURCES.contains(&b.purpose.as_str()) {
         return Err(LcError::Bad(format!("purpose must be one of {:?}", super::maintenance::RESOURCES)));
     }
+    let unverified = requester_claim(&app, &headers, &b.requester).await?;
     let expires = b.expires_in_secs.map(iso_in);
     let out = store::create_approval_notifying(
         &app.db,
@@ -955,6 +978,7 @@ pub async fn post_approval(State(app): State<Arc<App>>, Json(b): Json<ApprovalIn
         b.request_id.as_deref(),
         b.supersedes.as_deref(),
         b.reason.as_deref(),
+        unverified,
     )
     .await
     .map_err(|e| match e.downcast::<store::ApprovalRequestMismatch>() {
@@ -1016,6 +1040,25 @@ pub async fn post_approval_decision(
         _ => return Err(LcError::Bad("decision must be approve | deny | revoke".into())),
     };
     let current = store::approval(&app.db, &id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("approval".into()))?;
+    // 自己核准自己不算核准（issue #436）。核准是換 binary／重啟窗口的授權來源，申請與裁示要是兩個人。
+    //
+    // 只擋 `approve`：把自己送出去的申請 `deny`／`revoke` 掉就是收回申請，本來就該讓他做。
+    // 只在申請人**驗過**時比對（`requester_unverified == 0`）——沒驗過的那串字是自稱的，拿它來擋
+    // 只會擋到名字剛好一樣的人，真正想繞的填別人的名字就繞過去了（界線見 #432 票尾：共用 UI token
+    // 的前提下，daemon 只能對驗得過的身分下判斷）。
+    if status == "approved" && current.requester_unverified == 0 {
+        if let Some(caller) = super::bot_requests::verified_bot_id(&app, &headers).await? {
+            if super::maintenance::requester_bot_id(&app, &current.requester).await.as_deref() == Some(caller.as_str()) {
+                return Err(LcError::Forbidden(json!({
+                    "error": "forbidden",
+                    "reason": "self_approval_forbidden",
+                    "message": "不能核准自己送出的申請：換 binary／重啟的窗口要由另一個人裁示（自己的申請可以 deny／revoke 收回）",
+                    "approval_id": current.id,
+                    "requester": current.requester,
+                })));
+            }
+        }
+    }
     // A decision that is already recorded is answered from the row: a retry is not a new
     // decision, and re-approving something that was revoked has to be explicit.
     if current.status == status {
@@ -1576,6 +1619,113 @@ mod approval_decision_tests {
         std::fs::remove_dir_all(&app.data_dir).unwrap();
     }
 
+    /// issue #436：`requester` 以前是 body 說了算（`post_approval` 連 headers 都不收）。#414 之後
+    /// 「誰裁示」已經只有驗過的角色寫得出 `AGM:<role>`，「誰申請」卻還是自由填——同一筆紀錄一半可信
+    /// 一半不可信，而 `decide` 想擋「自己核准自己」也沒有可信的申請人可比。
+    ///
+    /// 注意這裡**不改寫** `requester`：它之後要跟 `lease acquire --owner` 逐字相等
+    /// （`maintenance.rs` 的 `approval_owner_mismatch`），改寫等於讓申請人後面開不了窗口。
+    #[tokio::test]
+    async fn an_approval_records_whether_its_requester_was_proven() {
+        let app = app().await;
+        let ask = |app: &Arc<App>, h: HeaderMap, who: &str, rid: &str| {
+            let (app, who, rid) = (app.clone(), who.to_string(), rid.to_string());
+            async move {
+                let body: ApprovalIn =
+                    serde_json::from_value(json!({"requester": who, "purpose": "rebuild", "scope": "daemon", "request_id": rid})).unwrap();
+                post_approval(State(app), h, Json(body)).await
+            }
+        };
+        let row = |app: &Arc<App>, id: String| {
+            let app = app.clone();
+            async move { store::approval(&app.db, &id).await.unwrap().unwrap() }
+        };
+
+        // 1) 沒宣告身分：照收（`daemon-update-kick.sh` 這類 launchd 腳本就是這樣申請的），
+        //    `requester` 一個字都不動，但記成沒驗過。
+        let Json(a1) = ask(&app, HeaderMap::new(), "daemon-update-kick", "r-1").await.unwrap();
+        let a1 = row(&app, a1["id"].as_str().unwrap().to_string()).await;
+        assert_eq!(a1.requester, "daemon-update-kick", "自稱的名字要原樣留著，lease 的 --owner 靠它對");
+        assert_eq!(a1.requester_unverified, 1);
+        assert_eq!(a1.to_json()["requester_unverified"], json!(true), "API 要看得出來沒驗過");
+
+        // 2) 驗過、而且申請人就是自己（這裡用 bot 名；bot id 與 agent 名一樣認得）：記成驗過。
+        let h = agm_role_headers(&app).await;
+        let Json(a2) = ask(&app, h.clone(), "AGM", "r-2").await.unwrap();
+        let a2 = row(&app, a2["id"].as_str().unwrap().to_string()).await;
+        assert_eq!((a2.requester.as_str(), a2.requester_unverified), ("AGM", 0));
+
+        // 3) 驗過、卻用別人的名義申請：403，不是默默改寫成自己。
+        let err = ask(&app, h.clone(), "somebody-else", "r-3").await.unwrap_err();
+        let LcError::Forbidden(v) = &err else { panic!("expected 403, got {err:?}") };
+        assert_eq!(v["reason"], "requester_not_the_caller");
+        assert!(store::approval_by_request(&app.db, "r-3").await.unwrap().is_none(), "擋下來就不該留下半筆申請");
+
+        // 4) 宣告了身分卻證明不了：照 #415 是 403 `bot_proof_mismatch`，不是退回「使用者申請」。
+        let mut bad = HeaderMap::new();
+        bad.insert("X-AM-Bot-Id", h.get("X-AM-Bot-Id").unwrap().clone());
+        bad.insert("X-AM-Bot-Token", "nope".parse().unwrap());
+        let err = ask(&app, bad, "AGM", "r-4").await.unwrap_err();
+        assert!(matches!(&err, LcError::Forbidden(v) if v["reason"] == "bot_proof_mismatch"), "got {err:?}");
+        assert!(store::approval_by_request(&app.db, "r-4").await.unwrap().is_none());
+
+        app.db.close().await;
+        std::fs::remove_dir_all(&app.data_dir).unwrap();
+    }
+
+    /// issue #436：核准是換 binary／重啟窗口的授權來源，申請與裁示要是兩個人。
+    /// 只擋 `approve`——把自己送出去的申請 `deny` 掉是收回申請，本來就該讓他做。
+    #[tokio::test]
+    async fn nobody_approves_the_window_they_asked_for_themselves() {
+        let app = app().await;
+        let h = agm_role_headers(&app).await;
+        let ask = |app: &Arc<App>, h: HeaderMap, who: &str, rid: &str| {
+            let (app, who, rid) = (app.clone(), who.to_string(), rid.to_string());
+            async move {
+                let body: ApprovalIn =
+                    serde_json::from_value(json!({"requester": who, "purpose": "rebuild", "scope": "daemon", "request_id": rid})).unwrap();
+                let Json(a) = post_approval(State(app), h, Json(body)).await.unwrap();
+                a["id"].as_str().unwrap().to_string()
+            }
+        };
+        let decide_as = |app: &Arc<App>, id: String, h: HeaderMap, what: &str| {
+            let (app, what) = (app.clone(), what.to_string());
+            async move {
+                let body: DecisionIn = serde_json::from_value(json!({"decision": what})).unwrap();
+                post_approval_decision(State(app), Path(id), h, Json(body)).await
+            }
+        };
+        let status = |app: &Arc<App>, id: String| {
+            let app = app.clone();
+            async move { store::approval(&app.db, &id).await.unwrap().unwrap().status }
+        };
+
+        // 自己申請、自己核准：擋下來，而且那筆還是 pending。
+        let mine = ask(&app, h.clone(), "AGM", "s-1").await;
+        let err = decide_as(&app, mine.clone(), h.clone(), "approve").await.unwrap_err();
+        let LcError::Forbidden(v) = &err else { panic!("expected 403, got {err:?}") };
+        assert_eq!(v["reason"], "self_approval_forbidden");
+        assert_eq!(status(&app, mine.clone()).await, "pending", "擋下來就不該動到那筆");
+
+        // 同一個人把自己的申請收回（deny）照舊可以。
+        decide_as(&app, mine.clone(), h.clone(), "deny").await.unwrap();
+        assert_eq!(status(&app, mine).await, "denied");
+
+        // 別人送的申請照常裁示得了。
+        let theirs = ask(&app, HeaderMap::new(), "fixer", "s-2").await;
+        decide_as(&app, theirs.clone(), h.clone(), "approve").await.unwrap();
+        assert_eq!(status(&app, theirs).await, "approved");
+
+        // 沒驗過的申請即使名字剛好一樣也不擋：那串字是自稱的，拿它擋只會擋到無辜的人
+        // （真想繞的填別人的名字就繞過去了，界線見 #432）。
+        let lookalike = ask(&app, HeaderMap::new(), "AGM", "s-3").await;
+        decide_as(&app, lookalike.clone(), h, "approve").await.unwrap();
+        assert_eq!(status(&app, lookalike).await, "approved");
+
+        app.db.close().await;
+        std::fs::remove_dir_all(&app.data_dir).unwrap();
+    }
+
     pub(super) async fn agm_role_headers(app: &Arc<App>) -> HeaderMap {
         let id = crate::db::ulid();
         sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES ('p-agm','/tmp','AGM',?)")
@@ -1690,11 +1840,11 @@ mod approval_decision_tests {
             .execute(&app.db)
             .await
             .unwrap();
-        assert!(post_approval(State(app.clone()), Json(ask())).await.is_err(), "通知寫不進去：回錯讓申請者重送");
+        assert!(post_approval(State(app.clone()), HeaderMap::new(), Json(ask())).await.is_err(), "通知寫不進去：回錯讓申請者重送");
         assert!(store::approvals(&app.db, 10).await.unwrap().is_empty(), "沒有留下一筆沒人知道的 pending");
 
         sqlx::query("DROP TRIGGER no_approval_event").execute(&app.db).await.unwrap();
-        let Json(ok) = post_approval(State(app.clone()), Json(ask())).await.unwrap();
+        let Json(ok) = post_approval(State(app.clone()), HeaderMap::new(), Json(ask())).await.unwrap();
         assert_eq!(ok["created"], true);
         let events: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE kind='approval_requested'").fetch_one(&app.db).await.unwrap();
@@ -1714,9 +1864,9 @@ mod approval_decision_tests {
             request_id: rid.map(str::to_string),
             supersedes: None,
         };
-        let Json(first) = post_approval(State(app.clone()), Json(ask(Some("restart-ca7b22d"), "ca7b22d"))).await.unwrap();
+        let Json(first) = post_approval(State(app.clone()), HeaderMap::new(), Json(ask(Some("restart-ca7b22d"), "ca7b22d"))).await.unwrap();
         assert_eq!(first["created"], true);
-        let Json(again) = post_approval(State(app.clone()), Json(ask(Some("restart-ca7b22d"), "ca7b22d"))).await.unwrap();
+        let Json(again) = post_approval(State(app.clone()), HeaderMap::new(), Json(ask(Some("restart-ca7b22d"), "ca7b22d"))).await.unwrap();
         assert_eq!(again["created"], false);
         assert_eq!(again["id"], first["id"]);
         assert_eq!(store::approvals(&app.db, 10).await.unwrap().len(), 1);
@@ -1725,7 +1875,7 @@ mod approval_decision_tests {
         assert_eq!(events, 1, "重送不再叫醒 AGM 一次");
 
         // 同 id 換 commit：409，原本那筆不動。
-        let err = post_approval(State(app.clone()), Json(ask(Some("restart-ca7b22d"), "deadbee"))).await.unwrap_err();
+        let err = post_approval(State(app.clone()), HeaderMap::new(), Json(ask(Some("restart-ca7b22d"), "deadbee"))).await.unwrap_err();
         let LcError::Conflict(detail) = &err else { panic!("expected 409, got {err:?}") };
         assert_eq!(detail["reason"], "approval_request_mismatch");
         assert_eq!(detail["field"], "target_commit");
@@ -1735,14 +1885,14 @@ mod approval_decision_tests {
         // 另一顆 bot 撞上同一個自然 id：不能拿回別人的那一筆（review2 sup 沒把握 3）。
         let mut other = ask(Some("restart-ca7b22d"), "ca7b22d");
         other.requester = "someone-else".into();
-        let err = post_approval(State(app.clone()), Json(other)).await.unwrap_err();
+        let err = post_approval(State(app.clone()), HeaderMap::new(), Json(other)).await.unwrap_err();
         let LcError::Conflict(detail) = &err else { panic!("expected 409, got {err:?}") };
         assert_eq!((detail["reason"].as_str(), detail["field"].as_str()), (Some("approval_request_mismatch"), Some("requester")));
         assert_eq!(store::approvals(&app.db, 10).await.unwrap().len(), 1);
 
         // 不帶 id 照舊：每次都是新的一筆。
-        let Json(a) = post_approval(State(app.clone()), Json(ask(None, "ca7b22d"))).await.unwrap();
-        let Json(b) = post_approval(State(app.clone()), Json(ask(None, "ca7b22d"))).await.unwrap();
+        let Json(a) = post_approval(State(app.clone()), HeaderMap::new(), Json(ask(None, "ca7b22d"))).await.unwrap();
+        let Json(b) = post_approval(State(app.clone()), HeaderMap::new(), Json(ask(None, "ca7b22d"))).await.unwrap();
         assert_ne!(a["id"], b["id"]);
         assert_eq!(a["client_request_id"], serde_json::Value::Null);
         app.db.close().await;

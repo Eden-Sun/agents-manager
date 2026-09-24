@@ -177,6 +177,10 @@ CREATE TABLE IF NOT EXISTS supervisor_approvals (
   reason TEXT,
   -- 申請者寫的理由（`approval request --reason`）。
   request_reason TEXT,
+  -- `requester` 是呼叫端自稱的、還是驗過的（issue #436）。`1`＝沒帶 `X-AM-Bot-Id`／帶了但那顆
+  -- 不是自稱的那位，只是一段字串；`0`＝建立時附上了那顆 bot 自己的 hook token，確實是它本人。
+  -- 舊列一律 `1`（那時候整欄都是自稱的），所以預設是 1 而不是 0：沒驗過的不能事後被讀成驗過。
+  requester_unverified INTEGER NOT NULL DEFAULT 1,
   expires_at TEXT,
   -- 呼叫端自己給的穩定 id：同一個 supervisor 下重送同一個 id 回原本那一筆（冪等）。NULL＝沒帶。
   client_request_id TEXT,
@@ -257,6 +261,12 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
     // 申請理由（2026-09-19）：舊庫沒有這一欄。
     if !has_column(pool, "supervisor_approvals", "request_reason").await? {
         sqlx::query("ALTER TABLE supervisor_approvals ADD COLUMN request_reason TEXT").execute(pool).await?;
+    }
+    // issue #436：申請人是不是驗過的。既有的列都是自稱的年代寫的，所以補上去時一律 1。
+    if !has_column(pool, "supervisor_approvals", "requester_unverified").await? {
+        sqlx::query("ALTER TABLE supervisor_approvals ADD COLUMN requester_unverified INTEGER NOT NULL DEFAULT 1")
+            .execute(pool)
+            .await?;
     }
     // Additive columns for databases created before they existed (same pattern as `db::migrate`).
     for (col, ddl) in [
@@ -2320,6 +2330,10 @@ pub struct Approval {
     /// 呼叫端給的穩定 id（`--request-id`）。重送同一個回原本那一筆，不新增。
     #[sqlx(default)]
     pub client_request_id: Option<String>,
+    /// `requester` 沒驗過（issue #436）：建立時沒帶 `X-AM-Bot-Id`＋那顆自己的 hook token，
+    /// 所以那串字是自稱的。`1`＝自稱、`0`＝驗過本人。舊列（欄位加上去之前的）都是 `1`。
+    #[sqlx(default)]
+    pub requester_unverified: i64,
     pub created_at: String,
     pub updated_at: String,
     /// 同一個申請者換 commit 重新申請（`supersedes`）時接下來的等待起點：被取代那筆的 `wait_since`，
@@ -2344,6 +2358,7 @@ impl Approval {
             "request_reason": self.request_reason,
             "expires_at": self.expires_at,
             "client_request_id": self.client_request_id,
+            "requester_unverified": self.requester_unverified != 0,
             "wait_since": self.wait_since,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -2442,7 +2457,8 @@ pub async fn create_approval_superseding(
     supersedes: Option<&str>,
     request_reason: Option<&str>,
 ) -> Result<ApprovalOutcome> {
-    create_approval_inner(pool, requester, purpose, scope, target_commit, expires_at, request_id, supersedes, request_reason, false).await
+    // 沒有 HTTP 身分可驗（測試與舊呼叫端）：照 issue #436 的預設當成自稱。
+    create_approval_inner(pool, requester, purpose, scope, target_commit, expires_at, request_id, supersedes, request_reason, true, false).await
 }
 
 /// [`create_approval_superseding`]，新建時同一個交易推 `approval_requested` 叫醒 AGM（#320）：通知寫不進去整筆不成立，
@@ -2458,8 +2474,10 @@ pub async fn create_approval_notifying(
     request_id: Option<&str>,
     supersedes: Option<&str>,
     request_reason: Option<&str>,
+    // `requester` 驗過了沒（issue #436）：`true`＝只是自稱的。
+    requester_unverified: bool,
 ) -> Result<ApprovalOutcome> {
-    create_approval_inner(pool, requester, purpose, scope, target_commit, expires_at, request_id, supersedes, request_reason, true).await
+    create_approval_inner(pool, requester, purpose, scope, target_commit, expires_at, request_id, supersedes, request_reason, requester_unverified, true).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2474,6 +2492,8 @@ async fn create_approval_inner(
     supersedes: Option<&str>,
     // 申請者寫的理由（`approval request --reason`）。AGM 裁示時看的就是這段。
     request_reason: Option<&str>,
+    // `requester` 只是自稱的（issue #436）：建立時沒有驗過那顆 bot 的身分。
+    requester_unverified: bool,
     notify: bool,
 ) -> Result<ApprovalOutcome> {
     let request_id = request_id.map(str::trim).filter(|s| !s.is_empty());
@@ -2559,12 +2579,13 @@ async fn create_approval_inner(
     }
     let insert = sqlx::query(
         "INSERT INTO supervisor_approvals
-           (id, supervisor_id, requester, purpose, scope, target_commit, status, expires_at, client_request_id, request_reason, wait_since, created_at, updated_at)
-         VALUES (?,?,?,?,?,?, 'pending', ?, ?, ?, ?, ?, ?)",
+           (id, supervisor_id, requester, requester_unverified, purpose, scope, target_commit, status, expires_at, client_request_id, request_reason, wait_since, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?, 'pending', ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(SUPERVISOR_ID)
     .bind(requester)
+    .bind(i64::from(requester_unverified))
     .bind(purpose)
     .bind(scope)
     .bind(target_commit)
@@ -3266,7 +3287,7 @@ mod tests {
     // ------------------------------------------------ issue #421：重申請不再累積 pending
 
     async fn request(p: &SqlitePool, commit: &str) -> ApprovalOutcome {
-        create_approval_notifying(p, "agm-kick", "rebuild", "release rebuild", Some(commit), None, None, None, None).await.unwrap()
+        create_approval_notifying(p, "agm-kick", "rebuild", "release rebuild", Some(commit), None, None, None, None, true).await.unwrap()
     }
 
     async fn statuses(p: &SqlitePool) -> Vec<(String, String)> {
@@ -3329,8 +3350,8 @@ mod tests {
     #[tokio::test]
     async fn the_automatic_supersede_only_touches_my_own_requests() {
         let p = pool().await;
-        let other = create_approval_notifying(&p, "someone-else", "rebuild", "s", Some("c1"), None, None, None, None).await.unwrap();
-        let other_purpose = create_approval_notifying(&p, "agm-kick", "restart", "s", Some("c1"), None, None, None, None).await.unwrap();
+        let other = create_approval_notifying(&p, "someone-else", "rebuild", "s", Some("c1"), None, None, None, None, true).await.unwrap();
+        let other_purpose = create_approval_notifying(&p, "agm-kick", "restart", "s", Some("c1"), None, None, None, None, true).await.unwrap();
         let mine = request(&p, "c1").await;
         assert_eq!(mine.superseded, None, "沒有自己的 pending 可取代");
         for a in [&other, &other_purpose] {

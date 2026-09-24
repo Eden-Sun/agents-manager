@@ -211,6 +211,8 @@ const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (16, "cd536b2d4cda75e5"),
     // issue #339：`messages.relay_unverified`（沒帶 bot token 自稱的 relay_from）。
     (17, "b9b1eb7d09e3cb5b"),
+    // issue #436：`supervisor_approvals.requester_unverified`（申請人是自稱的還是驗過的）。
+    (18, "5df2ad9350704345"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
