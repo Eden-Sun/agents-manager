@@ -154,17 +154,6 @@ export function pruneMarks(marks: Record<string, ReadMark>, liveBot: (id: string
 }
 
 /**
- * 分頁標題 `(N)` 只加 bot：群組未讀是同一批回覆，相加會一則算兩次。
- * 側欄收起來的那些不算：使用者看到 `(7)` 卻在側欄數不出七個未讀，只會以為數字壞了。
- */
-export function totalUnread(bots: Record<string, number>, hidden: readonly string[] = []): number {
-  const skip = new Set(hidden)
-  let n = 0
-  for (const [id, v] of Object.entries(bots)) if (!skip.has(id)) n += v
-  return n
-}
-
-/**
  * 側欄顯不顯示這顆 bot 的未讀：總管專案裡的往來是 AGM 的內部事務，不顯示（2026-09-16 使用者）。
  * 側欄與分頁標題共用這一條——標題照算的話，AGM 例行回合讓 `(N)` 長期掛著，側欄卻找不到一筆點得掉（review3 c5 L2）。
  */
@@ -192,24 +181,34 @@ export interface UnreadBook {
   supervisorProjectId: string | null
 }
 
-/** 分頁標題的 `(N)`：側欄收起來的與總管專案的都不算。 */
-export function titleUnread(s: UnreadBook): number {
-  const hidden = new Set(s.hiddenBotIds)
-  const skip = s.bots.filter((b) => !unreadCounted(b, s.supervisorProjectId, hidden)).map((b) => b.id)
-  // `hiddenBotIds` 也照原樣帶上：`bots` 裡沒有的（剛刪掉、還沒 prune）也要排除。
-  return totalUnread(s.botUnread, skip.length === 0 ? s.hiddenBotIds : [...s.hiddenBotIds, ...skip])
-}
-
-/** 專案收合時掛在標題上的 `!N`：跟 `titleUnread` 同一份排除，否則收合的專案掛著一個展開也點不到的數字。 */
-export function projectUnread(s: UnreadBook, projectId: string): number {
+/**
+ * 所有加總的唯一入口：**掃 `bots`，不掃 `botUnread` 的 key**。
+ *
+ * 兩者不一樣的那一批是「帳還在、bot 已經不在」的殘帳（剛刪掉、還沒輪到 `pruneUnread`，或 daemon
+ * 換了一批 bot）。掃 key 的話那些數字只會出現在分頁標題、側欄一列都生不出來，就是 #510 那個點不掉
+ * 的數字換個地方長（i92b 的複看）。代價是開機那一瞬間 `bots` 還沒回來，標題先不顯示 `(N)`——
+ * 反正 `pruneUnread` 本來就把「不在 `bots` 裡」當成死帳清掉，早一點晚一點而已。
+ *
+ * 只加 bot 的份：群組未讀是同一批回覆的第二份帳，相加會一則算兩次。
+ */
+function sumUnread(s: UnreadBook, keep: (bot: { id: string; project_id: string }) => boolean): number {
   const hidden = new Set(s.hiddenBotIds)
   let n = 0
   for (const b of s.bots) {
-    if (b.project_id !== projectId) continue
-    if (!unreadCounted(b, s.supervisorProjectId, hidden)) continue
+    if (!unreadCounted(b, s.supervisorProjectId, hidden) || !keep(b)) continue
     n += s.botUnread[b.id] ?? 0
   }
   return n
+}
+
+/** 分頁標題的 `(N)`：側欄收起來的與總管專案的都不算。 */
+export function titleUnread(s: UnreadBook): number {
+  return sumUnread(s, () => true)
+}
+
+/** 專案收合時掛在標題上的 `!N`：跟 `titleUnread` 同一份排除、同一個定義域，兩邊的數字才對得起來。 */
+export function projectUnread(s: UnreadBook, projectId: string): number {
+  return sumUnread(s, (b) => b.project_id === projectId)
 }
 
 /** `message_added` 與 `turn_updated` 都代表完成，去重避免一回合跳兩下；只留最近 500 筆。 */

@@ -14,6 +14,10 @@ interface Scenario {
   state: unknown
   frames: unknown[]
   messages?: Record<string, unknown>
+  /** 分頁在前景（預設背景）：要測「畫面上看不到」時，不能讓 focus 先把結論搶走。 */
+  focus?: boolean
+  /** `GET /api/hosts/:host/shells`：重整回來的 shell 面板要驗得過（`restoreShellView`）。 */
+  shells?: { pane_id: string }[]
 }
 
 const storagePath = process.env.AM_HARNESS_STORAGE ?? ''
@@ -37,8 +41,14 @@ g.localStorage = {
   },
 }
 const noop = () => {}
-// 背景分頁：沒在看，完成的回合要記未讀。
-g.document = { visibilityState: 'hidden', hasFocus: () => false, addEventListener: noop, removeEventListener: noop }
+// 預設背景分頁：沒在看，完成的回合要記未讀。`focus` 打開就是人真的盯著這個分頁。
+const seen = scenario.focus === true
+g.document = {
+  visibilityState: seen ? 'visible' : 'hidden',
+  hasFocus: () => seen,
+  addEventListener: noop,
+  removeEventListener: noop,
+}
 g.window = { addEventListener: noop, removeEventListener: noop }
 g.location = { protocol: 'http:', host: '127.0.0.1:7788' }
 
@@ -52,6 +62,7 @@ g.fetch = async (input: string) => {
   const [path, query] = String(input).split('?')
   if (path === '/api/session') return json({ token: 't' })
   if (path === '/api/state') return json(scenario.state)
+  if (/^\/api\/hosts\/[^/]+\/shells$/.test(path)) return json({ shells: scenario.shells ?? [] })
   const m = /^\/api\/bots\/([^/]+)\/messages$/.exec(path)
   if (m) {
     const botId = decodeURIComponent(m[1])

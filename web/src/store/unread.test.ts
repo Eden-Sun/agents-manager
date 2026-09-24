@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import type { Message } from '../api/types.ts'
-import { clearHookCompletion, completionKey, countUnreadTurns, idleEdgeCompletionKey, isUnread, loadCounts, loadMarks, markHookCompletion, markOfMessages, projectUnread, resetIdleEdges, resetTurnCompletions, saveCounts, saveMarks, takeTurnCompletion, titleUnread, totalUnread, unreadShown } from './unread.ts'
+import { clearHookCompletion, completionKey, countUnreadTurns, idleEdgeCompletionKey, isUnread, loadCounts, loadMarks, markHookCompletion, markOfMessages, projectUnread, resetIdleEdges, resetTurnCompletions, saveCounts, saveMarks, takeTurnCompletion, titleUnread, unreadShown } from './unread.ts'
 
 /** node 沒有 localStorage；這裡只要 get/set 兩支。 */
 function stubStorage() {
@@ -78,8 +78,9 @@ test('同一個回合的 message_added 與 turn_updated 只跳一次', () => {
   assert.equal(takeTurnCompletion('b2', 't1'), true)
 })
 
-test('totalUnread 只加 bot——群組未讀是同一批回覆的第二份帳', () => {
-  assert.equal(totalUnread({ a: 2, b: 1 }), 3)
+test('標題只加 bot 的份——群組未讀是同一批回覆的第二份帳', () => {
+  const bots = [{ id: 'a', project_id: 'p1' }, { id: 'b', project_id: 'p1' }]
+  assert.equal(titleUnread({ bots, botUnread: { a: 2, b: 1 }, hiddenBotIds: [], supervisorProjectId: null }), 3)
 })
 
 test('未讀數與已讀標記存得回來（跨重整的那一段）', () => {
@@ -212,6 +213,9 @@ test('專案收合的 !N 與分頁標題同一份排除：額度隱藏與總管�
   assert.equal(titleUnread(s), projectUnread(s, 'p1') + projectUnread(s, 'p2'))
   // 額度停用解除後那三筆就回來了。
   assert.equal(projectUnread({ ...s, hiddenBotIds: [] }, 'p1'), 5)
-  // 剛刪掉、`bots` 裡已經沒有但帳還沒 prune 的：`hiddenBotIds` 照原樣帶進排除名單才擋得掉。
-  assert.equal(titleUnread({ ...s, botUnread: { ...s.botUnread, gone: 7 }, hiddenBotIds: ['quota-hidden', 'gone'] }), 2 + 5)
+  // 剛刪掉、`bots` 裡已經沒有但帳還沒 prune 的：兩邊掃的都是 `bots`，所以標題也不算——
+  // 不然同一個點不掉的數字只是從側欄換到標題上（i92b 的複看）。
+  const stale = { ...s, botUnread: { ...s.botUnread, gone: 7 } }
+  assert.equal(titleUnread(stale), 2 + 5)
+  assert.equal(projectUnread(stale, 'p1'), 2)
 })
