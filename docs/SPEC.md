@@ -1219,6 +1219,13 @@ herdr server 重啟會讓**所有** pane 同時消失。照 §6.5 的規則，�
    `rearm_queue_retries` 本來就把每一筆 queued 叫醒一次，flush 走到閘門照原本的到期時間重掛 timer。
    只有 claude＋`inject_hooks` 的 run 等：codex／grok 要等第一個回合結束才回報 session（`hookrecv`），在這裡等只會死結；
    沒有 hook 的 bot 沒有驗證來源。遲到的舊行程 hook 不會拿同一個 session 冒充新行程：見 §4.1 世代圍籬的 `run_id`。
+   **忙到一半被重啟的 claude 補一句續行提示**（claude 2.1.281 起手動 `--resume` 不再補隱藏的「Continue」，停在工具中間的對話接回來
+   只會停在輸入框；`lifecycle::resume_nudge`）：`resume_native` 起的 claude，重啟前在忙——`restart_bot_with` 停之前在鎖裡讀到
+   `working`／`blocked`／還有一回合沒收；或 `start` 時上一個 run 是被外力收掉的（`exited`，herdr 整個重啟）且最後記著 `working`／`blocked`——
+   而且這次真的帶了 `--resume`，就排一則 `relay_from=daemon` 的續行提示進佇列（「重啟前的工作被中斷了……先確認上一個工具的實際結果，
+   再接著做完」），跟排隊的派工同一條送達路（上面的閘門、畫面閒置才送）。使用者自己停的（`stopped`）、閒著重啟的、接不回退回開新對話的、
+   codex／grok 都不補；佇列已經有一則（每個對話最多一筆 queued）就不補，那一則送進去 bot 自然會動。同一個 run 只補一次
+   （`client_request_id = resume-nudge:<run_id>`）。一鍵重啟（§6.9）要求閒置（`require_idle`，鎖內再判一次、停機那一步也要還閒著），不會遇到；實際會碰到的是 `restart?resume=native` 與 herdr 整個重啟後的 `start?resume=native`。
 5. herdr 自己的 `[session] resume_agents_on_restore` 要關掉：它會在 pane 裡打不帶 daemon 參數（`--settings`、權限旗標、帳號環境）的 `claude --resume`，
    跟 daemon 的接回撞成兩份。子 agent 仍由父 agent 重開（`start` 對子 agent 一律拒絕，§6.5a）。
 

@@ -34,6 +34,8 @@ pub(crate) mod fence;
 pub(crate) mod turn_controller;
 mod interrupt_grace;
 pub(crate) mod resume_gate;
+/// 忙到一半被重啟的 claude 接回後補一句續行提示（claude 2.1.281 不再補隱藏的 Continue）。
+mod resume_nudge;
 pub(crate) mod restart_hold;
 /// `runs.state` 轉移的唯一寫法，與寫不進去之後的重試（#135／#145／#146）。
 mod run_state;

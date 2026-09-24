@@ -296,7 +296,7 @@ pub(crate) fn queue_insert_error(bot_id: &str, conv: &str, e: sqlx::Error) -> Lc
     }
 }
 
-async fn queue_for_next_turn(
+pub(super) async fn queue_for_next_turn(
     app: &Arc<App>,
     conv: &str,
     bot_id: &str,
