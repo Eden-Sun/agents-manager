@@ -1760,7 +1760,14 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 ### `bin/agm`
 `scripts/agm.py` 由 `include_str!` 編進 daemon，`setup` 時寫成 `<cwd>/bin/agm`。子命令：`state`、`supervisor`、`search`、`messages`、`bot`（`start`／`stop`／`restart`／`create`／`delete`／`restore`；`start`／`restart` 收 `--resume native` → `?resume=native`，回應原樣印出）、
 `assign`（含 `--notice`、`--mission`／`--role`、`--review-by patrol|responder`、交接用的 `--ack`／`--reply-to <event_id>`）、`assignments`、`inbox`（`--all`、`--limit`、`--role patrol|responder|mine`）、`ack`、`handoff`、`quota`（`--probe [--account ccN] [--host h]` → `POST /api/quota/probe`）、`health`、`lease`、`mission`、
-`whoami`、`responder`（`show`／`setup`／`start`／`stop`）、`persona --role responder`；輸出一律 JSON。
+`whoami`、`responder`（`show`／`setup`／`start`／`stop`）、`persona --role responder`、
+`issue`（`claim`／`release <n>`，見下）；輸出一律 JSON。
+
+`agm issue claim <n> [--repo owner/name] [--bot 名] [--child 名] [--worktree p] [--branch b]`（issue #425）**不經 daemon、不讀 `runtime.json`**，只呼叫 `gh`：
+在票上留一則「派給 …」並加 label `wip`，留言尾端帶機器讀的標記 `<!-- agm:issue-claim {"bot","child","worktree","branch","at"} -->`。
+認領人省略時取 `AM_AGENT_NAME`，再退 `AM_BOT_ID`，都沒有就 `no_identity`／exit 2。票已被**別的** bot 認領且最後動靜在 24 小時內 → `issue_claimed`／**exit 3**，
+輸出 `claimed_by` 與那筆認領，且不寫任何東西；超過 24 小時沒動靜就接手並在留言裡寫明。自己重跑是 no-op（`already:true`，不留第二則，label 掉了會補回去）。
+`agm issue release <n>` 拿掉 label 並留 `<!-- agm:issue-release … -->`；別人還按著的票同樣 exit 3。目前的持有者由**最新**一個標記決定，交回的標記＝沒人認領。
 執行期設定讀 `<cwd>/runtime.json`：`{daemon_url, manager_bot_id, responder_bot_id, bot_id, role, self_bot_id, data_dir, supervisor_id, remote_name}`（巡檢目錄的 `responder_bot_id` 在沒有協調者時是 `null`）；**沒有 token**，CLI 執行期 `GET /api/session` 取；`daemon_url` 只接受 loopback。
 `role` 缺省＝`patrol`。環境 `AM_BOT_ID` 等於 `self_bot_id` 時，API 請求另帶 `X-AM-Bot-Id`／`X-AM-Bot-Token`（`AM_HOOK_TOKEN`）證明角色；mission 回報的 `relay_from` 用 `self_bot_id`。
 設定目錄可用 `AGM_RUNTIME_DIR` 或 `--runtime-dir` 覆寫。

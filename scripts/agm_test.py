@@ -1202,7 +1202,6 @@ class QuotaCommandTest(CliCase):
         self.assertFalse([r for r in FakeDaemon.seen if r["path"] != "/api/session"], "用法錯誤不該打任何 API")
 
 
-
 class OpsSyncTest(CliCase):
     """issue #418：已安裝的 ops 腳本跟 repo 比對。真的 git repo，安裝目錄就是 AGM_RUNTIME_DIR。"""
 
@@ -1285,6 +1284,242 @@ class OpsSyncTest(CliCase):
             if line.strip() and not line.startswith("#"):
                 source, _target = line.split()
                 self.assertTrue((repo / source).is_file(), f"對照表指到不存在的來源：{source}")
+
+
+# ------------------------------------------------------------- issue 認領（#425）
+
+# 假 gh：`issue view` 吐 $GH_STATE/issue-<n>.json，其餘子命令只記進 $GH_STATE/calls.log。
+# GH_FAIL=<子命令> 讓那一個子命令失敗；GH_NO_LABEL=1 模擬 label 還不存在（`issue edit --add-label` 先失敗）。
+# 真的 gh 不可達：PATH 只留這個目錄與 /usr/bin:/bin，而且這支 stub 不認得的子命令一律 exit 2。
+FAKE_GH = r"""#!/usr/bin/env python3
+import json, os, sys
+state = os.environ["GH_STATE"]
+argv = sys.argv[1:]
+with open(os.path.join(state, "calls.log"), "a") as f:
+    f.write(json.dumps(argv) + "\n")   # 一行一筆 JSON：--body 裡有換行也不會把記錄切斷
+sub = " ".join(argv[:2])
+if os.environ.get("GH_FAIL") == sub:
+    sys.stderr.write("gh: boom\n")
+    sys.exit(1)
+if sub == "issue view":
+    n = argv[2]
+    try:
+        sys.stdout.write(open(os.path.join(state, "issue-%s.json" % n)).read())
+    except FileNotFoundError:
+        sys.stderr.write("gh: no issue %s\n" % n)
+        sys.exit(1)
+elif sub in ("issue comment", "issue edit", "label create"):
+    if sub == "label create" and os.environ.get("GH_NO_LABEL"):
+        sys.stderr.write("gh: label already exists\n")
+        sys.exit(1)
+    sys.stdout.write("ok\n")
+else:
+    sys.stderr.write("gh: unknown %s\n" % sub)
+    sys.exit(2)
+"""
+
+
+def _iso(delta_secs: float) -> str:
+    import datetime
+    t = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=delta_secs)
+    return t.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+class IssueClaimTest(unittest.TestCase):
+    """`agm issue claim/release` 不連 daemon，只跟 gh 說話。"""
+
+    ENV_KEYS = ("PATH", "GH_STATE", "GH_FAIL", "GH_NO_LABEL", "AM_AGENT_NAME", "AM_BOT_ID", "AGM_RUNTIME_DIR")
+
+    def setUp(self):
+        # 先存原值再改：PATH 指向的是等一下會被刪掉的暫存目錄，收尾一定要還原。
+        saved = {k: os.environ.get(k) for k in self.ENV_KEYS}
+        self.addCleanup(lambda: [os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v) for k, v in saved.items()])
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        bindir = Path(self.dir.name) / "bin"
+        bindir.mkdir()
+        (bindir / "gh").write_text(FAKE_GH, encoding="utf-8")
+        (bindir / "gh").chmod(0o755)
+        self.state = Path(self.dir.name) / "state"
+        self.state.mkdir()
+        # 真的 gh 不可達：PATH 只有假的那一個目錄加上系統工具。
+        os.environ["PATH"] = f"{bindir}:/usr/bin:/bin"
+        os.environ["GH_STATE"] = str(self.state)
+        os.environ["AM_AGENT_NAME"] = "vvyyg1"
+        for k in ("GH_FAIL", "GH_NO_LABEL", "AM_BOT_ID"):
+            os.environ.pop(k, None)
+        # runtime.json 故意不存在：issue 這條路不該去讀它。
+        os.environ["AGM_RUNTIME_DIR"] = str(Path(self.dir.name) / "no-such-runtime")
+
+    # --- 造題 ---
+
+    def issue(self, number: int, *, labels=(), comments=(), updated: str | None = None, title="某張票"):
+        body = {
+            "number": number, "title": title, "state": "OPEN", "url": f"https://x/{number}",
+            "labels": [{"name": n} for n in labels],
+            "updatedAt": updated or _iso(-60),
+            "comments": list(comments),
+        }
+        (self.state / f"issue-{number}.json").write_text(json.dumps(body), encoding="utf-8")
+
+    def claim_comment(self, bot: str, *, age_secs: float, child=None, worktree=None, branch=None):
+        payload = {"bot": bot, "at": _iso(-age_secs)}
+        for k, v in (("child", child), ("worktree", worktree), ("branch", branch)):
+            if v:
+                payload[k] = v
+        return {"createdAt": _iso(-age_secs),
+                "body": f"派給 {bot}。\n\n<!-- agm:issue-claim {json.dumps(payload, ensure_ascii=False, sort_keys=True)} -->"}
+
+    def release_comment(self, bot: str, *, age_secs: float):
+        return {"createdAt": _iso(-age_secs),
+                "body": f"{bot} 交回。\n\n<!-- agm:issue-release {json.dumps({'bot': bot, 'at': _iso(-age_secs)})} -->"}
+
+    def calls(self):
+        try:
+            return [json.loads(l) for l in (self.state / "calls.log").read_text().splitlines()]
+        except FileNotFoundError:
+            return []
+
+    def run_cli(self, *argv: str):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                code = agm.main(list(argv))
+            except SystemExit as e:
+                code = e.code if isinstance(e.code, int) else 2
+        return code, out.getvalue(), err.getvalue()
+
+    # --- 測試 ---
+
+    def test_claim_labels_and_comments_with_worktree_and_branch(self):
+        self.issue(425)
+        code, out, err = self.run_cli("issue", "claim", "425", "--child", "i425",
+                                      "--worktree", "/w/i425", "--branch", "feat/i425", "--repo", "o/r")
+        self.assertEqual(code, 0, err)
+        got = json.loads(out)
+        self.assertEqual((got["claimed"], got["already"], got["bot"]), (True, False, "vvyyg1"))
+        self.assertEqual(got["label"], "wip")
+        comment = [c for c in self.calls() if c[:2] == ["issue", "comment"]]
+        self.assertEqual(len(comment), 1, self.calls())
+        body = comment[0][comment[0].index("--body") + 1]
+        self.assertIn("派給 vvyyg1", body)
+        self.assertIn("child i425", body)
+        self.assertIn("/w/i425", body)
+        self.assertIn("feat/i425", body)
+        self.assertIn("agm:issue-claim", body)
+        edit = [c for c in self.calls() if c[:2] == ["issue", "edit"]]
+        self.assertEqual(edit[0][-2:], ["--add-label", "wip"], edit)
+        for call in self.calls():
+            self.assertEqual(call[call.index("-R") + 1], "o/r", f"--repo 要傳給每一次 gh：{call}")
+
+    def test_claim_taken_by_another_bot_exits_3_and_names_it(self):
+        self.issue(413, labels=["wip"], comments=[self.claim_comment("kd61te", age_secs=600, child="life")])
+        code, out, err = self.run_cli("issue", "claim", "413")
+        self.assertEqual(code, 3, out)
+        e = json.loads(err)
+        self.assertEqual(e["error"], "issue_claimed")
+        self.assertEqual(e["claimed_by"], "kd61te")
+        self.assertIn("kd61te", e["message"])
+        self.assertIn("life", e["message"])
+        self.assertFalse([c for c in self.calls() if c[:2] in (["issue", "comment"], ["issue", "edit"])],
+                         "被別人認領時什麼都不能寫")
+
+    def test_a_claim_with_no_activity_for_over_24h_can_be_taken_over(self):
+        old = _iso(-30 * 3600)
+        self.issue(413, labels=["wip"], comments=[self.claim_comment("kd61te", age_secs=30 * 3600)], updated=old)
+        code, out, err = self.run_cli("issue", "claim", "413", "--child", "i413")
+        self.assertEqual(code, 0, err)
+        got = json.loads(out)
+        self.assertEqual(got["took_over_stale_claim_from"], "kd61te")
+        body = [c for c in self.calls() if c[:2] == ["issue", "comment"]][0][-1]
+        self.assertIn("超過 24 小時沒動靜", body)
+
+    def test_a_stale_claim_with_recent_activity_is_still_held(self):
+        # 認領留言是三天前，但這張票一小時前還被動過：那顆 bot 還在做。
+        self.issue(413, labels=["wip"], comments=[self.claim_comment("kd61te", age_secs=72 * 3600)], updated=_iso(-3600))
+        code, _out, err = self.run_cli("issue", "claim", "413")
+        self.assertEqual(code, 3, err)
+        self.assertEqual(json.loads(err)["claimed_by"], "kd61te")
+
+    def test_reclaiming_my_own_issue_does_not_comment_twice(self):
+        self.issue(425, labels=["wip"], comments=[self.claim_comment("vvyyg1", age_secs=300)])
+        got = json.loads(self.run_cli("issue", "claim", "425")[1])
+        self.assertTrue(got["already"])
+        self.assertFalse([c for c in self.calls() if c[:2] == ["issue", "comment"]], "重跑不洗版")
+
+    def test_reclaiming_my_own_issue_puts_a_missing_label_back(self):
+        self.issue(425, comments=[self.claim_comment("vvyyg1", age_secs=300)])
+        self.assertTrue(json.loads(self.run_cli("issue", "claim", "425")[1])["already"])
+        self.assertEqual([c[-2:] for c in self.calls() if c[:2] == ["issue", "edit"]], [["--add-label", "wip"]])
+
+    def test_a_released_issue_is_free_again(self):
+        self.issue(425, comments=[self.claim_comment("kd61te", age_secs=7200),
+                                  self.release_comment("kd61te", age_secs=3600)])
+        code, out, err = self.run_cli("issue", "claim", "425")
+        self.assertEqual(code, 0, err)
+        self.assertFalse(json.loads(out)["already"])
+
+    def test_release_removes_the_label_and_leaves_a_marker(self):
+        self.issue(425, labels=["wip"], comments=[self.claim_comment("vvyyg1", age_secs=300)])
+        code, out, err = self.run_cli("issue", "release", "425")
+        self.assertEqual(code, 0, err)
+        self.assertTrue(json.loads(out)["released"])
+        body = [c for c in self.calls() if c[:2] == ["issue", "comment"]][0][-1]
+        self.assertIn("agm:issue-release", body)
+        self.assertEqual([c[-2:] for c in self.calls() if c[:2] == ["issue", "edit"]], [["--remove-label", "wip"]])
+
+    def test_release_does_not_take_someone_elses_issue_off(self):
+        self.issue(413, labels=["wip"], comments=[self.claim_comment("kd61te", age_secs=600)])
+        code, _out, err = self.run_cli("issue", "release", "413")
+        self.assertEqual(code, 3)
+        self.assertEqual(json.loads(err)["claimed_by"], "kd61te")
+        self.assertFalse([c for c in self.calls() if c[:2] == ["issue", "edit"]], "別人的票不准把 label 拿掉")
+
+    def test_release_on_an_unclaimed_issue_is_a_no_op(self):
+        self.issue(425)
+        got = json.loads(self.run_cli("issue", "release", "425")[1])
+        self.assertTrue(got["already"])
+        self.assertFalse([c for c in self.calls() if c[:2] in (["issue", "comment"], ["issue", "edit"])])
+
+    def test_a_label_that_already_exists_does_not_fail_the_claim(self):
+        os.environ["GH_NO_LABEL"] = "1"
+        self.issue(425)
+        code, _out, err = self.run_cli("issue", "claim", "425")
+        self.assertEqual(code, 0, err)
+
+    def test_a_broken_claim_marker_is_ignored_rather_than_trusted(self):
+        self.issue(425, labels=["wip"], comments=[{"createdAt": _iso(-600), "body": "派給 x\n<!-- agm:issue-claim {oops -->"}])
+        code, out, err = self.run_cli("issue", "claim", "425")
+        self.assertEqual(code, 0, err)
+        self.assertFalse(json.loads(out)["already"])
+
+    def test_gh_failure_is_reported_and_nothing_is_written(self):
+        os.environ["GH_FAIL"] = "issue view"
+        self.issue(425)
+        code, _out, err = self.run_cli("issue", "claim", "425")
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(err)["error"], "gh_failed")
+        self.assertFalse([c for c in self.calls() if c[:2] == ["issue", "comment"]])
+
+    def test_without_a_bot_identity_it_refuses_before_talking_to_gh(self):
+        os.environ.pop("AM_AGENT_NAME", None)
+        os.environ.pop("AM_BOT_ID", None)
+        self.issue(425)
+        code, _out, err = self.run_cli("issue", "claim", "425")
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(err)["error"], "no_identity")
+        self.assertFalse(self.calls(), "認不出自己就不要打 gh")
+
+    def test_explicit_bot_flag_wins_over_the_pane_environment(self):
+        self.issue(425)
+        got = json.loads(self.run_cli("issue", "claim", "425", "--bot", "kd61te")[1])
+        self.assertEqual(got["bot"], "kd61te")
+
+    def test_claim_never_touches_the_daemon_runtime(self):
+        # AGM_RUNTIME_DIR 指向不存在的目錄：真的去讀 runtime.json 就會是 no_runtime／exit 2。
+        self.issue(425)
+        self.assertEqual(self.run_cli("issue", "claim", "425")[0], 0)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
