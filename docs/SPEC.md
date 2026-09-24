@@ -3003,6 +3003,15 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
 - **申請者的身分**：`requester` 可以是 bot id、bot 名或**agent 名**（`AM_AGENT_NAME`），三種都對得回同一顆 bot
   （`maintenance::requester_bot_id`）。2026-09-19 之前只認前兩種，bot 叫 `AM-m3`、agent 叫 `agents-manager-15m2dg`
   的情形下「排除申請者自己」永遠對不上，restart 一律 409 `exclude_not_requester`。
+- **申請人要跟憑證綁在一起（issue #436）**：`#414` 之後「誰裁示」已經只有驗過的角色寫得出 `AGM:<role>`，
+  「誰申請」卻還是 body 說了算——同一筆核准一半可信一半不可信，而「不能自己核准自己」也沒有可信的申請人可比。
+  現在 `POST /api/supervisor/approvals` 收標頭：**帶了 `X-AM-Bot-Id`＋自己的 hook token 就只能用自己的名義申請**
+  （填別人＝403 `requester_not_the_caller`，證明不了＝403 `bot_proof_mismatch`）；**沒帶身分照收**，那筆記成
+  `requester_unverified`（`daemon-update-kick.sh` 這類 launchd 腳本就是這樣申請的，擋掉等於停掉例行重建）。
+  daemon **不改寫** `requester`：它要跟 acquire 的 `owner` 逐字相等（上面那條），改寫等於讓申請人自己開不了窗口。
+  裁示端據此擋掉**自己核准自己**：申請人驗過、而且解析出來就是裁示的那顆 bot 時，`approve` 回 403
+  `self_approval_forbidden`（`deny`／`revoke` 不擋，那是收回自己的申請）。申請人沒驗過的不比對——那串字是自稱的，
+  拿它擋只會擋到名字剛好一樣的人；真正的界線是共用 UI token（見 #432），要靠 per-bot token 才解得掉。
 - **等太久就縮小封鎖面**（AGM 裁示 2026-09-16）：在這台機器的負載下「任何 bot 在回合中就不換」等同永遠不安全——2026-09-15 那筆核准卡了 11 小時，每 5 分鐘那一輪都撞到有人在講話。
   所以同一筆**已核准、未消耗**的 `rebuild`／`restart` 申請，從**核准時間**（`decided_at`；換 commit 接續的見下）起連續等超過門檻（常數 30 分鐘，`AM_MAINTENANCE_ESCALATE_MINS` 可調；0、負數或看不懂的值當沒設）之後，安全窗口改判「縮小封鎖面」：
   - **誰等太久就放寬誰**（AGM 裁示 2026-09-16）：`acquire` 只看**當下這筆核准自己**等了多久，別人放著沒用掉的核准不算數——否則一張被遺忘的核准等於把所有人的窗口都打開。

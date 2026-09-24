@@ -480,7 +480,7 @@ pub async fn safety_as(
 /// Take a window: approval checked, safety re-checked and the lease taken, all under the
 /// 這個 owner／requester 是哪一顆 bot（沒有對應的 bot——例如 `daemon-update-kick` 這種腳本
 /// 身分——就是 `None`）。先當成 bot id 查，查不到再用名字對。
-async fn requester_bot_id(app: &Arc<App>, owner: &str) -> Option<String> {
+pub(crate) async fn requester_bot_id(app: &Arc<App>, owner: &str) -> Option<String> {
     let owner = owner.trim();
     if owner.is_empty() {
         return None;
@@ -1426,6 +1426,7 @@ mod tests {
     fn approval(status: &str, purpose: &str, commit: Option<&str>, expires: Option<&str>) -> Approval {
         Approval {
             request_reason: None,
+            requester_unverified: 1,
             id: "ap1".into(),
             supervisor_id: "AGM".into(),
             requester: "bot-x".into(),

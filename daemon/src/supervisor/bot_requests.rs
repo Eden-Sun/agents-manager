@@ -161,6 +161,14 @@ fn bad_proof() -> LcError {
 /// 最後一列以前也是 `None`。而 `None` 在下游不是「沒有權限」而是「使用者本人」
 /// （`roles::ack` 的 `1=1`），所以把自己的 token 打壞反而比帶對還多權限——降級同時是提權。
 pub async fn actor_role(app: &Arc<App>, headers: &axum::http::HeaderMap) -> Result<Option<Role>, LcError> {
+    let Some(id) = verified_bot_id(app, headers).await? else { return Ok(None) };
+    Ok(roles::role_of_bot(&app.db, &id).await.ok().flatten())
+}
+
+/// 呼叫端是**哪一顆 bot**（issue #436）。三態跟 [`actor_role`] 一模一樣（這一支就是它的前半段），
+/// 只是回 bot id 而不是角色：申請重建／重啟窗口的是一般的修正 bot，沒有角色，`actor_role` 對它回的
+/// `None` 跟「沒宣告身分」分不出來——而「這筆申請是誰送的」正是要分出來的東西。
+pub async fn verified_bot_id(app: &Arc<App>, headers: &axum::http::HeaderMap) -> Result<Option<String>, LcError> {
     // 「有這個標頭但讀不出值」也算宣告了身分：空字串與非 UTF-8 都要驗，不能當沒帶。
     if !headers.contains_key("X-AM-Bot-Id") {
         return Ok(None);
@@ -171,7 +179,7 @@ pub async fn actor_role(app: &Arc<App>, headers: &axum::http::HeaderMap) -> Resu
         tracing::warn!(claimed_bot = %id, "refused a request that claimed a bot identity it could not prove");
         return Err(bad_proof());
     }
-    Ok(roles::role_of_bot(&app.db, id).await.ok().flatten())
+    Ok(Some(id.to_string()))
 }
 
 /// 這一句要不要攔下來排進 inbox。`Ok(None)` = 照原本的路送。

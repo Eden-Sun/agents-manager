@@ -1677,13 +1677,16 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 
 ### 核准與租約（SPEC §18.10）
 - `GET /api/supervisor/approvals?id=<id>`：只回那一筆（清單本身只有最新 100 筆，排程腳本要確認的舊核准會被擠出去）。
-- `GET /api/supervisor/approvals` → `{approvals:[{id,requester,purpose,scope,target_commit,status,decided_by,decided_at,reason,expires_at,client_request_id,wait_since,decisions:[{from,to,actor,reason,at}],…}]}`。
+- `GET /api/supervisor/approvals` → `{approvals:[{id,requester,requester_unverified,purpose,scope,target_commit,status,decided_by,decided_at,reason,expires_at,client_request_id,wait_since,decisions:[{from,to,actor,reason,at}],…}]}`。
+  `requester_unverified`（issue #436）：`true`＝`requester` 只是申請時自稱的字串（沒帶 `X-AM-Bot-Id`，例如 `daemon-update-kick.sh` 這類 launchd 腳本），`false`＝申請時附了那顆 bot 自己的 hook token、確定是它本人。欄位加上去之前的舊列一律 `true`。
   `status`：`pending` | `approved` | `denied` | `revoked` | `consumed` | `superseded`。`consumed`／`superseded` 不覆寫 `decided_at`／`decided_by`（誰、何時核准的留著；誰用掉的在 `decisions`）。
   `decisions` 是 append-only 的決定歷程（那一列只留最後一個狀態）。
 - `POST /api/supervisor/approvals {requester,purpose:"rebuild"|"restart",scope,target_commit?,expires_in_secs?,request_id?,supersedes?}` → 一筆 `pending`（回應多 `created`、`superseded`），並推 inbox `approval_requested` 給 AGM。
   **沒帶 `supersedes` 時 daemon 自己找**（issue #421）：同一個 `requester`、同一個 `purpose`、而且還 `pending` 的最新那一筆，直接取代掉（回應的 `superseded` 會帶它的 id）。
   kick 記住舊 id 的狀態檔掉了就不會帶 `--supersedes`，以前每輪開一筆新的 pending——2026-09-23 累積了四筆，AGM 被叫醒四次講同一件事。
   **只自動取代 `pending`**：`approved` 是人做過的裁示，不會因為排程又跑一輪就消失（要動它得明講 `supersedes`）。自動挑到的那筆對不上（剛被裁示、剛過期）只是不取代，不會讓申請失敗。
+  **帶 `X-AM-Bot-Id`＋那顆自己的 `X-AM-Bot-Token` 時，`requester` 只能是自己**（bot id、bot 名或 herdr agent 名都認，`maintenance.rs` 那套解析）：填別人 → `403 {"reason":"requester_not_the_caller"}`，什麼都不寫；宣告了身分卻證明不了 → `403 bot_proof_mismatch`（issue #415）。**不帶身分照收**，只是那筆記成 `requester_unverified:true`。
+  daemon **不會改寫** `requester`：它之後要跟 `lease acquire` 的 `owner` 逐字相等（下面的 `approval_owner_mismatch`），改寫等於讓申請人開不了自己的窗口。
   `supersedes=<舊的 approval id>`：**同一個 requester、同一個 purpose** 換 commit 重新申請。舊的還是 `pending`／`approved` 而且沒過期時，同一個 transaction 裡標 `superseded`、
   它還沒送出的 `approval_requested` 一起收掉（`acked_by:"daemon"`），新的 `wait_since` 接過舊的等待起點（舊的已核准＝它的 `min(wait_since, decided_at)`）；
   舊的已經不能用就不動它、新的從頭算。requester 或 purpose 不同 → `409 approval_supersede_refused`，什麼都不寫。
@@ -1692,6 +1695,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
   `expires_in_secs` 不參與比對：原本那筆的到期時間不會被重送改掉。不帶 `request_id` 就是舊行為，每次開一筆新的。
   CLI：`agm approval request --request-id <id>`（不確定送出去沒有時用同一個 id 重送，不要換新的）；`--supersedes <舊 id>` 帶 `supersedes`。
 - `POST /api/supervisor/approvals/{id}/decide {decision:"approve"|"deny"|"revoke",actor?,reason?,expires_in_secs?}`：同 decision 重送回 `idempotent:true`。
+  **不能核准自己送出的申請**（issue #436）：那筆的 `requester_unverified` 是 `false`、而且解析出來就是這個呼叫端那顆 bot 時，`approve` 回 `403 {"reason":"self_approval_forbidden"}`，那筆不動。`deny`／`revoke` 不擋——把自己的申請收回本來就該讓他做。`requester_unverified:true` 的不比對：那串字是自稱的，拿它擋只會擋到名字剛好一樣的人。
   `decided_by` **不看 body**（issue #414）：驗過角色的是 `AGM:patrol`／`AGM:responder`，其餘一律 `user`，body 的 `actor` 只當未驗證的備註包成 `user(<自稱>)`（取前 64 字）。
   **第一個裁示定案**：`approve`／`deny` 只從 `pending` 條件寫入；`revoke` 從 `approved` 或 `pending`。寫不進去 → 409
   `{reason:"already_decided"|"decided_concurrently",status,decided_by,allowed_from}`，什麼都沒寫（後到的 deny 不會把 approved 改掉）。
