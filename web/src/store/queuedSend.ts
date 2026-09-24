@@ -78,15 +78,3 @@ export function settleComposerSend(
   }
   if (wasQueued) io.restoreQueuedSend(botId, wasQueued)
 }
-
-/**
- * 清附件托盤前先認一次 bot（issue #496）。托盤住在 `ChatPanel`（`useAttachments(botId, botId)`），
- * 切 bot 只是清內容、hook 本身不重建，所以送出中的 `.then` 抓到的 `clearFiles` 一直是「現在這顆」的：
- * A 送完去清，清掉的是切過去那顆剛拖進來的附件，連正在跑的上傳都被 abort。
- * 切走之後 A 的托盤早就被換對話那段清過了，不是自己的就別清。
- */
-export function clearFilesIfOwned(clearFiles: () => void, botId: string, selectedBotId: () => string | null): () => void {
-  return () => {
-    if (selectedBotId() === botId) clearFiles()
-  }
-}
