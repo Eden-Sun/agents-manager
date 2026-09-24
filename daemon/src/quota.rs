@@ -594,8 +594,19 @@ fn unix_to_rfc3339(v: Option<&Value>) -> Option<String> {
             if let Ok(n) = s.parse::<i64>() {
                 n
             } else {
-                // Already a timestamp string? Keep it.
-                return Some(s.clone());
+                // 已經是時間字串：**至少驗一次解得開**再放行（i204 review，#489）。原本是原樣回傳，
+                // 所以格式漂移時一串亂碼會直接變成 `resets_at`，而解不開的重置時間會被
+                // `Window::reset_passed` 讀成「已經跨過重置」——那個身分就永遠看起來有額度。
+                // 解不開就丟掉：`resets_at: None` 是「不知道」，由 `usable_window` 的窗長規則收尾（#475），
+                // 比一個會讓人誤判成「有額度」的壞值安全。
+                // 只驗、不改寫：格式正規化不是這張票的事，而且下游一律 `parse_utc`／`cmp_ts` 比時刻。
+                return match parse_utc(s) {
+                    Some(_) => Some(s.clone()),
+                    None => {
+                        tracing::warn!(raw = %s, "額度讀數的重置時間不是 RFC3339，丟掉");
+                        None
+                    }
+                };
             }
         }
         _ => return None,
@@ -714,16 +725,28 @@ pub async fn set_fenced(app: &Arc<App>, host: &str, base: &str, q: Quota, fence:
     Ok(())
 }
 
-/// 這個重置時刻已經過去了嗎。解不開的當成**沒過去**（不主動丟掉看不懂的資料，交給讀取端判）。
+/// 這個重置時刻已經過去了嗎。**解不開的也算「已過去」**，所以不會被沿用（i204 review，#489）。
+///
+/// 第一版這裡回 `false`（＝沿用看不懂的值，交給讀取端判），跟 [`Window::reset_passed`] 把解不開當成
+/// 「已經跨過重置」**方向相反**，兩者接起來就重現了這張票要修的問題，而且更糟——它會一直黏著：
+/// 解不開的值被 `set` 一路沿用，而 `reset_passed` 每次都說「重置過了」，於是那個身分從此永遠看起來
+/// 有額度，即使 97% 用掉。過期的時刻至少會隨著新讀數自己好，解不開的不會。
 ///
 /// 寫成具名函式而不是 `is_some_and(|t| t <= now)`：`timestamp_compat_tests` 那條原始碼 lint 認得
 /// `|t| t <= …` 這個形狀（issue #101），而它分不出閉包參數是時間字串還是已經 parse 過的 `DateTime`。
 /// 這裡比的是 `DateTime`，秒／毫秒混存不影響。
 fn already_past(resets_at: Option<&str>) -> bool {
     let now = chrono::Utc::now();
-    match resets_at.and_then(parse_utc) {
-        Some(at) => at <= now,
+    match resets_at {
+        // 沒有重置時間：沒有東西可以沿用，也不必說它過去了。
         None => false,
+        Some(raw) => match parse_utc(raw) {
+            Some(at) => at <= now,
+            None => {
+                tracing::warn!(resets_at = %raw, "額度讀數的重置時間解不開，不沿用它");
+                true
+            }
+        },
     }
 }
 
@@ -1391,6 +1414,51 @@ mod tests {
         );
         // 順帶：已經過去的重置時間本來就不該被沿用（對顯示也沒意義）。
         assert_eq!(got.seven_day.as_ref().and_then(|w| w.resets_at.clone()), None, "過去的 resets_at 不沿用");
+    }
+
+    /// i204 review（#489）：**解不開**的 `resets_at` 走的是票上那條原路，而且會一直黏著——
+    /// `already_past` 第一版說它「沒過去」所以照樣沿用，`reset_passed` 又說它「已經跨過重置」，
+    /// 於是那個身分從此永遠看起來有額度。用票上那個兩輪 `set()` 的重現釘住。
+    #[tokio::test]
+    async fn an_unparseable_reset_time_is_not_carried_forward_and_does_not_excuse_a_critical_reading() {
+        let app = crate::testing::env().await.app.clone();
+        let key = quota_key(LOCAL_HOST, "codex");
+
+        // 第一輪：某個來源帶進一個解不開的 resets_at。
+        let mut first = codex_q("codex-app-server", None);
+        first.updated_at = crate::db::now();
+        first.seven_day = Some(Window { used_pct: 20.0, resets_at: Some("not-a-timestamp".into()), observed_at: None });
+        set(&app, LOCAL_HOST, "codex", first).await;
+
+        // 第二輪：狀態列讀數（沒有自己的 resets_at）而且真的見底。
+        let mut status = codex_q("codex-statusline", None);
+        status.updated_at = crate::db::now();
+        status.seven_day = Some(Window { used_pct: 97.0, resets_at: None, observed_at: None });
+        set(&app, LOCAL_HOST, "codex", status).await;
+
+        let got = app.quotas.lock().await.get(&key).cloned().unwrap();
+        let w = got.seven_day.as_ref().unwrap();
+        assert_eq!(w.used_pct, 97.0, "前提：新讀數進去了");
+        assert_eq!(w.resets_at, None, "解不開的重置時間不該被沿用下去");
+        assert!(got.exhausted(Bucket::SevenDay, chrono::Utc::now()), "97% 用掉不能因為一個解不開的時間戳就被放行");
+    }
+
+    /// `unix_to_rfc3339` 的字串分支要驗過格式才放行（i204 review，#489）：
+    /// 原本是原樣回傳，所以格式漂移時亂碼會直接變成 `resets_at`。
+    #[test]
+    fn a_reset_time_string_must_parse_before_it_is_accepted() {
+        let at = |v: serde_json::Value| unix_to_rfc3339(Some(&v));
+        // 正常的 RFC3339 照收，原樣留著。
+        assert_eq!(at(json!("2026-09-10T00:26:40Z")), Some("2026-09-10T00:26:40Z".into()));
+        // 帶時區位移的也收，原樣留著（下游一律比時刻，不比字串）。
+        assert_eq!(at(json!("2026-09-10T08:26:40+08:00")), Some("2026-09-10T08:26:40+08:00".into()));
+        // 解不開的丟掉，不要變成 resets_at。
+        assert_eq!(at(json!("not-a-timestamp")), None);
+        assert_eq!(at(json!("2026-13-99T99:99:99Z")), None);
+        assert_eq!(at(json!("")), None);
+        // 數字分支不受影響（秒與毫秒）。
+        assert_eq!(at(json!(1_789_000_000)), Some("2026-09-10T00:26:40.000Z".into()));
+        assert_eq!(at(json!(1_789_000_000_000i64)), Some("2026-09-10T00:26:40.000Z".into()));
     }
 
     /// #489 的第二條路：讀數**自己就帶著**一個剛過去的 `resets_at`（app-server 在窗剛翻過去時
