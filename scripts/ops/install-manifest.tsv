@@ -5,8 +5,10 @@ scripts/ops/browser-gc-kick.sh      bin/browser-gc-kick.sh
 scripts/ops/ci-watch-kick.sh        bin/ci-watch-kick.sh
 scripts/ops/claude-release-kick.sh  bin/claude-release-kick.sh
 scripts/ops/daemon-update-kick.sh   bin/daemon-update-kick.sh
+scripts/ops/dev-server-kick.ts      bin/dev-server-kick.ts
 scripts/ops/herdr-update-kick.sh    bin/herdr-update-kick.sh
 scripts/ops/herdr-lan-check.sh      bin/herdr-lan-check.sh
+scripts/ops/herdr-full-restart.sh   bin/herdr-full-restart.sh
 scripts/ops/outbox-gc.sh            bin/outbox-gc.sh
 scripts/ops/pane-gc.sh              bin/pane-gc.sh
 scripts/ops/release-triage-kick.sh  bin/release-triage-kick.sh
