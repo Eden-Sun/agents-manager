@@ -350,9 +350,16 @@ fn trashed_copy(app: &Arc<App>, bot_id: &str, local_path: &str) -> Option<PathBu
     candidate.is_file().then_some(candidate)
 }
 
-/// 送回瀏覽器的 `Content-Type`：白名單以外一律 `application/octet-stream`（#471，同
-/// [`crate::outbox::file`] 的規則與理由——上傳的 mime 是呼叫端自己給的，使用者的 HTML 不該在
-/// daemon 這個 origin 跑起來，UI token 就放在這個 origin 的 localStorage）。
+/// 送回瀏覽器的 `Content-Type`：白名單以外一律 `application/octet-stream`（#471，理由同
+/// [`crate::outbox::file`]——上傳的 mime 是呼叫端自己給的，使用者的 HTML 不該在 daemon 這個
+/// origin 跑起來，UI token 就放在這個 origin 的 localStorage）。
+///
+/// **跟 `outbox::file` 在 `image/svg+xml` 這一型上是不一樣的**（#476，別讀成完全一致）：
+/// outbox 把 svg 排除在白名單外，這裡留著而且 inline。差別在用途——outbox 的檔案是**下載**，
+/// 擋掉不影響任何畫面；附件會被 UI 當縮圖 `<img src={blobUrl}>` 畫出來，而瀏覽器對 SVG
+/// **不做內容嗅探**，型別一換就是看得見的破圖。這裡改用回應標頭擋（`nosniff` ＋
+/// `Content-Security-Policy: sandbox; default-src 'none'`，見 `api::get_attachment`）：
+/// `<img>` 裡的 SVG 本來就不跑腳本，真的被導航到時 sandbox 讓它拿不到這個 origin。
 ///
 /// **只影響送出去的標頭**：`attachments.mime` 照舊原樣存、原樣回給 UI 判斷要不要畫縮圖，
 /// 所以前端 `item.mime.startsWith('image/')` 那條邏輯不受影響。
@@ -391,8 +398,10 @@ mod tests {
     use super::*;
     use crate::testing as tt;
 
-    /// #471：上傳時的 mime 是呼叫端自己給的，送回去不能原樣照用。白名單外一律 octet-stream，
-    /// svg 刻意不在名單裡（可以帶腳本）；只有圖片能 inline，其他都是 attachment。
+    /// #471：上傳時的 mime 是呼叫端自己給的，送回去不能原樣照用——白名單外一律 octet-stream。
+    /// **SVG 在白名單裡而且 inline**（瀏覽器對 SVG 不嗅探，落成 octet-stream 會讓現有縮圖變破圖），
+    /// 靠回應的 `nosniff` ＋ `Content-Security-Policy: sandbox` 擋；只有 `image/*` inline，
+    /// 其餘（含 pdf）都是 attachment。
     #[test]
     fn the_served_mime_is_whitelisted_and_only_images_are_inline() {
         for (given, want) in [
