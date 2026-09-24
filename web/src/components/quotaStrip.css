@@ -309,6 +309,21 @@
   text-align: right;
 }
 
+/* 沿用上一份讀數的那一格（issue #540）：窗口名後面掛一個小「舊」。字而不是只有顏色——
+   狀態不能只靠顏色（UI-DECISIONS），而且這一格的數字本身還是要照常讀得到。 */
+.quota-window-stale {
+  margin-left: 1px;
+  font-size: 8px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--lamp-amber);
+  cursor: help;
+}
+
+.quota-window-name.carried {
+  color: var(--text-dim);
+}
+
 /* 條與數字之間 3px：使用者點名「不能黏在一起」，間距不減。 */
 
 .quota-bar-row {

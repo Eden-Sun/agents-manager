@@ -746,6 +746,8 @@ function toQuotaWindow(v: unknown): KindQuota['five_hour'] {
   return {
     used_pct: Math.max(0, Math.min(100, num(pick(v, 'used_pct'), 0))),
     resets_at: optStr(pick(v, 'resets_at')),
+    // #540：沿用上一份的那一桶靠它才看得出是舊的（`updated_at` 是整筆的，會被蓋成現在）。
+    observed_at: optStr(pick(v, 'observed_at')),
     // 門檻由 daemon 算（API.md §12.4），前端不補算
     low: bool(pick(v, 'low'), false),
     critical: bool(pick(v, 'critical'), false),
