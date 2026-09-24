@@ -75,6 +75,19 @@ pub async fn role_state(app: &Arc<App>, role: crate::supervisor::roles::Role) ->
         "waiting_quota" => return RoleState::Unavailable(REASON_WAITING_QUOTA),
         _ => {}
     }
+    // 登記過、但那顆 bot 已經被軟刪：`db::active_run` 只看 `runs`，不看 bot 還在不在，
+    // 所以「bot 已軟刪、run 那一列還掛著 running」的窗口會被讀成還活著（#421 指出）。
+    // 那正是這支函式要擋的那種錯：閘門說「它可以裁示」，而它根本不存在，核准就靜靜躺著。
+    match crate::db::bot(&app.db, &bot_id).await {
+        Ok(Some(bot)) if bot.deleted_at.is_none() => {}
+        // 登記過卻找不到（或已軟刪）＝沒有東西在跑。沿用 `no_run`，不新增原因字串：
+        // 那幾個字是對外契約（#421 已經接線、SPEC 與 persona 都列舉了）。
+        Ok(_) => return RoleState::Unavailable(REASON_NO_RUN),
+        Err(e) => {
+            tracing::warn!(role = role.as_str(), error = ?e, "role_state：讀不到那顆 bot");
+            return RoleState::Unknown;
+        }
+    }
     // 要它跑卻沒有 active run。`desired_running=0`（使用者自己停的）不是系統故障，
     // 但對「核准該給誰」來說一樣是不可用——沒有在跑的協調者不會裁示任何東西。
     match crate::db::active_run(&app.db, &bot_id).await {
@@ -350,6 +363,24 @@ mod tests {
         // 「沒有 needs_login」的意思是沒有證據說它壞了，不是證明它是好的。
         crate::supervisor::roles::set_status(&app.db, role, "", None, None).await.unwrap();
         assert_eq!(role_state(&app, role).await, RoleState::Unavailable(REASON_NO_RUN));
+
+        // 真的種一顆 bot＋一個 running 的 run，這時候才會是 Available。
+        // project_id 要用 env 真的建出來的那一個：`bots.project_id` 有外鍵，寫死字串會在 INSERT 就炸。
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "AGM-responder").await;
+        crate::testing::fake_run(&app, &bot.id).await;
+        crate::supervisor::roles::set_env(&app.db, role, &bot.id, &env.project_id, "/tmp").await.unwrap();
+        assert_eq!(role_state(&app, role).await, RoleState::Available);
+
+        // bot 被軟刪、但 run 那一列還掛著 running（刪除到停機之間的窗口，#421 指出）：
+        // `db::active_run` 只看 runs，不看 bot 還在不在，所以這裡如果不另外查一次，
+        // 閘門會說「它可以裁示」而它根本不存在，核准就靜靜躺著——正是這支函式要擋的那種錯。
+        sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?")
+            .bind(crate::db::now())
+            .bind(&bot.id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(role_state(&app, role).await, RoleState::Unavailable(REASON_NO_RUN), "軟刪掉的 bot 不能被當成還能裁示");
 
         // 巡檢是另一列，不會被協調者的狀態汙染。
         assert_eq!(role_state(&app, crate::supervisor::roles::Role::Patrol).await, RoleState::NotConfigured);
