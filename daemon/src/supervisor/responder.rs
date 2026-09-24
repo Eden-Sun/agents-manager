@@ -664,11 +664,11 @@ pub async fn quota_state(app: &Arc<App>, bot: &crate::db::Bot) -> QuotaState {
             .min_by(|a, b| crate::db::cmp_ts(a, b));
         return QuotaState::Blocked(hit.until.clone().or(soonest));
     }
-    let critical: Vec<&crate::quota::Window> = [&quota.five_hour, &quota.seven_day]
+    // 判斷本體是共用的 `Quota::exhausted`（issue #464／#475：以前三處各寫一份，而窗長到期只在開機跑）。
+    let critical: Vec<&crate::quota::Window> = [crate::quota::Bucket::FiveHour, crate::quota::Bucket::SevenDay]
         .into_iter()
-        .flatten()
-        // 判斷本體是共用的 `Window::exhausted_at`（issue #464，i407 review：以前三處各寫一份）。
-        .filter(|w| w.exhausted_at(now))
+        .filter(|b| quota.exhausted(*b, now))
+        .filter_map(|b| quota.usable_window(b, now))
         .collect();
     if !critical.is_empty() {
         return QuotaState::Blocked(critical.iter().filter_map(|w| w.resets_at.clone()).min_by(|a, b| crate::db::cmp_ts(a, b)));
@@ -676,7 +676,9 @@ pub async fn quota_state(app: &Arc<App>, bot: &crate::db::Bot) -> QuotaState {
     // 「可以用」要有證據：5 小時與 7 天兩個共用視窗**都有讀數**、都沒見底，也沒撞限。
     // 空的或不完整的讀數（探測只回了一半、剛起來還沒拿到）不能拿來宣稱恢復——少的那一格
     // 可能正是見底的那一格。
-    if quota.five_hour.is_some() && quota.seven_day.is_some() {
+    // issue #475：「有讀數」要是**說得出話**的讀數——一筆比窗長還舊、又沒有重置時間的，
+    // 不能拿來宣稱恢復（那正是「少的那一格可能就是見底的那一格」的情形）。
+    if quota.usable_window(crate::quota::Bucket::FiveHour, now).is_some() && quota.usable_window(crate::quota::Bucket::SevenDay, now).is_some() {
         QuotaState::Available
     } else {
         QuotaState::Unknown

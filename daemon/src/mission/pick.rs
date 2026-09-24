@@ -15,7 +15,7 @@
 //! - 讀不到額度（`None`）視為可以用：未知不等於用盡（與 AGM 自己的模型控制器同一條原則）——
 //!   但驗證者例外，D3 要的是「確定有 Fable 額度」，讀不到就不算。
 
-use crate::quota::{LimitHit, Quota, Window};
+use crate::quota::{Bucket, LimitHit, Quota, Window};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
@@ -82,7 +82,7 @@ enum Block {
 /// 那個模型的週桶用盡時，同一身分改用哪個模型。Fable 用盡→opus（7d 共用桶沒見底才會走到這裡）；
 /// Opus 用盡→確定還有 Fable 額度就用 Fable，否則 sonnet；Sonnet 用盡→opus。
 fn fallback_model(out: &str, q: &Quota, now: DateTime<Utc>) -> Option<&'static str> {
-    let fable_ok = !exhausted(q.fable.as_ref(), now);
+    let fable_ok = !q.exhausted(Bucket::Fable, now);
     match out {
         "fable" => Some("opus"),
         "opus" if fable_ok => Some("fable"),
@@ -104,11 +104,11 @@ fn parse_at(s: Option<&str>) -> Option<DateTime<Utc>> {
     s.and_then(|x| DateTime::parse_from_rfc3339(x.trim()).ok()).map(|x| x.with_timezone(&Utc))
 }
 
-/// 見底**而且那個窗還沒重置**才算用盡（issue #464）。判斷本體是共用的 [`Window::exhausted_at`]
-/// （`quota.rs`）：`mission::pick`／`supervisor::policy`／`supervisor::responder` 三處以前各寫一份，
-/// 其中這一份還跟另外兩份對「解不開的時間戳」意見相反（i407 review）。
-fn exhausted(w: Option<&Window>, now: DateTime<Utc>) -> bool {
-    w.is_some_and(|w| w.exhausted_at(now))
+/// 這一桶算不算用盡。判斷本體是共用的 [`Quota::exhausted`]（`quota.rs`）：三處以前各寫一份
+/// （i407 review #464），而「讀數比窗長還舊就不算用盡」那一半只在開機跑（i266 review #475）。
+/// 這裡只是轉接，不要在這裡再長出第二份規則。
+fn exhausted(q: &Quota, b: Bucket, now: DateTime<Utc>) -> bool {
+    q.exhausted(b, now)
 }
 
 /// 那一桶的重置時間，**只回還沒到的**（issue #464）：`Pick::Wait` 的 `until` 是呼叫端要排重試的時刻，
@@ -163,11 +163,11 @@ fn block_of(q: &Quota, now: DateTime<Utc>) -> Block {
         let model_bucket = matches!(hit.bucket.as_deref(), Some("fable") | Some("opus") | Some("sonnet"));
         match hit.bucket.as_deref() {
             Some("seven_day") => return Block::SevenDay(sooner(hit.until.clone(), reset_of(seven, now))),
-            Some("five_hour") if exhausted(seven, now) => return Block::SevenDay(reset_of(seven, now)),
+            Some("five_hour") if exhausted(q, Bucket::SevenDay, now) => return Block::SevenDay(reset_of(seven, now)),
             Some("five_hour") => return Block::FiveHour(sooner(hit.until.clone(), reset_of(five, now))),
-            Some(_) if model_bucket && exhausted(seven, now) => return Block::SevenDay(reset_of(seven, now)),
+            Some(_) if model_bucket && exhausted(q, Bucket::SevenDay, now) => return Block::SevenDay(reset_of(seven, now)),
             // 5h 也見底：先等 5h（時間是 5h 自己的，不是模型週桶的下週）；5h 回來之後撞限還在，再換模型。
-            Some(_) if model_bucket && exhausted(five, now) => return Block::FiveHour(reset_of(five, now)),
+            Some(_) if model_bucket && exhausted(q, Bucket::FiveHour, now) => return Block::FiveHour(reset_of(five, now)),
             // Opus／Sonnet 的週桶沒有自己的量表，時間借 7d 那格（同一個重置週期）。
             Some(m) if model_bucket => {
                 let own = if m == "fable" { reset_of(fable, now) } else { reset_of(seven, now) };
@@ -175,21 +175,21 @@ fn block_of(q: &Quota, now: DateTime<Utc>) -> Block {
             }
             _ => {}
         }
-        if exhausted(five, now) && !exhausted(seven, now) {
+        if exhausted(q, Bucket::FiveHour, now) && !exhausted(q, Bucket::SevenDay, now) {
             return Block::FiveHour(hit.until.clone().or(reset_of(five, now)));
         }
-        if exhausted(fable, now) && !exhausted(seven, now) && !exhausted(five, now) {
+        if exhausted(q, Bucket::Fable, now) && !exhausted(q, Bucket::SevenDay, now) && !exhausted(q, Bucket::FiveHour, now) {
             return Block::ModelOut { model: "fable".into(), until: hit.until.clone().or(reset_of(fable, now)) };
         }
         return Block::SevenDay(hit.until.clone().or(reset_of(seven, now)));
     }
-    if exhausted(q.seven_day.as_ref(), now) {
+    if exhausted(q, Bucket::SevenDay, now) {
         return Block::SevenDay(reset_of(q.seven_day.as_ref(), now));
     }
-    if exhausted(q.five_hour.as_ref(), now) {
+    if exhausted(q, Bucket::FiveHour, now) {
         return Block::FiveHour(reset_of(q.five_hour.as_ref(), now));
     }
-    if exhausted(q.fable.as_ref(), now) {
+    if exhausted(q, Bucket::Fable, now) {
         return Block::ModelOut { model: "fable".into(), until: reset_of(q.fable.as_ref(), now) };
     }
     Block::None
@@ -269,7 +269,7 @@ fn pick_verifier(candidates: &[Candidate], on_5h: On5hLimit, now: DateTime<Utc>)
             continue;
         };
         // D3：確定有 Fable 額度才算——讀不到 Fable 桶跟用盡一樣不能用；窗已經重置的不算用盡（#464）。
-        let fable_ok = q.fable.as_ref().is_some() && !exhausted(q.fable.as_ref(), now);
+        let fable_ok = q.usable_window(Bucket::Fable, now).is_some() && !q.exhausted(Bucket::Fable, now);
         match block_of(q, now) {
             Block::None if fable_ok => {
                 return Pick::Use { identity: c.name.into(), model: Some("fable".into()), reason: "Fable 週桶有額度".into() };
