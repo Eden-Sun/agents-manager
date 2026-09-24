@@ -1879,7 +1879,8 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
     payload 多 `reassigned_from:"responder"`、`reassigned_reason`、`reassigned_at`、`to_role:"patrol"`。
     協調者恢復後**不搶回**。狀態讀不到時**不改派**（沒有證據不搬）。只有 `approval_requested` 會改派——
     `bot_request` 與 `mission_*` 照舊留在協調者佇列等它回來。
-- `GET /api/supervisor/state` → 給 `agm` CLI 的精簡全域狀態：projects、bots（run 的 `agent_status`、`native_session_id`、`runtime_model/effort`、`pane_id`、`queued_turns`、`host_connected`）、未結案 assignment、待處理 inbox。不含 env、hook token、args、persona 全文。
+- `GET /api/supervisor/state` → 給 `agm` CLI 的精簡全域狀態：projects、bots（run 的 `agent_status`、`native_session_id`、`runtime_model/effort`、`pane_id`、`queued_turns`、`host_connected`、`asleep`、`lamp`）、未結案 assignment、待處理 inbox。不含 env、hook token、args、persona 全文。
+  `lamp` 跟 `GET /api/state` 是同一個函式算的（`api.rs` 的 `lamp`，吃 `bot_connected`＝bot → host → herdr session），呼叫端照抄就好：CLI 這邊只看得到主機層的 `host_connected`，自己推的話同一台主機上 session 掉了的那顆會分岔（issue #514）。
 - `GET /api/supervisor/evidence?q=<文字>&bot_id=&project_id=&before=<cursor>&limit=20` → `{messages:[{id,bot_id,bot_name,project_id,project_label,bot_deleted,turn_id,role,content,source,incomplete,created_at,truncated}],has_more,next_cursor}`。
   `q` 必填（trim 後 1–500 字），字面子字串（`%`、`_` 不是萬用字元）；`limit` 1–100；含已刪 bot 的歷史。依 `(created_at DESC,id DESC)`，`next_cursor` 原樣放回 `before`。
   每筆 content 最多 16,000 字（超過 `truncated:true`）。空查詢、過長、壞 cursor 400。只提供證據，不把命中當完成或適合度。

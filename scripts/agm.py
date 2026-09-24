@@ -288,8 +288,56 @@ def _s(v: object) -> str:
     return v if isinstance(v, str) else ""
 
 
+def _lamp(b: dict, run: dict) -> str:
+    """側欄上那顆複合燈號。
+
+    兩支 state 端點現在都會給 `lamp`，有就照抄——daemon 算它用的是 `bot_connected`
+    （bot → host → **herdr session**），CLI 這邊看得到的只有主機層的 `host_connected`，
+    同一台主機上 session 掉了的那顆推不出來。
+
+    推算只留給**還沒更新的 daemon**（`/api/supervisor/state` 以前沒有這個欄位，照抄的結果是
+    每一顆 bot 都拿到空字串，issue #514）。規則照 `daemon/src/api.rs` 的 `fn lamp` 抄一份，
+    差別只在連線那一格會粗一點——所以能照抄就別推。
+    """
+    lamp = _s(b.get("lamp"))
+    if lamp:
+        return lamp
+    if b.get("host_connected") is False:
+        return "disconnected"
+    if not run:
+        return "offline"
+    state = _s(run.get("state") or run.get("run_state"))
+    if state in ("starting", "stopping"):
+        return state
+    if state in ("stopped", "exited"):
+        return "offline"
+    status = _s(run.get("agent_status") or run.get("status"))
+    return status if status in ("idle", "working", "blocked") else "unknown"
+
+
+def _queued_count(b: dict, queued_turn: object) -> int | None:
+    """排隊中的工作有幾筆。`None` = 不知道確切筆數，**不是 0**。
+
+    只有 `/api/supervisor/state` 的 `queued_turns` 是真的筆數。`/api/state` 給的是「下一筆」
+    那一則 turn：有它只代表 ≥1，回 1 是在講一個沒有根據的數字——要判斷「有沒有在排隊」看
+    `queued_turn` 就好。明講 `null`（沒有下一筆）才是紮實的 0。
+    """
+    n = b.get("queued_turns")
+    if isinstance(n, int) and not isinstance(n, bool):
+        return n
+    if queued_turn is not None:
+        return None
+    if "queued_turn" in b or "queued" in b:
+        return 0
+    return None
+
+
 def _bot_row(b: dict, project_id: str, manager_id: str) -> dict:
-    """一顆 bot 的精簡投影。`run` 裡帶的是**執行期**真值（可能與設定不同）。"""
+    """一顆 bot 的精簡投影。`run` 裡帶的是**執行期**真值（可能與設定不同）。
+
+    兩種來源的欄位名不一樣，這裡兩種都吃（issue #514）：`/api/state` 給 `lamp` 與 `queued_turn`
+    （一筆 turn），`/api/supervisor/state` 給 `queued_turns`（**筆數**）、`asleep`、`host_connected`。
+    """
     run = b.get("run") if isinstance(b.get("run"), dict) else b.get("active_run")
     run = run if isinstance(run, dict) else {}
     bid = _s(b.get("id") or b.get("bot_id"))
@@ -305,12 +353,12 @@ def _bot_row(b: dict, project_id: str, manager_id: str) -> dict:
         "managed_by": _s(b.get("managed_by")),
         "parent_bot_id": _s(b.get("parent_bot_id")),
         "cwd": _s(b.get("cwd")),
-        # `lamp` 是 daemon 已經算好的複合燈號（side bar 上看到的那顆）。自己從 run
-        # 推一次只會跟畫面不一致，直接照抄。
-        "lamp": _s(b.get("lamp")),
+        # 側欄那顆複合燈號：有 daemon 算好的就照抄，沒有就照它同一套規則算（見 `_lamp`）。
+        "lamp": _lamp(b, run),
         "is_manager": bool(manager_id) and bid == manager_id,
     }
-    # 排隊中的 web prompt 是 `queued_turn`（一筆 turn，不是數字）；prompt_text 不外傳。
+    # 排隊中的 web prompt：`/api/state` 的 `queued_turn` 是一筆 turn（不是數字），
+    # prompt_text 不外傳。型別不混——`queued_turn` 永遠是 turn 或 null，筆數另外放 `queued_turns`。
     qt = b.get("queued_turn")
     if isinstance(qt, dict):
         row["queued_turn"] = _turn_row(qt)
@@ -318,6 +366,7 @@ def _bot_row(b: dict, project_id: str, manager_id: str) -> dict:
         row["queued_turn"] = b.get("queued")
     else:
         row["queued_turn"] = None
+    row["queued_turns"] = _queued_count(b, row["queued_turn"])
     if run:
         row["run"] = {
             "id": _s(run.get("id") or run.get("run_id")),
@@ -334,6 +383,17 @@ def _bot_row(b: dict, project_id: str, manager_id: str) -> dict:
         }
     else:
         row["run"] = None
+    # §6.11 被收起來省 RAM 的那幾顆：`run` 是 null 但叫得醒。少了這個欄位，睡著的跟停掉的、
+    # 掛掉的在 `agm state` 裡長得一模一樣（issue #514）。
+    asleep = b.get("asleep")
+    row["asleep"] = (
+        {"since": _s(asleep.get("since")), "idle_minutes": asleep.get("idle_minutes")}
+        if isinstance(asleep, dict)
+        else None
+    )
+    # 主機連不連得上。`None` = 這份 state 沒講（`/api/state` 就沒有這個欄位）。
+    hc = b.get("host_connected")
+    row["host_connected"] = hc if isinstance(hc, bool) else None
     turn = b.get("in_flight_turn") if isinstance(b.get("in_flight_turn"), dict) else b.get("turn")
     if isinstance(turn, dict):
         row["in_flight_turn"] = _turn_row(turn)
@@ -1370,6 +1430,33 @@ def mark_of(body: str) -> tuple[str, dict] | None:
     return (m.group(1), payload) if isinstance(payload, dict) else None
 
 
+# `gh issue view --json comments` 一次最多給這麼多則（底層是 GraphQL 的 `comments(first: 100)`）。
+INLINE_COMMENT_CAP = 100
+
+
+def all_comments(args, number: int, inline: list) -> list:
+    """這張票的所有留言。
+
+    `gh issue view --json comments` 只給**最舊**的 100 則，而現在的持有者由**最新**一個標記
+    決定（交回的標記＝沒人認領）。討論長一點的票上，交回那一則正好是被截掉的那一端：
+    `agm issue claim` 會一直看到一筆早就放掉的認領而 exit 3，沒有任何辦法繞過。
+    沒滿 100 則就直接用剛剛那一份（一次呼叫就夠）；滿了才用 REST 翻完。
+    """
+    if len(inline) < INLINE_COMMENT_CAP:
+        return inline
+    repo = getattr(args, "repo", None)
+    # `gh api` 不吃 `-R`；沒指定 repo 時用 gh 自己的 `{owner}`／`{repo}` 佔位符從 cwd 推。
+    path = f"repos/{repo}/issues/{number}/comments" if repo else f"repos/{{owner}}/{{repo}}/issues/{number}/comments"
+    raw = gh(["api", "--paginate", f"{path}?per_page=100"])
+    try:
+        rows = json.loads(raw or "[]")
+    except json.JSONDecodeError:
+        raise AgmError("gh_failed", f"gh api {path} 回的不是 JSON：{raw.strip()[:200]}", 1)
+    if not isinstance(rows, list):
+        raise AgmError("gh_failed", f"gh api {path} 回的不是留言清單", 1)
+    return rows
+
+
 def read_issue(args, number: int) -> dict:
     fields = "number,title,state,url,labels,updatedAt,comments"
     raw = gh(["issue", "view", str(number), *repo_args(args), "--json", fields])
@@ -1394,7 +1481,8 @@ def current_claim(issue: dict) -> dict | None:
         parsed = mark_of(c.get("body") or "")
         if not parsed:
             continue
-        at = parse_iso(c.get("createdAt"))
+        # `gh issue view --json` 是 `createdAt`，REST（`gh api`）是 `created_at`。
+        at = parse_iso(c.get("createdAt") or c.get("created_at"))
         if at is None:
             continue
         if latest is None or at > latest[0]:
@@ -1442,6 +1530,8 @@ def cmd_issue(_client, _cfg: dict, args) -> object:
     number = args.number
     me = claiming_bot(args)
     issue = read_issue(args, number)
+    # 留言滿 100 則就代表可能被截掉，而截掉的是決定持有者的那一端（見 `all_comments`）。
+    issue["comments"] = all_comments(args, number, issue.get("comments") or [])
     claim = current_claim(issue)
     blocker = held_by_other(claim, me)
     if blocker is not None:

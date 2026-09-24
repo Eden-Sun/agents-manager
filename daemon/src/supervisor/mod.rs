@@ -628,6 +628,10 @@ pub async fn sanitized_state(app: &Arc<App>) -> Result<Value, LcError> {
             "cwd": b.cwd,
             "host": hosts.get(&b.project_id).cloned(),
             "host_connected": hosts.get(&b.project_id).map(|h| connected.contains(h)),
+            // 側欄上那顆燈號，跟 `GET /api/state` 同一個函式算的。以前這裡沒有它，`bin/agm`
+            // 只好自己從 `host_connected` + `run` 推——而 `lamp` 吃的是 `bot_connected`
+            // （bot → host → **herdr session**），同一台主機上 session 掉了的那顆會分岔（issue #514）。
+            "lamp": crate::api::lamp(app.bot_connected(&b.id).await, run.as_ref()),
             "queued_turns": queued,
             // 停著但可以叫醒：派工照送就好，`lifecycle::prompt` 會先把它 `--resume` 回來。
             "asleep": asleep.get(&b.id).map(|(at, mins)| json!({"since": at, "idle_minutes": mins})),

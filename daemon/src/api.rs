@@ -499,7 +499,7 @@ async fn get_session(
     Json(json!({"token": app.ui_token, "port": app.port})).into_response()
 }
 
-fn lamp(connected: bool, run: Option<&db::Run>) -> &'static str {
+pub(crate) fn lamp(connected: bool, run: Option<&db::Run>) -> &'static str {
     if !connected {
         return "disconnected";
     }
