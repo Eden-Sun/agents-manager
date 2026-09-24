@@ -33,7 +33,7 @@ import { ApiError } from '../api/types'
 import { PREVIEW_OFF, toPreviewEvent, type Preview } from '../api/preview'
 import type { Bot, BotKind, RestartBatch, GroupChatResult, Mission, MissionDetail, NewMissionInput, MemSnapshot, GroupMessage, Host, HerdrVersion, HostResult, HostShell, Identity, IdentityStatusMap, Lamp, Message, ModelInfo, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, PatchBotInput, PatchProjectInput, Project, QuotaMap, Run, TerminalSource, ToolMap, Turn, TurnDelivery } from '../api/types'
 import type { ProjectPane } from '../api'
-import { joinRunningBatch, restartProgress } from './restartBatch'
+import { joinRunningBatch, reconcileBatch, restartProgress } from './restartBatch'
 import { dropHostModels, modelsKey, shouldFetchModels, type ModelsCache } from './modelsCache'
 import { byId, byTime, capList, insertSorted, pruneTurns } from './lists'
 import { type CapFloors, capFor, clearFloor, raiseFloor } from './messageCap'
@@ -970,6 +970,9 @@ export const useStore = create<StoreState>((set, get) => ({
         // 比現在的大就跟上——兩條路都等於 `st.daemon_seq`，不寫成三元式，免得看起來像有「不往下降」的分支
         // （i264 的複看，2026-09-24）。
         lastDurableSeq: st.daemon_seq,
+        // 手上的一鍵重啟進度跟快照對帳（issue #492）：`bots_restart_done` 收不到時（批次中途 daemon 重啟、
+        // 或落到全量 resync）它會永遠停在「重啟中 k/N」，而那顆晶片一直蓋著一鍵重啟的觸發鈕。
+        restartBatch: reconcileBatch(s.restartBatch, st.restart_batch),
         selectedBotId: selected,
         selectedProjectId: selectedProject,
       }

@@ -583,6 +583,8 @@ export function toState(raw: unknown): AppState {
 
   return {
     daemon_seq: num(pick(root, 'daemon_seq'), 0),
+    // 三態（issue #492）：欄位不在＝`undefined`＝舊 daemon、不知道；在但空＝`null`＝沒有批次在跑。
+    restart_batch: pick(root, 'restart_batch') === undefined ? undefined : str(pick(root, 'restart_batch')) || null,
     connected: bool(pick(root, 'connected'), true),
     default_connected: bool(pick(root, 'default_connected'), false),
     attach_command: attachCommand,

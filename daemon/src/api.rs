@@ -615,6 +615,8 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
     }
     Ok(json!({
         "daemon_seq": app.current_seq(),
+        // 現在有沒有一批一鍵重啟在跑（issue #492）：進度只走 WS，`bots_restart_done` 收不到時前端要有地方對帳。
+        "restart_batch": crate::bulk_restart::running_batch(&app.data_dir),
         "connected": connected,
         "default_connected": app.default_connected.load(Ordering::SeqCst),
         "herdr_session": app.herdr_session,
