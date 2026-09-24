@@ -539,6 +539,20 @@ async fn stop_closes_the_pane_and_frees_the_port() {
 }
 
 #[tokio::test]
+async fn stop_reports_failure_when_the_preview_pane_cannot_be_closed() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let r = rig().await;
+    let bot = running_bot(&r, "alfa").await;
+    start(&r.e.app, &bot, StartReq::default()).await.unwrap();
+    r.fake.close_fails.store(true, SeqCst);
+
+    let LcError::Conflict(body) = stop(&r.e.app, &bot).await.unwrap_err() else { panic!("關不掉 pane 時 DELETE 要失敗") };
+    assert_eq!(body["reason"], "preview_stop_failed");
+    assert_eq!(row(&r.e.app.db, &bot).await.unwrap().unwrap().status, "starting");
+    assert!(r.fake.closed.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn stopping_the_bot_takes_its_preview_with_it() {
     let r = rig().await;
     let bot = running_bot(&r, "alfa").await;

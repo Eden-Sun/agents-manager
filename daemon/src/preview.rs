@@ -984,22 +984,24 @@ async fn disconnect_locked(app: &Arc<App>, r: Row) -> Option<Row> {
 /// `DELETE`：關 pane、放掉 port。
 pub async fn stop(app: &Arc<App>, bot_id: &str) -> LcResult<Value> {
     top_level_bot(app, bot_id).await?;
-    stop_for_bot(app, bot_id).await;
+    if !stop_for_bot(app, bot_id).await {
+        return Err(LcError::conflict("preview_stop_failed", json!({"bot_id": bot_id})));
+    }
     Ok(off_body())
 }
 
 /// bot 被停止／刪除／閒置收掉時一起收預覽。盡力而為：讀不到就記 log，不擋 bot 的停機。
-pub async fn stop_for_bot(app: &Arc<App>, bot_id: &str) {
+pub async fn stop_for_bot(app: &Arc<App>, bot_id: &str) -> bool {
     let _g = gate().lock().await;
     let r = match row(&app.db, bot_id).await {
         Ok(Some(r)) if r.status() != Status::Off => r,
-        Ok(_) => return,
+        Ok(_) => return true,
         Err(e) => {
             tracing::warn!(bot = bot_id, error = %e, "preview: cannot read the preview row while stopping the bot");
-            return;
+            return false;
         }
     };
-    disconnect_locked(app, r).await;
+    matches!(disconnect_locked(app, r).await, Some(r) if r.status() == Status::Off)
 }
 
 /// 關這一列的 pane；回 `false`＝**沒關掉也沒確認它不在**（讀不到 run、拿不到那個 session 的 client、關指令失敗），呼叫端不可標 off。

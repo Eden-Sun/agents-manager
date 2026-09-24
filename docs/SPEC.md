@@ -2060,7 +2060,7 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   對帳時 bot 已經沒有 active run（自己退了）預覽也一併收成 `off`。
 - **收掉**：`DELETE`、bot 被停止／重啟／刪除、§6.11 閒置收 bot（它們都走 `stop_locked`）一律先關預覽 pane 再動 agent 的 pane——
   預覽的 pane 跟 agent 同一個 tab，先收它，agent 的 pane 關掉時那個 tab 才會是空的、才會被一起關。
-  收預覽是盡力而為，讀不到就記 log，不擋 bot 的停機。
+  收預覽是盡力而為，讀不到就記 log，不擋 bot 的停機；只有使用者自己按的 `DELETE` 會把「沒收掉」回成 409 `preview_stop_failed`（列原樣留著），不回 `off`。
   **讀不到 run 不等於 bot 停了**（#299）：對帳與收預覽時讀 `active_run` 失敗（DB busy／I/O）是「不知道」——不關 pane、不標 `off`，列原樣留著等下次；
   只有讀到 `Ok(None)` 才確定沒有 run（才跟著收），這時關 pane 用 **bot 自己設定的 session**（`session_for_bot`），不猜管理 session。
   **權威不明一律不動作**（#257）：讀 run 失敗、拿不到那個 session 的 herdr client、關 pane 的指令失敗或事後 `pane_get` 仍看得到它，都不標 `off`——
