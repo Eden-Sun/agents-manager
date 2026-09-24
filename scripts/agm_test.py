@@ -1312,7 +1312,9 @@ class OpsSyncTest(CliCase):
                  "scripts/ops/a.sh bin/a.sh\nscripts/ops/b.sh bin/b.sh\nscripts/ops/c.sh bin/c.sh\nscripts/ops/t.md t.md\n"
                  "scripts/ops/launchd/com.agm.x.plist LaunchAgents/com.agm.x.plist\n")
         self.put("scripts/ops/launchd/com.agm.x.plist",
-                 self.plist("com.agm.x", 1800, extra="<key>StandardOutPath</key><string>/tmp/x.log</string>"))
+                 self.plist("com.agm.x", 1800,
+                            extra="<key>StandardOutPath</key><string>/tmp/x.log</string>"
+                                  "<key>EnvironmentVariables</key><dict><key>PATH</key><string>/opt/other</string></dict>"))
         self.git("add", "-A")
         self.git("commit", "-qam", "加 plist")
         self.git("update-ref", "refs/remotes/origin/main", "HEAD")
@@ -1320,8 +1322,8 @@ class OpsSyncTest(CliCase):
             self.install(f"bin/{n}.sh", "a v3\n" if n == "a" else f"{n} v1\n")
         self.install("t.md", "task\n")
 
-    def test_key_order_and_env_vars_are_not_drift(self):
-        """比的是 parse 過的 dict，所以鍵的順序不影響；`EnvironmentVariables` 是每台機器自己的值，忽略。"""
+    def test_key_order_and_env_var_values_are_not_drift(self):
+        """鍵的順序不影響；`EnvironmentVariables` 的**值**每台機器不同，忽略（但鍵要在，見下一條）。"""
         self.with_plists()
         (self.agents / "com.agm.x.plist").write_text(
             self.PLIST.format(
@@ -1336,13 +1338,31 @@ class OpsSyncTest(CliCase):
         self.assertTrue(r["in_sync"], r)
         self.assertIn("LaunchAgents/com.agm.x.plist", [x["target"] for x in r["ok"]])
 
+    def test_a_dropped_env_vars_key_is_drift_even_though_its_value_is_ignored(self):
+        """issue #499（i264 review）：只忽略**值**。安裝端整份掉了 `EnvironmentVariables`，
+        那個 job 就少了 `PATH`——那是落差，不能因為「這個鍵不比」就報成同步。"""
+        self.with_plists()
+        self.install_plist_without_env()
+        code, out, _ = self.run_cli("ops-sync", "--check", "--repo", str(self.repo))
+        self.assertEqual(code, 1)
+        r = json.loads(out)
+        [row] = [x for x in r["drift"] if x["target"] == "LaunchAgents/com.agm.x.plist"]
+        self.assertEqual(row["diff"]["EnvironmentVariables"], {"repo": "<ignored>", "installed": None})
+
+    def install_plist_without_env(self) -> None:
+        (self.agents / "com.agm.x.plist").write_text(
+            self.plist("com.agm.x", 1800, extra="<key>StandardOutPath</key><string>/tmp/x.log</string>"),
+            encoding="utf-8")
+
     def test_log_path_drift_is_reported(self):
         """issue #499：`StandardOutPath`／`StandardErrorPath` 是 log 的落點。browser-gc 這種沒有
         ops-alert 管道的，失敗只留 log——路徑漂掉卻報同步，等於證據來源斷了還顯示綠燈。
         白名單那版會靜默忽略這兩個鍵，所以這條當時是綠的。"""
         self.with_plists()
         (self.agents / "com.agm.x.plist").write_text(
-            self.plist("com.agm.x", 1800, extra="<key>StandardOutPath</key><string>/tmp/moved.log</string>"),
+            self.plist("com.agm.x", 1800,
+                       extra="<key>StandardOutPath</key><string>/tmp/moved.log</string>"
+                             "<key>EnvironmentVariables</key><dict/>"),
             encoding="utf-8")
         code, out, _ = self.run_cli("ops-sync", "--check", "--repo", str(self.repo))
         self.assertEqual(code, 1)
@@ -1363,7 +1383,11 @@ class OpsSyncTest(CliCase):
     def test_plist_interval_drift_is_reported_with_both_values(self):
         """#487 的本體：實機把間隔改掉（或文件跟排程不一致）要看得出來，而且要講出兩邊的值。"""
         self.with_plists()
-        (self.agents / "com.agm.x.plist").write_text(self.plist("com.agm.x", 600), encoding="utf-8")
+        (self.agents / "com.agm.x.plist").write_text(
+            self.plist("com.agm.x", 600,
+                       extra="<key>StandardOutPath</key><string>/tmp/x.log</string>"
+                             "<key>EnvironmentVariables</key><dict/>"),
+            encoding="utf-8")
         code, out, _ = self.run_cli("ops-sync", "--check", "--repo", str(self.repo))
         self.assertEqual(code, 1)
         r = json.loads(out)
@@ -1373,7 +1397,11 @@ class OpsSyncTest(CliCase):
     def test_an_unlisted_com_agm_job_is_reported_as_unversioned(self):
         """`~/Library/LaunchAgents` 有、對照表沒有的 job＝沒有版控的排程，正是 #487 要抓的。"""
         self.with_plists()
-        (self.agents / "com.agm.x.plist").write_text(self.plist("com.agm.x", 1800), encoding="utf-8")
+        (self.agents / "com.agm.x.plist").write_text(
+            self.plist("com.agm.x", 1800,
+                       extra="<key>StandardOutPath</key><string>/tmp/x.log</string>"
+                             "<key>EnvironmentVariables</key><dict/>"),
+            encoding="utf-8")
         (self.agents / "com.agm.ghost.plist").write_text(self.plist("com.agm.ghost", 60), encoding="utf-8")
         (self.agents / "com.other.thing.plist").write_text(self.plist("com.other.thing", 60), encoding="utf-8")
         code, out, _ = self.run_cli("ops-sync", "--check", "--repo", str(self.repo))

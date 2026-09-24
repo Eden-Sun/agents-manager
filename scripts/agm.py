@@ -1007,6 +1007,8 @@ LAUNCHD_PREFIX = "LaunchAgents/"
 #: log——log 路徑漂掉卻報「同步」，等於證據來源斷了還顯示綠燈。
 #:
 #: `EnvironmentVariables` 留在忽略清單：裡面是這台機器的 `PATH` 與 bot id，每台不同。
+#: 忽略的只有**值**——鍵在不在兩邊還是要一樣，不然安裝端整份掉了 `EnvironmentVariables`
+#: （job 因此少了 `PATH`）會被報成同步（issue #499，i264 review）。
 PLIST_IGNORED_KEYS = ("EnvironmentVariables",)
 
 
@@ -1028,13 +1030,16 @@ def _git_bytes(repo: Path, ref: str, source: str) -> bytes:
 
 
 def _plist_semantics(raw: bytes) -> dict:
-    """plist 裡真正代表「這個 job 是什麼、多久跑一次」的那幾個欄位。讀不懂就回一個帶錯誤的 dict，
-    讓比對結果是 drift 而不是靜靜當成相同。"""
+    """parse 過的 plist，除了 [`PLIST_IGNORED_KEYS`] 的**值**以外全部保留（issue #499）。
+
+    被忽略的鍵仍然留下一個存在標記：整個鍵不見也是落差——安裝端把 `EnvironmentVariables` 整份掉了
+    （job 於是少了 `PATH`）不該報成同步。讀不懂就回一個帶錯誤的 dict，讓結果是 drift 而不是靜靜當成相同。
+    """
     try:
         d = plistlib.loads(raw)
     except Exception as e:  # noqa: BLE001 - 壞掉的 plist 要報成落差，不是炸掉整份報告
         return {"_error": f"{type(e).__name__}: {e}"}
-    return {k: v for k, v in d.items() if k not in PLIST_IGNORED_KEYS}
+    return {k: ("<ignored>" if k in PLIST_IGNORED_KEYS else v) for k, v in d.items()}
 
 
 def ops_sync_report(repo: Path, ref: str, agm_dir: Path) -> dict:
@@ -1062,8 +1067,8 @@ def ops_sync_report(repo: Path, ref: str, agm_dir: Path) -> dict:
         if not path.is_file():
             report["missing"].append(row)
             continue
-        # launchd 的 plist 不能整檔比（issue #487）：launchd 自己會改寫鍵的順序、補欄位，
-        # 所以按 blob 比對一定是 drift。只比語意欄位。
+        # plist 不按 blob 比（issue #487、#499）：比的是 `plistlib` parse 過的 dict，
+        # 所以同樣內容換個鍵序不算 drift。忽略的只有 `PLIST_IGNORED_KEYS`。
         if target.startswith(LAUNCHD_PREFIX):
             want = _plist_semantics(_git_bytes(repo, ref, source))
             got = _plist_semantics(path.read_bytes())
@@ -1115,7 +1120,16 @@ def cmd_ops_sync(client: Client, cfg: dict, args) -> object:
         return report
     if args.alert:
         counts = "、".join(f"{k} {len(report[k])}" for k in ("drift", "behind", "missing", "extra") if report[k])
-        names = ", ".join(r["target"] for k in ("drift", "behind", "missing", "extra") for r in report[k])
+        # plist 的 drift 要講出**哪個鍵、哪一邊**：只寫檔名的話，「log 落點漂掉」跟「腳本落後兩個 commit」
+        # 在通知裡長得一模一樣，收到的人得自己再跑一次才知道要不要緊（issue #499，i264 review）。
+        def _name(row: dict) -> str:
+            diff = row.get("diff")
+            if not diff:
+                return row["target"]
+            bits = "；".join(f"{k}: repo={v['repo']!r} 安裝={v['installed']!r}" for k, v in diff.items())
+            return f"{row['target']}（{bits}）"
+
+        names = ", ".join(_name(r) for k in ("drift", "behind", "missing", "extra") for r in report[k])
         detail = f"已安裝的 ops 腳本跟 {args.ref}（{report['commit']}）不一致：{counts}（{names}）。`agm ops-sync --check` 看明細，照 scripts/ops/README.md 重新 install"
         report["alert"] = client.post("/api/supervisor/ops-alerts", {"source": "ops-sync", "reason": "installed_out_of_sync", "detail": detail})
     return Exit(report, 1)
