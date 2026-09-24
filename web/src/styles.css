@@ -1992,6 +1992,13 @@ button.run-debug-toggle:hover:not(:disabled) {
   border-color: var(--accent);
 }
 
+/* 鍵盤直通被鎖住（#423 防誤刪框，issue #545）：開關照樣畫出來，但灰掉並說明原因——
+   不畫的話使用者不知道鍵盤現在是死的，也不知道為什麼。 */
+.blocked-modal-hints .conn.is-locked {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
 /* blocked 全畫面終端（BlockedModal）：吃掉大半畫面是刻意的，要判斷的就是這張圖。 */
 
 .modal.blocked-modal {

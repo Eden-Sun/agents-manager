@@ -280,7 +280,11 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   （指令不執行，claude 收到「被內建安全檢查拒絕」的 tool_result 後把回合做完；本機 2.1.281＋假 API 實測，畫面在 `lifecycle/fixtures/claude-2.1.281-dangerous-rm*.txt`）。
   daemon **一個鍵都不按**，也不設 `CLAUDE_CODE_DISABLE_SUBSTITUTION_RM_PROMPT` 把它整批關掉；在 bot 的對話插一則系統訊息（警語、目標、指令），同一個框只寫一次；
   送達閘門（`pane_ready_for_prompt`，一般送出、排隊 flush、插隊送出共用）認到就回 409 `dangerous_rm_pending`，一個字都不打進框裡；
-  子 agent 給父 agent 的通知加註「只有使用者本人能核准，不要替它按」。herdr 通常自己判成 `blocked`；判成 `idle` 時由 10 秒巡邏補標，
+  子 agent 給父 agent 的通知加註「只有使用者本人能核准，不要替它按」。
+  **網頁這一側同一條線**（#545）：blocked 全畫面視窗的鍵盤直通預設**關**（那個視窗是 blocked 後自己彈的，
+  人沒有要求它；直通開著時打字會一個字一個字送進 TUI，按到一個 `1` 就等於按下「1. Yes」），
+  認到這個框時直通鎖死、開關不給開，只能按畫面上的選項；開關與說明每個模式都看得見。
+  網頁的偵測在 `web/src/lib/dangerousRm.ts`，只判「是不是這個框」，解目標與指令仍以這裡的 `dangerous_rm_prompt` 為準。herdr 通常自己判成 `blocked`；判成 `idle` 時由 10 秒巡邏補標，
   框消失（回答或自動拒絕）時照原值還回去（CAS，herdr 這段期間報過別的狀態就不動），插一則「框已關掉」、叫醒排隊的 flush。
   開著的框記在記憶體：daemon 重啟後最多重講一次通知。
   指令從框上方的 `Bash command` 讀：多列或折行的指令每列前有 `│`；只佔一列時沒有 `│`，就取標題下第一列（下一列是說明）。
