@@ -403,6 +403,11 @@ function claudeModelsForIdentity(identity: string): Rec[] {
   }))
 }
 
+/** 幾小時前（ISO）：mock 用來造「沿用的那一桶」。 */
+function hoursAgo(h: number): string {
+  return new Date(Date.now() - h * 3600_000).toISOString()
+}
+
 function inHours(h: number): string {
   return new Date(Date.now() + h * 3600_000).toISOString()
 }
@@ -524,7 +529,15 @@ export class MockTransport implements Transport {
   /** SPEC §14：裸 key 是本機，遠端加 `<host>/` 前綴（`seedHostQuota()` 故意給不同數字）。 */
   private quota: Record<string, Rec | null> = {
     claude: { five_hour: { used_pct: 18, resets_at: inHours(2.4) }, seven_day: { used_pct: 40, resets_at: inHours(70) }, plan: 'Max 20x', updated_at: now(), host: 'local' },
-    'claude:cc1': { five_hour: { used_pct: 85, resets_at: inHours(1.1) }, seven_day: { used_pct: 30, resets_at: inHours(120) }, plan: 'Pro', updated_at: now(), host: 'local' },
+    // 沿用上一份讀數的那一桶（issue #540）：`observed_at` 比 `updated_at` 舊＝狀態列這幾次沒帶 5h，
+    // mock 固定留一格這種狀態，量表上的「舊」標記才有東西可看。
+    'claude:cc1': {
+      five_hour: { used_pct: 85, resets_at: inHours(1.1), observed_at: hoursAgo(2) },
+      seven_day: { used_pct: 30, resets_at: inHours(120), observed_at: now() },
+      plan: 'Pro',
+      updated_at: now(),
+      host: 'local',
+    },
     // zshrc 身份也有額度列（SPEC §16）。
     'claude:cc2': { five_hour: { used_pct: 24, resets_at: inHours(3.8) }, seven_day: { used_pct: 51, resets_at: inHours(88) }, plan: 'Pro', updated_at: now(), host: 'local' },
     // 重置券（codex `rateLimitResetCredits`）：固定給一張讓明細有東西可看。

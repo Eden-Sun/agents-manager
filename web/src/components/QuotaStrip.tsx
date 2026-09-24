@@ -17,6 +17,7 @@ import { UpdateQuotaChip } from './UpdateQuotaChip'
 import { RULE_5H, RULE_WEEKLY, resetBadge } from '../lib/quotaReset'
 import { cliLoginCommand, identityEnv } from '../lib/quotaLogin'
 import './quotaLimitHit.css'
+import { carriedOverAt } from '../lib/quotaWindowAge'
 import './quotaStrip.css'
 
 /**
@@ -163,6 +164,13 @@ function label(entry: QuotaEntry, q: KindQuota | null, loggedOut = false, now = 
     )
   }
   if (q?.fable?.resets_at) parts.push(`Fable ${fmtTime(q.fable.resets_at)} 重置`)
+  // 沿用上一份的那幾桶要點名（#540）：整筆的 `stale` 講的是另一件事（開機從快取回填）。
+  for (const [name, w] of [['5 小時', q?.five_hour], [weekLabel(entry.kind) === '週' ? '每週' : '7 天', q?.seven_day], ['Fable', q?.fable]] as const) {
+    const at = carriedOverAt(w, q?.updated_at)
+    if (!at) continue
+    const age = staleAge(at, now)
+    parts.push(`${name}是沿用${age ? ` ${age}前` : ''}的讀數`)
+  }
   if (q?.stale) parts.push(staleSuffix(q, now))
   return parts.join('，')
 }
@@ -303,6 +311,19 @@ function useMinuteNow(): number {
   return now
 }
 
+/**
+ * 沿用上一份讀數的那一格（#540）：窗口名後面掛一個「舊」，提示寫出它自己的年齡。
+ * 只用顏色不行（UI-DECISIONS：狀態一律還有文字、形狀或記號），所以是字不是點。
+ */
+function StaleWindowMark({ at, name, now }: { at: string; name: WindowName; now: number }) {
+  const age = staleAge(at, now)
+  return (
+    <sup className="quota-window-stale" title={`${name} 這一格是沿用${age ? ` ${age}前` : ''}的讀數——這幾次的狀態列沒有帶它，數字不一定是現況`}>
+      舊
+    </sup>
+  )
+}
+
 /** Health bar; colour follows daemon `low` / `critical` (docs/API.md §12.4). */
 function Bar({
   pct,
@@ -351,7 +372,20 @@ function Bar({
   )
 }
 
-type WindowBar = { name: WindowName; pct: number | null; resetsAt: string | null; low: boolean; critical: boolean }
+/** `staleAt`：這一桶是沿用上一份讀數時，它自己的觀測時間（#540）；不是沿用就 `null`。 */
+type WindowBar = { name: WindowName; pct: number | null; resetsAt: string | null; low: boolean; critical: boolean; staleAt: string | null }
+
+/** 六個建構點共用：`low`／`critical` 一律照 daemon 的旗標，沿用與否照 `observed_at`。 */
+function windowBar(name: WindowName, pct: number | null, w: QuotaWindow | null | undefined, updatedAt: string | undefined): WindowBar {
+  return {
+    name,
+    pct,
+    resetsAt: w?.resets_at ?? null,
+    low: w?.low ?? false,
+    critical: w?.critical ?? false,
+    staleAt: carriedOverAt(w, updatedAt),
+  }
+}
 
 /** 手機一格只放一個數字：先比 daemon 旗標再比 pct；平手留現任，免得數字在窗口間跳。 */
 function moreUrgent(w: WindowBar, best: WindowBar): boolean {
@@ -399,76 +433,32 @@ function Gauge({
   // 手機一格只寫一個窗口，否則 390px 放五格會長高（2026-09-12 使用者）。預設 7d（決定今天能否開工），
   // 5h／F 被 daemon 標 low／critical 且更急時才取代，不並列；完整數字在 tooltip 與 sheet。
   if (compact && seven !== null) {
-    const shown: WindowBar = {
-      name: weekLabel(entry.kind),
-      pct: seven,
-      resetsAt: q?.seven_day?.resets_at ?? null,
-      low: q?.seven_day?.low ?? false,
-      critical: q?.seven_day?.critical ?? false,
-    }
+    const shown: WindowBar = windowBar(weekLabel(entry.kind), seven, q?.seven_day, q?.updated_at)
     // 門檻見 docs/API.md §12.4。
     const rivals: WindowBar[] = []
     if (five !== null && (q?.five_hour?.low || q?.five_hour?.critical)) {
-      rivals.push({
-        name: '5h',
-        pct: five,
-        resetsAt: q?.five_hour?.resets_at ?? null,
-        low: q?.five_hour?.low ?? false,
-        critical: q?.five_hour?.critical ?? false,
-      })
+      rivals.push(windowBar('5h', five, q?.five_hour, q?.updated_at))
     }
     if (fable !== null && (q?.fable?.low || q?.fable?.critical)) {
-      rivals.push({
-        name: 'F',
-        pct: fable,
-        resetsAt: q?.fable?.resets_at ?? null,
-        low: q?.fable?.low ?? false,
-        critical: q?.fable?.critical ?? false,
-      })
+      rivals.push(windowBar('F', fable, q?.fable, q?.updated_at))
     }
     windows = [rivals.reduce((best, w) => (moreUrgent(w, best) ? w : best), shown)]
   } else if (collapsed) {
     const w = worstWindow(q)
     const src = w.name === '5h' ? q?.five_hour : w.name === 'F' ? q?.fable : q?.seven_day
-    windows = [
-      {
-        name: w.name === '7d' ? weekLabel(entry.kind) : w.name,
-        pct: w.pct,
-        resetsAt: src?.resets_at ?? null,
-        low: src?.low ?? false,
-        critical: src?.critical ?? false,
-      },
-    ]
+    windows = [windowBar(w.name === '7d' ? weekLabel(entry.kind) : w.name, w.pct, src, q?.updated_at)]
   } else if (five === null && seven === null) {
-    windows = [{ name: entry.kind === 'grok' ? '週' : '5h', pct: null, resetsAt: null, low: false, critical: false }]
+    windows = [windowBar(entry.kind === 'grok' ? '週' : '5h', null, null, q?.updated_at)]
   } else {
     windows = []
     if (five !== null) {
-      windows.push({
-        name: '5h',
-        pct: five,
-        resetsAt: q?.five_hour?.resets_at ?? null,
-        low: q?.five_hour?.low ?? false,
-        critical: q?.five_hour?.critical ?? false,
-      })
+      windows.push(windowBar('5h', five, q?.five_hour, q?.updated_at))
     }
     if (seven !== null) {
-      windows.push({
-        name: weekLabel(entry.kind),
-        pct: seven,
-        resetsAt: q?.seven_day?.resets_at ?? null,
-        low: q?.seven_day?.low ?? false,
-        critical: q?.seven_day?.critical ?? false,
-      })
+      windows.push(windowBar(weekLabel(entry.kind), seven, q?.seven_day, q?.updated_at))
     }
     if (fable !== null) {
-      windows.push({
-        name: 'F',
-        pct: fable,
-        resetsAt: q?.fable?.resets_at ?? null,
-        low: q?.fable?.low ?? false,
-        critical: q?.fable?.critical ?? false,
-      })
+      windows.push(windowBar('F', fable, q?.fable, q?.updated_at))
     }
   }
   const title = `${hostLabel(host)} · ${label(entry, q, loggedOut, now)}`
@@ -533,7 +523,10 @@ function Gauge({
             const back = resetBadge(w.pct, w.resetsAt, now, resetRule(w.name))
             return (
             <span key={w.name} className={`quota-compact-win ${levelOf(w)}`}>
-              <span className={`quota-window-name${soon ? ' soon' : ''}`} title={soon ? `5h 還有 ${soon} 重置` : undefined}>{soon ?? w.name}</span>
+              <span className={`quota-window-name${soon ? ' soon' : ''}${w.staleAt ? ' carried' : ''}`} title={soon ? `5h 還有 ${soon} 重置` : undefined}>
+                {soon ?? w.name}
+                {w.staleAt ? <StaleWindowMark at={w.staleAt} name={w.name} now={now} /> : null}
+              </span>
               {back ? (
                 <span className="quota-reset-at" title={`${w.pct !== null && w.pct > 0 ? `剩 ${fmtPct(w.pct)}%` : '用完了'}，還有 ${back} 重置`}>
                   {back}
@@ -556,8 +549,9 @@ function Gauge({
           const soon = back ? null : soonLabel(w.name, w.resetsAt, now)
           return (
             <span key={w.name} className="quota-window">
-              <span className={`quota-window-name${soon ? ' soon' : ''}`} title={soon ? `5h 還有 ${soon} 重置` : undefined}>
+              <span className={`quota-window-name${soon ? ' soon' : ''}${w.staleAt ? ' carried' : ''}`} title={soon ? `5h 還有 ${soon} 重置` : undefined}>
                 {soon ?? w.name}
+                {w.staleAt ? <StaleWindowMark at={w.staleAt} name={w.name} now={now} /> : null}
               </span>
               <Bar
                 pct={w.pct}

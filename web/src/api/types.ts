@@ -692,6 +692,12 @@ export interface QuotaWindow {
   used_pct: number
   /** ISO；可能為 null */
   resets_at: string | null
+  /**
+   * 這一桶**最後一次真的出現在新讀數裡**的時間（ISO，API.md §12.4／issue #475）。
+   * 跟整筆的 `updated_at` 不同：新讀數缺哪一桶，daemon 會沿用上一份（statusline 被截斷只剩 7d 時保住 5h），
+   * 那時 `updated_at` 是現在、這一欄還是舊的。舊 daemon 沒有這一欄 → `null`。
+   */
+  observed_at: string | null
   /** daemon 算的門檻（剩 30%）；UI 不可自己用 `used_pct` 寫死比較。 */
   low: boolean
   /** daemon 算的門檻（剩 5%） */
