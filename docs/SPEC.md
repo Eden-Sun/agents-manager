@@ -2036,6 +2036,7 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   （開新 tab 會被 reconcile 串成鏈、長出重複 bot）。要跑的那一行（回應與資料庫的 `command`）：
   - 目錄的 `package.json` 有 `dev` script → **`bun run dev`**。**不硬塞 port**：server 自己挑，起來之後觀察那顆 pane 的行程樹
     **實際 listen 到哪個 port**（`PreviewEnv::pane_ports`，多個取最小的）記進 `port`；在那之前 `port` 是 `null`。
+    `kind` 看 **dev script 本身**（例如 `next dev` 記 `next`），不是看 `bun run dev` 這一行（那樣一律變 `unknown`）；認不出才是 `unknown`。
   - 沒有才退回 `bunx vite --host <bind> --port <port> --strictPort`；`<bind>` 看 daemon 的 `allow_lan`：開著 `0.0.0.0`，否則
     `127.0.0.1`；`<port>` 從 5180 起往上找 100 顆，跳過別的預覽佔著的（`starting`／`running` 的列）與當下有人在 listen 的
     （5173 留給人手開）。`failed`／`off` 的列不佔 port。
