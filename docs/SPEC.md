@@ -2732,6 +2732,15 @@ AGM 的運維職責以本節為準，不靠任何 bot 的記憶。persona 是同
   要裝哪些、裝到哪裡只寫在 `scripts/ops/install-manifest.tsv`；`agm ops-sync --check`（issue #418）唯讀比對安裝端與 `origin/main`，
   分開報 `drift`（安裝檔不是 repo 任何一版）、`behind`（落後，附 commit）、`missing`、`extra`（`bin/` 裡沒有版控的檔；`agm` 與 `*.bak*` 不算），
   有落差 exit 1，加 `--alert` 推 `ops_alert`（`ops-sync`／`installed_out_of_sync`）。它不安裝任何東西，install 照舊由 AGM 核准後手動做。
+- **`bin/agm` 也要比對**（issue #532）：ops 腳本是手動裝的、`bin/agm` 是開機時從內嵌版寫出來的，兩邊各走各的，
+  而「腳本比 CLI 新」以前一律回報 ok——那正是最會痛的組合：`daemon-update-kick.sh` 派出的正文用 `--lease-token-file`，
+  舊的 `bin/agm` 不認得就 argparse rc 2，rebuild 窗口沒交還、握到 TTL（預設 900 秒），期間 assignment 派送也停著。
+  `ops-sync --check` 因此多問一件唯讀的事（`GET /api/supervisor/cli`），把兩段落差分開報在 `cli`：
+  `installed`（安裝的 ≠ binary 內嵌的）→ 換個檔案就好；`binary`（binary 內嵌的 ≠ `<ref>:scripts/agm.py`）→ 要重建 binary **並重啟 daemon**。
+  任一段有落差就 exit 1，`--alert` 的 detail 會講明是哪一種。daemon 問不到時 `cli.state` 是 `unknown`，**不翻紅**（本業是比對安裝端）。
+- **不必等開機也換得掉**（issue #532）：`POST /api/supervisor/cli` 就地跑同一支 `refresh`（只動 `bin/agm`）；
+  `agm ops-sync --check --refresh-cli` 偵測到安裝端落後時就叫它，換完重問一次。開機是唯一觸發點的時候，
+  「安裝端落後」只能靠重啟 daemon 修，而重啟要另外申請核准——一個換檔案就好的問題被綁在整條換版流程上。
 
 ### 18.2b herdr 升級流程：偵測與交辦（issue #66）
 

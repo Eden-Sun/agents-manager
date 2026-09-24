@@ -13,6 +13,7 @@ import json
 import os
 import socket
 import socketserver
+import subprocess
 import sys
 import tempfile
 import threading
@@ -846,6 +847,83 @@ class ApprovalLeaseCommandTest(CliCase):
         self.assertEqual(self._last_body()["exclude_bot_ids"], ["builder", "manager"])
 
 
+class CliSyncReportTest(unittest.TestCase):
+    """issue #532：`ops-sync --check` 也要看 `bin/agm`。
+
+    兩段落差的修法完全不同（一個換檔案、一個非重建＋重啟不可），所以報告要分得出來。
+    這裡不連真 daemon：`cli_sync_report` 只用到 client 的 `get`／`post`。
+    """
+
+    class Fake:
+        def __init__(self, payload=None, error=None):
+            self.payload = payload
+            self.error = error
+            self.posted = []
+
+        def get(self, path, query=None):
+            if self.error:
+                raise RuntimeError(self.error)
+            return self.payload
+
+        def post(self, path, body=None):
+            self.posted.append((path, body))
+            return {"refreshed": True}
+
+    def repo(self, content: bytes) -> Path:
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        root = Path(d.name)
+        (root / "scripts").mkdir()
+        (root / "scripts" / "agm.py").write_bytes(content)
+        for args in (["init", "-q"], ["config", "user.email", "t@t"], ["config", "user.name", "t"],
+                     ["add", "-A"], ["commit", "-qm", "init"]):
+            subprocess.run(["git", "-C", str(root), *args] if args[0] != "init" else ["git", "init", "-q", str(root)],
+                           check=True, capture_output=True)
+        return root
+
+    def test_the_repo_hash_is_the_same_algorithm_as_the_daemon(self):
+        # daemon 的 cli_refresh::short_hash 有一樣的兩個向量；算錯就永遠對不上。
+        self.assertEqual(agm.short_hash(b""), "cbf29ce48422")
+        self.assertEqual(agm.short_hash(b"a"), "af63dc4c8601")
+
+    def test_an_installed_cli_that_is_not_the_embedded_one_is_drift(self):
+        body = b"# repo version\n"
+        repo = self.repo(body)
+        embedded = agm.short_hash(body)  # binary 是照這一版建的
+        client = self.Fake({"embedded_hash": embedded,
+                            "roles": [{"role": "patrol", "state": "stale", "installed_hash": "deadbeef1234"}]})
+        r = agm.cli_sync_report(client, repo, "HEAD")
+        self.assertEqual(r["state"], "drift")
+        self.assertEqual([x["role"] for x in r["stale_roles"]], ["patrol"])
+        self.assertFalse(r["binary_behind"], "binary 本身是跟得上的")
+        self.assertIn("--refresh-cli", r["action"])
+        self.assertNotIn("重啟", r["action"], "這一種換個檔案就好，不該叫人去重啟 daemon")
+
+    def test_a_binary_older_than_the_repo_needs_a_rebuild_and_restart(self):
+        repo = self.repo(b"# repo version\n")
+        client = self.Fake({"embedded_hash": agm.short_hash(b"# older\n"),
+                            "roles": [{"role": "patrol", "state": "ok", "installed_hash": agm.short_hash(b"# older\n")}]})
+        r = agm.cli_sync_report(client, repo, "HEAD")
+        self.assertEqual(r["state"], "drift")
+        self.assertTrue(r["binary_behind"])
+        self.assertIn("重啟 daemon", r["action"])
+
+    def test_everything_matching_is_in_sync(self):
+        body = b"# repo version\n"
+        repo = self.repo(body)
+        client = self.Fake({"embedded_hash": agm.short_hash(body),
+                            "roles": [{"role": "patrol", "state": "ok", "installed_hash": agm.short_hash(body)}]})
+        r = agm.cli_sync_report(client, repo, "HEAD")
+        self.assertEqual(r["state"], "ok")
+        self.assertEqual(r["stale_roles"], [])
+
+    def test_a_daemon_that_cannot_be_reached_is_unknown_not_a_failure(self):
+        # 本業是比對安裝端：daemon 沒開是另一件事，不該讓整支 ops-sync 變紅。
+        r = agm.cli_sync_report(self.Fake(error="connection refused"), self.repo(b"x\n"), "HEAD")
+        self.assertEqual(r["state"], "unknown")
+        self.assertIn("connection refused", r["error"])
+
+
 class LeaseTokenTest(CliCase):
     """issue #517（守 #477）：`lease_token` 不可以走 argv，而守衛本身以前一條測試都沒有。
 
@@ -1619,9 +1697,46 @@ class OpsSyncTest(CliCase):
         [behind] = r["behind"]
         self.assertEqual((behind["target"], behind["behind"]), ("bin/a.sh", 2))
         self.assertEqual([c.split(" ", 1)[1] for c in behind["commits"]], ["a 改第三版", "a 改第二版"])
-        self.assertFalse([x for x in FakeDaemon.seen if x["path"] != "/api/session"], "沒帶 --alert 不打 API")
+        # 這支現在多問一件**唯讀**的事：已安裝的 bin/agm 跟不跟得上（issue #532）。除此之外不碰 API。
+        self.assertFalse([x for x in FakeDaemon.seen if x["method"] != "GET"], "沒帶 --alert 不寫任何東西")
+        self.assertEqual(
+            {x["path"] for x in FakeDaemon.seen if x["path"] != "/api/session"},
+            {"/api/supervisor/cli"},
+        )
         # 只讀：安裝檔一個字都沒動。
         self.assertEqual((Path(self.dir.name) / "bin/b.sh").read_text(encoding="utf-8"), "b 有人直接改了\n")
+
+    def test_a_stale_installed_cli_alone_turns_the_check_red(self):
+        """issue #532：ops 腳本全對、但 `bin/agm` 不是這顆 binary 內嵌的那份——以前一律回報 ok。
+
+        那正是最會痛的組合：kick 派出的正文用 `--lease-token-file`，舊 CLI argparse rc 2，
+        rebuild 窗口沒交還、握到 TTL。
+        """
+        for n in "abc":
+            self.install(f"bin/{n}.sh", f"{n} v3\n" if n == "a" else f"{n} v1\n")
+        self.install("t.md", "task\n")
+        FakeDaemon.routes["GET /api/supervisor/cli"] = (200, {
+            "embedded_hash": "aaaaaaaaaaaa",
+            "roles": [{"role": "patrol", "state": "stale", "installed_hash": "bbbbbbbbbbbb"}],
+        })
+        code, out, _ = self.run_cli("ops-sync", "--check", "--repo", str(self.repo))
+        self.assertEqual(code, 1)
+        r = json.loads(out)
+        self.assertFalse(r["in_sync"])
+        self.assertEqual(r["cli"]["state"], "drift")
+        self.assertEqual([x["role"] for x in r["cli"]["stale_roles"]], ["patrol"])
+        # 沒給 --refresh-cli 就不會去換（唯讀）。
+        self.assertFalse([x for x in FakeDaemon.seen if x["method"] != "GET"])
+
+        # 給了才換，而且換完重問一次。
+        FakeDaemon.routes["POST /api/supervisor/cli"] = (200, {"embedded_hash": "aaaaaaaaaaaa", "roles": []})
+        FakeDaemon.seen = []
+        FakeDaemon.routes["GET /api/supervisor/cli"] = (200, {
+            "embedded_hash": "aaaaaaaaaaaa",
+            "roles": [{"role": "patrol", "state": "ok", "installed_hash": "aaaaaaaaaaaa"}],
+        })
+        code, out, _ = self.run_cli("ops-sync", "--check", "--repo", str(self.repo), "--refresh-cli")
+        self.assertEqual(code, 0, out)
 
     # ── launchd plist（issue #487）────────────────────────────────────────────
     PLIST = (
@@ -1759,7 +1874,12 @@ class OpsSyncTest(CliCase):
         self.install("t.md", "task\n")
         r = self.ok("ops-sync", "--check", "--repo", str(self.repo), "--alert")
         self.assertTrue(r["in_sync"])
-        self.assertFalse([x for x in FakeDaemon.seen if x["path"] != "/api/session"], "一致就不喊人")
+        # 這支現在多問一件**唯讀**的事：已安裝的 bin/agm 跟不跟得上（issue #532）。除此之外不碰 API。
+        self.assertFalse([x for x in FakeDaemon.seen if x["method"] != "GET"], "一致就不喊人")
+        self.assertEqual(
+            {x["path"] for x in FakeDaemon.seen if x["path"] != "/api/session"},
+            {"/api/supervisor/cli"},
+        )
         FakeDaemon.routes["POST /api/supervisor/ops-alerts"] = (200, {"queued": True})
         self.install("bin/a.sh", "a v2\n")
         code, out, _ = self.run_cli("ops-sync", "--check", "--repo", str(self.repo), "--alert")

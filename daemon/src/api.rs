@@ -226,6 +226,12 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/supervisor/inbox", get(crate::supervisor::api::get_inbox))
         .route("/supervisor/inbox/{id}/ack", post(crate::supervisor::api::post_inbox_ack))
         .route("/supervisor/state", get(crate::supervisor::api::get_sanitized_state))
+        // 已安裝的 bin/agm vs 這顆 binary 內嵌的那份（SPEC §18.2a）：GET 比對、POST 就地換版，
+        // 不必等下一次開機（issue #532）。
+        .route(
+            "/supervisor/cli",
+            get(crate::supervisor::cli_refresh::get_cli).post(crate::supervisor::cli_refresh::post_cli_refresh),
+        )
         // 排程腳本卡住時喊人（SPEC §18.9）：只寫一則 durable inbox 事件。
         .route("/supervisor/ops-alerts", post(crate::supervisor::api::post_ops_alert))
         .route("/supervisor/evidence", get(crate::supervisor_evidence::search))

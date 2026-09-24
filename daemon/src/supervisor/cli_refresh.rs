@@ -8,7 +8,9 @@
 //! 寫不進去只記 warn 並推一則 inbox，daemon 照樣開機。`scripts/ops/*.sh` 沒有內嵌，仍要手動安裝。
 
 use crate::state::App;
-use serde_json::json;
+use axum::extract::State;
+use axum::Json;
+use serde_json::{json, Value};
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -120,6 +122,52 @@ async fn configured_dirs(app: &Arc<App>) -> Vec<(Role, PathBuf)> {
 
 pub async fn refresh_on_startup(app: &Arc<App>) {
     refresh_with(app, super::setup::AGM_CLI).await
+}
+
+/// 已安裝的 `bin/agm` 跟這顆 binary 內嵌的那份對不對得上（issue #532）。
+///
+/// `agm ops-sync --check` 只比對**已安裝的 ops 腳本**與 repo，`bin/agm` 完全不在它的視野裡
+/// （`install-manifest.tsv` 明寫「bin/agm 由 daemon 部署，不在這裡」）。於是「腳本比 CLI 新」
+/// 這個組合一律回報 ok，而它正是最會痛的那一種：`daemon-update-kick.sh` 派出的正文用
+/// `--lease-token-file`，舊的 `bin/agm` 不認得就 argparse rc 2，rebuild 窗口沒交還、握到 TTL。
+async fn status(app: &Arc<App>, embedded: &str) -> Value {
+    let embedded_hash = short_hash(embedded.as_bytes());
+    let mut roles = Vec::new();
+    for (role, dir) in configured_dirs(app).await {
+        let bin_dir = dir.join("bin");
+        let path = bin_dir.join("agm");
+        let installed_hash = std::fs::read(&path).ok().map(|b| short_hash(&b));
+        let state = match &installed_hash {
+            Some(h) if *h == embedded_hash => "ok",
+            // 換得動：`POST /api/supervisor/cli` 或下一次開機就會補上，不必重建 binary。
+            Some(_) => "stale",
+            None if bin_dir.is_dir() => "missing",
+            None => "not_set_up",
+        };
+        roles.push(json!({
+            "role": role.as_str(),
+            "dir": dir.to_string_lossy(),
+            "path": path.to_string_lossy(),
+            "installed_hash": installed_hash,
+            "state": state,
+        }));
+    }
+    json!({"embedded_hash": embedded_hash, "roles": roles})
+}
+
+/// `GET /api/supervisor/cli`。
+pub async fn get_cli(State(app): State<Arc<App>>) -> Json<Value> {
+    Json(status(&app, super::setup::AGM_CLI).await)
+}
+
+/// `POST /api/supervisor/cli`：不等下一次開機，現在就把 `bin/agm` 換成內嵌的那份（issue #532）。
+///
+/// 開機是唯一觸發點的時候，「安裝端落後」這件事只能靠重啟 daemon 修——而重啟要另外申請核准，
+/// 於是一個換個檔案就好的問題被綁在整條換版流程上。這條路只做 `refresh_on_startup` 做的事
+/// （只動 `bin/agm`，不碰 persona／runtime.json），回傳更新後的狀態。
+pub async fn post_cli_refresh(State(app): State<Arc<App>>) -> Json<Value> {
+    refresh_with(&app, super::setup::AGM_CLI).await;
+    Json(status(&app, super::setup::AGM_CLI).await)
 }
 
 async fn refresh_with(app: &Arc<App>, embedded: &str) {
@@ -324,6 +372,40 @@ mod tests {
     fn the_hash_is_stable_across_builds() {
         assert_eq!(short_hash(b""), "cbf29ce48422");
         assert_eq!(short_hash(b"a"), "af63dc4c8601");
+    }
+
+    /// #532：安裝端落後看得見，而且不必重啟 daemon 就修得掉。
+    #[tokio::test]
+    async fn the_api_reports_a_stale_cli_and_can_replace_it_without_a_restart() {
+        let e = crate::testing::env().await;
+        let app = &e.app;
+        let patrol = with_bin("OLD");
+        store::get_or_init(&app.db).await.unwrap();
+        store::set_env(&app.db, "patrol-bot", &e.project_id, &patrol.to_string_lossy()).await.unwrap();
+
+        let st = status(app, "NEW").await;
+        assert_eq!(st["embedded_hash"], short_hash(b"NEW"));
+        assert_eq!(st["roles"][0]["role"], "patrol");
+        assert_eq!(st["roles"][0]["state"], "stale", "{st}");
+        assert_eq!(st["roles"][0]["installed_hash"], short_hash(b"OLD"));
+
+        refresh_with(app, "NEW").await; // POST 走的就是這一支
+        let st = status(app, "NEW").await;
+        assert_eq!(st["roles"][0]["state"], "ok", "{st}");
+        assert_eq!(std::fs::read_to_string(patrol.join("bin/agm")).unwrap(), "NEW");
+        assert_eq!(std::fs::read_to_string(patrol.join("persona.md")).unwrap(), "persona", "只動 bin/agm");
+
+        // GET 報的是這顆 binary 真的內嵌的那份（ops-sync 要拿它跟 repo 比）。
+        let Json(v) = get_cli(State(app.clone())).await;
+        assert_eq!(v["embedded_hash"], short_hash(super::super::setup::AGM_CLI.as_bytes()));
+
+        // 沒有 bin/ 的角色目錄：not_set_up，不代建。
+        let bare = tmpdir();
+        roles::set_env(&app.db, Role::Responder, "responder-bot", &e.project_id, &bare.to_string_lossy()).await.unwrap();
+        let st = status(app, "NEW").await;
+        let responder = st["roles"].as_array().unwrap().iter().find(|r| r["role"] == "responder").unwrap().clone();
+        assert_eq!(responder["state"], "not_set_up", "{st}");
+        assert!(!bare.join("bin").exists());
     }
 
     #[tokio::test]
