@@ -40,17 +40,28 @@ try {
   }
   const users = await ev(`document.querySelectorAll('.msg.user').length`)
   console.log('user messages', users)
-  // 滑過最後一則使用者訊息：按鈕出現。
-  const rect = await ev(`(()=>{const ms=[...document.querySelectorAll('.msg.user')];const m=ms[ms.length-1];m.scrollIntoView({block:'center'});const r=m.getBoundingClientRect();return JSON.stringify({x:r.left+r.width/2,y:r.top+10})})()`).then(JSON.parse)
-  await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: rect.x, y: rect.y })
-  await sleep(300)
-  await shot(mobile ? 'm1-button' : '1-hover-shows-button')
-  await ev(`(()=>{const ms=[...document.querySelectorAll('.msg.user')];ms[ms.length-1].querySelector('.msg-rewind').click();return true})()`)
-  await sleep(400)
-  await shot(mobile ? 'm2-confirm' : '2-confirm')
+  if (mobile) {
+    // 手機：每則使用者訊息上常駐的「倒回這裡」。
+    const rect = await ev(`(()=>{const ms=[...document.querySelectorAll('.msg.user')];const m=ms[ms.length-1];m.scrollIntoView({block:'center'});const r=m.getBoundingClientRect();return JSON.stringify({x:r.left+r.width/2,y:r.top+10})})()`).then(JSON.parse)
+    await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: rect.x, y: rect.y })
+    await sleep(300)
+    await shot('m1-button')
+    await ev(`(()=>{const ms=[...document.querySelectorAll('.msg.user')];ms[ms.length-1].querySelector('.msg-rewind').click();return true})()`)
+    await sleep(400)
+    await shot('m2-confirm')
+  } else {
+    // 桌機（使用者 2026-09-24）：輸入列旁那顆常駐的「⟲ 倒回」→ 清單（新到舊、預設最新）→ 下一步 → 確認。
+    await shot('1-bar-button')
+    await ev(`document.querySelector('.rewind-bar-btn').click()`)
+    await sleep(400)
+    await shot('2-pick-list')
+    await ev(`(()=>{const b=[...document.querySelectorAll('button')].find(b=>b.textContent.trim()==='下一步');b.click();return true})()`)
+    await sleep(400)
+    await shot('3-confirm')
+  }
   await ev(`(()=>{const b=[...document.querySelectorAll('button')].find(b=>b.textContent.trim()==='倒回');b.click();return true})()`)
   await sleep(1200)
-  await shot(mobile ? 'm3-after' : '3-after-rewound-and-refilled')
+  await shot(mobile ? 'm3-after' : '4-after-rewound-and-refilled')
   console.log('composer', await ev(`document.querySelector('textarea').value`))
   console.log('rewound', await ev(`document.querySelectorAll('.msg.rewound').length`))
 } finally {

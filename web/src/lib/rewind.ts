@@ -45,3 +45,32 @@ export function rewindErrText(e: unknown): string {
   }
   return e instanceof Error ? e.message : String(e)
 }
+
+/** 桌機對話下方那顆「⟲ 倒回」的清單（使用者 2026-09-24）：還沒被倒掉的使用者訊息，新到舊；群組發言不列（同 `canOfferRewind`）。 */
+export function rewindCandidates(list: Message[]): Message[] {
+  return list.filter((m) => m.role === 'user' && !m.rewound_at && !m.group_id).reverse()
+}
+
+/** 倒回 `id` 會一起拿掉幾則（它自己＋之後還在脈絡裡的問答，system 不算）：確認框講清楚代價。 */
+export function rewindCost(list: Message[], id: string): number {
+  const i = list.findIndex((m) => m.id === id)
+  return i < 0 ? 0 : list.slice(i).filter((m) => m.role !== 'system' && !m.rewound_at).length
+}
+
+/** 那顆按鈕不能按的理由（disabled 的 title）；`null`＝可以。 */
+export function rewindBarBlocked(
+  bot: Pick<Bot, 'kind' | 'herdr_session'> | null | undefined,
+  run: Pick<Run, 'state' | 'agent_status'> | null | undefined,
+  candidates: number,
+): string | null {
+  if (!bot || bot.kind !== 'claude') return '只有 claude 能倒回（codex／grok 沒有對應的 /rewind）'
+  if (bot.herdr_session === 'default') return '這顆是你自己 default session 的終端：只看、不代打'
+  return rewindBlocked(run) ?? (candidates === 0 ? '還沒有可以倒回的使用者訊息' : null)
+}
+
+/** 清單上一則的樣子：前兩行（每行最多 80 字）。 */
+export function rewindPreview(text: string): string {
+  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean)
+  const head = lines.slice(0, 2).map((l) => (l.length > 80 ? `${l.slice(0, 80)}…` : l))
+  return head.join('\n') + (lines.length > 2 ? ' …' : '')
+}

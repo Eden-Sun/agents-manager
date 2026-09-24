@@ -32,6 +32,7 @@ import { CopyChip } from './CopyChip'
 import { HostBadge } from './HostsPanel'
 import { UpdateBadge } from './UpdateBadge'
 import { RewindButton, RewoundTag } from './RewindButton'
+import { RewindBar } from './RewindBar'
 import { TurnErrorBadge } from './TurnErrorBadge'
 import { HostShellPanel } from './HostShellPanel'
 import { GearIcon, GitIcon } from './Icons'
@@ -915,6 +916,7 @@ function Composer({
       <AttachTray items={files.items} onRemove={files.remove} disabled={sending} />
       <div className="composer-box">
         <AttachPicker onFiles={files.add} disabled={state.disabled || sending} />
+        <RewindBar botId={botId} />
         <textarea
           ref={ref}
           rows={phone ? 1 : 2}
