@@ -689,7 +689,7 @@ shim 轉遠端要 pane 裡有 `AM_DAEMON_EXE`、`AM_CONFIG_PATH`（`AM_DAEMON_EX
   token 只有固定格式，不可能夾帶 shell 字元或路徑。
 - 守門順手回收孤兒：沒鎖被持有、沒有行程的 cwd 在裡面、閒置超過 10 分鐘的 `job-*`／舊版 `<pid>/`；閒置超過
   `[build.remote] shared_idle_hours`（預設 3）小時的 `shared/`（遠端磁碟剩不到 25% 時也降到 10 分鐘）。只碰 `<16 位 hex>/<shared｜job-*｜數字>` 這種名字。
-  **`shared/` 另有數量上限（issue #196）**：`[build.remote] max_shared_dirs`（預設 8，`0`＝不限）——一天開十幾顆子 agent、每張票數個變異副本，每個路徑一個新的 hash、
+  **`shared/` 另有數量上限（issue #196）**：`[build.remote] max_shared_dirs`（預設 12，`0`＝不限；設定檔寫死了就以設定檔為準，改線上的值走 `PUT /api/build/remote`）——一天開十幾顆子 agent、每張票數個變異副本，每個路徑一個新的 hash、
   各 2～3G（實測 36 個 hash、29G），只靠時間擋不住。超過就從最久沒用的開始收（LRU；至少閒置 10 分鐘，剛用完的不動；鎖被持有、有行程在用、這次自己的永遠不收），
   時機是每次 remote-cargo 呼叫開始時（跟 #141 的孤兒回收同一處），不靠 crontab。
 - **遠端名額（issue #104）**：同一個 `remote_root` 不分 worktree 同時最多 `[build.remote] max_concurrent` 個遠端編譯（`<remote_root>/.slots/<n>`
