@@ -1373,7 +1373,7 @@ Project 底下所有存活 bot 的訊息合併，以插入順序（`rowid`）倒
 ```json
 { "kinds": {
     "codex": {
-      "five_hour": {"used_pct": 12.5, "resets_at": "2026-09-06T14:00:00.000Z", "low": false, "critical": false},
+      "five_hour": {"used_pct": 12.5, "resets_at": "2026-09-06T14:00:00.000Z", "observed_at": "2026-09-06T09:00:00.000Z", "low": false, "critical": false},
       "seven_day": {"used_pct": 40.0, "resets_at": "2026-09-12T08:00:00.000Z", "low": false, "critical": false},
       "reset_credits": {"available": 1, "title": "Full reset (Weekly + 5 hr)", "expires_at": "2026-10-11T05:31:28.000Z"},
       "limit_hit": null,
@@ -1389,6 +1389,9 @@ Project 底下所有存活 bot 的訊息合併，以插入順序（`rowid`）倒
 } }
 ```
 
+- **每個窗的欄位**：`used_pct`、`resets_at`、算出來的 `low`／`critical`，以及 `observed_at`——**那一桶最後一次真的出現在新讀數裡**的時間（issue #475）。
+  跟 `updated_at`（整筆讀數最後寫入的時間）不同：新讀數缺哪一桶，daemon 會沿用上一份（statusline 被截斷只剩 7d 時保住 5h），
+  那時 `updated_at` 是現在、`observed_at` 還是舊的。「這筆讀數比它自己的窗長還舊」用 `observed_at` 判；舊快取沒有這一欄時是 `null`，退回 `updated_at`。
 - **key**：`codex`、`claude`、`grok`；有 identity 的 bot 另存 `<kind>:<identity>`（`account` = identity 名）；遠端加 `<host>/`。沒裝 CLI、還沒讀到 → `null`。
   不屬於現存主機的 `<host>/…` key 不出現。
   **身分的 kind 跟 bot 不同一律寫裸 kind**（codex 不會有 `codex:ccN`，`ccN` 是 claude 的身分）。

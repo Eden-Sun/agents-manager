@@ -3819,7 +3819,7 @@ Tab:next answer  |  Esc:scrollback  |  Shift+x:dismiss
         assert_eq!(hit.bucket.as_deref(), Some("seven_day"), "撞限帶額度窗，`/usage` 探測才校正得到");
         let reading = crate::quota::Quota {
             five_hour: None,
-            seven_day: Some(crate::quota::Window { used_pct: 10.0, resets_at: Some(db::iso_at(chrono::Utc::now() + chrono::Duration::days(8))) }),
+            seven_day: Some(crate::quota::Window { observed_at: None, used_pct: 10.0, resets_at: Some(db::iso_at(chrono::Utc::now() + chrono::Duration::days(8))) }),
             fable: None,
             reset_credits: None,
             limit_hit: None,

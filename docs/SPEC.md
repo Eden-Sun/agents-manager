@@ -3316,6 +3316,10 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
   （`quota::Quota::usable_window`）——一筆比窗長還舊的讀數必定跨過一次重置，而橫幅早就有到期規則、量表沒有。
   這條在**每次判斷時**都跑，不只開機：`quota_claude` 的 statusline 路徑解不出重置時間就寫 `None`，而百分比照樣可能見底，
   所以同一次 uptime 內就會出現「永久用盡」的身分（issue #475，原本只在 `load_cache` 做一次）。
+  年齡看**那一桶自己的** `Window::observed_at`（最後一次真的出現在新讀數裡的時間），不是整筆的 `updated_at`：
+  `set` 會沿用新讀數缺的窗而把 `updated_at` 蓋成現在，statusline 每幾秒進來一次，被沿用的那一桶年齡就永遠是 0，
+  窗長到期永遠不成立（i267 review）。`seed_limit_hit`／`restore_limit_hit` 只改 `limit_hit` 與 `updated_at`，窗是原本那幾個，
+  所以不會重設年齡。沒有 `observed_at`（這個欄位出現以前的快取列）才退回 `updated_at`。
   回「沒有讀數」而不是「沒見底」，是為了讓「不知道」跟「有額度」分開：`supervisor::responder` 要兩個共用窗**都有說得出話的讀數**
   才敢宣稱恢復。有 `resets_at` 的**不套**這條——那時 `reset_passed` 判得更準，而 7d 窗的讀數本來就可能好幾天前才更新、窗卻還沒到。
   `Pick::Wait` 的 `until` 一律**不得是過去的時刻**：

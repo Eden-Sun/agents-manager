@@ -148,7 +148,7 @@ pub fn parse_grok_usage(screen: &str, now: DateTime<Local>) -> Option<Quota> {
             j += 1;
         }
         if let Some(used_pct) = pct {
-            let w = Window { used_pct, resets_at: resets };
+            let w = Window { observed_at: None, used_pct, resets_at: resets };
             if window.contains("week") {
                 seven = Some(w);
             } else if window.contains("hour") {

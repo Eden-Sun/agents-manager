@@ -853,7 +853,7 @@ pub(crate) async fn apply_codex_limit_hit_quota(app: &Arc<App>, host: &str, base
     }
     // 量表標成用完，但重置時間不從橫幅寫：橫幅時間會舊會歪（同日解析成隔天，交辦等 24 小時）。
     // 只記在 `limit_hit.until`；`resets_at` 留給 app-server／statusLine。
-    let win = crate::quota::Window { used_pct: 100.0, resets_at: None };
+    let win = crate::quota::Window { observed_at: None, used_pct: 100.0, resets_at: None };
     if let Some(existing) = q.five_hour.as_mut() {
         existing.used_pct = 100.0;
     } else if let Some(existing) = q.seven_day.as_mut() {

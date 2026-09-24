@@ -1444,7 +1444,7 @@ mod tests {
     }
 
     fn quota(fable_used: f64) -> Quota {
-        let w = |u: f64| Some(Window { used_pct: u, resets_at: Some("2026-09-18T06:00:00Z".into()) });
+        let w = |u: f64| Some(Window { observed_at: None, used_pct: u, resets_at: Some("2026-09-18T06:00:00Z".into()) });
         Quota {
             five_hour: w(10.0),
             seven_day: w(10.0),
@@ -2889,7 +2889,7 @@ mod tests {
         // cc2 的 5h 窗撞限（橫幅講明是 5h），任務選了「等重置」。
         {
             let mut q = quota(10.0);
-            q.five_hour = Some(Window { used_pct: 100.0, resets_at: Some("2999-01-01T05:00:00Z".into()) });
+            q.five_hour = Some(Window { observed_at: None, used_pct: 100.0, resets_at: Some("2999-01-01T05:00:00Z".into()) });
             q.limit_hit = Some(crate::quota::LimitHit {
                 message: "You've hit your 5-hour limit".into(),
                 until: Some("2999-01-01T05:00:00Z".into()),
