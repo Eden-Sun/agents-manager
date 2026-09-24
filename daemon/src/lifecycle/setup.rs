@@ -201,16 +201,23 @@ fn instance_gate(instance: Option<&str>) -> String {
 
 /// Dispatcher installed on remote hosts: forwards to the per-bot `hook.sh` (SPEC §11.4).
 /// 根目錄與實例閘門都跟著實例走：兩顆 daemon 管同一台遠端、bot id 又一樣時，不能共用同一份 spool。
+///
+/// 第三個參數是 [`REMOTE_TOKEN_SLOT`]，跟 claude／codex 一樣（issue #43、#495）：`hook.sh` 根本不讀它
+/// （`: "$TOKEN"`），而真的 token 上了 argv 就等於印在那台機器的 `ps` 上。pane env 的 `AM_HOOK_TOKEN`
+/// 仍然是身分的來源，上面那個 `-n` 檢查也還在——只是不再把它的值傳下去。
 pub fn remote_grok_dispatch_sh(root: &str, instance: Option<&str>) -> String {
     format!(
-        "#!/bin/sh\n# agents-manager grok dispatcher (SPEC §12). Installed by the daemon; no-op outside daemon panes.\n[ -n \"$AM_BOT_ID\" ] && [ -n \"$AM_HOOK_TOKEN\" ] || exit 0\n{gate}H=\"$HOME/{root}/bots/$AM_BOT_ID/hook.sh\"\n[ -x \"$H\" ] || exit 0\nexec \"$H\" grok \"$AM_BOT_ID\" \"$AM_HOOK_TOKEN\"\n",
+        "#!/bin/sh\n# agents-manager grok dispatcher (SPEC §12). Installed by the daemon; no-op outside daemon panes.\n[ -n \"$AM_BOT_ID\" ] && [ -n \"$AM_HOOK_TOKEN\" ] || exit 0\n{gate}H=\"$HOME/{root}/bots/$AM_BOT_ID/hook.sh\"\n[ -x \"$H\" ] || exit 0\nexec \"$H\" grok \"$AM_BOT_ID\" {slot}\n",
         gate = instance_gate(instance),
+        slot = REMOTE_TOKEN_SLOT,
     )
 }
 
+/// 沒有 `--token`（issue #43、#495）：`hook_cmd::hook_token()` 在旗標是空的時候本來就會讀
+/// `AM_HOOK_TOKEN`，而上面那行已經確定它有值。claude／codex 的 `hook_cmd_parts` 也從來沒帶過它。
 fn local_grok_dispatch_sh(exe: &str, data_dir: &str, instance: Option<&str>) -> String {
     format!(
-        "#!/bin/sh\n# agents-manager grok dispatcher (SPEC §12). Rewritten by the daemon on every grok bot start; no-op outside daemon panes.\n[ -n \"$AM_BOT_ID\" ] && [ -n \"$AM_HOOK_TOKEN\" ] || exit 0\n{gate}exec {exe} hook grok --bot \"$AM_BOT_ID\" --token \"$AM_HOOK_TOKEN\" --port \"${{AM_PORT:-7788}}\" --data-dir {data_dir}\n",
+        "#!/bin/sh\n# agents-manager grok dispatcher (SPEC §12). Rewritten by the daemon on every grok bot start; no-op outside daemon panes.\n[ -n \"$AM_BOT_ID\" ] && [ -n \"$AM_HOOK_TOKEN\" ] || exit 0\n{gate}exec {exe} hook grok --bot \"$AM_BOT_ID\" --port \"${{AM_PORT:-7788}}\" --data-dir {data_dir}\n",
         gate = instance_gate(instance),
         exe = sh_quote(exe),
         data_dir = sh_quote(data_dir)
@@ -1351,6 +1358,28 @@ mod remote_hook_tests {
                 let prod = sb.dir.join(".config/agents-manager/bots").join(&sb.bot).join("hook-spool.jsonl");
                 assert!(!prod.exists(), "隔離實例的事件跑進了正式 spool");
             }
+        }
+    }
+
+    /// issue #43／#495：token 不上命令列。dispatcher 仍然用 `AM_HOOK_TOKEN` 判斷「這是不是 daemon 開的
+    /// pane」（`inject_hooks = false` 就是靠它擋掉），但不把值傳下去：遠端那支 `hook.sh` 根本不讀第三個
+    /// 參數（`: "$TOKEN"`），本機的 `hook_cmd::hook_token()` 旗標空著時會自己去讀 env。
+    #[test]
+    fn neither_grok_dispatcher_puts_the_token_on_the_command_line() {
+        for slug in [None, Some("a1b2")] {
+            let root = crate::startup::remote_root_for(slug);
+            let remote = super::remote_grok_dispatch_sh(&root, slug);
+            let local = super::local_grok_dispatch_sh("/x/agents-managerd", "/x/data", slug);
+            for s in [&remote, &local] {
+                assert!(s.contains("[ -n \"$AM_HOOK_TOKEN\" ]"), "身分判斷要留著：{s}");
+                let after_exec = s.split_once("exec").expect("dispatcher 以 exec 收尾").1;
+                assert!(!after_exec.contains("$AM_HOOK_TOKEN"), "exec 之後不准再出現 token：{s}");
+            }
+            assert!(
+                remote.contains(&format!("grok \"$AM_BOT_ID\" {}", super::REMOTE_TOKEN_SLOT)),
+                "遠端用跟 claude／codex 同一個佔位：{remote}"
+            );
+            assert!(!local.contains("--token"), "本機走 hook_cmd::hook_token 的 env 回退：{local}");
         }
     }
 

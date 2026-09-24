@@ -2357,9 +2357,11 @@ grok TUI 沒有每次啟動注入 hook 的旗標（`--settings`/`--hooks`/`--plu
      ```sh
      #!/bin/sh
      [ -n "$AM_BOT_ID" ] && [ -n "$AM_HOOK_TOKEN" ] || exit 0
-     exec '<abs agents-managerd>' hook grok --bot "$AM_BOT_ID" --token "$AM_HOOK_TOKEN" --port "${AM_PORT:-7788}"
+     exec '<abs agents-managerd>' hook grok --bot "$AM_BOT_ID" --port "${AM_PORT:-7788}"
      ```
-     遠端版 `exec "$HOME/.config/agents-manager/bots/$AM_BOT_ID/hook.sh" grok "$AM_BOT_ID" "$AM_HOOK_TOKEN"`。
+     遠端版 `exec "$HOME/.config/agents-manager/bots/$AM_BOT_ID/hook.sh" grok "$AM_BOT_ID" -`。
+     兩支都**不把 token 放上命令列**（issue #43）：值只走 pane env，`AM_HOOK_TOKEN` 在這裡只用來判斷
+     「是不是 daemon 開的 pane」。遠端第三個參數是固定的佔位 `-`，`hook.sh` 不讀它。
    - `<GROK_HOME>/hooks/agents-manager.json`：`SessionStart` 與 `Stop` 各一個 command hook 指向分派腳本（`timeout: 5`）。`GROK_HOME` 取自 identity.env ∪ bot.env，缺省 `~/.grok`。
 2. `inject_hooks = false` 時 pane 不給 `AM_HOOK_TOKEN`，分派腳本立即 exit 0（走終端備援）。
 3. 使用者自己開的 grok（無 `AM_BOT_ID`）只多一次 `sh` 啟動。Stop hook 的 stdout 必須空（JSON 會被當 decision），§4.4 已保證。
