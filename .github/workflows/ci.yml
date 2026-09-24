@@ -38,6 +38,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      # check.sh ops 會用 bun 確認 scripts/ops/*.ts 載得進來，也用它跑 dev-server-kick 的隔離測試；
+      # 沒有 bun 的話那兩步會自己 skip，CI 就等於沒檢查（issue #418）。
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
       - run: scripts/check.sh ob
       - run: scripts/check.sh ops
 
