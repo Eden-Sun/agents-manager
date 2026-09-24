@@ -243,6 +243,14 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
 - **自動關滿意度問卷**：Claude Code 的 `How is Claude doing this session?` 會讓 agent 停下來等人，與工作無關 → 認出畫面一律送 `0`
   （`tui_prompts`）。進 `blocked` 當下看一次，另每 10 秒巡 `blocked`／`idle` 的 Run；額度探測 pane 也用同一套（那裡的 Enter 會變成替使用者評分）。
   其他等人回答的畫面一概不動。
+- **claude 2.1.281 的防誤刪框（Dangerous rm）不按、要人核准**（`dangerous_rm`，辨識在 `tui_prompts::dangerous_rm_prompt`）：`rm -rf $(…)`、`$VAR`、頂層目錄這類目標，
+  bypass 模式也會跳「Dangerous rm operation on … Do you want to proceed? 1. Yes / 2. No」，約 2 分鐘沒人回答 claude 自動拒絕
+  （指令不執行，claude 收到「被內建安全檢查拒絕」的 tool_result 後把回合做完；本機 2.1.281＋假 API 實測，畫面在 `lifecycle/fixtures/claude-2.1.281-dangerous-rm*.txt`）。
+  daemon **一個鍵都不按**，也不設 `CLAUDE_CODE_DISABLE_SUBSTITUTION_RM_PROMPT` 把它整批關掉；在 bot 的對話插一則系統訊息（警語、目標、指令），同一個框只寫一次；
+  送達閘門（`pane_ready_for_prompt`，一般送出、排隊 flush、插隊送出共用）認到就回 409 `dangerous_rm_pending`，一個字都不打進框裡；
+  子 agent 給父 agent 的通知加註「只有使用者本人能核准，不要替它按」。herdr 通常自己判成 `blocked`；判成 `idle` 時由 10 秒巡邏補標，
+  框消失（回答或自動拒絕）時照原值還回去（CAS，herdr 這段期間報過別的狀態就不動），插一則「框已關掉」、叫醒排隊的 flush。
+  開著的框記在記憶體：daemon 重啟後最多重講一次通知。
 - **claude 更新通知**：自動更新後 claude 只在 pane 最底印 `✔ Update installed · Restart to update`，不是事件。`update_watch` 每 30 秒
   對 running 的 claude run `pane.read visible 80`，認到就寫 `runs.update_notice` 並推 `bot_status`，消失就清 NULL（讀不到畫面不清）；不限 idle。
   認法（`tui_prompts::update_notice`）：兩段字都要中，**且只看最下面 6 行非空白**（正文引用這兩句時會誤中）。存在 run 上：重啟（套用更新本身）後的新 run 本來就沒有。

@@ -254,6 +254,68 @@ pub async fn shows_login_problem(app: &Arc<App>, run: &db::Run) -> bool {
     }
 }
 
+/// Claude Code 2.1.281 起的「Dangerous rm operation」確認框（`rm -rf $(…)`、`$VAR`、頂層目錄這類目標）：
+/// 就算帶 `--dangerously-skip-permissions` 也會跳，約 2 分鐘沒人回答就自動拒絕（那個指令不會執行，回合照常往下走）。
+/// 它是**防誤刪**的：daemon 只認、只通知，一個鍵都不替它按，送達也不能打進框裡（`pane_ready_for_prompt`、
+/// [`crate::dangerous_rm`]）。真畫面 `lifecycle/fixtures/claude-2.1.281-dangerous-rm.txt`（2026-09-24）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DangerousRm {
+    /// 警語原文（`Dangerous rm operation on …: <目標>`），折行接回一行。
+    pub warning: String,
+    /// 警語冒號後面那段，也就是 claude 認定的目標（路徑、`command substitution output`、變數路徑連同它所在的那段 rm）。
+    pub target: String,
+    /// 框上方 `Bash command` 裡的指令（逐行），讀不到是 `None`。
+    pub command: Option<String>,
+}
+
+/// 警語、倒數、問句與兩個選項最多這麼高（倒數那句在窄 pane 會折兩行、警語也會折）。
+const RM_DIALOG_TAIL_LINES: usize = 16;
+/// 從警語往上找 `Bash command` 標題最多找這麼多行（長指令會折很多行）。
+const RM_COMMAND_LOOKBACK: usize = 24;
+
+/// 框線、行首的 `│` 與前後空白拿掉，其餘原樣（大小寫與路徑要留著給人看）。
+fn strip_box(line: &str) -> String {
+    line.trim().trim_start_matches(['│', '┃', '▎']).trim().trim_end_matches(['│', '┃']).trim().to_string()
+}
+
+pub fn dangerous_rm_prompt(screen: &str) -> Option<DangerousRm> {
+    let raw: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
+    let start = raw.len().saturating_sub(RM_DIALOG_TAIL_LINES);
+    let tail_raw = &raw[start..];
+    if composer_is_idle(tail_raw) {
+        return None; // 輸入列空著＝沒有框在擋，回覆裡引了原文而已（見 [`composer_is_idle`]）。
+    }
+    let norm: Vec<String> = tail_raw.iter().map(|l| norm_line(l)).collect();
+    let question = norm.iter().rposition(|l| l.starts_with("do you want to proceed"))?;
+    let after = &norm[question + 1..];
+    if !(line_starts_with(after, "1. yes") && line_starts_with(after, "2. no")) {
+        return None;
+    }
+    let warn = norm[..question].iter().rposition(|l| l.starts_with("dangerous rm operation"))?;
+    // 警語折行：接到倒數那句（`⚠ Claude Code will automatically deny …`）或問句為止。
+    let mut warning = strip_box(tail_raw[warn]);
+    for (i, l) in norm.iter().enumerate().take(question).skip(warn + 1) {
+        if l.starts_with("⚠") || l.contains("will automatically deny") {
+            break;
+        }
+        warning.push(' ');
+        warning.push_str(&strip_box(tail_raw[i]));
+    }
+    let target = warning.split_once(": ").map(|(_, t)| t.trim().to_string()).unwrap_or_default();
+    // 指令在框上方的 `Bash command` 區塊：標題下、警語前，`│` 開頭的那幾行。
+    let abs_warn = start + warn;
+    let from = abs_warn.saturating_sub(RM_COMMAND_LOOKBACK);
+    let command = raw[from..abs_warn].iter().rposition(|l| norm_line(l) == "bash command").map(|h| {
+        raw[from + h + 1..abs_warn]
+            .iter()
+            .filter(|l| l.trim_start().starts_with('│'))
+            .map(|l| strip_box(l))
+            .collect::<Vec<_>>()
+            .join("\n")
+    });
+    Some(DangerousRm { warning, target, command: command.filter(|c| !c.is_empty()) })
+}
+
 /// 讀不到畫面就當不是——那不是這裡要擋的事。
 pub async fn stuck_at_login(app: &Arc<App>, run: &db::Run) -> bool {
     let Some(pane) = run.pane_id.clone() else { return false };
@@ -303,8 +365,10 @@ pub fn spawn_survey_watcher(app: Arc<App>) {
         loop {
             tokio::time::sleep(SWEEP).await;
             let runs = db::all_active_runs(&app.db).await.unwrap_or_default();
-            for run in runs.into_iter().filter(|r| r.agent_status == "blocked" || r.agent_status == "idle") {
+            for run in runs.into_iter().filter(|r| r.agent_status == "blocked" || r.agent_status == "idle" || crate::dangerous_rm::is_open(&r.id)) {
                 dismiss_if_survey(&app, &run).await;
+                // 防誤刪框：herdr 判成 idle 時的安全網，也負責框關掉之後的收尾（不按任何鍵）。
+                crate::dangerous_rm::observe(&app, &run).await;
             }
         }
     });
@@ -349,6 +413,35 @@ pub(crate) mod screens {
     /// 2026-09-22 triage bot（2.1.280）的真回報：正文逐行引了 onboarding 主題頁原文，底下是空的輸入列＋statusline。
     /// daemon 對它每次送交辦都回 needs_login，交辦停在 queued。
     pub const REPORT_QUOTING_ONBOARDING: &str = include_str!("lifecycle/fixtures/claude-2.1.280-report-quoting-onboarding.txt");
+    /// 2.1.281 真畫面：bypass 模式下 `rm -rf $(…)/*` 跳的防誤刪框，含自動拒絕的倒數（本機 2.1.281＋假 API 重現，2026-09-24）。
+    pub const DANGEROUS_RM: &str = include_str!("lifecycle/fixtures/claude-2.1.281-dangerous-rm.txt");
+    /// 同一個 pane 在倒數到 0 之後：框不見了，claude 收到「被內建安全檢查拒絕」的 tool_result、把回合做完、回到輸入列。
+    pub const DANGEROUS_RM_AUTO_DENIED: &str = include_str!("lifecycle/fixtures/claude-2.1.281-dangerous-rm-auto-denied.txt");
+    /// 2026-09-23 m12 的 pane（巡檢交辦時抄的原文，路徑中段被抄錄者省略成 `…`）。
+    pub const DANGEROUS_RM_M12: &str = "\
+ Dangerous rm operation on statically-unresolvable target: /Users/…/web/docs/screenshots/pin-3rows/*
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. No
+ Esc to cancel · Tab to amend
+";
+    /// 2026-09-20 w16A:pQ 真機（網頁 `tuiChoices.test.ts` 同一份）：變數路徑那一種，上面有 `Bash command` 框。
+    pub const DANGEROUS_RM_VARIABLE: &str = r#"
+────────────────────────────────────────────────────────────────────────────────
+ Bash command
+
+   │ D=$(cat /tmp/.origin_dir); P=robinstech-com-tw
+   │ shred -u "$D"/origin.key 2>/dev/null || rm -f "$D"/*; rmdir "$D" 2>/dev/null
+   Install origin cert on LB and clean up key
+
+ │ Dangerous rm operation on possibly-empty variable path: "$D"/* in `rm -f "$D"/*`
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. No
+
+ Esc to cancel · Tab to amend
+"#;
 }
 
 #[cfg(test)]
@@ -595,4 +688,38 @@ pub fn is_feedback_survey(screen: &str) -> bool {
     }
 
     const IDLE_CLAUDE: &str = "────────────────────\n❯\n────────────────────\n  15m2dg | agents-manager | Opus 5 31% | 5h:96%\n";
+
+    use super::screens::{DANGEROUS_RM, DANGEROUS_RM_AUTO_DENIED, DANGEROUS_RM_M12, DANGEROUS_RM_VARIABLE};
+
+    /// 2.1.281 的防誤刪框：真畫面（含倒數）、巡檢抄的 m12 畫面、09-20 的變數路徑，三種都認得，而且把目標帶出來。
+    #[test]
+    fn the_dangerous_rm_prompt_is_recognised_with_its_target() {
+        let rm = dangerous_rm_prompt(DANGEROUS_RM).expect("2.1.281 真畫面");
+        assert_eq!(rm.warning, "Dangerous rm operation on statically-unresolvable target: command substitution output");
+        assert_eq!(rm.target, "command substitution output");
+        let cmd = rm.command.expect("框上方的指令");
+        assert!(cmd.starts_with("rm -rf $(cat /private/tmp/") && cmd.ends_with("zz-nonexistent)/*"), "{cmd}");
+        assert!(!cmd.contains("will automatically deny"), "倒數那句不是指令：{cmd}");
+
+        let m12 = dangerous_rm_prompt(DANGEROUS_RM_M12).expect("m12 的框");
+        assert_eq!(m12.target, "/Users/…/web/docs/screenshots/pin-3rows/*");
+        assert_eq!(m12.command, None);
+
+        let var = dangerous_rm_prompt(DANGEROUS_RM_VARIABLE).expect("變數路徑");
+        assert_eq!(var.target, r#""$D"/* in `rm -f "$D"/*`"#);
+        assert_eq!(var.command.as_deref(), Some("D=$(cat /tmp/.origin_dir); P=robinstech-com-tw\nshred -u \"$D\"/origin.key 2>/dev/null || rm -f \"$D\"/*; rmdir \"$D\" 2>/dev/null"));
+    }
+
+    /// 倒數到 0 之後框不見了；一般的權限框、其他對話框、回覆裡引了原文（輸入列空著）都不是。
+    #[test]
+    fn other_screens_are_not_a_dangerous_rm_prompt() {
+        assert_eq!(dangerous_rm_prompt(DANGEROUS_RM_AUTO_DENIED), None, "自動拒絕之後回到輸入列");
+        assert_eq!(dangerous_rm_prompt(PERMISSION), None);
+        assert_eq!(dangerous_rm_prompt(SWITCH_MODEL), None);
+        assert_eq!(dangerous_rm_prompt(AUTO_MODE), None);
+        assert_eq!(dangerous_rm_prompt(""), None);
+        let quoted = format!("⏺ m12 那顆停在：\n  Dangerous rm operation on statically-unresolvable target: /x/*\n  Do you want to proceed?\n  1. Yes\n  2. No\n{IDLE_CLAUDE}");
+        assert_eq!(dangerous_rm_prompt(&quoted), None, "引文，底下是空的輸入列");
+        assert!(!is_switch_model_dialog(DANGEROUS_RM) && !is_auto_mode_offer(DANGEROUS_RM) && !is_feedback_survey(DANGEROUS_RM));
+    }
 }

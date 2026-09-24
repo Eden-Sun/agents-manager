@@ -365,6 +365,16 @@ pub(crate) async fn pane_ready_for_prompt(app: &Arc<App>, bot: &db::Bot, run: &d
         if let Some(pane) = run.pane_id.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
             if let Ok(client) = client_for_run(app, run).await {
                 if let Ok(r) = client.pane_read(pane, "visible", 60).await {
+                    // 2.1.281 的防誤刪框（`Dangerous rm operation …`）：只有人能核准。不按任何鍵、不打字進去，
+                    // 通知（同一個框只講一次）後回 409；排隊的留在佇列，框關掉由 `dangerous_rm` 叫醒 flush。
+                    if let Some(rm) = crate::tui_prompts::dangerous_rm_prompt(&r.text) {
+                        crate::dangerous_rm::notify_once(app, run, &rm).await;
+                        return Err(LcError::conflict(
+                            "dangerous_rm_pending",
+                            json!({"run_id": run.id, "target": rm.target, "warning": rm.warning,
+                                   "message": "claude 停在防誤刪確認框（Dangerous rm），要使用者本人到終端回答；框關掉之後再送。"}),
+                        ));
+                    }
                     // 2.1.278 首次啟動的「Auto mode」推銷框：herdr 判 idle，prompt 會打進框裡（2026-09-22 build child
                     // 卡了半小時）。替它選第二項「No, keep bypass permissions」——bot 本來就是 bypass 起的；還在就講清楚。
                     if crate::tui_prompts::is_auto_mode_offer(&r.text) {
@@ -1444,6 +1454,36 @@ mod prompt_tests {
         }
         let keys: Vec<String> = f.env.herdr.calls_to("pane.send_keys").iter().filter_map(|p| p.get("keys").and_then(|k| serde_json::to_string(k).ok())).collect();
         assert_eq!(keys, vec![r#"["Down","Enter"]"#.to_string()], "先替它選第二項 keep bypass");
+    }
+
+    /// 2.1.281 的防誤刪框（herdr 判成 idle 也一樣）：409 `dangerous_rm_pending` 帶目標，一個鍵都不按、一個字都不打；
+    /// 通知寫在對話裡，同一個框被擋幾次都只寫一次（排隊的 flush 會一再撞這道閘門）。
+    #[tokio::test]
+    async fn a_dangerous_rm_prompt_is_never_typed_into_or_answered() {
+        let f = fixture("claude", "test").await;
+        let app = f.env.app.clone();
+        sqlx::query("UPDATE runs SET pane_id='pane-prompt-test' WHERE id=?").bind(&f.run_id).execute(&app.db).await.unwrap();
+        f.env.herdr.set_screen("pane-prompt-test", crate::tui_prompts::screens::DANGEROUS_RM);
+        let bot = db::bot(&app.db, &f.bot_id).await.unwrap().unwrap();
+        let run = db::active_run(&app.db, &f.bot_id).await.unwrap().unwrap();
+        for _ in 0..2 {
+            match pane_ready_for_prompt(&app, &bot, &run, &f.conv).await.unwrap_err() {
+                LcError::Conflict(v) => {
+                    assert_eq!(v["reason"], "dangerous_rm_pending", "{v}");
+                    assert_eq!(v["target"], "command substitution output", "{v}");
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        for m in ["pane.send_keys", "pane.send_text", "agent.prompt"] {
+            assert!(f.env.herdr.calls_to(m).is_empty(), "{m}");
+        }
+        let notices: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE conversation_id=? AND role='system' AND content LIKE '%防誤刪確認框等你本人核准%'")
+            .bind(&f.conv)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(notices, 1);
     }
 
     /// onboarding 的主題頁跟登入選單同一類：交給人（needs_login），一個鍵都不按。

@@ -291,16 +291,17 @@ turn JSON 帶 `awaits_start`（1＝bot 沒在跑時收下、在等它起來，is
 `[supervisor] assignment_queue_wait_secs`（預設 30 分鐘）沒送出就撤回那則 queued、把交辦停在 `blocked`，inbox 推 `assignment_undeliverable`（payload 帶 `revoked_turn_id`）。目標身分沒有額度時（`quota::limit_hit_for_bot`）排著的不送、留在佇列，換身分或額度回來才送；這種撞限在 6 小時內會到期的，保險絲不撤（SPEC §4.4a「目標身分沒額度就不送」，issue #108）。**使用者與 web 的 `POST /api/bots/{id}/prompt` 遇到 in-flight 仍回 409**，由呼叫端重試，daemon 不會替你排隊。
 
 409 `reason`：`bot has no active run`、`run is not running`、`agent is blocked; answer the prompt first`、`a turn is already in flight`、
-`a previous turn has unknown delivery; abandon it first`、`needs_login`、`picker_open`、`dialog_open`。後三者 daemon 送之前先讀 pane：
+`a previous turn has unknown delivery; abandon it first`、`needs_login`、`picker_open`、`dialog_open`、`dangerous_rm_pending`。後四者 daemon 送之前先讀 pane：
 
 | reason | 畫面 | daemon 的處理 |
 |---|---|---|
 | `needs_login` | claude 停在「Select login method」（該 `CLAUDE_CONFIG_DIR` 沒登入過），或 onboarding 第一頁「Choose the text style…」（`hasCompletedOnboarding` 被清掉；2026-09-22） | 不建 turn，回 `{"reason":"needs_login","identity":"cc2","message"}`，對話插 system 訊息說明怎麼登入；主題頁**不自動按**（下一頁就是登入選單，一樣要人）。兩種都只看最底 20 行、且輸入列非空才算：bot 在回報裡逐行引用選單原文不算（2026-09-22 triage bot） |
 | `picker_open` | codex 的 `/model` 選單開著（字會變成選單操作，Enter 會換模型） | 先 Esc 到真的關掉（`esc` 只退一層）再送；關不掉才回 `{"reason":"picker_open","run_id","message"}` + system 訊息 |
 | `dialog_open` | claude 的「Switch model?」確認框（herdr 判成 idle；Enter 會替使用者按 Yes） | 按 Esc（No, go back）再送；退不掉才回 409 + system 訊息 |
+| `dangerous_rm_pending` | claude 2.1.281 的防誤刪框「Dangerous rm operation on …: <目標> / Do you want to proceed?」（bypass 模式也會跳，約 2 分鐘自動拒絕） | **不按任何鍵**（只有人能核准）：回 `{"reason":"dangerous_rm_pending","run_id","target","warning","message"}`，對話插一則帶目標與指令的 system 訊息（同一個框只插一次）；框關掉後排著的照常送（SPEC §3.1） |
 | `dialog_open` | claude 2.1.278 首次啟動的「Auto mode … Yes, set auto mode as my default permission mode／No, keep bypass permissions」推銷框（herdr 判 idle；2026-09-22 build child 卡了半小時） | 送 Down＋Enter 選「No, keep bypass permissions」再送；還在才回 409 + system 訊息 |
 
-**排隊中的 prompt 送出時也過這三道**：claim 之後、`agent.prompt` 之前中了就把 turn 放回 `queued`（清 `run_id`）並插同一則 system 訊息，等下一個 idle 再試。
+**排隊中的 prompt 送出時也過這幾道**：claim 之後、`agent.prompt` 之前中了就把 turn 放回 `queued`（清 `run_id`）並插同一則 system 訊息，等下一個 idle 再試。
 
 **打字送出的 run（2026-09-14，SPEC §4.4a）**：daemon 對 pane 直接打過字、或 herdr 沒綁到 agent session 的 run，
 prompt 改成打字進 pane 並以無損證據確認。**一個字都沒打時不建立 turn**，回：
