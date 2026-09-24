@@ -320,13 +320,34 @@ pub fn deliver_text(text: &str, items: &[Attachment]) -> String {
 
 /// `GET /api/attachments/:id`
 pub async fn read(app: &Arc<App>, id: &str) -> Result<(String, Vec<u8>)> {
-    let row = sqlx::query_as::<_, (String, String)>("SELECT mime, local_path FROM attachments WHERE id = ? AND state = 'ready'")
-        .bind(id)
-        .fetch_optional(&app.db)
-        .await?;
-    let Some((mime, path)) = row else { bail!("unknown attachment") };
-    let data = std::fs::read(&path).with_context(|| format!("read {path}"))?;
+    let row = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT mime, local_path, bot_id FROM attachments WHERE id = ? AND state = 'ready'",
+    )
+    .bind(id)
+    .fetch_optional(&app.db)
+    .await?;
+    let Some((mime, path, bot_id)) = row else { bail!("unknown attachment") };
+    let data = match std::fs::read(&path) {
+        Ok(d) => d,
+        // 刪 bot 會把 `attachments/<id>/` 搬進 `bots-trash`（#465），但已刪 bot 的對話仍讀得到
+        // （API.md §10.4），前端照樣會來抓縮圖——原地讀不到就去回收區裡那一份找同一個檔名。
+        // 只有遠端 bot 的 `local_path` 在資料目錄底下；本機 bot 指的是專案裡那份，不受影響。
+        Err(e) => match trashed_copy(app, &bot_id, &path) {
+            Some(alt) => std::fs::read(&alt).with_context(|| format!("read {} (trashed)", alt.display()))?,
+            None => return Err(e).with_context(|| format!("read {path}")),
+        },
+    };
     Ok((mime, data))
+}
+
+/// `local_path` 原地不在時，回收區裡對應的那一份（`bots-trash/<id>.attachments.<毫秒>/<檔名>`）。
+/// 只認「本來就在 `<資料目錄>/attachments/<bot_id>/` 底下」的路徑，其他一律不找。
+fn trashed_copy(app: &Arc<App>, bot_id: &str, local_path: &str) -> Option<PathBuf> {
+    let under = crate::bot_trash::attachments_dir(&app.data_dir, bot_id);
+    let name = Path::new(local_path).strip_prefix(&under).ok()?;
+    let dir = crate::bot_trash::latest_kind(&app.data_dir, bot_id, Some(crate::bot_trash::ATTACHMENTS))?;
+    let candidate = dir.join(name);
+    candidate.is_file().then_some(candidate)
 }
 
 pub fn to_json(a: &Attachment) -> serde_json::Value {
@@ -337,6 +358,35 @@ pub fn to_json(a: &Attachment) -> serde_json::Value {
 mod tests {
     use super::*;
     use crate::testing as tt;
+
+    /// #465 的刪除側：附件搬進回收區之後，已刪 bot 的對話仍讀得到縮圖（API.md §10.4），
+    /// 所以 `read` 原地讀不到時要去回收區找同一個檔名。
+    #[tokio::test]
+    async fn a_remote_attachment_is_still_readable_after_its_dir_moved_to_trash() {
+        let env = tt::env().await;
+        let app = &env.app;
+        let bot = tt::claude_bot(app, &env.project_id, "trashy").await;
+        let bot_id = bot.id.as_str();
+        let dir = crate::bot_trash::attachments_dir(&app.data_dir, bot_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let local_path = dir.join("a.png");
+        std::fs::write(&local_path, b"bytes").unwrap();
+        sqlx::query(
+            "INSERT INTO attachments (id, bot_id, name, mime, size, local_path, agent_path, host, state, created_at)
+             VALUES ('att1', ?, 'a.png', 'image/png', 5, ?, '/remote/a.png', 'zz', 'ready', ?)",
+        )
+        .bind(bot_id)
+        .bind(local_path.to_string_lossy().into_owned())
+        .bind(crate::db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        assert_eq!(read(app, "att1").await.unwrap().1, b"bytes", "搬走之前照舊讀得到");
+        crate::bot_trash::move_in_kind(&app.data_dir, bot_id, Some(crate::bot_trash::ATTACHMENTS), &dir).unwrap().unwrap();
+        assert!(!local_path.exists(), "原地已經沒有了");
+        assert_eq!(read(app, "att1").await.unwrap().1, b"bytes", "回收區裡那份仍要讀得到，不能變破圖");
+    }
 
     #[tokio::test]
     async fn local_attachment_copy_rejects_unsafe_bot_ids() {

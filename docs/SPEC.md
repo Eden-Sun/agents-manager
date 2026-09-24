@@ -216,6 +216,7 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   `stop_not_confirmed` / `run_state_unreadable` / `run_still_active`）——刪除本身已經定案（bot 已軟刪），所以回 200 而不是錯誤；下次開機的清掃在 run 確定結束後把目錄收掉。
   **開機的殘留清掃**（`purge_deleted_bot_dirs`，reconcile／rearm 之後跑一次）只收「確定軟刪」而且「確定沒有 active run」的 `bots/<id>/`；沒有 bot 認領的目錄不碰。
   **「清目錄」＝搬進回收區，不是刪**（issue #406）：本機的 `bots/<id>/` 搬到 `<資料目錄>/bots-trash/<id>.<毫秒>/`，`POST /api/bots/:id/restore` 時若 `bots/<id>/` 不在就把最新那份搬回來；
+  **附件副本一起收**（issue #465）：`<資料目錄>/attachments/<bot_id>/`（遠端 bot 也有，縮圖不走 ssh）以前刪 bot 時沒有任何人動它——沒有 TTL、沒有總量上限、`reconcile_orphans` 只收 `staging`／`failed`，`ready` 的永遠留著。現在跟著搬進同一個回收區，項目名是 `<id>.attachments.<毫秒>`（結尾一樣是毫秒，所以過期與總量上限一視同仁；`<kind>` 那段讓它不會被當成 `bots/<id>/` 還原回去），`restore` 時一起搬回來——不然還原後對話還在、縮圖全破（已刪 bot 的對話本來就讀得到，API.md §10.4）。
   本機回收區的清理有兩道、跑兩處：**過期**（放超過 7 天，看名字裡的時間，`rename` 不更新目錄 mtime）與**總量上限**（整個 `bots-trash/` 超過 2 GB 就從最舊的開始清到降下來，
   最新那一份永遠留著）；開機清掃跑一次，另外 `bot_trash::spawn_gc` 每天再跑一次——只靠開機那一次不夠，daemon 常駐好幾天回收區會一路長。
   名字看不懂的檔案／目錄一律不碰。軟刪本來就是為了能還原，目錄卻是當場 `remove_dir_all`——誤刪時 bot 列與 config 救得回來，
