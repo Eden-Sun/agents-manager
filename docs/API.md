@@ -1643,7 +1643,14 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 ### 協調者（responder，SPEC §18.15）
 - `GET /api/supervisor/responder` → `{configured,bot_present,bot_id,project_id,identity,model,effort,remote_control:false,status,status_detail,quota_reset_at,desired_running,watchdog:{attempts,next_at,gave_up_at},inbox_open,wake_pending,stats:{…}}`。`wake_pending` = 還沒送出、會叫醒它的事件數。
   `POST /api/supervisor/responder/start` 先記 `desired_running=true` 再啟動：啟動失敗回錯誤，但看門狗會照 §18.9 的退避重試。
-  `status`：`not_configured` | `stopped` | `starting` | `idle` | `busy` | `waiting_quota` | `needs_login`（CLI 沒登入，送不出去時看畫面判的，issue #420；`status_detail` 寫怎麼解） | `missing`（登記過但那顆 bot 被刪了；事件仍留在它的佇列，另推一則 `responder_bot_missing` 給巡檢）。
+  `status`：`not_configured` | `stopped` | `starting` | `idle` | `busy` | `waiting_quota` | `needs_login`（CLI 沒登入；`status_detail` 寫怎麼解） | `unavailable` | `missing`（登記過但那顆 bot 被刪了；事件仍留在它的佇列，另推一則 `responder_bot_missing` 給巡檢）。
+  `unavailable_reason`：`needs_login` | `waiting_quota` | `notify_stalled` | `no_run` | `null`——**機器讀這一欄，不要解析 `status`**。
+  它就是 `health::role_state()` 的結論（同一組字串會被 #421 原樣寫進 inbox payload 的 `reassigned_reason` 與 incident 的 `detail.reason`），
+  兩條判定路徑一起看：DB 的 `supervisor_roles.status`（`notify` 送不出去那一次看畫面寫的，issue #420），
+  以及每 30 秒 health tick 的記憶體結論（每拍看畫面＋notify 連續 3 個回合沒完成，issue #427）。
+  **`notify_stalled` 只有這一欄帶得出來**：那個值從來不會被寫進 DB，`status` 當下仍是 `idle`／`busy`（issue #454）。
+  `status` 只在 `needs_login` 與其他原因（`unavailable`）時被原因改寫；`waiting_quota` 與 `no_run` 維持既有值（`stopped`／`missing`／`not_configured` 比籠統的 `unavailable` 好懂）。
+  **`supervisor_roles.status` 那一欄本身一個字都沒被這條路改過**：它是 `notify` 與看門狗的憑據，寫進去會讓撞限的協調者被一直重啟。
   `configured` 是「登記過」，`bot_present` 才是「那顆 bot 還在」：路由只看前者。`model`／`effort` 是設定值，
   `runtime{model,effort,started_at}` 是它現在實際跑的（`/model` 換過就會不一樣）。
   `setup` 會驗 `model`（`[a-z0-9][a-z0-9._-]{0,39}`）與 `effort`（`config::normalize_effort`），不合格 400——這兩個值會直接變成 CLI 的 argv。
@@ -1671,8 +1678,11 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 - `GET /api/supervisor/health` → `status`（`healthy`／`degraded`／`critical`）、AGM 狀態、bot running/busy/stopped 計數、host 連線、quota、`pending_assignments`（未結案，含 `awaiting_review`／`blocked`）、（另有 `release_triage`：`publish = true` 時帶 `repo`／`gh_auth_ok`／`gh_auth_error`／`repo_ok`／`repo_error`／`viewer_permission`／`can_write`／`issues_enabled`／`labels_missing[]`，否則 `null`；auth 綠不等於開得出 issue，repo 看不到、只有 READ、或標籤少一個都會讓 `gh issue create` 硬失敗）
   `awaiting_review`、`inbox_open`（三者分開不相加）；`manager_health{status,supervisor_status,daemon_connected}` 與 `system_health{status,open_incidents,incidents,blind_probes}`（`blind_probes` 非空＝那幾類探針上一輪查詢失敗，`status` 至少是 `unknown`），頂層 `status` 取兩者較嚴重者。
   daemon 每 30 秒檢查，指紋變化才推 WS `supervisor_health`；inbox `health_changed` 只在巡檢或協調者的嚴重度（`manager_health.status`／`responder_health.status`）或總管狀態（idle/busy 視為 running）真的改變時入列，總管 stopped/starting 期間不入列、恢復後補一則。
-  `responder_health{status,responder_status,inbox_open,wake_pending,retry_at}` 單獨一格，**也併進**頂層 `status`（取較嚴重者）。
-  協調者 `waiting_quota`／`needs_login`、`desired_running` 卻沒在跑、或沒在跑（stopped／missing）而 `wake_pending>0` → `degraded`。
+  `responder_health{status,responder_status,unavailable_reason,inbox_open,wake_pending,retry_at}` 單獨一格，**也併進**頂層 `status`（取較嚴重者）。
+  協調者 `waiting_quota`、`desired_running` 卻沒在跑、或沒在跑（stopped／missing）而 `wake_pending>0`、或 `unavailable_reason` 是
+  `notify_stalled`／`no_run` → `degraded`；**`needs_login` → `critical`**（要人動手跑 `/login`，期間所有核准與 bot 申請都沒有人裁示，
+  而且不會自己好——`incidents` 對同一件事開的就是 critical，兩個面板講同一件事就該同一個嚴重度，issue #454）。
+  `unavailable_reason` 比 `responder_status` 優先：`notify_stalled` 時 `responder_status` 還是 `idle`。
   `due_actions{pending,overdue,failing,by_kind,soonest,items,items_truncated}`＝「daemon 接下來要做什麼、什麼一直做不成」（issue #75、#97）：
   把六處**本來就存在 DB 裡**的到期時間讀出來擺在一起（排隊 prompt 的重試、交辦重送、等額度、協調者補送、總管看門狗、hook 事件），
   只讀不寫、不是新的排程器。`overdue`＝到期了還在名單上（掃描還沒輪到，或一直失敗）；`failing`＝`attempts >= 3`；

@@ -179,6 +179,8 @@ pub async fn snapshot(app: &Arc<App>) -> Result<Value, LcError> {
         "responder_health": {
             "status": responder_severity,
             "responder_status": responder_status,
+            // #454：`responder_status` 在 `notify_stalled` 時還是 `idle`，原因只有這一欄帶得出來。
+            "unavailable_reason": responder.get("unavailable_reason"),
             "inbox_open": responder.get("inbox_open"),
             "wake_pending": responder.get("wake_pending"),
             "retry_at": responder.pointer("/stats/notify_next_at"),
@@ -210,9 +212,27 @@ pub async fn snapshot(app: &Arc<App>) -> Result<Value, LcError> {
 pub fn responder_severity(responder: &Value) -> &'static str {
     let status = responder.get("status").and_then(Value::as_str).unwrap_or("not_configured");
     let waiting = responder.get("wake_pending").and_then(Value::as_i64).unwrap_or(0) > 0;
-    match status {
-        "not_configured" | "idle" | "busy" | "starting" => "healthy",
-        "waiting_quota" | "needs_login" => "degraded",
+    // #454：#427 的兩個訊號只有 `unavailable_reason` 帶得出來（`status` 在 `notify_stalled` 時還是
+    // `idle`／`busy`——DB 那一欄從來不寫這個值）。不讀它的話，核准已經在改派、incident 已經開了，
+    // 這一格還是 healthy。
+    let reason = responder.get("unavailable_reason").and_then(Value::as_str);
+    match (status, reason) {
+        // 停在登入要人動手（從別的終端 `security unlock-keychain` 或跑 `/login`），期間所有核准與
+        // bot 申請都沒有人裁示，而且**不會自己好**。incident 開的就是 critical（`incidents.rs`），
+        // 兩個面板講同一件事就該同一個嚴重度（#454）。撞限不一樣：那是等得到的，維持 degraded。
+        (_, Some(r)) if r == REASON_NEEDS_LOGIN => "critical",
+        ("needs_login", _) => "critical",
+        // `no_run` 不是新消息——`status` 已經是 stopped／missing／not_configured，而下面那兩條規則
+        // 分得更細：**停著、又沒有人在等，本來就不算故障**（review 2026-09-16 c3 M1）。
+        // 這裡一律 degraded 會把那個判斷蓋掉，讓剛 setup 完還沒 start 的協調者被當成壞的。
+        (_, Some(r)) if r == REASON_NO_RUN => match () {
+            _ if responder.pointer("/desired_running").and_then(Value::as_bool) == Some(true) => "degraded",
+            _ if waiting => "degraded",
+            _ => "healthy",
+        },
+        (_, Some(_)) => "degraded",
+        ("not_configured" | "idle" | "busy" | "starting", _) => "healthy",
+        ("waiting_quota", _) => "degraded",
         _ if responder.pointer("/desired_running").and_then(Value::as_bool) == Some(true) => "degraded",
         _ if waiting => "degraded",
         _ => "healthy",
@@ -516,6 +536,31 @@ mod tests {
         assert_eq!(responder_severity(&r("idle", false, 5)), "healthy", "在跑就會被叫醒");
         assert_eq!(responder_severity(&r("not_configured", false, 3)), "healthy", "沒建立：事件歸巡檢");
         assert_eq!(responder_severity(&json!({"status": "stopped"})), "healthy", "舊形狀沒有 wake_pending");
+    }
+
+    /// #454：#427 判出來的不可用只在記憶體，`status` 不會變（`notify_stalled` 從來不寫 DB），
+    /// 所以這一格要讀 `unavailable_reason`——不讀的話「核准正在被改派、incident 已經開了，
+    /// 面板說 healthy」，正是 #420 要消滅的症狀換一條路又出現一次。
+    #[test]
+    fn a_responder_that_is_being_bypassed_is_never_healthy() {
+        let with = |status: &str, reason: Value| json!({"status": status, "unavailable_reason": reason, "wake_pending": 0});
+        // notify 連續沒完成：status 照樣是 idle，只有原因看得出來。
+        assert_eq!(responder_severity(&with("idle", json!("notify_stalled"))), "degraded");
+        assert_eq!(responder_severity(&with("busy", json!("notify_stalled"))), "degraded");
+        // `no_run` 交還給既有那兩條規則：停著、沒有人在等，本來就不是故障（別把剛 setup 完的當壞的）。
+        assert_eq!(responder_severity(&with("stopped", json!("no_run"))), "healthy");
+        assert_eq!(
+            responder_severity(&json!({"status": "stopped", "unavailable_reason": "no_run", "wake_pending": 2})),
+            "degraded",
+            "有人在等就還是 degraded"
+        );
+        // 停在登入要人動手、不會自己好：跟 incident 那邊一樣算 critical（兩個面板同一件事同一個嚴重度）。
+        assert_eq!(responder_severity(&with("needs_login", json!("needs_login"))), "critical");
+        assert_eq!(responder_severity(&with("idle", json!("needs_login"))), "critical", "原因先於 status");
+        // 撞限是等得到的，維持 degraded。
+        assert_eq!(responder_severity(&with("waiting_quota", json!("waiting_quota"))), "degraded");
+        // 沒有原因就照舊。
+        assert_eq!(responder_severity(&with("idle", Value::Null)), "healthy");
     }
 
     /// 端到端：setup 過、從沒 start，bot 送來一筆申請 → 健康頂層不再是 healthy。
