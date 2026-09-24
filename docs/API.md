@@ -47,7 +47,9 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
 `restart_batch`（issue #492）：現在正在跑的那一批一鍵重啟（§6.9）的 `batch_id`，沒有就是 `null`。
 唯讀，只為了對帳——進度本身走 WS（`bots_restart_progress` / `bots_restart_done`），而 `done` 有兩條收不到的路
 （批次跑到一半 daemon 重啟；客戶端落到全量 `resync`，那條走 `refreshState`、backlog 整段不重播），
-收不到就會永遠停在「重啟中 k/N」。前端拿這一格跟手上那份比：對不上就是過期的，清掉。
+收不到就會永遠停在「重啟中 k/N」。前端拿這一格跟手上那份比：`null`（沒有批次在跑）就清掉手上的進度，
+是**另一個** `batch_id` 就換成那一批（連已經跑完、還擺在畫面上的摘要也讓位——不換的話後來那批的事件
+會因為 id 對不上被整段丟掉）。欄位**不存在**（舊 daemon）是「不知道」，什麼都不動。
 **欄位不存在**（舊 daemon）跟 `null`（沒有批次在跑）是兩件事，不能混成同一個值——不知道時不該動手上的進度。
 
 ```json
