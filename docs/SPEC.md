@@ -110,6 +110,14 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
     （`restart_intents::recover_host`）讀還開著的 restart intent 檢查世界：有新 run＝`done`；舊 run 還 running／starting＝`abandoned`（`stopping` 從沒記過）；
     舊 run `stopping`＝補完停；沒有 active run＝舊 run 由 `stopped` 改標 `exited`（不是使用者要它停）並照原選項 start（`autostart=0` 也補）。
     補不成最多試 5 次（背景以退避重試），用完標 `failed` 並在同一個交易推 AGM inbox `intent_failed`；放置超過 15 分鐘同樣 `failed`＋通知。
+    **放置期限只算 daemon 在線的時間**（issue #508）：`expire_overdue` 有三條，中一條就收成 `failed`＋通知。
+    (1) `owner_boot` 等於這顆 daemon、而且過了 `expires_at`——`expires_at` 是建立時刻加 TTL，時鐘在 daemon 死著時照走，而 daemon 死著正是 intent 存在的理由；
+    上一顆 boot 留下的先讓這一輪 recovery 認領、真的補一次（`claim` 把 `owner_boot` 換成自己），補不完才輪到下一次對帳收掉。「試幾次就放棄」照舊由 5 次上限負責，
+    而 `claim` 每次都加 `attempts`，每次開機都死在半路也會在 5 次內收斂。
+    (2) `created_at` 早於 7 天前（`intents::HARD_TTL_SECS`）：認領只發生在**對帳成功之後**的 recovery，那台主機再也沒有成功對帳過（機器報廢、改名）的話 (1) 永遠撈不到、`attempts` 也不會增加，
+    連 5 次上限那條收斂路徑都到不了；這一條是最後的收斂，不看 owner。
+    (3) `host` 已經不在 config 的主機清單裡、而且過了 `expires_at`：沒有人會再來補，不必等 (2) 的七天。主機清單是空的（還沒 `apply_config`）就整條不算，寧可晚一輪也不在設定重載的空窗裡判死。
+    「過了 `expires_at` 還開著」因此是正常狀態；還欠著哪一件從 `agm health` 的 `due_actions`（`kind = "intent"`）看得到，久久不消失的要當真。
     **已接線：`delete_bot`／`delete_project`**（#296／#284）：定案（config＋DB 軟刪）**之前**先 commit intent（payload＝當時的 bot 快照，之後才出現的 child 不在授權範圍；寫不進去就不刪），
     handler 自己認領；定案之後死掉，開機（`delete_intents::recover_host`）檢查：母 bot／專案還活著＝`abandoned`；已定案＝逐顆（快照裡的）停、軟刪、清目錄補完（每步先驗世界，重跑安全）。
     軟刪寫不進去的 child 由 intent 的背景重試補完（取代各路徑自己的記憶體重試 task），5 次用完 `failed`＋AGM inbox；目錄清不掉不算補不成（`kept_dirs`／開機清掃／`remote_purge` 各有帳）。

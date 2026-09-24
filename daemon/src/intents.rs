@@ -183,18 +183,48 @@ pub async fn open(pool: &SqlitePool) -> Result<Vec<Intent>> {
     Ok(sqlx::query_as("SELECT * FROM intents WHERE status IN ('pending','running') ORDER BY created_at").fetch_all(pool).await?)
 }
 
-/// 開著卻過了 `expires_at` 的標成 `failed`，回它們（呼叫端推 AGM inbox）。
-pub async fn expire_overdue(pool: &SqlitePool, now: &str) -> Result<Vec<Intent>> {
-    let overdue: Vec<Intent> = sqlx::query_as(&format!(
-        "SELECT * FROM intents WHERE status IN ('pending','running') AND {} <= ?",
-        crate::db::ts_sql("expires_at")
-    ))
-    .bind(now)
-        .fetch_all(pool)
-        .await?;
+/// 不管補不補得完，開著超過這麼久一律收掉（`created_at` 起算）。見 [`expire_overdue`] 的第二條。
+pub const HARD_TTL_SECS: i64 = 7 * 24 * 3600;
+
+/// 開著、而且該放棄的標成 `failed`，回它們（呼叫端推 AGM inbox）。三條各自獨立，中一條就收：
+///
+/// 1. **`owner_boot = boot` 且過了 `expires_at`**（issue #508）：`expires_at` 是建立時刻加 TTL，時鐘在
+///    daemon 死著的時候照走——而 daemon 死著正是 intent 存在的唯一理由。以前開機對帳的第一步就是這一支，
+///    於是「刪除定案之後 daemon 停超過 TTL」的那件會在**任何一次補完嘗試之前**被收成 `failed`，
+///    `delete_intents::recover_host` 的 [`open`] 再也撈不到它：母 bot 已軟刪、child 還活著（#298 的
+///    「看不到的活 bot」），再按一次刪除只得 404。加上 owner 條件之後，期限等於「只算這顆 daemon 在線的
+///    時間」：上一顆 boot 留下的先讓這一輪 recovery 認領（`claim` 把 `owner_boot` 換成自己）、真的補一次，
+///    補不完才輪到下一次對帳收掉。「試幾次就放棄」照舊由 [`MAX_ATTEMPTS`]／[`record_failure`] 負責，
+///    而 `claim` 每次都加 `attempts`，所以每次 boot 都死在半路也會在 5 次內收斂。
+/// 2. **`created_at` 早於 `now - `[`HARD_TTL_SECS`]**：第 1 條的 owner 條件有一種會永遠 pending（#508 複看）——
+///    認領只發生在 `delete_intents::recover_host`，而它唯一的呼叫點（`reconcile::autostart_after_reconcile`）
+///    前面有「對帳沒成功就不跑」。那台主機再也沒有成功對帳過（機器報廢、從 `config.toml` 拿掉、改名）的話，
+///    永遠不 claim → `owner_boot` 停在死掉的 boot → 第 1 條一輩子撈不到 → `attempts` 不增加 →
+///    [`MAX_ATTEMPTS`] 那條收斂路徑也到不了，沒有 `failed`、沒有通知。這一條是最後的收斂，不看 owner。
+/// 3. **`host` 已經不在 `known_hosts` 裡、而且過了 `expires_at`**：主機從 config 拿掉之後那件 intent 不會再有人
+///    補，直接收掉並通知，不必等第 2 條的七天。`known_hosts` 是空的（還沒 `apply_config`）就整條不算——
+///    寧可晚一輪，也不要在設定重載的空窗裡把每一件遠端 intent 都判死。
+///
+/// 三條都走 [`fail_and_notify`]：標記與 AGM inbox 同生共死，不會有「放棄了卻沒人知道」。還開著、卻已經
+/// 過了 `expires_at` 的那些（等下一輪 recovery）由 `due_actions` 的 `intent` 那一列看得到。
+pub async fn expire_overdue(pool: &SqlitePool, now: &str, boot: &str, known_hosts: &[String]) -> Result<Vec<Intent>> {
+    let hard_cutoff = (chrono::Utc::now() - chrono::Duration::seconds(HARD_TTL_SECS)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let mut out = Vec::new();
-    for i in overdue {
-        if fail_and_notify(pool, &i.id, "expired before it could be completed").await? {
+    for i in open(pool).await? {
+        let overdue = crate::db::cmp_ts(&i.expires_at, now).is_le();
+        let why = if crate::db::cmp_ts(&i.created_at, &hard_cutoff).is_le() {
+            Some(format!("still not completed {} days after it was committed; giving up", HARD_TTL_SECS / 86_400))
+        } else if !overdue {
+            None
+        } else if i.owner_boot.as_deref() == Some(boot) {
+            Some("expired before it could be completed".to_string())
+        } else if !known_hosts.is_empty() && !known_hosts.iter().any(|h| h == &i.host) {
+            Some(format!("host `{}` is no longer configured; nobody will ever complete this", i.host))
+        } else {
+            None
+        };
+        let Some(why) = why else { continue };
+        if fail_and_notify(pool, &i.id, &why).await? {
             out.push(i);
         }
     }
@@ -275,13 +305,79 @@ mod tests {
         let (p, dir) = pool().await;
         let Inserted::New(late) = insert(&p, "restart", "bot-1", "local", &json!({}), -5).await.unwrap() else { panic!() };
         let Inserted::New(fine) = insert(&p, "restart", "bot-2", "local", &json!({}), 900).await.unwrap() else { panic!() };
-        let expired = expire_overdue(&p, &crate::db::now()).await.unwrap();
+        assert!(claim(&p, &late.id, "boot-A").await.unwrap());
+        assert!(claim(&p, &fine.id, "boot-A").await.unwrap());
+        let expired = expire_overdue(&p, &crate::db::now(), "boot-A", &["local".into()]).await.unwrap();
         assert_eq!(expired.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(), vec![late.id.as_str()]);
         assert_eq!(get(&p, &late.id).await.unwrap().unwrap().status, "failed");
-        assert_eq!(get(&p, &fine.id).await.unwrap().unwrap().status, "pending");
+        assert_eq!(get(&p, &fine.id).await.unwrap().unwrap().status, "running");
         assert_eq!(sweep_finished(&p).await.unwrap(), 0, "剛結束的不清");
         sqlx::query("UPDATE intents SET updated_at = '2020-01-01T00:00:00.000Z' WHERE id = ?").bind(&late.id).execute(&p).await.unwrap();
         assert_eq!(sweep_finished(&p).await.unwrap(), 1, "failed 超過 30 天才清");
+        p.close().await;
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// **#508**：`expires_at` 的時鐘在 daemon 死著的時候照走，而 daemon 死著正是 intent 存在的理由。
+    /// 上一顆 boot 留下的、早就過期的那件，這一顆 boot **還沒認領過**就不准收——不然開機對帳的第一步
+    /// 就把它收成 `failed`，後面的 recovery 連一次補完都跑不到。認領（真的試過一次）之後才輪到 TTL。
+    #[tokio::test]
+    async fn an_intent_left_by_a_dead_boot_is_not_expired_before_this_boot_has_tried_it() {
+        let (p, dir) = pool().await;
+        let Inserted::New(i) = insert(&p, "delete_bot", "bot-1", "local", &json!({}), -3600).await.unwrap() else { panic!() };
+        assert!(claim(&p, &i.id, "boot-dead").await.unwrap(), "上一顆 daemon 自己認領過");
+
+        // 開機對帳的第一步：這顆 boot 還沒碰過它，一件都不收。
+        assert!(expire_overdue(&p, &crate::db::now(), "boot-new", &["local".into()]).await.unwrap().is_empty());
+        assert_eq!(get(&p, &i.id).await.unwrap().unwrap().status, "running", "還開著，recovery 撈得到");
+        assert!(open(&p).await.unwrap().iter().any(|x| x.id == i.id));
+
+        // recovery 認領（＝真的補了一次）之後才輪到 TTL。
+        assert!(claim(&p, &i.id, "boot-new").await.unwrap());
+        let expired = expire_overdue(&p, &crate::db::now(), "boot-new", &["local".into()]).await.unwrap();
+        assert_eq!(expired.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), vec![i.id.as_str()]);
+        assert_eq!(get(&p, &i.id).await.unwrap().unwrap().status, "failed");
+        p.close().await;
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// **#508 複看**：第 1 條的 owner 條件有一種會永遠 pending——認領只發生在對帳成功之後的 recovery，
+    /// 那台主機再也沒有成功對帳過（機器報廢、從 config 拿掉、改名）就永遠不 claim，`owner_boot` 停在
+    /// 死掉的 boot、`attempts` 不增加，連 `MAX_ATTEMPTS` 那條收斂路徑都到不了：沒有 `failed`、沒有通知。
+    /// 兩條後路各釘一次：主機不在 config 就直接收；主機還在、但放了超過 `HARD_TTL_SECS` 也一定收。
+    #[tokio::test]
+    async fn an_intent_nobody_will_ever_claim_still_converges_to_failed_and_notifies() {
+        let (p, dir) = pool().await;
+        let host_gone = {
+            let Inserted::New(i) = insert(&p, "delete_bot", "bot-1", "rusty-box", &json!({}), -5).await.unwrap() else { panic!() };
+            assert!(claim(&p, &i.id, "boot-dead").await.unwrap());
+            i
+        };
+        let still_configured = {
+            let Inserted::New(i) = insert(&p, "delete_bot", "bot-2", "local", &json!({}), -5).await.unwrap() else { panic!() };
+            assert!(claim(&p, &i.id, "boot-dead").await.unwrap());
+            i
+        };
+
+        // 主機清單還沒建起來（空的）：一件都不判死，寧可晚一輪。
+        assert!(expire_overdue(&p, &crate::db::now(), "boot-new", &[]).await.unwrap().is_empty());
+
+        // `rusty-box` 已經不在 config 裡：沒有人會再來補它，現在就收掉並通知。
+        let expired = expire_overdue(&p, &crate::db::now(), "boot-new", &["local".into()]).await.unwrap();
+        assert_eq!(expired.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), vec![host_gone.id.as_str()]);
+        assert!(get(&p, &host_gone.id).await.unwrap().unwrap().last_error.unwrap().contains("no longer configured"));
+        assert_eq!(get(&p, &still_configured.id).await.unwrap().unwrap().status, "running", "主機還在＝等 recovery，不收");
+
+        // 主機還在、卻放了超過絕對期限：最後的收斂，不看 owner 也不看誰會來補。
+        let long_ago = (chrono::Utc::now() - chrono::Duration::seconds(HARD_TTL_SECS + 60)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        sqlx::query("UPDATE intents SET created_at = ? WHERE id = ?").bind(&long_ago).bind(&still_configured.id).execute(&p).await.unwrap();
+        let expired = expire_overdue(&p, &crate::db::now(), "boot-new", &["local".into()]).await.unwrap();
+        assert_eq!(expired.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), vec![still_configured.id.as_str()]);
+        assert_eq!(get(&p, &still_configured.id).await.unwrap().unwrap().status, "failed");
+
+        // 兩件都有人被通知（放棄不會沒人知道）。
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE kind = 'intent_failed'").fetch_one(&p).await.unwrap();
+        assert_eq!(n, 2);
         p.close().await;
         std::fs::remove_dir_all(dir).ok();
     }

@@ -4231,6 +4231,38 @@ mod delete_bot_tests {
         assert_eq!(intent_states(&app2, &parent).await, vec!["done"], "冪等");
     }
 
+    /// **#508**：定案之後 daemon 停超過 delete intent 的 TTL（一小時）才開回來。開機對帳的真實順序是
+    /// `restart_intents::recover_host`（第一步就是收過期的 intent）→ `delete_intents::recover_host`（補完）。
+    /// 以前第一步會把它收成 `failed`＋推 AGM inbox，補完那一步的 `intents::open()` 再也撈不到它，留下
+    /// 「母 bot 已軟刪、child 還活著」，而且再按一次刪除只得 404——期限的時鐘在 daemon 死著時照走，
+    /// 而 daemon 死著正是 intent 存在的理由。現在要照樣補完。
+    #[tokio::test]
+    async fn a_delete_interrupted_by_a_daemon_outage_longer_than_the_ttl_is_still_completed_on_boot() {
+        let e = crate::testing::env().await;
+        let (parent, kid) = parent_and_child(&e).await;
+        die_in_delete(&e, &parent, "delete_bot_after_decided", false).await;
+        assert!(deleted(&e.app, &parent).await && !deleted(&e.app, &kid).await, "前提：定案了、child 還活著");
+        // daemon 躺了一整夜：expires_at 早就過了。
+        sqlx::query("UPDATE intents SET expires_at = '2020-01-01T00:00:00.000Z' WHERE subject_id = ?")
+            .bind(&parent)
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+
+        let app2 = crate::testing::restart_app(&e).await;
+        crate::restart_intents::recover_host(&app2, LOCAL_HOST).await;
+        assert_eq!(intent_states(&app2, &parent).await, vec!["running"], "還沒補過就不准收成 failed");
+        crate::delete_intents::recover_host(&app2, LOCAL_HOST).await;
+        assert!(deleted(&app2, &kid).await, "開機補完：child 收掉了");
+        assert_eq!(intent_states(&app2, &parent).await, vec!["done"]);
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE kind = 'intent_failed' AND bot_id = ?")
+            .bind(&parent)
+            .fetch_one(&app2.db)
+            .await
+            .unwrap();
+        assert_eq!(n, 0, "沒有人被通知『補不完』——它補完了");
+    }
+
     /// 定案之前就死：世界沒變（bot 還活著、還在 config），abandoned。
     #[tokio::test]
     async fn a_delete_bot_killed_before_the_decision_is_abandoned() {
