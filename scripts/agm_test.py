@@ -56,6 +56,9 @@ class FakeDaemon(BaseHTTPRequestHandler):
         if entry is None:
             self._send(404, {"error": "not_found"})
             return
+        # 分頁要看 query 才答得出來，所以路由也收一個 `path -> (status, payload)` 的函式。
+        if callable(entry):
+            entry = entry(path)
         self._send(*entry)
 
     def _send(self, status: int, payload: object) -> None:
@@ -611,6 +614,80 @@ class AssignmentsCommandTest(CliCase):
 
     def test_no_retrying_section_when_nothing_is_stuck(self):
         self.assertNotIn("retrying_undelivered", self.ok("assignments", "--open"))
+
+
+class AssignmentsPagingTest(CliCase):
+    """issue #515：過濾要對**全量**做。
+
+    daemon 的清單預設只回最新一頁，而 `blocked`（＝還在等，保持未結案）天生活得比一頁久；
+    只對第一頁過濾的話，卡最久的那幾筆會被 `--open` 講成「沒有」。
+    """
+
+    ROWS = [
+        {"id": "a5", "client_request_id": "crid-5", "status": "completed", "created_at": "2026-09-24T00:00:00.000Z"},
+        {"id": "a4", "client_request_id": "crid-4", "status": "completed", "created_at": "2026-09-23T00:00:00.000Z"},
+        {"id": "a3", "client_request_id": "crid-3", "status": "completed", "created_at": "2026-09-22T00:00:00.000Z"},
+        # 頁外的兩筆：舊、而且還沒結案。
+        {"id": "a2", "client_request_id": "crid-2", "status": "blocked", "created_at": "2026-09-19T00:00:00.000Z"},
+        {"id": "a1", "client_request_id": "crid-1", "status": "awaiting_review", "created_at": "2026-09-16T00:00:00.000Z"},
+    ]
+
+    def setUp(self):
+        super().setUp()
+        FakeDaemon.routes["GET /api/supervisor/assignments"] = self._page
+
+    @classmethod
+    def _page(cls, path: str):
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(path).query)
+        # 這台 daemon 的每頁上限是 2（比呼叫端要的小）：客戶端要照 `has_more` 翻，
+        # 不能因為自己要了 200 筆就當成一次拿完。
+        limit = min(int((q.get("limit") or ["2"])[0]), 2)
+        before = (q.get("before") or [None])[0]
+        rows = cls.ROWS
+        if before:
+            key = tuple(json.loads(before))
+            rows = [r for r in rows if (r["created_at"], r["id"]) < key]
+        chunk, more = rows[:limit], len(rows) > limit
+        nxt = json.dumps([chunk[-1]["created_at"], chunk[-1]["id"]]) if more and chunk else None
+        return (200, {"assignments": chunk, "has_more": more, "next_cursor": nxt, "limit": limit})
+
+    def _reads(self):
+        return [r for r in FakeDaemon.seen if r["method"] == "GET" and r["path"].startswith("/api/supervisor/assignments")]
+
+    def test_open_keeps_paging_until_the_oldest_blocked_work_shows_up(self):
+        out = self.ok("assignments", "--open")
+        self.assertEqual([a["id"] for a in out["assignments"]], ["a2", "a1"])
+        self.assertEqual(out["open"], 2)
+        self.assertIs(out["complete"], True)
+        self.assertNotIn("note", out)
+        self.assertGreater(len(self._reads()), 1, "第一頁看不到 a2／a1，一定要翻頁")
+
+    def test_a_client_request_id_outside_the_first_page_is_found(self):
+        """`/assignments/{id}` 只吃 assignment id，crid 一定 404 —— 退路掃的必須是全量。"""
+        out = self.ok("assignments", "--id", "crid-1")
+        self.assertEqual(out["id"], "a1")
+
+    def test_a_plain_listing_still_reads_one_page(self):
+        out = self.ok("assignments")
+        self.assertEqual([a["id"] for a in out["assignments"]], ["a5", "a4"])
+        self.assertEqual(len(self._reads()), 1, "沒有過濾條件就不要多打幾輪")
+        self.assertIs(out["complete"], False)
+        self.assertIn("note", out)
+
+    def test_all_pages_everything(self):
+        out = self.ok("assignments", "--all")
+        self.assertEqual(len(out["assignments"]), 5)
+        self.assertIs(out["complete"], True)
+
+    def test_an_old_daemon_without_paging_says_so_instead_of_pretending(self):
+        FakeDaemon.routes["GET /api/supervisor/assignments"] = (200, {"assignments": self.ROWS[:2]})
+        out = self.ok("assignments", "--open")
+        self.assertIs(out["complete"], False)
+        self.assertIn("note", out)
+        err = self.bad("assignments", "--id", "crid-1")
+        self.assertEqual(err["error"], "not_found")
+        self.assertIs(err["complete"], False)
+        self.assertEqual(err["searched"], 2)
 
 
 class ReviewCommandTest(CliCase):

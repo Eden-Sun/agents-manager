@@ -1813,7 +1813,10 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
   持有 `restart` 租約期間 assignment 派送 hold（留 `queued`、不算重試）。
 
 ### 交辦 assignments（SPEC §18.8）
-- `GET /api/supervisor/assignments` → `{assignments:[]}`。
+- `GET /api/supervisor/assignments?before=<cursor>&limit=200` → `{assignments:[],has_more,next_cursor,limit}`。新的在前（`created_at DESC, id DESC`）；
+  `limit` 1–500（預設 200），`before` 原樣放回上一頁的 `next_cursor`（`["<created_at>","<id>"]` 的 JSON），壞游標 400。
+  **一次只回一頁**：未結案的交辦（尤其 `blocked`＝還在等，天生活得比一頁久）很容易在頁外，所以「有沒有這一筆」「還有幾件沒結案」一定要翻到 `has_more:false` 才算數（issue #515）。
+  `bin/agm` 的 `assignments` 帶任何過濾條件（`--open`／`--status`／`--awaiting-review`／`--id`）或 `--all` 時會自己翻完，並在輸出加 `complete`（`false` = 沒撈完，數字只是下限）。
 - `POST /api/supervisor/assignments {target_bot_id,text,client_request_id,source_turn_id?,ownership?:[path],kind?:"task"|"notice",expects_review?,mission_id?,role?,review_role?:"patrol"|"responder"}` → 一筆 assignment（多 `review_role`）：
   `{id,target_bot_id,client_request_id,turn_id,status,text,delivery,result,error,attempts,request_id,created_at,updated_at,completed_at,turn_status,evidence_complete,open,awaiting_review,
   review:{decision,by,at,reason,followup_assignment_id},follow_up_of,legacy_closed,ownership,ownership_conflicts,resume_at,quota_retries,next_attempt_at,conflict_since}`。
@@ -1881,6 +1884,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
     `bot_request` 與 `mission_*` 照舊留在協調者佇列等它回來。
 - `GET /api/supervisor/state` → 給 `agm` CLI 的精簡全域狀態：projects、bots（run 的 `agent_status`、`native_session_id`、`runtime_model/effort`、`pane_id`、`queued_turns`、`host_connected`、`asleep`、`lamp`）、未結案 assignment、待處理 inbox。不含 env、hook token、args、persona 全文。
   `lamp` 跟 `GET /api/state` 是同一個函式算的（`api.rs` 的 `lamp`，吃 `bot_connected`＝bot → host → herdr session），呼叫端照抄就好：CLI 這邊只看得到主機層的 `host_connected`，自己推的話同一台主機上 session 掉了的那顆會分岔（issue #514）。
+- `GET /api/supervisor/handoff` 與 `GET /api/supervisor` 的 `assignments`：最近一頁**加上**掉在頁外的未結案交辦，所以 `open_assignments` 不會少報（issue #515）。
 - `GET /api/supervisor/evidence?q=<文字>&bot_id=&project_id=&before=<cursor>&limit=20` → `{messages:[{id,bot_id,bot_name,project_id,project_label,bot_deleted,turn_id,role,content,source,incomplete,created_at,truncated}],has_more,next_cursor}`。
   `q` 必填（trim 後 1–500 字），字面子字串（`%`、`_` 不是萬用字元）；`limit` 1–100；含已刪 bot 的歷史。依 `(created_at DESC,id DESC)`，`next_cursor` 原樣放回 `before`。
   每筆 content 最多 16,000 字（超過 `truncated:true`）。空查詢、過長、壞 cursor 400。只提供證據，不把命中當完成或適合度。
@@ -1901,7 +1905,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 
 ### `bin/agm`
 `scripts/agm.py` 由 `include_str!` 編進 daemon，`setup` 時寫成 `<cwd>/bin/agm`。子命令：`state`、`supervisor`、`search`、`messages`、`bot`（`start`／`stop`／`restart`／`create`／`delete`／`restore`；`start`／`restart` 收 `--resume native` → `?resume=native`，回應原樣印出）、
-`assign`（含 `--notice`、`--mission`／`--role`、`--review-by patrol|responder`、交接用的 `--ack`／`--reply-to <event_id>`）、`assignments`、`inbox`（`--all`、`--limit`、`--role patrol|responder|mine`）、`ack`、`handoff`、`quota`（`--probe [--account ccN] [--host h]` → `POST /api/quota/probe`）、`health`、`lease`、`mission`、
+`assign`（含 `--notice`、`--mission`／`--role`、`--review-by patrol|responder`、交接用的 `--ack`／`--reply-to <event_id>`）、`assignments`（`--all` 與任何過濾條件都會翻完分頁）、`inbox`（`--all`、`--limit`、`--role patrol|responder|mine`）、`ack`、`handoff`、`quota`（`--probe [--account ccN] [--host h]` → `POST /api/quota/probe`）、`health`、`lease`、`mission`、
 `whoami`、`responder`（`show`／`setup`／`start`／`stop`）、`persona --role responder`、
 `issue`（`claim`／`release <n>`，見下）；輸出一律 JSON。
 

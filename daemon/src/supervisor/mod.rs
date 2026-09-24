@@ -237,7 +237,8 @@ pub async fn status_json(app: &Arc<App>) -> Result<Value, LcError> {
     } else {
         manager_liveness(app, bot.as_ref().map(|b| b.id.as_str()).unwrap_or_default()).await?.to_string()
     };
-    let assignments = store::list_assignments(&app.db, 50).await.map_err(up)?;
+    // 同 handoff：未結案的不能因為掉出最新 50 筆就從這個畫面消失（issue #515）。
+    let assignments = store::list_assignments_with_open(&app.db, 50).await.map_err(up)?;
     Ok(json!({
         "configured": configured,
         "bot_id": bot.as_ref().map(|b| b.id.clone()),
