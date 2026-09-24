@@ -81,8 +81,8 @@ enum Block {
 
 /// 那個模型的週桶用盡時，同一身分改用哪個模型。Fable 用盡→opus（7d 共用桶沒見底才會走到這裡）；
 /// Opus 用盡→確定還有 Fable 額度就用 Fable，否則 sonnet；Sonnet 用盡→opus。
-fn fallback_model(out: &str, q: &Quota) -> Option<&'static str> {
-    let fable_ok = q.fable.as_ref().is_some_and(|w| !w.critical());
+fn fallback_model(out: &str, q: &Quota, now: DateTime<Utc>) -> Option<&'static str> {
+    let fable_ok = !exhausted(q.fable.as_ref(), now);
     match out {
         "fable" => Some("opus"),
         "opus" if fable_ok => Some("fable"),
@@ -100,12 +100,45 @@ fn hit_active(hit: &LimitHit, now: DateTime<Utc>) -> bool {
     }
 }
 
-fn exhausted(w: Option<&Window>) -> bool {
-    w.is_some_and(|w| w.critical())
+fn parse_at(s: Option<&str>) -> Option<DateTime<Utc>> {
+    s.and_then(|x| DateTime::parse_from_rfc3339(x.trim()).ok()).map(|x| x.with_timezone(&Utc))
 }
 
-fn reset_of(w: Option<&Window>) -> Option<String> {
-    w.and_then(|w| w.resets_at.clone())
+/// 這個窗的重置時間已經過去了嗎——讀數跨過了重置，只是還沒有新讀數進來（issue #464）。
+///
+/// 沒有 `resets_at` 時**不算**重置過：無從判斷，寧可讓它繼續擋一下，也不要把真的見底當成可用。
+fn window_reset(w: &Window, now: DateTime<Utc>) -> bool {
+    // 比的是 **parse 過的 `DateTime`**，不是時間字串，所以 issue #101 的秒／毫秒混存不影響
+    // （`parse_from_rfc3339` 兩種都吃）。寫成 `match` 而不是 `is_some_and(|t| t <= now)`：
+    // `timestamp_compat_tests` 的 `closure_param_ordering` 認得 `|t| t <= now` 這個形狀，
+    // 它分不出閉包參數是 `&str` 還是 `DateTime`，寫成閉包會被那條 lint 擋下來。
+    match parse_at(w.resets_at.as_deref()) {
+        Some(at) => at <= now,
+        None => false,
+    }
+}
+
+/// 見底**而且那個窗還沒重置**才算用盡。
+///
+/// issue #464：以前只看 `used_pct`。`quota_cache` 的讀數活得比重置久（daemon 停機超過一個窗長、
+/// 帳號探測失敗在退避、主機斷線），於是一份「見底、`resets_at` 已經過去」的舊讀數照樣把身分算成用盡，
+/// 而那個窗其實早就重置了。`quota::load_cache` 早就為了同一個理由在開機時清掉過期的撞限橫幅
+/// （「so an old 用完了 marker never blocks work while the first fresh probe is pending」），
+/// 量表這一側漏了；`block_of` 本來就收得到 `now`。
+fn exhausted(w: Option<&Window>, now: DateTime<Utc>) -> bool {
+    w.is_some_and(|w| w.critical() && !window_reset(w, now))
+}
+
+/// 那一桶的重置時間，**只回還沒到的**（issue #464）：`Pick::Wait` 的 `until` 是呼叫端要排重試的時刻，
+/// 給它一個過去的時間沒有意義，而且會把「等重置」講成一個已經發生過的事。
+fn reset_of(w: Option<&Window>, now: DateTime<Utc>) -> Option<String> {
+    let raw = w.and_then(|w| w.resets_at.clone())?;
+    // 解不開的字串原樣留著（不是這條規則要管的事）；解得開而且已經過去的才丟掉。
+    // 同上，刻意不用 `filter(|t| …)` 閉包，見 `window_reset` 的註解。
+    match parse_at(Some(&raw)) {
+        Some(at) if at <= now => None,
+        _ => Some(raw),
+    }
 }
 
 /// 兩個重置時間取早的（任一邊沒有就用另一邊）。撞限最晚到那一桶自己重置為止。
@@ -136,35 +169,35 @@ fn block_of(q: &Quota, now: DateTime<Utc>) -> Block {
         let (five, seven, fable) = (q.five_hour.as_ref(), q.seven_day.as_ref(), q.fable.as_ref());
         let model_bucket = matches!(hit.bucket.as_deref(), Some("fable") | Some("opus") | Some("sonnet"));
         match hit.bucket.as_deref() {
-            Some("seven_day") => return Block::SevenDay(sooner(hit.until.clone(), reset_of(seven))),
-            Some("five_hour") if exhausted(seven) => return Block::SevenDay(reset_of(seven)),
-            Some("five_hour") => return Block::FiveHour(sooner(hit.until.clone(), reset_of(five))),
-            Some(_) if model_bucket && exhausted(seven) => return Block::SevenDay(reset_of(seven)),
+            Some("seven_day") => return Block::SevenDay(sooner(hit.until.clone(), reset_of(seven, now))),
+            Some("five_hour") if exhausted(seven, now) => return Block::SevenDay(reset_of(seven, now)),
+            Some("five_hour") => return Block::FiveHour(sooner(hit.until.clone(), reset_of(five, now))),
+            Some(_) if model_bucket && exhausted(seven, now) => return Block::SevenDay(reset_of(seven, now)),
             // 5h 也見底：先等 5h（時間是 5h 自己的，不是模型週桶的下週）；5h 回來之後撞限還在，再換模型。
-            Some(_) if model_bucket && exhausted(five) => return Block::FiveHour(reset_of(five)),
+            Some(_) if model_bucket && exhausted(five, now) => return Block::FiveHour(reset_of(five, now)),
             // Opus／Sonnet 的週桶沒有自己的量表，時間借 7d 那格（同一個重置週期）。
             Some(m) if model_bucket => {
-                let own = if m == "fable" { reset_of(fable) } else { reset_of(seven) };
+                let own = if m == "fable" { reset_of(fable, now) } else { reset_of(seven, now) };
                 return Block::ModelOut { model: m.to_string(), until: sooner(hit.until.clone(), own) };
             }
             _ => {}
         }
-        if exhausted(five) && !exhausted(seven) {
-            return Block::FiveHour(hit.until.clone().or(reset_of(five)));
+        if exhausted(five, now) && !exhausted(seven, now) {
+            return Block::FiveHour(hit.until.clone().or(reset_of(five, now)));
         }
-        if exhausted(fable) && !exhausted(seven) && !exhausted(five) {
-            return Block::ModelOut { model: "fable".into(), until: hit.until.clone().or(reset_of(fable)) };
+        if exhausted(fable, now) && !exhausted(seven, now) && !exhausted(five, now) {
+            return Block::ModelOut { model: "fable".into(), until: hit.until.clone().or(reset_of(fable, now)) };
         }
-        return Block::SevenDay(hit.until.clone().or(reset_of(seven)));
+        return Block::SevenDay(hit.until.clone().or(reset_of(seven, now)));
     }
-    if exhausted(q.seven_day.as_ref()) {
-        return Block::SevenDay(reset_of(q.seven_day.as_ref()));
+    if exhausted(q.seven_day.as_ref(), now) {
+        return Block::SevenDay(reset_of(q.seven_day.as_ref(), now));
     }
-    if exhausted(q.five_hour.as_ref()) {
-        return Block::FiveHour(reset_of(q.five_hour.as_ref()));
+    if exhausted(q.five_hour.as_ref(), now) {
+        return Block::FiveHour(reset_of(q.five_hour.as_ref(), now));
     }
-    if exhausted(q.fable.as_ref()) {
-        return Block::ModelOut { model: "fable".into(), until: reset_of(q.fable.as_ref()) };
+    if exhausted(q.fable.as_ref(), now) {
+        return Block::ModelOut { model: "fable".into(), until: reset_of(q.fable.as_ref(), now) };
     }
     Block::None
 }
@@ -199,7 +232,7 @@ fn pick_worker(role: Role, candidates: &[Candidate], on_5h: On5hLimit, exclude: 
             Block::None => {
                 return Pick::Use { identity: c.name.into(), model: None, reason: "額度可用".into() };
             }
-            Block::ModelOut { model, until } => match c.quota.and_then(|q| fallback_model(&model, q)) {
+            Block::ModelOut { model, until } => match c.quota.and_then(|q| fallback_model(&model, q, now)) {
                 Some(alt) => {
                     return Pick::Use {
                         identity: c.name.into(),
@@ -242,8 +275,8 @@ fn pick_verifier(candidates: &[Candidate], on_5h: On5hLimit, now: DateTime<Utc>)
             resets.push(Reset { identity: c.name.into(), resets_at: None });
             continue;
         };
-        // D3：確定有 Fable 額度才算——讀不到 Fable 桶跟用盡一樣不能用。
-        let fable_ok = q.fable.as_ref().is_some_and(|w| !w.critical());
+        // D3：確定有 Fable 額度才算——讀不到 Fable 桶跟用盡一樣不能用；窗已經重置的不算用盡（#464）。
+        let fable_ok = q.fable.as_ref().is_some() && !exhausted(q.fable.as_ref(), now);
         match block_of(q, now) {
             Block::None if fable_ok => {
                 return Pick::Use { identity: c.name.into(), model: Some("fable".into()), reason: "Fable 週桶有額度".into() };
@@ -257,9 +290,9 @@ fn pick_verifier(candidates: &[Candidate], on_5h: On5hLimit, now: DateTime<Utc>)
             }
             Block::FiveHour(until) if fable_ok => {
                 five_hour_waits.push((c.name.into(), until));
-                resets.push(Reset { identity: c.name.into(), resets_at: reset_of(q.fable.as_ref()) });
+                resets.push(Reset { identity: c.name.into(), resets_at: reset_of(q.fable.as_ref(), now) });
             }
-            _ => resets.push(Reset { identity: c.name.into(), resets_at: reset_of(q.fable.as_ref()) }),
+            _ => resets.push(Reset { identity: c.name.into(), resets_at: reset_of(q.fable.as_ref(), now) }),
         }
     }
     // 有 Fable 額度、只卡 5h：等最早重置的那個，不要停下來問人——以前這種情況回 `AskUser`，說的是「沒有 Fable 額度」，
@@ -294,6 +327,105 @@ mod tests {
             source: "test".into(),
             account: None,
             host: "local".into(),
+        }
+    }
+
+    // ------------------------------------------------------- issue #464：跨過重置的舊讀數
+
+    /// `now()` 是 2026-09-13T12:00:00Z，所以這個 5h 窗**兩小時前就重置了**，
+    /// 而讀數還停在見底（`quota_cache` 活得比重置久：daemon 停機、探測退避、主機斷線）。
+    fn stale_five_hour(mut quota: Quota) -> Quota {
+        quota.five_hour = w(100.0, "2026-09-13T10:00:00Z");
+        quota
+    }
+
+    /// 票上的主線：見底但那個窗已經重置 → 不算用盡，直接拿來用。
+    #[test]
+    fn a_critical_window_whose_reset_already_passed_is_not_exhausted() {
+        let qs = [("cc0", Some(stale_five_hour(q(100.0, 10.0, Some(10.0)))))];
+        let pick = pick(Role::Executor, &cands(&qs), On5hLimit::Wait, None, now());
+        assert_eq!(used(&pick), ("cc0", None), "5h 窗兩小時前就重置了，不該還在等它：{pick:?}");
+    }
+
+    /// 修好之前就是這個形狀：`Pick::Wait` 的 `until` 是**過去**的時刻，呼叫端拿它排重試沒有意義。
+    #[test]
+    fn a_wait_never_carries_a_reset_time_that_has_already_passed() {
+        // 5h 見底且已重置、7d 也見底但它的重置在未來 → 只能等 7d，而時間必須是未來那一個。
+        let mut quota = stale_five_hour(q(100.0, 100.0, Some(10.0)));
+        quota.seven_day = w(100.0, "2026-09-18T06:00:00Z");
+        let qs = [("cc0", Some(quota))];
+        let pick = pick(Role::Executor, &cands(&qs), On5hLimit::Wait, None, now());
+        match &pick {
+            Pick::Wait { until, .. } => {
+                let at = until.as_deref().and_then(|u| DateTime::parse_from_rfc3339(u).ok()).map(|t| t.with_timezone(&Utc));
+                assert_eq!(at, Some(parse_at(Some("2026-09-18T06:00:00Z")).unwrap()), "要等的是 7d 的重置：{pick:?}");
+                assert!(at.unwrap() > now(), "until 不能是過去");
+            }
+            other => panic!("7d 還沒重置，應該等它：{other:?}"),
+        }
+    }
+
+    /// `reset_of` 的過去過濾走得到的是**橫幅指名桶**那條路：那幾條不看 `exhausted`，所以那一桶的
+    /// `resets_at` 可能已經過去（橫幅還沒過期、讀數卻跨過了窗）。`sooner` 會挑較早的那個，
+    /// 不過濾就會挑到過去的時刻當 `Pick::Wait` 的 `until`。
+    #[test]
+    fn a_banner_named_bucket_does_not_wait_on_a_reset_that_already_passed() {
+        let mut quota = q(10.0, 100.0, Some(10.0));
+        // 7d 的讀數跨過了自己的重置（六小時前），但橫幅還有效到 18:00。
+        quota.seven_day = w(100.0, "2026-09-13T06:00:00Z");
+        quota.limit_hit = Some(LimitHit {
+            message: "You've reached your limit".into(),
+            until: Some("2026-09-13T18:00:00Z".into()),
+            at: "2026-09-13T11:50:00Z".into(),
+            bucket: Some("seven_day".into()),
+        });
+        let qs = [("cc0", Some(quota))];
+        let pick = pick(Role::Executor, &cands(&qs), On5hLimit::Wait, None, now());
+        match &pick {
+            Pick::Wait { until, .. } => {
+                assert_eq!(until.as_deref(), Some("2026-09-13T18:00:00Z"), "要等橫幅說的時間，不是已經過去的窗重置：{pick:?}");
+            }
+            other => panic!("橫幅還有效，應該等：{other:?}"),
+        }
+    }
+
+    /// 沒有 `resets_at` 的見底窗照舊算用盡：無從判斷有沒有重置，寧可繼續等。
+    #[test]
+    fn a_critical_window_without_a_reset_time_still_blocks() {
+        let mut quota = q(100.0, 10.0, Some(10.0));
+        quota.five_hour = Some(Window { used_pct: 100.0, resets_at: None });
+        let qs = [("cc0", Some(quota))];
+        let pick = pick(Role::Executor, &cands(&qs), On5hLimit::Wait, None, now());
+        assert!(matches!(pick, Pick::Wait { .. }), "看不出重置過沒有，就還是擋著：{pick:?}");
+    }
+
+    /// 撞限橫幅本來就會過期（`hit_active`）；量表也重置過的話，整個身分就是可用的。
+    #[test]
+    fn an_expired_banner_plus_a_reset_window_frees_the_identity() {
+        let quota = hit(stale_five_hour(q(100.0, 10.0, Some(10.0))), Some("2026-09-13T11:00:00Z"));
+        let qs = [("cc0", Some(quota))];
+        let pick = pick(Role::Executor, &cands(&qs), On5hLimit::Wait, None, now());
+        assert_eq!(used(&pick), ("cc0", None), "橫幅過期＋窗已重置：{pick:?}");
+    }
+
+    /// 驗證者那一條走同一個規則：Fable 窗見底但已經重置 → 算它有額度。
+    #[test]
+    fn the_verifier_also_ignores_a_fable_window_that_already_reset() {
+        let mut quota = q(10.0, 10.0, Some(100.0));
+        quota.fable = w(100.0, "2026-09-13T06:00:00Z"); // 六小時前就重置了
+        let qs = [("cc0", Some(quota))];
+        let pick = pick(Role::Verifier, &cands(&qs), On5hLimit::Wait, None, now());
+        assert_eq!(used(&pick), ("cc0", Some("fable")), "Fable 的週桶已經重置：{pick:?}");
+    }
+
+    /// 還沒到重置時間的見底窗當然照舊擋著（別把守衛寫成「永遠不算用盡」）。
+    #[test]
+    fn a_critical_window_before_its_reset_still_blocks() {
+        let qs = [("cc0", Some(q(100.0, 10.0, Some(10.0))))];
+        let pick = pick(Role::Executor, &cands(&qs), On5hLimit::Wait, None, now());
+        match &pick {
+            Pick::Wait { until, .. } => assert_eq!(until.as_deref(), Some("2026-09-13T15:00:00Z"), "{pick:?}"),
+            other => panic!("5h 還沒重置，要等它：{other:?}"),
         }
     }
 

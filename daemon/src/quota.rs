@@ -442,8 +442,16 @@ pub(crate) fn quota_value(q: &Quota, stale: bool) -> Value {
     value
 }
 
+/// 秒與毫秒都收（**加固，不是修 bug**：目前沒有任何來源送毫秒，issue #464）。
+///
+/// 沒有這道防線時，一個毫秒值會被當成秒算出西元五萬多年的 `resets_at`——`chrono` 收得下那個範圍，
+/// 所以不會失敗，只會安靜地產生一個「永遠不會到」的重置時間：`future()` 那類過濾永遠成立、
+/// `same_window` 永遠對不上、靠它判「窗是不是重置了」的地方（#464 的 `window_reset`）永遠說沒有。
+/// 寧可在入口把單位判掉，也不要讓一個單位錯誤變成永久卡住的額度。
+const MS_THRESHOLD: i64 = 1_000_000_000_000;
+
 fn unix_to_rfc3339(v: Option<&Value>) -> Option<String> {
-    let secs = match v? {
+    let raw = match v? {
         Value::Number(n) => n.as_f64()? as i64,
         Value::String(s) => {
             if let Ok(n) = s.parse::<i64>() {
@@ -455,7 +463,9 @@ fn unix_to_rfc3339(v: Option<&Value>) -> Option<String> {
         }
         _ => return None,
     };
-    chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0)
+    // 1e12 秒 ＝ 西元 33658 年；1e12 毫秒 ＝ 2001 年。超過就只可能是毫秒。
+    let (secs, millis) = if raw.abs() >= MS_THRESHOLD { (raw.div_euclid(1000), raw.rem_euclid(1000) as u32) } else { (raw, 0) };
+    chrono::DateTime::<chrono::Utc>::from_timestamp(secs, millis * 1_000_000)
         .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
 }
 
@@ -1167,6 +1177,28 @@ pub fn spawn_codex_poller(app: Arc<App>) {
 
 #[cfg(test)]
 mod tests {
+
+    /// issue #464 的**加固**（不是修 bug：目前沒有來源送毫秒）。1e12 秒是西元 33658 年，
+    /// 所以超過門檻只可能是毫秒；不擋的話會安靜地算出一個永遠不會到的 `resets_at`。
+    #[test]
+    fn a_millisecond_timestamp_is_not_read_as_seconds() {
+        let at = |v: serde_json::Value| unix_to_rfc3339(Some(&v));
+        // 秒：照舊。
+        assert_eq!(at(json!(1_789_000_000)), Some("2026-09-10T00:26:40.000Z".into()));
+        // 毫秒：同一個時刻，不是西元五萬年。
+        assert_eq!(at(json!(1_789_000_000_000i64)), Some("2026-09-10T00:26:40.000Z".into()));
+        assert_eq!(at(json!(1_789_000_000_123i64)), Some("2026-09-10T00:26:40.123Z".into()));
+        // 字串形式的毫秒一樣。
+        assert_eq!(at(json!("1789000000000")), Some("2026-09-10T00:26:40.000Z".into()));
+        // 已經是時間字串的原樣留著。
+        assert_eq!(at(json!("2026-09-10T00:26:40Z")), Some("2026-09-10T00:26:40Z".into()));
+        // 兩種都不該落在很遠的未來。
+        for v in [json!(1_789_000_000_000i64), json!(1_789_000_000)] {
+            let s = at(v).unwrap();
+            assert!(s.starts_with("2026-"), "{s}");
+        }
+    }
+
     /// 多個 Claude session 共用一把帳號 key；較晚收到的舊窗狀態列不能蓋掉重置後的讀數。
     #[tokio::test]
     async fn an_old_statusline_snapshot_cannot_replace_newer_quota_windows() {
