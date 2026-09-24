@@ -3,8 +3,13 @@
  *
  * 唯讀，走既有的 `GET /api/supervisor/approvals` 與 `GET /api/supervisor`（只取 `last_deploy.at`，
  * 用來排除上次上線以前的舊申請）；計數規則在 `lib/rebuildCount.ts`，與
- * `scripts/ops/daemon-update-kick.sh` 同一套。端點不存在（舊 daemon）或壞掉時回 `null`，
+ * `scripts/ops/daemon-update-kick.sh` 同一套。端點不存在（舊 daemon）或 daemon 回錯時回 `rows: null`，
  * chip 整顆不出現——它不是錯誤面板。
+ *
+ * **連不上 daemon 是第三種情況**（issue #531）：以前只吞 `ApiError`，`fetch` 丟的 `TypeError` 會往外拋，
+ * 呼叫端的 `void refresh()` 沒接，daemon 每重啟一次就每 30 秒一則 unhandled rejection，而 chip 停在
+ * 斷線前的數字、看起來像現況。現在一律不拋，並用 `offline` 把「問不到」跟「daemon 說沒有」分開：
+ * 前者留著上一次的數字但標成過期，後者才真的收掉。
  */
 import { rawTransport } from './index'
 import { ApiError } from './types'
@@ -69,15 +74,22 @@ export async function supervisorBotId(): Promise<string | null> {
   }
 }
 
-export async function fetchRebuildRequests(): Promise<RebuildRequest[] | null> {
-  if (rawTransport.mock) return pendingRebuilds(MOCK_ROWS)
+/** 一次查詢的結果。`rows: null` ＝這一次沒有名單可用；`offline` ＝原因是連不上，不是 daemon 說沒有。 */
+export interface RebuildSnapshot {
+  rows: RebuildRequest[] | null
+  offline: boolean
+}
+
+export async function fetchRebuildRequests(): Promise<RebuildSnapshot> {
+  if (rawTransport.mock) return { rows: pendingRebuilds(MOCK_ROWS), offline: false }
   try {
     const [raw, since] = await Promise.all([rawTransport.request('GET', '/supervisor/approvals'), lastDeployAt()])
     const rows = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>).approvals : null
-    if (!Array.isArray(rows)) return null
-    return pendingRebuilds(rows.map(toRow).filter((r): r is RebuildRequest => r !== null), since)
+    if (!Array.isArray(rows)) return { rows: null, offline: false }
+    return { rows: pendingRebuilds(rows.map(toRow).filter((r): r is RebuildRequest => r !== null), since), offline: false }
   } catch (e) {
-    if (e instanceof ApiError) return null
-    throw e
+    // daemon 有回（404 舊 daemon、500…）＝它說了算，chip 收掉；連不上（`TypeError: Failed to fetch`、
+    // abort）只代表這一次問不到，不改數字，改標過期。兩種都不往外拋。
+    return { rows: null, offline: !(e instanceof ApiError) }
   }
 }

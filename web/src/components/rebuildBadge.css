@@ -29,6 +29,23 @@
   color: var(--text);
 }
 
+/* 問不到（daemon 多半正在重啟）：數字留著但虛線＋淡化，表示「這是斷線前的」而不是現況（issue #531）。
+   不用警示色——連線狀態本來就有側欄那顆 ConnBadge 在講，這裡只需要不要假裝數字是準的。 */
+.rebuild-badge.offline {
+  border-style: dashed;
+  opacity: 0.55;
+}
+
+.rebuild-badge.offline .rebuild-v {
+  color: var(--text-dim);
+}
+
+.rebuild-offline-note {
+  margin-left: 6px;
+  color: var(--text-faint);
+  font-weight: 400;
+}
+
 .rebuild-k {
   color: var(--text-faint);
   letter-spacing: 0.03em;
