@@ -2633,7 +2633,8 @@ async fn get_mem_pane(State(app): State<Arc<App>>, Query(q): Query<HashMap<Strin
     Ok(Json(crate::memproc::pane_preview(&app, &host, pane_id, socket, lines).await?))
 }
 
-/// SPEC §15.4. Guard rails (in the tree, never herdr, never a bot) live in `memproc::kill`, which re-samples first.
+/// SPEC §15.4. Guard rails (in the tree, never herdr, never a bot) live in `memproc::kill`,
+/// which re-samples first and confirms the pid is still the same process in the same command (#526).
 async fn kill_mem_process(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Result<Json<Value>, LcError> {
     let host = body.get("host").and_then(|v| v.as_str()).unwrap_or(crate::config::LOCAL_HOST).to_string();
     let Some(pid) = body.get("pid").and_then(|v| v.as_i64()) else {
@@ -2648,6 +2649,11 @@ async fn kill_mem_process(State(app): State<Arc<App>>, Json(body): Json<Value>) 
         Ok(Ok(v)) => Ok(Json(v)),
         Ok(Err(crate::memproc::KillDenied::NotInTree)) => Err(LcError::Bad(format!("pid {pid} 不在 {host} 的 herdr 樹裡"))),
         Ok(Err(crate::memproc::KillDenied::Herdr)) => Err(LcError::Bad("不能砍 herdr 本身".into())),
+        // 什麼都沒送：那個 pid 在重新取樣與送訊號之間換了行程。重新整理清單再決定。
+        Ok(Err(crate::memproc::KillDenied::PidChanged)) => Err(LcError::conflict(
+            "pid_changed",
+            json!({"pid": pid, "message": "這個 pid 已經不是剛才那一顆行程了，沒有送出任何訊號；重新整理清單再試"}),
+        )),
         Ok(Err(crate::memproc::KillDenied::Bot(id))) => {
             Err(LcError::conflict("bot_process", json!({"bot_id": id, "message": "這是 AG Man 的 bot，請用停止 bot"})))
         }
