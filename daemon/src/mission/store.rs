@@ -942,7 +942,13 @@ pub async fn cancel_announced(pool: &SqlitePool, id: &str, announce: Option<Anno
 ///
 /// 每一筆都跟 [`cancel_announced`] 一樣是「列＋`cancelled` 事件」一個交易，只是理由寫成 `project_deleted`
 /// 並留在事件的 payload 裡（`GET /api/missions/{id}` 看得到為什麼被收）。不推 inbox：專案是使用者當下刪的，
-/// 不需要再叫醒 AGM。**還原專案不會把任務救回來**（取消是終態，見 SPEC §18.13）。
+/// 不需要再叫醒 AGM。**還原專案不會把任務救回來**（取消是終態，見 SPEC §18.14）。
+///
+/// **底下還開著的交辦也逐件收掉**（issue #498 的複看）：`cancel_announced` 的文件就寫著「呼叫端要接著走
+/// supervisor 的逐件取消」，`mission cancel` 有做、這條當初漏了。不收的話那些交辦還開著，額度回來時
+/// `controller::resume_quota_blocked` 會把它們 dispatch 到已經軟刪的 bot，收成 `awaiting_review` 再推一則
+/// `assignment_failed`——等於把噪音從任務層搬到交辦層。走 `supervisor::store::review`（不是 HTTP 那支）：
+/// 這是 daemon 自己的收尾，沒有角色身分可帶，`post_review` 會要求驗過的角色。
 pub async fn cancel_open_for_project(pool: &SqlitePool, project_id: &str, reason: &str) -> Result<usize> {
     let open: Vec<String> = sqlx::query_scalar(
         "SELECT id FROM missions WHERE project_id = ? AND completed_at IS NULL AND cancelled_at IS NULL ORDER BY created_at, rowid",
@@ -980,6 +986,26 @@ pub async fn cancel_open_for_project(pool: &SqlitePool, project_id: &str, reason
         .await?;
         tx.commit().await?;
         done += 1;
+        // 任務關了才收交辦：順序跟 `mission cancel` 一樣，鎖外排隊的派工拿到鎖時會看到任務已關，
+        // 不會在這之後又冒出一件新的。收不掉只記 log——任務已經取消了，不能因為某一件而回頭。
+        for a in crate::supervisor::store::mission_assignments(pool, &id).await?.into_iter().filter(|a| a.is_open()) {
+            match crate::supervisor::store::review(
+                pool,
+                &a.id,
+                "cancel",
+                crate::agent_relay::DAEMON_SENDER,
+                reason,
+                Some("專案已刪除，這筆任務與它的交辦一併取消"),
+                None,
+                None,
+            )
+            .await
+            {
+                Ok(Some(_)) => {}
+                Ok(None) => tracing::info!(mission = %id, assignment = %a.id, "assignment was already closed while cancelling a deleted project's mission"),
+                Err(e) => tracing::warn!(mission = %id, assignment = %a.id, error = ?e, "could not cancel a deleted project's mission assignment"),
+            }
+        }
     }
     Ok(done)
 }

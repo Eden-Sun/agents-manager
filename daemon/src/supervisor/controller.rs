@@ -805,10 +805,54 @@ async fn executor_identity(app: &Arc<App>, mission_id: &str) -> anyhow::Result<O
 /// 等額度的交辦就被放回 queued 重送。
 async fn mission_paused(app: &Arc<App>, a: &store::Assignment) -> anyhow::Result<bool> {
     let Some(mission_id) = a.mission_id.as_deref() else { return Ok(false) };
-    Ok(matches!(
-        crate::mission::store::get(&app.db, mission_id).await?,
-        Some(m) if super::api::user_pause_reason(m.paused_reason.as_deref()).is_some() && m.completed_at.is_none() && m.cancelled_at.is_none()
-    ))
+    let Some(m) = crate::mission::store::get(&app.db, mission_id).await? else { return Ok(false) };
+    // 任務已經結案／取消：這件交辦不該再被叫醒（issue #498 的複看）。以前這裡要求
+    // `completed_at IS NULL AND cancelled_at IS NULL`，於是**關掉的**任務回 false＝照常 resume：
+    // 額度回來時 dispatch 到一顆已經軟刪的 bot，收成 `awaiting_review` 再推一則 `assignment_failed` 給 AGM
+    // ——把「任務沒收乾淨」的噪音搬到交辦那一層。取消任務會逐件收交辦，這條是第二道（收不掉的、或更早就 park 在那裡的）。
+    if m.completed_at.is_some() || m.cancelled_at.is_some() {
+        return Ok(true);
+    }
+    Ok(super::api::user_pause_reason(m.paused_reason.as_deref()).is_some())
+}
+
+#[cfg(test)]
+mod mission_closed_tests {
+    use super::*;
+
+    /// issue #498 的複看：任務已經取消（例如專案被刪），它底下還 park 在那裡的交辦不能再被叫醒——
+    /// 額度回來時會 dispatch 到一顆已經軟刪的 bot，收成 `awaiting_review` 再推一則 `assignment_failed`。
+    /// 以前這裡要求 `cancelled_at IS NULL`，關掉的任務反而回 false＝照常 resume。
+    #[tokio::test]
+    async fn a_closed_missions_assignment_is_not_resumed() {
+        let env = crate::testing::env().await;
+        let app = &env.app;
+        store::get_or_init(&app.db).await.unwrap();
+        crate::mission::store::migrate(&app.db).await.unwrap();
+        let (m, _) = crate::mission::store::create(
+            &app.db,
+            &crate::mission::store::NewMission {
+                project_id: &env.project_id,
+                client_request_id: "crid-closed",
+                text: "任務",
+                delivery_mode: "push_main",
+                executor_kind: "claude",
+                on_5h_limit: "wait",
+                max_rounds: 2,
+                parent_mission_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        let a = store::insert_assignment(&app.db, None, "bot1", "crid-a", "做事", &[], None, true).await.unwrap();
+        store::set_mission_link(&app.db, &a.id, &m.id, "executor").await.unwrap();
+        let a = store::assignment(&app.db, &a.id).await.unwrap().unwrap();
+
+        assert!(!mission_paused(app, &a).await.unwrap(), "任務還開著、也沒暫停：照常叫醒");
+
+        crate::mission::store::cancel(&app.db, &m.id).await.unwrap();
+        assert!(mission_paused(app, &a).await.unwrap(), "任務取消了就不該再叫醒它的交辦");
+    }
 }
 
 /// 這件交辦 park 時撞的是模型專屬的桶（`error` 裡記的 claude 橫幅，例如 Fable），而這顆 bot 現在跑的模型

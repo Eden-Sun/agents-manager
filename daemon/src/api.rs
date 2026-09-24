@@ -1009,7 +1009,12 @@ async fn delete_project(State(app): State<Arc<App>>, Path(id): Path<String>) -> 
     crate::lifecycle::race_point::hit("delete_project_after_commit", &id).await;
     // 專案沒了，它底下還開著的任務也跟著收（issue #498）：任務沒有軟刪，而 `mission::store::open_unpaused`
     // （`workflow::wake_stalled_at` 掃的那份）沒有存活性條件——不收的話它們永遠停在 open，十分鐘後還會推一則
-    // `mission_next` 要 AGM 去推一個專案與 bot 都不存在的任務。臨時 bot 照既有那條收（結案的任務才輪得到它）。
+    // `mission_next` 要 AGM 去推一個專案與 bot 都不存在的任務。順帶把它們底下還開著的交辦也收掉。
+    //
+    // 臨時 bot（`agm-mission-*`）**不是**走 `closed_with_live_temp_bots` 那條（issue #498 的複看）：
+    // 那條要求 `bots.deleted_at IS NULL`，而下面的 `delete_in_config` 與逐顆軟刪已經先把它們收掉了，
+    // 所以那條掃不到、也不需要掃——刪專案本來就把專案裡每一顆 bot 都軟刪了。
+    //
     // 盡力而為：收不掉只記 log，不讓刪除回頭——專案在 config 裡已經定案刪除了。
     match crate::mission::store::cancel_open_for_project(&app.db, &id, "project_deleted").await {
         Ok(0) => {}
@@ -4078,7 +4083,16 @@ mod delete_bot_tests {
             .await
             .unwrap();
 
+        // 底下一件還開著的交辦：任務收了，它也要跟著收（issue #498 的複看：不收的話額度回來時
+        // 還會被 dispatch 到已經軟刪的 bot，收成 awaiting_review 再推一則 assignment_failed）。
+        crate::supervisor::store::get_or_init(&app.db).await.unwrap();
+        let a = crate::supervisor::store::insert_assignment(&app.db, None, &b1, "crid-a1", "做事", &[], None, true).await.unwrap();
+        crate::supervisor::store::set_mission_link(&app.db, &a.id, &open.id, "executor").await.unwrap();
+
         delete_project(State(app.clone()), Path(e.project_id.clone())).await.unwrap();
+
+        let a_after = crate::supervisor::store::assignment(&app.db, &a.id).await.unwrap().unwrap();
+        assert_eq!(a_after.status, "cancelled", "任務收了，底下開著的交辦也要收：{}", a_after.status);
 
         let after = crate::mission::store::get(&app.db, &open.id).await.unwrap().unwrap();
         assert!(after.cancelled_at.is_some(), "開著的任務要跟著專案收掉");
