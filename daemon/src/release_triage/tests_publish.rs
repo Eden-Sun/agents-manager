@@ -6,6 +6,7 @@ use super::verdict::{self, EntryVerdict, Proposal, StoredProposal, Submission, V
 use super::*;
 use crate::config::ReleaseTriageCfg;
 use crate::changelog::Section;
+use serde_json::json;
 
 const CLAUDE_MD: &str = include_str!("fixtures/claude_2.1.276-278.md");
 
@@ -113,6 +114,28 @@ fn quote_comes_from_the_ledger_never_from_the_model() {
     assert_eq!(issue::title("claude", "2.1.277", &p), "claude 2.1.277: 清理（採用）");
 }
 
+/// 模型自己把 `claude 2.1.277:` 也寫進 title 時（真實資料裡 6 個提案有 5 個這樣），
+/// 標題不能變成 `claude 2.1.277: claude 2.1.277: …`。全形冒號、多餘空白、只有前綴沒有句子都要處理。
+#[test]
+fn a_title_that_already_carries_the_version_prefix_is_not_doubled() {
+    let mk = |t: &str| StoredProposal {
+        entry_ids: vec!["b61f2b664d".into()],
+        triage: "guard".into(),
+        title: t.into(),
+        goal: "g".into(),
+        suggestion: "s".into(),
+        acceptance: "a".into(),
+        duplicate_of: None,
+    };
+    let t = |s: &str| issue::title("claude", "2.1.277", &mk(s));
+    assert_eq!(t("claude 2.1.277: resume 會多起一個回合"), "claude 2.1.277: resume 會多起一個回合（提防）");
+    assert_eq!(t("claude 2.1.277：resume 會多起一個回合"), "claude 2.1.277: resume 會多起一個回合（提防）");
+    assert_eq!(t("  claude 2.1.277:  resume 會多起一個回合 "), "claude 2.1.277: resume 會多起一個回合（提防）");
+    assert_eq!(t("resume 會多起一個回合"), "claude 2.1.277: resume 會多起一個回合（提防）", "沒有前綴的照舊");
+    assert_eq!(t("claude 2.1.277"), "claude 2.1.277: claude 2.1.277（提防）", "只有前綴沒有句子：不吃掉，讓人看得出模型沒寫");
+    assert_eq!(t("claude 2.1.278: 另一版的標題"), "claude 2.1.277: claude 2.1.278: 另一版的標題（提防）", "別版的前綴不剝");
+}
+
 // ───────────────────────── 假 gh ─────────────────────────
 
 struct FakeGh {
@@ -128,6 +151,10 @@ D=$(dirname "$0")
 echo "$1 $2" >> "$D/calls.log"
 case "$1 $2" in
   "auth status") [ -f "$D/fail_auth" ] && { echo "not logged in" >&2; exit 1; }; exit 0;;
+  "repo view")
+    [ -f "$D/fail_repo" ] && { echo "Could not resolve to a Repository" >&2; exit 1; }
+    cat "$D/repo.json" 2>/dev/null || echo '{"nameWithOwner":"o/r","viewerPermission":"ADMIN","hasIssuesEnabled":true}';;
+  "label list") cat "$D/labels.json" 2>/dev/null || echo '[{"name":"release-triage"},{"name":"upstream:claude"},{"name":"upstream:codex"},{"name":"triage:guard"},{"name":"triage:adopt"}]';;
   "issue list") if [ -f "$D/list.json" ]; then cat "$D/list.json"; else echo "[]"; fi;;
   "issue create")
     [ -f "$D/fail_create" ] && { echo "API rate limit exceeded" >&2; exit 1; }
@@ -354,9 +381,108 @@ async fn health_probe_reports_gh_auth_failure_and_stays_silent_when_publish_is_o
     assert_eq!(issue::health_probe(&gh.cfg(false)).await, None);
     assert_eq!(gh.calls().len(), 0, "publish=false 不碰 gh");
     let ok = issue::health_probe(&gh.cfg(true)).await.unwrap();
-    assert_eq!(ok["gh_auth_ok"], true);
+    assert_eq!((&ok["gh_auth_ok"], &ok["repo_ok"], &ok["can_write"]), (&json!(true), &json!(true), &json!(true)));
+    assert_eq!(ok["viewer_permission"], "ADMIN");
+    assert_eq!(ok["labels_missing"], json!([]), "標籤齊");
+    // auth 綠但 repo 看不到／權限只有 READ／標籤少一個——三種都會讓 `gh issue create` 失敗，健檢要分得出來。
+    std::fs::write(gh.dir.join("repo.json"), r#"{"nameWithOwner":"o/r","viewerPermission":"READ","hasIssuesEnabled":false}"#).unwrap();
+    std::fs::write(gh.dir.join("labels.json"), r#"[{"name":"release-triage"},{"name":"upstream:claude"}]"#).unwrap();
+    let ro = issue::health_probe(&gh.cfg(true)).await.unwrap();
+    assert_eq!((&ro["repo_ok"], &ro["can_write"], &ro["issues_enabled"]), (&json!(true), &json!(false), &json!(false)));
+    assert_eq!(ro["labels_missing"], json!(["upstream:codex", "triage:guard", "triage:adopt"]));
+    gh.flag("fail_repo", true);
+    let nr = issue::health_probe(&gh.cfg(true)).await.unwrap();
+    assert_eq!((&nr["gh_auth_ok"], &nr["repo_ok"]), (&json!(true), &json!(false)));
+    assert!(nr["repo_error"].as_str().unwrap().contains("Could not resolve"), "{nr}");
     gh.flag("fail_auth", true);
     let bad = issue::health_probe(&gh.cfg(true)).await.unwrap();
     assert_eq!(bad["gh_auth_ok"], false);
     assert!(bad["gh_auth_error"].as_str().unwrap().contains("not logged in"));
+    assert_eq!(bad["repo_ok"], false, "auth 沒過就停在那一步，不再問 repo");
+}
+
+// ───────────────────────── 乾跑（打開 publish 之前） ─────────────────────────
+
+fn actions(v: &serde_json::Value) -> Vec<String> {
+    v["versions"][0]["proposals"].as_array().unwrap().iter().map(|p| p["action"].as_str().unwrap().to_string()).collect()
+}
+
+/// #204 的 close condition：要能在 `publish = false` 的狀態下證明「這一版會開幾張、內文長什麼樣」，
+/// 而且乾跑本身一張 issue 都不開、帳本一個字都不改。
+#[tokio::test]
+async fn a_dry_run_plans_the_issues_without_creating_any_or_touching_the_ledger() {
+    let p = pool().await;
+    let gh = FakeGh::new("dry");
+    let es = seed(&p, &[("adopt", &[1], None), ("guard", &[0], None)]).await;
+    let before = row(&p).await;
+    let out = issue::preflight(&p, &gh.cfg(false), None, None).await.unwrap();
+    assert_eq!(out["publish_enabled"], false, "publish 還是關著");
+    assert_eq!((&out["would_create"], &out["would_comment"], &out["existing"]), (&json!(2), &json!(0), &json!(0)));
+    assert_eq!(actions(&out), ["create", "create"]);
+    // guard 優先：排序跟真的 publish 同一套。
+    assert_eq!(out["versions"][0]["proposals"][0]["triage"], "guard");
+    let first = &out["versions"][0]["proposals"][0];
+    assert_eq!(first["title"], "claude 2.1.277: 提案1（提防）");
+    assert!(first["body"].as_str().unwrap().contains(&format!("> {}", judged(&es)[0].text)), "內文先看得到引用");
+    assert!(first["body"].as_str().unwrap().contains(&format!("release-triage: claude@2.1.277#{} -->", judged(&es)[0].id)));
+    assert_eq!(first["labels"], json!(["release-triage", "upstream:claude", "triage:guard"]));
+    // gh 只被讀過：auth／repo／label／issue list，沒有 create 也沒有 comment。
+    assert_eq!((gh.count("issue create"), gh.count("issue comment")), (0, 0), "{:?}", gh.calls());
+    assert!(gh.count("issue list") >= 2, "每個提案都真的問過遠端去重：{:?}", gh.calls());
+    let after = row(&p).await;
+    assert_eq!((after.status, after.issues.len(), after.publish_error.clone()), (before.status, 0, None));
+    assert_eq!(after.updated_at, before.updated_at, "帳本一個字都沒動");
+}
+
+/// 遠端已經有同一個標記（含已關的）→ 乾跑就看得出「重跑不會開第二張」，不必真的開一張來試。
+#[tokio::test]
+async fn a_dry_run_reports_the_existing_remote_issue_instead_of_planning_a_duplicate() {
+    let p = pool().await;
+    let gh = FakeGh::new("dryexist");
+    let es = seed(&p, &[("guard", &[0], None)]).await;
+    let mk = issue::marker("claude", "2.1.277", &[judged(&es)[0].id.clone()]);
+    std::fs::write(
+        gh.dir.join("list.json"),
+        json!([{"number": 42, "url": "https://github.com/o/r/issues/42", "body": format!("x\n<!-- release-triage: {mk} -->\n")}]).to_string(),
+    )
+    .unwrap();
+    let out = issue::preflight(&p, &gh.cfg(true), Some("claude"), None).await.unwrap();
+    assert_eq!(actions(&out), ["existing"]);
+    assert_eq!((&out["would_create"], &out["existing"]), (&json!(0), &json!(1)));
+    assert_eq!(out["versions"][0]["proposals"][0]["number"], 42);
+    assert_eq!(row(&p).await.issues.len(), 0, "乾跑不把它記進帳本");
+}
+
+/// gh 檢查沒過（auth 壞／標籤少）時乾跑不能假裝算得出來：去重那欄是 `remote_unknown`，
+/// 但 title／body 照樣渲染，人還是能先看 verdict 品質。
+#[tokio::test]
+async fn a_dry_run_that_cannot_reach_github_says_so_instead_of_guessing() {
+    let p = pool().await;
+    let gh = FakeGh::new("dryblocked");
+    seed(&p, &[("guard", &[0], None)]).await;
+    std::fs::write(gh.dir.join("labels.json"), r#"[{"name":"release-triage"}]"#).unwrap();
+    let ok = issue::preflight(&p, &gh.cfg(true), None, None).await.unwrap();
+    assert_eq!(actions(&ok), ["create"]);
+    assert_eq!(ok["checks"]["labels_missing"], json!(["upstream:claude", "upstream:codex", "triage:guard", "triage:adopt"]));
+    gh.flag("fail_auth", true);
+    let blocked = issue::preflight(&p, &gh.cfg(true), None, None).await.unwrap();
+    assert_eq!(actions(&blocked), ["remote_unknown"]);
+    assert_eq!(blocked["would_create"], 0);
+    assert!(!blocked["versions"][0]["proposals"][0]["body"].as_str().unwrap().is_empty(), "內文照樣看得到");
+    assert_eq!(blocked["versions"][0]["proposals"][0]["writes"], false);
+}
+
+/// 帳本已經有這個 entry 的 issue（上一輪開好了）→ 連 gh 都不必問。
+#[tokio::test]
+async fn a_dry_run_skips_github_for_proposals_already_in_the_ledger() {
+    let p = pool().await;
+    let gh = FakeGh::new("drylogged");
+    let es = seed(&p, &[("guard", &[0], None)]).await;
+    let id = judged(&es)[0].id.clone();
+    let mk = issue::marker("claude", "2.1.277", &[id.clone()]);
+    let refs = vec![ledger::IssueRef { marker: mk, entry_ids: vec![id], number: 7, url: "u".into(), created_at: ledger::now_ts(), comment: false }];
+    assert!(ledger::save_publish(&p, "claude", "2.1.277", &refs, Status::Judged, None).await.unwrap());
+    let out = issue::preflight(&p, &gh.cfg(true), None, None).await.unwrap();
+    assert_eq!(actions(&out), ["already_logged"]);
+    assert_eq!(gh.count("issue list"), 0, "帳本有了就不問遠端：{:?}", gh.calls());
 }

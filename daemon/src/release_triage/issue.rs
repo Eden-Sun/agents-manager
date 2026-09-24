@@ -6,6 +6,10 @@
 //! 重試安全：開之前先查帳本、再用 `gh issue list --state all --search` 查隱藏標記——`--state all`，
 //! 已關掉的（做完或判定不做）不復活；每開一張立刻寫回帳本，中途掛掉重跑不會開出第二張。
 //! gh 失敗時列停在 `judged`（verdict 已存），下一輪只重試 publish、不重派模型。
+//!
+//! [`preflight`] 是唯一在 `publish = false` 時也會啟動 gh 的路徑：它由人明確觸發（`--dry-run`），
+//! 只讀（`auth status`／`repo view`／`label list`／`issue list`），**不開 issue、不寫帳本**——
+//! 要能在打開 `publish` 之前就看出「這一版會開哪幾張、標籤在不在、去重會不會命中」。
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -68,14 +72,82 @@ fn gh_for(cfg: &ReleaseTriageCfg) -> Gh {
     }
 }
 
+/// publish 會用到的所有標籤：`release-triage`、每個 kind 的 `upstream:<kind>`、`triage:guard`／`triage:adopt`。
+/// `gh issue create --label` 對不存在的標籤是**硬失敗**，所以「auth 綠」不等於「開得出 issue」——
+/// 少一個，第一次 publish 就會整版停在 `judged`。
+pub fn required_labels() -> Vec<String> {
+    let mut v = vec!["release-triage".to_string()];
+    for k in crate::release_triage::rules::KINDS {
+        v.push(format!("upstream:{k}"));
+    }
+    v.push("triage:guard".into());
+    v.push("triage:adopt".into());
+    v
+}
+
+/// gh 的唯讀健檢：`auth status` → `repo view`（設定的那個 repo 真的看得到、權限寫得進去嗎）
+/// → `label list`（少標籤 `issue create` 會硬失敗）。四個欄位都填好回去，任何一步失敗就停在那一步。
+async fn readonly_checks(gh: &Gh) -> serde_json::Value {
+    let auth = gh.run(&["auth", "status"]).await;
+    let mut out = serde_json::json!({
+        "repo": gh.repo,
+        "gh_auth_ok": auth.is_ok(),
+        "gh_auth_error": auth.as_ref().err().cloned(),
+        "repo_ok": false,
+        "repo_error": serde_json::Value::Null,
+        "viewer_permission": serde_json::Value::Null,
+        "can_write": false,
+        "issues_enabled": serde_json::Value::Null,
+        "labels_missing": serde_json::Value::Null,
+    });
+    if auth.is_err() {
+        return out;
+    }
+    if gh.repo.trim().is_empty() {
+        out["repo_error"] = serde_json::json!("[release_triage] repo 沒設定（owner/name）");
+        return out;
+    }
+    match gh.run(&["repo", "view", &gh.repo, "--json", "nameWithOwner,viewerPermission,hasIssuesEnabled"]).await {
+        Err(e) => {
+            out["repo_error"] = serde_json::json!(e);
+            return out;
+        }
+        Ok(o) => match serde_json::from_str::<serde_json::Value>(o.trim()) {
+            Err(e) => {
+                out["repo_error"] = serde_json::json!(format!("gh repo view 回的不是 JSON：{e}"));
+                return out;
+            }
+            Ok(v) => {
+                let perm = v.get("viewerPermission").and_then(|p| p.as_str()).unwrap_or_default().to_string();
+                out["repo_ok"] = serde_json::json!(true);
+                out["can_write"] = serde_json::json!(matches!(perm.as_str(), "ADMIN" | "MAINTAIN" | "WRITE" | "TRIAGE"));
+                out["viewer_permission"] = serde_json::json!(perm);
+                out["issues_enabled"] = v.get("hasIssuesEnabled").cloned().unwrap_or(serde_json::Value::Null);
+            }
+        },
+    }
+    match gh.run(&["label", "list", "--repo", &gh.repo, "--json", "name", "-L", "200"]).await {
+        Err(e) => out["repo_error"] = serde_json::json!(e),
+        Ok(o) => match serde_json::from_str::<Vec<serde_json::Value>>(o.trim()) {
+            Err(e) => out["repo_error"] = serde_json::json!(format!("gh label list 回的不是 JSON：{e}")),
+            Ok(list) => {
+                let have: Vec<&str> = list.iter().filter_map(|v| v.get("name").and_then(|n| n.as_str())).collect();
+                let missing: Vec<String> = required_labels().into_iter().filter(|l| !have.contains(&l.as_str())).collect();
+                out["labels_missing"] = serde_json::json!(missing);
+            }
+        },
+    }
+    out
+}
+
 /// `/api/supervisor/health` 的 `release_triage` 一格：`gh auth status` 失敗要看得到原因，
 /// 不是等到有版本要開 issue 才在帳本的 `publish_error` 裡發現。`publish = false` 時不碰 gh、回 `None`。
+/// auth 綠之後還要 repo 看得到、權限寫得進去、標籤齊——這三樣任何一樣不對，publish 一樣開不出 issue。
 pub async fn health_probe(cfg: &ReleaseTriageCfg) -> Option<serde_json::Value> {
     if !cfg.publish {
         return None;
     }
-    let r = gh_for(cfg).run(&["auth", "status"]).await;
-    Some(serde_json::json!({"gh_auth_ok": r.is_ok(), "gh_auth_error": r.err()}))
+    Some(readonly_checks(&gh_for(cfg)).await)
 }
 
 pub fn marker(kind: &str, version: &str, ids: &[String]) -> String {
@@ -90,8 +162,20 @@ fn quote(entries: &[Entry], ids: &[String]) -> String {
         .join("\n>\n")
 }
 
+/// 標題＝`<kind> <version>: <一句話>（提防｜採用）`，前綴由 daemon 貼。
+/// 模型常常自己也把 `claude 2.1.280:` 寫進 `title`（task.md 只要求「一句話」，但 2026-09-24 的正式帳本上
+/// 8 個提案 8 個都這樣，其中一個還用全形冒號），照貼會變成 `claude 2.1.280: claude 2.1.280: …`——
+/// 所以同一版的重複前綴在這裡剝掉（別版的不剝，那是模型真的在講另一版）。
 pub fn title(kind: &str, version: &str, p: &StoredProposal) -> String {
-    format!("{kind} {version}: {}（{}）", p.title, if p.triage == "guard" { "提防" } else { "採用" })
+    let prefix = format!("{kind} {version}");
+    let one_line = p
+        .title
+        .trim()
+        .strip_prefix(&prefix)
+        .map(|rest| rest.trim_start().trim_start_matches([':', '：']).trim_start())
+        .filter(|rest| !rest.is_empty())
+        .unwrap_or_else(|| p.title.trim());
+    format!("{prefix}: {one_line}（{}）", if p.triage == "guard" { "提防" } else { "採用" })
 }
 
 /// 照 #102 的格式渲染。`## 來源` 的引用來自帳本的 entry 原文，不是模型交回的文字。
@@ -139,6 +223,22 @@ fn proposals_of(row: &Row) -> Vec<StoredProposal> {
 
 fn number_from_url(url: &str) -> Option<i64> {
     url.trim().lines().last()?.trim().rsplit('/').next()?.parse().ok()
+}
+
+/// 遠端有沒有帶同一個隱藏標記的 issue（`--state all`：已關掉的**不復活**）。publish 與乾跑共用，
+/// 兩邊的去重結論才不會漂。回 `Ok(None)` ＝遠端確實沒有。
+async fn find_existing(gh: &Gh, mk: &str) -> Result<Option<(i64, String)>, String> {
+    let search = format!("release-triage: {mk} in:body");
+    let listed = gh
+        .run(&["issue", "list", "--repo", &gh.repo, "--state", "all", "--search", &search, "--json", "number,url,body", "-L", "20"])
+        .await?;
+    let needle = format!("release-triage: {mk} -->");
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_str(listed.trim()).map_err(|e| format!("gh issue list 回的不是 JSON：{e}"))?;
+    Ok(parsed
+        .iter()
+        .find(|v| v.get("body").and_then(|b| b.as_str()).is_some_and(|b| b.contains(&needle)))
+        .and_then(|v| Some((v.get("number")?.as_i64()?, v.get("url")?.as_str()?.to_string()))))
 }
 
 /// 把一個 `judged` 版本的提案開成 issue。冪等，可重複呼叫。
@@ -192,24 +292,11 @@ pub async fn publish_version(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: &s
             continue;
         }
         let mk = marker(kind, version, &p.entry_ids);
-        // (a) 帳本查完了；(b) 遠端標記。`--state all`：已關的不復活。
-        let search = format!("release-triage: {mk} in:body");
-        let listed = match gh
-            .run(&["issue", "list", "--repo", &gh.repo, "--state", "all", "--search", &search, "--json", "number,url,body", "-L", "20"])
-            .await
-        {
-            Ok(o) => o,
+        // (a) 帳本查完了；(b) 遠端標記（`--state all`，已關的不復活）——乾跑走同一個函式。
+        let found = match find_existing(&gh, &mk).await {
+            Ok(f) => f,
             Err(e) => return record_err(&issues, e).await,
         };
-        let needle = format!("release-triage: {mk} -->");
-        let parsed = match serde_json::from_str::<Vec<serde_json::Value>>(listed.trim()) {
-            Ok(v) => v,
-            Err(e) => return record_err(&issues, format!("gh issue list 回的不是 JSON：{e}")).await,
-        };
-        let found: Option<(i64, String)> = parsed
-            .iter()
-            .find(|v| v.get("body").and_then(|b| b.as_str()).is_some_and(|b| b.contains(&needle)))
-            .and_then(|v| Some((v.get("number")?.as_i64()?, v.get("url")?.as_str()?.to_string())));
         if let Some((number, url)) = found {
             issues.push(IssueRef { marker: mk, entry_ids: p.entry_ids.clone(), number, url, created_at: ledger::now_ts(), comment: true });
             ledger::save_publish(pool, kind, version, &issues, Status::Judged, None).await?;
@@ -269,4 +356,134 @@ pub async fn publish_version(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: &s
     let note = (!skipped.is_empty()).then(|| format!("每版上限 {MAX_PER_VERSION} 張，未開：{}", skipped.join("、")));
     ledger::save_publish(pool, kind, version, &issues, Status::Published, note.as_deref()).await?;
     Ok(Outcome::Published { created, commented, existing, skipped })
+}
+
+// ───────────────────────── 乾跑（preflight） ─────────────────────────
+
+/// 一個提案在乾跑裡的結論。`create`／`comment` 是「真的跑 publish 會做的事」，其餘是不會做的原因。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanAction {
+    /// 會開一張新的。
+    Create,
+    /// `duplicate_of`：只到那張 issue 留言。
+    Comment,
+    /// 遠端已經有同一個標記（含已關的），只會記進帳本、不開。
+    Existing,
+    /// 帳本裡已經有這個 entry 的 issue，連 gh 都不會問。
+    AlreadyLogged,
+    /// 被每版 [`MAX_PER_VERSION`] 張擋下，之後也不會再開。
+    SkippedVersionLimit,
+    /// 被 24 小時 [`MAX_PER_DAY`] 張擋下，留待下一輪。
+    DeferredDailyLimit,
+    /// gh 檢查沒過，去重問不到遠端，所以只知道帳本裡還沒有。
+    RemoteUnknown,
+}
+
+impl PlanAction {
+    fn as_str(self) -> &'static str {
+        match self {
+            PlanAction::Create => "create",
+            PlanAction::Comment => "comment",
+            PlanAction::Existing => "existing",
+            PlanAction::AlreadyLogged => "already_logged",
+            PlanAction::SkippedVersionLimit => "skipped_version_limit",
+            PlanAction::DeferredDailyLimit => "deferred_daily_limit",
+            PlanAction::RemoteUnknown => "remote_unknown",
+        }
+    }
+    /// 真的跑 publish 時會寫到 GitHub 的兩種。
+    fn writes(self) -> bool {
+        matches!(self, PlanAction::Create | PlanAction::Comment)
+    }
+}
+
+/// 打開 `publish` 之前先看會發生什麼：**只讀**，一張 issue 都不開、帳本一個字都不寫。
+///
+/// - `publish` 是不是 true 都跑（唯一在 `publish = false` 時碰 gh 的路徑，由人明確觸發）。
+/// - gh 檢查（auth／repo／標籤）過了才問遠端去重；沒過就照樣把 title／body 渲染出來，
+///   讓人先看 verdict 品質，去重那欄記成 `remote_unknown`。
+/// - 每版 4 張、24 小時 8 張的上限用跟 [`publish_version`] 同一組常數與同一個順序模擬。
+pub async fn preflight(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: Option<&str>, version: Option<&str>) -> Result<serde_json::Value> {
+    let gh = gh_for(cfg);
+    let checks = readonly_checks(&gh).await;
+    let remote_ok = checks["gh_auth_ok"] == serde_json::json!(true) && checks["repo_ok"] == serde_json::json!(true);
+
+    let mut created_today = ledger::created_in_last_day(pool).await?;
+    let mut versions = Vec::new();
+    let (mut n_create, mut n_comment, mut n_existing, mut n_blocked) = (0usize, 0usize, 0usize, 0usize);
+    for row in ledger::list(pool, kind, version).await?.into_iter().filter(|r| r.status == Status::Judged) {
+        let mut proposals = proposals_of(&row);
+        proposals.sort_by_key(|p| p.triage != "guard");
+        let mut in_row = row.issues.iter().filter(|i| !i.comment).count();
+        // publish_version 撞到 24 小時上限是 `break`（整版留待下一輪），所以一旦擋下，後面的一律算 deferred。
+        let mut deferred_hit = false;
+        let mut plans = Vec::new();
+        for p in &proposals {
+            let mk = marker(&row.kind, &row.version, &p.entry_ids);
+            let mut plan = serde_json::json!({
+                "marker": mk,
+                "triage": p.triage,
+                "entry_ids": p.entry_ids,
+                "title": title(&row.kind, &row.version, p),
+                "body": render_body(&row.kind, &row.version, &row.entries, p),
+                "labels": ["release-triage".to_string(), format!("upstream:{}", row.kind), format!("triage:{}", p.triage)],
+            });
+            let action = if row.issues.iter().any(|i| i.entry_ids.iter().any(|id| p.entry_ids.contains(id))) {
+                PlanAction::AlreadyLogged
+            } else if !remote_ok {
+                PlanAction::RemoteUnknown
+            } else {
+                match find_existing(&gh, &mk).await {
+                    Err(e) => {
+                        plan["error"] = serde_json::json!(e);
+                        PlanAction::RemoteUnknown
+                    }
+                    Ok(Some((number, url))) => {
+                        plan["number"] = serde_json::json!(number);
+                        plan["url"] = serde_json::json!(url);
+                        PlanAction::Existing
+                    }
+                    Ok(None) => match p.duplicate_of {
+                        Some(dup) => {
+                            plan["number"] = serde_json::json!(dup);
+                            PlanAction::Comment
+                        }
+                        None if deferred_hit => PlanAction::DeferredDailyLimit,
+                        None if in_row >= MAX_PER_VERSION => PlanAction::SkippedVersionLimit,
+                        None if created_today >= MAX_PER_DAY => {
+                            deferred_hit = true;
+                            PlanAction::DeferredDailyLimit
+                        }
+                        None => {
+                            in_row += 1;
+                            created_today += 1;
+                            PlanAction::Create
+                        }
+                    },
+                }
+            };
+            match action {
+                PlanAction::Create => n_create += 1,
+                PlanAction::Comment => n_comment += 1,
+                PlanAction::Existing => n_existing += 1,
+                PlanAction::SkippedVersionLimit | PlanAction::DeferredDailyLimit => n_blocked += 1,
+                _ => {}
+            }
+            // `duplicate_of` 只留言，不佔每版／每日的名額（同 publish_version）。
+            plan["action"] = serde_json::json!(action.as_str());
+            plan["writes"] = serde_json::json!(action.writes());
+            plans.push(plan);
+        }
+        versions.push(serde_json::json!({"kind": row.kind, "version": row.version, "proposals": plans}));
+    }
+    Ok(serde_json::json!({
+        "dry_run": true,
+        "publish_enabled": cfg.publish,
+        "checks": checks,
+        "would_create": n_create,
+        "would_comment": n_comment,
+        "existing": n_existing,
+        "blocked_by_caps": n_blocked,
+        "versions": versions,
+    }))
 }

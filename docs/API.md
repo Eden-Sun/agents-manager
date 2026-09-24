@@ -1578,8 +1578,12 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
   只收 `pending|dispatched|failed` 的版本（其他 409 `not_awaiting_verdict`）；**整份驗過才收**，不合格 400 `{error:"invalid_verdicts", problems:[…]}` 一次列完。
   沒有任何 issue 提案 → 版本 `empty`；否則 `judged`，`[release_triage] publish = true` 時當場 publish。回 `{kind,version,status,verdicts,issues_proposed,publish_enabled,publish}`。
 - `POST /api/release-triage/publish {kind?, version?}` → `{publish_enabled, results:[{kind,version,result:{outcome:disabled|published|deferred|failed,…}}]}`。重試所有（或指定的）`judged` 版本；`publish = false` 時每一筆都是 `disabled`、gh 不會被呼叫。
+- `POST /api/release-triage/publish {kind?, version?, dry_run:true}` → `{dry_run, publish_enabled, checks:{repo,gh_auth_ok,gh_auth_error,repo_ok,repo_error,viewer_permission,can_write,issues_enabled,labels_missing[]}, would_create, would_comment, existing, blocked_by_caps, versions:[{kind,version,proposals:[{marker,triage,entry_ids,title,body,labels,action,writes,number?,url?,error?}]}]}`。
+  **乾跑**：打開 `publish` 之前就要看得到「會開哪幾張、內文長什麼樣、去重會不會命中、標籤齊不齊」。`publish = false` 時**也會**跑（唯一在關閉狀態下碰 gh 的路徑，由人明確觸發），
+  但只用唯讀的 `gh auth status`／`repo view`／`label list`／`issue list`——**不開 issue、不留言、不寫帳本**。`action`：`create`｜`comment`｜`existing`（遠端已有同標記，含已關）｜`already_logged`（帳本已有，連 gh 都不問）｜
+  `skipped_version_limit`｜`deferred_daily_limit`｜`remote_unknown`（gh 檢查沒過，去重問不到；title／body 照樣渲染）。上限與排序（guard 優先）跟真的 publish 同一套。
 - 設定：`[release_triage] publish = false`（預設）／`gh_bin`／`repo`。
-- CLI：`bin/agm release-triage submit --file verdicts.json`；另有 `show`／`dispatched --kind K --version V…`／`publish`。
+- CLI：`bin/agm release-triage submit --file verdicts.json`；另有 `show`／`dispatched --kind K --version V…`／`publish`（加 `--dry-run` 就是上面的乾跑）。
 
 ## 總管 AGM（SPEC §18）
 
@@ -1620,7 +1624,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
   讀不到額度就不動（未知不等於滿）。
 
 ### 健康與 incident
-- `GET /api/supervisor/health` → `status`（`healthy`／`degraded`／`critical`）、AGM 狀態、bot running/busy/stopped 計數、host 連線、quota、`pending_assignments`（未結案，含 `awaiting_review`／`blocked`）、（另有 `release_triage`：`publish = true` 時帶 `gh_auth_ok`／`gh_auth_error`，否則 `null`）
+- `GET /api/supervisor/health` → `status`（`healthy`／`degraded`／`critical`）、AGM 狀態、bot running/busy/stopped 計數、host 連線、quota、`pending_assignments`（未結案，含 `awaiting_review`／`blocked`）、（另有 `release_triage`：`publish = true` 時帶 `repo`／`gh_auth_ok`／`gh_auth_error`／`repo_ok`／`repo_error`／`viewer_permission`／`can_write`／`issues_enabled`／`labels_missing[]`，否則 `null`；auth 綠不等於開得出 issue，repo 看不到、只有 READ、或標籤少一個都會讓 `gh issue create` 硬失敗）
   `awaiting_review`、`inbox_open`（三者分開不相加）；`manager_health{status,supervisor_status,daemon_connected}` 與 `system_health{status,open_incidents,incidents,blind_probes}`（`blind_probes` 非空＝那幾類探針上一輪查詢失敗，`status` 至少是 `unknown`），頂層 `status` 取兩者較嚴重者。
   daemon 每 30 秒檢查，指紋變化才推 WS `supervisor_health`；inbox `health_changed` 只在巡檢或協調者的嚴重度（`manager_health.status`／`responder_health.status`）或總管狀態（idle/busy 視為 running）真的改變時入列，總管 stopped/starting 期間不入列、恢復後補一則。
   `responder_health{status,responder_status,inbox_open,wake_pending,retry_at}` 單獨一格，**也併進**頂層 `status`（取較嚴重者）。

@@ -56,7 +56,7 @@ bin/agm release-triage submit --file verdicts.json
     {
       "entry_ids": ["a1b2c3d4e5"],
       "verdict": "guard",
-      "title": "一句話：發生什麼事、影響我們哪裡",
+      "title": "一句話：發生什麼事、影響我們哪裡（不要自己寫 `claude 2.1.280:` 這種前綴，daemon 會貼）",
       "goal": "## 目標 的內容",
       "suggestion": "## 建議 的內容：要改哪個檔、怎麼改",
       "acceptance": "## 驗收 的內容：怎麼證明處理好了",
@@ -68,6 +68,8 @@ bin/agm release-triage submit --file verdicts.json
 
 - 一份 JSON 涵蓋本次所有版本：每個 `entry_id` 本來就唯一。欄位細節若跟 `bin/agm release-triage submit --help` 不一致，以 CLI／`docs/API.md` 為準。
 - `duplicate_of` 只有找到同主題 issue 時才填，沒有就整個欄位省略。
+- `title` 只寫那一句話：完整標題是 daemon 組的 `<kind> <version>: <你的一句話>（提防｜採用）`，
+  自己再寫一次版本前綴會被剝掉（別版的前綴剝不掉，會變成兩層），結尾也不用自己加「（提防）」。
 - `issues` 只放 `guard`／`adopt`；沒有就給空陣列 `[]`（該版會標為 `empty`，不開 issue）。
 
 ## 通知（三到五行）
