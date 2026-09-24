@@ -232,7 +232,8 @@ fn data_dir_from(env: Option<std::ffi::OsString>) -> PathBuf {
 /// SPEC §4.4.4: one JSON line, `O_APPEND`, same body as the failed POST.
 fn spool_to(data_dir: &std::path::Path, bot_id: &str, body: &serde_json::Value) {
     let dir = data_dir.join("bots").join(bot_id);
-    if let Err(e) = std::fs::create_dir_all(&dir) {
+    // 目錄 0700、spool 0600：裡面是完整的 hook payload（issue #494）。
+    if let Err(e) = crate::private_files::create_private_dir(&dir) {
         log_line_in(data_dir, bot_id, &format!("spool mkdir failed: {e}"));
         return;
     }
@@ -244,7 +245,7 @@ fn spool_to(data_dir: &std::path::Path, bot_id: &str, body: &serde_json::Value) 
             return;
         }
     };
-    match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    match crate::private_files::append_private(&path) {
         Ok(mut f) => {
             if let Err(e) = f.write_all(format!("{line}\n").as_bytes()) {
                 log_line_in(data_dir, bot_id, &format!("spool write failed: {e}"));
@@ -257,10 +258,10 @@ fn spool_to(data_dir: &std::path::Path, bot_id: &str, body: &serde_json::Value) 
 /// Last resort; if this fails too we stay silent.
 fn log_line_in(data_dir: &std::path::Path, bot_id: &str, msg: &str) {
     let dir = data_dir.join("bots").join(bot_id);
-    if std::fs::create_dir_all(&dir).is_err() {
+    if crate::private_files::create_private_dir(&dir).is_err() {
         return;
     }
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("hook.log")) {
+    if let Ok(mut f) = crate::private_files::append_private(&dir.join("hook.log")) {
         let _ = f.write_all(format!("{} {}\n", now_rfc3339(), msg).as_bytes());
     }
 }

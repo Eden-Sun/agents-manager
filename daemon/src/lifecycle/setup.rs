@@ -49,6 +49,10 @@ const REMOTE_HOOK_SH_TEMPLATE: &str = r#"#!/bin/sh
 PROVIDER="$1"; BOT="$2"; TOKEN="$3"; shift 3
 LIMIT=1048576
 DIR="$HOME/__AM_REMOTE_ROOT__/bots/$BOT"
+# spool 裡是完整的 hook payload（prompt、工具輸入、回覆）：目錄 0700、檔案 0600，不交給那台機器的
+# umask 決定（issue #494）。使用者自己的 statusLine 指令跑之前會還原，不改它建檔的權限。
+AM_UMASK=$(umask)
+umask 077
 mkdir -p "$DIR" 2>/dev/null
 # Argument 3 is the token slot. It is never used here (the spool file is already only ours to
 # read), and the daemon passes `-` in it: a real token on codex's argv would be visible to
@@ -78,7 +82,7 @@ print(s.get("command","") if s.get("type","command")=="command" else "")' "$CFG"
     fi
   fi
   case "$CMD" in *"hook.sh statusline"*|*"agents-managerd statusline"*) CMD="" ;; esac
-  if [ -n "$CMD" ]; then printf '%s' "$INPUT" | sh -c "$CMD" 2>/dev/null; fi
+  if [ -n "$CMD" ]; then umask "$AM_UMASK"; printf '%s' "$INPUT" | sh -c "$CMD" 2>/dev/null; fi
   exit 0
 fi
 if [ "$PROVIDER" = "codex" ]; then PAYLOAD="$1"; else PAYLOAD=$(head -c $LIMIT); fi
@@ -239,20 +243,26 @@ fn grok_home(env: &Value, home: &str) -> String {
 }
 
 /// Write only when the content differs, so grok's hook loader does not see spurious changes.
-fn write_if_changed(path: &std::path::Path, content: &str, executable: bool) -> anyhow::Result<bool> {
-    if std::fs::read_to_string(path).map(|cur| cur == content).unwrap_or(false) {
-        return Ok(false);
+///
+/// 權限**每次**都對齊（issue #494、#126）：內容沒變但權限太寬的（舊版寫出來的 0755／0644）也要收回來，
+/// 否則只有內容改版那一次才修得到。
+fn write_if_changed(path: &std::path::Path, content: &str, mode: u32) -> anyhow::Result<bool> {
+    let same = std::fs::read_to_string(path).map(|cur| cur == content).unwrap_or(false);
+    if !same {
+        if let Some(d) = path.parent() {
+            crate::private_files::create_private_dir(d)?;
+        }
+        std::fs::write(path, content)?;
     }
-    if let Some(d) = path.parent() {
-        std::fs::create_dir_all(d)?;
-    }
-    std::fs::write(path, content)?;
     #[cfg(unix)]
-    if executable {
+    {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
+        let cur = std::fs::metadata(path).ok().map(|m| m.permissions().mode() & 0o7777);
+        if cur != Some(mode) {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
+        }
     }
-    Ok(true)
+    Ok(!same)
 }
 
 fn install_local_grok_hook(app: &App, env: &Value) -> anyhow::Result<()> {
@@ -263,11 +273,11 @@ fn install_local_grok_hook(app: &App, env: &Value) -> anyhow::Result<()> {
     let a = write_if_changed(
         &dispatcher,
         &local_grok_dispatch_sh(&exe, &app.data_dir.to_string_lossy(), instance.as_deref()),
-        true,
+        0o700,
     )?;
     let hooks_path =
         std::path::PathBuf::from(grok_home(env, &home)).join("hooks").join(grok_hooks_file(instance.as_deref()));
-    let b = write_if_changed(&hooks_path, &grok_hooks_json(&dispatcher.to_string_lossy()), false)?;
+    let b = write_if_changed(&hooks_path, &grok_hooks_json(&dispatcher.to_string_lossy()), 0o600)?;
     if a || b {
         tracing::info!(dispatcher = %dispatcher.display(), hooks = %hooks_path.display(), "grok hook installed");
     }
@@ -282,7 +292,8 @@ async fn install_remote_grok_hook(conn: &HostConn, env: &Value, instance: Option
     let dispatcher = format!("{home}/{root}/{GROK_DISPATCH_SH}");
     let hooks_dir = format!("{}/hooks", grok_home(env, &home));
     let script = format!(
-        "set -e\nW={w}\nmkdir -p \"$(dirname \"$W\")\"\ncat > \"$W\" <<'AM_WRAP_EOF'\n{wrap}AM_WRAP_EOF\nchmod +x \"$W\"\nG={g}\nmkdir -p \"$G\"\ncat > \"$G/{file}\" <<'AM_JSON_EOF'\n{json}\nAM_JSON_EOF\nprintf 'AM_GROK_INSTALLED\\n'\n",
+        // `$G` 是使用者自己的 `~/.grok/hooks`，只收我們寫的那個檔，不動別人的目錄（issue #494）。
+        "set -e\numask 077\nW={w}\nmkdir -p \"$(dirname \"$W\")\"\ncat > \"$W\" <<'AM_WRAP_EOF'\n{wrap}AM_WRAP_EOF\nchmod 700 \"$W\"\nG={g}\nmkdir -p \"$G\"\ncat > \"$G/{file}\" <<'AM_JSON_EOF'\n{json}\nAM_JSON_EOF\nchmod 600 \"$G/{file}\"\nprintf 'AM_GROK_INSTALLED\\n'\n",
         w = sh_quote(&dispatcher),
         wrap = remote_grok_dispatch_sh(&root, instance),
         g = sh_quote(&hooks_dir),
@@ -331,7 +342,9 @@ async fn install_remote_hook(conn: &HostConn, bot: &db::Bot, instance: Option<&s
     let settings = claude_settings(&cmd, &statusline, bot.args().iter().any(|a| a == "--remote-control"), instruction_files_of(bot));
     let settings_text = serde_json::to_string_pretty(&settings)?;
     let script = format!(
-        "set -e\nD={dir}\nmkdir -p \"$D\"\ncat > \"$D/hook.sh\" <<'AM_HOOK_EOF'\n{hook}AM_HOOK_EOF\nchmod +x \"$D/hook.sh\"\ncat > \"$D/claude-settings.json\" <<'AM_SETTINGS_EOF'\n{settings}\nAM_SETTINGS_EOF\nprintf 'AM_INSTALLED\\n'\n",
+        // issue #494：目錄 0700、腳本 0700、設定 0600。`umask 077` 管新建的，`chmod` 管舊版留下的
+        // （這支每次啟動 bot 都會跑，所以升級上來的 0644 spool 也在這裡被收回去）。
+        "set -e\numask 077\nD={dir}\nmkdir -p \"$D\"\nchmod 700 \"$D\"\nchmod go-rwx \"$D\"/* 2>/dev/null || true\ncat > \"$D/hook.sh\" <<'AM_HOOK_EOF'\n{hook}AM_HOOK_EOF\nchmod 700 \"$D/hook.sh\"\ncat > \"$D/claude-settings.json\" <<'AM_SETTINGS_EOF'\n{settings}\nAM_SETTINGS_EOF\nchmod 600 \"$D/claude-settings.json\"\nprintf 'AM_INSTALLED\\n'\n",
         dir = sh_quote(&p.dir),
         // 腳本裡寫的根目錄與上面的安裝位置同一個：事件才會進這個實例自己的 spool。
         hook = remote_hook_sh(&crate::startup::remote_root_for(instance)),
@@ -431,7 +444,8 @@ pub(crate) async fn injected_args(app: &App, bot: &db::Bot, project: &db::Projec
     }
 
     let dir = app.bot_dir(&bot.id)?;
-    std::fs::create_dir_all(&dir)?;
+    // spool 與 `claude-settings.json` 都在這底下：0700，不是 umask 決定的（issue #494）。
+    crate::private_files::create_private_dir(&dir)?;
     let hook_args: Vec<String> = match bot.kind.as_str() {
         "claude" => {
             let cmd = shell_join(&hook_cmd_parts(app, bot, "claude"));
@@ -1529,6 +1543,57 @@ mod remote_hook_tests {
         assert!(sb.read("hook.log").contains("herdr not found; spooled only"));
     }
 
+    fn mode_of(p: &std::path::Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::metadata(p).unwrap().permissions().mode() & 0o7777
+    }
+
+    /// #494：spool 裡是完整的 hook payload（prompt、工具輸入、回覆）。目錄 0700、檔案 0600，
+    /// 不交給那台機器的 umask 決定——Linux 預設 022 的話以前是 0644，同機任何使用者都讀得到。
+    #[test]
+    fn the_generated_hook_keeps_the_spool_private() {
+        let sb = Sandbox::new(false);
+        // 明確用寬鬆的 umask 跑：這條測的就是「不靠那台機器的 umask」，runner 剛好是 077 時
+        // 走 `Sandbox::run`（繼承呼叫者的 umask）會變成同義反覆。
+        let script = format!(
+            "umask 022; exec {} claude {} -",
+            crate::hosts::sh_quote(&sb.dir.join("hook.sh").to_string_lossy()),
+            crate::hosts::sh_quote(&sb.bot),
+        );
+        let mut ch = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&script)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &sb.dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        ch.stdin.take().unwrap().write_all(STOP.as_bytes()).unwrap();
+        let ok = ch.wait_with_output().unwrap().status.success();
+        assert!(ok);
+        assert_eq!(mode_of(&sb.bot_dir()), 0o700, "bot 目錄只給自己");
+        assert_eq!(mode_of(&sb.bot_dir().join("hook-spool.jsonl")), 0o600, "spool 只給自己");
+        assert_eq!(mode_of(&sb.dir.join(".config/agents-manager/bots")), 0o700, "中間層也是");
+    }
+
+    /// 收緊只管我們自己寫的東西：使用者的 statusLine 指令要在**原本的** umask 底下跑，
+    /// 不然它建出來的檔案會莫名其妙變成 0600。
+    #[test]
+    fn the_users_own_statusline_command_keeps_its_own_umask() {
+        let sb = Sandbox::new(true);
+        let cfg = sb.dir.join(".claude");
+        std::fs::create_dir_all(&cfg).unwrap();
+        std::fs::write(cfg.join("settings.json"), r#"{"statusLine":{"type":"command","command":"umask"}}"#).unwrap();
+        let (out, ok) = sb.run(&["statusline", &sb.bot, "-"], r#"{"cost":{"a":1}}"#);
+        assert!(ok);
+        let baseline = Command::new("/bin/sh").arg("-c").arg("umask").output().unwrap();
+        assert_eq!(out.trim(), String::from_utf8_lossy(&baseline.stdout).trim(), "還原成這個行程原本的 umask");
+        assert_eq!(mode_of(&sb.bot_dir().join("hook-status.json")), 0o600, "我們自己的單槽檔還是 0600");
+    }
+
     #[test]
     fn statusline_overwrites_a_single_slot_and_runs_the_user_command() {
         let sb = Sandbox::new(true);
@@ -1892,5 +1957,65 @@ mod herdr_skill_timeout_tests {
         let bad = fake_herdr("echo boom >&2; exit 3");
         let err = herdr_skill_output(bad.to_str().unwrap(), GIVE_UP).await.unwrap_err().to_string();
         assert!(err.contains("boom"), "{err}");
+    }
+}
+
+/// #494：遠端安裝腳本把 bot 目錄與裡面的檔案收成只有自己讀得到，升級上來的舊權限也一起修。
+#[cfg(test)]
+mod remote_install_permission_tests {
+    use super::*;
+    use crate::config::HostCfg;
+    use crate::testing as tt;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    fn mode_of(p: &std::path::Path) -> u32 {
+        std::fs::metadata(p).unwrap().permissions().mode() & 0o7777
+    }
+
+    /// ssh 換成「就地用 /bin/sh 跑這段腳本」：不連任何主機，但跑的是正式碼產生的同一段腳本。
+    #[tokio::test]
+    async fn the_remote_install_tightens_the_bot_dir_and_repairs_old_modes() {
+        let env = tt::env().await;
+        let host = format!("perm-{}", crate::db::ulid());
+        let home = std::env::temp_dir().join(format!("am-perm-{}", crate::db::ulid()));
+        std::fs::create_dir_all(&home).unwrap();
+        let conn = env
+            .app
+            .hosts
+            .insert_remote_for_test(HostCfg {
+                name: host.clone(),
+                ssh: "unused".into(),
+                ssh_port: 22,
+                ssh_opts: vec![],
+                herdr_session: "am-test".into(),
+                remote_path: String::new(),
+            })
+            .await;
+        *conn.remote_home.lock().await = Some(home.to_string_lossy().into_owned());
+        crate::hosts::set_ssh_fake(&host, |script| {
+            let out = std::process::Command::new("/bin/sh").arg("-c").arg(script).output()?;
+            if !out.status.success() {
+                anyhow::bail!("script failed: {}", String::from_utf8_lossy(&out.stderr));
+            }
+            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        });
+
+        let bot = tt::claude_bot(&env.app, &env.project_id, "alfa").await;
+        let dir = home.join(crate::startup::REMOTE_ROOT).join("bots").join(&bot.id);
+        // 升級前留下來的：目錄 0755、spool 0644。
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let spool = dir.join("hook-spool.jsonl");
+        std::fs::write(&spool, "{}\n").unwrap();
+        std::fs::set_permissions(&spool, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let p = super::install_remote_hook(&conn, &bot, None).await.unwrap();
+        assert_eq!(p.dir, dir.to_string_lossy());
+        assert_eq!(mode_of(&dir), 0o700, "目錄要收回來");
+        assert_eq!(mode_of(std::path::Path::new(&p.hook_sh)), 0o700, "hook.sh 自己跑得起來就好");
+        assert_eq!(mode_of(std::path::Path::new(&p.settings)), 0o600, "settings 不給別人讀");
+        assert_eq!(mode_of(&spool), 0o600, "升級前留下的 spool 也要修");
+        assert_eq!(std::fs::read_to_string(&spool).unwrap(), "{}\n", "修權限不准動內容");
+        let _ = std::fs::remove_dir_all(&home);
     }
 }
