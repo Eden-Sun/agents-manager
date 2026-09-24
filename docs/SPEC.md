@@ -1722,7 +1722,14 @@ listen port 只在本機算（pane 行程樹的 pid 對 `lsof -nP -iTCP -sTCP:LI
   **不先 acquire**：不受本機 `max_concurrent` 限制；遠端有自己的名額（`[build.remote] max_concurrent`，預設依遠端核數與 RAM 算，滿了排隊，
   排超過 30 分鐘回 75，issue #104，詳見 API.md「外部 Cargo 主機」）。
   helper 結束碼原樣帶出（非 125 一律 `exit`，不會偷偷在本機重跑；超過整體上限 `[build.remote] timeout_secs`，預設 12 分鐘，是 **124**，issue #194）；只有 **125＝根本沒有在遠端動手**（設定被關掉、不適合 offload）才落到下面，
-  認證：密碼留空＝走 ssh 的 key／agent（`BatchMode=yes`，不碰 sshpass／askpass）；`[build.remote] identity_file = "<路徑>"` 讓 ssh 與 rsync 都帶同一把 `-i … -o IdentitiesOnly=yes`（只放路徑；檔案不存在或 key 被拒都是 126 明確失敗，不退回本機，issue #104）。
+  認證：密碼留空＝走 ssh 的 key／agent（`BatchMode=yes`，不碰 sshpass／askpass）；`[build.remote] identity_file = "<路徑>"` 讓 ssh 與 rsync 都帶同一把 `-i … -o IdentitiesOnly=yes`（只放路徑；設定指的檔案不存在＝設定錯，**126** 明確失敗，不退回本機，issue #104）。
+  **連不進去（ssh 回 255：認證被拒、連不上、host key 不合）改成退回本機（125，issue #428，翻掉原本一律 126 的決定）**：
+  遠端這時什麼都還沒跑，讓每個人的編譯整個失敗換不到任何東西。但不能靜默（issue #138 的教訓）——helper 在 stderr 講明
+  「連的是誰、ssh 怎麼了、這次拿什麼登入（密碼檔／`identity_file`／ssh 預設金鑰）」，**第一行就要自己講完
+  「連不上誰、改在本機跑」**（ssh 自己的抱怨已經先印在上面，細節放第二行），原因帶 ssh 的原話
+  （守門那條連線的 stderr 一邊原樣轉出、一邊留最後一行），並把結論寫進 data-dir 的
+  `remote-cargo-health.json`，`GET /api/build-slots` 的 `remote.remote_reachable` 就是它（API.md「`GET /api/build-slots`」）：
+  本機隊伍排得再長，都看得出來是不是因為外部主機連不上。設定錯（`identity_file` 指的檔案不見了）維持 126——那是要去修設定，不是換台機器跑。
   這時才去 acquire、才受本機名額管。缺環境變數而沒轉成的（issue #138）也是落到本機、照本機名額排。`build`／`run`／…本來就不轉，照舊排。
   **`AM_DATA_DIR` 不是轉遠端的前提**（issue #417）：`scripts/check.sh` 為了不讓 daemon 測試吃到正式資料目錄會 `env -u AM_DATA_DIR`，
   以前 shim 因此每次都退回本機排隊、外部主機整段閒著。現在沒有它就不帶 `--data-dir`，helper 從設定檔推（`[server] data_dir` > 設定檔所在目錄）；

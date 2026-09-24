@@ -297,7 +297,22 @@ pub async fn status(app: &Arc<App>) -> Result<Value> {
         "lease_ttl_secs": cfg.lease_ttl(),
         "active": active,
         "slots": slots,
+        "remote": remote_json(&cfg.remote, &app.data_dir),
     }))
+}
+
+/// 外部編譯主機這一格（issue #428）：本機的隊伍排得再長，也要看得出來是不是因為遠端連不上。
+/// `remote_reachable` 是**上一次真的嘗試**的結論（`remote_health`），`null`＝沒開或還沒有人試過——
+/// 「不知道」跟「連不上」不能混成同一個值，否則剛開機就會亮一個假的紅燈。
+fn remote_json(remote: &crate::config::BuildRemoteCfg, data_dir: &std::path::Path) -> Value {
+    let last = remote.enabled.then(|| crate::remote_health::read(data_dir)).flatten();
+    json!({
+        "enabled": remote.enabled,
+        "target": remote.enabled.then(|| format!("{}@{}:{}", remote.user, remote.host, remote.ssh_port)),
+        "remote_reachable": last.as_ref().map(|h| h.reachable),
+        "checked_at": last.as_ref().map(|h| h.checked_at.clone()),
+        "reason": last.as_ref().and_then(|h| h.reason.clone()),
+    })
 }
 
 // ---------------------------------------------------------------- HTTP API
@@ -474,6 +489,47 @@ mod tests {
         let s = status(&app).await.unwrap();
         assert_eq!(s["active"], 2);
         assert_eq!(s["slots"].as_array().unwrap().len(), 5, "等待中的也看得到");
+    }
+
+    /// issue #428：本機隊伍排得再長，也要看得出來是不是因為外部編譯主機連不上。
+    /// 「沒開」「開了但還沒有人試過」「上一次連不上」是三種狀態，不能混成同一個布林。
+    #[tokio::test]
+    async fn the_status_says_whether_the_remote_build_host_was_reachable_last_time() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+
+        let s = status(&app).await.unwrap();
+        assert_eq!(s["remote"]["enabled"], json!(false), "預設沒開");
+        assert_eq!(s["remote"]["remote_reachable"], json!(null), "沒開就不是 false——那會亮一個假的紅燈");
+
+        app.cfg
+            .update(|cfg| {
+                cfg.build.remote.enabled = true;
+                cfg.build.remote.user = "me".into();
+                cfg.build.remote.host = "box".into();
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let s = status(&app).await.unwrap();
+        assert_eq!(s["remote"]["target"], json!("me@box:22"));
+        assert_eq!(s["remote"]["remote_reachable"], json!(null), "開了但還沒有人試過：不知道");
+
+        std::fs::create_dir_all(&app.data_dir).unwrap();
+        crate::remote_health::record(
+            &app.data_dir,
+            &crate::remote_health::Health {
+                reachable: false,
+                checked_at: "2026-09-24T10:00:00.000Z".into(),
+                target: "me@box:22".into(),
+                reason: Some("ssh 回 255".into()),
+            },
+        )
+        .unwrap();
+        let s = status(&app).await.unwrap();
+        assert_eq!(s["remote"]["remote_reachable"], json!(false));
+        assert_eq!(s["remote"]["checked_at"], json!("2026-09-24T10:00:00.000Z"), "什麼時候的結論要講");
+        assert_eq!(s["remote"]["reason"], json!("ssh 回 255"), "原因照 helper 記的帶出來");
     }
 
     /// 放掉一個名額之後，等待中的下一次 acquire 就能拿到——不是永遠卡住。

@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 const PASSWORD_FILE: &str = "remote-cargo-password";
 
@@ -30,6 +30,13 @@ pub const EXIT_TIMEOUT: i32 = 124;
 /// 排遠端名額排超過 [`QUEUE_WAIT_SECS`] 時 helper 的結束碼（EX_TEMPFAIL：稍後再試；跟 shim 自己「排程器用不了」的 75 同一個意思）。
 /// 這時遠端什麼都還沒跑；原因守門已經印在 stderr。
 pub const EXIT_QUEUE_FULL: i32 = 75;
+
+/// 「這次不轉外部編譯，改在本機跑」的結束碼：shim 只認這一個，看到就往下去拿本機名額（`cargo_shim.rs`）。
+pub const EXIT_RUN_LOCALLY: i32 = 125;
+
+/// ssh 自己沒進去時的結束碼（連不上、認證被拒、host key 不合）。遠端的指令真的跑起來之後，回的是那個指令的結束碼，
+/// 所以在交握階段看到 255 就是「我們根本沒進去」（issue #428）。
+const SSH_FAILED: i32 = 255;
 
 /// 測試用：把 `ssh`／`rsync` 換成假腳本（本機當遠端）。只有測試 build 有這個入口，而且是**執行緒本地**的——並行的其他測試不受影響。
 #[cfg(test)]
@@ -1151,14 +1158,47 @@ impl std::fmt::Display for QueueFull {
 
 impl std::error::Error for QueueFull {}
 
+/// ssh 根本沒進去：連不上、認證被拒、host key 不合、或本機沒有 `ssh`（issue #428）。
+/// 遠端這時**什麼都還沒跑**，所以跟 `125` 那條一樣退回本機，而不是讓呼叫端的編譯整個失敗。
+#[derive(Debug)]
+struct Unreachable {
+    /// 一句話說明「ssh 那邊發生什麼事」，會出現在 stderr 與 `remote_reachable` 的 `reason`。
+    why: String,
+}
+
+impl std::fmt::Display for Unreachable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.why)
+    }
+}
+
+impl std::error::Error for Unreachable {}
+
 impl Lease {
     /// `cmd` 跑的守門腳本要是用 `token` 產生的；它交回來的 token 對不上就當守門出事、不當成拿到目錄。
     ///
     /// 名額全滿或 shared 被佔著時，守門要排隊，可能很久才交出目錄（issue #104）：交握放到另一條執行緒讀，
     /// 這裡每 20ms 看一次 `ctl`，收到終止訊號就砍掉本機這條 ssh（排隊中的守門靠心跳發現斷線，自己結束、放鎖）。
     fn start(mut cmd: Command, token: LeaseToken, ctl: &Deadline) -> anyhow::Result<Self> {
-        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit());
-        let mut child = cmd.spawn().map_err(|e| anyhow::anyhow!("remote workdir guard: {e}"))?;
+        // stderr 原樣轉出去（守門與 ssh 自己講的話照舊看得到），順手留最後一行：連不進去時，
+        // 那一行就是 ssh 的原話（`Permission denied …`／`Connection refused`），要放進我們的說明裡（issue #428）。
+        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        // 叫不起 ssh（這台沒裝、PATH 裡沒有）也是「遠端什麼都還沒跑」：當連不上處理，退回本機（issue #428）。
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| anyhow::Error::new(Unreachable { why: format!("叫不起 {}：{e}", ssh_program()) }))?;
+        let said = Arc::new(Mutex::new(String::new()));
+        if let Some(err) = child.stderr.take() {
+            let said = said.clone();
+            std::thread::spawn(move || {
+                for line in BufReader::new(err).lines().map_while(Result::ok) {
+                    eprintln!("{line}");
+                    if !line.trim().is_empty() {
+                        *said.lock().unwrap_or_else(|e| e.into_inner()) = line;
+                    }
+                }
+            });
+        }
         let stdin = child.stdin.take();
         let stdout = child.stdout.take().ok_or_else(|| anyhow::anyhow!("remote workdir guard: no stdout"))?;
         let (tx, rx) = std::sync::mpsc::channel();
@@ -1184,11 +1224,24 @@ impl Lease {
         lease.hs = match hs {
             Ok(hs) => hs,
             Err(e) => {
-                // 沒交目錄就結束了：75＝排隊超過上限（原因守門已經印在 stderr），其他是守門出事。
-                if lease.finish().and_then(|st| st.code()) == Some(EXIT_QUEUE_FULL) {
-                    return Err(anyhow::Error::new(QueueFull));
+                // 沒交目錄就結束了：75＝排隊超過上限（原因守門已經印在 stderr），
+                // 255＝ssh 自己沒進去（連不上／認證被拒／host key 不合，issue #428），其他是守門出事。
+                match lease.finish().and_then(|st| st.code()) {
+                    Some(EXIT_QUEUE_FULL) => return Err(anyhow::Error::new(QueueFull)),
+                    Some(SSH_FAILED) => {
+                        // ssh 的原話（`Permission denied …` 之類）比「回 255」有用得多：看的人才知道要去修什麼。
+                        let said = said.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                        let said = said.trim();
+                        return Err(anyhow::Error::new(Unreachable {
+                            why: if said.is_empty() {
+                                format!("ssh 回 {SSH_FAILED}，什麼都沒說")
+                            } else {
+                                format!("ssh 回 {SSH_FAILED}：{said}")
+                            },
+                        }));
+                    }
+                    _ => return Err(e),
                 }
-                return Err(e);
             }
         };
         if lease.hs.token != lease.token.as_str() {
@@ -1543,14 +1596,14 @@ pub fn run_cli(config_path: &Path, data_dir: Option<&Path>, cwd: &Path, args: &[
             if let Some(why) = why {
                 eprintln!("agents-manager: 這次 cargo 不轉外部編譯，改在本機跑：{why}");
             }
-            return 125;
+            return EXIT_RUN_LOCALLY;
         }
     };
     let data_dir = match resolve_data_dir(config_path, data_dir) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("agents-manager: 這次 cargo 不轉外部編譯，改在本機跑：從設定檔 {} 推不出資料目錄（{e:#}）", config_path.display());
-            return 125;
+            return EXIT_RUN_LOCALLY;
         }
     };
     let data_dir = data_dir.as_path();
@@ -1560,6 +1613,44 @@ pub fn run_cli(config_path: &Path, data_dir: Option<&Path>, cwd: &Path, args: &[
     );
     install_signal_handlers();
     run_offload(&remote, data_dir, cwd, args, &Deadline::new(remote.timeout_secs).watching_signals())
+}
+
+/// 這次 ssh 拿什麼登入（issue #428）。連不上的時候最想知道的就是這個——「沒設金鑰也沒有密碼檔」跟
+/// 「金鑰設了但被拒」要修的地方完全不同。密碼檔只看在不在，不讀內容。
+fn auth_desc(remote: &BuildRemoteCfg, data_dir: &Path) -> String {
+    match (password_is_set(data_dir, remote), remote.identity_file.as_str()) {
+        (true, "") => format!("{} 裡的密碼檔", data_dir.display()),
+        (true, key) => format!("{} 裡的密碼檔，加上 identity_file {key}", data_dir.display()),
+        (false, "") => {
+            format!("ssh 預設的金鑰／agent（`[build.remote]` 沒設 identity_file，{} 也沒有密碼檔）", data_dir.display())
+        }
+        (false, key) => format!("`[build.remote] identity_file` 指的 {key}"),
+    }
+}
+
+/// 連不上時印的那一段（issue #428）。**第一行就要講完整件事**：ssh 自己的抱怨已經先印在上面了，
+/// 細節接在第二行——不然「這次沒有轉到外部編譯」會被埋在一堆 ssh 訊息裡，整批 child 靜靜擠回本機那兩個名額。
+/// 純組字串，好測；真正的決定（回 [`EXIT_RUN_LOCALLY`]）在 [`run_offload`]。
+fn unreachable_note(remote: &BuildRemoteCfg, auth: &str, why: &str) -> String {
+    format!(
+        "agents-manager: ⚠️ 連不上外部編譯主機 {}@{}:{}，這次 cargo 改在本機跑（要排本機名額）\n\
+         agents-manager:    {why}；這次的登入方式是{auth}",
+        remote.user, remote.host, remote.ssh_port
+    )
+}
+
+/// 把這一次的連線結論記在 data-dir（issue #428），`/api/build-slots` 的 `remote_reachable` 讀它。
+/// 記不下來只講一聲：說明用的東西不能擋住這次編譯。
+fn note_health(remote: &BuildRemoteCfg, data_dir: &Path, reachable: bool, reason: Option<String>) {
+    let h = crate::remote_health::Health {
+        reachable,
+        checked_at: crate::db::now(),
+        target: format!("{}@{}:{}", remote.user, remote.host, remote.ssh_port),
+        reason,
+    };
+    if let Err(e) = crate::remote_health::record(data_dir, &h) {
+        eprintln!("agents-manager: 記不下外部編譯主機的連線結論（{e}）");
+    }
 }
 
 /// 真的把這次呼叫丟到遠端（已經確定要轉、設定也讀好了）。整體時間受 `remote.timeout_secs` 限制（issue #194）；收到終止訊號也會好好收尾（issue #201）。
@@ -1583,9 +1674,24 @@ fn run_offload(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, args: &[Str
         return 128 + sig;
     }
     match result {
-        Ok(code) => code,
+        Ok(code) => {
+            note_health(remote, data_dir, true, None);
+            code
+        }
+        // 連不上／認證被拒（issue #428）：遠端什麼都還沒跑，所以跟 125 那條一樣退回本機——但要講清楚原因，
+        // 不然整批 child 會靜靜擠回本機那兩個名額，而沒有人知道外部編譯根本沒生效（同 issue #138 的教訓）。
+        Err(e) if e.downcast_ref::<Unreachable>().is_some() => {
+            let why = e.to_string();
+            eprintln!("{}", unreachable_note(remote, &auth_desc(remote, data_dir), &why));
+            note_health(remote, data_dir, false, Some(why));
+            EXIT_RUN_LOCALLY
+        }
         // 遠端什麼都還沒跑：原因守門已經印了，回 75 讓呼叫端知道是「稍後再試」，不是驗證失敗。
-        Err(e) if e.downcast_ref::<QueueFull>().is_some() => EXIT_QUEUE_FULL,
+        // 守門有回話＝連得上，只是滿了。
+        Err(e) if e.downcast_ref::<QueueFull>().is_some() => {
+            note_health(remote, data_dir, true, None);
+            EXIT_QUEUE_FULL
+        }
         Err(e) if matches!(e.downcast_ref::<Stopped>(), Some(Stopped::TimedOut)) => {
             eprintln!(
                 "agents-manager: 遠端編譯超過 {} 上限，已中止（遠端那一整組行程已收掉、目錄與鎖已還回；可調 [build.remote] timeout_secs，0＝不設上限）。這次不會退回本機重跑",
@@ -2810,6 +2916,67 @@ mod guard_tests {
         let owners: Vec<_> = std::fs::read_dir(base.join("rc")).unwrap().flatten().flat_map(|h| std::fs::read_dir(h.path()).unwrap().flatten()).filter(|e| e.file_name().to_string_lossy().ends_with(".owner")).collect();
         assert!(owners.is_empty(), "目錄要還回去：{owners:?}");
         let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// issue #428：ssh 連不進去（認證被拒、連不上、host key 不合）時，遠端**什麼都還沒跑**——
+    /// 這時要退回本機（125，shim 才會去拿本機名額），而不是把呼叫端的編譯整個弄失敗（126）。
+    /// 訊息要講得出「連的是誰、ssh 怎麼了、這次拿什麼登入」，結論要記進 data-dir 給 `/api/build-slots`。
+    #[test]
+    fn a_remote_that_refuses_the_login_falls_back_to_the_local_build_and_says_why() {
+        let base = base();
+        let (remote, cwd, data) = fake_remote(&base, 60, "exit 0\n");
+        // 真的 ssh 被拒時就是這樣：訊息進 stderr、退出碼 255，stdout 一個字都沒有。
+        write_exec(&base.join("fakebin/ssh"), "echo 'me@fake: Permission denied (publickey,password).' >&2\nexit 255\n");
+        let rc = with_fake_transport(&base, || run_offload(&remote, &data, &cwd, &["test".to_string()], &Deadline::new(remote.timeout_secs)));
+        assert_eq!(rc, EXIT_RUN_LOCALLY, "連不進去＝遠端沒動手，退回本機（不是 126＝驗證失敗）");
+
+        let h = crate::remote_health::read(&data).expect("結論要記下來");
+        assert!(!h.reachable, "{h:?}");
+        assert_eq!(h.target, "me@fake:22", "記的是連哪一台（設定換主機之後看得出來是舊的）");
+        let why = h.reason.as_deref().unwrap_or_default();
+        assert!(why.contains("Permission denied"), "要帶 ssh 自己說的那一句，不是只有「回 255」：{h:?}");
+
+        // 這一段就是印在 stderr 的東西：第一行要自己講完「連不上誰、改在本機跑」。
+        let note = unreachable_note(&remote, &auth_desc(&remote, &data), why);
+        let first = note.lines().next().unwrap();
+        assert!(first.contains("me@fake:22") && first.contains("改在本機跑"), "第一行就要看得懂：{first}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 同一件事的另一面（issue #428）：連得上、是遠端的 cargo 自己失敗——那是**真的驗證失敗**，
+    /// 原樣帶回它的退出碼，不能偷偷改成「在本機再跑一次」；而且這次算連得上。
+    #[test]
+    fn a_reachable_remote_whose_cargo_fails_is_not_a_fallback() {
+        let base = base();
+        let (remote, cwd, data) = fake_remote(&base, 60, "exit 101\n");
+        let rc = with_fake_transport(&base, || run_offload(&remote, &data, &cwd, &["test".to_string()], &Deadline::new(remote.timeout_secs)));
+        assert_eq!(rc, 101, "cargo 自己的退出碼原樣帶回，不是 125");
+        let h = crate::remote_health::read(&data).expect("結論要記下來");
+        assert!(h.reachable && h.reason.is_none(), "連得上：{h:?}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 訊息本身（純組字串）：這台機器 2026-09-24 的實況就是「沒設 identity_file、資料目錄也沒有密碼檔」，
+    /// 於是 ssh 拿預設金鑰去連、被拒。看訊息的人要能直接知道少了什麼，而不是只看到一行 Permission denied。
+    #[test]
+    fn the_note_names_the_host_and_which_credentials_were_used() {
+        let base = base();
+        let data = base.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let mut remote = BuildRemoteCfg { enabled: true, host: "box".into(), user: "me".into(), ..Default::default() };
+
+        let note = unreachable_note(&remote, &auth_desc(&remote, &data), "ssh 回 255");
+        assert!(note.contains("me@box:22") && note.contains("ssh 回 255"), "{note}");
+        assert!(note.lines().next().unwrap().contains("改在本機跑"), "第一行就要講接下來會怎麼樣：{note}");
+        assert!(note.contains("identity_file") && note.contains("密碼檔"), "兩個都沒有就要兩個都點名：{note}");
+
+        remote.identity_file = "/keys/build".into();
+        let note = unreachable_note(&remote, &auth_desc(&remote, &data), "ssh 回 255");
+        assert!(note.contains("/keys/build"), "設了金鑰就講是哪一把（被拒的是它）：{note}");
+
+        std::fs::write(data.join(PASSWORD_FILE), "pw").unwrap();
+        assert!(auth_desc(&remote, &data).contains("密碼檔"), "有密碼檔就先講密碼檔");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// 沒超過上限的照常回傳結果（成功回 0、cargo 失敗回它的退出碼），不會被誤判成逾時。

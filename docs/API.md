@@ -703,6 +703,13 @@ shim 轉遠端要 pane 裡有 `AM_DAEMON_EXE`、`AM_CONFIG_PATH`（`AM_DAEMON_EX
   2026-09-19 用真的 sshd 量過），所以用 `timeout 1 dd` 讀 stdin——讀到 EOF 就自己結束、放掉手上的鎖（實測砍掉本機 ssh 後 1 秒內）；helper 交握前不寫 stdin，不會吃掉資料。
   helper 這端交握改在另一條執行緒讀，收到終止訊號照樣馬上停。排超過 30 分鐘（每個佔名額的編譯都受 `timeout_secs` 管，正常兩輪內就排到；再久＝有名額被卡住，例如守門那條連線半開）就放棄：
   遠端什麼都沒跑，**結束碼 75**（EX_TEMPFAIL，稍後再試；shim 原樣帶出，不退回本機）。
+- **連不進去就退回本機（issue #428）**：ssh 回 `255`（認證被拒、連不上、host key 不合）或這台叫不起 `ssh` 時，遠端**什麼都還沒跑**，
+  helper 回 **125**（＝退回本機，shim 才會去拿本機名額），不是 126。stderr 兩行，**第一行自己講完**
+  「⚠️ 連不上外部編譯主機 `user@host:port`，這次 cargo 改在本機跑（要排本機名額）」，第二行是 ssh 的原話
+  （`Permission denied (publickey,password).` 之類）加上這次的登入方式（密碼檔／`identity_file`／ssh 預設金鑰）——
+  不講的話整批 child 會靜靜擠回本機那兩個名額，而沒有人知道外部編譯根本沒生效（issue #138 的教訓）。
+  同一次的結論寫進 data-dir 的 `remote-cargo-health.json`，`GET /api/build-slots` 的 `remote.remote_reachable` 就是它。
+  設定錯（`[build.remote] identity_file` 指的檔案不存在）維持 **126** 明確失敗：那是要去修設定，不是換台機器跑。
 - 遠端要是有 `flock`（util-linux）與 `/proc` 的 Linux，沒有就直接報錯、不跑。
 - **整體上限（issue #194）**：一次遠端編譯（同步＋編譯＋測試）最多 `[build.remote] timeout_secs`（預設 **720 秒＝12 分鐘**；實測 112 次遠端編譯最長 8.9 分鐘、
   全套 test 中位數 5.0、P90 8.7）。從**拿到遠端名額與目錄**才開始算（issue #104）：排隊的時間不算，不然滿載時排久一點的編譯一開始跑就被砍。連線正常、遠端的 cargo 或測試卡住（死結、等鎖、測試掛住）時 ssh 的 ConnectTimeout／ServerAlive 管不到，沒有上限 helper 與呼叫端的 agent 會一直等。
@@ -788,9 +795,17 @@ cargo shim 把這兩個明確的拒絕（`not_found`／`token_mismatch`）視為
      "expires_at": "2026-09-18T03:04:00.000Z"},
     {"holder": "manual:host:987", "status": "waiting", "bot_id": null, "purpose": "build",
      "host": "local", "since": "2026-09-18T03:00:30.000Z", "last_seen": "2026-09-18T03:00:55.000Z", "expires_at": null}
-  ]
+  ],
+  "remote": {"enabled": true, "target": "ubuntu@192.168.1.46:22", "remote_reachable": false,
+             "checked_at": "2026-09-24T09:12:00.000Z", "reason": "ssh 回 255（連不上、認證被拒，或 host key 不合；ssh 自己的訊息在上面）"}
 }
 ```
+
+`remote` 是外部編譯主機這一格（issue #428）：本機的隊伍排得再長，也要看得出來是不是因為遠端連不上、整批
+`check`／`test`／`clippy` 都退回本機在搶那兩個名額。`remote_reachable` 是**上一次真的嘗試**的結論
+（`remote-cargo` helper 每次連完寫進 data-dir 的 `remote-cargo-health.json`），不是另外再 ssh 探一次：
+`true`＝連得進去（之後編譯成不成功是另一回事）、`false`＝那一次沒進去（`reason` 是原因）、
+`null`＝`[build.remote]` 沒開或還沒有人試過（**不是**連不上）。`enabled: false` 時 `target`／`checked_at`／`reason` 都是 `null`。
 
 ## 記憶體
 

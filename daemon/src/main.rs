@@ -79,6 +79,7 @@ mod quota_grok;
 mod read_marks;
 mod rewind;
 mod remote_cargo;
+mod remote_health;
 mod reconcile;
 mod relay_auth;
 mod spawn_hints;
