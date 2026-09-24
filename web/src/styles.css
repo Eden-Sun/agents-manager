@@ -3251,12 +3251,6 @@ button.model-tag:hover:not(:disabled) {
     max-height: calc(var(--vvh, 100dvh) * 0.33);
   }
 
-  /* 打字時收掉圖片暫存（鍵盤已吃半個畫面），收鍵盤就回來。 */
-
-  body:has(.composer textarea:focus) .shelf {
-    display: none;
-  }
-
   .shelf {
     padding-bottom: env(safe-area-inset-bottom);
   }
@@ -3293,16 +3287,6 @@ button.model-tag:hover:not(:disabled) {
   .hint,
   .key-btn {
     font-size: 12px;
-  }
-}
-
-/* 手機暫存區預設收起（`ImageShelf` `readOpen` fallback）：展開在 390px 吃掉約 120px。 */
-
-@media (width <= 640px) {
-  /* 只收「沒展開」那條：展開是使用者自己按開的，卡片不能在瞄準時被推走。 */
-
-  .shelf.typing {
-    display: none;
   }
 }
 
