@@ -1172,7 +1172,7 @@ WS：每顆兩次 `bots_restart_progress`（`restarting`，然後 `ok` / `failed
 定案之前讀不到 bot 或 child 的 active run → 502，什麼都不動，可原樣重試。
 
 - 流程：有 active Run 先 stop（host 連不上送不出去時 run 直接標 `exited` 照常刪）→ 從 config.toml 移除 → `bots.deleted_at`（**對話與訊息保留**，`GET /api/bots/{id}/messages` 仍讀得到）→
-  把 `~/.config/agents-manager/bots/<bot_id>/` 搬進 `bots-trash/<bot_id>.<毫秒>/`（還原時搬回、7 天後開機清掉；遠端照舊 ssh `rm -rf`，失敗只 log）。
+  把 `~/.config/agents-manager/bots/<bot_id>/` 搬進 `bots-trash/<bot_id>.<毫秒>/`（還原時搬回、7 天後開機清掉；遠端 ssh 搬進遠端的 `bots-trash/`，主機連上時清 7 天以上的，ssh 失敗記欠帳重試）。
 - **AGM 的 bot 要明講**（issue #406）：bot 是總管／角色本身、parent 是它們、或在總管／角色的專案裡，沒帶 `?confirm=supervisor` →
   `409 {"reason":"supervisor_owned","bot_id","name","role","message"}`（`role`：`AGM 總管（巡檢）`／`AGM 協調者`／`AGM 開出去的子 agent`／`AGM 專案裡的常駐工人`），什麼都不動，並推一筆 `ops_alert` 給巡檢。`DELETE /api/projects/{id}` 同一條（專案是總管的、或裡面有 AGM 的 bot），409 帶 `project_id`。
   `bin/agm bot delete <id> --confirm-supervisor` 帶這個參數；網頁收到這個 409 會跳第二次確認框（寫名稱與 `role`），按確認才帶參數重送。
@@ -1182,7 +1182,7 @@ WS：每顆兩次 `bots_restart_progress`（`restarting`，然後 `ok` / `failed
 - daemon 啟動時掃一次 `bots/`，只把 DB 裡已 `deleted_at` 且沒有 active Run 的 hook 材料目錄搬進 `bots-trash/`。
 
 ### 10.4a `POST /api/bots/{id}/restore`
-軟刪復原：`200 {"bot_id"}`，推 `bot_changed` / `project_changed`。child 直接清 `deleted_at`；user bot 把 config.toml 那一筆加回去再投影。child 還原後不立即建立 run；daemon 給它十分鐘讓父 bot 在原 pane 重開。這段期間 reconcile 不會只因沒有 active run 而退休；寬限期過後仍未回來就照原規則退休。到期時間與 `agent_name_taken` 保護原因記在 `supervisor_notes`，daemon 重啟後仍有效。
+軟刪復原：`200 {"bot_id"}`，推 `bot_changed` / `project_changed`。child 直接清 `deleted_at`；user bot 把 config.toml 那一筆加回去再投影。刪除時搬進 `bots-trash/` 的 bot 目錄搬回來（本機直接搬；遠端 ssh 搬，最多等 10 秒，搬不回來不擋還原）。child 還原後不立即建立 run；daemon 給它十分鐘讓父 bot 在原 pane 重開。這段期間 reconcile 不會只因沒有 active run 而退休；寬限期過後仍未回來就照原規則退休。到期時間與 `agent_name_taken` 保護原因記在 `supervisor_notes`，daemon 重啟後仍有效。
 
 | 狀況 | 回應 |
 |---|---|

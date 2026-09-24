@@ -427,21 +427,16 @@ pub async fn purge_bot_dir(app: &Arc<App>, bot_id: &str, host: &str) -> bool {
         crate::remote_purge::record(app, bot_id, host, false, Some("unknown host")).await;
         return false;
     };
-    let res = async {
-        let p = remote_bot_dir(&conn, bot_id).await?;
-        conn.ssh_exec(&format!("rm -rf {}\n", sh_quote(&p.dir))).await?;
-        Ok::<_, anyhow::Error>(p.dir)
-    }
-    .await;
-    match res {
-        Ok(dir) => {
-            tracing::info!(host, %dir, "removed remote bot config dir");
+    // 遠端也搬進回收區而不是 `rm -rf`（issue #411）：restore 時 ssh 搬得回來。
+    match crate::remote_trash::move_in(&conn, bot_id).await {
+        Ok(to) => {
+            tracing::info!(host, bot = %bot_id, trash = ?to, "moved remote bot config dir to bots-trash");
             crate::remote_purge::record(app, bot_id, host, true, None).await;
             true
         }
         Err(e) => {
             let msg = format!("{e:#}");
-            tracing::warn!(host, bot = %bot_id, error = %msg, "could not remove remote bot config dir");
+            tracing::warn!(host, bot = %bot_id, error = %msg, "could not move remote bot config dir to bots-trash");
             crate::remote_purge::record(app, bot_id, host, false, Some(&msg)).await;
             false
         }

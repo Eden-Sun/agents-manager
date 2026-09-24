@@ -38,6 +38,7 @@ mod events;
 mod fork;
 mod fork_ops;
 mod remote_purge;
+mod remote_trash;
 mod promote;
 mod gh_auth;
 mod git_quick;

@@ -208,7 +208,8 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   **開機的殘留清掃**（`purge_deleted_bot_dirs`，reconcile／rearm 之後跑一次）只收「確定軟刪」而且「確定沒有 active run」的 `bots/<id>/`；沒有 bot 認領的目錄不碰。
   **「清目錄」＝搬進回收區，不是刪**（issue #406）：本機的 `bots/<id>/` 搬到 `<資料目錄>/bots-trash/<id>.<毫秒>/`，`POST /api/bots/:id/restore` 時若 `bots/<id>/` 不在就把最新那份搬回來；
   開機清掃順便刪掉放超過 7 天的（看名字裡的時間，`rename` 不更新目錄 mtime）。軟刪本來就是為了能還原，目錄卻是當場 `remove_dir_all`——誤刪時 bot 列與 config 救得回來，
-  spool 裡還沒重放的 hook、手動放的檔就沒了。取捨：多佔 7 天的磁碟（bot 目錄是 KB 級）；遠端主機照舊在遠端 `rm -rf`（遠端還原要走 ssh，這次不做）。
+  spool 裡還沒重放的 hook、手動放的檔就沒了。取捨：多佔 7 天的磁碟（bot 目錄是 KB 級）。
+  **遠端同一套**（issue #411，`daemon/src/remote_trash.rs`）：遠端的 `bots/<id>/` 由 ssh `mv` 到同一個遠端根（§3.1 遠端分實例）底下的 `bots-trash/<id>.<毫秒>/`；還原時 ssh 搬回最新那份（`bots/<id>/` 已在就不動，ssh 等 10 秒，搬不回來不擋還原、只記 warn），並清掉那顆的 `remote_bot_dir_purges` 記號；主機連上（開機、重連）時清掉遠端放超過 7 天的。
   bot 列或 active run 讀不到（DB 一時忙、I/O 錯）＝還不知道：目錄留著、記一行 warn，下次開機再判斷——清理可重入，刪掉還在跑的 bot 的 hook／shim／spool 補不回來（#187）。
   `DELETE /api/projects/:id` 依 id 排序拿齊專案內每顆 bot 的 per-bot 鎖，**在鎖內**重驗都已停止再定案；TOML 裡多出沒鎖住的 bot（剛建立、可能正要啟動）就 409 `delete_refused`。
   **鎖順序**：刪除是唯一會同時持多把 per-bot 鎖的路徑，兩支 DELETE 都「依 id 排序、一次拿齊」（`DELETE /api/bots/:id` 拿 parent＋所有 descendants，拿鎖途中若認領了新 child 就全放掉重來，三次後 409 `children_changed`），再用 locked 版停機；持一把再補拿另一把會與另一支互等成死鎖（ULID 不保證 parent 比 child 小）。
@@ -1127,8 +1128,8 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run
 ### 6.4 停止／刪除 Bot（per-bot 鎖內）
 - **遠端已刪 bot 的目錄靠 DB 推導的欠帳收**（issue #349，`daemon/src/remote_purge.rs`）：刪除 handler 的一次性 ssh purge 只在 handler 活著時有效；daemon 在「刪除已 commit、purge 還沒跑」之間死掉，
   開機的 `purge_deleted_bot_dirs` 只掃本機 `data_dir/bots`、看不到遠端。所以欠的清理從 DB 推：`deleted_at` 非空的 bot ＋ 它專案列記的 host（專案軟刪後列還在）＋ 沒有「已清掉」記號（`remote_bot_dir_purges.purged_at`）。
-  主機連上（含重連）時背景掃一次，連著期間每 5 分鐘再掃；只有「確定軟刪」而且「確定沒有 active run」才 `rm -rf`（run 讀不到或還活著＝不刪，DB 讀不到＝什麼都不刪），host 只取專案列、**不明就不動，不退回本機**。
-  `purge_bot_dir` 的遠端分支把結果記進那張表（成功＝`purged_at`；失敗＝次數與原因，`due_actions` 的 `remote_bot_dir_purge` 看得到）；記號寫不進去只是下一輪重推導、再 `rm -rf` 一次（冪等）。
+  主機連上（含重連）時背景掃一次，連著期間每 5 分鐘再掃；只有「確定軟刪」而且「確定沒有 active run」才搬進遠端回收區（run 讀不到或還活著＝不刪，DB 讀不到＝什麼都不刪），host 只取專案列、**不明就不動，不退回本機**。
+  `purge_bot_dir` 的遠端分支把結果記進那張表（成功＝`purged_at`；失敗＝次數與原因，`due_actions` 的 `remote_bot_dir_purge` 看得到）；記號寫不進去只是下一輪重推導、再搬一次（冪等：目錄已不在就什麼都不做）。
 - `interrupt`：`agent.send_keys [esc]`，Run 狀態不變。
   **按了 interrupt 之後，這顆 bot 排著的 queued 不立刻送**：先讓使用者拿回輸入框，規則見 §4.4a「使用者中斷之後，先讓使用者拿回輸入框」。
   - **Esc 與「把回合收成 failed」是兩半**（issue #147，`lifecycle::interruption`），中間不是同一個交易。鍵的結果分三種：
@@ -1175,7 +1176,7 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run
 - `POST /bots/:id/restart`：有 Run 先 stop 再 start，用來套用改過的 model／args／identity／env。停掉了卻沒能開回來（start 在前置檢查就失敗、
   沒建新 run）時，剛停掉的 run 改標 `exited`（`run_state::relabel`；`stopped` 是「使用者要它停」，incident 探針靠它分辨）。改標寫不進去回
   `503 restart_state_uncommitted`（帶 `start_error`）並排重試（#146 重開），不只回 start 的錯。
-- DELETE Bot：TOML 移除＋DB `deleted_at`（單一臨界區，§3.1；保留對話）→ stop（child 與自己）→ 刪 `~/.config/agents-manager/bots/<bot_id>/`（遠端 ssh `rm -rf`，失敗只 log）。
+- DELETE Bot：TOML 移除＋DB `deleted_at`（單一臨界區，§3.1；保留對話）→ stop（child 與自己）→ 刪 `~/.config/agents-manager/bots/<bot_id>/`（兩邊都是搬進 `bots-trash/`，見 §3.1；遠端 ssh 失敗記欠帳，`remote_purge` 重試）。
   先定案再停：拒絕只會發生在任何東西被停之前（2026-09-14 sol 四輪；原本是 stop 在前）。全程持該 bot 的 per-bot 鎖。
   `child` 不在 TOML，直接 `deleted_at` 並停 pane。
 - DELETE Project：拿齊專案內每顆 bot 的 per-bot 鎖 → 鎖內確認都已停止 → TOML 移除；不關 workspace、不刪目錄。
@@ -2214,7 +2215,7 @@ label = "foo@m4p"
 - **事件先到、spool 後寫**：拿不到 → T+2 秒再 drain 一次（早於 5 秒的終端備援），仍沒有就讓備援接手。
 - **事件整個遺失**：每台已連線 host 每 30 秒掃「有 in-flight Turn 或 spool 檔存在」的 bot 做 drain（一台一次 ssh，腳本內迴圈所有 bot 目錄）；host 重連與啟動對帳對每個 bot drain 一次（`replay_host`）。
 - **遲到的 hook**：對應 Turn 已 `completed_fallback` → 依 §4.3：已有回覆才丟棄只 log，一則都沒有就補上。
-- **bot 已刪除**：`process_locked` 擋 `deleted_at`；遠端 bot 目錄在刪除時 `rm -rf`。
+- **bot 已刪除**：`process_locked` 擋 `deleted_at`；遠端 bot 目錄在刪除時搬進遠端 `bots-trash/`。
 - **收下了但沒處理完**：列留在 `hook_events`（`processed_at IS NULL`），daemon 重啟後 worker 第一件事就是把它們補做完（§4.4b）。
 - **host 斷線期間**：hook 照寫本機檔，重連後 `replay_host` 補進來。
 
