@@ -1269,7 +1269,9 @@ fn bots_dir(bot_id: &str, root: &str) -> Result<String> {
 fn claim_script(bot_id: &str, root: &str) -> Result<String> {
     let dir = bots_dir(bot_id, root)?;
     Ok(format!(
-        "d={dir}\n\
+        // `.replaying` 是這支腳本自己建的，裡面裝完整 payload：0600，不交給那台機器的 login umask（#501）。
+        "umask 077\n\
+         d={dir}\n\
          f=\"$d/hook-spool.jsonl\"\n\
          am_fold() {{ [ -f \"$f.claim\" ] || return 0; \
          if [ -s \"$f.replaying\" ] && [ -n \"$(tail -c 1 \"$f.replaying\")\" ]; then printf '\\n' >> \"$f.replaying\"; fi; \
@@ -4046,6 +4048,20 @@ mod spool_claim_window_tests {
 
         assert_eq!(std::fs::read_to_string(&claim).unwrap(), "OLD-CLAIM\n", "唯一的副本不准被蓋掉");
         assert_eq!(std::fs::read_to_string(&r.spool).unwrap(), "NEW\n", "新的 spool 留到下一輪");
+    }
+
+    /// #501：`.replaying` 是 claim 腳本自己建的，裡面裝完整 payload——不能交給那台機器的 umask。
+    /// 明確用寬鬆的 umask 跑，runner 剛好是 077 時才不會變成同義反覆。
+    #[test]
+    fn the_replaying_file_the_claim_script_creates_is_private() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let r = Remote::new();
+        let root = crate::startup::REMOTE_ROOT;
+        std::fs::write(&r.spool, "A\n").unwrap();
+        r.sh(&format!("umask 022\n{}", claim_script("botX", root).unwrap()));
+        let staging = r.spool.with_extension("jsonl.replaying");
+        let mode = std::fs::metadata(&staging).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o600, ".replaying 只給自己讀");
     }
 
     /// 摘下來還沒併進 `.replaying` 就斷線：`.claim` 下一輪要被收回來，不是留在遠端沒人管。
