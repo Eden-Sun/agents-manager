@@ -974,6 +974,7 @@ pub async fn start(app: &Arc<App>, bot_id: &str, req: StartReq) -> LcResult<Valu
 
 /// 斷開一列：`spawned` 關 pane，`attached` 什麼都不動（那顆 vite 是別人的），然後標 `off`。要在 [`gate`] 裡呼叫。
 async fn disconnect_locked(app: &Arc<App>, r: Row) -> Option<Row> {
+    crate::preview_bind::forget(&r.bot_id);
     if !close_row_pane(app, &r).await {
         // 不知道那顆 pane 屬於哪個 session（讀 run 失敗）：不關、也不標 off，留著下次再看。
         tracing::warn!(bot = %r.bot_id, "preview: cannot tell which herdr session owns the pane; leaving the preview as is");
@@ -1132,11 +1133,23 @@ async fn refresh_locked(app: &Arc<App>, bot_id: &str) -> Option<Row> {
         _ => (Some(false), false),
     };
     let mut next = next_status(r.status(), attached, Observed { pane_alive, listening }, elapsed_secs(r.started_at.as_deref()));
-    // #434：`allow_lan` 關著時，**我們起的** server 不准綁到 loopback 以外。只在轉成 `running` 的那一拍量一次
-    // （之後每一拍維持原本的便宜檢查，不為此多跑 lsof）；量不到就不下結論，跟這個模組其他地方同一條原則。
-    // 接上的那顆是別人的 server，不在管轄範圍：使用者明確挑了它，而且關掉它也不是我們的事。
+    // #434：`allow_lan` 關著時，**我們起的** server 不准綁到 loopback 以外；量不到就不下結論，
+    // 跟這個模組其他地方同一條原則。接上的那顆是別人的 server，不在管轄範圍：使用者明確挑了它，
+    // 而且關掉它也不是我們的事。
+    //
+    // #452：原本只在轉成 `running` 的那一拍量一次——起來時綁 loopback、之後才改綁對外的 server
+    // （設定檔改了自己重啟、dev script 內部重啟）從此不會再被看一眼，`allow_lan` 關著也一路 `running`。
+    // 改成 `running` 期間也驗，但**不是每一拍**：量位址要多跑一趟 `lsof`，而 `running` 的輪詢本來
+    // 只是一次 TCP connect。轉進來那一拍一定驗，之後每 `RECHECK_EVERY_MS` 輪到一次。
+    let becoming_running = matches!(next, Next::To(Status::Running, _));
+    let still_running = matches!(next, Next::Stay) && r.status() == Status::Running;
     let mut forced_error: Option<String> = None;
-    if matches!(next, Next::To(Status::Running, _)) && !attached && r.source == SOURCE_SPAWNED && !app.allow_lan {
+    if (becoming_running || still_running)
+        && !attached
+        && r.source == SOURCE_SPAWNED
+        && !app.allow_lan
+        && (becoming_running || crate::preview_bind::take_recheck_slot(bot_id, &db::now()))
+    {
         if listeners.is_none() {
             if let Some(p) = r.pane_id.as_deref() {
                 listeners = env.pane_listeners(p).await;
@@ -1180,6 +1193,10 @@ async fn refresh_locked(app: &Arc<App>, bot_id: &str) -> Option<Row> {
     };
     // 一般的 failed 把 pane 留著給人看錯誤（重試時才收，見 #253）；綁到對外介面這一種不行——那顆 server
     // 還活著、還在對外聽，留著等於沒擋。關不掉也照樣記 failed（不能繼續說它 running），pane 留給重試再收。
+    // 不在 `running` 了就把 #452 的重驗名額忘掉（`disconnect_locked` 那條路自己也會忘）。
+    if to != Status::Running {
+        crate::preview_bind::forget(bot_id);
+    }
     let closed = (to == Status::Off || exposed_fail) && close_row_pane(app, &r).await;
     if to == Status::Off && !closed {
         return Some(r);

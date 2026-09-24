@@ -14,13 +14,70 @@
 //!    所以只列有把握的那兩個——其餘交給第 2 道，寧可失敗也不要亂送旗標。
 //! 2. **一律驗**（[`exposed_addr`]）：起來之後看行程樹**實際** listen 的位址（`lsof`），`allow_lan` 關著卻
 //!    綁到 loopback 以外就記 `failed`，不記 `running`。第 1 道管不到的框架、以及在設定檔裡又把位址
-//!    蓋回去的專案，都由這一道接住。
+//!    蓋回去的專案，都由這一道接住。**而且要一直驗**（issue #452）：原本只在 `starting → running`
+//!    那一拍量一次，起來時乖、之後才改綁對外的 server 就永遠抓不到。已經 `running` 的每
+//!    [`RECHECK_EVERY_MS`] 毫秒重驗一次（[`take_recheck_slot`]）——不是每一拍，因為量位址要多跑一趟
+//!    `lsof`，而 `running` 的輪詢本來只是一次 TCP connect。
 //!
 //! 驗不到（`lsof` 讀不到、行程樹問不到）**不算違規**：跟整個預覽模組同一條原則——讀不到是「不知道」，
 //! 不是「沒有」，不下結論。
 
 /// 強制綁這個位址。
 pub const LOOPBACK: &str = "127.0.0.1";
+
+/// 已經 `running` 的預覽多久重驗一次綁的位址（issue #452）。
+///
+/// 測試裡是 0＝每一拍都驗：測的是「running 期間會不會再驗」這條線，不是計時器本身；
+/// 間隔的算法由 [`recheck_due`] 自己的測試釘住。
+#[cfg(not(test))]
+pub const RECHECK_EVERY_MS: i64 = 60_000;
+#[cfg(test)]
+pub const RECHECK_EVERY_MS: i64 = 0;
+
+/// 距離上一次驗夠久了沒（間隔是 [`RECHECK_EVERY_MS`]）。
+pub fn recheck_due(last: Option<&str>, now: &str) -> bool {
+    due_after(last, now, RECHECK_EVERY_MS)
+}
+
+/// [`recheck_due`] 的本體，間隔可指定——正式的間隔在測試裡是 0（每一拍都驗），算法本身要另外釘。
+/// `last` 是上一次驗的時間戳（`db::now()` 的格式），`None`＝沒驗過（要驗）。
+/// 讀不懂的時間戳當成沒驗過：寧可多跑一次 `lsof`，也不要因為一個壞字串從此不再檢查。
+fn due_after(last: Option<&str>, now: &str, every_ms: i64) -> bool {
+    let (Some(last), Some(now)) = (parse_ts(last), parse_ts(Some(now))) else { return true };
+    (now - last).num_milliseconds() >= every_ms
+}
+
+fn parse_ts(ts: Option<&str>) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(ts?.trim()).ok().map(|t| t.with_timezone(&chrono::Utc))
+}
+
+/// 每顆 bot 上一次驗位址的時間。只在 `running` 期間用得到，預覽收掉時由 [`forget`] 清掉。
+fn last_checked() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
+    static M: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> = std::sync::OnceLock::new();
+    M.get_or_init(Default::default)
+}
+
+/// 這一拍輪不輪得到這顆 bot 重驗；回 `true` 時順手記下「這一拍驗了」。
+/// 轉成 `running` 的那一拍一律驗，不必問這支。
+pub fn take_recheck_slot(bot_id: &str, now: &str) -> bool {
+    take_slot_after(bot_id, now, RECHECK_EVERY_MS)
+}
+
+/// [`take_recheck_slot`] 的本體，間隔可指定——正式間隔在測試裡是 0（每一拍都給），
+/// 「記下來了沒」要拿真的間隔才看得出來。
+fn take_slot_after(bot_id: &str, now: &str, every_ms: i64) -> bool {
+    let mut g = last_checked().lock().unwrap_or_else(|e| e.into_inner());
+    if !due_after(g.get(bot_id).map(String::as_str), now, every_ms) {
+        return false;
+    }
+    g.insert(bot_id.to_string(), now.to_string());
+    true
+}
+
+/// 預覽不在 `running` 了就忘掉它：不然每顆開過預覽的 bot 都會在表裡留一筆。
+pub fn forget(bot_id: &str) {
+    last_checked().lock().unwrap_or_else(|e| e.into_inner()).remove(bot_id);
+}
 
 /// 這個框架要用哪個旗標指定綁的位址；`None`＝不知道，不要猜。
 ///
@@ -128,5 +185,40 @@ mod tests {
         let mixed = vec![("127.0.0.1".to_string(), 5180u16), ("*".to_string(), 5180)];
         assert_eq!(exposed_addr(&mixed), Some("*"));
         assert_eq!(exposed_addr(&[("192.168.1.9".to_string(), 3000u16)]), Some("192.168.1.9"));
+    }
+
+    /// 間隔的算法（正式是 60 秒；測試裡 `RECHECK_EVERY_MS` 是 0，所以這裡直接指定間隔驗）。
+    #[test]
+    fn a_recheck_is_due_once_the_interval_has_passed() {
+        let t = |ms: i64| chrono::DateTime::from_timestamp_millis(1_700_000_000_000 + ms).unwrap().to_rfc3339();
+        assert!(due_after(None, &t(0), 60_000), "沒驗過一定要驗");
+        assert!(!due_after(Some(&t(0)), &t(59_999), 60_000), "還沒到就不多跑 lsof");
+        assert!(due_after(Some(&t(0)), &t(60_000), 60_000), "到了就驗");
+        assert!(due_after(Some(&t(0)), &t(120_000), 60_000));
+        // 時鐘往回跳（NTP 校時）不該讓它從此不再檢查——但也不會比「沒驗過」更糟：下一次到期照樣驗。
+        assert!(!due_after(Some(&t(60_000)), &t(0), 60_000));
+        for bad in ["", "not-a-time", "2026-09-24"] {
+            assert!(due_after(Some(bad), &t(0), 60_000), "讀不懂的 {bad:?} 當成沒驗過");
+            assert!(due_after(Some(&t(0)), bad, 60_000));
+        }
+    }
+
+    /// 名額一個間隔只給一次（給了就記下來），`forget` 之後重新開始。
+    /// 拿真的間隔驗：正式間隔在測試裡是 0，每一拍都給，看不出有沒有記。
+    #[test]
+    fn a_slot_is_taken_once_per_interval_and_forgotten_with_the_preview() {
+        let t = |ms: i64| chrono::DateTime::from_timestamp_millis(1_700_000_000_000 + ms).unwrap().to_rfc3339();
+        // bot id 各測試不同：這張表是行程共用的，撞名才會互相影響。
+        let bot = format!("b-{}", crate::db::ulid());
+
+        assert!(take_slot_after(&bot, &t(0), 60_000), "第一次一定給");
+        assert!(!take_slot_after(&bot, &t(0), 60_000), "給過就記下來了，同一拍不再給");
+        assert!(!take_slot_after(&bot, &t(59_999), 60_000), "還沒到間隔");
+        assert!(take_slot_after(&bot, &t(60_000), 60_000), "到了再給一次");
+        assert!(!take_slot_after(&bot, &t(60_001), 60_000), "剛給過，重新計時");
+
+        forget(&bot);
+        assert!(take_slot_after(&bot, &t(0), 60_000), "忘掉之後重新開始");
+        forget(&bot);
     }
 }

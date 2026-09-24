@@ -543,9 +543,10 @@ bot 或 active Run 不存在 404。
   排序 same_dir、same_repo、other，各自依 port。非 `same_dir` 的不自動接（畫面上看到的不是這顆 bot 工作樹的程式碼），要用 `mode=attach` 明確挑。
 - `GET`／`POST` 回全部欄位；`off` 時只有 `status`＋`candidates`／`candidate_info`／`command`／`others`，`DELETE` 只回 `{"status":"off"}`。
   `failed` 的 `error` 帶原因與 pane 最後 40 行。iframe 網址用 `http://${location.hostname}:${port}/`。
-- **綁到對外介面一律 `failed`**（issue #434）：`allow_lan` 關著時，daemon 起的 dev server（`source=spawned`）轉 `running` 的那一拍會量
-  它實際 listen 的位址；有任何一個不是 loopback（`*`／`0.0.0.0`／`[::]`／LAN IP）就記 `failed`，`error` 寫出是哪個位址，**而且把 pane 關掉**
-  （那顆 server 還在對外聽，不能像一般 `failed` 那樣留著）。量不到位址不算違規。`attached` 不受這條管（那是使用者明確挑的別人的 server）。
+- **綁到對外介面一律 `failed`**（issue #434、#452）：`allow_lan` 關著時，daemon 起的 dev server（`source=spawned`）會量它實際 listen 的位址——
+  轉 `running` 的那一拍一定量，之後 `running` 期間每 60 秒再量一次（起來之後才改綁對外的也要抓得到）。有任何一個不是 loopback
+  （`*`／`0.0.0.0`／`[::]`／LAN IP）就記 `failed`，`error` 寫出是哪個位址，**而且把 pane 關掉**（那顆 server 還在對外聽，不能像一般 `failed` 那樣留著）。
+  量不到位址不算違規。`attached` 不受這條管（那是使用者明確挑的別人的 server）。
 
 ### `GET /api/bots/{id}/preview`
 先對一次帳（pane 還在不在、port 有沒有在 listen）再回。`running` 期間 daemon 也有常駐監看（SPEC §6.12），server 半路掛掉會自己轉 `failed`（`attached` 轉 `off`）並推 `preview_changed`，不必等 GET。
