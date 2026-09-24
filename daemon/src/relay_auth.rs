@@ -66,6 +66,26 @@ pub async fn authenticate(
             "relay_from": claimed,
         })));
     }
+    match prove_bot(app, headers, claimed).await? {
+        Proof::Verified(from) => Ok(Some(Relay { from, unverified: false })),
+        // 沒帶：相容期照收（bot 還是得是活的）。不記 token（本來就沒有），只記誰冒了誰的名，
+        // 方便相容期結束前清點還有誰沒帶。
+        Proof::Absent(from) => {
+            tracing::warn!(relay_from = %from, "relay_from without X-AM-Bot-Token: accepted as unverified (issue #339 compat)");
+            Ok(Some(Relay { from, unverified: true }))
+        }
+    }
+}
+
+/// `prove_bot` 的結果：`Absent` 是「沒帶 token、bot 是活的」，要不要放行由呼叫端決定。
+enum Proof {
+    Verified(String),
+    Absent(String),
+}
+
+/// 一顆 bot 的 id 配上 `X-AM-Bot-Token`：`/prompt` 與 mission 端點共用的那一段（issue #409）。
+/// `claimed` 已 trim、非空、不是 `daemon`。
+async fn prove_bot(app: &Arc<App>, headers: &HeaderMap, claimed: &str) -> Result<Proof, LcError> {
     // **header 在不在**才是分歧點，值長什麼樣都不算「沒帶」：空字串與非 UTF-8 以前都掉進相容期，
     // 等於送一個壞掉的 header 就能冒名放行。
     let presented = headers.get("X-AM-Bot-Token").map(|v| v.to_str().unwrap_or_default().trim().to_string());
@@ -75,9 +95,7 @@ pub async fn authenticate(
         .filter(|b| b.deleted_at.is_none());
     match (presented, live) {
         // 有帶而且對得上：本人。
-        (Some(t), Some(b)) if !t.is_empty() && crate::api::ct_eq(&t, &b.hook_token) => {
-            Ok(Some(Relay { from: b.id, unverified: false }))
-        }
+        (Some(t), Some(b)) if !t.is_empty() && crate::api::ct_eq(&t, &b.hook_token) => Ok(Proof::Verified(b.id)),
         // 有帶但對不上（別顆的、空的、非 UTF-8），或指到不存在／已刪的 bot：同一個 403。
         // 不按「bot 存不存在」分成 400／403——那會讓狀態碼變成探測 bot id 的神諭。
         (Some(_), _) => Err(LcError::Forbidden(json!({
@@ -85,12 +103,40 @@ pub async fn authenticate(
             "reason": "relay_from_mismatch",
             "message": "X-AM-Bot-Token 不是 relay_from 那顆 bot 的；只能以自己的身分轉述",
         }))),
-        // 沒帶：相容期照收（bot 還是得是活的）。不記 token（本來就沒有），只記誰冒了誰的名，
-        // 方便相容期結束前清點還有誰沒帶。
-        (None, Some(b)) => {
-            tracing::warn!(relay_from = %b.id, "relay_from without X-AM-Bot-Token: accepted as unverified (issue #339 compat)");
-            Ok(Some(Relay { from: b.id, unverified: true }))
-        }
+        (None, Some(b)) => Ok(Proof::Absent(b.id)),
         (None, None) => Err(LcError::Bad(format!("relay_from must be a live bot id or `{}`", crate::agent_relay::DAEMON_SENDER))),
+    }
+}
+
+/// mission 端點（`events`／`question`／`answer`／`revise`／`complete`／`deliver`）的 `relay_from`（issue #409）。
+/// 省略＝`Ok(None)`（使用者本人）。跟 `/prompt` 共用 `prove_bot`，差在兩格：
+///
+/// | relay_from | 條件 | 結果 |
+/// |---|---|---|
+/// | `daemon` | 呼叫端是驗證過的 AGM 角色 bot（`X-AM-Bot-Id`＋`X-AM-Bot-Token`） | 照收：`agm mission … --as-daemon` |
+/// | `daemon` | 其他 | **403** `relay_from_reserved` |
+/// | bot | 沒帶 `X-AM-Bot-Token` | **403** `relay_from_token_required`，沒有相容期 |
+///
+/// 沒有相容期：唯一帶 `relay_from` 的呼叫端是 `bin/agm`，它在角色自己的 pane 裡一律帶那顆的 token
+/// （`scripts/agm.py` `bot_auth_headers`）；web 從不帶。照收就得在 `mission_events` 另記「未驗證」。
+pub async fn authenticate_mission(app: &Arc<App>, headers: &HeaderMap, claimed: Option<&str>) -> Result<Option<String>, LcError> {
+    let Some(claimed) = claimed.map(str::trim).filter(|s| !s.is_empty()) else { return Ok(None) };
+    if claimed == crate::agent_relay::DAEMON_SENDER {
+        if crate::supervisor::bot_requests::actor_role(app, headers).await.is_some() {
+            return Ok(Some(claimed.to_string()));
+        }
+        return Err(LcError::Forbidden(json!({
+            "error": "forbidden",
+            "reason": "relay_from_reserved",
+            "message": "relay_from=daemon 只給驗證過的 AGM 角色 bot 代記（X-AM-Bot-Id＋X-AM-Bot-Token）",
+        })));
+    }
+    match prove_bot(app, headers, claimed).await? {
+        Proof::Verified(from) => Ok(Some(from)),
+        Proof::Absent(_) => Err(LcError::Forbidden(json!({
+            "error": "forbidden",
+            "reason": "relay_from_token_required",
+            "message": "relay_from 是 bot 時要帶那顆 bot 自己的 X-AM-Bot-Token",
+        }))),
     }
 }

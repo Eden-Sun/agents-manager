@@ -1822,6 +1822,18 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 `verified` 另帶 `generation` 與給了的 `worktree`。`completed` 的 payload 帶 `delivery`（見 `complete`）。
 `relay_from`：`null` = 使用者本人（只有 `instruction`），bot id = 那顆 bot，`"daemon"` = daemon 自己記的。
 
+**mission 的 `relay_from`**（`events`／`question`／`answer`／`revise`／`complete`／`deliver`，issue #409，SPEC §6.5d 第 6 點）：跟 §5 共用同一段 token 比對，擋下來就什麼都不寫。
+
+| `relay_from` | 條件 | 回應 |
+|---|---|---|
+| 省略 | — | 使用者本人 |
+| bot | `X-AM-Bot-Token` 是那顆自己的 | 照收 |
+| bot | `X-AM-Bot-Token` **有帶**但對不上（別顆的／空字串／非 UTF-8），或那顆不存在／已刪 | **403** `relay_from_mismatch` |
+| bot | **沒帶** `X-AM-Bot-Token` | **403** `relay_from_token_required`（跟 §5 不同，沒有相容期） |
+| 不存在／已刪的 bot | 沒帶 | 400 |
+| `"daemon"` | 呼叫端是驗證過的 AGM 角色 bot（`X-AM-Bot-Id`＋`X-AM-Bot-Token`，`agm mission … --as-daemon`） | 照收 |
+| `"daemon"` | 其他 | **403** `relay_from_reserved` |
+
 ### 端點
 
 | 方法 | 路徑 | 說明 |
@@ -1829,7 +1841,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 | POST | `/api/projects/{id}/missions` | `{text, client_request_id?, delivery_mode, executor_kind, on_5h_limit, max_rounds?(0..=10，預設 2)}` → 任務＋`created`。同一個 `client_request_id` 回同一筆（`created:false`）。建立時記一則 `instruction` 事件，並往 AGM inbox 放一則 `mission_created`（event_key `mission:<id>:created`，payload 含 `mission_id/project_id/project/cwd/text` 與三個選項）；任務列、`instruction` 與 inbox 是**同一個交易**。重送（`created:false`）也補推一次 `mission_created`（同一個 event_key，已經有就不多一筆），寫一半的舊列靠它補回通知。遠端專案回 400 `{"error":"remote_not_supported","host":…}`。 |
 | GET | `/api/projects/{id}/missions?status=all\|open\|done\|cancelled&limit=` | `{project_id, missions:[…]}`，新的在前。**已完成任務清單＝`status=done`，不含已取消的**；取消的另用 `status=cancelled` 取（UI 若要一起顯示須分開標示，不能混進「已完成」）。 |
 | GET | `/api/missions/{id}` | 任務＋`events[]`＋`revisions[]`（這筆成果的續作，新的在前）＋`parent`（自己是誰的續作；來源被刪掉時是 `{id, missing:true}`）。 |
-| POST | `/api/missions/{id}/events` | `{kind: "report"\|"note"\|"verified", text, relay_from?, payload?, worktree?, sha?}` → 事件。`relay_from` 只驗「是活著的 bot 或 `daemon`」（不存在的值 400）；還**沒有**套 `POST /api/bots/{id}/prompt` 的 bot token 驗證（#409）。**交付前必須有一則 `verified`**，而且 `verified` 要說驗的是哪個 commit：`worktree`（本專案 repo 的工作樹，daemon 讀它的 HEAD）或 `sha`（可縮寫，必須是本專案 repo 裡的 commit），兩個都給時必須一致；daemon 把完整 sha 寫進 `payload.sha`。都沒給、工作樹不是本專案的 repo、sha 找不到 → 400。寫入時在同一個交易裡重看（驗 commit、算代都在交易外）：任務已結案 → 409 `already_closed`；`verified` 算好代之後任務被退回（`round` 先落地）→ 409 `verification_stale`（`stale_because: round`、`verified_generation`、`generation`、`next`）——驗的是上一代的成果，落地卻會被算成新一代的驗證。兩種都什麼都不寫。 |
+| POST | `/api/missions/{id}/events` | `{kind: "report"\|"note"\|"verified", text, relay_from?, payload?, worktree?, sha?}` → 事件。`relay_from` 規則見下方「mission 的 `relay_from`」。**交付前必須有一則 `verified`**，而且 `verified` 要說驗的是哪個 commit：`worktree`（本專案 repo 的工作樹，daemon 讀它的 HEAD）或 `sha`（可縮寫，必須是本專案 repo 裡的 commit），兩個都給時必須一致；daemon 把完整 sha 寫進 `payload.sha`。都沒給、工作樹不是本專案的 repo、sha 找不到 → 400。寫入時在同一個交易裡重看（驗 commit、算代都在交易外）：任務已結案 → 409 `already_closed`；`verified` 算好代之後任務被退回（`round` 先落地）→ 409 `verification_stale`（`stale_because: round`、`verified_generation`、`generation`、`next`）——驗的是上一代的成果，落地卻會被算成新一代的驗證。兩種都什麼都不寫。 |
 | POST | `/api/missions/{id}/pause` | `{reason, detail?}` → 任務。`reason` **必填**（機器碼；缺了是 422，handler 不會跑）。任務列、`paused` 事件與叫醒協調者的 `mission_paused`（event_key `mission:<id>:paused:<event id>`，payload 含 `reason`／`detail`／`open_assignments[]`）是**同一個交易**；由收 mission 事件的那個 AGM 角色自己呼叫（bot token 驗過）時不推 inbox——自己叫醒自己只是多一個空回合。暫停**不**中止進行中的回合、不取消交辦，但 `deliver` 會 409（見下）。 |
 | POST | `/api/missions/{id}/resume` | → 任務（清掉 `paused_reason`）。 |
 | POST | `/api/missions/{id}/cancel` | → 任務，多 `temp_bots`（見 complete）與 `assignments[]`（被收掉的交辦：`{id, role, status, target_bot_id, turn_id, cancelled, revoked_turn_id?, may_still_be_running?}`）。任務列、`cancelled` 事件與 `mission_cancelled`（event_key `mission:<id>:cancelled:<event id>`；AGM 自己取消時不推）同一個交易；接著把底下**還開著的交辦**逐件走 `review --decision cancel`（排隊中的 turn 撤回、`quota_blocked` 不再被 controller 自動重送），最後才收臨時 bot。已經在跑的回合 daemon 不會中止，`may_still_be_running` 照實講。 |

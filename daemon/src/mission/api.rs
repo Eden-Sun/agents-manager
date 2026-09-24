@@ -100,16 +100,10 @@ async fn closed_now(app: &Arc<App>, id: &str) -> LcError {
     }
 }
 
-/// `relay_from` 跟 `POST /api/bots/{id}/prompt` 同一套：省略＝使用者本人，否則必須是存在中的 bot 或 `daemon`。
-async fn check_relay_from(app: &Arc<App>, relay_from: Option<&str>) -> Result<Option<String>, LcError> {
-    match relay_from.map(str::trim).filter(|s| !s.is_empty()) {
-        None => Ok(None),
-        Some(crate::agent_relay::DAEMON_SENDER) => Ok(Some(crate::agent_relay::DAEMON_SENDER.into())),
-        Some(id) => match crate::db::bot(&app.db, id).await.map_err(up)? {
-            Some(b) if b.deleted_at.is_none() => Ok(Some(b.id)),
-            _ => Err(LcError::Bad(format!("relay_from must be a live bot id or `{}`", crate::agent_relay::DAEMON_SENDER))),
-        },
-    }
+/// `relay_from` 省略＝使用者本人；bot 要帶自己的 `X-AM-Bot-Token`，`daemon` 只給驗證過的 AGM 角色（issue #409）。
+/// 規則在 `relay_auth::authenticate_mission`，跟 `POST /api/bots/{id}/prompt` 共用同一段 token 比對。
+async fn check_relay_from(app: &Arc<App>, headers: &HeaderMap, relay_from: Option<&str>) -> Result<Option<String>, LcError> {
+    crate::relay_auth::authenticate_mission(app, headers, relay_from).await
 }
 
 fn one_of(field: &str, v: &str, allowed: &[&str]) -> Result<(), LcError> {
@@ -293,6 +287,7 @@ pub struct QuestionIn {
 pub async fn post_question(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Json(b): Json<QuestionIn>,
 ) -> Result<Json<Value>, LcError> {
     let text = b.text.trim();
@@ -304,7 +299,7 @@ pub async fn post_question(
         return Err(LcError::Bad("client_request_id is empty".into()));
     }
     let m = load(&app, &id).await?;
-    let from = check_relay_from(&app, b.relay_from.as_deref()).await?;
+    let from = check_relay_from(&app, &headers, b.relay_from.as_deref()).await?;
     let payload = json!({
         "mission_id": m.id,
         "project_id": m.project_id,
@@ -360,6 +355,7 @@ pub struct AnswerIn {
 pub async fn post_answer(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Json(b): Json<AnswerIn>,
 ) -> Result<Json<Value>, LcError> {
     let text = b.text.trim();
@@ -371,7 +367,7 @@ pub async fn post_answer(
         return Err(LcError::Bad("client_request_id is empty".into()));
     }
     let m = load(&app, &id).await?;
-    let from = check_relay_from(&app, b.relay_from.as_deref()).await?;
+    let from = check_relay_from(&app, &headers, b.relay_from.as_deref()).await?;
     let is_bot_reply = from.is_some();
     // bot 的回覆一定是在回某一則追問，而且那則追問要真的屬於這筆任務。少了這個，
     // 「回覆」就變成一句沒有對象的話，UI 也串不起來。
@@ -507,14 +503,19 @@ async fn verified_commit(app: &Arc<App>, m: &store::Mission, b: &EventIn) -> Res
 }
 
 /// AGM／bot 往群組時間軸回報（`report`、`note`），或記下驗證通過（`verified`，交付前必須有，而且要帶 commit）。
-pub async fn post_event(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b): Json<EventIn>) -> Result<Json<Value>, LcError> {
+pub async fn post_event(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(b): Json<EventIn>,
+) -> Result<Json<Value>, LcError> {
     one_of("kind", &b.kind, &["report", "note", "verified"])?;
     if b.text.trim().is_empty() {
         return Err(LcError::Bad("text is empty".into()));
     }
     let m = load(&app, &id).await?;
     ensure_open(&m)?;
-    let from = check_relay_from(&app, b.relay_from.as_deref()).await?;
+    let from = check_relay_from(&app, &headers, b.relay_from.as_deref()).await?;
     let mut payload = b.payload.clone().unwrap_or_else(|| json!({}));
     let mut generation = None;
     if b.kind == "verified" {
@@ -688,6 +689,7 @@ pub struct ReviseIn {
 pub async fn post_revise(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Json(b): Json<ReviseIn>,
 ) -> Result<Json<Value>, LcError> {
     let text = b.text.trim();
@@ -698,7 +700,7 @@ pub async fn post_revise(
     if crid.is_empty() {
         return Err(LcError::Bad("client_request_id is empty".into()));
     }
-    let from = check_relay_from(&app, b.relay_from.as_deref()).await?;
+    let from = check_relay_from(&app, &headers, b.relay_from.as_deref()).await?;
     let parent = load(&app, &id).await?;
     // 契約鎖死：只有已完成的成果能續作。進行中的請直接回答／等它做完（要改方向就先 cancel），
     // 取消掉的沒有成果可以接續——兩種都回明確的理由，不要讓呼叫端猜。
@@ -1072,7 +1074,12 @@ pub struct CompleteIn {
 /// 1. 底下還有開著的交辦 → 409 `assignments_open`（那顆 bot 會繼續做一件已經關掉的任務）；
 /// 2. 對交付的要求（`flow::delivery_requirement`）：這一代驗過的 commit 已經交付，或 `no_delivery` 講的理由
 ///    對得上事實——否則 409 `not_delivered`／`has_verified_changes`／`user_not_asked`／`worktree_has_changes`。
-pub async fn post_complete(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b): Json<CompleteIn>) -> Result<Json<Value>, LcError> {
+pub async fn post_complete(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(b): Json<CompleteIn>,
+) -> Result<Json<Value>, LcError> {
     if b.result_summary.trim().is_empty() {
         return Err(LcError::Bad("result_summary is empty".into()));
     }
@@ -1108,7 +1115,7 @@ pub async fn post_complete(State(app): State<Arc<App>>, Path(id): Path<String>, 
             }
         }
     }
-    let from = check_relay_from(&app, b.relay_from.as_deref()).await?;
+    let from = check_relay_from(&app, &headers, b.relay_from.as_deref()).await?;
     #[cfg(test)]
     crate::lifecycle::race_point::hit("mission_complete_after_snapshot", &id).await;
     {
@@ -1246,7 +1253,12 @@ const DELIVERY_PAUSES: [&str; 2] = ["push_main_failed", "pr_failed"];
 /// **冪等**（review3 c1 M11）：同一個 commit 已經交付過就回原本那一筆（`replayed`）。動手之前先記一則
 /// `delivery_attempt`，所以「push 成功但回應斷在路上」的重試認得出來——HEAD 已經在 main 裡是成功，
 /// 不是 `nothing_to_deliver`；PR 模式先問 `gh pr view`，不會被「已經有一個 PR」判成 `pr_failed`。
-pub async fn post_deliver(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b): Json<DeliverIn>) -> Result<Json<Value>, LcError> {
+pub async fn post_deliver(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(b): Json<DeliverIn>,
+) -> Result<Json<Value>, LcError> {
     let m = load(&app, &id).await?;
     ensure_open(&m)?;
     // 任務停著（使用者按了暫停、等人回答、輪數用完…）就不交付。只有先前那次交付失敗停下的可以重試（review3 c1 M10）。
@@ -1256,7 +1268,7 @@ pub async fn post_deliver(State(app): State<Arc<App>>, Path(id): Path<String>, J
             json!({"mission_id": id, "paused_reason": reason, "hint": "任務停著：等使用者回答或 resume 之後再交付"}),
         ));
     }
-    let from = check_relay_from(&app, b.relay_from.as_deref()).await?;
+    let from = check_relay_from(&app, &headers, b.relay_from.as_deref()).await?;
     let (assignments, events) = super::workflow::inputs(&app, &id).await?;
     let f = flow::derive(&assignments, &events);
     let Some((verified, stale)) = f.latest_verified.clone() else {
@@ -1457,6 +1469,30 @@ mod tests {
         }
     }
 
+    /// 一顆帶 hook token 的 bot，回 `(bot id, 證明它身分的 headers)`。`agm` 為真就登記成巡檢角色
+    /// （`bin/agm` 在 AGM pane 裡送的就是這組）。
+    async fn bot_with_token(app: &Arc<App>, pid: &str, agm: bool) -> (String, HeaderMap) {
+        let id = crate::db::ulid();
+        let token = format!("tok-{id}");
+        sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES (?,?,?,'claude',?,?)")
+            .bind(&id)
+            .bind(pid)
+            .bind(format!("b-{id}"))
+            .bind(&token)
+            .bind(crate::db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        if agm {
+            crate::supervisor::store::get_or_init(&app.db).await.unwrap();
+            crate::supervisor::store::set_env(&app.db, &id, pid, "/tmp").await.unwrap();
+        }
+        let mut h = HeaderMap::new();
+        h.insert("X-AM-Bot-Id", id.parse().unwrap());
+        h.insert("X-AM-Bot-Token", token.parse().unwrap());
+        (id, h)
+    }
+
     fn q(text: &str, crid: &str) -> QuestionIn {
         QuestionIn { text: text.into(), client_request_id: crid.into(), relay_from: None }
     }
@@ -1558,7 +1594,7 @@ mod tests {
             .execute(&mut *writer)
             .await
             .unwrap();
-        let pending = tokio::spawn(post_complete(State(app.clone()), Path(id.clone()), Json(done("做完了", Some("no_changes"), None))));
+        let pending = tokio::spawn(post_complete(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(done("做完了", Some("no_changes"), None))));
         // 讓結案請求把讀取與關卡都跑完、卡在寫入（busy_timeout 10 秒，這裡遠小於它）。
         tokio::time::sleep(std::time::Duration::from_millis(800)).await;
         sqlx::query("COMMIT").execute(&mut *writer).await.unwrap();
@@ -1646,7 +1682,7 @@ mod tests {
                         crate::supervisor::api::post_review(State(app), Path(parent.unwrap()), HeaderMap::new(), Json(review)).await
                     }),
                     "cancel" => tokio::spawn(async move { post_cancel(State(app), Path(id), HeaderMap::new()).await }),
-                    _ => tokio::spawn(async move { post_complete(State(app), Path(id), Json(done("完成", Some("no_changes"), None))).await }),
+                    _ => tokio::spawn(async move { post_complete(State(app), Path(id), HeaderMap::new(), Json(done("完成", Some("no_changes"), None))).await }),
                 }
             };
 
@@ -1809,7 +1845,7 @@ mod tests {
                 // 驗過 env.repo 的 HEAD；那個 repo 沒有 origin，交付一定失敗。
                 let repo = Some(env.repo.to_string_lossy().to_string());
                 let ok = EventIn { kind: "verified".into(), text: "ok".into(), relay_from: None, payload: None, sha: None, worktree: repo };
-                let _ = post_event(State(app.clone()), Path(id.clone()), Json(ok)).await.unwrap();
+                let _ = post_event(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(ok)).await.unwrap();
             }
 
             let mut writer = app.db.acquire().await.unwrap();
@@ -1829,7 +1865,7 @@ mod tests {
                 }
                 _ => {
                     let d = DeliverIn { worktree: env.repo.to_string_lossy().to_string(), title: None, body: None, relay_from: None };
-                    tokio::spawn(post_deliver(State(app.clone()), Path(id.clone()), Json(d)))
+                    tokio::spawn(post_deliver(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(d)))
                 }
             };
             tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
@@ -1905,7 +1941,7 @@ mod tests {
             let closing = if close == "cancel" {
                 tokio::spawn(post_cancel(State(app.clone()), Path(id.clone()), HeaderMap::new()))
             } else {
-                tokio::spawn(post_complete(State(app.clone()), Path(id.clone()), Json(done("完成", Some("no_changes"), None))))
+                tokio::spawn(post_complete(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(done("完成", Some("no_changes"), None))))
             };
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
             assert_eq!(store::get(&app.db, &id).await.unwrap().unwrap().status(), "open", "{close}：鎖還被握著，任務不能先關掉");
@@ -1948,8 +1984,8 @@ mod tests {
             let body = if cut_in == "round" {
                 // 第 0 代驗過、交付過：鎖外的判定是「已交付，可以結案」。
                 commit_file(&wt, "a.txt");
-                let _ = post_event(State(app.clone()), Path(id.clone()), Json(verified(Some(&wt), None))).await.unwrap();
-                let _ = post_deliver(State(app.clone()), Path(id.clone()), Json(deliver_from(&wt))).await.unwrap();
+                let _ = post_event(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(verified(Some(&wt), None))).await.unwrap();
+                let _ = post_deliver(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(deliver_from(&wt))).await.unwrap();
                 done("完成", None, None)
             } else {
                 // 沒派過執行者、沒驗過東西：鎖外的判定是「no_changes 成立，不必附工作樹」。
@@ -1962,14 +1998,14 @@ mod tests {
                         let _ = post_round(State(app2), Path(id2)).await.expect("退回要成功");
                     }
                     "verified" => {
-                        let _ = post_event(State(app2), Path(id2), Json(verified(Some(&wt2), None))).await.expect("驗證要記得下來");
+                        let _ = post_event(State(app2), Path(id2), HeaderMap::new(), Json(verified(Some(&wt2), None))).await.expect("驗證要記得下來");
                     }
                     _ => {
                         let _ = mission_assignment(&app2, &id2, "late-exec", "executor", "completed").await;
                     }
                 }
             });
-            let res = post_complete(State(app.clone()), Path(id.clone()), Json(body)).await;
+            let res = post_complete(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(body)).await;
 
             let (completed, status) = (events_of("completed", &app, &id).await, store::get(&app.db, &id).await.unwrap().unwrap().status());
             let reason = match res {
@@ -2003,7 +2039,7 @@ mod tests {
                     let _ = post_round(State(app2), Path(id2)).await.expect("退回要成功");
                 }
             });
-            let res = post_event(State(app.clone()), Path(id.clone()), Json(verified(Some(&env.repo), None))).await;
+            let res = post_event(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(verified(Some(&env.repo), None))).await;
 
             let recorded = events_of("verified", &app, &id).await;
             let reason = match res {
@@ -2072,10 +2108,10 @@ mod tests {
         let pid = env.project_id.clone();
         let Json(m) = post_mission(State(app.clone()), Path(pid.clone()), Json(new_mission("r1", "pr"))).await.unwrap();
         let id = m["id"].as_str().unwrap().to_string();
-        let _ = post_complete(State(app.clone()), Path(id.clone()), Json(done("改好了", Some("no_changes"), None))).await.unwrap();
+        let _ = post_complete(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(done("改好了", Some("no_changes"), None))).await.unwrap();
         let before = get_mission(State(app.clone()), Path(id.clone())).await.unwrap().0;
 
-        let Json(out) = post_question(State(app.clone()), Path(id.clone()), Json(q("這個改動會影響登入嗎？", "q1"))).await.unwrap();
+        let Json(out) = post_question(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(q("這個改動會影響登入嗎？", "q1"))).await.unwrap();
         assert_eq!(out["event"]["kind"], "question");
         assert!(out["event"]["relay_from"].is_null(), "使用者本人問的，不冒充 bot");
 
@@ -2086,31 +2122,30 @@ mod tests {
         assert_eq!(inbox_keys(&app, &format!("mission:{id}:question:%")).await.len(), 1, "AGM 被叫醒一次");
 
         // 同一個 crid 重送：回原本那一則，不會變成第二個問題。
-        let Json(replay) = post_question(State(app.clone()), Path(id.clone()), Json(q("這個改動會影響登入嗎？", "q1"))).await.unwrap();
+        let Json(replay) = post_question(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(q("這個改動會影響登入嗎？", "q1"))).await.unwrap();
         assert_eq!(replay["replayed"], true);
         assert_eq!(replay["event"]["id"], out["event"]["id"]);
         assert_eq!(inbox_keys(&app, &format!("mission:{id}:question:%")).await.len(), 1);
         // 同 crid 換內容是冪等鍵被重用，要講出來。
-        let err = post_question(State(app.clone()), Path(id.clone()), Json(q("換一句話", "q1"))).await.unwrap_err();
+        let err = post_question(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(q("換一句話", "q1"))).await.unwrap_err();
         assert_eq!(conflict_reason(err), "request_id_reused");
 
         // 使用者自己在已完成的任務上按「回答」是沒有意義的（沒有東西在等他），要講清楚該去哪：
-        let err = post_answer(State(app.clone()), Path(id.clone()), Json(ans("那就這樣", "a0"))).await.unwrap_err();
+        let err = post_answer(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(ans("那就這樣", "a0"))).await.unwrap_err();
         assert_eq!(conflict_reason(err), "already_closed");
 
-        // AGM 回覆追問：帶自己的身分、指回那一則 question，而且**不會**放行或改狀態。
-        // 這裡用 `daemon` 哨符（測試環境沒有跑 AGM bot）；正式環境帶的是 AGM 自己的 bot id，
-        // 兩者都會走 `check_relay_from`，也都算「不是使用者本人」。
+        // AGM 回覆追問：帶自己的身分（bot id＋自己的 token）、指回那一則 question，而且**不會**放行或改狀態。
+        let (agm_id, agm) = bot_with_token(&app, &pid, true).await;
         let qid = out["event"]["id"].as_str().unwrap().to_string();
         let reply = AnswerIn {
             text: "不會，只動到文案".into(),
             client_request_id: "a1".into(),
             reply_to: Some(qid.clone()),
-            relay_from: Some(crate::agent_relay::DAEMON_SENDER.into()),
+            relay_from: Some(agm_id.clone()),
         };
-        let Json(r) = post_answer(State(app.clone()), Path(id.clone()), Json(reply)).await.unwrap();
+        let Json(r) = post_answer(State(app.clone()), Path(id.clone()), agm.clone(), Json(reply)).await.unwrap();
         assert_eq!(r["event"]["reply_to"], json!(qid), "答得出是回哪一句");
-        assert_eq!(r["event"]["relay_from"], json!(crate::agent_relay::DAEMON_SENDER), "不是使用者的泡泡");
+        assert_eq!(r["event"]["relay_from"], json!(agm_id), "不是使用者的泡泡");
         assert_eq!(r["resumed"], false);
         assert_eq!(r["mission"]["status"], "done", "回覆追問不會改變交付狀態");
         assert!(inbox_keys(&app, &format!("mission:{id}:answer:%")).await.is_empty(), "AGM 自己的回覆不會叫醒它自己");
@@ -2120,9 +2155,82 @@ mod tests {
             text: "亂指".into(),
             client_request_id: "a2".into(),
             reply_to: Some("no-such-event".into()),
-            relay_from: Some(crate::agent_relay::DAEMON_SENDER.into()),
+            relay_from: Some(agm_id.clone()),
         };
-        assert!(post_answer(State(app.clone()), Path(id.clone()), Json(bogus)).await.is_err());
+        assert!(post_answer(State(app.clone()), Path(id.clone()), agm, Json(bogus)).await.is_err());
+    }
+
+    /// issue #409：mission 端點的 `relay_from` 跟 `POST /api/bots/{id}/prompt` 用同一段 token 比對
+    /// （`relay_auth::prove_bot`）。拿得到 UI token 的本機行程不能把事件掛在別顆 bot 名下、也不能自稱
+    /// daemon；擋下來就什麼都不寫。
+    #[tokio::test]
+    async fn mission_relay_from_must_be_proven_by_the_bots_own_token() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let pid = env.project_id.clone();
+        let Json(m) = post_mission(State(app.clone()), Path(pid.clone()), Json(new_mission("relay-auth", "pr"))).await.unwrap();
+        let id = m["id"].as_str().unwrap().to_string();
+        let (victim, victim_h) = bot_with_token(&app, &pid, false).await;
+        let (_, other_h) = bot_with_token(&app, &pid, false).await; // 活著，但不是 AGM 角色
+        let (_, agm_h) = bot_with_token(&app, &pid, true).await;
+        let note = |from: &str| EventIn { kind: "note".into(), text: "x".into(), relay_from: Some(from.into()), payload: None, sha: None, worktree: None };
+        let reason = |e: LcError| match e {
+            LcError::Forbidden(v) => v["reason"].as_str().unwrap_or_default().to_string(),
+            other => panic!("expected 403, got {other:?}"),
+        };
+        let written = || {
+            let (app, id) = (app.clone(), id.clone());
+            async move {
+                sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM mission_events WHERE mission_id=? AND kind<>'instruction'")
+                    .bind(&id)
+                    .fetch_one(&app.db)
+                    .await
+                    .unwrap()
+            }
+        };
+
+        // 冒名：沒帶 token、帶別顆的（含 AGM 角色自己的）、帶空的 → 403。
+        let mut empty = HeaderMap::new();
+        empty.insert("X-AM-Bot-Token", "".parse().unwrap());
+        for (h, want) in [
+            (HeaderMap::new(), "relay_from_token_required"),
+            (other_h.clone(), "relay_from_mismatch"),
+            (agm_h.clone(), "relay_from_mismatch"),
+            (empty, "relay_from_mismatch"),
+        ] {
+            let err = post_event(State(app.clone()), Path(id.clone()), h, Json(note(&victim))).await.unwrap_err();
+            assert_eq!(reason(err), want);
+        }
+        // daemon：只有驗證過的 AGM 角色能代記；一般 bot、沒身分、AGM 的 token 打錯都不行。
+        let mut forged = agm_h.clone();
+        forged.insert("X-AM-Bot-Token", "nope".parse().unwrap());
+        for h in [HeaderMap::new(), other_h.clone(), victim_h.clone(), forged] {
+            let err = post_event(State(app.clone()), Path(id.clone()), h, Json(note("daemon"))).await.unwrap_err();
+            assert_eq!(reason(err), "relay_from_reserved");
+        }
+        // 其他五個端點走同一道：沒帶 token 的冒名一律 403。
+        let none = HeaderMap::new;
+        let v = || Some(victim.clone());
+        let q = QuestionIn { text: "q".into(), client_request_id: "rq".into(), relay_from: v() };
+        assert_eq!(reason(post_question(State(app.clone()), Path(id.clone()), none(), Json(q)).await.unwrap_err()), "relay_from_token_required");
+        let a = AnswerIn { text: "a".into(), client_request_id: "ra".into(), reply_to: Some("x".into()), relay_from: v() };
+        assert_eq!(reason(post_answer(State(app.clone()), Path(id.clone()), none(), Json(a)).await.unwrap_err()), "relay_from_token_required");
+        let r = ReviseIn { relay_from: v(), ..rev("r", "rr") };
+        assert_eq!(reason(post_revise(State(app.clone()), Path(id.clone()), none(), Json(r)).await.unwrap_err()), "relay_from_token_required");
+        let d = DeliverIn { worktree: env.repo.to_string_lossy().to_string(), title: None, body: None, relay_from: v() };
+        assert_eq!(reason(post_deliver(State(app.clone()), Path(id.clone()), none(), Json(d)).await.unwrap_err()), "relay_from_token_required");
+        let c = CompleteIn { relay_from: v(), ..done("c", Some("no_changes"), None) };
+        assert_eq!(reason(post_complete(State(app.clone()), Path(id.clone()), none(), Json(c)).await.unwrap_err()), "relay_from_token_required");
+        assert_eq!(written().await, 0, "擋下來的都不能寫進時間軸");
+        let Json(cur) = get_mission(State(app.clone()), Path(id.clone())).await.unwrap();
+        assert_ne!(status(&cur), "done", "冒名的 complete 不能結案");
+
+        // 本人帶自己的 token；AGM 角色代 daemon 記。
+        let Json(ev) = post_event(State(app.clone()), Path(id.clone()), victim_h, Json(note(&victim))).await.unwrap();
+        assert_eq!(ev["relay_from"], json!(victim));
+        let Json(ev) = post_event(State(app.clone()), Path(id.clone()), agm_h, Json(note("daemon"))).await.unwrap();
+        assert_eq!(ev["relay_from"], json!(crate::agent_relay::DAEMON_SENDER));
+        assert_eq!(written().await, 2);
     }
 
     /// 使用者回答暫停的任務：回答、放行、喚醒是一筆交易，而且重送不會派出第二次續作。
@@ -2137,7 +2245,7 @@ mod tests {
             .await
             .unwrap();
 
-        let Json(out) = post_answer(State(app.clone()), Path(id.clone()), Json(ans("照你說的做", "a1"))).await.unwrap();
+        let Json(out) = post_answer(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(ans("照你說的做", "a1"))).await.unwrap();
         assert_eq!(out["resumed"], true);
         assert_eq!(out["mission"]["status"], "open", "放行了");
         assert_eq!(inbox_keys(&app, &format!("mission:{id}:answer:%")).await, [format!("mission:{id}:answer:a1")]);
@@ -2149,7 +2257,7 @@ mod tests {
         assert!(kinds.contains(&"answer".to_string()) && kinds.contains(&"resumed".to_string()));
 
         // 重送——而且是在任務已經被放行之後。先查重放再看狀態，所以回原結果而不是 409。
-        let Json(replay) = post_answer(State(app.clone()), Path(id.clone()), Json(ans("照你說的做", "a1"))).await.unwrap();
+        let Json(replay) = post_answer(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(ans("照你說的做", "a1"))).await.unwrap();
         assert_eq!(replay["replayed"], true);
         assert_eq!(replay["event"]["id"], out["event"]["id"]);
         assert_eq!(inbox_keys(&app, &format!("mission:{id}:answer:%")).await.len(), 1, "沒有第二次喚醒");
@@ -2193,18 +2301,18 @@ mod tests {
         let ev = EventIn {
             kind: "verified".into(),
             text: "cargo test 全過".into(),
-            relay_from: Some("daemon".into()),
+            relay_from: None,
             payload: Some(json!({"shots": ["/tmp/a.png"]})),
             sha: None,
             worktree: Some(env.repo.to_string_lossy().to_string()),
         };
-        let _ = post_event(State(app.clone()), Path(id.clone()), Json(ev)).await.unwrap();
+        let _ = post_event(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(ev)).await.unwrap();
         // 這筆 fixture 刻意**沒有交付**（下面要驗快照誠實地說不出交付方式）。沒交付要結案得有使用者的決定（issue #74）。
         let _ = post_pause(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(PauseIn { reason: "clarify".into(), detail: None })).await.unwrap();
-        let _ = post_answer(State(app.clone()), Path(id.clone()), Json(ans("先不要交付，直接結案", "no-deliver"))).await.unwrap();
-        let _ = post_complete(State(app.clone()), Path(id.clone()), Json(done("第一版", Some("user_declined"), None))).await.unwrap();
+        let _ = post_answer(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(ans("先不要交付，直接結案", "no-deliver"))).await.unwrap();
+        let _ = post_complete(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(done("第一版", Some("user_declined"), None))).await.unwrap();
 
-        let Json(child) = post_revise(State(app.clone()), Path(id.clone()), Json(rev("順便把標題也改了", "rev1"))).await.unwrap();
+        let Json(child) = post_revise(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(rev("順便把標題也改了", "rev1"))).await.unwrap();
         assert_eq!(child["created"], true);
         let cid = child["id"].as_str().unwrap().to_string();
         assert_ne!(cid, id, "是新的一筆，不是把舊的打開");
@@ -2221,7 +2329,7 @@ mod tests {
 
         // 舊的 verified 不屬於新任務：不重新驗證就交付要被擋下來。
         let deliver = DeliverIn { worktree: env.repo.to_string_lossy().to_string(), title: None, body: None, relay_from: None };
-        let err = post_deliver(State(app.clone()), Path(cid.clone()), Json(deliver)).await.unwrap_err();
+        let err = post_deliver(State(app.clone()), Path(cid.clone()), HeaderMap::new(), Json(deliver)).await.unwrap_err();
         assert_eq!(conflict_reason(err), "not_verified", "舊證據不能放行新交付");
 
         // 脈絡是持久化的快照：原指示／摘要／驗證摘要都在新任務的 instruction 事件裡，
@@ -2259,10 +2367,10 @@ mod tests {
         assert_eq!(payload["runbook_start_step"], 2);
 
         // 同 crid 重送回同一筆；換內容是 409。
-        let Json(again) = post_revise(State(app.clone()), Path(id.clone()), Json(rev("順便把標題也改了", "rev1"))).await.unwrap();
+        let Json(again) = post_revise(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(rev("順便把標題也改了", "rev1"))).await.unwrap();
         assert_eq!(again["id"], json!(cid));
         assert_eq!(again["created"], false);
-        let err = post_revise(State(app.clone()), Path(id.clone()), Json(rev("不一樣的要求", "rev1"))).await.unwrap_err();
+        let err = post_revise(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(rev("不一樣的要求", "rev1"))).await.unwrap_err();
         assert_eq!(conflict_reason(err), "request_id_reused");
     }
 
@@ -2272,19 +2380,20 @@ mod tests {
         let app = env.app.clone();
         let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("source-parent", "pr"))).await.unwrap();
         let id = m["id"].as_str().unwrap().to_string();
-        let _ = post_complete(State(app.clone()), Path(id.clone()), Json(done("v1", Some("no_changes"), None))).await.unwrap();
+        let _ = post_complete(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(done("v1", Some("no_changes"), None))).await.unwrap();
         let mut input = rev("v2", "source-revise");
         input.relay_from = Some("daemon".into());
-        let Json(child) = post_revise(State(app.clone()), Path(id.clone()), Json(input)).await.unwrap();
+        let (_, agm) = bot_with_token(&app, &env.project_id, true).await;
+        let Json(child) = post_revise(State(app.clone()), Path(id.clone()), agm, Json(input)).await.unwrap();
         let cid = child["id"].as_str().unwrap();
         let events = store::events(&app.db, cid).await.unwrap();
         assert_eq!(events[0].relay_from.as_deref(), Some("daemon"));
         assert_eq!(serde_json::from_str::<Value>(&events[0].payload_json).unwrap()["requested_by"], "daemon");
-        let err = post_revise(State(app.clone()), Path(id.clone()), Json(rev("v2", "source-revise"))).await.unwrap_err();
+        let err = post_revise(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(rev("v2", "source-revise"))).await.unwrap_err();
         assert_eq!(conflict_reason(err), "request_id_reused");
         let mut invalid = rev("v2", "invalid-source");
         invalid.relay_from = Some("missing-bot".into());
-        assert!(matches!(post_revise(State(app.clone()), Path(id), Json(invalid)).await, Err(LcError::Bad(_))));
+        assert!(matches!(post_revise(State(app.clone()), Path(id), HeaderMap::new(), Json(invalid)).await, Err(LcError::Bad(_))));
     }
 
     /// 續作只能從**已完成**的成果開。進行中與已取消各自回明確理由。
@@ -2295,11 +2404,11 @@ mod tests {
         let pid = env.project_id.clone();
         let Json(m) = post_mission(State(app.clone()), Path(pid.clone()), Json(new_mission("r1", "pr"))).await.unwrap();
         let id = m["id"].as_str().unwrap().to_string();
-        let err = post_revise(State(app.clone()), Path(id.clone()), Json(rev("改這個", "rev1"))).await.unwrap_err();
+        let err = post_revise(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(rev("改這個", "rev1"))).await.unwrap_err();
         assert_eq!(conflict_reason(err), "not_completed");
 
         let _ = post_cancel(State(app.clone()), Path(id.clone()), HeaderMap::new()).await.unwrap();
-        let err = post_revise(State(app.clone()), Path(id.clone()), Json(rev("改這個", "rev2"))).await.unwrap_err();
+        let err = post_revise(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(rev("改這個", "rev2"))).await.unwrap_err();
         assert_eq!(conflict_reason(err), "not_completed");
     }
 
@@ -2361,30 +2470,31 @@ mod tests {
 
         // 沒有驗證通過不能交付。
         let deliver = || DeliverIn { worktree: env.repo.to_string_lossy().to_string(), title: None, body: None, relay_from: None };
-        let err = post_deliver(State(app.clone()), Path(id.clone()), Json(deliver())).await.unwrap_err();
+        let err = post_deliver(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(deliver())).await.unwrap_err();
         assert_eq!(conflict_reason(err), "not_verified");
 
-        // 來源不能冒名；daemon 哨符可以。
+        // 來源不能冒名；驗證過的 AGM 角色可以代 daemon 記（`agm mission … --as-daemon`）。
         let repo = Some(env.repo.to_string_lossy().to_string());
         let bogus = EventIn { kind: "verified".into(), text: "ok".into(), relay_from: Some("no-such-bot".into()), payload: None, sha: None, worktree: repo.clone() };
-        assert!(matches!(post_event(State(app.clone()), Path(id.clone()), Json(bogus)).await, Err(LcError::Bad(_))));
+        assert!(matches!(post_event(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(bogus)).await, Err(LcError::Bad(_))));
+        let (_, agm) = bot_with_token(&app, &pid, true).await;
         let ok = EventIn { kind: "verified".into(), text: "cargo test 全過".into(), relay_from: Some("daemon".into()), payload: None, sha: None, worktree: repo };
-        let _ = post_event(State(app.clone()), Path(id.clone()), Json(ok)).await.unwrap();
+        let _ = post_event(State(app.clone()), Path(id.clone()), agm, Json(ok)).await.unwrap();
 
         // 測試 repo 沒有 origin：交付失敗 → 停下來問人（D8），不是靜靜吞掉。
-        let err = post_deliver(State(app.clone()), Path(id.clone()), Json(deliver())).await.unwrap_err();
+        let err = post_deliver(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(deliver())).await.unwrap_err();
         assert!(matches!(err, LcError::Conflict(_)));
         let Json(cur) = get_mission(State(app.clone()), Path(id.clone())).await.unwrap();
         assert_eq!(cur["paused_reason"], "push_main_failed");
 
         // 驗過卻沒交付：不能就這樣結案（issue #74），也不能說成「沒有改東西」；「使用者不要」要有使用者的回答。
-        let complete = |no_delivery: Option<&'static str>| post_complete(State(app.clone()), Path(id.clone()), Json(done("修好了", no_delivery, None)));
+        let complete = |no_delivery: Option<&'static str>| post_complete(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(done("修好了", no_delivery, None)));
         assert_eq!(conflict_reason(complete(None).await.unwrap_err()), "not_delivered");
         assert_eq!(conflict_reason(complete(Some("no_changes")).await.unwrap_err()), "has_verified_changes");
         assert_eq!(conflict_reason(complete(Some("user_declined")).await.unwrap_err()), "user_not_asked");
         assert!(matches!(complete(Some("later")).await.unwrap_err(), LcError::Bad(_)), "不認得的理由是 400");
         // 使用者在群組回答「不用推了」之後，照實記下沒交付的理由再結案。
-        let _ = post_answer(State(app.clone()), Path(id.clone()), Json(ans("不用推了，直接結案", "decline"))).await.unwrap();
+        let _ = post_answer(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(ans("不用推了，直接結案", "decline"))).await.unwrap();
         let Json(closed) = complete(Some("user_declined")).await.unwrap();
         assert_eq!((closed["delivery"]["status"].as_str(), closed["delivery"]["reason"].as_str()), (Some("waived"), Some("user_declined")));
 
@@ -2441,7 +2551,7 @@ mod tests {
         EventIn {
             kind: "verified".into(),
             text: "cargo test 全過".into(),
-            relay_from: Some("daemon".into()),
+            relay_from: None,
             payload: None,
             sha: sha.map(String::from),
             worktree: worktree.map(|w| w.to_string_lossy().to_string()),
@@ -2469,36 +2579,36 @@ mod tests {
         let id = m["id"].as_str().unwrap().to_string();
 
         // verified 一定要說驗的是哪個 commit。
-        let err = post_event(State(app.clone()), Path(id.clone()), Json(verified(None, None))).await.unwrap_err();
+        let err = post_event(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(verified(None, None))).await.unwrap_err();
         assert!(bad_text(err).contains("commit it verified"));
         let elsewhere = env.dir.join("other-repo");
         crate::testing::git::init_repo(&elsewhere);
-        let err = post_event(State(app.clone()), Path(id.clone()), Json(verified(Some(&elsewhere), None))).await.unwrap_err();
+        let err = post_event(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(verified(Some(&elsewhere), None))).await.unwrap_err();
         assert!(bad_text(err).contains("not a checkout of this mission's project"), "別的 repo 的工作樹不算");
 
         let a = commit_file(&wt, "a.txt");
-        let Json(ev) = post_event(State(app.clone()), Path(id.clone()), Json(verified(Some(&wt), None))).await.unwrap();
+        let Json(ev) = post_event(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(verified(Some(&wt), None))).await.unwrap();
         let payload: Value = serde_json::from_str(ev["payload_json"].as_str().unwrap()).unwrap();
         assert_eq!(payload["sha"], json!(a), "daemon 自己讀 HEAD 記下完整 sha");
         // 縮寫 sha 也行，跟工作樹對不上就是 400。
-        let err = post_event(State(app.clone()), Path(id.clone()), Json(verified(Some(&wt), Some("0123456789ab")))).await.unwrap_err();
+        let err = post_event(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(verified(Some(&wt), Some("0123456789ab")))).await.unwrap_err();
         assert!(matches!(err, LcError::Bad(_)));
 
         // 執行者驗完又改（rebase／補一刀）：B 沒驗過，交付擋下來，而且**不**把任務停成交付失敗。
         let b = commit_file(&wt, "b.txt");
-        let err = post_deliver(State(app.clone()), Path(id.clone()), Json(deliver_from(&wt))).await.unwrap_err();
+        let err = post_deliver(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(deliver_from(&wt))).await.unwrap_err();
         let LcError::Conflict(v) = err else { panic!("expected 409") };
         assert_eq!((v["reason"].as_str(), v["verified_sha"].as_str(), v["head"].as_str()), (Some("head_not_verified"), Some(a.as_str()), Some(b.as_str())));
         // 專案主樹的 HEAD 也不是驗過的那個（主樹上可能有別人還沒 review 的 commit）。
-        let err = post_deliver(State(app.clone()), Path(id.clone()), Json(deliver_from(&env.repo))).await.unwrap_err();
+        let err = post_deliver(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(deliver_from(&env.repo))).await.unwrap_err();
         assert_eq!(conflict_reason(err), "head_not_verified");
         let Json(cur) = get_mission(State(app.clone()), Path(id.clone())).await.unwrap();
         assert_eq!(cur["status"], "open", "流程漏了一步不是交付失敗");
         assert_eq!(git(&origin, &["rev-parse", "main"]), git(&env.repo, &["rev-parse", "main"]), "什麼都沒推");
 
         // 重驗 B（用縮寫 sha 記）之後才推得上去，推上去的就是 B。
-        let _ = post_event(State(app.clone()), Path(id.clone()), Json(verified(None, Some(&b[..12])))).await.unwrap();
-        let Json(out) = post_deliver(State(app.clone()), Path(id.clone()), Json(deliver_from(&wt))).await.unwrap();
+        let _ = post_event(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(verified(None, Some(&b[..12])))).await.unwrap();
+        let Json(out) = post_deliver(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(deliver_from(&wt))).await.unwrap();
         assert_eq!(out["sha"], json!(b));
         assert_eq!(git(&origin, &["rev-parse", "main"]), b);
     }
@@ -2512,23 +2622,23 @@ mod tests {
         let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("retry", "push_main"))).await.unwrap();
         let id = m["id"].as_str().unwrap().to_string();
         commit_file(&wt, "mine.txt");
-        let _ = post_event(State(app.clone()), Path(id.clone()), Json(verified(Some(&wt), None))).await.unwrap();
+        let _ = post_event(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(verified(Some(&wt), None))).await.unwrap();
 
         // 別人先推了一個 commit：不是 fast-forward，任務停下來。
         let other = env.dir.join("other-clone");
         std::process::Command::new("git").args(["clone", "-q", origin.to_str().unwrap(), other.to_str().unwrap()]).status().unwrap();
         commit_file(&other, "theirs.txt");
         git(&other, &["push", "-q", "origin", "HEAD:main"]);
-        let err = post_deliver(State(app.clone()), Path(id.clone()), Json(deliver_from(&wt))).await.unwrap_err();
+        let err = post_deliver(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(deliver_from(&wt))).await.unwrap_err();
         assert_eq!(conflict_reason(err), "not_fast_forward");
         assert_eq!(load(&app, &id).await.unwrap().paused_reason.as_deref(), Some("push_main_failed"));
 
         // rebase 之後 HEAD 變了：舊的 verified 不算，要重驗。
         git(&wt, &["fetch", "-q", "origin"]);
         git(&wt, &["rebase", "-q", "origin/main"]);
-        assert_eq!(conflict_reason(post_deliver(State(app.clone()), Path(id.clone()), Json(deliver_from(&wt))).await.unwrap_err()), "head_not_verified");
-        let _ = post_event(State(app.clone()), Path(id.clone()), Json(verified(Some(&wt), None))).await.unwrap();
-        let Json(out) = post_deliver(State(app.clone()), Path(id.clone()), Json(deliver_from(&wt))).await.unwrap();
+        assert_eq!(conflict_reason(post_deliver(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(deliver_from(&wt))).await.unwrap_err()), "head_not_verified");
+        let _ = post_event(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(verified(Some(&wt), None))).await.unwrap();
+        let Json(out) = post_deliver(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(deliver_from(&wt))).await.unwrap();
         assert_eq!(out["sha"], json!(git(&wt, &["rev-parse", "HEAD"])));
 
         let m = load(&app, &id).await.unwrap();
@@ -2545,7 +2655,7 @@ mod tests {
         let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("legacy", "pr"))).await.unwrap();
         let id = m["id"].as_str().unwrap().to_string();
         store::add_event(&app.db, &id, "verified", "舊版記的", Some("daemon"), &json!({})).await.unwrap();
-        let err = post_deliver(State(app.clone()), Path(id.clone()), Json(deliver_from(&env.repo))).await.unwrap_err();
+        let err = post_deliver(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(deliver_from(&env.repo))).await.unwrap_err();
         assert_eq!(conflict_reason(err), "verified_without_sha");
     }
 
@@ -2621,17 +2731,17 @@ mod tests {
                     assert_eq!(r["mission_next"]["next"], next().await, "裁示的回應直接帶下一步，就是 mission get 推出來的那一步");
                 }
                 "record_verification" => {
-                    let Json(ev) = post_event(State(app.clone()), Path(id.clone()), Json(verified(Some(&wt), None))).await.unwrap();
+                    let Json(ev) = post_event(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(verified(Some(&wt), None))).await.unwrap();
                     let p: Value = serde_json::from_str(ev["payload_json"].as_str().unwrap()).unwrap();
                     assert_eq!(p[flow::ANCHOR], n["assignment_id"], "verified 記下當時最後一件交辦（驗證者那件）");
                     assert_eq!(p["worktree"].as_str(), wt.to_str());
                 }
                 "deliver" => {
                     assert_eq!(n["sha"], json!(git(&wt, &["rev-parse", "HEAD"])), "下一步說得出要交哪個 commit");
-                    let _ = post_deliver(State(app.clone()), Path(id.clone()), Json(deliver_from(&wt))).await.unwrap();
+                    let _ = post_deliver(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(deliver_from(&wt))).await.unwrap();
                 }
                 "complete" => {
-                    let Json(closed) = post_complete(State(app.clone()), Path(id.clone()), Json(done("完成", None, None))).await.unwrap();
+                    let Json(closed) = post_complete(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(done("完成", None, None))).await.unwrap();
                     assert_eq!((closed["delivery"]["status"].as_str(), closed["delivery"]["sha"].as_str()), (Some("delivered"), Some(git(&wt, &["rev-parse", "HEAD"]).as_str())));
                     break;
                 }
@@ -2659,26 +2769,26 @@ mod tests {
         let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("stale", "push_main"))).await.unwrap();
         let id = m["id"].as_str().unwrap().to_string();
         let a = commit_file(&wt, "a.txt");
-        let deliver = || post_deliver(State(app.clone()), Path(id.clone()), Json(deliver_from(&wt)));
+        let deliver = || post_deliver(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(deliver_from(&wt)));
         let stale_because = |e: LcError| match e {
             LcError::Conflict(v) => (v["reason"].as_str().unwrap_or_default().to_string(), v["stale_because"].as_str().unwrap_or_default().to_string()),
             other => panic!("expected 409, got {other:?}"),
         };
 
         // 驗過 A 之後退回：HEAD 還是 A，但那是上一代的驗證。
-        let _ = post_event(State(app.clone()), Path(id.clone()), Json(verified(Some(&wt), None))).await.unwrap();
+        let _ = post_event(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(verified(Some(&wt), None))).await.unwrap();
         let _ = post_round(State(app.clone()), Path(id.clone())).await.unwrap();
         assert_eq!(stale_because(deliver().await.unwrap_err()), ("verification_stale".into(), "round".into()));
 
         // 這一代重驗之後，又派了執行者（rebase／補改）：它還沒動 HEAD 也一樣，要重驗。
-        let _ = post_event(State(app.clone()), Path(id.clone()), Json(verified(Some(&wt), None))).await.unwrap();
+        let _ = post_event(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(verified(Some(&wt), None))).await.unwrap();
         let exec = mission_assignment(&app, &id, "stale-exec", "executor", "delivered").await;
         assert_eq!(stale_because(deliver().await.unwrap_err()), ("verification_stale".into(), "new_executor".into()));
         assert_eq!(load(&app, &id).await.unwrap().status(), "open", "流程漏了一步不是交付失敗，不停下來");
 
         // 執行者結案、重驗這個 commit：放行，推上去的是 A。
         sqlx::query("UPDATE supervisor_assignments SET status='completed' WHERE id=?").bind(&exec).execute(&app.db).await.unwrap();
-        let _ = post_event(State(app.clone()), Path(id.clone()), Json(verified(Some(&wt), None))).await.unwrap();
+        let _ = post_event(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(verified(Some(&wt), None))).await.unwrap();
         let Json(out) = deliver().await.unwrap();
         assert_eq!(out["sha"], json!(a));
         assert_eq!(git(&origin, &["rev-parse", "main"]), a);
@@ -2694,7 +2804,7 @@ mod tests {
         let id = m["id"].as_str().unwrap().to_string();
         let _ = mission_assignment(&app, &id, "u-exec", "executor", "completed").await;
         let complete = |no_delivery: Option<&'static str>, worktree: Option<&std::path::Path>| {
-            post_complete(State(app.clone()), Path(id.clone()), Json(done("完成", no_delivery, worktree)))
+            post_complete(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(done("完成", no_delivery, worktree)))
         };
 
         // 什麼都沒講：擋。
@@ -2710,8 +2820,8 @@ mod tests {
         assert_eq!(load(&app, &id).await.unwrap().status(), "open", "被擋下來的結案什麼都沒寫");
 
         // 驗過、交付了：結案，記下交了哪個 commit。
-        let _ = post_event(State(app.clone()), Path(id.clone()), Json(verified(Some(&wt), None))).await.unwrap();
-        let _ = post_deliver(State(app.clone()), Path(id.clone()), Json(deliver_from(&wt))).await.unwrap();
+        let _ = post_event(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(verified(Some(&wt), None))).await.unwrap();
+        let _ = post_deliver(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(deliver_from(&wt))).await.unwrap();
         let Json(closed) = complete(None, None).await.unwrap();
         assert_eq!((closed["delivery"]["status"].as_str(), closed["delivery"]["sha"].as_str()), (Some("delivered"), Some(b.as_str())));
         let events = store::events(&app.db, &id).await.unwrap();
@@ -2742,7 +2852,7 @@ mod tests {
         let _ = post_pause(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(PauseIn { reason: "clarify".into(), detail: None })).await.unwrap();
         let Json(cur) = get_mission(State(app.clone()), Path(id.clone())).await.unwrap();
         assert_eq!((cur["next"]["action"].as_str(), cur["next"]["then"]["role"].as_str()), (Some("paused"), Some("reviewer")));
-        let _ = post_answer(State(app.clone()), Path(id.clone()), Json(ans("照原本的做", "rn-a"))).await.unwrap();
+        let _ = post_answer(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(ans("照原本的做", "rn-a"))).await.unwrap();
         let p = payload_of("mission_answered").await;
         assert_eq!((p["next"]["action"].as_str(), p["next"]["role"].as_str()), (Some("assign"), Some("reviewer")));
 
@@ -2835,7 +2945,7 @@ mod tests {
         // 入口二：同一個狀態，結案也要被擋。
         // 結案時對交付的要求另外測；這裡用「沒有改東西」並附上乾淨的執行者工作樹，只量「開著的交辦」這道。
         let (_origin, wt) = with_origin(&env);
-        let complete = || post_complete(State(app.clone()), Path(id.clone()), Json(done("完成", Some("no_changes"), Some(&wt))));
+        let complete = || post_complete(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(done("完成", Some("no_changes"), Some(&wt))));
         assert_eq!(conflict_reason(complete().await.unwrap_err()), "assignments_open", "complete 沒接上閘門");
 
         // 收乾淨之後兩邊都放行——閘門不是把路堵死。
@@ -2869,7 +2979,7 @@ mod tests {
         assert_eq!((m.paused_reason.as_deref(), m.rounds_used, m.max_rounds), (Some("max_rounds"), 2, 2));
 
         // 使用者回答「再給一輪」：放行＋上限加一，AGM 的下一次 round 走得通。
-        let Json(out) = post_answer(State(app.clone()), Path(id.clone()), Json(ans("再改一輪：把標題也換掉", "a1"))).await.unwrap();
+        let Json(out) = post_answer(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(ans("再改一輪：把標題也換掉", "a1"))).await.unwrap();
         assert_eq!(out["resumed"], true);
         assert_eq!(load(&app, &id).await.unwrap().max_rounds, 3);
         let Json(third) = round().await.unwrap();
@@ -2898,19 +3008,19 @@ mod tests {
         let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("twice", "push_main"))).await.unwrap();
         let id = m["id"].as_str().unwrap().to_string();
         let sha = commit_file(&wt, "a.txt");
-        let _ = post_event(State(app.clone()), Path(id.clone()), Json(verified(Some(&wt), None))).await.unwrap();
+        let _ = post_event(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(verified(Some(&wt), None))).await.unwrap();
 
-        let Json(first) = post_deliver(State(app.clone()), Path(id.clone()), Json(deliver_from(&wt))).await.unwrap();
+        let Json(first) = post_deliver(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(deliver_from(&wt))).await.unwrap();
         assert_eq!((first["sha"].as_str(), first["already_in_base"].as_bool()), (Some(sha.as_str()), Some(false)));
         assert_eq!(git(&origin, &["rev-parse", "main"]), sha);
 
         // 再呼叫一次（AGM 重試、或使用者連點）：回原本那一筆。
-        let Json(again) = post_deliver(State(app.clone()), Path(id.clone()), Json(deliver_from(&wt))).await.unwrap();
+        let Json(again) = post_deliver(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(deliver_from(&wt))).await.unwrap();
         assert_eq!((again["replayed"].as_bool(), again["sha"].as_str()), (Some(true), Some(sha.as_str())));
 
         // push 成功但 `delivered` 事件沒寫成（agm.py 30 秒逾時、add_event 回 502）：重試要認出來。
         sqlx::query("DELETE FROM mission_events WHERE mission_id = ? AND kind = 'delivered'").bind(&id).execute(&app.db).await.unwrap();
-        let Json(recovered) = post_deliver(State(app.clone()), Path(id.clone()), Json(deliver_from(&wt))).await.unwrap();
+        let Json(recovered) = post_deliver(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(deliver_from(&wt))).await.unwrap();
         assert_eq!((recovered["sha"].as_str(), recovered["already_in_base"].as_bool()), (Some(sha.as_str()), Some(true)));
         let m = load(&app, &id).await.unwrap();
         assert_eq!(m.status(), "open", "已經在 main 上的交付不能被報成失敗、把任務停下來");
@@ -2931,13 +3041,13 @@ mod tests {
         let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("noattempt", "push_main"))).await.unwrap();
         let id = m["id"].as_str().unwrap().to_string();
         commit_file(&wt, "a.txt");
-        let _ = post_event(State(app.clone()), Path(id.clone()), Json(verified(Some(&wt), None))).await.unwrap();
+        let _ = post_event(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(verified(Some(&wt), None))).await.unwrap();
 
         sqlx::query("CREATE TRIGGER no_notes BEFORE INSERT ON mission_events WHEN NEW.kind = 'note' BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END")
             .execute(&app.db)
             .await
             .unwrap();
-        let res = post_deliver(State(app.clone()), Path(id.clone()), Json(deliver_from(&wt))).await;
+        let res = post_deliver(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(deliver_from(&wt))).await;
         assert!(res.is_err(), "記不下「開始交付」就不該動手：{res:?}");
         assert_eq!(git(&origin, &["rev-parse", "main"]), base_before, "什麼都沒推");
         assert_eq!(load(&app, &id).await.unwrap().status(), "open", "沒動手也不是交付失敗");
@@ -2985,7 +3095,7 @@ mod tests {
         let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("pause", "push_main"))).await.unwrap();
         let id = m["id"].as_str().unwrap().to_string();
         commit_file(&wt, "done.txt");
-        let _ = post_event(State(app.clone()), Path(id.clone()), Json(verified(Some(&wt), None))).await.unwrap();
+        let _ = post_event(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(verified(Some(&wt), None))).await.unwrap();
 
         let pause = |reason: &str| PauseIn { reason: reason.into(), detail: Some("使用者按了暫停".into()) };
         let _ = post_pause(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(pause("user_pause"))).await.unwrap();
@@ -2997,12 +3107,12 @@ mod tests {
             .unwrap();
         assert_eq!(kind, "mission_paused");
 
-        let err = post_deliver(State(app.clone()), Path(id.clone()), Json(deliver_from(&wt))).await.unwrap_err();
+        let err = post_deliver(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(deliver_from(&wt))).await.unwrap_err();
         assert_eq!(conflict_reason(err), "mission_paused", "停著的任務不交付");
 
         // 放行之後就交得出去；交付失敗停下來的那種不算「停著」，可以重試。
         let _ = post_resume(State(app.clone()), Path(id.clone())).await.unwrap();
-        let Json(out) = post_deliver(State(app.clone()), Path(id.clone()), Json(deliver_from(&wt))).await.unwrap();
+        let Json(out) = post_deliver(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(deliver_from(&wt))).await.unwrap();
         assert_eq!(out["mode"], "push_main");
     }
 
@@ -3063,7 +3173,7 @@ mod tests {
         }
 
         let (_origin, wt) = with_origin(&env);
-        let Json(closed) = post_complete(State(app.clone()), Path(id.clone()), Json(done("完成", Some("no_changes"), Some(&wt))))
+        let Json(closed) = post_complete(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(done("完成", Some("no_changes"), Some(&wt))))
             .await
             .unwrap();
         let deleted: Vec<&str> = closed["temp_bots"]["deleted"].as_array().unwrap().iter().map(|b| b["bot_id"].as_str().unwrap()).collect();
