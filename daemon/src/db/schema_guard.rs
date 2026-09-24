@@ -223,8 +223,25 @@ fn constraint_defs(sql: &str) -> Vec<String> {
     let mut defs: Vec<&str> = Vec::new();
     let mut depth: i32 = 0;
     let mut start: usize = 0;
-    for (i, c) in body.char_indices() {
+    // 字串字面值裡的括號不算括號（i264 審 #470 提的）。今天的 SCHEMA 沒有這種字面值，但切錯的後果
+    // 不對稱：子句對不上 → `drift` 報問題 → `check_drift` 的 `ensure!` → **連全新 DB 都開不起來**，
+    // 而且訊息會說「表 X 的約束跟程式不同」，把人往資料庫的方向帶。跳引號的規則同 `normalize_sql`：
+    // 連著兩個引號是跳脫，不是結束。
+    let mut in_quote: Option<char> = None;
+    let mut it = body.char_indices().peekable();
+    while let Some((i, c)) = it.next() {
+        if let Some(q) = in_quote {
+            if c == q {
+                if it.peek().map(|(_, n)| *n) == Some(q) {
+                    it.next();
+                } else {
+                    in_quote = None;
+                }
+            }
+            continue;
+        }
         match c {
+            '\'' | '"' => in_quote = Some(c),
             '(' => depth += 1,
             ')' if depth == 0 => {
                 defs.push(&body[start..i]);
@@ -233,7 +250,7 @@ fn constraint_defs(sql: &str) -> Vec<String> {
             ')' => depth -= 1,
             ',' if depth == 0 => {
                 defs.push(&body[start..i]);
-                start = i + 1;
+                start = i + c.len_utf8();
             }
             _ => {}
         }
@@ -562,6 +579,15 @@ mod tests {
         );
         // CHECK 裡面的逗號不能把子句切斷（括號深度）。
         assert_eq!(c("CREATE TABLE t (a TEXT CHECK (a IN ('x','y')), b TEXT)").len(), 1);
+        // 字串字面值裡的**不成對**括號不能算進深度（i264 審 #470）：不跳引號的話，`')'` 那個右括號
+        // 會把深度歸零、當成整張表的結尾，第二欄的子句就此消失——而後果是連全新 DB 都開不起來。
+        let quoted = c("CREATE TABLE t (a TEXT CHECK (a <> ')'), b TEXT CHECK (b <> '('))");
+        assert_eq!(quoted.len(), 2, "字面值裡的括號不算深度：{quoted:?}");
+        // `normalize_sql` 會把空白收緊：`a <> ')'` → `a<>')'`。
+        assert!(quoted.iter().any(|d| d.contains("a<>")) && quoted.iter().any(|d| d.contains("b<>")), "{quoted:?}");
+        // 連著兩個引號是跳脫、不是結束（同 `normalize_sql`）。
+        let escaped = c("CREATE TABLE t (a TEXT CHECK (a <> 'it''s )'), b TEXT CHECK (b <> 'x'))");
+        assert_eq!(escaped.len(), 2, "跳脫的引號不能提早結束字面值：{escaped:?}");
         // 表層級的 FK 與 UNIQUE 也算。
         let table_level = c("CREATE TABLE t (a TEXT, b TEXT, UNIQUE(a, b), FOREIGN KEY(a) REFERENCES u(id))");
         assert_eq!(table_level.len(), 2, "{table_level:?}");
