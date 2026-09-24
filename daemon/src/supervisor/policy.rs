@@ -15,7 +15,7 @@
 //! no turn in flight (or not running at all): `/model` mid-turn is how a user's message gets
 //! eaten (b95142a), so a busy manager gets [`Decision::Defer`] and the next tick asks again.
 
-use crate::quota::{Quota, Window};
+use crate::quota::{Bucket, Quota, Window};
 use chrono::{DateTime, Utc};
 
 use super::store::Supervisor;
@@ -55,6 +55,12 @@ fn reset_passed(w: &Window, now: DateTime<Utc>) -> bool {
     w.reset_passed(now)
 }
 
+/// Fable 那一格**還說得出話**的讀數（issue #475）：`resets_at` 是 `None` 而且讀數比窗長還舊就沒有。
+/// 沒有讀數時「剩多少」不能當 0 也不能當 100——所以 `decide` 那邊回 `Keep`（維持現狀），不切換。
+fn usable_fable<'a>(q: &'a Quota, now: DateTime<Utc>) -> Option<&'a Window> {
+    q.usable_window(Bucket::Fable, now)
+}
+
 /// What is left as far as we can tell. Past its reset the window is full again, whatever
 /// the last reading said — the reading is simply older than the reset.
 fn effective_remaining(w: &Window, now: DateTime<Utc>) -> f64 {
@@ -65,9 +71,7 @@ fn effective_remaining(w: &Window, now: DateTime<Utc>) -> f64 {
     }
 }
 
-fn shared_critical(w: &Window, now: DateTime<Utc>) -> bool {
-    w.exhausted_at(now)
-}
+
 
 fn cooldown_over(sup: &Supervisor, now: DateTime<Utc>) -> bool {
     sup.cooldown_until.as_deref().map(|t| past(t, now)).unwrap_or(true)
@@ -88,8 +92,12 @@ pub fn decide(sup: &Supervisor, quota: Option<&Quota>, liveness: &str, now: Date
     };
 
     // Shared windows first: with the 5-hour or 7-day bucket gone there is nothing to switch to.
-    let critical: Vec<&Window> =
-        [&q.five_hour, &q.seven_day].into_iter().flatten().filter(|w| shared_critical(w, now)).collect();
+    // issue #475：用 `Quota::exhausted`（含「讀數比窗長還舊就不算用盡」），不要各自判。
+    let critical: Vec<&Window> = [Bucket::FiveHour, Bucket::SevenDay]
+        .into_iter()
+        .filter(|b| q.exhausted(*b, now))
+        .filter_map(|b| q.usable_window(b, now))
+        .collect();
     if !critical.is_empty() {
         // 比時刻不比字串：`resets_at` 有的是 CLI 回報的原樣字串（秒、`+00:00`），跟毫秒格式混在一起。
         let reset_at = critical.iter().filter_map(|w| w.resets_at.clone()).min_by(|a, b| crate::db::cmp_ts(a, b));
@@ -109,7 +117,7 @@ pub fn decide(sup: &Supervisor, quota: Option<&Quota>, liveness: &str, now: Date
     }
 
     let idle = matches!(liveness, "idle" | "stopped");
-    let fable = q.fable.as_ref();
+    let fable = usable_fable(q, now);
     if sup.active_model == "fable" {
         let Some(w) = fable else { return Decision::Keep };
         if effective_remaining(w, now) >= FABLE_MIN_REMAINING_PCT {

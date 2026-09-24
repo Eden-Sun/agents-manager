@@ -301,6 +301,25 @@ pub struct Window {
 pub const FIVE_HOUR_LEN: chrono::Duration = chrono::Duration::hours(5);
 pub const SEVEN_DAY_LEN: chrono::Duration = chrono::Duration::days(7);
 
+/// 哪一桶。窗長跟著桶走——`Window` 自己不知道它是 5h 還是 7d，所以「這筆讀數有沒有比窗長還舊」
+/// 只能由拿著 [`Quota`] 的那一端判（issue #475）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bucket {
+    FiveHour,
+    SevenDay,
+    Fable,
+}
+
+impl Bucket {
+    pub fn len(self) -> chrono::Duration {
+        match self {
+            Bucket::FiveHour => FIVE_HOUR_LEN,
+            // Fable 跟 7d 同一個週期重置。
+            Bucket::SevenDay | Bucket::Fable => SEVEN_DAY_LEN,
+        }
+    }
+}
+
 impl Window {
     fn remaining_pct(&self) -> f64 {
         (100.0 - self.used_pct).max(0.0)
@@ -395,6 +414,53 @@ pub struct Quota {
     pub host: String,
 }
 
+impl Quota {
+    fn window_of(&self, b: Bucket) -> Option<&Window> {
+        match b {
+            Bucket::FiveHour => self.five_hour.as_ref(),
+            Bucket::SevenDay => self.seven_day.as_ref(),
+            Bucket::Fable => self.fable.as_ref(),
+        }
+    }
+
+    /// 這筆讀數本身比那一桶的窗長還舊嗎。`updated_at` 解不開就回 `false`（不知道年齡，不亂判）。
+    fn reading_older_than_window(&self, b: Bucket, now: chrono::DateTime<chrono::Utc>) -> bool {
+        match parse_utc(&self.updated_at) {
+            Some(at) => now - at >= b.len(),
+            None => false,
+        }
+    }
+
+    /// 這一桶**還說得出話**的讀數，沒有就 `None`（issue #475）。
+    ///
+    /// 「見底、沒有 `resets_at`」的讀數在 [`Window::exhausted_at`] 眼裡永遠算用盡——沒有時間可以
+    /// 讓它翻回來。這種讀數真的會產生（`quota_claude` 的 statusline 路徑解不出重置時間就是 `None`，
+    /// 而百分比照樣可能見底），於是那個身分在**同一次 uptime 內**被永久排除；而這台 daemon 常連跑好幾天。
+    ///
+    /// 規則：`resets_at` 是 `None` 而且這筆讀數比那一桶的窗長還舊 → 當成**沒有讀數**。一筆比窗長
+    /// 還舊的讀數必定跨過了一次重置，不管它當時是幾 %。有 `resets_at` 的**不套這條**——那時
+    /// `reset_passed` 判得更準，而且一個 7d 窗的讀數本來就可能好幾天前才更新、窗卻還沒到。
+    ///
+    /// 回 `None` 而不是「不算用盡」，是為了讓「不知道」跟「有額度」分開：`responder` 要兩個共用窗
+    /// **都有讀數**才敢說恢復，拿一筆過期讀數冒充「沒見底」會讓它宣稱一個沒有證據的恢復。
+    ///
+    /// issue #464 原本只在 `load_cache` 開機時做一次（i266 在 #475 指出來）：那只擋得住跨重啟，
+    /// 同一次 uptime 內照樣永久卡住。現在只有這一份，而且在每次判斷時都跑（純計算，沒有 I/O）。
+    pub fn usable_window(&self, b: Bucket, now: chrono::DateTime<chrono::Utc>) -> Option<&Window> {
+        let w = self.window_of(b)?;
+        if w.resets_at.is_none() && self.reading_older_than_window(b, now) {
+            return None;
+        }
+        Some(w)
+    }
+
+    /// 這一桶現在算不算用盡：讀數還說得出話、窗還沒重置、而且見底。三處共用（`mission::pick`、
+    /// `supervisor::policy`、`supervisor::responder`）。
+    pub fn exhausted(&self, b: Bucket, now: chrono::DateTime<chrono::Utc>) -> bool {
+        self.usable_window(b, now).is_some_and(|w| w.exhausted_at(now))
+    }
+}
+
 /// DB 裡的額度讀數不是派工判準；它只在開機時先填回畫面，第一次新的探測成功後才變成 fresh。
 /// `Quota` 本身不帶 stale，避免把顯示用的狀態帶進 daemon 內部所有額度判斷。
 pub async fn load_cache(app: &Arc<App>) -> Result<usize> {
@@ -416,16 +482,6 @@ pub async fn load_cache(app: &Arc<App>) -> Result<usize> {
             q.limit_hit = None;
         }
         q.updated_at = if updated_at.trim().is_empty() { q.updated_at } else { updated_at };
-        // issue #464（i407 review）：橫幅有到期規則，量表沒有。**沒有 `resets_at` 的見底讀數**
-        // 在 `Window::exhausted_at` 眼裡永遠算用盡（沒有時間可比），所以它會跨重啟一直擋著那個身分；
-        // 配上探測持續失敗（登出退避、主機斷線）就再也解不開，而 `reset_of` 回 `None`，
-        // 呼叫端連什麼時候再試都不知道。
-        //
-        // 這裡用**那一桶自己的窗長**收掉這種讀數：一筆比窗長還舊的讀數必定跨過了一次重置，
-        // 不管它當時是幾 %。丟成 `None`＝「這一格沒有讀數」——這是實話（那個數字已經沒有意義），
-        // 而且比留著一個假的百分比安全：`pick` 不會拿它擋人，`responder` 也不會拿它宣稱恢復
-        // （它要兩個共用窗**都有讀數**才說 Available）。有 `resets_at` 的照舊交給 `reset_passed`。
-        drop_readings_older_than_their_window(&mut q);
         q.host = key.split_once('/').map_or(LOCAL_HOST, |(host, _)| host).to_string();
         restored.push((key, q));
     }
@@ -438,25 +494,6 @@ pub async fn load_cache(app: &Arc<App>) -> Result<usize> {
         stale.insert(key);
     }
     Ok(count)
-}
-
-/// 開機回填時，把「見底、沒有 `resets_at`、而且比自己那一桶的窗長還舊」的讀數丟掉（issue #464）。
-///
-/// 只動這種：有 `resets_at` 的由 [`Window::reset_passed`] 判，沒見底的留著顯示也無害。
-fn drop_readings_older_than_their_window(q: &mut Quota) {
-    let Some(at) = parse_utc(&q.updated_at) else { return };
-    let age = chrono::Utc::now() - at;
-    for (name, len, w) in [
-        ("five_hour", FIVE_HOUR_LEN, &mut q.five_hour),
-        ("seven_day", SEVEN_DAY_LEN, &mut q.seven_day),
-        ("fable", SEVEN_DAY_LEN, &mut q.fable),
-    ] {
-        let stale_and_blocking = w.as_ref().is_some_and(|x| x.resets_at.is_none() && x.critical()) && age >= len;
-        if stale_and_blocking {
-            tracing::info!(bucket = name, updated_at = %q.updated_at, "開機回填：見底但沒有重置時間、又比窗長還舊的讀數丟掉，不讓它永久擋住這個身分");
-            *w = None;
-        }
-    }
 }
 
 async fn persist_cache(app: &Arc<App>, key: &str, q: &Quota) {
@@ -1257,55 +1294,73 @@ mod tests {
         assert!(!w(100.0, None).reset_passed(now));
     }
 
-    /// issue #464（i407 review）：開機回填的「見底、沒有 `resets_at`」讀數會跨重啟永久擋著。
-    /// 比自己那一桶的窗長還舊的就丟掉——那筆讀數必定跨過一次重置。
-    #[tokio::test]
-    async fn boot_drops_a_critical_reading_older_than_its_own_window() {
-        let env = crate::testing::env().await;
-        let app = env.app.clone();
-        let old_at = crate::db::iso_at(chrono::Utc::now() - chrono::Duration::hours(6));
-        let mut q = codex_q("boot", None);
-        q.updated_at = old_at.clone();
-        // 見底、沒有重置時間：5h 的比窗長（5 小時）舊 → 丟掉；7d 的還沒超過 7 天 → 留著。
-        q.five_hour = Some(Window { used_pct: 100.0, resets_at: None });
-        q.seven_day = Some(Window { used_pct: 100.0, resets_at: None });
-        sqlx::query("INSERT INTO quota_cache (key, quota_json, updated_at) VALUES (?,?,?)")
-            .bind(quota_key(LOCAL_HOST, "claude"))
-            .bind(serde_json::to_string(&q).unwrap())
-            .bind(&old_at)
-            .execute(&app.db)
-            .await
-            .unwrap();
+    /// issue #475（i266 review）：`resets_at` 是 `None` 的見底讀數在 `exhausted_at` 眼裡永遠用盡，
+    /// 沒有任何時間能讓它翻回來。這條規則以前只在 `load_cache` 開機跑一次，所以同一次 uptime 內
+    /// 照樣永久卡住——而這台 daemon 常連跑好幾天。現在每次判斷都跑。
+    #[test]
+    fn a_reading_older_than_its_window_stops_counting_as_exhausted() {
+        let now = chrono::Utc::now();
+        let q = |age: chrono::Duration, resets: Option<String>| {
+            let mut x = Quota {
+                five_hour: Some(Window { used_pct: 100.0, resets_at: resets }),
+                seven_day: None,
+                fable: None,
+                reset_credits: None,
+                limit_hit: None,
+                plan: None,
+                updated_at: crate::db::iso_at(now - age),
+                source: "test".into(),
+                account: None,
+                host: LOCAL_HOST.into(),
+            };
+            x.seven_day = Some(Window { used_pct: 10.0, resets_at: None });
+            x
+        };
+        // 沒有 resets_at：窗長（5h）之內照舊算用盡，超過就不算。
+        assert!(q(chrono::Duration::hours(1), None).exhausted(Bucket::FiveHour, now), "1 小時前的讀數還算數");
+        assert!(!q(chrono::Duration::hours(6), None).exhausted(Bucket::FiveHour, now), "6 小時前＋沒有重置時間 → 必定跨過一次重置");
+        // 回的是「沒有讀數」，不是「沒見底」：`responder` 靠這個分辨「不知道」與「有額度」。
+        assert!(q(chrono::Duration::hours(6), None).usable_window(Bucket::FiveHour, now).is_none());
+        assert!(q(chrono::Duration::hours(1), None).usable_window(Bucket::FiveHour, now).is_some());
 
-        load_cache(&app).await.unwrap();
-        let got = app.quotas.lock().await.get(&quota_key(LOCAL_HOST, "claude")).cloned().unwrap();
-        assert!(got.five_hour.is_none(), "6 小時前的見底 5h 讀數要丟掉，不然它永遠算用盡");
-        assert!(got.seven_day.is_some(), "7d 的窗還沒過，留著");
-        assert!(app.quota_stale.lock().await.contains(&quota_key(LOCAL_HOST, "claude")), "回填的一律算陳舊");
+        // 有 resets_at 就**不套**這條：7d 的讀數本來就可能好幾天前更新、窗卻還沒到。
+        let future = Some(crate::db::iso_at(now + chrono::Duration::hours(2)));
+        assert!(q(chrono::Duration::hours(6), future).exhausted(Bucket::FiveHour, now), "有重置時間就交給 reset_passed 判");
     }
 
-    /// 有 `resets_at` 的不在這條規則裡：交給 `reset_passed` 在讀的時候判，開機不動它。
-    #[tokio::test]
-    async fn boot_keeps_an_old_reading_that_has_a_reset_time() {
-        let env = crate::testing::env().await;
-        let app = env.app.clone();
-        let old_at = crate::db::iso_at(chrono::Utc::now() - chrono::Duration::hours(6));
-        let mut q = codex_q("boot", None);
-        q.updated_at = old_at.clone();
-        q.five_hour = Some(Window { used_pct: 100.0, resets_at: Some(crate::db::iso_at(chrono::Utc::now() - chrono::Duration::hours(1))) });
-        sqlx::query("INSERT INTO quota_cache (key, quota_json, updated_at) VALUES (?,?,?)")
-            .bind(quota_key(LOCAL_HOST, "claude"))
-            .bind(serde_json::to_string(&q).unwrap())
-            .bind(&old_at)
-            .execute(&app.db)
-            .await
-            .unwrap();
+    /// 窗長跟著桶走：同一筆 6 小時前的讀數，對 5h 桶算過期、對 7d／Fable 桶不算。
+    #[test]
+    fn the_window_length_follows_the_bucket() {
+        let now = chrono::Utc::now();
+        let full = Window { used_pct: 100.0, resets_at: None };
+        let q = Quota {
+            five_hour: Some(full.clone()),
+            seven_day: Some(full.clone()),
+            fable: Some(full),
+            reset_credits: None,
+            limit_hit: None,
+            plan: None,
+            updated_at: crate::db::iso_at(now - chrono::Duration::hours(6)),
+            source: "test".into(),
+            account: None,
+            host: LOCAL_HOST.into(),
+        };
+        assert!(!q.exhausted(Bucket::FiveHour, now), "6 小時 > 5 小時窗");
+        assert!(q.exhausted(Bucket::SevenDay, now), "6 小時 < 7 天窗");
+        assert!(q.exhausted(Bucket::Fable, now), "Fable 跟 7d 同一個週期");
+        assert_eq!(Bucket::FiveHour.len(), FIVE_HOUR_LEN);
+        assert_eq!(Bucket::SevenDay.len(), SEVEN_DAY_LEN);
+        assert_eq!(Bucket::Fable.len(), SEVEN_DAY_LEN);
+    }
 
-        load_cache(&app).await.unwrap();
-        let got = app.quotas.lock().await.get(&quota_key(LOCAL_HOST, "claude")).cloned().unwrap();
-        let five = got.five_hour.expect("有 resets_at 的讀數留著");
-        assert!(five.reset_passed(chrono::Utc::now()), "它自己的重置時間已經過去，讀的時候就不算用盡");
-        assert!(!five.exhausted_at(chrono::Utc::now()));
+    /// `updated_at` 解不開時不亂判年齡：維持原本「沒有 resets_at 就算用盡」的保守行為。
+    #[test]
+    fn an_unreadable_updated_at_does_not_expire_the_reading() {
+        let now = chrono::Utc::now();
+        let mut q = codex_q("test", None);
+        q.updated_at = "not-a-timestamp".into();
+        q.five_hour = Some(Window { used_pct: 100.0, resets_at: None });
+        assert!(q.exhausted(Bucket::FiveHour, now), "不知道年齡就不拿年齡當理由");
     }
 
     /// issue #464 的**加固**（不是修 bug：目前沒有來源送毫秒）。1e12 秒是西元 33658 年，
