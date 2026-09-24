@@ -265,6 +265,9 @@ pub fn spawn(app: Arc<App>) {
         let mut detector = crate::supervisor::incidents::Detector::default();
         loop {
             tick.tick().await;
+            // #427 第 2 項：先看兩顆角色 bot 的畫面（巡檢也看），結論放記憶體。
+            // 要排在 `sweep` **之前**——incident 與同一拍的 health 讀數要講同一件事，理由同下一行。
+            crate::supervisor::role_faults::refresh(&app).await;
             // Incidents first: the snapshot below reports what this pass decided, so a fault
             // and the health reading that mentions it never disagree by one tick.
             crate::supervisor::incidents::sweep(&app, &mut detector).await;
