@@ -225,6 +225,57 @@ fn number_from_url(url: &str) -> Option<i64> {
     url.trim().lines().last()?.trim().rsplit('/').next()?.parse().ok()
 }
 
+/// 帳本（含這一輪剛開的）已經有這個提案任一 entry 的 issue。**同一版兩個提案的 `entry_ids` 有交集時
+/// 只會處理第一個**——`proposals_of` 只是把模型交來的 `verdicts.issues` 反序列化，沒有任何地方保證不重疊。
+/// publish 與乾跑共用這一份，而且兩邊都要餵「會長大的」清單，否則預覽說 2 張、實際開 1 張（#204 review）。
+fn already(p: &StoredProposal, issues: &[IssueRef]) -> bool {
+    issues.iter().any(|i| i.entry_ids.iter().any(|id| p.entry_ids.contains(id)))
+}
+
+/// 每版／每日上限的即時計數。`publish_version` 與 [`preflight`] 共用，排序與上限的判斷只有一份。
+struct Caps {
+    /// 這一版已經**新開**幾張（`comment` 的不算，同 `publish_version` 原本的 `in_row`）。
+    in_row: usize,
+    /// 24 小時內已新開幾張（全部 kind、全部版本）。
+    created_today: usize,
+    /// 已經撞到 24 小時上限：`publish_version` 撞到就 `break`，所以之後一律 deferred。
+    deferred_hit: bool,
+}
+
+impl Caps {
+    /// 遠端查完之後該做什麼。`already` 要在呼叫這裡**之前**先擋掉（那一步不必問 gh）。
+    fn plan(&self, p: &StoredProposal, found: Option<&(i64, String)>) -> PlanAction {
+        if found.is_some() {
+            return PlanAction::Existing;
+        }
+        // `duplicate_of` 只留言，不佔每版／每日的名額。
+        if p.duplicate_of.is_some() {
+            return PlanAction::Comment;
+        }
+        if self.deferred_hit {
+            return PlanAction::DeferredDailyLimit;
+        }
+        if self.in_row >= MAX_PER_VERSION {
+            return PlanAction::SkippedVersionLimit;
+        }
+        if self.created_today >= MAX_PER_DAY {
+            return PlanAction::DeferredDailyLimit;
+        }
+        PlanAction::Create
+    }
+
+    fn note(&mut self, action: PlanAction) {
+        match action {
+            PlanAction::Create => {
+                self.in_row += 1;
+                self.created_today += 1;
+            }
+            PlanAction::DeferredDailyLimit => self.deferred_hit = true,
+            _ => {}
+        }
+    }
+}
+
 /// 遠端有沒有帶同一個隱藏標記的 issue（`--state all`：已關掉的**不復活**）。publish 與乾跑共用，
 /// 兩邊的去重結論才不會漂。回 `Ok(None)` ＝遠端確實沒有。
 async fn find_existing(gh: &Gh, mk: &str) -> Result<Option<(i64, String)>, String> {
@@ -275,7 +326,6 @@ pub async fn publish_version(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: &s
     proposals.sort_by_key(|p| p.triage != "guard");
 
     // 有事可做才碰 gh：全部已在帳本就不必問 auth。
-    let already = |p: &StoredProposal, issues: &[IssueRef]| issues.iter().any(|i| i.entry_ids.iter().any(|id| p.entry_ids.contains(id)));
     if proposals.iter().all(|p| already(p, &issues)) {
         ledger::save_publish(pool, kind, version, &issues, Status::Published, None).await?;
         return Ok(Outcome::Published { created: 0, commented: 0, existing: 0, skipped: vec![] });
@@ -287,6 +337,13 @@ pub async fn publish_version(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: &s
     let (mut created, mut commented, mut existing) = (0usize, 0usize, 0usize);
     let mut skipped: Vec<String> = Vec::new();
     let mut deferred: Option<String> = None;
+    // 上限用計數器而不是每輪重查：只有 `Create` 會增加「非 comment」的張數，跟原本每輪
+    // `issues.iter().filter(!comment).count()` ＋ `created_in_last_day` 等價，而且與乾跑共用同一份判斷。
+    let mut caps = Caps {
+        in_row: issues.iter().filter(|i| !i.comment).count(),
+        created_today: ledger::created_in_last_day(pool).await?,
+        deferred_hit: false,
+    };
     for p in &proposals {
         if already(p, &issues) {
             continue;
@@ -297,30 +354,39 @@ pub async fn publish_version(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: &s
             Ok(f) => f,
             Err(e) => return record_err(&issues, e).await,
         };
-        if let Some((number, url)) = found {
-            issues.push(IssueRef { marker: mk, entry_ids: p.entry_ids.clone(), number, url, created_at: ledger::now_ts(), comment: true });
-            ledger::save_publish(pool, kind, version, &issues, Status::Judged, None).await?;
-            existing += 1;
-            continue;
-        }
-        if let Some(dup) = p.duplicate_of {
-            let body = render_comment(kind, version, &row.entries, p);
-            if let Err(e) = gh.run(&["issue", "comment", &dup.to_string(), "--repo", &gh.repo, "--body", &body]).await {
-                return record_err(&issues, e).await;
+        // 排序、上限、`duplicate_of` 不佔名額的判斷全在 `Caps::plan`，乾跑叫的是同一份。
+        let action = caps.plan(p, found.as_ref());
+        caps.note(action);
+        match action {
+            PlanAction::Existing => {
+                let (number, url) = found.expect("Existing 就是查到了");
+                issues.push(IssueRef { marker: mk, entry_ids: p.entry_ids.clone(), number, url, created_at: ledger::now_ts(), comment: true });
+                ledger::save_publish(pool, kind, version, &issues, Status::Judged, None).await?;
+                existing += 1;
+                continue;
             }
-            issues.push(IssueRef { marker: mk, entry_ids: p.entry_ids.clone(), number: dup, url: String::new(), created_at: ledger::now_ts(), comment: true });
-            ledger::save_publish(pool, kind, version, &issues, Status::Judged, None).await?;
-            commented += 1;
-            continue;
-        }
-        let in_row = issues.iter().filter(|i| !i.comment).count();
-        if in_row >= MAX_PER_VERSION {
-            skipped.push(mk);
-            continue;
-        }
-        if ledger::created_in_last_day(pool).await? >= MAX_PER_DAY {
-            deferred = Some(format!("24 小時內已開 {MAX_PER_DAY} 張，{mk} 留待下一輪"));
-            break;
+            PlanAction::Comment => {
+                let dup = p.duplicate_of.expect("Comment 就是有 duplicate_of");
+                let body = render_comment(kind, version, &row.entries, p);
+                if let Err(e) = gh.run(&["issue", "comment", &dup.to_string(), "--repo", &gh.repo, "--body", &body]).await {
+                    return record_err(&issues, e).await;
+                }
+                issues.push(IssueRef { marker: mk, entry_ids: p.entry_ids.clone(), number: dup, url: String::new(), created_at: ledger::now_ts(), comment: true });
+                ledger::save_publish(pool, kind, version, &issues, Status::Judged, None).await?;
+                commented += 1;
+                continue;
+            }
+            PlanAction::SkippedVersionLimit => {
+                skipped.push(mk);
+                continue;
+            }
+            PlanAction::DeferredDailyLimit => {
+                deferred = Some(format!("24 小時內已開 {MAX_PER_DAY} 張，{mk} 留待下一輪"));
+                break;
+            }
+            // `already` 在迴圈開頭擋掉了；`RemoteUnknown` 只有乾跑會用（這裡查不到就已經 record_err 回去）。
+            PlanAction::AlreadyLogged | PlanAction::RemoteUnknown => continue,
+            PlanAction::Create => {}
         }
         let t = title(kind, version, p);
         let body = render_body(kind, version, &row.entries, p);
@@ -406,29 +472,33 @@ impl PlanAction {
 pub async fn preflight(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: Option<&str>, version: Option<&str>) -> Result<serde_json::Value> {
     let gh = gh_for(cfg);
     let checks = readonly_checks(&gh).await;
-    let remote_ok = checks["gh_auth_ok"] == serde_json::json!(true) && checks["repo_ok"] == serde_json::json!(true);
+    // 門檻要跟 publish_version 一樣：它只跑 `gh auth status`（repo 沒設時提早回錯、不碰 gh），
+    // 不查 repo view。乾跑若額外要求 repo_ok，repo 有問題時乾跑全報 remote_unknown、真跑照樣開（#204 review）。
+    // repo 的問題仍然照實記在 `checks`，而且真的查不到時 find_existing 會回錯、落成 remote_unknown。
+    let remote_ok = checks["gh_auth_ok"] == serde_json::json!(true) && !gh.repo.trim().is_empty();
 
-    let mut created_today = ledger::created_in_last_day(pool).await?;
+    let created_today = ledger::created_in_last_day(pool).await?;
     let mut versions = Vec::new();
     let (mut n_create, mut n_comment, mut n_existing, mut n_blocked) = (0usize, 0usize, 0usize, 0usize);
     for row in ledger::list(pool, kind, version).await?.into_iter().filter(|r| r.status == Status::Judged) {
         let mut proposals = proposals_of(&row);
         proposals.sort_by_key(|p| p.triage != "guard");
-        let mut in_row = row.issues.iter().filter(|i| !i.comment).count();
-        // publish_version 撞到 24 小時上限是 `break`（整版留待下一輪），所以一旦擋下，後面的一律算 deferred。
-        let mut deferred_hit = false;
+        // **會長大的清單**（同 publish_version）：existing／comment／create 都要 push 進去，
+        // 否則同一版兩個提案的 entry_ids 有交集時，真跑跳過第二個、乾跑兩個都算 create（#204 review）。
+        let mut issues = row.issues.clone();
+        let mut caps = Caps { in_row: issues.iter().filter(|i| !i.comment).count(), created_today, deferred_hit: false };
         let mut plans = Vec::new();
         for p in &proposals {
             let mk = marker(&row.kind, &row.version, &p.entry_ids);
             let mut plan = serde_json::json!({
-                "marker": mk,
+                "marker": mk.clone(),
                 "triage": p.triage,
                 "entry_ids": p.entry_ids,
                 "title": title(&row.kind, &row.version, p),
                 "body": render_body(&row.kind, &row.version, &row.entries, p),
                 "labels": ["release-triage".to_string(), format!("upstream:{}", row.kind), format!("triage:{}", p.triage)],
             });
-            let action = if row.issues.iter().any(|i| i.entry_ids.iter().any(|id| p.entry_ids.contains(id))) {
+            let action = if already(p, &issues) {
                 PlanAction::AlreadyLogged
             } else if !remote_ok {
                 PlanAction::RemoteUnknown
@@ -438,30 +508,32 @@ pub async fn preflight(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: Option<&
                         plan["error"] = serde_json::json!(e);
                         PlanAction::RemoteUnknown
                     }
-                    Ok(Some((number, url))) => {
-                        plan["number"] = serde_json::json!(number);
-                        plan["url"] = serde_json::json!(url);
-                        PlanAction::Existing
+                    Ok(found) => {
+                        let a = caps.plan(p, found.as_ref());
+                        match (&a, &found) {
+                            (PlanAction::Existing, Some((number, url))) => {
+                                plan["number"] = serde_json::json!(number);
+                                plan["url"] = serde_json::json!(url);
+                            }
+                            (PlanAction::Comment, _) => plan["number"] = serde_json::json!(p.duplicate_of),
+                            _ => {}
+                        }
+                        a
                     }
-                    Ok(None) => match p.duplicate_of {
-                        Some(dup) => {
-                            plan["number"] = serde_json::json!(dup);
-                            PlanAction::Comment
-                        }
-                        None if deferred_hit => PlanAction::DeferredDailyLimit,
-                        None if in_row >= MAX_PER_VERSION => PlanAction::SkippedVersionLimit,
-                        None if created_today >= MAX_PER_DAY => {
-                            deferred_hit = true;
-                            PlanAction::DeferredDailyLimit
-                        }
-                        None => {
-                            in_row += 1;
-                            created_today += 1;
-                            PlanAction::Create
-                        }
-                    },
                 }
             };
+            caps.note(action);
+            // 真跑會把 existing／comment／create 都寫進帳本的 issue 清單，下一個提案的 `already` 看得到它。
+            if matches!(action, PlanAction::Existing | PlanAction::Comment | PlanAction::Create) {
+                issues.push(IssueRef {
+                    marker: mk.clone(),
+                    entry_ids: p.entry_ids.clone(),
+                    number: plan["number"].as_i64().unwrap_or(0),
+                    url: String::new(),
+                    created_at: ledger::now_ts(),
+                    comment: action != PlanAction::Create,
+                });
+            }
             match action {
                 PlanAction::Create => n_create += 1,
                 PlanAction::Comment => n_comment += 1,

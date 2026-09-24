@@ -2683,7 +2683,10 @@ gh 健檢露在 `/api/supervisor/health` 的 `release_triage`（`publish = false
 **乾跑（`POST /api/release-triage/publish {dry_run:true}`／`agm release-triage publish --dry-run`）**：打開 `publish` 之前就要能證明「這一版會開哪幾張、內文長什麼樣、重跑會不會開第二張」，
 不必先拿正式 repo 試開一張。它是唯一在 `publish = false` 時也會啟動 gh 的路徑（由人明確觸發，kick 不跑它），且**只讀**：`auth status`／`repo view`／`label list`／`issue list`，
 一張 issue 都不開、帳本一個字都不寫。每個提案回一個 `action`（`create`｜`comment`｜`existing`｜`already_logged`｜`skipped_version_limit`｜`deferred_daily_limit`｜`remote_unknown`）
-與渲染好的 title／body／labels；排序（guard 優先）、每版 4 張、24 小時 8 張都跟真的 publish 共用同一套判斷（遠端去重也是同一個函式），乾跑說不會開第二張就真的不會。
+與渲染好的 title／body／labels。**乾跑與真跑共用同一份判斷**：去重（`find_existing`）、`already`、排序（guard 優先）、
+每版 4 張／24 小時 8 張（`Caps::plan`）都只有一份實作，兩邊各寫一遍就會分岔——乾跑的 `already` 也吃「這一輪已排定的」清單，
+因為同一版兩個提案的 `entry_ids` 可以有交集（模型交來的 `issues` 沒有任何不重疊的保證，`already` 用 any/contains，交集就算），
+真跑開完第一張就會跳過第二個；乾跑若只看帳本原本的 issue 清單就會說 2 張、實際只開 1 張。乾跑說不會開第二張就真的不會。
 
 **`pending` 不能拿 `from` 當下界（2026-09-22 修）**：`from` 就是「帳本裡已分診（含插入但還沒派）的最大版本」；
 一版剛被 `check` 插入、那一輪的派工（額度閘門、`agm assign` 失敗）沒能完成時，它已經是 ledger max，

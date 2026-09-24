@@ -1596,7 +1596,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 - `POST /api/release-triage/publish {kind?, version?, dry_run:true}` → `{dry_run, publish_enabled, checks:{repo,gh_auth_ok,gh_auth_error,repo_ok,repo_error,viewer_permission,can_write,issues_enabled,labels_missing[]}, would_create, would_comment, existing, blocked_by_caps, versions:[{kind,version,proposals:[{marker,triage,entry_ids,title,body,labels,action,writes,number?,url?,error?}]}]}`。
   **乾跑**：打開 `publish` 之前就要看得到「會開哪幾張、內文長什麼樣、去重會不會命中、標籤齊不齊」。`publish = false` 時**也會**跑（唯一在關閉狀態下碰 gh 的路徑，由人明確觸發），
   但只用唯讀的 `gh auth status`／`repo view`／`label list`／`issue list`——**不開 issue、不留言、不寫帳本**。`action`：`create`｜`comment`｜`existing`（遠端已有同標記，含已關）｜`already_logged`（帳本已有，連 gh 都不問）｜
-  `skipped_version_limit`｜`deferred_daily_limit`｜`remote_unknown`（gh 檢查沒過，去重問不到；title／body 照樣渲染）。上限與排序（guard 優先）跟真的 publish 同一套。
+  `skipped_version_limit`｜`deferred_daily_limit`｜`remote_unknown`（gh 檢查沒過，去重問不到；title／body 照樣渲染）。去重、`already`、上限與排序（guard 優先）跟真的 publish **共用同一份實作**，`would_create`／`would_comment`／`existing` 等於真跑的 `created`／`commented`／`existing`（有等價測試釘住，含兩個提案 `entry_ids` 交集的情形）。
 - 設定：`[release_triage] publish = false`（預設）／`gh_bin`／`repo`。
 - CLI：`bin/agm release-triage submit --file verdicts.json`；另有 `show`／`dispatched --kind K --version V…`／`publish`（加 `--dry-run` 就是上面的乾跑）。
 
