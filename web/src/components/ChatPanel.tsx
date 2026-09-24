@@ -13,7 +13,7 @@ import { useScrollTail } from '../hooks/useScrollTail'
 import { useTapCopy } from '../hooks/useTapCopy'
 import { cleanLiveActivity, cleanLiveText } from '../store/liveText'
 import { typeAlongside } from '../store/alongside'
-import { clearFilesIfOwned, queueFromComposer, settleComposerSend } from '../store/queuedSend'
+import { queueFromComposer, settleComposerSend } from '../store/queuedSend'
 import { startingSend, startingSendLabel } from '../store/startingSend'
 import { composerPlaceholder, sendButtonLabel, sendButtonTitle } from '../lib/composerLabels'
 import { herdrJumpCommand } from '../lib/herdrJump'
@@ -712,8 +712,6 @@ function Composer({
   const setDraftCursor = useStore((s) => s.setDraftCursor)
   const setText = (v: string) => setDraft(draftKey, v)
   const [sending, setSendingState] = useState(false)
-  // 送出的收尾（清輸入框與托盤）可能在切去別顆之後才跑：托盤是共用的，不是自己的就別清（issue #496）。
-  const clearFiles = clearFilesIfOwned(files.clear, botId, () => useStore.getState().selectedBotId)
   const ref = inputRef
   // 送出期間輸入框 disabled、焦點掉到 body；送完還給輸入框（手機不還）。
   const noteSend = useRefocusAfterSend(sending, ref, phone)
@@ -743,7 +741,7 @@ function Composer({
     if (sending || files.uploading) return
     // Turn still running: queue instead of eating a 409.
     if (state.queued && !state.autoStart) {
-      queueFromComposer({ setText, clearFiles, queueSend }, botId, body, files.ids)
+      queueFromComposer({ setText, clearFiles: files.clear, queueSend }, botId, body, files.ids)
       return
     }
     setSending(true)
@@ -753,7 +751,7 @@ function Composer({
       setSending(false)
       if (ok) {
         setText('')
-        clearFiles()
+        files.clear()
       }
     })
   }
@@ -773,7 +771,7 @@ function Composer({
     const stopped = await abortBot(botId)
     const ok = stopped && (await sendPrompt(botId, body, ids))
     setSending(false)
-    settleComposerSend({ setText, clearFiles, restoreQueuedSend }, botId, wasQueued, ok)
+    settleComposerSend({ setText, clearFiles: files.clear, restoreQueuedSend }, botId, wasQueued, ok)
   }
 
   // 插隊送出（issue #103）：照舊建一個新回合，但由 CLI 自己的 send-now 鍵打斷當下那一輪。
@@ -787,7 +785,7 @@ function Composer({
     setSending(true)
     const ok = await sendPrompt(botId, body, ids, true)
     setSending(false)
-    settleComposerSend({ setText, clearFiles, restoreQueuedSend }, botId, wasQueued, ok)
+    settleComposerSend({ setText, clearFiles: files.clear, restoreQueuedSend }, botId, wasQueued, ok)
   }
 
   // 直接打進 pane、不建新回合：回覆併在目前這一輪。
@@ -1505,8 +1503,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
               </button>
             </div>
           ) : null}
-          {/* key：送出中切 bot 時 `sending` 會留在新那顆的輸入框上，把它鎖住（issue #496）。 */}
-          <Composer key={botId} botId={botId} inputRef={composerRef} hideLock={!active} forceFocus={chatEmpty && active} files={files} />
+          <Composer botId={botId} inputRef={composerRef} hideLock={!active} forceFocus={chatEmpty && active} files={files} />
           {settingsOpen ? <BotSettingsPanel key={botId} botId={botId} /> : null}
         </div>
       )}
