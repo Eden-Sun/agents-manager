@@ -966,8 +966,10 @@ export const useStore = create<StoreState>((set, get) => ({
         defaultConnected: st.default_connected,
         // daemon 重啟後 seq 變小要跟著降，否則 `?since=` 送未來數字會一直 `resync`。
         lastSeq: st.daemon_seq < s.lastSeq ? st.daemon_seq : Math.max(s.lastSeq, st.daemon_seq),
-        // 這份快照反映到 `daemon_seq` 為止的所有狀態，所以耐久 seq 也對到這裡（同樣要能往下降）。
-        lastDurableSeq: st.daemon_seq < s.lastDurableSeq ? st.daemon_seq : Math.max(s.lastDurableSeq, st.daemon_seq),
+        // 這份快照反映到 `daemon_seq` 為止的所有狀態，所以耐久 seq 直接對到它：比現在的小（daemon 重啟）要跟著降、
+        // 比現在的大就跟上——兩條路都等於 `st.daemon_seq`，不寫成三元式，免得看起來像有「不往下降」的分支
+        // （i264 的複看，2026-09-24）。
+        lastDurableSeq: st.daemon_seq,
         selectedBotId: selected,
         selectedProjectId: selectedProject,
       }
@@ -2586,6 +2588,10 @@ function noteGroupCompletion(set: SetFn, get: GetFn, botId: string, turnId: stri
  * 拿它判斷「快照落後了嗎」則會在沒有任何耐久改變時一直多排 `/api/state`。
  * `resync` 也不算：它帶的是 daemon 當下的 seq（可能正好落在某一幀 progress 上），
  * 而緊接著的 `refreshState` 會用快照的 `daemon_seq` 把兩個 seq 一起對正。
+ *
+ * **這份「哪些不算」的清單跟 daemon 的 `state::is_ephemeral` 是兩份，沒有東西綁著它們**（i264 的複看）：
+ * Rust 那邊加了新的即時幀卻忘了改這裡的話，`lastDurableSeq` 會被推到一個不在環裡的 seq，重連就落回
+ * `backlog` 的保守分支——多一次 resync，不會壞掉。加幀時兩邊一起改。
  */
 export function seqAfterFrame(prev: { lastSeq: number; lastDurableSeq: number }, type: string, seq: number) {
   const durable = type !== 'turn_progress' && type !== 'resync'

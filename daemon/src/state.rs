@@ -19,6 +19,10 @@ pub const WS_RING: usize = 200;
 
 /// 這種幀不進重播環（issue #482）：過期即無用，補送舊的沒有意義，而且它的頻率會把耐久事件擠掉。
 /// 判斷放這裡而不是散在呼叫端：`emit` 是唯一的入口，加新的即時幀時只改這一個名單。
+///
+/// **前端有一份對應的清單**（`web/src/store/store.ts` 的 `seqAfterFrame`），沒有東西綁著兩邊：
+/// 這裡加了新的即時幀就要一起改那邊，否則客戶端的 `lastDurableSeq` 會推到不在環裡的 seq
+/// （後果只是重連多一次 resync，見 [`App::backlog`] 的註解）。
 pub fn is_ephemeral(kind: &str) -> bool {
     kind == "turn_progress"
 }
@@ -385,10 +389,15 @@ impl App {
         match oldest {
             None => Some(vec![]),
             // `o` 是**環裡最舊那一則的 seq**，不是「最舊的 seq」——即時幀不進環（[`is_ephemeral`]，issue #482），
-            // 所以環內的 seq 是稀疏的，中間被 progress 打洞。這個算術因此偏**保守**：客戶端的 `since` 剛好
-            // 停在最近被擠出去的那一則耐久事件、而它與 `o` 之間全是 progress 的 seq 時，其實一則耐久事件都沒漏，
-            // 這裡仍然回 `None` 要求 resync。方向是 fail-safe（只會多要求重抓，不會謊稱補得齊），
-            // 而客戶端送的是 `lastDurableSeq`（收 progress 不推進）時就落回精確。動這一行之前先看這段。
+            // 所以環內的 seq 是稀疏的，中間被 progress 打洞，而這行算術是照「連續」寫的。
+            //
+            // 後果是它偏**保守**：`since` 是某一則耐久事件、環裡最舊的是**下一則**耐久事件（中間隔著 progress）時，
+            // 其實一則都沒漏，`since + 1 >= o` 卻不成立，照樣回 `None` 要求 resync。**這跟客戶端送什麼無關**——
+            // 送 `lastDurableSeq` 也一樣（i264 的複看，2026-09-24：兩則耐久事件只有「號碼相鄰」時條件才成立）。
+            // 方向是 fail-safe（只會多要求重抓，不會謊稱補得齊），所以維持現狀。
+            //
+            // 要真的精確：`pop_front` 時記下被擠掉的耐久事件裡最大的 seq（`evicted_max`），這裡改判
+            // `since >= evicted_max`，就跟「環裡最舊那一則的號碼」脫鉤。動這一行之前先看這段。
             Some(o) if since + 1 >= o => Some(ring.iter().filter(|e| e.seq > since).cloned().collect()),
             Some(_) => None,
         }
