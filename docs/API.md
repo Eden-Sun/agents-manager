@@ -1887,6 +1887,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
   - assignment 狀態遷移與完成事件同一個 transaction；啟動時補掃一次。
   - pending → delivered 的推送節流成每 `notify_interval_secs`（600）最多一次，一次併成一則通知；入庫不受影響。
   - `kind` 另有 `bot_restart_failed`（`batch_id,bot_id,name,error`）、`supervisor_restart_retry`（`batch_id,bot_id,name,ok,error`）、`approval_requested`、mission 相關事件（見群組任務）。
+  - `kind:"bot_shim_stale"`（issue #533，SPEC §6.5b）：開機換 shim 時某顆 bot 的 `bin/herdr`／`bin/cargo` 寫不進去，`payload{bot_id,shim,path,embedded_hash,error,action}`，路由給巡檢並叫醒。event_key 是 `bot_shim_stale:<bot>/<shim>:<內容雜湊>`，所以同一個版本換不動只有一則。跟 `agm_cli_stale`（`bin/agm` 換不動）是同一種事。
   - **核准改派**（issue #421，SPEC §18.15）：`approval_requested` 在協調者手上開著超過 5 分鐘、而協調者不可用
     （`health::responder_state` 回 `Unavailable`：`needs_login`／`waiting_quota`／`notify_stalled`／`no_run`）時，daemon 把它改成巡檢的並叫醒巡檢：
     `role='patrol'`、`claimed_by=NULL`、`wake=1`、`state='pending'`，`notify_*` 歸零（協調者累積的次數不算在巡檢頭上），
