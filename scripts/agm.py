@@ -566,21 +566,34 @@ def _check_length(text: str) -> None:
         )
 
 
-def _assign_text(args) -> str:
-    if args.text_file:
-        try:
-            text = Path(args.text_file).expanduser().read_text(encoding="utf-8")
-        except OSError as e:
-            raise AgmError("bad_args", f"讀不到 --text-file：{e.strerror}", 2)
-        except UnicodeDecodeError:
-            raise AgmError("bad_args", "--text-file 不是 UTF-8 文字", 2)
-    else:
-        text = args.text or ""
+def read_text_file(path: str, flag: str) -> str:
+    """把 `--…-file` 的內容讀進來。讀不到／不是 UTF-8 都是**呼叫端的參數錯**（`bad_args`／exit 2）。
+
+    `UnicodeDecodeError` 不是 `OSError`：只接 `OSError` 的話它會掉到 `main` 的兜底，變成
+    `internal`／exit 1，而 exit 1 在這支 CLI 是「gh 失敗／有落差」那一類，照離開碼分流的
+    排程腳本會分錯邊（issue #333 修過 `--text-file`，#516 是同一個形狀的另外三個旗標）。
+    """
+    try:
+        return Path(path).expanduser().read_text(encoding="utf-8")
+    except OSError as e:
+        raise AgmError("bad_args", f"讀不到 {flag}（{path}）：{e.strerror or e}", 2, path=path)
+    except UnicodeDecodeError:
+        raise AgmError("bad_args", f"{flag}（{path}）不是 UTF-8 文字", 2, path=path)
+
+
+def _text_of(args, flag: str, file_attr: str, text_attr: str, what: str) -> str:
+    """`--<x>-file` 或 `--<x>`，二選一，回 strip 過、長度檢查過的內容。"""
+    path = getattr(args, file_attr, None)
+    text = read_text_file(path, flag + "-file") if path else (getattr(args, text_attr, None) or "")
     text = text.strip()
     if not text:
-        raise AgmError("bad_args", "交辦內容不可為空", 2)
+        raise AgmError("bad_args", f"{what}不可為空", 2)
     _check_length(text)
     return text
+
+
+def _assign_text(args) -> str:
+    return _text_of(args, "--text", "text_file", "text", "交辦內容")
 
 
 def cmd_assign(client: Client, cfg: dict, args) -> object:
@@ -747,13 +760,9 @@ def cmd_review(client: Client, cfg: dict, args) -> object:
             raise AgmError("bad_args", "followup 要用 --followup-text 或 --followup-file 說明接下來做什麼", 2)
         if not args.followup_request_id:
             raise AgmError("bad_args", "followup 要一個穩定的 --followup-request-id（重試沿用同一個）", 2)
-        if args.followup_file:
-            try:
-                body["followup_text"] = Path(args.followup_file).expanduser().read_text(encoding="utf-8")
-            except OSError as e:
-                raise AgmError("bad_args", f"讀不到 --followup-file：{e.strerror}", 2)
-        else:
-            body["followup_text"] = args.followup_text
+        # 續作會變成一筆新的交辦，所以跟 `assign` 走同一組檢查：非 UTF-8、空白、超長都在這裡擋，
+        # 不要送出去等 daemon 回 400／422（issue #516）。
+        body["followup_text"] = _text_of(args, "--followup", "followup_file", "followup_text", "續作內容")
         body["followup_request_id"] = args.followup_request_id
         if args.followup_bot:
             body["followup_bot_id"] = args.followup_bot
@@ -950,10 +959,7 @@ def cmd_persona(client: Client, cfg: dict, args) -> object:
         return client.post("/api/supervisor/persona/adopt-embedded", body)
     # set
     if args.file:
-        try:
-            text = Path(args.file).expanduser().read_text(encoding="utf-8")
-        except OSError as e:
-            raise AgmError("bad_args", f"讀不到 --file：{e.strerror}", 2)
+        text = read_text_file(args.file, "--file")
     elif args.text:
         text = args.text
     else:
@@ -1293,10 +1299,7 @@ def cmd_handoff(client: Client, cfg: dict, args) -> object:
     if args.summary is None and args.summary_file is None:
         return client.get("/api/supervisor/handoff")
     if args.summary_file:
-        try:
-            summary = Path(args.summary_file).expanduser().read_text(encoding="utf-8")
-        except OSError as e:
-            raise AgmError("bad_args", f"讀不到 --summary-file：{e.strerror}", 2)
+        summary = read_text_file(args.summary_file, "--summary-file")
     else:
         summary = args.summary or ""
     return client.put("/api/supervisor/handoff", {"summary": summary})
@@ -1386,19 +1389,7 @@ def cmd_mission(client: Client, cfg: dict, args) -> object:
 
 
 def _mission_text(args) -> str:
-    if args.text_file:
-        try:
-            text = Path(args.text_file).expanduser().read_text(encoding="utf-8")
-        except OSError as e:
-            raise AgmError("bad_args", f"讀不到 --text-file：{e.strerror}", 2)
-        except UnicodeDecodeError:
-            raise AgmError("bad_args", "--text-file 不是 UTF-8 文字", 2)
-    else:
-        text = args.text or ""
-    if not text.strip():
-        raise AgmError("bad_args", "內容是空的", 2)
-    _check_length(text)
-    return text
+    return _text_of(args, "--text", "text_file", "text", "內容")
 
 
 def _with_relay(body: dict, cfg: dict, args) -> None:
