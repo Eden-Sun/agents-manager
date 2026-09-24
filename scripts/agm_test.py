@@ -1374,6 +1374,11 @@ class IssueClaimTest(unittest.TestCase):
         return {"createdAt": _iso(-age_secs),
                 "body": f"{bot} 交回。\n\n<!-- agm:issue-release {json.dumps({'bot': bot, 'at': _iso(-age_secs)})} -->"}
 
+    def close(self, number: int) -> None:
+        raw = json.loads((self.state / f"issue-{number}.json").read_text())
+        raw["state"] = "CLOSED"
+        (self.state / f"issue-{number}.json").write_text(json.dumps(raw), encoding="utf-8")
+
     def calls(self):
         try:
             return [json.loads(l) for l in (self.state / "calls.log").read_text().splitlines()]
@@ -1514,6 +1519,25 @@ class IssueClaimTest(unittest.TestCase):
         self.issue(425)
         got = json.loads(self.run_cli("issue", "claim", "425", "--bot", "kd61te")[1])
         self.assertEqual(got["bot"], "kd61te")
+
+    def test_a_closed_issue_is_not_claimed(self):
+        # 派工前才 claim；票關掉之後再貼 wip 只會誤導下一個人。
+        self.issue(406)
+        self.close(406)
+        code, _out, err = self.run_cli("issue", "claim", "406")
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(err)["error"], "issue_closed")
+        self.assertFalse([c for c in self.calls() if c[:2] in (["issue", "comment"], ["issue", "edit"])],
+                         "關掉的票不貼 label、不留言")
+
+    def test_release_still_works_on_a_closed_issue(self):
+        # 關票之後清掉留著的 wip 是正常收尾，不能被上面那道擋住。
+        self.issue(406, labels=["wip"], comments=[self.claim_comment("vvyyg1", age_secs=300)])
+        self.close(406)
+        code, out, err = self.run_cli("issue", "release", "406")
+        self.assertEqual(code, 0, err)
+        self.assertTrue(json.loads(out)["released"])
+        self.assertEqual([c[-2:] for c in self.calls() if c[:2] == ["issue", "edit"]], [["--remove-label", "wip"]])
 
     def test_claim_never_touches_the_daemon_runtime(self):
         # AGM_RUNTIME_DIR 指向不存在的目錄：真的去讀 runtime.json 就會是 no_runtime／exit 2。

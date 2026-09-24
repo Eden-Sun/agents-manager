@@ -1273,6 +1273,15 @@ def cmd_issue(_client, _cfg: dict, args) -> object:
     if blocker is not None:
         raise claim_conflict(number, blocker)
     labels = [l.get("name") for l in issue.get("labels") or []]
+    # 關掉的票沒有什麼好派的。`release` 還是放行：關票之後清掉留著的 label 是正常的收尾。
+    if args.op == "claim" and (issue.get("state") or "").upper() != "OPEN":
+        raise AgmError(
+            "issue_closed",
+            f"#{number} 已經是 {issue.get('state')}，不認領也不派工；要清掉留著的 label 用 `agm issue release {number}`",
+            2,
+            issue=number,
+            state=issue.get("state"),
+        )
     now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
     if args.op == "release":
