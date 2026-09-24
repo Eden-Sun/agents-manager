@@ -11,9 +11,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, it, mock, test as bunTest } from 'bun:test'
 
 const test = Object.assign((...args: Parameters<typeof bunTest>) => bunTest(...args), {
-  skip: bunTest.skip,
-  todo: bunTest.todo,
-  only: bunTest.only,
   describe,
   it,
   before: beforeAll,
@@ -21,6 +18,12 @@ const test = Object.assign((...args: Parameters<typeof bunTest>) => bunTest(...a
   beforeEach,
   afterEach,
 })
+
+// skip／todo／only 用 getter，用到才讀：CI（`CI=true`）下 bun 光是讀 `test.only` 就丟
+// 「.only is disabled in CI environments」，載入時就讀的話每個測試檔都紅（#429）。
+for (const key of ['skip', 'todo', 'only'] as const) {
+  Object.defineProperty(test, key, { get: () => bunTest[key], enumerable: true })
+}
 
 mock.module('node:test', () => ({
   default: test,
