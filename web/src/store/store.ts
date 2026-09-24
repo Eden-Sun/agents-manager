@@ -53,6 +53,7 @@ import { MISSION_USER_PAUSE } from '../lib/missionView'
 import type { QueuedSend, RestoreResult } from './queuedSend'
 import { laterMark, serverUnread } from './sharedUnread'
 import { viewingBot, viewingGroup } from './viewing'
+import { flushDelayMs, flushGaveUp, flushGaveUpText } from './flushRetry'
 import { confirmGroupTurn, dropLegacyGroupCounts, noteGroupPrompt, noteGroupPrompts } from './groupUnread'
 import {
   botKey,
@@ -861,6 +862,9 @@ export const useStore = create<StoreState>((set, get) => ({
   restartBatch: null,
 
   notify: (kind, text, action) => {
+    // 同一則還掛在畫面上就不要再疊一張（issue #530）：重試迴圈會把同一句話刷成一整排，
+    // 而第二張沒有帶任何新資訊。帶動作的不去重——那是要人按的按鈕，不是狀態播報。
+    if (!action && get().notices.some((n) => n.kind === kind && n.text === text)) return
     noticeSeq += 1
     const id = noticeSeq
     set((s) => ({ notices: [...s.notices, { id, kind, text, action }] }))
@@ -2965,20 +2969,90 @@ function withoutKey<T>(map: Record<string, T>, key: string): Record<string, T> {
  * went `blocked` — or that already has another turn in flight — keeps the queued text
  * instead of losing it to a 409.
  */
+/**
+ * 每顆 bot 排隊訊息的重送進度（issue #530）。`pending` 記的是物件本身：使用者換了一則（或取消後重排）
+ * 就從頭算，不會繼承上一則的失敗次數。節奏規則在 `store/flushRetry.ts`。
+ */
+interface FlushRetry {
+  pending: QueuedSend | null
+  failures: number
+  timer: ReturnType<typeof setTimeout> | null
+  /** 放棄的話只講一次。 */
+  toldGaveUp: boolean
+}
+const flushRetries = new Map<string, FlushRetry>()
+
+function flushRetryOf(botId: string): FlushRetry {
+  const have = flushRetries.get(botId)
+  if (have) return have
+  const fresh: FlushRetry = { pending: null, failures: 0, timer: null, toldGaveUp: false }
+  flushRetries.set(botId, fresh)
+  return fresh
+}
+
+function clearFlushRetry(botId: string) {
+  const r = flushRetries.get(botId)
+  if (r?.timer) clearTimeout(r.timer)
+  flushRetries.delete(botId)
+}
+
+/** 測試用：模組層的進度跨測試會互相污染。 */
+export function resetFlushRetriesForTest() {
+  for (const botId of [...flushRetries.keys()]) clearFlushRetry(botId)
+}
+
+/**
+ * 排隊的訊息排一次送出。幀（`bot_status`／`turn_updated`）與上一次失敗都會叫它，所以
+ * **已經排好就不再排**：以前每一幀都疊一次 `setTimeout`，撞上 retryable 409 時幀來幾次就送幾次（#530）。
+ */
 function flushQueued(botId: string) {
-  setTimeout(() => {
-    const s = useStore.getState()
-    const pending = s.queuedSends[botId]
-    if (!pending) return
-    const cs = composerState(s, botId)
-    if (cs.disabled || cs.queued) return
-    useStore.setState({ queuedSends: withoutKey(s.queuedSends, botId) })
-    // 送不出去（409 picker_open／dialog_open／needs_login、502、網路錯）就放回去，
-    // 別讓文字連附件一起消失；toast 由 sendPrompt 自己講。
-    void s.sendPrompt(botId, pending.text, pending.attachments).then((ok) => {
-      if (!ok) useStore.getState().restoreQueuedSend(botId, pending)
-    })
-  }, 350)
+  const r = flushRetryOf(botId)
+  if (r.timer) return
+  r.timer = setTimeout(() => {
+    r.timer = null
+    attemptFlush(botId)
+  }, flushDelayMs(r.failures))
+}
+
+function attemptFlush(botId: string) {
+  const s = useStore.getState()
+  const pending = s.queuedSends[botId]
+  if (!pending) {
+    clearFlushRetry(botId)
+    return
+  }
+  const r = flushRetryOf(botId)
+  // 換了一則（取消後重排、或第二次 Enter 覆蓋）：失敗次數重算。
+  if (r.pending !== pending) {
+    r.pending = pending
+    r.failures = 0
+    r.toldGaveUp = false
+  }
+  // 送不了不算一次嘗試：那是這顆 bot 現在的狀態，不是被 daemon 拒絕。
+  const cs = composerState(s, botId)
+  if (cs.disabled || cs.queued) return
+  if (flushGaveUp(r.failures)) {
+    if (!r.toldGaveUp) {
+      r.toldGaveUp = true
+      s.notify('error', flushGaveUpText(r.failures))
+    }
+    return
+  }
+  useStore.setState({ queuedSends: withoutKey(s.queuedSends, botId) })
+  // 送不出去（409 picker_open／dialog_open／needs_login、502、網路錯）就放回去，
+  // 別讓文字連附件一起消失；toast 由 sendPrompt 自己講（同一句會被 `notify` 去重）。
+  void s.sendPrompt(botId, pending.text, pending.attachments).then((ok) => {
+    if (ok) {
+      clearFlushRetry(botId)
+      return
+    }
+    useStore.getState().restoreQueuedSend(botId, pending)
+    const back = flushRetryOf(botId)
+    back.pending = pending
+    back.failures += 1
+    // 自己排下一次：不要再靠幀來推（幀可能一直來，也可能一直不來）。
+    flushQueued(botId)
+  })
 }
 
 /** Patch connection state onto the known hosts without losing their config fields. */
