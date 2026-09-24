@@ -235,12 +235,9 @@ pub async fn next_reset_for_bot(app: &Arc<App>, bot: &crate::db::Bot) -> Option<
     };
     let keys = keys_for_bot(app, &host, bot, identity.as_deref()).await;
     let now = chrono::Utc::now();
-    let future = |t: &Option<String>| {
-        t.as_deref()
-            .and_then(|x| chrono::DateTime::parse_from_rfc3339(x).ok())
-            .map(|x| x.with_timezone(&chrono::Utc))
-            .filter(|x| *x > now)
-    };
+    // 時間戳一律走 [`parse_utc`]（#518 收口：散落的 `parse_from_rfc3339` 收成一支，
+    // 才不會有人再寫出一個方向不一樣的解析）。
+    let future = |t: &Option<String>| t.as_deref().and_then(parse_utc).filter(|x| *x > now);
     let q = app.quotas.lock().await;
     for k in keys {
         let Some(entry) = q.get(&k) else { continue };
@@ -470,10 +467,18 @@ impl Quota {
     /// `Quota::updated_at`。不能只看 `updated_at`：[`set`] 會沿用新讀數缺的窗，而 `updated_at`
     /// 蓋成現在，被沿用的那一桶年齡永遠是 0（i267 review，#475）。解不開就回 `false`（不知道年齡，不亂判）。
     fn reading_older_than_window(&self, b: Bucket, now: chrono::DateTime<chrono::Utc>) -> bool {
-        let at = self.window_of(b).and_then(|w| w.observed_at.as_deref()).unwrap_or(&self.updated_at);
-        match parse_utc(at) {
+        // `observed_at` 解不開時**退回 `updated_at`**：能用的時間戳優先於「不知道」。
+        // 兩個都解不開才算說不出年齡。
+        let observed = self.window_of(b).and_then(|w| w.observed_at.as_deref()).and_then(parse_utc);
+        match observed.or_else(|| parse_utc(&self.updated_at)) {
             Some(at) => now - at >= b.len(),
-            None => false,
+            // **兩個時間戳都解不開＝當成已經過期**（i267 review，#518）：跟其他四處「解不開＝已過去」同向。
+            //
+            // 第一版回 `false`（＝「這筆讀數還很新」），方向剛好相反，於是 #475 那個「永久擋住一個身分」
+            // 原封不動回來：`resets_at` 被丟成 `None`（#489 那顆）收不掉、`reset_passed` 回 false、
+            // `exhausted` 永遠 true。這裡的嚴格方向是「寧可放掉，也不要永久擋住」——跟 #464／#475
+            // 整條線的取捨一致，而且 [`load_cache`] 已經先把這兩個欄位驗過，壞值不該從那條路進來。
+            None => true,
         }
     }
 
@@ -742,12 +747,26 @@ pub async fn set_fenced(app: &Arc<App>, host: &str, base: &str, q: Quota, fence:
 /// `None` ＝「不知道」，由 [`Quota::usable_window`] 的窗長規則收尾（#475）；留著壞值會被
 /// [`Window::reset_passed`] 讀成「已重置」而放行一個可能真的見底的身分。
 fn drop_unparseable_resets(q: &mut Quota, key: &str) {
+    if parse_utc(&q.updated_at).is_none() {
+        // 不編一個時間出來（那等於謊報新鮮度）：只記下來。年齡判斷那一側對解不開的已經當成過期
+        // （`reading_older_than_window`），所以結果是「這筆讀數不算數」，不是被當成很新。
+        tracing::warn!(key, updated_at = %q.updated_at, "快取列的 updated_at 解不開，這筆讀數的年齡無從判斷");
+    }
     for (bucket, w) in [("five_hour", &mut q.five_hour), ("seven_day", &mut q.seven_day), ("fable", &mut q.fable)] {
         let Some(w) = w.as_mut() else { continue };
-        let Some(raw) = w.resets_at.as_deref() else { continue };
-        if parse_utc(raw).is_none() {
-            tracing::warn!(key, bucket, resets_at = %raw, "快取裡的重置時間解不開，載回來時丟掉");
-            w.resets_at = None;
+        if let Some(raw) = w.resets_at.as_deref() {
+            if parse_utc(raw).is_none() {
+                tracing::warn!(key, bucket, resets_at = %raw, "快取裡的重置時間解不開，載回來時丟掉");
+                w.resets_at = None;
+            }
+        }
+        // `observed_at` 同樣要驗（i267 review，#518）：留著壞值會讓年齡判斷拿它當輸入。
+        // 設成 `None` 就退回 `updated_at`，那個也壞的話由上面那條 warn ＋ 年齡側的「解不開＝過期」收尾。
+        if let Some(raw) = w.observed_at.as_deref() {
+            if parse_utc(raw).is_none() {
+                tracing::warn!(key, bucket, observed_at = %raw, "快取裡的觀測時間解不開，載回來時丟掉");
+                w.observed_at = None;
+            }
         }
     }
 }
@@ -980,9 +999,11 @@ fn recalibrate_limit_hit(mut hit: LimitHit, fresh: &Quota) -> Option<LimitHit> {
 /// 沒寫時間的一律**不**過期，只能靠 [`clear_limit_hit`]。
 pub fn limit_hit_expired(hit: Option<&LimitHit>) -> bool {
     let Some(until) = hit.and_then(|h| h.until.as_deref()) else { return false };
-    match chrono::DateTime::parse_from_rfc3339(until) {
-        Ok(t) => chrono::Utc::now() >= t.with_timezone(&chrono::Utc),
-        Err(_) => false,
+    // 解不開的 `until` **不**算過期：這裡的「不過期」是**繼續擋**（嚴格的那一邊），
+    // 跟 `already_past` 的嚴格方向一致，不是 `reset_passed` 那種「放行」。
+    match parse_utc(until) {
+        Some(t) => chrono::Utc::now() >= t,
+        None => false,
     }
 }
 
@@ -1083,8 +1104,7 @@ pub const HELD_SOURCE: &str = "queued-prompt-hold";
 /// 時間不寫；同一格已經有**更晚**（或沒寫時間＝黏著）的撞限時也不覆蓋，所以呼叫端可以照順序把
 /// 每一張交辦餵進來，最晚的那個自然會留下。回傳有沒有真的寫進去。
 pub async fn seed_limit_hit(app: &Arc<App>, host: &str, base: &str, until: &str, message: &str, bucket: Option<String>) -> bool {
-    let parse = |s: &str| chrono::DateTime::parse_from_rfc3339(s).ok().map(|t| t.with_timezone(&chrono::Utc));
-    let Some(t) = parse(until) else { return false };
+    let Some(t) = parse_utc(until) else { return false };
     if t <= chrono::Utc::now() {
         return false;
     }
@@ -1093,7 +1113,7 @@ pub async fn seed_limit_hit(app: &Arc<App>, host: &str, base: &str, until: &str,
     if let Some(hit) = quotas.get(&key).and_then(|q| q.limit_hit.as_ref()) {
         if !limit_hit_expired(Some(hit)) {
             // 沒寫時間的撞限永不過期（`limit_hit_expired`），一定比任何時間都「晚」。
-            let keep = match hit.until.as_deref().and_then(parse) {
+            let keep = match hit.until.as_deref().and_then(parse_utc) {
                 None => true,
                 Some(prev) => prev >= t,
             };
@@ -1470,6 +1490,64 @@ mod tests {
         assert!(got.exhausted(Bucket::SevenDay, chrono::Utc::now()), "97% 用掉不能因為一個解不開的時間戳就被放行");
     }
 
+    /// i267 review（#518）：`resets_at` **與** `observed_at` 都解不開時，身分不可以被永久擋住。
+    ///
+    /// 這是前一顆的鏡像洞：`resets_at` 被丟成 `None` 之後就交給窗長規則收尾，但那條規則的輸入
+    /// （`observed_at`，沒有就退回 `updated_at`）第一版對解不開的回 `false`＝「還很新」，
+    /// 於是窗長永遠收不掉、`reset_passed` 回 false、`exhausted` 永遠 true——#475 標題那個問題原封不動回來。
+    /// 既有的 `boot_drops_an_unparseable_reset_time_from_the_cache` 用的是**可解析**的 `observed_at`，走不到這裡。
+    #[tokio::test]
+    async fn a_reading_whose_every_timestamp_is_broken_does_not_block_forever() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let key = quota_key(LOCAL_HOST, "claude");
+        let mut q = codex_q("boot", None);
+        q.updated_at = crate::db::now();
+        q.five_hour = Some(Window { used_pct: 100.0, resets_at: Some("garbage".into()), observed_at: Some("also-garbage".into()) });
+        sqlx::query("INSERT INTO quota_cache (key, quota_json, updated_at) VALUES (?,?,?)")
+            .bind(&key)
+            .bind(serde_json::to_string(&q).unwrap())
+            .bind("not-a-timestamp") // 連整筆的 updated_at 都壞掉
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        load_cache(&app).await.unwrap();
+        let got = app.quotas.lock().await.get(&key).cloned().unwrap();
+        let five = got.five_hour.as_ref().expect("窗留著");
+        assert_eq!(five.resets_at, None, "壞的重置時間丟掉");
+        assert_eq!(five.observed_at, None, "壞的觀測時間也丟掉");
+        // 三個時間戳全壞 → 這筆讀數說不出年齡，不能拿它永久擋住一個身分。
+        assert!(!got.exhausted(Bucket::FiveHour, chrono::Utc::now()), "全壞的讀數不可以永久算用盡");
+        assert!(got.usable_window(Bucket::FiveHour, chrono::Utc::now()).is_none(), "當成沒有讀數");
+    }
+
+    /// 年齡判斷對解不開的時間戳要當「已過期」，而不是「還很新」（#518 的純函式那一格）。
+    #[test]
+    fn an_unparseable_observation_time_counts_as_expired_not_fresh() {
+        let now = chrono::Utc::now();
+        let mk = |observed: Option<&str>, updated: &str| Quota {
+            five_hour: Some(Window { used_pct: 100.0, resets_at: None, observed_at: observed.map(String::from) }),
+            seven_day: None,
+            fable: None,
+            reset_credits: None,
+            limit_hit: None,
+            plan: None,
+            updated_at: updated.into(),
+            source: "test".into(),
+            account: None,
+            host: LOCAL_HOST.into(),
+        };
+        let fresh = crate::db::iso_at(now);
+        // 正常：剛觀測到、見底 → 算用盡。
+        assert!(mk(Some(&fresh), &fresh).exhausted(Bucket::FiveHour, now));
+        // observed_at 解不開 → 退回 updated_at（還新）→ 仍算用盡。
+        assert!(mk(Some("garbage"), &fresh).exhausted(Bucket::FiveHour, now));
+        // 兩個都解不開 → 說不出年齡 → 不算用盡（不永久擋人）。
+        assert!(!mk(Some("garbage"), "also-garbage").exhausted(Bucket::FiveHour, now));
+        assert!(!mk(None, "also-garbage").exhausted(Bucket::FiveHour, now));
+    }
+
     /// i264 review（#489）：`load_cache` 是裸的 `serde_json::from_str`，所以快取裡解不開的 `resets_at`
     /// 原樣載回來，`reset_passed` 讀成「已重置」→ 那個身分載回來就看起來有額度。載入時要驗一次。
     #[tokio::test]
@@ -1692,14 +1770,20 @@ mod tests {
         assert_eq!(Bucket::Fable.len(), SEVEN_DAY_LEN);
     }
 
-    /// `updated_at` 解不開時不亂判年齡：維持原本「沒有 resets_at 就算用盡」的保守行為。
+    /// **#518 刻意翻掉這條的方向。** 原本（#475）寫的是「`updated_at` 解不開就不拿年齡當理由」，
+    /// 所以一筆「見底、沒有 `resets_at`、年齡又說不出來」的讀數會**永遠**算用盡——那正是 #475 標題
+    /// 要修的「永久擋住一個身分」，只是換成走時間戳損毀那條路（i267 review）。
+    /// 現在兩個時間戳都解不開就當成已過期＝這筆讀數不算數，跟其他四處「解不開＝已過去」同向。
     #[test]
-    fn an_unreadable_updated_at_does_not_expire_the_reading() {
+    fn a_reading_with_no_usable_timestamp_stops_counting_as_exhausted() {
         let now = chrono::Utc::now();
         let mut q = codex_q("test", None);
         q.updated_at = "not-a-timestamp".into();
         q.five_hour = Some(Window { observed_at: None, used_pct: 100.0, resets_at: None });
-        assert!(q.exhausted(Bucket::FiveHour, now), "不知道年齡就不拿年齡當理由");
+        assert!(!q.exhausted(Bucket::FiveHour, now), "說不出年齡的讀數不可以永久算用盡");
+        // 但 `updated_at` 讀得出來時照舊算數（這一半沒有變）。
+        q.updated_at = crate::db::now();
+        assert!(q.exhausted(Bucket::FiveHour, now), "年齡說得出來、又在窗長內 → 照舊算用盡");
     }
 
     /// issue #464 的**加固**（不是修 bug：目前沒有來源送毫秒）。1e12 秒是西元 33658 年，
