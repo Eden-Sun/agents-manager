@@ -678,8 +678,12 @@ async fn recent_fallback_turn(app: &Arc<App>, run_id: &str) -> Result<Option<db:
     // Fixed-width RFC3339 UTC, so lexicographic comparison is chronological.
     let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(120)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     Ok(sqlx::query_as::<_, db::Turn>(
+        // 第二鍵同 issue #461 的其餘三處：`created_at` 只到毫秒，並列時 SQLite 回哪一列是未定義的，
+        // 挑錯就把這次的回覆掛到另一回合底下。（同一個 run 通常一次只有一筆在飛，
+        // 要兩筆 `completed_fallback` 撞同一毫秒才會中，機率比接回 session 那三處低很多；
+        // 一起改是因為修法完全相同。）
         "SELECT * FROM turns WHERE run_id=? AND status='completed_fallback' AND native_turn_id IS NULL
-         AND completed_at > ? ORDER BY created_at DESC LIMIT 1",
+         AND completed_at > ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
     )
     .bind(run_id)
     .bind(&cutoff)
