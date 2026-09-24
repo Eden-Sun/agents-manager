@@ -303,7 +303,7 @@ impl HerdrClient {
                 bail!("herdr closed connection without a response ({method})");
             }
             let resp: RawResponse = serde_json::from_str(buf.trim_end())
-                .with_context(|| format!("parse herdr response for {method}: {buf}"))?;
+                .with_context(|| format!("parse herdr response for {method}: {}", snippet(method, &buf)))?;
             if let Some(e) = resp.error {
                 return Err(HerdrError { code: e.code, message: e.message }.into());
             }
@@ -588,21 +588,36 @@ impl HerdrClient {
         self.call_as("agent.read", json!({"target": target, "source": source, "lines": lines}), "read").await
     }
 
+    /// 訂閱的**握手**最多等這麼久（issue #491）。其他 RPC 都走 [`Self::call_timeout`]，只有這裡
+    /// 以前整段沒有逾時：herdr 接了連線卻不回 ack 時，`read_line` 會永遠等下去，而兩個呼叫端
+    /// （`events.rs` 的全域訂閱與每個 pane 的狀態監看）都是「失敗才退避重連」的迴圈——卡在這裡
+    /// 等於連 `Err` 分支的 log 與 `connected=false` 都不會發生，也不會再重試。本機的全域訂閱是
+    /// 開機 spawn 一次、沒有 watchdog，於是 herdr 卡過一次之後 pane 事件就永遠收不到了。
+    const SUBSCRIBE_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+
     /// Channel closes when the connection drops; caller reconnects.
     pub async fn subscribe(&self, subscriptions: Vec<Value>) -> Result<mpsc::Receiver<Event>> {
-        let mut stream = UnixStream::connect(&self.socket).await.context("connect herdr socket for subscribe")?;
         let req = json!({"id": self.next_id(), "method": "events.subscribe", "params": {"subscriptions": subscriptions}});
-        let mut line = serde_json::to_vec(&req)?;
-        line.push(b'\n');
-        stream.write_all(&line).await?;
-        stream.flush().await?;
-        let mut reader = BufReader::new(stream);
-        let mut first = String::new();
-        reader.read_line(&mut first).await?;
-        let ack: RawResponse = serde_json::from_str(first.trim_end()).context("parse subscribe ack")?;
-        if let Some(e) = ack.error {
-            return Err(HerdrError { code: e.code, message: e.message }.into());
-        }
+        // **只包握手**：連線、送出、讀 ack。後面讀事件的那條是長連線，本來就該一直等，不能包。
+        let handshake = async {
+            let mut stream = UnixStream::connect(&self.socket).await.context("connect herdr socket for subscribe")?;
+            let mut line = serde_json::to_vec(&req)?;
+            line.push(b'\n');
+            stream.write_all(&line).await?;
+            stream.flush().await?;
+            let mut reader = BufReader::new(stream);
+            let mut first = String::new();
+            reader.read_line(&mut first).await?;
+            let ack: RawResponse =
+                serde_json::from_str(first.trim_end()).with_context(|| format!("parse subscribe ack: {}", snippet("events.subscribe", &first)))?;
+            if let Some(e) = ack.error {
+                return Err(HerdrError { code: e.code, message: e.message }.into());
+            }
+            Ok::<_, anyhow::Error>(reader)
+        };
+        let mut reader = tokio::time::timeout(Self::SUBSCRIBE_HANDSHAKE_TIMEOUT, handshake)
+            .await
+            .map_err(|_| anyhow!("herdr events.subscribe 握手逾時（{:?}）", Self::SUBSCRIBE_HANDSHAKE_TIMEOUT))??;
         let (tx, rx) = mpsc::channel(256);
         tokio::spawn(async move {
             let mut buf = String::new();
@@ -631,6 +646,26 @@ impl HerdrClient {
         Ok(rx)
     }
 }
+
+/// 解析失敗時能放進錯誤訊息的那一段回應（issue #491）。
+///
+/// 兩件事：**長度**砍到 [`SNIPPET_CHARS`] 字（整份回應原樣塞進 `anyhow` 的 context，會經 log 與
+/// `LcError::Upstream` 流到 API 回應去），以及**畫面內容不進去**——`pane.read`／`agent.read` 的
+/// 回應就是使用者 pane 上的字，herdr 回半截 JSON 不是把整個畫面寫進 daemon.log 的理由。
+fn snippet(method: &str, body: &str) -> String {
+    let body = body.trim();
+    if matches!(method, "pane.read" | "agent.read") {
+        return format!("<{} 位元組的畫面內容，不記錄>", body.len());
+    }
+    let mut out: String = body.chars().take(SNIPPET_CHARS).collect();
+    if body.chars().count() > SNIPPET_CHARS {
+        out.push('…');
+    }
+    out
+}
+
+/// 錯誤訊息裡最多帶幾個字的回應。
+const SNIPPET_CHARS: usize = 200;
 
 fn is_not_found(e: &anyhow::Error) -> bool {
     e.downcast_ref::<HerdrError>()
@@ -675,6 +710,72 @@ fn split_paste(text: &str, max: usize) -> Vec<&str> {
 /// `line` 是 `text` 的子切片：它在 `text` 裡的起點。
 fn start_of(text: &str, line: &str) -> usize {
     line.as_ptr() as usize - text.as_ptr() as usize
+}
+
+#[cfg(test)]
+mod rpc_tests {
+    use super::*;
+
+    /// accept 了但一個字都不回的假 herdr：socket 半開時最像的那種。
+    fn wedged_socket(tag: &str) -> (PathBuf, tokio::task::JoinHandle<()>) {
+        let dir = std::env::temp_dir().join(format!("am-herdr-{tag}-{}", crate::db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("herdr.sock");
+        let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+        let handle = tokio::spawn(async move {
+            // 接了就把連線握在手上，永遠不寫 ack。
+            let mut held = Vec::new();
+            while let Ok((conn, _)) = listener.accept().await {
+                held.push(conn);
+            }
+        });
+        (sock, handle)
+    }
+
+    /// issue #491：herdr 接了連線卻不回 ack 時，`subscribe` 必須在握手逾時之後回 `Err`，
+    /// 不能永遠卡住——卡住的話兩個呼叫端的退避重連迴圈都不會再跑，本機的全域訂閱又沒有 watchdog，
+    /// pane 事件就永遠收不到了。
+    #[tokio::test(start_paused = true)]
+    async fn a_socket_that_never_acks_times_out_instead_of_hanging_forever() {
+        let (sock, server) = wedged_socket("noack");
+        let client = HerdrClient::new(&sock);
+        let started = tokio::time::Instant::now();
+        let err = client.subscribe(vec![json!({"type": "pane.exited"})]).await.expect_err("不能成功");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("握手逾時"), "要說是握手逾時：{msg}");
+        // `start_paused` 下時鐘由 tokio 推進：真的等到門檻才逾時，不是立刻失敗。
+        assert!(started.elapsed() >= HerdrClient::SUBSCRIBE_HANDSHAKE_TIMEOUT, "{:?}", started.elapsed());
+        server.abort();
+        std::fs::remove_dir_all(sock.parent().unwrap()).ok();
+    }
+
+    /// 同一個形狀的 socket 上，一般 RPC 本來就有逾時（對照組：#491 修的只有 subscribe 那條）。
+    #[tokio::test(start_paused = true)]
+    async fn an_ordinary_rpc_on_the_same_socket_already_times_out() {
+        let (sock, server) = wedged_socket("rpc");
+        let client = HerdrClient::new(&sock);
+        let err = client.call_timeout("ping", json!({}), Duration::from_secs(15)).await.expect_err("不能成功");
+        assert!(format!("{err:#}").contains("timed out"), "{err:#}");
+        server.abort();
+        std::fs::remove_dir_all(sock.parent().unwrap()).ok();
+    }
+
+    /// 解析失敗的錯誤訊息不能把整份回應（尤其是畫面）原樣帶出去。
+    #[test]
+    fn a_parse_error_snippet_is_short_and_never_carries_screen_content() {
+        let screen = "使用者的畫面內容\n".repeat(200);
+        let masked = snippet("pane.read", &screen);
+        assert!(!masked.contains("使用者的畫面內容"), "pane.read 的內容不進錯誤訊息：{masked}");
+        assert!(masked.contains("位元組的畫面內容，不記錄"), "{masked}");
+        assert_eq!(snippet("agent.read", &screen), snippet("pane.read", &screen), "agent.read 同一條規則");
+
+        let long = "x".repeat(500);
+        let cut = snippet("pane.get", &long);
+        assert_eq!(cut.chars().count(), SNIPPET_CHARS + 1, "砍到 {SNIPPET_CHARS} 字再加一個省略號");
+        assert!(cut.ends_with('…'));
+        // 短的原樣保留（診斷還是要看得到東西）。
+        assert_eq!(snippet("pane.get", "{\"oops\":1}"), "{\"oops\":1}");
+    }
 }
 
 #[cfg(test)]
