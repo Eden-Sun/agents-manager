@@ -70,6 +70,10 @@ pub struct App {
     /// 記憶體、重啟重算——跟 incident 的門檻計時同一個原則（SPEC §18.9）。
     /// 它失敗的後果是「新進 inbox 事件分不到角色，對兩個通知者同時隱形」，
     /// 而那件事沒有任何其他偵測會發現，所以要自己數。
+    /// #481：Jev shadow 的保險絲。只鎖「數一次 ＋ 占一個名額」那兩句快的 DB 操作，
+    /// **不跨那次外部 HTTP**。`shadow_limit_hit` 是 spawn 出去的，沒有這把鎖時
+    /// K 個並行的 task 會讀到同一個數字、一起衝過 `max_per_hour`。
+    pub judge_fuse: Mutex<()>,
     /// #480：`judge::stuck` 這一輪看過哪些 turn（key＝turn_id）。冷卻期內不再看第二次。
     ///
     /// 兩個作用：候選有上限時不會永遠只看最舊那幾顆（第 11 顆會餓死），
@@ -189,6 +193,7 @@ impl App {
             ui_token,
             herdr_session,
             allow_lan,
+            judge_fuse: Mutex::new(()),
             judge_stuck_seen: Mutex::new(HashMap::new()),
             classify_failures: std::sync::atomic::AtomicU32::new(0),
             connected: std::sync::atomic::AtomicBool::new(false),
