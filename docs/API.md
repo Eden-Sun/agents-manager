@@ -1318,6 +1318,7 @@ Project 底下所有存活 bot 的訊息合併，以插入順序（`rowid`）倒
 - 隔離實例不認領既有 pane（要在它底下重啟那顆 bot）。
 - `DELETE /api/bots/:id`、`DELETE /api/projects/:id`：目標此刻不在 config.toml → `409 {"error":"conflict","reason":"not_in_config"}`；除了這次要刪的 id 還有別的列會不見 → `409 … "reason":"delete_refused"`。兩者都什麼都不動（`DELETE /api/bots/:id` 不停 bot、不刪 child）。
 - `DELETE /api/projects/:id` 成功時一併清掉專案內 bot 的 runtime 目錄；清不掉的（遠端 ssh 失敗、主機不明、軟刪狀態讀不到）列在回應 `kept_dirs: [{bot_id, reason}]`（`purge_failed`／`delete_state_unreadable`），不能當成清掉了。
+- `DELETE /api/projects/:id` 也會把這個專案底下**還開著的任務**取消（issue #498），連同它們**還開著的交辦**逐件 `cancel`。任務多一則 `cancelled` 事件，payload 是 `{"reason":"project_deleted"}`（`GET /api/missions/{id}` 的事件串看得到為什麼被收）；已經完成／取消的任務一個字都不動。**不會**推 inbox（專案是使用者當下刪的），也**不會**因為某一筆收不掉就讓刪除回頭（只記 log）。專案之後又回到 config 也不會把任務救回來：取消是終態（SPEC §18.14）。
 - 只換 `listen` port **不算隔離**：2026-09-14 這樣起的第二顆開到正式 DB，被空 config 投影軟刪 15 顆 bot（SPEC §3.1）。
 
 ## WS `turn_progress`（即時輸出）
