@@ -319,6 +319,9 @@ mkdir -p "$STARTER_ROOT/target/release"
 # 機率極低，但這一條斷言就是為了不要再有這類機率才改的（issue #433，i264 review）。
 printf '%s\n' '#!/bin/sh' 'env > "$STARTER_ENV_DUMP.tmp" && mv "$STARTER_ENV_DUMP.tmp" "$STARTER_ENV_DUMP"' > "$STARTER_ROOT/target/release/agents-managerd"
 chmod +x "$STARTER_ROOT/target/release/agents-managerd"
+# canary-gap: 這一行就是在測「啟動器自己推出來的 PATH」，帶進 canary 目錄會讓下面那條
+# 精確比對的斷言失敗。這段只跑 daemon-start.py 與一個印 env 的假 agents-managerd，
+# 沒有任何破壞性指令；真 binary 就算可達也沒有東西會叫到它。
 STARTER_ENV_DUMP="$STARTER_ROOT/env" AM_DATA_DIR=/should/be/dropped PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME="$STARTER_ROOT/home" \
   /usr/bin/python3 "$HERE/daemon-start.py" "$STARTER_ROOT" "$STARTER_ROOT/daemon.log"
 # `daemon-start.py` 刻意 fork + setsid 脫離、父行程先結束，所以上面那行 python3 回來**不代表**

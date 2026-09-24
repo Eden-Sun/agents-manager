@@ -87,6 +87,40 @@ AGM_DIR=/tmp/am-ops-test/supervisor/AGM AGM_REPO=$PWD AGM_BUILD_BOT=<測試 bot>
 cat /tmp/am-ops-test/supervisor/AGM/daemon-update.log
 ```
 
+#### 破壞性指令的護欄（issue #422，必讀）
+
+`*_test.sh` 會把被測腳本複製出來真的執行，而那些腳本裡有 `launchctl bootout`、`pkill -f`、`ssh`。
+2026-09-23 17:39Z 一支測試的 PATH 沒擋住，真的把 `gui/501` 的兩個 herdr launchd job bootout 掉，
+全機 pane 當場消失。所以 `scripts/check.sh ops` 會把每一支測試包在
+`scripts/ops/destructive-canary.sh` 底下跑，三層攔截：
+
+1. **PATH**：把 canary 目錄放在最前面。便宜，但**腳本自己整個覆寫 PATH 就失效**。
+2. **匯出的 bash 函式**：函式優先於 PATH 查找，覆寫 PATH 蓋不掉，而且跟著環境進到子 bash。
+   `export -f` 是 bash 專有的——在 zsh 底下它會變成「印出定義」，看起來成功但根本沒匯出。
+3. **zsh 的 `$ZDOTDIR/.zshenv`**：zsh 對每一個 shell（含 `zsh -c`、含巢狀）都會讀它，
+   跟 PATH 無關。沒有這層的話，子 zsh 在覆寫 PATH 之後完全沒有保護。
+
+`rm` 不整支攔（測試本來就要清自己的暫存目錄），只擋**絕對路徑且在暫存目錄之外**的目標——
+`rm -rf ~/foo` 展開後正好是那種。要放行別的根目錄就設 `AM_CANARY_ALLOW_RM`。
+
+**護欄擋不到的**：絕對路徑呼叫（`/bin/launchctl`）完全不經過 PATH 也不經過函式，三層都抓不到；
+`env -i` 會把匯出的函式與 ZDOTDIR 一起清掉。這兩種只能靠 `lint` 靜態掃出來點名，
+所以**寫測試時不要用絕對路徑叫破壞性指令**，要指定就用 `LAUNCHCTL_BIN=` 這種間接變數指到替身
+（`daemon-swap_test.sh` 是這樣做的）。
+
+寫新測試時：
+
+- PATH 要帶上 canary：`PATH="$你的fakebin:${AM_CANARY_DIR:+$AM_CANARY_DIR:}/usr/bin:/bin"`。
+- 真的需要最小環境（模擬 launchd 之類）就在那一行上面寫
+  `# canary-gap: <理由，以及那段裡的破壞性指令是怎麼另外擋住的>`，`lint` 就會放行。
+  重點是**有人寫下理由**，不是默默漏掉。
+- `scripts/ops/canary-baseline.tsv` 是棘輪：既有的漏洞記在裡面，只能變少。
+  修好之後跑 `scripts/ops/destructive-canary.sh lint --update` 把數字縮小。
+
+**驗證護欄本身時，只准用 `am-canary-probe` 這個無害的 sentinel 指令名**，
+絕對不要拿真的 `launchctl`／`pkill` 當白老鼠：護欄沒生效時，白老鼠就變成真的破壞——
+#422 的事故正是這樣來的。
+
 ### 正式安裝（需要 AGM 核准）
 
 ```sh

@@ -87,6 +87,9 @@ run() { bash "$SCRIPT"; echo $?; }
 setup
 equals "副本裡 launchctl 已被函式攔截" "$(grep -c '^launchctl() {' "$SCRIPT")" "1"
 equals "副本裡 pkill 已被函式攔截" "$(grep -c '^pkill() {' "$SCRIPT")" "1"
+# canary-gap: 這一行是**斷言字串**，不是指派——它在檢查副本裡被改寫成的 PATH 長什麼樣。
+# 這支測試本來就不靠 PATH 擋（檔頭寫了理由）：launchctl／pkill／pgrep／herdr 都用注入的
+# shell 函式攔，函式優先於 PATH 查找，被測腳本自己 `export PATH=` 也蓋不掉。
 equals "副本的 PATH 只指到測試用的 fakebin" "$(grep '^export PATH=' "$SCRIPT")" "export PATH=${BIN}:/usr/bin:/bin"
 # nohup 看不到函式，所以那一行必須指到檔案樁，不能留真 binary 的路徑。
 equals "nohup 起 server 那行指到測試樁" "$(grep -c "nohup setsid ${BIN}/herdr server" "$SCRIPT")" "1"
