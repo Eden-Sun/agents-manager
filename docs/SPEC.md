@@ -2183,7 +2183,8 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
 - `/hook/*`、`/relay/announce`、`/relay/pane` 驗 **per-bot** `X-AM-Bot-Token`。
 
 ### 7.3 WebSocket `/ws`
-- 事件帶遞增 `seq`（記憶體，daemon 重啟從 0）。客戶端帶 `?since=`；daemon 保留最近 200 則，補不齊或 seq 倒退 → `{"type":"resync"}`，客戶端重新 `GET /state` 與訊息。
+- 事件帶遞增 `seq`（記憶體，daemon 重啟從 0）。客戶端帶 `?since=`；daemon 保留最近 200 則，補不齊或 seq 倒退 → `{"type":"resync","seq":<現在的 seq>}`（lag 掉的那條也一樣帶 seq），客戶端重新 `GET /state` 與訊息。
+  **即時幀不佔那 200 個位子**（issue #482，`state::is_ephemeral`）：`turn_progress` 是每個 run 每秒 4 幀，跟耐久事件共用的話重播窗口＝`200 / (4 × 在跑的 run 數)`，20 顆同時在跑只剩 2.5 秒，而客戶端光是重連退避就 250ms～3 秒——每次重連都會退化成全量 resync（重抓 state、額度、每顆已載入 bot 的訊息）。progress 照樣即時廣播、照樣佔 `seq`，只是重連時不補送：下一幀 250ms 內就到，真相另有 `turn_updated` 與訊息。
 - 事件種類見 `API.md`。終端畫面由前端輪詢 `GET terminal`，不走 WS。
 
 ## 8. 技術選型
