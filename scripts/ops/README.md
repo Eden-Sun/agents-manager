@@ -103,10 +103,23 @@ cat /tmp/am-ops-test/supervisor/AGM/daemon-update.log
 `rm` 不整支攔（測試本來就要清自己的暫存目錄），只擋**絕對路徑且在暫存目錄之外**的目標——
 `rm -rf ~/foo` 展開後正好是那種。要放行別的根目錄就設 `AM_CANARY_ALLOW_RM`。
 
-**護欄擋不到的**：絕對路徑呼叫（`/bin/launchctl`）完全不經過 PATH 也不經過函式，三層都抓不到；
-`env -i` 會把匯出的函式與 ZDOTDIR 一起清掉。這兩種只能靠 `lint` 靜態掃出來點名，
-所以**寫測試時不要用絕對路徑叫破壞性指令**，要指定就用 `LAUNCHCTL_BIN=` 這種間接變數指到替身
-（`daemon-swap_test.sh` 是這樣做的）。
+**護欄擋不到的（實測過，不要以為有三層就安全）**：
+
+- **絕對路徑呼叫**（`/bin/launchctl`）：不經過 PATH，也不經過 shell 的函式查找，三層都抓不到。
+  所以**不要用絕對路徑叫破壞性指令**；要指定就用 `LAUNCHCTL_BIN=` 這種間接變數指到替身
+  （`daemon-swap_test.sh` 是這樣做的）。
+- **非 shell 的子行程**（python 的 `subprocess`、`Bun.spawn`、任何走 `execvp` 的）：
+  第 2、3 層保護的是**shell 的指令查找**，`execvp` 根本不經過 shell，所以對它們**只剩 PATH 那一層**。
+  實測：PATH 完整時擋得住，PATH 被覆寫時 python／Bun 都直接穿過去（`FileNotFoundError`／
+  `Executable not found in $PATH`，而那只是因為用的是 sentinel；換成真指令就會執行）。
+  ⇒ **測試呼叫 `.py`／`.ts` 時，那一行的 PATH 一定要帶上 `${AM_CANARY_DIR:+$AM_CANARY_DIR:}`**。
+  `lint` 會掃「直譯器＋腳本在同一行」的寫法；用變數叫的（`"${BUN}" "${SCRIPT}"`）掃不出來，靠這條規則自律。
+  更深一層——測試叫一支 `.py`、那支自己再 spawn——`lint` 完全看不到，寫那種測試要自己確認 PATH。
+- **`env -i`**：把匯出的函式與 `ZDOTDIR` 一起清掉，只剩你自己在那一行給的 PATH。
+
+`rm` 護欄的界線：目標會先正規化成絕對路徑、並解開路徑中的 symlink 再比對，所以
+`cd /tmp && rm ../Users/…` 與「`/tmp` 底下指到暫存外的 symlink」都擋得住。
+**但正規化只解開目錄部分**：最後一段本身是 symlink 時比的是連結自己（刪連結不刪目標，這是對的）。
 
 寫新測試時：
 

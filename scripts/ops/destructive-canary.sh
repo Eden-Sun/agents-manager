@@ -29,21 +29,34 @@ CANARY_CMDS="launchctl pkill killall ssh scp shutdown reboot am-canary-probe"
 # 相對路徑在測試裡是相對於自己的暫存 cwd，擋它只會製造假警報。
 canary_rm_guard_body() {
     cat <<'RMGUARD'
-rm() {
-    local a
+# 把路徑正規化成「絕對＋去掉 symlink」再比：純字串前綴比對擋不住
+# `cd /tmp && rm ../Users/…`（相對路徑），也擋不住 /tmp 底下指到暫存外的 symlink（i407 審核）。
+_am_canary_real() {
+    local p="$1" d b
+    case "$p" in /*) ;; *) p="${PWD}/${p}" ;; esac
+    d="${p%/*}"; b="${p##*/}"
+    [ -n "$d" ] || d=/
+    if [ -d "$d" ]; then
+        d="$(cd -P "$d" 2>/dev/null && pwd -P)" || d="${p%/*}"
+    fi
+    printf '%s/%s' "${d%/}" "$b"
+}
+
+rm() {  # 依賴 _am_canary_real：兩個函式必須一起匯出，少一個就會把所有 rm 都擋掉
+    local a r
     for a in "$@"; do
         case "$a" in
             -*) continue ;;
-            /*) ;;
-            *) continue ;;
         esac
-        case "$a" in
+        # 相對路徑也要看：測試只要 cd 過，「cwd 一定在暫存目錄」這個前提就不成立。
+        r="$(_am_canary_real "$a")"
+        case "$r" in
             /tmp/*|/private/tmp/*|/var/folders/*|/private/var/folders/*) continue ;;
         esac
-        case "${TMPDIR:+x}" in x) case "$a" in "${TMPDIR%/}"/*) continue ;; esac ;; esac
-        case "${AM_CANARY_ALLOW_RM:+x}" in x) case "$a" in "${AM_CANARY_ALLOW_RM%/}"/*) continue ;; esac ;; esac
+        case "${TMPDIR:+x}" in x) case "$r" in "${TMPDIR%/}"/*) continue ;; esac ;; esac
+        case "${AM_CANARY_ALLOW_RM:+x}" in x) case "$r" in "${AM_CANARY_ALLOW_RM%/}"/*) continue ;; esac ;; esac
         echo "${AM_CANARY_TEST:-<未知測試>}: rm $*" >> "${AM_CANARY_DIR}/hits.log"
-        echo "destructive-canary: rm 的目標在暫存目錄之外（${a}），已擋下" >&2
+        echo "destructive-canary: rm 的目標在暫存目錄之外（${a} → ${r}），已擋下" >&2
         return 99
     done
     # **不要**用 `command -v rm` 找真 rm：函式叫 rm 時它回傳的就是 "rm"（函式名），
@@ -87,6 +100,7 @@ STUB
         printf 'export -f %s\n' "${c}"
     done
     canary_rm_guard_body "${dir}"
+    echo 'export -f _am_canary_real'
     echo 'export -f rm'
     echo 'else'
     echo '  echo "destructive-canary: 這個 shell 不是 bash，bash 函式層裝不了（export -f 是 bash 專有）；PATH 與 zsh 層仍然有效" >&2'
@@ -124,6 +138,25 @@ STUB
     update=0
     if [ "${1:-}" = "--update" ]; then update=1; shift; fi
     BASELINE="scripts/ops/canary-baseline.tsv"
+    # baseline 壞掉時**一定要紅**。壞掉的最常見形式就是 rebase 留下的：同一個檔名兩行
+    # （兩邊各自 --update 過），或整段衝突標記沒清。兩種原本都只會讓比較用的 `[` 噴
+    # 「integer expected」到 stderr，然後整支照樣 rc=0 並印一個亂算的總數——
+    # 棘輪等於被靜靜關掉，而且沒有人看得出來（i407 審核實測：重複行 129 處、衝突標記 42 處，都 rc=0）。
+    if [ ! -f "${BASELINE}" ]; then
+        echo "canary lint: 找不到 ${BASELINE}" >&2
+        exit 1
+    fi
+    bad="$(awk -F'\t' '
+        /^#/ || /^[[:space:]]*$/ { next }
+        NF != 2 || $1 !~ /^scripts\// || $2 !~ /^[0-9]+$/ { print "  格式不對：" $0; next }
+        { if (seen[$1]++) print "  檔名重複：" $1 }
+    ' "${BASELINE}")"
+    if [ -n "${bad}" ]; then
+        echo "canary lint: ${BASELINE} 壞了，棘輪不能信：" >&2
+        printf '%s\n' "${bad}" >&2
+        echo "（rebase 之後最常見：同一個檔名兩行，或衝突標記沒清乾淨。修好再跑一次 lint --update。）" >&2
+        exit 1
+    fi
     files="$*"
     if [ -z "${files}" ]; then
         files="$(ls scripts/*_test.sh scripts/ops/*_test.sh 2>/dev/null || true)"
@@ -133,6 +166,7 @@ STUB
         [ -f "${f}" ] || continue
         n=0
         prev_ok=0
+        cont=0
         while IFS= read -r line; do
             n=$((n + 1))
             case "${line}" in
@@ -145,6 +179,20 @@ STUB
             hit=""
             case "${line}" in
                 *'env -i '*) hit="env -i 清掉環境，匯出的函式跟著沒了" ;;
+                # 非 shell 的子行程（python 的 subprocess、Bun.spawn）走 execvp，
+                # **不經過 shell 的指令查找**，所以第 2、3 層（bash 函式／zsh ZDOTDIR）對它們完全無效，
+                # 只剩 PATH 那一層。那支 .py／.ts 自己再 spawn 時若 PATH 被換掉就沒有保護了（i407 審核實測）。
+                # 這裡只認「測試直接叫某支 .py／.ts」，要求那一行帶著 canary 的 PATH 前綴。
+                # 只認「直譯器＋腳本在同一行」這種看得出來是在執行的：光比副檔名會把
+                # 「skip - 沒有 bun，跳過 dev-server-kick.ts 的測試」這種說明文字、
+                # 以及 fixture 裡的假 pane 標題（`/opt/x/gcloud.py auth login`）全部誤判（實測）。
+                # 用變數叫的（`"${BUN}" "${SCRIPT}"`）比不出來，那類靠 README 的規則約束。
+                *python3' '*.py*|*python' '*.py*|*bun' '*.ts*|*node' '*.ts*|*node' '*.mjs*)
+                    case "${line}" in
+                        *AM_CANARY_DIR*) : ;;
+                        *) hit="直接用直譯器跑 .py／.ts：execvp 不看 shell 函式，只剩 PATH 層，要帶上 AM_CANARY_DIR" ;;
+                    esac
+                    ;;
                 # `OUTPUT=$(PATH="..." …)` 一樣是整個覆寫，只是前面不是空白。
                 # 用「PATH= 前面不是識別字字元」比對，才不會漏掉命令替換裡的那種，
                 # 也不會誤中 `HERDR_PATH=`／`FAKEPATH=`。
@@ -158,12 +206,16 @@ STUB
                     esac
                     ;;
             esac
+            # 反斜線續行的下一行仍屬同一個指令：`canary-gap:` 寫在指令上方時，
+            # 續行不該因為「上一個物理行是程式碼」就失去說明（daemon-swap_test.sh 的
+            # `PATH=… \` 換行再 `/usr/bin/python3 …` 就是這種）。
+            case "${line}" in *\\) cont=1 ;; *) cont=0 ;; esac
             if [ -z "${hit}" ]; then
-                prev_ok=0
+                [ "${cont}" = "1" ] || prev_ok=0
                 continue
             fi
             if [ "${prev_ok}" = "1" ]; then
-                prev_ok=0
+                [ "${cont}" = "1" ] || prev_ok=0
                 continue
             fi
             gaps="${gaps}${f}:${n}: ${hit}

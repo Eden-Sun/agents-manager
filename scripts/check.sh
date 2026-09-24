@@ -97,6 +97,13 @@ check_ops() {
     local canary
     canary="${TMPDIR:-/tmp}/am-canary-$$"
     eval "$(scripts/ops/destructive-canary.sh arm "${canary}")"
+    # `arm` 萬一失敗，命令替換是空字串、`eval` 什麼都不做，而且 `set -e` 在這個位置抓不到——
+    # 整輪就會在**毫無保護**的情況下跑完，還不會有任何徵兆（i407 審核指出）。
+    # 護欄沒裝起來時，寧可整輪紅在這裡。
+    if [ -z "${AM_CANARY_DIR:-}" ] || [ ! -x "${AM_CANARY_DIR}/am-canary-probe" ]; then
+        echo "destructive-canary arm 失敗：護欄沒有裝起來，不能在沒有保護的情況下跑 ops 測試" >&2
+        exit 1
+    fi
     # 新的 *_test.sh 放在 scripts/ 或 scripts/ops/ 就會被撈到；需要外部工具的測試自己 skip 並印原因。
     for t in scripts/*_test.sh scripts/ops/*_test.sh; do
         step "ops: $t"
