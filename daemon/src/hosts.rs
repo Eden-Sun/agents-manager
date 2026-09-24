@@ -590,6 +590,8 @@ fn spawn_supervisor(app: Arc<App>, conn: Arc<HostConn>, generation: u64) -> toki
                     crate::remote_purge::spawn_sweep(app.clone(), conn.name.clone());
                     // daemon 升級後，長跑的遠端 bot 手上還是舊 shim：連上（重連也一樣）就補版，背景做、不擋連線（issue #124）。
                     crate::shim_refresh::spawn_remote_refresh(app.clone(), conn.name.clone());
+                    // 同一個道理的權限：#494 的收緊在「啟動 bot」那一趟，換版前就在跑的遠端 bot 要等重啟才收得到（issue #501）。
+                    crate::remote_perms::spawn_tighten(app.clone(), conn.name.clone());
                     // 開機那一輪跑的時候這台還沒連上，它的 autostart bot 因此從來沒被起過（review 2026-09-16）。
                     // 對帳成功才跑、每台一生一次：重連不能把使用者停掉的 bot 再開起來（core 5）。
                     crate::reconcile::autostart_after_reconcile(&app, &conn.name, reconciled).await;
