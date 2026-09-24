@@ -137,11 +137,9 @@ pub async fn inspect(app: &Arc<App>, c: &Stuck) -> Result<Option<f64>> {
     let cfg = app.cfg.get().await.judge;
     let Some(bot) = crate::db::bot(&app.db, &c.bot_id).await? else { return Ok(None) };
     let label = crate::db::project(&app.db, &bot.project_id).await?.map(|p| p.label).unwrap_or_default();
-    let asked: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM judge_shadow WHERE at >= ?")
-        .bind(crate::db::iso_in(-3600))
-        .fetch_one(&app.db)
-        .await?;
-    if let Some(skip) = super::gate(&cfg, &bot.project_id, &label, asked) {
+    // 便宜的早退：開關與專案名單在讀畫面之前就看得出來。真正的名額是等到要問之前才占
+    // （`reserve_slot`），否則占了卻因為「輸入列空著」「同畫面問過」而沒問，名額就白燒了。
+    if let Some(skip @ (super::Skip::Disabled | super::Skip::ProjectNotListed)) = super::gate(&cfg, &bot.project_id, &label, 0) {
         return Err(anyhow!("{skip:?}"));
     }
     let Some(run) = crate::db::active_run(&app.db, &c.bot_id).await? else { return Ok(None) };
@@ -168,6 +166,8 @@ pub async fn inspect(app: &Arc<App>, c: &Stuck) -> Result<Option<f64>> {
     if seen > 0 {
         return Ok(None);
     }
+    // 跟 `observe` 走**同一支**占位（i339 review #481）：只有一邊占位的話，另一邊照樣衝得過保險絲。
+    let slot = super::reserve_slot(app, &cfg, &bot.project_id, &label, &c.bot_id, &c.run_id, &bot.kind, &digest, false, "stuck_queued").await?;
     let body = request_body(&cfg.model, &bot.kind, c.waited_secs, &tail);
     let started = Instant::now();
     let answer = match super::read_key(&cfg.key_file) {
@@ -179,23 +179,7 @@ pub async fn inspect(app: &Arc<App>, c: &Stuck) -> Result<Option<f64>> {
         Ok(a) => (Some(a.value), a.model.clone(), a.input_tokens, None),
         Err(e) => (None, None, None, Some(e.to_string())),
     };
-    sqlx::query(
-        "INSERT INTO judge_shadow (id, at, bot_id, run_id, kind, matched_line, composer_idle, regex_verdict, jev_is_live_ui, model, ms, input_tokens, error)
-         VALUES (?, ?, ?, ?, ?, ?, 0, 'stuck_queued', ?, ?, ?, ?, ?)",
-    )
-    .bind(crate::db::ulid())
-    .bind(crate::db::now())
-    .bind(&c.bot_id)
-    .bind(&c.run_id)
-    .bind(&bot.kind)
-    .bind(&digest)
-    .bind(p)
-    .bind(model)
-    .bind(ms)
-    .bind(tokens)
-    .bind(error)
-    .execute(&app.db)
-    .await?;
+    super::settle_slot(app, &slot, p, model, ms, tokens, error).await?;
     let p = answer?.value;
     if p >= ALERT_THRESHOLD {
         let key = format!("judge_stuck_screen:{}:{digest}", c.run_id);

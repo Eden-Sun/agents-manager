@@ -98,23 +98,108 @@ pub fn gate(cfg: &JudgeCfg, project_id: &str, project_label: &str, asked_last_ho
     None
 }
 
+/// **先占位再問**：數一次額度、通過就立刻寫一筆占位列，兩件事在同一把鎖裡做完（issue #481）。
+///
+/// 以前是「數 → 問 → 寫」，中間隔著一次外部 HTTP。`shadow_limit_hit` 是 `tokio::spawn` 出去的，
+/// 所以 K 顆 bot 同時撞限時，K 個 task 會在第一筆 INSERT 落地之前讀到同一個數字、一起放行，
+/// 保險絲就被衝破。
+///
+/// 鎖**不跨那次 HTTP**：裡面只有兩句快的 DB 操作，不然整條路會被序列化成一次一個。
+/// 兩個呼叫端（`observe` 的撞限樣本、`stuck::inspect` 的卡住畫面）共用這一支——
+/// 只有一邊占位的話，另一邊照樣衝得過去（i339 review #481）。
+///
+/// 占位列先寫 `error='pending'`，答案由呼叫端問完再 [`settle_slot`] 補上。
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn reserve_slot(
+    app: &Arc<App>,
+    cfg: &JudgeCfg,
+    project_id: &str,
+    project_label: &str,
+    bot_id: &str,
+    run_id: &str,
+    kind: &str,
+    matched_line: &str,
+    composer_idle: bool,
+    regex_verdict: &str,
+) -> Result<String> {
+    let id = crate::db::ulid();
+    let _g = app.judge_fuse.lock().await;
+    let asked: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM judge_shadow WHERE at >= ?")
+        .bind(crate::db::iso_in(-3600))
+        .fetch_one(&app.db)
+        .await?;
+    if let Some(skip) = gate(cfg, project_id, project_label, asked) {
+        return Err(anyhow!("{skip:?}"));
+    }
+    sqlx::query(
+        "INSERT INTO judge_shadow (id, at, bot_id, run_id, kind, matched_line, composer_idle, regex_verdict, error)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')",
+    )
+    .bind(&id)
+    .bind(crate::db::now())
+    .bind(bot_id)
+    .bind(run_id)
+    .bind(kind)
+    .bind(matched_line)
+    .bind(composer_idle)
+    .bind(regex_verdict)
+    .execute(&app.db)
+    .await?;
+    Ok(id)
+}
+
+/// 把 [`reserve_slot`] 占下的那一列補成終態。**失敗也留著**、不退還名額：逾時／5xx 也是真的
+/// 送出去過一次（花費與「畫面離開這台機器」都已經發生）；失敗就退名額的話，一個壞掉的端點
+/// 會讓保險絲永遠跳不了——那正好是最需要它跳的時候。
+pub(crate) async fn settle_slot(
+    app: &Arc<App>,
+    id: &str,
+    p: Option<f64>,
+    model: Option<String>,
+    ms: i64,
+    tokens: Option<i64>,
+    error: Option<String>,
+) -> Result<()> {
+    sqlx::query("UPDATE judge_shadow SET jev_is_live_ui=?, model=?, ms=?, input_tokens=?, error=? WHERE id=?")
+        .bind(p)
+        .bind(model)
+        .bind(ms)
+        .bind(tokens)
+        .bind(error)
+        .bind(id)
+        .execute(&app.db)
+        .await?;
+    Ok(())
+}
+
+/// 開機收尾：上一輪 daemon 在「占位」與「補答案」之間被收掉時留下的 `pending` 列（i339 review #481）。
+///
+/// 不刪掉——那一次很可能真的送出去過（花費與畫面外流已經發生），刪了帳本就對不上。
+/// 改成一個**終態**：`error='interrupted'`，帳本與 `GET /api/judge/shadow` 上看得出來是
+/// 「daemon 中途被收掉、答案沒回來」，而不是永遠顯示「在飛」。
+pub async fn settle_interrupted(app: &Arc<App>) -> Result<u64> {
+    let n = sqlx::query("UPDATE judge_shadow SET error='interrupted' WHERE error='pending'")
+        .execute(&app.db)
+        .await?
+        .rows_affected();
+    if n > 0 {
+        tracing::info!(rows = n, "judge shadow：上一輪留下的占位列收成 interrupted");
+    }
+    Ok(n)
+}
+
 pub async fn observe(app: &Arc<App>, s: Sample) -> Result<()> {
     let cfg = app.cfg.get().await.judge;
     if !cfg.enabled {
         return Ok(());
     }
     let label = crate::db::project(&app.db, &s.project_id).await?.map(|p| p.label).unwrap_or_default();
-    let asked: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM judge_shadow WHERE at >= ?")
-        .bind(crate::db::iso_in(-3600))
-        .fetch_one(&app.db)
-        .await?;
-    if let Some(skip) = gate(&cfg, &s.project_id, &label, asked) {
-        return Err(anyhow!("{skip:?}"));
-    }
     let lines: Vec<&str> = s.screen.lines().collect();
     let composer_idle = crate::tui_prompts::composer_is_idle(&lines);
     let matched = mask(&s.matched_line);
     let body = request_body(&cfg.model, &s.kind, &matched, &tail(&s.screen), composer_idle);
+
+    let id = reserve_slot(app, &cfg, &s.project_id, &label, &s.bot_id, &s.run_id, &s.kind, &matched, composer_idle, "limit_hit").await?;
 
     let started = Instant::now();
     let answer = match read_key(&cfg.key_file) {
@@ -126,24 +211,7 @@ pub async fn observe(app: &Arc<App>, s: Sample) -> Result<()> {
         Ok(a) => (Some(a.is_live_ui), a.model, a.input_tokens, None),
         Err(e) => (None, None, None, Some(e.to_string())),
     };
-    sqlx::query(
-        "INSERT INTO judge_shadow (id, at, bot_id, run_id, kind, matched_line, composer_idle, regex_verdict, jev_is_live_ui, model, ms, input_tokens, error)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'limit_hit', ?, ?, ?, ?, ?)",
-    )
-    .bind(crate::db::ulid())
-    .bind(crate::db::now())
-    .bind(&s.bot_id)
-    .bind(&s.run_id)
-    .bind(&s.kind)
-    .bind(&matched)
-    .bind(composer_idle)
-    .bind(p)
-    .bind(model)
-    .bind(ms)
-    .bind(tokens)
-    .bind(error)
-    .execute(&app.db)
-    .await?;
+    settle_slot(app, &id, p, model, ms, tokens, error).await?;
     Ok(())
 }
 
@@ -776,6 +844,49 @@ mod tests {
 
     async fn rows(app: &Arc<App>) -> Vec<(String, Option<f64>, Option<String>, Option<String>, bool)> {
         sqlx::query_as("SELECT matched_line, jev_is_live_ui, error, cleared_at, composer_idle FROM judge_shadow").fetch_all(&app.db).await.unwrap()
+    }
+
+    /// #481：保險絲在**並行**時也要是真的上限。
+    ///
+    /// `shadow_limit_hit` 是 `tokio::spawn` 出去的，所以 K 顆 bot 同時撞限就是 K 個並行的
+    /// `observe`。改成「先占位再問」之前，它們會在第一筆寫進去之前都讀到同一個數字、一起放行；
+    /// 這條測試就是要釘住「不管同時來幾個，放行的就是 `max_per_hour` 個」。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_asks_never_exceed_the_hourly_fuse() {
+        let (url, seen) = fake_jev(200).await;
+        let (app, dir) = app_with(true, &["P1"], &url).await;
+        const CAP: u32 = 3;
+        const CONCURRENT: usize = 12;
+        app.cfg
+            .update(|c| {
+                c.judge.max_per_hour = CAP;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let mut tasks = Vec::new();
+        for i in 0..CONCURRENT {
+            let app = app.clone();
+            let mut s = sample();
+            s.run_id = format!("R{i}");
+            tasks.push(tokio::spawn(async move { observe(&app, s).await.is_ok() }));
+        }
+        let mut passed = 0usize;
+        for t in tasks {
+            if t.await.unwrap() {
+                passed += 1;
+            }
+        }
+
+        assert_eq!(passed as u32, CAP, "同時來 {CONCURRENT} 個，放行的必須剛好是上限 {CAP} 個");
+        assert_eq!(seen.lock().unwrap().len() as u32, CAP, "真的送出去的次數也要等於上限");
+        let written: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM judge_shadow").fetch_one(&app.db).await.unwrap();
+        assert_eq!(written as u32, CAP, "帳本上就是那幾筆，沒有多寫也沒有少寫");
+        let pending: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM judge_shadow WHERE error = 'pending'").fetch_one(&app.db).await.unwrap();
+        assert_eq!(pending, 0, "問完了就要把占位列補上答案，不能留著 pending");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[tokio::test]
