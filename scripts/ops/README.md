@@ -383,3 +383,53 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agm.ci-watch.plist
 
 隔離測試：`bash scripts/ops/outbox-gc_test.sh`、`pane-gc_test.sh`、`browser-gc-kick_test.sh`（假 `ps`／`lsof`／`herdr`／`bin/agm`，`kill` 用函式替身，`/tmp/am-*` 換成暫存目錄；不會殺行程、關 pane 或碰真的 outbox／HOME）。
 安裝比照其他 kick：`install -m 755 scripts/ops/{outbox-gc,pane-gc,browser-gc-kick}.sh ~/.config/agents-manager/supervisor/AGM/bin/`、`install -m 644 scripts/ops/browser-gc-task.md ~/.config/agents-manager/supervisor/AGM/`；launchd 由巡檢處理。
+
+## dev-server-kick.ts（issue #418）
+
+5173 dev server 的看門狗。**2026-09-24 之前只存在於 `AGM/bin/`**：`docs/SPEC.md` §18.1 把行為寫得很細，
+程式碼卻沒有版控、沒有 review、沒有測試，而且它會 `kill` 占用 port 的行程。現在 repo 是來源檔。
+
+- launchd `com.agm.dev-server`：`StartInterval 60`、`RunAtLoad`，跑 `bun run …/AGM/bin/dev-server-kick.ts`。
+- 行為與判斷順序見 `docs/SPEC.md` §18.1（健康＝綁 `*`／`0.0.0.0` 且本機 curl 有回應；只收孤兒 vite；
+  找不到 node 或 `vite.js` 寧可這輪不起，也不拿 bun 代跑）。
+- **看門狗用 bun、vite 一律用 node**：bun 的 upgrade socket 沒有 `destroySoon`，daemon 一重啟代理斷線 vite 會 crash。
+
+隔離測試：`bash scripts/ops/dev-server-kick_test.sh`（假 `lsof`／`ps`／`git`／`bun`／`node`，副本的 `PORT` 換成
+測試 port，假 `lsof` 只回報測試自己 spawn 的 pid；**不會碰真的 5173 或真的 vite**）。沒有 bun／python3 會自己 skip。
+
+安裝（**需要 AGM 核准**）：
+
+```sh
+install -m 755 scripts/ops/dev-server-kick.ts ~/.config/agents-manager/supervisor/AGM/bin/
+```
+
+## herdr-full-restart.sh（issue #418）
+
+herdr 全機重啟：bootout 兩個 herdr launchd job → 殺掉所有 herdr server → 清 socket → bootstrap 回來 →
+補起預設 server。2026-09-22 使用者下令全機重啟時寫的，同樣原本只在 `AGM/bin/`。**沒有 launchd 排程**，手動跑。
+
+- 順序是關鍵：**先 bootout 再殺 server**，反過來 launchd 會立刻把 server 拉回來。
+- **已知 bug（還沒修）**：第 16 行 `nohup setsid …` 在 macOS 上必定失敗（系統沒有 `setsid`），
+  所以預設 session 的 server 其實沒被拉起，但下一行照樣寫「default server started pid=…」。
+  2026-09-22 的 log 裡 `session list` 顯示 `default stopped` 就是這個。修的時候要一併改測試第 4 組。
+- 路徑與 uid（`gui/501`）寫死成這台開發機的值，是收進 repo 時保留的既有行為。
+
+隔離測試：`bash scripts/ops/herdr-full-restart_test.sh`（`launchctl`／`pkill`／`pgrep`／`sleep`／`herdr`
+全部用**注入的 shell 函式**攔截，不靠 PATH；socket 與 plist 都在暫存目錄）。
+
+安裝（**需要 AGM 核准**）：
+
+```sh
+install -m 755 scripts/ops/herdr-full-restart.sh ~/.config/agents-manager/supervisor/AGM/bin/
+```
+
+## 已安裝版與 repo 的落差（issue #418 稽核，2026-09-24）
+
+這些檔沒有自動同步，所以會漂。2026-09-24 的逐支比對（`git hash-object` 對 `origin/main` 的 blob）結論：
+同名檔沒有任何一支「安裝版比 repo 新」；`browser-gc-kick.sh` 與 `pane-gc.sh` 落後一個純寫法的 commit。
+
+- **`herdr-lan-check.sh` 目前沒有裝**，但上面 herdr-update-kick 那節寫著要 `install`。
+  實際用法（`herdr-upgrade-runbook.md`、`herdr-update-kick.sh` 的派工正文）都是從 repo checkout 跑
+  `bash scripts/ops/herdr-lan-check.sh /opt/homebrew/bin/herdr`，所以沒裝不影響升級流程；
+  要嘛補裝、要嘛把那行 install 拿掉，兩邊挑一個對齊。
+- `daemon-swap.sh`、`daemon-start.py`、`herdr-upgrade-runbook.md` 本來就不裝（從 checkout 跑），不是缺口。

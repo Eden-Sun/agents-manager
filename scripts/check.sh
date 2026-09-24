@@ -75,6 +75,16 @@ check_ops() {
     # variable 而中止（issue #412，三天內踩到三次）。修法一律是 ${VAR}。
     step "ops: shell 變數後面緊接非 ASCII 字元"
     scripts/ops/lint-shell-vars.sh
+    # scripts/ops/*.ts 不在 web 的 tsconfig／oxlint 範圍裡（那兩個只看 web/src），
+    # 至少確認 bun 載得進來（語法／import 沒壞）。沒有 bun 就跳過並說原因。
+    if command -v bun >/dev/null 2>&1; then
+        for t in scripts/ops/*.ts; do
+            step "ops: bun 載得進 $t"
+            bun build --target=bun "$t" --outfile=/dev/null >/dev/null
+        done
+    else
+        step "ops: 沒有 bun，跳過 scripts/ops/*.ts 的載入檢查"
+    fi
     # 新的 *_test.sh 放在 scripts/ 或 scripts/ops/ 就會被撈到；需要外部工具的測試自己 skip 並印原因。
     for t in scripts/*_test.sh scripts/ops/*_test.sh; do
         step "ops: $t"

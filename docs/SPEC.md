@@ -2567,12 +2567,13 @@ AGM 的運維職責以本節為準，不靠任何 bot 的記憶。persona 是同
 - **runtime 是 node 不是 bun**：`node web/node_modules/vite/bin/vite.js`。bun 的 upgrade socket 沒有 `destroySoon`，daemon 一重啟代理斷線 vite 就 crash。bun 只用來 build 與裝套件。
 - **必綁 `--host 0.0.0.0`**（手機／LAN／Tailscale）；`vite.config.ts` 也設 `server.host: true`，手動起的也對外。代理把 `Origin` 改寫成 daemon 位址。
   代價：同網段裝置都能透過 5173 的 `/api` 代理打到 7788。
-- **看門狗** launchd `com.agm.dev-server`：`StartInterval 60`（使用者指示；推上去後最多一分鐘可見）、`RunAtLoad`，跑 `bun run supervisor/AGM/bin/dev-server-kick.ts`，
+- **看門狗** launchd `com.agm.dev-server`：`StartInterval 60`（使用者指示；推上去後最多一分鐘可見）、`RunAtLoad`，跑 `bun run supervisor/AGM/bin/dev-server-kick.ts`（來源檔是 `scripts/ops/dev-server-kick.ts`，手動 install，見 §18.2a 與 `scripts/ops/README.md`），
   plist 的 `PATH` 要含 `/opt/homebrew/bin` 與 `~/.local/bin`（launchd 不給登入 shell 的 PATH）。行為：
   1. **健康 = 對外可達**：`lsof -nP -iTCP:5173 -sTCP:LISTEN -Fpn`（要用 `-F` 機器格式）綁 `*`／`0.0.0.0` 且 curl 127.0.0.1 有回應 → exit 0、不寫 log。只綁 loopback 的是**錯誤實例**。
   2. 錯誤實例：vite 且 `ppid=1`（孤兒）→ kill、等 port 放開（≤ 5 秒）再拉起；vite 但父程序活著 → 只記錄「需人工處理」；非 vite → 只記錄 pid 與 command。
-  3. 找不到 node 或 `vite.js` → 記 log 跳過，**不拿 bun 代跑**。
-  4. 沒人聽 → `nohup node vite.js --host 0.0.0.0 --port 5173 --strictPort`，≤ 15 秒複驗；失敗交下一輪，不在腳本內重試。
+  3. 找不到 node 或 `vite.js` → 記 log 跳過，**不拿 bun 代跑**。node 先取寫死的 `~/.local/bin/node`，沒有才退回 `which node`；兩個都沒有才算找不到。
+  4. 沒人聽 → `node vite.js --host 0.0.0.0 --port 5173 --strictPort`，用 `Bun.spawn` 的 `detached` ＋ `unref()` 脫離（**不是 `nohup`**；launchd 會在 kick 結束後收掉整個 job 的程序群），stdout／stderr 以附加模式接到 `dev-server.log`；≤ 15 秒複驗；失敗交下一輪，不在腳本內重試。
+  5. 健康檢查的 `fetch` 有 3 秒逾時。「健康」還要求這一輪沒有因為 `web/bun.lock` 變動而需要重啟；需要重啟、但占用 port 的不是孤兒 vite 時不搶，留給下一輪。
   log：`supervisor/AGM/dev-server.log`、`dev-server.launchd.log`。
 - **驗證**（改規則或腳本後）：kill vite → 跑一次 kick → `curl 127.0.0.1:5173/`、`<LAN IP>:5173/`、`<LAN IP>:5173/api/session` 都 200。LAN IP 用 `route -n get default` 的介面問，不寫死 `en0`。
 
