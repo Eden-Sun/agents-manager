@@ -2280,6 +2280,10 @@ label = "foo@m4p"
   `--seq` 有 `python3` 用 `time.time_ns()`，否則 `date +%s`×1000 + `$DIR/hook-seq` 計數；`--agent-session-id`／`--agent-session-path` 有才帶；`--message` 不填。
 - 找 herdr：`${AM_REAL_HERDR:-}` → `command -v herdr`；都沒有就只寫 spool、記 `hook.log`、exit 0（30 秒掃描會補）。`HERDR_SESSION` 有值時帶 `--session`。
 - 契約同 §4.4：≤ 3 秒、永遠 exit 0、空 stdout（grok 的 Stop hook 會把 stdout 當 decision）。
+- **權限**：bot 目錄 0700、`hook.sh` 0700、`claude-settings.json`／spool／`hook-status.json` 0600（#494）。
+  腳本自己 `umask 077`（跑使用者的 statusLine 命令前還原），安裝那一趟另外 `chmod` 一次，所以升級上來的
+  0755／0644 也會被修回去。spool 裡是完整的 hook payload，不能交給那台機器的 umask 決定誰讀得到。
+  本機同一組檔案同樣是 0700／0600（`private_files`）。
 
 #### 11.4.3 daemon 端：狀態事件 → 讀 spool → 重放
 `events::handle_status` 在遠端 run 上多一步（per-bot 鎖內，與 HTTP hook 同一把）：

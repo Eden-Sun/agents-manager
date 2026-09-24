@@ -72,6 +72,7 @@ mod pane_probe;
 mod shim_path;
 mod shim_refresh;
 mod panes;
+mod private_files;
 mod projection;
 mod quota;
 mod quota_claude;
