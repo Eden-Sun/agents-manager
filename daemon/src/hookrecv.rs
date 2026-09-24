@@ -1258,7 +1258,11 @@ fn bots_dir(bot_id: &str, root: &str) -> Result<String> {
 /// 後者的 `cat` 與 `rm` 是兩支各自 fork／exec 的外部指令，中間 hook 附加進來的行會被 `rm` 連檔刪掉——
 /// 而這條路徑正好只在「上一輪 ack 沒成功」時走到，也就是剛斷線重連、hook 正在補寫的那一刻。
 /// rename 之後 append 落在新的 inode 上，這一輪碰不到它。`.claim` 是「摘下來、還沒併進 `.replaying`」
-/// 的中繼：崩在中間的話下一輪的 `fold` 會接著併，不會留在那裡沒人管。
+/// 的中繼：崩在中間的話下一輪的 `am_fold` 會接著併，不會留在那裡沒人管。
+///
+/// #500：`am_fold` 沒把 `.claim` 收掉（`.replaying` 寫不進去、磁碟滿）時**不准摘新的 spool**——
+/// 這支腳本沒有 `set -e`、`am_fold` 的回傳值也沒人看，直接 `mv` 會把那份唯一的副本蓋掉，而且是無聲的。
+/// 這一輪就只讀 `.replaying`，spool 留到下一輪，跟本機 `fold_spool(...)?` 的 `?` 行為對齊。
 ///
 /// `hook-status.json` 是例外，照舊讀完就刪：它是單槽、最新的贏的訊號（不是佇列），
 /// 掉一格只是晚一次重繪——理由與本機 StatusLine 不進收件匣是同一個（[`crate::hook_inbox`]）。
@@ -1271,7 +1275,7 @@ fn claim_script(bot_id: &str, root: &str) -> Result<String> {
          if [ -s \"$f.replaying\" ] && [ -n \"$(tail -c 1 \"$f.replaying\")\" ]; then printf '\\n' >> \"$f.replaying\"; fi; \
          cat \"$f.claim\" >> \"$f.replaying\" && rm -f \"$f.claim\"; }}\n\
          am_fold\n\
-         if [ -f \"$f\" ]; then mv \"$f\" \"$f.claim\" && am_fold; fi\n\
+         if [ -f \"$f\" ] && [ ! -f \"$f.claim\" ]; then mv \"$f\" \"$f.claim\" && am_fold; fi\n\
          if [ -f \"$f.replaying\" ]; then cat \"$f.replaying\"; fi\n\
          s=\"$d/hook-status.json\"\n\
          if [ -f \"$s\" ]; then printf '\\n{marker}\\n'; cat \"$s\"; rm -f \"$s\"; fi\n",
@@ -4024,6 +4028,24 @@ mod spool_claim_window_tests {
         let again = r.sh(&claim_script("botX", root).unwrap());
         assert!(again.contains("LATE"), "下一輪要讀得到它：{again}");
         assert!(!again.contains("OLD"), "已經 ack 過的不能再出現：{again}");
+    }
+
+    /// #500：`am_fold` 沒收掉 `.claim`（`.replaying` 寫不進去）時，這一輪不准摘新的 spool——
+    /// 直接 `mv` 會把那份唯一的副本蓋掉，而且腳本 exit 0、stdout 有東西，daemon 會照常 ack。
+    /// 用「`.replaying` 是目錄」製造寫入失敗：跟權限無關，root 底下跑也一樣失敗。
+    #[test]
+    fn a_claim_that_could_not_be_folded_is_never_overwritten_by_the_next_spool() {
+        let r = Remote::new();
+        let root = crate::startup::REMOTE_ROOT;
+        let claim = r.spool.with_extension("jsonl.claim");
+        std::fs::write(&claim, "OLD-CLAIM\n").unwrap();
+        std::fs::create_dir(r.spool.with_extension("jsonl.replaying")).unwrap();
+        std::fs::write(&r.spool, "NEW\n").unwrap();
+
+        r.sh(&claim_script("botX", root).unwrap());
+
+        assert_eq!(std::fs::read_to_string(&claim).unwrap(), "OLD-CLAIM\n", "唯一的副本不准被蓋掉");
+        assert_eq!(std::fs::read_to_string(&r.spool).unwrap(), "NEW\n", "新的 spool 留到下一輪");
     }
 
     /// 摘下來還沒併進 `.replaying` 就斷線：`.claim` 下一輪要被收回來，不是留在遠端沒人管。
