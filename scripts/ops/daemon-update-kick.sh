@@ -502,20 +502,23 @@ if [ -z "$LEASE" ]; then
   note_fail "拿不到 rebuild 窗口（可能有人正在做或核准對不上），這輪不派"; exit 0
 fi
 # 舊 daemon 還沒有 token（升級前的那一版）：照舊不帶，release 那邊會放行並留 warn。
-# token **不進派工正文**（review2 sup #5）：正文會出現在 `GET /api/supervisor/assignments`、建置 child 的對話紀錄，
-# 而 assign 的輸出還會寫進這份 log。寫進只有本人讀得到的檔案，正文只給路徑，child 用 `$(cat …)` 帶上。
+# token **不進派工正文，也不進 argv**（review2 sup #5、issue #477）：正文會出現在
+# `GET /api/supervisor/assignments`、建置 child 的對話紀錄，而 assign 的輸出還會寫進這份 log；
+# argv 則是同一個 uid 的行程用 `ps` 就看得到。寫進只有本人讀得到的檔案，自己交還與派工正文
+# 都用 `--lease-token-file <路徑>`，token 本身從頭到尾只出現在那個 600 的檔裡。
 TOKEN_FILE="$DIR/daemon-update.lease-token"
 TOKEN_ARG=""
 TOKEN_TEXT=""
 rm -f "$TOKEN_FILE"
 if [ -n "$LEASE_TOKEN" ]; then
-  TOKEN_ARG=" --lease-token $LEASE_TOKEN"
   if ( umask 077 && printf '%s' "$LEASE_TOKEN" > "$TOKEN_FILE" ); then
-    TOKEN_TEXT=" --lease-token \"\$(cat $TOKEN_FILE)\""
+    TOKEN_ARG=" --lease-token-file $TOKEN_FILE"
+    TOKEN_TEXT=" --lease-token-file $TOKEN_FILE"
   else
     note_fail "寫不進 lease token 檔，交還窗口，這輪不派"
-    # shellcheck disable=SC2086
-    "$AGM" --compact lease release rebuild --owner "$OWNER" --fence "$LEASE" $TOKEN_ARG >> "$LOG" 2>&1 || true
+    # 檔寫不出來時走 stdin，仍然不讓 token 進 argv。
+    printf '%s' "$LEASE_TOKEN" \
+      | "$AGM" --compact lease release rebuild --owner "$OWNER" --fence "$LEASE" --lease-token - >> "$LOG" 2>&1 || true
     exit 0
   fi
 fi
@@ -537,7 +540,7 @@ cat "$DIR/daemon-update-task.md" > "$TMP" 2>/dev/null || true
   [ -n "$ESC_NOTE" ] && printf '%s\n' "$ESC_NOTE"
   # shellcheck disable=SC2016  # 單引號是刻意的：反引號與 %s 都是要原樣印出去的文字
   printf '做完請回報，並用 `bin/agm lease release rebuild --owner %s --fence %s%s` 交還窗口；\n' "$OWNER" "$LEASE" "$TOKEN_TEXT"
-  printf '（lease-token 只在 acquire 那一次出現、只寫在上面那個檔案裡，不要把它印出來或貼進回報；真的拿不到就請 AGM 用 --force 並附理由接管。）\n'
+  printf '（lease-token 只在 acquire 那一次出現、只寫在上面那個檔案裡：用 --lease-token-file 讓 agm 自己去讀，不要 cat 出來、不要印出來、不要貼進回報——argv 同 uid 的行程看得到。真的拿不到就請 AGM 用 --force 並附理由接管。）\n'
   printf '需要重啟正式 daemon 另外申請 restart 核准與租約，替換前請 AGM 重驗所有使用者與排程回合。\n'
 } >> "$TMP"
 if "$AGM" --compact assign --bot "$BOT" --text-file "$TMP" \
