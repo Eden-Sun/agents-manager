@@ -2514,10 +2514,11 @@ mod compat_tests {
         assert_eq!(refusals[0].0.as_deref(), Some(agm_kid.as_str()));
         assert!(refusals[0].1.contains("reconcile_agent_gone"), "帶原因：{}", refusals[0].1);
         assert!(refusals[0].1.contains("AGM 開出去的子 agent"), "帶角色：{}", refusals[0].1);
-        // 同一顆、同一輪不會越推越多（同一個小時同一把鑰匙）。
+        // 同一顆、同一輪不會越推越多：第二次沿用上一則那把鑰匙（#536；以前是牆上時鐘的小時格，兩次對帳
+        // 跨過整點就變兩則，這條斷言因此會間歇性紅）。
         super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
         assert!(!retired(&app, &agm_kid).await);
-        assert_eq!(retire_refusals(&app).await.len(), 1, "同一小時只推一次");
+        assert_eq!(retire_refusals(&app).await.len(), 1, "一小時只推一次，跨整點也一樣");
     }
 
     /// **#413，第二條路**（`(None, None)`：`pane_closed` 早就把 run 收掉了，herdr 也不列它）。
