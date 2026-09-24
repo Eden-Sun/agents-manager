@@ -871,7 +871,32 @@ def cmd_responder(client: Client, cfg: dict, args) -> object:
 
 
 def cmd_ack(client: Client, cfg: dict, args) -> object:
-    return client.post(f"/api/supervisor/inbox/{urllib.parse.quote(args.event_id)}/ack", {})
+    """結案一則 inbox 通知。**只有 AGM 角色結得掉**（issue #432）。
+
+    daemon 認的是 `X-AM-Bot-Id` ＋ 那顆 bot 自己的 hook token，而 `bot_auth_headers` 只在
+    `AM_BOT_ID` 等於這個 runtime 的 `self_bot_id` 時才帶——也就是只有在角色自己的 pane 裡才帶。
+    在一般 shell（或別顆 bot 的 pane）裡跑會回 403 `role_required`，那不是壞掉，是這支本來就
+    不接受沒有身分的呼叫端。
+    """
+    try:
+        return client.post(f"/api/supervisor/inbox/{urllib.parse.quote(args.event_id)}/ack", {})
+    except AgmError as e:
+        if e.extra.get("status") != 403:
+            raise
+        detail = e.extra.get("detail")
+        reason = detail.get("reason") if isinstance(detail, dict) else None
+        if reason not in ("role_required", "bot_proof_mismatch"):
+            raise
+        raise AgmError(
+            "role_required",
+            "ack 只有 AGM 角色做得到：要在巡檢或協調者自己的 pane 裡跑 bin/agm，"
+            "或自己帶 X-AM-Bot-Id 與那顆 bot 的 AM_HOOK_TOKEN。"
+            f"（這個 pane 的 AM_BOT_ID={os.environ.get('AM_BOT_ID') or '未設定'}，"
+            f"runtime 的 self_bot_id={cfg.get('self_bot_id') or cfg.get('manager_bot_id') or cfg.get('bot_id') or '未設定'}）",
+            3,
+            status=403,
+            detail=detail,
+        )
 
 
 def cmd_ops_alert(client: Client, cfg: dict, args) -> object:

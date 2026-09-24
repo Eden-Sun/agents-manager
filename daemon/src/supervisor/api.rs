@@ -614,15 +614,16 @@ pub async fn get_inbox(
     })))
 }
 
-/// 結案一則通知。帶了角色 bot 的 token 就只能結自己收的那些（另一個角色收的回 409）；
-/// UI 與使用者照舊什麼都能結。重複 ack 是冪等的。
+/// 結案一則通知。**只給 AGM 角色**：要帶 `X-AM-Bot-Id` 與那顆 bot 自己的 hook token，
+/// 否則 403 `role_required`（issue #432）。角色只結得掉自己收的那些，另一個角色收的回 409。
+/// 重複 ack 是冪等的。
 pub async fn post_inbox_ack(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, LcError> {
     use super::roles::AckOutcome;
-    let actor = super::bot_requests::actor_role(&app, &headers).await?;
+    let actor = super::bot_requests::require_role(&app, &headers).await?;
     let responder_configured = super::roles::responder_configured(&app.db).await.map_err(up)?;
     match super::roles::ack(&app.db, &id, actor, responder_configured).await.map_err(up)? {
         AckOutcome::NotFound => Err(LcError::NotFound("inbox event".into())),
@@ -1576,10 +1577,29 @@ mod approval_decision_tests {
         assert!(matches!(&err, LcError::Forbidden(v) if v["reason"] == "bot_proof_mismatch"), "got {err:?}");
         assert_eq!(state(&app, e3).await, "pending");
 
-        // 4) 什麼身分都沒宣告＝使用者／UI，照舊什麼都結得掉。
+        // 4) 什麼身分都沒宣告：以前是「使用者／UI，什麼都結得掉」，issue #432 之後也是 403
+        //    ——不宣告曾經比宣告了卻證明不了更有權限，那個反差正是要消掉的東西。
         let e4 = ev(&app).await;
-        post_inbox_ack(State(app.clone()), Path(e4.clone()), HeaderMap::new()).await.unwrap();
-        assert_eq!(state(&app, e4).await, "handled");
+        let err = post_inbox_ack(State(app.clone()), Path(e4.clone()), HeaderMap::new()).await.unwrap_err();
+        let LcError::Forbidden(v) = &err else { panic!("沒宣告身分應該 403，卻是 {err:?}") };
+        assert_eq!(v["reason"], "role_required");
+        assert_eq!(state(&app, e4).await, "pending", "擋下來就不該動到事件");
+
+        // 5) 驗過、但那顆不是角色 bot：跟沒宣告一樣結不掉（`actor_role` 回 Ok(None)）。
+        let plain = crate::db::ulid();
+        sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES (?,'p-agm','plain','claude','plain-tok',?)")
+            .bind(&plain)
+            .bind(crate::db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let mut plain_h = HeaderMap::new();
+        plain_h.insert("X-AM-Bot-Id", plain.parse().unwrap());
+        plain_h.insert("X-AM-Bot-Token", "plain-tok".parse().unwrap());
+        let e5 = ev(&app).await;
+        let err = post_inbox_ack(State(app.clone()), Path(e5.clone()), plain_h).await.unwrap_err();
+        assert!(matches!(&err, LcError::Forbidden(v) if v["reason"] == "role_required"), "got {err:?}");
+        assert_eq!(state(&app, e5).await, "pending");
 
         app.db.close().await;
         std::fs::remove_dir_all(&app.data_dir).unwrap();

@@ -182,6 +182,24 @@ pub async fn verified_bot_id(app: &Arc<App>, headers: &axum::http::HeaderMap) ->
     Ok(Some(id.to_string()))
 }
 
+/// 角色端點專用：一定要證明得了身分，而且那顆要是角色 bot。
+///
+/// `actor_role` 的 `Ok(None)`（＝完全沒宣告身分）在這裡**不是**「使用者，什麼都能做」而是 403。
+/// 理由見 issue #432：`roles::ack` 以前對 `None` 用 `1=1`，於是角色 bot 只要不送標頭就結得掉
+/// 另一個角色的事件——帶對 token 反而被 409 擋下。把「不宣告」和「宣告了但證明不了」拉成同一種結果。
+///
+/// 代價寫在票上：人在一般 shell 裡跑 `bin/agm ack` 會 403，要在角色自己的 pane 裡跑。
+/// 共用 UI token 的前提下 daemon 分不出人與 bot，這是取捨、不是把洞補乾淨了。
+pub async fn require_role(app: &Arc<App>, headers: &axum::http::HeaderMap) -> Result<Role, LcError> {
+    actor_role(app, headers).await?.ok_or_else(|| {
+        LcError::Forbidden(json!({
+            "error": "forbidden",
+            "reason": "role_required",
+            "message": "這支只給 AGM 角色：要帶 X-AM-Bot-Id 與那顆 bot 自己的 X-AM-Bot-Token，而且那顆要是巡檢或協調者",
+        }))
+    })
+}
+
 /// 這一句要不要攔下來排進 inbox。`Ok(None)` = 照原本的路送。
 #[allow(clippy::too_many_arguments)]
 pub async fn intercept(
@@ -664,7 +682,7 @@ pub(crate) mod flow_tests {
         assert_eq!(again["inbox_event_id"], first["inbox_event_id"]);
 
         let first_id = first["inbox_event_id"].as_str().unwrap().to_string();
-        assert_eq!(roles::ack(&app.db, &first_id, Some(Role::Responder), true).await.unwrap(), roles::AckOutcome::Acked);
+        assert_eq!(roles::ack(&app.db, &first_id, Role::Responder, true).await.unwrap(), roles::AckOutcome::Acked);
         let after = intercept(&app, "patrol", "w1", "請核准重建", None, &[], true, "shim", ReplyMark::default()).await.unwrap().unwrap();
         assert_eq!(after["duplicate"], false, "結案之後同一句是新的申請");
         assert_ne!(after["inbox_event_id"], first["inbox_event_id"]);
@@ -676,7 +694,7 @@ pub(crate) mod flow_tests {
         // 帶 request id：結案了也是同一件事。
         let with_id = intercept(&app, "patrol", "w2", "請核准重啟", Some("r-7"), &[], true, "api", ReplyMark::default()).await.unwrap().unwrap();
         let wid = with_id["inbox_event_id"].as_str().unwrap().to_string();
-        roles::ack(&app.db, &wid, Some(Role::Responder), true).await.unwrap();
+        roles::ack(&app.db, &wid, Role::Responder, true).await.unwrap();
         let retry = intercept(&app, "patrol", "w2", "請核准重啟", Some("r-7"), &[], true, "api", ReplyMark::default()).await.unwrap().unwrap();
         assert_eq!((retry["duplicate"].as_bool(), retry["inbox_event_id"].as_str()), (Some(true), Some(wid.as_str())));
     }
@@ -748,8 +766,8 @@ pub(crate) mod flow_tests {
         let patrol = roles::due_for(&app.db, Role::Patrol, true, "2999-01-01T00:00:00Z", 5).await.unwrap();
         assert_eq!(patrol.len(), 1, "還是巡檢的");
         assert_eq!(roles::mark_delivered(&app.db, &[id.clone()], Role::Responder, "t-new", "ok").await.unwrap(), 0);
-        assert_eq!(roles::ack(&app.db, &id, Some(Role::Responder), true).await.unwrap(), roles::AckOutcome::ClaimedByOther("patrol".into()));
-        assert_eq!(roles::ack(&app.db, &id, Some(Role::Patrol), true).await.unwrap(), roles::AckOutcome::Acked);
+        assert_eq!(roles::ack(&app.db, &id, Role::Responder, true).await.unwrap(), roles::AckOutcome::ClaimedByOther("patrol".into()));
+        assert_eq!(roles::ack(&app.db, &id, Role::Patrol, true).await.unwrap(), roles::AckOutcome::Acked);
     }
 
     /// inbox 清單的角色條件要在 SQL 的 LIMIT 之前：最舊的一整頁都是別人的事件時，自己的待辦
