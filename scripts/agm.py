@@ -827,6 +827,24 @@ def cmd_approval(client: Client, cfg: dict, args) -> object:
     return client.post(f"/api/supervisor/approvals/{urllib.parse.quote(args.approval_id)}/decide", body)
 
 
+def single_line_token(raw: str, where: str) -> str:
+    """把讀進來的內容收成「單獨一行」的 token；多行直接拒絕。
+
+    `.strip()` 只去頭尾空白，中間的換行會留在 token 裡整串送出去，而 daemon 只會回一句
+    「token 不符」——查的人得自己想到 `wc -l`（issue #477，i407 審核）。檔案與 stdin 兩條路
+    用同一份規則（i267 審核：以前只有檔案那條有）。尾端多一個空行不算多行。
+    """
+    lines = [ln for ln in raw.splitlines() if ln.strip()]
+    if len(lines) > 1:
+        raise AgmError(
+            "bad_args",
+            f"{where} 有 {len(lines)} 行；token 是單獨一行，"
+            "多半是誤把別的東西也寫進去了（送出去只會換來一句 token 不符）",
+            2,
+        )
+    return lines[0].strip() if lines else ""
+
+
 def lease_token_of(args) -> str:
     """`--lease-token-file` / `--lease-token -`（stdin）/ `--lease-token <值>`，取一個。
 
@@ -872,22 +890,12 @@ def lease_token_of(args) -> str:
                 raw = fh.read().decode("utf-8")
             except (OSError, UnicodeDecodeError) as e:
                 raise AgmError("bad_args", f"讀不到 lease token 檔 {path}：{e}", 2) from e
-        # 多行就拒絕（i407 審核）：`.strip()` 只去頭尾空白，中間的換行會留在 token 裡整串送出去，
-        # daemon 只會回「token 不符」，查的人得自己想到 `wc -l`。缺檔、空檔都給了明確訊息，這個也要給。
-        lines = [ln for ln in raw.splitlines() if ln.strip()]
-        if len(lines) > 1:
-            raise AgmError(
-                "bad_args",
-                f"lease token 檔 {path} 有 {len(lines)} 行；token 是單獨一行，"
-                "多半是誤把別的東西也寫進去了（送出去只會換來一句 token 不符）",
-                2,
-            )
-        tok = lines[0].strip() if lines else ""
+        tok = single_line_token(raw, f"lease token 檔 {path}")
         if not tok:
             raise AgmError("bad_args", f"lease token 檔 {path} 是空的", 2)
         return tok
     if inline == "-":
-        tok = sys.stdin.read().strip()
+        tok = single_line_token(sys.stdin.read(), "--lease-token - 的 stdin")
         if not tok:
             raise AgmError("bad_args", "--lease-token - 要從 stdin 讀，但 stdin 是空的", 2)
         return tok
