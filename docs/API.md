@@ -1555,8 +1555,26 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
 刪 row，可重複執行。舊資料庫的既有列（都是舊流程「檔案寫完才 insert」留下來的）打開時一律回填 `ready`。
 
 ### `GET /api/attachments/{id}`
-回原始位元組（原 MIME）。要 `X-AM-Token`，UI 用 fetch 轉 object URL，不能直接放 `<img src>`。只有 `state='ready'`
+回原始位元組。要 `X-AM-Token`，UI 用 fetch 轉 object URL，不能直接放 `<img src>`。只有 `state='ready'`
 的附件讀得到，`staging`／`failed` 一律 404。
+
+送出去的 `Content-Type` **不是**上傳時收到的那個（那是呼叫端自己給的，`POST …/attachments` 刻意什麼都收）：
+走白名單，`image/png|jpeg|gif|webp`、`image/svg+xml`、`application/pdf`、`text/plain` 之外一律
+`application/octet-stream`。一律 `X-Content-Type-Options: nosniff` 與
+`Content-Security-Policy: sandbox; default-src 'none'`；**只有 `image/*` 是 `Content-Disposition: inline`**，
+其餘（含 pdf）都是 `attachment`（#471，同 `outbox/file` 的規則：使用者的 HTML 不該在 daemon 這個 origin
+跑起來，UI token 就在這個 origin 的 localStorage）。
+
+兩個刻意的取捨：
+
+- **`image/svg+xml` 留在白名單且 inline**。svg 可以帶腳本，但瀏覽器對 SVG **不做內容嗅探**——落成
+  `octet-stream` 會讓現有的 svg 縮圖直接變破圖（UI 是 `<img src={blobUrl}>`）。`<img>` 裡的 SVG 本來就
+  不會執行腳本，真的被導航到時由上面的 `sandbox` 擋。**注意** `URL.createObjectURL` 只保留 MIME、不帶
+  回應標頭，所以之後若要加「在新分頁開啟附件」，不能靠這個 CSP，要另外處理。
+- **`application/pdf` 在白名單裡但不 inline**。白名單管的是「下載下來的型別要對」，內嵌與否是另一件事，
+  而 UI 目前沒有 pdf 預覽；要做預覽時再一起評估。
+
+`attachments.mime` 照舊原樣存、原樣出現在附件 JSON 裡，UI 判斷要不要畫縮圖看的是那個，不受影響。
 
 ### prompt / 群組聊天帶附件
 `POST /api/bots/{id}/prompt` 與 `POST /api/projects/{id}/chat` 可帶 `"attachments": ["01M1…"]`：
