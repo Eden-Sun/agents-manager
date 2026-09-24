@@ -63,17 +63,63 @@ pub async fn restore(conn: &HostConn, bot_id: &str) -> Result<Option<String>> {
     }
 }
 
-/// 清掉回收區裡放超過 `keep` 的（看名字裡的時間，不看 mtime）。回清掉幾份。
-pub async fn gc(conn: &HostConn, keep: Duration) -> Result<usize> {
+/// 兩道一起跑，跟本機 [`crate::bot_trash::gc_with_cap`] 同一套政策（#441）：先清放超過 `keep` 的
+/// （看名字裡的時間，不看 mtime——`mv` 不更新目錄 mtime），再看總量，還超過 `max_bytes` 就從**最舊的**
+/// 開始清到降下來；最新那一份永遠留著（剛刪掉的那顆才是最可能要還原的）。回 `(過期清掉幾份, 因為超量再清掉幾份)`。
+///
+/// 只有時間規則不夠：#141／#196 那兩次遠端磁碟被塞爆都是「清得不夠快」，而七天之內連刪十幾顆 bot 時，
+/// 時間規則一份都不會清。
+///
+/// **跟 [`restore`] 不互斥**：`restore` 挑中一份剛好跨過期限的、而這裡在它 `mv` 之前就 `rm -rf` 掉，
+/// `restore` 的 `set -e` 會讓腳本失敗、[`restore_for`] 記一行 warn 不擋還原。窗口極窄（那一份本來下一輪
+/// 也要過期），代價是那個目錄拿不回來，不值得為它加鎖。
+pub async fn gc(conn: &HostConn, keep: Duration, max_bytes: u64) -> Result<(usize, usize)> {
     let cutoff = now_ms().saturating_sub(keep.as_millis());
+    let max_kb = max_bytes / 1024;
+    // basename 是 `move_in` 造的 `<bot_id>.<毫秒>`（ULID，不含空白），所以第二道可以用行為單位排序；
+    // 不是這個形狀的一律不動——那不是我們放的。`$T` 本身有空白也沒關係，只有 basename 進 sort。
     let script = format!(
-        "T={t}\nC={cutoff}\nn=0\nif [ -d \"$T\" ]; then\n  for e in \"$T\"/*.*; do\n    [ -d \"$e\" ] || continue\n    ms=${{e##*.}}\n    case \"$ms\" in ''|*[!0-9]*) continue;; esac\n    if [ \"$ms\" -le \"$C\" ]; then rm -rf \"$e\" && n=$((n+1)); fi\n  done\nfi\nprintf 'AM_TRASH_GC %s\\n' \"$n\"\n",
+        "T={t}\nC={cutoff}\nMAXK={max_kb}\nn=0\nev=0\n\
+         # 列出「我們放的、可以按大小淘汰的」：<毫秒> <KB> <basename>。抽成函式是因為 `case` 的樣式\n\
+         # 帶 `)`，寫在 $(...) 裡會被 shell 當成命令替換的結尾（macOS /bin/sh 實測語法錯誤）。\n\
+         am_list() {{\n\
+        \x20 for d in \"$T\"/*.*; do\n\
+        \x20   [ -d \"$d\" ] || continue\n\
+        \x20   b=${{d##*/}}; ms=${{b##*.}}\n\
+        \x20   case \"$ms\" in ''|*[!0-9]*) continue;; esac\n\
+        \x20   case \"$b\" in *[[:space:]]*) continue;; esac\n\
+        \x20   printf '%s %s %s\\n' \"$ms\" \"$(du -sk \"$d\" 2>/dev/null | awk 'NR==1{{print $1+0}}')\" \"$b\"\n\
+        \x20 done\n\
+         }}\n\
+         if [ -d \"$T\" ]; then\n\
+        \x20 for d in \"$T\"/*.*; do\n\
+        \x20   [ -d \"$d\" ] || continue\n\
+        \x20   b=${{d##*/}}; ms=${{b##*.}}\n\
+        \x20   case \"$ms\" in ''|*[!0-9]*) continue;; esac\n\
+        \x20   if [ \"$ms\" -le \"$C\" ]; then rm -rf \"$d\" && n=$((n+1)); fi\n\
+        \x20 done\n\
+        \x20 list=$(am_list | sort -n)\n\
+        \x20 total=$(printf '%s\\n' \"$list\" | awk '{{s+=$2}} END{{print s+0}}')\n\
+        \x20 cnt=$(printf '%s\\n' \"$list\" | grep -c '[^[:space:]]')\n\
+        \x20 i=0\n\
+        \x20 for b in $(printf '%s\\n' \"$list\" | awk '{{print $3}}'); do\n\
+        \x20   i=$((i+1))\n\
+        \x20   [ \"$i\" -lt \"$cnt\" ] || break\n\
+        \x20   [ \"$total\" -gt \"$MAXK\" ] || break\n\
+        \x20   k=$(du -sk \"$T/$b\" 2>/dev/null | awk 'NR==1{{print $1+0}}')\n\
+        \x20   if rm -rf \"$T/$b\"; then ev=$((ev+1)); total=$((total-k)); fi\n\
+        \x20 done\n\
+         fi\n\
+         printf 'AM_TRASH_GC %s %s\\n' \"$n\" \"$ev\"\n",
         t = sh_quote(&trash_dir(conn).await?),
     );
     let out = conn.ssh_exec(&script).await?;
     out.lines()
         .find_map(|l| l.strip_prefix("AM_TRASH_GC "))
-        .and_then(|n| n.trim().parse().ok())
+        .and_then(|rest| {
+            let mut it = rest.split_whitespace();
+            Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?))
+        })
         .ok_or_else(|| anyhow::anyhow!("remote bots-trash gc did not confirm: {}", out.trim()))
 }
 
@@ -106,10 +152,17 @@ pub async fn gc_host(app: &Arc<App>, host: &str) {
     if conn.is_local() {
         return;
     }
-    match gc(&conn, Duration::from_secs(crate::bot_trash::KEEP_DAYS * 86_400)).await {
-        Ok(0) => {}
-        Ok(n) => tracing::info!(host, removed = n, "removed expired remote bots-trash entries"),
-        Err(e) => tracing::warn!(host, error = %format!("{e:#}"), "could not clean expired remote bots-trash entries"),
+    // 保留期與總量上限都跟本機同一個值（#441）：同一套政策，兩邊不必分開記。
+    match gc(&conn, Duration::from_secs(crate::bot_trash::KEEP_DAYS * 86_400), crate::bot_trash::MAX_BYTES).await {
+        Ok((0, 0)) => {}
+        Ok((expired, evicted)) => {
+            if evicted > 0 {
+                tracing::warn!(host, expired, evicted, "remote bots-trash is over its size cap; removed the oldest entries");
+            } else {
+                tracing::info!(host, expired, "removed expired remote bots-trash entries");
+            }
+        }
+        Err(e) => tracing::warn!(host, error = %format!("{e:#}"), "could not clean the remote bots-trash"),
     }
 }
 
@@ -222,10 +275,89 @@ mod tests {
         for name in [format!("aaa.{old}"), format!("bbb.{fresh}"), "notes.txt.bak".into(), "ccc".into()] {
             std::fs::create_dir_all(trash.join(name)).unwrap();
         }
-        assert_eq!(gc(&conn, Duration::from_secs(crate::bot_trash::KEEP_DAYS * 86_400)).await.unwrap(), 1);
+        assert_eq!(gc(&conn, Duration::from_secs(crate::bot_trash::KEEP_DAYS * 86_400), crate::bot_trash::MAX_BYTES).await.unwrap(), (1, 0));
         assert_eq!(entries(&trash), vec!["bbb.".to_string() + &fresh.to_string(), "ccc".into(), "notes.txt.bak".into()]);
         gc_host(&env.app, "trashbox-gc").await;
         assert_eq!(entries(&trash).len(), 3, "沒有過期的就不動");
+    }
+
+    /// 在回收區種一份 `<id>.<ms>/`，裡面放 `kb` KB 的內容（`du -sk` 量得到的才算數）。
+    fn seed(trash: &Path, id: &str, ms: u128, kb: usize) -> PathBuf {
+        let d = trash.join(format!("{id}.{ms}"));
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("blob"), vec![b'x'; kb * 1024]).unwrap();
+        d
+    }
+
+    /// **#441**：時間規則擋不住「七天之內連刪十幾顆」——那正是 #141／#196 塞爆遠端磁碟的形狀。
+    /// 跟本機 `bot_trash::the_oldest_entries_go_first_once_the_trash_is_over_its_size_cap` 同一套：
+    /// 沒超量一個都不動；超量就從最舊的清到降下來，最新那一份永遠留著。
+    #[tokio::test]
+    async fn the_oldest_remote_entries_go_first_once_the_trash_is_over_its_size_cap() {
+        let (env, root) = remote("trashbox-cap").await;
+        let conn = env.app.hosts.get("trashbox-cap").await.unwrap();
+        let trash = root.join("bots-trash");
+        let now = now_ms();
+        let keep_long = Duration::from_secs(3600);
+        let (old, mid, new) = (seed(&trash, "b1", now - 3_000, 64), seed(&trash, "b2", now - 2_000, 64), seed(&trash, "b3", now - 1_000, 64));
+
+        // 沒超量、也沒過期：一個都不動。
+        assert_eq!(gc(&conn, keep_long, 100 * 1024 * 1024).await.unwrap(), (0, 0));
+        assert!(old.exists() && mid.exists() && new.exists());
+
+        // 上限只容得下一份：最舊的兩份走，最新那份留著。
+        assert_eq!(gc(&conn, keep_long, 100 * 1024).await.unwrap(), (0, 2));
+        assert!(!old.exists() && !mid.exists(), "最舊的先清");
+        assert!(new.exists(), "最新那一份永遠留著");
+    }
+
+    /// 過期的先清；清完還超量才輪到按大小淘汰，兩個數字分開回報（同本機 `expiry_runs_before_the_size_cap`）。
+    #[tokio::test]
+    async fn remote_expiry_runs_before_the_size_cap() {
+        let (env, root) = remote("trashbox-both").await;
+        let conn = env.app.hosts.get("trashbox-both").await.unwrap();
+        let trash = root.join("bots-trash");
+        let now = now_ms();
+        seed(&trash, "b1", now - 10_000, 64); // 過期
+        let mid = seed(&trash, "b2", now - 2_000, 64);
+        let new = seed(&trash, "b3", now - 1_000, 64);
+
+        assert_eq!(gc(&conn, Duration::from_millis(5_000), 100 * 1024).await.unwrap(), (1, 1));
+        assert!(!mid.exists() && new.exists());
+        assert_eq!(entries(&trash), vec![new.file_name().unwrap().to_string_lossy().into_owned()]);
+    }
+
+    /// 名字看不懂的（別人放進來的檔案、暫存目錄）一律不碰，兩道都一樣（同本機
+    /// `entries_with_unparseable_names_are_never_touched`）。
+    #[tokio::test]
+    async fn remote_entries_with_unparseable_names_are_never_touched() {
+        let (env, root) = remote("trashbox-alien").await;
+        let conn = env.app.hosts.get("trashbox-alien").await.unwrap();
+        let trash = root.join("bots-trash");
+        std::fs::create_dir_all(trash.join("not-a-trash-entry")).unwrap();
+        std::fs::write(trash.join("README"), "x").unwrap();
+
+        assert_eq!(gc(&conn, Duration::ZERO, 0).await.unwrap(), (0, 0));
+        assert_eq!(entries(&trash), vec!["README".to_string(), "not-a-trash-entry".into()]);
+    }
+
+    /// 名字帶空白的（只可能是人手動放的，`move_in` 造的是 `<ULID>.<毫秒>`）：第二道的排序以行為單位，
+    /// 這種跳過——不算進總量、也不會被淘汰。第一道（過期）跟本機一樣只看那串毫秒，這裡用很長的 `keep`
+    /// 把它排除，單獨釘住第二道的行為。
+    #[tokio::test]
+    async fn a_remote_entry_whose_name_has_spaces_is_never_evicted_for_size() {
+        let (env, root) = remote("trashbox-space").await;
+        let conn = env.app.hosts.get("trashbox-space").await.unwrap();
+        let trash = root.join("bots-trash");
+        let now = now_ms();
+        let spaced = trash.join(format!("has space.{}", now - 9_000));
+        std::fs::create_dir_all(&spaced).unwrap();
+        std::fs::write(spaced.join("blob"), vec![b'x'; 64 * 1024]).unwrap();
+        let ours = seed(&trash, "b1", now - 1_000, 64);
+
+        // 上限 0：我們自己的只剩最新那一份（永遠留著），帶空白的那個一個位元組都沒被動到。
+        assert_eq!(gc(&conn, Duration::from_secs(3600), 0).await.unwrap(), (0, 0));
+        assert!(spaced.exists() && ours.exists());
     }
 
     /// **#431**：清理不能只掛在「主機連上」那一次。常駐連線的主機不會再連一次，以前就永遠不清、
