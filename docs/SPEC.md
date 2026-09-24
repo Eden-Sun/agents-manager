@@ -2091,9 +2091,11 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   3. 選單由舊到新、最下面是 `(current)`，每則只顯示第一行（多行的加 `…`、太長的在欄寬截斷加 `…`）。一格一格往上（`Up`），每按一下等畫面真的變了再讀游標那一則，
      第一行對得上目標就停；同一句（第一行一樣）在網頁上較新的還有幾則，就先跳過幾則。游標不再移動＝到頂了還沒找到 → Esc 退出，409 `not_in_menu`。
   4. Enter 進確認頁：`│ <原文>` 印出那一則。**比對原文**：去掉所有空白（折行、換行不算差異）與 `[Image #N]` 佔位後要一模一樣；確認頁對長的訊息只印前 4 行或約 6 個折行、
-     **沒有截斷記號**，所以只對到前綴時要至少 4 行才算（比這短卻只是前綴＝另一則）。對不上 → Esc 兩下退出，409 `text_mismatch`（帶畫面上的字）；游標不在
-     `1. Restore conversation` → 一樣退出，409 `restore_not_selected`。**沒確認過絕不選 Restore。**
-  5. Enter 選 Restore，等畫面離開 rewind（6 秒）；沒離開 → 409 `rewind_unconfirmed`（不知道倒了沒有，訊息不標）。
+     **沒有截斷記號**，所以只對到前綴時要至少 4 行才算（比這短卻只是前綴＝另一則）。對不上 → Esc 兩下退出，409 `text_mismatch`（帶畫面上的字）。
+     **沒確認過絕不選 Restore。**
+  5. 按 `1` 選 Restore（**不是 Enter、也不看游標在哪一項**：選項是編號的，`1` 直接選 Restore，矮 pane 會把選項擠出畫面也照樣選得到——
+     fixture `claude_2.1.280_rewind_confirm_options_cut_off_14rows.txt` 就是這個情況。所以確認頁只比對原文，不檢查游標位置，
+     也沒有 `restore_not_selected` 這個錯誤碼）。等畫面離開 rewind（6 秒）；沒離開 → 409 `rewind_unconfirmed`（不知道倒了沒有，訊息不標）。
   6. **pane 的輸入列清掉**：CLI 放回輸入列的原文由 daemon 按 `ctrl+c` 清掉，原文改交給網頁的輸入框——留在 pane 裡的話，下一則打進去的 prompt 會接在它後面。
      輸入列裡的不是那一則就不清，回應 `pane_cleared: false`，網頁通知叫人到終端清。
   - 打字前先記 `runs.pane_typed`（同 §4.4a 的 slash 指令：直接對 pane 打過字的 run 之後的 prompt 走打字路線）；記不下來就不打。
