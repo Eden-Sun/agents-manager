@@ -363,6 +363,13 @@ impl Window {
     /// **解不開的 `resets_at` 當成已經過去**，沿用 `supervisor::policy::past` 的先例（那裡的註解：
     /// 「An unreadable timestamp must not park the manager forever」）：一筆壞資料不該把一個身分永久排除。
     ///
+    /// ⚠️ **這裡的 `true` 與 [`already_past`] 的 `true` 安全方向相反**（i264 review，#489）：
+    /// 四處對「解不開」的約定都是「當成已過去」，但後果不一樣——`already_past` 回 `true` 是**丟棄**那個值
+    /// （嚴格、安全），這支回 `true` 卻是**放行**（`exhausted_at` 變 `false`，身分看起來有額度）。
+    /// 兩者現在相容，只因為壞值在生產路徑上到不了這裡：寫 `Window.resets_at` 的入口
+    /// （claude `/usage`、claude statusline 的 `unix_to_rfc3339`、grok 的 `parse_reset`、快取載入）
+    /// 都自己算出來或驗過格式。**要是有人新增一個不驗格式的入口，這一行就會變成「壞值＝有額度」。**
+    ///
     /// **沒有 `resets_at` 就不算重置過**：那是「不知道」，不是「已經重置」。那種讀數由
     /// [`Quota::usable_window`] 用窗長收掉（issue #475）。
     ///
@@ -521,6 +528,11 @@ pub async fn load_cache(app: &Arc<App>) -> Result<usize> {
             q.limit_hit = None;
         }
         q.updated_at = if updated_at.trim().is_empty() { q.updated_at } else { updated_at };
+        // 快取列的 `resets_at` 也要驗一次（i264 review，#489）：`load_cache` 是裸的
+        // `serde_json::from_str`，而 `Window` 只 derive `Deserialize`，所以解不開的值**不是被丟掉，
+        // 是原樣載回記憶體**——接著 `reset_passed` 把它讀成「已經跨過重置」，那個身分一路看起來有額度，
+        // 直到下一次探測成功才好，而 `unix_to_rfc3339`／`already_past` 的兩個 warn 都不在這條路上。
+        drop_unparseable_resets(&mut q, &key);
         q.host = key.split_once('/').map_or(LOCAL_HOST, |(host, _)| host).to_string();
         restored.push((key, q));
     }
@@ -723,6 +735,21 @@ pub async fn set_fenced(app: &Arc<App>, host: &str, base: &str, q: Quota, fence:
     }
     set(app, host, base, q).await;
     Ok(())
+}
+
+/// 快取列載回來時把解不開的 `resets_at` 設成 `None`（i264 review，#489）。
+///
+/// `None` ＝「不知道」，由 [`Quota::usable_window`] 的窗長規則收尾（#475）；留著壞值會被
+/// [`Window::reset_passed`] 讀成「已重置」而放行一個可能真的見底的身分。
+fn drop_unparseable_resets(q: &mut Quota, key: &str) {
+    for (bucket, w) in [("five_hour", &mut q.five_hour), ("seven_day", &mut q.seven_day), ("fable", &mut q.fable)] {
+        let Some(w) = w.as_mut() else { continue };
+        let Some(raw) = w.resets_at.as_deref() else { continue };
+        if parse_utc(raw).is_none() {
+            tracing::warn!(key, bucket, resets_at = %raw, "快取裡的重置時間解不開，載回來時丟掉");
+            w.resets_at = None;
+        }
+    }
 }
 
 /// 這個重置時刻已經過去了嗎。**解不開的也算「已過去」**，所以不會被沿用（i204 review，#489）。
@@ -1441,6 +1468,37 @@ mod tests {
         assert_eq!(w.used_pct, 97.0, "前提：新讀數進去了");
         assert_eq!(w.resets_at, None, "解不開的重置時間不該被沿用下去");
         assert!(got.exhausted(Bucket::SevenDay, chrono::Utc::now()), "97% 用掉不能因為一個解不開的時間戳就被放行");
+    }
+
+    /// i264 review（#489）：`load_cache` 是裸的 `serde_json::from_str`，所以快取裡解不開的 `resets_at`
+    /// 原樣載回來，`reset_passed` 讀成「已重置」→ 那個身分載回來就看起來有額度。載入時要驗一次。
+    #[tokio::test]
+    async fn boot_drops_an_unparseable_reset_time_from_the_cache() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let key = quota_key(LOCAL_HOST, "claude");
+        let mut q = codex_q("boot", None);
+        q.updated_at = crate::db::now();
+        // 見底 ＋ 解不開的重置時間：載回來不能變成「有額度」。
+        q.five_hour = Some(Window { used_pct: 100.0, resets_at: Some("not-a-timestamp".into()), observed_at: Some(crate::db::now()) });
+        // 好的那個要留著。
+        let good = crate::db::iso_at(chrono::Utc::now() + chrono::Duration::days(3));
+        q.seven_day = Some(Window { used_pct: 10.0, resets_at: Some(good.clone()), observed_at: Some(crate::db::now()) });
+        sqlx::query("INSERT INTO quota_cache (key, quota_json, updated_at) VALUES (?,?,?)")
+            .bind(&key)
+            .bind(serde_json::to_string(&q).unwrap())
+            .bind(crate::db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        load_cache(&app).await.unwrap();
+        let got = app.quotas.lock().await.get(&key).cloned().unwrap();
+        let five = got.five_hour.as_ref().expect("窗本身留著，只是沒有重置時間");
+        assert_eq!(five.resets_at, None, "解不開的重置時間載回來時要丟掉");
+        assert!(!five.reset_passed(chrono::Utc::now()), "沒有重置時間＝不知道，不是「已重置」");
+        assert!(got.exhausted(Bucket::FiveHour, chrono::Utc::now()), "見底的讀數不能因為一個壞時間戳就被放行");
+        assert_eq!(got.seven_day.as_ref().and_then(|w| w.resets_at.clone()), Some(good), "解得開的不動");
     }
 
     /// `unix_to_rfc3339` 的字串分支要驗過格式才放行（i204 review，#489）：
