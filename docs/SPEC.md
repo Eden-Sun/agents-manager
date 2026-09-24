@@ -1420,7 +1420,8 @@ pane 打 `cargo` 就 permission denied）時，只 chmod 回 0755，不重寫內
   舊檔不動；斷線當下寫了一半的暫存檔沒有可執行位，超過 10 分鐘的殘留下一次會被掃掉；輸出沒有結尾標記（`AM_SHIM_SYNC_DONE`）就不當成功；
 - **只補已經有的**（`create_missing=false`）：沒有 `bin/` 或沒有那支 shim 的 bot 不生出新檔案；bot 啟動時的 `install_remote`（`create_missing=true`）
   也走同一支原子腳本（以前是 `cat > $D/herdr` 就地截斷，再 chmod）；
-- host 連不上時只 defer，不影響任何事：失敗（ssh 抖了）背景重試兩次（20、60 秒後），host 已掉線就放棄，下次連上再補（冪等）。
+- host 連不上時只 defer，不影響任何事：host 已掉線就放棄，下次連上再補（冪等）。
+- **失敗要退避重試、放棄要開票**（issue #534）：重試節奏是立刻／5 分／15 分／60 分（`REMOTE_RETRY_WAITS`）——以前是 20 與 60 秒，只夠撐過「ssh 抖一下」，那台在重開機、網路斷幾分鐘時三次全都趕不上，而下一次機會要等它**掉線再連上**（一直連著就等到 daemon 重啟）。都失敗、或腳本跑完但有檔案換不動時，記一行「gave up」（不再寫 will retry）並開 `remote_shim_stale` incident（degraded，`resource` 是 host 名，detail 帶原因與該去那台機器看什麼）；下一次補成就自動消失。
 
 - `herdr agent start <name> …`：`<name>` 不以 `$AM_AGENT_NAME-` 開頭就補前綴（截到 32 字）並在 stderr 說明。旗標可在名字前面，`--kind`/`--pane`/`--timeout` 的值不誤認，`--` 之後原封不動。
   **模型沿用**：`--` 之後沒有 `--model` 且 `--kind` 與母 bot 相同（或沒寫）時補 `-- --model $AM_MODEL`，claude 再補 `--effort $AM_EFFORT`；

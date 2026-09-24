@@ -94,6 +94,10 @@ pub struct App {
     /// `hookrecv::note_fold_stuck` 每輪更新，`supervisor::incidents` 的探針拿它開票。
     /// 記憶體、重啟重算（SPEC §18.9）：重啟後第一輪 drain 就會重新看到。
     pub spool_fold_stuck: tokio::sync::Mutex<std::collections::HashMap<String, (u32, i64)>>,
+    /// #534：`<host>` → 補版放棄的原因。`shim_refresh::spawn_remote_refresh` 重試用完（或部分檔案
+    /// 換不動）時寫進來，`supervisor::incidents` 的探針拿它開票，下一次補版成功就移除。
+    /// 記憶體、重啟重算（SPEC §18.9）：daemon 一重啟每台都會重連、重補一次。
+    pub remote_shim_stale: tokio::sync::Mutex<std::collections::HashMap<String, String>>,
     pub connected: std::sync::atomic::AtomicBool,
     pub default_connected: std::sync::atomic::AtomicBool,
     /// How "which account is this pid running under" gets answered (SPEC §16.6). Empty in a
@@ -211,6 +215,7 @@ impl App {
             judge_stuck_seen: Mutex::new(HashMap::new()),
             classify_failures: std::sync::atomic::AtomicU32::new(0),
             spool_fold_stuck: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            remote_shim_stale: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             connected: std::sync::atomic::AtomicBool::new(false),
             default_connected: std::sync::atomic::AtomicBool::new(false),
             proc_env: Default::default(),

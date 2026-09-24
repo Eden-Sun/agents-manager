@@ -513,6 +513,26 @@ pub async fn observe(app: &Arc<App>, thresholds: &Thresholds) -> Probed {
         }
     }
 
+    // #534：遠端 shim 補版放棄了。這一條跟上面兩條的理由一樣——**沒有別的探針會發現**：
+    // 那台上的 bot 都還在跑、hook 照進來，只是它們手上的 cargo／herdr 是舊版，
+    // 表現出來的是「工作沒被轉到外部編譯主機」「cargo 卡住」這種看起來像慢、不像壞的症狀。
+    {
+        let stale = app.remote_shim_stale.lock().await;
+        for (host, why) in stale.iter() {
+            out.push(Observation {
+                kind: REMOTE_SHIM_STALE_KIND.into(),
+                resource: host.clone(),
+                // 不是資料問題、也沒有人被擋住，但這台的每一次建置都可能踩到舊 shim 的 bug。
+                severity: "degraded".into(),
+                detail: json!({
+                    "why": why,
+                    "action": "那台機器：`ssh <host> df -h` 與 `ls -l <bot 目錄>/bin`（磁碟滿、權限、被改成目錄都會讓 mv 失敗）；修好之後等它重連、或重啟 daemon 會再補一次，急的話重啟那顆 bot 的 pane 也會重寫",
+                })
+                .to_string(),
+            });
+        }
+    }
+
     probed
 }
 
@@ -536,6 +556,9 @@ pub const SPOOL_FOLD_STUCK_LIMIT: u32 = 3;
 
 /// 這件事的 incident 種類。`resource` 是 `<host>/<bot_id>`：一台機器上可以只有某顆 bot 卡住。
 pub const SPOOL_FOLD_STUCK_KIND: &str = "remote_spool_stuck";
+
+/// #534：遠端 shim 補版放棄了。`resource` 是 host 名——一台機器一筆，補版是整台一起做的。
+pub const REMOTE_SHIM_STALE_KIND: &str = "remote_shim_stale";
 
 pub const ROLE_UNAVAILABLE_KIND: &str = "role_unavailable";
 /// 改名前的 kind（issue #459 的遷移用）。
@@ -801,6 +824,40 @@ mod tests {
 
         // 這一類要推進 inbox：壞的是那台機器的磁碟，不是通知那條路自己（對照 #472）。
         assert!(notifiable(SPOOL_FOLD_STUCK_KIND, "mac2/b1", false));
+    }
+
+    /// #534：遠端補版放棄之後要開票，補成之後要消失。`resource` 是 host 名。
+    #[tokio::test]
+    async fn a_host_whose_shims_could_not_be_refreshed_opens_an_incident() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let t = thresholds();
+        let of = |p: &Probed| -> Vec<String> {
+            p.seen.iter().filter(|o| o.kind == REMOTE_SHIM_STALE_KIND).map(|o| o.resource.clone()).collect()
+        };
+
+        assert!(of(&observe(&app, &t).await).is_empty(), "沒放棄過就不該有");
+
+        app.remote_shim_stale.lock().await.insert("mac2".into(), "重試 4 次都失敗，最後一個錯誤：connection refused".into());
+        let probed = observe(&app, &t).await;
+        let o = probed.seen.iter().find(|o| o.kind == REMOTE_SHIM_STALE_KIND).expect("放棄了就要開票");
+        assert_eq!(o.resource, "mac2");
+        assert_eq!(o.severity, "degraded");
+        assert!(o.detail.contains("connection refused"), "查的人要看得到最後那個錯誤：{}", o.detail);
+
+        // 下一次補成了：計數被移除，這一拍就不該再看到。
+        app.remote_shim_stale.lock().await.clear();
+        assert!(of(&observe(&app, &t).await).is_empty(), "補成之後不該還在");
+
+        // 壞的是那台機器，不是通知那條路：這一類要推進 inbox（對照 #472）。
+        assert!(notifiable(REMOTE_SHIM_STALE_KIND, "mac2", false));
+    }
+
+    /// #534：重試節奏是分鐘級的。20／60 秒只夠撐過「ssh 抖一下」，那台在重開機時三次全都趕不上，
+    /// 而下一次機會要等它掉線再連上。
+    #[test]
+    fn the_remote_retry_schedule_is_minutes_not_seconds() {
+        assert_eq!(crate::shim_refresh::REMOTE_RETRY_WAITS, [0, 300, 900, 3600]);
     }
 
     /// #472：分類器連續失敗到門檻才開 incident，而且**不推 inbox**——
