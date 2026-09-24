@@ -141,9 +141,22 @@ pub async fn observe(app: &Arc<App>, s: Sample) -> Result<()> {
     Ok(())
 }
 
-/// 多久以前的撞限還算「這一次清掉的」（issue #453）。比 5 小時窗寬一截，涵蓋週限與 daemon 重啟後
-/// 第一次成功回合；再舊的就讓它維持 NULL——那是「從未被清掉」，不是「N 天後才清掉」。
+/// 多久以前的撞限還算「這一次清掉的」（issue #453）。5 小時窗撞上去之後，下一次成功回合通常就在幾小時內，
+/// 24 小時已經很寬；再舊的讓它維持 NULL——那是「從未被清掉」，不是「N 天後才清掉」。
 const CLEAR_WINDOW_HOURS: i64 = 24;
+
+/// 週限用的下界（issue #453 的跟進審核）。**24 小時涵蓋不了週限**：撞了週限之後可能好幾天才有下一次
+/// 成功回合，用同一個下界會讓「真的撞週限又恢復」跟「那顆 bot 就此沒再跑過」在帳本上長得一模一樣，
+/// 之後照 `cleared_at IS NOT NULL` 篩樣本會把週限整批篩掉。窗本身是 7 天，多給一天涵蓋重置前後的誤差。
+const WEEKLY_CLEAR_WINDOW_HOURS: i64 = 24 * 8;
+
+/// 這一筆撞的是不是週限。`judge_shadow` 沒有窗別欄位，但存著命中的那一行（`matched_line`），
+/// 而講週限的橫幅一定帶得出「weekly」／「7-day」這類字（`lifecycle::screen::grok_limit_window` 用的是
+/// 同一個訊號）。認不出來就當 5 小時窗——寧可少蓋一筆，也不要把久遠的舊帳追認成剛剛清掉。
+fn weekly_limit_line(matched_line: &str) -> bool {
+    let low = matched_line.to_ascii_lowercase();
+    ["weekly", "7-day", "7 day", "seven day", "seven-day", "per week"].iter().any(|k| low.contains(k))
+}
 
 /// 成功回合清掉這顆 bot 的撞限時呼叫：把還沒對帳的那幾筆蓋上時刻。失敗只記 log。
 ///
@@ -155,18 +168,38 @@ const CLEAR_WINDOW_HOURS: i64 = 24;
 ///   額度真的沒回來），它本來就該停在 NULL。不設下界的話，幾天後那顆 bot 被 resume 的那一次清除，
 ///   會把這筆舊的追認成「剛剛清掉」，把「從未被清掉」這個事實改寫掉。
 pub async fn note_cleared(pool: &SqlitePool, bot_id: &str) {
-    let since = crate::db::iso_at(chrono::Utc::now() - chrono::Duration::hours(CLEAR_WINDOW_HOURS));
-    let res = sqlx::query(
-        "UPDATE judge_shadow SET cleared_at = ?
+    let now = chrono::Utc::now();
+    // 先撈最寬的窗，再逐筆按「撞的是哪個窗」決定算不算數：下界寫在 Rust，不必把橫幅的字串搬進 SQL。
+    let widest = crate::db::iso_at(now - chrono::Duration::hours(WEEKLY_CLEAR_WINDOW_HOURS));
+    let rows: Vec<(String, String, String)> = match sqlx::query_as(
+        "SELECT id, at, matched_line FROM judge_shadow
           WHERE bot_id = ? AND cleared_at IS NULL AND regex_verdict = 'limit_hit' AND at >= ?",
     )
-    .bind(crate::db::now())
     .bind(bot_id)
-    .bind(&since)
-    .execute(pool)
-    .await;
-    if let Err(e) = res {
-        tracing::debug!(bot = %bot_id, error = %e, "judge shadow rows not settled");
+    .bind(&widest)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::debug!(bot = %bot_id, error = %e, "judge shadow rows not settled");
+            return;
+        }
+    };
+    let cutoff = crate::db::iso_at(now - chrono::Duration::hours(CLEAR_WINDOW_HOURS));
+    let at_now = crate::db::now();
+    for (id, at, matched_line) in rows {
+        if at < cutoff && !weekly_limit_line(&matched_line) {
+            continue;
+        }
+        if let Err(e) = sqlx::query("UPDATE judge_shadow SET cleared_at = ? WHERE id = ? AND cleared_at IS NULL")
+            .bind(&at_now)
+            .bind(&id)
+            .execute(pool)
+            .await
+        {
+            tracing::debug!(bot = %bot_id, row = %id, error = %e, "judge shadow row not settled");
+        }
     }
 }
 
@@ -769,15 +802,16 @@ mod tests {
     #[tokio::test]
     async fn only_recent_limit_hits_are_settled_by_a_clear() {
         let (app, dir) = app_with(false, &[], "http://127.0.0.1:1/x").await;
-        let put = |id: &str, verdict: &str, at: String| {
-            let (app, id, verdict) = (app.clone(), id.to_string(), verdict.to_string());
+        let put = |id: &str, verdict: &str, at: String, line: &str| {
+            let (app, id, verdict, line) = (app.clone(), id.to_string(), verdict.to_string(), line.to_string());
             async move {
                 sqlx::query(
                     "INSERT INTO judge_shadow (id, at, bot_id, run_id, kind, matched_line, composer_idle, regex_verdict)
-                     VALUES (?, ?, 'B1', 'R1', 'claude', 'x', 1, ?)",
+                     VALUES (?, ?, 'B1', 'R1', 'claude', ?, 1, ?)",
                 )
                 .bind(&id)
                 .bind(&at)
+                .bind(&line)
                 .bind(&verdict)
                 .execute(&app.db)
                 .await
@@ -796,15 +830,20 @@ mod tests {
         };
         let hours_ago = |h: i64| crate::db::iso_at(chrono::Utc::now() - chrono::Duration::hours(h));
 
-        put("fresh", "limit_hit", hours_ago(1)).await;
-        put("stale", "limit_hit", hours_ago(CLEAR_WINDOW_HOURS + 1)).await;
-        put("stuck", "stuck_queued", hours_ago(1)).await;
+        put("fresh", "limit_hit", hours_ago(1), "You've hit your usage limit").await;
+        put("stale", "limit_hit", hours_ago(CLEAR_WINDOW_HOURS + 1), "You've hit your usage limit").await;
+        put("stuck", "stuck_queued", hours_ago(1), "x").await;
+        // 週限：撞了之後可能好幾天才有下一次成功回合，用 5 小時窗那個下界會把它整批漏掉（#453 跟進審核）。
+        put("weekly", "limit_hit", hours_ago(24 * 3), "You hit your weekly limit.").await;
+        put("weekly_old", "limit_hit", hours_ago(WEEKLY_CLEAR_WINDOW_HOURS + 1), "You hit your weekly limit.").await;
 
         note_cleared(&app.db, "B1").await;
 
         assert!(cleared("fresh").await.is_some(), "近期的撞限才是這次清掉的那一筆");
         assert!(cleared("stale").await.is_none(), "幾天前沒被清掉的撞限要維持 NULL，不是追認成剛剛清掉");
         assert!(cleared("stuck").await.is_none(), "stuck_queued 跟撞限無關，cleared_at 對它沒有意義");
+        assert!(cleared("weekly").await.is_some(), "三天前的週限就是這次清掉的：週限本來就可能隔幾天才恢復");
+        assert!(cleared("weekly_old").await.is_none(), "連週限的窗都過了：那是從未被清掉");
         std::fs::remove_dir_all(&dir).ok();
     }
 
