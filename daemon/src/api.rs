@@ -1915,6 +1915,15 @@ pub(crate) async fn restore_bot(State(app): State<Arc<App>>, Path(id): Path<Stri
             Err(e) => tracing::warn!(bot = %id, error = %e, "could not restore bot config dir from bots-trash"),
         }
     }
+    // 附件副本也是刪除時一起收進回收區的（#465）：不搬回來的話還原後對話還在、縮圖全破。
+    {
+        let att = crate::bot_trash::attachments_dir(&app.data_dir, &id);
+        match crate::bot_trash::restore_kind(&app.data_dir, &id, Some(crate::bot_trash::ATTACHMENTS), &att) {
+            Ok(Some(from)) => tracing::info!(bot = %id, from = %from.display(), "restored bot attachments from bots-trash"),
+            Ok(None) => {}
+            Err(e) => tracing::warn!(bot = %id, error = %e, "could not restore bot attachments from bots-trash"),
+        }
+    }
     crate::remote_trash::restore_for(&app, &id).await;
     app.emit("bot_changed", json!({"bot_id": id})).await;
     app.emit("project_changed", json!({"project_id": bot.project_id})).await;

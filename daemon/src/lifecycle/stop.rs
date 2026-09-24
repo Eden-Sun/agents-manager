@@ -408,6 +408,16 @@ pub async fn purge_bot_dir(app: &Arc<App>, bot_id: &str, host: &str) -> bool {
         tracing::warn!(host, bot = %bot_id, "invalid bot id; bot config dir left in place");
         return false;
     }
+    // 附件的 daemon 端副本（`attachments/<id>/`）不分本機／遠端都在這台（遠端 bot 也留一份做縮圖）。
+    // 以前刪 bot 完全沒人動它：沒有 TTL、沒有總量上限、也沒有任何程式碼路徑會再看它一眼（#465）。
+    // 一起搬進 `bots-trash`，就跟 `bots/<id>/` 受同一套 7 天＋總量上限，restore 也搬得回來。
+    // 搬不動只記 warning：這支的回傳值講的是「bot 設定目錄清掉了沒」，不改那個語意。
+    let att = crate::bot_trash::attachments_dir(&app.data_dir, bot_id);
+    match crate::bot_trash::move_in_kind(&app.data_dir, bot_id, Some(crate::bot_trash::ATTACHMENTS), &att) {
+        Ok(Some(to)) => tracing::info!(bot = %bot_id, dir = %att.display(), trash = %to.display(), "moved bot attachments to bots-trash"),
+        Ok(None) => {}
+        Err(e) => tracing::warn!(bot = %bot_id, dir = %att.display(), error = %e, "could not move bot attachments to bots-trash"),
+    }
     if host == LOCAL_HOST {
         let Ok(dir) = app.bot_dir(bot_id) else { return false };
         // 搬進回收區而不是刪（issue #406）：restore 時搬得回來。

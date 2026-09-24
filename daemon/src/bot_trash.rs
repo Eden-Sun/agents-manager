@@ -35,26 +35,58 @@ fn now_ms() -> u128 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()
 }
 
+/// 同一顆 bot 除了 `bots/<id>/` 之外還要收進回收區的目錄（issue #465）。回收區的項目名：
+/// `<id>.<毫秒>` 是 `bots/<id>/`，`<id>.<kind>.<毫秒>` 是這裡的其他目錄。兩種的結尾都是毫秒，
+/// 所以 [`entries`]（過期與總量上限）一視同仁；[`latest`] 認的是前者，`<kind>` 那種 `parse::<u128>`
+/// 會失敗、不會被當成 bot 目錄還原回去。
+pub const ATTACHMENTS: &str = "attachments";
+
+/// 這顆 bot 在資料目錄裡的附件副本（`attach::local_copy_dir` 的同一條路）。
+pub fn attachments_dir(data_dir: &Path, bot_id: &str) -> PathBuf {
+    data_dir.join(ATTACHMENTS).join(bot_id)
+}
+
+fn entry_name(bot_id: &str, kind: Option<&str>) -> String {
+    match kind {
+        Some(k) => format!("{bot_id}.{k}.{}", now_ms()),
+        None => format!("{bot_id}.{}", now_ms()),
+    }
+}
+
 /// 把 `dir`（某顆 bot 的 `bots/<id>/`）搬進回收區。`dir` 不存在＝`Ok(None)`。
 pub fn move_in(data_dir: &Path, bot_id: &str, dir: &Path) -> std::io::Result<Option<PathBuf>> {
+    move_in_kind(data_dir, bot_id, None, dir)
+}
+
+/// 同 [`move_in`]，但收的是這顆 bot 的其他目錄（`kind`，目前只有 [`ATTACHMENTS`]）。
+pub fn move_in_kind(data_dir: &Path, bot_id: &str, kind: Option<&str>, dir: &Path) -> std::io::Result<Option<PathBuf>> {
     if !dir.exists() {
         return Ok(None);
     }
     let root = root(data_dir);
     std::fs::create_dir_all(&root)?;
-    let dest = root.join(format!("{bot_id}.{}", now_ms()));
+    let dest = root.join(entry_name(bot_id, kind));
     std::fs::rename(dir, &dest)?;
     Ok(Some(dest))
 }
 
-/// 回收區裡這顆 bot 最新的那一份（名字是 `<id>.<毫秒>`）。
-fn latest(data_dir: &Path, bot_id: &str) -> Option<PathBuf> {
-    let prefix = format!("{bot_id}.");
+/// 回收區裡這顆 bot 最新的那一份（`<id>.<毫秒>`，或 `kind` 版的 `<id>.<kind>.<毫秒>`）。
+/// `attach::read` 用得到：附件搬進回收區之後，已刪 bot 的對話仍要讀得到縮圖（#465）。
+pub fn latest_kind(data_dir: &Path, bot_id: &str, kind: Option<&str>) -> Option<PathBuf> {
+    latest(data_dir, bot_id, kind)
+}
+
+fn latest(data_dir: &Path, bot_id: &str, kind: Option<&str>) -> Option<PathBuf> {
+    let prefix = match kind {
+        Some(k) => format!("{bot_id}.{k}."),
+        None => format!("{bot_id}."),
+    };
     std::fs::read_dir(root(data_dir))
         .ok()?
         .flatten()
         .filter_map(|e| {
             let name = e.file_name().to_str()?.to_string();
+            // `<id>.attachments.<ms>` 在 kind=None 時 strip 出來是 `attachments.<ms>`，parse 失敗＝不是 bot 目錄。
             let ms: u128 = name.strip_prefix(&prefix)?.parse().ok()?;
             Some((ms, e.path()))
         })
@@ -64,10 +96,16 @@ fn latest(data_dir: &Path, bot_id: &str) -> Option<PathBuf> {
 
 /// 還原：`bots/<id>/` 還不在時把回收區最新那份搬回去。已經在（重新啟動過、重建了）就不動，免得蓋掉新的。
 pub fn restore(data_dir: &Path, bot_id: &str, dir: &Path) -> std::io::Result<Option<PathBuf>> {
+    restore_kind(data_dir, bot_id, None, dir)
+}
+
+/// 同 [`restore`]，但還原的是 `kind` 那份。刪 bot 會把附件一起收進回收區，還原時要一起搬回來——
+/// 不然還原後對話還在、縮圖卻全破（已刪 bot 的對話本來就讀得到，API.md §10.4）。
+pub fn restore_kind(data_dir: &Path, bot_id: &str, kind: Option<&str>, dir: &Path) -> std::io::Result<Option<PathBuf>> {
     if dir.exists() {
         return Ok(None);
     }
-    let Some(src) = latest(data_dir, bot_id) else { return Ok(None) };
+    let Some(src) = latest(data_dir, bot_id, kind) else { return Ok(None) };
     if let Some(parent) = dir.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -236,6 +274,46 @@ mod tests {
 
         assert_eq!(gc_with_cap(&data, Duration::ZERO, 0), (0, 0));
         assert!(root(&data).join("not-a-trash-entry").exists() && root(&data).join("README").exists());
+        std::fs::remove_dir_all(&data).unwrap();
+    }
+
+    /// #465：附件副本要跟 `bots/<id>/` 一起進回收區、受同一套過期與總量上限，還原時一起搬回來，
+    /// 而且 `<id>.attachments.<ms>` 不能被當成 bot 目錄還原到 `bots/<id>/`。
+    #[test]
+    fn attachments_ride_the_same_trash_lifecycle_without_being_mistaken_for_the_bot_dir() {
+        let data = std::env::temp_dir().join(format!("am-trash-att-{}", crate::db::ulid()));
+        let bots = data.join("bots/B1");
+        let att = attachments_dir(&data, "B1");
+        std::fs::create_dir_all(&bots).unwrap();
+        std::fs::create_dir_all(&att).unwrap();
+        std::fs::write(bots.join("config"), "bot").unwrap();
+        std::fs::write(att.join("a.png"), "img").unwrap();
+
+        assert!(move_in(&data, "B1", &bots).unwrap().is_some());
+        assert!(move_in_kind(&data, "B1", Some(ATTACHMENTS), &att).unwrap().is_some());
+        assert!(!bots.exists() && !att.exists(), "兩個都搬走了");
+        assert_eq!(entries(&data).len(), 2, "兩份都要被 GC 看得到（過期與總量上限一視同仁）");
+
+        // 還原 bot 目錄時不能撈到 attachments 那份。
+        restore(&data, "B1", &bots).unwrap();
+        assert_eq!(std::fs::read_to_string(bots.join("config")).unwrap(), "bot");
+        restore_kind(&data, "B1", Some(ATTACHMENTS), &att).unwrap();
+        assert_eq!(std::fs::read_to_string(att.join("a.png")).unwrap(), "img");
+        std::fs::remove_dir_all(&data).unwrap();
+    }
+
+    /// 過期清理會把附件那份也收掉（以前 `attachments/<id>/` 永遠不會被任何人清）。
+    #[test]
+    fn expired_attachment_entries_are_collected_like_any_other() {
+        let data = std::env::temp_dir().join(format!("am-trash-attgc-{}", crate::db::ulid()));
+        let att = attachments_dir(&data, "B1");
+        std::fs::create_dir_all(&att).unwrap();
+        std::fs::write(att.join("a.png"), vec![b'x'; 32]).unwrap();
+        let moved = move_in_kind(&data, "B1", Some(ATTACHMENTS), &att).unwrap().unwrap();
+        assert!(moved.exists());
+        let (expired, _) = gc_with_cap(&data, Duration::ZERO, u64::MAX);
+        assert_eq!(expired, 1, "附件那份也要被過期清理收掉");
+        assert!(!moved.exists());
         std::fs::remove_dir_all(&data).unwrap();
     }
 
