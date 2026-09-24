@@ -706,6 +706,10 @@ label = "foo"
   把累積的未 ack 事件彙整成一則 `[AG Man 通知]`。health 偵測、watchdog、控制器 TICK 不受影響。總管 busy 時延後，送成功才開始下一個視窗。
   `0` = 不節流。上次喚醒時間存 `supervisors.last_notify_at`。改值要重啟 daemon。只管巡檢；協調者見 §18.15。
 - `[supervisor] responder_batch_secs`（預設 15）、`responder_max_backoff_secs`（預設 300）：協調者的短窗批次與重試上限（§18.15）。
+  `responder_max_backoff_secs` 與 `notify_max_attempts`（預設 5）**在解析設定時就夾下限**（Refs #504，跟 `panes.idle_close_secs`、
+  `build.max_concurrent` 同一條防呆規矩）：`notify_max_attempts` 至少 1（`0`／負數不是「不補送」，是每一筆事件一建立就算用完，
+  `due_for` 的 `notify_attempts < max` 從頭到尾不成立，沒有人會被叫醒），`responder_max_backoff_secs` 至少 10 秒（一個 controller
+  tick；`0` 會讓重試時間永遠等於「現在」，每個 tick 重寫一次角色列、推一次 SSE）。夾在解析層，讀取端抄漏 `.max(1)` 也不會破功。
 
 ## 6. 生命週期
 
