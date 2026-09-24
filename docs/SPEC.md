@@ -3302,6 +3302,15 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
   登入不了的 CLI 跑不完回合、送不出 hook，讀數只會停在舊的；而在回報裡引用那句話的 bot 是剛跑完一個回合才印得出那份回報，
   那一回合就會帶一份新的讀數進來。
   `stuck_at_login` **刻意不認**這個畫面（#427 第 1 項裁示）：擋住不送就等不到恢復訊號，觀測與攔截分開。
+- **notify 連續 3 個回合沒完成也算不可用**（issue #427）：`recover_unacked` 每拍在算 `why` 時，按角色收集「這一輪哪些
+  notify 回合是 `failed`」，整輪掃完才一次算給那個角色；已計入的回合 id 存成**集合**（不是計數器——`recover_unacked` 是
+  逐筆掃 inbox 事件的，同一角色一輪裡可以有好幾筆不同的 `notify_turn_id`，用「上一個算過的 id」去重時兩個壞回合兩輪就會
+  湊到 3）。這一輪只要有任何回合真的跑完就整個歸零；集合大小達到 `NOTIFY_STALL_LIMIT`（3）就併進 `role_state` 的不可用原因
+  `notify_stalled`。這跟 `responder_undeliverable`（根本送不出去）是兩件事：這一項是「送出去了、
+  但回合沒跑完」，#420 現場那四筆最後都是 `notify turn did not complete`，被送了 66／43／18／6 次才 gave_up。
+  不可用原因字串（對外契約）：`needs_login`／`waiting_quota`／`notify_stalled`／`no_run`。
+  **讀不到畫面不是故障**：那一拍只記 `probe_failed`，原因維持上一拍的結論，incident 不開也不解——沒有證據就宣告故障，
+  等於把核准從一顆其實健康的協調者手上搬走。同理，daemon 剛重啟、第一拍還沒跑時記憶體是空的，那是「還沒有結論」，不是故障。
 - **送到了卻沒人 ack 的補送有上限**（使用者 2026-09-17 裁示，取代先前「刻意不設上限」）：`recover_unacked` 把 delivered 而沒 ack 的事件放回 pending，
   以前沒有次數上限——協調者漏 ack 一則，opus-high 就每 `notify_ack_deadline_secs`（1800 秒）被叫醒一次，而且沒有任何人知道。
   現在送達 **5 次**（同看門狗的 `MAX_ATTEMPTS` 與巡檢的 `notify_max_attempts`：送五次沒人 ack，第六次也不會有人），
