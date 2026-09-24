@@ -123,8 +123,16 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   - **漂移核對涵蓋所有由程式建立的物件**（`db::schema_guard::check_drift`，migrate 的最後一步）：拿一顆全新的 in-memory
     DB 跑同一套 migrate（含交易 commit 之後才跑的子模組）當標準答案，既有 DB 要有其中每張表的每個欄位、每個索引與
     trigger（正規化後定義相同）。`CREATE … IF NOT EXISTS` 對既有 DB 是 no-op，漏了升級步驟就在啟動時講清楚是哪張表
-    哪一欄、哪個索引，不等某條路徑才炸成 column-not-found 或守衛默默停在舊規則。表的原文與約束不比（舊 DB 的表是
-    ALTER 一欄一欄補出來的，原文本來就不同）；標準答案裡沒有的東西（已移除功能留下的表、索引）不管。
+    哪一欄、哪個索引，不等某條路徑才炸成 column-not-found 或守衛默默停在舊規則。
+    **表的約束也比**（issue #470）：`CHECK` 與表層級的 `UNIQUE(…)`／`FOREIGN KEY(…)` 只存在建表語句裡，
+    `pragma_table_info` 看不到，所以放寬一個 CHECK 之後既有 DB 會安靜地留著舊約束——全新 DB 正常、測試全綠
+    （測試都是新 DB），只有正式機在寫新值時炸 `CHECK constraint failed`。比的是**帶約束的子句集合**而不是整段原文：
+    舊 DB 的表是 ALTER 一欄一欄補出來的，欄位順序與排版本來就不同，整段比會在每一顆升級過的資料庫上誤報。
+    約束對不上時訊息要指名哪張表、少了／多了哪個子句，並講明修法是重建表（`CREATE …_new` ＋ `INSERT …SELECT` ＋
+    `DROP` ＋ `RENAME`）而不是 `ALTER`——CHECK 改不了。**欄位層級的 `REFERENCES` 與 `PRIMARY KEY` 不比**：
+    前者在既有資料庫上真的對不上（pre-v2 的 `bot_previews` 沒有 `REFERENCES bots(id)`），算成漂移等於讓那種
+    資料庫從此開不起來，那是要重建表才補得回來的另一件事；後者已經由欄位的主鍵序管到了。
+    標準答案裡沒有的東西（已移除功能留下的表、索引）不管。
 - **到期動作不靠行程內的 timer 當唯一真相**（issue #75）：每一種「等一下再做」的到期時間都**存在 DB 的擁有者那一列**上——
   排隊 prompt 的重試 `turns.next_flush_at`、交辦重送 `supervisor_assignments.next_attempt_at`、等額度 `…resume_at`、
   協調者補送 `supervisor_inbox.notify_next_at`、總管看門狗 `supervisors.watchdog_next_at`、hook 事件 `hook_events.next_attempt_at`。

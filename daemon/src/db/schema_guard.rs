@@ -9,6 +9,11 @@
 //! 1. [`check_drift`]（每次開 DB）：`CREATE … IF NOT EXISTS` 對既有 DB 是 no-op，所以標準答案裡有、既有 DB 卻沒有
 //!    （或定義不同）的東西，就是某個 migrate 漏了升級步驟。在這裡講清楚，不要等到某條少走的路徑才炸成
 //!    sqlx 的 column-not-found，或是守衛默默停在舊規則。
+//!
+//!    「定義不同」對索引／trigger／view 是整段 DDL 原文比對；對**表**比的是欄位（名字、型別、NOT NULL、
+//!    預設值、主鍵序）**加上約束子句**（`CHECK`／`UNIQUE`／`FOREIGN KEY`／`REFERENCES`，見
+//!    [`constraint_defs`]）。表不整段比是刻意的：`ALTER TABLE ADD COLUMN` 會改寫 SQLite 存的建表語句，
+//!    升級過的資料庫跟全新的在欄位順序與排版上本來就不會一樣（issue #470）。
 //! 2. [`fingerprint`]＋`db::SCHEMA_HISTORY`（測試）：標準答案一變指紋就變，測試逼著 `SCHEMA_VERSION` 跟著升——
 //!    只改子模組的索引／trigger／約束也一樣，不靠人記得。
 
@@ -123,6 +128,26 @@ fn drift(want: &[SchemaObject], have: &[SchemaObject]) -> Vec<String> {
                     w.name
                 ));
             }
+            // 約束（issue #470）：`pragma_table_info` 看不到 `CHECK`／表層級的 `UNIQUE`／`FOREIGN KEY`，
+            // 而表以前從來不比 DDL 原文（只有下面的 `else if` 分支比，表走不到那裡）。於是放寬一個 CHECK
+            // 之後：全新 DB 正常、測試全綠（測試都是新 DB），既有 DB 安靜地留著舊約束，只有正式機在寫
+            // 新值時炸 `CHECK constraint failed`。
+            let (want_c, have_c) = (constraint_defs(&w.sql), constraint_defs(&h.sql));
+            if want_c != have_c {
+                let only_in = |a: &[String], b: &[String]| {
+                    let missing: Vec<&str> = a.iter().filter(|c| !b.contains(c)).map(String::as_str).collect();
+                    if missing.is_empty() { "（沒有）".to_string() } else { missing.join("；") }
+                };
+                problems.push(format!(
+                    "表 {} 的約束跟程式不同——這個資料庫少了：{}；多了：{}。`CREATE TABLE IF NOT EXISTS` 不會換掉既有的定義，\
+                     而 CHECK 沒辦法用 `ALTER TABLE` 改：要在建 {} 的那個 migrate 裡重建表\
+                     （`CREATE …_new` ＋ `INSERT …SELECT` ＋ `DROP` ＋ `RENAME`），並先處理違反新約束的舊資料。",
+                    w.name,
+                    only_in(&want_c, &have_c),
+                    only_in(&have_c, &want_c),
+                    w.name
+                ));
+            }
         } else if h.sql != w.sql {
             problems.push(format!(
                 "{} {} 的定義跟程式不同——這個資料庫：`{}`；程式：`{}`。`CREATE … IF NOT EXISTS` 不會換掉既有的定義，\
@@ -172,6 +197,61 @@ pub(super) fn check_pinned(fingerprint: &str, history: &[(i64, &str)]) -> Result
 /// `sqlite_master.sql` 存的是當初送進去的原文（只拿掉 `IF NOT EXISTS`）。同一個索引被不同排版的舊版建過
 /// （例如從 DDL 字串搬進 Rust 陣列、換行縮排不同）不能被當成定義不同：拿掉 `--` 註解、空白壓成一格、
 /// 括號／逗號／比較符號兩側的空白拿掉。引號裡的字元原樣保留。
+/// 一張表 DDL 裡帶約束的那幾段（issue #470）：`CHECK`、表層級的 `UNIQUE(…)` 與 `FOREIGN KEY(…)`。
+///
+/// 比的是**子句的集合**，不是整段 DDL：`ALTER TABLE … ADD COLUMN` 會把新欄位接在 SQLite 存的
+/// 建表語句尾巴，跟 `SCHEMA` 裡寫的位置不一定一樣，整段比會在每一顆升級過的資料庫上誤報
+/// （`old_layouts_and_leftovers_are_not_drift` 釘著這件事）。沒有約束關鍵字的欄位定義一律丟掉，
+/// 所以多一欄、少一欄、換順序都不算漂移——那些本來就由 `columns`／`col_defs` 管。
+///
+/// **故意不比欄位層級的 `REFERENCES` 與 `PRIMARY KEY`**：
+/// * `PRIMARY KEY` 已經由 `col_defs` 的主鍵序管，重複比只是多一條噪音；
+/// * 欄位層級的 `REFERENCES` 在既有資料庫上真的對不上——`preview` 的 pre-v2 `bot_previews` 是
+///   `bot_id TEXT PRIMARY KEY`，今天的 DDL 是 `bot_id TEXT PRIMARY KEY REFERENCES bots(id)`
+///   （`preview::tests::opening_a_pre_v2_database_adds_the_source_and_pid_columns` 釘著那個形狀）。
+///   把它算成漂移等於讓那種資料庫從此開不起來，而它已經這樣跑了好幾個月。那是**另一件事**
+///   （要重建表才補得回 FK），追在它自己的票，不要用一道啟動守衛把它變成當機。
+///
+/// 欄位層級的 `UNIQUE`（`name TEXT UNIQUE`，沒有括號）也不在內：它建出來的是 autoindex，
+/// `read_objects` 的 `sql IS NOT NULL` 本來就撈不到，比不了。
+///
+/// 輸入是 [`normalize_sql`] 過的原文（`--` 註解與多餘空白都已經沒了，`UNIQUE (a, b)` 會變成
+/// `UNIQUE(a,b)`，所以帶括號的關鍵字直接比字串就分得出表層級與欄位層級）。
+fn constraint_defs(sql: &str) -> Vec<String> {
+    const KEYWORDS: [&str; 3] = ["CHECK", "UNIQUE(", "FOREIGN KEY("];
+    let Some(open_paren) = sql.find('(') else { return Vec::new() };
+    let body = &sql[open_paren + 1..];
+    let mut defs: Vec<&str> = Vec::new();
+    let mut depth: i32 = 0;
+    let mut start: usize = 0;
+    for (i, c) in body.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' if depth == 0 => {
+                defs.push(&body[start..i]);
+                break;
+            }
+            ')' => depth -= 1,
+            ',' if depth == 0 => {
+                defs.push(&body[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    let mut out: Vec<String> = defs
+        .into_iter()
+        .map(str::trim)
+        .filter(|d| {
+            let upper = d.to_ascii_uppercase();
+            KEYWORDS.iter().any(|k| upper.contains(*k))
+        })
+        .map(str::to_string)
+        .collect();
+    out.sort();
+    out
+}
+
 fn normalize_sql(sql: &str) -> String {
     const TIGHT: &[char] = &['(', ')', ',', ';', '=', '<', '>', '!'];
     let mut out = String::with_capacity(sql.len());
@@ -400,6 +480,91 @@ mod tests {
         let err = check_drift(&pool).await.expect_err("trigger 內容不同").to_string();
         assert!(err.contains("trigger runs_agent_status_since"), "{err}");
         pool.close().await;
+    }
+
+    /// issue #470：表的 `CHECK` 只存在 `sqlite_master.sql`，`pragma_table_info` 看不到，而表以前
+    /// 從來不比 DDL 原文。於是「程式放寬了一個 CHECK」之後，既有資料庫會安靜地留著舊約束——
+    /// 全新 DB 正常、測試全綠（測試都是新 DB），只有正式機在寫新值時炸 `CHECK constraint failed`。
+    ///
+    /// `herdr_maintenance` 是獨立的表（沒有任何 FK 指向它），所以測試裡重建得起來。
+    #[tokio::test]
+    async fn a_tables_check_constraint_that_drifted_is_caught_on_an_existing_db() {
+        // 1) 舊 DB 的 CHECK 跟程式不一樣（程式是 `CHECK (id = 1)`）。
+        let (dir, path) = tmp_db();
+        {
+            let pool = open(&path).await.unwrap();
+            for s in [
+                "DROP TABLE herdr_maintenance",
+                "CREATE TABLE herdr_maintenance (id INTEGER PRIMARY KEY CHECK (id IN (1, 2)), opened_at TEXT NOT NULL,
+                   until TEXT NOT NULL, opened_by TEXT NOT NULL, reason TEXT)",
+            ] {
+                sqlx::query(s).execute(&pool).await.unwrap();
+            }
+            pool.close().await;
+        }
+        let err = open(&path).await.expect_err("CHECK 不同不該靜靜開起來").to_string();
+        assert!(err.contains("schema drift"), "{err}");
+        assert!(err.contains("herdr_maintenance"), "訊息要指名是哪張表：{err}");
+        // `normalize_sql` 會把空白收緊：`CHECK (id = 1)` → `CHECK(id=1)`。
+        assert!(err.contains("CHECK(id=1)"), "訊息要指名少了哪個子句：{err}");
+        assert!(err.contains("CHECK(id IN(1,2))"), "訊息要指名多了哪個子句：{err}");
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        // 2) 舊 DB 根本沒有那個 CHECK（＝程式後來才加上／放寬的那個方向）。
+        let (dir, path) = tmp_db();
+        {
+            let pool = open(&path).await.unwrap();
+            for s in [
+                "DROP TABLE herdr_maintenance",
+                "CREATE TABLE herdr_maintenance (id INTEGER PRIMARY KEY, opened_at TEXT NOT NULL,
+                   until TEXT NOT NULL, opened_by TEXT NOT NULL, reason TEXT)",
+            ] {
+                sqlx::query(s).execute(&pool).await.unwrap();
+            }
+            pool.close().await;
+        }
+        let err = open(&path).await.expect_err("少一個 CHECK 也是漂移").to_string();
+        assert!(err.contains("herdr_maintenance") && err.contains("CHECK(id=1)"), "{err}");
+        // 修法要講重建表，不要叫人去 ALTER（CHECK 改不了）。
+        assert!(err.contains("重建表"), "訊息要講清楚修法：{err}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 只挑帶約束的子句比，所以多一欄、少一欄、換順序都不是漂移——那些本來就由 `columns`／`col_defs` 管。
+    #[test]
+    fn only_constraint_clauses_count_as_a_tables_definition() {
+        let c = |sql: &str| constraint_defs(&normalize_sql(sql));
+        assert_eq!(c("CREATE TABLE t (a TEXT, b INTEGER)"), Vec::<String>::new(), "沒有約束就沒有子句");
+        // `ALTER TABLE ADD COLUMN` 會把新欄位接在 SQLite 存的建表語句尾巴：不能因此誤報。
+        assert_eq!(
+            c("CREATE TABLE t (a TEXT CHECK (a IN ('x')), b INTEGER)"),
+            c("CREATE TABLE t (a TEXT CHECK (a IN ('x')), b INTEGER, c TEXT)"),
+            "多一個沒有約束的欄位不算漂移"
+        );
+        // 順序不算：比的是集合。
+        assert_eq!(
+            c("CREATE TABLE t (a TEXT CHECK (a IN ('x')), b TEXT CHECK (b > 0))"),
+            c("CREATE TABLE t (b TEXT CHECK (b > 0), a TEXT CHECK (a IN ('x')))"),
+            "換順序不算漂移"
+        );
+        // 欄位層級的 REFERENCES 與 PRIMARY KEY 不在比對範圍內：pre-v2 的 `bot_previews` 少了前者，
+        // 算成漂移的話那種資料庫從此開不起來（見 `constraint_defs` 的說明）。
+        assert_eq!(
+            c("CREATE TABLE t (a TEXT PRIMARY KEY)"),
+            c("CREATE TABLE t (a TEXT PRIMARY KEY REFERENCES u(id))"),
+            "欄位層級的 FK 不算漂移"
+        );
+        // 真的改了約束就要看得出來。
+        assert_ne!(
+            c("CREATE TABLE t (a TEXT CHECK (a IN ('x')))"),
+            c("CREATE TABLE t (a TEXT CHECK (a IN ('x','y')))"),
+            "放寬 CHECK 要算漂移"
+        );
+        // CHECK 裡面的逗號不能把子句切斷（括號深度）。
+        assert_eq!(c("CREATE TABLE t (a TEXT CHECK (a IN ('x','y')), b TEXT)").len(), 1);
+        // 表層級的 FK 與 UNIQUE 也算。
+        let table_level = c("CREATE TABLE t (a TEXT, b TEXT, UNIQUE(a, b), FOREIGN KEY(a) REFERENCES u(id))");
+        assert_eq!(table_level.len(), 2, "{table_level:?}");
     }
 
     /// 正式 DB 開不起來的代價很大：舊版用別的排版建過的索引、已移除功能留下的表、索引、trigger，都不是漂移。
