@@ -3219,15 +3219,19 @@ button.model-tag:hover:not(:disabled) {
 /* mobile (≤ 640px)。斷點只有兩個（`hooks/useMediaQuery.ts`）：≤1024 抽屜、≤640 手機；1240/1160/1080 只收邊距不算斷點。
    版面與觸控通則集中在這裡（`docs/goals/mobile-rwd-2026-09-08.md`）。 */
 
-@media (width <= 640px) {
-  /* iOS 網址列伸縮時 `100%` 比可視區高，底部輸入區被推出去；用 `dvh`。 */
+/* iOS／iPadOS 的鍵盤不縮 layout viewport，所以高度要跟著 `--vvh`；抽屜版面（含 iPad 直式）一樣中招（issue #548）。 */
 
+@media (width <= 1024px) {
   html,
   body,
   #root {
     /* `--vvh` 是 `useViewportPin` 寫的 visualViewport 高度：iOS 鍵盤只動它，dvh 不動。 */
     height: var(--vvh, 100dvh);
   }
+}
+
+@media (width <= 640px) {
+  /* iOS 網址列伸縮時 `100%` 比可視區高，底部輸入區被推出去；用 `dvh`。 */
 
   /* 標題列要一直在最上面（2026-09-08 使用者回報）：iOS 鍵盤會捲整個文件，body 釘 fixed 就沒東西可捲；`.main-head` sticky 當保險。 */
 
