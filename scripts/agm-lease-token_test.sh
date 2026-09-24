@@ -119,9 +119,17 @@ out = subprocess.run([sys.executable, "-c", code], input="tok-from-stdin\n",
                      capture_output=True, text=True, env=dict(os.environ))
 ok("- 從 stdin 讀") if out.stdout.strip() == "tok-from-stdin" else bad("- 從 stdin 讀", out.stdout + out.stderr)
 
+# 8b. stdin 那條也是同一份規則（i267 審核：以前只有檔案那條擋多行）。
+two_lines = subprocess.run([sys.executable, "-c", code], input="FAKE-TOKEN-AAA\nFAKE-TOKEN-BBB\n",
+                           capture_output=True, text=True, env=dict(os.environ))
+if two_lines.returncode != 0 and "有 2 行" in (two_lines.stdout + two_lines.stderr):
+    ok("stdin 多行也擋，而且講出幾行")
+else:
+    bad("stdin 多行也擋，而且講出幾行", f"rc={two_lines.returncode} {two_lines.stdout}{two_lines.stderr}")
+
 # 9. 檔案權限的檢查是 open 之後才 fstat 的：程式碼層面確認，不要退回先 stat 再 open。
 src = open(os.environ["AGM_PY"], encoding="utf-8").read()
-body = src[src.index("def lease_token_of"):src.index("def cmd_lease")]
+body = src[src.index("def single_line_token"):src.index("def cmd_lease")]
 if "os.fstat(" in body and "O_NOFOLLOW" in body and "os.stat(" not in body:
     ok("先 open 再 fstat，而且不跟隨 symlink")
 else:
