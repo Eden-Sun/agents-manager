@@ -19,6 +19,39 @@ use std::sync::Arc;
 /// D4：claude 身分的調度順序，用盡才往下一個。
 pub const CLAUDE_ORDER: [&str; 3] = ["cc2", "cc1", "cc0"];
 
+/// 這顆 bot 現在在用哪個帳號，**用候選清單裡的名字講**（issue #468）。
+///
+/// `quota::billing_identity` 對「沒有設身分、跑 CLI 預設帳號」回 `None`——那是誠實的（它就是沒有名字），
+/// 但拿去跟 [`CLAUDE_ORDER`] 的名字比就永遠不相等，於是 `pick::quota_policy` 那道「挑到的還是同一個
+/// 身分就別換手」的守衛對這種 bot 永遠不成立：第一次撞限就換手，而換手是開新 bot＋新 session。
+///
+/// 這裡把預設帳號解析成它在候選清單裡的名字：**沒有自己 home 變數的那個身分就是預設帳號**
+/// （`quota::identity_shares_default`，跟額度 key 的收斂規則同一份）。順序也照 [`CLAUDE_ORDER`]，
+/// 跟 `pick` 挑的順序一致——兩個身分都收斂到預設帳號時，兩邊會講同一個名字。
+///
+/// 回 `None` ＝**查不出來**（這台主機的身分表還沒偵測完、或 kind 不是 claude）。呼叫端要把它當成
+/// 「不知道」，不是「沒有身分」：不知道就不要為了換身分丟掉一個 session。
+pub async fn billing_identity_named(app: &Arc<App>, host: &str, bot: &crate::db::Bot) -> anyhow::Result<Option<String>> {
+    if let Some(name) = crate::quota::billing_identity(app, bot).await? {
+        return Ok(Some(name));
+    }
+    Ok(default_identity_name(app, host, &bot.kind).await)
+}
+
+/// 這台主機上，哪個身分就是這個 kind 的預設帳號（沒有自己的 home 變數那個）。查不到回 `None`。
+pub async fn default_identity_name(app: &Arc<App>, host: &str, kind: &str) -> Option<String> {
+    if kind != "claude" {
+        return None;
+    }
+    let known = crate::tools::identities_for_host(app, host).await;
+    CLAUDE_ORDER.iter().find_map(|name| {
+        known
+            .iter()
+            .find(|i| i.kind == kind && i.name == *name && crate::quota::identity_shares_default(kind, &i.env))
+            .map(|i| i.name.clone())
+    })
+}
+
 /// 挑身分用的候選清單（照 [`CLAUDE_ORDER`]）。claude 以外的 kind 只有一把額度、沒有身分可輪換，
 /// 回一個名字為空的候選。
 ///
@@ -60,6 +93,105 @@ mod tests {
 
     fn identity(name: &str, kind: &str) -> crate::config::IdentityCfg {
         crate::config::IdentityCfg { name: name.into(), kind: kind.into(), host: None, env: Default::default(), args: Vec::new() }
+    }
+
+    fn identity_with(name: &str, kind: &str, env: &[(&str, &str)]) -> crate::config::IdentityCfg {
+        let mut c = identity(name, kind);
+        c.env = env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        c
+    }
+
+    async fn bot_with_identity(app: &Arc<App>, id: &str, identity: Option<&str>) -> crate::db::Bot {
+        sqlx::query("INSERT OR IGNORE INTO projects (id,path,label,created_at) VALUES ('p','/tmp','p',?)")
+            .bind(crate::db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO bots (id,project_id,name,kind,identity,hook_token,created_at) VALUES (?,'p',?,'claude',?,?,?)")
+            .bind(id)
+            .bind(id)
+            .bind(identity)
+            .bind(format!("tok-{id}"))
+            .bind(crate::db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        crate::db::bot(&app.db, id).await.unwrap().unwrap()
+    }
+
+    /// issue #468：跑 CLI 預設帳號的 bot 沒有身分名，拿空字串跟候選清單比就永遠「不是同一個身分」，
+    /// 於是第一次撞限就換手——而換手是開新 bot＋新 session。解析成候選清單裡的名字之後，
+    /// 挑到同一個帳號就是原地等。
+    #[tokio::test]
+    async fn a_bot_on_the_default_account_is_named_after_the_identity_that_shares_it() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let host = crate::config::LOCAL_HOST;
+        let plain = bot_with_identity(&app, "b-default", None).await;
+        let named = bot_with_identity(&app, "b-cc2", Some("cc2")).await;
+
+        // 偵測還沒跑完：**查不出來**，不是「沒有身分」——呼叫端要當成不知道而原地等。
+        assert_eq!(billing_identity_named(&app, host, &plain).await.unwrap(), None);
+
+        // cc2 有自己的 CLAUDE_CONFIG_DIR，cc1／cc0 沒有＝它們就是預設帳號。
+        app.tools.lock().await.insert(
+            host.to_string(),
+            crate::tools::HostTools {
+                tools: Default::default(),
+                identities: Default::default(),
+                shell_identities: vec![
+                    identity_with("cc2", "claude", &[("CLAUDE_CONFIG_DIR", "/home/me/.claude-cc2")]),
+                    identity_with("cc1", "claude", &[]),
+                    identity_with("cc0", "claude", &[]),
+                ],
+                utc_offset_secs: None,
+                herdr_cli: None,
+                checked_at: crate::db::now(),
+            },
+        );
+        // 順序照 CLAUDE_ORDER，跟 `pick` 挑的順序一致——兩個身分都收斂到預設帳號時兩邊講同一個名字。
+        assert_eq!(default_identity_name(&app, host, "claude").await.as_deref(), Some("cc1"));
+        assert_eq!(billing_identity_named(&app, host, &plain).await.unwrap().as_deref(), Some("cc1"));
+        // 有設身分的照舊，不經過這條路。
+        assert_eq!(billing_identity_named(&app, host, &named).await.unwrap().as_deref(), Some("cc2"));
+
+        // 解析出名字之後，挑到同一個帳號就是原地等，不是換手。
+        use super::pick::{quota_policy, Pick, QuotaPolicy};
+        let same = Pick::Use { identity: "cc1".into(), model: None, reason: "額度可用".into() };
+        let current = billing_identity_named(&app, host, &plain).await.unwrap();
+        assert_eq!(quota_policy(current.as_deref(), None, &same), QuotaPolicy::Wait, "不能為了換身分丟掉 session");
+    }
+
+    /// issue #468 的第二個出口：執行者跑預設帳號時，`exclude` 以前是 `None`，reviewer 就可能被挑成
+    /// 執行者正在用的那個帳號（review3 c1 L11 加 `--exclude` 要擋的正是這件事）。解析成名字之後擋得住。
+    #[tokio::test]
+    async fn a_reviewer_does_not_land_on_the_executors_default_account() {
+        use super::pick::{pick, Candidate, On5hLimit, Pick, Role};
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let host = crate::config::LOCAL_HOST;
+        app.tools.lock().await.insert(
+            host.to_string(),
+            crate::tools::HostTools {
+                tools: Default::default(),
+                identities: Default::default(),
+                shell_identities: vec![identity_with("cc0", "claude", &[])],
+                utc_offset_secs: None,
+                herdr_cli: None,
+                checked_at: crate::db::now(),
+            },
+        );
+        let executor = bot_with_identity(&app, "b-exec", None).await;
+        let exclude = billing_identity_named(&app, host, &executor).await.unwrap();
+        assert_eq!(exclude.as_deref(), Some("cc0"), "執行者的預設帳號要有名字才排除得掉");
+
+        // 這台只有 cc0（＝執行者正在用的那個帳號）：reviewer 挑不到別的身分，要講出來，不能退而求其次。
+        let cands = [Candidate { name: "cc0", disabled: false, quota: None }];
+        let got = pick(Role::Reviewer, &cands, On5hLimit::Wait, exclude.as_deref(), chrono::Utc::now());
+        assert!(matches!(got, Pick::NoIndependentReviewer { .. }), "{got:?}");
+        // 沒有解析（以前的行為）就擋不住：同一個帳號會被當成獨立的 reviewer。
+        let unguarded = pick(Role::Reviewer, &cands, On5hLimit::Wait, None, chrono::Utc::now());
+        assert!(matches!(unguarded, Pick::Use { .. }), "{unguarded:?}");
     }
 
     /// 這台沒有的身分不當候選；偵測還沒跑完時三個都留著（不知道不等於沒有）。

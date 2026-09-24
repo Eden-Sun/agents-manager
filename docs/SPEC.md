@@ -2917,6 +2917,14 @@ codex 橫幅的 `try again at` 沒有時區，印的是**那台主機**的當地
   **任務的撞限政策讀不到就不判**（issue #160）：換手／停下來問人要讀的任務、目標 bot、它在哪台主機、身分停用清單、reviewer 要排除的執行者身分，任何一項讀不到都是第三態——什麼都不改（排著的交辦 `hold` 10 秒、回合已結束的留著給下一輪對帳），不退回一般等待、不當成 `local`、不當成「沒有停用」、不拿掉排除條件；使用者暫停讀不到時等額度的交辦也不重送。驗證者挑不到 Fable 時，交辦收成 `quota_exhausted` 與任務停成 `no_fable_for_verifier`（含 `paused` 事件）是同一個交易，寫不進去就整批不發生、不發 paused。到期仍被擋（順延，或重送後又撞到）累計 6 次 → `awaiting_review` + `turn_status=quota_exhausted`（通常是 credits 真的用完）。
   mission 交辦另有 `quota_policy` 與身份切換，見 §18.14。撞限換手挑 reviewer 時 daemon 自己帶上 `exclude`＝該任務執行者現在的身分，
   挑不到別的身分就回 `no_independent_reviewer`（＝原地等），不會偷偷讓 reviewer 跟執行者同一個帳號（review3 c1 L11）。
+  **「跑 CLI 預設帳號」要先解析成候選清單裡的名字**（issue #468，`mission::billing_identity_named`）：
+  那種 bot 的 `quota::billing_identity` 回 `None`（它確實沒有名字），拿去跟候選清單比就永遠不相等，
+  於是「挑到的還是同一個身分就別換手」與 reviewer 的 `exclude` 兩道都會落空——第一次撞限就換手、
+  甚至換到它已經在用的那個帳號，而換手是開新 bot＋新 session。解析規則跟額度 key 的收斂同一份
+  （`quota::identity_shares_default`：沒有自己 home 變數的那個身分就是預設帳號），順序照 `CLAUDE_ORDER`，
+  跟 `pick` 挑的順序一致，所以兩個身分都收斂到預設帳號時兩邊講同一個名字。
+  **解析不出來（那台的身分表還沒偵測完）是第三態**：`quota_policy` 一律回 `Wait`——沒有證據說它現在在哪，
+  就不要為了換身分丟掉一個 session，下一輪查得到再判。
 
 ### 18.9 總管健康與系統 incident
 
