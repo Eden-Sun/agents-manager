@@ -165,7 +165,7 @@ mod tests {
     }
 
     fn w(used: f64, resets: &str) -> Option<Window> {
-        Some(Window { used_pct: used, resets_at: Some(resets.into()) })
+        Some(Window { observed_at: None, used_pct: used, resets_at: Some(resets.into()) })
     }
 
     fn quota(five: Option<Window>, seven: Option<Window>, fable: Option<Window>) -> Quota {

@@ -465,7 +465,7 @@ async fn a_dispatch_held_for_quota_goes_out_once_when_identity_a_gets_its_quota_
     // A 的新讀數：5 小時窗是撞限之後才開的（剛重置、用了 3%）——撞限作廢（`quota::recalibrate_limit_hit`）。
     let base = crate::quota::quota_base_for_host(&app, LOCAL_HOST, "claude", Some("cc-a")).await;
     let reopened = crate::quota::Quota {
-        five_hour: Some(crate::quota::Window { used_pct: 3.0, resets_at: Some(db::iso_at(chrono::Utc::now() + chrono::Duration::hours(5) + chrono::Duration::seconds(5))) }),
+        five_hour: Some(crate::quota::Window { observed_at: None, used_pct: 3.0, resets_at: Some(db::iso_at(chrono::Utc::now() + chrono::Duration::hours(5) + chrono::Duration::seconds(5))) }),
         seven_day: None,
         fable: None,
         reset_credits: None,
@@ -577,7 +577,7 @@ async fn a_quota_hold_survives_a_daemon_restart_then_goes_out_once_when_a_new_re
 
     let base = crate::quota::quota_base_for_host(&app, LOCAL_HOST, "claude", Some("cc-a")).await;
     let reopened = crate::quota::Quota {
-        five_hour: Some(crate::quota::Window { used_pct: 3.0, resets_at: Some(db::iso_at(chrono::Utc::now() + chrono::Duration::hours(5) + chrono::Duration::seconds(5))) }),
+        five_hour: Some(crate::quota::Window { observed_at: None, used_pct: 3.0, resets_at: Some(db::iso_at(chrono::Utc::now() + chrono::Duration::hours(5) + chrono::Duration::seconds(5))) }),
         seven_day: None,
         fable: None,
         reset_credits: None,

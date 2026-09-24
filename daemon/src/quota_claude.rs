@@ -196,7 +196,7 @@ pub fn parse_claude_usage(screen: &str, now: DateTime<Local>, account: Option<&s
         // 純文字（`claude -p "/usage"`）：百分比與重置時間都在同一行。
         if let Some(used_pct) = parse_used_pct(&lines[i]) {
             let resets_at = resets_tail(&lines[i]).and_then(|t| parse_claude_reset(t, now));
-            let w = Window { used_pct, resets_at };
+            let w = Window { observed_at: None, used_pct, resets_at };
             match kind {
                 "five" => five = Some(w),
                 "seven" => seven = Some(w),
@@ -222,7 +222,7 @@ pub fn parse_claude_usage(screen: &str, now: DateTime<Local>, account: Option<&s
             j += 1;
         }
         if let Some(used_pct) = pct {
-            let w = Window { used_pct, resets_at: resets };
+            let w = Window { observed_at: None, used_pct, resets_at: resets };
             match kind {
                 "five" => five = Some(w),
                 "seven" => seven = Some(w),
@@ -403,7 +403,7 @@ pub fn parse_claude_usage_report(segment: &str, account: Option<&str>) -> Option
         DateTime::parse_from_rfc3339(s).ok().map(|t| crate::db::iso_at(t.to_utc()))
     };
     let win = |row: &Value| -> Option<Window> {
-        Some(Window { used_pct: row.get("percent")?.as_f64()?.clamp(0.0, 100.0), resets_at: iso(row) })
+        Some(Window { observed_at: None, used_pct: row.get("percent")?.as_f64()?.clamp(0.0, 100.0), resets_at: iso(row) })
     };
     let (mut five, mut seven, mut fable) = (None, None, None);
     for row in limits {

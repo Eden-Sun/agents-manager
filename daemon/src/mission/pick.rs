@@ -305,7 +305,7 @@ mod tests {
     }
 
     fn w(used: f64, resets: &str) -> Option<Window> {
-        Some(Window { used_pct: used, resets_at: Some(resets.into()) })
+        Some(Window { observed_at: None, used_pct: used, resets_at: Some(resets.into()) })
     }
 
     fn q(five: f64, seven: f64, fable: Option<f64>) -> Quota {
@@ -388,7 +388,7 @@ mod tests {
     #[test]
     fn an_unreadable_reset_time_does_not_park_the_identity_forever() {
         let mut quota = q(100.0, 10.0, Some(10.0));
-        quota.five_hour = Some(Window { used_pct: 100.0, resets_at: Some("not-a-timestamp".into()) });
+        quota.five_hour = Some(Window { observed_at: None, used_pct: 100.0, resets_at: Some("not-a-timestamp".into()) });
         let qs = [("cc0", Some(quota))];
         let pick = pick(Role::Executor, &cands(&qs), On5hLimit::Wait, None, now());
         assert_eq!(used(&pick), ("cc0", None), "壞掉的時間戳不該讓這個身分永久用不了：{pick:?}");
@@ -402,7 +402,7 @@ mod tests {
     #[test]
     fn a_wait_never_carries_an_unreadable_reset_time() {
         let mut quota = q(10.0, 100.0, Some(10.0));
-        quota.seven_day = Some(Window { used_pct: 100.0, resets_at: Some("garbage".into()) });
+        quota.seven_day = Some(Window { observed_at: None, used_pct: 100.0, resets_at: Some("garbage".into()) });
         quota.limit_hit = Some(LimitHit {
             message: "You've reached your limit".into(),
             until: Some("2026-09-13T18:00:00Z".into()),
@@ -421,7 +421,7 @@ mod tests {
     #[test]
     fn a_critical_window_without_a_reset_time_still_blocks() {
         let mut quota = q(100.0, 10.0, Some(10.0));
-        quota.five_hour = Some(Window { used_pct: 100.0, resets_at: None });
+        quota.five_hour = Some(Window { observed_at: None, used_pct: 100.0, resets_at: None });
         let qs = [("cc0", Some(quota))];
         let pick = pick(Role::Executor, &cands(&qs), On5hLimit::Wait, None, now());
         assert!(matches!(pick, Pick::Wait { .. }), "看不出重置過沒有，就還是擋著：{pick:?}");
@@ -478,7 +478,7 @@ mod tests {
     #[test]
     fn the_banner_says_which_bucket_and_that_beats_guessing() {
         let now = chrono::DateTime::parse_from_rfc3339("2026-09-16T10:00:00Z").unwrap().with_timezone(&Utc);
-        let w = |used: f64| Some(crate::quota::Window { used_pct: used, resets_at: Some("2026-09-23T00:00:00Z".into()) });
+        let w = |used: f64| Some(crate::quota::Window { observed_at: None, used_pct: used, resets_at: Some("2026-09-23T00:00:00Z".into()) });
         let mut q = crate::quota::Quota {
             five_hour: w(96.0), // 剛好也快滿
             seven_day: w(40.0),
@@ -506,7 +506,7 @@ mod tests {
         );
         let five_reset = |t: &str| {
             let mut q2 = q.clone();
-            q2.five_hour = Some(crate::quota::Window { used_pct: 96.0, resets_at: Some(t.into()) });
+            q2.five_hour = Some(crate::quota::Window { observed_at: None, used_pct: 96.0, resets_at: Some(t.into()) });
             q2
         };
         let mut q3 = five_reset("2026-09-16T14:00:00Z");

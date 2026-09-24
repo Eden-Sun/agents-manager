@@ -2640,7 +2640,7 @@ mod manager_quota_tests {
     use crate::quota::{Quota, Window};
 
     fn reading(used: f64, reset: &str) -> Quota {
-        let w = Some(Window { used_pct: used, resets_at: Some(reset.into()) });
+        let w = Some(Window { observed_at: None, used_pct: used, resets_at: Some(reset.into()) });
         Quota { five_hour: w.clone(), seven_day: w.clone(), fable: w, reset_credits: None, limit_hit: None, plan: None,
                 updated_at: crate::db::now(), source: "test".into(), account: None, host: "local".into() }
     }
@@ -2852,7 +2852,7 @@ mod mission_quota_tests {
     }
 
     fn quota(five: f64, seven: f64, fable: f64) -> Quota {
-        let w = |u: f64, r: &str| Some(Window { used_pct: u, resets_at: Some(r.into()) });
+        let w = |u: f64, r: &str| Some(Window { observed_at: None, used_pct: u, resets_at: Some(r.into()) });
         Quota {
             five_hour: w(five, "2999-01-01T05:00:00Z"),
             seven_day: w(seven, "2999-01-07T00:00:00Z"),

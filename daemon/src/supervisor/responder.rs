@@ -1228,7 +1228,7 @@ mod flow_tests {
 
     /// 有讀數、沒撞限、視窗也還有：明確「可以用」。
     fn available() -> Quota {
-        let w = |used: f64| Some(crate::quota::Window { used_pct: used, resets_at: Some("2999-01-01T05:00:00Z".into()) });
+        let w = |used: f64| Some(crate::quota::Window { observed_at: None, used_pct: used, resets_at: Some("2999-01-01T05:00:00Z".into()) });
         Quota { five_hour: w(10.0), seven_day: w(20.0), fable: w(10.0), reset_credits: None, limit_hit: None, plan: None,
                 updated_at: crate::db::now(), source: "test".into(), account: None, host: "local".into() }
     }
@@ -1244,7 +1244,7 @@ mod flow_tests {
         let app = fx::app().await;
         fx::configure_responder(&app).await;
         let bot = roles::responder_bot(&app.db).await.unwrap().unwrap();
-        let w = |at: &str| Some(crate::quota::Window { used_pct: 99.0, resets_at: Some(at.into()) });
+        let w = |at: &str| Some(crate::quota::Window { observed_at: None, used_pct: 99.0, resets_at: Some(at.into()) });
         let mut q = available();
         q.five_hour = w("2999-01-01T05:00:00.500Z");
         q.seven_day = w("2999-01-01T05:00:00Z");
@@ -1253,8 +1253,8 @@ mod flow_tests {
 
         // 撞限橫幅沒說幾點恢復時，取三格裡最近的重置——同樣照時刻。
         let mut q = available();
-        q.five_hour = Some(crate::quota::Window { used_pct: 10.0, resets_at: Some("2999-01-01T05:00:00.500Z".into()) });
-        q.seven_day = Some(crate::quota::Window { used_pct: 10.0, resets_at: Some("2999-01-01T05:00:00Z".into()) });
+        q.five_hour = Some(crate::quota::Window { observed_at: None, used_pct: 10.0, resets_at: Some("2999-01-01T05:00:00.500Z".into()) });
+        q.seven_day = Some(crate::quota::Window { observed_at: None, used_pct: 10.0, resets_at: Some("2999-01-01T05:00:00Z".into()) });
         q.fable = None;
         q.limit_hit = Some(LimitHit { message: "You've hit your limit".into(), until: None, at: crate::db::now(), bucket: None });
         app.quotas.lock().await.insert("claude:cc0".into(), q);
@@ -1462,7 +1462,7 @@ mod flow_tests {
         fx::configure_responder(&app).await;
         let bot = roles::responder_bot(&app.db).await.unwrap().unwrap();
         let key = "claude:cc0".to_string();
-        let w = |used: f64| Some(crate::quota::Window { used_pct: used, resets_at: Some("2999-01-01T05:00:00Z".into()) });
+        let w = |used: f64| Some(crate::quota::Window { observed_at: None, used_pct: used, resets_at: Some("2999-01-01T05:00:00Z".into()) });
 
         let mut empty = available();
         empty.five_hour = None;

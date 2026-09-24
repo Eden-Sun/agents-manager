@@ -295,6 +295,21 @@ pub async fn pollable_hosts(app: &Arc<App>) -> Vec<String> {
 pub struct Window {
     pub used_pct: f64,
     pub resets_at: Option<String>,
+    /// 這一桶最後一次**真的出現在新讀數裡**的時間（issue #475，i267 review）。
+    ///
+    /// 不能用 `Quota::updated_at` 代替：那是**整筆**讀數最後寫入的時間，而 [`set`] 會刻意沿用新讀數
+    /// 缺的窗（statusline 被截斷只剩 7d 時把舊的 5h 原樣搬過來），`updated_at` 卻蓋成現在。
+    /// statusline 每幾秒進來一次，於是被沿用的那一桶年齡永遠是 0，「比窗長還舊」永遠不成立——
+    /// #475 想修的「同一次 uptime 內永久排除」在那條路上等於沒修到。
+    ///
+    /// 沿用時原樣保留，只有那一桶真的在新讀數裡才更新。`seed_limit_hit`／`restore_limit_hit` 只改
+    /// `limit_hit` 與 `updated_at`（它們繞過 [`set`]，直接改 map 裡那一筆），窗是原本那幾個，
+    /// 所以 `observed_at` 自然留著——年齡不會被一次撞限記錄重設。
+    ///
+    /// `None` = 不知道（這個欄位出現以前寫的快取列），這時退回 `updated_at`。那種列在下一次真讀數
+    /// 進來（走 [`set`]）就會補上。
+    #[serde(default)]
+    pub observed_at: Option<String>,
 }
 
 /// 各桶的窗長。`recalibrate_limit_hit` 與 pane 讀數也用同一組數字。
@@ -365,9 +380,10 @@ impl Window {
 /// Manual impl so `low` / `critical` go over the wire as computed fields.
 impl Serialize for Window {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        let mut st = s.serialize_struct("Window", 4)?;
+        let mut st = s.serialize_struct("Window", 5)?;
         st.serialize_field("used_pct", &self.used_pct)?;
         st.serialize_field("resets_at", &self.resets_at)?;
+        st.serialize_field("observed_at", &self.observed_at)?;
         st.serialize_field("low", &self.low())?;
         st.serialize_field("critical", &self.critical())?;
         st.end()
@@ -423,9 +439,14 @@ impl Quota {
         }
     }
 
-    /// 這筆讀數本身比那一桶的窗長還舊嗎。`updated_at` 解不開就回 `false`（不知道年齡，不亂判）。
+    /// **那一桶的讀數**比它自己的窗長還舊嗎。
+    ///
+    /// 年齡看 [`Window::observed_at`]（那一桶最後一次真的出現在新讀數裡的時間），沒有才退回
+    /// `Quota::updated_at`。不能只看 `updated_at`：[`set`] 會沿用新讀數缺的窗，而 `updated_at`
+    /// 蓋成現在，被沿用的那一桶年齡永遠是 0（i267 review，#475）。解不開就回 `false`（不知道年齡，不亂判）。
     fn reading_older_than_window(&self, b: Bucket, now: chrono::DateTime<chrono::Utc>) -> bool {
-        match parse_utc(&self.updated_at) {
+        let at = self.window_of(b).and_then(|w| w.observed_at.as_deref()).unwrap_or(&self.updated_at);
+        match parse_utc(at) {
             Some(at) => now - at >= b.len(),
             None => false,
         }
@@ -587,7 +608,7 @@ pub fn quota_from_codex(result: &Value) -> Option<Quota> {
     let rl = result.get("rateLimits")?;
     let window = |v: Option<&Value>| -> Option<Window> {
         let v = v?;
-        Some(Window { used_pct: v.get("usedPercent")?.as_f64()?, resets_at: unix_to_rfc3339(v.get("resetsAt")) })
+        Some(Window { observed_at: None, used_pct: v.get("usedPercent")?.as_f64()?, resets_at: unix_to_rfc3339(v.get("resetsAt")) })
     };
     let mins = |v: Option<&Value>| v.and_then(|x| x.get("windowDurationMins")).and_then(|m| m.as_i64());
     let (p, s) = (rl.get("primary"), rl.get("secondary"));
@@ -625,6 +646,7 @@ pub fn quota_from_statusline(payload: &Value, account: Option<&str>) -> Option<Q
         Some(Window {
             used_pct: v.get("used_percentage")?.as_f64()?,
             resets_at: unix_to_rfc3339(v.get("resets_at")),
+            observed_at: None,
         })
     };
     let five = window(rl.get("five_hour"));
@@ -693,6 +715,13 @@ pub async fn set(app: &Arc<App>, host: &str, base: &str, mut q: Quota) {
     for k in &stale {
         if quotas.remove(k).is_some() {
             tracing::info!(host, stale = %k, bare = %key, "dropped a split quota key that now resolves to the bare key");
+        }
+    }
+    // issue #475（i267 review）：**這一次真的帶進來的**窗蓋上觀測時間；下面沿用舊窗時原樣保留它。
+    // 沒有這一步，被沿用的那一桶會跟著 `updated_at` 一直「看起來很新」，窗長到期永遠不成立。
+    for w in [&mut q.five_hour, &mut q.seven_day, &mut q.fable].into_iter().flatten() {
+        if w.observed_at.is_none() {
+            w.observed_at = Some(if q.updated_at.trim().is_empty() { crate::db::now() } else { q.updated_at.clone() });
         }
     }
     // A window the new reading lacks keeps the previous value: statusLine has no Fable and
@@ -1092,7 +1121,7 @@ pub async fn snapshot(app: &Arc<App>) -> Value {
 
 /// codex 狀態列的剩餘量；沒有 `resets_at`，交給 [`set`] 沿用。
 pub fn quota_from_codex_status(q: &crate::codex_live::CodexStatusQuota, account: Option<&str>) -> Option<Quota> {
-    let win = |left: Option<f64>| left.map(|l| Window { used_pct: (100.0 - l).clamp(0.0, 100.0), resets_at: None });
+    let win = |left: Option<f64>| left.map(|l| Window { observed_at: None, used_pct: (100.0 - l).clamp(0.0, 100.0), resets_at: None });
     let (five, seven) = (win(q.five_hour_left), win(q.weekly_left));
     if five.is_none() && seven.is_none() {
         return None;
@@ -1282,7 +1311,7 @@ mod tests {
     fn a_window_is_exhausted_only_while_its_window_is_still_open() {
         let t = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&chrono::Utc);
         let now = t("2026-09-13T12:00:00Z");
-        let w = |used: f64, resets: Option<&str>| Window { used_pct: used, resets_at: resets.map(String::from) };
+        let w = |used: f64, resets: Option<&str>| Window { observed_at: None, used_pct: used, resets_at: resets.map(String::from) };
 
         assert!(w(100.0, Some("2026-09-13T15:00:00Z")).exhausted_at(now), "見底、窗還沒到 → 用盡");
         assert!(!w(100.0, Some("2026-09-13T10:00:00Z")).exhausted_at(now), "見底但窗兩小時前就重置了 → 不算用盡");
@@ -1294,6 +1323,65 @@ mod tests {
         assert!(!w(100.0, None).reset_passed(now));
     }
 
+    /// issue #475（i267 review）：年齡要跟著**窗**走，不是跟著整筆讀數走。
+    ///
+    /// 走真的 `set()` 路徑：先送一筆「5h 見底、沒有 resets_at」，之後 statusline 一直只帶 7d
+    /// （`set` 會把舊的 5h 原樣沿用，而 `updated_at` 蓋成現在）。只看 `updated_at` 的話那筆 5h
+    /// 年齡永遠是 0，窗長到期永遠不成立——這條會紅。
+    #[tokio::test]
+    async fn a_carried_over_window_keeps_its_own_age_across_repeated_statuslines() {
+        let app = crate::testing::env().await.app.clone();
+        let key = quota_key(LOCAL_HOST, "claude");
+        let win = |used: f64| Some(Window { used_pct: used, resets_at: None, observed_at: None });
+
+        // 第一筆：5h 見底、7d 還有，兩個都沒有 resets_at。觀測時間是 6 小時前。
+        let mut first = codex_q("statusline", None);
+        first.updated_at = crate::db::iso_at(chrono::Utc::now() - chrono::Duration::hours(6));
+        first.five_hour = win(100.0);
+        first.seven_day = win(10.0);
+        set(&app, LOCAL_HOST, "claude", first).await;
+
+        // 之後 statusline 只帶 7d（被截斷）：5h 被 `set` 沿用，`updated_at` 是現在。
+        for _ in 0..3 {
+            let mut later = codex_q("statusline", None);
+            later.updated_at = crate::db::now();
+            later.five_hour = None;
+            later.seven_day = win(10.0);
+            set(&app, LOCAL_HOST, "claude", later).await;
+        }
+
+        let got = app.quotas.lock().await.get(&key).cloned().unwrap();
+        assert_eq!(got.five_hour.as_ref().map(|w| w.used_pct), Some(100.0), "前提：5h 真的被沿用了");
+        assert!(got.updated_at > crate::db::iso_at(chrono::Utc::now() - chrono::Duration::minutes(1)), "前提：整筆的 updated_at 是現在");
+        let observed = got.five_hour.as_ref().and_then(|w| w.observed_at.clone()).expect("沿用的窗要帶著自己的觀測時間");
+        assert!(observed < crate::db::iso_at(chrono::Utc::now() - chrono::Duration::hours(5)), "觀測時間要留在 6 小時前：{observed}");
+
+        let now = chrono::Utc::now();
+        assert!(!got.exhausted(Bucket::FiveHour, now), "5h 的讀數 6 小時前觀測、又沒有 resets_at → 不算用盡");
+        assert!(got.usable_window(Bucket::FiveHour, now).is_none(), "當成沒有讀數");
+        // 7d 每次都真的帶進來，年齡是現在，照舊算數。
+        assert!(got.usable_window(Bucket::SevenDay, now).is_some());
+    }
+
+    /// 撞限記錄（繞過 `set`、只改 `limit_hit` 與 `updated_at`）不該把窗的年齡重設。
+    #[tokio::test]
+    async fn recording_a_limit_hit_does_not_reset_a_windows_age() {
+        let app = crate::testing::env().await.app.clone();
+        let key = quota_key(LOCAL_HOST, "claude");
+        let mut first = codex_q("statusline", None);
+        first.updated_at = crate::db::iso_at(chrono::Utc::now() - chrono::Duration::hours(6));
+        first.five_hour = Some(Window { used_pct: 100.0, resets_at: None, observed_at: None });
+        first.seven_day = Some(Window { used_pct: 10.0, resets_at: None, observed_at: None });
+        set(&app, LOCAL_HOST, "claude", first).await;
+
+        let until = crate::db::iso_at(chrono::Utc::now() + chrono::Duration::hours(1));
+        seed_limit_hit(&app, LOCAL_HOST, "claude", &until, "You've reached your limit", Some("five_hour".into())).await;
+
+        let got = app.quotas.lock().await.get(&key).cloned().unwrap();
+        let observed = got.five_hour.as_ref().and_then(|w| w.observed_at.clone()).expect("窗還在，觀測時間也還在");
+        assert!(observed < crate::db::iso_at(chrono::Utc::now() - chrono::Duration::hours(5)), "撞限記錄不該把年齡重設：{observed}");
+    }
+
     /// issue #475（i266 review）：`resets_at` 是 `None` 的見底讀數在 `exhausted_at` 眼裡永遠用盡，
     /// 沒有任何時間能讓它翻回來。這條規則以前只在 `load_cache` 開機跑一次，所以同一次 uptime 內
     /// 照樣永久卡住——而這台 daemon 常連跑好幾天。現在每次判斷都跑。
@@ -1302,7 +1390,7 @@ mod tests {
         let now = chrono::Utc::now();
         let q = |age: chrono::Duration, resets: Option<String>| {
             let mut x = Quota {
-                five_hour: Some(Window { used_pct: 100.0, resets_at: resets }),
+                five_hour: Some(Window { observed_at: None, used_pct: 100.0, resets_at: resets }),
                 seven_day: None,
                 fable: None,
                 reset_credits: None,
@@ -1313,7 +1401,7 @@ mod tests {
                 account: None,
                 host: LOCAL_HOST.into(),
             };
-            x.seven_day = Some(Window { used_pct: 10.0, resets_at: None });
+            x.seven_day = Some(Window { observed_at: None, used_pct: 10.0, resets_at: None });
             x
         };
         // 沒有 resets_at：窗長（5h）之內照舊算用盡，超過就不算。
@@ -1332,7 +1420,7 @@ mod tests {
     #[test]
     fn the_window_length_follows_the_bucket() {
         let now = chrono::Utc::now();
-        let full = Window { used_pct: 100.0, resets_at: None };
+        let full = Window { observed_at: None, used_pct: 100.0, resets_at: None };
         let q = Quota {
             five_hour: Some(full.clone()),
             seven_day: Some(full.clone()),
@@ -1359,7 +1447,7 @@ mod tests {
         let now = chrono::Utc::now();
         let mut q = codex_q("test", None);
         q.updated_at = "not-a-timestamp".into();
-        q.five_hour = Some(Window { used_pct: 100.0, resets_at: None });
+        q.five_hour = Some(Window { observed_at: None, used_pct: 100.0, resets_at: None });
         assert!(q.exhausted(Bucket::FiveHour, now), "不知道年齡就不拿年齡當理由");
     }
 
@@ -1389,7 +1477,7 @@ mod tests {
     async fn an_old_statusline_snapshot_cannot_replace_newer_quota_windows() {
         let app = crate::testing::env().await.app.clone();
         let now = chrono::Utc::now();
-        let window = |used_pct, resets_at| Window { used_pct, resets_at: Some(iso(resets_at)) };
+        let window = |used_pct, resets_at| Window { observed_at: None, used_pct, resets_at: Some(iso(resets_at)) };
         let mut current = codex_q("statusline", None);
         current.five_hour = Some(window(0.0, now + chrono::Duration::hours(4)));
         current.seven_day = Some(window(0.0, now + chrono::Duration::days(6)));
@@ -1415,18 +1503,18 @@ mod tests {
         let app = crate::testing::env().await.app.clone();
         let reset = chrono::Utc::now() + chrono::Duration::hours(4);
         let mut current = codex_q("statusline", None);
-        current.five_hour = Some(Window { used_pct: 40.0, resets_at: Some(iso(reset)) });
+        current.five_hour = Some(Window { observed_at: None, used_pct: 40.0, resets_at: Some(iso(reset)) });
         current.source = "statusline".into();
         set(&app, LOCAL_HOST, "claude", current).await;
 
         let mut stale = codex_q("statusline", None);
-        stale.five_hour = Some(Window { used_pct: 10.0, resets_at: Some(iso(reset)) });
+        stale.five_hour = Some(Window { observed_at: None, used_pct: 10.0, resets_at: Some(iso(reset)) });
         stale.source = "statusline".into();
         set(&app, LOCAL_HOST, "claude", stale).await;
         assert_eq!(app.quotas.lock().await.get("claude").unwrap().five_hour.as_ref().unwrap().used_pct, 40.0);
 
         let mut probe = codex_q("claude-usage", None);
-        probe.five_hour = Some(Window { used_pct: 12.0, resets_at: Some(iso(reset)) });
+        probe.five_hour = Some(Window { observed_at: None, used_pct: 12.0, resets_at: Some(iso(reset)) });
         set(&app, LOCAL_HOST, "claude", probe).await;
         let q = app.quotas.lock().await.get("claude").cloned().unwrap();
         assert_eq!(q.source, "claude-usage");
@@ -1436,8 +1524,8 @@ mod tests {
     /// 一顆 claude session 的 statusLine：`five` 是 5h 窗 (已用, 重置)，沒有就是那顆最後一次 API 回合落在已結束的窗裡。
     fn claude_statusline(five: Option<(f64, chrono::DateTime<chrono::Utc>)>, seven: (f64, chrono::DateTime<chrono::Utc>)) -> Quota {
         let mut q = codex_q("statusline", None);
-        q.five_hour = five.map(|(used_pct, at)| Window { used_pct, resets_at: Some(iso(at)) });
-        q.seven_day = Some(Window { used_pct: seven.0, resets_at: Some(iso(seven.1)) });
+        q.five_hour = five.map(|(used_pct, at)| Window { observed_at: None, used_pct, resets_at: Some(iso(at)) });
+        q.seven_day = Some(Window { observed_at: None, used_pct: seven.0, resets_at: Some(iso(seven.1)) });
         q
     }
 
@@ -1500,8 +1588,8 @@ mod tests {
         let jitter = chrono::Duration::milliseconds(594);
         set(&app, LOCAL_HOST, "claude", claude_statusline(None, (97.0, seven_reset))).await;
         let mut probe = codex_q("claude-usage", None);
-        probe.five_hour = Some(Window { used_pct: 6.0, resets_at: Some(iso(five_reset + jitter)) });
-        probe.seven_day = Some(Window { used_pct: 12.0, resets_at: Some(iso(seven_reset + jitter)) });
+        probe.five_hour = Some(Window { observed_at: None, used_pct: 6.0, resets_at: Some(iso(five_reset + jitter)) });
+        probe.seven_day = Some(Window { observed_at: None, used_pct: 12.0, resets_at: Some(iso(seven_reset + jitter)) });
         set(&app, LOCAL_HOST, "claude", probe).await;
         assert_eq!(claude_seven_day(&app).await, 12.0, "探測直接覆寫");
 
@@ -1520,8 +1608,8 @@ mod tests {
     async fn the_status_line_updates_the_numbers_without_losing_the_reset_time() {
         let app = crate::testing::env().await.app.clone();
         let from_server = Quota {
-            five_hour: Some(Window { used_pct: 0.0, resets_at: Some("2026-09-13T12:00:00Z".into()) }),
-            seven_day: Some(Window { used_pct: 50.0, resets_at: Some("2026-09-18T00:00:00Z".into()) }),
+            five_hour: Some(Window { observed_at: None, used_pct: 0.0, resets_at: Some("2026-09-13T12:00:00Z".into()) }),
+            seven_day: Some(Window { observed_at: None, used_pct: 50.0, resets_at: Some("2026-09-18T00:00:00Z".into()) }),
             fable: None,
             reset_credits: Some(ResetCredits { available: 1, title: None, expires_at: None }),
             limit_hit: None,
@@ -1663,8 +1751,8 @@ mod tests {
         let screen = |left: u32| format!("\n› Ask Codex\n  gpt-6-astra low · /tmp · Context 20% used · 5h {left}% left · weekly 65% left\n");
         let server = |used: f64, resets: chrono::DateTime<chrono::Utc>| {
             let mut q = codex_q("codex-app-server", None);
-            q.five_hour = Some(Window { used_pct: used, resets_at: Some(iso(resets)) });
-            q.seven_day = Some(Window { used_pct: 35.0, resets_at: Some(iso(now + chrono::Duration::days(3))) });
+            q.five_hour = Some(Window { observed_at: None, used_pct: used, resets_at: Some(iso(resets)) });
+            q.seven_day = Some(Window { observed_at: None, used_pct: 35.0, resets_at: Some(iso(now + chrono::Duration::days(3))) });
             q
         };
         let five_used = |app: Arc<App>| async move { app.quotas.lock().await.get("codex").unwrap().five_hour.clone().unwrap().used_pct };
@@ -1694,7 +1782,7 @@ mod tests {
         let now = chrono::Utc::now();
         let h = chrono::Duration::hours;
         let len = h(5);
-        let w = |used: f64, resets: chrono::DateTime<chrono::Utc>| Window { used_pct: used, resets_at: Some(iso(resets)) };
+        let w = |used: f64, resets: chrono::DateTime<chrono::Utc>| Window { observed_at: None, used_pct: used, resets_at: Some(iso(resets)) };
         let cur = w(20.0, now + h(4)); // 窗從 1 小時前開始
         // 剛看著它變：照寫，連比較小的數字也寫（CLI 當下的說法，例如用了重置券）。
         assert_eq!(pane_window_used(Some(5.0), Some(&cur), len, Some(now), Sighting::Changed, now), Some(5.0));
@@ -1708,7 +1796,7 @@ mod tests {
         assert_eq!(pane_window_used(Some(3.0), Some(&ended), len, Some(now - h(2)), Sighting::Same, now), None);
         assert_eq!(pane_window_used(Some(3.0), Some(&ended), len, Some(now - chrono::Duration::minutes(30)), Sighting::Same, now), Some(3.0));
         // 沒有重置時間：只收這個行程第一次看到的畫面。
-        let bare = Window { used_pct: 20.0, resets_at: None };
+        let bare = Window { observed_at: None, used_pct: 20.0, resets_at: None };
         assert_eq!(pane_window_used(Some(7.0), Some(&bare), len, Some(now), Sighting::New, now), Some(7.0));
         assert_eq!(pane_window_used(Some(7.0), Some(&bare), len, Some(now), Sighting::Same, now), None);
         assert_eq!(pane_window_used(None, Some(&cur), len, Some(now), Sighting::Changed, now), None);
@@ -1719,12 +1807,12 @@ mod tests {
     async fn a_partial_reading_keeps_the_window_it_could_not_see() {
         let app = crate::testing::env().await.app.clone();
         let mut full = codex_q("codex-app-server", None);
-        full.five_hour = Some(Window { used_pct: 30.0, resets_at: Some("2026-09-13T19:22:00.000Z".into()) });
-        full.seven_day = Some(Window { used_pct: 76.0, resets_at: Some("2026-09-18T00:00:00.000Z".into()) });
+        full.five_hour = Some(Window { observed_at: None, used_pct: 30.0, resets_at: Some("2026-09-13T19:22:00.000Z".into()) });
+        full.seven_day = Some(Window { observed_at: None, used_pct: 76.0, resets_at: Some("2026-09-18T00:00:00.000Z".into()) });
         set(&app, LOCAL_HOST, "codex", full).await;
 
         let mut partial = codex_q("codex-statusline", None);
-        partial.five_hour = Some(Window { used_pct: 64.0, resets_at: None });
+        partial.five_hour = Some(Window { observed_at: None, used_pct: 64.0, resets_at: None });
         partial.seven_day = None;
         set(&app, LOCAL_HOST, "codex", partial).await;
 
@@ -1763,7 +1851,7 @@ mod tests {
         let app = env_.app.clone();
         let reading = |pct: f64| {
             let mut q = codex_q("statusline", None);
-            q.five_hour = Some(Window { used_pct: pct, resets_at: None });
+            q.five_hour = Some(Window { observed_at: None, used_pct: pct, resets_at: None });
             q
         };
         // 身分還沒偵測到：cc0 寧可分開。
@@ -1844,7 +1932,7 @@ mod tests {
         // 裸 codex 撞限：cc1 的 codex bot 讀得到，cc2 的讀不到（它有自己的帳號）。
         let hit = LimitHit { message: "You've hit your usage limit.".into(), until: Some("2999-01-01T00:00:00Z".into()), at: crate::db::now(), bucket: None };
         let mut q = codex_q("codex-limit-hit", Some(hit));
-        q.five_hour = Some(Window { used_pct: 100.0, resets_at: None });
+        q.five_hour = Some(Window { observed_at: None, used_pct: 100.0, resets_at: None });
         set(&app, LOCAL_HOST, "codex", q).await;
         let bot = |identity: &str| crate::db::Bot {
             id: format!("b-{identity}"),
@@ -1946,17 +2034,17 @@ mod tests {
     async fn a_statusline_reading_keeps_the_probes_fable_window() {
         let app = crate::testing::env().await.app.clone();
         let probe = Quota {
-            five_hour: Some(Window { used_pct: 10.0, resets_at: None }),
-            seven_day: Some(Window { used_pct: 20.0, resets_at: None }),
-            fable: Some(Window { used_pct: 66.0, resets_at: None }),
+            five_hour: Some(Window { observed_at: None, used_pct: 10.0, resets_at: None }),
+            seven_day: Some(Window { observed_at: None, used_pct: 20.0, resets_at: None }),
+            fable: Some(Window { observed_at: None, used_pct: 66.0, resets_at: None }),
             reset_credits: None,
             limit_hit: None,
             plan: None, updated_at: crate::db::now(), source: "claude-usage".into(), account: Some("cc1".into()), host: LOCAL_HOST.into(),
         };
         set(&app, LOCAL_HOST, "claude:cc1", probe).await;
         let status = Quota {
-            five_hour: Some(Window { used_pct: 11.0, resets_at: None }),
-            seven_day: Some(Window { used_pct: 21.0, resets_at: None }),
+            five_hour: Some(Window { observed_at: None, used_pct: 11.0, resets_at: None }),
+            seven_day: Some(Window { observed_at: None, used_pct: 21.0, resets_at: None }),
             fable: None,
             reset_credits: None,
             limit_hit: None,
@@ -2001,8 +2089,8 @@ mod tests {
 
     fn codex_q(source: &str, limit_hit: Option<LimitHit>) -> Quota {
         Quota {
-            five_hour: Some(Window { used_pct: 0.0, resets_at: None }),
-            seven_day: Some(Window { used_pct: 0.0, resets_at: None }),
+            five_hour: Some(Window { observed_at: None, used_pct: 0.0, resets_at: None }),
+            seven_day: Some(Window { observed_at: None, used_pct: 0.0, resets_at: None }),
             fable: None,
             reset_credits: None,
             limit_hit,
@@ -2070,19 +2158,19 @@ mod tests {
         // 撞限後讀到的 Fable 窗：還見底，明天 08:00 重置 → 撞限最晚到那時，不是下週。
         let tomorrow = now + chrono::Duration::hours(20);
         let mut usage = codex_q("claude-usage", None);
-        usage.fable = Some(Window { used_pct: 100.0, resets_at: Some(iso(tomorrow)) });
+        usage.fable = Some(Window { observed_at: None, used_pct: 100.0, resets_at: Some(iso(tomorrow)) });
         set(&app, LOCAL_HOST, "claude:cc1", usage.clone()).await;
         assert_eq!(until(app.clone()).await, Some(iso(tomorrow)), "保底的 7 天要被那一桶自己的重置時間截短");
 
         // 不相干的桶（statusLine 只有 5h／7d）不算那一桶的讀數。
         let mut status = codex_q("statusline", None);
-        status.five_hour = Some(Window { used_pct: 3.0, resets_at: Some(iso(now + chrono::Duration::hours(4))) });
+        status.five_hour = Some(Window { observed_at: None, used_pct: 3.0, resets_at: Some(iso(now + chrono::Duration::hours(4))) });
         set(&app, LOCAL_HOST, "claude:cc1", status).await;
         assert_eq!(until(app.clone()).await, Some(iso(tomorrow)));
 
         // 重置之後的讀數：窗的起點在撞限之後 → 撞限作廢。
         let mut after = codex_q("claude-usage", None);
-        after.fable = Some(Window { used_pct: 0.0, resets_at: Some(iso(at + chrono::Duration::days(7) + chrono::Duration::minutes(1))) });
+        after.fable = Some(Window { observed_at: None, used_pct: 0.0, resets_at: Some(iso(at + chrono::Duration::days(7) + chrono::Duration::minutes(1))) });
         set(&app, LOCAL_HOST, "claude:cc1", after).await;
         assert_eq!(until(app.clone()).await, None, "那一桶重置過了，撞限不能再擋");
     }
@@ -2100,7 +2188,7 @@ mod tests {
             bucket: bucket.map(String::from),
         };
         let mut reading = codex_q("statusline", None);
-        reading.five_hour = Some(Window { used_pct: 94.0, resets_at: Some(iso(now + chrono::Duration::minutes(20))) });
+        reading.five_hour = Some(Window { observed_at: None, used_pct: 94.0, resets_at: Some(iso(now + chrono::Duration::minutes(20))) });
         let got = recalibrate_limit_hit(hit(Some("five_hour")), &reading).expect("窗在撞限之前就開了：還在擋");
         assert_eq!(got.until, Some(iso(now + chrono::Duration::minutes(20))));
         assert_eq!(recalibrate_limit_hit(hit(None), &reading), Some(hit(None)), "沒有桶名就不猜");
@@ -2122,7 +2210,7 @@ mod tests {
             bucket: Some("five_hour".into()),
         };
         let mut idle = codex_q("claude-usage", None);
-        idle.five_hour = Some(Window { used_pct: 0.0, resets_at: Some(iso(now - chrono::Duration::hours(1))) });
+        idle.five_hour = Some(Window { observed_at: None, used_pct: 0.0, resets_at: Some(iso(now - chrono::Duration::hours(1))) });
         assert_eq!(recalibrate_limit_hit(hit.clone(), &idle), Some(hit.clone()), "上一個窗的讀數不動它");
 
         let app = crate::testing::env().await.app.clone();
@@ -2321,7 +2409,7 @@ mod tests {
             false,
         );
         let q = Quota {
-            five_hour: Some(Window { used_pct: 10.0, resets_at: None }),
+            five_hour: Some(Window { observed_at: None, used_pct: 10.0, resets_at: None }),
             seven_day: None,
             fable: None,
             reset_credits: None,
@@ -2351,8 +2439,8 @@ mod tests {
         let env = crate::testing::env().await;
         let app = env.app.clone();
         let reading = |used_pct: f64, limit_hit: Option<LimitHit>| Quota {
-            five_hour: Some(Window { used_pct, resets_at: Some("2099-01-01T00:00:00Z".into()) }),
-            seven_day: Some(Window { used_pct: 20.0, resets_at: Some("2099-01-07T00:00:00Z".into()) }),
+            five_hour: Some(Window { observed_at: None, used_pct, resets_at: Some("2099-01-01T00:00:00Z".into()) }),
+            seven_day: Some(Window { observed_at: None, used_pct: 20.0, resets_at: Some("2099-01-07T00:00:00Z".into()) }),
             fable: None,
             reset_credits: None,
             limit_hit,
@@ -2449,7 +2537,7 @@ mod tests {
 
         // 重啟後、回填前就進來的讀數：5 小時窗是撞限之後才開的——撞限作廢，不種。
         let reading = |resets: String| Quota {
-            five_hour: Some(Window { used_pct: 3.0, resets_at: Some(resets) }),
+            five_hour: Some(Window { observed_at: None, used_pct: 3.0, resets_at: Some(resets) }),
             seven_day: None,
             fable: None,
             reset_credits: None,
@@ -2483,7 +2571,7 @@ mod tests {
         let bot = crate::testing::claude_bot(app, &pid, "far").await;
         let later = |h: i64| crate::db::iso_at(chrono::Utc::now() + chrono::Duration::hours(h));
         let mut local = codex_q("statusline", None);
-        local.five_hour = Some(Window { used_pct: 40.0, resets_at: Some(later(1)) });
+        local.five_hour = Some(Window { observed_at: None, used_pct: 40.0, resets_at: Some(later(1)) });
         set(app, LOCAL_HOST, "claude", local).await;
         assert!(seed_limit_hit(app, LOCAL_HOST, "claude", &later(2), "You've hit your session limit", Some("five_hour".into())).await);
         bot
@@ -2571,7 +2659,7 @@ mod tests {
         app.hosts.insert_remote_for_test(cfg("target-a")).await;
         let fence = app.hosts.fence("build1").await.unwrap();
         let reading = || Quota {
-            five_hour: Some(Window { used_pct: 10.0, resets_at: None }), seven_day: None, fable: None, reset_credits: None,
+            five_hour: Some(Window { observed_at: None, used_pct: 10.0, resets_at: None }), seven_day: None, fable: None, reset_credits: None,
             limit_hit: None, plan: None, updated_at: crate::db::now(), source: "test".into(), account: None, host: "build1".into(),
         };
         app.hosts.insert_remote_for_test(cfg("target-b")).await;

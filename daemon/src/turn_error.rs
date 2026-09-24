@@ -586,7 +586,7 @@ async fn record_grok(app: &Arc<App>, host: &str, base: &str, m: &Mark, bucket: O
     });
     let full = |w: &mut Option<crate::quota::Window>| match w {
         Some(w) => w.used_pct = 100.0,
-        None => *w = Some(crate::quota::Window { used_pct: 100.0, resets_at: None }),
+        None => *w = Some(crate::quota::Window { observed_at: None, used_pct: 100.0, resets_at: None }),
     };
     match bucket {
         Some("seven_day") => full(&mut q.seven_day),
@@ -695,7 +695,7 @@ mod quota_limit_tests {
     }
 
     fn window(pct: f64, resets: &str) -> Option<crate::quota::Window> {
-        Some(crate::quota::Window { used_pct: pct, resets_at: Some(resets.into()) })
+        Some(crate::quota::Window { observed_at: None, used_pct: pct, resets_at: Some(resets.into()) })
     }
 
     fn quota() -> crate::quota::Quota {
@@ -730,7 +730,7 @@ mod quota_limit_tests {
 
         // 有讀數時照舊用那一桶自己的 resets_at，保底不會蓋掉它。
         let mut q = crate::quota::Quota {
-            five_hour: Some(crate::quota::Window { used_pct: 10.0, resets_at: Some("2026-09-16T12:00:00Z".into()) }),
+            five_hour: Some(crate::quota::Window { observed_at: None, used_pct: 10.0, resets_at: Some("2026-09-16T12:00:00Z".into()) }),
             seven_day: None, fable: None, reset_credits: None, limit_hit: None, plan: None,
             updated_at: at.into(), source: "test".into(), account: None, host: "local".into(),
         };
@@ -895,8 +895,8 @@ mod quota_limit_tests {
         let hours = |h: i64| db::iso_at(chrono::Utc::now() + chrono::Duration::hours(h));
         let week_reset = hours(100);
         let reading = || crate::quota::Quota {
-            five_hour: Some(crate::quota::Window { used_pct: 0.0, resets_at: Some(hours(-1)) }),
-            seven_day: Some(crate::quota::Window { used_pct: 97.0, resets_at: Some(week_reset.clone()) }),
+            five_hour: Some(crate::quota::Window { observed_at: None, used_pct: 0.0, resets_at: Some(hours(-1)) }),
+            seven_day: Some(crate::quota::Window { observed_at: None, used_pct: 97.0, resets_at: Some(week_reset.clone()) }),
             fable: None,
             reset_credits: None,
             limit_hit: None,
