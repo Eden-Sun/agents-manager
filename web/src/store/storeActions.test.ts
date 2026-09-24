@@ -5,8 +5,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { requests, reset, routeDaemon } from './storeEnv.harness.ts'
-import type { Bot, Mission, MissionDetail, Project } from '../api/types.ts'
+import type { Bot, Message, Mission, MissionDetail, Project } from '../api/types.ts'
 import { queueFromComposer, settleComposerSend } from './queuedSend.ts'
+import { MESSAGE_CAP, capList } from './lists.ts'
+import { capFor } from './messageCap.ts'
 
 const { useStore } = await import('./store.ts')
 
@@ -1095,4 +1097,98 @@ test('連不上 daemon／代理回空的 502：通知講人話，不是 Failed t
   routeDaemon(() => new Response('Bad Gateway', { status: 502 }))
   await useStore.getState().sendPrompt('b1', 'y')
   assert.ok(noticeTexts().some((t) => t.includes('暫時不可用')), noticeTexts().join('|'))
+})
+
+/**
+ * issue #457：按「載入更早的」補回來的 200 則，下一則新訊息進來就被 `MESSAGE_CAP` 從頭整批切掉
+ * （`capList` 留的是最新的 cap 筆，而剛補回來的正是最前面那一段），畫面還會往後跳約 200 則。
+ *
+ * `message_added` 是 WS 幀，而這個 harness 只擋 fetch、沒有 fake WebSocket，所以「下一則新訊息會不會
+ * 剪到」用 store.ts 在那條路上算的**同一個運算式**（`capList(list, capFor(floors, key))`）斷言，
+ * 不假裝餵了一幀。純函式那一層在 `messageCap.test.ts`。
+ */
+const capMsg = (n: number): Message =>
+  ({
+    id: `m${String(n).padStart(6, '0')}`,
+    role: n % 2 === 0 ? 'assistant' : 'user',
+    content: `#${n}`,
+    created_at: new Date(Date.UTC(2026, 0, 1) + n * 1000).toISOString(),
+    turn_id: null,
+  }) as Message
+
+/** store.ts 的 `message_added` 那條路算的就是這個：再來一則新訊息會不會剪掉東西。 */
+function capWouldTrim(list: readonly { id: string }[], key: string): boolean {
+  const floors = useStore.getState().messageCapFloors
+  return capList([...list, { id: 'm999999' }], capFor(floors, key)).trimmed
+}
+
+const olderPage = (count: number, from: number, extra: Record<string, unknown> = {}) =>
+  json({ messages: Array.from({ length: count }, (_, i) => ({ ...capMsg(from + i), ...extra })), turns: [], has_more: true }, 200)
+
+test('#457：清單滿了之後補回 200 則，下一則新訊息不會把它們剪掉', async () => {
+  seed()
+  const list = Array.from({ length: MESSAGE_CAP }, (_, i) => capMsg(1000 + i))
+  useStore.setState({ messages: { b1: list }, moreMessages: { b1: true }, messageCapFloors: {} })
+  // 修好之前：上限是死的 500，長度一到 501 就從頭切 200 → 整批消失、畫面往後跳。
+  assert.equal(capWouldTrim(list, 'b1'), true, '前提：補回來之前，清單已經滿在上限上')
+
+  routeDaemon((r) => {
+    assert.ok(r.path.includes('before='), `要帶 before 分頁：${r.path}`)
+    return olderPage(200, 800)
+  })
+  await useStore.getState().loadEarlierMessages('b1')
+  await settle()
+
+  const s = useStore.getState()
+  assert.equal(s.messages.b1.length, MESSAGE_CAP + 200, '200 則真的補進去了')
+  assert.equal(s.messages.b1[0].id, capMsg(800).id, '補在最前面，時間軸連續')
+  assert.equal(s.messageCapFloors.b1, MESSAGE_CAP + 200 + MESSAGE_CAP, '下緣抬到「現有長度＋餘裕」')
+  assert.equal(capWouldTrim(s.messages.b1, 'b1'), false, '下一則新訊息剪不到任何東西 ← 這就是 #457')
+  assert.equal(s.moreMessages.b1, true, '「還有更早的」來自 has_more，不是被 trimmed 逼出來的')
+})
+
+test('#457：整頁重灌之後上限回到 MESSAGE_CAP（餘裕不會永久留著）', async () => {
+  seed()
+  useStore.setState({
+    messages: { b1: Array.from({ length: MESSAGE_CAP }, (_, i) => capMsg(1000 + i)) },
+    moreMessages: { b1: true },
+    messageCapFloors: {},
+  })
+  routeDaemon(() => olderPage(200, 800))
+  await useStore.getState().loadEarlierMessages('b1')
+  await settle()
+  assert.ok(useStore.getState().messageCapFloors.b1 > MESSAGE_CAP, '前提：下緣被抬過')
+
+  routeDaemon(() => json({ messages: [capMsg(2000)], turns: [], has_more: true }, 200))
+  await useStore.getState().loadMessages('b1')
+  await settle()
+  assert.equal(useStore.getState().messageCapFloors.b1, undefined, '整頁重灌歸零')
+})
+
+test('#457：那一頁一則都沒補到時不抬下緣（避免每按一次就往上飄）', async () => {
+  seed()
+  const list = Array.from({ length: MESSAGE_CAP }, (_, i) => capMsg(1000 + i))
+  useStore.setState({ messages: { b1: list }, moreMessages: { b1: true }, messageCapFloors: {} })
+  // daemon 回的全是已經有的那幾則 → 去重之後 older 是空的。
+  routeDaemon(() => json({ messages: [list[0], list[1]], turns: [], has_more: false }, 200))
+  await useStore.getState().loadEarlierMessages('b1')
+  await settle()
+  const s = useStore.getState()
+  assert.equal(s.messages.b1.length, MESSAGE_CAP, '沒有補進任何東西')
+  assert.equal(s.messageCapFloors.b1, undefined, '沒有新歷史要保護，就不抬')
+  assert.equal(s.moreMessages.b1, false, 'older 是空的 → 沒有更早的了')
+})
+
+test('#457：群組時間軸走同一條規則', async () => {
+  seed()
+  const list = Array.from({ length: MESSAGE_CAP }, (_, i) => ({ ...capMsg(1000 + i), bot_id: 'b1', bot_name: 'b1' }))
+  useStore.setState({ groupMessages: { p1: list as never }, moreMessages: { p1: true }, messageCapFloors: {} })
+  // 群組那條路的 `toGroupMessage` 沒有 bot_id 就整則丟掉，所以這一頁要帶。
+  routeDaemon(() => olderPage(200, 800, { bot_id: 'b1', bot_name: 'b1' }))
+  await useStore.getState().loadEarlierGroupMessages('p1')
+  await settle()
+  const s = useStore.getState()
+  assert.equal(s.groupMessages.p1.length, MESSAGE_CAP + 200)
+  assert.equal(s.messageCapFloors.p1, MESSAGE_CAP + 200 + MESSAGE_CAP)
+  assert.equal(capWouldTrim(s.groupMessages.p1, 'p1'), false)
 })
