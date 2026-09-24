@@ -5,6 +5,7 @@
 use crate::lifecycle::LcError;
 use crate::state::App;
 use axum::extract::State;
+use axum::http::HeaderMap;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
@@ -151,12 +152,16 @@ struct PersonaIn {
     expected_version: Option<i64>,
 }
 
-async fn put_persona(State(app): State<Arc<App>>, Json(b): Json<PersonaIn>) -> Result<Json<Value>, LcError> {
+/// 協調者的人設跟總管那份同一個形狀、同一個問題（issue #462）：以前連 `HeaderMap` 都不收，
+/// 任何拿得到 UI token 的本機呼叫端都能改寫協調者的常駐指示。守衛與留痕都用 `api` 那兩支共用的。
+async fn put_persona(State(app): State<Arc<App>>, headers: HeaderMap, Json(b): Json<PersonaIn>) -> Result<Json<Value>, LcError> {
+    let actor = super::api::persona_actor(&app, &headers).await?;
     let text = b.text.trim();
     if text.is_empty() {
         return Err(LcError::Bad("persona text must not be empty".into()));
     }
     let _g = super::lock().await;
+    let previous = roles::get(&app.db, Role::Responder).await.map_err(up)?.persona_text;
     let version = responder::set_persona(&app, text, b.expected_version).await?;
     responder::apply_persona(&app, text).await.map_err(|e| {
         LcError::conflict(
@@ -165,6 +170,9 @@ async fn put_persona(State(app): State<Arc<App>>, Json(b): Json<PersonaIn>) -> R
         )
     })?;
     drop(_g);
+    if previous.as_deref() != Some(text) {
+        super::api::note_persona_change(&app, &actor, previous.as_deref(), text, version, "responder_api").await;
+    }
     app.emit("supervisor_changed", json!({"responder_persona_version": version})).await;
     Ok(Json(get_persona(State(app.clone())).await?.0))
 }
