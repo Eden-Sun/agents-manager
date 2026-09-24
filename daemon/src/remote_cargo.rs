@@ -949,7 +949,10 @@ take_slot() {
       exec 7>&-
       i=$((i + 1))
     done
-    [ $(($(date +%s) - q0)) -lt "$qwait" ] || return 74
+    # `-le` 不是 `-lt`（issue #486）：`date +%s` truncate 到整秒，`now - q0` 會比真實經過的時間**多算最多 1 秒**
+    # （`q0` 落在某一秒的最後 10ms 時，真的過了 1.01 秒就已經算成 2）。用 `-lt` 的話 `qwait=2` 實際只等了約 1 秒。
+    # 改成等到「算出來的秒數**超過** qwait」才放棄：truncate 的誤差只會讓它多等，不會少等（正式設定是 1800 秒，多 1 秒無所謂）。
+    [ $(($(date +%s) - q0)) -le "$qwait" ] || return 74
     [ -n "$said" ] || { echo "agents-manager: 遠端同時編譯已滿（$max 個，[build.remote] max_concurrent），排隊等名額（最多 $qwait 秒）…" >&2; said=1; }
     alive || return 73
   done
@@ -975,7 +978,10 @@ hold() {
   return 0
 }
 queue_full() {
-  echo "agents-manager: 等遠端名額等了 $qwait 秒還是全滿（$max 個），這次沒跑；稍後再試（結束碼 75）" >&2
+  # 印**量到的**秒數，不是設定值（issue #486）：log 自報「等了 2 秒」而外面量到 1.04 秒，
+  # 比慢一秒難查得多。`q0` 還沒設過（沒排隊就走到這裡）時退回設定值。
+  waited=${q0:+$(($(date +%s) - q0))}
+  echo "agents-manager: 等遠端名額等了 ${waited:-$qwait} 秒還是全滿（$max 個），這次沒跑；稍後再試（結束碼 75）" >&2
   exit 75
 }
 # 73＝排隊中發現本機已經斷線：沒人要結果了，直接結束（鎖跟著放）。
@@ -3207,6 +3213,10 @@ mod guard_tests {
     }
 
     /// 名額一直全滿：排到上限就放棄——不交目錄、exit 75（[`QueueFull`]），自己佔的 shared 鎖也放掉。
+    ///
+    /// 「至少等滿 `queue_wait_secs`」這條以前是碰運氣的（issue #486）：守門用 `date +%s` 算經過時間，
+    /// truncate 到整秒會多算最多 1 秒，`qwait=2` 時真的只等約 1 秒就放棄，整樹平行下就偶發紅在下面那行
+    /// （量到 1.04 秒，而守門自己的 log 還說「等了 2 秒」）。守門改成 `-le` 之後這條是確定的。
     #[test]
     fn a_queue_that_never_moves_gives_up_with_exit_75() {
         let base = base();
@@ -3216,7 +3226,11 @@ mod guard_tests {
         let t0 = Instant::now();
         let err = Lease::start(cmd, token, &Deadline::new(0)).err().expect("queue full");
         assert!(err.downcast_ref::<QueueFull>().is_some(), "{err:#}");
-        assert!(t0.elapsed() >= Duration::from_secs(2) && t0.elapsed() < Duration::from_secs(60), "{:?}", t0.elapsed());
+        assert!(
+            t0.elapsed() >= Duration::from_secs(2) && t0.elapsed() < Duration::from_secs(60),
+            "要等滿 queue_wait_secs 才放棄（issue #486：整秒時鐘會少等將近一秒），實際等了 {:?}",
+            t0.elapsed()
+        );
         assert!(lock_free(&base.join(format!("rc/{HASH}/shared.lock"))), "放棄時要放掉 shared 的鎖");
         holder.finish();
         let _ = std::fs::remove_dir_all(base);
