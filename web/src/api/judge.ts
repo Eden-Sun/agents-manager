@@ -35,13 +35,26 @@ function parse(raw: unknown): JudgeSettings | null {
   }
 }
 
-/** 舊 daemon 沒有這個端點 → `null`，整個區塊不出現。 */
+/**
+ * 404／405：這顆 daemon 還沒有 `/judge/settings`（POST 掉進前端 SPA 的 catch-all，那條只收 GET
+ * 所以是 405）。**只有這兩個狀態碼**算「舊 daemon」——跟 `api/index.ts` 與 `api/preview.ts`
+ * （`previewApiMissing`）同一個約定。
+ *
+ * 以前這裡是 `if (e instanceof ApiError) return null`，不分狀態碼（issue #466）：500（daemon 自己出錯）、
+ * 403（token 不對）、502／504（反向代理）全都被翻譯成「這顆 daemon 還沒有這個功能，需要更新 daemon」，
+ * 使用者照著去重建＋重啟 daemon 當然修不好。
+ */
+export function judgeApiMissing(e: unknown): boolean {
+  return e instanceof ApiError && (e.status === 404 || e.status === 405)
+}
+
+/** 舊 daemon 沒有這個端點 → `null`，整個區塊不出現。其餘錯誤往外丟，由呼叫端顯示。 */
 export async function fetchJudgeSettings(): Promise<JudgeSettings | null> {
   if (rawTransport.mock) return mockState
   try {
     return parse(await rawTransport.request('GET', '/judge/settings'))
   } catch (e) {
-    if (e instanceof ApiError) return null
+    if (judgeApiMissing(e)) return null
     throw e
   }
 }
