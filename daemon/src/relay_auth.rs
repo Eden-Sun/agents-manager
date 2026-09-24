@@ -122,7 +122,9 @@ async fn prove_bot(app: &Arc<App>, headers: &HeaderMap, claimed: &str) -> Result
 pub async fn authenticate_mission(app: &Arc<App>, headers: &HeaderMap, claimed: Option<&str>) -> Result<Option<String>, LcError> {
     let Some(claimed) = claimed.map(str::trim).filter(|s| !s.is_empty()) else { return Ok(None) };
     if claimed == crate::agent_relay::DAEMON_SENDER {
-        if crate::supervisor::bot_requests::actor_role(app, headers).await.is_some() {
+        // `?`：帶了 `X-AM-Bot-Id` 卻證明不了是 403 `bot_proof_mismatch`（issue #415），不是
+        // 「不是 AGM 角色」——後者會把驗證失敗又讀成沒帶，正是 #415 要消掉的形狀。
+        if crate::supervisor::bot_requests::actor_role(app, headers).await?.is_some() {
             return Ok(Some(claimed.to_string()));
         }
         return Err(LcError::Forbidden(json!({

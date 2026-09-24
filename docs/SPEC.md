@@ -3264,8 +3264,10 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
   送出時以 `claimed_by` 條件更新；`ack` 的守衛跟寫入在同一句 SQL（先讀後寫之間 claim 會變），帶角色 bot token 時只能結自己收的（另一個角色的回 409 `claimed_by_other_role`），UI／使用者照舊全能結。
   核准決定是條件寫入，但條件寫死在 SQL 裡（approve／deny 只從 `pending`、revoke 從 `approved`／`pending`），不是「先讀到什麼就寫什麼」：
   兩個角色同時決定只有一個成功，後到的回 409 `already_decided`（對方已經寫進去了）或 `decided_concurrently`（還是 pending，但這一句沒寫到）；交辦驗收本來就是條件寫入。
-- **角色身分**：只認 `X-AM-Bot-Id` + 該 bot 的 hook token（`X-AM-Bot-Token`）。`bin/agm` 在自己的 pane 裡（`AM_BOT_ID` 等於 runtime 的 `self_bot_id`）才帶；
+- **角色身分**：只認 `X-AM-Bot-Id` + 該 bot 的 hook token（`X-AM-Bot-Token`），常數時間比對。`bin/agm` 在自己的 pane 裡（`AM_BOT_ID` 等於 runtime 的 `self_bot_id`）才帶；
   驗證過的決定記成 `AGM:patrol`／`AGM:responder`，body 自稱的 `actor` 不算。`relay_from` 的 bot 申請沒帶 token 仍收，但標 `sender_verified=false`。
+  **帶了 `X-AM-Bot-Id` 卻證明不了（token 空／非 UTF-8／對不上）是 403 `bot_proof_mismatch`，不退回使用者權限**（issue #415）：使用者權限在 `inbox` ack 上比角色權限大（跨角色也結得掉），
+  當成「沒帶」等於把驗證失敗變成提權。沒帶 `X-AM-Bot-Id` 才是使用者／UI。
 - **協調者故障不倒回巡檢**：分流只看它**建立過**沒有（`supervisor_roles.responder` 的 `bot_id`），不看它現在活不活著。沒額度（CLI 撞限，或共享 5h／7d critical）→ `status=waiting_quota`、`notify_next_at`＝重置時間與上限取早者，事件留 `pending`、不計重試次數；
   停著 → 看門狗（同 §18.9 的 30/60/120/300 秒、5 次）；放棄 → 推 `responder_watchdog_gave_up` 給巡檢。
   反方向對稱（review 2026-09-16 c1 M2）：巡檢的看門狗放棄（`watchdog_gave_up`）與巡檢的通知用盡（`notify_exhausted`）路由給**協調者**並叫醒——倒下的就是巡檢，送給它沒有人收；協調者未建立時巡檢的待送查詢照舊撈得到。**送不出去**（還沒送達）是有界退避（15 秒倍增到 `responder_max_backoff_secs`），沒有次數上限，

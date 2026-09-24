@@ -177,7 +177,7 @@ pub async fn get(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
 }
 
 pub async fn open(State(app): State<Arc<App>>, headers: HeaderMap, body: Option<Json<OpenIn>>) -> Result<Json<Value>, LcError> {
-    let role = crate::supervisor::bot_requests::actor_role(&app, &headers).await.ok_or_else(forbidden)?;
+    let role = crate::supervisor::bot_requests::actor_role(&app, &headers).await?.ok_or_else(forbidden)?;
     let b = body.map(|Json(b)| b).unwrap_or_default();
     let minutes = b.minutes.unwrap_or(MAX_MINUTES);
     if !(1..=MAX_MINUTES).contains(&minutes) {
@@ -212,7 +212,7 @@ pub async fn open(State(app): State<Arc<App>>, headers: HeaderMap, body: Option<
 }
 
 pub async fn end(State(app): State<Arc<App>>, headers: HeaderMap, body: Option<Json<CloseIn>>) -> Result<Json<Value>, LcError> {
-    let role = crate::supervisor::bot_requests::actor_role(&app, &headers).await.ok_or_else(forbidden)?;
+    let role = crate::supervisor::bot_requests::actor_role(&app, &headers).await?.ok_or_else(forbidden)?;
     let b = body.map(|Json(b)| b).unwrap_or_default();
     let Some(w) = active(&app).await.map_err(up)? else {
         return Ok(Json(json!({"active": false, "closed": false})));
