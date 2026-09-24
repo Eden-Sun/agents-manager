@@ -669,6 +669,57 @@ class AssignmentsPagingTest(CliCase):
         self.assertNotIn("note", out)
         self.assertGreater(len(self._reads()), 1, "第一頁看不到 a2／a1，一定要翻頁")
 
+    def test_the_status_filter_is_sent_to_the_daemon(self):
+        """issue #543：為了 6 筆未結案把一千多筆搬回來再篩，成本正好落在最需要的那個答案上。"""
+        for argv, want in (
+            (("assignments", "--open"), "open"),
+            (("assignments", "--awaiting-review"), "awaiting_review"),
+            (("assignments", "--status", "blocked"), "blocked"),
+            # 兩個一起給：送比較寬的那個，剩下的交給客戶端那層收。
+            (("assignments", "--open", "--awaiting-review"), "open"),
+        ):
+            FakeDaemon.seen.clear()
+            self.ok(*argv)
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self._reads()[0]["path"]).query)
+            self.assertEqual(q.get("status"), [want], f"{argv}")
+        # `--id` 要掃全部，不能先被狀態篩掉。
+        FakeDaemon.seen.clear()
+        self.ok("assignments", "--id", "crid-1")
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(self._reads()[0]["path"]).query)
+        self.assertNotIn("status", q)
+        # 沒有過濾條件時也不要送。
+        FakeDaemon.seen.clear()
+        self.ok("assignments", "--all")
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(self._reads()[0]["path"]).query)
+        self.assertNotIn("status", q)
+
+    def test_an_old_daemon_that_ignores_status_still_gets_filtered_here(self):
+        """伺服器端過濾是省搬運，不是把客戶端那層換掉：舊 daemon 忽略 status，答案還是要對。"""
+        FakeDaemon.routes["GET /api/supervisor/assignments"] = (
+            200,
+            {"assignments": self.ROWS, "has_more": False, "next_cursor": None},
+        )
+        out = self.ok("assignments", "--open")
+        self.assertEqual([a["id"] for a in out["assignments"]], ["a2", "a1"])
+        self.assertEqual(out["open"], 2)
+
+    def test_paging_stops_when_the_cursor_stops_moving(self):
+        """拿掉頁數上限（#543）之後，防無窮迴圈的是「游標必須往前走」。"""
+        calls = {"n": 0}
+
+        def stuck(_path: str):
+            calls["n"] += 1
+            # 守衛壞掉時要**紅**，不能掛在這裡讓 CI 跑到逾時：第 6 次之後自己收手，
+            # 讓下面的次數斷言去講話。
+            more = calls["n"] < 6
+            return (200, {"assignments": [self.ROWS[0]], "has_more": more, "next_cursor": "same-cursor" if more else None})
+
+        FakeDaemon.routes["GET /api/supervisor/assignments"] = stuck
+        out = self.ok("assignments", "--open")
+        self.assertEqual(calls["n"], 2, "第二頁游標沒動就停，不要一直問下去")
+        self.assertIs(out["complete"], False)
+        self.assertIn("note", out)
+
     def test_a_client_request_id_outside_the_first_page_is_found(self):
         """`/assignments/{id}` 只吃 assignment id，crid 一定 404 —— 退路掃的必須是全量。"""
         out = self.ok("assignments", "--id", "crid-1")

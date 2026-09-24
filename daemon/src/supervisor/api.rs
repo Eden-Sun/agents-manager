@@ -77,6 +77,9 @@ pub struct AssignmentsQuery {
     pub before: Option<String>,
     #[serde(default)]
     pub limit: Option<i64>,
+    /// `open`＝未結案那一組（`OPEN_STATES`），或剛好一個狀態名。省略＝全部。
+    #[serde(default)]
+    pub status: Option<String>,
 }
 
 /// 交辦清單，新的在前。**有分頁**：`before` 沒帶就是第一頁。
@@ -99,11 +102,18 @@ pub async fn get_assignments(
         })
         .transpose()?;
     let limit = q.limit.unwrap_or(200).clamp(1, 500);
+    // 在 SQL 裡篩，不是回去之後才篩：未結案的那幾筆天生是最舊的，呼叫端過濾等於為了 6 筆
+    // 把一千多筆搬過去、一頁一頁翻（issue #543）。不認得的狀態回 400——回一份空清單的話，
+    // 打錯字跟「真的沒有這個狀態的交辦」長得一模一樣。
+    let raw_status = q.status.as_deref().unwrap_or("");
+    let status = store::StatusFilter::parse(raw_status)
+        .ok_or_else(|| LcError::Bad(format!("status must be `open` or one of {:?}", super::assignment_state::ALL)))?;
     // 多撈一筆才知道後面還有沒有；`has_more` 是「這不是全部」唯一可靠的訊號。
     let mut rows = store::list_assignments_page(
         &app.db,
         cursor.as_ref().map(|c| (c.0.as_str(), c.1.as_str())),
         limit + 1,
+        status,
     )
     .await
     .map_err(up)?;
@@ -119,6 +129,8 @@ pub async fn get_assignments(
         "has_more": has_more,
         "next_cursor": next_cursor,
         "limit": limit,
+        // 回聲：舊 daemon 會忽略 `status`，呼叫端照這個欄位就知道自己那份過濾到底有沒有生效。
+        "status": if raw_status.is_empty() { Value::Null } else { json!(raw_status.trim()) },
     })))
 }
 
@@ -2382,7 +2394,7 @@ mod review_boundary_tests {
         loop {
             let page = get_assignments(
                 State(app.clone()),
-                Query(AssignmentsQuery { before: before.clone(), limit: Some(2) }),
+                Query(AssignmentsQuery { before: before.clone(), limit: Some(2), status: None }),
             )
             .await
             .unwrap()
@@ -2407,11 +2419,82 @@ mod review_boundary_tests {
         assert_eq!(first["has_more"], json!(false));
         let bad = get_assignments(
             State(app.clone()),
-            Query(AssignmentsQuery { before: Some("not json".into()), limit: None }),
+            Query(AssignmentsQuery { before: Some("not json".into()), limit: None, status: None }),
         )
         .await
         .expect_err("壞游標要回 400，不是靜靜回第一頁");
         assert!(matches!(bad, LcError::Bad(_)), "{bad:?}");
+        app.db.close().await;
+        std::fs::remove_dir_all(&app.data_dir).unwrap();
+    }
+
+    /// #543：排序有專用索引撐著，而且過濾是在 SQL 裡做的。
+    #[tokio::test]
+    async fn the_list_filters_by_status_in_sql_and_the_sort_has_an_index() {
+        let app = app().await;
+        // 一筆很舊的未結案，前面壓一整頁比它新的已結案：客戶端過濾要翻頁才看得到它。
+        let open = store::insert_assignment(&app.db, None, "bot", "crid-open", "還在等", &[], None, true).await.unwrap();
+        sqlx::query("UPDATE supervisor_assignments SET created_at='2026-09-01T00:00:00.000Z', status='blocked' WHERE id=?")
+            .bind(&open.id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        for i in 0..4 {
+            let a = store::insert_assignment(&app.db, None, "bot", &format!("crid-{i}"), "做完了", &[], None, true).await.unwrap();
+            sqlx::query("UPDATE supervisor_assignments SET created_at=?, status='completed' WHERE id=?")
+                .bind(format!("2026-09-2{i}T00:00:00.000Z"))
+                .bind(&a.id)
+                .execute(&app.db)
+                .await
+                .unwrap();
+        }
+
+        // `status=open`：第一頁就是那一筆，不必翻。
+        let page = get_assignments(
+            State(app.clone()),
+            Query(AssignmentsQuery { before: None, limit: Some(2), status: Some("open".into()) }),
+        )
+        .await
+        .unwrap()
+        .0;
+        let ids: Vec<&str> = page["assignments"].as_array().unwrap().iter().map(|a| a["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, vec![open.id.as_str()], "未結案只有這一筆，而且不必翻頁");
+        assert_eq!(page["has_more"], json!(false));
+        assert_eq!(page["status"], json!("open"), "回聲要在：舊 daemon 忽略 status 時呼叫端才看得出來");
+
+        // 剛好一個狀態。
+        let done = get_assignments(
+            State(app.clone()),
+            Query(AssignmentsQuery { before: None, limit: Some(10), status: Some("completed".into()) }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(done["assignments"].as_array().unwrap().len(), 4);
+
+        // 打錯字回 400，不是靜靜地回一份空清單（那跟「真的沒有」分不開）。
+        let err = get_assignments(
+            State(app.clone()),
+            Query(AssignmentsQuery { before: None, limit: None, status: Some("opne".into()) }),
+        )
+        .await
+        .expect_err("不認得的狀態");
+        assert!(matches!(err, LcError::Bad(_)), "{err:?}");
+
+        // 排序真的走索引：少了它 planner 會掃完整張表再排序（離線兩萬筆 202ms → 13ms）。
+        // `EXPLAIN QUERY PLAN` 回四欄（id、parent、notused、detail），要的是第四欄；
+        // `query_scalar` 取的是第一欄，那是 INTEGER。
+        let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(
+            "EXPLAIN QUERY PLAN SELECT * FROM supervisor_assignments WHERE supervisor_id=?
+              ORDER BY created_at DESC, id DESC LIMIT 5",
+        )
+        .bind(store::SUPERVISOR_ID)
+        .fetch_all(&app.db)
+        .await
+        .unwrap();
+        let plan = plan.iter().map(|r| r.3.as_str()).collect::<Vec<_>>().join(" | ");
+        assert!(plan.contains("supervisor_assignments_created"), "沒走新索引：{plan}");
+        assert!(!plan.contains("TEMP B-TREE"), "還在排整張表：{plan}");
         app.db.close().await;
         std::fs::remove_dir_all(&app.data_dir).unwrap();
     }

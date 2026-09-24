@@ -218,6 +218,8 @@ const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (19, "5df2ad9350704345"),
     // issue #528：`supervisor_assignments.busy_rounds`（排不進去幾輪，跟 `attempts` 分開記）。
     (20, "bfb00c5a78aa5503"),
+    // issue #543：`supervisor_assignments_created`（分頁與未結案清單共用的排序索引）。
+    (21, "80f6adcef290b9e3"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
