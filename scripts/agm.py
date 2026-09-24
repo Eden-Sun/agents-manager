@@ -1002,6 +1002,9 @@ def cmd_release_triage(client: Client, cfg: dict, args) -> object:
         body["kind"] = args.kind
     if args.version:
         body["version"] = args.version[0]
+    # --dry-run：打開 [release_triage] publish 之前先看會開哪幾張（只讀 gh，不開 issue、不寫帳本）。
+    if getattr(args, "dry_run", False):
+        body["dry_run"] = True
     return client.post("/api/release-triage/publish", body)
 
 
@@ -1618,6 +1621,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--file", help="submit：verdicts.json（{kind,version,verdicts,issues}）")
     s.add_argument("--kind", choices=["claude", "codex"])
     s.add_argument("--version", action="append", help="show／publish：某一版；dispatched：可重複給多版")
+    s.add_argument("--dry-run", action="store_true", help="publish：乾跑。檢查 gh auth／repo 權限／標籤齊不齊，印出會開哪幾張（含標題與內文），一張都不開、帳本不動")
     s.set_defaults(func=cmd_release_triage)
 
     s = sub.add_parser("handoff", help="讀管理摘要；帶 --summary/--summary-file 就是寫入")

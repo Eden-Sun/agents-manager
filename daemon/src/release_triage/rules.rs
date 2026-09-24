@@ -69,6 +69,9 @@ fn profile(kind: &str) -> Option<&'static Profile> {
     }
 }
 
+/// 目前有規則 profile 的上游（`herdr` 第二階段才補）。`upstream:<kind>` 標籤照這份清單要求。
+pub const KINDS: &[&str] = &["claude", "codex"];
+
 /// 有沒有這個 kind 的規則 profile（`herdr` 第二階段才補）。
 pub fn supported(kind: &str) -> bool {
     profile(kind).is_some()

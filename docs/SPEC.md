@@ -2659,14 +2659,22 @@ claude 與 codex **每出一個新版**，自動把那一版的 changelog 逐條
 
 **issue**：一項一張，沒有「一版一張報告」；「這一版看過了、逐條結論是什麼」放帳本（`GET /api/release-triage`）。模型不直接跑 `gh`，用 `bin/agm release-triage submit` 交回結構化結果，
 daemon 驗過才收（每個 kept／unmatched 都有 verdict、提案只引用 guard／adopt、同一 entry 只進一張、文字不得含去重標記）。**`## 來源` 的引用由 daemon 從帳本原文貼**，模型的字只進 `## 目標`／`## 建議`／`## 驗收`。
-標題 `<kind> <version>: <一句話>（提防｜採用）`，標籤 `release-triage`、`upstream:<kind>`、`triage:guard|adopt`，結尾 `<!-- release-triage: <kind>@<version>#<id>[,<id>] -->`。
+標題 `<kind> <version>: <一句話>（提防｜採用）`（前綴由 daemon 貼；模型的 `title` 自己又寫了同一版的前綴時剝掉，不然會變成兩層），標籤 `release-triage`、`upstream:<kind>`、`triage:guard|adopt`，結尾 `<!-- release-triage: <kind>@<version>#<id>[,<id>] -->`。
 提案帶 `duplicate_of` 時只在那張 issue 留言，不另開。
 
-**publish**（`[release_triage]`）：`publish = false`（**預設**）只寫帳本、**完全不啟動 gh**；`gh_bin`（省略＝PATH 上的 `gh`，daemon 補 Homebrew 路徑）、`repo`（`owner/name`，publish 開啟時必填）。
+**publish**（`[release_triage]`）：`publish = false`（**預設**）只寫帳本、自動路徑（verdict 進來、kick 每輪的重試）**完全不啟動 gh**（例外只有下面人工觸發的乾跑）；`gh_bin`（省略＝PATH 上的 `gh`，daemon 補 Homebrew 路徑）、`repo`（`owner/name`，publish 開啟時必填）。
 開之前帳本＋`gh issue list --state all --search "release-triage: <marker> in:body"` 雙重去重（**已關的不復活**）；每版 ≤4 張（超過的記在 `publish_error` 不再開）、每 24 小時 ≤8 張（超過的留在 `judged` 待下一輪）、`guard` 優先；
 每開一張立刻寫回帳本。gh／設定失敗 → 停在 `judged`、錯誤進 `publish_error`，重試（`POST /api/release-triage/publish`）只重跑 publish，不重派模型、不重花額度。
 
-`gh auth status` 失敗露在 `/api/supervisor/health` 的 `release_triage`（`{gh_auth_ok, gh_auth_error}`；`publish = false` 時為 `null`、不碰 gh；結果快取 60 秒）。`publish` 重試沒有 daemon 內定時器，由 kick 呼叫上述端點。
+gh 健檢露在 `/api/supervisor/health` 的 `release_triage`（`publish = false` 時為 `null`、不碰 gh；結果快取 60 秒）：`gh auth status` 之外還查
+`repo view`（設定的 repo 看不看得到、`viewer_permission`／`can_write`、issue 有沒有開）與 `label list`（`labels_missing`）——**auth 綠不等於開得出 issue**，
+`gh issue create --label` 對不存在的標籤是硬失敗，所以 `release-triage`／`upstream:claude`／`upstream:codex`／`triage:guard`／`triage:adopt` 少一個，第一次 publish 就會整版停在 `judged`。
+`publish` 重試沒有 daemon 內定時器，由 kick 呼叫上述端點。
+
+**乾跑（`POST /api/release-triage/publish {dry_run:true}`／`agm release-triage publish --dry-run`）**：打開 `publish` 之前就要能證明「這一版會開哪幾張、內文長什麼樣、重跑會不會開第二張」，
+不必先拿正式 repo 試開一張。它是唯一在 `publish = false` 時也會啟動 gh 的路徑（由人明確觸發，kick 不跑它），且**只讀**：`auth status`／`repo view`／`label list`／`issue list`，
+一張 issue 都不開、帳本一個字都不寫。每個提案回一個 `action`（`create`｜`comment`｜`existing`｜`already_logged`｜`skipped_version_limit`｜`deferred_daily_limit`｜`remote_unknown`）
+與渲染好的 title／body／labels；排序（guard 優先）、每版 4 張、24 小時 8 張都跟真的 publish 共用同一套判斷（遠端去重也是同一個函式），乾跑說不會開第二張就真的不會。
 
 **`pending` 不能拿 `from` 當下界（2026-09-22 修）**：`from` 就是「帳本裡已分診（含插入但還沒派）的最大版本」；
 一版剛被 `check` 插入、那一輪的派工（額度閘門、`agm assign` 失敗）沒能完成時，它已經是 ledger max，

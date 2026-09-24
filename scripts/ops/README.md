@@ -288,6 +288,24 @@ install -m 644 scripts/ops/release-triage-task.md ~/.config/agents-manager/super
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agm.release-triage.plist
 ```
 
+**打開 `[release_triage] publish = true` 之前**（#204 的 close condition）：先乾跑一次，看它會開哪幾張、
+內文長什麼樣、去重會不會命中、標籤齊不齊。乾跑只讀 gh（`auth status`／`repo view`／`label list`／`issue list`），
+**一張 issue 都不開、帳本一個字都不寫**，所以在 `publish = false` 的現況下就能跑：
+
+```sh
+~/.config/agents-manager/supervisor/AGM/bin/agm release-triage publish --dry-run          # 全部 judged 的版本
+~/.config/agents-manager/supervisor/AGM/bin/agm release-triage publish --dry-run --kind codex --version 0.156.0
+```
+
+`checks` 要全綠才會真的開得出 issue：`gh_auth_ok`、`repo_ok`、`can_write`（`viewer_permission` 是
+`ADMIN`／`MAINTAIN`／`WRITE`／`TRIAGE`）、`issues_enabled`、`labels_missing` 是空的——
+`gh issue create --label` 對**不存在的標籤是硬失敗**，少一個就會整版停在 `judged`，
+所以 `release-triage`／`upstream:claude`／`upstream:codex`／`triage:guard`／`triage:adopt` 這五個要先在 repo 上建好。
+每個提案的 `action` 是 `create`（會開）｜`comment`（`duplicate_of`，只留言）｜`existing`（遠端已有同標記，含已關的，不會重開）｜
+`already_logged`｜`skipped_version_limit`｜`deferred_daily_limit`｜`remote_unknown`（gh 檢查沒過，去重問不到）。
+`publish = true` 之後 kick 每輪的 `publish` 重試會把 `judged` 的版本一次開出來（每版 ≤4 張、24 小時 ≤8 張），
+所以打開前先確認 `would_create` 的數字是預期的。
+
 ## ci-watch-kick.sh
 
 main 的 GitHub CI 盯哨（issue #211）。2026-09-16 起 main 的 CI 連紅好幾天沒人發現——規則只要求跑本機 `check.sh`，沒人看 GitHub 的結果。

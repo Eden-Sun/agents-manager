@@ -114,12 +114,19 @@ async fn post_dispatched(State(app): State<Arc<App>>, Json(b): Json<DispatchedIn
 struct PublishIn {
     kind: Option<String>,
     version: Option<String>,
+    /// 乾跑：只讀 gh（auth／repo／標籤／去重）並算出「會開哪幾張」，一張都不開、帳本不動。
+    #[serde(default)]
+    dry_run: bool,
 }
 
 /// 重試 publish：對所有（或指定的）`judged` 版本重跑 issue 開立，不重派模型。`publish = false` 時什麼都不做。
+/// `dry_run` 例外：`publish = false` 時也會跑，因為打開開關之前就要看得到會發生什麼。
 async fn post_publish(State(app): State<Arc<App>>, body: Option<Json<PublishIn>>) -> Result<Json<Value>, LcError> {
     let b = body.map(|Json(b)| b).unwrap_or_default();
     let cfg = app.cfg.get().await.release_triage;
+    if b.dry_run {
+        return Ok(Json(issue::preflight(&app.db, &cfg, b.kind.as_deref(), b.version.as_deref()).await.map_err(up)?));
+    }
     let rows = ledger::list(&app.db, b.kind.as_deref(), b.version.as_deref()).await.map_err(up)?;
     let mut out = Vec::new();
     for r in rows.iter().filter(|r| r.status == Status::Judged) {
