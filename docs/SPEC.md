@@ -2965,6 +2965,10 @@ MissionController）用的單一入口：帶 CAS、擋非法邊、轉移沒發�
   並推一則 `assignment_undeliverable` 進 inbox（AGM 看得到，不是只寫 log）。`blocked` 仍在 `OPEN_STATES` 裡，所以不會從未結案與 ownership 衝突裡消失。
   計時不從 `created_at` 起（review2 2026-09-16）：在 `quota_blocked` 等額度、被 restart 窗口 hold 是合法的等待，算進去的話恢復後第一個暫時性 409 就直接 `blocked`。
   `conflict_since` 在第一次 409 時寫下，進 `quota_blocked`、被窗口 hold（含窗口結束解除 hold）、送達時清掉；`error` 照實寫最後一次 409 的原因與起點。
+  **409 的等待記在 `busy_rounds`，不加 `attempts`**（issue #528，schema v20）：`attempts` 是上游／暫時性錯誤的重試上限（用完就 `dispatch_failed`），
+  混進 409 的話一顆回合中的 bot 只要排八分鐘（15+30+60+120+240 秒）就把那個上限用完，之後第一個 herdr 抖動會把使用者以為在跑的工作判成失敗——而那時 30 分鐘的保險絲還沒燒。
+  退避梯用 `busy_rounds` 爬。時間那條會被合法的等待清掉（上一段），所以輪數自己也有上限：**連續 20 輪**（只加不減）排不進去一樣標 `blocked`＋`assignment_undeliverable`，
+  payload 與 `error` 寫明是哪一條保險絲燒的、排不進去幾輪、累計派送嘗試幾次。退避封頂 900 秒時 20 輪 ≥ 3.5 小時，正常情況永遠是時間那條先燒。
   `assignment_undeliverable` 的 `hint` 指向 `review --decision followup`（新的 `followup_request_id`）或 `cancel`——**同一個 request id 再 `assign` 是冪等查詢**，只會拿回那筆 `blocked`。
 - **排進佇列不是失敗**（2026-09-16 AGM）：對方回合中時交辦停在 `delivered`＋`delivery='queued'`，
   只推一則 `assignment_queued`（`needs_review:false`，路由表歸在「只記錄、不叫醒」那一組），
