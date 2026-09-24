@@ -456,9 +456,17 @@ herdr 全機重啟：bootout 兩個 herdr launchd job → 殺掉所有 herdr ser
 補起預設 server。2026-09-22 使用者下令全機重啟時寫的，同樣原本只在 `AGM/bin/`。**沒有 launchd 排程**，手動跑。
 
 - 順序是關鍵：**先 bootout 再殺 server**，反過來 launchd 會立刻把 server 拉回來。
-- **已知 bug（還沒修）**：第 16 行 `nohup setsid …` 在 macOS 上必定失敗（系統沒有 `setsid`），
-  所以預設 session 的 server 其實沒被拉起，但下一行照樣寫「default server started pid=…」。
-  2026-09-22 的 log 裡 `session list` 顯示 `default stopped` 就是這個。修的時候要一併改測試第 4 組。
+- **起 default server 這一步是唯一沒有自癒路徑的**：被殺掉的 session 裡，`agents-manager` 與
+  `am-attach-remote` 有 launchd job 會 bootstrap 回來，其他具名 session 由 daemon 的
+  `ensure_session`（`daemon/src/state.rs`）在下次要用時自動重啟；**只有 `default` 不會**——
+  `ensure_session` 明文拒絕代起使用者自己的 session。所以那一步起不來就要讓人知道。
+- 修過的（issue #455，2026-09-24）：以前是 `nohup setsid …`，而 macOS 根本沒有 `setsid`
+  （util-linux 才有），所以 `nohup` 找不到它直接失敗、herdr 一次都沒被執行；更糟的是那行
+  寫成 `cd … && nohup … &`，`&` 綁的是整個 `&&` 清單，`$!` 拿到的是 subshell 的 pid，
+  **起不起得來都有值**，於是失敗被記成「default server started pid=…」。2026-09-22 的 log 裡
+  `session list` 顯示 `default stopped` 就是這個。現在：不用 `setsid`（`nohup` + `&` + `disown`
+  就夠，跟 `ensure_session` 同一款），`$!` 取的是 server 本身，而且要 `herdr session list` 看到
+  `default running` 才記 `default server up`，等不到就寫 FAIL 並以 rc=1 結束。
 - 路徑與 uid（`gui/501`）寫死成這台開發機的值，是收進 repo 時保留的既有行為。
 
 隔離測試：`bash scripts/ops/herdr-full-restart_test.sh`（`launchctl`／`pkill`／`pgrep`／`sleep`／`herdr`

@@ -59,6 +59,7 @@ setup() {
   echo "7422
 7459" > "$FIX/servers"
   echo 0 > "$FIX/launchctl.rc"
+  echo running > "$FIX/default.status"
   {
     echo '#!/bin/bash'
     # 危險指令的攔截器。全部只記錄，rc 由 fixture 決定；真的 binary 一次都碰不到。
@@ -67,7 +68,9 @@ setup() {
     echo 'pkill() { echo "pkill $*" >> "$FIX/calls.log"; case "$1" in -TERM) : > "$FIX/servers" ;; esac; return 0; }'
     echo 'pgrep() { case "$*" in *-fl*) awk "{print \$1\" /opt/homebrew/bin/herdr server\"}" "$FIX/servers" ;; *) cat "$FIX/servers" ;; esac; }'
     echo 'sleep() { :; }'
-    echo 'herdr() { echo "herdr $*" >> "$FIX/calls.log"; case "$*" in "session list") echo "default              stopped" ;; esac; return 0; }'
+    # `session list` 的狀態由 fixture 決定：#455 之後腳本要靠它判斷 default 到底起來了沒有，
+    # 兩個方向（running／stopped）都要測得到。
+    echo 'herdr() { echo "herdr $*" >> "$FIX/calls.log"; case "$*" in "session list") echo "default              $(cat "$FIX/default.status")" ;; esac; return 0; }'
     tail -n +2 "$SRC" \
       | sed -e "s#/Users/m4p/.config/agents-manager/supervisor/AGM/herdr-full-restart.log#${LOG}#g" \
             -e "s#/Users/m4p/.config/herdr#${HERDR}#g" \
@@ -92,7 +95,13 @@ equals "副本裡 pkill 已被函式攔截" "$(grep -c '^pkill() {' "$SCRIPT")" 
 # shell 函式攔，函式優先於 PATH 查找，被測腳本自己 `export PATH=` 也蓋不掉。
 equals "副本的 PATH 只指到測試用的 fakebin" "$(grep '^export PATH=' "$SCRIPT")" "export PATH=${BIN}:/usr/bin:/bin"
 # nohup 看不到函式，所以那一行必須指到檔案樁，不能留真 binary 的路徑。
-equals "nohup 起 server 那行指到測試樁" "$(grep -c "nohup setsid ${BIN}/herdr server" "$SCRIPT")" "1"
+equals "nohup 起 server 那行指到測試樁" "$(grep -c "^nohup ${BIN}/herdr server" "$SCRIPT")" "1"
+# issue #455：macOS 沒有 setsid，`nohup setsid …` 是 nohup 找不到 setsid 直接失敗、herdr 從沒被執行。
+equals "不再用 macOS 沒有的 setsid（只看會被執行的行，註解照樣可以解釋原因）" \
+  "$(grep -cE '^[^#]*[^[:alnum:]_]setsid|^setsid' "$SCRIPT")" "0"
+# `&` 綁整個 `cd … && nohup … &` 清單時，`$!` 是 subshell 的 pid，起不起得來都有值。
+# 對**原始檔**斷言，不是對副本：副本的路徑被 sed 改寫過，`cd /Users/m4p` 已經不在了。
+equals "起 server 那行沒有跟 cd 串成 && 清單" "$(grep -cE '^[^#]*cd .* && nohup' "$SRC")" "0" 
 # 副本裡還提到 /opt/homebrew 的，只准是假 pgrep 印出來的那行字串（不是會被執行的指令）。
 equals "副本裡提到真 binary 路徑的只剩假 pgrep 的輸出字串" \
   "$(grep -n '/opt/homebrew' "$SCRIPT" | grep -vc '^[0-9]*:pgrep() {')" "0"
@@ -146,18 +155,31 @@ check "bootstrap 的 rc=127 也記下來" "bootstrap agents-manager rc=127" "$LO
 check "缺依賴不影響後面的收尾" "== done" "$LOG"
 teardown
 
-# 4. 現況（已知 bug，見 README 與 issue #418）：macOS 沒有 setsid，原腳本第 16 行的
-#    `nohup setsid …` 起不來，但下一行照樣寫「default server started」。
-#    這條釘住的是現況，不是期望行為；修掉 bug 時要一起改這裡。
+# 4. issue #455：以前這裡釘的是 bug 本身（macOS 沒有 setsid，`nohup setsid …` 起不來，
+#    下一行卻照樣寫「default server started」）。現在釘的是修好之後的行為——**不依賴這台機器
+#    有沒有 setsid**：腳本裡已經沒有 setsid 了，所以兩種機器上結果都一樣。
 setup
-if command -v setsid >/dev/null 2>&1; then
-  echo "skip - 這台有 setsid，跳過「macOS 沒有 setsid」那條"
-else
-  run >/dev/null
-  check "log 宣稱 default server 起來了" "default server started pid=" "$LOG"
-  check "實際上 nohup 找不到 setsid（已知 bug）" "setsid" "$ROOT/herdr-default.log"
-  check_no "所以 herdr server 根本沒被執行" "herdr server" "$FIX/calls.log"
-fi
+run >/dev/null
+# 那一行是真的背景行程（nohup … &），腳本結束時它不一定已經被排到——這裡等它，
+# 不是放寬斷言：等不到就照樣 FAIL。
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  grep -q 'herdr server' "$FIX/calls.log" && break
+  sleep 0.1
+done
+check "herdr server 真的被執行了" "herdr server" "$FIX/calls.log"
+check_no "log 不再用「started」宣稱成功" "default server started pid=" "$LOG"
+check "改成確認過 default 真的 running 才記 up" "default server up pid=" "$LOG"
+teardown
+
+# 5. issue #455：default 起不來時要非零退出並留下可以查的 log，不能像以前那樣靜默宣告成功。
+#    daemon 的 `ensure_session` 明文拒絕代起 `default`，所以這是唯一沒有自癒路徑的 session。
+setup
+echo stopped > "$FIX/default.status"
+equals "default 起不來要非零退出" "$(run)" "1"
+check "log 寫明是 FAIL" "FAIL: default server 沒起來" "$LOG"
+check "log 說明 pid 不代表起來了" "只代表 fork 成功" "$LOG"
+check_no "不能同時又說 up" "default server up pid=" "$LOG"
+check "收尾仍然標明結束" "== done (failed)" "$LOG"
 teardown
 
 echo "$PASS passed, $FAIL failed"
