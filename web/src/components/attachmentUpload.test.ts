@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { pendingReducer, progressGate, progressLabel, runUpload, uploadPercent } from './attachmentUpload'
+import { admitFile, pendingReducer, progressGate, progressLabel, runUpload, uploadPercent } from './attachmentUpload'
 import type { Pending, PendingAction, UploadDeps } from './attachmentUpload'
 import type { UploadOptions } from '../api/transport'
 import { abortError } from '../api/transport'
@@ -155,4 +155,27 @@ test('百分比往下取整、單位跟著總大小', () => {
   assert.equal(uploadPercent(5, 0), 0)
   assert.equal(progressLabel(300 * 1024, 800 * 1024), '300 / 800 KB · 37%')
   assert.equal(progressLabel(10, 100), '10 / 100 B · 10%')
+})
+
+test('擋下來的大檔不記指紋：同一個檔再拖一次照樣講一次「超過上限」（issue #497）', () => {
+  const seen = new Set<string>()
+  const big = 60 * MB
+  assert.equal(admitFile(seen, 'big.zip|1', big, false), 'too-large')
+  // 擋下來的那一次沒有卡片、沒有 × 可以按；指紋要是記了，第二次就變成默默略過。
+  assert.equal(seen.size, 0)
+  assert.equal(admitFile(seen, 'big.zip|1', big, false), 'too-large')
+})
+
+test('收下的才記指紋，第二次同一個檔算重複', () => {
+  const seen = new Set<string>()
+  assert.equal(admitFile(seen, 'a.png|1', 3 * MB, false), 'accept')
+  assert.deepEqual([...seen], ['a.png|1'])
+  assert.equal(admitFile(seen, 'a.png|1', 3 * MB, false), 'duplicate')
+  assert.equal(admitFile(seen, 'b.png|1', 3 * MB, false), 'accept')
+})
+
+test('圖片超過上限先收下：壓完才比上限（壓不下去的由 runUpload 記失敗）', () => {
+  assert.equal(admitFile(new Set(), 'huge.png|1', MAX_BYTES + 1, true), 'accept')
+  assert.equal(admitFile(new Set(), 'huge.zip|1', MAX_BYTES + 1, false), 'too-large')
+  assert.equal(admitFile(new Set(), 'edge.zip|1', MAX_BYTES, false), 'accept')
 })

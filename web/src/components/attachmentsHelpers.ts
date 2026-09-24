@@ -4,7 +4,7 @@ import * as api from '../api'
 import { compressible, compressImage } from '../lib/imageCompress'
 import { MAX_BYTES, SHELF_MIME, shelfFilesFor } from '../store/shelf'
 import { useStore } from '../store/store'
-import { pendingReducer, runUpload } from './attachmentUpload'
+import { admitFile, pendingReducer, runUpload } from './attachmentUpload'
 import type { Pending, UploadDeps } from './attachmentUpload'
 
 export type { Pending } from './attachmentUpload'
@@ -104,18 +104,17 @@ export function useAttachments(uploadTo: string | null, resetKey: string | null)
         return
       }
       for (const file of files) {
-        // 同一張不重複放入（2026-09-09 使用者：同一張暫存會重複放入對話）。
         const fp = `${file.name}|${file.size}|${file.lastModified}`
-        if (seen.current.has(fp)) continue
-        seen.current.add(fp)
-        seq.current += 1
-        const key = `a${seq.current}`
-        // 圖片先壓再比上限（`lib/imageCompress.ts`）：手機原圖超過上限，壓完多半放得下。
         const compress = compressible(file.type)
-        if (file.size > MAX_BYTES && !compress) {
+        // 同一張不重複放入（2026-09-09 使用者：同一張暫存會重複放入對話）；收下的指紋由 `admitFile` 記。
+        const verdict = admitFile(seen.current, fp, file.size, compress)
+        if (verdict === 'duplicate') continue
+        if (verdict === 'too-large') {
           notify('error', `「${file.name}」有 ${formatSize(file.size)}，超過 ${formatSize(MAX_BYTES)} 上限。`)
           continue
         }
+        seq.current += 1
+        const key = `a${seq.current}`
         const isImage = isImageFile(file)
         const previewUrl = isImage ? URL.createObjectURL(file) : ''
         if (previewUrl) urls.current.add(previewUrl)
