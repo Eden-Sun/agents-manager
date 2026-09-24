@@ -129,6 +129,17 @@ fake_listener() { # <addr> [ppid] [cmd]
   echo "$pid"
 }
 serve() { "$PY3" -m http.server "$PORT" --bind 127.0.0.1 --directory "$ROOT" >/dev/null 2>&1 & local pid=$!; disown 2>/dev/null || true; echo "$pid" >> "$FIX/spawned"; echo "$pid"; }
+# 等它真的在聽才能往下跑。原本固定 sleep 1，在 CI 的 runner 上不夠——server 還沒 bind，
+# 被測腳本的 alive() 就回 false，於是「健康」那組變成「沒人聽」，測試假紅（run 35958418022）。
+wait_ready() {
+  local i
+  for i in $(seq 1 60); do
+    curl -sf -o /dev/null "http://127.0.0.1:${PORT}/" 2>/dev/null && return 0
+    sleep 0.5
+  done
+  echo "      （等不到測試用的 HTTP server 在 ${PORT} 上回應）" >&2
+  return 1
+}
 run() { ( cd "$ROOT" && PATH="$BIN:${AM_CANARY_DIR:+$AM_CANARY_DIR:}/usr/bin:/bin" "$BUN" "$SCRIPT" >/dev/null 2>&1; echo $? ); }
 
 # 0. 安全前提：副本裡不准再有 5173，假 lsof 只回報自己 spawn 的 pid。
@@ -148,7 +159,7 @@ teardown
 setup
 echo "aaaaaaa" > "$FIX/head.after"; echo "lock1" > "$FIX/lock.after"
 fake_listener "*:${PORT}" 1 "node /x/vite.js --host 0.0.0.0" >/dev/null
-serve >/dev/null; sleep 1
+serve >/dev/null; wait_ready
 equals "健康時 exit 0" "$(run)" "0"
 equals "健康時不寫 log" "$(wc -c < "$LOG" | tr -d ' ')" "0"
 check_no "健康時不會去起 vite" "vite.js --host" "$FIX/calls.log"
@@ -224,7 +235,7 @@ teardown
 setup
 echo "bbbbbbb" > "$FIX/head.after"; echo "lock1" > "$FIX/lock.after"
 fake_listener "*:${PORT}" 1 "node /x/vite.js --host 0.0.0.0" >/dev/null
-serve >/dev/null; sleep 1
+serve >/dev/null; wait_ready
 run >/dev/null
 check "記下同步到 origin/main" "同步到 origin/main aaaaaaa..bbbbbbb" "$LOG"
 check_no "lock 沒變就不 bun install" "bun install" "$FIX/calls.log"
@@ -234,7 +245,7 @@ teardown
 setup
 echo "bbbbbbb" > "$FIX/head.after"; echo "lock2" > "$FIX/lock.after"
 fake_listener "*:${PORT}" 1 "node /x/vite.js --host 0.0.0.0" >/dev/null
-serve >/dev/null; sleep 1
+serve >/dev/null; wait_ready
 run >/dev/null
 check "lock 變了就 bun install" "bun install --frozen-lockfile" "$FIX/calls.log"
 check "log 說明要重啟 vite" "web/bun.lock 變了" "$LOG"
