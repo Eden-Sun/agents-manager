@@ -41,7 +41,8 @@ case "$sub:$op" in
   assignments:*)     printf '%s' "$STUB_ASSIGNMENTS" ;;
   lease:safety)      printf '%s' "$STUB_SAFETY" ;;
   lease:acquire)     printf '%s' "$STUB_ACQUIRE" ;;
-  lease:release)     printf '%s' '{"released":true}' ;;
+  lease:release)     [ -n "${STUB_RELEASE_FAIL:-}" ] && { printf '%s' '{"error":"http_error","status":409,"detail":{"error":"conflict","reason":"fence_mismatch"}}'; exit 1; }
+                     printf '%s' '{"released":true}' ;;
   approval:request)  printf '%s' "$STUB_APPROVAL" ;;
   approval:list)     printf '%s' "$STUB_APPROVAL_LIST" ;;
   approval:)         printf '%s\n' "${STUB_APPROVAL_HELP- --supersedes APPROVAL_ID}" ;;   # `approval --help`
@@ -600,11 +601,35 @@ check "寫不進檔就從 stdin 交還" "lease release rebuild --owner .* --fenc
 check_no "這條路一樣不讓 token 進 argv" "tok-abc123" "$AGM_DIR/calls.log"
 check "這輪不派工" "寫不進 lease token 檔" "$AGM_DIR/daemon-update.log"
 check_eq "失敗那次不留半個 token 檔" "0" "$(ls "$AGM_DIR"/daemon-update.lease-token.* 2>/dev/null | wc -l | tr -d ' ')"
+check "stdin 那條路交還成功也記一行" "rebuild 窗口已交還（token 檔寫不出來）" "$AGM_DIR/daemon-update.log"
 if [ -s "$AGM_DIR/assign-body.txt" ]; then   # setup 會先建一個空的，有內容才是真的派了工
   echo "FAIL - 寫不進 token 檔卻還是派了工"; FAIL=$((FAIL + 1))
 else
   echo "ok   - 寫不進 token 檔就不派工"; PASS=$((PASS + 1))
 fi
+teardown
+
+# 交還窗口失敗：log 不准說「已交還」（issue #477，i407 審核）。以前這兩處都是 `… || true`，
+# note_fail 先寫了「交還窗口」，release 的 rc 又被丟掉，窗口其實握到 TTL 而紀錄說還了。
+setup
+export AGM_TEST_MINUTE="0"
+export STUB_ACQUIRE='{"lease":{"fence":9,"resource":"rebuild"},"lease_token":"tok-abc123"}'
+export STUB_ASSIGN_FAIL=1 STUB_RELEASE_FAIL=1
+bash "$SCRIPT"
+check "派工失敗的交還失敗有記 log" "交還 rebuild 窗口失敗 rc=" "$AGM_DIR/daemon-update.log"
+check "講出窗口仍被握著" "窗口仍被握著" "$AGM_DIR/daemon-update.log"
+check_no "不准謊報已交還" "rebuild 窗口已交還" "$AGM_DIR/daemon-update.log"
+check "log 的字眼是「嘗試交還」" "派工失敗，嘗試交還窗口" "$AGM_DIR/daemon-update.log"
+unset STUB_RELEASE_FAIL
+teardown
+
+# 交還成功時照樣要留一行，下一個人才看得出窗口確實還了。
+setup
+export AGM_TEST_MINUTE="0"
+export STUB_ACQUIRE='{"lease":{"fence":9,"resource":"rebuild"},"lease_token":"tok-abc123"}'
+export STUB_ASSIGN_FAIL=1
+bash "$SCRIPT"
+check "交還成功有記 log" "rebuild 窗口已交還（派工失敗）" "$AGM_DIR/daemon-update.log"
 teardown
 
 # 舊 daemon 沒有 lease_token：照舊不帶，不要送出空的旗標。

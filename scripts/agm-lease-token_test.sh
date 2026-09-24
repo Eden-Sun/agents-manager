@@ -83,6 +83,21 @@ open(empty, "w").close()
 os.chmod(empty, 0o600)
 expect_error("空檔要講清楚", args(path=empty), "是空的")
 
+# 4b. 兩行：`.strip()` 只去頭尾，中間的換行會被當成 token 的一部分送出去，daemon 只回「token 不符」。
+two = os.path.join(tmp, "two")
+with open(two, "w") as fh:
+    fh.write("FAKE-TOKEN-AAA\nFAKE-TOKEN-BBB\n")
+os.chmod(two, 0o600)
+expect_error("多行要講清楚是幾行", args(path=two), "有 2 行")
+
+# 4c. 尾巴多一個空行不算多行（只是 printf 的習慣），照樣讀得到。
+trailing = os.path.join(tmp, "trailing")
+with open(trailing, "w") as fh:
+    fh.write("tok-abc123\n\n")
+os.chmod(trailing, 0o600)
+got = agm.lease_token_of(args(path=trailing))
+ok("尾巴多空行照樣讀得到") if got == "tok-abc123" else bad("尾巴多空行照樣讀得到", repr(got))
+
 # 5. 檔案不存在。
 expect_error("檔不存在要講清楚", args(path=os.path.join(tmp, "nope")), "讀不到 lease token 檔")
 
@@ -112,7 +127,7 @@ if "os.fstat(" in body and "O_NOFOLLOW" in body and "os.stat(" not in body:
 else:
     bad("先 open 再 fstat，而且不跟隨 symlink", "lease_token_of 裡還有 os.stat／少了 O_NOFOLLOW")
 
-for f in (good, loose, empty, link):
+for f in (good, loose, empty, link, two, trailing):
     os.remove(f)
 os.rmdir(tmp)
 print(f"{PASS} passed, {FAIL} failed")
