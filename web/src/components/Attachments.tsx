@@ -11,6 +11,7 @@ import { useDialogFocus } from '../hooks/useDialogFocus'
 import './attachments.css'
 
 import { formatSize, sizeLabel, type Pending } from './attachmentsHelpers'
+import { progressLabel, uploadPercent } from './attachmentUpload'
 
 export function DropVeil({ label = '放開以附加檔案' }: { label?: string }) {
   return (
@@ -24,7 +25,17 @@ export function DropVeil({ label = '放開以附加檔案' }: { label?: string }
 }
 
 /** Pending thumbnails; 40px 認不出是哪張，hover/focus 浮一張絕對定位的大預覽。 */
-export function AttachTray({ items, onRemove, disabled }: { items: Pending[]; onRemove: (key: string) => void; disabled?: boolean }) {
+export function AttachTray({
+  items,
+  onRemove,
+  onRetry,
+  disabled,
+}: {
+  items: Pending[]
+  onRemove: (key: string) => void
+  onRetry?: (key: string) => void
+  disabled?: boolean
+}) {
   const [peek, setPeek] = useState<string | null>(null)
   if (items.length === 0) return null
   const peeked = items.find((it) => it.key === peek) ?? null
@@ -56,10 +67,12 @@ export function AttachTray({ items, onRemove, disabled }: { items: Pending[]; on
               <FileIcon />
             </span>
           )}
-          <span className="attach-thumb-name" title={`${it.name} · ${sizeLabel(it.size, it.originalSize)}`}>
-            {it.name}
+          <span className="attach-thumb-text">
+            <span className="attach-thumb-name" title={`${it.name} · ${sizeLabel(it.size, it.originalSize)}`}>
+              {it.name}
+            </span>
+            <PendingState item={it} onRetry={onRetry} disabled={disabled} />
           </span>
-          {it.id ? null : it.error ? <span className="attach-thumb-state err">失敗</span> : <span className="attach-thumb-state">上傳中…</span>}
           <button
             type="button"
             className="attach-thumb-x"
@@ -73,6 +86,46 @@ export function AttachTray({ items, onRemove, disabled }: { items: Pending[]; on
         </div>
       ))}
     </div>
+  )
+}
+
+/**
+ * 卡片第二行：壓縮中／`3.2 / 12.6 MB · 25%`＋細條／失敗原因＋重試（issue #435）。
+ * 進度一律有文字，條只是輔助；條用 `role="progressbar"` 帶數值給報讀器。
+ */
+function PendingState({ item: it, onRetry, disabled }: { item: Pending; onRetry?: (key: string) => void; disabled?: boolean }) {
+  if (it.id) return null
+  if (it.error) {
+    return (
+      <span className="attach-thumb-state err">
+        <span className="attach-thumb-err" title={it.error}>
+          失敗：{it.error}
+        </span>
+        {onRetry && it.retryable ? (
+          <button type="button" className="mini-btn attach-thumb-retry" disabled={disabled} aria-label={`重試上傳 ${it.name}`} onClick={() => onRetry(it.key)}>
+            重試
+          </button>
+        ) : null}
+      </span>
+    )
+  }
+  if (it.compressing) return <span className="attach-thumb-state">壓縮中…</span>
+  const label = progressLabel(it.loaded, it.size)
+  return (
+    <>
+      <span className="attach-thumb-state">{label}</span>
+      <span
+        className="attach-thumb-bar"
+        role="progressbar"
+        aria-label={`上傳 ${it.name}`}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={uploadPercent(it.loaded, it.size)}
+        aria-valuetext={label}
+      >
+        <span style={{ width: `${uploadPercent(it.loaded, it.size)}%` }} />
+      </span>
+    </>
   )
 }
 

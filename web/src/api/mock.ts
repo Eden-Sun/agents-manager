@@ -7,7 +7,8 @@ import { parseMentions } from './mentions'
 import { BOT_NAME_HINT, isValidBotName } from '../lib/botName'
 import { ApiError, BOT_KINDS } from './types'
 import type { BotKind } from './types'
-import type { HttpMethod, SocketHandlers, Transport } from './transport'
+import { abortError } from './transport'
+import type { HttpMethod, SocketHandlers, Transport, UploadOptions } from './transport'
 
 /** 未知 kind 一律當 claude（與 daemon 的 400 不同，mock 寬鬆處理）。 */
 /** 2026-09-23 真機（pane 只有 14 行）：claude 把 AskUserQuestion 的題目裁掉，只剩捲動中的選項。 */
@@ -462,6 +463,37 @@ interface MockMissionEvent {
   created_at: string
 }
 
+/**
+ * 假裝在傳：每 100ms 前進一段，照樣回報進度、吃 abort。檔名帶 `slow` 走慢速、`stall` 停在 25%、
+ * `fail` 傳到 40% 回 502——截圖與手動驗上傳進度用。
+ */
+function mockUploadProgress(name: string, total: number, { signal, onProgress }: UploadOptions): Promise<void> {
+  const perTick = /slow/i.test(name) ? 20 * 1024 : 800 * 1024
+  const stall = /stall/i.test(name)
+  const fail = /fail/i.test(name)
+  const limit = Math.floor(total * (stall ? 0.25 : fail ? 0.4 : 1))
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(abortError())
+    let loaded = 0
+    const timer = setInterval(() => {
+      loaded = Math.min(limit, loaded + perTick)
+      onProgress?.(loaded, total)
+      if (loaded < limit || stall) return
+      clearInterval(timer)
+      if (fail) reject(new ApiError(502, { error: 'upstream', message: 'mock: 寫入附件失敗' }, 'POST attachments failed (502)'))
+      else resolve()
+    }, 100)
+    signal?.addEventListener(
+      'abort',
+      () => {
+        clearInterval(timer)
+        reject(abortError())
+      },
+      { once: true },
+    )
+  })
+}
+
 export class MockTransport implements Transport {
   readonly mock = true
 
@@ -725,11 +757,12 @@ export class MockTransport implements Transport {
     return Promise.resolve('mock-ui-token')
   }
 
-  async upload(path: string, file: Blob): Promise<unknown> {
+  async upload(path: string, file: Blob, opts: UploadOptions = {}): Promise<unknown> {
     await this.session()
+    const name = new URLSearchParams(path.split('?')[1] ?? '').get('name') || 'image'
+    await mockUploadProgress(name, file.size, opts)
     const id = ulid('att')
     this.blobs.set(id, file)
-    const name = new URLSearchParams(path.split('?')[1] ?? '').get('name') || 'image'
     return {
       id,
       name,

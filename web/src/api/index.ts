@@ -2,7 +2,7 @@ import { MockTransport } from './mock'
 import { toMission, toMissionDetail, toMissionEvent, toMissions, toGroupMessagesPage, toHostShell, toHostShells, toInstallResult, toIssueDetail, toIssues, toMessagesPage, toMemProcesses, toMemSnapshot, toModels, toQuota, toState, toTerminal, toToolMap, toIdentityStatusMap, num, str, isRec, optStr, pick, arr, toSubmodules } from './normalize'
 import { HttpTransport } from './transport'
 import { ApiError } from './types'
-import type { SocketHandlers, Transport } from './transport'
+import type { SocketHandlers, Transport, UploadOptions } from './transport'
 import type {
   MemProcesses,
   MemSnapshot,
@@ -576,9 +576,9 @@ export async function withdrawTurn(turnId: string): Promise<void> {
   await transport.request('POST', `/turns/${encodeURIComponent(turnId)}/withdraw`)
 }
 
-export async function uploadAttachment(botId: string, file: File): Promise<Attachment> {
+export async function uploadAttachment(botId: string, file: File, opts?: UploadOptions): Promise<Attachment> {
   const qs = new URLSearchParams({ name: file.name || 'image' })
-  const raw = await transport.upload(`/bots/${encodeURIComponent(botId)}/attachments?${qs.toString()}`, file)
+  const raw = await transport.upload(`/bots/${encodeURIComponent(botId)}/attachments?${qs.toString()}`, file, opts)
   const o = isRec(raw) ? raw : {}
   return {
     id: str(pick(o, 'id')),
