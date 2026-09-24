@@ -635,22 +635,68 @@ def cmd_assign(client: Client, cfg: dict, args) -> object:
 
 # `quota_blocked`：帳號撞到用量上限，daemon 會在額度回來後自己重送——工作還沒完，所以算 open。
 OPEN_STATUSES = ("queued", "delivered", "unknown", "awaiting_review", "blocked", "quota_blocked")
+# 一次跟 daemon 要幾筆，以及最多翻幾頁（避免壞掉的游標把這裡變成無窮迴圈）。
+ASSIGNMENT_PAGE = 200
+MAX_ASSIGNMENT_PAGES = 50
+
+
+def _all_assignments(client: Client) -> tuple[list, bool]:
+    """翻完整份交辦清單。回 `(items, complete)`。
+
+    過濾（`--open`／`--status`／`--id` 的退路）一定要對**全部**做：daemon 的清單預設只回最新
+    一頁，而卡最久的那幾筆天生活得比一頁久——`blocked` 的定義就是「還在等，保持未結案」
+    （issue #515：正式機上 6 筆未結案有 3 筆在頁外，`--open` 一筆都看不到它們）。
+
+    `complete=False` = 沒撈完，而且**不知道漏了什麼**：舊 daemon 不回 `has_more`（沒有分頁，
+    只有那一頁）、或翻頁翻到上限。呼叫端要把這件事講出來，不要把半份清單當成全部。
+    """
+    items: list = []
+    cursor = None
+    for _ in range(MAX_ASSIGNMENT_PAGES):
+        page = client.get("/api/supervisor/assignments", {"before": cursor, "limit": ASSIGNMENT_PAGE})
+        if not isinstance(page, dict):
+            return items, False
+        items.extend(a for a in page.get("assignments") or [] if isinstance(a, dict))
+        if "has_more" not in page:
+            # 舊 daemon：沒有游標可以翻，拿到的就只有最新那一頁。
+            return items, False
+        if not page.get("has_more"):
+            return items, True
+        cursor = page.get("next_cursor")
+        if not isinstance(cursor, str) or not cursor:
+            return items, False
+    return items, False
 
 
 def cmd_assignments(client: Client, cfg: dict, args) -> object:
-    out = client.get("/api/supervisor/assignments")
-    if not isinstance(out, dict):
-        return out
-    items = [a for a in out.get("assignments") or [] if isinstance(a, dict)]
+    # 有過濾條件就一定要翻完：只看第一頁的過濾結果會把頁外的未結案講成「沒有」。
+    filtered = bool(args.id or args.status or args.open or args.awaiting_review)
+    if filtered or args.all:
+        items, complete = _all_assignments(client)
+    else:
+        out = client.get("/api/supervisor/assignments")
+        if not isinstance(out, dict):
+            return out
+        items = [a for a in out.get("assignments") or [] if isinstance(a, dict)]
+        # 舊 daemon 沒有 `has_more`：那就是「不知道還有沒有」，不是「沒有了」。
+        complete = "has_more" in out and not out.get("has_more")
     if args.id:
-        # 單筆優先走 `/assignments/{id}`（有 review 歷程）；舊 daemon 沒這支就退回清單過濾。
+        # 單筆優先走 `/assignments/{id}`（有 review 歷程）；那支只吃 assignment id，
+        # 拿 client_request_id 來查一定 404，所以退路掃的是**全量**清單。
         one = optional_get(client, f"/api/supervisor/assignments/{urllib.parse.quote(args.id)}")
         if one is not None:
             return one
         for a in items:
             if a.get("id") == args.id or a.get("client_request_id") == args.id:
                 return a
-        raise AgmError("not_found", f"找不到交辦 {args.id}", 4, id=args.id)
+        raise AgmError(
+            "not_found",
+            f"找不到交辦 {args.id}" if complete else f"在撈得到的 {len(items)} 筆裡找不到交辦 {args.id}；清單沒撈完（daemon 可能還沒有分頁），不代表它不存在",
+            4,
+            id=args.id,
+            searched=len(items),
+            complete=complete,
+        )
     if args.status:
         items = [a for a in items if a.get("status") == args.status]
     # 未結案 = 還在跑 + 等驗收 + 被標阻塞。回合跑完不等於結案，所以 awaiting_review 也算。
@@ -676,7 +722,11 @@ def cmd_assignments(client: Client, cfg: dict, args) -> object:
         "assignments": items,
         "open": len([a for a in items if a.get("status") in OPEN_STATUSES]),
         "awaiting_review": len([a for a in items if a.get("status") == "awaiting_review"]),
+        # 這份清單是不是全部。False = 還有沒撈到的，上面每一個數字都只是下限。
+        "complete": complete,
     }
+    if not complete:
+        out["note"] = "清單沒撈完（daemon 還沒有分頁，或翻頁翻到上限）：上面的數字是下限，舊的交辦可能不在裡面"
     if stuck:
         out["retrying_undelivered"] = stuck
     return out
@@ -1737,6 +1787,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--status", help="只列這個狀態")
     s.add_argument("--open", action="store_true", help="只列未結案（含 awaiting_review、blocked）")
     s.add_argument("--awaiting-review", action="store_true", dest="awaiting_review", help="只列等你驗收的")
+    s.add_argument("--all", action="store_true", help="翻完所有分頁（預設只看最新一頁；有過濾條件時本來就會翻完）")
     s.set_defaults(func=cmd_assignments)
 
     s = sub.add_parser(

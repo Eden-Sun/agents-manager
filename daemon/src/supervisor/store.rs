@@ -1200,13 +1200,45 @@ pub async fn mission_assignments(pool: &SqlitePool, mission_id: &str) -> Result<
 }
 
 pub async fn list_assignments(pool: &SqlitePool, limit: i64) -> Result<Vec<Assignment>> {
+    list_assignments_page(pool, None, limit).await
+}
+
+/// 交辦清單的一頁，新的在前。`before` = 上一頁最後一筆的 `(created_at, id)`。
+///
+/// 有游標才翻得完：這支以前只回最新 `limit` 筆，而 `bin/agm` 的 `--open`／`--id` 是在
+/// **客戶端**過濾——卡最久的那幾筆（`blocked` 天生活得比一頁久）於是從「未結案」裡整個消失
+/// （issue #515，正式機上 6 筆未結案有 3 筆在頁外）。排序補上 `id` 才是全序：`created_at`
+/// 同毫秒的兩筆之間沒有定序的話，翻頁會漏掉或重複（同 `supervisor_evidence` 的游標）。
+pub async fn list_assignments_page(
+    pool: &SqlitePool,
+    before: Option<(&str, &str)>,
+    limit: i64,
+) -> Result<Vec<Assignment>> {
     Ok(sqlx::query_as::<_, Assignment>(
-        "SELECT * FROM supervisor_assignments WHERE supervisor_id=? ORDER BY created_at DESC LIMIT ?",
+        "SELECT * FROM supervisor_assignments
+          WHERE supervisor_id=?1
+            AND (?2 IS NULL OR created_at < ?2 OR (created_at=?2 AND id < ?3))
+          ORDER BY created_at DESC, id DESC LIMIT ?4",
     )
     .bind(SUPERVISOR_ID)
+    .bind(before.map(|c| c.0))
+    .bind(before.map(|c| c.1))
     .bind(limit)
     .fetch_all(pool)
     .await?)
+}
+
+/// 最近 `limit` 筆，**加上**掉在那一頁外面的未結案交辦。
+///
+/// 「最近幾筆」跟「還欠著幾件」是兩件事：`blocked`／`awaiting_review` 天生活得比一頁久，
+/// 只看一頁的話 handoff 的 `open_assignments` 會少報，而少報的正是最該被看見的那幾筆
+/// （issue #515：正式庫 1287 筆，5 筆未結案有 3 筆在最新 200 之外）。
+pub async fn list_assignments_with_open(pool: &SqlitePool, limit: i64) -> Result<Vec<Assignment>> {
+    let mut rows = list_assignments(pool, limit).await?;
+    let seen: std::collections::HashSet<String> = rows.iter().map(|a| a.id.clone()).collect();
+    rows.extend(unsettled_assignments(pool).await?.into_iter().filter(|a| !seen.contains(&a.id)));
+    rows.sort_by(|a, b| (&b.created_at, &b.id).cmp(&(&a.created_at, &a.id)));
+    Ok(rows)
 }
 
 /// The controller's work list: assignments the daemon itself can still move (dispatch, retry,

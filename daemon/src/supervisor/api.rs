@@ -70,9 +70,56 @@ pub async fn post_fallback(State(app): State<Arc<App>>) -> Result<Json<Value>, L
     Ok(Json(out))
 }
 
-pub async fn get_assignments(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
-    let rows = store::list_assignments(&app.db, 200).await.map_err(up)?;
-    Ok(Json(json!({"assignments": rows.iter().map(store::Assignment::to_json).collect::<Vec<_>>()})))
+#[derive(Deserialize, Default)]
+pub struct AssignmentsQuery {
+    /// 上一頁的 `next_cursor`（`["<created_at>","<id>"]` 的 JSON），原樣放回來。
+    #[serde(default)]
+    pub before: Option<String>,
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+/// 交辦清單，新的在前。**有分頁**：`before` 沒帶就是第一頁。
+///
+/// 以前只回最新 200 筆而且沒有任何「還有更多」的訊號，`bin/agm` 又是在客戶端過濾 `--open`，
+/// 於是頁外那些未結案的交辦在 CLI 裡完全看不到，而 `blocked`（＝還在等，保持未結案）天生
+/// 就活得比一頁久（issue #515）。
+pub async fn get_assignments(
+    State(app): State<Arc<App>>,
+    Query(q): Query<AssignmentsQuery>,
+) -> Result<Json<Value>, LcError> {
+    let cursor: Option<(String, String)> = q
+        .before
+        .as_deref()
+        .map(|s| {
+            if s.len() > 512 {
+                return Err(LcError::Bad("invalid assignment cursor".into()));
+            }
+            serde_json::from_str(s).map_err(|_| LcError::Bad("invalid assignment cursor".into()))
+        })
+        .transpose()?;
+    let limit = q.limit.unwrap_or(200).clamp(1, 500);
+    // 多撈一筆才知道後面還有沒有；`has_more` 是「這不是全部」唯一可靠的訊號。
+    let mut rows = store::list_assignments_page(
+        &app.db,
+        cursor.as_ref().map(|c| (c.0.as_str(), c.1.as_str())),
+        limit + 1,
+    )
+    .await
+    .map_err(up)?;
+    let has_more = rows.len() > limit as usize;
+    rows.truncate(limit as usize);
+    let next_cursor = if has_more {
+        rows.last().map(|r| serde_json::to_string(&(&r.created_at, &r.id)).expect("string tuple"))
+    } else {
+        None
+    };
+    Ok(Json(json!({
+        "assignments": rows.iter().map(store::Assignment::to_json).collect::<Vec<_>>(),
+        "has_more": has_more,
+        "next_cursor": next_cursor,
+        "limit": limit,
+    })))
 }
 
 #[derive(Deserialize)]
@@ -543,7 +590,9 @@ pub async fn get_incidents(
 
 pub async fn get_handoff(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
     let sup = store::get_or_init(&app.db).await.map_err(up)?;
-    let assignments = store::list_assignments(&app.db, 200).await.map_err(up)?;
+    // 未結案的一律帶上，就算它已經掉出最新 200 筆——不然 `open_assignments` 會少報，
+    // 而冷啟動的總管就是照這個數字決定還有沒有事要接手（issue #515）。
+    let assignments = store::list_assignments_with_open(&app.db, 200).await.map_err(up)?;
     let open = assignments.iter().filter(|a| a.is_open()).count();
     Ok(Json(json!({
         "summary": sup.summary,
@@ -2304,6 +2353,107 @@ mod review_boundary_tests {
             assert_eq!(d["reason"], "assignment_request_mismatch", "{label}");
             assert_eq!(d["field"], label);
         }
+        app.db.close().await;
+        std::fs::remove_dir_all(&app.data_dir).unwrap();
+    }
+
+    /// #515：清單有分頁，而且頁外的未結案交辦翻得到。
+    ///
+    /// 以前只回最新 200 筆、沒有任何「還有更多」的訊號，`bin/agm` 在客戶端過濾 `--open`，
+    /// 於是頁外那些 `blocked`（＝還在等，保持未結案，天生活得比一頁久）完全看不到。
+    #[tokio::test]
+    async fn the_assignment_list_pages_so_the_oldest_open_work_is_still_reachable() {
+        let app = app().await;
+        // 同一毫秒寫兩筆：沒有 id 當第二個排序鍵的話，翻頁會漏掉或重複其中一筆。
+        for i in 0..5 {
+            let a = store::insert_assignment(&app.db, None, "bot", &format!("crid-{i}"), "work", &[], None, true)
+                .await
+                .unwrap();
+            let at = format!("2026-09-{:02}T00:00:00.000Z", 10 + i / 2);
+            sqlx::query("UPDATE supervisor_assignments SET created_at=?, status='blocked' WHERE id=?")
+                .bind(&at)
+                .bind(&a.id)
+                .execute(&app.db)
+                .await
+                .unwrap();
+        }
+        let mut seen: Vec<String> = Vec::new();
+        let mut before: Option<String> = None;
+        loop {
+            let page = get_assignments(
+                State(app.clone()),
+                Query(AssignmentsQuery { before: before.clone(), limit: Some(2) }),
+            )
+            .await
+            .unwrap()
+            .0;
+            for a in page["assignments"].as_array().unwrap() {
+                seen.push(a["id"].as_str().unwrap().to_string());
+            }
+            if !page["has_more"].as_bool().unwrap() {
+                assert!(page["next_cursor"].is_null(), "最後一頁不給游標");
+                break;
+            }
+            before = Some(page["next_cursor"].as_str().unwrap().to_string());
+            assert!(seen.len() <= 5, "游標沒有往前走");
+        }
+        let mut uniq = seen.clone();
+        uniq.sort();
+        uniq.dedup();
+        assert_eq!((seen.len(), uniq.len()), (5, 5), "五筆各出現一次：{seen:?}");
+        // 第一頁就是舊行為：拿得到最新兩筆，而且明講後面還有。
+        let first = get_assignments(State(app.clone()), Query(AssignmentsQuery::default())).await.unwrap().0;
+        assert_eq!(first["assignments"].as_array().unwrap().len(), 5);
+        assert_eq!(first["has_more"], json!(false));
+        let bad = get_assignments(
+            State(app.clone()),
+            Query(AssignmentsQuery { before: Some("not json".into()), limit: None }),
+        )
+        .await
+        .expect_err("壞游標要回 400，不是靜靜回第一頁");
+        assert!(matches!(bad, LcError::Bad(_)), "{bad:?}");
+        app.db.close().await;
+        std::fs::remove_dir_all(&app.data_dir).unwrap();
+    }
+
+    /// #515：掉出那一頁的未結案交辦，handoff 也要算得到。
+    #[tokio::test]
+    async fn the_handoff_counts_open_work_that_fell_off_the_recent_page() {
+        let app = app().await;
+        // 一筆很舊、還沒結案；再塞一整頁比它新的已結案。
+        let old = store::insert_assignment(&app.db, None, "bot", "crid-old", "還在等", &[], None, true).await.unwrap();
+        sqlx::query("UPDATE supervisor_assignments SET created_at='2026-09-01T00:00:00.000Z', status='blocked' WHERE id=?")
+            .bind(&old.id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        for i in 0..3 {
+            let a = store::insert_assignment(&app.db, None, "bot", &format!("crid-{i}"), "做完了", &[], None, true).await.unwrap();
+            sqlx::query("UPDATE supervisor_assignments SET created_at=?, status='completed' WHERE id=?")
+                .bind(format!("2026-09-2{i}T00:00:00.000Z"))
+                .bind(&a.id)
+                .execute(&app.db)
+                .await
+                .unwrap();
+        }
+        // 只看最新 2 筆的話，那筆 blocked 在頁外。
+        let page = store::list_assignments(&app.db, 2).await.unwrap();
+        assert!(!page.iter().any(|a| a.id == old.id), "前提：它不在最新那一頁裡");
+        let with_open = store::list_assignments_with_open(&app.db, 2).await.unwrap();
+        assert!(with_open.iter().any(|a| a.id == old.id), "未結案的要補進來");
+        assert_eq!(with_open.iter().filter(|a| a.is_open()).count(), 1);
+        // 新的在前，而且補進來的那筆不會插錯位置。
+        let order: Vec<&str> = with_open.iter().map(|a| a.created_at.as_str()).collect();
+        let mut sorted = order.clone();
+        sorted.sort_by(|a, b| b.cmp(a));
+        assert_eq!(order, sorted, "{order:?}");
+
+        let handoff = get_handoff(State(app.clone())).await.unwrap().0;
+        assert_eq!(handoff["open_assignments"], json!(1), "少報就等於沒有人會回頭看那一筆");
+        assert!(
+            handoff["assignments"].as_array().unwrap().iter().any(|a| a["id"] == json!(old.id)),
+            "數字有、清單沒有的話，看的人查不到是哪一筆",
+        );
         app.db.close().await;
         std::fs::remove_dir_all(&app.data_dir).unwrap();
     }
