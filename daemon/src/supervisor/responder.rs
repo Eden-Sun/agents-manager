@@ -904,7 +904,7 @@ async fn login_recovered(app: &Arc<App>, bot: &crate::db::Bot, since: Option<&st
 
 /// 送不出去的那一次順便看畫面（issue #420）：協調者的 CLI 沒登入時，送出只會一直 `composer_unreadable`／
 /// 回合失敗，而 liveness 照樣是 idle、health 照樣 healthy，申請與核准靜默過期了 9 小時。看得出是登入問題就把
-/// 狀態標成 `needs_login`：health 轉 degraded，incident 探針開 `responder_needs_login` 叫醒巡檢去找人。
+/// 狀態標成 `needs_login`：health 轉 critical（#454），incident 探針開 `role_unavailable` 叫醒巡檢去找人。
 async fn note_login_problem(app: &Arc<App>, bot: &crate::db::Bot, status: &str) {
     if status == "needs_login" || !login_problem_on_screen(app, bot).await {
         return;
@@ -1484,7 +1484,7 @@ mod flow_tests {
     }
 
     /// issue #420：協調者的 CLI 沒登入時，liveness 照樣 idle、health 照樣 healthy，核准申請送了 66 次到過期都沒人知道。
-    /// 送不出去時看畫面：看得出要登入就標 `needs_login`（health degraded、incident 探針開 `responder_needs_login`）；
+    /// 送不出去時看畫面：看得出要登入就標 `needs_login`（health critical、incident 探針開 `role_unavailable`）；
     /// 畫面恢復就解除。另外不管原因，協調者的事件送了 5 次還在 pending 就開 `responder_undeliverable`（一個協調者一筆）。
     #[tokio::test]
     async fn a_responder_that_is_not_logged_in_is_flagged_and_its_stuck_events_open_an_incident() {
@@ -1518,7 +1518,7 @@ mod flow_tests {
         // #454：incident 對同一件事開 critical，這一格以前是 degraded——兩個面板講同一件事就該同一個嚴重度。
         assert_eq!(super::super::health::responder_severity(&status), "critical");
         let probed = super::super::incidents::observe(&app, &thresholds).await;
-        assert!(kinds(&probed).contains(&("responder_needs_login".into(), "critical".into())), "{:?}", kinds(&probed));
+        assert!(kinds(&probed).contains(&(crate::supervisor::incidents::ROLE_UNAVAILABLE_KIND.into(), "critical".into())), "{:?}", kinds(&probed));
 
         // 畫面還是那樣：不解除。
         notify(&app).await;
@@ -1529,7 +1529,7 @@ mod flow_tests {
         let row = roles::get(&app.db, Role::Responder).await.unwrap();
         assert_eq!((row.status.as_str(), row.status_detail.as_deref(), row.waiting_since), ("", Some("登入已恢復"), None));
         let probed = super::super::incidents::observe(&app, &thresholds).await;
-        assert!(!kinds(&probed).iter().any(|(k, _)| k == "responder_needs_login"));
+        assert!(!kinds(&probed).iter().any(|(k, _)| k == crate::supervisor::incidents::ROLE_UNAVAILABLE_KIND));
 
         // 不管原因：協調者的事件送了 5 次還在 pending → 一筆 incident；4 次還不到。
         let mut ids = Vec::new();
@@ -1550,7 +1550,14 @@ mod flow_tests {
         assert_eq!(stuck[0].severity, "critical");
         // 開出來的 incident 叫醒的是巡檢，不是倒下的協調者自己。
         assert_eq!(roles::route("incident_opened", &json!({"incident": {"kind": "responder_undeliverable"}}), None).role, Role::Patrol);
-        assert_eq!(roles::route("incident_opened", &json!({"incident": {"kind": "responder_needs_login"}}), None).role, Role::Patrol);
+        let role_unavailable = |resource: &str| {
+            json!({"incident": {"kind": crate::supervisor::incidents::ROLE_UNAVAILABLE_KIND, "resource": resource}})
+        };
+        assert_eq!(roles::route("incident_opened", &role_unavailable("responder"), None).role, Role::Patrol);
+        // #459：故障的是巡檢自己時要送協調者——送回巡檢等於送進已知收不到的那條路。
+        assert_eq!(roles::route("incident_opened", &role_unavailable("patrol"), None).role, Role::Responder);
+        assert_eq!(roles::route("incident_resolved", &role_unavailable("patrol"), None).role, Role::Responder);
+        assert!(!roles::route("incident_resolved", &role_unavailable("patrol"), None).wake, "恢復不叫醒人");
     }
 
     /// 送達不是恢復：prompt 成功（`ok`／`unknown`）只代表字進了 pane 或佇列。還沒有回答、或回合

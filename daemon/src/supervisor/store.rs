@@ -388,6 +388,25 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
             sqlx::query(ddl).execute(pool).await?;
         }
     }
+    // issue #459：`responder_needs_login` 改名成 `role_unavailable`。舊 kind 的列再也不會被觀測到
+    // （`observe` 只出新名），所以還開著的那些會變成永遠關不掉的孤兒——resource 是角色名的直接改寫
+    // 過來（同一件事、同一把唯一索引 key），其餘（#420 時代 resource 是 bot_id 的）就地關掉。
+    sqlx::query(
+        "UPDATE supervisor_incidents SET kind=? WHERE kind=? AND resource IN ('patrol','responder')
+           AND NOT EXISTS (SELECT 1 FROM supervisor_incidents b
+                            WHERE b.supervisor_id=supervisor_incidents.supervisor_id AND b.kind=?
+                              AND b.resource=supervisor_incidents.resource AND b.status='open')",
+    )
+    .bind(super::incidents::ROLE_UNAVAILABLE_KIND)
+    .bind(super::incidents::ROLE_UNAVAILABLE_KIND_LEGACY)
+    .bind(super::incidents::ROLE_UNAVAILABLE_KIND)
+    .execute(pool)
+    .await?;
+    sqlx::query("UPDATE supervisor_incidents SET status='resolved', resolved_at=? WHERE kind=? AND status='open'")
+        .bind(crate::db::now())
+        .bind(super::incidents::ROLE_UNAVAILABLE_KIND_LEGACY)
+        .execute(pool)
+        .await?;
     // 雙角色（巡檢／協調）的欄位與表，見 roles.rs。
     super::roles::migrate(pool).await?;
     Ok(())
