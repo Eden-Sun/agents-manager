@@ -1,8 +1,11 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { projectHostName, useStore } from '../store/store'
-import { quotaKey } from '../api/types'
+import { canonicalModel, quotaKey } from '../api/types'
 import './turnErrorBadge.css'
+
+/** 「改用 opus」送出去的正式 id（`opus` 是已停用別名，送了會被 daemon 換掉）。 */
+const OPUS = canonicalModel('claude', 'opus')
 
 /**
  * 「這一回合其實斷了」的紅色 badge（SPEC §4.3a）：claude 斷線只在 pane 印一行、照常 idle，`runs.turn_error` 在此顯示。
@@ -23,6 +26,8 @@ export function TurnErrorBadge({ botId }: { botId: string }) {
     return q.limit_hit?.until ?? (/fable/i.test(notice ?? '') ? q.fable?.resets_at : q.five_hour?.resets_at) ?? null
   })
   const currentModel = useStore((s) => s.bots.find((b) => b.id === botId)?.model ?? null)
+  /** 舊資料可能還存著 `opus` 這個已停用別名，新的一律是正式 id：兩個都算「已經是 opus」（#539）。 */
+  const isOpus = currentModel === OPUS || currentModel === 'opus'
   const patchBot = useStore((s) => s.patchBot)
   const lastUserText = useStore((s) => {
     const list = s.messages[botId] ?? []
@@ -130,13 +135,15 @@ export function TurnErrorBadge({ botId }: { botId: string }) {
           <button
             type="button"
             className="btn primary"
-            disabled={sending || currentModel === 'opus'}
-            title={currentModel === 'opus' ? '已經是 opus' : '把這顆 bot 的模型改成 opus（live 套用，不重啟）'}
+            disabled={sending || isOpus}
+            title={isOpus ? '已經是 opus' : '把這顆 bot 的模型改成 opus（live 套用，不重啟）'}
             onClick={() => {
               setSending(true)
-              void patchBot(botId, { model: 'opus' }).then((ok) => {
+              // 送正式 id，不送已停用的 `opus` 別名（#539）：送別名的話 daemon 會換掉再存，
+              // 而這顆按鈕的 `currentModel === 'opus'` 從此永遠不成立，按完還是一直可按。
+              void patchBot(botId, { model: OPUS }).then((res) => {
                 setSending(false)
-                if (ok) {
+                if (res) {
                   setOpen(false)
                   notify('info', '已改用 opus，重送上一則就能繼續')
                 }
@@ -149,11 +156,11 @@ export function TurnErrorBadge({ botId }: { botId: string }) {
         <button
           type="button"
           className="btn primary"
-          disabled={!lastUserText || sending || busy || (quotaLimit && currentModel !== 'opus' && !resetPassed(resetsAt))}
+          disabled={!lastUserText || sending || busy || (quotaLimit && !isOpus && !resetPassed(resetsAt))}
           title={
             !lastUserText
               ? '這個對話裡沒有可以重送的訊息'
-              : quotaLimit && currentModel !== 'opus' && !resetPassed(resetsAt)
+              : quotaLimit && !isOpus && !resetPassed(resetsAt)
                 ? '額度還沒重置，重送只會再被拒絕一次；先換模型'
               : busy
                 ? '它正在忙，等這一輪停下來再重送'

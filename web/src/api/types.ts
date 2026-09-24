@@ -635,10 +635,18 @@ export interface PatchBotInput {
 }
 
 /** `needs_restart = true`：已寫入 config，但目前的 Run 仍跑舊參數，要 restart 才生效。 */
+/** daemon 把送進去的停用模型換掉了（API.md「停用模型的回應」／#400）。 */
+export interface ModelRemap {
+  from: string
+  to: string
+}
+
 export interface PatchBotResult {
   needs_restart: boolean
   /** 只有真的試過當場套用才有（codex model／effort／fast，SPEC §4.4a）。`deferred`＝bot 正忙、排到下次 idle 再套（#393）。 */
   live_apply?: { applied: boolean; deferred: boolean; reason: string | null }
+  /** 送進去的 model 是停用別名、daemon 換成別的才有；沒換就是 `null`（issue #539）。 */
+  remapped_model: ModelRemap | null
 }
 
 /** grok 的靜態 effort（`GET /api/models` 失敗時退回）。 */
@@ -654,10 +662,10 @@ export function effortLabel(level: string): string {
 }
 
 export const MODEL_OPTIONS: Record<BotKind, readonly string[]> = {
-  // 由輕到重（2026-09-09 使用者決定）；`sortModels` 以此排序 API 清單。
-  claude: ['haiku', 'sonnet', 'opus', 'fable'],
+  // 由輕到重（2026-09-09 使用者決定）；`sortModels` 以此排序 API 清單。停用別名一律寫替換後的正式 id（#539）。
+  claude: ['haiku', 'sonnet', 'claude-opus-5-5', 'fable'],
   // 順序同 claude（2026-09-09 使用者決定）；gpt-5.5 拿掉（2026-09-09）。
-  codex: ['gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol', 'gpt-6-astra'],
+  codex: ['gpt-6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol', 'gpt-6-astra'],
   // `grok models`（grok 1.0.40，2026-09-22）
   grok: ['grok-4.7', 'grok-4.7-build-fast', 'grok-4.6', 'grok-4.5'],
 }
@@ -667,6 +675,23 @@ export const MODEL_OPTIONS: Record<BotKind, readonly string[]> = {
  * 已設成它的 bot 仍保留那顆按鈕，否則會被顯示成「自訂」。
  */
 export const HIDDEN_MODELS: readonly string[] = ['gpt-5.5']
+
+/**
+ * daemon 已停用的模型別名（#400）：送這些值進去，它會換成右邊那個再存，並在回應帶 `remapped`。
+ * 權威在 `daemon/src/models.rs` 的 `remap_deprecated_model`，這裡留一份只為了**前端自己不要再送別名**
+ * （靜態後備清單、快捷按鈕）與排序時把別名對到正式 id；**兩邊要一起改**（同 `REBUILD_THRESHOLD` 的作法）。
+ * 選單本身照舊顯示 daemon 給的清單——claude 的 `GET /api/models` 目前就是回 `opus` 這種別名，
+ * 前端擅自濾掉會讓人選不到 opus。真的被換時由 `store.patchBot` 講一句。
+ */
+export const DEPRECATED_MODELS: Readonly<Record<string, string>> = {
+  'claude:opus': 'claude-opus-5-5',
+  'codex:gpt-5.6-luna': 'gpt-6-luna',
+}
+
+/** 這個 kind 的這個 model id 的正式寫法（不是別名就原樣回）。 */
+export function canonicalModel(kind: BotKind, id: string): string {
+  return DEPRECATED_MODELS[`${kind}:${id}`] ?? id
+}
 
 /** `<select>` sentinel 值 */
 export const MODEL_DEFAULT = ''

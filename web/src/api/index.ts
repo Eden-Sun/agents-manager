@@ -7,6 +7,7 @@ import type {
   MemProcesses,
   MemSnapshot,
   MessageHit,
+  ModelRemap,
   AppState,
   Attachment,
   DirListing,
@@ -386,10 +387,20 @@ export async function deleteIdentity(name: string, host = 'local'): Promise<void
   await transport.request('DELETE', `/identities/${encodeURIComponent(name)}${q}`)
 }
 
-export async function createBot(projectId: string, input: NewBotInput): Promise<{ id: string; name: string }> {
+/** API.md「停用模型的回應」（#400）：`{"remapped":{"model":{"from","to"}}}`；沒換就沒有這一段。 */
+function toModelRemap(v: unknown): ModelRemap | null {
+  if (!isRec(v)) return null
+  const m = isRec(v.model) ? v.model : null
+  if (!m) return null
+  const from = str(pick(m, 'from'))
+  const to = str(pick(m, 'to'))
+  return from && to && from !== to ? { from, to } : null
+}
+
+export async function createBot(projectId: string, input: NewBotInput): Promise<{ id: string; name: string; remapped_model: ModelRemap | null }> {
   const raw = await transport.request('POST', `/projects/${encodeURIComponent(projectId)}/bots`, input)
   const o = isRec(raw) ? raw : {}
-  return { id: str(pick(o, 'bot_id')), name: str(pick(o, 'name')) }
+  return { id: str(pick(o, 'bot_id')), name: str(pick(o, 'name')), remapped_model: toModelRemap(o.remapped) }
 }
 
 /** API.md v3.3. `null` `model`/`identity` clears; renaming with an active Run → 409. */
@@ -400,6 +411,7 @@ export async function patchBot(botId: string, input: PatchBotInput): Promise<Pat
   return {
     needs_restart: o.needs_restart === true || o.restart_required === true,
     ...(la ? { live_apply: { applied: la.applied === true, deferred: la.deferred === true, reason: typeof la.reason === 'string' ? la.reason : null } } : {}),
+    remapped_model: toModelRemap(o.remapped),
   }
 }
 
