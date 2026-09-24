@@ -1659,7 +1659,14 @@ async fn recover_unacked(app: &Arc<App>) {
         // 不可用。以前唯一的出口是補送到第 60～80 次才 gave_up，中間沒有任何人知道它收不到 digest。
         // 這裡只收集，整輪掃完才一次算給那個角色——逐筆算的話，同一角色一輪裡有好幾筆事件時，
         // 「一筆壞、一筆好」的結果會取決於迭代順序（i407 review 2026-09-24）。
-        if let Some(role) = e.role.clone() {
+        //
+        // 算給誰看 `claimed_by`，不是 `role`（issue #505）：`notify_turn_id` 是 `roles::mark_delivered`
+        // 跟 `claimed_by` **同一句 SQL** 寫下的，所以「這個回合是誰的」只有 `claimed_by` 答得準；
+        // `role` 只是路由表寫的「本來該歸誰」。兩者不一樣的列（`role='responder'` 而
+        // `claimed_by='patrol'`，也就是單角色時期巡檢收走的那些）照 `role` 算，等於把**巡檢**送不出去
+        // 的回合記到協調者頭上：三輪就把一顆健康的協調者判成 `notify_stalled`，#421 的閘門於是把核准
+        // 從它手上搬給壞掉的巡檢，而巡檢自己的故障反而沒有人算。下面 `give_up_on` 早就是這樣取 owner 的。
+        if let Some(role) = super::roles::owner(e.claimed_by.as_deref(), e.role.as_deref()) {
             let round = notify_rounds.entry(role).or_default();
             match turn.as_ref().map(|t| t.status.as_str()) {
                 Some("failed") => {
@@ -1699,7 +1706,7 @@ fn age_secs(iso: &str) -> i64 {
 /// 三個管道，跟看門狗放棄時同一套：事件本身改成 `gave_up`（不再補送、但仍算未處理，人照樣 ack 得掉）、
 /// 一則 durable inbox 事件叫醒另一個角色、一行 error log。`event_key` 綁事件 id，所以只會喊一次。
 async fn give_up_on(app: &Arc<App>, e: &store::InboxEvent, why: &str, age: i64) {
-    let owner = e.claimed_by.clone().or_else(|| e.role.clone()).unwrap_or_else(|| "patrol".into());
+    let owner = super::roles::owner_or_default(e.claimed_by.as_deref(), e.role.as_deref());
     let to = match super::roles::Role::parse(&owner) {
         Some(super::roles::Role::Responder) => super::roles::Role::Patrol,
         _ => super::roles::Role::Responder,
@@ -1988,7 +1995,7 @@ pub fn spawn(app: Arc<App>, generation: i64) {
                     // 先分角色、合併重複，再各自決定要不要叫醒（roles.rs）。沒有要叫醒的事件時，
                     // 這一段只讀寫資料庫，不開任何模型回合。
                     // 失敗要記，而且**這一拍照跑下去**（#472）：這兩支失敗時，事件會留在
-                    // `role IS NULL`，而 `due_for` 三個分支全都比 `COALESCE(claimed_by, role)`，
+                    // `role IS NULL`，而 `due_for` 三個分支全都比 `roles::OWNER`，
                     // 所以那些事件對兩個通知者同時隱形——沒人被叫醒、`notify_attempts` 也不會累積
                     // （走不到 `notify_exhausted`）。以前這裡是 `let _ =`，連一行 log 都沒有。
                     // 整拍不因此中止：後面幾段（watchdog、mission、idle_sleep）跟分類無關，
@@ -2024,7 +2031,7 @@ pub fn spawn(app: Arc<App>, generation: i64) {
 /// 記一次 `roles::classify` 的結果：失敗要看得見，而且要數「連續幾拍」（#472）。
 ///
 /// 為什麼不是 `let _ =`（原本的寫法）：`classify` 只處理 `role IS NULL` 的列，而 `roles::due_for`
-/// 三個分支全都比 `COALESCE(claimed_by, role)`——它一失敗，那些事件對**兩個**通知者同時隱形：
+/// 三個分支全都比 [`crate::supervisor::roles::OWNER`]——它一失敗，那些事件對**兩個**通知者同時隱形：
 /// 沒有人被叫醒，`notify_attempts` 也不會累積（所以連 `notify_exhausted` 那條 incident 都走不到）。
 /// 以前連一行 log 都沒有，等於 #420 那 9 小時的形狀換一個入口。
 ///
@@ -2402,6 +2409,55 @@ mod tests {
         recover_unacked(&app).await;
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE kind='inbox_gave_up'").fetch_one(&app.db).await.unwrap();
         assert_eq!(n, 1);
+    }
+
+    /// issue #505：notify 回合算給**收它的那個角色**（`claimed_by`），不是路由表寫的 `role`。
+    ///
+    /// `role='responder'` 而 `claimed_by='patrol'` 的列是單角色時期巡檢收走的（`due_for` 那時走
+    /// `OWNER IN ('patrol','responder')`，`mark_delivered` 寫下 `claimed_by='patrol'`），協調者建起來
+    /// 之後也不搬回去。它的 `notify_turn_id` 是**巡檢**的回合——`mark_delivered` 同一句寫的兩個欄位。
+    /// 照 `role` 算的話，巡檢送不出去三輪就會把一顆完全健康的協調者判成 `notify_stalled`：
+    /// `health::role_state` 回 `Unavailable` → #421 的閘門把核准從它手上搬給壞掉的巡檢，
+    /// 而巡檢自己那三個壞回合一個都沒被算到。
+    #[tokio::test]
+    async fn a_failed_patrol_notify_turn_is_never_counted_against_the_responder() {
+        use super::super::bot_requests::flow_tests;
+        use super::super::roles::{self, Role};
+        let app = flow_tests::app().await;
+        flow_tests::configure_responder(&app).await;
+        let id = store::push_inbox(&app.db, "approval_requested:a1", "approval_requested", None, None, None, &json!({}))
+            .await
+            .unwrap()
+            .unwrap();
+        roles::classify(&app.db).await.unwrap();
+        let role: Option<String> = sqlx::query_scalar("SELECT role FROM supervisor_inbox WHERE id=?")
+            .bind(&id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(role.as_deref(), Some("responder"), "路由表說這是協調者的");
+
+        // 巡檢的回合，每一輪都是新的一個、而且都沒跑完。
+        let now = crate::db::now();
+        sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,started_at) VALUES ('r-p','patrol','running','idle',?)")
+            .bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO conversations (id,bot_id,created_at) VALUES ('c-p','patrol',?)")
+            .bind(&now).execute(&app.db).await.unwrap();
+        for i in 0..super::super::role_faults::NOTIFY_STALL_LIMIT {
+            let turn = format!("t-fail-{i}");
+            sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,created_at) VALUES (?,'c-p','r-p','web','failed',?)")
+                .bind(&turn).bind(&now).execute(&app.db).await.unwrap();
+            // 巡檢收走這一則（單角色時期就是這樣撈的），然後那個回合掛掉。
+            roles::mark_delivered(&app.db, std::slice::from_ref(&id), Role::Patrol, &turn, "ok").await.unwrap();
+            recover_unacked(&app).await;
+            let state: String = sqlx::query_scalar("SELECT state FROM supervisor_inbox WHERE id=?")
+                .bind(&id).fetch_one(&app.db).await.unwrap();
+            assert_eq!(state, "pending", "回合沒跑完就放回佇列，下一輪再送");
+        }
+
+        let patrol = super::super::role_faults::snapshot(&app, Role::Patrol).await.expect("壞的是巡檢，要算在它頭上");
+        assert_eq!(patrol.failed_turns.len(), super::super::role_faults::NOTIFY_STALL_LIMIT, "三個不同的壞回合都是巡檢的");
+        assert!(
+            super::super::role_faults::snapshot(&app, Role::Responder).await.is_none_or(|f| f.failed_turns.is_empty()),
+            "協調者一次都沒送過這一則，不能算它不可用"
+        );
     }
 
     /// 放棄補送（`gave_up`）與喊另一個角色的 `inbox_gave_up` 同一個交易：通知寫不進去，事件就不轉 `gave_up`、留在

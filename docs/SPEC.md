@@ -3493,7 +3493,10 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
   那一回合就會帶一份新的讀數進來。
   `stuck_at_login` **刻意不認**這個畫面（#427 第 1 項裁示）：擋住不送就等不到恢復訊號，觀測與攔截分開。
 - **notify 連續 3 個回合沒完成也算不可用**（issue #427）：`recover_unacked` 每拍在算 `why` 時，按角色收集「這一輪哪些
-  notify 回合是 `failed`」，整輪掃完才一次算給那個角色；已計入的回合 id 存成**集合**（不是計數器——`recover_unacked` 是
+  notify 回合是 `failed`」，整輪掃完才一次算給那個角色；**算給誰看 `claimed_by`**（`roles::owner`，issue #505）——
+  `notify_turn_id` 是 `mark_delivered` 跟 `claimed_by` 同一句寫下的，照 `role` 算會把巡檢送不出去的回合記到協調者頭上，
+  三輪就把一顆健康的協調者判成 `notify_stalled`、核准被改派給壞掉的巡檢，而巡檢自己的故障沒有人算；
+  已計入的回合 id 存成**集合**（不是計數器——`recover_unacked` 是
   逐筆掃 inbox 事件的，同一角色一輪裡可以有好幾筆不同的 `notify_turn_id`，用「上一個算過的 id」去重時兩個壞回合兩輪就會
   湊到 3）。這一輪只要有任何回合真的跑完就整個歸零；集合大小達到 `NOTIFY_STALL_LIMIT`（3）就併進 `role_state` 的不可用原因
   `notify_stalled`。這跟 `responder_undeliverable`（根本送不出去）是兩件事：這一項是「送出去了、
