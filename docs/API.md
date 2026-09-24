@@ -1695,7 +1695,9 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
   `expires_in_secs` 不參與比對：原本那筆的到期時間不會被重送改掉。不帶 `request_id` 就是舊行為，每次開一筆新的。
   CLI：`agm approval request --request-id <id>`（不確定送出去沒有時用同一個 id 重送，不要換新的）；`--supersedes <舊 id>` 帶 `supersedes`。
 - `POST /api/supervisor/approvals/{id}/decide {decision:"approve"|"deny"|"revoke",actor?,reason?,expires_in_secs?}`：同 decision 重送回 `idempotent:true`。
-  **不能核准自己送出的申請**（issue #436）：那筆的 `requester_unverified` 是 `false`、而且解析出來就是這個呼叫端那顆 bot 時，`approve` 回 `403 {"reason":"self_approval_forbidden"}`，那筆不動。`deny`／`revoke` 不擋——把自己的申請收回本來就該讓他做。`requester_unverified:true` 的不比對：那串字是自稱的，拿它擋只會擋到名字剛好一樣的人。
+  **不能核准自己送出的申請**（issue #436）：`requester` 解析出來就是這個呼叫端那顆 bot 時，`approve` 回 `403 {"reason":"self_approval_forbidden"}`，那筆不動。`deny`／`revoke` 不擋——把自己的申請收回本來就該讓他做。
+  **不看那筆申請驗過沒**：只要呼叫端驗得過、而且 `requester` 指的就是它，照擋——否則守衛等於被約束者自己選配（申請時不帶 `X-AM-Bot-Id`、裁示時才帶，就整段跳過）。沒有 bot 身分的呼叫端（走 UI 的人）與解析不到 bot 的 `requester`（`daemon-update-kick` 的 `agm-kick`）都不受影響。
+  查不出申請人是誰時（DB 讀取失敗）回 `503 {"reason":"requester_lookup_failed","retryable":true,"sent":false}`，**不放行**：這裡的「解析不到」等於通過，所以不能把讀取失敗吞成「不是它」。
   `decided_by` **不看 body**（issue #414）：驗過角色的是 `AGM:patrol`／`AGM:responder`，其餘一律 `user`，body 的 `actor` 只當未驗證的備註包成 `user(<自稱>)`（取前 64 字）。
   **第一個裁示定案**：`approve`／`deny` 只從 `pending` 條件寫入；`revoke` 從 `approved` 或 `pending`。寫不進去 → 409
   `{reason:"already_decided"|"decided_concurrently",status,decided_by,allowed_from}`，什麼都沒寫（後到的 deny 不會把 approved 改掉）。

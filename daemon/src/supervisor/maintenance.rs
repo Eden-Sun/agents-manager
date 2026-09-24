@@ -481,27 +481,30 @@ pub async fn safety_as(
 /// 這個 owner／requester 是哪一顆 bot（沒有對應的 bot——例如 `daemon-update-kick` 這種腳本
 /// 身分——就是 `None`）。先當成 bot id 查，查不到再用名字對。
 pub(crate) async fn requester_bot_id(app: &Arc<App>, owner: &str) -> Option<String> {
+    try_requester_bot_id(app, owner).await.unwrap_or(None)
+}
+
+/// [`requester_bot_id`] 的「讀不到就說讀不到」版（issue #436）：DB 出錯時**不能**跟「這個名字不是任何一顆 bot」
+/// 回同一個 `None`。用它下**否決**類的判斷（自我核准的守衛）：那裡的 `None` 等於放行，把讀取失敗吞成 `None`
+/// 就是 fail-open——這個模組其他地方讀不到是不下結論，只有這裡「不下結論」剛好等於通過。
+pub(crate) async fn try_requester_bot_id(app: &Arc<App>, owner: &str) -> anyhow::Result<Option<String>> {
     let owner = owner.trim();
     if owner.is_empty() {
-        return None;
+        return Ok(None);
     }
-    if matches!(crate::db::bot(&app.db, owner).await, Ok(Some(_))) {
-        return Some(owner.to_string());
+    if crate::db::bot(&app.db, owner).await?.is_some() {
+        return Ok(Some(owner.to_string()));
     }
-    if let Ok(bots) = crate::db::live_bots(&app.db).await {
-        if let Some(b) = bots.into_iter().find(|b| b.name == owner) {
-            return Some(b.id);
-        }
+    if let Some(b) = crate::db::live_bots(&app.db).await?.into_iter().find(|b| b.name == owner) {
+        return Ok(Some(b.id));
     }
     // **agent 名也要認**：申請者常用自己的 herdr agent 名（`AM_AGENT_NAME`），那跟 bot 的名字
     // 不一定一樣——2026-09-19 實測 bot 叫 `AM-m3`、agent 叫 `agents-manager-15m2dg`，於是
     // 「排除申請者自己」永遠對不上，restart 一律 409 `exclude_not_requester`。
-    sqlx::query_scalar::<_, String>("SELECT bot_id FROM runs WHERE agent_name = ? AND state = 'running' ORDER BY started_at DESC LIMIT 1")
+    Ok(sqlx::query_scalar::<_, String>("SELECT bot_id FROM runs WHERE agent_name = ? AND state = 'running' ORDER BY started_at DESC LIMIT 1")
         .bind(owner)
         .fetch_optional(&app.db)
-        .await
-        .ok()
-        .flatten()
+        .await?)
 }
 
 /// 送達臨界區真正要放過的那一顆：申請者自己，而且它確實出現在 `--exclude-bot` 裡。

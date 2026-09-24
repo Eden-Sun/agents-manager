@@ -3009,9 +3009,18 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
   （填別人＝403 `requester_not_the_caller`，證明不了＝403 `bot_proof_mismatch`）；**沒帶身分照收**，那筆記成
   `requester_unverified`（`daemon-update-kick.sh` 這類 launchd 腳本就是這樣申請的，擋掉等於停掉例行重建）。
   daemon **不改寫** `requester`：它要跟 acquire 的 `owner` 逐字相等（上面那條），改寫等於讓申請人自己開不了窗口。
-  裁示端據此擋掉**自己核准自己**：申請人驗過、而且解析出來就是裁示的那顆 bot 時，`approve` 回 403
-  `self_approval_forbidden`（`deny`／`revoke` 不擋，那是收回自己的申請）。申請人沒驗過的不比對——那串字是自稱的，
-  拿它擋只會擋到名字剛好一樣的人；真正的界線是共用 UI token（見 #432），要靠 per-bot token 才解得掉。
+  裁示端據此擋掉**自己核准自己**：`requester` 解析出來就是裁示的那顆 bot 時，`approve` 回 403
+  `self_approval_forbidden`（`deny`／`revoke` 不擋，那是收回自己的申請）。
+  **不看那筆申請驗過沒**（2026-09-24 裁示）：本來只比對驗過的申請，於是守衛變成被約束者自己選配的——
+  申請時不帶 `X-AM-Bot-Id`、裁示時才帶自己的身分，整段就跳過。沒驗過的被擋下來也是對的：要嘛真的是它送的，
+  要嘛有人冒它的名，兩種都該去查。`requester_unverified` 因此只剩「這筆申請人可不可信」的標示（API 看得到），
+  不再是守衛的條件。
+- **守衛是裁示當下重新解析名字，有它的界線**（issue #436）：`requester` 逐字留著給 lease 對，所以裁示時是拿那串字
+  重新解析（`maintenance::try_requester_bot_id`）。申請人**改名、被軟刪、或用 agent 名申請而那個 run 已經結束**，
+  就解析不到、守衛放行——這是已知的漏網，不是保證。**但讀不到不能等於放行**：DB 讀取失敗一律 503
+  `requester_lookup_failed`（`retryable:true`、`sent:false`），不猜「大概不是它」。要徹底解決得把驗過的 bot id
+  另存一欄、比 id 不比字串；現階段不加欄位（2026-09-24 裁示，避免再動 schema）。真正的界線仍是共用 UI token
+  （見 #432），那要 per-bot token 才解得掉。
 - **等太久就縮小封鎖面**（AGM 裁示 2026-09-16）：在這台機器的負載下「任何 bot 在回合中就不換」等同永遠不安全——2026-09-15 那筆核准卡了 11 小時，每 5 分鐘那一輪都撞到有人在講話。
   所以同一筆**已核准、未消耗**的 `rebuild`／`restart` 申請，從**核准時間**（`decided_at`；換 commit 接續的見下）起連續等超過門檻（常數 30 分鐘，`AM_MAINTENANCE_ESCALATE_MINS` 可調；0、負數或看不懂的值當沒設）之後，安全窗口改判「縮小封鎖面」：
   - **誰等太久就放寬誰**（AGM 裁示 2026-09-16）：`acquire` 只看**當下這筆核准自己**等了多久，別人放著沒用掉的核准不算數——否則一張被遺忘的核准等於把所有人的窗口都打開。

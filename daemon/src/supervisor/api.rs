@@ -1044,12 +1044,23 @@ pub async fn post_approval_decision(
     // 自己核准自己不算核准（issue #436）。核准是換 binary／重啟窗口的授權來源，申請與裁示要是兩個人。
     //
     // 只擋 `approve`：把自己送出去的申請 `deny`／`revoke` 掉就是收回申請，本來就該讓他做。
-    // 只在申請人**驗過**時比對（`requester_unverified == 0`）——沒驗過的那串字是自稱的，拿它來擋
-    // 只會擋到名字剛好一樣的人，真正想繞的填別人的名字就繞過去了（界線見 #432 票尾：共用 UI token
-    // 的前提下，daemon 只能對驗得過的身分下判斷）。
-    if status == "approved" && current.requester_unverified == 0 {
+    //
+    // **不看那筆申請驗過沒**（2026-09-24 裁示，i406 的審核）：以前只在 `requester_unverified == 0` 時比對，
+    // 於是守衛變成被約束者自己選配的——申請時不帶 `X-AM-Bot-Id`（`requester` 照樣填自己），裁示時再帶自己的
+    // 身分，整段就跳過了。現在只問一件事：**這個呼叫端驗得過，而且 `requester` 指的就是它**。
+    // 沒驗過的申請被擋下來也是對的：要嘛真的是它送的，要嘛有人冒它的名，兩種都該去查而不是直接放行。
+    // 不影響 `daemon-update-kick`（`agm-kick` 解析不到任何 bot）與走 UI 的人（沒有 bot 身分）。
+    if status == "approved" {
         if let Some(caller) = super::bot_requests::verified_bot_id(&app, &headers).await? {
-            if super::maintenance::requester_bot_id(&app, &current.requester).await.as_deref() == Some(caller.as_str()) {
+            // 讀不到就不敢放行（issue #436）：這裡的「解析不到」等於通過，所以 DB 出錯不能吞成「不是它」。
+            let owner = super::maintenance::try_requester_bot_id(&app, &current.requester).await.map_err(|e| {
+                LcError::Unavailable(json!({
+                    "error": "unavailable", "reason": "requester_lookup_failed", "retryable": true, "sent": false,
+                    "message": format!("查不出這筆申請是誰送的，不敢就這樣核准：{e}"),
+                    "approval_id": current.id,
+                }))
+            })?;
+            if owner.as_deref() == Some(caller.as_str()) {
                 return Err(LcError::Forbidden(json!({
                     "error": "forbidden",
                     "reason": "self_approval_forbidden",
@@ -1736,11 +1747,12 @@ mod approval_decision_tests {
         decide_as(&app, theirs.clone(), h.clone(), "approve").await.unwrap();
         assert_eq!(status(&app, theirs).await, "approved");
 
-        // 沒驗過的申請即使名字剛好一樣也不擋：那串字是自稱的，拿它擋只會擋到無辜的人
-        // （真想繞的填別人的名字就繞過去了，界線見 #432）。
-        let lookalike = ask(&app, HeaderMap::new(), "AGM", "s-3").await;
-        decide_as(&app, lookalike.clone(), h, "approve").await.unwrap();
-        assert_eq!(status(&app, lookalike).await, "approved");
+        // 申請時不帶身分、裁示時才帶自己的——守衛不能因此變成選配的（i406 的審核，2026-09-24 裁示）：
+        // 只要 `requester` 解析出來就是這個呼叫端，照擋。
+        let side_door = ask(&app, HeaderMap::new(), "AGM", "s-3").await;
+        let err = decide_as(&app, side_door.clone(), h, "approve").await.unwrap_err();
+        assert!(matches!(&err, LcError::Forbidden(v) if v["reason"] == "self_approval_forbidden"), "got {err:?}");
+        assert_eq!(status(&app, side_door).await, "pending", "空 header 申請、自己核准，一樣不該過");
 
         app.db.close().await;
         std::fs::remove_dir_all(&app.data_dir).unwrap();
