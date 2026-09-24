@@ -364,10 +364,17 @@ fn mask_line(line: &str) -> String {
         // `Authorization: Bearer <token>`：`Authorization:` 讓 `secret_next` 成立，但要遮的是 token，
         // 不是 `Bearer` 這個字——認證方式留著，版面才看得出這行是什麼（Jev 判的就是版面）。
         let scheme = matches!(upper.as_str(), "BEARER" | "BASIC" | "DIGEST" | "TOKEN");
-        let masked = if secret_next && !scheme { REDACTED.to_string() } else { mask_word(piece) };
-        secret_next = (secret_next && scheme)
-            || upper.ends_with("BEARER")
-            || (upper.ends_with(['=', ':']) && SECRET_NAMES.iter().any(|n| upper.contains(n)));
+        // 遮掉整個片段會把 JSON 的收尾一起吃掉（`"Bearer <jwt>"}` → 右邊的 `"}` 不見了）。
+        // 立場跟「認證方式留著」一樣：版面是 Jev 判斷的依據，只換掉字本身（issue #451 的跟進審核）。
+        let masked = if secret_next && !scheme {
+            let (lead, trail) = wrapping(piece);
+            format!("{lead}{REDACTED}{trail}")
+        } else {
+            mask_word(piece)
+        };
+        // `Bearer`／`Basic`／`Digest`／`Token` 自己就點得起來：以前只有 `BEARER` 那一條，所以
+        // `Authorization: Basic <b64>` 有遮（靠前面的 `Authorization:` 接力），裸寫的 `Basic <b64>` 沒遮。
+        secret_next = scheme || (upper.ends_with(['=', ':']) && SECRET_NAMES.iter().any(|n| upper.contains(n)));
         out.push_str(&masked);
     }
     out
@@ -399,8 +406,22 @@ const SECRET_NAMES: [&str; 8] = ["TOKEN", "SECRET", "PASSWORD", "PASSWD", "API_K
 /// 去掉 JSON／程式碼常見的包裹標點。`mask_word` 與 `mask_line` 的 `secret_next` 要看同一個字，
 /// 不然 `Bearer x` 遮得掉、`"Bearer", "x"` 遮不掉（issue #451）。
 fn bare(word: &str) -> &str {
-    word.trim_matches(|c: char| "\"'`,;()[]{}<>".contains(c))
+    word.trim_matches(WRAPPERS)
 }
+
+/// 這個片段前後各黏了哪些包裹標點。遮掉的時候把它們接回去，版面才不會缺一角。
+fn wrapping(word: &str) -> (&str, &str) {
+    let lead = word.len() - word.trim_start_matches(WRAPPERS).len();
+    let trail = word.len() - word.trim_end_matches(WRAPPERS).len();
+    // 整個片段都是標點時不要重疊切。
+    if lead + trail >= word.len() {
+        return (word, "");
+    }
+    (&word[..lead], &word[word.len() - trail..])
+}
+
+/// 包裹標點：原本寫在 `mask_word` 的 `trim_matches` 裡（`"'`,;()[]{}<>`），抽出來給 `bare`／`wrapping` 共用。
+const WRAPPERS: [char; 13] = ['"', '\'', '`', ',', ';', '(', ')', '[', ']', '{', '}', '<', '>'];
 
 fn mask_word(word: &str) -> String {
     let bare = bare(word);
@@ -414,7 +435,17 @@ fn mask_word(word: &str) -> String {
             return format!("{}{}{REDACTED}", &bare[..i], &bare[i..=i]);
         }
     }
-    if bare.contains('@') && bare.rsplit('@').next().is_some_and(|d| d.contains('.')) && !bare.starts_with('@') {
+    // URL 的 query string：整串是同一個片段，上面那條只看**第一個** `=`／`:`，而 URL 的第一個冒號永遠是
+    // scheme 的（`https:`），所以 `?token=…` 一路漏到底（issue #451 的跟進審核）。逐段看、只換值。
+    if let Some(masked) = mask_query(bare) {
+        // `bare` 已經去掉包裹標點，接回去才不會把 `curl '…'` 的引號吃掉。
+        let (lead, trail) = wrapping(word);
+        return format!("{lead}{masked}{trail}");
+    }
+    // `user:pass@host` 的憑據：以前要網域含 `.` 才遮，於是 `http://u:p@localhost:8080/x` 漏掉。
+    // 有 `@`、而且 `@` 左邊有冒號（＝帶密碼的 userinfo）就遮，網域長什麼樣不管。
+    let userinfo = bare.rsplit_once('@').is_some_and(|(left, _)| left.contains(':') && !left.is_empty());
+    if bare.contains('@') && !bare.starts_with('@') && (userinfo || bare.rsplit('@').next().is_some_and(|d| d.contains('.'))) {
         return REDACTED.to_string();
     }
     if looks_random(bare) || looks_jwt(bare) {
@@ -430,6 +461,38 @@ fn mask_word(word: &str) -> String {
     }
 }
 
+/// query string 裡的憑據：`https://h/api?token=abc&page=2` → 只把 `token` 的值換掉，其餘原樣。
+/// `None`＝這個字裡沒有該遮的 query 參數（呼叫端接著走原本的規則）。
+///
+/// 值的名字比 [`SECRET_NAMES`] 多認幾個常見的短名：query string 裡 `key`／`auth`／`sig` 就是憑據，
+/// 但把它們放進 `SECRET_NAMES` 會讓 `monkey=`、`sig:` 這種一般的字也中招，所以只在這裡認。
+fn mask_query(word: &str) -> Option<String> {
+    let (head, query) = word.split_once('?')?;
+    let mut out = String::with_capacity(word.len());
+    out.push_str(head);
+    out.push('?');
+    let mut changed = false;
+    for (i, seg) in query.split('&').enumerate() {
+        if i > 0 {
+            out.push('&');
+        }
+        match seg.split_once('=') {
+            Some((name, value)) if !value.is_empty() && query_secret(&name.to_ascii_uppercase()) => {
+                out.push_str(name);
+                out.push('=');
+                out.push_str(REDACTED);
+                changed = true;
+            }
+            _ => out.push_str(seg),
+        }
+    }
+    changed.then_some(out)
+}
+
+fn query_secret(name: &str) -> bool {
+    SECRET_NAMES.iter().any(|n| name.contains(n)) || matches!(name, "KEY" | "AUTH" | "SIG" | "SIGNATURE" | "CODE")
+}
+
 /// JWT：三段 base64url、用 `.` 分隔，而且第一段是 `eyJ`（JOSE header 的 `{"` base64url 過來一定長這樣）。
 ///
 /// 獨立一條而不是把 `.` 加進 [`looks_random`] 的允許集合（issue #451）：那樣長路徑、版本字串、
@@ -437,13 +500,13 @@ fn mask_word(word: &str) -> String {
 fn looks_jwt(s: &str) -> bool {
     let b64url = |p: &str| p.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
     let parts: Vec<&str> = s.split('.').collect();
-    parts.len() == 3
-        && parts[0].starts_with("eyJ")
+    // 3 段＝JWS（簽章型），5 段＝JWE compact（header.key.iv.ciphertext.tag，中間幾段可能是空的）。
+    // header 的開頭：`{"` → `eyJ`，`{ "`（大括號後有空白）→ `eyA`。
+    matches!(parts.len(), 3 | 5)
+        && (parts[0].starts_with("eyJ") || parts[0].starts_with("eyA"))
         && parts[0].len() >= 12
-        && b64url(parts[0])
-        && parts[1].len() >= 8
-        && b64url(parts[1])
-        && b64url(parts[2])
+        && parts.iter().all(|p| b64url(p))
+        && (parts.len() == 5 || parts[1].len() >= 8)
 }
 
 /// ≥32 個 base64／hex 字元、字母數字混雜、沒有路徑分隔以外的結構：當成憑據。git sha（40 hex）也會中，
@@ -524,6 +587,44 @@ mod tests {
         assert!(mask(r#"cookie: "sess_abcdefghijklmnopqrstuvwxyz01234567""#).contains(REDACTED));
         // `Token <值>`（GitHub 那種寫法）：方式留著、值遮掉。
         assert_eq!(mask("Authorization: Token ghp_abcdefghijklmnopqrstuvwxyz0123"), format!("Authorization: Token {REDACTED}"));
+    }
+
+    /// issue #451 的跟進審核（i407）：四個反向缺口。字串全是捏造的。
+    #[test]
+    fn bare_schemes_query_strings_userinfo_and_jwe_are_masked_too() {
+        // 1) 裸寫的 Basic／Token／Digest：以前只有 `BEARER` 點得起 `secret_next`，
+        //    所以 `Authorization: Basic X` 有遮（靠前面那個字接力），單獨一行的 `Basic X` 沒遮。
+        assert_eq!(mask("Basic dXNlcjpwYXNzd29yZA=="), format!("Basic {REDACTED}"));
+        assert_eq!(mask("Token ghp_abcdefghijklmnopqrstuvwxyz0123"), format!("Token {REDACTED}"));
+        assert_eq!(mask("Digest username=admin"), format!("Digest {REDACTED}"));
+
+        // 2) query string：整串 URL 是同一個片段，第一個冒號是 scheme 的，名字比對不到；
+        //    `/`／`?`／`.` 又讓 looks_random 回 false。只換值、其餘原樣。
+        assert_eq!(
+            mask("https://h.example.invalid/api?token=abcdef123456&page=2"),
+            format!("https://h.example.invalid/api?token={REDACTED}&page=2")
+        );
+        assert_eq!(mask("curl 'https://x.invalid/v1?api_key=k-abc123&q=1'"), format!("curl 'https://x.invalid/v1?api_key={REDACTED}&q=1'"));
+        assert_eq!(mask("https://x.invalid/p?key=abc&sig=def"), format!("https://x.invalid/p?key={REDACTED}&sig={REDACTED}"));
+        // 沒有憑據參數的 URL 一個字都不要動。
+        let plain = "https://x.invalid/p?page=2&sort=name";
+        assert_eq!(mask(plain), plain);
+
+        // 3) `user:pass@`：以前要網域含 `.` 才遮。
+        assert_eq!(mask("http://u:p@localhost:8080/path"), REDACTED);
+        assert_eq!(mask("mail someone@example.com now"), format!("mail {REDACTED} now"));
+
+        // 4) JWE compact 是五段。
+        let jwe = "eyJhbGciOiJSU0EtT0FFUCJ9.abcdefgh.ijklmnop.qrstuvwxyz012345.tag12345";
+        assert_eq!(mask(jwe), REDACTED);
+        // `{ "alg"…`（大括號後有空白）的 header 是 `eyA` 開頭。
+        assert_eq!(mask("eyAiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiIxIn0.sig12345"), REDACTED);
+
+        // 收尾標點留著：以前整個片段被換掉，JSON 的 `"}` 會不見。
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abcdefghijklmnopqrstuvwxyz012345";
+        let out = mask(&format!(r#"{{"Authorization": "Bearer {jwt}"}}"#));
+        assert!(out.ends_with(r#""}"#), "版面要留著：{out}");
+        assert!(!out.contains(jwt), "{out}");
     }
 
     /// 遮罩只能吃 token，不能吃版面：有 `.` 的一般字串（版本、路徑、檔名、句子）照樣原樣通過。
