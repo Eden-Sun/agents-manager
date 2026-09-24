@@ -155,9 +155,16 @@ case "$1 $2" in
     [ -f "$D/fail_repo" ] && { echo "Could not resolve to a Repository" >&2; exit 1; }
     cat "$D/repo.json" 2>/dev/null || echo '{"nameWithOwner":"o/r","viewerPermission":"ADMIN","hasIssuesEnabled":true}';;
   "label list") cat "$D/labels.json" 2>/dev/null || echo '[{"name":"release-triage"},{"name":"upstream:claude"},{"name":"upstream:codex"},{"name":"triage:guard"},{"name":"triage:adopt"}]';;
-  "issue list") if [ -f "$D/list.json" ]; then cat "$D/list.json"; else echo "[]"; fi;;
+  "issue list")
+    # --label 走 repo 的 issues 列表（#456：立即一致）；--search 走非同步索引。兩份分開餵，
+    # 才測得出「列表看得到、搜尋還搜不到」那個空窗。
+    case " $* " in
+      *" --label "*) cat "$D/labelled.json" 2>/dev/null || echo "[]" ;;
+      *) if [ -f "$D/list.json" ]; then cat "$D/list.json"; else echo "[]"; fi ;;
+    esac;;
   "issue create")
     [ -f "$D/fail_create" ] && { echo "API rate limit exceeded" >&2; exit 1; }
+    if [ -f "$D/hang_create" ]; then sleep 120; fi
     printf '%s\n' "$@" > "$D/last_create.txt"
     n=$(cat "$D/n" 2>/dev/null || echo 100); n=$((n+1)); echo $n > "$D/n"
     echo "https://github.com/o/r/issues/$n";;
@@ -283,6 +290,62 @@ async fn a_closed_issue_is_never_reopened_even_when_the_ledger_forgot_it() {
     assert!(gh.calls().iter().any(|c| c == "issue list"));
     let r = row(&p).await;
     assert_eq!((r.status, r.issues[0].number), (Status::Published, 42));
+}
+
+/// #456 的核心：`gh issue create` 逾時（子行程在被殺之前已經把 issue 開出來）或行程在寫回帳本之前
+/// 掛掉時，遠端多了一張、帳本卻不知道。這時重試若只靠 `--search`，搜尋索引還沒跟上就會再開一張。
+/// 這條把「列表看得到、搜尋還搜不到」的狀態直接做出來：`labelled.json` 有那張，`list.json` 不存在。
+#[tokio::test]
+async fn a_retry_finds_the_issue_through_the_label_listing_when_search_has_not_indexed_it_yet() {
+    let p = pool().await;
+    let gh = FakeGh::new("noindex");
+    let es = seed(&p, &[("guard", &[0], None)]).await;
+    let mk = issue::marker("claude", "2.1.277", &[judged(&es)[0].id.clone()]);
+    std::fs::write(
+        gh.dir.join("labelled.json"),
+        json!([{"number": 77, "url": "https://github.com/o/r/issues/77", "title": "別的標題", "body": format!("x\n<!-- release-triage: {mk} -->\n")}]).to_string(),
+    )
+    .unwrap();
+    // list.json 不存在＝`--search` 回 []（索引還沒跟上）。
+    let o = issue::publish_version(&p, &gh.cfg(true), "claude", "2.1.277").await.unwrap();
+    assert!(matches!(o, Outcome::Published { created: 0, existing: 1, .. }), "{o:?}");
+    assert_eq!(gh.count("issue create"), 0, "遠端已經有了就不能再開：{:?}", gh.calls());
+    assert_eq!(row(&p).await.issues[0].number, 77);
+}
+
+/// 內文被人編輯、隱藏標記跟著不見時，靠標題還認得出來（標題是 daemon 自己組的，形狀固定）。
+#[tokio::test]
+async fn a_listed_issue_whose_body_lost_the_marker_is_matched_by_its_exact_title() {
+    let p = pool().await;
+    let gh = FakeGh::new("notitle");
+    seed(&p, &[("guard", &[0], None)]).await;
+    let t = "claude 2.1.277: 提案0（提防）";
+    std::fs::write(
+        gh.dir.join("labelled.json"),
+        json!([{"number": 88, "url": "https://github.com/o/r/issues/88", "title": t, "body": "標記被編輯掉了"}]).to_string(),
+    )
+    .unwrap();
+    let o = issue::publish_version(&p, &gh.cfg(true), "claude", "2.1.277").await.unwrap();
+    assert!(matches!(o, Outcome::Published { created: 0, existing: 1, .. }), "{o:?}");
+    assert_eq!(row(&p).await.issues[0].number, 88);
+}
+
+/// 但標題比對**只在那張的內文完全沒有標記時**才算：內文有別的 marker＝那是另一個提案的 issue，
+/// 標題撞在一起不能讓這一張該開的被吃掉。
+#[tokio::test]
+async fn a_same_title_issue_that_still_has_another_marker_does_not_suppress_a_new_one() {
+    let p = pool().await;
+    let gh = FakeGh::new("titleclash");
+    seed(&p, &[("guard", &[0], None)]).await;
+    let t = "claude 2.1.277: 提案0（提防）";
+    std::fs::write(
+        gh.dir.join("labelled.json"),
+        json!([{"number": 99, "url": "https://github.com/o/r/issues/99", "title": t, "body": "x\n<!-- release-triage: claude@2.1.277#zzzzzzzzzz -->\n"}]).to_string(),
+    )
+    .unwrap();
+    let o = issue::publish_version(&p, &gh.cfg(true), "claude", "2.1.277").await.unwrap();
+    assert!(matches!(o, Outcome::Published { created: 1, existing: 0, .. }), "{o:?}");
+    assert_eq!(gh.count("issue create"), 1);
 }
 
 #[tokio::test]

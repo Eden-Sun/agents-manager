@@ -52,6 +52,9 @@ impl Gh {
                 .env_remove("CLICOLOR_FORCE")
                 .env_remove("FORCE_COLOR")
                 .stdin(std::process::Stdio::null())
+                // 逾時＝丟掉這個 future。沒有這一行的話子行程不會被殺，`gh issue create` 會在背景
+                // 繼續把 issue 開出來，而呼叫端已經當它失敗、帳本裡沒有那張的紀錄（#456）。
+                .kill_on_drop(true)
                 .output(),
         )
         .await
@@ -276,9 +279,59 @@ impl Caps {
     }
 }
 
-/// 遠端有沒有帶同一個隱藏標記的 issue（`--state all`：已關掉的**不復活**）。publish 與乾跑共用，
-/// 兩邊的去重結論才不會漂。回 `Ok(None)` ＝遠端確實沒有。
-async fn find_existing(gh: &Gh, mk: &str) -> Result<Option<(i64, String)>, String> {
+/// 遠端已經有的 release-triage issue，一次抓完之後在本地比對。
+///
+/// **不走 `--search`**：那是 GitHub 的非同步搜尋索引，剛建立的 issue 要等一段時間才搜得到。
+/// `gh issue create` 逾時（子行程雖然已加 `kill_on_drop`，仍可能在被殺之前就建好）或行程在
+/// 寫回帳本之前掛掉時，重試就會因為「搜不到」而再開一張（#456）。`--label` 走的是 repo 的
+/// issues 列表，對剛建立的 issue **立即一致**，而 `release-triage` 這個標籤是我們每次開 issue
+/// 都一定會帶的（見 `publish_version` 的 `labels`）。`--state all`：已關掉的**不復活**。
+struct Remote {
+    listed: Vec<serde_json::Value>,
+}
+
+impl Remote {
+    async fn load(gh: &Gh) -> Result<Self, String> {
+        let out = gh
+            .run(&["issue", "list", "--repo", &gh.repo, "--state", "all", "--label", "release-triage", "--json", "number,url,title,body", "-L", "200"])
+            .await?;
+        let listed: Vec<serde_json::Value> =
+            serde_json::from_str(out.trim()).map_err(|e| format!("gh issue list 回的不是 JSON：{e}"))?;
+        Ok(Self { listed })
+    }
+
+    /// 這個 marker（或這個標題）在遠端有沒有對應的 issue。
+    ///
+    /// 標題只在**那張 issue 的內文完全沒有 release-triage 標記**時才採用——內文被人編輯掉、
+    /// 標記跟著不見的情況下還認得出來。不無條件用標題比對：同一版兩個提案的標題有可能撞在一起，
+    /// 那樣會把第二張該開的 issue 誤判成已經存在。
+    fn find(&self, mk: &str, title: &str) -> Option<(i64, String)> {
+        let needle = format!("release-triage: {mk} -->");
+        let pick = |v: &serde_json::Value| Some((v.get("number")?.as_i64()?, v.get("url")?.as_str()?.to_string()));
+        let body_of = |v: &serde_json::Value| v.get("body").and_then(|b| b.as_str()).unwrap_or_default().to_string();
+        if let Some(v) = self.listed.iter().find(|v| body_of(v).contains(&needle)) {
+            return pick(v);
+        }
+        self.listed
+            .iter()
+            .find(|v| {
+                v.get("title").and_then(|t| t.as_str()) == Some(title) && !body_of(v).contains(MARKER_PREFIX)
+            })
+            .and_then(pick)
+    }
+}
+
+/// issue 內文結尾隱藏標記的前綴；`Remote::find` 用它判斷「內文還有沒有標記」。
+const MARKER_PREFIX: &str = "release-triage:";
+
+/// 遠端有沒有帶同一個隱藏標記的 issue。publish 與乾跑共用，兩邊的去重結論才不會漂。
+/// 先看已經抓下來的列表（立即一致）；沒中才退回搜尋索引當補網——`--label` 被人拿掉、
+/// 或 release-triage 的 issue 多到超過 `-L 200` 時還接得住。搜尋只會**多**認出東西，
+/// 不會讓「其實有」變成「沒有」，所以加上它只有好處。
+async fn find_existing(gh: &Gh, remote: &Remote, mk: &str, title: &str) -> Result<Option<(i64, String)>, String> {
+    if let Some(hit) = remote.find(mk, title) {
+        return Ok(Some(hit));
+    }
     let search = format!("release-triage: {mk} in:body");
     let listed = gh
         .run(&["issue", "list", "--repo", &gh.repo, "--state", "all", "--search", &search, "--json", "number,url,body", "-L", "20"])
@@ -333,6 +386,12 @@ pub async fn publish_version(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: &s
     if let Err(e) = gh.run(&["auth", "status"]).await {
         return record_err(&issues, e).await;
     }
+    // 遠端已有的 release-triage issue 抓一次就好（立即一致的列表，不是搜尋索引）。這一輪自己開出來的
+    // 不必進這份快取：每開一張立刻寫回帳本，下一個提案由 `already` 擋掉。
+    let remote = match Remote::load(&gh).await {
+        Ok(r) => r,
+        Err(e) => return record_err(&issues, e).await,
+    };
 
     let (mut created, mut commented, mut existing) = (0usize, 0usize, 0usize);
     let mut skipped: Vec<String> = Vec::new();
@@ -350,7 +409,7 @@ pub async fn publish_version(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: &s
         }
         let mk = marker(kind, version, &p.entry_ids);
         // (a) 帳本查完了；(b) 遠端標記（`--state all`，已關的不復活）——乾跑走同一個函式。
-        let found = match find_existing(&gh, &mk).await {
+        let found = match find_existing(&gh, &remote, &mk, &title(kind, version, p)).await {
             Ok(f) => f,
             Err(e) => return record_err(&issues, e).await,
         };
@@ -471,11 +530,15 @@ impl PlanAction {
 /// - 每版 4 張、24 小時 8 張的上限用跟 [`publish_version`] 同一組常數與同一個順序模擬。
 pub async fn preflight(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: Option<&str>, version: Option<&str>) -> Result<serde_json::Value> {
     let gh = gh_for(cfg);
-    let checks = readonly_checks(&gh).await;
+    let mut checks = readonly_checks(&gh).await;
     // 門檻要跟 publish_version 一樣：它只跑 `gh auth status`（repo 沒設時提早回錯、不碰 gh），
     // 不查 repo view。乾跑若額外要求 repo_ok，repo 有問題時乾跑全報 remote_unknown、真跑照樣開（#204 review）。
     // repo 的問題仍然照實記在 `checks`，而且真的查不到時 find_existing 會回錯、落成 remote_unknown。
-    let remote_ok = checks["gh_auth_ok"] == serde_json::json!(true) && !gh.repo.trim().is_empty();
+    let can_ask = checks["gh_auth_ok"] == serde_json::json!(true) && !gh.repo.trim().is_empty();
+    // 遠端已有的 release-triage issue 只抓一次（立即一致的列表，不是搜尋索引），而且**真的需要問**
+    // 才抓：全部提案都已經在帳本裡時一次 gh 都不叫（同 publish_version 的提早返回）。
+    let mut remote: Option<Remote> = None;
+    let mut remote_err: Option<String> = None;
 
     // **24 小時上限是跨版本的**：真跑每呼叫一次 publish_version 就重讀一次帳本，所以第 2 版看得到第 1 版
     // 剛開的那幾張。乾跑若每版都用同一個初始值重開 Caps，3 版以上就會說「每版都能開 4 張」（共 12），
@@ -502,12 +565,22 @@ pub async fn preflight(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: Option<&
                 "body": render_body(&row.kind, &row.version, &row.entries, p),
                 "labels": ["release-triage".to_string(), format!("upstream:{}", row.kind), format!("triage:{}", p.triage)],
             });
+            if can_ask && remote.is_none() && remote_err.is_none() && !already(p, &issues) {
+                match Remote::load(&gh).await {
+                    Ok(r) => remote = Some(r),
+                    Err(e) => remote_err = Some(e),
+                }
+            }
             let action = if already(p, &issues) {
                 PlanAction::AlreadyLogged
-            } else if !remote_ok {
+            } else if !can_ask {
+                PlanAction::RemoteUnknown
+            } else if let Some(e) = remote_err.clone() {
+                plan["error"] = serde_json::json!(e);
                 PlanAction::RemoteUnknown
             } else {
-                match find_existing(&gh, &mk).await {
+                let remote = remote.as_ref().expect("load 成功才會到這裡");
+                match find_existing(&gh, remote, &mk, &title(&row.kind, &row.version, p)).await {
                     Err(e) => {
                         plan["error"] = serde_json::json!(e);
                         PlanAction::RemoteUnknown
@@ -551,6 +624,9 @@ pub async fn preflight(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: Option<&
             plans.push(plan);
         }
         versions.push(serde_json::json!({"kind": row.kind, "version": row.version, "proposals": plans}));
+    }
+    if let Some(e) = remote_err {
+        checks["remote_list_error"] = serde_json::json!(e);
     }
     Ok(serde_json::json!({
         "dry_run": true,
