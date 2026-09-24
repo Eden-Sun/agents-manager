@@ -2688,7 +2688,9 @@ daemon 驗過才收（每個 kept／unmatched 都有 verdict、提案只引用 g
 提案帶 `duplicate_of` 時只在那張 issue 留言，不另開。
 
 **publish**（`[release_triage]`）：`publish = false`（**預設**）只寫帳本、自動路徑（verdict 進來、kick 每輪的重試）**完全不啟動 gh**（例外只有下面人工觸發的乾跑）；`gh_bin`（省略＝PATH 上的 `gh`，daemon 補 Homebrew 路徑）、`repo`（`owner/name`，publish 開啟時必填）。
-開之前帳本＋`gh issue list --state all --search "release-triage: <marker> in:body"` 雙重去重（**已關的不復活**）；每版 ≤4 張（超過的記在 `publish_error` 不再開）、每 24 小時 ≤8 張（超過的留在 `judged` 待下一輪）、`guard` 優先；
+開之前帳本＋遠端雙重去重（**已關的不復活**）。遠端那一道用 `gh issue list --state all --label release-triage`（repo 的 issues 列表，對剛建立的 issue **立即一致**）抓一次、在本地比對隱藏標記；
+`--search` 只當補網（標籤被拿掉、或超過 `-L 200`），因為它走 GitHub 的**非同步**搜尋索引：`gh issue create` 逾時或行程在寫回帳本之前掛掉時，只靠搜尋會因為「還沒索引到」而重開一張（#456；`Gh::run` 也加了 `kill_on_drop`，逾時就不讓子行程在背景把 issue 開完）。
+內文被編輯、標記不見時改用**完全相同的標題**認（標題是 daemon 組的；只在那張內文完全沒有標記時採用，否則同版兩個提案標題撞在一起會吃掉該開的第二張）。每版 ≤4 張（超過的記在 `publish_error` 不再開）、每 24 小時 ≤8 張（超過的留在 `judged` 待下一輪）、`guard` 優先；
 每開一張立刻寫回帳本。gh／設定失敗 → 停在 `judged`、錯誤進 `publish_error`，重試（`POST /api/release-triage/publish`）只重跑 publish，不重派模型、不重花額度。
 
 gh 健檢露在 `/api/supervisor/health` 的 `release_triage`（`publish = false` 時為 `null`、不碰 gh；結果快取 60 秒）：`gh auth status` 之外還查
