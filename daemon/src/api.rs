@@ -3436,7 +3436,11 @@ async fn ws_loop(app: Arc<App>, mut socket: WebSocket, since: Option<u64>) {
                     if socket.send(WsMessage::Text(serde_json::to_string(&e).unwrap().into())).await.is_err() { return; }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    let _ = socket.send(WsMessage::Text(json!({"type":"resync"}).to_string().into())).await;
+                    // 帶 seq，跟重連那條一樣（API.md §8：`{"type":"resync","seq":12}`）——少了它，
+                    // 客戶端在 lag 之後的 `lastSeq` 會停在漏掉的事件之前，下一次重連白跑一趟 backlog（issue #482）。
+                    let _ = socket
+                        .send(WsMessage::Text(json!({"type": "resync", "seq": app.current_seq()}).to_string().into()))
+                        .await;
                 }
                 Err(_) => return,
             },

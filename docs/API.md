@@ -419,6 +419,7 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 
 `ws://127.0.0.1:7788/ws?token=<token>`，重連帶 `&since=<最後收到的 seq>`。每則一行 `{ "seq": 12, "type": "bot_status", "data": { ... } }`。
 `seq` 從 1 遞增（daemon 重啟歸零），保留最近 200 則；補不齊或 seq 倒退會先送不帶 data 的 `{ "type": "resync", "seq": 12 }`，收到就重新 `GET /api/state` 與訊息。
+**`turn_progress` 不進那 200 則**（issue #482）：它是每個 run 每秒 4 幀，跟耐久事件共用額度的話，重播窗口＝`200 / (4 × 在跑的 run 數)`——20 顆同時在跑只剩 2.5 秒，而客戶端光是重連退避就 250ms～3 秒，於是每次重連都退化成全量 resync。它照樣即時廣播、照樣佔 `seq`，只是重連時不補送：下一幀 250ms 內就到，真相另有 `turn_updated` 與訊息。
 `resync` 也可能帶 `data{reason,…}`，目前只有一種：`reason:"turn_retracted"`＋`turn_id`——送不出去的那一則被撤回了，而事件模型只有新增／更新沒有刪除，泡泡與回合已經廣播出去，不重讀畫面會留一顆幽靈泡泡與一個永遠不結束的回合。處理方式跟不帶 data 的一樣：重拉。
 
 | type | data |

@@ -17,6 +17,12 @@ use tokio::sync::{broadcast, Mutex};
 
 pub const WS_RING: usize = 200;
 
+/// 這種幀不進重播環（issue #482）：過期即無用，補送舊的沒有意義，而且它的頻率會把耐久事件擠掉。
+/// 判斷放這裡而不是散在呼叫端：`emit` 是唯一的入口，加新的即時幀時只改這一個名單。
+pub fn is_ephemeral(kind: &str) -> bool {
+    kind == "turn_progress"
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct WsEvent {
     pub seq: u64,
@@ -349,9 +355,16 @@ impl App {
         {
             let mut ring = self.ring.lock().await;
             let ev = WsEvent { seq: self.seq.fetch_add(1, Ordering::SeqCst) + 1, kind: kind.to_string(), data };
-            ring.push_back(ev.clone());
-            while ring.len() > WS_RING {
-                ring.pop_front();
+            // 即時幀不佔重播額度（issue #482）：`turn_progress` 是每個 run 每秒 4 幀，跟耐久事件共用
+            // 這 200 個位子的話，環涵蓋的時間＝`200 / (4 × 在跑的 run 數)`——20 顆同時在跑只剩 2.5 秒，
+            // 而前端光是重連退避就 250ms～3 秒，於是**每次**重連都落在環外、退化成全量 resync。
+            // 照樣即時廣播（下面的 `bus.send`）；重連的客戶端不需要舊的 progress：下一幀 250ms 內就到，
+            // 真相另有 `turn_updated` 與訊息。seq 照發，`{seq,type,data}` 的形狀不變。
+            if !is_ephemeral(kind) {
+                ring.push_back(ev.clone());
+                while ring.len() > WS_RING {
+                    ring.pop_front();
+                }
             }
             let _ = self.bus.send(ev);
         }
@@ -552,6 +565,39 @@ mod ws_seq_tests {
         assert_eq!(seqs.last().copied(), Some(200));
         assert!(seqs.windows(2).all(|w| w[1] == w[0] + 1), "no gaps: {seqs:?}");
         assert_eq!(app.current_seq(), 200);
+    }
+
+    /// issue #482：`turn_progress` 是每個 run 每秒 4 幀，跟耐久事件共用 200 個位子的話，
+    /// 環涵蓋的時間＝`200 / (4 × 在跑的 run 數)`——20 顆同時在跑只剩 2.5 秒，而前端光是重連退避
+    /// 就 250ms～3 秒，於是每次重連都落在環外、退化成全量 resync（refreshState ＋ 每顆 bot 的訊息）。
+    ///
+    /// 這一條釘的就是票上的數字：20 顆 run × 4 幀/秒 × 斷線 3 秒 ＝ 240 幀 progress，
+    /// 之後重連仍然要能用 backlog 補齊，而不是被要求 resync。
+    #[tokio::test]
+    async fn progress_frames_do_not_push_durable_events_out_of_the_replay_ring() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+
+        // 斷線前最後收到的耐久事件。
+        app.emit("message_added", json!({"bot_id": "b1"})).await;
+        let last_seen = app.current_seq();
+
+        // 斷線那 3 秒：20 顆 run 各 4 幀/秒。
+        for i in 0..20 * 4 * 3 {
+            app.emit("turn_progress", json!({"run_id": format!("r{}", i % 20)})).await;
+        }
+        // 斷線期間真正該補的那一則。
+        app.emit("turn_updated", json!({"bot_id": "b1"})).await;
+
+        let backlog = app.backlog(last_seen).await.expect("240 幀 progress 不該把重播窗口衝掉");
+        let kinds: Vec<&str> = backlog.iter().map(|e| e.kind.as_str()).collect();
+        assert_eq!(kinds, ["turn_updated"], "補的是耐久事件，progress 不重播（過期即無用）：{kinds:?}");
+
+        // progress 照樣即時廣播、也照樣佔 seq（`{seq,type,data}` 的形狀不變）。
+        assert!(app.current_seq() > last_seen + 240, "seq 照發");
+        let mut rx = app.subscribe();
+        app.emit("turn_progress", json!({"run_id": "r0"})).await;
+        assert_eq!(rx.try_recv().unwrap().kind, "turn_progress", "不進環不等於不廣播");
     }
 }
 
