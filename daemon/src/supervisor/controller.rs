@@ -1350,9 +1350,18 @@ async fn block_stale_queues(app: &Arc<App>) {
         // 剛放掉擋、下一次重看就會送——這時候撤掉等於把馬上要送的派工丟掉。看不到盡頭的才照舊撤，理由寫額度。
         // 判準跟 flush 是同一支（`blocking_hit`）：重啟之後、這台主機回填之前記憶體是空的，那一列自己帶的上一輪憑據
         // 才是證據——只看記憶體的話，控制迴圈第一拍（比回填早）就把等額度的派工撤掉（issue #168）。
+        // **讀不到 bot 不等於它沒在等額度**（issue #525）：以前 `Err` 跟 `Ok(None)` 一起收斂成 `None`，
+        // 而 `None` 會退回只看記憶體的 `recently_held`——重啟後那張表是空的，所以「剛重啟那一拍剛好讀不到 DB」
+        // 就把一則只是在等額度的派工撤掉，理由還寫成「對方一直沒有回合結束的空檔」。讀不到就跳過這一拍：
+        // 保險絲本來就週期性跑，晚一拍沒有代價；當成擋著則會讓真的沒有 bot 的那種永遠撤不掉。
         let hit = match crate::db::bot(&app.db, &a.target_bot_id).await {
             Ok(Some(bot)) => crate::lifecycle::quota_hold::blocking_hit(app, &bot, &turn_id).await,
-            _ => None,
+            Ok(None) => None,
+            Err(e) => {
+                tracing::warn!(assignment = %a.id, bot = %a.target_bot_id, error = ?e,
+                               "讀不到目標 bot：這一輪不判排隊保險絲，下一拍再看");
+                continue;
+            }
         };
         let now = chrono::Utc::now();
         let holding = match &hit {
@@ -3612,6 +3621,39 @@ mod queue_dispatch_tests {
     fn a_queued_event_never_wakes_anyone() {
         let route = crate::supervisor::roles::route("assignment_queued", &json!({"needs_review": false}), None);
         assert!(!route.wake);
+    }
+
+    /// **issue #525**：讀不到目標 bot 不等於它沒在等額度。以前 `db::bot` 的 `Err` 跟 `Ok(None)` 一起收斂成
+    /// `None`，判斷就退回只看記憶體的 `recently_held`——而那張表重啟後是空的。所以「daemon 剛重啟、那一拍
+    /// 剛好讀不到 DB」會把一則只是在等額度的派工撤掉，理由還寫成「對方一直沒有回合結束的空檔」。
+    ///
+    /// 故障注入用那一列的 TEXT 欄塞非 UTF-8（只弄壞這一顆 bot 的讀取，不動同表其他守衛）。
+    #[tokio::test]
+    async fn a_bot_that_cannot_be_read_does_not_get_its_queued_assignment_revoked() {
+        let app = app().await;
+        let a = queued_assignment(&app, 60 * 45).await;
+        let turn_id = a.turn_id.clone().unwrap();
+        // 重啟後第一拍：`recently_held` 是空的（純記憶體），唯一還能證明它在等額度的是 DB。
+        crate::lifecycle::quota_hold::forget_held("b");
+        sqlx::query("UPDATE bots SET name=CAST(x'ff' AS BLOB) WHERE id='b'").execute(&app.db).await.unwrap();
+        assert!(crate::db::bot(&app.db, "b").await.is_err(), "前提：這一列真的讀不出來");
+
+        block_stale_queues(&app).await;
+
+        let row = store::assignment(&app.db, &a.id).await.unwrap().unwrap();
+        assert_eq!(row.status, "delivered", "讀不到 bot 的那一拍什麼都不該寫");
+        let (status, delivery): (String, String) = sqlx::query_as("SELECT status, delivery FROM turns WHERE id=?")
+            .bind(&turn_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!((status.as_str(), delivery.as_str()), ("queued", "pending"), "排著的那則不准被撤回");
+        let notes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE assignment_id=?")
+            .bind(&a.id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(notes, 0, "也不該拿錯的理由去吵 AGM");
     }
 
     #[tokio::test]
