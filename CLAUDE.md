@@ -34,7 +34,7 @@
 
 ## 驗證（收尾前必跑）
 - 先跑一鍵檢查：`scripts/check.sh`。只驗單一側可用 `web` 或 `daemon` 參數。
-- 整樹測試「單跑都綠、整樹偶發紅」：`scripts/flaky-sweep.sh -n 5 -c 2`（高並行連跑 N 輪、可同時開多份製造負載，列出紅過的測試與次數、有紅 exit 1、一輪都沒跑到或少跑 exit 2）；修完要用它連跑證明不再紅。**本機預設禁跑**（協調者 2026-09-24 裁示）：它繞過 cargo shim、開高 `--test-threads` 又同時開好幾份，要驗 flaky 走遠端編譯主機或 CI；真的要在本機跑得加 `--i-know` 並先跟協調者講一聲。
+- 整樹測試「單跑都綠、整樹偶發紅」：`scripts/flaky-sweep.sh -n 5 -c 2`（高並行連跑 N 輪、可同時開多份製造負載，列出紅過的測試與次數、有紅 exit 1、一輪都沒跑到或少跑 exit 2）；修完要用它連跑證明不再紅。**本機預設禁跑**（協調者 2026-09-24 裁示）：它繞過 cargo shim、開高 `--test-threads` 又同時開好幾份，要驗 flaky 走遠端編譯主機或 CI；真的要在本機跑得在命令列加 `--i-know`（唯一的同意方式，沒有環境變數繞法）並先跟協調者講一聲。
 - daemon 個別指令：`cargo build --release -p agents-managerd`、`cargo test -p agents-managerd`、`cargo clippy -p agents-managerd`（目前既有 32 個 warning，暫不加 `-D warnings`）。
 - web 個別指令：`cd web && bunx tsc -p tsconfig.app.json --noEmit && bunx oxlint src && bun run build`（既有 warning 不算，新增的要清）。
 - shell 腳本裡變數後面接全形標點一律寫 `${VAR}`：macOS 的 bash 3.2 會把標點併進變數名，`set -u` 下直接 unbound variable 而中止。`scripts/ops/lint-shell-vars.sh`（`scripts/check.sh ops` 與 CI 的 ops job 都會跑）會擋住。

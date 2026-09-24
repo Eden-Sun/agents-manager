@@ -64,25 +64,41 @@ setup() { # setup <假測試 binary 的結束碼>
 }
 teardown() { rm -rf "$ROOT"; unset FAKE_TRUNCATE_ROUNDS; }
 
-run() { # run <額外參數…>；閘門預設開著，測閘門的 case 自己 unset
-  AM_ALLOW_LOCAL_FLAKY_SWEEP=${AM_ALLOW_LOCAL_FLAKY_SWEEP:-1} \
-    bash "$SCRIPT" -k -o "$OUT" "$@" >"$LOGF" 2>&1
+run() { # run <額外參數…>；一律帶 --i-know（唯一的同意方式），測閘門的 case 自己不帶
+  bash "$SCRIPT" --i-know -k -o "$OUT" "$@" >"$LOGF" 2>&1
   echo $?
 }
 
 # 1. 沒有同意閘門：直接拒絕，不准在本機起高並行測試。
 setup 0
-rc=$(env -u AM_ALLOW_LOCAL_FLAKY_SWEEP bash -c 'bash "$1" -k -o "$2" -n 1 -c 1 >"$3" 2>&1; echo $?' _ "$SCRIPT" "$OUT" "$LOGF")
+rc=$(bash -c 'bash "$1" -k -o "$2" -n 1 -c 1 >"$3" 2>&1; echo $?' _ "$SCRIPT" "$OUT" "$LOGF")
 check_eq "沒有 --i-know 就 rc=2" "2" "$rc"
 check "講出為什麼拒絕" "拒絕：本機預設禁跑" "$LOGF"
 check "檔頭寫明本機禁跑" "本機預設禁跑" "$SCRIPT"
 check "檔頭指向遠端／CI" "請走遠端編譯主機或 CI" "$LOGF"
+# 說明是整段檔頭印出來的，不是寫死行號（行號會隨著補充說明失準：印半段、或印到程式碼）。
+check "說明印到檔頭最後一行" "這支的用途就是拿數字當證據" "$LOGF"
+check_no "沒印到程式碼" "set -euo pipefail" "$LOGF"
+check "說明是整段檔頭印出來的" "usage() { awk" "$SCRIPT"
+check_no "不是用寫死行號從 \$0 切出來的" "sed -n .*\"\$0\"" "$SCRIPT"
 teardown
 
-# 2. --i-know 當作同意（環境變數以外的那條路）。
+# 2. --i-know 是**唯一**的同意方式：環境變數不算（會被 export 到整個 pane、或寫死在某支腳本裡
+#    默默一直開著，事後從指令看不出當時有沒有同意）。
 setup 0
-rc=$(env -u AM_ALLOW_LOCAL_FLAKY_SWEEP bash -c 'bash "$1" --i-know -k -o "$2" -n 1 -c 1 >"$3" 2>&1; echo $?' _ "$SCRIPT" "$OUT" "$LOGF")
-check_eq "--i-know 放行且全綠 rc=0" "0" "$rc"
+rc=$(AM_ALLOW_LOCAL_FLAKY_SWEEP=1 bash -c 'bash "$1" -k -o "$2" -n 1 -c 1 >"$3" 2>&1; echo $?' _ "$SCRIPT" "$OUT" "$LOGF")
+check_eq "環境變數繞不過去（rc=2）" "2" "$rc"
+check_no "腳本裡沒有那個環境變數的繞法" "AM_ALLOW_LOCAL_FLAKY_SWEEP" "$SCRIPT"
+teardown
+
+# 2b. 輪數／份數／執行緒要是正整數：`-n 0` 以前 WANT=0、TOTAL=0 判定相等，一輪都沒跑卻 exit 0。
+setup 0
+rc=$(run -n 0 -c 1); check_eq "-n 0 要紅（rc=2）" "2" "$rc"
+check "講出是哪個旗標" "-n 要大於 0" "$LOGF"
+rc=$(run -n 1 -c 0); check_eq "-c 0 要紅（rc=2）" "2" "$rc"
+rc=$(run -n 1 -c 1 -t 0); check_eq "-t 0 要紅（rc=2）" "2" "$rc"
+rc=$(run -n abc -c 1); check_eq "-n 非數字要紅（rc=2）" "2" "$rc"
+check "講出拿到什麼" "要是正整數，拿到的是 'abc'" "$LOGF"
 teardown
 
 # 3. 全綠：rc=0，而且輪數要跑滿。彙總那段的 grep 找不到東西不准把腳本殺掉（set -e ＋ pipefail）。
@@ -114,7 +130,7 @@ teardown
 # 6. 輸出目錄建不出來：rc=2，不是默默用別的地方。
 setup 0
 touch "$ROOT/blocked"
-rc=$(AM_ALLOW_LOCAL_FLAKY_SWEEP=1 bash -c 'bash "$1" -k -o "$2" -n 1 -c 1 >"$3" 2>&1; echo $?' _ "$SCRIPT" "$ROOT/blocked/out" "$LOGF")
+rc=$(bash -c 'bash "$1" --i-know -k -o "$2" -n 1 -c 1 >"$3" 2>&1; echo $?' _ "$SCRIPT" "$ROOT/blocked/out" "$LOGF")
 check_eq "建不出輸出目錄 rc=2" "2" "$rc"
 check "講出是哪個目錄" "建不出輸出目錄" "$LOGF"
 teardown
