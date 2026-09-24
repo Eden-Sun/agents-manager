@@ -19,6 +19,7 @@
 
 一致 exit 0；有落差 exit 1，加 `--alert` 另推一則 `ops_alert`（`source=ops-sync`、`reason=installed_out_of_sync`，同一小時一則）。
 巡檢每天跑一次 `bin/agm ops-sync --check --alert` 就會被叫醒；它不會替你 install。
+`--check` 另外唯讀比對 **`bin/agm`**（issue #532）：`installed` 段是「安裝的不是這顆 binary 內嵌的那份」——加 `--refresh-cli` 就地換掉（`POST /api/supervisor/cli`，不必等 daemon 重啟）；`binary` 段是「binary 內嵌的落後 repo」——那要重建 binary **並重啟 daemon**，這支動不了。daemon 問不到時 `cli.state` 是 `unknown`，不影響 ops 腳本那半邊的結論。
 
 ## daemon-update-kick.sh
 

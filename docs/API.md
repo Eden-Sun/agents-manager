@@ -1894,6 +1894,13 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
     payload 多 `reassigned_from:"responder"`、`reassigned_reason`、`reassigned_at`、`to_role:"patrol"`。
     協調者恢復後**不搶回**。狀態讀不到時**不改派**（沒有證據不搬）。只有 `approval_requested` 會改派——
     `bot_request` 與 `mission_*` 照舊留在協調者佇列等它回來。
+- `GET /api/supervisor/cli` → `{embedded_hash, roles:[{role,dir,path,installed_hash,state}]}`（SPEC §18.2a、issue #532）。
+  `embedded_hash` 是**這顆 binary 內嵌的** `scripts/agm.py` 的 FNV-1a 64 前 12 碼（跟備份檔名 `agm.bak-<雜湊>` 同一個算法）；
+  `state`：`ok`（安裝的就是內嵌那份）、`stale`（不一樣）、`missing`（有 `bin/` 沒有 `agm`）、`not_set_up`（沒有 `bin/`）。
+  只列**已設定**的角色（有登記 bot 的巡檢／協調者）。
+  `POST /api/supervisor/cli` `{}` → 就地把 `bin/agm` 換成內嵌那份（只動 `bin/agm`，不碰 `CLAUDE.md`／`persona.md`／`runtime.json`），
+  回同一份狀態。**不必等下一次開機**：`agm ops-sync --check --refresh-cli` 走的就是這條。
+  binary 自己落後 repo 時這條救不了——那要重建 binary 並重啟 daemon。
 - `GET /api/supervisor/state` → 給 `agm` CLI 的精簡全域狀態：projects、bots（run 的 `agent_status`、`native_session_id`、`runtime_model/effort`、`pane_id`、`queued_turns`、`host_connected`、`asleep`、`lamp`）、未結案 assignment、待處理 inbox。不含 env、hook token、args、persona 全文。
   `lamp` 跟 `GET /api/state` 是同一個函式算的（`api.rs` 的 `lamp`，吃 `bot_connected`＝bot → host → herdr session），呼叫端照抄就好：CLI 這邊只看得到主機層的 `host_connected`，自己推的話同一台主機上 session 掉了的那顆會分岔（issue #514）。
 - `GET /api/supervisor/handoff` 與 `GET /api/supervisor` 的 `assignments`：最近一頁**加上**掉在頁外的未結案交辦，所以 `open_assignments` 不會少報（issue #515）。

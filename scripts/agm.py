@@ -1262,9 +1262,76 @@ def ops_sync_report(repo: Path, ref: str, agm_dir: Path) -> dict:
     return report
 
 
+def short_hash(content: bytes) -> str:
+    """FNV-1a 64、取前 12 碼十六進位——跟 daemon 的 `cli_refresh::short_hash` 是同一個算法。
+
+    不能用 `hashlib`：比對的對象是 daemon 回報的雜湊，兩邊算的東西不一樣就永遠對不上。
+    """
+    h = 0xCBF29CE484222325
+    for b in content:
+        h ^= b
+        h = (h * 0x100000001B3) & 0xFFFF_FFFF_FFFF_FFFF
+    return f"{h:016x}"[:12]
+
+
+def _blob_bytes(repo: Path, rev: str, path: str) -> bytes | None:
+    """`git show <rev>:<path>` 的**原始位元組**（`_git` 會 strip，雜湊就對不上了）。"""
+    r = subprocess.run(["git", "-C", str(repo), "show", f"{rev}:{path}"], capture_output=True)
+    return r.stdout if r.returncode == 0 else None
+
+
+def cli_sync_report(client: Client, repo: Path, ref: str) -> dict:
+    """已安裝的 `bin/agm` 跟得上嗎（issue #532）。
+
+    ops 腳本是手動安裝的，`bin/agm` 是 daemon 開機時從 binary 內嵌的那份寫出來的——兩邊各走各的，
+    而 `ops-sync --check` 以前只看前者。於是「腳本比 CLI 新」一律回報 ok，正是最會痛的那一種：
+    `daemon-update-kick.sh` 派出的正文用 `--lease-token-file`，舊的 `bin/agm` 不認得就 argparse rc 2，
+    rebuild 窗口沒交還、握到 TTL（預設 900 秒），期間 assignment 派送也停著。
+
+    兩段落差分開報，因為修法完全不同：
+    * `installed`（安裝的 ≠ binary 內嵌的）→ `agm ops-sync --check --refresh-cli` 或下一次開機就好，**不必重建**；
+    * `binary`（binary 內嵌的 ≠ repo 的 `scripts/agm.py`）→ 只能重建 binary＋**重啟 daemon**。
+
+    daemon 問不到時回 `state: "unknown"`：這支的本業是比對安裝端，不該因為 daemon 沒開就整個失敗。
+    """
+    out: dict = {"ref": ref, "state": "ok", "roles": [], "stale_roles": [], "binary_behind": False}
+    blob = _blob_bytes(repo, ref, "scripts/agm.py")
+    out["repo_hash"] = short_hash(blob) if blob is not None else None
+    try:
+        info = client.get("/api/supervisor/cli")
+    except Exception as e:  # daemon 沒開、token 不對：講出來，但不影響 ops 腳本那半邊的結論
+        out.update({"state": "unknown", "error": str(e)})
+        return out
+    if not isinstance(info, dict):
+        out.update({"state": "unknown", "error": f"daemon 回了非預期的內容：{info!r}"})
+        return out
+    out["embedded_hash"] = info.get("embedded_hash")
+    out["roles"] = info.get("roles") or []
+    out["stale_roles"] = [r for r in out["roles"] if r.get("state") in ("stale", "missing")]
+    out["binary_behind"] = bool(out["repo_hash"] and out["embedded_hash"] and out["repo_hash"] != out["embedded_hash"])
+    if out["stale_roles"] or out["binary_behind"]:
+        out["state"] = "drift"
+        bits = []
+        if out["stale_roles"]:
+            bits.append("已安裝的 bin/agm 不是這顆 binary 內嵌的那份（`agm ops-sync --check --refresh-cli` 就地換，不必重建）")
+        if out["binary_behind"]:
+            bits.append(f"這顆 binary 內嵌的 agm.py 落後 {ref}：要重建 binary **並重啟 daemon** 才會換上（重啟要另外申請核准）")
+        out["action"] = "；".join(bits)
+    return out
+
+
 def cmd_ops_sync(client: Client, cfg: dict, args) -> object:
     repo = Path(args.repo or os.environ.get("AGM_REPO") or DEFAULT_REPO).expanduser()
     report = ops_sync_report(repo, args.ref, runtime_dir(args.runtime_dir))
+    cli = cli_sync_report(client, repo, args.ref)
+    if args.refresh_cli and cli["stale_roles"]:
+        # 只換得動的那一半修得掉：binary 落後要重建，這裡動不了。
+        cli["refreshed"] = client.post("/api/supervisor/cli", {})
+        cli = cli_sync_report(client, repo, args.ref)
+    report["cli"] = cli
+    # `unknown`（daemon 沒開）不翻紅：這支的本業是比對安裝端，daemon 沒開是另一件事，
+    # 而且那種時候什麼排程都沒在跑。
+    report["in_sync"] = report["in_sync"] and cli["state"] != "drift"
     if report["in_sync"]:
         return report
     if args.alert:
@@ -1279,7 +1346,14 @@ def cmd_ops_sync(client: Client, cfg: dict, args) -> object:
             return f"{row['target']}（{bits}）"
 
         names = ", ".join(_name(r) for k in ("drift", "behind", "missing", "extra") for r in report[k])
-        detail = f"已安裝的 ops 腳本跟 {args.ref}（{report['commit']}）不一致：{counts}（{names}）。`agm ops-sync --check` 看明細，照 scripts/ops/README.md 重新 install"
+        if counts:
+            detail = f"已安裝的 ops 腳本跟 {args.ref}（{report['commit']}）不一致：{counts}（{names}）。`agm ops-sync --check` 看明細，照 scripts/ops/README.md 重新 install"
+        else:
+            detail = f"已安裝的 ops 腳本跟 {args.ref}（{report['commit']}）一致。"
+        # CLI 那半邊要講清楚是哪一種落差：一種換個檔案就好，另一種非重啟 daemon 不可（issue #532）。
+        if cli["state"] == "drift":
+            stale = "、".join(f"{r['role']}({r['state']})" for r in cli["stale_roles"]) or "無"
+            detail += f" bin/agm：{cli['action']}（安裝端落後的角色：{stale}）"
         report["alert"] = client.post("/api/supervisor/ops-alerts", {"source": "ops-sync", "reason": "installed_out_of_sync", "detail": detail})
     return Exit(report, 1)
 
@@ -1947,6 +2021,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--repo", help=f"repo 位置（預設 AGM_REPO，再退回 {DEFAULT_REPO}）")
     s.add_argument("--ref", default="origin/main", help="跟哪一版比（預設 origin/main；要最新先 git fetch）")
     s.add_argument("--alert", action="store_true", help="有落差時推一則 ops_alert 給巡檢（同 source+reason 每小時一則）")
+    s.add_argument("--refresh-cli", action="store_true",
+                   help="安裝的 bin/agm 不是 binary 內嵌的那份時，順手叫 daemon 就地換掉（不必等開機；binary 自己落後仍要重建＋重啟）")
     s.set_defaults(func=cmd_ops_sync)
 
     s = sub.add_parser("release-triage", help="上游新版分診：submit（交回 verdict）/ show / dispatched / publish（issue #204）")
