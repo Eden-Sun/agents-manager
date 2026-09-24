@@ -341,9 +341,16 @@ fn mask_line(line: &str) -> String {
             out.push_str(piece);
             continue;
         }
-        let masked = if secret_next { REDACTED.to_string() } else { mask_word(piece) };
-        let upper = piece.to_ascii_uppercase();
-        secret_next = upper == "BEARER" || (upper.ends_with(['=', ':']) && SECRET_NAMES.iter().any(|n| upper.contains(n)));
+        // 判斷要看**去掉包裹標點**之後的字（issue #451）：JSON 寫成 `"Bearer`、`{"Authorization":`，
+        // 用原字比 `== "BEARER"` 永遠不成立，於是後面那條 JWT 原樣送出去。
+        let upper = bare(piece).to_ascii_uppercase();
+        // `Authorization: Bearer <token>`：`Authorization:` 讓 `secret_next` 成立，但要遮的是 token，
+        // 不是 `Bearer` 這個字——認證方式留著，版面才看得出這行是什麼（Jev 判的就是版面）。
+        let scheme = matches!(upper.as_str(), "BEARER" | "BASIC" | "DIGEST" | "TOKEN");
+        let masked = if secret_next && !scheme { REDACTED.to_string() } else { mask_word(piece) };
+        secret_next = (secret_next && scheme)
+            || upper.ends_with("BEARER")
+            || (upper.ends_with(['=', ':']) && SECRET_NAMES.iter().any(|n| upper.contains(n)));
         out.push_str(&masked);
     }
     out
@@ -368,10 +375,18 @@ fn split_keep_ws(line: &str) -> Vec<&str> {
 }
 
 const KEY_PREFIXES: [&str; 9] = ["sk-", "ghp_", "gho_", "ghs_", "github_pat_", "xoxb-", "xoxa-", "xoxp-", "AKIA"];
-const SECRET_NAMES: [&str; 5] = ["TOKEN", "SECRET", "PASSWORD", "PASSWD", "API_KEY"];
+/// `AUTHORIZATION`／`COOKIE`／`CREDENTIAL` 是 issue #451 補的：JSON header 那一行的名字就是它們，
+/// 名字認得出來，後面那個字（`"Bearer`、或直接是 token）才遮得掉。`X-AM-Token` 已經被 `TOKEN` 蓋到。
+const SECRET_NAMES: [&str; 8] = ["TOKEN", "SECRET", "PASSWORD", "PASSWD", "API_KEY", "AUTHORIZATION", "COOKIE", "CREDENTIAL"];
+
+/// 去掉 JSON／程式碼常見的包裹標點。`mask_word` 與 `mask_line` 的 `secret_next` 要看同一個字，
+/// 不然 `Bearer x` 遮得掉、`"Bearer", "x"` 遮不掉（issue #451）。
+fn bare(word: &str) -> &str {
+    word.trim_matches(|c: char| "\"'`,;()[]{}<>".contains(c))
+}
 
 fn mask_word(word: &str) -> String {
-    let bare = word.trim_matches(|c: char| "\"'`,;()[]{}<>".contains(c));
+    let bare = bare(word);
     if KEY_PREFIXES.iter().any(|p| bare.starts_with(p)) && bare.len() >= 12 {
         return REDACTED.to_string();
     }
@@ -385,7 +400,7 @@ fn mask_word(word: &str) -> String {
     if bare.contains('@') && bare.rsplit('@').next().is_some_and(|d| d.contains('.')) && !bare.starts_with('@') {
         return REDACTED.to_string();
     }
-    if looks_random(bare) {
+    if looks_random(bare) || looks_jwt(bare) {
         return REDACTED.to_string();
     }
     match word.find("/Users/") {
@@ -396,6 +411,22 @@ fn mask_word(word: &str) -> String {
         }
         None => word.to_string(),
     }
+}
+
+/// JWT：三段 base64url、用 `.` 分隔，而且第一段是 `eyJ`（JOSE header 的 `{"` base64url 過來一定長這樣）。
+///
+/// 獨立一條而不是把 `.` 加進 [`looks_random`] 的允許集合（issue #451）：那樣長路徑、版本字串、
+/// 一整句話裡的長識別字都會開始中招，而遮掉版面正是 Jev 判斷不了的原因。簽章段允許是空的（`alg:none`）。
+fn looks_jwt(s: &str) -> bool {
+    let b64url = |p: &str| p.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    let parts: Vec<&str> = s.split('.').collect();
+    parts.len() == 3
+        && parts[0].starts_with("eyJ")
+        && parts[0].len() >= 12
+        && b64url(parts[0])
+        && parts[1].len() >= 8
+        && b64url(parts[1])
+        && b64url(parts[2])
 }
 
 /// ≥32 個 base64／hex 字元、字母數字混雜、沒有路徑分隔以外的結構：當成憑據。git sha（40 hex）也會中，
@@ -446,6 +477,53 @@ mod tests {
         let code = r#"    low.contains("you hit your weekly limit") || low.contains("you've hit your weekly limit")"#;
         assert_eq!(m(code), code);
         assert_eq!(m("@mention and a_long_snake_case_identifier_that_is_not_a_secret_0123"), "@mention and a_long_snake_case_identifier_that_is_not_a_secret_0123");
+    }
+
+    /// issue #451：JSON／引號形式的 header。`"Bearer` 前面黏著雙引號，原本 `== "BEARER"` 不成立，
+    /// 於是 `secret_next` 是 false；JWT 又因為有 `.` 被 `looks_random` 的字元集擋在門外，整條原樣送出去。
+    ///
+    /// 這裡的字串全是假的（header 是 `{"alg":"HS256"}`、payload 是 `{"sub":"1"}`，簽章隨便湊的）。
+    #[test]
+    fn json_shaped_bearer_and_bare_jwts_are_masked() {
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abcdefghijklmnopqrstuvwxyz012345";
+        let line = format!(r#"{{"Authorization": "Bearer {jwt}"}}"#);
+        let out = mask(&line);
+        assert!(!out.contains("eyJzdWIiOiIxIn0"), "JSON 形式的 Bearer 後面那條也要遮掉：{out}");
+        assert!(!out.contains(jwt), "{out}");
+        // 認證方式本身留著：遮掉版面等於把 Jev 要判的東西一起拿走。
+        assert!(out.contains("Bearer"), "{out}");
+
+        // 沒有 Bearer、單獨出現的 JWT 也要遮（log、curl 的 -H 拆行、程式碼字面值都會這樣）。
+        assert_eq!(mask(&format!("token={jwt}")), format!("token={REDACTED}"));
+        assert_eq!(mask(jwt), REDACTED);
+        assert_eq!(mask(&format!("  header: {jwt} ok")), format!("  header: {REDACTED} ok"));
+
+        // 空白分隔的那一版（既有行為）不能退步。
+        assert_eq!(mask(&format!("Authorization: Bearer {jwt}")), format!("Authorization: Bearer {REDACTED}"));
+
+        // 名字認得出來、值直接接在後面時也遮：`"Authorization":` 去掉包裹標點才對得上。
+        let out = mask(r#"{"authorization": "abcdefghijklmnopqrstuvwxyz0123456789"}"#);
+        assert!(!out.contains("abcdefghijklmnopqrstuvwxyz0123456789"), "{out}");
+        assert!(mask(r#"cookie: "sess_abcdefghijklmnopqrstuvwxyz01234567""#).contains(REDACTED));
+        // `Token <值>`（GitHub 那種寫法）：方式留著、值遮掉。
+        assert_eq!(mask("Authorization: Token ghp_abcdefghijklmnopqrstuvwxyz0123"), format!("Authorization: Token {REDACTED}"));
+    }
+
+    /// 遮罩只能吃 token，不能吃版面：有 `.` 的一般字串（版本、路徑、檔名、句子）照樣原樣通過。
+    /// 這條是 [`looks_jwt`] 的反面——當初沒有把 `.` 加進 `looks_random` 的允許集合就是為了這些。
+    #[test]
+    fn dotted_words_that_are_not_jwts_survive() {
+        for s in [
+            "gpt-5.6-luna",
+            "v1.22.333-rc.1",
+            "daemon/src/judge.rs:346",
+            "web/src/api/index.ts",
+            "eyJhbGci.short.x",
+            "api.github.com",
+            "0.93",
+        ] {
+            assert_eq!(mask(s), s, "{s} 不是 JWT，不該被遮掉");
+        }
     }
 
     #[test]
