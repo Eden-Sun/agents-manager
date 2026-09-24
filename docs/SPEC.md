@@ -2959,6 +2959,7 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
 | `assignment_stalled` | 未結案交辦 `updated_at` 沒動 | `assignment_stalled_secs`（7200） |
 | `assignment_undelivered` | 仍 `queued`、從沒送出，用 `created_at` 算 | `assignment_stalled_secs`（7200） |
 | `notify_exhausted` | 通知重送用盡 | `notify_max_attempts`（5） |
+| `inbox_classify_failing` | `roles::classify` 連續失敗（新事件分不到角色，對兩個通知者同時隱形） | 連續 3 拍（tick 10 秒，約 30 秒） |
 | `role_unavailable` | 角色 bot（協調者**與巡檢**，resource 是角色名）不可用：停在登入失效＝critical，`notify_stalled`＝degraded（見 §18.15）。**收件人看故障的是誰**：`resource='patrol'` 送協調者、`resource='responder'` 送巡檢（同 `watchdog_gave_up` 的對稱規則——送給故障的那一顆等於送進已知壞掉的那條路）；協調者沒建立時巡檢那一筆不推 inbox，只留在 UI 與 `system_health`。舊名 `responder_needs_login` 在 migrate 改寫過來（issue #459） | `ROLE_UNAVAILABLE_HOLD_SECS`（60＝連兩拍） |
 | `responder_undeliverable` | 協調者的事件送了 5 次還在 `pending`（不管原因），一個協調者一筆（resource=`responder`），critical | `RESPONDER_UNDELIVERED_ATTEMPTS`（5） |
 

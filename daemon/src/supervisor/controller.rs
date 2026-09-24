@@ -1928,8 +1928,18 @@ pub fn spawn(app: Arc<App>, generation: i64) {
                     recover_unacked(&app).await;
                     // 先分角色、合併重複，再各自決定要不要叫醒（roles.rs）。沒有要叫醒的事件時，
                     // 這一段只讀寫資料庫，不開任何模型回合。
-                    let _ = super::roles::classify(&app.db).await;
-                    let _ = super::roles::coalesce_patrol(&app.db).await;
+                    // 失敗要記，而且**這一拍照跑下去**（#472）：這兩支失敗時，事件會留在
+                    // `role IS NULL`，而 `due_for` 三個分支全都比 `COALESCE(claimed_by, role)`，
+                    // 所以那些事件對兩個通知者同時隱形——沒人被叫醒、`notify_attempts` 也不會累積
+                    // （走不到 `notify_exhausted`）。以前這裡是 `let _ =`，連一行 log 都沒有。
+                    // 整拍不因此中止：後面幾段（watchdog、mission、idle_sleep）跟分類無關，
+                    // 為了一個分類失敗把它們一起停掉只會多壞一件事。
+                    note_classify_result(&app, super::roles::classify(&app.db).await);
+                    if let Err(e) = super::roles::coalesce_patrol(&app.db).await {
+                        // 合併失敗只是「重複的 health_changed 沒被收掉」，事件本身照樣送得出去，
+                        // 所以記一行就好，不進 incident。
+                        tracing::warn!(error = ?e, "巡檢的重複事件沒合併成功（roles::coalesce_patrol 失敗）");
+                    }
                     // issue #421：協調者不可用而核准等超過 5 分鐘 → 改派給巡檢並叫醒它。
                     // 放在 notify 之前：改派完這一拍就由巡檢的 notify 送出去，不必再等一拍。
                     let unavailable = super::failover::responder_unavailable(&app).await;
@@ -1949,6 +1959,32 @@ pub fn spawn(app: Arc<App>, generation: i64) {
             }
         }
     });
+}
+
+/// 記一次 `roles::classify` 的結果：失敗要看得見，而且要數「連續幾拍」（#472）。
+///
+/// 為什麼不是 `let _ =`（原本的寫法）：`classify` 只處理 `role IS NULL` 的列，而 `roles::due_for`
+/// 三個分支全都比 `COALESCE(claimed_by, role)`——它一失敗，那些事件對**兩個**通知者同時隱形：
+/// 沒有人被叫醒，`notify_attempts` 也不會累積（所以連 `notify_exhausted` 那條 incident 都走不到）。
+/// 以前連一行 log 都沒有，等於 #420 那 9 小時的形狀換一個入口。
+///
+/// 計數放記憶體（`App`，重啟重算，同 SPEC §18.9 的原則），連續到
+/// [`crate::supervisor::incidents::CLASSIFY_FAILURE_LIMIT`] 拍就由 incident 探針開票。
+fn note_classify_result(app: &Arc<App>, result: anyhow::Result<usize>) {
+    use std::sync::atomic::Ordering;
+    match result {
+        Ok(_) => {
+            app.classify_failures.store(0, Ordering::Relaxed);
+        }
+        Err(e) => {
+            let n = app.classify_failures.fetch_add(1, Ordering::Relaxed) + 1;
+            tracing::warn!(
+                error = ?e,
+                consecutive = n,
+                "inbox 事件分不到角色（roles::classify 失敗）：這些事件不會被送出，也不會累積重送次數"
+            );
+        }
+    }
 }
 
 async fn current(app: &Arc<App>, generation: i64) -> bool {
@@ -2002,6 +2038,38 @@ async fn respawn_with(app: &Arc<App>, delays: &'static [Duration]) {
 
 #[cfg(test)]
 mod tests {
+    /// #472：`classify` 失敗要累計、成功要歸零，而且**整拍不因此中止**。
+    /// 用真的讓 `classify` 讀不到表來產生錯誤，不是自己造一個 `Err`——
+    /// 要證明的是「真的失敗時計數會動」，不是「我寫的 match 會動」。
+    #[tokio::test]
+    async fn a_failing_classify_is_counted_and_a_good_one_clears_it() {
+        use std::sync::atomic::Ordering;
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+
+        // 正常情況：計數是 0，而且保持 0。
+        super::note_classify_result(&app, super::super::roles::classify(&app.db).await);
+        assert_eq!(app.classify_failures.load(Ordering::Relaxed), 0, "讀得到就不該累計");
+
+        // 真的讓它讀不到（schema 漂移／鎖不到表都是這個形狀）。
+        crate::testing::make_table_unreadable(&app, "supervisor_inbox").await;
+        for expected in 1..=3u32 {
+            let r = super::super::roles::classify(&app.db).await;
+            assert!(r.is_err(), "表讀不到時 classify 就該回錯，否則這條測試證明不了任何事");
+            super::note_classify_result(&app, r);
+            assert_eq!(app.classify_failures.load(Ordering::Relaxed), expected, "連續失敗要累計");
+        }
+        // 到門檻了：incident 探針會看到（門檻本身在 incidents.rs 的測試釘）。
+        assert!(app.classify_failures.load(Ordering::Relaxed) >= crate::supervisor::incidents::CLASSIFY_FAILURE_LIMIT);
+
+        // 恢復：成功一次就歸零，不是慢慢退。
+        crate::testing::make_table_readable(&app, "supervisor_inbox").await;
+        let r = super::super::roles::classify(&app.db).await;
+        assert!(r.is_ok(), "表還原之後要讀得到");
+        super::note_classify_result(&app, r);
+        assert_eq!(app.classify_failures.load(Ordering::Relaxed), 0, "成功一次就歸零");
+    }
+
     use super::*;
 
     /// #300：開機讀不到 supervisor 列不能讓 controller 整個行程期間都不起來——背景重試，讀得到就起。

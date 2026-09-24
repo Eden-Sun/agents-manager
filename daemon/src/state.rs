@@ -65,6 +65,12 @@ pub struct App {
     /// checks accept any peer, not just loopback. Only the packaged macOS app — or an explicit
     /// `AM_DEV_LAN=0` — stays localhost-only.
     pub allow_lan: bool,
+    /// #472：`roles::classify` 連續失敗幾拍了（成功就歸零）。
+    ///
+    /// 記憶體、重啟重算——跟 incident 的門檻計時同一個原則（SPEC §18.9）。
+    /// 它失敗的後果是「新進 inbox 事件分不到角色，對兩個通知者同時隱形」，
+    /// 而那件事沒有任何其他偵測會發現，所以要自己數。
+    pub classify_failures: std::sync::atomic::AtomicU32,
     pub connected: std::sync::atomic::AtomicBool,
     pub default_connected: std::sync::atomic::AtomicBool,
     /// How "which account is this pid running under" gets answered (SPEC §16.6). Empty in a
@@ -178,6 +184,7 @@ impl App {
             ui_token,
             herdr_session,
             allow_lan,
+            classify_failures: std::sync::atomic::AtomicU32::new(0),
             connected: std::sync::atomic::AtomicBool::new(false),
             default_connected: std::sync::atomic::AtomicBool::new(false),
             proc_env: Default::default(),
