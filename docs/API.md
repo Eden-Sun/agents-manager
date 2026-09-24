@@ -880,11 +880,14 @@ herdr 進程樹佔多少常駐記憶體（SPEC §15）。
    "owner":"bot","subtree_bytes":420000000,"children":3}]}
 ```
 
-- `owner`：`bot`（有 `AM_BOT_ID`）/ `pane`（只有 `HERDR_PANE_ID`）/ `herdr`（不列）/ `unknown`。bot 已刪仍回 `bot_id`。
+- `owner`：`bot`（有 `AM_BOT_ID`）/ `pane`（只有 `HERDR_PANE_ID`）/ `herdr`（不列）/ `daemon`（AG Man 自己與它開的，不可砍）/ `unknown`。bot 已刪仍回 `bot_id`。
+  父行程死掉、被 init 收養的孤兒也在清單裡（靠繼承來的環境認回來，#529），不是只看 ppid。
 - `subtree_bytes` = 自己 + 子孫 RSS，清單依它降冪。只列 `claude`/`codex`/`grok`/`node`/`bash`/`zsh`/`sh`/`fish` 且 ≥ 8 MiB 的，其餘併進父程序。
 
 ### `POST /api/mem/processes/kill`
 `{"host":"local","pid":59407,"signal":"TERM"}`（`signal` 只認 `TERM` / `KILL`，預設 TERM）→ `{"host","pid","signal","exe","freed_bytes"}`，並立刻推一次 `mem_updated`。
+**訊號送給整棵子樹**（目標＋子孫，深的在前，先 `STOP` 再送再 `CONT`），所以 `freed_bytes`（＝`subtree_bytes`）才是真的會放掉的量（#529）；
+子孫裡有 `bot`／`herdr`／`daemon` 就整個拒絕（同目標本身的規則），`daemon` 回 400。
 送訊號前重新取樣判定：不在該主機 herdr 樹裡 400；就是 herdr 400；`owner == "bot"` → `409 {"reason":"bot_process","bot_id","message"}`（走 `POST /bots/{id}/stop`）。
 讀不到目標 pid 的環境變數（判不出是不是 bot 的行程）→ 502，不送訊號；讀不到它的**起始時間**（判不出送訊號時還是不是同一顆行程）也是 502。
 **確認與送訊號在同一趟指令裡**（#526）：篩選當下記下 `ps -o lstart=`，送之前再比一次，對不上就什麼都不送，回
