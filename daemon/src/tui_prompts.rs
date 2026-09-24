@@ -145,13 +145,46 @@ pub fn is_login_menu(screen: &str) -> bool {
 }
 
 /// 開場選單（登入／onboarding 主題）連同底下的預覽與提示最多這麼高；再往上是正文。
-const MENU_TAIL_LINES: usize = 20;
+///
+/// **40 而不是 20（#483）**：量過 repo 裡的兩張真 fixture——真的 onboarding 頁
+/// （`claude-2.1.278-onboarding-theme.txt`）與 bot 逐行引用它的回報
+/// （`claude-2.1.280-report-quoting-onboarding.txt`）——在偵測用的每個標記上**幾何完全一樣**：
+/// 非空行都是 32、標題都在距底部第 16 行、`1. auto…` 都在第 14 行。也就是說窗口本身
+/// **沒有在分辨真假**，擋住引文那張的自始至終是 [`composer_is_idle`]（它的空輸入列在距底部第 4 行，
+/// 任何 ≥4 的窗口都看得到，放寬不會讓那個誤判回來）。
+///
+/// 窗口原本是 20，對真畫面只剩 4 行餘裕：新版多一句提示、窄 pane 把預覽折幾行、或底部多一列
+/// statusLine，標題就掉出窗口，`is_onboarding_theme`／`is_login_menu` **靜默**失效——沒有 log、
+/// 沒有 health 欄位，只會以「交辦被送進登入畫面、回合掛著」的形式出現（#420 那個形狀）。
+const MENU_TAIL_LINES: usize = 40;
 
-/// 畫面最底 [`MENU_TAIL_LINES`] 個非空行；輸入列空著（[`composer_is_idle`]）就回 `None`——那時畫面上不可能有選單在擋。
+/// 對話／工具輸出那幾種行首符號。選單底下不該再有這些——有的話那是正文引文，不是開著的選單。
+fn is_agent_output_line(line: &str) -> bool {
+    matches!(line.trim_start().chars().next(), Some('⏺') | Some('●') | Some('⎿') | Some('✻'))
+}
+
+/// 選單是不是畫面**最底下**那個 UI：最後一個 `N.` 選項之後，不能再有對話／工具輸出。
+///
+/// 窗口從 20 放寬到 40 之後（[`MENU_TAIL_LINES`]），需要這一條來擋「引文在上面、底下還在跑」的畫面：
+/// 那種情況輸入列不是空的（正在跑），[`composer_is_idle`] 幫不上忙，原本純粹是靠 20 行窗口把引文
+/// 推出範圍外才沒中——而那個窗口同時也是 #483 的脆弱點。真的選單底下只會有它自己的預覽與提示
+/// （2.1.278 真畫面是一段程式碼預覽＋`Syntax theme:` 一行），不會有 `⏺`／`⎿` 這種對話輸出。
+fn menu_is_bottom_most(tail: &[&str]) -> bool {
+    let is_option = |l: &&str| {
+        let n = norm_line(l);
+        let mut c = n.chars();
+        c.next().is_some_and(|d| d.is_ascii_digit()) && c.next() == Some('.')
+    };
+    let Some(last) = tail.iter().rposition(is_option) else { return false };
+    !tail[last + 1..].iter().any(|l| is_agent_output_line(l))
+}
+
+/// 畫面最底 [`MENU_TAIL_LINES`] 個非空行；輸入列空著（[`composer_is_idle`]）、或選單底下還有對話輸出
+/// （[`menu_is_bottom_most`]）就回 `None`——那兩種情況畫面上都不可能有選單在擋。
 fn menu_tail(screen: &str) -> Option<Vec<&str>> {
     let raw: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
     let tail = raw[raw.len().saturating_sub(MENU_TAIL_LINES)..].to_vec();
-    (!composer_is_idle(&tail)).then_some(tail)
+    (!composer_is_idle(&tail) && menu_is_bottom_most(&tail)).then_some(tail)
 }
 
 /// claude 狀態列靠右的 `✔ Update installed · Restart to update`。回固定字而非整行：左半是每回合
@@ -235,14 +268,20 @@ const DIALOG_TAIL_LINES: usize = 12;
 /// claude 開得起來、但憑證讀不到（`CLAUDE_CONFIG_DIR` 沒登入、Keychain 鎖著）時，每個回合都只回一行
 /// `⎿  Not logged in · Please run /login`（畫面見測試用的 `screens::NOT_LOGGED_IN`）。跟登入選單不同，
 /// 輸入列是空的、herdr 判 idle，所以送交辦的閘擋不到它（issue #420：協調者這樣停了 9 小時）。
-/// 只認最底 [`MENU_TAIL_LINES`] 行裡、以 `⎿` 開頭的那一行：正文或引文裡提到這句不算。
+/// 只認最底 [`LATEST_REPLY_TAIL_LINES`] 行裡、以 `⎿` 開頭的那一行：正文或引文裡提到這句不算。
 /// 畫面在人從別的終端 `security unlock-keychain` 之後不會變，所以這只拿來**標狀態**，不拿來擋送出。
 pub fn is_not_logged_in_reply(screen: &str) -> bool {
     let raw: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
-    raw[raw.len().saturating_sub(MENU_TAIL_LINES)..]
+    raw[raw.len().saturating_sub(LATEST_REPLY_TAIL_LINES)..]
         .iter()
         .any(|l| l.trim_start().starts_with('⎿') && norm_line(l).starts_with("not logged in") && flatten(l).contains("/login"))
 }
+
+/// 「這一行是不是**最近一個**回合印的」的範圍。跟 [`MENU_TAIL_LINES`] 是兩件事：那個問的是
+/// 「選單有多高」（#483 把它放寬到 40 以吸收版本長高），這個問的是「多久以前算太久」——
+/// 之後又答過很多話就代表人已經處理掉了，不該再標成停在登入問題（issue #420 的測試釘住這一點）。
+/// 兩者以前共用同一個常數，放寬選單窗口時會連帶把這裡的「最近」也放寬。
+const LATEST_REPLY_TAIL_LINES: usize = 20;
 
 /// 畫面上看得出這個 pane 要人登入（登入選單、onboarding、或回合只回 `Not logged in`）。讀不到畫面就當不是。
 pub async fn shows_login_problem(app: &Arc<App>, run: &db::Run) -> bool {
@@ -675,6 +714,30 @@ pub fn is_feedback_survey(screen: &str) -> bool {
         assert!(!is_login_menu(ONBOARDING_THEME));
         assert!(!is_onboarding_theme("⏺ run /theme to choose the text style that looks best with your terminal\n❯\n"));
         assert!(!is_auto_mode_offer(ONBOARDING_THEME));
+    }
+
+    /// #483：真畫面底部長高了仍要認得出來。原本窗口是 20，而真 onboarding 頁的標題就在距底部
+    /// 第 16 行——只剩 4 行餘裕，新版多一句提示、窄 pane 折個幾行就掉出窗口，`is_onboarding_theme`
+    /// 會**靜默**失效（沒有 log、沒有 health 欄位，只以「交辦被送進登入畫面」的形式出現）。
+    #[test]
+    fn the_onboarding_page_is_still_recognised_when_the_bottom_grows() {
+        for extra in [4usize, 8, 16] {
+            let hints: String = (0..extra).map(|i| format!("  hint line {i}\n")).collect();
+            let grown = format!("{ONBOARDING_THEME}\n{hints}");
+            assert!(is_onboarding_theme(&grown), "底部多 {extra} 行仍要認得出來");
+        }
+    }
+
+    /// 放寬窗口不能把「引文在上面、底下還在跑」放進來：那種畫面輸入列不是空的，
+    /// `composer_is_idle` 擋不到，靠的是「選單必須是最底下那個 UI」（`menu_is_bottom_most`）。
+    #[test]
+    fn a_quote_with_tool_output_below_it_is_not_the_menu_even_with_a_wider_window() {
+        let below = "  ⏺ Bash(cargo test)\n  ⎿  running…\n".repeat(12);
+        let quoted = format!("{}\n{below}", REPORT_QUOTING_ONBOARDING.split("0 tokens").next().unwrap());
+        assert!(!is_onboarding_theme(&quoted), "底下還有對話輸出＝引文，不是開著的選單");
+        assert!(!is_login_menu(&quoted));
+        // 選單底下只有它自己的預覽／提示時才算——真畫面就是這樣。
+        assert!(is_onboarding_theme(ONBOARDING_THEME));
     }
 
     /// 正文引了整頁原文、輸入列空著：不是選單。登入選單同一條規則。
