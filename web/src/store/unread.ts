@@ -172,15 +172,44 @@ export function unreadShown(bot: { project_id: string } | undefined, supervisorP
   return !(bot && supervisorProjectId && bot.project_id === supervisorProjectId)
 }
 
-/** 分頁標題的 `(N)`：側欄收起來的與總管專案的都不算。 */
-export function titleUnread(s: {
+/**
+ * 這顆 bot 的未讀進不進任何加總：總管專案的不算（上面那條），側欄收起來的（額度停用）也不算——
+ * 點不到的數字比沒有數字更糟。分頁標題與側欄收合專案的 `!N` 共用這一條（issue #510）。
+ */
+export function unreadCounted(
+  bot: { id: string; project_id: string },
+  supervisorProjectId: string | null,
+  hidden: ReadonlySet<string>,
+): boolean {
+  return unreadShown(bot, supervisorProjectId) && !hidden.has(bot.id)
+}
+
+/** 未讀加總的來源：`bots` 是要掃的那一群（整份或某個專案的）。 */
+export interface UnreadBook {
   botUnread: Record<string, number>
   hiddenBotIds: readonly string[]
   bots: readonly { id: string; project_id: string }[]
   supervisorProjectId: string | null
-}): number {
-  const agm = s.bots.filter((b) => !unreadShown(b, s.supervisorProjectId)).map((b) => b.id)
-  return totalUnread(s.botUnread, agm.length === 0 ? s.hiddenBotIds : [...s.hiddenBotIds, ...agm])
+}
+
+/** 分頁標題的 `(N)`：側欄收起來的與總管專案的都不算。 */
+export function titleUnread(s: UnreadBook): number {
+  const hidden = new Set(s.hiddenBotIds)
+  const skip = s.bots.filter((b) => !unreadCounted(b, s.supervisorProjectId, hidden)).map((b) => b.id)
+  // `hiddenBotIds` 也照原樣帶上：`bots` 裡沒有的（剛刪掉、還沒 prune）也要排除。
+  return totalUnread(s.botUnread, skip.length === 0 ? s.hiddenBotIds : [...s.hiddenBotIds, ...skip])
+}
+
+/** 專案收合時掛在標題上的 `!N`：跟 `titleUnread` 同一份排除，否則收合的專案掛著一個展開也點不到的數字。 */
+export function projectUnread(s: UnreadBook, projectId: string): number {
+  const hidden = new Set(s.hiddenBotIds)
+  let n = 0
+  for (const b of s.bots) {
+    if (b.project_id !== projectId) continue
+    if (!unreadCounted(b, s.supervisorProjectId, hidden)) continue
+    n += s.botUnread[b.id] ?? 0
+  }
+  return n
 }
 
 /** `message_added` 與 `turn_updated` 都代表完成，去重避免一回合跳兩下；只留最近 500 筆。 */

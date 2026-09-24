@@ -23,7 +23,7 @@ import {
   useStore,
 } from '../store/store'
 import type { SocketStatus } from '../store/store'
-import { unreadShown } from '../store/unread'
+import { projectUnread, unreadShown } from '../store/unread'
 import { GearIcon, TerminalIcon } from './Icons'
 import { StatusLamp } from './StatusLamp'
 import { LAMP_LABEL } from './lampLabel'
@@ -775,16 +775,9 @@ function ProjectTitle({
 }) {
   const selected = useStore((s) => s.selectedProjectId === projectId)
   const unread = useStore((s) => s.groupUnread[projectId] ?? 0)
-  const foldedUnread = useStore((s) =>
-    folded
-      ? s.bots.reduce((n, b) => {
-          if (b.project_id !== projectId) return n
-          // 同上：總管專案的未讀不進群組加總。
-          if (!unreadShown(b, s.supervisorProjectId)) return n
-          return n + (s.botUnread[b.id] ?? 0)
-        }, 0)
-      : 0,
-  )
+  // 排除規則跟分頁標題 `(N)` 同一份（`store/unread.ts`）：總管專案的不算，額度停用而被側欄
+  // 收起來的也不算——收合的專案掛著 `!3`、展開卻只看得到「已隱藏」，那個數字點不掉（issue #510）。
+  const foldedUnread = useStore((s) => (folded ? projectUnread(s, projectId) : 0))
   const selectProject = useStore((s) => s.selectProject)
   // `<input>` can't live in a `<button>`: renaming swaps the row for a same-class `<div>`.
   const [editing, setEditing] = useState(false)

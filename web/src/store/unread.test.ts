@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import type { Message } from '../api/types.ts'
-import { clearHookCompletion, completionKey, countUnreadTurns, idleEdgeCompletionKey, isUnread, loadCounts, loadMarks, markHookCompletion, markOfMessages, resetIdleEdges, resetTurnCompletions, saveCounts, saveMarks, takeTurnCompletion, titleUnread, totalUnread, unreadShown } from './unread.ts'
+import { clearHookCompletion, completionKey, countUnreadTurns, idleEdgeCompletionKey, isUnread, loadCounts, loadMarks, markHookCompletion, markOfMessages, projectUnread, resetIdleEdges, resetTurnCompletions, saveCounts, saveMarks, takeTurnCompletion, titleUnread, totalUnread, unreadShown } from './unread.ts'
 
 /** node 沒有 localStorage；這裡只要 get/set 兩支。 */
 function stubStorage() {
@@ -188,4 +188,30 @@ test('分頁標題不算總管專案的未讀：側欄不顯示的，標題也�
   // 還不知道總管專案是哪個（`GET /api/supervisor` 讀不到）：不排除。
   assert.equal(titleUnread({ ...s, supervisorProjectId: null }), 45)
   assert.equal(unreadShown(undefined, 'p-agm'), true)
+})
+
+test('專案收合的 !N 與分頁標題同一份排除：額度隱藏與總管專案的都不算（issue #510）', () => {
+  const bots = [
+    { id: 'work', project_id: 'p1' },
+    { id: 'quota-hidden', project_id: 'p1' },
+    { id: 'other', project_id: 'p2' },
+    { id: 'agm', project_id: 'p-agm' },
+  ]
+  const s = {
+    bots,
+    botUnread: { work: 2, 'quota-hidden': 3, other: 5, agm: 40 },
+    hiddenBotIds: ['quota-hidden'],
+    supervisorProjectId: 'p-agm',
+  }
+  // 側欄收合 p1 時掛的數字：只有展開後點得到的那一筆。
+  assert.equal(projectUnread(s, 'p1'), 2)
+  assert.equal(projectUnread(s, 'p2'), 5)
+  // 總管專案的收合加總也是 0（側欄本來就不顯示它們的未讀）。
+  assert.equal(projectUnread(s, 'p-agm'), 0)
+  // 兩邊同一份排除：分頁標題與各專案加總對得起來。
+  assert.equal(titleUnread(s), projectUnread(s, 'p1') + projectUnread(s, 'p2'))
+  // 額度停用解除後那三筆就回來了。
+  assert.equal(projectUnread({ ...s, hiddenBotIds: [] }, 'p1'), 5)
+  // 剛刪掉、`bots` 裡已經沒有但帳還沒 prune 的：`hiddenBotIds` 照原樣帶進排除名單才擋得掉。
+  assert.equal(titleUnread({ ...s, botUnread: { ...s.botUnread, gone: 7 }, hiddenBotIds: ['quota-hidden', 'gone'] }), 2 + 5)
 })
