@@ -141,13 +141,30 @@ pub async fn observe(app: &Arc<App>, s: Sample) -> Result<()> {
     Ok(())
 }
 
+/// 多久以前的撞限還算「這一次清掉的」（issue #453）。比 5 小時窗寬一截，涵蓋週限與 daemon 重啟後
+/// 第一次成功回合；再舊的就讓它維持 NULL——那是「從未被清掉」，不是「N 天後才清掉」。
+const CLEAR_WINDOW_HOURS: i64 = 24;
+
 /// 成功回合清掉這顆 bot 的撞限時呼叫：把還沒對帳的那幾筆蓋上時刻。失敗只記 log。
+///
+/// 只蓋**撞限**那一類、而且是**近期**的（issue #453）：
+/// * `regex_verdict = 'limit_hit'`——`cleared_at` 的語意（「撞限之後被成功回合清掉」）只對撞限成立。
+///   `stuck_queued`（`judge/stuck.rs`）講的是「畫面底部有個不認得的框」，跟撞限無關，以前會被一起蓋上時刻，
+///   帳本因此多出「某筆 stuck_queued 在某時被清掉」這種沒有意義的資料，照 `cleared_at` 篩樣本也會混進來。
+/// * `at >= now - [`CLEAR_WINDOW_HOURS`]`——一筆撞限如果那顆 bot 之後一直沒有成功回合（停用、軟刪、
+///   額度真的沒回來），它本來就該停在 NULL。不設下界的話，幾天後那顆 bot 被 resume 的那一次清除，
+///   會把這筆舊的追認成「剛剛清掉」，把「從未被清掉」這個事實改寫掉。
 pub async fn note_cleared(pool: &SqlitePool, bot_id: &str) {
-    let res = sqlx::query("UPDATE judge_shadow SET cleared_at = ? WHERE bot_id = ? AND cleared_at IS NULL")
-        .bind(crate::db::now())
-        .bind(bot_id)
-        .execute(pool)
-        .await;
+    let since = crate::db::iso_at(chrono::Utc::now() - chrono::Duration::hours(CLEAR_WINDOW_HOURS));
+    let res = sqlx::query(
+        "UPDATE judge_shadow SET cleared_at = ?
+          WHERE bot_id = ? AND cleared_at IS NULL AND regex_verdict = 'limit_hit' AND at >= ?",
+    )
+    .bind(crate::db::now())
+    .bind(bot_id)
+    .bind(&since)
+    .execute(pool)
+    .await;
     if let Err(e) = res {
         tracing::debug!(bot = %bot_id, error = %e, "judge shadow rows not settled");
     }
@@ -642,6 +659,51 @@ mod tests {
         assert!(rows(&app).await[0].3.is_none());
         note_cleared(&app.db, "B1").await;
         assert!(rows(&app).await[0].3.is_some());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// issue #453：`cleared_at` 的語意是「**撞限**之後被成功回合清掉」，所以那句 UPDATE 只能蓋
+    /// 撞限那一類、而且是近期的。以前沒有任何條件，於是一次成功回合會順手：
+    /// (1) 把 `stuck_queued`（跟撞限無關）也蓋上時刻；(2) 把幾天前那筆「從未被清掉」追認成「剛剛清掉」。
+    #[tokio::test]
+    async fn only_recent_limit_hits_are_settled_by_a_clear() {
+        let (app, dir) = app_with(false, &[], "http://127.0.0.1:1/x").await;
+        let put = |id: &str, verdict: &str, at: String| {
+            let (app, id, verdict) = (app.clone(), id.to_string(), verdict.to_string());
+            async move {
+                sqlx::query(
+                    "INSERT INTO judge_shadow (id, at, bot_id, run_id, kind, matched_line, composer_idle, regex_verdict)
+                     VALUES (?, ?, 'B1', 'R1', 'claude', 'x', 1, ?)",
+                )
+                .bind(&id)
+                .bind(&at)
+                .bind(&verdict)
+                .execute(&app.db)
+                .await
+                .unwrap();
+            }
+        };
+        let cleared = |id: &str| {
+            let (app, id) = (app.clone(), id.to_string());
+            async move {
+                sqlx::query_scalar::<_, Option<String>>("SELECT cleared_at FROM judge_shadow WHERE id = ?")
+                    .bind(&id)
+                    .fetch_one(&app.db)
+                    .await
+                    .unwrap()
+            }
+        };
+        let hours_ago = |h: i64| crate::db::iso_at(chrono::Utc::now() - chrono::Duration::hours(h));
+
+        put("fresh", "limit_hit", hours_ago(1)).await;
+        put("stale", "limit_hit", hours_ago(CLEAR_WINDOW_HOURS + 1)).await;
+        put("stuck", "stuck_queued", hours_ago(1)).await;
+
+        note_cleared(&app.db, "B1").await;
+
+        assert!(cleared("fresh").await.is_some(), "近期的撞限才是這次清掉的那一筆");
+        assert!(cleared("stale").await.is_none(), "幾天前沒被清掉的撞限要維持 NULL，不是追認成剛剛清掉");
+        assert!(cleared("stuck").await.is_none(), "stuck_queued 跟撞限無關，cleared_at 對它沒有意義");
         std::fs::remove_dir_all(&dir).ok();
     }
 
