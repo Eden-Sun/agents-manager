@@ -557,5 +557,9 @@ daemon 對 AGM 的 bot（總管／角色本身、它們的 child、總管專案�
 - **失敗**：卡片紅框、寫「失敗：原因」（全文在 tooltip）＋「重試」；壓過的重試直接傳壓好的那份。壓完仍超過上限的不給重試（再傳一次也一樣）。
 - 送出鍵照舊：還有卡片在壓縮／上傳就擋著（「上傳中…」）；失敗的卡片不擋，但送出時不會帶上它。
 - 手機的 × 是 44px 觸控目標，卡片右側留白跟著放大、重試鍵 28px 高，才不會跟 × 疊在一起。
+- **那行字的精度同時是重繪的節流門檻**（issue #438）：XHR 的上傳進度事件最密約每 50 ms 一次，而卡片的 state 住在 `ChatPanel`，
+  每一次都重繪會把整個訊息列一起帶下去。`attachmentUpload.ts::progressGate` 只在**這行字真的會變**時才 dispatch
+  （50 MB 實測 6000 個事件變成 601 次，少 90%，而且一階都沒少）。要改文案的精度就是在改重繪頻率，兩者刻意綁在一起——
+  用畫出來的字當門檻，而不是固定時間或固定百分比，才不會出現「字會變但畫面沒更新」的落差。
 - mock 模式下檔名帶 `stall`（停在 25%）、`fail`（傳到 40% 回 502）、`slow` 可以重現這幾種畫面。
   ![桌機上傳中](screenshots/upload-progress/desktop-uploading.png) ![桌機失敗](screenshots/upload-progress/desktop-failed.png) ![手機上傳中](screenshots/upload-progress/phone-uploading.png) ![手機失敗](screenshots/upload-progress/phone-failed.png)
