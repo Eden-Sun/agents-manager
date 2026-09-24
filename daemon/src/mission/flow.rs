@@ -577,6 +577,7 @@ mod tests {
             turn_error: None,
             review_role: None,
             conflict_since: None,
+            busy_rounds: 0,
         }
     }
 

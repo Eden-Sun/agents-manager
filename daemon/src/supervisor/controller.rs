@@ -38,6 +38,12 @@ const MAX_QUOTA_RETRIES: i64 = 6;
 const CONFLICT_BACKOFF_CAP_SECS: i64 = 900;
 /// 送不進去多久之後放棄重試、改成讓人看得見。**不判 fail**：工作沒失敗，是進不去。
 const CONFLICT_GIVE_UP_MINS: i64 = 30;
+/// 同一筆最多排不進去幾輪（`busy_rounds`）。時間那條保險絲從 `conflict_since` 算，而
+/// `hold`（維護窗口、讀不到狀態）、`quota_blocked` 與一次成功送達都會把 `conflict_since` 清掉——
+/// 合法的等待本來就不該算進「送不進去」，但這也表示一顆長期回合中的 bot 配上週期性的窗口，
+/// 可以讓時間那條永遠燒不完。輪數只加不減，所以收得掉。退避封頂 900 秒，20 輪 ≥ 3.5 小時，
+/// 正常情況下永遠是時間那條先燒。
+const CONFLICT_MAX_ROUNDS: i64 = 20;
 /// 交辦送出去了、結果還沒寫進 DB（#149）時多久再問一次同一個 crid。daemon 自己的補寫從 1 秒起重試。
 const UNCOMMITTED_RECHECK_SECS: i64 = 15;
 pub const CONFLICT_BACKOFF_ENV: &str = "AM_DISPATCH_CONFLICT_BACKOFF_SECS";
@@ -66,6 +72,12 @@ fn conflict_gave_up(since: &str, now: chrono::DateTime<chrono::Utc>) -> bool {
         // 讀不懂時間就不要放棄：寧可繼續重試，也不要因為一個壞欄位把工作收起來。
         Err(_) => false,
     }
+}
+
+/// 上游／暫時性錯誤還剩不剩重試。只看 `attempts`——那是 [`store::defer`] 加的數字，
+/// 409 的等待記在 `busy_rounds`，不吃這個額度（issue #528）。
+fn upstream_retries_left(attempts: i64) -> bool {
+    attempts < RETRY_BACKOFF.len() as i64
 }
 
 fn backoff_for(attempts: i64) -> Duration {
@@ -253,11 +265,23 @@ pub async fn dispatch(app: &Arc<App>, assignment_id: &str) {
         // the assignment queued with the same id.
         Err(LcError::Conflict(v)) => {
             let why = conflict_reason(&v);
+            // 這一輪也算進去：`busy_rounds` 記的是「排不進去幾輪」，`attempts` 不再被它加（issue #528）。
+            let rounds = a.busy_rounds + 1;
+            let mins = env_i64(CONFLICT_GIVE_UP_ENV, CONFLICT_GIVE_UP_MINS);
             match a.conflict_since.as_deref() {
-                Some(since) if conflict_gave_up(since, chrono::Utc::now()) => undeliverable(app, &a, since, &why).await,
+                Some(since) if conflict_gave_up(since, chrono::Utc::now()) => {
+                    undeliverable(app, &a, since, &why, &format!("從 {since} 起超過 {mins} 分鐘一直送不進去")).await
+                }
+                // 次數的保險絲（issue #528）：時間那條靠 `conflict_since`，而 `hold`／`quota_blocked`
+                // ／送達都會把它清掉（那是對的，合法的等待不算「送不進去」），所以一顆長期回合中的 bot
+                // 配上每隔一陣子就開一次的維護窗口，可以讓時間那條永遠燒不完。次數只加不減，收得掉。
+                _ if rounds >= CONFLICT_MAX_ROUNDS => {
+                    let since = a.conflict_since.clone().unwrap_or_else(|| a.created_at.clone());
+                    undeliverable(app, &a, &since, &why, &format!("連續 {rounds} 輪都排不進去（上限 {CONFLICT_MAX_ROUNDS} 輪）")).await
+                }
                 // 第一次撞（或上一輪被 hold／quota_blocked／送達打斷過）：`defer_conflict` 從現在開始計時。
                 _ => {
-                    let wait = conflict_backoff_secs(a.attempts);
+                    let wait = conflict_backoff_secs(a.busy_rounds);
                     let _ = store::defer_conflict(&app.db, &a.id, &iso_in(wait), &why).await;
                 }
             }
@@ -282,7 +306,7 @@ pub async fn dispatch(app: &Arc<App>, assignment_id: &str) {
             // Upstream / bad-request: retry a bounded number of times, then give up loudly
             // rather than silently holding work the user thinks is running.
             let why = format!("{e:?}");
-            if a.attempts >= RETRY_BACKOFF.len() as i64 {
+            if !upstream_retries_left(a.attempts) {
                 dispatch_failed(app, &a, &why).await;
             } else {
                 let wait = backoff_for(a.attempts).as_secs() as i64;
@@ -322,11 +346,13 @@ fn conflict_reason(v: &serde_json::Value) -> String {
 /// user believes is running must not disappear from the list on the daemon's own say-so.
 /// 一直送不進去：標成 `blocked` 並推一則 inbox 事件——**不能只寫 log**，那等於沒人知道。
 /// 不判 `dispatch_failed`：工作沒失敗，是進不去那顆 bot（它一直在回合中），該由 AGM 決定怎麼辦。
-async fn undeliverable(app: &Arc<App>, a: &store::Assignment, since: &str, why: &str) {
+async fn undeliverable(app: &Arc<App>, a: &store::Assignment, since: &str, why: &str, fuse: &str) {
     let mins = env_i64(CONFLICT_GIVE_UP_ENV, CONFLICT_GIVE_UP_MINS);
-    // 照實寫：原因是最後一次 409 說的那句，不是一律「對方在回合中」；次數是累計的派送嘗試。
-    let note = format!("從 {since} 起超過 {mins} 分鐘一直送不進去（最後一次：{why}；累計派送嘗試 {} 次）", a.attempts);
+    // 照實寫：哪一條保險絲燒掉的、最後一次 409 說了什麼（不是一律「對方在回合中」），
+    // 以及排不進去幾輪（`busy_rounds`）與累計派送嘗試幾次（`attempts`）——兩個數字不是同一件事。
+    let note = format!("{fuse}（最後一次：{why}；連續排不進去 {} 輪、累計派送嘗試 {} 次）", a.busy_rounds + 1, a.attempts);
     let payload = json!({"assignment_id": a.id, "target_bot_id": a.target_bot_id, "attempts": a.attempts,
+                "busy_rounds": a.busy_rounds + 1, "max_busy_rounds": CONFLICT_MAX_ROUNDS,
                 "waited_mins": mins, "conflict_since": since, "reason": why, "status": "blocked",
                 // 不能叫人用同一個 request id 再 `assign`：那是冪等查詢，只會拿回這筆 blocked（review2 deliv M1）。
                 "hint": UNDELIVERABLE_HINT});
@@ -2814,6 +2840,60 @@ mod conflict_fuse_tests {
         store::assignment(&app.db, id).await.unwrap().unwrap()
     }
 
+    /// issue #528：409 是「對方正忙」，不是一次失敗的派送——它不可以吃掉上游錯誤的重試額度。
+    ///
+    /// 以前 `defer_conflict` 跟 `defer` 加的是同一個 `attempts`，而 `dispatch` 的上游錯誤分支是
+    /// `attempts >= RETRY_BACKOFF.len()`（5）就判 `dispatch_failed`。409 的退避是 15*2^n（`controller.rs`），
+    /// 所以一顆回合中的 bot 只要排 15+30+60+120+240 = 465 秒（約 8 分鐘）就把額度用完，
+    /// 之後第一個 herdr 抖動就把使用者以為在跑的工作判成失敗——而 409 自己的保險絲是 30 分鐘，
+    /// 那時候它還完全正常。
+    #[tokio::test]
+    async fn eight_minutes_of_409s_leaves_the_upstream_retry_budget_untouched() {
+        let app = app().await;
+        let a = store::insert_assignment(&app.db, None, "b", "busy-1", "做 X", &[], None, true).await.unwrap();
+
+        // 目標 bot 沒有 run ＝ 409。八分鐘的退避階梯剛好是這五輪。
+        for round in 1..=5 {
+            set(&app, &a.id, "next_attempt_at=NULL, error=?", "").await;
+            dispatch(&app, &a.id).await;
+            let r = row(&app, &a.id).await;
+            assert_eq!(r.status, "queued", "還在排隊：{:?}", r.error);
+            assert_eq!(r.busy_rounds, round, "排不進去的輪數自己記");
+            assert_eq!(r.attempts, 0, "409 不算一次派送失敗");
+        }
+        let r = row(&app, &a.id).await;
+        assert!(upstream_retries_left(r.attempts), "第一個暫時性上游錯誤仍然有完整的 {} 次重試", RETRY_BACKOFF.len());
+        assert!(r.conflict_since.is_some(), "時間那條保險絲照舊在跑");
+    }
+
+    /// issue #528 的另一半：時間那條保險絲會被合法的等待清掉（`hold`／`quota_blocked`／送達都會清
+    /// `conflict_since`），所以輪數要有自己的上限，否則一顆長期回合中的 bot 配上週期性的維護窗口
+    /// 可以一直重試而沒有人知道。
+    #[tokio::test]
+    async fn an_assignment_that_keeps_missing_its_turn_gives_up_on_rounds_even_without_the_clock() {
+        let app = app().await;
+        let a = store::insert_assignment(&app.db, None, "b", "busy-2", "做 X", &[], None, true).await.unwrap();
+        // 最後一輪之前：時間那條完全沒在跑（每次都被 hold 清掉），只剩輪數。
+        sqlx::query("UPDATE supervisor_assignments SET busy_rounds=?, conflict_since=NULL WHERE id=?")
+            .bind(CONFLICT_MAX_ROUNDS - 1)
+            .bind(&a.id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        dispatch(&app, &a.id).await;
+
+        let r = row(&app, &a.id).await;
+        assert_eq!(r.status, "blocked", "輪數用完要讓人看得見，不是繼續賭");
+        assert!(r.error.as_deref().is_some_and(|e| e.contains(&format!("上限 {CONFLICT_MAX_ROUNDS} 輪"))), "{:?}", r.error);
+        let kinds: Vec<String> = sqlx::query_scalar("SELECT kind FROM supervisor_inbox WHERE assignment_id=?")
+            .bind(&a.id)
+            .fetch_all(&app.db)
+            .await
+            .unwrap();
+        assert!(kinds.contains(&"assignment_undeliverable".to_string()), "{kinds:?}");
+    }
+
     /// 13:50 建立、在 quota_blocked 等到 19:00、恢復後第一個 409：不能因為「建立已經五小時」就直接 blocked。
     #[tokio::test]
     async fn waiting_on_quota_or_a_window_does_not_count_as_failing_to_deliver() {
@@ -3175,7 +3255,7 @@ mod mission_quota_tests {
             .unwrap();
         let a = store::assignment(&app.db, &a.id).await.unwrap().unwrap();
 
-        undeliverable(&app, &a, "2026-09-16T11:00:00Z", "turn_in_flight: a turn is already in flight").await;
+        undeliverable(&app, &a, "2026-09-16T11:00:00Z", "turn_in_flight: a turn is already in flight", "從 2026-09-16T11:00:00Z 起超過 30 分鐘一直送不進去").await;
 
         let after = store::assignment(&app.db, &a.id).await.unwrap().unwrap();
         assert_eq!(after.status, "blocked", "不是 failed：工作沒失敗，是進不去");
@@ -3191,7 +3271,7 @@ mod mission_quota_tests {
         );
         // 已經被別的路徑改掉的那一筆不會被蓋回去。
         sqlx::query("UPDATE supervisor_assignments SET status='cancelled' WHERE id=?").bind(&a.id).execute(&app.db).await.unwrap();
-        undeliverable(&app, &a, "2026-09-16T11:00:00Z", "again").await;
+        undeliverable(&app, &a, "2026-09-16T11:00:00Z", "again", "從 2026-09-16T11:00:00Z 起超過 30 分鐘一直送不進去").await;
         assert_eq!(store::assignment(&app.db, &a.id).await.unwrap().unwrap().status, "cancelled");
     }
 

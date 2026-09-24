@@ -80,6 +80,10 @@ CREATE TABLE IF NOT EXISTS supervisor_assignments (
   result TEXT,
   error TEXT,
   attempts INTEGER NOT NULL DEFAULT 0,
+  -- 排不進去幾輪（409：對方回合中、沒有 run、框裡有字）。跟 `attempts` 分開記（issue #528）：
+  -- `attempts` 是「上游錯誤重試到第幾次」的界，混進 409 的等待之後，一顆忙碌的 bot 排個八分鐘
+  -- 就把那個界用完，之後第一個暫時性錯誤直接判 dispatch_failed。
+  busy_rounds INTEGER NOT NULL DEFAULT 0,
   next_attempt_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
@@ -355,6 +359,9 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
         // 這一輪「一直 409 送不進去」從什麼時候開始（第一次撞 409 寫下）。409 保險絲從這裡計時，
         // 不是 `created_at`：在 quota_blocked 或 restart 窗口 hold 裡合法等待的時間不算「送不進去」。
         ("conflict_since", "ALTER TABLE supervisor_assignments ADD COLUMN conflict_since TEXT"),
+        // 排不進去幾輪（見 SCHEMA 的欄位註解）。舊列從 0 開始：它們的 409 歷史本來就記在
+        // `attempts` 裡分不出來，硬猜只會讓保險絲一升級就燒掉。
+        ("busy_rounds", "ALTER TABLE supervisor_assignments ADD COLUMN busy_rounds INTEGER NOT NULL DEFAULT 0"),
     ] {
         if !has_column(pool, "supervisor_assignments", col).await? {
             sqlx::query(ddl).execute(pool).await?;
@@ -525,6 +532,9 @@ pub struct Assignment {
     /// 這一輪第一次撞 409 的時間（見 migrate 的欄位註解）。
     #[sqlx(default)]
     pub conflict_since: Option<String>,
+    /// 排不進去幾輪（409）。跟 `attempts` 分開，見 SCHEMA 的欄位註解與 issue #528。
+    #[sqlx(default)]
+    pub busy_rounds: i64,
 }
 
 /// Lifecycle states an assignment can still move out of on its own.
@@ -559,6 +569,8 @@ impl Assignment {
             "result": self.result,
             "error": self.error,
             "attempts": self.attempts,
+            // 排不進去幾輪（409）。`attempts` 是上游錯誤的重試次數，兩者不是同一件事（issue #528）。
+            "busy_rounds": self.busy_rounds,
             // When the next retry is due. Without it "attempts: 37" is a number with no story:
             // you cannot tell a job that is retrying on schedule from one that is wedged.
             "next_attempt_at": self.next_attempt_at,
@@ -1382,12 +1394,18 @@ pub async fn defer(pool: &SqlitePool, id: &str, next_attempt_at: &str, why: &str
     Ok(())
 }
 
-/// 409（對方回合中、沒有 run、框裡有字…）：跟 [`defer`] 一樣排下一次，並記下這一輪第一次撞 409 的時間。
-/// 已經有就不動——保險絲量的是「連續送不進去多久」。
+/// 409（對方回合中、沒有 run、框裡有字…）：排下一次，記下這一輪第一次撞 409 的時間，
+/// 並把「排不進去幾輪」加一。`conflict_since` 已經有就不動——保險絲量的是「連續送不進去多久」。
+///
+/// **不加 `attempts`**（issue #528）：那個數字是 `dispatch` 給上游／暫時性錯誤的重試上限
+/// （`a.attempts >= RETRY_BACKOFF.len()` 就判 `dispatch_failed`）。409 是「對方正忙」，
+/// 不是一次失敗的派送；混在一起的話，一顆回合中的 bot 只要讓它排八分鐘（15+30+60+120+240 秒）
+/// 就把上限用完，之後第一個 herdr 抖動就把使用者以為在跑的工作判成失敗。409 自己的界是
+/// `conflict_since` 的時間與 [`crate::supervisor::controller`] 的輪數上限。
 pub async fn defer_conflict(pool: &SqlitePool, id: &str, next_attempt_at: &str, why: &str) -> Result<()> {
     let now = crate::db::now();
     sqlx::query(
-        "UPDATE supervisor_assignments SET attempts=attempts+1, next_attempt_at=?, error=?,
+        "UPDATE supervisor_assignments SET busy_rounds=busy_rounds+1, next_attempt_at=?, error=?,
                 conflict_since=COALESCE(conflict_since, ?), updated_at=?
           WHERE id=? AND status='queued'",
     )
