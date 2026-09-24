@@ -3349,6 +3349,13 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
   只看前者會把一筆剛讀到、真的見底的讀數放行：codex 狀態列的讀數沒有 `resets_at`，`set` 會沿用上一份（原本純為顯示），
   app-server 探測壞掉時那個繼承來的時刻早就過去了，於是 97% 用掉的新讀數被當成有額度——跟 §18.14 D4 要修的方向正好相反。
   觀測比重置新，就表示這筆讀數已經反映重置後的狀態，它說見底就是真的。`observed_at` 沒有時退回只看前者（＝舊行為），
+  **時間戳解不開的一律當成「已過去／已過期」**（issue #518，收口）：`policy::past`、`Window::reset_passed`、
+  `already_past`、`pick::reset_of`、`Quota::reads_older_than_window` 五處同向。注意兩種 `true` 的安全方向相反——
+  `already_past` 的 `true` 是**丟棄**那個值（嚴格），`reset_passed` 的 `true` 是**放行**（`exhausted_at` 變 false）；
+  兩者相容只因為壞值到不了 `reset_passed`（所有寫 `Window.resets_at` 的入口都驗過格式，含 `load_cache`）。
+  年齡判斷（`reading_older_than_window`）先看 `observed_at`、解不開退回 `updated_at`、**兩個都解不開就當過期**——
+  否則「見底＋沒有 `resets_at`＋年齡說不出來」會讓那個身分永久算用盡，就是 §18.14 D4 要修的那個問題換一條路回來。
+  時間戳一律走 `quota::parse_utc` 這一支（#518 把散落的 `parse_from_rfc3339` 收乾淨），不要再各寫一個方向不同的解析。
   **刻意不拿 `updated_at` 當備援**（那是整筆寫入時間，不是那一桶的觀測時間）。`set` 也不再沿用**已經過去**的 `resets_at`：
   對顯示沒有意義（會寫成「N 小時前重置」），而且它就是上面那個破口的來源。
   **沒有 `resets_at` 的見底讀數**：窗長之內算用盡（無從判斷，寧可繼續等），**比那一桶自己的窗長還舊就當成「沒有讀數」**
