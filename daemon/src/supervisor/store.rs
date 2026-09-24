@@ -94,6 +94,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS supervisor_assignments_crid
 CREATE INDEX IF NOT EXISTS supervisor_assignments_open
   ON supervisor_assignments(status) WHERE status IN ('queued','delivered','unknown');
 CREATE INDEX IF NOT EXISTS supervisor_assignments_turn ON supervisor_assignments(turn_id);
+-- 分頁與「還欠著哪幾件」共用的排序（issue #543）。`list_assignments_page` 是
+-- `WHERE supervisor_id=? ORDER BY created_at DESC, id DESC`，而 `supervisor_id` 實際上只有一個值，
+-- 所以少了這個索引時 planner 會走 crid 索引把整張表掃完、再 `USE TEMP B-TREE FOR ORDER BY`：
+-- 離線兩萬筆量到翻 50 頁 202ms，加上之後 13ms（變成 covering index）。這張表只增不減，
+-- 而 `assign()` 的 ownership 衝突檢查與 state／handoff 的未結案清單都踩在同一條路上。
+CREATE INDEX IF NOT EXISTS supervisor_assignments_created
+  ON supervisor_assignments(supervisor_id, created_at DESC, id DESC);
 -- Every acceptance decision, kept whole: who decided, on what grounds, from where. The
 -- assignment row carries only the latest one, and a state machine without an audit trail is
 -- how "AGM said it was done" becomes unfalsifiable.
@@ -1212,7 +1219,7 @@ pub async fn mission_assignments(pool: &SqlitePool, mission_id: &str) -> Result<
 }
 
 pub async fn list_assignments(pool: &SqlitePool, limit: i64) -> Result<Vec<Assignment>> {
-    list_assignments_page(pool, None, limit).await
+    list_assignments_page(pool, None, limit, StatusFilter::All).await
 }
 
 /// 交辦清單的一頁，新的在前。`before` = 上一頁最後一筆的 `(created_at, id)`。
@@ -1225,19 +1232,60 @@ pub async fn list_assignments_page(
     pool: &SqlitePool,
     before: Option<(&str, &str)>,
     limit: i64,
+    status: StatusFilter<'_>,
 ) -> Result<Vec<Assignment>> {
-    Ok(sqlx::query_as::<_, Assignment>(
+    Ok(sqlx::query_as::<_, Assignment>(&format!(
         "SELECT * FROM supervisor_assignments
-          WHERE supervisor_id=?1
+          WHERE supervisor_id=?1 {}
             AND (?2 IS NULL OR created_at < ?2 OR (created_at=?2 AND id < ?3))
           ORDER BY created_at DESC, id DESC LIMIT ?4",
-    )
+        status.sql()
+    ))
     .bind(SUPERVISOR_ID)
     .bind(before.map(|c| c.0))
     .bind(before.map(|c| c.1))
     .bind(limit)
     .fetch_all(pool)
     .await?)
+}
+
+/// 清單要不要在 **SQL 裡**先篩掉。呼叫端過濾的話，「只想看 6 筆未結案」得先把整張表搬回去
+/// 一頁一頁翻（issue #543）；而未結案的那幾筆天生是最舊的，翻頁成本正好落在最需要的答案上。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StatusFilter<'a> {
+    /// 不篩。
+    #[default]
+    All,
+    /// 還欠著的（`OPEN_STATES`）。
+    Open,
+    /// 剛好是這一個狀態。
+    One(&'a str),
+}
+
+impl StatusFilter<'_> {
+    /// 接在 `WHERE supervisor_id=?1` 後面的那一段。狀態字串**不從外面拼進 SQL**：
+    /// `One` 只收認得的狀態（見 [`StatusFilter::parse`]），拼進去的永遠是這個模組自己的常數。
+    fn sql(&self) -> String {
+        match self {
+            Self::All => String::new(),
+            Self::Open => format!("AND status IN ({})", sql_list(&OPEN_STATES)),
+            Self::One(s) => format!("AND status = '{s}'"),
+        }
+    }
+}
+
+impl<'a> StatusFilter<'a> {
+    /// `open`＝未結案那一組，其餘要剛好是一個認得的狀態；不認得的回 `None`（呼叫端回 400，
+    /// 不要靜靜地當成「沒有這個狀態的交辦」回一份空清單）。
+    pub fn parse(raw: &'a str) -> Option<Self> {
+        match raw.trim() {
+            "" => Some(Self::All),
+            "open" => Some(Self::Open),
+            // 狀態清單只准有一份：`assignment_state::ALL` 是那一份（`sources_for` 也掃它）。
+            // 在這裡抄第四份，改表的時候就會有人抄不走鐘。
+            s => super::assignment_state::ALL.iter().find(|k| **k == s).map(|k| Self::One(k)),
+        }
+    }
 }
 
 /// 最近 `limit` 筆，**加上**掉在那一頁外面的未結案交辦。

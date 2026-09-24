@@ -651,23 +651,34 @@ def cmd_assign(client: Client, cfg: dict, args) -> object:
 OPEN_STATUSES = ("queued", "delivered", "unknown", "awaiting_review", "blocked", "quota_blocked")
 # 一次跟 daemon 要幾筆，以及最多翻幾頁（避免壞掉的游標把這裡變成無窮迴圈）。
 ASSIGNMENT_PAGE = 200
-MAX_ASSIGNMENT_PAGES = 50
 
 
-def _all_assignments(client: Client) -> tuple[list, bool]:
-    """翻完整份交辦清單。回 `(items, complete)`。
+def _all_assignments(client: Client, status: str = "") -> tuple[list, bool]:
+    """翻完整份（或 `status` 那一份）交辦清單。回 `(items, complete)`。
 
-    過濾（`--open`／`--status`／`--id` 的退路）一定要對**全部**做：daemon 的清單預設只回最新
-    一頁，而卡最久的那幾筆天生活得比一頁久——`blocked` 的定義就是「還在等，保持未結案」
-    （issue #515：正式機上 6 筆未結案有 3 筆在頁外，`--open` 一筆都看不到它們）。
+    過濾一定要對**全部**做：daemon 的清單一頁只有 200 筆，而卡最久的那幾筆天生活得比一頁久
+    ——`blocked` 的定義就是「還在等，保持未結案」（issue #515：正式機上 6 筆未結案有 3 筆
+    在頁外，`--open` 一筆都看不到它們）。
 
-    `complete=False` = 沒撈完，而且**不知道漏了什麼**：舊 daemon 不回 `has_more`（沒有分頁，
-    只有那一頁）、或翻頁翻到上限。呼叫端要把這件事講出來，不要把半份清單當成全部。
+    所以 `status` 要**送到 daemon 去**（issue #543）：為了 6 筆未結案把一千多筆搬回來一頁一頁
+    翻，成本正好落在最需要的那個答案上。舊 daemon 忽略這個參數也沒關係——呼叫端那份過濾照跑，
+    只是要多搬幾頁。
+
+    沒有頁數上限：上限等於把「撈得完」換成「看起來像撈完了」，而那正是 #515 要修掉的症狀
+    （issue #543 量到兩萬筆時 50 頁只看得到一萬筆）。防無窮迴圈靠的是游標**必須往前走**：
+    沒動就停，而不是數頁數。
+
+    `complete=False` = 沒撈完，而且**不知道漏了什麼**：舊 daemon 不回 `has_more`（沒有游標可
+    以翻）、游標壞掉或原地打轉。呼叫端要把這件事講出來，不要把半份清單當成全部。
     """
     items: list = []
     cursor = None
-    for _ in range(MAX_ASSIGNMENT_PAGES):
-        page = client.get("/api/supervisor/assignments", {"before": cursor, "limit": ASSIGNMENT_PAGE})
+    seen: set[str] = set()
+    while True:
+        page = client.get(
+            "/api/supervisor/assignments",
+            {"before": cursor, "limit": ASSIGNMENT_PAGE, "status": status},
+        )
         if not isinstance(page, dict):
             return items, False
         items.extend(a for a in page.get("assignments") or [] if isinstance(a, dict))
@@ -677,16 +688,35 @@ def _all_assignments(client: Client) -> tuple[list, bool]:
         if not page.get("has_more"):
             return items, True
         cursor = page.get("next_cursor")
-        if not isinstance(cursor, str) or not cursor:
+        if not isinstance(cursor, str) or not cursor or cursor in seen:
+            # 游標沒往前走：再問一次只會拿到同一頁。停下來並說自己沒撈完。
             return items, False
-    return items, False
+        seen.add(cursor)
+
+
+def _server_status(args) -> str:
+    """交給 daemon 的 `?status=`。**下面那些客戶端過濾照舊全部留著**：舊 daemon 忽略這個參數，
+    而少一道就會變成「舊 daemon 上 --status 突然失效」。
+
+    `--id` 要掃全部，所以不篩。`--open`／`--awaiting-review` 各自對應一種；兩個一起給時送
+    `open`（比較寬的那個），剩下的交給客戶端那層收。
+    """
+    if getattr(args, "id", None):
+        return ""
+    if getattr(args, "status", None):
+        return args.status
+    if getattr(args, "open", False):
+        return "open"
+    if getattr(args, "awaiting_review", False):
+        return "awaiting_review"
+    return ""
 
 
 def cmd_assignments(client: Client, cfg: dict, args) -> object:
     # 有過濾條件就一定要翻完：只看第一頁的過濾結果會把頁外的未結案講成「沒有」。
     filtered = bool(args.id or args.status or args.open or args.awaiting_review)
     if filtered or args.all:
-        items, complete = _all_assignments(client)
+        items, complete = _all_assignments(client, _server_status(args))
     else:
         out = client.get("/api/supervisor/assignments")
         if not isinstance(out, dict):
