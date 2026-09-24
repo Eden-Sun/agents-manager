@@ -61,11 +61,14 @@ pub struct Thresholds {
     /// issue #421：核准開著多久沒人裁示才算卡住。不從 config 讀（使用者定的是固定 30 分鐘），
     /// 放在這裡只是為了測試能換一個小值。
     pub approval_stalled_secs: i64,
+    /// issue #472：`roles::classify` 連續失敗幾拍才開 incident。同上，放這裡是為了測試能換小值。
+    pub classify_failures: u32,
 }
 
 impl Thresholds {
     pub fn from_cfg(cfg: &crate::config::SupervisorCfg) -> Self {
         Self {
+            classify_failures: CLASSIFY_FAILURE_LIMIT,
             host_disconnected_secs: cfg.host_disconnected_secs as i64,
             bot_stopped_secs: cfg.bot_stopped_secs as i64,
             assignment_stalled_secs: cfg.assignment_stalled_secs as i64,
@@ -450,6 +453,27 @@ pub async fn observe(app: &Arc<App>, thresholds: &Thresholds) -> Probed {
         }
     }
 
+    // #472：分類器自己壞掉。這不是某個資源故障，是 daemon 的一段路不通——
+    // 而它不通的後果是「新進 inbox 事件分不到角色，對兩個通知者同時隱形」，
+    // 沒有任何其他探針會發現（那些事件根本沒被選中，所以連 `notify_exhausted` 都不會觸發）。
+    // 計數在 `App`（記憶體、重啟重算，同 SPEC §18.9 的原則），tick 每拍更新。
+    {
+        let failures = app.classify_failures.load(std::sync::atomic::Ordering::Relaxed);
+        if failures >= thresholds.classify_failures {
+            out.push(Observation {
+                kind: CLASSIFY_FAILING_KIND.into(),
+                resource: "inbox".into(),
+                // critical：期間所有新事件都送不出去，而使用者入口看起來是好的。
+                severity: "critical".into(),
+                detail: json!({
+                    "consecutive_failures": failures,
+                    "action": "看 daemon.log 裡「roles::classify 失敗」那幾行的 error；分類不通時 bot 申請、核准與 mission 事件都不會被送出",
+                })
+                .to_string(),
+            });
+        }
+    }
+
     probed
 }
 
@@ -459,6 +483,13 @@ pub async fn observe(app: &Arc<App>, thresholds: &Thresholds) -> Probed {
 /// 時故障的是巡檢不是協調者，`reason="notify_stalled"` 時也根本不是登入問題，跟 `detail.reason` 自相矛盾。
 /// 故障對象看 `resource`、原因看 `detail.reason`，kind 只說「有個角色 bot 不能用」。
 /// 舊名的既有列在 `store::migrate` 改寫過來，免得留下觀測不到、因此永遠關不掉的孤兒。
+/// #472：`roles::classify` 連續失敗這麼多拍就開 incident。tick 是 10 秒一拍，
+/// 3 拍＝約 30 秒：撐得過一次暫時性的 DB 錯誤，又不會讓「新事件全部送不出去」躺很久。
+pub const CLASSIFY_FAILURE_LIMIT: u32 = 3;
+
+/// #472 的 incident 種類。resource 是固定字串：這是 daemon 自己那一支分類器，全機只有一個。
+pub const CLASSIFY_FAILING_KIND: &str = "inbox_classify_failing";
+
 pub const ROLE_UNAVAILABLE_KIND: &str = "role_unavailable";
 /// 改名前的 kind（issue #459 的遷移用）。
 pub const ROLE_UNAVAILABLE_KIND_LEGACY: &str = "responder_needs_login";
@@ -482,6 +513,10 @@ fn notifiable(kind: &str, resource: &str, responder_configured: bool) -> bool {
         // #459：壞掉的是巡檢自己時，唯一收得到的是協調者（`roles::route` 會把它送過去）。
         // 沒有協調者就沒有第二條路：留在 UI 與 `system_health` 上，不要推進一個已知收不到的佇列。
         ROLE_UNAVAILABLE_KIND => resource != super::roles::Role::Patrol.as_str() || responder_configured,
+        // #472：壞掉的**就是分類本身**。推一則 inbox 事件進去，那一則同樣會停在
+        // `role IS NULL`、同樣沒有人收得到——等於用壞掉的那條路去通報那條路壞了
+        // （跟 `notify_exhausted` 不推給巡檢是同一個理由）。留在 UI 與 `system_health` 上。
+        CLASSIFY_FAILING_KIND => false,
         _ => true,
     }
 }
@@ -649,7 +684,62 @@ mod tests {
             assignment_stalled_secs: 7200,
             notify_max_attempts: 5,
             approval_stalled_secs: 1800,
+            classify_failures: CLASSIFY_FAILURE_LIMIT,
         }
+    }
+
+    /// #472：`observe` 讀的是 `App` 上那個計數器，所以「連續幾拍」這件事要真的走一遍。
+    /// 門檻以下不開票（一次抖動不驚動人），到門檻才開，成功歸零之後下一拍就該消失。
+    #[tokio::test]
+    async fn the_classifier_incident_follows_the_consecutive_counter() {
+        use std::sync::atomic::Ordering;
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let t = thresholds();
+
+        let has = |p: &Probed| p.seen.iter().any(|o| o.kind == CLASSIFY_FAILING_KIND);
+
+        // 沒失敗過：不該有。
+        assert!(!has(&observe(&app, &t).await));
+
+        // 差一次：還不到門檻。
+        app.classify_failures.store(CLASSIFY_FAILURE_LIMIT - 1, Ordering::Relaxed);
+        assert!(!has(&observe(&app, &t).await), "門檻以下不開票");
+
+        // 到門檻：開，而且 detail 要帶得出次數（查事故的人要看得到連續幾拍）。
+        app.classify_failures.store(CLASSIFY_FAILURE_LIMIT, Ordering::Relaxed);
+        let probed = observe(&app, &t).await;
+        let o = probed.seen.iter().find(|o| o.kind == CLASSIFY_FAILING_KIND).expect("到門檻要開");
+        assert_eq!(o.severity, "critical", "期間所有新事件都送不出去");
+        assert!(o.detail.contains("consecutive_failures"), "{}", o.detail);
+
+        // 成功一次歸零：下一拍就不該再看到。
+        app.classify_failures.store(0, Ordering::Relaxed);
+        assert!(!has(&observe(&app, &t).await), "恢復之後不該還在");
+    }
+
+    /// #472：分類器連續失敗到門檻才開 incident，而且**不推 inbox**——
+    /// 壞掉的就是分類那條路，推進去那一則同樣會停在 `role IS NULL` 沒人收得到。
+    #[test]
+    fn a_failing_classifier_opens_an_incident_that_never_goes_through_the_inbox() {
+        // 門檻以下不開：撐得過一次暫時性的 DB 錯誤。
+        assert!(CLASSIFY_FAILURE_LIMIT >= 2, "至少要撐過一拍，否則一次抖動就開票");
+
+        let mut d = Detector::default();
+        let t = thresholds();
+        let seen = [obs(CLASSIFY_FAILING_KIND, "inbox")];
+        // 這一類沒有時間門檻（次數已經是門檻），所以看到就開。
+        assert_eq!(d.plan(&seen, &[], &[], &t, 1000).open.len(), 1);
+
+        // 不論有沒有協調者都不入 inbox。
+        assert!(!notifiable(CLASSIFY_FAILING_KIND, "inbox", true));
+        assert!(!notifiable(CLASSIFY_FAILING_KIND, "inbox", false));
+        // 對照：一般的種類照舊會推。
+        assert!(notifiable("host_disconnected", "mac2", true));
+
+        // 恢復就自動關。
+        let open = vec![(CLASSIFY_FAILING_KIND.to_string(), "inbox".to_string())];
+        assert_eq!(d.plan(&[], &open, &[], &t, 9000).resolve, open);
     }
 
     /// A host that drops for ten seconds during a reconnect is not an outage. One that stays
