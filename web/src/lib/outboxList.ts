@@ -1,5 +1,6 @@
 /** 檔案暫存區裡「bot 給你的檔案」那一段的純邏輯：怎麼講一個檔案、還剩多久、怎麼講「沒得列」。 */
 import type { OutboxFile } from '../api'
+import { ApiError } from '../api/types'
 import type { Turn } from '../api/types'
 
 /** `18 KB` / `1.1 MB`：一行要看得懂，個位數才給小數。跟 MemBadge 的 `humanBytes` 不同單位詞：
@@ -26,6 +27,29 @@ export function remainingNow(file: OutboxFile, fetchedAt: number, now = Date.now
 export function remainingLabel(secs: number): string {
   if (!Number.isFinite(secs) || secs <= 0) return '即將清除'
   return `剩 ${Math.ceil(secs / 60)} 分鐘`
+}
+
+/**
+ * 下載失敗要講哪一句，以及這一列是不是已經沒了（issue #547）。
+ *
+ * 404 ＝ 檔案被清掉了：outbox 的檔案放進去一小時後由 AGM 的 gc 掃掉（每 10 分鐘一輪），而清單只在換 bot、
+ * 按 ↻ 或回合結束時重讀，所以過期的那幾列會一直留在畫面上。`gone` 讓呼叫端當場把它拿掉並重讀一次。
+ * 其餘的把 daemon 的原因講成人話——以前這裡只拿得到 `res.statusText`（「Not Found」「Conflict」）。
+ */
+export function downloadFailure(name: string, e: unknown): { text: string; gone: boolean } {
+  const plain = (text: string) => ({ text, gone: false })
+  if (!(e instanceof ApiError)) return plain(`下載「${name}」失敗：${e instanceof Error ? e.message : String(e)}`)
+  if (e.status === 404) {
+    return { text: `「${name}」已經不在了：outbox 的檔案放進去一小時後會自動清掉。`, gone: true }
+  }
+  const reason = String(e.body.reason ?? e.body.error ?? '')
+  if (reason === 'file_too_large') {
+    const big = typeof e.body.size === 'number' ? `（${fileSize(e.body.size)}）` : ''
+    const max = typeof e.body.max === 'number' ? fileSize(e.body.max) : '下載上限'
+    return plain(`「${name}」太大${big}，超過 ${max}，這裡下載不了——請 bot 換個小一點的，或到那台機器上拿。`)
+  }
+  if (reason === 'outbox_remote') return plain(`「${name}」在遠端主機上，不在這台機器，下載不了。`)
+  return plain(`下載「${name}」失敗：${e.message}（HTTP ${e.status}）`)
 }
 
 /** 讀不到清單（網路、500、404）：畫面上的 `reason`，不是 daemon 回的（#234）。 */
