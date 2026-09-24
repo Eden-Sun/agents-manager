@@ -1195,6 +1195,12 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run
    （清單是拿鎖前讀的，用舊的 idle 蓋掉已 working 的 run，真正的 `working→idle` 就不會觸發備援與排隊 prompt）。找不到 → `exited`。
 3. 清單上的 name 對得到某 bot 但 DB 無 active Run → 建 Run（`running`、`adopted=1`），沿用同一 Conversation。
 4. orphan pane 回收：`exited/stopped` Run 的 `pane_id` 仍在 snapshot 且沒有 agent → `pane.close`。
+   **但 `panes` 已經記著這顆、而且它的 `first_seen` 晚於那個 Run 的 `ended_at` 就不關**（issue #469）：herdr 重開後
+   pane id 會被重用，而 `runs.pane_id` 結束後不清、`runs` 也沒有保留期，所以每一顆歷史 Run 的 id 都是候選——
+   光比對 id 的話，使用者自己開的 shell 拿到其中一個就會被無條件關掉（這條路不是 `panes` GC，§6.5e 的
+   `user_pane`／`scratch`／`recent_output` 三條守門一條都不適用）。真孤兒在同一輪裡是**先關、後掃**
+   （這一步排在 `panes` 掃描之前），關的時候還沒有 `panes` 列；有列而且 `first_seen` 比較晚的，是熬過至少一輪的
+   另一顆 pane，交給 §6.5e 的 GC 依它的守門處理。
 5. 重建各 active Run 的狀態訂閱。
 
 ### 6.5.2 計畫中的 herdr server 重啟（AGM 2026-09-17，herdr 0.9.0 升級）
@@ -1676,6 +1682,12 @@ listen port 只在本機算（pane 行程樹的 pid 對 `lsof -nP -iTCP -sTCP:LI
   佇列順序＝`(since, holder)` 字典序，`since` 是這個 holder**第一次**排進 waiting 的時間（重試不會歸零）；
   `since` 相同（毫秒級撞期）時比 `holder` 當穩定的第二排序鍵。跟 `cargo-slot.sh` 的號碼牌是同一個道理，只是這裡
   拿 `build_slots.since` 當號碼牌，不必另開一張表——`acquire` 額滿或前面有人排隊都會先確保自己有一列 `waiting`。
+- **`holder` 只能是自己的**（issue #460）：`holder` 是呼叫端自己填的字串，證明不了身分。帶 bot 身分的 `acquire`
+  若指到一列 `bot_id` 不是自己的 holder，回 `403 {"reason":"holder_bot_mismatch"}`、什麼都不動——否則任何驗得過的
+  bot 只要重複別人的 holder，就能從冪等分支拿回**它現在的 token**（進而 `release` 掉它的名額，讓對方的 shim 判定
+  租約失效、把整棵建置行程樹殺掉），或是覆寫它排隊中的那一列。帶 UI token 的人工／管理呼叫維持明講的 bypass。
+  shim 收到這個 403 比照 `unauthorized` 當場 fail closed（77），不等滿重試：`<agent 名>:<pid>` 撞到的是還沒過期的
+  舊列，等下去也只是等那一列的 TTL。
 - **名額是 TTL 租的，不是等建置跑完才還**：拿到之後 shim 背景續約（間隔取 TTL 的 1/3），跑多久都行，只要續約還在動；
   停止續約（持有者掛了、pane 被砍、行程被殺）超過 TTL 就被下一次 acquire 或背景 sweep 收回——不用去猜「這個 pid 還活著嗎」
   （這個 codebase 本來就沒有 PID liveness 檢查，見 `pane_identity.rs` 讀的是帳號不是死活；TTL 到期是唯一的死活判準）。
