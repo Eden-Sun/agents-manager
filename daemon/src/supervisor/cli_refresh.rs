@@ -36,6 +36,43 @@ pub enum Outcome {
     Refreshed { old_hash: Option<String>, new_hash: String, backup: Option<String> },
 }
 
+/// 原子地裝一個**可執行檔**：暫存檔 → `fchmod` → `rename`（issue #520）。
+///
+/// `bin/agm` 是一直有人在跑的東西（`agm.py`，所有 kick 每 5～30 分鐘 exec 一次）。`std::fs::write`
+/// 是 `O_TRUNC` 之後才寫，中間那一段別人讀到的是空的或半截——python 啟動時整個讀檔，剛好落在那裡
+/// 就是 `SyntaxError`。`rename` 在同一個檔案系統上是原子的，所以讀的人永遠只會看到**完整的舊版或
+/// 完整的新版**，不會有中間狀態。
+///
+/// 權限用 **fd 上的 `fchmod`**（`File::set_permissions`）而不是對路徑 `chmod`：對路徑做的話，
+/// 「建檔」跟「補上 +x」之間有一段檔案存在但還不能執行的窗口（新檔是 umask 的 0644）。先在暫存檔上
+/// 設好、再 `rename` 進去，那個檔一出現在最終路徑就已經是 0755。
+///
+/// 暫存檔名帶 pid ＋ 單調遞增的序號：同一個行程裡兩個呼叫（`deploy_files` 與 `refresh_cli`）可能同時
+/// 寫同一個目錄，只用 pid 會互相蓋掉對方的暫存檔。
+pub fn install_executable(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    let dir = path
+        .parent()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{} 沒有上層目錄", path.display())))?;
+    let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("agm");
+    let tmp = dir.join(format!(".{name}.tmp-{}-{}", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed)));
+    let written = (|| {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(contents)?;
+        f.sync_all()?;
+        // fd 上設權限：rename 進去的那一刻就已經是 0755，沒有「存在但不能執行」的窗口。
+        f.set_permissions(std::fs::Permissions::from_mode(0o755))?;
+        std::fs::rename(&tmp, path)
+    })();
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
+}
+
 /// 比對 `<dir>/bin/agm` 與 `embedded`，不同就備份舊檔（同雜湊已備份過不重複）再原子寫入（tmp＋rename，0755）。
 pub fn refresh_cli(dir: &Path, embedded: &str) -> std::io::Result<Outcome> {
     let bin_dir = dir.join("bin");
@@ -61,18 +98,7 @@ pub fn refresh_cli(dir: &Path, embedded: &str) -> std::io::Result<Outcome> {
         }
         backup = Some(name);
     }
-    let tmp = bin_dir.join(format!(".agm.tmp-{}", std::process::id()));
-    let written = (|| {
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(embedded.as_bytes())?;
-        f.sync_all()?;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
-        std::fs::rename(&tmp, &bin)
-    })();
-    if let Err(e) = written {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
-    }
+    install_executable(&bin, embedded.as_bytes())?;
     Ok(Outcome::Refreshed { old_hash, new_hash: short_hash(embedded.as_bytes()), backup })
 }
 
@@ -134,6 +160,88 @@ async fn refresh_with(app: &Arc<App>, embedded: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// issue #520：`bin/agm` 是一直有人在 exec 的 python 腳本。以前 `deploy_files` 用 `fs::write`
+    /// （`O_TRUNC` 之後才寫），讀的人會看到空的或半截。這條真的開一個讀者執行緒一直讀，一邊反覆換版：
+    /// **每一次讀到的內容都必須是完整的舊版或完整的新版**，不能有第三種。
+    #[test]
+    fn a_reader_only_ever_sees_a_whole_0755_executable() {
+        let dir = tmpdir();
+        let bin = dir.join("agm");
+        // 夠大才看得出截斷：小檔案有機會在一次 write 裡寫完，測不到那個窗口。
+        let old: String = "# old\n".repeat(20_000);
+        let new: String = "# new\n".repeat(20_000);
+        install_executable(&bin, old.as_bytes()).unwrap();
+
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let reader = {
+            let (bin, stop, seen) = (bin.clone(), stop.clone(), seen.clone());
+            let (old, new) = (old.clone(), new.clone());
+            std::thread::spawn(move || {
+                let mut reads = 0u64;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    // 權限跟內容一起看：檔案只要出現在最終路徑，就該已經是 0755。
+                    // 對路徑 chmod 的寫法在「建檔」與「補 +x」之間會有一瞬是 umask 的 0644。
+                    if let Ok(md) = std::fs::metadata(&bin) {
+                        let mode = md.permissions().mode() & 0o777;
+                        if mode != 0o755 {
+                            seen.lock().unwrap().push(format!("權限 {mode:o}"));
+                        }
+                    }
+                    if let Ok(got) = std::fs::read_to_string(&bin) {
+                        reads += 1;
+                        // 只記「不是舊也不是新」的那種，記字數就夠指認是不是半截。
+                        if got != *"" && got.as_str() != old.as_str() && got.as_str() != new.as_str() {
+                            seen.lock().unwrap().push(format!("{} 位元組", got.len()));
+                        }
+                    }
+                }
+                reads
+            })
+        };
+        for i in 0..60 {
+            let body = if i % 2 == 0 { &new } else { &old };
+            // 每隔幾輪先刪掉：這樣才會走到「從無到有建檔」那條，權限窗口只在那裡出現。
+            if i % 10 == 0 {
+                let _ = std::fs::remove_file(&bin);
+            }
+            install_executable(&bin, body.as_bytes()).unwrap();
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let reads = reader.join().unwrap();
+
+        let torn = seen.lock().unwrap().clone();
+        assert!(torn.is_empty(), "讀到半截的內容、或權限不是 0755 的瞬間：{torn:?}");
+        assert!(reads > 0, "讀者一次都沒讀到，這條沒有真的驗到東西");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// issue #520：以前是 `fs::write` 建檔（umask，通常 0644）之後才對**路徑** chmod 0755，
+    /// 中間那一瞬檔案已經在那裡但還不能執行。`fchmod` 在暫存檔上設好再 rename，
+    /// 所以那個檔一出現在最終路徑就是 0755——連第一次建立都沒有例外。
+    #[test]
+    fn the_executable_is_0755_the_moment_it_appears() {
+        let dir = tmpdir();
+        let bin = dir.join("agm");
+        assert!(!bin.exists(), "前提：這是第一次建立");
+        install_executable(&bin, b"#!/usr/bin/env python3\n").unwrap();
+        let mode = std::fs::metadata(&bin).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755, "建出來就該是 0755，實際 {mode:o}");
+
+        // 覆寫既有檔也要維持 0755：先把它改成 0644，再裝一次。
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o644)).unwrap();
+        install_executable(&bin, b"#!/usr/bin/env python3\nprint(1)\n").unwrap();
+        let mode = std::fs::metadata(&bin).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755, "覆寫之後也要是 0755，實際 {mode:o}");
+
+        // 暫存檔不留下。
+        let strays: Vec<String> = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".tmp-")).collect();
+        assert!(strays.is_empty(), "暫存檔沒清掉：{strays:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn tmpdir() -> PathBuf {
         let d = std::env::temp_dir().join(format!("am-cli-refresh-{}", crate::db::ulid()));

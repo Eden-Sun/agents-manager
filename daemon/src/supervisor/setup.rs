@@ -151,13 +151,11 @@ pub fn deploy_files(app: &Arc<App>, bot_id: &str, responder_id: Option<&str>, pe
     if !dir.join("handoff.md").exists() {
         std::fs::write(dir.join("handoff.md"), "# AGM 管理摘要\n\n（尚未寫入。權威紀錄在 AG Man 資料庫。）\n")?;
     }
+    // 原子寫（issue #520）：這支 CLI 一直有人在跑（所有 kick 每 5～30 分鐘 exec 一次），
+    // `fs::write` 的 `O_TRUNC` 窗口會讓它們讀到半截的 python。跟 `cli_refresh` 用同一個 helper，
+    // 免得同一個檔兩條路兩種寫法（這正是 #520 的形狀）。
     let bin = dir.join("bin").join("agm");
-    std::fs::write(&bin, AGM_CLI)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))?;
-    }
+    super::cli_refresh::install_executable(&bin, AGM_CLI.as_bytes())?;
     Ok(Deployed { cwd: dir.to_string_lossy().to_string(), agm_cli: "deployed".into() })
 }
 
