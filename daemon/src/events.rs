@@ -395,13 +395,18 @@ pub async fn unwatch_pane_on_session(app: &Arc<App>, host: &str, session: &str, 
     if let Some(h) = watchers.remove(&key) {
         h.abort();
     }
+    drop(watchers);
+    forget_pane_status_state(&key);
 }
 
 pub(crate) async fn handle_status(app: &Arc<App>, host: &str, session: &str, ev: &crate::herdr::Event) {
     handle_status_try(app, host, session, ev, 0, None).await
 }
 
-/// 同一個 pane 最新的狀態事件是第幾則：讀不到 run 而延後重放的那一則，只在它之後沒有更新的事件時才算數（#192）。
+/// 這個 pane 最新那一則狀態事件的編號：讀不到 run 而延後重放的那一則，只在它之後沒有更新的事件時才算數（#192）。
+///
+/// 編號取自一個**全域**遞增的計數器，不是每個 pane 各自從 1 數起——`forget_pane_status_state` 會在 pane 收掉時
+/// 清項目，號碼若會重來，同一個 pane 的新事件就可能撞上某個還在等的舊重放手上那個號碼（issue #521）。
 fn status_seq() -> &'static std::sync::Mutex<std::collections::HashMap<PaneKey, u64>> {
     static M: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<PaneKey, u64>>> = std::sync::OnceLock::new();
     M.get_or_init(Default::default)
@@ -438,9 +443,23 @@ fn replay_status_later(app: &Arc<App>, host: &str, session: &str, ev: &crate::he
 /// 同一個 pane 的狀態事件**一則一則寫**（#192 的補洞）：重放的那一則在「讀 run 到寫狀態」之間，較新的事件可能整則跑完，
 /// 重放這時再把舊狀態寫回去就把新的蓋掉（`blocked` 蓋掉已經回答的 `idle`）。所以讀 run、比對「我還是不是最新」、寫狀態
 /// 這一段在 pane 的鎖裡做；較新的事件一到就先登記序號（鎖之前），拿到鎖的重放看到序號變了就放棄。
-fn pane_status_lock(key: &PaneKey) -> Arc<tokio::sync::Mutex<()>> {
+fn pane_status_locks() -> &'static std::sync::Mutex<std::collections::HashMap<PaneKey, Arc<tokio::sync::Mutex<()>>>> {
     static M: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<PaneKey, Arc<tokio::sync::Mutex<()>>>>> = std::sync::OnceLock::new();
-    M.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner()).entry(key.clone()).or_default().clone()
+    M.get_or_init(Default::default)
+}
+
+fn pane_status_lock(key: &PaneKey) -> Arc<tokio::sync::Mutex<()>> {
+    pane_status_locks().lock().unwrap_or_else(|e| e.into_inner()).entry(key.clone()).or_default().clone()
+}
+
+/// pane 不再有 run（關掉、或 run 收掉）時把這兩張表的項目帶走：它們是行程級的，不清的話每個開過又收掉的
+/// pane 都留一格，長跑的 daemon 只增不減。拿走 `Arc` 的重放還握著自己那份，清掉只是不再有人查得到它。
+///
+/// 清得掉是因為 `status_seq` 的號碼取自**全域**計數器：同一個 pane 之後又有新 run 時，新的事件拿到的是更大的
+/// 號碼，不會跟某個還沒跑完的重放撞號（重放看到號碼對不上就放棄，這正是它要的）。
+fn forget_pane_status_state(key: &PaneKey) {
+    status_seq().lock().unwrap().remove(key);
+    pane_status_locks().lock().unwrap_or_else(|e| e.into_inner()).remove(key);
 }
 
 async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate::herdr::Event, attempt: usize, replay_seq: Option<u64>) {
@@ -463,10 +482,12 @@ async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate
     let seq = match replay_seq {
         Some(seq) => seq,
         None => {
-            let mut m = status_seq().lock().unwrap();
-            let n = m.entry(key.clone()).or_insert(0);
-            *n += 1;
-            *n
+            // 全域遞增，不是每個 pane 從 1 開始數：`forget_pane_status_state` 清掉項目之後，同一個 pane 的
+            // 新事件才不會拿到某個還在等的重放手上那個號碼（拿到就會把舊狀態當成「還是最新的」寫回去）。
+            static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let n = N.fetch_add(1, Ordering::Relaxed) + 1;
+            status_seq().lock().unwrap().insert(key.clone(), n);
+            n
         }
     };
     let pane_lock = pane_status_lock(&key);
@@ -767,12 +788,13 @@ mod tests {
         };
         let stored = || async { sqlx::query_scalar::<_, String>("SELECT agent_status FROM runs WHERE bot_id=?").bind(&bot.id).fetch_one(&app.db).await.unwrap() };
         let key: PaneKey = (LOCAL_HOST.to_string(), "test".to_string(), pane.clone());
-        // 舊的 blocked 事件是這個 pane 的第 1 則（讀不到 run、排了重放）。
+        // 舊的 blocked 事件登記的號碼（讀不到 run、排了重放）。編號是全域遞增的（#521），所以這裡只能
+        // 斷言「較新的事件把它換掉了」，不能假設下一個號碼就是 2。
         status_seq().lock().unwrap().insert(key.clone(), 1);
 
         let held = pane_status_lock(&key).lock_owned().await;
         let newer = { let (app, ev) = (app.clone(), ev("idle")); tokio::spawn(async move { handle_status(&app, LOCAL_HOST, "test", &ev).await }) };
-        let _ = crate::testing::eventually!(status_seq().lock().unwrap().get(&key) == Some(&2));
+        let _ = crate::testing::eventually!(status_seq().lock().unwrap().get(&key).is_some_and(|n| *n != 1));
         let replay = { let (app, ev) = (app.clone(), ev("blocked")); tokio::spawn(async move { handle_status_try(&app, LOCAL_HOST, "test", &ev, 1, Some(1)).await }) };
         tokio::task::yield_now().await;
         drop(held);
@@ -807,5 +829,31 @@ mod tests {
         // 重複的關閉事件是安全的。
         handle_global(&app, LOCAL_HOST, "test", &close_event(&pane)).await;
         assert_eq!(run_state(&app, &run).await, "exited");
+    }
+
+    /// issue #521：`status_seq` 與 `pane_status_lock` 是行程級的表，pane 收掉時要把項目帶走，
+    /// 否則每個開過又關掉的 pane 都留一格，長跑的 daemon 只增不減。
+    #[tokio::test]
+    async fn a_closed_pane_leaves_nothing_behind_in_the_process_wide_tables() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let bot = tt::claude_bot(&app, &e.project_id, "leaver").await;
+        let run = tt::fake_run(&app, &bot.id).await;
+        let pane = format!("pane-{}", bot.id);
+        let key: PaneKey = (LOCAL_HOST.to_string(), "test".to_string(), pane.clone());
+        plant_watcher(&app, &pane).await;
+
+        let ev = crate::herdr::Event {
+            event: "pane_agent_status_changed".into(),
+            data: json!({"pane_id": pane, "agent_status": "working"}),
+        };
+        handle_status(&app, LOCAL_HOST, "test", &ev).await;
+        assert!(status_seq().lock().unwrap().contains_key(&key), "狀態事件要先在表裡留下項目，這條測試才有意義");
+        assert!(pane_status_locks().lock().unwrap().contains_key(&key));
+
+        handle_global(&app, LOCAL_HOST, "test", &close_event(&pane)).await;
+        let _ = crate::testing::eventually!(run_state(&app, &run).await == "exited" && !watching(&app, &pane).await);
+        assert!(!status_seq().lock().unwrap().contains_key(&key), "pane 收掉之後 status_seq 不該還留著它");
+        assert!(!pane_status_locks().lock().unwrap().contains_key(&key), "pane 收掉之後 pane_status_lock 不該還留著它");
     }
 }
