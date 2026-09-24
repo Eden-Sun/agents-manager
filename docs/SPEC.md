@@ -255,6 +255,8 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   子 agent 給父 agent 的通知加註「只有使用者本人能核准，不要替它按」。herdr 通常自己判成 `blocked`；判成 `idle` 時由 10 秒巡邏補標，
   框消失（回答或自動拒絕）時照原值還回去（CAS，herdr 這段期間報過別的狀態就不動），插一則「框已關掉」、叫醒排隊的 flush。
   開著的框記在記憶體：daemon 重啟後最多重講一次通知。
+  指令從框上方的 `Bash command` 讀：多列或折行的指令每列前有 `│`；只佔一列時沒有 `│`，就取標題下第一列（下一列是說明）。
+  手動重現要用目標**整段都是**替換輸出的指令，例如 `rm -rf "$(echo tmpdir2)"`；`rm -rf "$(pwd)/tmpdir"` 在 2.1.281 不跳框、直接刪掉（2026-09-24 實測）。
 - **claude 更新通知**：自動更新後 claude 只在 pane 最底印 `✔ Update installed · Restart to update`，不是事件。`update_watch` 每 30 秒
   對 running 的 claude run `pane.read visible 80`，認到就寫 `runs.update_notice` 並推 `bot_status`，消失就清 NULL（讀不到畫面不清）；不限 idle。
   認法（`tui_prompts::update_notice`）：兩段字都要中，**且只看最下面 6 行非空白**（正文引用這兩句時會誤中）。存在 run 上：重啟（套用更新本身）後的新 run 本來就沒有。
