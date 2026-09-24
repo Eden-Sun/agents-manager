@@ -15,21 +15,83 @@ export interface Transport {
   session: () => Promise<string>
   /** `signal`：呼叫端自己決定要不要逾時／中止；transport 本身不設逾時。 */
   request: (method: HttpMethod, path: string, body?: unknown, signal?: AbortSignal) => Promise<unknown>
-  upload: (path: string, file: Blob) => Promise<unknown>
+  /** 附件上傳：要進度與中止，所以走 XHR（fetch 拿不到 request body 的進度）。 */
+  upload: (path: string, file: Blob, opts?: UploadOptions) => Promise<unknown>
   /** Attachments need the token header, which `<img src>` can't carry — so fetch and blob-URL. */
   blobUrl: (path: string) => Promise<string>
   openSocket: (handlers: SocketHandlers) => () => void
 }
 
-async function readBody(res: Response): Promise<unknown> {
-  if (res.status === 204) return null
-  const text = await res.text()
-  if (!text) return null
+export interface UploadOptions {
+  /** 中止：真的 `xhr.abort()`，promise 以 `AbortError` reject（呼叫端據此不當成失敗）。 */
+  signal?: AbortSignal
+  /** 已送出／總位元組（request body 的，瀏覽器量的）。 */
+  onProgress?: (loaded: number, total: number) => void
+}
+
+export function abortError(): DOMException {
+  return new DOMException('上傳已取消', 'AbortError')
+}
+
+export function isAbortError(e: unknown): boolean {
+  return typeof e === 'object' && e !== null && (e as { name?: unknown }).name === 'AbortError'
+}
+
+function parseText(status: number, text: string): unknown {
+  if (status === 204 || !text) return null
   try {
     return JSON.parse(text) as unknown
   } catch {
     return text
   }
+}
+
+/**
+ * `POST` 一個 Blob，回 HTTP 狀態與解析過的 body；網路斷掉 reject `Error`、中止 reject `AbortError`。
+ * 不設逾時（跟原本的 fetch 一樣）：50 MB 在慢網路上本來就要很久，卡住時卡片上有進度可看、× 會真的中止。
+ */
+export function xhrUpload(
+  url: string,
+  file: Blob,
+  token: string,
+  opts: UploadOptions = {},
+  create: () => XMLHttpRequest = () => new XMLHttpRequest(),
+): Promise<{ status: number; body: unknown }> {
+  const { signal, onProgress } = opts
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(abortError())
+      return
+    }
+    const xhr = create()
+    const onAbort = () => xhr.abort()
+    const settle = () => signal?.removeEventListener('abort', onAbort)
+    xhr.open('POST', url)
+    xhr.setRequestHeader('Accept', 'application/json')
+    if (token) xhr.setRequestHeader('X-AM-Token', token)
+    xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream')
+    if (onProgress) {
+      xhr.upload.onprogress = (e: ProgressEvent) => onProgress(e.loaded, e.lengthComputable ? e.total : file.size)
+    }
+    xhr.onload = () => {
+      settle()
+      resolve({ status: xhr.status, body: parseText(xhr.status, xhr.responseText) })
+    }
+    xhr.onerror = () => {
+      settle()
+      reject(new Error('連線中斷，上傳沒有完成'))
+    }
+    xhr.onabort = () => {
+      settle()
+      reject(abortError())
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+    xhr.send(file)
+  })
+}
+
+async function readBody(res: Response): Promise<unknown> {
+  return res.status === 204 ? null : parseText(res.status, await res.text())
 }
 
 export class HttpTransport implements Transport {
@@ -108,16 +170,12 @@ export class HttpTransport implements Transport {
     return parsed
   }
 
-  async upload(path: string, file: Blob): Promise<unknown> {
-    const headers: Record<string, string> = { Accept: 'application/json' }
-    if (this.token) headers['X-AM-Token'] = this.token
-    headers['Content-Type'] = file.type || 'application/octet-stream'
-    const res = await fetch(`/api${path}`, { method: 'POST', headers, body: file })
-    const parsed = await readBody(res)
-    if (!res.ok) {
+  async upload(path: string, file: Blob, opts?: UploadOptions): Promise<unknown> {
+    const { status, body: parsed } = await xhrUpload(`/api${path}`, file, this.token, opts)
+    if (status < 200 || status >= 300) {
       const errBody: ApiErrorBody =
         parsed && typeof parsed === 'object' ? (parsed as ApiErrorBody) : { reason: String(parsed ?? '') }
-      throw new ApiError(res.status, errBody, `POST ${path} failed (${res.status})`)
+      throw new ApiError(status, errBody, `POST ${path} failed (${status})`)
     }
     return parsed
   }

@@ -80,7 +80,8 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  max-width: 220px;
+  /* 第二行要放得下「12.6 / 48.3 MB · 25%」（issue #435）。 */
+  max-width: 240px;
   padding: 4px 26px 4px 4px;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
@@ -104,14 +105,77 @@
   white-space: nowrap;
 }
 
+/* 名字一行、狀態一行（壓縮中／已傳 / 總大小 · %／失敗原因＋重試），上傳中底下再一條細進度條。 */
+.attach-thumb-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
 .attach-thumb-state {
-  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
   font-size: 11px;
   color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .attach-thumb-state.err {
   color: var(--danger);
+}
+
+.attach-thumb-err {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mini-btn.attach-thumb-retry {
+  flex: none;
+  min-height: 18px;
+  padding: 0 6px;
+  font-size: 11px;
+}
+
+.attach-thumb-bar {
+  display: block;
+  width: 100%;
+  min-width: 96px;
+  height: 3px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--text) 12%, transparent);
+  overflow: hidden;
+}
+
+.attach-thumb-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 0.15s linear;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .attach-thumb-bar > span {
+    transition: none;
+  }
+}
+
+/* 手機的 × 是 44px 觸控目標（styles.css），右側留白跟著放大，才不會壓到進度文字與「重試」。 */
+@media (width <= 640px) {
+  .attach-thumb {
+    max-width: 280px;
+    padding-right: 46px;
+  }
+
+  .mini-btn.attach-thumb-retry {
+    min-height: 28px;
+    padding: 0 10px;
+  }
 }
 
 .attach-thumb.uploading img {

@@ -1,53 +1,13 @@
 import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react'
 import type { DragEvent } from 'react'
 import * as api from '../api'
-import type { Attachment } from '../api/types'
 import { compressible, compressImage } from '../lib/imageCompress'
 import { MAX_BYTES, SHELF_MIME, shelfFilesFor } from '../store/shelf'
 import { useStore } from '../store/store'
+import { pendingReducer, runUpload } from './attachmentUpload'
+import type { Pending, UploadDeps } from './attachmentUpload'
 
-/** One file waiting to be sent: uploading, ready (has an id), or failed. */
-export interface Pending {
-  key: string
-  /** 名稱｜大小｜修改時間，擋重複用。 */
-  fp: string
-  name: string
-  /** 實際上傳的大小（圖片壓縮後的）。 */
-  size: number
-  /** 壓縮前的大小；沒壓（非圖片、GIF、壓了沒變小）就沒有。 */
-  originalSize?: number
-  /** An image is drawn as a thumbnail; anything else as an icon card. */
-  isImage: boolean
-  /** Local preview for an image; `''` for everything else (no blob held for nothing). */
-  previewUrl: string
-  id: string | null
-  error: string | null
-}
-
-type PendingAction =
-  | { type: 'add'; item: Pending }
-  | { type: 'compressed'; key: string; name: string; size: number }
-  | { type: 'uploaded'; key: string; id: string }
-  | { type: 'failed'; key: string; error: string }
-  | { type: 'remove'; key: string }
-  | { type: 'clear' }
-
-function pendingReducer(items: Pending[], action: PendingAction): Pending[] {
-  switch (action.type) {
-    case 'add':
-      return [...items, action.item]
-    case 'compressed':
-      return items.map((it) => (it.key === action.key ? { ...it, name: action.name, originalSize: it.size, size: action.size } : it))
-    case 'uploaded':
-      return items.map((it) => (it.key === action.key ? { ...it, id: action.id } : it))
-    case 'failed':
-      return items.map((it) => (it.key === action.key ? { ...it, error: action.error } : it))
-    case 'remove':
-      return items.filter((it) => it.key !== action.key)
-    case 'clear':
-      return []
-  }
-}
+export type { Pending } from './attachmentUpload'
 
 export function isImageFile(f: File): boolean {
   return f.type.startsWith('image/')
@@ -72,12 +32,30 @@ export function useAttachments(uploadTo: string | null, resetKey: string | null)
   const seen = useRef(new Set<string>())
   const urls = useRef(new Set<string>())
   const itemsRef = useRef<Pending[]>([])
+  /** 每張卡片正在跑的那一次上傳；× 移除／清空／換對話都要真的 abort（issue #435）。 */
+  const inflight = useRef(new Map<string, AbortController>())
+  /** 重試要傳的檔：`prepared` 表示已經壓過了，重試直接傳這份。 */
+  const sources = useRef(new Map<string, { file: File; prepared: boolean }>())
+
+  const abortOne = useCallback((key: string) => {
+    inflight.current.get(key)?.abort()
+    inflight.current.delete(key)
+    sources.current.delete(key)
+  }, [])
+
+  const abortAll = useCallback(() => {
+    for (const c of inflight.current.values()) c.abort()
+    inflight.current.clear()
+    sources.current.clear()
+  }, [])
+
   useEffect(() => {
     const held = urls.current
     return () => {
+      abortAll()
       for (const u of held) URL.revokeObjectURL(u)
     }
-  }, [])
+  }, [abortAll])
 
   const revokePreview = useCallback((previewUrl: string) => {
     if (!previewUrl) return
@@ -91,11 +69,33 @@ export function useAttachments(uploadTo: string | null, resetKey: string | null)
 
   // Attachments belong to the conversation, not necessarily the bot that received the upload.
   useLayoutEffect(() => {
+    abortAll()
     for (const it of itemsRef.current) revokePreview(it.previewUrl)
     // 指紋一起清，否則換回原對話時同一張會被誤判重複。
     seen.current.clear()
     dispatch({ type: 'clear' })
-  }, [revokePreview, resetKey])
+  }, [abortAll, revokePreview, resetKey])
+
+  const start = useCallback(
+    (to: string, key: string, file: File, compress: boolean) => {
+      const ctl = new AbortController()
+      inflight.current.set(key, ctl)
+      const deps: UploadDeps = {
+        compress: compressImage,
+        upload: (f, opts) => api.uploadAttachment(to, f, opts),
+        dispatch,
+        onPrepared: (f) => {
+          if (!ctl.signal.aborted) sources.current.set(key, { file: f, prepared: true })
+        },
+        onError: (name, msg) => notify('error', `「${name}」上傳失敗：${msg}`),
+        formatSize,
+      }
+      void runUpload(deps, key, file, compress, ctl.signal).finally(() => {
+        if (inflight.current.get(key) === ctl) inflight.current.delete(key)
+      })
+    },
+    [notify],
+  )
 
   const add = useCallback(
     (files: File[]) => {
@@ -111,52 +111,59 @@ export function useAttachments(uploadTo: string | null, resetKey: string | null)
         seq.current += 1
         const key = `a${seq.current}`
         // 圖片先壓再比上限（`lib/imageCompress.ts`）：手機原圖超過上限，壓完多半放得下。
-        if (file.size > MAX_BYTES && !compressible(file.type)) {
+        const compress = compressible(file.type)
+        if (file.size > MAX_BYTES && !compress) {
           notify('error', `「${file.name}」有 ${formatSize(file.size)}，超過 ${formatSize(MAX_BYTES)} 上限。`)
           continue
         }
         const isImage = isImageFile(file)
         const previewUrl = isImage ? URL.createObjectURL(file) : ''
         if (previewUrl) urls.current.add(previewUrl)
-        dispatch({ type: 'add', item: { key, fp, name: file.name || '檔案', size: file.size, isImage, previewUrl, id: null, error: null } })
-        void compressImage(file)
-          .then((out) => {
-            if (out.size > MAX_BYTES) throw new Error(`有 ${formatSize(out.size)}，超過 ${formatSize(MAX_BYTES)} 上限`)
-            if (out !== file) dispatch({ type: 'compressed', key, name: out.name, size: out.size })
-            return api.uploadAttachment(uploadTo, out)
-          })
-          .then((a: Attachment) => {
-            dispatch({ type: 'uploaded', key, id: a.id })
-          })
-          .catch((e: unknown) => {
-            const msg = e instanceof Error ? e.message : String(e)
-            dispatch({ type: 'failed', key, error: msg })
-            notify('error', `「${file.name}」上傳失敗：${msg}`)
-          })
+        const item: Pending = {
+          key, fp, name: file.name || '檔案', size: file.size, isImage, previewUrl,
+          compressing: compress, loaded: 0, id: null, error: null, retryable: true,
+        }
+        dispatch({ type: 'add', item })
+        sources.current.set(key, { file, prepared: !compress })
+        start(uploadTo, key, file, compress)
       }
     },
-    [notify, uploadTo],
+    [notify, start, uploadTo],
+  )
+
+  /** 失敗的卡片再傳一次：壓過的直接傳壓好的那份。 */
+  const retry = useCallback(
+    (key: string) => {
+      const src = sources.current.get(key)
+      const it = items.find((x) => x.key === key)
+      if (!uploadTo || !src || !it?.error || !it.retryable) return
+      dispatch({ type: 'retry', key })
+      start(uploadTo, key, src.file, !src.prepared)
+    },
+    [items, start, uploadTo],
   )
 
   const remove = useCallback((key: string) => {
+    abortOne(key)
     const removed = items.find((it) => it.key === key)
     if (removed) {
       revokePreview(removed.previewUrl)
       seen.current.delete(removed.fp)
     }
     dispatch({ type: 'remove', key })
-  }, [items, revokePreview])
+  }, [abortOne, items, revokePreview])
 
   const clear = useCallback(() => {
+    abortAll()
     for (const it of items) revokePreview(it.previewUrl)
     seen.current.clear()
     dispatch({ type: 'clear' })
-  }, [items, revokePreview])
+  }, [abortAll, items, revokePreview])
 
   const ids = items.map((it) => it.id).filter((id): id is string => Boolean(id))
   const uploading = items.some((it) => !it.id && !it.error)
 
-  return { items, add, remove, clear, ids, uploading }
+  return { items, add, remove, retry, clear, ids, uploading }
 }
 
 /** Drop target for OS files and shelf drags (key only; the shelf never uploads, so bytes go to the bot dropped on). */

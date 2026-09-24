@@ -544,3 +544,18 @@ daemon 對 AGM 的 bot（總管／角色本身、它們的 child、總管專案�
 「仍要刪除」才帶參數重送，成功後照常是帶「復原」的通知。判斷集中在 `lib/agmDelete.ts`，框是 `AgmDeleteConfirm`（掛在 App 根層，側欄 ⋯ 與 Bot 設定兩個入口共用）。
 不在第一個框就先問：前端不知道哪些 bot 算 AGM 的（那是 daemon 查 supervisor 表才知道的），照 409 走才不會兩邊規則分岔。
 ![桌機](screenshots/agm-delete-confirm/1-agm-confirm-1280.png) ![手機](screenshots/agm-delete-confirm/m1-agm-confirm-390.png)
+
+## 附件上傳的進度、中止與重試（2026-09-24，issue #435）
+
+使用者：「上傳中該要有 progress」——上限放寬到 50 MB 之後，卡片只寫「上傳中…」，傳很久也看不出還要多久、有沒有卡住。
+
+- **上傳走 XHR，不走 fetch**（`api/transport.ts::xhrUpload`）：fetch 拿不到 request body 的進度。token header、錯誤格式（非 2xx 照樣丟 `ApiError`）不變；
+  **不設逾時**（跟原本一樣）——慢網路上 50 MB 本來就要很久，卡住時卡片上看得到進度停住，× 會真的中止。
+- **卡片第二行**：壓縮中寫「壓縮中…」（圖片先在瀏覽器縮，`lib/imageCompress.ts`）；上傳中寫 `3.2 / 12.6 MB · 25%`（單位跟著總大小、百分比往下取整），
+  底下一條 3px 的 accent 細條。**文字是主體、條是輔助**，不靠顏色；條是 `role="progressbar"` 帶 `aria-valuenow`／`aria-valuetext`，沒有 aria-live（每 50ms 念一次是噪音，失敗另有通知）。
+- **× 是真的中止**：移除、清空、換對話、元件卸載都 `abort()` 那一次上傳；使用者自己拿掉的不算失敗，不記錯、不跳通知。
+- **失敗**：卡片紅框、寫「失敗：原因」（全文在 tooltip）＋「重試」；壓過的重試直接傳壓好的那份。壓完仍超過上限的不給重試（再傳一次也一樣）。
+- 送出鍵照舊：還有卡片在壓縮／上傳就擋著（「上傳中…」）；失敗的卡片不擋，但送出時不會帶上它。
+- 手機的 × 是 44px 觸控目標，卡片右側留白跟著放大、重試鍵 28px 高，才不會跟 × 疊在一起。
+- mock 模式下檔名帶 `stall`（停在 25%）、`fail`（傳到 40% 回 502）、`slow` 可以重現這幾種畫面。
+  ![桌機上傳中](screenshots/upload-progress/desktop-uploading.png) ![桌機失敗](screenshots/upload-progress/desktop-failed.png) ![手機上傳中](screenshots/upload-progress/phone-uploading.png) ![手機失敗](screenshots/upload-progress/phone-failed.png)

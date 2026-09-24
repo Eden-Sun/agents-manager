@@ -436,7 +436,7 @@ function GroupComposer({
           )
         })}
       </div>
-      <AttachTray items={files.items} onRemove={files.remove} disabled={sending} />
+      <AttachTray items={files.items} onRemove={files.remove} onRetry={files.retry} disabled={sending} />
       <div className="composer-box">
         <AttachPicker onFiles={files.add} disabled={state.disabled || sending || toAgm} />
         {showPop ? (
