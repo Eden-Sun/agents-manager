@@ -24,6 +24,7 @@ import http.client
 import json
 import os
 import socket
+import subprocess
 import sys
 import urllib.error
 import urllib.parse
@@ -876,6 +877,95 @@ def cmd_ops_alert(client: Client, cfg: dict, args) -> object:
     return client.post("/api/supervisor/ops-alerts", body)
 
 
+# ---------------------------------------------------------------- ops-sync（issue #418）
+
+# 來源 → 安裝位置的對照表只寫在這一處；`--check` 讀的是 `--ref`（預設 origin/main）那一版。
+OPS_MANIFEST = "scripts/ops/install-manifest.tsv"
+DEFAULT_REPO = "~/project/agents-manager"
+
+
+class Exit:
+    """指令照常輸出 JSON，但用非 0 離開（例如 `ops-sync --check` 有落差）。"""
+
+    def __init__(self, out: object, code: int) -> None:
+        self.out = out
+        self.code = code
+
+
+def _git(repo: Path, *args: str) -> str:
+    r = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise AgmError("git_failed", f"git {' '.join(args)}：{r.stderr.strip()}", 2)
+    return r.stdout.strip()
+
+
+def _blob_at(repo: Path, rev: str, path: str) -> str | None:
+    r = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "-q", f"{rev}:{path}"], capture_output=True, text=True)
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def ops_sync_report(repo: Path, ref: str, agm_dir: Path) -> dict:
+    """唯讀比對已安裝的 ops 腳本與 repo：只跑 git 與讀檔，不改任何安裝檔。
+
+    四種落差分開報，嚴重度不同：`drift`（安裝檔不是 repo 任何一版＝有人直接改了安裝檔）、
+    `behind`（repo 有更新沒裝，附落後的 commit）、`missing`（對照表有、安裝端沒有）、
+    `extra`（`bin/` 裡有、對照表沒有——沒有版控的腳本）。
+    """
+    manifest = _git(repo, "show", f"{ref}:{OPS_MANIFEST}")
+    entries = []
+    for line in manifest.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if len(parts) != 2:
+            raise AgmError("bad_manifest", f"{OPS_MANIFEST} 這行看不懂（要「來源 安裝位置」兩欄）：{line}", 2)
+        entries.append((parts[0], parts[1]))
+    report: dict = {"ref": ref, "commit": _git(repo, "rev-parse", "--short", ref), "agm_dir": str(agm_dir),
+                    "ok": [], "behind": [], "drift": [], "missing": [], "extra": []}
+    for source, target in entries:
+        path = agm_dir / target
+        row: dict = {"source": source, "target": target}
+        if not path.is_file():
+            report["missing"].append(row)
+            continue
+        installed = _git(repo, "hash-object", str(path))
+        if installed == _blob_at(repo, ref, source):
+            report["ok"].append(row)
+            continue
+        found = next((c for c in _git(repo, "log", "--format=%H", ref, "--", source).split()
+                      if _blob_at(repo, c, source) == installed), None)
+        if found is None:
+            report["drift"].append(row)
+            continue
+        titles = _git(repo, "log", "--format=%h %s", f"{found}..{ref}", "--", source).splitlines()
+        row.update({"installed_commit": found[:8], "behind": len(titles), "commits": titles})
+        report["behind"].append(row)
+    # `agm` 本身由 daemon 部署（內嵌在 binary 裡），備份檔與快取不算。
+    listed = {t for _, t in entries}
+    bin_dir = agm_dir / "bin"
+    if bin_dir.is_dir():
+        for f in sorted(bin_dir.iterdir()):
+            rel = f"bin/{f.name}"
+            if f.is_file() and f.name != "agm" and ".bak" not in f.name and rel not in listed:
+                report["extra"].append({"target": rel})
+    report["in_sync"] = not any(report[k] for k in ("behind", "drift", "missing", "extra"))
+    return report
+
+
+def cmd_ops_sync(client: Client, cfg: dict, args) -> object:
+    repo = Path(args.repo or os.environ.get("AGM_REPO") or DEFAULT_REPO).expanduser()
+    report = ops_sync_report(repo, args.ref, runtime_dir(args.runtime_dir))
+    if report["in_sync"]:
+        return report
+    if args.alert:
+        counts = "、".join(f"{k} {len(report[k])}" for k in ("drift", "behind", "missing", "extra") if report[k])
+        names = ", ".join(r["target"] for k in ("drift", "behind", "missing", "extra") for r in report[k])
+        detail = f"已安裝的 ops 腳本跟 {args.ref}（{report['commit']}）不一致：{counts}（{names}）。`agm ops-sync --check` 看明細，照 scripts/ops/README.md 重新 install"
+        report["alert"] = client.post("/api/supervisor/ops-alerts", {"source": "ops-sync", "reason": "installed_out_of_sync", "detail": detail})
+    return Exit(report, 1)
+
+
 def cmd_release_triage(client: Client, cfg: dict, args) -> object:
     """上游新版分診（issue #204）：模型交回 verdict、查帳本、標記派出、重試 publish。
 
@@ -1322,6 +1412,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--detail", help="人看得懂的細節：要怎麼處理")
     s.set_defaults(func=cmd_ops_alert)
 
+    s = sub.add_parser("ops-sync", help="已安裝的 ops 腳本跟 repo 比對（唯讀；有落差 exit 1）")
+    s.add_argument("--check", action="store_true", required=True, help="只比對不安裝（目前唯一的模式）")
+    s.add_argument("--repo", help=f"repo 位置（預設 AGM_REPO，再退回 {DEFAULT_REPO}）")
+    s.add_argument("--ref", default="origin/main", help="跟哪一版比（預設 origin/main；要最新先 git fetch）")
+    s.add_argument("--alert", action="store_true", help="有落差時推一則 ops_alert 給巡檢（同 source+reason 每小時一則）")
+    s.set_defaults(func=cmd_ops_sync)
+
     s = sub.add_parser("release-triage", help="上游新版分診：submit（交回 verdict）/ show / dispatched / publish（issue #204）")
     s.add_argument("op", choices=["submit", "show", "dispatched", "publish"])
     s.add_argument("--file", help="submit：verdicts.json（{kind,version,verdicts,issues}）")
@@ -1416,9 +1513,12 @@ def main(argv: list[str] | None = None) -> int:
         json.dump({"error": "internal", "message": f"{type(e).__name__}: {e}"}, sys.stderr, ensure_ascii=False, indent=indent)
         sys.stderr.write("\n")
         return 1
+    code = 0
+    if isinstance(out, Exit):
+        out, code = out.out, out.code
     json.dump(out, sys.stdout, ensure_ascii=False, indent=indent, default=str)
     sys.stdout.write("\n")
-    return 0
+    return code
 
 
 if __name__ == "__main__":

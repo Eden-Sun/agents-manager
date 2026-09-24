@@ -1,0 +1,17 @@
+# 已安裝的 ops 檔對照表（issue #418）：「repo 來源」與「安裝位置（相對 AGM 目錄，
+# ~/.config/agents-manager/supervisor/AGM）」兩欄，空白分隔。`agm ops-sync --check` 讀這一份比對；
+# 新增／移除要安裝的檔就改這裡，照 README.md install。bin/agm 由 daemon 部署，不在這裡。
+scripts/ops/browser-gc-kick.sh      bin/browser-gc-kick.sh
+scripts/ops/ci-watch-kick.sh        bin/ci-watch-kick.sh
+scripts/ops/claude-release-kick.sh  bin/claude-release-kick.sh
+scripts/ops/daemon-update-kick.sh   bin/daemon-update-kick.sh
+scripts/ops/herdr-update-kick.sh    bin/herdr-update-kick.sh
+scripts/ops/herdr-lan-check.sh      bin/herdr-lan-check.sh
+scripts/ops/outbox-gc.sh            bin/outbox-gc.sh
+scripts/ops/pane-gc.sh              bin/pane-gc.sh
+scripts/ops/release-triage-kick.sh  bin/release-triage-kick.sh
+scripts/ops/browser-gc-task.md      browser-gc-task.md
+scripts/ops/ci-watch-task.md        ci-watch-task.md
+scripts/ops/claude-release-task.md  claude-release-task.md
+scripts/ops/daemon-update-task.md   daemon-update-task.md
+scripts/ops/release-triage-task.md  release-triage-task.md

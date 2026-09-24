@@ -6,6 +6,20 @@
 **這裡的檔案不會自動安裝。** daemon 只把 `bin/agm`（`scripts/agm.py`）部署到總管 cwd；
 這些 kick 腳本要不要裝、什麼時候裝，由 AGM 決定並在有窗口的時候執行。
 
+**裝了哪些、跟 repo 差多少**（issue #418）：要安裝的檔與位置只列在 `install-manifest.tsv`。
+`bin/agm ops-sync --check` 唯讀比對安裝端（AGM 目錄）與本機 repo 的 `origin/main`（要最新先 `git fetch`；
+`--repo` 預設 `AGM_REPO`，再退回 `~/project/agents-manager`），分四種報：
+
+| 種類 | 意思 |
+| --- | --- |
+| `drift` | 安裝檔不是 repo 任何一版——有人直接改了安裝檔，最嚴重 |
+| `behind` | repo 有更新沒裝；附安裝的是哪個 commit、落後的 commit 標題 |
+| `missing` | 對照表有、安裝端沒有 |
+| `extra` | `bin/` 裡有、對照表沒有（沒有版控的腳本；`agm` 與 `*.bak*` 不算） |
+
+一致 exit 0；有落差 exit 1，加 `--alert` 另推一則 `ops_alert`（`source=ops-sync`、`reason=installed_out_of_sync`，同一小時一則）。
+巡檢每天跑一次 `bin/agm ops-sync --check --alert` 就會被叫醒；它不會替你 install。
+
 ## daemon-update-kick.sh
 
 例行更新：正式 daemon 的 release binary 落後 `origin/main` 時，申請核准、取得 rebuild 租約，
