@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { emptyReason, fileSize, isPreviewableImage, lastSettledTurnKey, orderFiles, previewPlacement, readOutbox, remainingLabel, remainingNow } from './outboxList'
+import { downloadFailure, emptyReason, fileSize, isPreviewableImage, lastSettledTurnKey, orderFiles, previewPlacement, readOutbox, remainingLabel, remainingNow } from './outboxList'
+import { ApiError } from '../api/types'
 
 const file = (name: string, modified: number, remainingSecs = 3600) => ({ name, size: 1, modified, remainingSecs })
 
@@ -103,4 +104,20 @@ test('預覽框放在那一列左邊、夾在視窗內；左邊放不下改放�
   assert.deepEqual(previewPlacement({ left: 1250, top: 900, bottom: 960 }, box, vp), { left: 882, top: 692 })
   // 窄視窗（手機）：左邊不夠 → 放下方，左緣夾在視窗內
   assert.deepEqual(previewPlacement({ left: 100, top: 100, bottom: 150 }, box, { width: 390, height: 800 }), { left: 22, top: 158 })
+})
+
+test('下載失敗講人話：404 是「被清掉了」並要求呼叫端移除那一列（issue #547）', () => {
+  const gone = downloadFailure('shot.png', new ApiError(404, { error: 'not_found', what: 'file' }, 'GET … failed (404)'))
+  assert.equal(gone.gone, true)
+  assert.match(gone.text, /shot\.png.*不在了/)
+  assert.doesNotMatch(gone.text, /Not Found|404/)
+
+  const big = downloadFailure('dump.bin', new ApiError(409, { error: 'conflict', reason: 'file_too_large', size: 60 * 1024 ** 2, max: 50 * 1024 ** 2 }, 'x'))
+  assert.equal(big.gone, false)
+  assert.match(big.text, /60 MB.*50 MB/)
+
+  assert.match(downloadFailure('a.txt', new ApiError(409, { error: 'conflict', reason: 'outbox_remote', host: 'mini' }, 'x')).text, /遠端主機/)
+  // 認不出來的 reason 至少帶狀態碼；不是 ApiError 的照原樣。
+  assert.match(downloadFailure('a.txt', new ApiError(500, { error: 'upstream', message: '壞了' }, 'x')).text, /HTTP 500/)
+  assert.match(downloadFailure('a.txt', new Error('連線中斷')).text, /連線中斷/)
 })

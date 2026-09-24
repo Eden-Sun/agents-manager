@@ -183,7 +183,17 @@ export class HttpTransport implements Transport {
   async blobUrl(path: string): Promise<string> {
     const send = (tok: string) => fetch(`/api${path}`, { headers: tok ? { 'X-AM-Token': tok } : {} })
     const res = await this.withFreshToken(send, async (r) => r)
-    if (!res.ok) throw new ApiError(res.status, { reason: res.statusText }, `GET ${path} failed (${res.status})`)
+    if (!res.ok) {
+      // daemon 講的原因在 body 裡（`{error, reason, …}`）。以前只拿 `res.statusText`，畫面上就只剩
+      // 「Not Found」／「Conflict」（HTTP/2 連 statusText 都是空字串），連 `file_too_large` 帶的
+      // size／max 也一起丟掉（issue #547）。
+      const parsed = parseText(res.status, await res.text().catch(() => ''))
+      const body: ApiErrorBody =
+        parsed && typeof parsed === 'object'
+          ? (parsed as ApiErrorBody)
+          : { reason: String(parsed ?? '') || res.statusText }
+      throw new ApiError(res.status, body, `GET ${path} failed (${res.status})`)
+    }
     return URL.createObjectURL(await res.blob())
   }
 

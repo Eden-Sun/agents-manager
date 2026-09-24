@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import * as api from '../api'
 import type { OutboxFile } from '../api'
-import { emptyReason, fileSize, isPreviewableImage, lastSettledTurnKey, LOAD_FAILED, readOutbox, remainingLabel, remainingNow } from '../lib/outboxList'
+import { downloadFailure, emptyReason, fileSize, isPreviewableImage, lastSettledTurnKey, LOAD_FAILED, readOutbox, remainingLabel, remainingNow } from '../lib/outboxList'
 import { clearOutboxPreviews } from '../lib/outboxPreviewCache'
 import { OutboxImagePreview } from './OutboxImagePreview'
 import { useStore } from '../store/store'
@@ -110,7 +110,14 @@ export function OutboxFiles() {
       a.remove()
       setTimeout(() => URL.revokeObjectURL(url), 10_000)
     } catch (e) {
-      notify('error', e instanceof Error ? e.message : String(e))
+      // 過期被清掉的那一列留在畫面上沒有意義：當場拿掉並重讀一次清單（issue #547）。
+      const { text, gone } = downloadFailure(name, e)
+      if (gone) {
+        setFiles((fs) => fs.filter((f) => f.name !== name))
+        setLoadedFor(null)
+        setNonce((n) => n + 1)
+      }
+      notify('error', text)
     } finally {
       setBusy(null)
     }
