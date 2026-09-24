@@ -15,7 +15,7 @@ VITE_DAEMON=http://127.0.0.1:9999 bunx vite   # 指到別的 daemon
 bunx tsc --noEmit -p tsconfig.app.json   # 真的檢查型別（只寫 --noEmit 什麼都不檢查）
 bunx oxlint src
 bun run build                   # tsc -b && vite build → web/dist，release daemon 用 rust-embed 內嵌
-node --test --experimental-strip-types src/**/*.test.ts   # 純函式單元測試
+bun test                        # 單元測試（見下：走 bunfig.toml 的 preload）
 ```
 
 - `bun test`（`scripts/check.sh web`／CI）經 `web/bunfig.toml` 的 preload 把 `node:test` 對到 `bun:test`：bun 1.3.14 內建的 node:test 墊片在一條 async 測試失敗後會讓之後每個檔都報 `test() inside another test()`（#426）。測試用到新的 node:test API 時要補進 `web/test/node-test-shim.ts`。
@@ -29,8 +29,9 @@ node --test --experimental-strip-types src/**/*.test.ts   # 純函式單元測�
 
 ```
 web/src/
-  api/        types.ts（型別）· normalize.ts（寬鬆解碼，JSON 形狀的知識只在這裡）· transport.ts（fetch + WS 重連）
-              mock.ts（VITE_MOCK 假 daemon）· mentions.ts（@mention 規則，與 daemon group.rs 同一套）· supervisor.ts · changelog.ts
+  api/        index.ts（對外的 API 門面）· types.ts（共用型別）· normalize.ts（共用的寬鬆解碼）· transport.ts（fetch + WS 重連）
+              mock.ts（VITE_MOCK 假 daemon）· mentions.ts（@mention 規則，與 daemon group.rs 同一套）
+              自成一組的 API 各自帶型別與解碼：preview.ts（`toPreview*`）· supervisor.ts · judge.ts · rebuildRequests.ts · changelog.ts
   store/      store.ts（單一 Zustand store：server state 鏡像 + UI state + WS 事件）· routeSync.ts（網址 ↔ store）
               unread.ts · shelf*.ts · quotaHide.ts · queuedSend.ts 等（有 .test.ts 的是純函式）
   lib/        純函式：routes · tuiChoices（終端快照 → 選單）· choiceDraft／draftPreload（多分頁問卷草稿）· missionView（任務卡推導）
@@ -40,11 +41,13 @@ web/src/
               元件專屬 CSS 放同目錄（*.css），其餘在 styles.css
 ```
 
-原則：元件與 store 只看 `types.ts`；後端改欄位名時只改 `normalize.ts`。
+原則：**共用**的型別放 `types.ts`、共用的解碼放 `normalize.ts`——這一組後端改欄位名時只改 `normalize.ts`。
+某支 API 自成一組時（`preview.ts`／`supervisor.ts`／`judge.ts`／`rebuildRequests.ts`）型別與解碼跟著那個模組走，
+store 與元件就直接 import 它（例：`store.ts` 的 `toPreviewEvent`、`fetchSupervisor`），改那幾支的欄位名要改的是那個檔。
 
 ## 讀程式看不出來的約定
 
-- **螢幕保持亮著**：Screen Wake Lock 只在安全來源（HTTPS／localhost）存在；手機走 `https://<機器>.<tailnet>.ts.net:8443`（tailscale serve）才有。開關存 `am-keep-awake`，預設關，切回前景要重拿鎖（見 `hooks/useWakeLock.ts`）。
+- **螢幕保持亮著**：Screen Wake Lock 只在安全來源（HTTPS／localhost）存在；手機走 `https://<機器>.<tailnet>.ts.net:8443`（tailscale serve）才有。開關存 `am-keep-awake`，預設關，切回前景要重拿鎖。key 與「這個瀏覽器／這個網址能不能用」（`wakeSupport()`：`ok`／`insecure`／`unsupported`）在 `lib/wakeLock.ts`，拿鎖與回前景重拿在 `hooks/useWakeLock.ts`，開關 UI 在 `components/KeepAwakeToggle.tsx`。
 - **token**：啟動時打一次 `GET /api/session`，只存記憶體；不讀網址上的 `?token=`，`routeSync` 第一次 `replaceState` 時把它從網址拿掉。
   **GET 撞 401 會自己重拿一次 token 再送一次**（single-flight，2026-09-20 使用者：blocked 面板卡在「讀取終端失敗：missing or bad X-AM-Token」，
   只能重整）；重拿後仍 401 就照實丟。寫入請求（POST/PATCH…）不重送——401 時 daemon 沒跑到處理函式，但重送仍可能變成送兩次。
@@ -61,7 +64,7 @@ web/src/
   GIF、SVG、HEIC 與非圖片不動。50 MB 上限對壓完的檔案判。附件卡片的大小是實際上傳的，壓過的附「原 N MB」。
   實測手機照片 4032×3024／2.6 MB → 1568×1176／288 KB（桌機 Chrome 約 0.1 秒）。
 - **來源標籤**：`hook` 不標；`terminal_fallback` 標「可能不完整」；系統訊息另有來源標。
-- **WS**：指數退避重連（250ms 起跳、上限 3 秒 + jitter；`transport.ts`），重連帶 `?since=<最高 seq>`；`resync` 或 `project_changed`／`bot_changed` → 重新 `GET /api/state`。
+- **WS**：指數退避重連（250ms 起跳、上限 3 秒 + jitter；`transport.ts`），重連帶 `?since=<lastDurableSeq>`——**最後一則耐久事件的 seq，不是最高的那個 seq**：store 裡 `lastSeq` 跟著每一幀走，`lastDurableSeq` 只跟著會進 daemon 重播環的幀走（`seqAfterFrame`，即時幀如 `bots_restart_progress` 不推進；送成 `lastSeq` 會指到環裡沒有的號碼，重連落回保守分支多一次 resync）。daemon 那邊 `state::is_ephemeral` 加了新的即時幀，這裡的名單要一起改；`resync` 或 `project_changed`／`bot_changed` → 重新 `GET /api/state`。
 - **blocked**：`BlockedModal`（全畫面，blocked 1 秒後自動彈出，只彈正在看的 bot，關過就不再彈直到下一次 blocked）與
   `BlockedPanel`（對話上方，全畫面開著時暫停輪詢）共用 `useTerminalSnapshot` 與 `usePaneKeys`。
   全畫面的鍵盤直通把 `KeyboardEvent` 翻成 herdr 鍵名（⌘ 系列留給瀏覽器，Home/End/PgUp/PgDn herdr 不收）；直通時 Esc 也送給 agent。
