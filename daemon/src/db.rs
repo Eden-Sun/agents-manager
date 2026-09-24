@@ -492,6 +492,21 @@ async fn rebuild_bot_previews_fk(conn: &mut sqlx::SqliteConnection) -> Result<()
     if orphans > 0 {
         tracing::warn!(orphans, "bot_previews 有指不到 bot 的列；補外鍵時一併丟掉（issue #474）");
     }
+    // 這張表自己的索引與 trigger：`DROP TABLE` 會一起帶走，而 `RENAME` 不會還回來（i406 在 #474 提的
+    // 前瞻陷阱）。今天 `bot_previews` 一個都沒有，所以現況不會掉東西——但下一個替它加索引的人不會
+    // 想到要回來改這裡，而掉了也不會有人立刻發現（少一個索引只是變慢，不會報錯）。所以先收起來、
+    // 重建完照原樣建回去。
+    //
+    // `sql IS NULL` 的不收：那是 PRIMARY KEY／UNIQUE 自動建的 autoindex，新表的約束會自己重建，
+    // 照抄反而會撞名。
+    let extras: Vec<(String,)> = sqlx::query_as(
+        "SELECT sql FROM sqlite_master
+          WHERE tbl_name='bot_previews' AND type IN ('index','trigger') AND sql IS NOT NULL
+          ORDER BY name",
+    )
+    .fetch_all(&mut *conn)
+    .await
+    .context("read bot_previews indexes and triggers")?;
     let list = names.join(", ");
     for stmt in [
         format!("CREATE TABLE bot_previews_new ({})", defs.join(", ")),
@@ -501,7 +516,29 @@ async fn rebuild_bot_previews_fk(conn: &mut sqlx::SqliteConnection) -> Result<()
     ] {
         sqlx::query(&stmt).execute(&mut *conn).await.with_context(|| format!("rebuild bot_previews: {stmt}"))?;
     }
-    tracing::info!(rows_dropped = orphans, "bot_previews 重建完成，補回 REFERENCES bots(id)（issue #474）");
+    // 改完名才建：收起來的那幾句 DDL 指名的是 `bot_previews`，在 RENAME 之前建會落到舊名上。
+    for (sql,) in &extras {
+        sqlx::query(sql).execute(&mut *conn).await.with_context(|| format!("restore bot_previews object: {sql}"))?;
+    }
+    // 對帳：數量對不上就整個 migrate 失敗、交易回滾（DB 一個字都沒動），不要留一張少了索引的表
+    // 讓人以後自己去發現。
+    let after: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master
+          WHERE tbl_name='bot_previews' AND type IN ('index','trigger') AND sql IS NOT NULL",
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .context("recount bot_previews indexes and triggers")?;
+    anyhow::ensure!(
+        after as usize == extras.len(),
+        "bot_previews 重建後索引／trigger 數對不上（重建前 {}、重建後 {after}）：交易回滾，沒有動到資料庫",
+        extras.len()
+    );
+    tracing::info!(
+        rows_dropped = orphans,
+        restored = extras.len(),
+        "bot_previews 重建完成，補回 REFERENCES bots(id)（issue #474）"
+    );
     Ok(())
 }
 
@@ -1417,6 +1454,9 @@ mod tests {
     /// issue #474：pre-v2 的 `bot_previews` 沒有 `REFERENCES bots(id)`，外鍵又不能用 ALTER 加回去。
     /// migrate 要重建表補上，而且**不能把資料洗掉**——除了指不到 bot 的孤兒列（新表帶 FK、
     /// `foreign_keys` 開著，不濾掉的話 `INSERT … SELECT` 會整批失敗、整個 migrate 回滾）。
+    ///
+    /// 連同這張表自己的索引與 trigger 也要活下來：`DROP TABLE` 會一起帶走它們、`RENAME` 不會還回來
+    /// （i406 在 #474 提的前瞻陷阱）。今天的 `bot_previews` 一個都沒有，所以測試自己造兩個。
     #[tokio::test]
     async fn v19_rebuilds_a_pre_v2_bot_previews_to_restore_its_foreign_key() {
         let dir = tmp_dir();
@@ -1438,6 +1478,11 @@ mod tests {
                 // 孤兒：指不到任何 bot，補外鍵時要被丟掉。
                 "INSERT INTO bot_previews (bot_id,host,pane_id,port,dir,status,error,started_at,updated_at)
                    VALUES ('gone','local','w1:p9',5174,'/tmp/y','off',NULL,NULL,'2026-01-02T00:00:00.000Z')",
+                // 這張表自己的索引與 trigger：`DROP TABLE` 會一起帶走，重建完要照原樣回來（i406 在 #474
+                // 提的前瞻陷阱）。今天的 `bot_previews` 一個都沒有，所以這裡自己造兩個來釘住行為。
+                "CREATE INDEX bot_previews_by_host ON bot_previews(host)",
+                "CREATE TRIGGER bot_previews_touch AFTER UPDATE ON bot_previews
+                   BEGIN UPDATE bot_previews SET updated_at = updated_at WHERE bot_id = NEW.bot_id; END",
             ] {
                 sqlx::query(stmt).execute(&pool).await.unwrap_or_else(|e| panic!("{stmt}: {e}"));
             }
@@ -1461,6 +1506,19 @@ mod tests {
         assert_eq!(row.3, "running");
         assert_eq!(row.4, "2026-01-02T00:00:00.000Z");
         assert_eq!(row.5, "spawned", "ALTER 補的欄位照樣拿到預設值");
+        // 索引與 trigger 要原樣回來：`DROP TABLE` 帶走它們，`RENAME` 不會還回來。
+        let extras: Vec<(String, String)> = sqlx::query_as(
+            "SELECT type, name FROM sqlite_master
+              WHERE tbl_name='bot_previews' AND type IN ('index','trigger') AND sql IS NOT NULL ORDER BY name",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            extras,
+            vec![("index".to_string(), "bot_previews_by_host".to_string()), ("trigger".to_string(), "bot_previews_touch".to_string())],
+            "重建前有的索引與 trigger 要一個不少"
+        );
         // 重跑是 no-op：已經有 FK 就不再重建（否則每次開機都洗一次表）。
         pool.close().await;
         let pool = open(&file).await.unwrap();
