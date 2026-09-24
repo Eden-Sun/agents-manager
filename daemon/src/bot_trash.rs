@@ -101,6 +101,10 @@ pub fn restore(data_dir: &Path, bot_id: &str, dir: &Path) -> std::io::Result<Opt
 
 /// 同 [`restore`]，但還原的是 `kind` 那份。刪 bot 會把附件一起收進回收區，還原時要一起搬回來——
 /// 不然還原後對話還在、縮圖卻全破（已刪 bot 的對話本來就讀得到，API.md §10.4）。
+///
+/// 跟清理搶的是同一個 `rename`（issue #513，見 [`remove`]）：gc 先把那一份改名走了，這裡的 `rename`
+/// 就回 `NotFound`（`Err`），呼叫端記 warn、不擋還原——**不會**出現「回了 `Ok(Some(..))`、拿回來的目錄
+/// 卻正在被清空」。
 pub fn restore_kind(data_dir: &Path, bot_id: &str, kind: Option<&str>, dir: &Path) -> std::io::Result<Option<PathBuf>> {
     if dir.exists() {
         return Ok(None);
@@ -140,12 +144,63 @@ fn dir_size(path: &Path) -> u64 {
     entries.flatten().map(|e| dir_size(&e.path())).sum()
 }
 
+/// 正在被清理的那一份改用這個結尾（issue #513）。[`entries`] 與 [`latest`] 都是拿 `rsplit_once('.')`
+/// 的最後一段 `parse::<u128>`，所以 `.deleting` 結尾的一律 parse 不出來、兩邊都看不到它。
+const DELETING_SUFFIX: &str = "deleting";
+
+/// 清掉一份：**先 `rename` 成 `<原名>.<毫秒>.deleting`，成功了才 `remove_dir_all`**（issue #513）。
+///
+/// 直接 `remove_dir_all` 的問題是它先把裡面的檔一個個 unlink、最後才刪目錄本身，而且走的是已開啟的
+/// dir fd（inode）：清到一半時 [`latest`] 還看得到這一份，[`restore_kind`] 的 `rename` 也照樣成功——
+/// 目錄被搬到 `bots/<id>/` 之後這裡仍沿著同一個 inode 繼續刪，使用者拿回一個正在被清空的目錄，
+/// 而還原那一步回的是 `Ok(Some(..))`。改成 rename-then-delete 之後，兩邊搶的是同一個 `rename`：
+/// 還原先成功，這裡的 rename 就 `NotFound`、一個檔都不會動；這裡先成功，還原的 rename `NotFound`、
+/// 回 `Err` 讓 `restore_bot` 記一行 warn（跟遠端那份的行為一致，`remote_trash::gc` 的 doc）。
 fn remove(path: &Path) -> bool {
-    match std::fs::remove_dir_all(path) {
-        Ok(()) => true,
+    let Some(staged) = take_aside(path) else { return false };
+    if let Err(err) = std::fs::remove_dir_all(&staged) {
+        tracing::warn!(dir = %staged.display(), error = %err, "could not remove a bots-trash entry that was set aside");
+    }
+    // rename 成功就代表這一份已經不在回收區裡（還原也撈不到了）：即使 remove_dir_all 沒清乾淨，
+    // 剩下的殘骸由下一輪的 [`sweep_leftovers`] 收，對呼叫端來說這一份確實清掉了。
+    true
+}
+
+/// [`remove`] 的第一步：把這一份改名成看不見的 `*.deleting`。回 `None`＝沒拿到（多半是還原或另一輪 gc
+/// 先把它搬走了），呼叫端**一個檔都不准動**。
+fn take_aside(path: &Path) -> Option<PathBuf> {
+    let name = path.file_name().and_then(|n| n.to_str())?;
+    let staged = path.with_file_name(format!("{name}.{}.{DELETING_SUFFIX}", now_ms()));
+    match std::fs::rename(path, &staged) {
+        Ok(()) => Some(staged),
+        // `NotFound`＝別人先拿走了，本來就不該由這裡清，不是錯。
         Err(err) => {
-            tracing::warn!(dir = %path.display(), error = %err, "could not remove a bots-trash entry");
-            false
+            if err.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(dir = %path.display(), error = %err, "could not set a bots-trash entry aside for removal");
+            }
+            None
+        }
+    }
+}
+
+/// 上一輪在 `rename` 與 `remove_dir_all` 之間被砍掉時留下的 `*.deleting`：兩邊都看不到它們，
+/// 沒有人收就會一直佔著磁碟。每輪 gc 開頭收一次（別輪正在清的那一份也可能被撈到，
+/// 兩邊同時 `remove_dir_all` 同一棵樹只會讓其中一邊拿到 `NotFound`，不影響結果）。
+///
+/// **收掉之前它們不算進 [`MAX_BYTES`]**（[`entries`] 看不到＝`dir_size` 不會加到它們），而 gc 只在開機清掃
+/// 與 [`spawn_gc`] 每天那一次跑：daemon 剛好死在那個窗口的話，磁碟上會多出一份總量上限沒算到的殘骸，
+/// 最久到隔天才收。追磁碟對不上時先看回收區裡有沒有 `*.deleting`。
+fn sweep_leftovers(data_dir: &Path) {
+    let Ok(dir) = std::fs::read_dir(root(data_dir)) else { return };
+    for e in dir.flatten() {
+        let Some(name) = e.file_name().to_str().map(str::to_string) else { continue };
+        if !name.ends_with(&format!(".{DELETING_SUFFIX}")) {
+            continue;
+        }
+        if let Err(err) = std::fs::remove_dir_all(e.path()) {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(dir = %e.path().display(), error = %err, "could not remove a leftover bots-trash .deleting entry");
+            }
         }
     }
 }
@@ -158,6 +213,7 @@ pub fn gc(data_dir: &Path, keep: Duration) -> usize {
 /// 兩道一起跑：先清過期的，再看總量——還超過 `max_bytes` 就從**最舊的**開始清到降下來。
 /// 回傳 `(過期清掉幾份, 因為超量再清掉幾份)`。
 pub fn gc_with_cap(data_dir: &Path, keep: Duration, max_bytes: u64) -> (usize, usize) {
+    sweep_leftovers(data_dir);
     let cutoff = now_ms().saturating_sub(keep.as_millis());
     let mut live: Vec<(u128, PathBuf, u64)> = Vec::new();
     let (mut expired, mut evicted) = (0, 0);
@@ -314,6 +370,60 @@ mod tests {
         let (expired, _) = gc_with_cap(&data, Duration::ZERO, u64::MAX);
         assert_eq!(expired, 1, "附件那份也要被過期清理收掉");
         assert!(!moved.exists());
+        std::fs::remove_dir_all(&data).unwrap();
+    }
+
+    /// **#513**：清理與還原不互斥時，`remove_dir_all` 是「先把裡面 unlink 光、最後才刪目錄」，
+    /// 清到一半的那一份 `latest` 還看得到、還原的 `rename` 還會成功——使用者拿回一個正在被清空的目錄，
+    /// 而還原回的是 `Ok(Some(..))`。現在清理的第一步是把它改名成 `*.deleting`：改名成功的那一刻起
+    /// 回收區就看不到它，還原撈不到（`Ok(None)`），不會拿到一份注定被清空的目錄。
+    #[test]
+    fn an_entry_being_removed_leaves_the_trash_namespace_before_a_single_file_is_deleted() {
+        let data = std::env::temp_dir().join(format!("am-trash-race-{}", crate::db::ulid()));
+        let now = now_ms();
+        let entry = seed(&data, "B1", now - 1_000, 32);
+        assert_eq!(latest(&data, "B1", None).as_ref(), Some(&entry), "前提：還原撈得到它");
+
+        // 清理的第一步（改名）做完、remove_dir_all 還沒跑：裡面的檔一個都還在。
+        let staged = take_aside(&entry).expect("gc 拿到了這一份");
+        assert!(staged.join("blob").exists(), "還沒刪任何東西");
+        assert_eq!(entries(&data).len(), 0, "回收區的帳看不到正在清的那一份");
+        assert_eq!(latest(&data, "B1", None), None, "還原也撈不到");
+
+        let dir = data.join("bots/B1");
+        assert_eq!(restore(&data, "B1", &dir).unwrap(), None, "撈不到就是沒得還原，不會回 Ok(Some) 給半條命的目錄");
+        assert!(!dir.exists());
+        std::fs::remove_dir_all(&data).unwrap();
+    }
+
+    /// 反過來：還原先搶到那一份，清理的改名就 `NotFound`——一個檔都不准動，還原回來的目錄完整。
+    #[test]
+    fn a_restore_that_wins_the_race_keeps_every_file_and_the_gc_removes_nothing() {
+        let data = std::env::temp_dir().join(format!("am-trash-race2-{}", crate::db::ulid()));
+        let now = now_ms();
+        let entry = seed(&data, "B1", now - 1_000, 32);
+        let dir = data.join("bots/B1");
+
+        assert_eq!(restore(&data, "B1", &dir).unwrap(), Some(entry.clone()), "還原先到");
+        assert!(!remove(&entry), "清理沒拿到那一份");
+        assert_eq!(std::fs::read(dir.join("blob")).unwrap().len(), 32, "還原回來的目錄一個位元組都沒少");
+        std::fs::remove_dir_all(&data).unwrap();
+    }
+
+    /// 上一輪在改名與 remove_dir_all 之間被砍掉留下的 `*.deleting`：兩道 gc 都看不到它，
+    /// 沒人收就永遠佔著磁碟。每輪開頭收一次，而且不算進任何一個計數。
+    #[test]
+    fn leftover_deleting_entries_from_a_crashed_sweep_are_collected_on_the_next_gc() {
+        let data = std::env::temp_dir().join(format!("am-trash-leftover-{}", crate::db::ulid()));
+        let now = now_ms();
+        let entry = seed(&data, "B1", now - 1_000, 16);
+        let leftover = take_aside(&entry).expect("改名成功");
+        assert!(leftover.exists() && entries(&data).is_empty(), "前提：留下一份誰都看不到的殘骸");
+
+        let keep = seed(&data, "B2", now - 500, 16);
+        assert_eq!(gc_with_cap(&data, Duration::from_secs(3600), u64::MAX), (0, 0), "殘骸不算過期、也不算超量淘汰");
+        assert!(!leftover.exists(), "殘骸收掉了");
+        assert!(keep.exists(), "沒過期的照樣留著");
         std::fs::remove_dir_all(&data).unwrap();
     }
 
