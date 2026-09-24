@@ -138,7 +138,7 @@ CREATE INDEX IF NOT EXISTS supervisor_inbox_open ON supervisor_inbox(state) WHER
 CREATE TABLE IF NOT EXISTS supervisor_incidents (
   id TEXT PRIMARY KEY,
   supervisor_id TEXT NOT NULL,
-  -- host_disconnected | bot_stopped | assignment_stalled | notify_exhausted | remote_entry
+  -- host_disconnected | bot_stopped | assignment_stalled | notify_exhausted | remote_entry | approval_stalled
   kind TEXT NOT NULL,
   -- What is wrong: a host name, a bot id, an assignment id. Never a message.
   resource TEXT NOT NULL,
@@ -2490,21 +2490,42 @@ async fn create_approval_inner(
     let mut tx = pool.begin().await?;
     let mut wait_since: Option<String> = None;
     let mut superseded = None;
-    if let Some(old_id) = supersedes.map(str::trim).filter(|s| !s.is_empty()) {
+    // issue #421：沒帶 `supersedes` 時 daemon 自己找「同一個申請者、同一種用途、還 **pending**」的那一筆。
+    // kick 每個整點重試，而記住舊 id 的本機狀態檔掉了（換機器、檔案被清、daemon 換版）時，以前每一輪都開
+    // 一筆新的 pending：AGM 收到四則 `approval_requested`、被叫醒四次，而它們講的是同一件事。
+    // **只自動取代 pending**：`approved` 是人做過的裁示，不能因為排程又跑了一輪就無聲消失。
+    let auto_supersedes = match supersedes.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(_) => None,
+        None => sqlx::query_scalar::<_, String>(
+            "SELECT id FROM supervisor_approvals
+              WHERE supervisor_id=? AND requester=? AND purpose=? AND status='pending'
+              ORDER BY created_at DESC, id DESC LIMIT 1",
+        )
+        .bind(SUPERVISOR_ID)
+        .bind(requester)
+        .bind(purpose)
+        .fetch_optional(&mut *tx)
+        .await?,
+    };
+    // 自動挑的那一筆不會讓整筆申請失敗：對不上（剛被裁示、剛過期）就只是不取代。
+    let auto = auto_supersedes.is_some();
+    if let Some(old_id) = supersedes.map(str::trim).filter(|s| !s.is_empty()).or(auto_supersedes.as_deref()) {
         let old = sqlx::query_as::<_, Approval>("SELECT * FROM supervisor_approvals WHERE id=?")
             .bind(old_id)
             .fetch_optional(&mut *tx)
             .await?;
         let refuse = |reason| anyhow::Error::new(ApprovalSupersedeRefused { approval_id: old_id.to_string(), reason });
-        let Some(old) = old else { return Err(refuse("approval_not_found")) };
-        if old.requester != requester {
-            return Err(refuse("not_the_same_requester"));
-        }
-        if old.purpose != purpose {
-            return Err(refuse("purpose_mismatch"));
-        }
-        let live = matches!(old.status.as_str(), "pending" | "approved") && !old.expires_at.as_deref().is_some_and(|t| crate::db::cmp_ts(t, &now).is_le());
-        if live {
+        let bail = |reason| if auto { Ok(None) } else { Err(refuse(reason)) };
+        let old = match old {
+            Some(o) if o.requester != requester => bail("not_the_same_requester")?,
+            Some(o) if o.purpose != purpose => bail("purpose_mismatch")?,
+            Some(o) => Some(o),
+            None => bail("approval_not_found")?,
+        };
+        let live = old
+            .as_ref()
+            .is_some_and(|o| matches!(o.status.as_str(), "pending" | "approved") && !o.expires_at.as_deref().is_some_and(|t| crate::db::cmp_ts(t, &now).is_le()));
+        if let (true, Some(old)) = (live, old) {
             sqlx::query("UPDATE supervisor_approvals SET status='superseded', updated_at=? WHERE id=? AND status=?")
                 .bind(&now)
                 .bind(&old.id)
@@ -3240,6 +3261,96 @@ mod tests {
         let p = SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
         migrate(&p).await.unwrap();
         p
+    }
+
+    // ------------------------------------------------ issue #421：重申請不再累積 pending
+
+    async fn request(p: &SqlitePool, commit: &str) -> ApprovalOutcome {
+        create_approval_notifying(p, "agm-kick", "rebuild", "release rebuild", Some(commit), None, None, None, None).await.unwrap()
+    }
+
+    async fn statuses(p: &SqlitePool) -> Vec<(String, String)> {
+        sqlx::query_as("SELECT target_commit, status FROM supervisor_approvals ORDER BY created_at, id").fetch_all(p).await.unwrap()
+    }
+
+    /// issue #421：kick 每個整點重試，記住舊 id 的本機狀態檔掉了就不會帶 `--supersedes`，於是每一輪
+    /// 開一筆新的 pending——那個晚上累積了四筆，AGM 被叫醒四次，講的都是同一件事。
+    /// daemon 自己認：同一個申請者、同一種用途、還 pending 的那一筆直接取代掉。
+    #[tokio::test]
+    async fn a_repeat_request_supersedes_the_pending_one_instead_of_piling_up() {
+        let p = pool().await;
+        let first = request(&p, "c1").await;
+        let second = request(&p, "c2").await;
+        assert!(second.created, "第二次是新的一筆");
+        assert_eq!(second.superseded.as_deref(), Some(first.approval.id.as_str()), "舊的那筆被自動取代");
+        assert_eq!(statuses(&p).await, vec![("c1".into(), "superseded".into()), ("c2".into(), "pending".into())]);
+        // 只剩一筆 pending，所以 AGM 只有一則要裁示的。
+        let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_approvals WHERE status='pending'").fetch_one(&p).await.unwrap();
+        assert_eq!(pending, 1);
+        // 作廢那筆還沒送出的 `approval_requested` 一起收掉，不要叫人裁示一筆已經不算的申請。
+        let open: Vec<String> = sqlx::query_scalar("SELECT event_key FROM supervisor_inbox WHERE state='pending' ORDER BY created_at")
+            .fetch_all(&p)
+            .await
+            .unwrap();
+        assert_eq!(open, vec![format!("approval:{}:requested", second.approval.id)]);
+    }
+
+    /// 連跑四輪只會留下一筆 pending（票上那個晚上的形狀）。
+    #[tokio::test]
+    async fn four_rounds_leave_exactly_one_pending_approval() {
+        let p = pool().await;
+        for c in ["c1", "c2", "c3", "c4"] {
+            request(&p, c).await;
+        }
+        let rows = statuses(&p).await;
+        assert_eq!(rows.len(), 4, "四筆都留著歷史");
+        assert_eq!(rows.iter().filter(|(_, st)| st == "pending").count(), 1, "但只有一筆還要人裁示：{rows:?}");
+        assert_eq!(rows.last().unwrap().1, "pending", "留下的是最新那筆");
+    }
+
+    /// **已經核准的不自動取代**：那是人做過的裁示，不能因為排程又跑了一輪就無聲消失
+    /// （部署腳本可能正要拿它開窗口）。明講 `--supersedes` 才動得了它。
+    #[tokio::test]
+    async fn an_approved_decision_is_never_superseded_automatically() {
+        let p = pool().await;
+        let first = request(&p, "c1").await;
+        decide_approval(&p, &first.approval.id, "approved", "AGM", None, None).await.unwrap();
+        let second = request(&p, "c2").await;
+        assert_eq!(second.superseded, None, "沒帶 --supersedes 就不該動那筆核准");
+        assert_eq!(statuses(&p).await, vec![("c1".into(), "approved".into()), ("c2".into(), "pending".into())]);
+        // 明講就還是取代得掉（原本的機制沒有變）。
+        let third = create_approval_superseding(&p, "agm-kick", "rebuild", "release rebuild", Some("c3"), None, None, Some(&first.approval.id), None)
+            .await
+            .unwrap();
+        assert_eq!(third.superseded.as_deref(), Some(first.approval.id.as_str()));
+    }
+
+    /// 別人的申請不會被我的重申請掃掉：自動取代只認**同一個申請者、同一種用途**。
+    #[tokio::test]
+    async fn the_automatic_supersede_only_touches_my_own_requests() {
+        let p = pool().await;
+        let other = create_approval_notifying(&p, "someone-else", "rebuild", "s", Some("c1"), None, None, None, None).await.unwrap();
+        let other_purpose = create_approval_notifying(&p, "agm-kick", "restart", "s", Some("c1"), None, None, None, None).await.unwrap();
+        let mine = request(&p, "c1").await;
+        assert_eq!(mine.superseded, None, "沒有自己的 pending 可取代");
+        for a in [&other, &other_purpose] {
+            let st: String = sqlx::query_scalar("SELECT status FROM supervisor_approvals WHERE id=?").bind(&a.approval.id).fetch_one(&p).await.unwrap();
+            assert_eq!(st, "pending", "別人的／別種用途的申請不能被動到");
+        }
+    }
+
+    /// 自動挑到的那筆如果剛好在同一瞬間被裁示掉，整筆申請**不能**因此失敗——
+    /// 明講 `--supersedes` 指到裁示過的才回 refuse，自動那條只是不取代。
+    #[tokio::test]
+    async fn an_automatic_target_that_slipped_away_does_not_fail_the_request() {
+        let p = pool().await;
+        let first = request(&p, "c1").await;
+        // 模擬那一瞬間：狀態已經不是 pending 了，但自動查詢是在同一個交易裡讀的，
+        // 這裡直接把它改成 cancelled，相當於自動挑中之後才發現不能取代。
+        sqlx::query("UPDATE supervisor_approvals SET status='cancelled' WHERE id=?").bind(&first.approval.id).execute(&p).await.unwrap();
+        let second = request(&p, "c2").await;
+        assert!(second.created, "還是要開得出新的一筆");
+        assert_eq!(second.superseded, None);
     }
 
     #[tokio::test]

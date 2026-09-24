@@ -1655,7 +1655,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
   寫一則 inbox `ops_alert`（路由給巡檢、叫醒）。`source`／`reason` 各 1–64 字的 `[A-Za-z0-9._-]`（不合格 400），`detail` 截到 2000 字。
   event_key 帶小時格：同 `source`+`reason` 每小時最多一則（`queued:false` = 這小時已經有了）。
 - `GET /api/supervisor/incidents?all=0|1` → `{incidents:[{id,kind,resource,severity,status,detail,occurrences,first_seen_at,last_seen_at,resolved_at}],open,all}`。
-  `kind`：`host_disconnected` | `bot_stopped` | `assignment_stalled` | `assignment_undelivered` | `notify_exhausted` | `responder_needs_login` | `responder_undeliverable`（SPEC §18.9，後兩個 issue #420，推給巡檢）。一個 resource 同時只有一筆 open；開啟與恢復各推 inbox `incident_opened` / `incident_resolved`。
+  `kind`：`host_disconnected` | `bot_stopped` | `assignment_stalled` | `assignment_undelivered` | `notify_exhausted` | `responder_needs_login` | `responder_undeliverable` | `approval_stalled`（SPEC §18.9／§18.15；`responder_*` 是 issue #420，`approval_stalled` 是 issue #421——核准開著 30 分鐘沒有任何人裁示，critical，resource 是核准 id，detail 帶 `approval_id`／`waiting_secs`／`requester`／`action`；都推給巡檢）。一個 resource 同時只有一筆 open；開啟與恢復各推 inbox `incident_opened` / `incident_resolved`。
   `notify_exhausted` 例外：協調者建立時推（路由給協調者，開啟叫醒、恢復只記錄）；沒有協調者不入 inbox，只在這支與 `system_health` 看得到。
 
 ### 遠端入口
@@ -1677,6 +1677,9 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
   `status`：`pending` | `approved` | `denied` | `revoked` | `consumed` | `superseded`。`consumed`／`superseded` 不覆寫 `decided_at`／`decided_by`（誰、何時核准的留著；誰用掉的在 `decisions`）。
   `decisions` 是 append-only 的決定歷程（那一列只留最後一個狀態）。
 - `POST /api/supervisor/approvals {requester,purpose:"rebuild"|"restart",scope,target_commit?,expires_in_secs?,request_id?,supersedes?}` → 一筆 `pending`（回應多 `created`、`superseded`），並推 inbox `approval_requested` 給 AGM。
+  **沒帶 `supersedes` 時 daemon 自己找**（issue #421）：同一個 `requester`、同一個 `purpose`、而且還 `pending` 的最新那一筆，直接取代掉（回應的 `superseded` 會帶它的 id）。
+  kick 記住舊 id 的狀態檔掉了就不會帶 `--supersedes`，以前每輪開一筆新的 pending——2026-09-23 累積了四筆，AGM 被叫醒四次講同一件事。
+  **只自動取代 `pending`**：`approved` 是人做過的裁示，不會因為排程又跑一輪就消失（要動它得明講 `supersedes`）。自動挑到的那筆對不上（剛被裁示、剛過期）只是不取代，不會讓申請失敗。
   `supersedes=<舊的 approval id>`：**同一個 requester、同一個 purpose** 換 commit 重新申請。舊的還是 `pending`／`approved` 而且沒過期時，同一個 transaction 裡標 `superseded`、
   它還沒送出的 `approval_requested` 一起收掉（`acked_by:"daemon"`），新的 `wait_since` 接過舊的等待起點（舊的已核准＝它的 `min(wait_since, decided_at)`）；
   舊的已經不能用就不動它、新的從頭算。requester 或 purpose 不同 → `409 approval_supersede_refused`，什麼都不寫。
@@ -1769,6 +1772,12 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
   - assignment 狀態遷移與完成事件同一個 transaction；啟動時補掃一次。
   - pending → delivered 的推送節流成每 `notify_interval_secs`（600）最多一次，一次併成一則通知；入庫不受影響。
   - `kind` 另有 `bot_restart_failed`（`batch_id,bot_id,name,error`）、`supervisor_restart_retry`（`batch_id,bot_id,name,ok,error`）、`approval_requested`、mission 相關事件（見群組任務）。
+  - **核准改派**（issue #421，SPEC §18.15）：`approval_requested` 在協調者手上開著超過 5 分鐘、而協調者不可用
+    （`health::responder_state` 回 `Unavailable`：`needs_login`／`waiting_quota`／`notify_stalled`／`no_run`）時，daemon 把它改成巡檢的並叫醒巡檢：
+    `role='patrol'`、`claimed_by=NULL`、`wake=1`、`state='pending'`，`notify_*` 歸零（協調者累積的次數不算在巡檢頭上），
+    payload 多 `reassigned_from:"responder"`、`reassigned_reason`、`reassigned_at`、`to_role:"patrol"`。
+    協調者恢復後**不搶回**。狀態讀不到時**不改派**（沒有證據不搬）。只有 `approval_requested` 會改派——
+    `bot_request` 與 `mission_*` 照舊留在協調者佇列等它回來。
 - `GET /api/supervisor/state` → 給 `agm` CLI 的精簡全域狀態：projects、bots（run 的 `agent_status`、`native_session_id`、`runtime_model/effort`、`pane_id`、`queued_turns`、`host_connected`）、未結案 assignment、待處理 inbox。不含 env、hook token、args、persona 全文。
 - `GET /api/supervisor/evidence?q=<文字>&bot_id=&project_id=&before=<cursor>&limit=20` → `{messages:[{id,bot_id,bot_name,project_id,project_label,bot_deleted,turn_id,role,content,source,incomplete,created_at,truncated}],has_more,next_cursor}`。
   `q` 必填（trim 後 1–500 字），字面子字串（`%`、`_` 不是萬用字元）；`limit` 1–100；含已刪 bot 的歷史。依 `(created_at DESC,id DESC)`，`next_cursor` 原樣放回 `before`。

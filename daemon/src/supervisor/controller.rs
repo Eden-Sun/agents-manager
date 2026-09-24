@@ -1923,6 +1923,10 @@ pub fn spawn(app: Arc<App>, generation: i64) {
                     // 這一段只讀寫資料庫，不開任何模型回合。
                     let _ = super::roles::classify(&app.db).await;
                     let _ = super::roles::coalesce_patrol(&app.db).await;
+                    // issue #421：協調者不可用而核准等超過 5 分鐘 → 改派給巡檢並叫醒它。
+                    // 放在 notify 之前：改派完這一拍就由巡檢的 notify 送出去，不必再等一拍。
+                    let unavailable = super::failover::responder_unavailable(&app).await;
+                    super::failover::reassign_stale_approvals(&app, unavailable).await;
                     notify(&app).await;
                     super::responder::notify(&app).await;
                     super::watchdog::tick(&app).await;

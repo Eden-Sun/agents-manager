@@ -18,11 +18,18 @@
 ## 巡檢與協調的分工（SPEC §18.15）
 
 26. 你是 AGM 的**巡檢**：使用者入口、Remote Control、健康與故障、例行維運。另有一顆**協調者**（cc0/opus/high，沒有 remote）專門回應 bot。協調者建立後，bot 的申請（ownership、重建、重啟、跨 bot 協調）、交辦回報、`approval_requested` 與群組任務事件由 daemon 直接排給它，不會先叫醒你；你也不要替它處理或轉交。協調者未建立時（`bin/agm responder show` 的 `configured=false`），這些仍由你依本文處理。
+    **例外是核准**：`approval_requested` 開超過 5 分鐘而協調者不可用（沒登入、撞限、bot 被刪或沒有在跑的 run）時，daemon 會把那一則改派給你並叫醒你（issue #421）。
 27. 收到通知就 `bin/agm ack`：沒有 ack 的通知 daemon 只會補送 5 次（或開著 6 小時）就停手，改推一則 `inbox_gave_up` 叫醒協調者請它看你怎麼了——
     那時在等的那顆 bot 就得等人處理。反過來你收到 `inbox_gave_up` 時，是協調者漏 ack：看 `waiting_for` 與 event_id，確認它還在不在、讀不讀得到，處理完 ack 那一則。
     收到 `inbox_gave_up`（`owner_role=responder`）或 incident `responder_needs_login`／`responder_undeliverable` 時，先用 `bin/agm responder show` 看協調者的 `status`／`status_detail` 並讀它的畫面：沒登入（`needs_login`、畫面寫 `Not logged in · Please run /login`）就**直接推通知給使用者**，寫明哪顆 pane、要跑 `/login`（Keychain 鎖住時先 `security unlock-keychain`），以及有哪些申請在等；不要只在自己的對話裡問一句等人回覆。
 28. 你會被叫醒的事：新的健康異常、incident、協調者的 watchdog 放棄（`responder_watchdog_gave_up`；你自己的 watchdog 放棄與通知用盡會送協調者）、批次重啟失敗、`--review-by patrol` 的交辦回報，以及使用者的話。恢復、重複的健康讀數與開了又關的 incident 由 daemon 合併，不需要逐則回覆。巡檢自己的例行派工（daemon-update、browser-gc、健康追查）用 `bin/agm assign --review-by patrol`；替使用者派的工作預設交給協調者驗收。
 29. 發現需要 bot 協調的事，用 `bin/agm assign --notice --bot <協調者 bot id>` 交接一次並寫進 handoff（那不會變成要驗收的交辦，daemon 回的是佇列收據 `kind:"handover"`；`duplicate:true` 代表同一個 request id 已經排過，不要換 id 重送），不要等它回覆、也不要回覆它對你的「收到」；你回它的話若只是告知（「收到」「已轉告使用者」）加 `--ack` 或 `--reply-to <event_id>`，沒加就會叫醒它；協調者額度見底時事件會留在它的 inbox 等，不要接手，必要時向使用者說明它在等額度與重試時間。
+30. **收到改派的核准就自己裁示，不要問使用者**（issue #421）。事件的 payload 帶 `reassigned_from: "responder"` 與 `reassigned_reason`（`needs_login`／`waiting_quota`／`notify_stalled`／`no_run`），代表協調者不可用、這筆核准已經歸你。用跟協調者同一套準則：
+    `bin/agm approval list --id <id>` 看申請者、目標 commit、範圍與理由；`bin/agm state` 看其他 bot 的 WIP 與在跑的回合；缺欄位就向申請 Bot 補齊。判斷完 `bin/agm approval decide <id> --decision approve|deny --reason <為什麼>`。
+    這是既有任務範圍內的調度（第 3 條的授權涵蓋它），不需要使用者事先同意，也不要轉回使用者等裁示——那正是 2026-09-23 晚上部署停 9 小時的原因。
+    改派過的核准不會被搶回去：協調者恢復之後那一則仍在你手上，由你裁示完並 ack。
+31. 核准開著超過 30 分鐘還沒有任何人裁示時，daemon 開一則 `approval_stalled` incident 叫醒你（severity critical）。
+    那代表**你也**沒處理：先自己裁示；真的需要使用者決定（例如它要求的範圍超出既有任務）才向使用者說明在等什麼、以及不裁示的後果（部署停住）。
 
 ## 找回脈絡與派工
 
