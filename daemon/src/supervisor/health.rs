@@ -21,6 +21,87 @@ async fn release_triage_health(app: &Arc<App>) -> Value {
     v
 }
 
+/// 一顆角色 bot（巡檢／協調者）現在能不能用，給「核准該不該改派」這類決定當依據（issue #421）。
+///
+/// #420 之後 daemon 已經看得出協調者停在登入失效（`responder::notify` 送不出去時讀畫面，
+/// 標 `supervisor_roles.status = 'needs_login'`），但只有一個字串，呼叫端要自己拼判斷。
+/// 這裡把它收成一個型別，重點是**四個值**而不是 bool。
+///
+/// `Unknown` 一定要跟 `Unavailable` 分開：沒有證據就把核准從一顆健康的協調者手上搬走，
+/// 比晚幾分鐘更糟。呼叫端只在 `Unavailable` 動作，`Unknown` 當作「這一拍不動」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoleState {
+    /// 這個角色還沒建立：核准本來就歸巡檢，沒有東西要改派。
+    NotConfigured,
+    Available,
+    /// 不可用，附一個**穩定的**原因字串（見 `REASON_*`）——會被寫進 inbox payload 與 SPEC，別改字。
+    Unavailable(&'static str),
+    /// 讀不到（DB 錯）。不是「它壞了」，也不是「它好了」。
+    Unknown,
+}
+
+/// claude 停在 `Not logged in · Please run /login`（或 Keychain 鎖著）。
+/// 由 `responder::notify` 在送不出去時看畫面判定（#420）；**看不到畫面時它不會標**，
+/// 所以這裡讀到的「沒有 needs_login」是「沒有證據說它壞了」，不是「證明它是好的」。
+pub const REASON_NEEDS_LOGIN: &str = "needs_login";
+/// 撞額度。
+pub const REASON_WAITING_QUOTA: &str = "waiting_quota";
+/// 登記過、卻沒有 active run。
+pub const REASON_NO_RUN: &str = "no_run";
+
+/// 協調者能不能用。
+pub async fn responder_state(app: &Arc<App>) -> RoleState {
+    role_state(app, crate::supervisor::roles::Role::Responder).await
+}
+
+/// 巡檢與協調者共用同一套判斷。順序是「最確定的證據先講」。
+///
+/// 只讀 DB，不讀畫面：`/api/supervisor/health` 與 `/api/supervisor/responder` 都會被 UI 高頻輪詢，
+/// 每次都去抓一次 pane 會把 herdr 打爆。畫面是 `responder::notify` 在**送不出去時**看的，
+/// 結論已經落在 `supervisor_roles.status` 上（#420）。
+pub async fn role_state(app: &Arc<App>, role: crate::supervisor::roles::Role) -> RoleState {
+    let row = match crate::supervisor::roles::get(&app.db, role).await {
+        Ok(row) => row,
+        // 讀不到不是「它好了」，也不是「它壞了」。
+        Err(e) => {
+            tracing::warn!(role = role.as_str(), error = ?e, "role_state：讀不到角色那一列");
+            return RoleState::Unknown;
+        }
+    };
+    let Some(bot_id) = row.bot_id.clone() else { return RoleState::NotConfigured };
+    match row.status.as_str() {
+        "needs_login" => return RoleState::Unavailable(REASON_NEEDS_LOGIN),
+        "waiting_quota" => return RoleState::Unavailable(REASON_WAITING_QUOTA),
+        _ => {}
+    }
+    // 要它跑卻沒有 active run。`desired_running=0`（使用者自己停的）不是系統故障，
+    // 但對「核准該給誰」來說一樣是不可用——沒有在跑的協調者不會裁示任何東西。
+    match crate::db::active_run(&app.db, &bot_id).await {
+        Ok(Some(_)) => RoleState::Available,
+        Ok(None) => RoleState::Unavailable(REASON_NO_RUN),
+        Err(e) => {
+            tracing::warn!(role = role.as_str(), error = ?e, "role_state：讀不到 active run");
+            RoleState::Unknown
+        }
+    }
+}
+
+impl RoleState {
+    /// 不可用的原因，給 API／incident detail／inbox payload 用。只有 `Unavailable` 有值。
+    pub fn reason(self) -> Option<&'static str> {
+        match self {
+            RoleState::Unavailable(r) => Some(r),
+            _ => None,
+        }
+    }
+
+    /// 可以拿它當「改派」的依據嗎。`Unknown` 與 `NotConfigured` 都是 `false`：
+    /// 前者沒有證據，後者本來就沒有東西要改派。
+    pub fn is_unavailable(self) -> bool {
+        matches!(self, RoleState::Unavailable(_))
+    }
+}
+
 pub async fn snapshot(app: &Arc<App>) -> Result<Value, LcError> {
     let bots = crate::db::live_bots(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     let mut running = 0usize;
@@ -225,6 +306,63 @@ pub fn spawn(app: Arc<App>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 真的把 `role_state` 跑起來：這四個值是 #421 決定「要不要把核准改派給巡檢」的唯一依據，
+    /// 而最貴的錯誤是**在沒有證據的時候回 Unavailable**。用真的 DB 走一遍，不是只測純函式。
+    #[tokio::test]
+    async fn role_state_reads_the_evidence_and_says_unknown_when_there_is_none() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let role = crate::supervisor::roles::Role::Responder;
+
+        // 還沒建立：核准本來就歸巡檢，沒有東西要改派。
+        assert_eq!(role_state(&app, role).await, RoleState::NotConfigured);
+        assert!(!role_state(&app, role).await.is_unavailable());
+
+        crate::supervisor::roles::set_env(&app.db, role, "resp-bot", "proj", "/tmp").await.unwrap();
+        // 登記了、但沒有 active run：它不會裁示任何東西。
+        assert_eq!(role_state(&app, role).await, RoleState::Unavailable(REASON_NO_RUN));
+
+        // #420 在送不出去時看畫面寫下的那個字，要被讀成 needs_login（字不一樣就永遠判不出來）。
+        crate::supervisor::roles::set_status(&app.db, role, "needs_login", None, None).await.unwrap();
+        assert_eq!(role_state(&app, role).await, RoleState::Unavailable(REASON_NEEDS_LOGIN));
+        // 撞限是另一個原因，但一樣是不可用。
+        crate::supervisor::roles::set_status(&app.db, role, "waiting_quota", None, None).await.unwrap();
+        assert_eq!(role_state(&app, role).await, RoleState::Unavailable(REASON_WAITING_QUOTA));
+
+        // 狀態清掉之後又回到「沒有 active run」——不是 Available：這一層只讀 DB，
+        // 「沒有 needs_login」的意思是沒有證據說它壞了，不是證明它是好的。
+        crate::supervisor::roles::set_status(&app.db, role, "", None, None).await.unwrap();
+        assert_eq!(role_state(&app, role).await, RoleState::Unavailable(REASON_NO_RUN));
+
+        // 巡檢是另一列，不會被協調者的狀態汙染。
+        assert_eq!(role_state(&app, crate::supervisor::roles::Role::Patrol).await, RoleState::NotConfigured);
+
+        // #421 呼叫的是 responder_state()，它就是 role_state(Responder) 的別名，不能有第二套判斷。
+        assert_eq!(responder_state(&app).await, role_state(&app, role).await);
+    }
+
+    /// 這三個字串是 #421 要寫進 inbox payload（`reassigned_reason`）與 SPEC 的對外契約，改了要一起改。
+    #[test]
+    fn the_unavailable_reasons_are_a_stable_contract() {
+        assert_eq!([REASON_NEEDS_LOGIN, REASON_WAITING_QUOTA, REASON_NO_RUN], ["needs_login", "waiting_quota", "no_run"]);
+        // `needs_login` 與 `waiting_quota` 必須跟 `supervisor_roles.status` 寫進去的字一模一樣，
+        // 否則 `role_state` 會永遠判不出不可用（#420 寫的是這兩個字）。
+        assert_eq!(REASON_NEEDS_LOGIN, "needs_login");
+        assert_eq!(REASON_WAITING_QUOTA, "waiting_quota");
+    }
+
+    /// 只有 `Unavailable` 能拿來當改派的依據。`Unknown`（讀不到）與 `NotConfigured`（沒建立）
+    /// 都不行——沒有證據就把核准從一顆健康的協調者手上搬走，比晚幾分鐘更糟。
+    #[test]
+    fn only_unavailable_is_grounds_for_reassigning() {
+        assert!(RoleState::Unavailable(REASON_NEEDS_LOGIN).is_unavailable());
+        assert_eq!(RoleState::Unavailable(REASON_NEEDS_LOGIN).reason(), Some("needs_login"));
+        for state in [RoleState::Unknown, RoleState::Available, RoleState::NotConfigured] {
+            assert!(!state.is_unavailable(), "{state:?} 不該被當成不可用");
+            assert_eq!(state.reason(), None, "{state:?} 不該有原因");
+        }
+    }
 
     #[test]
     fn counters_do_not_make_events_only_state_does() {
