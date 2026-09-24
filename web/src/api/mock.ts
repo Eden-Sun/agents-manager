@@ -2652,6 +2652,9 @@ export class MockTransport implements Transport {
     const base = this.bot(botId).cwd ?? '/Users/m4p/project/agents-manager'
     const root = this.projects.find((p) => p.id === this.bot(botId).project_id)?.path ?? base
     return {
+      // mock 的 iframe 走 srcDoc（沒有真的 dev server），所以這裡說「綁得對外」，
+      // 不然手機開 mock 會被 #527 的說明蓋掉那頁假畫面。
+      lan: true,
       // am-claude-2 演「偵測不到 dev server、只有 others」（wits-ops 的情境）。
       candidates: this.bot(botId).name === 'am-claude-2' ? [] : [{ dir: `${base}/web`, command: 'bunx vite' }, { dir: `${base}/apps/web`, command: 'bun run dev' }],
       others: [

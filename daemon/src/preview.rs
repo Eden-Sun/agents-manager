@@ -756,6 +756,9 @@ async fn decorated(app: &Arc<App>, bot: &db::Bot, mut body: Value, live: bool) -
         others.sort_by_key(|(r, _, p)| (*r, p.port));
     }
     if let Some(o) = body.as_object_mut() {
+        // #527：`allow_lan` 關著時我們起的 dev server 釘在 loopback（#434／#452），從手機或別台機器
+        // 開的前端連不到它；前端要據此把 iframe 換成說明，不要只給一片空白。
+        o.insert("lan".into(), json!(app.allow_lan));
         o.insert("candidates".into(), json!(cands.iter().map(|c| c.to_string_lossy()).collect::<Vec<_>>()));
         if !live {
             o.insert("command".into(), info.first().map(|i| i["command"].clone()).unwrap_or(Value::Null));
@@ -999,7 +1002,12 @@ pub async fn stop(app: &Arc<App>, bot_id: &str) -> LcResult<Value> {
     if !stop_for_bot(app, bot_id).await {
         return Err(LcError::conflict("preview_stop_failed", json!({"bot_id": bot_id})));
     }
-    Ok(off_body())
+    // 這條不走 `decorated`，`lan` 自己補（#527）：前端拿回應直接蓋掉手上那一份。
+    let mut body = off_body();
+    if let Some(o) = body.as_object_mut() {
+        o.insert("lan".into(), json!(app.allow_lan));
+    }
+    Ok(body)
 }
 
 /// bot 被停止／刪除／閒置收掉時一起收預覽。盡力而為：讀不到就記 log，不擋 bot 的停機。

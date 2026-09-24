@@ -531,7 +531,7 @@ bot 或 active Run 不存在 404。
 ```json
 {"status": "off | starting | running | failed", "port": 5180, "dir": "/path/to/web",
  "pane_id": "wM:pB", "error": null, "started_at": "2026-09-19T15:44:40.881Z",
- "source": "spawned | attached", "pid": null, "command": "bun run dev", "kind": "vite",
+ "source": "spawned | attached", "pid": null, "command": "bun run dev", "kind": "vite", "lan": false,
  "candidates": ["/path/to/web", "/path/to/apps/site"],
  "candidate_info": [{"dir": "/path/to/web", "command": "bunx vite --host 127.0.0.1 --port 5180 --strictPort"}],
  "others": [{"port": 3200, "dir": "/path/wt/witsper-ops", "pid": 44112, "kind": "next", "relation": "same_dir", "repo": "wt"}]}
@@ -551,7 +551,10 @@ bot 或 active Run 不存在 404。
   （cwd 是這顆 bot 的候選目錄**或它的工作目錄**，`auto` 會自動接它）／`same_repo`（同一個 repo 的別份 checkout：git common dir 或 origin URL 相同）／
   `other`（別的專案，判不出 repo 也算）；判 repo 與 same_dir 一律看 bot 自己的工作目錄，跟有沒有找到候選無關。`repo` 是分組顯示用的 repo 名。
   排序 same_dir、same_repo、other，各自依 port。非 `same_dir` 的不自動接（畫面上看到的不是這顆 bot 工作樹的程式碼），要用 `mode=attach` 明確挑。
-- `GET`／`POST` 回全部欄位；`off` 時只有 `status`＋`candidates`／`candidate_info`／`command`／`others`，`DELETE` 只回 `{"status":"off"}`。
+- `lan`（issue #527）：這顆 daemon 的 `allow_lan`。**三個端點都帶**（`DELETE` 那份也有）。`false` ＝ daemon 起的 dev server 釘在
+  loopback（下一條），所以只有跟 daemon 同一台機器的瀏覽器連得到 `port`；前端據此在手機／別台機器上把 iframe 換成說明，
+  而不是顯示一片空白。舊 daemon 沒有這個欄位＝不知道，前端不下結論。
+- `GET`／`POST` 回全部欄位；`off` 時只有 `status`＋`lan`＋`candidates`／`candidate_info`／`command`／`others`，`DELETE` 回 `{"status":"off","lan":…}`。
   `failed` 的 `error` 帶原因與 pane 最後 40 行。iframe 網址用 `http://${location.hostname}:${port}/`。
 - **綁到對外介面一律 `failed`**（issue #434、#452）：`allow_lan` 關著時，daemon 起的 dev server（`source=spawned`）會量它實際 listen 的位址——
   轉 `running` 的那一拍一定量，之後 `running` 期間每 60 秒再量一次（起來之後才改綁對外的也要抓得到）。有任何一個不是 loopback

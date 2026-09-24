@@ -25,6 +25,11 @@ export interface Preview {
   command: string | null
   /** v2：本機在跑的 dev server（v3 起含別的 repo，帶 relation；v4 起帶 kind）。 */
   others: PreviewOther[]
+  /**
+   * v6：daemon 的 `allow_lan`（issue #527）。`false` ＝它起的 dev server 釘在 loopback（#434／#452），
+   * 只有跟 daemon 同一台機器的瀏覽器連得到；`null` ＝舊 daemon 沒這一格＝不知道，不下結論。
+   */
+  lan: boolean | null
 }
 
 export interface PreviewCandidate {
@@ -68,6 +73,7 @@ export const PREVIEW_OFF: Preview = {
   candidates: [],
   command: null,
   others: [],
+  lan: null,
 }
 
 const posInt = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.floor(v) : null)
@@ -104,6 +110,7 @@ export function toPreview(v: unknown): Preview {
       })
     })(),
     command: optStr(pick(v, 'command')),
+    lan: typeof pick(v, 'lan') === 'boolean' ? (pick(v, 'lan') as boolean) : null,
     others: (() => {
       const x = pick(v, 'others')
       if (!Array.isArray(x)) return []
@@ -210,6 +217,25 @@ export async function stopPreview(botId: string): Promise<Preview> {
  */
 export function previewUrl(port: number): string {
   return `http://${location.hostname}:${port}/`
+}
+
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1', ''])
+
+/** 這個頁面是從跑 daemon 的那台機器自己開的嗎。 */
+export function isLoopbackHost(hostname: string): boolean {
+  return LOOPBACK_HOSTS.has(hostname.toLowerCase())
+}
+
+/**
+ * 這個瀏覽器連不連得到那顆 dev server（issue #527）。
+ *
+ * `allow_lan` 關著時 daemon 把自己起的 dev server 釘在 loopback（#434／#452），而 iframe 的網址是
+ * `http://${location.hostname}:${port}/`——從手機或別台機器開的話那個 host 不是 loopback，一定連不到
+ * （走 tailscale serve 的 https 頁面更是連請求都不會發：http 的 iframe 被當 mixed content 擋掉）。
+ * `lan === null`（舊 daemon）＝不知道，不擋。
+ */
+export function previewOutOfReach(lan: boolean | null, hostname: string): boolean {
+  return lan === false && !isLoopbackHost(hostname)
 }
 
 
