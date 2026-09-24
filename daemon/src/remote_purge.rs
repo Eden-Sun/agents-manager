@@ -93,6 +93,13 @@ pub async fn pending(pool: &SqlitePool, host: &str) -> Result<Vec<String>> {
 /// （hook spool、shim），而遠端同時是外部編譯主機，磁碟已經被 #141／#196 塞爆過兩次。
 /// 清理跟「還欠著誰的目錄」是兩件事，所以排在 `pending` 之前：那一段讀不到也要清。
 /// 代價是每輪多一次 ssh（腳本很短，走既有的 ControlMaster）。
+///
+/// **每顆都在它自己的 per-bot 鎖裡重讀一次 `deleted_at`**（issue #511）：`pending` 讀完到真的
+/// `mv` 之間隔著一次 `active_run` 與一整段 ssh，一輪最多 100 顆、可以是好幾分鐘。這段時間裡使用者按
+/// 「復原」（`restore_bot`，拿的就是這把鎖）的話，以前照樣會把**剛還原的活 bot** 的遠端目錄搬進回收區、
+/// 連本機的 `attachments/<id>/` 一起帶走，還補回一列 `purged_at`——那列會讓這顆之後真的被刪時
+/// 被 [`pending`] 的 `NOT EXISTS` 排除，遠端目錄從此沒有人回收（#349／#411 的帳被消掉）。
+/// `delete_intents::resume_bot`／`resume_project` 與開機清掃本來就是先拿鎖／先重讀，只有這條漏掉。
 pub async fn sweep(app: &Arc<App>, host: &str) -> (usize, usize) {
     if host == crate::config::LOCAL_HOST {
         return (0, 0);
@@ -105,8 +112,31 @@ pub async fn sweep(app: &Arc<App>, host: &str) -> (usize, usize) {
             return (0, 0);
         }
     };
+    // 讀完「誰欠著」、還沒拿任何一把鎖的那一瞬（測試在這裡把其中一顆還原掉）。
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("remote_sweep_after_pending", host).await;
     let (mut purged, mut kept) = (0, 0);
     for id in ids {
+        // `restore_bot` 拿的是同一把：拿到之後看到的 `deleted_at` 就是最終的答案。
+        let _guard = app.bot_lock(&id).await.lock_owned().await;
+        match crate::db::bot(&app.db, &id).await {
+            // 這一輪開始之後被還原了：它是活的，一個檔都不准動，也不准補那列 `purged_at`。
+            Ok(Some(b)) if b.deleted_at.is_none() => {
+                tracing::info!(bot = %id, host, "the bot was restored while this sweep was running; leaving its directory alone");
+                continue;
+            }
+            Ok(Some(_)) => {}
+            // 列不見了（硬刪）或讀不到：fail closed，留著下一輪再說。
+            Ok(None) => {
+                kept += 1;
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(bot = %id, host, error = %e, "could not re-read whether a bot is still deleted; leaving its directory");
+                kept += 1;
+                continue;
+            }
+        }
         match crate::db::active_run(&app.db, &id).await {
             Ok(None) => {}
             Ok(Some(_)) => {
@@ -284,6 +314,30 @@ mod tests {
         sqlx::query("UPDATE runs SET state='exited', ended_at=? WHERE id=?").bind(crate::db::now()).bind(&run).execute(&r.env.app.db).await.unwrap();
         assert_eq!(sweep(&r.env.app, &r.host).await, (1, 0));
         assert_eq!(r.removed(&id), 1);
+    }
+
+    /// **#511**：`pending()` 讀完、還沒輪到這顆之前，使用者按了「復原」。以前 sweep 不拿 per-bot 鎖、
+    /// 也不重讀 `deleted_at`，照樣把**活著的** bot 的遠端目錄搬進回收區，還補回一列 `purged_at`——
+    /// 那列會讓它之後真的被刪時被 `pending` 排除，遠端目錄從此沒人回收。
+    #[tokio::test]
+    async fn a_bot_restored_while_the_sweep_is_running_keeps_its_directory_and_its_debt() {
+        let r = remote("purgehost-restore").await;
+        let app = r.env.app.clone();
+        let id = r.deleted_bot("alfa").await;
+        // child：還原只清 `deleted_at`，不必動 config.toml。
+        sqlx::query("UPDATE bots SET managed_by = 'child' WHERE id = ?").bind(&id).execute(&app.db).await.unwrap();
+
+        let (a2, i2) = (app.clone(), id.clone());
+        crate::lifecycle::race_point::arm("remote_sweep_after_pending", &r.host, move || async move {
+            crate::api::restore_bot(axum::extract::State(a2), axum::extract::Path(i2)).await.unwrap();
+        });
+
+        assert_eq!(sweep(&app, &r.host).await, (0, 0), "還原掉的那顆既沒清也不算欠著");
+        // `removed` 會把還原自己那次 ssh 也算進去（同樣提到 bots-trash 與這顆的 id），所以直接認搬進回收區的那支腳本。
+        let moved_in = r.calls.lock().unwrap().iter().filter(|s| s.contains("AM_TRASHED") && s.contains(&id)).count();
+        assert_eq!(moved_in, 0, "沒有任何一次「搬進回收區」下在這顆身上");
+        assert!(crate::db::bot(&app.db, &id).await.unwrap().unwrap().deleted_at.is_none(), "它是活的");
+        assert!(r.row(&id).await.is_none(), "沒有補回那列 purged_at：之後真的刪它時 pending 還撈得到");
     }
 
     /// 清理只認專案列記的主機：本機專案的已刪 bot 不會被遠端掃描碰到，也不會退回本機去刪。
