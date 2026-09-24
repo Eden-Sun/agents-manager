@@ -472,6 +472,71 @@ async fn a_dry_run_that_cannot_reach_github_says_so_instead_of_guessing() {
     assert_eq!(blocked["versions"][0]["proposals"][0]["writes"], false);
 }
 
+/// #204 review 抓到的分岔：乾跑與真跑各寫一遍上限／already，數字會對不上。
+/// 同一版兩個提案的 `entry_ids` 有交集時（`already` 用 `.any(contains)`，交集就算，而 `proposals_of`
+/// 對重疊沒有任何保證），真跑第一個 create 之後就會跳過第二個——乾跑若讀的是不會長大的 `row.issues`，
+/// 就會說 2 張、實際只開 1 張。這條先乾跑再真跑，斷言兩邊逐項相等。
+#[tokio::test]
+async fn a_dry_run_and_the_real_publish_agree_even_when_two_proposals_share_an_entry() {
+    let p = pool().await;
+    let gh = FakeGh::new("equiv");
+    let es = entries277();
+    ledger::insert_version(&p, "claude", "2.1.277", &es).await.unwrap();
+    let j = judged(&es);
+    // 兩個提案共用 j[0]：第二個還多帶一條 j[1]，所以不是同一組 entry_ids。
+    let stored = vec![
+        StoredProposal {
+            entry_ids: vec![j[0].id.clone()],
+            triage: "guard".into(),
+            title: "第一張".into(),
+            goal: "g".into(),
+            suggestion: "s".into(),
+            acceptance: "a".into(),
+            duplicate_of: None,
+        },
+        StoredProposal {
+            entry_ids: vec![j[0].id.clone(), j[1].id.clone()],
+            triage: "guard".into(),
+            title: "跟第一張重疊".into(),
+            goal: "g".into(),
+            suggestion: "s".into(),
+            acceptance: "a".into(),
+            duplicate_of: None,
+        },
+    ];
+    let v = serde_json::json!({"verdicts": [], "issues": stored});
+    assert!(ledger::save_verdicts(&p, "claude", "2.1.277", &v, Status::Judged).await.unwrap());
+
+    let cfg = gh.cfg(true);
+    let dry = issue::preflight(&p, &cfg, None, None).await.unwrap();
+    assert_eq!(actions(&dry), ["create", "already_logged"], "第二個跟第一個重疊，乾跑就要說不會開");
+    assert_eq!(row(&p).await.issues.len(), 0, "乾跑沒動帳本");
+
+    let real = issue::publish_version(&p, &cfg, "claude", "2.1.277").await.unwrap();
+    let Outcome::Published { created, commented, existing, .. } = real else { panic!("{real:?}") };
+    assert_eq!(
+        (dry["would_create"].as_u64().unwrap(), dry["would_comment"].as_u64().unwrap(), dry["existing"].as_u64().unwrap()),
+        (created as u64, commented as u64, existing as u64),
+        "乾跑預告與真跑結果必須逐項相等：dry={dry}"
+    );
+    assert_eq!(gh.count("issue create"), 1, "真的只開一張");
+}
+
+/// 上限也要對得上：5 個提案、每版上限 4 張——乾跑與真跑要同樣說 4 開 1 擋。
+#[tokio::test]
+async fn a_dry_run_and_the_real_publish_agree_on_the_per_version_cap() {
+    let p = pool().await;
+    let gh = FakeGh::new("equivcap");
+    seed(&p, &[("guard", &[0], None), ("guard", &[1], None), ("guard", &[2], None), ("guard", &[3], None), ("guard", &[4], None)]).await;
+    let cfg = gh.cfg(true);
+    let dry = issue::preflight(&p, &cfg, None, None).await.unwrap();
+    assert_eq!(actions(&dry), ["create", "create", "create", "create", "skipped_version_limit"]);
+    let real = issue::publish_version(&p, &cfg, "claude", "2.1.277").await.unwrap();
+    let Outcome::Published { created, skipped, .. } = real else { panic!("{real:?}") };
+    assert_eq!(dry["would_create"], json!(created), "乾跑說幾張就是幾張");
+    assert_eq!((created, skipped.len()), (4, 1));
+}
+
 /// 帳本已經有這個 entry 的 issue（上一輪開好了）→ 連 gh 都不必問。
 #[tokio::test]
 async fn a_dry_run_skips_github_for_proposals_already_in_the_ledger() {
