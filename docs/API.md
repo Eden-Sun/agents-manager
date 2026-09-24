@@ -1697,8 +1697,15 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 - `GET /api/supervisor/persona` → `{stored:{version,hash,source,updated_at,seeded_from,length,text},embedded:{hash,length},loaded:{status,run_started_at,evidence},upgrade_available,needs_restart}`。
   持久版是權威（SPEC §18.11）。`loaded.status`：`unknown`（沒在跑）、`stale`（session 比人設舊，確定沒載到）、`unverified`（帶著這份啟動，但看不到 session 現在握著什麼）；`needs_restart` 只在 `stale` 時 true。
 - `PUT /api/supervisor/persona {text,expected_version?}` → 同上。正文改變才版本 +1，並改寫 config.toml 的 bot persona 與 `persona.md`（副本，不要手改）。
+  **身分（issue #462）**：沒帶 `X-AM-Bot-Id` = 使用者／UI，照收（網頁就是這樣改的）；帶了而且驗得過、那顆是角色 bot → 照收；
+  帶了、驗得過、**那顆不是角色 bot** → 403 `role_required`；帶了卻證明不了 → 403 `bot_proof_mismatch`。
+  改動成功一律留痕：`daemon.log` 記一行，並推一則 inbox `persona_changed` 給巡檢（payload `{actor,verified,how,version,old_hash,new_hash,old_bytes,new_bytes,old_lines,new_lines}`，
+  `actor` 是 `AGM:<role>` 或 `user`）。權威寫入成功就留痕，**不會被 projection 失敗吃掉**。同一段文字重送（修 projection）不算改動，不再推。
+  `/api/supervisor/responder/persona` PUT 同一套。
+  「沒帶身分＝使用者」這條界線本身留在 #447 等 per-bot token。
   `expected_version` 對不上且正文不同 409 `version_mismatch`；副本同步失敗 409 `persona_sync_incomplete`（帶 `stored:true` 與 `version`，重送相同正文可修復且不加版本）。
 - `POST /api/supervisor/persona/adopt-embedded {actor?,reason?}` → `{changed,version,hash}`：內嵌版取代持久版的唯一路徑。
+  身分與留痕同 `PUT`（issue #462）。
   持久版的 hash 已經等於內嵌版時回 **200** `{"changed":false,"reason":"already_identical","version"}`（**不是錯誤**：副本照樣重新同步一次，版本不動）。
 - `GET /api/supervisor/build-inputs` → `{paths,embedded:[{path,symbol}],note}`：會編進 binary 的路徑（含 `docs/goals/agm-supervisor-persona.md`、`docs/goals/agm-responder-persona.md`、`scripts/agm.py`）。
 

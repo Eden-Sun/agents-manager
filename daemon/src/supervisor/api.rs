@@ -809,9 +809,73 @@ pub struct PersonaIn {
     pub expected_version: Option<i64>,
 }
 
+/// 改寫總管人設的呼叫端是誰（issue #462）。
+///
+/// 共用 UI token 的前提下「沒帶身分＝使用者」這個預設不動（網頁就是這樣改 persona 的），所以：
+///
+/// | `X-AM-Bot-Id` | 結果 |
+/// |---|---|
+/// | 沒帶 | `Ok("user")`＝使用者／UI，照收 |
+/// | 帶了、驗得過、那顆是角色 bot | `Ok("AGM:<role>")` |
+/// | 帶了、驗得過、**那顆不是角色 bot** | **403 `role_required`** |
+/// | 帶了、證明不了 | **403 `bot_proof_mismatch`**（`verified_bot_id` 丟的） |
+///
+/// 第三列是這張票的重點：人設就是總管跑的那份角色前導詞（`persona.rs`、`setup.rs`），
+/// 一顆普通 bot 沒有理由改寫它；而它本來連 `HeaderMap` 都不收。
+/// 界線（沒帶身分仍然過得去）留在 #447 等 per-bot token。
+pub(super) async fn persona_actor(app: &Arc<App>, headers: &HeaderMap) -> Result<String, LcError> {
+    let Some(id) = super::bot_requests::verified_bot_id(app, headers).await? else {
+        return Ok("user".to_string());
+    };
+    match super::roles::role_of_bot(&app.db, &id).await.map_err(up)? {
+        Some(r) => Ok(format!("{}:{}", store::SUPERVISOR_ID, r.as_str())),
+        None => Err(LcError::Forbidden(json!({
+            "error": "forbidden",
+            "reason": "role_required",
+            "message": "改寫總管人設只有 AGM 角色或沒有 bot 身分的使用者做得到：這顆 bot 證明得了自己，但它不是巡檢也不是協調者",
+            "bot_id": id,
+        }))),
+    }
+}
+
+/// 人設換了就讓它看得見：log 一行＋推一則 `persona_changed` 給巡檢（issue #462）。
+///
+/// 沒帶身分的呼叫端照收，但「照收」不等於「沒發生過」——改的是總管之後照著做事的那份字，
+/// 而 `persona.rs` 自己說線上載入的那份不可觀測，不留痕跡的話改完不會有人發現。
+pub(super) async fn note_persona_change(app: &Arc<App>, actor: &str, old: Option<&str>, new: &str, version: i64, how: &str) {
+    let lines = |t: &str| t.lines().count();
+    let (old_len, new_len) = (old.map(str::len).unwrap_or(0), new.len());
+    let summary = json!({
+        "actor": actor,
+        "verified": actor != "user",
+        "how": how,
+        "version": version,
+        "old_hash": old.map(super::persona::hash),
+        "new_hash": super::persona::hash(new),
+        "old_bytes": old_len, "new_bytes": new_len,
+        "old_lines": old.map(lines).unwrap_or(0), "new_lines": lines(new),
+    });
+    tracing::info!(
+        actor,
+        how,
+        version,
+        old_bytes = old_len,
+        new_bytes = new_len,
+        old_hash = old.map(super::persona::hash).unwrap_or_default(),
+        new_hash = super::persona::hash(new),
+        "AGM persona rewritten"
+    );
+    // 一個版本一則：同一版重送（修 projection）不該再叫醒巡檢一次。
+    let key = format!("persona:{version}:changed");
+    if let Err(e) = store::push_inbox(&app.db, &key, "persona_changed", None, None, None, &summary).await {
+        tracing::warn!(error = ?e, "persona 換了，但通知寫不進 inbox");
+    }
+}
+
 /// Set the persona. This is the supported path — not editing `config.toml` by hand, and not
 /// waiting for some binary's default to win.
-pub async fn put_persona(State(app): State<Arc<App>>, Json(b): Json<PersonaIn>) -> Result<Json<Value>, LcError> {
+pub async fn put_persona(State(app): State<Arc<App>>, headers: HeaderMap, Json(b): Json<PersonaIn>) -> Result<Json<Value>, LcError> {
+    let actor = persona_actor(&app, &headers).await?;
     let text = b.text.trim();
     if text.is_empty() {
         return Err(LcError::Bad("persona text must not be empty".into()));
@@ -826,8 +890,13 @@ pub async fn put_persona(State(app): State<Arc<App>>, Json(b): Json<PersonaIn>) 
             ));
         }
     }
-    let version = if sup.persona_text.as_deref() == Some(text) { sup.persona_version }
-        else { store::set_persona(&app.db, text, "api", None).await.map_err(up)? };
+    let changed = sup.persona_text.as_deref() != Some(text);
+    let version = if changed { store::set_persona(&app.db, text, "api", None).await.map_err(up)? } else { sup.persona_version };
+    // 留痕擺在 `sync_persona` **之前**：DB 那一份才是權威，projection 寫不出去時文字已經生效了
+    // （`sync_persona` 的說明就是這個意思）。把留痕放在後面的話，部分失敗＝改了卻沒人知道。
+    if changed {
+        note_persona_change(&app, &actor, sup.persona_text.as_deref(), text, version, "api").await;
+    }
     sync_persona(&app, text, version).await?;
     drop(_g);
     app.emit("supervisor_changed", json!({"persona_version": version})).await;
@@ -846,8 +915,10 @@ pub struct AdoptIn {
 /// — a migration somebody asked for, recorded as such, never a side effect of running `setup`.
 pub async fn post_persona_adopt(
     State(app): State<Arc<App>>,
+    headers: HeaderMap,
     Json(b): Json<AdoptIn>,
 ) -> Result<Json<Value>, LcError> {
+    let actor = persona_actor(&app, &headers).await?;
     let embedded = setup::persona_body();
     let _g = super::lock().await;
     let sup = store::get_or_init(&app.db).await.map_err(up)?;
@@ -856,15 +927,14 @@ pub async fn post_persona_adopt(
         sync_persona(&app, &embedded, sup.persona_version).await?;
         return Ok(Json(json!({"changed": false, "reason": "already_identical", "version": sup.persona_version})));
     }
+    let previous = sup.persona_text.clone();
     let version = store::set_persona(&app.db, &embedded, "embedded", Some(&embedded_hash)).await.map_err(up)?;
+    note_persona_change(&app, &actor, previous.as_deref(), &embedded, version, "adopt_embedded").await;
     sync_persona(&app, &embedded, version).await?;
     drop(_g);
-    tracing::info!(
-        version,
-        actor = b.actor.as_deref().unwrap_or("AGM"),
-        reason = b.reason.as_deref().unwrap_or(""),
-        "AGM persona migrated to the embedded version"
-    );
+    // `actor` 從驗過的身分來，不是 body 自稱的（issue #463）：以前這裡是
+    // `b.actor.as_deref().unwrap_or("AGM")`，任何呼叫端都能把這行 log 掛成 AGM。
+    tracing::info!(version, actor, reason = b.reason.as_deref().unwrap_or(""), "AGM persona migrated to the embedded version");
     app.emit("supervisor_changed", json!({"persona_version": version})).await;
     Ok(Json(json!({"changed": true, "version": version, "hash": embedded_hash})))
 }
@@ -1415,21 +1485,21 @@ mod persona_sync_tests {
         let initial = store::get_or_init(&app.db).await.unwrap().persona_version;
         // persona.md cannot be created yet. A partial sync must be visible, while the new
         // authoritative text remains durable and recoverable using the exact same request.
-        let err = put_persona(State(app.clone()), Json(PersonaIn {
+        let err = put_persona(State(app.clone()), HeaderMap::new(), Json(PersonaIn {
             text: "new persona".into(), expected_version: Some(initial),
         })).await.unwrap_err();
         assert!(format!("{err:?}").contains("persona_sync_incomplete"));
         let stored = store::get_or_init(&app.db).await.unwrap();
         assert_eq!(stored.persona_text.as_deref(), Some("new persona"));
         std::fs::create_dir_all(setup::agm_dir(&app)).unwrap();
-        let repaired = put_persona(State(app.clone()), Json(PersonaIn {
+        let repaired = put_persona(State(app.clone()), HeaderMap::new(), Json(PersonaIn {
             text: "new persona".into(), expected_version: Some(initial),
         })).await.unwrap().0;
         assert_eq!(repaired["stored"]["version"], stored.persona_version);
         assert_eq!(std::fs::read_to_string(setup::agm_dir(&app).join("persona.md")).unwrap(), "new persona");
         assert_eq!(crate::db::bot(&app.db, &bid).await.unwrap().unwrap().persona.as_deref(), Some("new persona"));
         // An old request with DIFFERENT text still cannot overwrite the new revision.
-        assert!(put_persona(State(app.clone()), Json(PersonaIn {
+        assert!(put_persona(State(app.clone()), HeaderMap::new(), Json(PersonaIn {
             text: "stale edit".into(), expected_version: Some(initial),
         })).await.is_err());
         app.db.close().await;
@@ -1459,6 +1529,92 @@ mod approval_decision_tests {
 
     async fn pending(app: &Arc<App>) -> String {
         store::create_approval(&app.db, "fixer", "rebuild", "release", Some("abc123"), None, None).await.unwrap().approval.id
+    }
+
+    /// issue #462：改寫總管人設以前連 `HeaderMap` 都不收。共用 UI token 的前提下「沒帶身分＝
+    /// 使用者」的預設不動（網頁就是這樣改的），但**證明得了自己卻不是角色 bot** 的呼叫端要 403——
+    /// 一顆普通 bot 沒有理由改寫總管跑的那份角色前導詞。而且不管誰改，都要留下痕跡。
+    #[tokio::test]
+    async fn rewriting_the_persona_is_refused_for_a_bot_that_is_not_a_role_and_always_leaves_a_trace() {
+        let app = app().await;
+        let agm = agm_role_headers(&app).await; // 巡檢角色
+        // 這個精簡的測試 app 沒有 manager bot 的 config 列，`sync_persona` 必然回
+        // `persona_sync_incomplete`。那正好是要測的那一格：權威寫入已經生效，留痕不能被它吃掉。
+        let put = |app: &Arc<App>, h: HeaderMap, text: &str| {
+            let (app, text) = (app.clone(), text.to_string());
+            async move {
+                match put_persona(State(app), h, Json(PersonaIn { text, expected_version: None })).await {
+                    Ok(_) => Ok(()),
+                    Err(LcError::Conflict(v)) if v["reason"] == "persona_sync_incomplete" => Ok(()),
+                    Err(e) => Err(e),
+                }
+            }
+        };
+        let inbox = |app: &Arc<App>| {
+            let app = app.clone();
+            async move {
+                sqlx::query_as::<_, (String, String)>(
+                    "SELECT payload_json, COALESCE(role,'') FROM supervisor_inbox WHERE kind='persona_changed' ORDER BY rowid",
+                )
+                .fetch_all(&app.db)
+                .await
+                .unwrap()
+            }
+        };
+
+        // 1) 驗得過、但那顆不是角色 bot：403，一個字都不寫。
+        let plain = crate::db::ulid();
+        sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES (?,'p-agm','plain','claude','plain-tok',?)")
+            .bind(&plain)
+            .bind(crate::db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let mut plain_h = HeaderMap::new();
+        plain_h.insert("X-AM-Bot-Id", plain.parse().unwrap());
+        plain_h.insert("X-AM-Bot-Token", "plain-tok".parse().unwrap());
+        let err = put(&app, plain_h, "一顆普通 bot 塞進來的指示").await.unwrap_err();
+        let LcError::Forbidden(v) = &err else { panic!("expected 403, got {err:?}") };
+        assert_eq!(v["reason"], "role_required");
+        assert!(store::get_or_init(&app.db).await.unwrap().persona_text.is_none(), "被擋下就不該寫進去");
+        assert!(inbox(&app).await.is_empty(), "被擋下就不該推通知");
+
+        // 2) 宣告了身分卻證明不了：403（`verified_bot_id` 丟的），也不寫。
+        let mut forged = HeaderMap::new();
+        forged.insert("X-AM-Bot-Id", plain.parse().unwrap());
+        forged.insert("X-AM-Bot-Token", "nope".parse().unwrap());
+        let err = put(&app, forged, "冒名塞進來的指示").await.unwrap_err();
+        assert!(matches!(&err, LcError::Forbidden(v) if v["reason"] == "bot_proof_mismatch"), "got {err:?}");
+        assert!(store::get_or_init(&app.db).await.unwrap().persona_text.is_none());
+
+        // 3) 沒宣告身分＝使用者／UI：照收（界線留在 #447），但要留痕，記成 user、歸巡檢。
+        put(&app, HeaderMap::new(), "使用者從網頁改的").await.unwrap();
+        let rows = inbox(&app).await;
+        assert_eq!(rows.len(), 1, "每次真的改動都要推一則");
+        let p: Value = serde_json::from_str(&rows[0].0).unwrap();
+        assert_eq!(p["actor"], "user");
+        assert_eq!(p["verified"], json!(false));
+        assert_eq!(p["how"], "api");
+        assert_eq!(p["old_bytes"], json!(0), "第一次沒有舊文字");
+        assert_ne!(p["new_hash"], p["old_hash"], "diff 摘要要看得出換了");
+        crate::supervisor::roles::classify(&app.db).await.unwrap();
+        assert_eq!(inbox(&app).await[0].1, "patrol", "persona_changed 歸巡檢");
+
+        // 4) 角色 bot：照收，記成 AGM:<role>。
+        put(&app, agm, "協調者改的").await.unwrap();
+        let rows = inbox(&app).await;
+        assert_eq!(rows.len(), 2);
+        let p: Value = serde_json::from_str(&rows[1].0).unwrap();
+        assert_eq!(p["actor"], format!("{}:patrol", store::SUPERVISOR_ID));
+        assert_eq!(p["verified"], json!(true));
+        assert_eq!(p["old_bytes"], json!("使用者從網頁改的".len()), "舊文字的長度要對");
+
+        // 5) 同一段文字再送一次（修 projection）：不是改動，不該再叫醒巡檢一次。
+        put(&app, HeaderMap::new(), "協調者改的").await.unwrap();
+        assert_eq!(inbox(&app).await.len(), 2, "重送同一段文字不該再推一則");
+
+        app.db.close().await;
+        std::fs::remove_dir_all(&app.data_dir).unwrap();
     }
 
     /// 第一個裁示定案。後到的 deny 不能把 approved 翻成 denied——那會讓同一筆核准有兩個
