@@ -816,7 +816,8 @@ pub async fn start(app: &Arc<App>, bot_id: &str, req: StartReq) -> LcResult<Valu
     let _g = gate().lock().await;
     // 已經在跑（或在起）而且對得上帳：原樣回；明確指定了別的（換目錄、換接哪顆）才先斷開再來。
     if let Some(r) = refresh_locked(app, bot_id).await {
-        if r.status().is_live() {
+        let status = r.status();
+        if status.is_live() {
             if !explicit {
                 #[cfg(not(test))]
                 spawn_watcher(app.clone(), bot_id.to_string());
@@ -826,6 +827,15 @@ pub async fn start(app: &Arc<App>, bot_id: &str, req: StartReq) -> LcResult<Valu
                 Some(stopped) if !stopped.status().is_live() => {}
                 _ => {
                     // 明確切換不能把舊 pane 關掉時，不能繼續起第二顆，否則會留下孤兒 server。
+                    return Err(LcError::conflict("preview_stop_failed", json!({"bot_id": bot_id})));
+                }
+            }
+        } else if status == Status::Failed {
+            // A failed server can leave its service pane alive at a shell prompt. Close it
+            // before retrying, otherwise replacing the row below leaves an orphan pane.
+            match disconnect_locked(app, r).await {
+                Some(stopped) if !stopped.status().is_live() => {}
+                _ => {
                     return Err(LcError::conflict("preview_stop_failed", json!({"bot_id": bot_id})));
                 }
             }

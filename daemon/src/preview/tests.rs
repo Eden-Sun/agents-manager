@@ -486,6 +486,23 @@ async fn a_start_that_never_listens_fails_with_the_pane_tail() {
 }
 
 #[tokio::test]
+async fn retry_closes_a_failed_preview_pane_before_spawning_again() {
+    let r = rig().await;
+    let bot = running_bot(&r, "alfa").await;
+    let first = start(&r.e.app, &bot, StartReq::default()).await.unwrap();
+    let old_pane = first["pane_id"].as_str().unwrap().to_string();
+    let old = (chrono::Utc::now() - chrono::Duration::seconds(61)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    sqlx::query("UPDATE bot_previews SET started_at = ? WHERE bot_id = ?").bind(old).bind(&bot).execute(&r.e.app.db).await.unwrap();
+
+    assert_eq!(status(&get(&r.e.app, &bot).await.unwrap()), "failed");
+    assert!(r.fake.closed.lock().unwrap().is_empty(), "失敗當下仍保留 pane，應由重試清理");
+
+    let second = start(&r.e.app, &bot, StartReq::default()).await.unwrap();
+    assert_eq!(r.fake.closed.lock().unwrap().clone(), vec![old_pane]);
+    assert_ne!(second["pane_id"], first["pane_id"]);
+}
+
+#[tokio::test]
 async fn a_running_preview_whose_vite_died_fails_and_one_whose_pane_was_closed_goes_off() {
     let r = rig().await;
     let bot = running_bot(&r, "alfa").await;

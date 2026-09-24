@@ -2049,7 +2049,8 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   | `running` | pane 被關了 | `off`（使用者關的，不是錯） |
   | `running` | pane 在、port 不再 listen | `failed`（server 自己掛了；`attached` 是 `off`） |
 
-  herdr 沒回答（`pane_alive` 問不到）當「沒變」，不當「不在」。`failed` 之後再 `POST` 就是重試：舊 pane 已收、port 重挑。
+  herdr 沒回答（`pane_alive` 問不到）當「沒變」，不當「不在」。`failed` 之後再 `POST` 就是重試：server 掛了 pane 可能還停在 shell，所以先關掉 `failed` 那列的 pane 再起新的、port 重挑；
+  關不掉就 409 `preview_stop_failed`、不起新的（否則舊 pane 變成沒人管的孤兒）。
 - **誰在看**（#260）：預覽在 `starting`／`running` 期間有一個常駐監看（一顆 bot 一個，登記在 `gate` 裡，重複的 `POST`／`GET`／開機對帳不會多掛）：
   `starting` 每秒、`running` 每 5 秒對一次帳（pane 還在不在＋port 有沒有在 listen），離開這兩個狀態（`off`／`failed`／這列沒了）才結束。
   server 半路掛掉（`spawned` 轉 `failed`、`attached` 轉 `off`）不必等人 `GET` 才發現，狀態一變就推 `preview_changed`。
