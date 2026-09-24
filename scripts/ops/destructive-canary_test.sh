@@ -89,5 +89,47 @@ else
     pass=$((pass + 1))
 fi
 
+# 8b. **子 bash 裡的 rm**：`rm` 依賴 `_am_canary_real`，只匯出 rm 而沒匯出助手時，
+#     子 bash 裡助手不見、正規化回空字串，結果是「什麼都擋」——連正當的暫存清理都被擋掉。
+#     實測會讓整套 ops 紅（找不到對象／殘留鎖…一整排），所以這一條要釘住。
+legit2="${ROOT}/legit-child"
+rc=$(bash -c 'eval "$('"${CANARY}"' arm "'"${D}"'")"; bash -c "mkdir -p '"${legit2}"'/sub && rm -rf '"${legit2}"' && echo \$?"')
+check "子 bash：暫存目錄內的 rm 照常能刪（助手函式也要匯出）" 0 "${rc}"
+if [ -d "${legit2}" ]; then
+    echo "FAIL - 子 bash 的 rm 應該真的刪掉，但目錄還在"
+    fail=$((fail + 1))
+else
+    echo "ok   - 子 bash 的 rm 真的刪掉了"
+    pass=$((pass + 1))
+fi
+
+# 9. baseline 壞掉一定要紅（rebase 最常留下的兩種）。原本兩種都只會噴
+#    「integer expected」到 stderr 然後 rc=0＋亂算的總數——棘輪被靜靜關掉（i407 審核）。
+BL="scripts/ops/canary-baseline.tsv"
+if [ -f "${BL}" ]; then
+    WORK="${ROOT}/repo"
+    mkdir -p "${WORK}/scripts/ops"
+    cp "${BL}" "${WORK}/${BL}"
+    dup="${WORK}/dup.tsv"
+    { cat "${BL}"; printf 'scripts/ops/pane-gc_test.sh\t99\n'; } > "${WORK}/${BL}"
+    ( cd "${WORK}" && "${CANARY}" lint >/dev/null 2>&1 ); rc=$?
+    check "baseline 有重複檔名時整支要紅" 1 "${rc}"
+    { cat "${BL}"; printf '<<<<<<< HEAD\n'; } > "${WORK}/${BL}"
+    ( cd "${WORK}" && "${CANARY}" lint >/dev/null 2>&1 ); rc=$?
+    check "baseline 留著衝突標記時整支要紅" 1 "${rc}"
+    : "${dup}"
+fi
+
+# 10. rm：相對路徑與 symlink 繞不過去（純字串前綴比對擋不住這兩種）。
+rc=$(bash -c 'eval "$('"${CANARY}"' arm "'"${D}"'")"; cd /tmp && rm ../nonexistent-am-canary-sentinel >/dev/null 2>&1; echo $?')
+check "rm：cd 之後用 ../ 指到暫存外也要擋" 99 "${rc}"
+link="${ROOT}/linkfarm"
+mkdir -p "${link}"
+ln -sfn / "${link}/toroot" 2>/dev/null || true
+if [ -L "${link}/toroot" ]; then
+    rc=$(bash -c 'eval "$('"${CANARY}"' arm "'"${D}"'")"; rm "'"${link}"'/toroot/nonexistent-am-canary-sentinel" >/dev/null 2>&1; echo $?')
+    check "rm：經 symlink 指到暫存外也要擋" 99 "${rc}"
+fi
+
 echo "${pass} passed, ${fail} failed"
 [ "${fail}" -eq 0 ]
