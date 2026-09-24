@@ -558,7 +558,7 @@ fn instruction_files_of(bot: &db::Bot) -> &'static str {
 /// Write a file only its owner can read (0600): bot settings may carry secrets.
 /// 先寫 0600 的暫存檔再 rename 蓋過去：新內容永遠不會進到既有（可能是 0644 的）inode，
 /// 成功回傳就代表最終檔是 0600；任何一步失敗都回錯並刪掉暫存檔，舊檔維持原樣。
-fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::io::Write as _;

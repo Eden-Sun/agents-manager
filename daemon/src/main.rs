@@ -278,23 +278,89 @@ fn main() {
     }
 }
 
+/// UI token 是整個 API 的主憑證（`api::auth`、`cargo_shim` 直接讀這個檔，`outbox` 把它列進「就是憑證」
+/// 的檔名黑名單），所以它只能是 0600。issue #512：以前是 `fs::write` 先建一個 0644 的 inode、寫進明文
+/// token 之後才 chmod，而且 chmod 失敗被 `let _` 吞掉；既有檔走早退那條路時權限更是連看都不看。
+/// 新檔走 `write_private`（0600 的暫存檔 + rename，新內容永遠不進舊 inode）；既有檔開機時修回 0600，
+/// 修不動就 warn——不擋開機（token 本身是好的），但不能沉默。
 fn load_or_create_ui_token(dir: &PathBuf) -> Result<String> {
     let path = dir.join("ui-token");
     if let Ok(s) = std::fs::read_to_string(&path) {
         let s = s.trim().to_string();
         if !s.is_empty() {
+            tighten_ui_token(&path);
             return Ok(s);
         }
     }
     let tok = projection::new_token();
-    std::fs::write(&path, &tok)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    }
+    lifecycle::setup::write_private(&path, tok.as_bytes())
+        .with_context(|| format!("write {}", path.display()))?;
     Ok(tok)
 }
+
+/// [`tighten_ui_token`] 這一趟做了什麼（測試看得到，`serve` 只拿它記 log）。
+#[derive(Debug, PartialEq, Eq)]
+enum Tightened {
+    /// 已經是 0600。
+    AlreadyPrivate,
+    /// 讀不到權限（檔案剛被刪、掛載點沒了）：不猜，交給下一次開機。
+    Unknown,
+    /// 從 `mode` 改回 0600。
+    Repaired(u32),
+    /// 過寬但改不動——例如檔案是別人的、或掛在唯讀檔案系統上。
+    Failed(u32),
+}
+
+/// 既有 ui-token 的權限比 0600 寬就修回來（備份還原、rsync、手動複製都會把它放寬）。
+#[cfg(unix)]
+fn tighten_ui_token(path: &std::path::Path) {
+    // 包一層具名 fn：直接傳泛型的 `std::fs::set_permissions` 會被實例化成某個固定 lifetime，
+    // 滿足不了 `for<'a> Fn(&'a Path, ..)`。
+    fn chmod(p: &std::path::Path, perm: std::fs::Permissions) -> std::io::Result<()> {
+        std::fs::set_permissions(p, perm)
+    }
+    let outcome = tighten_with(path, chmod);
+    // uid 一起記：過寬的 token 誰讀得到，看檔案是誰的最直接（i92b review）。
+    let owner = file_owner(path);
+    match outcome {
+        Tightened::AlreadyPrivate | Tightened::Unknown => {}
+        Tightened::Repaired(mode) => {
+            tracing::warn!(path = %path.display(), found = format!("{mode:o}"), uid = owner, "ui-token 權限過寬，已改回 0600")
+        }
+        Tightened::Failed(mode) => {
+            tracing::warn!(path = %path.display(), found = format!("{mode:o}"), uid = owner, "ui-token 權限過寬且改不回 0600；這把 token 是整個 API 的憑證，請手動 chmod 600")
+        }
+    }
+}
+
+/// `chmod` 抽成參數：失敗那條分支同一個使用者沒辦法用真的檔案系統造出來
+/// （chmod 自己的檔案不會失敗），只好從這裡注入（i92b review）。
+#[cfg(unix)]
+fn tighten_with(
+    path: &std::path::Path,
+    chmod: impl Fn(&std::path::Path, std::fs::Permissions) -> std::io::Result<()>,
+) -> Tightened {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(mode) = std::fs::metadata(path).map(|m| m.permissions().mode() & 0o777) else {
+        return Tightened::Unknown;
+    };
+    if mode == 0o600 {
+        return Tightened::AlreadyPrivate;
+    }
+    match chmod(path, std::fs::Permissions::from_mode(0o600)) {
+        Ok(()) => Tightened::Repaired(mode),
+        Err(_) => Tightened::Failed(mode),
+    }
+}
+
+#[cfg(unix)]
+fn file_owner(path: &std::path::Path) -> String {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).map(|m| m.uid().to_string()).unwrap_or_else(|_| "?".into())
+}
+
+#[cfg(not(unix))]
+fn tighten_ui_token(_path: &std::path::Path) {}
 
 async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Result<()> {
     tracing_subscriber::fmt()
@@ -501,6 +567,67 @@ fn _assert_send(_: &Arc<state::App>) {}
 mod tests {
     use super::*;
     use std::path::Path;
+
+    /// issue #512：新建的 ui-token 一開始就要是 0600（不留 `write` 與 `chmod` 之間那段 0644 的窗口），
+    /// 既有的過寬檔案開機時要被修回來，而且內容不能被換掉（token 本身是好的）。
+    #[cfg(unix)]
+    #[test]
+    fn the_ui_token_is_owner_only_when_created_and_repaired_when_found_too_open() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("am-ui-token-{}", db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ui-token");
+
+        let fresh = load_or_create_ui_token(&dir).unwrap();
+        assert!(!fresh.is_empty());
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600, "新建的就要是 0600");
+
+        // 備份還原／rsync 把它放寬：開機時修回來，token 不變。
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let again = load_or_create_ui_token(&dir).unwrap();
+        assert_eq!(again, fresh, "既有 token 不可以被換掉");
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600, "過寬的要被修回 0600");
+
+        // 空檔（寫到一半死掉）會重新產生，而且新檔照樣 0600，不沿用舊 inode 的權限。
+        std::fs::write(&path, "   \n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+        let regenerated = load_or_create_ui_token(&dir).unwrap();
+        assert_ne!(regenerated, fresh);
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// i92b review：chmod 失敗那條分支同一個使用者沒辦法用真的檔案系統造出來（chmod 自己的檔案
+    /// 不會失敗），注入一個一定失敗的 chmod 來驗——重點是**不 panic、不換 token、如實回報 Failed**。
+    #[cfg(unix)]
+    #[test]
+    fn a_chmod_that_cannot_run_is_reported_not_swallowed() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("am-ui-token-chmod-{}", db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ui-token");
+        std::fs::write(&path, "tok").unwrap();
+        // 具名 fn 而不是 closure：closure 推不出 `for<'a> Fn(&'a Path, ..)`，會撞
+        // 「implementation of `Fn` is not general enough」。
+        fn boom(_: &Path, _: std::fs::Permissions) -> std::io::Result<()> {
+            Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "nope"))
+        }
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(tighten_with(&path, boom), Tightened::Failed(0o644), "改不動要說改不動");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "tok", "修權限不可以動到內容");
+
+        // 已經是 0600 就根本不叫 chmod（叫了就會炸在 boom 上）。
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(tighten_with(&path, boom), Tightened::AlreadyPrivate);
+
+        // 檔案不見了：不猜、不報錯。
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(tighten_with(&path, boom), Tightened::Unknown);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn bundled_daemon_is_localhost_only() {

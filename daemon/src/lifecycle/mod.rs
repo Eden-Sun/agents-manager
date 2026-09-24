@@ -15,7 +15,7 @@ mod messages;
 pub(crate) mod relay_watch;
 pub(crate) mod dead_panes;
 mod queue;
-mod setup;
+pub(crate) mod setup;
 mod start;
 mod stop;
 mod deferred_live;
