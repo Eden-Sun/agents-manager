@@ -505,7 +505,8 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 
 - `source`：`spawned`＝AG Man 起的（有 `pane_id`）；`attached`＝接上一顆本來就在跑的 server（沒有 pane，`pid` 是那顆行程）。
 - `command`：`spawned` 實際跑的那一行；`off`／`failed` 時是**下一次啟動預設候選會跑的那一行**（`attached` 是 `null`，那是別人開的）。
-  目錄的 `package.json` 有 `dev` script 就是 `bun run dev`（不指定 port：server 自己挑，起來之後 daemon 觀察那顆 pane **實際 listen 的 port**
+  目錄的 `package.json` 有 `dev` script 就是 `bun run dev`（`allow_lan` 關著且認得出框架時後面接 `-- --host 127.0.0.1`／`-- -H 127.0.0.1`，見 SPEC §6.12；
+  不指定 port：server 自己挑，起來之後 daemon 觀察那顆 pane **實際 listen 的 port**
   記進 `port`；在那之前 `starting` 的 `port` 是 `null`），沒有才是 `bunx vite --host <bind> --port <port> --strictPort`。
 - `kind`：`vite`／`next`／`webpack`／`astro`／`remix`／`storybook`／`nuxt`／`rsbuild`／`parcel`／`angular`／`react-scripts`／`bun`／`unknown`。AG Man 用 dev script 起的看 script 內容判（`next dev` 是 `next`），不是看 `bun run dev`。
 - `candidates`：這顆 bot 可以起 dev server 的目錄（在 bot 的工作目錄底下最多找 3 層、最多 20 個；有 `vite.config.*`，**或** `package.json` 帶
@@ -518,6 +519,9 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
   排序 same_dir、same_repo、other，各自依 port。非 `same_dir` 的不自動接（畫面上看到的不是這顆 bot 工作樹的程式碼），要用 `mode=attach` 明確挑。
 - `GET`／`POST` 回全部欄位；`off` 時只有 `status`＋`candidates`／`candidate_info`／`command`／`others`，`DELETE` 只回 `{"status":"off"}`。
   `failed` 的 `error` 帶原因與 pane 最後 40 行。iframe 網址用 `http://${location.hostname}:${port}/`。
+- **綁到對外介面一律 `failed`**（issue #434）：`allow_lan` 關著時，daemon 起的 dev server（`source=spawned`）轉 `running` 的那一拍會量
+  它實際 listen 的位址；有任何一個不是 loopback（`*`／`0.0.0.0`／`[::]`／LAN IP）就記 `failed`，`error` 寫出是哪個位址，**而且把 pane 關掉**
+  （那顆 server 還在對外聽，不能像一般 `failed` 那樣留著）。量不到位址不算違規。`attached` 不受這條管（那是使用者明確挑的別人的 server）。
 
 ### `GET /api/bots/{id}/preview`
 先對一次帳（pane 還在不在、port 有沒有在 listen）再回。`running` 期間 daemon 也有常駐監看（SPEC §6.12），server 半路掛掉會自己轉 `failed`（`attached` 轉 `off`）並推 `preview_changed`，不必等 GET。

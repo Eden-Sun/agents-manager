@@ -2042,16 +2042,31 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   - `POST` 的 `mode`：`auto`（預設）／`attach`（必須帶 `port`，且那個 port 真的是掃到的 dev server，否則 409 `not_vite`）／`spawn`
     （不管有沒有現成的都自己起）；`dir` 從 `candidates` 挑。明確指定（mode／port／dir 任何一個）而且已經有預覽在用時，先斷開舊的
     再照新的來；沒指定就原樣回舊的（冪等）。
-  - 掃描（`PreviewEnv::scan_servers`）、pane 的 listen port（`pane_ports`）與其他行程／port 查詢一樣可注入，測試不碰真行程（#211）。
+  - 掃描（`PreviewEnv::scan_servers`）、pane 的 listen `(位址, port)`（`pane_listeners`）與其他行程／port 查詢一樣可注入，測試不碰真行程（#211）。
     掃不到只影響「自動接」與 `others`，不擋 spawn。
 - **起新的**：`pane.split`（方向往下，只吃高度、不擠寬度）切在**該 bot 自己那顆 pane 旁邊**，也就是它自己的 tab
   （開新 tab 會被 reconcile 串成鏈、長出重複 bot）。要跑的那一行（回應與資料庫的 `command`）：
   - 目錄的 `package.json` 有 `dev` script → **`bun run dev`**。**不硬塞 port**：server 自己挑，起來之後觀察那顆 pane 的行程樹
-    **實際 listen 到哪個 port**（`PreviewEnv::pane_ports`，多個取最小的）記進 `port`；在那之前 `port` 是 `null`。
+    **實際 listen 到哪個 port**（`PreviewEnv::pane_listeners`，多個取最小的）記進 `port`；在那之前 `port` 是 `null`。
     `kind` 看 **dev script 本身**（例如 `next dev` 記 `next`），不是看 `bun run dev` 這一行（那樣一律變 `unknown`）；認不出才是 `unknown`。
+    `allow_lan` 關著時後面再接框架對應的 loopback 旗標（issue #434，見下）。
   - 沒有才退回 `bunx vite --host <bind> --port <port> --strictPort`；`<bind>` 看 daemon 的 `allow_lan`：開著 `0.0.0.0`，否則
     `127.0.0.1`；`<port>` 從 5180 起往上找 100 顆，跳過別的預覽佔著的（`starting`／`running` 的列）與當下有人在 listen 的
     （5173 留給人手開）。`failed`／`off` 的列不佔 port。
+- **綁哪個介面：兩道，缺一不可**（issue #434，`daemon/src/preview_bind.rs`）。`allow_lan` 是 daemon 的對外開關（§7.1，
+  同一個判斷也決定 daemon 自己 bind 哪裡與放不放行同網段的 peer／`Origin`），**由 daemon 起的 dev server 不能繞過它**。
+  以前只有 `bunx vite` 那條受管：`bun run dev` 綁哪裡完全由專案決定，這個 repo 自己的 `web/` 就是
+  `dev: "vite"` ＋ `vite.config.ts` 的 `server.host: true`（＝`0.0.0.0`），`allow_lan` 關著也照樣對外。
+  1. **能指定就指定**：`allow_lan` 關著而且認得出框架時，`bun run dev` 後面接 `-- <旗標> 127.0.0.1`（vite 是 `--host`、
+     next 是 `-H`）。旗標一個框架一個樣，**送錯會讓 dev server 以未知參數直接退出**，所以只列有把握的那兩個；
+     其餘（與 `kind=unknown`）原樣送，交給第 2 道。
+  2. **一律驗**：轉成 `running` 的**那一拍**量一次這顆 pane 行程樹**實際 listen 的位址**（`lsof`，`*`＝全部介面）。
+     `allow_lan` 關著卻有任何一個綁在 loopback 以外 → `failed`（error 寫出是哪個位址），而且**把 pane 關掉**——
+     一般的 `failed` 把 pane 留著給人看錯誤（重試時才收），這一種不行，那顆 server 還活著、還在對外聽。
+     關不掉也照樣記 `failed`（不能繼續說它 `running`），pane 留給重試收。
+     只在那一拍量，之後每一拍維持原本的便宜檢查（不為此一直跑 `lsof`）；量不到（`lsof` 讀不到）**不算違規**：
+     跟這個模組其他地方同一條原則，讀不到是「不知道」，不下結論。
+     只管 `source=spawned` 的：`attached` 是使用者明確挑的別人的 server，綁哪裡不是我們的事，也不准去關它。
 - **狀態**（`bot_previews` 一顆 bot 一列，另有 `source`／`pid`／`command`／`kind`；沒有列＝`off`）：
 
   | 從 | 條件 | 到 |

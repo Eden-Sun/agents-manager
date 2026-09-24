@@ -92,7 +92,8 @@ pub trait PreviewEnv: Send + Sync {
     /// `None`＝掃不到（不是「沒有」）。
     fn scan_servers<'a>(&'a self, roots: &'a [String]) -> BoxFuture<'a, Option<Vec<ViteProc>>>;
     /// 這顆 pane 的行程樹現在 listen 的 port（昇冪）；`None`＝問不到。dev script 起的 server 自己挑 port，靠這個觀察。
-    fn pane_ports<'a>(&'a self, pane_id: &'a str) -> BoxFuture<'a, Option<Vec<u16>>>;
+    /// 這顆 pane 的行程樹實際 listen 的 `(位址, port)`；`None`＝問不到。位址是 #434 用來判有沒有綁到對外介面的。
+    fn pane_listeners<'a>(&'a self, pane_id: &'a str) -> BoxFuture<'a, Option<Vec<(String, u16)>>>;
     /// 這個目錄屬於哪個 git repo；不是 repo 或讀不到＝`None`。
     fn repo_key<'a>(&'a self, dir: &'a str) -> BoxFuture<'a, Option<RepoKey>>;
 }
@@ -185,14 +186,14 @@ impl PreviewEnv for RealEnv {
     fn scan_servers<'a>(&'a self, roots: &'a [String]) -> BoxFuture<'a, Option<Vec<ViteProc>>> {
         Box::pin(scan_real(roots))
     }
-    fn pane_ports<'a>(&'a self, pane_id: &'a str) -> BoxFuture<'a, Option<Vec<u16>>> {
+    fn pane_listeners<'a>(&'a self, pane_id: &'a str) -> BoxFuture<'a, Option<Vec<(String, u16)>>> {
         Box::pin(async move {
             let local = crate::config::LOCAL_HOST;
             let probe = self.app.probe();
             let shell = self.client.pane_shell(pane_id).await.ok()?;
             let dump = probe.dump(&self.app, local).await.ok()?;
             let facts = crate::panes::facts_from(&shell, &dump, pane_id)?;
-            probe.listen_ports(local, &facts.pids).await
+            crate::panes::listen_sockets(local, &facts.pids).await
         })
     }
     fn repo_key<'a>(&'a self, dir: &'a str) -> BoxFuture<'a, Option<RepoKey>> {
@@ -507,8 +508,12 @@ fn read_dev_script(dir: &Path) -> Option<String> {
 
 /// 實際要跑的那一行：目錄有 `dev` script 就 `bun run dev`（不硬塞 port，起來之後觀察它實際 listen 的 port），
 /// 沒有才退回 `bunx vite`（port 由 daemon 挑好）。
-pub fn run_command(dev_script: Option<&str>, allow_lan: bool, port: u16) -> String {
+///
+/// `allow_lan` 關著時，`bun run dev` 那條會再接上框架對應的 loopback 旗標（issue #434）——綁哪裡以前
+/// 完全由專案決定，`allow_lan` 只管得到 `bunx vite` 這條。認不出框架就原樣送，由起來之後的實際位址檢查接住。
+pub fn run_command(dev_script: Option<&str>, kind: &str, allow_lan: bool, port: u16) -> String {
     match dev_script {
+        Some(_) if !allow_lan => crate::preview_bind::pin_dev_command("bun run dev", kind),
         Some(_) => "bun run dev".to_string(),
         None => command(allow_lan, port),
     }
@@ -728,7 +733,11 @@ async fn decorated(app: &Arc<App>, bot: &db::Bot, mut body: Value, live: bool) -
     let info: Vec<Value> = cands
         .iter()
         .zip(&devs)
-        .map(|(c, d)| json!({"dir": c.to_string_lossy(), "command": run_command(d.as_deref(), app.allow_lan, port)}))
+        .map(|(c, d)| {
+            // 顯示的那一行要跟真的會跑的一致（含 #434 接上去的 loopback 旗標）。
+            let kind = d.as_deref().and_then(dev_kind).unwrap_or(if d.is_some() { "unknown" } else { "vite" });
+            json!({"dir": c.to_string_lossy(), "command": run_command(d.as_deref(), kind, app.allow_lan, port)})
+        })
         .collect();
     if !live {
         let base = base_dir(app, bot).await?;
@@ -929,8 +938,10 @@ pub async fn start(app: &Arc<App>, bot_id: &str, req: StartReq) -> LcResult<Valu
                 .ok_or_else(|| LcError::conflict("no_free_port", json!({"from": PORT_START, "span": PORT_SPAN})))?,
         )
     };
-    let cmd = run_command(dev.as_deref(), app.allow_lan, port.unwrap_or(PORT_START));
-    let kind = dev_kind(dev.as_deref().unwrap_or(cmd.as_str())).unwrap_or(if dev.is_some() { "unknown" } else { "vite" });
+    // kind 先算：`run_command` 要靠它決定接哪個 loopback 旗標（#434）。沒有 dev script 時我們自己組的
+    // 那一行一定是 vite。
+    let kind = dev.as_deref().and_then(dev_kind).unwrap_or(if dev.is_some() { "unknown" } else { "vite" });
+    let cmd = run_command(dev.as_deref(), kind, app.allow_lan, port.unwrap_or(PORT_START));
     let pane = run.pane_id.clone().unwrap_or_default();
     let pane_id = env.spawn(&pane, &dir, &cmd).await.map_err(up)?;
     let now = db::now();
@@ -1088,17 +1099,22 @@ async fn refresh_locked(app: &Arc<App>, bot_id: &str) -> Option<Row> {
     let mut port = r.port;
     // 接上的 server 換了行程（同 port 被別的行程接手）：見 [`attached_identity`]。
     let mut rebind: Option<i64> = None;
+    // 這一拍量到的 `(位址, port)`；`None`＝這一拍沒問（或問不到），#434 的檢查就不下結論。
+    let mut listeners: Option<Vec<(String, u16)>> = None;
     let (pane_alive, listening) = match (&r.pane_id, r.port) {
         (Some(p), Some(port)) => (env.pane_alive(p).await, env.port_listening(port as u16).await),
         // dev script 起的 server 自己挑 port：看這顆 pane 的行程樹實際 listen 到哪個（多個取最小的）。
         (Some(p), None) if !attached => {
             let alive = env.pane_alive(p).await;
-            let ports = env.pane_ports(p).await;
-            // pane_ports 的 None 是「問不到」，不能當成空集合讓 starting 超時失敗；pane_alive 已知關閉仍照常失敗。
-            if ports.is_none() && alive != Some(false) {
+            let socks = env.pane_listeners(p).await;
+            // pane_listeners 的 None 是「問不到」，不能當成空集合讓 starting 超時失敗；pane_alive 已知關閉仍照常失敗。
+            if socks.is_none() && alive != Some(false) {
                 return Some(r);
             }
-            port = ports.unwrap_or_default().first().map(|x| i64::from(*x));
+            let socks = socks.unwrap_or_default();
+            port = socks.iter().map(|(_, p)| i64::from(*p)).min();
+            // 同一拍拿到的位址留著給下面的 bind 檢查用（#434），不再多問一次 lsof。
+            listeners = Some(socks);
             (alive, port.is_some())
         }
         (None, Some(port)) if attached => {
@@ -1115,7 +1131,28 @@ async fn refresh_locked(app: &Arc<App>, bot_id: &str) -> Option<Row> {
         (_, Some(port)) => (Some(false), env.port_listening(port as u16).await),
         _ => (Some(false), false),
     };
-    let next = next_status(r.status(), attached, Observed { pane_alive, listening }, elapsed_secs(r.started_at.as_deref()));
+    let mut next = next_status(r.status(), attached, Observed { pane_alive, listening }, elapsed_secs(r.started_at.as_deref()));
+    // #434：`allow_lan` 關著時，**我們起的** server 不准綁到 loopback 以外。只在轉成 `running` 的那一拍量一次
+    // （之後每一拍維持原本的便宜檢查，不為此多跑 lsof）；量不到就不下結論，跟這個模組其他地方同一條原則。
+    // 接上的那顆是別人的 server，不在管轄範圍：使用者明確挑了它，而且關掉它也不是我們的事。
+    let mut forced_error: Option<String> = None;
+    if matches!(next, Next::To(Status::Running, _)) && !attached && r.source == SOURCE_SPAWNED && !app.allow_lan {
+        if listeners.is_none() {
+            if let Some(p) = r.pane_id.as_deref() {
+                listeners = env.pane_listeners(p).await;
+            }
+        }
+        if let Some(addr) = listeners.as_deref().and_then(crate::preview_bind::exposed_addr) {
+            tracing::warn!(bot = bot_id, %addr, "preview: the dev server bound a non-loopback address while allow_lan is off; failing it");
+            forced_error = Some(format!(
+                "dev server 綁在 {addr}，不是 loopback；daemon 的 allow_lan 是關的，不能讓預覽對外聽（issue #434）。\
+                 改專案的 dev script／設定檔綁 {}，或開 allow_lan",
+                crate::preview_bind::LOOPBACK
+            ));
+            next = Next::To(Status::Failed, Some("bind_not_loopback"));
+        }
+    }
+    let exposed_fail = forced_error.is_some();
     let Next::To(to, why) = next else {
         let Some(pid) = rebind else { return Some(r) };
         let updated = Row { pid: Some(pid), updated_at: db::now(), ..r.clone() };
@@ -1136,14 +1173,18 @@ async fn refresh_locked(app: &Arc<App>, bot_id: &str) -> Option<Row> {
                 Some(p) if pane_alive != Some(false) => env.pane_tail(p).await,
                 _ => String::new(),
             };
-            Some(if tail.trim().is_empty() { why.to_string() } else { format!("{why}\n{}", tail.trim_end()) })
+            let base = forced_error.unwrap_or_else(|| why.to_string());
+            Some(if tail.trim().is_empty() { base } else { format!("{base}\n{}", tail.trim_end()) })
         }
         _ => None,
     };
-    if to == Status::Off && !close_row_pane(app, &r).await {
+    // 一般的 failed 把 pane 留著給人看錯誤（重試時才收，見 #253）；綁到對外介面這一種不行——那顆 server
+    // 還活著、還在對外聽，留著等於沒擋。關不掉也照樣記 failed（不能繼續說它 running），pane 留給重試再收。
+    let closed = (to == Status::Off || exposed_fail) && close_row_pane(app, &r).await;
+    if to == Status::Off && !closed {
         return Some(r);
     }
-    let pane_id = if to == Status::Off { None } else { r.pane_id.clone() };
+    let pane_id = if closed { None } else { r.pane_id.clone() };
     let updated = Row { status: to.as_str().into(), error, pane_id, port, updated_at: db::now(), ..r.clone() };
     match put(&app.db, &updated).await {
         Ok(()) => {
