@@ -2532,6 +2532,12 @@ owner 格可點開唯讀的 pane 畫面（`GET /api/mem/processes/pane`，`pane.
 
 砍之前**一定重新取樣**再判定，不信前端送來的那列（pid 會回收）：不在樹裡 400、`herdr` 本身 400、`owner=bot` 409（走 `POST /bots/{id}/stop` 才會記錄）。目標 pid 的環境讀不到（`ps -E` 壞了、環境段空、Linux 的 `environ` 讀不了）時 owner 會退成 `unknown`，不能把它當「沒主人」放行——回 502、不送訊號。砍完立刻取樣推 `mem_updated`。
 
+**確認與送訊號是同一趟指令**（#526）：重新取樣只擋得住「前端手上那份過期清單」，擋不住「取樣完到送訊號之間」——
+那中間隔著一次行程建立（遠端是一整趟 ssh），目標在那段時間退出、pid 被回收的話訊號就打在別人身上，
+而回報還是被篩選那一顆的 `exe`／`freed_bytes`。所以取樣時多讀一段 `ps -Awwo pid=,lstart=`（獨立一段：
+`lstart` 含空白，混進主表會切壞 argv 欄），送訊號那趟先比一次起始時間，對不上就什麼都不送、回 409 `pid_changed`；
+讀不到起始時間跟讀不到環境一樣回 502。
+
 ## 16. 從 shell 認出來的身份 cc0～cc6
 
 多帳號的人已把帳號寫在 shell 裡（`alias cc1='CLAUDE_CONFIG_DIR=$HOME/.claude-cc1 claude …'`），daemon 直接讀，不必手寫 `[[identities]]`。

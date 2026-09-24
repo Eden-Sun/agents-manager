@@ -15,7 +15,12 @@ use crate::state::App;
 /// Tree and environments in one round trip. macOS has `ps -E`; Linux needs `/proc/<pid>/environ`
 /// (same-user only, which is exactly the scope we want).
 const MARKER: &str = "---AM-ENV---";
+/// #526：送訊號那一趟要確認「這個 pid 還是剛才篩過的那一顆」，靠的是起始時間。獨立一段是因為
+/// `lstart` 本身含空白（`Wed Sep 24 10:11:12 2026`），混進主表會把 `parse_ps` 的 argv 欄切壞。
+const START_MARKER: &str = "---AM-START---";
 const PS_TREE_ENV: &str = r#"ps -Awwo pid=,ppid=,rss=,args= 2>/dev/null
+echo '---AM-START---'
+ps -Awwo pid=,lstart= 2>/dev/null
 echo '---AM-ENV---'
 if [ "$(uname -s)" = Linux ]; then
   for f in /proc/[0-9]*/environ; do
@@ -97,15 +102,44 @@ fn parse_env(section: &str) -> HashMap<i32, String> {
 }
 
 /// Match the marker as a whole line: an argv can contain the marker text, but never a newline.
-fn split_sections(out: &str) -> (&str, &str) {
+fn split_at<'a>(out: &'a str, marker: &str) -> (&'a str, &'a str) {
     let mut at = 0usize;
     for line in out.split_inclusive('\n') {
-        if line.trim_end_matches(['\r', '\n']) == MARKER {
+        if line.trim_end_matches(['\r', '\n']) == marker {
             return (&out[..at], &out[at + line.len()..]);
         }
         at += line.len();
     }
     (out, "")
+}
+
+/// `(行程表, 環境段)`。先切環境段再切起始時間段，所以沒有 `---AM-START---` 的舊輸出
+/// （測試夾具、手工餵的 dump）照樣解得出前兩段。
+fn split_sections(out: &str) -> (&str, &str) {
+    let (head, env) = split_at(out, MARKER);
+    let (tree, _) = split_at(head, START_MARKER);
+    (tree, env)
+}
+
+fn start_section(out: &str) -> &str {
+    let (head, _) = split_at(out, MARKER);
+    split_at(head, START_MARKER).1
+}
+
+/// `pid` → 起始時間（空白收斂成一個，前後修掉）。比對用，不解析內容——格式是那台機器的 `ps` 給的，
+/// 送訊號那趟也用同一支 `ps` 產生，兩邊一致就夠了。
+fn parse_start(section: &str) -> HashMap<i32, String> {
+    let mut m = HashMap::new();
+    for line in section.lines() {
+        let line = line.trim();
+        let Some((pid, rest)) = line.split_once(char::is_whitespace) else { continue };
+        let Ok(pid) = pid.parse::<i32>() else { continue };
+        let started = rest.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !started.is_empty() {
+            m.insert(pid, started);
+        }
+    }
+    m
 }
 
 fn scan(out: &str) -> (Vec<Proc>, Vec<Raw>) {
@@ -358,12 +392,23 @@ pub enum KillDenied {
     NotInTree,
     Herdr,
     Bot(String),
+    /// #526：篩選完到送訊號之間這個 pid 已經不是同一顆行程了（退出、pid 被回收）。什麼都沒送。
+    PidChanged,
+}
+
+/// `screen_kill` 放行時帶回來的東西：送給誰、回報釋放多少、以及送之前要比對的起始時間。
+#[derive(Debug)]
+struct Target {
+    pid: i32,
+    exe: String,
+    freed: u64,
+    started: String,
 }
 
 /// 送訊號前的篩選（純函式，好測）：不在樹裡、herdr、bot 都擋。
 /// **讀不到這個 pid 的環境＝判不出是不是 bot 的行程**（`ps -E` 壞了、環境段整段空、Linux 的 `/proc/<pid>/environ` 讀不了），
 /// 這時 owner 會退成 `unknown`、被當成沒主人的行程放行，等於 bot 的 claude 就能被砍——所以直接不送。
-fn screen_kill(out: &str, pid: i32) -> anyhow::Result<Result<(String, u64), KillDenied>> {
+fn screen_kill(out: &str, pid: i32) -> anyhow::Result<Result<Target, KillDenied>> {
     let (procs, raws) = scan(out);
     let Some(raw) = raws.iter().find(|r| procs[r.p_index].pid == pid) else {
         return Ok(Err(KillDenied::NotInTree));
@@ -377,33 +422,66 @@ fn screen_kill(out: &str, pid: i32) -> anyhow::Result<Result<(String, u64), Kill
     if !parse_env(split_sections(out).1).contains_key(&pid) {
         anyhow::bail!("讀不到 pid {pid} 的環境變數，判不出它是不是 bot 的行程，不送訊號");
     }
-    Ok(Ok((exe_name(&procs[raw.p_index].argv).to_string(), raw.subtree_bytes)))
+    // #526：沒有起始時間就沒辦法確認送訊號那一刻還是同一顆行程，寧可不送。
+    let Some(started) = parse_start(start_section(out)).get(&pid).cloned() else {
+        anyhow::bail!("讀不到 pid {pid} 的起始時間，確認不了送訊號時還是同一顆行程，不送");
+    };
+    Ok(Ok(Target { pid, exe: exe_name(&procs[raw.p_index].argv).to_string(), freed: raw.subtree_bytes, started }))
+}
+
+/// 確認與送訊號放進**同一趟**指令（#526）：兩趟之間 pid 被回收的話，訊號會打在別人身上，
+/// 而回報還是被篩選那一顆的 exe 與大小。對不上就什麼都不送。
+fn kill_script(target: &Target, sig: &str) -> String {
+    let pid = target.pid;
+    format!(
+        "s=$(ps -o lstart= -p {pid} 2>/dev/null | tr -s ' ' | sed -e 's/^ *//' -e 's/ *$//')\n\
+         [ \"$s\" = {started} ] || {{ printf 'AM_PID_CHANGED\\n'; exit 0; }}\n\
+         kill -{sig} {pid} 2>/dev/null\n\
+         printf 'AM_KILLED\\n'\n\
+         exit 0\n",
+        started = crate::hosts::sh_quote(&target.started),
+    )
 }
 
 /// Re-samples instead of trusting the caller's list: pids are recycled, and a stale row must
 /// never let a `kill` escape the herdr trees.
 pub async fn kill(app: &Arc<App>, host: &str, pid: i32, signal: &str) -> anyhow::Result<Result<Value, KillDenied>> {
     let out = dump(app, host).await?;
-    let (exe, freed) = match screen_kill(&out, pid)? {
+    let target = match screen_kill(&out, pid)? {
         Ok(t) => t,
         Err(d) => return Ok(Err(d)),
     };
     let sig = if signal.eq_ignore_ascii_case("KILL") { "KILL" } else { "TERM" };
-    let cmd = format!("kill -{sig} {pid}");
+    let cmd = kill_script(&target, sig);
     let conn = app.hosts.get(host).await.ok_or_else(|| anyhow::anyhow!("unknown host `{host}`"))?;
-    if conn.is_local() {
+    let stdout = if conn.is_local() {
         let o = crate::local_sh::output(&cmd).await?;
         if !o.status.success() {
             anyhow::bail!("kill exited {}: {}", o.status, String::from_utf8_lossy(&o.stderr).trim());
         }
+        String::from_utf8_lossy(&o.stdout).into_owned()
     } else {
-        conn.ssh_exec_path(&cmd).await?;
+        conn.ssh_exec_path(&cmd).await?
+    };
+    let (exe, freed) = (target.exe, target.freed);
+    if stdout.lines().any(|l| l.trim() == "AM_PID_CHANGED") {
+        return Ok(Err(KillDenied::PidChanged));
+    }
+    if !stdout.lines().any(|l| l.trim() == "AM_KILLED") {
+        anyhow::bail!("kill 沒有回報結果，不確定送出去沒有：{}", stdout.trim());
     }
 
     // Update the badge now rather than up to 15s later.
     let snap = crate::memstat::sample(app).await;
     app.emit("mem_updated", json!(snap)).await;
     Ok(Ok(json!({"host": host, "pid": pid, "signal": sig, "exe": exe, "freed_bytes": freed})))
+}
+
+/// 測試用：跑一段 sh 並回 stdout。放在這裡是因為 `kill_script` 的驗證要真的執行腳本。
+#[cfg(test)]
+fn run_sh(script: &str) -> String {
+    let out = std::process::Command::new("/bin/sh").arg("-c").arg(script).output().expect("sh");
+    String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
 #[cfg(test)]
@@ -420,6 +498,16 @@ mod tests {
   406   400  10000 /bin/zsh -l
   407   406 300000 claude --resume
   500     1  90000 claude --not-under-herdr
+---AM-START---
+  400 Wed Sep 24 10:00:00 2026
+  401 Wed Sep 24 10:00:01 2026
+  402 Wed Sep 24 10:00:02 2026
+  403 Wed Sep 24 10:00:03 2026
+  404 Wed Sep 24 10:00:04 2026
+  405 Wed Sep 24 10:00:05 2026
+  406 Wed Sep 24 10:00:06 2026
+  407 Wed Sep 24 10:00:07 2026
+  500 Wed Sep 24 10:00:08 2026
 ---AM-ENV---
   401 /bin/zsh -l HERDR_PANE_ID=w1:p1 AM_BOT_ID=b1
   402 claude HERDR_PANE_ID=w1:p1 AM_BOT_ID=b1
@@ -449,7 +537,8 @@ mod tests {
     /// 專案標籤的底：每顆 bot 的程序各算自己的 RSS（不重複算子樹），pane 以 socket+pane id 去重；沒有 AM_BOT_ID 的不歸任何 bot。
     #[test]
     fn bot_totals_count_each_process_once_with_its_panes() {
-        let dump = DUMP.replace("---AM-ENV---\n", "  408   400  50000 /bin/zsh -l\n  409   408 200000 claude\n---AM-ENV---\n")
+        // 行程列要插在**行程表**那一段（`---AM-START---` 之前），不是起始時間段裡。
+        let dump = DUMP.replace("---AM-START---\n", "  408   400  50000 /bin/zsh -l\n  409   408 200000 claude\n---AM-START---\n")
             + "  408 /bin/zsh HERDR_PANE_ID=w1:p2 AM_BOT_ID=b1\n  409 claude HERDR_PANE_ID=w1:p2 AM_BOT_ID=b1\n";
         let totals = bot_totals_from_dump(&dump);
         assert_eq!(totals.len(), 1, "只有 b1 帶 AM_BOT_ID");
@@ -550,6 +639,42 @@ mod tests {
         assert_eq!(find(405).unwrap().owner, "pane");
     }
 
+    /// #526：確認與送訊號要在同一趟。這裡真的把產生出來的腳本跑起來，但 **pid 是本測試行程自己**、
+    /// 訊號送給它會出事，所以只驗到比對那一段：對不上時腳本在 `kill` 之前就 exit，對得上那次
+    /// 送的是 `kill -TERM <自己>`——所以**不執行**那一版，改看腳本長相（下一條）。
+    #[test]
+    fn the_kill_script_stops_at_the_check_when_the_pid_changed() {
+        // 起始時間對不上：什麼都不送，連 `kill` 那一行都走不到。
+        let me = std::process::id() as i32;
+        let other = Target { pid: me, exe: "x".into(), freed: 1, started: "Wed Sep 24 10:00:05 2026".into() };
+        let out = super::run_sh(&kill_script(&other, "TERM"));
+        assert!(out.contains("AM_PID_CHANGED"), "{out:?}");
+        assert!(!out.contains("AM_KILLED"), "對不上就不准往下走：{out:?}");
+    }
+
+    /// 腳本長相：比對一定在 `kill` 之前，而且比的是篩選當下那顆的起始時間。
+    #[test]
+    fn the_kill_script_checks_the_start_time_before_it_signals() {
+        let t = match screen_kill(DUMP, 405).unwrap() {
+            Ok(t) => t,
+            Err(d) => panic!("405 是 pane 的行程，應該放行：{d:?}"),
+        };
+        assert_eq!(t.started, "Wed Sep 24 10:00:05 2026");
+        let script = kill_script(&t, "TERM");
+        let check = script.find("AM_PID_CHANGED").expect("要有比對那一段");
+        let first_kill = script.find("kill -").expect("要有送訊號那一段");
+        assert!(check < first_kill, "比對必須在送訊號之前：{script}");
+        assert!(script.contains("'Wed Sep 24 10:00:05 2026'"), "比的是篩選當下那顆的起始時間：{script}");
+    }
+
+    /// 沒有起始時間（那台的 `ps` 不吃 `lstart`、或輸出被截斷）＝確認不了同一顆行程，寧可不送。
+    #[test]
+    fn a_target_without_a_start_time_is_refused() {
+        let no_start = DUMP.replace("  405 Wed Sep 24 10:00:05 2026\n", "");
+        let err = screen_kill(&no_start, 405).unwrap_err().to_string();
+        assert!(err.contains("起始時間"), "{err}");
+    }
+
     /// 環境段讀不到（`ps -E` 壞了、Linux 的 environ 讀不了）：bot 的行程會被誤當成沒主人，所以不能送訊號。
     #[test]
     fn kill_refuses_when_the_target_env_was_not_read() {
@@ -558,8 +683,9 @@ mod tests {
         let err = screen_kill(&no_env_at_all, 402).unwrap_err().to_string();
         assert!(err.contains("環境"), "{err}");
         // 只缺這個 pid 的那一行也一樣。
-        let missing_one = DUMP.replace("  402 claude HERDR_PANE_ID=w1:p1 AM_BOT_ID=b1\n", "");
-        assert!(screen_kill(&missing_one, 402).is_err());
+        let missing_one = DUMP.replace("  405 codex HERDR_PANE_ID=w2:p1\n", "");
+        let err = screen_kill(&missing_one, 405).unwrap_err().to_string();
+        assert!(err.contains("環境"), "{err}");
         // 讀得到、真的沒主人：照舊放行；bot 照舊 409。
         assert!(matches!(screen_kill(DUMP, 407), Ok(Ok(_))));
         assert!(matches!(screen_kill(DUMP, 402), Ok(Err(KillDenied::Bot(_)))));
