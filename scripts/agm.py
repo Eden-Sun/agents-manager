@@ -995,8 +995,19 @@ def _blob_at(repo: Path, rev: str, path: str) -> str | None:
 
 
 LAUNCHD_PREFIX = "LaunchAgents/"
-#: 只比這幾個欄位——`EnvironmentVariables` 是每台機器自己的 PATH 與 bot id，不該跨機比對。
-PLIST_KEYS = ("Label", "ProgramArguments", "StartInterval", "RunAtLoad")
+#: plist 比對**只忽略這些**，其餘全部算語意（issue #499）。
+#:
+#: 原本反過來寫成白名單（`Label`／`ProgramArguments`／`StartInterval`／`RunAtLoad`），理由是「launchd
+#: 會自己改寫 plist」——**那個理由是錯的**：實機那八份都是純 XML 文字檔，launchd 只讀不回寫，我當初
+#: 看到的「鍵順序不同」是 `PlistBuddy -c Print` 把 dict 印出來的順序，不是檔案被改過。而且這裡比的是
+#: `plistlib` parse 過的 dict，順序本來就不影響。
+#:
+#: 白名單的代價是**沒列到的鍵被靜默忽略**：八份 plist 全都有的 `StandardOutPath`／`StandardErrorPath`
+#: 就這樣不在比對範圍裡。那兩個是 log 的落點，而 `browser-gc-kick.sh` 沒有 ops-alert 的管道、失敗只留
+#: log——log 路徑漂掉卻報「同步」，等於證據來源斷了還顯示綠燈。
+#:
+#: `EnvironmentVariables` 留在忽略清單：裡面是這台機器的 `PATH` 與 bot id，每台不同。
+PLIST_IGNORED_KEYS = ("EnvironmentVariables",)
 
 
 def _launch_agents_dir() -> Path:
@@ -1023,7 +1034,7 @@ def _plist_semantics(raw: bytes) -> dict:
         d = plistlib.loads(raw)
     except Exception as e:  # noqa: BLE001 - 壞掉的 plist 要報成落差，不是炸掉整份報告
         return {"_error": f"{type(e).__name__}: {e}"}
-    return {k: d[k] for k in PLIST_KEYS if k in d}
+    return {k: v for k, v in d.items() if k not in PLIST_IGNORED_KEYS}
 
 
 def ops_sync_report(repo: Path, ref: str, agm_dir: Path) -> dict:
@@ -1059,9 +1070,10 @@ def ops_sync_report(repo: Path, ref: str, agm_dir: Path) -> dict:
             if want == got:
                 report["ok"].append(row)
             else:
-                # `_error`（plist 讀不懂）也要進 diff，不然報告只會說「每個欄位都是 None」，
-                # 看的人查不出真正的原因是那個檔壞了。
-                keys = (*PLIST_KEYS, "_error")
+                # 兩邊的鍵取聯集：少一個鍵跟改一個值同樣是落差，只看其中一邊會漏掉「安裝端整個少了
+                # StandardOutPath」這種。`_error`（plist 讀不懂）也在裡面，不然報告只會說每個欄位都是
+                # None，看的人查不出真正的原因是那個檔壞了。
+                keys = sorted(set(want) | set(got))
                 row["diff"] = {k: {"repo": want.get(k), "installed": got.get(k)} for k in keys if want.get(k) != got.get(k)}
                 report["drift"].append(row)
             continue

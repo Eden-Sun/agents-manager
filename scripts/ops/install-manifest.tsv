@@ -18,10 +18,11 @@ scripts/ops/claude-release-task.md  claude-release-task.md
 scripts/ops/daemon-update-task.md   daemon-update-task.md
 scripts/ops/release-triage-task.md  release-triage-task.md
 
-# launchd 排程（issue #487）：安裝位置以 `LaunchAgents/` 開頭的，解析成 `~/Library/LaunchAgents/`，
-# 而且**只比語意欄位**（Label／ProgramArguments／StartInterval／RunAtLoad）——launchd 會自己改寫
-# plist（鍵的順序、加欄位），整檔比對會一直噪音。`EnvironmentVariables` 刻意不比：裡面是這台機器的
-# PATH 與 bot id 之類的值，每台不同；repo 這份留著它是為了 install 之後 job 還跑得起來。
+# launchd 排程（issue #487、#499）：安裝位置以 `LaunchAgents/` 開頭的，解析成 `~/Library/LaunchAgents/`。
+# 比的是 plistlib parse 過的 dict（所以鍵的順序不影響），**除了 EnvironmentVariables 以外全部都比**——
+# 包括 StandardOutPath／StandardErrorPath，那是 log 的落點，漂掉卻報同步等於證據來源斷了還顯示綠燈。
+# EnvironmentVariables 不比：裡面是這台機器的 PATH 與 bot id，每台不同；repo 這份留著它是為了
+# install 之後 job 還跑得起來。
 scripts/ops/launchd/com.agm.browser-gc.plist      LaunchAgents/com.agm.browser-gc.plist
 scripts/ops/launchd/com.agm.ci-watch.plist        LaunchAgents/com.agm.ci-watch.plist
 scripts/ops/launchd/com.agm.claude-release.plist  LaunchAgents/com.agm.claude-release.plist
