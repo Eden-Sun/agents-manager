@@ -146,6 +146,11 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   行程欠著的送達結果（#149 的帳），已經有 poller 盯著的 run 不再掛一次。
   `GET /api/supervisor/health` 的 `due_actions` 把這六處讀成同一份摘要，供觀測 pending／failing（數字是 SQL 聚合算的，
   不吃列表上限；`items` 是有界的樣本，`items_truncated` 說有沒有列完）。
+  **總管 tick 的耗時有量**（issue #473，`supervisor/timing.rs`）：tick 每一段、整拍、以及全域鎖的等待與持有時間
+  記成最近一小時的 p50／p95／max，放在 `GET /api/supervisor/health` 的 `timing`（只是量測，不進 `status`）。
+  `daemon.log` **只寫超標的**：單段 ≥ 2 秒、整拍 ≥ 10 秒（一個心跳）、等鎖 ≥ 1 秒，帶段名或拿鎖點（`檔案:行`，
+  靠 `lock()` 的 `#[track_caller]`）、bot 數與耗時——正常的一拍一個字都不寫，不然 log 變成沒人看的噪音。
+  這是 #473「先量測再決定要不要動結構」的第一步：**只記錄，不改任何行為、順序或鎖的範圍**。
   **執行端刻意不統一**（issue #97）：三個執行者對應三種延遲與鎖的需求——總管 tick 10 秒輪詢（交辦重送／等額度／
   協調者補送／看門狗，序列化是刻意的）、排隊 prompt 的重試要在**那顆 bot 的鎖**裡準時燒、hook 收件匣靠 notify
   立刻處理（改成輪詢等於每個回合收尾都慢）。收成一個迴圈只會在裡面重新長出同樣三套政策。

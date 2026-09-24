@@ -24,6 +24,7 @@ pub mod role_faults;
 pub mod roles;
 pub mod setup;
 pub mod store;
+pub mod timing;
 pub mod watchdog;
 
 use crate::lifecycle::LcError;
@@ -41,8 +42,52 @@ fn op_lock() -> &'static Mutex<()> {
     L.get_or_init(|| Mutex::new(()))
 }
 
-pub async fn lock() -> tokio::sync::MutexGuard<'static, ()> {
-    op_lock().lock().await
+/// 等到鎖、拿到鎖，順便記下「等多久」與「握多久」（issue #473 的量測，只記錄不改行為）。
+///
+/// 刻意**不是** `async fn`：`#[track_caller]` 在 `async fn` 上抓不到呼叫端（`Location::caller()` 會
+/// 變成 poll 它的人）。寫成「同步函式回一個 future」，位置就在呼叫的那一刻抓好——27 個拿鎖點
+/// 一行都不用改，統計裡卻分得出是哪一個。
+#[track_caller]
+pub fn lock() -> impl std::future::Future<Output = OpGuard> {
+    let at = std::panic::Location::caller();
+    async move {
+        let waited_since = std::time::Instant::now();
+        let inner = op_lock().lock().await;
+        timing::note_lock_wait(at, waited_since.elapsed());
+        OpGuard { inner: Some(inner), at, held_since: std::time::Instant::now() }
+    }
+}
+
+/// 全域鎖的守衛。除了照舊在 drop 時放鎖，多記一筆「握了多久」。
+///
+/// `inner` 是 `Option` 只為了一件事：**記帳一定要在放鎖之後**。欄位是晚於 `Drop::drop` 才 drop 的，
+/// 所以直接在 `drop` 裡記帳等於「還握著全域鎖去搶 timing 那張表的 mutex」——而 [`timing::snapshot`]
+/// 掛在 UI 高頻輪詢的 health 端點上，那一刻正好在算統計的話，放鎖就得排在它後面，等全域鎖的 API
+/// 跟著一起慢。那既違反「不改鎖的範圍」，量出來的 hold 又剛好不含被自己拖長的那一段，
+/// 對「握著全域鎖做 herdr 送出是不是太久」這個問題系統性偏樂觀（i263 審 #473）。
+pub struct OpGuard {
+    /// `take()` 之後就是 `None`；只有 [`Drop`] 會動它。
+    inner: Option<tokio::sync::MutexGuard<'static, ()>>,
+    at: &'static std::panic::Location<'static>,
+    held_since: std::time::Instant,
+}
+
+impl Drop for OpGuard {
+    fn drop(&mut self) {
+        // 1) 在放鎖的那一刻量：hold 要含到真的放掉為止。
+        let held = self.held_since.elapsed();
+        // 2) 先把全域鎖放掉。
+        drop(self.inner.take());
+        // 3) 記帳（會拿 timing 的 mutex）已經在鎖外面了。
+        timing::note_lock_hold(self.at, held);
+    }
+}
+
+/// 測試用：全域鎖現在是不是自由的。**不走 [`lock`]**——那一支自己要記帳（拿 timing 的表），
+/// 拿它來探測會把「被鎖擋住」跟「被記帳擋住」混成同一件事。
+#[cfg(test)]
+pub(crate) fn op_lock_is_free() -> bool {
+    op_lock().try_lock().is_ok()
 }
 
 const BOOTSTRAP_REQUEST_ID: &str = "agm-bootstrap-v1";

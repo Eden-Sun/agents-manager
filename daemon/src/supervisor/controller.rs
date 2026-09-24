@@ -1910,22 +1910,25 @@ pub fn spawn(app: Arc<App>, generation: i64) {
                     Err(_) => return,
                 },
                 _ = tick.tick() => {
-                    {
+                    // issue #473：每一段與整拍各記一次耗時。`timing::seg` 只是在原地 await 同一個
+                    // future，順序、鎖的範圍一個字都沒變；超標才寫 log（見 `supervisor/timing.rs`）。
+                    let tick_started = std::time::Instant::now();
+                    super::timing::seg(&app, "quota_policy", async {
                         let _g = super::lock().await;
                         match apply_quota_policy(&app).await {
                             // Mid-turn: the next tick asks again.
                             Err(LcError::Conflict(_)) | Ok(_) => {}
                             Err(e) => tracing::warn!(error = ?e, "supervisor quota policy failed"),
                         }
-                    }
-                    reconcile(&app).await;
-                    resume_quota_blocked(&app).await;
-                    block_stale_queues(&app).await;
-                    crate::judge::stuck::sweep(&app).await;
-                    drain_queue(&app).await;
+                    }).await;
+                    super::timing::seg(&app, "reconcile", reconcile(&app)).await;
+                    super::timing::seg(&app, "resume_quota_blocked", resume_quota_blocked(&app)).await;
+                    super::timing::seg(&app, "block_stale_queues", block_stale_queues(&app)).await;
+                    super::timing::seg(&app, "judge_stuck_sweep", crate::judge::stuck::sweep(&app)).await;
+                    super::timing::seg(&app, "drain_queue", drain_queue(&app)).await;
                     // Before pushing anything new: give back the notifications that went out
                     // and were never answered. A delivered event nobody acked is still owed.
-                    recover_unacked(&app).await;
+                    super::timing::seg(&app, "recover_unacked", recover_unacked(&app)).await;
                     // 先分角色、合併重複，再各自決定要不要叫醒（roles.rs）。沒有要叫醒的事件時，
                     // 這一段只讀寫資料庫，不開任何模型回合。
                     // 失敗要記，而且**這一拍照跑下去**（#472）：這兩支失敗時，事件會留在
@@ -1934,27 +1937,28 @@ pub fn spawn(app: Arc<App>, generation: i64) {
                     // （走不到 `notify_exhausted`）。以前這裡是 `let _ =`，連一行 log 都沒有。
                     // 整拍不因此中止：後面幾段（watchdog、mission、idle_sleep）跟分類無關，
                     // 為了一個分類失敗把它們一起停掉只會多壞一件事。
-                    note_classify_result(&app, super::roles::classify(&app.db).await);
-                    if let Err(e) = super::roles::coalesce_patrol(&app.db).await {
+                    note_classify_result(&app, super::timing::seg(&app, "roles_classify", super::roles::classify(&app.db)).await);
+                    if let Err(e) = super::timing::seg(&app, "roles_coalesce_patrol", super::roles::coalesce_patrol(&app.db)).await {
                         // 合併失敗只是「重複的 health_changed 沒被收掉」，事件本身照樣送得出去，
                         // 所以記一行就好，不進 incident。
                         tracing::warn!(error = ?e, "巡檢的重複事件沒合併成功（roles::coalesce_patrol 失敗）");
                     }
                     // issue #421：協調者不可用而核准等超過 5 分鐘 → 改派給巡檢並叫醒它。
                     // 放在 notify 之前：改派完這一拍就由巡檢的 notify 送出去，不必再等一拍。
-                    let unavailable = super::failover::responder_unavailable(&app).await;
-                    super::failover::reassign_stale_approvals(&app, unavailable).await;
-                    notify(&app).await;
-                    super::responder::notify(&app).await;
-                    super::watchdog::tick(&app).await;
-                    super::responder::watchdog_tick(&app).await;
+                    let unavailable = super::timing::seg(&app, "responder_unavailable", super::failover::responder_unavailable(&app)).await;
+                    super::timing::seg(&app, "reassign_stale_approvals", super::failover::reassign_stale_approvals(&app, unavailable)).await;
+                    super::timing::seg(&app, "notify", notify(&app)).await;
+                    super::timing::seg(&app, "responder_notify", super::responder::notify(&app)).await;
+                    super::timing::seg(&app, "watchdog", super::watchdog::tick(&app)).await;
+                    super::timing::seg(&app, "responder_watchdog", super::responder::watchdog_tick(&app)).await;
                     // 群組任務停在「輪到 AGM」很久沒動靜（重啟、回合中斷）：照持久狀態推出的下一步叫醒它（issue #74）。
-                    crate::mission::workflow::wake_stalled(&app).await;
+                    super::timing::seg(&app, "mission_wake_stalled", crate::mission::workflow::wake_stalled(&app)).await;
                     // 結案時沒收乾淨的臨時 bot（當機、一時讀不到狀態、遠端斷線）在這裡補收（issue #343）。
-                    crate::mission::api::sweep_closed_mission_temp_bots(&app).await;
+                    super::timing::seg(&app, "mission_sweep_temp_bots", crate::mission::api::sweep_closed_mission_temp_bots(&app)).await;
                     // 閒置太久的 bot 收起來省 RAM（§6.11）。巡邏自己節流成每分鐘一次，
                     // 而且丟到背景跑——停一顆最久要等 agent 十秒，不能卡住這條迴圈。
-                    super::idle_sleep::tick(&app);
+                    super::timing::seg(&app, "idle_sleep", async { super::idle_sleep::tick(&app) }).await;
+                    super::timing::note_tick(&app, tick_started.elapsed()).await;
                 }
             }
         }

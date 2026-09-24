@@ -200,6 +200,9 @@ pub async fn snapshot(app: &Arc<App>) -> Result<Value, LcError> {
         "hosts": {"total": hosts.len(), "disconnected": disconnected_hosts},
         // issue #204：`[release_triage] publish = true` 時 gh 沒登入要在這裡看得到（publish = false 為 null）。
         "release_triage": release_triage_health(app).await,
+        // issue #473：controller tick 每一段與全域鎖的耗時（最近一小時的 p50／p95／max）。
+        // 只是量測，沒有嚴重度、不進 `status`——要先有數字才談得上改結構。
+        "timing": crate::supervisor::timing::snapshot(),
     }))
 }
 
