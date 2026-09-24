@@ -246,8 +246,11 @@ pub(crate) async fn native_resume_plan(
     let last = if let Some(sid) = override_session {
         // 指名的 session：transcript 路徑盡量從記過這段的 run 帶出來（換身分時要複製），沒有就讓 CLI 自己找。
         let transcript: Option<String> = sqlx::query_scalar(
+            // 第二鍵用 `rowid`（寫入順序），不是 `id`：`started_at` 只到毫秒（`db::now`），
+            // 同一顆 bot 快速重啟時兩個 run 會擠進同一毫秒，而 ULID 的亂數段在同一毫秒內不保證遞增
+            // （issue #100／a4605b2，同 `supervisor/incidents.rs` 挑「最後一個 run」的寫法）。
             "SELECT transcript_path FROM runs WHERE bot_id = ? AND native_session_id = ? AND transcript_path IS NOT NULL
-              ORDER BY started_at DESC LIMIT 1",
+              ORDER BY started_at DESC, rowid DESC LIMIT 1",
         )
         .bind(&bot.id)
         .bind(sid)
@@ -257,8 +260,10 @@ pub(crate) async fn native_resume_plan(
         Some((sid.to_string(), transcript))
     } else if include_active {
         sqlx::query_as::<_, (String, Option<String>)>(
+            // 同上：挑錯的後果不是少接回一次，是 `--resume` 進**另一段對話**，
+            // 之後這顆 bot 的訊息都落在那段裡（issue #461）。重啟正是最會擠同一毫秒的路徑。
             "SELECT native_session_id, transcript_path FROM runs
-              WHERE bot_id = ? AND native_session_id IS NOT NULL ORDER BY started_at DESC LIMIT 1",
+              WHERE bot_id = ? AND native_session_id IS NOT NULL ORDER BY started_at DESC, rowid DESC LIMIT 1",
         )
         .bind(&bot.id)
         .fetch_optional(&app.db)

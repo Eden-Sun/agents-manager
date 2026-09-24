@@ -799,9 +799,12 @@ pub async fn last_native_session_id(pool: &SqlitePool, bot_id: &str) -> Result<O
 /// Transcript path included so a restart can tell a resumable session from one never written.
 pub async fn last_native_session(pool: &SqlitePool, bot_id: &str) -> Result<Option<(String, Option<String>)>> {
     Ok(sqlx::query_as::<_, (String, Option<String>)>(
+        // 第二鍵用 `rowid`（寫入順序），不是 `id`：`started_at` 只到毫秒，同一顆 bot 快速重啟時
+        // 兩個 run 會擠進同一毫秒，ULID 的亂數段那時不保證遞增（issue #100／a4605b2）。
+        // 這裡挑錯＝ `--resume` 接回另一段對話（issue #461）。
         "SELECT native_session_id, transcript_path FROM runs
           WHERE bot_id = ? AND ended_at IS NOT NULL AND native_session_id IS NOT NULL
-          ORDER BY started_at DESC LIMIT 1",
+          ORDER BY started_at DESC, rowid DESC LIMIT 1",
     )
     .bind(bot_id)
     .fetch_optional(pool)
@@ -1518,6 +1521,55 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 1);
+
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// issue #461：同一毫秒的兩個 run，要接回的是**後寫進去的那一個**。
+    ///
+    /// `started_at` 只到毫秒（`now()`），而一顆 bot 快速重啟（stop 完馬上 start，
+    /// `restart?resume=native` 就是這條路）會讓兩個 run 擠進同一毫秒。
+    /// 那時 ULID 的亂數段不保證遞增，所以 `id` 的字典序跟寫入順序可能相反——
+    /// 這裡故意把**後寫的那一筆給比較小的 id**，把那個情況釘死。
+    ///
+    /// 挑錯的後果不是少接回一次，是 `--resume` 進另一段對話，之後訊息都落在那段裡。
+    #[tokio::test]
+    async fn two_runs_in_the_same_millisecond_resume_the_one_written_last() {
+        let dir = tmp_dir();
+        let pool = open(&dir.join("samems.sqlite3")).await.unwrap();
+        let at = now();
+        sqlx::query("INSERT INTO projects (id, path, label, created_at) VALUES ('p1','/tmp/p','p',?)")
+            .bind(&at).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO bots (id, project_id, name, kind, hook_token, created_at) VALUES ('b1','p1','pm','claude','tok',?)")
+            .bind(&at).execute(&pool).await.unwrap();
+
+        // 同一個 started_at，而且 id 的字典序跟寫入順序**相反**：
+        // 先寫 `r-zzz`（舊的那次 run），後寫 `r-aaa`（真正最後那次）。
+        let same = "2026-09-07T05:00:00.123Z";
+        for (id, native) in [("r-zzz", "native-earlier"), ("r-aaa", "native-latest")] {
+            sqlx::query(
+                "INSERT INTO runs (id, bot_id, state, agent_status, native_session_id, transcript_path, started_at, ended_at)
+                 VALUES (?, 'b1', 'exited', 'unknown', ?, '/tmp/t.jsonl', ?, ?)",
+            )
+            .bind(id).bind(native).bind(same).bind(same)
+            .execute(&pool).await.unwrap();
+        }
+
+        // 修好的寫法（`, rowid DESC`）：拿到後寫的那一個。
+        let got = last_native_session(&pool, "b1").await.unwrap().map(|(sid, _)| sid);
+        assert_eq!(got.as_deref(), Some("native-latest"), "同毫秒時要接回後寫進去的那一個 run");
+        assert_eq!(last_native_session_id(&pool, "b1").await.unwrap().as_deref(), Some("native-latest"));
+
+        // 舊寫法為什麼不行，在同一份資料上直接證明：`id DESC` 會挑到先寫的那一筆
+        // （`r-zzz` > `r-aaa`），也就是**另一段對話**。沒有第二鍵的版本更糟——連決定性都沒有。
+        let by_id: Option<String> = sqlx::query_scalar(
+            "SELECT native_session_id FROM runs WHERE bot_id='b1' AND native_session_id IS NOT NULL
+              ORDER BY started_at DESC, id DESC LIMIT 1",
+        )
+        .fetch_optional(&pool).await.unwrap();
+        assert_eq!(by_id.as_deref(), Some("native-earlier"), "舊寫法（id DESC）挑到的正是錯的那一段");
+        assert_ne!(by_id, got, "兩種寫法在這份資料上必須不同，否則這條測試證明不了任何事");
 
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
