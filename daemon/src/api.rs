@@ -3427,6 +3427,18 @@ async fn ws_handler(
 
 async fn ws_loop(app: Arc<App>, mut socket: WebSocket, since: Option<u64>) {
     let mut rx = app.subscribe();
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("ws_subscribed", &app.data_dir.display().to_string()).await;
+    // **先訂閱再讀環**是對的：反過來的話兩者之間的事件誰都收不到。代價是重複——那一段時間送出的耐久事件
+    // 兩邊都有（`emit` 把推進環與 `bus.send` 包在同一把 ring 鎖裡，而我們的 `backlog` 正在等那把鎖），
+    // 同一個 `seq` 會送兩次。客戶端沒有 seq 去重，而 `bots_restart_progress` 這類 handler 是純累加
+    // （`restartBatch.ts` 的 `done + 1`），重複等於「又發生了一次」：進度會超前甚至衝過總數（issue #521）。
+    //
+    // 所以這條連線自己記「backlog 送到哪」，之後低於它的即時幀跳過＝**同一個 seq 在一條連線上只送一次**。
+    // 從 0 起算、只被真的送出去的 backlog 幀推高，刻意**不拿 `since` 當起點**：daemon 重啟後 seq 從頭來，
+    // 客戶端帶著舊的大 `since` 重連會落到下面的 resync 分支（那時一幀 backlog 都沒送），拿 `since` 當起點
+    // 會把新 daemon 那些號碼很小的即時幀全部擋掉（issue #368 要補的正是那段）。
+    let mut sent_through = 0u64;
     let backlog = match since {
         Some(s) => app.backlog(s).await,
         None => Some(vec![]),
@@ -3434,6 +3446,7 @@ async fn ws_loop(app: Arc<App>, mut socket: WebSocket, since: Option<u64>) {
     match backlog {
         Some(evs) => {
             for e in evs {
+                sent_through = sent_through.max(e.seq);
                 if socket.send(WsMessage::Text(serde_json::to_string(&e).unwrap().into())).await.is_err() {
                     return;
                 }
@@ -3448,7 +3461,10 @@ async fn ws_loop(app: Arc<App>, mut socket: WebSocket, since: Option<u64>) {
     loop {
         tokio::select! {
             ev = rx.recv() => match ev {
+                // backlog 已經送過這一則（訂閱與讀環之間送出的，兩邊都有）：跳過，不是漏送（issue #521）。
+                Ok(e) if e.seq <= sent_through => {}
                 Ok(e) => {
+                    sent_through = e.seq;
                     if socket.send(WsMessage::Text(serde_json::to_string(&e).unwrap().into())).await.is_err() { return; }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
@@ -3503,6 +3519,82 @@ mod ws_shutdown_tests {
         tx.send(()).unwrap();
         let done = tokio::time::timeout(std::time::Duration::from_secs(3), server).await;
         assert!(done.is_ok(), "開著的 websocket 讓 graceful shutdown 卡住了");
+        drop(client);
+    }
+}
+
+/// issue #521：`ws_loop` 先訂閱再讀環，兩者之間送出的耐久事件兩邊都有——同一條連線上同一個 `seq` 只能送一次。
+#[cfg(test)]
+mod ws_backlog_dedupe_tests {
+    use serde_json::json;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// 讀到 `\r\n\r\n` 為止，一次一個 byte：整塊讀會把後面那些 WS 幀的位元組一起吃掉。
+    async fn read_handshake(s: &mut tokio::net::TcpStream) -> String {
+        let mut head = Vec::new();
+        let mut b = [0u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            s.read_exact(&mut b).await.unwrap();
+            head.push(b[0]);
+        }
+        String::from_utf8_lossy(&head).into_owned()
+    }
+
+    /// server→client 的 text 幀沒有 mask；長度 126 以上才有 16-bit 的延伸長度。
+    async fn read_text_frame(s: &mut tokio::net::TcpStream) -> serde_json::Value {
+        let mut hdr = [0u8; 2];
+        s.read_exact(&mut hdr).await.unwrap();
+        assert_eq!(hdr[0] & 0x0f, 1, "只預期 text 幀，拿到 opcode {:x}", hdr[0] & 0x0f);
+        let mut len = (hdr[1] & 0x7f) as usize;
+        if len == 126 {
+            let mut ext = [0u8; 2];
+            s.read_exact(&mut ext).await.unwrap();
+            len = u16::from_be_bytes(ext) as usize;
+        }
+        let mut buf = vec![0u8; len];
+        s.read_exact(&mut buf).await.unwrap();
+        serde_json::from_slice(&buf).unwrap()
+    }
+
+    /// 修正前：那一則落在 backlog 與即時串流兩邊，客戶端連收兩次同一個 `seq`——而
+    /// `bots_restart_progress` 這類 handler 是純累加，重複就是多算一次。
+    #[tokio::test]
+    async fn an_event_emitted_between_subscribe_and_backlog_is_sent_once() {
+        let env = crate::testing::env().await;
+        // 環裡先有一則，`since` 才有東西可以往後接。
+        env.app.emit("bot_changed", json!({"mark": "before"})).await;
+        let since = env.app.current_seq();
+
+        // 訂閱之後、讀環之前送出的那一則。key 用 data-dir，平行測試不會互相觸發。
+        let app2 = env.app.clone();
+        crate::lifecycle::race_point::arm("ws_subscribed", &env.app.data_dir.display().to_string(), move || async move {
+            app2.emit("bot_changed", json!({"mark": "in_window"})).await;
+        });
+
+        let router = super::router(env.app.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await;
+        });
+        let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let req = format!(
+            "GET /ws?token=test-token&since={since} HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        );
+        client.write_all(req.as_bytes()).await.unwrap();
+        let head = read_handshake(&mut client).await;
+        assert!(head.starts_with("HTTP/1.1 101"), "要真的升級成 websocket：{head}");
+
+        // 第一幀＝backlog 裡的那一則（沒有它就是漏送，不是重複）。
+        let first = tokio::time::timeout(std::time::Duration::from_secs(5), read_text_frame(&mut client)).await.unwrap();
+        assert_eq!(first["data"]["mark"], "in_window", "窗口裡那一則要從 backlog 送出來：{first}");
+        let first_seq = first["seq"].as_u64().unwrap();
+
+        // 哨兵在第一幀之後才送，所以它一定排在「重複的那一則」後面：下一幀是誰就見分曉。
+        env.app.emit("bot_changed", json!({"mark": "sentinel"})).await;
+        let second = tokio::time::timeout(std::time::Duration::from_secs(5), read_text_frame(&mut client)).await.unwrap();
+        assert_eq!(second["data"]["mark"], "sentinel", "同一個 seq 被送第二次（backlog 一次、即時串流一次）：{second}");
+        assert!(second["seq"].as_u64().unwrap() > first_seq, "哨兵的 seq 要比前一則大：{second}");
         drop(client);
     }
 }

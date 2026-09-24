@@ -34,6 +34,7 @@ import { PREVIEW_OFF, toPreviewEvent, type Preview } from '../api/preview'
 import type { Bot, BotKind, RestartBatch, GroupChatResult, Mission, MissionDetail, NewMissionInput, MemSnapshot, GroupMessage, Host, HerdrVersion, HostResult, HostShell, Identity, IdentityStatusMap, Lamp, Message, ModelInfo, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, PatchBotInput, PatchProjectInput, Project, QuotaMap, Run, TerminalSource, ToolMap, Turn, TurnDelivery } from '../api/types'
 import type { ProjectPane } from '../api'
 import { joinRunningBatch, reconcileBatch, restartProgress } from './restartBatch'
+import { gateFrame } from './frameSeen'
 import { dropHostModels, modelsKey, shouldFetchModels, type ModelsCache } from './modelsCache'
 import { byId, byTime, capList, insertSorted, pruneTurns } from './lists'
 import { type CapFloors, capFor, clearFloor, raiseFloor } from './messageCap'
@@ -2488,6 +2489,8 @@ async function identityAuth(set: SetFn, get: GetFn, host: string, identity: stri
 
 let disconnect: (() => void) | null = null
 let openedOnce = false
+/** 這條連線上已經套用過的最大耐久 seq（issue #521）；每次 socket 開起來歸零，見 `gateFrame`。 */
+let seenSeq = 0
 let quotaSweep: ReturnType<typeof setInterval> | null = null
 const QUOTA_SWEEP_MS = 5 * 60_000
 
@@ -2498,6 +2501,7 @@ function connectSocket(set: SetFn, get: GetFn) {
     onStatus: (socket) => {
       if (socket === 'open') {
         resetStateSeq()
+        seenSeq = 0
         // Re-fetch on every open: a failed frame already advanced lastSeq; the snapshot repairs the gap.
         set({ socket, stateStale: false })
         void get().refreshState()
@@ -2607,6 +2611,11 @@ export function seqAfterFrame(prev: { lastSeq: number; lastDurableSeq: number },
 }
 
 function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string; data?: unknown }) {
+  // daemon 訂閱與讀重播環之間送出的耐久事件兩邊都有（issue #521）。daemon 端已經擋掉，這是第二道：
+  // handler 不見得冪等（`bots_restart_progress` 是純累加），同一個 seq 套兩次就是多算一次。
+  const gate = gateFrame(seenSeq, frame.type, frame.seq)
+  if (gate.skip) return
+  seenSeq = gate.seen
   if (typeof frame.seq === 'number') {
     const seq = frame.seq
     set((s) => seqAfterFrame(s, frame.type, seq))
