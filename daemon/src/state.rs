@@ -384,6 +384,11 @@ impl App {
         }
         match oldest {
             None => Some(vec![]),
+            // `o` 是**環裡最舊那一則的 seq**，不是「最舊的 seq」——即時幀不進環（[`is_ephemeral`]，issue #482），
+            // 所以環內的 seq 是稀疏的，中間被 progress 打洞。這個算術因此偏**保守**：客戶端的 `since` 剛好
+            // 停在最近被擠出去的那一則耐久事件、而它與 `o` 之間全是 progress 的 seq 時，其實一則耐久事件都沒漏，
+            // 這裡仍然回 `None` 要求 resync。方向是 fail-safe（只會多要求重抓，不會謊稱補得齊），
+            // 而客戶端送的是 `lastDurableSeq`（收 progress 不推進）時就落回精確。動這一行之前先看這段。
             Some(o) if since + 1 >= o => Some(ring.iter().filter(|e| e.seq > since).cloned().collect()),
             Some(_) => None,
         }

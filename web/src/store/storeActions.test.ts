@@ -10,7 +10,7 @@ import { queueFromComposer, settleComposerSend } from './queuedSend.ts'
 import { MESSAGE_CAP, capList } from './lists.ts'
 import { capFor } from './messageCap.ts'
 
-const { useStore } = await import('./store.ts')
+const { useStore, seqAfterFrame } = await import('./store.ts')
 
 const bot = (id: string, extra: Partial<Bot> = {}) =>
   ({ id, name: id, project_id: 'p1', kind: 'claude', identity: null, ...extra }) as Bot
@@ -977,7 +977,7 @@ test('放棄未知送達的回合連點兩下：只放棄一次', async () => {
 
 test('快照在飛時 WS 已推進到更新的 seq：套完舊快照要再抓一次，不能讓舊的 run 狀態留著', async () => {
   seed()
-  useStore.setState({ lastSeq: 1000, runs: {} })
+  useStore.setState({ lastSeq: 1000, lastDurableSeq: 1000, runs: {} })
   let stateFetches = 0
   const snapshot = (seq: number, agent: string) => ({
     daemon_seq: seq,
@@ -995,7 +995,8 @@ test('快照在飛時 WS 已推進到更新的 seq：套完舊快照要再抓一
       stateFetches += 1
       if (stateFetches === 1) {
         // 快照是 seq 1000 時拍的；回應在路上時 `bot_status`（seq 1001）已經套用過。
-        useStore.setState({ lastSeq: 1001 })
+        // 追過快照的是 `bot_status`（耐久幀），兩個 seq 都推進。
+        useStore.setState({ lastSeq: 1001, lastDurableSeq: 1001 })
         return json(snapshot(1000, 'working'), 200)
       }
       return json(snapshot(1001, 'idle'), 200)
@@ -1005,6 +1006,53 @@ test('快照在飛時 WS 已推進到更新的 seq：套完舊快照要再抓一
   await useStore.getState().refreshState()
   assert.equal(stateFetches, 2, '比快照新的 frame 已經到了，要補抓一次')
   assert.equal(useStore.getState().runs.b1?.agent_status, 'idle')
+})
+
+test('快照來回之間只落進 turn_progress：不算落後，不再多抓一次 /api/state（#482）', async () => {
+  seed()
+  // `lastSeq` 被 progress 推到 1001，但耐久 seq 還停在快照那一刻。
+  // seq 要比同檔前面那條（1000/1001）大：`appliedStateSeq` 是模組層狀態，比它舊的快照會被當成過期丟掉，
+  // 那樣這條就根本走不到「要不要補抓」那一步（第一版就是這樣假綠的）。
+  useStore.setState({ lastSeq: 5000, lastDurableSeq: 5000, runs: {} })
+  let stateFetches = 0
+  routeDaemon((req) => {
+    if (req.path.endsWith('/state')) {
+      stateFetches += 1
+      // 回應在路上時來了幾幀 progress：只推 `lastSeq`，耐久 seq 不動。
+      useStore.setState({ lastSeq: 5004 })
+      // 第二次（如果真的又抓了）回一份「追上 progress」的快照，讓誤判的那一版停得下來、
+      // 乾脆地在下面的斷言紅掉，而不是一直「落後→再抓」轉成無窮迴圈。
+      return json(
+        {
+          daemon_seq: stateFetches === 1 ? 5000 : 5004,
+          projects: [
+            {
+              id: 'p1',
+              path: '/p',
+              label: 'p',
+              bots: [{ id: 'b1', project_id: 'p1', name: 'b1', kind: 'claude', run: { id: 'r1', bot_id: 'b1', state: 'running', agent_status: 'working' } }],
+            },
+          ],
+        },
+        200,
+      )
+    }
+    return json({ messages: [], turns: [], has_more: false }, 200)
+  })
+  await useStore.getState().refreshState()
+  assert.equal(stateFetches, 1, 'progress 不是耐久改變，不該為它再抓一次 state')
+})
+
+test('seqAfterFrame：progress 與 resync 不推進耐久 seq，耐久幀兩個都推（#482）', () => {
+  const at = (lastSeq: number, lastDurableSeq: number) => ({ lastSeq, lastDurableSeq })
+  assert.deepEqual(seqAfterFrame(at(10, 10), 'message_added', 11), at(11, 11))
+  assert.deepEqual(seqAfterFrame(at(11, 11), 'turn_progress', 12), at(12, 11), 'progress 只推 lastSeq')
+  assert.deepEqual(seqAfterFrame(at(12, 11), 'turn_progress', 13), at(13, 11))
+  assert.deepEqual(seqAfterFrame(at(13, 11), 'turn_updated', 14), at(14, 14), '耐久幀把兩個都帶上來')
+  // resync 帶的是 daemon 當下的 seq，可能落在某一幀 progress 上：等 refreshState 用 daemon_seq 對正。
+  assert.deepEqual(seqAfterFrame(at(14, 14), 'resync', 99), at(99, 14))
+  // 晚到的舊幀不能把任何一個往回拉。
+  assert.deepEqual(seqAfterFrame(at(99, 14), 'message_added', 5), at(99, 14))
 })
 
 test('任務「暫停」連點兩下：只送一次，不跳「任務操作失敗」', async () => {
