@@ -440,9 +440,12 @@ fn default_remote_shared_idle_hours() -> u64 {
     3
 }
 
-/// 每份約 2～3G：8 份約 20～25G，不把遠端的磁碟吃光（issue #196：一天開十幾顆子 agent、每張票數個變異副本，各是一個新 hash）。
+/// 每份約 2～3G：12 份約 30～36G，不把遠端的磁碟吃光（issue #196：一天開十幾顆子 agent、每張票數個變異副本，各是一個新 hash）。
+/// 8 太小（issue #417）：常態就是十來顆 child 各一棵 worktree ＝ 十來個 hash，上限卡在 8 會在每一輪把最舊的幾份收掉，
+/// 下一輪那幾顆又得整棵冷編譯一次——回收是要擋磁碟，不是要製造抖動。正式設定檔自己寫死 `max_shared_dirs` 時這個預設不生效，
+/// 要改線上的值得走 `PUT /api/build/remote`。
 fn default_remote_max_shared_dirs() -> usize {
-    8
+    12
 }
 
 /// 12 分鐘：實測 112 次遠端編譯最長 8.9 分鐘（全套 test 中位數 5.0、P90 8.7），約 1.35 倍，不誤殺正常編譯（issue #194）。
