@@ -193,6 +193,23 @@ pub async fn get_assignment(State(app): State<Arc<App>>, Path(id): Path<String>)
     Ok(Json(out))
 }
 
+/// 裁示紀錄裡的「是誰」。**只有**驗過的 `X-AM-Bot-Id` 能寫出 `AGM:<role>`；沒驗過的呼叫端
+/// 一律記成 `user`，body 裡自稱的名字只當未驗證的備註括進去（issue #414）。
+///
+/// 以前是 `verified` 為 `None` 時直接採信 body 的 `actor`，而且預設填 `AGM`——UI token 本機
+/// 任何行程都拿得到（`relay_auth.rs` 的說明），等於任何一顆 bot 都能把自己的裁示掛成
+/// `AGM:responder`，事後從 DB 與 supervisor_notes 都分不出來。
+fn decision_actor(verified: Option<super::roles::Role>, claimed: Option<&str>) -> String {
+    if let Some(r) = verified {
+        return format!("{}:{}", store::SUPERVISOR_ID, r.as_str());
+    }
+    match claimed.map(str::trim).filter(|c| !c.is_empty()) {
+        // 保留呼叫端自稱的名字（`bin/agm … --actor`），但永遠包在 `user(…)` 裡：讀的人一眼看得出
+        // 這串字沒有被驗證過，而且它再怎麼填都變不成 `AGM` 開頭。
+        Some(c) => format!("user({})", c.chars().take(64).collect::<String>()),
+        None => "user".to_string(),
+    }
+}
 
 #[derive(Deserialize)]
 pub struct ReviewIn {
@@ -290,11 +307,8 @@ pub async fn post_review(
         ));
     }
 
-    // 驗證過的角色以 token 為準，不信 body 裡自稱的名字。
-    let actor = match verified {
-        Some(r) => format!("{}:{}", store::SUPERVISOR_ID, r.as_str()),
-        None => b.actor.clone().unwrap_or_else(|| store::SUPERVISOR_ID.to_string()),
-    };
+    // 驗證過的角色以 token 為準，不信 body 裡自稱的名字（issue #414）。
+    let actor = decision_actor(verified, b.actor.as_deref());
     let source = b.source.clone().unwrap_or_else(|| "api".to_string());
 
     // Cancelling work that is (or may be) already running stops the *tracking*, not the bot.
@@ -1010,10 +1024,7 @@ pub async fn post_approval_decision(
         return Ok(Json(out));
     }
     let expires = b.expires_in_secs.map(iso_in);
-    let actor = match verified {
-        Some(r) => format!("{}:{}", store::SUPERVISOR_ID, r.as_str()),
-        None => b.actor.clone().unwrap_or_else(|| store::SUPERVISOR_ID.to_string()),
-    };
+    let actor = decision_actor(verified, b.actor.as_deref());
     // **第一個裁示定案**：approve／deny 只從 `pending` 寫得進去，而且條件寫在 SQL 裡、不看先前
     // 讀到的值。否則兩個角色同時決定時，後到的那個會把 `approved` 改成 `denied`——同一筆核准就
     // 有了兩個「第一次裁示」。要翻案得明講 `revoke`，而且歷程留著（`supervisor_notes`）。
@@ -1531,6 +1542,40 @@ mod approval_decision_tests {
         std::fs::remove_dir_all(&app.data_dir).unwrap();
     }
 
+    /// issue #414：`decided_by` 以前是 body 說了算，預設還填 `AGM`。UI token 本機任何行程都
+    /// 拿得到，所以那等於任何一顆 bot 都能把自己的裁示掛成 `AGM:responder`。
+    #[tokio::test]
+    async fn only_a_verified_role_can_be_recorded_as_the_supervisor() {
+        let app = app().await;
+        let decided_by = |app: &Arc<App>, id: String| {
+            let app = app.clone();
+            async move { store::approval(&app.db, &id).await.unwrap().unwrap().decided_by.unwrap_or_default() }
+        };
+
+        // 沒驗過卻自稱是協調者：記成 user(...)，絕不是 AGM 開頭。
+        let a1 = pending(&app).await;
+        decide(&app, &a1, "approve", "AGM:responder").await.unwrap();
+        let who = decided_by(&app, a1).await;
+        assert_eq!(who, "user(AGM:responder)");
+        assert!(!who.starts_with(store::SUPERVISOR_ID), "未驗證的呼叫端寫不出 AGM 開頭的身分，卻拿到 {who:?}");
+
+        // 沒驗過、也沒自稱：user，而不是以前的 AGM。
+        let a2 = pending(&app).await;
+        let body: DecisionIn = serde_json::from_value(json!({"decision": "approve"})).unwrap();
+        post_approval_decision(State(app.clone()), Path(a2.clone()), HeaderMap::new(), Json(body)).await.unwrap();
+        assert_eq!(decided_by(&app, a2).await, "user");
+
+        // 驗過的角色：以 token 為準，body 自稱的名字不影響。
+        let a3 = pending(&app).await;
+        let h = agm_role_headers(&app).await;
+        let body: DecisionIn = serde_json::from_value(json!({"decision": "approve", "actor": "AGM:responder"})).unwrap();
+        post_approval_decision(State(app.clone()), Path(a3.clone()), h, Json(body)).await.unwrap();
+        assert_eq!(decided_by(&app, a3).await, format!("{}:patrol", store::SUPERVISOR_ID));
+
+        app.db.close().await;
+        std::fs::remove_dir_all(&app.data_dir).unwrap();
+    }
+
     pub(super) async fn agm_role_headers(app: &Arc<App>) -> HeaderMap {
         let id = crate::db::ulid();
         sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES ('p-agm','/tmp','AGM',?)")
@@ -1750,7 +1795,10 @@ mod approval_decision_tests {
             .map(|d| (d["from"].as_str().unwrap_or("").into(), d["to"].as_str().unwrap_or("").into()))
             .collect();
         assert_eq!(pairs, vec![("pending".to_string(), "approved".to_string()), ("approved".into(), "revoked".into())]);
-        assert_eq!(decisions[0]["actor"], "AGM:responder", "誰核准的要查得到");
+        // `decide` 走的是沒有 bot 標頭的呼叫端，所以自稱的 `AGM:responder` 只會被記成未驗證的
+        // `user(…)`（issue #414）——歷程照樣查得到是誰說的，但讀的人一眼看得出那串字沒被驗證。
+        assert_eq!(decisions[0]["actor"], "user(AGM:responder)", "誰核准的要查得到");
+        assert_eq!(decisions[1]["actor"], "user(AGM:patrol)");
         // 撤銷之後不能就地再核准：要開新的一筆申請。
         assert!(decide(&app, &id, "approve", "AGM:patrol").await.is_err());
     }
