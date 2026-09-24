@@ -4,7 +4,7 @@
  */
 import { useCallback, useEffect, useState } from 'react'
 import { orderRows, showRepo } from '../lib/previewList'
-import { groupOthers, kindLabel, fetchPreview, type PreviewOther, type PreviewRelation, type StartPreviewOpts, previewApiMissing, PREVIEW_API_MISSING, previewUrl, startPreview, stopPreview, PREVIEW_OFF, type Preview } from '../api/preview'
+import { groupOthers, kindLabel, fetchPreview, type PreviewOther, type PreviewRelation, type StartPreviewOpts, previewApiMissing, PREVIEW_API_MISSING, previewReasonText, previewUrl, startPreview, stopPreview, NO_DEV_REASONS, PREVIEW_OFF, type Preview } from '../api/preview'
 import { isMock } from '../api'
 import { ApiError } from '../api/types'
 import type { ReactNode } from 'react'
@@ -19,19 +19,24 @@ interface PreviewErr {
   noConfig: boolean
 }
 
-/** daemon 的「找不到能起的」409：v1 叫 `no_vite_config`，v4 擴大後可能改名。 */
-const NO_DEV = new Set(['no_vite_config', 'no_dev_server', 'no_dev_command'])
-
+/**
+ * daemon 的 409 只帶機器代碼（`LcError::conflict` 的 body 沒有 `message`，而 `ApiError` 的 message 就是
+ * 那個 `reason`），所以人話在 `api/preview.ts::previewReasonText`；認不出來的至少寫成「代碼（HTTP 狀態）」
+ * 而不是只丟一個英文字（issue #524）。
+ */
 function startError(e: unknown): PreviewErr {
   const plain = (text: string): PreviewErr => ({ text, tried: [], noConfig: false })
   if (previewApiMissing(e)) return plain(PREVIEW_API_MISSING)
   if (e instanceof ApiError) {
-    if (e.body.reason === 'not_top_level' || e.body.error === 'not_top_level') return plain('只有頂層 bot 能開預覽。')
-    if (NO_DEV.has(String(e.body.reason ?? e.body.error ?? ''))) {
+    const reason = String(e.body.reason ?? e.body.error ?? '')
+    const text = previewReasonText(reason, e.body)
+    // 偵測不到設定檔：不是死路（下面的 others 照樣能接），另外標記並列出試過的路徑。
+    if (NO_DEV_REASONS.has(reason)) {
       const tried = Array.isArray(e.body.tried) ? e.body.tried.map(String) : []
-      return { text: '這顆 bot 的目錄裡找不到可以起的 dev server（vite 設定檔或 package.json 的 dev script），AG Man 沒辦法自己起。', tried, noConfig: true }
+      return { text: text ?? e.message, tried, noConfig: true }
     }
-    return plain(e.message)
+    if (text) return plain(text)
+    return plain(reason && reason !== 'conflict' ? `${reason}（HTTP ${e.status}）` : e.message)
   }
   return plain(e instanceof Error ? e.message : String(e))
 }
