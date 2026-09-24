@@ -462,6 +462,19 @@ pub async fn stop(app: &Arc<App>) -> Result<(), LcError> {
 
 // ---------------------------------------------------------------- watchdog
 
+/// 這一列翻譯成看門狗看得懂的那幾個欄位。拿鎖前的第一次判斷與拿鎖後的重判共用同一支，
+/// 兩次才不會用不同的規則（issue #523）。
+fn watched(row: &roles::RoleRow, quota_unknown_retry: bool) -> watchdog::Watched<'_> {
+    watchdog::Watched {
+        configured: true,
+        wanted: row.desired_running != 0,
+        // 等額度時看門狗不把它拉起來——除非我們其實**不知道**額度狀態，而且排定的重試時間已經到了。
+        waiting_quota: row.status == "waiting_quota" && !quota_unknown_retry,
+        attempts: row.watchdog_attempts,
+        next_at: row.watchdog_next_at.as_deref(),
+    }
+}
+
 pub async fn watchdog_tick(app: &Arc<App>) {
     let Ok(row) = roles::get(&app.db, Role::Responder).await else { return };
     let Ok(bot) = roles::responder_bot(&app.db).await else { return };
@@ -481,16 +494,10 @@ pub async fn watchdog_tick(app: &Arc<App>) {
     // `notify` 因為它沒在跑不送、`answered_since` 要它答完一個回合——三個條件互相等，永遠卡住（review3 c3 M3）。
     // 有可信證據說被擋（撞限或見底讀數）時照舊不啟動。
     let retry_due = row.notify_next_at.as_deref().is_none_or(watchdog::past);
-    let parked_on_quota = row.status == "waiting_quota"
-        && !(retry_due && quota_state(app, &bot).await == QuotaState::Unknown);
-    let w = watchdog::Watched {
-        configured: true,
-        wanted: row.desired_running != 0,
-        waiting_quota: parked_on_quota,
-        attempts: row.watchdog_attempts,
-        next_at: row.watchdog_next_at.as_deref(),
-    };
-    match watchdog::plan_for(w, liveness, watchdog::past) {
+    // 這個判斷要花一次額度查詢，所以算一次就記著：下面拿鎖之後重判時直接沿用（額度狀態不會因為
+    // 有人按 stop 而改變，而在全域鎖裡再查一次額度只會把 controller 整拍拖住，#473）。
+    let quota_unknown_retry = retry_due && quota_state(app, &bot).await == QuotaState::Unknown;
+    match watchdog::plan_for(watched(&row, quota_unknown_retry), liveness, watchdog::past) {
         watchdog::Plan::Idle => {
             if matches!(liveness, "idle" | "busy") && (row.watchdog_attempts > 0 || row.watchdog_next_at.is_some()) {
                 let _ = roles::set_watchdog(&app.db, Role::Responder, 0, None, None).await;
@@ -510,6 +517,19 @@ pub async fn watchdog_tick(app: &Arc<App>) {
         }
         watchdog::Plan::Start => {
             let _g = super::lock().await;
+            // 拿到鎖才重讀意圖與 liveness（issue #523）：上面那個 `row` 是**等鎖之前**讀的，而
+            // `POST /api/supervisor/responder/stop` 拿的是同一把鎖，它會先把 `desired_running=0`
+            // 寫進去再停掉 pane。照舊的 `row` 啟動等於把使用者剛按下的 stop 蓋掉，而且收不回來：
+            // bot 跑著、意圖是 0，下一拍 `plan_for` 因為 `wanted=false` 回 `Idle`，看門狗從此不管它。
+            // 巡檢那半（`watchdog::start`）一直是這樣防的，這裡以前沒跟上。
+            #[cfg(test)]
+            crate::lifecycle::race_point::hit("responder_watchdog_start", &bot.id).await;
+            let Ok(row) = roles::get(&app.db, Role::Responder).await else { return };
+            let Ok(liveness) = super::manager_liveness(app, &bot.id).await else { return };
+            if watchdog::plan_for(watched(&row, quota_unknown_retry), liveness, watchdog::past) != watchdog::Plan::Start {
+                tracing::info!(liveness, wanted = row.desired_running, "協調者看門狗放掉這一次自動啟動：拿到鎖時狀態已經變了");
+                return;
+            }
             let attempt = row.watchdog_attempts + 1;
             match start(app, Some(&format!("watchdog 自動重新啟動（第 {attempt} 次）"))).await {
                 Ok(()) => {
@@ -1456,6 +1476,32 @@ mod flow_tests {
         watchdog_tick(&app).await;
         let row = roles::get(&app.db, Role::Responder).await.unwrap();
         assert_eq!((row.watchdog_attempts, row.watchdog_next_at), (0, None), "有可信證據說被擋就別開");
+    }
+
+    /// issue #523：看門狗決定要啟動之後、真的啟動之前，使用者按下 stop（`post_stop` 拿的是同一把鎖）。
+    /// 拿到鎖一定要重讀意圖，否則那次 stop 會被蓋掉——bot 跑著而 `desired_running=0`，
+    /// 下一拍 `plan_for` 因為 `wanted=false` 回 `Idle`，再也沒有人會把它收回去。
+    #[tokio::test]
+    async fn a_stop_that_lands_while_the_watchdog_waits_for_the_lock_is_not_overridden() {
+        let app = fx::app().await;
+        fx::configure_responder(&app).await;
+        let bot = roles::responder_bot(&app.db).await.unwrap().unwrap();
+        roles::set_desired_running(&app.db, Role::Responder, true).await.unwrap();
+        roles::set_watchdog(&app.db, Role::Responder, 0, Some("2020-01-01T00:00:00Z"), None).await.unwrap();
+        // 「等鎖的那一瞬」使用者按了 stop：`responder::stop` 寫的就是這一欄（寫得進去才停 pane）。
+        let db = app.db.clone();
+        crate::lifecycle::race_point::arm("responder_watchdog_start", &bot.id, move || async move {
+            roles::set_desired_running(&db, Role::Responder, false).await.unwrap();
+        });
+        watchdog_tick(&app).await;
+
+        let row = roles::get(&app.db, Role::Responder).await.unwrap();
+        assert_eq!(row.desired_running, 0, "使用者的 stop 不可以被看門狗改回去");
+        // `set_desired_running` 本來就會把計數與排程清乾淨（人做了新決定）；沒放掉的話，
+        // 這裡會看到 `start` 失敗那條路寫回來的 `attempts=1` 與錯誤訊息。
+        assert_eq!(row.watchdog_attempts, 0, "這一次自動啟動要放掉，不算一次嘗試");
+        assert_eq!(row.watchdog_last_error, None, "連失敗紀錄都不該有：根本不該試");
+        assert!(crate::db::active_run(&app.db, &bot.id).await.unwrap().is_none(), "不可以把它啟動起來");
     }
 
     /// 空的、不完整的讀數都不是「可以用」：少的那一格可能正是見底的那一格。
