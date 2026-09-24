@@ -1245,6 +1245,12 @@ class OpsSyncTest(CliCase):
 
     def setUp(self):
         super().setUp()
+        # `ops_sync_report` 會掃 `~/Library/LaunchAgents` 找沒有版控的 `com.agm.*`（issue #487）。
+        # 每個測試都先指到自己的空目錄：不指的話會讀到這台機器真的 plist，測試結果跟著機器跑。
+        self.agents = Path(self.dir.name) / "LaunchAgents"
+        self.agents.mkdir(parents=True, exist_ok=True)
+        os.environ["AGM_LAUNCHAGENTS_DIR"] = str(self.agents)
+        self.addCleanup(os.environ.pop, "AGM_LAUNCHAGENTS_DIR", None)
         self.repo_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.repo_dir.cleanup)
         self.repo = Path(self.repo_dir.name)
@@ -1285,6 +1291,82 @@ class OpsSyncTest(CliCase):
         self.assertFalse([x for x in FakeDaemon.seen if x["path"] != "/api/session"], "沒帶 --alert 不打 API")
         # 只讀：安裝檔一個字都沒動。
         self.assertEqual((Path(self.dir.name) / "bin/b.sh").read_text(encoding="utf-8"), "b 有人直接改了\n")
+
+    # ── launchd plist（issue #487）────────────────────────────────────────────
+    PLIST = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+        '<plist version="1.0"><dict>{}</dict></plist>\n'
+    )
+
+    def plist(self, label: str, interval: int, extra: str = "", program: str = "/bin/zsh") -> str:
+        return self.PLIST.format(
+            f"<key>Label</key><string>{label}</string>"
+            f"<key>ProgramArguments</key><array><string>{program}</string></array>"
+            f"<key>StartInterval</key><integer>{interval}</integer>{extra}"
+        )
+
+    def with_plists(self):
+        """對照表多一列 plist（`self.agents` 在 setUp 已經指到暫存目錄）。"""
+        self.put("scripts/ops/install-manifest.tsv",
+                 "scripts/ops/a.sh bin/a.sh\nscripts/ops/b.sh bin/b.sh\nscripts/ops/c.sh bin/c.sh\nscripts/ops/t.md t.md\n"
+                 "scripts/ops/launchd/com.agm.x.plist LaunchAgents/com.agm.x.plist\n")
+        self.put("scripts/ops/launchd/com.agm.x.plist", self.plist("com.agm.x", 1800))
+        self.git("add", "-A")
+        self.git("commit", "-qam", "加 plist")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        for n in "abc":
+            self.install(f"bin/{n}.sh", "a v3\n" if n == "a" else f"{n} v1\n")
+        self.install("t.md", "task\n")
+
+    def test_plist_compares_only_semantic_fields_so_launchd_rewrites_are_not_drift(self):
+        """launchd 會改寫 plist（鍵的順序、補欄位）——整檔比對一定是 drift，所以只比語意欄位。"""
+        self.with_plists()
+        # 同樣四個語意欄位，但鍵的順序不同、而且多了 launchd 自己補的 StandardOutPath 與 EnvironmentVariables。
+        (self.agents / "com.agm.x.plist").write_text(
+            self.PLIST.format(
+                "<key>StandardOutPath</key><string>/tmp/x.log</string>"
+                "<key>StartInterval</key><integer>1800</integer>"
+                "<key>EnvironmentVariables</key><dict><key>PATH</key><string>/usr/bin</string></dict>"
+                "<key>ProgramArguments</key><array><string>/bin/zsh</string></array>"
+                "<key>Label</key><string>com.agm.x</string>"
+            ), encoding="utf-8")
+        r = self.ok("ops-sync", "--check", "--repo", str(self.repo))
+        self.assertTrue(r["in_sync"], r)
+        self.assertIn("LaunchAgents/com.agm.x.plist", [x["target"] for x in r["ok"]])
+
+    def test_plist_interval_drift_is_reported_with_both_values(self):
+        """#487 的本體：實機把間隔改掉（或文件跟排程不一致）要看得出來，而且要講出兩邊的值。"""
+        self.with_plists()
+        (self.agents / "com.agm.x.plist").write_text(self.plist("com.agm.x", 600), encoding="utf-8")
+        code, out, _ = self.run_cli("ops-sync", "--check", "--repo", str(self.repo))
+        self.assertEqual(code, 1)
+        r = json.loads(out)
+        [row] = [x for x in r["drift"] if x["target"] == "LaunchAgents/com.agm.x.plist"]
+        self.assertEqual(row["diff"]["StartInterval"], {"repo": 1800, "installed": 600})
+
+    def test_an_unlisted_com_agm_job_is_reported_as_unversioned(self):
+        """`~/Library/LaunchAgents` 有、對照表沒有的 job＝沒有版控的排程，正是 #487 要抓的。"""
+        self.with_plists()
+        (self.agents / "com.agm.x.plist").write_text(self.plist("com.agm.x", 1800), encoding="utf-8")
+        (self.agents / "com.agm.ghost.plist").write_text(self.plist("com.agm.ghost", 60), encoding="utf-8")
+        (self.agents / "com.other.thing.plist").write_text(self.plist("com.other.thing", 60), encoding="utf-8")
+        code, out, _ = self.run_cli("ops-sync", "--check", "--repo", str(self.repo))
+        self.assertEqual(code, 1)
+        r = json.loads(out)
+        extras = [x["target"] for x in r["extra"]]
+        self.assertIn("LaunchAgents/com.agm.ghost.plist", extras)
+        self.assertNotIn("LaunchAgents/com.other.thing.plist", extras, "只管 com.agm.*，別人的 job 不碰")
+
+    def test_an_unreadable_plist_is_drift_not_a_crash(self):
+        """壞掉的 plist 要報成落差，不是讓整份報告炸掉。"""
+        self.with_plists()
+        (self.agents / "com.agm.x.plist").write_text("not a plist", encoding="utf-8")
+        code, out, _ = self.run_cli("ops-sync", "--check", "--repo", str(self.repo))
+        self.assertEqual(code, 1)
+        r = json.loads(out)
+        [row] = [x for x in r["drift"] if x["target"] == "LaunchAgents/com.agm.x.plist"]
+        self.assertIn("_error", row["diff"])
 
     def test_in_sync_exits_zero_and_alert_pushes_one_ops_alert(self):
         for n in "bc":
