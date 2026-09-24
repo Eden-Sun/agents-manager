@@ -1700,6 +1700,10 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
   `awaiting_review`、`inbox_open`（三者分開不相加）；`manager_health{status,supervisor_status,daemon_connected}` 與 `system_health{status,open_incidents,incidents,blind_probes}`（`blind_probes` 非空＝那幾類探針上一輪查詢失敗，`status` 至少是 `unknown`），頂層 `status` 取兩者較嚴重者。
   daemon 每 30 秒檢查，指紋變化才推 WS `supervisor_health`；inbox `health_changed` 只在巡檢或協調者的嚴重度（`manager_health.status`／`responder_health.status`）或總管狀態（idle/busy 視為 running）真的改變時入列，總管 stopped/starting 期間不入列、恢復後補一則。
   `responder_health{status,responder_status,unavailable_reason,inbox_open,wake_pending,retry_at}` 單獨一格，**也併進**頂層 `status`（取較嚴重者）。
+  `timing`（issue #473，**只是量測，不進 `status`**）：`{"window_secs":3600,"stats":{"<key>":{"count","p50_ms","p95_ms","max_ms"}}}`。
+  key 有三類：`tick:<段名>`（controller tick 的每一段）、`tick:_total`（整拍）、`lock:wait:<檔案>:<行>` 與 `lock:hold:<檔案>:<行>`
+  （supervisor 全域鎖，行號就是那個拿鎖點）。只給統計不給樣本；每個 key 留最近一小時、最多 2000 筆。
+  `daemon.log` 只寫超標的：單段 ≥ 2 秒、整拍 ≥ 10 秒（一個心跳）、等鎖 ≥ 1 秒，各帶段名／拿鎖點、bot 數與耗時；正常的一拍一個字都不寫。
   協調者 `waiting_quota`、`desired_running` 卻沒在跑、或沒在跑（stopped／missing）而 `wake_pending>0`、或 `unavailable_reason` 是
   `notify_stalled`／`no_run` → `degraded`；**`needs_login` → `critical`**（要人動手跑 `/login`，期間所有核准與 bot 申請都沒有人裁示，
   而且不會自己好——`incidents` 對同一件事開的就是 critical，兩個面板講同一件事就該同一個嚴重度，issue #454）。
