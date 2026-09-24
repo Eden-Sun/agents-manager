@@ -832,6 +832,12 @@ pub async fn notify(app: &Arc<App>) {
         }
         QuotaState::Unknown | QuotaState::Available => {}
     }
+    // 停在登入（#420）：答完一個沒出錯的回合、或畫面上已經看不到登入問題，才算恢復。送還是照退避繼續試——
+    // 人從別的終端 unlock-keychain 之後畫面不會變，擋住不送就永遠等不到那個「答完」。
+    if row.status == "needs_login" && login_recovered(app, &bot, row.waiting_since.as_deref()).await {
+        let _ = roles::set_status(&app.db, Role::Responder, "", Some("登入已恢復"), None).await;
+        app.emit("supervisor_changed", json!({"responder": "login_resumed"})).await;
+    }
     // 還沒到下一次可以試的時間（上一次送不出去的退避，或讀不到額度時仍在等的那個點）。
     if next_at.as_deref().is_some_and(|t| !watchdog::past(t)) {
         return;
@@ -855,7 +861,10 @@ pub async fn notify(app: &Arc<App>) {
     };
     // 送出去了、結果還沒寫進 DB（#149）照 `unknown` 綁在那一筆回合上：換新的 crid 重送會讓協調者收到兩份。
     match lifecycle::owed_as_unknown(lifecycle::prompt_relayed(app, &bot.id, &digest(&due), &crid, &[], Some(crate::agent_relay::DAEMON_SENDER)).await) {
-        Ok(out) if out.delivery == "failed" => defer("delivery failed".into()).await,
+        Ok(out) if out.delivery == "failed" => {
+            defer("delivery failed".into()).await;
+            note_login_problem(app, &bot, &row.status).await;
+        }
         Ok(out) => {
             let n = roles::mark_delivered(&app.db, &due.iter().map(|e| e.id.clone()).collect::<Vec<_>>(), Role::Responder, &out.turn_id, &out.delivery)
                 .await
@@ -869,7 +878,39 @@ pub async fn notify(app: &Arc<App>) {
             }
             app.emit("supervisor_changed", json!({"responder": "woken", "events": n})).await;
         }
-        Err(e) => defer(format!("{e:?}")).await,
+        Err(e) => {
+            defer(format!("{e:?}")).await;
+            note_login_problem(app, &bot, &row.status).await;
+        }
+    }
+}
+
+/// 協調者 pane 現在看得出要人登入嗎（登入選單、onboarding、或回合只回 `Not logged in`）。沒有 run 就是不知道。
+async fn login_problem_on_screen(app: &Arc<App>, bot: &crate::db::Bot) -> bool {
+    match crate::db::active_run(&app.db, &bot.id).await {
+        Ok(Some(run)) => crate::tui_prompts::shows_login_problem(app, &run).await,
+        _ => false,
+    }
+}
+
+async fn login_recovered(app: &Arc<App>, bot: &crate::db::Bot, since: Option<&str>) -> bool {
+    answered_since(app, &bot.id, since).await || !login_problem_on_screen(app, bot).await
+}
+
+/// 送不出去的那一次順便看畫面（issue #420）：協調者的 CLI 沒登入時，送出只會一直 `composer_unreadable`／
+/// 回合失敗，而 liveness 照樣是 idle、health 照樣 healthy，申請與核准靜默過期了 9 小時。看得出是登入問題就把
+/// 狀態標成 `needs_login`：health 轉 degraded，incident 探針開 `responder_needs_login` 叫醒巡檢去找人。
+async fn note_login_problem(app: &Arc<App>, bot: &crate::db::Bot, status: &str) {
+    if status == "needs_login" || !login_problem_on_screen(app, bot).await {
+        return;
+    }
+    let who = bot.identity.as_deref().unwrap_or("(身分不明)");
+    let detail = format!(
+        "{who} 的 CLI 沒登入（畫面要求 /login）：協調事件送不出去、留在 inbox。請在協調者的 pane 跑 /login（Keychain 鎖住時先在另一個終端 security unlock-keychain）"
+    );
+    if roles::set_status(&app.db, Role::Responder, "needs_login", Some(&detail), None).await.is_ok() {
+        tracing::error!(bot = %bot.id, identity = who, "responder CLI is not logged in; coordination events cannot be delivered");
+        app.emit("supervisor_changed", json!({"responder": "needs_login"})).await;
     }
 }
 
@@ -1415,6 +1456,74 @@ mod flow_tests {
 
         app.quotas.lock().await.insert(key, available());
         assert_eq!(quota_state(&app, &bot).await, QuotaState::Available);
+    }
+
+    /// issue #420：協調者的 CLI 沒登入時，liveness 照樣 idle、health 照樣 healthy，核准申請送了 66 次到過期都沒人知道。
+    /// 送不出去時看畫面：看得出要登入就標 `needs_login`（health degraded、incident 探針開 `responder_needs_login`）；
+    /// 畫面恢復就解除。另外不管原因，協調者的事件送了 5 次還在 pending 就開 `responder_undeliverable`（一個協調者一筆）。
+    #[tokio::test]
+    async fn a_responder_that_is_not_logged_in_is_flagged_and_its_stuck_events_open_an_incident() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        store::get_or_init(&app.db).await.unwrap();
+        let now = crate::db::now();
+        sqlx::query("INSERT INTO bots (id,project_id,name,kind,identity,hook_token,created_at) VALUES ('resp',?,'AGM-responder','claude','cc0','tok',?)")
+            .bind(&env.project_id).bind(&now).execute(&app.db).await.unwrap();
+        roles::set_env(&app.db, Role::Responder, "resp", &env.project_id, "/tmp").await.unwrap();
+        sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,herdr_session,pane_id,started_at) VALUES ('run-r','resp','running','idle','test','pane-r',?)")
+            .bind(&now).execute(&app.db).await.unwrap();
+        let bot = crate::db::bot(&app.db, "resp").await.unwrap().unwrap();
+        let thresholds = super::super::incidents::Thresholds::from_cfg(&app.cfg.get().await.supervisor);
+        let kinds = |p: &super::super::incidents::Probed| p.seen.iter().map(|o| (o.kind.clone(), o.severity.clone())).collect::<Vec<_>>();
+
+        // 畫面正常時送不出去（例如 pane 忙）：不是登入問題，不標。
+        env.herdr.set_screen("pane-r", "⏺ 已處理。\n\n❯ \n  AGM-responder | Opus 5 H | 5h:80%\n");
+        note_login_problem(&app, &bot, "").await;
+        assert_eq!(roles::get(&app.db, Role::Responder).await.unwrap().status, "");
+
+        env.herdr.set_screen("pane-r", crate::tui_prompts::screens::NOT_LOGGED_IN);
+        note_login_problem(&app, &bot, "").await;
+        let row = roles::get(&app.db, Role::Responder).await.unwrap();
+        assert_eq!(row.status, "needs_login");
+        assert!(row.waiting_since.is_some(), "記下從什麼時候開始等人登入");
+        assert!(row.status_detail.as_deref().unwrap_or("").contains("/login"), "{:?}", row.status_detail);
+        let status = status_json(&app).await.unwrap();
+        assert_eq!(status["status"], "needs_login", "{status}");
+        assert_eq!(super::super::health::responder_severity(&status), "degraded");
+        let probed = super::super::incidents::observe(&app, &thresholds).await;
+        assert!(kinds(&probed).contains(&("responder_needs_login".into(), "critical".into())), "{:?}", kinds(&probed));
+
+        // 畫面還是那樣：不解除。
+        notify(&app).await;
+        assert_eq!(roles::get(&app.db, Role::Responder).await.unwrap().status, "needs_login");
+        // 登入了（畫面上看不到登入問題）：解除，incident 探針也不再看到它。
+        env.herdr.set_screen("pane-r", "❯ /login\n  ⎿  Login successful\n\n❯ \n  AGM-responder | Opus 5 H | 5h:99%\n");
+        notify(&app).await;
+        let row = roles::get(&app.db, Role::Responder).await.unwrap();
+        assert_eq!((row.status.as_str(), row.status_detail.as_deref(), row.waiting_since), ("", Some("登入已恢復"), None));
+        let probed = super::super::incidents::observe(&app, &thresholds).await;
+        assert!(!kinds(&probed).iter().any(|(k, _)| k == "responder_needs_login"));
+
+        // 不管原因：協調者的事件送了 5 次還在 pending → 一筆 incident；4 次還不到。
+        let mut ids = Vec::new();
+        for k in ["a1", "a2"] {
+            ids.push(store::push_inbox(&app.db, k, "approval_requested", None, None, None, &json!({})).await.unwrap().unwrap());
+        }
+        roles::classify(&app.db).await.unwrap();
+        sqlx::query("UPDATE supervisor_inbox SET notify_attempts=4, notify_error='composer_unreadable'").execute(&app.db).await.unwrap();
+        let probed = super::super::incidents::observe(&app, &thresholds).await;
+        assert!(!kinds(&probed).iter().any(|(k, _)| k == "responder_undeliverable"), "4 次還不到");
+        sqlx::query("UPDATE supervisor_inbox SET notify_attempts=5 WHERE id=?").bind(&ids[0]).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE supervisor_inbox SET notify_attempts=66 WHERE id=?").bind(&ids[1]).execute(&app.db).await.unwrap();
+        let probed = super::super::incidents::observe(&app, &thresholds).await;
+        let stuck: Vec<_> = probed.seen.iter().filter(|o| o.kind == "responder_undeliverable").collect();
+        assert_eq!(stuck.len(), 1, "一個協調者一筆，不是一則事件一筆");
+        let detail: Value = serde_json::from_str(&stuck[0].detail).unwrap();
+        assert_eq!((detail["events"].as_i64(), detail["max_attempts"].as_i64()), (Some(2), Some(66)), "{detail}");
+        assert_eq!(stuck[0].severity, "critical");
+        // 開出來的 incident 叫醒的是巡檢，不是倒下的協調者自己。
+        assert_eq!(roles::route("incident_opened", &json!({"incident": {"kind": "responder_undeliverable"}}), None).role, Role::Patrol);
+        assert_eq!(roles::route("incident_opened", &json!({"incident": {"kind": "responder_needs_login"}}), None).role, Role::Patrol);
     }
 
     /// 送達不是恢復：prompt 成功（`ok`／`unknown`）只代表字進了 pane 或佇列。還沒有回答、或回合

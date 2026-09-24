@@ -232,6 +232,28 @@ pub fn is_grok_trust_dialog(screen: &str) -> bool {
 /// 確認框連同框線與 statusLine 的最大高度；再往上是正文。
 const DIALOG_TAIL_LINES: usize = 12;
 
+/// claude 開得起來、但憑證讀不到（`CLAUDE_CONFIG_DIR` 沒登入、Keychain 鎖著）時，每個回合都只回一行
+/// `⎿  Not logged in · Please run /login`（畫面見測試用的 `screens::NOT_LOGGED_IN`）。跟登入選單不同，
+/// 輸入列是空的、herdr 判 idle，所以送交辦的閘擋不到它（issue #420：協調者這樣停了 9 小時）。
+/// 只認最底 [`MENU_TAIL_LINES`] 行裡、以 `⎿` 開頭的那一行：正文或引文裡提到這句不算。
+/// 畫面在人從別的終端 `security unlock-keychain` 之後不會變，所以這只拿來**標狀態**，不拿來擋送出。
+pub fn is_not_logged_in_reply(screen: &str) -> bool {
+    let raw: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
+    raw[raw.len().saturating_sub(MENU_TAIL_LINES)..]
+        .iter()
+        .any(|l| l.trim_start().starts_with('⎿') && norm_line(l).starts_with("not logged in") && flatten(l).contains("/login"))
+}
+
+/// 畫面上看得出這個 pane 要人登入（登入選單、onboarding、或回合只回 `Not logged in`）。讀不到畫面就當不是。
+pub async fn shows_login_problem(app: &Arc<App>, run: &db::Run) -> bool {
+    let Some(pane) = run.pane_id.clone() else { return false };
+    let Some(client) = app.herdr_for_run(run).await else { return false };
+    match client.pane_read(&pane, "visible", 80).await {
+        Ok(r) => is_login_menu(&r.text) || is_onboarding_theme(&r.text) || is_not_logged_in_reply(&r.text),
+        Err(_) => false,
+    }
+}
+
 /// 讀不到畫面就當不是——那不是這裡要擋的事。
 pub async fn stuck_at_login(app: &Arc<App>, run: &db::Run) -> bool {
     let Some(pane) = run.pane_id.clone() else { return false };
@@ -307,6 +329,22 @@ pub(crate) mod screens {
   build | agents-manager | Opus 5 | 5h:96%
 ";
 
+    /// issue #420：協調者 2026-09-23 停了 9 小時的樣子（輸入列空著、herdr 判 idle，每個回合只回這一行）。
+    pub const NOT_LOGGED_IN: &str = "\
+ ▐▛███▜▌   Claude Code v2.1.280
+▝▜█████▛▘  Opus 5 · Claude Max
+  ▘▘ ▝▝    ~/.config/agents-manager/supervisor/AGM-responder
+
+❯ [agents-manager daemon] 協調事件 3 則
+  ⎿  Not logged in · Please run /login
+   · Run in another terminal: security unlock-keychain
+
+────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────
+  AGM-responder | Opus 5 H | 5h:- | 7d:-
+";
+
     pub const ONBOARDING_THEME: &str = include_str!("lifecycle/fixtures/claude-2.1.278-onboarding-theme.txt");
     /// 2026-09-22 triage bot（2.1.280）的真回報：正文逐行引了 onboarding 主題頁原文，底下是空的輸入列＋statusline。
     /// daemon 對它每次送交辦都回 needs_login，交辦停在 queued。
@@ -315,6 +353,20 @@ pub(crate) mod screens {
 
 #[cfg(test)]
 mod tests {
+    /// issue #420：協調者停在「Not logged in」——輸入列空著、herdr 判 idle，但每個回合都只回這一行。
+    /// 要認得出來；正文引用這句、或更早的回合出過這句而後面又答過話，都不算。
+    #[test]
+    fn a_not_logged_in_reply_is_recognised_only_as_the_latest_error_line() {
+        let stuck = super::screens::NOT_LOGGED_IN;
+        assert!(super::is_not_logged_in_reply(stuck));
+        // 正文提到這句（沒有 `⎿`）：不算。
+        let quoted = "⏺ 協調者畫面是「Not logged in · Please run /login」，我已經請使用者處理。\n\n❯ \n  AGM | Opus 5 | 5h:80%\n";
+        assert!(!super::is_not_logged_in_reply(quoted));
+        // 很久以前出過、之後答過很多話（已經捲出底部）：不算。
+        let recovered = format!("{stuck}{}", "⏺ 已處理一則申請。\n".repeat(30));
+        assert!(!super::is_not_logged_in_reply(&recovered));
+    }
+
     #[test]
     fn grok_trust_dialog_is_recognised_even_when_centred_and_wrapped() {
         let screen = "  main ~/p/h/projects/rt\n\n⠀⠀⠀⠀⠀⠀⣀⣀⡀\nDo you trust the contents of this directory?\n                /Users/m4p/project/hermes-agents/projects/rt\n\nGrok Build may run or modify contents in this directory,\n              posing security risks.\n\nYes, proceed                 y\n                  No, quit                     n\n\nGrok Build  1.0.34 [stable]\n";

@@ -399,6 +399,23 @@ case "$STATUS" in
 esac
 break
 done
+# 協調者多久沒裁示（issue #420）：自己的申請從第一次看到 pending 起算，到期重申請（expired → 新的一筆）
+# 也接著算，直到看到別的狀態才清掉。超過一個到期週期（AGM_UNDECIDED_ALERT_SECS，預設 5400＝--expires-in）
+# 還沒裁示就推 ops_alert——2026-09-23 協調者沒登入，申請每 90 分鐘過期、每小時重申請，停了 9 小時，
+# log 只有「核准狀態是 pending」，看不出是協調者掛了。
+UNDECIDED="$DIR/daemon-update.undecided"
+UNDECIDED_ALERT_SECS=${AGM_UNDECIDED_ALERT_SECS:-5400}
+if [ "$STATUS" = "pending" ]; then
+  _now=$(date +%s)
+  _since=$(cat "$UNDECIDED" 2>/dev/null)
+  case "$_since" in ''|*[!0-9]*) _since=$_now; echo "$_since" > "$UNDECIDED" ;; esac
+  _waited=$((_now - _since))
+  if [ "$_waited" -ge "$UNDECIDED_ALERT_SECS" ]; then
+    alert approval_undecided "協調者 $((_waited / 3600)) 小時 $((_waited % 3600 / 60)) 分沒裁示例行重建的核准（目前是 ${APPROVAL}，到期只會重新申請）。請看協調者在不在、有沒有登入：bin/agm responder show、bin/agm health"
+  fi
+else
+  rm -f "$UNDECIDED"
+fi
 if [ "$STATUS" != "approved" ]; then
   log "核准狀態是 ${STATUS:-unknown}，這輪不派（下個整點再看）"; exit 0
 fi

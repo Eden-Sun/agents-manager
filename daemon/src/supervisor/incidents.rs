@@ -32,6 +32,10 @@ pub fn worst(a: &str, b: &str) -> String {
     if rank(a) >= rank(b) { a.to_string() } else { b.to_string() }
 }
 
+/// 協調者的事件送了這麼多次還在 pending 就開 incident（issue #420）。跟巡檢的 `notify_max_attempts`、
+/// 補送上限 `RECOVER_MAX_DELIVERIES` 同一個數字：試了五次都送不進去，第六次也不會。
+pub const RESPONDER_UNDELIVERED_ATTEMPTS: i64 = 5;
+
 /// One thing that is currently wrong, as the probes see it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Observation {
@@ -317,6 +321,50 @@ pub async fn observe(app: &Arc<App>, thresholds: &Thresholds) -> Probed {
                 });
             }
         }
+    }
+
+    // 協調者（issue #420）：它是 bot 申請、核准、群組任務唯一的收件者，倒了就是整條協調線靜默停擺。
+    // 兩件事分開開：CLI 沒登入（`notify` 送不出去時看畫面標的 `needs_login`），以及——不管原因——
+    // 它的事件已經送了 RESPONDER_UNDELIVERED_ATTEMPTS 次還在 pending。incident_opened 走巡檢（`roles::route`）。
+    match super::roles::get(&app.db, super::roles::Role::Responder).await {
+        Err(e) => {
+            tracing::warn!(error = ?e, "responder_needs_login probe failed");
+            probed.failed.push("responder_needs_login");
+        }
+        Ok(row) => {
+            if let (Some(bot_id), "needs_login") = (row.bot_id.as_deref(), row.status.as_str()) {
+                out.push(Observation {
+                    kind: "responder_needs_login".into(),
+                    resource: bot_id.to_string(),
+                    severity: "critical".into(),
+                    detail: json!({"bot_id": bot_id, "since": row.waiting_since, "detail": row.status_detail}).to_string(),
+                });
+            }
+        }
+    }
+    match store::responder_undelivered(&app.db, RESPONDER_UNDELIVERED_ATTEMPTS).await {
+        Err(e) => {
+            tracing::warn!(error = ?e, "responder_undeliverable probe failed");
+            probed.failed.push("responder_undeliverable");
+        }
+        Ok(stuck) if !stuck.is_empty() => {
+            // 一個協調者一筆 incident，不是一則事件一筆：它倒下時佇列裡常有十幾則，逐則開就是通知風暴。
+            let worst = stuck.iter().max_by_key(|e| e.notify_attempts).expect("non-empty");
+            out.push(Observation {
+                kind: "responder_undeliverable".into(),
+                resource: "responder".into(),
+                severity: "critical".into(),
+                detail: json!({
+                    "events": stuck.len(),
+                    "oldest_event_id": stuck[0].id,
+                    "oldest_created_at": stuck[0].created_at,
+                    "max_attempts": worst.notify_attempts,
+                    "last_error": worst.notify_error,
+                })
+                .to_string(),
+            });
+        }
+        Ok(_) => {}
     }
 
     // The phone entry point, but only when there is evidence it is *broken*. `unknown` with an

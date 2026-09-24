@@ -681,5 +681,39 @@ bash "$SCRIPT"
 check "讀不到申請數算失敗、連續幾輪會喊人" "ops-alert.*check_failing" "$AGM_DIR/calls.log"
 teardown
 
+# 32. issue #420：協調者一直不裁示時，到期重申請不能讓等待歸零；超過一個到期週期推 ops_alert。
+setup
+export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"pending"}]}'
+bash "$SCRIPT"
+check "第一次看到 pending 就開始計時" "" "$AGM_DIR/daemon-update.undecided"
+check_no "剛開始等不喊人" "approval_undecided" "$AGM_DIR/calls.log"
+echo $(( $(date +%s) - 6000 )) > "$AGM_DIR/daemon-update.undecided"
+: > "$AGM_DIR/calls.log"
+bash "$SCRIPT"
+check "等超過一個到期週期推 ops_alert" "ops-alert.*approval_undecided" "$AGM_DIR/calls.log"
+check "寫明協調者幾小時沒裁示" "協調者 1 小時 40 分沒裁示" "$AGM_DIR/daemon-update.log"
+teardown
+
+setup
+echo $(( $(date +%s) - 6000 )) > "$AGM_DIR/daemon-update.undecided"
+printf '%s' '{"owner":"test-owner","id":"ap-1","commit":"'"$(/usr/bin/git -C "$AGM_REPO" rev-parse HEAD)"'"}' > "$AGM_DIR/daemon-update.approval.json"
+export STUB_APPROVAL='{"id":"ap-2","status":"pending"}'
+export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"expired"},{"id":"ap-2","status":"pending"}]}'
+bash "$SCRIPT"
+check "過期重申請了" "核准 ap-1 已經不能用（expired），重新申請" "$AGM_DIR/daemon-update.log"
+check "重申請不讓等待歸零" "ops-alert.*approval_undecided" "$AGM_DIR/calls.log"
+teardown
+
+setup
+echo $(( $(date +%s) - 6000 )) > "$AGM_DIR/daemon-update.undecided"
+bash "$SCRIPT"
+check_no "裁示了（approved）不喊人" "approval_undecided" "$AGM_DIR/calls.log"
+if [ -e "$AGM_DIR/daemon-update.undecided" ]; then
+  echo "FAIL - 裁示了就清掉計時"; FAIL=$((FAIL + 1))
+else
+  echo "ok   - 裁示了就清掉計時"; PASS=$((PASS + 1))
+fi
+teardown
+
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
