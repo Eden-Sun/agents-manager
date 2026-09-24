@@ -444,7 +444,7 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     lifecycle::purge_deleted_bot_dirs(&app).await;
     // shim 只在 bot 啟動時寫，長跑的 bot 會抱著舊版好幾天（2026-09-18 的 shim 巢狀死鎖就是這樣
     // 在修正上線後還在發生）。開機就地換成這顆 binary 帶的版本，不必重啟任何 pane。
-    shim_refresh::refresh_at_startup(&app.data_dir);
+    shim_refresh::refresh_at_startup(&app).await;
     // #88: attachments whose save() died mid-write or mid-finalize before this restart.
     attach::reconcile_orphans(&app).await;
     // 預覽（§6.12）：pane 還在不在、port 有沒有在 listen，對回 `bot_previews`。

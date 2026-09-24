@@ -16,6 +16,7 @@
 //! 會把 mtime 洗掉，之後沒人分得出哪些 shim 真的換過版。內容一樣但權限掉了（0644）的，只 chmod 回 0755。
 
 use crate::state::App;
+use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -75,13 +76,23 @@ fn repair_mode(path: &Path) -> std::io::Result<bool> {
     Ok(false)
 }
 
-/// 掃 `<data_dir>/bots/*/bin`，把已經存在的 shim 換成當前版本。回傳換掉的 `<bot id>/<檔名>`。
+/// 一次本機掃描的結果。`failed` 跟 `changed` 一樣重要：換不動的 shim 不會自己好，
+/// 而它就是「這顆 bot 的 cargo 還是舊的」——2026-09-18 的巢狀死鎖與 #417 都是這樣來的。
+#[derive(Debug, Default)]
+pub struct LocalRefresh {
+    /// 真的動了的 `<bot id>/<檔名>`。
+    pub changed: Vec<String>,
+    /// 換不動的 `(<bot id>/<檔名>, 錯誤)`。
+    pub failed: Vec<(String, String)>,
+}
+
+/// 掃 `<data_dir>/bots/*/bin`，把已經存在的 shim 換成當前版本。
 ///
 /// **只補已經有的**：沒有 `bin/` 或沒有那支 shim 的 bot 不生出新檔案——那種 bot（遠端、從沒啟動過）
 /// 的 shim 由 `lifecycle::setup::install_shim` 在啟動時處理，這裡不替它決定。
-pub fn refresh_all(data_dir: &Path) -> Vec<String> {
-    let mut changed = Vec::new();
-    let Ok(entries) = std::fs::read_dir(data_dir.join("bots")) else { return changed };
+pub fn refresh_all(data_dir: &Path) -> LocalRefresh {
+    let mut out = LocalRefresh::default();
+    let Ok(entries) = std::fs::read_dir(data_dir.join("bots")) else { return out };
     for entry in entries.flatten() {
         let bot_dir = entry.path();
         if !bot_dir.is_dir() {
@@ -93,23 +104,59 @@ pub fn refresh_all(data_dir: &Path) -> Vec<String> {
             if !path.exists() {
                 continue;
             }
+            let who = format!("{}/{name}", entry.file_name().to_string_lossy());
             match write_atomic(&path, content) {
-                Ok(true) => changed.push(format!("{}/{name}", entry.file_name().to_string_lossy())),
+                Ok(true) => out.changed.push(who),
                 Ok(false) => {}
-                Err(e) => tracing::warn!(path = %path.display(), error = %e, "could not refresh this shim"),
+                Err(e) => {
+                    tracing::warn!(path = %path.display(), error = %e, "could not refresh this shim");
+                    out.failed.push((who, e.to_string()));
+                }
             }
         }
     }
-    changed
+    out
 }
 
-/// 開機時跑一次，只記一行 log。
-pub fn refresh_at_startup(data_dir: &Path) {
-    let changed = refresh_all(data_dir);
-    if changed.is_empty() {
+/// 這顆 bot 的 shim 換不動時的 inbox 種類（issue #533）。
+///
+/// 跟 `cli_refresh` 的 `agm_cli_stale` 同一個形狀、同一個理由：**換不動的檔案不會自己好**，
+/// 而下一次修正機會要等下一次 daemon 重啟。只記 `tracing::warn!` 等於沒人會知道——沒有人固定
+/// 看 daemon.log，而舊 shim 的後果（cargo 巢狀死鎖、工作沒被轉到外部編譯主機）在畫面上看起來
+/// 只是「這顆 bot 很慢」。
+pub const SHIM_STALE_KIND: &str = "bot_shim_stale";
+
+/// 開機時跑一次：換掉的記一行 info，換不動的每一支推一則 inbox 給巡檢。
+pub async fn refresh_at_startup(app: &Arc<App>) {
+    let out = refresh_all(&app.data_dir);
+    if out.changed.is_empty() {
         tracing::debug!("every bot shim is already the version this binary carries");
     } else {
-        tracing::info!(count = changed.len(), shims = ?changed, "refreshed bot shims to this binary's version (no pane restart needed)");
+        tracing::info!(count = out.changed.len(), shims = ?out.changed, "refreshed bot shims to this binary's version (no pane restart needed)");
+    }
+    for (who, error) in &out.failed {
+        let (bot_id, shim) = who.split_once('/').unwrap_or((who.as_str(), ""));
+        let wanted = shims().iter().find(|(n, _)| *n == shim).map(|(_, c)| *c).unwrap_or_default();
+        // event_key 帶內容雜湊：同一個版本換不動只會有一則（`push_inbox` 是 INSERT OR IGNORE），
+        // 下一顆 binary 帶了新 shim 又失敗才是新的一則。
+        let key = format!("{SHIM_STALE_KIND}:{who}:{}", crate::supervisor::cli_refresh::short_hash(wanted.as_bytes()));
+        let _ = crate::supervisor::store::push_inbox(
+            &app.db,
+            &key,
+            SHIM_STALE_KIND,
+            None,
+            Some(bot_id),
+            None,
+            &json!({
+                "bot_id": bot_id,
+                "shim": shim,
+                "path": app.data_dir.join("bots").join(bot_id).join("bin").join(shim).to_string_lossy(),
+                "embedded_hash": crate::supervisor::cli_refresh::short_hash(wanted.as_bytes()),
+                "error": error,
+                "action": "這顆 bot 手上還是舊 shim（舊 cargo shim ＝ 工作不會被轉到外部編譯主機，還可能跟 build shim 互相當成真 cargo 而卡住）：修好那個檔案的權限／磁碟，下一次 daemon 重啟會再換一次；急的話重啟這顆 bot 的 pane 也會重寫",
+            }),
+        )
+        .await;
     }
 }
 
@@ -322,7 +369,7 @@ mod tests {
     fn an_old_shim_is_replaced_without_touching_the_pane() {
         let data = tmp();
         let bin = seed(&data, "01OLD", "#!/bin/sh\n# 舊版，沒有 marker\nexec cargo \"$@\"\n");
-        let changed = refresh_all(&data);
+        let changed = refresh_all(&data).changed;
         assert_eq!(changed.len(), 2, "{changed:?}");
         assert_eq!(std::fs::read_to_string(bin.join("cargo")).unwrap(), crate::cargo_shim::SHIM_SH);
         assert_eq!(std::fs::read_to_string(bin.join("herdr")).unwrap(), crate::herdr_shim::SHIM_SH);
@@ -349,7 +396,7 @@ mod tests {
         };
         let before = (stat("cargo"), stat("herdr"));
 
-        assert!(refresh_all(&data).is_empty());
+        assert!(refresh_all(&data).changed.is_empty());
         assert_eq!((stat("cargo"), stat("herdr")), before, "mtime／ctime／inode 都不能動");
         let _ = std::fs::remove_dir_all(&data);
     }
@@ -375,7 +422,7 @@ mod tests {
                 })
                 .collect();
 
-            let mut changed = refresh_all(&data);
+            let mut changed = refresh_all(&data).changed;
             changed.sort();
             assert_eq!(changed, vec!["01MODE/cargo".to_string(), "01MODE/herdr".to_string()], "{broken:o} 要算修過：{changed:?}");
             for (i, (name, content)) in shims().iter().enumerate() {
@@ -386,7 +433,7 @@ mod tests {
                 assert_eq!((m.mtime(), m.mtime_nsec(), m.ino()), before[i], "{name}：只 chmod，不重寫內容（mtime／inode 不動）");
             }
             // 修完之後再跑就是真的 no-op（冪等）。
-            assert!(refresh_all(&data).is_empty());
+            assert!(refresh_all(&data).changed.is_empty());
             let _ = std::fs::remove_dir_all(&data);
         }
     }
@@ -416,7 +463,7 @@ mod tests {
         let bin = seed(&data, "01SWAP", "#!/bin/sh\n# 舊版\n");
         let mut old_handle = std::fs::File::open(bin.join("cargo")).unwrap();
 
-        assert_eq!(refresh_all(&data).len(), 2);
+        assert_eq!(refresh_all(&data).changed.len(), 2);
 
         let mut seen_by_old_process = String::new();
         old_handle.read_to_string(&mut seen_by_old_process).unwrap();
@@ -437,12 +484,54 @@ mod tests {
         std::fs::write(bin.join("cargo"), "#!/bin/sh\n# 舊\n").unwrap();
         std::fs::write(bin.join("something-else"), "keep me").unwrap();
 
-        let changed = refresh_all(&data);
+        let changed = refresh_all(&data).changed;
         assert_eq!(changed, vec!["01HALF/cargo".to_string()], "{changed:?}");
         assert!(!bare.join("bin").exists(), "沒有 bin 的 bot 不該被生出目錄");
         assert!(!bin.join("herdr").exists(), "本來就沒有的 shim 不補");
         assert_eq!(std::fs::read_to_string(bin.join("something-else")).unwrap(), "keep me");
         let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// 換不動的 shim 要推 inbox：只記 warn 等於沒人知道，而它不會自己好（issue #533）。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_shim_that_cannot_be_replaced_is_reported_to_the_inbox() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let e = crate::testing::env().await;
+        let app = &e.app;
+        let bin = app.data_dir.join("bots").join("01STUCK").join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("cargo"), "#!/bin/sh\n# 舊\n").unwrap();
+        let lock = || std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let unlock = || std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        lock();
+        refresh_at_startup(app).await; // 不 panic：開機照走
+        unlock();
+        assert_eq!(std::fs::read_to_string(bin.join("cargo")).unwrap(), "#!/bin/sh\n# 舊\n", "換不動時舊檔原封不動");
+
+        let rows = |db: sqlx::SqlitePool| async move {
+            sqlx::query_as::<_, (String, String)>("SELECT bot_id, payload_json FROM supervisor_inbox WHERE kind=?")
+                .bind(SHIM_STALE_KIND)
+                .fetch_all(&db)
+                .await
+                .unwrap()
+        };
+        let one = rows(app.db.clone()).await;
+        assert_eq!(one.len(), 1, "{one:?}");
+        assert_eq!(one[0].0, "01STUCK");
+        assert!(one[0].1.contains("\"shim\":\"cargo\""), "{}", one[0].1);
+        assert!(one[0].1.contains("01STUCK/bin/cargo"), "payload 要帶得出是哪個檔：{}", one[0].1);
+
+        // 同一個版本再失敗一次不是新的一則（event_key 帶內容雜湊）。
+        lock();
+        refresh_at_startup(app).await;
+        unlock();
+        assert_eq!(rows(app.db.clone()).await.len(), 1);
+
+        // 修好之後照樣換得動。
+        refresh_at_startup(app).await;
+        assert_eq!(std::fs::read_to_string(bin.join("cargo")).unwrap(), crate::cargo_shim::SHIM_SH);
     }
 
     /// 換版是 rename：暫存檔不留下來。

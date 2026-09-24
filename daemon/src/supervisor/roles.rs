@@ -229,7 +229,8 @@ fn known_route(kind: &str, payload: &Value, review_role: Option<&str>) -> Option
         // `judge_stuck_screen`：prompt 排著送不出去、畫面底部疑似有 daemon 不認得的框（SPEC §4.3c），要人去終端看一眼。
         // `child_retire_refused`：對帳／維護收尾要隱式退役 AGM 的 child，daemon 擋下來了（#413），要人決定刪不刪。
         "ops_alert" | "incident_opened" | "responder_watchdog_gave_up" | "responder_bot_missing" | "bot_restart_failed" | "intent_failed"
-        | "supervisor_restart_retry" | "agm_cli_stale" | "pane_unowned" | "pane_orphaned" | "judge_stuck_screen"
+        // `bot_shim_stale`：某顆 bot 的 herdr／cargo shim 換不動（issue #533），跟 `agm_cli_stale` 同一種事。
+        | "supervisor_restart_retry" | "agm_cli_stale" | "bot_shim_stale" | "pane_unowned" | "pane_orphaned" | "judge_stuck_screen"
         // `persona_changed`：總管的常駐指示被改寫了（issue #462）。沒帶身分的呼叫端也改得動
         // （共用 UI token 的界線留在 #447），所以至少要有人看見——巡檢收、叫醒。
         | "child_retire_refused" | "persona_changed" => r(Role::Patrol, true),

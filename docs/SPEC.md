@@ -1407,6 +1407,7 @@ daemon 啟動時掃 `<data_dir>/bots/*/bin`，把**已經存在**的 `herdr`／`
 內容與權限**分開判**（issue #126）：內容已是現行版、但權限掉了（舊版 `install_local` 寫完才 chmod，中間死掉會留下 0644，
 pane 打 `cargo` 就 permission denied）時，只 chmod 回 0755，不重寫內容；內容與權限都對才是真的 no-op。
 沒有 `bin/` 或本來就沒有那支 shim 的 bot 不會被生出新檔案（那是啟動時 `install_shim` 的事）。
+**換不動的要喊人**（issue #533）：某支 shim 寫不進去（目錄權限、磁碟滿、被改成目錄）時除了 warn，還推一則 `bot_shim_stale` inbox 給巡檢並叫醒，payload 帶 `bot_id`／`shim`／`path`／`embedded_hash`／`error`／`action`；event_key 帶內容雜湊，所以同一個版本換不動只有一則，下一顆 binary 帶新 shim 又失敗才是新的一則。這跟 `bin/agm` 的 `agm_cli_stale`（§18.2a）是同一種事：換不動的檔案不會自己好，而舊 cargo shim 的後果（工作沒轉到外部編譯主機、shim 互相當成真 cargo 而卡住）在畫面上只看得出「這顆 bot 很慢」。
 
 **遠端 bot 一樣就地換版**（issue #124）：長跑的遠端 bot 也可以跨好幾個 daemon 版本不重啟 pane，手上是舊 shim。host supervisor 每次連上
 （含重連）就在背景（`shim_refresh::spawn_remote_refresh`，不擋連線、不擋 daemon 啟動）盤點這台的 `live_bots_on_host`，用一次 ssh 跑
@@ -3448,7 +3449,7 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
 | 入口 | 使用者 web／手機 Remote Control（**唯一**的 remote） | 沒有 remote；只有 daemon 的通知 |
 | 目錄 | `supervisor/AGM` | `supervisor/AGM-responder`（記在 `bots.cwd`；claude session 以 cwd 為鍵，共用會互相接到對方的 session 與 `persona.md`） |
 | 專案 | 巡檢的專案 | **同一個**（見下）；側欄上兩個角色在同一塊 |
-| 收什麼 | `health_changed`、`incident_*`（`notify_exhausted` 除外）、`bot_restart_failed`、`supervisor_restart_retry`、`responder_watchdog_gave_up`、`responder_bot_missing`、`agm_cli_stale`、`pane_unowned`、`review_role=patrol` 的交辦回報、不認得的種類 | `bot_request`、`approval_requested`、`mission_*`、其餘交辦回報（含 `assignment_undeliverable`）；巡檢自己倒下的 `watchdog_gave_up` 與 `notify_exhausted` 的 `incident_*` |
+| 收什麼 | `health_changed`、`incident_*`（`notify_exhausted` 除外）、`bot_restart_failed`、`supervisor_restart_retry`、`responder_watchdog_gave_up`、`responder_bot_missing`、`agm_cli_stale`、`bot_shim_stale`、`pane_unowned`、`review_role=patrol` 的交辦回報、不認得的種類 | `bot_request`、`approval_requested`、`mission_*`、其餘交辦回報（含 `assignment_undeliverable`）；巡檢自己倒下的 `watchdog_gave_up` 與 `notify_exhausted` 的 `incident_*` |
 | 喚醒節流 | `notify_interval_secs`（600） | 短窗批次 `responder_batch_secs`（15）：最舊的待辦等滿、且距上次喚醒也滿才叫 |
 
 **協調者的健康算進頂層 `status`**（review 2026-09-16）：它是 bot 申請、核准請求與所有 `mission_*` 的唯一收件人，
