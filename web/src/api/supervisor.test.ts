@@ -7,7 +7,7 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { toAssignment, toIncident, toResponder } from './supervisor.ts'
+import { fetchAssignments, toAssignment, toIncident, toResponder } from './supervisor.ts'
 
 test('集合欄位不是陣列時不會 throw（.map 白屏的那個 bug）', () => {
   // 這些都是 `(x as unknown[]) ?? []` 擋不住的：?? 只認 null/undefined。
@@ -123,4 +123,117 @@ test('協調者：舊 daemon 沒這一塊、或是垃圾，都當成沒建立，
   assert.equal(r.quota_reset_at, '2026-09-13T18:00:00Z')
   assert.equal(r.stats.wakes, 0, '型別不對的數字不採用')
   assert.equal(r.stats.duplicates, 99)
+})
+
+
+/**
+ * issue #537：`GET /api/supervisor/assignments` 在 #515 之後是分頁的，一頁預設 200 筆。
+ * 只拿第一頁的話，卡最久的未結案交辦（`blocked` 天生活得比一頁久）會從清單裡消失，
+ * 而回傳型別讓呼叫端看不出來被截斷過。
+ *
+ * 自己架假 daemon，不借 `store/storeEnv.harness.ts`（跨目錄 import 會多一份模組實例）。
+ */
+const g = globalThis as unknown as Record<string, unknown>
+const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status })
+
+async function withDaemon<T>(handler: (url: string) => Response, body: () => Promise<T>): Promise<T> {
+  const saved = { fetch: g.fetch, location: g.location, localStorage: g.localStorage }
+  g.location = { protocol: 'http:', host: '127.0.0.1:7788' }
+  g.localStorage = { getItem: () => null, setItem: () => {}, removeItem: () => {} }
+  g.fetch = async (input: string) => {
+    const url = String(input)
+    return url.split('?')[0] === '/api/session' ? json({ token: 't' }) : handler(url)
+  }
+  try {
+    return await body()
+  } finally {
+    g.fetch = saved.fetch
+    g.location = saved.location
+    g.localStorage = saved.localStorage
+  }
+}
+
+/** 三筆、每頁兩筆的假 daemon。游標形狀跟 daemon 一樣是 `["<created_at>","<id>"]` 的 JSON。 */
+const ROWS = [
+  { id: 'a3', status: 'completed', created_at: '2026-09-24T00:00:00.000Z' },
+  { id: 'a2', status: 'completed', created_at: '2026-09-23T00:00:00.000Z' },
+  { id: 'a1', status: 'blocked', created_at: '2026-09-16T00:00:00.000Z' },
+]
+
+function paged(url: string): Response {
+  const q = new URL(url, 'http://x').searchParams
+  const before = q.get('before')
+  const rows = before
+    ? ROWS.filter((r) => {
+        const [at, id] = JSON.parse(before) as [string, string]
+        return r.created_at < at || (r.created_at === at && r.id < id)
+      })
+    : ROWS
+  // 這台 daemon 每頁上限 2（比呼叫端要的小）：要照 has_more 翻，不能因為自己要了 200 就當拿完了。
+  const chunk = rows.slice(0, 2)
+  const has_more = rows.length > 2
+  const last = chunk[chunk.length - 1]
+  return json({
+    assignments: chunk,
+    has_more,
+    next_cursor: has_more && last ? JSON.stringify([last.created_at, last.id]) : null,
+  })
+}
+
+test('翻到底：第二頁的未結案交辦也在清單裡', async () => {
+  const calls: string[] = []
+  const page = await withDaemon(
+    (url) => {
+      calls.push(url)
+      return paged(url)
+    },
+    () => fetchAssignments(),
+  )
+  assert.deepEqual(page.assignments.map((a) => a.id), ['a3', 'a2', 'a1'])
+  assert.equal(page.complete, true)
+  assert.equal(calls.length, 2, '第一頁看不到 a1，一定要翻第二頁')
+  assert.ok(calls[0]?.includes('limit=200'), `第一頁不帶游標：${calls[0]}`)
+  assert.ok(!calls[0]?.includes('before='), `第一頁不帶游標：${calls[0]}`)
+  assert.ok(calls[1]?.includes('before='), `第二頁要帶游標：${calls[1]}`)
+})
+
+test('舊 daemon 不回 has_more：說自己沒撈完，不要假裝那一頁就是全部', async () => {
+  const page = await withDaemon(() => json({ assignments: ROWS.slice(0, 2) }), () => fetchAssignments())
+  assert.equal(page.assignments.length, 2)
+  assert.equal(page.complete, false, '不知道還有沒有，就不能說撈完了')
+})
+
+test('has_more 是垃圾或游標掉了都當成沒撈完，而且不會無窮翻下去', async () => {
+  for (const body of [
+    { assignments: [ROWS[0]], has_more: 'yes' },
+    { assignments: [ROWS[0]], has_more: 1 },
+    // 游標是好的、只有 has_more 型別不對：`!has_more` 這種寫法會照翻下去，把讀不懂
+    // 當成「還有更多」。三態的意思是「不是 true 就不翻」。
+    { assignments: [ROWS[0]], has_more: 'yes', next_cursor: '["2026-09-24T00:00:00.000Z","a3"]' },
+    { assignments: [ROWS[0]], has_more: 1, next_cursor: '["2026-09-24T00:00:00.000Z","a3"]' },
+    { assignments: [ROWS[0]], has_more: true, next_cursor: null },
+    { assignments: [ROWS[0]], has_more: true, next_cursor: '' },
+    { assignments: [ROWS[0]], has_more: true, next_cursor: 42 },
+  ]) {
+    let calls = 0
+    const page = await withDaemon(
+      () => {
+        calls++
+        return json(body)
+      },
+      () => fetchAssignments(),
+    )
+    assert.equal(page.complete, false, JSON.stringify(body))
+    assert.equal(calls, 1, `不該再翻下去：${JSON.stringify(body)}`)
+    assert.equal(page.assignments.length, 1)
+  }
+})
+
+test('每一頁的垃圾條目照樣被濾掉，整包不會爆', async () => {
+  const page = await withDaemon(
+    () => json({ assignments: [null, 'x', 42, { id: '' }, ROWS[2]], has_more: false }),
+    () => fetchAssignments(),
+  )
+  assert.deepEqual(page.assignments.map((a) => a.id), ['a1'])
+  assert.equal(page.complete, true)
 })
