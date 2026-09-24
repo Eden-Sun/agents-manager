@@ -527,11 +527,15 @@ async fn mission_quota_inner(app: &Arc<App>, a: &store::Assignment, mission_id: 
     // `pick` 回 `NoIndependentReviewer`，`quota_policy` 當成 Wait——原地等，不會退而求其次用同一個身分。
     let exclude = if role == pick::Role::Reviewer { unavailable("executor identity", executor_identity(app, mission_id).await)? } else { None };
     let decision = pick::pick(role, &cands, on_5h, exclude.as_deref(), chrono::Utc::now());
-    // 撞限的是 pane 裡實際的帳號（run 起來時的身分，issue #238），不是剛改、還沒重啟生效的設定。
-    let current = unavailable("bot identity", crate::quota::billing_identity(app, &bot).await)?.unwrap_or_default();
-    match pick::quota_policy(&current, bot.model.as_deref(), &decision) {
+    // 撞限的是 pane 裡實際的帳號（run 起來時的身分，issue #238），而「跑 CLI 預設帳號」要解析成
+    // 候選清單裡的名字才比得起來（issue #468）：以前 `unwrap_or_default()` 把它壓成空字串，
+    // 而候選清單裡永遠沒有空字串，於是那種 bot 第一次撞限就換手——換手是開新 bot＋新 session。
+    let current = unavailable("bot identity", crate::mission::billing_identity_named(app, &host, &bot).await)?;
+    match pick::quota_policy(current.as_deref(), bot.model.as_deref(), &decision) {
         pick::QuotaPolicy::Wait => Ok(MissionQuota::NotApplicable),
         pick::QuotaPolicy::Switch { identity, model, reason } => {
+            // `Switch` 只會在 `current` 是 `Some` 時回（`quota_policy` 查不到就 `Wait`）。
+            let current = current.unwrap_or_default();
             let to = match model.as_deref() {
                 Some(mdl) => format!("{identity}（{mdl}）"),
                 None => identity.clone(),
@@ -784,8 +788,11 @@ async fn executor_identity(app: &Arc<App>, mission_id: &str) -> anyhow::Result<O
     let rows = store::mission_assignments(&app.db, mission_id).await?;
     let Some(executor) = rows.iter().rev().find(|x| x.mission_role.as_deref() == Some("executor")) else { return Ok(None) };
     let Some(bot) = crate::db::bot(&app.db, &executor.target_bot_id).await? else { return Ok(None) };
-    // 實際在跑的帳號（issue #238）。
-    crate::quota::billing_identity(app, &bot).await
+    // 實際在跑的帳號（issue #238），預設帳號要解析成候選清單裡的名字（issue #468）——不解析的話
+    // 執行者跑預設帳號時這裡回 `None`，`pick` 的 `exclude` 就是空的，reviewer 可能被挑成執行者
+    // 正在用的那個帳號，「reviewer 必須是另一個身分」被悄悄打破（同 review3 c1 L11 要擋的那件事）。
+    let host = crate::db::bot_host(&app.db, &bot.id).await?;
+    crate::mission::billing_identity_named(app, &host, &bot).await
 }
 
 /// 這件交辦屬於一個**還開著、而且被使用者暫停**的任務。

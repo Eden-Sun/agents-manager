@@ -747,9 +747,16 @@ pub enum QuotaPolicy {
 ///
 /// 同一個身分、同一個模型還被挑中 → 額度讀數可能比 CLI 慢一步，照原本的規則等；
 /// 挑到別的身分，或同一身分但要換模型（Fable 用盡改 opus）→ 換手。
-pub fn quota_policy(current_identity: &str, current_model: Option<&str>, decision: &Pick) -> QuotaPolicy {
+///
+/// `current_identity` 是三態（issue #468）：`None` ＝**查不出這顆 bot 現在在哪個帳號**，
+/// 一律當成 `Wait`。以前呼叫端把「跑 CLI 預設帳號」跟「查不到」一起 `unwrap_or_default()` 成空字串，
+/// 而候選清單裡永遠不會有空字串，於是 `other_identity` 恆真：那種 bot 第一次撞限就換手，
+/// 甚至換到它已經在用的那個帳號——而換手是開新 bot＋新 session，代價是一個 session。
+/// 沒有證據說它現在在哪，就不要為了換身分丟掉 session；下一輪查得到再判。
+pub fn quota_policy(current_identity: Option<&str>, current_model: Option<&str>, decision: &Pick) -> QuotaPolicy {
     match decision {
         Pick::Use { identity, model, reason } => {
+            let Some(current_identity) = current_identity else { return QuotaPolicy::Wait };
             let other_identity = identity != current_identity;
             let other_model = model.as_deref().is_some_and(|m| Some(m) != current_model);
             if other_identity || other_model {
@@ -773,13 +780,30 @@ mod quota_policy_tests {
 
     #[test]
     fn a_different_identity_or_model_is_a_switch_and_the_same_one_waits() {
-        assert!(matches!(quota_policy("cc2", Some("fable"), &use_("cc1", None)), QuotaPolicy::Switch { .. }));
-        assert!(matches!(quota_policy("cc2", Some("fable"), &use_("cc2", Some("opus"))), QuotaPolicy::Switch { .. }));
-        assert_eq!(quota_policy("cc2", Some("opus"), &use_("cc2", Some("opus"))), QuotaPolicy::Wait);
-        assert_eq!(quota_policy("cc2", None, &use_("cc2", None)), QuotaPolicy::Wait);
+        assert!(matches!(quota_policy(Some("cc2"), Some("fable"), &use_("cc1", None)), QuotaPolicy::Switch { .. }));
+        assert!(matches!(quota_policy(Some("cc2"), Some("fable"), &use_("cc2", Some("opus"))), QuotaPolicy::Switch { .. }));
+        assert_eq!(quota_policy(Some("cc2"), Some("opus"), &use_("cc2", Some("opus"))), QuotaPolicy::Wait);
+        assert_eq!(quota_policy(Some("cc2"), None, &use_("cc2", None)), QuotaPolicy::Wait);
         let wait = Pick::Wait { identity: "cc2".into(), until: None, reason: "5h".into() };
-        assert_eq!(quota_policy("cc2", None, &wait), QuotaPolicy::Wait);
+        assert_eq!(quota_policy(Some("cc2"), None, &wait), QuotaPolicy::Wait);
         let ask = Pick::AskUser { reason: "no fable".into(), resets: vec![] };
-        assert!(matches!(quota_policy("cc1", Some("fable"), &ask), QuotaPolicy::AskUser { .. }));
+        assert!(matches!(quota_policy(Some("cc1"), Some("fable"), &ask), QuotaPolicy::AskUser { .. }));
+    }
+
+    /// issue #468：跑 CLI 預設帳號的 bot，呼叫端要先把它解析成候選清單裡的名字再進來
+    /// （`mission::billing_identity_named`）。解析得出來就跟一般身分一樣比——**挑到同一個名字
+    /// 就是同一個帳號，不准換手**，不然會為了「換身分」丟掉 session、換到它已經在用的帳號。
+    #[test]
+    fn a_bot_on_the_default_account_does_not_hand_off_to_the_account_it_is_already_on() {
+        // 解析出來是 cc0（預設帳號在候選清單裡的名字）：挑到 cc0 就是原地等。
+        assert_eq!(quota_policy(Some("cc0"), None, &use_("cc0", None)), QuotaPolicy::Wait);
+        // 真的挑到別的身分才換手。
+        assert!(matches!(quota_policy(Some("cc0"), None, &use_("cc2", None)), QuotaPolicy::Switch { .. }));
+        // 查不出它現在在哪（身分表還沒偵測完）：不准為了換身分丟掉 session，下一輪再判。
+        assert_eq!(quota_policy(None, None, &use_("cc2", None)), QuotaPolicy::Wait);
+        assert_eq!(quota_policy(None, Some("opus"), &use_("cc0", Some("fable"))), QuotaPolicy::Wait);
+        // 停下來問人跟「挑不到獨立的 reviewer」不受影響：那兩個本來就不靠 current_identity。
+        let ask = Pick::AskUser { reason: "no fable".into(), resets: vec![] };
+        assert!(matches!(quota_policy(None, None, &ask), QuotaPolicy::AskUser { .. }));
     }
 }
