@@ -61,8 +61,13 @@ pub fn event_key(from: &str, crid: Option<&str>, fingerprint: &str, anchor_unix:
 
 /// 這一句的去重視窗要錨在哪個時刻（unix 秒）。
 ///
-/// 找「同寄件者、同指紋、**還沒結案**、而且 `created_at` 距現在不到 `DEDUPE_BUCKET_SECS`」的最新一筆：
-/// 有就用**它的** `created_at` 當錨，所以重問一定跟它算同一格；沒有就用現在，開一個新視窗。
+/// 找「同寄件者、同指紋、**還會被送出**（`pending`／`delivered`）、而且 `created_at` 距現在
+/// **不超過** `DEDUPE_BUCKET_SECS`（SQL 是 `>=`，剛好等於也算）」的最新一筆：有就用**它的**
+/// `created_at` 當錨，所以重問一定跟它算同一格；沒有就用現在，開一個新視窗。
+///
+/// `gave_up` 刻意**不**當錨（i264 review）：那種事件已經不再補送，把重問吸進去等於讓它跟著沉掉——
+/// 比「AGM 被叫醒兩次」糟。實際上 600 秒內到不了 `gave_up`（要 5 次補送、照 1800 秒的 ack deadline
+/// 約 2.5 小時），這裡寫明是為了不留一個「時序一改就變成洞」的隱患。
 ///
 /// 這樣「兩次呼叫相隔多久」才是決定要不要去重的東西。以前用 `now.div_euclid(600)`，決定的其實是
 /// 「它們各自落在哪一格」——同一句相隔 20 秒的重問，跨過邊界就變兩筆 durable 申請，AGM 被叫醒兩次
@@ -73,7 +78,7 @@ async fn window_anchor(app: &Arc<App>, from_bot_id: &str, fingerprint: &str, now
     let since = crate::db::iso_at(chrono::DateTime::from_timestamp(now_unix - DEDUPE_BUCKET_SECS, 0).unwrap_or_else(chrono::Utc::now));
     let found: Result<Option<String>, _> = sqlx::query_scalar(
         "SELECT created_at FROM supervisor_inbox
-          WHERE supervisor_id=? AND kind='bot_request' AND state!='handled' AND bot_id=?
+          WHERE supervisor_id=? AND kind='bot_request' AND state IN ('pending','delivered') AND bot_id=?
             AND json_extract(payload_json,'$.fingerprint')=? AND created_at >= ?
           ORDER BY created_at DESC, rowid DESC LIMIT 1",
     )
@@ -84,7 +89,15 @@ async fn window_anchor(app: &Arc<App>, from_bot_id: &str, fingerprint: &str, now
     .fetch_optional(&app.db)
     .await;
     match found {
-        Ok(Some(at)) => chrono::DateTime::parse_from_rfc3339(&at).map(|t| t.timestamp()).unwrap_or(now_unix),
+        Ok(Some(at)) => match chrono::DateTime::parse_from_rfc3339(&at) {
+            Ok(t) => t.timestamp(),
+            // 無聲退路會讓整個修法失效而沒有任何訊號：`created_at` 的格式一旦飄掉（#101 的前科），
+            // 每次都落回「現在」，就等於退回固定格子，而唯一的線索是 AGM 又被叫醒兩次（i264 review）。
+            Err(e) => {
+                tracing::warn!(created_at = %at, error = %e, "bot_request 的 created_at 解不開，去重視窗退回「現在」（#442 的錨點失效）");
+                now_unix
+            }
+        },
         Ok(None) => now_unix,
         Err(e) => {
             tracing::warn!(error = %e, "could not look for an open bot_request to anchor the dedupe window; using now");
@@ -527,6 +540,59 @@ mod dedupe_window_tests {
         let now = BOUNDARY + 19;
         open_request(&app, "w1", &fp, now - DEDUPE_BUCKET_SECS - 1, "pending").await;
         assert_eq!(window_anchor(&app, "w1", &fp, now).await, now, "超過十分鐘就是新的一件事");
+    }
+
+    /// 視窗長度那一端也要釘住（i264 review）：SQL 是 `created_at >= now - 600`，所以**剛好 600 秒**
+    /// 算在視窗內、601 秒不算。以前 doc 寫「不到 600」而 SQL 含等於，這一點沒有測試。
+    #[tokio::test]
+    async fn exactly_one_window_old_still_anchors_but_a_second_older_does_not() {
+        let app = flow_tests::app().await;
+        let fp = fp_of("請核准重建 abc123");
+        let now = BOUNDARY + 19;
+
+        let exactly = now - DEDUPE_BUCKET_SECS;
+        open_request(&app, "w1", &fp, exactly, "pending").await;
+        assert_eq!(window_anchor(&app, "w1", &fp, now).await, exactly, "剛好一個視窗長度：還算同一件");
+
+        // 再老一秒就不算了（把上面那筆往前挪一秒，避免兩筆互相干擾）。
+        sqlx::query("UPDATE supervisor_inbox SET created_at=? WHERE bot_id='w1'")
+            .bind(crate::db::iso_at(chrono::DateTime::from_timestamp(exactly - 1, 0).unwrap()))
+            .execute(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(window_anchor(&app, "w1", &fp, now).await, now, "超過一秒就是新的一件事");
+    }
+
+    /// `gave_up` 不當錨：那種事件已經不再補送，把重問吸進去等於讓它跟著沉掉。
+    #[tokio::test]
+    async fn a_gave_up_request_does_not_swallow_the_repeat() {
+        let app = flow_tests::app().await;
+        let fp = fp_of("請核准重建 abc123");
+        open_request(&app, "w1", &fp, BOUNDARY - 1, "gave_up").await;
+        let now = BOUNDARY + 19;
+        assert_eq!(window_anchor(&app, "w1", &fp, now).await, now, "不再補送的那筆不該把重問吸走");
+    }
+
+    /// `delivered`（送出去了、還沒 ack）仍然當錨：那是「同一件事還在進行中」。
+    #[tokio::test]
+    async fn a_delivered_but_unacked_request_still_anchors() {
+        let app = flow_tests::app().await;
+        let fp = fp_of("請核准重建 abc123");
+        let at = BOUNDARY - 1;
+        open_request(&app, "w1", &fp, at, "delivered").await;
+        assert_eq!(window_anchor(&app, "w1", &fp, BOUNDARY + 19).await, at);
+    }
+
+    /// `created_at` 的格式飄掉時退回「現在」，但**要留下訊號**（i264 review）：無聲退路會讓整個
+    /// 修法失效而只看得到「AGM 又被叫醒兩次」。
+    #[tokio::test]
+    async fn an_unparseable_created_at_falls_back_to_now() {
+        let app = flow_tests::app().await;
+        let fp = fp_of("請核准重建 abc123");
+        open_request(&app, "w1", &fp, BOUNDARY - 1, "pending").await;
+        sqlx::query("UPDATE supervisor_inbox SET created_at='not-a-timestamp' WHERE bot_id='w1'").execute(&app.db).await.unwrap();
+        let now = BOUNDARY + 19;
+        assert_eq!(window_anchor(&app, "w1", &fp, now).await, now, "解不開就退回現在，不 panic");
     }
 
     /// 別人的申請、別的內容都不當錨。

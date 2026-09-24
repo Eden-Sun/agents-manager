@@ -1802,7 +1802,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
   `{routed:"responder"|"patrol",queued:true,duplicate,wake,inbox_event_id,state,delivery:"queued",turn_id:null,message_id:null,note}`。
   沒有 `relay_from`（使用者）、目標不是角色 bot、協調者未建立 → 照舊 200 `PromptOut`（`relay_from:"daemon"` 從 HTTP 帶進來是 403，見 §5）。
 - `POST /relay/announce`（shim，`X-AM-Bot-Token`，表單 `bot_id,to_agent,text,ack?,reply_to?`）的 `to_agent` 對得上角色 bot（名字、agent 名、pane id）→ 200 同上形狀；shim 見 `routed` 不再轉給真的 herdr。其他 → `{}`（照舊記來源）。
-- 去重：同寄件者同 `client_request_id` 一筆（結案了也是同一筆）；沒 id 時同寄件者、同內容指紋、**還沒結案**、而且落在同一個十分鐘滑動視窗（錨在既有那筆的 `created_at`，不是固定格子，issue #442）的一筆——前一筆已 `handled` 就重新入列（新的 `inbox_event_id`、`duplicate:false`）。指紋 = 收件角色＋目標＋正文（逐字）＋附件。
+- 去重：同寄件者同 `client_request_id` 一筆（結案了也是同一筆）；沒 id 時同寄件者、同內容指紋、**還會被送出**（`pending`／`delivered`，`gave_up` 不算）、而且落在同一個十分鐘滑動視窗（錨在既有那筆的 `created_at`，不是固定格子，issue #442）的一筆——前一筆已 `handled` 就重新入列（新的 `inbox_event_id`、`duplicate:false`）。指紋 = 收件角色＋目標＋正文（逐字）＋附件。
   重複且指紋相同 → `duplicate:true`、同一個 `inbox_event_id`；指紋不同 → 409 `request_mismatch`（不寫入，回報既有事件 id）。
 - `wake:false` 只在寄件端明講是回覆時：`ack:true`（`quiet_reason:"ack"`），或 `reply_to` 對得上一則跟寄件者有關的 inbox 事件（寄給它的角色、它寄的、收件角色寄來的）或派給它的交辦（id 或 `client_request_id`）（`"reply"`）。
   沒帶、或 `reply_to` 對不上（payload `reply_to_matched:false`）→ `wake:true`。不看寄件者當下在跑哪種回合。
