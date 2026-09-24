@@ -734,6 +734,31 @@ class ReviewCommandTest(CliCase):
         self.assertEqual(body["followup_text"], "把 A 做完")
         self.assertEqual(body["followup_request_id"], "agm-follow-1")
 
+    def test_followup_from_a_file_gets_the_same_checks_as_assign(self):
+        """issue #516：續作會變成一筆新的交辦，就該跟 `assign` 走同一組檢查。"""
+        good = Path(self.dir.name) / "follow.md"
+        good.write_text("  接著把 B 做完  ", encoding="utf-8")
+        self.ok("review", "a1", "--decision", "followup", "--followup-file", str(good), "--followup-request-id", "f-1")
+        self.assertEqual(self._body()["followup_text"], "接著把 B 做完")
+
+        binary = Path(self.dir.name) / "bin.bin"
+        binary.write_bytes(b"\xff\xfe not utf8 \x80")
+        err = self.bad("review", "a1", "--decision", "followup", "--followup-file", str(binary), "--followup-request-id", "f-2")
+        self.assertEqual(err["error"], "bad_args", "非 UTF-8 是參數錯（exit 2），不是 internal（exit 1）")
+        self.assertEqual(err["path"], str(binary))
+
+        err = self.bad("review", "a1", "--decision", "followup", "--followup-file", str(self.dir.name) + "/nope", "--followup-request-id", "f-3")
+        self.assertEqual(err["error"], "bad_args")
+
+        err = self.bad("review", "a1", "--decision", "followup", "--followup-text", "   ", "--followup-request-id", "f-4")
+        self.assertEqual(err["error"], "bad_args", "只有空白的續作不要送出去")
+
+        err = self.bad("review", "a1", "--decision", "followup", "--followup-text", "x" * (agm.MAX_TEXT_CHARS + 1), "--followup-request-id", "f-5")
+        self.assertEqual((err["error"], err["max_chars"]), ("bad_args", agm.MAX_TEXT_CHARS))
+
+        posts = [r for r in FakeDaemon.seen if r["method"] == "POST"]
+        self.assertEqual(len(posts), 1, "只有第一次合法的續作送得出去")
+
     def test_timeout_reports_delivery_unknown_without_retrying(self):
         FakeDaemon.slow.add("/api/supervisor/assignments/a1/review")
         code, _out, err = self.run_cli("--timeout", "0.2", "review", "a1", "--decision", "accept")
@@ -849,6 +874,18 @@ class PersonaCommandTest(CliCase):
         body = [r for r in FakeDaemon.seen if r["method"] == "PUT"][-1]["body"]
         self.assertEqual((body["text"], body["expected_version"]), ("新版人設", 3))
 
+    def test_set_from_a_file_and_a_non_utf8_one_is_a_bad_arg(self):
+        """issue #516：`--file` 跟 `--text-file` 是同一件事，錯法也該一樣。"""
+        good = Path(self.dir.name) / "persona.md"
+        good.write_text("新的人設", encoding="utf-8")
+        self.ok("persona", "set", "--file", str(good))
+        self.assertEqual([r for r in FakeDaemon.seen if r["method"] == "PUT"][-1]["body"]["text"], "新的人設")
+        binary = Path(self.dir.name) / "persona.bin"
+        binary.write_bytes(b"\xff\xfe\x00")
+        err = self.bad("persona", "set", "--file", str(binary))
+        self.assertEqual(err["error"], "bad_args")
+        self.assertEqual(err["path"], str(binary))
+
     def test_adopt_embedded_is_explicit(self):
         """內嵌版只會透過這支明確的遷移覆蓋持久版，不會是 setup 的副作用。"""
         self.assertEqual(self.ok("persona", "adopt-embedded", "--reason", "跟上新版")["version"], 5)
@@ -923,6 +960,19 @@ class MiscCommandTest(CliCase):
         self.ok("handoff", "--summary", "新摘要")
         body = [r["body"] for r in FakeDaemon.seen if r["method"] == "PUT"][0]
         self.assertEqual(body, {"summary": "新摘要"})
+
+    def test_handoff_from_a_file_and_a_non_utf8_one_is_a_bad_arg(self):
+        """issue #516：`--summary-file` 也走同一個讀檔 helper。"""
+        FakeDaemon.routes["PUT /api/supervisor/handoff"] = (200, {"summary_version": 9})
+        good = Path(self.dir.name) / "handoff.md"
+        good.write_text("交接摘要", encoding="utf-8")
+        self.ok("handoff", "--summary-file", str(good))
+        self.assertEqual([r for r in FakeDaemon.seen if r["method"] == "PUT"][-1]["body"]["summary"], "交接摘要")
+        binary = Path(self.dir.name) / "handoff.bin"
+        binary.write_bytes(b"\x80\x81")
+        err = self.bad("handoff", "--summary-file", str(binary))
+        self.assertEqual(err["error"], "bad_args")
+        self.assertEqual(err["path"], str(binary))
 
     def test_ack_and_inbox(self):
         FakeDaemon.routes["GET /api/supervisor/inbox"] = (200, {"events": [{"id": "e1"}]})
