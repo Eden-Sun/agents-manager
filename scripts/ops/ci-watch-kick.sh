@@ -189,9 +189,23 @@ def add(n):
     if n and n not in seen:
         seen.add(n); out.append(n)
 in_block = False
+# bash 測試 harness 的失敗長 `FAIL - <中文描述>`，而描述跨檔不保證唯一，所以記住最近一個
+# `==> ops: <path>` 當前綴（issue #449）。
+src = ""
 for raw in open(sys.argv[1], errors="replace"):
     line = raw.rstrip("\n").split("\t")[-1]
     line = re.sub(r"^\d{4}-\d\d-\d\dT[\d:.]+Z ", "", line)
+    m = re.match(r"^==> \w+: (\S+)$", line)
+    if m:
+        src = m.group(1).rsplit("/", 1)[-1]; continue
+    # `scripts/*_test.sh` 全部都是這個格式；行尾的全形括號是每輪會變的實際值（`（是 '1871'，
+    # 預期 '0'）`），留著會讓「失敗清單變了」每輪都誤判成有新失敗，所以去掉。
+    m = re.match(r"^FAIL\s+-\s+(.+)$", line)
+    if m:
+        desc = re.sub(r"（[^（）]*）\s*$", "", m.group(1)).strip()
+        if desc:
+            add("%s: %s" % (src, desc) if src else desc)
+        continue
     m = re.match(r"^test (\S+) \.\.\. FAILED$", line)
     if m:
         add(m.group(1)); continue
@@ -296,7 +310,12 @@ if [ -n "$PREV_GREEN" ]; then git rev-list "${PREV_GREEN}..${FIRST_SHA}" > "${WO
 else : > "${WORK}/range.txt"; fi
 while IFS= read -r TNAME; do
   [ -n "$TNAME" ] || continue
-  NEEDLE=${TNAME##*::}; NEEDLE=${NEEDLE%% *}; NEEDLE=${NEEDLE%%(*}
+  case "$TNAME" in
+    *::*) NEEDLE=${TNAME##*::}; NEEDLE=${NEEDLE%% *}; NEEDLE=${NEEDLE%%(*} ;;
+    # bash 測試是 `檔名: 中文描述`（issue #449）：描述字串就寫在那個測試檔裡，拿它去 -S 找得到。
+    *": "*) NEEDLE=${TNAME#*": "} ;;
+    *) NEEDLE=${TNAME%% *} ;;
+  esac
   [ -n "$NEEDLE" ] || continue
   # `-n 1` 是**最後一次**動到這個字串的 commit；新增那一筆通常就是它，改過名才會不同。
   INTRO_LINE=$(git log -S"$NEEDLE" --oneline -n 1 2>/dev/null)
