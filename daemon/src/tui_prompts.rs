@@ -98,27 +98,52 @@ pub(crate) fn composer_is_idle(lines: &[&str]) -> bool {
 }
 
 /// 問句要由 `●` / `>` 開頭且相鄰幾行內有至少三個選項，避免 agent 引用這些字串時誤認。
+/// 這一行是不是**選項列**：`N: 標籤` 之外幾乎沒有別的字。真的問卷是
+/// `1: Bad  2: Fine  3: Good  0: Dismiss` 單獨一列（窄 pane 折成兩列也還是只有選項）；
+/// 散文裡提到那些字一定還夾著別的句子。
+///
+/// 這一條取代了原本「該行要以 `● ` 或 `> ` 開頭」的守衛（#485）：`●` 正是 Claude 自己印助理
+/// 訊息的項目符號，用 agent 自己的前綴去排除 agent 的引文等於沒有排除。
+fn is_option_row(line: &str) -> bool {
+    let present = survey_options(line);
+    if !present.iter().any(|p| *p) {
+        return false;
+    }
+    let mut rest = flatten(line);
+    for (n, label) in [(0usize, "dismiss"), (1, "bad"), (2, "fine"), (3, "good")] {
+        for sep in [" ", ""] {
+            rest = rest.replace(&format!("{n}:{sep}{label}"), " ");
+        }
+    }
+    rest.split_whitespace().collect::<String>().chars().count() <= 8
+}
+
 pub fn is_feedback_survey(screen: &str) -> bool {
-    let lines: Vec<String> = screen
-        .lines()
-        .map(flatten)
-        .filter(|line| !line.is_empty())
-        .collect();
-    let tail = &lines[lines.len().saturating_sub(SURVEY_TAIL_LINES)..];
+    // 原文與壓平後的版本一起留著：兩個 tail 要對齊同一批行——`composer_is_idle` 要看原文
+    // （`❯` 會被 `flatten` 留著，但框線得先去掉），問句與選項看壓平後的。
+    let kept: Vec<(&str, String)> = screen.lines().map(|l| (l, flatten(l))).filter(|(_, f)| !f.is_empty()).collect();
+    let from = kept.len().saturating_sub(SURVEY_TAIL_LINES);
+    // 輸入列空著＝沒有框在擋，那是回覆裡引用了問卷原文（同其他五個偵測，#114／#485）。
+    // 真的問卷佔著輸入列那一行（`> │`），不會同時留一行空的 `❯`。
+    // **只看同一個 tail**：套在整個畫面上的話，捲動區任何一處有空的 `❯`（例如上一個回合結束時那一行）
+    // 都會把真的問卷判成引文（i267 審 #485）。
+    let raw_tail: Vec<&str> = kept[from..].iter().map(|(l, _)| *l).collect();
+    if composer_is_idle(&raw_tail) {
+        return false;
+    }
+    let tail: Vec<String> = kept[from..].iter().map(|(_, f)| f.clone()).collect();
+    let tail = &tail[..];
     let question = "how is claude doing";
 
     for start in 0..tail.len() {
-        let marker = tail[start].strip_prefix("● ").or_else(|| tail[start].strip_prefix("> "));
-        if marker.is_none() {
-            continue;
-        }
         for end in (start + 1)..=tail.len().min(start + SURVEY_QUESTION_LINES) {
             if !tail[start..end].join(" ").contains(question) {
                 continue;
             }
             let option_end = tail.len().min(end + SURVEY_OPTION_GAP);
             let mut found = [false; 4];
-            for line in &tail[start..option_end] {
+            // 只採計「看起來就是選項列」的行：散文裡把選項寫進句子中間不算（`is_option_row`）。
+            for line in tail[start..option_end].iter().filter(|l| is_option_row(l)) {
                 for (slot, present) in survey_options(line).into_iter().enumerate() {
                     found[slot] |= present;
                 }
@@ -363,7 +388,27 @@ pub async fn stuck_at_login(app: &Arc<App>, run: &db::Run) -> bool {
     }
 }
 
-/// 停在問卷上就按 `0`；回傳是否真的按了。
+/// 認出問卷之後**要不要真的按鍵**（#485）。
+///
+/// 目前是 `false`：這個模組裡唯一會主動按鍵的偵測，卻是唯一**沒有真畫面 fixture** 的——
+/// `SURVEY`／`SURVEY_WRAPPED` 都是手寫的，其他每個偵測都釘著有日期的真 capture
+/// （onboarding 2026-09-22、dangerous rm 2026-09-24、grok trust 2026-09-17）。
+/// 所以「2.1.28x 的問卷還長不長這樣」無從查證，而誤判的代價是替使用者送出一則 `0`
+/// （按了之後畫面上的引文不會消失，700 毫秒後再判一次仍成立就會補送 enter）。
+///
+/// **保守不等於沒有代價**：不按鍵的話，問卷真的跳出來時 bot 會停在上面——那正是這個模組當初
+/// 存在的理由。所以關掉按鍵的同時，問卷也不再從「該吵父 agent 的畫面」裡被排除
+/// （[`daemon_dismisses_survey`]，見 `child_alerts::alertable_question`）：改由父 agent／人處理，
+/// 順便就能把真畫面抓成 fixture。拿到 fixture、補上對照測試之後把這裡改回 `true`。
+const PRESS_KEYS_ON_SURVEY: bool = false;
+
+/// daemon 現在會不會自己把問卷按掉。`child_alerts` 用它決定要不要把問卷算成「該吵父 agent 的畫面」：
+/// daemon 會按掉就不吵，不按就要吵，否則問卷會變成沒人知道的靜默停擺。
+pub fn daemon_dismisses_survey() -> bool {
+    PRESS_KEYS_ON_SURVEY
+}
+
+/// 停在問卷上就按 `0`；回傳是否真的按了。[`PRESS_KEYS_ON_SURVEY`] 關著時只記一行 warn 就回 `false`。
 pub async fn dismiss_if_survey(app: &Arc<App>, run: &db::Run) -> bool {
     let Some(pane) = run.pane_id.clone() else { return false };
     let Some(client) = app.herdr_for_run(run).await else { return false };
@@ -371,12 +416,33 @@ pub async fn dismiss_if_survey(app: &Arc<App>, run: &db::Run) -> bool {
     if !is_feedback_survey(&read.text) {
         return false;
     }
-    {
+    let first_for_this_run = {
         let mut revisions = app.survey_revisions.lock().await;
         if revisions.get(&run.id) == Some(&read.revision) {
             return false;
         }
+        let first = !revisions.contains_key(&run.id);
         revisions.insert(run.id.clone(), read.revision);
+        first
+    };
+    if !PRESS_KEYS_ON_SURVEY {
+        // 畫面內容不進 log（那是對話內容）；要補 fixture 的人用 pane id 自己抓一份原文。
+        //
+        // **每個 run 只吵一次**：revision 去重對按鍵版夠用（按下去畫面就變了），但不按鍵時問卷會一直
+        // 留在畫面上，每次重繪 revision 就變一次，每 10 秒一輪的巡邏會把同一件事一直寫進 log
+        // （i267 審 #485）。第一次 warn，之後降成 debug；真正該吵的人由 `child_alerts` 負責，
+        // 那邊本來就有自己的指紋去重。
+        if first_for_this_run {
+            tracing::warn!(
+                run = %run.id,
+                bot = %run.bot_id,
+                pane = %pane,
+                "claude 滿意度問卷：偵測到但不自動按鍵（#485：沒有真畫面 fixture）。請人處理，並把這個 pane 的畫面抓成 fixture"
+            );
+        } else {
+            tracing::debug!(run = %run.id, pane = %pane, "claude 滿意度問卷仍在（不自動按鍵）");
+        }
+        return false;
     }
     tracing::info!(run = %run.id, bot = %run.bot_id, "claude 滿意度問卷：自動選 0（Dismiss）");
     if let Err(e) = client.pane_send_keys(&pane, &["0"]).await {
@@ -571,6 +637,45 @@ mod tests {
     fn survey_is_recognised_even_when_wrapped() {
         assert!(is_feedback_survey(SURVEY));
         assert!(is_feedback_survey(SURVEY_WRAPPED));
+    }
+
+    /// #485：agent 在回覆裡逐行照抄問卷（連 `● ` 前綴都一樣，那本來就是 claude 自己的項目符號），
+    /// 底下是空的輸入列——那不是開著的問卷，不能對它按鍵。
+    #[test]
+    fn a_reply_that_quotes_the_survey_is_not_the_survey() {
+        let quoted = format!(
+            "⏺ 剛剛跳出這個問卷，我照你說的貼上來：\n ● How is Claude doing this session? (optional)\n   1: Bad    2: Fine   3: Good   0: Dismiss\n{IDLE_CLAUDE}"
+        );
+        assert!(!is_feedback_survey(&quoted), "輸入列空著＝引文，不是問卷");
+        // 沒有空輸入列（還在跑）時靠選項列那一條：問句與四個選項**都**出現，但全寫在句子中間。
+        // （這一行必須同時含 `how is claude doing`，否則問句那一關就先擋掉，測不到 `is_option_row`。）
+        let prose = " ⏺ The popup asked How is Claude doing this session? with 1: Bad 2: Fine 3: Good 0: Dismiss and I chose 0.\n ⎿  done\n   ✽ Working…\n";
+        assert!(!is_feedback_survey(prose), "選項夾在句子裡不是選項列");
+    }
+
+    /// i267 審 #485：`composer_is_idle` 只能套在**跟問句同一個 tail** 上。套在整個畫面的話，
+    /// 捲動區裡任何一處空的 `❯`（上一個回合結束時那一行就是）都會把真的問卷判成引文。
+    #[test]
+    fn an_empty_composer_further_up_the_scrollback_does_not_hide_a_live_survey() {
+        let scrollback = format!("{IDLE_CLAUDE}\n{}", "⏺ 上一輪做完了。\n".repeat(20));
+        let live = format!("{scrollback}{SURVEY}");
+        assert!(is_feedback_survey(&live), "問卷在最底下就是問卷，上面有過空輸入列不算");
+    }
+
+    /// 前綴守衛不再靠 `●`（#485）：真的問卷就算前面不是 `● `／`> ` 也要認得出來。
+    #[test]
+    fn the_survey_is_recognised_without_relying_on_the_assistant_bullet() {
+        let no_bullet = " How is Claude doing this session? (optional)\n   1: Bad    2: Fine   3: Good   0: Dismiss\n > │\n";
+        assert!(is_feedback_survey(no_bullet));
+    }
+
+    /// daemon 不自動按鍵時，問卷必須變成「該吵父 agent」的畫面——否則就是沒人按也沒人知道。
+    #[test]
+    fn not_pressing_means_the_survey_must_be_alertable() {
+        assert!(
+            daemon_dismisses_survey() || crate::child_alerts::alertable_question(SURVEY).is_some(),
+            "不按鍵就一定要吵人"
+        );
     }
 
     #[test]
