@@ -35,7 +35,7 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
 }
 
 /// 記下一次 purge 的結果（`purge_bot_dir` 的遠端分支呼叫，刪除 handler 與掃描共用）。寫不進去只是少一筆記號：
-/// 下一輪從 DB 重新推導、再 `rm -rf` 一次（冪等）。
+/// 下一輪從 DB 重新推導、再搬一次（冪等）。
 pub async fn record(app: &Arc<App>, bot_id: &str, host: &str, ok: bool, error: Option<&str>) {
     let now = crate::db::now();
     let res = if ok {
@@ -86,7 +86,7 @@ pub async fn pending(pool: &SqlitePool, host: &str) -> Result<Vec<String>> {
     .await?)
 }
 
-/// 掃一台遠端主機：回 `(清掉, 留著)`。只有「確定軟刪」而且「確定沒有 active run」的才 `rm -rf`。
+/// 掃一台遠端主機：回 `(清掉, 留著)`。只有「確定軟刪」而且「確定沒有 active run」的才搬進遠端回收區（#411）。
 pub async fn sweep(app: &Arc<App>, host: &str) -> (usize, usize) {
     if host == crate::config::LOCAL_HOST {
         return (0, 0);
@@ -126,10 +126,18 @@ pub async fn sweep(app: &Arc<App>, host: &str) -> (usize, usize) {
     (purged, kept)
 }
 
-/// 主機連上（含重連）那一刻背景掃一次。
+/// 還原的 bot 忘掉「已清掉」的記號（issue #411）：之後再被刪一次，掃描才會再搬它的目錄。寫不進去只記 log。
+pub async fn forget(app: &Arc<App>, bot_id: &str) {
+    if let Err(e) = sqlx::query("DELETE FROM remote_bot_dir_purges WHERE bot_id = ?").bind(bot_id).execute(&app.db).await {
+        tracing::warn!(bot = %bot_id, error = %e, "could not clear the remote bot dir purge mark of a restored bot");
+    }
+}
+
+/// 主機連上（含重連）那一刻背景掃一次，順便清掉遠端回收區裡過期的（#411）。
 pub fn spawn_sweep(app: Arc<App>, host: String) {
     tokio::spawn(async move {
         sweep(&app, &host).await;
+        crate::remote_trash::gc_host(&app, &host).await;
     });
 }
 
@@ -176,7 +184,7 @@ mod tests {
                 anyhow::bail!("ssh: connect to host: Connection refused");
             }
             c.lock().unwrap().push(script.to_string());
-            Ok(String::new())
+            Ok("AM_TRASHED\n".into())
         });
         Remote { env, host: host.into(), calls, fail }
     }
@@ -188,7 +196,7 @@ mod tests {
             bot.id
         }
         fn removed(&self, id: &str) -> usize {
-            self.calls.lock().unwrap().iter().filter(|s| s.contains("rm -rf") && s.contains(id)).count()
+            self.calls.lock().unwrap().iter().filter(|s| s.contains("bots-trash") && s.contains(id)).count()
         }
         async fn row(&self, id: &str) -> Option<(Option<String>, i64, Option<String>)> {
             sqlx::query_as("SELECT purged_at, attempts, last_error FROM remote_bot_dir_purges WHERE bot_id = ?")

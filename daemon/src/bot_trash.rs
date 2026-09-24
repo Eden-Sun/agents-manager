@@ -3,7 +3,7 @@
 //! 軟刪本來就是為了能還原（對話、設定都留著），偏偏 `bots/<id>/` 是當場 `remove_dir_all`——2026-09-23 13:28Z
 //! `build` 與 triage 被誤刪時，AGM 還原得回 bot 列與 config，目錄裡的東西（spool 裡還沒重放的 hook、shim、
 //! 手動放的檔）就沒了。搬走而不是刪：`POST /api/bots/{id}/restore` 時搬回來；開機時把放超過 [`KEEP_DAYS`] 天的清掉。
-//! 只管本機：遠端目錄照舊由 `purge_bot_dir` 在遠端 `rm -rf`（那邊的還原要走 ssh，這次不做）。
+//! 這裡只管本機；遠端目錄的回收區在 `remote_trash`（#411）。
 
 use std::path::{Path, PathBuf};
 

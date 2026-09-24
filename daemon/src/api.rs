@@ -1898,6 +1898,7 @@ pub(crate) async fn restore_bot(State(app): State<Arc<App>>, Path(id): Path<Stri
             Err(e) => tracing::warn!(bot = %id, error = %e, "could not restore bot config dir from bots-trash"),
         }
     }
+    crate::remote_trash::restore_for(&app, &id).await;
     app.emit("bot_changed", json!({"bot_id": id})).await;
     app.emit("project_changed", json!({"project_id": bot.project_id})).await;
     Ok((StatusCode::OK, Json(json!({"bot_id": id}))).into_response())
