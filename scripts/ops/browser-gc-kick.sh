@@ -1,11 +1,61 @@
 #!/bin/zsh
-# 定期喚醒 agm-pxf2pv-browser-gc（sonnet）清理殭屍瀏覽器視窗。由 launchd 每 6 小時跑一次。
+# 定期喚醒 agm-pxf2pv-browser-gc（sonnet）清理殭屍瀏覽器視窗。
+# launchd `com.agm.browser-gc`，`StartInterval 1800`（30 分鐘，見 scripts/ops/launchd/）。
+#
+#   AGM_LOCK_STALE_SECS、AGM_LOCK_HUNG_SECS 可覆寫（測試用）。
 set -u
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BOT=01M248GA4H1TAHJCZRKVR73S3C
 LOG="$DIR/browser-gc.log"
 cd "$DIR" || exit 1
+log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
 echo "== $(date '+%F %T') kick" >> "$LOG"
+
+# 鎖（issue #490）：這一支會殺 Chrome、`rm -rf` profile、關 pane、派工，卻是 kick 家族裡唯一沒有鎖的。
+# 一輪跑超過 `StartInterval` 下一輪就疊上去，最明確的後果是重複派工。形狀抄 release-triage-kick.sh：
+# 鎖裡寫 pid 與時間；SIGKILL／斷電那一輪 EXIT trap 沒跑，鎖會留在磁碟上——執行者不在就回收接手，
+# 還活著但卡太久只記一行（這支沒有 ops-alert 的管道，不在這張票的範圍裡加）。
+LOCK="$DIR/browser-gc.lock"
+LOCK_STALE_SECS=${AGM_LOCK_STALE_SECS:-120}    # 沒有 pid 可查時，超過這麼久就算殘留
+LOCK_HUNG_SECS=${AGM_LOCK_HUNG_SECS:-3600}     # 執行者還活著但卡了這麼久：記一行醒目的
+lock_age() {
+  _born=$(python3 -c '
+import os,sys
+try:
+    print(int(os.path.getmtime(sys.argv[1])))
+except OSError:
+    print(0)
+' "$LOCK" 2>/dev/null) || _born=0
+  case "$_born" in ''|*[!0-9]*) _born=0 ;; esac
+  [ "$_born" = 0 ] && { echo 0; return; }
+  echo $(( $(date +%s) - _born ))
+}
+cleanup() { rm -rf "$LOCK" 2>/dev/null || true; true; }
+take_lock() { mkdir "$LOCK" 2>/dev/null && { echo "$$ $(date +%s)" > "$LOCK/owner"; trap cleanup EXIT; return 0; }; return 1; }
+if ! take_lock; then
+  _pid=$(cut -d' ' -f1 "$LOCK/owner" 2>/dev/null)
+  _age=$(lock_age)
+  # `kill -0` 之外再比對指令名：pid 被回收之後，光看「還活著」會把別人的行程當成自己的執行者。
+  if [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null && ps -o command= -p "$_pid" 2>/dev/null | grep -q 'browser-gc-kick'; then
+    if [ "$_age" -ge "$LOCK_HUNG_SECS" ]; then
+      log "WARN: 上一輪（pid ${_pid}）已經跑了 ${_age} 秒還沒結束，瀏覽器清理停住；必要時結束它並移除 ${LOCK}"
+    else
+      log "已有執行者（pid ${_pid}，${_age} 秒），這輪跳過"
+    fi
+    exit 0
+  fi
+  if [ "$_age" -lt "$LOCK_STALE_SECS" ]; then
+    log "鎖剛建立（${_age} 秒）但讀不到執行者，這輪跳過"
+    exit 0
+  fi
+  rm -rf "$LOCK" 2>/dev/null
+  if take_lock; then
+    log "清掉殘留鎖（執行者 ${_pid:-未知} 已不在，鎖存在 ${_age} 秒）並接手這一輪"
+  else
+    log "WARN: 殘留鎖 ${LOCK} 清不掉（執行者 ${_pid:-未知} 已不在），瀏覽器清理停住；請人工確認沒有執行者後移除它"
+    exit 0
+  fi
+fi
 
 # ── bot 的 headless Chrome（CDP 截圖用）────────────────────────────────────────
 # 這段用 shell 直接做，不花 LLM：判斷純機械（孤兒 + 沒有 CDP 連線 + 活超過 2 分鐘）。
@@ -80,5 +130,9 @@ sys.exit(0 if (b.get('run') or {}).get('state')=='running' else 1)"; then
   bin/agm bot start "$BOT" >> "$LOG" 2>&1
   sleep 20
 fi
+# `--request-id` **刻意保持分鐘級**（issue #490）：`turns_client_req` 是
+# `(conversation_id, client_request_id)` 上**沒有時間範圍**的唯一索引（`daemon/src/db.rs:105`），
+# 所以換成日期級的「穩定 key」會讓一天 48 輪只有第一輪派得出去，其餘全被當成重試擋掉。
+# 防重複派工靠的是上面那把鎖——鎖擋住重疊之後，每一輪本來就只會有一個 key。
 bin/agm --compact assign --review-by patrol --bot "$BOT" --text-file browser-gc-task.md \
   --request-id "agm-browser-gc-$(date +%Y%m%d-%H%M)" >> "$LOG" 2>&1

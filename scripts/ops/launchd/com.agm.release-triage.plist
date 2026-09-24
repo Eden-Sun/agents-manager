@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+	<key>Label</key>
+	<string>com.agm.release-triage</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/bash</string>
+		<string>/Users/m4p/.config/agents-manager/supervisor/AGM/bin/release-triage-kick.sh</string>
+	</array>
+	<key>StandardErrorPath</key>
+	<string>/Users/m4p/.config/agents-manager/supervisor/AGM/release-triage.launchd.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/m4p/.config/agents-manager/supervisor/AGM/release-triage.launchd.log</string>
+	<key>StartInterval</key>
+	<integer>1800</integer>
+</dict>
+</plist>

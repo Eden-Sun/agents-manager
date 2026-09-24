@@ -53,6 +53,8 @@ case "$*" in
   "-axo pid,ppid,command") cat "$FIX/ps.txt" ;;
   "-axo command") awk '{ $1=""; $2=""; sub(/^ +/, ""); print }' "$FIX/ps.txt" ;;
   "-o etime= -p "*) cat "$FIX/etime.$4" 2>/dev/null ;;
+  # 鎖的殘留判斷要比對指令名（issue #490）：$FIX/cmd.<pid> 有就印那一行。
+  "-o command= -p "*) cat "$FIX/cmd.$4" 2>/dev/null ;;
   *) echo "ps stub: unknown $*" >&2; exit 2 ;;
 esac
 STUB
@@ -204,6 +206,51 @@ check  "沒有任何 am-*：profile 清理照跑、刪 0 個" "profile 目錄：
 check  "沒有任何 am-*：pane-gc 照跑" "pane-gc called" "$FIX/kills.log"
 check  "沒有任何 am-*：照派 assign" " assign " "$FIX/agm.log"
 teardown
+
+# ── 鎖（issue #490）──────────────────────────────────────────────────────────────
+# 這支會殺 Chrome、rm -rf profile、關 pane、派工，卻是 kick 家族裡唯一沒有鎖的；
+# 一輪跑超過 StartInterval 下一輪就疊上去，最明確的後果是重複派工。
+
+# 5. 上一輪還在跑：這輪整個跳過，一個破壞性動作都不做、也不派工。
+setup
+chrome 501 1 "05:00" 9222 "$TMPD/am-p1"
+mkdir -p "$ROOT/agm/browser-gc.lock"
+echo "4242 $(date +%s)" > "$ROOT/agm/browser-gc.lock/owner"
+: > "$FIX/alive.4242"                       # 假 kill -0 說它還活著
+echo "zsh $ROOT/agm/bin/browser-gc-kick.sh" > "$FIX/cmd.4242"   # 指令名對得上
+equals "有執行者時 exit 0" "$(run)" "0"
+check    "log 說這輪跳過" "已有執行者（pid 4242" "$LOG"
+check_no "沒有殺任何 Chrome" "kill -TERM" "$FIX/kills.log"
+check_no "沒有呼叫 pane-gc" "pane-gc called" "$FIX/kills.log"
+check_no "沒有派工" "assign" "$FIX/agm.log"
+teardown
+
+# 6. 殘留鎖（執行者不在、鎖夠舊）：清掉接手，這輪照常做事。
+setup
+mkdir -p "$ROOT/agm/browser-gc.lock"
+echo "4242 1" > "$ROOT/agm/browser-gc.lock/owner"   # 沒有 alive.4242＝kill -0 失敗
+AGM_LOCK_STALE_SECS=0 PATH="$ROOT/fakebin:$PATH" zsh "$ROOT/agm/bin/browser-gc-kick.sh" >/dev/null 2>&1
+check "log 說清掉殘留鎖並接手" "清掉殘留鎖" "$LOG"
+check "接手之後照常派工" "assign" "$FIX/agm.log"
+teardown
+
+# 7. 鎖剛建立但讀不到執行者：不搶，等下一輪（寧可晚一輪，也不要兩個一起跑）。
+setup
+mkdir -p "$ROOT/agm/browser-gc.lock"            # 沒有 owner 檔
+equals "讀不到執行者且鎖還新 → exit 0" "$(run)" "0"
+check    "log 說鎖剛建立" "鎖剛建立" "$LOG"
+check_no "沒有派工" "assign" "$FIX/agm.log"
+teardown
+
+# 8. 正常跑完要把鎖收掉（trap），否則下一輪會被自己擋住。
+setup
+run >/dev/null
+equals "跑完鎖不留下" "$([ -e "$ROOT/agm/browser-gc.lock" ] && echo yes || echo no)" "no"
+teardown
+
+# 9. `--request-id` 要維持分鐘級：turns_client_req 是 (conversation_id, client_request_id) 上
+#    **沒有時間範圍**的唯一索引（daemon/src/db.rs:105），換成日期級會讓一天只派得出第一輪。
+equals "request-id 仍含 %H%M" "$(grep -c 'request-id "agm-browser-gc-$(date +%Y%m%d-%H%M)"' "$HERE/browser-gc-kick.sh")" "1"
 
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

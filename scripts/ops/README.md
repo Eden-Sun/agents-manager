@@ -25,6 +25,20 @@
 例行更新：正式 daemon 的 release binary 落後 `origin/main` 時，申請核准、取得 rebuild 租約，
 再把重建重啟任務派給建置 child。
 
+### launchd 排程進了版控（issue #487）
+
+`scripts/ops/launchd/com.agm.*.plist` 是這台機器上 8 個 job 的來源檔，`install-manifest.tsv` 也列了它們
+（安裝位置寫成 `LaunchAgents/…`，`agm ops-sync --check` 解析成 `~/Library/LaunchAgents/`）。
+
+比對**只看語意欄位**：`Label`／`ProgramArguments`／`StartInterval`／`RunAtLoad`。launchd 自己會改寫 plist
+（鍵的順序、補欄位），整檔比對會一直報 drift。`EnvironmentVariables` 刻意不比——裡面是這台機器的 `PATH`
+與 bot id 之類的值，每台不同；repo 那一份留著它是為了 install 之後 job 還跑得起來。
+
+`~/Library/LaunchAgents/` 裡有、對照表沒有的 `com.agm.*` job 會報成 `extra`（＝沒有版控的排程）。
+路徑與 `gui/501` 寫死成這台開發機的值，跟 `herdr-full-restart.sh` 同一個處理方式。
+
+**這裡只管版控與比對，不負責 install／`launchctl`**（部署另外走）。
+
 **四個觸發條件**：整點的例行檢查（launchd 每 5 分鐘跑一次，分鐘 < 5 的那一輪）、
 **重建申請集滿門檻**（`AGM_REBUILD_THRESHOLD`，預設 3；使用者 2026-09-14 訂 5、2026-09-16 降成 3）、
 **最早一筆申請已經等超過上限**（`AGM_REBUILD_MAX_WAIT_MIN`，預設 30 分鐘；使用者 2026-09-15——不能卡著等湊滿），
@@ -428,7 +442,8 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agm.ci-watch.plist
 
 - `outbox-gc.sh`：launchd `com.agm.outbox-gc` 每 10 分鐘；刪 outbox 底下（含 bot 子目錄）超過 60 分鐘的檔與空目錄。護欄：`AM_OUTBOX_ROOT` 不在 `~/.config/agents-manager/outbox*` 就拒絕。
 - `pane-gc.sh`：關卡住超過 24 小時的 `claude auth login`／`gcloud auth login`／`codex login` pane；幽靈 pane 只記錄。由 `browser-gc-kick.sh` 呼叫。
-- `browser-gc-kick.sh`：每 6 小時；收孤兒、無 CDP 連線、活超過 2 分鐘的 headless Chrome，刪沒人用的 `/tmp/am-*` Chrome profile，跑 `pane-gc.sh`，再派 `browser-gc-task.md`。
+- `browser-gc-kick.sh`：launchd `com.agm.browser-gc`，**`StartInterval 1800`（30 分鐘）**；收孤兒、無 CDP 連線、活超過 2 分鐘的 headless Chrome，刪沒人用的 `/tmp/am-*` Chrome profile，跑 `pane-gc.sh`，再派 `browser-gc-task.md`。有鎖與殘留回收（issue #490）。
+  （這裡原本寫「每 6 小時」，但實機一直是 1800 秒——是**文件寫錯**，不是排程跑錯；issue #487 把 plist 收進版控時照實機現值定案。）
 
 隔離測試：`bash scripts/ops/outbox-gc_test.sh`、`pane-gc_test.sh`、`browser-gc-kick_test.sh`（假 `ps`／`lsof`／`herdr`／`bin/agm`，`kill` 用函式替身，`/tmp/am-*` 換成暫存目錄；不會殺行程、關 pane 或碰真的 outbox／HOME）。
 安裝比照其他 kick：`install -m 755 scripts/ops/{outbox-gc,pane-gc,browser-gc-kick}.sh ~/.config/agents-manager/supervisor/AGM/bin/`、`install -m 644 scripts/ops/browser-gc-task.md ~/.config/agents-manager/supervisor/AGM/`；launchd 由巡檢處理。

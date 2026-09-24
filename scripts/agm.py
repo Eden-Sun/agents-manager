@@ -24,6 +24,8 @@ import datetime
 import http.client
 import json
 import os
+import pathlib
+import plistlib
 import re
 import socket
 import subprocess
@@ -992,6 +994,38 @@ def _blob_at(repo: Path, rev: str, path: str) -> str | None:
     return r.stdout.strip() if r.returncode == 0 else None
 
 
+LAUNCHD_PREFIX = "LaunchAgents/"
+#: 只比這幾個欄位——`EnvironmentVariables` 是每台機器自己的 PATH 與 bot id，不該跨機比對。
+PLIST_KEYS = ("Label", "ProgramArguments", "StartInterval", "RunAtLoad")
+
+
+def _launch_agents_dir() -> Path:
+    """`~/Library/LaunchAgents`；`AGM_LAUNCHAGENTS_DIR` 只給測試蓋掉（不要讓測試讀到真的 plist）。"""
+    override = os.environ.get("AGM_LAUNCHAGENTS_DIR", "").strip()
+    return pathlib.Path(override) if override else pathlib.Path.home() / "Library" / "LaunchAgents"
+
+
+def _install_path(agm_dir: Path, target: str) -> Path:
+    """對照表的安裝位置：預設相對 AGM 目錄，`LaunchAgents/` 開頭的走 [`_launch_agents_dir`]（issue #487）。"""
+    if target.startswith(LAUNCHD_PREFIX):
+        return _launch_agents_dir() / target[len(LAUNCHD_PREFIX):]
+    return agm_dir / target
+
+
+def _git_bytes(repo: Path, ref: str, source: str) -> bytes:
+    return subprocess.run(["git", "-C", str(repo), "show", f"{ref}:{source}"], capture_output=True, check=True).stdout
+
+
+def _plist_semantics(raw: bytes) -> dict:
+    """plist 裡真正代表「這個 job 是什麼、多久跑一次」的那幾個欄位。讀不懂就回一個帶錯誤的 dict，
+    讓比對結果是 drift 而不是靜靜當成相同。"""
+    try:
+        d = plistlib.loads(raw)
+    except Exception as e:  # noqa: BLE001 - 壞掉的 plist 要報成落差，不是炸掉整份報告
+        return {"_error": f"{type(e).__name__}: {e}"}
+    return {k: d[k] for k in PLIST_KEYS if k in d}
+
+
 def ops_sync_report(repo: Path, ref: str, agm_dir: Path) -> dict:
     """唯讀比對已安裝的 ops 腳本與 repo：只跑 git 與讀檔，不改任何安裝檔。
 
@@ -1012,10 +1046,24 @@ def ops_sync_report(repo: Path, ref: str, agm_dir: Path) -> dict:
     report: dict = {"ref": ref, "commit": _git(repo, "rev-parse", "--short", ref), "agm_dir": str(agm_dir),
                     "ok": [], "behind": [], "drift": [], "missing": [], "extra": []}
     for source, target in entries:
-        path = agm_dir / target
+        path = _install_path(agm_dir, target)
         row: dict = {"source": source, "target": target}
         if not path.is_file():
             report["missing"].append(row)
+            continue
+        # launchd 的 plist 不能整檔比（issue #487）：launchd 自己會改寫鍵的順序、補欄位，
+        # 所以按 blob 比對一定是 drift。只比語意欄位。
+        if target.startswith(LAUNCHD_PREFIX):
+            want = _plist_semantics(_git_bytes(repo, ref, source))
+            got = _plist_semantics(path.read_bytes())
+            if want == got:
+                report["ok"].append(row)
+            else:
+                # `_error`（plist 讀不懂）也要進 diff，不然報告只會說「每個欄位都是 None」，
+                # 看的人查不出真正的原因是那個檔壞了。
+                keys = (*PLIST_KEYS, "_error")
+                row["diff"] = {k: {"repo": want.get(k), "installed": got.get(k)} for k in keys if want.get(k) != got.get(k)}
+                report["drift"].append(row)
             continue
         installed = _git(repo, "hash-object", str(path))
         if installed == _blob_at(repo, ref, source):
@@ -1031,6 +1079,13 @@ def ops_sync_report(repo: Path, ref: str, agm_dir: Path) -> dict:
         report["behind"].append(row)
     # `agm` 本身由 daemon 部署（內嵌在 binary 裡），備份檔與快取不算。
     listed = {t for _, t in entries}
+    # 沒有列進對照表的 `com.agm.*` job：那就是「沒有版控的排程」，正是 #487 要抓的那種。
+    agents = _launch_agents_dir()
+    if agents.is_dir():
+        for f in sorted(agents.glob("com.agm.*.plist")):
+            rel = f"{LAUNCHD_PREFIX}{f.name}"
+            if rel not in listed:
+                report["extra"].append({"target": rel})
     bin_dir = agm_dir / "bin"
     if bin_dir.is_dir():
         for f in sorted(bin_dir.iterdir()):

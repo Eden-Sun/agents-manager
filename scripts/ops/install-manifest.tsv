@@ -1,4 +1,4 @@
-# 已安裝的 ops 檔對照表（issue #418）：「repo 來源」與「安裝位置（相對 AGM 目錄，
+# 已安裝的 ops 檔對照表（issue #418、#487）：「repo 來源」與「安裝位置（相對 AGM 目錄，
 # ~/.config/agents-manager/supervisor/AGM）」兩欄，空白分隔。`agm ops-sync --check` 讀這一份比對；
 # 新增／移除要安裝的檔就改這裡，照 README.md install。bin/agm 由 daemon 部署，不在這裡。
 scripts/ops/browser-gc-kick.sh      bin/browser-gc-kick.sh
@@ -17,3 +17,16 @@ scripts/ops/ci-watch-task.md        ci-watch-task.md
 scripts/ops/claude-release-task.md  claude-release-task.md
 scripts/ops/daemon-update-task.md   daemon-update-task.md
 scripts/ops/release-triage-task.md  release-triage-task.md
+
+# launchd 排程（issue #487）：安裝位置以 `LaunchAgents/` 開頭的，解析成 `~/Library/LaunchAgents/`，
+# 而且**只比語意欄位**（Label／ProgramArguments／StartInterval／RunAtLoad）——launchd 會自己改寫
+# plist（鍵的順序、加欄位），整檔比對會一直噪音。`EnvironmentVariables` 刻意不比：裡面是這台機器的
+# PATH 與 bot id 之類的值，每台不同；repo 這份留著它是為了 install 之後 job 還跑得起來。
+scripts/ops/launchd/com.agm.browser-gc.plist      LaunchAgents/com.agm.browser-gc.plist
+scripts/ops/launchd/com.agm.ci-watch.plist        LaunchAgents/com.agm.ci-watch.plist
+scripts/ops/launchd/com.agm.claude-release.plist  LaunchAgents/com.agm.claude-release.plist
+scripts/ops/launchd/com.agm.daemon-update.plist   LaunchAgents/com.agm.daemon-update.plist
+scripts/ops/launchd/com.agm.dev-server.plist      LaunchAgents/com.agm.dev-server.plist
+scripts/ops/launchd/com.agm.herdr-update.plist    LaunchAgents/com.agm.herdr-update.plist
+scripts/ops/launchd/com.agm.outbox-gc.plist       LaunchAgents/com.agm.outbox-gc.plist
+scripts/ops/launchd/com.agm.release-triage.plist  LaunchAgents/com.agm.release-triage.plist
