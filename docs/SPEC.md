@@ -3265,7 +3265,8 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
   核准決定是條件寫入，但條件寫死在 SQL 裡（approve／deny 只從 `pending`、revoke 從 `approved`／`pending`），不是「先讀到什麼就寫什麼」：
   兩個角色同時決定只有一個成功，後到的回 409 `already_decided`（對方已經寫進去了）或 `decided_concurrently`（還是 pending，但這一句沒寫到）；交辦驗收本來就是條件寫入。
 - **角色身分**：只認 `X-AM-Bot-Id` + 該 bot 的 hook token（`X-AM-Bot-Token`），常數時間比對。`bin/agm` 在自己的 pane 裡（`AM_BOT_ID` 等於 runtime 的 `self_bot_id`）才帶；
-  驗證過的決定記成 `AGM:patrol`／`AGM:responder`，body 自稱的 `actor` 不算。`relay_from` 的 bot 申請沒帶 token 仍收，但標 `sender_verified=false`。
+  驗證過的決定記成 `AGM:patrol`／`AGM:responder`，body 自稱的 `actor` 不算——**沒驗過就記 `user`／`user(<自稱>)`，寫不出 `AGM` 開頭的身分**（issue #414；以前沒驗過時直接採信 body，預設還填 `AGM`）。
+  `relay_from` 的 bot 申請沒帶 token 仍收，但標 `sender_verified=false`。
   **帶了 `X-AM-Bot-Id` 卻證明不了（token 空／非 UTF-8／對不上）是 403 `bot_proof_mismatch`，不退回使用者權限**（issue #415）：使用者權限在 `inbox` ack 上比角色權限大（跨角色也結得掉），
   當成「沒帶」等於把驗證失敗變成提權。沒帶 `X-AM-Bot-Id` 才是使用者／UI。
 - **協調者故障不倒回巡檢**：分流只看它**建立過**沒有（`supervisor_roles.responder` 的 `bot_id`），不看它現在活不活著。沒額度（CLI 撞限，或共享 5h／7d critical）→ `status=waiting_quota`、`notify_next_at`＝重置時間與上限取早者，事件留 `pending`、不計重試次數；

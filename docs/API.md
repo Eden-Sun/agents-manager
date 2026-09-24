@@ -1670,6 +1670,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
   `expires_in_secs` 不參與比對：原本那筆的到期時間不會被重送改掉。不帶 `request_id` 就是舊行為，每次開一筆新的。
   CLI：`agm approval request --request-id <id>`（不確定送出去沒有時用同一個 id 重送，不要換新的）；`--supersedes <舊 id>` 帶 `supersedes`。
 - `POST /api/supervisor/approvals/{id}/decide {decision:"approve"|"deny"|"revoke",actor?,reason?,expires_in_secs?}`：同 decision 重送回 `idempotent:true`。
+  `decided_by` **不看 body**（issue #414）：驗過角色的是 `AGM:patrol`／`AGM:responder`，其餘一律 `user`，body 的 `actor` 只當未驗證的備註包成 `user(<自稱>)`（取前 64 字）。
   **第一個裁示定案**：`approve`／`deny` 只從 `pending` 條件寫入；`revoke` 從 `approved` 或 `pending`。寫不進去 → 409
   `{reason:"already_decided"|"decided_concurrently",status,decided_by,allowed_from}`，什麼都沒寫（後到的 deny 不會把 approved 改掉）。
   成功回 `decided_from` 與 `audit_note_id`；決定歷程 append-only 存在 `supervisor_notes`。帶角色 bot token 時 `decided_by` 記 `AGM:patrol`／`AGM:responder`。
@@ -1729,7 +1730,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 - `GET /api/supervisor/assignments/{id}` → 單筆加 `reviews:[{id,decision,from_status,to_status,actor,source,reason,evidence,followup_assignment_id,created_at}]`。
   `mission_id` 指到的任務被**使用者**暫停時 409 `mission_paused`（daemon 自己設的暫停——`max_rounds`、`no_fable_for_verifier`、`push_main_failed`／`pr_failed`、`clarify`——不擋，runbook 要 AGM 在那些狀態下繼續處理）。
 - `POST /api/supervisor/assignments/{id}/review {decision,actor?,source?,reason?,evidence?,followup_text?,followup_request_id?,followup_bot_id?,ownership?}` → 更新後的 assignment（`followup` 時另含 `followup`）。
-  帶角色 bot token 時 `actor` 以 token 為準（`AGM:<role>`）。
+  `actor` 同 `approvals/{id}/decide`：驗過角色才寫得出 `AGM:<role>`，其餘記 `user` 或 `user(<自稱>)`（issue #414）。
   **唯一的結案路徑**。`accept`→`completed`、`fail`→`failed`、`cancel`→`cancelled`、`block`→`blocked`、`followup`→原本 `superseded` 並以 `followup_request_id` 另開 `follow_up_of` 的新交辦（不改寫已送出的 text）。
   同 decision 重送冪等；followup 重送須同 request ID、文字與目標，不同 409 `followup_mismatch`。`followup_request_id` 已經是別件交辦的 → 409 `followup_request_id_taken`（`{client_request_id,assignment_id}`，換一個 id）。
   續作沿用父交辦的 `expects_review`（通知的續作仍是通知）、`review_role` 與任務連結。已結案 409 `already_closed`；還在跑只接受 `cancel`（409 `still_executing`，且 cancel 不中止回合）。
