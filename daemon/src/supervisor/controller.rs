@@ -1565,6 +1565,9 @@ async fn recover_unacked(app: &Arc<App>) {
     let cfg = app.cfg.get().await;
     let deadline = cfg.supervisor.notify_ack_deadline_secs as i64;
     let Ok(delivered) = store::delivered_inbox(&app.db).await else { return };
+    // 角色 → (這一輪沒跑完的回合 id, 這一輪有沒有回合真的跑完)。見下面 #427 那一段。
+    let mut notify_rounds: std::collections::HashMap<String, (std::collections::BTreeSet<String>, bool)> =
+        std::collections::HashMap::new();
     for e in delivered {
         let Some(turn_id) = e.notify_turn_id.clone() else { continue };
         let turn = sqlx::query_as::<_, crate::db::Turn>("SELECT * FROM turns WHERE id=?")
@@ -1592,6 +1595,22 @@ async fn recover_unacked(app: &Arc<App>) {
                 (age >= deadline).then_some("delivered but never acknowledged")
             }
         };
+        // #427 第 3 項：「送出去了、但回合沒跑完」連續 NOTIFY_STALL_LIMIT 個**不同的**回合就算那個角色
+        // 不可用。以前唯一的出口是補送到第 60～80 次才 gave_up，中間沒有任何人知道它收不到 digest。
+        // 這裡只收集，整輪掃完才一次算給那個角色——逐筆算的話，同一角色一輪裡有好幾筆事件時，
+        // 「一筆壞、一筆好」的結果會取決於迭代順序（i407 review 2026-09-24）。
+        if let Some(role) = e.role.clone() {
+            let round = notify_rounds.entry(role).or_default();
+            match turn.as_ref().map(|t| t.status.as_str()) {
+                Some("failed") => {
+                    round.0.insert(turn_id.clone());
+                }
+                // 跑完了就是通的——有沒有被 ack 是另一回事（那是 `why` 在管的）。
+                Some(s) if s != "in_flight" && s != "queued" => round.1 = true,
+                // 還在跑、或回合整個不見了：都不算證據。
+                _ => {}
+            }
+        }
         let Some(why) = why else { continue };
         // 補送不是無限的（使用者 2026-09-17 裁示）：送了五次沒人 ack、或開著超過六小時又已經補送過，
         // 就停手並喊人。以前這裡沒有上限，協調者漏 ack 一則就每 30 分鐘被叫醒一次，而沒有任何人知道。
@@ -1603,6 +1622,9 @@ async fn recover_unacked(app: &Arc<App>) {
         if store::requeue_inbox(&app.db, &e.id, why).await.unwrap_or(false) {
             tracing::warn!(event = %e.id, attempts = e.notify_attempts, why, "re-queueing an unanswered notification");
         }
+    }
+    for (role, (failed, any_completed)) in notify_rounds {
+        super::role_faults::note_notify_round(app, &role, failed, any_completed).await;
     }
 }
 
