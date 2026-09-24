@@ -716,8 +716,13 @@ pub struct RemoteObservationIn {
 /// harden into a permanent "connected" that nobody rechecked.
 pub async fn post_remote_observation(
     State(app): State<Arc<App>>,
+    headers: HeaderMap,
     Json(b): Json<RemoteObservationIn>,
 ) -> Result<Json<Value>, LcError> {
+    // 身分照 #414 的形狀：驗過的角色才寫得出 `AGM:<role>`，其餘一律 `user` / `user(<自稱>)`。
+    // 以前 `actor` 整個由 body 決定，而 doc 卻寫「refuses an anonymous caller」——擋的只有空字串
+    // （issue #463）。
+    let verified = super::bot_requests::actor_role(&app, &headers).await?;
     if !super::remote::STATES.contains(&b.status.as_str()) {
         return Err(LcError::Bad(format!("status must be one of {:?}", super::remote::STATES)));
     }
@@ -730,10 +735,14 @@ pub async fn post_remote_observation(
             json!({"reason": "source_cannot_verify", "source": b.source}),
         ));
     }
-    let actor = b.actor.as_deref().map(str::trim).filter(|s| !s.is_empty());
-    if matches!(b.status.as_str(), "verified" | "unavailable") && actor.is_none() {
+    let claim = b.actor.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    // 驗過的角色不必再自稱：它的身分本身就是署名。沒驗過的照舊要填一個名字，
+    // 只是那個名字會被包成 `user(<自稱>)`，讀的人一眼看得出沒驗過。
+    if matches!(b.status.as_str(), "verified" | "unavailable") && claim.is_none() && verified.is_none() {
         return Err(LcError::Bad("an observation that claims verified or unavailable needs an actor".into()));
     }
+    let recorded = decision_actor(verified, claim);
+    let actor = Some(recorded.as_str());
     if matches!(b.status.as_str(), "verified" | "unavailable")
         && b.evidence.as_deref().is_none_or(|v| v.trim().is_empty()) {
         return Err(LcError::Bad("verified or unavailable needs observation evidence".into()));
@@ -1612,6 +1621,47 @@ mod approval_decision_tests {
         // 5) 同一段文字再送一次（修 projection）：不是改動，不該再叫醒巡檢一次。
         put(&app, HeaderMap::new(), "協調者改的").await.unwrap();
         assert_eq!(inbox(&app).await.len(), 2, "重送同一段文字不該再推一則");
+
+        app.db.close().await;
+        std::fs::remove_dir_all(&app.data_dir).unwrap();
+    }
+
+    /// issue #463：`post_remote_observation` 的 `actor` 以前整個由 body 決定，而它的 doc 卻寫
+    /// 「refuses an anonymous caller」——擋的只有空字串。照 #414 的形狀：驗過才寫得出 `AGM:<role>`。
+    #[tokio::test]
+    async fn a_remote_observation_records_who_it_really_came_from() {
+        let app = app().await;
+        let obs = |app: &Arc<App>, h: HeaderMap, actor: Option<&str>| {
+            let (app, actor) = (app.clone(), actor.map(str::to_string));
+            async move {
+                let mut body = json!({"status": "requested", "source": "manual"});
+                if let Some(a) = actor {
+                    body["actor"] = json!(a);
+                }
+                post_remote_observation(State(app), h, Json(serde_json::from_value(body).unwrap())).await
+            }
+        };
+        let recorded = |app: &Arc<App>| {
+            let app = app.clone();
+            async move {
+                sqlx::query_scalar::<_, Option<String>>("SELECT remote_actor FROM supervisors WHERE id=?")
+                    .bind(store::SUPERVISOR_ID)
+                    .fetch_one(&app.db)
+                    .await
+                    .unwrap()
+            }
+        };
+
+        // 沒驗過卻自稱是總管：包成 user(...)，變不成 AGM 開頭。
+        obs(&app, HeaderMap::new(), Some("AGM:responder")).await.unwrap();
+        let who = recorded(&app).await.unwrap_or_default();
+        assert_eq!(who, "user(AGM:responder)");
+        assert!(!who.starts_with(store::SUPERVISOR_ID), "未驗證的呼叫端寫不出 AGM 開頭的身分，卻拿到 {who:?}");
+
+        // 驗過的角色：以 token 為準，body 的自稱不影響。
+        let agm = agm_role_headers(&app).await;
+        obs(&app, agm, Some("我是別人")).await.unwrap();
+        assert_eq!(recorded(&app).await.unwrap_or_default(), format!("{}:patrol", store::SUPERVISOR_ID));
 
         app.db.close().await;
         std::fs::remove_dir_all(&app.data_dir).unwrap();

@@ -1691,6 +1691,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 `GET /api/supervisor/remote` → `{status,stored_status,revoked,source,observed_at,observed_by,session_id,current_session_id,url,url_is_evidence,capability,ttl_secs}`。
 `status` 只有 `requested` | `verified` | `unavailable` | `unknown`（SPEC §18.12）；`capability.status` 目前 `unsupported`。觀測超過 `ttl_secs`（900）或 AGM 換 session 退回 `unknown`（`revoked` 說明），`url` 不回（`url_is_evidence:false`）。
 `POST /api/supervisor/remote {status,source,actor?,evidence?,url?}`：`source` 只收 `manual`（`provider` 保留、`argv` 拒絕）；`verified`／`unavailable` 需要 actor、非空 evidence 與當前 AGM run，15 分鐘後失效。
+  記下來的 `observed_by` 照 #414 的形狀（issue #463）：驗過的角色寫 `AGM:<role>`，其餘寫 `user(<自稱>)`／`user`——body 的 `actor` 只是未驗證的自稱。驗過的角色不必再帶 `actor`。
 用一個**不能作證**的來源報 `verified` → 409 `{"reason":"source_cannot_verify","source":"<送來的 source>"}`：哪些來源作得了證是 `remote::Source::can_verify` 說了算，不是呼叫端說了算。
 
 ### 人設
@@ -1705,7 +1706,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
   「沒帶身分＝使用者」這條界線本身留在 #447 等 per-bot token。
   `expected_version` 對不上且正文不同 409 `version_mismatch`；副本同步失敗 409 `persona_sync_incomplete`（帶 `stored:true` 與 `version`，重送相同正文可修復且不加版本）。
 - `POST /api/supervisor/persona/adopt-embedded {actor?,reason?}` → `{changed,version,hash}`：內嵌版取代持久版的唯一路徑。
-  身分與留痕同 `PUT`（issue #462）。
+  身分與留痕同 `PUT`（issue #462／#463）；body 的 `actor` **不再採信**，log 與通知記的是驗過的身分（`AGM:<role>`）或 `user`。
   持久版的 hash 已經等於內嵌版時回 **200** `{"changed":false,"reason":"already_identical","version"}`（**不是錯誤**：副本照樣重新同步一次，版本不動）。
 - `GET /api/supervisor/build-inputs` → `{paths,embedded:[{path,symbol}],note}`：會編進 binary 的路徑（含 `docs/goals/agm-supervisor-persona.md`、`docs/goals/agm-responder-persona.md`、`scripts/agm.py`）。
 
