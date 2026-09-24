@@ -9,8 +9,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 fn default_listen() -> String {
     "127.0.0.1:7788".to_string()
 }
+/// `[server] herdr_session` 與每台主機的 `herdr_session` 的預設值。
+pub const DEFAULT_HERDR_SESSION: &str = "agents-manager";
+
 fn default_session() -> String {
-    "agents-manager".to_string()
+    DEFAULT_HERDR_SESSION.to_string()
 }
 fn default_true() -> bool {
     true

@@ -773,6 +773,13 @@ impl HostManager {
         }
 
         for h in hosts {
+            // 第二層保險（issue #506）：`projection::validate` 已經擋掉 `name = "local"`，但這支
+            // 也被測試與 API 直接呼叫，而「把本機那顆 HostConn 換成 remote」是個沒有回頭路的形狀
+            // ——socket 指到沒人在聽的 `<instance>/local.sock`，`is_local()` 翻面之後全部走 ssh。
+            if h.name == LOCAL_HOST {
+                tracing::warn!(host = %h.name, "[[hosts]] 不能叫 `local`（那是本機）；忽略這一列");
+                continue;
+            }
             let cur = self.get(&h.name).await;
             let changed = match &cur {
                 None => true,
@@ -1084,6 +1091,26 @@ mod tests {
             herdr_session: "agents-manager".into(),
             remote_path: String::new(),
         }
+    }
+
+    /// issue #506：`apply_config` 的套用迴圈以前沒像上面的移除迴圈那樣跳過 local，
+    /// 一列 `name = "local"` 就會把本機那顆 `HostConn` 換成 `HostConn::remote`——
+    /// client socket 變成沒人在聽的 `<instance>/local.sock`、`is_local()` 翻成 false，
+    /// 之後所有「本機走直接路徑、遠端走 ssh」的分支整批翻面。
+    #[tokio::test]
+    async fn a_hosts_entry_named_local_never_replaces_the_local_connection() {
+        let env = crate::testing::env().await;
+        let before = env.app.hosts.get(LOCAL_HOST).await.expect("本機那顆一開始就在");
+        assert!(before.is_local());
+
+        let mut bad = cfg();
+        bad.name = LOCAL_HOST.into();
+        let changed = env.app.hosts.apply_config(&env.app, &[bad]).await;
+
+        assert!(!changed.contains(LOCAL_HOST), "不該把 local 當成「設定變了」的主機");
+        let after = env.app.hosts.get(LOCAL_HOST).await.expect("本機那顆還要在");
+        assert!(after.is_local(), "local 不可以變成 ssh 遠端");
+        assert!(Arc::ptr_eq(&before, &after), "連那顆 HostConn 都不該被換掉（supervisor、master 都還在原位）");
     }
 
     #[test]

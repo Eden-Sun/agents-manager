@@ -1971,7 +1971,12 @@ async fn create_host(State(app): State<Arc<App>>, Json(b): Json<NewHost>) -> Res
         ssh: b.ssh.trim().to_string(),
         ssh_port: b.ssh_port.unwrap_or(22),
         ssh_opts: b.ssh_opts.unwrap_or_default(),
-        herdr_session: b.herdr_session.filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "agents-manager".into()),
+        // trim 跟 `ssh` 同一條規矩：存進 config 的字就是之後直接交給 herdr 的字。
+        herdr_session: b
+            .herdr_session
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| crate::config::DEFAULT_HERDR_SESSION.to_string()),
         remote_path: b.remote_path.unwrap_or_default(),
     };
     let c2 = cfg.clone();

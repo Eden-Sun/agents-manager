@@ -3,7 +3,7 @@
 //! config.toml is the authority for the desired Project / Bot set. Rows removed from
 //! the TOML are soft-deleted so their conversation history survives.
 
-use crate::config::{canonical_path, valid_bot_name, valid_id, ConfigStore, ID_RE};
+use crate::config::{canonical_path, valid_bot_name, valid_host_name, valid_id, ConfigStore, ID_RE, LOCAL_HOST};
 use crate::db;
 use anyhow::{bail, Result};
 use rand::Rng;
@@ -214,6 +214,32 @@ pub fn validate(cfg: &crate::config::ConfigFile) -> Result<()> {
 pub struct ConfigInvalid(pub String);
 
 fn check(cfg: &crate::config::ConfigFile) -> Result<()> {
+    // `[[hosts]]` 以前完全沒驗（issue #506）：`create_host` 擋的四件事只擋得住 API，手改 TOML
+    // 這條全部放行。最要命的是 `name = "local"`——`hosts::apply_config` 會照著它把本機那顆
+    // `HostConn` 換成 `HostConn::remote`，socket 指到一個沒人在聽的 `<instance>/local.sock`、
+    // `is_local()` 翻成 false，本機的一切開始走 ssh，而 log 只留一行 `host configured`。
+    let mut seen_hosts: HashSet<&str> = HashSet::new();
+    for h in &cfg.hosts {
+        if h.name == LOCAL_HOST {
+            bail!("`{LOCAL_HOST}` is reserved for this machine; remove the [[hosts]] entry named `{LOCAL_HOST}`");
+        }
+        if !valid_host_name(&h.name) {
+            bail!("invalid host name `{}` (must match {})", h.name, crate::config::SLUG_NAME_RE);
+        }
+        // 一律**先 trim 再驗空**（i92b review）。前後空白本身不擋開機——`project_inner` 會把它
+        // trim 掉寫回去（跟補 id／canonical path 同一條路），一個手滑的空白不該讓 daemon 起不來。
+        // `herdr_session` 也要驗：serde 的 `default` 只在**缺 key** 時生效，手寫 `herdr_session = ""`
+        // 照樣進得來，之後就是 `herdr --session ''` 接到一個空的 session 名。
+        if h.ssh.trim().is_empty() {
+            bail!("host `{}` has an empty ssh target", h.name);
+        }
+        if h.herdr_session.trim().is_empty() {
+            bail!("host `{}` has an empty herdr_session", h.name);
+        }
+        if !seen_hosts.insert(h.name.as_str()) {
+            bail!("duplicate [[hosts]] entry named `{}`", h.name);
+        }
+    }
     for i in &cfg.identities {
         if !crate::config::valid_identity_name(&i.name) {
             bail!("invalid identity name `{}` (must match {})", i.name, crate::config::SLUG_NAME_RE);
@@ -344,6 +370,25 @@ async fn project_inner(
             at,
             |cfg| {
                 let mut dirty = false;
+                // host 的 ssh／herdr_session 跟著 id／canonical path 一起正規化寫回（i92b review）：
+                // `create_host` 會 `ssh.trim()`，手改 TOML 這條沒人 trim，`ssh " me@host "` 會原樣
+                // 帶到 ssh 指令上變成一個查不出原因的連不上。空的 `herdr_session` 補回預設，跟「整個
+                // key 省略」同一個結果。
+                for h in cfg.hosts.iter_mut() {
+                    for (field, default) in
+                        [(&mut h.ssh, None), (&mut h.herdr_session, Some(crate::config::DEFAULT_HERDR_SESSION))]
+                    {
+                        let trimmed = field.trim();
+                        let want = match default {
+                            Some(d) if trimmed.is_empty() => d.to_string(),
+                            _ => trimmed.to_string(),
+                        };
+                        if *field != want {
+                            *field = want;
+                            dirty = true;
+                        }
+                    }
+                }
                 for p in cfg.projects.iter_mut() {
                     if p.id.is_none() {
                         p.id = Some(db::ulid());
@@ -745,6 +790,90 @@ mod tests {
         assert_eq!(after_bots, before_bots, "DB 不該被動到");
         store.update(|cfg| { cfg.projects[0].label = "renamed".into(); Ok(()) }).await.expect("合法的改動要過");
         assert!(std::fs::read_to_string(&path).unwrap().contains("renamed"), "合法的改動要真的落盤");
+
+        pool.close().await;
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// issue #506：`[[hosts]]` 以前一條都沒驗。`create_host` 擋的四件事只擋得住 API，
+    /// 手改 TOML 全部放行，而 `name = "local"` 會讓 `hosts::apply_config` 把本機那顆
+    /// `HostConn` 換成 `HostConn::remote`（socket 指到沒人在聽的 `<instance>/local.sock`、
+    /// `is_local()` 翻面），開機時就發生，log 只留一行 `host configured`。
+    #[test]
+    fn hand_edited_hosts_are_validated_like_the_api_validates_them() {
+        use crate::config::{ConfigFile, HostCfg};
+        let host = |name: &str, ssh: &str| HostCfg {
+            name: name.into(),
+            ssh: ssh.into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "agents-manager".into(),
+            remote_path: String::new(),
+        };
+        let with = |hosts: Vec<HostCfg>| ConfigFile { hosts, ..Default::default() };
+        // serde 的 `default` 只在缺 key 時生效：手寫一個空字串照樣進得來。
+        let blank_session = |s: &str| HostCfg { herdr_session: s.into(), ..host("m4p", "me@10.0.0.2") };
+
+        validate(&with(vec![host("m4p", "me@10.0.0.2")])).expect("一台正常的遠端要過");
+        // 前後空白交給 `project_inner` trim 掉寫回，不在這裡擋開機。
+        validate(&with(vec![host("m4p", " me@10.0.0.2 ")])).expect("空白是正規化的事，不是拒絕的事");
+
+        for (what, cfg, needle) in [
+            ("保留字 local", with(vec![host("local", "me@10.0.0.2")]), "reserved"),
+            ("名字不合 slug", with(vec![host("M4P", "me@10.0.0.2")]), "invalid host name"),
+            ("名字帶斜線（會進檔名與 launchd label）", with(vec![host("a/b", "me@10.0.0.2")]), "invalid host name"),
+            ("空的 ssh", with(vec![host("m4p", "   ")]), "empty ssh target"),
+            ("同名兩列", with(vec![host("m4p", "a@1"), host("m4p", "b@2")]), "duplicate"),
+            ("空的 herdr_session", with(vec![blank_session("")]), "empty herdr_session"),
+            ("herdr_session 只有空白", with(vec![blank_session("  ")]), "empty herdr_session"),
+        ] {
+            let err = validate(&cfg).expect_err(what).to_string();
+            assert!(err.contains(needle), "{what}: {err}");
+            assert!(err.contains("config.toml 未變更"), "{what}: 要是 ConfigInvalid（不是上游壞掉）：{err}");
+        }
+    }
+
+    /// 同一條規則在**開機**那一次投影也要生效：手改成 `name = "local"` 的設定檔不該安靜地跑起來。
+    #[tokio::test]
+    async fn a_host_named_local_refuses_to_project_instead_of_hijacking_the_local_host() {
+        let dir = std::env::temp_dir().join(format!("am-hosts-local-{}", db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let text = "[server]\nlisten = '127.0.0.1:7788'\n\n[[hosts]]\nname = 'local'\nssh = 'me@10.0.0.2'\n";
+        std::fs::write(&path, text).unwrap();
+        let store = ConfigStore::load(path.clone()).await.unwrap();
+        let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
+
+        let err = project_config_at_startup(&store, &pool, false).await.unwrap_err().to_string();
+        assert!(err.contains("reserved"), "{err}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "拒絕時檔案一個字都不能動");
+
+        pool.close().await;
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// i92b review：前後空白與空的 `herdr_session` 不擋開機，但也不能原樣留著——
+    /// `ssh " me@host "` 會原樣帶到 ssh 指令上。跟補 id／canonical path 同一條路，正規化後寫回。
+    #[tokio::test]
+    async fn host_ssh_and_session_are_trimmed_back_into_the_file() {
+        let dir = std::env::temp_dir().join(format!("am-hosts-trim-{}", db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            "[server]\nlisten = '127.0.0.1:7788'\n\n[[hosts]]\nname = 'm4p'\nssh = '  me@10.0.0.2  '\nherdr_session = '  '\n",
+        )
+        .unwrap();
+        let store = ConfigStore::load(path.clone()).await.unwrap();
+        let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
+
+        project_config_at_startup(&store, &pool, false).await.expect("空白不該擋開機");
+
+        let cfg = store.get().await;
+        assert_eq!(cfg.hosts[0].ssh, "me@10.0.0.2");
+        assert_eq!(cfg.hosts[0].herdr_session, crate::config::DEFAULT_HERDR_SESSION, "空的 session 補回預設");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("ssh = \"me@10.0.0.2\""), "要真的寫回檔案：{text}");
 
         pool.close().await;
         std::fs::remove_dir_all(&dir).unwrap();
