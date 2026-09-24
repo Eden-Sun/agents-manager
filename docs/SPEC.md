@@ -2211,7 +2211,9 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
 
 ### 7.1 存取控制
 - bind：開發版 bind `0.0.0.0`；打包成 macOS app 的執行檔（路徑在 `…app/Contents/MacOS/`）bind `127.0.0.1`；`AM_DEV_LAN` 可雙向覆寫（`main.rs::dev_lan_default`）。
-- 啟動時產生 UI token 寫 `~/.config/agents-manager/ui-token`；`GET /api/session`（**TCP 對端**須為 loopback——不看 `Host`，那是呼叫端自己填的）回 token；
+- 啟動時產生 UI token 寫 `~/.config/agents-manager/ui-token`，**權限一律 0600**（issue #512）：新檔走 `write_private`
+  （先建 0600 的暫存檔再 rename，明文 token 不會先躺在一個 0644 的 inode 上），開機讀到既有檔時發現權限比 0600 寬就修回來、
+  修不動記 WARN 但不擋開機。`GET /api/session`（**TCP 對端**須為 loopback——不看 `Host`，那是呼叫端自己填的）回 token；
   其餘 `/api/*` 要 header `X-AM-Token`，`/ws` 用 `?token=`；`Origin` 存在時主機須為本機。
   開發版（`App::allow_lan`，跟 bind `0.0.0.0` 同一個判斷）對端與 `Origin` 都直接放行，同網段誰都拿得到 token：使用者裁示保留（`e7392dd` 撤掉配對碼時記明）。
 - `/hook/*`、`/relay/announce`、`/relay/pane` 驗 **per-bot** `X-AM-Bot-Token`。
