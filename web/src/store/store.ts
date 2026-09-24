@@ -749,16 +749,19 @@ const orderSaveGen = new Map<string, number>()
  */
 const orderSaveTail = new Map<string, Promise<void>>()
 /** 一個 order POST 最多等多久；transport 本身沒有逾時，卡住的一個會讓同範圍後面的存檔永遠排隊（#391）。 */
-let orderSaveTimeoutMs = 15_000
-export function setOrderSaveTimeoutForTest(ms: number) {
-  orderSaveTimeoutMs = ms
+const ORDER_SAVE_TIMEOUT_MS = 15_000
+const orderSaveTimeout = () => AbortSignal.timeout(ORDER_SAVE_TIMEOUT_MS)
+/** 每個 POST 的逾時 signal 從這裡拿。測試換成自己手動 abort 的 signal，不靠真的計時——負載高時固定毫秒的等待會假紅（#426）。 */
+let orderSaveSignal: () => AbortSignal = orderSaveTimeout
+export function setOrderSaveSignalForTest(make: (() => AbortSignal) | null) {
+  orderSaveSignal = make ?? orderSaveTimeout
 }
 function saveOrderTracked(key: string, input: Parameters<typeof api.saveOrder>[0], onFail: (e?: unknown) => void) {
   orderSavesInFlight += 1
   const gen = (orderSaveGen.get(key) ?? 0) + 1
   orderSaveGen.set(key, gen)
   // 計時從真的送出才開始（排隊等前一個的時間不算）；逾時會中止 fetch、照一般失敗處理，下一個才接著送。
-  const send = () => api.saveOrder(input, AbortSignal.timeout(orderSaveTimeoutMs))
+  const send = () => api.saveOrder(input, orderSaveSignal())
   const done = (orderSaveTail.get(key) ?? Promise.resolve())
     .then(send, send)
     .catch((e) => {
