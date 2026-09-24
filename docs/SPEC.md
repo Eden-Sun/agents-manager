@@ -2555,6 +2555,9 @@ AGM 的運維職責以本節為準，不靠任何 bot 的記憶。persona 是同
 - **只動 `bin/agm`**：`CLAUDE.md`、`persona.md`、`runtime.json`、身分／model／effort 一律不碰（那些只在 `agm supervisor-setup`／`responder setup` 寫；開機不走 setup）。
 - 寫不進去不擋開機：記 warn，推一則 `agm_cli_stale` inbox（路由給巡檢並喚醒），payload 帶角色、路徑、內嵌版雜湊與錯誤。
 - **`scripts/ops/*.sh`（`daemon-update-kick.sh` 等）與 `*-task.md` 沒有內嵌，不會自動更新**——改了就照 `scripts/ops/README.md` 手動 install，並留備份。
+  要裝哪些、裝到哪裡只寫在 `scripts/ops/install-manifest.tsv`；`agm ops-sync --check`（issue #418）唯讀比對安裝端與 `origin/main`，
+  分開報 `drift`（安裝檔不是 repo 任何一版）、`behind`（落後，附 commit）、`missing`、`extra`（`bin/` 裡沒有版控的檔；`agm` 與 `*.bak*` 不算），
+  有落差 exit 1，加 `--alert` 推 `ops_alert`（`ops-sync`／`installed_out_of_sync`）。它不安裝任何東西，install 照舊由 AGM 核准後手動做。
 
 ### 18.2b herdr 升級流程：偵測與交辦（issue #66）
 

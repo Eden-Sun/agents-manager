@@ -1202,5 +1202,89 @@ class QuotaCommandTest(CliCase):
         self.assertFalse([r for r in FakeDaemon.seen if r["path"] != "/api/session"], "用法錯誤不該打任何 API")
 
 
+
+class OpsSyncTest(CliCase):
+    """issue #418：已安裝的 ops 腳本跟 repo 比對。真的 git repo，安裝目錄就是 AGM_RUNTIME_DIR。"""
+
+    def git(self, *args: str) -> str:
+        import subprocess
+        return subprocess.run(["git", "-C", str(self.repo), *args], check=True, capture_output=True, text=True).stdout.strip()
+
+    def put(self, rel: str, text: str) -> None:
+        p = self.repo / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text, encoding="utf-8")
+
+    def install(self, rel: str, text: str) -> None:
+        p = Path(self.dir.name) / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text, encoding="utf-8")
+
+    def setUp(self):
+        super().setUp()
+        self.repo_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.repo_dir.cleanup)
+        self.repo = Path(self.repo_dir.name)
+        self.git("init", "-q")
+        self.git("config", "user.email", "t@t")
+        self.git("config", "user.name", "t")
+        self.put("scripts/ops/install-manifest.tsv",
+                 "# comment\nscripts/ops/a.sh bin/a.sh\nscripts/ops/b.sh bin/b.sh\nscripts/ops/c.sh bin/c.sh\nscripts/ops/t.md t.md\n")
+        for n in "abc":
+            self.put(f"scripts/ops/{n}.sh", f"{n} v1\n")
+        self.put("scripts/ops/t.md", "task\n")
+        self.git("add", "-A")
+        self.git("commit", "-qm", "v1")
+        self.put("scripts/ops/a.sh", "a v2\n")
+        self.git("commit", "-qam", "a 改第二版")
+        self.put("scripts/ops/a.sh", "a v3\n")
+        self.git("commit", "-qam", "a 改第三版")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+
+    def test_each_kind_of_gap_is_reported_separately_and_exits_nonzero(self):
+        self.install("bin/a.sh", "a v1\n")            # 落後兩個 commit
+        self.install("bin/b.sh", "b 有人直接改了\n")    # repo 任何一版都不是
+        self.install("bin/c.sh", "c v1\n")            # 最新
+        self.install("bin/agm", "cli")                 # daemon 部署的，不算多出來
+        self.install("bin/a.sh.bak-20260920", "old")   # 備份不算
+        self.install("bin/dev-server-kick.ts", "x")    # 沒有版控
+        code, out, err = self.run_cli("ops-sync", "--check", "--repo", str(self.repo))
+        self.assertEqual(code, 1, err)
+        r = json.loads(out)
+        self.assertFalse(r["in_sync"])
+        self.assertEqual([x["target"] for x in r["ok"]], ["bin/c.sh"])
+        self.assertEqual([x["target"] for x in r["drift"]], ["bin/b.sh"])
+        self.assertEqual([x["target"] for x in r["missing"]], ["t.md"])
+        self.assertEqual([x["target"] for x in r["extra"]], ["bin/dev-server-kick.ts"])
+        [behind] = r["behind"]
+        self.assertEqual((behind["target"], behind["behind"]), ("bin/a.sh", 2))
+        self.assertEqual([c.split(" ", 1)[1] for c in behind["commits"]], ["a 改第三版", "a 改第二版"])
+        self.assertFalse([x for x in FakeDaemon.seen if x["path"] != "/api/session"], "沒帶 --alert 不打 API")
+        # 只讀：安裝檔一個字都沒動。
+        self.assertEqual((Path(self.dir.name) / "bin/b.sh").read_text(encoding="utf-8"), "b 有人直接改了\n")
+
+    def test_in_sync_exits_zero_and_alert_pushes_one_ops_alert(self):
+        for n in "bc":
+            self.install(f"bin/{n}.sh", f"{n} v1\n")
+        self.install("bin/a.sh", "a v3\n")
+        self.install("t.md", "task\n")
+        r = self.ok("ops-sync", "--check", "--repo", str(self.repo), "--alert")
+        self.assertTrue(r["in_sync"])
+        self.assertFalse([x for x in FakeDaemon.seen if x["path"] != "/api/session"], "一致就不喊人")
+        FakeDaemon.routes["POST /api/supervisor/ops-alerts"] = (200, {"queued": True})
+        self.install("bin/a.sh", "a v2\n")
+        code, out, _ = self.run_cli("ops-sync", "--check", "--repo", str(self.repo), "--alert")
+        self.assertEqual(code, 1)
+        [sent] = [x for x in FakeDaemon.seen if x["path"] == "/api/supervisor/ops-alerts"]
+        self.assertEqual((sent["body"]["source"], sent["body"]["reason"]), ("ops-sync", "installed_out_of_sync"))
+        self.assertIn("bin/a.sh", sent["body"]["detail"])
+
+    def test_the_real_manifest_names_existing_sources(self):
+        repo = Path(__file__).resolve().parent.parent
+        for line in (repo / agm.OPS_MANIFEST).read_text(encoding="utf-8").splitlines():
+            if line.strip() and not line.startswith("#"):
+                source, _target = line.split()
+                self.assertTrue((repo / source).is_file(), f"對照表指到不存在的來源：{source}")
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
