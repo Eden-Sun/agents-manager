@@ -52,6 +52,7 @@ import { MISSION_USER_PAUSE } from '../lib/missionView'
 
 import type { QueuedSend, RestoreResult } from './queuedSend'
 import { laterMark, serverUnread } from './sharedUnread'
+import { viewingBot, viewingGroup } from './viewing'
 import { confirmGroupTurn, dropLegacyGroupCounts, noteGroupPrompt, noteGroupPrompts } from './groupUnread'
 import {
   botKey,
@@ -1278,11 +1279,12 @@ export const useStore = create<StoreState>((set, get) => ({
   markCurrentRead: () => {
     if (!windowActive()) return
     const s = get()
+    // shell 面板蓋住的是整個主畫面（`App.tsx`）：bot 對話與群組時間軸都不算「正在看」（issue #509）。
+    if (s.shellView) return
     if (s.selectedProjectId) {
       get().markGroupRead(s.selectedProjectId)
       return
     }
-    if (s.shellView) return
     if (s.selectedBotId) get().markBotRead(s.selectedBotId)
   },
 
@@ -2548,10 +2550,6 @@ const resyncTrigger = (() => {
   }
 })()
 
-function viewingBot(s: StoreState, botId: string): boolean {
-  return s.selectedBotId === botId && !s.selectedProjectId && !s.shellView
-}
-
 /** 回合完成（訊息與 `turn_updated` 都會觸發，`takeTurnCompletion` 只算一次）；沒在看就記未讀。 */
 function noteTurnDone(set: SetFn, get: GetFn, botId: string, turnId: string) {
   if (viewingBot(get(), botId) && windowActive()) {
@@ -2565,7 +2563,7 @@ function noteTurnDone(set: SetFn, get: GetFn, botId: string, turnId: string) {
 
 /** 同上，記在專案群組（§13.6）。 */
 function noteGroupTurnDone(set: SetFn, get: GetFn, projectId: string, turnId: string) {
-  if (get().selectedProjectId === projectId && windowActive()) {
+  if (viewingGroup(get(), projectId) && windowActive()) {
     get().markGroupRead(projectId)
     return
   }
