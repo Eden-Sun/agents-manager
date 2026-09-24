@@ -5,6 +5,8 @@ import { usePendingQuestion } from '../hooks/usePendingQuestion'
 import { questionVisibleOnScreen } from '../lib/pendingQuestion'
 import { PendingQuestionCard } from './PendingQuestionCard'
 import { herdrKeyFromEvent, KEYPAD, usePaneKeys } from '../hooks/usePaneKeys'
+import { blockedKeyAction, passthroughLive } from '../lib/blockedKeys'
+import { isDangerousRmScreen } from '../lib/dangerousRm'
 import { useTerminalSnapshot } from '../hooks/useTerminalSnapshot'
 import { useDialogFocus } from '../hooks/useDialogFocus'
 import { useStore } from '../store/store'
@@ -19,14 +21,21 @@ const READABLE_COLUMNS = 60
 
 /**
  * agent 進 `blocked` 時彈出整個 herdr 畫面：`BlockedPanel` 的 300px 截角看不到完整問題與選項。
- * 鍵盤直通會把 Esc 也送給 agent，所以關閉只走 ✕／點視窗外（頁尾有寫）。
+ *
+ * **鍵盤直通預設關**（issue #545）：這個視窗是 `blocked` 後自己彈出來的，使用者沒有要求它；
+ * 直通開著時打字會一個字一個字送進 TUI，在 `1. Yes / 2. No` 這種框上按到一個 `1` 就等於核准了。
+ * 打開之後 Esc 也會送給 agent，所以那時關閉只走 ✕／點視窗外（開關旁邊有寫）。
+ * #423 的防誤刪框一律鎖死直通：那一下只有使用者本人能按，而且要按在按鈕上。
  */
 export function BlockedModal({ botId, onClose }: { botId: string; onClose: () => void }) {
   const bot = useStore((s) => s.bots.find((b) => b.id === botId) ?? null)
-  const [passthrough, setPassthrough] = useState(true)
+  const [passthrough, setPassthrough] = useState(false)
   const { snap, err, refresh } = useTerminalSnapshot(botId, { source: 'visible', lines: 200 })
   const press = usePaneKeys(botId, refresh)
   const menu = useChoiceMenu(botId, snap?.text)
+  /** #423 的防誤刪框：直通鎖死、開關不給開（SPEC §3.2「只有使用者本人能核准」）。 */
+  const dangerous = isDangerousRmScreen(snap?.text)
+  const keysLive = passthroughLive(passthrough, dangerous)
   // 畫面上看不到題目（pane 太矮、claude 把選單裁掉）時，從 transcript 補題目（2026-09-23 使用者）。
   const pending = usePendingQuestion(botId, false)
   const showPending = pending.length > 0 && !questionVisibleOnScreen(pending, menu?.question)
@@ -38,8 +47,11 @@ export function BlockedModal({ botId, onClose }: { botId: string; onClose: () =>
 
   // handler 每次 render 都是新的；透過 ref 讀，listener 才不必重新註冊（同 Modal.tsx）。
   const onCloseRef = useRef(onClose)
+  // 每秒一張新快照：`dangerous` 走 ref，listener 才不必跟著重掛（同 `onClose`）。
+  const dangerousRef = useRef(dangerous)
   useEffect(() => {
     onCloseRef.current = onClose
+    dangerousRef.current = dangerous
   })
 
   useDialogFocus(true, rootRef, { initialFocus: () => termRef.current })
@@ -47,20 +59,19 @@ export function BlockedModal({ botId, onClose }: { botId: string; onClose: () =>
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null
-      const tag = target?.tagName.toLowerCase()
-      // 模態期間只有這個視窗裡的輸入控制項能留住鍵盤，否則字會跑進背後的聊天輸入框。
-      const inside = Boolean(rootRef.current?.contains(target))
-      const editing = inside && (tag === 'input' || tag === 'textarea' || tag === 'select')
-      if (editing) return
-      if (e.key === 'Tab') return
-      // 焦點在視窗內按鈕上時 Enter／Space 要啟動那顆按鈕，而不是送進 pane（否則會選到 TUI 游標那項）。
-      if (inside && (tag === 'button' || tag === 'a') && (e.key === 'Enter' || e.key === ' ')) return
-
-      if (!passthrough) {
-        if (e.key === 'Escape' && !e.defaultPrevented) {
-          e.preventDefault()
-          onCloseRef.current()
-        }
+      const action = blockedKeyAction({
+        passthrough,
+        dangerous: dangerousRef.current,
+        // 模態期間只有這個視窗裡的輸入控制項能留住鍵盤，否則字會跑進背後的聊天輸入框。
+        inside: Boolean(rootRef.current?.contains(target)),
+        tag: target?.tagName.toLowerCase() ?? null,
+        key: e.key,
+        defaultPrevented: e.defaultPrevented,
+      })
+      if (action === 'browser') return
+      if (action === 'close') {
+        e.preventDefault()
+        onCloseRef.current()
         return
       }
       const key = herdrKeyFromEvent(e)
@@ -139,39 +150,35 @@ export function BlockedModal({ botId, onClose }: { botId: string; onClose: () =>
           {menu ? (
             <BlockedExtrasBar botId={botId} open={extras} onToggle={() => setExtras((v) => !v)} onAnswered={refresh} />
           ) : null}
-          {/* 選單模式預設不長這一段（第二輪回饋第 2 點）。 */}
+          {/* 整排按鍵在選單模式收起來（第二輪回饋第 2 點）；鍵盤直通那條**每個模式都要看得見**
+              （#545：選單模式看不到它開著，也關不掉）。 */}
           {showRaw ? (
-            <>
-              <div className="keypad">
-                {KEYPAD.map((k) => (
-                  <button
-                    key={k.label}
-                    type="button"
-                    className="key-btn"
-                    title={k.title}
-                    onClick={() => press(k.keys)}
-                  >
-                    {k.label}
-                  </button>
-                ))}
-              </div>
-              <div className="blocked-modal-hints">
-                <label className="conn">
-                  <input
-                    type="checkbox"
-                    checked={passthrough}
-                    onChange={(e) => setPassthrough(e.target.checked)}
-                  />
-                  鍵盤直通
-                </label>
-                <span className="hint">
-                  {passthrough
-                    ? '打字、方向鍵、Enter、Esc、ctrl+c 都直接送進終端；Esc 也算，關閉請按右上 ✕ 或點視窗外。⌘ 快捷鍵（⌘C 複製）留給瀏覽器，Home / End / PgUp / PgDn 用來捲這個畫面。'
-                    : '鍵盤還給瀏覽器：Esc 關閉這個視窗，回應改用上面的按鍵。'}
-                </span>
-              </div>
-            </>
+            <div className="keypad">
+              {KEYPAD.map((k) => (
+                <button key={k.label} type="button" className="key-btn" title={k.title} onClick={() => press(k.keys)}>
+                  {k.label}
+                </button>
+              ))}
+            </div>
           ) : null}
+          <div className="blocked-modal-hints">
+            <label className={`conn${dangerous ? ' is-locked' : ''}`}>
+              <input
+                type="checkbox"
+                checked={keysLive}
+                disabled={dangerous}
+                onChange={(e) => setPassthrough(e.target.checked)}
+              />
+              鍵盤直通
+            </label>
+            <span className="hint">
+              {dangerous
+                ? 'claude 的防誤刪框：只有你本人能核准，而且要按上面那兩個選項。這種框上不開放鍵盤直通——打字打到一個 1 就等於按下「1. Yes」。'
+                : keysLive
+                  ? '打字、方向鍵、Enter、Esc、ctrl+c 都直接送進終端；Esc 也算，關閉請按右上 ✕ 或點視窗外。⌘ 快捷鍵（⌘C 複製）留給瀏覽器，Home / End / PgUp / PgDn 用來捲這個畫面。'
+                  : '鍵盤還給瀏覽器：Esc 關閉這個視窗，回應改用上面的選項或按鍵。要把整個鍵盤接進終端再打開這個開關。'}
+            </span>
+          </div>
         </div>
       </div>
     </div>,
