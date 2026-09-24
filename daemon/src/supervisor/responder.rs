@@ -667,7 +667,8 @@ pub async fn quota_state(app: &Arc<App>, bot: &crate::db::Bot) -> QuotaState {
     let critical: Vec<&crate::quota::Window> = [&quota.five_hour, &quota.seven_day]
         .into_iter()
         .flatten()
-        .filter(|w| w.critical() && !w.resets_at.as_deref().is_some_and(|t| super::policy::past(t, now)))
+        // 判斷本體是共用的 `Window::exhausted_at`（issue #464，i407 review：以前三處各寫一份）。
+        .filter(|w| w.exhausted_at(now))
         .collect();
     if !critical.is_empty() {
         return QuotaState::Blocked(critical.iter().filter_map(|w| w.resets_at.clone()).min_by(|a, b| crate::db::cmp_ts(a, b)));

@@ -3293,7 +3293,12 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
   **「用盡」＝量表見底而且那個窗還沒重置**（issue #464，`mission::pick` 的 `exhausted`）：`quota_cache` 的讀數活得比重置久
   （daemon 停機超過一個窗長、帳號探測失敗在退避、主機斷線），所以一份「見底、`resets_at` 已經過去」的舊讀數不算用盡——
   那個窗早就重置了，只是還沒有新讀數。`quota::load_cache` 早就為了同一個理由在開機時清掉過期的撞限橫幅，量表這一側原本漏了。
-  沒有 `resets_at` 的見底窗照舊算用盡（無從判斷，寧可繼續等）。`Pick::Wait` 的 `until` 一律**不得是過去的時刻**：
+  判斷只有一份：`quota::Window::exhausted_at`，`mission::pick`／`supervisor::policy`／`supervisor::responder` 三處共用
+  （以前各寫一份，其中 `pick` 那份連重置時刻都不看，對「解不開的時間戳」又跟另外兩份相反）。
+  **解不開的 `resets_at` 當成已經重置**，沿用 `supervisor::policy::past` 的先例（「壞掉的時間戳不該把人永久卡住」）。
+  **沒有 `resets_at` 的見底讀數**照舊算用盡（無從判斷，寧可繼續等）；但開機回填時，比自己那一桶窗長還舊的那種會被丟掉
+  （`quota::load_cache`）——一筆比窗長還舊的讀數必定跨過一次重置，留著會跨重啟永久擋住那個身分，而橫幅早就有到期規則、量表沒有。
+  `Pick::Wait` 的 `until` 一律**不得是過去的時刻**：
   呼叫端拿它排重試，過去的時間沒有意義（橫幅指名桶那條路不看 `exhausted`，所以那一桶的 `resets_at` 也要過濾）。
 - D5 5h 撞限時等重置還是直接換身分，開任務時選（`on_5h_limit = wait|switch`）。
 - D6 驗證者找不到 Fable 有效額度 → 停下來問使用者，不自動降級、不乾等。

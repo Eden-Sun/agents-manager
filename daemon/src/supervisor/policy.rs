@@ -49,8 +49,10 @@ pub fn past(iso: &str, now: DateTime<Utc>) -> bool {
     }
 }
 
+/// 判斷本體在 [`Window::reset_passed`]（`quota.rs`）：三處共用一份（issue #464，i407 review）。
+/// 解不開的時間戳當「已重置」的先例就是這個檔案的 [`past`]。
 fn reset_passed(w: &Window, now: DateTime<Utc>) -> bool {
-    w.resets_at.as_deref().is_some_and(|t| past(t, now))
+    w.reset_passed(now)
 }
 
 /// What is left as far as we can tell. Past its reset the window is full again, whatever
@@ -64,7 +66,7 @@ fn effective_remaining(w: &Window, now: DateTime<Utc>) -> f64 {
 }
 
 fn shared_critical(w: &Window, now: DateTime<Utc>) -> bool {
-    !reset_passed(w, now) && w.critical()
+    w.exhausted_at(now)
 }
 
 fn cooldown_over(sup: &Supervisor, now: DateTime<Utc>) -> bool {
