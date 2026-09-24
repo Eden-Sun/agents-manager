@@ -477,7 +477,10 @@ pub async fn preflight(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: Option<&
     // repo 的問題仍然照實記在 `checks`，而且真的查不到時 find_existing 會回錯、落成 remote_unknown。
     let remote_ok = checks["gh_auth_ok"] == serde_json::json!(true) && !gh.repo.trim().is_empty();
 
-    let created_today = ledger::created_in_last_day(pool).await?;
+    // **24 小時上限是跨版本的**：真跑每呼叫一次 publish_version 就重讀一次帳本，所以第 2 版看得到第 1 版
+    // 剛開的那幾張。乾跑若每版都用同一個初始值重開 Caps，3 版以上就會說「每版都能開 4 張」（共 12），
+    // 真跑第 9 張起 deferred（#440）。所以 `created_today` 與 `deferred_hit` 跨版留著，只有 `in_row` 每版重置。
+    let mut caps = Caps { in_row: 0, created_today: ledger::created_in_last_day(pool).await?, deferred_hit: false };
     let mut versions = Vec::new();
     let (mut n_create, mut n_comment, mut n_existing, mut n_blocked) = (0usize, 0usize, 0usize, 0usize);
     for row in ledger::list(pool, kind, version).await?.into_iter().filter(|r| r.status == Status::Judged) {
@@ -486,7 +489,8 @@ pub async fn preflight(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: Option<&
         // **會長大的清單**（同 publish_version）：existing／comment／create 都要 push 進去，
         // 否則同一版兩個提案的 entry_ids 有交集時，真跑跳過第二個、乾跑兩個都算 create（#204 review）。
         let mut issues = row.issues.clone();
-        let mut caps = Caps { in_row: issues.iter().filter(|i| !i.comment).count(), created_today, deferred_hit: false };
+        // 每版重置的只有「這一版開了幾張」。
+        caps.in_row = issues.iter().filter(|i| !i.comment).count();
         let mut plans = Vec::new();
         for p in &proposals {
             let mk = marker(&row.kind, &row.version, &p.entry_ids);

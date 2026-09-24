@@ -1,6 +1,6 @@
 //! B：verdict 驗證、issue 渲染、gh publish（假 gh 腳本，絕不打真的 GitHub）。
 
-use super::issue::{self, Outcome};
+use super::issue::{self, Outcome, MAX_PER_DAY};
 use super::ledger::{self, Status};
 use super::verdict::{self, EntryVerdict, Proposal, StoredProposal, Submission, Verdict};
 use super::*;
@@ -198,8 +198,13 @@ impl Drop for FakeGh {
 
 /// 帳本裡放一個 judged 的 2.1.277，提案由 `(triage, [entry index])` 決定（index 指 kept／unmatched 的第幾條）。
 async fn seed(p: &SqlitePool, props: &[(&str, &[usize], Option<i64>)]) -> Vec<Entry> {
+    seed_version(p, "2.1.277", props).await
+}
+
+/// 同 [`seed`]，但可指定版本——24 小時上限是跨版本的，只種一版照不出 #440。
+async fn seed_version(p: &SqlitePool, version: &str, props: &[(&str, &[usize], Option<i64>)]) -> Vec<Entry> {
     let es = entries277();
-    ledger::insert_version(p, "claude", "2.1.277", &es).await.unwrap();
+    ledger::insert_version(p, "claude", version, &es).await.unwrap();
     let j = judged(&es);
     let stored: Vec<StoredProposal> = props
         .iter()
@@ -215,7 +220,7 @@ async fn seed(p: &SqlitePool, props: &[(&str, &[usize], Option<i64>)]) -> Vec<En
         })
         .collect();
     let v = serde_json::json!({"verdicts": [], "issues": stored});
-    assert!(ledger::save_verdicts(p, "claude", "2.1.277", &v, Status::Judged).await.unwrap());
+    assert!(ledger::save_verdicts(p, "claude", version, &v, Status::Judged).await.unwrap());
     es
 }
 
@@ -535,6 +540,36 @@ async fn a_dry_run_and_the_real_publish_agree_on_the_per_version_cap() {
     let Outcome::Published { created, skipped, .. } = real else { panic!("{real:?}") };
     assert_eq!(dry["would_create"], json!(created), "乾跑說幾張就是幾張");
     assert_eq!((created, skipped.len()), (4, 1));
+}
+
+/// #440：24 小時上限是**跨版本**的。真跑每呼叫一次 `publish_version` 就重讀一次帳本，所以第 2 版
+/// 看得到第 1 版剛開的那幾張；乾跑若每版重開 `Caps`，3 版 × 4 張就會說 12 張、真跑第 9 張起 deferred。
+/// 只種一版照不出來（`preflight(None, None)` 看起來像涵蓋多版，其實帳本只有一版）。
+#[tokio::test]
+async fn a_dry_run_and_the_real_publish_agree_on_the_daily_cap_across_versions() {
+    let p = pool().await;
+    let gh = FakeGh::new("equivday");
+    let four: &[(&str, &[usize], Option<i64>)] = &[("guard", &[0], None), ("guard", &[1], None), ("guard", &[2], None), ("guard", &[3], None)];
+    for v in ["2.1.277", "2.1.278", "2.1.279"] {
+        seed_version(&p, v, four).await;
+    }
+    let cfg = gh.cfg(true);
+    let dry = issue::preflight(&p, &cfg, None, None).await.unwrap();
+    // 3 版 × 4 ＝ 12 個提案，但 24 小時只准 8 張。
+    assert_eq!(dry["versions"].as_array().unwrap().len(), 3, "三版都要在乾跑裡");
+    assert_eq!(dry["would_create"], json!(MAX_PER_DAY), "乾跑不能說 12 張：{dry}");
+
+    // 真跑：照 ledger::list 的順序逐版開（同 post_publish）。
+    let mut created_total = 0usize;
+    for r in ledger::list(&p, None, None).await.unwrap().iter().filter(|r| r.status == Status::Judged) {
+        match issue::publish_version(&p, &cfg, &r.kind, &r.version).await.unwrap() {
+            Outcome::Published { created, .. } => created_total += created,
+            Outcome::Deferred { .. } => {}
+            other => panic!("{other:?}"),
+        }
+    }
+    assert_eq!(dry["would_create"], json!(created_total), "乾跑預告要等於逐版真跑的總和");
+    assert_eq!(gh.count("issue create"), MAX_PER_DAY, "真的只開 {MAX_PER_DAY} 張");
 }
 
 /// 帳本已經有這個 entry 的 issue（上一輪開好了）→ 連 gh 都不必問。
