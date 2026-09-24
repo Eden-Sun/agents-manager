@@ -155,17 +155,53 @@ pub fn note_lock_wait(at: &'static std::panic::Location<'static>, waited: Durati
 
 /// 放掉全域鎖了。持有時間本身不寫 log（握久不一定是問題，等的人久才是），只進統計。
 pub fn note_lock_hold(at: &'static std::panic::Location<'static>, held: Duration) {
+    // 測試探針：讓測試看得到「進到記帳這一步的當下」全域鎖放了沒。正式 build 沒有這段。
+    #[cfg(test)]
+    {
+        let probe = hold_probe().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(f) = probe.as_ref() {
+            f(at);
+        }
+    }
     record(&format!("lock:hold:{}", site(at)), held);
 }
 
-/// 測試用：佔住樣本表，讓「記帳」那一步一定會卡住（見 `OpGuard` 的 drop 順序測試）。
+/// 測試用探針：`note_lock_hold` 進來時先叫它一次。
+///
+/// 用它而不是「佔住樣本表再看鎖放了沒」（原本的寫法，i204 審 #473）：那張表是行程共用的，佔住它會讓
+/// **平行跑的其他測試**卡在 `record()` 上，整樹跑就會偶發紅。探針只在自己那個拿鎖點觸發（呼叫端比對
+/// `at`），其餘的 drop 進來看一眼就走，誰也不擋。
 #[cfg(test)]
-pub(crate) fn hold_samples_for_test() -> std::sync::MutexGuard<'static, HashMap<String, VecDeque<(Instant, u64)>>> {
-    samples().lock().unwrap_or_else(|e| e.into_inner())
+type HoldProbe = Box<dyn Fn(&'static std::panic::Location<'static>) + Send + Sync>;
+
+#[cfg(test)]
+fn hold_probe() -> &'static Mutex<Option<HoldProbe>> {
+    static P: OnceLock<Mutex<Option<HoldProbe>>> = OnceLock::new();
+    P.get_or_init(Default::default)
 }
 
+/// 裝上探針；回傳的守衛在 drop 時拆掉，測試失敗也不會留給別人。
+#[cfg(test)]
+pub(crate) fn probe_lock_hold(f: HoldProbe) -> ProbeGuard {
+    *hold_probe().lock().unwrap_or_else(|e| e.into_inner()) = Some(f);
+    ProbeGuard
+}
+
+#[cfg(test)]
+pub(crate) struct ProbeGuard;
+
+#[cfg(test)]
+impl Drop for ProbeGuard {
+    fn drop(&mut self) {
+        *hold_probe().lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
+/// key 只用**檔名**，不帶行號（i204 審 #473）：行號一改版就變，跨版本就比不了 p95——而這張表存在的
+/// 理由正是跨版本比。代價是同一個檔裡的多個拿鎖點會合成一筆分佈（`supervisor/api.rs` 有八個），
+/// 但 #473 要回答的是「controller 的 dispatch 跟 API handler 誰在等」，檔名這一層剛好分得出來。
 fn site(at: &'static std::panic::Location<'static>) -> String {
-    format!("{}:{}", at.file(), at.line())
+    at.file().to_string()
 }
 
 #[cfg(test)]
@@ -301,6 +337,11 @@ mod tests {
         let (logs, _guard) = crate::config_audit::capture::start();
         const SLOW_LINE: &str = "waited a long time for the supervisor lock";
         let at = std::panic::Location::caller();
+        // key 現在只有檔名（i204 審 #473），所以同一個檔裡的別條測試（那條 drop 順序的會真的拿一次鎖）
+        // 會寫進同一格：比增量，不比絕對值。
+        let count = |key: String| snapshot()["stats"][key]["count"].as_u64().unwrap_or(0);
+        let wait_key = format!("lock:wait:{}", site(at));
+        let before = count(wait_key.clone());
 
         note_lock_wait(at, SLOW_LOCK_WAIT - Duration::from_millis(1));
         note_lock_hold(at, Duration::from_secs(30));
@@ -312,9 +353,9 @@ mod tests {
         assert!(line.contains(at.file()), "要指出是哪個拿鎖點：{line}");
         assert!(line.contains("waited_ms="), "{line}");
 
-        let s = snapshot();
-        assert_eq!(s["stats"][format!("lock:wait:{}", site(at))]["count"], json!(2));
-        assert_eq!(s["stats"][format!("lock:hold:{}", site(at))]["max_ms"], json!(30_000));
+        assert_eq!(count(wait_key) - before, 2, "兩次都要進統計，只有一次進 log");
+        // hold 的 30 秒遠比別條測試寫進來的任何一筆大，比 max 仍然穩。
+        assert_eq!(snapshot()["stats"][format!("lock:hold:{}", site(at))]["max_ms"], json!(30_000));
     }
 
     /// i263 審 #473：`OpGuard` 的 drop 必須**先放全域鎖、再記帳**。
@@ -323,39 +364,26 @@ mod tests {
     /// 順序反過來的話，放鎖就得排在統計後面——等全域鎖的 API 跟著慢，而且量出來的 hold 還不含
     /// 被自己拖長的那一段，對「握著全域鎖做 herdr 送出是不是太久」剛好系統性偏樂觀。
     ///
-    /// 探測**不能**用 `lock()`：那一支自己也要記帳，會一起卡在樣本表上，分不出是被誰擋的。
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    /// 驗法是**探針**，不是「佔住樣本表再看鎖放了沒」（i204 審 #473：那會讓平行跑的其他測試卡在
+    /// `record()` 上，整樹跑偶發紅）。探針只認自己這個拿鎖點，別人的 drop 進來看一眼就走。
+    #[tokio::test]
     async fn dropping_the_guard_frees_the_op_lock_before_it_books_the_hold() {
-        // 先拿鎖（這一步要記 wait，得在樣本表被佔住之前做完）。
+        let seen: Arc<Mutex<Option<bool>>> = Arc::new(Mutex::new(None));
+        let mine = std::panic::Location::caller();
+        let (sink, at) = (seen.clone(), mine);
+        let _probe = probe_lock_hold(Box::new(move |who| {
+            // 只管自己那一把：平行跑的別的測試也會 drop guard，進來的不是我的就不看。
+            if who.file() != at.file() {
+                return;
+            }
+            *sink.lock().unwrap_or_else(|e| e.into_inner()) = Some(crate::supervisor::op_lock_is_free());
+        }));
+
         let guard = crate::supervisor::lock().await;
         assert!(!crate::supervisor::op_lock_is_free(), "前提：鎖在手上");
+        drop(guard);
 
-        let (holding_tx, holding_rx) = std::sync::mpsc::channel::<()>();
-        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
-        // 另一條執行緒佔住樣本表：從現在起，任何「記帳」都會卡住。
-        let squatter = std::thread::spawn(move || {
-            let _g = hold_samples_for_test();
-            holding_tx.send(()).expect("test channel");
-            let _ = release_rx.recv();
-        });
-        holding_rx.recv().expect("squatter took the table");
-
-        // drop 會卡在記帳那一步；重點是它卡的時候有沒有**還握著**全域鎖。
-        let dropping = tokio::task::spawn_blocking(move || drop(guard));
-
-        let mut freed = false;
-        for _ in 0..50 {
-            if crate::supervisor::op_lock_is_free() {
-                freed = true;
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-
-        release_tx.send(()).expect("test channel");
-        squatter.join().expect("squatter");
-        dropping.await.expect("drop finished");
-
-        assert!(freed, "記帳卡住時全域鎖不該還被握著：drop 要先放鎖、再記帳");
+        let observed = *seen.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(observed, Some(true), "記帳那一刻全域鎖必須已經放掉：drop 要先放鎖、再記帳");
     }
 }
