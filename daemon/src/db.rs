@@ -213,6 +213,9 @@ const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (17, "b9b1eb7d09e3cb5b"),
     // issue #436：`supervisor_approvals.requester_unverified`（申請人是自稱的還是驗過的）。
     (18, "5df2ad9350704345"),
+    // issue #474：pre-v2 的 `bot_previews` 重建補回 `REFERENCES bots(id)`。全新 DB 本來就有那個外鍵，
+    // 所以指紋跟 v18 一樣（同 #400 那一版的情形）——升版是因為 migrate 真的動了既有資料庫。
+    (19, "5df2ad9350704345"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -386,6 +389,11 @@ async fn apply_migrations(pool: &SqlitePool) -> Result<()> {
             sqlx::query(ddl).execute(&mut *tx).await.with_context(|| format!("add {table}.{col}"))?;
         }
     }
+    // issue #474：pre-v2 建的 `bot_previews` 沒有 `REFERENCES bots(id)`——`CREATE TABLE IF NOT EXISTS`
+    // 對既有 DB 是 no-op，而外鍵用 `ALTER TABLE` 加不回去，所以那種資料庫到今天都還缺這個約束
+    // （`pragma_table_info` 看不到 FK，#470 之前漂移核對也不比表的約束，所以一直沒人發現）。
+    // 唯一補得回來的做法是重建表。
+    rebuild_bot_previews_fk(&mut tx).await?;
     // 建在這裡（column 一定已經存在之後），不是跟著上面的 SCHEMA 一起用 `;\n` 切開來送：這句 trigger
     // body 自己就帶了分號，切开來就會斷成兩句送不出去。寫 `agent_status` 的地方有好幾處（events／
     // reconcile／default session／bulk_restart／stuck_turns…），用 trigger 而不是在每一處補一行：
@@ -422,6 +430,78 @@ async fn apply_migrations(pool: &SqlitePool) -> Result<()> {
     crate::build_scheduler::migrate(pool).await?;
     crate::release_triage::ledger::migrate(pool).await?;
     crate::judge::migrate(pool).await?;
+    Ok(())
+}
+
+/// 把缺了 `REFERENCES bots(id)` 的 `bot_previews` 重建出來（issue #474）。
+///
+/// **只動缺 FK 的那種資料庫**：`pragma_foreign_key_list` 有東西就直接回來，所以全新 DB 與已經補過的
+/// 都不會被碰，這支跑第二次是 no-op。
+///
+/// 欄位定義是從 `pragma_table_info` 現場讀出來重組的，不是寫死一份：這支在上面那串 additive ALTER
+/// **之後**才跑，所以這時 `bot_previews` 已經有 `source`／`pid`／`command`／`kind`。寫死一份 DDL 的話，
+/// 以後有人再加一欄就會在這裡悄悄把它的資料丟掉。（`bot_previews` 的欄位都沒有 `CHECK`，所以
+/// pragma 讀得到的四樣——型別、NOT NULL、預設值、主鍵——就是全部；有 CHECK 的表不能照抄這個做法。）
+///
+/// 孤兒列（`bot_id` 指不到任何 bot）會被丟掉並記一行 warn：新表帶著 FK，而 `db::open` 開著
+/// `foreign_keys`，不先濾掉的話 `INSERT … SELECT` 會整批失敗、整個 migrate 回滾、daemon 起不來。
+/// 預覽是執行期狀態（一顆跑著的 vite），指不到 bot 的那幾列本來就沒有人會再用到。
+async fn rebuild_bot_previews_fk(conn: &mut sqlx::SqliteConnection) -> Result<()> {
+    let fks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pragma_foreign_key_list('bot_previews')")
+        .fetch_one(&mut *conn)
+        .await
+        .context("read bot_previews foreign keys")?;
+    if fks > 0 {
+        return Ok(());
+    }
+    let cols: Vec<(String, String, i64, Option<String>, i64)> =
+        sqlx::query_as("SELECT name, type, \"notnull\", dflt_value, pk FROM pragma_table_info('bot_previews') ORDER BY cid")
+            .fetch_all(&mut *conn)
+            .await
+            .context("read bot_previews columns")?;
+    if cols.is_empty() {
+        return Ok(());
+    }
+    let mut defs = Vec::with_capacity(cols.len());
+    let mut names = Vec::with_capacity(cols.len());
+    for (name, ty, notnull, dflt, pk) in &cols {
+        let mut def = format!("{name} {ty}");
+        if *pk > 0 {
+            def.push_str(" PRIMARY KEY");
+        }
+        if *notnull != 0 && *pk == 0 {
+            def.push_str(" NOT NULL");
+        }
+        if let Some(d) = dflt {
+            def.push_str(&format!(" DEFAULT {d}"));
+        }
+        if name == "bot_id" {
+            def.push_str(" REFERENCES bots(id)");
+        }
+        defs.push(def);
+        names.push(name.as_str());
+    }
+    // `bot_id IS NULL` 也算孤兒，而且要明寫（i264 審 #474 提的）：`NULL NOT IN (…)` 是 NULL 不是 true，
+    // 只寫 `NOT IN` 的話那種列不會被算進來，但下面 `INSERT … WHERE bot_id IN (…)` 一樣會把它濾掉
+    // ——列被丟了、warn 卻少報一筆。（`bot_id TEXT PRIMARY KEY` 在 SQLite 是可以為 NULL 的。）
+    let orphans: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM bot_previews WHERE bot_id IS NULL OR bot_id NOT IN (SELECT id FROM bots)")
+        .fetch_one(&mut *conn)
+        .await
+        .context("count orphan bot_previews rows")?;
+    if orphans > 0 {
+        tracing::warn!(orphans, "bot_previews 有指不到 bot 的列；補外鍵時一併丟掉（issue #474）");
+    }
+    let list = names.join(", ");
+    for stmt in [
+        format!("CREATE TABLE bot_previews_new ({})", defs.join(", ")),
+        format!("INSERT INTO bot_previews_new ({list}) SELECT {list} FROM bot_previews WHERE bot_id IN (SELECT id FROM bots)"),
+        "DROP TABLE bot_previews".to_string(),
+        "ALTER TABLE bot_previews_new RENAME TO bot_previews".to_string(),
+    ] {
+        sqlx::query(&stmt).execute(&mut *conn).await.with_context(|| format!("rebuild bot_previews: {stmt}"))?;
+    }
+    tracing::info!(rows_dropped = orphans, "bot_previews 重建完成，補回 REFERENCES bots(id)（issue #474）");
     Ok(())
 }
 
@@ -1331,6 +1411,62 @@ mod tests {
         let p2 = open(&file).await.unwrap();
         assert_eq!(columns(&p2, "bots").await, before);
         p2.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// issue #474：pre-v2 的 `bot_previews` 沒有 `REFERENCES bots(id)`，外鍵又不能用 ALTER 加回去。
+    /// migrate 要重建表補上，而且**不能把資料洗掉**——除了指不到 bot 的孤兒列（新表帶 FK、
+    /// `foreign_keys` 開著，不濾掉的話 `INSERT … SELECT` 會整批失敗、整個 migrate 回滾）。
+    #[tokio::test]
+    async fn v19_rebuilds_a_pre_v2_bot_previews_to_restore_its_foreign_key() {
+        let dir = tmp_dir();
+        let file = dir.join("pre-v2.sqlite3");
+        // 先讓 migrate 建出完整的 schema，再把 `bot_previews` 換成 pre-v2 的形狀（沒有 FK）。
+        // 手寫整份 `projects`／`bots` 會漏掉後來加的欄位（`projects.host` 之類），那些欄位上還有索引，
+        // 下一次開 DB 就會炸在 `CREATE UNIQUE INDEX … ON projects(host, path)`——那是測試自己寫壞，
+        // 不是 migrate 的問題。這樣做也更接近正式那顆：跑過歷代 migrate、只有那個外鍵一直缺。
+        {
+            let pool = open(&file).await.unwrap();
+            for stmt in [
+                "INSERT INTO projects (id,path,label,created_at) VALUES ('p','/tmp','p','2026-01-01T00:00:00.000Z')",
+                "INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('b1','p','one','claude','t','2026-01-01T00:00:00.000Z')",
+                "DROP TABLE bot_previews",
+                "CREATE TABLE bot_previews (bot_id TEXT PRIMARY KEY, host TEXT NOT NULL, pane_id TEXT, port INTEGER, dir TEXT,
+                   status TEXT NOT NULL, error TEXT, started_at TEXT, updated_at TEXT NOT NULL)",
+                "INSERT INTO bot_previews (bot_id,host,pane_id,port,dir,status,error,started_at,updated_at)
+                   VALUES ('b1','local','w1:p1',5173,'/tmp/x','running',NULL,'2026-01-01T00:00:00.000Z','2026-01-02T00:00:00.000Z')",
+                // 孤兒：指不到任何 bot，補外鍵時要被丟掉。
+                "INSERT INTO bot_previews (bot_id,host,pane_id,port,dir,status,error,started_at,updated_at)
+                   VALUES ('gone','local','w1:p9',5174,'/tmp/y','off',NULL,NULL,'2026-01-02T00:00:00.000Z')",
+            ] {
+                sqlx::query(stmt).execute(&pool).await.unwrap_or_else(|e| panic!("{stmt}: {e}"));
+            }
+            let fks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pragma_foreign_key_list('bot_previews')").fetch_one(&pool).await.unwrap();
+            assert_eq!(fks, 0, "前提：這時的 bot_previews 沒有外鍵");
+            pool.close().await;
+        }
+        let pool = open(&file).await.expect("pre-v2 形狀的 bot_previews 要開得起來並且自己補好");
+        let fks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pragma_foreign_key_list('bot_previews')").fetch_one(&pool).await.unwrap();
+        assert_eq!(fks, 1, "重建之後要有 bots(id) 那個外鍵");
+        // 指得到 bot 的那一列要原封不動，連 ALTER 後來補的欄位都要有預設值。
+        let row: (String, String, Option<i64>, String, String, String) = sqlx::query_as(
+            "SELECT bot_id, host, port, status, updated_at, source FROM bot_previews",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("只該剩一列");
+        assert_eq!(row.0, "b1");
+        assert_eq!(row.1, "local");
+        assert_eq!(row.2, Some(5173), "資料不能在重建時掉字");
+        assert_eq!(row.3, "running");
+        assert_eq!(row.4, "2026-01-02T00:00:00.000Z");
+        assert_eq!(row.5, "spawned", "ALTER 補的欄位照樣拿到預設值");
+        // 重跑是 no-op：已經有 FK 就不再重建（否則每次開機都洗一次表）。
+        pool.close().await;
+        let pool = open(&file).await.unwrap();
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bot_previews").fetch_one(&pool).await.unwrap();
+        assert_eq!(n, 1, "第二次開不該再動它");
+        pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -204,13 +204,12 @@ pub(super) fn check_pinned(fingerprint: &str, history: &[(i64, &str)]) -> Result
 /// （`old_layouts_and_leftovers_are_not_drift` 釘著這件事）。沒有約束關鍵字的欄位定義一律丟掉，
 /// 所以多一欄、少一欄、換順序都不算漂移——那些本來就由 `columns`／`col_defs` 管。
 ///
-/// **故意不比欄位層級的 `REFERENCES` 與 `PRIMARY KEY`**：
-/// * `PRIMARY KEY` 已經由 `col_defs` 的主鍵序管，重複比只是多一條噪音；
-/// * 欄位層級的 `REFERENCES` 在既有資料庫上真的對不上——`preview` 的 pre-v2 `bot_previews` 是
-///   `bot_id TEXT PRIMARY KEY`，今天的 DDL 是 `bot_id TEXT PRIMARY KEY REFERENCES bots(id)`
-///   （`preview::tests::opening_a_pre_v2_database_adds_the_source_and_pid_columns` 釘著那個形狀）。
-///   把它算成漂移等於讓那種資料庫從此開不起來，而它已經這樣跑了好幾個月。那是**另一件事**
-///   （要重建表才補得回 FK），追在它自己的票，不要用一道啟動守衛把它變成當機。
+/// 欄位層級的 `REFERENCES` **現在也比**（issue #474）：#470 當時把它排除掉，因為 pre-v2 的
+/// `bot_previews` 少了 `REFERENCES bots(id)`，算成漂移會讓那種資料庫從此開不起來。#474 在
+/// `db::rebuild_bot_previews_fk` 把它重建補回去之後，那個例外就不需要了——少一個外鍵是真的漂移，
+/// 而且現在有 migrate 修得好。
+///
+/// **仍然不比欄位層級的 `PRIMARY KEY`**：已經由 `col_defs` 的主鍵序管，重複比只是多一條噪音。
 ///
 /// 欄位層級的 `UNIQUE`（`name TEXT UNIQUE`，沒有括號）也不在內：它建出來的是 autoindex，
 /// `read_objects` 的 `sql IS NOT NULL` 本來就撈不到，比不了。
@@ -218,7 +217,7 @@ pub(super) fn check_pinned(fingerprint: &str, history: &[(i64, &str)]) -> Result
 /// 輸入是 [`normalize_sql`] 過的原文（`--` 註解與多餘空白都已經沒了，`UNIQUE (a, b)` 會變成
 /// `UNIQUE(a,b)`，所以帶括號的關鍵字直接比字串就分得出表層級與欄位層級）。
 fn constraint_defs(sql: &str) -> Vec<String> {
-    const KEYWORDS: [&str; 3] = ["CHECK", "UNIQUE(", "FOREIGN KEY("];
+    const KEYWORDS: [&str; 4] = ["CHECK", "UNIQUE(", "FOREIGN KEY(", "REFERENCES"];
     let Some(open_paren) = sql.find('(') else { return Vec::new() };
     let body = &sql[open_paren + 1..];
     let mut defs: Vec<&str> = Vec::new();
@@ -547,13 +546,14 @@ mod tests {
             c("CREATE TABLE t (b TEXT CHECK (b > 0), a TEXT CHECK (a IN ('x')))"),
             "換順序不算漂移"
         );
-        // 欄位層級的 REFERENCES 與 PRIMARY KEY 不在比對範圍內：pre-v2 的 `bot_previews` 少了前者，
-        // 算成漂移的話那種資料庫從此開不起來（見 `constraint_defs` 的說明）。
-        assert_eq!(
+        // 欄位層級的 FK 算（issue #474：pre-v2 的 `bot_previews` 少了它，migrate 現在補得回來）。
+        assert_ne!(
             c("CREATE TABLE t (a TEXT PRIMARY KEY)"),
             c("CREATE TABLE t (a TEXT PRIMARY KEY REFERENCES u(id))"),
-            "欄位層級的 FK 不算漂移"
+            "少一個外鍵是漂移"
         );
+        // 但光是 PRIMARY KEY 不算：那一項由 `col_defs` 的主鍵序管。
+        assert_eq!(c("CREATE TABLE t (a TEXT PRIMARY KEY)"), Vec::<String>::new(), "PRIMARY KEY 自己不算子句");
         // 真的改了約束就要看得出來。
         assert_ne!(
             c("CREATE TABLE t (a TEXT CHECK (a IN ('x')))"),

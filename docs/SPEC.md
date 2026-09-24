@@ -83,6 +83,12 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   `db::migrate` 自己的 SCHEMA／additive ALTER 包在一個 transaction 裡，中途失敗（例如舊資料違反新加的 UNIQUE INDEX）整批回滾，
   不留半套 schema；重跑冪等。子模組各自的 migration（`supervisor::store`、`read_marks`、`panes`、`herdr_maintenance`、
   `mission::store`）不在這個 transaction 裡，各自維護自己那張表，風險最高的「加欄＋回填」已經各自包了自己的 transaction。
+  - **不能用 `ALTER` 改的東西要重建表**（issue #474）：SQLite 的 `ALTER TABLE` 加不了外鍵，也改不了 `CHECK`。
+    既有資料庫缺了這種約束時，migrate 要在**同一個交易內** `CREATE …_new` ＋ `INSERT … SELECT` ＋ `DROP` ＋
+    `RENAME`，而且只對真的缺的那種資料庫做（`pragma_foreign_key_list` 有東西就跳過，跑第二次是 no-op）。
+    新表帶著約束，`db::open` 又開著 `foreign_keys`，所以**先濾掉違反新約束的舊資料並記 warn**——不濾的話
+    `INSERT … SELECT` 會整批失敗、整個 migrate 回滾、daemon 起不來。欄位定義從 `pragma_table_info` 現場讀出來
+    重組，不寫死一份：那支跑在 additive ALTER 之後，寫死的話以後多一欄就會在重建時把它的資料丟掉。
   - **schema 版本戳記**（issue #72）：`db::SCHEMA_VERSION` 存進 SQLite 內建的 `PRAGMA user_version`，在**全部**子模組 migrate 與 schema 漂移核對都通過之後
     才蓋（#289；中途失敗時 DB 維持舊版本號，回滾用的舊 binary 才打得開）。`migrate` 一開始先比對：DB 記的版本比這顆 binary 認得的還新（代表已經有更新版
     daemon 動過這個檔案）就直接拒絕啟動，一個 SCHEMA／ALTER 都不碰；版本較舊或沒設過（既有 DB 的 `user_version` 預設
@@ -129,9 +135,9 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
     （測試都是新 DB），只有正式機在寫新值時炸 `CHECK constraint failed`。比的是**帶約束的子句集合**而不是整段原文：
     舊 DB 的表是 ALTER 一欄一欄補出來的，欄位順序與排版本來就不同，整段比會在每一顆升級過的資料庫上誤報。
     約束對不上時訊息要指名哪張表、少了／多了哪個子句，並講明修法是重建表（`CREATE …_new` ＋ `INSERT …SELECT` ＋
-    `DROP` ＋ `RENAME`）而不是 `ALTER`——CHECK 改不了。**欄位層級的 `REFERENCES` 與 `PRIMARY KEY` 不比**：
-    前者在既有資料庫上真的對不上（pre-v2 的 `bot_previews` 沒有 `REFERENCES bots(id)`），算成漂移等於讓那種
-    資料庫從此開不起來，那是要重建表才補得回來的另一件事；後者已經由欄位的主鍵序管到了。
+    `DROP` ＋ `RENAME`）而不是 `ALTER`——CHECK 改不了。欄位層級的 `REFERENCES` 也比（issue #474：
+    pre-v2 的 `bot_previews` 缺 `REFERENCES bots(id)`，migrate 會重建表補回去，所以不再需要例外）；
+    **欄位層級的 `PRIMARY KEY` 不比**，那一項已經由欄位的主鍵序管到了。
     標準答案裡沒有的東西（已移除功能留下的表、索引）不管。
 - **到期動作不靠行程內的 timer 當唯一真相**（issue #75）：每一種「等一下再做」的到期時間都**存在 DB 的擁有者那一列**上——
   排隊 prompt 的重試 `turns.next_flush_at`、交辦重送 `supervisor_assignments.next_attempt_at`、等額度 `…resume_at`、
@@ -3135,6 +3141,9 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
    （同時移走殘留的 `-wal`／`-shm`）→ 對還原後的檔案再跑一次 `PRAGMA integrity_check` 與 `PRAGMA user_version`，版本要 ≤ 舊 binary 的 `SCHEMA_VERSION` → 才啟動。
 3. 備份到回滾之間新寫入的資料（新 run、訊息、交辦）會隨還原消失；能不回滾就往前修。
 `db::migrate` 升版**中途失敗**時版本號不會被蓋（戳記在全部子模組 migrate 與漂移核對之後才寫，#289），那種情況換回舊 binary 即可，不必還原 DB。
+**升版成功之後就不是那樣了**：`user_version` 已經是新的，舊 binary 一律被 #72 的版本閘擋在門外，
+所以回滾一定要連 DB 備份一起還原（上面第 2 步）。**指紋跟前一版相同也不例外**——那只代表全新 DB 的 schema 沒變
+（例如 #474 補的是既有資料庫缺的外鍵、#400 那版只改資料），舊 binary 其實讀得動那顆 DB，但版本閘不看指紋、只看版本號。
 供參考——supervisor 相關資料表與欄位都是 additive，`db::migrate` 重跑冪等。往回滾到較舊的 binary（DB 已還原之後）時：
 - 舊 binary 不認得 `awaiting_review`／`blocked`／`superseded`／`quota_blocked`，這些交辦會從它的未結案清單消失（資料不刪）；回滾前先逐筆決定掉。
 - 舊的 `on_turn_done` 會把跑完的交辦直接寫成 `completed`，且不會標 `legacy_closed`。

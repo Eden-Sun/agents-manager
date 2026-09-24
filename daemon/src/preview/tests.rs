@@ -1084,6 +1084,15 @@ async fn opening_a_pre_v2_database_adds_the_source_and_pid_columns() {
     let pool = db::open(&path).await.unwrap();
     let cols: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info('bot_previews')").fetch_all(&pool).await.unwrap();
     assert!(cols.contains(&"source".to_string()) && cols.contains(&"pid".to_string()), "{cols:?}");
+    // issue #474：pre-v2 的表沒有 `REFERENCES bots(id)`，而外鍵用 ALTER 加不回去——migrate 會重建表補上。
+    let fks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pragma_foreign_key_list('bot_previews')").fetch_one(&pool).await.unwrap();
+    assert_eq!(fks, 1, "重建之後要有 bots(id) 那個外鍵");
+    // 重跑一次是 no-op（已經有 FK 就不再重建），而且不能把資料洗掉。
+    pool.close().await;
+    let pool = db::open(&path).await.unwrap();
+    let fks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pragma_foreign_key_list('bot_previews')").fetch_one(&pool).await.unwrap();
+    assert_eq!(fks, 1, "第二次開不該再動它");
+    pool.close().await;
     let _ = std::fs::remove_dir_all(&dir);
 }
 
