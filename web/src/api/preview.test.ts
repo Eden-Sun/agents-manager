@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { PREVIEW_OFF, groupOthers, kindLabel, previewReasonText, toPreview, toPreviewEvent } from './preview'
+import { PREVIEW_OFF, groupOthers, kindLabel, previewOutOfReach, previewReasonText, toPreview, toPreviewEvent } from './preview'
 
 test('toPreview: 沒開過／壞資料都是 off', () => {
   assert.deepEqual(toPreview({ status: 'off' }), PREVIEW_OFF)
@@ -97,4 +97,24 @@ test('缺 port／pid 的 stale_selection 不寫成 :null，認不出的 reason �
   assert.match(t, /那個 port/)
   assert.equal(previewReasonText('something_new'), null)
   assert.equal(previewReasonText(''), null)
+})
+
+test('lan 三態：布林照收，舊 daemon 沒這格＝null（issue #527）', () => {
+  assert.equal(toPreview({ status: 'running', port: 5180, lan: false }).lan, false)
+  assert.equal(toPreview({ status: 'running', port: 5180, lan: true }).lan, true)
+  assert.equal(toPreview({ status: 'running', port: 5180 }).lan, null)
+  assert.equal(PREVIEW_OFF.lan, null)
+  // WS 的 preview_changed 不帶 lan：沿用上一份，不要被事件洗成 null。
+  assert.equal(toPreviewEvent({ status: 'running', port: 5180 }, { ...PREVIEW_OFF, lan: false }).lan, false)
+})
+
+test('連不連得到：allow_lan 關著又不是本機開的才擋（issue #527）', () => {
+  assert.equal(previewOutOfReach(false, 'mac.tailnet.ts.net'), true)
+  assert.equal(previewOutOfReach(false, '192.168.1.51'), true)
+  assert.equal(previewOutOfReach(false, 'localhost'), false)
+  assert.equal(previewOutOfReach(false, '127.0.0.1'), false)
+  assert.equal(previewOutOfReach(false, '[::1]'), false)
+  // allow_lan 開著＝daemon 讓它綁對外，照舊嵌 iframe；null＝舊 daemon，不知道就不擋。
+  assert.equal(previewOutOfReach(true, 'mac.tailnet.ts.net'), false)
+  assert.equal(previewOutOfReach(null, 'mac.tailnet.ts.net'), false)
 })

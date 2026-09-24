@@ -491,6 +491,7 @@ daemon 這幾天把「寫不進 DB」改成 fail closed：外面的副作用做�
   `kind=unknown`（多半是 hono BFF、ffi-server 之類的後端）預設收起，最底一行「顯示其他 N 個服務」展開／收起；分組順序與 `other` 的警語不變。
   整列就是一顆按鈕（鍵盤與讀屏可聚焦，`aria-label` 寫明要接哪一個），右邊的「接這個」只剩次要文字；手機把它拿掉、列高加到 32px 好點。
   列高 26px：桌機預設欄寬下含分組標題八筆不用捲動。
+- **v6：連不到的預覽不給空白 iframe（2026-09-24，issue #527）**：`allow_lan` 關著時 daemon 把自己起的 dev server 釘在 loopback（#434／#452），所以從手機或別台機器開的頁面一定連不到那個 port（走 tailscale serve 的 https 頁面更是連請求都不會發：http 的 iframe 算混合內容）。daemon 的預覽狀態多回一格 `lan`（＝`allow_lan`），前端在 `lan === false` 且 `location.hostname` 不是 loopback 時把 iframe 換成說明（哪一台、為什麼、要開 `allow_lan`），並停用「在新分頁開」。`lan` 不存在（舊 daemon）＝不知道，照舊嵌 iframe。「手機一樣有這個分頁」不變——變的是連不到的時候講出來。
 
 ## 主力那列（★）固定順序、可拖曳，不再照未讀／忙碌跳位（2026-09-20，#344）
 

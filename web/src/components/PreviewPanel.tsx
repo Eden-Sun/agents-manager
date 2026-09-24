@@ -4,7 +4,7 @@
  */
 import { useCallback, useEffect, useState } from 'react'
 import { orderRows, showRepo } from '../lib/previewList'
-import { groupOthers, kindLabel, fetchPreview, type PreviewOther, type PreviewRelation, type StartPreviewOpts, previewApiMissing, PREVIEW_API_MISSING, previewReasonText, previewUrl, startPreview, stopPreview, NO_DEV_REASONS, PREVIEW_OFF, type Preview } from '../api/preview'
+import { groupOthers, kindLabel, fetchPreview, type PreviewOther, type PreviewRelation, type StartPreviewOpts, previewApiMissing, PREVIEW_API_MISSING, previewOutOfReach, previewReasonText, previewUrl, startPreview, stopPreview, NO_DEV_REASONS, PREVIEW_OFF, type Preview } from '../api/preview'
 import { isMock } from '../api'
 import { ApiError } from '../api/types'
 import type { ReactNode } from 'react'
@@ -58,6 +58,24 @@ function ErrNote({ err }: { err: PreviewErr }) {
           </ul>
         </details>
       ) : null}
+    </div>
+  )
+}
+
+/**
+ * 從手機或別台機器開的頁面連不到釘在 loopback 的 dev server（issue #527）：`running` 照舊，但 iframe
+ * 換成這段說明——不然畫面就只是一片空白，而工具列還寫著網址。
+ */
+export function OutOfReachNote({ hostname, https }: { hostname: string; https: boolean }) {
+  return (
+    <div className="preview-empty" role="status">
+      <h2 className="preview-title">這台裝置看不到這個預覽</h2>
+      <p className="preview-body">
+        dev server 只綁在跑 daemon 的那台機器上（<code>127.0.0.1</code>），而這一頁是從 <code>{hostname}</code> 開的，連不過去。
+        要從手機或別台機器看，daemon 要開 <code>allow_lan</code>（它才會讓 dev server 綁對外介面）。
+        {https ? ' 這一頁還是 https，http 的 iframe 也會被瀏覽器當混合內容擋掉。' : ''}
+      </p>
+      <p className="preview-body">預覽還在跑，在那台機器上開一樣的網址就看得到。</p>
     </div>
   )
 }
@@ -247,6 +265,8 @@ export function PreviewPanel({ botId, headStart, headEnd }: { botId: string; hea
   )
 
   if (p.status === 'running' && url) {
+    // `allow_lan` 關著時 daemon 把 dev server 釘在 loopback（#434／#452），這個頁面不是從那台機器開的就連不到（#527）。
+    const outOfReach = previewOutOfReach(p.lan, location.hostname)
     return (
       <div className="preview-pane">
         {/* 跑起來之後這一列就是預覽欄的標題列（2026-09-20 使用者：「兩排 header 可併在同一排」）。 */}
@@ -262,9 +282,15 @@ export function PreviewPanel({ botId, headStart, headEnd }: { botId: string; hea
           <button type="button" className="btn preview-btn" onClick={() => setNonce((n) => n + 1)}>
             重新整理
           </button>
-          <a className="btn preview-btn" href={url} target="_blank" rel="noreferrer">
-            在新分頁開
-          </a>
+          {outOfReach ? (
+            <button type="button" className="btn preview-btn" disabled title="這台裝置連不到那個 port，開新分頁也一樣">
+              在新分頁開
+            </button>
+          ) : (
+            <a className="btn preview-btn" href={url} target="_blank" rel="noreferrer">
+              在新分頁開
+            </a>
+          )}
           <button
             type="button"
             className="btn preview-btn"
@@ -277,12 +303,16 @@ export function PreviewPanel({ botId, headStart, headEnd }: { botId: string; hea
           {headEnd}
         </div>
         {err ? <ErrNote err={err} /> : null}
-        <iframe
-          key={nonce}
-          className="preview-frame"
-          title={`${bot?.name ?? ''} 預覽`}
-          {...(isMock ? { srcDoc: MOCK_DOC } : { src: url })}
-        />
+        {outOfReach ? (
+          <OutOfReachNote hostname={location.hostname} https={location.protocol === 'https:'} />
+        ) : (
+          <iframe
+            key={nonce}
+            className="preview-frame"
+            title={`${bot?.name ?? ''} 預覽`}
+            {...(isMock ? { srcDoc: MOCK_DOC } : { src: url })}
+          />
+        )}
       </div>
     )
   }

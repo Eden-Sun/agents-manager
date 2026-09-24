@@ -467,6 +467,27 @@ async fn get_advances_starting_to_running_and_emits() {
     assert_eq!(map[&bot], json!({"status": "running", "port": 5180, "source": "spawned"}));
 }
 
+/// #527：`allow_lan` 關著時我們起的 dev server 釘在 loopback（#434／#452），從手機或別台機器開的
+/// 前端連不到它。三個端點都要帶這一格，前端才知道要把 iframe 換成說明，而不是給一片空白。
+#[tokio::test]
+async fn every_preview_body_says_whether_the_dev_server_is_reachable_from_elsewhere() {
+    let mut r = rig().await;
+    assert!(!r.e.app.allow_lan, "測試的 App 預設 allow_lan 關著");
+    let bot = running_bot(&r, "alfa").await;
+    // 面板進來的第一次 GET 就是 off，那一份也要有。
+    assert_eq!(get(&r.e.app, &bot).await.unwrap()["lan"], json!(false));
+    assert_eq!(start(&r.e.app, &bot, StartReq::default()).await.unwrap()["lan"], json!(false));
+    r.fake.listen(5180);
+    let running = get(&r.e.app, &bot).await.unwrap();
+    assert_eq!(status(&running), "running");
+    assert_eq!(running["lan"], json!(false));
+    // DELETE 不走 `decorated`，自己補的那一份也要有。
+    assert_eq!(stop(&r.e.app, &bot).await.unwrap()["lan"], json!(false));
+
+    Arc::get_mut(&mut r.e.app).expect("no other handle").allow_lan = true;
+    assert_eq!(get(&r.e.app, &bot).await.unwrap()["lan"], json!(true), "開著就是 true，不是寫死的");
+}
+
 #[tokio::test]
 async fn never_started_is_off_and_absent_from_state() {
     let r = rig().await;
@@ -536,14 +557,14 @@ async fn stop_closes_the_pane_and_frees_the_port() {
     let b = running_bot(&r, "bravo").await;
     let started = start(&r.e.app, &a, StartReq::default()).await.unwrap();
     let pane = started["pane_id"].as_str().unwrap().to_string();
-    assert_eq!(stop(&r.e.app, &a).await.unwrap(), json!({"status": "off"}));
+    assert_eq!(stop(&r.e.app, &a).await.unwrap(), json!({"status": "off", "lan": false}));
     assert_eq!(r.fake.closed.lock().unwrap().clone(), vec![pane]);
     assert_eq!(status(&get(&r.e.app, &a).await.unwrap()), "off");
     assert!(state_map(&r.e.app.db).await.unwrap().is_empty());
     assert_eq!(start(&r.e.app, &b, StartReq::default()).await.unwrap()["port"], 5180, "5180 放出來了");
     // 沒開過的 bot 停也是 off，不動任何 pane。
     let c = running_bot(&r, "charlie").await;
-    assert_eq!(stop(&r.e.app, &c).await.unwrap(), json!({"status": "off"}));
+    assert_eq!(stop(&r.e.app, &c).await.unwrap(), json!({"status": "off", "lan": false}));
     assert_eq!(r.fake.closed.lock().unwrap().len(), 1);
 }
 
@@ -929,7 +950,7 @@ async fn disconnecting_an_attached_preview_never_touches_the_others_server() {
     r.fake.vite(4242, 5241, &web_dir(&r));
     let bot = running_bot(&r, "alfa").await;
     start(&r.e.app, &bot, StartReq::default()).await.unwrap();
-    assert_eq!(stop(&r.e.app, &bot).await.unwrap(), json!({"status": "off"}));
+    assert_eq!(stop(&r.e.app, &bot).await.unwrap(), json!({"status": "off", "lan": false}));
     assert!(r.fake.closed.lock().unwrap().is_empty(), "沒有關任何 pane");
     assert!(r.fake.vites.lock().unwrap().iter().any(|v| v.pid == 4242), "vite 還活著");
     // bot 被停也一樣：只斷開。
