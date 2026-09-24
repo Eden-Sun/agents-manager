@@ -2731,6 +2731,13 @@ claude 與 codex **每出一個新版**，自動把那一版的 changelog 逐條
 - **§6.9（一鍵套用 claude 更新）**：分診發生在**升級之前**（`from` 是帳本已分診的最大版本，不是磁碟上的、也不是跑著的），
   `guard` 類的鎖要在升級前補好；`upgrade-arg` 類（值得早點升級的理由）只進通知、當 AGM 排 §6.9 的依據，永遠不開 issue。
 - `claude-release-kick.sh` 的 binary diff 是 changelog 沒寫到的東西的補充，保留，由同一支 kick 帶進同一則交辦。
+  在那之前兩條管線各自派工、各自公告，而且**公告的 `client_request_id` 必須分開**：分診用
+  `agm-release-triage-<kind>-<版本>-notice`，binary diff 用 `agm-claude-release-<版本>-notice`。
+  兩邊處理同一個 claude 版本、又（依 `release_bot_id`／`responder_bot_id` 的解析順序）派給同一顆 bot，
+  公告內文必然不同，共用一個 id 的話後送的那一則會被 `supervisor::assign` 以
+  `client_request_id already used with different text` 拒絕，使用者只看得到其中一則（issue #519）。
+  **派工**的 crid 是另一回事：`agm-claude-release-<版本>`（不帶 `-notice`）由網頁按鈕與 kick 共用，
+  那是刻意的冪等（`claude_review.rs`），不要跟著改。
 
 **兩層判斷**
 1. **決定性規則**（`daemon/src/release_triage/rules.toml`，`include_str!`；改規則＝改檔）。每條 changelog（`- ` 開頭、續行併入）一個 entry，

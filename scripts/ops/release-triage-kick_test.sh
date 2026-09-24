@@ -434,5 +434,27 @@ equals "agm 不在：exit 0" "$RC" "0"
 check  "agm 不在：留一行 log" "agm CLI 不在" "$AGM_DIR/release-triage.log"
 teardown
 
+# issue #519：兩條管線的**公告** request-id 不能共用。claude 的 binary diff（claude-release-task.md）
+# 與 changelog 逐條分診（release-triage-task.md）會處理同一個版本、派給同一顆 bot，兩則公告的內文必然
+# 不同——共用一個 id 的話，後送的那一則會被 daemon 以 client_request_id already used with different text
+# 拒絕，使用者只看得到其中一則。這裡釘住「兩份 task.md 交代的 id 不一樣，而且各自帶得出自己的管線」。
+TRIAGE_TASK="$HERE/release-triage-task.md"
+CLAUDE_TASK="$HERE/claude-release-task.md"
+notice_id() { # notice_id <task.md>：抓出 --request-id 後面那個 …-notice 的樣板
+  sed -n 's/.*--request-id \(agm-[^ ]*-notice\).*/\1/p' "$1" | head -1
+}
+TRIAGE_ID=$(notice_id "$TRIAGE_TASK")
+CLAUDE_ID=$(notice_id "$CLAUDE_TASK")
+equals "分診的公告 id 帶管線與 kind" "$TRIAGE_ID" "agm-release-triage-<kind>-<新版號>-notice"
+equals "binary diff 的公告 id 維持原樣" "$CLAUDE_ID" "agm-claude-release-<新版號>-notice"
+if [ -n "$TRIAGE_ID" ] && [ "$TRIAGE_ID" != "$CLAUDE_ID" ]; then
+  echo "ok   - 兩條管線的公告 id 不同"; PASS=$((PASS + 1))
+else
+  echo "FAIL - 兩條管線的公告 id 相同或抓不到（triage='$TRIAGE_ID' claude='$CLAUDE_ID'）"; FAIL=$((FAIL + 1))
+fi
+# 派工本身的 crid 是另一回事，不能被這次改動波及：`claude_review.rs` 用 agm-claude-release-<ver>
+# 讓網頁按鈕與 kick 冪等地指到同一筆（見該檔 :10／:142），所以那個**沒有** -notice 尾巴的 id 要留著。
+check "kick 的派工 request-id 仍是 release-triage-<kind>-<to>" 'release-triage-${KIND}-${TO}' "$SCRIPT"
+
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

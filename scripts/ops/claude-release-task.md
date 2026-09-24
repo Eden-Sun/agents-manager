@@ -3,6 +3,8 @@ AGM 定期交辦：Claude Code 出新版了，請解析這一版有什麼**這�
 **通知怎麼送**：如果你是巡檢 AGM（使用者入口那顆），你這則回覆就是通知。如果你是協調者或其他 child（使用者看不到你的對話），解析完要用
 `bin/agm assign --notice --bot <巡檢 bot id> --request-id agm-claude-release-<新版號>-notice --text '…'` 把結論交給巡檢，由它出現在使用者入口。
 
+這個 id 是**這一條管線（binary diff）專用**的。同一個版本的 changelog 逐條分診是另一條管線，它的公告用 `agm-release-triage-<kind>-<新版號>-notice`——兩邊不能共用一個 id，否則後送的那一則會被 daemon 以「client_request_id already used with different text」拒絕（issue #519）。
+
 本次版本（由 `bin/claude-release-kick.sh` 填在訊息末尾）：舊版與新版的版本號，以及兩顆 binary 的路徑。
 
 怎麼解析（唯讀，不要 build、不要重啟、不要改設定）：

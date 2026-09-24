@@ -1,7 +1,9 @@
 AGM 定期交辦：上游（claude／codex）出新版了，請對訊息末尾那份 JSON 裡**每一條** kept／unmatched 的 changelog 條目下 verdict，該處理的開成 issue（由 daemon 開，你不直接跑 `gh`）。只分診，**不改程式、不升級、不改設定、不重啟**。
 
 **通知怎麼送**：如果你是巡檢 AGM（使用者入口那顆），你這則回覆就是通知。如果你是協調者或其他 child（使用者看不到你的對話），做完要用
-`bin/agm assign --notice --bot <巡檢 bot id> --request-id agm-claude-release-<新版號>-notice --text '…'` 把結論交給巡檢，由它出現在使用者入口。（`<新版號>` 換成本次 JSON 的 `to`；codex 那一輪一樣用這個格式。）
+`bin/agm assign --notice --bot <巡檢 bot id> --request-id agm-release-triage-<kind>-<新版號>-notice --text '…'` 把結論交給巡檢，由它出現在使用者入口。
+
+`<kind>` 是本次 JSON 的 `kind`（`claude` 或 `codex`），`<新版號>` 是本次 JSON 的 `to`——例如 `agm-release-triage-codex-0.156.1-notice`。**這個 id 一定要帶 `release-triage-` 與 `<kind>`**：同一個 claude 版本另外還有一條 binary diff 的管線（`claude-release-task.md`）也會發公告，兩邊若用同一個 id，後送的那一則會被 daemon 以「client_request_id already used with different text」拒絕，使用者就只看得到其中一則（issue #519）。
 
 ## 輸入
 
