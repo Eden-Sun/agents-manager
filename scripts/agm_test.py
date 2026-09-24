@@ -767,6 +767,20 @@ class MiscCommandTest(CliCase):
         self.assertEqual(self.ok("inbox")["events"][0]["id"], "e1")
         self.assertTrue(self.ok("ack", "e1")["ok"])
 
+    def test_ack_without_a_role_identity_says_why(self):
+        """issue #432：ack 只有 AGM 角色做得到。403 要講「去角色的 pane 裡跑」，不是丟一個 http_error。"""
+        FakeDaemon.routes["POST /api/supervisor/inbox/e1/ack"] = (
+            403,
+            {"error": "forbidden", "reason": "role_required", "message": "這支只給 AGM 角色"},
+        )
+        err = self.bad("ack", "e1")
+        self.assertEqual(err["error"], "role_required")
+        self.assertIn("pane", err["message"])
+        self.assertIn("AM_HOOK_TOKEN", err["message"])
+        # 其他 403 不要被這條吃掉：照原本的 http_error 冒出來。
+        FakeDaemon.routes["POST /api/supervisor/inbox/e2/ack"] = (403, {"error": "forbidden", "reason": "something_else"})
+        self.assertEqual(self.bad("ack", "e2")["error"], "http_error")
+
     def test_ops_alert_and_approval_lookup_by_id(self):
         """排程腳本卡住時喊得到人，而且查得到被清單擠掉的那筆核准（review 2026-09-16 c1 M1）。"""
         FakeDaemon.routes["POST /api/supervisor/ops-alerts"] = (200, {"queued": True, "inbox_event_id": "e9"})

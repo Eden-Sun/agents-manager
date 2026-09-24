@@ -2251,7 +2251,9 @@ mod tests {
         assert!(err.is_some_and(|e| e.contains("never acknowledged")), "最後一次的原因留著");
         // 還算未處理：UI、inbox_open 與 ack 都還看得到它。
         assert_eq!(store::open_inbox_count(&app.db).await.unwrap(), 2, "放棄的那則加上喊人的那則");
-        assert_eq!(roles::ack(&app.db, &id, None, true).await.unwrap(), roles::AckOutcome::Acked, "人照樣 ack 得掉");
+        // `gave_up` 不等於結案：收它的那個角色照樣 ack 得掉。（issue #432 之前這裡走的是
+        // `None`＝使用者那條路，現在 ack 只認驗過的角色。）
+        assert_eq!(roles::ack(&app.db, &id, Role::Responder, true).await.unwrap(), roles::AckOutcome::Acked, "角色照樣 ack 得掉");
 
         roles::classify(&app.db).await.unwrap(); // tick 裡 recover_unacked 之後就是這一步
         let patrol = roles::due_for(&app.db, Role::Patrol, true, "2999-01-01T00:00:00Z", 5).await.unwrap();

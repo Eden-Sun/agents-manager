@@ -1770,6 +1770,9 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 - `GET /api/supervisor/inbox?all=0|1&limit=200&role=patrol|responder` → `{events:[{id,event_key,assignment_id,bot_id,turn_id,kind,payload,state,notify:{turn_id,delivery,attempts,next_at,error,delivered_at},role,wake,claimed_by,acked_by,merged_into,created_at,updated_at}],open,all,limit,role}`。
   預設只列未 handled、最舊在前；`all=1` 含已處理（最新在前）；`limit` 上限 1000；`role` 以 `COALESCE(claimed_by, role)` 在 **SQL 的 LIMIT 之前**過濾（先取一頁再過濾的話，最舊一整頁都是另一個角色時就翻不到自己的）。
   `POST /api/supervisor/inbox/{id}/ack` → `{}`；已結過 `{already_handled:true}`；帶角色 bot token 而事件歸另一個角色 → 409 `claimed_by_other_role`。
+  **只有 AGM 角色結得掉**（issue #432）：沒帶 `X-AM-Bot-Id`、或帶了而那顆不是角色 bot → 403 `role_required`；帶了卻證明不了 → 403 `bot_proof_mismatch`。
+  以前沒帶標頭走的是 `1=1`（什麼角色的事件都結得掉），所以角色 bot 只要不送標頭就繞過角色分界——帶對 token 反而被 409 擋。
+  代價：人在一般 shell 裡跑 `bin/agm ack` 會 403，要在角色自己的 pane 裡跑（CLI 會把這件事講明）。
   - `role`／`wake`：SPEC §18.15 的路由表。`wake=false` 的事件不會自己開一次喚醒；`merged_into` 非空 = 被 daemon 合併掉（`acked_by:"daemon"`）。
   - `kind:"bot_request"`（`payload{to_role,wake,quiet_reason,from_bot_id,from_name,from_role,target_bot_id,text,client_request_id,attachments,sender_verified,via}`）：見下方「bot 寫給 AGM」。
   - `state`：`pending` → `delivered`（已送通知）→ `handled`（總管 ack）；另有 `gave_up`＝補送用盡、已停手（仍算未處理，ack 得掉，見下）。送達看 `delivery`：`failed` 留 pending 退避；`unknown` 綁 `notify.turn_id` 對帳不重送。
@@ -1820,6 +1823,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 **角色標頭是三態，不是兩態（issue #415）**：沒帶 `X-AM-Bot-Id` = 使用者／UI（照舊，什麼都做得了）；帶了而且 token 對得上 = 那顆 bot 的角色（不是角色 bot 就等同沒帶）；
 **帶了卻證明不了**（token 空、非 UTF-8、對不上，或 `X-AM-Bot-Id` 本身讀不出值）= 整個請求 `403 {"reason":"bot_proof_mismatch"}`，**不會**退回使用者權限。
 以前最後一種也當成「沒帶」，而沒帶在 `inbox/{id}/ack` 是 `1=1`（什麼角色的事件都結得掉），於是角色 bot 把自己的 token 打壞反而比帶對還多權限。
+`inbox/{id}/ack` 那一支在 issue #432 之後連「沒帶」也不收了（403 `role_required`）；**其餘端點的「沒帶＝使用者」仍然成立**，共用 UI token 的前提下 daemon 分不出人與 bot，那條界線留在 #432。
 受影響的端點：`supervisor/assignments`（含 `{id}/review`）、`supervisor/inbox/{id}/ack`、`supervisor/approvals/{id}/decide`、`supervisor/leases/{resource}/renew`｜`release`、
 `supervisor/herdr-maintenance/open`｜`end`、`missions/{id}/pause`｜`cancel`。
 設定目錄可用 `AGM_RUNTIME_DIR` 或 `--runtime-dir` 覆寫。

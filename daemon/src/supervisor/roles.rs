@@ -630,19 +630,20 @@ pub enum AckOutcome {
     ClaimedByOther(String),
 }
 
-/// 結案一則事件。`actor` = 驗證過的角色（bot token）；`None` = UI／使用者，什麼都能結。
+/// 結案一則事件。`actor` 一定是驗證過的角色——呼叫端在 `post_inbox_ack` 就被 `require_role`
+/// 擋掉了（issue #432）。以前這裡收 `Option<Role>`，`None`（沒帶標頭）走 `1=1` 什麼都結得掉，
+/// 而那正好比帶對 token 的角色權限更大。
 ///
 /// 協調者還沒建立時，巡檢可以結協調的事件（因為那時就是它在收）。
-pub async fn ack(pool: &SqlitePool, id: &str, actor: Option<Role>, responder_configured: bool) -> Result<AckOutcome> {
+pub async fn ack(pool: &SqlitePool, id: &str, actor: Role, responder_configured: bool) -> Result<AckOutcome> {
     // 守衛跟寫入在同一句 SQL：先 SELECT 再 UPDATE 的話，兩者之間送出的那一次 `mark_delivered`
     // 會把 claim 換成另一個角色，而這一句照樣寫下去——等於跨角色結了別人的案。
     let allowed = match actor {
-        None => "1=1".to_string(),
         // 協調者還沒建立時，協調的事件就是巡檢在收，所以巡檢結得了。
-        Some(Role::Patrol) if !responder_configured => format!("{OWNER} IN ('patrol','responder')"),
-        Some(r) => format!("{OWNER}='{}'", r.as_str()),
+        Role::Patrol if !responder_configured => format!("{OWNER} IN ('patrol','responder')"),
+        r => format!("{OWNER}='{}'", r.as_str()),
     };
-    let acked_by = actor.map(Role::as_str).unwrap_or("user");
+    let acked_by = actor.as_str();
     let sql = format!(
         "UPDATE supervisor_inbox SET state='handled', acked_by=?, updated_at=?
           WHERE supervisor_id=? AND id=? AND state!='handled' AND {allowed}"
@@ -1080,8 +1081,8 @@ mod tests {
         // 原收件者才 ack 得動；協調者送不進去也結不掉。
         let id: String = sqlx::query_scalar("SELECT id FROM supervisor_inbox WHERE event_key='old-recovered'").fetch_one(&p).await.unwrap();
         assert_eq!(mark_delivered(&p, &[id.clone()], Role::Responder, "t-new", "ok").await.unwrap(), 0);
-        assert_eq!(ack(&p, &id, Some(Role::Responder), true).await.unwrap(), AckOutcome::ClaimedByOther("patrol".into()));
-        assert_eq!(ack(&p, &id, Some(Role::Patrol), true).await.unwrap(), AckOutcome::Acked);
+        assert_eq!(ack(&p, &id, Role::Responder, true).await.unwrap(), AckOutcome::ClaimedByOther("patrol".into()));
+        assert_eq!(ack(&p, &id, Role::Patrol, true).await.unwrap(), AckOutcome::Acked);
     }
 
     /// 加欄與回填同一個 transaction：回填失敗時連欄位都不能留下，否則重啟看到欄位已經在，
@@ -1165,21 +1166,22 @@ mod tests {
         let ids = vec![id.clone()];
         assert_eq!(mark_delivered(&p, &ids, Role::Responder, "t1", "ok").await.unwrap(), 1);
         assert_eq!(mark_delivered(&p, &ids, Role::Patrol, "t2", "ok").await.unwrap(), 0, "已被協調者 claim");
-        assert_eq!(ack(&p, &id, Some(Role::Patrol), true).await.unwrap(), AckOutcome::ClaimedByOther("responder".into()));
-        assert_eq!(ack(&p, &id, Some(Role::Responder), true).await.unwrap(), AckOutcome::Acked);
-        assert_eq!(ack(&p, &id, Some(Role::Responder), true).await.unwrap(), AckOutcome::AlreadyHandled);
-        assert_eq!(ack(&p, "nope", None, true).await.unwrap(), AckOutcome::NotFound);
+        assert_eq!(ack(&p, &id, Role::Patrol, true).await.unwrap(), AckOutcome::ClaimedByOther("responder".into()));
+        assert_eq!(ack(&p, &id, Role::Responder, true).await.unwrap(), AckOutcome::Acked);
+        assert_eq!(ack(&p, &id, Role::Responder, true).await.unwrap(), AckOutcome::AlreadyHandled);
+        assert_eq!(ack(&p, "nope", Role::Responder, true).await.unwrap(), AckOutcome::NotFound);
         let acked_by: String = sqlx::query_scalar("SELECT acked_by FROM supervisor_inbox WHERE id=?").bind(&id).fetch_one(&p).await.unwrap();
         assert_eq!(acked_by, "responder");
     }
 
     #[tokio::test]
-    async fn concurrent_acks_from_both_roles_close_it_once() {
+    async fn two_concurrent_acks_close_it_once() {
         let p = pool().await;
         let id = super::super::store::push_inbox(&p, "k1", "approval_requested", None, None, None, &json!({})).await.unwrap().unwrap();
         classify(&p).await.unwrap();
-        // 使用者（UI）與協調者同時結：只有一個 Acked。
-        let (a, b) = tokio::join!(ack(&p, &id, None, true), ack(&p, &id, Some(Role::Responder), true));
+        // 同一個角色的兩次同時結（協調者的兩個回合）：守衛與寫入在同一句 SQL，只有一個 Acked。
+        // 以前這裡一側是 `None`＝使用者，那條路在 issue #432 之後不存在了。
+        let (a, b) = tokio::join!(ack(&p, &id, Role::Responder, true), ack(&p, &id, Role::Responder, true));
         let outcomes = [a.unwrap(), b.unwrap()];
         assert_eq!(outcomes.iter().filter(|o| **o == AckOutcome::Acked).count(), 1, "{outcomes:?}");
     }
