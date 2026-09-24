@@ -85,7 +85,7 @@ approval，所以 approval 表就是唯一真相。數不出來（端點壞了�
    `origin/main` 動了但 `build-inputs` 路徑沒變（docs-only）：沿用原核准，acquire 的 `--commit` 用核准那一顆，不為了建出一樣的東西再叫醒協調者。
    真的動到要建的東西，而舊的**已核准、那顆 commit 還沒派過**（在等安全窗口）：照核准的那顆建，不開新申請；「已派過」（`daemon-update.last`）記核准的 commit，HEAD 多出來的留到下一輪另外申請（issue #439：main 約每 5 分鐘一個 push，以前已核准的那張每輪被取代，核准永遠派不出去）。
    舊的還是 pending，或已經 denied／expired／consumed／superseded：新申請帶 `--supersedes <舊 id>`，daemon 把還能用的舊申請標 `superseded`、等待時間接過去（升級計時不因為 main 動了就歸零，SPEC §18.10），不能用的就不接；舊的 `bin/agm` 不認得這個旗標時照舊開新的一筆。pending 換成新 commit 是因為還沒人裁示，讓協調者審的就是現在要建的東西，不必核准後再為 HEAD 多裁示、多建一次。
-7. `lease_token` **不進派工正文，也不進 argv**：寫進 `daemon-update.lease-token`（權限 600），自己交還與派工正文都用 `--lease-token-file <路徑>`，由 `agm` 自己去讀（issue #477）。正文會出現在 assignments API、建置 child 的對話紀錄與這份 log；argv 則是同一個 uid 的行程用 `ps` 就看得到，所以 `--lease-token "$(cat …)"` 這種寫法等於把前面的功夫做白工。檔寫不出來時退而用 `--lease-token -`（stdin）。`--lease-token-file` 要求檔案權限不寬於 600，而且是 open 之後才 fstat、不跟隨 symlink。部署順序：`bin/agm` 要先換成認得這個旗標的版本，舊的 `bin/agm` 會以 rc 2 退掉。
+7. `lease_token` **不進派工正文，也不進 argv**：`mktemp` 建一個 `daemon-update.lease-token.XXXXXX`（權限 600，O_EXCL＋隨機名，不用可預測的固定路徑；上一輪的在拿到新窗口時清掉），自己交還與派工正文都用 `--lease-token-file <路徑>`，由 `agm` 自己去讀（issue #477）。正文會出現在 assignments API、建置 child 的對話紀錄與這份 log；argv 則是同一個 uid 的行程用 `ps` 就看得到，所以 `--lease-token "$(cat …)"` 這種寫法等於把前面的功夫做白工。檔寫不出來時退而用 `--lease-token -`（stdin）。`--lease-token-file` 要求檔案權限不寬於 600，而且是 open 之後才 fstat、不跟隨 symlink。部署順序：`bin/agm` 要先換成認得這個旗標的版本，舊的 `bin/agm` 會以 rc 2 退掉。
 5. `daemon-update.lock` 防止腳本重疊執行，鎖裡寫 pid 與時間。執行者已經不在（強制關機、斷電、SIGKILL）就**自己回收**並接手這一輪；
    還活著但卡超過 `AGM_LOCK_HUNG_SECS`（預設 3600 秒）不搶它的鎖，改推一則 `ops_alert` 給 AGM。核准狀態檔損毀、或核准 ID 查不到
    （先用 `approval list --id` 查，清單只回最新 100 筆）一樣停住並推 `ops_alert`，不自動繞過——以前這些只寫 log 就 `exit 0`，
@@ -184,7 +184,7 @@ scripts/ops/daemon-swap.sh --sha <完整 sha> --old <short sha> --old-hash <sha2
     --approval <restart 核准 id> --owner <自己的 bot id> --checkout <乾淨 worktree>
 ```
 
-離開碼：0 成功、2 參數錯、3 前置核對失敗、4 沒窗口／複查不安全、5 備份有問題、6 往前修後停在新 binary、7 已回滾、8 換版成功但 restart 窗口沒交還成功（issue #477：下一個人拿不到窗口，要等 TTL 或請 AGM `--force` 接管）。
+離開碼：0 成功、2 參數錯、3 前置核對失敗、4 沒窗口／複查不安全、5 備份有問題、6 往前修後停在新 binary、7 已回滾、8 換版成功但 restart 窗口沒交還成功（issue #477）。**窗口不會自己消失**：它要撐到租約的 `expires_at`——預設 900 秒（`maintenance::DEFAULT_TTL_SECS`，上限 3600，且不會晚於那張核准的到期時間），這段時間內 supervisor 的 assignment 派送是停的、也沒有人拿得到 restart 窗口。看到 8 就是要有人處理：等 TTL 到期，或請 AGM 用 `lease release restart --force` 附理由接管，不要當成換版順利結束。
 
 `lease_token` **不進 argv**（issue #477）：拿到窗口之後 `mktemp` 在 AGM 私有目錄底下建一個 0600 的檔（不可預測路徑、不落在全域可寫的 /tmp），`agm lease release` 走 `--lease-token-file` 讀，腳本結束時（不管成敗）刪掉。argv 對同一個 uid 的行程是公開的（`ps`），而那顆 token 是「只出現一次、任何 API 都查不到」的一次性憑證，抄走就能收掉別人正在換 binary 的窗口。交還的 rc 也不再被 `>/dev/null 2>&1` 吞掉——以前失敗時 log 照樣寫「窗口已交還」，而窗口其實握到 TTL。
 

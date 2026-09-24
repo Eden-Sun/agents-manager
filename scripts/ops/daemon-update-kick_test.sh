@@ -86,6 +86,14 @@ check_no() {
   fi
 }
 
+check_eq() { # check_eq <描述> <期望> <實際>
+  if [ "$2" = "$3" ]; then
+    echo "ok   - $1"; PASS=$((PASS + 1))
+  else
+    echo "FAIL - $1（預期 '$2'，實際 '$3'）"; FAIL=$((FAIL + 1))
+  fi
+}
+
 # 1. 一路順的情形：申請核准 → 取得窗口 → 派工，而且未結案查詢用的是 --open。
 setup
 bash "$SCRIPT"
@@ -542,14 +550,23 @@ setup
 export AGM_TEST_MINUTE="0"
 export STUB_ACQUIRE='{"lease":{"fence":9,"resource":"rebuild"},"lease_token":"tok-abc123"}'
 bash "$SCRIPT"
-check "派工正文用檔案帶 lease-token" "--lease-token-file $AGM_DIR/daemon-update.lease-token" "$AGM_DIR/assign-body.txt"
+# 檔名是 mktemp 給的隨機尾巴（O_EXCL＋猜不到，同 uid 的行程佔不住那個名字，i92b 審核）。
+TOKF=$(ls "$AGM_DIR"/daemon-update.lease-token.* 2>/dev/null | head -1)
+check_eq "token 檔只有一份" "1" "$(ls "$AGM_DIR"/daemon-update.lease-token.* 2>/dev/null | wc -l | tr -d ' ')"
+if [ -e "$AGM_DIR/daemon-update.lease-token" ]; then
+  echo "FAIL - 還在用可預測的固定路徑"; FAIL=$((FAIL + 1))
+else
+  echo "ok   - 不是可預測的固定路徑"; PASS=$((PASS + 1))
+fi
+check "腳本用 mktemp 建 token 檔" 'mktemp "\$DIR/daemon-update.lease-token.XXXXXX"' "$SCRIPT"
+check "派工正文用檔案帶 lease-token" "--lease-token-file $TOKF" "$AGM_DIR/assign-body.txt"
 # `--lease-token "$(cat …)"` 等於叫 child 把 token 攤回 argv（同 uid 用 `ps` 就看得到），
 # 前面寫 600 檔的功夫就白做了；正文只能給路徑（issue #477，i264 審核）。
 check_no "正文不叫 child 把 token 攤回 argv" 'cat .*daemon-update.lease-token' "$AGM_DIR/assign-body.txt"
 check_no "派工正文沒有 token 本身" "tok-abc123" "$AGM_DIR/assign-body.txt"
 check_no "log 裡也沒有" "tok-abc123" "$AGM_DIR/daemon-update.log"
-check "token 檔的內容" "^tok-abc123$" "$AGM_DIR/daemon-update.lease-token"
-if [ "$(stat -f %Lp "$AGM_DIR/daemon-update.lease-token" 2>/dev/null || stat -c %a "$AGM_DIR/daemon-update.lease-token")" = "600" ]; then
+check "token 檔的內容" "^tok-abc123$" "$TOKF"
+if [ "$(stat -f %Lp "$TOKF" 2>/dev/null || stat -c %a "$TOKF")" = "600" ]; then
   echo "ok   - token 檔只有本人讀得到"; PASS=$((PASS + 1))
 else
   echo "FAIL - token 檔權限不是 600"; FAIL=$((FAIL + 1))
@@ -570,11 +587,19 @@ teardown
 setup
 export AGM_TEST_MINUTE="0"
 export STUB_ACQUIRE='{"lease":{"fence":9,"resource":"rebuild"},"lease_token":"tok-abc123"}'
-mkdir -p "$AGM_DIR/daemon-update.lease-token"   # 佔住那個路徑，printf 寫不進去
-bash "$SCRIPT"
+# mktemp 的名字猜不到，佔不住——改成讓「建 token 檔」那一次 mktemp 直接失敗（不帶樣板的那次照常，
+# 派工正文的暫存檔還要用）。
+mkdir -p "$ROOT/stubbin"
+{ echo '#!/bin/bash'
+  echo 'case "${1:-}" in *daemon-update.lease-token.XXXXXX) exit 1 ;; esac'
+  echo 'exec /usr/bin/mktemp "$@"'
+} > "$ROOT/stubbin/mktemp"
+chmod +x "$ROOT/stubbin/mktemp"
+PATH="$ROOT/stubbin:$PATH" bash "$SCRIPT"
 check "寫不進檔就從 stdin 交還" "lease release rebuild --owner .* --fence 9 --lease-token -" "$AGM_DIR/calls.log"
 check_no "這條路一樣不讓 token 進 argv" "tok-abc123" "$AGM_DIR/calls.log"
 check "這輪不派工" "寫不進 lease token 檔" "$AGM_DIR/daemon-update.log"
+check_eq "失敗那次不留半個 token 檔" "0" "$(ls "$AGM_DIR"/daemon-update.lease-token.* 2>/dev/null | wc -l | tr -d ' ')"
 if [ -s "$AGM_DIR/assign-body.txt" ]; then   # setup 會先建一個空的，有內容才是真的派了工
   echo "FAIL - 寫不進 token 檔卻還是派了工"; FAIL=$((FAIL + 1))
 else
