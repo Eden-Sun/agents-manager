@@ -3290,8 +3290,11 @@ mod tests {
         create_approval_notifying(p, "agm-kick", "rebuild", "release rebuild", Some(commit), None, None, None, None, true).await.unwrap()
     }
 
+    /// 照**寫進去的順序**列（issue #443）：本來是 `ORDER BY created_at, id`，但同一輪四筆是同一毫秒建的，
+    /// `created_at` 全部一樣，於是比到 `id`——ULID 在同一毫秒內不保證遞增（隨機那段說了算），
+    /// 「最後一筆是最新的」就變成擲硬幣，main 因此偶發紅。`rowid` 是 SQLite 的插入序，不會平手。
     async fn statuses(p: &SqlitePool) -> Vec<(String, String)> {
-        sqlx::query_as("SELECT target_commit, status FROM supervisor_approvals ORDER BY created_at, id").fetch_all(p).await.unwrap()
+        sqlx::query_as("SELECT target_commit, status FROM supervisor_approvals ORDER BY rowid").fetch_all(p).await.unwrap()
     }
 
     /// issue #421：kick 每個整點重試，記住舊 id 的本機狀態檔掉了就不會帶 `--supersedes`，於是每一輪
@@ -3314,6 +3317,35 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(open, vec![format!("approval:{}:requested", second.approval.id)]);
+    }
+
+    /// issue #443：同一毫秒建的幾筆，列出來要照**寫進去的順序**。
+    ///
+    /// 這條是拿 [`statuses`] 的排序當守衛：ULID 在同一毫秒內只有隨機那段在變、不保證遞增，
+    /// 所以 `ORDER BY created_at, id` 在這種情形是擲硬幣——`four_rounds_leave_exactly_one_pending_approval`
+    /// 的「留下的是最新那筆」因此偶發紅（main 2026-09-24）。id 這裡故意跟寫入順序相反，
+    /// 換回舊排序這條會當場紅，不必靠重跑碰運氣。同型的前例：837cf7d0（決定歷程）、d9bfbeee（交辦順序）。
+    #[tokio::test]
+    async fn approvals_written_in_the_same_millisecond_are_listed_in_write_order() {
+        let p = pool().await;
+        let at = "2026-09-24T03:00:00.000Z";
+        for (id, commit) in [("01ZZZZZZZZZZZZZZZZZZZZZZZZ", "first"), ("01AAAAAAAAAAAAAAAAAAAAAAAA", "second")] {
+            sqlx::query(
+                "INSERT INTO supervisor_approvals
+                   (id, supervisor_id, requester, requester_unverified, purpose, scope, target_commit, status, created_at, updated_at)
+                 VALUES (?,?, 'agm-kick', 1, 'rebuild', 'release rebuild', ?, 'pending', ?, ?)",
+            )
+            .bind(id)
+            .bind(SUPERVISOR_ID)
+            .bind(commit)
+            .bind(at)
+            .bind(at)
+            .execute(&p)
+            .await
+            .unwrap();
+        }
+        let rows = statuses(&p).await;
+        assert_eq!(rows.iter().map(|(c, _)| c.as_str()).collect::<Vec<_>>(), vec!["first", "second"], "照寫入順序，不看 ULID 的亂數段");
     }
 
     /// 連跑四輪只會留下一筆 pending（票上那個晚上的形狀）。
