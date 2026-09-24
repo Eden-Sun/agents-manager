@@ -905,8 +905,17 @@ mod tests {
 
         // pane 不見了就從表裡拿掉。
         assert_eq!(scan_host(&app, "local", &[pane("w1:pA", Some("claude"), 3)]).await.unwrap().panes, 0);
-        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM panes").fetch_one(&app.db).await.unwrap();
-        assert_eq!(left, 0);
+        // #437：這裡偶發紅（整樹高並行時 left 1 / right 0），但原因還沒查出來——原本是全表
+        // `COUNT(*)`，紅的時候只知道「數字不對」，連**哪一顆 pane 活下來**都不知道，沒辦法往下查。
+        // 先把證據補齊：列出還留著的 `pane_id` 與它的 `last_seen`，下次再紅就看得出是誰、時間差多少。
+        // （查過但**排除掉**的假設：跨測試汙染——`app()` 每次開自己的 `am-panes-<ulid>/t.sqlite3`；
+        // 以及「兩次 `db::now()` 落在同一毫秒讓 `last_seen < scanned_at` 為假」——插樁量 20 次，
+        // 間隔穩定是 3–4 毫秒，而且 `scanned_at` 在 `scan_host` 最前面就捕捉，越忙只會拉大不會縮小。）
+        let left: Vec<(String, String)> = sqlx::query_as("SELECT pane_id, last_seen FROM panes")
+            .fetch_all(&app.db)
+            .await
+            .unwrap();
+        assert!(left.is_empty(), "非 agent pane 不在 snapshot 裡就該被清掉，卻還留著（pane_id, last_seen）：{left:?}");
         std::fs::remove_dir_all(&app.data_dir).ok();
     }
 
