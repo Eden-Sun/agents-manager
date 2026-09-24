@@ -6,7 +6,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { quotaDisableKey, quotaHiddenBotIds } from './quotaHide.ts'
 import { adjacentBotId, orderedBotIds } from './store.ts'
-import { totalUnread } from './unread.ts'
+import { titleUnread } from './unread.ts'
 import type { StoreState } from './store.ts'
 import type { Bot, Project } from '../api/types.ts'
 
@@ -42,6 +42,7 @@ test('⌥↑／⌥↓ 跳過收起來的 bot，不會走進畫面上沒有的那
 })
 
 test('分頁標題的 (N) 不算收起來的未讀', () => {
-  assert.equal(totalUnread({ b1: 2, b2: 3, b3: 1 }), 6)
-  assert.equal(totalUnread({ b1: 2, b2: 3, b3: 1 }, ['b1', 'b2']), 1)
+  const book = { ...state(null), botUnread: { b1: 2, b2: 3, b3: 1 }, supervisorProjectId: null }
+  assert.equal(titleUnread({ ...book, hiddenBotIds: [] }), 6)
+  assert.equal(titleUnread({ ...book, hiddenBotIds: ['b1', 'b2'] }), 1)
 })

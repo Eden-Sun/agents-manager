@@ -273,3 +273,34 @@ test('整合：queued 的 turn_updated 不算完成，之後真正完成才記�
   const done = [...queuedOnly, { seq: 4, type: 'turn_updated', data: { bot_id: 'B3', turn: turn('t-q', 'web-q', 'completed') } }]
   assert.deepEqual(boot(storage, { state, frames: done }).botUnread, { B3: 1 }, '真正完成那一次照樣記')
 })
+
+/** issue #509 的另一半：不只是「不要標成已讀」，shell 蓋著群組時新回合要真的 `+1`。 */
+test('整合：人在前景、選著專案，但畫面是 shell 面板——群組回覆照樣記未讀', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'am-group-unread-'))
+  const storage = join(dir, 'storage.json')
+  const seed = (shell: boolean) =>
+    writeFileSync(
+      storage,
+      JSON.stringify({
+        // 選著 P1 的群組（`viewPane`／「在這裡開 shell」都不會清掉它）。
+        'am.selection': JSON.stringify({ botId: null, projectId: 'P1' }),
+        'am.groupUnread.v3': '1',
+        ...(shell ? { 'am.shellView': JSON.stringify({ host: 'local', paneId: 'w1:p9', cwd: '/p1' }) } : {}),
+      }),
+    )
+  const state = { daemon_seq: 1, projects: [{ id: 'P1', path: '/p1', bots: [bot('B1')] }] }
+  const frames = [
+    { seq: 2, type: 'turn_updated', data: { bot_id: 'B1', turn: turn('t-g', 'grp-9:B1', 'in_flight') } },
+    { seq: 3, type: 'message_added', data: { bot_id: 'B1', message: msg('mu', 't-g', 'user', 'grp-9') } },
+    { seq: 4, type: 'message_added', data: { bot_id: 'B1', message: msg('ma', 't-g', 'assistant') } },
+    { seq: 5, type: 'turn_updated', data: { bot_id: 'B1', turn: turn('t-g', 'grp-9:B1', 'completed') } },
+  ]
+
+  seed(true)
+  const covered = boot(storage, { state, frames, focus: true, shells: [{ pane_id: 'w1:p9' }] })
+  assert.deepEqual(covered.groupUnread, { P1: 1 }, 'shell 蓋著時群組時間軸看不到，回覆要算未讀')
+
+  // 對照：同樣在前景、同樣選著 P1，沒有 shell 就是真的在看，標成已讀。
+  seed(false)
+  assert.deepEqual(boot(storage, { state, frames, focus: true }).groupUnread, {})
+})

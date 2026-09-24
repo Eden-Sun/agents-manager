@@ -8,11 +8,13 @@
  * 而直接標成已讀——徽章不會亮，已讀標記還被推到最後一則。兩條規則放同一個檔，免得再分岔。
  */
 
+import type { ShellView } from './store'
+
 export interface ViewSelection {
   selectedBotId: string | null
   selectedProjectId: string | null
-  /** 只看有沒有：掛上去就是蓋住整個主畫面。 */
-  shellView: unknown
+  /** 只看有沒有（掛上去就是蓋住整個主畫面），型別照 store 那一份，免得傳錯東西進來還編得過。 */
+  shellView: ShellView | null
 }
 
 export function viewingBot(s: ViewSelection, botId: string): boolean {

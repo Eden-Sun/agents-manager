@@ -142,7 +142,7 @@ const initialSelection = readSelection()
 
 const SHELL_VIEW_KEY = 'am.shellView'
 
-type ShellView = {
+export type ShellView = {
   host: string
   paneId: string
   cwd: string
