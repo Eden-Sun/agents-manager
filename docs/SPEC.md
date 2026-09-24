@@ -2902,7 +2902,7 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
 | `assignment_stalled` | 未結案交辦 `updated_at` 沒動 | `assignment_stalled_secs`（7200） |
 | `assignment_undelivered` | 仍 `queued`、從沒送出，用 `created_at` 算 | `assignment_stalled_secs`（7200） |
 | `notify_exhausted` | 通知重送用盡 | `notify_max_attempts`（5） |
-| `responder_needs_login` | 協調者 `status=needs_login`（CLI 沒登入，見 §18.15），critical | 無（狀態本身就是證據） |
+| `responder_needs_login` | 角色 bot（協調者**與巡檢**，resource 是角色名）不可用：停在登入失效＝critical，`notify_stalled`＝degraded（見 §18.15） | `ROLE_UNAVAILABLE_HOLD_SECS`（60＝連兩拍） |
 | `responder_undeliverable` | 協調者的事件送了 5 次還在 `pending`（不管原因），一個協調者一筆（resource=`responder`），critical | `RESPONDER_UNDELIVERED_ATTEMPTS`（5） |
 
 - 條件持續超過門檻才寫入（計時在記憶體，重啟重算——寧可晚開不重複開）；開啟與恢復各推一則 inbox，中間只更新 `occurrences`；恢復後再壞是新的一筆。

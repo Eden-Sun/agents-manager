@@ -113,6 +113,7 @@ impl Detector {
             let needed = match obs.kind.as_str() {
                 "host_disconnected" => thresholds.host_disconnected_secs,
                 "bot_stopped" => thresholds.bot_stopped_secs,
+                ROLE_UNAVAILABLE_KIND => ROLE_UNAVAILABLE_HOLD_SECS,
                 // The stalled, undelivered and exhausted probes carry their own age test; a
                 // second wait here would just double the threshold.
                 _ => 0,
@@ -324,23 +325,64 @@ pub async fn observe(app: &Arc<App>, thresholds: &Thresholds) -> Probed {
     }
 
     // 協調者（issue #420）：它是 bot 申請、核准、群組任務唯一的收件者，倒了就是整條協調線靜默停擺。
-    // 兩件事分開開：CLI 沒登入（`notify` 送不出去時看畫面標的 `needs_login`），以及——不管原因——
+    // 兩件事分開開：角色 bot 自己不能用（下面那個迴圈），以及——不管原因——
     // 它的事件已經送了 RESPONDER_UNDELIVERED_ATTEMPTS 次還在 pending。incident_opened 走巡檢（`roles::route`）。
-    match super::roles::get(&app.db, super::roles::Role::Responder).await {
-        Err(e) => {
-            tracing::warn!(error = ?e, "responder_needs_login probe failed");
-            probed.failed.push("responder_needs_login");
-        }
-        Ok(row) => {
-            if let (Some(bot_id), "needs_login") = (row.bot_id.as_deref(), row.status.as_str()) {
-                out.push(Observation {
-                    kind: "responder_needs_login".into(),
-                    resource: bot_id.to_string(),
-                    severity: "critical".into(),
-                    detail: json!({"bot_id": bot_id, "since": row.waiting_since, "detail": row.status_detail}).to_string(),
-                });
+    // #427 第 2 項：**巡檢也要看**，而且每一拍都看。以前只有協調者、而且只在 `notify` 送不出去時才看，
+    // 所以巡檢停在登入失效沒有人知道（它是 incident 與 ops_alert 的收件人），協調者佇列空著時也一樣。
+    // 判定在 `role_faults::refresh`（同一拍、`sweep` 之前跑），這裡只把結論變成 incident。
+    // `resource` 從 bot_id 換成角色名：兩顆各自一筆，而且換 bot 不會留下關不掉的孤兒。
+    for role in super::role_faults::WATCHED {
+        let row = match super::roles::get(&app.db, role).await {
+            Err(e) => {
+                tracing::warn!(role = role.as_str(), error = ?e, "role unavailable probe failed");
+                probed.failed.push(ROLE_UNAVAILABLE_KIND);
+                continue;
             }
+            Ok(row) => row,
+        };
+        // 沒建立的角色整個不留紀錄（連 blind 都不算）：算了會讓這個 kind 每一拍都是「探針沒跑」，
+        // 另一顆角色已經開著的 incident 就再也關不掉。
+        if row.bot_id.is_none() {
+            continue;
         }
+        let fault = super::role_faults::snapshot(app, role).await.unwrap_or_default();
+        // 兩個獨立訊號：DB 那一欄是 `responder::notify` 送不出去時看畫面寫的（#420），
+        // 記憶體那份是每拍看畫面＋notify 連續沒完成（#427）。哪一個先看到都算。
+        let reason = if row.status == "needs_login" {
+            Some(super::role_faults::REASON_NEEDS_LOGIN)
+        } else {
+            fault.reason
+        };
+        let Some(reason) = reason else {
+            // 這一拍連畫面都讀不到＝不知道。不開也不解（跟上面每個探針同一個原則）。
+            if fault.probe_failed {
+                probed.failed.push(ROLE_UNAVAILABLE_KIND);
+            }
+            continue;
+        };
+        let stuck_at_login = reason == super::role_faults::REASON_NEEDS_LOGIN;
+        // 停在登入要人動手，而且期間所有核准都沒有人裁示——比 degraded 嚴重。
+        let severity = if stuck_at_login { "critical" } else { "degraded" };
+        let action = if stuck_at_login {
+            "在那顆 bot 的 pane 跑 /login（Keychain 鎖著時先在另一個終端 security unlock-keychain）；恢復後排著的核准會在下一輪 notify 被裁示"
+        } else {
+            "看那顆 bot 的 pane：notify 回合一直沒完成，核准與 bot 申請都沒有人在裁示"
+        };
+        out.push(Observation {
+            kind: ROLE_UNAVAILABLE_KIND.into(),
+            resource: role.as_str().to_string(),
+            severity: severity.into(),
+            detail: json!({
+                "role": role.as_str(),
+                "reason": reason,
+                "bot_id": row.bot_id,
+                "since": fault.since.clone().or_else(|| row.waiting_since.clone()),
+                "notify_failures": fault.failed_turns.len(),
+                "detail": row.status_detail,
+                "action": action,
+            })
+            .to_string(),
+        });
     }
     match store::responder_undelivered(&app.db, RESPONDER_UNDELIVERED_ATTEMPTS).await {
         Err(e) => {
@@ -383,6 +425,14 @@ pub async fn observe(app: &Arc<App>, thresholds: &Thresholds) -> Probed {
 
     probed
 }
+
+/// 角色 bot 自己不能用（issue #420／#427）。`resource` 是角色名（`responder`／`patrol`），兩顆各自一筆。
+/// 名字沿用 #420 的（SPEC §18.9 的表已經有它），只是現在巡檢也會用到。
+pub const ROLE_UNAVAILABLE_KIND: &str = "responder_needs_login";
+
+/// 這個條件要連續看到這麼久才開 incident（health tick 是 30 秒，等於要連兩拍都看到）。
+/// #427 把偵測從「送不出去才看」改成「每一拍都看」，一拍的閃動不該驚動使用者；真的卡住時它會一直都在。
+pub const ROLE_UNAVAILABLE_HOLD_SECS: i64 = 60;
 
 /// Incidents whose whole point is that the inbox is not working. Queueing an inbox event for
 /// them *to the same role* is how a stuck notification becomes two stuck notifications: the event
@@ -491,6 +541,53 @@ mod tests {
             severity: "degraded".into(),
             detail: "{}".into(),
         }
+    }
+
+    /// #427：角色 bot 不可用要連續看到一分鐘（兩拍）才開 incident。偵測從「送不出去才看畫面」
+    /// 改成「每一拍都看」之後，一拍的閃動不該驚動使用者；真的卡住時它會一直都在。恢復了自動關。
+    #[test]
+    fn a_role_that_is_unavailable_for_two_ticks_opens_and_clears_by_itself() {
+        let mut d = Detector::default();
+        let t = thresholds();
+        let seen = [obs(ROLE_UNAVAILABLE_KIND, "responder")];
+        assert!(d.plan(&seen, &[], &[], &t, 1000).open.is_empty(), "第一拍只是看到，還不開");
+        assert!(d.plan(&seen, &[], &[], &t, 1000 + ROLE_UNAVAILABLE_HOLD_SECS - 1).open.is_empty(), "差一秒也還不開");
+        assert_eq!(d.plan(&seen, &[], &[], &t, 1000 + ROLE_UNAVAILABLE_HOLD_SECS).open.len(), 1, "過了門檻才開");
+        // 恢復：這一拍沒看到就關掉，不用等任何人來按。
+        let open = vec![(ROLE_UNAVAILABLE_KIND.to_string(), "responder".to_string())];
+        assert_eq!(d.plan(&[], &open, &[], &t, 9000).resolve, open);
+    }
+
+    /// 讀不到畫面時**不能**把已經開著的那筆當成恢復——「探針沒跑」跟「它好了」長得一樣，
+    /// 把後者當前者等於對使用者宣告一個沒人觀察到的恢復（同 host／bot 探針的既有原則）。
+    /// 兩顆角色共用一個 kind，所以其中一顆瞎掉時另一顆的也一起留著：寧可晚關，不可誤關。
+    #[test]
+    fn a_role_probe_that_could_not_run_neither_opens_nor_resolves() {
+        let mut d = Detector::default();
+        let t = thresholds();
+        let open = vec![
+            (ROLE_UNAVAILABLE_KIND.to_string(), "responder".to_string()),
+            (ROLE_UNAVAILABLE_KIND.to_string(), "patrol".to_string()),
+        ];
+        let plan = d.plan(&[], &open, &[ROLE_UNAVAILABLE_KIND], &t, 9000);
+        assert!(plan.resolve.is_empty(), "探針沒跑：兩筆都留著");
+        assert!(plan.open.is_empty());
+    }
+
+    /// 兩顆角色各自一筆：`resource` 是角色名，所以協調者卡住不會蓋掉巡檢那一筆（反之亦然）。
+    #[test]
+    fn each_role_gets_its_own_incident_row() {
+        let mut d = Detector::default();
+        let t = thresholds();
+        let seen = [obs(ROLE_UNAVAILABLE_KIND, "responder"), obs(ROLE_UNAVAILABLE_KIND, "patrol")];
+        let at = 1000 + ROLE_UNAVAILABLE_HOLD_SECS;
+        d.plan(&seen, &[], &[], &t, 1000);
+        assert_eq!(d.plan(&seen, &[], &[], &t, at).open.len(), 2);
+        // 只剩協調者還在壞：巡檢那一筆關掉，協調者那一筆留著。
+        let open: Vec<(String, String)> = seen.iter().map(Observation::key).collect();
+        let plan = d.plan(&seen[..1], &open, &[], &t, at + 30);
+        assert_eq!(plan.resolve, vec![(ROLE_UNAVAILABLE_KIND.to_string(), "patrol".to_string())]);
+        assert_eq!(plan.open.len(), 1);
     }
 
     fn thresholds() -> Thresholds {
