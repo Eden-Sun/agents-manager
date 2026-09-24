@@ -549,10 +549,11 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 | `no_free_port` | 5180 起的 100 顆都被佔了 |
 | `not_vite` | `mode=attach` 的 `port` 不是掃到的 dev server（body 帶 `port`） |
 | `stale_selection` | `mode=attach` 帶的 `pid`／`dir` 跟現在佔著那個 `port` 的行程對不上（body 帶現在的 `pid`／`dir`） |
-| `preview_stop_failed` | 要先收掉的舊預覽 pane 關不掉（`failed` 重試、明確換預覽時）；列維持原狀態 |
+| `preview_stop_failed` | 預覽 pane 關不掉（`DELETE`、`failed` 重試、明確換預覽時）；列維持原狀態 |
 
 ### `DELETE /api/bots/{id}/preview`
-`spawned` 關 pane、放掉 port；`attached` **只斷開，絕不動對方的 server**。回 `{"status":"off"}`；沒開過也是。bot 被停止／重啟／刪除、§6.11 閒置收 bot 時 daemon 也會做同一件事。
+`spawned` 關 pane、放掉 port；`attached` **只斷開，絕不動對方的 server**。回 `{"status":"off"}`；沒開過也是。
+`spawned` 的 pane 關不掉（讀不到 run、拿不到 session 的 client、關指令失敗）回 409 `preview_stop_failed`，列維持原狀態，不謊報 `off`。bot 被停止／重啟／刪除、§6.11 閒置收 bot 時 daemon 也會做同一件事。
 每次狀態變動推 WS `preview_changed`。
 
 ## 非 agent 的 pane（SPEC §6.5e）
