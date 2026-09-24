@@ -705,6 +705,49 @@ def cmd_approval(client: Client, cfg: dict, args) -> object:
     return client.post(f"/api/supervisor/approvals/{urllib.parse.quote(args.approval_id)}/decide", body)
 
 
+def lease_token_of(args) -> str:
+    """`--lease-token-file` / `--lease-token -`（stdin）/ `--lease-token <值>`，取一個。
+
+    **優先給檔案與 stdin**：argv 對同一個 uid 的行程是公開的（`ps` 看得到），而 `lease_token` 是
+    「只在 acquire 回應出現一次、任何 API 都查不到」的一次性憑證——拿到就能收掉別人正在換 binary 的
+    窗口（issue #477）。`daemon-update-kick.sh` 早就把它寫進 0600 的檔、避免它進派工正文，
+    但 child 照著 `--lease-token "$(cat …)"` 帶上時又回到 argv，前面那些功夫就白做了。
+
+    檔案要求權限不寬於 0600：group／other 讀得到的話當成已經外洩，直接拒絕而不是照用。
+    """
+    path = getattr(args, "lease_token_file", None)
+    inline = getattr(args, "lease_token", None)
+    if path and inline:
+        raise AgmError("bad_args", "--lease-token 與 --lease-token-file 只能給一個", 2)
+    if path:
+        # 先 open 再 fstat，不要先 stat 再 open（issue #89 修過的同一個 TOCTOU 形狀）：兩步之間
+        # 路徑可以被換掉，驗過的跟讀到的就不是同一個檔；而且 os.stat 跟隨 symlink，驗到的會是
+        # 目標的權限。O_NOFOLLOW 連「路徑本身是 symlink」都擋掉，只認我們自己寫的那個真檔。
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        except OSError as e:
+            raise AgmError("bad_args", f"讀不到 lease token 檔 {path}：{e}", 2) from e
+        with os.fdopen(fd, encoding="utf-8") as fh:
+            mode = os.fstat(fh.fileno()).st_mode
+            if mode & 0o077:
+                raise AgmError(
+                    "bad_args",
+                    f"lease token 檔 {path} 的權限是 {mode & 0o777:o}，group／other 讀得到就當它已經外洩；"
+                    "請 chmod 600 之後重拿一次窗口",
+                    2,
+                )
+            tok = fh.read().strip()
+        if not tok:
+            raise AgmError("bad_args", f"lease token 檔 {path} 是空的", 2)
+        return tok
+    if inline == "-":
+        tok = sys.stdin.read().strip()
+        if not tok:
+            raise AgmError("bad_args", "--lease-token - 要從 stdin 讀，但 stdin 是空的", 2)
+        return tok
+    return inline or ""
+
+
 def cmd_lease(client: Client, cfg: dict, args) -> object:
     """執行租約：等安全窗口用 `safety`（唯讀），真的要動手用 `acquire`。
 
@@ -749,8 +792,9 @@ def cmd_lease(client: Client, cfg: dict, args) -> object:
     body = {"owner": owner, "fence": args.fence}
     if args.ttl:
         body["ttl_secs"] = args.ttl
-    if args.lease_token:
-        body["lease_token"] = args.lease_token
+    tok = lease_token_of(args)
+    if tok:
+        body["lease_token"] = tok
     if getattr(args, "force", False):
         if not args.reason:
             raise AgmError("bad_args", "lease release --force 需要 --reason（會寫進稽核紀錄）", 2)
@@ -1583,7 +1627,15 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument(
         "--lease-token",
         dest="lease_token",
-        help="renew/release：acquire 回應裡的 lease_token（只出現那一次，不會在 lease status 裡）",
+        metavar="TOKEN|-",
+        help="renew/release：acquire 回應裡的 lease_token（只出現那一次，不會在 lease status 裡）。"
+        "**argv 同一台機器上誰都看得到（ps）**——請改用 --lease-token-file，或給 `-` 從 stdin 讀（issue #477）",
+    )
+    s.add_argument(
+        "--lease-token-file",
+        dest="lease_token_file",
+        metavar="PATH",
+        help="renew/release：從檔案讀 lease_token（權限要 600，group／other 讀得到就拒絕）。優先用這個，不要把 token 放進 argv",
     )
     s.add_argument("--force", action="store_true", help="release：強制接管（持有者已經不在了），要附 --reason，會留稽核紀錄")
     s.add_argument("--allow-busy", action="store_true", dest="allow_busy", help="acquire：跳過「沒人在跑」的檢查")

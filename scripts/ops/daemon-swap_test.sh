@@ -95,6 +95,7 @@ setup() { # setup <checkout 的 SCHEMA_VERSION> <DB 目前的 user_version>
   export STUB_UV_AFTER_START="$1"  # 新 binary 起來之後 DB 會被 migrate 到這個版本
   export STUB_SESSION_OK=1 STUB_SESSION_OK_AFTER_FORWARD=1 STUB_HEALTH_OK=1
   export STUB_ACQUIRE_HELD=true STUB_SAFE=true STUB_SUPERVISOR=idle
+  export STUB_RELEASE_FAIL=""       # 設了：lease release 回 409（模擬 fence 過期／token 對不上）
   export STUB_NAMES_BEFORE='["a","b"]' STUB_NAMES_AFTER='["a","b"]'
   export STUB_RESTART_HELD=false
 
@@ -129,7 +130,20 @@ case "$sub:$op" in
                  [ "${STUB_PROBE_INFLIGHT_TIMES:-0}" -ge "$n" ] && fl='{"bot_id":"bot-probe","turn_id":"t-1"}'
                  printf '{"safe":%s,"working":[],"delivering":[],"in_flight":[%s]}' "$STUB_SAFE" "$fl" ;;
   lease:status)  printf '{"leases":[{"resource":"restart","held":%s}]}' "$STUB_RESTART_HELD" ;;
-  lease:release) printf '{"released":true}' ;;
+  lease:release)
+      # token 是怎麼進來的：記下檔案路徑、權限與讀到的內容，測試才驗得到「agm 真的讀到了
+      # 那顆 token，而且它只待在一個 600 的檔裡」。
+      tf=""; nxt=0
+      for a in "$@"; do
+        [ "$nxt" = 1 ] && { tf="$a"; nxt=0; continue; }
+        [ "$a" = "--lease-token-file" ] && nxt=1
+      done
+      if [ -n "$tf" ]; then
+        printf '%s mode=%s token=%s\n' "$tf" "$(stat -f '%Lp' "$tf" 2>/dev/null || stat -c '%a' "$tf")" "$(cat "$tf")" \
+          >> "$AGM_DIR/tokenfile.log"
+      fi
+      [ -n "${STUB_RELEASE_FAIL:-}" ] && { printf '{"error":"http_error","status":409,"detail":{"error":"conflict","reason":"fence_mismatch"}}'; exit 1; }
+      printf '{"released":true}' ;;
   health:*)      [ -n "$STUB_HEALTH_OK" ] || exit 1; printf '{"status":"healthy"}' ;;
   supervisor:*)  printf '{"status":"%s"}' "$STUB_SUPERVISOR" ;;
   state:*)       if [ -e "$AGM_DIR/started" ]; then names="$STUB_NAMES_AFTER"; else names="$STUB_NAMES_BEFORE"; fi
@@ -455,6 +469,39 @@ check_eq "上限用完仍繼續，窗口重試接手（rc=0）" "0" "$rc"
 check "講清楚等滿了" "自測回合等了 5 次還在飛" "$SWAP_LOG"
 check "那次 409 有註明可能是自測回合" "no window yet (try 1/3) reason=not_idle working=(空，可能是自測回合" "$SWAP_LOG"
 check "預設等 12 次" 'SWAP_PROBE_SETTLE_TRIES:-12' "$SCRIPT"
+teardown
+
+# 24. lease_token 走檔案，不進 argv（issue #477）。
+# STUB_RESTART_HELD=true：daemon 沒有自動放掉窗口，腳本要自己交還——這才會走到 release。
+setup 10 10
+export STUB_RESTART_HELD=true
+rc=$(run)
+check_eq "順利時 rc=0" "0" "$rc"
+check "交還窗口走 --lease-token-file" "lease release restart .*--lease-token-file" "$AGM_DIR/calls.log"
+check_no "token 本身不出現在 argv" "tok-1" "$AGM_DIR/calls.log"
+check "agm 真的從檔案讀到那顆 token" "mode=600 token=tok-1" "$AGM_DIR/tokenfile.log"
+check_eq "token 檔收尾要刪掉" "0" "$(ls "$AGM_DIR"/daemon-swap.lease-token.* 2>/dev/null | wc -l | tr -d ' ')"
+check "token 檔用 mktemp，不是可預測路徑" 'mktemp "$AGM_DIR/daemon-swap.lease-token.XXXXXX"' "$SCRIPT"
+teardown
+
+# 25. 交還窗口失敗：log 不准說「已交還」，而且要用非零結束碼講出來（issue #477）。
+setup 10 10
+export STUB_RESTART_HELD=true STUB_RELEASE_FAIL=1
+rc=$(run)
+check_eq "換版成功但窗口沒還：rc=8" "8" "$rc"
+check "log 說交還失敗" "交還 restart 窗口失敗 rc=" "$SWAP_LOG"
+check "log 說窗口還被握著" "窗口仍被握著" "$SWAP_LOG"
+check_no "不准謊報已交還" "restart 窗口已交還" "$SWAP_LOG"
+check "換版本身有做完" "new-binary" "$AGM_DIR/started-binary.log"
+teardown
+
+# 26. 中途中止時交還失敗也一樣不謊報（這條路的結束碼仍是它自己的原因碼）。
+setup 10 10
+export STUB_SAFE=false STUB_RELEASE_FAIL=1
+rc=$(run)
+check_eq "複查不安全仍以 rc=4 結束" "4" "$rc"
+check "log 說交還失敗" "交還 restart 窗口失敗 rc=" "$SWAP_LOG"
+check_no "不准謊報已交還" "restart 窗口已交還" "$SWAP_LOG"
 teardown
 
 echo "$PASS passed, $FAIL failed"

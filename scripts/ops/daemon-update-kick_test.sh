@@ -542,7 +542,10 @@ setup
 export AGM_TEST_MINUTE="0"
 export STUB_ACQUIRE='{"lease":{"fence":9,"resource":"rebuild"},"lease_token":"tok-abc123"}'
 bash "$SCRIPT"
-check "派工正文用檔案帶 lease-token" "--lease-token \"\$(cat $AGM_DIR/daemon-update.lease-token)\"" "$AGM_DIR/assign-body.txt"
+check "派工正文用檔案帶 lease-token" "--lease-token-file $AGM_DIR/daemon-update.lease-token" "$AGM_DIR/assign-body.txt"
+# `--lease-token "$(cat …)"` 等於叫 child 把 token 攤回 argv（同 uid 用 `ps` 就看得到），
+# 前面寫 600 檔的功夫就白做了；正文只能給路徑（issue #477，i264 審核）。
+check_no "正文不叫 child 把 token 攤回 argv" 'cat .*daemon-update.lease-token' "$AGM_DIR/assign-body.txt"
 check_no "派工正文沒有 token 本身" "tok-abc123" "$AGM_DIR/assign-body.txt"
 check_no "log 裡也沒有" "tok-abc123" "$AGM_DIR/daemon-update.log"
 check "token 檔的內容" "^tok-abc123$" "$AGM_DIR/daemon-update.lease-token"
@@ -559,7 +562,24 @@ export AGM_TEST_MINUTE="0"
 export STUB_ACQUIRE='{"lease":{"fence":9,"resource":"rebuild"},"lease_token":"tok-abc123"}'
 export STUB_ASSIGN_FAIL=1
 bash "$SCRIPT"
-check "交還窗口帶 lease-token" "lease release rebuild --owner .* --fence 9 --lease-token tok-abc123" "$AGM_DIR/calls.log"
+check "交還窗口帶 lease-token" "lease release rebuild --owner .* --fence 9 --lease-token-file .*daemon-update.lease-token" "$AGM_DIR/calls.log"
+check_no "token 自己不進 argv" "tok-abc123" "$AGM_DIR/calls.log"
+teardown
+
+# token 檔寫不出來：退而用 stdin（`--lease-token -`），仍然不讓 token 進 argv（issue #477）。
+setup
+export AGM_TEST_MINUTE="0"
+export STUB_ACQUIRE='{"lease":{"fence":9,"resource":"rebuild"},"lease_token":"tok-abc123"}'
+mkdir -p "$AGM_DIR/daemon-update.lease-token"   # 佔住那個路徑，printf 寫不進去
+bash "$SCRIPT"
+check "寫不進檔就從 stdin 交還" "lease release rebuild --owner .* --fence 9 --lease-token -" "$AGM_DIR/calls.log"
+check_no "這條路一樣不讓 token 進 argv" "tok-abc123" "$AGM_DIR/calls.log"
+check "這輪不派工" "寫不進 lease token 檔" "$AGM_DIR/daemon-update.log"
+if [ -s "$AGM_DIR/assign-body.txt" ]; then   # setup 會先建一個空的，有內容才是真的派了工
+  echo "FAIL - 寫不進 token 檔卻還是派了工"; FAIL=$((FAIL + 1))
+else
+  echo "ok   - 寫不進 token 檔就不派工"; PASS=$((PASS + 1))
+fi
 teardown
 
 # 舊 daemon 沒有 lease_token：照舊不帶，不要送出空的旗標。
@@ -568,7 +588,7 @@ export AGM_TEST_MINUTE="0"
 export STUB_ACQUIRE='{"lease":{"fence":9,"resource":"rebuild"}}'
 export STUB_ASSIGN_FAIL=1
 bash "$SCRIPT"
-check_no "舊 daemon 不帶空旗標" "--lease-token " "$AGM_DIR/calls.log"
+check_no "舊 daemon 不帶空旗標" "--lease-token" "$AGM_DIR/calls.log"
 check "舊 daemon 照樣交還窗口" "lease release rebuild --owner" "$AGM_DIR/calls.log"
 teardown
 

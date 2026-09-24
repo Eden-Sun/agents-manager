@@ -54,6 +54,44 @@ done
 
 LOG="${SWAP_LOG:-$AGM_DIR/daemon-swap.log}"
 log() { echo "$(date '+%F %T') $*" | tee -a "$LOG"; }
+
+# lease_token 不進 argv（issue #477）：argv 對同一個 uid 的行程是公開的（`ps`），而這顆 token 是
+# 「只在 acquire 回應出現一次、任何 API 都查不到」的一次性憑證——抄走就能收掉別人正在換 binary 的窗口。
+# 寫進 0600 的檔，`agm` 用 --lease-token-file 讀；離開時不管成敗都刪掉。
+TOKEN_FILE=""
+cleanup_token() { [ -n "$TOKEN_FILE" ] && rm -f "$TOKEN_FILE"; return 0; }
+trap cleanup_token EXIT
+
+save_token() { # $1=token
+    # 路徑要不可預測、而且**不要落在全域可寫的 /tmp**：umask 077 只在「這個檔是我們建的」時有用，
+    # 同 uid 的行程（正是這張票的威脅模型）先建好同名檔或擺一條 symlink，`>` 就會沿用它的 owner／mode。
+    # mktemp 的 XXXXXX ＋ O_EXCL 建在 AGM 自己的私有目錄（daemon-update-kick.sh 的 token 檔也放這）。
+    TOKEN_FILE=$(mktemp "$AGM_DIR/daemon-swap.lease-token.XXXXXX") || {
+        log "ABORT: 建不出 lease token 檔，不能在沒有辦法交還窗口的情況下往下走"
+        exit 4
+    }
+    chmod 600 "$TOKEN_FILE"
+    ( umask 077 && printf '%s' "$1" > "$TOKEN_FILE" ) || {
+        log "ABORT: 寫不進 lease token 檔，不能在沒有辦法交還窗口的情況下往下走"
+        exit 4
+    }
+}
+
+# 交還窗口。**rc 不吞**（issue #477）：以前這三處都是 `>/dev/null 2>&1` 然後無條件 log「窗口已交還」，
+# release 真的失敗時（daemon 不在、fence 過期、token 對不上）窗口會一直握到 TTL 到期，而紀錄說已經還了，
+# 下一個人照著 log 判斷就會判錯。回傳 release 自己的 rc，由呼叫端決定要不要因此換結束碼。
+release_window() { # $1=為什麼要還（寫進 log）
+    local out rc
+    out=$(agm lease release restart --owner "$OWNER" --fence "$FENCE" --lease-token-file "$TOKEN_FILE" 2>&1)
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+        log "restart 窗口已交還（${1}）"
+    else
+        log "交還 restart 窗口失敗 rc=${rc}（${1}）：$(printf '%s' "$out" | tr -d '\n' | head -c 200)"
+        log "窗口仍被握著，要等 TTL 到期或請 AGM 用 --force 接管——不要當成已經還了"
+    fi
+    return "$rc"
+}
 agm() { "$AGM_BIN" --compact "$@"; }
 dpid() { "$PGREP" -f '^\./target/release/agents-managerd serve$' | head -1; }
 api() { "$CURL" -sf -o /dev/null "http://127.0.0.1:$PORT$1"; }
@@ -213,6 +251,7 @@ print(" ".join(b for b in bits if b))')
 done
 [ "$HELD" = True ] || { log "DEFER: 拿不到 restart 窗口（試了 $WINDOW_TRIES 次，最後 reason=${WHY:-unparsed}）"; exit 4; }
 log "restart lease fence=$FENCE token=$([ "$TOKEN" != - ] && echo saved || echo MISSING)"
+save_token "$TOKEN"
 
 SAFE=$(agm lease safety --approval "$APPROVAL" --owner "$OWNER" --exclude-bot "$OWNER" | "$PYTHON" -c 'import json,sys
 d = json.load(sys.stdin)
@@ -220,8 +259,10 @@ print(d.get("safe"), [w.get("name") for w in d.get("working") or []], d.get("del
 log "3a recheck: $SAFE"
 case "$SAFE" in
     True*) ;;
-    *) agm lease release restart --owner "$OWNER" --fence "$FENCE" --lease-token "$TOKEN" >/dev/null 2>&1
-       log "ABORT: 換 binary 前複查不安全，窗口已交還"; exit 4 ;;
+    *) log "ABORT: 換 binary 前複查不安全"
+       # 交還失敗不改結束碼：4 的意思（沒窗口／複查不安全）沒變，而「有沒有還成」log 裡講得很清楚。
+       release_window "3a 複查不安全" || true
+       exit 4 ;;
 esac
 
 # ── 3. 備份 DB 與舊 binary ───────────────────────────────────────────────────
@@ -230,8 +271,9 @@ DBB="$DB.bak-$(date +%Y%m%d-%H%M)"
 IC=$("$SQLITE" "$DBB" "pragma integrity_check" | head -1)
 BUV=$("$SQLITE" "$DBB" "pragma user_version")
 log "db backup $DBB integrity=$IC user_version=$BUV"
-[ "$IC" = ok ] || { agm lease release restart --owner "$OWNER" --fence "$FENCE" --lease-token "$TOKEN" >/dev/null 2>&1
-                    log "ABORT: 備份讀不回來（integrity_check=${IC}），不換版"; exit 5; }
+[ "$IC" = ok ] || { log "ABORT: 備份讀不回來（integrity_check=${IC}），不換版"
+                    release_window "DB 備份讀不回來" || true
+                    exit 5; }
 
 OFF=$(wc -c < "$DLOG" 2>/dev/null || echo 0)
 BEFORE_NAMES=$(agm state | "$PYTHON" -c 'import json,sys
@@ -306,8 +348,9 @@ HELD_AFTER=$(agm lease status | "$PYTHON" -c 'import json,sys
 L = [l for l in json.load(sys.stdin).get("leases") or [] if l.get("resource") == "restart"]
 print(L[0].get("held") if L else "?")')
 log "restart lease held=$HELD_AFTER"
-[ "$HELD_AFTER" = True ] && { agm lease release restart --owner "$OWNER" --fence "$FENCE" --lease-token "$TOKEN" >/dev/null 2>&1
-                              log "restart lease 手動交還（daemon 沒有自動放掉）"; }
+# 換版本身成功了，但窗口沒交還就是下一個人拿不到窗口：整輪以 8 結束，不要靜靜走完（issue #477）。
+RELEASE_FAILED=0
+[ "$HELD_AFTER" = True ] && { release_window "daemon 沒有自動放掉，手動交還" || RELEASE_FAILED=1; }
 
 sleep "$SETTLE"
 SUP=$(agm supervisor | "$PYTHON" -c 'import json,sys
@@ -326,3 +369,5 @@ log "daemon.log since restart: ERROR/drift lines=$ERRS"
 
 echo "$SHORT" > "$AGM_DIR/daemon-update.built"
 log "DONE .built=$SHORT pid=$(dpid) db_backup=$DBB"
+# 換版成功、但窗口沒交還：下一個人拿不到窗口，要看得出來（issue #477）。
+[ "$RELEASE_FAILED" = 0 ] || { log "EXIT 8: 換版成功，但 restart 窗口沒有交還成功（見上面的 rc）"; exit 8; }
