@@ -318,9 +318,28 @@ printf '%s\n' '#!/bin/sh' 'env > "$STARTER_ENV_DUMP"' > "$STARTER_ROOT/target/re
 chmod +x "$STARTER_ROOT/target/release/agents-managerd"
 STARTER_ENV_DUMP="$STARTER_ROOT/env" AM_DATA_DIR=/should/be/dropped PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME="$STARTER_ROOT/home" \
   /usr/bin/python3 "$HERE/daemon-start.py" "$STARTER_ROOT" "$STARTER_ROOT/daemon.log"
-for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$STARTER_ROOT/env" ] && break; sleep 0.2; done
-check "啟動器帶出的 PATH 含 /opt/homebrew/bin" "^PATH=$STARTER_ROOT/home/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin$" "$STARTER_ROOT/env"
-check_no "啟動器真的丟掉 AM_DATA_DIR" "^AM_DATA_DIR=" "$STARTER_ROOT/env"
+# `daemon-start.py` 刻意 fork + setsid 脫離、父行程先結束，所以上面那行 python3 回來**不代表**
+# 孫行程已經跑完 `env > "$STARTER_ENV_DUMP"`。機器忙的時候它排不到 CPU：原本只等 10 × 0.2 ＝ 2 秒，
+# 2026-09-24 本機 load ~70（好幾顆 agent 同時編譯）時就寫不出來，後面的斷言去 sed 一個不存在的檔，
+# 訊息變成 `sed: …/env: No such file or directory`，要看兩層才知道其實是逾時（issue #433）。
+STARTER_WAIT_SECS=${STARTER_WAIT_SECS:-30}
+waited=0
+while [ ! -s "$STARTER_ROOT/env" ] && [ "$waited" -lt "$((STARTER_WAIT_SECS * 5))" ]; do
+  waited=$((waited + 1))
+  sleep 0.2
+done
+if [ -s "$STARTER_ROOT/env" ]; then
+  echo "ok   - 啟動器在 ${STARTER_WAIT_SECS} 秒內寫出 env dump"; PASS=$((PASS + 1))
+  check "啟動器帶出的 PATH 含 /opt/homebrew/bin" "^PATH=$STARTER_ROOT/home/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin$" "$STARTER_ROOT/env"
+  # `check_no` 找不到字串就算過，所以**一定要先確定 dump 真的寫出來了**：檔案不存在時它照樣綠，
+  # 逾時就變成一條看不出來的假綠（issue #433，只有上面那條 PATH 會露出來）。
+  check_no "啟動器真的丟掉 AM_DATA_DIR" "^AM_DATA_DIR=" "$STARTER_ROOT/env"
+else
+  echo "FAIL - 啟動器沒有在 ${STARTER_WAIT_SECS} 秒內寫出 env dump（$STARTER_ROOT/env）"
+  echo "      fork+setsid 的孫行程可能還沒排到 CPU（機器忙），或根本沒起來。daemon.log："
+  if [ -s "$STARTER_ROOT/daemon.log" ]; then sed 's/^/      /' "$STARTER_ROOT/daemon.log"; else echo "      （空的或不存在）"; fi
+  FAIL=$((FAIL + 1))
+fi
 rm -rf "$STARTER_ROOT"
 
 
