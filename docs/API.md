@@ -1783,6 +1783,12 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 `agm issue release <n>` 拿掉 label 並留 `<!-- agm:issue-release … -->`；別人還按著的票同樣 exit 3。目前的持有者由**最新**一個標記決定，交回的標記＝沒人認領。
 執行期設定讀 `<cwd>/runtime.json`：`{daemon_url, manager_bot_id, responder_bot_id, bot_id, role, self_bot_id, data_dir, supervisor_id, remote_name}`（巡檢目錄的 `responder_bot_id` 在沒有協調者時是 `null`）；**沒有 token**，CLI 執行期 `GET /api/session` 取；`daemon_url` 只接受 loopback。
 `role` 缺省＝`patrol`。環境 `AM_BOT_ID` 等於 `self_bot_id` 時，API 請求另帶 `X-AM-Bot-Id`／`X-AM-Bot-Token`（`AM_HOOK_TOKEN`）證明角色；mission 回報的 `relay_from` 用 `self_bot_id`。
+
+**角色標頭是三態，不是兩態（issue #415）**：沒帶 `X-AM-Bot-Id` = 使用者／UI（照舊，什麼都做得了）；帶了而且 token 對得上 = 那顆 bot 的角色（不是角色 bot 就等同沒帶）；
+**帶了卻證明不了**（token 空、非 UTF-8、對不上，或 `X-AM-Bot-Id` 本身讀不出值）= 整個請求 `403 {"reason":"bot_proof_mismatch"}`，**不會**退回使用者權限。
+以前最後一種也當成「沒帶」，而沒帶在 `inbox/{id}/ack` 是 `1=1`（什麼角色的事件都結得掉），於是角色 bot 把自己的 token 打壞反而比帶對還多權限。
+受影響的端點：`supervisor/assignments`（含 `{id}/review`）、`supervisor/inbox/{id}/ack`、`supervisor/approvals/{id}/decide`、`supervisor/leases/{resource}/renew`｜`release`、
+`supervisor/herdr-maintenance/open`｜`end`、`missions/{id}/pause`｜`cancel`。
 設定目錄可用 `AGM_RUNTIME_DIR` 或 `--runtime-dir` 覆寫。
 
 ## 群組任務（mission，2026-09-13 新增，使用者決策見 SPEC §18.14 D1–D8）

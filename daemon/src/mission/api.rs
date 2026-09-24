@@ -561,13 +561,14 @@ pub struct PauseIn {
 /// 呼叫的是不是**收 mission 事件的那個 AGM 角色**自己（bot token 驗過）。是的話就不推 inbox——
 /// 自己叫醒自己只是多一個空回合（同 `resume` 的防線）。有協調者時收件人是協調者；只有巡檢時是巡檢。
 /// 使用者（web）、巡檢代使用者操作時都要叫醒協調者。
-async fn called_by_mission_manager(app: &Arc<App>, headers: &HeaderMap) -> bool {
+async fn called_by_mission_manager(app: &Arc<App>, headers: &HeaderMap) -> Result<bool, LcError> {
     use crate::supervisor::roles::{self, Role};
-    match crate::supervisor::bot_requests::actor_role(app, headers).await {
+    // 宣告了身分卻驗不過就是 403（issue #415）：不能默默當成「不是管理者」照常往下做。
+    Ok(match crate::supervisor::bot_requests::actor_role(app, headers).await? {
         Some(Role::Responder) => true,
         Some(Role::Patrol) => !roles::responder_configured(&app.db).await.unwrap_or(true),
         None => false,
-    }
+    })
 }
 
 /// 這個任務底下還開著的交辦（`supervisor::store::OPEN_STATES`），給 AGM 看的精簡形狀。
@@ -601,7 +602,7 @@ pub async fn post_pause(
         None => format!("暫停：{reason}"),
     };
     let paused_key = format!("mission:{id}:paused");
-    let announce = if called_by_mission_manager(&app, &headers).await {
+    let announce = if called_by_mission_manager(&app, &headers).await? {
         None
     } else {
         let open = open_assignments(&app, &id).await?;
@@ -860,7 +861,7 @@ pub async fn post_revise(
 pub async fn post_cancel(State(app): State<Arc<App>>, Path(id): Path<String>, headers: HeaderMap) -> Result<Json<Value>, LcError> {
     let m = load(&app, &id).await?;
     ensure_open(&m)?;
-    let by_manager = called_by_mission_manager(&app, &headers).await;
+    let by_manager = called_by_mission_manager(&app, &headers).await?;
     let before = open_assignments(&app, &id).await?;
     let announce = (!by_manager).then(|| store::Announce {
         event_key_prefix: "",
@@ -2201,13 +2202,19 @@ mod tests {
             let err = post_event(State(app.clone()), Path(id.clone()), h, Json(note(&victim))).await.unwrap_err();
             assert_eq!(reason(err), want);
         }
-        // daemon：只有驗證過的 AGM 角色能代記；一般 bot、沒身分、AGM 的 token 打錯都不行。
-        let mut forged = agm_h.clone();
-        forged.insert("X-AM-Bot-Token", "nope".parse().unwrap());
-        for h in [HeaderMap::new(), other_h.clone(), victim_h.clone(), forged] {
+        // daemon：只有驗證過的 AGM 角色能代記。沒宣告身分、或宣告了而且證明得了卻不是角色
+        // bot，都是「不是 AGM」→ relay_from_reserved。
+        for h in [HeaderMap::new(), other_h.clone(), victim_h.clone()] {
             let err = post_event(State(app.clone()), Path(id.clone()), h, Json(note("daemon"))).await.unwrap_err();
             assert_eq!(reason(err), "relay_from_reserved");
         }
+        // 宣告了 AGM 的 bot id 卻拿不出它的 token：403 `bot_proof_mismatch`（issue #415）。
+        // 讀成「不是 AGM 角色」再回 relay_from_reserved 也是 403，但那就是把驗證失敗當成沒帶，
+        // 正是 #415 要消掉的形狀——訊息要說中真正的原因。
+        let mut forged = agm_h.clone();
+        forged.insert("X-AM-Bot-Token", "nope".parse().unwrap());
+        let err = post_event(State(app.clone()), Path(id.clone()), forged, Json(note("daemon"))).await.unwrap_err();
+        assert_eq!(reason(err), "bot_proof_mismatch");
         // 其他五個端點走同一道：沒帶 token 的冒名一律 403。
         let none = HeaderMap::new;
         let v = || Some(victim.clone());

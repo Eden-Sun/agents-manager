@@ -132,19 +132,46 @@ async fn quiet_reason(
 /// `X-AM-Bot-Token` 是寄件 bot 自己的 hook token 才算驗證過。沒有也照收，只是記下來。
 pub async fn sender_verified(app: &Arc<App>, token: Option<&str>, from: &str) -> bool {
     let Some(t) = token.filter(|t| !t.is_empty()) else { return false };
-    matches!(crate::db::bot(&app.db, from).await, Ok(Some(b)) if b.deleted_at.is_none() && b.hook_token == t)
+    // 常數時間比對，跟 `api.rs`／`hookrecv.rs`／`build_scheduler.rs`／`relay_auth.rs` 同一套；
+    // 這裡以前是 `==`，是六處裡唯一的例外（issue #415）。
+    matches!(crate::db::bot(&app.db, from).await, Ok(Some(b)) if b.deleted_at.is_none() && crate::api::ct_eq(t, &b.hook_token))
+}
+
+/// 帶了 `X-AM-Bot-Id` 卻驗不過：整個請求 403，不降級。
+fn bad_proof() -> LcError {
+    LcError::Forbidden(json!({
+        "error": "forbidden",
+        "reason": "bot_proof_mismatch",
+        "message": "帶了 X-AM-Bot-Id 就要附上那顆 bot 自己的 X-AM-Bot-Token；對不上不會退回使用者權限",
+    }))
 }
 
 /// 呼叫端是哪個 AGM 角色：`X-AM-Bot-Id` + `X-AM-Bot-Token`（那顆 bot 自己的 hook token）都對得上
 /// 才算。CLI 在角色的 pane 裡跑，環境裡本來就有這兩個值；模型打出來的字串冒充不了。
-/// 沒帶、對不上、或那顆 bot 不是角色 bot → `None`，照 UI／使用者的權限處理（跟以前一樣）。
-pub async fn actor_role(app: &Arc<App>, headers: &axum::http::HeaderMap) -> Option<Role> {
-    let get = |k: &str| headers.get(k).and_then(|v| v.to_str().ok()).map(str::trim).filter(|v| !v.is_empty());
-    let (id, token) = (get("X-AM-Bot-Id")?, get("X-AM-Bot-Token"));
-    if !sender_verified(app, token, id).await {
-        return None;
+///
+/// 三態，不是兩態（issue #415）：
+///
+/// | `X-AM-Bot-Id` | 結果 |
+/// |---|---|
+/// | 沒帶 | `Ok(None)`＝使用者／UI，照舊什麼都能做 |
+/// | 帶了、token 對得上、那顆是角色 bot | `Ok(Some(role))` |
+/// | 帶了、token 對得上、那顆不是角色 bot | `Ok(None)`＝跟沒宣告身分一樣，不多不少 |
+/// | 帶了、token 空／非 UTF-8／對不上 | **`Err` 403** |
+///
+/// 最後一列以前也是 `None`。而 `None` 在下游不是「沒有權限」而是「使用者本人」
+/// （`roles::ack` 的 `1=1`），所以把自己的 token 打壞反而比帶對還多權限——降級同時是提權。
+pub async fn actor_role(app: &Arc<App>, headers: &axum::http::HeaderMap) -> Result<Option<Role>, LcError> {
+    // 「有這個標頭但讀不出值」也算宣告了身分：空字串與非 UTF-8 都要驗，不能當沒帶。
+    if !headers.contains_key("X-AM-Bot-Id") {
+        return Ok(None);
     }
-    roles::role_of_bot(&app.db, id).await.ok().flatten()
+    let get = |k: &str| headers.get(k).and_then(|v| v.to_str().ok()).map(str::trim).filter(|v| !v.is_empty());
+    let Some(id) = get("X-AM-Bot-Id") else { return Err(bad_proof()) };
+    if !sender_verified(app, get("X-AM-Bot-Token"), id).await {
+        tracing::warn!(claimed_bot = %id, "refused a request that claimed a bot identity it could not prove");
+        return Err(bad_proof());
+    }
+    Ok(roles::role_of_bot(&app.db, id).await.ok().flatten())
 }
 
 /// 這一句要不要攔下來排進 inbox。`Ok(None)` = 照原本的路送。

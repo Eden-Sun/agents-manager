@@ -152,7 +152,7 @@ pub async fn post_assignment(
     headers: HeaderMap,
     Json(b): Json<AssignIn>,
 ) -> Result<Json<Value>, LcError> {
-    let actor = super::bot_requests::actor_role(&app, &headers).await;
+    let actor = super::bot_requests::actor_role(&app, &headers).await?;
     let review_role = match b.review_role.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         Some(r) => Some(super::roles::Role::parse(r).ok_or_else(|| LcError::Bad("review_role must be patrol | responder".into()))?),
         None => actor,
@@ -192,6 +192,7 @@ pub async fn get_assignment(State(app): State<Arc<App>>, Path(id): Path<String>)
     out["reviews"] = json!(store::reviews(&app.db, &a.id).await.map_err(up)?);
     Ok(Json(out))
 }
+
 
 #[derive(Deserialize)]
 pub struct ReviewIn {
@@ -236,7 +237,7 @@ pub async fn post_review(
     headers: HeaderMap,
     Json(b): Json<ReviewIn>,
 ) -> Result<Json<Value>, LcError> {
-    let verified = super::bot_requests::actor_role(&app, &headers).await;
+    let verified = super::bot_requests::actor_role(&app, &headers).await?;
     let _g = super::lock().await;
     let to_status = store::decision_status(&b.decision).ok_or_else(|| {
         LcError::Bad("decision must be one of accept | block | followup | fail | cancel".into())
@@ -607,7 +608,7 @@ pub async fn post_inbox_ack(
     headers: HeaderMap,
 ) -> Result<Json<Value>, LcError> {
     use super::roles::AckOutcome;
-    let actor = super::bot_requests::actor_role(&app, &headers).await;
+    let actor = super::bot_requests::actor_role(&app, &headers).await?;
     let responder_configured = super::roles::responder_configured(&app.db).await.map_err(up)?;
     match super::roles::ack(&app.db, &id, actor, responder_configured).await.map_err(up)? {
         AckOutcome::NotFound => Err(LcError::NotFound("inbox event".into())),
@@ -992,7 +993,7 @@ pub async fn post_approval_decision(
     headers: HeaderMap,
     Json(b): Json<DecisionIn>,
 ) -> Result<Json<Value>, LcError> {
-    let verified = super::bot_requests::actor_role(&app, &headers).await;
+    let verified = super::bot_requests::actor_role(&app, &headers).await?;
     let _g = super::lock().await;
     let status = match b.decision.as_str() {
         "approve" => "approved",
@@ -1240,7 +1241,7 @@ pub async fn post_lease_renew(
     headers: HeaderMap,
     Json(b): Json<LeaseHolderIn>,
 ) -> Result<Json<Value>, LcError> {
-    let actor = super::bot_requests::actor_role(&app, &headers).await;
+    let actor = super::bot_requests::actor_role(&app, &headers).await?;
     // force 是「持有者已經不在了、收掉它的窗口」，不是「替別人延長」：renew 只認 token。
     // 以前 AGM 角色帶 force 就能用公開的 owner／fence 延長別人的租約，而且不留 note（review2 sup #5）。
     if b.force {
@@ -1294,7 +1295,7 @@ pub async fn post_lease_release(
     headers: HeaderMap,
     Json(b): Json<LeaseHolderIn>,
 ) -> Result<Json<Value>, LcError> {
-    let actor = super::bot_requests::actor_role(&app, &headers).await;
+    let actor = super::bot_requests::actor_role(&app, &headers).await?;
     let proof = lease_proof(&b, actor).map_err(|e| force_warn(e, &resource, &b.owner, actor))?;
     // Consumes the approval (one yes, one window) and, for a restart window, lifts the holds it
     // placed so held assignments go out on the next pass.
@@ -1451,6 +1452,85 @@ mod approval_decision_tests {
 
     /// 巡檢角色的呼叫端：`X-AM-Bot-Id` + 那顆 bot 自己的 hook token（CLI 在角色的 pane 裡跑，
     /// 環境本來就有這兩個值）。模型打出來的字串冒充不了。
+    /// issue #415：`X-AM-Bot-Id` 帶了卻證明不了，以前回 `None`，而 `None` 在 `roles::ack` 是
+    /// `1=1`＝使用者本人。於是巡檢只要把自己的 token 打壞，就結得掉協調者的事件——帶對反而
+    /// 被 409 擋下。降級同時是提權，所以現在整個請求 403。
+    #[tokio::test]
+    async fn a_claimed_bot_identity_that_cannot_be_proven_is_refused_not_downgraded_to_the_user() {
+        let app = app().await;
+        let good = agm_role_headers(&app).await; // 巡檢角色
+        let bot_id = good.get("X-AM-Bot-Id").unwrap().to_str().unwrap().to_string();
+        // 協調者要先建立起來，跨角色才成立：沒有協調者時，協調的事件本來就是巡檢在收
+        // （`roles::ack` 的 `Patrol if !responder_configured`），那一格不是這條測試要問的。
+        let responder = crate::db::ulid();
+        sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES (?,'p-agm','AGM-responder','claude','resp-tok',?)")
+            .bind(&responder)
+            .bind(crate::db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        crate::supervisor::roles::set_env(&app.db, crate::supervisor::roles::Role::Responder, &responder, "p-agm", "/tmp").await.unwrap();
+        assert!(crate::supervisor::roles::responder_configured(&app.db).await.unwrap(), "前提：協調者已建立");
+
+        // 一筆歸協調者的事件。
+        let ev = |app: &Arc<App>| {
+            let app = app.clone();
+            async move {
+                let id = store::push_inbox(&app.db, &format!("k-{}", crate::db::ulid()), "approval_requested", None, None, None, &json!({}))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                sqlx::query("UPDATE supervisor_inbox SET role='responder' WHERE id=?").bind(&id).execute(&app.db).await.unwrap();
+                id
+            }
+        };
+        let state = |app: &Arc<App>, id: String| {
+            let app = app.clone();
+            async move {
+                sqlx::query_scalar::<_, String>("SELECT state FROM supervisor_inbox WHERE id=?")
+                    .bind(&id)
+                    .fetch_one(&app.db)
+                    .await
+                    .unwrap()
+            }
+        };
+
+        // 1) 帶對 token：還是只能結自己角色的，409（既有行為，別退化）。
+        let e1 = ev(&app).await;
+        let err = post_inbox_ack(State(app.clone()), Path(e1.clone()), good.clone()).await.unwrap_err();
+        let LcError::Conflict(v) = &err else { panic!("expected 409, got {err:?}") };
+        assert_eq!(v["reason"], "claimed_by_other_role");
+        assert_eq!(state(&app, e1.clone()).await, "pending", "被擋下就不該動到事件");
+
+        // 2) 同一顆 bot、token 打錯：403，不是「當成使用者」。
+        for bad in ["nope", ""] {
+            let mut h = HeaderMap::new();
+            h.insert("X-AM-Bot-Id", bot_id.parse().unwrap());
+            h.insert("X-AM-Bot-Token", bad.parse().unwrap());
+            let e = ev(&app).await;
+            let err = post_inbox_ack(State(app.clone()), Path(e.clone()), h).await.unwrap_err();
+            let LcError::Forbidden(v) = &err else { panic!("token={bad:?} 應該 403，卻是 {err:?}") };
+            assert_eq!(v["reason"], "bot_proof_mismatch", "token={bad:?}");
+            assert_eq!(state(&app, e).await, "pending", "token={bad:?}：擋下來就不該結掉別人的事件");
+        }
+
+        // 3) 完全不帶 token 但宣告了 bot id：一樣證明不了。
+        let mut only_id = HeaderMap::new();
+        only_id.insert("X-AM-Bot-Id", bot_id.parse().unwrap());
+        let e3 = ev(&app).await;
+        let err = post_inbox_ack(State(app.clone()), Path(e3.clone()), only_id).await.unwrap_err();
+        assert!(matches!(&err, LcError::Forbidden(v) if v["reason"] == "bot_proof_mismatch"), "got {err:?}");
+        assert_eq!(state(&app, e3).await, "pending");
+
+        // 4) 什麼身分都沒宣告＝使用者／UI，照舊什麼都結得掉。
+        let e4 = ev(&app).await;
+        post_inbox_ack(State(app.clone()), Path(e4.clone()), HeaderMap::new()).await.unwrap();
+        assert_eq!(state(&app, e4).await, "handled");
+
+        app.db.close().await;
+        std::fs::remove_dir_all(&app.data_dir).unwrap();
+    }
+
     pub(super) async fn agm_role_headers(app: &Arc<App>) -> HeaderMap {
         let id = crate::db::ulid();
         sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES ('p-agm','/tmp','AGM',?)")
