@@ -623,20 +623,82 @@ check "request-id 用核准的 commit" "request-id agm-daemon-update-$H1" "$AGM_
 check_no "request-id 不用 HEAD" "request-id agm-daemon-update-$H2" "$AGM_DIR/calls.log"
 teardown
 
-# 29. main 動到要建的東西：新申請取代舊的（--supersedes），等待時間由 daemon 接過去。
+# 29. 已核准、還沒派工（在等安全窗口）時 main 又動到要建的東西：照核准的那顆建，不 supersede、不開新申請
+#     （issue #439：main 約每 5 分鐘一個 push，已核准的那張每輪被取代，核准永遠派不出去）。
+bump_code() { ( cd "$AGM_REPO" && echo "$1" >> daemon/main.rs && /usr/bin/git add -A && /usr/bin/git commit -qm "code $1" \
+    && /usr/bin/git update-ref refs/remotes/origin/main HEAD ) >/dev/null 2>&1; }
 setup
 export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"approved"}]}'
 export STUB_SAFETY='{"safe":false,"working":[{"bot_id":"b9","name":"busy"}],"in_flight":[],"unreadable":[],"excluded_bot_ids":["bot-build","bot-manager"]}'
 bash "$SCRIPT"
-( cd "$AGM_REPO" && echo y >> daemon/main.rs && /usr/bin/git add -A && /usr/bin/git commit -qm code \
-    && /usr/bin/git update-ref refs/remotes/origin/main HEAD ) >/dev/null 2>&1
+H1=$(cd "$AGM_REPO" && /usr/bin/git rev-parse HEAD)
+bump_code y
 H2=$(cd "$AGM_REPO" && /usr/bin/git rev-parse HEAD)
 : > "$AGM_DIR/calls.log"
 export STUB_APPROVAL='{"id":"ap-2","status":"pending"}'
-export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"superseded"},{"id":"ap-2","status":"pending"}]}'
+export STUB_SAFETY='{"safe":true,"working":[],"in_flight":[],"unreadable":[],"excluded_bot_ids":["bot-build","bot-manager"]}'
 bash "$SCRIPT"
-check "換了要建的東西就取代舊申請" "approval request --requester test-owner --purpose rebuild .* --commit $H2 --expires-in 21600 --supersedes ap-1" "$AGM_DIR/calls.log"
+check_no "已核准沒派工：main 前進不開新申請" "approval request" "$AGM_DIR/calls.log"
+check_no "已核准沒派工：不 supersede" "--supersedes" "$AGM_DIR/calls.log"
+check "拿窗口用核准的 commit" "lease acquire rebuild --approval ap-1 --commit $H1" "$AGM_DIR/calls.log"
+check "request-id 用核准的 commit" "request-id agm-daemon-update-$H1" "$AGM_DIR/calls.log"
+check "交辦正文指名核准的 commit" "要建、要重啟的 commit：${H1}（核准 ap-1 針對的就是它）" "$AGM_DIR/assign-body.txt"
+check "交辦正文說明 HEAD 留到下一輪" "這次仍然只 checkout $H1 來建" "$AGM_DIR/assign-body.txt"
+check_no "交辦正文不說成 docs-only" "只動到不進 binary 的檔" "$AGM_DIR/assign-body.txt"
+check "log 寫明照核准的建" "核准 ap-1 已核准、還沒派工：照它的 commit $H1 建，origin/main $H2 留到下一輪" "$AGM_DIR/daemon-update.log"
+check "已派過記的是核准的 commit，不是 HEAD" "^$H1$" "$AGM_DIR/daemon-update.last"
+# 同一張核准還掛著 approved（例如租約還沒交還）但這顆 commit 已經派過：不再派同一顆，改為 HEAD 申請。
+: > "$AGM_DIR/calls.log"; : > "$AGM_DIR/assign-body.txt"
+export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"approved"},{"id":"ap-2","status":"pending"}]}'
+bash "$SCRIPT"
+check_no "已派過的核准不再派一次" "request-id agm-daemon-update-$H1" "$AGM_DIR/calls.log"
+check "改為 HEAD 申請" "approval request .* --commit $H2" "$AGM_DIR/calls.log"
+teardown
+
+# 29b. 那張核准用掉（consumed）之後才為新的 HEAD 開申請。
+setup
+export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"approved"}]}'
+export STUB_SAFETY='{"safe":false,"working":[{"bot_id":"b9","name":"busy"}],"in_flight":[],"unreadable":[],"excluded_bot_ids":["bot-build","bot-manager"]}'
+bash "$SCRIPT"
+bump_code y
+export STUB_SAFETY='{"safe":true,"working":[],"in_flight":[],"unreadable":[],"excluded_bot_ids":["bot-build","bot-manager"]}'
+bash "$SCRIPT"
+bump_code z
+H3=$(cd "$AGM_REPO" && /usr/bin/git rev-parse HEAD)
+: > "$AGM_DIR/calls.log"
+export STUB_APPROVAL='{"id":"ap-2","status":"pending"}'
+export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"consumed"},{"id":"ap-2","status":"pending"}]}'
+bash "$SCRIPT"
+check "consumed 之後為 HEAD 開新申請" "approval request --requester test-owner --purpose rebuild .* --commit $H3" "$AGM_DIR/calls.log"
+check "新申請等裁示，這輪不派" "核准狀態是 pending" "$AGM_DIR/daemon-update.log"
+teardown
+
+# 29c. 還沒核准（pending）時 main 動到要建的東西：照舊換成新 commit（--supersedes），等待時間由 daemon 接過去。
+setup
+export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"pending"}]}'
+bash "$SCRIPT"
+bump_code y
+H2=$(cd "$AGM_REPO" && /usr/bin/git rev-parse HEAD)
+: > "$AGM_DIR/calls.log"
+export STUB_APPROVAL='{"id":"ap-2","status":"pending"}'
+export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"pending"},{"id":"ap-2","status":"pending"}]}'
+bash "$SCRIPT"
+check "pending 時換了要建的東西就取代舊申請" "approval request --requester test-owner --purpose rebuild .* --commit $H2 --expires-in 21600 --supersedes ap-1" "$AGM_DIR/calls.log"
 check "log 寫明取代誰" "已申請核准 ap-2（commit ${H2}，取代 ap-1）" "$AGM_DIR/daemon-update.log"
+check_no "pending 不拿窗口" "lease acquire" "$AGM_DIR/calls.log"
+teardown
+
+# 29d. 被駁回（denied）之後 main 動到要建的東西：開新的（同一顆 commit 被駁不重申請，見 case 10）。
+setup
+export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"denied"}]}'
+bash "$SCRIPT"
+bump_code y
+H2=$(cd "$AGM_REPO" && /usr/bin/git rev-parse HEAD)
+: > "$AGM_DIR/calls.log"
+export STUB_APPROVAL='{"id":"ap-2","status":"pending"}'
+export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"denied"},{"id":"ap-2","status":"pending"}]}'
+bash "$SCRIPT"
+check "denied 之後為新 commit 開申請" "approval request .* --commit $H2" "$AGM_DIR/calls.log"
 teardown
 
 # 舊的 bin/agm 不認得 --supersedes：照舊開一筆新的，不要讓整筆申請被 argparse 拒絕。

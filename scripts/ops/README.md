@@ -64,7 +64,8 @@ approval，所以 approval 表就是唯一真相。數不出來（端點壞了�
    拿著 `restart` 租約期間 supervisor assignment 派送會暫停；這不是所有 prompt 路徑的全域互斥鎖，正式替換前仍須由 AGM 重驗窗口。
 4. `daemon-update.approval.json` 保存同一完整 commit 與申請者的核准 ID，下一輪接續查核。pending、denied、revoked 不另建申請；過期、已被用掉（`consumed`，例如上一個窗口過期沒交還）或被取代時**同一輪**重新申請。查派工或核准失敗時停止，不當作無工作或已獲准。
    `origin/main` 動了但 `build-inputs` 路徑沒變（docs-only）：沿用原核准，acquire 的 `--commit` 用核准那一顆，不為了建出一樣的東西再叫醒協調者。
-   真的動到要建的東西：新申請帶 `--supersedes <舊 id>`，daemon 把舊的標 `superseded`、等待時間接過去（升級計時不因為 main 動了就歸零，SPEC §18.10）；舊的 `bin/agm` 不認得這個旗標時照舊開新的一筆。
+   真的動到要建的東西，而舊的**已核准、那顆 commit 還沒派過**（在等安全窗口）：照核准的那顆建，不開新申請；「已派過」（`daemon-update.last`）記核准的 commit，HEAD 多出來的留到下一輪另外申請（issue #439：main 約每 5 分鐘一個 push，以前已核准的那張每輪被取代，核准永遠派不出去）。
+   舊的還是 pending，或已經 denied／expired／consumed／superseded：新申請帶 `--supersedes <舊 id>`，daemon 把還能用的舊申請標 `superseded`、等待時間接過去（升級計時不因為 main 動了就歸零，SPEC §18.10），不能用的就不接；舊的 `bin/agm` 不認得這個旗標時照舊開新的一筆。pending 換成新 commit 是因為還沒人裁示，讓協調者審的就是現在要建的東西，不必核准後再為 HEAD 多裁示、多建一次。
 7. `lease_token` **不進派工正文**：寫進 `daemon-update.lease-token`（權限 600），正文只給 `--lease-token "$(cat …)"`。正文會出現在 assignments API、建置 child 的對話紀錄與這份 log。
 5. `daemon-update.lock` 防止腳本重疊執行，鎖裡寫 pid 與時間。執行者已經不在（強制關機、斷電、SIGKILL）就**自己回收**並接手這一輪；
    還活著但卡超過 `AGM_LOCK_HUNG_SECS`（預設 3600 秒）不搶它的鎖，改推一則 `ops_alert` 給 AGM。核准狀態檔損毀、或核准 ID 查不到

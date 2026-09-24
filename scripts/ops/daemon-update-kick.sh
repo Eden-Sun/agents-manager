@@ -290,7 +290,29 @@ REVIEW=()
 # and requester so approval for one tree/owner can never authorize another.
 APPROVAL=""
 APPR_COMMIT="$HEAD_SHA"   # 這筆核准是針對哪個 commit（acquire 要對得上）
+DEFERRED=0                # 1＝照核准的舊 commit 建，HEAD 多出來、會進 binary 的改動留到下一輪
 SUPERSEDE=""
+# approval_status <id> → pending／approved／denied／…（過期的 pending／approved 讀成 expired）；查不到回非 0。
+# 先用 `--id` 查（清單只回最新 100 筆，舊的那筆會被擠出去）；舊的 CLI 不認得就退回整份清單。
+approval_status() {
+  local _q _s
+  for _q in "--id $1" ""; do
+    # shellcheck disable=SC2086  # _q 是刻意要拆成兩個參數的（沒有時是空字串）
+    _s=$("$AGM" --compact approval list $_q 2>/dev/null | APPROVAL="$1" python3 -c '
+import datetime,json,os,sys
+rows=json.load(sys.stdin)["approvals"]
+if not isinstance(rows,list): sys.exit(1)
+a=next((a for a in rows if a["id"]==os.environ["APPROVAL"]),None)
+if a is None: sys.exit(1)
+status=a["status"]
+if a.get("expires_at") and status in ("pending","approved"):
+    expiry=datetime.datetime.fromisoformat(a["expires_at"].replace("Z","+00:00"))
+    if expiry <= datetime.datetime.now(datetime.timezone.utc): status="expired"
+print(status)
+' 2>/dev/null) && [ -n "$_s" ] && { echo "$_s"; return 0; }
+  done
+  return 1
+}
 if [ -f "$APPROVAL_STATE" ]; then
   STATE_LINE=$(python3 -c '
 import json,sys
@@ -314,8 +336,19 @@ if d["owner"] == sys.argv[2]:
       APPROVAL=$OLD_ID
       APPR_COMMIT=$OLD_COMMIT
       log "origin/main ${OLD_COMMIT} → ${HEAD_SHA} 只動到不進 binary 的檔，沿用核准 ${OLD_ID}"
+    elif [ "$(approval_status "$OLD_ID")" = "approved" ] && [ "$(cat "$STATE" 2>/dev/null)" != "$OLD_COMMIT" ]; then
+      # 已經核准、那顆 commit 還沒派過（在等安全窗口）：照核准的那顆建，HEAD 留到下一輪（issue #439）。
+      # 以前這裡一律 supersede：main 約每 5 分鐘一個 push、kick 每 5 分鐘一輪，協調者 1 分鐘內核准的那張
+      # 下一輪就被取代，核准永遠派不出去（2026-09-24 11:04～11:25 連開四張）。
+      APPROVAL=$OLD_ID
+      APPR_COMMIT=$OLD_COMMIT
+      DEFERRED=1
+      log "核准 ${OLD_ID} 已核准、還沒派工：照它的 commit ${OLD_COMMIT} 建，origin/main ${HEAD_SHA} 留到下一輪"
     else
-      # 真的換了要建的東西：新申請取代舊的，等待時間接過去（SPEC §18.10 supersedes）。
+      # 真的換了要建的東西、而舊的還沒核准（pending）：新申請取代舊的，等待時間接過去（SPEC §18.10 supersedes）。
+      # pending 照舊換成新 commit：還沒人裁示，讓協調者審的就是現在要建的東西；daemon 會收掉舊的那則還沒送出的
+      # approval_requested，不多叫醒一次。不換的話核准後建的是舊的，下一輪又得為 HEAD 再申請一次＝多一次裁示、多一次重建。
+      # 舊的已經 denied／expired／consumed／superseded（或這顆 commit 已派過）：一樣開新的，daemon 對不能用的舊申請不接等待。
       SUPERSEDE=$OLD_ID
     fi
   fi
@@ -359,33 +392,7 @@ os.replace(path+".tmp",path)
   SUP_ARGS=()
 fi
 
-# 先用 `--id` 查（清單只回最新 100 筆，舊的那筆會被擠出去）；舊的 CLI 不認得就退回整份清單。
-STATUS=$("$AGM" --compact approval list --id "$APPROVAL" 2>/dev/null | APPROVAL="$APPROVAL" python3 -c '
-import datetime,json,os,sys
-rows=json.load(sys.stdin)["approvals"]
-if not isinstance(rows,list): sys.exit(1)
-a=next((a for a in rows if a["id"]==os.environ["APPROVAL"]),None)
-if a is None: sys.exit(1)
-status=a["status"]
-if a.get("expires_at") and status in ("pending","approved"):
-    expiry=datetime.datetime.fromisoformat(a["expires_at"].replace("Z","+00:00"))
-    if expiry <= datetime.datetime.now(datetime.timezone.utc): status="expired"
-print(status)
-' 2>/dev/null) || STATUS=""
-if [ -z "$STATUS" ]; then
-  STATUS=$("$AGM" --compact approval list 2>/dev/null | APPROVAL="$APPROVAL" python3 -c '
-import datetime,json,os,sys
-rows=json.load(sys.stdin)["approvals"]
-if not isinstance(rows,list): sys.exit(1)
-a=next((a for a in rows if a["id"]==os.environ["APPROVAL"]),None)
-if a is None: sys.exit(1)
-status=a["status"]
-if a.get("expires_at") and status in ("pending","approved"):
-    expiry=datetime.datetime.fromisoformat(a["expires_at"].replace("Z","+00:00"))
-    if expiry <= datetime.datetime.now(datetime.timezone.utc): status="expired"
-print(status)
-' 2>/dev/null) || STATUS=""
-fi
+STATUS=$(approval_status "$APPROVAL") || STATUS=""
 if [ -z "$STATUS" ]; then
   alert approval_missing "查不到核准 ${APPROVAL}（狀態檔 ${APPROVAL_STATE} 指著它），例行更新停住。請確認那筆核准還在不在，不在就刪掉狀態檔讓它重新申請"
   exit 0
@@ -519,9 +526,12 @@ cat "$DIR/daemon-update-task.md" > "$TMP" 2>/dev/null || true
 {
   printf '\n---\n'
   # 派工目標是**核准的那個 commit**，不是派工當下的 HEAD：兩者不同時（沿用核准的 docs-only 情形）建 HEAD 等於
-  # 建一個沒審過的版本（2026-09-22：核准 513f2320、建了 69010d72）。HEAD 動到要建的東西時上面已改成重新申請，不會到這裡。
+  # 建一個沒審過的版本（2026-09-22：核准 513f2320、建了 69010d72）。已核准之後 HEAD 又動到要建的東西（DEFERRED）也一樣，
+  # 新的留到下一輪另外申請（issue #439）。
   printf '要建、要重啟的 commit：%s（核准 %s 針對的就是它）。rebuild 租約 fence %s（owner %s）。\n' "$APPR_COMMIT" "$APPROVAL" "$LEASE" "$OWNER"
-  if [ "$APPR_COMMIT" != "$HEAD_SHA" ]; then
+  if [ "$DEFERRED" = 1 ]; then
+    printf 'origin/main 現在是 %s，比核准的多出會進 binary 的改動；這次仍然只 checkout %s 來建，restart 核准也申請 %s，不要拿 HEAD——新的留到下一輪另外申請核准。\n' "$HEAD_SHA" "$APPR_COMMIT" "$APPR_COMMIT"
+  elif [ "$APPR_COMMIT" != "$HEAD_SHA" ]; then
     printf 'origin/main 現在是 %s，多出來的 commit 只動到不進 binary 的檔；仍然 checkout %s 來建，restart 核准也申請 %s，不要拿 HEAD。\n' "$HEAD_SHA" "$APPR_COMMIT" "$APPR_COMMIT"
   fi
   [ -n "$ESC_NOTE" ] && printf '%s\n' "$ESC_NOTE"
@@ -533,7 +543,8 @@ cat "$DIR/daemon-update-task.md" > "$TMP" 2>/dev/null || true
 if "$AGM" --compact assign --bot "$BOT" --text-file "$TMP" \
      --request-id "agm-daemon-update-$APPR_COMMIT" ${REVIEW[@]+"${REVIEW[@]}"} \
      --owns daemon --owns web --owns Cargo.lock >> "$LOG" 2>&1; then
-  echo "$HEAD_SHA" > "$STATE"
+  # 「已派過」記的是這次實際建出來的東西：DEFERRED 時記核准的 commit，下一輪才會看到 HEAD 還沒建（記 HEAD 會讓它被當成已派過）。
+  if [ "$DEFERRED" = 1 ]; then echo "$APPR_COMMIT" > "$STATE"; else echo "$HEAD_SHA" > "$STATE"; fi
   log "已派工 agm-daemon-update-${APPR_COMMIT}（origin/main ${HEAD_SHA}）"
 else
   note_fail "派工失敗，交還窗口"
