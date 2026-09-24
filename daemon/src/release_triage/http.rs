@@ -124,10 +124,23 @@ struct PublishIn {
 async fn post_publish(State(app): State<Arc<App>>, body: Option<Json<PublishIn>>) -> Result<Json<Value>, LcError> {
     let b = body.map(|Json(b)| b).unwrap_or_default();
     let cfg = app.cfg.get().await.release_triage;
-    if b.dry_run {
-        return Ok(Json(issue::preflight(&app.db, &cfg, b.kind.as_deref(), b.version.as_deref()).await.map_err(up)?));
+    // 篩選條件跟 `post_dispatched`／`get_ledger` 對齊（#458）：`ledger::list` 是完全相等比對，
+    // 不驗、不正規化的話 `--kind codx`（打錯）或 `--version v0.156.0`（帶 v）都只會靜靜回
+    // 「沒事要做」，跟「這一版真的沒東西要開」在輸出上分不出來——而乾跑的數字正是打開
+    // `publish` 之前的依據。
+    if let Some(kind) = b.kind.as_deref() {
+        if !super::rules::supported(kind) {
+            return Err(LcError::Bad(format!("kind `{kind}` 沒有分診規則（claude｜codex）")));
+        }
     }
-    let rows = ledger::list(&app.db, b.kind.as_deref(), b.version.as_deref()).await.map_err(up)?;
+    let version = match b.version.as_deref() {
+        Some(v) => Some(crate::changelog::version_string(v).ok_or_else(|| LcError::Bad(format!("version `{v}` 看不出版本")))?),
+        None => None,
+    };
+    if b.dry_run {
+        return Ok(Json(issue::preflight(&app.db, &cfg, b.kind.as_deref(), version.as_deref()).await.map_err(up)?));
+    }
+    let rows = ledger::list(&app.db, b.kind.as_deref(), version.as_deref()).await.map_err(up)?;
     let mut out = Vec::new();
     for r in rows.iter().filter(|r| r.status == Status::Judged) {
         let o: Outcome = issue::publish_version(&app.db, &cfg, &r.kind, &r.version).await.map_err(up)?;
@@ -188,6 +201,49 @@ mod tests {
         // publish 重試端點在 publish=false 時什麼都不做。
         let p = post_publish(State(app.clone()), None).await.unwrap();
         assert_eq!(p.0["results"][0]["result"]["outcome"], "disabled");
+    }
+
+    /// #458：`publish` 的篩選條件原本不正規化也不驗——`v2.1.277`（帶 v）與打錯的 kind 都只會
+    /// 靜靜回「沒事要做」，跟「這一版真的沒東西要開」分不出來。`show` 一直都會正規化，兩支對同一個
+    /// 輸入給不一樣的答案就是這張票。
+    #[tokio::test]
+    async fn the_publish_filters_are_normalised_and_a_bad_kind_is_rejected() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let sections = source_sections("claude", include_str!("fixtures/claude_2.1.276-278.md"));
+        let entries = build_entries("claude", sections.iter().find(|s| s.version == "2.1.277").unwrap()).unwrap();
+        ledger::insert_version(&app.db, "claude", "2.1.277", &entries).await.unwrap();
+        let vs: Vec<EntryVerdict> = entries
+            .iter()
+            .filter(|e| e.bucket != Bucket::Dropped)
+            .map(|e| EntryVerdict { entry_id: e.id.clone(), verdict: Verdict::Guard, reason: "r".into(), module: "m".into() })
+            .collect();
+        let issues = vec![Proposal {
+            entry_ids: vec![vs[0].entry_id.clone()],
+            verdict: None,
+            title: "t".into(),
+            goal: "g".into(),
+            suggestion: "s".into(),
+            acceptance: "a".into(),
+            duplicate_of: None,
+        }];
+        post_verdicts(State(app.clone()), Json(Submission { kind: "claude".into(), version: "2.1.277".into(), verdicts: vs, issues })).await.unwrap();
+        assert_eq!(ledger::get(&app.db, "claude", "2.1.277").await.unwrap().unwrap().status, Status::Judged);
+
+        let pub_in = |kind: Option<&str>, version: Option<&str>, dry_run: bool| {
+            Json(PublishIn { kind: kind.map(str::to_string), version: version.map(str::to_string), dry_run })
+        };
+        // 帶 v 的版本要對到同一列（以前回 results: []）。
+        let hit = post_publish(State(app.clone()), Some(pub_in(None, Some("v2.1.277"), false))).await.unwrap();
+        assert_eq!(hit.0["results"].as_array().unwrap().len(), 1, "v2.1.277 要對到 2.1.277：{}", hit.0);
+        assert_eq!(hit.0["results"][0]["version"], "2.1.277");
+        // 乾跑那條路同樣要正規化，否則打開 publish 前看到的 would_create 會是假的 0。
+        let dry = post_publish(State(app.clone()), Some(pub_in(None, Some("v2.1.277"), true))).await.unwrap();
+        assert_eq!(dry.0["versions"].as_array().unwrap().len(), 1, "{}", dry.0);
+        // 認不出的版本與不支援的 kind 都是 400，不再靜靜回空。
+        for bad in [pub_in(None, Some("不是版本"), false), pub_in(Some("codx"), None, false), pub_in(Some("codx"), None, true)] {
+            assert!(matches!(post_publish(State(app.clone()), Some(bad)).await, Err(LcError::Bad(_))));
+        }
     }
 
     /// 驗證期間狀態被別人改掉（`save_verdicts` 沒更新到任何一列）：一樣是 API.md 的 409 `not_awaiting_verdict`。
