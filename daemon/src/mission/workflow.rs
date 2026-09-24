@@ -454,6 +454,41 @@ mod tests {
         assert!(ensure_can_assign(&env.app, &id, "executor").await.is_ok());
     }
 
+    /// issue #498：專案被刪之後，它底下的任務不能再被叫醒——那一步永遠走不完（專案與 bot 都不在了）。
+    ///
+    /// 這裡直接呼叫 `delete_project` 收任務時用的那一支（`store::cancel_open_for_project`）；
+    /// 「HTTP 刪除真的會呼叫它」由 `api.rs` 的 `deleting_a_project_cancels_its_open_missions` 釘。
+    #[tokio::test]
+    async fn a_mission_whose_project_was_deleted_is_not_woken_any_more() {
+        let env = tt::env().await;
+        let app = &env.app;
+        store::get_or_init(&app.db).await.unwrap();
+        let id = mission(&env, "m-gone").await;
+        sqlx::query("UPDATE supervisor_inbox SET state='handled'").execute(&app.db).await.unwrap();
+        linked(app, &id, "s1", "executor", "completed").await;
+        let later = chrono::Utc::now() + chrono::Duration::seconds(STALL_SECS + 5);
+
+        // 前提：沒刪之前，這一步確實會被叫醒。
+        assert_eq!(wake_stalled_at(app, later).await, vec![id.clone()], "前提：這一步本來會叫醒");
+        sqlx::query("UPDATE supervisor_inbox SET state='handled'").execute(&app.db).await.unwrap();
+
+        let n = crate::mission::store::cancel_open_for_project(&app.db, &env.project_id, "project_deleted").await.unwrap();
+        assert_eq!(n, 1, "專案底下那一筆開著的任務要被收掉");
+
+        // 下一步的簽名變了也不再叫（取消是終態，`open_unpaused` 撈不到它）。
+        linked(app, &id, "s2", "reviewer", "completed").await;
+        let much_later = later + chrono::Duration::seconds(2 * STALL_SECS);
+        assert!(wake_stalled_at(app, much_later).await.is_empty(), "專案都刪了還叫 AGM 去推，那一步永遠走不完");
+
+        let m = crate::mission::store::get(&app.db, &id).await.unwrap().unwrap();
+        assert!(m.cancelled_at.is_some() && m.completed_at.is_none());
+        let ev = crate::mission::store::events(&app.db, &id).await.unwrap();
+        let last = ev.last().expect("有事件");
+        assert_eq!(last.kind, "cancelled");
+        let payload: Value = serde_json::from_str(&last.payload_json).unwrap();
+        assert_eq!(payload["reason"], "project_deleted", "為什麼被收要留在事件裡：{payload}");
+    }
+
     /// 停在輪到 AGM 的一步、很久沒動靜：推一則 `mission_next`，同一步只推一次；還沒到時間、有交辦開著、
     /// 暫停中、或還有沒處理的通知，都不推。這是「daemon 重啟後從持久狀態接續」的叫醒那一半。
     #[tokio::test]

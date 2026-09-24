@@ -934,6 +934,56 @@ pub async fn cancel_announced(pool: &SqlitePool, id: &str, announce: Option<Anno
     Ok(true)
 }
 
+/// 專案被刪時把它底下**還開著**的任務收掉（issue #498）。回收掉了幾筆。
+///
+/// 為什麼要收：`open_unpaused`（`workflow::wake_stalled_at` 掃的那份）沒有存活性條件，任務也沒有軟刪——
+/// 不收的話它們永遠停在 open，十分鐘後還會推一則 `mission_next` 要 AGM 去推一個專案與 bot 都不存在的任務，
+/// 而清臨時 bot 那條只收**已結案**的任務，連 `agm-mission-*` 都不會被收。
+///
+/// 每一筆都跟 [`cancel_announced`] 一樣是「列＋`cancelled` 事件」一個交易，只是理由寫成 `project_deleted`
+/// 並留在事件的 payload 裡（`GET /api/missions/{id}` 看得到為什麼被收）。不推 inbox：專案是使用者當下刪的，
+/// 不需要再叫醒 AGM。**還原專案不會把任務救回來**（取消是終態，見 SPEC §18.13）。
+pub async fn cancel_open_for_project(pool: &SqlitePool, project_id: &str, reason: &str) -> Result<usize> {
+    let open: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM missions WHERE project_id = ? AND completed_at IS NULL AND cancelled_at IS NULL ORDER BY created_at, rowid",
+    )
+    .bind(project_id)
+    .fetch_all(pool)
+    .await?;
+    let mut done = 0;
+    for id in open {
+        let now = crate::db::now();
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+        // 條件重放在 UPDATE 裡：讀完到寫入之間別人剛好結案／取消了就當沒這回事，不補第二則事件。
+        let n = sqlx::query(
+            "UPDATE missions SET cancelled_at = ?, updated_at = ? WHERE id = ? AND completed_at IS NULL AND cancelled_at IS NULL",
+        )
+        .bind(&now)
+        .bind(&now)
+        .bind(&id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if n != 1 {
+            continue;
+        }
+        insert_event(
+            &mut tx,
+            &id,
+            "cancelled",
+            "專案已刪除，這筆任務一併取消",
+            Some(crate::agent_relay::DAEMON_SENDER),
+            &serde_json::json!({ "reason": reason }),
+            None,
+            None,
+        )
+        .await?;
+        tx.commit().await?;
+        done += 1;
+    }
+    Ok(done)
+}
+
 pub async fn cancel(pool: &SqlitePool, id: &str) -> Result<bool> {
     let now = crate::db::now();
     let n = sqlx::query("UPDATE missions SET cancelled_at = ?, updated_at = ? WHERE id = ? AND completed_at IS NULL AND cancelled_at IS NULL")
