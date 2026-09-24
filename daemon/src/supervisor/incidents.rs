@@ -58,6 +58,9 @@ pub struct Thresholds {
     pub bot_stopped_secs: i64,
     pub assignment_stalled_secs: i64,
     pub notify_max_attempts: i64,
+    /// issue #421：核准開著多久沒人裁示才算卡住。不從 config 讀（使用者定的是固定 30 分鐘），
+    /// 放在這裡只是為了測試能換一個小值。
+    pub approval_stalled_secs: i64,
 }
 
 impl Thresholds {
@@ -67,6 +70,7 @@ impl Thresholds {
             bot_stopped_secs: cfg.bot_stopped_secs as i64,
             assignment_stalled_secs: cfg.assignment_stalled_secs as i64,
             notify_max_attempts: cfg.notify_max_attempts,
+            approval_stalled_secs: super::failover::STALLED_AFTER_SECS,
         }
     }
 }
@@ -423,6 +427,29 @@ pub async fn observe(app: &Arc<App>, thresholds: &Thresholds) -> Probed {
         });
     }
 
+    // issue #421：核准開著超過 30 分鐘還沒有**任何人**裁示。改派（`failover`）只換得動角色；
+    // 兩個角色都沒登入時換到誰手上都一樣，這時要喊的是人，而不是只留一行 log——2026-09-23 那天
+    // 部署停了 9 小時，全程沒有任何東西告訴使用者「有一筆核准在等你」。
+    // critical：這是一道閘門，卡住的是別人的部署，不是 AGM 自己的工作。
+    match super::failover::stalled_approvals(app, thresholds.approval_stalled_secs).await {
+        Ok(stalled) => {
+            for (id, waiting_secs, requester) in stalled {
+                out.push(Observation {
+                    kind: super::failover::STALLED_KIND.into(),
+                    resource: id.clone(),
+                    severity: "critical".into(),
+                    detail: json!({"approval_id": id, "waiting_secs": waiting_secs, "requester": requester,
+                                   "action": "agm approval list 看它等什麼，再 agm approval decide"})
+                    .to_string(),
+                });
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "could not probe for stalled approvals");
+            probed.failed.push(super::failover::STALLED_KIND);
+        }
+    }
+
     probed
 }
 
@@ -596,6 +623,7 @@ mod tests {
             bot_stopped_secs: 300,
             assignment_stalled_secs: 7200,
             notify_max_attempts: 5,
+            approval_stalled_secs: 1800,
         }
     }
 
@@ -723,9 +751,56 @@ mod tests {
         assert!(!notifiable("notify_exhausted", false), "this one would retry, exhaust, and open another incident");
         // With a responder there is a second channel whose queue never exhausts: tell it.
         assert!(notifiable("notify_exhausted", true));
-        for kind in ["host_disconnected", "bot_stopped", "assignment_stalled", "assignment_undelivered", "remote_entry"] {
+        for kind in ["host_disconnected", "bot_stopped", "assignment_stalled", "assignment_undelivered", "remote_entry", super::super::failover::STALLED_KIND] {
             assert!(notifiable(kind, false), "{kind} is safe to wake the manager about");
         }
+    }
+
+    /// issue #421：核准開著超過 30 分鐘沒人裁示 → incident，而且是走 inbox 喊人那條路（不是只留 log）。
+    /// 裁示之後自己關掉。
+    #[tokio::test]
+    async fn a_stalled_approval_opens_an_incident_and_closes_when_someone_decides() {
+        use super::super::failover;
+        // `crate::testing::env()` 的 Env 一 drop 就把暫存目錄收掉，只留 app 會讓 DB 檔消失。
+        let app = super::super::bot_requests::flow_tests::app().await;
+        let a = store::create_approval(&app.db, "agm-kick", "rebuild", "release rebuild", Some("c1"), None, None).await.unwrap().approval.id;
+        let t = thresholds();
+
+        // 剛申請：沒有觀測。
+        assert!(observe(&app, &t).await.seen.iter().all(|o| o.kind != failover::STALLED_KIND), "剛申請的不算卡住");
+
+        sqlx::query("UPDATE supervisor_approvals SET created_at=? WHERE id=?")
+            .bind(crate::db::iso_in(-t.approval_stalled_secs - 60))
+            .bind(&a)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let seen = observe(&app, &t).await.seen;
+        let obs = seen.iter().find(|o| o.kind == failover::STALLED_KIND).expect("30 分鐘沒裁示要被看到");
+        assert_eq!(obs.resource, a, "resource 是核准 id，所以一筆核准只開一個 incident");
+        assert_eq!(obs.severity, "critical", "卡住的是別人的部署");
+        assert!(obs.detail.contains("waiting_secs"), "{}", obs.detail);
+
+        // 真的寫進去，而且會叫醒人（`incident_opened` → 巡檢）。
+        let mut detector = Detector::default();
+        sweep(&app, &mut detector).await;
+        // 寫入時不分類（`role`／`wake` 是 NULL），controller 每一拍先補上——跟其他 inbox 事件一樣。
+        super::super::roles::classify(&app.db).await.unwrap();
+        let woken: Vec<(String, Option<String>, Option<i64>)> =
+            sqlx::query_as("SELECT kind, role, wake FROM supervisor_inbox WHERE kind='incident_opened'").fetch_all(&app.db).await.unwrap();
+        assert_eq!(woken.len(), 1, "{woken:?}");
+        assert_eq!((woken[0].1.as_deref(), woken[0].2), (Some("patrol"), Some(1)), "使用者入口要被叫醒：{woken:?}");
+
+        // 有人裁示了 → 觀測消失，sweep 把 incident 關掉。
+        store::decide_approval(&app.db, &a, "approved", "AGM:patrol", None, None).await.unwrap();
+        assert!(observe(&app, &t).await.seen.iter().all(|o| o.kind != failover::STALLED_KIND));
+        sweep(&app, &mut detector).await;
+        let open: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_incidents WHERE kind=? AND status='open'")
+            .bind(failover::STALLED_KIND)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(open, 0, "裁示之後 incident 要自己關");
     }
 
     /// 巡檢自己的通知一直送不出去（它倒了）時，`notify_exhausted` 跟巡檢的 `watchdog_gave_up` 都要進

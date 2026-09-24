@@ -92,6 +92,10 @@ bash "$SCRIPT"
 check "順利時會派工" "已派工 agm-daemon-update-" "$AGM_DIR/daemon-update.log"
 check "未結案判斷用 --open（含 awaiting_review）" "assignments --open" "$AGM_DIR/calls.log"
 check "先申請核准" "approval request" "$AGM_DIR/calls.log"
+# issue #421：核准有效期 6 小時，不是 90 分鐘。90 分鐘會在協調者沒裁示的那個晚上自己過期，
+# 下個整點的 kick 只能重新申請，部署就一小時一次地原地打轉。
+check "核准有效期是 6 小時（21600 秒）" "expires-in 21600" "$AGM_DIR/calls.log"
+check_no "不再用 90 分鐘" "expires-in 5400" "$AGM_DIR/calls.log"
 check "再取得 rebuild 窗口" "lease acquire rebuild" "$AGM_DIR/calls.log"
 check "派工帶 ownership" "--owns daemon" "$AGM_DIR/calls.log"
 teardown
@@ -631,7 +635,7 @@ H2=$(cd "$AGM_REPO" && /usr/bin/git rev-parse HEAD)
 export STUB_APPROVAL='{"id":"ap-2","status":"pending"}'
 export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"superseded"},{"id":"ap-2","status":"pending"}]}'
 bash "$SCRIPT"
-check "換了要建的東西就取代舊申請" "approval request --requester test-owner --purpose rebuild .* --commit $H2 --expires-in 5400 --supersedes ap-1" "$AGM_DIR/calls.log"
+check "換了要建的東西就取代舊申請" "approval request --requester test-owner --purpose rebuild .* --commit $H2 --expires-in 21600 --supersedes ap-1" "$AGM_DIR/calls.log"
 check "log 寫明取代誰" "已申請核准 ap-2（commit ${H2}，取代 ap-1）" "$AGM_DIR/daemon-update.log"
 teardown
 

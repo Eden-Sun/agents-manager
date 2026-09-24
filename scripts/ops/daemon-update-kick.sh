@@ -330,10 +330,13 @@ fi
 # 不要白等到下一個整點。
 for ROUND in 1 2; do
 if [ -z "$APPROVAL" ]; then
+  # issue #421：有效期 6 小時（21600），不是 90 分鐘。90 分鐘會在協調者沒裁示的那個晚上自己過期，
+  # 下個整點只能重新申請，部署就一小時一次地原地打轉（2026-09-23 停了 9 小時）。6 小時足以跨過
+  # 「協調者要人去 /login」這種需要人介入的等待；重申請由 daemon 自己 supersede，不會累積 pending。
   APPROVAL=$("$AGM" --compact approval request \
     --requester "$OWNER" --purpose rebuild \
     --scope "release rebuild（daemon/web/persona/agm.py）；restart 另行核准" \
-    --commit "$HEAD_SHA" --expires-in 5400 ${SUP_ARGS[@]+"${SUP_ARGS[@]}"} 2>>"$LOG" | python3 -c '
+    --commit "$HEAD_SHA" --expires-in 21600 ${SUP_ARGS[@]+"${SUP_ARGS[@]}"} 2>>"$LOG" | python3 -c '
 import json,sys
 d=json.load(sys.stdin)
 if not isinstance(d.get("id"),str) or not d["id"]: sys.exit(1)
@@ -400,9 +403,13 @@ esac
 break
 done
 # 協調者多久沒裁示（issue #420）：自己的申請從第一次看到 pending 起算，到期重申請（expired → 新的一筆）
-# 也接著算，直到看到別的狀態才清掉。超過一個到期週期（AGM_UNDECIDED_ALERT_SECS，預設 5400＝--expires-in）
-# 還沒裁示就推 ops_alert——2026-09-23 協調者沒登入，申請每 90 分鐘過期、每小時重申請，停了 9 小時，
-# log 只有「核准狀態是 pending」，看不出是協調者掛了。
+# 也接著算，直到看到別的狀態才清掉。超過 AGM_UNDECIDED_ALERT_SECS（預設 5400＝90 分鐘）還沒裁示就推
+# ops_alert——2026-09-23 協調者沒登入，申請每 90 分鐘過期、每小時重申請，停了 9 小時，log 只有
+# 「核准狀態是 pending」，看不出是協調者掛了。
+#
+# 這個數字**不再等於 `--expires-in`**（issue #421 把有效期改成 6 小時，理由見下面那段）：它是腳本這一側的
+# 備援通道。daemon 那一側更快也更準——開 5 分鐘改派給巡檢、開 30 分鐘開 `approval_stalled` incident
+# （SPEC §18.10）。兩條都留著：daemon 那條要 daemon 活著且 inbox 送得出去，這條只要 launchd 還在跑。
 UNDECIDED="$DIR/daemon-update.undecided"
 UNDECIDED_ALERT_SECS=${AGM_UNDECIDED_ALERT_SECS:-5400}
 if [ "$STATUS" = "pending" ]; then

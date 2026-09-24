@@ -243,7 +243,7 @@ pub(crate) async fn accept_run_state(app: &Arc<App>, state: &str) {
 /// 測試用：incident 探針這一輪會不會說這顆 bot「應該在跑卻停了」（`bot_stopped`）——`stopped`／`exited` 標籤的語意就在這裡。
 #[cfg(test)]
 pub(crate) async fn bot_stopped_reported(app: &Arc<App>, bot_id: &str) -> bool {
-    let t = crate::supervisor::incidents::Thresholds { host_disconnected_secs: 120, bot_stopped_secs: 300, assignment_stalled_secs: 7200, notify_max_attempts: 5 };
+    let t = crate::supervisor::incidents::Thresholds { host_disconnected_secs: 120, bot_stopped_secs: 300, assignment_stalled_secs: 7200, notify_max_attempts: 5, approval_stalled_secs: 1800 };
     crate::supervisor::incidents::observe(app, &t).await.seen.iter().any(|o| o.kind == "bot_stopped" && o.resource == bot_id)
 }
 

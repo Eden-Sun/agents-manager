@@ -10,6 +10,7 @@ pub mod bot_requests;
 pub mod cli_refresh;
 pub mod controller;
 pub mod digest_text;
+pub mod failover;
 pub mod health;
 pub mod idle_sleep;
 pub mod incidents;

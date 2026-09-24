@@ -2913,7 +2913,10 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
   `daemon-update-kick.sh` 的鎖改成帶 pid 與時間：執行者不在了（強制關機、SIGKILL）就回收並接手這一輪；還活著但卡超過 `AGM_LOCK_HUNG_SECS`（3600 秒）才喊人。
   核准 ID 先用 `approval list --id` 查（清單只回最新 100 筆），查不到與狀態檔壞掉都喊人。
   **協調者一直不裁示也喊人**（issue #420）：自己的申請從第一次看到 `pending` 起算（`daemon-update.undecided`），到期重申請也接著算、看到別的狀態才清掉；
-  超過一個到期週期（`AGM_UNDECIDED_ALERT_SECS`，預設 5400＝`--expires-in`）推 `ops_alert`（`approval_undecided`，寫明「協調者 N 小時 M 分沒裁示」）。
+  超過 `AGM_UNDECIDED_ALERT_SECS`（預設 5400＝90 分鐘）推 `ops_alert`（`approval_undecided`，寫明「協調者 N 小時 M 分沒裁示」）。
+  這個數字**不再等於 `--expires-in`**（issue #421 把有效期改成 6 小時／21600，見 §18.15）：它是腳本這一側的備援通道。
+  daemon 那一側更快也更準——核准開 5 分鐘改派給巡檢、開 30 分鐘開 `approval_stalled` incident。兩條都留著：
+  daemon 那條要 daemon 活著且 inbox 送得出去，這條只要 launchd 還在跑。
 - **`desired_running` 是 watchdog 唯一的憑據，而且要跨重啟活著**，所以巡檢與協調者的 start／stop 都把它的寫入當**前置條件**，不是順手做的副作用（issue #84）：
   start 先寫「要它跑」再啟動、stop 先寫「不要它跑」再停，**寫不進去就整個失敗、一步副作用都不做**（呼叫端拿到 502，說明是持久化失敗，原樣重試是安全的）。
   以前兩支都是 `let _ = …`：stop 吞掉錯誤照樣停並回 200，watchdog 讀到的還是「要它跑」，使用者剛停掉的 AGM 下一個 tick 自己活回來；
@@ -3311,6 +3314,38 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
   不可用原因字串（對外契約）：`needs_login`／`waiting_quota`／`notify_stalled`／`no_run`。
   **讀不到畫面不是故障**：那一拍只記 `probe_failed`，原因維持上一拍的結論，incident 不開也不解——沒有證據就宣告故障，
   等於把核准從一顆其實健康的協調者手上搬走。同理，daemon 剛重啟、第一拍還沒跑時記憶體是空的，那是「還沒有結論」，不是故障。
+- **核准會改派，其他種類不會**（issue #421，使用者 2026-09-24 裁示；`supervisor/failover.rs`）。上面那條「不倒回巡檢」對
+  `bot_request` 與 `mission_*` 仍然成立——那些是「請協調者處理一件事」，換人做沒有意義。**`approval_requested` 是例外**：
+  它是一道閘門，卡住的不是協調者的工作，而是別人的部署。
+  - **判定不可用**：`health::responder_state`（#420 後續）。順序是 `supervisor_roles.responder` 的 `status`
+    （`needs_login` / `waiting_quota`，§18.15 上一條，由 #420 寫入）→ 沒有 active run（`no_run`）→ `Available`；
+    沒登記過是 `NotConfigured`，角色列或 run 讀不到是 `Unknown`。改派只看 `RoleState::is_unavailable()`，
+    reason ∈ `needs_login` / `waiting_quota` / `notify_stalled` / `no_run`（`health::REASON_*`，**穩定字串**，會進 inbox payload）。
+    **`Unknown` 與 `NotConfigured` 都不算不可用**：沒有證據就把核准從一顆其實健康的協調者手上搬走，比晚 5 分鐘
+    糟得多——兩個角色都以為對方在處理，就沒有人在處理；沒登記協調者時核准本來就歸巡檢，沒有東西要改派。
+    呼叫端不自己 `match` reason（很容易手滑把 `Unknown` 算進去），只用 `is_unavailable()` 當閘門、`reason()` 當標籤。
+    #427 已經在 `active_run` 與 `Available` 之間插進「每拍讀畫面的結論」與 notify 連續 3 個回合沒完成（上面兩條），
+    所以同一個閘門現在也吃得到 `notify_stalled`——多出來的只讓改派**更早**觸發，改派這一側一行都不必改。
+  - **改派**：事件開著（`state != 'handled'`）超過 **5 分鐘**而協調者不可用 → `role='patrol'`、`claimed_by=NULL`、`wake=1`、
+    `state='pending'`，payload 補 `reassigned_from:"responder"`、`reassigned_reason:<reason>`、`reassigned_at`、`to_role:"patrol"`。
+    `notify_attempts`／`notify_next_at`／`notify_turn_id`／`delivered_at` **一起歸零**：那些次數是協調者送不出去累積的，
+    留著會吃掉巡檢的補送額度（巡檢的 `due_for` 有 `notify_attempts < notify_max_attempts` 上限），等於改派的同一刻就已經超限、
+    巡檢永遠撈不到它。條件寫在 SQL 的 `WHERE`（`COALESCE(claimed_by, role)='responder'`），所以同一則跑兩拍只改派一次。
+  - **恢復後不搶回**：`roles::classify` 只補 `role IS NULL` 的列，寫過 `patrol` 就定了；`roles::route("approval_requested", …)`
+    另外認 payload 的 `to_role`，所以重讀 payload 也答巡檢。巡檢用同一套 `agm approval decide` 裁示（巡檢 persona 第 30 條）。
+  - **5 分鐘**：夠久到「協調者只是正忙著上一個回合」不會被誤判（notify 的批次窗 `responder_batch_secs` 遠小於它），
+    又短到一個晚上不會白等。
+- **核准開著 30 分鐘沒人裁示就喊人**（issue #421）：不論在誰手上（改派之後巡檢也沒登入時，換到誰手上都一樣），
+  incident `approval_stalled`、severity **critical**、resource 是核准 id（一筆核准只開一個），detail 帶 `approval_id`／`waiting_secs`／
+  `requester`／`action`。走 `incident_opened` → 巡檢並叫醒，不是只留一行 log——2026-09-23 那天部署停了 9 小時，
+  全程沒有任何東西告訴使用者「有一筆核准在等你」。有人裁示（狀態不再是 `pending`）就自動 resolve。
+  等待起點用 `wait_since`（被取代時接過來的）優先於 `created_at`：重申請接續的等待不能因為換了一筆 id 就從零開始算。
+- **核准有效期 6 小時，重申請自己 supersede**（issue #421）：`daemon-update-kick.sh` 的 `--expires-in` 從 5400 改成 **21600**。
+  90 分鐘會在協調者沒裁示的那個晚上自己過期，下個整點只能重新申請，部署一小時一次地原地打轉。
+  另外 `create_approval_*` 沒帶 `supersedes` 時 **daemon 自己**找「同一個申請者、同一種用途、還 `pending`」的那一筆取代掉
+  （kick 記住舊 id 的本機狀態檔掉了就不會帶 `--supersedes`，以前每輪開一筆新的 pending，那個晚上累積了四筆、AGM 被叫醒四次）。
+  **只自動取代 `pending`**：`approved` 是人做過的裁示，不能因為排程又跑了一輪就無聲消失（部署腳本可能正要拿它開窗口）；
+  明講 `--supersedes` 才動得了它。自動挑到的那筆對不上（剛被裁示、剛過期）只是不取代，不會讓整筆申請失敗。
 - **送到了卻沒人 ack 的補送有上限**（使用者 2026-09-17 裁示，取代先前「刻意不設上限」）：`recover_unacked` 把 delivered 而沒 ack 的事件放回 pending，
   以前沒有次數上限——協調者漏 ack 一則，opus-high 就每 `notify_ack_deadline_secs`（1800 秒）被叫醒一次，而且沒有任何人知道。
   現在送達 **5 次**（同看門狗的 `MAX_ATTEMPTS` 與巡檢的 `notify_max_attempts`：送五次沒人 ack，第六次也不會有人），

@@ -8,7 +8,8 @@
 //! 先喚醒巡檢再請它轉交，等於每個 bot 申請都先燒一輪 fable——這張表存在就是為了不讓那件事發生。
 //!
 //! 協調者還沒建立（舊部署）時一切照舊：協調的事件由巡檢收，節流也照巡檢的。一旦建立了，
-//! 協調的事件就**只**給協調者；它沒額度、停了或登出，事件留在 inbox 等，不倒回巡檢。
+//! 協調的事件就**只**給協調者；它沒額度、停了或登出，事件留在 inbox 等。
+//! 唯一的例外是**核准**：開超過 5 分鐘而協調者不可用時改派給巡檢（`failover.rs`、issue #421）。
 
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -193,7 +194,14 @@ fn known_route(kind: &str, payload: &Value, review_role: Option<&str>) -> Option
         // 通知型交辦送到了、額度擋住／恢復：controller 自己會處理，這些只是記錄。
         // 排隊中（`assignment_queued`）同理：它還在路上，等回合結束自己會送出。
         "assignment_noticed" | "assignment_queued" | "assignment_quota_blocked" | "assignment_quota_resumed" => r(reviewer, false),
-        "approval_requested" | "mission_created" | "mission_question" | "mission_answered" | "mission_resumed"
+        // 核准：預設協調者，但**改派過的認 payload 的 `to_role`**（issue #421）。協調者不可用而核准
+        // 等超過 5 分鐘時 `failover` 會把它改成巡檢；恢復之後不搶回，靠的是 `classify` 只補
+        // `role IS NULL` 的列，這裡多認一個欄位是為了讓「重讀 payload 也答巡檢」這件事不只靠那個條件。
+        "approval_requested" => r(
+            payload.get("to_role").and_then(Value::as_str).and_then(Role::parse).unwrap_or(Role::Responder),
+            true,
+        ),
+        "mission_created" | "mission_question" | "mission_answered" | "mission_resumed"
         | "mission_identity_switch" | "mission_paused" | "mission_cancelled" | "mission_next" => r(Role::Responder, true),
         // 倒下的就是巡檢自己：它的看門狗放棄、或它的通知一直送不出去（`notify_exhausted`）。送給巡檢等於
         // 送進已知壞掉的那條路——活著的協調者才收得到（review 2026-09-16 c1 M2、L4）。反方向對稱：
@@ -485,7 +493,8 @@ async fn count_merged(pool: &SqlitePool, role: Role, n: usize) -> Result<()> {
 }
 
 /// 協調者**建立過**沒有。這跟「它現在活著」是兩件事：一旦雙角色啟用，協調的事件就永遠是
-/// 協調的——它停了、沒額度、bot 被刪掉，事件都留在 inbox 等，不會倒回巡檢（那等於又去燒 fable）。
+/// 協調的——它停了、沒額度、bot 被刪掉，事件都留在 inbox 等（那等於又去燒 fable）。
+/// `approval_requested` 例外：等超過 5 分鐘會被 `failover` 改派給巡檢（issue #421）。
 pub async fn responder_configured(pool: &SqlitePool) -> Result<bool> {
     Ok(get(pool, Role::Responder).await?.bot_id.is_some())
 }

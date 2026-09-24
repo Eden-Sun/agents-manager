@@ -6,7 +6,9 @@
 //!   共用一個目錄就會互相接到對方的 session、覆寫對方的 `persona.md`。
 //! * **自己的模型**（預設 cc0/opus/high），沒有 fable→opus 的切換：協調者不跑巡檢的模型政策。
 //! * **沒有 Remote Control**。使用者入口只有巡檢一個。
-//! * **額度用完就等**。事件留在 inbox、狀態寫 `waiting_quota` 與下次重試時間，不會倒回巡檢。
+//! * **額度用完就等**。事件留在 inbox、狀態寫 `waiting_quota` 與下次重試時間。**例外是核准**：
+//!   `approval_requested` 開超過 5 分鐘而協調者不可用（含撞限）時改派給巡檢，見 `failover.rs`
+//!   與 SPEC §18.15。其餘種類（bot 的申請、mission 事件）照舊留在協調者佇列等它回來。
 
 use crate::config::{BotCfg, ProjectCfg};
 use crate::lifecycle::{self, LcError};
@@ -465,7 +467,7 @@ pub async fn watchdog_tick(app: &Arc<App>) {
     let Ok(bot) = roles::responder_bot(&app.db).await else { return };
     let Some(bot) = bot else {
         // 登記過卻找不到那顆 bot（被刪掉）：看門狗沒有東西可以拉起來，交給巡檢。事件照樣留在
-        // 協調者的佇列，不倒回巡檢處理（SPEC §18.15）。
+        // 協調者的佇列（SPEC §18.15）——只有等超過 5 分鐘的核准會被 `failover` 改派（issue #421）。
         if row.bot_id.is_some() {
             report_missing(app, row.bot_id.as_deref().unwrap_or("")).await;
         }
@@ -527,7 +529,8 @@ pub async fn watchdog_tick(app: &Arc<App>) {
 }
 
 /// 登記過的協調者 bot 不見了（被刪除）。說一次給巡檢聽，並把狀態寫清楚：它的事件仍留在它的
-/// 佇列裡等人把它建回來，不會改由巡檢處理。event_key 帶 bot id，所以刪掉再建一顆會是新的一則。
+/// 佇列裡等人把它建回來（等超過 5 分鐘的核准除外，那些會改派給巡檢，issue #421）。
+/// event_key 帶 bot id，所以刪掉再建一顆會是新的一則。
 async fn report_missing(app: &Arc<App>, bot_id: &str) {
     let _ = roles::set_status_detail(
         &app.db,
@@ -544,7 +547,7 @@ async fn report_missing(app: &Arc<App>, bot_id: &str) {
         None,
         None,
         None,
-        &json!({"bot_id": bot_id, "action": "`bin/agm responder setup` 再 `responder start`；協調的事件不會倒回巡檢"}),
+        &json!({"bot_id": bot_id, "action": "`bin/agm responder setup` 再 `responder start`；bot 申請與 mission 事件留在協調者佇列，等超過 5 分鐘的核准會改派給巡檢"}),
     )
     .await;
     if matches!(pushed, Ok(Some(_))) {
@@ -565,7 +568,7 @@ async fn report_gave_up(app: &Arc<App>, why: &str) {
         None,
         None,
         None,
-        &json!({"why": why, "gave_up_at": at, "action": "`bin/agm responder-start`；協調的事件留在 inbox，不會改由巡檢處理"}),
+        &json!({"why": why, "gave_up_at": at, "action": "`bin/agm responder-start`；bot 申請與 mission 事件留在 inbox，等超過 5 分鐘的核准會改派給巡檢裁示"}),
     )
     .await;
     let Ok(Some(_)) = pushed else { return };
@@ -805,8 +808,10 @@ pub async fn notify(app: &Arc<App>) {
                 return;
             }
             let next = quota_retry_at(reset.as_deref(), watchdog::iso_in(cap));
+            // issue #421：這句以前寫「不會改由巡檢處理」。核准現在會改派（開超過 5 分鐘就換巡檢裁示），
+            // 其餘種類才是真的留著等——UI 讀的就是這段字，寫錯會讓人以為核准還在協調者手上。
             let detail = format!(
-                "{} 的額度見底；協調事件留在 inbox，{next} 再試，不會改由巡檢處理",
+                "{} 的額度見底；{next} 再試。bot 申請與 mission 事件留在協調者佇列等它回來；等超過 5 分鐘的核准會改派給巡檢裁示",
                 bot.identity.as_deref().unwrap_or("(身分不明)")
             );
             let _ = roles::set_status(&app.db, Role::Responder, "waiting_quota", Some(&detail), reset.as_deref()).await;
