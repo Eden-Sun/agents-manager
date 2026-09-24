@@ -112,6 +112,18 @@ mk_log() {
   printf 'daemon\tRun tests\t2026-09-19T01:00:02.0000000Z \n' >> "$GHDIR/log-$id.txt"
 }
 
+# ops 測試的 log：`==> ops: <檔>` 之後跟著 harness 的 `ok   - …` / `FAIL - …`（issue #449）。
+mk_ops_log() {
+  local id="$1" file="$2"; shift 2
+  : > "$GHDIR/log-$id.txt"
+  printf 'ob\tRun scripts/check.sh ops\t2026-09-24T05:00:00.0000000Z ==> ops: %s\n' "$file" >> "$GHDIR/log-$id.txt"
+  printf 'ob\tRun scripts/check.sh ops\t2026-09-24T05:00:00.0000000Z ok   - 這條是過的，不該被抽出來\n' >> "$GHDIR/log-$id.txt"
+  for n in "$@"; do
+    printf 'ob\tRun scripts/check.sh ops\t2026-09-24T05:00:01.0000000Z FAIL - %s\n' "$n" >> "$GHDIR/log-$id.txt"
+    printf 'ob\tRun scripts/check.sh ops\t2026-09-24T05:00:01.0000000Z       不該有 '"'"'某某'"'"'\n' >> "$GHDIR/log-$id.txt"
+  done
+}
+
 check() {
   if grep -q -- "$2" "$3" 2>/dev/null; then echo "ok   - $1"; PASS=$((PASS + 1))
   else echo "FAIL - $1"; echo "      找不到 '$2'，實際內容："; sed 's/^/      /' "$3" 2>/dev/null; FAIL=$((FAIL + 1)); fi
@@ -443,6 +455,32 @@ mk_log 5 mod::tests::brand_new_case
 bash "$SCRIPT"
 check "回歸：標成在本段紅的範圍內" "在本段紅的範圍內" "$GHDIR/created.log"
 check_no "回歸：不標 flaky" "疑似間歇紅" "$GHDIR/created.log"
+teardown
+
+# 12d. bash 測試 harness 的 `FAIL - …` 要抽得出來（issue #449）。
+#      以前只認 Rust 的 `test X ... FAILED` 與 `ERROR:／FAIL:`，ops 紅時整張票是空的。
+setup
+( cd "$AGM_REPO" && git init -q && git config user.email t@t && git config user.name t &&
+  echo a > other && git add other && git commit -q -m "上一個綠" &&
+  printf 'check "健康時不寫 log" ...\n' > t_test.sh && git add t_test.sh && git commit -q -m "這一筆引入了那條斷言" )
+G=$(git -C "$AGM_REPO" rev-parse HEAD~1); F=$(git -C "$AGM_REPO" rev-parse HEAD)
+mk_runs 5:failure 4:failure 3:success
+python3 - "$GHDIR/runs.json" "$G" "$F" <<'PY'
+import json, sys
+p, g, f = sys.argv[1:]; d = json.load(open(p))
+for r in d:
+    if r["databaseId"] == 3: r["headSha"] = g
+    if r["databaseId"] == 4: r["headSha"] = f
+json.dump(d, open(p, "w"))
+PY
+mk_ops_log 5 scripts/ops/dev-server-kick_test.sh "健康時不寫 log（是 '1871'，預期 '0'）" "健康時不會去起 vite"
+bash "$SCRIPT"
+check "bash：標題數得出條數" "^TITLE CI 紅了：${F:0:8} 起 2 條失敗" "$GHDIR/created.log"
+check "bash：失敗名帶測試檔名" 'BODY - `dev-server-kick_test.sh: 健康時不寫 log`' "$GHDIR/created.log"
+check_no "bash：行尾的實際值細節要去掉" "是 '1871'" "$GHDIR/created.log"
+check "bash：第二條也抽得到" "健康時不會去起 vite" "$GHDIR/created.log"
+check_no "bash：過的那條不能被當成失敗" "這條是過的" "$GHDIR/created.log"
+check "bash：反查得到引入那條斷言的 commit" "BODY .*這一筆引入了那條斷言" "$GHDIR/created.log"
 teardown
 
 # 13. 假 agm／gh 對未知旗標要 exit 2（守住 stub 本身）。
