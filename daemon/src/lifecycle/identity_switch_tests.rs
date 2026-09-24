@@ -634,6 +634,39 @@ async fn limit_hits(app: &Arc<App>) -> Vec<String> {
     app.quotas.lock().await.iter().filter(|(_, q)| q.limit_hit.is_some()).map(|(k, _)| k.clone()).collect()
 }
 
+/// **issue #522**：憑據在、但**內容壞了**（未來加欄位沒帶 `serde(default)`、寫到一半、有人動過 DB）。
+/// 以前回填把那一列跳過卻照樣把整台主機標成「回填完了」，於是 flush 走「回填完了只看記憶體」那條：
+/// 記憶體是空的 → 判定不擋 → `forget` 把唯一的證據清掉 → 重啟後第一拍就送進還沒額度的身分，
+/// 正是這個模組存在的理由。現在解不開的那顆 bot 不算回填過，照舊問那一列自己的憑據（那裡對解不開是回錯、
+/// 呼叫端照擋，跟 `held_on_turn` 同方向）。
+#[tokio::test]
+async fn a_queued_prompt_whose_quota_hold_is_unreadable_is_not_released_after_a_restart() {
+    let e = tt::env().await;
+    let (bot, _run_a, pane_a, dispatch) = quota_hit_with_a_dispatch_queued(&e, "quota-hold-corrupt").await;
+    let app = restarted(&e, &bot.id).await;
+    assert!(crate::quota::limit_hit_for_bot(&app, &bot).await.is_none(), "前提：新行程的記憶體是空的");
+    sqlx::query("UPDATE turns SET quota_hold='{' WHERE id=?").bind(&dispatch).execute(&app.db).await.unwrap();
+
+    // 回填跑完：那一列解不開，撞限沒被種回記憶體。
+    identities_detected(&app).await;
+    assert!(crate::quota::limit_hit_for_bot(&app, &bot).await.is_none(), "前提：解不開的憑據種不回去");
+
+    forget_queue_retry_timer(&bot.id);
+    flush_queued_locked(&app, &bot.id).await.unwrap();
+
+    assert_eq!(held(&turn_row(&app, &dispatch).await), ("queued", 0, None), "證明不了有額度就照擋：不 claim、不花重試");
+    assert_eq!(sent_to(&e, &pane_a), 0, "沒有送進還沒額度的 A");
+    let raw: Option<String> = sqlx::query_scalar("SELECT quota_hold FROM turns WHERE id=?")
+        .bind(&dispatch)
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+    assert_eq!(raw.as_deref(), Some("{"), "唯一的證據不准被 forget 掉");
+    assert!(queue_retry_timer_armed(&bot.id), "掛了 timer 回來再看");
+    forget_queue_retry_timer(&bot.id);
+    stop_bot(&app, &bot.id).await.unwrap();
+}
+
 /// #108 重開（故障注入 1、4）：A 撞額度的 `StopFailure` 到的時候讀不到 A 在哪台主機。以前退回 `local` 照記、照收回合、
 /// 推回合結束。現在這一則失敗（收件匣重試）、哪一格都不寫、撞限欠著、回合不收——派工留在佇列。讀得到之後收件匣重試：
 /// 撞限記下、回合收成失敗、派工照撞限擋；換到 B → 送出，只送一次。
