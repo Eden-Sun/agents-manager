@@ -47,11 +47,49 @@ pub fn fingerprint(to: Role, target_bot_id: &str, text: &str, attachments: &[Str
 }
 
 /// 去重鍵。有 `client_request_id` 就用它（重試沿用同一個 id 是呼叫端說了算）；沒有的話用
-/// 寄件者＋內容指紋＋十分鐘一格，讓逾時重跑的 shim 不會變成兩件事。
-pub fn event_key(from: &str, crid: Option<&str>, fingerprint: &str, now_unix: i64) -> String {
+/// 寄件者＋內容指紋＋一個十分鐘的**錨點**，讓逾時重跑的 shim 不會變成兩件事。
+///
+/// `anchor_unix` 是那個十分鐘視窗的起點。**呼叫端不要直接餵「現在」**：`window_anchor` 會先找還開著的
+/// 同一句申請，有就沿用它的 `created_at`。直接餵現在的話，視窗變成牆上時鐘切出來的固定格子，
+/// 相隔二十秒的兩次重問只要跨過 600 的倍數就落在不同格子、變成兩筆（issue #442）。
+pub fn event_key(from: &str, crid: Option<&str>, fingerprint: &str, anchor_unix: i64) -> String {
     match crid.map(str::trim).filter(|s| !s.is_empty()) {
         Some(c) => format!("bot_request:{from}:crid:{c}"),
-        None => format!("bot_request:{from}:fp:{fingerprint}:{}", now_unix.div_euclid(DEDUPE_BUCKET_SECS)),
+        None => format!("bot_request:{from}:fp:{fingerprint}:{}", anchor_unix.div_euclid(DEDUPE_BUCKET_SECS)),
+    }
+}
+
+/// 這一句的去重視窗要錨在哪個時刻（unix 秒）。
+///
+/// 找「同寄件者、同指紋、**還沒結案**、而且 `created_at` 距現在不到 `DEDUPE_BUCKET_SECS`」的最新一筆：
+/// 有就用**它的** `created_at` 當錨，所以重問一定跟它算同一格；沒有就用現在，開一個新視窗。
+///
+/// 這樣「兩次呼叫相隔多久」才是決定要不要去重的東西。以前用 `now.div_euclid(600)`，決定的其實是
+/// 「它們各自落在哪一格」——同一句相隔 20 秒的重問，跨過邊界就變兩筆 durable 申請，AGM 被叫醒兩次
+/// （issue #442；那條 shim 的回歸測試因此約 6–7% 機率紅）。
+///
+/// 讀不到就退回「現在」：這只是去重的錨點，讀失敗時寧可多一筆待辦，也不要讓申請整筆失敗。
+async fn window_anchor(app: &Arc<App>, from_bot_id: &str, fingerprint: &str, now_unix: i64) -> i64 {
+    let since = crate::db::iso_at(chrono::DateTime::from_timestamp(now_unix - DEDUPE_BUCKET_SECS, 0).unwrap_or_else(chrono::Utc::now));
+    let found: Result<Option<String>, _> = sqlx::query_scalar(
+        "SELECT created_at FROM supervisor_inbox
+          WHERE supervisor_id=? AND kind='bot_request' AND state!='handled' AND bot_id=?
+            AND json_extract(payload_json,'$.fingerprint')=? AND created_at >= ?
+          ORDER BY created_at DESC, rowid DESC LIMIT 1",
+    )
+    .bind(store::SUPERVISOR_ID)
+    .bind(from_bot_id)
+    .bind(fingerprint)
+    .bind(&since)
+    .fetch_optional(&app.db)
+    .await;
+    match found {
+        Ok(Some(at)) => chrono::DateTime::parse_from_rfc3339(&at).map(|t| t.timestamp()).unwrap_or(now_unix),
+        Ok(None) => now_unix,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not look for an open bot_request to anchor the dedupe window; using now");
+            now_unix
+        }
     }
 }
 
@@ -244,7 +282,14 @@ pub async fn queue(
     let (quiet, reply_matched) = quiet_reason(app, from_bot_id, sender, to_bot.as_deref(), mark).await?;
     let from_bot = crate::db::bot(&app.db, from_bot_id).await.map_err(up)?;
     let fp = fingerprint(to, target_bot_id, text, attachments);
-    let key = event_key(from_bot_id, client_request_id, &fp, chrono::Utc::now().timestamp());
+    // 錨點：還開著的同一句申請用它的 `created_at`，不然用現在（issue #442）。帶了 request id 時
+    // 錨點用不到（鍵就是那個 id），所以不必多查一次 DB。
+    let now_unix = chrono::Utc::now().timestamp();
+    let anchor = match client_request_id.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(_) => now_unix,
+        None => window_anchor(app, from_bot_id, &fp, now_unix).await,
+    };
+    let key = event_key(from_bot_id, client_request_id, &fp, anchor);
     let payload = json!({
         "to_role": to.as_str(),
         "wake": quiet.is_none(),
@@ -380,7 +425,8 @@ mod tests {
         assert_eq!(event_key("b1", Some("r-1"), &fp("x"), 0), event_key("b1", Some(" r-1 "), &fp("y"), 999_999));
         assert_ne!(fp("x"), fp("y"));
         assert_ne!(event_key("b1", Some("r-1"), &fp("x"), 0), event_key("b2", Some("r-1"), &fp("x"), 0), "不同寄件者不互相吃掉");
-        // 沒帶 id：同寄件者、同內容、同一個十分鐘格子算一件。
+        // 沒帶 id：同寄件者、同內容、同一個十分鐘視窗算一件。這裡測的是純函式（餵錨點進去）；
+        // 「重問要落在同一個視窗」由 `window_anchor` 負責，見 `dedupe_window_tests`（issue #442）。
         let t = 1_757_750_400;
         assert_eq!(event_key("b1", None, &fp("請核准重建"), t), event_key("b1", None, &fp("請核准重建"), t + 599));
         assert_ne!(event_key("b1", None, &fp("請核准重建"), t), event_key("b1", None, &fp("請核准重建"), t + 600));
@@ -400,6 +446,111 @@ mod tests {
 }
 
 /// 整條路：真的 App、真的 DB，驗「fable 沒被叫醒」與去重、迴圈、額度。
+#[cfg(test)]
+mod dedupe_window_tests {
+    //! issue #442：沒帶 request id 的去重視窗要錨在「還開著的那筆申請」，不是牆上時鐘的固定格子。
+    //!
+    //! 這裡把時間**釘在格子邊界**上，所以迴歸不必靠運氣才踩到：以前 `herdr_shim` 那條回歸測試
+    //! 大約 6–7% 機率紅（整樹跑 300 秒，剛好跨過 600 的倍數就變兩筆）。
+    use super::*;
+
+    /// 600 的倍數，拿來當格子邊界。
+    const BOUNDARY: i64 = 1_757_750_400;
+
+    fn fp_of(text: &str) -> String {
+        fingerprint(Role::Responder, "patrol", text, &[])
+    }
+
+    /// 寫一筆 `bot_request`（`created_at` 指定），回它的 id。
+    async fn open_request(app: &Arc<App>, from: &str, fp: &str, created_at_unix: i64, state: &str) -> String {
+        let id = crate::db::ulid();
+        let at = crate::db::iso_at(chrono::DateTime::from_timestamp(created_at_unix, 0).unwrap());
+        sqlx::query(
+            "INSERT INTO supervisor_inbox (id, supervisor_id, event_key, kind, payload_json, state, bot_id, notify_attempts, created_at, updated_at)
+             VALUES (?,?,?,'bot_request',?,?,?,0,?,?)",
+        )
+        .bind(&id)
+        .bind(store::SUPERVISOR_ID)
+        .bind(format!("bot_request:{from}:fp:{fp}:{}", created_at_unix.div_euclid(DEDUPE_BUCKET_SECS)))
+        .bind(json!({"fingerprint": fp}).to_string())
+        .bind(state)
+        .bind(from)
+        .bind(&at)
+        .bind(&at)
+        .execute(&app.db)
+        .await
+        .unwrap();
+        id
+    }
+
+    /// **這一條就是 #442**：第一筆落在邊界前一秒，重問發生在邊界之後——錨點要沿用既有那筆的
+    /// `created_at`，兩次算同一格。用「現在」當錨（舊行為）會落在下一格，變成兩筆。
+    #[tokio::test]
+    async fn a_repeat_across_a_bucket_boundary_stays_one_request() {
+        assert_eq!(BOUNDARY % DEDUPE_BUCKET_SECS, 0, "前提：BOUNDARY 是格子邊界");
+        let app = flow_tests::app().await;
+        let fp = fp_of("請核准重建 abc123");
+        let first_at = BOUNDARY - 1;
+        open_request(&app, "w1", &fp, first_at, "pending").await;
+
+        let now = BOUNDARY + 19; // 相隔 20 秒的重問，但跨過了邊界
+        let anchor = window_anchor(&app, "w1", &fp, now).await;
+        assert_eq!(anchor, first_at, "錨點是既有那筆的 created_at，不是現在");
+        assert_eq!(
+            event_key("w1", None, &fp, anchor),
+            event_key("w1", None, &fp, first_at),
+            "重問跟既有那筆同一把鍵 → INSERT OR IGNORE 命中 → 仍只有一筆"
+        );
+        // 舊行為（拿 now 當錨）就是這裡分岔的：同一句、相隔 20 秒，卻是兩把鍵。
+        assert_ne!(
+            event_key("w1", None, &fp, now),
+            event_key("w1", None, &fp, first_at),
+            "固定格子下這兩把鍵不同，這就是會變兩筆的原因"
+        );
+    }
+
+    /// 已經結案的不當錨：bot 照裁示改完又來申請，那是新的一件事（既有的 `#2` 規則接手）。
+    #[tokio::test]
+    async fn a_handled_request_does_not_anchor_the_next_one() {
+        let app = flow_tests::app().await;
+        let fp = fp_of("請核准重建 abc123");
+        open_request(&app, "w1", &fp, BOUNDARY - 1, "handled").await;
+        let now = BOUNDARY + 19;
+        assert_eq!(window_anchor(&app, "w1", &fp, now).await, now, "結案的那筆不該把新申請吸回舊視窗");
+    }
+
+    /// 超過視窗長度的舊申請也不當錨：視窗是「十分鐘」，不是「永遠」。
+    #[tokio::test]
+    async fn an_open_request_older_than_the_window_does_not_anchor() {
+        let app = flow_tests::app().await;
+        let fp = fp_of("請核准重建 abc123");
+        let now = BOUNDARY + 19;
+        open_request(&app, "w1", &fp, now - DEDUPE_BUCKET_SECS - 1, "pending").await;
+        assert_eq!(window_anchor(&app, "w1", &fp, now).await, now, "超過十分鐘就是新的一件事");
+    }
+
+    /// 別人的申請、別的內容都不當錨。
+    #[tokio::test]
+    async fn only_the_same_sender_and_the_same_content_anchor() {
+        let app = flow_tests::app().await;
+        let mine = fp_of("請核准重建 abc123");
+        let other = fp_of("請核准重啟 abc123");
+        let now = BOUNDARY + 19;
+        open_request(&app, "w2", &mine, BOUNDARY - 1, "pending").await; // 別的寄件者
+        open_request(&app, "w1", &other, BOUNDARY - 1, "pending").await; // 別的內容
+        assert_eq!(window_anchor(&app, "w1", &mine, now).await, now, "不是同一個寄件者＋同一句就不算重問");
+    }
+
+    /// 錨點只影響去重，讀不到不該讓申請失敗：查詢壞掉時退回「現在」。
+    #[tokio::test]
+    async fn an_unreadable_inbox_falls_back_to_now_instead_of_failing() {
+        let app = flow_tests::app().await;
+        sqlx::query("DROP TABLE supervisor_inbox").execute(&app.db).await.unwrap();
+        let now = BOUNDARY + 19;
+        assert_eq!(window_anchor(&app, "w1", &fp_of("x"), now).await, now);
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod flow_tests {
     use super::*;
