@@ -930,6 +930,7 @@ pub async fn start(app: &Arc<App>, bot_id: &str, req: StartReq) -> LcResult<Valu
         )
     };
     let cmd = run_command(dev.as_deref(), app.allow_lan, port.unwrap_or(PORT_START));
+    let kind = dev_kind(dev.as_deref().unwrap_or(cmd.as_str())).unwrap_or(if dev.is_some() { "unknown" } else { "vite" });
     let pane = run.pane_id.clone().unwrap_or_default();
     let pane_id = env.spawn(&pane, &dir, &cmd).await.map_err(up)?;
     let now = db::now();
@@ -945,7 +946,7 @@ pub async fn start(app: &Arc<App>, bot_id: &str, req: StartReq) -> LcResult<Valu
         updated_at: now,
         source: SOURCE_SPAWNED.into(),
         pid: None,
-        kind: Some(dev_kind(&cmd).unwrap_or(if dev.is_some() { "unknown" } else { "vite" }).into()),
+        kind: Some(kind.into()),
         command: Some(cmd),
     };
     if let Err(e) = put(&app.db, &r).await {

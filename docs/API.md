@@ -507,7 +507,7 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 - `command`：`spawned` 實際跑的那一行；`off`／`failed` 時是**下一次啟動預設候選會跑的那一行**（`attached` 是 `null`，那是別人開的）。
   目錄的 `package.json` 有 `dev` script 就是 `bun run dev`（不指定 port：server 自己挑，起來之後 daemon 觀察那顆 pane **實際 listen 的 port**
   記進 `port`；在那之前 `starting` 的 `port` 是 `null`），沒有才是 `bunx vite --host <bind> --port <port> --strictPort`。
-- `kind`：`vite`／`next`／`webpack`／`astro`／`remix`／`storybook`／`nuxt`／`rsbuild`／`parcel`／`angular`／`react-scripts`／`bun`／`unknown`。
+- `kind`：`vite`／`next`／`webpack`／`astro`／`remix`／`storybook`／`nuxt`／`rsbuild`／`parcel`／`angular`／`react-scripts`／`bun`／`unknown`。AG Man 用 dev script 起的看 script 內容判（`next dev` 是 `next`），不是看 `bun run dev`。
 - `candidates`：這顆 bot 可以起 dev server 的目錄（在 bot 的工作目錄底下最多找 3 層、最多 20 個；有 `vite.config.*`，**或** `package.json` 帶
   `dev` script 的都算；略過隱藏目錄、`node_modules`、`target`、`dist`、`build`、`worktrees`、`vendor`；`<dir>` 本身、`<dir>/web` 排前面，
   第一個是預設）。`candidate_info` 是同一份清單，每個目錄附上會跑的那一行。

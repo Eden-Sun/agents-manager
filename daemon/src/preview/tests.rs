@@ -1225,6 +1225,7 @@ async fn a_dev_script_directory_is_spawned_with_bun_run_dev_and_the_port_is_obse
     let body = start(&r.e.app, &bot, StartReq::default()).await.unwrap();
     assert_eq!(status(&body), "starting");
     assert_eq!(body["command"], "bun run dev");
+    assert_eq!(body["kind"], "next");
     assert_eq!(body["port"], Value::Null, "不硬塞 port");
     assert_eq!(r.fake.spawns()[0].2, "bun run dev");
     assert_eq!(r.fake.spawns()[0].1, r.e.repo.to_string_lossy());
