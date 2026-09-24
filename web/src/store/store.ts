@@ -35,7 +35,8 @@ import type { Bot, BotKind, RestartBatch, GroupChatResult, Mission, MissionDetai
 import type { ProjectPane } from '../api'
 import { joinRunningBatch, restartProgress } from './restartBatch'
 import { dropHostModels, modelsKey, shouldFetchModels, type ModelsCache } from './modelsCache'
-import { MESSAGE_CAP, byId, byTime, capList, insertSorted, pruneTurns } from './lists'
+import { byId, byTime, capList, insertSorted, pruneTurns } from './lists'
+import { type CapFloors, capFor, clearFloor, raiseFloor } from './messageCap'
 import { markRewound } from '../lib/rewind'
 import { acceptStateSeq, singleFlight } from './singleFlight'
 import { quotaForIdentity } from './quotaLookup'
@@ -358,6 +359,8 @@ export interface StoreState {
   loadedBots: Record<string, boolean>
   /** issue #25：前面還有更早的（`has_more` 或被 `MESSAGE_CAP` 截掉）；key 是 bot id 或 project id。 */
   moreMessages: Record<string, boolean>
+  /** issue #457：使用者按「載入更早的」之後這個對話的上限下緣（`store/messageCap.ts`）。 */
+  messageCapFloors: CapFloors
   loadingMore: Record<string, boolean>
   /** bot id → 已完成未讀回合數；純前端帳，存 localStorage（`store/unread.ts`）。 */
   botUnread: Record<string, number>
@@ -813,6 +816,7 @@ export const useStore = create<StoreState>((set, get) => ({
   messages: {},
   loadedBots: {},
   moreMessages: {},
+  messageCapFloors: {},
   loadingMore: {},
   botUnread: initialUnread.bots,
   hiddenBotIds: [],
@@ -1029,6 +1033,7 @@ export const useStore = create<StoreState>((set, get) => ({
           },
           loadedProjects: { ...s.loadedProjects, [projectId]: true },
           moreMessages: { ...s.moreMessages, [projectId]: page.has_more },
+          messageCapFloors: clearFloor(s.messageCapFloors, projectId),
         }
       })
     } catch (e) {
@@ -1046,9 +1051,12 @@ export const useStore = create<StoreState>((set, get) => ({
       set((s) => {
         const have = new Set((s.groupMessages[projectId] ?? []).map((m) => m.id))
         const older = page.messages.filter((m) => !have.has(m.id))
+        const merged = [...older, ...(s.groupMessages[projectId] ?? [])]
         return {
-          groupMessages: { ...s.groupMessages, [projectId]: [...older, ...(s.groupMessages[projectId] ?? [])] },
+          groupMessages: { ...s.groupMessages, [projectId]: merged },
           moreMessages: { ...s.moreMessages, [projectId]: page.has_more && older.length > 0 },
+          // issue #457：同 bot 時間軸。
+          messageCapFloors: raiseFloor(s.messageCapFloors, projectId, older.length, merged.length),
         }
       })
     } catch (e) {
@@ -1199,6 +1207,7 @@ export const useStore = create<StoreState>((set, get) => ({
           turns: { ...s.turns, [botId]: turns },
           loadedBots: { ...s.loadedBots, [botId]: true },
           moreMessages: { ...s.moreMessages, [botId]: page.has_more },
+          messageCapFloors: clearFloor(s.messageCapFloors, botId),
         }
       })
       get().recountBot(botId)
@@ -1217,10 +1226,13 @@ export const useStore = create<StoreState>((set, get) => ({
       set((s) => {
         const have = new Set((s.messages[botId] ?? []).map((m) => m.id))
         const older = page.messages.filter((m) => !have.has(m.id))
+        const merged = [...older, ...(s.messages[botId] ?? [])]
         return {
-          messages: { ...s.messages, [botId]: [...older, ...(s.messages[botId] ?? [])] },
+          messages: { ...s.messages, [botId]: merged },
           // 舊頁不灌 `turns`：它只服務 in-flight / unknown 判斷（issue #25 `pruneTurns`）。
           moreMessages: { ...s.moreMessages, [botId]: page.has_more && older.length > 0 },
+          // issue #457：補回來的歷史不能被下一則新訊息從頭切掉。
+          messageCapFloors: raiseFloor(s.messageCapFloors, botId, older.length, merged.length),
         }
       })
     } catch (e) {
@@ -2695,7 +2707,7 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
         // issue #25：滿了從頭截掉，並打開「還有更早的」。
         const grown = insertSorted(s.messages[botId] ?? [], msg, byTime)
         if (grown) {
-          const cut = capList(grown, MESSAGE_CAP)
+          const cut = capList(grown, capFor(s.messageCapFloors, botId))
           patch.messages = { ...s.messages, [botId]: cut.list }
           if (cut.trimmed) more[botId] = true
         }
@@ -2710,7 +2722,7 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
           const group = s.groupMessages[pid]
           const grownGroup = group ? insertSorted(group, { ...msg, bot_id: botId, bot_name: bot.name }, byId) : null
           if (grownGroup) {
-            const cut = capList(grownGroup, MESSAGE_CAP)
+            const cut = capList(grownGroup, capFor(s.messageCapFloors, pid))
             patch.groupMessages = { ...s.groupMessages, [pid]: cut.list }
             if (cut.trimmed) more[pid] = true
           }
