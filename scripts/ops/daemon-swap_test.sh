@@ -314,7 +314,10 @@ check "啟動器丟掉 AM_DATA_DIR 等 pane 變數" "AM_DATA_DIR" "$HERE/daemon-
 # 真的跑一次啟動器：假 binary 把環境倒出來。launchd 給的最小 PATH 要被換成含 Homebrew 的那組，AM_* 要被丟掉。
 STARTER_ROOT=$(mktemp -d)
 mkdir -p "$STARTER_ROOT/target/release"
-printf '%s\n' '#!/bin/sh' 'env > "$STARTER_ENV_DUMP"' > "$STARTER_ROOT/target/release/agents-managerd"
+# 暫存檔 + `mv`（rename 是原子的）：等待那邊用的 `[ -s ]` 只證明「非空」、不證明「寫完了」，
+# 直接寫目的檔的話，剛好在 write 中間被讀到就會拿到半份 dump——env 小於 stdio 的 4096 緩衝時
+# 機率極低，但這一條斷言就是為了不要再有這類機率才改的（issue #433，i264 review）。
+printf '%s\n' '#!/bin/sh' 'env > "$STARTER_ENV_DUMP.tmp" && mv "$STARTER_ENV_DUMP.tmp" "$STARTER_ENV_DUMP"' > "$STARTER_ROOT/target/release/agents-managerd"
 chmod +x "$STARTER_ROOT/target/release/agents-managerd"
 STARTER_ENV_DUMP="$STARTER_ROOT/env" AM_DATA_DIR=/should/be/dropped PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME="$STARTER_ROOT/home" \
   /usr/bin/python3 "$HERE/daemon-start.py" "$STARTER_ROOT" "$STARTER_ROOT/daemon.log"
