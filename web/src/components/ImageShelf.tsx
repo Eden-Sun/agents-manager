@@ -6,7 +6,7 @@
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react'
-import { DRAWER_QUERY, PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
+import { DRAWER_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { FileIcon } from './Attachments'
 import { formatSize, useDropTarget } from './attachmentsHelpers'
 import { MAX_BYTES, SHELF_MAX, SHELF_MIME, useShelf } from '../store/shelf'
@@ -52,49 +52,6 @@ function readOpen(fallback: boolean): boolean {
   }
 }
 
-/** `true` while a text field has focus (phone keyboard up) — hides the collapsed bar only. */
-function useTypingAway(): boolean {
-  const [typing, setTyping] = useState(false)
-  useEffect(() => {
-    const isField = (el: EventTarget | null) =>
-      el instanceof HTMLTextAreaElement || (el instanceof HTMLInputElement && !['checkbox', 'radio', 'file'].includes(el.type))
-
-    // bar 在按下與放開之間出現會把送出鍵推走、click 落空（2026-09-08 390px 實測），
-    // 所以延到下一個 task（microtask 會插在 mousedown/mouseup 之間）且等指標放開才改狀態。
-    let pointerDown = false
-    let pending = false
-    const settle = () => {
-      if (pointerDown) {
-        pending = true
-        return
-      }
-      pending = false
-      setTyping(isField(document.activeElement))
-    }
-    const schedule = () => setTimeout(settle, 0)
-    const down = () => {
-      pointerDown = true
-    }
-    const up = () => {
-      pointerDown = false
-      if (pending) schedule()
-    }
-    document.addEventListener('focusin', schedule)
-    document.addEventListener('focusout', schedule)
-    document.addEventListener('pointerdown', down, true)
-    document.addEventListener('pointerup', up, true)
-    document.addEventListener('pointercancel', up, true)
-    return () => {
-      document.removeEventListener('focusin', schedule)
-      document.removeEventListener('focusout', schedule)
-      document.removeEventListener('pointerdown', down, true)
-      document.removeEventListener('pointerup', up, true)
-      document.removeEventListener('pointercancel', up, true)
-    }
-  }, [])
-  return typing
-}
-
 /** `true` while an OS file drag is over the window; the 38px collapsed rail grows a drop pad. */
 function useFileDragActive(): boolean {
   const [active, setActive] = useState(false)
@@ -135,11 +92,9 @@ export function ImageShelf() {
   const addToShelf = useShelf((s) => s.add)
   const clear = useShelf((s) => s.clear)
   const notify = useStore((s) => s.notify)
-  // 手機沒有拖放，空狀態那段字也會在 390px 折成兩行、白佔掉底部一段：短版只講點得到的那條路。
-  const phone = useMediaQuery(PHONE_QUERY)
-  // 手機預設收起：展開在 390px 會吃掉約 120px 對話空間。
-  const [open, setOpen] = useState(() => readOpen(!window.matchMedia(PHONE_QUERY).matches))
-  const typing = useTypingAway()
+  // 預設展開。手機（≤640px）沒有這條托盤——`.app > .shelf` 在那個寬度是 `display: none`，
+  // 加附件走輸入列的 📎，所以這裡不再分手機／桌機（issue #484）。
+  const [open, setOpen] = useState(() => readOpen(true))
   const atBottom = useMediaQuery(DRAWER_QUERY)
   const fileDrag = useFileDragActive()
   const picker = useRef<HTMLInputElement>(null)
@@ -233,9 +188,7 @@ export function ImageShelf() {
   return (
     <aside
       ref={shelfRef}
-      className={`shelf${open ? ' open' : ''}${drop.over ? ' dropping' : ''}${!open && fileDrag ? ' armed' : ''}${
-        !open && typing ? ' typing' : ''
-      }`}
+      className={`shelf${open ? ' open' : ''}${drop.over ? ' dropping' : ''}${!open && fileDrag ? ' armed' : ''}`}
       aria-label="檔案暫存區"
       onPaste={(e) => {
         const imgs = Array.from(e.clipboardData?.files ?? [])
@@ -311,9 +264,8 @@ export function ImageShelf() {
           <div className="shelf-list" role="list">
             {count === 0 ? (
               <p className="shelf-empty">
-                {phone
-                  ? '用 ＋ 把檔案放這裡，之後點一下就進對話。'
-                  : '把檔案（圖片、PDF、log 都可以）拖到這裡先放著，換到想給的對話再拖（或點）進去。跨 bot、跨 project 都在，重新整理也還在，放進來 30 分鐘後自動清掉。'}
+                把檔案（圖片、PDF、log 都可以）拖到這裡先放著，換到想給的對話再拖（或點）進去。跨 bot、跨 project
+                都在，重新整理也還在，放進來 30 分鐘後自動清掉。
               </p>
             ) : (
               items.map((it) => (
