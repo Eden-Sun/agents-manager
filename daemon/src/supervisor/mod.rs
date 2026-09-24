@@ -19,6 +19,7 @@ pub mod policy;
 pub mod remote;
 pub mod responder;
 pub mod responder_api;
+pub mod role_faults;
 pub mod roles;
 pub mod setup;
 pub mod store;

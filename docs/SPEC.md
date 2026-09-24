@@ -3288,6 +3288,20 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
   （`tui_prompts::is_not_logged_in_reply`，只看最底 20 行、以 `⎿` 開頭的那一行）就標 `status=needs_login`（`waiting_since` 記開始時間），health 轉 `degraded`、
   incident 開 `responder_needs_login`。送出照退避繼續試——人從別的終端 `security unlock-keychain` 之後畫面不會變，擋住不送就永遠等不到恢復；
   答完一個沒出錯的回合、或畫面上已經看不到登入問題，就解除（`status_detail=登入已恢復`）。
+- **每一拍都看畫面，而且巡檢也看**（issue #427，補上 #420 剩下的缺口）：上一段只在「有事要送、而且送不出去」時才看協調者，
+  所以巡檢停在登入失效沒有人知道（它是 incident 與 ops_alert 的收件人），協調者佇列空著時也一樣。改成 health 的 30 秒 tick
+  在 `incidents::sweep` **之前**對兩個角色各讀一次畫面（`supervisor::role_faults::refresh`），結論放**記憶體**
+  （`App.role_faults`，同 §18.9「計時在記憶體，重啟重算」）；`role_state` 只讀記憶體，不在 API 路徑上抓 pane
+  （`/api/supervisor/health` 與 `/api/supervisor/responder` 都會被 UI 高頻輪詢）。
+  **判定要兩個訊號同時成立**：回覆槽那一行（`tui_prompts::is_not_logged_in_reply`，同上一段），
+  **加上** daemon 自己那份額度讀數是空的或陳舊的（key 不在 `App.quotas`、或還在 `App.quota_stale` 裡、或兩個視窗都沒有數字）。
+  上一段的單一訊號在「只有送失敗才看」的前提下是安全的，改成每拍都看就不成立——一顆登入好好的 bot 只要在回報裡引用那句話
+  就會被判成故障。第二個訊號**刻意不看畫面**：statusLine 上那兩格是使用者自己的 `statusline-command.sh` 印的，
+  認它的字面（`5h:-`）等於把偵測綁在一支外部腳本的格式上，換一台沒有那支腳本的機器就永遠不成立、真的登出也偵測不到
+  （i407 review 2026-09-24）。daemon 那份是 claude 的 StatusLine hook 送進來的 `rate_limits`（`/api/quota` 同一個來源）：
+  登入不了的 CLI 跑不完回合、送不出 hook，讀數只會停在舊的；而在回報裡引用那句話的 bot 是剛跑完一個回合才印得出那份回報，
+  那一回合就會帶一份新的讀數進來。
+  `stuck_at_login` **刻意不認**這個畫面（#427 第 1 項裁示）：擋住不送就等不到恢復訊號，觀測與攔截分開。
 - **送到了卻沒人 ack 的補送有上限**（使用者 2026-09-17 裁示，取代先前「刻意不設上限」）：`recover_unacked` 把 delivered 而沒 ack 的事件放回 pending，
   以前沒有次數上限——協調者漏 ack 一則，opus-high 就每 `notify_ack_deadline_secs`（1800 秒）被叫醒一次，而且沒有任何人知道。
   現在送達 **5 次**（同看門狗的 `MAX_ATTEMPTS` 與巡檢的 `notify_max_attempts`：送五次沒人 ack，第六次也不會有人），

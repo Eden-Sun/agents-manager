@@ -98,6 +98,12 @@ pub struct App {
     pub progress_emitted: Mutex<HashMap<String, std::time::Instant>>,
     /// run_id -> 上次關滿意度問卷時的 pane revision：事件路徑與定期巡邏共用，避免按兩次。
     pub survey_revisions: Mutex<HashMap<String, u64>>,
+    /// #427（#420 後續）：角色 bot（`patrol`／`responder`）當下為什麼不能用，key 是 role 字串。
+    ///
+    /// 故意**不進 DB**：跟 incident 的門檻計時同一個原則（SPEC §18.9「計時在記憶體，重啟重算」）。
+    /// 寫進 DB 的「故障」會跟著重啟活過來，而重啟後第一拍就能重新判定——寧可晚 30 秒開，也不要讓
+    /// 一顆已經修好的協調者因為陳舊的旗標被繼續當成壞的。空表＝還沒有結論，不是故障。
+    pub role_faults: Mutex<HashMap<String, crate::supervisor::role_faults::RoleFault>>,
     /// v4.0: `GET /api/models` cache, key `<host>/<kind>` (10 min TTL).
     pub models_cache: Mutex<HashMap<String, (std::time::Instant, Value)>>,
     /// v4.0: quota per kind key (`codex`, `claude`, `claude:<identity>`).
@@ -189,6 +195,7 @@ impl App {
             progress_pollers: Mutex::new(HashMap::new()),
             progress_emitted: Mutex::new(HashMap::new()),
             survey_revisions: Mutex::new(HashMap::new()),
+            role_faults: Mutex::new(HashMap::new()),
             models_cache: Mutex::new(HashMap::new()),
             quotas: Mutex::new(std::collections::BTreeMap::new()),
             quota_stale: Mutex::new(std::collections::BTreeSet::new()),
