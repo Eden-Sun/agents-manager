@@ -21,7 +21,7 @@ printf '%s\n' '"herdr-1672acdeb8e5ac40" => 1' > "$ROOT/network.plist"
 printf '%s\n' 'fake binary' > "$ROOT/herdr"
 chmod +x "$ROOT/herdr"
 
-OUTPUT=$(PATH="$ROOT/bin:/usr/bin:/bin" HERDR_NETWORK_AUTH_PLIST="$ROOT/network.plist" HERDR_NODE_LOG="$ROOT/node.log" \
+OUTPUT=$(PATH="$ROOT/bin:${AM_CANARY_DIR:+$AM_CANARY_DIR:}/usr/bin:/bin" HERDR_NETWORK_AUTH_PLIST="$ROOT/network.plist" HERDR_NODE_LOG="$ROOT/node.log" \
   bash "$SCRIPT" "$ROOT/herdr" 192.168.1.1 80 2>&1) || fail "三步驗證應成功"
 
 printf '%s\n' "$OUTPUT" | grep -F '1/3 identifier: herdr-1672acdeb8e5ac40' >/dev/null || fail "沒有回報 identifier"
@@ -31,7 +31,7 @@ grep -F -- '192.168.1.1 80' "$ROOT/node.log" >/dev/null || fail "node 沒收到�
 ok "假的 codesign/plutil/node 完成三步，未連真網路"
 
 set +e
-SKIP_OUTPUT=$(PATH="$ROOT/bin:/usr/bin:/bin" NODE_BIN=missing-node HERDR_NETWORK_AUTH_PLIST="$ROOT/network.plist" \
+SKIP_OUTPUT=$(PATH="$ROOT/bin:${AM_CANARY_DIR:+$AM_CANARY_DIR:}/usr/bin:/bin" NODE_BIN=missing-node HERDR_NETWORK_AUTH_PLIST="$ROOT/network.plist" \
   bash "$SCRIPT" "$ROOT/herdr" 192.168.1.1 80 2>&1)
 SKIP_RC=$?
 set -u
@@ -64,7 +64,7 @@ chmod +x "$ROOT/bin/fake-ps" "$ROOT/bin/fake-lsof"
 run_noarg() { # run_noarg <ps 內容> <txt 對照> [fallback]
   printf '%s\n' "$1" > "$ROOT/ps.txt"
   printf '%s\n' "$2" > "$ROOT/txt.txt"
-  PATH="$ROOT/.config/agents-manager/bots/b1/bin:$ROOT/local/bin:$ROOT/bin:/usr/bin:/bin" \
+  PATH="$ROOT/.config/agents-manager/bots/b1/bin:$ROOT/local/bin:$ROOT/bin:${AM_CANARY_DIR:+$AM_CANARY_DIR:}/usr/bin:/bin" \
     PS_BIN="$ROOT/bin/fake-ps" LSOF_BIN="$ROOT/bin/fake-lsof" HERDR_FAKE_PS="$ROOT/ps.txt" HERDR_FAKE_TXT="$ROOT/txt.txt" \
     HERDR_FALLBACK_BIN="${3:-$ROOT/nowhere/herdr}" HERDR_NETWORK_AUTH_PLIST="$ROOT/network.plist" HERDR_NODE_LOG="$ROOT/node.log" \
     LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 bash "$SCRIPT" "" 192.168.1.1 80 2>&1
@@ -126,7 +126,7 @@ ok "沒有 server、沒有 fallback：明確 FAIL、rc=1"
 # （bash 3.2＋set -u 會把 `${BINARY}（` 的全形括號併進變數名）。
 printf '%s\n' '#!/bin/bash' 'echo "code object is not signed at all" >&2' 'exit 1' > "$ROOT/bin/codesign"
 set +e
-BAD_OUTPUT=$(LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 PATH="$ROOT/bin:/usr/bin:/bin" HERDR_NETWORK_AUTH_PLIST="$ROOT/network.plist" HERDR_NODE_LOG="$ROOT/node.log" \
+BAD_OUTPUT=$(LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 PATH="$ROOT/bin:${AM_CANARY_DIR:+$AM_CANARY_DIR:}/usr/bin:/bin" HERDR_NETWORK_AUTH_PLIST="$ROOT/network.plist" HERDR_NODE_LOG="$ROOT/node.log" \
   bash "$SCRIPT" "$ROOT/herdr" 192.168.1.1 80 2>&1)
 BAD_RC=$?
 set -u

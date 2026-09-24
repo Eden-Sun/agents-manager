@@ -1,0 +1,7 @@
+# canary lint 的棘輪基準（issue #422）：檔名<TAB>還蓋不到的處數。
+# 只能變小；修掉之後跑 scripts/ops/destructive-canary.sh lint --update 更新。
+scripts/ops/ci-watch-kick_test.sh	5
+scripts/ops/herdr-update-kick_test.sh	8
+scripts/ops/pane-gc_test.sh	3
+scripts/ops/release-triage-kick_test.sh	3
+scripts/sccache-wrapper_test.sh	11

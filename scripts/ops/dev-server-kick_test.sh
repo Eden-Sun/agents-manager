@@ -129,7 +129,7 @@ fake_listener() { # <addr> [ppid] [cmd]
   echo "$pid"
 }
 serve() { "$PY3" -m http.server "$PORT" --bind 127.0.0.1 --directory "$ROOT" >/dev/null 2>&1 & local pid=$!; disown 2>/dev/null || true; echo "$pid" >> "$FIX/spawned"; echo "$pid"; }
-run() { ( cd "$ROOT" && PATH="$BIN:/usr/bin:/bin" "$BUN" "$SCRIPT" >/dev/null 2>&1; echo $? ); }
+run() { ( cd "$ROOT" && PATH="$BIN:${AM_CANARY_DIR:+$AM_CANARY_DIR:}/usr/bin:/bin" "$BUN" "$SCRIPT" >/dev/null 2>&1; echo $? ); }
 
 # 0. 安全前提：副本裡不准再有 5173，假 lsof 只回報自己 spawn 的 pid。
 setup
@@ -141,7 +141,7 @@ equals "副本裡剩下的 5173 都不是可執行的 port（只在註解與 log
   "$(grep -n '5173' "$SCRIPT" | grep -vE ':[[:space:]]*(//|/\*\*|\*)' | grep -vc 'log(`')" "0"
 equals "副本的 REPO 指到暫存目錄" "$(grep -c "const REPO = '${REPO}'" "$SCRIPT")" "1"
 echo "99999" > "$FIX/lsof.txt"   # 沒登記、也不存在的 pid
-equals "假 lsof 不回報沒登記的 pid" "$(PATH="$BIN:/usr/bin:/bin" "$BIN/lsof" -nP -iTCP:"$PORT" -sTCP:LISTEN -Fpn | wc -l | tr -d ' ')" "0"
+equals "假 lsof 不回報沒登記的 pid" "$(PATH="$BIN:${AM_CANARY_DIR:+$AM_CANARY_DIR:}/usr/bin:/bin" "$BIN/lsof" -nP -iTCP:"$PORT" -sTCP:LISTEN -Fpn | wc -l | tr -d ' ')" "0"
 teardown
 
 # 1. 健康（綁 *、有 HTTP 回應、HEAD 沒變）→ 什麼都不做、log 不寫。

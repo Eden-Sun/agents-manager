@@ -85,11 +85,30 @@ check_ops() {
     else
         step "ops: 沒有 bun，跳過 scripts/ops/*.ts 的載入檢查"
     fi
+
+    # canary 到不了的地方（整個覆寫 PATH、env -i）靜態掃出來，用棘輪擋「又多一處」。
+    step "ops: canary lint（PATH 覆寫／env -i）"
+    scripts/ops/destructive-canary.sh lint
+
+    # 每一支測試都在護欄底下跑（issue #422）：`launchctl`／`pkill`／`ssh` 這種
+    # 「測試永遠不該真的執行」的指令被三層攔下（PATH、匯出的 bash 函式、zsh 的 ZDOTDIR），
+    # 真的被叫到就記一筆並讓整輪失敗，看得出是哪一支測試漏擋了。
+    # 2026-09-23 就是一支測試的 PATH 沒擋住，真的把 herdr 的 launchd job bootout 掉，全機 pane 消失。
+    local canary
+    canary="${TMPDIR:-/tmp}/am-canary-$$"
+    eval "$(scripts/ops/destructive-canary.sh arm "${canary}")"
     # 新的 *_test.sh 放在 scripts/ 或 scripts/ops/ 就會被撈到；需要外部工具的測試自己 skip 並印原因。
     for t in scripts/*_test.sh scripts/ops/*_test.sh; do
         step "ops: $t"
-        bash "$t"
+        AM_CANARY_TEST="$t" bash "$t"
     done
+    if ! scripts/ops/destructive-canary.sh hits "${canary}"; then
+        echo "上面這些測試真的叫到了破壞性指令（已被擋下，但那條路要修）：見 scripts/ops/destructive-canary.sh" >&2
+        /bin/rm -rf "${canary}"
+        exit 1
+    fi
+    /bin/rm -rf "${canary}"
+    echo "canary 乾淨：沒有任何測試叫到 $(scripts/ops/destructive-canary.sh cmds)"
 }
 
 check_fmt() {
