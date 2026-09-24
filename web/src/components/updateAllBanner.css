@@ -83,3 +83,25 @@
 .update-all-list.bad li b {
   color: var(--danger);
 }
+
+/* 總數還不知道（接回別人按出來的那一批，`already_running` 只給 batch_id，issue #492）：
+   不畫滿格假裝做完了，用一條來回跑的不定量進度條，等事件把總數補上。 */
+.update-all-bar.unknown span {
+  width: 30%;
+  animation: update-all-indeterminate 1.2s ease-in-out infinite;
+}
+
+@keyframes update-all-indeterminate {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(333%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .update-all-bar.unknown span {
+    animation: none;
+  }
+}

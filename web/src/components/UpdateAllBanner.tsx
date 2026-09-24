@@ -13,7 +13,10 @@ export function UpdateAllBanner() {
 /** 收 props（不自己讀 store）才測得到，同 `JudgeLoadNotice`／`BotSwitcherMenu`。 */
 export function BatchRow({ batch, onClear }: { batch: RestartBatch; onClear: () => void }) {
   const { total, done, current, ok, failed, skipped, finished } = batch
-  const pct = total > 0 ? Math.round((done / total) * 100) : 100
+  // 接回別人按出來的那一批（`already_running` 只給 batch_id）時總數是 0，要等事件補。以前這裡把
+  // 「除不了」當成 100%，等於一接上就畫滿格、還寫「重啟中 0/0」——看起來像做完了（issue #492）。
+  const unknownTotal = total <= 0
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0
 
   return (
     <div className={`update-all running${finished ? ' done' : ''}`}>
@@ -23,7 +26,7 @@ export function BatchRow({ batch, onClear }: { batch: RestartBatch; onClear: () 
             ? `重啟完成 · 成功 ${ok.length} 顆${skipped.length ? ` · 跳過 ${skipped.length} 顆` : ''}${
                 failed.length ? ` · 失敗 ${failed.length} 顆` : ''
               }`
-            : `重啟中 ${done}/${total}${current ? ` · ${current}` : ''}`}
+            : `重啟中 ${unknownTotal ? `${done} 顆（總數未知）` : `${done}/${total}`}${current ? ` · ${current}` : ''}`}
         </strong>
         {/* 未完成也要關得掉（issue #492）：`bots_restart_done` 收不到（批次中途 daemon 重啟、或落到全量
             resync）時，以前這裡沒有 ✕、晶片又是停用的，使用者只能重新整理分頁。收起不會中斷批次——
@@ -38,8 +41,14 @@ export function BatchRow({ batch, onClear }: { batch: RestartBatch; onClear: () 
         </button>
       </div>
       {finished ? null : (
-        <div className="update-all-bar" role="progressbar" aria-valuenow={done} aria-valuemin={0} aria-valuemax={total}>
-          <span style={{ width: `${pct}%` }} />
+        <div
+          className={`update-all-bar${unknownTotal ? ' unknown' : ''}`}
+          role="progressbar"
+          aria-valuemin={0}
+          // 總數還不知道時不報 now／max：ARIA 的不定量進度條就是「沒有 valuenow」，報 0/0 會被讀成已完成。
+          {...(unknownTotal ? {} : { 'aria-valuenow': done, 'aria-valuemax': total })}
+        >
+          <span style={unknownTotal ? undefined : { width: `${pct}%` }} />
         </div>
       )}
       {/* 失敗的先列：那是要動手的。跳過的接在後面，理由用 daemon 給的那句。 */}

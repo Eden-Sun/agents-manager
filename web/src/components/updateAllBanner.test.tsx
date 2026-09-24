@@ -26,3 +26,23 @@ test('#492 跑完的摘要照舊有收起鈕，說法不一樣', () => {
   assert.match(html, /重啟完成/)
   assert.match(html, /aria-label="收起這則摘要"/)
 })
+
+/**
+ * **issue #492**：接回別人按出來的那一批走 `already_running`，回應只有 batch_id、沒有總數，
+ * 要等 `bots_restart_progress` 補。以前 `total` 是 0 時 `pct` 直接當 100%，一接上就畫滿格、
+ * 標題還寫「重啟中 0/0」——看起來像做完了。
+ */
+test('#492 接回別人那一批（總數未知）：不畫滿格、也不報 aria-valuenow', () => {
+  const html = render(batch({ total: 0, done: 0, current: 'C', ok: [] }))
+  assert.match(html, /重啟中 0 顆（總數未知）/)
+  assert.match(html, /update-all-bar unknown/)
+  assert.doesNotMatch(html, /width:\s*100%/, `總數未知時不能畫滿格：${html}`)
+  assert.doesNotMatch(html, /aria-valuenow/, `不定量進度條不報 valuenow：${html}`)
+})
+
+test('#492 總數補上之後照常畫比例', () => {
+  const html = render(batch({ total: 4, done: 1, ok: ['A'] }))
+  assert.match(html, /重啟中 1\/4/)
+  assert.match(html, /aria-valuenow="1"/)
+  assert.doesNotMatch(html, /update-all-bar unknown/)
+})

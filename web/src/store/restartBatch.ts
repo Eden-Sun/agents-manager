@@ -57,12 +57,17 @@ export function restartProgress(b: RestartBatch, data: Rec): RestartBatch {
  * 收不到就會永遠停在「重啟中 k/N」，而且那顆晶片會一直蓋住一鍵重啟的觸發鈕。
  *
  * - `undefined`（舊 daemon 沒有這個欄位）＝**不知道**，不動手上的：清掉正在跑的進度比留著更糟。
- * - 已經 `finished` 的不動：那是給人看的摘要，要由使用者自己收起來。
- * - daemon 說沒有批次、或在跑的是**另一批**：手上這份已經過期，清掉（晶片跟著變回一鍵重啟）。
+ * - 同一批還在跑：原樣留著（連物件都不換，免得白重繪）。
+ * - daemon 說在跑的是**另一批**：換成那一批（總數等事件補）。手上這份已經過期，而進度只走 WS、
+ *   `restartProgress` 只收 id 對得上的事件——不換的話那一批的進度會被整段丟掉。跑完的摘要也一樣要換：
+ *   摘要是給人看的，但不能因為它還沒被收起來，就讓後來那批重啟整個看不見。
+ * - daemon 說沒有批次在跑：正在跑的那份已經過期，清掉（晶片跟著變回一鍵重啟）；已經 `finished` 的
+ *   摘要留著，那是給人看的，要由使用者自己收起來。
  */
 export function reconcileBatch(current: RestartBatch | null, daemonBatchId: string | null | undefined): RestartBatch | null {
-  if (!current || daemonBatchId === undefined || current.finished) return current
-  return daemonBatchId === current.id ? current : null
+  if (!current || daemonBatchId === undefined || daemonBatchId === current.id) return current
+  if (daemonBatchId !== null) return joinRunningBatch(null, daemonBatchId)
+  return current.finished ? current : null
 }
 
 /** `already_running` 的回應：已經在看同一批就不動，否則換成那一批（總數等事件補）。 */
