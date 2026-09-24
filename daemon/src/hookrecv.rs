@@ -1254,6 +1254,12 @@ fn bots_dir(bot_id: &str, root: &str) -> Result<String> {
 /// 以前這裡是 `cat` 完就 `rm`：遠端那份唯一的副本在位元組寫進本機任何地方之前就沒了，
 /// 中間掉線或 daemon 掛掉，事件就永遠不見。刪的動作移到 [`ack_script`]，在本機 commit 之後。
 ///
+/// #493：摘下來的動作是 `mv "$f" "$f.claim"`（rename，原子），不是「`cat` 完再 `rm -f "$f"`」。
+/// 後者的 `cat` 與 `rm` 是兩支各自 fork／exec 的外部指令，中間 hook 附加進來的行會被 `rm` 連檔刪掉——
+/// 而這條路徑正好只在「上一輪 ack 沒成功」時走到，也就是剛斷線重連、hook 正在補寫的那一刻。
+/// rename 之後 append 落在新的 inode 上，這一輪碰不到它。`.claim` 是「摘下來、還沒併進 `.replaying`」
+/// 的中繼：崩在中間的話下一輪的 `fold` 會接著併，不會留在那裡沒人管。
+///
 /// `hook-status.json` 是例外，照舊讀完就刪：它是單槽、最新的贏的訊號（不是佇列），
 /// 掉一格只是晚一次重繪——理由與本機 StatusLine 不進收件匣是同一個（[`crate::hook_inbox`]）。
 fn claim_script(bot_id: &str, root: &str) -> Result<String> {
@@ -1261,8 +1267,11 @@ fn claim_script(bot_id: &str, root: &str) -> Result<String> {
     Ok(format!(
         "d={dir}\n\
          f=\"$d/hook-spool.jsonl\"\n\
-         if [ -f \"$f.replaying\" ]; then cat \"$f\" >> \"$f.replaying\" 2>/dev/null; rm -f \"$f\"; \
-         elif [ -f \"$f\" ]; then mv \"$f\" \"$f.replaying\"; fi\n\
+         am_fold() {{ [ -f \"$f.claim\" ] || return 0; \
+         if [ -s \"$f.replaying\" ] && [ -n \"$(tail -c 1 \"$f.replaying\")\" ]; then printf '\\n' >> \"$f.replaying\"; fi; \
+         cat \"$f.claim\" >> \"$f.replaying\" && rm -f \"$f.claim\"; }}\n\
+         am_fold\n\
+         if [ -f \"$f\" ]; then mv \"$f\" \"$f.claim\" && am_fold; fi\n\
          if [ -f \"$f.replaying\" ]; then cat \"$f.replaying\"; fi\n\
          s=\"$d/hook-status.json\"\n\
          if [ -f \"$s\" ]; then printf '\\n{marker}\\n'; cat \"$s\"; rm -f \"$s\"; fi\n",
@@ -1404,6 +1413,28 @@ fn scan_script(root: &str) -> String {
     )
 }
 
+/// 把 `src` 併到 `dst` 尾端並刪掉 `src`（`dst` 不存在就直接 rename）。兩邊都是已經摘下來的副本，
+/// 沒有別人會往裡面寫，所以這裡的 read／write／remove 沒有 #493 的窗口。
+///
+/// 位元組層合併，不經 UTF-8：崩在半個多位元組字元上的 `.replaying` 以前 `read_to_string` 失敗、
+/// `unwrap_or_default` 成空字串，接著整份被新的 spool 覆蓋——舊事件就此消失（#302）。
+fn fold_spool(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    if !src.exists() {
+        return Ok(());
+    }
+    if !dst.exists() {
+        return std::fs::rename(src, dst);
+    }
+    let mut prev = std::fs::read(dst)?;
+    // 崩在一行寫到一半時尾巴沒有換行：直接接上去，會跟下一份的第一行黏成一行、兩則一起解不開。
+    if prev.last().is_some_and(|b| *b != b'\n') {
+        prev.push(b'\n');
+    }
+    prev.extend(std::fs::read(src)?);
+    std::fs::write(dst, prev)?;
+    std::fs::remove_file(src)
+}
+
 /// SPEC §4.4.6.
 pub async fn replay_spool(app: &Arc<App>, bot_id: &str) -> Result<usize> {
     // 讀不到 host 不等於本機（#243）：退回 local 會去讀本機 spool、遠端那份留著沒人排。回錯讓呼叫端重試。
@@ -1415,27 +1446,26 @@ pub async fn replay_spool(app: &Arc<App>, bot_id: &str) -> Result<usize> {
     let _g = lock.lock().await;
     let dir = app.bot_dir(bot_id)?;
     let spool = dir.join("hook-spool.jsonl");
+    let claim = dir.join("hook-spool.jsonl.claim");
     let staging = dir.join("hook-spool.jsonl.replaying");
-    // 上一輪崩在「收了一半」留下的 `.replaying` 就是唯一的副本：沒有新的 spool 也要處理它（#302）。
+    // 上一輪崩在「收了一半」留下的 `.replaying`／`.claim` 就是唯一的副本：沒有新的 spool 也要處理它（#302）。
     // 以前只看 spool 在不在，兩邊都沒新事件時它就一直躺在那裡，直到下一則 hook 失敗寫進 spool 才被併回來。
-    if !spool.exists() && !staging.exists() {
+    if !spool.exists() && !claim.exists() && !staging.exists() {
         return Ok(0);
     }
-    if !spool.exists() {
-        // 只剩 `.replaying`：直接讀它。
-    } else if staging.exists() {
-        // 位元組層合併，不經 UTF-8：崩在半個多位元組字元上的 `.replaying` 以前 `read_to_string` 失敗、
-        // `unwrap_or_default` 成空字串，接著整份被新的 spool 覆蓋——舊事件就此消失。
-        let mut prev = std::fs::read(&staging)?;
-        // 崩在一行寫到一半時尾巴沒有換行：直接接上去，會跟新 spool 的第一行黏成一行、兩則一起解不開。
-        if prev.last().is_some_and(|b| *b != b'\n') {
-            prev.push(b'\n');
-        }
-        prev.extend(std::fs::read(&spool)?);
-        std::fs::write(&staging, prev)?;
-        std::fs::remove_file(&spool)?;
-    } else {
-        std::fs::rename(&spool, &staging)?;
+    // 上一輪摘下來、還沒併進 `.replaying` 就崩掉的。
+    fold_spool(&claim, &staging)?;
+    if spool.exists() {
+        // #493：**先 rename 再讀**。以前是 `read(spool)` → 整份寫回 `.replaying` → `remove_file(spool)`，
+        // 中間那一大段（寫一份完整的 staging）裡 hook 附加進來的行，會在最後那個 remove 被連檔刪掉。
+        // rename 是原子的：之後 append 的行落在新的 inode 上，不在這一輪手上，也就刪不到。
+        std::fs::rename(&spool, &claim)?;
+        #[cfg(test)]
+        crate::lifecycle::race_point::hit("spool_claimed", bot_id).await;
+        fold_spool(&claim, &staging)?;
+    }
+    if !staging.exists() {
+        return Ok(0);
     }
     let text = String::from_utf8_lossy(&std::fs::read(&staging)?).into_owned();
     let mut n = 0usize;
@@ -1588,7 +1618,9 @@ mod drain_tests {
         assert!(scan_script(&iso).contains("\"$HOME/.config/agents-manager/instances/a1b2/bots\"/*/"));
         assert_eq!(crate::startup::remote_root_for(None), crate::startup::REMOTE_ROOT);
         assert_eq!(crate::startup::remote_root_for(Some("a1b2")), ".config/agents-manager/instances/a1b2");
-        assert!(s.contains("mv \"$f\" \"$f.replaying\""));
+        // #493：摘下來走 rename，不是 `cat` 完再刪 spool。
+        assert!(s.contains("mv \"$f\" \"$f.claim\""), "要先 rename 再讀：{s}");
+        assert!(!s.contains("rm -f \"$f\";"), "claim 階段不准刪 live spool：{s}");
         assert!(s.contains("hook-status.json"));
         assert!(s.contains(STATUS_MARKER));
     }
@@ -3845,6 +3877,175 @@ mod codex_title_tests {
             "input-messages": ["Reply with exactly MERGED-OK"], "last-assistant-message": "MERGED-OK"
         });
         assert!(matches!(classify("codex", &real), HookKind::TurnComplete { .. }));
+    }
+}
+
+/// #493：spool 的收攏是「先 rename 再讀」——claim 與 ack 之間 hook 附加進來的行不准被刪掉。
+#[cfg(test)]
+mod spool_claim_window_tests {
+    use super::*;
+    use crate::testing as tt;
+
+    fn line(bot_id: &str, session: &str) -> String {
+        let v = serde_json::json!({
+            "bot_id": bot_id,
+            "provider": "claude",
+            "payload": {"hook_event_name": "Stop", "session_id": session},
+        });
+        format!("{v}\n")
+    }
+
+    async fn inbox_rows(env: &tt::Env) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM hook_events").fetch_one(&env.app.db).await.unwrap()
+    }
+
+    fn append(path: &std::path::Path, text: &str) {
+        use std::io::Write as _;
+        let mut f = std::fs::OpenOptions::new().append(true).create(true).open(path).unwrap();
+        f.write_all(text.as_bytes()).unwrap();
+    }
+
+    /// 修正前：`read(spool)` → 整份寫回 `.replaying` → `remove_file(spool)`，中間那一段裡 hook 附加的行
+    /// 被最後那個 remove 連檔刪掉。注入點放在「摘下來之後、這一輪的副本還沒刪掉」那一瞬。
+    #[tokio::test]
+    async fn a_line_appended_between_claim_and_ack_survives() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "alfa").await;
+        let dir = env.app.bot_dir(&bot.id).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        let spool = dir.join("hook-spool.jsonl");
+        let staging = dir.join("hook-spool.jsonl.replaying");
+        // 上一輪 ack 沒成功留下的 `.replaying`：修正前只有這條合併路徑會走到「讀完再刪」。
+        std::fs::write(&staging, line(&bot.id, "s0")).unwrap();
+        std::fs::write(&spool, line(&bot.id, "s1")).unwrap();
+
+        let late_path = spool.clone();
+        let late = line(&bot.id, "s2");
+        crate::lifecycle::race_point::arm("spool_claimed", &bot.id, move || async move {
+            append(&late_path, &late);
+        });
+
+        assert_eq!(replay_spool(&env.app, &bot.id).await.unwrap(), 2, "這一輪收的是 s0 與 s1");
+        assert!(spool.exists(), "claim 之後附加的那一行必須還在 spool 上，不能被這一輪刪掉");
+        assert_eq!(replay_spool(&env.app, &bot.id).await.unwrap(), 1, "下一輪把 s2 收進來");
+        assert_eq!(inbox_rows(&env).await, 3, "三則都要進收件匣");
+    }
+
+    /// 摘下來（rename 成 `.claim`）之後、併進 `.replaying` 之前崩掉：`.claim` 是唯一的副本，
+    /// 下一輪要接著收，不能留在那裡沒人管。
+    #[tokio::test]
+    async fn a_leftover_claim_file_is_folded_in_on_the_next_round() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "alfa").await;
+        let dir = env.app.bot_dir(&bot.id).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        let claim = dir.join("hook-spool.jsonl.claim");
+        std::fs::write(&claim, line(&bot.id, "s0")).unwrap();
+        assert_eq!(replay_spool(&env.app, &bot.id).await.unwrap(), 1, "只剩 .claim 也要收");
+        assert!(!claim.exists(), "收完就不該留著");
+        assert_eq!(inbox_rows(&env).await, 1);
+    }
+
+    // ---- 遠端那一半：真的把產出的腳本跑起來（不連任何主機，`$HOME` 指到暫存目錄）
+
+    struct Remote {
+        home: std::path::PathBuf,
+        bin: std::path::PathBuf,
+        spool: std::path::PathBuf,
+    }
+
+    impl Remote {
+        fn new() -> Self {
+            let home = std::env::temp_dir().join(format!("am-claim-{}", db::ulid()));
+            let d = home.join(crate::startup::REMOTE_ROOT).join("bots").join("botX");
+            std::fs::create_dir_all(&d).unwrap();
+            let bin = home.join("bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            Self { spool: d.join("hook-spool.jsonl"), home, bin }
+        }
+
+        /// `rm` 的替身：第一次被呼叫時先往 spool 附加一行，再真的刪。修正前的腳本第一個 `rm` 是
+        /// `rm -f "$f"`（刪 live spool），那一行就此消失；修正後第一個 `rm` 是 `rm -f "$f.claim"`，
+        /// 附加的行落在 `mv` 之後新建的 spool 上，刪不到。只處理 `$HOME` 底下的路徑。
+        fn arm_append_inside_the_window(&self, text: &str) {
+            let stub = format!(
+                "#!/bin/sh\n\
+                 if [ ! -f \"$HOME/.armed\" ]; then : > \"$HOME/.armed\"; printf '%s' {line} >> {spool}; fi\n\
+                 for a in \"$@\"; do case \"$a\" in -*) ;; \"$HOME\"/*) ;; *) echo \"refusing $a\" >&2; exit 1;; esac; done\n\
+                 exec /bin/rm \"$@\"\n",
+                line = crate::hosts::sh_quote(text),
+                spool = crate::hosts::sh_quote(&self.spool.to_string_lossy()),
+            );
+            let p = self.bin.join("rm");
+            std::fs::write(&p, stub).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+
+        fn sh(&self, script: &str) -> String {
+            let path = format!("{}:{}", self.bin.display(), std::env::var("PATH").unwrap_or_default());
+            let out = std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(script)
+                .env("HOME", &self.home)
+                .env("PATH", path)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "腳本失敗：{}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        }
+    }
+
+    impl Drop for Remote {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.home);
+        }
+    }
+
+    /// 遠端同款：claim 的 `cat` 與 `rm` 是兩支各自 fork／exec 的外部指令，中間附加的行不准被刪。
+    #[test]
+    fn the_remote_claim_script_keeps_a_line_appended_inside_the_window() {
+        let r = Remote::new();
+        let root = crate::startup::REMOTE_ROOT;
+        // 上一輪 ack 沒成功留下的 `.replaying`：修正前只有這條路徑會 `cat` 完再刪 live spool。
+        std::fs::write(r.spool.with_extension("jsonl.replaying"), "OLD\n").unwrap();
+        std::fs::write(&r.spool, "A\n").unwrap();
+        r.arm_append_inside_the_window("LATE\n");
+
+        let out = r.sh(&claim_script("botX", root).unwrap());
+        assert!(out.contains("OLD") && out.contains("A"), "兩則都要讀出來：{out}");
+        r.sh(&ack_script("botX", root).unwrap());
+
+        let left = std::fs::read_to_string(&r.spool).unwrap_or_default();
+        assert!(left.contains("LATE"), "窗口裡附加的那一行要留在 spool 上：{left:?}");
+        let again = r.sh(&claim_script("botX", root).unwrap());
+        assert!(again.contains("LATE"), "下一輪要讀得到它：{again}");
+        assert!(!again.contains("OLD"), "已經 ack 過的不能再出現：{again}");
+    }
+
+    /// 摘下來還沒併進 `.replaying` 就斷線：`.claim` 下一輪要被收回來，不是留在遠端沒人管。
+    #[test]
+    fn the_remote_claim_script_folds_a_leftover_claim_file() {
+        let r = Remote::new();
+        let root = crate::startup::REMOTE_ROOT;
+        std::fs::write(r.spool.with_extension("jsonl.claim"), "STRANDED\n").unwrap();
+        let out = r.sh(&claim_script("botX", root).unwrap());
+        assert!(out.contains("STRANDED"), "上一輪留下的 .claim 要收進來：{out}");
+        assert!(!r.spool.with_extension("jsonl.claim").exists(), "併完就不留");
+    }
+
+    /// `.replaying` 尾巴沒有換行（崩在一行寫到一半）時，併進來的第一行不能跟它黏成一行（#302 的遠端版）。
+    #[test]
+    fn the_remote_fold_does_not_glue_lines_together() {
+        let r = Remote::new();
+        let root = crate::startup::REMOTE_ROOT;
+        std::fs::write(r.spool.with_extension("jsonl.replaying"), "TORN").unwrap();
+        std::fs::write(&r.spool, "NEXT\n").unwrap();
+        let out = r.sh(&claim_script("botX", root).unwrap());
+        assert!(out.lines().any(|l| l == "NEXT"), "新的一行要自己一行：{out:?}");
     }
 }
 

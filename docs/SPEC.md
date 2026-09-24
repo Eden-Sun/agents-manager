@@ -566,8 +566,9 @@ claude 連線在回應中途掉了時，pane 只多一行 `⏺ API Error: Connec
 4. 失敗（連不上、逾時，或**任何非 2xx**，含 daemon 寫不進收件匣時的 503）→ `O_APPEND` 追加一行到
    `~/.config/agents-manager/bots/<bot_id>/hook-spool.jsonl`；寫失敗只記 `hook.log`，仍 exit 0。這就是 hook 的重試路徑。
 5. `--port` 取自 command 列；env `AM_PORT` 為備援。
-6. daemon 重放 spool：拿 per-bot 鎖 → rename 成 `.replaying` → 逐行**寫進 `hook_events` 並 commit** → 刪檔 → 放鎖；
+6. daemon 重放 spool：拿 per-bot 鎖 → rename 成 `.claim` → 併進 `.replaying` → 逐行**寫進 `hook_events` 並 commit** → 刪檔 → 放鎖；
    §6.7 的配對交給 worker。順序不能顛倒：先刪檔再處理，中間掛掉就等於事件沒發生過。
+   摘下來一定走 rename，不是「讀完再刪」：讀與刪之間 hook 附加進來的行會被那個刪除連檔帶走（#493，遠端同款）。
 7. **遠端 bot 不走 HTTP**：改成「寫 spool + `herdr pane report-agent`」，spool 是唯一內容通道，重放由 herdr 狀態事件觸發（§11.4）。
 
 ### 4.4b hook 耐久收件匣 `hook_events`
@@ -2284,10 +2285,12 @@ label = "foo@m4p"
 `events::handle_status` 在遠端 run 上多一步（per-bot 鎖內，與 HTTP hook 同一把）：
 1. 照舊更新 `agent_status`、推 WS。
 2. host ≠ local 且（`working → idle` 或 `→ blocked`）→ **drain**，**兩趟 ssh**：
-   - **claim**：把 `hook-spool.jsonl` `mv` 成 `.replaying`（已存在就把新的接在後面）→ `cat`。**不刪**。
+   - **claim**：把 `hook-spool.jsonl` **`mv` 成 `.claim`**（rename，原子）→ 併進 `.replaying`（尾巴沒換行先補一個）→ 刪 `.claim` → `cat .replaying`。**不刪 spool 本身**。
    - daemon 逐行寫進 `hook_events` 並 commit（§4.4b）。
    - **ack**：`rm -f .replaying`。
    遠端那份是唯一的副本，所以刪它的唯一時機是本機已經 commit 之後；以前 `cat` 完就 `rm`，位元組還沒落地就沒了。
+   摘下來一定走 rename：`cat` 完再 `rm -f` 那個 live spool 的話，兩支指令之間 hook 附加進來的行會被連檔刪掉（#493）。
+   `.claim` 是「摘下來、還沒併進 `.replaying`」的中繼，崩在中間下一輪會接著併。
    ack 失敗（或中間掉線）＝`.replaying` 留在遠端，下一輪 claim 會再讀到它，靠 `dedupe_key` 擋重複。§6.7 的配對交給 worker。
    `hook-status.json` 仍是讀完就刪：單槽訊號不是佇列（§4.4b）。
 3. drain 是 await 的（預算 4 秒），成功後才 `arm_fallback`——終端備援只在 hook 真的沒來時才贏；失敗或逾時照舊 arm，CAS 保證不雙寫。
