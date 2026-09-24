@@ -390,11 +390,43 @@ export async function fetchIncidents(): Promise<SupervisorIncident[] | null> {
   }
 }
 
-/** 交辦清單。單獨拉一次是為了在不重整整個狀態的情況下刷新結果。 */
-export async function fetchAssignments(): Promise<SupervisorAssignment[]> {
-  if (rawTransport.mock) return [...mockState.assignments]
-  const raw = await rawTransport.request('GET', '/supervisor/assignments')
-  return list(isRec(raw) ? raw.assignments : null)
-    .map(toAssignment)
-    .filter((a): a is SupervisorAssignment => a !== null)
+/** 一次撈完的交辦清單。`complete: false` = 沒撈完，上面的筆數只是下限。 */
+export interface AssignmentPage {
+  assignments: SupervisorAssignment[]
+  complete: boolean
+}
+
+/** 每頁跟 daemon 要幾筆，以及最多翻幾頁（壞游標不該變成無窮迴圈）。 */
+const ASSIGNMENT_PAGE = 200
+const MAX_ASSIGNMENT_PAGES = 50
+
+/**
+ * 交辦清單。單獨拉一次是為了在不重整整個狀態的情況下刷新結果。
+ *
+ * **翻到底**：`GET /api/supervisor/assignments` 是分頁的（issue #515），一頁預設 200 筆。
+ * 只拿第一頁的話，未結案的交辦會從清單裡消失——`blocked` 的定義就是「還在等，保持未結案」，
+ * 它天生活得比一頁久（正式庫 1287 筆裡 5 筆未結案，3 筆在最新 200 之外）。
+ *
+ * 撈不完時回 `complete: false` 而不是靜靜地少給：舊 daemon 不回 `has_more`（沒有游標可翻），
+ * 游標壞掉或翻到上限也一樣。半份清單跟完整清單長得一樣的話，呼叫端只會把「看不到」讀成「沒有」。
+ */
+export async function fetchAssignments(): Promise<AssignmentPage> {
+  if (rawTransport.mock) return { assignments: [...mockState.assignments], complete: true }
+  const assignments: SupervisorAssignment[] = []
+  let before = ''
+  for (let page = 0; page < MAX_ASSIGNMENT_PAGES; page++) {
+    const q = new URLSearchParams({ limit: String(ASSIGNMENT_PAGE) })
+    if (before) q.set('before', before)
+    const raw = await rawTransport.request('GET', `/supervisor/assignments?${q.toString()}`)
+    const body = isRec(raw) ? raw : {}
+    for (const a of list(body.assignments).map(toAssignment)) {
+      if (a !== null) assignments.push(a)
+    }
+    // 三態，不是兩態：`true` 才繼續翻，`false` 才算撈完，其他（沒這個欄位、型別是垃圾）都是「不知道」。
+    if (body.has_more === false) return { assignments, complete: true }
+    if (body.has_more !== true) return { assignments, complete: false }
+    before = typeof body.next_cursor === 'string' ? body.next_cursor : ''
+    if (!before) return { assignments, complete: false }
+  }
+  return { assignments, complete: false }
 }
