@@ -26,12 +26,15 @@ export function useWakeLock(): { on: boolean; setOn: (v: boolean) => void; suppo
     if (!on || support !== 'ok') return
     let alive = true
     let held: Sentinel | null = null
+    /** 同時只准一個 request 在路上：兩次 `visibilitychange` 夾在同一次 request 裡的話，
+     *  第二次會再要一顆，先拿到的那顆從此沒人 release——開關關掉了螢幕還是不睡（#548 順帶，稽核時發現）。 */
+    let inflight: Promise<Sentinel> | null = null
     const acquire = async () => {
-      if (!alive || document.visibilityState !== 'visible' || held) return
+      if (!alive || document.visibilityState !== 'visible' || held || inflight) return
       try {
-        const lock = (await (navigator as unknown as { wakeLock: { request: (t: 'screen') => Promise<Sentinel> } }).wakeLock.request(
-          'screen',
-        )) as Sentinel
+        const req = (navigator as unknown as { wakeLock: { request: (t: 'screen') => Promise<Sentinel> } }).wakeLock.request('screen')
+        inflight = req
+        const lock = (await req) as Sentinel
         if (!alive) {
           void lock.release()
           return
@@ -46,6 +49,8 @@ export function useWakeLock(): { on: boolean; setOn: (v: boolean) => void; suppo
       } catch {
         // 使用者拒絕、或系統省電模式不給：當成沒開，開關留在原處讓人再試。
         setActive(false)
+      } finally {
+        inflight = null
       }
     }
     const onVisible = () => {
@@ -58,8 +63,10 @@ export function useWakeLock(): { on: boolean; setOn: (v: boolean) => void; suppo
       document.removeEventListener('visibilitychange', onVisible)
       const lock = held
       held = null
+      inflight = null
       setActive(false)
       if (lock && !lock.released) void lock.release().catch(() => {})
+      // 還在路上的那一顆由 `acquire` 自己收（它 await 完會看到 `alive === false` 就 release）。
     }
   }, [on, support])
 
