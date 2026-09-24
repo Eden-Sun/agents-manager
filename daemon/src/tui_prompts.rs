@@ -302,16 +302,14 @@ pub fn dangerous_rm_prompt(screen: &str) -> Option<DangerousRm> {
         warning.push_str(&strip_box(tail_raw[i]));
     }
     let target = warning.split_once(": ").map(|(_, t)| t.trim().to_string()).unwrap_or_default();
-    // 指令在框上方的 `Bash command` 區塊：標題下、警語前，`│` 開頭的那幾行。
+    // 指令在框上方的 `Bash command` 區塊：標題下、警語前，`│` 開頭的那幾行。指令只佔一列時 claude 不畫 `│`
+    // （2026-09-24 真畫面），那就是標題下第一列；再下一列是說明，不算。
     let abs_warn = start + warn;
     let from = abs_warn.saturating_sub(RM_COMMAND_LOOKBACK);
     let command = raw[from..abs_warn].iter().rposition(|l| norm_line(l) == "bash command").map(|h| {
-        raw[from + h + 1..abs_warn]
-            .iter()
-            .filter(|l| l.trim_start().starts_with('│'))
-            .map(|l| strip_box(l))
-            .collect::<Vec<_>>()
-            .join("\n")
+        let block = &raw[from + h + 1..abs_warn];
+        let gutter: Vec<String> = block.iter().filter(|l| l.trim_start().starts_with('│')).map(|l| strip_box(l)).collect();
+        if gutter.is_empty() { block.first().map(|l| strip_box(l)).unwrap_or_default() } else { gutter.join("\n") }
     });
     Some(DangerousRm { warning, target, command: command.filter(|c| !c.is_empty()) })
 }
@@ -417,6 +415,10 @@ pub(crate) mod screens {
     pub const DANGEROUS_RM: &str = include_str!("lifecycle/fixtures/claude-2.1.281-dangerous-rm.txt");
     /// 同一個 pane 在倒數到 0 之後：框不見了，claude 收到「被內建安全檢查拒絕」的 tool_result、把回合做完、回到輸入列。
     pub const DANGEROUS_RM_AUTO_DENIED: &str = include_str!("lifecycle/fixtures/claude-2.1.281-dangerous-rm-auto-denied.txt");
+    /// 2.1.281 真畫面（2026-09-24，真帳號的拋棄式 pane，herdr `pane read` 原文，herdr 判 `blocked`）：指令只佔一列時
+    /// `Bash command` 底下**沒有 `│`**（多列或折行才畫），下一列是說明。重現要用 `rm -rf "$(echo tmpdir2)"` 這種目標
+    /// **整段都是**替換輸出的；`rm -rf "$(pwd)/tmpdir"` 在 2.1.281 不跳框、直接刪掉。
+    pub const DANGEROUS_RM_ONE_ROW: &str = include_str!("lifecycle/fixtures/claude-2.1.281-dangerous-rm-one-row.txt");
     /// 2026-09-23 m12 的 pane（巡檢交辦時抄的原文，路徑中段被抄錄者省略成 `…`）。
     pub const DANGEROUS_RM_M12: &str = "\
  Dangerous rm operation on statically-unresolvable target: /Users/…/web/docs/screenshots/pin-3rows/*
@@ -689,7 +691,7 @@ pub fn is_feedback_survey(screen: &str) -> bool {
 
     const IDLE_CLAUDE: &str = "────────────────────\n❯\n────────────────────\n  15m2dg | agents-manager | Opus 5 31% | 5h:96%\n";
 
-    use super::screens::{DANGEROUS_RM, DANGEROUS_RM_AUTO_DENIED, DANGEROUS_RM_M12, DANGEROUS_RM_VARIABLE};
+    use super::screens::{DANGEROUS_RM, DANGEROUS_RM_AUTO_DENIED, DANGEROUS_RM_M12, DANGEROUS_RM_ONE_ROW, DANGEROUS_RM_VARIABLE};
 
     /// 2.1.281 的防誤刪框：真畫面（含倒數）、巡檢抄的 m12 畫面、09-20 的變數路徑，三種都認得，而且把目標帶出來。
     #[test]
@@ -708,6 +710,11 @@ pub fn is_feedback_survey(screen: &str) -> bool {
         let var = dangerous_rm_prompt(DANGEROUS_RM_VARIABLE).expect("變數路徑");
         assert_eq!(var.target, r#""$D"/* in `rm -f "$D"/*`"#);
         assert_eq!(var.command.as_deref(), Some("D=$(cat /tmp/.origin_dir); P=robinstech-com-tw\nshred -u \"$D\"/origin.key 2>/dev/null || rm -f \"$D\"/*; rmdir \"$D\" 2>/dev/null"));
+
+        // 單列指令沒有 `│`：以前只收 `│` 開頭的列，通知裡指令是空的。說明那一列不能算進去。
+        let one = dangerous_rm_prompt(DANGEROUS_RM_ONE_ROW).expect("單列指令的真畫面");
+        assert_eq!(one.target, "command substitution output");
+        assert_eq!(one.command.as_deref(), Some(r#"rm -rf "$(echo tmpdir2)""#));
     }
 
     /// 倒數到 0 之後框不見了；一般的權限框、其他對話框、回覆裡引了原文（輸入列空著）都不是。
