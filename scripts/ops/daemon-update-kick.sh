@@ -506,16 +506,23 @@ fi
 # `GET /api/supervisor/assignments`、建置 child 的對話紀錄，而 assign 的輸出還會寫進這份 log；
 # argv 則是同一個 uid 的行程用 `ps` 就看得到。寫進只有本人讀得到的檔案，自己交還與派工正文
 # 都用 `--lease-token-file <路徑>`，token 本身從頭到尾只出現在那個 600 的檔裡。
-TOKEN_FILE="$DIR/daemon-update.lease-token"
+# 固定路徑＋`rm -f` 再 `>` 是可預測的：同一個 uid 的行程（正是這張票的威脅模型）可以先把那個名字
+# 佔住、或擺一條 symlink，`>` 就會沿用既有檔的 owner／mode——umask 077 只在「這個檔是我們建的」時
+# 有用。mktemp 是 O_EXCL ＋ 隨機名，佔不住也猜不到（i92b 審核）。
+# 上一輪留下的先清掉（含舊版的固定檔名）：能拿到新的 rebuild 窗口就代表舊窗口已經不在，那些 token 早就沒用。
+rm -f "$DIR/daemon-update.lease-token" "$DIR"/daemon-update.lease-token.*
+TOKEN_FILE=""
 TOKEN_ARG=""
 TOKEN_TEXT=""
-rm -f "$TOKEN_FILE"
 if [ -n "$LEASE_TOKEN" ]; then
-  if ( umask 077 && printf '%s' "$LEASE_TOKEN" > "$TOKEN_FILE" ); then
+  if TOKEN_FILE=$(mktemp "$DIR/daemon-update.lease-token.XXXXXX") \
+       && chmod 600 "$TOKEN_FILE" \
+       && ( umask 077 && printf '%s' "$LEASE_TOKEN" > "$TOKEN_FILE" ); then
     TOKEN_ARG=" --lease-token-file $TOKEN_FILE"
     TOKEN_TEXT=" --lease-token-file $TOKEN_FILE"
   else
     note_fail "寫不進 lease token 檔，交還窗口，這輪不派"
+    [ -n "$TOKEN_FILE" ] && rm -f "$TOKEN_FILE"
     # 檔寫不出來時走 stdin，仍然不讓 token 進 argv。
     printf '%s' "$LEASE_TOKEN" \
       | "$AGM" --compact lease release rebuild --owner "$OWNER" --fence "$LEASE" --lease-token - >> "$LOG" 2>&1 || true
@@ -553,6 +560,6 @@ else
   note_fail "派工失敗，交還窗口"
   # shellcheck disable=SC2086  # TOKEN_ARG 是刻意要拆成兩個參數的（沒有 token 時是空字串）
   "$AGM" --compact lease release rebuild --owner "$OWNER" --fence "$LEASE" $TOKEN_ARG >> "$LOG" 2>&1 || true
-  rm -f "$TOKEN_FILE"
+  [ -n "$TOKEN_FILE" ] && rm -f "$TOKEN_FILE"
 fi
 rm -f "$TMP"
