@@ -31,7 +31,7 @@ import {
 } from '../api/normalize'
 import { ApiError } from '../api/types'
 import { PREVIEW_OFF, toPreviewEvent, type Preview } from '../api/preview'
-import type { Bot, BotKind, RestartBatch, GroupChatResult, Mission, MissionDetail, NewMissionInput, MemSnapshot, GroupMessage, Host, HerdrVersion, HostResult, HostShell, Identity, IdentityStatusMap, Lamp, Message, ModelInfo, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, PatchBotInput, PatchProjectInput, Project, QuotaMap, Run, TerminalSource, ToolMap, Turn, TurnDelivery } from '../api/types'
+import type { Bot, BotKind, RestartBatch, GroupChatResult, Mission, MissionDetail, NewMissionInput, MemSnapshot, GroupMessage, Host, HerdrVersion, HostResult, HostShell, Identity, IdentityStatusMap, Lamp, Message, ModelInfo, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, PatchBotInput, PatchProjectInput, Project, QuotaMap, Run, TerminalSource, ToolMap, Turn, TurnDelivery, ModelRemap } from '../api/types'
 import type { ProjectPane } from '../api'
 import { joinRunningBatch, reconcileBatch, restartProgress } from './restartBatch'
 import { dropHostModels, modelsKey, shouldFetchModels, type ModelsCache } from './modelsCache'
@@ -51,6 +51,12 @@ import { missionRequests } from './missionRequests'
 import { MISSION_USER_PAUSE } from '../lib/missionView'
 
 import type { QueuedSend, RestoreResult } from './queuedSend'
+
+/** `patchBot` 的結果：要不要重啟，以及 daemon 有沒有把送進去的停用模型換掉（issue #539）。 */
+export interface PatchBotOutcome {
+  needsRestart: boolean
+  remappedModel: ModelRemap | null
+}
 import { laterMark, serverUnread } from './sharedUnread'
 import { viewingBot, viewingGroup } from './viewing'
 import { flushDelayMs, flushGaveUp, flushGaveUpText } from './flushRetry'
@@ -496,7 +502,8 @@ export interface StoreState {
   /** 子 agent 升級成頂層 bot（保留對話）。回新 bot id；null = 失敗（原因已跳通知）。 */
   promoteBot: (botId: string) => Promise<string | null>
   /** 回傳 `needs_restart`；null = 失敗（原因已跳通知）。 */
-  patchBot: (botId: string, input: PatchBotInput) => Promise<boolean | null>
+  /** `null`＝沒送出或失敗（原因已跳通知）。 */
+  patchBot: (botId: string, input: PatchBotInput) => Promise<PatchBotOutcome | null>
   patchProject: (projectId: string, input: PatchProjectInput) => Promise<boolean>
   /** `resumeNative`：換身分後重啟要接回原對話（`?resume=native`），接不回自動退回不帶旗標重送一次。 */
   restartBot: (botId: string, resumeNative?: boolean) => Promise<boolean>
@@ -1638,11 +1645,12 @@ export const useStore = create<StoreState>((set, get) => ({
     // 冪等鍵（#352）：同一個動作（快速新增：專案＋kind＋身分，名字只是提示）失敗後重試沿用同一個鍵，成功才作廢。
     const reqKey = input.name_auto ? `add:${projectId}:${input.kind}:${input.identity ?? ''}` : `add:${projectId}:${input.name}`
     try {
-      const { id, name } = await api.createBot(projectId, { ...input, client_request_id: createRequestId(reqKey) })
+      const { id, name, remapped_model: remapped } = await api.createBot(projectId, { ...input, client_request_id: createRequestId(reqKey) })
       settleCreateRequest(reqKey)
       await get().refreshState()
       if (id) set({ selectedBotId: id })
-      get().notify('info', `已新增 Bot ${name}`)
+      // 建的時候送到停用別名也會被換掉（API.md「停用模型的回應」）：一起講，不要讓人以為選的生效了（#539）。
+      get().notify('info', remapped ? `已新增 Bot ${name}：「${remapped.from}」已停用，改用「${remapped.to}」` : `已新增 Bot ${name}`)
       return id || null
     } catch (e) {
       // daemon 說這個鍵已經是另一件事（例如設定變了）：作廢，下一次是新的動作。
@@ -1772,14 +1780,19 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   async patchBot(botId, input) {
-    if (Object.keys(input).length === 0) return false
-    let needsRestart: boolean | null = null
+    if (Object.keys(input).length === 0) return { needsRestart: false, remappedModel: null }
+    let out: PatchBotOutcome | null = null
     await guarded(set, get, `patch:${botId}`, async () => {
       const res = await api.patchBot(botId, input)
-      needsRestart = res.needs_restart
+      out = { needsRestart: res.needs_restart, remappedModel: res.remapped_model }
+      // 停用的模型別名會被 daemon 換掉再存（API.md「停用模型的回應」）：不講的話，使用者以為自己選的生效了，
+      // 而畫面上那一欄還停在他送出的值（issue #539）。三個送出入口共用這一句。
+      if (res.remapped_model) {
+        get().notify('info', `「${res.remapped_model.from}」已停用，這顆 bot 改用「${res.remapped_model.to}」`)
+      }
       await get().refreshState()
     })
-    return needsRestart
+    return out
   },
 
   async restartBot(botId, resumeNative) {

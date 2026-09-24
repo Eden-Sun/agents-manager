@@ -2,7 +2,7 @@ import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import type { BotKind, ModelInfo, PatchBotInput } from '../api/types'
-import { CLAUDE_EFFORT_OPTIONS, CODEX_EFFORT_OPTIONS, EFFORT_OPTIONS, FAST_TIER, HIDDEN_MODELS, MODEL_OPTIONS, effortLabel } from '../api/types'
+import { CLAUDE_EFFORT_OPTIONS, CODEX_EFFORT_OPTIONS, EFFORT_OPTIONS, FAST_TIER, HIDDEN_MODELS, MODEL_OPTIONS, canonicalModel, effortLabel } from '../api/types'
 import { useMenuKeys } from '../hooks/useMenuKeys'
 import { modelSwitchPatch } from '../lib/modelSwitch'
 import { useStore } from '../store/store'
@@ -40,8 +40,9 @@ function modelLabel(m: ModelInfo): string {
 /** 照 `MODEL_OPTIONS` 排序：API 順序隨 CLI 版本變會毀掉肌肉記憶；新模型接在後面。 */
 function sortModels(kind: BotKind, models: ModelInfo[]): ModelInfo[] {
   const want = MODEL_OPTIONS[kind] ?? []
+  // `want` 寫的是正式 id，daemon 的清單可能還是別名（claude 目前就回 `opus`）：對過去再排（#539）。
   const rank = (id: string) => {
-    const at = want.indexOf(id)
+    const at = want.indexOf(canonicalModel(kind, id))
     return at < 0 ? want.length : at
   }
   return models
@@ -296,9 +297,9 @@ export function ModelQuickPicker({
   const efforts = current?.efforts ?? []
 
   const apply = async (input: PatchBotInput) => {
-    const needsRestart = await patchBot(botId, input)
-    if (needsRestart === null) return
-    if (needsRestart) {
+    const res = await patchBot(botId, input)
+    if (!res) return
+    if (res.needsRestart) {
       notify('info', '已儲存，重啟 Bot 後才會套用')
     }
   }

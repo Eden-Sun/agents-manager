@@ -60,6 +60,11 @@
 - 第一行：燈號、名字、★、⚙、更新 chip 等；第二行：`● 需要回應`（blocked 時，排第一）、kind logo（無框、有底色、貼近 model）、model／effort chip、pane id（擠不下只剩 `▾`）。
 - 顏色：kind 品牌色 `--kind-claude` 橘、`--kind-codex` 綠、`--kind-grok` 紫（使用者選的）；model chip 吃該 kind 色；⚙ 與 ▾ 吃 accent；★ 釘起來實心黃、沒釘淡黃空心。
   kind 圖示 tooltip 寫「這是哪個 CLI、哪家模型」，`aria-label` 只有 kind 名。codex 顯示時去掉 `gpt-` 前綴（完整 id 在 tooltip）（使用者指定）。
+- **停用的模型別名照 daemon 的清單顯示，但被換掉一定要講**（#539）：daemon 對 `opus`（claude）與
+  `gpt-5.6-luna`（codex）會換成正式 id 再存並回 `remapped`（API.md「停用模型的回應」）。選單不擅自濾掉別名——
+  claude 的 `GET /api/models` 目前回的就是 `opus`，濾掉等於讓人選不到；改成**被換時 `store.patchBot` 講一句**，
+  設定面板記的是 daemon 實際採用的值（記送出的那個會讓欄位一直顯示一個沒在用的模型）。
+  前端自己送出的地方（靜態後備清單 `MODEL_OPTIONS`、「改用 opus」按鈕）一律寫正式 id，別再製造 remap。
 - **codex fast 在 logo 上疊閃電**（2026-09-22 使用者）：正在跑的 codex 是 fast（priority tier）時，kind logo 右下（手機右上，右下會被額度列蓋掉）疊一個琥珀色 ⚡，
   來源跟 model chip 的「· fast」同一份（`status.fast_mode`，實際在跑的，不是設定值）。fast 額度燒得快，只寫在 chip 尾巴太容易漏看。
 - 更新 chip 只寫 `${kind} 有更新`；額度列的更新 chip 有列到當前 bot（閒置或在忙那組都算）就不畫，免得同一個 ⌃⌃ 出現兩次（2026-09-19 使用者：「logo 重工了」）；只剩非 claude 的會畫。這顆自己要套用走 context bar 版本號旁的「升級」。

@@ -372,17 +372,20 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
     setSaving(true)
     setBanner(null)
     const sent = patch
-    void patchBot(botId, sent).then((needsRestart) => {
+    void patchBot(botId, sent).then((res) => {
       setSaving(false)
-      if (needsRestart === null) return
-      setSaved((s) => ({ ...s, ...sent }))
+      if (!res) return
+      // 記 daemon **實際採用**的值，不是送出去的：停用別名會被換掉（#539），記送出的那個會讓
+      // `pruneSaved` 永遠追不上，欄位就一直顯示一個沒在用的模型、還算不出 dirty。
+      setSaved((s) => ({ ...s, ...sent, ...(res.remappedModel ? { model: res.remappedModel.to } : {}) }))
       setTouched((t) => {
         const n = new Set(t)
         for (const k of Object.keys(sent)) n.delete(k as BotFormKey)
         return n
       })
-      setBanner(needsRestart ? 'restart' : 'saved')
-      if (!needsRestart) notify('info', `已儲存 ${patch.name ?? bot.name} 的設定`)
+      setBanner(res.needsRestart ? 'restart' : 'saved')
+      // 被換掉時 `store.patchBot` 已經講了一句，不要再疊一則「已儲存」。
+      if (!res.needsRestart && !res.remappedModel) notify('info', `已儲存 ${patch.name ?? bot.name} 的設定`)
     })
   }
 
