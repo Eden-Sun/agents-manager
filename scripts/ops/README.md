@@ -30,9 +30,14 @@
 `scripts/ops/launchd/com.agm.*.plist` 是這台機器上 8 個 job 的來源檔，`install-manifest.tsv` 也列了它們
 （安裝位置寫成 `LaunchAgents/…`，`agm ops-sync --check` 解析成 `~/Library/LaunchAgents/`）。
 
-比對**只看語意欄位**：`Label`／`ProgramArguments`／`StartInterval`／`RunAtLoad`。launchd 自己會改寫 plist
-（鍵的順序、補欄位），整檔比對會一直報 drift。`EnvironmentVariables` 刻意不比——裡面是這台機器的 `PATH`
-與 bot id 之類的值，每台不同；repo 那一份留著它是為了 install 之後 job 還跑得起來。
+比對用 `plistlib` parse 過的 dict（**鍵的順序不影響**），**除了 `EnvironmentVariables` 以外全部都比**，
+包括 `StandardOutPath`／`StandardErrorPath`／`WorkingDirectory`。`EnvironmentVariables` 不比——裡面是這台
+機器的 `PATH` 與 bot id 之類的值，每台不同；repo 那一份留著它是為了 install 之後 job 還跑得起來。
+
+（#487 原本反過來寫成白名單，理由是「launchd 會自己改寫 plist」。**那個理由是錯的**：實機那八份都是純
+XML 文字檔，launchd 只讀不回寫；當時看到的「鍵順序不同」是 `PlistBuddy -c Print` 的輸出順序。白名單的
+代價是沒列到的鍵被靜默忽略——八份全都有的 `StandardOutPath`／`StandardErrorPath` 就這樣不在比對範圍裡，
+而 `browser-gc-kick.sh` 沒有 ops-alert 管道、失敗只留 log，log 路徑漂掉卻報同步就是綠燈假象。issue #499。）
 
 `~/Library/LaunchAgents/` 裡有、對照表沒有的 `com.agm.*` job 會報成 `extra`（＝沒有版控的排程）。
 路徑與 `gui/501` 寫死成這台開發機的值，跟 `herdr-full-restart.sh` 同一個處理方式。

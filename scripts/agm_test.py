@@ -1311,7 +1311,8 @@ class OpsSyncTest(CliCase):
         self.put("scripts/ops/install-manifest.tsv",
                  "scripts/ops/a.sh bin/a.sh\nscripts/ops/b.sh bin/b.sh\nscripts/ops/c.sh bin/c.sh\nscripts/ops/t.md t.md\n"
                  "scripts/ops/launchd/com.agm.x.plist LaunchAgents/com.agm.x.plist\n")
-        self.put("scripts/ops/launchd/com.agm.x.plist", self.plist("com.agm.x", 1800))
+        self.put("scripts/ops/launchd/com.agm.x.plist",
+                 self.plist("com.agm.x", 1800, extra="<key>StandardOutPath</key><string>/tmp/x.log</string>"))
         self.git("add", "-A")
         self.git("commit", "-qam", "加 plist")
         self.git("update-ref", "refs/remotes/origin/main", "HEAD")
@@ -1319,21 +1320,45 @@ class OpsSyncTest(CliCase):
             self.install(f"bin/{n}.sh", "a v3\n" if n == "a" else f"{n} v1\n")
         self.install("t.md", "task\n")
 
-    def test_plist_compares_only_semantic_fields_so_launchd_rewrites_are_not_drift(self):
-        """launchd 會改寫 plist（鍵的順序、補欄位）——整檔比對一定是 drift，所以只比語意欄位。"""
+    def test_key_order_and_env_vars_are_not_drift(self):
+        """比的是 parse 過的 dict，所以鍵的順序不影響；`EnvironmentVariables` 是每台機器自己的值，忽略。"""
         self.with_plists()
-        # 同樣四個語意欄位，但鍵的順序不同、而且多了 launchd 自己補的 StandardOutPath 與 EnvironmentVariables。
         (self.agents / "com.agm.x.plist").write_text(
             self.PLIST.format(
-                "<key>StandardOutPath</key><string>/tmp/x.log</string>"
+                # 故意打亂順序，而且多一個只有安裝端才有的 EnvironmentVariables。
                 "<key>StartInterval</key><integer>1800</integer>"
                 "<key>EnvironmentVariables</key><dict><key>PATH</key><string>/usr/bin</string></dict>"
+                "<key>StandardOutPath</key><string>/tmp/x.log</string>"
                 "<key>ProgramArguments</key><array><string>/bin/zsh</string></array>"
                 "<key>Label</key><string>com.agm.x</string>"
             ), encoding="utf-8")
         r = self.ok("ops-sync", "--check", "--repo", str(self.repo))
         self.assertTrue(r["in_sync"], r)
         self.assertIn("LaunchAgents/com.agm.x.plist", [x["target"] for x in r["ok"]])
+
+    def test_log_path_drift_is_reported(self):
+        """issue #499：`StandardOutPath`／`StandardErrorPath` 是 log 的落點。browser-gc 這種沒有
+        ops-alert 管道的，失敗只留 log——路徑漂掉卻報同步，等於證據來源斷了還顯示綠燈。
+        白名單那版會靜默忽略這兩個鍵，所以這條當時是綠的。"""
+        self.with_plists()
+        (self.agents / "com.agm.x.plist").write_text(
+            self.plist("com.agm.x", 1800, extra="<key>StandardOutPath</key><string>/tmp/moved.log</string>"),
+            encoding="utf-8")
+        code, out, _ = self.run_cli("ops-sync", "--check", "--repo", str(self.repo))
+        self.assertEqual(code, 1)
+        r = json.loads(out)
+        [row] = [x for x in r["drift"] if x["target"] == "LaunchAgents/com.agm.x.plist"]
+        self.assertEqual(row["diff"]["StandardOutPath"], {"repo": "/tmp/x.log", "installed": "/tmp/moved.log"})
+
+    def test_a_key_missing_on_the_installed_side_is_drift(self):
+        """少一個鍵跟改一個值同樣是落差——只看其中一邊會漏掉「安裝端整個少了 StandardErrorPath」。"""
+        self.with_plists()
+        (self.agents / "com.agm.x.plist").write_text(self.plist("com.agm.x", 1800), encoding="utf-8")
+        code, out, _ = self.run_cli("ops-sync", "--check", "--repo", str(self.repo))
+        self.assertEqual(code, 1)
+        r = json.loads(out)
+        [row] = [x for x in r["drift"] if x["target"] == "LaunchAgents/com.agm.x.plist"]
+        self.assertEqual(row["diff"]["StandardOutPath"], {"repo": "/tmp/x.log", "installed": None})
 
     def test_plist_interval_drift_is_reported_with_both_values(self):
         """#487 的本體：實機把間隔改掉（或文件跟排程不一致）要看得出來，而且要講出兩邊的值。"""
