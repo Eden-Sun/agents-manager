@@ -2285,8 +2285,9 @@ label = "foo@m4p"
   0755／0644 也會被修回去。spool 裡是完整的 hook payload，不能交給那台機器的 umask 決定誰讀得到。
   本機同一組檔案同樣是 0700／0600（`private_files`）。
   安裝只在**啟動 bot** 時跑，所以換版當下還在跑的遠端 bot 另外靠**連上時掃一次**收緊
-  （`remote_perms::spawn_tighten`，冪等、失敗只記 debug）；drain 自己建的 `.replaying` 由 `claim_script`
-  的 `umask 077` 負責。
+  （`remote_perms::spawn_tighten`，冪等）；drain 自己建的 `.replaying` 由 `claim_script` 的 `umask 077` 負責。
+  掃描每顆 bot 印 `AM_TIGHTENED`／`AM_TIGHTEN_FAILED`，失敗（ssh 掛掉或有 `chmod` 不成功）記 `warn!` 並
+  把那台記成欠著，每 5 分鐘補跑到成功為止——觸發時機正是 ssh 最不穩的時候，而一台不重連的主機不會有第二次機會（#500 複看）。
 
 #### 11.4.3 daemon 端：狀態事件 → 讀 spool → 重放
 `events::handle_status` 在遠端 run 上多一步（per-bot 鎖內，與 HTTP hook 同一把）：
@@ -2294,6 +2295,10 @@ label = "foo@m4p"
 2. host ≠ local 且（`working → idle` 或 `→ blocked`）→ **drain**，**兩趟 ssh**：
    - **claim**：把 `hook-spool.jsonl` **`mv` 成 `.claim`**（rename，原子）→ 併進 `.replaying`（尾巴沒換行先補一個）→ 刪 `.claim` → `cat .replaying`。**不刪 spool 本身**。
      上一輪的 `.claim` 還在（併不進去）時**這一輪不摘新的 spool**：腳本沒有 `set -e`，直接 `mv` 會把那份唯一的副本無聲蓋掉（#500）。
+     這種時候 claim 會多印一行 `AM_FOLD_STUCK <bytes>`（#501 複看）：腳本仍然 exit 0、收到的行數是 0，
+     沒有這個標記的話 daemon 這邊一行 log 都不會有，而「hook 不再進來」跟「這顆 bot 很閒」長得一模一樣。
+     daemon 每看到一次就 `warn!` 並累計，連續 3 輪開 `remote_spool_stuck` incident（`resource` 是 `<host>/<bot_id>`）；
+     併回去的那一輪把計數清掉。資料沒丟——`.claim` 還在，空間一回來下一輪整份補上。
    - daemon 逐行寫進 `hook_events` 並 commit（§4.4b）。
    - **ack**：`rm -f .replaying`。
    遠端那份是唯一的副本，所以刪它的唯一時機是本機已經 commit 之後；以前 `cat` 完就 `rm`，位元組還沒落地就沒了。

@@ -90,6 +90,10 @@ pub struct App {
     /// 而且已經問過的那幾顆不用每輪再付一次 herdr 讀畫面。記憶體、重啟重算。
     pub judge_stuck_seen: Mutex<HashMap<String, std::time::Instant>>,
     pub classify_failures: std::sync::atomic::AtomicU32,
+    /// #500 複看：`<host>/<bot_id>` → （連續看到 `.claim` 併不進去的輪數, 那份副本的位元組數）。
+    /// `hookrecv::note_fold_stuck` 每輪更新，`supervisor::incidents` 的探針拿它開票。
+    /// 記憶體、重啟重算（SPEC §18.9）：重啟後第一輪 drain 就會重新看到。
+    pub spool_fold_stuck: tokio::sync::Mutex<std::collections::HashMap<String, (u32, i64)>>,
     pub connected: std::sync::atomic::AtomicBool,
     pub default_connected: std::sync::atomic::AtomicBool,
     /// How "which account is this pid running under" gets answered (SPEC §16.6). Empty in a
@@ -206,6 +210,7 @@ impl App {
             judge_fuse: Mutex::new(()),
             judge_stuck_seen: Mutex::new(HashMap::new()),
             classify_failures: std::sync::atomic::AtomicU32::new(0),
+            spool_fold_stuck: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             connected: std::sync::atomic::AtomicBool::new(false),
             default_connected: std::sync::atomic::AtomicBool::new(false),
             proc_env: Default::default(),

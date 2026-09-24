@@ -63,12 +63,14 @@ pub struct Thresholds {
     pub approval_stalled_secs: i64,
     /// issue #472：`roles::classify` 連續失敗幾拍才開 incident。同上，放這裡是為了測試能換小值。
     pub classify_failures: u32,
+    pub spool_fold_stuck_rounds: u32,
 }
 
 impl Thresholds {
     pub fn from_cfg(cfg: &crate::config::SupervisorCfg) -> Self {
         Self {
             classify_failures: CLASSIFY_FAILURE_LIMIT,
+            spool_fold_stuck_rounds: SPOOL_FOLD_STUCK_LIMIT,
             host_disconnected_secs: cfg.host_disconnected_secs as i64,
             bot_stopped_secs: cfg.bot_stopped_secs as i64,
             assignment_stalled_secs: cfg.assignment_stalled_secs as i64,
@@ -474,6 +476,30 @@ pub async fn observe(app: &Arc<App>, thresholds: &Thresholds) -> Probed {
         }
     }
 
+    // #500 複看：遠端 spool 停收。這一條跟分類器那條的理由一樣——**沒有別的探針會發現**：
+    // 事件還在遠端的 `.claim` 裡，本機的 `hook_events` 從頭到尾沒看過它們，
+    // 而「hook 不再進來」跟「這顆 bot 很閒」在 daemon 這邊長得一模一樣。
+    {
+        let stuck = app.spool_fold_stuck.lock().await;
+        for (resource, (rounds, bytes)) in stuck.iter() {
+            if *rounds < thresholds.spool_fold_stuck_rounds {
+                continue;
+            }
+            out.push(Observation {
+                kind: SPOOL_FOLD_STUCK_KIND.into(),
+                resource: resource.clone(),
+                // 資料沒丟（`.claim` 還在，空間一回來就整份補上），但期間這顆 bot 的回合全部看不到。
+                severity: "critical".into(),
+                detail: json!({
+                    "rounds": rounds,
+                    "claim_bytes": bytes,
+                    "action": "那台機器上 `df -h` 與 `ls -l <bot 目錄>`：.replaying 寫不進去（磁碟滿、quota、權限或被改成目錄）；修好之後下一輪 drain 會自己整份補上，不必手動搬檔",
+                })
+                .to_string(),
+            });
+        }
+    }
+
     probed
 }
 
@@ -489,6 +515,14 @@ pub const CLASSIFY_FAILURE_LIMIT: u32 = 3;
 
 /// #472 的 incident 種類。resource 是固定字串：這是 daemon 自己那一支分類器，全機只有一個。
 pub const CLASSIFY_FAILING_KIND: &str = "inbox_classify_failing";
+
+/// #500 複看：遠端 spool 的 `.claim` 併不進 `.replaying` 就是「這顆 bot 的 hook 事件從現在起全部收不到」。
+/// drain 是事件驅動的，一顆閒著的 bot 本來就沒有輪數，所以門檻壓在 3 輪——看到三次代表它真的有事件
+/// 要送、而且三次都沒收成，不是一次暫時的磁碟忙。
+pub const SPOOL_FOLD_STUCK_LIMIT: u32 = 3;
+
+/// 這件事的 incident 種類。`resource` 是 `<host>/<bot_id>`：一台機器上可以只有某顆 bot 卡住。
+pub const SPOOL_FOLD_STUCK_KIND: &str = "remote_spool_stuck";
 
 pub const ROLE_UNAVAILABLE_KIND: &str = "role_unavailable";
 /// 改名前的 kind（issue #459 的遷移用）。
@@ -685,6 +719,7 @@ mod tests {
             notify_max_attempts: 5,
             approval_stalled_secs: 1800,
             classify_failures: CLASSIFY_FAILURE_LIMIT,
+            spool_fold_stuck_rounds: SPOOL_FOLD_STUCK_LIMIT,
         }
     }
 
@@ -716,6 +751,43 @@ mod tests {
         // 成功一次歸零：下一拍就不該再看到。
         app.classify_failures.store(0, Ordering::Relaxed);
         assert!(!has(&observe(&app, &t).await), "恢復之後不該還在");
+    }
+
+    /// #500 複看：遠端 spool 停收。門檻以下不開票（drain 是事件驅動的，一次磁碟忙不該驚動人），
+    /// 到門檻才開；`resource` 要分得出是哪一台的哪一顆；併回去之後（計數被移除）就該消失。
+    #[tokio::test]
+    async fn a_stuck_remote_spool_opens_an_incident_per_bot() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let t = thresholds();
+        let of = |p: &Probed| -> Vec<String> {
+            p.seen.iter().filter(|o| o.kind == SPOOL_FOLD_STUCK_KIND).map(|o| o.resource.clone()).collect()
+        };
+
+        assert!(of(&observe(&app, &t).await).is_empty(), "沒卡住就不該有");
+
+        app.spool_fold_stuck.lock().await.insert("mac2/b1".into(), (SPOOL_FOLD_STUCK_LIMIT - 1, 42));
+        assert!(of(&observe(&app, &t).await).is_empty(), "門檻以下不開票");
+
+        app.spool_fold_stuck.lock().await.insert("mac2/b1".into(), (SPOOL_FOLD_STUCK_LIMIT, 4096));
+        let probed = observe(&app, &t).await;
+        let o = probed.seen.iter().find(|o| o.kind == SPOOL_FOLD_STUCK_KIND).expect("到門檻要開");
+        assert_eq!(o.resource, "mac2/b1", "一台機器上可以只有某顆 bot 卡住");
+        assert_eq!(o.severity, "critical");
+        assert!(o.detail.contains("claim_bytes"), "查事故的人要知道卡著多少：{}", o.detail);
+
+        // 同一台的另一顆也卡住：各開各的。
+        app.spool_fold_stuck.lock().await.insert("mac2/b2".into(), (SPOOL_FOLD_STUCK_LIMIT, 7));
+        let mut both = of(&observe(&app, &t).await);
+        both.sort();
+        assert_eq!(both, vec!["mac2/b1".to_string(), "mac2/b2".to_string()]);
+
+        // 併回去了：計數被移除，下一拍就不該再看到。
+        app.spool_fold_stuck.lock().await.clear();
+        assert!(of(&observe(&app, &t).await).is_empty(), "恢復之後不該還在");
+
+        // 這一類要推進 inbox：壞的是那台機器的磁碟，不是通知那條路自己（對照 #472）。
+        assert!(notifiable(SPOOL_FOLD_STUCK_KIND, "mac2/b1", false));
     }
 
     /// #472：分類器連續失敗到門檻才開 incident，而且**不推 inbox**——
