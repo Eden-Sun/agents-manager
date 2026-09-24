@@ -3201,14 +3201,31 @@ async fn upload_attachment(
     Ok((StatusCode::OK, Json(crate::attach::to_json(&a))).into_response())
 }
 
+/// 上傳時收的 `Content-Type` 是呼叫端自己給的（`upload_attachment` 刻意什麼都收），所以送回去的時候
+/// 比照 `outbox::file` 三件事：白名單外一律 `application/octet-stream`、非圖片帶
+/// `Content-Disposition: attachment`、一律 `nosniff`。使用者的 HTML 不該在 daemon 這個 origin 跑起來
+/// （UI token 就在這個 origin 的 localStorage）——原本擋住它的只是「認證只看 header，導航不帶 token」
+/// 與「前端只對 image/* 抓位元組」這兩個跟這支端點無關的巧合（#471）。
 async fn get_attachment(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
     let (mime, data) = crate::attach::read(&app, &id).await.map_err(|e| {
         tracing::warn!(attachment = %id, error = %e, "attachment read failed");
         LcError::NotFound("attachment".into())
     })?;
+    let served = crate::attach::served_mime(&mime);
+    let disposition = if crate::attach::is_inline(served) { "inline" } else { "attachment" };
     Ok((
         StatusCode::OK,
-        [(header::CONTENT_TYPE, mime), (header::CACHE_CONTROL, "private, max-age=31536000".into())],
+        [
+            (header::CONTENT_TYPE, served.to_string()),
+            (header::CONTENT_DISPOSITION, disposition.to_string()),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
+            // svg 是 inline 的（拿掉會讓現有縮圖變破圖），所以這一層要擋住「真的被導航到」的情況：
+            // sandbox 讓它拿不到這個 origin，腳本也不會跑。`<img>` 載入不是 document，這個標頭對它沒作用，
+            // 但那條路本來就不會執行腳本。**注意**：`URL.createObjectURL` 只保留 MIME、不帶標頭，
+            // 所以未來若要加「在新分頁開啟附件」，不能靠這個標頭，要用別的方式（#471）。
+            (header::CONTENT_SECURITY_POLICY, "sandbox; default-src 'none'".to_string()),
+            (header::CACHE_CONTROL, "private, max-age=31536000".to_string()),
+        ],
         data,
     )
         .into_response())

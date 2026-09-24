@@ -350,6 +350,38 @@ fn trashed_copy(app: &Arc<App>, bot_id: &str, local_path: &str) -> Option<PathBu
     candidate.is_file().then_some(candidate)
 }
 
+/// 送回瀏覽器的 `Content-Type`：白名單以外一律 `application/octet-stream`（#471，同
+/// [`crate::outbox::file`] 的規則與理由——上傳的 mime 是呼叫端自己給的，使用者的 HTML 不該在
+/// daemon 這個 origin 跑起來，UI token 就放在這個 origin 的 localStorage）。
+///
+/// **只影響送出去的標頭**：`attachments.mime` 照舊原樣存、原樣回給 UI 判斷要不要畫縮圖，
+/// 所以前端 `item.mime.startsWith('image/')` 那條邏輯不受影響。
+pub fn served_mime(mime: &str) -> &'static str {
+    match mime.split(';').next().unwrap_or("").trim().to_ascii_lowercase().as_str() {
+        "image/png" => "image/png",
+        "image/jpeg" => "image/jpeg",
+        "image/gif" => "image/gif",
+        "image/webp" => "image/webp",
+        // svg 留在名單裡而且照舊 inline：拿掉它會讓現有的 svg 縮圖**變破圖**——前端是
+        // `<img src={blobUrl}>`，而瀏覽器對 SVG 不做內容嗅探，型別不是 `image/svg+xml` 就不算繪。
+        // 為了修一個目前打不穿的硬化缺口而製造看得見的回歸不划算；改成靠回應本身的標頭擋：
+        // `nosniff` ＋ `Content-Security-Policy: sandbox`（見 `get_attachment`）。`<img>` 裡的 SVG
+        // 本來就不會跑腳本，真的被導航到時 sandbox 讓它拿不到這個 origin。
+        "image/svg+xml" => "image/svg+xml",
+        "application/pdf" => "application/pdf",
+        "text/plain" => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
+    }
+}
+
+/// 圖片才讓瀏覽器內嵌（UI 用 `<img>`）；其他一律當附件下載，不在這個 origin 算繪。
+///
+/// `application/pdf` 在 [`served_mime`] 的白名單裡**但不 inline**：白名單管的是「下載下來的型別要對」，
+/// 內嵌與否是另一件事，而 UI 目前沒有 pdf 預覽。要做 pdf 預覽時再一起評估（見 docs/API.md）。
+pub fn is_inline(served: &str) -> bool {
+    served.starts_with("image/")
+}
+
 pub fn to_json(a: &Attachment) -> serde_json::Value {
     json!({"id": a.id, "name": a.name, "mime": a.mime, "size": a.size, "path": a.path})
 }
@@ -358,6 +390,31 @@ pub fn to_json(a: &Attachment) -> serde_json::Value {
 mod tests {
     use super::*;
     use crate::testing as tt;
+
+    /// #471：上傳時的 mime 是呼叫端自己給的，送回去不能原樣照用。白名單外一律 octet-stream，
+    /// svg 刻意不在名單裡（可以帶腳本）；只有圖片能 inline，其他都是 attachment。
+    #[test]
+    fn the_served_mime_is_whitelisted_and_only_images_are_inline() {
+        for (given, want) in [
+            ("image/png", "image/png"),
+            ("image/jpeg; charset=binary", "image/jpeg"),
+            ("IMAGE/PNG", "image/png"),
+            ("application/pdf", "application/pdf"),
+            ("text/plain", "text/plain; charset=utf-8"),
+            ("text/html", "application/octet-stream"),
+            ("application/xhtml+xml", "application/octet-stream"),
+            ("", "application/octet-stream"),
+            // svg 留在白名單而且 inline：瀏覽器對 SVG 不嗅探，改成 octet-stream 會讓現有縮圖變破圖。
+            // 安全性由回應的 nosniff ＋ `Content-Security-Policy: sandbox` 擔（見 `get_attachment`）。
+            ("image/svg+xml", "image/svg+xml"),
+        ] {
+            assert_eq!(served_mime(given), want, "{given}");
+        }
+        assert!(is_inline(served_mime("image/png")));
+        assert!(is_inline(served_mime("image/svg+xml")), "svg 要能 inline，否則縮圖破圖");
+        assert!(!is_inline(served_mime("text/html")), "HTML 不能在這個 origin 內嵌算繪");
+        assert!(!is_inline(served_mime("application/pdf")), "白名單管型別，內嵌是另一回事");
+    }
 
     /// #465 的刪除側：附件搬進回收區之後，已刪 bot 的對話仍讀得到縮圖（API.md §10.4），
     /// 所以 `read` 原地讀不到時要去回收區找同一個檔名。
