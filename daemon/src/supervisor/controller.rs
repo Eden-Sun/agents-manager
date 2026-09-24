@@ -1924,7 +1924,10 @@ pub fn spawn(app: Arc<App>, generation: i64) {
                     super::timing::seg(&app, "reconcile", reconcile(&app)).await;
                     super::timing::seg(&app, "resume_quota_blocked", resume_quota_blocked(&app)).await;
                     super::timing::seg(&app, "block_stale_queues", block_stale_queues(&app)).await;
-                    super::timing::seg(&app, "judge_stuck_sweep", crate::judge::stuck::sweep(&app)).await;
+                    // 丟背景（issue #480）：一輪要做 herdr 讀畫面與外部 Jev 呼叫，await 會拖住整拍。
+                    // timing 的區段留著（i406 的量測靠它列齊每一段），現在量到的是「派出去」本身，
+                    // 幾乎是 0——那就是實話，這一段不再佔 tick 的時間了。
+                    super::timing::seg(&app, "judge_stuck_sweep", async { crate::judge::stuck::sweep(&app) }).await;
                     super::timing::seg(&app, "drain_queue", drain_queue(&app)).await;
                     // Before pushing anything new: give back the notifications that went out
                     // and were never answered. A delivered event nobody acked is still owed.

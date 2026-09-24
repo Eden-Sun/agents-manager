@@ -99,7 +99,8 @@ pub async fn capture_codex_usage_notices(app: &Arc<App>, bot_id: &str, expected_
                     matched_line: notice.clone(),
                     screen: read.text.clone(),
                 },
-            );
+            )
+            .await;
             if let Err(e) = crate::turn_error::mark_codex_limit_hit(app, &bot, &notice).await {
                 marked = Err(e);
             }

@@ -61,8 +61,14 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
     Ok(())
 }
 
-/// 鎖外去問。關著的時候連 task 都不起。
-pub fn shadow_limit_hit(app: &Arc<App>, sample: Sample) {
+/// 鎖外去問：問答本身丟背景，呼叫端（畫面處理）不等它。
+///
+/// **關著的時候連 task 都不起**（issue #480）：以前是無條件 spawn、進到 `observe` 才看開關，
+/// 跟這句註解說的相反。多讀一次設定就能省掉那個 task，而呼叫端本來就在 async 裡。
+pub async fn shadow_limit_hit(app: &Arc<App>, sample: Sample) {
+    if !app.cfg.get().await.judge.enabled {
+        return;
+    }
     let app = app.clone();
     tokio::spawn(async move {
         if let Err(e) = observe(&app, sample).await {

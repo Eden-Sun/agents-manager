@@ -37,15 +37,68 @@ pub async fn candidates(app: &Arc<App>, after_secs: i64) -> Result<Vec<Stuck>> {
            FROM turns t JOIN conversations c ON c.id = t.conversation_id
            JOIN bots b ON b.id = c.bot_id AND b.deleted_at IS NULL
            JOIN runs r ON r.bot_id = b.id AND r.state = 'running' AND r.agent_status = 'idle' AND r.pane_id IS NOT NULL
-          WHERE t.status = 'queued' AND t.created_at <= ?",
+          WHERE t.status = 'queued' AND t.created_at <= ?
+          ORDER BY t.created_at ASC, t.rowid ASC
+          LIMIT ?",
     )
     .bind(cutoff)
+    .bind(MAX_CANDIDATES)
     .fetch_all(&app.db)
     .await?)
 }
 
-/// 控制迴圈每拍呼叫：關著就零成本。每一顆各自成敗，失敗只記 log。
-pub async fn sweep(app: &Arc<App>) {
+/// 一次只准一個 sweep 在跑。`sweep` 是每拍呼叫的，而一輪最久可能要好幾十秒
+/// （每顆候選一次 herdr 讀畫面＋一次外部 HTTP），不擋的話會越疊越多。
+static SWEEPING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 一輪最多**看**幾顆（讀畫面＋問 Jev）。原本沒有上限：排隊的 turn 有多少就做多少次，全塞在同一拍。
+const MAX_PER_ROUND: usize = 10;
+
+/// SQL 撈候選的上限。比 [`MAX_PER_ROUND`] 大，輪轉才有東西可以輪——
+/// 只撈 10 筆的話，冷卻中的那 10 筆會讓這一輪什麼都不做。
+const MAX_CANDIDATES: i64 = 200;
+
+/// 同一筆 turn 看過之後多久內不再看。比 tick（10 秒）長很多，才真的省得下讀畫面的成本；
+/// 比 `STUCK_AFTER_SECS`（180 秒）短，卡住的那顆不會太久沒人看。
+const SEEN_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// 控制迴圈每拍呼叫。**丟背景跑**（issue #480）：一輪要做 herdr 讀畫面與外部 Jev 呼叫，
+/// 同步 await 會把整個 tick 拖住——同模組的 [`crate::judge::shadow_limit_hit`] 早就是這樣做的，
+/// 這裡跟上。`STUCK_AFTER_SECS` 是 180 秒，少跑幾拍完全沒差。
+///
+/// 同時只准一個在跑：上一輪還沒做完就直接跳過這一拍，不排隊、不疊加。
+pub fn sweep(app: &Arc<App>) {
+    let Some(guard) = SweepGuard::take() else {
+        tracing::debug!("judge stuck sweep: 上一輪還在跑，這一拍跳過");
+        return;
+    };
+    let app = app.clone();
+    tokio::spawn(async move {
+        // guard 在這個 task 結束時才放掉，**包含 panic**（i339 review #480）：
+        // 用 `store(false)` 寫在最後一行的話，只要 `sweep_once` 裡任何一步 panic 就永遠放不掉——
+        // tokio 不會因為 task panic 中止行程，所以 daemon 照常活著、sweep 從此靜靜不再跑，一行 log 都沒有。
+        let _guard = guard;
+        sweep_once(&app).await;
+    });
+}
+
+/// 拿到就代表「這一輪歸我跑」，drop 的時候放掉（panic 也會 drop）。
+struct SweepGuard;
+
+impl SweepGuard {
+    fn take() -> Option<Self> {
+        (!SWEEPING.swap(true, std::sync::atomic::Ordering::SeqCst)).then_some(SweepGuard)
+    }
+}
+
+impl Drop for SweepGuard {
+    fn drop(&mut self) {
+        SWEEPING.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// 一輪的本體。測試直接叫這支（不經過單一併發守衛，才不會跟平行跑的別條測試互相擋）。
+pub(crate) async fn sweep_once(app: &Arc<App>) {
     let cfg = app.cfg.get().await.judge;
     if !cfg.enabled {
         return;
@@ -57,7 +110,22 @@ pub async fn sweep(app: &Arc<App>) {
             return;
         }
     };
-    for c in cands {
+    // 冷卻 ＋ 輪轉（i339 review #480）：`LIMIT` ＋ `created_at ASC` 單獨用會**餓死第 11 顆**——
+    // `inspect` 不會改 turn 的 `queued`，候選條件只會隨時間更成立，所以最舊那幾顆永遠佔滿名額。
+    // 看過的記在記憶體裡，冷卻期內跳過；名額自然輪到後面的。
+    // 這也順手省掉「已經問過的那幾顆每輪再付一次 herdr 讀畫面」——那個 dedupe 的 key 是畫面指紋，
+    // 讀完畫面才算得出來，所以擋不住讀的成本，只有這一層擋得住。
+    let now = std::time::Instant::now();
+    let due: Vec<Stuck> = {
+        let mut seen = app.judge_stuck_seen.lock().await;
+        seen.retain(|_, t| now.duration_since(*t) < SEEN_COOLDOWN);
+        let picked: Vec<Stuck> = cands.into_iter().filter(|c| !seen.contains_key(&c.turn_id)).take(MAX_PER_ROUND).collect();
+        for c in &picked {
+            seen.insert(c.turn_id.clone(), now);
+        }
+        picked
+    };
+    for c in due {
         if let Err(e) = inspect(app, &c).await {
             tracing::debug!(bot = %c.bot_id, error = %e, "judge stuck sweep skipped");
         }
@@ -281,8 +349,76 @@ mod tests {
 
         let (env, s, seen, dir) = setup(0.99, false).await;
         env.herdr.set_screen(&s.pane_id, crate::tui_prompts::screens::AUTO_MODE);
-        sweep(&env.app).await;
+        sweep_once(&env.app).await;
         assert!(seen.lock().unwrap().is_empty() && inbox_kinds(&env.app).await.is_empty(), "關著零呼叫");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #480：一輪最多**看** `MAX_PER_ROUND` 顆，而且下一輪要輪到後面的（不能餓死第 11 顆）。
+    ///
+    /// 一個對話只能有一筆 queued（`turns.conversation_id` 上的唯一索引），所以候選數等於
+    /// 「有 queued turn 的 bot 數」——要撐出上限就得真的多開幾顆 bot。
+    #[tokio::test]
+    async fn a_round_is_bounded_and_the_next_round_moves_on() {
+        let (env, _s, _seen, dir) = setup(0.99, true).await;
+        let app = env.app.clone();
+        let total = MAX_PER_ROUND + 5;
+        for i in 0..total {
+            let bot = tt::claude_bot(&app, &env.project_id, &format!("stuck-{i}")).await;
+            tt::fake_run(&app, &bot.id).await;
+            let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+            sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, delivery, prompt_text, created_at) VALUES (?,?,'web','queued','pending','派工','2026-09-22T15:00:00.000Z')")
+                .bind(db::ulid())
+                .bind(&conv)
+                .execute(&app.db)
+                .await
+                .unwrap();
+        }
+        // SQL 那一層撈得比每輪上限多，輪轉才有東西可以輪。
+        let all = candidates(&app, STUCK_AFTER_SECS).await.unwrap();
+        assert!(all.len() > MAX_PER_ROUND, "撈到的要比每輪上限多，否則輪不動：{}", all.len());
+
+        // 第一輪挑的數量有上限；第二輪（冷卻還在）要換一批，不能又是同一批。
+        let pick = |app: Arc<App>| async move {
+            let now = std::time::Instant::now();
+            let mut seen = app.judge_stuck_seen.lock().await;
+            seen.retain(|_, t| now.duration_since(*t) < SEEN_COOLDOWN);
+            let cands = candidates(&app, STUCK_AFTER_SECS).await.unwrap();
+            let picked: Vec<String> =
+                cands.into_iter().filter(|c| !seen.contains_key(&c.turn_id)).take(MAX_PER_ROUND).map(|c| c.turn_id).collect();
+            for t in &picked {
+                seen.insert(t.clone(), now);
+            }
+            picked
+        };
+        let first = pick(app.clone()).await;
+        assert_eq!(first.len(), MAX_PER_ROUND, "一輪要有上限");
+        let second = pick(app.clone()).await;
+        assert!(!second.is_empty(), "第二輪要輪到後面的，不能被最舊那幾顆餓死");
+        assert!(second.iter().all(|t| !first.contains(t)), "第二輪不該又是同一批");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #480：同時只准一輪在跑；而且 **panic 也要放掉**——用「最後一行 `store(false)`」寫法時，
+    /// 一次 panic 就會讓 sweep 從此靜靜不再跑（tokio 不會因為 task panic 收掉行程）。
+    #[test]
+    fn the_sweep_guard_is_released_even_when_the_round_panics() {
+        use std::sync::atomic::Ordering;
+        assert!(!SWEEPING.load(Ordering::SeqCst), "起點是沒人在跑");
+        {
+            let _g = SweepGuard::take().expect("第一個搶得到");
+            assert!(SweepGuard::take().is_none(), "第二個搶不到——那一拍就跳過");
+        }
+        assert!(!SWEEPING.load(Ordering::SeqCst), "正常結束要放掉");
+
+        // panic 的那一輪：guard 在 unwind 時被 drop，下一輪照樣搶得到。
+        let hit = std::panic::catch_unwind(|| {
+            let _g = SweepGuard::take().expect("panic 那一輪也拿得到");
+            panic!("boom");
+        });
+        assert!(hit.is_err(), "這裡就是要它 panic");
+        assert!(!SWEEPING.load(Ordering::SeqCst), "panic 之後也要放掉，否則 sweep 從此不再跑");
+        assert!(SweepGuard::take().is_some(), "下一輪拿得到");
+        SWEEPING.store(false, Ordering::SeqCst);
     }
 }

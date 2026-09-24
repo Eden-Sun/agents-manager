@@ -70,6 +70,11 @@ pub struct App {
     /// 記憶體、重啟重算——跟 incident 的門檻計時同一個原則（SPEC §18.9）。
     /// 它失敗的後果是「新進 inbox 事件分不到角色，對兩個通知者同時隱形」，
     /// 而那件事沒有任何其他偵測會發現，所以要自己數。
+    /// #480：`judge::stuck` 這一輪看過哪些 turn（key＝turn_id）。冷卻期內不再看第二次。
+    ///
+    /// 兩個作用：候選有上限時不會永遠只看最舊那幾顆（第 11 顆會餓死），
+    /// 而且已經問過的那幾顆不用每輪再付一次 herdr 讀畫面。記憶體、重啟重算。
+    pub judge_stuck_seen: Mutex<HashMap<String, std::time::Instant>>,
     pub classify_failures: std::sync::atomic::AtomicU32,
     pub connected: std::sync::atomic::AtomicBool,
     pub default_connected: std::sync::atomic::AtomicBool,
@@ -184,6 +189,7 @@ impl App {
             ui_token,
             herdr_session,
             allow_lan,
+            judge_stuck_seen: Mutex::new(HashMap::new()),
             classify_failures: std::sync::atomic::AtomicU32::new(0),
             connected: std::sync::atomic::AtomicBool::new(false),
             default_connected: std::sync::atomic::AtomicBool::new(false),
