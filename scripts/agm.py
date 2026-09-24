@@ -28,6 +28,7 @@ import pathlib
 import plistlib
 import re
 import socket
+import stat
 import subprocess
 import sys
 import urllib.error
@@ -845,19 +846,32 @@ def lease_token_of(args) -> str:
         # 路徑可以被換掉，驗過的跟讀到的就不是同一個檔；而且 os.stat 跟隨 symlink，驗到的會是
         # 目標的權限。O_NOFOLLOW 連「路徑本身是 symlink」都擋掉，只認我們自己寫的那個真檔。
         try:
-            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+            # `O_NONBLOCK`：路徑指到 fifo 時 open 會一直等寫端，整支 CLI 就這樣掛著不動；
+            # 帶著它 open 馬上回來，下面的 `S_ISREG` 再把它擋掉。普通檔不受影響。
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         except OSError as e:
             raise AgmError("bad_args", f"讀不到 lease token 檔 {path}：{e}", 2) from e
-        with os.fdopen(fd, encoding="utf-8") as fh:
-            mode = os.fstat(fh.fileno()).st_mode
-            if mode & 0o077:
+        # 型別要在 `fdopen` **之前**問：目錄在 macOS 上 open 得起來，而 `fdopen` 自己就會丟
+        # `IsADirectoryError`，落到 `main` 的兜底變成 internal／exit 1。不是普通檔（目錄、
+        # fifo、裝置）都是呼叫端給錯路徑，該回 `bad_args`；fifo 還會讓 read 直接卡住。
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            os.close(fd)
+            raise AgmError("bad_args", f"lease token 檔 {path} 不是普通檔案", 2)
+        with os.fdopen(fd, "rb") as fh:
+            if st.st_mode & 0o077:
                 raise AgmError(
                     "bad_args",
-                    f"lease token 檔 {path} 的權限是 {mode & 0o777:o}，group／other 讀得到就當它已經外洩；"
+                    f"lease token 檔 {path} 的權限是 {st.st_mode & 0o777:o}，group／other 讀得到就當它已經外洩；"
                     "請 chmod 600 之後重拿一次窗口",
                     2,
                 )
-            raw = fh.read()
+            try:
+                # 用二進位讀再自己解碼：以文字模式開的話，非 UTF-8 的檔會在 `read()` 就丟
+                # `UnicodeDecodeError`，落到 `main` 的兜底變成 internal／exit 1。
+                raw = fh.read().decode("utf-8")
+            except (OSError, UnicodeDecodeError) as e:
+                raise AgmError("bad_args", f"讀不到 lease token 檔 {path}：{e}", 2) from e
         # 多行就拒絕（i407 審核）：`.strip()` 只去頭尾空白，中間的換行會留在 token 裡整串送出去，
         # daemon 只會回「token 不符」，查的人得自己想到 `wc -l`。缺檔、空檔都給了明確訊息，這個也要給。
         lines = [ln for ln in raw.splitlines() if ln.strip()]

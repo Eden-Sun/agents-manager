@@ -132,13 +132,19 @@ class CliCase(unittest.TestCase):
     def write_runtime(self, cfg: dict) -> None:
         (Path(self.dir.name) / "runtime.json").write_text(json.dumps(cfg), encoding="utf-8")
 
-    def run_cli(self, *argv: str):
+    def run_cli(self, *argv: str, stdin: str | None = None):
         out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            try:
-                code = agm.main(list(argv))
-            except SystemExit as e:  # argparse 的用法錯誤
-                code = e.code if isinstance(e.code, int) else 2
+        real_stdin = sys.stdin
+        if stdin is not None:
+            sys.stdin = io.StringIO(stdin)
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                try:
+                    code = agm.main(list(argv))
+                except SystemExit as e:  # argparse 的用法錯誤
+                    code = e.code if isinstance(e.code, int) else 2
+        finally:
+            sys.stdin = real_stdin
         return code, out.getvalue(), err.getvalue()
 
     def ok(self, *argv: str):
@@ -838,6 +844,118 @@ class ApprovalLeaseCommandTest(CliCase):
         self.ok("lease", "acquire", "rebuild", "--approval", "ap-1",
                 "--exclude-bot", "builder", "--exclude-bot", "manager")
         self.assertEqual(self._last_body()["exclude_bot_ids"], ["builder", "manager"])
+
+
+class LeaseTokenTest(CliCase):
+    """issue #517（守 #477）：`lease_token` 不可以走 argv，而守衛本身以前一條測試都沒有。
+
+    它是「只在 acquire 回應出現一次、任何 API 都查不到」的一次性憑證：拿到就能把別人正在
+    換 binary 的窗口收掉。守衛全靠 `lease_token_of` 那幾行，失效了不會有任何人發現。
+    """
+
+    def setUp(self):
+        super().setUp()
+        FakeDaemon.routes["POST /api/supervisor/leases/rebuild/release"] = (200, {"released": True})
+        FakeDaemon.routes["POST /api/supervisor/leases/rebuild/renew"] = (200, {"lease": {"fence": 3}})
+        FakeDaemon.routes["GET /api/supervisor/maintenance/safety"] = (200, {"safe": True})
+        self.tok = Path(self.dir.name) / "lease-token"
+        self.tok.write_text("one-shot-secret\n", encoding="utf-8")
+        os.chmod(self.tok, 0o600)
+
+    def _bodies(self):
+        return [r["body"] for r in FakeDaemon.seen if r["method"] == "POST"]
+
+    def test_a_0600_file_gets_the_token_into_the_body_and_never_into_argv(self):
+        argv = ["lease", "release", "rebuild", "--owner", "bot-a", "--fence", "3", "--lease-token-file", str(self.tok)]
+        code, _out, err = self.run_cli(*argv)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self._bodies()[-1]["lease_token"], "one-shot-secret")
+        # argv 同一台機器上誰都看得到（`ps`）：檔案路徑可以在裡面，token 本身不行。
+        self.assertNotIn("one-shot-secret", " ".join(argv))
+
+    def test_a_file_anyone_else_can_read_is_treated_as_already_leaked(self):
+        for mode in (0o640, 0o604, 0o644, 0o666):
+            os.chmod(self.tok, mode)
+            err = self.bad("lease", "release", "rebuild", "--owner", "b", "--fence", "3", "--lease-token-file", str(self.tok))
+            self.assertEqual(err["error"], "bad_args", f"{mode:o}")
+            self.assertIn(f"{mode:o}", err["message"], "訊息要講出實際權限，不然不知道要 chmod 什麼")
+        self.assertEqual(self._bodies(), [], "被拒的憑證一個請求都不送出去")
+
+    def test_the_path_itself_may_not_be_a_symlink(self):
+        """O_NOFOLLOW：驗過的跟讀到的要是同一個檔，而 `os.stat` 會跟著 symlink 走到別人的 0600。"""
+        link = Path(self.dir.name) / "link-to-token"
+        link.symlink_to(self.tok)
+        self.assertTrue(link.is_symlink() and link.exists(), "前提：symlink 真的建起來而且指得到東西")
+        err = self.bad("lease", "release", "rebuild", "--owner", "b", "--fence", "3", "--lease-token-file", str(link))
+        self.assertEqual(err["error"], "bad_args")
+        # 「路徑打錯」也是 bad_args：擋下來的必須是 symlink 這件事本身，不是找不到檔。
+        self.assertNotIn("No such file", err["message"])
+        self.assertEqual(self._bodies(), [])
+        # 對照組：同一個目標用真路徑讀得到，證明擋的是 symlink 不是內容或權限。
+        self.ok("lease", "release", "rebuild", "--owner", "b", "--fence", "3", "--lease-token-file", str(self.tok))
+        self.assertEqual(self._bodies()[-1]["lease_token"], "one-shot-secret")
+
+    def test_something_that_is_not_a_regular_file_is_a_bad_arg_not_a_traceback(self):
+        """目錄 `fdopen` 會丟 IsADirectoryError、fifo 會讓 open 一直等寫端（整支 CLI 卡住）。"""
+        fifo = Path(self.dir.name) / "fifo"
+        os.mkfifo(fifo, 0o600)
+        for path in (self.dir.name, str(fifo)):
+            err = self.bad("lease", "release", "rebuild", "--owner", "b", "--fence", "3", "--lease-token-file", path)
+            self.assertEqual(err["error"], "bad_args", path)
+        self.assertEqual(self._bodies(), [])
+
+    def test_an_empty_file_is_refused(self):
+        empty = Path(self.dir.name) / "empty"
+        empty.write_text("", encoding="utf-8")
+        os.chmod(empty, 0o600)
+        err = self.bad("lease", "release", "rebuild", "--owner", "b", "--fence", "3", "--lease-token-file", str(empty))
+        self.assertEqual(err["error"], "bad_args")
+        self.assertEqual(self._bodies(), [])
+
+    def test_the_two_ways_of_giving_it_are_mutually_exclusive(self):
+        err = self.bad(
+            "lease", "release", "rebuild", "--owner", "b", "--fence", "3",
+            "--lease-token-file", str(self.tok), "--lease-token", "inline",
+        )
+        self.assertEqual(err["error"], "bad_args")
+        self.assertEqual(self._bodies(), [], "含糊不清的時候什麼都不送")
+
+    def test_a_dash_reads_the_token_from_stdin(self):
+        code, _out, _err = self.run_cli(
+            "lease", "renew", "rebuild", "--owner", "b", "--fence", "3", "--lease-token", "-", stdin="from-stdin\n"
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(self._bodies()[-1]["lease_token"], "from-stdin")
+        code, _out, err = self.run_cli(
+            "lease", "renew", "rebuild", "--owner", "b", "--fence", "3", "--lease-token", "-", stdin=""
+        )
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(err)["error"], "bad_args")
+
+    def test_release_without_a_token_still_sends_the_owner_and_fence(self):
+        """舊的租約（token 出現之前拿的）還交得回來：沒帶就是不帶這個欄位，不是空字串。"""
+        self.ok("lease", "release", "rebuild", "--owner", "b", "--fence", "3")
+        self.assertNotIn("lease_token", self._bodies()[-1])
+
+    def test_safety_forwards_the_owner_and_the_approval_it_is_waiting_on(self):
+        """SPEC §18.10「自己的租約不擋自己」：`--owner` 要真的進 query，不然等的是別人的答案。"""
+        self.ok("lease", "safety", "--owner", "bot-a", "--approval", "ap-1", "--exclude-bot", "builder")
+        read = [r for r in FakeDaemon.seen if r["method"] == "GET" and "/maintenance/safety" in r["path"]][-1]
+        self.assertEqual(
+            urllib.parse.parse_qs(urllib.parse.urlparse(read["path"]).query),
+            {"exclude": ["builder"], "approval": ["ap-1"], "owner": ["bot-a"]},
+        )
+        # 不帶就不要送：那是「每一把租約都算擋」的舊行為，送空字串會變成另一個意思。
+        self.ok("lease", "safety")
+        read = [r for r in FakeDaemon.seen if r["method"] == "GET" and "/maintenance/safety" in r["path"]][-1]
+        self.assertEqual(urllib.parse.parse_qs(urllib.parse.urlparse(read["path"]).query), {})
+
+    def test_a_forced_release_needs_a_reason(self):
+        err = self.bad("lease", "release", "rebuild", "--owner", "b", "--fence", "3", "--force")
+        self.assertEqual(err["error"], "bad_args")
+        self.assertEqual(self._bodies(), [])
+        self.ok("lease", "release", "rebuild", "--owner", "b", "--fence", "3", "--force", "--reason", "持有者的 pane 沒了")
+        self.assertEqual((self._bodies()[-1]["force"], self._bodies()[-1]["reason"]), (True, "持有者的 pane 沒了"))
 
 
 class PersonaCommandTest(CliCase):
