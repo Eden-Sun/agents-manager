@@ -518,6 +518,12 @@ am_cargo() {
                     _bad="不認得這顆 bot 的身分（unauthorized）"
                     _fatal=1
                     ;;
+                # 這個 holder 是別顆 bot 的（issue #460 的守衛）：`<agent 名>:<pid>` 撞到還沒過期的舊列，
+                # 等下去也只是等那一列的 TTL，而且訊息會變成沒人看得懂的「回應看不懂」。同 unauthorized，當場停。
+                *'"reason":"holder_bot_mismatch"'*)
+                    _bad="這個名額的 holder 是別顆 bot 的（holder_bot_mismatch）：<agent 名>:<pid> 撞到還沒過期的舊列，等它到期再跑"
+                    _fatal=1
+                    ;;
                 *) _bad="回應看不懂：$(printf '%s' "$_resp" | cut -c1-200)" ;;
             esac
         fi
@@ -1180,6 +1186,25 @@ esac"#
         assert!(t0.elapsed() < std::time::Duration::from_secs(60), "身分被拒不該等重試：{:?}", t0.elapsed());
         assert!(!log.exists(), "{err}");
         assert!(err.contains("unauthorized"), "{err}");
+    }
+
+    /// #460 的守衛回 `holder_bot_mismatch`（`<agent 名>:<pid>` 撞到別顆 bot 還沒過期的那一列）也不會在幾秒內
+    /// 自己好：同 `unauthorized`，當場 fail closed（77），不落到「回應看不懂」那條等滿 120 秒——那個訊息看的人
+    /// 也不知道發生什麼事（i406 的審核，Refs #460）。
+    #[test]
+    fn a_holder_owned_by_another_bot_stops_at_once_with_a_message_that_says_why() {
+        let s = Sandbox::new();
+        s.install_fake_curl("printf '{\"error\":\"forbidden\",\"reason\":\"holder_bot_mismatch\",\"message\":\"a bot may only reuse its own build slot holder\"}'\n");
+        let log = s.dir.join("cargo.log");
+        let mut env = lease_env(&s);
+        env.push(("AM_BUILD_SCHEDULER_WAIT_SECS", "120".into()));
+        env.push(("AM_TEST_FAKE_CARGO_LOG", log.display().to_string()));
+        let t0 = std::time::Instant::now();
+        let (_, err, rc) = s.run(&as_refs(&env), &["build"]);
+        assert_eq!(rc, 77, "{err}");
+        assert!(t0.elapsed() < std::time::Duration::from_secs(60), "不該等滿重試：{:?}", t0.elapsed());
+        assert!(!log.exists(), "沒有名額就不能起 cargo：{err}");
+        assert!(err.contains("holder_bot_mismatch"), "訊息要講得出是哪一種拒絕：{err}");
     }
 
     /// 人工 host shell（沒有 bot 身分）維持**明講的** bypass：排程器問不到就直接跑，stderr 說一聲。
