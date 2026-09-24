@@ -28,7 +28,8 @@
 //!
 //! **讀不到就擋**（#108 重開）：讀不到主機、讀不到那一列的憑據，都不能當成「沒撞限」——照擋、短時間後再看
 //! （[`unverified`]）。撞限本身記不進正確那把 key 時由 `turn_error` 記成欠著，閘門照欠著的那一筆擋。憑據寫不進去不算
-//! 圍籬做完：記憶體照擋，很快再寫一次。回填讀不到就不算回填過。
+//! 圍籬做完：記憶體照擋，很快再寫一次。回填讀不到就不算回填過，回填時**憑據解不開**的那顆 bot 也不算
+//! （issue #522）——它的撞限沒被種回記憶體，「記憶體說不擋」對它不是證據，照舊問那一列自己的憑據。
 
 use super::*;
 use std::collections::HashMap;
@@ -114,7 +115,9 @@ pub(crate) async fn blocking_hit(app: &Arc<App>, bot: &db::Bot, turn_id: &str) -
         Ok(h) => h,
         Err(e) => return Some(unverified(bot, &e)),
     };
-    if !backfilled(app, &host) {
+    // 這台主機回填過了、而且這顆 bot 的憑據在回填時讀得懂（或本來就沒有）：記憶體就是唯一判準。
+    // 回填時解不開的那幾顆是例外——它們的撞限沒有被種回記憶體，「記憶體說不擋」對它們不是證據（issue #522）。
+    if !backfilled(app, &host) || unresolved(app, &bot.id) {
         match held_on_turn(app, bot, turn_id).await {
             Ok(Some(hit)) => return Some(hit),
             Ok(None) => {}
@@ -193,6 +196,23 @@ fn backfill_key(app: &App, host: &str) -> String {
     format!("{}\u{0}{host}", app.boot_id)
 }
 
+/// 回填時憑據解不開的 bot（鍵同樣帶 `boot_id`）：對它們而言「這台回填完了」不成立，`blocking_hit` 照舊
+/// 問那一列自己的憑據。只在這一輪開機內有效——下一次開機重新回填時會再判一次。
+fn unresolved_holds() -> &'static Mutex<std::collections::HashSet<String>> {
+    static M: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    M.get_or_init(Default::default)
+}
+
+fn mark_unresolved(app: &App, bot_id: &str) {
+    if let Ok(mut m) = unresolved_holds().lock() {
+        m.insert(backfill_key(app, bot_id));
+    }
+}
+
+fn unresolved(app: &App, bot_id: &str) -> bool {
+    unresolved_holds().lock().ok().is_some_and(|m| m.contains(&backfill_key(app, bot_id)))
+}
+
 fn backfilled(app: &App, host: &str) -> bool {
     backfill_state().lock().ok().and_then(|m| m.get(&backfill_key(app, host)).copied()).unwrap_or(false)
 }
@@ -260,15 +280,20 @@ async fn backfill(app: &Arc<App>, host: &str) -> anyhow::Result<Vec<String>> {
         if db::bot_host(&app.db, &bot.id).await? != host {
             continue;
         }
-        woken.push(bot.id.clone());
-        // 解不開的憑據（不是讀不到，是內容壞了）重來也一樣：記下來跳過，不讓它擋住整台主機的回填。
+        // 解不開的憑據（不是讀不到，是內容壞了）重來也一樣：跳過它，不讓它擋住整台主機的回填。
+        // 但**這顆 bot 不算回填過**（issue #522）：撞限沒被種回記憶體，之後 `blocking_hit` 若照「回填完了、
+        // 只看記憶體」走，就會讀到一個空的記憶體、把唯一的證據 `forget` 掉，然後把那一則送進還沒額度的身分——
+        // 正是這個模組要擋的事。記下來，讓它繼續走 `held_on_turn`（那裡對解不開是回錯、呼叫端照擋，方向一致）。
+        // 也不叫醒它的 flush：叫醒只是提早去踩那條路。
         let held = match serde_json::from_str::<Held>(&raw) {
             Ok(h) => h,
             Err(e) => {
-                tracing::error!(bot = %bot.id, error = %e, "a queued prompt carries an unreadable quota hold; skipped");
+                tracing::error!(bot = %bot.id, error = %e, "a queued prompt carries an unreadable quota hold; it keeps holding that prompt");
+                mark_unresolved(app, &bot.id);
                 continue;
             }
         };
+        woken.push(bot.id.clone());
         if held.boot == app.boot_id || !still_holds(app, &bot, &held).await? {
             continue;
         }
@@ -655,11 +680,17 @@ mod tests {
         rename(&app, "turns_unreadable", "turns").await;
         assert!(state(&app, &q.turn).await.1.is_some(), "憑據沒被當成放行清掉");
 
-        // 憑據壞了（解不開）：回填之前一樣照擋，回填跳過它之後只看記憶體。
+        // 憑據壞了（解不開）：回填之前照擋，**回填之後也照擋**（issue #522）。這裡以前斷言的是
+        // 「回填跳過它之後只看記憶體」——而那正是放行：解不開的憑據沒被種回記憶體，空的記憶體不是
+        // 「沒撞限」的證據，照那條走會把唯一的證據 `forget` 掉、再把那一則送進還沒額度的身分。
+        // 跟上面一格（那一列讀不到 → 照擋）也自相矛盾：同樣是「證明不了」，不該一個擋一個放。
         sqlx::query("UPDATE turns SET quota_hold='not json' WHERE id=?").bind(&q.turn).execute(&app.db).await.unwrap();
         assert!(blocking_hit(&app, &q.bot, &q.turn).await.is_some(), "解不開：回填之前照擋");
         backfill_once(&app, LOCAL_HOST).await;
-        assert!(blocking_hit(&app, &q.bot, &q.turn).await.is_none(), "回填跑完：記憶體說了算");
+        assert!(blocking_hit(&app, &q.bot, &q.turn).await.is_some(), "解不開：回填之後照樣擋（#522）");
+        // 這裡不能用 `state`（它會把憑據 parse 回 `Held`，而這一格正是故意壞的）：直接看那一欄還在不在。
+        let raw: Option<String> = sqlx::query_scalar("SELECT quota_hold FROM turns WHERE id=?").bind(&q.turn).fetch_one(&app.db).await.unwrap();
+        assert_eq!(raw.as_deref(), Some("not json"), "唯一的證據不准被 forget 掉");
         forget_queue_retry_timer(&q.bot.id);
         forget_held(&q.bot.id);
     }
