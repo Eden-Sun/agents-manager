@@ -364,11 +364,11 @@ pub async fn set_desired_running(pool: &SqlitePool, role: Role, wanted: bool) ->
 
 pub async fn set_status(pool: &SqlitePool, role: Role, status: &str, detail: Option<&str>, reset_at: Option<&str>) -> Result<()> {
     let now = crate::db::now();
-    // `waiting_since` 只在**進入**等待時記一次，之後刷新 detail／reset 不改它；離開等待就清掉。
+    // `waiting_since` 只在**進入**等待（額度或登入，#420）時記一次，之後刷新 detail／reset 不改它；離開等待就清掉。
     sqlx::query(
         "UPDATE supervisor_roles
             SET status=?, status_detail=?, quota_reset_at=?, updated_at=?,
-                waiting_since = CASE WHEN ?='waiting_quota' THEN COALESCE(waiting_since, ?) ELSE NULL END
+                waiting_since = CASE WHEN ? IN ('waiting_quota','needs_login') THEN COALESCE(waiting_since, ?) ELSE NULL END
           WHERE role=?",
     )
     .bind(status)

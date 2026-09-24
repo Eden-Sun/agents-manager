@@ -2852,6 +2852,8 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
 | `assignment_stalled` | 未結案交辦 `updated_at` 沒動 | `assignment_stalled_secs`（7200） |
 | `assignment_undelivered` | 仍 `queued`、從沒送出，用 `created_at` 算 | `assignment_stalled_secs`（7200） |
 | `notify_exhausted` | 通知重送用盡 | `notify_max_attempts`（5） |
+| `responder_needs_login` | 協調者 `status=needs_login`（CLI 沒登入，見 §18.15），critical | 無（狀態本身就是證據） |
+| `responder_undeliverable` | 協調者的事件送了 5 次還在 `pending`（不管原因），一個協調者一筆（resource=`responder`），critical | `RESPONDER_UNDELIVERED_ATTEMPTS`（5） |
 
 - 條件持續超過門檻才寫入（計時在記憶體，重啟重算——寧可晚開不重複開）；開啟與恢復各推一則 inbox，中間只更新 `occurrences`；恢復後再壞是新的一筆。
   例外 `notify_exhausted`：它說的是巡檢的通知送不出去，推給巡檢等於送進壞掉的那條路（事件又會用盡、再開一筆）。協調者建立時推給**協調者**（佇列沒有次數上限，不會遞迴）；沒有協調者就只留在 UI 與 `system_health`，不入 inbox。
@@ -2860,6 +2862,8 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
   同 `source`+`reason` 每小時最多一則。以前那幾支只寫自己的 log 就 `exit 0`——正式 daemon 從此不再自動換版而沒有任何人知道（review 2026-09-16 c1 M1）。
   `daemon-update-kick.sh` 的鎖改成帶 pid 與時間：執行者不在了（強制關機、SIGKILL）就回收並接手這一輪；還活著但卡超過 `AGM_LOCK_HUNG_SECS`（3600 秒）才喊人。
   核准 ID 先用 `approval list --id` 查（清單只回最新 100 筆），查不到與狀態檔壞掉都喊人。
+  **協調者一直不裁示也喊人**（issue #420）：自己的申請從第一次看到 `pending` 起算（`daemon-update.undecided`），到期重申請也接著算、看到別的狀態才清掉；
+  超過一個到期週期（`AGM_UNDECIDED_ALERT_SECS`，預設 5400＝`--expires-in`）推 `ops_alert`（`approval_undecided`，寫明「協調者 N 小時 M 分沒裁示」）。
 - **`desired_running` 是 watchdog 唯一的憑據，而且要跨重啟活著**，所以巡檢與協調者的 start／stop 都把它的寫入當**前置條件**，不是順手做的副作用（issue #84）：
   start 先寫「要它跑」再啟動、stop 先寫「不要它跑」再停，**寫不進去就整個失敗、一步副作用都不做**（呼叫端拿到 502，說明是持久化失敗，原樣重試是安全的）。
   以前兩支都是 `let _ = …`：stop 吞掉錯誤照樣停並回 200，watchdog 讀到的還是「要它跑」，使用者剛停掉的 AGM 下一個 tick 自己活回來；
@@ -3225,6 +3229,12 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
   停著 → 看門狗（同 §18.9 的 30/60/120/300 秒、5 次）；放棄 → 推 `responder_watchdog_gave_up` 給巡檢。
   反方向對稱（review 2026-09-16 c1 M2）：巡檢的看門狗放棄（`watchdog_gave_up`）與巡檢的通知用盡（`notify_exhausted`）路由給**協調者**並叫醒——倒下的就是巡檢，送給它沒有人收；協調者未建立時巡檢的待送查詢照舊撈得到。**送不出去**（還沒送達）是有界退避（15 秒倍增到 `responder_max_backoff_secs`），沒有次數上限，
   也不開 `notify_exhausted`——事件是 bot 在等的答覆，不能因為協調者在等額度就被丟掉。巡檢自己的事件照舊有 `notify_max_attempts`。
+  但**送了 5 次還在 pending** 就開 `responder_undeliverable` incident 叫醒巡檢（issue #420：2026-09-23 協調者沒登入，送出一直 `composer_unreadable`，
+  核准申請送了 66 次到過期、停了 9 小時，health 一直是 healthy）；事件本身照舊留著、照舊退避重送。
+  **沒登入**：送不出去（Err 或 `delivery=failed`）的那一次順便讀協調者 pane，看得到登入選單、onboarding 或回合只回 `⎿ Not logged in · Please run /login`
+  （`tui_prompts::is_not_logged_in_reply`，只看最底 20 行、以 `⎿` 開頭的那一行）就標 `status=needs_login`（`waiting_since` 記開始時間），health 轉 `degraded`、
+  incident 開 `responder_needs_login`。送出照退避繼續試——人從別的終端 `security unlock-keychain` 之後畫面不會變，擋住不送就永遠等不到恢復；
+  答完一個沒出錯的回合、或畫面上已經看不到登入問題，就解除（`status_detail=登入已恢復`）。
 - **送到了卻沒人 ack 的補送有上限**（使用者 2026-09-17 裁示，取代先前「刻意不設上限」）：`recover_unacked` 把 delivered 而沒 ack 的事件放回 pending，
   以前沒有次數上限——協調者漏 ack 一則，opus-high 就每 `notify_ack_deadline_secs`（1800 秒）被叫醒一次，而且沒有任何人知道。
   現在送達 **5 次**（同看門狗的 `MAX_ATTEMPTS` 與巡檢的 `notify_max_attempts`：送五次沒人 ack，第六次也不會有人），

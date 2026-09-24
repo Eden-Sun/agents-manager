@@ -105,7 +105,7 @@ pub fn responder_severity(responder: &Value) -> &'static str {
     let waiting = responder.get("wake_pending").and_then(Value::as_i64).unwrap_or(0) > 0;
     match status {
         "not_configured" | "idle" | "busy" | "starting" => "healthy",
-        "waiting_quota" => "degraded",
+        "waiting_quota" | "needs_login" => "degraded",
         _ if responder.pointer("/desired_running").and_then(Value::as_bool) == Some(true) => "degraded",
         _ if waiting => "degraded",
         _ => "healthy",

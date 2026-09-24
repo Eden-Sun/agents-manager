@@ -2282,6 +2282,21 @@ pub async fn exhausted_inbox(pool: &SqlitePool, max_attempts: i64) -> Result<Vec
     .await?)
 }
 
+/// 協調者的事件沒有重試上限（`roles::due_for`），送不出去就一直留在 pending、`notify_attempts` 一直加——
+/// 2026-09-23 協調者沒登入時一則核准申請被試了 66 次，沒有任何 incident（issue #420）。這裡撈出試了
+/// `min_attempts` 次以上還在 pending 的，給 incident 探針用。事件本身照舊留著、照舊退避重送。
+pub async fn responder_undelivered(pool: &SqlitePool, min_attempts: i64) -> Result<Vec<InboxEvent>> {
+    Ok(sqlx::query_as::<_, InboxEvent>(
+        "SELECT * FROM supervisor_inbox WHERE supervisor_id=? AND state='pending' AND notify_attempts >= ?
+           AND COALESCE(claimed_by, role)='responder'
+          ORDER BY created_at ASC, rowid ASC",
+    )
+    .bind(SUPERVISOR_ID)
+    .bind(min_attempts)
+    .fetch_all(pool)
+    .await?)
+}
+
 // ---------------------------------------------------------------- approvals & leases
 
 /// Mirrors the row; several fields are read straight out of `to_json`.
