@@ -1833,7 +1833,11 @@ class IssueClaimTest(unittest.TestCase):
         self.state = Path(self.dir.name) / "state"
         self.state.mkdir()
         # 真的 gh 不可達：PATH 只有假的那一個目錄加上系統工具。
-        os.environ["PATH"] = f"{bindir}:/usr/bin:/bin"
+        # canary 的護欄（`check.sh ops` arm 起來的那個）要留在最前面：python 的 subprocess 走
+        # execvp，不經過 shell 的指令查找，所以三層防護只剩 PATH 這一層；整個蓋掉就等於在沒有
+        # 保護的情況下跑（scripts/ops/destructive-canary.sh）。沒 arm 時這個變數是空的，照舊。
+        guard = os.environ.get("AM_CANARY_DIR", "")
+        os.environ["PATH"] = ":".join(p for p in (guard, str(bindir), "/usr/bin", "/bin") if p)
         os.environ["GH_STATE"] = str(self.state)
         os.environ["AM_AGENT_NAME"] = "vvyyg1"
         for k in ("GH_FAIL", "GH_NO_LABEL", "AM_BOT_ID"):

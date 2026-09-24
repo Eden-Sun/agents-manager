@@ -109,6 +109,14 @@ check_ops() {
         step "ops: $t"
         AM_CANARY_TEST="$t" bash "$t"
     done
+    # `bin/agm` 的 CLI 契約測試。以前沒有任何自動化路徑會跑它：上面那個迴圈只撈 `*_test.sh`，
+    # `check_ob` 跑的是 OB 那幾支，而 CI 的四個 job 都是呼叫這支 check.sh（issue #538）。
+    # `scripts/agm.py` 是 include_str! 編進 daemon 二進位、setup 時寫成 `<cwd>/bin/agm` 的，
+    # AGM 的每一條指令都走它——它的測試不該只靠「改到它的人自己記得跑」。
+    # 放在護欄裡面跑：它自己起一個 loopback 的假 daemon 與假 gh，不連正式 daemon、不碰正式環境。
+    # `-B` 跟 `ob_test.py` 一致：不要在工作樹留 __pycache__（`check_ob` 有一條守衛在擋）。
+    step "ops: scripts/agm_test.py"
+    AM_CANARY_TEST="scripts/agm_test.py" python3 -B scripts/agm_test.py
     if ! scripts/ops/destructive-canary.sh hits "${canary}"; then
         echo "上面這些測試真的叫到了破壞性指令（已被擋下，但那條路要修）：見 scripts/ops/destructive-canary.sh" >&2
         /bin/rm -rf "${canary}"
