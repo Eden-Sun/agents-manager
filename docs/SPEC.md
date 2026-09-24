@@ -193,8 +193,13 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   驗不過就直接回錯誤，**config.toml 一個字都不動**，
   記憶體裡那份也不變；錯誤訊息保留原因並附「（config.toml 未變更）」，recovery path 就是改個合法的值再送一次。
   以前只在投影當下驗，而投影跑在 config 已經落盤之後：一筆會被擋的修改先把 TOML 改壞，API 回了錯，現場卻已經變了，
-  daemon 下次啟動才爆。`validate` 是純函式（bot／專案 id 格式、bot 名字、kind、identity 綁定與 kind 相符、identity 名字與 kind），
-  不碰 DB；每個 mutation 都走同一支，規則只有一份。
+  daemon 下次啟動才爆。`validate` 是純函式（bot／專案 id 格式、bot 名字、kind、identity 綁定與 kind 相符、identity 名字與 kind，
+  以及 `[[hosts]]` 的名字不得是保留的 `local`、要合 slug 規則、`ssh` 不得為空、不得同名重複——issue #506：這四條以前只擋得住
+  `POST /api/hosts`，手改 TOML 全部放行，而一列 `name = "local"` 會讓開機的 `hosts::apply_config` 把本機那顆連線換成 ssh 遠端），
+  不碰 DB；每個 mutation 都走同一支，規則只有一份。`apply_config` 自己也跳過叫 `local` 的列當第二層保險。
+  **壞掉的 `[[hosts]]` ＝拒絕開機**：開機那一次投影走的是同一支 `validate`，所以驗不過時 `serve` 直接帶著
+  `project config into sqlite` 與具體原因（哪一台、哪一條規則）退出，不會半套跑起來。前後空白與空的
+  `herdr_session` 不算壞：跟補 id／canonical path 一樣由 `project_inner` trim 掉、補回預設再寫回檔案。
   **需要 DB 才判得出來的大量軟刪閘門不在這支裡**（純函式不碰 DB）：刪除 API（`delete_from_config`）本來就先在記憶體算出結果、
   對著 DB 快照驗過才寫檔；issue #73 之後，daemon 裡**所有**寫 config.toml 的 mutation（Project／Bot 的建/改/排序/還原，
   以及身分的建/刪）都改走 `projection::update_and_project`——同一個 `PROJECTION` 臨界區內先查一次 DB 快照，交給

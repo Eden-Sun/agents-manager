@@ -943,6 +943,9 @@ Project 可在另一台機器，daemon 透過 SSH 轉發連遠端 herdr。`host`
 | `ssh_opts` | | `[]`，原樣附加到每個 ssh 指令 |
 
 回 `200 {"name","connected","error"}`；連不上仍 200（設定已寫入）。名稱不合法或為 `local` 400。同名視為更新（先斷舊連線）。
+同一組規則（保留字 `local`、slug 格式、`ssh` 不得為空、不得同名重複）從 issue #506 起也由 `projection::validate` 把關，
+所以手改 `config.toml` 寫進去的 `[[hosts]]` 一樣擋得住：之後任何一次寫設定都回 **400 `config_invalid`**（`config.toml` 未變更），
+開機那一次投影則直接拒絕啟動並說明——以前這條路全部放行，而一列 `name = "local"` 會把本機那顆連線換成 ssh 遠端。
 
 ### `DELETE /api/hosts/{name}`
 `200 {}`；仍有 project 使用 → `409 {"reason":"host still used by projects","project_id"}`；`local` 400。刪除時推 `host_changed {"connected":false,"error":"removed"}` 與 `project_changed`。
