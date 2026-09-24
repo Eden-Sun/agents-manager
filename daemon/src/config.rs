@@ -55,7 +55,8 @@ pub struct SupervisorCfg {
     #[serde(default = "default_notify_ack_deadline_secs")]
     pub notify_ack_deadline_secs: u64,
     /// Then raise `notify_exhausted`; the event is kept, only the quota burn on a silent manager stops.
-    #[serde(default = "default_notify_max_attempts")]
+    /// 解析時就夾到 [`MIN_NOTIFY_MAX_ATTEMPTS`] 以上（Refs #504）。
+    #[serde(default = "default_notify_max_attempts", deserialize_with = "de_notify_max_attempts")]
     pub notify_max_attempts: i64,
     /// Reconnect blips are not a fault.
     #[serde(default = "default_host_disconnected_secs")]
@@ -74,8 +75,36 @@ pub struct SupervisorCfg {
     #[serde(default = "default_responder_batch_secs")]
     pub responder_batch_secs: u64,
     /// 協調者送不出去或等額度時，下一次重試最多隔多久。沒有次數上限。
-    #[serde(default = "default_responder_max_backoff_secs")]
+    /// 解析時就夾到 [`MIN_RESPONDER_MAX_BACKOFF_SECS`] 以上（Refs #504）。
+    #[serde(default = "default_responder_max_backoff_secs", deserialize_with = "de_responder_max_backoff_secs")]
     pub responder_max_backoff_secs: u64,
+}
+
+/// 補送次數的下限（Refs #504）：`0`／負數不是「不補送」，是「每一筆事件一建立就算用完」——
+/// `due_for` 的 `notify_attempts < max` 從頭到尾不成立，沒有人會被叫醒。`controller` 一直在
+/// 讀取端寫 `.max(1)` 補救，但 `incidents::Thresholds::from_cfg` 這類地方抄漏就破功，
+/// 所以在解析設定時就夾好，結構裡永遠不會有離譜的值。
+pub const MIN_NOTIFY_MAX_ATTEMPTS: i64 = 1;
+
+/// 退避上限的下限（Refs #504）：`0` 會讓 `notify_next_at` 永遠等於「現在」，協調者每個 controller tick
+/// （`controller::TICK`，10 秒）重寫一次角色列、推一次 SSE——那正是 `responder::notify` 的 `Blocked`
+/// 分支註解在防的抖動。低於一個 tick 的值本來也觀測不到，所以下限就取一個 tick。
+pub const MIN_RESPONDER_MAX_BACKOFF_SECS: u64 = 10;
+
+fn de_notify_max_attempts<'de, D: serde::Deserializer<'de>>(d: D) -> Result<i64, D::Error> {
+    let raw = i64::deserialize(d)?;
+    if raw < MIN_NOTIFY_MAX_ATTEMPTS {
+        tracing::warn!(raw, used = MIN_NOTIFY_MAX_ATTEMPTS, "[supervisor] notify_max_attempts 太小，改用下限（0／負數＝沒有人會被叫醒）");
+    }
+    Ok(raw.max(MIN_NOTIFY_MAX_ATTEMPTS))
+}
+
+fn de_responder_max_backoff_secs<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+    let raw = u64::deserialize(d)?;
+    if raw < MIN_RESPONDER_MAX_BACKOFF_SECS {
+        tracing::warn!(raw, used = MIN_RESPONDER_MAX_BACKOFF_SECS, "[supervisor] responder_max_backoff_secs 太小，改用下限（低於一個 controller tick 觀測不到）");
+    }
+    Ok(raw.max(MIN_RESPONDER_MAX_BACKOFF_SECS))
 }
 
 fn default_responder_batch_secs() -> u64 {
@@ -921,6 +950,12 @@ pub fn write_atomic(path: &Path, cfg: &ConfigFile) -> Result<()> {
     let tmp = target.with_extension(format!("toml.{}.{}.tmp", std::process::id(), nonce));
     let result = (|| -> Result<()> {
         std::fs::write(&tmp, text)?;
+        // rename 會把暫存檔的權限（umask，通常 0644）當成新檔的權限。設定檔被 chmod 600 過的話，
+        // 第一次寫入就會被悄悄放寬——跟 `trust.rs::write_atomic_preserving_mode` 同一條規矩：
+        // 先把原檔的 mode 套到暫存檔上。原檔不存在（第一次寫預設設定）就照 umask。
+        if let Ok(md) = std::fs::metadata(&target) {
+            let _ = std::fs::set_permissions(&tmp, md.permissions());
+        }
         std::fs::rename(&tmp, &target)?;
         Ok(())
     })();
@@ -929,12 +964,6 @@ pub fn write_atomic(path: &Path, cfg: &ConfigFile) -> Result<()> {
     }
     result?;
     Ok(())
-        // rename 會把暫存檔的權限（umask，通常 0644）當成新檔的權限。設定檔被 chmod 600 過的話，
-        // 第一次寫入就會被悄悄放寬——跟 `trust.rs::write_atomic_preserving_mode` 同一條規矩：
-        // 先把原檔的 mode 套到暫存檔上。原檔不存在（第一次寫預設設定）就照 umask。
-        if let Ok(md) = std::fs::metadata(&target) {
-            let _ = std::fs::set_permissions(&tmp, md.permissions());
-        }
 }
 
 #[cfg(test)]
@@ -1293,14 +1322,6 @@ mod issue507_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// 設定檔還不存在時（`read_file` 會寫一份預設）照原路徑建，不因為 canonicalize 失敗就爆掉。
-    #[tokio::test]
-    async fn a_missing_config_is_still_created_in_place() {
-        let dir = std::env::temp_dir().join(format!("am-config-missing-{}", crate::db::ulid()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("config.toml");
-        let store = ConfigStore::load(path.clone()).await.unwrap();
-        assert!(path.exists(), "不存在時要寫出一份預設 config");
     /// i92b review 的兩條：**相對路徑**的 symlink（`ln -s ../dotfiles/am.toml config.toml`，
     /// 比絕對路徑更常見）要以連結所在的目錄解析；而 `rename` 會把暫存檔的 umask 權限當成新檔的權限，
     /// 所以 chmod 600 過的設定檔不可以在第一次寫入時被悄悄放寬。
@@ -1332,9 +1353,58 @@ mod issue507_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// 設定檔還不存在時（`read_file` 會寫一份預設）照原路徑建，不因為 canonicalize 失敗就爆掉。
+    #[tokio::test]
+    async fn a_missing_config_is_still_created_in_place() {
+        let dir = std::env::temp_dir().join(format!("am-config-missing-{}", crate::db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let store = ConfigStore::load(path.clone()).await.unwrap();
+        assert!(path.exists(), "不存在時要寫出一份預設 config");
         assert!(!std::fs::symlink_metadata(&path).unwrap().file_type().is_symlink());
         store.update(|cfg| { cfg.server.herdr_session = "x".into(); Ok(()) }).await.unwrap();
         assert!(std::fs::read_to_string(&path).unwrap().contains("herdr_session = \"x\""));
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod supervisor_cfg_tests {
+    use super::*;
+
+    /// Refs #504：`notify_max_attempts = 0` 以前照單全收，`due_for` 的 `notify_attempts < max`
+    /// 從頭到尾不成立＝沒有人會被叫醒；`responder_max_backoff_secs = 0` 讓重試時間永遠等於「現在」，
+    /// 每個 controller tick 重寫一次角色列。跟 `idle_close_secs`／`max_concurrent` 同一條規矩：
+    /// 離譜的值不採用，而且在**解析**時就夾好，讀取端抄漏 `.max(1)` 也不會破功。
+    #[test]
+    fn hostile_supervisor_thresholds_are_clamped_while_parsing() {
+        let parse = |text: &str| toml::from_str::<ConfigFile>(text).unwrap().supervisor;
+
+        let d = SupervisorCfg::default();
+        assert_eq!(parse("").notify_max_attempts, d.notify_max_attempts, "沒寫就是預設");
+        assert_eq!(parse("").responder_max_backoff_secs, d.responder_max_backoff_secs);
+
+        for bad in ["0", "-1", "-999"] {
+            let cfg = parse(&format!("[supervisor]\nnotify_max_attempts = {bad}\n"));
+            assert_eq!(cfg.notify_max_attempts, MIN_NOTIFY_MAX_ATTEMPTS, "notify_max_attempts = {bad}");
+        }
+        assert_eq!(parse("[supervisor]\nnotify_max_attempts = 3\n").notify_max_attempts, 3, "合理的值照用");
+
+        for bad in ["0", "1", "9"] {
+            let cfg = parse(&format!("[supervisor]\nresponder_max_backoff_secs = {bad}\n"));
+            assert_eq!(cfg.responder_max_backoff_secs, MIN_RESPONDER_MAX_BACKOFF_SECS, "responder_max_backoff_secs = {bad}");
+        }
+        assert_eq!(parse("[supervisor]\nresponder_max_backoff_secs = 600\n").responder_max_backoff_secs, 600);
+
+        // 夾過的值序列化出去再讀回來要穩定（不會每次開機都判成「外部改動」）。
+        let once = parse("[supervisor]\nnotify_max_attempts = 0\nresponder_max_backoff_secs = 0\n");
+        let twice = toml::from_str::<ConfigFile>(&toml::to_string_pretty(&ConfigFile {
+            supervisor: once.clone(),
+            ..Default::default()
+        })
+        .unwrap())
+        .unwrap()
+        .supervisor;
+        assert_eq!(once, twice);
     }
 }
