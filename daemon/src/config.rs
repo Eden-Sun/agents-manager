@@ -907,13 +907,21 @@ fn read_file(path: &Path) -> Result<(ConfigFile, Option<SystemTime>)> {
 }
 
 /// Full serde re-serialization: comments are lost.
+///
+/// 寫的是 `path` **解開 symlink 之後**的那個檔（issue #506 的鄰居 #507）：`startup::normalize_config_file`
+/// 刻意不 canonicalize 檔名那一段，因為 `config.toml` 常是指到 dotfiles 的 symlink，而資料目錄要留在
+/// 連結所在的目錄。但 `rename(2)` 換掉的是連結本身，所以照著 `path` 寫等於第一次寫入就把連結吃掉：
+/// 連結變成一般檔、dotfiles 那一份停在舊內容，而 `git status` 什麼都看不出來。
+/// 暫存檔跟著搬到目標所在目錄，順便讓「目標在另一個檔案系統」不會 rename EXDEV。
 pub fn write_atomic(path: &Path, cfg: &ConfigFile) -> Result<()> {
     let text = toml::to_string_pretty(cfg)?;
+    // 檔案還不存在（`read_file` 第一次寫預設設定）時 canonicalize 會失敗：那就照原路徑建。
+    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
-    let tmp = path.with_extension(format!("toml.{}.{}.tmp", std::process::id(), nonce));
+    let tmp = target.with_extension(format!("toml.{}.{}.tmp", std::process::id(), nonce));
     let result = (|| -> Result<()> {
         std::fs::write(&tmp, text)?;
-        std::fs::rename(&tmp, path)?;
+        std::fs::rename(&tmp, &target)?;
         Ok(())
     })();
     if result.is_err() {
@@ -921,6 +929,12 @@ pub fn write_atomic(path: &Path, cfg: &ConfigFile) -> Result<()> {
     }
     result?;
     Ok(())
+        // rename 會把暫存檔的權限（umask，通常 0644）當成新檔的權限。設定檔被 chmod 600 過的話，
+        // 第一次寫入就會被悄悄放寬——跟 `trust.rs::write_atomic_preserving_mode` 同一條規矩：
+        // 先把原檔的 mode 套到暫存檔上。原檔不存在（第一次寫預設設定）就照 umask。
+        if let Ok(md) = std::fs::metadata(&target) {
+            let _ = std::fs::set_permissions(&tmp, md.permissions());
+        }
 }
 
 #[cfg(test)]
@@ -1232,5 +1246,95 @@ label = "external"
         assert!(message.contains("parse "), "{message}");
         assert!(!message.contains("reload required"), "{message}");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod issue507_tests {
+    use super::ConfigStore;
+
+    /// issue #507：`~/.config/agents-manager/config.toml` 是指到 dotfiles 的 symlink 是本專案明示支援的
+    /// 安裝方式（`startup::normalize_config_file` 的註解與 `a_symlinked_config_file_keeps_the_data_dir_where_the_link_is`），
+    /// 但寫回是 `rename` 蓋過連結本身：第一次寫入連結就變成一般檔，dotfiles 那份停在舊內容。
+    #[tokio::test]
+    async fn writing_through_a_symlinked_config_updates_the_target_and_keeps_the_link() {
+        let root = std::env::temp_dir().join(format!("am-config-symlink-{}", crate::db::ulid()));
+        let home = root.join("home");
+        let dotfiles = root.join("dotfiles");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&dotfiles).unwrap();
+        let target = dotfiles.join("am.toml");
+        std::fs::write(&target, "[server]\nlisten = '127.0.0.1:7788'\nherdr_session = 'before'\n").unwrap();
+        let link = home.join("config.toml");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let store = ConfigStore::load(link.clone()).await.unwrap();
+        store
+            .update(|cfg| {
+                cfg.server.herdr_session = "after".into();
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "連結被換成一般檔了");
+        assert!(std::fs::read_to_string(&target).unwrap().contains("after"), "dotfiles 那份沒被更新");
+        // 暫存檔跟著目標走，而且兩邊都不准留下殘骸。
+        for dir in [&home, &dotfiles] {
+            let left: Vec<String> = std::fs::read_dir(dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .filter(|n| n.ends_with(".tmp"))
+                .collect();
+            assert!(left.is_empty(), "{}: 留下暫存檔 {left:?}", dir.display());
+        }
+        // 重新載入讀得到新值（連結還通）。
+        assert_eq!(ConfigStore::load(link).await.unwrap().get().await.server.herdr_session, "after");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// 設定檔還不存在時（`read_file` 會寫一份預設）照原路徑建，不因為 canonicalize 失敗就爆掉。
+    #[tokio::test]
+    async fn a_missing_config_is_still_created_in_place() {
+        let dir = std::env::temp_dir().join(format!("am-config-missing-{}", crate::db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let store = ConfigStore::load(path.clone()).await.unwrap();
+        assert!(path.exists(), "不存在時要寫出一份預設 config");
+    /// i92b review 的兩條：**相對路徑**的 symlink（`ln -s ../dotfiles/am.toml config.toml`，
+    /// 比絕對路徑更常見）要以連結所在的目錄解析；而 `rename` 會把暫存檔的 umask 權限當成新檔的權限，
+    /// 所以 chmod 600 過的設定檔不可以在第一次寫入時被悄悄放寬。
+    #[tokio::test]
+    async fn a_relative_symlink_resolves_beside_the_link_and_keeps_the_targets_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("am-config-relsym-{}", crate::db::ulid()));
+        let home = root.join("home");
+        let dotfiles = root.join("dotfiles");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&dotfiles).unwrap();
+        let target = dotfiles.join("am.toml");
+        std::fs::write(&target, "[server]\nlisten = '127.0.0.1:7788'\nherdr_session = 'before'\n").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let link = home.join("config.toml");
+        std::os::unix::fs::symlink("../dotfiles/am.toml", &link).unwrap();
+
+        let store = ConfigStore::load(link.clone()).await.unwrap();
+        store.update(|cfg| { cfg.server.herdr_session = "after".into(); Ok(()) }).await.unwrap();
+
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "相對連結也不能被吃掉");
+        assert_eq!(std::fs::read_link(&link).unwrap(), std::path::Path::new("../dotfiles/am.toml"), "連結內容不變");
+        assert!(std::fs::read_to_string(&target).unwrap().contains("after"), "要寫到 ../dotfiles 那份");
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "原本 0600 的設定檔不可以被 rename 放寬成 umask 的權限"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+        assert!(!std::fs::symlink_metadata(&path).unwrap().file_type().is_symlink());
+        store.update(|cfg| { cfg.server.herdr_session = "x".into(); Ok(()) }).await.unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains("herdr_session = \"x\""));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

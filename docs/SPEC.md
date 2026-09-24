@@ -697,6 +697,10 @@ label = "foo"
 - **設定檔在哪，資料就在哪**：`--config` 指到非預設路徑時，SQLite／`ui-token`／spool 一律跟著設定檔的目錄（或 `[server] data_dir`），不得沿用 `~/.config/agents-manager`；`AM_DATA_DIR` 與它不一致就拒絕啟動（§3.1）。隔離測試請用
   `agents-managerd serve --config /tmp/am-iso/config.toml`（要跑 hook 就再 `AM_DATA_DIR=/tmp/am-iso`，兩者必須一致），**不要**只換 `listen` port：2026-09-14 就是這樣開到正式 DB，被空 config 投影軟刪了 15 顆 bot。
 - 寫回：serde 全量序列化（註解不保留），暫存檔 + 原子 rename，單一 mutex；mtime 與上次讀取不符時在同一把 mutex 內重讀再套用。內容沒變就不碰檔案。
+  目標檔原本的權限會先套到暫存檔上再 rename（否則 chmod 600 過的設定檔會被 umask 放寬，同 `trust.rs`）。
+  `config.toml` 本身是 symlink 時（相對或絕對都算，以連結所在的目錄解析），暫存檔與 rename 都落在**解開連結之後**的目標檔（issue #507）：`rename(2)` 換掉的是連結本身，
+  照字面寫等於第一次寫入就把指到 dotfiles 的連結換成一般檔，之後 daemon 的每次寫入都進不去而 `git status` 什麼都看不出來。
+  資料目錄仍然留在連結所在的目錄（§3.1），兩件事不同。檔案還不存在時（第一次寫預設設定）照原路徑建。
 - 改 `listen` port 需重啟 daemon，既有 agent 的 hook 會打舊 port（靠 spool + 對帳補入）。
 - `[supervisor] notify_interval_secs`（預設 600）：事件照舊即時寫入 `supervisor_inbox`；被節流的只有「喚醒總管」——每 ≥ 這個秒數一次，
   把累積的未 ack 事件彙整成一則 `[AG Man 通知]`。health 偵測、watchdog、控制器 TICK 不受影響。總管 busy 時延後，送成功才開始下一個視窗。
