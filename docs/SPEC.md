@@ -2518,6 +2518,7 @@ UI：左上格「已用 · 剩 N」，剩餘 < 15% 轉警示色；明細第一�
 
 ### 15.2 展開看程序 / 砍程序
 **owner 判定讀 process 環境變數，不讀我們的帳本**：daemon 起 bot 注入 `AM_BOT_ID`，herdr 對每個 pane 注入 `HERDR_PANE_ID`，子孫繼承——連 daemon 開機前就在跑的也判得對。
+**被 init 收養的孤兒也算在內**（#529）：父行程死掉之後 ppid 接不回 herdr 樹，但環境是繼承來的，所以帶 `HERDR_PANE_ID`／`AM_BOT_ID` 的照樣收進清單——不然它們佔著 RAM 卻從清單消失、`kill` 還一律回「不在樹裡」。
 macOS `ps -Ewwo pid=,args=`，Linux `/proc/<pid>/environ`。
 
 | owner | 條件 | UI |
@@ -2525,12 +2526,19 @@ macOS `ps -Ewwo pid=,args=`，Linux `/proc/<pid>/environ`。
 | `bot` | 有 `AM_BOT_ID`（bot 已刪也算） | 「停止 bot」 |
 | `pane` | 只有 `HERDR_PANE_ID` | 「結束」→ 再按「強制」 |
 | `herdr` | 執行檔就是 herdr | 不列、不可砍 |
+| `daemon` | 執行檔是 `agents-managerd`，或它底下的（ssh master、helper） | 不可砍（#529） |
 | `unknown` | 都讀不到 | 同 `pane` |
 
 只列 `claude`/`codex`/`grok`/`node`/`bash`/`zsh`/`sh`/`fish` 且 `subtree_bytes ≥ 8 MiB` 的，其餘併進父程序；依 `subtree_bytes` 排序（「砍這個能省多少」）。
 owner 格可點開唯讀的 pane 畫面（`GET /api/mem/processes/pane`，`pane.read visible`，每 2 秒重讀，不給打字）；bot 列不給看（有自己的終端分頁）。
 
 砍之前**一定重新取樣**再判定，不信前端送來的那列（pid 會回收）：不在樹裡 400、`herdr` 本身 400、`owner=bot` 409（走 `POST /bots/{id}/stop` 才會記錄）。目標 pid 的環境讀不到（`ps -E` 壞了、環境段空、Linux 的 `environ` 讀不了）時 owner 會退成 `unknown`，不能把它當「沒主人」放行——回 502、不送訊號。砍完立刻取樣推 `mem_updated`。
+
+**訊號送給整棵子樹**（#529）：`kill -TERM <pid>` 只送那一個行程，子孫不會跟著死，而
+`subtree_bytes`／`freed_bytes` 算的是整棵——以前按下去的結果是「那一顆死了、底下的全活著」，
+而且子孫被 init 收養之後就從清單消失、再也砍不到。現在送的是目標＋子孫（深的在前），
+而且先 `kill -STOP` 凍住整棵再 `TERM`、最後 `CONT`（不然它在送訊號的空檔還會 fork，跟 `am_kill_tree` 同一個理由）。
+子孫裡只要有 `bot`／`herdr`／`daemon` 就整個拒絕——子樹一起收訊號，就不能變成繞過那三道的側門。
 
 **確認與送訊號是同一趟指令**（#526）：重新取樣只擋得住「前端手上那份過期清單」，擋不住「取樣完到送訊號之間」——
 那中間隔著一次行程建立（遠端是一整趟 ssh），目標在那段時間退出、pid 被回收的話訊號就打在別人身上，

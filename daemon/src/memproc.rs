@@ -39,6 +39,9 @@ const LISTED: &[&str] = &["claude", "codex", "grok", "node", "bash", "zsh", "sh"
 /// Below this a row is noise; its bytes still count towards the parent's subtree.
 const MIN_SUBTREE: u64 = 8 * 1024 * 1024;
 
+/// 這支二進位自己的名字（`env!` 拿的是 crate 名＝執行檔名）。
+const DAEMON_EXE: &str = env!("CARGO_BIN_NAME");
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct MemProcess {
     pub pid: i32,
@@ -52,7 +55,7 @@ pub struct MemProcess {
     pub bot_id: Option<String>,
     pub bot_name: Option<String>,
     pub project_id: Option<String>,
-    /// `bot` | `pane` | `herdr` | `unknown` — see [`owner_of`].
+    /// `bot` | `pane` | `herdr` | `daemon` | `unknown` — see [`owner_of`].
     pub owner: String,
     /// This process plus every descendant: "killing this frees roughly that much".
     pub subtree_bytes: u64,
@@ -70,8 +73,14 @@ struct Raw {
 }
 
 /// `AM_BOT_ID` wins over `HERDR_PANE_ID`: a bot always runs inside a pane, the pane is not its owner.
-fn owner_of(is_herdr_proc: bool, bot_id: Option<&str>, pane_id: Option<&str>) -> &'static str {
-    if is_herdr_proc {
+///
+/// `daemon` 壓過其他所有判斷（#529）：daemon 自己（與它開的 ssh master、remote-cargo helper…）是
+/// 從某顆 pane 起來的，環境裡帶著 `HERDR_PANE_ID`，甚至 `AM_BOT_ID`。以前它被 init 收養之後就掉出
+/// herdr 樹、怎麼樣都殺不到；孤兒也收進來之後不擋就會變成「用釋放記憶體的端點把 daemon 自己關掉」。
+fn owner_of(is_daemon: bool, is_herdr_proc: bool, bot_id: Option<&str>, pane_id: Option<&str>) -> &'static str {
+    if is_daemon {
+        "daemon"
+    } else if is_herdr_proc {
         "herdr"
     } else if bot_id.is_some() {
         "bot"
@@ -164,6 +173,21 @@ fn scan(out: &str) -> (Vec<Proc>, Vec<Raw>) {
             }
         }
     }
+    // #529：父行程被砍掉的子孫會被 init 收養，ppid 從此接不回 herdr 樹——它們照樣佔著 RAM，
+    // 但以前從清單上消失、`kill` 也一律回 `NotInTree`（＝這個端點最容易的失敗方式是把目標變成
+    // 自己再也管不到的孤兒）。環境是繼承來的，所以用 `HERDR_PANE_ID`／`AM_BOT_ID` 把它們認回來。
+    for p in &procs {
+        if seen.contains(&p.pid) {
+            continue;
+        }
+        let Some(blob) = envs.get(&p.pid) else { continue };
+        if env_value(blob, "HERDR_PANE_ID").is_none() && env_value(blob, "AM_BOT_ID").is_none() {
+            continue;
+        }
+        seen.insert(p.pid);
+        in_tree.push(p.pid);
+    }
+    let daemons = daemon_pids(&procs, &children);
 
     let mut raws = Vec::new();
     for pid in in_tree {
@@ -188,10 +212,27 @@ fn scan(out: &str) -> (Vec<Proc>, Vec<Raw>) {
         let bot_id = blob.and_then(|b| env_value(b, "AM_BOT_ID"));
         let pane_id = blob.and_then(|b| env_value(b, "HERDR_PANE_ID"));
         let socket_path = blob.and_then(|b| env_value(b, "HERDR_SOCKET_PATH"));
-        let owner = owner_of(is_herdr(p), bot_id.as_deref(), pane_id.as_deref());
+        let owner = owner_of(daemons.contains(&pid), is_herdr(p), bot_id.as_deref(), pane_id.as_deref());
         raws.push(Raw { p_index: i, pane_id, socket_path, bot_id, owner, subtree_bytes: bytes, children: kids });
     }
     (procs, raws)
+}
+
+/// AG Man 自己那一支與它底下的全部（ssh master、remote-cargo helper、`sh -c` …）。
+/// 認的是執行檔名而不是 pid：遠端主機上的 daemon、隔離實例的 daemon 都算，這台的 `std::process::id()`
+/// 只在本機成立，而這支函式同一份碼要用在每一台。
+fn daemon_pids(procs: &[Proc], children: &HashMap<i32, Vec<i32>>) -> HashSet<i32> {
+    let mut out: HashSet<i32> = HashSet::new();
+    let mut stack: Vec<i32> = procs.iter().filter(|p| exe_name(&p.argv) == DAEMON_EXE).map(|p| p.pid).collect();
+    while let Some(pid) = stack.pop() {
+        if !out.insert(pid) {
+            continue;
+        }
+        if let Some(kids) = children.get(&pid) {
+            stack.extend(kids.iter().copied());
+        }
+    }
+    out
 }
 
 fn listed(procs: &[Proc], raws: &[Raw]) -> Vec<MemProcess> {
@@ -391,17 +432,22 @@ pub async fn pane_preview(app: &Arc<App>, host: &str, pane_id: &str, socket: Opt
 pub enum KillDenied {
     NotInTree,
     Herdr,
+    /// AG Man 自己（或它開的 ssh master、helper）。#529。
+    Daemon,
     Bot(String),
     /// #526：篩選完到送訊號之間這個 pid 已經不是同一顆行程了（退出、pid 被回收）。什麼都沒送。
     PidChanged,
 }
 
-/// `screen_kill` 放行時帶回來的東西：送給誰、回報釋放多少、以及送之前要比對的起始時間。
+/// `screen_kill` 放行時帶回來的東西：訊號要送給哪些 pid、回報要說釋放多少、以及送之前要比對的起始時間。
 #[derive(Debug)]
 struct Target {
+    /// 要確認身分的那一顆（使用者按的那一列）。
     pid: i32,
     exe: String,
     freed: u64,
+    /// 目標自己與它的子孫，**深的在前**：`kill -TERM` 只送給那一個 pid，子孫不會跟著死（#529）。
+    set: Vec<i32>,
     started: String,
 }
 
@@ -410,14 +456,37 @@ struct Target {
 /// 這時 owner 會退成 `unknown`、被當成沒主人的行程放行，等於 bot 的 claude 就能被砍——所以直接不送。
 fn screen_kill(out: &str, pid: i32) -> anyhow::Result<Result<Target, KillDenied>> {
     let (procs, raws) = scan(out);
-    let Some(raw) = raws.iter().find(|r| procs[r.p_index].pid == pid) else {
+    let by_pid: HashMap<i32, usize> = procs.iter().enumerate().map(|(i, p)| (p.pid, i)).collect();
+    let owner_of_pid: HashMap<i32, &Raw> = raws.iter().map(|r| (procs[r.p_index].pid, r)).collect();
+    let Some(raw) = owner_of_pid.get(&pid).copied() else {
         return Ok(Err(KillDenied::NotInTree));
     };
-    if raw.owner == "herdr" {
-        return Ok(Err(KillDenied::Herdr));
+    // 目標自己與**整棵子樹**一起篩：子孫要一起收到訊號（#529），所以從側門砍到 bot／herdr／daemon
+    // 的路也要一起堵——以前只看目標那一顆。
+    let children = crate::memstat::child_index(&procs);
+    let mut set: Vec<i32> = Vec::new();
+    let mut stack = vec![pid];
+    let mut seen: HashSet<i32> = HashSet::new();
+    while let Some(cur) = stack.pop() {
+        if !seen.insert(cur) {
+            continue;
+        }
+        if by_pid.contains_key(&cur) {
+            set.push(cur);
+        }
+        if let Some(kids) = children.get(&cur) {
+            stack.extend(kids.iter().copied());
+        }
     }
-    if raw.owner == "bot" {
-        return Ok(Err(KillDenied::Bot(raw.bot_id.clone().unwrap_or_default())));
+    for member in &set {
+        // 子孫不在 herdr 樹裡（讀不到環境、`env -i` 起的）時 `raws` 沒有它：沒有歸屬就沒有理由擋。
+        let Some(r) = owner_of_pid.get(member) else { continue };
+        match r.owner {
+            "herdr" => return Ok(Err(KillDenied::Herdr)),
+            "daemon" => return Ok(Err(KillDenied::Daemon)),
+            "bot" => return Ok(Err(KillDenied::Bot(r.bot_id.clone().unwrap_or_default()))),
+            _ => {}
+        }
     }
     if !parse_env(split_sections(out).1).contains_key(&pid) {
         anyhow::bail!("讀不到 pid {pid} 的環境變數，判不出它是不是 bot 的行程，不送訊號");
@@ -426,17 +495,22 @@ fn screen_kill(out: &str, pid: i32) -> anyhow::Result<Result<Target, KillDenied>
     let Some(started) = parse_start(start_section(out)).get(&pid).cloned() else {
         anyhow::bail!("讀不到 pid {pid} 的起始時間，確認不了送訊號時還是同一顆行程，不送");
     };
-    Ok(Ok(Target { pid, exe: exe_name(&procs[raw.p_index].argv).to_string(), freed: raw.subtree_bytes, started }))
+    // 深的先收：父行程先死的話，子孫會被 init 收養，之後只能靠環境認回來。
+    set.reverse();
+    Ok(Ok(Target { pid, exe: exe_name(&procs[raw.p_index].argv).to_string(), freed: raw.subtree_bytes, set, started }))
 }
 
 /// 確認與送訊號放進**同一趟**指令（#526）：兩趟之間 pid 被回收的話，訊號會打在別人身上，
 /// 而回報還是被篩選那一顆的 exe 與大小。對不上就什麼都不送。
 fn kill_script(target: &Target, sig: &str) -> String {
     let pid = target.pid;
+    let set = target.set.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(" ");
     format!(
         "s=$(ps -o lstart= -p {pid} 2>/dev/null | tr -s ' ' | sed -e 's/^ *//' -e 's/ *$//')\n\
          [ \"$s\" = {started} ] || {{ printf 'AM_PID_CHANGED\\n'; exit 0; }}\n\
-         kill -{sig} {pid} 2>/dev/null\n\
+         kill -STOP {set} 2>/dev/null\n\
+         kill -{sig} {set} 2>/dev/null\n\
+         kill -CONT {set} 2>/dev/null\n\
          printf 'AM_KILLED\\n'\n\
          exit 0\n",
         started = crate::hosts::sh_quote(&target.started),
@@ -639,32 +713,43 @@ mod tests {
         assert_eq!(find(405).unwrap().owner, "pane");
     }
 
-    /// #526：確認與送訊號要在同一趟。這裡真的把產生出來的腳本跑起來，但 **pid 是本測試行程自己**、
-    /// 訊號送給它會出事，所以只驗到比對那一段：對不上時腳本在 `kill` 之前就 exit，對得上那次
-    /// 送的是 `kill -TERM <自己>`——所以**不執行**那一版，改看腳本長相（下一條）。
+    /// #526 那顆的行為版：`set` 空著跑真的腳本，兩條路都走一遍——一個訊號都不會送出去
+    /// （硬規則：測試不對真實行程送訊號）。身分用的是**本測試行程自己**的 pid 與起始時間，只讀。
     #[test]
     fn the_kill_script_stops_at_the_check_when_the_pid_changed() {
-        // 起始時間對不上：什麼都不送，連 `kill` 那一行都走不到。
         let me = std::process::id() as i32;
-        let other = Target { pid: me, exe: "x".into(), freed: 1, started: "Wed Sep 24 10:00:05 2026".into() };
+        let started = super::run_sh(&format!("ps -o lstart= -p {me} 2>/dev/null | tr -s ' ' | sed -e 's/^ *//' -e 's/ *$//'"));
+        let started = started.trim().to_string();
+        assert!(!started.is_empty(), "這台機器的 ps 讀不到自己的 lstart，測不了");
+
+        // 對得上：走到送訊號那一段（`set` 空的，`kill` 沒有對象）。
+        let same = Target { pid: me, exe: "x".into(), freed: 1, set: vec![], started: started.clone() };
+        let out = super::run_sh(&kill_script(&same, "TERM"));
+        assert!(out.contains("AM_KILLED"), "{out:?}");
+        assert!(!out.contains("AM_PID_CHANGED"), "{out:?}");
+
+        // 對不上（pid 被回收成別的行程）：什麼都不送。
+        let other = Target { pid: me, exe: "x".into(), freed: 1, set: vec![], started: "Wed Sep 24 10:00:05 2026".into() };
         let out = super::run_sh(&kill_script(&other, "TERM"));
         assert!(out.contains("AM_PID_CHANGED"), "{out:?}");
-        assert!(!out.contains("AM_KILLED"), "對不上就不准往下走：{out:?}");
+        assert!(!out.contains("AM_KILLED"), "{out:?}");
     }
 
-    /// 腳本長相：比對一定在 `kill` 之前，而且比的是篩選當下那顆的起始時間。
+    /// 腳本長相的部分（不執行）：比對一定在任何 `kill` 之前，而且送的是整個集合、深的在前。
     #[test]
-    fn the_kill_script_checks_the_start_time_before_it_signals() {
-        let t = match screen_kill(DUMP, 405).unwrap() {
+    fn the_kill_script_signals_the_whole_subtree_after_the_check() {
+        let t = match screen_kill(DUMP, 404).unwrap() {
             Ok(t) => t,
-            Err(d) => panic!("405 是 pane 的行程，應該放行：{d:?}"),
+            Err(d) => panic!("404 是 pane 的 shell，應該放行：{d:?}"),
         };
-        assert_eq!(t.started, "Wed Sep 24 10:00:05 2026");
+        assert_eq!(t.set, vec![405, 404], "深的先收：父先死的話子孫會被 init 收養");
         let script = kill_script(&t, "TERM");
         let check = script.find("AM_PID_CHANGED").expect("要有比對那一段");
         let first_kill = script.find("kill -").expect("要有送訊號那一段");
         assert!(check < first_kill, "比對必須在送訊號之前：{script}");
-        assert!(script.contains("'Wed Sep 24 10:00:05 2026'"), "比的是篩選當下那顆的起始時間：{script}");
+        assert!(script.contains("kill -STOP 405 404"), "先凍住整棵，不然它還會 fork：{script}");
+        assert!(script.contains("kill -TERM 405 404"), "{script}");
+        assert!(script.contains("kill -CONT 405 404"), "凍住之後要放開才收得了尾：{script}");
     }
 
     /// 沒有起始時間（那台的 `ps` 不吃 `lstart`、或輸出被截斷）＝確認不了同一顆行程，寧可不送。
@@ -675,6 +760,85 @@ mod tests {
         assert!(err.contains("起始時間"), "{err}");
     }
 
+    /// #529：子孫一起收訊號，所以從側門砍到 bot 的路也要堵——以前只看目標那一顆。
+    #[test]
+    fn a_subtree_that_contains_a_bot_is_refused_as_a_bot() {
+        // 404（pane 的 shell，自己不是 bot）底下掛一顆別人的 bot。
+        let dump = DUMP
+            .replace("---AM-START---\n", "  410   404 300000 claude --resume\n---AM-START---\n")
+            .replace("---AM-ENV---\n", "  410 Wed Sep 24 10:00:09 2026\n---AM-ENV---\n")
+            + "  410 claude HERDR_PANE_ID=w2:p1 AM_BOT_ID=b9\n";
+        match screen_kill(&dump, 404).unwrap() {
+            Err(KillDenied::Bot(id)) => assert_eq!(id, "b9"),
+            other => panic!("子孫裡有 bot 就不能放行：{other:?}"),
+        }
+    }
+
+    /// #529：父行程被砍掉之後，子孫被 init 收養、ppid 接不回 herdr 樹。它們照樣佔著 RAM，
+    /// 所以要靠繼承來的環境認回來——不然這個端點看不到也殺不掉，RAM 一點都沒少。
+    #[test]
+    fn an_orphan_is_adopted_back_by_the_environment_it_inherited() {
+        let dump = "\
+  400     1  48000 /opt/homebrew/bin/herdr --session agents-manager
+  401   400  30000 /bin/zsh -l
+  900     1 512000 node /x/server.js
+  901   900  64000 node /x/worker.js
+  910     1 128000 claude --resume
+---AM-START---
+  400 Wed Sep 24 10:00:00 2026
+  401 Wed Sep 24 10:00:01 2026
+  900 Wed Sep 24 10:00:02 2026
+  901 Wed Sep 24 10:00:03 2026
+  910 Wed Sep 24 10:00:04 2026
+---AM-ENV---
+  401 /bin/zsh -l HERDR_PANE_ID=w1:p1
+  900 node /x/server.js HERDR_PANE_ID=w1:p1
+  901 node /x/worker.js HERDR_PANE_ID=w1:p1
+  910 claude --resume
+";
+        let rows = processes_from_dump(dump);
+        let orphan = rows.iter().find(|r| r.pid == 900).expect("被收養的孤兒要回到清單上");
+        assert_eq!(orphan.owner, "pane");
+        assert_eq!(orphan.subtree_bytes, (512_000 + 64_000) * 1024, "它自己的子樹照算");
+        // 環境裡完全沒有我們的變數：那是別人的行程，不歸我們管。
+        assert!(rows.iter().all(|r| r.pid != 910), "沒有 AM_*／HERDR_* 的不收進來");
+        assert!(matches!(screen_kill(dump, 900), Ok(Ok(_))), "認回來了就殺得掉");
+        assert!(matches!(screen_kill(dump, 910), Ok(Err(KillDenied::NotInTree))));
+    }
+
+    /// #529：daemon 自己（與它開的 ssh master、helper）也是從某顆 pane 起來的，環境裡帶著
+    /// `HERDR_PANE_ID`；孤兒認領之後不擋，就會變成「用釋放記憶體的端點把 AG Man 自己關掉」。
+    #[test]
+    fn the_daemon_and_everything_it_started_are_never_killable() {
+        let dump = format!(
+            "\
+  400     1  48000 /opt/homebrew/bin/herdr --session agents-manager
+  800     1 180000 ./target/release/{exe} serve
+  801   800  12000 ssh -N -M -S /tmp/x.ctl m4p@host
+  802   800  20000 /bin/sh -c ps -Awwo pid=
+---AM-START---
+  400 Wed Sep 24 10:00:00 2026
+  800 Wed Sep 24 10:00:01 2026
+  801 Wed Sep 24 10:00:02 2026
+  802 Wed Sep 24 10:00:03 2026
+---AM-ENV---
+  800 {exe} serve HERDR_PANE_ID=w1:p1 AM_BOT_ID=b1
+  801 ssh -N -M HERDR_PANE_ID=w1:p1 AM_BOT_ID=b1
+  802 sh -c ps HERDR_PANE_ID=w1:p1 AM_BOT_ID=b1
+",
+            exe = DAEMON_EXE
+        );
+        for pid in [800, 801, 802] {
+            match screen_kill(&dump, pid).unwrap() {
+                Err(KillDenied::Daemon) => {}
+                other => panic!("{pid} 是 daemon 自己那一支底下的，不能砍：{other:?}"),
+            }
+        }
+        // `AM_BOT_ID` 也蓋不過去：daemon 常常是從某顆 bot 的 pane 起來的，那個變數是繼承來的。
+        let rows = processes_from_dump(&dump);
+        assert!(rows.iter().all(|r| r.owner != "bot"), "{rows:?}");
+    }
+
     /// 環境段讀不到（`ps -E` 壞了、Linux 的 environ 讀不了）：bot 的行程會被誤當成沒主人，所以不能送訊號。
     #[test]
     fn kill_refuses_when_the_target_env_was_not_read() {
@@ -682,7 +846,7 @@ mod tests {
         let no_env_at_all = format!("{tree}---AM-ENV---\n");
         let err = screen_kill(&no_env_at_all, 402).unwrap_err().to_string();
         assert!(err.contains("環境"), "{err}");
-        // 只缺這個 pid 的那一行也一樣。
+        // 只缺這個 pid 的那一行也一樣。405 是葉子：沒有子孫可以先把它擋下來，走到的就是環境那道。
         let missing_one = DUMP.replace("  405 codex HERDR_PANE_ID=w2:p1\n", "");
         let err = screen_kill(&missing_one, 405).unwrap_err().to_string();
         assert!(err.contains("環境"), "{err}");
