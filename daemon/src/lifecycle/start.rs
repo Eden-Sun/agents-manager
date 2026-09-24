@@ -160,6 +160,8 @@ pub async fn start_bot_locked_with(app: &Arc<App>, bot_id: &str, opts: StartOpts
         }
     }
 
+    // 上一個 run 被外力收掉時還在忙：接回之後補一句續行提示（claude 2.1.281，`resume_nudge`）。要在新 run 寫進去之前讀。
+    let nudge = super::resume_nudge::prior_run_ended_busy(app, &bot, &opts).await;
     // 1. INSERT Run before touching herdr (SPEC §6.2.1).
     // 身分跟著 run 走（issue #238）：pane 用這一刻的身分起來，之後 PATCH 改身分要重啟才生效，額度要記在這個身分上。
     let run_id = db::ulid();
@@ -188,7 +190,12 @@ pub async fn start_bot_locked_with(app: &Arc<App>, bot_id: &str, opts: StartOpts
     app.emit_bot_status(bot_id).await;
 
     match start_inner(app, &bot, &project, &run_id, opts.clone()).await {
-        Ok(()) => Ok(run_id),
+        Ok(()) => {
+            if let Some(busy) = nudge {
+                super::resume_nudge::queue(app, &bot, &run_id, busy).await;
+            }
+            Ok(run_id)
+        }
         // agent 已經在跑，只差 `running` 沒記下（#145）：收成 exited 會留下一顆沒有 run 的活 agent，
         // 交給 `start_inner` 排好的重試照證據收斂。
         Err(e @ LcError::Uncommitted(_)) => {
@@ -928,6 +935,7 @@ pub async fn restart_bot_with(app: &Arc<App>, bot_id: &str, opts: StartOpts) -> 
         }
     }
     let stopping = db::active_run(&app.db, bot_id).await.map_err(up)?.map(|r| r.id);
+    let nudge = super::resume_nudge::busy_before_restart(app, &bot, &opts).await;
     // 持久 intent（#355 P2）：在第一個不可逆步驟（記 `stopping`）**之前**先 commit，daemon 在 stop 與 start 之間死掉的話，
     // 開機由 `restart_intents::recover_host` 往前補完。寫不進去＝什麼都還沒動，不能開始（fail closed）。
     let host = db::bot_host(&app.db, bot_id).await.map_err(up)?;
@@ -941,6 +949,10 @@ pub async fn restart_bot_with(app: &Arc<App>, bot_id: &str, opts: StartOpts) -> 
     super::race_point::hit("restart_after_intent", bot_id).await;
     let res = restart_stop_and_start(app, bot_id, opts, stopping).await;
     settle_restart_intent(app, &intent_id, &res).await;
+    // 排著的 flush 在等這把鎖，放掉之後就會看到這一則（`resume_nudge`）。
+    if let (Ok(run_id), Some(busy)) = (&res, nudge) {
+        super::resume_nudge::queue(app, &bot, run_id, busy).await;
+    }
     res
 }
 
