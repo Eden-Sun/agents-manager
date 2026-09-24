@@ -49,6 +49,22 @@ export function restartProgress(b: RestartBatch, data: Rec): RestartBatch {
   }
 }
 
+/**
+ * 快照說的「現在有沒有批次在跑」跟手上這一份對帳（issue #492）。
+ *
+ * 進度只走 WS，`bots_restart_done` 是唯一會把它收尾的來源，而它有兩條收不到的路：批次跑到一半
+ * daemon 重啟（那一則永遠不會送），或客戶端落到全量 resync（`refreshState` 不重播 backlog）。
+ * 收不到就會永遠停在「重啟中 k/N」，而且那顆晶片會一直蓋住一鍵重啟的觸發鈕。
+ *
+ * - `undefined`（舊 daemon 沒有這個欄位）＝**不知道**，不動手上的：清掉正在跑的進度比留著更糟。
+ * - 已經 `finished` 的不動：那是給人看的摘要，要由使用者自己收起來。
+ * - daemon 說沒有批次、或在跑的是**另一批**：手上這份已經過期，清掉（晶片跟著變回一鍵重啟）。
+ */
+export function reconcileBatch(current: RestartBatch | null, daemonBatchId: string | null | undefined): RestartBatch | null {
+  if (!current || daemonBatchId === undefined || current.finished) return current
+  return daemonBatchId === current.id ? current : null
+}
+
 /** `already_running` 的回應：已經在看同一批就不動，否則換成那一批（總數等事件補）。 */
 export function joinRunningBatch(current: RestartBatch | null, batchId: string): RestartBatch {
   if (current && current.id === batchId) return current

@@ -465,6 +465,15 @@ export const GROUP_SKIP_LABEL: Record<GroupSkipReason, string> = {
 
 export interface AppState {
   daemon_seq: number
+  /**
+   * 現在正在跑的那一批一鍵重啟的 id（issue #492）。進度只走 WS，`bots_restart_done` 收不到時
+   * （批次中途 daemon 重啟、或落到全量 resync）前端靠這一格對帳。
+   *
+   * 三態，別把後兩者混成同一個值（同 `remote_reachable` 的教訓）：`string`＝這一批在跑、
+   * `null`＝daemon 說沒有任何一批在跑、`undefined`＝這個 daemon 還沒有這個欄位（舊版）＝**不知道**，
+   * 不知道就不要動手上的進度。
+   */
+  restart_batch: string | null | undefined
   connected: boolean
   /** The user's Herdr default session; separate from the manager session. */
   default_connected: boolean

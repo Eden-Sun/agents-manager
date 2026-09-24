@@ -63,13 +63,14 @@ export function UpdateQuotaChip() {
       ? `重啟完成 · 成功 ${ok.length} 顆${failed.length ? ` · 失敗 ${failed.length} 顆` : ''}`
       : `重啟中 ${done}/${total}`
     return (
+      // 未完成也可以收起（issue #492）：以前 `disabled={!finished}`，`bots_restart_done` 收不到時
+      // 這顆會永遠停用，而它又蓋住一鍵重啟的觸發鈕，等於連再按一次都不行。收起不中斷批次。
       <button
         type="button"
         className={`quota-update running${finished ? ' done' : ''}${failed.length ? ' bad' : ''}`}
-        title={finished ? `${summary}（點一下收起，詳細名單在側欄）` : summary}
+        title={`${summary}（點一下收起，詳細名單在側欄${finished ? '' : '；不會中斷重啟'}）`}
         aria-label={summary}
-        disabled={!finished}
-        onClick={finished ? clear : undefined}
+        onClick={clear}
       >
         <span aria-hidden="true">{finished ? (failed.length ? '⚠' : '✓') : <UpgradeIcon />}</span>
         <span className="quota-update-n" aria-hidden="true">

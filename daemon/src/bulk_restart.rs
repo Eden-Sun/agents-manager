@@ -202,6 +202,15 @@ fn running_batches() -> &'static std::sync::Mutex<std::collections::HashMap<Stri
     M.get_or_init(Default::default)
 }
 
+/// 這個 daemon 現在有沒有一批在跑；有的話是哪一批（`GET /api/state` 的 `restart_batch`，issue #492）。
+///
+/// 進度只走 WS，而 `bots_restart_done` 收不到就沒有第二個來源：批次跑到一半 daemon 重啟（那一則永遠不會送），
+/// 或客戶端落到全量 resync（`refreshState` 不重播 backlog）時，前端會永遠停在「重啟中 k/N」。
+/// 有了這一格，`refreshState` 就能對帳：daemon 說沒有這一批了，手上那個進度就是過期的。
+pub fn running_batch(data_dir: &std::path::Path) -> Option<String> {
+    running_batches().lock().ok()?.get(&data_dir.display().to_string()).cloned()
+}
+
 /// 批次結束（含 panic）就放掉。
 struct BatchSlot(String);
 
