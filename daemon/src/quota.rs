@@ -348,22 +348,40 @@ impl Window {
         self.remaining_pct() < CRITICAL_REMAINING_PCT
     }
 
-    /// 這個窗的重置時間已經過去了嗎（讀數跨過了重置，只是還沒有新讀數）。
+    /// **這筆讀數跨過了重置**嗎（＝它比重置還舊，所以它說的百分比已經沒有意義）。
     ///
-    /// **解不開的時間戳當成已經過去**，沿用 `supervisor::policy::past` 的先例
-    /// （那裡的註解：「An unreadable timestamp must not park the manager forever」）：一筆壞資料
-    /// 不該把一個身分永久排除，而且沒有任何東西會去修它。i407 在 #464 的 review 指出這一點——
-    /// 這支函式第一版跟那個先例相反，是三份實作裡唯一不一致的。
+    /// 兩個條件都要成立：
+    /// 1. `resets_at` 已經過去；
+    /// 2. 這一桶的 `observed_at`（那一桶最後一次真的出現在新讀數裡的時間）**不晚於** `resets_at`。
     ///
-    /// **沒有 `resets_at` 就不算重置過**：那是「不知道」，不是「已經重置」。開機回填的那種舊讀數
-    /// 由 [`load_cache`] 用窗長把它收掉，不在這裡猜。
+    /// 第 2 條是 issue #489 補的。只看第 1 條會把一筆**剛剛讀到而且真的見底**的讀數判成「已重置」：
+    /// codex 狀態列的讀數建構時一定沒有 `resets_at`（`quota_from_codex_status`），而 [`set`] 會沿用上一份的
+    /// 重置時間（原本純粹為了顯示）。app-server 探測壞掉、只剩狀態列在進來時，那個繼承來的時刻早就過去了，
+    /// 於是 97% 用掉的新讀數被當成有額度——正好跟 #464 想修的方向相反。觀測時間比重置新，就表示這筆讀數
+    /// 已經反映了重置後的狀態；它說見底就是真的見底。
+    ///
+    /// **解不開的 `resets_at` 當成已經過去**，沿用 `supervisor::policy::past` 的先例（那裡的註解：
+    /// 「An unreadable timestamp must not park the manager forever」）：一筆壞資料不該把一個身分永久排除。
+    ///
+    /// **沒有 `resets_at` 就不算重置過**：那是「不知道」，不是「已經重置」。那種讀數由
+    /// [`Quota::usable_window`] 用窗長收掉（issue #475）。
+    ///
+    /// `observed_at` 是 `None` 時退回只看第 1 條（＝#464 的行為）。**刻意不拿 `Quota::updated_at` 當備援**：
+    /// 那是整筆讀數最後**寫入**的時間，不是那一桶被觀測的時間，兩者在沿用的情況下差很多；而且這個欄位
+    /// 出現以前的測試與快取列都只是順手把 `updated_at` 填成「現在」，拿它當觀測時間會把那些資料重新解讀成
+    /// 「觀測於重置之後」，連帶改掉 `policy` 對 Fable 的既有決定（那不是這張票的範圍）。
+    /// 沒有 `observed_at` 的只有兩種來源：這個欄位出現以前寫的快取列（本來就是舊讀數，照 #464 放行是對的），
+    /// 以及測試自己建的 `Window`。生產路徑寫進來的窗都會在 [`set`] 蓋上 `observed_at`。
     pub fn reset_passed(&self, now: chrono::DateTime<chrono::Utc>) -> bool {
-        match self.resets_at.as_deref() {
-            None => false,
-            Some(t) => match chrono::DateTime::parse_from_rfc3339(t) {
-                Ok(at) => at.with_timezone(&chrono::Utc) <= now,
-                Err(_) => true,
-            },
+        let Some(raw) = self.resets_at.as_deref() else { return false };
+        let Some(resets) = parse_utc(raw) else { return true };
+        if resets > now {
+            return false;
+        }
+        match self.observed_at.as_deref().and_then(parse_utc) {
+            // 觀測比重置新 → 這筆讀數已經是重置後的狀態，不算跨過重置（#489）。
+            Some(observed) => observed <= resets,
+            None => true,
         }
     }
 
@@ -696,6 +714,19 @@ pub async fn set_fenced(app: &Arc<App>, host: &str, base: &str, q: Quota, fence:
     Ok(())
 }
 
+/// 這個重置時刻已經過去了嗎。解不開的當成**沒過去**（不主動丟掉看不懂的資料，交給讀取端判）。
+///
+/// 寫成具名函式而不是 `is_some_and(|t| t <= now)`：`timestamp_compat_tests` 那條原始碼 lint 認得
+/// `|t| t <= …` 這個形狀（issue #101），而它分不出閉包參數是時間字串還是已經 parse 過的 `DateTime`。
+/// 這裡比的是 `DateTime`，秒／毫秒混存不影響。
+fn already_past(resets_at: Option<&str>) -> bool {
+    let now = chrono::Utc::now();
+    match resets_at.and_then(parse_utc) {
+        Some(at) => at <= now,
+        None => false,
+    }
+}
+
 pub async fn set(app: &Arc<App>, host: &str, base: &str, mut q: Quota) {
     q.host = host.to_string();
     let key = quota_key(host, base);
@@ -761,10 +792,12 @@ pub async fn set(app: &Arc<App>, host: &str, base: &str, mut q: Quota) {
         q.limit_hit = None;
     }
     // CLI 狀態列沒有重置時間，沿用上一份，否則量表的「N 小時後重置」會消失。
+    // **已經過去的不沿用**（issue #489）：對顯示沒有意義（畫面會寫「N 小時前重置」），而且它會被
+    // `reset_passed` 讀成「這個窗重置過了」，把一筆剛讀到、真的見底的狀態列讀數放行。
     if let Some(prev) = quotas.get(&key) {
         for (now, old) in [(&mut q.five_hour, &prev.five_hour), (&mut q.seven_day, &prev.seven_day), (&mut q.fable, &prev.fable)] {
             if let (Some(w), Some(p)) = (now.as_mut(), old.as_ref()) {
-                if w.resets_at.is_none() {
+                if w.resets_at.is_none() && !already_past(p.resets_at.as_deref()) {
                     w.resets_at = p.resets_at.clone();
                 }
             }
@@ -1323,6 +1356,98 @@ mod tests {
         assert!(!w(100.0, None).reset_passed(now));
     }
 
+    /// issue #489（我 #464 帶出來的回歸）：走**真的 `set()` 路徑**。
+    ///
+    /// app-server 探測成功一次寫下未來的 `resets_at` → 時間跨過它、探測不再成功 → 之後只有 codex 狀態列
+    /// 進來（建構時 `resets_at: None`、`used_pct` 見底）。只看「重置時刻在過去」的話，那筆繼承來的舊時刻
+    /// 會把新鮮的見底讀數判成「已重置」→ 身分被當成有額度。
+    #[tokio::test]
+    async fn a_fresh_critical_statusline_is_not_excused_by_an_inherited_past_reset() {
+        let app = crate::testing::env().await.app.clone();
+        let key = quota_key(LOCAL_HOST, "codex");
+        // 1. app-server：還有額度，重置時間在「一小時前」（模擬那次探測之後時間就跨過去了）。
+        let mut probe = codex_q("codex-app-server", None);
+        probe.updated_at = crate::db::iso_at(chrono::Utc::now() - chrono::Duration::hours(3));
+        probe.seven_day = Some(Window {
+            used_pct: 20.0,
+            resets_at: Some(crate::db::iso_at(chrono::Utc::now() - chrono::Duration::hours(1))),
+            observed_at: None,
+        });
+        set(&app, LOCAL_HOST, "codex", probe).await;
+
+        // 2. 之後只有狀態列：真的見底、沒有 resets_at。這一刻才觀測到。
+        let mut status = codex_q("codex-statusline", None);
+        status.updated_at = crate::db::now();
+        status.seven_day = Some(Window { used_pct: 97.0, resets_at: None, observed_at: None });
+        set(&app, LOCAL_HOST, "codex", status).await;
+
+        let got = app.quotas.lock().await.get(&key).cloned().unwrap();
+        let now = chrono::Utc::now();
+        assert_eq!(got.seven_day.as_ref().map(|w| w.used_pct), Some(97.0), "前提：新讀數真的進去了");
+        assert!(
+            got.exhausted(Bucket::SevenDay, now),
+            "剛讀到的 97% 不能因為繼承了一個過去的重置時間就被放行：{:?}",
+            got.seven_day
+        );
+        // 順帶：已經過去的重置時間本來就不該被沿用（對顯示也沒意義）。
+        assert_eq!(got.seven_day.as_ref().and_then(|w| w.resets_at.clone()), None, "過去的 resets_at 不沿用");
+    }
+
+    /// #489 的第二條路：讀數**自己就帶著**一個剛過去的 `resets_at`（app-server 在窗剛翻過去時
+    /// 回的就是這種），沿用那一段完全沒參與。這條專門釘 `reset_passed` 的觀測時間條件——
+    /// 只靠「不沿用過期的 `resets_at`」擋不到它。
+    ///
+    /// （第一版我只寫了走沿用那條，結果變異「`reset_passed` 不看觀測時間」殺不掉它：
+    /// 沿用那一半先把過期時刻丟了，根本走不到這個判斷。兩個守衛各自夠用，就得各自有測試。）
+    #[tokio::test]
+    async fn a_freshly_observed_critical_window_with_its_own_past_reset_still_blocks() {
+        let app = crate::testing::env().await.app.clone();
+        let key = quota_key(LOCAL_HOST, "codex");
+        let mut probe = codex_q("codex-app-server", None);
+        probe.updated_at = crate::db::now();
+        // 窗剛翻過去一分鐘，而這一刻讀到的就是 97% 用掉。
+        probe.seven_day = Some(Window {
+            used_pct: 97.0,
+            resets_at: Some(crate::db::iso_at(chrono::Utc::now() - chrono::Duration::minutes(1))),
+            observed_at: None,
+        });
+        set(&app, LOCAL_HOST, "codex", probe).await;
+
+        let got = app.quotas.lock().await.get(&key).cloned().unwrap();
+        let w = got.seven_day.as_ref().expect("讀數自己帶的 resets_at 不受沿用規則影響");
+        assert!(w.resets_at.is_some(), "前提：這個過期時刻是讀數自己帶的，不是沿用來的");
+        assert!(!w.reset_passed(chrono::Utc::now()), "觀測時間比重置新 → 不算跨過重置");
+        assert!(got.exhausted(Bucket::SevenDay, chrono::Utc::now()), "剛讀到的 97% 要算用盡");
+    }
+
+    /// 反方向要照舊成立（#464 修的那個）：**觀測時間早於重置**的舊讀數仍然算「已重置」，不能永久擋人。
+    #[test]
+    fn a_reading_observed_before_the_reset_still_counts_as_reset() {
+        let t = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&chrono::Utc);
+        let now = t("2026-09-13T12:00:00Z");
+        let w = |observed: Option<&str>| Window {
+            used_pct: 100.0,
+            resets_at: Some("2026-09-13T10:00:00Z".into()),
+            observed_at: observed.map(String::from),
+        };
+        // 觀測在重置之前 → 這筆讀數跨過了重置 → 不算用盡（#464）。
+        assert!(w(Some("2026-09-13T09:00:00Z")).reset_passed(now));
+        assert!(!w(Some("2026-09-13T09:00:00Z")).exhausted_at(now));
+        // 剛好等於重置時刻也算跨過（邊界）。
+        assert!(w(Some("2026-09-13T10:00:00Z")).reset_passed(now));
+        // 觀測在重置之後 → 它已經反映重置後的狀態，說見底就是見底（#489）。
+        assert!(!w(Some("2026-09-13T11:00:00Z")).reset_passed(now));
+        assert!(w(Some("2026-09-13T11:00:00Z")).exhausted_at(now));
+        // 完全不知道觀測時間 → 退回只看重置時刻（＝#464 的行為；舊快取列就是這種，本來就是舊讀數）。
+        // 刻意不拿 `Quota::updated_at` 當備援，理由見 `reset_passed` 的註解。
+        assert!(w(None).reset_passed(now));
+        assert!(!w(None).exhausted_at(now));
+        // 重置還沒到 → 無論觀測時間都不算跨過。
+        let future = Window { used_pct: 100.0, resets_at: Some("2026-09-13T15:00:00Z".into()), observed_at: Some("2026-09-13T11:00:00Z".into()) };
+        assert!(!future.reset_passed(now));
+        assert!(future.exhausted_at(now));
+    }
+
     /// issue #475（i267 review）：年齡要跟著**窗**走，不是跟著整筆讀數走。
     ///
     /// 走真的 `set()` 路徑：先送一筆「5h 見底、沒有 resets_at」，之後 statusline 一直只帶 7d
@@ -1607,9 +1732,15 @@ mod tests {
     #[tokio::test]
     async fn the_status_line_updates_the_numbers_without_losing_the_reset_time() {
         let app = crate::testing::env().await.app.clone();
+        // 重置時間用**還沒到**的相對時刻：原本寫死 2026-09-13／18，那兩個日期早就過去了，
+        // 於是這條測試其實是在釘「連已經過去的重置時間也照樣沿用」——而那正是 #489 的破口
+        // （繼承來的過期時刻會把新鮮的見底讀數判成已重置）。這裡的本意是「app-server 的重置時間
+        // 不會被狀態列更新洗掉」，改成未來的時刻才測得到本意。
+        let five_reset = crate::db::iso_at(chrono::Utc::now() + chrono::Duration::hours(4));
+        let seven_reset = crate::db::iso_at(chrono::Utc::now() + chrono::Duration::days(6));
         let from_server = Quota {
-            five_hour: Some(Window { observed_at: None, used_pct: 0.0, resets_at: Some("2026-09-13T12:00:00Z".into()) }),
-            seven_day: Some(Window { observed_at: None, used_pct: 50.0, resets_at: Some("2026-09-18T00:00:00Z".into()) }),
+            five_hour: Some(Window { observed_at: None, used_pct: 0.0, resets_at: Some(five_reset.clone()) }),
+            seven_day: Some(Window { observed_at: None, used_pct: 50.0, resets_at: Some(seven_reset.clone()) }),
             fable: None,
             reset_credits: Some(ResetCredits { available: 1, title: None, expires_at: None }),
             limit_hit: None,
@@ -1631,8 +1762,8 @@ mod tests {
         assert_eq!(q.source, "codex-statusline");
         assert_eq!(q.five_hour.as_ref().unwrap().used_pct, 10.0, "90% left = 10% used");
         assert_eq!(q.seven_day.as_ref().unwrap().used_pct, 52.0);
-        assert_eq!(q.five_hour.as_ref().unwrap().resets_at.as_deref(), Some("2026-09-13T12:00:00Z"), "重置時間沿用");
-        assert_eq!(q.seven_day.as_ref().unwrap().resets_at.as_deref(), Some("2026-09-18T00:00:00Z"));
+        assert_eq!(q.five_hour.as_ref().unwrap().resets_at.as_deref(), Some(five_reset.as_str()), "重置時間沿用");
+        assert_eq!(q.seven_day.as_ref().unwrap().resets_at.as_deref(), Some(seven_reset.as_str()));
         assert!(q.reset_credits.is_some(), "重置券只有 app-server 讀得到，不能被洗掉");
     }
 
