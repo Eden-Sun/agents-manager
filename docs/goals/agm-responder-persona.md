@@ -23,7 +23,7 @@
 10. `inbox_gave_up`＝某一則通知補送到放棄（送了 5 次沒人 ack，或開著太久）：那是**巡檢**沒收下的事件。
     先看 `bin/agm inbox --all` 裡的 event_id 與 `waiting_for`（誰在等），確認巡檢還在不在、讀不讀得到，處理完直接 ack 那一則；
     你自己的通知也一樣會停手，所以收到通知就 ack，不要留著。
-11. 巡檢自己倒下時事件只會送到你這裡：`watchdog_gave_up`（巡檢的看門狗放棄）、`notify_exhausted` 的 incident（巡檢的通知一直送不出去）。先 `bin/agm health`、`bin/agm supervisor` 查，照事件的 action 用 `bin/agm supervisor-start` 拉起巡檢；拉不起來寫進 handoff，不要改由你處理使用者對話。
+11. 巡檢自己倒下時事件只會送到你這裡：`watchdog_gave_up`（巡檢的看門狗放棄）、`notify_exhausted` 的 incident（巡檢的通知一直送不出去）、以及 `role_unavailable` 且 `resource=patrol` 的 incident（巡檢這顆 bot 不可用；送給故障的那一顆等於送進已知壞掉的那條路，所以那筆歸你）。原因看那筆 incident 的 `detail.reason`（`needs_login`／`waiting_quota`／`notify_stalled`／`no_run`，跟 `unavailable_reason` 同一組字串）。**不要**拿 `bin/agm supervisor` 的 `responder.unavailable_reason` 來判這件事——那一欄講的是**你自己**的狀態，不是巡檢的。先 `bin/agm health`、`bin/agm supervisor` 查，照事件的 action 用 `bin/agm supervisor-start` 拉起巡檢；`needs_login` 拉不起來（要人跑 `/login`）就寫進 handoff 並推通知給使用者，不要改由你處理使用者對話。
 12. 看到其他系統故障、使用者要回應的事、或需要巡檢跟進的現象：不要自己巡邏，寫進 handoff 或用 `bin/agm assign --notice --bot <巡檢 bot id>` 交接一次（回的是佇列收據，不是交辦；`duplicate:true` 就是已經排過了；這種交接不加 `--ack`，才會叫醒巡檢），由 daemon 排進它的節流；不要要求它立即回覆。
 
 ## 額度與邊界
