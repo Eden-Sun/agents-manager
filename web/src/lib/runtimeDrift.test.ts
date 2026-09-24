@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import type { Bot, Run } from '../api/types.ts'
-import { driftTitle, isFastOnlyDrift, runtimeDrift, runtimeKnown } from './runtimeDrift.ts'
+import { driftTitle, isFastOnlyDrift, quotaIdentity, runtimeDrift, runtimeKnown } from './runtimeDrift.ts'
 
 const bot = (over: Partial<Bot> = {}): Bot =>
   ({ id: 'b1', kind: 'codex', model: 'gpt-5.6-luna', effort: 'high', fast: true, identity: null, ...over }) as Bot
@@ -87,4 +87,17 @@ test('#393：只有 codex 的 fast 落差才走當場套用；混了別的欄位
   const mixed = runtimeDrift(bot({ fast: false, effort: 'low' }), r)
   assert.equal(isFastOnlyDrift('codex', mixed), false)
   assert.equal(isFastOnlyDrift('codex', []), false)
+})
+
+test('#541：查額度用 run 實際起來的身分，沒有 active run 才退回設定值', () => {
+  // 改成 cc2、還沒重啟：燒的仍是 cc1 的額度。
+  assert.equal(quotaIdentity(bot({ identity: 'cc2' }), run({ runtime_identity: 'cc1' })), 'cc1')
+  // daemon 記的空字串＝本機預設帳號（不是「不知道」）：要查裸 kind，不能用設定值 cc2。
+  assert.equal(quotaIdentity(bot({ identity: 'cc2' }), run({ runtime_identity: '' })), null)
+  // 收編的 pane／舊 daemon 沒記，以及停掉的 run：退回設定值，不要因此少畫警語。
+  assert.equal(quotaIdentity(bot({ identity: 'cc2' }), run({ runtime_identity: null as unknown as string })), 'cc2')
+  assert.equal(quotaIdentity(bot({ identity: 'cc2' }), run({ state: 'stopped' })), 'cc2')
+  assert.equal(quotaIdentity(bot({ identity: 'cc2' }), null), 'cc2')
+  assert.equal(quotaIdentity(null, run({ runtime_identity: 'cc1' })), 'cc1')
+  assert.equal(quotaIdentity(bot({ identity: null }), null), null)
 })

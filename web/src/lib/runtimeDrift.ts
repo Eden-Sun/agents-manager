@@ -40,6 +40,17 @@ export function runtimeIdentity(run: Run | null): string | null | undefined {
   return normalizedIdentity(run.runtime_identity)
 }
 
+/**
+ * 查額度要用哪個身分（issue #541）：額度記在 run **實際起來**的那個身分上（API.md 的 `runtime_identity`：
+ * 「改了 `bot.identity` 之後、重啟之前兩者不同；額度一律記在這個身分上」）。所以 daemon 記得的話以它為準，
+ * `undefined`（收編的 pane、沒記、沒有 active run）才退回設定值——不然改帳號還沒重啟那段期間，
+ * 側欄查的是新帳號的格子，燒的卻是舊帳號的額度。
+ */
+export function quotaIdentity(bot: { identity: string | null } | null | undefined, run: Run | null): string | null {
+  const running = runtimeIdentity(run)
+  return running === undefined ? (bot?.identity ?? null) : running
+}
+
 /** 模型／強度／fast 這一組是否已知；identity 單獨已知時不能拿 null 猜這三欄。 */
 export function runtimeSettingsKnown(run: Run | null): boolean {
   if (!run || (run.state !== 'running' && run.state !== 'starting')) return false

@@ -57,7 +57,7 @@ import { UpdateAllBanner } from './UpdateAllBanner'
 import { ApiModelFields } from './ModelPicker'
 import { InstallToolButton } from './Tools'
 import { UpdateBadge } from './UpdateBadge'
-import { runtimeIdentity, runtimeSettingsKnown } from '../lib/runtimeDrift'
+import { quotaIdentity, runtimeIdentity, runtimeSettingsKnown } from '../lib/runtimeDrift'
 import { syncKidsScroll, wheelKidsScroll } from '../lib/kidsScroll'
 import { createHitSearch } from '../lib/hitSearch'
 import { useWheelRef } from '../hooks/useWheelRef'
@@ -161,7 +161,8 @@ function BotRow({
       // 額度按主機分（SPEC §14）；身分清單也跟著那台（同名身分在各主機可能是不同帳號）。
       if (!b) return null
       const host = projectHostName(s, b.project_id)
-      return botQuotaWarning(s.quota, b.kind, b.identity, host, quotaClaimants(s, host))
+      // 同下面的模型：run 實際在用的優先（issue #541）。
+      return botQuotaWarning(s.quota, b.kind, quotaIdentity(b, s.runs[botId] ?? null), host, quotaClaimants(s, host))
     }),
   )
   // 黃燈（low）；同樣要 useShallow。
@@ -173,7 +174,7 @@ function BotRow({
       const model = run?.status?.model_name ?? (runtimeSettingsKnown(run) ? run!.runtime_model : (b?.model ?? null))
       if (!b) return null
       const host = projectHostName(s, b.project_id)
-      return botQuotaLevel(s.quota, b.kind, b.identity, host, model, quotaClaimants(s, host))
+      return botQuotaLevel(s.quota, b.kind, quotaIdentity(b, run), host, model, quotaClaimants(s, host))
     }),
   )
   const selected = useStore((s) => s.selectedBotId === botId)
