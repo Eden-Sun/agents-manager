@@ -3018,7 +3018,9 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
 - **守衛是裁示當下重新解析名字，有它的界線**（issue #436）：`requester` 逐字留著給 lease 對，所以裁示時是拿那串字
   重新解析（`maintenance::try_requester_bot_id`）。申請人**改名、被軟刪、或用 agent 名申請而那個 run 已經結束**，
   就解析不到、守衛放行——這是已知的漏網，不是保證。**但讀不到不能等於放行**：DB 讀取失敗一律 503
-  `requester_lookup_failed`（`retryable:true`、`sent:false`），不猜「大概不是它」。要徹底解決得把驗過的 bot id
+  `requester_lookup_failed`（`retryable:true`、`sent:false`），不猜「大概不是它」。
+  這條只在 `approve` 上：**DB 壞著的時候永遠還能說不**（`deny`／`revoke` 碰不到這段守衛），
+  沒有 bot 身分的裁示者（走 UI 的人）也不會被它擋到——守衛根本不查。要徹底解決得把驗過的 bot id
   另存一欄、比 id 不比字串；現階段不加欄位（2026-09-24 裁示，避免再動 schema）。真正的界線仍是共用 UI token
   （見 #432），那要 per-bot token 才解得掉。
 - **等太久就縮小封鎖面**（AGM 裁示 2026-09-16）：在這台機器的負載下「任何 bot 在回合中就不換」等同永遠不安全——2026-09-15 那筆核准卡了 11 小時，每 5 分鐘那一輪都撞到有人在講話。
