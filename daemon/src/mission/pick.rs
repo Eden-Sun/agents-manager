@@ -104,40 +104,33 @@ fn parse_at(s: Option<&str>) -> Option<DateTime<Utc>> {
     s.and_then(|x| DateTime::parse_from_rfc3339(x.trim()).ok()).map(|x| x.with_timezone(&Utc))
 }
 
-/// 這個窗的重置時間已經過去了嗎——讀數跨過了重置，只是還沒有新讀數進來（issue #464）。
-///
-/// 沒有 `resets_at` 時**不算**重置過：無從判斷，寧可讓它繼續擋一下，也不要把真的見底當成可用。
-fn window_reset(w: &Window, now: DateTime<Utc>) -> bool {
-    // 比的是 **parse 過的 `DateTime`**，不是時間字串，所以 issue #101 的秒／毫秒混存不影響
-    // （`parse_from_rfc3339` 兩種都吃）。寫成 `match` 而不是 `is_some_and(|t| t <= now)`：
-    // `timestamp_compat_tests` 的 `closure_param_ordering` 認得 `|t| t <= now` 這個形狀，
-    // 它分不出閉包參數是 `&str` 還是 `DateTime`，寫成閉包會被那條 lint 擋下來。
-    match parse_at(w.resets_at.as_deref()) {
-        Some(at) => at <= now,
-        None => false,
-    }
-}
-
-/// 見底**而且那個窗還沒重置**才算用盡。
-///
-/// issue #464：以前只看 `used_pct`。`quota_cache` 的讀數活得比重置久（daemon 停機超過一個窗長、
-/// 帳號探測失敗在退避、主機斷線），於是一份「見底、`resets_at` 已經過去」的舊讀數照樣把身分算成用盡，
-/// 而那個窗其實早就重置了。`quota::load_cache` 早就為了同一個理由在開機時清掉過期的撞限橫幅
-/// （「so an old 用完了 marker never blocks work while the first fresh probe is pending」），
-/// 量表這一側漏了；`block_of` 本來就收得到 `now`。
+/// 見底**而且那個窗還沒重置**才算用盡（issue #464）。判斷本體是共用的 [`Window::exhausted_at`]
+/// （`quota.rs`）：`mission::pick`／`supervisor::policy`／`supervisor::responder` 三處以前各寫一份，
+/// 其中這一份還跟另外兩份對「解不開的時間戳」意見相反（i407 review）。
 fn exhausted(w: Option<&Window>, now: DateTime<Utc>) -> bool {
-    w.is_some_and(|w| w.critical() && !window_reset(w, now))
+    w.is_some_and(|w| w.exhausted_at(now))
 }
 
 /// 那一桶的重置時間，**只回還沒到的**（issue #464）：`Pick::Wait` 的 `until` 是呼叫端要排重試的時刻，
-/// 給它一個過去的時間沒有意義，而且會把「等重置」講成一個已經發生過的事。
+/// 給它一個過去的時間沒有意義。
+///
+/// 解不開的字串也回 `None` 並記一行 warn（i407 review）：原樣傳下去會變成一個呼叫端既排不了重試、
+/// 也看不出是壞資料的 `Pick::Wait { until: <亂碼> }`。方向跟 [`Window::reset_passed`] 把解不開當
+/// 「已重置」一致——壞資料不該把人卡住。
+///
+/// **這一條目前走不到，是刻意留的第二道防線**：`reset_passed` 把解不開當成已重置，所以 `exhausted`
+/// 不會成立，量表那幾條進不來；橫幅那幾條會經過 [`sooner`]，而它對解不開的那一邊本來就會退回另一邊。
+/// 所以變異測試殺不掉它（實測：把這裡改回原樣傳下去，全部測試照綠）。留著是為了「有人改掉
+/// `reset_passed` 的解不開規則」時仍有一層擋著，不是因為現在有路徑需要它。
 fn reset_of(w: Option<&Window>, now: DateTime<Utc>) -> Option<String> {
     let raw = w.and_then(|w| w.resets_at.clone())?;
-    // 解不開的字串原樣留著（不是這條規則要管的事）；解得開而且已經過去的才丟掉。
-    // 同上，刻意不用 `filter(|t| …)` 閉包，見 `window_reset` 的註解。
     match parse_at(Some(&raw)) {
         Some(at) if at <= now => None,
-        _ => Some(raw),
+        Some(_) => Some(raw),
+        None => {
+            tracing::warn!(resets_at = %raw, "額度讀數的重置時間解不開，不拿它當重試時刻");
+            None
+        }
     }
 }
 
@@ -385,6 +378,41 @@ mod tests {
             Pick::Wait { until, .. } => {
                 assert_eq!(until.as_deref(), Some("2026-09-13T18:00:00Z"), "要等橫幅說的時間，不是已經過去的窗重置：{pick:?}");
             }
+            other => panic!("橫幅還有效，應該等：{other:?}"),
+        }
+    }
+
+    /// i407 review（#464）：**解不開**的 `resets_at` 不能把身分永久排除。沿用 `policy::past` 的先例
+    /// （「An unreadable timestamp must not park the manager forever」）當成已重置；而且那個字串
+    /// 不能原樣變成 `Pick::Wait` 的 `until`，呼叫端既排不了重試也看不出是壞資料。
+    #[test]
+    fn an_unreadable_reset_time_does_not_park_the_identity_forever() {
+        let mut quota = q(100.0, 10.0, Some(10.0));
+        quota.five_hour = Some(Window { used_pct: 100.0, resets_at: Some("not-a-timestamp".into()) });
+        let qs = [("cc0", Some(quota))];
+        let pick = pick(Role::Executor, &cands(&qs), On5hLimit::Wait, None, now());
+        assert_eq!(used(&pick), ("cc0", None), "壞掉的時間戳不該讓這個身分永久用不了：{pick:?}");
+    }
+
+    /// 橫幅指名桶、而那一桶的 `resets_at` 是壞字串：`until` 要退回橫幅自己的時間，不是那串亂碼。
+    ///
+    /// 釘的是**結果**，不是哪一段程式碼做到的：現在真正擋下來的是 `sooner`（它對解不開的那一邊
+    /// 會退回另一邊），`reset_of` 的同名防線在這條路上走不到。所以這一條殺不掉 `reset_of` 的變異——
+    /// 那個分支是刻意留的第二道防線，見 `reset_of` 的註解。
+    #[test]
+    fn a_wait_never_carries_an_unreadable_reset_time() {
+        let mut quota = q(10.0, 100.0, Some(10.0));
+        quota.seven_day = Some(Window { used_pct: 100.0, resets_at: Some("garbage".into()) });
+        quota.limit_hit = Some(LimitHit {
+            message: "You've reached your limit".into(),
+            until: Some("2026-09-13T18:00:00Z".into()),
+            at: "2026-09-13T11:50:00Z".into(),
+            bucket: Some("seven_day".into()),
+        });
+        let qs = [("cc0", Some(quota))];
+        let pick = pick(Role::Executor, &cands(&qs), On5hLimit::Wait, None, now());
+        match &pick {
+            Pick::Wait { until, .. } => assert_eq!(until.as_deref(), Some("2026-09-13T18:00:00Z"), "{pick:?}"),
             other => panic!("橫幅還有效，應該等：{other:?}"),
         }
     }

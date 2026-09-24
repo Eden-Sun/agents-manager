@@ -297,6 +297,10 @@ pub struct Window {
     pub resets_at: Option<String>,
 }
 
+/// 各桶的窗長。`recalibrate_limit_hit` 與 pane 讀數也用同一組數字。
+pub const FIVE_HOUR_LEN: chrono::Duration = chrono::Duration::hours(5);
+pub const SEVEN_DAY_LEN: chrono::Duration = chrono::Duration::days(7);
+
 impl Window {
     fn remaining_pct(&self) -> f64 {
         (100.0 - self.used_pct).max(0.0)
@@ -308,6 +312,34 @@ impl Window {
 
     pub fn critical(&self) -> bool {
         self.remaining_pct() < CRITICAL_REMAINING_PCT
+    }
+
+    /// 這個窗的重置時間已經過去了嗎（讀數跨過了重置，只是還沒有新讀數）。
+    ///
+    /// **解不開的時間戳當成已經過去**，沿用 `supervisor::policy::past` 的先例
+    /// （那裡的註解：「An unreadable timestamp must not park the manager forever」）：一筆壞資料
+    /// 不該把一個身分永久排除，而且沒有任何東西會去修它。i407 在 #464 的 review 指出這一點——
+    /// 這支函式第一版跟那個先例相反，是三份實作裡唯一不一致的。
+    ///
+    /// **沒有 `resets_at` 就不算重置過**：那是「不知道」，不是「已經重置」。開機回填的那種舊讀數
+    /// 由 [`load_cache`] 用窗長把它收掉，不在這裡猜。
+    pub fn reset_passed(&self, now: chrono::DateTime<chrono::Utc>) -> bool {
+        match self.resets_at.as_deref() {
+            None => false,
+            Some(t) => match chrono::DateTime::parse_from_rfc3339(t) {
+                Ok(at) => at.with_timezone(&chrono::Utc) <= now,
+                Err(_) => true,
+            },
+        }
+    }
+
+    /// 見底**而且還沒重置**才算用盡（issue #464）。
+    ///
+    /// 三處共用這一份：`mission::pick`（選身分）、`supervisor::policy`（換模型）、
+    /// `supervisor::responder`（協調者能不能答）。以前各寫一份，其中 `mission::pick` 那份連
+    /// 「重置過沒有」都不看，另外兩份對解不開的時間戳又跟它相反（i407 review，#464）。
+    pub fn exhausted_at(&self, now: chrono::DateTime<chrono::Utc>) -> bool {
+        !self.reset_passed(now) && self.critical()
     }
 }
 
@@ -384,6 +416,16 @@ pub async fn load_cache(app: &Arc<App>) -> Result<usize> {
             q.limit_hit = None;
         }
         q.updated_at = if updated_at.trim().is_empty() { q.updated_at } else { updated_at };
+        // issue #464（i407 review）：橫幅有到期規則，量表沒有。**沒有 `resets_at` 的見底讀數**
+        // 在 `Window::exhausted_at` 眼裡永遠算用盡（沒有時間可比），所以它會跨重啟一直擋著那個身分；
+        // 配上探測持續失敗（登出退避、主機斷線）就再也解不開，而 `reset_of` 回 `None`，
+        // 呼叫端連什麼時候再試都不知道。
+        //
+        // 這裡用**那一桶自己的窗長**收掉這種讀數：一筆比窗長還舊的讀數必定跨過了一次重置，
+        // 不管它當時是幾 %。丟成 `None`＝「這一格沒有讀數」——這是實話（那個數字已經沒有意義），
+        // 而且比留著一個假的百分比安全：`pick` 不會拿它擋人，`responder` 也不會拿它宣稱恢復
+        // （它要兩個共用窗**都有讀數**才說 Available）。有 `resets_at` 的照舊交給 `reset_passed`。
+        drop_readings_older_than_their_window(&mut q);
         q.host = key.split_once('/').map_or(LOCAL_HOST, |(host, _)| host).to_string();
         restored.push((key, q));
     }
@@ -396,6 +438,25 @@ pub async fn load_cache(app: &Arc<App>) -> Result<usize> {
         stale.insert(key);
     }
     Ok(count)
+}
+
+/// 開機回填時，把「見底、沒有 `resets_at`、而且比自己那一桶的窗長還舊」的讀數丟掉（issue #464）。
+///
+/// 只動這種：有 `resets_at` 的由 [`Window::reset_passed`] 判，沒見底的留著顯示也無害。
+fn drop_readings_older_than_their_window(q: &mut Quota) {
+    let Some(at) = parse_utc(&q.updated_at) else { return };
+    let age = chrono::Utc::now() - at;
+    for (name, len, w) in [
+        ("five_hour", FIVE_HOUR_LEN, &mut q.five_hour),
+        ("seven_day", SEVEN_DAY_LEN, &mut q.seven_day),
+        ("fable", SEVEN_DAY_LEN, &mut q.fable),
+    ] {
+        let stale_and_blocking = w.as_ref().is_some_and(|x| x.resets_at.is_none() && x.critical()) && age >= len;
+        if stale_and_blocking {
+            tracing::info!(bucket = name, updated_at = %q.updated_at, "開機回填：見底但沒有重置時間、又比窗長還舊的讀數丟掉，不讓它永久擋住這個身分");
+            *w = None;
+        }
+    }
 }
 
 async fn persist_cache(app: &Arc<App>, key: &str, q: &Quota) {
@@ -1177,6 +1238,75 @@ pub fn spawn_codex_poller(app: Arc<App>) {
 
 #[cfg(test)]
 mod tests {
+
+    /// issue #464（i407 review）：`Window::exhausted_at` 是三處共用的那一份判斷，
+    /// 其中「解不開的時間戳當成已重置」沿用 `supervisor::policy::past` 的先例。
+    #[test]
+    fn a_window_is_exhausted_only_while_its_window_is_still_open() {
+        let t = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&chrono::Utc);
+        let now = t("2026-09-13T12:00:00Z");
+        let w = |used: f64, resets: Option<&str>| Window { used_pct: used, resets_at: resets.map(String::from) };
+
+        assert!(w(100.0, Some("2026-09-13T15:00:00Z")).exhausted_at(now), "見底、窗還沒到 → 用盡");
+        assert!(!w(100.0, Some("2026-09-13T10:00:00Z")).exhausted_at(now), "見底但窗兩小時前就重置了 → 不算用盡");
+        assert!(!w(10.0, Some("2026-09-13T15:00:00Z")).exhausted_at(now), "沒見底就不是用盡");
+        // 解不開＝已重置（不永久擋）；沒有時間＝不知道（繼續擋）。
+        assert!(!w(100.0, Some("not-a-timestamp")).exhausted_at(now), "壞掉的時間戳不該把身分永久排除");
+        assert!(w(100.0, None).exhausted_at(now), "沒有重置時間就無從判斷，保守繼續擋");
+        assert!(w(100.0, Some("not-a-timestamp")).reset_passed(now));
+        assert!(!w(100.0, None).reset_passed(now));
+    }
+
+    /// issue #464（i407 review）：開機回填的「見底、沒有 `resets_at`」讀數會跨重啟永久擋著。
+    /// 比自己那一桶的窗長還舊的就丟掉——那筆讀數必定跨過一次重置。
+    #[tokio::test]
+    async fn boot_drops_a_critical_reading_older_than_its_own_window() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let old_at = crate::db::iso_at(chrono::Utc::now() - chrono::Duration::hours(6));
+        let mut q = codex_q("boot", None);
+        q.updated_at = old_at.clone();
+        // 見底、沒有重置時間：5h 的比窗長（5 小時）舊 → 丟掉；7d 的還沒超過 7 天 → 留著。
+        q.five_hour = Some(Window { used_pct: 100.0, resets_at: None });
+        q.seven_day = Some(Window { used_pct: 100.0, resets_at: None });
+        sqlx::query("INSERT INTO quota_cache (key, quota_json, updated_at) VALUES (?,?,?)")
+            .bind(quota_key(LOCAL_HOST, "claude"))
+            .bind(serde_json::to_string(&q).unwrap())
+            .bind(&old_at)
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        load_cache(&app).await.unwrap();
+        let got = app.quotas.lock().await.get(&quota_key(LOCAL_HOST, "claude")).cloned().unwrap();
+        assert!(got.five_hour.is_none(), "6 小時前的見底 5h 讀數要丟掉，不然它永遠算用盡");
+        assert!(got.seven_day.is_some(), "7d 的窗還沒過，留著");
+        assert!(app.quota_stale.lock().await.contains(&quota_key(LOCAL_HOST, "claude")), "回填的一律算陳舊");
+    }
+
+    /// 有 `resets_at` 的不在這條規則裡：交給 `reset_passed` 在讀的時候判，開機不動它。
+    #[tokio::test]
+    async fn boot_keeps_an_old_reading_that_has_a_reset_time() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let old_at = crate::db::iso_at(chrono::Utc::now() - chrono::Duration::hours(6));
+        let mut q = codex_q("boot", None);
+        q.updated_at = old_at.clone();
+        q.five_hour = Some(Window { used_pct: 100.0, resets_at: Some(crate::db::iso_at(chrono::Utc::now() - chrono::Duration::hours(1))) });
+        sqlx::query("INSERT INTO quota_cache (key, quota_json, updated_at) VALUES (?,?,?)")
+            .bind(quota_key(LOCAL_HOST, "claude"))
+            .bind(serde_json::to_string(&q).unwrap())
+            .bind(&old_at)
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        load_cache(&app).await.unwrap();
+        let got = app.quotas.lock().await.get(&quota_key(LOCAL_HOST, "claude")).cloned().unwrap();
+        let five = got.five_hour.expect("有 resets_at 的讀數留著");
+        assert!(five.reset_passed(chrono::Utc::now()), "它自己的重置時間已經過去，讀的時候就不算用盡");
+        assert!(!five.exhausted_at(chrono::Utc::now()));
+    }
 
     /// issue #464 的**加固**（不是修 bug：目前沒有來源送毫秒）。1e12 秒是西元 33658 年，
     /// 所以超過門檻只可能是毫秒；不擋的話會安靜地算出一個永遠不會到的 `resets_at`。
