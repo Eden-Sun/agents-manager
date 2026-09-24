@@ -87,10 +87,17 @@ pub async fn pending(pool: &SqlitePool, host: &str) -> Result<Vec<String>> {
 }
 
 /// 掃一台遠端主機：回 `(清掉, 留著)`。只有「確定軟刪」而且「確定沒有 active run」的才搬進遠端回收區（#411）。
+///
+/// 順便清掉回收區裡放過 [`crate::bot_trash::KEEP_DAYS`] 的（#431）。掛在這裡而不是只掛在「主機連上」那一次：
+/// 連上只發生在開機與重連，常駐連線的主機因此從來不清，`KEEP_DAYS` 等於沒生效——回收區放的是整個 bot 目錄
+/// （hook spool、shim），而遠端同時是外部編譯主機，磁碟已經被 #141／#196 塞爆過兩次。
+/// 清理跟「還欠著誰的目錄」是兩件事，所以排在 `pending` 之前：那一段讀不到也要清。
+/// 代價是每輪多一次 ssh（腳本很短，走既有的 ControlMaster）。
 pub async fn sweep(app: &Arc<App>, host: &str) -> (usize, usize) {
     if host == crate::config::LOCAL_HOST {
         return (0, 0);
     }
+    crate::remote_trash::gc_host(app, host).await;
     let ids = match pending(&app.db, host).await {
         Ok(v) => v,
         Err(e) => {
@@ -133,15 +140,15 @@ pub async fn forget(app: &Arc<App>, bot_id: &str) {
     }
 }
 
-/// 主機連上（含重連）那一刻背景掃一次，順便清掉遠端回收區裡過期的（#411）。
+/// 主機連上（含重連）那一刻背景掃一次（回收區的過期清理在 `sweep` 裡，#431）。
 pub fn spawn_sweep(app: Arc<App>, host: String) {
     tokio::spawn(async move {
         sweep(&app, &host).await;
-        crate::remote_trash::gc_host(&app, &host).await;
     });
 }
 
-/// 連著的遠端主機定期再掃：ssh 一時失敗、run 剛結束的那些不必等下一次重連。
+/// 連著的遠端主機定期再掃：ssh 一時失敗、run 剛結束的那些不必等下一次重連，
+/// 回收區裡過期的也在這一輪清掉（#431：不重連的主機以前永遠不清）。
 pub fn spawn_poller(app: Arc<App>) {
     tokio::spawn(async move {
         loop {
@@ -184,7 +191,8 @@ mod tests {
                 anyhow::bail!("ssh: connect to host: Connection refused");
             }
             c.lock().unwrap().push(script.to_string());
-            Ok("AM_TRASHED\n".into())
+            // `sweep` 現在也會清回收區（#431）：那支腳本要回它自己的確認字，不然每個測試都在跑 gc 的失敗路徑。
+            Ok(if script.contains("AM_TRASH_GC") { "AM_TRASH_GC 0\n".into() } else { "AM_TRASHED\n".into() })
         });
         Remote { env, host: host.into(), calls, fail }
     }

@@ -212,7 +212,7 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   最新那一份永遠留著）；開機清掃跑一次，另外 `bot_trash::spawn_gc` 每天再跑一次——只靠開機那一次不夠，daemon 常駐好幾天回收區會一路長。
   名字看不懂的檔案／目錄一律不碰。軟刪本來就是為了能還原，目錄卻是當場 `remove_dir_all`——誤刪時 bot 列與 config 救得回來，
   spool 裡還沒重放的 hook、手動放的檔就沒了。取捨：多佔最多 7 天／2 GB 的磁碟（bot 目錄通常是 KB 級）。
-  **遠端同一套**（issue #411，`daemon/src/remote_trash.rs`）：遠端的 `bots/<id>/` 由 ssh `mv` 到同一個遠端根（§3.1 遠端分實例）底下的 `bots-trash/<id>.<毫秒>/`；還原時 ssh 搬回最新那份（`bots/<id>/` 已在就不動，ssh 等 10 秒，搬不回來不擋還原、只記 warn），並清掉那顆的 `remote_bot_dir_purges` 記號；主機連上（開機、重連）時清掉遠端放超過 7 天的。
+  **遠端同一套**（issue #411，`daemon/src/remote_trash.rs`）：遠端的 `bots/<id>/` 由 ssh `mv` 到同一個遠端根（§3.1 遠端分實例）底下的 `bots-trash/<id>.<毫秒>/`；還原時 ssh 搬回最新那份（`bots/<id>/` 已在就不動，ssh 等 10 秒，搬不回來不擋還原、只記 warn），並清掉那顆的 `remote_bot_dir_purges` 記號；過期（超過 7 天）的由 `remote_purge::sweep` 清掉——**主機連上那一次與連著期間每 5 分鐘那一輪共用同一支**（issue #431：以前只掛在「連上」，常駐連線的主機從來不清，7 天的保留期等於沒生效）。清理排在「還欠著誰的目錄」之前，那一段讀不到也照清。
   bot 列或 active run 讀不到（DB 一時忙、I/O 錯）＝還不知道：目錄留著、記一行 warn，下次開機再判斷——清理可重入，刪掉還在跑的 bot 的 hook／shim／spool 補不回來（#187）。
   `DELETE /api/projects/:id` 依 id 排序拿齊專案內每顆 bot 的 per-bot 鎖，**在鎖內**重驗都已停止再定案；TOML 裡多出沒鎖住的 bot（剛建立、可能正要啟動）就 409 `delete_refused`。
   **鎖順序**：刪除是唯一會同時持多把 per-bot 鎖的路徑，兩支 DELETE 都「依 id 排序、一次拿齊」（`DELETE /api/bots/:id` 拿 parent＋所有 descendants，拿鎖途中若認領了新 child 就全放掉重來，三次後 409 `children_changed`），再用 locked 版停機；持一把再補拿另一把會與另一支互等成死鎖（ULID 不保證 parent 比 child 小）。

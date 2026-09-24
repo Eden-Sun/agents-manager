@@ -228,6 +228,24 @@ mod tests {
         assert_eq!(entries(&trash).len(), 3, "沒有過期的就不動");
     }
 
+    /// **#431**：清理不能只掛在「主機連上」那一次。常駐連線的主機不會再連一次，以前就永遠不清、
+    /// `KEEP_DAYS` 等於沒生效。這裡走的是每 5 分鐘那一輪真正呼叫的那支（`remote_purge::sweep`），
+    /// 主機從頭到尾沒有重連、也沒有任何 bot 被刪（`pending` 是空的），過期的那份還是要消失。
+    #[tokio::test]
+    async fn a_host_that_never_reconnects_still_has_its_expired_trash_cleaned() {
+        let (env, root) = remote("trashbox-poll").await;
+        let trash = root.join("bots-trash");
+        let old = now_ms() - Duration::from_secs((crate::bot_trash::KEEP_DAYS + 1) * 86_400).as_millis();
+        let fresh = now_ms() - Duration::from_secs(86_400).as_millis();
+        std::fs::create_dir_all(trash.join(format!("aaa.{old}"))).unwrap();
+        std::fs::create_dir_all(trash.join(format!("bbb.{fresh}"))).unwrap();
+
+        // 5 分鐘那一輪對每台已連線的遠端主機做的事，就是這一行（`remote_purge::spawn_poller`）。
+        assert_eq!(crate::remote_purge::sweep(&env.app, "trashbox-poll").await, (0, 0), "沒有欠著的目錄");
+
+        assert_eq!(entries(&trash), vec!["bbb.".to_string() + &fresh.to_string()], "過期的清掉、沒過期的留著");
+    }
+
     /// ssh 失敗：刪除記成欠著（`remote_purge` 補帳），目錄原地不動。
     #[tokio::test]
     async fn a_failed_move_stays_owed() {
