@@ -225,7 +225,8 @@ class SlimTest(unittest.TestCase):
         self.assertEqual(out["bots"][0]["project_id"], "p1")
         self.assertEqual(out["bots"][0]["queued_turn"]["id"], "q1")
         self.assertEqual(out["bots"][0]["queued_turn"]["status"], "queued")
-        self.assertEqual(out["bots"][0]["lamp"], "busy")
+        self.assertIsNone(out["bots"][0]["queued_turns"], "`/api/state` 只給下一筆 turn：知道 ≥1，不知道幾筆")
+        self.assertEqual(out["bots"][0]["lamp"], "busy", "daemon 算好的照抄，不自己推")
         self.assertNotIn("team", out["bots"][0])
         self.assertTrue(out["bots"][0]["is_manager"])
         self.assertEqual(set(out), {"projects", "bots", "manager_bot_id"})
@@ -233,7 +234,92 @@ class SlimTest(unittest.TestCase):
     def test_state_bot_without_queue_or_teams(self):
         out = agm.slim_state({"projects": [{"id": "p1", "bots": [{"id": "b1", "lamp": "idle", "queued_turn": None}]}]})
         self.assertIsNone(out["bots"][0]["queued_turn"])
+        self.assertEqual(out["bots"][0]["queued_turns"], 0, "明講 null 就是 0，不是不知道")
         self.assertEqual(set(out), {"projects", "bots"})
+
+    def test_state_reads_the_shape_the_supervisor_endpoint_really_returns(self):
+        """issue #514：走的是 `/api/supervisor/state`，它沒有 `lamp`、`queued_turn` 叫 `queued_turns`。
+
+        這份 fixture 照 `supervisor::sanitized_state` 真的會給的欄位抄，`/api/state` 的那份留在上面——
+        兩種形狀各一份，欄位名之後再漂掉就會在這裡紅。
+        """
+        out = agm.slim_state(
+            {
+                "supervisor_id": "agm",
+                "projects": [{"id": "p1", "label": "AG Man", "path": "/x", "host": "local"}],
+                "bots": [
+                    {
+                        "id": "b1",
+                        "project_id": "p1",
+                        "name": "AM-1-L",
+                        "kind": "claude",
+                        "model": "claude-opus-5-5",
+                        "effort": "low",
+                        "identity": "cc0",
+                        "managed_by": "user",
+                        "parent_bot_id": None,
+                        "is_supervisor": False,
+                        "supervisor_role": None,
+                        "cwd": "/x",
+                        "host": "local",
+                        "host_connected": True,
+                        "queued_turns": 2,
+                        "asleep": None,
+                        # daemon 算好的（`bot_connected` 比 CLI 看得到的 host_connected 細）。
+                        "lamp": "working",
+                        "run": {
+                            "id": "r1",
+                            "state": "running",
+                            "agent_status": "working",
+                            "agent_title": "在跑測試",
+                            "native_session_id": "sess-1",
+                            "runtime_model": "claude-opus-5-5",
+                            "runtime_effort": "low",
+                            "pane_id": "w1:p1",
+                            "started_at": "2026-09-24T01:00:00.000Z",
+                        },
+                    },
+                    {
+                        "id": "b2",
+                        "project_id": "p1",
+                        "name": "AM-2",
+                        "host_connected": True,
+                        "queued_turns": 0,
+                        # §6.11 收起來省 RAM：run 是 null，但它叫得醒。
+                        "asleep": {"since": "2026-09-24T01:03:25.662Z", "idle_minutes": 92},
+                        "run": None,
+                    },
+                ],
+            },
+            "b1",
+        )
+        busy, asleep = out["bots"]
+        # `lamp` 這個欄位不存在 → 照 daemon 的 `fn lamp` 從 host_connected + run 算，不是空字串。
+        self.assertEqual(busy["lamp"], "working")
+        self.assertEqual(busy["queued_turns"], 2)
+        self.assertIsNone(busy["queued_turn"], "筆數不塞進 turn 欄位")
+        self.assertIs(busy["host_connected"], True)
+        self.assertIsNone(busy["asleep"])
+        self.assertEqual(busy["run"]["native_session_id"], "sess-1")
+        # 睡著的跟停掉的不能長一樣：run 都是 null，差別只在 asleep。
+        self.assertEqual(asleep["lamp"], "offline")
+        self.assertEqual(asleep["asleep"], {"since": "2026-09-24T01:03:25.662Z", "idle_minutes": 92})
+        self.assertEqual(asleep["queued_turns"], 0)
+
+    def test_an_old_daemon_without_a_lamp_field_still_gets_one(self):
+        """`/api/supervisor/state` 現在會吐 `lamp`；沒吐的是還沒更新的 daemon，那才輪到 CLI 推。"""
+        out = agm.slim_state({"bots": [{"id": "b1", "host_connected": False, "run": {"state": "running", "agent_status": "working"}}]})
+        self.assertEqual(out["bots"][0]["lamp"], "disconnected")
+        self.assertIs(out["bots"][0]["host_connected"], False)
+        # daemon 給了就照抄，不要用比較粗的輸入覆寫它。
+        out = agm.slim_state({"bots": [{"id": "b1", "lamp": "blocked", "host_connected": False, "run": None}]})
+        self.assertEqual(out["bots"][0]["lamp"], "blocked")
+
+    def test_state_does_not_call_an_unknown_queue_empty(self):
+        """舊 daemon 兩個欄位都沒有：回 None（不知道），不是 0（沒有人在排隊）。"""
+        out = agm.slim_state({"bots": [{"id": "b1"}]})
+        self.assertIsNone(out["bots"][0]["queued_turns"])
+        self.assertIsNone(out["bots"][0]["host_connected"])
 
     def test_state_reads_top_level_bots(self):
         out = agm.slim_state({"bots": [{"id": "b9", "name": "n", "project_id": "p2"}]})
