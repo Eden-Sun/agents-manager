@@ -73,9 +73,13 @@ os.chmod(loose, 0o644)
 expect_error("權限太鬆就拒絕", args(path=loose), "權限是 644")
 
 # 3. symlink：os.stat 會跟過去驗到目標的權限，驗過的就不是實際讀的那個檔（#89 的 TOCTOU 形狀）。
+#    斷言認的是 **ELOOP**（「Too many levels of symbolic links」），不是「讀不到 lease token 檔」——
+#    後者跟第 5 步（檔案不存在）一模一樣，路徑打錯這條也會綠（i92b 複看）。
 link = os.path.join(tmp, "link")
 os.symlink(good, link)
-expect_error("不吃 symlink", args(path=link), "讀不到 lease token 檔")
+if not os.path.islink(link) or not os.path.exists(link):
+    bad("不吃 symlink", "前提就壞了：symlink 沒建起來或指不到東西")
+expect_error("不吃 symlink（擋下來的是 O_NOFOLLOW，不是檔案不存在）", args(path=link), "symbolic links")
 
 # 4. 空檔：不要靜靜地送出空 token（daemon 會當成「沒帶」而不是「帶錯」）。
 empty = os.path.join(tmp, "empty")
@@ -128,12 +132,20 @@ else:
     bad("stdin 多行也擋，而且講出幾行", f"rc={two_lines.returncode} {two_lines.stdout}{two_lines.stderr}")
 
 # 9. 檔案權限的檢查是 open 之後才 fstat 的：程式碼層面確認，不要退回先 stat 再 open。
+#    以前這裡是對整段原始碼 grep `O_NOFOLLOW`，而正上方的註解裡就有這個字串——把旗標從
+#    `os.open(...)` 拿掉，這一格照樣綠（i92b 複看）。所以先把註解整行剝掉再看，而且只認
+#    `os.open(` 那一行本身。「不跟隨 symlink」的行為面由第 3 步守（那裡認的是 ELOOP）。
 src = open(os.environ["AGM_PY"], encoding="utf-8").read()
 body = src[src.index("def single_line_token"):src.index("def cmd_lease")]
-if "os.fstat(" in body and "O_NOFOLLOW" in body and "os.stat(" not in body:
-    ok("先 open 再 fstat，而且不跟隨 symlink")
+code = "\n".join(ln for ln in body.splitlines() if not ln.lstrip().startswith("#"))
+opens = [ln for ln in code.splitlines() if "os.open(" in ln]
+if len(opens) == 1 and "O_NOFOLLOW" in opens[0] and "os.fstat(" in code and "os.stat(" not in code:
+    ok("os.open 那一行帶 O_NOFOLLOW，而且權限是 open 之後才 fstat")
 else:
-    bad("先 open 再 fstat，而且不跟隨 symlink", "lease_token_of 裡還有 os.stat／少了 O_NOFOLLOW")
+    bad(
+        "os.open 那一行帶 O_NOFOLLOW，而且權限是 open 之後才 fstat",
+        f"os.open 行={opens!r}；os.fstat( 在不在={'os.fstat(' in code}；os.stat( 在不在={'os.stat(' in code}",
+    )
 
 for f in (good, loose, empty, link, two, trailing):
     os.remove(f)
