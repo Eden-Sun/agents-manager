@@ -3369,6 +3369,14 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
   `notify_stalled`。這跟 `responder_undeliverable`（根本送不出去）是兩件事：這一項是「送出去了、
   但回合沒跑完」，#420 現場那四筆最後都是 `notify turn did not complete`，被送了 66／43／18／6 次才 gave_up。
   不可用原因字串（對外契約）：`needs_login`／`waiting_quota`／`notify_stalled`／`no_run`。
+- **唯讀面板要看得到這個結論**（issue #454）：`GET /api/supervisor` 的 `responder` 與 `GET /api/supervisor/health` 的
+  `responder_health` 各多一個 `unavailable_reason`（就是上面那四個字串或 `null`），`responder_severity` 也讀它。
+  在這之前那兩格只看 DB 的 `supervisor_roles.status`，而上面兩條新訊號都只寫記憶體——`notify_stalled` 更是從來不寫 DB，
+  於是會出現「核准正在被改派（§18.15 的 #421）、incident 已經開了，面板卻說 `idle`／`healthy`」，
+  正是 #420 要消滅的症狀換一條路再出現一次。**`supervisor_roles.status` 那一欄仍然一個字都不改**：
+  它是 `notify` 與看門狗的憑據，把 `unavailable` 寫進去會讓撞限的協調者被看門狗一直重啟。
+  嚴重度兩個面板對齊：`needs_login` 在 incident 與 health 都是 **critical**（要人動手、不會自己好），
+  `notify_stalled`／`no_run` 是 degraded，撞限維持 degraded（等得到）。
   **讀不到畫面不是故障**：那一拍只記 `probe_failed`，原因維持上一拍的結論，incident 不開也不解——沒有證據就宣告故障，
   等於把核准從一顆其實健康的協調者手上搬走。同理，daemon 剛重啟、第一拍還沒跑時記憶體是空的，那是「還沒有結論」，不是故障。
 - **核准會改派，其他種類不會**（issue #421，使用者 2026-09-24 裁示；`supervisor/failover.rs`）。上面那條「不倒回巡檢」對

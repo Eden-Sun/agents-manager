@@ -931,6 +931,23 @@ pub async fn status_json(app: &Arc<App>) -> Result<Value, LcError> {
         (Some(_), _) if !row.status.is_empty() => row.status.clone(),
         (Some(b), _) => super::manager_liveness(app, &b.id).await?.to_string(),
     };
+    // #454：#427 判出來的不可用只存在記憶體（`App.role_faults`），而這支面板只讀 DB 的 `row.status`，
+    // 於是「核准正在被默默改派、incident 已經開了，面板卻說 idle」——正是 #420 要消滅的症狀，
+    // 只是換成 #427 新加的訊號路徑又出現一次。`notify_stalled` 更是從來不會被寫進 DB，永遠看不到。
+    //
+    // **只改對外這一層**：`supervisor_roles.status` 一個字都不動。那一欄是 `notify` 與看門狗的憑據
+    // （`parked_on_quota`），把 `unavailable` 寫進去會讓撞限的協調者被看門狗一直重啟。
+    let unavailable_reason = crate::supervisor::health::responder_state(app).await.reason();
+    let status = match unavailable_reason {
+        // 停在登入是要人動手的那一種，單獨給一個值（既有 UI 與 `responder_severity` 都認這個字）。
+        Some(r) if r == crate::supervisor::health::REASON_NEEDS_LOGIN => "needs_login".to_string(),
+        // 撞限照舊叫 waiting_quota；`no_run` 的既有值（stopped／missing／not_configured）比
+        // 一個籠統的 `unavailable` 好懂，也不要蓋掉。
+        Some(r) if r == crate::supervisor::health::REASON_WAITING_QUOTA => status,
+        Some(r) if r == crate::supervisor::health::REASON_NO_RUN => status,
+        Some(_) => "unavailable".to_string(),
+        None => status,
+    };
     let run = match bot.as_ref() {
         Some(b) => crate::db::active_run(&app.db, &b.id).await.map_err(up)?,
         None => None,
@@ -965,6 +982,9 @@ pub async fn status_json(app: &Arc<App>) -> Result<Value, LcError> {
         "runtime": runtime,
         "remote_control": false,
         "status": status,
+        // 機器讀的原因（穩定字串，同 `health::REASON_*`、同 #421 寫進 inbox payload 的那個）：
+        // `needs_login` / `waiting_quota` / `notify_stalled` / `no_run`，`null` = 這一拍看起來是好的。
+        "unavailable_reason": unavailable_reason,
         "status_detail": row.status_detail,
         "quota_reset_at": row.quota_reset_at,
         "desired_running": row.desired_running != 0,
@@ -1494,7 +1514,9 @@ mod flow_tests {
         assert!(row.status_detail.as_deref().unwrap_or("").contains("/login"), "{:?}", row.status_detail);
         let status = status_json(&app).await.unwrap();
         assert_eq!(status["status"], "needs_login", "{status}");
-        assert_eq!(super::super::health::responder_severity(&status), "degraded");
+        assert_eq!(status["unavailable_reason"], "needs_login", "#454：機器讀這一欄，不要解析 status");
+        // #454：incident 對同一件事開 critical，這一格以前是 degraded——兩個面板講同一件事就該同一個嚴重度。
+        assert_eq!(super::super::health::responder_severity(&status), "critical");
         let probed = super::super::incidents::observe(&app, &thresholds).await;
         assert!(kinds(&probed).contains(&("responder_needs_login".into(), "critical".into())), "{:?}", kinds(&probed));
 
