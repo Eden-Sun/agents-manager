@@ -141,12 +141,13 @@ async fn quiet_reason(
     let matched = match reply_to {
         None => None,
         Some(r) => {
-            let event: i64 = sqlx::query_scalar(
+            let event: i64 = sqlx::query_scalar(&format!(
                 "SELECT COUNT(*) FROM supervisor_inbox
                   WHERE supervisor_id=? AND id=?
                     AND (bot_id=? OR json_extract(payload_json,'$.from_bot_id') IN (?, ?)
-                         OR (? IS NOT NULL AND COALESCE(claimed_by, role)=?))",
-            )
+                         OR (? IS NOT NULL AND {owner}=?))",
+                owner = roles::OWNER
+            ))
             .bind(store::SUPERVISOR_ID)
             .bind(r)
             .bind(from)

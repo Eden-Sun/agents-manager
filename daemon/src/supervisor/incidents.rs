@@ -74,7 +74,10 @@ impl Thresholds {
             host_disconnected_secs: cfg.host_disconnected_secs as i64,
             bot_stopped_secs: cfg.bot_stopped_secs as i64,
             assignment_stalled_secs: cfg.assignment_stalled_secs as i64,
-            notify_max_attempts: cfg.notify_max_attempts,
+            // `.max(1)` 跟 `controller::notify` 同一句（issue #504 附帶）：那裡夾了、這裡沒夾，
+            // `notify_max_attempts = 0` 就會讓 `notify_attempts >= 0` 對**每一則** pending 巡檢事件
+            // 成立，一則事件一張 critical incident，而通知本身其實還在正常送（送出的那一路用的是 1）。
+            notify_max_attempts: cfg.notify_max_attempts.max(1),
             approval_stalled_secs: super::failover::STALLED_AFTER_SECS,
         }
     }
@@ -309,28 +312,38 @@ pub async fn observe(app: &Arc<App>, thresholds: &Thresholds) -> Probed {
 
     // A notification nobody could deliver after every retry. Critical: this is the path the
     // manager learns anything through, and a silent one is worse than a loud failure.
+    //
+    // 一個巡檢一筆，不是一則事件一筆（issue #504 審核）：巡檢停在登入失效時整個佇列會一起用盡額度，
+    // 逐則開等於把一則送不出去的通知變成 N 張 critical incident，而每一張又各推一則 inbox 事件給協調者。
+    // 隔壁 `responder_undeliverable` 為了同一個理由早就是聚合的；兩邊現在形狀一致（`events` 是真正的總數）。
     match store::exhausted_inbox(&app.db, thresholds.notify_max_attempts).await {
         Err(e) => {
             tracing::warn!(error = ?e, "notify_exhausted probe failed");
             probed.failed.push("notify_exhausted");
         }
-        Ok(stuck) => {
-            for e in stuck {
-                out.push(Observation {
-                    kind: "notify_exhausted".into(),
-                    resource: e.id.clone(),
-                    severity: "critical".into(),
-                    detail: json!({
-                        "event_id": e.id,
-                        "event_key": e.event_key,
-                        "kind": e.kind,
-                        "attempts": e.notify_attempts,
-                        "error": e.notify_error,
-                    })
-                    .to_string(),
-                });
-            }
+        Ok(stuck) if stuck.total > 0 => {
+            // 樣本一定非空（`total > 0` 而上限是 20）；`max_by_key` 仍照 Option 處理，不 expect。
+            let worst = stuck.events.iter().max_by_key(|e| e.notify_attempts);
+            let oldest = stuck.events.first();
+            out.push(Observation {
+                kind: "notify_exhausted".into(),
+                resource: super::roles::Role::Patrol.as_str().to_string(),
+                severity: "critical".into(),
+                detail: json!({
+                    "events": stuck.total,
+                    "sampled": stuck.events.len(),
+                    "oldest_event_id": oldest.map(|e| e.id.clone()),
+                    "oldest_event_key": oldest.map(|e| e.event_key.clone()),
+                    "oldest_kind": oldest.map(|e| e.kind.clone()),
+                    "oldest_created_at": oldest.map(|e| e.created_at.clone()),
+                    "max_attempts": worst.map(|e| e.notify_attempts),
+                    "error": worst.and_then(|e| e.notify_error.clone()),
+                    "action": "`bin/agm inbox` 看這些事件在等什麼：巡檢收不到通知（常見是它的 CLI 停在 /login），處理完 ack",
+                })
+                .to_string(),
+            });
         }
+        Ok(_) => {}
     }
 
     // 協調者（issue #420）：它是 bot 申請、核准、群組任務唯一的收件者，倒了就是整條協調線靜默停擺。
@@ -1014,6 +1027,57 @@ mod tests {
         assert!(responder.iter().any(|e| e.kind == "watchdog_gave_up" && e.wake == Some(1)));
         let patrol = roles::due_for(&app.db, Role::Patrol, true, "2999-01-01T00:00:00Z", 1_000).await.unwrap();
         assert!(patrol.iter().all(|e| !exhausted(e) && e.kind != "watchdog_gave_up"), "不送回倒下的巡檢");
+    }
+
+    /// issue #504 審核：整個佇列一起用盡額度時是**一張** critical incident 帶筆數，不是一則一張。
+    ///
+    /// 一則一張的話，巡檢停在登入失效那一晚（現場上百則）會開出上百張 critical，而每一張又各推一則
+    /// `incident_opened` 給協調者——「把一則送不出去的通知變成 N 則」正是 `notifiable` 那段註解在防的事。
+    /// 隔壁 `responder_undeliverable` 早就是聚合的，兩邊形狀現在一致。
+    #[tokio::test]
+    async fn a_whole_queue_that_ran_out_of_retries_is_one_incident_carrying_the_count() {
+        use super::super::bot_requests::flow_tests;
+        use super::super::roles;
+        let app = flow_tests::app().await;
+        flow_tests::configure_responder(&app).await;
+        let max = app.cfg.get().await.supervisor.notify_max_attempts.max(1);
+        for i in 0..5 {
+            store::push_inbox(&app.db, &format!("health:{i}"), "health_changed", None, None, None, &json!({})).await.unwrap();
+        }
+        roles::classify(&app.db).await.unwrap();
+        sqlx::query("UPDATE supervisor_inbox SET notify_attempts=?").bind(max).execute(&app.db).await.unwrap();
+
+        let mut d = Detector::default();
+        sweep(&app, &mut d).await;
+
+        let open = store::open_incidents(&app.db).await.unwrap();
+        let mine: Vec<_> = open.iter().filter(|i| i.kind == "notify_exhausted").collect();
+        assert_eq!(mine.len(), 1, "五則事件一張 incident，不是五張");
+        assert_eq!(mine[0].resource, "patrol", "resource 是角色，不是事件 id（換一則事件不會留下關不掉的孤兒）");
+        let detail: Value = serde_json::from_str(&mine[0].detail_json).unwrap();
+        assert_eq!(detail["events"], 5, "筆數要寫在 detail 上：{detail}");
+        assert_eq!(detail["max_attempts"], max);
+        // 叫醒協調者的也只有一則。
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE kind='incident_opened'")
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(n, 1, "一張 incident 一則通知");
+    }
+
+    /// issue #504 附帶：`notify_max_attempts` 的下限要跟送出那一路（`controller::notify` 的 `.max(1)`）一致。
+    ///
+    /// 沒夾的話 `0` 會讓 `notify_attempts >= 0` 對**每一則** pending 巡檢事件成立：一則都還沒送過就
+    /// 開 critical incident，而通知本身其實正常在送（送出那一路用的是 1）。
+    #[test]
+    fn a_zero_or_negative_notify_budget_is_clamped_like_the_sending_path_does() {
+        let mut cfg = crate::config::SupervisorCfg::default();
+        for bad in [0, -3] {
+            cfg.notify_max_attempts = bad;
+            assert_eq!(Thresholds::from_cfg(&cfg).notify_max_attempts, 1, "{bad} 要夾成 1");
+        }
+        cfg.notify_max_attempts = 5;
+        assert_eq!(Thresholds::from_cfg(&cfg).notify_max_attempts, 5, "正常值不動");
     }
 
     /// 探針查詢失敗：`system_health` 回 unknown 並列出是哪一類看不到；下一輪跑得起來就回 healthy。

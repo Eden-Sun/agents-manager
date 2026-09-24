@@ -2331,27 +2331,59 @@ pub async fn due_inbox(pool: &SqlitePool, now: &str, max_attempts: i64) -> Resul
 
 /// Events that have spent their whole retry budget. They stay pending (nothing is swallowed),
 /// but the daemon stops pushing them and raises an incident instead of burning quota forever.
-pub async fn exhausted_inbox(pool: &SqlitePool, max_attempts: i64) -> Result<Vec<InboxEvent>> {
-    Ok(sqlx::query_as::<_, InboxEvent>(
-        "SELECT * FROM supervisor_inbox WHERE supervisor_id=? AND state='pending' AND notify_attempts >= ?
-           AND COALESCE(role, 'patrol')='patrol'
-          ORDER BY created_at ASC",
-    )
+///
+/// 歸屬用 [`super::roles::OWNER`]，不是 `role`（issue #504）：`role='responder'` 而
+/// `claimed_by='patrol'` 的列是巡檢的（`due_for` 就是這樣撈的，而且有 `notify_attempts < max` 的
+/// 上限），照 `role` 判會讓它們在用完額度之後對這個探針隱形，而 [`responder_undelivered`] 照 `OWNER`
+/// 判也不會收它們——沒有人被叫醒、也沒有任何 incident。外層再 `COALESCE(…, 'patrol')` 是保留原本
+/// 「還沒分類的列（兩欄都是 NULL）算巡檢的」那個行為。
+pub async fn exhausted_inbox(pool: &SqlitePool, max_attempts: i64) -> Result<Exhausted> {
+    let owner = super::roles::OWNER;
+    let owned = format!("state='pending' AND notify_attempts >= ? AND COALESCE({owner}, 'patrol')='patrol'");
+    let total: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM supervisor_inbox WHERE supervisor_id=? AND {owned}"))
+        .bind(SUPERVISOR_ID)
+        .bind(max_attempts)
+        .fetch_one(pool)
+        .await?;
+    let events = sqlx::query_as::<_, InboxEvent>(&format!(
+        "SELECT * FROM supervisor_inbox WHERE supervisor_id=? AND {owned}
+          ORDER BY created_at ASC, rowid ASC LIMIT ?"
+    ))
     .bind(SUPERVISOR_ID)
     .bind(max_attempts)
+    .bind(EXHAUSTED_SCAN_LIMIT)
     .fetch_all(pool)
-    .await?)
+    .await?;
+    Ok(Exhausted { events, total })
+}
+
+/// 一輪最多讀回這麼多則做為 incident 的樣本（issue #504 審核）。巡檢停在登入失效時整個佇列都會
+/// 用盡額度，而 detail 只需要「幾則、最舊的是哪一則、試了幾次、最後的錯誤」；把幾百列全讀回來
+/// 只是把記憶體與 JSON 撐大，答案一個字都不會變。`total` 不受它影響，所以數字照樣是真的。
+pub const EXHAUSTED_SCAN_LIMIT: i64 = 20;
+
+/// [`exhausted_inbox`] 的結果：樣本加上**真正的**總數。
+///
+/// 分成兩個欄位是因為 incident 是**一張**（`resource='patrol'`），不是一則事件一張：
+/// 一則一張等於「一則送不出去的通知變成 N 張 critical incident」，而每一張又各推一則 inbox 事件給
+/// 協調者——正是隔壁 `responder_undeliverable` 刻意聚合要避開的那場通知風暴（issue #420）。
+pub struct Exhausted {
+    /// 最舊的最多 [`EXHAUSTED_SCAN_LIMIT`] 則。
+    pub events: Vec<InboxEvent>,
+    /// 符合條件的總數，不受上限影響。
+    pub total: i64,
 }
 
 /// 協調者的事件沒有重試上限（`roles::due_for`），送不出去就一直留在 pending、`notify_attempts` 一直加——
 /// 2026-09-23 協調者沒登入時一則核准申請被試了 66 次，沒有任何 incident（issue #420）。這裡撈出試了
 /// `min_attempts` 次以上還在 pending 的，給 incident 探針用。事件本身照舊留著、照舊退避重送。
 pub async fn responder_undelivered(pool: &SqlitePool, min_attempts: i64) -> Result<Vec<InboxEvent>> {
-    Ok(sqlx::query_as::<_, InboxEvent>(
+    let owner = super::roles::OWNER;
+    Ok(sqlx::query_as::<_, InboxEvent>(&format!(
         "SELECT * FROM supervisor_inbox WHERE supervisor_id=? AND state='pending' AND notify_attempts >= ?
-           AND COALESCE(claimed_by, role)='responder'
-          ORDER BY created_at ASC, rowid ASC",
-    )
+           AND {owner}='responder'
+          ORDER BY created_at ASC, rowid ASC"
+    ))
     .bind(SUPERVISOR_ID)
     .bind(min_attempts)
     .fetch_all(pool)
@@ -4374,8 +4406,68 @@ mod tests {
             defer_notify(&p, &ids, "2000-01-01T00:00:00Z", "nope").await.unwrap();
         }
         assert!(due_inbox(&p, "2099-01-01T00:00:00Z", 5).await.unwrap().is_empty(), "budget spent, no more sends");
-        assert_eq!(exhausted_inbox(&p, 5).await.unwrap().len(), 1, "and it is visible as an incident source");
+        assert_eq!(exhausted_inbox(&p, 5).await.unwrap().total, 1, "and it is visible as an incident source");
         assert_eq!(open_inbox_count(&p).await.unwrap(), 1, "still owed, never swallowed");
+    }
+
+    /// issue #504：兩個探針的歸屬要用同一個定義（`roles::OWNER`），否則中間破一個洞。
+    ///
+    /// `role='responder'` 而 `claimed_by='patrol'` 的列是**巡檢的**——單角色時期
+    /// `due_for(Patrol, responder_configured=false)` 撈走、`mark_delivered` 寫下 `claimed_by`，
+    /// 之後協調者建起來也不會搬回去（SPEC §18.15）；`roles::migrate` 的回填也會長出同一個組合。
+    /// 它照 `due_for` 有 `notify_attempts < max` 的上限，額度用完就不再被送。
+    /// 所以額度用完那一刻它必須出現在 `exhausted_inbox`，而**不能**出現在 `responder_undelivered`
+    /// （那是「協調者自己收不到」的探針，數字會被算進 `responder_undeliverable` 的 incident detail）。
+    /// 兩邊都漏掉的話，事件永遠停在 pending：沒有人被叫醒，也沒有任何 incident。
+    #[tokio::test]
+    async fn a_patrol_claimed_event_that_routes_to_the_responder_is_the_patrols_when_it_runs_out_of_retries() {
+        let p = pool().await;
+        get_or_init(&p).await.unwrap();
+        // 三種列，`notify_attempts` 都已經用完巡檢的 5 次額度。
+        let claimed = push_inbox(&p, "k-claimed", "approval_requested", None, None, None, &json!({})).await.unwrap().unwrap();
+        let responders = push_inbox(&p, "k-responder", "approval_requested", None, None, None, &json!({})).await.unwrap().unwrap();
+        let unclassified = push_inbox(&p, "k-none", "approval_requested", None, None, None, &json!({})).await.unwrap().unwrap();
+        // 巡檢收走的協調類事件：路由表說協調者，實際收的是巡檢。
+        sqlx::query("UPDATE supervisor_inbox SET role='responder', claimed_by='patrol', notify_attempts=5 WHERE id=?")
+            .bind(&claimed).execute(&p).await.unwrap();
+        // 真的在協調者手上的（還沒送出，所以 claimed_by 還是 NULL）。
+        sqlx::query("UPDATE supervisor_inbox SET role='responder', notify_attempts=5 WHERE id=?")
+            .bind(&responders).execute(&p).await.unwrap();
+        // 還沒分類的：兩欄都是 NULL，照舊算巡檢的。
+        sqlx::query("UPDATE supervisor_inbox SET notify_attempts=5 WHERE id=?")
+            .bind(&unclassified).execute(&p).await.unwrap();
+
+        let mut exhausted: Vec<String> = exhausted_inbox(&p, 5).await.unwrap().events.into_iter().map(|e| e.id).collect();
+        exhausted.sort();
+        let mut want = vec![claimed.clone(), unclassified.clone()];
+        want.sort();
+        assert_eq!(exhausted, want, "巡檢收走的（含 role=responder 的那一筆）與還沒分類的都是巡檢的");
+
+        let undelivered: Vec<String> = responder_undelivered(&p, 5).await.unwrap().into_iter().map(|e| e.id).collect();
+        assert_eq!(undelivered, vec![responders], "只有真的還在協調者手上的才算它送不出去");
+    }
+
+    /// issue #504 審核：`notify_exhausted` 是**一張** incident 帶筆數，所以查詢只需要一批樣本。
+    /// 巡檢停在登入失效時整個佇列會一起用盡額度（現場是上百則），把它們全讀回來只是把記憶體與
+    /// incident 的 JSON 撐大——但 `total` 必須是真的，不然 detail 上的數字會騙人。
+    #[tokio::test]
+    async fn the_exhausted_probe_samples_a_bounded_batch_but_counts_them_all() {
+        let p = pool().await;
+        get_or_init(&p).await.unwrap();
+        let n = EXHAUSTED_SCAN_LIMIT + 7;
+        for i in 0..n {
+            let id = push_inbox(&p, &format!("k{i}"), "health_changed", None, None, None, &json!({})).await.unwrap().unwrap();
+            sqlx::query("UPDATE supervisor_inbox SET notify_attempts=5, created_at=? WHERE id=?")
+                .bind(format!("2026-09-24T00:00:{:02}.000Z", i))
+                .bind(&id)
+                .execute(&p)
+                .await
+                .unwrap();
+        }
+        let got = exhausted_inbox(&p, 5).await.unwrap();
+        assert_eq!(got.total, n, "總數是真的");
+        assert_eq!(got.events.len() as i64, EXHAUSTED_SCAN_LIMIT, "樣本有上限");
+        assert_eq!(got.events[0].event_key, "k0", "樣本最舊的在前，detail 指得到最早卡住的那一則");
     }
 
     /// Incidents are one row per resource, deduplicated across restarts, with a fresh row for a
