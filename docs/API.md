@@ -419,6 +419,7 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 
 `ws://127.0.0.1:7788/ws?token=<token>`，重連帶 `&since=<最後收到的 seq>`。每則一行 `{ "seq": 12, "type": "bot_status", "data": { ... } }`。
 `seq` 從 1 遞增（daemon 重啟歸零），保留最近 200 則；補不齊或 seq 倒退會先送不帶 data 的 `{ "type": "resync", "seq": 12 }`，收到就重新 `GET /api/state` 與訊息。
+`resync` 也可能帶 `data{reason,…}`，目前只有一種：`reason:"turn_retracted"`＋`turn_id`——送不出去的那一則被撤回了，而事件模型只有新增／更新沒有刪除，泡泡與回合已經廣播出去，不重讀畫面會留一顆幽靈泡泡與一個永遠不結束的回合。處理方式跟不帶 data 的一樣：重拉。
 
 | type | data |
 |---|---|
@@ -456,6 +457,29 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 ```
 
 路徑不存在或不是目錄 → 400。
+
+### `GET /api/search/messages?q=<文字>&limit=200`
+側欄搜尋用的**命中計數**：回 `{q, bots:[{bot_id, hits, snippet}]}`——每顆 bot 幾則命中，外加最新那一則的片段
+（命中字前後各約 90 字）。`q` trim 後為空就回 `{q:"", bots:[]}`（不是錯誤）；`limit` 1–1000，預設 200，
+依 `hits` 由多到少。字面子字串比對，`%`、`_`、`\` 是字元不是萬用字元。含已刪 bot 的歷史。
+
+**跟 `GET /api/supervisor/evidence` 的分工**（兩支都在搜同一張 `messages` 表，但回答的是不同問題）：
+
+| | `search/messages` | `supervisor/evidence` |
+|---|---|---|
+| 回答 | 「**哪幾顆 bot** 講過這件事」 | 「**哪幾則訊息**講過這件事」 |
+| 單位 | 一顆 bot 一列，帶 `hits` 與一段 snippet | 一則訊息一列，帶 `bot_name`／`project_label`／`turn_id`／`role`／`source`／`created_at` |
+| 分頁 | 沒有，`limit` 一次給完 | `before` 游標 ＋ `has_more`／`next_cursor` |
+| 內容 | 只有片段，讀全文要再打 `GET /api/bots/{id}/messages` | 整則 content（超過 16,000 字 `truncated:true`） |
+| 空查詢 | 回空清單 | **400** |
+| 用途 | 網頁側欄即時篩 bot | AGM 要可追溯、可引用的證據（SPEC §18.15） |
+
+要「先找到是哪顆 bot、再跳進去看」用這支；要「把證據原文貼進回報或 issue」用 `evidence`。
+
+### `POST /api/bots/{id}/pane/move-to-tab`
+把還跟別人共用分頁的 bot pane 搬到自己的新分頁（一個 bot 一個 tab 之前起的 bot 才需要，SPEC §6.5）。
+回 `200 {}`。pane id、訂閱與進行中的 Turn 都不變，**不重啟 agent**；已經獨占分頁的再打一次是 no-op。
+bot 或 active Run 不存在 404。
 
 ### `POST /api/bots/{id}/read`
 跨裝置共用的已讀位置（2026-09-15）。body `{"at":"<讀到的最後一則 created_at>","message_id":"<那則 id>"}`，兩者可省（`at` 省略＝現在）；標記**只往前推**，較舊的送來不會倒退。
@@ -1626,6 +1650,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 - `POST /api/supervisor/responder/setup {identity?,model?,effort?}` → 同上加 `deployed`。冪等、只建立不啟動；預設沿用已存的（第一次 `cc0/opus/high`）。掛在**巡檢的專案**底下，cwd 是自己的 `supervisor/AGM-responder`（記在 `bots.cwd`）
   （`CLAUDE.md`、`persona.md`、`runtime.json{role:"responder",self_bot_id,responder_bot_id,manager_bot_id}`、`bin/agm`、`handoff.md`），args 空（rc off）。身分不存在 409 `identity_missing`。
 - `POST /api/supervisor/responder/start {}` / `stop {}` → 同 GET。`start` 標應該在跑（看門狗會拉起），`stop` 先標不要再停。
+  還沒 `setup` 就 `start` → 409 `{"reason":"responder_not_configured"}`（看門狗要拉起一顆不存在的協調者時同一個代碼）。
 - `GET /api/supervisor/responder/persona`、`PUT {text,expected_version?}` → 同巡檢的 persona 形狀加 `role:"responder"`；內嵌種子 `docs/goals/agm-responder-persona.md`。
 - `POST /api/supervisor/setup {}` → 同上再加 `deployed:{cwd,agm_cli}`。冪等：建立專用 Project／Bot／cwd，寫 `CLAUDE.md`、`persona.md`、`runtime.json`（**不含 token**）、`bin/agm`、
   `handoff.md`（已存在不覆蓋）。args `["--remote-control","AGM"]`、`autostart=false`，**只建立不啟動**。`cc0` 不存在 409 `identity_missing`；專案裡有別的 `AGM` 409 `name_taken`——supervisor 列還沒記過 bot 時（第一次設定、或上一次寫進 config 之後部署／記錄失敗），daemon 目錄那個專案裡的同名 `AGM` 就是上一次寫進去的那一顆，接著用它、不回 `name_taken`（協調者的 `AGM-responder` 同一條，#181）。
@@ -1666,6 +1691,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 `GET /api/supervisor/remote` → `{status,stored_status,revoked,source,observed_at,observed_by,session_id,current_session_id,url,url_is_evidence,capability,ttl_secs}`。
 `status` 只有 `requested` | `verified` | `unavailable` | `unknown`（SPEC §18.12）；`capability.status` 目前 `unsupported`。觀測超過 `ttl_secs`（900）或 AGM 換 session 退回 `unknown`（`revoked` 說明），`url` 不回（`url_is_evidence:false`）。
 `POST /api/supervisor/remote {status,source,actor?,evidence?,url?}`：`source` 只收 `manual`（`provider` 保留、`argv` 拒絕）；`verified`／`unavailable` 需要 actor、非空 evidence 與當前 AGM run，15 分鐘後失效。
+用一個**不能作證**的來源報 `verified` → 409 `{"reason":"source_cannot_verify","source":"<送來的 source>"}`：哪些來源作得了證是 `remote::Source::can_verify` 說了算，不是呼叫端說了算。
 
 ### 人設
 - `GET /api/supervisor/persona` → `{stored:{version,hash,source,updated_at,seeded_from,length,text},embedded:{hash,length},loaded:{status,run_started_at,evidence},upgrade_available,needs_restart}`。
@@ -1673,6 +1699,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 - `PUT /api/supervisor/persona {text,expected_version?}` → 同上。正文改變才版本 +1，並改寫 config.toml 的 bot persona 與 `persona.md`（副本，不要手改）。
   `expected_version` 對不上且正文不同 409 `version_mismatch`；副本同步失敗 409 `persona_sync_incomplete`（帶 `stored:true` 與 `version`，重送相同正文可修復且不加版本）。
 - `POST /api/supervisor/persona/adopt-embedded {actor?,reason?}` → `{changed,version,hash}`：內嵌版取代持久版的唯一路徑。
+  持久版的 hash 已經等於內嵌版時回 **200** `{"changed":false,"reason":"already_identical","version"}`（**不是錯誤**：副本照樣重新同步一次，版本不動）。
 - `GET /api/supervisor/build-inputs` → `{paths,embedded:[{path,symbol}],note}`：會編進 binary 的路徑（含 `docs/goals/agm-supervisor-persona.md`、`docs/goals/agm-responder-persona.md`、`scripts/agm.py`）。
 
 ### 核准與租約（SPEC §18.10）
@@ -1804,6 +1831,8 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 - `POST /relay/announce`（shim，`X-AM-Bot-Token`，表單 `bot_id,to_agent,text,ack?,reply_to?`）的 `to_agent` 對得上角色 bot（名字、agent 名、pane id）→ 200 同上形狀；shim 見 `routed` 不再轉給真的 herdr。其他 → `{}`（照舊記來源）。
 - 去重：同寄件者同 `client_request_id` 一筆（結案了也是同一筆）；沒 id 時同寄件者、同內容指紋、**還會被送出**（`pending`／`delivered`，`gave_up` 不算）、而且落在同一個十分鐘滑動視窗（錨在既有那筆的 `created_at`，不是固定格子，issue #442）的一筆——前一筆已 `handled` 就重新入列（新的 `inbox_event_id`、`duplicate:false`）。指紋 = 收件角色＋目標＋正文（逐字）＋附件。
   重複且指紋相同 → `duplicate:true`、同一個 `inbox_event_id`；指紋不同 → 409 `request_mismatch`（不寫入，回報既有事件 id）。
+- 寄件的那個**角色**登記了卻沒有 bot（`setup` 過但 bot 被刪）→ 409 `{"reason":"role_not_configured"}`：
+  寄件者查不出來就不寫 inbox，免得留下一筆沒有來源的 `bot_request`。
 - `wake:false` 只在寄件端明講是回覆時：`ack:true`（`quiet_reason:"ack"`），或 `reply_to` 對得上一則跟寄件者有關的 inbox 事件（寄給它的角色、它寄的、收件角色寄來的）或派給它的交辦（id 或 `client_request_id`）（`"reply"`）。
   沒帶、或 `reply_to` 對不上（payload `reply_to_matched:false`）→ `wake:true`。不看寄件者當下在跑哪種回合。
   `POST /api/supervisor/assignments` 對角色 bot 的交接同樣收 `ack`／`reply_to`；對一般 bot 的交辦帶它們 → 400。
@@ -1915,7 +1944,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 | POST | `/api/missions/{id}/answer` | `{text, client_request_id, reply_to?, relay_from?}` → `{event, replayed, resumed, mission}`。兩種語意由 `relay_from` 分：**沒有**（使用者本人）＝回答暫停的任務，daemon 在**同一個交易**裡寫事件、`paused→open`、推 inbox（`mission_answered`，event_key `mission:<id>:answer:<crid>`）；**有**（AGM／bot）＝回覆某則追問，`reply_to` **必填**且必須真的是這筆任務的 `question` 事件，不 resume、不推 inbox（自己叫醒自己就是通知迴圈）。使用者的 answer 只在任務真的 `paused` 時成立：`open` → 409 `not_paused`、`done` → 409 `already_closed`、`cancelled` → 409 `cancelled`，而且**被拒時什麼都不寫**（沒有事件、沒有 inbox）。 |
 | POST | `/api/missions/{id}/revise` | `{text, client_request_id, relay_from?, delivery_mode?, executor_kind?, on_5h_limit?, max_rounds?}` → **新的一筆任務**（`parent_mission_id` 指回來，`created`）。原成果完全不動。沒指定的選項沿用原任務，**有指定就照 `POST /projects/{id}/missions` 同一套驗證**（enum 與 `max_rounds` 0..=10，專案還要存在且是本機）。新任務、它的 `instruction`、原成果那邊的 `note`、以及 inbox 是**同一個交易**：中途失敗不會留下沒人知道的續作。新任務的 `instruction` 事件與 inbox `mission_created` 帶快照（原指示／結果摘要／commit 或 PR／`verified` 摘要／新要求／`runbook_start_step: 2`），所以原本的臨時 bot 被清掉也不影響續作——快照是**參考，不是證據**，新任務仍要自己的 `verified` 才能交付。只有 `done` 能續作（進行中或已取消 → 409 `not_completed`）；同一個 parent 同時只能有一筆未結案的續作（第二筆 → 409 `revision_in_progress`，附既存那筆的 id），由 partial unique index 擋，並發也只會成立一筆。 |
 | POST | `/api/missions/{id}/round` | 用掉一輪（review 退回或驗證失敗）→ 任務。`rounds_used` 與 `round` 事件（payload `rounds_used`、`after_assignment`＝寫下那一刻最後一件交辦）同一個交易，一起在或一起不在；請求途中任務已被關掉 → 409 `already_closed`。已達 `max_rounds` → 任務停在 `max_rounds` 並回 409 `max_rounds`（暫停與 `paused` 事件同一個交易；請求途中任務已被關掉 → 409 `already_closed`，什麼都不寫）。**使用者放行時上限加一**：停在 `max_rounds` 的任務被 `answer`（使用者回答）或 `resume` 放行時，`max_rounds` 設成 `rounds_used + 1`，`resumed` 事件寫「來回上限加一輪：N」、payload 帶 `max_rounds`——否則使用者說「再改一輪」也沒有路，AGM 一呼叫 `round` 又是 409、任務再停一次。加的是**一輪**，不是解除上限；別的原因停下來的放行不動上限。 |
-| GET | `/api/missions/{id}/pick?role=executor\|reviewer\|verifier&exclude=<identity>` | 照任務設定挑身分，見下。`role=verifier` 回 `ask_user` 時會把任務停在 `no_fable_for_verifier`（任務這中間已被關掉就不停、不記事件）。使用者的身分停用清單讀不到 → 503 `policy_unavailable`（`retryable`、`retry_after_secs`）：不拿「都可用」挑（issue #160）。 |
+| GET | `/api/missions/{id}/pick?role=executor\|reviewer\|verifier&exclude=<identity>` | 照任務設定挑身分，見下。`role=verifier` 回 `ask_user` 時會把任務停在 `no_fable_for_verifier`（任務這中間已被關掉就不停、不記事件）。使用者的身分停用清單讀不到 → 503 `{"error":"policy_unavailable","reason":"identity_preferences_unreadable","retryable":true,"retry_after_secs":10,"message","detail"}`：不拿「都可用」挑（issue #160）。 |
 | POST | `/api/missions/{id}/deliver` | `{worktree(本機絕對路徑), title?, body?, relay_from?}`。`push_main`：fetch → `origin/<base>` 必須是 HEAD 的祖先 → `git push origin HEAD:<base>`（fast-forward only，不 force）；`pr`：推 `mission/<id>` 分支並 `gh pr create`。`<base>` 是這個 repo 的預設分支（`origin/HEAD`，問不到才退回 `main`），回應與 `delivered` payload 都帶 `base`——寫死 main 的話預設分支叫 master／trunk 的專案一定 `fetch_failed`。成功記 `delivered` 事件並回 `{mode, sha, already_in_base}` 或 `{mode, branch, url, sha, existing_pr}`；**冪等**：同一個 commit 已經交付過就回原本那筆 payload＋`replayed:true`，不會再推一次。動手前記一則帶 `delivery_attempt:{sha,mode}` 的 `note`，所以「push／PR 成功但回應斷在路上」的重試認得出來——HEAD 已經在 `origin/main` 裡時回 `already_in_base:true` 並補記 `delivered`（沒試過那次仍是 `nothing_to_deliver`，那代表執行者根本沒 commit），PR 模式先問 `gh pr view`，已經有**開著的** PR（或已合併、而且 HEAD 已在 base 裡）就回 `existing_pr:true` 而不是 `pr_failed`；那條分支上被關掉的、或合併之後又有新 commit 的 PR 不算，照樣開一條新的（`gh pr view <branch>` 不看狀態，issue #132）。任務若停在 `push_main_failed`／`pr_failed`，成功時自動解除（記 `resumed`）。**關卡**（不改任務狀態）：任務停著（`paused_reason` 不是 `push_main_failed`／`pr_failed`）→ 409 `mission_paused`；`worktree` 必須是本專案 repo 的工作樹（否則 400）；沒有 `verified` 事件 → 409 `not_verified`；最新一則 `verified` 沒記 commit → 409 `verified_without_sha`；那一則之後有 `round`、或又派了執行者 → 409 `verification_stale`（`stale_because: round | new_executor`、`verified_generation`、`generation`、`next`；**HEAD 沒變也擋**，被退回的那一份不能靠舊驗證交付）；工作樹 HEAD 不是那個 commit（rebase、又改過、指到主樹）→ 409 `head_not_verified`（`verified_sha`、`head`）。過了關卡之後的失敗一律**停下來問人**（`push_main_failed`／`pr_failed`）並回 409，`reason` 是機器碼：`dirty_worktree`、`fetch_failed`、`not_fast_forward`、`nothing_to_deliver`、`push_failed`、`pr_failed`。交付途中任務已被取消 → 不停、不記 `paused`，回 409 `already_closed`（附 `delivery_failed`、`detail`）。 |
 | PUT | `/api/identities/{name}/disabled` | `{kind, disabled, host?}` → 同一份。身分停用搬進 daemon（原本只在瀏覽器 localStorage）；WS `identity_prefs_changed`。停用＝群組任務挑身分與**環境設定／Bot 設定的身份選單**都看不到它（已經綁著它的 bot 仍看得到自己那一個），不影響執行中的 bot，也不動主機上的 alias。 |
 | GET | `/api/identity-prefs` | `{disabled:[{host, kind, identity}]}`。 |
