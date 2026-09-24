@@ -85,7 +85,7 @@ pub async fn reassign_stale_approvals(app: &Arc<App>, unavailable: Option<&'stat
         "SELECT * FROM supervisor_inbox
           WHERE supervisor_id=? AND kind=? AND state!='handled' AND {owner}=?
           ORDER BY created_at ASC, rowid ASC",
-        owner = "COALESCE(claimed_by, role)"
+        owner = roles::OWNER
     ))
     .bind(store::SUPERVISOR_ID)
     .bind(REASSIGNABLE)
@@ -102,8 +102,8 @@ pub async fn reassign_stale_approvals(app: &Arc<App>, unavailable: Option<&'stat
     };
     let mut moved = 0usize;
     for e in &open {
-        // 門檻在這裡判，不在 SQL。`owner` 用 `COALESCE(claimed_by, role)`，跟查詢同一個定義。
-        let owner = e.claimed_by.clone().or_else(|| e.role.clone()).unwrap_or_default();
+        // 門檻在這裡判，不在 SQL。`owner` 走 `roles::owner_or_default`，跟查詢的 `roles::OWNER` 同一個定義。
+        let owner = roles::owner_or_default(e.claimed_by.as_deref(), e.role.as_deref());
         if !should_reassign(age_secs(&e.created_at), &owner, Some(reason)) {
             continue;
         }
@@ -135,13 +135,14 @@ async fn reassign_one(app: &Arc<App>, e: &store::InboxEvent, reason: &str, now: 
     // `notify_*` 一起歸零：那些次數是協調者送不出去累積的，留著會吃掉巡檢的補送額度
     // （`roles::due_for` 對巡檢有 `notify_attempts < max` 的上限），等於改派過去就已經用完了。
     // `claimed_by` 清掉、`state` 回 pending：巡檢還沒被告知過這一則。
-    let n = sqlx::query(
+    let n = sqlx::query(&format!(
         "UPDATE supervisor_inbox
             SET role='patrol', claimed_by=NULL, wake=1, state='pending', payload_json=?,
                 notify_attempts=0, notify_next_at=NULL, notify_turn_id=NULL, notify_delivery=NULL,
                 notify_error=NULL, delivered_at=NULL, updated_at=?
-          WHERE id=? AND COALESCE(claimed_by, role)='responder' AND state!='handled'",
-    )
+          WHERE id=? AND {owner}='responder' AND state!='handled'",
+        owner = roles::OWNER
+    ))
     .bind(payload.to_string())
     .bind(now)
     .bind(&e.id)
@@ -180,7 +181,10 @@ fn age_secs(iso: &str) -> i64 {
 
 /// 改派之後誰擁有這一則。測試與 SPEC 都讀這個。
 pub async fn owner_of(pool: &sqlx::SqlitePool, event_id: &str) -> anyhow::Result<Option<String>> {
-    Ok(sqlx::query_scalar("SELECT COALESCE(claimed_by, role) FROM supervisor_inbox WHERE id=?").bind(event_id).fetch_optional(pool).await?)
+    Ok(sqlx::query_scalar(&format!("SELECT {owner} FROM supervisor_inbox WHERE id=?", owner = roles::OWNER))
+        .bind(event_id)
+        .fetch_optional(pool)
+        .await?)
 }
 
 #[cfg(test)]

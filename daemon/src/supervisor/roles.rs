@@ -546,7 +546,32 @@ pub async fn bot_for(pool: &SqlitePool, role: Role) -> Result<Option<String>> {
 /// 交錯：雙角色剛啟用時，先前由巡檢收走（`claimed_by='patrol'`）的協調事件會被 recover 放回
 /// pending，若只看 `role` 就會被協調者撈去送，而 `mark_delivered` 的 claim 守衛又不讓它寫成
 /// delivered——同一則事件每個 tick 送一次，兩邊都以為是自己的。
-const OWNER: &str = "COALESCE(claimed_by, role)";
+///
+/// `pub` 是因為 incident 探針也要用同一份（issue #504）：`store::exhausted_inbox` 以前自己寫
+/// `COALESCE(role, 'patrol')`，於是 `role='responder'` 而 `claimed_by='patrol'` 的列——也就是
+/// 單角色時期巡檢收走的、以及 [`migrate`] 回填過的那些——對兩個探針**同時**隱形：
+/// `notify_exhausted` 看 `role` 說它是協調者的、`responder_undelivered` 看 `OWNER` 說它是巡檢的，
+/// 而 [`due_for`] 早就因為 `notify_attempts < max` 不再送它了。抄第二份就是這樣漏的。
+pub const OWNER: &str = "COALESCE(claimed_by, role)";
+
+/// 讀不出主人時的答案。整個 supervisor 只有這一個：巡檢是使用者入口，也是不認得的事件的預設收件人
+/// （見 [`route`]）。以前三個呼叫端各寫各的（`unwrap_or_default()` 的空字串、`"patrol".into()`、
+/// 什麼都不補），同一個問題三種答案（issue #504 審核）。
+pub const DEFAULT_OWNER: &str = "patrol";
+
+/// [`OWNER`] 的 Rust 版：同一個 `COALESCE`，同一個順序。
+///
+/// SQL 那一份給查詢用，這一份給手上已經有列的呼叫端用（`recover_unacked`、`give_up_on`、
+/// `reassign_stale_approvals`、[`ack`]）。兩份必須永遠給同一個答案，所以順序寫死在這裡，
+/// 而不是讓每個呼叫端自己 `claimed_by.or(role)`——寫反了就是「送的人」與「本來該歸誰」對調。
+pub fn owner(claimed_by: Option<&str>, role: Option<&str>) -> Option<String> {
+    claimed_by.or(role).map(str::to_string)
+}
+
+/// 同上，但兩欄都空時回 [`DEFAULT_OWNER`]。要一個字串（寫進 payload、比對角色名）的呼叫端用這支。
+pub fn owner_or_default(claimed_by: Option<&str>, role: Option<&str>) -> String {
+    owner(claimed_by, role).unwrap_or_else(|| DEFAULT_OWNER.to_string())
+}
 
 /// 這個角色這一輪可以送的事件（最舊在前）。
 ///
@@ -681,7 +706,7 @@ pub async fn ack(pool: &SqlitePool, id: &str, actor: Role, responder_configured:
     if state == "handled" {
         return Ok(AckOutcome::AlreadyHandled);
     }
-    Ok(AckOutcome::ClaimedByOther(claimed.or(role).unwrap_or_else(|| "patrol".into())))
+    Ok(AckOutcome::ClaimedByOther(owner_or_default(claimed.as_deref(), role.as_deref())))
 }
 
 /// 巡檢的合併去重（今天 fable 用量最大的來源）。在送之前、每個 tick 跑一次：
@@ -965,6 +990,61 @@ mod tests {
             }
         }
         kinds
+    }
+
+    /// issue #504 審核：歸屬的定義只准有一份，而且只准在這個檔案裡。
+    ///
+    /// #504 就是抄第二份抄漏的（`store::exhausted_inbox` 寫成 `COALESCE(role, 'patrol')`），
+    /// 而當時 SQL 有 6 份字面、Rust 側的 NULL fallback 有三種不同寫法（空字串／`"patrol"`／不補）。
+    /// 掃原始碼是唯一擋得住「下一個人再抄一份」的方式：型別系統對字串沒有意見。
+    #[test]
+    fn the_owner_definition_lives_in_exactly_one_place() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    out.push(p);
+                }
+            }
+        }
+        // 執行期讀，不是 `include_str!`：那會把整棵原始碼變成這個測試的建置輸入。
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        walk(&root, &mut files);
+        assert!(files.len() > 10, "掃不到檔案就不算掃過");
+        let squash = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+        // 比對的字串**由 `OWNER` 現算**，不在這裡再打一次：打出來的話這個檔案自己就有兩份字面，
+        // 而「只准有一份」的那條斷言會被自己弄紅（也等於又多抄了一份，正是要擋的事）。
+        let needle = squash(OWNER);
+        let mut sql_here = 0usize;
+        let mut strays: Vec<String> = Vec::new();
+        for f in &files {
+            let at = f.strip_prefix(&root).unwrap().display().to_string();
+            let is_this_file = at == "supervisor/roles.rs";
+            for (n, line) in std::fs::read_to_string(f).unwrap().lines().enumerate() {
+                let flat = squash(line);
+                let sql = flat.contains(&needle);
+                // Rust 側自己補 NULL fallback 的三種寫法都算（`.or(`／`.or_else(`）。
+                let rust = flat.contains("claimed_by") && (flat.contains(".or(") || flat.contains(".or_else("));
+                if !(sql || rust) {
+                    continue;
+                }
+                if is_this_file {
+                    sql_here += usize::from(sql);
+                    continue;
+                }
+                strays.push(format!("{at}:{}: {}", n + 1, line.trim()));
+            }
+        }
+        // 撈取本身要撈得到東西：否則哪天比對字串壞掉，這個測試會安靜地變成恆真。
+        assert_eq!(sql_here, 1, "roles.rs 裡應該剛好只有 OWNER 那一行是字面的 SQL");
+        assert!(
+            strays.is_empty(),
+            "歸屬要走 roles::OWNER / roles::owner / roles::owner_or_default，不要再抄一份：\n{}",
+            strays.join("\n")
+        );
     }
 
     /// 每一種寫進 inbox 的 kind 都要在路由表有**明寫**的分支（review 2026-09-16 新發現 5）。

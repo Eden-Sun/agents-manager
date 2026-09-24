@@ -960,15 +960,18 @@ pub async fn status_json(app: &Arc<App>) -> Result<Value, LcError> {
         "effort": run.as_ref().and_then(|r| r.runtime_effort.clone()),
         "started_at": run.as_ref().map(|r| r.started_at.clone()),
     });
-    let open: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE COALESCE(claimed_by, role)='responder' AND state!='handled'")
-            .fetch_one(&app.db)
-            .await
-            .map_err(up)?;
+    let open: i64 = sqlx::query_scalar(&format!(
+        "SELECT COUNT(*) FROM supervisor_inbox WHERE {owner}='responder' AND state!='handled'",
+        owner = roles::OWNER
+    ))
+    .fetch_one(&app.db)
+    .await
+    .map_err(up)?;
     // 還沒送出、會叫醒它的事件。協調者沒在跑時這個數字就是「有人在等、而沒有人會被叫醒」（health.rs）。
-    let wake_pending: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM supervisor_inbox WHERE COALESCE(claimed_by, role)='responder' AND state='pending' AND COALESCE(wake, 1)=1",
-    )
+    let wake_pending: i64 = sqlx::query_scalar(&format!(
+        "SELECT COUNT(*) FROM supervisor_inbox WHERE {owner}='responder' AND state='pending' AND COALESCE(wake, 1)=1",
+        owner = roles::OWNER
+    ))
     .fetch_one(&app.db)
     .await
     .map_err(up)?;

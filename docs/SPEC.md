@@ -3009,7 +3009,7 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
 | `bot_stopped` | `autostart=1` 的 bot 沒有 active run | `bot_stopped_secs`（300） |
 | `assignment_stalled` | 未結案交辦 `updated_at` 沒動 | `assignment_stalled_secs`（7200） |
 | `assignment_undelivered` | 仍 `queued`、從沒送出，用 `created_at` 算 | `assignment_stalled_secs`（7200） |
-| `notify_exhausted` | 通知重送用盡 | `notify_max_attempts`（5） |
+| `notify_exhausted` | 巡檢的通知重送用盡（歸屬用 §18.15 的 `COALESCE(claimed_by, role)`，不是 `role`——巡檢收走的協調類事件也是巡檢的）。**一個巡檢一筆**（resource=`patrol`），detail 帶 `events`（真正的筆數）、`sampled`、最舊那一則與 `max_attempts`／`error`；查詢一輪最多讀回 `EXHAUSTED_SCAN_LIMIT`（20）則做樣本，`events` 不受上限影響。一則一張會讓巡檢停在登入失效那一晚開出上百張 critical、各推一則通知給協調者（issue #504） | `notify_max_attempts`（5，`<1` 夾成 1，同送出那一路） |
 | `inbox_classify_failing` | `roles::classify` 連續失敗（新事件分不到角色，對兩個通知者同時隱形） | 連續 3 拍（tick 10 秒，約 30 秒） |
 | `role_unavailable` | 角色 bot（協調者**與巡檢**，resource 是角色名）不可用：停在登入失效＝critical，`notify_stalled`＝degraded（見 §18.15）。**收件人看故障的是誰**：`resource='patrol'` 送協調者、`resource='responder'` 送巡檢（同 `watchdog_gave_up` 的對稱規則——送給故障的那一顆等於送進已知壞掉的那條路）；協調者沒建立時巡檢那一筆不推 inbox，只留在 UI 與 `system_health`。舊名 `responder_needs_login` 在 migrate 改寫過來（issue #459） | `ROLE_UNAVAILABLE_HOLD_SECS`（60＝連兩拍） |
 | `responder_undeliverable` | 協調者的事件送了 5 次還在 `pending`（不管原因），一個協調者一筆（resource=`responder`），critical | `RESPONDER_UNDELIVERED_ATTEMPTS`（5） |
@@ -3449,6 +3449,12 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
   「還在 pending、`claimed_by='patrol'`、沒有任何送達痕跡、沒人 ack」的列放回路由表（`mark_delivered` 寫 claim 時一定
   同時寫送達痕跡，所以這種列只可能出自那次回填），真的被角色收走或結案的工作一律不碰。
 - **一件事只有一個角色**：擁有者的定義是 `COALESCE(claimed_by, role)`——送出去之後看實際收的人，還沒送就看路由表。
+  這個字串只有**一份**（`roles::OWNER`），Rust 側的同一份是 `roles::owner` / `roles::owner_or_default`
+  （兩欄都空時一律 `patrol`）；待送查詢、`ack` 的守衛、UI 過濾、改派、協調者面板的計數、**兩個 incident 探針**
+  （`notify_exhausted`／`responder_undeliverable`）與 §18.15 的 notify 回合歸屬全部走它，有一條原始碼掃描測試擋新的字面寫法。
+  抄第二份就是 issue #504：`exhausted_inbox` 寫成 `COALESCE(role, 'patrol')`，於是「`role='responder'` 而 `claimed_by='patrol'`」
+  的列（單角色時期巡檢收走的、以及升級回填過的）用完巡檢的補送額度之後對兩個探針同時隱形——待送查詢不再選它，
+  兩張 incident 也都撈不到，事件永遠停在 `pending`。
   兩個角色的待送查詢、`ack` 的守衛與 UI 過濾都用這一條，所以雙角色剛啟用時、先前由巡檢收走（`claimed_by='patrol'`）
   而被 recover 放回 pending 的協調事件仍歸巡檢，不會被協調者撈去送、卻又寫不進 delivered（每個 tick 重送一次）。
   送出時以 `claimed_by` 條件更新；`ack` 的守衛跟寫入在同一句 SQL（先讀後寫之間 claim 會變），帶角色 bot token 時只能結自己收的（另一個角色的回 409 `claimed_by_other_role`），UI／使用者照舊全能結。
