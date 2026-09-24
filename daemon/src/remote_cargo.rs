@@ -2073,10 +2073,10 @@ mod tests {
         assert_eq!(pick(&GcPolicy { shared_idle_secs: 6 * 3600, max_shared: 1 }), names(&["a1", "a2", "a3", "a4", "a5", "a6", "aa"]));
     }
 
-    /// 政策從設定來：閒置小時數至少算 1（0 不能變成「馬上收光」），預設 3 小時、最多 8 份，舊設定沒寫這兩個 key 也是預設。
+    /// 政策從設定來：閒置小時數至少算 1（0 不能變成「馬上收光」），預設 3 小時、最多 12 份（issue #417），舊設定沒寫這兩個 key 也是預設。
     #[test]
     fn the_gc_policy_comes_from_the_remote_settings() {
-        assert_eq!(GcPolicy::default(), GcPolicy { shared_idle_secs: 3 * 3600, max_shared: 8 });
+        assert_eq!(GcPolicy::default(), GcPolicy { shared_idle_secs: 3 * 3600, max_shared: 12 });
         let cfg = BuildRemoteCfg { shared_idle_hours: 0, max_shared_dirs: 3, ..Default::default() };
         assert_eq!(GcPolicy::from_cfg(&cfg), GcPolicy { shared_idle_secs: 3600, max_shared: 3 });
         let old: BuildRemoteCfg = toml::from_str("host = \"h\"\n").unwrap();
