@@ -18,6 +18,9 @@ bun run build                   # tsc -b && vite build → web/dist，release da
 node --test --experimental-strip-types src/**/*.test.ts   # 純函式單元測試
 ```
 
+- `bun test`（`scripts/check.sh web`／CI）經 `web/bunfig.toml` 的 preload 把 `node:test` 對到 `bun:test`：bun 1.3.14 內建的 node:test 墊片在一條 async 測試失敗後會讓之後每個檔都報 `test() inside another test()`（#426）。測試用到新的 node:test API 時要補進 `web/test/node-test-shim.ts`。
+- 測試不要用固定毫秒等非同步結果（負載高就假紅，#426）：等條件成立——假 fetch 由測試手動放行、逾時由注入的 signal 手動 abort，只用 `setTimeout(r, 0)` 清一輪 macrotask。
+
 - `vite.config.ts` 把 `/api`、`/hook` 轉 http、`/ws` 轉 ws，**`changeOrigin: true` 必要**（daemon 檢查 `Host`）；`server.host: true` 讓手機／LAN 連得到。
 - 有 AGM 的機器上 5173 由看門狗維護、只跟 `origin/main`（SPEC §18.1）；驗自己未提交的改動用自己的 port。
 - UI 改動要看真畫面（ego-browser 或 `scripts/` 裡的截圖腳本），手機至少看 390px。
