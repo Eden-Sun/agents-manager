@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { restoreQueued } from './queuedSend.ts'
+import { clearFilesIfOwned, restoreQueued } from './queuedSend.ts'
 
 const pending = { text: '排隊那句', attachments: ['a1', 'a2'] }
 
@@ -28,4 +28,23 @@ test('別顆 bot 的佇列與草稿不受影響', () => {
   const r = restoreQueued(s, 'b1', pending)
   assert.deepEqual(r.patch.queuedSends, { b2: s.queuedSends.b2, b1: pending })
   assert.equal(r.patch.drafts, undefined)
+})
+
+test('清托盤先認 bot：還在同一顆才清（issue #496）', () => {
+  let cleared = 0
+  const clear = clearFilesIfOwned(() => (cleared += 1), 'b1', () => 'b1')
+  clear()
+  assert.equal(cleared, 1)
+})
+
+test('送出中切去別顆：收尾不清托盤，新那顆剛加的附件留著', () => {
+  let cleared = 0
+  let selected: string | null = 'b1'
+  const clear = clearFilesIfOwned(() => (cleared += 1), 'b1', () => selected)
+  selected = 'b2'
+  clear()
+  assert.equal(cleared, 0)
+  selected = null
+  clear()
+  assert.equal(cleared, 0)
 })
