@@ -97,10 +97,11 @@ export async function runUpload(deps: UploadDeps, key: string, file: File, compr
       deps.onPrepared(out)
     }
     deps.dispatch({ type: 'uploading', key })
+    const worthDrawing = progressGate()
     const a = await deps.upload(out, {
       signal,
-      onProgress: (loaded) => {
-        if (!signal.aborted) deps.dispatch({ type: 'progress', key, loaded })
+      onProgress: (loaded, total) => {
+        if (!signal.aborted && worthDrawing(loaded, total)) deps.dispatch({ type: 'progress', key, loaded })
       },
     })
     if (signal.aborted) return
@@ -110,6 +111,28 @@ export async function runUpload(deps: UploadDeps, key: string, file: File, compr
     const msg = e instanceof Error ? e.message : String(e)
     deps.dispatch({ type: 'failed', key, error: msg, retryable: !(e instanceof TooLargeError) })
     deps.onError(file.name, msg)
+  }
+}
+
+/**
+ * 一次上傳的進度節流（issue #438）：**只有卡片上那行字真的會變時才值得 dispatch**。
+ *
+ * XHR 的上傳進度事件依規範最密約每 50 ms 一次（≈20 次／秒），而這張卡片的 state 住在
+ * `ChatPanel`，所以每一次 dispatch 都會重繪整個聊天面板，包含沒有 memo 的訊息列
+ * （`MessageList` 每次重繪都會對所有 turn 做一次 filter+sort）。50 MB 在慢網路上要好幾分鐘，
+ * 那就是好幾千次重繪，而使用者看得到的變化只有 [`progressLabel`] 那行字。
+ *
+ * 用「畫出來的字」當閘門而不是固定時間或固定百分比：門檻自動跟著顯示精度走，
+ * 之後有人把文案改成更細或更粗，節流也跟著對，不會出現「字會變但沒重繪」的落差。
+ * 50 MB 的上限是 0.1 MB 與 1% 兩種精度裡較細的那個，約 500 階。
+ */
+export function progressGate(): (loaded: number, total: number) => boolean {
+  let shown = ''
+  return (loaded, total) => {
+    const next = progressLabel(loaded, total)
+    if (next === shown) return false
+    shown = next
+    return true
   }
 }
 

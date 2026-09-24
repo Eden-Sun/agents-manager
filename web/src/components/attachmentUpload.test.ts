@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { pendingReducer, progressLabel, runUpload, uploadPercent } from './attachmentUpload'
+import { pendingReducer, progressGate, progressLabel, runUpload, uploadPercent } from './attachmentUpload'
 import type { Pending, PendingAction, UploadDeps } from './attachmentUpload'
 import type { UploadOptions } from '../api/transport'
 import { abortError } from '../api/transport'
@@ -61,6 +61,47 @@ test('進度事件推進卡片：已傳位元組跟著 onProgress 走，送完�
   await done
   assert.equal(h.items[0].id, 'att1')
   assert.equal(h.errors.length, 0)
+})
+
+test('進度重繪節流：50 MB 只在卡片那行字會變時才 dispatch，而且一階都沒少（issue #438）', async () => {
+  const h = harness()
+  const ctl = new AbortController()
+  const done = runUpload(h.deps, 'a1', new File(['x'], 'big.zip'), false, ctl.signal)
+  await tick()
+  const total = 50 * MB
+  // XHR 的上傳進度事件最密約每 50 ms 一次；5 分鐘的上傳就是這個量級。
+  const events = 6000
+  const raw: number[] = []
+  for (let i = 1; i <= events; i++) raw.push(Math.round((total * i) / events))
+  for (const loaded of raw) h.opts!.onProgress!(loaded, total)
+
+  const drawn = h.actions.filter((a) => a.type === 'progress').map((a) => (a as { loaded: number }).loaded)
+  // 節流前是每個事件一次；節流後只剩文字真的會變的次數（0.1 MB 與 1% 裡較細的那個，約 500 階）。
+  assert.ok(drawn.length < events / 8, `${events} 個事件應該被節流到幾百次，實際 ${drawn.length}`)
+
+  // **一階都不能少**：節流不是抽樣——原始事件流會畫出來的每一種文字都要真的被送出去過，
+  // 否則卡片會跳號（例如從 12% 直接跳到 14%）。
+  const seen = new Set(drawn.map((l) => progressLabel(l, total)))
+  const every = new Set(raw.map((l) => progressLabel(l, total)))
+  assert.deepEqual([...seen].sort(), [...every].sort(), '看得到的每一階都要有對應的 dispatch')
+  // 而且順序是遞增的，不會把舊的值蓋回去。
+  assert.deepEqual(drawn, [...drawn].sort((a, b) => a - b))
+
+  h.settle.resolve('att1')
+  await done
+  assert.equal(h.items[0].id, 'att1')
+})
+
+test('節流閘門本身：同一行字只放行一次，字變了才再放行（issue #438）', () => {
+  const gate = progressGate()
+  const total = 50 * MB
+  assert.equal(gate(0, total), true, '第一次一定要畫')
+  assert.equal(gate(1024, total), false, '1 KB 看不出來')
+  assert.equal(gate(2048, total), false)
+  assert.equal(gate(0.1 * MB, total), true, '0.1 MB 就是文字的最小刻度')
+  assert.equal(gate(0.1 * MB + 1, total), false)
+  // 每一張卡片各自一個閘門，不會互相影響。
+  assert.equal(progressGate()(0.1 * MB, total), true)
 })
 
 test('× 中止：signal 真的交到 transport、被 abort，卡片不記失敗也不跳通知', async () => {
