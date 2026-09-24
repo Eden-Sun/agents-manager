@@ -1758,6 +1758,35 @@ mod approval_decision_tests {
         std::fs::remove_dir_all(&app.data_dir).unwrap();
     }
 
+    /// issue #436（i264 的審核）：守衛「查不出申請人是誰就不敢核准」這條路本來沒有測到——
+    /// `requester_lookup_failed` 在整個 daemon 只出現在產生它的那一行，`try_requester_bot_id` 的 `Err`
+    /// 分支從沒被走過。以後有人把它改回 `requester_bot_id`（把讀取失敗吞成 `None`），洞會無聲回來而全套照綠。
+    ///
+    /// 這裡只弄壞 `runs`：`requester` 是 agent 名那一段才查它（`try_requester_bot_id` 的最後一步），
+    /// 呼叫端自己的身分驗證只讀 `bots`，所以壞的剛好是「查申請人」這一步——403 與 503 分得開。
+    #[tokio::test]
+    async fn an_unreadable_db_refuses_the_approval_instead_of_guessing_it_is_someone_else() {
+        let app = app().await;
+        let h = agm_role_headers(&app).await;
+        // 申請人是個解析不到 bot 的名字：DB 正常時 `Ok(None)`＝不是自我核准，照常放行。
+        let body: ApprovalIn =
+            serde_json::from_value(json!({"requester": "some-agent-name", "purpose": "rebuild", "scope": "daemon", "request_id": "u-1"}))
+                .unwrap();
+        let Json(a) = post_approval(State(app.clone()), HeaderMap::new(), Json(body)).await.unwrap();
+        let id = a["id"].as_str().unwrap().to_string();
+
+        sqlx::query("DROP TABLE runs").execute(&app.db).await.unwrap();
+        let decision: DecisionIn = serde_json::from_value(json!({"decision": "approve"})).unwrap();
+        let err = post_approval_decision(State(app.clone()), Path(id.clone()), h, Json(decision)).await.unwrap_err();
+        let LcError::Unavailable(v) = &err else { panic!("讀不到就不該猜『不是它』，要回 503：{err:?}") };
+        assert_eq!(v["reason"], "requester_lookup_failed");
+        assert_eq!((v["retryable"].as_bool(), v["sent"].as_bool()), (Some(true), Some(false)));
+        assert_eq!(store::approval(&app.db, &id).await.unwrap().unwrap().status, "pending", "沒查清楚就不能動那筆");
+
+        app.db.close().await;
+        std::fs::remove_dir_all(&app.data_dir).unwrap();
+    }
+
     pub(super) async fn agm_role_headers(app: &Arc<App>) -> HeaderMap {
         let id = crate::db::ulid();
         sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES ('p-agm','/tmp','AGM',?)")
