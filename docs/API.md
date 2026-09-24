@@ -523,7 +523,7 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 先對一次帳（pane 還在不在、port 有沒有在 listen）再回。`running` 期間 daemon 也有常駐監看（SPEC §6.12），server 半路掛掉會自己轉 `failed`（`attached` 轉 `off`）並推 `preview_changed`，不必等 GET。
 
 ### `POST /api/bots/{id}/preview`
-冪等啟動：已經 `starting`／`running` 就原樣回；`failed`／`off` 重新起（重挑 port）。body 可省略，或：
+冪等啟動：已經 `starting`／`running` 就原樣回；`failed`／`off` 重新起（重挑 port；`failed` 先關掉它留下的 pane，關不掉回 409 `preview_stop_failed`）。body 可省略，或：
 
 ```json
 {"mode": "auto | attach | spawn", "port": 5173, "dir": "/path/to/apps/site", "pid": 4242}
@@ -549,6 +549,7 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 | `no_free_port` | 5180 起的 100 顆都被佔了 |
 | `not_vite` | `mode=attach` 的 `port` 不是掃到的 dev server（body 帶 `port`） |
 | `stale_selection` | `mode=attach` 帶的 `pid`／`dir` 跟現在佔著那個 `port` 的行程對不上（body 帶現在的 `pid`／`dir`） |
+| `preview_stop_failed` | 要先收掉的舊預覽 pane 關不掉（`failed` 重試、明確換預覽時）；列維持原狀態 |
 
 ### `DELETE /api/bots/{id}/preview`
 `spawned` 關 pane、放掉 port；`attached` **只斷開，絕不動對方的 server**。回 `{"status":"off"}`；沒開過也是。bot 被停止／重啟／刪除、§6.11 閒置收 bot 時 daemon 也會做同一件事。
