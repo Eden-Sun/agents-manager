@@ -1188,16 +1188,24 @@ impl Lease {
             .spawn()
             .map_err(|e| anyhow::Error::new(Unreachable { why: format!("叫不起 {}：{e}", ssh_program()) }))?;
         let said = Arc::new(Mutex::new(String::new()));
-        if let Some(err) = child.stderr.take() {
-            let said = said.clone();
-            std::thread::spawn(move || {
-                for line in BufReader::new(err).lines().map_while(Result::ok) {
-                    eprintln!("{line}");
-                    if !line.trim().is_empty() {
-                        *said.lock().unwrap_or_else(|e| e.into_inner()) = line;
+        // 這條在 stderr 讀完（管線 EOF）時才會斷；失敗路徑靠它等那一行真的進到 `said` 再讀（issue #467）。
+        // 不送內容、只當完成訊號：成功路徑沒有人收，送內容會讓長時間的編譯把 channel 撐大。
+        let (relay_done, relay_rx) = std::sync::mpsc::channel::<()>();
+        match child.stderr.take() {
+            Some(err) => {
+                let said = said.clone();
+                std::thread::spawn(move || {
+                    for line in BufReader::new(err).lines().map_while(Result::ok) {
+                        eprintln!("{line}");
+                        if !line.trim().is_empty() {
+                            *said.lock().unwrap_or_else(|e| e.into_inner()) = line;
+                        }
                     }
-                }
-            });
+                    drop(relay_done);
+                });
+            }
+            // 沒有 stderr 可讀就當場斷訊號，否則失敗路徑會白等滿上限。
+            None => drop(relay_done),
         }
         let stdin = child.stdin.take();
         let stdout = child.stdout.take().ok_or_else(|| anyhow::anyhow!("remote workdir guard: no stdout"))?;
@@ -1229,7 +1237,13 @@ impl Lease {
                 match lease.finish().and_then(|st| st.code()) {
                     Some(EXIT_QUEUE_FULL) => return Err(anyhow::Error::new(QueueFull)),
                     Some(SSH_FAILED) => {
-                        // ssh 的原話（`Permission denied …` 之類）比「回 255」有用得多：看的人才知道要去修什麼。
+                        // 等轉發那條讀完再看（issue #467）：`finish()` 只保證 ssh 這個行程收掉了，**不保證**
+                        // 轉發執行緒已經把最後一行寫進 `said`。macOS 上剛好都來得及，Linux 上量到的是空字串，
+                        // 於是 `reason` 變成「什麼都沒說」而畫面上明明印著 `Permission denied`（#467 的紅）。
+                        // 行程已經收掉＝管線一定會 EOF，所以這裡等的是「馬上就會發生的事」；仍然給上限，
+                        // 不讓它變成 helper 卡住的新路（等不到就用手上有的，頂多少一句原話）。
+                        // 只送完成訊號（`Err(Disconnected)`＝讀完了），所以這裡等的是「斷線」而不是「收到值」。
+                        let _ = relay_rx.recv_timeout(std::time::Duration::from_secs(5));
                         let said = said.lock().unwrap_or_else(|e| e.into_inner()).clone();
                         let said = said.trim();
                         return Err(anyhow::Error::new(Unreachable {
@@ -2926,7 +2940,12 @@ mod guard_tests {
         let base = base();
         let (remote, cwd, data) = fake_remote(&base, 60, "exit 0\n");
         // 真的 ssh 被拒時就是這樣：訊息進 stderr、退出碼 255，stdout 一個字都沒有。
-        write_exec(&base.join("fakebin/ssh"), "echo 'me@fake: Permission denied (publickey,password).' >&2\nexit 255\n");
+        // 多寫一行前置訊息：`reason` 要帶的是**最後**那一行（ssh 的結論），而且這一段等得到 stderr 讀完
+        // （issue #467：以前沒等，Linux 上量到空字串、`reason` 變成「什麼都沒說」）。
+        write_exec(
+            &base.join("fakebin/ssh"),
+            "echo 'OpenSSH_9.0, LibreSSL 3.3.6' >&2\necho 'me@fake: Permission denied (publickey,password).' >&2\nexit 255\n",
+        );
         let rc = with_fake_transport(&base, || run_offload(&remote, &data, &cwd, &["test".to_string()], &Deadline::new(remote.timeout_secs)));
         assert_eq!(rc, EXIT_RUN_LOCALLY, "連不進去＝遠端沒動手，退回本機（不是 126＝驗證失敗）");
 
@@ -2935,6 +2954,7 @@ mod guard_tests {
         assert_eq!(h.target, "me@fake:22", "記的是連哪一台（設定換主機之後看得出來是舊的）");
         let why = h.reason.as_deref().unwrap_or_default();
         assert!(why.contains("Permission denied"), "要帶 ssh 自己說的那一句，不是只有「回 255」：{h:?}");
+        assert!(!why.contains("LibreSSL"), "帶的是最後那一行（結論），不是開頭的版本行：{h:?}");
 
         // 這一段就是印在 stderr 的東西：第一行要自己講完「連不上誰、改在本機跑」。
         let note = unreachable_note(&remote, &auth_desc(&remote, &data), why);
