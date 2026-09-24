@@ -2517,9 +2517,12 @@ async fn create_approval_inner(
     let auto_supersedes = match supersedes.map(str::trim).filter(|s| !s.is_empty()) {
         Some(_) => None,
         None => sqlx::query_scalar::<_, String>(
+            // 挑最新用**插入序**（`rowid`）：`created_at` 只到毫秒，平手時比 `id`，而 ULID 同一毫秒內
+            // 只有隨機那段在變、不保證遞增——同毫秒兩筆 pending 時「最新那筆」會變成擲硬幣，
+            // 取代到比較舊的那筆，最新的留著，AGM 照樣被同一件事叫醒兩次（issue #446，同 #443）。
             "SELECT id FROM supervisor_approvals
               WHERE supervisor_id=? AND requester=? AND purpose=? AND status='pending'
-              ORDER BY created_at DESC, id DESC LIMIT 1",
+              ORDER BY rowid DESC LIMIT 1",
         )
         .bind(SUPERVISOR_ID)
         .bind(requester)
@@ -3346,6 +3349,47 @@ mod tests {
         }
         let rows = statuses(&p).await;
         assert_eq!(rows.iter().map(|(c, _)| c.as_str()).collect::<Vec<_>>(), vec!["first", "second"], "照寫入順序，不看 ULID 的亂數段");
+    }
+
+    /// **issue #446**：自動取代挑「最新那筆 pending」也要照插入序。
+    ///
+    /// 同毫秒兩筆 pending（兩個 `post_approval` 併發：`BEGIN DEFERRED` 下兩邊都先讀到「沒有 pending」，
+    /// 而 `supervisor_approvals` 沒有 `(requester, purpose, status)` 的唯一索引擋）時，舊的
+    /// `ORDER BY created_at DESC, id DESC` 會比到 ULID 的亂數段——取代到**比較舊**的那筆、最新的留著，
+    /// AGM 手上仍有兩筆 pending，正是 #421 要防的「被同一件事叫醒兩次」，而且是靜靜地錯
+    /// （`auto` 分支對不上時只會「不取代」，不報錯）。
+    ///
+    /// 這裡兩筆的 `created_at` 完全相同、**ULID 故意跟插入順序相反**（先寫 `01ZZZ…`、後寫 `01AAA…`），
+    /// 所以換回舊排序會當場紅，不必靠重跑碰運氣。
+    #[tokio::test]
+    async fn the_auto_supersede_picks_the_last_written_pending_not_the_larger_ulid() {
+        let p = pool().await;
+        let at = "2026-09-24T05:00:00.000Z";
+        // 先寫的 ULID 比較大：舊排序（id DESC）會挑到它，插入序（rowid DESC）會挑到後寫的那筆。
+        for (id, commit) in [("01ZZZZZZZZZZZZZZZZZZZZZZZZ", "older"), ("01AAAAAAAAAAAAAAAAAAAAAAAA", "newer")] {
+            sqlx::query(
+                "INSERT INTO supervisor_approvals
+                   (id, supervisor_id, requester, requester_unverified, purpose, scope, target_commit, status, created_at, updated_at)
+                 VALUES (?,?, 'agm-kick', 1, 'rebuild', 'release rebuild', ?, 'pending', ?, ?)",
+            )
+            .bind(id)
+            .bind(SUPERVISOR_ID)
+            .bind(commit)
+            .bind(at)
+            .bind(at)
+            .execute(&p)
+            .await
+            .unwrap();
+        }
+
+        let out = request(&p, "this-round").await;
+
+        assert_eq!(out.superseded.as_deref(), Some("01AAAAAAAAAAAAAAAAAAAAAAAA"), "取代的是後寫的那筆（插入序最新），不是 ULID 比較大的");
+        let by_id: std::collections::HashMap<String, String> =
+            sqlx::query_as::<_, (String, String)>("SELECT id, status FROM supervisor_approvals").fetch_all(&p).await.unwrap().into_iter().collect();
+        assert_eq!(by_id["01AAAAAAAAAAAAAAAAAAAAAAAA"], "superseded");
+        assert_eq!(by_id["01ZZZZZZZZZZZZZZZZZZZZZZZZ"], "pending", "先寫的那筆本來就不是最新的，這一輪不動它");
+        assert_eq!(by_id[&out.approval.id], "pending", "新開的這筆是 pending");
     }
 
     /// 連跑四輪只會留下一筆 pending（票上那個晚上的形狀）。
