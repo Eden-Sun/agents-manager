@@ -32,7 +32,12 @@ pub enum Outcome {
 /// 主機（本機開機，或遠端連上並對帳成功）之後：先收過期的，再把這台主機上還開著的 `restart` intent 各補一次（**內嵌**——
 /// 呼叫端接著要做 autostart 判斷，必須先解決）；補不成的丟背景以 `recovery_retry_delay` 重試到用完次數。
 pub async fn recover_host(app: &Arc<App>, host: &str) {
-    match intents::expire_overdue(&app.db, &db::now()).await {
+    // 期限只算這顆 daemon 在線的時間（#508）：上一顆 boot 留下的先讓下面的 recovery 真的補一次，
+    // 不能在任何嘗試之前就被 TTL 收掉——daemon 死著的那段時間正是 intent 存在的理由。
+    // 主機清單給的是「還有沒有人會來補」：不在 config 裡的那台，它的 intent 現在就收掉並通知，
+    // 不然永遠等不到認領（見 `intents::expire_overdue` 的第 2、3 條）。
+    let known_hosts = app.hosts.names().await;
+    match intents::expire_overdue(&app.db, &db::now(), &app.boot_id, &known_hosts).await {
         Ok(expired) => {
             for i in expired {
                 tracing::error!(intent = %i.id, kind = %i.kind, subject = %i.subject_id, "intent expired before it could be completed; reported to AGM");
