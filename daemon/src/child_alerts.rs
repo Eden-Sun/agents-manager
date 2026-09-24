@@ -152,10 +152,16 @@ fn fingerprint(s: &str) -> u64 {
 
 /// 這個畫面該不該吵父 agent。`None` ＝不該。
 ///
-/// daemon 自己會按掉的畫面不算：問卷（`0: Dismiss`）與 `/model`／`/effort` 的確認框（`tui_prompts`
-/// 會替使用者按掉，幾秒後就不見了）。
+/// daemon 自己會按掉的畫面不算：`/model`／`/effort` 的確認框（`tui_prompts` 會替使用者按掉，
+/// 幾秒後就不見了），以及**daemon 還會自己按掉時**的問卷。
+///
+/// 問卷那一條要跟著 `tui_prompts::daemon_dismisses_survey()` 走（#485）：daemon 暫時不自動按鍵時
+/// 還把它排除掉，問卷就會變成「沒人按、也沒人知道」的靜默停擺——比誤按更糟。
 pub fn alertable_question(screen: &str) -> Option<String> {
-    if crate::tui_prompts::is_feedback_survey(screen) || crate::tui_prompts::is_switch_model_dialog(screen) {
+    if crate::tui_prompts::daemon_dismisses_survey() && crate::tui_prompts::is_feedback_survey(screen) {
+        return None;
+    }
+    if crate::tui_prompts::is_switch_model_dialog(screen) {
         return None;
     }
     question_from_screen(screen)
@@ -441,15 +447,26 @@ mod tests {
         assert!(!q.contains('│'), "{q}");
     }
 
-    /// daemon 自己會按掉的畫面不吵人：問卷與換模型確認框。
+    /// daemon 自己會按掉的畫面不吵人：換模型確認框一定不吵；問卷則**跟著 daemon 現在按不按鍵走**。
+    ///
+    /// #485：daemon 暫時不自動按問卷（沒有真畫面 fixture），那就必須吵——不然問卷會變成
+    /// 「沒人按、也沒人知道」的靜默停擺，比誤按更糟。等補上 fixture、`PRESS_KEYS_ON_SURVEY`
+    /// 改回 true，這裡自動回到「不吵」。
     #[test]
     fn dialogs_the_daemon_answers_itself_are_not_worth_a_message() {
-        let survey = " ● How is Claude doing this session? (optional)\n   1: Bad    2: Fine   3: Good   0: Dismiss\n";
-        assert!(alertable_question(survey).is_none());
         let switch = "   Switch model?\n   Your next response will be slower and use more tokens\n   ❯ 1. Yes, switch to Haiku 4.5\n     2. No, go back\n";
         assert!(alertable_question(switch).is_none());
         assert!(alertable_question("").is_none());
         assert!(alertable_question("   \n  \n").is_none());
+
+        // 問卷：兩種模式各自要對。畫面要有「不是空輸入列」這個前提才算問卷（#485 的守衛）。
+        let survey = " ● How is Claude doing this session? (optional)\n   1: Bad    2: Fine   3: Good   0: Dismiss\n > │\n";
+        assert!(crate::tui_prompts::is_feedback_survey(survey), "前提：這是問卷");
+        if crate::tui_prompts::daemon_dismisses_survey() {
+            assert!(alertable_question(survey).is_none(), "daemon 會自己按掉就不吵");
+        } else {
+            assert!(alertable_question(survey).is_some(), "daemon 不按就一定要吵，否則靜默停擺");
+        }
     }
 
     /// 同一個問題只講一次；問題變了才再講。指紋認的是內容，不是時間。
