@@ -56,9 +56,10 @@ pub async fn responder_state(app: &Arc<App>) -> RoleState {
 
 /// 巡檢與協調者共用同一套判斷。順序是「最確定的證據先講」。
 ///
-/// 只讀 DB，不讀畫面：`/api/supervisor/health` 與 `/api/supervisor/responder` 都會被 UI 高頻輪詢，
-/// 每次都去抓一次 pane 會把 herdr 打爆。畫面是 `responder::notify` 在**送不出去時**看的，
-/// 結論已經落在 `supervisor_roles.status` 上（#420）。
+/// 只讀 DB 與記憶體，**不在這裡讀畫面**：`/api/supervisor/health` 與 `/api/supervisor/responder`
+/// 都會被 UI 高頻輪詢，每次都去抓一次 pane 會把 herdr 打爆。畫面有兩條路看：`responder::notify`
+/// 在**送不出去時**看一次（結論落在 `supervisor_roles.status`，#420），以及 health 的 30 秒 tick
+/// 對兩個角色各看一次（結論落在 `App.role_faults`，#427——巡檢只有這一條路看得到）。
 pub async fn role_state(app: &Arc<App>, role: crate::supervisor::roles::Role) -> RoleState {
     let row = match crate::supervisor::roles::get(&app.db, role).await {
         Ok(row) => row,
@@ -77,13 +78,25 @@ pub async fn role_state(app: &Arc<App>, role: crate::supervisor::roles::Role) ->
     // 要它跑卻沒有 active run。`desired_running=0`（使用者自己停的）不是系統故障，
     // 但對「核准該給誰」來說一樣是不可用——沒有在跑的協調者不會裁示任何東西。
     match crate::db::active_run(&app.db, &bot_id).await {
-        Ok(Some(_)) => RoleState::Available,
-        Ok(None) => RoleState::Unavailable(REASON_NO_RUN),
+        Ok(Some(_)) => {}
+        Ok(None) => return RoleState::Unavailable(REASON_NO_RUN),
         Err(e) => {
             tracing::warn!(role = role.as_str(), error = ?e, "role_state：讀不到 active run");
-            RoleState::Unknown
+            return RoleState::Unknown;
         }
     }
+    // #427：health 的 30 秒 tick 看畫面看到的（`role_faults::refresh`；巡檢也看），加上 notify
+    // 連續沒完成。**排在 `active_run` 之後**：記憶體那張表會過期——bot 一停掉或重啟，上一輪的
+    // `needs_login` 還留著，排在前面會讓一顆已經停掉的協調者回 `needs_login` 而事實是 `no_run`。
+    // 兩個都是不可用，所以改派的決定不會錯，但那個字串會被原樣寫進 inbox payload 與 incident detail，
+    // 之後查事故的人會被它帶偏（i266 2026-09-24）。
+    //
+    // 空表（daemon 剛起來、第一拍還沒跑）與讀不到畫面都是 `None`：退回上面只看 DB 的結論，
+    // **不會**憑空變成 `Unavailable`（#421 的不變量）。這裡仍然不打 herdr，只讀記憶體。
+    if let Some(reason) = crate::supervisor::role_faults::reason(app, role).await {
+        return RoleState::Unavailable(reason);
+    }
+    RoleState::Available
 }
 
 impl RoleState {
@@ -343,6 +356,55 @@ mod tests {
 
         // #421 呼叫的是 responder_state()，它就是 role_state(Responder) 的別名，不能有第二套判斷。
         assert_eq!(responder_state(&app).await, role_state(&app, role).await);
+    }
+
+    /// #427：`role_state` 除了 DB，還要讀 health tick 每 30 秒看畫面得到的那張記憶體表。
+    /// 三件事一起釘：**空表不是故障**（daemon 剛起來那一分鐘不能把等著的核准全部改派一輪）、
+    /// 記憶體那份要**排在 `active_run` 之後**（停掉的角色要回 `no_run`，不是上一輪留下的
+    /// `needs_login`——兩個都是不可用，但錯的字串會被原樣寫進 inbox payload 帶偏事後追查），
+    /// 以及 `notify_stalled` 要真的走得通到 `is_unavailable()`（#421 靠它改派）。
+    #[tokio::test]
+    async fn role_state_also_reads_the_screen_conclusions_but_an_empty_table_is_not_a_fault() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let role = crate::supervisor::roles::Role::Responder;
+        // `runs` 對 `bots` 有 FK，所以這裡要真的把那顆 bot 建出來（不像只讀 DB 那條測試）。
+        sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES ('proj','/tmp','proj',?)")
+            .bind(crate::db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('resp-bot','proj','AGM-responder','claude','tok',?)")
+            .bind(crate::db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        crate::supervisor::roles::set_env(&app.db, role, "resp-bot", "proj", "/tmp").await.unwrap();
+        sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,started_at) VALUES ('run-resp','resp-bot','running','idle',?)")
+            .bind(crate::db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        // 表還沒被填過＝還沒有結論，不是「它壞了」。
+        assert_eq!(role_state(&app, role).await, RoleState::Available);
+
+        // 記憶體說 notify 一直沒跑完（那條路不會為巡檢寫 DB，只有這張表看得到）。
+        let failed = ["t1", "t2", "t3"].into_iter().map(str::to_string).collect();
+        crate::supervisor::role_faults::note_notify_round(&app, "responder", failed, false).await;
+        crate::supervisor::role_faults::refresh(&app).await;
+        let state = role_state(&app, role).await;
+        assert_eq!(state, RoleState::Unavailable(crate::supervisor::role_faults::REASON_NOTIFY_STALLED));
+        assert!(state.is_unavailable(), "#421 靠這個改派");
+
+        // bot 停掉：記憶體那份還留著上一輪的結論，但答案必須是 no_run，不是那個陳舊的原因。
+        sqlx::query("UPDATE runs SET state='stopped' WHERE id='run-resp'").execute(&app.db).await.unwrap();
+        assert_eq!(role_state(&app, role).await, RoleState::Unavailable(REASON_NO_RUN));
+
+        // DB 的 needs_login 仍然最權威（送不出去時寫的），排在記憶體那份前面。
+        sqlx::query("UPDATE runs SET state='running' WHERE id='run-resp'").execute(&app.db).await.unwrap();
+        crate::supervisor::roles::set_status(&app.db, role, "needs_login", None, None).await.unwrap();
+        assert_eq!(role_state(&app, role).await, RoleState::Unavailable(REASON_NEEDS_LOGIN));
     }
 
     /// 這三個字串是 #421 要寫進 inbox payload（`reassigned_reason`）與 SPEC 的對外契約，改了要一起改。
