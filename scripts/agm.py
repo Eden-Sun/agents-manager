@@ -738,7 +738,18 @@ def lease_token_of(args) -> str:
                     "請 chmod 600 之後重拿一次窗口",
                     2,
                 )
-            tok = fh.read().strip()
+            raw = fh.read()
+        # 多行就拒絕（i407 審核）：`.strip()` 只去頭尾空白，中間的換行會留在 token 裡整串送出去，
+        # daemon 只會回「token 不符」，查的人得自己想到 `wc -l`。缺檔、空檔都給了明確訊息，這個也要給。
+        lines = [ln for ln in raw.splitlines() if ln.strip()]
+        if len(lines) > 1:
+            raise AgmError(
+                "bad_args",
+                f"lease token 檔 {path} 有 {len(lines)} 行；token 是單獨一行，"
+                "多半是誤把別的東西也寫進去了（送出去只會換來一句 token 不符）",
+                2,
+            )
+        tok = lines[0].strip() if lines else ""
         if not tok:
             raise AgmError("bad_args", f"lease token 檔 {path} 是空的", 2)
         return tok

@@ -84,6 +84,20 @@ settle() {
   return 0
 }
 cleanup() { settle; rm -rf "$LOCK" 2>/dev/null || true; }
+# 交還 rebuild 窗口。**rc 不吞**（issue #477，i407 審核）：以前兩處都是 `… || true`，
+# release 真的失敗時（daemon 不在、fence 過期、token 對不上）窗口會一直握到 TTL，而 log 上一行
+# 已經寫了「交還窗口」，下一個人照 log 判斷就會判錯。$1 是為什麼要還，其餘參數是 token 的帶法。
+release_rebuild() {
+    local why="$1"; shift
+    local rc=0
+    "$AGM" --compact lease release rebuild --owner "$OWNER" --fence "$LEASE" "$@" >> "$LOG" 2>&1 || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        log "rebuild 窗口已交還（${why}）"
+    else
+        log "交還 rebuild 窗口失敗 rc=${rc}（${why}）：窗口仍被握著，要等 TTL 到期或請 AGM 用 --force 接管——不要當成已經還了"
+    fi
+    return "$rc"
+}
 take_lock() { mkdir "$LOCK" 2>/dev/null && { echo "$$ $(date +%s)" > "$LOCK/owner"; trap cleanup EXIT; return 0; }; return 1; }
 if ! take_lock; then
   _pid=$(cut -d' ' -f1 "$LOCK/owner" 2>/dev/null)
@@ -521,11 +535,10 @@ if [ -n "$LEASE_TOKEN" ]; then
     TOKEN_ARG=" --lease-token-file $TOKEN_FILE"
     TOKEN_TEXT=" --lease-token-file $TOKEN_FILE"
   else
-    note_fail "寫不進 lease token 檔，交還窗口，這輪不派"
+    note_fail "寫不進 lease token 檔，嘗試交還窗口，這輪不派"
     [ -n "$TOKEN_FILE" ] && rm -f "$TOKEN_FILE"
     # 檔寫不出來時走 stdin，仍然不讓 token 進 argv。
-    printf '%s' "$LEASE_TOKEN" \
-      | "$AGM" --compact lease release rebuild --owner "$OWNER" --fence "$LEASE" --lease-token - >> "$LOG" 2>&1 || true
+    printf '%s' "$LEASE_TOKEN" | release_rebuild "token 檔寫不出來" --lease-token - || true
     exit 0
   fi
 fi
@@ -557,9 +570,9 @@ if "$AGM" --compact assign --bot "$BOT" --text-file "$TMP" \
   if [ "$DEFERRED" = 1 ]; then echo "$APPR_COMMIT" > "$STATE"; else echo "$HEAD_SHA" > "$STATE"; fi
   log "已派工 agm-daemon-update-${APPR_COMMIT}（origin/main ${HEAD_SHA}）"
 else
-  note_fail "派工失敗，交還窗口"
+  note_fail "派工失敗，嘗試交還窗口"
   # shellcheck disable=SC2086  # TOKEN_ARG 是刻意要拆成兩個參數的（沒有 token 時是空字串）
-  "$AGM" --compact lease release rebuild --owner "$OWNER" --fence "$LEASE" $TOKEN_ARG >> "$LOG" 2>&1 || true
+  release_rebuild "派工失敗" $TOKEN_ARG || true
   [ -n "$TOKEN_FILE" ] && rm -f "$TOKEN_FILE"
 fi
 rm -f "$TMP"
