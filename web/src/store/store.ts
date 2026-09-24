@@ -323,6 +323,13 @@ export interface StoreState {
   /** The observed user's Herdr default session, used by imported default-session bots. */
   defaultConnected: boolean
   lastSeq: number
+  /**
+   * 最後一則**耐久**事件的 seq（`turn_progress` 不推進它，issue #482）。重連的 `?since=` 與
+   * 「快照是不是落後」都看它：`lastSeq` 被每個 run 每秒 4 幀的 progress 推著跑，拿它判斷等於
+   * 「只要 `GET /api/state` 的來回之間有任何一幀 progress 就算落後」，會一直多排 `/api/state`；
+   * 送它當 `since` 也讓 daemon 端 `backlog` 的 `since + 1 >= oldest` 落回精確（環裡只有耐久事件）。
+   */
+  lastDurableSeq: number
   /** `GET /api/state` failed; the sidebar may be behind until the next successful refresh. */
   stateStale: boolean
 
@@ -792,6 +799,7 @@ export const useStore = create<StoreState>((set, get) => ({
   connected: true,
   defaultConnected: false,
   lastSeq: 0,
+  lastDurableSeq: 0,
   stateStale: false,
 
   hosts: [],
@@ -897,7 +905,9 @@ export const useStore = create<StoreState>((set, get) => ({
     appliedStateSeq = seq
     // 快照在飛時 WS 已推進到更新的 seq：那些 frame（例如 `bot_status`）先套用過了，這份較舊的快照
     // 會把 run 狀態蓋回舊的。套完補抓一次；daemon 重啟（seq 變小）時下面會把 lastSeq 降下來，只多這一次。
-    const behindFrames = get().lastSeq > st.daemon_seq
+    // 看的是耐久 seq（issue #482）：`lastSeq` 會被 progress 推著跑，拿它判斷的話，只要快照的來回之間
+    // 落進任何一幀 progress 就算「落後」，於是在沒有任何耐久狀態改變時也一直多排一次 `/api/state`。
+    const behindFrames = get().lastDurableSeq > st.daemon_seq
     const runs: Record<string, Run | null> = {}
     for (const b of st.bots) runs[b.id] = st.runs.find((r) => r.bot_id === b.id) ?? null
     set((s) => {
@@ -956,6 +966,8 @@ export const useStore = create<StoreState>((set, get) => ({
         defaultConnected: st.default_connected,
         // daemon 重啟後 seq 變小要跟著降，否則 `?since=` 送未來數字會一直 `resync`。
         lastSeq: st.daemon_seq < s.lastSeq ? st.daemon_seq : Math.max(s.lastSeq, st.daemon_seq),
+        // 這份快照反映到 `daemon_seq` 為止的所有狀態，所以耐久 seq 也對到這裡（同樣要能往下降）。
+        lastDurableSeq: st.daemon_seq < s.lastDurableSeq ? st.daemon_seq : Math.max(s.lastDurableSeq, st.daemon_seq),
         selectedBotId: selected,
         selectedProjectId: selectedProject,
       }
@@ -2471,7 +2483,7 @@ const QUOTA_SWEEP_MS = 5 * 60_000
 function connectSocket(set: SetFn, get: GetFn) {
   disconnect?.()
   disconnect = api.openSocket({
-    since: () => get().lastSeq,
+    since: () => get().lastDurableSeq,
     onStatus: (socket) => {
       if (socket === 'open') {
         resetStateSeq()
@@ -2566,9 +2578,27 @@ function noteGroupCompletion(set: SetFn, get: GetFn, botId: string, turnId: stri
   })
 }
 
+/**
+ * 收到一幀之後的兩個 seq（issue #482）。純函式：`lastSeq` 是「看過的最後一幀」，
+ * `lastDurableSeq` 只跟著**會進 daemon 重播環**的幀走（`state::is_ephemeral` 的反面）。
+ *
+ * `turn_progress` 不算：它每個 run 每秒 4 幀，拿它推 `since` 會讓重連問到一個環裡沒有的 seq，
+ * 拿它判斷「快照落後了嗎」則會在沒有任何耐久改變時一直多排 `/api/state`。
+ * `resync` 也不算：它帶的是 daemon 當下的 seq（可能正好落在某一幀 progress 上），
+ * 而緊接著的 `refreshState` 會用快照的 `daemon_seq` 把兩個 seq 一起對正。
+ */
+export function seqAfterFrame(prev: { lastSeq: number; lastDurableSeq: number }, type: string, seq: number) {
+  const durable = type !== 'turn_progress' && type !== 'resync'
+  return {
+    lastSeq: Math.max(prev.lastSeq, seq),
+    lastDurableSeq: durable ? Math.max(prev.lastDurableSeq, seq) : prev.lastDurableSeq,
+  }
+}
+
 function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string; data?: unknown }) {
   if (typeof frame.seq === 'number') {
-    set((s) => ({ lastSeq: Math.max(s.lastSeq, frame.seq as number) }))
+    const seq = frame.seq
+    set((s) => seqAfterFrame(s, frame.type, seq))
   }
   const data = frame.data
   switch (frame.type) {
