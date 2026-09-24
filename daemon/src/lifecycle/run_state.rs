@@ -250,6 +250,7 @@ pub(crate) async fn bot_stopped_reported(app: &Arc<App>, bot_id: &str) -> bool {
         notify_max_attempts: 5,
         approval_stalled_secs: 1800,
         classify_failures: crate::supervisor::incidents::CLASSIFY_FAILURE_LIMIT,
+        spool_fold_stuck_rounds: crate::supervisor::incidents::SPOOL_FOLD_STUCK_LIMIT,
     };
     crate::supervisor::incidents::observe(app, &t).await.seen.iter().any(|o| o.kind == "bot_stopped" && o.resource == bot_id)
 }

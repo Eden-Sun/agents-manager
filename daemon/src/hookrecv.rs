@@ -1164,6 +1164,11 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
 
 const STATUS_MARKER: &str = "---AM-STATUS---";
 
+/// #500 複看：`am_fold` 跑完 `.claim` 還在＝這台的 spool 停收了，而且從外面看不出來——腳本 exit 0、
+/// `n = 0`、`drain_remote` 兩個 `info!` 都被 `n > 0` 擋著，一行 log 都不會有。遠端自己判斷得出來，
+/// 所以就地印一行（後面接 `.claim` 的位元組數），不必多一趟 ssh。
+const FOLD_STUCK_MARKER: &str = "AM_FOLD_STUCK";
+
 const DRAIN_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// The event can beat the spool write; retry once, still ahead of the 5s terminal fallback.
@@ -1172,8 +1177,16 @@ const DRAIN_RETRY: std::time::Duration = std::time::Duration::from_secs(2);
 /// Catches status events that never arrived (§11.4.4).
 const SCAN_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 
-fn parse_drain_output(text: &str) -> (Vec<&str>, Option<String>) {
-    let mut lines = Vec::new();
+#[derive(Default)]
+struct Drained<'a> {
+    lines: Vec<&'a str>,
+    status: Option<String>,
+    /// `Some(位元組數)`＝`.claim` 併不進 `.replaying`，這台的 spool 停收了（#500 複看）。
+    stuck_bytes: Option<i64>,
+}
+
+fn parse_drain_output(text: &str) -> Drained<'_> {
+    let mut out = Drained::default();
     let mut status: Option<String> = None;
     let mut it = text.lines();
     for line in it.by_ref() {
@@ -1182,11 +1195,17 @@ fn parse_drain_output(text: &str) -> (Vec<&str>, Option<String>) {
             break;
         }
         let l = line.trim();
+        if let Some(n) = l.strip_prefix(FOLD_STUCK_MARKER) {
+            // 數字讀不出來不影響判斷「卡住了」——標記本身才是訊號。
+            out.stuck_bytes = Some(n.trim().parse().unwrap_or(-1));
+            continue;
+        }
         if !l.is_empty() {
-            lines.push(l);
+            out.lines.push(l);
         }
     }
-    (lines, status.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()))
+    out.status = status.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    out
 }
 
 /// SPEC §11.4.3.
@@ -1203,7 +1222,9 @@ pub async fn drain_remote(app: &Arc<App>, host: &str, bot_id: &str) -> Result<us
     let root = crate::startup::remote_root_for(app.instance().as_deref());
     // 第一趟：claim（`mv` 成 `.replaying` 再 `cat`），**不刪**。遠端那份是唯一的副本。
     let text = conn.ssh_exec(&claim_script(bot_id, &root)?).await?;
-    let (lines, status) = parse_drain_output(&text);
+    let drained = parse_drain_output(&text);
+    let (lines, status) = (drained.lines, drained.status);
+    note_fold_stuck(app, host, bot_id, drained.stuck_bytes).await;
     let mut n = 0usize;
     for line in lines {
         match serde_json::from_str::<HookBody>(line) {
@@ -1242,6 +1263,31 @@ pub async fn drain_remote(app: &Arc<App>, host: &str, bot_id: &str) -> Result<us
     Ok(n)
 }
 
+/// #500 複看：`.claim` 卡住要有人知道。每輪更新一顆 bot 的連續次數，`supervisor::incidents` 的探針拿它開票。
+/// 計數在記憶體、重啟重算（SPEC §18.9）——重啟之後第一輪 drain 就會重新看到標記。
+async fn note_fold_stuck(app: &Arc<App>, host: &str, bot_id: &str, bytes: Option<i64>) {
+    let key = format!("{host}/{bot_id}");
+    let mut g = app.spool_fold_stuck.lock().await;
+    match bytes {
+        Some(bytes) => {
+            let e = g.entry(key).or_insert((0, bytes));
+            e.0 += 1;
+            e.1 = bytes;
+            tracing::warn!(
+                bot_id,
+                host,
+                claim_bytes = bytes,
+                rounds = e.0,
+                "remote spool is stuck: the claimed copy cannot be folded into .replaying, so nothing new is being taken"
+            );
+        }
+        // 併進去了：這一輪是好的，重新算。
+        None => {
+            g.remove(&key);
+        }
+    }
+}
+
 fn bots_dir(bot_id: &str, root: &str) -> Result<String> {
     if !valid_id(bot_id) {
         anyhow::bail!("invalid bot id `{bot_id}` (must match {ID_RE})");
@@ -1278,10 +1324,12 @@ fn claim_script(bot_id: &str, root: &str) -> Result<String> {
          cat \"$f.claim\" >> \"$f.replaying\" && rm -f \"$f.claim\"; }}\n\
          am_fold\n\
          if [ -f \"$f\" ] && [ ! -f \"$f.claim\" ]; then mv \"$f\" \"$f.claim\" && am_fold; fi\n\
+         if [ -f \"$f.claim\" ]; then printf '{stuck} %s\\n' \"$(wc -c < \"$f.claim\" | tr -d ' ')\"; fi\n\
          if [ -f \"$f.replaying\" ]; then cat \"$f.replaying\"; fi\n\
          s=\"$d/hook-status.json\"\n\
          if [ -f \"$s\" ]; then printf '\\n{marker}\\n'; cat \"$s\"; rm -f \"$s\"; fi\n",
-        marker = STATUS_MARKER
+        marker = STATUS_MARKER,
+        stuck = FOLD_STUCK_MARKER,
     ))
 }
 
@@ -1566,24 +1614,24 @@ mod drain_tests {
     #[test]
     fn spool_lines_and_the_status_slot_come_apart() {
         let out = "{\"bot_id\":\"b\"}\n{\"bot_id\":\"b\",\"provider\":\"claude\"}\n\n---AM-STATUS---\n{\n  \"session_id\": \"s\"\n}\n";
-        let (lines, status) = parse_drain_output(out);
-        assert_eq!(lines.len(), 2);
-        assert_eq!(status.as_deref(), Some("{\n  \"session_id\": \"s\"\n}"));
+        let d = parse_drain_output(out);
+        assert_eq!(d.lines.len(), 2);
+        assert_eq!(d.status.as_deref(), Some("{\n  \"session_id\": \"s\"\n}"));
+        assert!(d.stuck_bytes.is_none());
     }
 
     #[test]
     fn output_without_the_marker_is_all_spool() {
-        let (lines, status) = parse_drain_output("{\"bot_id\":\"b\"}\n");
-        assert_eq!(lines, vec!["{\"bot_id\":\"b\"}"]);
-        assert!(status.is_none());
-        let (lines, status) = parse_drain_output("");
-        assert!(lines.is_empty() && status.is_none());
+        let d = parse_drain_output("{\"bot_id\":\"b\"}\n");
+        assert_eq!(d.lines, vec!["{\"bot_id\":\"b\"}"]);
+        assert!(d.status.is_none());
+        let d = parse_drain_output("");
+        assert!(d.lines.is_empty() && d.status.is_none());
     }
 
     #[test]
     fn an_empty_status_slot_is_no_status() {
-        let (_, status) = parse_drain_output("---AM-STATUS---\n\n");
-        assert!(status.is_none());
+        assert!(parse_drain_output("---AM-STATUS---\n\n").status.is_none());
     }
 
     #[test]
@@ -4048,6 +4096,48 @@ mod spool_claim_window_tests {
 
         assert_eq!(std::fs::read_to_string(&claim).unwrap(), "OLD-CLAIM\n", "唯一的副本不准被蓋掉");
         assert_eq!(std::fs::read_to_string(&r.spool).unwrap(), "NEW\n", "新的 spool 留到下一輪");
+    }
+
+    /// #500 複看：`.claim` 併不進去時，卡住這件事要從遠端自己回報——腳本 exit 0、`n = 0`、
+    /// `drain_remote` 兩個 info 都被 `n > 0` 擋著，沒有這行標記就是一行 log 都沒有。
+    #[test]
+    fn a_claim_that_cannot_be_folded_reports_itself_as_stuck() {
+        let r = Remote::new();
+        let root = crate::startup::REMOTE_ROOT;
+        std::fs::write(r.spool.with_extension("jsonl.claim"), "OLD-CLAIM\n").unwrap();
+        std::fs::create_dir(r.spool.with_extension("jsonl.replaying")).unwrap();
+
+        let out = r.sh(&claim_script("botX", root).unwrap());
+        let d = parse_drain_output(&out);
+        assert_eq!(d.stuck_bytes, Some(10), ".claim 的位元組數要帶回來：{out:?}");
+        assert!(d.lines.is_empty(), "標記不可以被當成 spool 的一行：{:?}", d.lines);
+
+        // 併得進去的那一輪不准報卡住（不然每次 drain 都在喊狼來了）。
+        std::fs::remove_dir(r.spool.with_extension("jsonl.replaying")).unwrap();
+        let out = r.sh(&claim_script("botX", root).unwrap());
+        assert_eq!(parse_drain_output(&out).stuck_bytes, None, "{out:?}");
+    }
+
+    /// 連續看到才算數：併回去的那一輪要把計數清掉，不然一次卡住會永遠掛在那裡。
+    #[tokio::test]
+    async fn the_stuck_counter_only_counts_consecutive_rounds() {
+        let env = crate::testing::env().await;
+        let app = &env.app;
+        let rounds = |app: &Arc<App>| {
+            let app = app.clone();
+            async move { app.spool_fold_stuck.lock().await.get("mac2/b1").map(|e| e.0) }
+        };
+
+        note_fold_stuck(app, "mac2", "b1", Some(8)).await;
+        assert_eq!(rounds(app).await, Some(1));
+        note_fold_stuck(app, "mac2", "b1", Some(16)).await;
+        assert_eq!(rounds(app).await, Some(2));
+        assert_eq!(app.spool_fold_stuck.lock().await.get("mac2/b1").map(|e| e.1), Some(16), "大小跟著最新一輪");
+
+        note_fold_stuck(app, "mac2", "b1", None).await;
+        assert_eq!(rounds(app).await, None, "收成了就重新算");
+        note_fold_stuck(app, "mac2", "b1", Some(8)).await;
+        assert_eq!(rounds(app).await, Some(1), "不是接著上次算");
     }
 
     /// #501：`.replaying` 是 claim 腳本自己建的，裡面裝完整 payload——不能交給那台機器的 umask。
