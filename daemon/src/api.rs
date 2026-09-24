@@ -1007,6 +1007,15 @@ async fn delete_project(State(app): State<Arc<App>>, Path(id): Path<String>) -> 
     }
     #[cfg(test)]
     crate::lifecycle::race_point::hit("delete_project_after_commit", &id).await;
+    // 專案沒了，它底下還開著的任務也跟著收（issue #498）：任務沒有軟刪，而 `mission::store::open_unpaused`
+    // （`workflow::wake_stalled_at` 掃的那份）沒有存活性條件——不收的話它們永遠停在 open，十分鐘後還會推一則
+    // `mission_next` 要 AGM 去推一個專案與 bot 都不存在的任務。臨時 bot 照既有那條收（結案的任務才輪得到它）。
+    // 盡力而為：收不掉只記 log，不讓刪除回頭——專案在 config 裡已經定案刪除了。
+    match crate::mission::store::cancel_open_for_project(&app.db, &id, "project_deleted").await {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(project = %id, missions = n, "project deleted; its open missions were cancelled"),
+        Err(e) => tracing::error!(project = %id, error = ?e, "project deleted but its open missions could not be cancelled"),
+    }
     // config 投影只軟刪「不在 TOML 裡的 user bot」，child 本來就不進 TOML，所以會留下一批
     // `deleted_at IS NULL`、project 卻已經軟刪的列：UI 看不到、reconcile 也掃不到（`live_bots_on_host`
     // 要求專案還活著），它們的 pane 與 hook 目錄從此沒人回收（review 2026-09-16）。
@@ -4015,6 +4024,77 @@ mod delete_bot_tests {
         assert!(db::active_run(&app.db, &parent).await.unwrap().is_none(), "母 bot 已刪，它的 run 一定要停");
         sqlx::query("DROP TRIGGER am_test_fail_kid").execute(&app.db).await.unwrap();
         assert!(crate::testing::eventually!(db::bot(&app.db, &child).await.unwrap().unwrap().deleted_at.is_some()), "寫得進去之後背景補上");
+    }
+
+    /// issue #498：刪專案要把它底下**還開著**的任務一起收掉，並留下為什麼。
+    ///
+    /// 不收的話任務永遠停在 open（任務沒有軟刪），`workflow::wake_stalled_at` 十分鐘後還會推一則
+    /// `mission_next` 要 AGM 去推一個專案與 bot 都不存在的任務——「叫醒之後不再叫」那一半由
+    /// `mission::workflow` 的 `a_mission_whose_project_was_deleted_is_not_woken_any_more` 釘。
+    #[tokio::test]
+    async fn deleting_a_project_cancels_its_open_missions() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        // 專案要在 config.toml 裡，`delete_project` 才肯動（否則 409 not_in_config）。
+        let b1 = a_bot(&e, "alfa", "user").await;
+        in_config(&e, &[(&b1, "alfa")]).await;
+        let open = crate::mission::store::create(
+            &app.db,
+            &crate::mission::store::NewMission {
+                project_id: &e.project_id,
+                client_request_id: "crid-open",
+                text: "還開著的",
+                delivery_mode: "push_main",
+                executor_kind: "claude",
+                on_5h_limit: "wait",
+                max_rounds: 2,
+                parent_mission_id: None,
+            },
+        )
+        .await
+        .unwrap()
+        .0;
+        // 已經結案的那一筆不能被再寫一次（`cancelled_at` 只給還開著的）。
+        let done = crate::mission::store::create(
+            &app.db,
+            &crate::mission::store::NewMission {
+                project_id: &e.project_id,
+                client_request_id: "crid-done",
+                text: "早就完成的",
+                delivery_mode: "push_main",
+                executor_kind: "claude",
+                on_5h_limit: "wait",
+                max_rounds: 2,
+                parent_mission_id: None,
+            },
+        )
+        .await
+        .unwrap()
+        .0;
+        sqlx::query("UPDATE missions SET completed_at = ?, result_summary = '交付了' WHERE id = ?")
+            .bind(db::now())
+            .bind(&done.id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        delete_project(State(app.clone()), Path(e.project_id.clone())).await.unwrap();
+
+        let after = crate::mission::store::get(&app.db, &open.id).await.unwrap().unwrap();
+        assert!(after.cancelled_at.is_some(), "開著的任務要跟著專案收掉");
+        let ev = crate::mission::store::events(&app.db, &open.id).await.unwrap();
+        let last = ev.last().expect("有事件");
+        assert_eq!(last.kind, "cancelled");
+        let payload: Value = serde_json::from_str(&last.payload_json).unwrap();
+        assert_eq!(payload["reason"], "project_deleted", "為什麼被收要查得到：{payload}");
+
+        let done_after = crate::mission::store::get(&app.db, &done.id).await.unwrap().unwrap();
+        assert!(done_after.cancelled_at.is_none() && done_after.completed_at.is_some(), "已經結案的不動它");
+        assert_eq!(
+            crate::mission::store::events(&app.db, &done.id).await.unwrap().iter().filter(|e| e.kind == "cancelled").count(),
+            0,
+            "結案的任務不該多一則 cancelled"
+        );
     }
 
     /// #298：專案已刪的 child 不能還原成看不到的活 bot。

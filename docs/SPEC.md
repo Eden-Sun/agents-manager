@@ -3200,6 +3200,12 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
   還開著的交辦的角色」，同時開兩件時它就不是一個定義良好的答案——任務卡、`mission get` 與 AGM 的下一步
   讀同一個函式卻可能得到不同結果。退回／換手走 `review followup` 不受影響：那條在同一個交易裡把原件標成
   `superseded` 再開新的，任何一刻都只有一件開著。
+- **刪掉專案會把它底下還開著的任務一併取消**（issue #498，理由寫進 `cancelled` 事件的 payload：`project_deleted`）。
+  任務沒有軟刪、只有完成／取消兩種終態，而 `mission::store::open_unpaused`（`workflow::wake_stalled_at` 掃的那份）
+  沒有存活性條件——不收的話那些任務永遠停在 open，十分鐘後還會推一則 `mission_next` 要 AGM 去推一個
+  專案與 bot 都不存在的任務，而清臨時 bot 那條只收**已結案**的任務，連 `agm-mission-*` 都不會被收。
+  **專案之後又回到 config（同一個 id 復活）也不會把任務救回來**：取消是終態，要繼續做就重開一筆。
+  收不掉只記 log、不讓刪除回頭：專案在 config 裡已經定案刪除了。
 - `mission complete` 時底下還有開著的交辦 → 409 `assignments_open`。以前 `complete` 除了「任務還開著」
   什麼都不查：那顆 bot 會繼續做一件已經關掉的任務，回合結束還會推一則沒有人要的 `assignment_completed`。
   先 `review accept`／`fail`／`cancel` 收乾淨，或走 `mission cancel`（那條本來就會逐件取消）。
