@@ -20,9 +20,11 @@
 from __future__ import annotations
 
 import argparse
+import datetime
 import http.client
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -36,6 +38,13 @@ DEFAULT_TIMEOUT = 30.0
 MAX_TEXT_CHARS = 200_000
 LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost", "0:0:0:0:0:0:0:1"}
 DEFAULT_RUNTIME_DIR = "~/.config/agents-manager/supervisor/AGM"
+# issue 認領（#425）。`gh` 是唯一的對外通道；label 與這兩個標記就是整個協定。
+CLAIM_LABEL = "wip"
+CLAIM_MARK = "agm:issue-claim"
+RELEASE_MARK = "agm:issue-release"
+# 認領多久沒有任何動靜就算放掉了（票上的裁示）。
+CLAIM_STALE_SECS = 24 * 3600
+GH_TIMEOUT = 60.0
 
 
 class AgmError(Exception):
@@ -1137,6 +1146,181 @@ def cmd_quota(client: Client, cfg: dict, args) -> object:
     return client.post(f"/api/quota/probe?{urllib.parse.urlencode(query)}")
 
 
+# ------------------------------------------------------ issue 認領（#425，不經 daemon）
+
+
+def gh(argv: list[str], *, allow_fail: bool = False) -> str:
+    """跑一次 `gh`，回 stdout。這條路不碰 daemon、不碰 token。"""
+    try:
+        r = subprocess.run(["gh", *argv], capture_output=True, text=True, timeout=GH_TIMEOUT)
+    except FileNotFoundError:
+        raise AgmError("no_gh", "PATH 上沒有 gh；issue 認領要靠它", 2)
+    except subprocess.TimeoutExpired:
+        raise AgmError("gh_timeout", f"gh {' '.join(argv[:2])} 超過 {GH_TIMEOUT:g} 秒沒回", 1)
+    if r.returncode != 0 and not allow_fail:
+        raise AgmError("gh_failed", f"gh {' '.join(argv[:2])} 失敗（rc={r.returncode}）：{r.stderr.strip()[:300]}", 1)
+    return r.stdout
+
+
+def repo_args(args) -> list[str]:
+    """`--repo` 有給就指名，沒給就讓 gh 自己從 cwd 的 remote 推。"""
+    return ["-R", args.repo] if getattr(args, "repo", None) else []
+
+
+def claiming_bot(args) -> str:
+    """認領人是誰。managed pane 有 `AM_AGENT_NAME`（herdr 的 agent 名）；不在 pane 裡就要自己講。"""
+    for v in (getattr(args, "bot", None), os.environ.get("AM_AGENT_NAME"), os.environ.get("AM_BOT_ID")):
+        if v:
+            return v
+    raise AgmError("no_identity", "認不出這是誰在認領：不在 managed pane 裡（沒有 AM_AGENT_NAME／AM_BOT_ID）就要帶 --bot", 2)
+
+
+def parse_iso(t: str | None) -> datetime.datetime | None:
+    if not isinstance(t, str) or not t:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(t.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def mark_of(body: str) -> tuple[str, dict] | None:
+    """一則留言裡的認領／交回標記。`<!-- agm:issue-claim {...} -->`，JSON 壞掉就當沒有這個標記。"""
+    m = re.search(r"<!--\s*(agm:issue-(?:claim|release))\s+(\{.*?\})\s*-->", body or "", re.S)
+    if not m:
+        return None
+    try:
+        payload = json.loads(m.group(2))
+    except json.JSONDecodeError:
+        return None
+    return (m.group(1), payload) if isinstance(payload, dict) else None
+
+
+def read_issue(args, number: int) -> dict:
+    fields = "number,title,state,url,labels,updatedAt,comments"
+    raw = gh(["issue", "view", str(number), *repo_args(args), "--json", fields])
+    try:
+        data = json.loads(raw or "null")
+    except json.JSONDecodeError:
+        raise AgmError("gh_failed", f"gh issue view {number} 回的不是 JSON：{raw.strip()[:200]}", 1)
+    if not isinstance(data, dict):
+        raise AgmError("gh_failed", f"gh issue view {number} 回的不是一筆 issue", 1)
+    return data
+
+
+def current_claim(issue: dict) -> dict | None:
+    """目前的認領狀態：由**最新**一個標記決定（交回的標記就是「沒人認領」）。
+
+    回 `{"bot", "child", "worktree", "branch", "at", "last_activity", "stale"}`，沒人認領回 `None`。
+    「有動靜」取「認領留言的時間」與「這張票最後被動到的時間」裡比較晚的那個：認領的人還在留言、
+    改 label、推 commit 關聯，都算它還活著。
+    """
+    latest = None
+    for c in issue.get("comments") or []:
+        parsed = mark_of(c.get("body") or "")
+        if not parsed:
+            continue
+        at = parse_iso(c.get("createdAt"))
+        if at is None:
+            continue
+        if latest is None or at > latest[0]:
+            latest = (at, parsed)
+    if latest is None:
+        return None
+    at, (kind, payload) = latest
+    if kind == RELEASE_MARK:
+        return None
+    updated = parse_iso(issue.get("updatedAt"))
+    last = max([t for t in (at, updated) if t is not None])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    return {
+        "bot": payload.get("bot"),
+        "child": payload.get("child"),
+        "worktree": payload.get("worktree"),
+        "branch": payload.get("branch"),
+        "at": at.isoformat(),
+        "last_activity": last.isoformat(),
+        "stale": (now - last).total_seconds() > CLAIM_STALE_SECS,
+    }
+
+
+def held_by_other(claim: dict | None, me: str) -> dict | None:
+    """別人還按著這張票就回那筆認領；沒人、是我自己、或已經放到過期都回 None。"""
+    if claim is None or claim.get("bot") == me or claim.get("stale"):
+        return None
+    return claim
+
+
+def claim_conflict(number: int, claim: dict) -> AgmError:
+    who = claim.get("bot") or "(沒寫名字的 bot)"
+    where = "，".join(f"{k} {claim[k]}" for k in ("child", "worktree", "branch") if claim.get(k))
+    return AgmError(
+        "issue_claimed",
+        f"#{number} 已經由 {who} 認領（{where or '沒寫 worktree／分支'}），最後動靜 {claim['last_activity']}；不要再派第二顆",
+        3,
+        issue=number,
+        claimed_by=who,
+        claim=claim,
+    )
+
+
+def cmd_issue(_client, _cfg: dict, args) -> object:
+    number = args.number
+    me = claiming_bot(args)
+    issue = read_issue(args, number)
+    claim = current_claim(issue)
+    blocker = held_by_other(claim, me)
+    if blocker is not None:
+        raise claim_conflict(number, blocker)
+    labels = [l.get("name") for l in issue.get("labels") or []]
+    now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+    if args.op == "release":
+        out = {"issue": number, "title": issue.get("title"), "bot": me, "released": True, "was_claimed": claim is not None}
+        if claim is None and CLAIM_LABEL not in labels:
+            out["already"] = True
+            return out
+        body = f"{me} 交回 #{number}。\n\n<!-- {RELEASE_MARK} {json.dumps({'bot': me, 'at': now}, ensure_ascii=False, sort_keys=True)} -->"
+        gh(["issue", "comment", str(number), *repo_args(args), "--body", body])
+        if CLAIM_LABEL in labels:
+            gh(["issue", "edit", str(number), *repo_args(args), "--remove-label", CLAIM_LABEL])
+        return out
+
+    # claim：同一顆 bot 重跑不再留第二則（重試不該洗版），但 label 掉了會補回去。
+    if claim is not None and claim.get("bot") == me and not claim.get("stale"):
+        if CLAIM_LABEL not in labels:
+            gh(["issue", "edit", str(number), *repo_args(args), "--add-label", CLAIM_LABEL])
+        return {"issue": number, "title": issue.get("title"), "claimed": True, "already": True, "bot": me, "claim": claim}
+
+    payload = {"bot": me, "at": now}
+    for key in ("child", "worktree", "branch"):
+        val = getattr(args, key, None)
+        if val:
+            payload[key] = val
+    bits = []
+    if payload.get("child"):
+        bits.append(f"child {payload['child']}")
+    if payload.get("worktree"):
+        bits.append(f"worktree `{payload['worktree']}`")
+    if payload.get("branch"):
+        bits.append(f"分支 `{payload['branch']}`")
+    detail = "，".join(bits)
+    took_over = bool(claim and claim.get("stale"))
+    lead = f"派給 {me}" + (f"（{detail}）" if detail else "")
+    if took_over:
+        lead += f"。接手 {claim.get('bot')} 超過 24 小時沒動靜的認領（最後動靜 {claim['last_activity']}）"
+    body = f"{lead}。\n\n<!-- {CLAIM_MARK} {json.dumps(payload, ensure_ascii=False, sort_keys=True)} -->"
+    # label 不存在時 `--add-label` 會失敗，先建一次（已存在會失敗，無妨；同 ci-watch-kick 的做法）。
+    gh(["label", "create", CLAIM_LABEL, *repo_args(args), "--color", "FBCA04", "--description", "有 bot 正在做（agm issue claim）"], allow_fail=True)
+    gh(["issue", "comment", str(number), *repo_args(args), "--body", body])
+    gh(["issue", "edit", str(number), *repo_args(args), "--add-label", CLAIM_LABEL])
+    out = {"issue": number, "title": issue.get("title"), "claimed": True, "already": False, "bot": me, "label": CLAIM_LABEL}
+    out.update({k: v for k, v in payload.items() if k in ("child", "worktree", "branch")})
+    if took_over:
+        out["took_over_stale_claim_from"] = claim.get("bot")
+    return out
+
+
 def cmd_bot(client: Client, cfg: dict, args) -> object:
     if args.op == "create":
         if not args.project or not args.name:
@@ -1199,6 +1383,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  agm inbox / agm ack <event-id>         處理通知（預設只列未 ack、最舊在前）\n"
             "  agm handoff / agm handoff --summary '…' 讀寫管理摘要\n"
             "  agm mission list --project <id> --status open  群組任務；pick --role verifier 照規則挑身分\n"
+            "  agm issue claim 425 --child i425 --worktree … --branch …   派工前先認領（exit 3＝別人在做）\n"
             "\n"
             "注意：assign 逾時代表送達未知，**不要**換新的 --request-id 重送，先用 assignments 對帳。\n"
             "注意：回合結束不等於工作完成。交辦會停在 awaiting_review，要 `agm review` 才會結案。"
@@ -1478,6 +1663,23 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--as-daemon", dest="as_daemon", action="store_true", help="event/complete/deliver：來源標成 daemon 而不是總管")
     s.set_defaults(func=cmd_mission)
 
+    s = sub.add_parser(
+        "issue",
+        help="issue 認領：claim / release（#425；只用 gh，不連 daemon）",
+        description=(
+            "派任何 issue 給 child 之前先 claim，claim 失敗（exit 3）就不要派——"
+            "同一張票被兩顆父 bot 各派一顆 child 是 2026-09-23 發生三次的重工來源。收尾時 release。"
+        ),
+    )
+    s.add_argument("op", choices=["claim", "release"])
+    s.add_argument("number", type=int, help="issue 編號")
+    s.add_argument("--repo", help="owner/name；省略就讓 gh 從 cwd 的 remote 自己推")
+    s.add_argument("--bot", help="認領人；省略取 AM_AGENT_NAME、再退 AM_BOT_ID")
+    s.add_argument("--child", help="claim：要派出去的 child agent 名")
+    s.add_argument("--worktree", help="claim：child 會用的 worktree")
+    s.add_argument("--branch", help="claim：child 會用的分支")
+    s.set_defaults(func=cmd_issue, needs_client=False)
+
     s = sub.add_parser("bot", help="管理 bot：start / stop / restart / set / create / delete / restore")
     s.add_argument("op", choices=["start", "stop", "restart", "set", "create", "delete", "restore"])
     s.add_argument("bot_id", nargs="?", help="start/stop/restart/delete/restore 的目標（delete＝停 pane 並軟刪，子 agent 一起收；restore＝還原被軟刪的子 agent，不開 run）")
@@ -1500,8 +1702,12 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     indent = None if args.compact else 2
     try:
-        cfg = load_runtime(args.runtime_dir)
-        client = Client(daemon_url(cfg), args.timeout, bot_auth_headers(cfg))
+        # `issue` 只用 gh，不連 daemon：沒有 runtime.json 的 pane（一般的父 bot）也要能 claim。
+        cfg: dict = {}
+        client = None
+        if getattr(args, "needs_client", True):
+            cfg = load_runtime(args.runtime_dir)
+            client = Client(daemon_url(cfg), args.timeout, bot_auth_headers(cfg))
         out = args.func(client, cfg, args)
     except AgmError as e:
         json.dump(e.to_json(), sys.stderr, ensure_ascii=False, indent=indent)

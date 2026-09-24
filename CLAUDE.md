@@ -58,6 +58,7 @@ nohup ./target/release/agents-managerd serve >> ~/.config/agents-manager/daemon.
 ```
 
 ## 用 herdr 開子 agent
+- **派任何 issue 之前先認領**（#425）：`python3 scripts/agm.py issue claim <n> --child <子 agent 名> --worktree <path> --branch <b>`（部署過的總管用 `bin/agm issue claim …`）。回 exit 3 就是別的 bot 正在做——**不要派**，看它印出的 `claimed_by` 去協調。24 小時都沒動靜的認領才可以接手（它會自己判斷並在留言裡講）。child 收尾（或你決定不做了）時 `agm issue release <n>`；票關掉就不用。
 - 名稱一律 `<你的 agent 名>-<字尾>`（`$AM_AGENT_NAME` 有值；PATH 上的 `herdr` shim 會自動補前綴），daemon 才會把它掛在你底下。
 - 子 pane 用 `herdr pane split --pane $HERDR_PANE_ID`，帳號與 hook 環境會繼承。
 - 子 agent 一樣要遵守本檔；派工 prompt 必須帶上：「先 `git worktree list` 找自己的 `.claude/worktrees/<你的 agent 名>`，沒有就 `git worktree add .claude/worktrees/<你的 agent 名>-<字尾> -b <分支>`；只在自己的 worktree 改與 commit，禁止在主樹 `git stash` / `--autostash` / `git checkout --`，只 `git add` 自己的檔案，收尾前跑 `scripts/check.sh`，推完用 `gh run list --branch main --commit <sha>`／`gh run watch <id>` 確認這次 push 的 CI 結果（紅的是你造成的就修，不是就回報派工者哪一條、哪個 run，不能只看本機 check.sh），完成後移除自己的 worktree。」
