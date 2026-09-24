@@ -1962,7 +1962,22 @@ struct NewHost {
     remote_path: Option<String>,
 }
 
-async fn create_host(State(app): State<Arc<App>>, Json(b): Json<NewHost>) -> Result<Response, LcError> {
+/// 這次更新會不會改變「這個名字指到哪台機器」。`remote_path`／`ssh_opts` 只影響在同一台上怎麼跑，
+/// 改它們不會把既有的 run 接到別台去，所以不擋（issue #544）。
+fn repoints_host(old: &HostCfg, new: &HostCfg) -> bool {
+    old.ssh != new.ssh || old.ssh_port != new.ssh_port || old.herdr_session != new.herdr_session
+}
+
+/// 主機上還活著的專案。`delete_host` 用同一條判斷（`api.rs` 的 `host still used by projects`）。
+async fn live_projects_on_host(app: &Arc<App>, host: &str) -> Result<Vec<db::Project>, LcError> {
+    Ok(db::live_projects(&app.db).await.map_err(any_err)?.into_iter().filter(|p| p.host == host).collect())
+}
+
+async fn create_host(
+    State(app): State<Arc<App>>,
+    Query(q): Query<DeleteQuery>,
+    Json(b): Json<NewHost>,
+) -> Result<Response, LcError> {
     if b.name == LOCAL_HOST {
         return Err(LcError::Bad("`local` is reserved for this machine".into()));
     }
@@ -1985,6 +2000,28 @@ async fn create_host(State(app): State<Arc<App>>, Json(b): Json<NewHost>) -> Res
             .unwrap_or_else(|| crate::config::DEFAULT_HERDR_SESSION.to_string()),
         remote_path: b.remote_path.unwrap_or_default(),
     };
+    // 這支同時是新增與**更新**（docs/API.md）。更新到「指去另一台機器」時要跟 `delete_host` 一樣先確認
+    // 主機上沒有活著的專案（issue #544）：`apply_config` 會把連線整個換掉，但 `runs` 一列都不動——
+    // 那些 run 還帶著**舊那台**開出來的 pane id，接下來 daemon 會拿它們去問新那台。輕則 pane 不存在、
+    // run 被判成不見了收掉；重則新機器上剛好有同樣的 pane id（herdr 的 id 是每個實例自己編的），
+    // prompt 與按鍵就送進一顆完全不相干的 pane。刪掉只是「連線沒了」，改掉是「連線還在、但接到別台」。
+    let existing = app.cfg.get().await.hosts.into_iter().find(|h| h.name == cfg.name);
+    if let Some(old) = existing.filter(|old| repoints_host(old, &cfg)) {
+        let live = live_projects_on_host(&app, &b.name).await?;
+        if !live.is_empty() && q.confirm.as_deref() != Some("repoint") {
+            return Err(LcError::conflict(
+                "host still used by projects",
+                json!({
+                    "reason": "host_repoint_in_use",
+                    "host": b.name,
+                    "from": {"ssh": old.ssh, "ssh_port": old.ssh_port, "herdr_session": old.herdr_session},
+                    "to": {"ssh": cfg.ssh, "ssh_port": cfg.ssh_port, "herdr_session": cfg.herdr_session},
+                    "projects": live.iter().map(|p| json!({"id": p.id, "label": p.label})).collect::<Vec<_>>(),
+                    "hint": "先把這些專案移走或刪掉；真的要改就帶 ?confirm=repoint（既有的 run 會留著舊機器的 pane id）",
+                }),
+            ));
+        }
+    }
     let c2 = cfg.clone();
     app.cfg
         .update(move |f| {
@@ -2173,6 +2210,89 @@ mod identity_auth_error_tests {
         assert_eq!(body["reason"], "identity_login_unavailable", "{body}");
         assert_eq!(body["identity"], "cc1");
         assert_eq!(body["kind"], "claude");
+    }
+
+    /// issue #544：`POST /api/hosts` 同時是新增與更新。把 `ssh` 改成指到**另一台機器**時，
+    /// 要跟 `delete_host` 一樣先確認主機上沒有活著的專案——`apply_config` 換掉連線但不動 `runs`，
+    /// 那些 run 還帶著舊機器的 pane id。只改 `remote_path`／`ssh_opts` 不會換機器，照樣放行。
+    #[tokio::test]
+    async fn repointing_a_host_with_live_projects_is_refused_but_cosmetic_edits_are_not() {
+        let e = crate::testing::env().await;
+        let host = NewHost {
+            name: "zz92".into(),
+            ssh: "old-box".into(),
+            ssh_port: None,
+            ssh_opts: None,
+            herdr_session: None,
+            remote_path: None,
+        };
+        let mk = |h: &NewHost| NewHost {
+            name: h.name.clone(),
+            ssh: h.ssh.clone(),
+            ssh_port: h.ssh_port,
+            ssh_opts: h.ssh_opts.clone(),
+            herdr_session: h.herdr_session.clone(),
+            remote_path: h.remote_path.clone(),
+        };
+        // 先把主機寫進 config（不必等它真的連上：這條測的是閘門，不是連線）。
+        e.app.cfg
+            .update(move |f| {
+                f.hosts.push(HostCfg {
+                    name: "zz92".into(),
+                    ssh: "old-box".into(),
+                    ssh_port: 22,
+                    ssh_opts: vec![],
+                    herdr_session: "agents-manager".into(),
+                    remote_path: String::new(),
+                });
+                Ok(())
+            })
+            .await
+            .unwrap();
+        // 這台上放一個活著的專案。
+        crate::projection::update_and_project(&e.app.cfg, &e.app.db, |cfg| {
+            cfg.projects.push(crate::config::ProjectCfg {
+                id: Some("01PROJZZ92".into()),
+                path: "/srv/work".into(),
+                label: "work".into(),
+                host: "zz92".into(),
+                bots: vec![],
+            });
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        // 1. 改 ssh（換機器）→ 409，而且什麼都沒寫進去。
+        let mut repoint = mk(&host);
+        repoint.ssh = "new-box".into();
+        let err = create_host(State(e.app.clone()), Query(DeleteQuery::default()), Json(repoint))
+            .await
+            .expect_err("repointing a host in use must be refused");
+        let (status, body) = body_of(err).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["reason"], "host_repoint_in_use", "{body}");
+        assert_eq!(body["projects"][0]["id"], "01PROJZZ92", "{body}");
+        let after = e.app.cfg.get().await.hosts.into_iter().find(|h| h.name == "zz92").unwrap();
+        assert_eq!(after.ssh, "old-box", "被擋下來就不能改到 config：{body}");
+
+        // 2. 只改不會換機器的欄位（remote_path）→ 放行。
+        let mut cosmetic = mk(&host);
+        cosmetic.remote_path = Some("/opt/bin".into());
+        create_host(State(e.app.clone()), Query(DeleteQuery::default()), Json(cosmetic))
+            .await
+            .expect("cosmetic edits are not a repoint");
+        let after = e.app.cfg.get().await.hosts.into_iter().find(|h| h.name == "zz92").unwrap();
+        assert_eq!((after.ssh.as_str(), after.remote_path.as_str()), ("old-box", "/opt/bin"));
+
+        // 3. 明確確認就放行（沿用 ?confirm= 的先例）。
+        let mut forced = mk(&host);
+        forced.ssh = "new-box".into();
+        create_host(State(e.app.clone()), Query(DeleteQuery { confirm: Some("repoint".into()) }), Json(forced))
+            .await
+            .expect("?confirm=repoint is the documented escape hatch");
+        let after = e.app.cfg.get().await.hosts.into_iter().find(|h| h.name == "zz92").unwrap();
+        assert_eq!(after.ssh, "new-box");
     }
 
     /// API.md：host 不存在是 404。沒寫 host 的身分在遠端也生效，所以找不到主機時不能先走到

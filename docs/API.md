@@ -949,6 +949,13 @@ Project 可在另一台機器，daemon 透過 SSH 轉發連遠端 herdr。`host`
 所以手改 `config.toml` 寫進去的 `[[hosts]]` 一樣擋得住：之後任何一次寫設定都回 **400 `config_invalid`**（`config.toml` 未變更），
 開機那一次投影則直接拒絕啟動並說明——以前這條路全部放行，而一列 `name = "local"` 會把本機那顆連線換成 ssh 遠端。
 
+**更新到「指去另一台機器」要先清空**（issue #544）：同名更新若改動了 `ssh`／`ssh_port`／`herdr_session`
+（＝這個名字指到哪台機器），而該主機上還有活著的專案 → `409 conflict`，`reason` 是 `host_repoint_in_use`，
+內文帶 `from`／`to` 與擋下來的 `projects`，**config 一個字都不會寫**。跟 `DELETE /api/hosts/{name}` 同一條判斷：
+`apply_config` 會把連線整個換掉，但 `runs` 一列都不動——那些 run 還帶著**舊那台**開出來的 pane id，
+之後 daemon 會拿它們去問新那台（pane 不存在就把 run 收掉，剛好撞上同名 pane 就更糟）。
+只改 `remote_path`／`ssh_opts` 不算換機器，照舊放行。真的要改帶 `?confirm=repoint`。
+
 ### `DELETE /api/hosts/{name}`
 `200 {}`；仍有 project 使用 → `409 {"reason":"host still used by projects","project_id"}`；`local` 400。刪除時推 `host_changed {"connected":false,"error":"removed"}` 與 `project_changed`。
 
