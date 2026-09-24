@@ -282,13 +282,52 @@ gh label create "$LABEL" --color B60205 --description "main 的 CI 紅了（ci-w
 if [ -n "$PREV_GREEN" ]; then SUSPECTS=$(git log --oneline -n 30 "${PREV_GREEN}..${FIRST_SHA}" 2>/dev/null)
 else SUSPECTS=$(git log --oneline -n 10 "$FIRST_SHA" 2>/dev/null); fi
 [ -n "$SUSPECTS" ] || SUSPECTS="（本機 repo 查不到 ${PREV_GREEN:-?}..${FIRST_SHA:0:8}，請先 git fetch）"
+
+# 引入每一條失敗測試的 commit（issue #445）。
+#
+# 「上一個綠之後的 commit」只對「一次紅到底」的回歸有意義；對**間歇紅**一定指錯人——擲輸的那一輪
+# 跟嫌疑範圍沒有因果關係。#444 就是：嫌疑欄只列了 `00ed282f`，真正引入那條測試的是三個 commit 之前
+# 的 `d12a91a9`，而它自己那輪擲贏了。接票的人照嫌疑欄讀 commit，等於固定浪費一輪。
+#
+# 測試名的最後一段就是函式名（`a::b::c::the_test` → `the_test`），`git log -S` 找得到新增那一筆。
+: > "${WORK}/names.txt"; : > "${WORK}/intro.txt"; : > "${WORK}/inrange.txt"
+python3 -c 'import json,sys; print("\n".join(json.loads(sys.argv[1])))' "$FAILURES" > "${WORK}/names.txt" 2>/dev/null || :
+if [ -n "$PREV_GREEN" ]; then git rev-list "${PREV_GREEN}..${FIRST_SHA}" > "${WORK}/range.txt" 2>/dev/null || : > "${WORK}/range.txt"
+else : > "${WORK}/range.txt"; fi
+while IFS= read -r TNAME; do
+  [ -n "$TNAME" ] || continue
+  NEEDLE=${TNAME##*::}; NEEDLE=${NEEDLE%% *}; NEEDLE=${NEEDLE%%(*}
+  [ -n "$NEEDLE" ] || continue
+  # `-n 1` 是**最後一次**動到這個字串的 commit；新增那一筆通常就是它，改過名才會不同。
+  INTRO_LINE=$(git log -S"$NEEDLE" --oneline -n 1 2>/dev/null)
+  if [ -z "$INTRO_LINE" ]; then
+    printf -- '- `%s` ← 查不到（本機 repo 可能落後，先 git fetch）\n' "$TNAME" >> "${WORK}/intro.txt"
+    continue
+  fi
+  INTRO_SHA=${INTRO_LINE%% *}
+  if [ -s "${WORK}/range.txt" ] && grep -q "^${INTRO_SHA}" "${WORK}/range.txt" 2>/dev/null; then
+    printf -- '- `%s` ← `%s`（**在本段紅的範圍內，優先看這個**）\n' "$TNAME" "$INTRO_LINE" >> "${WORK}/intro.txt"
+    echo 1 >> "${WORK}/inrange.txt"
+  else
+    printf -- '- `%s` ← `%s`（在上一個綠之前就有了）\n' "$TNAME" "$INTRO_LINE" >> "${WORK}/intro.txt"
+  fi
+done < "${WORK}/names.txt"
+INTRO=$(cat "${WORK}/intro.txt")
+[ -n "$INTRO" ] || INTRO="（沒有抽到測試名，或本機 repo 查不到）"
+# 全部失敗的測試都在上一個綠就存在且通過了 → 嫌疑範圍多半不是兇手。
+FLAKY=""
+if [ "$NFAIL" -gt 0 ] && [ -n "$PREV_GREEN" ] && [ ! -s "${WORK}/inrange.txt" ] && [ -s "${WORK}/names.txt" ]; then
+  FLAKY="**疑似間歇紅（flaky）**：這些測試在上一個綠的 run（\`${PREV_GREEN:0:8}\`）裡就已經存在而且通過了，下面那串嫌疑 commit 多半不是兇手。先當成 flaky 查（排序鍵、時間戳精度、平行測試共用狀態），本機重跑不出來**不代表**不是它。"
+fi
 if [ "$NFAIL" -gt 0 ]; then TITLE="CI 紅了：${FIRST_SHA:0:8} 起 ${NFAIL} 條失敗"; else TITLE="CI 紅了：${FIRST_SHA:0:8} 起失敗"; fi
 {
   printf 'main 的 CI 從這個 run 起是紅的（ci-watch-kick 自動開；恢復綠時會在這裡留言，但不會自動關）。\n\n'
   printf -- '- 第一個紅的 run：%s（run %s，`%s`）\n' "${FIRST_URL:-run ${FIRST_RUN}}" "$FIRST_RUN" "$FIRST_SHA"
   printf -- '- 目前最新一個紅的 run：%s（run %s）\n\n' "${RUN_URL:-}" "$RUN_ID"
   printf '## 失敗的測試（最新 run）\n%s\n\n' "$(fail_lines "$FAILURES")"
-  printf '## 嫌疑 commit（上一個綠的 `%s` 之後）\n```\n%s\n```\n' "${PREV_GREEN:0:8}" "$SUSPECTS"
+  printf '## 引入這些測試的 commit（`git log -S`）\n%s\n\n' "$INTRO"
+  [ -n "$FLAKY" ] && printf '%s\n\n' "$FLAKY"
+  printf '## 上一個綠的 `%s` 之後的 commit\n（一次紅到底的回歸看這裡；**間歇紅時這串不可靠**，見上面）\n```\n%s\n```\n' "${PREV_GREEN:0:8}" "$SUSPECTS"
 } > "$WORK/issue.md"
 if ! URL=$(gh issue create --title "$TITLE" --label "$LABEL" --body-file "$WORK/issue.md" 2> "$WORK/err"); then
   fail_run "開 issue 失敗，下一輪再試：$(head -c 200 "$WORK/err" | tr '\n' ' ')"

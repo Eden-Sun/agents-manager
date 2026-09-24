@@ -397,6 +397,54 @@ check "缺 python3：有記 log" "找不到 python3" "$AGM_DIR/ci-watch.log"
 check "缺 python3：推 ops-alert" "\-\-reason missing_dependency" "$AGM_DIR/calls.log"
 teardown
 
+# 12b. 間歇紅（issue #445）：失敗的測試在上一個綠之前就存在 → 嫌疑欄要指向引入它的 commit，並標 flaky。
+#      #444 就是這樣被 00ed282f 背黑鍋的：真正引入測試的是三個 commit 之前的 d12a91a9。
+setup
+( cd "$AGM_REPO" && git init -q && git config user.email t@t && git config user.name t &&
+  printf 'fn four_rounds_leave_one() {}\n' > src.rs && git add src.rs && git commit -q -m "引入那條測試" &&
+  echo a > other && git add other && git commit -q -m "無關的一筆" &&
+  echo b > other && git add other && git commit -q -m "剛好擲輸的那一筆" )
+G=$(git -C "$AGM_REPO" rev-parse HEAD~1); F=$(git -C "$AGM_REPO" rev-parse HEAD)
+INTRO=$(git -C "$AGM_REPO" rev-parse --short HEAD~2)
+mk_runs 5:failure 4:failure 3:success
+python3 - "$GHDIR/runs.json" "$G" "$F" <<'PY'
+import json, sys
+p, g, f = sys.argv[1:]; d = json.load(open(p))
+for r in d:
+    if r["databaseId"] == 3: r["headSha"] = g
+    if r["databaseId"] == 4: r["headSha"] = f
+json.dump(d, open(p, "w"))
+PY
+mk_log 5 supervisor::store::tests::four_rounds_leave_one
+bash "$SCRIPT"
+check "flaky：嫌疑指向引入測試的 commit" "BODY .*${INTRO} 引入那條測試" "$GHDIR/created.log"
+check "flaky：標示在上一個綠之前就有了" "在上一個綠之前就有了" "$GHDIR/created.log"
+check "flaky：講明疑似間歇紅" "疑似間歇紅" "$GHDIR/created.log"
+check "flaky：仍保留上一個綠之後的 commit 清單" "剛好擲輸的那一筆" "$GHDIR/created.log"
+check_no "flaky：不把擲輸那筆講成優先看" "BODY .*剛好擲輸的那一筆.*優先看" "$GHDIR/created.log"
+teardown
+
+# 12c. 真回歸：引入測試的 commit 就落在本段紅的範圍內 → 標「優先看這個」，不標 flaky。
+setup
+( cd "$AGM_REPO" && git init -q && git config user.email t@t && git config user.name t &&
+  echo a > other && git add other && git commit -q -m "上一個綠" &&
+  printf 'fn brand_new_case() {}\n' > src.rs && git add src.rs && git commit -q -m "這一筆引入了新測試" )
+G=$(git -C "$AGM_REPO" rev-parse HEAD~1); F=$(git -C "$AGM_REPO" rev-parse HEAD)
+mk_runs 5:failure 4:failure 3:success
+python3 - "$GHDIR/runs.json" "$G" "$F" <<'PY'
+import json, sys
+p, g, f = sys.argv[1:]; d = json.load(open(p))
+for r in d:
+    if r["databaseId"] == 3: r["headSha"] = g
+    if r["databaseId"] == 4: r["headSha"] = f
+json.dump(d, open(p, "w"))
+PY
+mk_log 5 mod::tests::brand_new_case
+bash "$SCRIPT"
+check "回歸：標成在本段紅的範圍內" "在本段紅的範圍內" "$GHDIR/created.log"
+check_no "回歸：不標 flaky" "疑似間歇紅" "$GHDIR/created.log"
+teardown
+
 # 13. 假 agm／gh 對未知旗標要 exit 2（守住 stub 本身）。
 setup
 "$AGM_DIR/bin/agm" --compact assign --bot x --client-request-id y 2>/dev/null; equals "agm stub 對未知旗標 exit 2" "$?" "2"
