@@ -215,6 +215,16 @@ fn known_route(kind: &str, payload: &Value, review_role: Option<&str>) -> Option
         "incident_opened" | "incident_resolved" if payload.pointer("/incident/kind").and_then(Value::as_str) == Some("notify_exhausted") => {
             r(Role::Responder, kind == "incident_opened")
         }
+        // #459：故障的就是角色 bot 自己（`resource` 是角色名）。送給故障的那一顆等於送進已知壞掉的
+        // 那條路，跟上面 `watchdog_gave_up` 是同一個反模式——壞的是巡檢就給協調者，反之給巡檢。
+        // 協調者沒建立時 `incidents::notifiable` 會先把巡檢那一筆擋掉，不會繞回它自己。
+        "incident_opened" | "incident_resolved"
+            if payload.pointer("/incident/kind").and_then(Value::as_str) == Some(super::incidents::ROLE_UNAVAILABLE_KIND) =>
+        {
+            let broken = payload.pointer("/incident/resource").and_then(Value::as_str).and_then(Role::parse);
+            let to = if broken == Some(Role::Patrol) { Role::Responder } else { Role::Patrol };
+            r(to, kind == "incident_opened")
+        }
         // 系統層的故障：巡檢收、叫醒。`ops_alert` 是排程腳本自己喊的（例行更新卡住），也是巡檢的事。
         // `judge_stuck_screen`：prompt 排著送不出去、畫面底部疑似有 daemon 不認得的框（SPEC §4.3c），要人去終端看一眼。
         // `child_retire_refused`：對帳／維護收尾要隱式退役 AGM 的 child，daemon 擋下來了（#413），要人決定刪不刪。

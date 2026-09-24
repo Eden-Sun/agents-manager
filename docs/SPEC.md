@@ -2927,7 +2927,7 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
 | `assignment_stalled` | 未結案交辦 `updated_at` 沒動 | `assignment_stalled_secs`（7200） |
 | `assignment_undelivered` | 仍 `queued`、從沒送出，用 `created_at` 算 | `assignment_stalled_secs`（7200） |
 | `notify_exhausted` | 通知重送用盡 | `notify_max_attempts`（5） |
-| `responder_needs_login` | 角色 bot（協調者**與巡檢**，resource 是角色名）不可用：停在登入失效＝critical，`notify_stalled`＝degraded（見 §18.15） | `ROLE_UNAVAILABLE_HOLD_SECS`（60＝連兩拍） |
+| `role_unavailable` | 角色 bot（協調者**與巡檢**，resource 是角色名）不可用：停在登入失效＝critical，`notify_stalled`＝degraded（見 §18.15）。**收件人看故障的是誰**：`resource='patrol'` 送協調者、`resource='responder'` 送巡檢（同 `watchdog_gave_up` 的對稱規則——送給故障的那一顆等於送進已知壞掉的那條路）；協調者沒建立時巡檢那一筆不推 inbox，只留在 UI 與 `system_health`。舊名 `responder_needs_login` 在 migrate 改寫過來（issue #459） | `ROLE_UNAVAILABLE_HOLD_SECS`（60＝連兩拍） |
 | `responder_undeliverable` | 協調者的事件送了 5 次還在 `pending`（不管原因），一個協調者一筆（resource=`responder`），critical | `RESPONDER_UNDELIVERED_ATTEMPTS`（5） |
 
 - 條件持續超過門檻才寫入（計時在記憶體，重啟重算——寧可晚開不重複開）；開啟與恢復各推一則 inbox，中間只更新 `occurrences`；恢復後再壞是新的一筆。
@@ -3346,7 +3346,7 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
   核准申請送了 66 次到過期、停了 9 小時，health 一直是 healthy）；事件本身照舊留著、照舊退避重送。
   **沒登入**：送不出去（Err 或 `delivery=failed`）的那一次順便讀協調者 pane，看得到登入選單、onboarding 或回合只回 `⎿ Not logged in · Please run /login`
   （`tui_prompts::is_not_logged_in_reply`，只看最底 20 行、以 `⎿` 開頭的那一行）就標 `status=needs_login`（`waiting_since` 記開始時間），health 轉 `degraded`、
-  incident 開 `responder_needs_login`。送出照退避繼續試——人從別的終端 `security unlock-keychain` 之後畫面不會變，擋住不送就永遠等不到恢復；
+  incident 開 `role_unavailable`。送出照退避繼續試——人從別的終端 `security unlock-keychain` 之後畫面不會變，擋住不送就永遠等不到恢復；
   答完一個沒出錯的回合、或畫面上已經看不到登入問題，就解除（`status_detail=登入已恢復`）。
 - **每一拍都看畫面，而且巡檢也看**（issue #427，補上 #420 剩下的缺口）：上一段只在「有事要送、而且送不出去」時才看協調者，
   所以巡檢停在登入失效沒有人知道（它是 incident 與 ops_alert 的收件人），協調者佇列空著時也一樣。改成 health 的 30 秒 tick

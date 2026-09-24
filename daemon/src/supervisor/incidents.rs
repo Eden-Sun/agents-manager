@@ -454,8 +454,14 @@ pub async fn observe(app: &Arc<App>, thresholds: &Thresholds) -> Probed {
 }
 
 /// 角色 bot 自己不能用（issue #420／#427）。`resource` 是角色名（`responder`／`patrol`），兩顆各自一筆。
-/// 名字沿用 #420 的（SPEC §18.9 的表已經有它），只是現在巡檢也會用到。
-pub const ROLE_UNAVAILABLE_KIND: &str = "responder_needs_login";
+///
+/// 名字從 `responder_needs_login` 改成中性的（issue #459）：那個舊名現在會騙人——`resource="patrol"`
+/// 時故障的是巡檢不是協調者，`reason="notify_stalled"` 時也根本不是登入問題，跟 `detail.reason` 自相矛盾。
+/// 故障對象看 `resource`、原因看 `detail.reason`，kind 只說「有個角色 bot 不能用」。
+/// 舊名的既有列在 `store::migrate` 改寫過來，免得留下觀測不到、因此永遠關不掉的孤兒。
+pub const ROLE_UNAVAILABLE_KIND: &str = "role_unavailable";
+/// 改名前的 kind（issue #459 的遷移用）。
+pub const ROLE_UNAVAILABLE_KIND_LEGACY: &str = "responder_needs_login";
 
 /// 這個條件要連續看到這麼久才開 incident（health tick 是 30 秒，等於要連兩拍都看到）。
 /// #427 把偵測從「送不出去才看」改成「每一拍都看」，一拍的閃動不該驚動使用者；真的卡住時它會一直都在。
@@ -470,8 +476,14 @@ pub const ROLE_UNAVAILABLE_HOLD_SECS: i64 = 60;
 /// sends `incident_*` for this kind to the responder, whose queue never exhausts — and AGM finds out.
 /// Without a responder there is no other channel: it stays on the UI and in `system_health` only
 /// (review 2026-09-16 c1 L4).
-fn notifiable(kind: &str, responder_configured: bool) -> bool {
-    kind != "notify_exhausted" || responder_configured
+fn notifiable(kind: &str, resource: &str, responder_configured: bool) -> bool {
+    match kind {
+        "notify_exhausted" => responder_configured,
+        // #459：壞掉的是巡檢自己時，唯一收得到的是協調者（`roles::route` 會把它送過去）。
+        // 沒有協調者就沒有第二條路：留在 UI 與 `system_health` 上，不要推進一個已知收不到的佇列。
+        ROLE_UNAVAILABLE_KIND => resource != super::roles::Role::Patrol.as_str() || responder_configured,
+        _ => true,
+    }
 }
 
 /// Apply one pass: write what changed, and queue one inbox event per transition.
@@ -510,7 +522,7 @@ pub async fn sweep(app: &Arc<App>, detector: &mut Detector) {
         let detail: Value = serde_json::from_str(&obs.detail).unwrap_or_else(|_| json!({}));
         // incident 與通知同一個交易（#319）：寫不進去就不開，下一輪 detector 重來。
         let Ok((incident, opened)) =
-            store::open_incident_notifying(&app.db, &obs.kind, &obs.resource, &obs.severity, &detail, notifiable(&obs.kind, responder_configured)).await
+            store::open_incident_notifying(&app.db, &obs.kind, &obs.resource, &obs.severity, &detail, notifiable(&obs.kind, &obs.resource, responder_configured)).await
         else {
             continue;
         };
@@ -522,7 +534,7 @@ pub async fn sweep(app: &Arc<App>, detector: &mut Detector) {
     }
 
     for (kind, resource) in plan.resolve {
-        let Ok(Some(incident)) = store::resolve_incident_notifying(&app.db, &kind, &resource, notifiable(&kind, responder_configured)).await else { continue };
+        let Ok(Some(incident)) = store::resolve_incident_notifying(&app.db, &kind, &resource, notifiable(&kind, &resource, responder_configured)).await else { continue };
         tracing::info!(kind = %kind, resource = %resource, "system incident resolved");
         app.emit("supervisor_changed", json!({"incident": incident.to_json()})).await;
     }
@@ -599,6 +611,19 @@ mod tests {
         let plan = d.plan(&[], &open, &[ROLE_UNAVAILABLE_KIND], &t, 9000);
         assert!(plan.resolve.is_empty(), "探針沒跑：兩筆都留著");
         assert!(plan.open.is_empty());
+    }
+
+    /// #459：壞掉的是巡檢自己時，`incident_opened` 不能推回巡檢——那正是這個檔案自己對
+    /// `notify_exhausted` 防過的反模式（「把一則送不出去的通知變成兩則」）。協調者在就送它；
+    /// 協調者沒建立時**一則都不推**（沒有第二條路），incident 本身照開、留在 UI 與 `system_health`。
+    #[test]
+    fn a_broken_patrol_is_never_told_about_itself() {
+        assert!(notifiable(ROLE_UNAVAILABLE_KIND, "responder", false), "協調者壞了：巡檢收得到，跟有沒有協調者無關");
+        assert!(notifiable(ROLE_UNAVAILABLE_KIND, "patrol", true), "巡檢壞了、協調者在：送協調者");
+        assert!(!notifiable(ROLE_UNAVAILABLE_KIND, "patrol", false), "巡檢壞了、又沒有協調者：不推進已知收不到的佇列");
+        // 既有規則不受影響。
+        assert!(!notifiable("notify_exhausted", "responder", false));
+        assert!(notifiable("host_disconnected", "some-host", false));
     }
 
     /// 兩顆角色各自一筆：`resource` 是角色名，所以協調者卡住不會蓋掉巡檢那一筆（反之亦然）。
@@ -748,11 +773,11 @@ mod tests {
     /// The incidents that say "the inbox is broken" must not be announced through the inbox.
     #[test]
     fn the_broken_notification_channel_is_not_used_to_report_itself() {
-        assert!(!notifiable("notify_exhausted", false), "this one would retry, exhaust, and open another incident");
+        assert!(!notifiable("notify_exhausted", "responder", false), "this one would retry, exhaust, and open another incident");
         // With a responder there is a second channel whose queue never exhausts: tell it.
-        assert!(notifiable("notify_exhausted", true));
+        assert!(notifiable("notify_exhausted", "responder", true));
         for kind in ["host_disconnected", "bot_stopped", "assignment_stalled", "assignment_undelivered", "remote_entry", super::super::failover::STALLED_KIND] {
-            assert!(notifiable(kind, false), "{kind} is safe to wake the manager about");
+            assert!(notifiable(kind, "whatever", false), "{kind} is safe to wake the manager about");
         }
     }
 

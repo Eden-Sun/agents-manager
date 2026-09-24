@@ -1694,7 +1694,9 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
   寫一則 inbox `ops_alert`（路由給巡檢、叫醒）。`source`／`reason` 各 1–64 字的 `[A-Za-z0-9._-]`（不合格 400），`detail` 截到 2000 字。
   event_key 帶小時格：同 `source`+`reason` 每小時最多一則（`queued:false` = 這小時已經有了）。
 - `GET /api/supervisor/incidents?all=0|1` → `{incidents:[{id,kind,resource,severity,status,detail,occurrences,first_seen_at,last_seen_at,resolved_at}],open,all}`。
-  `kind`：`host_disconnected` | `bot_stopped` | `assignment_stalled` | `assignment_undelivered` | `notify_exhausted` | `responder_needs_login` | `responder_undeliverable` | `approval_stalled`（SPEC §18.9／§18.15；`responder_*` 是 issue #420，`approval_stalled` 是 issue #421——核准開著 30 分鐘沒有任何人裁示，critical，resource 是核准 id，detail 帶 `approval_id`／`waiting_secs`／`requester`／`action`；都推給巡檢）。一個 resource 同時只有一筆 open；開啟與恢復各推 inbox `incident_opened` / `incident_resolved`。
+  `kind`：`host_disconnected` | `bot_stopped` | `assignment_stalled` | `assignment_undelivered` | `notify_exhausted` | `role_unavailable` | `responder_undeliverable` | `approval_stalled`（SPEC §18.9／§18.15；`responder_undeliverable` 是 issue #420，`approval_stalled` 是 issue #421——核准開著 30 分鐘沒有任何人裁示，critical，resource 是核准 id，detail 帶 `approval_id`／`waiting_secs`／`requester`／`action`）。一個 resource 同時只有一筆 open；開啟與恢復各推 inbox `incident_opened` / `incident_resolved`。
+  **收件人不一定是巡檢**：`notify_exhausted` 推給協調者（倒下的正是巡檢的通知路），`role_unavailable` 看故障的是誰——`resource='patrol'` 推協調者、`resource='responder'` 推巡檢；其餘都推巡檢。
+  `role_unavailable`（issue #427／#459，舊名 `responder_needs_login`，migrate 會改寫既有的列）：resource 是角色名（`patrol`／`responder`），`detail{role,reason,bot_id,since,notify_failures,detail,action}`；`reason` 就是 `unavailable_reason` 那組字串，`needs_login` 是 critical、其餘 degraded。協調者沒建立時巡檢那一筆**不推 inbox**（沒有第二條路），只留在 UI 與 `system_health`。
   `notify_exhausted` 例外：協調者建立時推（路由給協調者，開啟叫醒、恢復只記錄）；沒有協調者不入 inbox，只在這支與 `system_health` 看得到。
 
 ### 遠端入口
