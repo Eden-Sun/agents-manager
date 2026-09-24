@@ -283,6 +283,9 @@ AGM 的重建排程原本只在整點檢查；使用者要它**集滿門檻筆�
   （`web/src/api/rebuildRequests.ts`）。兩邊要一起改。
 - **等太久也提前**（使用者 2026-09-15）：最早一筆申請等超過 30 分鐘（`AGM_REBUILD_MAX_WAIT_MIN`，前端常數
   `REBUILD_MAX_WAIT_MIN`）也不等整點。chip 在這種時候同樣轉警示色，提示寫出最早那筆等了幾分鐘。
+- **問不到 ≠ 沒有**（#531）：daemon 回錯（舊 daemon 沒這支、500）＝它說了算，chip 收掉；**連不上**
+  （daemon 多半正在重啟）只代表這一次問不到，數字留著上一次的，但 chip 轉虛線＋淡化、提示寫明「是斷線前的」，
+  點開的清單也加一句。不轉警示色——連線狀態由側欄的連線燈號負責，這裡只要不假裝數字是現況。
 - **「請 AGM 現在重建」**：送一則使用者 prompt 給 AGM（`lib/rebuildAsk.ts`）。AGM 回合進行中 daemon 必回 409、不替人排隊，
   所以明講「AGM 正在忙，等它這一輪結束再按」；`delivery` 是 `failed`／`unknown` 不說「已請 AGM 開始重建」。
   沒送出（409、回應斷在路上、`unknown`）重按沿用同一個 `client_request_id`，送到了（或那一回合確定 failed）才換新的。

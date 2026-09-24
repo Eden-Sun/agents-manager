@@ -20,6 +20,8 @@ const askAgm = rebuildAsker(api.newClientRequestId)
 
 export function RebuildBadge() {
   const [rows, setRows] = useState<RebuildRequest[] | null>(null)
+  /** 上一次沒問到（daemon 多半正在重啟）：數字留著，但要標成不保證是現況（issue #531）。 */
+  const [offline, setOffline] = useState(false)
   const [open, setOpen] = useState(false)
   const [asking, setAsking] = useState(false)
   const notify = useStore((s) => s.notify)
@@ -28,11 +30,16 @@ export function RebuildBadge() {
   useEffect(() => {
     let live = true
     const refresh = async () => {
-      const next = await fetchRebuildRequests()
-      if (live) setRows(next)
+      const snap = await fetchRebuildRequests()
+      if (!live) return
+      setOffline(snap.offline)
+      // 連不上就留著上一次的數字（標成過期）；daemon 自己說沒有才收掉。
+      if (!snap.offline) setRows(snap.rows)
     }
-    void refresh()
-    const t = setInterval(() => void refresh(), POLL_MS)
+    // `fetchRebuildRequests` 已經不會拋了，這裡再接一次：輪詢的 promise 沒人接就是 unhandled rejection。
+    const tick = () => void refresh().catch(() => {})
+    tick()
+    const t = setInterval(tick, POLL_MS)
     return () => {
       live = false
       clearInterval(t)
@@ -63,11 +70,13 @@ export function RebuildBadge() {
     <div className="rebuild-badge-box" ref={boxRef}>
       <button
         type="button"
-        className={`rebuild-badge${hot ? ' hot' : ''}`}
-        aria-label={`還在等的重建申請 ${rows.length} 筆，門檻 ${REBUILD_THRESHOLD} 筆`}
+        className={`rebuild-badge${hot && !offline ? ' hot' : ''}${offline ? ' offline' : ''}`}
+        aria-label={`還在等的重建申請 ${rows.length} 筆，門檻 ${REBUILD_THRESHOLD} 筆${offline ? '（連不上 daemon，數字是斷線前的）' : ''}`}
         onClick={() => setOpen((v) => !v)}
         title={
-          full
+          offline
+            ? `連不上 daemon（可能正在重啟），這個數字是斷線前的 ${rows.length} 筆，不一定是現況。`
+            : full
             ? `重建申請已達 ${REBUILD_THRESHOLD} 筆：AGM 不等整點，下一輪檢查就會安排重建。`
             : hot
               ? `最早一筆重建申請已等 ${waited} 分鐘：AGM 不等整點，下一輪檢查就會安排重建。`
@@ -83,6 +92,7 @@ export function RebuildBadge() {
         <div className="rebuild-pop" role="dialog" aria-label="重建申請">
           <div className="rebuild-pop-head">
             還在等的重建申請 {rows.length} / {REBUILD_THRESHOLD}
+            {offline ? <span className="rebuild-offline-note">連不上 daemon，以下是斷線前的</span> : null}
           </div>
           <ul className="rebuild-list">
             {rows.map((r) => (
