@@ -123,16 +123,22 @@ pub fn parse_ports(s: Option<&str>) -> Vec<u16> {
 /// （§6.5e：不為了它多開 ssh 往返）。`None`＝`lsof` 起不來或逾時：**不是「沒有 port」**，呼叫端要當成讀不到
 /// （以前這裡回空的，打字前的複查就等於放行）。
 pub async fn listen_ports(host: &str, pids: &[i32]) -> Option<Vec<u16>> {
+    let mut ports: Vec<u16> = listen_sockets(host, pids).await?.into_iter().map(|(_, port)| port).collect();
+    ports.sort_unstable();
+    ports.dedup();
+    Some(ports)
+}
+
+/// 同 [`listen_ports`]，但**位址也留著**（`127.0.0.1`／`*`／`[::1]`）：預覽要靠它判 dev server 有沒有綁到
+/// loopback 以外（issue #434）。`None` 的語意一樣是「讀不到」，不是「沒有」。
+pub async fn listen_sockets(host: &str, pids: &[i32]) -> Option<Vec<(String, u16)>> {
     if host != crate::config::LOCAL_HOST || pids.is_empty() {
         return Some(Vec::new());
     }
     let list = pids.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(",");
     let script = format!("lsof -nP -iTCP -sTCP:LISTEN -a -p {list} -Fpn 2>/dev/null");
     let Ok(Some(o)) = crate::hosts::sh_local(&script, std::time::Duration::from_secs(10)).await else { return None };
-    let mut ports: Vec<u16> = parse_lsof(&String::from_utf8_lossy(&o.stdout)).into_values().flatten().collect();
-    ports.sort_unstable();
-    ports.dedup();
-    Some(ports)
+    Some(crate::preview_bind::parse_listeners(&String::from_utf8_lossy(&o.stdout)))
 }
 
 /// `lsof -Fpn` 是一行一個欄位：`p<pid>` 之後的 `n<addr>` 都屬於那個 pid。位址取最後一個 `:` 之後的數字。

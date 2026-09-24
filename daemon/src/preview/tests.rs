@@ -16,16 +16,16 @@ struct FakeEnv {
     vites: StdMutex<Vec<ViteProc>>,
     /// 目錄 → 它的 repo；沒登記＝判不出來。
     repos: StdMutex<HashMap<String, RepoKey>>,
-    /// pane → 它的行程樹 listen 的 port（dev script 起的 server 自己挑的）。
-    pane_ports: StdMutex<HashMap<String, Vec<u16>>>,
+    /// pane → 它的行程樹實際 listen 的 `(位址, port)`（dev script 起的 server 自己挑的）。
+    pane_listeners: StdMutex<HashMap<String, Vec<(String, u16)>>>,
     /// 模擬「拿不到這顆 bot 的 herdr session」（#257）。
     unresolvable: std::sync::atomic::AtomicBool,
     /// 模擬 herdr 的關 pane 失敗。
     close_fails: std::sync::atomic::AtomicBool,
     /// 模擬本機掃描失敗（問不到，不是「沒有」）。
     scan_fails: std::sync::atomic::AtomicBool,
-    /// 模擬讀不到 dev script 行程樹的 listen ports。
-    pane_ports_fails: std::sync::atomic::AtomicBool,
+    /// 模擬讀不到 dev script 行程樹的 listen 位址。
+    pane_listeners_fails: std::sync::atomic::AtomicBool,
 }
 
 impl FakeEnv {
@@ -45,8 +45,13 @@ impl FakeEnv {
         self.vites.lock().unwrap().push(ViteProc { pid, port, cwd: cwd.into(), kind: kind.into() });
         self.listen(port);
     }
+    /// 綁 loopback（正常情況）。
     fn pane_listens(&self, pane: &str, port: u16) {
-        self.pane_ports.lock().unwrap().entry(pane.into()).or_default().push(port);
+        self.pane_listens_on(pane, crate::preview_bind::LOOPBACK, port);
+    }
+    /// 綁指定位址：`*` 之類的對外位址用來驗 #434 的檢查。
+    fn pane_listens_on(&self, pane: &str, addr: &str, port: u16) {
+        self.pane_listeners.lock().unwrap().entry(pane.into()).or_default().push((addr.into(), port));
         self.listen(port);
     }
     fn repo(&self, dir: &str, common: &str, origin: Option<&str>) {
@@ -104,12 +109,12 @@ impl PreviewEnv for FakeEnv {
             Some(self.vites.lock().unwrap().clone())
         })
     }
-    fn pane_ports<'a>(&'a self, pane_id: &'a str) -> BoxFuture<'a, Option<Vec<u16>>> {
+    fn pane_listeners<'a>(&'a self, pane_id: &'a str) -> BoxFuture<'a, Option<Vec<(String, u16)>>> {
         Box::pin(async move {
-            if self.pane_ports_fails.load(std::sync::atomic::Ordering::SeqCst) {
+            if self.pane_listeners_fails.load(std::sync::atomic::Ordering::SeqCst) {
                 return None;
             }
-            Some(self.pane_ports.lock().unwrap().get(pane_id).cloned().unwrap_or_default())
+            Some(self.pane_listeners.lock().unwrap().get(pane_id).cloned().unwrap_or_default())
         })
     }
     fn repo_key<'a>(&'a self, dir: &'a str) -> BoxFuture<'a, Option<RepoKey>> {
@@ -285,8 +290,12 @@ fn package_json_dev_script_and_the_command_that_follows() {
     assert_eq!(parse_dev_script(r#"{"scripts":{"build":"x"}}"#), None);
     assert_eq!(parse_dev_script(r#"{"scripts":{"dev":"  "}}"#), None);
     assert_eq!(parse_dev_script("not json"), None);
-    assert_eq!(run_command(Some("next dev"), false, 5180), "bun run dev");
-    assert_eq!(run_command(None, false, 5181), "bunx vite --host 127.0.0.1 --port 5181 --strictPort");
+    // #434：`allow_lan` 關著時認得出的框架要接上 loopback 旗標；開著就照專案自己的意思。
+    assert_eq!(run_command(Some("next dev"), "next", false, 5180), "bun run dev -- -H 127.0.0.1");
+    assert_eq!(run_command(Some("vite"), "vite", false, 5180), "bun run dev -- --host 127.0.0.1");
+    assert_eq!(run_command(Some("node server.js"), "unknown", false, 5180), "bun run dev", "認不出框架就別猜旗標");
+    assert_eq!(run_command(Some("next dev"), "next", true, 5180), "bun run dev", "allow_lan 開著不插手");
+    assert_eq!(run_command(None, "vite", false, 5181), "bunx vite --host 127.0.0.1 --port 5181 --strictPort");
 }
 
 #[test]
@@ -1238,10 +1247,11 @@ async fn a_dev_script_directory_is_spawned_with_bun_run_dev_and_the_port_is_obse
     let bot = running_bot(&r, "alfa").await;
     let body = start(&r.e.app, &bot, StartReq::default()).await.unwrap();
     assert_eq!(status(&body), "starting");
-    assert_eq!(body["command"], "bun run dev");
+    // #434：allow_lan 關著，next 認得出來就接上 `-H 127.0.0.1`。
+    assert_eq!(body["command"], "bun run dev -- -H 127.0.0.1");
     assert_eq!(body["kind"], "next");
     assert_eq!(body["port"], Value::Null, "不硬塞 port");
-    assert_eq!(r.fake.spawns()[0].2, "bun run dev");
+    assert_eq!(r.fake.spawns()[0].2, "bun run dev -- -H 127.0.0.1");
     assert_eq!(r.fake.spawns()[0].1, r.e.repo.to_string_lossy());
     // 還沒 listen：留在 starting。
     assert_eq!(status(&get(&r.e.app, &bot).await.unwrap()), "starting");
@@ -1254,6 +1264,110 @@ async fn a_dev_script_directory_is_spawned_with_bun_run_dev_and_the_port_is_obse
     // 之後照一般的 port 檢查：server 掛了就 failed。
     r.fake.unlisten(3200);
     assert_eq!(status(&get(&r.e.app, &bot).await.unwrap()), "failed");
+}
+
+// ── #434：allow_lan 關著時，我們起的 dev server 不准綁到 loopback 以外 ──
+
+/// dev script 自己綁了 `0.0.0.0`（`lsof` 寫成 `*`）：旗標管不到（專案在設定檔裡蓋回去）時，
+/// 起來那一拍要判成 failed，而且**把 pane 關掉**——留著等於那顆 server 繼續對外聽。
+#[tokio::test]
+async fn a_dev_server_that_binds_a_public_address_fails_and_its_pane_is_closed() {
+    let r = rig().await;
+    std::fs::remove_file(r.e.repo.join("web/vite.config.ts")).unwrap();
+    write_pkg(&r.e.repo, Some("vite"));
+    let bot = running_bot(&r, "alfa").await;
+    let body = start(&r.e.app, &bot, StartReq::default()).await.unwrap();
+    let pane = body["pane_id"].as_str().unwrap().to_string();
+
+    r.fake.pane_listens_on(&pane, "*", 3200);
+    let seen = get(&r.e.app, &bot).await.unwrap();
+
+    assert_eq!(status(&seen), "failed", "綁到對外介面不能算 running：{seen}");
+    let err = seen["error"].as_str().unwrap_or_default();
+    assert!(err.contains('*') && err.contains("allow_lan"), "錯誤要說綁在哪與為什麼：{err}");
+    assert_eq!(r.fake.closed.lock().unwrap().clone(), vec![pane], "那顆 server 還在對外聽，pane 一定要收掉");
+    assert_eq!(seen["pane_id"], Value::Null);
+}
+
+/// 綁 loopback 的照常 running——這道檢查不能把正常的預覽擋掉。
+#[tokio::test]
+async fn a_loopback_dev_server_is_not_affected_by_the_bind_check() {
+    let r = rig().await;
+    std::fs::remove_file(r.e.repo.join("web/vite.config.ts")).unwrap();
+    write_pkg(&r.e.repo, Some("vite"));
+    let bot = running_bot(&r, "alfa").await;
+    let pane = start(&r.e.app, &bot, StartReq::default()).await.unwrap()["pane_id"].as_str().unwrap().to_string();
+
+    r.fake.pane_listens_on(&pane, "127.0.0.1", 3200);
+    r.fake.pane_listens_on(&pane, "[::1]", 3200);
+
+    let seen = get(&r.e.app, &bot).await.unwrap();
+    assert_eq!((status(&seen), seen["port"].as_u64()), ("running", Some(3200)));
+    assert!(r.fake.closed.lock().unwrap().is_empty());
+}
+
+/// `allow_lan` 開著＝使用者明講要對外（手機／Tailscale 連得到）：綁 `*` 照常 running。
+#[tokio::test]
+async fn the_lan_flag_allows_a_public_dev_server() {
+    let mut r = rig().await;
+    std::fs::remove_file(r.e.repo.join("web/vite.config.ts")).unwrap();
+    write_pkg(&r.e.repo, Some("vite"));
+    Arc::get_mut(&mut r.e.app).expect("no other handle").allow_lan = true;
+    let bot = running_bot(&r, "alfa").await;
+    let pane = start(&r.e.app, &bot, StartReq::default()).await.unwrap()["pane_id"].as_str().unwrap().to_string();
+
+    r.fake.pane_listens_on(&pane, "*", 3200);
+
+    assert_eq!(status(&get(&r.e.app, &bot).await.unwrap()), "running");
+    assert!(r.fake.closed.lock().unwrap().is_empty());
+}
+
+/// 我們自己組的 `bunx vite --host 127.0.0.1` 也要驗：專案的 `vite.config.ts` 可以把 `server.host` 蓋回去
+/// （這個 repo 的 `web/` 就是 `server.host: true`）。旗標不是保證，實際位址才是。
+#[tokio::test]
+async fn even_the_daemons_own_vite_command_is_verified_against_the_real_address() {
+    let r = rig().await;
+    let bot = running_bot(&r, "alfa").await;
+    let body = start(&r.e.app, &bot, StartReq::default()).await.unwrap();
+    let pane = body["pane_id"].as_str().unwrap().to_string();
+    let port = body["port"].as_u64().unwrap() as u16;
+    assert!(body["command"].as_str().unwrap().contains("--host 127.0.0.1"), "前提：旗標有帶");
+
+    // 旗標帶了，實際卻綁在對外介面。
+    r.fake.pane_listens_on(&pane, "0.0.0.0", port);
+
+    let seen = get(&r.e.app, &bot).await.unwrap();
+    assert_eq!(status(&seen), "failed", "{seen}");
+    assert!(seen["error"].as_str().unwrap_or_default().contains("0.0.0.0"));
+}
+
+/// 問不到位址（`lsof` 讀不到）不是「綁對外」：不下結論，照原本的 port 檢查走。
+#[tokio::test]
+async fn an_unreadable_address_probe_never_fails_the_preview() {
+    let r = rig().await;
+    let bot = running_bot(&r, "alfa").await;
+    let body = start(&r.e.app, &bot, StartReq::default()).await.unwrap();
+    r.fake.listen(body["port"].as_u64().unwrap() as u16);
+    r.fake.pane_listeners_fails.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let seen = get(&r.e.app, &bot).await.unwrap();
+    assert_eq!(status(&seen), "running", "讀不到位址要當成不知道，不能擋下正常的預覽：{seen}");
+    assert_eq!(seen["port"], body["port"]);
+}
+
+/// 接上的是別人開的 server：綁哪裡不是我們的事，也不准去關它。
+#[tokio::test]
+async fn an_attached_server_is_never_failed_for_its_bind_address() {
+    let r = rig().await;
+    let base = r.e.repo.to_string_lossy().into_owned();
+    r.fake.vite(44112, 3300, &base);
+    let bot = running_bot(&r, "alfa").await;
+    let body = start(&r.e.app, &bot, req("attach", Some(3300), None)).await.unwrap();
+    assert_eq!(body["source"], "attached");
+
+    let seen = get(&r.e.app, &bot).await.unwrap();
+    assert_eq!(status(&seen), "running");
+    assert!(r.fake.closed.lock().unwrap().is_empty(), "別人的 server 一根毛都不能動");
 }
 
 #[tokio::test]
@@ -1279,7 +1393,7 @@ async fn an_unreadable_dev_script_ports_read_does_not_count_as_a_timeout() {
     let pane = body["pane_id"].as_str().unwrap().to_string();
     let old = (chrono::Utc::now() - chrono::Duration::seconds(61)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     sqlx::query("UPDATE bot_previews SET started_at = ? WHERE bot_id = ?").bind(old).bind(&bot).execute(&r.e.app.db).await.unwrap();
-    r.fake.pane_ports_fails.store(true, std::sync::atomic::Ordering::SeqCst);
+    r.fake.pane_listeners_fails.store(true, std::sync::atomic::Ordering::SeqCst);
 
     let body = get(&r.e.app, &bot).await.unwrap();
     assert_eq!(status(&body), "starting", "讀不到實際 ports 不能當成 60 秒都沒 listen");
@@ -1301,7 +1415,7 @@ async fn off_state_shows_the_command_it_would_run_per_candidate() {
         off["candidate_info"],
         json!([
             {"dir": web, "command": "bunx vite --host 127.0.0.1 --port 5180 --strictPort"},
-            {"dir": site, "command": "bun run dev"},
+            {"dir": site, "command": "bun run dev -- -H 127.0.0.1"},
         ])
     );
 }
