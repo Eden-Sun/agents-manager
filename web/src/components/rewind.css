@@ -10,21 +10,6 @@
   font-size: 11px;
   line-height: 1.45;
   cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.12s;
-}
-
-/* 平常藏著，免得每則使用者訊息都多一顆按鈕；滑過那則、鍵盤聚焦、觸控裝置（沒有 hover）才出現。 */
-.msg:hover .msg-rewind,
-.msg-rewind:focus-visible,
-.msg-rewind.busy {
-  opacity: 1;
-}
-
-@media (hover: none) {
-  .msg-rewind {
-    opacity: 1;
-  }
 }
 
 .msg-rewind:hover:not(:disabled) {
@@ -43,4 +28,74 @@
 
 .src-tag.rewound-tag {
   border-style: dashed;
+}
+
+/* 桌機：輸入列旁那顆常駐的「⟲ 倒回」（使用者 2026-09-24）。跟附加檔案鈕同高，貼在它右邊。 */
+.rewind-bar-btn {
+  flex: none;
+  align-self: flex-end;
+  height: 38px;
+  padding: 0 10px;
+  border: 1px solid var(--btn-ghost-border);
+  border-radius: 6px;
+  background: var(--btn-ghost-bg);
+  color: var(--btn-ghost-fg);
+  font: inherit;
+  font-size: 12.5px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.rewind-bar-btn:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.rewind-bar-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.rewind-pick {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 52vh;
+  overflow-y: auto;
+}
+
+.rewind-pick-item {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: start;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.rewind-pick-item.on {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.rewind-pick-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.rewind-pick-time {
+  font-size: 11px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.rewind-pick-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
 }
