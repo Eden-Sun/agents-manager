@@ -43,6 +43,22 @@ export type PendingAction =
   | { type: 'remove'; key: string }
   | { type: 'clear' }
 
+export type AddVerdict = 'accept' | 'duplicate' | 'too-large'
+
+/**
+ * 收一個檔之前的守門（issue #497）：已經收過的略過，不能壓又超過上限的擋下來，收下的才把指紋記進 `seen`。
+ * 記指紋跟判斷寫在一起是故意的——**擋下來的不能記**：它沒有卡片，也就沒有 × 可以按
+ * （只有 `remove` 會把指紋收回去），指紋一記下去，同一個檔之後再拖幾次都算「重複」，
+ * 沒有卡片也沒有通知，使用者只看得到第一次那張。
+ */
+export function admitFile(seen: Set<string>, fp: string, size: number, canCompress: boolean): AddVerdict {
+  if (seen.has(fp)) return 'duplicate'
+  // 圖片先壓再比上限（`lib/imageCompress.ts`）：手機原圖超過上限，壓完多半放得下，壓完還超過才算失敗。
+  if (size > MAX_BYTES && !canCompress) return 'too-large'
+  seen.add(fp)
+  return 'accept'
+}
+
 export function pendingReducer(items: Pending[], action: PendingAction): Pending[] {
   const patch = (key: string, f: (it: Pending) => Pending) => items.map((it) => (it.key === key ? f(it) : it))
   switch (action.type) {
