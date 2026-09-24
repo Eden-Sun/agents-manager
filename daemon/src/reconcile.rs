@@ -897,10 +897,21 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<()> {
     }
 
     // Orphan panes of finished runs; the tab goes along so an emptied tab is closed too.
+    //
+    // **herdr 重開後 pane id 會被重用**（`panes.rs` 的 inbox key 早就為了同一件事帶 `first_seen`），而
+    // `runs.pane_id` 結束後不會清、`runs` 也沒有保留期——所以光比對 id 的話，使用者自己開的 shell 只要
+    // 拿到某個歷史 run 用過的 id 就會被當成孤兒關掉（issue #469）。
+    //
+    // 分辨的依據：真孤兒在**同一輪裡是「先關、後掃」**（這段在 `panes::scan_snapshot` 之前），所以它還沒有
+    // `panes` 列；有列、而且 `first_seen` 晚於那個 run 的 `ended_at`，就是熬過至少一輪的**另一顆** pane
+    // ——那是 `panes` GC 的事（它有 `user_pane`／`scratch`／`recent_output` 三條守門），不該由這裡硬關。
+    // `ended_at` 是 NULL 的舊列照舊（`> NULL` 是 NULL，`NOT EXISTS` 成立），行為不變。
     let dead: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
         "SELECT DISTINCT r.pane_id, r.tab_id, r.workspace_id FROM runs r JOIN bots b ON b.id = r.bot_id JOIN projects p ON p.id = b.project_id
          WHERE r.pane_id IS NOT NULL AND p.host = ? AND r.state IN ('exited','stopped')
          AND COALESCE(r.herdr_session, ?) = ?
+         AND NOT EXISTS (
+           SELECT 1 FROM panes pn WHERE pn.host = ? AND pn.pane_id = r.pane_id AND pn.first_seen > r.ended_at)
          AND r.pane_id NOT IN (
            SELECT r2.pane_id FROM runs r2 JOIN bots b2 ON b2.id = r2.bot_id JOIN projects p2 ON p2.id = b2.project_id
            WHERE r2.pane_id IS NOT NULL AND p2.host = ? AND r2.state IN ('starting','running','stopping')
@@ -909,6 +920,7 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<()> {
     .bind(host)
     .bind(&session)
     .bind(&session)
+    .bind(host)
     .bind(host)
     .bind(&session)
     .bind(&session)
@@ -2246,6 +2258,70 @@ mod compat_tests {
         .await
         .unwrap();
         (bot, run)
+    }
+
+    /// **#469**：孤兒 pane 的清理只比對 pane id，而 herdr 重開後 id 會被重用（`runs.pane_id` 結束後不清、
+    /// `runs` 也沒有保留期，所以每一顆歷史 run 的 id 都是候選）。使用者自己開的 shell 只要拿到其中一個 id
+    /// 就會被無條件關掉——那條路不是 `panes` GC，`user_pane`／`scratch`／`recent_output` 三條守門一條都不適用。
+    ///
+    /// 分辨的依據是 `panes.first_seen`：真孤兒在同一輪裡是「先關、後掃」，關的時候還沒有 `panes` 列；
+    /// 有列而且 `first_seen` 晚於那個 run 的 `ended_at`，就是熬過至少一輪的另一顆 pane。
+    /// 這裡兩顆 pane 走同一條路，只差有沒有那一列。
+    #[tokio::test]
+    async fn a_reused_pane_id_belonging_to_a_newer_pane_is_not_closed_as_an_orphan() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, _root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        // 兩顆都是「活著、沒有 agent」的 pane，而且都掛在某個已結束的 run 的 pane id 上。
+        let orphan = client.tab_create(&ws.workspace_id, "/tmp/p", "orphan", json!({})).await.unwrap();
+        let reused = client.tab_create(&ws.workspace_id, "/tmp/p", "reused", json!({})).await.unwrap();
+        let ended_at = db::iso_in(-600);
+        for (name, pane) in [("alfa", &orphan), ("bravo", &reused)] {
+            let bot = a_bot(&env, name).await;
+            sqlx::query(
+                "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, tab_id, pane_id, herdr_session, started_at, ended_at)
+                 VALUES (?,?,'exited','unknown',?,?,?,'test',?,?)",
+            )
+            .bind(db::ulid())
+            .bind(&bot)
+            .bind(&ws.workspace_id)
+            .bind(&pane.tab_id)
+            .bind(&pane.pane_id)
+            .bind(db::iso_in(-1200))
+            .bind(&ended_at)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        }
+        // 只有「重用 id」那顆在 `panes` 裡，而且是那個 run 結束**之後**才第一次被看到的。
+        let seen = db::iso_in(-60);
+        sqlx::query(
+            "INSERT INTO panes (pane_id, host, workspace_id, tab_id, cwd, kind, last_output_at, first_seen, last_seen, owned_by)
+             VALUES (?,?,?,?,'/tmp/p','shell',?,?,?,'user')",
+        )
+        .bind(&reused.pane_id)
+        .bind(crate::config::LOCAL_HOST)
+        .bind(&ws.workspace_id)
+        .bind(&reused.tab_id)
+        .bind(&seen)
+        .bind(&seen)
+        .bind(&seen)
+        .execute(&app.db)
+        .await
+        .unwrap();
+        env.herdr.agents.lock().unwrap().clear();
+
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+
+        assert!(
+            client.pane_get(&reused.pane_id).await.unwrap().is_some(),
+            "first_seen 晚於那個 run 的 ended_at＝這是重用同一個 id 的新 pane，不能當孤兒關掉"
+        );
+        assert!(
+            client.pane_get(&orphan.pane_id).await.unwrap().is_none(),
+            "沒有 panes 列的才是這一輪剛留下的孤兒，照舊關掉"
+        );
     }
 
     /// **#60.** `pane_closed` ends the run before reconcile; children stayed forever (19 on 2026-09-11).
