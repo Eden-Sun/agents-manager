@@ -4,6 +4,7 @@
  */
 import { rawTransport } from './index'
 import { ApiError } from './types'
+import type { ApiErrorBody } from './types'
 import { isRec, optStr, pick } from './normalize'
 
 export type PreviewStatus = 'off' | 'starting' | 'running' | 'failed'
@@ -141,6 +142,46 @@ export function previewApiMissing(e: unknown): boolean {
 }
 
 export const PREVIEW_API_MISSING = 'daemon 還沒有預覽功能（二進位比前端舊），需要重建＋重啟 daemon。'
+
+/** 偵測不到能起的 dev server：v1 叫 `no_vite_config`，v4 擴大後可能改名。 */
+export const NO_DEV_REASONS = new Set(['no_vite_config', 'no_dev_server', 'no_dev_command'])
+
+/**
+ * 預覽的 409 講成人話（issue #524）。daemon 的 `LcError::conflict` 組出來的 body 是
+ * `{error:"conflict", reason, …extra}`——**沒有 `message` 欄**，而 `ApiError` 的 message 會直接拿
+ * `reason`，所以不接手的話畫面上就是一個英文代碼（`bot_not_running`、`stale_selection`…）。
+ * store 的 `reasonText` 那套要 `body.message` 才給得出人話，這裡只能自己對。
+ *
+ * 認不出來的 reason 回 `null`，由呼叫端退回「代碼（HTTP 狀態）」——至少看得到代碼。
+ */
+export function previewReasonText(reason: string, body: ApiErrorBody = {}): string | null {
+  const num = (k: string) => (typeof body[k] === 'number' ? (body[k] as number) : null)
+  const port = num('port')
+  const pid = num('pid')
+  const at = port ? `:${port}` : '那個 port'
+  switch (reason) {
+    case 'not_top_level':
+      return '只有頂層 bot 能開預覽。'
+    case 'remote_host': {
+      const host = typeof body.host === 'string' && body.host ? `（這顆 bot 在 ${body.host}）` : ''
+      return `預覽只能開在跑 daemon 的這台機器上${host}。`
+    }
+    case 'bot_not_running':
+      return '這顆 bot 沒在跑：dev server 要開在它的 pane 裡，先啟動 bot 再按一次。'
+    case 'stale_selection':
+      return `${at} 已經換成別的行程${pid ? `（pid ${pid}）` : ''}，沒有接上去——清單是稍早抓的。重新整理再挑一次。`
+    case 'not_vite':
+      return `${at} 上已經沒有 dev server 了（多半剛剛關掉）。重新整理清單再挑一次。`
+    case 'no_free_port':
+      return '預覽保留的那段 port 都被占著，挑不到可用的；關掉幾個 dev server 再試。'
+    case 'preview_stop_failed':
+      return '上一顆預覽的 pane 關不掉，所以這次沒有重開。到「終端」看看那個 pane，或稍後再試。'
+    default:
+      return NO_DEV_REASONS.has(reason)
+        ? '這顆 bot 的目錄裡找不到可以起的 dev server（vite 設定檔或 package.json 的 dev script），AG Man 沒辦法自己起。'
+        : null
+  }
+}
 
 export async function fetchPreview(botId: string): Promise<Preview> {
   return toPreview(await rawTransport.request('GET', path(botId)))

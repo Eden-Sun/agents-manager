@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { PREVIEW_OFF, groupOthers, kindLabel, toPreview, toPreviewEvent } from './preview'
+import { PREVIEW_OFF, groupOthers, kindLabel, previewReasonText, toPreview, toPreviewEvent } from './preview'
 
 test('toPreview: 沒開過／壞資料都是 off', () => {
   assert.deepEqual(toPreview({ status: 'off' }), PREVIEW_OFF)
@@ -75,4 +75,26 @@ test('v4：candidates 可帶指令、others 帶 kind、kind 標籤', () => {
   assert.equal(kindLabel('next'), 'Next.js')
   assert.equal(kindLabel('unknown'), '其他')
   assert.equal(kindLabel('foo'), 'Foo')
+})
+
+test('預覽的 409 講人話，不是丟一個英文代碼給使用者（issue #524）', () => {
+  // daemon 的 conflict body 沒有 message 欄，ApiError 的 message 就是 reason 本身。
+  assert.equal(previewReasonText('bot_not_running'), '這顆 bot 沒在跑：dev server 要開在它的 pane 裡，先啟動 bot 再按一次。')
+  assert.match(previewReasonText('remote_host', { host: 'mini' }) ?? '', /這台機器.*mini/)
+  assert.match(previewReasonText('stale_selection', { port: 5173, pid: 1234 }) ?? '', /:5173.*pid 1234/)
+  assert.match(previewReasonText('not_vite', { port: 3200 }) ?? '', /:3200/)
+  assert.match(previewReasonText('no_free_port') ?? '', /port/)
+  assert.match(previewReasonText('preview_stop_failed') ?? '', /pane/)
+  assert.match(previewReasonText('not_top_level') ?? '', /頂層/)
+  for (const r of ['no_vite_config', 'no_dev_server', 'no_dev_command']) {
+    assert.match(previewReasonText(r) ?? '', /找不到可以起的 dev server/)
+  }
+})
+
+test('缺 port／pid 的 stale_selection 不寫成 :null，認不出的 reason 回 null 交給呼叫端', () => {
+  const t = previewReasonText('stale_selection') ?? ''
+  assert.doesNotMatch(t, /null|undefined|:\s/)
+  assert.match(t, /那個 port/)
+  assert.equal(previewReasonText('something_new'), null)
+  assert.equal(previewReasonText(''), null)
 })
