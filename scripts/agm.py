@@ -887,11 +887,21 @@ def cmd_ack(client: Client, cfg: dict, args) -> object:
         reason = detail.get("reason") if isinstance(detail, dict) else None
         if reason not in ("role_required", "bot_proof_mismatch"):
             raise
+        # 兩個 reason 的下一步不一樣，不要收斂成同一句：`bot_proof_mismatch` 的人已經在角色
+        # pane 裡了，叫他「去角色 pane 裡跑」等於白說一步。
+        if reason == "role_required":
+            hint = (
+                "ack 只有 AGM 角色做得到：要在巡檢或協調者自己的 pane 裡跑 bin/agm，"
+                "或自己帶 X-AM-Bot-Id 與那顆 bot 的 AM_HOOK_TOKEN。"
+            )
+        else:
+            hint = (
+                "標頭帶了，但 daemon 對不上那顆 bot 的 hook token（token 輪替過、"
+                "或 AM_BOT_ID 與 AM_HOOK_TOKEN 不是同一顆的）：這一顆要重啟才會拿到新的環境。"
+            )
         raise AgmError(
-            "role_required",
-            "ack 只有 AGM 角色做得到：要在巡檢或協調者自己的 pane 裡跑 bin/agm，"
-            "或自己帶 X-AM-Bot-Id 與那顆 bot 的 AM_HOOK_TOKEN。"
-            f"（這個 pane 的 AM_BOT_ID={os.environ.get('AM_BOT_ID') or '未設定'}，"
+            reason,
+            hint + f"（這個 pane 的 AM_BOT_ID={os.environ.get('AM_BOT_ID') or '未設定'}，"
             f"runtime 的 self_bot_id={cfg.get('self_bot_id') or cfg.get('manager_bot_id') or cfg.get('bot_id') or '未設定'}）",
             3,
             status=403,

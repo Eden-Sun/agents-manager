@@ -777,6 +777,16 @@ class MiscCommandTest(CliCase):
         self.assertEqual(err["error"], "role_required")
         self.assertIn("pane", err["message"])
         self.assertIn("AM_HOOK_TOKEN", err["message"])
+        # 另一個 reason 的下一步不一樣：人已經在角色 pane 裡了，別再叫他換 pane（i407 審出來的）。
+        FakeDaemon.routes["POST /api/supervisor/inbox/e3/ack"] = (
+            403,
+            {"error": "forbidden", "reason": "bot_proof_mismatch", "message": "對不上"},
+        )
+        err = self.bad("ack", "e3")
+        self.assertEqual(err["error"], "bot_proof_mismatch")
+        self.assertIn("token", err["message"])
+        self.assertNotIn("去角色", err["message"])
+        self.assertNotIn("裡跑 bin/agm", err["message"])
         # 其他 403 不要被這條吃掉：照原本的 http_error 冒出來。
         FakeDaemon.routes["POST /api/supervisor/inbox/e2/ack"] = (403, {"error": "forbidden", "reason": "something_else"})
         self.assertEqual(self.bad("ack", "e2")["error"], "http_error")
