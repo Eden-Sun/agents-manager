@@ -477,6 +477,15 @@ daemon 這幾天把「寫不進 DB」改成 fail closed：外面的副作用做�
 - **外部 Cargo「測試連線」先存再測**：`POST /api/build/remote/test` 測的是已儲存的設定；表單有沒存的改動就先存，結果寫明測的是 `user@host`。
 - 截圖：`docs/screenshots/remote-cargo-test-saves-first/`。
 
+## 輸入框卡著草稿：輸入列上方常駐一條，送出框裡那段／清掉再送我這則（2026-09-26）
+
+bot 的終端輸入框裡留著一段沒送出的字（claude 的「Edit prompt and retry」最常見），網頁每送一則都 409 `composer_busy`；以前只跳一句「清掉或送出之後再送一次」的 toast，網頁上卻沒有地方能清或送，使用者只能自己去終端。
+
+- **常駐，不是 toast**：409 帶了 `draft`（SPEC §4.4a「框裡卡著草稿」）就在輸入列上方放一條（`ComposerDraftBar`，黃底），顯示框裡那段（等寬、最多約四行可捲，daemon 截過 500 字時註明），留到使用者選了動作、按「取消」、或之後任何一則送成功為止。有這一條就不另跳 toast；舊 daemon 沒帶 `draft` 照舊只跳那一句。
+- **三個動作**：「送出框裡那段」（主按鈕；daemon 對 pane 按 Enter、照一般 prompt 開回合，自己輸入框裡的字不動，之後照常送）、「清掉再送我這則」（輸入框裡沒有自己的字時停用）、「取消」（只收起這一條，框裡的字不動）。daemon 沒給的動作不顯示（沒驗過的 kind、讀不出字）；一個都沒有時說明要到「終端」分頁處理。
+- **按下去之後**：按鈕鎖住、主按鈕顯示「送出中…」／「清除中…」。框裡換了字（`draft_changed`）＝這一條換成新的內容並說一聲、等使用者再確認，不會替使用者送出或清掉沒看過的字；清不掉（`draft_uncleared`）＝這一條留著剩下的字、通知指向終端；框已經空了（`draft_gone`）＝收掉這一條。
+- 截圖：`docs/screenshots/composer-draft/`（mock：`__amMock.composerDraft('<bot>', '<字>')`）。
+
 ## herdr 版本顯示在 hosts 面板（2026-09-19）
 
 升級 herdr 時使用者要能在 UI 確認結果，所以每台主機（含本機）的那一列多一行小字 `herdr 0.9.1 · protocol 22`（等寬、`text-dim`）。

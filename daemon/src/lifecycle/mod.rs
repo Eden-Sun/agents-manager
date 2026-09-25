@@ -21,6 +21,7 @@ mod stop;
 mod deferred_live;
 mod slash;
 mod delivery;
+mod composer_draft;
 /// 「輸入框有沒有字」的同一支判斷，給 lifecycle 以外的地方（judge 的卡住畫面）用。
 pub(crate) use delivery::{plain_without_hints, read_styled};
 mod prompt;
@@ -99,6 +100,7 @@ pub(crate) use deferred_live::{defer_live, is_busy_reason, schedule_deferred_liv
 pub(crate) use delivery::*;
 pub(crate) use start::*;
 pub(crate) use start_send::{prompt_starting, withdraw_turn};
+pub(crate) use composer_draft::submit as submit_composer_draft;
 pub(crate) use stop::*;
 pub(crate) use interrupt_grace::{note_user_interrupt_of, settle_interrupt_echo, FailureEvidence as InterruptFailureEvidence};
 pub(crate) use interruption::{adopt_interrupted_on_restart, adopt_turns_of_ended_runs, adopt_unbound_send_nows, settle_locked as settle_interruption, Evidence as InterruptEvidence};

@@ -676,7 +676,8 @@ pub(crate) fn composer_text(kind: &str, screen: &str) -> Option<String> {
     for (n, line) in tail[idx..].iter().enumerate() {
         let row = undecorate_row(line);
         let body = if n == 0 { row[marker.len()..].trim().to_string() } else { row };
-        if n > 0 && (body.is_empty() || is_rule_row(&body)) {
+        // grok 的框底 `╰── Grok 4.7 (high) · … ─╯` 寫著字，不是純線條：一樣是框的下緣，不是草稿的一列。
+        if n > 0 && (body.is_empty() || is_rule_row(&body) || super::delivery::is_box_bottom(&body)) {
             break;
         }
         out.push(body);

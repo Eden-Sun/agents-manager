@@ -377,6 +377,27 @@ prompt 改成打字進 pane 並以無損證據確認。**一個字都沒打時�
 | 503 | `{"reason":"maintenance_state_unavailable","resource":"restart","retry_after_secs","retryable":true,"sent":false,"message"}`（帶 `Retry-After` header） | **讀不到**維護窗口的狀態（DB 出錯、租約那一列解不開、沒放掉卻沒有讀得懂的到期時間，issue #127）——觀測不到租約不等於沒有租約，所以照窗口處理：不送任何字、連 turn 都不留（已 commit 的那一筆會撤回）。跟上一列 409 `maintenance_window`（**確定**有人握著）分得開；DB 一恢復就重新判斷，同一個 `client_request_id` 原樣重送即可。AGM 派工不回這個 503——留在佇列。 |
 | 409 | `{"reason":"resume_unverified","run_id","session_id","retry_after_s"}` | 這個 run 是 `--resume` 接回來的 claude，還沒收到它回報 session（SessionStart hook），不知道接回的是不是原本那段對話（issue #92，SPEC §6.5.2 第 4 點）。連 turn 都不建；回報一到、或等滿 120 秒（刻意放行並在對話插說明）就恢復，同一個 `client_request_id` 原樣重送即可。等的時間可能更長：pane 停在要人回答的提示（信任目錄）那段不算，按掉之後還會再給 60 秒讓遠端的回報走完一輪 spool 掃描——照 `retry_after_s` 再問就好。AGM 派工不回這個 409——排進佇列等驗證。 |
 
+**輸入框卡著草稿（2026-09-26，SPEC §4.4a「框裡卡著草稿」）**：409 `composer_busy` 另外帶
+`"draft"`（框裡現在的字，最多 500 字；讀不出來是 `null`）、`"draft_truncated"`、`"draft_actions"`（這個 kind 驗過的動作，
+`["submit","clear"]`；`draft` 是 `null` 時是空陣列）。網頁拿它顯示框裡那段，並用同一個端點處理：
+
+| body | 做什麼 |
+|---|---|
+| `{"submit_draft":true,"expect_draft","client_request_id"}` | **送出框裡那段**：對 pane 按 Enter（不重打字），照一般 prompt 開回合、證明送達；`text` 不用帶，user 訊息的內容是框裡那段（有 session log 證據時換成 log 裡那一則的原文）。回應同一般 prompt（`delivery` 為 `ok`／`unverified`／`unknown`）。不收 `attachments`／`send_now`／`start_if_stopped`／`clear_draft`（400）。 |
+| `{"text","clear_draft":true,"expect_draft","client_request_id",…}` | **清掉再送我這則**：先按清框鍵、重讀畫面確認框是空的，才照一般流程打 `text`。框本來就空了就不按鍵、直接送。 |
+
+兩者都要帶 `expect_draft`＝409 給的 `draft`（沒帶是 400）；bot 轉送的（`relay_from`）不收（400）。一個字都沒送時的 409：
+
+| reason | 意思 |
+|---|---|
+| `draft_changed` | 框裡的字跟 `expect_draft` 不一樣了（有人在終端打字、CLI 放回另一段）：一個鍵都沒按；body 帶新的 `draft`／`draft_actions`，`retryable:true`。 |
+| `draft_uncleared` | 清框鍵按了、重讀框裡還有字（或 herdr 沒收下那顆鍵）：`text` 沒打；body 帶剩下的 `draft`，`retryable:false`。 |
+| `draft_gone` | `submit_draft` 時框已經空了，沒有東西可以送；`retryable:false`。 |
+| `draft_clear_while_busy` | 插隊送出（`send_now`）時有回合在跑：清框鍵會打斷它，不按。 |
+| `draft_clear_unsupported` | 這個 kind 沒驗過清框鍵。 |
+
+herdr 沒收下 Enter、框裡還是那一段：撤回那一筆回合，回 502（不留一筆 `unknown` 擋住之後每一則）。
+
 turn 已經建好、還沒打第一個字時 run 就結束（`mark_run_exited` 把它標 failed 並插「run ended」說明）：撤回撤不掉，這時
 **不刪任何東西**，回 `200` 那筆 turn 的現況（訊息與說明都留著），跟用同一個 `client_request_id` 重送拿到的回應一致，不回可重試的 409。
 
