@@ -243,6 +243,29 @@ pub fn is_switch_model_dialog(screen: &str) -> bool {
     titled && line_starts_with(&tail, "1. yes, switch to") && line_starts_with(&tail, "2. no, go back")
 }
 
+/// Codex 0.157.0's startup upgrade screen for legacy models (including `gpt-5.6-*`).
+/// It uses the full-screen migration flow, so the migration copy, both choices, and footer are
+/// all visible together. Treat it as a user decision: callers must leave it open and block input.
+pub fn is_codex_model_migration_prompt(screen: &str) -> bool {
+    const TAIL_LINES: usize = 20;
+    let raw: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
+    let tail_raw = &raw[raw.len().saturating_sub(TAIL_LINES)..];
+    if tail_raw.is_empty() || composer_is_idle(tail_raw) {
+        return false;
+    }
+    let tail: Vec<String> = tail_raw.iter().map(|l| norm_line(l)).collect();
+    let copy = tail.iter().any(|l| {
+        l.starts_with("meet gpt-6 sol")
+            || l.starts_with("meet gpt-6 luna")
+            || l.starts_with("codex just got an upgrade. introducing")
+            || l.starts_with("gpt-5.4 is no longer available")
+    });
+    let has_footer = tail.last().is_some_and(|l| l.starts_with("enter/esc confirm") || l.starts_with("enter/esc continue"));
+    let has_migration_choices =
+        line_starts_with(&tail, "1. try new model") && line_starts_with(&tail, "2. use existing model");
+    copy && has_footer && (has_migration_choices || tail.last().is_some_and(|l| l.starts_with("enter/esc continue")))
+}
+
 /// Claude Code 2.1.278 首次啟動的「Auto mode」推銷框（2026-09-22 build child 卡在這裡半小時：herdr 判 idle、
 /// 交辦 queued 不送，排隊逾時被撤回、租約過期）。兩個選項各自成行才算；同 [`is_switch_model_dialog`]，
 /// 輸入列空著就不是框。第二個選項「keep bypass permissions」是我們要的，呼叫端送 Down＋Enter。
@@ -468,10 +491,14 @@ pub fn spawn_survey_watcher(app: Arc<App>) {
         loop {
             tokio::time::sleep(SWEEP).await;
             let runs = db::all_active_runs(&app.db).await.unwrap_or_default();
-            for run in runs.into_iter().filter(|r| r.agent_status == "blocked" || r.agent_status == "idle" || crate::dangerous_rm::is_open(&r.id)) {
-                dismiss_if_survey(&app, &run).await;
-                // 防誤刪框：herdr 判成 idle 時的安全網，也負責框關掉之後的收尾（不按任何鍵）。
-                crate::dangerous_rm::observe(&app, &run).await;
+            for run in runs {
+                if run.agent_status == "blocked" || run.agent_status == "idle" || crate::dangerous_rm::is_open(&run.id) {
+                    dismiss_if_survey(&app, &run).await;
+                    // 防誤刪框：herdr 判成 idle 時的安全網，也負責框關掉之後的收尾（不按任何鍵）。
+                    crate::dangerous_rm::observe(&app, &run).await;
+                }
+                // Codex 在 starting／working 狀態也可能停在啟動遷移框；只查畫面，不替使用者選。
+                crate::codex_model_migration::observe(&app, &run).await;
             }
         }
     });
@@ -698,6 +725,20 @@ mod tests {
         // 同樣不能被正文裡的引文帶偏。
         let quoted = format!("{}\n{}\n─────\n❯\n─────\n  tony. | agents-manager | Opus 5 | 5h:96%\n", CHANGE_EFFORT, "⏺ Bash(cargo test)\n  ⎿  ok\n".repeat(8));
         assert!(!is_switch_model_dialog(&quoted));
+    }
+
+    /// Codex 0.157.0 `rust-v0.157.0` model migration copy plus its full-screen choices.
+    /// The private-prefix CLI reached the sign-in menu before this screen, so this fixture follows
+    /// `models.json` migration markdown and `tui/src/model_migration.rs` rendering.
+    #[test]
+    fn codex_0157_model_migration_is_a_user_choice_prompt() {
+        let screen = include_str!("lifecycle/fixtures/codex-0.157-model-migration.txt");
+        assert!(is_codex_model_migration_prompt(screen));
+
+        let quoted = format!("⏺ Model migration screen:\n{screen}\n────────\n›\n");
+        assert!(!is_codex_model_migration_prompt(&quoted), "an assistant quote followed by a composer is not a modal");
+        let no_footer = screen.replace("enter/esc confirm · ctrl+c quit", "");
+        assert!(!is_codex_model_migration_prompt(&no_footer), "the migration copy alone is not a prompt");
     }
 
     /// 這顆 bot 回報完上面那個修正之後的真畫面尾段（2026-09-18，w168:p91）：畫面上沒有框，只是

@@ -664,8 +664,8 @@ export function effortLabel(level: string): string {
 export const MODEL_OPTIONS: Record<BotKind, readonly string[]> = {
   // 由輕到重（2026-09-09 使用者決定）；`sortModels` 以此排序 API 清單。停用別名一律寫替換後的正式 id（#539）。
   claude: ['haiku', 'sonnet', 'claude-opus-5-5', 'fable'],
-  // 順序同 claude（2026-09-09 使用者決定）；gpt-5.5 拿掉（2026-09-09）。
-  codex: ['gpt-6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol', 'gpt-6-astra'],
+  // 輕到重；Codex 0.157 的 GPT-6 Luna / Sol 已取代舊的 5.6 型號。
+  codex: ['gpt-6-luna', 'gpt-6-sol', 'gpt-6-astra'],
   // `grok models`（grok 1.0.40，2026-09-22）
   grok: ['grok-4.7', 'grok-4.7-build-fast', 'grok-4.6', 'grok-4.5'],
 }
@@ -674,7 +674,7 @@ export const MODEL_OPTIONS: Record<BotKind, readonly string[]> = {
  * 選單隱藏的模型（2026-09-09）：codex `model/list` 仍回上一代。daemon 照抄 CLI，所以在選單層過濾；
  * 已設成它的 bot 仍保留那顆按鈕，否則會被顯示成「自訂」。
  */
-export const HIDDEN_MODELS: readonly string[] = ['gpt-5.5']
+export const HIDDEN_MODELS: readonly string[] = ['gpt-5.5', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']
 
 /**
  * daemon 已停用的模型別名（#400）：送這些值進去，它會換成右邊那個再存，並在回應帶 `remapped`。
@@ -685,6 +685,8 @@ export const HIDDEN_MODELS: readonly string[] = ['gpt-5.5']
  */
 export const DEPRECATED_MODELS: Readonly<Record<string, string>> = {
   'claude:opus': 'claude-opus-5-5',
+  'codex:gpt-5.6-sol': 'gpt-6-sol',
+  'codex:gpt-5.6-terra': 'gpt-6-sol',
   'codex:gpt-5.6-luna': 'gpt-6-luna',
 }
 

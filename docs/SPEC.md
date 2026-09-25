@@ -618,10 +618,13 @@ claude 連線在回應中途掉了時，pane 只多一行 `⏺ API Error: Connec
 
 | kind | 停用的輸入 | 強制使用 | 其餘版本名稱 |
 |---|---|---|---|
+| codex | `gpt-5.6-sol`、`gpt-5.6-terra` | `gpt-6-sol` | 原樣保留 |
 | codex | `gpt-5.6-luna` | `gpt-6-luna` | 原樣保留 |
 | claude | `opus` | `claude-opus-5-5` | 原樣保留，包括 `claude-opus-4-1` 及其他 `claude-opus-*` 完整名 |
 
-create／PATCH／promote 回應以 `remapped.model.from/to` 說明實際替換；`GET /api/models?kind=codex` 不列出 `gpt-5.6-luna`。啟動舊 DB 設定、採納子 agent argv、config.toml 投影與 responder/supervisor 的啟動設定都套用同一 helper。schema v15 將 `bots.model` 的既有精確舊值改寫，包含軟刪列；資料 migration 可重複執行。額度與 runtime 探測到明確版本 id 時不做前綴推測或降版。
+create／PATCH／promote 回應以 `remapped.model.from/to` 說明實際替換；`GET /api/models?kind=codex` 不列出這三個精確的 `gpt-5.6-*` 值。啟動舊 DB 設定、採納子 agent argv、config.toml 投影與 responder/supervisor 的啟動設定都套用同一 helper。schema v15 將 `bots.model` 的既有精確舊值改寫，包含軟刪列；資料 migration 可重複執行。額度與 runtime 探測到明確版本 id 時不做前綴推測或降版。
+
+Codex 0.157.0 以舊模型啟動時可能顯示模型遷移選單（例如 `Meet GPT-6 Sol`，含 `Try new model`／`Use existing model`）。daemon 偵測後保留選單、不送任何鍵，將 run 標成 `blocked` 並通知使用者；一般送出與排隊 flush 都等使用者在終端選完。選單關閉後還原 daemon 補上的狀態並繼續送佇列。`Approaching rate limits` 的切換建議也辨識為選擇畫面；它不代表額度已用盡，不會標成 quota hit。
 
 `bots.model` / `effort` / `fast` 是**設定**，不等於 bot 現在真的在跑的東西。
 
