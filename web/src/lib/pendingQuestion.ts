@@ -48,3 +48,44 @@ export function questionVisibleOnScreen(pending: PendingQuestion[], screenQuesti
   const shown = squash(screenQuestion)
   return pending.every((q) => shown.includes(squash(q.question).slice(0, 12)))
 }
+
+/**
+ * 畫面上這份選單是原題裡的第幾題（issue #559）；對不上回 -1。
+ *
+ * 先比問句（同 `questionVisibleOnScreen` 的前 12 個字）；畫面沒畫出問句（pane 太矮）時改比選項：原題的每個選項
+ * 都能在畫面的選項標題裡找到才算。多題的標題可能一樣（例如兩題都有「先不關」），所以要**全部**對上、而且只認一題，
+ * 兩題都對得上就不猜。
+ */
+export function pendingIndexOnScreen(
+  pending: PendingQuestion[],
+  menu: { question: string | null; choices: { title: string }[] } | null | undefined,
+): number {
+  if (!menu || pending.length === 0) return -1
+  const squash = (s: string) => s.replace(/\s+/g, '')
+  if (menu.question) {
+    const shown = squash(menu.question)
+    const byQuestion = pending.findIndex((q) => shown.includes(squash(q.question).slice(0, 12)))
+    if (byQuestion >= 0) return byQuestion
+  }
+  const titles = menu.choices.map((c) => squash(c.title))
+  const hits = pending
+    .map((q, i) => ({ i, ok: q.options.length > 0 && q.options.every((o) => titles.includes(squash(o.label))) }))
+    .filter((h) => h.ok)
+  return hits.length === 1 ? hits[0].i : -1
+}
+
+/** 畫面上這一題在原題裡的位置與題目（`BlockedChoices` 用來補沒畫出來的題目、第幾題）。 */
+export interface PendingAt {
+  at: number
+  total: number
+  question: string
+  header: string
+}
+
+export function pendingAtOnScreen(
+  pending: PendingQuestion[],
+  menu: Parameters<typeof pendingIndexOnScreen>[1],
+): PendingAt | null {
+  const at = pendingIndexOnScreen(pending, menu)
+  return at < 0 ? null : { at, total: pending.length, question: pending[at].question, header: pending[at].header }
+}

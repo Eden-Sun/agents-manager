@@ -1,56 +1,108 @@
-/* 從 transcript 讀出來的題目（`PendingQuestionCard.tsx`）：跟 blocked 面板同一個紅系底，題目字級最大。 */
+/* 從 transcript 讀出來的原題（`PendingQuestionCard.tsx`）：唯讀摘要，預設收成一行（issue #559）。
+   長相刻意跟選項（`.bc-item`：有框、編號、粗體、44px）分開——這裡沒有一樣東西按了會作答。 */
 .pending-q {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  margin: 0 0 8px;
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-left: 3px solid var(--danger);
-  border-radius: var(--radius);
-  background: var(--bg-panel);
+  margin: 8px 0 0;
+  padding: 4px 0 0;
+  border-top: 1px dashed var(--border-strong);
+}
+
+/* 收合列：跟 `.bc-more` 同一種中性小按鈕的份量，不是選項。 */
+.pending-q-toggle {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-height: 32px;
+  padding: 4px 2px;
+  border: 0;
+  background: none;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.pending-q-toggle:hover {
+  color: var(--text);
 }
 
 .pending-q-src,
 .pending-q-note {
   margin: 0;
   font-size: 11px;
+  font-weight: 400;
+  color: var(--text-faint);
+}
+
+.pending-q-src {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pending-q-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-left: 8px;
+  border-left: 2px solid var(--border);
+}
+
+.pending-q-current {
+  border-left-color: var(--accent);
+}
+
+.pending-q-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: 11px;
   color: var(--text-faint);
 }
 
 .pending-q-header {
-  align-self: flex-start;
   padding: 0 6px;
   border-radius: 999px;
   border: 1px solid var(--border-strong);
-  font-size: 11px;
   color: var(--text-dim);
+}
+
+.pending-q-here {
+  color: var(--accent-ink);
 }
 
 .pending-q-text {
   margin: 0;
-  font-size: 14px;
-  font-weight: 650;
-  line-height: 1.5;
-  color: var(--text);
-}
-
-.pending-q-opts {
-  margin: 0;
-  padding-left: 20px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
   font-size: 12.5px;
   line-height: 1.5;
+  color: var(--text);
 }
 
-.pending-q-label {
-  font-weight: 600;
-  color: var(--text);
+/* 選項是散文清單：不編號、不加粗、跟說明同一段。 */
+.pending-q-opts {
+  margin: 0;
+  padding-left: 16px;
+  list-style: disc;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-dim);
 }
 
 .pending-q-desc {
-  display: block;
-  color: var(--text-dim);
+  color: var(--text-faint);
+}
+
+/* 認不出選單時卡片排在終端快照上面：自己捲，不把底部按鍵擠出去。 */
+.blocked-modal > .pending-q {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  margin: 0 16px;
 }

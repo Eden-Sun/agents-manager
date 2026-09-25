@@ -15,6 +15,7 @@ import {
   type TuiChoiceMenu,
   type WalkTarget,
 } from '../lib/tuiChoices'
+import type { PendingAt } from '../lib/pendingQuestion'
 import { useStore } from '../store/store'
 import { TypeAnswerField } from './TypeAnswerField'
 import './blockedChoices.css'
@@ -43,10 +44,13 @@ export function BlockedChoices({
   botId,
   menu,
   onAnswered,
+  pendingAt = null,
 }: {
   botId: string
   menu: TuiChoiceMenu
   onAnswered?: () => void
+  /** pane 太矮、題目或分頁列被裁掉時，從原題補：沒畫出來的題目、第幾題與上一題／下一題。 */
+  pendingAt?: PendingAt | null
 }) {
   const readTerminal = useStore((s) => s.readTerminal)
   const sendKeys = useStore((s) => s.sendKeys)
@@ -239,7 +243,8 @@ export function BlockedChoices({
       for (let i = 0; i < TRIES; i++) {
         await sleep(STEP)
         const now = await read()
-        if (!now || now.question !== before.question || now.tabAt !== before.tabAt) return true
+        // 題目被裁掉時兩邊的問句都是 null，換頁只看得出選項變了。
+        if (!now || !sameChoices(now, before) || now.tabAt !== before.tabAt) return true
       }
     }
     return false
@@ -312,6 +317,33 @@ export function BlockedChoices({
               →
             </button>
           </div>
+        ) : pendingAt && pendingAt.total > 1 ? (
+          // 分頁列被裁掉（pane 太矮），但原題說有好幾題：照樣給上一題／下一題，第幾題照原題對出來的講。
+          <div className="bc-tabs" role="group" aria-label="這份問卷的各題">
+            <button
+              type="button"
+              className="bc-step"
+              aria-label="上一題"
+              title="上一題（送 shift+tab）"
+              disabled={Boolean(busy) || pendingAt.at === 0}
+              onClick={() => void step(-1)}
+            >
+              ←
+            </button>
+            <span className="bc-tab bc-tab-at bc-tab-count" aria-current="true">
+              第 {pendingAt.at + 1}／{pendingAt.total} 題{pendingAt.header ? `・${pendingAt.header}` : ''}
+            </span>
+            <button
+              type="button"
+              className="bc-step"
+              aria-label="下一題"
+              title="下一題（送 tab）"
+              disabled={Boolean(busy)}
+              onClick={() => void step(1)}
+            >
+              →
+            </button>
+          </div>
         ) : null}
         {/* 問句上面的指令與警語：不給這段，`Do you want to proceed?` 根本看不出在核准什麼（2026-09-20 使用者）。 */}
         {menu.context.length ? (
@@ -325,7 +357,13 @@ export function BlockedChoices({
             ))}
           </pre>
         ) : null}
-        {menu.question ? <p className="bc-question">{menu.question}</p> : null}
+        {menu.question ? (
+          <p className="bc-question">{menu.question}</p>
+        ) : pendingAt ? (
+          <p className="bc-question" title="終端沒畫出題目，這是對話紀錄裡的原題">
+            {pendingAt.question}
+          </p>
+        ) : null}
         {/* 問句底下的條列說明（`Try the new fullscreen renderer?` 的三行 `·`），照畫面順序排在問句後面。 */}
         {menu.notes.length ? <pre className="bc-context bc-notes">{menu.notes.join('\n')}</pre> : null}
       </div>

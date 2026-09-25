@@ -290,6 +290,12 @@
   font-weight: 650;
 }
 
+/* 分頁列被裁掉時的「第 N／M 題」（issue #559）：從原題對出來的，不是猜的、也不是按鈕。 */
+.bc-tab.bc-tab-count {
+  border-style: solid;
+  cursor: default;
+}
+
 .bc-step {
   min-width: 28px;
   min-height: 28px;
