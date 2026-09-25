@@ -613,20 +613,13 @@ fn usage_fresh_at(key: &str, now: std::time::Instant) -> bool {
 
 /// 這一輪要不要**跳過**這把 key 的 `/usage` pane。
 ///
-/// 只有兩件事都成立才跳過：①狀態列剛送過同樣那幾個窗（開 pane 重讀是純成本），②`/usage` 自己
-/// 的那一份還新。少了②，有 bot 在講話的帳號就永遠問不到 Fable 與方案——省下的成本是「那格資料
-/// 再也不會出現」，不是省。
-pub(crate) fn skip_probe_for_fresh_statusline(login_known: bool, statusline_fresh: bool, usage_fresh: bool) -> bool {
-    login_known && statusline_fresh && usage_fresh
-}
-
-fn fresher_than(updated_at: &str, window: Duration) -> bool {
-    let Ok(t) = chrono::DateTime::parse_from_rfc3339(updated_at) else { return false };
-    match chrono::Utc::now().signed_duration_since(t.with_timezone(&chrono::Utc)).to_std() {
-        Ok(age) => age < window,
-        // Negative age (clock skew) — treat as fresh rather than probing on every cycle.
-        Err(_) => true,
-    }
+/// 登入答案已知、而且 `/usage` 自己那一份還新（[`USAGE_REFRESH`]）就跳過，**不看狀態列新不新**。
+/// 有 bot 在講話的帳號，5h/7d 由狀態列即時補；安靜的帳號額度本來就不太動，十分鐘一次夠用。
+/// 以前安靜帳號每 [`CLAUDE_POLL`]（60 秒）就開一個 `claude -p`：每一個都是完整 session，會跟同一個
+/// config dir 裡的 bot 搶著換 OAuth token（refresh token 只能用一次，慢的那個會被登出），`/usage`
+/// 背後的端點也很快就 429（2026-09-25 使用者：「m4p 的 cc1 一直被登出」）。
+pub(crate) fn skip_usage_probe(login_known: bool, usage_fresh: bool) -> bool {
+    login_known && usage_fresh
 }
 
 /// Short enough that a transient failure (herdr busy, TUI slow) heals on its own.
@@ -853,19 +846,13 @@ pub async fn refresh_claude(app: &Arc<App>, host: &str) -> Result<bool> {
     let mut touched = false;
     for t in targets {
         let full = crate::quota::quota_key(host, &t.key);
-        // Fresh statusLine = skip (many `ccN` per host, SPEC §16, would queue probes), unless
-        // we've never had a login answer for it — that rides on the probe.
+        // `/usage` answered within USAGE_REFRESH = skip (many `ccN` per host, SPEC §16, would queue
+        // probes), unless we've never had a login answer for it — that rides on the probe.
         let login_known = t.names.iter().all(|n| logins.get(n).is_some_and(|i| i.logged_in.is_some()));
         if t.login_only && login_known {
             continue;
         }
-        let statusline_fresh = app
-            .quotas
-            .lock()
-            .await
-            .get(&full)
-            .is_some_and(|q| q.source == "statusline" && fresher_than(&q.updated_at, CLAUDE_POLL));
-        if skip_probe_for_fresh_statusline(login_known, statusline_fresh, usage_fresh(&full)) {
+        if skip_usage_probe(login_known, usage_fresh(&full)) {
             any = true;
             continue;
         }
@@ -884,7 +871,7 @@ pub async fn refresh_claude(app: &Arc<App>, host: &str) -> Result<bool> {
                 } else if o.quota.is_some() {
                     any = true;
                     unpark(&full);
-                    // 這把 key 的 `/usage` 剛答過：接下來十分鐘讓狀態列接手，不用再開 pane。
+                    // 這把 key 的 `/usage` 剛答過：接下來十分鐘不用再開 pane（有 bot 講話時狀態列補 5h/7d）。
                     mark_usage_seen(&full);
                 } else {
                     // No plan lines: park it using the login answer we just got.
@@ -1211,14 +1198,21 @@ AM_USAGE_DONE=0
     /// 週窗與方案名**只有** `/usage` 讀得到。重啟前看得到只是因為 `quota::set` 會沿用舊的 `fable`。
     #[test]
     fn a_chatty_account_still_gets_its_usage_probe() {
-        // 從沒問過 `/usage`：狀態列再新也要開一次 pane，否則 Fable 那格永遠是空的。
-        assert!(!skip_probe_for_fresh_statusline(true, true, false));
-        // 問過而且還新：這一輪讓狀態列接手，不用再開 pane（原本省成本的用意保留）。
-        assert!(skip_probe_for_fresh_statusline(true, true, true));
-        // 狀態列不新（帳號安靜了）：照樣要問。
-        assert!(!skip_probe_for_fresh_statusline(true, false, true));
+        // 從沒問過 `/usage`（或已超過十分鐘）：狀態列再新也要開一次 pane，否則 Fable 那格永遠是空的。
+        assert!(!skip_usage_probe(true, false));
+        // 問過而且還新：不用再開 pane。
+        assert!(skip_usage_probe(true, true));
         // 還不知道這個帳號登入了沒：登入答案跟 `/usage` 同一趟，值得一個 pane。
-        assert!(!skip_probe_for_fresh_statusline(false, true, true));
+        assert!(!skip_usage_probe(false, true));
+    }
+
+    /// 2026-09-25 使用者：「m4p 的 cc1 一直被登出」。安靜的帳號（狀態列不新）以前每 60 秒就開一個
+    /// `claude -p`，跟同 config dir 的 bot 搶 OAuth refresh；現在跟有講話的帳號一樣十分鐘一次。
+    #[test]
+    fn a_quiet_account_is_not_probed_every_poll() {
+        let key = format!("claude:test-{}", crate::db::ulid());
+        mark_usage_seen(&key);
+        assert!(skip_usage_probe(true, usage_fresh(&key)), "十分鐘內問過就不開 pane，不管狀態列");
     }
 
     /// 記帳本身：沒問過就是不新，問過之後才在十分鐘內算數。
