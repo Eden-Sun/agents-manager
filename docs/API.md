@@ -42,7 +42,7 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
 | C | `DELETE /hosts/{name}/shells/{pane_id}`、`POST /panes/{id}/close` | 網頁 | 服務 pane 要 `?confirm=true`；agent pane 403 | 關掉 pane | 維持 |
 | C | `POST /bots/{id}/restore`、`/identities`、`DELETE /identities/{name}`、`POST /order`、`PATCH /bots/{id}`、`PATCH /projects/{id}`、start／stop／restart／fork／promote／rewind 等其餘寫入 | 網頁、`agm` | UI token（各自的狀態機檢查） | 本機設定與行程，改得回來 | 維持 |
 | D | `POST /supervisor/herdr-maintenance/open`／`end`、`/supervisor/inbox/{id}/ack`、lease `force` 接管 | AGM 角色 pane 裡的 `agm` | `require_role`／`actor_role`（沒角色 403） | — | 已有 |
-| D | `POST /supervisor/approvals/{id}/decide` | 人在一般 shell 跑的 `agm`（不帶身分） | 只有 UI token | 核准換版窗口 | 由 #447 處理 |
+| D | `POST /supervisor/approvals/{id}/decide` | AGM 角色 pane 裡的 `agm`；人在一般 shell 跑的 `agm`（不帶身分，只剩 deny／revoke） | `approve` 要 `require_role`（沒角色 403）；`deny`／`revoke` 只有 UI token | 核准換版窗口 | 已有（#447） |
 | E | `/hook/{provider}`、`/relay/announce`、`/relay/pane`、`/build-slots/*` | bot pane 裡的 hook／shim | 不在 `/api` 底下，驗 per-bot `X-AM-Bot-Token` | — | 已有 |
 | F | `POST /mem/processes/kill` | 只有網頁 | `memproc::kill` 只殺 herdr 樹內、非 herdr、非 bot 的行程 | — | 維持 |
 
@@ -1840,8 +1840,10 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
   `expires_in_secs` 不參與比對：原本那筆的到期時間不會被重送改掉。不帶 `request_id` 就是舊行為，每次開一筆新的。
   CLI：`agm approval request --request-id <id>`（不確定送出去沒有時用同一個 id 重送，不要換新的）；`--supersedes <舊 id>` 帶 `supersedes`。
 - `POST /api/supervisor/approvals/{id}/decide {decision:"approve"|"deny"|"revoke",actor?,reason?,expires_in_secs?}`：同 decision 重送回 `idempotent:true`。
+  **`approve` 只給驗過的 AGM 角色**（issue #447，同 `require_role`）：沒帶 `X-AM-Bot-Id`、或驗得過卻不是巡檢／協調者 → `403 {"reason":"role_required"}`；帶了卻證明不了 → `403 {"reason":"bot_proof_mismatch"}`；那筆都不動。
+  `deny`／`revoke` 不要求角色，只有 UI token 也收（人在一般 shell 裡還能叫停）。
   **不能核准自己送出的申請**（issue #436）：`requester` 解析出來就是這個呼叫端那顆 bot 時，`approve` 回 `403 {"reason":"self_approval_forbidden"}`，那筆不動。`deny`／`revoke` 不擋——把自己的申請收回本來就該讓他做。
-  **不看那筆申請驗過沒**：只要呼叫端驗得過、而且 `requester` 指的就是它，照擋——否則守衛等於被約束者自己選配（申請時不帶 `X-AM-Bot-Id`、裁示時才帶，就整段跳過）。沒有 bot 身分的呼叫端（走 UI 的人）與解析不到 bot 的 `requester`（`daemon-update-kick` 的 `agm-kick`）都不受影響。
+  **不看那筆申請驗過沒**：只要呼叫端驗得過、而且 `requester` 指的就是它，照擋——否則守衛等於被約束者自己選配（申請時不帶 `X-AM-Bot-Id`、裁示時才帶，就整段跳過）。解析不到 bot 的 `requester`（`daemon-update-kick` 的 `agm-kick`）不受影響。
   查不出申請人是誰時（DB 讀取失敗）回 `503 {"reason":"requester_lookup_failed","retryable":true,"sent":false}`，**不放行**：這裡的「解析不到」等於通過，所以不能把讀取失敗吞成「不是它」。
   `decided_by` **不看 body**（issue #414）：驗過角色的是 `AGM:patrol`／`AGM:responder`，其餘一律 `user`，body 的 `actor` 只當未驗證的備註包成 `user(<自稱>)`（取前 64 字）。
   **第一個裁示定案**：`approve`／`deny` 只從 `pending` 條件寫入；`revoke` 從 `approved` 或 `pending`。寫不進去 → 409

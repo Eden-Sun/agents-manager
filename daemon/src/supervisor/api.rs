@@ -1172,7 +1172,14 @@ pub async fn post_approval_decision(
     headers: HeaderMap,
     Json(b): Json<DecisionIn>,
 ) -> Result<Json<Value>, LcError> {
-    let verified = super::bot_requests::actor_role(&app, &headers).await?;
+    // 核准只給驗過的 AGM 角色（issue #447，2026-09-25 使用者裁示）：核准是換 binary／重啟窗口的授權來源，
+    // 而 UI token 本機任何行程都拿得到——不要求角色的話，一顆 bot 不帶身分就能核准自己要的窗口。
+    // deny／revoke 照舊不要求：那只會叫停，人在一般 shell 裡還得叫得停。
+    let verified = if b.decision == "approve" {
+        Some(super::bot_requests::require_role(&app, &headers).await?)
+    } else {
+        super::bot_requests::actor_role(&app, &headers).await?
+    };
     let _g = super::lock().await;
     let status = match b.decision.as_str() {
         "approve" => "approved",
@@ -1189,7 +1196,7 @@ pub async fn post_approval_decision(
     // 於是守衛變成被約束者自己選配的——申請時不帶 `X-AM-Bot-Id`（`requester` 照樣填自己），裁示時再帶自己的
     // 身分，整段就跳過了。現在只問一件事：**這個呼叫端驗得過，而且 `requester` 指的就是它**。
     // 沒驗過的申請被擋下來也是對的：要嘛真的是它送的，要嘛有人冒它的名，兩種都該去查而不是直接放行。
-    // 不影響 `daemon-update-kick`（`agm-kick` 解析不到任何 bot）與走 UI 的人（沒有 bot 身分）。
+    // 不影響 `daemon-update-kick` 的申請（`agm-kick` 解析不到任何 bot）。走到這裡的 approve 一定是驗過的角色（#447）。
     if status == "approved" {
         if let Some(caller) = super::bot_requests::verified_bot_id(&app, &headers).await? {
             // 讀不到就不敢放行（issue #436）：這裡的「解析不到」等於通過，所以 DB 出錯不能吞成「不是它」。
@@ -1592,9 +1599,24 @@ mod approval_decision_tests {
         app
     }
 
+    /// `approve` 走驗過的巡檢角色（issue #447：核准只給 AGM 角色），`deny`／`revoke` 走沒有 bot 標頭的呼叫端。
     async fn decide(app: &Arc<App>, id: &str, decision: &str, actor: &str) -> Result<Json<Value>, LcError> {
         let body: DecisionIn = serde_json::from_value(json!({"decision": decision, "actor": actor})).unwrap();
-        post_approval_decision(State(app.clone()), Path(id.to_string()), HeaderMap::new(), Json(body)).await
+        let h = if decision == "approve" { patrol_headers(app).await } else { HeaderMap::new() };
+        post_approval_decision(State(app.clone()), Path(id.to_string()), h, Json(body)).await
+    }
+
+    /// 同一個 app 只種一顆巡檢 bot：再種一顆會把角色搶走，前一顆的標頭就驗不過角色了。
+    async fn patrol_headers(app: &Arc<App>) -> HeaderMap {
+        let seeded: Option<String> = sqlx::query_scalar("SELECT id FROM bots WHERE hook_token = 'agm-tok' LIMIT 1")
+            .fetch_optional(&app.db)
+            .await
+            .unwrap();
+        let Some(id) = seeded else { return agm_role_headers(app).await };
+        let mut h = HeaderMap::new();
+        h.insert("X-AM-Bot-Id", id.parse().unwrap());
+        h.insert("X-AM-Bot-Token", "agm-tok".parse().unwrap());
+        h
     }
 
     async fn pending(app: &Arc<App>) -> String {
@@ -1893,16 +1915,16 @@ mod approval_decision_tests {
             async move { store::approval(&app.db, &id).await.unwrap().unwrap().decided_by.unwrap_or_default() }
         };
 
-        // 沒驗過卻自稱是協調者：記成 user(...)，絕不是 AGM 開頭。
+        // 沒驗過卻自稱是協調者：記成 user(...)，絕不是 AGM 開頭。沒驗過的只能 deny／revoke（issue #447）。
         let a1 = pending(&app).await;
-        decide(&app, &a1, "approve", "AGM:responder").await.unwrap();
+        decide(&app, &a1, "deny", "AGM:responder").await.unwrap();
         let who = decided_by(&app, a1).await;
         assert_eq!(who, "user(AGM:responder)");
         assert!(!who.starts_with(store::SUPERVISOR_ID), "未驗證的呼叫端寫不出 AGM 開頭的身分，卻拿到 {who:?}");
 
         // 沒驗過、也沒自稱：user，而不是以前的 AGM。
         let a2 = pending(&app).await;
-        let body: DecisionIn = serde_json::from_value(json!({"decision": "approve"})).unwrap();
+        let body: DecisionIn = serde_json::from_value(json!({"decision": "deny"})).unwrap();
         post_approval_decision(State(app.clone()), Path(a2.clone()), HeaderMap::new(), Json(body)).await.unwrap();
         assert_eq!(decided_by(&app, a2).await, "user");
 
@@ -2020,6 +2042,76 @@ mod approval_decision_tests {
         let err = decide_as(&app, side_door.clone(), h, "approve").await.unwrap_err();
         assert!(matches!(&err, LcError::Forbidden(v) if v["reason"] == "self_approval_forbidden"), "got {err:?}");
         assert_eq!(status(&app, side_door).await, "pending", "空 header 申請、自己核准，一樣不該過");
+
+        app.db.close().await;
+        std::fs::remove_dir_all(&app.data_dir).unwrap();
+    }
+
+    /// issue #447：核准只給驗過的 AGM 角色。以前沒帶身分＝使用者，什麼都能核准，於是一顆 bot 不帶
+    /// 標頭申請、再不帶標頭核准，#436 的自我核准守衛整段跳過。deny／revoke 照舊不要求角色。
+    #[tokio::test]
+    async fn only_a_verified_role_can_approve_but_anyone_can_stop() {
+        let app = app().await;
+        let status = |app: &Arc<App>, id: String| {
+            let app = app.clone();
+            async move { store::approval(&app.db, &id).await.unwrap().unwrap().status }
+        };
+        let decide_as = |app: &Arc<App>, id: String, h: HeaderMap, what: &str| {
+            let (app, what) = (app.clone(), what.to_string());
+            async move {
+                let body: DecisionIn = serde_json::from_value(json!({"decision": what})).unwrap();
+                post_approval_decision(State(app), Path(id), h, Json(body)).await
+            }
+        };
+        let role_required = |r: Result<Json<Value>, LcError>| match r {
+            Err(LcError::Forbidden(v)) => assert_eq!(v["reason"], "role_required"),
+            other => panic!("expected 403 role_required, got {other:?}"),
+        };
+
+        // 1) 沒宣告身分（共用 UI token 的任何呼叫端）：核准 403，那筆還是 pending。
+        let a1 = pending(&app).await;
+        role_required(decide_as(&app, a1.clone(), HeaderMap::new(), "approve").await);
+        assert_eq!(status(&app, a1.clone()).await, "pending", "擋下來就不該動到那筆");
+
+        // 2) 證明得了自己、卻不是角色 bot（一般修正 bot）：一樣 403，不因為驗過身分就能核准。
+        let fixer = crate::db::ulid();
+        sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES ('p-fix','/tmp/p-fix','fix',?)")
+            .bind(crate::db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES (?,'p-fix','fixer','claude','fix-tok',?)")
+            .bind(&fixer)
+            .bind(crate::db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let mut fix_h = HeaderMap::new();
+        fix_h.insert("X-AM-Bot-Id", fixer.parse().unwrap());
+        fix_h.insert("X-AM-Bot-Token", "fix-tok".parse().unwrap());
+        role_required(decide_as(&app, a1.clone(), fix_h.clone(), "approve").await);
+        assert_eq!(status(&app, a1.clone()).await, "pending");
+
+        // 3) 宣告了身分卻證明不了：照 #415 是 403 `bot_proof_mismatch`，不是退回「使用者核准」。
+        let mut bad = fix_h.clone();
+        bad.insert("X-AM-Bot-Token", "nope".parse().unwrap());
+        let err = decide_as(&app, a1.clone(), bad, "approve").await.unwrap_err();
+        assert!(matches!(&err, LcError::Forbidden(v) if v["reason"] == "bot_proof_mismatch"), "got {err:?}");
+
+        // 4) 驗過的角色照常核准。
+        let role = patrol_headers(&app).await;
+        let _ = decide_as(&app, a1.clone(), role, "approve").await.unwrap();
+        assert_eq!(status(&app, a1.clone()).await, "approved");
+
+        // 5) 叫停不要求角色：沒標頭的 revoke、沒標頭的 deny、非角色 bot 的 deny 都照收。
+        let _ = decide_as(&app, a1.clone(), HeaderMap::new(), "revoke").await.unwrap();
+        assert_eq!(status(&app, a1).await, "revoked");
+        let a2 = pending(&app).await;
+        let _ = decide_as(&app, a2.clone(), HeaderMap::new(), "deny").await.unwrap();
+        assert_eq!(status(&app, a2).await, "denied");
+        let a3 = pending(&app).await;
+        let _ = decide_as(&app, a3.clone(), fix_h, "deny").await.unwrap();
+        assert_eq!(status(&app, a3).await, "denied");
 
         app.db.close().await;
         std::fs::remove_dir_all(&app.data_dir).unwrap();
@@ -2273,9 +2365,9 @@ mod approval_decision_tests {
             .map(|d| (d["from"].as_str().unwrap_or("").into(), d["to"].as_str().unwrap_or("").into()))
             .collect();
         assert_eq!(pairs, vec![("pending".to_string(), "approved".to_string()), ("approved".into(), "revoked".into())]);
-        // `decide` 走的是沒有 bot 標頭的呼叫端，所以自稱的 `AGM:responder` 只會被記成未驗證的
-        // `user(…)`（issue #414）——歷程照樣查得到是誰說的，但讀的人一眼看得出那串字沒被驗證。
-        assert_eq!(decisions[0]["actor"], "user(AGM:responder)", "誰核准的要查得到");
+        // 核准只有驗過的角色做得了（issue #447），記成 token 驗出來的角色、不是 body 自稱的；
+        // revoke 走沒有 bot 標頭的呼叫端，自稱的 `AGM:patrol` 只會被記成未驗證的 `user(…)`（issue #414）。
+        assert_eq!(decisions[0]["actor"], format!("{}:patrol", store::SUPERVISOR_ID), "誰核准的要查得到");
         assert_eq!(decisions[1]["actor"], "user(AGM:patrol)");
         // 撤銷之後不能就地再核准：要開新的一筆申請。
         assert!(decide(&app, &id, "approve", "AGM:patrol").await.is_err());
