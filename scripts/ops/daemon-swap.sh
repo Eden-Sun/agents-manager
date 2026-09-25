@@ -16,6 +16,8 @@ set -u
 AGM_DIR="${AGM_DIR:-$HOME/.config/agents-manager/supervisor/AGM}"
 AGM_REPO="${AGM_REPO:-$HOME/project/agents-manager}"
 AM_DATA="${AM_DATA:-$HOME/.config/agents-manager}"
+SERVICE_TOKEN_DIR="$AM_DATA/service-tokens"
+SERVICE_TOKEN_FILE="$AM_DATA/service-tokens/daemon-swap.token"
 DB="${DAEMON_DB:-$AM_DATA/agents-manager.sqlite3}"
 DLOG="${DAEMON_LOG:-$AM_DATA/daemon.log}"
 PORT="${AM_PORT_SWAP:-7788}"
@@ -54,6 +56,48 @@ done
 
 LOG="${SWAP_LOG:-$AGM_DIR/daemon-swap.log}"
 log() { echo "$(date '+%F %T') $*" | tee -a "$LOG"; }
+service_capability() {
+    "$PYTHON" - "$PORT" <<'PY'
+import json, sys, urllib.error, urllib.request
+base = f"http://127.0.0.1:{sys.argv[1]}"
+try:
+    with urllib.request.urlopen(base + "/api/session", timeout=3) as response:
+        token = json.load(response).get("token", "")
+    if not token:
+        raise RuntimeError("session response has no UI token")
+    request = urllib.request.Request(base + "/api/capabilities", headers={"X-AM-Token": token})
+    with urllib.request.urlopen(request, timeout=3) as response:
+        capabilities = json.load(response).get("capabilities", [])
+    print("service" if "service_principals" in capabilities else "bootstrap")
+except urllib.error.HTTPError as error:
+    print("bootstrap" if error.code == 404 else "unknown")
+except Exception:
+    print("unknown")
+PY
+}
+if [ -L "$SERVICE_TOKEN_DIR" ] || { [ -e "$SERVICE_TOKEN_DIR" ] && [ ! -d "$SERVICE_TOKEN_DIR" ]; } \
+    || [ -L "$SERVICE_TOKEN_FILE" ] || { [ -e "$SERVICE_TOKEN_FILE" ] && [ ! -f "$SERVICE_TOKEN_FILE" ]; }; then
+    log "ABORT: daemon-swap service credential 不是一般檔案"
+    exit 4
+elif [ -f "$SERVICE_TOKEN_FILE" ]; then
+    SERVICE_MODE=service
+    log "maintenance API identity: daemon-swap service principal"
+else
+    # Only an old daemon without this capability may use the one-time User bootstrap. If a new
+    # daemon lost its service token file, fail closed instead of silently restoring broad User power.
+    SERVICE_MODE=$(service_capability)
+    case "$SERVICE_MODE" in
+        bootstrap)
+            # Older daemon cannot accept scoped service tokens; this is the one-time transition.
+            log "maintenance API identity: one-time User bootstrap; upgraded daemon will create the service principal" ;;
+        service)
+            log "ABORT: daemon supports service principals but daemon-swap token file is missing"
+            exit 4 ;;
+        *)
+            log "ABORT: cannot determine daemon service-auth capability; refusing User fallback"
+            exit 4 ;;
+    esac
+fi
 
 # lease_token 不進 argv（issue #477）：argv 對同一個 uid 的行程是公開的（`ps`），而這顆 token 是
 # 「只在 acquire 回應出現一次、任何 API 都查不到」的一次性憑證——抄走就能收掉別人正在換 binary 的窗口。
@@ -92,25 +136,49 @@ release_window() { # $1=為什麼要還（寫進 log）
     fi
     return "$rc"
 }
-agm() { "$AGM_BIN" --compact "$@"; }
+agm() {
+    if [ "$SERVICE_MODE" = service ]; then
+        AM_SERVICE_ID=daemon-swap AM_SERVICE_TOKEN_FILE="$SERVICE_TOKEN_FILE" \
+            AM_BOT_ID= AM_BOT_TOKEN= AM_HOOK_TOKEN= "$AGM_BIN" --compact "$@"
+    else
+        AM_SERVICE_ID= AM_SERVICE_TOKEN_FILE= AM_BOT_ID= AM_BOT_TOKEN= AM_HOOK_TOKEN= "$AGM_BIN" --compact "$@"
+    fi
+}
 dpid() { "$PGREP" -f '^\./target/release/agents-managerd serve$' | head -1; }
 api() { "$CURL" -sf -o /dev/null "http://127.0.0.1:$PORT$1"; }
 agm_probe() { # agm_probe <bot id> → "<http code> <body>"
     # 測試用：注入一支假的送達器，才不用真的打 daemon。
     [ -n "${SWAP_PROBE_CMD:-}" ] && { "$SWAP_PROBE_CMD" "$1"; return; }
-    "$PYTHON" - "$1" "$PORT" "$OWNER" <<'PY'
-import json, os, sys, urllib.request
-bot, port, owner = sys.argv[1], sys.argv[2], sys.argv[3]
+    "$PYTHON" - "$PORT" "$SERVICE_TOKEN_FILE" "$1" "$SERVICE_MODE" <<'PY'
+import json, os, stat, sys, urllib.error, urllib.parse, urllib.request
+port, token_path, bot, mode = sys.argv[1:]
 base = f"http://127.0.0.1:{port}"
-tok = json.load(urllib.request.urlopen(base + "/api/session"))["token"]
-body = {"text": "[build 自測，回 ok 即可，不要做任何事]", "relay_from": owner}
-headers = {"X-AM-Token": tok, "Content-Type": "application/json"}
-# relay_from 要有 owner 自己的 bot token 才算驗證過（issue #339）。只在 owner 自己的 pane 裡跑時帶——
-# 別顆的 token 配 owner 的名字會被 403；launchd 裡沒有 token 就不帶，daemon 照收、標「未驗證」。
-if os.environ.get("AM_BOT_ID") == owner and os.environ.get("AM_HOOK_TOKEN"):
-    headers["X-AM-Bot-Token"] = os.environ["AM_HOOK_TOKEN"]
-req = urllib.request.Request(base + f"/api/bots/{bot}/prompt", data=json.dumps(body).encode(),
-                             headers=headers, method="POST")
+if mode == "service":
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    fd = os.open(token_path, flags)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_mode & 0o077 or (hasattr(os, "getuid") and st.st_uid != os.getuid()):
+            raise RuntimeError("service credential file is not a private regular file owned by this user")
+        raw = os.read(fd, 4097)
+    finally:
+        os.close(fd)
+    if len(raw) > 4096:
+        raise RuntimeError("service credential file is too large")
+    tok = raw.decode("utf-8").strip()
+    if not tok or "\n" in tok or "\r" in tok:
+        raise RuntimeError("service credential file must contain one non-empty token line")
+    headers = {"X-AM-Service-Id": "daemon-swap", "X-AM-Service-Token": tok}
+    url = base + f"/api/services/daemon-swap/probe/{urllib.parse.quote(bot, safe='')}"
+    data = b""
+else:
+    # Old daemon, one-time migration only: the existing local User token keeps this first swap possible.
+    with urllib.request.urlopen(base + "/api/session") as response:
+        tok = json.load(response)["token"]
+    headers = {"X-AM-Token": tok, "Content-Type": "application/json"}
+    url = base + f"/api/bots/{bot}/prompt"
+    data = json.dumps({"text": "[build 自測，回 ok 即可，不要做任何事]"}).encode()
+req = urllib.request.Request(url, data=data, headers=headers, method="POST")
 try:
     r = urllib.request.urlopen(req)
     print(r.status, r.read().decode("utf-8", "replace")[:200])
@@ -314,6 +382,10 @@ rollback() {
     fi
     kill -TERM "$(dpid)" 2>/dev/null; sleep 5
     cp -p "$BAK" target/release/agents-managerd
+    # The old daemon cannot load or accept service principals. Remove credentials it generated before
+    # the rollback so the next invocation uses the documented one-time User bootstrap path again.
+    rm -f "$AM_DATA/service-tokens/daemon-swap.token" "$AM_DATA/service-tokens/herdr-upgrade.token"
+    rmdir "$AM_DATA/service-tokens" 2>/dev/null || true
     # DB 還原：daemon 已停；主檔與 -wal／-shm 要一起處理——新版留下的 WAL 配舊主檔會變成半新半舊。
     rm -f "$DB-wal" "$DB-shm"
     cp -p "$DBB" "$DB"
@@ -342,6 +414,18 @@ log "new pid $NEWPID binary=$(date -r target/release/agents-managerd '+%F %T' 2>
 ok=""; j=0
 while [ $j -lt 30 ]; do api /api/session && { ok=1; break; }; sleep 1; j=$((j + 1)); done
 [ -n "$ok" ] || rollback "/api/session 30 秒內沒起來"
+if [ "$SERVICE_MODE" = bootstrap ]; then
+    if [ -f "$SERVICE_TOKEN_FILE" ] && [ ! -L "$SERVICE_TOKEN_DIR" ] && [ ! -L "$SERVICE_TOKEN_FILE" ]; then
+        SERVICE_MODE=service
+    else
+        cap=$(service_capability)
+        case "$cap" in
+            service) rollback "新版 daemon 支援 service principal，但 daemon-swap token file 不存在或不安全" ;;
+            bootstrap) rollback "新 binary 未提供 service principal capability" ;;
+            *) rollback "無法確認新版 daemon 的 service principal capability" ;;
+        esac
+    fi
+fi
 log "session ok"
 agm health >/dev/null 2>&1 || rollback "health 失敗"
 log "health ok"

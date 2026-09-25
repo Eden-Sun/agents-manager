@@ -359,19 +359,29 @@ fn up<E: std::fmt::Display>(e: E) -> LcError {
     LcError::Upstream(e.to_string())
 }
 
-/// 兩種呼叫端都認：bot 自己的 hook token（`X-AM-Bot-Token` + body 的 `bot_id`），或人工 host shell
-/// 帶的一般 UI token（`X-AM-Token`，跟 `~/.config/agents-manager/ui-token` 比對）——issue 要求
-/// 「manual/admin host shell 要有明講的 bypass 路徑」，這裡反過來給它一條**參與排程**的路，
-/// 賽跑：bot 沒有 UI token、人工 shell 沒有 bot token，兩邊只會用得到其中一種。
-/// 通過回傳「已驗證的 bot_id」（人工呼叫是 `None`）；都不對回 401。
+/// Bot 請求用該 bot 的 per-bot token；有 `X-AM-Bot-Id` 時還必須與 body `bot_id` 相同。
+/// 舊 shim 在 body 帶 id、只送 `X-AM-Bot-Token`，仍可在相容期間驗證。出現任何 Bot 身分欄位後，
+/// partial／錯誤／混合 UI 憑證都拒絕，不降級成 User。沒有 Bot 身分的人工 host shell 可用 UI token。
 async fn authenticate(app: &Arc<App>, headers: &HeaderMap, bot_id: Option<&str>) -> Result<Option<String>, LcError> {
-    let bot_token = headers.get("X-AM-Bot-Token").and_then(|v| v.to_str().ok()).unwrap_or("");
-    if let Some(id) = bot_id {
-        if !bot_token.is_empty() {
-            match crate::db::bot(&app.db, id).await.map_err(up)? {
-                Some(b) if b.deleted_at.is_none() && crate::api::ct_eq(bot_token, &b.hook_token) => return Ok(Some(id.to_string())),
-                _ => {}
-            }
+    let id_header_present = headers.contains_key("X-AM-Bot-Id");
+    let token_header_present = headers.contains_key("X-AM-Bot-Token");
+    let ui_header_present = headers.contains_key("X-AM-Token");
+    let header_id = headers.get("X-AM-Bot-Id").and_then(|v| v.to_str().ok()).map(str::trim).filter(|s| !s.is_empty());
+    let body_id = bot_id.map(str::trim).filter(|s| !s.is_empty());
+    let bot_token = headers.get("X-AM-Bot-Token").and_then(|v| v.to_str().ok()).map(str::trim).filter(|s| !s.is_empty());
+    if id_header_present || token_header_present || body_id.is_some() {
+        if ui_header_present {
+            return Err(LcError::Forbidden(json!({"error":"unauthorized","message":"Bot identity cannot fall back to or mix with X-AM-Token"})));
+        }
+        let (Some(id), Some(token)) = (body_id, bot_token) else {
+            return Err(LcError::Forbidden(json!({"error":"unauthorized","message":"need a matching X-AM-Bot-Id, bot_id, and X-AM-Bot-Token"})));
+        };
+        if id_header_present && header_id != Some(id) {
+            return Err(LcError::Forbidden(json!({"error":"unauthorized","message":"X-AM-Bot-Id must match body bot_id"})));
+        }
+        match crate::db::bot(&app.db, id).await.map_err(up)? {
+            Some(b) if b.deleted_at.is_none() && crate::api::ct_eq(token, &b.hook_token) => return Ok(Some(id.to_string())),
+            _ => {}
         }
     }
     let ui_token = headers.get("X-AM-Token").and_then(|v| v.to_str().ok()).unwrap_or("");
@@ -685,7 +695,7 @@ mod tests {
         assert!(!holders.contains(&"dead-front".to_string()), "{holders:?}");
     }
 
-    fn auth_headers(bot_token: Option<&str>, ui_token: Option<&str>) -> HeaderMap {
+    fn auth_headers(bot_token: Option<&str>, ui_token: Option<&str>, bot_id: Option<&str>) -> HeaderMap {
         let mut h = HeaderMap::new();
         if let Some(t) = bot_token {
             h.insert("X-AM-Bot-Token", t.parse().unwrap());
@@ -693,18 +703,21 @@ mod tests {
         if let Some(t) = ui_token {
             h.insert("X-AM-Token", t.parse().unwrap());
         }
+        if let Some(id) = bot_id {
+            h.insert("X-AM-Bot-Id", id.parse().unwrap());
+        }
         h
     }
 
     /// bot 用自己的 hook token 就能參與排程，不需要一般 UI token（bot 的 pane 裡本來就拿不到那個）；
     /// 人工 host shell 用 UI token 一樣放行；兩個都沒有／都不對 → 401。
     #[tokio::test]
-    async fn a_bot_hook_token_or_the_ui_token_both_authenticate() {
+    async fn build_slot_bot_or_user_credentials_are_exclusive() {
         let env = tt::env().await;
         let app = env.app.clone();
         let bot_id = a_bot(&env, "tok-123").await;
 
-        let h = auth_headers(Some("tok-123"), None);
+        let h = auth_headers(Some("tok-123"), None, Some(&bot_id));
         let out = post_acquire(
             State(app.clone()),
             h,
@@ -714,17 +727,41 @@ mod tests {
         .unwrap();
         assert_eq!(out.0["granted"], true);
 
-        let h = auth_headers(None, Some("test-token"));
+        let h = auth_headers(None, Some("test-token"), None);
         let out = post_acquire(State(app.clone()), h, Form(AcquireIn { holder: "manual:host:1".into(), bot_id: None, purpose: "".into(), host: "local".into() }))
             .await
             .unwrap();
         assert_eq!(out.0["granted"], true);
 
-        let h = auth_headers(Some("wrong"), None);
+        // Old shims that send body bot_id plus the hook token (no X-AM-Bot-Id) still authenticate during
+        // pane migration. Both slots are taken by now, so this one queues — the point is it is not refused.
+        let h = auth_headers(Some("tok-123"), None, None);
+        let out = post_acquire(
+            State(app.clone()),
+            h,
+            Form(AcquireIn { holder: "b1-legacy".into(), bot_id: Some(bot_id.clone()), purpose: "test".into(), host: "local".into() }),
+        )
+        .await
+        .unwrap();
+        assert!(out.0["granted"].is_boolean(), "{}", out.0);
+
+        let h = auth_headers(Some("wrong"), None, Some(&bot_id));
         assert!(matches!(
-            post_acquire(State(app.clone()), h, Form(AcquireIn { holder: "b2".into(), bot_id: Some(bot_id), purpose: "".into(), host: "local".into() })).await,
+            post_acquire(State(app.clone()), h, Form(AcquireIn { holder: "b2".into(), bot_id: Some(bot_id.clone()), purpose: "".into(), host: "local".into() })).await,
             Err(LcError::Forbidden(_))
         ));
+
+        let h = auth_headers(Some("wrong"), Some("test-token"), Some(&bot_id));
+        assert!(matches!(
+            post_acquire(State(app.clone()), h, Form(AcquireIn { holder: "b4".into(), bot_id: Some(bot_id.clone()), purpose: "".into(), host: "local".into() })).await,
+            Err(LcError::Forbidden(_))
+        ), "a bad Bot proof plus valid UI token must not downgrade to User");
+
+        let h = auth_headers(Some("tok-123"), None, Some("another-bot"));
+        assert!(matches!(
+            post_acquire(State(app.clone()), h, Form(AcquireIn { holder: "b5".into(), bot_id: Some(bot_id.clone()), purpose: "".into(), host: "local".into() })).await,
+            Err(LcError::Forbidden(_))
+        ), "header identity must match the bot id used by the scheduler");
 
         let h = HeaderMap::new();
         assert!(matches!(
@@ -745,7 +782,7 @@ mod tests {
 
         let owner = post_acquire(
             State(app.clone()),
-            auth_headers(Some("owner-token"), None),
+            auth_headers(Some("owner-token"), None, Some(&owner_id)),
             Form(AcquireIn { holder: "shared-holder".into(), bot_id: Some(owner_id.clone()), purpose: "owner".into(), host: "local".into() }),
         )
         .await
@@ -754,7 +791,7 @@ mod tests {
 
         let denied = post_acquire(
             State(app.clone()),
-            auth_headers(Some("attacker-token"), None),
+            auth_headers(Some("attacker-token"), None, Some(&attacker_id)),
             Form(AcquireIn {
                 holder: "shared-holder".into(),
                 bot_id: Some(attacker_id.clone()),
@@ -770,7 +807,7 @@ mod tests {
         // The owner still gets the same secret; the attacker did not replace the row.
         let owner_again = post_acquire(
             State(app.clone()),
-            auth_headers(Some("owner-token"), None),
+            auth_headers(Some("owner-token"), None, Some(&owner_id)),
             Form(AcquireIn { holder: "shared-holder".into(), bot_id: Some(owner_id.clone()), purpose: "owner".into(), host: "local".into() }),
         )
         .await
@@ -785,7 +822,7 @@ mod tests {
         };
         let denied = post_acquire(
             State(app.clone()),
-            auth_headers(Some("attacker-token"), None),
+            auth_headers(Some("attacker-token"), None, Some(&attacker_id)),
             Form(AcquireIn {
                 holder: "queued-holder".into(),
                 bot_id: Some(attacker_id),

@@ -114,7 +114,7 @@ am_remote_cargo_missing() {
 # `http://127.0.0.1:$AM_PORT` 的埠。**本機** bot 的 pane 一定有 `AM_PORT`（daemon 注入）；人工 host shell 沒有，
 # 用文件寫的預設埠（SPEC：daemon 在 127.0.0.1:7788）。
 #
-# 有 bot 身分（`AM_BOT_ID`／`AM_HOOK_TOKEN`）卻沒有 `AM_PORT` 的 pane 不能猜預設值（issue #153）：**遠端主機**上的 bot
+# 有 bot 身分（`AM_BOT_ID`／`AM_BOT_TOKEN`）卻沒有 `AM_PORT` 的 pane 不能猜預設值（issue #153）：**遠端主機**上的 bot
 # 就是這樣——遠端沒有 daemon、也不開反向埠（SPEC §11.4），127.0.0.1 是那台機器自己，猜 7788 打到的是不知道什麼東西
 # （那台剛好也跑一份 agents-manager 的話，會把名額要求送給別顆 daemon）。回失敗，由呼叫端明講並直接跑。
 am_build_port() {
@@ -122,18 +122,20 @@ am_build_port() {
         printf '%s' "$AM_PORT"
         return 0
     fi
-    if [ -n "${AM_BOT_ID:-}" ] || [ -n "${AM_HOOK_TOKEN:-}" ]; then
+    if [ -n "${AM_BOT_ID:-}" ] || [ -n "${AM_BOT_TOKEN:-}" ] || [ -n "${AM_HOOK_TOKEN:-}" ]; then
         return 1
     fi
     printf '7788'
 }
 
-# 認證：bot 用自己的 hook token（pane 裡本來就有），人工 host shell 用一般 UI token（讀
+# 認證：bot 用自己的 API token（hook disabled 時也注入；舊 pane fallback 到同值的 hook token），人工 host shell 用一般 UI token（讀
 # `~/.config/agents-manager/ui-token`，daemon 的預設位置）。兩個都沒有就回傳空字串，呼叫端看到空字串
 # 就該直接跳過排程——沒有身分，daemon 也不可能認得這個名額。
 am_build_auth_header() {
-    if [ -n "${AM_BOT_ID:-}" ] && [ -n "${AM_HOOK_TOKEN:-}" ]; then
-        printf 'X-AM-Bot-Token: %s' "$AM_HOOK_TOKEN"
+    if [ -n "${AM_BOT_ID:-}" ] || [ -n "${AM_BOT_TOKEN:-}" ] || [ -n "${AM_HOOK_TOKEN:-}" ]; then
+        _bot_token=${AM_BOT_TOKEN:-${AM_HOOK_TOKEN:-}}
+        [ -n "${AM_BOT_ID:-}" ] && [ -n "$_bot_token" ] || return 1
+        printf 'X-AM-Bot-Token: %s' "$_bot_token"
         return 0
     fi
     _tok_file="$HOME/.config/agents-manager/ui-token"
@@ -147,12 +149,12 @@ am_build_auth_header() {
     return 1
 }
 
-# 受管的 bot pane：本機 bot（daemon 注入 `AM_BOT_ID`、hook token、`AM_PORT`）。這種 pane 的 cargo 不能因為排程器出問題就悄悄變成
+# 受管的 bot pane：本機 bot（daemon 注入 `AM_BOT_ID`、bot token、`AM_PORT`）。這種 pane 的 cargo 不能因為排程器出問題就悄悄變成
 # 沒有名額的 cargo（issue #128：daemon 重啟／升級／DB 出問題的瞬間，所有 bot 同時開編就繞過了 `max_concurrent`，
 # 而那正是最需要保護本機的時候）。沒有 bot 身分的人工 host shell 才有「排程器出問題就直接跑」的隱式 bypass；bot 要繞過得明講
 # （`AM_CARGO_BYPASS_SCHEDULER=1`），不是由連線錯誤自動取得。遠端 bot pane（沒有 `AM_PORT`）不是：那台機器的編譯本來就不受這台 daemon 管。
 am_is_managed() {
-    [ -n "${AM_BOT_ID:-}" ] && [ -n "${AM_HOOK_TOKEN:-}" ] && [ -n "${AM_PORT:-}" ]
+    { [ -n "${AM_BOT_ID:-}" ] || [ -n "${AM_BOT_TOKEN:-}" ] || [ -n "${AM_HOOK_TOKEN:-}" ]; } && [ -n "${AM_PORT:-}" ]
 }
 
 # 排程器用不了、而且這一輪不會自己好（沒有 curl、建不出暫存目錄）：受管的 bot 不跑（exit 75，可重試）；人工 shell 印一行後回 0，
@@ -424,6 +426,13 @@ am_cargo() {
         exec "$_real" "$@"
     fi
     _auth=$(am_build_auth_header) || {
+        if am_is_managed; then
+            am_scheduler_unusable "Bot pane 缺少 AM_BOT_ID 或 AM_BOT_TOKEN，拒絕改用共用 User token"
+        fi
+        if [ -n "${AM_BOT_ID:-}" ] || [ -n "${AM_BOT_TOKEN:-}" ] || [ -n "${AM_HOOK_TOKEN:-}" ]; then
+            printf 'agents-manager: 遠端 Bot 沒有 AM_PORT 或 bot credential，不問本機 scheduler，直接跑 cargo\n' >&2
+            exec "$_real" "$@"
+        fi
         printf 'agents-manager: 沒有 bot／管理員身分，這次 cargo 不經過排程器，直接跑\n' >&2
         exec "$_real" "$@"
     }
@@ -484,11 +493,19 @@ am_cargo() {
     _down=0
     while :; do
         _acq_at=$(am_epoch)
-        _resp=$(curl -s -m 5 -X POST "${_url}/acquire" \
-            -H "$_auth" \
-            --data-urlencode "holder=${_holder}" \
-            --data-urlencode "bot_id=${_bot_id}" \
-            --data-urlencode "purpose=${_purpose}" 2>/dev/null)
+        if [ -n "${AM_BOT_ID:-}" ]; then
+            _resp=$(curl -s -m 5 -X POST "${_url}/acquire" \
+                -H "$_auth" -H "X-AM-Bot-Id: ${AM_BOT_ID}" \
+                --data-urlencode "holder=${_holder}" \
+                --data-urlencode "bot_id=${_bot_id}" \
+                --data-urlencode "purpose=${_purpose}" 2>/dev/null)
+        else
+            _resp=$(curl -s -m 5 -X POST "${_url}/acquire" \
+                -H "$_auth" \
+                --data-urlencode "holder=${_holder}" \
+                --data-urlencode "bot_id=${_bot_id}" \
+                --data-urlencode "purpose=${_purpose}" 2>/dev/null)
+        fi
         _rc=$?
         _bad=""
         _fatal=""
@@ -1383,7 +1400,40 @@ esac"#
         assert!(url.contains("http://127.0.0.1:4242/build-slots/acquire"), "有 AM_PORT 就照它：{url}");
         let (_, err, rc) = s.run(&[("AM_PORT", "4243"), ("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok")], &["build"]);
         assert_eq!(rc, 0, "{err}");
-        assert!(acquire_url().contains("http://127.0.0.1:4243/"), "本機 bot 照 AM_PORT");
+        let request = acquire_url();
+        assert!(request.contains("http://127.0.0.1:4243/"), "本機 bot 照 AM_PORT");
+        assert!(request.contains("X-AM-Bot-Id: b1") && request.contains("X-AM-Bot-Token: tok"), "Bot 請求帶成對身分：{request}");
+        assert!(!request.contains("X-AM-Token"), "Bot 不得同時帶共用 User token：{request}");
+
+        let (_, err, rc) = s.run(
+            &[("AM_PORT", "4244"), ("AM_BOT_ID", "b1"), ("AM_BOT_TOKEN", "api-token"), ("AM_HOOK_TOKEN", "old-hook-token")],
+            &["build"],
+        );
+        assert_eq!(rc, 0, "{err}");
+        let request = acquire_url();
+        assert!(request.contains("X-AM-Bot-Token: api-token"), "新 API token 優先於舊 hook 環境：{request}");
+        assert!(!request.contains("old-hook-token"), "{request}");
+    }
+
+    #[test]
+    fn a_bot_without_its_token_does_not_downgrade_to_a_valid_ui_token() {
+        let s = Sandbox::new();
+        s.install_fake_curl("echo called >> \"$AM_TEST_CURL_LOG\"\nprintf '{\\\"granted\\\":true}'\n");
+        let home = s.dir.join("fake-home/.config/agents-manager");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("ui-token"), "valid-ui-token").unwrap();
+        let log = s.dir.join("cargo.log");
+        let curl_log = s.dir.join("curl.log");
+        let log_path = log.display().to_string();
+        let curl_log_path = curl_log.display().to_string();
+        let (_, err, rc) = s.run(
+            &[("AM_BOT_ID", "b1"), ("AM_PORT", "1"), ("AM_TEST_FAKE_CARGO_LOG", &log_path), ("AM_TEST_CURL_LOG", &curl_log_path)],
+            &["build"],
+        );
+        assert_eq!(rc, 75, "Bot proof 缺失時受管 build fail closed：{err}");
+        assert!(err.contains("拒絕改用共用 User token"), "{err}");
+        assert!(!curl_log.exists(), "不能改用 UI token 詢問 scheduler");
+        assert!(!log.exists(), "缺 credential 時不能啟動 cargo");
     }
 
     /// 名額滿了先等，daemon 說 granted 才跑；granted 帶的 `cargo_jobs` 要真的傳進 CARGO_BUILD_JOBS。

@@ -100,10 +100,19 @@ async fn closed_now(app: &Arc<App>, id: &str) -> LcError {
     }
 }
 
-/// `relay_from` 省略＝使用者本人；bot 要帶自己的 `X-AM-Bot-Token`，`daemon` 只給驗證過的 AGM 角色（issue #409）。
+/// `relay_from` is metadata, not authentication: when a Bot id is present and the claim is omitted,
+/// use that authenticated id. Bot tokens are checked by API middleware and `relay_auth` (issue #409).
 /// 規則在 `relay_auth::authenticate_mission`，跟 `POST /api/bots/{id}/prompt` 共用同一段 token 比對。
 async fn check_relay_from(app: &Arc<App>, headers: &HeaderMap, relay_from: Option<&str>) -> Result<Option<String>, LcError> {
-    crate::relay_auth::authenticate_mission(app, headers, relay_from).await
+    let effective = effective_relay_claim(headers, relay_from);
+    crate::relay_auth::authenticate_mission(app, headers, effective).await
+}
+
+fn effective_relay_claim<'a>(headers: &'a HeaderMap, relay_from: Option<&'a str>) -> Option<&'a str> {
+    relay_from
+        .map(str::trim)
+        .filter(|claim| !claim.is_empty())
+        .or_else(|| headers.get("X-AM-Bot-Id").and_then(|v| v.to_str().ok()).map(str::trim).filter(|id| !id.is_empty()))
 }
 
 fn one_of(field: &str, v: &str, allowed: &[&str]) -> Result<(), LcError> {
@@ -1421,6 +1430,14 @@ pub async fn get_identity_prefs(State(app): State<Arc<App>>) -> Result<Json<Valu
 mod tests {
     use super::*;
     use crate::quota::{Quota, Window};
+
+    #[test]
+    fn blank_mission_relay_claim_uses_authenticated_bot_id() {
+        let mut headers = HeaderMap::new();
+        headers.insert("X-AM-Bot-Id", "authenticated-bot".parse().unwrap());
+
+        assert_eq!(effective_relay_claim(&headers, Some(" \t ")), Some("authenticated-bot"));
+    }
 
 
     fn done(summary: &str, no_delivery: Option<&str>, worktree: Option<&std::path::Path>) -> CompleteIn {

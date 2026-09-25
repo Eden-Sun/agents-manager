@@ -1156,7 +1156,7 @@ stall watchdog 的自動補送走同一條驗證路徑，次數記在 `turns.res
 3. 先做不需要 pane 的準備（hook 注入檔、CLI 參數；遠端可能 ssh 上傳）與執行檔 preflight。失敗 → Run `exited`，**不建 tab／pane**。
 4. 取得 pane：workspace 剛建立 → 用 `root_pane`；否則 `tab.create {workspace_id, cwd, label: tab_label(bot), focus:false, env}` 取 `root_pane`。
    **一個 bot 一個 tab**，不 `pane.split`——共用 tab 會把 pane 越切越窄，窄到 TUI 一列一個字時備援完全讀不出東西（§4.3）。
-   `env`：`AM_BOT_ID`、`AM_RUN_ID`（診斷）、`AM_PORT`、`AM_HOOK_TOKEN`（`inject_hooks = false` 時不給）、`CLAUDE_CODE_CHILD_SESSION=""`、`CLAUDECODE=""`。
+   `env`：`AM_BOT_ID`、`AM_RUN_ID`（診斷）、`AM_PORT`、`AM_BOT_TOKEN`（一律注入，作為每 bot 的 API 身分；目前重用 `bots.hook_token`）、`AM_HOOK_TOKEN`（只在 `inject_hooks=true` 時給 hook）、`CLAUDE_CODE_CHILD_SESSION=""`、`CLAUDECODE=""`。User 透過 `POST /api/bots/{id}/credential/rotate` 立即輪替：舊值立即失效，執行中的 bot 重啟取得新值，停止中的 bot 下次啟動時取得。
    失敗 → Run `exited`、回 502。
 5. 更新 Run 的 `workspace_id`／`pane_id`／`tab_id`；先寫 `runs.agent_name`，再 `agent.start {name, kind, pane_id, args: injected ++ bot.args, timeout_ms: 60000}`
    （立即回 `launch_pending`）。之後所有 herdr 目標一律用 `run.agent_name`。pane 建好到 start 成功之間任何失敗 → Run `exited` + 盡力關 pane（tab 空了一併關）。
@@ -1535,7 +1535,7 @@ pane 打 `cargo` 就 permission denied）時，只 chmod 回 0755，不重寫內
     每一代子 agent 把母代的 PATH 往下傳、外掛又補一次，不去重會一代比一代長；`AM_*`／`CLAUDE_CONFIG_DIR`／`CODEX_HOME` 照舊完整帶到。
   - 暫存檔放 `$TMPDIR`（指到 scratchpad 或 outbox 就改 `/tmp`；那兩處會被當成給使用者的檔案），`umask 077`＋`chmod 600`。
     寫不出來（目錄不存在、唯讀）才退回舊的逐行 export——環境不能丟。source 失敗時檔案不刪（`&&`），方便查。
-- `herdr pane split` / `pane new` / `tab create`：原樣轉發並補 `--env`，帶下 `CLAUDE_CONFIG_DIR`、`CODEX_HOME`、`AM_BOT_ID`、`AM_HOOK_TOKEN`、`AM_PORT`、`AM_RUN_ID`、
+- `herdr pane split` / `pane new` / `tab create`：原樣轉發並補 `--env`，帶下 `CLAUDE_CONFIG_DIR`、`CODEX_HOME`、`AM_BOT_ID`、`AM_BOT_TOKEN`、`AM_HOOK_TOKEN`、`AM_PORT`、`AM_RUN_ID`、
   `AM_AGENT_NAME`、`AM_KIND`、`AM_MODEL`、`AM_EFFORT`、`AM_PROJECT_ID`、`AM_WORKSPACE_ID`、`AM_OUTBOX`、`AM_DAEMON_EXE`、`AM_CONFIG_PATH`、`AM_REAL_HERDR`、`PATH`——herdr 的 pane 是 **server** 生的、不繼承呼叫端 shell，沒這段子 pane 會用預設帳號起來、拿不到 hook token。
   `AM_DAEMON_EXE`／`AM_CONFIG_PATH`（issue #138）是 cargo shim 把 check／test／clippy 轉到外部編譯主機（#104）的前提：漏了它們，每個子 agent 的 cargo 都靜默留在本機。
   傳遞清單（`AM_RESERVED_ENV_KEYS`）與 daemon 注入端（`lifecycle/setup.rs` 的 `env.insert`）綁了一條測試：daemon 注入的每個 key 要嘛在清單裡、要嘛明列成「刻意不傳」。
@@ -1590,17 +1590,9 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
    90 秒內字既沒進輸入列、agent 也沒接手，回合標 `failed` 並留一則系統說明。
    **死 pane 的 run**（`lifecycle::dead_panes`，隨 60 秒的 stuck-turn sweeper 跑）：herdr 明確回 `pane_not_found` 的 running run 收成 exited，
    不看 RPC 失敗（不是證據）、herdr 計畫中的維護期間不動（§6.5.2）；補上對帳只在開機／重連／事件時才跑、pane-exit 事件漏了就一直畫成活的那個洞。盯梢的時間由呼叫端傳入、pane 走 herdr client，測試不睡覺。
-6. **`POST /api/bots/{id}/prompt` 的 `relay_from` 要跟呼叫者自己的身分綁在一起**（issue #339，`relay_auth.rs`）：那支 API 只要 UI token，
-   而本機任何行程都拿得到 UI token，「relay_from 指到一顆活著的 bot」證明不了是誰送的。證明用那顆 bot 自己的 hook token
-   （`X-AM-Bot-Token`＝pane 的 `AM_HOOK_TOKEN`，跟 `/relay/announce`、build slot 同一個；一顆 bot 一個、永不換）。
-   帶了但不是那顆的 → 403 `relay_from_mismatch`（只可能是冒名）；`relay_from:"daemon"` 從 HTTP 進來一律 403 `relay_from_reserved`——
-   daemon 自己的訊息（通知、digest、child 警示、派工）都在行程內直接寫，不走 HTTP，而 `daemon` 會繞過 AGM 協調者的收件匣（§18.15）。
-   **沒帶** token 是相容期：照收，訊息記 `relay_unverified = 1`，UI 在來源旁寫「（未驗證）」，daemon.log 記一行 warn（只記被冒名的 bot id）。
-   相容期的理由是不帶 token 的既有呼叫端一被 403 就會誤判失敗：換版腳本 `daemon-swap.sh` 的自測 prompt（失敗會觸發回滾；已改成在 owner 自己的 pane 裡帶 token）、
-   資料目錄裡的一次性維運腳本、照慣例手打 curl 的 bot。移除條件與清點方式見 #410。
-   **「有帶」看的是 header 在不在**，不是值好不好：空字串與非 UTF-8 的 `X-AM-Bot-Token` 算有帶而且對不上 → 403，
-   不然送一個空 header 就能走進相容期冒名放行。**帶了 token 而對不上時一律先 403**，不先查 bot 回 400——
-   按「bot 存不存在」分成 400／403 會讓狀態碼變成探測 bot id 的神諭（沒帶 token 的相容期照舊 400，那條路沒有 token 可對）。
+6. **`POST /api/bots/{id}/prompt` 與 mission 的 `relay_from` 是來源標記，不是 principal**（issue #339、#409、#556，`relay_auth.rs`）：User 沿用共用 UI token；User 未帶 Bot 身分 header 且 prompt `relay_from` 指活 bot 時，#410 相容期照收並標 `relay_unverified = 1`。Bot principal 必須帶成對 `X-AM-Bot-Id`＋`X-AM-Bot-Token`，後者驗該 bot 現行的 `hook_token`（pane 的 `AM_BOT_TOKEN`；hook 開關另控制 `AM_HOOK_TOKEN`）。`X-AM-Bot-Id` 或 token header 一旦出現就選了 Bot principal；欄位缺少、值錯、或混帶 UI/service 身分都拒絕，不得降為 User。Bot 省略或留空 `relay_from` 時由 daemon 以驗證過的 id 標記；明確自稱別顆 bot 回 403 `relay_from_mismatch`。
+   User 請求帶 `X-AM-Bot-Id`／`X-AM-Bot-Token` 卻無有效 Bot principal 時，在 auth 中介層先回 401，不進相容分支。未帶 Bot 身分 header 且有有效 `X-AM-Token` 的請求是 User；這保留使用者裁示接受的共用 UI token／`allow_lan` 風險，並不提供額外的人類證明。Bot 憑證沿用 hook token，User 用 credential rotation 立即失效；活 bot 重啟取得新值，停止 bot 下次啟動取得。
+   `relay_from:"daemon"` 從 Bot／User HTTP 請求一律 403 `relay_from_reserved`——daemon 自己的訊息（通知、digest、child 警示、派工）都在行程內直接寫，不走 HTTP，而 `daemon` 會繞過 AGM 協調者的收件匣（§18.15）。User 的未驗證相容行為和 #410 移除條件維持原票，不因 Bot principal 上線而提早移除。
    **`relay_from` 不能是收件的那顆 bot 自己** → 400 `relay_self`：`relay_from` 的意思是「這句話不是收件者自己想的」，
    指向本人就沒有來源可標，UI 會畫出「A → A」；daemon 的 child 警示是 child → 母代，本來就是兩顆不同的 bot。
    信任邊界照實寫：hook token 也在同一個 unix 使用者讀得到的檔案裡（bot 目錄的 settings），這一層擋的是「以為可以代別人發言」的 agent 與誤用，
@@ -1865,10 +1857,10 @@ listen port 只在本機算（pane 行程樹的 pid 對 `lsof -nP -iTCP -sTCP:LI
 - 等待中的列也要能觀察（issue 要求 `waiting_for_build_slot`／`building` 可查）：`last_seen` 是「還在 poll 嗎」，
   `since` 是「排隊排多久了」，兩者分開存——不然一個排很久但一直在 poll 的呼叫者，會被誤判成早就死掉的呼叫者。
 
-#### API（不在 `/api` 底下的三支：bot 的 pane 只有自己的 hook token，拿不到一般 UI token）
-- `POST /build-slots/acquire {holder, bot_id?, purpose?, host?}`：`X-AM-Bot-Token`＋body 的 `bot_id`（驗證同一顆 bot
-  的 `hook_token`），或人工 host shell 用 `X-AM-Token`（一般 UI token，讀 `~/.config/agents-manager/ui-token`）。
-  兩者都沒有 → 401。回 `{granted:true, token, expires_at, cargo_jobs, lease_ttl_secs}` 或
+#### API（不在 `/api` 底下的三支：bot pane 帶自己的 per-bot token；人工 host shell 用 UI token）
+- `POST /build-slots/acquire {holder, bot_id?, purpose?, host?}`：Bot 用 `X-AM-Bot-Id`、`X-AM-Bot-Token` 與相同的 body `bot_id`（驗證同一顆 bot
+  的 `hook_token`；舊 shim 在 body 有 id、只有 token header 時相容），或人工 host shell 用 `X-AM-Token`（一般 UI token，讀 `~/.config/agents-manager/ui-token`）。
+  Bot 身分欄位出現後，缺漏、錯誤、header/body id 不同或混帶 UI token 都回 403、不降級。兩者都沒有 → 401。回 `{granted:true, token, expires_at, cargo_jobs, lease_ttl_secs}` 或
   `{granted:false, active, max_concurrent, since, retry_after_secs}`——**額滿是正常的執行期狀態，不是失敗**，回 200 不是 4xx。
   同一個 holder 對已經握著、還沒過期的名額重 call 是幂等的（回同一份憑證），逾時後重問一次是安全的。
 - `POST /build-slots/renew {holder, token}`、`POST /build-slots/release {holder, token}`：**不另外驗 bot／UI
@@ -1887,14 +1879,14 @@ listen port 只在本機算（pane 行程樹的 pid 對 `lsof -nP -iTCP -sTCP:LI
   外部編譯（`remote-cargo` helper 的 `eligible`）只搬「原樣搬到遠端意思不變」的全域旗標（`-v`／`-q`／`--locked`／`--color`）；`+toolchain`、`-C`、`--config`、`--offline`、`--frozen`、`-Z` 留在本機、照本機名額排。
   `cargo clippy --fix`（`--` 之前有 `--fix`）也留在本機（issue #104）：它會改原始碼，改到的是 rsync 過去的遠端那份、不會同步回來。
 - **排程器問不到（連不上、空回應、5xx／不是 JSON、身分被拒）時，受管的 bot 不會變成沒有名額的 cargo（issue #128 重開）**：daemon 重啟／升級／DB 出問題的
-  瞬間所有 bot 同時開編就繞過了 `max_concurrent`，而那正是最需要保護本機的時候。「受管」＝pane 有 `AM_BOT_ID`、hook token 與 `AM_PORT`（本機 bot）。
+  瞬間所有 bot 同時開編就繞過了 `max_concurrent`，而那正是最需要保護本機的時候。「受管」＝pane 有 `AM_BOT_ID`、bot API token 與 `AM_PORT`（本機 bot）。
   受管的 bot：每 3 秒重試，最多等 `AM_BUILD_SCHEDULER_WAIT_SECS`（預設 120 秒），之後 **fail closed，exit 75**（可重試），stderr 講明原因與怎麼明確繞過；
   排程器回來了就照常排隊（名額滿了＝排程器有在回答，是另一條路：一直等到有名額）。`unauthorized`（bot 身分被拒）不會在幾秒內自己好，不等滿、馬上 exit 77。
   沒有 bot 身分的**人工 host shell**維持明講的 bypass：問不到就直接跑、stderr 說一聲。bot 要繞過得**明講**：`AM_CARGO_BYPASS_SCHEDULER=1`（cargo 直接跑、不問排程器；
   外部編譯照舊優先），不是連線錯誤自動取得的。同一類的另兩個入口一樣：受管的 bot 建不出暫存目錄（守衛沒地方放 pid，停不了 cargo；拿到的名額放回去）、
   或這台機器沒有 curl，都 exit 75；人工 shell 才直接跑。遠端 bot（沒有 `AM_PORT`）不算受管：那台機器的編譯本來就不受這台 daemon 管（issue #153）。
 - **不猜 daemon 的位址（issue #153）**：埠只認 `AM_PORT`。沒有 `AM_PORT` 時，只有**沒有 bot 身分**的人工 host shell 用文件寫的預設 7788；
-  有 bot 身分（`AM_BOT_ID`／`AM_HOOK_TOKEN`）卻沒有 `AM_PORT` 的 pane——**遠端主機**上的 bot 就是（遠端沒有 daemon、不開反向埠，§11.4，
+  有 bot 身分（`AM_BOT_ID`／`AM_BOT_TOKEN`）卻沒有 `AM_PORT` 的 pane——**遠端主機**上的 bot 就是（遠端沒有 daemon、不開反向埠，§11.4，
   daemon 也不注入 `AM_PORT`）——一通 curl 都不打（127.0.0.1 在遠端是那台機器自己，可能是別顆 daemon），stderr 講明缺 `AM_PORT`，cargo 照跑：
   遠端那台的編譯本來就不受這台 daemon 的名額管。不把位址寫進遠端 shim：daemon 只聽本機 127.0.0.1，遠端連不到，寫了也是假的。
 - **轉到外部編譯主機的指令不佔本機名額（issue #155，使用者 2026-09-19 決定）**：本機名額管的是本機的 RAM／CPU。`check`／`test`／`clippy`
@@ -2333,8 +2325,14 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
 - bind：開發版 bind `0.0.0.0`；打包成 macOS app 的執行檔（路徑在 `…app/Contents/MacOS/`）bind `127.0.0.1`；`AM_DEV_LAN` 可雙向覆寫（`main.rs::dev_lan_default`）。
 - 啟動時產生 UI token 寫 `~/.config/agents-manager/ui-token`，**權限一律 0600**（issue #512）：新檔走 `write_private`
   （先建 0600 的暫存檔再 rename，明文 token 不會先躺在一個 0644 的 inode 上），開機讀到既有檔時發現權限比 0600 寬就修回來、
-  修不動記 WARN 但不擋開機。`GET /api/session`（**TCP 對端**須為 loopback——不看 `Host`，那是呼叫端自己填的）回 token；
-  其餘 `/api/*` 要 header `X-AM-Token`，`/ws` 用 `?token=`；`Origin` 存在時主機須為本機。
+  修不動記 WARN 但不擋開機。`GET /api/session`（**TCP 對端**須為 loopback——不看 `Host`，那是呼叫端自己填的）回 User token；
+  其餘 `/api/*` 接受 User `X-AM-Token`、Bot 成對 `X-AM-Bot-Id`＋`X-AM-Bot-Token`，或路徑限定的 service 成對 `X-AM-Service-Id`＋`X-AM-Service-Token`；
+  出現 Bot／service header 即選該身分，缺欄、錯誤或混帶其他 principal 一律拒絕，不降級成 User。沒帶 Bot／service header 且帶有效共用 UI token 就是 User，
+  這保留使用者接受的 LAN／共用 token 風險，不做額外人類證明。`/ws` 維持 `?token=`；`Origin` 存在時主機須為本機。
+  Bot proof 重用 `bots.hook_token`；pane 一律注入 `AM_BOT_TOKEN`，hooks 開啟時另注入 `AM_HOOK_TOKEN`。User 用 `POST /api/bots/{id}/credential/rotate` 輪替，舊值即刻失效，
+  活 bot 重啟取得新值、停止 bot 下次啟動取得。child 不是獨立 principal：它的 pane 由母 bot 開、herdr shim 帶下的是**母 bot 的** `AM_BOT_ID`／token，
+  daemon 原地重啟 child 也不重建 env，所以對 child 輪替回 409 `child_uses_parent_credential`；child 以母 bot 的名義呼叫 API（跟它本來就能替母 bot 做事同一條界線）。Service token 在 `<data_dir>/service-tokens/` 建立（目錄 0700、token 檔 0600），重啟保持不變；`/api/capabilities` 的
+  `service_principals` 標記代表 launchd clients 不得在憑證遺失時退回 User。service scope 與固定維運 route 見 API.md。
   開發版（`App::allow_lan`，跟 bind `0.0.0.0` 同一個判斷）對端與 `Origin` 都直接放行，同網段誰都拿得到 token：使用者裁示保留（`e7392dd` 撤掉配對碼時記明）。
 - `/hook/*`、`/relay/announce`、`/relay/pane` 驗 **per-bot** `X-AM-Bot-Token`。
 
@@ -2837,7 +2835,7 @@ AGM 的運維職責以本節為準，不靠任何 bot 的記憶。persona 是同
 - **立即部署**（使用者 2026-09-25：「agm排以外，要我可以在左上角直接點立即部署」）：網頁左上角在線上 binary 落後 origin/main **且有程式碼差異**
   （`build-inputs` 路徑，docs-only 不算）時出現「⇪ 部署 N」。按下去先開確認框（`live..target` 的 commit、此刻 working 的 bot），確認後 `POST /api/deploy/now`（API.md）。
   **這一下就是使用者的裁示**：daemon 開一筆 `requester=daemon-update-kick` 的 rebuild 核准並以 `user(立即部署)` 核准，寫 `daemon-update.now.json`，`launchctl kickstart` 同一個 `com.agm.daemon-update` job——
-  依 #556 使用者裁示，這裡不做真人證明：持有共用 UI token 視為使用者，接受本機／`allow_lan` 取得 token 的風險（原話「沒關系lan開放」，[裁示留言](https://github.com/Eden-Sun/agents-manager/issues/556#issuecomment-5833272486)）。`X-AM-Bot-Id` 或 `X-AM-Bot-Token` 任一標頭出現（含缺值、錯值或只帶一半）都回 403 `ui_only`，不可退回使用者權限；兩者都沒帶才按此政策視為 UI 使用者。
+  依 #556 使用者裁示，這裡不做真人證明：持有共用 UI token 視為使用者，接受本機／`allow_lan` 取得 token 的風險（原話「沒關系lan開放」，[裁示留言](https://github.com/Eden-Sun/agents-manager/issues/556#issuecomment-5833272486)）。有效 Bot principal 回 403 `ui_only`；缺值、錯值、只帶一半或跟 `X-AM-Token` 混帶的 Bot 標頭在 `/api` 中介層就回 401（#556），不可退回使用者權限；兩者都沒帶才按此政策視為 UI 使用者。
   **不另寫一套 build＋swap**，也不 fork 自己的 kick（`AGM_BUILD_BOT`／`PATH` 只在 plist 裡；launchd 保證同一個 job 不會疊）。
   kick 讀到請求檔就走立即模式，只略過三道排程閘：觸發條件（整點／門檻／等太久）、「同 commit 已派過」、等 AGM 裁示 rebuild。**其餘照舊**：建置 child 要在、上一筆 `agm-daemon-update-*` 要結案、
   `lease safety`／`acquire` 的沒人 working（等太久的縮小封鎖面照 §18.10 從核准時間起算）、派工正文的固定條件 1～6（乾淨 HEAD worktree、整樹測試、`.bak`、驗證失敗回滾，§18.13）、`daemon-swap.sh`。
@@ -3039,10 +3037,11 @@ launchd `com.agm.claude-release` 每 30 分鐘跑 `bin/claude-release-kick.sh`�
 
 ### 18.6 persona 的副本
 由 §18.11 規範：改人設走 `PUT /api/supervisor/persona`，不要手改 `config.toml` 或 `persona.md`。
-**誰改得動（issue #462）**：沒帶 `X-AM-Bot-Id` 的呼叫端（網頁、人）照收；帶了身分就必須驗得過，而且那顆要是角色 bot，否則 403——
+**誰改得動（issue #462、#556）**：User principal（網頁）照收；有效 Bot principal 必須是角色 bot，否則 403；Bot／service 身分不完整、憑證錯或混帶 principal 由 `/api` 全域中介層回 401——
 一顆普通 managed bot 沒有理由改寫總管跑的那份角色前導詞。不管誰改，成功就記一行 log 並推 `persona_changed` 給巡檢：
 共用 UI token 的前提下「沒帶身分＝使用者」這個預設擋不住冒充，所以至少要讓改寫看得見（`persona.rs` 自己說線上載入的那份不可觀測）。
-那條預設本身留在 #556 等 per-bot token。`ConfigStore` 寫入前比 mtime，磁碟變了會在同一把 mutex 內重讀再套用
+`#556` 保留共用 UI token；未帶 Bot／service header 且通過 UI token 驗證就是 User。Bot header 一旦出現會驗 per-bot token，驗證失敗不降級；這不提供額外的人類證明。
+`ConfigStore` 寫入前比 mtime，磁碟變了會在同一把 mutex 內重讀再套用
 （重新解析失敗才回錯），但 serde 全量回寫會洗掉註解與未知欄位。persona 改完不必重啟 daemon。
 
 ### 18.7 共用工作樹規範
@@ -3299,7 +3298,7 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
 - **申請人要跟憑證綁在一起（issue #436）**：`#414` 之後「誰裁示」已經只有驗過的角色寫得出 `AGM:<role>`，
   「誰申請」卻還是 body 說了算——同一筆核准一半可信一半不可信，而「不能自己核准自己」也沒有可信的申請人可比。
   現在 `POST /api/supervisor/approvals` 收標頭：**帶了 `X-AM-Bot-Id`＋自己的 hook token 就只能用自己的名義申請**
-  （填別人＝403 `requester_not_the_caller`，證明不了＝403 `bot_proof_mismatch`）；**沒帶身分照收**，那筆記成
+  （填別人＝403 `requester_not_the_caller`）；**有效 User principal 不帶 Bot 身分照收**，那筆記成
   `requester_unverified`（`daemon-update-kick.sh` 這類 launchd 腳本就是這樣申請的，擋掉等於停掉例行重建）。
   daemon **不改寫** `requester`：它要跟 acquire 的 `owner` 逐字相等（上面那條），改寫等於讓申請人自己開不了窗口。
   裁示端據此擋掉**自己核准自己**：`requester` 解析出來就是裁示的那顆 bot 時，`approve` 回 403
@@ -3666,14 +3665,14 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
 - **角色身分**：只認 `X-AM-Bot-Id` + 該 bot 的 hook token（`X-AM-Bot-Token`），常數時間比對。`bin/agm` 在自己的 pane 裡（`AM_BOT_ID` 等於 runtime 的 `self_bot_id`）才帶；
   驗證過的決定記成 `AGM:patrol`／`AGM:responder`，body 自稱的 `actor` 不算——**沒驗過就記 `user`／`user(<自稱>)`，寫不出 `AGM` 開頭的身分**（issue #414；以前沒驗過時直接採信 body，預設還填 `AGM`）。
   `relay_from` 的 bot 申請沒帶 token 仍收，但標 `sender_verified=false`。
-  **帶了 `X-AM-Bot-Id` 卻證明不了（token 空／非 UTF-8／對不上）是 403 `bot_proof_mismatch`，不退回使用者權限**（issue #415）：使用者權限在 `inbox` ack 上比角色權限大（跨角色也結得掉），
+  **Bot／service 身分標頭不完整、token 空／非 UTF-8／對不上，或混帶 principal，一律由 `/api` 全域中介層回 401，不退回 User**（issue #415、#556）：使用者權限在 `inbox` ack 上比角色權限大（跨角色也結得掉），
   當成「沒帶」等於把驗證失敗變成提權。
   **`inbox/{id}/ack` 再進一步，連「沒帶」也不收**（issue #432）：沒宣告身分、或宣告了而那顆不是角色 bot，都是 403 `role_required`——否則角色 bot 只要不送標頭就繞過角色分界。
   代價是人在一般 shell 裡 ack 不了，要在角色自己的 pane 裡跑 `bin/agm`。
   **`approvals/{id}/decide` 的 `approve` 也要驗過的角色，`deny`／`revoke` 不要**（issue #447，2026-09-25 使用者裁示）：核准是換 binary／重啟窗口的授權來源，
   不要求角色的話一顆 bot 不帶標頭申請、再不帶標頭核准，就繞過 #436 的自我核准守衛；叫停不開任何窗口，人在一般 shell 裡還得叫得停。
   沒角色的 `approve` 一律 403 `role_required`（驗得過但不是角色 bot 的一般 bot 也一樣），所以人要核准得請 AGM 裁示；由 launchd 腳本代核准（不帶身分）也不再成立。
-  **其餘端點「沒帶＝使用者／UI」的預設不變**：共用 UI token 的前提下 daemon 分不出人與冒充人的 bot，那條界線留給 per-bot token，不在這裡硬補。
+  **其餘端點仍保留 User principal**：沒有 Bot／service header 且帶有效共用 UI token 就是 User；這是使用者接受的憑證界線，不代表 daemon 能證明呼叫者是人。帶 Bot header 時由全域中介層驗證 per-bot token，驗證失敗不會降級成 User。
 - **協調者故障不倒回巡檢**：分流只看它**建立過**沒有（`supervisor_roles.responder` 的 `bot_id`），不看它現在活不活著。沒額度（CLI 撞限，或共享 5h／7d critical）→ `status=waiting_quota`、`notify_next_at`＝重置時間與上限取早者，事件留 `pending`、不計重試次數；
   停著 → 看門狗（同 §18.9 的 30/60/120/300 秒、5 次）；放棄 → 推 `responder_watchdog_gave_up` 給巡檢。
   反方向對稱（review 2026-09-16 c1 M2）：巡檢的看門狗放棄（`watchdog_gave_up`）與巡檢的通知用盡（`notify_exhausted`）路由給**協調者**並叫醒——倒下的就是巡檢，送給它沒有人收；協調者未建立時巡檢的待送查詢照舊撈得到。**送不出去**（還沒送達）是有界退避（15 秒倍增到 `responder_max_backoff_secs`），沒有次數上限，

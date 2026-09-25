@@ -96,6 +96,7 @@ mod supervisor_owned;
 mod supervisor_evidence;
 mod startup;
 mod statusline_cmd;
+mod service_auth;
 #[cfg(test)]
 mod testing;
 #[cfg(test)]
@@ -403,6 +404,7 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
         addr.set_ip(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
     }
     let ui_token = load_or_create_ui_token(&dir)?;
+    let service_tokens = service_auth::load_or_create(&dir)?;
     let app = state::App::new(
         pool,
         herdr_client,
@@ -415,6 +417,7 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
         cfg.server.herdr_session.clone(),
         dev_lan,
     );
+    *app.service_tokens.write().expect("service token lock") = service_tokens;
     app.connected.store(true, std::sync::atomic::Ordering::SeqCst);
     if let Some(local) = app.hosts.get("local").await {
         local.connected.store(true, std::sync::atomic::Ordering::SeqCst);

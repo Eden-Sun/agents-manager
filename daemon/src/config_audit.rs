@@ -27,7 +27,7 @@ pub fn http_caller() -> String {
 /// `X-AM-Bot-Token`，呼叫端算出來傳進來）；`caller_self_reported=` 是 `X-AM-Caller`，自由文字——
 /// 整個 API 都在同一把 UI token 後面，任何拿得到 token 的人都能寫 `X-AM-Caller: agm`。欄位名直接說它是自稱的，
 /// 事後查帳才不會把自稱當成證據。
-pub fn describe_request(req: &axum::extract::Request, verified_bot: Option<&str>) -> String {
+pub fn describe_request(req: &axum::extract::Request, verified_bot: Option<&str>, verified_service: Option<&str>) -> String {
     let h = req.headers();
     let header = |name: &str| -> String {
         h.get(name)
@@ -41,13 +41,14 @@ pub fn describe_request(req: &axum::extract::Request, verified_bot: Option<&str>
         .map(|c| c.0.to_string())
         .unwrap_or_else(|| "-".into());
     format!(
-        "{} {} peer={peer} ua={} origin={} referer={} bot={} caller_self_reported={}",
+        "{} {} peer={peer} ua={} origin={} referer={} bot={} service={} caller_self_reported={}",
         req.method(),
         req.uri().path(),
         header("user-agent"),
         header("origin"),
         header("referer"),
         verified_bot.unwrap_or("-"),
+        verified_service.unwrap_or("-"),
         header("x-am-caller"),
     )
 }
@@ -254,21 +255,21 @@ mod tests {
     /// `X-AM-Caller` 是自由文字：一定要標成自稱，而且不能佔用 `bot=`（那一格只放驗過的）。
     #[test]
     fn a_self_reported_caller_never_fills_the_verified_bot_slot() {
-        let line = describe_request(&req(&[("x-am-caller", "agm"), ("user-agent", "curl/8")]), None);
+        let line = describe_request(&req(&[("x-am-caller", "agm"), ("user-agent", "curl/8")]), None, None);
         assert!(line.contains("caller_self_reported=agm"), "{line}");
         assert!(line.contains(" bot=-"), "沒驗過就不能有身分：{line}");
         assert!(!line.contains("caller=agm"), "舊的 caller= 會被讀成驗過的：{line}");
 
         // 驗過的 bot 在 `bot=`；同一個請求就算自稱別人，自稱那一格也只是自稱。
-        let line = describe_request(&req(&[("x-am-caller", "agm")]), Some("01M3(build)"));
+        let line = describe_request(&req(&[("x-am-caller", "agm")]), Some("01M3(build)"), None);
         assert!(line.contains("bot=01M3(build)") && line.contains("caller_self_reported=agm"), "{line}");
     }
 
     #[test]
     fn a_request_without_the_headers_records_dashes() {
-        let line = describe_request(&req(&[]), None);
+        let line = describe_request(&req(&[]), None, None);
         assert!(line.starts_with("DELETE /api/bots/b1 peer=-"), "{line}");
-        assert!(line.contains("bot=- caller_self_reported=-"), "{line}");
+        assert!(line.contains("bot=- service=- caller_self_reported=-"), "{line}");
     }
 
     #[tokio::test(flavor = "current_thread")]

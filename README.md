@@ -54,7 +54,7 @@ flowchart LR
 - `x（轉述）`：沒有 `relay_from` 但第一行是 `AGM …：`、`[AGM …]` 或 `[來自 <bot> / <agent>]` 抬頭——使用者親手貼進來的總管訊息、或 bot 之間走 `herdr agent prompt` 而 daemon 沒認領到的那種。
 - `daemon 自動觸發`：排程腳本與 daemon 自己發的通知（`relay_from = "daemon"`）；`[AG Man 通知]` 另有黃槓。
 
-bot 對 bot 送訊息的慣例：走 `POST /api/bots/{id}/prompt` 的要帶 `relay_from=<自己的 bot_id>` 與 `-H "X-AM-Bot-Token: $AM_HOOK_TOKEN"`（省略 `relay_from`＝使用者自己打的，不存在的值回 400；token 不是自己的、空的或壞掉的 403；沒帶 token 相容期照收、標「未驗證」；`relay_from=daemon` 從 API 帶進來 403；`relay_from` 指到收件的那顆自己 400 `relay_self`）；走 `herdr agent prompt` 的由 PATH shim 經 `/relay/announce` 認領，第一行再順手寫 `[來自 …]` 抬頭當備援。規格見 [`docs/API.md`](docs/API.md) 的 prompt 一節。
+bot 對 bot 送訊息的慣例：走 `POST /api/bots/{id}/prompt` 的要用 `X-AM-Bot-Id: $AM_BOT_ID`、`X-AM-Bot-Token: $AM_BOT_TOKEN`；可以省略 `relay_from`（daemon 會用已驗證的 bot id），若帶就只能是自己的 id，不能藉此冒充其他 bot。未帶 Bot headers 且以共用 UI token 驗證的 User 請求仍有 #339／#410 的未驗證相容期，標「未驗證」；`relay_from=daemon` 從 API 帶進來 403；`relay_from` 指到收件的那顆自己回 400 `relay_self`。Bot header 缺漏、token 錯或混帶 UI token 都拒絕，不降級成 User。走 `herdr agent prompt` 的由 PATH shim 經 `/relay/announce` 認領，第一行再順手寫 `[來自 …]` 抬頭當備援。規格見 [`docs/API.md`](docs/API.md) 的 prompt 一節。
 
 ![手機版對話與來源標示](docs/screenshots/readme/451-readme-mobile-light.png)
 

@@ -55,8 +55,10 @@ check_eq() { # check_eq <描述> <期望> <實際>
 setup() { # setup <checkout 的 SCHEMA_VERSION> <DB 目前的 user_version>
   ROOT=$(mktemp -d); export ROOT
   export AGM_DIR="$ROOT/agm" AGM_REPO="$ROOT/repo" CHECKOUT="$ROOT/checkout"
-  export DAEMON_DB="$ROOT/am.sqlite3" DAEMON_LOG="$ROOT/daemon.log" SWAP_LOG="$ROOT/swap.log"
+  export AM_DATA="$ROOT/data" DAEMON_DB="$ROOT/am.sqlite3" DAEMON_LOG="$ROOT/daemon.log" SWAP_LOG="$ROOT/swap.log"
   export SWAP_SETTLE_SECS=0 SWAP_WINDOW_TRIES=3 SWAP_WINDOW_WAIT_SECS=0
+  # 假 daemon 的埠：沒人聽的 1 號。腳本自己用 python 打 daemon（service 能力探測），不設就會打到本機正式的 7788。
+  export AM_PORT_SWAP=1
   export STUB_ACQUIRE_FAIL_TIMES=0   # 前幾次 acquire 回 409（模擬瞬間有人在跑）
   export STUB_ACQUIRE_EMPTY_WORKING=""   # 設了：那幾次 409 的 working 名單是空的
   export STUB_PROBE_INFLIGHT_TIMES=0     # 前幾次 lease safety 裡自測對象還在 in_flight
@@ -66,7 +68,9 @@ setup() { # setup <checkout 的 SCHEMA_VERSION> <DB 目前的 user_version>
   export SWAP_PROBE_TRIES=2 SWAP_PROBE_BOT=bot-probe
   export HERDR_PANE_ID="w1:pA"          # 預設：pane 裡本來就有；測 current 的 case 會 unset
   export STUB_PANE_READ_OK=1 STUB_PANE_CURRENT="w1:pA" STUB_PROBE='200 {"delivery":"ok"}' 
-  mkdir -p "$AGM_DIR" "$AGM_REPO/target/release" "$CHECKOUT/daemon/src" "$CHECKOUT/target/release" "$ROOT/bin"
+  mkdir -p "$AGM_DIR" "$AM_DATA/service-tokens" "$AGM_REPO/target/release" "$CHECKOUT/daemon/src" "$CHECKOUT/target/release" "$ROOT/bin"
+  printf 'test-daemon-swap-service-token\n' > "$AM_DATA/service-tokens/daemon-swap.token"
+  chmod 600 "$AM_DATA/service-tokens/daemon-swap.token"
 
   # 假 checkout：SCHEMA_HISTORY 的最後一項就是這顆 binary 認得的版本。
   { echo 'const SCHEMA_HISTORY: &[(i64, &str)] = &['
@@ -416,6 +420,21 @@ rc=$(run)
 check_eq "in flight 會重送並繼續（rc=0）" "0" "$rc"
 check "重送過（送了兩次）" "bot-probe" "$AGM_DIR/probe.log"
 check "自測最後是通的" "3b self probe ok" "$SWAP_LOG"
+teardown
+
+# 16a. launchd maintenance requests use the scoped service principal and fixed daemon-owned probe.
+check "agm 維運請求用 daemon-swap service principal" "AM_SERVICE_ID=daemon-swap" "$SCRIPT"
+check "自測送到固定 service route" "/api/services/daemon-swap/probe/" "$SCRIPT"
+check_no "自測不再自行宣告 relay_from" "relay_from" "$SCRIPT"
+check_no "自測不再先取 shared UI token" 'json.load(urllib.request.urlopen(base + "/api/session"))' "$SCRIPT"
+
+# 16b. If the service credential disappeared, do not silently turn a newer daemon client back into User.
+setup 10 10
+rm -rf "$AM_DATA/service-tokens"
+rc=$(run)
+check_eq "service 能力無法判定時 fail closed（rc=4）" "4" "$rc"
+check_no "能力不明時不取得維運租約" "lease acquire restart" "$AGM_DIR/calls.log"
+check_no "能力不明時不替換 binary" "submit" "$AGM_DIR/launchctl.log"
 teardown
 
 # 17. 腳本本身：`$VAR` 後面直接接全形標點會被 `set -u` 當成變數名的一部分（2026-09-16／09-20／09-20 踩過三次）。
