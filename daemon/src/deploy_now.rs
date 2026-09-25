@@ -29,6 +29,8 @@ use std::time::{Duration, Instant};
 /// kick 申請 rebuild 用的名字（plist 沒設 `AM_AGENT_NAME`）。核准的 `requester` 要跟 kick 之後
 /// `lease acquire --owner` 逐字相等，否則 409 `approval_owner_mismatch`。
 pub const KICK_OWNER: &str = "daemon-update-kick";
+/// 使用者在 UI 按「立即部署」時記在核准上的 actor。
+pub const USER_ACTOR: &str = "user(立即部署)";
 /// 使用者的請求：kick 讀到就走「立即」模式，派工成功才刪。
 pub const REQUEST_FILE: &str = "daemon-update.now.json";
 pub const LOG_FILE: &str = "daemon-update.log";
@@ -187,6 +189,53 @@ pub async fn in_progress(app: &Arc<App>, agm_dir: &Path) -> Result<Option<Value>
     Ok(None)
 }
 
+/// kick 在立即模式替建置 child 申請 restart 時用的 request id 前綴，後面接那筆 rebuild 核准的 id。
+pub const RESTART_REQUEST_PREFIX: &str = "deploy-now-restart-";
+
+/// 立即部署的 restart 核准由 daemon 在建立當下核准（#447 之後 `decide` 的 approve 要驗過的 AGM 角色，
+/// launchd 跑的 kick 沒有角色身分，打 HTTP decide 會 403）。只在全部對得上時才核准，否則照舊留給 AGM：
+/// 請求檔還在、request id 是 `deploy-now-restart-<請求檔的 rebuild 核准>`、那筆 rebuild 是使用者在 UI 核准的
+/// 且還有效、commit 一致、這筆 restart 還是 pending。回傳核准後的那筆。
+pub async fn preapprove_restart(app: &Arc<App>, a: &store::Approval) -> Option<store::Approval> {
+    preapprove_restart_in(app, &Ctx::of(app).agm_dir, a).await
+}
+
+async fn preapprove_restart_in(app: &Arc<App>, agm_dir: &Path, a: &store::Approval) -> Option<store::Approval> {
+    if a.purpose != "restart" || a.status != "pending" {
+        return None;
+    }
+    let rebuild_id = a.client_request_id.as_deref()?.strip_prefix(RESTART_REQUEST_PREFIX)?;
+    let req = read_request(agm_dir)?;
+    if req.get("approval_id").and_then(Value::as_str) != Some(rebuild_id) {
+        return None;
+    }
+    let rebuild = store::approval(&app.db, rebuild_id).await.ok()??;
+    let now = crate::db::now();
+    let live = rebuild.purpose == "rebuild"
+        && rebuild.status == "approved"
+        && rebuild.decided_by.as_deref() == Some(USER_ACTOR)
+        && rebuild.expires_at.as_deref().is_none_or(|e| crate::db::cmp_ts(e, &now).is_gt());
+    let same_commit = match (rebuild.target_commit.as_deref(), a.target_commit.as_deref()) {
+        (Some(r), Some(t)) if !t.is_empty() => r.starts_with(t) || t.starts_with(r),
+        _ => false,
+    };
+    if !live || !same_commit {
+        return None;
+    }
+    let reason = format!("使用者在 UI 按「立即部署」（rebuild 核准 {rebuild_id}）");
+    match store::decide_approval_from(&app.db, &a.id, "pending", "approved", USER_ACTOR, Some(&reason), None).await {
+        Ok(Some((decided, _))) => {
+            tracing::info!(approval = %a.id, rebuild = rebuild_id, "deploy now: restart approval pre-approved by the daemon");
+            Some(decided)
+        }
+        Ok(None) => None,
+        Err(e) => {
+            tracing::warn!(approval = %a.id, error = %e, "deploy now: could not pre-approve the restart");
+            None
+        }
+    }
+}
+
 /// 請求檔還在、讀得懂才算。壞掉的檔 kick 會自己清掉並記 log，這裡不把它當成有部署在跑。
 fn read_request(agm_dir: &Path) -> Option<Value> {
     let txt = std::fs::read_to_string(agm_dir.join(REQUEST_FILE)).ok()?;
@@ -319,7 +368,7 @@ pub async fn start(app: &Arc<App>, ctx: &Ctx, sha: Option<&str>, launcher: &dyn 
         &app.db,
         KICK_OWNER,
         "rebuild",
-        &format!("立即部署 {}..{short}（使用者在 UI 按下）；restart 由 kick 以同一個授權開", ctx.live_sha),
+        &format!("立即部署 {}..{short}（使用者在 UI 按下）；restart 由 daemon 在 kick 申請時以同一個授權核准", ctx.live_sha),
         Some(&target),
         Some(&expires),
         Some(&request_id),
@@ -329,7 +378,7 @@ pub async fn start(app: &Arc<App>, ctx: &Ctx, sha: Option<&str>, launcher: &dyn 
     .await
     .map_err(up)?;
     let id = created.approval.id.clone();
-    let decided = store::decide_approval_from(&app.db, &id, "pending", "approved", "user(立即部署)", Some("使用者在 UI 按「立即部署」"), None)
+    let decided = store::decide_approval_from(&app.db, &id, "pending", "approved", USER_ACTOR, Some("使用者在 UI 按「立即部署」"), None)
         .await
         .map_err(up)?;
     if decided.is_none() {
@@ -372,7 +421,7 @@ fn write_request(agm_dir: &Path, v: &Value) -> Result<(), String> {
 /// 叫不起 kick 就收回：請求檔刪掉、核准撤銷。留著的話之後每一下都 409，而且沒有人會去用那筆核准。
 async fn undo(app: &Arc<App>, agm_dir: &Path, approval_id: &str, why: &str) {
     let _ = std::fs::remove_file(agm_dir.join(REQUEST_FILE));
-    if let Err(e) = store::decide_approval_from(&app.db, approval_id, "approved", "revoked", "user(立即部署)", Some(why), None).await {
+    if let Err(e) = store::decide_approval_from(&app.db, approval_id, "approved", "revoked", USER_ACTOR, Some(why), None).await {
         tracing::warn!(approval = %approval_id, error = %e, "deploy now: could not revoke the approval after a failed start");
     }
     tracing::warn!(approval = %approval_id, why, "deploy now did not start");
@@ -450,6 +499,64 @@ mod tests {
         assert_eq!(v["code_changed"], false);
         assert!(behind(&f.ctx.repo, "unknown").await.is_err(), "沒有 git 的建置說不出落後多少");
         let _ = &f.live;
+    }
+
+    async fn restart_request(f: &Fixture, rebuild_id: &str, commit: &str) -> store::Approval {
+        store::create_approval_superseding(&f.env.app.db, "bot-build", "restart", "daemon 重啟", Some(commit), None,
+            Some(&format!("{RESTART_REQUEST_PREFIX}{rebuild_id}")), None, None)
+        .await
+        .unwrap()
+        .approval
+    }
+
+    async fn started(f: &Fixture) -> String {
+        start(&f.env.app, &f.ctx, Some(&f.code), &fake(None)).await.unwrap()["approval_id"].as_str().unwrap().to_string()
+    }
+
+    /// #447：kick 沒有角色身分打不了 decide，restart 改由 daemon 在建立當下核准——但只在全部對得上時。
+    #[tokio::test]
+    async fn restart_for_a_live_deploy_now_is_approved_by_the_daemon() {
+        let f = fixture().await;
+        let rebuild = started(&f).await;
+        let r = restart_request(&f, &rebuild, &f.code[..8]).await;
+        let ok = preapprove_restart_in(&f.env.app, &f.ctx.agm_dir, &r).await.expect("對得上就核准");
+        assert_eq!((ok.status.as_str(), ok.decided_by.as_deref()), ("approved", Some(USER_ACTOR)));
+    }
+
+    #[tokio::test]
+    async fn a_restart_for_another_commit_is_left_to_agm() {
+        let f = fixture().await;
+        let rebuild = started(&f).await;
+        let r = restart_request(&f, &rebuild, &f.head).await;
+        assert!(preapprove_restart_in(&f.env.app, &f.ctx.agm_dir, &r).await.is_none(), "commit 對不上不能核准");
+        assert_eq!(store::approval(&f.env.app.db, &r.id).await.unwrap().unwrap().status, "pending", "留給 AGM");
+    }
+
+    #[tokio::test]
+    async fn a_restart_naming_another_rebuild_or_after_the_request_is_gone_is_left_to_agm() {
+        let f = fixture().await;
+        let rebuild = started(&f).await;
+        // 另一筆同樣由使用者核准、同一個 commit 的 rebuild，但請求檔指的不是它。
+        let db = &f.env.app.db;
+        let other = store::create_approval_superseding(db, KICK_OWNER, "rebuild", "另一趟", Some(&f.code), None, Some("other-rebuild"), None, None)
+            .await
+            .unwrap()
+            .approval;
+        store::decide_approval_from(db, &other.id, "pending", "approved", USER_ACTOR, None, None).await.unwrap();
+        let stranger = restart_request(&f, &other.id, &f.code).await;
+        assert!(preapprove_restart_in(&f.env.app, &f.ctx.agm_dir, &stranger).await.is_none(), "不是請求檔那筆 rebuild");
+        std::fs::remove_file(f.ctx.agm_dir.join(REQUEST_FILE)).unwrap();
+        let late = restart_request(&f, &rebuild, &f.code).await;
+        assert!(preapprove_restart_in(&f.env.app, &f.ctx.agm_dir, &late).await.is_none(), "請求檔不在就不核准");
+    }
+
+    #[tokio::test]
+    async fn a_revoked_deploy_now_does_not_preapprove_the_restart() {
+        let f = fixture().await;
+        let rebuild = started(&f).await;
+        store::decide_approval_from(&f.env.app.db, &rebuild, "approved", "revoked", "agm", Some("撤回"), None).await.unwrap();
+        let r = restart_request(&f, &rebuild, &f.code).await;
+        assert!(preapprove_restart_in(&f.env.app, &f.ctx.agm_dir, &r).await.is_none(), "rebuild 已撤銷就不核准 restart");
     }
 
     #[tokio::test]

@@ -626,8 +626,9 @@ fi
 log "已取得 rebuild 窗口 fence=$LEASE"
 
 # 立即模式：restart 也由使用者這一下授權。以建置 child 的名義申請（§3c：restart 的 requester／owner 要是它自己的
-# bot id，否則 acquire 會 409 exclude_not_requester），同一輪以 `deploy-now:<rebuild 核准>` 核准。request id 固定，
-# 這輪之後重跑也回同一筆。開不出來就不帶，建置 child 照例行流程申請（AGM 裁示）——不是停手。
+# bot id，否則 acquire 會 409 exclude_not_requester），request id 固定成 `deploy-now-restart-<rebuild 核准>`：
+# **daemon 在建立當下**核准（對得上請求檔、使用者核准的 rebuild、同一個 commit 才核准）。這支腳本不打 decide——
+# #447 之後 approve 要驗過的 AGM 角色，launchd 沒有。回來不是 approved 就不帶，建置 child 照例行流程申請（AGM 裁示）。
 RESTART_APPROVAL=""
 if [ "$NOW" = 1 ]; then
   RESTART_APPROVAL=$("$AGM" --compact approval request --requester "$BOT" --purpose restart \
@@ -635,15 +636,13 @@ if [ "$NOW" = 1 ]; then
     --commit "$NOW_SHA" --request-id "deploy-now-restart-${APPROVAL}" --expires-in 21600 2>>"$LOG" | python3 -c '
 import json,sys
 d=json.load(sys.stdin)
-if not isinstance(d.get("id"),str) or not d["id"]: sys.exit(1)
+if not isinstance(d.get("id"),str) or not d["id"] or d.get("status")!="approved": sys.exit(1)
 print(d["id"])
 ' 2>/dev/null) || RESTART_APPROVAL=""
-  if [ -n "$RESTART_APPROVAL" ] && "$AGM" --compact approval decide "$RESTART_APPROVAL" --decision approve \
-       --actor "deploy-now:${APPROVAL}" --reason "使用者在 UI 按「立即部署」（rebuild 核准 ${APPROVAL}）" >> "$LOG" 2>&1; then
-    log "立即部署的 restart 核准 ${RESTART_APPROVAL} 已開好並核准（建置 child ${BOT}）"
+  if [ -n "$RESTART_APPROVAL" ]; then
+    log "立即部署的 restart 核准 ${RESTART_APPROVAL} 已由 daemon 核准（建置 child ${BOT}）"
   else
-    log "開不出立即部署的 restart 核准（${RESTART_APPROVAL:-申請失敗}）：建置 child 照例行流程申請"
-    RESTART_APPROVAL=""
+    log "立即部署的 restart 核准沒有當場核准：建置 child 照例行流程申請"
   fi
 fi
 
