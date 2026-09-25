@@ -2971,7 +2971,7 @@ launchd `com.agm.claude-release` 每 30 分鐘跑 `bin/claude-release-kick.sh`�
 **誰改得動（issue #462）**：沒帶 `X-AM-Bot-Id` 的呼叫端（網頁、人）照收；帶了身分就必須驗得過，而且那顆要是角色 bot，否則 403——
 一顆普通 managed bot 沒有理由改寫總管跑的那份角色前導詞。不管誰改，成功就記一行 log 並推 `persona_changed` 給巡檢：
 共用 UI token 的前提下「沒帶身分＝使用者」這個預設擋不住冒充，所以至少要讓改寫看得見（`persona.rs` 自己說線上載入的那份不可觀測）。
-那條預設本身留在 #447 等 per-bot token。`ConfigStore` 寫入前比 mtime，磁碟變了會在同一把 mutex 內重讀再套用
+那條預設本身留在 #556 等 per-bot token。`ConfigStore` 寫入前比 mtime，磁碟變了會在同一把 mutex 內重讀再套用
 （重新解析失敗才回錯），但 serde 全量回寫會洗掉註解與未知欄位。persona 改完不必重啟 daemon。
 
 ### 18.7 共用工作樹規範
