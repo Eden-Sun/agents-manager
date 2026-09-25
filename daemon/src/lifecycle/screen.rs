@@ -875,11 +875,16 @@ pub(crate) async fn apply_codex_limit_hit_quota(app: &Arc<App>, host: &str, base
 pub(crate) fn clean_screen(kind: &str, text: &str) -> Option<String> {
     let lines: Vec<&str> = text.lines().collect();
     let start = after_last_prompt_echo(kind, &lines);
+    let tool_rows = codex_tool_cell_mask(kind, &lines);
     let mut out: Vec<String> = Vec::new();
     let grok = kind == "grok";
     // grok's telemetry banner wraps at pane width: skip "Help improve Grok" … "Privacy Policy." as a block.
     let mut in_banner = false;
-    for line in &lines[start..] {
+    for (i, line) in lines.iter().enumerate().skip(start) {
+        // Codex draws every tool call with the assistant's own `•` marker; the cell is not the answer.
+        if tool_rows.get(i).copied().unwrap_or(false) {
+            continue;
+        }
         let stripped;
         let s = if grok {
             stripped = strip_grok_decor(line);
@@ -946,14 +951,23 @@ pub(crate) fn extract_reply(kind: &str, text: &str) -> Option<String> {
     let lines: Vec<&str> = text.lines().collect();
     // A2: only this turn's output — else the previous turn's `⏺` line is returned as the answer.
     let after_echo = after_last_prompt_echo(kind, &lines);
+    let tool_rows = codex_tool_cell_mask(kind, &lines);
+    let is_tool_row = |i: usize| tool_rows.get(i).copied().unwrap_or(false);
     let start = after_echo
-        + lines[after_echo..].iter().rposition(|l| {
+        + lines[after_echo..].iter().enumerate().rposition(|(off, l)| {
             let s = l.trim_start();
             s.starts_with(marker)
-                && (kind != "codex" || (codex_usage_notice_line(s).is_none() && !codex_non_reply_row(s)))
+                && (kind != "codex"
+                    || (codex_usage_notice_line(s).is_none()
+                        && !codex_non_reply_row(s)
+                        && !is_tool_row(after_echo + off)))
         })?;
     let mut out: Vec<String> = Vec::new();
-    for line in &lines[start..] {
+    for (i, line) in lines.iter().enumerate().skip(start) {
+        // The answer ends where the next tool cell begins; its `└` output is not part of the reply.
+        if i > start && is_tool_row(i) {
+            break;
+        }
         let t = line.trim_end();
         let s = t.trim_start();
         // Stop at the input box / horizontal rule drawn below the transcript.
@@ -1003,6 +1017,68 @@ fn codex_non_reply_row(line: &str) -> bool {
     let lower = body.to_ascii_lowercase();
     lower.starts_with("api error:")
         || (lower.starts_with("api error") && (lower.contains("retrying") || lower.contains("attempt ") || lower.contains("connection")))
+}
+
+/// Codex 把**每個工具呼叫**也畫成一個 `•` cell（2026-09-25 w168:pGD，codex 0.155.1 真畫面）：
+///
+/// ```text
+/// • Ran rtk proxy npm --prefix web run build
+///   └ vite v8.2.2 building client environment for production...
+///     … +11 lines (ctrl + t to view transcript)
+/// ```
+///
+/// 它跟助手回覆共用同一個 `• ` 標記，所以「畫面上最後一個 `•` 行」在回合結束時幾乎一定是工具列而不是回覆——
+/// 備援就把 `Ran …` 連同 `└` 的指令輸出當成回覆存進對話，真正的三則回覆在更上面一則都沒收到。
+/// 動詞會隨版本變（`Ran`／`Explored`／…），所以認**結構**不認字：工具列底下第一行非空的續行是輸出框
+/// （`└ …`，heredoc 是 `│ …`），回覆的續行不是。
+fn codex_tool_row(lines: &[&str], i: usize) -> bool {
+    if !lines[i].trim_start().starts_with("• ") {
+        return false;
+    }
+    lines[i + 1..]
+        .iter()
+        .map(|l| l.trim())
+        .find(|l| !l.is_empty())
+        .is_some_and(|l| l.starts_with('└') || l.starts_with('│'))
+}
+
+/// 工具 cell 的最後一行（不含）：續行都是縮排的（`  └ …`、`    … +N lines …`、heredoc 的 `  │ …`），
+/// 中間可能夾**輸出自己的空行**（`sed` 印出來的空白行），下一個 cell 從第一欄的 `•`／`■` 重新開始。
+/// 尾端的空行不吃掉，留給 [`clean_screen`] 當段落分隔。
+fn codex_tool_cell_end(lines: &[&str], i: usize) -> usize {
+    let mut end = i + 1;
+    let mut j = i + 1;
+    while j < lines.len() {
+        let raw = lines[j];
+        if raw.trim().is_empty() {
+            j += 1;
+        } else if raw.starts_with([' ', '\t']) {
+            j += 1;
+            end = j;
+        } else {
+            break;
+        }
+    }
+    end
+}
+
+/// 哪些行屬於 codex 的工具 cell（整塊：`• Ran …` 加它的 `└`／`│` 輸出框）。非 codex 一律空遮罩。
+fn codex_tool_cell_mask(kind: &str, lines: &[&str]) -> Vec<bool> {
+    if kind != "codex" {
+        return Vec::new();
+    }
+    let mut mask = vec![false; lines.len()];
+    let mut i = 0;
+    while i < lines.len() {
+        if codex_tool_row(lines, i) {
+            let end = codex_tool_cell_end(lines, i);
+            mask[i..end].fill(true);
+            i = end;
+        } else {
+            i += 1;
+        }
+    }
+    mask
 }
 
 #[cfg(test)]
@@ -1155,6 +1231,27 @@ gpt-5.6-luna max fast · ~/project/hermes-agents/projects/pt · Context 0% used 
             Some("The top is PR #42.\n\n  Branch: feature/rollout."),
             "subagent completion activity must not replace or join the answer",
         );
+    }
+
+
+    /// 2026-09-25 w168:pGD（codex 0.155.1）的真畫面：三則回覆中間夾了十幾個 `• Ran …` 工具 cell。
+    /// codex 把工具呼叫畫成跟回覆同一個 `•` 標記，備援又取「畫面上最後一個 `•`」，所以網頁上那顆 codex
+    /// 的回覆變成 `Ran rtk proxy cargo test …` 加它 `└` 的 rsync 錯誤，三則真回覆一則都沒進對話。
+    #[test]
+    fn codex_tool_cells_are_not_the_answer() {
+        const REAL: &str = include_str!("fixtures/codex-0.155-tool-rows-share-the-answer-marker.txt");
+
+        let reply = extract_reply("codex", REAL).expect("畫面上有回覆");
+        assert_eq!(reply, "網頁已改成在 bot 設定與額度未登入提示中開獨立 CLI 登入，並保留原 bot pane；cc1 目前仍回報 loggedIn: false，因為 OAuth 授權碼尚未回填到登入 shell w168:pG9。程式驗證正在跑，授權完成後我會再核對 w16J:pF。", "最後一則回覆，不是它下面的工具 cell");
+
+        // 三則都抓得到，工具 cell 一行都不留。
+        let whole = clean_screen("codex", REAL).expect("畫面上有回覆");
+        assert_eq!(whole, "• 系統修正已改到兩個入口：Claude 身份登入改用 claude auth login，額度列偵測到未登入時會開獨立 CLI shell，不再把 /login 送進原 bot pane。現在驗證編譯與相關測試；cc1 的瀏覽器授權仍在等待完成。\n\n• cc1 的 Claude CLI 登入已在 Herdr shell w168:pG9 等待授權碼。請在剛開啟的瀏覽器完成授權，並將授權碼貼回該 shell；完成後告訴我，我會核對登入狀態及原 bot。\n\n• 網頁已改成在 bot 設定與額度未登入提示中開獨立 CLI 登入，並保留原 bot pane；cc1 目前仍回報 loggedIn: false，因為 OAuth 授權碼尚未回填到登入 shell w168:pG9。程式驗證正在跑，授權完成後我會再核對 w16J:pF。");
+
+        for junk in ["Ran rtk", "└", "rsync", "+11 lines", "Conversation interrupted"] {
+            assert!(!reply.contains(junk), "工具輸出不可以進回覆：{junk}");
+            assert!(!whole.contains(junk), "工具輸出不可以進回覆：{junk}");
+        }
     }
 
     const CODEX_LIMIT_HIT: &str = "\

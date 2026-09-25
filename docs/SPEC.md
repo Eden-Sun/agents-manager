@@ -524,6 +524,12 @@ hook body 另外帶 `run_id`＝這個 CLI 行程 pane env 的 `AM_RUN_ID`（本�
     在無框的 `›` 輸入列停住，否則完成時間行不在尾巴、剝不掉）。回合中輸入框一直在，`box_state` 是 Empty（ansi 佔位字）不是 Unready。
   - 完成時間行**不當**回合結束的訊號（票上的「採用」不做）：格式已對過真畫面，但 (1) 當下 ChatGPT 帳號撞限，沒抓到 live 成功回合的時序，
     (2) TUI 用 textwrap 折行（`subsequent_indent` 兩格），單行 matcher 對折行會漏；`notify` hook 仍是主訊號。
+  - **工具呼叫跟回覆共用 `• ` 標記**（2026-09-25 w168:pGD 真畫面）：`• Ran <指令>` 底下接一個縮排的輸出框
+    （`└ …`，heredoc 是 `│ …`，折疊處是 `… +N lines (ctrl + t to view transcript)`，中間可能夾輸出自己的空行）。
+    回合結束時「畫面上最後一個 `•`」幾乎一定是工具列，抽出來的就是 `Ran …` 加它的指令輸出，真回覆在更上面一則都收不到
+    （真實災情：三則回覆一則沒進對話，網頁上那顆 codex 的回覆變成 `cargo test` 的 rsync 錯誤）。所以 `extract_reply` 取的是
+    **最後一個不是工具列的 `•` 行**、往下掃到下一個工具 cell 就停，`clean_screen` 把整塊跳過。動詞會隨版本變（`Ran`／`Explored`／…），
+    認的是**結構**——底下第一行非空的續行是不是輸出框——不是 `Ran` 這個字。fixture：`codex-0.155-tool-rows-share-the-answer-marker.txt`。
   - 真機 fixture：`daemon/src/lifecycle/fixtures/codex-0.155-{idle,working,working-summary,finished}.{txt,ansi}`（0.155.1 私有 prefix、
     拋棄式 `CODEX_HOME`、名字為空的 pane）。`screen.rs` 的 `codex_0155_screen_tests`、`poller.rs` 的 `codex_0155_fallback_tests` 讀這些檔。
 - **沒有 hook 的 run**：被認領的 pane（`runs.adopted = 1` 且 `bots.inject_hooks = 0`，典型是 bot 自己開的子 agent，§6.5a）等不到 hook，
