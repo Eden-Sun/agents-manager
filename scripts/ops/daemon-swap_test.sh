@@ -98,6 +98,10 @@ setup() { # setup <checkout 的 SCHEMA_VERSION> <DB 目前的 user_version>
   export STUB_RELEASE_FAIL=""       # 設了：lease release 回 409（模擬 fence 過期／token 對不上）
   export STUB_NAMES_BEFORE='["a","b"]' STUB_NAMES_AFTER='["a","b"]'
   export STUB_RESTART_HELD=false
+  export REAL_SQLITE="${REAL_SQLITE:-$(command -v sqlite3)}"
+  "$REAL_SQLITE" "$ROOT/audit.sqlite3" "CREATE TABLE bots (id TEXT PRIMARY KEY, name TEXT, project_id TEXT, deleted_at TEXT);
+    CREATE TABLE intents (id TEXT PRIMARY KEY, kind TEXT, subject_id TEXT, payload_json TEXT NOT NULL DEFAULT '{}',
+      status TEXT NOT NULL DEFAULT 'done', created_at TEXT NOT NULL);"
 
   cat > "$ROOT/bin/agm" <<'STUB'
 #!/bin/bash
@@ -148,7 +152,7 @@ case "$sub:$op" in
   supervisor:*)  printf '{"status":"%s"}' "$STUB_SUPERVISOR" ;;
   state:*)       if [ -e "$AGM_DIR/started" ]; then names="$STUB_NAMES_AFTER"; else names="$STUB_NAMES_BEFORE"; fi
                  printf '{"bots":['; sep=""
-                 for n in $(printf '%s' "$names" | tr -d '[]"' | tr ',' ' '); do printf '%s{"name":"%s"}' "$sep" "$n"; sep=","; done
+                 for n in $(printf '%s' "$names" | tr -d '[]"' | tr ',' ' '); do printf '%s{"id":"id-%s","name":"%s"}' "$sep" "$n" "$n"; sep=","; done
                  printf ']}' ;;
   *)             printf '{}' ;;
 esac
@@ -156,13 +160,16 @@ STUB
 
   cat > "$ROOT/bin/sqlite3" <<'STUB'
 #!/bin/bash
+ro=""; [ "$1" = -readonly ] && { ro=-readonly; shift; }
 db="$1"; q="$2"
 case "$q" in
   "pragma user_version")
       if [ "$db" = "$DAEMON_DB" ]; then cat "$ROOT/uv"; else cat "$db.uv" 2>/dev/null || cat "$ROOT/uv"; fi ;;
   "pragma integrity_check") cat "$ROOT/integrity" ;;
   .backup*) dest=${q#.backup }; cp "$db" "$dest"; cp "$ROOT/uv" "$dest.uv" ;;
-  *) : ;;
+  *) # 其他查詢（換版後比對刪除紀錄）交給真的 sqlite3，查 seed_audit 種的那份；要求一定是唯讀開的。
+     [ "$db" = "$DAEMON_DB" ] && [ -n "$ro" ] || { echo "non-readonly query: $q" >> "$AGM_DIR/sqlite-rw.log"; exit 1; }
+     "$REAL_SQLITE" -readonly "$ROOT/audit.sqlite3" "$q" ;;
 esac
 STUB
 
@@ -221,6 +228,7 @@ STUB
 }
 
 teardown() { rm -rf "$ROOT"; }
+seed_audit() { "$REAL_SQLITE" "$ROOT/audit.sqlite3" "$1"; }   # 換版後腳本唯讀查的那份 DB（bots／intents）
 
 run() { bash "$SCRIPT" --sha "$SHA" --old "$OLD" --old-hash "$OLDHASH" --approval ap-1 --owner bot-me --checkout "$CHECKOUT" >/dev/null 2>&1; echo $?; }
 
@@ -502,6 +510,50 @@ rc=$(run)
 check_eq "複查不安全仍以 rc=4 結束" "4" "$rc"
 check "log 說交還失敗" "交還 restart 窗口失敗 rc=" "$SWAP_LOG"
 check_no "不准謊報已交還" "restart 窗口已交還" "$SWAP_LOG"
+teardown
+
+# 27. 換版窗口內父 bot 用刪除 API 收掉 child（2026-09-24 22:53 ca9a0330 的 i263）：有 delete intent、
+#     deleted_at 在窗口內 → 不是重啟弄丟的，不回滾。時間用 2099 年代表「比換版起點晚」。
+setup 10 10
+export STUB_NAMES_BEFORE='["a","b","kid"]' STUB_NAMES_AFTER='["a","b"]'
+seed_audit "INSERT INTO bots VALUES ('id-kid','kid','p1','2099-01-01T00:00:01.000Z');
+  INSERT INTO intents VALUES ('it1','delete_bot','id-kid','{\"bots\":[],\"requested_by\":\"agm\"}','done','2099-01-01T00:00:00.000Z');"
+rc=$(run)
+check_eq "窗口內刻意刪掉的不回滾（rc=0）" "0" "$rc"
+check "log 列出窗口內刪掉的" "missing=\[\] deleted_in_window=\[kid \]" "$SWAP_LOG"
+check_no "沒有回滾" "ROLLBACK" "$SWAP_LOG"
+check_file "不是唯讀開 DB 的查詢一筆都沒有" no "$AGM_DIR/sqlite-rw.log"
+teardown
+
+# 28. 母 bot 被刪、child 跟著走：child 的 id 在母 bot 那筆 intent 的 payload 快照裡 → 一樣不回滾。
+setup 10 10
+export STUB_NAMES_BEFORE='["a","mom","kid"]' STUB_NAMES_AFTER='["a"]'
+seed_audit "INSERT INTO bots VALUES ('id-mom','mom','p1','2099-01-01T00:00:01.000Z'), ('id-kid','kid','p1','2099-01-01T00:00:02.000Z');
+  INSERT INTO intents VALUES ('it1','delete_bot','id-mom','{\"bots\":[{\"id\":\"id-kid\",\"managed_by\":\"child\"}]}','done','2099-01-01T00:00:00.000Z');"
+rc=$(run)
+check_eq "連帶刪掉的 child 也不回滾（rc=0）" "0" "$rc"
+check "兩顆都算刻意刪除" "deleted_in_window=\[kid mom \]" "$SWAP_LOG"
+teardown
+
+# 29. 不見了、只有 deleted_at 沒有刪除紀錄（重啟後 reconcile 找不到 pane 退役、或投影軟刪都是這個樣子）
+#     → 照樣回滾。這條不能放寬。
+setup 10 10
+export STUB_NAMES_BEFORE='["a","b","kid"]' STUB_NAMES_AFTER='["a","b"]'
+seed_audit "INSERT INTO bots VALUES ('id-kid','kid','p1','2099-01-01T00:00:01.000Z');"
+rc=$(run)
+check_eq "沒有刪除紀錄就回滾（rc=7）" "7" "$rc"
+check "log 講是沒有刪除紀錄" "有 bot 不見了（沒有刪除紀錄）：kid" "$SWAP_LOG"
+check_eq "binary 換回舊的" "old-binary" "$(cat "$AGM_REPO/target/release/agents-managerd")"
+teardown
+
+# 30. 刪除紀錄是換版之前的舊帳（例如之前刪過又還原），這次不見的原因不是它 → 照樣回滾。
+setup 10 10
+export STUB_NAMES_BEFORE='["a","kid"]' STUB_NAMES_AFTER='["a"]'
+seed_audit "INSERT INTO bots VALUES ('id-kid','kid','p1','2099-01-01T00:00:01.000Z');
+  INSERT INTO intents VALUES ('it0','delete_bot','id-kid','{}','done','2000-01-01T00:00:00.000Z');"
+rc=$(run)
+check_eq "窗口外的刪除紀錄不算（rc=7）" "7" "$rc"
+check "log 講是沒有刪除紀錄" "有 bot 不見了（沒有刪除紀錄）：kid" "$SWAP_LOG"
 teardown
 
 echo "$PASS passed, $FAIL failed"
