@@ -80,7 +80,11 @@ CREATE TABLE IF NOT EXISTS runs (
   -- claude 原生 SubagentStart／SubagentStop 的最後一筆快照（issue #82）：純輔助可見性，不影響
   -- §6.5a 的血緣認領——child 本來就沒有 hook（§4.3），這一欄只會有頂層 bot 自己（in-process
   -- Task 工具）的紀錄。`{"event","agent_id","agent_type","transcript_path","at"}`，一律整筆覆蓋。
-  subagent_json TEXT
+  subagent_json TEXT,
+  -- `mark_run_exited` 把 run 收成 exited 時的原因（`pane exited`、`agent not found during reconcile`…），只在它
+  -- 的 CAS 真的寫下 exited 那一次記（issue #554）；退役紀錄靠它分辨 pane 是 herdr 親口報關掉的還是對帳時才發現不見。
+  -- NULL＝不是那條路收的（停止、舊列）。
+  exit_reason TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS runs_one_active ON runs(bot_id) WHERE state IN ('starting','running','stopping');
 CREATE INDEX IF NOT EXISTS runs_pane ON runs(pane_id);
@@ -220,6 +224,8 @@ const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (20, "bfb00c5a78aa5503"),
     // issue #543：`supervisor_assignments_created`（分頁與未結案清單共用的排序索引）。
     (21, "80f6adcef290b9e3"),
+    // issue #554：`runs.exit_reason`（run 為什麼被收成 exited，child 退役紀錄分辨刻意／弄丟用）。
+    (22, "23efc61b27d2a5a9"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -388,6 +394,8 @@ async fn apply_migrations(pool: &SqlitePool) -> Result<()> {
         ("runs", "launch_rev", "ALTER TABLE runs ADD COLUMN launch_rev TEXT"),
         // issue #339：`relay_from` 是呼叫端自稱、沒帶自己的 bot token 證明（相容期）＝1。舊列 0＝不是這條路寫的。
         ("messages", "relay_unverified", "ALTER TABLE messages ADD COLUMN relay_unverified INTEGER NOT NULL DEFAULT 0"),
+        // issue #554：run 為什麼被收成 exited；舊列 NULL＝不知道，退役紀錄當成「沒親眼看到 pane 被關」。
+        ("runs", "exit_reason", "ALTER TABLE runs ADD COLUMN exit_reason TEXT"),
     ] {
         if !has_column(&mut *tx, table, col).await? {
             sqlx::query(ddl).execute(&mut *tx).await.with_context(|| format!("add {table}.{col}"))?;

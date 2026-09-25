@@ -87,6 +87,29 @@ pub async fn insert(pool: &SqlitePool, kind: &str, subject_id: &str, host: &str,
     }
 }
 
+/// 一件**當下就做完**的動作留下的紀錄：直接寫 `done`，不經 `pending`／`running`，也沒有補做這回事——存在只是為了
+/// 事後查得到「這件事是誰、為什麼做的」（#554：`retire_child`）。要跟動作本身同一個交易，所以收連線不收 pool。
+/// 跟別的 `done` 一樣由 [`sweep_finished`] 在 24 小時後收掉。
+pub async fn record_done(conn: &mut sqlx::SqliteConnection, kind: &str, subject_id: &str, host: &str, payload: &Value) -> Result<String> {
+    let now = crate::db::now();
+    let id = crate::db::ulid();
+    sqlx::query(
+        "INSERT INTO intents (id, kind, subject_id, host, payload_json, status, created_at, updated_at, expires_at)
+         VALUES (?,?,?,?,?,'done',?,?,?)",
+    )
+    .bind(&id)
+    .bind(kind)
+    .bind(subject_id)
+    .bind(host)
+    .bind(payload.to_string())
+    .bind(&now)
+    .bind(&now)
+    .bind(&now)
+    .execute(conn)
+    .await?;
+    Ok(id)
+}
+
 /// 認領（CAS）：`pending`，或 `running` 但 owner 不是這次 boot（上個行程死了）。回 `true`＝這次拿到、可以做。
 pub async fn claim(pool: &SqlitePool, id: &str, boot: &str) -> Result<bool> {
     let n = sqlx::query(

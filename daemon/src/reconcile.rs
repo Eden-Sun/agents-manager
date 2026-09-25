@@ -2347,6 +2347,96 @@ mod compat_tests {
         assert!(b.deleted_at.is_some(), "a child whose pane was closed must leave the sidebar");
     }
 
+    /// #554：這顆 child 的退役紀錄（`intents` 的 `retire_child`）：`(status, payload)`。
+    async fn retire_record(app: &Arc<App>, bot: &str) -> Option<(String, serde_json::Value)> {
+        let row: Option<(String, String)> =
+            sqlx::query_as("SELECT status, payload_json FROM intents WHERE kind = 'retire_child' AND subject_id = ?")
+                .bind(bot)
+                .fetch_optional(&app.db)
+                .await
+                .unwrap();
+        row.map(|(status, payload)| (status, serde_json::from_str(&payload).unwrap()))
+    }
+
+    /// **#554，父 bot 用 `herdr pane close` 收 child 的那條路**：herdr 發了 pane 關閉事件（run 以 `pane exited` 結束）、
+    /// 對帳時 herdr 也說 pane 不在 → 退役紀錄的 `cause` 是 `pane_closed`。換版腳本只認這種（與 promote）是刻意收掉的。
+    #[tokio::test]
+    async fn a_child_whose_pane_was_closed_leaves_a_pane_closed_retire_record() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, _root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let pane = client.tab_create(&ws.workspace_id, "/tmp/p", "kid", json!({})).await.unwrap();
+        let parent = a_bot(&env, "alfa").await;
+        let kid_agent = format!("{}-kid", crate::config::agent_name("proj", &parent));
+        let (kid, run) = a_child(&env, &parent, "kid", &kid_agent, &ws.workspace_id, &pane.tab_id, &pane.pane_id).await;
+        client.pane_close(&pane.pane_id).await.unwrap();
+        env.herdr.agents.lock().unwrap().clear();
+        crate::lifecycle::mark_run_exited(&app, &run, "pane exited").await;
+
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+
+        assert!(retired(&app, &kid).await);
+        let (status, p) = retire_record(&app, &kid).await.expect("退役要留一筆 DB 查得到的紀錄");
+        assert_eq!(status, "done");
+        assert_eq!(p["why"], "reconcile_run_already_ended");
+        assert_eq!(p["cause"], "pane_closed", "{p}");
+        assert_eq!(p["pane"], "gone", "{p}");
+        assert_eq!(p["last_run"]["id"], run.as_str());
+        assert_eq!(p["last_run"]["exit_reason"], "pane exited", "{p}");
+        assert_eq!(p["parent_bot_id"], parent.as_str());
+        assert_eq!(p["requested_by"], "-", "背景對帳沒有 HTTP 呼叫端");
+        assert_eq!(p["boot_id"], app.boot_id.as_str(), "是哪一顆 daemon 退役的");
+    }
+
+    /// **#554，換版會弄丟 child 的那條路**：daemon 重啟、herdr 沒動，pane 還在，只是 daemon 認不出裡面的 agent
+    /// （herdr 不列它、pane 上也問不到）。這種不能被當成刻意收掉：`cause` 是 `agent_missing`。
+    #[tokio::test]
+    async fn a_child_whose_agent_vanished_from_a_live_pane_is_recorded_as_agent_missing() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, _root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let pane = client.tab_create(&ws.workspace_id, "/tmp/p", "kid", json!({})).await.unwrap();
+        let parent = a_bot(&env, "alfa").await;
+        let kid_agent = format!("{}-kid", crate::config::agent_name("proj", &parent));
+        let (kid, _run) = a_child(&env, &parent, "kid", &kid_agent, &ws.workspace_id, &pane.tab_id, &pane.pane_id).await;
+        env.herdr.agents.lock().unwrap().clear();
+
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+
+        assert!(retired(&app, &kid).await, "前提：照 #60 退役");
+        let (_, p) = retire_record(&app, &kid).await.expect("退役要留紀錄");
+        assert_eq!(p["why"], "reconcile_agent_gone");
+        assert_eq!(p["pane"], "present", "{p}");
+        assert_eq!(p["cause"], "agent_missing", "{p}");
+    }
+
+    /// **#554**：pane 真的不在了、但 daemon 沒有親眼看到它被關（沒有 pane 關閉事件，對帳時才發現）——例如換版那幾秒裡
+    /// 被關掉，或新的 daemon 連到一個空的 herdr。「pane 不在」本身證明不了是誰關的：`cause` 是 `unconfirmed`，不算刻意。
+    #[tokio::test]
+    async fn a_child_whose_pane_vanished_unobserved_is_unconfirmed() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, _root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let pane = client.tab_create(&ws.workspace_id, "/tmp/p", "kid", json!({})).await.unwrap();
+        let parent = a_bot(&env, "alfa").await;
+        let kid_agent = format!("{}-kid", crate::config::agent_name("proj", &parent));
+        let (kid, _run) = a_child(&env, &parent, "kid", &kid_agent, &ws.workspace_id, &pane.tab_id, &pane.pane_id).await;
+        client.pane_close(&pane.pane_id).await.unwrap();
+        env.herdr.agents.lock().unwrap().clear();
+
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+
+        assert!(retired(&app, &kid).await);
+        let (_, p) = retire_record(&app, &kid).await.expect("退役要留紀錄");
+        assert_eq!(p["why"], "reconcile_agent_gone");
+        assert_eq!(p["pane"], "gone", "{p}");
+        assert_eq!(p["last_run"]["exit_reason"], "agent not found during reconcile", "{p}");
+        assert_eq!(p["cause"], "unconfirmed", "{p}");
+    }
+
     /// 計畫中的 herdr 重啟（§6.5.2）：維護中兩條退休路徑都不刪子 agent；run 照樣結束。
     /// 反向：同樣的情境不在維護中就照舊退休（上面那條測試），逾時的窗口也不算維護中。
     #[tokio::test]
@@ -2507,6 +2597,8 @@ mod compat_tests {
 
         assert!(!retired(&app, &agm_kid).await, "AGM 的 child 沒有被隱式軟刪");
         assert!(retired(&app, &user_kid).await, "一般專案的 child 照舊退役");
+        assert!(retire_record(&app, &agm_kid).await.is_none(), "擋下來的不留退役紀錄（#554）");
+        assert!(retire_record(&app, &user_kid).await.is_some(), "退役的才有（#554）");
         let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(&agm_run).fetch_one(&app.db).await.unwrap();
         assert_eq!(state, "exited", "擋的只有軟刪：run 照樣收掉");
         let refusals = retire_refusals(&app).await;
@@ -2546,6 +2638,8 @@ mod compat_tests {
 
         assert!(!retired(&app, &agm_kid).await, "AGM 的 child 沒有被隱式軟刪");
         assert!(retired(&app, &user_kid).await, "一般專案的 child 照舊退役");
+        assert!(retire_record(&app, &agm_kid).await.is_none(), "擋下來的不留退役紀錄（#554）");
+        assert!(retire_record(&app, &user_kid).await.is_some(), "退役的才有（#554）");
         let refusals = retire_refusals(&app).await;
         assert_eq!(refusals.len(), 1, "{refusals:?}");
         assert_eq!(refusals[0].0.as_deref(), Some(agm_kid.as_str()));
