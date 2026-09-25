@@ -556,5 +556,43 @@ check_eq "窗口外的刪除紀錄不算（rc=7）" "7" "$rc"
 check "log 講是沒有刪除紀錄" "有 bot 不見了（沒有刪除紀錄）：kid" "$SWAP_LOG"
 teardown
 
+# 31. 父 bot 用 `herdr pane close` 收掉 child（沒呼叫 DELETE，#554）：daemon 退役時寫了 retire_child 紀錄，
+#     herdr 報過關閉事件、當下 pane 也不在（cause=pane_closed）→ 刻意收掉的，不回滾。promote 收掉的 child 一樣。
+setup 10 10
+export STUB_NAMES_BEFORE='["a","kid","pro"]' STUB_NAMES_AFTER='["a"]'
+seed_audit "INSERT INTO bots VALUES ('id-kid','kid','p1','2099-01-01T00:00:01.000Z'), ('id-pro','pro','p1','2099-01-01T00:00:02.000Z');
+  INSERT INTO intents VALUES ('it1','retire_child','id-kid','{\"why\":\"reconcile_run_already_ended\",\"cause\":\"pane_closed\"}','done','2099-01-01T00:00:01.000Z'),
+    ('it2','retire_child','id-pro','{\"why\":\"promoted\",\"cause\":\"promoted\"}','done','2099-01-01T00:00:02.000Z');"
+rc=$(run)
+check_eq "pane 被關掉而退役的 child 不回滾（rc=0）" "0" "$rc"
+check "兩顆都算刻意收掉" "missing=\[\] deleted_in_window=\[kid pro \]" "$SWAP_LOG"
+check_no "沒有回滾" "ROLLBACK" "$SWAP_LOG"
+check_file "不是唯讀開 DB 的查詢一筆都沒有" no "$AGM_DIR/sqlite-rw.log"
+teardown
+
+# 32. 換版弄丟的形狀（#554）：有 retire_child 紀錄，但 pane 還在、只是新 daemon 認不出 agent（agent_missing），
+#     或 pane 不在卻沒有人看到它被關（unconfirmed）→ 照樣回滾。有紀錄不等於刻意。
+for c in agent_missing unconfirmed herdr_restarted; do
+  setup 10 10
+  export STUB_NAMES_BEFORE='["a","kid"]' STUB_NAMES_AFTER='["a"]'
+  seed_audit "INSERT INTO bots VALUES ('id-kid','kid','p1','2099-01-01T00:00:01.000Z');
+    INSERT INTO intents VALUES ('it1','retire_child','id-kid','{\"why\":\"reconcile_agent_gone\",\"cause\":\"$c\"}','done','2099-01-01T00:00:01.000Z');"
+  rc=$(run)
+  check_eq "cause=${c} 的退役照樣回滾（rc=7）" "7" "$rc"
+  check "cause=${c}：log 講是沒有刪除紀錄" "有 bot 不見了（沒有刪除紀錄）：kid" "$SWAP_LOG"
+  teardown
+done
+
+# 33. retire_child 紀錄在換版窗口之前（舊帳），或 subject 是別顆（payload 裡提到它只是 parent_bot_id）→ 不算，回滾。
+setup 10 10
+export STUB_NAMES_BEFORE='["a","kid"]' STUB_NAMES_AFTER='["a"]'
+seed_audit "INSERT INTO bots VALUES ('id-kid','kid','p1','2099-01-01T00:00:01.000Z');
+  INSERT INTO intents VALUES ('it0','retire_child','id-kid','{\"cause\":\"pane_closed\"}','done','2000-01-01T00:00:00.000Z'),
+    ('it1','retire_child','id-grandkid','{\"cause\":\"pane_closed\",\"parent_bot_id\":\"id-kid\"}','done','2099-01-01T00:00:01.000Z');"
+rc=$(run)
+check_eq "窗口外、或別顆的退役紀錄都不算（rc=7）" "7" "$rc"
+check "log 講是沒有刪除紀錄" "有 bot 不見了（沒有刪除紀錄）：kid" "$SWAP_LOG"
+teardown
+
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

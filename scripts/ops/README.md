@@ -197,6 +197,9 @@ launchd：`com.agm.daemon-update` 改成每 5 分鐘跑一次（`StartInterval 3
 - 重啟後比對 bot 名單（看 id）：少了就回滾，**只有**換版窗口內刻意刪掉的不算——deleted_at 在窗口起點之後、
   而且有刪除 API 留下的 `delete_bot`／`delete_project` intent（subject 是它、它的專案，或 payload 快照裡有它），DB 唯讀查。
   只有 deleted_at、沒有 intent（重啟後 reconcile 退役、投影軟刪）照樣回滾（issue #553：2026-09-24 父 bot 在窗口內刪 child i263 被誤判回滾）。
+  父 bot 用 `herdr pane close` 收 child（不呼叫 DELETE）時，daemon 退役那顆會寫 `retire_child` 紀錄；只認 subject 是它、窗口內、
+  `cause` 是 `pane_closed`（herdr 報過關閉事件、當下 pane 也不在）或 `promoted` 的。`agent_missing`／`unconfirmed`／`herdr_restarted`
+  是換版會弄丟 child 的樣子，照樣回滾（issue #554，判準見 SPEC §6.5a）。
 
 ```sh
 scripts/ops/daemon-swap.sh --sha <完整 sha> --old <short sha> --old-hash <sha256 前 16 碼> \
