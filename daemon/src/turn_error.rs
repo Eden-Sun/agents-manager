@@ -217,6 +217,23 @@ pub async fn capture(app: &Arc<App>, bot_id: &str, expected_run_id: &str) -> Res
     let Some(bot) = db::bot(&app.db, bot_id).await? else { return Ok(()) };
     let conversation_id = db::conversation_id(&app.db, bot_id).await?;
     let turn = last_turn(app, &run.id).await?;
+    // Codex 0.156 flushes an interrupted/failed stream into its terminal transcript. Keep that
+    // assistant content as a separate incomplete message beside the error notice.
+    let partial = if bot.kind == "codex" {
+        if let Some(t) = turn.as_ref() {
+            match lifecycle::turn_echo_texts(app, &t.id).await {
+                Ok(sent) => lifecycle::codex_partial_reply(&read.text, &sent),
+                Err(e) => {
+                    tracing::debug!(turn = %t.id, error = ?e, "partial Codex reply could not be matched to its prompt");
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     // 額度格標成被擋，量表與標題列才對得上。撞限是外面已經發生的事：記不進去時欠著（排著的派工照欠著的那一筆擋），
     // 下面寫不寫得進去都一樣；錯誤留到最後回給呼叫端。
@@ -224,9 +241,42 @@ pub async fn capture(app: &Arc<App>, bot_id: &str, expected_run_id: &str) -> Res
 
     let mut tx = app.db.begin().await?;
     sqlx::query("UPDATE runs SET turn_error = ? WHERE id = ?").bind(&line).bind(&run.id).execute(&mut *tx).await?;
+    let mut messages = Vec::new();
+    if let (Some(t), Some(reply)) = (turn.as_ref(), partial.as_deref()) {
+        let already_has_answer: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM messages WHERE turn_id = ? AND role = 'assistant')")
+            .bind(&t.id)
+            .fetch_one(&mut *tx)
+            .await?;
+        if !already_has_answer {
+            messages.push(
+                lifecycle::insert_message_tx(
+                    &mut tx,
+                    &conversation_id,
+                    Some(&t.id),
+                    "assistant",
+                    reply,
+                    "terminal_fallback",
+                    true,
+                    Some(&read.text),
+                )
+                .await?,
+            );
+        }
+    }
     // 釘在那一回合上，看得出是哪一則回覆斷的。
-    lifecycle::insert_message_tx(&mut tx, &conversation_id, turn.as_ref().map(|t| t.id.as_str()), "system", &line, "system", true, Some(&read.text))
-        .await?;
+    messages.push(
+        lifecycle::insert_message_tx(
+            &mut tx,
+            &conversation_id,
+            turn.as_ref().map(|t| t.id.as_str()),
+            "system",
+            &line,
+            "system",
+            true,
+            Some(&read.text),
+        )
+        .await?,
+    );
     // 不收掉 in_flight 的話輸入框會一直鎖著。
     let mut failed = None;
     if let Some(t) = turn.as_ref().filter(|t| t.status == "in_flight") {
@@ -243,6 +293,9 @@ pub async fn capture(app: &Arc<App>, bot_id: &str, expected_run_id: &str) -> Res
     }
     tx.commit().await?;
     tracing::warn!(bot = %bot_id, run = %run.id, error = %line, "turn cut short by an API error");
+    for message in messages {
+        lifecycle::emit_message_added(app, bot_id, message).await;
+    }
     if let Some(t) = failed {
         lifecycle::emit_turn(app, &t).await;
     }
@@ -1096,6 +1149,51 @@ mod quota_limit_tests {
         assert_eq!(notes, 1);
         let marked: Option<String> = sqlx::query_scalar("SELECT turn_error FROM runs WHERE id=?").bind(&run).fetch_one(&app.db).await.unwrap();
         assert_eq!(marked.as_deref(), Some("API Error: Connection lost mid-response."));
+    }
+
+    #[tokio::test]
+    async fn a_failed_codex_turn_keeps_its_streamed_reply_as_incomplete() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "codex-partial").await;
+        sqlx::query("UPDATE bots SET kind='codex' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
+        let run = crate::testing::fake_run(&app, &bot.id).await;
+        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        let turn = db::ulid();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at, prompt_text)
+             VALUES (?,?,?,'web','in_flight','ok',?,'跑一下測試')",
+        )
+        .bind(&turn)
+        .bind(&conv)
+        .bind(&run)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        env.herdr.set_screen(
+            &format!("pane-{}", bot.id),
+            "› 跑一下測試\n\n• 已找到失敗位置。\n• API Error: Connection lost mid-response.\n",
+        );
+
+        capture(&app, &bot.id, &run).await.unwrap();
+
+        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(&turn).fetch_one(&app.db).await.unwrap();
+        assert_eq!(status, "failed");
+        let messages: Vec<(String, String, i64, String)> = sqlx::query_as(
+            "SELECT role, content, incomplete, source FROM messages WHERE turn_id=? ORDER BY rowid",
+        )
+        .bind(&turn)
+        .fetch_all(&app.db)
+        .await
+        .unwrap();
+        assert_eq!(
+            messages,
+            vec![
+                ("assistant".into(), "已找到失敗位置。".into(), 1, "terminal_fallback".into()),
+                ("system".into(), "API Error: Connection lost mid-response.".into(), 1, "system".into()),
+            ],
+        );
     }
 
     /// 撞限記下的當下就蓋到排著的那一則上（不等 flush）；蓋不上就回錯、欠著——記憶體那一格照樣寫了（照擋），

@@ -902,6 +902,11 @@ pub(crate) fn clean_screen(kind: &str, text: &str) -> Option<String> {
         if is_noise(s) || is_activity_shape(s) || (grok && is_grok_noise(s)) {
             continue;
         }
+        // Codex 0.156 keeps the streamed body when a turn fails or is interrupted, then draws a
+        // terminal status row after it. Do not save that UI row as part of the assistant reply.
+        if kind == "codex" && codex_non_reply_row(s) {
+            break;
+        }
         // Prompt box means the transcript ended. Codex's composer is unboxed `› …`（佔位字不是空的 `›`）。
         if s == "❯" || s == "›" || s.starts_with("❯ ") || s.starts_with("› ") {
             break;
@@ -944,7 +949,8 @@ pub(crate) fn extract_reply(kind: &str, text: &str) -> Option<String> {
     let start = after_echo
         + lines[after_echo..].iter().rposition(|l| {
             let s = l.trim_start();
-            s.starts_with(marker) && (kind != "codex" || codex_usage_notice_line(s).is_none())
+            s.starts_with(marker)
+                && (kind != "codex" || (codex_usage_notice_line(s).is_none() && !codex_non_reply_row(s)))
         })?;
     let mut out: Vec<String> = Vec::new();
     for line in &lines[start..] {
@@ -957,6 +963,9 @@ pub(crate) fn extract_reply(kind: &str, text: &str) -> Option<String> {
             || s.starts_with('›')
             || s.starts_with('❯')
         {
+            break;
+        }
+        if kind == "codex" && codex_non_reply_row(s) {
             break;
         }
         if !s.is_empty() && s.chars().all(|c| c == '─' || c == '━' || c == '-' || c == '=' || c == '_') {
@@ -981,6 +990,19 @@ pub(crate) fn extract_reply(kind: &str, text: &str) -> Option<String> {
     } else {
         Some(joined)
     }
+}
+
+/// Codex's terminal renders failure/interruption notices and completed subagent activity after
+/// the preserved stream. API transport banners can also appear with the ordinary assistant marker.
+fn codex_non_reply_row(line: &str) -> bool {
+    let s = line.trim_start();
+    if s.starts_with("■ ") || s.strip_prefix("• Completed ").is_some_and(|tail| tail.starts_with('`') && tail.ends_with('`')) {
+        return true;
+    }
+    let body = s.strip_prefix("• ").or_else(|| s.strip_prefix("⏺ ")).unwrap_or(s).trim_start();
+    let lower = body.to_ascii_lowercase();
+    lower.starts_with("api error:")
+        || (lower.starts_with("api error") && (lower.contains("retrying") || lower.contains("attempt ") || lower.contains("connection")))
 }
 
 #[cfg(test)]
@@ -1108,6 +1130,31 @@ gpt-5.6-luna max fast · ~/project/hermes-agents/projects/pt · Context 0% used 
         assert_eq!(extract_reply("codex", CODEX_IDLE_SPLASH), None);
         assert_eq!(last_prompt_echo_text("codex", CODEX_IDLE_SPLASH), None);
         assert!(codex_usage_notice_lines(CODEX_IDLE_SPLASH).iter().any(|n| n.contains("usage limit reset")));
+    }
+
+    #[test]
+    fn codex_failed_and_interrupted_streams_keep_only_the_partial_body() {
+        let interrupted = "› 請整理計畫\n\n• Proposed Plan\n\n  Intro.\n  $$\n  \\frac{a+b}{c}\n\n■ Conversation interrupted - tell the model what to do differently.";
+        assert_eq!(
+            extract_reply("codex", interrupted).as_deref(),
+            Some("Proposed Plan\n\n  Intro.\n  $$\n  \\frac{a+b}{c}"),
+        );
+        assert_eq!(
+            crate::lifecycle::codex_partial_reply(interrupted, &["請整理計畫".into()]).as_deref(),
+            Some("Proposed Plan\n\n  Intro.\n  $$\n  \\frac{a+b}{c}"),
+        );
+        assert_eq!(crate::lifecycle::codex_partial_reply(interrupted, &["別的回合".into()]), None);
+
+        let failed = "› 修正連線錯誤\n\n• 已確認重試流程。\n• API Error: Connection lost mid-response.";
+        assert_eq!(extract_reply("codex", failed).as_deref(), Some("已確認重試流程。"));
+        assert_eq!(clean_screen("codex", "■ Server error\n›\n"), None, "失敗提示本身不是部分回答");
+
+        let subagent = "› 檢查 PR\n\n• The top is PR #42.\n\n  Branch: feature/rollout.\n• Completed \u{60}/root/stack_tip\u{60}\n■ Conversation interrupted.";
+        assert_eq!(
+            extract_reply("codex", subagent).as_deref(),
+            Some("The top is PR #42.\n\n  Branch: feature/rollout."),
+            "subagent completion activity must not replace or join the answer",
+        );
     }
 
     const CODEX_LIMIT_HIT: &str = "\

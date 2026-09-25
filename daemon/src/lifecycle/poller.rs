@@ -385,6 +385,17 @@ pub(crate) fn screen_reply(kind: &str, text: &str, sent: &[String]) -> Option<St
     }
 }
 
+/// Only attach a Codex failure/interruption snapshot to this turn when its visible prompt echo
+/// matches one of the exact forms we sent. Without this guard, a clipped or missing echo could
+/// make an older assistant message look like the current partial reply.
+pub(crate) fn codex_partial_reply(text: &str, sent: &[String]) -> Option<String> {
+    let echo = last_prompt_echo_text("codex", text)?;
+    if !sent.iter().any(|prompt| prompt.trim() == echo.trim()) {
+        return None;
+    }
+    screen_reply("codex", text, sent)
+}
+
 /// Trailing-ellipsis marker a TUI leaves where it clipped the echo of a long prompt.
 const ELLIPSES: [&str; 2] = ["…", "..."];
 
