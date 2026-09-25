@@ -1425,7 +1425,31 @@ impl Deadline {
 /// 收掉的行程，不會碰到 pid 被回收重用的別人。被砍的只是**本機**這條 ssh／rsync；遠端那組行程由守門在 [`Lease`] 放掉時收（stdin EOF）。
 fn run_status(mut cmd: Command, what: &str, deadline: &Deadline) -> anyhow::Result<ExitStatus> {
     cmd.stdin(Stdio::inherit()).stdout(Stdio::inherit()).stderr(Stdio::inherit());
+    let child = cmd.spawn().map_err(|e| anyhow::anyhow!("{what}: {e}"))?;
+    wait_child(child, what, deadline)
+}
+
+/// 同 [`run_status`]，但 stderr 一邊照印一邊留一份回傳（rsync 要看它說了什麼才知道能不能重試）。
+fn run_status_tee_stderr(mut cmd: Command, what: &str, deadline: &Deadline) -> anyhow::Result<(ExitStatus, String)> {
+    cmd.stdin(Stdio::inherit()).stdout(Stdio::inherit()).stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(|e| anyhow::anyhow!("{what}: {e}"))?;
+    let err = child.stderr.take().expect("stderr piped");
+    let tee = std::thread::spawn(move || {
+        let mut seen = String::new();
+        for line in BufReader::new(err).lines().map_while(Result::ok) {
+            eprintln!("{line}");
+            seen.push_str(&line);
+            seen.push('\n');
+        }
+        seen
+    });
+    let status = wait_child(child, what, deadline);
+    // 被砍時 rsync 的 ssh 孫行程可能還握著 pipe；不等它，免得卡住收尾。
+    let seen = if status.is_ok() { tee.join().unwrap_or_default() } else { String::new() };
+    Ok((status?, seen))
+}
+
+fn wait_child(mut child: Child, what: &str, deadline: &Deadline) -> anyhow::Result<ExitStatus> {
     loop {
         if let Some(status) = child.try_wait().map_err(|e| anyhow::anyhow!("{what}: {e}"))? {
             return Ok(status);
@@ -1508,6 +1532,20 @@ fn rsync_rsh(remote: &BuildRemoteCfg, has_password: bool, askpass: bool) -> Stri
 /// 會被一起送（rsync 3.2 沒有 `--exclude-if-present`，認不出它們）；那是樹裡真實存在的東西，送過去不會錯。
 const RSYNC_EXCLUDES: [&str; 4] = ["--exclude", ".git", "--exclude", "/target"];
 
+/// rsync 失敗是不是「來源樹在同步途中被改動」：掃完檔案清單之後檔案被刪／換名（`bun run build` 換掉 `web/dist` 的 hash 檔名）。
+/// 24＝rsync 自己說的 vanished；23（部分傳輸失敗）只有在它抱怨的是「找不到檔案」時才算，其他 23（權限等）照舊直接失敗。
+pub fn source_changed_during_sync(code: Option<i32>, stderr: &str) -> bool {
+    match code {
+        Some(24) => true,
+        Some(23) => stderr.contains("No such file or directory") || stderr.contains("vanished"),
+        _ => false,
+    }
+}
+
+/// 來源樹在同步途中被改動時最多同步幾次（含第一次）。重試之間稍等，讓別人的 build 寫完。
+const SYNC_ATTEMPTS: u32 = 3;
+const SYNC_RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(1500);
+
 fn sync_source(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, dir: &str, deadline: &Deadline) -> anyhow::Result<()> {
     if !has_program(&rsync_program()) {
         anyhow::bail!("remote Cargo requires `rsync` on the daemon host");
@@ -1519,34 +1557,58 @@ fn sync_source(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, dir: &str, 
         None => None,
     };
     let ssh = rsync_rsh(remote, pw.is_some(), matches!(mode, Some(PwMode::Askpass(_))));
-    let mut cmd = match &mode {
-        Some(PwMode::Sshpass) => {
-            let mut c = Command::new("sshpass");
-            c.arg("-e").arg("rsync");
-            c
-        }
-        _ => Command::new(rsync_program()),
-    };
-    if let (Some(pw), Some(m)) = (pw.as_deref(), &mode) {
-        match m {
-            PwMode::Sshpass => {
-                cmd.env("SSHPASS", pw);
-            }
-            PwMode::Askpass(helper) => {
-                cmd.env("AM_SSH_PASSWORD", pw).env("SSH_ASKPASS", helper).env("SSH_ASKPASS_REQUIRE", "force");
-            }
-        }
-    }
     let source = format!("{}/", cwd.to_string_lossy().trim_end_matches('/'));
     let dest = format!("{}@{}:{}/", remote.user, remote.host, dir.trim_end_matches('/'));
-    cmd.args(["-az", "--delete"]).args(RSYNC_EXCLUDES).args(["-e", &ssh])
-        .arg(source)
-        .arg(dest);
-    let status = run_status(cmd, "rsync source", deadline)?;
-    if !status.success() {
-        anyhow::bail!("rsync failed with exit {:?}", status.code());
+    let command = || {
+        let mut cmd = match &mode {
+            Some(PwMode::Sshpass) => {
+                let mut c = Command::new("sshpass");
+                c.arg("-e").arg("rsync");
+                c
+            }
+            _ => Command::new(rsync_program()),
+        };
+        if let (Some(pw), Some(m)) = (pw.as_deref(), &mode) {
+            match m {
+                PwMode::Sshpass => {
+                    cmd.env("SSHPASS", pw);
+                }
+                PwMode::Askpass(helper) => {
+                    cmd.env("AM_SSH_PASSWORD", pw).env("SSH_ASKPASS", helper).env("SSH_ASKPASS_REQUIRE", "force");
+                }
+            }
+        }
+        cmd.args(["-az", "--delete"]).args(RSYNC_EXCLUDES).args(["-e", &ssh])
+            .arg(&source)
+            .arg(&dest);
+        cmd
+    };
+    // 共用主樹的 `web/dist` 會被別的 bot 的 `bun run build` 整批換掉；rsync 列完清單後舊檔消失就回 23/24。
+    // 重送一次就是新的一致狀態（`--delete` 也會清掉遠端的舊 hash 檔），所以短暫重試，不把呼叫端的 cargo 判死。
+    for attempt in 1..=SYNC_ATTEMPTS {
+        let (status, stderr) = run_status_tee_stderr(command(), "rsync source", deadline)?;
+        if status.success() {
+            return Ok(());
+        }
+        if !source_changed_during_sync(status.code(), &stderr) {
+            anyhow::bail!("rsync failed with exit {:?}", status.code());
+        }
+        if attempt == SYNC_ATTEMPTS {
+            anyhow::bail!(
+                "rsync failed with exit {:?}: 來源樹在同步時一直被改動（多半是別的 bot 正在 build web，換掉了 web/dist），重試 {SYNC_ATTEMPTS} 次仍失敗；等它 build 完再跑",
+                status.code()
+            );
+        }
+        eprintln!("agents-manager: 來源樹在同步時被改動（多半是別的 bot 正在 build web），{}ms 後重新同步（第 {} 次，共 {SYNC_ATTEMPTS} 次）", SYNC_RETRY_PAUSE.as_millis(), attempt + 1);
+        let until = std::time::Instant::now() + SYNC_RETRY_PAUSE;
+        while std::time::Instant::now() < until {
+            if let Some(why) = deadline.stop() {
+                return Err(anyhow::Error::new(why));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
-    Ok(())
+    unreachable!("the loop always returns or bails on the last attempt")
 }
 
 /// 測試執行緒數：呼叫端自己設了 `RUST_TEST_THREADS`（正整數）就尊重它，沒有才用設定（`0`＝不設）。
@@ -2980,6 +3042,58 @@ mod guard_tests {
         let h = crate::remote_health::read(&data).expect("結論要記下來");
         assert!(h.reachable && h.reason.is_none(), "連得上：{h:?}");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 假 rsync：每跑一次在 `<base>/rsync-calls` 記一筆；第 N 次（1 起算）照 `fails` 第 N 個字元決定：`v`＝印 rsync 真的會印的
+    /// ENOENT 那行、回 23；`p`＝權限錯、回 23；`x`＝回 12（協定錯）；超出長度＝照常複製。回傳 sync_source 的結果與呼叫次數。
+    fn sync_with_fake_rsync(fails: &str) -> (anyhow::Result<()>, usize) {
+        let base = base();
+        let (remote, cwd, data) = fake_remote(&base, 60, "exit 0\n");
+        let calls = base.join("rsync-calls");
+        write_exec(
+            &base.join("fakebin/rsync"),
+            &format!(
+                "echo x >> '{calls}'\nn=$(wc -l < '{calls}' | tr -d ' ')\nc=$(printf '%s' '{fails}' | cut -c\"$n\")\n\
+                 case \"$c\" in\n\
+                 v) echo \"rsync(95387): error: $PWD/web/dist/assets/index-Cy7N34fd.js: open (2) in $PWD: No such file or directory\" >&2; exit 23 ;;\n\
+                 p) echo 'rsync: opendir \"/x\" failed: Permission denied (13)' >&2; exit 23 ;;\n\
+                 x) exit 12 ;;\n\
+                 esac\n\
+                 for a; do src=$dest; dest=$a; done\nd=${{dest#*:}}\nmkdir -p \"$d\" && cp -a \"${{src}}.\" \"$d\"\n",
+                calls = calls.display()
+            ),
+        );
+        let dir = base.join("dest").display().to_string();
+        let r = with_fake_transport(&base, || sync_source(&remote, &data, &cwd, &dir, &Deadline::new(60)));
+        let n = std::fs::read_to_string(&calls).unwrap_or_default().lines().count();
+        if r.is_ok() {
+            assert!(base.join("dest/Cargo.toml").exists(), "成功就真的同步過去了");
+        }
+        let _ = std::fs::remove_dir_all(&base);
+        (r, n)
+    }
+
+    /// am-lead 2026-09-25：別的 bot 在主樹 `bun run build`，rsync 列完清單後 `web/dist` 的舊 hash 檔不見 → exit 23，整個 cargo 判死。
+    /// 來源在同步中途消失要短暫重試；一直消失才失敗、而且要講是來源樹被改動；其他 rsync 錯誤不重試。
+    #[test]
+    fn rsync_retries_only_when_the_source_changes_under_it() {
+        let (r, n) = sync_with_fake_rsync("v");
+        assert!(r.is_ok(), "第一次撞到檔案消失、第二次成功＝成功：{r:?}");
+        assert_eq!(n, 2);
+
+        let (r, n) = sync_with_fake_rsync("vvvvvv");
+        let msg = format!("{:#}", r.expect_err("一直消失要失敗"));
+        assert_eq!(n, SYNC_ATTEMPTS as usize, "重試有上限");
+        assert!(msg.contains("exit Some(23)") && msg.contains("來源樹在同步時一直被改動") && msg.contains("web/dist"), "{msg}");
+
+        for fails in ["p", "x"] {
+            let (r, n) = sync_with_fake_rsync(fails);
+            let msg = format!("{:#}", r.expect_err("別的錯誤照舊失敗"));
+            assert_eq!(n, 1, "{fails}：不是來源消失就不重試");
+            assert!(!msg.contains("來源樹"), "{fails}：不能誤報成來源被改動：{msg}");
+        }
+        assert!(source_changed_during_sync(Some(24), ""), "24＝vanished，一律算");
+        assert!(!source_changed_during_sync(None, "No such file or directory"), "被訊號砍掉不算");
     }
 
     /// 訊息本身（純組字串）：這台機器 2026-09-24 的實況就是「沒設 identity_file、資料目錄也沒有密碼檔」，
