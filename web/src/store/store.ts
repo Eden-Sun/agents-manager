@@ -34,6 +34,7 @@ import { PREVIEW_OFF, toPreviewEvent, type Preview } from '../api/preview'
 import type { Bot, BotKind, RestartBatch, GroupChatResult, Mission, MissionDetail, NewMissionInput, MemSnapshot, GroupMessage, Host, HerdrVersion, HostResult, HostShell, Identity, IdentityStatusMap, Lamp, Message, ModelInfo, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, PatchBotInput, PatchProjectInput, Project, QuotaMap, Run, TerminalSource, ToolMap, Turn, TurnDelivery, ModelRemap } from '../api/types'
 import type { ProjectPane } from '../api'
 import { joinRunningBatch, reconcileBatch, restartProgress } from './restartBatch'
+import { cliUpdateDone, cliUpdateProgress, reconcileCliUpdate, type CliUpdate } from './cliUpdate'
 import { gateFrame } from './frameSeen'
 import { dropHostModels, modelsKey, shouldFetchModels, type ModelsCache } from './modelsCache'
 import { byId, byTime, capList, insertSorted, pruneTurns } from './lists'
@@ -513,6 +514,9 @@ export interface StoreState {
   /** null = 沒有批次在跑，也沒有摘要要看。 */
   restartBatch: RestartBatch | null
   clearRestartBatch: () => void
+  /** header 一鍵升級 codex（SPEC §6.9）：那台裝好、驗過版本就接著重啟那台閒置的 codex。null＝沒有在裝。 */
+  cliUpdate: CliUpdate | null
+  installCodexUpdate: (host: string) => Promise<void>
   removeBot: (botId: string, opts?: { confirmSupervisor?: boolean }) => Promise<void>
   /** 刪除被 daemon 以「這是 AGM 的 bot」擋下，等使用者第二次確認（issue #406）；null＝沒有在問。 */
   agmDeleteAsk: AgmDeleteAsk | null
@@ -868,6 +872,7 @@ export const useStore = create<StoreState>((set, get) => ({
   notices: [],
   busy: {},
   restartBatch: null,
+  cliUpdate: null,
 
   notify: (kind, text, action) => {
     // 同一則還掛在畫面上就不要再疊一張（issue #530）：重試迴圈會把同一句話刷成一整排，
@@ -986,6 +991,7 @@ export const useStore = create<StoreState>((set, get) => ({
         // 手上的一鍵重啟進度跟快照對帳（issue #492）：`bots_restart_done` 收不到時（批次中途 daemon 重啟、
         // 或落到全量 resync）它會永遠停在「重啟中 k/N」，而那顆晶片一直蓋著一鍵重啟的觸發鈕。
         restartBatch: reconcileBatch(s.restartBatch, st.restart_batch),
+        cliUpdate: reconcileCliUpdate(s.cliUpdate, st.cli_updates),
         selectedBotId: selected,
         selectedProjectId: selectedProject,
       }
@@ -1845,6 +1851,20 @@ export const useStore = create<StoreState>((set, get) => ({
       })
       if (plan.total === 0) {
         get().notify('info', plan.skipped.length > 0 ? '沒有閒置的 Bot 可以重啟（都在忙）' : '沒有等著套用更新的 Bot')
+      }
+    })
+  },
+
+  async installCodexUpdate(host) {
+    await guarded(set, get, `cli-update:${host}`, async () => {
+      set({ cliUpdate: { id: '', host, kind: 'codex', phase: 'starting', from: null, to: null } })
+      try {
+        const r = await api.startCliUpdate(host, 'codex')
+        // 事件可能比回應先到（已經換成真的 id 與階段），那就不要蓋回 starting。
+        set((s) => (s.cliUpdate?.phase === 'starting' ? { cliUpdate: { ...s.cliUpdate, id: r.update_id } } : {}))
+      } catch (e) {
+        set({ cliUpdate: null })
+        throw e
       }
     })
   },
@@ -2910,6 +2930,32 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
       })
       return
     }
+    case 'cli_update_progress': {
+      if (!isRec(data)) return
+      set((s) => {
+        const next = cliUpdateProgress(s.cliUpdate, data)
+        return next !== s.cliUpdate ? { cliUpdate: next } : {}
+      })
+      return
+    }
+    case 'cli_update_done': {
+      if (!isRec(data)) return
+      const r = cliUpdateDone(data)
+      set((s) => ({
+        cliUpdate: null,
+        // 同一批已經在手上（進度事件先到）就留著它，不要把數到一半的進度歸零。
+        restartBatch: r.batch
+          ? s.restartBatch?.id === r.batch.id
+            ? s.restartBatch
+            : r.batch
+          : r.joinBatchId
+            ? joinRunningBatch(s.restartBatch, r.joinBatchId)
+            : s.restartBatch,
+      }))
+      get().notify(r.ok ? 'info' : 'error', r.message)
+      void get().refreshState()
+      return
+    }
     case 'bots_restart_done': {
       if (!isRec(data)) return
       const batchId = str(pick(data, 'batch_id'))
@@ -2936,7 +2982,7 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
         const parts = [`成功 ${okNames.length} 顆`]
         if (skipped.length > 0) parts.push(`跳過 ${skipped.length} 顆`)
         if (failed.length > 0) parts.push(`失敗 ${failed.length} 顆`)
-        get().notify(failed.length > 0 ? 'error' : 'info', `claude 更新重啟完成：${parts.join(' · ')}`)
+        get().notify(failed.length > 0 ? 'error' : 'info', `更新重啟完成：${parts.join(' · ')}`)
       }
       // 重啟過的 bot 換了 run，狀態一次撈回來。
       void get().refreshState()

@@ -873,6 +873,7 @@ export class MockTransport implements Transport {
     if (method === 'POST' && rawPath === '/mem/processes/kill') return this.killMemProcess(b)
     if (method === 'GET' && rawPath === '/mem/processes/pane') return this.memPane(q.get('host') ?? 'local', q.get('pane_id') ?? '')
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'tools' && seg[3] === 'install') return this.installTool(seg[1], b)
+    if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'cli-update' && seg.length === 3) return this.cliUpdate(decodeURIComponent(seg[1]), b)
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'tools' && seg[3] === 'refresh') return this.refreshTools(seg[1])
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'identities' && seg[4] === 'login') return this.loginIdentity(seg[1], decodeURIComponent(seg[3]))
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'identities' && seg[4] === 'logout') return this.logoutIdentity(seg[1], decodeURIComponent(seg[3]))
@@ -2512,12 +2513,47 @@ export class MockTransport implements Transport {
   }
 
   /** SPEC §6.9，規則照 `daemon/src/bulk_restart.rs`；進度用 setTimeout 拉開，否則進度條一閃而過。 */
-  private restartIdle() {
+  /** SPEC §6.9 的 codex 安裝：演「讀版本 → 安裝 → 驗版本 → 開那台 codex 的一鍵重啟」，不碰任何真的東西。 */
+  private cliUpdateRunning = new Set<string>()
+  private cliUpdate(host: string, b: Rec) {
+    const kind = String(b.kind ?? '')
+    if (kind !== 'codex') throw new ApiError(400, { error: 'bad_request', message: 'kind 目前只收 codex' }, 'bad request')
+    if (this.cliUpdateRunning.has(host)) {
+      throw new ApiError(409, { error: 'conflict', reason: 'cli_update_in_progress', host, message: `${host} 已經在安裝 codex` }, 'conflict')
+    }
+    this.cliUpdateRunning.add(host)
+    const update_id = ulid('cliup')
+    const hostOf = (botId: string) => this.projects.find((p) => p.id === this.bot(botId).project_id)?.host ?? 'local'
+    const targets = this.bots.filter((x) => x.kind === 'codex' && hostOf(x.id) === host && this.activeRun(x.id)?.update_notice?.includes('需安裝'))
+    const notice = targets.map((x) => this.activeRun(x.id)?.update_notice ?? '').find(Boolean) ?? ''
+    const [from = '0.155.1', to = '0.157.0'] = notice.match(/\d+(?:\.\d+)+/g) ?? []
+    const base = { update_id, host, kind: 'codex' }
+    const steps: [number, string, Rec][] = [
+      [200, 'checking', {}],
+      [700, 'installing', { from }],
+      [2600, 'verifying', { from }],
+      [3200, 'restarting', { from, to }],
+    ]
+    for (const [at, phase, extra] of steps) setTimeout(() => this.emit('cli_update_progress', { ...base, phase, ...extra }), at)
+    setTimeout(() => {
+      for (const x of targets) {
+        const run = this.activeRun(x.id)
+        if (run) run.update_notice = `codex 有新版 ${to}（這個 run 跑的是 ${from}），已安裝，重啟套用`
+        this.emitBotStatus(x.id)
+      }
+      const restart = this.restartIdle({ kind: 'codex', host })
+      this.cliUpdateRunning.delete(host)
+      this.emit('cli_update_done', { ...base, ok: true, from, to, notices_updated: targets.length, restart })
+    }, 3400)
+    return { ...base, started: true }
+  }
+
+  private restartIdle(scope?: { kind: string; host: string }) {
     const batch_id = ulid('batch')
     const planned: { bot_id: string; name: string }[] = []
     const skipped: { bot_id: string; name: string; reason: string; reason_label: string }[] = []
     for (const bot of this.bots) {
-      if (bot.kind !== 'claude') continue
+      if (scope ? bot.kind !== scope.kind || (this.projects.find((p) => p.id === bot.project_id)?.host ?? 'local') !== scope.host : bot.kind !== 'claude') continue
       const run = this.activeRun(bot.id)
       if (!run?.update_notice) continue
       const inFlight = this.turns.some((t) => t.run_id === run.id && t.status === 'in_flight')

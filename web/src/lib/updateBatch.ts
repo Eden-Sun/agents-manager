@@ -13,8 +13,8 @@ import type { AgentStatus, Bot, Run } from '../api/types'
 
 export interface UpdateBatchCounts {
   ready: { botId: string; name: string }[]
-  /** 正在忙、或需要先手動處理才會被跳過的。 */
-  busy: { botId: string; name: string; why: string }[]
+  /** 正在忙、或需要先手動處理才會被跳過的。`install`＝codex 新版還沒裝（header 另一顆 chip 負責，見 `codexInstallPlan`）。 */
+  busy: { botId: string; name: string; why: string; install?: true }[]
 }
 
 /** codex 的新版還沒裝：重啟換不到，只能先手動安裝（daemon 的 `Skip::NeedsManualInstall`）。 */
@@ -25,6 +25,11 @@ export function needsManualInstall(bot: Bot, run: Run | null | undefined): boole
 /** `null` = 可以動。 */
 function busyReason(bot: Bot, run: Run, hasInFlightTurn: boolean): string | null {
   if (needsManualInstall(bot, run)) return '新版還沒裝，要先手動安裝才能套用'
+  return runBusyReason(run, hasInFlightTurn)
+}
+
+/** 不管更新有沒有裝，這顆現在能不能重啟。 */
+function runBusyReason(run: Run, hasInFlightTurn: boolean): string | null {
   if (run.state !== 'running') return '還在啟動或關閉中'
   const st: AgentStatus = run.agent_status
   if (st === 'working') return '正在跑'
@@ -48,8 +53,49 @@ export function updateBatchCounts(
     const run = runs[bot.id]
     if (!run || !run.update_notice?.trim()) continue
     const why = busyReason(bot, run, hasInFlightTurn(bot.id))
-    if (why) busy.push({ botId: bot.id, name: bot.name, why })
+    if (why && needsManualInstall(bot, run)) busy.push({ botId: bot.id, name: bot.name, why, install: true })
+    else if (why) busy.push({ botId: bot.id, name: bot.name, why })
     else ready.push({ botId: bot.id, name: bot.name })
   }
   return { ready, busy }
+}
+
+export interface CodexInstallPlan {
+  host: string
+  /** 第一顆「需安裝」的通知：版本區間從這裡讀（`updateRange`）。 */
+  notice: string
+  /** 那台還寫著「需安裝」的 codex 有幾顆。 */
+  installCount: number
+  /** 裝好之後會被重啟的（那台閒置的 codex，含已經是「已安裝」的）。 */
+  ready: { botId: string; name: string }[]
+  /** 裝好之後仍會被跳過的（在忙），之後再按一般的 ⌃⌃。 */
+  busy: { botId: string; name: string; why: string }[]
+}
+
+/**
+ * header「安裝 codex 新版」那顆 chip 的內容（SPEC §6.9，daemon `cli_update.rs`）：取第一台還有「需安裝」codex 的主機，
+ * 列出那台裝好之後的一鍵重啟會動到哪幾顆——daemon 的批次範圍是「那台主機的 codex」，前端照同一條切。
+ * 沒有需安裝的 codex 回 `null`。多台都有時一次一台，裝完那台 chip 自然換到下一台。
+ */
+export function codexInstallPlan(
+  bots: Bot[],
+  runs: Record<string, Run | null>,
+  hasInFlightTurn: (botId: string) => boolean,
+  hostOf: (bot: Bot) => string,
+): CodexInstallPlan | null {
+  const first = bots.find((b) => needsManualInstall(b, runs[b.id]))
+  if (!first) return null
+  const host = hostOf(first)
+  const plan: CodexInstallPlan = { host, notice: runs[first.id]?.update_notice ?? '', installCount: 0, ready: [], busy: [] }
+  for (const bot of bots) {
+    const run = runs[bot.id]
+    if (bot.kind !== 'codex' || !run || !run.update_notice?.trim() || hostOf(bot) !== host) continue
+    if (needsManualInstall(bot, run)) plan.installCount += 1
+    // 子 agent 批次一律跳過（daemon `Skip::Child`，SPEC §6.5a），由父 bot 用 herdr 重開。
+    const child = bot.managed_by === 'child' || Boolean(bot.parent_bot_id)
+    const why = child ? '子 agent，由父 Bot 重開' : runBusyReason(run, hasInFlightTurn(bot.id))
+    if (why) plan.busy.push({ botId: bot.id, name: bot.name, why })
+    else plan.ready.push({ botId: bot.id, name: bot.name })
+  }
+  return plan
 }

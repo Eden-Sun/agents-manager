@@ -1,13 +1,14 @@
 import { useState } from 'react'
 import * as api from '../api'
 import { inFlightTurn, projectHostName, useStore } from '../store/store'
-import { needsManualInstall, updateBatchCounts } from '../lib/updateBatch'
+import { updateBatchCounts } from '../lib/updateBatch'
 import { reviewErrText } from '../lib/claudeReviewErr'
 import { updateRange } from '../lib/updateRange'
 import { ConfirmDialog } from './ConfirmDialog'
 import { UpgradeIcon } from './UpgradeIcon'
 import { UpdateChangelog } from './UpdateChangelog'
 import { AgmReviewBox } from './AgmReviewBox'
+import { CodexInstallChip } from './CodexInstallChip'
 import './updateQuotaChip.css'
 
 /**
@@ -15,6 +16,16 @@ import './updateQuotaChip.css'
  * 側欄收起時也要看得到。對齊量表第一行並補 1px 分隔線（2026-09-11）。按下去先確認：批次重啟沒有取消，確認框是唯一反悔點。
  */
 export function UpdateQuotaChip() {
+  // codex 新版還沒裝的那顆（安裝＋重啟）跟這顆（重啟套用）並排，各自一個確認框（UI-DECISIONS「header 的 codex 安裝」）。
+  return (
+    <>
+      <RestartChip />
+      <CodexInstallChip />
+    </>
+  )
+}
+
+function RestartChip() {
   const batch = useStore((s) => s.restartBatch)
   const restartIdleBots = useStore((s) => s.restartIdleBots)
   const clear = useStore((s) => s.clearRestartBatch)
@@ -26,22 +37,14 @@ export function UpdateQuotaChip() {
       .ready.map((b) => b.name)
       .join('、'),
   )
+  // 還沒裝新版的 codex 由旁邊的 `CodexInstallChip` 負責（安裝＋重啟），不再算進這顆的「在忙」。
   const busyLines = useStore((s) =>
     updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null)
-      .busy.map((b) => `${b.name}（${b.why}）`)
+      .busy.filter((b) => !b.install)
+      .map((b) => `${b.name}（${b.why}）`)
       .join('\n'),
   )
   const busyCount = busyLines ? busyLines.split('\n').length : 0
-  // 還沒裝新版的 codex（2026-09-25 使用者：codex 有更新 header 也要提示）：灰掉按不動就看不出是提示，
-  // 沒有可重啟的時候改成點一下切到那顆 bot（已在其中一顆就換下一顆），在它的徽章看 changelog、裝好再重啟。
-  const installIds = useStore((s) =>
-    s.bots
-      .filter((b) => needsManualInstall(b, s.runs[b.id]))
-      .map((b) => b.id)
-      .join(' '),
-  )
-  const selectedBotId = useStore((s) => s.selectedBotId)
-  const selectBot = useStore((s) => s.selectBot)
   const [confirming, setConfirming] = useState(false)
   const [asking, setAsking] = useState(false)
   const [reviewKey, setReviewKey] = useState(0)
@@ -92,28 +95,10 @@ export function UpdateQuotaChip() {
 
   if (readyCount === 0 && busyCount === 0) return null
 
-  if (readyCount === 0 && installIds) {
-    const ids = installIds.split(' ')
-    const next = ids[(ids.indexOf(selectedBotId ?? '') + 1) % ids.length]
-    const installLabel = `codex 有新版，要先手動安裝（${ids.length} 顆 Bot）· 點一下切到那顆，在它的標題列看 changelog`
-    return (
-      <button
-        type="button"
-        className="quota-update install"
-        title={`${installLabel}\n${busyLines}`}
-        aria-label={installLabel}
-        onClick={() => selectBot(next)}
-      >
-        <span aria-hidden="true"><UpgradeIcon /></span>
-        <span className="quota-update-n" aria-hidden="true">{busyCount}</span>
-      </button>
-    )
-  }
-
-  const busyNote = busyCount > 0 ? `\n${busyCount} 顆在忙（或還沒手動安裝），會先跳過：\n${busyLines}` : ''
+  const busyNote = busyCount > 0 ? `\n${busyCount} 顆在忙，會先跳過：\n${busyLines}` : ''
   const label =
     readyCount === 0
-      ? '有 CLI 更新，但這些 Bot 現在都在忙或還沒手動安裝——處理完再按'
+      ? '有 CLI 更新，但這些 Bot 現在都在忙——閒下來再按'
       : `有 CLI 更新 · 重啟 ${readyCount} 顆閒置的 Bot（結束目前的 agent，再用同一個 session --resume 接回來，上下文不會掉）`
 
   return (

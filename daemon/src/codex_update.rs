@@ -91,6 +91,14 @@ pub fn pending_text(from: Option<&str>, to: &str) -> String {
     }
 }
 
+/// 「需安裝」通知寫的起點（`codex 有新版 <a> → <b>，需安裝後重啟` 的 `a`）：那顆 run 當時跑著的版本。沒寫起點是 `None`。
+pub fn pending_from(notice: &str) -> Option<String> {
+    if !(notice.starts_with(NOTICE_PREFIX) && notice.contains("需安裝")) {
+        return None;
+    }
+    versions_after(notice).and_then(|(from, _)| from)
+}
+
 /// 磁碟上已經是新版（安裝過了）、這個 run 還跑著舊的：重啟就換。`--version` 的原文（`codex-cli 0.155.1`）也收。
 pub fn installed_text(disk: &str, running: &str) -> Option<String> {
     let (d, r) = (parse_version(&cli_version_string(disk).unwrap_or_else(|| disk.to_string()))?, parse_version(running)?);
@@ -112,6 +120,10 @@ pub fn decide(
     upstream: Option<&str>,
     existing: Option<&str>,
 ) -> Option<String> {
+    // 跑著的版本沒看過（啟動畫面早被推掉）時，「需安裝」通知寫的起點就是它：不然 header 一鍵裝好之後，
+    // 這顆的通知會一直停在「需安裝」、批次永遠不收（`cli_update`，2026-09-25）。
+    let from_notice = existing.and_then(pending_from);
+    let running = running.or(from_notice.as_deref());
     if let (Some(d), Some(r)) = (disk, running) {
         if let Some(t) = installed_text(d, r) {
             return Some(t);
@@ -325,6 +337,20 @@ mod tests {
         assert_eq!(decide(None, None, Some("codex-cli 0.155.1"), Some("0.157.0"), Some(&old)), Some(pending_text(Some("0.155.1"), "0.157.0")));
         let ahead = pending_text(Some("0.155.1"), "0.158.0");
         assert_eq!(decide(None, None, Some("codex-cli 0.155.1"), Some("0.157.0"), Some(&ahead)), Some(ahead.clone()));
+    }
+
+    /// header 一鍵裝好（`cli_update`）之後，跑著的版本沒看過的那顆：通知寫的起點就是它跑著的版本，
+    /// 磁碟已經是新版就要變成「已安裝，重啟套用」，不能卡在「需安裝」讓批次永遠不收。
+    #[test]
+    fn a_pending_notice_turns_into_installed_once_the_disk_catches_up() {
+        let pending = pending_text(Some("0.155.1"), "0.157.0");
+        assert_eq!(pending_from(&pending).as_deref(), Some("0.155.1"));
+        assert_eq!(pending_from(&pending_text(None, "0.157.0")), None);
+        assert_eq!(pending_from("Update installed · Restart to update"), None);
+        let n = decide(None, None, Some("codex-cli 0.157.0"), Some("0.157.0"), Some(&pending)).unwrap();
+        assert!(n.contains("已安裝") && !n.contains("需安裝") && n.contains("0.155.1"), "{n}");
+        // 磁碟還沒到：照舊是「需安裝」。
+        assert_eq!(decide(None, None, Some("codex-cli 0.155.1"), Some("0.157.0"), Some(&pending)), Some(pending));
     }
 
     #[test]

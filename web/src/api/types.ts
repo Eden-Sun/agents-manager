@@ -474,6 +474,8 @@ export interface AppState {
    * 不知道就不要動手上的進度。
    */
   restart_batch: string | null | undefined
+  /** 現在在跑的 codex 升級（SPEC §6.9）。同上：`undefined`＝舊 daemon 沒這欄＝不知道。 */
+  cli_updates: { update_id: string; host: string }[] | undefined
   connected: boolean
   /** The user's Herdr default session; separate from the manager session. */
   default_connected: boolean

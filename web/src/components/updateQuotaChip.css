@@ -94,3 +94,20 @@
 .quota-update.install {
   color: var(--warn);
 }
+
+/* codex「安裝＋重啟」跟「重啟套用」並排（UI-DECISIONS「header 的 codex 安裝」）：同一組，第二顆不再畫分隔線、不再留分組間距。 */
+
+.quota-update + .quota-update {
+  margin-left: 0;
+}
+
+.quota-update + .quota-update::before {
+  display: none;
+}
+
+/* 安裝中：按不動，但維持警示色，看得出是 codex 那顆在跑，不是「全在忙」的灰。 */
+
+.quota-update.install.running:disabled {
+  color: var(--warn);
+  cursor: progress;
+}

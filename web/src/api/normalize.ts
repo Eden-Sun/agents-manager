@@ -587,6 +587,10 @@ export function toState(raw: unknown): AppState {
     // 存在與否**只能**用 `in` 判：`pick` 把 `null` 也收斂成 `undefined`（它的用途是「挑第一個有值的鍵」），
     // 拿它判存在會把 daemon 說的「現在沒有批次」講成「不知道」——而那正是要用來清掉卡住的進度的那一格。
     restart_batch: 'restart_batch' in root ? str(pick(root, 'restart_batch')) || null : undefined,
+    cli_updates:
+      'cli_updates' in root
+        ? arr(pick(root, 'cli_updates')).flatMap((v) => (isRec(v) ? [{ update_id: str(pick(v, 'update_id')), host: str(pick(v, 'host')) }] : []))
+        : undefined,
     connected: bool(pick(root, 'connected'), true),
     default_connected: bool(pick(root, 'default_connected'), false),
     attach_command: attachCommand,

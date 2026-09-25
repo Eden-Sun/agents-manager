@@ -152,12 +152,24 @@ async fn cand_of(app: &Arc<App>, run: &db::Run, bot: &db::Bot) -> anyhow::Result
     })
 }
 
-pub async fn candidates(app: &Arc<App>) -> anyhow::Result<Vec<Cand>> {
+/// 只重啟某台主機的某個 kind（`cli_update`：那台裝好 codex 新版之後，只重啟那台的 codex，不順手動到 claude 或別台）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Scope {
+    pub kind: String,
+    pub host: String,
+}
+
+pub async fn candidates(app: &Arc<App>, scope: Option<&Scope>) -> anyhow::Result<Vec<Cand>> {
     let mut out = Vec::new();
     for run in db::all_active_runs(&app.db).await? {
         let Some(bot) = db::bot(&app.db, &run.bot_id).await? else { continue };
         if bot.deleted_at.is_some() {
             continue;
+        }
+        if let Some(s) = scope {
+            if bot.kind != s.kind || db::bot_host(&app.db, &bot.id).await? != s.host {
+                continue;
+            }
         }
         out.push(cand_of(app, &run, &bot).await?);
     }
@@ -227,6 +239,11 @@ fn skip_json(c: &Cand, w: Skip) -> serde_json::Value {
 /// 只回計畫、背景執行：一顆 `stop_bot` 最久等十秒，同步做會拖爆 HTTP；進度走 WS。
 /// 已經有一批在跑：不另開，回那一批的 `batch_id`（`already_running: true`），進度與結果照舊從那一批的事件來。
 pub async fn spawn(app: &Arc<App>) -> anyhow::Result<serde_json::Value> {
+    spawn_scoped(app, None).await
+}
+
+/// [`spawn`]，但候選只取 `scope` 那台主機的那個 kind。同時只准一批的規則照舊（跟不限範圍的共用同一格）。
+pub async fn spawn_scoped(app: &Arc<App>, scope: Option<&Scope>) -> anyhow::Result<serde_json::Value> {
     let slot_key = app.data_dir.display().to_string();
     let batch_id = db::ulid();
     {
@@ -237,7 +254,7 @@ pub async fn spawn(app: &Arc<App>) -> anyhow::Result<serde_json::Value> {
         running.insert(slot_key.clone(), batch_id.clone());
     }
     let slot = BatchSlot(slot_key);
-    let cands = candidates(app).await?;
+    let cands = candidates(app, scope).await?;
     let (go, skipped) = plan(&cands);
     let supervisor = supervisor_bot_id(app).await?;
     let targets = supervisor_last(go.iter().map(|c| (c.bot_id.clone(), c.name.clone())).collect(), supervisor.as_deref());
@@ -743,6 +760,42 @@ mod tests {
         assert_eq!(recheck(&app, &bot.id).await, Some(Skip::Working));
         sqlx::query("UPDATE runs SET update_notice=NULL, agent_status='idle' WHERE bot_id=?").bind(&bot.id).execute(&app.db).await.unwrap();
         assert_eq!(recheck(&app, &bot.id).await, Some(Skip::NoLongerPending));
+    }
+
+    /// header 一鍵升級 codex（`cli_update`）只重啟那台主機的 codex：claude 與別台的 codex 就算也帶著更新，也不在這一批。
+    #[tokio::test]
+    async fn a_scoped_batch_only_sees_that_kind_on_that_host() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let mk = |name: &'static str, kind: &'static str, notice: &'static str| {
+            let (app, pid) = (app.clone(), env.project_id.clone());
+            async move {
+                let b = crate::testing::claude_bot(&app, &pid, name).await;
+                sqlx::query("UPDATE bots SET kind=? WHERE id=?").bind(kind).bind(&b.id).execute(&app.db).await.unwrap();
+                let run = crate::testing::fake_run(&app, &b.id).await;
+                sqlx::query("UPDATE runs SET update_notice=? WHERE id=?").bind(notice).bind(&run).execute(&app.db).await.unwrap();
+                b.id
+            }
+        };
+        let installed = "codex 有新版 0.157.0（這個 run 跑的是 0.155.1），已安裝，重啟套用";
+        mk("cx", "codex", installed).await;
+        mk("cl", "claude", "Update installed · Restart to update").await;
+        let far = mk("cx-far", "codex", installed).await;
+        let pid = db::ulid();
+        sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?, '/x', 'far', 'far', ?)")
+            .bind(&pid)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE bots SET project_id=? WHERE id=?").bind(&pid).bind(&far).execute(&app.db).await.unwrap();
+
+        let scope = Scope { kind: "codex".into(), host: "local".into() };
+        let names = |v: Vec<Cand>| v.into_iter().map(|c| c.name).collect::<Vec<_>>();
+        assert_eq!(names(candidates(&app, Some(&scope)).await.unwrap()), ["cx"]);
+        assert_eq!(names(candidates(&app, None).await.unwrap()).len(), 3, "不限範圍的照舊全收");
+        let plan = spawn_scoped(&app, Some(&Scope { kind: "codex".into(), host: "nowhere".into() })).await.unwrap();
+        assert_eq!(plan["total"], 0, "那台沒有 codex：空批次");
     }
 
     /// 34d24f0 讓 restart 在 bot 鎖內再判一次閒置、不閒置回 409 `not_idle`。那是「輪到它時忙起來了」，

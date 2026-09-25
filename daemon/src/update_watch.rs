@@ -37,6 +37,11 @@ async fn disk_version(app: &Arc<App>, host: &str, kind: &str) -> Option<String> 
     v
 }
 
+/// 剛在這台裝過新版（`cli_update`）：丟掉快取，下一輪巡邏重讀，不要拿五分鐘前的舊版本把通知改回「需安裝」。
+pub(crate) async fn forget_disk_version(host: &str, kind: &str) {
+    disk_cache().lock().await.remove(&format!("{kind}@{host}"));
+}
+
 /// statusLine 回報的 process 版本（`runs.status_json.version`）。**跑著的**版本，不是磁碟上的；
 /// 插隊送出的版本閘門（issue #103，`lifecycle::send_now`）也讀這一支。
 pub(crate) fn running_version(status_json: Option<&str>) -> Option<String> {
@@ -236,7 +241,7 @@ mod tests {
         seed_disk("codex", "codex-cli 0.154.0").await;
         sweep(&e.app).await;
         assert!(notice_of(&e.app, &run).await.is_some());
-        let cands = crate::bulk_restart::candidates(&e.app).await.unwrap();
+        let cands = crate::bulk_restart::candidates(&e.app, None).await.unwrap();
         let mine = cands.iter().find(|c| c.bot_id == bot).expect("候選清單有它");
         assert!(mine.has_update && mine.needs_manual_install && crate::bulk_restart::is_candidate(mine));
         let (go, skip) = crate::bulk_restart::plan(&cands);
