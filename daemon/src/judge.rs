@@ -18,6 +18,7 @@ use sqlx::SqlitePool;
 use crate::config::JudgeCfg;
 use crate::state::App;
 
+pub mod collision;
 pub mod http;
 pub mod stuck;
 
@@ -48,6 +49,8 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
            composer_idle INTEGER NOT NULL,
            regex_verdict TEXT NOT NULL,
            jev_is_live_ui REAL,
+           -- #557 撞題 Noul。不塞進 jev_is_live_ui（那個欄位只表示「是不是活的介面」）。
+           jev_same_work REAL,
            model TEXT,
            ms INTEGER,
            input_tokens INTEGER,
@@ -58,6 +61,10 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
     )
     .execute(pool)
     .await?;
+    // 舊庫沒有這一欄。全新庫的 CREATE 已經有，這裡是 no-op。
+    if !crate::db::has_column(pool, "judge_shadow", "jev_same_work").await? {
+        sqlx::query("ALTER TABLE judge_shadow ADD COLUMN jev_same_work REAL").execute(pool).await?;
+    }
     Ok(())
 }
 

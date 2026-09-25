@@ -595,6 +595,7 @@ Codex 0.157 對暫時性 OpenAI file-blob 上傳失敗加入重試，並把上�
 - **帳本 `judge_shadow`**：遮罩後的命中行、`composer_idle`、`jev_is_live_ui`（機率）、模型、耗時、input tokens、錯誤、`cleared_at`。不存畫面全文。`cleared_at` 是這顆 bot 的撞限之後被成功回合清掉的時刻——撞限後幾分鐘內就被清掉＝當時其實沒撞限，這就是事後對帳的標籤。只蓋 `regex_verdict='limit_hit'` 而且**還在窗內**的那幾筆（issue #453）：5 小時窗 24 小時、週限 8 天（撞週限之後可能隔幾天才有下一次成功回合）。窗別沒有自己的欄位，靠 `matched_line` 認（橫幅講週限時帶得出 `weekly`／`7-day`），認不出來就當 5 小時窗。過了下界就讓它維持 `NULL`＝**從未被清掉**，不追認成「剛剛清掉」；`stuck_queued` 那類跟撞限無關，`cleared_at` 對它沒有意義，一律不蓋。
 - **設定入口**：網頁「環境設定 → Jev 第二意見」（或 `PUT /api/judge/settings`）：貼 API key、開關、勾專案。存檔當下生效，不用重啟。貼進來的 key 由 daemon 寫到 `key_file`（600），不進 `config.toml`，任何 API 都不回 key，只回 `key_present`／`key_error`。沒有可用的 key 時不給開（409 `needs_key`）。
 - **第二個場景：卡在不認識的畫面**（2026-09-23，`judge::stuck`）。有 prompt 排在 `queued`、bot 的 run 是 `running`／`idle`、排了超過 180 秒還沒送出去（2.1.278「Auto mode」推銷框那次的形狀：daemon 什麼都沒說，等 30 分鐘把交辦撤回）。控制迴圈每拍掃一次：輸入列空著的不問（那不是框在擋）；問 Jev「畫面底部是不是有介面自己畫的選單／確認框在等人選」，同一個 run 同一個畫面（尾段指紋）只問一次，答案寫進 `judge_shadow`（`regex_verdict='stuck_queued'`，`matched_line` 放指紋）。機率 ≥0.7 推一則 inbox `judge_stuck_screen`（巡檢收；payload 帶 bot、turn、等了多久、機率、遮罩後的畫面尾段），**不按任何鍵**——regex 認得的框各有自己的處理，這條只管「daemon 不認得的」。同一個 `[judge]` 開關與專案名單。
+- **第三個場景：撞題提示**（#557，`judge::collision`，只接 #264 測過的 Noul `same_work`，門檻 0.5）。派工（`supervisor::assign` 在 `ownership_conflicts()` 之後）與開票（release-triage 真的開出新 issue 之後）各丟一個背景 task 去問，**不等、不擋、不改交辦、不關票、不改認領、不按鍵**。比對的是同專案 daemon 看得到的在跑工作：其他 child 的任務標題（`runs.agent_title`，頂層 bot 不算）、未結案交辦點名的 `#N` 或分支名上的 `-gN`／`issue-N`（已認領的票）、child 的 worktree 分支；被派工那顆自己的標題、分支與交辦不算（同一顆接著做不是撞題）。開票那條的「同專案」＝label 或路徑最後一段等於 `[release_triage] repo` 的 `name`，對不上就不問。不另打 GitHub，也不跟路徑前綴的 `ownership_conflicts` 加成一個分數。送出的 state 只有專案 label、雙方標題、前 450 字、最多 8 條路徑；題目原文與 `reports/jev-spike/collision/` 那一題相同。同一對只問一次，一次最多 15 對（票號或路徑 basename 有重疊的先問，那只是名額順序）。沒開、專案不在名單、key 讀不到就靜默略過；逾時或非 2xx 記 `error`、不推提示、不重試。機率寫在 `jev_same_work`，**不**寫進 `jev_is_live_ui`。`regex_verdict='same_work'`，`matched_line` 是這一對的 JSON（`pair`、兩邊的 ref 與標題、`source`＝`assignment`／`claimed_issue`／`child_title`／`worktree_branch`），`run_id` 是配對鍵。≥0.5 推 inbox `judge_same_work`（巡檢收，掛在父 bot；文案寫明離線 precision 約 0.68、大約每三則有一則是雜訊）。`cleared_at` 不蓋——事後把 `jev_same_work >= 0.5` 且 `error` 為空的列，對上「候選後來有沒有被收成重複／連結／併進 `existing_ref`」就是誤報率。
 - 模型釘 `jev-1.13.0`。離線量測與題目來源在 `reports/jev-spike/`。Jev 的答案目前**不**作為否決票；要升級得先看帳本的數字。
 
 ### 4.4 hook 子命令（`agents-managerd hook claude|codex|grok`）最低契約
@@ -3260,7 +3261,7 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
   - AGM 三顆（巡檢、協調者、建置 child）照舊由呼叫端排除，門檻高低都一樣。
   - **留痕**：safety 多回 `escalated`、`waited_secs`、`escalation_approval_id`，以及 `delivering`／`held_leases` 兩份清單；acquire 把整份 safety 寫進租約 meta 並在 log 明寫「升級後才拿到窗口」；`daemon-update-kick.sh` 的 log 與派工正文也寫明這次是升級後才換的。
   沒等超過門檻時**完全不變**：全靜止才 `safe`。
-- assignment 可帶 `ownership`（檔案／模組），重疊時 `POST /assignments` 回 `ownership_conflicts`，**只回報不阻擋**。
+- assignment 可帶 `ownership`（檔案／模組），重疊時 `POST /assignments` 回 `ownership_conflicts`，**只回報不阻擋**。這是「會不會改到同一個檔」。是不是同一件事由 §4.3c 的撞題提示另外問，不加成進這個清單，也不擋派工。
   「未結案」只有一份定義（`store::OPEN_STATES`，六個狀態），ownership 衝突與未結案計數都從它產生——以前四個查詢各自硬寫清單、三種答案，
   `quota_blocked` 因此從衝突檢查裡消失：AGM 查過衝突、回報「沒有人握著這塊」，然後把同一個模組派給第二顆 bot（review 2026-09-16）。
   「卡住沒人管」是另一張具名的表（`STALLED_STATES`），刻意不含 `quota_blocked`（在等一個已知時間點）與 `blocked`（在等人回答）。

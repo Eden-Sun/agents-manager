@@ -231,6 +231,8 @@ fn known_route(kind: &str, payload: &Value, review_role: Option<&str>) -> Option
         "ops_alert" | "incident_opened" | "responder_watchdog_gave_up" | "responder_bot_missing" | "bot_restart_failed" | "intent_failed"
         // `bot_shim_stale`：某顆 bot 的 herdr／cargo shim 換不動（issue #533），跟 `agm_cli_stale` 同一種事。
         | "supervisor_restart_retry" | "agm_cli_stale" | "bot_shim_stale" | "pane_unowned" | "pane_orphaned" | "judge_stuck_screen"
+        // `judge_same_work`：派工／開票時疑似撞上同專案在跑的工作（#557）。只提示，不阻擋。
+        | "judge_same_work"
         // `persona_changed`：總管的常駐指示被改寫了（issue #462）。沒帶身分的呼叫端也改得動
         // （共用 UI token 的界線留在 #447），所以至少要有人看見——巡檢收、叫醒。
         | "child_retire_refused" | "persona_changed" => r(Role::Patrol, true),

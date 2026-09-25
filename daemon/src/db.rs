@@ -226,6 +226,8 @@ const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (21, "80f6adcef290b9e3"),
     // issue #554：`runs.exit_reason`（run 為什麼被收成 exited，child 退役紀錄分辨刻意／弄丟用）。
     (22, "23efc61b27d2a5a9"),
+    // issue #557：`judge_shadow.jev_same_work`（撞題 Noul，不塞進 jev_is_live_ui）。
+    (23, "8118ff0f6b5b3027"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
