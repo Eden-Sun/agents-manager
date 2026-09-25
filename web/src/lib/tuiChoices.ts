@@ -94,6 +94,12 @@ const BULLET = /^\s+[·•]\s/
 
 const ASKS = /[?？]$/
 
+/**
+ * 沒有問號、但標題自己一行的 claude 對話框（2.1.281 `Session paused`：說明＋`Details:` 再接選項）。
+ * 認到就拿標題當題目、底下那幾行當 notes，不要把整段接成一句題目。
+ */
+const DIALOG_TITLE = /^Session paused$/i
+
 const TAB_MARK = /([☒☑☐✔✓])\s*([^☒☑☐✔✓←→]+)/g
 
 /**
@@ -182,6 +188,16 @@ function askedAbove(lines: string[], top: number): number {
     if (BULLET.test(s)) continue
     if (TRANSCRIPT.test(s.trim()) || matchRow(i, s) || parseTabs(s)) return -1
     if (found < 0 && ASKS.test(s.trim())) found = i
+  }
+  return -1
+}
+
+/** 選項上方、同一個框裡的 `DIALOG_TITLE` 行號；中間有問號句（那才是題目）或走出框（分隔線、transcript、別的選項）回 -1。 */
+function dialogTitleAbove(lines: string[], top: number): number {
+  for (let i = top - 1; i >= 0 && top - i <= CONTEXT_LIMIT; i--) {
+    const s = lines[i].trim()
+    if (DIALOG_TITLE.test(s)) return i
+    if (isDivider(lines[i]) || TRANSCRIPT.test(s) || matchRow(i, lines[i]) || ASKS.test(s)) return -1
   }
   return -1
 }
@@ -299,7 +315,12 @@ export function parseChoiceMenu(text: string | null | undefined): TuiChoiceMenu 
   // 4a. 掃到的不是問句（`null`，或夾在中間的說明）：到分隔線為止的區塊裡有問號結尾的行，就以它為題，
   // 它跟選項之間的東西當 notes。沒有問號照舊。
   let notes: string[] = []
-  if (!ASKS.test(qs[qs.length - 1] ?? '')) {
+  const titled = dialogTitleAbove(lines, rows[0].line)
+  if (titled >= 0) {
+    notes = dedentBlock(lines.slice(titled + 1, rows[0].line))
+    q = titled - 1
+    qs.splice(0, qs.length, lines[titled].trim())
+  } else if (!ASKS.test(qs[qs.length - 1] ?? '')) {
     const asked = askedAbove(lines, rows[0].line)
     if (asked >= 0) {
       qs.length = 0

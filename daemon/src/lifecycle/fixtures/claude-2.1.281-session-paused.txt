@@ -1,0 +1,6 @@
+ Session paused
+  This request was paused before it finished. Placeholder text for the fixture.
+  Details: `[cyber]`
+  ❯ 1. Switch to Opus 4.8
+    2. Edit prompt and retry with Opus 5.5
+✻ Waiting for API response · will retry in 2m 40s · check your network

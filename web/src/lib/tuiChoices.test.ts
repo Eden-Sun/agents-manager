@@ -473,3 +473,37 @@ test('複選頁打過字的 Type something：認成第 5 項、已勾、標題�
   assert.equal(customAnswerChecked(row, '別的字'), false)
   assert.ok(m.submit, '這頁有 Submit 列')
 })
+
+/**
+ * claude 2.1.281 的「Session paused」（2026-09-25 cf-ox-fork-fork，只取選單那段、說明換成假文字）：沒有問號，
+ * 標題自己一行、底下是說明與 `Details:`，再接兩個編號選項；最底下還有一行 `✻ Waiting for API response`。
+ */
+const SESSION_PAUSED = readFileSync(new URL('./__fixtures__/claude-2.1.281-session-paused.txt', import.meta.url), 'utf8')
+
+test('Session paused：1／2 兩個選項可點，標題當題目、說明與 Details 放 notes', () => {
+  const menu = parseChoiceMenu(SESSION_PAUSED)
+  assert.ok(menu)
+  assert.equal(menu.question, 'Session paused')
+  assert.deepEqual(menu.notes, [
+    'This request was paused before it finished. Placeholder text for the fixture.',
+    'Details: `[cyber]`',
+  ])
+  assert.deepEqual(
+    menu.choices.map((c) => c.title),
+    ['Switch to Opus 4.8', 'Edit prompt and retry with Opus 5.5'],
+  )
+  assert.equal(menu.cursor, 0)
+  assert.equal(menu.multi, false)
+  assert.deepEqual(keysToSelect(menu, 1), ['down', 'enter'])
+})
+
+test('Session paused 說明折成很多行：標題仍然是題目，不被擠掉', () => {
+  const long = SESSION_PAUSED.replace(
+    'Placeholder text for the fixture.\n',
+    'Placeholder text for the fixture.\n  second line\n  third line\n  fourth line\n',
+  )
+  const menu = parseChoiceMenu(long)
+  assert.ok(menu)
+  assert.equal(menu.question, 'Session paused')
+  assert.equal(menu.notes.length, 5)
+})

@@ -33,6 +33,7 @@ mod config;
 mod config_audit;
 mod capture;
 mod dangerous_rm;
+mod session_paused;
 mod default_session;
 mod db;
 mod due_actions;
