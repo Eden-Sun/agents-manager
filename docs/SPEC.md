@@ -3549,8 +3549,11 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
   **帶了 `X-AM-Bot-Id` 卻證明不了（token 空／非 UTF-8／對不上）是 403 `bot_proof_mismatch`，不退回使用者權限**（issue #415）：使用者權限在 `inbox` ack 上比角色權限大（跨角色也結得掉），
   當成「沒帶」等於把驗證失敗變成提權。
   **`inbox/{id}/ack` 再進一步，連「沒帶」也不收**（issue #432）：沒宣告身分、或宣告了而那顆不是角色 bot，都是 403 `role_required`——否則角色 bot 只要不送標頭就繞過角色分界。
-  代價是人在一般 shell 裡 ack 不了，要在角色自己的 pane 裡跑 `bin/agm`。**其餘端點「沒帶＝使用者／UI」的預設不變**：共用 UI token 的前提下 daemon 分不出人與冒充人的 bot，
-  那條界線（含 `approvals/{id}/decide` 不要求角色）留在 #432 等 per-bot token，不在這裡硬補。
+  代價是人在一般 shell 裡 ack 不了，要在角色自己的 pane 裡跑 `bin/agm`。
+  **`approvals/{id}/decide` 的 `approve` 也要驗過的角色，`deny`／`revoke` 不要**（issue #447，2026-09-25 使用者裁示）：核准是換 binary／重啟窗口的授權來源，
+  不要求角色的話一顆 bot 不帶標頭申請、再不帶標頭核准，就繞過 #436 的自我核准守衛；叫停不開任何窗口，人在一般 shell 裡還得叫得停。
+  沒角色的 `approve` 一律 403 `role_required`（驗得過但不是角色 bot 的一般 bot 也一樣），所以人要核准得請 AGM 裁示；由 launchd 腳本代核准（不帶身分）也不再成立。
+  **其餘端點「沒帶＝使用者／UI」的預設不變**：共用 UI token 的前提下 daemon 分不出人與冒充人的 bot，那條界線留給 per-bot token，不在這裡硬補。
 - **協調者故障不倒回巡檢**：分流只看它**建立過**沒有（`supervisor_roles.responder` 的 `bot_id`），不看它現在活不活著。沒額度（CLI 撞限，或共享 5h／7d critical）→ `status=waiting_quota`、`notify_next_at`＝重置時間與上限取早者，事件留 `pending`、不計重試次數；
   停著 → 看門狗（同 §18.9 的 30/60/120/300 秒、5 次）；放棄 → 推 `responder_watchdog_gave_up` 給巡檢。
   反方向對稱（review 2026-09-16 c1 M2）：巡檢的看門狗放棄（`watchdog_gave_up`）與巡檢的通知用盡（`notify_exhausted`）路由給**協調者**並叫醒——倒下的就是巡檢，送給它沒有人收；協調者未建立時巡檢的待送查詢照舊撈得到。**送不出去**（還沒送達）是有界退避（15 秒倍增到 `responder_max_backoff_secs`），沒有次數上限，
