@@ -180,6 +180,9 @@ impl FakeTui {
     fn log(&self) -> Vec<String> {
         self.log.lock().unwrap().clone()
     }
+    fn close_confirmation(&self) {
+        *self.ui.lock().unwrap() = Ui::Idle;
+    }
 
     fn display(e: &str) -> String {
         let first = e.lines().next().unwrap_or("");
@@ -438,6 +441,19 @@ async fn a_confirm_page_with_other_text_backs_out_without_restoring() {
     let confirm_at = log.iter().rposition(|k| k == "Enter").unwrap();
     assert!(log[confirm_at + 1..].iter().all(|k| k == "Escape"), "進確認頁之後只按了 Esc：{log:?}");
     assert!(!log.iter().any(|k| k == "1"), "沒有按 1（Restore）");
+}
+
+#[tokio::test]
+async fn a_confirmation_that_closes_before_restore_does_not_get_a_stale_one() {
+    let tui = FakeTui::new(&[A, SECOND, C], Faults::default());
+    let racing_tui = tui.clone();
+    lifecycle::race_point::arm("rewind_before_restore", SECOND, move || async move {
+        racing_tui.close_confirmation();
+    });
+
+    assert_eq!(drive(tui.as_ref(), SECOND, 0).await.unwrap_err(), Fail::ConfirmNotShown);
+    assert_eq!(tui.restored(), None);
+    assert!(!tui.log().contains(&"1".to_string()), "沒有把選擇鍵送進離開後的畫面");
 }
 
 /// 選 Restore 用 `1`，不靠游標：游標停在別的選項、或選項整組被擠出畫面（矮 pane）都一樣選到 Restore。

@@ -387,7 +387,14 @@ pub async fn drive(pane: &dyn Pane, target: &str, skip: usize) -> Result<Done, F
     }
 
     keys(pane, &["Enter"]).await?;
-    let Some(confirm) = wait_for(pane, CONFIRM_WAIT_MS, parse_confirm).await? else {
+    let Some(_) = wait_for(pane, CONFIRM_WAIT_MS, parse_confirm).await? else {
+        back_out(pane).await;
+        return Err(Fail::ConfirmNotShown);
+    };
+    #[cfg(test)]
+    lifecycle::race_point::hit("rewind_before_restore", target).await;
+    let latest = read(pane).await?;
+    let Some(confirm) = parse_confirm(&latest) else {
         back_out(pane).await;
         return Err(Fail::ConfirmNotShown);
     };
