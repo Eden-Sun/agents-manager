@@ -189,6 +189,9 @@ fn known_route(kind: &str, payload: &Value, review_role: Option<&str>) -> Option
             payload.get("wake").and_then(Value::as_bool).unwrap_or(true),
         ),
         "assignment_completed" | "assignment_failed" => r(reviewer, needs_review != Some(false)),
+        // #558：完成回報的證據旗標（shadow）。歸這筆交辦的驗收者，**不叫醒**：約一半的回報會標
+        // 「缺驗證」，叫醒等於每則回報多一回合；旗標搭下一次送達一起看就好。
+        "judge_report_evidence" => r(reviewer, false),
         // 送不進去、停在 blocked：要驗收角色決定改派、followup 或放掉（controller::undeliverable）。
         "assignment_undeliverable" => r(reviewer, true),
         // 通知型交辦送到了、額度擋住／恢復：controller 自己會處理，這些只是記錄。
@@ -854,7 +857,7 @@ mod tests {
         assert_eq!(route("assignment_completed", &json!({"needs_review": true}), None), Route { role: Role::Responder, wake: true });
         assert_eq!(route("assignment_failed", &json!({"needs_review": true}), Some("patrol")), Route { role: Role::Patrol, wake: true }, "巡檢自己的例行派工回到巡檢");
         // 寫入端真正用的名字（store::park_quota_blocked／resume_quota_blocked），不是表上以前寫的 `quota_blocked`。
-        for kind in ["assignment_noticed", "assignment_queued", "assignment_quota_blocked", "assignment_quota_resumed"] {
+        for kind in ["assignment_noticed", "assignment_queued", "assignment_quota_blocked", "assignment_quota_resumed", "judge_report_evidence"] {
             assert_eq!(route(kind, &p, None), Route { role: Role::Responder, wake: false }, "{kind} 只記錄、歸驗收角色");
             assert_eq!(route(kind, &p, Some("patrol")).role, Role::Patrol, "{kind} 跟著交辦的驗收角色");
         }

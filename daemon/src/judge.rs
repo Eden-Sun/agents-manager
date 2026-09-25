@@ -20,6 +20,7 @@ use crate::state::App;
 
 pub mod collision;
 pub mod http;
+pub mod report;
 pub mod stuck;
 
 const TAIL_LINES: usize = 60;
@@ -56,7 +57,11 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
            input_tokens INTEGER,
            error TEXT,
            -- 這顆 bot 的撞限之後被成功回合清掉的時刻：撞限後幾分鐘內就清掉＝當時其實沒撞限。
-           cleared_at TEXT
+           cleared_at TEXT,
+           -- #558：完成回報對到哪一筆交辦。機率不塞進 jev_is_live_ui（那個欄位只表示「是不是活的介面」）。
+           assignment_id TEXT,
+           claims_verified REAL,
+           asks_parent_action REAL
          )",
     )
     .execute(pool)
@@ -64,6 +69,12 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
     // 舊庫沒有這一欄。全新庫的 CREATE 已經有，這裡是 no-op。
     if !crate::db::has_column(pool, "judge_shadow", "jev_same_work").await? {
         sqlx::query("ALTER TABLE judge_shadow ADD COLUMN jev_same_work REAL").execute(pool).await?;
+    }
+    // 既有 DB 的 CREATE TABLE IF NOT EXISTS 不會補欄。
+    for (col, ty) in [("assignment_id", "TEXT"), ("claims_verified", "REAL"), ("asks_parent_action", "REAL")] {
+        if !crate::db::has_column(pool, "judge_shadow", col).await? {
+            sqlx::query(&format!("ALTER TABLE judge_shadow ADD COLUMN {col} {ty}")).execute(pool).await?;
+        }
     }
     Ok(())
 }
@@ -390,15 +401,21 @@ pub(crate) struct NoulAnswer {
     pub input_tokens: Option<i64>,
 }
 
-/// 一次就好：逾時、429、5xx 都只記一筆 error，不重試——shadow 少一筆無所謂，不值得佔連線。
-pub(crate) async fn ask_noul(cfg: &JudgeCfg, key: &str, body: &Value, question: &str) -> Result<NoulAnswer> {
+/// 打一次 System One。逾時、429、5xx 都只記一筆 error，不重試——shadow 少一筆無所謂，不值得佔連線。
+/// 撞限、卡住的畫面、回報旗標都走這支，不另寫客戶端。
+pub(crate) async fn post_systemone(cfg: &JudgeCfg, key: &str, body: &Value) -> Result<Value> {
     let client = reqwest::Client::builder().timeout(Duration::from_millis(cfg.timeout_ms)).build()?;
     let resp = client.post(&cfg.endpoint).bearer_auth(key).json(body).send().await.map_err(|e| anyhow!("request failed: {}", e.without_url()))?;
     let status = resp.status();
     if !status.is_success() {
         return Err(anyhow!("http {}", status.as_u16()));
     }
-    let v: Value = resp.json().await?;
+    resp.json().await.map_err(|e| anyhow!("response was not json: {e}"))
+}
+
+/// 一次就好：逾時、429、5xx 都只記一筆 error，不重試。
+pub(crate) async fn ask_noul(cfg: &JudgeCfg, key: &str, body: &Value, question: &str) -> Result<NoulAnswer> {
+    let v = post_systemone(cfg, key, body).await?;
     let value = v["answers"][question]["noul"].as_f64().ok_or_else(|| anyhow!("no noul in the answer"))?;
     Ok(NoulAnswer { value, model: v["model"].as_str().map(str::to_string), input_tokens: v["usage"]["input_tokens"].as_i64() })
 }

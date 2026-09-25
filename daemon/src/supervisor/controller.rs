@@ -418,6 +418,8 @@ async fn settle(
         Ok(s) => {
             if s.moved {
                 app.emit("supervisor_changed", json!({"assignment_id": a.id, "status": "awaiting_review"})).await;
+                // #558：證據旗標在結案之後另起 task 問，不改這次回傳、也不改交辦狀態。
+                crate::judge::report::shadow_settled(app, &a.id, &a.target_bot_id, a.turn_id.as_deref(), turn_status, result).await;
             }
             s.moved
         }
@@ -1042,6 +1044,8 @@ async fn late_reply(app: &Arc<App>, a: &store::Assignment, turn_id: &str) {
         }
     };
     let Some(reply) = reply.filter(|r| !r.trim().is_empty()) else { return };
+    // 區塊裡的 JSON 會把 `reply` 搬走；證據旗標要的是同一段文字。
+    let report = reply.clone();
     let res = async {
         let now = crate::db::now();
         let mut tx = app.db.begin().await?;
@@ -1105,6 +1109,8 @@ async fn late_reply(app: &Arc<App>, a: &store::Assignment, turn_id: &str) {
         Ok((true, pushed)) => {
             tracing::info!(assignment = %a.id, turn = %turn_id, pushed, "late hook reply written back to its assignment");
             app.emit("supervisor_changed", json!({"assignment_id": a.id, "status": a.status})).await;
+            // 先前以「沒有回覆」結掉的，真正的回報現在才進 result。同一則交辦只問一次。
+            crate::judge::report::shadow_settled(app, &a.id, &a.target_bot_id, Some(turn_id), "completed", Some(report.as_str())).await;
         }
         Ok((false, _)) => {}
         Err(e) => tracing::warn!(error = ?e, assignment = %a.id, "could not write a late reply back to its assignment"),
@@ -5060,5 +5066,44 @@ mod mission_state_dispatch_tests {
             dispatch(&app, &aid).await;
         }
         assert_eq!(typed(&env, &pane), 1, "等 AGM 處理的暫停不擋派送");
+    }
+}
+
+/// #558：`settle()` 收成完成回合時，背景問 Jev 回報證據旗標；收成本身不等它、狀態不因它改。
+#[cfg(test)]
+mod report_evidence_tests {
+    use super::*;
+    use crate::judge::report::tests::{enable, fake_jev};
+    use crate::testing as tt;
+
+    #[tokio::test]
+    async fn settling_a_completed_turn_asks_jev_in_the_background_and_a_scraped_reply_does_not() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (url, seen, _go) = fake_jev(200, 0.1, 0.2, false).await;
+        let key = env.dir.join("jev-key");
+        std::fs::write(&key, "k-test\n").unwrap();
+        enable(&app, &env.project_id, &url, &key).await;
+        let bot = tt::claude_bot(&app, &env.project_id, "child").await;
+        let done = store::insert_assignment(&app.db, None, &bot.id, "crid-558-a", "把功能做完", &[], None, true).await.unwrap();
+        let scraped = store::insert_assignment(&app.db, None, &bot.id, "crid-558-b", "把功能做完", &[], None, true).await.unwrap();
+
+        assert!(settle(&app, &scraped, "completed_fallback", false, Some("把功能做完\n5-hour limit reached"), None).await);
+        assert!(settle(&app, &done, "completed", true, Some("做完了，還沒跑測試。"), None).await);
+        assert!(
+            tt::eventually!(sqlx::query_scalar::<_, Option<f64>>("SELECT claims_verified FROM judge_shadow WHERE assignment_id = ?")
+                .bind(&done.id)
+                .fetch_optional(&app.db)
+                .await
+                .unwrap()
+                .flatten()
+                .is_some()),
+            "完成回合要寫進帳本"
+        );
+        let asked: Vec<String> = sqlx::query_scalar("SELECT assignment_id FROM judge_shadow").fetch_all(&app.db).await.unwrap();
+        assert_eq!(asked, [done.id.clone()], "從終端機刮下來的回覆不送");
+        assert_eq!(seen.lock().unwrap().len(), 1);
+        let status: String = sqlx::query_scalar("SELECT status FROM supervisor_assignments WHERE id = ?").bind(&done.id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(status, "awaiting_review", "旗標不改交辦狀態");
     }
 }

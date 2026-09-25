@@ -228,6 +228,8 @@ const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (22, "23efc61b27d2a5a9"),
     // issue #557：`judge_shadow.jev_same_work`（撞題 Noul，不塞進 jev_is_live_ui）。
     (23, "8118ff0f6b5b3027"),
+    // issue #558：`judge_shadow.assignment_id`／`claims_verified`／`asks_parent_action`（回報證據旗標）。
+    (24, "190576f2d85181bd"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
