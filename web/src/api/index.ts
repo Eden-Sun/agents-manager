@@ -485,6 +485,15 @@ export async function restartIdleBots(): Promise<RestartPlan> {
   }
 }
 
+/**
+ * header 一鍵升級 codex（SPEC §6.9）：daemon 在那台跑官方安裝指令、確認版本升上去，再重啟那台閒置的 codex。
+ * 只回 `update_id`，進度走 WS `cli_update_progress` / `cli_update_done`。同一台在裝 → 409 `cli_update_in_progress`。
+ */
+export async function startCliUpdate(host: string, kind: 'codex'): Promise<{ update_id: string }> {
+  const raw = await transport.request('POST', `/hosts/${encodeURIComponent(host)}/cli-update`, { kind })
+  return { update_id: str(pick(isRec(raw) ? raw : {}, 'update_id')) }
+}
+
 /** WS 事件與 REST 回應共用。 */
 export function toRestartSkips(v: unknown): RestartSkip[] {
   return arr(v).flatMap((x) =>

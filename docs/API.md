@@ -32,6 +32,7 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
 |---|---|---|---|---|---|
 | A | `POST /hosts/{name}/shells`、`…/shells/{pane_id}/text`、`…/keys` | 只有網頁 | UI token；text／keys 只認白名單 pane（daemon 自己開的、或 `panes` 表的 shell／service），跑 agent 的 pane 403、有 listen port 的唯讀（`shell::registered`） | 在任何已設定主機上執行任意指令 | 待裁示（見下） |
 | A | `POST /hosts/{name}/tools/install` | 只有網頁 | UI token | 叫 `via_bot_id` 那顆 agent 去裝 CLI（跟 `/bots/{id}/prompt` 等價） | 同 `/bots/{id}/prompt` |
+| A | `POST /hosts/{name}/cli-update` | 只有網頁（確認框之後） | UI token；帶 `X-AM-Bot-Id` 或 `X-AM-Bot-Token` 一律 403 `ui_only`；指令寫死、同一台 409 | 在那台跑 codex 官方安裝指令、換掉所有 codex bot 共用的 binary，再重啟那台閒置的 codex | 維持（網頁已有確認框） |
 | A | `POST /bots/{id}/prompt`、`/text`、`/keys` | 網頁、`daemon-swap.sh`（換版自測）、`scripts/*-test.sh` | UI token；`prompt` 的 `relay_from` 要 hook token 才算驗過（`relay_auth`），寫給 AGM 的排進 inbox | 驅動任一顆 agent | 維持（網頁與腳本都不帶身分） |
 | A | `PUT /build/remote`、`POST /build/remote/install-toolchain` | 只有網頁 | UI token | 改外部編譯主機＝之後的 cargo 送到哪台機器跑 | 待裁示 |
 | B | `POST /projects/{id}/git/push` | 只有網頁 | UI token；一般 `git push`（沒有 `--force`） | 推到遠端 repo，撤回要另外動作 | 待裁示（確認或維持） |
@@ -90,10 +91,14 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 會因為 id 對不上被整段丟掉）。欄位**不存在**（舊 daemon）是「不知道」，什麼都不動。
 **欄位不存在**（舊 daemon）跟 `null`（沒有批次在跑）是兩件事，不能混成同一個值——不知道時不該動手上的進度。
 
+`cli_updates`：現在在跑的 codex 升級（§12.7a）`[{"update_id","host","kind"}]`，沒有就是 `[]`。同一個理由：進度只走 WS，
+`cli_update_done` 收不到時前端拿它對帳——手上那一次不在清單裡就清掉（header 的 chip 變回可以按）；欄位不存在（舊 daemon）不動。
+
 ```json
 {
   "daemon_seq": 6,
   "restart_batch": null,
+  "cli_updates": [],
   "connected": true,
   "default_connected": true,
   "herdr_session": "agents-manager",
@@ -487,6 +492,7 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 | `quota_updated` | 見 §12.5 |
 | `mem_updated` | 與 `GET /api/mem` 同形 |
 | `bots_restart_progress` / `bots_restart_done` | 見 §10.3a |
+| `cli_update_progress` / `cli_update_done` | 見 §12.7a |
 | `supervisor_health` | 見「總管」一節 |
 
 終端畫面不走 WS，輪詢 §7。
@@ -1263,7 +1269,7 @@ codex 的 `fast` **不再因為不知道現況而拒絕**（拿掉 `unknown_fast
 - **202**：回的是計畫，重啟在背景一顆一顆跑。`total = 0` 也是 202，並立刻推 `bots_restart_done`。
 - 已經有一批在跑：`202 {"batch_id": <那一批>, "total": 0, "planned": [], "skipped": [], "already_running": true}`，不另開一批、不推新的 `done`，進度照那一批的事件。
 - 每顆 `restart_bot_with(resume_native)`，claude 拿到 `--resume <上一個 session>`（上下文不掉）；本機找不到 `transcript_path` 時開新對話。
-- 候選 = claude 且 run 的 `update_notice` 非空；非候選不出現在任何清單。`reason`：`default_session` / `not_running` / `working` / `blocked` / `unknown_status` / `turn_in_flight`，
+- 候選 = claude／codex 且 run 的 `update_notice` 非空（codex 的「需安裝」是候選但跳過，`needs_manual_install`）；非候選不出現在任何清單。`reason`：`default_session` / `not_running` / `working` / `blocked` / `unknown_status` / `turn_in_flight`，
   以及輪到它時已經不是候選的 `no_longer_pending`（每一顆真的重啟前會照同一張表再判斷一次）、輪到它時 DB 讀不到它的狀態的 `state_unreadable`
   （這次沒動它，更新還在等；不是 `no_longer_pending`），
   `reason_label` 是給人看的那句（前端直接顯示）。
@@ -1544,6 +1550,33 @@ Project 底下所有存活 bot 的訊息合併，以插入順序（`rowid`）倒
 - `protocol_supported`：protocol 是否在 daemon 實測過的清單（`herdr.rs` `SUPPORTED_PROTOCOLS`，目前 20／22）；不知道 protocol 時 `null`。
 - 舊 daemon 沒有 `herdr` 欄位，前端一律當未知。
 
+### 12.7a header 一鍵升級 codex `POST /api/hosts/{name}/cli-update`
+`{"kind":"codex"}`。在那台主機跑**寫死的**官方安裝指令 `curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh`
+（codex 自己升級提示寫的那一句；不接受呼叫端傳指令），確認 `codex --version` 真的升上去之後，把那台 codex run 的「需安裝」通知改成
+「已安裝，重啟套用」，接著開一鍵重啟（§10.3a），**範圍只限那台主機的 codex**（不動 claude、不動別台）。SPEC §6.9。
+
+```json
+202 {"update_id":"01M4…","host":"local","kind":"codex","started":true}
+```
+- 403 `{"reason":"ui_only"}`：帶 `X-AM-Bot-Id` 或 `X-AM-Bot-Token`（bot 身分）一律拒絕——換掉的是所有 codex bot 共用的 binary。
+- 400：`kind` 不是 `codex`（claude 自己會下載新版，走 §10.3a 就好）；404：不認得的主機。
+- 409 `{"reason":"cli_update_in_progress","host","kind","update_id","message"}`：那台已經在裝（同一台同時只跑一個）。
+- 本機直接 `/bin/sh -c`，遠端走既有的 ssh 執行路徑（`ssh_exec_path_timeout`）；逾時 5 分鐘（遠端逾時只砍得掉本機那條 ssh，那台的安裝可能還在跑）。
+  輸出逐次附加到 `<data_dir>/cli-update.log`。
+
+WS（`update_id`／`host`／`kind`／`log_path` 每則都帶）：`cli_update_progress` 的 `phase` 依序 `checking`（讀安裝前版本）→ `installing`（帶 `from`）→
+`verifying` → `restarting`（帶 `from`、`to`）；最後一則 `cli_update_done`：
+
+```json
+{"update_id":"01M4…","host":"local","kind":"codex","ok":true,"from":"0.155.1","to":"0.157.0","notices_updated":2,
+ "restart":{"batch_id":"01M2…","total":2,"planned":[…],"skipped":[…]}}
+{"update_id":"01M4…","host":"local","kind":"codex","ok":false,"reason":"install_failed","error":"安裝指令失敗（exit status: 6）：curl: (6) …","from":"0.155.1"}
+```
+- `ok:false` 一律**沒有重啟任何 bot**、通知不動。`reason`：`version_unreadable`（讀不到安裝前的版本，沒有安裝）、`install_failed`、
+  `verify_failed`（跑完讀不到版本）、`version_unchanged`（跑完版本沒變，帶 `from`／`to`）。
+- `ok:true` 的 `restart` 是 §10.3a 的計畫，之後照 `bots_restart_progress`／`bots_restart_done` 走；已經有一批在跑時是那一批的
+  `already_running:true`（codex 這次沒排進去，等那批跑完再按一次重啟）。批次開不起來時 `restart:null`＋`restart_error`（新版已裝好，照一般重啟再按一次）。
+
 ### 12.7 透過現有 agent 安裝 `POST /api/hosts/{name}/tools/install`
 `{ "kind": "grok", "via_bot_id": "01M1…" }`：daemon 組一則安裝 prompt（官方安裝方式：claude `curl -fsSL https://claude.ai/install.sh | bash`、codex `npm i -g @openai/codex`、
 grok `curl -fsSL https://x.ai/cli/install.sh | bash`；接著確認 `--version`、執行登入並原樣印出登入 URL），走 §5 送給 `via_bot_id`。
@@ -1665,7 +1698,7 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
 | `status_line` | 使用者自己的 claude `statusLine` 命令輸出（ANSI 已去）。daemon 的 `agents-managerd statusline` 代跑它並把同一份輸出放進 POST `/hook/claude` 的 payload。只有 claude；沒設 `statusLine.command` 為 `null`；變了才寫 |
 | `status_json` | statusLine 壓縮前的原始 JSON（`transcript_path` 以外整份），daemon 補 `account_email`（讀該身份設定目錄 `.claude.json` 的 `oauthAccount.emailAddress`）。變了才寫 |
 | `herdr_session` | bot 與 run 都有；一般為 `null`（沿用 host 設定），從本機 `default` session 採用的是 `"default"`（SPEC §6.5.1） |
-| `update_notice` | 有新版等著處理，或 `null`（SPEC §3.1）。claude：固定字串 `"Update installed · Restart to update"`（已下載，重啟就換）；單顆套用 `POST /bots/{id}/restart`，全部 `POST /bots/restart-idle`。**codex**（issue #388）：以 `codex 有新版` 開頭，`codex 有新版 0.154.0 → 0.155.1，需安裝後重啟`（**還沒安裝**，重啟換不到；要先裝）或 `codex 有新版 0.155.1（這個 run 跑的是 0.154.0），已安裝，重啟套用`；`POST /bots/restart-idle` **不收** codex，只有單顆 `restart` |
+| `update_notice` | 有新版等著處理，或 `null`（SPEC §3.1）。claude：固定字串 `"Update installed · Restart to update"`（已下載，重啟就換）；單顆套用 `POST /bots/{id}/restart`，全部 `POST /bots/restart-idle`。**codex**（issue #388）：以 `codex 有新版` 開頭，`codex 有新版 0.154.0 → 0.155.1，需安裝後重啟`（**還沒安裝**，重啟換不到；要先裝）或 `codex 有新版 0.155.1（這個 run 跑的是 0.154.0），已安裝，重啟套用`；`POST /bots/restart-idle` 只收「已安裝」的 codex（「需安裝」的列進 `skipped`，`needs_manual_install`），要先裝就走 `POST /hosts/{name}/cli-update`（§12.7a，裝好接著重啟） |
 | `runtime_model` / `runtime_effort` / `runtime_fast` | run **實際**在跑的值（SPEC §4.4a），跟 `bot.*`（下次啟動的設定）分開。三個都 `null` = 不知道（收編的 pane），前端不比對不標 |
 | `runtime_identity` | run 用哪個身分起來的（issue #238）：`""`＝沒有身分（預設帳號）、`null`＝不知道（收編的 pane、升級前的舊列）。改了 `bot.identity` 之後、重啟之前兩者不同；額度一律記在這個身分上 |
 | `turn_error` | 上一回合被 API 中斷或額度拒絕時 pane 上那行原文，否則 `null`；下一回合開始清回（SPEC §4.3a）。命中時對話多一則釘在回合上的 system 訊息（`incomplete = 1`、附 `terminal_snapshot`），回合還 in_flight 就收成 failed。重送就是再 `POST /prompt` 最後一則 user 訊息 |

@@ -32,3 +32,9 @@ test('#492 restart_batch 的三態：在但空是 null（沒有批次），欄�
   assert.equal(toState({ restart_batch: 'b1' }).restart_batch, 'b1')
   assert.equal(toState({}).restart_batch, undefined)
 })
+
+test('cli_updates 同一個三態：在就是清單（可能空），不在是 undefined（舊 daemon，不知道）', () => {
+  assert.deepEqual(toState({ cli_updates: [] }).cli_updates, [])
+  assert.deepEqual(toState({ cli_updates: [{ update_id: 'u1', host: 'local', kind: 'codex' }] }).cli_updates, [{ update_id: 'u1', host: 'local' }])
+  assert.equal(toState({}).cli_updates, undefined)
+})

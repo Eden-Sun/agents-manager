@@ -75,6 +75,15 @@
     padding-right: 124px;
   }
 
+  /* codex「安裝＋重啟」跟「重啟套用」並排（UI-DECISIONS「header 的 codex 安裝」）：前一顆再往左讓一顆寬，名字行多讓 28px。 */
+  .main-head.bot-head .main-title-row > .quota-update:has(+ .quota-update) {
+    right: 110px;
+  }
+
+  .main-head.bot-head .main-title-row:has(> .quota-update + .quota-update) {
+    padding-right: 152px;
+  }
+
   .main-head.bot-head .mobile-bot-version {
     min-height: 0;
     padding-left: 4px;

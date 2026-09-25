@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import type { Bot, Run } from '../api/types.ts'
-import { updateBatchCounts } from './updateBatch.ts'
+import { codexInstallPlan, updateBatchCounts } from './updateBatch.ts'
 
 const NOTICE = 'Update installed · Restart to update'
 
@@ -90,4 +90,65 @@ test('子 agent 也歸這顆按鈕管（587b07f：在自己的 pane 裡 exit + r
     ['kid', 'mine'],
   )
   assert.deepEqual(c.busy, [])
+})
+
+// —— header 的 codex「安裝＋重啟」（SPEC §6.9，cli_update）——
+
+const PENDING = 'codex 有新版 0.155.1 → 0.157.0，需安裝後重啟'
+const INSTALLED = 'codex 有新版 0.157.0（這個 run 跑的是 0.155.1），已安裝，重啟套用'
+
+test('需安裝的 codex 在一般 chip 的在忙名單裡帶 install 旗標（旁邊那顆負責），一般的在忙不帶', () => {
+  const bots = [bot('cx', { kind: 'codex' }), bot('busy')]
+  const runs = { cx: run('cx', { update_notice: PENDING }), busy: run('busy', { agent_status: 'working' }) }
+  const c = updateBatchCounts(bots, runs, none)
+  assert.deepEqual(
+    c.busy.map((x) => [x.name, x.install ?? false]),
+    [
+      ['cx', true],
+      ['busy', false],
+    ],
+  )
+})
+
+test('codexInstallPlan：只看第一台有需安裝的主機，列出裝好後會重啟／會跳過的 codex', () => {
+  const bots = [
+    bot('cx-idle', { kind: 'codex', project_id: 'p-local' }),
+    bot('cx-busy', { kind: 'codex', project_id: 'p-local' }),
+    bot('cx-done', { kind: 'codex', project_id: 'p-local' }),
+    bot('cx-kid', { kind: 'codex', project_id: 'p-local', managed_by: 'child' }),
+    bot('cx-far', { kind: 'codex', project_id: 'p-far' }),
+    bot('cl', { project_id: 'p-local' }),
+  ]
+  const runs = {
+    'cx-idle': run('cx-idle', { update_notice: PENDING }),
+    'cx-busy': run('cx-busy', { update_notice: PENDING, agent_status: 'working' }),
+    'cx-done': run('cx-done', { update_notice: INSTALLED }),
+    'cx-kid': run('cx-kid', { update_notice: PENDING }),
+    'cx-far': run('cx-far', { update_notice: PENDING }),
+    cl: run('cl'),
+  }
+  const hostOf = (b: Bot) => (b.project_id === 'p-far' ? 'far' : 'local')
+  const p = codexInstallPlan(bots, runs, none, hostOf)
+  assert.ok(p)
+  assert.equal(p.host, 'local')
+  assert.equal(p.notice, PENDING)
+  assert.equal(p.installCount, 3, '那台還寫著需安裝的 codex（含在忙、子 agent）')
+  assert.deepEqual(
+    p.ready.map((x) => x.name),
+    ['cx-idle', 'cx-done'],
+    '閒置的都會被 daemon 的 codex 批次重啟，已裝好的也算；別台、claude 不算',
+  )
+  assert.deepEqual(
+    p.busy.map((x) => x.name),
+    ['cx-busy', 'cx-kid'],
+  )
+})
+
+test('codexInstallPlan：沒有需安裝的 codex 就沒有這顆 chip', () => {
+  const bots = [bot('cx', { kind: 'codex' }), bot('cl')]
+  const runs = { cx: run('cx', { update_notice: INSTALLED }), cl: run('cl') }
+  assert.equal(
+    codexInstallPlan(bots, runs, none, () => 'local'),
+    null,
+  )
 })

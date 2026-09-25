@@ -147,6 +147,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/hosts/{name}/reconnect", post(reconnect_host))
         .route("/hosts/{name}/tools/refresh", post(refresh_tools))
         .route("/hosts/{name}/tools/install", post(install_tool))
+        // header 一鍵升級 codex：裝好、驗版本、接著重啟那台的 codex（SPEC §6.9）。只給 UI。
+        .route("/hosts/{name}/cli-update", post(crate::cli_update::post_cli_update))
         .route("/hosts/{name}/identities/{identity}/login", post(login_identity))
         .route("/hosts/{name}/identities/{identity}/logout", post(logout_identity))
         .route("/hosts/{name}/gh", get(get_gh_status))
@@ -626,6 +628,8 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
         "daemon_seq": app.current_seq(),
         // 現在有沒有一批一鍵重啟在跑（issue #492）：進度只走 WS，`bots_restart_done` 收不到時前端要有地方對帳。
         "restart_batch": crate::bulk_restart::running_batch(&app.data_dir),
+        // 現在在跑的 codex 升級（同一個理由：`cli_update_done` 收不到時的對帳來源）。
+        "cli_updates": crate::cli_update::running_list(&app.data_dir),
         "connected": connected,
         "default_connected": app.default_connected.load(Ordering::SeqCst),
         "herdr_session": app.herdr_session,

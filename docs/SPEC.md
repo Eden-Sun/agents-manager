@@ -325,7 +325,8 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   畫面上讀不到那句時退到版本比對：statusLine 的 `version`（process 在跑的）對 `claude --version`（磁碟上的），磁碟較新才算；磁碟版本每台主機快取 5 分鐘。
 - **codex 更新通知**（issue #388，2026-09-21 使用者截圖：codex 畫面有 `✨ Update available! 0.154.0 -> 0.155.1` 卻沒有任何徽章）：`update_watch`
   同一支巡邏也巡 running 的 codex run（`daemon/src/codex_update.rs`）。**跟 claude 相反：claude 是新版已經下載好、重啟就換；codex 是新版還沒安裝**，
-  要先跑安裝指令再重啟——所以通知文字寫明「需安裝後重啟」，**安裝本身不自動跑**（照舊要人或 AGM 核准）。
+  要先跑安裝指令再重啟——所以通知文字寫明「需安裝後重啟」，**安裝本身不自動跑**：只在使用者按 header 的 codex chip 並確認時才跑（§6.9「codex 需安裝」，
+  `daemon/src/cli_update.rs`、API §12.7a），bot 呼叫一律 403。
   - 認得兩種畫面寫法，都是同一句 `✨ Update available! <a> -> <b>`（`->`／`→`／`=>`，窄 pane 折行也讀得到），而且**緊接著要有**：
     ① 啟動時的**互動選單**（`1. Update now (…)`＋`2. Skip`，還有 `3. Skip until next version`），或 ② **非互動方框**（`Run sh -c '…install.sh…' to update.`）。
     光有那句（對話裡引用、不在行首）不算。方框印在 session 開頭，之後會被對話推出畫面。
@@ -340,8 +341,9 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
     裝著的版本兩個都不知道時不拿帳本比。帳本空（kick 沒裝）就跟以前一樣只靠畫面與磁碟。
     提示被推掉、或選了 Skip，都不代表新版不存在，所以「需安裝」通知**不會**因畫面沒了就清掉，只在 run 重啟（新 run 本來就沒有）或磁碟裝好（改成「已安裝，重啟套用」）時變。
     跑著的版本從沒看到過、畫面也沒提示時什麼都不寫（不知道就不猜）。
-  - **批次重啟不收 codex**（§6.9：候選只收 kind 是 claude）：重啟一顆沒裝新版的 codex 換不到任何東西。web 的更新徽章對 codex 說明要先安裝，
-    裝好（通知寫「已安裝」）才是「重啟套用」。
+  - **批次重啟只收「已安裝」的 codex**（§6.9）：重啟一顆沒裝新版的 codex 換不到任何東西，「需安裝」的是候選但跳過（`needs_manual_install`）。
+    header 一鍵安裝（`cli_update`）裝好、驗過版本之後，把那台 codex run 的「需安裝」直接改成「已安裝，重啟套用」（跑著的版本取記憶體裡看過的 → 通知寫的起點 → 安裝前的磁碟版本），
+    並丟掉那台 `codex --version` 的 5 分鐘快取，不等下一輪巡邏。巡邏自己也把「需安裝」通知寫的起點當成跑著的版本（啟動畫面早被推掉時），磁碟追上就變「已安裝」，不會卡住。
 
 ### 3.2 前端
 
@@ -2032,8 +2034,16 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   （`codex_update.rs`）：磁碟**已經裝好**、這個 run 還跑舊版（notice 含「已安裝」）跟 claude 一樣重啟就換，
   現在會一起進批次；新版**還沒安裝**（notice 含「需安裝」）重啟換不到東西，改成「是候選但被跳過」而不是
   「整個不算」——一樣會出現在 header 與確認框的跳過名單裡，講清楚要先手動安裝，不會像以前那樣默默消失。
-  **2026-09-25**：沒有可重啟的、只剩「需安裝」的 codex 時，header 那顆不再灰掉按不動（使用者：看不出是提示）——
-  改成警示色、點一下切到那顆 codex bot（已在其中一顆就換下一顆），在它自己的更新徽章看 changelog；安裝仍不自動跑。
+  **codex 需安裝（2026-09-25，使用者：「codex 的 upgrade 也和 claude 用一樣的方式出現在 header」）**：header 在一般那顆旁邊另有一顆警示色的
+  ⌃⌃ N（N＝那台還寫著「需安裝」的 codex 數），點下去是同一種確認框——左 changelog（`UpdateChangelog kind="codex"`）、右 AGM 解析（`kind=codex`，同一版只派一次）、
+  下面列出裝好後會重啟的那台閒置 codex 與會跳過的（在忙、子 agent）。確認後 `POST /api/hosts/{name}/cli-update {kind:"codex"}`（API §12.7a，`cli_update.rs`）：
+  1. 讀安裝前的 `codex --version`（讀不到就不裝）；
+  2. 在那台跑**寫死的**官方安裝指令 `curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh`（本機 `/bin/sh -c`，遠端走既有 ssh 執行路徑；逾時 5 分鐘；輸出寫 `<data_dir>/cli-update.log`）；
+  3. 重新讀 `codex --version`，**真的變新**才往下——安裝失敗、讀不到、或版本沒變：一顆 bot 都不重啟，`cli_update_done` 帶 `reason` 講原因、通知不動；
+  4. 把那台 codex run 的通知改成「已安裝，重啟套用」，接著開一鍵重啟，**範圍只限那台主機的 codex**（`bulk_restart::spawn_scoped`；claude 與別台不在這批），之後照上面的規則與事件走。
+  只收 UI token：帶 `X-AM-Bot-Id`／`X-AM-Bot-Token` 一律 403（換掉的是所有 codex bot 共用的 binary）；同一台同時只跑一個（409）。進度走 WS `cli_update_progress`／`cli_update_done`，
+  `GET /api/state` 的 `cli_updates` 列出在跑的，前端靠它對帳（同 #492）。多台都有「需安裝」時一次一台，裝完 chip 自然換到下一台。
+  已經有一批重啟在跑時，裝好之後的那批會拿到 `already_running`（codex 這次沒排進去），等那批跑完再按一般的 ⌃⌃。
 
   刻意保守：批次最不能做的就是砍掉使用者正在等的回合。
   **輪到那一顆真的要重啟前再判斷一次**（`bulk_restart::recheck`，同一張表，外加「已經不是候選」→ `no_longer_pending`）：計畫是按下去那一刻的快照，
