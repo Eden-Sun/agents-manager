@@ -718,6 +718,7 @@ check "拿窗口用核准的 commit" "lease acquire rebuild --approval ap-1 --co
 check "request-id 用核准的 commit" "request-id agm-daemon-update-$H1" "$AGM_DIR/calls.log"
 check "交辦正文指名核准的 commit" "要建、要重啟的 commit：${H1}（核准 ap-1 針對的就是它）" "$AGM_DIR/assign-body.txt"
 check "交辦正文說明 HEAD 留到下一輪" "這次仍然只 checkout $H1 來建" "$AGM_DIR/assign-body.txt"
+check "交辦正文寫出之後有幾個 commit 動到 binary" "之後還有 1 個 commit 動到 binary，留下一趟" "$AGM_DIR/assign-body.txt"
 check_no "交辦正文不說成 docs-only" "只動到不進 binary 的檔" "$AGM_DIR/assign-body.txt"
 check "log 寫明照核准的建" "核准 ap-1 已核准、還沒派工：照它的 commit $H1 建，origin/main $H2 留到下一輪" "$AGM_DIR/daemon-update.log"
 check "已派過記的是核准的 commit，不是 HEAD" "^$H1$" "$AGM_DIR/daemon-update.last"
@@ -980,6 +981,32 @@ bash "$SCRIPT"
 check_no "例行路徑不預開 restart" "--purpose restart" "$AGM_DIR/calls.log"
 check_no "例行路徑正文不提立即部署" "立即部署" "$AGM_DIR/assign-body.txt"
 teardown
+
+# N12. 使用者按下之後 main 又有兩個動到 binary 的 commit（加一個 docs）：只建按下的那顆，正文如實寫出 N=2、
+#      不宣稱沒差；「已派過」記按下的那顆，下一輪例行路徑才會為 HEAD 另外申請。
+now_setup
+bump_docs() { ( cd "$AGM_REPO" && mkdir -p docs && echo "$1" >> docs/NOTE.md && /usr/bin/git add -A && /usr/bin/git commit -qm "docs $1" \
+    && /usr/bin/git update-ref refs/remotes/origin/main HEAD ) >/dev/null 2>&1; }
+bump_code n1; bump_docs n2; bump_code n3
+H=$(/usr/bin/git -C "$AGM_REPO" rev-parse HEAD)
+bash "$SCRIPT"
+check "照按下的那顆建" "lease acquire rebuild --approval now-1 --commit $NOW_SHA" "$AGM_DIR/calls.log"
+check "正文寫出 N" "之後還有 2 個 commit 動到 binary，留下一趟" "$AGM_DIR/assign-body.txt"
+check "正文仍只 checkout 按下的那顆" "這次仍然只 checkout $NOW_SHA 來建" "$AGM_DIR/assign-body.txt"
+check_no "正文不宣稱只動到不進 binary 的檔" "只動到不進 binary 的檔" "$AGM_DIR/assign-body.txt"
+check "log 寫明留下一趟" "立即部署 ${NOW_SHA} 之後 origin/main ${H} 又動到會進 binary 的檔，留下一趟" "$AGM_DIR/daemon-update.log"
+check "已派過記按下的那顆，不是 HEAD" "^$NOW_SHA$" "$AGM_DIR/daemon-update.last"
+now_teardown
+
+# N13. 使用者按下之後 main 只多了 docs：正文照實寫沒有動到 binary，不寫留下一趟。
+now_setup
+bump_docs d1
+H=$(/usr/bin/git -C "$AGM_REPO" rev-parse HEAD)
+bash "$SCRIPT"
+check "正文寫只動到不進 binary 的檔" "多出來的 commit 只動到不進 binary 的檔；仍然 checkout $NOW_SHA 來建" "$AGM_DIR/assign-body.txt"
+check_no "正文不寫留下一趟" "留下一趟" "$AGM_DIR/assign-body.txt"
+check "已派過記 HEAD（沒有要留的）" "^$H$" "$AGM_DIR/daemon-update.last"
+now_teardown
 
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
