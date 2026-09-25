@@ -2730,6 +2730,17 @@ AGM 的運維職責以本節為準，不靠任何 bot 的記憶。persona 是同
   6. 60 秒內確認 `agm supervisor` 不是 stopped、running 名單沒少、沒有 bot 被無故關 pane。任一項不對用 `.bak` 回滾並回報；這批若升了 `SCHEMA_VERSION`，DB 要連同備份一起還原（§18.13，只換 binary 會被版本閘擋下）。
   期間不要同時觸發 claude 更新批次重啟。
 - 動 migration 的版本：上線前對正式 DB 的副本跑一次 migrate，重建申請附 DB 備份步驟。
+- **立即部署**（使用者 2026-09-25：「agm排以外，要我可以在左上角直接點立即部署」）：網頁左上角在線上 binary 落後 origin/main **且有程式碼差異**
+  （`build-inputs` 路徑，docs-only 不算）時出現「⇪ 部署 N」。按下去先開確認框（`live..target` 的 commit、此刻 working 的 bot），確認後 `POST /api/deploy/now`（API.md）。
+  **這一下就是使用者的裁示**：daemon 開一筆 `requester=daemon-update-kick` 的 rebuild 核准並以 `user(立即部署)` 核准，寫 `daemon-update.now.json`，`launchctl kickstart` 同一個 `com.agm.daemon-update` job——
+  **不另寫一套 build＋swap**，也不 fork 自己的 kick（`AGM_BUILD_BOT`／`PATH` 只在 plist 裡；launchd 保證同一個 job 不會疊）。
+  kick 讀到請求檔就走立即模式，只略過三道排程閘：觸發條件（整點／門檻／等太久）、「同 commit 已派過」、等 AGM 裁示 rebuild。**其餘照舊**：建置 child 要在、上一筆 `agm-daemon-update-*` 要結案、
+  `lease safety`／`acquire` 的沒人 working（等太久的縮小封鎖面照 §18.10 從核准時間起算）、派工正文的固定條件 1～6（乾淨 HEAD worktree、整樹測試、`.bak`、驗證失敗回滾，§18.13）、`daemon-swap.sh`。
+  建的是確認框上那顆（daemon 驗過是 origin/main 的祖先），派工 request id `agm-daemon-update-<sha>-now-<核准>`（同一顆先前派過沒上線也能再派）。
+  restart 也由這一下授權：kick 拿到 rebuild 窗口後以**建置 child 的 bot id** 申請 restart（§3c 的 `exclude_not_requester`），同一輪以 `deploy-now:<rebuild 核准>` 核准，正文叫 child 直接用它；
+  開不出來就照例行流程自己申請（AGM 裁示），不是停手。這筆 restart 申請照常推一則 `approval_requested` 給協調者（知會；已核准，不必裁示）。
+  等不到窗口就留著請求下一輪（5 分鐘）再試；請求只在派工成功、線上已是那顆（docs-only）、或核准不能用（撤銷／過期／用掉／對不上，推 `ops_alert`）時才收掉，所以最長活到核准的 6 小時。
+  daemon 在請求還在、有人握著 rebuild／restart 租約、或更新交辦未結案時回 409 `deploy_in_progress`。
 
 ### 18.2d 決策紀錄：不設 CD 信任閘門（使用者 2026-09-21）
 2026-09-20 加過一道部署前檢查（`cd-trust-gate.py`，`1f90b510`）：線上版 → 要部署的版本之間有 fork PR 的 commit／內容、名單外作者、被改寫的歷史或動到部署鏈就不換版。2026-09-21 依使用者指示整個拿掉（message `01M30N2VY76AG24B018GFY7FTF`，原話：「拿掉CD信任閘門這功能，沒有，沒有對self-hosting設定cicd，故沒有安全疑慮」）。理由：這台機器沒有對 self-hosting 設 CI/CD、不會自動部署外部貢獻；CI 在 GitHub 代管 runner 上跑，main 只有 owner 推得進去。不保留成可關的選項或警告模式。要重提得先有新的威脅（例如加了 self-hosted runner，或開放外部 collaborator）。

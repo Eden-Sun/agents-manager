@@ -37,6 +37,7 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
 | B | `POST /projects/{id}/git/push` | 只有網頁 | UI token；一般 `git push`（沒有 `--force`） | 推到遠端 repo，撤回要另外動作 | 待裁示（確認或維持） |
 | B | `POST /projects/{id}/git/commit`、`/git/pull` | 只有網頁 | UI token；pull 固定 `--rebase --no-autostash` | 本機 git 歷史 | 維持 |
 | B | `POST /missions/{id}/deliver` | `agm mission deliver`（協調者） | UI token＋流程守衛：要有帶 sha 的 `verified` 事件、任務沒停；`relay_from` 同 `relay_auth` | 把驗過的 commit 交付出去 | 維持 |
+| B | `POST /deploy/now` | 只有網頁（確認框之後） | UI token；帶 `X-AM-Bot-Id` 一律 403 `ui_only`；已有部署在跑 409、kick 沒裝或太舊 503（什麼都不寫） | 以使用者名義核准 rebuild（kick 同輪開並核准 restart）→ 重建並重啟正式 daemon；沒人 working 才換、租約、`.bak`、回滾照舊 | 維持（網頁已有確認框） |
 | C | `DELETE /bots/{id}`、`DELETE /projects/{id}` | 網頁、`agm` | UI token；AGM 的 bot／專案要 `?confirm=supervisor`（`supervisor_owned`） | 軟刪，`POST /bots/{id}/restore` 救得回 | 維持 |
 | C | `POST /hosts`（改 ssh 目標）、`DELETE /hosts/{name}` | 網頁 | 還有專案在用時改 ssh 要 `?confirm=repoint`、刪除 409 | 只改 config.toml | 維持 |
 | C | `DELETE /hosts/{name}/shells/{pane_id}`、`POST /panes/{id}/close` | 網頁 | 服務 pane 要 `?confirm=true`；agent pane 403 | 關掉 pane | 維持 |
@@ -1819,6 +1820,22 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
   身分與留痕同 `PUT`（issue #462／#463）；body 的 `actor` **不再採信**，log 與通知記的是驗過的身分（`AGM:<role>`）或 `user`。
   持久版的 hash 已經等於內嵌版時回 **200** `{"changed":false,"reason":"already_identical","version"}`（**不是錯誤**：副本照樣重新同步一次，版本不動）。
 - `GET /api/supervisor/build-inputs` → `{paths,embedded:[{path,symbol}],note}`：會編進 binary 的路徑（含 `docs/goals/agm-supervisor-persona.md`、`docs/goals/agm-responder-persona.md`、`scripts/agm.py`）。
+
+### 立即部署 `/api/deploy/*`（SPEC §18.2，使用者 2026-09-25）
+- `GET /api/deploy/status` → `{live_sha,live_full,target_sha,target_short,behind,code_commits,code_changed,commits:[{sha,subject}],commits_truncated,running,working:[{bot_id,name,is_supervisor}],log_path,kick_ready,error?}`。
+  `live_sha`＝這顆 binary 建置時的 short sha（同 `GET /api/supervisor` 的 `last_deploy.sha`），`target_sha`＝daemon 所在 repo 的 `origin/main`（完整 sha）。
+  `behind`＝`live..origin/main` 的 commit 數，`code_commits`／`code_changed` 只看 `build-inputs` 的路徑（docs-only 的落後是 `code_changed:false`，規則同 kick）；`commits` 最多 30 個、最新在前，超過時 `commits_truncated:true`。
+  `running`＝現在有沒有部署在跑（`null`＝沒有）：`{kind:"requested",sha,requested_at,approval_id}`（按過、kick 還沒派出去或在等安全窗口）、`{kind:"lease",resource,owner,expires_at}`（有人握著 rebuild／restart 窗口）、`{kind:"assignment",client_request_id,status,bot_id}`（`agm-daemon-update-*` 交辦還沒結案，含等驗收）。
+  `working`＝此刻 `working` 的 bot（`lease safety` 同一份判定，沒有排除任何人）。`kick_ready:false`＝裝好的 `bin/daemon-update-kick.sh` 不存在或還不認得立即模式。
+  說不出落後多少（sha 是 `unknown`、不在 repo、讀不到 origin/main）時 `code_changed:false` 並帶 `error`。repo 是 daemon binary 往上第一個有 `.git` 與 `daemon/Cargo.toml` 的目錄（找不到退回 `~/project/agents-manager`）；每 5 分鐘最多在背景 `git fetch origin main` 一次，這一次的回應用 fetch 之前的 ref。
+- `POST /api/deploy/now {sha?}` → `{started:true,sha,short,live_sha,approval_id,log_path,request_path}`。`sha` 是確認框上那顆（不帶＝當下的 origin/main）：部署的就是它，不是按下去那一刻的 HEAD。
+  **只給 UI**：帶 `X-AM-Bot-Id` 一律 `403 {"reason":"ui_only"}`（bot 要重建照 §18.10 申請核准；共用 UI token 下 daemon 分不出不報身分的 bot，同 §18.10 的取捨）。
+  做的事：開一筆 `requester=daemon-update-kick`、`purpose=rebuild`、`target_commit=<sha>`、有效 6 小時的核准並**當場以 `user(立即部署)` 核准**（不推 `approval_requested`，同 requester 的 pending 照 #421 自動取代），寫 `supervisor/AGM/daemon-update.now.json`，再 `launchctl kickstart gui/<uid>/com.agm.daemon-update`；留一筆 `deploy_now` note。
+  - `409 deploy_in_progress {running,log_path}`：上面 `running` 的三種任一，什麼都不寫。
+  - `409 nothing_to_deploy`（線上到那顆只動到不進 binary 的檔）、`409 target_not_on_main`（不是 origin/main 的祖先）、`409 unknown_commit`、`409 status_unknown`（說不出落後多少）。
+  - `503 kick_not_installed`／`kick_outdated`：kick 沒裝或還不認得立即模式（檔裡沒有 `daemon-update.now.json`），先 install，什麼都不寫。
+  - `503 kick_start_failed`／`request_write_failed`：已開的核准改成 `revoked`、請求檔刪掉，可以直接重按。
+  同一時間只受理一次（連點兩下第二下是 409）。
 
 ### 核准與租約（SPEC §18.10）
 - `GET /api/supervisor/approvals?id=<id>`：只回那一筆（清單本身只有最新 100 筆，排程腳本要確認的舊核准會被擠出去）。
