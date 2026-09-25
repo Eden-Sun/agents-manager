@@ -852,7 +852,9 @@ user 文字先照 CLI 自己的拆法還原（`lifecycle::pasted_content`，只�
   所以缺開頭時再看兩件事：框的列數到了上限（畫面列數取 `pane.get` 的 `scroll.viewport_rows`，只在看不到開頭時才多問這一次），
   而且框裡的字（去空白）是送出文字的連續尾段——兩者都成立就是框太矮，照常按 Enter、交給 transcript 證據；
   框沒滿卻缺開頭才是 #382。列數讀不到時不能斷定框滿了，照缺頭處理（清框、下一輪重試），寧可晚一輪也不送半段。
-  框從最下面的 `❯` 讀到下緣分隔線、空白列也算（部署交辦那種有空行的 prompt），往上找的範圍跟著這段字的列數走，
+  框從最下面**頂格**的 `❯` 讀到下緣分隔線、空白列也算（部署交辦那種有空行的 prompt），往上找的範圍跟著這段字的列數走。
+  貼進去的每一列 claude 都縮兩格，所以內容自己有 `❯ ` 開頭的列（#562：child-blocked 通知夾著子 agent 的畫面原文）不會被當成框頂——
+  以前會，整段明明都在框裡卻判成缺頭、清框重試到上限（真 claude 2.1.281 實測，fixture `claude-2.1.281-paste-child-blocked-notice`）；
   不再靠「框高過 24 列、`❯` 落在範圍外就當空框」的巧合（browser-gc 換成 8 列的框就連續 blocked 了 7 次）。
   約 7 千字、有空行的 prompt 貼進 8 列的框，真 claude 收到的與原文逐字相同。
   **不改用 bracketed paste**：自己包 `\e[200~`…`\e[201~` 分段送，claude 會摺成一個佔位，但 transcript 裡被包進 `<pasted_content …>` 標籤，
@@ -953,7 +955,7 @@ cancel 撤掉的是還沒送出的那則時，review 回應不再帶「turn 還�
    agent 起來了、只是 `running` 寫不進 DB（`start_state_uncommitted`，#152；叫醒那條回的是字串，看有沒有留下 `starting` 的 run）
    **不是**沒能啟動：不寫 `start_error`，在背景等對帳把 run 收成 `running` 再叫 flush（對帳那條不會叫 flush）；run 不在了就交給撤孤兒那條記原因。
 3. 送出完全走既有的 flush：CAS claim 保證只送一次，resume／額度／維護窗口的閘門照舊。瀏覽器不留一份，WS 幀、重整、重按啟動都不會變成第二次送出。
-4. 取消：`POST /api/turns/{id}/withdraw` 只撤還在等的那一則（`failed`＋說明）；已被佇列領走的回 409——不能拿 abandon 頂替，
+4. 取消：`POST /api/turns/{id}/withdraw` 只撤還在等的那一則（`failed`＋說明；另外也撤還在排的 daemon 自動通知，#562）；已被佇列領走的回 409——不能拿 abandon 頂替，
    那會把已經送出的回合收成失敗，web 又把文字放回輸入框，再按一次就送兩次。
 5. daemon 重啟：開機對帳完成、autostart 那一步（`reconcile::autostart_after_reconcile` → `start_send::resume_after_boot`），
    還在等、沒有 run 的再替它起一次（重啟前那次可能沒做完）。每次開機最多一次。清單或那顆 bot 在哪台主機讀不到就先不起、30 秒後再看那幾顆
@@ -1066,7 +1068,8 @@ abort 之後照常 flush 出去（但先照下一段等寬限）。要取消排�
 下次時間存在 `turns.flush_retries`／`turns.next_flush_at`，時間未到的其他喚醒不動它，但**要補掛一個到期才燒的 timer**
 （叫醒它的那個 timer 燒掉後就不在了，不補的話這顆 bot 一個 timer 都沒有，排隊的派工要等 30 分鐘保險絲，review3 L1）；
 每顆 bot 同時只有一個重試 timer，**更早的會換掉已經掛著的**（差 1 秒以內算同一個，不換）；放回
-12 次仍送不出就標 failed 並插說明（同一個 transaction）。daemon 重啟（`reconcile::rearm_progress`）時掃描**所有** queued turn
+12 次仍送不出就標 failed 並插說明（同一個 transaction）。daemon 自己排的通知（`client_request_id` 前綴 `child-blocked:`／`resume-nudge:`，
+`lifecycle::daemon_notice`）上限只有 3 次（約兩分鐘）：它擋在佇列頭時後面的使用者訊息排不到，用完就標 failed＋說明讓路（#562）。daemon 重啟（`reconcile::rearm_progress`）時掃描**所有** queued turn
 （沒有 `next_flush_at` 的當作現在到期），以 `max(now, next_flush_at)` 為每顆 bot 重建唯一的 timer。直接送出的 409 回應則由呼叫端（或 AGM
 交辦的既有退避）重試。
 

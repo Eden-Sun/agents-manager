@@ -371,9 +371,9 @@ pub(crate) async fn withdraw_waiting_tx(
     Ok(withdrawn)
 }
 
-/// 使用者取消（`POST /turns/{id}/withdraw`）：還在等 bot 起來的那一則撤回、寫明理由，不送。
+/// 使用者取消（`POST /turns/{id}/withdraw`）：還在等 bot 起來的那一則、或還在排的 daemon 自動通知（#562）撤回、寫明理由，不送。
 ///
-/// 只撤這一種。已經被佇列領走（`in_flight`，字已經打進去了）或本來就不是這種的一律 409——不能拿「放棄回合」
+/// 只撤這兩種。已經被佇列領走（`in_flight`，字已經打進去了）或本來就不是這種的一律 409——不能拿「放棄回合」
 /// 頂替：那會把已經送出的回合收成失敗，web 又把文字放回輸入框，使用者再按一次就送了兩次。
 pub async fn withdraw_turn(app: &Arc<App>, turn_id: &str) -> LcResult<()> {
     let bot_id: String = sqlx::query_scalar("SELECT c.bot_id FROM turns t JOIN conversations c ON c.id = t.conversation_id WHERE t.id=?")
@@ -384,13 +384,21 @@ pub async fn withdraw_turn(app: &Arc<App>, turn_id: &str) -> LcResult<()> {
         .ok_or_else(|| LcError::NotFound("turn".into()))?;
     let lock = app.bot_lock(&bot_id).await;
     let _g = lock.lock().await;
-    let (status, awaits_start): (String, i64) = sqlx::query_as("SELECT status, awaits_start FROM turns WHERE id=?")
-        .bind(turn_id)
-        .fetch_one(&app.db)
-        .await
-        .map_err(up)?;
-    let why = "使用者取消了這一則：它是 bot 沒在跑時送的，還在等 bot 起來，沒有送出，不會再送。";
-    if status != "queued" || awaits_start != 1 || !revoke_queued_turn(app, turn_id, why).await.map_err(up)? {
+    let (status, awaits_start, crid): (String, i64, Option<String>) =
+        sqlx::query_as("SELECT status, awaits_start, client_request_id FROM turns WHERE id=?")
+            .bind(turn_id)
+            .fetch_one(&app.db)
+            .await
+            .map_err(up)?;
+    // 還在排的 daemon 自動通知也可以撤（#562）：它擋在佇列頭時，使用者要能讓自己的訊息先走。
+    let why = if awaits_start == 1 {
+        "使用者取消了這一則：它是 bot 沒在跑時送的，還在等 bot 起來，沒有送出，不會再送。"
+    } else if super::daemon_notice::is_daemon_notice(crid.as_deref()) {
+        super::daemon_notice::WITHDRAWN_WHY
+    } else {
+        ""
+    };
+    if status != "queued" || why.is_empty() || !revoke_queued_turn(app, turn_id, why).await.map_err(up)? {
         return Err(LcError::conflict("turn is not waiting for its bot to start", json!({"turn_id": turn_id, "status": status})));
     }
     Ok(())

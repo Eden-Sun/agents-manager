@@ -58,12 +58,16 @@ pub(crate) fn lost_head(kind: &str, screen: &str, sent: &str, tail: usize) -> Op
 }
 
 /// 框裡每一列（去掉 `❯` 與縮排），從 `❯` 那列到下緣分隔線，尾端的空白列不算。
+///
+/// 框頂的 `❯` 畫在第 0 欄；貼進去的每一列（含換列）claude 都縮兩格。所以只認頂格的 `❯`——
+/// 貼的內容自己就有 `❯ ` 開頭的列（#562：child-blocked 通知夾著子 agent 的畫面原文）時，
+/// 不能把那一列當成框頂，否則整段明明都在框裡，卻判成「看不到開頭」而清框重試到天荒地老。
 fn box_rows(kind: &str, screen: &str, tail: usize) -> Option<Vec<String>> {
     let plain = super::delivery::plain_without_hints(kind, screen);
     let marker = super::screen::prompt_echo_prefix(kind)?.trim_end();
     let lines: Vec<&str> = plain.lines().collect();
     let from = lines.len().saturating_sub(tail);
-    let idx = from + lines[from..].iter().rposition(|l| undecorate_row(l).starts_with(marker))?;
+    let idx = from + lines[from..].iter().rposition(|l| l.starts_with(marker))?;
     let mut rows: Vec<String> = Vec::new();
     for (n, line) in lines[idx..].iter().enumerate() {
         let row = undecorate_row(line);
@@ -255,6 +259,29 @@ mod tests {
         // 同一個 8 行框，畫面其實有 55 列（上限 22）：框沒滿還看不到開頭＝真的缺頭。
         let (screen, sent) = real!("rows26-box8-46lines");
         assert!(truncated("claude", screen, sent, Some(55)));
+    }
+
+    /// #562：daemon 的 child-blocked 通知夾著子 agent 的畫面原文，裡面有 `❯ ` 開頭的列。真 claude 2.1.281
+    /// 把整段都收進框（55 列的畫面），那兩列縮兩格畫在框裡——不是框頂，不能判成缺頭。
+    #[test]
+    fn a_pasted_row_starting_with_the_prompt_mark_is_not_the_box_top() {
+        let (screen, sent) = (
+            include_str!("fixtures/claude-2.1.281-paste-child-blocked-notice.ansi"),
+            include_str!("fixtures/claude-2.1.281-paste-child-blocked-notice.sent"),
+        );
+        assert!(sent.lines().filter(|l| l.starts_with("❯ ")).count() >= 2, "fixture 要真的夾著 `❯ ` 開頭的列");
+        assert!(lost_head("claude", screen, sent, 400).is_none(), "開頭就在框頂");
+        assert!(!truncated("claude", screen, sent, Some(55)));
+    }
+
+    /// 同一則通知走完整的送出路：以前每次都 `paste_truncated`、清框、放回佇列；現在整段送達、只送一次。
+    #[tokio::test]
+    async fn a_notice_quoting_a_child_screen_reaches_the_agent() {
+        let f = fixture().await;
+        let text = include_str!("fixtures/claude-2.1.281-paste-child-blocked-notice.sent");
+        let out = prompt(&f.env.app, &f.bot_id, text, "crid-child-blocked").await.unwrap();
+        assert!(matches!(out.delivery.as_str(), "ok"), "{out:?}");
+        assert_eq!(received(&f), vec![text.to_string()]);
     }
 
     /// 滿框但看得到的字不是送出文字的尾段（例如使用者在框裡另外打的字）：照樣算缺頭，不按 Enter。
