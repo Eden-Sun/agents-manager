@@ -46,6 +46,7 @@ import { MemBadge } from './MemBadge'
 import { ThemeToggle } from './ThemeToggle'
 import { ProjectMemBadge } from './ProjectMemBadge'
 import { RebuildBadge } from './RebuildBadge'
+import { DeployNowBadge } from './DeployNowBadge'
 import { TabsBadge } from './TabsBadge'
 import { ModelTag } from './ModelTag'
 import { BotRowMenu } from './BotRowMenu'
@@ -1071,6 +1072,8 @@ export function Sidebar() {
           </div>
           <div className="head-brand-meta">
             <PaneBadge />
+            {/* 立即部署（2026-09-25 使用者）：落後且有程式碼差異才出現；疊在重建申請數正下方。 */}
+            <DeployNowBadge />
             <ThemeToggle />
             <ConnBadge socket={socket} connected={connected} />
           </div>

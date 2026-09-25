@@ -43,7 +43,11 @@ case "$sub:$op" in
   lease:acquire)     printf '%s' "$STUB_ACQUIRE" ;;
   lease:release)     [ -n "${STUB_RELEASE_FAIL:-}" ] && { printf '%s' '{"error":"http_error","status":409,"detail":{"error":"conflict","reason":"fence_mismatch"}}'; exit 1; }
                      printf '%s' '{"released":true}' ;;
-  approval:request)  printf '%s' "$STUB_APPROVAL" ;;
+  approval:request)  case " $* " in
+                       *" --purpose restart "*) [ -n "${STUB_RESTART_FAIL:-}" ] && exit 1; printf '%s' "${STUB_RESTART_APPROVAL:-$STUB_APPROVAL}" ;;
+                       *) printf '%s' "$STUB_APPROVAL" ;;
+                     esac ;;
+  approval:decide)   [ -n "${STUB_DECIDE_FAIL:-}" ] && exit 1; printf '%s' '{"status":"approved"}' ;;
   approval:list)     printf '%s' "$STUB_APPROVAL_LIST" ;;
   approval:)         printf '%s\n' "${STUB_APPROVAL_HELP- --supersedes APPROVAL_ID}" ;;   # `approval --help`
   assign:*)          for i in $(seq 1 $#); do
@@ -849,6 +853,121 @@ if [ -e "$AGM_DIR/daemon-update.undecided" ]; then
 else
   echo "ok   - 裁示了就清掉計時"; PASS=$((PASS + 1))
 fi
+teardown
+
+# ── 立即部署（使用者 2026-09-25，SPEC §18.2）：daemon 寫 daemon-update.now.json（使用者核准的 rebuild），
+# kick 略過觸發閘／已派過／AGM 裁示，安全條件照舊。
+now_setup() { # now_setup [sha]：非整點、已派過同一顆，請求檔指著使用者核准的 now-1
+  setup
+  export AGM_TEST_MINUTE=37
+  NOW_SHA=${1:-$(/usr/bin/git -C "$AGM_REPO" rev-parse HEAD)}
+  printf '%s' "{\"approval_id\":\"now-1\",\"sha\":\"$NOW_SHA\",\"requested_by\":\"ui\"}" > "$AGM_DIR/daemon-update.now.json"
+  /usr/bin/git -C "$AGM_REPO" rev-parse HEAD > "$AGM_DIR/daemon-update.last"
+  export STUB_APPROVAL_LIST="{\"approvals\":[{\"id\":\"now-1\",\"purpose\":\"rebuild\",\"requester\":\"test-owner\",\"target_commit\":\"$NOW_SHA\",\"status\":\"approved\"}]}"
+  export STUB_RESTART_APPROVAL='{"id":"rs-1","status":"pending"}'
+}
+now_teardown() { teardown; unset STUB_RESTART_APPROVAL STUB_RESTART_FAIL STUB_DECIDE_FAIL NOW_SHA; }
+
+# N1. 一路順：非整點、同一顆已派過也照樣派；不另申請 rebuild，用使用者那筆拿窗口；restart 也預先開好並核准。
+now_setup
+bash "$SCRIPT"
+check "立即模式不等整點" "使用者按了立即部署，不等整點" "$AGM_DIR/daemon-update.log"
+check_no "不為 rebuild 另外申請（使用者已核准）" "approval request --requester test-owner" "$AGM_DIR/calls.log"
+check "用使用者那筆核准拿 rebuild 窗口" "lease acquire rebuild --approval now-1 --commit $NOW_SHA" "$AGM_DIR/calls.log"
+check "safety 綁使用者那筆核准" "lease safety --approval now-1" "$AGM_DIR/calls.log"
+check "restart 以建置 child 名義申請" "approval request --requester bot-build --purpose restart" "$AGM_DIR/calls.log"
+check "restart 同一輪核准，actor 指回 rebuild 核准" "approval decide rs-1 --decision approve --actor deploy-now:now-1" "$AGM_DIR/calls.log"
+check "派工 request id 帶核准（不撞先前派過的同一顆）" "request-id agm-daemon-update-${NOW_SHA}-now-now-1" "$AGM_DIR/calls.log"
+check "正文寫明是使用者按的立即部署" "左上角按「立即部署」" "$AGM_DIR/assign-body.txt"
+check "正文帶預先核准的 restart" "restart 核准 rs-1" "$AGM_DIR/assign-body.txt"
+check "正文照抄固定條件" "TASK-BODY 建置說明" "$AGM_DIR/assign-body.txt"
+check_eq "派工成功就收掉請求" "no" "$([ -e "$AGM_DIR/daemon-update.now.json" ] && echo yes || echo no)"
+check "狀態檔改指使用者那筆" '"id": "now-1"' "$AGM_DIR/daemon-update.approval.json"
+now_teardown
+
+# N2. 還有人在 working：不拿窗口、不派，請求留著等下一輪（安全條件不因為「立即」放寬）。
+now_setup
+export STUB_SAFETY='{"safe":false,"working":[{"bot_id":"bot-busy","name":"bot-busy"}],"in_flight":[],"unreadable":[],"excluded_bot_ids":["bot-build","bot-manager"]}'
+bash "$SCRIPT"
+check "有人在跑就等安全窗口" "立即部署等安全窗口" "$AGM_DIR/daemon-update.log"
+check_no "有人在跑不拿窗口" "lease acquire" "$AGM_DIR/calls.log"
+check_no "有人在跑不開 restart 核准" "--purpose restart" "$AGM_DIR/calls.log"
+check_eq "請求留著" "yes" "$([ -e "$AGM_DIR/daemon-update.now.json" ] && echo yes || echo no)"
+now_teardown
+
+# N3. 使用者那筆核准被撤銷（或過期／用掉）：收掉請求並喊人，不拿去撞 acquire。
+now_setup
+export STUB_APPROVAL_LIST="{\"approvals\":[{\"id\":\"now-1\",\"purpose\":\"rebuild\",\"requester\":\"test-owner\",\"target_commit\":\"$NOW_SHA\",\"status\":\"revoked\"}]}"
+bash "$SCRIPT"
+check "核准不能用就喊人" "ops-alert.*now_approval_unusable" "$AGM_DIR/calls.log"
+check_no "不拿窗口" "lease acquire" "$AGM_DIR/calls.log"
+check_eq "請求收掉" "no" "$([ -e "$AGM_DIR/daemon-update.now.json" ] && echo yes || echo no)"
+now_teardown
+
+# N4. 核准對不上（申請者不是自己、commit 不同）：一樣不用。
+now_setup
+export STUB_APPROVAL_LIST="{\"approvals\":[{\"id\":\"now-1\",\"purpose\":\"rebuild\",\"requester\":\"someone-else\",\"target_commit\":\"$NOW_SHA\",\"status\":\"approved\"}]}"
+bash "$SCRIPT"
+check "申請者對不上算不能用" "核准 mismatch" "$AGM_DIR/daemon-update.log"
+check_no "不拿窗口" "lease acquire" "$AGM_DIR/calls.log"
+now_teardown
+
+# N5. 查不到那筆核准（daemon 不在）：這輪不知道，請求留著，不當成不能用。
+now_setup
+export STUB_APPROVAL_LIST='{"error":"unavailable"}'
+bash "$SCRIPT"
+check "查不到就這輪不派" "查不到立即部署的核准 now-1" "$AGM_DIR/daemon-update.log"
+check_eq "請求留著" "yes" "$([ -e "$AGM_DIR/daemon-update.now.json" ] && echo yes || echo no)"
+now_teardown
+
+# N6. 線上已經是那一顆（docs-only）：收掉請求，不申請、不拿窗口。
+now_setup
+/usr/bin/git -C "$AGM_REPO" rev-parse --short HEAD > "$AGM_DIR/daemon-update.built"
+bash "$SCRIPT"
+check "零程式碼差異就收掉" "已經是最新" "$AGM_DIR/daemon-update.log"
+check_no "不拿窗口" "lease acquire" "$AGM_DIR/calls.log"
+check_eq "請求收掉" "no" "$([ -e "$AGM_DIR/daemon-update.now.json" ] && echo yes || echo no)"
+now_teardown
+
+# N7. commit 不在 origin/main 上：不做。
+now_setup 0123456789abcdef0123456789abcdef01234567
+bash "$SCRIPT"
+check "不在 main 上就喊人" "ops-alert.*now_target_invalid" "$AGM_DIR/calls.log"
+check_no "不拿窗口" "lease acquire" "$AGM_DIR/calls.log"
+now_teardown
+
+# N8. 上一筆更新還沒結案：不疊，請求留著（等它結案後下一輪接著做）。
+now_setup
+export STUB_ASSIGNMENTS='{"assignments":[{"client_request_id":"agm-daemon-update-abc","status":"delivered"}]}'
+bash "$SCRIPT"
+check "上一筆未結案不疊" "還沒結案" "$AGM_DIR/daemon-update.log"
+check_eq "請求留著" "yes" "$([ -e "$AGM_DIR/daemon-update.now.json" ] && echo yes || echo no)"
+now_teardown
+
+# N9. restart 核准開不出來：照樣派，正文叫建置 child 照例行流程申請（不是停手）。
+now_setup
+export STUB_RESTART_FAIL=yes
+bash "$SCRIPT"
+check "restart 開不出來有記 log" "開不出立即部署的 restart 核准" "$AGM_DIR/daemon-update.log"
+check "正文改叫 child 自己申請" "restart 核准沒能預先開好" "$AGM_DIR/assign-body.txt"
+check "照樣派工" "已派工 agm-daemon-update-" "$AGM_DIR/daemon-update.log"
+now_teardown
+
+# N10. 請求檔壞掉：喊人並收掉，這輪回到例行判斷（不略過任何閘）。
+now_setup
+printf '%s' 'not json' > "$AGM_DIR/daemon-update.now.json"
+bash "$SCRIPT"
+check "壞掉的請求喊人" "ops-alert.*now_request_corrupt" "$AGM_DIR/calls.log"
+check_no "不當成立即部署" "使用者按了立即部署" "$AGM_DIR/daemon-update.log"
+check_no "例行判斷下（同一顆已派過）不派" "已派工" "$AGM_DIR/daemon-update.log"
+check_eq "請求收掉" "no" "$([ -e "$AGM_DIR/daemon-update.now.json" ] && echo yes || echo no)"
+now_teardown
+
+# N11. 沒有請求檔的例行一輪不會去開 restart 核准（那仍是建置 child 申請、AGM 裁示）。
+setup
+bash "$SCRIPT"
+check_no "例行路徑不預開 restart" "--purpose restart" "$AGM_DIR/calls.log"
+check_no "例行路徑正文不提立即部署" "立即部署" "$AGM_DIR/assign-body.txt"
 teardown
 
 echo "$PASS passed, $FAIL failed"

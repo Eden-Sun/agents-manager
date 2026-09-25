@@ -207,6 +207,9 @@ pub fn router(app: Arc<App>) -> Router {
         )
         .route("/supervisor/persona/adopt-embedded", post(crate::supervisor::api::post_persona_adopt))
         .route("/supervisor/build-inputs", get(crate::supervisor::api::get_build_inputs))
+        // 左上角「立即部署」：落後多少、有沒有在跑；按下去交給既有的 daemon-update-kick（SPEC §18.2）。
+        .route("/deploy/status", get(crate::deploy_now::get_status))
+        .route("/deploy/now", post(crate::deploy_now::post_now))
         // 遠端入口：argv 只算 requested，宣稱通了要有帶 actor 的觀測（SPEC §18.12）。
         .route(
             "/supervisor/remote",

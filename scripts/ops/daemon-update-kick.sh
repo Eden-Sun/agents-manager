@@ -127,6 +127,32 @@ if ! take_lock; then
 fi
 log "== check"
 
+# 立即部署（使用者 2026-09-25，SPEC §18.2）：使用者在 UI 左上角按「立即部署」時，daemon 以使用者的名義核准一筆
+# rebuild（requester＝這支腳本的 OWNER、commit＝確認框上那顆），寫下 daemon-update.now.json，再 launchctl kickstart
+# 這個 job。這一輪因此略過三道「排程」的閘：觸發條件（整點／門檻／等太久）、「同 commit 已派過」、等 AGM 裁示。
+# **安全條件一條都不略過**：建置 child 要在、上一筆更新要結案、沒人 working 才拿得到 rebuild 窗口（等太久的放寬照舊）、
+# 派工正文的固定條件（乾淨 HEAD worktree、整樹測試、.bak、驗證失敗回滾）照抄。等不到窗口就留著請求，下一輪（5 分鐘）再試；
+# 請求只在派工成功、或那筆核准已經不能用（過期／撤銷／用掉）時才收掉，所以最長活到核准的 6 小時有效期。
+NOW_FILE="$DIR/daemon-update.now.json"
+NOW=0; NOW_APPROVAL=""; NOW_SHA=""
+drop_now() { rm -f "$NOW_FILE"; log "收掉立即部署請求（$1）"; }
+if [ -f "$NOW_FILE" ]; then
+  NOW_LINE=$(python3 -c '
+import json,sys
+with open(sys.argv[1]) as f: d=json.load(f)
+a,c=d.get("approval_id"),d.get("sha")
+if not isinstance(a,str) or not a.strip() or not isinstance(c,str) or not c.strip() or " " in a+c: sys.exit(1)
+print(a.strip(), c.strip())
+' "$NOW_FILE" 2>/dev/null) || NOW_LINE=""
+  if [ -n "$NOW_LINE" ]; then
+    NOW=1; NOW_APPROVAL=${NOW_LINE%% *}; NOW_SHA=${NOW_LINE#* }
+    log "立即部署請求：核准 ${NOW_APPROVAL}，commit ${NOW_SHA}"
+  else
+    alert now_request_corrupt "立即部署請求 ${NOW_FILE} 讀不出 approval_id／sha，已收掉；請使用者重按一次"
+    drop_now "檔案壞掉"
+  fi
+fi
+
 # 觸發條件有三個：整點的例行檢查、**累積夠多重建申請**（使用者 2026-09-14），或**最早一筆申請已經等太久**
 # （使用者 2026-09-15：不能一直卡著等湊滿）。launchd 每 5 分鐘跑一次，所以「整點」＝分鐘 < 5；
 # 門檻 `AGM_REBUILD_THRESHOLD`（預設 3；使用者 2026-09-16 從 5 降下來）、等待上限 `AGM_REBUILD_MAX_WAIT_MIN`（預設 30 分鐘）。
@@ -195,7 +221,9 @@ UNKNOWN=0
 case "$REQUESTS" in ''|*[!0-9]*) note_fail "讀不到重建申請數（approval list 壞了或格式不符）：這輪照常往下檢查，不當成沒人申請"; UNKNOWN=1; REQUESTS=0 ;; esac
 case "$WAITED" in ''|*[!0-9]*) WAITED=0 ;; esac
 case "$MINE" in 1) ;; *) MINE=0 ;; esac
-if [ "$REQUESTS" -ge "$THRESHOLD" ]; then
+if [ "$NOW" = 1 ]; then
+  log "使用者按了立即部署，不等整點"
+elif [ "$REQUESTS" -ge "$THRESHOLD" ]; then
   log "重建申請 ${REQUESTS}/${THRESHOLD}，不等整點"
 elif [ "$REQUESTS" -gt 0 ] && [ "$WAITED" -ge "$MAX_WAIT_MIN" ]; then
   log "最早一筆重建申請已等 ${WAITED} 分鐘（上限 ${MAX_WAIT_MIN}），不等整點（申請 ${REQUESTS}/${THRESHOLD}）"
@@ -209,6 +237,15 @@ fi
 CHECKED=1   # 過了觸發條件：從這裡起這一輪算「真的檢查」，失敗才會累計、完整跑完才會清零
 "$GIT" -C "$REPO" fetch -q origin main 2>>"$LOG" || log "fetch 失敗，用本地 origin/main"
 HEAD_SHA=$("$GIT" -C "$REPO" rev-parse origin/main) || { note_fail "無法讀取 origin/main，跳過"; exit 0; }
+# 立即模式建的是確認框上那顆（daemon 驗過它在 origin/main 上），不是這一刻的 HEAD。
+DIFF_TO=origin/main
+if [ "$NOW" = 1 ]; then
+  if ! "$GIT" -C "$REPO" merge-base --is-ancestor "$NOW_SHA" origin/main 2>/dev/null; then
+    alert now_target_invalid "立即部署的 commit ${NOW_SHA} 不在 origin/main 上（或讀不到），這趟不做"
+    drop_now "commit 不在 origin/main"; exit 0
+  fi
+  DIFF_TO=$NOW_SHA
+fi
 
 # 會影響 binary 的路徑。問 daemon 拿（它知道自己 include_str! 了什麼）；問不到再用保底清單。
 PATHS=$("$AGM" --compact build-inputs 2>/dev/null | python3 -c '
@@ -228,13 +265,17 @@ if [ -f "$BUILT" ]; then
 fi
 if [ -n "$BUILT_SHA" ]; then
   # shellcheck disable=SC2086  # PATHS 是刻意要拆成多個參數的
-  if "$GIT" -C "$REPO" diff --quiet "$BUILT_SHA" origin/main -- $PATHS; then
+  if "$GIT" -C "$REPO" diff --quiet "$BUILT_SHA" "$DIFF_TO" -- $PATHS; then
+    if [ "$NOW" = 1 ]; then
+      drop_now "${BUILT_SHA} 到 ${NOW_SHA} 只動到不進 binary 的檔，已經是最新"; exit 0
+    fi
     log "$BUILT_SHA 之後只動到不進 binary 的檔，跳過（origin/main ${HEAD_SHA}）"
     echo "$HEAD_SHA" > "$STATE"
     exit 0
   fi
 fi
-if [ -f "$STATE" ] && [ "$(cat "$STATE")" = "$HEAD_SHA" ]; then
+# 立即模式不看「已派過」：上一趟派過同一顆但沒上線（回滾、阻塞）時，使用者重按就是要再來一次。
+if [ "$NOW" != 1 ] && [ -f "$STATE" ] && [ "$(cat "$STATE")" = "$HEAD_SHA" ]; then
   log "$HEAD_SHA 已經派過，跳過"; exit 0
 fi
 
@@ -327,6 +368,40 @@ print(status)
   done
   return 1
 }
+if [ "$NOW" = 1 ]; then
+  # 核准是 daemon 在使用者按下時開的：只認 rebuild、申請者是自己、commit 對得上、還是 approved 沒過期的那筆。
+  # 查不到＝這輪不知道（留著請求下一輪再問）；查得到但不能用＝收掉請求，不要一直拿它去撞 acquire。
+  NOW_STATUS=$("$AGM" --compact approval list --id "$NOW_APPROVAL" 2>/dev/null | APPROVAL="$NOW_APPROVAL" OWNER="$OWNER" SHA="$NOW_SHA" python3 -c '
+import datetime,json,os,sys
+rows=json.load(sys.stdin)["approvals"]
+a=next((a for a in rows if a.get("id")==os.environ["APPROVAL"]),None)
+if a is None: sys.exit(1)
+if a.get("purpose")!="rebuild" or a.get("requester")!=os.environ["OWNER"] or a.get("target_commit")!=os.environ["SHA"]:
+    print("mismatch"); sys.exit(0)
+status=a.get("status") or ""
+if a.get("expires_at") and status=="approved":
+    expiry=datetime.datetime.fromisoformat(a["expires_at"].replace("Z","+00:00"))
+    if expiry <= datetime.datetime.now(datetime.timezone.utc): status="expired"
+print(status)
+' 2>/dev/null) || NOW_STATUS=""
+  case "$NOW_STATUS" in
+    approved) ;;
+    "") note_fail "查不到立即部署的核准 ${NOW_APPROVAL}，這輪不派（請求留著，下一輪再問）"; exit 0 ;;
+    *) alert now_approval_unusable "立即部署的核准 ${NOW_APPROVAL} 不能用（${NOW_STATUS}），這趟不做；要部署請使用者重按"
+       drop_now "核准 ${NOW_STATUS}"; exit 0 ;;
+  esac
+  APPROVAL=$NOW_APPROVAL
+  APPR_COMMIT=$NOW_SHA
+  # 狀態檔改指這一筆：這趟上線後例行路徑看到的是它（consumed）→ 需要時為 HEAD 重新申請，而不是繼續等一筆舊的。
+  python3 -c '
+import json,os,sys
+path,commit,owner,aid=sys.argv[1:]
+with open(path+".tmp","w") as f: json.dump(dict(commit=commit,owner=owner,id=aid),f)
+os.replace(path+".tmp",path)
+' "$APPROVAL_STATE" "$NOW_SHA" "$OWNER" "$APPROVAL" || { note_fail "保存核准 ID 失敗，這輪不派"; exit 0; }
+  rm -f "$DIR/daemon-update.undecided"
+else
+# ── 例行路徑：申請／沿用核准、等 AGM 裁示（縮排刻意不動，對照歷史比較好讀）──
 if [ -f "$APPROVAL_STATE" ]; then
   STATE_LINE=$(python3 -c '
 import json,sys
@@ -447,6 +522,7 @@ fi
 if [ "$STATUS" != "approved" ]; then
   log "核准狀態是 ${STATUS:-unknown}，這輪不派（下個整點再看）"; exit 0
 fi
+fi   # 例行路徑的核准段到這裡
 
 # 取得 rebuild 窗口：acquire 會在同一個鎖裡重驗一次 idle 再把窗口拿走。
 
@@ -492,7 +568,12 @@ WAITED_SECS=${ESC_REST##*|}
 case "$WAITED_SECS" in ''|*[!0-9]*) WAITED_SECS=0 ;; esac
 case "$SAFE" in unknown|unreadable) note_fail "讀不到／看不懂安全窗口判定（${SAFE}），這輪不派" ;; esac
 if [ "$SAFE" != "yes" ]; then
-  log "還有人在跑（${SAFE}），這輪不派"; exit 0
+  if [ "$NOW" = 1 ]; then
+    log "還有人在跑（${SAFE}），立即部署等安全窗口：請求留著，下一輪再試"
+  else
+    log "還有人在跑（${SAFE}），這輪不派"
+  fi
+  exit 0
 fi
 # 這次不是等到全靜止才換的：log 與派工正文都要寫明（SPEC §18.10）。
 ESC_NOTE=""
@@ -544,6 +625,28 @@ if [ -n "$LEASE_TOKEN" ]; then
 fi
 log "已取得 rebuild 窗口 fence=$LEASE"
 
+# 立即模式：restart 也由使用者這一下授權。以建置 child 的名義申請（§3c：restart 的 requester／owner 要是它自己的
+# bot id，否則 acquire 會 409 exclude_not_requester），同一輪以 `deploy-now:<rebuild 核准>` 核准。request id 固定，
+# 這輪之後重跑也回同一筆。開不出來就不帶，建置 child 照例行流程申請（AGM 裁示）——不是停手。
+RESTART_APPROVAL=""
+if [ "$NOW" = 1 ]; then
+  RESTART_APPROVAL=$("$AGM" --compact approval request --requester "$BOT" --purpose restart \
+    --scope "daemon 重啟（立即部署 ${NOW_SHA}；使用者已在 UI 核准，rebuild 核准 ${APPROVAL}）" \
+    --commit "$NOW_SHA" --request-id "deploy-now-restart-${APPROVAL}" --expires-in 21600 2>>"$LOG" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+if not isinstance(d.get("id"),str) or not d["id"]: sys.exit(1)
+print(d["id"])
+' 2>/dev/null) || RESTART_APPROVAL=""
+  if [ -n "$RESTART_APPROVAL" ] && "$AGM" --compact approval decide "$RESTART_APPROVAL" --decision approve \
+       --actor "deploy-now:${APPROVAL}" --reason "使用者在 UI 按「立即部署」（rebuild 核准 ${APPROVAL}）" >> "$LOG" 2>&1; then
+    log "立即部署的 restart 核准 ${RESTART_APPROVAL} 已開好並核准（建置 child ${BOT}）"
+  else
+    log "開不出立即部署的 restart 核准（${RESTART_APPROVAL:-申請失敗}）：建置 child 照例行流程申請"
+    RESTART_APPROVAL=""
+  fi
+fi
+
 TMP=$(mktemp)
 cat "$DIR/daemon-update-task.md" > "$TMP" 2>/dev/null || true
 {
@@ -558,17 +661,29 @@ cat "$DIR/daemon-update-task.md" > "$TMP" 2>/dev/null || true
     printf 'origin/main 現在是 %s，多出來的 commit 只動到不進 binary 的檔；仍然 checkout %s 來建，restart 核准也申請 %s，不要拿 HEAD。\n' "$HEAD_SHA" "$APPR_COMMIT" "$APPR_COMMIT"
   fi
   [ -n "$ESC_NOTE" ] && printf '%s\n' "$ESC_NOTE"
+  if [ "$NOW" = 1 ]; then
+    printf '這趟是使用者在 UI 左上角按「立即部署」觸發的：rebuild 核准 %s 由使用者核准，不等排程、不等 AGM 裁示。固定條件一條都不省（乾淨 HEAD worktree、整樹測試、沒人 working 才換、.bak、驗證失敗回滾）。\n' "$APPROVAL"
+    if [ -n "$RESTART_APPROVAL" ]; then
+      printf 'restart 核准 %s（requester＝你自己 %s、commit %s）也已由使用者一併核准：跳過 3c 第 2 步的申請與等待，直接用它走第 3 步與 `scripts/ops/daemon-swap.sh --approval %s`。\n' "$RESTART_APPROVAL" "$BOT" "$APPR_COMMIT" "$RESTART_APPROVAL"
+    else
+      printf 'restart 核准沒能預先開好：照 3c 第 2 步自己申請。\n'
+    fi
+  fi
   # shellcheck disable=SC2016  # 單引號是刻意的：反引號與 %s 都是要原樣印出去的文字
   printf '做完請回報，並用 `bin/agm lease release rebuild --owner %s --fence %s%s` 交還窗口；\n' "$OWNER" "$LEASE" "$TOKEN_TEXT"
   printf '（lease-token 只在 acquire 那一次出現、只寫在上面那個檔案裡：用 --lease-token-file 讓 agm 自己去讀，不要 cat 出來、不要印出來、不要貼進回報——argv 同 uid 的行程看得到。真的拿不到就請 AGM 用 --force 並附理由接管。）\n'
   printf '需要重啟正式 daemon 另外申請 restart 核准與租約，替換前請 AGM 重驗所有使用者與排程回合。\n'
 } >> "$TMP"
+# 立即模式的 request id 多帶核准 id：同一顆 commit 先前派過（沒上線）時，同一個 id 會被當成重送、拿回舊的那筆。
+CRID="agm-daemon-update-$APPR_COMMIT"
+[ "$NOW" = 1 ] && CRID="agm-daemon-update-${APPR_COMMIT}-now-${APPROVAL}"
 if "$AGM" --compact assign --bot "$BOT" --text-file "$TMP" \
-     --request-id "agm-daemon-update-$APPR_COMMIT" ${REVIEW[@]+"${REVIEW[@]}"} \
+     --request-id "$CRID" ${REVIEW[@]+"${REVIEW[@]}"} \
      --owns daemon --owns web --owns Cargo.lock >> "$LOG" 2>&1; then
   # 「已派過」記的是這次實際建出來的東西：DEFERRED 時記核准的 commit，下一輪才會看到 HEAD 還沒建（記 HEAD 會讓它被當成已派過）。
   if [ "$DEFERRED" = 1 ]; then echo "$APPR_COMMIT" > "$STATE"; else echo "$HEAD_SHA" > "$STATE"; fi
-  log "已派工 agm-daemon-update-${APPR_COMMIT}（origin/main ${HEAD_SHA}）"
+  log "已派工 ${CRID}（origin/main ${HEAD_SHA}）"
+  [ "$NOW" = 1 ] && drop_now "已派工 ${CRID}"
 else
   note_fail "派工失敗，嘗試交還窗口"
   # shellcheck disable=SC2086  # TOKEN_ARG 是刻意要拆成兩個參數的（沒有 token 時是空字串）

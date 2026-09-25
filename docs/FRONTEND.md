@@ -31,7 +31,7 @@ bun test                        # 單元測試（見下：走 bunfig.toml 的 pr
 web/src/
   api/        index.ts（對外的 API 門面）· types.ts（共用型別）· normalize.ts（共用的寬鬆解碼）· transport.ts（fetch + WS 重連）
               mock.ts（VITE_MOCK 假 daemon）· mentions.ts（@mention 規則，與 daemon group.rs 同一套）
-              自成一組的 API 各自帶型別與解碼：preview.ts（`toPreview*`）· supervisor.ts · judge.ts · rebuildRequests.ts · changelog.ts
+              自成一組的 API 各自帶型別與解碼：preview.ts（`toPreview*`）· supervisor.ts · judge.ts · rebuildRequests.ts · deploy.ts · changelog.ts
   store/      store.ts（單一 Zustand store：server state 鏡像 + UI state + WS 事件）· routeSync.ts（網址 ↔ store）
               unread.ts · shelf*.ts · quotaHide.ts · queuedSend.ts 等（有 .test.ts 的是純函式）
   lib/        純函式：routes · tuiChoices（終端快照 → 選單）· choiceDraft／draftPreload（多分頁問卷草稿）· missionView（任務卡推導）
