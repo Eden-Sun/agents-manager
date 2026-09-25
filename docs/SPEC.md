@@ -603,7 +603,26 @@ Codex 0.156 起，TUI 在回合失敗或被中斷時會把已收到的回答／�
 Codex 0.157 對暫時性 OpenAI file-blob 上傳失敗加入重試，並把上傳逾時從 60 秒放寬到 5 分鐘（上游 #47122、#47393）；這由 Codex CLI 處理，daemon 附件 staging 流程不變。
 
 
-### 4.3c 撞限偵測的第二意見：只記錄（`[judge]`，issue #240）
+### 4.3c Jev 判斷層：角色、界線與現行用法（`[judge]`，issue #240）
+
+#### Jev 的角色與界線（2026-09-25，#240）
+
+Jev 的角色是旁路判斷層，不是 worker；實際工作仍由 claude／codex／grok 執行。它是 TypeSafe System One 的型別判斷 API，只回 Noul、Choice、Score 等答案；Jev 不產生自由文字、程式碼或工具呼叫，也沒有可啟動的 pane、session 或 herdr agent kind。
+
+worker、model、identity、ownership、額度處理與 issue 優先順序仍由現有確定性規則或使用者決定。程式決定是否詢問、如何解讀結果及是否顯示提示；Jev 的答案只能成為 shadow 記錄或人可檢視的提示；不可直接按鍵、核准、停派、改認領或關票，也不能作為配額耗盡時接手工作的 fallback。
+
+Jev 不負責回合收尾、額度記帳或競態判斷；這些依 run、turn、身分與時鐘等結構資料處理。
+
+六組離線評估（#262–#267）支持的是逐場景驗證的窄問題，不是通用路由器：
+
+- #265 的 `is_live_ui` Noul 在正式題目 26 題答對 25 題；#227／#237 類反例 10/10 判對、真撞限畫面 5/5 判為介面，適合作為帳本第二意見。Choice `screen_kind` 的整體準確率是 0.80，不能拿來判斷執行狀態；`composer_is_idle` 等結構性事實仍優先。
+- #264 的 `same_work` Noul 離線 precision／recall 是 0.94／0.89，但真實基準率下估計 precision 約 0.68。它只作不阻擋的撞題提示，不能合併成路徑比對分數，也不能決定 ownership。
+- #263 在 0.8 門檻上的 `claims_verified` P/R 是 0.95／0.91，`asks_parent_action` 是 1.00／0.54；中英配對 40 組有 39 組判斷一致，機率中位差 0.01。現行整合只顯示這兩個驗收提示，不改 assignment 狀態或驗收決定。
+- #262 的 `touches_agm` Noul 準確率是 0.88，但原樣本 50 筆由單一標註者標記；門檻 0.4 的零漏是在同一批樣本上得到，帳本當時也沒有真實 verdict。等 release-triage 有真實 verdict 標籤後再重跑，不能單靠現有結果授權上線。
+- #266 的五選一 CI 分類準確率 0.50，對 `runner_environment` 的 recall 是 0/7；唯一較好的 `rerun_would_pass`（0.75）仍只有 5 筆真實重跑，且前次同測試結果的確定性查詢能先排除 94% 的紅。#267 的 `next_action` 準確率 0.51，`restart_bot` precision 0.24；`auth_problem`／`quota_problem` 的模型結果沒有顯示比現有事實多出的效益。#266 與 #267 不接進工作流程。
+
+跨題結果顯示窄 Noul 在部分任務有用，但 Choice／Score 不能直接拿來路由或排序；`confidence` 也不是通用門檻。即使分數符合某一題的門檻，失敗、未啟用、專案不在名單或資料不足時仍照原流程處理。Jev 的答案不等於事實，也不授權執行動作；要新增用途或改變提示的效果，另立決定並先驗證該用途的資料與外送範圍。
+
 畫面比對判定「這是新的撞限」（codex／grok，`capture_codex_usage_notices`）的那一刻，daemon 另外問 TypeSafe 的 Jev 一題是非題：命中的那一行是介面自己畫的，還是 bot 印出來的內容（原始碼、diff、測試輸出——#227／#237 的誤判來源）。**只寫帳本、不改行為**：回合照收、額度照標；這條路的任何失敗（關閉、逾時 3 秒、429、key 讀不到）都不影響它們，也不重試。
 - **預設全關，兩層都要開**：`[judge] enabled = true` 且專案的 id 或 label 在 `projects` 名單裡。另有 `max_per_hour`（預設 60）保險絲。
 - **送出的內容**：agent kind、命中行、畫面最後 60 行（上限 6,000 字元）、輸入列是否空著。不送 bot／專案／對話的任何識別。送出前逐行遮罩：常見 token 前綴、`Bearer …`、`*TOKEN／SECRET／PASSWORD／API_KEY*` 的值、PEM 區塊、email、≥32 字元的亂數字串，`/Users/<name>/` 改成 `~/`。遮罩是盡力而為；閘門是上面的開關。
