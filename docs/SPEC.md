@@ -311,6 +311,14 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   開著的框記在記憶體：daemon 重啟後最多重講一次通知。
   指令從框上方的 `Bash command` 讀：多列或折行的指令每列前有 `│`；只佔一列時沒有 `│`，就取標題下第一列（下一列是說明）。
   手動重現要用目標**整段都是**替換輸出的指令，例如 `rm -rf "$(echo tmpdir2)"`；`rm -rf "$(pwd)/tmpdir"` 在 2.1.281 不跳框、直接刪掉（2026-09-24 實測）。
+- **claude 2.1.281 的「Session paused」選單不按、當成 blocked 讓人選**（`session_paused`，辨識在 `tui_prompts::is_session_paused_menu`）：
+  API 拒答或額度用完時 claude 停下來問「1. Switch to <備援模型> / 2. Edit prompt and retry with <原模型>」（或用額度續跑／換模型），
+  底下還掛一行 `✻ Waiting for API response · will retry in …`；herdr 判成 `idle`，網頁不彈選項，回合還被 §4.3 備援收掉、把選單一行存成回覆（2026-09-25 cf-ox-fork-fork）。
+  認法：最底 18 行非空行裡有一份開著的編號選單（從 `1.` 連號、至少兩項、**剛好一個**游標、最後一項底下 ≤ 6 行且只有腳註／`✻` spinner／statusLine、輸入列不是空的），
+  選單正上方同一個框裡（中間沒有 `⏺`／`●`／`⎿` 對話輸出）有自己一行的 `Session paused`。回覆裡照抄這段（底下是回合結束那一行與空輸入列）不算。
+  herdr 轉 `idle` 那一刻（等 0.8 秒畫完）與 10 秒巡邏都看：是就 CAS 補標 `blocked`（herdr 自己判的不動）；選單消失時照原值還回去
+  （CAS，herdr 這段期間報過別的狀態就不動）並叫醒排隊的 flush。**一個鍵都不按**：網頁用既有的 BlockedModal／BlockedPanel＋BlockedChoices 讓使用者自己點
+  （`parseChoiceMenu` 把 `Session paused` 標題當題目、說明與 `Details:` 放 notes）。畫面在 `lifecycle/fixtures/claude-2.1.281-session-paused.txt`（只取選單那段，說明是假文字）。
 - **claude 更新通知**：自動更新後 claude 只在 pane 最底印 `✔ Update installed · Restart to update`，不是事件。`update_watch` 每 30 秒
   對 running 的 claude run `pane.read visible 80`，認到就寫 `runs.update_notice` 並推 `bot_status`，消失就清 NULL（讀不到畫面不清）；不限 idle。
   認法（`tui_prompts::update_notice`）：兩段字都要中，**且只看最下面 6 行非空白**（正文引用這兩句時會誤中）。存在 run 上：重啟（套用更新本身）後的新 run 本來就沒有。
@@ -492,6 +500,10 @@ hook body 另外帶 `run_id`＝這個 CLI 行程 pane env 的 `AM_RUN_ID`（本�
 - **沒有 prompt 的外部回合不重存上一段回覆**（2026-09-25 am-lead）：herdr 的 `working → idle` 抖一下就會開一筆 `origin = external` 的回合，
   畫面上還是上一段回覆；游標的尾端 hash 又含 codex 狀態列的額度數字（`5h 83% left`），數字一變就對不上、整個畫面算新的，同一段回覆就被存第二次。
   所以：`external` 回合沒有任何使用者訊息、抽到的回覆跟上一則 assistant 一模一樣時，只收回合、不存訊息。有人送過 prompt 的回合（web 或在 pane 打字）照存——真的可能回一樣的話。
+- **停在等人選的編號選單上不收**（`tui_prompts::awaits_menu_choice`，2026-09-25）：herdr 判 `idle` 但畫面最底是一份開著的編號選單
+  （權限框、AskUserQuestion、`Session paused`…；認法同上一段 Session paused 的選單部分，不要求標題）時，那不是回合結束，
+  選單那幾行更不是回覆：`try_fallback` 與沒有 hook 的擷取都不收、不存，回合留在飛，等使用者選完由 hook／下一次 idle edge 收；
+  一直沒人選就走 §4.3b（blocked 的不收；herdr 判 idle 的照 §4.3b 寫系統說明收尾，不存畫面）。
 - **執行**：CAS `UPDATE turns SET status='completed_fallback' WHERE id=? AND status='in_flight'`，成功才 `agent.read {source: recent_unwrapped, lines: 200}`，
   取游標（`last_read_revision` + 已見文字尾端 hash）之後的內容，依 provider 抽回覆：Claude `⏺ ` 開頭、Codex `• ` 開頭；grok 無標記（§12.3）。
 - **沒有回覆標記**時用 `clean_screen`：取最後一行 prompt 回音之後的內容，去掉 banner、方框、分隔線、狀態列、spinner、`⚠` 行，保留 `⎿` 工具結果行。

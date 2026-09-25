@@ -557,6 +557,10 @@ async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate
         // Codex 的模型遷移提示也等使用者本人選擇，不把後續訊息送進選單。
         crate::codex_model_migration::on_blocked(app, &run);
     }
+    // claude 2.1.281 的 Session paused 選單 herdr 判成 idle：看一眼畫面，是就補標 blocked（不按鍵）。
+    if prev != "idle" && status == "idle" {
+        crate::session_paused::on_idle(app, &run);
+    }
     // 不再 blocked：同一個問題下次再出現時才要再講一次。
     if prev == "blocked" && status != "blocked" {
         crate::child_alerts::forget(&run.bot_id);

@@ -293,6 +293,90 @@ pub fn is_auto_mode_offer(screen: &str) -> bool {
     line_starts_with(&tail, "yes, set auto mode as my default permission mode") && line_starts_with(&tail, "no, keep bypass permissions")
 }
 
+/// 編號選單最多這麼高（含說明、`Details:` 與折行）；最後一個選項之下最多再有 [`MENU_BELOW_LINES`] 行
+/// （腳註、`✻ Waiting for API response …`、statusLine）。
+const CHOICE_MENU_TAIL_LINES: usize = 18;
+const MENU_BELOW_LINES: usize = 6;
+
+/// 這一行是不是選項列：`N. 標籤`，前面可以有游標（`❯`／`›`／`>`）。回（編號, 有沒有游標）。
+fn menu_row(line: &str) -> Option<(u32, bool)> {
+    let body = line.trim().trim_start_matches(['│', '┃', '▎']).trim_start();
+    let (cursor, body) = match body.chars().next() {
+        Some(c @ ('❯' | '›' | '>')) => (true, body[c.len_utf8()..].trim_start()),
+        _ => (false, body),
+    };
+    let digits: String = body.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() || digits.len() > 2 {
+        return None;
+    }
+    let rest = &body[digits.len()..];
+    let label = rest.strip_prefix('.').or_else(|| rest.strip_prefix(')'))?;
+    if !label.starts_with(' ') || label.trim().is_empty() {
+        return None;
+    }
+    Some((digits.parse().ok()?, cursor))
+}
+
+/// 畫面最底下是不是一份**開著、等人選**的編號選單；是就回它在 `tail` 裡的（第一個、最後一個選項）位置。
+///
+/// 開著的選單長這樣：從 `1.` 起連號、至少兩項、**剛好一個**選項帶游標、最後一項底下只剩腳註／spinner／statusLine
+/// （沒有 `⏺`／`●`／`⎿` 這種對話輸出），而且輸入列不是空的（[`composer_is_idle`]）——回覆裡照抄一份選單，
+/// 回合結束後底下一定還會印出空的輸入列。
+fn open_choice_menu(tail: &[&str]) -> Option<(usize, usize)> {
+    if tail.is_empty() || composer_is_idle(tail) {
+        return None;
+    }
+    let last = tail.iter().rposition(|l| menu_row(l).is_some())?;
+    if tail.len() - 1 - last > MENU_BELOW_LINES || tail[last + 1..].iter().any(|l| is_agent_output_line(l) && !l.trim_start().starts_with('✻')) {
+        return None;
+    }
+    let (mut want, mut cursors, mut first, mut gap) = (menu_row(tail[last])?.0, 0, last, 0);
+    for i in (0..=last).rev() {
+        let Some((n, cursor)) = menu_row(tail[i]) else {
+            // 選項之間的說明、折行；撞到對話輸出或夾太多行＝走出選單了。
+            gap += 1;
+            if is_agent_output_line(tail[i]) || gap > MENU_BELOW_LINES {
+                break;
+            }
+            continue;
+        };
+        if n != want {
+            break;
+        }
+        cursors += usize::from(cursor);
+        (first, gap) = (i, 0);
+        if n == 1 {
+            break;
+        }
+        want -= 1;
+    }
+    let count = menu_row(tail[last])?.0;
+    (menu_row(tail[first]).map(|(n, _)| n) == Some(1) && count >= 2 && cursors == 1).then_some((first, last))
+}
+
+/// 終端備援（`poller::try_fallback`）用：畫面停在**任何**等人選的編號選單上（權限框、AskUserQuestion、
+/// `Session paused`…）。那不是回合結束，選單那幾行更不是回覆（2026-09-25 cf-ox-fork-fork：herdr 判 idle，
+/// 備援把 `2. Edit prompt and retry with …` 存成了回覆）。
+pub fn awaits_menu_choice(screen: &str) -> bool {
+    let raw: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
+    open_choice_menu(&raw[raw.len().saturating_sub(CHOICE_MENU_TAIL_LINES)..]).is_some()
+}
+
+/// Claude Code 2.1.281 的「Session paused」選單（API 拒答或額度用完後，問要換模型重試還是改 prompt／改用額度）。
+/// herdr 判成 `idle`，網頁不會彈出選項；[`crate::session_paused`] 補標成 `blocked`，**一個鍵都不按**，讓使用者自己選。
+/// 標題要自己一行、在選單正上方的同一個框裡（中間不能夾對話輸出）。真畫面（只取選單那段）在
+/// `lifecycle/fixtures/claude-2.1.281-session-paused.txt`。
+pub fn is_session_paused_menu(screen: &str) -> bool {
+    let raw: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
+    let tail = &raw[raw.len().saturating_sub(CHOICE_MENU_TAIL_LINES)..];
+    let Some((first, _)) = open_choice_menu(tail) else { return false };
+    tail[..first]
+        .iter()
+        .rev()
+        .take_while(|l| !is_agent_output_line(l))
+        .any(|l| norm_line(l) == "session paused")
+}
+
 /// onboarding 第一頁（`hasCompletedOnboarding` 被清掉、或全新的 `CLAUDE_CONFIG_DIR`）：「Choose the text style…」
 /// 七個主題選項。跟登入選單同一類：交給人處理（409 `needs_login`），不自動按——按了下一頁就是登入選單，
 /// 一樣要人。真畫面在 `lifecycle/fixtures/claude-2.1.278-onboarding-theme.txt`（2026-09-22）。
@@ -509,6 +593,10 @@ pub fn spawn_survey_watcher(app: Arc<App>) {
                     // 防誤刪框：herdr 判成 idle 時的安全網，也負責框關掉之後的收尾（不按任何鍵）。
                     crate::dangerous_rm::observe(&app, &run).await;
                 }
+                // Session paused 選單：herdr 判 idle 時補標 blocked、選單關掉時還原（不按任何鍵）。
+                if run.agent_status == "idle" || crate::session_paused::is_forced(&run.id) {
+                    crate::session_paused::observe(&app, &run).await;
+                }
                 // Codex 在 starting／working 狀態也可能停在啟動遷移框；只查畫面，不替使用者選。
                 crate::codex_model_migration::observe(&app, &run).await;
             }
@@ -562,6 +650,10 @@ pub(crate) mod screens {
     pub const REPORT_QUOTING_ONBOARDING: &str = include_str!("lifecycle/fixtures/claude-2.1.280-report-quoting-onboarding.txt");
     /// 2.1.281 真畫面：bypass 模式下 `rm -rf $(…)/*` 跳的防誤刪框，含自動拒絕的倒數（本機 2.1.281＋假 API 重現，2026-09-24）。
     pub const DANGEROUS_RM: &str = include_str!("lifecycle/fixtures/claude-2.1.281-dangerous-rm.txt");
+    /// 回合結束、輸入列空著的 claude 底部。
+    pub const IDLE_CLAUDE: &str = "────────────────────\n❯\n────────────────────\n  15m2dg | agents-manager | Opus 5 31% | 5h:96%\n";
+    /// 2026-09-25 cf-ox-fork-fork（2.1.281）停著的「Session paused」選單：只取選單那段，說明換成假文字。herdr 判 `idle`。
+    pub const SESSION_PAUSED: &str = include_str!("lifecycle/fixtures/claude-2.1.281-session-paused.txt");
     /// 同一個 pane 在倒數到 0 之後：框不見了，claude 收到「被內建安全檢查拒絕」的 tool_result、把回合做完、回到輸入列。
     pub const DANGEROUS_RM_AUTO_DENIED: &str = include_str!("lifecycle/fixtures/claude-2.1.281-dangerous-rm-auto-denied.txt");
     /// 2.1.281 真畫面（2026-09-24，真帳號的拋棄式 pane，herdr `pane read` 原文，herdr 判 `blocked`）：指令只佔一列時
@@ -927,7 +1019,7 @@ pub fn is_feedback_survey(screen: &str) -> bool {
         assert!(!is_onboarding_theme(&far_above));
     }
 
-    const IDLE_CLAUDE: &str = "────────────────────\n❯\n────────────────────\n  15m2dg | agents-manager | Opus 5 31% | 5h:96%\n";
+    use super::screens::IDLE_CLAUDE;
 
     use super::screens::{DANGEROUS_RM, DANGEROUS_RM_AUTO_DENIED, DANGEROUS_RM_M12, DANGEROUS_RM_ONE_ROW, DANGEROUS_RM_VARIABLE};
 
@@ -966,5 +1058,45 @@ pub fn is_feedback_survey(screen: &str) -> bool {
         let quoted = format!("⏺ m12 那顆停在：\n  Dangerous rm operation on statically-unresolvable target: /x/*\n  Do you want to proceed?\n  1. Yes\n  2. No\n{IDLE_CLAUDE}");
         assert_eq!(dangerous_rm_prompt(&quoted), None, "引文，底下是空的輸入列");
         assert!(!is_switch_model_dialog(DANGEROUS_RM) && !is_auto_mode_offer(DANGEROUS_RM) && !is_feedback_survey(DANGEROUS_RM));
+    }
+
+    use super::screens::SESSION_PAUSED;
+
+    /// 2026-09-25 cf-ox-fork-fork：2.1.281 的「Session paused」選單（herdr 判 idle）。要認成等人選的選單；
+    /// 底下多一列 statusLine、說明折成好幾行也一樣。
+    #[test]
+    fn the_session_paused_menu_is_recognised() {
+        assert!(is_session_paused_menu(SESSION_PAUSED));
+        assert!(awaits_menu_choice(SESSION_PAUSED));
+        let with_status = format!("{SESSION_PAUSED}  cf-ox-fork-fork | agents-manager | Opus 5.5 H 41% | 5h:80%\n");
+        assert!(is_session_paused_menu(&with_status));
+        let wrapped = SESSION_PAUSED.replace("for the fixture.\n", "for the fixture.\n  second line\n  third line\n");
+        assert!(is_session_paused_menu(&wrapped));
+        // 別的框不是 Session paused，但同樣是等人選的選單。
+        assert!(!is_session_paused_menu(PERMISSION) && awaits_menu_choice(PERMISSION));
+        assert!(!is_session_paused_menu(DANGEROUS_RM) && awaits_menu_choice(DANGEROUS_RM));
+    }
+
+    /// 回覆裡照抄這個選單（底下是回合結束那一行與空的輸入列）、選單已經選掉、或只是一般的編號清單，都不是開著的選單。
+    #[test]
+    fn a_quoted_or_answered_session_paused_menu_is_not_open() {
+        let quoted = format!(
+            "⏺ 剛剛停在這個選單：\n  Session paused\n  Details: `[x]`\n  ❯ 1. Switch to Opus 4.8\n    2. Edit prompt and retry\n✻ Cooked for 3s\n{IDLE_CLAUDE}"
+        );
+        assert!(!is_session_paused_menu(&quoted) && !awaits_menu_choice(&quoted), "引文，底下是空的輸入列");
+        // 還在跑、引文底下有工具輸出：不是選單。
+        let running = SESSION_PAUSED.replace("✻ Waiting", "⏺ Bash(ls)\n  ⎿  ok\n✻ Waiting");
+        assert!(!is_session_paused_menu(&running) && !awaits_menu_choice(&running));
+        // 游標：零個（捲出去或不是選單）、兩個（引文）都不算。
+        let no_cursor = SESSION_PAUSED.replace("❯ 1.", "  1.");
+        assert!(!is_session_paused_menu(&no_cursor) && !awaits_menu_choice(&no_cursor));
+        let two = SESSION_PAUSED.replace("    2. Edit", "  ❯ 2. Edit");
+        assert!(!awaits_menu_choice(&two));
+        // 標題被對話隔開：那是上一段的字，選單不是它的。
+        let apart = SESSION_PAUSED.replace("  This request", "⏺ something else\n  This request");
+        assert!(!is_session_paused_menu(&apart));
+        let list = format!("⏺ 兩個做法：\n  1. 改 daemon\n  2. 改 web\n{IDLE_CLAUDE}");
+        assert!(!awaits_menu_choice(&list), "回覆裡的編號清單");
+        assert!(!awaits_menu_choice(DANGEROUS_RM_AUTO_DENIED) && !awaits_menu_choice(IDLE_CLAUDE));
     }
 }
