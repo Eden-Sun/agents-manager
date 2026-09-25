@@ -378,16 +378,22 @@ pub(crate) async fn pane_ready_for_prompt(app: &Arc<App>, bot: &db::Bot, run: &d
                     // 2.1.278 首次啟動的「Auto mode」推銷框：herdr 判 idle，prompt 會打進框裡（2026-09-22 build child
                     // 卡了半小時）。替它選第二項「No, keep bypass permissions」——bot 本來就是 bypass 起的；還在就講清楚。
                     if crate::tui_prompts::is_auto_mode_offer(&r.text) {
-                        let _ = client.pane_send_keys(pane, &["Down", "Enter"]).await;
-                        tokio::time::sleep(Duration::from_millis(900)).await;
-                        let still = matches!(client.pane_read(pane, "visible", 60).await,
-                            Ok(r2) if crate::tui_prompts::is_auto_mode_offer(&r2.text));
-                        if still {
-                            let hint = "claude 2.1.278 的「Auto mode」框擋在輸入列前面，自動選「No, keep bypass permissions」沒有關掉。請到「終端」分頁選第 2 項再送一次。";
-                            let _ = insert_message(app, conv, None, "system", hint, "system", false, None).await;
-                            return Err(LcError::conflict("dialog_open", json!({"run_id": run.id, "message": hint})));
+                        #[cfg(test)]
+                        super::race_point::hit("claude_auto_mode_before_answer", &bot.id).await;
+                        if matches!(client.pane_read(pane, "visible", 60).await,
+                            Ok(latest) if crate::tui_prompts::is_auto_mode_offer(&latest.text))
+                        {
+                            let _ = client.pane_send_keys(pane, &["Down", "Enter"]).await;
+                            tokio::time::sleep(Duration::from_millis(900)).await;
+                            let still = matches!(client.pane_read(pane, "visible", 60).await,
+                                Ok(r2) if crate::tui_prompts::is_auto_mode_offer(&r2.text));
+                            if still {
+                                let hint = "claude 2.1.278 的「Auto mode」框擋在輸入列前面，自動選「No, keep bypass permissions」沒有關掉。請到「終端」分頁選第 2 項再送一次。";
+                                let _ = insert_message(app, conv, None, "system", hint, "system", false, None).await;
+                                return Err(LcError::conflict("dialog_open", json!({"run_id": run.id, "message": hint})));
+                            }
+                            tracing::info!(run = %run.id, "answered claude's auto-mode offer (keep bypass) before delivering a prompt");
                         }
-                        tracing::info!(run = %run.id, "answered claude's auto-mode offer (keep bypass) before delivering a prompt");
                     }
                     if crate::tui_prompts::is_switch_model_dialog(&r.text) {
                         let _ = client.pane_send_keys(pane, &["Escape"]).await;
@@ -428,16 +434,29 @@ pub(crate) async fn pane_ready_for_prompt(app: &Arc<App>, bot: &db::Bot, run: &d
                                 tracing::warn!(bot = %bot.name, host, cwd, warning = %w, "could not record grok folder trust");
                             }
                         }
-                        let _ = client.pane_send_keys(pane, &["y"]).await;
-                        tokio::time::sleep(Duration::from_millis(1200)).await;
-                        let still = matches!(client.pane_read(pane, "visible", 60).await,
-                            Ok(r2) if crate::tui_prompts::is_grok_trust_dialog(&r2.text));
-                        if still {
-                            let hint = "grok 在問「要不要信任這個目錄」，自動按 y 沒有關掉。請到「終端」分頁按 y 再送一次。";
-                            let _ = insert_message(app, conv, None, "system", hint, "system", false, None).await;
-                            return Err(LcError::conflict("dialog_open", json!({"run_id": run.id, "message": hint})));
+                        #[cfg(test)]
+                        super::race_point::hit("grok_trust_before_answer", &bot.id).await;
+                        let latest = match client.pane_read(pane, "visible", 60).await {
+                            Ok(latest) => latest.text,
+                            Err(e) => {
+                                tracing::warn!(run = %run.id, error = %e, "could not re-read grok's trust dialog before answering");
+                                let hint = "grok 的目錄信任畫面在確認前讀不到，沒有自動按 y。請到「終端」分頁確認畫面後再送一次。";
+                                let _ = insert_message(app, conv, None, "system", hint, "system", false, None).await;
+                                return Err(LcError::conflict("dialog_open", json!({"run_id": run.id, "message": hint})));
+                            }
+                        };
+                        if crate::tui_prompts::is_grok_trust_dialog(&latest) {
+                            let _ = client.pane_send_keys(pane, &["y"]).await;
+                            tokio::time::sleep(Duration::from_millis(1200)).await;
+                            let still = matches!(client.pane_read(pane, "visible", 60).await,
+                                Ok(r2) if crate::tui_prompts::is_grok_trust_dialog(&r2.text));
+                            if still {
+                                let hint = "grok 在問「要不要信任這個目錄」，自動按 y 沒有關掉。請到「終端」分頁按 y 再送一次。";
+                                let _ = insert_message(app, conv, None, "system", hint, "system", false, None).await;
+                                return Err(LcError::conflict("dialog_open", json!({"run_id": run.id, "message": hint})));
+                            }
+                            tracing::info!(run = %run.id, "answered grok's folder-trust dialog before delivering a prompt");
                         }
-                        tracing::info!(run = %run.id, "answered grok's folder-trust dialog before delivering a prompt");
                     }
                 }
             }
@@ -1466,6 +1485,53 @@ mod prompt_tests {
         }
         let keys: Vec<String> = f.env.herdr.calls_to("pane.send_keys").iter().filter_map(|p| p.get("keys").and_then(|k| serde_json::to_string(k).ok())).collect();
         assert_eq!(keys, vec![r#"["Down","Enter"]"#.to_string()], "先替它選第二項 keep bypass");
+    }
+
+    #[tokio::test]
+    async fn a_closed_auto_mode_offer_does_not_get_a_stale_down_or_enter() {
+        let f = fixture("claude", "test").await;
+        let app = f.env.app.clone();
+        sqlx::query("UPDATE runs SET pane_id='pane-prompt-test' WHERE id=?").bind(&f.run_id).execute(&app.db).await.unwrap();
+        f.env.herdr.set_screen("pane-prompt-test", crate::tui_prompts::screens::AUTO_MODE);
+        let screens = f.env.herdr.screens.clone();
+        super::super::race_point::arm("claude_auto_mode_before_answer", &f.bot_id, move || async move {
+            screens.lock().unwrap().insert("pane-prompt-test".into(), "Claude Code\n❯\n".into());
+        });
+        let bot = db::bot(&app.db, &f.bot_id).await.unwrap().unwrap();
+        let run = db::active_run(&app.db, &f.bot_id).await.unwrap().unwrap();
+
+        pane_ready_for_prompt(&app, &bot, &run, &f.conv).await.unwrap();
+        assert!(f.env.herdr.calls_to("pane.send_keys").is_empty(), "畫面已變，不能送 Down 或 Enter");
+    }
+
+    /// Trust setup can take time (especially on a remote host); if the prompt vanishes during it,
+    /// the stale `y` must not hit the next screen.
+    #[tokio::test]
+    async fn a_grok_trust_prompt_that_closes_before_the_answer_gets_no_y() {
+        let f = fixture("grok", "test").await;
+        let app = f.env.app.clone();
+        sqlx::query("UPDATE runs SET pane_id='pane-prompt-test' WHERE id=?").bind(&f.run_id).execute(&app.db).await.unwrap();
+        let grok_home = f.env.dir.join("grok-home");
+        std::fs::create_dir_all(&grok_home).unwrap();
+        let cwd = f.env.repo.to_string_lossy().into_owned();
+        sqlx::query("UPDATE bots SET cwd=?, env_json=? WHERE id=?")
+            .bind(&cwd)
+            .bind(json!({"GROK_HOME": grok_home.to_string_lossy()}).to_string())
+            .bind(&f.bot_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        f.env.herdr.set_screen("pane-prompt-test", "Do you trust the contents of this directory?\n  Yes, proceed                 y\n  No, quit                      n\nGrok Build 1.0.34\n");
+        let screens = f.env.herdr.screens.clone();
+        super::super::race_point::arm("grok_trust_before_answer", &f.bot_id, move || async move {
+            screens.lock().unwrap().insert("pane-prompt-test".into(), "Grok Build 1.0.34\n❯\n".into());
+        });
+        let bot = db::bot(&app.db, &f.bot_id).await.unwrap().unwrap();
+        let run = db::active_run(&app.db, &f.bot_id).await.unwrap().unwrap();
+
+        pane_ready_for_prompt(&app, &bot, &run, &f.conv).await.unwrap();
+        assert!(f.env.herdr.calls_to("pane.send_keys").is_empty(), "畫面已變，不能送 y");
+        assert!(f.env.herdr.calls_to("pane.send_text").is_empty());
     }
 
     /// 2.1.281 的防誤刪框（herdr 判成 idle 也一樣）：409 `dangerous_rm_pending` 帶目標，一個鍵都不按、一個字都不打；

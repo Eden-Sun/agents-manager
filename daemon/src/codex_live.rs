@@ -200,6 +200,11 @@ pub fn picker_open(screen: &str) -> bool {
         || t.contains("select reasoning level")
 }
 
+/// The exact row we selected is still in a recognized picker on the latest pane read.
+fn picker_choice_matches(screen: &str, needle: &str, n: u32) -> bool {
+    picker_open(screen) && picker_number(screen, needle) == Some(n)
+}
+
 /// Escapes until no picker is left. One Escape is not enough: from the level menu it only goes
 /// back to the model menu, and anything typed next would land in it.
 pub async fn close_picker(client: &HerdrClient, pane_id: &str) -> bool {
@@ -219,7 +224,13 @@ pub async fn close_picker(client: &HerdrClient, pane_id: &str) -> bool {
 const PICKER_ESCAPES: u32 = 4;
 
 /// A failed send leaves the menu open, so back out before reporting failure.
-async fn press_number(client: &HerdrClient, pane_id: &str, n: u32) -> bool {
+async fn press_number(client: &HerdrClient, pane_id: &str, n: u32, needle: &str) -> bool {
+    // A picker can close or change while the caller is deciding which row to choose. Re-read and
+    // verify both the picker and the intended row immediately before typing the one-digit choice.
+    if !picker_choice_matches(&read(client, pane_id).await, needle, n) {
+        close_picker(client, pane_id).await;
+        return false;
+    }
     if !text(client, pane_id, &n.to_string()).await {
         close_picker(client, pane_id).await;
         return false;
@@ -257,7 +268,7 @@ async fn apply_model_and_effort(
         close_picker(client, pane_id).await;
         return false;
     };
-    if !press_number(client, pane_id, n).await {
+    if !press_number(client, pane_id, n, &needle).await {
         return false;
     }
 
@@ -277,7 +288,7 @@ async fn apply_model_and_effort(
             close_picker(client, pane_id).await;
             return false;
         };
-        if !press_number(client, pane_id, more).await {
+        if !press_number(client, pane_id, more, "More reasoning").await {
             return false;
         }
         read(client, pane_id).await
@@ -288,7 +299,7 @@ async fn apply_model_and_effort(
         close_picker(client, pane_id).await;
         return false;
     };
-    if !press_number(client, pane_id, n).await {
+    if !press_number(client, pane_id, n, &needle).await {
         return false;
     }
     // Should be closed now; if not, the next prompt would be typed into it.
@@ -543,6 +554,13 @@ mod tests {
         assert_eq!(picker_number(EFFORT_MENU, "Max"), None, "max / ultra are one menu deeper");
         assert_eq!(picker_number(EFFORT_MENU, "Ultra"), None);
         assert_eq!(picker_number(MODEL_MENU, "gpt-4"), None);
+    }
+
+    #[test]
+    fn a_numeric_choice_requires_the_target_row_in_a_live_picker() {
+        assert!(picker_choice_matches(MODEL_MENU, "gpt-5.6-sol", 2));
+        assert!(!picker_choice_matches(MODEL_MENU, "gpt-5.6-sol", 3), "a different row is not the target");
+        assert!(!picker_choice_matches(COMPOSER, "gpt-5.6-sol", 2), "a stale selection cannot target the composer");
     }
 
     /// Real composer, codex 0.154.0 (2026-09-10) — nothing in the way.

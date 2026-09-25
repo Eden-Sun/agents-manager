@@ -1042,7 +1042,7 @@ pub(crate) async fn prepare_delivery(
     Ok(Ready::Type { pane, proof, submit, offset, baseline })
 }
 
-/// [`execute_delivery`] 從第一個按鍵開始的那一段。這裡之後的放棄都是 `Unproven`／錯誤，不再是 `NotAttempted`。
+/// [`execute_delivery`] 準備完成後的派送。`type_text` 貼字前仍會重讀 composer；那一刻看到草稿還是 `NotAttempted`。
 pub(crate) async fn type_prepared(
     app: &Arc<App>,
     client: &HerdrClient,
@@ -1051,6 +1051,8 @@ pub(crate) async fn type_prepared(
     text: &str,
     ready: Ready,
 ) -> anyhow::Result<Delivered> {
+    #[cfg(test)]
+    super::race_point::hit("delivery_before_typing", &run.bot_id).await;
     match type_text(client, run, bot, text, ready).await? {
         Typing::Done(d) => Ok(d),
         Typing::Ready(t) => {
@@ -1101,6 +1103,22 @@ pub(crate) async fn type_text(
     };
     // Styled read when herdr can (`box_state` needs the dim flag); echo evidence strips the styling.
     let read = || read_composer(client, &pane);
+
+    // The turn may finish while Codex is restoring an unanswered question answer to its composer
+    // (#551 / Codex 0.157). Re-read at the last point before our first write so the two drafts can
+    // never be concatenated. This is still `NotAttempted`: no key has reached the pane.
+    let before = match read().await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(run = %run.id, error = %e, "could not read the pane immediately before typing");
+            return Ok(Typing::Done(Delivered::NotAttempted { reason: "composer_unreadable", retry: true }));
+        }
+    };
+    match box_state(&bot.kind, &before) {
+        BoxState::Empty => {}
+        BoxState::NonEmpty => return Ok(Typing::Done(Delivered::NotAttempted { reason: "composer_busy", retry: true })),
+        BoxState::Unready => return Ok(Typing::Done(Delivered::NotAttempted { reason: "composer_unreadable", retry: true })),
+    }
 
     client.pane_send_text(&pane, text).await?;
     tokio::time::sleep(Duration::from_millis(TYPE_SETTLE_MS)).await;
@@ -1350,6 +1368,14 @@ mod tests {
 
     const CODEX_PARTICLES_EMPTY: &str = include_str!("fixtures/codex_astra_particles_empty.ansi");
     const CODEX_PARTICLES_DRAFT: &str = include_str!("fixtures/codex_astra_particles_draft.ansi");
+    const CODEX_0157_RESTORED_ANSWER: &str = include_str!("fixtures/codex-0.157-question-turn-end-restored.txt");
+
+    /// Upstream Codex #47422's turn-end snapshot: existing composer text followed by recovered,
+    /// unsent question answers. This remains a draft from the daemon's point of view.
+    #[test]
+    fn codex_0157_question_turn_end_snapshot_is_a_nonempty_composer() {
+        assert_eq!(box_state("codex", CODEX_0157_RESTORED_ANSWER), BoxState::NonEmpty);
+    }
 
     /// codex v0.154.0（gpt-6-astra）輸入列的點字動畫：2026-09-15 在 herdr pane 開一個 codex、`pane read --format ansi`
     /// 實抓（fixtures/codex_astra_particles_*.ansi）。上下兩列與 marker 列都撒了帶顏色、非 dim 的 ⠁⠂⠄⠈⠐⠠⢀。
@@ -1871,6 +1897,31 @@ mod api_tests {
         let out = prompt(&app, &bot_id, "Reply with PONG please", "crid-1").await.unwrap();
         assert_eq!(out.delivery, "ok");
         assert_eq!(turns(&app, &conv).await, 1);
+    }
+
+    /// Codex 0.157 puts unanswered question answers back in the composer when a turn ends.
+    /// If one appears after delivery preparation, the prompt must not be appended to it.
+    #[tokio::test]
+    async fn a_codex_answer_restored_after_preparation_is_left_in_the_composer() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, conv, _run) = idle_bot(&env, "codex").await;
+        env.herdr.live_pane("pane-api", crate::testing::LivePane { codex: true, width: Some(120), ..Default::default() });
+        let live = env.herdr.live.clone();
+        super::super::race_point::arm("delivery_before_typing", &bot_id, move || async move {
+            live.lock().unwrap().get_mut("pane-api").unwrap().composer = vec!["restored answer from Codex 0.157".into()];
+        });
+
+        match prompt(&app, &bot_id, "first line\nsecond line", "crid-codex-restored-answer").await {
+            Err(LcError::Conflict(body)) => {
+                assert_eq!(body["reason"], "composer_busy", "{body}");
+                assert_eq!(body["retryable"], true, "{body}");
+            }
+            other => panic!("expected a retryable composer_busy, got {other:?}"),
+        }
+        assert_eq!(turns(&app, &conv).await, 0, "unattempted delivery withdraws its turn");
+        assert_eq!(env.herdr.calls_to("pane.send_text").len(), 0, "no text is appended to Codex's restored answer");
+        assert_eq!(env.herdr.pane("pane-api").unwrap().composer, ["restored answer from Codex 0.157"]);
     }
 
     /// codex 已知 session 但 rollout 還沒寫：直接送的 prompt 回可重試的 409，不建 turn（sol 第九輪 #1）。
