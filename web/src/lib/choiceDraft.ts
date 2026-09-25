@@ -63,6 +63,11 @@ function pageOf(menu: TuiChoiceMenu, tab: number, label: string): DraftPage {
   }
 }
 
+/** 合成的送出頁：草稿裡的送出頁照本地作答畫，不需要從終端讀。 */
+function submitPage(tab: number, label: string): DraftPage {
+  return { tab, label, question: null, choices: [], multi: false, hasSubmitRow: false, review: [], isSubmit: true }
+}
+
 /** 走一格分頁並確認畫面換了。先 ←／→（別處無副作用），沒反應才 `tab`／`shift+tab`；走不動回 `null`。 */
 export async function moveTab(io: Io, dir: 1 | -1, from: TuiChoiceMenu): Promise<TuiChoiceMenu | null> {
   for (const key of dir > 0 ? ['right', 'tab'] : ['left', 'shift+tab']) {
@@ -77,8 +82,13 @@ export async function moveTab(io: Io, dir: 1 | -1, from: TuiChoiceMenu): Promise
 }
 
 /**
- * 左到頭、右到尾、再走回起點，每頁讀一次。走不動就回 `null`（不留半份草稿），呼叫端退回即時模式。
+ * 左到頭、右到最後一題、再走回起點，每頁讀一次。走不動就回 `null`（不留半份草稿），呼叫端退回即時模式。
  * 副作用：真終端的分頁會跳來跳去，但不送任何會改答案的鍵。
+ *
+ * **不走進 `✔ Submit` 頁**（2026-09-25 使用者：「輸入窗太怪了」）：送出頁在草稿裡是照本地作答畫的，不需要讀；走進去時
+ * 畫面變成「Submit answers / Cancel」，好幾個瀏覽器同時開著時，另一個的預載會把那裡當起點、最後「走回」那裡，
+ * 終端就被晾在送出頁。送出頁改成合成的一頁；只有一題的問卷因此完全不用換頁。起點本身就是送出頁（`tabAt` 是推的、
+ * 不是真的游標所在）時不預載，退回即時模式。
  */
 export async function preload(
   io: Io,
@@ -90,18 +100,29 @@ export async function preload(
   const startTab = start.tabAt
   if (n < MIN_TABS || startTab === null) return null
 
+  const startPage = pageOf(start, startTab, tabs[startTab].label)
+  if (tabs[startTab].submit || startPage.isSubmit) return null
+  // 送出頁一律在最後；只走到最後一題為止。
+  let last = n - 1
+  while (last > 0 && tabs[last].submit) last -= 1
+  if (startTab > last) return null
+
   const pages: (DraftPage | undefined)[] = new Array<DraftPage | undefined>(n)
   let cur: TuiChoiceMenu = start
   let at = startTab
   let done = 0
   const note = () => onProgress?.(++done, n)
 
-  pages[at] = pageOf(cur, at, tabs[at].label)
+  pages[at] = startPage
   note()
+  for (let t = last + 1; t < n; t++) {
+    pages[t] = submitPage(t, tabs[t].label)
+    note()
+  }
 
   for (const dir of [-1, 1] as const) {
     // 第二圈經過讀過的頁照樣重讀：便宜，順便確認畫面沒變。
-    const stop = dir < 0 ? 0 : n - 1
+    const stop = dir < 0 ? 0 : last
     while (at !== stop) {
       const next = await moveTab(io, dir, cur)
       if (!next) return null
