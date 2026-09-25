@@ -158,7 +158,7 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
 
 成功後推 `project_changed` / `bot_changed`。
 
-**停用模型的回應（#400）**：POST create 與 PATCH model 若輸入剛好等於停用值，回應帶 `"remapped":{"model":{"from":"gpt-5.6-luna","to":"gpt-6-luna"}}` 或 `"remapped":{"model":{"from":"opus","to":"claude-opus-5-5"}}`。其他回應不含 `remapped`；同一欄位的 PATCH 只會回報實際替換的值。
+**停用模型的回應（#400）**：POST create 與 PATCH model 若輸入剛好等於停用值，回應帶 `remapped.model.from/to`。Codex 的 `gpt-5.6-sol`、`gpt-5.6-terra` 會換成 `gpt-6-sol`，`gpt-5.6-luna` 會換成 `gpt-6-luna`；Claude 的 `opus` 會換成 `claude-opus-5-5`。其他回應不含 `remapped`；同一欄位的 PATCH 只會回報實際替換的值。
 
 **`GET /api/intents`**（#355）：持久 intent 的最近 100 筆（含已結束的，新的先）`{intents:[{id,kind,subject_id,host,payload_json,step,status,owner_boot,attempts,last_error,created_at,updated_at,expires_at}]}`。唯讀；`restart`／`delete_bot`／`delete_project`／`promote` 會寫（見 SPEC §3.1 的持久 intent）。
 
@@ -1379,7 +1379,7 @@ Project 底下所有存活 bot 的訊息合併，以插入順序（`rowid`）倒
 | `grok` | `grok-cli` | `grok models` + `~/.grok/models_cache.json` 的 per-model `reasoning_efforts`（無 cache 退回 low/medium/high） | 依模型 | `[]` |
 | `claude` | `static` | `opus / sonnet / haiku / fable` | 每個 alias 都是 `low…max` 五級 | `[]` |
 
-`GET /api/models` 提供可選 alias 清單；bot 的 `model` 設定則會原樣交給對應 CLI。Claude 可設定 alias（例如 `opus`）或完整 CLI 模型名（例如 `claude-opus-5-5`），完整名稱不必出現在 alias 清單；Codex 的模型名（例如 `gpt-6-luna`）同樣原樣交給 `-m`。CLI 不會先以 `/api/models` 限制 PATCH 的模型字串。
+`GET /api/models` 提供可選 alias 清單；bot 的 `model` 設定則會交給對應 CLI。Claude 可設定 alias（例如 `opus`）或完整 CLI 模型名（例如 `claude-opus-5-5`），完整名稱不必出現在 alias 清單；Codex 的模型名（例如 `gpt-6-luna`）同樣交給 `-m`。精確舊值 `gpt-5.6-sol`／`gpt-5.6-terra`／`gpt-5.6-luna` 不列在 Codex 清單，送入 create 或 PATCH 時會回報並採用上面的遷移目標。CLI 不會先以 `/api/models` 限制 PATCH 的其他模型字串。
 
 - `default_effort`：codex/grok 是模型回報的值（可能 `null`）；claude 一律有值——帳號 `settings.json` 的 per-model 覆寫 > `effortLevel` > 內建 `"high"`。
 - `display_name` / `description` 可能為空字串。

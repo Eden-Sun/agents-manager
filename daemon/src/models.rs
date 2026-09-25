@@ -114,7 +114,7 @@ pub fn codex_models_from_rpc(result: &Value) -> Vec<Value> {
             arr.iter()
                 .filter_map(|m| {
                     let id = m.get("id")?.as_str()?.to_string();
-                    if id == "gpt-5.6-luna" {
+                    if matches!(id.as_str(), "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna") {
                         return None;
                     }
                     let efforts: Vec<String> = m
@@ -155,6 +155,7 @@ pub fn codex_models_from_rpc(result: &Value) -> Vec<Value> {
 /// Map only explicitly retired aliases. Full versioned model ids are user choices and stay intact.
 pub fn remap_deprecated_model(kind: &str, model: &str) -> Option<&'static str> {
     match (kind, model) {
+        ("codex", "gpt-5.6-sol" | "gpt-5.6-terra") => Some("gpt-6-sol"),
         ("codex", "gpt-5.6-luna") => Some("gpt-6-luna"),
         ("claude", "opus") => Some("claude-opus-5-5"),
         _ => None,
@@ -646,7 +647,7 @@ mod tests {
                 "codex",
                 &argv(&["codex", "-m", "gpt-5.6-sol", "-c", "model_reasoning_effort=\"max\"", "-c", "service_tier=\"priority\""])
             ),
-            (Some("gpt-5.6-sol".into()), Some("max".into()))
+            (Some("gpt-6-sol".into()), Some("max".into()))
         );
         assert_eq!(
             fast_from_argv("codex", &argv(&["codex", "-c", "service_tier=\"priority\""])),
@@ -806,7 +807,11 @@ mod tests {
 
     #[test]
     fn deprecated_models_are_remapped_only_on_exact_matches() {
+        assert_eq!(remap_deprecated_model("codex", "gpt-5.6-sol"), Some("gpt-6-sol"));
+        assert_eq!(remap_deprecated_model("codex", "gpt-5.6-terra"), Some("gpt-6-sol"));
         assert_eq!(remap_deprecated_model("codex", "gpt-5.6-luna"), Some("gpt-6-luna"));
+        assert_eq!(remap_deprecated_model("codex", "gpt-5.6-sol-preview"), None);
+        assert_eq!(remap_deprecated_model("codex", "gpt-5.6-terra-extra"), None);
         assert_eq!(remap_deprecated_model("codex", "gpt-5.6-luna-extra"), None);
         assert_eq!(remap_deprecated_model("claude", "opus"), Some("claude-opus-5-5"));
         assert_eq!(remap_deprecated_model("claude", "claude-opus-4-1"), None);
@@ -816,6 +821,8 @@ mod tests {
     #[test]
     fn adopted_child_argv_model_is_canonicalized_only_for_retired_exact_names() {
         let argv = |model: &str| vec!["codex".into(), "-m".into(), model.into()];
+        assert_eq!(model_effort_from_argv("codex", &argv("gpt-5.6-sol")).0.as_deref(), Some("gpt-6-sol"));
+        assert_eq!(model_effort_from_argv("codex", &argv("gpt-5.6-terra")).0.as_deref(), Some("gpt-6-sol"));
         assert_eq!(model_effort_from_argv("codex", &argv("gpt-5.6-luna")).0.as_deref(), Some("gpt-6-luna"));
         let argv = vec!["claude".into(), "--model".into(), "opus".into()];
         assert_eq!(model_effort_from_argv("claude", &argv).0.as_deref(), Some("claude-opus-5-5"));
@@ -824,15 +831,19 @@ mod tests {
     }
 
     #[test]
-    fn codex_model_catalog_hides_the_deprecated_luna_exactly() {
+    fn codex_model_catalog_hides_all_deprecated_56_models_exactly() {
         let r = json!({"data": [
-            {"id": "gpt-5.6-luna", "displayName": "Old"},
+            {"id": "gpt-5.6-sol", "displayName": "Old Sol"},
+            {"id": "gpt-5.6-terra", "displayName": "Old Terra"},
+            {"id": "gpt-5.6-luna", "displayName": "Old Luna"},
+            {"id": "gpt-5.6-sol-preview", "displayName": "Preview"},
             {"id": "gpt-5.6-luna-preview", "displayName": "Other"},
+            {"id": "gpt-6-sol", "displayName": "New Sol"},
             {"id": "gpt-6-luna", "displayName": "New"}
         ]});
         let mapped = codex_models_from_rpc(&r);
         let ids: Vec<_> = mapped.iter().map(|m| m["id"].as_str().unwrap()).collect();
-        assert_eq!(ids, ["gpt-5.6-luna-preview", "gpt-6-luna"]);
+        assert_eq!(ids, ["gpt-5.6-sol-preview", "gpt-5.6-luna-preview", "gpt-6-sol", "gpt-6-luna"]);
     }
 
     #[test]

@@ -6,7 +6,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import './storeEnv.harness.ts'
 import { pruneSaved, type BotFormBase } from '../components/botSettingsForm.ts'
-import { MODEL_OPTIONS, canonicalModel, type Bot, type Project } from '../api/types.ts'
+import { HIDDEN_MODELS, MODEL_OPTIONS, canonicalModel, type Bot, type Project } from '../api/types.ts'
 
 const { useStore } = await import('./store.ts')
 
@@ -91,4 +91,12 @@ test('#539：前端自己的清單不再放停用別名', () => {
       assert.equal(canonicalModel(kind as Bot['kind'], id), id, `${kind} 的 ${id} 是停用別名，要寫替換後的正式 id`)
     }
   }
+})
+
+test('#550：Codex 5.6 bots map to GPT-6 and the retired ids stay hidden', () => {
+  assert.equal(canonicalModel('codex', 'gpt-5.6-sol'), 'gpt-6-sol')
+  assert.equal(canonicalModel('codex', 'gpt-5.6-terra'), 'gpt-6-sol')
+  assert.equal(canonicalModel('codex', 'gpt-5.6-luna'), 'gpt-6-luna')
+  assert.deepEqual(MODEL_OPTIONS.codex, ['gpt-6-luna', 'gpt-6-sol', 'gpt-6-astra'])
+  assert.ok(['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'].every((id) => HIDDEN_MODELS.includes(id)))
 })
