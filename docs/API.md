@@ -13,6 +13,43 @@ daemon 預設 `http://127.0.0.1:7788`（`config.toml` 的 `server.listen`）。�
 
 Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daemon 不檢查 `Host`；proxy 從本機連過來，對端就是 loopback。
 
+### 0.1 寫入端點授權總表（issue #478）
+
+`/api` 的 `auth` 中介層只驗 `Origin` 與 `X-AM-Token`；`X-AM-Caller` 只當自稱記進 config 寫入 log。所以下表「只有 UI token」的端點，
+授權強度全都相同。要多一道閘門時沿用現成的兩種：**角色**（`bot_requests::require_role`：`X-AM-Bot-Id`＋那顆 bot 自己的
+`X-AM-Bot-Token`，而且是巡檢或協調者）或**明確確認**（`?confirm=<字>`）。
+
+先讀前提，否則會高估角色閘門：
+
+- **本機同一個使用者的行程**讀得到 `ui-token`，也拿得到每顆 pane 的環境；daemon 連遠端主機用的是一般的 `ssh <host>`（使用者自己的
+  `~/.ssh` 與 ControlMaster socket）。所以對它們來說，「UI token＝每台主機的 shell」**不是提權**——不用 token 也能直接 ssh。
+  任何角色／確認閘門對這類呼叫端都只是提高門檻，要真正隔離得先有 per-bot 的憑證取代共用 UI token（#432、#447）。
+- 會因為 token 而**多拿到**權限的是本機使用者以外的人：開發版 `allow_lan`（跟 bind `0.0.0.0` 同一個判斷，§7.1）時，同網段的任何人
+  `GET /api/session` 就拿得到 token；而且 `Origin` 不檢查、`Host` 本來就不檢查，瀏覽器裡的 DNS rebinding 也走得到這條。
+- 遠端主機上沒有 daemon、也不開反向埠（SPEC §11.4），遠端的 bot 打不到 `/api`。
+
+| 組 | 端點 | 呼叫端 | 目前守衛 | 後果 | 建議要求 |
+|---|---|---|---|---|---|
+| A | `POST /hosts/{name}/shells`、`…/shells/{pane_id}/text`、`…/keys` | 只有網頁 | UI token；text／keys 只認白名單 pane（daemon 自己開的、或 `panes` 表的 shell／service），跑 agent 的 pane 403、有 listen port 的唯讀（`shell::registered`） | 在任何已設定主機上執行任意指令 | 待裁示（見下） |
+| A | `POST /hosts/{name}/tools/install` | 只有網頁 | UI token | 叫 `via_bot_id` 那顆 agent 去裝 CLI（跟 `/bots/{id}/prompt` 等價） | 同 `/bots/{id}/prompt` |
+| A | `POST /bots/{id}/prompt`、`/text`、`/keys` | 網頁、`daemon-swap.sh`（換版自測）、`scripts/*-test.sh` | UI token；`prompt` 的 `relay_from` 要 hook token 才算驗過（`relay_auth`），寫給 AGM 的排進 inbox | 驅動任一顆 agent | 維持（網頁與腳本都不帶身分） |
+| A | `PUT /build/remote`、`POST /build/remote/install-toolchain` | 只有網頁 | UI token | 改外部編譯主機＝之後的 cargo 送到哪台機器跑 | 待裁示 |
+| B | `POST /projects/{id}/git/push` | 只有網頁 | UI token；一般 `git push`（沒有 `--force`） | 推到遠端 repo，撤回要另外動作 | 待裁示（確認或維持） |
+| B | `POST /projects/{id}/git/commit`、`/git/pull` | 只有網頁 | UI token；pull 固定 `--rebase --no-autostash` | 本機 git 歷史 | 維持 |
+| B | `POST /missions/{id}/deliver` | `agm mission deliver`（協調者） | UI token＋流程守衛：要有帶 sha 的 `verified` 事件、任務沒停；`relay_from` 同 `relay_auth` | 把驗過的 commit 交付出去 | 維持 |
+| C | `DELETE /bots/{id}`、`DELETE /projects/{id}` | 網頁、`agm` | UI token；AGM 的 bot／專案要 `?confirm=supervisor`（`supervisor_owned`） | 軟刪，`POST /bots/{id}/restore` 救得回 | 維持 |
+| C | `POST /hosts`（改 ssh 目標）、`DELETE /hosts/{name}` | 網頁 | 還有專案在用時改 ssh 要 `?confirm=repoint`、刪除 409 | 只改 config.toml | 維持 |
+| C | `DELETE /hosts/{name}/shells/{pane_id}`、`POST /panes/{id}/close` | 網頁 | 服務 pane 要 `?confirm=true`；agent pane 403 | 關掉 pane | 維持 |
+| C | `POST /bots/{id}/restore`、`/identities`、`DELETE /identities/{name}`、`POST /order`、`PATCH /bots/{id}`、`PATCH /projects/{id}`、start／stop／restart／fork／promote／rewind 等其餘寫入 | 網頁、`agm` | UI token（各自的狀態機檢查） | 本機設定與行程，改得回來 | 維持 |
+| D | `POST /supervisor/herdr-maintenance/open`／`end`、`/supervisor/inbox/{id}/ack`、lease `force` 接管 | AGM 角色 pane 裡的 `agm` | `require_role`／`actor_role`（沒角色 403） | — | 已有 |
+| D | `POST /supervisor/approvals/{id}/decide` | 人在一般 shell 跑的 `agm`（不帶身分） | 只有 UI token | 核准換版窗口 | 由 #447 處理 |
+| E | `/hook/{provider}`、`/relay/announce`、`/relay/pane`、`/build-slots/*` | bot pane 裡的 hook／shim | 不在 `/api` 底下，驗 per-bot `X-AM-Bot-Token` | — | 已有 |
+| F | `POST /mem/processes/kill` | 只有網頁 | `memproc::kill` 只殺 herdr 樹內、非 herdr、非 bot 的行程 | — | 維持 |
+
+A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是網頁，而網頁手上的憑證就是 UI token，沒有可以要求的角色；
+加確認要嘛網頁自動帶上（等於沒加），要嘛變成新的 UI 確認步驟。怎麼收緊（綁 loopback 對端、只收瀏覽器請求、`allow_lan` 下檢查
+`Host`、或等 per-bot 憑證）是授權模型的取捨，在 #478 等使用者決定，這裡不先定。
+
 ## 1. 錯誤格式
 
 | 狀態碼 | body | 意義 |
