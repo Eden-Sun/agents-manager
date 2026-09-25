@@ -2802,6 +2802,7 @@ AGM 的運維職責以本節為準，不靠任何 bot 的記憶。persona 是同
 - **立即部署**（使用者 2026-09-25：「agm排以外，要我可以在左上角直接點立即部署」）：網頁左上角在線上 binary 落後 origin/main **且有程式碼差異**
   （`build-inputs` 路徑，docs-only 不算）時出現「⇪ 部署 N」。按下去先開確認框（`live..target` 的 commit、此刻 working 的 bot），確認後 `POST /api/deploy/now`（API.md）。
   **這一下就是使用者的裁示**：daemon 開一筆 `requester=daemon-update-kick` 的 rebuild 核准並以 `user(立即部署)` 核准，寫 `daemon-update.now.json`，`launchctl kickstart` 同一個 `com.agm.daemon-update` job——
+  依 #556 使用者裁示，這裡不做真人證明：持有共用 UI token 視為使用者，接受本機／`allow_lan` 取得 token 的風險（原話「沒關系lan開放」，[裁示留言](https://github.com/Eden-Sun/agents-manager/issues/556#issuecomment-5833272486)）。`X-AM-Bot-Id` 或 `X-AM-Bot-Token` 任一標頭出現（含缺值、錯值或只帶一半）都回 403 `ui_only`，不可退回使用者權限；兩者都沒帶才按此政策視為 UI 使用者。
   **不另寫一套 build＋swap**，也不 fork 自己的 kick（`AGM_BUILD_BOT`／`PATH` 只在 plist 裡；launchd 保證同一個 job 不會疊）。
   kick 讀到請求檔就走立即模式，只略過三道排程閘：觸發條件（整點／門檻／等太久）、「同 commit 已派過」、等 AGM 裁示 rebuild。**其餘照舊**：建置 child 要在、上一筆 `agm-daemon-update-*` 要結案、
   `lease safety`／`acquire` 的沒人 working（等太久的縮小封鎖面照 §18.10 從核准時間起算）、派工正文的固定條件 1～6（乾淨 HEAD worktree、整樹測試、`.bak`、驗證失敗回滾，§18.13）、`daemon-swap.sh`。

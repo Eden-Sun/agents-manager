@@ -1831,7 +1831,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
   `working`＝此刻 `working` 的 bot（`lease safety` 同一份判定，沒有排除任何人）。`kick_ready:false`＝裝好的 `bin/daemon-update-kick.sh` 不存在或還不認得立即模式。
   說不出落後多少（sha 是 `unknown`、不在 repo、讀不到 origin/main）時 `code_changed:false` 並帶 `error`。repo 是 daemon binary 往上第一個有 `.git` 與 `daemon/Cargo.toml` 的目錄（找不到退回 `~/project/agents-manager`）；每 5 分鐘最多在背景 `git fetch origin main` 一次，這一次的回應用 fetch 之前的 ref。
 - `POST /api/deploy/now {sha?}` → `{started:true,sha,short,live_sha,approval_id,log_path,request_path}`。`sha` 是確認框上那顆（不帶＝當下的 origin/main）：部署的就是它，不是按下去那一刻的 HEAD。
-  **只給 UI**：帶 `X-AM-Bot-Id` 一律 `403 {"reason":"ui_only"}`（bot 要重建照 §18.10 申請核准；共用 UI token 下 daemon 分不出不報身分的 bot，同 §18.10 的取捨）。
+  **只給 UI**：帶 `X-AM-Bot-Id` 或 `X-AM-Bot-Token` 任一標頭，一律 `403 {"reason":"ui_only"}`；缺值、錯 token、非 UTF-8 或只帶一半也不能降級成使用者（#339）。bot 要重建照 §18.10 申請核准。兩個 bot 標頭都沒帶時，共用 UI token 持有者依 #556 使用者裁示視為使用者；不做真人證明，接受本機／`allow_lan` 取得 UI token 的風險（使用者原話「沒關系lan開放」，[裁示留言](https://github.com/Eden-Sun/agents-manager/issues/556#issuecomment-5833272486)）。
   做的事：開一筆 `requester=daemon-update-kick`、`purpose=rebuild`、`target_commit=<sha>`、有效 6 小時的核准並**當場以 `user(立即部署)` 核准**（不推 `approval_requested`，同 requester 的 pending 照 #421 自動取代），寫 `supervisor/AGM/daemon-update.now.json`，再 `launchctl kickstart gui/<uid>/com.agm.daemon-update`；留一筆 `deploy_now` note。
   - `409 deploy_in_progress {running,log_path}`：上面 `running` 的三種任一，什麼都不寫。
   - `409 nothing_to_deploy`（線上到那顆只動到不進 binary 的檔）、`409 target_not_on_main`（不是 origin/main 的祖先）、`409 unknown_commit`、`409 status_unknown`（說不出落後多少）。
