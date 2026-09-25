@@ -315,12 +315,12 @@ pub struct NowIn {
 /// 同一時間只受理一次（連點兩下、兩個分頁同時按）：檢查「有沒有在跑」到寫出請求檔之間不能插隊。
 static START_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// 只給 UI：帶 bot 身分來的一律 403。bot 要重建照 §18.10 申請核准，不能替使用者按這顆鍵。
-/// （共用 UI token 的前提下 daemon 分不出人與不報身分的 bot，SPEC §18.10 同一個取捨。）
+/// 只給 UI：帶任一 bot 身分標頭的一律 403，包括缺值、錯 token 或只帶一半，不得降級成使用者（#339）。
+/// #556 裁示接受共用 UI token 持有者視為使用者；兩個 bot 標頭都沒帶時照此政策放行，不代表 daemon 證明了真人。
 pub fn refuse_bot_caller(headers: &HeaderMap) -> Result<(), LcError> {
-    if headers.contains_key("X-AM-Bot-Id") {
+    if headers.contains_key("X-AM-Bot-Id") || headers.contains_key("X-AM-Bot-Token") {
         return Err(LcError::Forbidden(json!({"error": "forbidden", "reason": "ui_only",
-            "message": "立即部署只給使用者在 UI 上按；bot 要重建請照 SPEC §18.10 申請核准"})));
+            "message": "立即部署只給使用者；帶 bot 身分標頭的呼叫端不接受，bot 要重建請照 SPEC §18.10 申請核准"})));
     }
     Ok(())
 }
@@ -665,10 +665,26 @@ mod tests {
     }
 
     #[test]
-    fn bots_cannot_press_the_button() {
-        let mut h = HeaderMap::new();
-        assert!(refuse_bot_caller(&h).is_ok());
-        h.insert("X-AM-Bot-Id", "b1".parse().unwrap());
-        assert!(matches!(refuse_bot_caller(&h), Err(LcError::Forbidden(v)) if v["reason"] == "ui_only"));
+    fn only_unmarked_ui_token_callers_can_press_the_button() {
+        // #556 裁示：目前持有共用 UI token 就視為使用者，接受 LAN／本機行程風險。
+        assert!(refuse_bot_caller(&HeaderMap::new()).is_ok());
+
+        // 只帶半套、帶錯 token 或完整宣告 bot 身分，都不能降級成使用者。
+        let cases: &[&[(&str, &[u8])]] = &[
+            &[("X-AM-Bot-Id", b"b1")],
+            &[("X-AM-Bot-Token", b"not-the-token")],
+            &[("X-AM-Bot-Id", b"b1"), ("X-AM-Bot-Token", b"not-the-token")],
+            &[("X-AM-Bot-Token", b"")],
+            &[("X-AM-Bot-Token", b"\xff")],
+        ];
+        for pairs in cases {
+            let mut headers = HeaderMap::new();
+            for (name, value) in *pairs {
+                headers.insert(*name, axum::http::HeaderValue::from_bytes(value).unwrap());
+            }
+            assert!(
+                matches!(refuse_bot_caller(&headers), Err(LcError::Forbidden(v)) if v["reason"] == "ui_only"),
+                "headers {pairs:?} must not fall back to the user principal");
+        }
     }
 }
