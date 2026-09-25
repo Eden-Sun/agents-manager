@@ -338,15 +338,42 @@ async fn shows(proof: Option<SentProof>) -> bool {
 /// 收掉那一筆：CAS 在 `status='in_flight'`；贏了才寫說明，兩句同一個交易（說明寫不進去就整筆回滾，下次再試）。
 /// 插隊送出的話，同一個交易把新的那一則掛上 run；掛不上（run 已經不在、另有回合在飛）就把它收成 failed。
 async fn close(app: &Arc<App>, bot_id: &str, p: &Pending) -> anyhow::Result<()> {
+    let partial = match codex_partial_for_interruption(app, bot_id, p).await {
+        Ok(partial) => partial,
+        Err(e) => {
+            tracing::debug!(bot = bot_id, turn = %p.turn_id, error = ?e, "partial Codex reply could not be captured during interruption");
+            None
+        }
+    };
     let mut tx = app.db.begin().await?;
     let outcome = super::turn_controller::fail_on(&mut tx, &p.turn_id, super::turn_controller::DeliveryOnFail::Keep, &p.note).await?;
-    let note = if outcome == super::turn_controller::Outcome::Applied {
+    let mut notes = Vec::new();
+    if outcome == super::turn_controller::Outcome::Applied {
         let conv: String = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id=?").bind(&p.turn_id).fetch_one(&mut *tx).await?;
-        Some(insert_message_tx(&mut tx, &conv, Some(&p.turn_id), "system", &p.note, "system", false, None).await?)
-    } else {
-        None
-    };
-    let mut notes = Vec::from_iter(note);
+        if let Some((reply, snapshot)) = partial.as_ref() {
+            let already_answered: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM messages WHERE turn_id = ? AND role = 'assistant')")
+                    .bind(&p.turn_id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            if !already_answered {
+                notes.push(
+                    insert_message_tx(
+                        &mut tx,
+                        &conv,
+                        Some(&p.turn_id),
+                        "assistant",
+                        reply,
+                        "terminal_fallback",
+                        true,
+                        Some(snapshot),
+                    )
+                    .await?,
+                );
+            }
+        }
+        notes.push(insert_message_tx(&mut tx, &conv, Some(&p.turn_id), "system", &p.note, "system", false, None).await?);
+    }
     let mut bound = false;
     if let Some(n) = &p.new_turn {
         bound = sqlx::query(
@@ -387,6 +414,21 @@ async fn close(app: &Arc<App>, bot_id: &str, p: &Pending) -> anyhow::Result<()> 
     // 推回合結束：排著的派工由它叫醒（`fail_in_flight` 一樣靠這個）。
     emit_turn(app, &p.turn_id).await;
     Ok(())
+}
+
+/// Read Codex's finalized TUI stream after a confirmed interruption. The captured message carries
+/// `incomplete = 1`; failure to read a pane must never keep an already-sent Esc from closing the turn.
+async fn codex_partial_for_interruption(app: &Arc<App>, bot_id: &str, p: &Pending) -> anyhow::Result<Option<(String, String)>> {
+    let Some(bot) = db::bot(&app.db, bot_id).await? else { return Ok(None) };
+    if bot.kind != "codex" {
+        return Ok(None);
+    }
+    let Some(run) = db::run(&app.db, &p.run_id).await? else { return Ok(None) };
+    let Some(pane_id) = run.pane_id.as_deref() else { return Ok(None) };
+    let Some(client) = app.herdr_for_run(&run).await else { return Ok(None) };
+    let read = client.pane_read(pane_id, "recent_unwrapped", 200).await?;
+    let sent = super::turn_echo_texts(app, &p.turn_id).await?;
+    Ok(super::codex_partial_reply(&read.text, &sent).map(|reply| (reply, read.text)))
 }
 
 /// 重啟時從 session log 補收「重啟前就被按停」的那一筆，寫進對話的說明。
@@ -633,6 +675,40 @@ mod tests {
             .fetch_all(&app.db)
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_codex_interrupt_keeps_the_streamed_plan_marked_incomplete() {
+        let b = busy("codex-interrupted-plan").await;
+        let app = b.env.app.clone();
+        sqlx::query("UPDATE bots SET kind='codex' WHERE id=?").bind(&b.bot.id).execute(&app.db).await.unwrap();
+        b.env.herdr.set_screen(
+            &format!("pane-{}", b.bot.id),
+            "› 跑一下測試\n\n• Proposed Plan\n  Compare the current behavior with the rollout.\n■ Conversation interrupted - tell the model what to do differently.\n",
+        );
+
+        close_turn(&app, &b.bot.id, &b.run, &b.turn, "interrupted by user").await.unwrap();
+
+        assert_eq!(status_of(&app, &b.turn).await, "failed");
+        let messages: Vec<(String, String, i64, String)> = sqlx::query_as(
+            "SELECT role, content, incomplete, source FROM messages WHERE turn_id=? ORDER BY rowid",
+        )
+        .bind(&b.turn)
+        .fetch_all(&app.db)
+        .await
+        .unwrap();
+        assert_eq!(
+            messages,
+            vec![
+                (
+                    "assistant".into(),
+                    "Proposed Plan\n  Compare the current behavior with the rollout.".into(),
+                    1,
+                    "terminal_fallback".into(),
+                ),
+                ("system".into(), "interrupted by user".into(), 0, "system".into()),
+            ],
+        );
     }
 
     fn escs(env: &tt::Env) -> usize {
