@@ -1351,7 +1351,7 @@ export class MockTransport implements Transport {
     const shell = this.openShell(host, '')
     const pane = this.shell(host, shell.pane_id)
     const dir = st.config_dir ? `CLAUDE_CONFIG_DIR='${st.config_dir}' ` : ''
-    const command = st.kind === 'claude' ? `${dir}claude /login` : `${dir}${st.kind} login`
+    const command = st.kind === 'claude' ? `${dir}claude auth login` : `${dir}${st.kind} login`
     pane.lines.push(`${pane.cwd.split('/').pop() ?? '~'} % ${command}`, '請在瀏覽器完成登入：', 'https://example.test/device?code=AM-MOCK', '登入完成，正在重新偵測…', '')
     st.logged_in = true
     st.account = st.account ?? 'mock@example.com'
@@ -1368,7 +1368,7 @@ export class MockTransport implements Transport {
     const shell = this.openShell(host, '')
     const pane = this.shell(host, shell.pane_id)
     const dir = st.config_dir ? `CLAUDE_CONFIG_DIR='${st.config_dir}' ` : ''
-    const command = st.kind === 'claude' ? `${dir}claude /logout` : `${dir}${st.kind} logout`
+    const command = st.kind === 'claude' ? `${dir}claude auth logout` : `${dir}${st.kind} logout`
     pane.lines.push(`${pane.cwd.split('/').pop() ?? '~'} % ${command}`, '已登出，憑證已清除。', '')
     st.logged_in = false
     st.account = undefined
@@ -2941,6 +2941,9 @@ export class MockTransport implements Transport {
         }, 300 * (i + 1))
       })
       setTimeout(() => this.finishTurn(botId, turn, 'hook', '重試後成功了。'), 9000)
+    } else if (lowered.includes('authfail')) {
+      // 回合收在 `authentication_failed`（hookrecv `FailureReason::Auth`）：對話裡那則要長出「立即登入」。
+      setTimeout(() => this.failTurnAuth(botId, turn), 1200)
     } else if (lowered.includes('fallback')) {
       setTimeout(() => this.finishTurn(botId, turn, 'terminal_fallback'), 2600)
     } else {
@@ -3084,6 +3087,38 @@ export class MockTransport implements Transport {
       setAgentStatus(run, 'idle')
       this.emitBotStatus(botId)
     }
+  }
+
+  /** 跟 daemon `StopFailure` 那條一樣：回合收成 failed，system 訊息帶分類標籤。 */
+  private failTurnAuth(botId: string, turn: MockTurn) {
+    if (turn.status !== 'in_flight') return
+    this.updateTurn(turn, { status: 'failed', completed_at: now() })
+    this.addMessage({
+      conversation_id: turn.conversation_id,
+      turn_id: turn.id,
+      bot_id: botId,
+      role: 'system',
+      content: '這一回合失敗收尾（帳號或授權）：authentication_failed',
+      source: 'hook',
+      incomplete: 0,
+    })
+    const run = this.activeRun(botId)
+    if (run) {
+      setAgentStatus(run, 'idle')
+      this.emitBotStatus(botId)
+    }
+  }
+
+  /** 截圖用：把 bot 綁到某個身份並把它標成沒登入（`__amMock.loggedOut('am-claude', 'cc1')`）。 */
+  markLoggedOut(botId: string, identity: string) {
+    const st = this.localIdentityStatus[identity]
+    if (st) {
+      st.logged_in = false
+      st.account = undefined
+      this.emit('host_changed', { name: 'local', connected: true, identities: this.localIdentityStatus })
+    }
+    this.bot(botId).identity = identity
+    this.emit('bot_changed', { bot_id: botId })
   }
 
   /** Public so the dev helper can force a blocked state without a prompt. */
@@ -3578,6 +3613,7 @@ function installDevHelpers(mock: MockTransport) {
     /** 問句跟選項之間夾著 `·` 條列說明（claude 2.1.280 fullscreen renderer 邀請）。回 bot id。 */
     bulletAsk: (botIdOrName?: string) =>
       mock.enterBulletAsk(botIdOrName ? (mock.botIdByName(botIdOrName) ?? botIdOrName) : undefined),
+    loggedOut: (botIdOrName: string, identity = 'cc1') => mock.markLoggedOut(mock.botIdByName(botIdOrName) ?? botIdOrName, identity),
     disconnect: () => mock.setConnected(false),
     reconnect: () => mock.setConnected(true),
     hostDown: (name: string) => mock.setHostConnected(name, false),

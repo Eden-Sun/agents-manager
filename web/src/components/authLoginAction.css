@@ -1,0 +1,24 @@
+/* components/AuthLoginAction.tsx：auth 失敗那則系統訊息底下的登入／重試列，跟著系統 pill 置中。 */
+
+.auth-login-action {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  margin-top: 6px;
+  max-width: 100%;
+}
+
+.auth-login-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+}
+
+.auth-login-hint {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  text-align: center;
+}
