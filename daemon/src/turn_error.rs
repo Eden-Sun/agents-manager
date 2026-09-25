@@ -281,7 +281,7 @@ async fn last_turn(app: &Arc<App>, run_id: &str) -> Result<Option<db::Turn>> {
 
 #[cfg(test)]
 mod tests {
-    use super::api_error_line;
+    use super::{api_error_line, is_quota_exhaustion, is_quota_limit};
 
     /// pane w168:pE 的真實快照（2026-09-09）：回合被 API 斷線截斷，但收尾照樣寫 `done`。
     const CONNECTION_LOST: &str = "\
@@ -344,6 +344,16 @@ mod tests {
             api_error_line(screen).as_deref(),
             Some("You've reached your Fable limit. Run /usage-credits to continue or switch models with /model.")
         );
+    }
+
+    #[test]
+    fn codex_0157_rate_limit_suggestion_is_not_an_exhausted_quota() {
+        let screen = include_str!("lifecycle/fixtures/codex-0.157-rate-limit-switch.txt");
+        assert_eq!(api_error_line(screen), None);
+        assert!(!is_quota_limit(screen));
+        assert!(!is_quota_exhaustion(screen));
+        // A real exhausted-bucket banner remains classifiable despite the new recommendation.
+        assert!(is_quota_limit("You've hit your weekly limit. Switch to gpt-6-luna for lower credit usage."));
     }
 
     #[test]

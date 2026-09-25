@@ -5253,6 +5253,23 @@ mod instruction_files_tests {
         let codex_id = created["bot_id"].as_str().unwrap();
         assert_eq!(db::bot(&e.app.db, codex_id).await.unwrap().unwrap().model.as_deref(), Some("gpt-6-luna"));
 
+        for (name, old, replacement) in [
+            ("old-codex-sol", "gpt-5.6-sol", "gpt-6-sol"),
+            ("old-codex-terra", "gpt-5.6-terra", "gpt-6-sol"),
+        ] {
+            let response = create_bot(
+                State(e.app.clone()),
+                Path(e.project_id.clone()),
+                Json(serde_json::from_value(json!({"name":name, "kind":"codex", "model":old})).unwrap()),
+            )
+            .await
+            .unwrap();
+            let body: Value = serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 1 << 20).await.unwrap()).unwrap();
+            assert_eq!(body["remapped"]["model"]["from"], old);
+            assert_eq!(body["remapped"]["model"]["to"], replacement);
+            assert_eq!(db::bot(&e.app.db, body["bot_id"].as_str().unwrap()).await.unwrap().unwrap().model.as_deref(), Some(replacement));
+        }
+
         let create_claude = create_bot(
             State(e.app.clone()),
             Path(e.project_id.clone()),

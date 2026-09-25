@@ -550,6 +550,8 @@ async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate
         crate::child_alerts::on_child_blocked(app, &run);
         // claude 2.1.281 的防誤刪框：通知使用者（帶目標），一個鍵都不按。
         crate::dangerous_rm::on_blocked(app, &run);
+        // Codex 的模型遷移提示也等使用者本人選擇，不把後續訊息送進選單。
+        crate::codex_model_migration::on_blocked(app, &run);
     }
     // 不再 blocked：同一個問題下次再出現時才要再講一次。
     if prev == "blocked" && status != "blocked" {
