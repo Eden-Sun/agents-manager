@@ -1069,11 +1069,11 @@ export function Sidebar() {
             {MOCK_MODE ? <span className="mock-badge">MOCK</span> : null}
             {/* 重建申請數放在「AG Man」右上、連線燈號正上方（2026-09-14 使用者）。 */}
             <RebuildBadge />
+            {/* 立即部署（2026-09-25 使用者）：落後且有程式碼差異才出現。放標題列、只寫 `⇪N`：放第二列會把 RAM 格擠到跟兩側重疊。 */}
+            <DeployNowBadge />
           </div>
           <div className="head-brand-meta">
             <PaneBadge />
-            {/* 立即部署（2026-09-25 使用者）：落後且有程式碼差異才出現；疊在重建申請數正下方。 */}
-            <DeployNowBadge />
             <ThemeToggle />
             <ConnBadge socket={socket} connected={connected} />
           </div>

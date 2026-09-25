@@ -39,7 +39,8 @@ export function DeployNowBadge() {
 
   if (!deployVisible(status) || !status) return null
   const running = status.running
-  const label = running ? '部署中' : `部署 ${status.behind}`
+  // 側欄標題列只放得下 `⇪N`；完整說法在 aria-label 與 title。
+  const label = running ? '部署中' : `${status.behind}`
   const title = offline
     ? '連不上 daemon（可能正在重啟），這是斷線前的狀態。'
     : running

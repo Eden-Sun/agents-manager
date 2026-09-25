@@ -24,14 +24,15 @@
   opacity: 0.7;
 }
 
-/* 位置：側欄標題第二列（重建申請數正下方），跟主題鈕、連線燈一起靠右。標題那一列擠不下第三顆：
-   1440 寬會壓到 RAM 格，手機會把「AG Man」擠出去（2026-09-25 截圖）。 */
-.head-brand-meta > .deploy-badge {
+/* 位置：側欄標題列「AG Man」右邊，只寫 `⇪N`（2026-09-25 使用者截圖：放第二列時 pane／部署／主題鈕把左欄撐到 160px，
+   中間的 RAM 格只剩 16px、疊到兩側）。跟重建申請數擠不下同一列，所以部署鈕出現時重建 chip 先讓位：
+   立即部署做的就是那些申請要的事（重建＋重啟）；部署鈕不在（已是最新）時重建 chip 照常出現。 */
+.head-brand-title > .deploy-badge {
   margin-left: auto;
 }
 
-.head-brand-meta > .deploy-badge + .theme-toggle {
-  margin-left: 0;
+.head-brand-title:has(> .deploy-badge) > .rebuild-badge-box {
+  display: none;
 }
 
 /* 部署中：不是警示，是「已經在做了」，所以用綠燈、不給再開確認框。 */
