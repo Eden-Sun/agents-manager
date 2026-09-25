@@ -286,13 +286,15 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
 - **滿意度問卷**：Claude Code 的 `How is Claude doing this session?` 會讓 agent 停下來等人，與工作無關 → 認出畫面（`tui_prompts`）。
   進 `blocked` 當下看一次，另每 10 秒巡 `blocked`／`idle` 的 Run；額度探測 pane 也用同一套（那裡的 Enter 會變成替使用者評分）。
   其他等人回答的畫面一概不動。
-  辨識要兩個條件同時成立：**輸入列不是空的**（空的就是回覆在引用原文，同其他對話框的守衛）與**選項自成一列**
-  （`1: Bad 2: Fine 3: Good 0: Dismiss` 之外幾乎沒有別的字）。不看行首是不是 `●`——那正是 Claude 自己印助理訊息的符號，
-  拿它排除 agent 的引文等於沒有排除（issue #485）。
-  **自動送 `0` 目前關著**（`PRESS_KEYS_ON_SURVEY = false`，issue #485）：這是唯一會主動按鍵的偵測，卻是唯一沒有真畫面 fixture 的，
-  所以「現在的問卷還長不長這樣」無從查證，而誤判的代價是替使用者送出一則 `0`。關著的期間問卷**改為算成「該吵父 agent」的畫面**
-  （§10 的 `alertable_question` 跟著 `daemon_dismisses_survey()` 走）——不然沒人按也沒人知道，比誤按更糟。
-  補上真畫面 fixture 與對照測試之後再打開。
+  辨識要兩個條件同時成立：**選項自成一列**（`1: Bad 2: Fine 3: Good 0: Dismiss` 之外幾乎沒有別的字）與**最後一列選項正下方
+  （跳過框線）就是空的輸入列**。2.1.281 的真問卷畫在輸入框正上方、輸入列空著（一打字問卷就收掉），所以不能套其他對話框
+  「輸入列空著就不是框」的守衛；回覆裡照抄問卷時，引文和輸入框之間隔著回合結束那一行 `✻ … · done`。不看行首是不是 `●`——
+  那正是 Claude 自己印助理訊息的符號（issue #485）。真畫面 fixture：`claude-2.1.281-feedback-survey.txt`（`CLAUDE_FORCE_DISPLAY_SURVEY=1`
+  叫出）與 `claude-2.1.281-feedback-survey-quoted.txt`。單按 `0` 就收掉；`0` 若其實落進輸入列（`❯ 0`），畫面隨即不再算問卷，
+  不補 Enter、下一輪也不再按。已知的殘留：`showTurnDuration` 關掉（沒有 `✻ … · done`）且回覆**以**逐字照抄的問卷結尾時仍會誤認，
+  最壞是在空的輸入列留下一個 `0`。
+  自動送 `0` 由 `PRESS_KEYS_ON_SURVEY` 控制（目前開著）；關掉時問卷自動改算成「該吵父 agent」的畫面
+  （§10 的 `alertable_question` 跟著 `daemon_dismisses_survey()` 走），不會變成沒人按也沒人知道的靜默停擺。
 - **claude 2.1.281 的防誤刪框（Dangerous rm）不按、要人核准**（`dangerous_rm`，辨識在 `tui_prompts::dangerous_rm_prompt`）：`rm -rf $(…)`、`$VAR`、頂層目錄這類目標，
   bypass 模式也會跳「Dangerous rm operation on … Do you want to proceed? 1. Yes / 2. No」，約 2 分鐘沒人回答 claude 自動拒絕
   （指令不執行，claude 收到「被內建安全檢查拒絕」的 tool_result 後把回合做完；本機 2.1.281＋假 API 實測，畫面在 `lifecycle/fixtures/claude-2.1.281-dangerous-rm*.txt`）。
@@ -1387,7 +1389,7 @@ child 轉成 `blocked` 並且**穩定 8 秒**（daemon 自己按掉的對話框�
 - 只有 `managed_by = 'child'`、未刪、`parent_bot_id` 有值的 bot 會觸發；
 - 父 agent 沒有活著的 run 就不送（沒有 pane 收得下，UI 徽章仍在）；
 - daemon 自己會按掉的畫面不算：`/model`／`/effort` 確認框（§3.1、`tui_prompts`）；滿意度問卷則**跟著 daemon 現在按不按鍵走**
-  （`daemon_dismisses_survey()`，issue #485：不按的期間要吵，否則靜默停擺）；
+  （`daemon_dismisses_survey()`，issue #485：目前會按，所以不吵；關掉按鍵的期間要吵，否則靜默停擺）；
 - 同一個問題只講一次：指紋取畫面尾段，statusLine 與 `⏵⏵ bypass permissions` 這類每回合都在變的行先濾掉；
   child 離開 `blocked` 就把指紋忘掉，同一個問題再出現才會再講；
 - **節流**：同一顆 child 兩則之間至少 10 分鐘。指紋去重擋「同一個問題」，節流擋「畫面一直重畫、

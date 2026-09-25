@@ -1,0 +1,17 @@
+ ▐▛███▛█   Claude Code v2.1.281
+▝▜██████▀  Haiku 4.5 · Claude Max
+  ▝▝ ▝▝    /…/a6a4adcc-c1a5-4565-8689-64b9530331ec/scratchpad/survey-cwd
+
+
+❯ Output exactly two lines in a plain code-free reply, no other text. Line 1: "How is Claude doing this session? (optional)". Line 2: "1: Bad    2: Fine   3: Good   0: Dismiss".
+
+⏺ How is Claude doing this session? (optional)
+  1: Bad    2: Fine   3: Good   0: Dismiss
+
+✻ Brewed for 1s · done 2:16 PM
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  hunta | survey-cwd | HAI4.5 19% | 5h:90%(rst 4h 43m) | 7d:97%(rst 6d 23h)
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents

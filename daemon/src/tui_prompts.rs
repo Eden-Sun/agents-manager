@@ -118,19 +118,29 @@ fn is_option_row(line: &str) -> bool {
     rest.split_whitespace().collect::<String>().chars().count() <= 8
 }
 
+/// 問卷的最後一列選項**正下方**（跳過框線）是不是一個**空的**輸入列。
+///
+/// 2.1.281 真畫面（`claude-2.1.281-feedback-survey.txt`，#485）：問卷畫在輸入框正上方，輸入列空著；
+/// 一打字問卷就收掉，所以真的問卷只存在於「底下是空輸入列」的時候。回覆裡照抄問卷時，問卷與輸入框之間
+/// 還隔著回合結束那一行 `✻ … for Ns · done`（`claude-2.1.281-feedback-survey-quoted.txt`）；
+/// 按下的 `0` 如果其實落進輸入列（`❯ 0`），這一條也就不再成立——不會再補 Enter、下一輪也不會再按。
+fn sits_on_empty_composer(below: &[&str]) -> bool {
+    below
+        .iter()
+        .map(|l| l.chars().filter(|c| !"│┃╭╮╰╯─━▔ \t".contains(*c)).collect::<String>())
+        .find(|rest| !rest.is_empty())
+        .is_some_and(|rest| matches!(rest.as_str(), "❯" | "›" | ">"))
+}
+
 pub fn is_feedback_survey(screen: &str) -> bool {
     // 原文與壓平後的版本一起留著：兩個 tail 要對齊同一批行——`composer_is_idle` 要看原文
     // （`❯` 會被 `flatten` 留著，但框線得先去掉），問句與選項看壓平後的。
     let kept: Vec<(&str, String)> = screen.lines().map(|l| (l, flatten(l))).filter(|(_, f)| !f.is_empty()).collect();
     let from = kept.len().saturating_sub(SURVEY_TAIL_LINES);
-    // 輸入列空著＝沒有框在擋，那是回覆裡引用了問卷原文（同其他五個偵測，#114／#485）。
-    // 真的問卷佔著輸入列那一行（`> │`），不會同時留一行空的 `❯`。
-    // **只看同一個 tail**：套在整個畫面上的話，捲動區任何一處有空的 `❯`（例如上一個回合結束時那一行）
-    // 都會把真的問卷判成引文（i267 審 #485）。
+    // **不能**套其他偵測的「輸入列空著就不是框」（[`composer_is_idle`]）：2.1.281 的真問卷底下就是一個空的
+    // 輸入列（`claude-2.1.281-feedback-survey.txt`），那道守衛會把真的問卷全部擋掉。分辨引文改看
+    // 問卷正下方是什麼（[`sits_on_empty_composer`]）。
     let raw_tail: Vec<&str> = kept[from..].iter().map(|(l, _)| *l).collect();
-    if composer_is_idle(&raw_tail) {
-        return false;
-    }
     let tail: Vec<String> = kept[from..].iter().map(|(_, f)| f.clone()).collect();
     let tail = &tail[..];
     let question = "how is claude doing";
@@ -142,13 +152,17 @@ pub fn is_feedback_survey(screen: &str) -> bool {
             }
             let option_end = tail.len().min(end + SURVEY_OPTION_GAP);
             let mut found = [false; 4];
+            let mut last_row = None;
             // 只採計「看起來就是選項列」的行：散文裡把選項寫進句子中間不算（`is_option_row`）。
-            for line in tail[start..option_end].iter().filter(|l| is_option_row(l)) {
-                for (slot, present) in survey_options(line).into_iter().enumerate() {
+            for i in (start..option_end).filter(|&i| is_option_row(&tail[i])) {
+                for (slot, present) in survey_options(&tail[i]).into_iter().enumerate() {
                     found[slot] |= present;
                 }
+                last_row = Some(i);
             }
-            if found.into_iter().filter(|present| *present).count() >= 3 {
+            if found.into_iter().filter(|present| *present).count() >= 3
+                && last_row.is_some_and(|i| sits_on_empty_composer(&raw_tail[i + 1..]))
+            {
                 return true;
             }
         }
@@ -413,17 +427,15 @@ pub async fn stuck_at_login(app: &Arc<App>, run: &db::Run) -> bool {
 
 /// 認出問卷之後**要不要真的按鍵**（#485）。
 ///
-/// 目前是 `false`：這個模組裡唯一會主動按鍵的偵測，卻是唯一**沒有真畫面 fixture** 的——
-/// `SURVEY`／`SURVEY_WRAPPED` 都是手寫的，其他每個偵測都釘著有日期的真 capture
-/// （onboarding 2026-09-22、dangerous rm 2026-09-24、grok trust 2026-09-17）。
-/// 所以「2.1.28x 的問卷還長不長這樣」無從查證，而誤判的代價是替使用者送出一則 `0`
-/// （按了之後畫面上的引文不會消失，700 毫秒後再判一次仍成立就會補送 enter）。
+/// 曾經暫時關掉（1804c9f8）：當時這是唯一會主動按鍵、卻沒有真畫面 fixture 的偵測。2026-09-25 補上
+/// 2.1.281 的真畫面（`CLAUDE_FORCE_DISPLAY_SURVEY=1` 在隔離的 herdr session 叫出來、`pane read` 原文）
+/// 與 agent 照抄問卷的真畫面，兩張都有對照測試；同一次實測確認單按 `0` 就會收掉、輸入列維持空的。
+/// 誤判的最壞情況也收斂了：`0` 若其實落進輸入列，[`sits_on_empty_composer`] 隨即不成立，不補 Enter、
+/// 下一輪也不再按。
 ///
-/// **保守不等於沒有代價**：不按鍵的話，問卷真的跳出來時 bot 會停在上面——那正是這個模組當初
-/// 存在的理由。所以關掉按鍵的同時，問卷也不再從「該吵父 agent 的畫面」裡被排除
-/// （[`daemon_dismisses_survey`]，見 `child_alerts::alertable_question`）：改由父 agent／人處理，
-/// 順便就能把真畫面抓成 fixture。拿到 fixture、補上對照測試之後把這裡改回 `true`。
-const PRESS_KEYS_ON_SURVEY: bool = false;
+/// 改回 `false` 時，問卷會自動變成「該吵父 agent 的畫面」（[`daemon_dismisses_survey`]，見
+/// `child_alerts::alertable_question`），不會變成沒人按也沒人知道的靜默停擺。
+const PRESS_KEYS_ON_SURVEY: bool = true;
 
 /// daemon 現在會不會自己把問卷按掉。`child_alerts` 用它決定要不要把問卷算成「該吵父 agent 的畫面」：
 /// daemon 會按掉就不吵，不按就要吵，否則問卷會變成沒人知道的靜默停擺。
@@ -460,7 +472,7 @@ pub async fn dismiss_if_survey(app: &Arc<App>, run: &db::Run) -> bool {
                 run = %run.id,
                 bot = %run.bot_id,
                 pane = %pane,
-                "claude 滿意度問卷：偵測到但不自動按鍵（#485：沒有真畫面 fixture）。請人處理，並把這個 pane 的畫面抓成 fixture"
+                "claude 滿意度問卷：偵測到但不自動按鍵（PRESS_KEYS_ON_SURVEY 關著，#485）。請人處理"
             );
         } else {
             tracing::debug!(run = %run.id, pane = %pane, "claude 滿意度問卷仍在（不自動按鍵）");
@@ -539,6 +551,11 @@ pub(crate) mod screens {
   AGM-responder | Opus 5 H | 5h:- | 7d:-
 ";
 
+    /// 2.1.281 真畫面（2026-09-25，#485）：隔離的 herdr session 裡 `CLAUDE_FORCE_DISPLAY_SURVEY=1 claude` 叫出的問卷，
+    /// `pane read --source visible` 原文（路徑縮成 `/…/`）。問卷就在輸入框正上方，**輸入列是空的**。
+    pub const FEEDBACK_SURVEY: &str = include_str!("lifecycle/fixtures/claude-2.1.281-feedback-survey.txt");
+    /// 同一個 session 問卷收掉之後，請 agent 把問卷兩行原樣印出來的回覆：`⏺` 引文、`✻ … · done`、空輸入列。
+    pub const FEEDBACK_SURVEY_QUOTED: &str = include_str!("lifecycle/fixtures/claude-2.1.281-feedback-survey-quoted.txt");
     pub const ONBOARDING_THEME: &str = include_str!("lifecycle/fixtures/claude-2.1.278-onboarding-theme.txt");
     /// 2026-09-22 triage bot（2.1.280）的真回報：正文逐行引了 onboarding 主題頁原文，底下是空的輸入列＋statusline。
     /// daemon 對它每次送交辦都回 needs_login，交辦停在 queued。
@@ -666,18 +683,30 @@ mod tests {
         assert!(is_feedback_survey(SURVEY_WRAPPED));
     }
 
-    /// #485：agent 在回覆裡逐行照抄問卷（連 `● ` 前綴都一樣，那本來就是 claude 自己的項目符號），
-    /// 底下是空的輸入列——那不是開著的問卷，不能對它按鍵。
+    /// #485 的真畫面：2.1.281 的問卷底下就是空的輸入列。套其他偵測那道「輸入列空著就不是框」的守衛，
+    /// 這張會被判成不是問卷（1804c9f8 就是這樣）。
+    #[test]
+    fn the_real_2_1_281_survey_is_recognised() {
+        assert!(is_feedback_survey(screens::FEEDBACK_SURVEY));
+    }
+
+    /// #485：agent 在回覆裡逐行照抄問卷（真畫面）——引文與輸入框之間隔著 `✻ … · done`，那不是開著的問卷。
     #[test]
     fn a_reply_that_quotes_the_survey_is_not_the_survey() {
-        let quoted = format!(
-            "⏺ 剛剛跳出這個問卷，我照你說的貼上來：\n ● How is Claude doing this session? (optional)\n   1: Bad    2: Fine   3: Good   0: Dismiss\n{IDLE_CLAUDE}"
-        );
-        assert!(!is_feedback_survey(&quoted), "輸入列空著＝引文，不是問卷");
+        assert!(!is_feedback_survey(screens::FEEDBACK_SURVEY_QUOTED), "底下隔著回合結束那一行＝引文");
         // 沒有空輸入列（還在跑）時靠選項列那一條：問句與四個選項**都**出現，但全寫在句子中間。
         // （這一行必須同時含 `how is claude doing`，否則問句那一關就先擋掉，測不到 `is_option_row`。）
         let prose = " ⏺ The popup asked How is Claude doing this session? with 1: Bad 2: Fine 3: Good 0: Dismiss and I chose 0.\n ⎿  done\n   ✽ Working…\n";
         assert!(!is_feedback_survey(prose), "選項夾在句子裡不是選項列");
+    }
+
+    /// 按下的 `0` 如果落進了輸入列（那就不是問卷），畫面就不能再算問卷：否則 700 毫秒後會補 Enter 把「0」送出去，
+    /// 下一輪巡邏也會再按一次。
+    #[test]
+    fn a_zero_typed_into_the_composer_is_not_a_survey() {
+        let typed = screens::FEEDBACK_SURVEY.replacen("\n❯\n", "\n❯ 0\n", 1);
+        assert_ne!(typed, screens::FEEDBACK_SURVEY, "前提：fixture 裡有空的輸入列");
+        assert!(!is_feedback_survey(&typed));
     }
 
     /// i267 審 #485：`composer_is_idle` 只能套在**跟問句同一個 tail** 上。套在整個畫面的話，
