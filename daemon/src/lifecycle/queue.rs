@@ -652,6 +652,12 @@ pub async fn mark_run_exited(app: &Arc<App>, run_id: &str, reason: &str) -> RunE
             return RunExit::NotRecorded;
         }
     }
+    // 只有 CAS 真的寫下 exited 的這一條路記原因（每個 run 只會成功一次，後到的在上面就回 AlreadyEnded）。#554：
+    // child 退役紀錄靠它分辨 pane 是 herdr 報關掉的還是對帳才發現不見。
+    // 記不下來只是少一個證據：退役紀錄讀到 NULL 就當成沒親眼看到，偏向「不算刻意」。
+    if let Err(e) = sqlx::query("UPDATE runs SET exit_reason = ? WHERE id = ?").bind(reason).bind(run_id).execute(&app.db).await {
+        tracing::warn!(run = run_id, reason, error = %e, "run exited but its exit reason could not be recorded");
+    }
     // pane 已經沒了，這不是我們能不做的事：回合收不成就記成欠著、之後補（#156），不當成已經收掉。
     // 撤佇列與拆 watcher 是 run 結束的事，跟回合收不收得成無關，照做。
     let turn_owed = match fail_in_flight_or_owe(app, run_id, &format!("run ended: {reason}")).await {

@@ -102,7 +102,7 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
     也就是說 `user_version` 是**最低相容 binary 的圍籬，不是 migration 帳本**：它只回答「哪些 binary 准開這個檔案」，
     不記錄跑過哪些步驟。等真的出現非 additive 的資料轉換（改欄位型別、拆表、改約束得重建表），再引入照順序執行的
     migration 框架。
-  - **持久 intent 與啟動版本（v13，#355）**：`intents` 表記「已承諾、可能只做了一半」的多步驟動作（restart／delete_bot／delete_project／promote），
+  - **持久 intent 與啟動版本（v13，#355）**：`intents` 表記「已承諾、可能只做了一半」的多步驟動作（restart／delete_bot／delete_project／promote；另有當下做完、只留紀錄的 retire_child），
     daemon 中途死掉後開機由 `intents.rs` 接續（設計與階段見 #355）；同一目標同一種動作同時只能有一件開著（partial unique index `intents_one_open`），
     認領用 CAS（`owner_boot`），補做失敗最多 5 次就 `failed`。`bots.launch_rev`／`runs.launch_rev` 是啟動相關設定的版本雜湊（NULL＝沒記，不誤報需重啟）。
     **已接線：`restart`**（`restart_bot_with`，含一鍵重啟每顆各一件）：記 `stopping` 之前先 commit intent（寫不進去就不重啟）；正常完成標 `done`、
@@ -125,6 +125,8 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
     開機（`promote_intents::recover_host`）檢查：child 還在跑＝停 child 從沒發生→收回複製、`abandoned`（可原樣重送）；child 已停／已收掉→**往前補完、不回滾**
     （目標 bot 沒建就建、沒種 session 就種、沒起過就 native resume 起、收掉 child），每步先驗世界；補不成 5 次 `failed`＋AGM inbox。handler 活著時的失敗仍照原樣回滾並收成 `abandoned`。
     「沒起過」＝這顆除了種下的那列之外沒有別的 run；種下的那列以 `started_at = ended_at` 認，所以兩欄**必須綁同一個時間戳**（`promote_intents::seed_session_run`，handler 與補完共用）——各取一次 `now()` 跨毫秒時會被當成「起過了」而跳過 resume、直接記 `done`（#401）。
+    **只是紀錄：`retire_child`**（#554，v22）：child 退役（§6.5a 的 `child_retire`）當下就做完、沒有補做這回事，直接寫一列 `done`（`intents::record_done`），
+    跟 `deleted_at` 同一個交易——寫不進去就不退役。存在只為了事後（例如換版腳本）查得到是誰、為什麼收掉的；payload 與 `cause` 的判準見 §6.5a。一樣 24 小時後由清掃收掉。
     **機制 B：啟動版本（#353）**：`needs_restart` 從資料算——`launch_rev::of(bot)`（啟動相關設定正規化後的雜湊）在 run 啟動時記進 `runs.launch_rev`，
     bot 目前的版本對不上 active run 記的＝過期，`GET /api/state` 的 bot 帶 `needs_restart`；PATCH 當場套用（slash）成功就更新該 run 的版本、沒記版本的舊 run 在改設定那刻補記「改之前」的版本；
     web 的 Bot 設定面板開著時也顯示「需重啟」。`bots.launch_rev` 欄位 v13 一併加了但不用（現在的版本隨時可算）。
@@ -1385,6 +1387,25 @@ hint 可用，退回規則 2／3——這條沒有、也不打算改掉子代 ho
 以及 `pane_closed` 事件**先**結束 run、reconcile 後到——bot 沒有 active run、herdr 清單找不到它、且至少有一個已結束的 run，一樣退役。
 herdr 還列著這個 agent（pane 被搬走）的不算，會被重新收編。`pane_closed` 結束的是子 agent 的 run 時，2 秒後自己排一次 reconcile。
 **AGM 的子 agent 不隱式退役**（#413）：上面兩條路與維護窗口收尾（§6.5.2）退役前，都要先過 §3.1「AGM 的 bot 一律不隱式刪」那份 `supervisor_owned` 判斷——目標是總管／角色本身、它們的 child、或總管專案底下的 bot 時**不軟刪**，改推一則 `child_retire_refused` 給巡檢（帶 bot、退役原因與最後一個 run 的 pane 狀態），由人決定要不要真的刪（`agm bot delete <id> --confirm-supervisor`）。同一顆一小時最多一則，而且那一小時**從上一則通知算起**（寫入前先找同一顆、一小時內的最新一則，沿用它那把去重鍵）：對帳每拍都跑，用牆上時鐘的固定小時格的話，相隔幾秒的兩次對帳只要跨過整點就落在不同格子、推兩則講同一件事的通知（#536，與 #442 同一類）。這裡**不挑事件狀態**（#442 的申請去重只認還沒結案的）——被擋下來的情況會一直成立，只認未結案等於巡檢一裁示完、下一拍就再推一則。讀不到「誰是 AGM 的」也不退役，下一輪再看。一般專案的子 agent 行為不變。這三條與 promote（§6.10a，含開機補完）寫 `deleted_at` 一律走同一個退役入口（`child_retire`），每次都記一行 `child retired`：原因（`reconcile_agent_gone`／`reconcile_run_already_ended`／`herdr_maintenance_closed`／`promoted`／`promote_recovered`）、程式呼叫位置、HTTP 呼叫端（背景是 `-`）；promote 是明講的動作，只記不擋。
+
+**退役紀錄與「刻意／弄丟」怎麼分**（#554）：真的退役了（不是被擋、不是早就不在）就跟 `deleted_at` 同一個交易寫一列 `intents`（§3.1）：
+`kind = retire_child`、`subject_id`＝bot id、`status = done`，payload 帶 `why`（上面那五種原因）、`mode`、`call_site`、`requested_by`（HTTP 呼叫端，背景 `-`）、
+`boot_id`（哪一顆 daemon 做的）、`parent_bot_id`、最後一個 run 的 `id`／`state`／`pane_id`／`ended_at`／`exit_reason`、退役當下 herdr 對那個 pane 的回答（`pane`：`gone`／`present`／`unknown`），
+以及據此算出的 `cause`。`runs.exit_reason` 是 `mark_run_exited` **真的把 run 收成 exited 的那一次**寫的原因（CAS 輸掉的後到者不改寫）。
+`reconcile_agent_gone`／`reconcile_run_already_ended` 同時可能是「父 bot `herdr pane close` 收掉 child」和「換版弄丟 child」，`cause` 這樣判：
+
+| `cause` | 條件 | 換版腳本 |
+|---|---|---|
+| `pane_closed` | run 是因為 herdr **發了事件**說 pane 關了才結束的（`exit_reason` 是 `pane exited`／`workspace closed`），**而且**退役當下 herdr 也說 pane 不在 | 刻意，不回滾 |
+| `promoted` | `promoted`／`promote_recovered` | 刻意，不回滾 |
+| `agent_missing` | pane 還在，只是 daemon 認不出裡面的 agent | 回滾 |
+| `herdr_restarted` | `herdr_maintenance_closed`：herdr 計畫中重啟之後沒回來 | 回滾 |
+| `unconfirmed` | 其餘：pane 不在但沒有人親眼看到它被關（對帳才發現、定時問到 `pane_not_found`、升級前結束的 run 沒有原因）、問不到 herdr | 回滾 |
+
+依據：`daemon-swap.sh` 只重啟 daemon、herdr 不動，換版本身關不掉任何 pane。換版能弄丟 child 的形狀只有兩種：pane 還在、新 daemon 認不出裡面的 agent（`agent_missing`）；
+或新 daemon 連到不對的 herdr（例如算錯 socket 自己起了一顆空的 server），那顆 server 對每個 pane 都回 `pane_not_found`——單看「pane 不在」分不出來，所以要再加上
+「herdr 發過關閉事件」：空的 server 不會替它沒有的 pane 發事件。daemon 自己關的 pane 不會冒充：對帳收的孤兒 pane 屬於早就結束的 run（事件到時 CAS 輸掉、不寫原因），
+停止／刪除則本來就是有人明講的動作。代價：父 bot 在 daemon 停著的那幾秒關掉 pane，沒有人收到事件，只會是 `unconfirmed`，那一趟換版照樣回滾——寧可多回滾一次，不放過弄丟的。
 
 ### 6.5a-1 子 agent 卡住時通知父 agent（`child_alerts`，使用者 2026-09-18）
 

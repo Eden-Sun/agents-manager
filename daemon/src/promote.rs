@@ -716,8 +716,9 @@ mod tests {
         let _ = h.await;
     }
 
+    /// promote 那一件的狀態（同一顆 child 退役時另有一筆 `retire_child` 紀錄，#554，不算在這裡）。
     async fn intent_status(app: &Arc<App>, child: &str) -> Vec<String> {
-        sqlx::query_scalar("SELECT status FROM intents WHERE subject_id = ? ORDER BY created_at").bind(child).fetch_all(&app.db).await.unwrap()
+        sqlx::query_scalar("SELECT status FROM intents WHERE subject_id = ? AND kind = 'promote' ORDER BY created_at").bind(child).fetch_all(&app.db).await.unwrap()
     }
 
     /// #248：停 child 之後（承諾點前後三個位置）行程死掉。以前留下「child 已停、目標 bot 半建」的半套；現在開機往前補完：
@@ -747,7 +748,7 @@ mod tests {
             if !ok {
                 // 30 秒都等不到：把 intent 記的重試狀態與 last_error 一起丟進斷言訊息（整樹高負載下曾經連著重試都失敗過一次，
                 // 沒抓到根因；下次真的再紅，訊息裡就有東西可查，不用只看到「新 bot 起來了」）。
-                let intent_row: Option<(String, i64, Option<String>)> = sqlx::query_as("SELECT status, attempts, last_error FROM intents WHERE subject_id=?")
+                let intent_row: Option<(String, i64, Option<String>)> = sqlx::query_as("SELECT status, attempts, last_error FROM intents WHERE subject_id=? AND kind='promote'")
                     .bind(&r.child).fetch_optional(&app2.db).await.unwrap();
                 let runs_dump: Vec<(String, String, Option<String>)> = sqlx::query_as("SELECT id, state, ended_at FROM runs WHERE bot_id=?")
                     .bind(&new_id).fetch_all(&app2.db).await.unwrap();
