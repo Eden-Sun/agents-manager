@@ -164,6 +164,12 @@ class CliCase(unittest.TestCase):
         for var in ("HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"):
             os.environ[var] = "http://127.0.0.1:9"
             self.addCleanup(lambda v=var: os.environ.pop(v, None))
+        # 在 bot 的 pane 裡跑測試時這些都有值：agm 一看到 AM_BOT_ID 就改用 Bot 身分（#556），
+        # 期望「一般 shell＝User token」的測試會紅。每個測試從乾淨的身分環境開始，要的自己設。
+        for var in ("AM_BOT_ID", "AM_BOT_TOKEN", "AM_HOOK_TOKEN", "AM_SERVICE_ID", "AM_SERVICE_TOKEN_FILE"):
+            old = os.environ.pop(var, None)
+            if old is not None:
+                self.addCleanup(lambda v=var, o=old: os.environ.__setitem__(v, o))
 
     def release_server(self) -> None:
         """收尾：放行卡在 slow 的 handler，等 in-flight 的全部跑完（#560）。
