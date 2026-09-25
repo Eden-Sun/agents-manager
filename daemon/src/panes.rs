@@ -904,13 +904,18 @@ mod tests {
         assert!(newer > out_at, "{newer} > {out_at}");
 
         // pane 不見了就從表裡拿掉。
+        // #437：清理只收 `last_seen < scanned_at` 的列（比 snapshot 新的留給下一輪），所以「w1:pB 比這份
+        // snapshot 舊」是這一步的前提。以前靠上一輪與這一輪背對背呼叫、**牆鐘一定往前走**來成立。DB 是
+        // 每條測試自己的（`app()`），沒有別處插列；兩輪依序 await、中間沒有別的寫入者，所以 pB 會留下來
+        // （left 1 / right 0）的路只剩牆鐘在兩次 `db::now()` 之間沒往前走（NTP／VM 對時回撥）——回撥本身
+        // 沒量到，但把 `record_scan` 的 `now` 撥快一秒就能照原樣重現。前提改由測試自己擺好：把它的
+        // `last_seen` 撥回一分鐘前——正式環境上一輪本來就是 60 秒前（`RESCAN_INTERVAL`）。
+        sqlx::query("UPDATE panes SET last_seen=? WHERE host='local' AND pane_id='w1:pB'")
+            .bind(crate::db::iso_in(-60))
+            .execute(&app.db)
+            .await
+            .unwrap();
         assert_eq!(scan_host(&app, "local", &[pane("w1:pA", Some("claude"), 3)]).await.unwrap().panes, 0);
-        // #437：這裡偶發紅（整樹高並行時 left 1 / right 0），但原因還沒查出來——原本是全表
-        // `COUNT(*)`，紅的時候只知道「數字不對」，連**哪一顆 pane 活下來**都不知道，沒辦法往下查。
-        // 先把證據補齊：列出還留著的 `pane_id` 與它的 `last_seen`，下次再紅就看得出是誰、時間差多少。
-        // （查過但**排除掉**的假設：跨測試汙染——`app()` 每次開自己的 `am-panes-<ulid>/t.sqlite3`；
-        // 以及「兩次 `db::now()` 落在同一毫秒讓 `last_seen < scanned_at` 為假」——插樁量 20 次，
-        // 間隔穩定是 3–4 毫秒，而且 `scanned_at` 在 `scan_host` 最前面就捕捉，越忙只會拉大不會縮小。）
         let left: Vec<(String, String)> = sqlx::query_as("SELECT pane_id, last_seen FROM panes")
             .fetch_all(&app.db)
             .await
