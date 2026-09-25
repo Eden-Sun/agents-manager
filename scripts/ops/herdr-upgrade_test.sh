@@ -38,9 +38,14 @@ open(portfile, "w").write(str(s.server_address[1]))
 s.serve_forever()
 PY
 # canary-gap: 假 daemon 只用 http.server 回固定 JSON、寫請求紀錄，沒有任何 subprocess／破壞性指令
-python3 "$ROOT/server.py" "$ROOT/requests.log" "$ROOT/port" & SRV_PID=$!
-for _ in $(seq 1 50); do [ -s "$ROOT/port" ] && break; sleep 0.1; done
-[ -s "$ROOT/port" ] || { echo "FAIL - 假 daemon 沒起來"; exit 1; }
+python3 "$ROOT/server.py" "$ROOT/requests.log" "$ROOT/port" 2> "$ROOT/server.err" & SRV_PID=$!
+# CI 的 macOS runner 起 python 可能要好幾秒：等到 30 秒，中途死掉就不必再等。
+for _ in $(seq 1 300); do
+  [ -s "$ROOT/port" ] && break
+  kill -0 "$SRV_PID" 2>/dev/null || break
+  sleep 0.1
+done
+[ -s "$ROOT/port" ] || { echo "FAIL - 假 daemon 沒起來"; sed 's/^/      /' "$ROOT/server.err"; exit 1; }
 
 # 從腳本抽出 svc／svc_code（到下一個頂層 `}` 為止），不執行升級流程本身。
 sed -n '/^svc() {$/,/^}$/p; /^svc_code() /p' "$SCRIPT" > "$ROOT/svc.sh"
