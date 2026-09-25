@@ -72,12 +72,9 @@
     display: none;
   }
 
-  /* 桌機：放第二行最前面。1440px＋側欄時名字列只剩約 161px 塞不下 71px chip；讓掉 pane id（debug 用，tooltip 與識別列都有）。 */
+  /* 桌機：放第二行最前面。1440px＋側欄時名字列只剩約 161px 塞不下 71px chip。pane id 不再整顆藏掉（2026-09-25 使用者：
+     「這窗怎麼沒有 pane name」）：它本來就會先縮成 `…▾`（`desktopBotHead.css` 的 flex-shrink 1000），有空間就照常顯示。 */
   .bot-head .main-title-sub > .blocked-badge {
     margin-right: 2px;
-  }
-
-  .bot-head .main-title-sub:has(> .blocked-badge) > .main-status.pane-toggle {
-    display: none;
   }
 }

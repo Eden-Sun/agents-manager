@@ -57,7 +57,7 @@
 
 - **收縮優先序**：分頁不讓 > 名字 > 附屬 chip／遠端記憶體。**額度量表不在可讓的名單裡：桌機每個帳號都畫完整量表**（使用者指定「額度顯示很重要，不要省空間」）。
   名字 `flex: 1 0.25 auto`、下限 3em、上限 22em；中間空白要真的被名字與 pane id 用掉。
-- 第一行：燈號、名字、★、⚙、更新 chip 等；第二行：`● 需要回應`（blocked 時，排第一）、kind logo（無框、有底色、貼近 model）、model／effort chip、pane id（擠不下只剩 `▾`）。
+- 第一行：燈號、名字、★、⚙、更新 chip 等；第二行：`● 需要回應`（blocked 時，排第一）、kind logo（無框、有底色、貼近 model）、model／effort chip、pane id（擠不下只剩 `▾`；blocked 時也一樣，不因為多了 `● 需要回應` 就整顆藏掉，2026-09-25 使用者）。
 - 顏色：kind 品牌色 `--kind-claude` 橘、`--kind-codex` 綠、`--kind-grok` 紫（使用者選的）；model chip 吃該 kind 色；⚙ 與 ▾ 吃 accent；★ 釘起來實心黃、沒釘淡黃空心。
   kind 圖示 tooltip 寫「這是哪個 CLI、哪家模型」，`aria-label` 只有 kind 名。codex 顯示時去掉 `gpt-` 前綴（完整 id 在 tooltip）（使用者指定）。
 - **停用的模型別名照 daemon 的清單顯示，但被換掉一定要講**（#539）：daemon 對 `opus`（claude）與
