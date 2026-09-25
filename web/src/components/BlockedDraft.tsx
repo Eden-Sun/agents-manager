@@ -3,9 +3,9 @@
  * 送出時照差集逐頁驗證，對不上就停手。預載失敗整個退回即時模式（`BlockedChoices`），不留半套草稿。
  */
 import { useEffect, useRef, useState } from 'react'
-import { commit, pageNeedsCommit, preload, wantOf, type Draft, type Io } from '../lib/choiceDraft'
+import { commit, pageNeedsCommit, preload, typeToPaste, wantOf, type Draft, type Io } from '../lib/choiceDraft'
 import { acquirePreload, restartPreload } from '../lib/draftPreload'
-import { isTypeSomething, MULTI_TYPE_HINT, parseChoiceMenu, typedAnswerHere, type TuiChoiceMenu } from '../lib/tuiChoices'
+import { isTypeSomething, parseChoiceMenu, typedAnswerHere, type TuiChoiceMenu } from '../lib/tuiChoices'
 import { useStore } from '../store/store'
 import { BlockedChoices } from './BlockedChoices'
 import { TypeAnswerField } from './TypeAnswerField'
@@ -122,8 +122,6 @@ export function BlockedDraft({
   const pick = (page: number, idx: number) => {
     const p = draft.pages[page]
     if (p.multi && p.choices[idx]?.checked === null) return
-    // 複選頁的 Type something 只准取消（終端上已經打好的），不准在這裡勾起來。
-    if (p.multi && isTypeSomething(p.choices[idx] ?? { title: '' }) && !want[page]?.[idx]) return
     setWant((v) =>
       v.map((row, i) => {
         if (i !== page) return row
@@ -137,8 +135,9 @@ export function BlockedDraft({
     setPhase('sending')
     setErr(null)
     setStep({ done: 0, total: 0 })
+    // 單選：選了 Type something 要有字；複選：想勾、而終端上還沒勾的 Type something 要有字（已勾的是終端打好的）。
     const typedEmpty = draft.pages.some((p, i) => {
-      const idx = (want[i] ?? []).findIndex(Boolean)
+      const idx = p.multi ? typeToPaste(p, want[i]) : (want[i] ?? []).findIndex(Boolean)
       return idx >= 0 && typedAnswerHere(p, p.choices[idx] ?? { title: '' }) && !(custom[p.tab] ?? '').trim()
     })
     if (typedEmpty) {
@@ -159,8 +158,11 @@ export function BlockedDraft({
     const p = draft.pages[page]
     const idx = (want[page] ?? []).findIndex(Boolean)
     if (idx < 0) return ''
-    if (typedAnswerHere(p, p.choices[idx] ?? { title: '' })) return (custom[p.tab] ?? '').trim()
-    return p.choices.filter((_, j) => Boolean(want[page]?.[j])).map((c) => c.title).join('、')
+    if (!p.multi && typedAnswerHere(p, p.choices[idx] ?? { title: '' })) return (custom[p.tab] ?? '').trim()
+    return p.choices
+      .filter((_, j) => Boolean(want[page]?.[j]))
+      .map((c) => (isTypeSomething(c) && !c.checked ? (custom[p.tab] ?? '').trim() || c.title : c.title))
+      .join('、')
   }
 
   const jump = (tab: number) =>
@@ -220,23 +222,21 @@ export function BlockedDraft({
                   const shown = open.includes(key)
                   const action = page.multi && c.checked === null
                   const picked = Boolean(want[i]?.[j])
-                  const typeRow = typedAnswerHere(page, c)
-                  const typeLocked = page.multi && isTypeSomething(c) && !picked
+                  // 複選頁終端上已經勾好的 Type something 是使用者打好的字，這裡只准留或取消，不再給打字框。
+                  const typeRow = typedAnswerHere(page, c) && !(page.multi && c.checked)
                   return (
                     <li key={key} className={`bc-row${c.detail ? ' bc-row-more' : ''}`}>
                       <button
                         type="button"
                         role={page.multi ? undefined : 'radio'}
                         className={`bc-item${picked ? ' bc-checked' : ''}${shown ? ' bc-open' : ''}`}
-                        disabled={busy || action || typeLocked}
+                        disabled={busy || action}
                         aria-checked={page.multi ? undefined : picked}
                         aria-pressed={page.multi && !action ? picked : undefined}
                         title={
                           action
                             ? '這一列是動作不是勾選，要用它請先關掉這個畫面回終端'
-                            : typeLocked
-                              ? MULTI_TYPE_HINT
-                              : page.multi
+                            : page.multi
                               ? picked
                                 ? '取消勾選（只改這裡，還沒送出）'
                                 : '勾選（只改這裡，還沒送出）'

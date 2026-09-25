@@ -5,11 +5,10 @@
 import { useLayoutEffect, useRef, useState } from 'react'
 import { usePaneKeys } from '../hooks/usePaneKeys'
 import {
+  customAnswerChecked,
   customAnswerShown,
-  isTypeSomething,
   keysToMove,
   keysToSelect,
-  MULTI_TYPE_HINT,
   parseChoiceMenu,
   sameChoices,
   typedAnswerHere,
@@ -184,6 +183,13 @@ export function BlockedChoices({
         }
       }
       if (!shown) return '自訂文字沒有出現在畫面上，沒有按 Enter。'
+      // 複選頁：貼字那列會自己勾起來（2026-09-25 真機），Enter 只會把勾翻掉；勾完按下面的「送出」。
+      if (menu.multi) {
+        const now = await read()
+        if (!(now?.choices[i] && customAnswerChecked(now.choices[i], text))) return '自訂文字出現了但那列沒勾起來，沒有再按鍵；請看終端。'
+        setTypeFor(null)
+        return null
+      }
       await sendKeys(botId, ['enter'])
       return null
     })
@@ -202,12 +208,8 @@ export function BlockedChoices({
     })
 
   const activate = (i: number) => {
-    // 複選頁：不貼字、不按 Enter（可能直接交卷），也不勾一個空白的自訂答案（review3 c1 M8）。
-    if (menu.multi && isTypeSomething(menu.choices[i]) && !menu.choices[i].checked) {
-      setNote(MULTI_TYPE_HINT)
-      return
-    }
-    if (typedAnswerHere(menu, menu.choices[i])) {
+    // 複選頁終端上已勾好的 Type something 是使用者打好的字：只翻轉勾，不再給打字框。
+    if (typedAnswerHere(menu, menu.choices[i]) && !(menu.multi && menu.choices[i].checked)) {
       setTypeFor(i)
       setNote(null)
       return
@@ -368,9 +370,7 @@ export function BlockedChoices({
               aria-checked={menu.multi ? undefined : c.current}
               aria-pressed={c.checked === null ? undefined : c.checked}
               title={
-                menu.multi && isTypeSomething(c) && !c.checked
-                  ? MULTI_TYPE_HINT
-                  : c.checked === null
+                c.checked === null
                     ? '選這一項（游標移過去再按 Enter）'
                     : c.checked
                       ? '取消勾選（游標移過去再按 space）'

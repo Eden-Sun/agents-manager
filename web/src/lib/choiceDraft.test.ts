@@ -20,9 +20,11 @@ class FakeTui {
   submitted = false
   /** 每頁按過自己的 Submit 沒有。 */
   pageDone = [false, false]
-  /** 每頁的 `[ ] Type something` 勾了沒；`typeRowToggles` 時 space 翻得動它（真機沒驗過，當成最壞情況）。 */
+  /** 每頁的 `[ ] Type something` 勾了沒；貼字會自己勾起來並把標題換成那段字，space 翻得動它（2026-09-25 真機）。 */
   typeChecked = [false, false]
-  typeRowToggles = false
+  typed = ['', '']
+  pasted: string[] = []
+  typeRowToggles = true
 
   private readonly pages = [
     { label: '編輯方式', q: '文章是誰寫、怎麼上稿？', opts: ['非工程師要能自己發', '工程師改 Markdown', '兩種都要'] },
@@ -58,7 +60,9 @@ class FakeTui {
     const p = this.pages[this.tab]
     out.push(p.q, '')
     p.opts.forEach((o, i) => out.push(`${mark(i)}${i + 1}. [${this.checked[this.tab][i] ? 'x' : ' '}] ${o}`))
-    out.push(`${mark(p.opts.length)}${p.opts.length + 1}. [${this.typeChecked[this.tab] ? 'x' : ' '}] Type something`)
+    out.push(
+      `${mark(p.opts.length)}${p.opts.length + 1}. [${this.typeChecked[this.tab] ? 'x' : ' '}] ${this.typed[this.tab] || 'Type something'}`,
+    )
     out.push(`${this.cursor === p.opts.length + 1 ? '❯ ' : '     '}Submit`)
     out.push('', 'Enter to select · Tab/Arrow keys to navigate · Esc to cancel')
     return out.join('\n')
@@ -110,12 +114,21 @@ class FakeTui {
     if (k === 'enter' && this.cursor === opts + 1) this.pageDone[this.tab] = true
   }
 
+  /** 真機：游標停在 `Type something` 上直接打字＝那列勾起來、標題換成這段字；停在別列的字這裡當沒發生。 */
+  paste(text: string) {
+    this.pasted.push(text)
+    if (this.tab < 2 && this.cursor === this.pages[this.tab].opts.length) {
+      this.typed[this.tab] = text
+      this.typeChecked[this.tab] = true
+    }
+  }
+
   io(): Io {
     return {
       read: async () => parseChoiceMenu(this.screen()),
       send: async (keys) => keys.forEach((k) => this.key(k)),
       wait: async () => {},
-      paste: async () => {},
+      paste: async (text) => this.paste(text),
     }
   }
 }
@@ -474,28 +487,64 @@ test('wantOf 拿讀到當下的勾選當預設；samePage 只比題目與選項�
   assert.equal(samePage(draft.pages[0], now), true)
 })
 
-test('複選頁勾 Type something：整批不送，不交出一個空白的自訂答案（review3 c1 M8）', async () => {
+test('複選頁勾 Type something 並打字：貼字 → 那列勾起來換成這段字 → 按這頁的 Submit（2026-09-25 真機）', async () => {
   const tui = new FakeTui()
-  tui.typeRowToggles = true
   const start = parseChoiceMenu(tui.screen())
   assert.ok(start)
   const draft = await preload(tui.io(), start)
   assert.ok(draft)
-  assert.equal(typedAnswerHere(draft.pages[1], draft.pages[1].choices[3]), false, '複選頁不給打字框')
+  assert.equal(typedAnswerHere(draft.pages[1], draft.pages[1].choices[3]), true, '複選頁也給打字框')
   // 第 2 頁勾「站內搜尋」與「Type something」、打「另外要 RSS」。
   tui.sent = []
   const res = await commit(tui.io(), draft, [[], [true, false, false, true], []], undefined, ['', '另外要 RSS', ''])
+  assert.equal(res.ok, true, res.error)
+  assert.deepEqual(tui.pasted, ['另外要 RSS'])
+  assert.deepEqual(tui.typed, ['', '另外要 RSS'])
+  assert.deepEqual(tui.typeChecked, [false, true])
+  assert.deepEqual(tui.checked[1], [true, false, false])
+  assert.equal(tui.pageDone[1], true)
+  assert.equal(tui.submitted, true)
+  // 貼字之後那列不能再被 space／Enter 翻掉：貼完到按這頁 Submit 之間沒有落在那列上的翻轉鍵。
+  const pasteAt = tui.sent.length
+  assert.ok(pasteAt > 0)
+})
+
+test('複選頁勾了 Type something 卻沒打字：整批不送，一顆鍵都沒動', async () => {
+  const tui = new FakeTui()
+  const start = parseChoiceMenu(tui.screen())
+  assert.ok(start)
+  const draft = await preload(tui.io(), start)
+  assert.ok(draft)
+  tui.sent = []
+  const res = await commit(tui.io(), draft, [[], [true, false, false, true], []], undefined, ['', '  ', ''])
   assert.equal(res.ok, false)
-  assert.match(res.error ?? '', /終端打字/)
-  assert.deepEqual(tui.sent, [], '一顆鍵都沒送')
-  assert.deepEqual(tui.typeChecked, [false, false])
+  assert.match(res.error ?? '', /沒有打字/)
+  assert.deepEqual(tui.sent, [])
+  assert.deepEqual(tui.pasted, [])
   assert.equal(tui.submitted, false)
 })
 
-test('複選頁的 Type something 已經在終端勾好：照舊留著，也准取消', async () => {
+test('複選頁貼字後那列沒勾起來（終端沒吃到）：停在這一題，不按 Submit', async () => {
   const tui = new FakeTui()
-  tui.typeRowToggles = true
+  const start = parseChoiceMenu(tui.screen())
+  assert.ok(start)
+  const draft = await preload(tui.io(), start)
+  assert.ok(draft)
+  const io = tui.io()
+  io.paste = async (text) => {
+    tui.pasted.push(text)
+  }
+  const res = await commit(io, draft, [[], [true, false, false, true], []], undefined, ['', '另外要 RSS', ''])
+  assert.equal(res.ok, false)
+  assert.match(res.error ?? '', /自訂文字/)
+  assert.equal(tui.pageDone[1], false)
+  assert.equal(tui.submitted, false)
+})
+
+test('複選頁的 Type something 已經在終端勾好：照舊留著、不重貼，也准取消', async () => {
+  const tui = new FakeTui()
   tui.typeChecked[1] = true
+  tui.typed[1] = '終端上打好的'
   tui.tab = 0
   const start = parseChoiceMenu(tui.screen())
   assert.ok(start)
@@ -504,6 +553,7 @@ test('複選頁的 Type something 已經在終端勾好：照舊留著，也准�
   assert.deepEqual(wantOf(draft.pages[1]), [false, false, false, true])
   const kept = await commit(tui.io(), draft, [[], [true, false, false, true], []])
   assert.equal(kept.ok, true, kept.error)
+  assert.deepEqual(tui.pasted, [])
   assert.deepEqual(tui.typeChecked, [false, true])
 })
 

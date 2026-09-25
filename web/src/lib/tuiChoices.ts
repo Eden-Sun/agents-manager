@@ -426,16 +426,19 @@ export function isTypeSomething(c: Pick<TuiChoice, 'title'>): boolean {
 }
 
 /**
- * 這一列能不能在面板裡打字作答。只有**單選頁**真機驗過（走到 → 貼字 → 對帳 → Enter）；複選頁的
- * `[ ] Type something` 怎麼輸入沒驗過，而且在複選頁按 Enter 可能直接交卷——以前面板照樣給打字框，
- * 送出時只勾了空白的那一列、字完全沒送（review3 c1 M8）。複選頁的自訂文字請到終端打。
+ * 這一列能不能在面板裡打字作答。單選頁：走到 → 貼字 → 對帳 → Enter（2026-09-13 真機）。
+ * 複選頁（2026-09-25 真機，claude 2.1.281）：游標停在 `[ ] Type something` 上直接打字，那列會**自己勾起來**
+ * 並把標題換成打的字（不開輸入框、不必 Enter）；之後 Enter／space 只是翻轉那列的勾，字留著。
+ * 所以複選頁也給打字框，送出時貼字、對帳「出現且已勾」，再走這一頁的 Submit 列。
  */
-export function typedAnswerHere(menu: { multi: boolean }, c: Pick<TuiChoice, 'title'>): boolean {
-  return isTypeSomething(c) && !menu.multi
+export function typedAnswerHere(_menu: { multi: boolean }, c: Pick<TuiChoice, 'title'>): boolean {
+  return isTypeSomething(c)
 }
 
-/** 複選頁的 `Type something` 在面板裡勾不起來（勾了也送不出字），要到終端打。 */
-export const MULTI_TYPE_HINT = '複選題的「Type something」要在終端打字（按「展開全畫面」或「終端原文與更多按鍵」），這裡勾了也送不出文字。'
+/** 複選頁貼字後：那列要同時「長出這段字」且「已勾起來」，才算終端收到自訂答案。 */
+export function customAnswerChecked(choice: TuiChoice, text: string): boolean {
+  return choice.checked === true && customAnswerShown(choice, text)
+}
 
 /** 貼上後那列是否已長出這段字：換行貼上時第一行在標題、其餘在說明；答完會多 `✔`。 */
 export function customAnswerShown(choice: TuiChoice, text: string): boolean {

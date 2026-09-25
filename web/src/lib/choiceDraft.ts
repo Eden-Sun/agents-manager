@@ -6,10 +6,10 @@
  * 選單、只送差集（複選是 toggle），任何一步對不上就停。I/O 走 `Io` 注入以便測試。
  */
 import {
+  customAnswerChecked,
   customAnswerShown,
   isTypeSomething,
   keysToMove,
-  MULTI_TYPE_HINT,
   parseChoiceMenu,
   type TuiChoiceMenu,
   type WalkTarget,
@@ -143,6 +143,11 @@ export function pageNeedsCommit(page: DraftPage, want: boolean[] | undefined): b
   return togglesFor(page.choices, want ?? wantOf(page)).length > 0
 }
 
+/** 複選頁要貼字的那一列：想勾 `Type something`、而終端上還沒勾；沒有回 `-1`。 */
+export function typeToPaste(page: DraftPage, want: boolean[] | undefined): number {
+  return page.choices.findIndex((c, j) => Boolean(want?.[j]) && !c.checked && isTypeSomething(c))
+}
+
 /** 要翻轉的 index。複選是 toggle，一定比差集、不照點擊次數送；沒方框的列是動作，不算。 */
 export function togglesFor(now: TuiChoiceMenu['choices'], want: boolean[]): number[] {
   const out: number[] = []
@@ -214,18 +219,13 @@ export async function commit(
   const todo = draft.pages.map((p, i) => ({ p, i })).filter(({ p, i }) => pageNeedsCommit(p, want[i]))
 
   for (const { p, i } of todo) {
-    // 複選頁要把 `Type something` 勾起來：字送不出去，只會交出一個空白的自訂答案（review3 c1 M8）。
-    if (p.multi && (want[i] ?? []).some((on, j) => on && !p.choices[j]?.checked && isTypeSomething(p.choices[j] ?? { title: '' }))) {
-      return { ok: false, error: `第 ${p.tab + 1} 題：${MULTI_TYPE_HINT}什麼都沒送出。`, at: i }
-    }
-    const idx = radioPick(want[i])
-    if (!p.multi && idx >= 0 && isTypeSomething(p.choices[idx] ?? { title: '' })) {
-      if (!(custom[p.tab] ?? '').trim()) {
-        return {
-          ok: false,
-          error: `第 ${p.tab + 1} 題選了「Type something.」但沒有打字。請打一段或改選別項。`,
-          at: i,
-        }
+    // `Type something` 要打字才送得出去：單選是那一項被選；複選是想勾、而終端上還沒勾（已勾的是終端打好的，留著）。
+    const typing = p.multi ? typeToPaste(p, want[i]) : radioPick(want[i])
+    if (typing >= 0 && isTypeSomething(p.choices[typing] ?? { title: '' }) && !(custom[p.tab] ?? '').trim()) {
+      return {
+        ok: false,
+        error: `第 ${p.tab + 1} 題選了「Type something.」但沒有打字。請打一段或改選別項。`,
+        at: i,
       }
     }
   }
@@ -284,8 +284,33 @@ export async function commit(
       continue
     }
 
+    // 複選頁的 `Type something`：走到 → 貼字，那列會自己勾起來並換成這段字（2026-09-25 真機）；
+    // 對帳「出現且已勾」才往下，之後這一頁都拿換過標題的那份比。
+    let page = p
+    const typeIdx = typeToPaste(p, want[i])
+    if (typeIdx >= 0) {
+      const text = (custom[p.tab] ?? '').trim()
+      const landed = await walkTo(io, typeIdx, p)
+      if (!landed) return { ok: false, error: `第 ${p.tab + 1} 題的游標走不到第 ${typeIdx + 1} 項，停在這裡。`, at: i }
+      await io.paste(text)
+      let typed: TuiChoiceMenu | null = null
+      for (let t = 0; t < SETTLE_TRIES; t++) {
+        await io.wait(SETTLE_STEP)
+        const now = await io.read()
+        if (now && now.choices[typeIdx] && customAnswerChecked(now.choices[typeIdx], text)) {
+          typed = now
+          break
+        }
+      }
+      if (!typed) {
+        return { ok: false, error: `第 ${p.tab + 1} 題的自訂文字沒有出現在畫面上（或沒勾起來），停在這裡。`, at: i }
+      }
+      cur = typed
+      page = { ...p, choices: p.choices.map((c, j) => (j === typeIdx ? { ...c, title: typed.choices[typeIdx].title, checked: true } : c)) }
+    }
+
     for (const idx of togglesFor(cur.choices, want[i])) {
-      const landed = await walkTo(io, idx, p)
+      const landed = await walkTo(io, idx, page)
       if (!landed) return { ok: false, error: `第 ${p.tab + 1} 題的游標走不到第 ${idx + 1} 項，停在這裡。`, at: i }
       const before = landed.choices[idx].checked
       const flipped = (now: TuiChoiceMenu | null) => Boolean(now && now.choices[idx]?.checked !== before)
@@ -296,7 +321,7 @@ export async function commit(
     }
 
     const after = await io.read()
-    if (!after || !samePage(p, after)) {
+    if (!after || !samePage(page, after)) {
       return { ok: false, error: `第 ${p.tab + 1} 題送完之後畫面對不上，後面的都沒送出。`, at: i }
     }
     if (togglesFor(after.choices, want[i]).length) {
@@ -307,7 +332,7 @@ export async function commit(
 
     // 多選要按這頁的 Submit 列才算答完。
     if (p.hasSubmitRow) {
-      const landed = await walkTo(io, 'submit', p)
+      const landed = await walkTo(io, 'submit', page)
       if (!landed?.submit?.current) {
         return { ok: false, error: `第 ${p.tab + 1} 題的游標沒有停在 Submit 上，沒有按下去。`, at: i }
       }
