@@ -276,8 +276,14 @@ log "db backup $DBB integrity=$IC user_version=$BUV"
                     exit 5; }
 
 OFF=$(wc -c < "$DLOG" 2>/dev/null || echo 0)
-BEFORE_NAMES=$(agm state | "$PYTHON" -c 'import json,sys
-print("\n".join(sorted(b["name"] for b in json.load(sys.stdin).get("bots") or [])))')
+# 名單用「id<TAB>名字」：比對看 id（同名的新 bot 蓋不掉舊的那顆），log 印名字。
+# 沒有 id 的列退回用名字比（`name:` 開頭，也就不可能被當成刻意刪除）。
+# SWAP_T0 是換版窗口的起點，格式跟 daemon 的 db::now() 一樣（RFC3339、毫秒、Z），才能在 SQL 裡直接比字串；
+# 取整到秒只會讓窗口往前多算不到一秒。
+bot_rows() { agm state | "$PYTHON" -c 'import json,sys
+print("\n".join(sorted("%s\t%s" % (b.get("id") or "name:%s" % b.get("name"), b.get("name")) for b in json.load(sys.stdin).get("bots") or [])))'; }
+SWAP_T0=$(date -u '+%Y-%m-%dT%H:%M:%S.000Z')
+BEFORE_ROWS=$(bot_rows)
 
 # ── 4. 換 binary 並重啟 ──────────────────────────────────────────────────────
 # 啟動一律經過 launchd：pane 忙的時候會被 renice 到 5，子行程繼承後降不回去
@@ -358,11 +364,30 @@ d = json.load(sys.stdin); print(d.get("status") or (d.get("supervisor") or {}).g
 log "supervisor status: $SUP"
 [ "$SUP" = stopped ] && rollback "supervisor 停了"
 
-AFTER_NAMES=$(agm state | "$PYTHON" -c 'import json,sys
-print("\n".join(sorted(b["name"] for b in json.load(sys.stdin).get("bots") or [])))')
-MISSING=$(comm -23 <(printf '%s\n' "$BEFORE_NAMES") <(printf '%s\n' "$AFTER_NAMES") | tr '\n' ' ')
-log "bots before=$(printf '%s\n' "$BEFORE_NAMES" | grep -c .) after=$(printf '%s\n' "$AFTER_NAMES" | grep -c .) missing=[$MISSING]"
-[ -n "$(echo "$MISSING" | tr -d ' ')" ] && rollback "有 bot 不見了：$MISSING"
+AFTER_ROWS=$(bot_rows)
+# 窗口內**刻意刪掉**的 bot 不算重啟弄丟的（2026-09-24 22:53 ca9a0330：父 bot 在這 45 秒裡刪了 child i263，
+# 整趟被誤判回滾）。「刻意」只認刪除 API 留下的 intent：DELETE /api/bots|projects 在定案前先寫一筆
+# delete_bot／delete_project（payload 帶當時的子孫 id），done 之後保留 24 小時。光有 deleted_at 不夠——
+# 重啟後 reconcile 找不到 pane 而退役 child、或投影軟刪，也會寫 deleted_at，那正是這一步要抓的遺失。
+# 讀 DB 一律 -readonly；讀不到、id 格式不對都當成「沒有刪除紀錄」，照樣回滾。
+deleted_on_purpose() { # $1=bot id → 印 1 才算
+    case "$1" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
+    "$SQLITE" -readonly "$DB" "SELECT count(*) FROM bots b WHERE b.id = '$1'
+      AND b.deleted_at IS NOT NULL AND b.deleted_at >= '$SWAP_T0'
+      AND EXISTS (SELECT 1 FROM intents i WHERE i.kind IN ('delete_bot', 'delete_project')
+        AND i.status != 'abandoned' AND i.created_at >= '$SWAP_T0'
+        AND (i.subject_id = b.id OR i.subject_id = b.project_id OR instr(i.payload_json, '\"' || b.id || '\"') > 0))" 2>/dev/null
+}
+MISSING=""; DELETED=""
+while IFS="$(printf '\t')" read -r id name; do
+    [ -n "$id$name" ] || continue
+    printf '%s\n' "$AFTER_ROWS" | cut -f1 | grep -qxF -- "$id" && continue
+    if [ "$(deleted_on_purpose "$id")" = 1 ]; then DELETED="$DELETED$name "; else MISSING="$MISSING$name "; fi
+done <<EOF
+$BEFORE_ROWS
+EOF
+log "bots before=$(printf '%s\n' "$BEFORE_ROWS" | grep -c .) after=$(printf '%s\n' "$AFTER_ROWS" | grep -c .) missing=[$MISSING] deleted_in_window=[$DELETED]"
+[ -n "$(echo "$MISSING" | tr -d ' ')" ] && rollback "有 bot 不見了（沒有刪除紀錄）：$MISSING"
 
 ERRS=$(tail -c "+$((OFF + 1))" "$DLOG" 2>/dev/null | grep -cE '\bERROR\b|drift')
 log "daemon.log since restart: ERROR/drift lines=$ERRS"
