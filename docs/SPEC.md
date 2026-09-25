@@ -485,6 +485,9 @@ hook body 另外帶 `run_id`＝這個 CLI 行程 pane env 的 `AM_RUN_ID`（本�
   Stop hook 先收掉了上一回合、這 5 秒內使用者又送出新的一則（CLI 還沒畫 spinner、herdr 還沒報 working）時，到點在飛的是新回合，畫面上最後一段回覆卻是上一則的，
   收下去就是把上一則的答案掛在剛送出的那一則底下、真正的回覆只能落到另一個外部回合（2026-09-19 真機）。沒收的回合留給它自己的 hook／下一次 idle edge（會排一個綁它的新計時）／輪詢器。
   排定當下讀不到在飛的是哪一回合就不排（收錯比不收糟，回合有輪詢器的閒置備援與 stuck watchdog 兜著）。輪詢器那一條同一個規則：它問的是自己那一回合。
+- **沒有 prompt 的外部回合不重存上一段回覆**（2026-09-25 am-lead）：herdr 的 `working → idle` 抖一下就會開一筆 `origin = external` 的回合，
+  畫面上還是上一段回覆；游標的尾端 hash 又含 codex 狀態列的額度數字（`5h 83% left`），數字一變就對不上、整個畫面算新的，同一段回覆就被存第二次。
+  所以：`external` 回合沒有任何使用者訊息、抽到的回覆跟上一則 assistant 一模一樣時，只收回合、不存訊息。有人送過 prompt 的回合（web 或在 pane 打字）照存——真的可能回一樣的話。
 - **執行**：CAS `UPDATE turns SET status='completed_fallback' WHERE id=? AND status='in_flight'`，成功才 `agent.read {source: recent_unwrapped, lines: 200}`，
   取游標（`last_read_revision` + 已見文字尾端 hash）之後的內容，依 provider 抽回覆：Claude `⏺ ` 開頭、Codex `• ` 開頭；grok 無標記（§12.3）。
 - **沒有回覆標記**時用 `clean_screen`：取最後一行 prompt 回音之後的內容，去掉 banner、方框、分隔線、狀態列、spinner、`⚠` 行，保留 `⎿` 工具結果行。
@@ -1822,6 +1825,10 @@ listen port 只在本機算（pane 行程樹的 pid 對 `lsof -nP -iTCP -sTCP:LI
   （守門那條連線的 stderr 一邊原樣轉出、一邊留最後一行），並把結論寫進 data-dir 的
   `remote-cargo-health.json`，`GET /api/build-slots` 的 `remote.remote_reachable` 就是它（API.md「`GET /api/build-slots`」）：
   本機隊伍排得再長，都看得出來是不是因為外部主機連不上。設定錯（`identity_file` 指的檔案不見了）維持 126——那是要去修設定，不是換台機器跑。
+  **來源樹在同步途中被改動不算失敗（2026-09-25 am-lead）**：共用主樹的 `web/dist` 會被別的 bot 的 `bun run build` 整批換掉（hash 檔名），
+  rsync 列完檔案清單後舊檔消失就回 23（`open (2)`／`No such file or directory`）或 24（vanished）。這兩種才重送（最多共 3 次、中間等 1.5 秒，仍受整體上限與訊號管；
+  重送一次就是新的一致狀態，`--delete` 順便清掉遠端的舊 hash 檔），仍失敗就 126、訊息講明「來源樹在同步時一直被改動（多半是別的 bot 正在 build web）」。
+  其他 rsync 錯誤（權限、協定、連線）照舊立刻失敗，不重試。不對 `web/dist` 做快照：多一份複製換不到比重送更多的東西。
   這時才去 acquire、才受本機名額管。缺環境變數而沒轉成的（issue #138）也是落到本機、照本機名額排。`build`／`run`／…本來就不轉，照舊排。
   **`AM_DATA_DIR` 不是轉遠端的前提**（issue #417）：`scripts/check.sh` 為了不讓 daemon 測試吃到正式資料目錄會 `env -u AM_DATA_DIR`，
   以前 shim 因此每次都退回本機排隊、外部主機整段閒著。現在沒有它就不帶 `--data-dir`，helper 從設定檔推（`[server] data_dir` > 設定檔所在目錄）；

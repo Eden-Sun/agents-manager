@@ -1421,6 +1421,21 @@ async fn try_fallback(app: &Arc<App>, run_id: &str, expected_turn: Option<&str>)
         }
     };
 
+    // 沒有人送 prompt 的 external 回合（herdr 的 working→idle 抖一下就會開一個）：畫面上還是上一段回覆，游標又對不上
+    // （尾端含 codex 狀態列的額度數字，一變就找不到）時，整個畫面被當成新內容，同一段回覆存第二次（am-lead 2026-09-25 10:36／11:27）。
+    // 跟上一則 assistant 一樣就是同一段回覆，只收回合不存訊息；有人送過 prompt 的回合照舊（真的可能回一樣的話）。
+    let reply = match reply {
+        Some(r)
+            if turn.origin == "external"
+                && turn_echo_texts(app, &turn.id).await?.is_empty()
+                && last_assistant_content(app, &turn.conversation_id).await?.as_deref().map(str::trim) == Some(r.trim()) =>
+        {
+            tracing::info!(turn = %turn.id, "terminal fallback of a prompt-less external turn re-read the previous reply; not storing it again");
+            None
+        }
+        r => r,
+    };
+
     // CAS claim + reply in one transaction, so a completed turn never lacks its reply.
     let mut tx = app.db.begin().await?;
     // 撞限直接 `in_flight -> failed`：先落在 `completed_fallback` 再改 failed 不是合法邊，trigger 會把整個交易擋掉（#109）。
@@ -3033,6 +3048,42 @@ mod progress_poll_tests {
             assert!(std::time::Instant::now() < deadline, "回合收掉了，poller 應該退出");
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+    }
+
+    /// am-lead 2026-09-25：herdr 抖一下開了沒有 prompt 的 external 回合，游標對不上（狀態列額度數字變了），備援把上一段回覆又存一次。
+    /// 沒有 prompt 的 external 回合讀到跟上一則一樣的回覆：收掉回合、不存第二次；有人送 prompt 的回合回一樣的話照存。
+    #[tokio::test]
+    async fn a_prompt_less_external_turn_does_not_store_the_previous_reply_again() {
+        let f = in_flight(PONG, "Reply with PONG").await;
+        let app = f.env.app.clone();
+        assert!(try_fallback(&app, &f.run_id, Some(&f.turn_id)).await.unwrap());
+        let conv = db::conversation_id(&app.db, &f.bot_id).await.unwrap();
+        let replies = |app: Arc<App>, conv: String| async move {
+            sqlx::query_scalar::<_, String>("SELECT content FROM messages WHERE conversation_id=? AND role='assistant'").bind(conv).fetch_all(&app.db).await.unwrap()
+        };
+        assert_eq!(replies(app.clone(), conv.clone()).await, vec!["PONG"]);
+
+        let open = |origin: &'static str| {
+            let (app, conv, run) = (app.clone(), conv.clone(), f.run_id.clone());
+            async move {
+                // 游標對不上＝整個畫面都算新的。
+                sqlx::query("UPDATE runs SET last_read_tail_hash='nope' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
+                let tid = db::ulid();
+                sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,?,'in_flight','ok',?)")
+                    .bind(&tid).bind(&conv).bind(&run).bind(origin).bind(db::now()).execute(&app.db).await.unwrap();
+                tid
+            }
+        };
+        let ext = open("external").await;
+        assert!(try_fallback(&app, &f.run_id, Some(&ext)).await.unwrap(), "回合照樣收掉");
+        assert_eq!(status(&app, &ext).await, "completed_fallback");
+        assert_eq!(replies(app.clone(), conv.clone()).await, vec!["PONG"], "同一段回覆不能存第二次");
+
+        let web = open("web").await;
+        sqlx::query("INSERT INTO messages (id, conversation_id, turn_id, role, content, source, created_at) VALUES (?,?,?,'user','Reply with PONG','web',?)")
+            .bind(db::ulid()).bind(&conv).bind(&web).bind(db::now()).execute(&app.db).await.unwrap();
+        assert!(try_fallback(&app, &f.run_id, Some(&web)).await.unwrap());
+        assert_eq!(replies(app.clone(), conv).await, vec!["PONG", "PONG"], "有人送 prompt 的回合回一樣的話要照存");
     }
 
     /// 驗收 1、2：某一輪讀 `in_flight_turn` 失敗（SQLite busy／I/O error），一輪之後 DB 恢復——poller 還活著；之後 pane
