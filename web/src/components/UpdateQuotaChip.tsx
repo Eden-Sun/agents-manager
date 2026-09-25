@@ -9,6 +9,9 @@ import { UpgradeIcon } from './UpgradeIcon'
 import { UpdateChangelog } from './UpdateChangelog'
 import { AgmReviewBox } from './AgmReviewBox'
 import { CodexInstallChip } from './CodexInstallChip'
+import { MergedUpdateChip, type DialogControl } from './MergedUpdateChip'
+import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
+import { codexInstallPlan, mergeUpdateChips } from '../lib/updateBatch'
 import './updateQuotaChip.css'
 
 /**
@@ -16,6 +19,19 @@ import './updateQuotaChip.css'
  * 側欄收起時也要看得到。對齊量表第一行並補 1px 分隔線（2026-09-11）。按下去先確認：批次重啟沒有取消，確認框是唯一反悔點。
  */
 export function UpdateQuotaChip() {
+  const phone = useMediaQuery(PHONE_QUERY)
+  const restartShown = useStore((s) => {
+    if (s.restartBatch) return true
+    const c = updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null)
+    return c.ready.length > 0 || c.busy.some((b) => !b.install)
+  })
+  const codexShown = useStore(
+    (s) =>
+      Boolean(s.cliUpdate) ||
+      codexInstallPlan(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null, (b) => projectHostName(s, b.project_id)) !== null,
+  )
+  // 手機兩種都有時合成一顆（名字行只讓得出一顆的寬，兩顆並排名字只剩 ▾；UI-DECISIONS「header 的 codex 安裝」）。
+  if (mergeUpdateChips(phone, restartShown, codexShown)) return <MergedUpdateChip />
   // codex 新版還沒裝的那顆（安裝＋重啟）跟這顆（重啟套用）並排，各自一個確認框（UI-DECISIONS「header 的 codex 安裝」）。
   return (
     <>
@@ -25,7 +41,8 @@ export function UpdateQuotaChip() {
   )
 }
 
-function RestartChip() {
+/** `control`：手機合成的那顆（`MergedUpdateChip`）代為開框，這裡只畫確認框、不畫按鈕。 */
+export function RestartChip({ control }: { control?: DialogControl } = {}) {
   const batch = useStore((s) => s.restartBatch)
   const restartIdleBots = useStore((s) => s.restartIdleBots)
   const clear = useStore((s) => s.clearRestartBatch)
@@ -45,7 +62,9 @@ function RestartChip() {
       .join('\n'),
   )
   const busyCount = busyLines ? busyLines.split('\n').length : 0
-  const [confirming, setConfirming] = useState(false)
+  const [localOpen, setLocalOpen] = useState(false)
+  const confirming = control ? control.open : localOpen
+  const setConfirming = (v: boolean) => (control ? !v && control.close() : setLocalOpen(v))
   const [asking, setAsking] = useState(false)
   const [reviewKey, setReviewKey] = useState(0)
   const notify = useStore((s) => s.notify)
@@ -70,7 +89,7 @@ function RestartChip() {
   const range = updateRange(changelogKind, changelogNotice, changelogFrom)
   const canReview = changelogKind === 'claude' || changelogKind === 'codex'
 
-  if (batch) {
+  if (batch && !control) {
     const { total, done, ok, failed, finished } = batch
     const summary = finished
       ? `重啟完成 · 成功 ${ok.length} 顆${failed.length ? ` · 失敗 ${failed.length} 顆` : ''}`
@@ -93,7 +112,7 @@ function RestartChip() {
     )
   }
 
-  if (readyCount === 0 && busyCount === 0) return null
+  if (readyCount === 0 && busyCount === 0 && !control) return null
 
   const busyNote = busyCount > 0 ? `\n${busyCount} 顆在忙，會先跳過：\n${busyLines}` : ''
   const label =
@@ -103,7 +122,7 @@ function RestartChip() {
 
   return (
     <>
-      <button
+      {control ? null : <button
         type="button"
         className={`quota-update${readyCount === 0 ? ' waiting' : ''}`}
         disabled={sending || readyCount === 0}
@@ -115,7 +134,7 @@ function RestartChip() {
         <span className="quota-update-n" aria-hidden="true">
           {sending ? '…' : readyCount === 0 ? busyCount : readyCount}
         </span>
-      </button>
+      </button>}
       <ConfirmDialog
         open={confirming}
         title="重啟這些 Bot 來套用更新？"

@@ -84,6 +84,11 @@
     padding-right: 152px;
   }
 
+  /* 兩種都有更新時合成的那顆（MergedUpdateChip）只留圖示，名字行只多讓 ~18px（390px 長名字實測，見 UI-DECISIONS）。 */
+  .main-head.bot-head .main-title-row:has(> .quota-update.merged) {
+    padding-right: 102px;
+  }
+
   .main-head.bot-head .mobile-bot-version {
     min-height: 0;
     padding-left: 4px;

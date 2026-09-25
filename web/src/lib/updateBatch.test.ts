@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import type { Bot, Run } from '../api/types.ts'
-import { codexInstallPlan, updateBatchCounts } from './updateBatch.ts'
+import { codexInstallPlan, mergeUpdateChips, updateBatchCounts } from './updateBatch.ts'
 
 const NOTICE = 'Update installed · Restart to update'
 
@@ -151,4 +151,11 @@ test('codexInstallPlan：沒有需安裝的 codex 就沒有這顆 chip', () => {
     codexInstallPlan(bots, runs, none, () => 'local'),
     null,
   )
+})
+
+test('手機兩種更新都有時合成一顆；桌機或只有一種時照舊', () => {
+  assert.equal(mergeUpdateChips(true, true, true), true)
+  assert.equal(mergeUpdateChips(false, true, true), false, '桌機額度列放得下兩顆')
+  assert.equal(mergeUpdateChips(true, true, false), false)
+  assert.equal(mergeUpdateChips(true, false, true), false)
 })

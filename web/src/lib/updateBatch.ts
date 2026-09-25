@@ -99,3 +99,11 @@ export function codexInstallPlan(
   }
   return plan
 }
+
+/**
+ * header 的兩顆更新 chip 要不要合成一顆（UI-DECISIONS「header 的 codex 安裝」）：只有手機、而且兩顆都會出現時。
+ * 手機名字行在 390px 只讓得出一顆圖示的寬（兩顆並排時長名字只剩 ▾）；桌機的額度列放得下兩顆，照舊並排。
+ */
+export function mergeUpdateChips(phone: boolean, restartShown: boolean, codexShown: boolean): boolean {
+  return phone && restartShown && codexShown
+}

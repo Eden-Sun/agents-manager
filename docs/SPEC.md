@@ -2043,6 +2043,7 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   4. 把那台 codex run 的通知改成「已安裝，重啟套用」，接著開一鍵重啟，**範圍只限那台主機的 codex**（`bulk_restart::spawn_scoped`；claude 與別台不在這批），之後照上面的規則與事件走。
   只收 UI token：帶 `X-AM-Bot-Id`／`X-AM-Bot-Token` 一律 403（換掉的是所有 codex bot 共用的 binary）；同一台同時只跑一個（409）。進度走 WS `cli_update_progress`／`cli_update_done`，
   `GET /api/state` 的 `cli_updates` 列出在跑的，前端靠它對帳（同 #492）。多台都有「需安裝」時一次一台，裝完 chip 自然換到下一台。
+  手機（≤640px）兩顆都要出現時合成一顆只留圖示的 ⌃⌃，點開兩項選單各自開原本的確認框（名字行放不下兩顆，UI-DECISIONS）。
   已經有一批重啟在跑時，裝好之後的那批會拿到 `already_running`（codex 這次沒排進去），等那批跑完再按一般的 ⌃⌃。
 
   刻意保守：批次最不能做的就是砍掉使用者正在等的回合。
