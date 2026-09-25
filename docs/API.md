@@ -225,7 +225,7 @@ config.toml 裡沒有的 id（child、已刪）忽略。成功推 `project_chang
 | POST | `/api/bots/{id}/keys` | `{"keys":["y"],"expect_run_id"?}` | `200 {}`；`expect_run_id` 不符 409 |
 | POST | `/api/bots/{id}/text` | `{"text":"多行\n也可以","enter"?:true,"expect_run_id"?}` | `200 {}`；沒有 pane 404；`expect_run_id` 不符 409 |
 | POST | `/api/turns/{id}/abandon` | — | `200 {}`；只有 `in_flight`（含 `delivery=unknown`）可放棄，其餘在 per-bot lock 內 CAS 判定為 `409 {"reason":"turn is neither in-flight nor of unknown delivery","turn_id"}`（不新增 system message） |
-| POST | `/api/turns/{id}/withdraw` | — | `200 {}`；issue #122：撤回一則 bot 沒在跑時送、還在等它起來的 `queued`（`awaits_start:1`）——標 `failed`＋一則 system 說明，不送。其他狀態（已被佇列領走、AGM 的派工…）一律 `409 {"reason":"turn is not waiting for its bot to start","turn_id","status"}`、原樣不動（已經打進去的不能假裝沒送） |
+| POST | `/api/turns/{id}/withdraw` | — | `200 {}`；撤回一則還沒送出的 `queued`——標 `failed`＋一則 system 說明，不送。只收兩種：bot 沒在跑時送、還在等它起來的（`awaits_start:1`，issue #122），以及 daemon 自己排的通知（`client_request_id` 前綴 `child-blocked:`／`resume-nudge:`，issue #562：擋在佇列頭時讓使用者的訊息先走）。其他（已被佇列領走、使用者排的訊息、AGM 的派工…）一律 `409 {"reason":"turn is not waiting for its bot to start","turn_id","status"}`、原樣不動（已經打進去的不能假裝沒送） |
 | POST | `/api/bots/{id}/login` | — | `200 {"run_id","kind","command":"/login"}`，見 §4.1 |
 
 - `keys` 的鍵名由 herdr 驗證，常用 `enter`、`esc`、`y`、`n`、`up`、`down`、`ctrl+c`。

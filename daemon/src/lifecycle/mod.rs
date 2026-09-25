@@ -36,6 +36,8 @@ mod interrupt_grace;
 pub(crate) mod resume_gate;
 /// 忙到一半被重啟的 claude 接回後補一句續行提示（claude 2.1.281 不再補隱藏的 Continue）。
 mod resume_nudge;
+/// daemon 自己排進佇列的通知：較短的重試上限、可以撤回（#562）。
+pub(crate) mod daemon_notice;
 pub(crate) use resume_nudge::poke as poke_resume_nudge;
 pub(crate) mod restart_hold;
 /// `runs.state` 轉移的唯一寫法，與寫不進去之後的重試（#135／#145／#146）。

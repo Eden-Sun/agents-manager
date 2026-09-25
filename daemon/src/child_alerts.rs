@@ -395,6 +395,9 @@ pub fn forget(bot_id: &str) {
     episodes().lock().unwrap().remove(bot_id);
 }
 
+/// 這則通知的 `client_request_id` 前綴（`lifecycle::daemon_notice` 靠它認出 daemon 自己排的通知，#562）。
+pub(crate) const CRID_PREFIX: &str = "child-blocked:";
+
 /// 把通知送給 parent（`prompt_relayed_queueable`：parent 在回合中就排隊，不插隊、不打斷）。
 /// 抽出來是為了讓「排隊而不是插隊」測得到——那條路只碰 DB，不需要 herdr。
 pub async fn deliver(
@@ -405,7 +408,7 @@ pub async fn deliver(
     question: &str,
 ) -> crate::lifecycle::LcResult<crate::lifecycle::PromptOut> {
     // 冪等鍵＝這一次 blocked（episode）＋問題：同一次的重試不 fan-out，解除後再卡住是新的一則（issue #134）。
-    let crid = format!("child-blocked:{child_id}:{}:{:x}", episode_for(child_id), fingerprint(question));
+    let crid = format!("{CRID_PREFIX}{child_id}:{}:{:x}", episode_for(child_id), fingerprint(question));
     crate::lifecycle::prompt_relayed_queueable(app, parent_id, &message_for(child_name, question), &crid, Some(child_id)).await
 }
 

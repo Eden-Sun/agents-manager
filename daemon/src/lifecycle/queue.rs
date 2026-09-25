@@ -294,14 +294,21 @@ async fn defer_queued_turn(
         super::race_point::hit("defer_before_return", turn_id).await;
     }
     let mut tx = app.db.begin().await?;
-    let retries: i64 = sqlx::query_scalar("SELECT flush_retries FROM turns WHERE id = ?").bind(turn_id).fetch_one(&mut *tx).await?;
-    if retries >= QUEUE_RETRY_LIMIT {
+    let (retries, crid): (i64, Option<String>) =
+        sqlx::query_as("SELECT flush_retries, client_request_id FROM turns WHERE id = ?").bind(turn_id).fetch_one(&mut *tx).await?;
+    // daemon 自己排的通知擋在佇列頭，後面的使用者訊息就排不到：它的上限短得多（#562）。
+    let notice = super::daemon_notice::is_daemon_notice(crid.as_deref());
+    if retries >= if notice { super::daemon_notice::RETRY_LIMIT } else { QUEUE_RETRY_LIMIT } {
         let out = super::turn_controller::fail_on(&mut tx, turn_id, super::turn_controller::DeliveryOnFail::Failed, "退避次數用完").await?;
         // 沒收到的（別的路徑先收掉了）不補「試了 N 次」的說明：那不是它結束的原因。
         if out != super::turn_controller::Outcome::Applied {
             return Ok(Deferred::Settled(out));
         }
-        let hint = format!("沒有送出：試了 {QUEUE_RETRY_LIMIT} 次都沒辦法打字（最後一次是 {reason}），已停止自動重試。請清空輸入框後重送。");
+        let hint = if notice {
+            super::daemon_notice::gave_up_hint(reason)
+        } else {
+            format!("沒有送出：試了 {QUEUE_RETRY_LIMIT} 次都沒辦法打字（最後一次是 {reason}），已停止自動重試。請清空輸入框後重送。")
+        };
         insert_message_tx(&mut tx, conv, Some(turn_id), "system", &hint, "system", false, None).await?;
         tx.commit().await?;
         return Ok(Deferred::GaveUp);

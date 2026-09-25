@@ -40,7 +40,7 @@ pub(crate) const NUDGE_TEXT: &str = "[來自 AG Man daemon] 重啟前你正在�
 請先確認上一個工具的實際結果，再接著把原本的工作做完。";
 
 /// 續行提示的 `client_request_id` 前綴，後面接排它的那個 run。
-const CRID_PREFIX: &str = "resume-nudge:";
+pub(crate) const CRID_PREFIX: &str = "resume-nudge:";
 
 /// 接回驗證過、畫面閒置之後，還要再空著這麼久才送（#424 裁示）。
 pub(crate) const IDLE_WAIT: Duration = Duration::from_secs(10);
