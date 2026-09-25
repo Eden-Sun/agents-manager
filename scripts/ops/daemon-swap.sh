@@ -369,14 +369,21 @@ AFTER_ROWS=$(bot_rows)
 # 整趟被誤判回滾）。「刻意」只認刪除 API 留下的 intent：DELETE /api/bots|projects 在定案前先寫一筆
 # delete_bot／delete_project（payload 帶當時的子孫 id），done 之後保留 24 小時。光有 deleted_at 不夠——
 # 重啟後 reconcile 找不到 pane 而退役 child、或投影軟刪，也會寫 deleted_at，那正是這一步要抓的遺失。
+# 父 bot 用 `herdr pane close` 收 child（不呼叫 DELETE）時，daemon 退役那顆 child 會寫一筆 retire_child 紀錄（#554）；
+# 只認 subject 就是它、而且 cause 是 pane_closed（herdr 報過關閉事件、當下 pane 也不在）或 promoted 的。
+# agent_missing（pane 還在、新 daemon 認不出 agent）／unconfirmed（pane 不在但沒人看到它被關）／herdr_restarted
+# 正是換版會弄丟 child 的樣子，照樣回滾。判準見 SPEC §6.5a。
 # 讀 DB 一律 -readonly；讀不到、id 格式不對都當成「沒有刪除紀錄」，照樣回滾。
 deleted_on_purpose() { # $1=bot id → 印 1 才算
     case "$1" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
     "$SQLITE" -readonly "$DB" "SELECT count(*) FROM bots b WHERE b.id = '$1'
       AND b.deleted_at IS NOT NULL AND b.deleted_at >= '$SWAP_T0'
-      AND EXISTS (SELECT 1 FROM intents i WHERE i.kind IN ('delete_bot', 'delete_project')
+      AND (EXISTS (SELECT 1 FROM intents i WHERE i.kind IN ('delete_bot', 'delete_project')
         AND i.status != 'abandoned' AND i.created_at >= '$SWAP_T0'
-        AND (i.subject_id = b.id OR i.subject_id = b.project_id OR instr(i.payload_json, '\"' || b.id || '\"') > 0))" 2>/dev/null
+        AND (i.subject_id = b.id OR i.subject_id = b.project_id OR instr(i.payload_json, '\"' || b.id || '\"') > 0))
+      OR EXISTS (SELECT 1 FROM intents i WHERE i.kind = 'retire_child' AND i.status = 'done'
+        AND i.created_at >= '$SWAP_T0' AND i.subject_id = b.id
+        AND json_extract(i.payload_json, '\$.cause') IN ('pane_closed', 'promoted')))" 2>/dev/null
 }
 MISSING=""; DELETED=""
 while IFS="$(printf '\t')" read -r id name; do
