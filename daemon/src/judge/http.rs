@@ -47,6 +47,10 @@ async fn get_shadow(State(app): State<Arc<App>>, Query(q): Query<ShadowQuery>) -
                 "input_tokens": r.get::<Option<i64>, _>("input_tokens"),
                 "error": r.get::<Option<String>, _>("error"),
                 "cleared_at": r.get::<Option<String>, _>("cleared_at"),
+                // #558：只有 `report_evidence` 會填。別種機率仍在 `jev_is_live_ui`。
+                "assignment_id": r.get::<Option<String>, _>("assignment_id"),
+                "claims_verified": r.get::<Option<f64>, _>("claims_verified"),
+                "asks_parent_action": r.get::<Option<f64>, _>("asks_parent_action"),
             })
         })
         .collect();
