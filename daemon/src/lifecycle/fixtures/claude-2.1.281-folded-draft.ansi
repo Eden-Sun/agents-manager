@@ -1,0 +1,24 @@
+user@host tui-cwd % claude --model haiku
+[0m[38;2;215;119;87m ▐[0m[38;2;215;119;87m[48;2;0;0;0m▛███▛█   [0m[1mClaude Code [0m[38;2;153;153;153mv2.1.281[0m
+[0m[38;2;215;119;87m▝▜[0m[38;2;215;119;87m[48;2;0;0;0m█████[0m[38;2;215;119;87m█▀  [0m[38;2;153;153;153mHaiku 4.5 · Claude Max[0m
+[0m[38;2;215;119;87m  ▝▝ ▝▝    [0m[38;2;153;153;153m/…/tui-cwd[0m
+
+
+[0m[38;2;136;136;136m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+❯ fixture folded row 1
+  fixture folded row 2
+  fixture folded row 3
+  fixture folded row 4
+  fixture folded row 5
+  fixture folded row 6
+  fixture folded row 7
+  fixture folded row 8
+  fixture folded row 9
+  fixture folded row 10
+  fixture folded row 11
+  fixture folded row 12
+  fixture folded row 13
+  fixture folded row 14
+[0m[38;2;136;136;136m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+  [0m[38;2;153;153;153mhost | tui-cwd | HAI4.5 | 5h:99%(rst 4h 19m) | 7d:84%(rst 6d 13h)                                                                                                                         ctrl+g to edit in Vim[0m
+  [0m[38;2;255;107;128m⏵⏵ bypass permissions on[0m[38;2;153;153;153m (shift+tab to cycle)[0m

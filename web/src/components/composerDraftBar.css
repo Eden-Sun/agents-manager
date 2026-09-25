@@ -1,0 +1,48 @@
+/* components/ComposerDraftBar.tsx：bot 的輸入框卡著草稿（409 composer_busy）時，輸入列上方常駐的那一條。 */
+
+.composer-draft {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+  background: var(--warn-soft);
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
+  border-radius: 6px;
+  padding: 6px 10px;
+  margin-bottom: 8px;
+}
+
+.composer-draft-label {
+  font-weight: 600;
+  color: var(--warn);
+}
+
+.composer-draft-text {
+  margin: 0;
+  max-height: 6.2em;
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text);
+}
+
+.composer-draft-cut {
+  font-size: 11px;
+}
+
+.composer-draft-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+@media (width <= 640px) {
+  .composer-draft .mini-btn {
+    min-height: 30px;
+    padding: 0 10px;
+  }
+}

@@ -30,6 +30,7 @@ import {
   arr,
 } from '../api/normalize'
 import { ApiError } from '../api/types'
+import { DRAFT_REASON_TEXT, draftBlockFrom, draftIsGone, markDraftBusy, type ComposerDraftBlock, type DraftRequest } from './composerDraft'
 import { PREVIEW_OFF, toPreviewEvent, type Preview } from '../api/preview'
 import type { Bot, BotKind, RestartBatch, GroupChatResult, Mission, MissionDetail, NewMissionInput, MemSnapshot, GroupMessage, Host, HerdrVersion, HostResult, HostShell, Identity, IdentityStatusMap, Lamp, Message, ModelInfo, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, PatchBotInput, PatchProjectInput, Project, QuotaMap, Run, TerminalSource, ToolMap, Turn, TurnDelivery, ModelRemap } from '../api/types'
 import type { ProjectPane } from '../api'
@@ -486,7 +487,11 @@ export interface StoreState {
   /** `attachments` 是 `POST /bots/:id/attachments` 回傳的 id。 */
   /** `sendNow`＝插隊送出（issue #103）：對方回合中時打斷它，而不是排隊／409。 */
   /** `startIfStopped`：bot 沒在跑時交給 daemon 先收下再啟動（issue #122），不經瀏覽器佇列。 */
-  sendPrompt: (botId: string, text: string, attachments?: string[], sendNow?: boolean, startIfStopped?: boolean) => Promise<boolean>
+  /** `draft`：處理框裡卡著的草稿（`composerDrafts`）——清掉再送這則，或改成送出框裡那段。 */
+  sendPrompt: (botId: string, text: string, attachments?: string[], sendNow?: boolean, startIfStopped?: boolean, draft?: DraftRequest) => Promise<boolean>
+  /** 409 `composer_busy` 帶回來的框內草稿，輸入列旁邊顯示到使用者處理或取消（`store/composerDraft.ts`）。 */
+  composerDrafts: Record<string, ComposerDraftBlock>
+  dismissComposerDraft: (botId: string) => void
   sendKeys: (botId: string, keys: string[]) => Promise<void>
   /** 多行內容要走這裡：`sendKeys` 吃鍵名，`\n` 不是鍵名（見 `store/alongside.ts`）。 */
   sendText: (botId: string, text: string, enter: boolean) => Promise<boolean>
@@ -629,6 +634,7 @@ const REASON_TEXT: Record<string, string> = {
   resume_unverified: '沒送出：這顆 bot 是接回舊對話起來的，還在確認接回的是不是原本那段（最多約兩分鐘），稍後再送一次',
   // API.md 有列、daemon 不附 `message`：讀不到這顆 bot 在哪台主機（daemon 的資料暫時讀不到），字沒打進去（#233）。
   host_unreadable: '沒送出：讀不到這顆 bot 在哪台主機（daemon 的資料暫時讀不到），稍後再送一次',
+  ...DRAFT_REASON_TEXT,
 }
 
 /**
@@ -844,6 +850,7 @@ export const useStore = create<StoreState>((set, get) => ({
   hiddenBotIds: [],
   liveReply: {},
   queuedSends: {},
+  composerDrafts: {},
 
   selectedProjectId: initialSelection.projectId,
   groupMessages: {},
@@ -1472,14 +1479,17 @@ export const useStore = create<StoreState>((set, get) => ({
     })
   },
 
-  async sendPrompt(botId, text, attachments = [], sendNow = false, startIfStopped = false) {
+  async sendPrompt(botId, text, attachments = [], sendNow = false, startIfStopped = false, draft) {
     // 連線斷在 daemon 收下之後（回應遺失）：使用者會再按一次同一句，要拿同一個 crid，daemon 才認得是同一件事而不是再送一次。
     // 只有「沒收到任何回覆」的失敗才沿用；daemon 明確回了（成功或 ApiError）就作廢，下一次是新的動作（#367）。
-    const reqKey = `send:${botId}:${sendNow ? 1 : 0}:${text}\u0000${attachments.join(',')}`
+    const draftKey = draft ? `:${draft.action}:${draft.expect}` : ''
+    const reqKey = `send:${botId}:${sendNow ? 1 : 0}:${text}\u0000${attachments.join(',')}${draftKey}`
     const crid = createRequestId(reqKey)
+    if (draft) set((s) => markDraftBusy(s, botId, draft.action))
     try {
-      const res = await api.sendPrompt(botId, text, crid, attachments, sendNow, startIfStopped)
+      const res = await api.sendPrompt(botId, text, crid, attachments, sendNow, startIfStopped, draft)
       settleCreateRequest(reqKey)
+      set((s) => ({ composerDrafts: withoutKey(s.composerDrafts, botId) }))
       // 送出鍵沒生效（not_sent）／不知道生效沒有（unknown）：這一則已是 failed、沒有照一般方式送出（#120）。
       const fell = sendNow ? sendNowFellThrough(res.send_now) : null
       if (fell) {
@@ -1526,6 +1536,15 @@ export const useStore = create<StoreState>((set, get) => ({
         }
         return true
       }
+      // 框裡卡著草稿：輸入列旁邊常駐一條，讓使用者送出框裡那段或清掉再送（不是一閃就沒的 toast）。
+      const block = draftBlockFrom(e)
+      if (block) {
+        set((s) => ({ composerDrafts: { ...s.composerDrafts, [botId]: block } }))
+        // 按了動作卻又擋下（框裡換了字、清不掉）：那一條換成新的草稿，再說一聲為什麼沒動。
+        if (draft) get().notify(e instanceof ApiError && e.body.reason === 'draft_changed' ? 'info' : 'error', errText(e))
+        return false
+      }
+      if (draft) set((s) => (draftIsGone(e) ? { composerDrafts: withoutKey(s.composerDrafts, botId) } : markDraftBusy(s, botId, undefined)))
       // claude 停在登入選單：通知講白，不要只給「HTTP 409」。
       if (e instanceof ApiError && e.status === 409 && e.body.reason === 'needs_login') {
         get().notify('error', typeof e.body.message === 'string' ? e.body.message : '這個 claude 還沒登入，先到「終端」分頁完成登入。')
@@ -1539,6 +1558,10 @@ export const useStore = create<StoreState>((set, get) => ({
       get().notify('error', errText(e))
       return false
     }
+  },
+
+  dismissComposerDraft(botId) {
+    set((s) => ({ composerDrafts: withoutKey(s.composerDrafts, botId) }))
   },
 
   async sendKeys(botId, keys) {

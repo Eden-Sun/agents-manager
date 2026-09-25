@@ -144,9 +144,9 @@ impl Plan {
 }
 
 const TYPE_SETTLE_MS: u64 = 700;
-const SUBMIT_SETTLE_MS: u64 = 1200;
-const SUBMIT_CHECKS: u32 = 3;
-const DELIVER_SCAN_LINES: u32 = 400;
+pub(crate) const SUBMIT_SETTLE_MS: u64 = 1200;
+pub(crate) const SUBMIT_CHECKS: u32 = 3;
+pub(crate) const DELIVER_SCAN_LINES: u32 = 400;
 /// The `pane.read` source for delivery scans. herdr only knows `visible | recent | recent_unwrapped |
 /// detection` — the hyphenated spelling is an `invalid_request` (4713c5c P0).
 pub(crate) const SCAN_SOURCE: &str = "recent_unwrapped";
@@ -204,7 +204,7 @@ fn is_rule_row(row: &str) -> bool {
 
 /// The bottom edge of a boxed composer: `╰──…──╯`, which grok fills with its model label
 /// (`╰── Grok 4.6 (low) · always-approve ─╯`).
-fn is_box_bottom(row: &str) -> bool {
+pub(crate) fn is_box_bottom(row: &str) -> bool {
     let t = row.trim();
     t.starts_with('╰') && t.ends_with('╯')
 }
@@ -942,7 +942,7 @@ fn should_repaste(proof: &Proof, box_empty: bool, evidence_grew: bool) -> bool {
 }
 
 /// Is the run still on the session the transcript proof was taken from?
-async fn same_session(app: &Arc<App>, run_id: &str, proof: &Proof) -> bool {
+pub(crate) async fn same_session(app: &Arc<App>, run_id: &str, proof: &Proof) -> bool {
     let Proof::Transcript { format, path, session_id } = proof else { return true };
     match db::run(&app.db, run_id).await {
         Ok(Some(r)) => {

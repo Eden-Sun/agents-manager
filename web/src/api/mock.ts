@@ -11,6 +11,7 @@ import { abortError } from './transport'
 import { TWO_ASK_QUESTIONS, twoAskKeys, twoAskScreen, twoAskStart, type TwoAskState } from './mockTwoAsk'
 import { MockReleaseTriage } from './mockReleaseTriage'
 import type { HttpMethod, SocketHandlers, Transport, UploadOptions } from './transport'
+import { MockComposerDrafts } from './mockComposerDraft'
 
 /** 未知 kind 一律當 claude（與 daemon 的 400 不同，mock 寬鬆處理）。 */
 /** 2026-09-23 真機（pane 只有 14 行）：claude 把 AskUserQuestion 的題目裁掉，只剩捲動中的選項。 */
@@ -565,6 +566,9 @@ export class MockTransport implements Transport {
 
   /** 更新框的 changelog／分診／AGM 解析（`mockReleaseTriage.ts`）。 */
   readonly releaseTriage = new MockReleaseTriage()
+
+  /** bot 輸入框卡著的草稿（`__amMock.composerDraft`，`mockComposerDraft.ts`）。 */
+  readonly composerDrafts = new MockComposerDrafts()
 
   /** 下一個符合的請求回指定的錯誤（`__amMock.failNext`）：手動看錯誤路徑、截圖用，用過一次就拿掉。 */
   private faults: { method: HttpMethod; pattern: RegExp; status: number; body: Rec }[] = []
@@ -2915,7 +2919,7 @@ export class MockTransport implements Transport {
       )
     }
 
-    const text = String(b.text ?? '')
+    const text = this.composerDrafts.gate(botId, b)
     const attachIds = Array.isArray(b.attachments) ? b.attachments.filter((x): x is string => typeof x === 'string') : []
     const turn: MockTurn = {
       id: ulid('turn'),
@@ -3712,6 +3716,8 @@ function installDevHelpers(mock: MockTransport) {
     paneSqueeze: (n = 5) => mock.setForeignPanes(n),
     // 下一個符合的請求回錯：`__amMock.failNext('POST', 'identities/.*/login', 409, {reason: '…', message: '…'})`
     failNext: (method: HttpMethod, pattern: string, status: number, body: Rec = {}) => mock.failNext(method, pattern, status, body),
+    // bot 的輸入框卡著一段沒送出的字：之後送 prompt 回 409 composer_busy（`null` 清掉）
+    composerDraft: (botIdOrName: string, text: string | null) => mock.composerDrafts.set(mock.botIdByName(botIdOrName) ?? botIdOrName, text),
     // 更新框：清掉某個 kind 的分診帳本（演「尚未分析」）、給 bot 掛更新通知
     triageOff: (kind: string) => mock.releaseTriage.triageOff(kind),
     updateNotice: (botIdOrName: string, notice: string | null) => mock.setUpdateNotice(mock.botIdByName(botIdOrName) ?? botIdOrName, notice),

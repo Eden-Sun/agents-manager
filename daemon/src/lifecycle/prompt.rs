@@ -56,7 +56,7 @@ pub(crate) fn not_attempted_error(run_id: &str, not: Delivered) -> LcError {
 }
 
 /// 撤不回來（DB 出錯）：改收成 failed 了，或那一句也寫不進去、記成欠著（`owed`，#158）。
-struct Unretracted {
+pub(super) struct Unretracted {
     cause: anyhow::Error,
     owed: Option<anyhow::Error>,
 }
@@ -64,7 +64,7 @@ struct Unretracted {
 impl Unretracted {
     /// 收成 failed 了：這個 request id 之後只會拿到那筆失敗的回合，回 5xx（最終答案，不是可重試的 409）。還欠著：跟送達結果
     /// 寫不回去同一種 503（`sent:false`）——不回普通的錯誤讓人以為收掉了，daemon 自己補，同一個 request id 重問拿得到結果。
-    fn answer(self, run_id: &str, turn_id: &str, msg_id: &str, what: &str) -> LcError {
+    pub(super) fn answer(self, run_id: &str, turn_id: &str, msg_id: &str, what: &str) -> LcError {
         match self.owed {
             Some(e) => super::owed_delivery::uncommitted(Some(run_id), turn_id, msg_id, "failed", Some(&e)),
             None => LcError::Upstream(format!("{what}: {}", self.cause)),
@@ -77,7 +77,7 @@ const UNRETRACTED_NOTE: &str = "沒有送出：一個字都沒打，但這一則
 
 /// 撤回一筆沒送出的 turn 的結果。
 #[derive(Debug, PartialEq, Eq)]
-enum Retraction {
+pub(super) enum Retraction {
     /// turn 與它的訊息都撤掉了：同一個 `client_request_id` 可以原樣重送。
     Withdrawn,
     /// turn 已經不是 `in_flight`——窄窗裡別的路徑（`mark_run_exited` → `fail_in_flight`）先把它收掉了。
@@ -91,7 +91,7 @@ enum Retraction {
 /// 刪之前先確認 turn 還是 `in_flight`，而且跟刪訊息在同一個交易裡：`fail_in_flight` 不拿 per-bot 鎖，
 /// 會在「turn 已 commit、第一個字還沒打」這個窄窗裡把它標成 failed 並插一則「run ended」說明。訊息那句
 /// 原本不帶條件，於是使用者那顆泡泡跟那則說明被一起刪掉，只留下一個空的 failed 回合（review3 L4）。
-async fn retract_unsent_turn(app: &Arc<App>, bot_id: &str, turn_id: &str, msg_id: &str) -> Result<Retraction, Unretracted> {
+pub(super) async fn retract_unsent_turn(app: &Arc<App>, bot_id: &str, turn_id: &str, msg_id: &str) -> Result<Retraction, Unretracted> {
     let res = async {
         let mut tx = app.db.begin().await?;
         // 訊息要先刪（`messages.turn_id` 指著 turns，反過來會踩到外鍵），turn 那句才是把關的：
@@ -159,7 +159,7 @@ pub(super) async fn answer_for_turn(app: &Arc<App>, t: &db::Turn) -> LcResult<Pr
 }
 
 /// [`answer_for_turn`]，但 turn 要先從 id 讀回來（撤回撤不掉時，手上只有 id）。
-async fn answer_for_turn_id(app: &Arc<App>, turn_id: &str) -> LcResult<PromptOut> {
+pub(super) async fn answer_for_turn_id(app: &Arc<App>, turn_id: &str) -> LcResult<PromptOut> {
     let t = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id = ?")
         .bind(turn_id)
         .fetch_optional(&app.db)
@@ -251,6 +251,7 @@ pub async fn prompt_relayed(
 }
 
 /// `POST /bots/{id}/prompt`：一般送出（`send_now=false`）或插隊送出，來源已由 `relay_auth` 驗過（issue #339）。
+#[allow(clippy::too_many_arguments)]
 pub async fn prompt_from_api(
     app: &Arc<App>,
     bot_id: &str,
@@ -259,8 +260,10 @@ pub async fn prompt_from_api(
     attachment_ids: &[String],
     relay: RelaySrc<'_>,
     send_now: bool,
+    // 「清掉再送我這則」：先清掉框裡使用者確認過的那段（`composer_draft::clear`），框空了才打字。
+    clear_draft: Option<&str>,
 ) -> LcResult<PromptOut> {
-    prompt_inner(app, bot_id, text, client_request_id, None, None, attachment_ids, relay, false, Admission::Gated, send_now).await
+    prompt_inner(app, bot_id, text, client_request_id, None, None, attachment_ids, relay, false, Admission::Gated, send_now, clear_draft).await
 }
 
 /// AGM 派工專用：對方正在回合中時**排隊**而不是 409（AGM 2026-09-16 裁示）。
@@ -275,7 +278,7 @@ pub async fn prompt_relayed_queueable(
     client_request_id: &str,
     relay_from: Option<&str>,
 ) -> LcResult<PromptOut> {
-    prompt_inner(app, bot_id, text, client_request_id, None, None, &[], RelaySrc::trusted(relay_from), true, Admission::Gated, false).await
+    prompt_inner(app, bot_id, text, client_request_id, None, None, &[], RelaySrc::trusted(relay_from), true, Admission::Gated, false, None).await
 }
 
 /// 排一筆 `queued` turn 等下一回合（只有 AGM 派工走這裡）。
@@ -500,7 +503,7 @@ pub async fn prompt_grouped(
     attachment_ids: &[String],
     relay_from: Option<&str>,
 ) -> LcResult<PromptOut> {
-    prompt_inner(app, bot_id, text, client_request_id, group_id, deliver, attachment_ids, RelaySrc::trusted(relay_from), false, Admission::Gated, false).await
+    prompt_inner(app, bot_id, text, client_request_id, group_id, deliver, attachment_ids, RelaySrc::trusted(relay_from), false, Admission::Gated, false, None).await
 }
 
 /// 插隊送出（issue #103）：照舊寫 turn／訊息進資料庫，但**不等 idle**——對 pane 送 claude 2.1.275 的
@@ -518,7 +521,7 @@ pub async fn prompt_send_now(
     attachment_ids: &[String],
     relay_from: Option<&str>,
 ) -> LcResult<PromptOut> {
-    prompt_from_api(app, bot_id, text, client_request_id, attachment_ids, RelaySrc::trusted(relay_from), true).await
+    prompt_from_api(app, bot_id, text, client_request_id, attachment_ids, RelaySrc::trusted(relay_from), true, None).await
 }
 
 /// daemon 自己的控制面 prompt（AGM／協調者啟動時的握手）：不受維護窗口的入場閘門管（issue #86）。
@@ -530,7 +533,7 @@ pub async fn prompt_control_plane(
     client_request_id: &str,
     relay_from: Option<&str>,
 ) -> LcResult<PromptOut> {
-    prompt_inner(app, bot_id, text, client_request_id, None, None, &[], RelaySrc::trusted(relay_from), false, Admission::ControlPlane, false).await
+    prompt_inner(app, bot_id, text, client_request_id, None, None, &[], RelaySrc::trusted(relay_from), false, Admission::ControlPlane, false, None).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -550,6 +553,8 @@ async fn prompt_inner(
     admission: Admission,
     // 插隊送出（issue #103）：對方回合中時打斷它，而不是 409。只有使用者按「立刻送出」會給 true。
     want_send_now: bool,
+    // 先清掉框裡的這段草稿（使用者在網頁上按「清掉再送我這則」）。
+    clear_draft: Option<&str>,
 ) -> LcResult<PromptOut> {
     let deliver = deliver.unwrap_or(text);
     #[cfg(test)]
@@ -683,6 +688,9 @@ async fn prompt_inner(
     }
     // Resolve the client before committing: must stay a retryable 502, not a stuck `pending` turn.
     let client = client_for_run(app, &run).await?;
+    if let Some(expect) = clear_draft {
+        super::composer_draft::clear(&client, &run, &bot, expect, interrupted.is_some()).await?;
+    }
     // Decide how it will be delivered before a turn exists: a prompt that cannot be sent right now
     // (box busy, no way to prove it) must never become an in-flight turn nobody can release
     // (sol review round seven #2). A 409 keeps a supervisor assignment queued with backoff.
@@ -693,7 +701,7 @@ async fn prompt_inner(
     let plan = match plan_delivery(app, &client, &run, &bot, &deliver, send_now_active, false).await.map_err(up)? {
         Ok(plan) if send_now_active => plan.submitting_with(Submit::SendNow),
         Ok(plan) => plan,
-        Err(not) => return Err(not_attempted_error(&run.id, not)),
+        Err(not) => return Err(super::composer_draft::with_draft(&client, &run, &bot, not_attempted_error(&run.id, not)).await),
     };
 
     // 插隊送出：被打斷的那一筆**現在不收**，要等送出鍵確定生效（#120，`send_now::deliver`）。新的那一則照樣先寫進 DB
@@ -805,7 +813,7 @@ async fn prompt_inner(
         Ok(not @ Delivered::NotAttempted { .. }) => {
             match retract_unsent_turn(app, bot_id, &turn_id, &msg_id).await {
                 // 撤掉了：同一個 request id 原樣重送會重來一次，照計畫階段的答案回 409／422。
-                Ok(Retraction::Withdrawn) => return Err(not_attempted_error(&run.id, not)),
+                Ok(Retraction::Withdrawn) => return Err(super::composer_draft::with_draft(&client, &run, &bot, not_attempted_error(&run.id, not)).await),
                 // 窄窗裡別的路徑（`mark_run_exited` → `fail_in_flight`）已經把這筆收掉並插了說明：
                 // 一個字都沒刪，照 turn 現況回。回可重試的 409 只會叫呼叫端用同一個 request id 重送，
                 // 而重送從冪等分支拿到的就是這一筆收掉的回合——兩次答案不一致，交辦還被記成送達失敗

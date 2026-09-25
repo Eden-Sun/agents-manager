@@ -35,6 +35,7 @@ import { RewindButton, RewoundTag } from './RewindButton'
 import { RewindBar } from './RewindBar'
 import { TurnErrorBadge } from './TurnErrorBadge'
 import { AuthLoginAction } from './AuthLoginAction'
+import { ComposerDraftBar } from './ComposerDraftBar'
 import { isAuthFailure } from '../lib/authFailure'
 import { HostShellPanel } from './HostShellPanel'
 import { GearIcon, GitIcon } from './Icons'
@@ -817,6 +818,15 @@ function Composer({
 
   return (
     <div className="composer bot-composer">
+      <ComposerDraftBar
+        botId={botId}
+        text={text}
+        attachments={files.ids}
+        onSent={() => {
+          setText('')
+          files.clear()
+        }}
+      />
       {starting ? (
         <div className="composer-queued" role="status">
           <span className="composer-queued-label">{startingSendLabel(starting, hasRun)}</span>

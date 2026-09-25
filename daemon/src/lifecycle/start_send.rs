@@ -46,7 +46,7 @@ pub async fn prompt_starting(
         accept_locked(app, bot_id, text, client_request_id, attachment_ids, relay).await?
     };
     match accepted {
-        Accepted::Normal => prompt_from_api(app, bot_id, text, client_request_id, attachment_ids, relay, false).await,
+        Accepted::Normal => prompt_from_api(app, bot_id, text, client_request_id, attachment_ids, relay, false, None).await,
         Accepted::Queued(out, mark) => {
             if let Some(mark) = mark {
                 spawn_start(app, bot_id, mark);

@@ -876,6 +876,20 @@ user 文字先照 CLI 自己的拆法還原（`lifecycle::pasted_content`，只�
 
 第一次貼字前會重讀輸入框；若回合結束時 Codex 把未送出的提問答案放回 composer（0.157 起），daemon 保留該答案、回可重試的 `409 composer_busy`，不把新 prompt 接在後面。自動替 TUI 選答案的操作（數字、`y`，以及方向鍵後的 Enter）會在送鍵前重讀畫面並辨認仍開著的目標提示及選項；認不出來就不按。
 
+**框裡卡著草稿**（2026-09-26 w16T:p3：claude 的「Edit prompt and retry」把上一則放回框裡，網頁每送一則都 409、網頁上卻沒有地方處理）：
+`composer_busy` 的 409 附上框裡現在的字（`poller::composer_text`，截到 500 字）與這個 kind 驗過的動作，網頁在輸入列上方常駐一條
+（UI-DECISIONS「輸入框卡著草稿」），給兩個動作（`lifecycle/composer_draft.rs`，API.md「輸入框卡著草稿」）：
+- **送出框裡那段**＝對 pane 按 Enter，不重打字。前提與一般 prompt 相同（冪等、維護窗口、回合在飛、接回未驗證、畫面上開著的選單、unknown 回合），
+  turn＋user 訊息在按鍵前寫進 DB。框裡的字是畫面讀來的，不能逐字當證據：本機 claude／codex 的 session log 在基準之後**多了一則使用者訊息**＋框清空
+  才算 `Submitted`，對話裡的訊息換成 log 那一則的原文；其他情況框在 Enter 後清空＝`Unverified`。框裡還是同一段就再按一次 Enter（換了字不按）；
+  herdr 拒收 Enter 而框裡還是那一段＝沒送出，撤回回合。不會自動重送（`auto_resend=0`：那段字不是 daemon 打的）。
+- **清掉再送我這則**＝在規劃送達之前按清框鍵，**重讀畫面確認框是空的**才往下打字；還有字（或 herdr 拒收那顆鍵）回 409 `draft_uncleared`、一個字都不打。
+  清框鍵三種 kind 都是一次 `ctrl+c`：2026-09-26 在隔離的 herdr session（`env -i` + `--session`，daemon 看不到）實測 claude 2.1.281、codex 0.155.1、
+  grok 1.0.41 的單行、多行與 claude 的十四列長段，一次就清空（fixtures `*-draft.ansi`／`*-cleared.ansi`）。框本來就空不按（空框的 `ctrl+c` 是
+  「再按一次離開」）；有回合在跑不按（`ctrl+c` 會打斷它，插隊送出時回 `draft_clear_while_busy`）。
+兩個動作都要帶 409 給的草稿（`expect_draft`）：框裡換了字就 409 `draft_changed` 帶新的草稿，不送出、不清掉使用者沒看過的字。
+只給使用者自己的 prompt，bot 轉送的不收。讀草稿時 grok 框底那一列（`╰── Grok 4.7 (high) · … ─╯`，寫著字）是框的下緣，不算草稿。
+
 **空框的判定依各 provider 的實機畫面**（`screen.rs` 的真 fixture 都有測）：
 
 | provider | 輸入框長相 | 算空框 |

@@ -25,6 +25,9 @@ export function routeDaemon(handler: (req: FakeRequest) => Response | Promise<Re
 export function reset(): void {
   requests.length = 0
   route = () => ok()
+  // 別的測試檔（movePrimary、rewindAction…）會直接換掉全域 fetch；這個模組只在第一次 import 時執行，
+  // 排在它們前面 import 的話之後就再也收不到請求。每次 reset 都裝回來。
+  g.fetch = fakeFetch
 }
 
 const g = globalThis as unknown as Record<string, unknown>
@@ -44,7 +47,7 @@ g.localStorage = {
 g.document = { visibilityState: 'hidden', hasFocus: () => false, addEventListener: noop, removeEventListener: noop }
 g.window = { addEventListener: noop, removeEventListener: noop }
 g.location = { protocol: 'http:', host: '127.0.0.1:7788' }
-g.fetch = async (input: string, init?: { method?: string; body?: string }) => {
+const fakeFetch = async (input: string, init?: { method?: string; body?: string }) => {
   const req: FakeRequest = {
     method: init?.method ?? 'GET',
     path: String(input),
@@ -53,3 +56,4 @@ g.fetch = async (input: string, init?: { method?: string; body?: string }) => {
   requests.push(req)
   return route(req)
 }
+g.fetch = fakeFetch
