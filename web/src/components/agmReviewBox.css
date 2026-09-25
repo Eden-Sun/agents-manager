@@ -30,6 +30,94 @@
   line-height: 1.5;
 }
 
+.agm-review-none {
+  margin: 6px 0 0;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+.agm-review-agm {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+
+/* 上游分診（issue #561）：一版一段，提防／採用／值得早升用文字標籤＋色，不只靠顏色。
+   提防是琥珀不是紅：紅只給「要你本人動手」（UI-DECISIONS 通用原則）。 */
+.triage {
+  margin-top: 4px;
+}
+
+.triage-ver {
+  margin-top: 6px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.triage-ver-head {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.triage-ver-no {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.triage-ver-state {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.triage-items,
+.triage-issues {
+  margin: 2px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.triage-items > li,
+.triage-issues > li {
+  margin: 2px 0;
+  overflow-wrap: anywhere;
+}
+
+.triage-tag {
+  display: inline-block;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+.triage-tag.guard {
+  color: var(--warn);
+  background: var(--warn-soft);
+}
+
+.triage-tag.adopt {
+  color: var(--status-ok);
+  background: color-mix(in srgb, var(--status-ok) 12%, transparent);
+}
+
+.triage-tag.upgrade {
+  color: var(--accent-ink);
+  background: var(--accent-soft);
+}
+
+.triage-mod {
+  margin-left: 6px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.triage-dup {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
 /* 桌機更新框分左右（2026-09-19 使用者），但別把視窗撐滿（同日：「現又太大，聰明的調整 render 空間」）：
    兩欄只長到內容需要的高度、上限 42vh 各自捲；bot 清單改成會換行的小晶片，不再一顆一行；手機維持上下。 */
 @media (width > 900px) {

@@ -98,26 +98,63 @@ pub fn installed_text(disk: &str, running: &str) -> Option<String> {
 }
 
 /// 這一輪 codex run 的通知該是什麼。優先序：磁碟已是新版（重啟就換，最具體）→ 畫面上的提示（新版還沒裝）→
-/// 既有的「還沒裝」通知（畫面被推掉、選了 Skip 都不代表新版不存在，run 重啟後新 run 本來就乾淨）。
-/// 畫面上的提示若磁碟已經裝好，就不能再說「需安裝」——那是過期的提示，所以磁碟先。
-pub fn decide(screen_prompt: Option<&Prompt>, running: Option<&str>, disk: Option<&str>, existing: Option<&str>) -> Option<String> {
+/// 分診帳本裡的上游最新版比裝著的新（新版還沒裝）→ 既有的「還沒裝」通知（畫面被推掉、選了 Skip 都不代表新版不存在，
+/// run 重啟後新 run 本來就乾淨）。畫面上的提示若磁碟已經裝好，就不能再說「需安裝」——那是過期的提示，所以磁碟先。
+///
+/// `upstream` 是 `release_triage` 帳本裡最新的正式版（issue #561）：畫面上的提示只在啟動那一刻印、
+/// 而且版本是 codex 自己上一次檢查（`~/.codex/version.json`）的結果——2026-09-25 實測帳本已有 0.157.0，
+/// 6 顆 codex bot 裡 4 顆的通知還停在 0.156.1、2 顆沒被巡到提示就一直沒有通知。目標版本取提示、帳本、
+/// 既有通知三者較新的那個（安裝指令裝的就是最新版）。
+pub fn decide(
+    screen_prompt: Option<&Prompt>,
+    running: Option<&str>,
+    disk: Option<&str>,
+    upstream: Option<&str>,
+    existing: Option<&str>,
+) -> Option<String> {
     if let (Some(d), Some(r)) = (disk, running) {
         if let Some(t) = installed_text(d, r) {
             return Some(t);
         }
     }
+    let disk_v = disk.and_then(|d| cli_version_string(d).or_else(|| version_string(d)));
+    // 裝著的版本：磁碟優先（跑著的不會比磁碟新），讀不到才用跑著的。兩個都不知道就不拿帳本比。
+    let have = disk_v.clone().or_else(|| running.and_then(version_string));
+    let upstream_target = match (have.as_deref().and_then(parse_version), upstream.and_then(version_string)) {
+        (Some(h), Some(u)) if parse_version(&u).is_some_and(|uv| uv > h) => Some(u),
+        _ => None,
+    };
     if let Some(p) = screen_prompt {
-        // 提示說的新版磁碟上已經有了（安裝過、這個 run 還舊）：也是「重啟就換」，不再說需安裝。
-        if let Some(d) = disk.and_then(|d| cli_version_string(d).or_else(|| version_string(d))) {
-            if let (Some(dv), Some(tv)) = (parse_version(&d), parse_version(&p.to)) {
+        // 提示說的新版磁碟上已經有了（安裝過、這個 run 還舊）：也是「重啟就換」，不再說需安裝——
+        // 除非帳本知道還有更新的一版。
+        if let Some(d) = disk_v.as_deref() {
+            if let (Some(dv), Some(tv)) = (parse_version(d), parse_version(&p.to)) {
                 if dv >= tv {
-                    return Some(format!("{NOTICE_PREFIX} {}，已安裝，重啟套用", p.to));
+                    return Some(match upstream_target {
+                        Some(u) => pending_text(Some(d), &u),
+                        None => format!("{NOTICE_PREFIX} {}，已安裝，重啟套用", p.to),
+                    });
                 }
             }
         }
-        return Some(pending_text(p.from.as_deref(), &p.to));
+        return Some(pending_text(p.from.as_deref(), &newest(&p.to, upstream_target.as_deref())));
+    }
+    if let Some(u) = upstream_target {
+        // 既有的「還沒裝」通知若寫的新版更新（帳本落後 codex 自己的檢查），沿用它的目標。
+        let prev = existing.filter(|e| e.starts_with(NOTICE_PREFIX) && e.contains("需安裝")).and_then(versions_after);
+        let to = newest(&u, prev.as_ref().map(|(_, t)| t.as_str()));
+        let from = running.and_then(version_string).or_else(|| prev.and_then(|(f, _)| f)).or(disk_v);
+        return Some(pending_text(from.as_deref(), &to));
     }
     existing.filter(|e| e.starts_with(NOTICE_PREFIX)).map(str::to_string)
+}
+
+/// 兩個版本取新的；`b` 看不懂就是 `a`。
+fn newest(a: &str, b: Option<&str>) -> String {
+    match b {
+        Some(b) if parse_version(b) > parse_version(a) => b.to_string(),
+        _ => a.to_string(),
+    }
 }
 
 fn running_versions() -> &'static Mutex<HashMap<String, String>> {
@@ -221,25 +258,25 @@ mod tests {
 
     #[test]
     fn the_prompt_on_screen_alone_makes_a_pending_notice() {
-        let n = decide(Some(&p("0.154.0", "0.155.1")), Some("0.154.0"), Some("codex-cli 0.154.0"), None).unwrap();
+        let n = decide(Some(&p("0.154.0", "0.155.1")), Some("0.154.0"), Some("codex-cli 0.154.0"), None, None).unwrap();
         assert!(n.contains("需安裝後重啟"), "{n}");
     }
 
     /// 畫面被推掉、只剩版本比對：磁碟已經是新版（有人裝過了），這個 run 還跑著舊的。
     #[test]
     fn once_the_prompt_is_pushed_off_screen_the_disk_version_is_what_remains() {
-        let n = decide(None, Some("0.154.0"), Some("codex-cli 0.155.1"), None).unwrap();
+        let n = decide(None, Some("0.154.0"), Some("codex-cli 0.155.1"), None, None).unwrap();
         assert!(n.contains("0.155.1") && n.contains("0.154.0") && n.contains("已安裝") && n.contains("重啟套用"), "{n}");
         assert!(!n.contains("需安裝"), "已經裝好了，不能再叫人去裝：{n}");
         // 磁碟相同或更舊、也沒有提示：沒有通知。
-        assert_eq!(decide(None, Some("0.155.1"), Some("codex-cli 0.155.1"), None), None);
-        assert_eq!(decide(None, Some("0.155.1"), Some("codex-cli 0.154.0"), None), None);
-        assert_eq!(decide(None, None, Some("codex-cli 0.155.1"), None), None, "不知道跑著的版本就不比");
+        assert_eq!(decide(None, Some("0.155.1"), Some("codex-cli 0.155.1"), None, None), None);
+        assert_eq!(decide(None, Some("0.155.1"), Some("codex-cli 0.154.0"), None, None), None);
+        assert_eq!(decide(None, None, Some("codex-cli 0.155.1"), None, None), None, "不知道跑著的版本就不比");
     }
 
     #[test]
     fn a_stale_prompt_does_not_say_install_when_it_is_already_installed() {
-        let n = decide(Some(&p("0.154.0", "0.155.1")), None, Some("codex-cli 0.155.1"), None).unwrap();
+        let n = decide(Some(&p("0.154.0", "0.155.1")), None, Some("codex-cli 0.155.1"), None, None).unwrap();
         assert!(n.contains("已安裝") && !n.contains("需安裝"), "{n}");
     }
 
@@ -247,9 +284,47 @@ mod tests {
     #[test]
     fn a_pending_notice_survives_the_prompt_leaving_the_screen() {
         let pending = pending_text(Some("0.154.0"), "0.155.1");
-        assert_eq!(decide(None, Some("0.154.0"), Some("codex-cli 0.154.0"), Some(&pending)), Some(pending.clone()));
+        assert_eq!(decide(None, Some("0.154.0"), Some("codex-cli 0.154.0"), None, Some(&pending)), Some(pending.clone()));
         // 不是 codex 的通知（例如舊資料）不沿用。
-        assert_eq!(decide(None, None, None, Some("Update installed · Restart to update")), None);
+        assert_eq!(decide(None, None, None, None, Some("Update installed · Restart to update")), None);
+    }
+
+    /// issue #561（2026-09-25 真 daemon）：本機 0.155.1、帳本已有 0.157.0，提示早被推出畫面（或當下沒巡到）、
+    /// 跑著的版本也不知道——以前這顆 bot 一直沒有通知。帳本比磁碟新就是「新版還沒裝」。
+    #[test]
+    fn the_triage_ledger_alone_is_enough_to_know_there_is_a_newer_version() {
+        let n = decide(None, None, Some("codex-cli 0.155.1"), Some("0.157.0"), None).expect("帳本比磁碟新＝有新版");
+        assert_eq!(n, pending_text(Some("0.155.1"), "0.157.0"), "{n}");
+        // 帳本沒有比裝著的新：不造通知。
+        assert_eq!(decide(None, None, Some("codex-cli 0.157.0"), Some("0.157.0"), None), None);
+        assert_eq!(decide(None, None, Some("codex-cli 0.157.0"), Some("0.156.1"), None), None);
+        // 裝著的版本完全不知道：不拿帳本比（不能憑空說有新版）。
+        assert_eq!(decide(None, None, None, Some("0.157.0"), None), None);
+        // 只知道跑著的版本也行。
+        assert_eq!(decide(None, Some("0.155.1"), None, Some("0.157.0"), None), Some(pending_text(Some("0.155.1"), "0.157.0")));
+    }
+
+    /// 畫面上的提示是 codex 自己上一次檢查的結果（會落後）：帳本有更新的一版就寫帳本那一版。
+    #[test]
+    fn the_newer_of_the_prompt_and_the_ledger_is_the_target() {
+        let n = decide(Some(&p("0.155.1", "0.156.1")), Some("0.155.1"), Some("codex-cli 0.155.1"), Some("0.157.0"), None).unwrap();
+        assert_eq!(n, pending_text(Some("0.155.1"), "0.157.0"));
+        // 帳本反而落後（kick 停了）：提示照舊。
+        let n = decide(Some(&p("0.155.1", "0.156.1")), Some("0.155.1"), Some("codex-cli 0.155.1"), Some("0.155.1"), None).unwrap();
+        assert_eq!(n, pending_text(Some("0.155.1"), "0.156.1"));
+        // 過期的提示（磁碟已經裝了它說的那版）但帳本還有更新的：仍是「需安裝」，不是「重啟套用」。
+        let n = decide(Some(&p("0.155.1", "0.156.1")), None, Some("codex-cli 0.156.1"), Some("0.157.0"), None).unwrap();
+        assert_eq!(n, pending_text(Some("0.156.1"), "0.157.0"));
+    }
+
+    /// 既有的「還沒裝」通知（真 daemon 上那 4 顆寫的 0.155.1 → 0.156.1）遇到帳本 0.157.0：換成新的目標，
+    /// 起點沿用；既有的反而比帳本新（帳本落後）就留著它的目標。
+    #[test]
+    fn an_existing_pending_notice_moves_up_to_the_ledger_version_but_never_down() {
+        let old = pending_text(Some("0.155.1"), "0.156.1");
+        assert_eq!(decide(None, None, Some("codex-cli 0.155.1"), Some("0.157.0"), Some(&old)), Some(pending_text(Some("0.155.1"), "0.157.0")));
+        let ahead = pending_text(Some("0.155.1"), "0.158.0");
+        assert_eq!(decide(None, None, Some("codex-cli 0.155.1"), Some("0.157.0"), Some(&ahead)), Some(ahead.clone()));
     }
 
     #[test]

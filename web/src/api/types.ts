@@ -1016,8 +1016,8 @@ export interface NewMissionInput {
   max_rounds?: number
 }
 
-/** `GET/POST /api/claude-update/review` 的 `review` 欄位：這一版的 AGM 解析到哪了。 */
-export interface ClaudeReview {
+/** `GET/POST /api/claude-update/review?kind=` 的 `review` 欄位：這一版的 AGM 解析到哪了（claude／codex 同一套，issue #561）。 */
+export interface UpdateReview {
   state: 'none' | 'pending' | 'done'
   target_bot_name: string
   asked_at: string
