@@ -5,7 +5,10 @@ import { canLoginInSession, cliLoginCommand, findLoginTargetId, identityEnv } fr
 import { QuotaLoginShell } from './QuotaLoginShell'
 import { ConfirmDialog } from './ConfirmDialog'
 
-/** 額度 popover「未登入」列的登入鈕（claude / grok）：`/login` 送進同 host、kind、身份且在跑的 bot（`findLoginTarget`）。 */
+/**
+ * 額度 popover「未登入」列的登入鈕。claude 一律開主機 shell 跑 `claude auth login`（不佔 bot 的 pane，它可能正卡在
+ * `Not logged in`）；grok 把 `/login` 送進同 host、kind、身份且在跑的 bot（`findLoginTarget`）。
+ */
 export function QuotaLoginSlash({
   kind,
   host,
@@ -29,6 +32,9 @@ export function QuotaLoginSlash({
   const [loginSent, setLoginSent] = useState(false)
   const shellCommand = useStore((s) => cliLoginCommand(kind, identityEnv(s, host, kind, identity)))
 
+  // 有身份走 daemon（它照主機展開 `$HOME`、登完重驗收 pane）；前端拼的 env 會把 config 裡的 `$HOME` 單引號成字面值。
+  if (kind === 'claude' && identity) return <IdentityCliLogin host={host} hostLabel={hostLabel} identity={identity} />
+  if (kind === 'claude') return <QuotaLoginShell host={host} hostLabel={hostLabel} kind={kind} command={shellCommand} />
   // codex 沒有 `/login`，走 `QuotaLogin-codex`；這裡擋一下免得被誤用時給出壞按鈕。
   if (!canLoginInSession(kind)) return null
   // 沒有在跑的 Bot 就走 codex 那條路：開主機 shell 跑 `<cli> login`，登的是同一個身份。
@@ -86,6 +92,25 @@ export function QuotaLoginSlash({
           })
         }}
       />
+    </div>
+  )
+}
+
+/** claude 身份的 CLI 登入：`POST …/identities/{identity}/login` 在獨立 pane 跑 `claude auth login`，畫面切到那個 pane。 */
+function IdentityCliLogin({ host, hostLabel, identity }: { host: string; hostLabel: string; identity: string }) {
+  const loginIdentity = useStore((s) => s.loginIdentity)
+  const busy = useStore((s) => s.busy[`identity-login:${host}:${identity}`] === true)
+  return (
+    <div className="bs-login-row">
+      <button
+        type="button"
+        className="btn"
+        disabled={busy}
+        title={`在 ${hostLabel} 開獨立終端，帶 ${identity} 的設定跑 claude auth login`}
+        onClick={() => void loginIdentity(host, identity)}
+      >
+        {busy ? '開終端中…' : '開終端登入'}
+      </button>
     </div>
   )
 }

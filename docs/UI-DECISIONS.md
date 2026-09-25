@@ -585,3 +585,17 @@ daemon 對 AGM 的 bot（總管／角色本身、它們的 child、總管專案�
   用畫出來的字當門檻，而不是固定時間或固定百分比，才不會出現「字會變但畫面沒更新」的落差。
 - mock 模式下檔名帶 `stall`（停在 25%）、`fail`（傳到 40% 回 502）、`slow` 可以重現這幾種畫面。
   ![桌機上傳中](screenshots/upload-progress/desktop-uploading.png) ![桌機失敗](screenshots/upload-progress/desktop-failed.png) ![手機上傳中](screenshots/upload-progress/phone-uploading.png) ![手機失敗](screenshots/upload-progress/phone-failed.png)
+
+## claude 用 CLI 登入、不佔 bot 的 pane（2026-09-25，使用者：「抓到 auth fail 要能快速登入，用 cli 的方式而不是卡著」）
+
+cc1 的 bot 好幾個回合都收在 `authentication_failed`，對話只寫「這一回合失敗收尾（帳號或授權）」，沒有能按的東西；而 Bot 設定與額度 popover 的「登入」是把 `/login` 送進那顆 bot 的 pane——
+它本來就卡在 `Not logged in`，再送一個登入流程進去只會讓它更卡，完成之前送給它的訊息也全卡住。
+
+- **claude 一律在獨立的主機 shell 跑 `claude auth login`**（SPEC §16.3a），不送 `/login` 進 bot 的 pane：有身份走 daemon 的 `…/identities/{identity}/login`（env 由 daemon 照主機偵測到的設定組、`$HOME` 在那台展開，登完重驗、收 pane），沒綁身份開 shell 打不帶 env 的那行。
+  入口三個：auth 失敗那則訊息、Bot 設定的「登入 / 切換帳號」、額度 popover「未登入」列。grok 這次不動，仍把 `/login` 送進 bot（使用者要改的是 claude）。
+- **auth 失敗那則訊息底下兩顆鍵**：「立即登入」（primary）與「登入好了，重試」。重試＝重新偵測身份，確定還沒登入就只提示；否則重送上一則使用者訊息。
+  不做自動重送：登入要人到瀏覽器授權，什麼時候好只有人知道；按一下的成本很低，自動重送猜錯會多燒一個失敗回合。
+- **只掛在最後一則 auth 失敗**，之後出現正常回覆就收起來——一顆連錯五次的 bot 不該長出五排按鈕。agent 回覆只認「整則就是 `Not logged in · …/login`」那一行，引用那句話的回報不算（同 SPEC §18 協調者登入偵測的教訓）。
+- 截圖：`docs/screenshots/auth-cli-login/`（`scripts/auth-login-shots.mjs`，`MOBILE=1` 出手機那組；mock 模式：`__amMock.loggedOut('am-claude', 'cc1')` 後送含 `authfail` 的訊息）。
+  ![桌機](screenshots/auth-cli-login/desktop-auth-fail.png) ![手機](screenshots/auth-cli-login/phone-auth-fail.png)
+

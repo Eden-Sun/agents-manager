@@ -34,6 +34,8 @@ import { UpdateBadge } from './UpdateBadge'
 import { RewindButton, RewoundTag } from './RewindButton'
 import { RewindBar } from './RewindBar'
 import { TurnErrorBadge } from './TurnErrorBadge'
+import { AuthLoginAction } from './AuthLoginAction'
+import { isAuthFailure } from '../lib/authFailure'
 import { HostShellPanel } from './HostShellPanel'
 import { GearIcon, GitIcon } from './Icons'
 import { useShelfSink } from './useShelfSink'
@@ -217,6 +219,7 @@ export const Bubble = memo(function Bubble({
           </span>
         </button>
       ) : null}
+      {isAuthFailure(msg) ? <AuthLoginAction msg={msg} /> : null}
     </article>
   )
 })
