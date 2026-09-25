@@ -2842,6 +2842,7 @@ AGM 的運維職責以本節為準，不靠任何 bot 的記憶。persona 是同
   kick 讀到請求檔就走立即模式，只略過三道排程閘：觸發條件（整點／門檻／等太久）、「同 commit 已派過」、等 AGM 裁示 rebuild。**其餘照舊**：建置 child 要在、上一筆 `agm-daemon-update-*` 要結案、
   `lease safety`／`acquire` 的沒人 working（等太久的縮小封鎖面照 §18.10 從核准時間起算）、派工正文的固定條件 1～6（乾淨 HEAD worktree、整樹測試、`.bak`、驗證失敗回滾，§18.13）、`daemon-swap.sh`。
   建的是確認框上那顆（daemon 驗過是 origin/main 的祖先），派工 request id `agm-daemon-update-<sha>-now-<核准>`（同一顆先前派過沒上線也能再派）。
+  按下之後 origin/main 又動到 binary（跟例行路徑同一支 `binary_changed_since`、同一組 `build-inputs` 路徑判斷）就跟例行的 DEFERRED 一樣：只建按下的那顆，正文寫「之後還有 N 個 commit 動到 binary，留下一趟」（N＝`rev-list --count <sha>..origin/main -- <路徑>`），「已派過」記按下的那顆，下一輪例行路徑再為 HEAD 申請；只多了 docs 才寫「只動到不進 binary 的檔」（#570）。
   restart 也由這一下授權：kick 拿到 rebuild 窗口後以**建置 child 的 bot id** 申請 restart（§3c 的 `exclude_not_requester`），request id 固定為 `deploy-now-restart-<rebuild 核准>`，**daemon 在建立當下**以 `user(立即部署)` 核准（`deploy_now::preapprove_restart`：請求檔還在且指著那筆 rebuild、rebuild 是使用者核准且有效、commit 一致才核准）。kick 不打 `decide`——#447 之後 approve 要驗過的 AGM 角色，launchd 沒有。回應是 `approved` 才叫 child 直接用它；
   開不出來就照例行流程自己申請（AGM 裁示），不是停手。這筆 restart 申請照常推一則 `approval_requested` 給協調者（知會；已核准，不必裁示）。
   等不到窗口就留著請求下一輪（5 分鐘）再試；請求只在派工成功、線上已是那顆（docs-only）、或核准不能用（撤銷／過期／用掉／對不上，推 `ops_alert`）時才收掉，所以最長活到核准的 6 小時。

@@ -257,6 +257,13 @@ except Exception:
 print(" ".join(d.get("paths") or []))
 ' 2>/dev/null) || PATHS=""
 [ -n "$PATHS" ] || PATHS="daemon web Cargo.toml Cargo.lock docs/goals/agm-supervisor-persona.md docs/goals/agm-responder-persona.md scripts/agm.py"
+# <commit> 到 origin/main 之間有沒有動到會進 binary 的檔、動到的 commit 有幾個。例行與立即兩條路都用這一組，
+# 路徑清單只有上面那份 PATHS——立即路徑以前不判斷、直接寫「只動到不進 binary 的檔」，連三趟都是錯的。
+# diff 出錯（exit 128）算有動到：寧可說「留下一趟」，不要宣稱沒差。
+# shellcheck disable=SC2086  # PATHS 是刻意要拆成多個參數的
+binary_changed_since() { ! "$GIT" -C "$REPO" diff --quiet "$1" origin/main -- $PATHS; }
+# shellcheck disable=SC2086
+binary_commits_since() { "$GIT" -C "$REPO" rev-list --count "$1..origin/main" -- $PATHS 2>/dev/null || echo '?'; }
 
 BUILT_SHA=""
 if [ -f "$BUILT" ]; then
@@ -392,6 +399,12 @@ print(status)
   esac
   APPROVAL=$NOW_APPROVAL
   APPR_COMMIT=$NOW_SHA
+  # 使用者按下之後 main 又動到要建的東西：跟例行路徑的 DEFERRED 同一件事——只建按下的那顆，
+  # 「已派過」記它（不是 HEAD），下一輪例行路徑才會為 HEAD 另外申請。
+  if [ "$NOW_SHA" != "$HEAD_SHA" ] && binary_changed_since "$NOW_SHA"; then
+    DEFERRED=1
+    log "立即部署 ${NOW_SHA} 之後 origin/main ${HEAD_SHA} 又動到會進 binary 的檔，留下一趟"
+  fi
   # 狀態檔改指這一筆：這趟上線後例行路徑看到的是它（consumed）→ 需要時為 HEAD 重新申請，而不是繼續等一筆舊的。
   python3 -c '
 import json,os,sys
@@ -416,11 +429,10 @@ if d["owner"] == sys.argv[2]:
   if [ -n "$STATE_LINE" ]; then
     OLD_ID=${STATE_LINE%% *}
     OLD_COMMIT=${STATE_LINE#* }
-    # shellcheck disable=SC2086  # PATHS 是刻意要拆成多個參數的
     if [ "$OLD_COMMIT" = "$HEAD_SHA" ]; then
       APPROVAL=$OLD_ID
     elif "$GIT" -C "$REPO" cat-file -e "${OLD_COMMIT}^{commit}" 2>/dev/null \
-         && "$GIT" -C "$REPO" diff --quiet "$OLD_COMMIT" origin/main -- $PATHS; then
+         && ! binary_changed_since "$OLD_COMMIT"; then
       # main 動了，但只動到不進 binary 的檔：建出來的東西一樣，沿用原本的核准（不為 docs-only 的 commit 再叫醒協調者）。
       APPROVAL=$OLD_ID
       APPR_COMMIT=$OLD_COMMIT
@@ -655,7 +667,7 @@ cat "$DIR/daemon-update-task.md" > "$TMP" 2>/dev/null || true
   # 新的留到下一輪另外申請（issue #439）。
   printf '要建、要重啟的 commit：%s（核准 %s 針對的就是它）。rebuild 租約 fence %s（owner %s）。\n' "$APPR_COMMIT" "$APPROVAL" "$LEASE" "$OWNER"
   if [ "$DEFERRED" = 1 ]; then
-    printf 'origin/main 現在是 %s，比核准的多出會進 binary 的改動；這次仍然只 checkout %s 來建，restart 核准也申請 %s，不要拿 HEAD——新的留到下一輪另外申請核准。\n' "$HEAD_SHA" "$APPR_COMMIT" "$APPR_COMMIT"
+    printf 'origin/main 現在是 %s，比核准的多出會進 binary 的改動：之後還有 %s 個 commit 動到 binary，留下一趟；這次仍然只 checkout %s 來建，restart 核准也申請 %s，不要拿 HEAD——新的留到下一輪另外申請核准。\n' "$HEAD_SHA" "$(binary_commits_since "$APPR_COMMIT")" "$APPR_COMMIT" "$APPR_COMMIT"
   elif [ "$APPR_COMMIT" != "$HEAD_SHA" ]; then
     printf 'origin/main 現在是 %s，多出來的 commit 只動到不進 binary 的檔；仍然 checkout %s 來建，restart 核准也申請 %s，不要拿 HEAD。\n' "$HEAD_SHA" "$APPR_COMMIT" "$APPR_COMMIT"
   fi
