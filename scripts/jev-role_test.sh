@@ -5,7 +5,7 @@ spec="${1:-docs/SPEC.md}"
 
 require_literal() {
     local literal="$1"
-    if ! rg --fixed-strings --quiet -- "$literal" "$spec"; then
+    if ! grep -Fq -- "$literal" "$spec"; then
         printf 'SPEC 缺少 Jev 角色政策：%s\n' "$literal" >&2
         return 1
     fi
