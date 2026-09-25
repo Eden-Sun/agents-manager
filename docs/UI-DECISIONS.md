@@ -303,6 +303,24 @@ AGM 的重建排程原本只在整點檢查；使用者要它**集滿門檻筆�
 ![桌機](screenshots/rebuild-counter/desktop-1440.png)
 ![手機 390](screenshots/rebuild-counter/mobile-390.png)
 
+## 左上角「立即部署」（2026-09-25，使用者指定）
+
+使用者原話：「agm排以外，要我可以在左上角直接點立即部署」。重建申請 chip 只在有申請時出現、「請 AGM 現在重建」也只是傳訊息給 AGM，都不是「我按了就部署」。
+
+- **位置**：標題第二列（重建申請數正下方），跟主題鈕、連線燈一起靠右。先放在重建 chip 同一列：側欄最窄 288px，1440 寬時會壓到 RAM 那格，手機會把 `AG Man` 擠出去；第二列本來只有兩個小圖示，正好空著。
+- **樣子**：`⇪ 部署 4`（落後 origin/main 4 個 commit）。只在**有會進 binary 的差異**時出現——docs-only 的落後按下去也不會重建，畫一顆按不動的鍵只是噪音（規則同 kick，`GET /api/deploy/status` 的 `code_changed`）。accent 邊框表示「可以按」，不用警示色：落後是常態，不是警報。
+- **部署中**：kick 還沒派出去、有人握著 rebuild／restart 窗口、或更新交辦未結案時改寫 `⇪ 部署中`（綠），點下去只出一則通知說在做什麼、log 在哪，不開確認框——daemon 反正會 409，按鈕不該讓人以為能再來一趟。
+- **確認框**：線上 → 上線的 sha、共幾個 commit／幾個動到程式碼、commit 清單（最多 30 筆，可捲）、此刻 working 的 bot（換 binary 會等它們，不是按了就砍）、固定條件一句話與 log 路徑。開框前當場重讀一次狀態；部署的是**框上那顆**（`sha` 送給 daemon），不是按下去那一刻的 origin/main。焦點預設在「取消」（ConfirmDialog 既有規則）。
+- **kick 還沒裝新版**：確認鍵反灰，框裡寫要先照 `scripts/ops/README.md` install。daemon 也會 503 `kick_outdated`，但不該讓人按了才知道。
+- **結果**：成功寫「已開始立即部署 <sha>…進度看 <log>」；409 分清楚「已經有部署在跑」與「不用部署」；其他錯照 daemon 的 `message` 寫。
+- **問不到 daemon**：同重建 chip（#531），留著上一次的狀態、虛線淡化、不給按。
+- **資料**：每 60 秒讀一次 `GET /api/deploy/status`（origin/main 約 5 分鐘一個 push）。mock 模式有一組固定假資料，按下去變成「部署中」。
+
+![桌機確認框](screenshots/deploy-now/desktop-1440.png)
+![桌機 chip](screenshots/deploy-now/desktop-chip.png)
+![手機 390](screenshots/deploy-now/mobile-390.png)
+![手機確認框](screenshots/deploy-now/mobile-390-confirm.png)
+
 ## 身份列的登出與停用（2026-09-16，使用者指定）
 
 環境設定裡的 `ccN` 是從 `~/.zshrc` 認出來的唯讀列，先前只有「登入／切換」，所以偵測到但用不到的身份（例如 cc2）沒有任何處置方式。使用者要的是「能對它做登出登入或標為停用」。
