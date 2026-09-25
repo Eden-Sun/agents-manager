@@ -86,6 +86,15 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
         schedule_flush_retry(app, bot_id, left);
         return Ok(());
     }
+    // 續行提示只送進驗證過的接回（#430，`resume_nudge`）：接回失敗、驗證不了就撤掉，不送進一段全新的對話。
+    match super::resume_nudge::withdraw_unless_resumed(app, &turn, &run).await {
+        Ok(false) => {}
+        Ok(true) => return Ok(()),
+        Err(e) => {
+            schedule_flush_retry(app, bot_id, WITHDRAWAL_RECHECK);
+            return Err(e.context("續行提示該撤卻撤不掉：留在佇列，稍後再撤"));
+        }
+    }
     // 目標身分還沒有額度（issue #108，`quota_hold`）：送進去只會再撞一次、派工白白燒掉。留在佇列、不花重試，
     // 掛 timer 到撞限到期（最多五分鐘再看一次）；換身分重啟（#106）會叫醒這裡。撞限記在這一列上，重啟後照樣擋。
     if let Some(hit) = super::quota_hold::blocking_hit(app, &bot, &turn.id).await {
