@@ -9,6 +9,7 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { UpgradeIcon } from './UpgradeIcon'
 import { UpdateChangelog } from './UpdateChangelog'
 import { AgmReviewBox } from './AgmReviewBox'
+import type { DialogControl } from './MergedUpdateChip'
 
 /** 確認框裡照實寫出來的安裝指令：跟 daemon `cli_update::CODEX_INSTALL` 同一句（daemon 不收呼叫端傳的指令，這裡只是給人看）。 */
 const INSTALL_CMD = 'curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh'
@@ -18,7 +19,7 @@ const INSTALL_CMD = 'curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON
  * 跟 claude 那顆同一個樣子（⌃⌃ N，警示色）、同一種確認框（左 changelog、右 AGM 解析、下面列會重啟／會跳過的），
  * 確認後 daemon 在那台跑官方安裝指令 → 驗 `codex --version` → 接著一鍵重啟那台閒置的 codex。claude 也有更新時兩顆並排（UI-DECISIONS）。
  */
-export function CodexInstallChip() {
+export function CodexInstallChip({ control }: { control?: DialogControl } = {}) {
   // 各 selector 回純值（見 UpdateQuotaChip：回新物件會 getSnapshot should be cached）。
   const planKey = useStore((s) => {
     const p = codexInstallPlan(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null, (b) => projectHostName(s, b.project_id))
@@ -27,11 +28,14 @@ export function CodexInstallChip() {
   const cli = useStore((s) => s.cliUpdate)
   const install = useStore((s) => s.installCodexUpdate)
   const notify = useStore((s) => s.notify)
-  const [confirming, setConfirming] = useState(false)
+  const [localOpen, setLocalOpen] = useState(false)
+  // 手機合成的那顆（`MergedUpdateChip`）代為開框時，這裡只畫確認框。
+  const confirming = control ? control.open : localOpen
+  const setConfirming = (v: boolean) => (control ? !v && control.close() : setLocalOpen(v))
   const [asking, setAsking] = useState(false)
   const [reviewKey, setReviewKey] = useState(0)
 
-  if (cli) {
+  if (cli && !control) {
     const label = `${cli.host} 的 codex ${CLI_UPDATE_PHASE_LABEL[cli.phase]}${cli.from ? `（${cli.from}${cli.to ? ` → ${cli.to}` : ''}）` : ''}…`
     return (
       <button type="button" className="quota-update install running" disabled title={label} aria-label={label}>
@@ -48,7 +52,7 @@ export function CodexInstallChip() {
 
   return (
     <>
-      <button
+      {control ? null : <button
         type="button"
         className="quota-update install"
         title={`${label}${plan.ready.length ? `：\n${plan.ready.map((b) => b.name).join('、')}` : ''}`}
@@ -57,7 +61,7 @@ export function CodexInstallChip() {
       >
         <span aria-hidden="true"><UpgradeIcon /></span>
         <span className="quota-update-n" aria-hidden="true">{plan.installCount}</span>
-      </button>
+      </button>}
       <ConfirmDialog
         open={confirming}
         title={`安裝 codex${version} 並重啟？`}

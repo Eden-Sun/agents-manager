@@ -111,3 +111,14 @@
   color: var(--warn);
   cursor: progress;
 }
+
+/* 手機合成的那顆（MergedUpdateChip）點開的兩項選單：fixed 對齊按鈕（位置由元件算），長句可折行、不超出螢幕。 */
+
+.update-menu-pop {
+  width: max-content;
+  max-width: min(300px, calc(100vw - 32px));
+}
+
+.update-menu-pop .head-menu-item {
+  white-space: normal;
+}

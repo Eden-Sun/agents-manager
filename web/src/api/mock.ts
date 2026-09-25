@@ -3715,5 +3715,8 @@ function installDevHelpers(mock: MockTransport) {
     // 更新框：清掉某個 kind 的分診帳本（演「尚未分析」）、給 bot 掛更新通知
     triageOff: (kind: string) => mock.releaseTriage.triageOff(kind),
     updateNotice: (botIdOrName: string, notice: string | null) => mock.setUpdateNotice(mock.botIdByName(botIdOrName) ?? botIdOrName, notice),
+    // 截圖用：改名（演長名字在手機標題列被擠的情況）
+    rename: (botIdOrName: string, name: string) =>
+      mock.request('PATCH', `/bots/${encodeURIComponent(mock.botIdByName(botIdOrName) ?? botIdOrName)}`, { name }),
   }
 }
