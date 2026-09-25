@@ -2160,6 +2160,24 @@ mod codex_0155_screen_tests {
 }
 
 /// 撞限橫幅寫進額度那一格（`apply_codex_limit_hit_quota`）的去重規則。
+/// Codex 0.157.0 的 inline 冷啟動畫面（私有 prefix、`--no-daemon --no-alt-screen`）：
+/// 初始 frame 的模型與目錄仍在載入，不能被誤認成使用者輸入或回合回覆。
+#[cfg(test)]
+mod codex_0157_screen_tests {
+    use super::*;
+
+    const STARTUP: &str = include_str!("fixtures/codex-0.157-startup.txt");
+
+    #[test]
+    fn the_0157_inline_startup_frame_is_readable_but_not_a_turn() {
+        assert_eq!(crate::codex_update::parse_running_version(STARTUP).as_deref(), Some("0.157.0"));
+        assert_eq!(clean_screen("codex", STARTUP), None);
+        assert_eq!(extract_reply("codex", STARTUP), None);
+        assert_eq!(last_prompt_echo_text("codex", STARTUP), None);
+        assert!(!pane_still_busy(STARTUP));
+    }
+}
+
 #[cfg(test)]
 mod limit_hit_quota_tests {
     use super::*;

@@ -8,6 +8,14 @@ async fn identity_args(app: &Arc<App>, bot: &db::Bot, host: &str) -> Vec<String>
     crate::tools::identity_for_host(app, host, idn).await.map(|i| i.args).unwrap_or_default()
 }
 
+fn codex_pane_guard_args(kind: &str) -> Vec<String> {
+    if kind == "codex" {
+        vec!["--no-daemon".into(), "--no-alt-screen".into()]
+    } else {
+        Vec::new()
+    }
+}
+
 
 /// `resume_native` continues the bot's last native session (batch update restart).
 /// `fork_session`：從這個 native session 分出一個新 session（`POST /bots/:id/fork` 的第一次啟動，SPEC §6.10）。
@@ -700,6 +708,7 @@ async fn start_inner(
             .await
             .map_err(up)?;
     }
+    args.extend(codex_pane_guard_args(&bot.kind));
 
     let cwd = bot_cwd(bot, project);
     // A new dir opens on "trust this project?" with the cursor on *No*: claude quits, codex eats
@@ -1236,6 +1245,7 @@ pub async fn restart_child_in_pane_with(app: &Arc<App>, bot_id: &str, require_id
     } else {
         tracing::info!(bot = %bot.name, "子 agent 沒有可接續的 session，重啟後從新的對話開始");
     }
+    args.extend(codex_pane_guard_args(&bot.kind));
 
     let run_id = db::ulid();
     sqlx::query(
@@ -1410,6 +1420,24 @@ mod resume_args_tests {
         let args = started_args(&e).pop().unwrap();
         assert!(!args.contains(&"--resume".into()));
         stop_bot(&e.app, &pm.id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn codex_start_uses_an_inline_tui_and_its_own_app_server() {
+        let e = env().await;
+        let bot = claude_bot(&e.app, &e.project_id, "codex").await;
+        sqlx::query("UPDATE bots SET kind='codex', identity=NULL, model='gpt-5.6-sol', auto_approve=1 WHERE id=?")
+            .bind(&bot.id)
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+
+        start_bot(&e.app, &bot.id).await.unwrap();
+
+        let args = started_args(&e).pop().unwrap();
+        assert!(args.contains(&"--no-daemon".into()), "Codex must not reuse a shared app server: {args:?}");
+        assert!(args.contains(&"--no-alt-screen".into()), "Codex must keep its screen readable: {args:?}");
+        assert!(args.contains(&"--yolo".into()), "existing auto-approve args must be preserved: {args:?}");
     }
 
     /// `resume_native` 沒要求一定要接（`resume_required=false`）、接不回時照舊退回開新對話——但這件
@@ -2133,6 +2161,59 @@ mod child_restart_tests {
         assert!(swept.load(std::sync::atomic::Ordering::SeqCst), "sweeper 真的落在停與起之間");
         let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(&queued).fetch_one(&app.db).await.unwrap();
         assert_eq!(status, "queued", "重啟中的子 agent 不是孤兒：派工留給新的 run 送");
+    }
+
+    #[tokio::test]
+    async fn a_codex_child_restart_keeps_its_process_and_screen_guards() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let kid_pane = client.pane_split(&root.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
+        let parent = tt::claude_bot(&app, &env.project_id, "alfa").await;
+        let kid = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, model, args_json, autostart, inject_hooks, hook_token, auto_approve, managed_by, parent_bot_id, created_at)
+             VALUES (?,?,'ui','codex','gpt-5.6-sol','[]',0,0,'tok',1,'child',?,?)",
+        )
+        .bind(&kid)
+        .bind(&env.project_id)
+        .bind(&parent.id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let agent = "proj-alfa-ui";
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, tab_id, pane_id, agent_name, herdr_session, adopted, started_at)
+             VALUES (?,?,'running','idle',?,?,?,?,'test',1,?)",
+        )
+        .bind(db::ulid())
+        .bind(&kid)
+        .bind(&ws.workspace_id)
+        .bind(&kid_pane.tab_id)
+        .bind(&kid_pane.pane_id)
+        .bind(agent)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        *env.herdr.agents.lock().unwrap() = vec![json!({
+            "name": agent, "agent": "codex", "agent_status": "idle",
+            "workspace_id": ws.workspace_id, "tab_id": kid_pane.tab_id, "pane_id": kid_pane.pane_id,
+            "cwd": "/tmp/p"})];
+
+        restart_child_in_pane(&app, &kid).await.unwrap();
+
+        let calls = env.herdr.calls_to("agent.start");
+        let args = calls.last().unwrap()["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|arg| arg.as_str())
+            .collect::<Vec<_>>();
+        assert!(args.contains(&"--no-daemon"), "Codex must not reuse a shared app server: {args:?}");
+        assert!(args.contains(&"--no-alt-screen"), "Codex must keep its screen readable: {args:?}");
     }
 }
 

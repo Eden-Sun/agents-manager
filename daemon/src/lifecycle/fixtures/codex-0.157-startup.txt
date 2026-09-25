@@ -1,0 +1,8 @@
+╭───────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.157.0)            │
+│                                       │
+│ model: loading   /model to change     │
+│ directory: loading                    │
+╰───────────────────────────────────────╯
+
+› Ask Codex to do anything
