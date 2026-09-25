@@ -1137,9 +1137,14 @@ pub async fn post_approval(State(app): State<Arc<App>>, headers: HeaderMap, Json
             Err(e) => up(e),
         },
     })?;
-    let a = out.approval;
+    let mut a = out.approval;
+    // 使用者按「立即部署」後 kick 替建置 child 開的 restart：daemon 當場以使用者名義核准（#447 之後 kick 打不了 decide）。
+    let preapproved = crate::deploy_now::preapprove_restart(&app, &a).await;
+    if let Some(d) = preapproved.clone() {
+        a = d;
+    }
     // 重送不再叫醒 AGM 一次，也不再推一次事件：它看到的還是同一筆。
-    if out.created {
+    if out.created || preapproved.is_some() {
         // AGM decides these itself (CLAUDE.md, 2026-09-12): the request is put in front of it as an
         // inbox event rather than sent to the user to relay. 事件已在建立的同一個交易裡寫好（#320）。
         app.emit("supervisor_changed", json!({"approval": a.to_json()})).await;

@@ -104,7 +104,7 @@ kick 讀到這個檔就走立即模式：
 - **核對那筆核准**：`approval list --id`，要 `purpose=rebuild`、`requester` 是自己的 `OWNER`、`target_commit` 等於請求的 sha、`approved` 沒過期。查不到＝這輪不知道（留著請求）；不能用＝`ops_alert now_approval_unusable` 並收掉請求。
 - **建確認框上那顆**：sha 要是 origin/main 的祖先（否則 `ops_alert now_target_invalid`）；`.built` 到它之間沒有程式碼差異就收掉請求（已經是最新）。
 - **照舊**：建置 child 要在、上一筆更新要結案、`lease safety`／`acquire`（等不到窗口就留著請求，下一輪再試）、token 檔、派工正文的固定條件。
-- **restart**：拿到 rebuild 窗口後以 `AGM_BUILD_BOT` 申請 restart（`--request-id deploy-now-restart-<rebuild 核准>`），同一輪 `approval decide --actor deploy-now:<rebuild 核准>`，正文叫 child 直接用它；開不出來就寫明「照 3c 自己申請」。
+- **restart**：拿到 rebuild 窗口後以 `AGM_BUILD_BOT` 申請 restart（`--request-id deploy-now-restart-<rebuild 核准>`），daemon 在建立當下核准（kick 不打 decide，#447），回應是 `approved` 才叫 child 直接用它；開不出來就寫明「照 3c 自己申請」。
 - **派工**：request id `agm-daemon-update-<sha>-now-<核准>`，成功才刪請求檔；`daemon-update.approval.json` 改指那一筆。請求檔壞掉 → `ops_alert now_request_corrupt`、刪掉，這輪回到例行判斷。
 
 daemon 的 `kick_ready` 以「裝好的 kick 裡有沒有 `daemon-update.now.json` 這個字」判斷，所以**要先 install 這一版 kick，按鈕才按得下去**（舊 kick 不會讀請求檔，按了只會永遠停在「部署中」）。

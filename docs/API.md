@@ -1845,7 +1845,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
   `requester_unverified`（issue #436）：`true`＝`requester` 只是申請時自稱的字串（沒帶 `X-AM-Bot-Id`，例如 `daemon-update-kick.sh` 這類 launchd 腳本），`false`＝申請時附了那顆 bot 自己的 hook token、確定是它本人。欄位加上去之前的舊列一律 `true`。
   `status`：`pending` | `approved` | `denied` | `revoked` | `consumed` | `superseded`。`consumed`／`superseded` 不覆寫 `decided_at`／`decided_by`（誰、何時核准的留著；誰用掉的在 `decisions`）。
   `decisions` 是 append-only 的決定歷程（那一列只留最後一個狀態）。
-- `POST /api/supervisor/approvals {requester,purpose:"rebuild"|"restart",scope,target_commit?,expires_in_secs?,request_id?,supersedes?}` → 一筆 `pending`（回應多 `created`、`superseded`），並推 inbox `approval_requested` 給 AGM。
+- `POST /api/supervisor/approvals {requester,purpose:"rebuild"|"restart",scope,target_commit?,expires_in_secs?,request_id?,supersedes?}` → 一筆 `pending`（回應多 `created`、`superseded`），並推 inbox `approval_requested` 給 AGM。例外：`purpose:"restart"`、`request_id` 是 `deploy-now-restart-<rebuild 核准>` 且對得上正在進行的立即部署（見 `POST /api/deploy/now`）時，回來就是 `approved`（`decided_by:"user(立即部署)"`）。
   **沒帶 `supersedes` 時 daemon 自己找**（issue #421）：同一個 `requester`、同一個 `purpose`、而且還 `pending` 的最新那一筆，直接取代掉（回應的 `superseded` 會帶它的 id）。
   kick 記住舊 id 的狀態檔掉了就不會帶 `--supersedes`，以前每輪開一筆新的 pending——2026-09-23 累積了四筆，AGM 被叫醒四次講同一件事。
   **只自動取代 `pending`**：`approved` 是人做過的裁示，不會因為排程又跑一輪就消失（要動它得明講 `supersedes`）。自動挑到的那筆對不上（剛被裁示、剛過期）只是不取代，不會讓申請失敗。

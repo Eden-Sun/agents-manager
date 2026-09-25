@@ -864,7 +864,7 @@ now_setup() { # now_setup [sha]：非整點、已派過同一顆，請求檔指�
   printf '%s' "{\"approval_id\":\"now-1\",\"sha\":\"$NOW_SHA\",\"requested_by\":\"ui\"}" > "$AGM_DIR/daemon-update.now.json"
   /usr/bin/git -C "$AGM_REPO" rev-parse HEAD > "$AGM_DIR/daemon-update.last"
   export STUB_APPROVAL_LIST="{\"approvals\":[{\"id\":\"now-1\",\"purpose\":\"rebuild\",\"requester\":\"test-owner\",\"target_commit\":\"$NOW_SHA\",\"status\":\"approved\"}]}"
-  export STUB_RESTART_APPROVAL='{"id":"rs-1","status":"pending"}'
+  export STUB_RESTART_APPROVAL='{"id":"rs-1","status":"approved"}'   # daemon 建立當下就核准（#447）
 }
 now_teardown() { teardown; unset STUB_RESTART_APPROVAL STUB_RESTART_FAIL STUB_DECIDE_FAIL NOW_SHA; }
 
@@ -876,7 +876,8 @@ check_no "不為 rebuild 另外申請（使用者已核准）" "approval request
 check "用使用者那筆核准拿 rebuild 窗口" "lease acquire rebuild --approval now-1 --commit $NOW_SHA" "$AGM_DIR/calls.log"
 check "safety 綁使用者那筆核准" "lease safety --approval now-1" "$AGM_DIR/calls.log"
 check "restart 以建置 child 名義申請" "approval request --requester bot-build --purpose restart" "$AGM_DIR/calls.log"
-check "restart 同一輪核准，actor 指回 rebuild 核准" "approval decide rs-1 --decision approve --actor deploy-now:now-1" "$AGM_DIR/calls.log"
+check "restart 的 request id 指回 rebuild 核准" "request-id deploy-now-restart-now-1" "$AGM_DIR/calls.log"
+check_no "kick 不打 decide（#447 之後沒有角色身分會 403）" "approval decide" "$AGM_DIR/calls.log"
 check "派工 request id 帶核准（不撞先前派過的同一顆）" "request-id agm-daemon-update-${NOW_SHA}-now-now-1" "$AGM_DIR/calls.log"
 check "正文寫明是使用者按的立即部署" "左上角按「立即部署」" "$AGM_DIR/assign-body.txt"
 check "正文帶預先核准的 restart" "restart 核准 rs-1" "$AGM_DIR/assign-body.txt"
@@ -948,9 +949,19 @@ now_teardown
 now_setup
 export STUB_RESTART_FAIL=yes
 bash "$SCRIPT"
-check "restart 開不出來有記 log" "開不出立即部署的 restart 核准" "$AGM_DIR/daemon-update.log"
+check "restart 開不出來有記 log" "restart 核准沒有當場核准" "$AGM_DIR/daemon-update.log"
 check "正文改叫 child 自己申請" "restart 核准沒能預先開好" "$AGM_DIR/assign-body.txt"
 check "照樣派工" "已派工 agm-daemon-update-" "$AGM_DIR/daemon-update.log"
+now_teardown
+
+# N9b. daemon 沒有當場核准（回 pending：請求檔對不上、commit 不同…）：不拿來用、不自己 decide，叫 child 照例行流程申請。
+now_setup
+export STUB_RESTART_APPROVAL='{"id":"rs-1","status":"pending"}'
+bash "$SCRIPT"
+check "pending 就不當成已核准" "restart 核准沒有當場核准" "$AGM_DIR/daemon-update.log"
+check_no "不自己 decide" "approval decide" "$AGM_DIR/calls.log"
+check "正文改叫 child 自己申請" "restart 核准沒能預先開好" "$AGM_DIR/assign-body.txt"
+check_no "正文不帶 pending 那筆" "restart 核准 rs-1" "$AGM_DIR/assign-body.txt"
 now_teardown
 
 # N10. 請求檔壞掉：喊人並收掉，這輪回到例行判斷（不略過任何閘）。
