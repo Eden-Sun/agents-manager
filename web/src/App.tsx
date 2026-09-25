@@ -14,6 +14,7 @@ import { PreviewColumn } from './components/PreviewColumn'
 import { Sidebar } from './components/Sidebar'
 import { screenTitle, useDrawerRoute } from './store/routeSync'
 import { useStore } from './store/store'
+import { useBlockedPrefetch } from './hooks/useBlockedPrefetch'
 import { titleUnread } from './store/unread'
 import './components/relayedMessage.css'
 
@@ -163,6 +164,7 @@ export default function App() {
   useBotSwitchKeys()
   useProjectJumpKeys()
   useUnread()
+  useBlockedPrefetch()
   // 抽屜借一格歷史：開著時按上一頁是關抽屜，不是離開這個畫面。
   useDrawerRoute(drawerOpen, () => setDrawer(false))
 

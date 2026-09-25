@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { TerminalSnapshot, TerminalSource } from '../api/types'
 import { useStore } from '../store/store'
+import { peekPrefetched } from '../lib/blockedPrefetch'
 
 export interface TerminalPoll {
   snap: TerminalSnapshot | null
@@ -23,7 +24,8 @@ export function useTerminalSnapshot(
   }: { source?: TerminalSource; lines?: number; intervalMs?: number; paused?: boolean } = {},
 ): TerminalPoll {
   const readTerminal = useStore((s) => s.readTerminal)
-  const [snap, setSnap] = useState<TerminalSnapshot | null>(null)
+  // blocked 的 bot 在背景先讀過（`lib/blockedPrefetch.ts`）：視窗一打開就有畫面，不必等第一次輪詢。
+  const [snap, setSnap] = useState<TerminalSnapshot | null>(() => peekPrefetched(botId, source, lines))
   const [err, setErr] = useState<string | null>(null)
   const [nonce, setNonce] = useState(0)
 
@@ -31,7 +33,7 @@ export function useTerminalSnapshot(
   const [lastBot, setLastBot] = useState(botId)
   if (lastBot !== botId) {
     setLastBot(botId)
-    setSnap(null)
+    setSnap(peekPrefetched(botId, source, lines))
     setErr(null)
   }
 
