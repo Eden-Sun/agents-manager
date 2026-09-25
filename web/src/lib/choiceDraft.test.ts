@@ -174,6 +174,28 @@ test('預載把三頁都讀回來，而且走完停回原本那一頁', async ()
   )
 })
 
+test('預載不走進 Submit 頁：送出頁是合成的，終端從頭到尾沒離開題目（2026-09-25）', async () => {
+  const tui = new FakeTui()
+  const start = parseChoiceMenu(tui.screen())
+  assert.ok(start)
+  const seen: number[] = []
+  const io = tui.io()
+  const draft = await preload({ ...io, send: async (keys) => { await io.send(keys); seen.push(tui.tab) } }, start)
+  assert.ok(draft)
+  assert.equal(draft.pages[2].isSubmit, true)
+  assert.ok(seen.every((t) => t < 2), `走進了送出頁：${seen.join(',')}`)
+  assert.equal(tui.tab, 0)
+})
+
+test('起點就是 Submit 頁（被別的預載晾在那裡）時不預載，退回即時模式', async () => {
+  const tui = new FakeTui()
+  tui.tab = 2
+  const start = parseChoiceMenu(tui.screen())
+  assert.ok(start)
+  assert.equal(await preload(tui.io(), start), null)
+  assert.deepEqual(tui.sent, [], '一顆鍵都不送')
+})
+
 test('走不動就整個放棄，不留讀了一半的草稿', async () => {
   const tui = new FakeTui()
   const start = parseChoiceMenu(tui.screen())
