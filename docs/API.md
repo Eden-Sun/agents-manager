@@ -196,6 +196,7 @@ config.toml 裡沒有的 id（child、已刪）忽略。成功推 `project_chang
 
 ### 4.1 登入 / 切換帳號
 把登入 slash 指令打進**正在跑的** bot 的 TUI；之後 agent 停在登入畫面，使用者完成前不能工作。登入結果由 `POST /api/hosts/{name}/tools/refresh` 重新偵測。
+網頁的 claude 已經不走這條（UI-DECISIONS「claude 用 CLI 登入、不佔 bot 的 pane」）：改用下面主機層的 `…/identities/{identity}/login`；端點本身照舊，grok 還在用。
 
 | kind | 指令 |
 |---|---|
@@ -1098,7 +1099,8 @@ env 值的 `$HOME`、`${HOME}` 與開頭 `~` 展開成**該 host 的 home**。id
 - WS `identities_changed {}` → 重拉 state；bot 的 identity/env 變更沿用 `bot_changed`。
 
 ### `POST /api/hosts/{name}/identities/{identity}/login`
-在該主機開**臨時 host-shell pane**，以該身份展開後的 env 執行 `claude /login` / `codex login` / `grok login`。env 只送進該 pane，不寫 daemon log 或事件。
+在該主機開**臨時 host-shell pane**，以該身份展開後的 env 執行 `claude auth login` / `codex login` / `grok login`。env 只送進該 pane，不寫 daemon log 或事件。
+claude 用 `auth login` 子命令（2.1.281：開瀏覽器、同時印網址並等 `Paste code here if prompted >`，登完就結束）：舊的 `claude /login` 會起整個 REPL、登完不退出，pane 要掛滿 15 分鐘才收。
 回應是主機 shell 的 pane 物件；UI 從它的 terminal 顯示 device code / URL。登入指令結束後 daemon 重新探測該身份並關 pane。
 
 | 狀況 | 回應 |
@@ -1108,7 +1110,7 @@ env 值的 `$HOME`、`${HOME}` 與開頭 `~` 展開成**該 host 的 home**。id
 | host 不存在 / 未連線 / pane 建立失敗 | `404 {"what":"host"}` / 502 |
 
 ### `POST /api/hosts/{name}/identities/{identity}/logout`
-同一條路、同一組 env，只是指令換成 `claude /logout` / `codex logout` / `grok logout`（回應與錯誤與 login 相同）。
+同一條路、同一組 env，只是指令換成 `claude auth logout` / `codex logout` / `grok logout`（回應與錯誤與 login 相同）。
 env 前綴跟登入是同一段程式算出來的——少帶 `CLAUDE_CONFIG_DIR` 會登出**別的**帳號。
 清掉的是該身份設定目錄裡的憑證：正在跑的 bot 不受影響，之後重新啟動會停在登入畫面。
 

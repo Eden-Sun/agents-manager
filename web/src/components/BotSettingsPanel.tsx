@@ -4,6 +4,7 @@ import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { useDialogFocus } from '../hooks/useDialogFocus'
 import { enabledIdentities, identitiesOfHost, identityStatusOfHost, projectHostName, useStore } from '../store/store'
 import { canLoginInSession } from '../lib/quotaLogin'
+import { startCliLogin } from '../lib/cliLogin'
 import { ConfirmDialog } from './ConfirmDialog'
 import { CopyChip } from './CopyChip'
 import { KindTag } from './KindTag'
@@ -235,6 +236,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
   const [closeConfirmOpen, setCloseConfirmOpen] = useState(false)
   const [loginOpen, setLoginOpen] = useState(false)
   const [loginSent, setLoginSent] = useState(false)
+  const [cliOpening, setCliOpening] = useState(false)
   const nameRef = useRef<HTMLInputElement>(null)
   // 手機是全螢幕 sheet，不用 anchor 座標（只會推歪）。
   const phone = useMediaQuery(PHONE_QUERY)
@@ -344,6 +346,8 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
   // 名稱不做前端檢查（2026-09-09 使用者決定）：規則在 daemon，前端會漂走。
   const nameOk = name.trim().length > 0
   const hostLabel = !host || host === 'local' ? '本機' : host
+  /** claude 用獨立終端跑 `claude auth login`（`startCliLogin`）；grok 仍把 `/login` 送進 Bot 的畫面。 */
+  const cliLogin = bot.kind === 'claude'
 
   // store 追上存過的值就放掉那一欄，之後別處改了同一欄才看得到（render 期 setState：沒東西可放時回傳同一個物件）。
   const prunedSaved = pruneSaved(saved, bot)
@@ -521,15 +525,17 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
                 <button
                   type="button"
                   className="btn"
-                  disabled={!running || loginBusy}
+                  disabled={cliLogin ? cliOpening : !running || loginBusy}
                   title={
-                    running
+                    cliLogin
+                      ? `在 ${hostLabel} 開獨立終端跑 claude auth login（${bot.identity ?? '預設帳號'}）`
+                      : running
                       ? `對 ${bot.name} 的 ${bot.kind} 送 /login`
                       : '這個 Bot 沒在跑，沒有畫面可以送指令'
                   }
                   onClick={() => setLoginOpen(true)}
                 >
-                  {loginBusy ? '送出中…' : '登入 / 切換帳號'}
+                  {loginBusy || cliOpening ? '送出中…' : '登入 / 切換帳號'}
                 </button>
                 {loginSent ? (
                   <button
@@ -544,7 +550,11 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
                 ) : null}
               </div>
               <span className="hint">
-                {running ? (
+                {cliLogin ? (
+                  <>
+                    會在 {hostLabel} 開一個獨立終端跑 <code>claude auth login</code>，這個 Bot 的畫面不受影響。
+                  </>
+                ) : running ? (
                   <>
                     會對這個 Bot 的 {bot.kind} 送 <code>/login</code>：畫面切到登入流程，通常會跳出瀏覽器要你在那邊完成。
                     <strong>完成之前這個 Bot 不能工作。</strong>
@@ -648,11 +658,19 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
         </button>
       </div>
 
-      {/* `/login` 會讓 Bot 在登完前不能工作，按下去之前講清楚。 */}
+      {/* `/login` 會讓 Bot 在登完前不能工作，按下去之前講清楚；claude 改用獨立終端跑 CLI，不佔 Bot 的畫面。 */}
       <ConfirmDialog
         open={loginOpen}
-        title="送出登入指令？"
+        title={cliLogin ? '開終端用 CLI 登入？' : '送出登入指令？'}
         body={
+          cliLogin ? (
+            <>
+              會在 <strong>{hostLabel}</strong> 開一個獨立終端，帶 <strong>{bot.identity ?? '預設帳號'}</strong> 的設定跑 <code>claude auth login</code>，
+              通常會跳出瀏覽器要你完成授權（沒跳就照終端上的網址開、把 code 貼回去）。
+              <br />
+              <strong>{bot.name} 的畫面不會被登入流程佔住</strong>；登完 CLI 自己結束{bot.identity ? '，終端會收掉、身份會重新偵測' : ''}。
+            </>
+          ) : (
           <>
             會對 <strong>{bot.name}</strong> 的 agent 送 <code>/login</code>。它的畫面會切到登入流程，通常會開瀏覽器要你在那邊完成登入。
             <br />
@@ -660,12 +678,18 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
             <br />
             登入完成後回到這裡按「重新偵測」，身份狀態才會更新。
           </>
+          )
         }
-        confirmLabel="送出 /login"
+        confirmLabel={cliLogin ? '開終端登入' : '送出 /login'}
         width={400}
         onCancel={() => setLoginOpen(false)}
         onConfirm={() => {
           setLoginOpen(false)
+          if (cliLogin) {
+            setCliOpening(true)
+            void startCliLogin(botId).finally(() => setCliOpening(false))
+            return
+          }
           void loginBot(botId).then((ok) => {
             if (!ok) return
             setLoginSent(true)
