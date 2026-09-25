@@ -17,9 +17,14 @@ export interface UpdateBatchCounts {
   busy: { botId: string; name: string; why: string }[]
 }
 
+/** codex 的新版還沒裝：重啟換不到，只能先手動安裝（daemon 的 `Skip::NeedsManualInstall`）。 */
+export function needsManualInstall(bot: Bot, run: Run | null | undefined): boolean {
+  return bot.kind === 'codex' && Boolean(run?.update_notice?.includes('需安裝'))
+}
+
 /** `null` = 可以動。 */
 function busyReason(bot: Bot, run: Run, hasInFlightTurn: boolean): string | null {
-  if (bot.kind === 'codex' && run.update_notice?.includes('需安裝')) return '新版還沒裝，要先手動安裝才能套用'
+  if (needsManualInstall(bot, run)) return '新版還沒裝，要先手動安裝才能套用'
   if (run.state !== 'running') return '還在啟動或關閉中'
   const st: AgentStatus = run.agent_status
   if (st === 'working') return '正在跑'

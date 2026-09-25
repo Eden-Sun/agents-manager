@@ -88,3 +88,9 @@
 .quota-update.running.bad {
   color: var(--danger);
 }
+
+/* 只剩「codex 要先手動安裝」：按得動（切到那顆 bot），用警示色，不跟「全在忙」一樣退成灰。 */
+
+.quota-update.install {
+  color: var(--warn);
+}
