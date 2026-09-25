@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import {
+  customAnswerChecked,
   customAnswerShown,
   isActionChoice,
   isTypeSomething,
@@ -20,6 +21,9 @@ const REVIEW = readFileSync(new URL('./__fixtures__/carbis-review.txt', import.m
 /** 2026-09-13 真機：多分頁**單選**（沒有 `[ ]`）。草稿若把 `checked===null` 當 disabled 就勾不起來。 */
 const OPU_RADIO = readFileSync(new URL('./__fixtures__/opu-radio.txt', import.meta.url), 'utf8')
 const TYPE_IDLE = readFileSync(new URL('./__fixtures__/type-something-idle.txt', import.meta.url), 'utf8')
+
+/** 2026-09-25 真機（claude 2.1.281，隔離 herdr session）：複選頁在 `Type something` 上直接打字，那列自己勾起來、標題換成打的字。 */
+const MULTI_TYPED = readFileSync(new URL('./__fixtures__/claude-2.1.281-multiselect-typed.txt', import.meta.url), 'utf8')
 const TYPE_TYPED = readFileSync(new URL('./__fixtures__/type-something-typed.txt', import.meta.url), 'utf8')
 const TYPE_REVIEW = readFileSync(new URL('./__fixtures__/type-something-review.txt', import.meta.url), 'utf8')
 
@@ -451,4 +455,21 @@ test('既有畫面（AskUserQuestion、權限框、多分頁、review）沒有 n
     assert.deepEqual(menu.notes, [], name)
   }
   for (const text of [OPU_RADIO, TYPE_IDLE, TYPE_TYPED, TYPE_REVIEW]) assert.deepEqual(parseChoiceMenu(text)?.notes, [])
+})
+
+test('複選頁打過字的 Type something：認成第 5 項、已勾、標題是打的字，對得上自訂答案', () => {
+  const m = parseChoiceMenu(MULTI_TYPED)
+  assert.ok(m)
+  assert.equal(m.multi, true)
+  assert.equal(m.tabs.length, 2)
+  const row = m.choices[4]
+  assert.equal(row.number, 5)
+  assert.equal(row.title, '自訂項目')
+  assert.equal(row.checked, true)
+  assert.equal(row.current, true)
+  assert.equal(m.choices[3].checked, true)
+  assert.equal(customAnswerChecked(row, '自訂項目'), true)
+  assert.equal(customAnswerChecked({ ...row, checked: false }, '自訂項目'), false, '出現但沒勾不算')
+  assert.equal(customAnswerChecked(row, '別的字'), false)
+  assert.ok(m.submit, '這頁有 Submit 列')
 })
