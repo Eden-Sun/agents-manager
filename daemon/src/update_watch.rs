@@ -71,7 +71,9 @@ async fn sweep(app: &Arc<App>) {
             let prompt = crate::codex_update::parse_prompt(&read.text);
             let running = crate::codex_update::remember_running(&run.id, &read.text, prompt.as_ref());
             let disk = disk_version(app, &host, "codex").await;
-            crate::codex_update::decide(prompt.as_ref(), running.as_deref(), disk.as_deref(), run.update_notice.as_deref())
+            // 上游最新版：分診帳本（`release-triage-kick` 抓 releases 寫的，跟主機無關）。issue #561。
+            let upstream = crate::release_triage::ledger::max_version(&app.db, "codex").await.ok().flatten();
+            crate::codex_update::decide(prompt.as_ref(), running.as_deref(), disk.as_deref(), upstream.as_deref(), run.update_notice.as_deref())
         } else {
             let mut seen = update_notice(&read.text);
             // 畫面原句優先（claude 自己說的較準），沒有才用版本比對。

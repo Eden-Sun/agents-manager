@@ -2,6 +2,7 @@ import { MockTransport } from './mock'
 import { toMission, toMissionDetail, toMissionEvent, toMissions, toGroupMessagesPage, toHostShell, toHostShells, toInstallResult, toIssueDetail, toIssues, toMessagesPage, toMemProcesses, toMemSnapshot, toModels, toQuota, toState, toTerminal, toToolMap, toIdentityStatusMap, num, str, isRec, optStr, pick, arr, toSubmodules } from './normalize'
 import { HttpTransport } from './transport'
 import { ApiError } from './types'
+import { parseTriageRows } from '../lib/releaseTriage'
 import type { SocketHandlers, Transport, UploadOptions } from './transport'
 import type {
   MemProcesses,
@@ -22,7 +23,7 @@ import type {
   GroupSkipReason,
   HostResult,
   HostShell,
-  ClaudeReview,
+  UpdateReview,
   RemoteCargoInput,
   RemoteCargoSettings,
   IdentityStatusMap,
@@ -739,7 +740,7 @@ export async function installRemoteCargoToolchain(): Promise<{
   }
 }
 
-function toReview(raw: unknown): ClaudeReview {
+function toReview(raw: unknown): UpdateReview {
   const o = isRec(raw) ? raw : {}
   const state = o.state === 'done' || o.state === 'pending' ? o.state : 'none'
   return {
@@ -751,27 +752,42 @@ function toReview(raw: unknown): ClaudeReview {
   }
 }
 
-/** 這一版的 AGM 解析到哪了（更新框一打開就讀，有結論就直接顯示）。 */
-export async function fetchClaudeUpdateReview(input: { host?: string; from?: string | null }): Promise<ClaudeReview> {
-  const q = new URLSearchParams()
+/**
+ * 這一版的 AGM 解析到哪了（更新框一打開就讀，有結論就直接顯示）。`version` 是 daemon 實際查的那一版：
+ * claude 沒給 `to` 時就是磁碟上那一版，更新框拿它當分診區間的終點。
+ */
+export async function fetchUpdateReview(input: {
+  kind: string
+  host?: string
+  to?: string | null
+}): Promise<{ version: string; review: UpdateReview }> {
+  const q = new URLSearchParams({ kind: input.kind })
   if (input.host) q.set('host', input.host)
-  const raw = await transport.request('GET', `/claude-update/review${q.size ? `?${q}` : ''}`)
-  return toReview(isRec(raw) ? raw.review : null)
+  if (input.to) q.set('to', input.to)
+  const raw = await transport.request('GET', `/claude-update/review?${q}`)
+  const o = isRec(raw) ? raw : {}
+  return { version: str(o.version), review: toReview(o.review) }
 }
 
-/** 請 AGM 解析這一版 claude changelog（唯讀，只建交辦）。 */
-export async function requestClaudeUpdateReview(input: { host?: string; from?: string | null; to?: string | null }): Promise<{
+/** 請 AGM 解析這一版的 changelog（claude／codex；唯讀，只建交辦）。 */
+export async function requestUpdateReview(input: { kind: string; host?: string; from?: string | null; to?: string | null }): Promise<{
   version: string
   target_bot_name: string
   duplicate: boolean
 }> {
   const raw = await transport.request('POST', '/claude-update/review', {
+    kind: input.kind,
     host: input.host,
     from: input.from ?? undefined,
     to: input.to ?? undefined,
   })
   const o = isRec(raw) ? raw : {}
   return { version: str(o.version), target_bot_name: str(o.target_bot_name), duplicate: o.duplicate === true }
+}
+
+/** 上游新版分診帳本（SPEC §18.2c）：更新框顯示這幾版分析過了沒、結論是什麼（issue #561）。 */
+export async function fetchReleaseTriage(kind: string): Promise<ReturnType<typeof parseTriageRows>> {
+  return parseTriageRows(await transport.request('GET', `/release-triage?kind=${encodeURIComponent(kind)}`))
 }
 
 /** 開臨時 pane 做該身份的登入。 */

@@ -685,20 +685,20 @@ adopt 之後孤兒通知標記會清掉。pane 不存在 404、`owner_bot_id` �
   `pane` 的 `kind`／`foreground`／`listen_ports`／`read_only` 換成即時值（`unverified:true`＝讀不到，沿用表上的）——UI 要先把 port 顯示給人看再問一次。
 - 表裡沒有這顆 404；主機沒連上 502。
 
-## 請 AGM 解析 claude 新版（使用者 2026-09-19）
+## 請 AGM 解析 claude／codex 新版（使用者 2026-09-19；codex 2026-09-25，issue #561）
 
-**目前只有 claude**：這支端點沒有 `kind` 參數，永遠讀／派 claude 的 changelog。批次更新框
-（`UpdateQuotaChip.tsx`）2026-09-22 起也收 codex（SPEC §6.9），但只在 `changelogKind === 'claude'` 時
-才畫「請 AGM 解析」按鈕與 `AgmReviewBox`——codex 的批次只顯示 changelog，不冒充 claude 的解析結論。
-codex 的「這一版該不該採用／要提防什麼」走**另一條已經支援兩種 kind 的機制**：§18.2c 的上游新版分診
-（`release_triage`，結論開 GitHub issue，不是這個對話框），擴充這支端點支援 codex 留待之後有需求再做。
+兩支都收 `kind`（`claude`｜`codex`，省略＝`claude`，其他 400）。路徑保留 `claude-update` 是為了舊前端；
+codex 走**同一套**派工對象、冪等與結論回填，差別只在：讀 codex 的 releases、任務檔是 `codex-release-task.md`、
+識別碼前綴 `agm-codex-release-…`，以及**沒給 `to` 時的新版**——claude 是磁碟上那一版（自動更新已下載好），
+codex 的新版還沒安裝、磁碟是舊的，所以先取 `release_triage` 帳本裡最新的正式版，帳本空才退回磁碟。
+網頁一律把版本帶上（codex 從 `update_notice` 讀）。更新框另外讀 `GET /api/release-triage?kind=` 顯示該區間已分診的結論（SPEC §18.2c）。
 
 ### `GET /api/claude-update/review`
 這一版的 AGM 解析到哪了——更新框一打開就讀，**有結論就直接印在框裡**（使用者 2026-09-19：不要只給一句
-「結論會回到這裡」）。`?host=`／`?to=` 可指定，預設本機與磁碟上那一版。
+「結論會回到這裡」）。`?kind=`／`?host=`／`?to=` 可指定，預設 claude、本機與上面說的新版。
 
 ```json
-{"version":"2.1.277","review":{"state":"done","assignment_id":"01…","target_bot_name":"AGM-responder",
+{"kind":"claude","version":"2.1.277","review":{"state":"done","assignment_id":"01…","target_bot_name":"AGM-responder",
  "asked_at":"…","answered_at":"…","result":"2.1.277 沒有值得跟進的東西…"}}
 ```
 
@@ -714,19 +714,19 @@ codex 的「這一版該不該採用／要提防什麼」走**另一條已經支
 一則 assistant 訊息（派給 AGM 角色一律走交接佇列，不會有 assignment，2026-09-19 上線後實測踩過）。
 
 ### `POST /api/claude-update/review`
-`{host?, from?, to?}`（預設 `host=local`、`to`＝磁碟上那一版）。把這一版的 changelog 組成交辦派給**協調者**，
-唯讀——只建交辦，不 build、不重啟、不碰 claude 的檔案。內容與 `scripts/ops/claude-release-task.md` 同一套規則，
+`{kind?, host?, from?, to?}`（預設 `kind=claude`、`host=local`、`to` 見上）。把這一版的 changelog 組成交辦派給**協調者**，
+唯讀——只建交辦，不 build、不重啟、不碰 CLI 的檔案。內容與 `scripts/ops/<kind>-release-task.md` 同一套規則，
 結論照那份任務的指示回到使用者入口。
 
 ```json
-{"version":"2.1.277","from_version":"2.1.276","target_bot_id":"01…","target_bot_name":"AGM-responder",
+{"kind":"claude","version":"2.1.277","from_version":"2.1.276","target_bot_id":"01…","target_bot_name":"AGM-responder",
  "assignment_id":"01…","duplicate":false,"sections":1}
 ```
 
-- **正文只有一份來源**：`claude-release-task.md`（AGM 目錄裝好的那份優先，其次 repo 的 `scripts/ops/`）原文
-  ＋ 版本尾段（舊／新版號與兩顆 binary 路徑），跟 `claude-release-kick.sh` 完全一樣；規則要改就改那個檔案。
-  找不到那份檔案 → 409 `no_task_file`；
-- 按鈕用**自己的** `client_request_id`：`agm-claude-release-<版本>-ui`（kick 用不帶 `-ui` 的那個）。
+- **正文只有一份來源**：`<kind>-release-task.md`（AGM 目錄裝好的那份優先，其次 repo 的 `scripts/ops/`）原文
+  ＋ 版本尾段（舊／新版號；claude 另附兩顆 binary 路徑，codex 沒有舊版 binary 的版本目錄、不附），claude 跟 `claude-release-kick.sh` 完全一樣；
+  規則要改就改那個檔案。找不到那份檔案 → 409 `no_task_file`；
+- 按鈕用**自己的** `client_request_id`：`agm-<kind>-release-<版本>-ui`（kick 用不帶 `-ui` 的那個；codex 目前沒有 kick）。
   分開是因為 kick 走 AGM 收件匣的 `bot_request`，那條路沒有 assignment，**結論無處可讀**；走自己的交辦
   才有 `result` 能回填到更新框。同一版重按仍然只有一筆，回應帶 `duplicate:true` 與當下的 `review` 狀態。
 - **冪等判斷跟 `GET` 是同一套**（issue #394）：那個 crid 沿 supersede 鏈還活著或已完成，就直接回它
@@ -740,7 +740,7 @@ codex 的「這一版該不該採用／要提防什麼」走**另一條已經支
   不先查會撞上 `text_mismatch` 409；
 - 派給誰：`AGM_RELEASE_BOT` ＞ `runtime.json` 的 `release_bot_id` ＞ `responder_bot_id`，**絕不派給巡檢**
   （daemon 擋「總管對自己下交辦」）。都沒設 → 409 `no_target`，`message` 就是給使用者看的原因；
-- 那台主機還讀不到 claude 版本 → 409 `no_version`；
+- 那台主機還讀不到版本、也沒給 `to` → 409 `no_version`（帶 `kind`）；
 - changelog 原文框成引用（反引號數比原文最長那串多一個）並註明是資料，上限 8000 字，超過截斷並註明；
   抓不到 changelog 照樣派，正文請協調者改用 diff binary 的做法。
 
@@ -1710,7 +1710,7 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
 CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>] --json`（抓 feed、切條、分桶、寫帳本；抓不到 exit 1）輸出
 `{"kind","from","to","pending":[{"version","kept":[{"id","text","categories":[]}],"unmatched":[{"id","text"}],"dropped_count"}]}`，`pending` 舊版在前。
 
-- `GET /api/release-triage?kind=&version=` → `{publish_enabled, repo, rows:[{kind,version,status,entries:[{id,text,bucket,categories,rules}],verdicts,issues:[{marker,entry_ids,number,url,created_at,comment}],dispatched_at,attempts,publish_error,created_at,updated_at}]}`，新版在前；`status`：`pending|dispatched|judged|published|empty|failed`。
+- `GET /api/release-triage?kind=&version=` → `{publish_enabled, repo, rows:[{kind,version,status,entries:[{id,text,bucket,categories,rules}],verdicts,issues:[{marker,entry_ids,number,url,created_at,comment}],dispatched_at,attempts,publish_error,created_at,updated_at}]}`，新版在前；`status`：`pending|dispatched|judged|published|empty|failed`。`verdicts` 是交回來的整份（`{verdicts:[…], issues:[提案，含 title／triage／entry_ids／duplicate_of?], submitted_at}`），還沒交回是 `null`；網頁更新框讀這支顯示分診結論（issue #561）。
 - `POST /api/release-triage/dispatched {kind, versions[]}` → `{kind, dispatched}`。`pending` → `dispatched`（CAS，同一版不被下一輪再派）。
 - `POST /api/release-triage/verdicts {kind, version, verdicts:[{entry_id, verdict:guard|adopt|upgrade-arg|none, reason, module}], issues:[{entry_ids[], title, goal, suggestion, acceptance, verdict?, duplicate_of?}]}`。
   只收 `pending|dispatched|failed` 的版本（其他 409 `not_awaiting_verdict`）；**整份驗過才收**，不合格 400 `{error:"invalid_verdicts", problems:[…]}` 一次列完。

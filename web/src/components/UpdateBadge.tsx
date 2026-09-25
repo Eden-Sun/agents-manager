@@ -2,6 +2,7 @@ import { useState, type ReactNode } from 'react'
 import * as api from '../api'
 import { inFlightTurn, projectHostName, useStore } from '../store/store'
 import { reviewErrText } from '../lib/claudeReviewErr'
+import { updateRange } from '../lib/updateRange'
 import { updateBatchCounts } from '../lib/updateBatch'
 import { ConfirmDialog } from './ConfirmDialog'
 import { UpgradeIcon } from './UpgradeIcon'
@@ -40,6 +41,10 @@ export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; varian
   if (!notice) return null
 
   const busy = run?.agent_status === 'working' || run?.agent_status === 'blocked'
+  // 要看的版本區間：codex 的新版還沒裝、磁碟是舊的，兩個版本都從通知讀（issue #561）。
+  const range = updateRange(botKind, notice, runningVersion)
+  // 「請 AGM 解析」claude 與 codex 同一套（issue #561）；其他 kind 沒有 changelog 來源也沒有任務檔。
+  const canReview = botKind === 'claude' || botKind === 'codex'
   // codex 的新版通常還沒安裝（issue #388）：重啟換不到任何東西，先講清楚要裝；裝好之後（通知寫「已安裝」）才是重啟套用。
   const needsInstall = botKind !== 'claude' && !notice.includes('已安裝')
   const restart = () => {
@@ -55,12 +60,12 @@ export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; varian
     })
   }
 
-  // 使用者不想現在重啟，但想知道「這版有沒有我們用得上的東西」：交給 AGM 解析，結論回使用者入口。
+  // 使用者不想現在重啟，但想知道「這版有沒有我們用得上的東西」：交給 AGM 解析，結論回更新框。
   // 唯讀，所以按完就關框，不擋重啟那條路（使用者 2026-09-19）。
   const askAgm = () => {
     setAsking(true)
     void api
-      .requestClaudeUpdateReview({ host, from: runningVersion })
+      .requestUpdateReview({ kind: botKind, host, from: range.from, to: range.to })
       .then((r) => {
         // 不關框：結論就顯示在框裡（使用者 2026-09-19）。派完先刷新一次，之後打開也會再讀。
         setReviewKey((n) => n + 1)
@@ -68,8 +73,8 @@ export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; varian
           'info',
           // 已經派過（自己按過，或 30 分鐘那支排程先派了）不是錯誤，照實說一次就好。
           r.duplicate
-            ? `claude ${r.version} 已經派給 ${r.target_bot_name || 'AGM'} 解析過了，結論會回到這裡`
-            : `已請 ${r.target_bot_name} 解析 claude ${r.version} 的 changelog，結論會回到這裡`,
+            ? `${botKind} ${r.version} 已經派給 ${r.target_bot_name || 'AGM'} 解析過了，結論會回到這裡`
+            : `已請 ${r.target_bot_name} 解析 ${botKind} ${r.version} 的 changelog，結論會回到這裡`,
         )
       })
       .catch((e: unknown) => notify('error', `派不出去：${reviewErrText(e)}`))
@@ -88,14 +93,14 @@ export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; varian
       changelog={
         confirming ? (
           <div className="update-split">
-            <UpdateChangelog kind={botKind} host={host} from={runningVersion} />
-            {botKind === 'claude' ? <AgmReviewBox host={host} from={runningVersion} refreshKey={reviewKey} /> : null}
+            <UpdateChangelog kind={botKind} host={host} from={range.from} to={range.to} />
+            {canReview ? <AgmReviewBox kind={botKind} host={host} from={range.from} to={range.to} refreshKey={reviewKey} /> : null}
           </div>
         ) : null
       }
       onCancel={() => setConfirming(false)}
       onConfirm={restart}
-      onAskAgm={botKind === 'claude' ? askAgm : undefined}
+      onAskAgm={canReview ? askAgm : undefined}
     />
   )
 

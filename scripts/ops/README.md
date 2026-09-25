@@ -228,7 +228,11 @@ Claude Code 換版就派 AGM 解析新版有什麼用得上的，AGM 的回覆�
 ```sh
 install -m 755 scripts/ops/claude-release-kick.sh ~/.config/agents-manager/supervisor/AGM/bin/
 install -m 644 scripts/ops/claude-release-task.md ~/.config/agents-manager/supervisor/AGM/
+install -m 644 scripts/ops/codex-release-task.md ~/.config/agents-manager/supervisor/AGM/
 ```
+
+`codex-release-task.md` 沒有對應的 kick：只給網頁更新框的「請 AGM 解析」（`POST /api/claude-update/review {kind:"codex"}`，issue #561）用，
+沒裝進 AGM 目錄時 daemon 退回讀 repo 的 `scripts/ops/`。
 
 launchd：`com.agm.claude-release`，`StartInterval 1800`，`ProgramArguments = [/bin/bash, …/bin/claude-release-kick.sh]`。
 

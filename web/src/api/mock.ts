@@ -9,6 +9,7 @@ import { ApiError, BOT_KINDS } from './types'
 import type { BotKind } from './types'
 import { abortError } from './transport'
 import { TWO_ASK_QUESTIONS, twoAskKeys, twoAskScreen, twoAskStart, type TwoAskState } from './mockTwoAsk'
+import { MockReleaseTriage } from './mockReleaseTriage'
 import type { HttpMethod, SocketHandlers, Transport, UploadOptions } from './transport'
 
 /** 未知 kind 一律當 claude（與 daemon 的 400 不同，mock 寬鬆處理）。 */
@@ -562,6 +563,9 @@ export class MockTransport implements Transport {
   /** 模擬舊 daemon 沒有 `/api/missions`（`__amMock.missionsOff()`）。 */
   private missionsDisabled = false
 
+  /** 更新框的 changelog／分診／AGM 解析（`mockReleaseTriage.ts`）。 */
+  readonly releaseTriage = new MockReleaseTriage()
+
   /** 下一個符合的請求回指定的錯誤（`__amMock.failNext`）：手動看錯誤路徑、截圖用，用過一次就拿掉。 */
   private faults: { method: HttpMethod; pattern: RegExp; status: number; body: Rec }[] = []
   failNext(method: HttpMethod, pattern: string, status: number, body: Rec = {}) {
@@ -837,6 +841,7 @@ export class MockTransport implements Transport {
     const seg = rawPath.split('/').filter(Boolean)
 
     if (method === 'GET' && rawPath === '/state') return this.state()
+    { const r = this.releaseTriage.handle(method, rawPath, q, b); if (r !== undefined) return r }
     // 前端已樂觀套用排序，mock 收下就好。
     // 跨裝置已讀：mock 只有一個瀏覽器，記下來就好。
     { const m = rawPath.match(/^\/bots\/([^/]+)\/read$/); if (method === 'POST' && m) return { bot_id: decodeURIComponent(m[1]), read_mark: { at: typeof b.at === 'string' ? b.at : new Date().toISOString(), id: typeof b.message_id === 'string' ? b.message_id : '' }, unread: 0 } }
@@ -3630,6 +3635,19 @@ export class MockTransport implements Transport {
   setForeignPanes(n: number) {
     this.foreignPanes = Math.max(0, Math.floor(n))
   }
+
+  /** 截圖用：給某顆 bot 的 run 掛更新通知（`__amMock.updateNotice('am-codex', 'codex 有新版 0.155.1 → 0.157.0，需安裝後重啟')`）。 */
+  setUpdateNotice(botId: string, notice: string | null) {
+    const run = this.activeRun(botId)
+    if (!run) {
+      // 還沒啟動的先啟動，等它變 running（`start` 裡的計時器）再掛。
+      this.start(botId)
+      setTimeout(() => this.setUpdateNotice(botId, notice), 1500)
+      return
+    }
+    run.update_notice = notice
+    this.emitBotStatus(botId)
+  }
 }
 
 function sleep(ms: number) {
@@ -3658,5 +3676,8 @@ function installDevHelpers(mock: MockTransport) {
     paneSqueeze: (n = 5) => mock.setForeignPanes(n),
     // 下一個符合的請求回錯：`__amMock.failNext('POST', 'identities/.*/login', 409, {reason: '…', message: '…'})`
     failNext: (method: HttpMethod, pattern: string, status: number, body: Rec = {}) => mock.failNext(method, pattern, status, body),
+    // 更新框：清掉某個 kind 的分診帳本（演「尚未分析」）、給 bot 掛更新通知
+    triageOff: (kind: string) => mock.releaseTriage.triageOff(kind),
+    updateNotice: (botIdOrName: string, notice: string | null) => mock.setUpdateNotice(mock.botIdByName(botIdOrName) ?? botIdOrName, notice),
   }
 }

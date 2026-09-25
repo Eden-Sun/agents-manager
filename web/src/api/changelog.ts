@@ -62,9 +62,6 @@ export async function fetchChangelog(
   if (from) q.set('from', from)
   // codex 新版還沒進磁碟，目標版本取自 pane 上的 `a -> b`。
   if (to) q.set('to', to)
-  if (rawTransport.mock) {
-    return { kind, host, installedVersion: null, fromVersion: from, found: false, sections: [], sourceUrl: sourceFor(kind), error: 'mock 模式沒有 changelog' }
-  }
   try {
     return toReply(await rawTransport.request('GET', `/changelog?${q.toString()}`), kind, host)
   } catch (e) {

@@ -12,7 +12,9 @@ export function reviewErrText(e: unknown): string {
     }
     const human = e.body.message
     if (typeof human === 'string' && human.trim()) return human.trim()
-    if (e.body.reason === 'no_version') return '這台主機還讀不到 claude 的版本（等它回報之後再按一次）。'
+    if (e.body.reason === 'no_version') {
+      return `這台主機還讀不到 ${typeof e.body.kind === 'string' ? e.body.kind : 'claude'} 的版本（等它回報之後再按一次）。`
+    }
   }
   return e instanceof Error ? e.message : String(e)
 }

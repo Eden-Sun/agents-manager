@@ -643,3 +643,18 @@ cc1 的 bot 好幾個回合都收在 `authentication_failed`，對話只寫「�
   手機上藏起來；開關本身照舊常駐（#545）。
 - 回歸檢查：`node scripts/verify-blocked-mobile.mjs`（mock `__amMock.twoAsk()`，量 390×844／390×640／1440×900 第一個選項整列可見且點得到，並在手機上真的點完兩題＋送出）。
   ![修正前](screenshots/blocked-mobile/before-phone-390x844.png) ![修正後](screenshots/blocked-mobile/after-phone-390x844.png) ![展開原題](screenshots/blocked-mobile/after-phone-390x844-expanded.png) ![第二題](screenshots/blocked-mobile/after-flow-q2.png) ![桌機](screenshots/blocked-mobile/after-desktop-1440x900.png)
+
+## 更新框的「分析」：先攤已分診的結論，codex 也能請 AGM 解析（2026-09-25，issue #561）
+
+使用者：「codex 的更新能抓到在 header show 出來了嗎？要跟 claude 一樣分析是否有對系統的優化」。
+
+- **先給看得到的結論**：上游分診帳本（SPEC §18.2c）早就逐條分析過 claude／codex 每一版，只是網頁沒讀。更新框右半邊的「分析」
+  把 `(跑著的版本, 新版]` 每一版攤開：提防（琥珀）／採用（綠）／值得早升（accent），一律帶文字標籤；已寫成提案的條目只列提案標題與
+  issue 連結，不逐條重複（0.157.0 那種五條提防三張提案，逐條列會把框撐爆）。
+- **提防不用紅**：紅只給「要你本人動手」（通用原則）；提防是給排升級的人看的風險，不是現在要按的東西。
+- **沒有就明講「尚未分析」**，指向框底同一顆「請 AGM 解析」。不另做一顆框內按鈕：框底那顆 claude 本來就在，兩顆會搶焦點。
+- codex 與 claude 同一個區塊、同一顆按鈕；codex 的版本區間從 `update_notice` 讀（新版還沒裝，磁碟是舊的）。
+
+![codex 有分析](screenshots/codex-update-review/codex-analysed-1440.png) ![codex 尚未分析](screenshots/codex-update-review/codex-not-analysed-1440.png)
+![claude 有分析](screenshots/codex-update-review/claude-analysed-1440.png) ![claude 尚未分析](screenshots/codex-update-review/claude-not-analysed-1440.png)
+![手機](screenshots/codex-update-review/claude-not-analysed-390.png) ![真 daemon（唯讀）](screenshots/codex-update-review/codex-real-daemon-1440.png)

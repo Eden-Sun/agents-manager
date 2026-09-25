@@ -332,7 +332,12 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   - `runs.update_notice` 的字：`codex 有新版 <a> → <b>，需安裝後重啟`（`a` 讀不到時省略）；磁碟上已經是新版、這個 run 還跑舊的：
     `codex 有新版 <disk>（這個 run 跑的是 <running>），已安裝，重啟套用`。一律以 `codex 有新版` 開頭。
   - **版本比對補位**（畫面被推掉時）：磁碟版本 = `codex --version`（每台主機快取 5 分鐘）；跑著的版本 = 啟動畫面 `OpenAI Codex (v…)` 或提示句的 `<a>`，
-    看到就記在記憶體（掛 run，run 重啟後是新的）。磁碟比跑著的新 → 「已安裝，重啟套用」。優先序：磁碟已是新版 → 畫面上的提示 → 既有的「需安裝」通知。
+    看到就記在記憶體（掛 run，run 重啟後是新的）。磁碟比跑著的新 → 「已安裝，重啟套用」。優先序：磁碟已是新版 → 畫面上的提示 → 分診帳本 → 既有的「需安裝」通知。
+  - **分診帳本當上游來源**（issue #561）：畫面上的提示只在啟動那一刻印，版本是 codex 自己上一次檢查（`~/.codex/version.json`）的結果，會落後；
+    2026-09-25 實測帳本已有 0.157.0，6 顆 codex bot 裡 4 顆寫著「→ 0.156.1」、2 顆從沒巡到提示就一直沒有通知。所以每輪另讀 `release_triage`
+    帳本裡 codex 最大的正式版（§18.2c，`release-triage-kick` 抓 releases 寫的，跟主機無關）：比裝著的版本（磁碟，讀不到才用跑著的）新就是
+    「需安裝」，目標取畫面提示、帳本、既有通知三者較新的那個（安裝指令裝的就是最新版，帳本落後時不會把既有的目標往回拉）。
+    裝著的版本兩個都不知道時不拿帳本比。帳本空（kick 沒裝）就跟以前一樣只靠畫面與磁碟。
     提示被推掉、或選了 Skip，都不代表新版不存在，所以「需安裝」通知**不會**因畫面沒了就清掉，只在 run 重啟（新 run 本來就沒有）或磁碟裝好（改成「已安裝，重啟套用」）時變。
     跑著的版本從沒看到過、畫面也沒提示時什麼都不寫（不知道就不猜）。
   - **批次重啟不收 codex**（§6.9：候選只收 kind 是 claude）：重啟一顆沒裝新版的 codex 換不到任何東西。web 的更新徽章對 codex 說明要先安裝，
@@ -2889,7 +2894,15 @@ claude 與 codex **每出一個新版**，自動把那一版的 changelog 逐條
   公告內文必然不同，共用一個 id 的話後送的那一則會被 `supervisor::assign` 以
   `client_request_id already used with different text` 拒絕，使用者只看得到其中一則（issue #519）。
   **派工**的 crid 是另一回事：`agm-claude-release-<版本>`（不帶 `-notice`）由網頁按鈕與 kick 共用，
-  那是刻意的冪等（`claude_review.rs`），不要跟著改。
+  那是刻意的冪等（`claude_review.rs`），不要跟著改。codex 的網頁按鈕（issue #561）走同一支、同一套規則，
+  crid 是 `agm-codex-release-<版本>[-ui]`，任務檔 `codex-release-task.md`，公告 `agm-codex-release-<版本>-notice`（同樣跟分診的公告分開）。
+
+**網頁看得到帳本**（issue #561）：更新確認框（單顆徽章與額度列的批次框）的「分析」區塊讀 `GET /api/release-triage?kind=`，
+把 `(跑著的版本, 新版]` 區間內每一版的結論攤開——提防／採用（已寫成提案的條目只列提案標題與 issue 連結，不逐條重複）、
+值得早升（`upgrade-arg`）、`empty`＝看過了沒有要處理的、還在排隊或派出＝分診中；帳本沒有新版那一列＝「尚未分析」，
+這時整塊指向框底的「請 AGM 解析」。issue 連結：已開的用帳本記的 `url`；只併進既有 issue（`duplicate_of`）的在
+`[release_triage] repo` 有設時才組得出連結，沒設只顯示編號。claude 的新版是磁碟上那一版（`GET /api/claude-update/review` 回的 `version`），
+codex 的新版還沒裝，兩個版本都從 `update_notice` 讀。
 
 **兩層判斷**
 1. **決定性規則**（`daemon/src/release_triage/rules.toml`，`include_str!`；改規則＝改檔）。每條 changelog（`- ` 開頭、續行併入）一個 entry，
