@@ -533,6 +533,10 @@ async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate
     if status == "working" || status == "blocked" {
         crate::lifecycle::cancel_stall(app, &run.id).await;
     }
+    // 續行提示的 10 秒從「驗證過且 idle」起算；變成 working／blocked 就取消（#424）。
+    if matches!(status.as_str(), "idle" | "working" | "blocked") {
+        crate::lifecycle::poke_resume_nudge(app, &run.bot_id);
+    }
 
     // 停下來等人回答時先看是不是 claude 的滿意度問卷——是就自己按 0（§3.1）。其他 blocked 不動。
     if prev != "blocked" && status == "blocked" {

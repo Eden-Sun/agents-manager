@@ -200,7 +200,7 @@ pub async fn start_bot_locked_with(app: &Arc<App>, bot_id: &str, opts: StartOpts
     match start_inner(app, &bot, &project, &run_id, opts.clone()).await {
         Ok(()) => {
             if let Some(busy) = nudge {
-                super::resume_nudge::queue(app, &bot, &run_id, busy).await;
+                super::resume_nudge::arm(app, &bot, &run_id, busy).await;
             }
             Ok(run_id)
         }
@@ -963,9 +963,9 @@ pub async fn restart_bot_with(app: &Arc<App>, bot_id: &str, opts: StartOpts) -> 
     super::race_point::hit("restart_after_intent", bot_id).await;
     let res = restart_stop_and_start(app, bot_id, opts, stopping).await;
     settle_restart_intent(app, &intent_id, &res).await;
-    // 排著的 flush 在等這把鎖，放掉之後就會看到這一則（`resume_nudge`）。
+    // 不在這裡佔佇列。接回驗證且閒置滿 10 秒、尾巴仍是被砍的工具，才由 `resume_nudge` 送一次（#424）。
     if let (Ok(run_id), Some(busy)) = (&res, nudge) {
-        super::resume_nudge::queue(app, &bot, run_id, busy).await;
+        super::resume_nudge::arm(app, &bot, run_id, busy).await;
     }
     res
 }

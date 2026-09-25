@@ -26,7 +26,7 @@ pub(crate) fn starter_origin_kind(log: &str) -> Option<String> {
     })
 }
 
-fn read_tail(path: &std::path::Path) -> Option<String> {
+pub(crate) fn read_tail(path: &std::path::Path) -> Option<String> {
     use std::io::{Read, Seek, SeekFrom};
     let mut f = std::fs::File::open(path).ok()?;
     let len = f.metadata().ok()?.len();

@@ -670,6 +670,8 @@ async fn consume_resume_session(
     }
     // 閘門在等的就是這一則：排著的 prompt 現在可以送了（對不上的話，上面那則說明已經先進聊天室）。
     lifecycle::schedule_flush_queued(app, &bot.id);
+    // 續行提示從接回驗過、畫面閒置起算 10 秒；對不上的就地取消（#424）。
+    lifecycle::poke_resume_nudge(app, &bot.id);
     Ok(())
 }
 
