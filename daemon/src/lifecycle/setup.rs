@@ -653,12 +653,6 @@ pub(crate) async fn pane_env(
         env.insert("AM_DAEMON_EXE".into(), json!(app.exe.to_string_lossy()));
         env.insert("AM_CONFIG_PATH".into(), json!(app.cfg.path.to_string_lossy()));
     }
-    // Hook token rides in the pane env for every kind: grok's dispatcher learns the bot only here
-    // (SPEC §12), and local hooks read it so it never shows in `ps` (issue #43).
-    // Omitting it is how `inject_hooks = false` is honoured for grok.
-    if bot.inject_hooks != 0 {
-        env.insert("AM_HOOK_TOKEN".into(), json!(bot.hook_token));
-    }
     env.insert("CLAUDE_CODE_CHILD_SESSION".into(), json!(""));
     env.insert("CLAUDECODE".into(), json!(""));
     // claude 2.1.280 回合結束後在輸入框畫一句 dim 的「建議下一句」（prompt suggestion），Esc／Ctrl-U／Ctrl-C 都清不掉；
@@ -680,6 +674,7 @@ pub(crate) async fn pane_env(
     for (k, v) in bot.env() {
         env.insert(k, json!(crate::config::expand_home(&v, &home)));
     }
+    reserve_bot_auth_env(&mut env, bot, bot.inject_hooks != 0);
     let local_data_dir = (host == LOCAL_HOST).then(|| app.data_dir.to_string_lossy().into_owned());
     reserve_instance_env(&mut env, app.instance().as_deref(), local_data_dir.as_deref());
     // §6.5f：給使用者的檔案放這裡（不是 scratchpad）。跟 AM_DATA_DIR 一樣在自訂 env 合併之後才由 daemon 蓋回去：
@@ -689,6 +684,18 @@ pub(crate) async fn pane_env(
         None => env.remove("AM_OUTBOX"),
     };
     Value::Object(env)
+}
+
+/// Bot identity credentials are daemon-owned even when custom identity/bot env contains the same
+/// keys. Keep hook dispatch conditional while always restoring the API token.
+fn reserve_bot_auth_env(env: &mut serde_json::Map<String, Value>, bot: &db::Bot, hooks_enabled: bool) {
+    env.insert("AM_BOT_ID".into(), json!(bot.id));
+    env.insert("AM_BOT_TOKEN".into(), json!(bot.hook_token));
+    if hooks_enabled {
+        env.insert("AM_HOOK_TOKEN".into(), json!(bot.hook_token));
+    } else {
+        env.remove("AM_HOOK_TOKEN");
+    }
 }
 
 /// 決定「這個 pane 屬於哪顆 daemon」的兩個變數是保留的：identity.env、bot.env 合併**之後**才由 daemon
@@ -1700,6 +1707,29 @@ mod pane_env_tests {
         assert_eq!(e["AM_OUTBOX"], json!(want.to_string_lossy()), "bot.env 蓋不過去");
         assert_eq!(e["FOO"], json!("kept"));
         assert!(pane_env(&env.app, &bot, "box", "run-1", "proj-alfa", None).await.get("AM_OUTBOX").is_none(), "遠端也不留自訂的假路徑");
+    }
+
+    #[tokio::test]
+    async fn bot_api_token_is_reserved_and_independent_of_hook_installation() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "api-token").await;
+        for (enabled, want_hook) in [(0, false), (1, true)] {
+            sqlx::query("UPDATE bots SET inject_hooks=?, env_json=? WHERE id=?")
+                .bind(enabled)
+                .bind(r#"{"AM_BOT_ID":"forged","AM_BOT_TOKEN":"forged","AM_HOOK_TOKEN":"forged"}"#)
+                .bind(&bot.id)
+                .execute(&env.app.db)
+                .await
+                .unwrap();
+            let current = db::bot(&env.app.db, &bot.id).await.unwrap().unwrap();
+            let pane = pane_env(&env.app, &current, LOCAL_HOST, "run-1", "proj-api-token", None).await;
+            assert_eq!(pane["AM_BOT_ID"], json!(bot.id));
+            assert_eq!(pane["AM_BOT_TOKEN"], json!(bot.hook_token), "API identity is always the stored per-bot token");
+            assert_eq!(pane.get("AM_HOOK_TOKEN").is_some(), want_hook, "hook env still follows inject_hooks");
+            if want_hook {
+                assert_eq!(pane["AM_HOOK_TOKEN"], json!(bot.hook_token));
+            }
+        }
     }
 
     /// claude 2.1.280 的「建議下一句」本機、遠端都關掉（env，不是 `--prompt-suggestions`：那個旗標只收 `--print`）；

@@ -143,15 +143,18 @@ def runtime_role(cfg: dict) -> str:
 
 
 def bot_auth_headers(cfg: dict) -> dict:
-    """角色身分的證明：pane 環境裡的 `AM_BOT_ID` + `AM_HOOK_TOKEN`（daemon 注入的那顆 bot 自己的
-    hook token）。daemon 只認這兩個對得上的，模型打出來的角色名字不算數。
+    """角色身分的證明：pane 環境裡的 `AM_BOT_ID` + `AM_BOT_TOKEN`（既有 per-bot token）。
+    已運行的舊 pane 暫用相同值的 `AM_HOOK_TOKEN`；新 daemon 只認 id 與自己那顆 token 對得上。
 
-    只在 `AM_BOT_ID` 就是這個 runtime 的 `self_bot_id` 時才帶：在別的 pane 裡借用這支 CLI，
-    不會把那顆 bot 的 token 送出去冒充角色。"""
-    bot, tok = os.environ.get("AM_BOT_ID", ""), os.environ.get("AM_HOOK_TOKEN", "")
-    mine = cfg.get("self_bot_id") or cfg.get("manager_bot_id") or cfg.get("bot_id")
-    if bot and tok and bot == mine:
-        return {"X-AM-Bot-Id": bot, "X-AM-Bot-Token": tok}
+    pane 宣告了 bot id 就帶上該 id；沒有 token 或 token 對不上時，daemon 拒絕該 Bot 請求，
+    Client 不會改用共用 User token。角色權限仍由 daemon 依驗過的 bot id 判斷。"""
+    bot = os.environ.get("AM_BOT_ID", "")
+    tok = os.environ.get("AM_BOT_TOKEN") or os.environ.get("AM_HOOK_TOKEN", "")
+    if bot:
+        headers = {"X-AM-Bot-Id": bot}
+        if tok:
+            headers["X-AM-Bot-Token"] = tok
+        return headers
     return {}
 
 
@@ -208,10 +211,23 @@ class Client:
             data = json.dumps(body).encode("utf-8")
             headers["Content-Type"] = "application/json"
         if auth:
-            headers["X-AM-Token"] = self.token()
             # daemon 把寫入型請求的呼叫端記進 log／刪除 intent（issue #406）：自報是 agm，事後查得出來。
             headers["X-AM-Caller"] = "agm"
-            headers.update(self._extra)
+            service_id = os.environ.get("AM_SERVICE_ID", "")
+            service_file = os.environ.get("AM_SERVICE_TOKEN_FILE", "")
+            if service_id or service_file:
+                if not service_id or not service_file:
+                    raise AgmError("bad_service_auth", "AM_SERVICE_ID 與 AM_SERVICE_TOKEN_FILE 必須一起設定", 2)
+                if "X-AM-Bot-Id" in self._extra or "X-AM-Bot-Token" in self._extra:
+                    raise AgmError("bad_service_auth", "service 與 bot 身分不能同時使用", 2)
+                headers["X-AM-Service-Id"] = service_id
+                headers["X-AM-Service-Token"] = self._read_private_token(service_file)
+            elif "X-AM-Bot-Id" in self._extra or "X-AM-Bot-Token" in self._extra:
+                # Exactly one principal per request: a proven bot does not also send the shared UI token.
+                headers.update(self._extra)
+            else:
+                headers["X-AM-Token"] = self.token()
+                headers.update(self._extra)
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
             with self._opener.open(req, timeout=self.timeout) as res:
@@ -241,6 +257,52 @@ class Client:
             if isinstance(e.reason, (ConnectionError, http.client.HTTPException)) and not isinstance(e.reason, ConnectionRefusedError):
                 raise AgmError("connection_lost", f"{method} {path} 送出後連線中斷：{e.reason}", 5)
             raise AgmError("connect_failed", f"連不上 daemon：{e.reason}", 6)
+
+    @staticmethod
+    def _read_private_token(path: str) -> str:
+        """Read one owner-only service token without putting it in argv or printing it."""
+        parent = os.path.dirname(os.path.abspath(path))
+        dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        try:
+            dir_fd = os.open(parent, dir_flags)
+        except OSError as e:
+            raise AgmError("bad_service_auth", f"讀不到 service token 目錄 {parent}：{e}", 2) from e
+        try:
+            dir_st = os.fstat(dir_fd)
+            if not stat.S_ISDIR(dir_st.st_mode):
+                raise AgmError("bad_service_auth", f"service token 路徑 {parent} 不是目錄", 2)
+            if hasattr(os, "getuid") and dir_st.st_uid != os.getuid():
+                raise AgmError("bad_service_auth", f"service token 目錄 {parent} 不是目前使用者擁有", 2)
+            if dir_st.st_mode & 0o077:
+                raise AgmError("bad_service_auth", f"service token 目錄 {parent} 權限過寬；請 chmod 700", 2)
+        finally:
+            os.close(dir_fd)
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        try:
+            fd = os.open(path, flags)
+        except OSError as e:
+            raise AgmError("bad_service_auth", f"讀不到 service token 檔 {path}：{e}", 2) from e
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                raise AgmError("bad_service_auth", f"service token 檔 {path} 不是普通檔案", 2)
+            if hasattr(os, "getuid") and st.st_uid != os.getuid():
+                raise AgmError("bad_service_auth", f"service token 檔 {path} 不是目前使用者擁有", 2)
+            if st.st_mode & 0o077:
+                raise AgmError("bad_service_auth", f"service token 檔 {path} 權限過寬；請 chmod 600", 2)
+            try:
+                data = os.read(fd, 4097)
+                if len(data) > 4096:
+                    raise AgmError("bad_service_auth", f"service token 檔 {path} 太大", 2)
+                raw = data.decode("utf-8")
+            except (OSError, UnicodeDecodeError) as e:
+                raise AgmError("bad_service_auth", f"讀不到 service token 檔 {path}：{e}", 2) from e
+        finally:
+            os.close(fd)
+        tok = single_line_token(raw, f"service token 檔 {path}")
+        if not tok:
+            raise AgmError("bad_service_auth", f"service token 檔 {path} 是空的", 2)
+        return tok
 
     def get(self, path: str, query: dict | None = None) -> object:
         if query:
@@ -914,6 +976,7 @@ def lease_token_of(args) -> str:
                     "請 chmod 600 之後重拿一次窗口",
                     2,
                 )
+
             try:
                 # 用二進位讀再自己解碼：以文字模式開的話，非 UTF-8 的檔會在 `read()` 就丟
                 # `UnicodeDecodeError`，落到 `main` 的兜底變成 internal／exit 1。
@@ -1081,7 +1144,7 @@ def cmd_whoami(client: Client, cfg: dict, args) -> object:
         "role": runtime_role(cfg),
         "self_bot_id": cfg.get("self_bot_id") or cfg.get("manager_bot_id") or cfg.get("bot_id"),
         "manager_bot_id": cfg.get("manager_bot_id"),
-        "bot_token_present": bool(headers),
+        "bot_token_present": bool(headers.get("X-AM-Bot-Token")),
     }
 
 
@@ -1098,10 +1161,8 @@ def cmd_responder(client: Client, cfg: dict, args) -> object:
 def cmd_ack(client: Client, cfg: dict, args) -> object:
     """結案一則 inbox 通知。**只有 AGM 角色結得掉**（issue #432）。
 
-    daemon 認的是 `X-AM-Bot-Id` ＋ 那顆 bot 自己的 hook token，而 `bot_auth_headers` 只在
-    `AM_BOT_ID` 等於這個 runtime 的 `self_bot_id` 時才帶——也就是只有在角色自己的 pane 裡才帶。
-    在一般 shell（或別顆 bot 的 pane）裡跑會回 403 `role_required`，那不是壞掉，是這支本來就
-    不接受沒有身分的呼叫端。
+    daemon 認的是 `X-AM-Bot-Id` ＋那顆 bot 自己的 API token；任何 pane 有 Bot id 就只能以那顆
+    Bot 的身分請求，沒有 token 時不會退回共用 User token。角色權限由 daemon 再依驗過的 id 判斷。
     """
     try:
         return client.post(f"/api/supervisor/inbox/{urllib.parse.quote(args.event_id)}/ack", {})
@@ -1117,12 +1178,12 @@ def cmd_ack(client: Client, cfg: dict, args) -> object:
         if reason == "role_required":
             hint = (
                 "ack 只有 AGM 角色做得到：要在巡檢或協調者自己的 pane 裡跑 bin/agm，"
-                "或自己帶 X-AM-Bot-Id 與那顆 bot 的 AM_HOOK_TOKEN。"
+                "或自己帶 X-AM-Bot-Id 與那顆 bot 的 AM_BOT_TOKEN（舊 pane 暫用 AM_HOOK_TOKEN）。"
             )
         else:
             hint = (
-                "標頭帶了，但 daemon 對不上那顆 bot 的 hook token（token 輪替過、"
-                "或 AM_BOT_ID 與 AM_HOOK_TOKEN 不是同一顆的）：這一顆要重啟才會拿到新的環境。"
+                "標頭帶了，但 daemon 對不上那顆 bot 的 API token（token 輪替過、"
+                "或 AM_BOT_ID 與 AM_BOT_TOKEN 不是同一顆的）：這一顆要重啟才會拿到新的環境。"
             )
         raise AgmError(
             reason,

@@ -69,6 +69,8 @@ pub struct App {
     pub exe: PathBuf,
     pub port: u16,
     pub ui_token: String,
+    /// Fixed-scope credentials for launchd maintenance clients (keyed by service id).
+    pub service_tokens: std::sync::RwLock<HashMap<String, String>>,
     pub herdr_session: String,
     /// True for every dev run of the daemon (see `main.rs::dev_lan_default`): it is bound to
     /// every interface for direct LAN/Tailscale/etc access, so the peer-address and Origin
@@ -209,6 +211,7 @@ impl App {
             exe,
             port,
             ui_token,
+            service_tokens: std::sync::RwLock::new(HashMap::new()),
             herdr_session,
             allow_lan,
             judge_fuse: Mutex::new(()),

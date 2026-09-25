@@ -47,7 +47,13 @@ am_dedupe_path() {
 # `AM_DAEMON_EXE`／`AM_CONFIG_PATH`（issue #138）：cargo shim 把 check／test／clippy 轉到外部編譯主機的前提。
 # 少了它們，子 agent 的 cargo 永遠留在本機——#104 當初只在 daemon 注入端加了，這份清單漏了。
 # 跟其他 key 一樣：母 pane 有才帶、呼叫者自己給了就尊重（它們不是隔離實例那種要防偽造的保留變數）。
-AM_RESERVED_ENV_KEYS="CLAUDE_CONFIG_DIR CODEX_HOME AM_BOT_ID AM_HOOK_TOKEN AM_PORT AM_RUN_ID AM_AGENT_NAME AM_KIND AM_MODEL AM_EFFORT AM_PROJECT_ID AM_WORKSPACE_ID AM_OUTBOX AM_DAEMON_EXE AM_CONFIG_PATH AM_REAL_HERDR PATH CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"
+AM_RESERVED_ENV_KEYS="CLAUDE_CONFIG_DIR CODEX_HOME AM_BOT_ID AM_BOT_TOKEN AM_HOOK_TOKEN AM_PORT AM_RUN_ID AM_AGENT_NAME AM_KIND AM_MODEL AM_EFFORT AM_PROJECT_ID AM_WORKSPACE_ID AM_OUTBOX AM_DAEMON_EXE AM_CONFIG_PATH AM_REAL_HERDR PATH CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"
+
+# API calls use the independent bot credential. Keep the hook-token fallback for already-running
+# hook-enabled panes until they restart to receive AM_BOT_TOKEN.
+am_bot_token() {
+    if [ -n "${AM_BOT_TOKEN:-}" ]; then printf '%s' "$AM_BOT_TOKEN"; else printf '%s' "${AM_HOOK_TOKEN:-}"; fi
+}
 
 # `<name>` → `<AM_AGENT_NAME>-<name>`, unless it already carries the prefix. herdr agent names
 # are `[a-z][a-z0-9_-]{0,31}`, so the result is cut to 32.
@@ -262,7 +268,7 @@ am_agent_prompt() {
         esac
         _text="${_text:+$_text }$_a"
     done
-    if [ -n "${AM_BOT_ID:-}" ] && [ -n "${AM_HOOK_TOKEN:-}" ] && [ -n "${AM_PORT:-}" ]; then
+    if [ -n "${AM_BOT_ID:-}" ] && [ -n "$(am_bot_token)" ] && [ -n "${AM_PORT:-}" ]; then
         # 「確定沒送到 daemon」與「送了但回覆不明」要分清楚（issue #143）。直送 pane 只有一種情形站得住腳：**連線根本沒建立**
         # （curl 7，daemon 不在），request 一定沒進 daemon。其餘——逾時、空回應、連線被重置、任何非 2xx、看不懂的 2xx——
         # request 可能已經進了 daemon（durable 的 bot_request 可能已經 commit，只是回覆沒收完整）：直送會變成佇列一份、pane 一份，
@@ -277,7 +283,7 @@ am_agent_prompt() {
             if [ "$_try" = 1 ]; then _m=2; else _m=15; fi
             # 表單編碼：prompt 內容有引號、換行、`&` 都不會壞，也不必在 sh 裡拼 JSON。`-w` 在回應後面補一行 HTTP 狀態碼。
             _out=$(curl -s -m "$_m" -w '\n%{http_code}' -X POST "http://127.0.0.1:${AM_PORT}/relay/announce" \
-                -H "X-AM-Bot-Token: ${AM_HOOK_TOKEN}" \
+                -H "X-AM-Bot-Token: $(am_bot_token)" \
                 --data-urlencode "bot_id=${AM_BOT_ID}" \
                 --data-urlencode "to_agent=${_name}" \
                 --data-urlencode "text=${_text}" \
@@ -430,7 +436,7 @@ am_forward_with_env() {
     # §6.5e：開出來的 pane 要能說出「這是誰、為了什麼開的」。歸屬由 daemon 從行程環境推斷（AM_BOT_ID
     # 一定帶得下去），這裡只補**用途**：`--purpose <文字>` 是我們自己的旗標，轉發前剝掉。
     # 沒有 curl／沒有 token 就只是少一個字串，pane 照開。
-    if [ -n "$_purpose" ] && [ -n "${AM_BOT_ID:-}" ] && [ -n "${AM_HOOK_TOKEN:-}" ] && [ -n "${AM_PORT:-}" ] && command -v curl >/dev/null 2>&1; then
+    if [ -n "$_purpose" ] && [ -n "${AM_BOT_ID:-}" ] && [ -n "$(am_bot_token)" ] && [ -n "${AM_PORT:-}" ] && command -v curl >/dev/null 2>&1; then
         _out=$("$AM_HERDR" "$_sub1" "$_sub2" "$@")
         _rc=$?
         printf '%s\n' "$_out"
@@ -440,7 +446,7 @@ am_forward_with_env() {
         _pane=$(printf '%s' "$_out" | tr ',' '\n' | sed -n 's/.*"pane_id" *: *"\([^"]*\)".*/\1/p' | head -n 1)
         [ -n "$_pane" ] || exit 0
         curl -s -m 2 -X POST "http://127.0.0.1:${AM_PORT}/relay/pane" \
-            -H "X-AM-Bot-Token: ${AM_HOOK_TOKEN}" \
+            -H "X-AM-Bot-Token: $(am_bot_token)" \
             --data-urlencode "bot_id=${AM_BOT_ID}" \
             --data-urlencode "pane_id=${_pane}" \
             --data-urlencode "purpose=${_purpose}" >/dev/null 2>&1 || true

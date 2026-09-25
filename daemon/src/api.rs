@@ -9,7 +9,7 @@ use crate::lifecycle::{self, LcError};
 use crate::state::App;
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
 use axum::body::Bytes;
-use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, Query, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Extension, OriginalUri, Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -113,6 +113,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/bots/restart-idle", post(restart_idle_bots))
         .route("/bots/{id}/start", post(start_bot))
         .route("/bots/{id}/restart", post(restart_bot))
+        .route("/bots/{id}/credential/rotate", post(rotate_bot_credential))
         .route("/bots/{id}/fork", post(crate::fork::fork_bot))
         .route("/bots/{id}/promote", post(crate::promote::promote_bot))
         .route("/bots/{id}/stop", post(stop_bot))
@@ -248,6 +249,9 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/identities/{name}", delete(delete_identity))
         .route("/fs/dirs", get(list_dirs))
         .route("/capabilities", get(get_capabilities))
+        .route("/services/daemon-swap/probe/{id}", post(service_daemon_swap_probe))
+        .route("/services/herdr-upgrade/resume/{id}", post(service_herdr_upgrade_resume))
+        .route("/services/herdr-upgrade/notify", post(service_herdr_upgrade_notify))
         .route("/supervisor/herdr-maintenance", get(crate::herdr_maintenance::get))
         .route("/supervisor/herdr-maintenance/open", post(crate::herdr_maintenance::open))
         .route("/supervisor/herdr-maintenance/end", post(crate::herdr_maintenance::end))
@@ -480,22 +484,71 @@ pub(crate) fn ct_eq(a: &str, b: &str) -> bool {
     a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
-async fn auth(State(app): State<Arc<App>>, req: axum::extract::Request, next: Next) -> Response {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum RequestPrincipal {
+    User,
+    Bot(String),
+    Service(String),
+}
+
+fn unauthorized() -> Response {
+    (StatusCode::UNAUTHORIZED, Json(json!({"error": "missing or bad API credential"}))).into_response()
+}
+
+async fn auth(State(app): State<Arc<App>>, mut req: axum::extract::Request, next: Next) -> Response {
     let headers = req.headers().clone();
     if !origin_is_local(&headers, app.port, app.allow_lan) {
         return (StatusCode::FORBIDDEN, Json(json!({"error": "bad origin"}))).into_response();
     }
-    let tok = headers.get("X-AM-Token").and_then(|v| v.to_str().ok()).unwrap_or("");
-    if !ct_eq(tok, &app.ui_token) {
-        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "missing or bad X-AM-Token"}))).into_response();
-    }
+    let has_bot = headers.contains_key("X-AM-Bot-Id") || headers.contains_key("X-AM-Bot-Token");
+    let has_service = headers.contains_key("X-AM-Service-Id") || headers.contains_key("X-AM-Service-Token");
+    let has_ui = headers.contains_key("X-AM-Token");
+    let principal = if has_bot || has_service {
+        // A presented identity is decisive: partial, invalid, or mixed credentials never fall
+        // through to the shared user token.
+        if has_bot == has_service || has_ui {
+            return unauthorized();
+        }
+        if has_service {
+            let id = headers.get("X-AM-Service-Id").and_then(|v| v.to_str().ok()).map(str::trim).filter(|s| !s.is_empty());
+            let token = headers.get("X-AM-Service-Token").and_then(|v| v.to_str().ok()).map(str::trim).filter(|s| !s.is_empty());
+            let (Some(id), Some(token)) = (id, token) else { return unauthorized() };
+            let valid = app.service_tokens.read().ok().and_then(|tokens| tokens.get(id).cloned()).is_some_and(|expected| ct_eq(token, &expected));
+            if !valid {
+                return unauthorized();
+            }
+            let path = req.extensions().get::<OriginalUri>().map(|uri| uri.0.path()).unwrap_or_else(|| req.uri().path());
+            if !crate::service_auth::allows(id, req.method().as_str(), path) {
+                return (StatusCode::FORBIDDEN, Json(json!({"error": "service scope denied", "service": id}))).into_response();
+            }
+            RequestPrincipal::Service(id.to_string())
+        } else {
+            let id = headers.get("X-AM-Bot-Id").and_then(|v| v.to_str().ok()).map(str::trim).filter(|s| !s.is_empty());
+            let token = headers.get("X-AM-Bot-Token").and_then(|v| v.to_str().ok()).map(str::trim).filter(|s| !s.is_empty());
+            let (Some(id), Some(token)) = (id, token) else { return unauthorized() };
+            let bot = match db::bot(&app.db, id).await {
+                Ok(Some(bot)) if bot.deleted_at.is_none() && ct_eq(token, &bot.hook_token) => bot,
+                Ok(_) => return unauthorized(),
+                Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+            };
+            RequestPrincipal::Bot(bot.id)
+        }
+    } else {
+        let tok = headers.get("X-AM-Token").and_then(|v| v.to_str().ok()).unwrap_or("");
+        if !has_ui || !ct_eq(tok, &app.ui_token) {
+            return unauthorized();
+        }
+        RequestPrincipal::User
+    };
+    req.extensions_mut().insert(principal.clone());
     // 會改東西的請求記下是誰發的：config.toml 的寫入 log 與刪除 intent 要引用（issue #406）。
     if matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS) {
         return next.run(req).await;
     }
     // 只有 hook token 對得上才算「驗過的 bot」；`X-AM-Caller` 一律只當自稱記（review d77434c0 #3）。
-    let verified = verified_caller_bot(&app, &headers).await;
-    let caller = crate::config_audit::describe_request(&req, verified.as_deref());
+    let verified = if matches!(principal, RequestPrincipal::Bot(_)) { verified_caller_bot(&app, &headers).await } else { None };
+    let service = match &principal { RequestPrincipal::Service(id) => Some(id.as_str()), _ => None };
+    let caller = crate::config_audit::describe_request(&req, verified.as_deref(), service);
     crate::config_audit::HTTP_CALLER.scope(caller, next.run(req)).await
 }
 
@@ -3201,7 +3254,7 @@ async fn refuse_child_restart(app: &Arc<App>, id: &str) -> Result<(), LcError> {
 
 /// 這顆 daemon 支援哪些要先確認才能用的能力（例如升級腳本在停 herdr 前要確定 `resume_native_start`）。
 async fn get_capabilities() -> Json<Value> {
-    Json(json!({"capabilities": ["resume_native_start", "herdr_maintenance"]}))
+    Json(json!({"capabilities": ["resume_native_start", "herdr_maintenance", "service_principals"]}))
 }
 
 /// SPEC §6.9。立刻回計畫、進度走 WS：一顆 `stop_bot` 最久十秒，同步做完會拖死 HTTP 連線。
@@ -3217,6 +3270,139 @@ async fn restart_bot(State(app): State<Arc<App>>, Path(id): Path<String>, Query(
     let body = started_json(&app, &run_id, &opts).await?;
     app.emit("bot_changed", json!({"bot_id": id})).await;
     Ok((StatusCode::OK, Json(body)).into_response())
+}
+
+/// Replace the per-bot proof immediately. A live bot is restarted so the new `AM_BOT_TOKEN` is
+/// present before it can make another authenticated request; a stopped bot uses it on next start.
+///
+/// Child bots are refused: their pane was opened by the parent and inherits the **parent's**
+/// `AM_BOT_ID`／token (herdr shim, SPEC §6.5b); `restart_child_in_pane` does not rebuild that env,
+/// so a rotated child token would never reach the pane. Rotate the parent instead.
+async fn rotate_bot_credential(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    Extension(principal): Extension<RequestPrincipal>,
+) -> Result<Response, LcError> {
+    if principal != RequestPrincipal::User {
+        return Err(LcError::Forbidden(json!({"error": "forbidden", "reason": "user_only"})));
+    }
+    let bot = db::bot(&app.db, &id).await.map_err(any_err)?.filter(|b| b.deleted_at.is_none()).ok_or_else(|| LcError::NotFound("bot".into()))?;
+    if bot.managed_by == "child" {
+        return Err(LcError::conflict(
+            "a child agent runs on its parent's credential; rotate the parent bot",
+            json!({"reason": "child_uses_parent_credential", "bot_id": id, "parent_bot_id": bot.parent_bot_id}),
+        ));
+    }
+    let token = crate::projection::new_token();
+    let changed = sqlx::query("UPDATE bots SET hook_token=? WHERE id=? AND deleted_at IS NULL")
+        .bind(&token)
+        .bind(&id)
+        .execute(&app.db)
+        .await
+        .map_err(any_err)?
+        .rows_affected();
+    if changed == 0 {
+        return Err(LcError::NotFound("bot".into()));
+    }
+    let active = db::active_run(&app.db, &id).await.map_err(any_err)?;
+    let run_id = match active {
+        None => None,
+        // The old token is already dead; a failed restart leaves the pane unable to authenticate,
+        // so say so instead of pretending the rotation finished.
+        Some(_) => Some(lifecycle::restart_bot(&app, &id).await.map_err(|e| {
+            LcError::conflict(
+                "credential rotated, but restarting the bot failed; restart it to hand it the new token",
+                json!({"reason": "restart_failed", "credential_rotated": true, "bot_id": id, "detail": format!("{e:?}")}),
+            )
+        })?),
+    };
+    app.emit("bot_changed", json!({"bot_id": id})).await;
+    Ok((StatusCode::OK, Json(json!({"credential_rotated": true, "restarted": run_id.is_some(), "run_id": run_id}))).into_response())
+}
+
+fn require_service(principal: &RequestPrincipal, expected: &str) -> Result<(), LcError> {
+    if matches!(principal, RequestPrincipal::Service(id) if id == expected) {
+        Ok(())
+    } else {
+        Err(LcError::Forbidden(json!({"error": "forbidden", "reason": "service_only", "service": expected})))
+    }
+}
+
+/// Launchd's fixed harmless probe (`daemon-swap.sh` 3b). The service picks which bot answers the
+/// self-test, but not the text, the source label, or anything else a real prompt could carry.
+async fn service_daemon_swap_probe(
+    State(app): State<Arc<App>>,
+    Path(bot_id): Path<String>,
+    Extension(principal): Extension<RequestPrincipal>,
+) -> Result<Response, LcError> {
+    require_service(&principal, crate::service_auth::DAEMON_SWAP)?;
+    if db::bot(&app.db, &bot_id).await.map_err(any_err)?.filter(|b| b.deleted_at.is_none()).is_none() {
+        return Err(LcError::NotFound("bot".into()));
+    }
+    let out = lifecycle::prompt_from_api(
+        &app,
+        &bot_id,
+        DAEMON_SWAP_PROBE_TEXT,
+        &format!("daemon-swap-probe-{}", db::ulid()),
+        &[],
+        lifecycle::RelaySrc { from: Some(crate::agent_relay::DAEMON_SENDER), unverified: false },
+        false,
+    )
+    .await?;
+    Ok((StatusCode::OK, Json(out)).into_response())
+}
+
+const DAEMON_SWAP_PROBE_TEXT: &str = "[build 自測，回 ok 即可，不要做任何事]";
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ServiceNotifyIn {
+    text: String,
+}
+
+/// Launchd herdr upgrade may notify the configured responder, but cannot choose a bot or claim
+/// another bot as the source. The daemon marks the message as its own maintenance action.
+async fn service_herdr_upgrade_notify(
+    State(app): State<Arc<App>>,
+    Extension(principal): Extension<RequestPrincipal>,
+    Json(body): Json<ServiceNotifyIn>,
+) -> Result<Response, LcError> {
+    require_service(&principal, crate::service_auth::HERDR_UPGRADE)?;
+    let text = body.text.trim();
+    if text.is_empty() || text.len() > 4096 {
+        return Err(LcError::Bad("text must be 1..=4096 bytes".into()));
+    }
+    let bot = crate::supervisor::roles::responder_bot(&app.db)
+        .await
+        .map_err(any_err)?
+        .ok_or_else(|| LcError::Unavailable(json!({"error": "responder_unavailable", "retry_after_secs": 30})))?;
+    let out = lifecycle::prompt_from_api(
+        &app,
+        &bot.id,
+        text,
+        &format!("herdr-upgrade-notify-{}", db::ulid()),
+        &[],
+        lifecycle::RelaySrc { from: Some(crate::agent_relay::DAEMON_SENDER), unverified: false },
+        false,
+    )
+    .await?;
+    Ok((StatusCode::OK, Json(out)).into_response())
+}
+
+/// Resume a bot after herdr server upgrade. The service can perform only this fixed operation;
+/// it cannot choose a session, stop/restart a bot, or pass query options through to start_bot.
+async fn service_herdr_upgrade_resume(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    Extension(principal): Extension<RequestPrincipal>,
+) -> Result<Response, LcError> {
+    require_service(&principal, crate::service_auth::HERDR_UPGRADE)?;
+    start_bot(
+        State(app),
+        Path(id),
+        Query(StartQuery { resume: Some("native".into()), session: None }),
+    )
+    .await
 }
 
 async fn stop_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
@@ -3269,8 +3455,8 @@ struct PromptIn {
     /// In display order.
     #[serde(default)]
     attachments: Vec<String>,
-    /// 另一顆 bot 的 id 或哨符 `daemon`；省略 = 使用者自己打的。
-    /// 2026-09-12 使用者：「就連 AGM 自己的 message 也要區分是由 daemon 觸發而非 user」。
+    /// 相容期的 relay metadata；有效 Bot principal 省略時由 daemon 補成該 bot id。
+    /// Bot principal 帶其他 bot id 時，middleware 的 principal proof 與 relay_auth 會拒絕。
     #[serde(default)]
     relay_from: Option<String>,
     /// bot 寫給 AGM 時明講「這是回覆」：`ack`（純告知）或 `reply_to`（回哪一則事件／交辦）。
@@ -3297,8 +3483,12 @@ async fn prompt_bot(
 ) -> Result<Response, LcError> {
     let given_crid = b.client_request_id.clone();
     let crid = b.client_request_id.unwrap_or_else(db::ulid);
-    // relay_from 要跟呼叫者自己的 bot token 對得上；daemon 哨符與「自己送給自己」都不收（issue #339，`relay_auth`）。
-    let relay = crate::relay_auth::authenticate(&app, &headers, b.relay_from.as_deref(), &id).await?;
+    // `relay_from` is metadata, never an alternate principal. A proven bot that omits it is
+    // attributed to the id already authenticated by middleware. User requests keep #339's
+    // unsigned compatibility branch until #410's recorded conditions permit its removal.
+    let relay_claim = b.relay_from.as_deref().map(str::trim).filter(|value| !value.is_empty());
+    let effective_relay = relay_claim.or_else(|| headers.get("X-AM-Bot-Id").and_then(|v| v.to_str().ok()));
+    let relay = crate::relay_auth::authenticate(&app, &headers, effective_relay, &id).await?;
     // bot 寫給 AGM 的申請不直接開回合：排進協調者的佇列，回 202（SPEC §18.15）。
     if let Some(r) = &relay {
         let mark = crate::supervisor::bot_requests::ReplyMark { ack: b.ack, reply_to: b.reply_to.as_deref() };
@@ -5093,10 +5283,10 @@ mod resume_query_tests {
     }
 
     #[tokio::test]
-    async fn capabilities_advertise_the_resume_entry_and_maintenance() {
+    async fn capabilities_advertise_resume_maintenance_and_service_auth() {
         let v = get_capabilities().await.0;
         let caps: Vec<&str> = v["capabilities"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
-        assert!(caps.contains(&"resume_native_start") && caps.contains(&"herdr_maintenance"), "{v}");
+        assert!(caps.contains(&"resume_native_start") && caps.contains(&"herdr_maintenance") && caps.contains(&"service_principals"), "{v}");
     }
 }
 
@@ -5585,6 +5775,339 @@ mod unknown_api_route_tests {
 }
 
 #[cfg(test)]
+mod per_principal_auth_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// `testing::claude_bot` gives every bot the same `hook_token` ('tok'); identity tests need
+    /// each bot's token to be its own, or "someone else's token" is indistinguishable from "mine".
+    async fn distinct_bot(e: &crate::testing::Env, name: &str) -> db::Bot {
+        let bot = crate::testing::claude_bot(&e.app, &e.project_id, name).await;
+        sqlx::query("UPDATE bots SET hook_token=? WHERE id=?").bind(format!("tok-{}", bot.id)).bind(&bot.id).execute(&e.app.db).await.unwrap();
+        db::bot(&e.app.db, &bot.id).await.unwrap().unwrap()
+    }
+
+    async fn raw(app: Arc<App>, request: String) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router = super::router(app);
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await
+        });
+        let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
+        c.write_all(request.as_bytes()).await.unwrap();
+        let mut out = String::new();
+        c.read_to_string(&mut out).await.unwrap();
+        server.abort();
+        out
+    }
+
+    async fn state(app: Arc<App>, headers: &[(&str, &str)]) -> String {
+        let extra: String = headers.iter().map(|(k, v)| format!("{k}: {v}\r\n")).collect();
+        raw(
+            app,
+            format!("GET /api/state HTTP/1.1\r\nHost: 127.0.0.1\r\n{extra}Connection: close\r\nContent-Length: 0\r\n\r\n"),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_bot_id_and_its_token_authenticate_without_the_ui_token() {
+        let e = crate::testing::env().await;
+        let bot = distinct_bot(&e, "bot-auth").await;
+        let response = state(e.app.clone(), &[("X-AM-Bot-Id", &bot.id), ("X-AM-Bot-Token", &bot.hook_token)]).await;
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    }
+
+    #[tokio::test]
+    async fn a_bot_id_without_its_token_cannot_fall_back_to_a_valid_ui_token() {
+        let e = crate::testing::env().await;
+        let bot = distinct_bot(&e, "missing-bot-token").await;
+        let response = state(e.app.clone(), &[("X-AM-Token", &e.app.ui_token), ("X-AM-Bot-Id", &bot.id)]).await;
+        assert!(response.starts_with("HTTP/1.1 401") || response.starts_with("HTTP/1.1 403"), "{response}");
+    }
+
+    #[tokio::test]
+    async fn a_wrong_bot_token_cannot_fall_back_to_a_valid_ui_token() {
+        let e = crate::testing::env().await;
+        let bot = distinct_bot(&e, "wrong-bot-token").await;
+        let response = state(
+            e.app.clone(),
+            &[("X-AM-Token", &e.app.ui_token), ("X-AM-Bot-Id", &bot.id), ("X-AM-Bot-Token", "wrong")],
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 401"), "invalid Bot proof must not downgrade to User: {response}");
+    }
+
+    #[tokio::test]
+    async fn an_authenticated_bot_with_no_relay_from_is_stored_as_that_bot() {
+        let e = crate::testing::env().await;
+        let sender = distinct_bot(&e, "sender").await;
+        let target = distinct_bot(&e, "target").await;
+        sqlx::query("UPDATE bots SET kind='grok' WHERE id=?").bind(&target.id).execute(&e.app.db).await.unwrap();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, pane_typed, started_at)
+             VALUES (?,?,'running','idle','ws-1','pane-principal','target','test',1,?)",
+        )
+        .bind(db::ulid())
+        .bind(&target.id)
+        .bind(db::now())
+        .execute(&e.app.db)
+        .await
+        .unwrap();
+        e.herdr.live_pane("pane-principal", crate::testing::LivePane { width: Some(120), boxed: true, ..Default::default() });
+
+        let body = json!({ "text": "bot-authored", "client_request_id": "bot-authored-no-relay" });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let response = raw(
+            e.app.clone(),
+            format!(
+                "POST /api/bots/{}/prompt HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Bot-Id: {}\r\nX-AM-Bot-Token: {}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+                target.id,
+                sender.id,
+                sender.hook_token,
+                bytes.len(),
+                String::from_utf8(bytes).unwrap(),
+            ),
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        let payload = response.split("\r\n\r\n").nth(1).unwrap_or_default();
+        let payload: Value = serde_json::from_str(payload).unwrap();
+        let message_id = payload["message_id"].as_str().expect("prompt response message id");
+        let relay: Option<String> = sqlx::query_scalar("SELECT relay_from FROM messages WHERE id=?")
+            .bind(message_id)
+            .fetch_one(&e.app.db)
+            .await
+            .unwrap();
+        assert_eq!(relay.as_deref(), Some(sender.id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn an_empty_relay_from_cannot_override_the_authenticated_bot_identity() {
+        let e = crate::testing::env().await;
+        let sender = distinct_bot(&e, "empty-relay-sender").await;
+        let target = distinct_bot(&e, "empty-relay-target").await;
+        sqlx::query("UPDATE bots SET kind='grok' WHERE id=?").bind(&target.id).execute(&e.app.db).await.unwrap();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, pane_typed, started_at)
+             VALUES (?,?,'running','idle','ws-1','pane-empty-relay','target','test',1,?)",
+        )
+        .bind(db::ulid())
+        .bind(&target.id)
+        .bind(db::now())
+        .execute(&e.app.db)
+        .await
+        .unwrap();
+        e.herdr.live_pane("pane-empty-relay", crate::testing::LivePane { width: Some(120), boxed: true, ..Default::default() });
+
+        let body = serde_json::to_vec(&json!({ "text": "empty-relay-authored", "client_request_id": "empty-relay-authored", "relay_from": "" })).unwrap();
+        let response = raw(
+            e.app.clone(),
+            format!(
+                "POST /api/bots/{}/prompt HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Bot-Id: {}\r\nX-AM-Bot-Token: {}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+                target.id,
+                sender.id,
+                sender.hook_token,
+                body.len(),
+                String::from_utf8(body).unwrap(),
+            ),
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        let payload = response.split("\r\n\r\n").nth(1).unwrap_or_default();
+        let payload: Value = serde_json::from_str(payload).unwrap();
+        let message_id = payload["message_id"].as_str().expect("prompt response message id");
+        let relay: Option<String> = sqlx::query_scalar("SELECT relay_from FROM messages WHERE id=?")
+            .bind(message_id)
+            .fetch_one(&e.app.db)
+            .await
+            .unwrap();
+        assert_eq!(relay.as_deref(), Some(sender.id.as_str()), "empty body claim must not erase the authenticated bot identity");
+    }
+
+    #[tokio::test]
+    async fn a_service_credential_authenticates_only_inside_its_scope() {
+        let e = crate::testing::env().await;
+        e.app.service_tokens.write().unwrap().insert(crate::service_auth::HERDR_UPGRADE.into(), "service-secret".into());
+        let allowed = raw(
+            e.app.clone(),
+            "GET /api/capabilities HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Service-Id: herdr-upgrade\r\nX-AM-Service-Token: service-secret\r\nConnection: close\r\nContent-Length: 0\r\n\r\n".into(),
+        )
+        .await;
+        assert!(allowed.starts_with("HTTP/1.1 200"), "{allowed}");
+
+        let denied = state(e.app.clone(), &[("X-AM-Service-Id", "herdr-upgrade"), ("X-AM-Service-Token", "service-secret")]).await;
+        assert!(denied.starts_with("HTTP/1.1 403"), "service must not read arbitrary state: {denied}");
+
+        let fallback = state(
+            e.app.clone(),
+            &[("X-AM-Token", &e.app.ui_token), ("X-AM-Service-Id", "herdr-upgrade"), ("X-AM-Service-Token", "wrong")],
+        )
+        .await;
+        assert!(fallback.starts_with("HTTP/1.1 401"), "invalid service credentials must not downgrade to User: {fallback}");
+    }
+
+    async fn service_post(app: Arc<App>, id: &str, token: &str, path: &str) -> String {
+        raw(
+            app,
+            format!("POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Service-Id: {id}\r\nX-AM-Service-Token: {token}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn daemon_swap_service_scope_accepts_only_its_fixed_probe_route() {
+        let e = crate::testing::env().await;
+        e.app.service_tokens.write().unwrap().insert(crate::service_auth::DAEMON_SWAP.into(), "swap-secret".into());
+        let target = distinct_bot(&e, "swap-probe-target").await;
+        // An unknown bot is 404 from the handler: auth and scope let the request through.
+        let response = service_post(e.app.clone(), "daemon-swap", "swap-secret", "/api/services/daemon-swap/probe/01NOSUCHBOT").await;
+        assert!(response.starts_with("HTTP/1.1 404"), "{response}");
+        // The same credential cannot use the generic prompt, bot control, or the other service's route.
+        for path in [
+            format!("/api/bots/{}/prompt", target.id),
+            format!("/api/bots/{}/stop", target.id),
+            format!("/api/services/herdr-upgrade/resume/{}", target.id),
+            "/api/services/herdr-upgrade/notify".to_string(),
+        ] {
+            let denied = service_post(e.app.clone(), "daemon-swap", "swap-secret", &path).await;
+            assert!(denied.starts_with("HTTP/1.1 403"), "{path}: {denied}");
+        }
+        // Another service's token under this id, or an unknown service id, is not a credential.
+        e.app.service_tokens.write().unwrap().insert(crate::service_auth::HERDR_UPGRADE.into(), "herdr-secret".into());
+        let swapped = service_post(e.app.clone(), "daemon-swap", "herdr-secret", "/api/services/daemon-swap/probe/01NOSUCHBOT").await;
+        assert!(swapped.starts_with("HTTP/1.1 401"), "{swapped}");
+        let unknown = service_post(e.app.clone(), "root", "swap-secret", "/api/services/daemon-swap/probe/01NOSUCHBOT").await;
+        assert!(unknown.starts_with("HTTP/1.1 401"), "{unknown}");
+    }
+
+    #[tokio::test]
+    async fn a_bot_principal_cannot_call_a_service_route() {
+        let e = crate::testing::env().await;
+        let bot = distinct_bot(&e, "not-a-service").await;
+        let response = raw(
+            e.app.clone(),
+            format!(
+                "POST /api/services/herdr-upgrade/resume/{} HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Bot-Id: {}\r\nX-AM-Bot-Token: {}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+                bot.id, bot.id, bot.hook_token
+            ),
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 403") && response.contains("service_only"), "{response}");
+    }
+
+    #[tokio::test]
+    async fn a_child_credential_is_not_rotated_because_its_pane_uses_the_parents() {
+        let e = crate::testing::env().await;
+        let child = distinct_bot(&e, "rotate-child").await;
+        sqlx::query("UPDATE bots SET managed_by='child' WHERE id=?").bind(&child.id).execute(&e.app.db).await.unwrap();
+        let response = raw(
+            e.app.clone(),
+            format!(
+                "POST /api/bots/{}/credential/rotate HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Token: {}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+                child.id, e.app.ui_token
+            ),
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 409") && response.contains("child_uses_parent_credential"), "{response}");
+        let current: String = sqlx::query_scalar("SELECT hook_token FROM bots WHERE id=?").bind(&child.id).fetch_one(&e.app.db).await.unwrap();
+        assert_eq!(current, child.hook_token);
+    }
+
+    #[tokio::test]
+    async fn a_bot_principal_cannot_rotate_a_credential() {
+        let e = crate::testing::env().await;
+        let bot = distinct_bot(&e, "bot-cannot-rotate").await;
+        let old = bot.hook_token.clone();
+        let response = raw(
+            e.app.clone(),
+            format!(
+                "POST /api/bots/{}/credential/rotate HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Bot-Id: {}\r\nX-AM-Bot-Token: {}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+                bot.id, bot.id, bot.hook_token
+            ),
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 403"), "only User may rotate bot credentials: {response}");
+        let current: String = sqlx::query_scalar("SELECT hook_token FROM bots WHERE id=?").bind(&bot.id).fetch_one(&e.app.db).await.unwrap();
+        assert_eq!(current, old);
+    }
+
+    #[tokio::test]
+    async fn relay_from_cannot_override_the_authenticated_bot_identity() {
+        let e = crate::testing::env().await;
+        let sender = distinct_bot(&e, "authenticated-sender").await;
+        let claimed = distinct_bot(&e, "forged-relay").await;
+        let target = distinct_bot(&e, "relay-target").await;
+        let body = serde_json::to_vec(&json!({"text": "must-not-send", "relay_from": claimed.id})).unwrap();
+        let response = raw(
+            e.app.clone(),
+            format!(
+                "POST /api/bots/{}/prompt HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Bot-Id: {}\r\nX-AM-Bot-Token: {}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+                target.id,
+                sender.id,
+                sender.hook_token,
+                body.len(),
+                String::from_utf8(body).unwrap(),
+            ),
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 403"), "{response}");
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE content='must-not-send'")
+            .fetch_one(&e.app.db)
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "mismatched relay identity must be rejected before message creation");
+    }
+
+    /// Defense in depth: even if two bots ever shared a token, a Bot principal still may only
+    /// claim its own id as `relay_from`. (`testing::claude_bot` gives both bots the same 'tok'.)
+    #[tokio::test]
+    async fn relay_from_is_compared_by_id_even_when_tokens_collide() {
+        let e = crate::testing::env().await;
+        let sender = crate::testing::claude_bot(&e.app, &e.project_id, "collide-sender").await;
+        let claimed = crate::testing::claude_bot(&e.app, &e.project_id, "collide-claimed").await;
+        let target = crate::testing::claude_bot(&e.app, &e.project_id, "collide-target").await;
+        assert_eq!(sender.hook_token, claimed.hook_token, "precondition: the helper hands out one shared token");
+        let body = serde_json::to_vec(&json!({"text": "collide-must-not-send", "relay_from": claimed.id})).unwrap();
+        let response = raw(
+            e.app.clone(),
+            format!(
+                "POST /api/bots/{}/prompt HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Bot-Id: {}\r\nX-AM-Bot-Token: {}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+                target.id,
+                sender.id,
+                sender.hook_token,
+                body.len(),
+                String::from_utf8(body).unwrap(),
+            ),
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 403") && response.contains("relay_from_mismatch"), "{response}");
+    }
+
+    #[tokio::test]
+    async fn rotating_a_bot_credential_invalidates_the_old_token_without_returning_the_new_one() {
+        let e = crate::testing::env().await;
+        let bot = distinct_bot(&e, "rotate-auth").await;
+        let old = bot.hook_token.clone();
+        let response = raw(
+            e.app.clone(),
+            format!(
+                "POST /api/bots/{}/credential/rotate HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Token: {}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+                bot.id, e.app.ui_token
+            ),
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(!response.contains(&old), "response must never disclose either credential");
+        let current: String = sqlx::query_scalar("SELECT hook_token FROM bots WHERE id=?").bind(&bot.id).fetch_one(&e.app.db).await.unwrap();
+        assert_ne!(current, old, "old bot credential is invalidated immediately");
+        let stale = state(e.app.clone(), &[("X-AM-Bot-Id", &bot.id), ("X-AM-Bot-Token", &old)]).await;
+        assert!(stale.starts_with("HTTP/1.1 401"), "the old proof must already be unusable: {stale}");
+    }
+}
+
+#[cfg(test)]
 mod caller_audit_tests {
     //! review d77434c0 #3：`X-AM-Caller` 是自由文字，任何拿得到 UI token 的人都能寫 `caller=agm`。
     //! 身分只認 `X-AM-Bot-Id` ＋ 對得上的 `X-AM-Bot-Token`；自稱記在另一格，而且要看得出是自稱。
@@ -5619,22 +6142,26 @@ mod caller_audit_tests {
     }
 
     /// 真的走一次 HTTP（含 `auth` 中介層），回 `(狀態行, intent 記下的呼叫端)`。
-    async fn delete_over_http(app: &Arc<App>, bot_id: &str, headers: &[(&str, &str)]) -> (String, String) {
+    /// `DELETE /api/bots/{id}` with exactly these headers (no UI token added); the raw response.
+    async fn delete_raw(app: &Arc<App>, bot_id: &str, headers: &[(&str, &str)]) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let router = super::router(app.clone());
         let server =
             tokio::spawn(async move { axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await });
         let extra: String = headers.iter().map(|(k, v)| format!("{k}: {v}\r\n")).collect();
-        let req = format!(
-            "DELETE /api/bots/{bot_id} HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Token: {}\r\n{extra}Connection: close\r\nContent-Length: 0\r\n\r\n",
-            app.ui_token
-        );
+        let req = format!("DELETE /api/bots/{bot_id} HTTP/1.1\r\nHost: 127.0.0.1\r\n{extra}Connection: close\r\nContent-Length: 0\r\n\r\n");
         let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
         c.write_all(req.as_bytes()).await.unwrap();
         let mut out = String::new();
         c.read_to_string(&mut out).await.unwrap();
         server.abort();
+        out
+    }
+
+    /// Delete with these headers, then read who the delete intent says asked for it.
+    async fn delete_as(app: &Arc<App>, bot_id: &str, headers: &[(&str, &str)]) -> (String, String) {
+        let out = delete_raw(app, bot_id, headers).await;
         let payload: String = sqlx::query_scalar("SELECT payload_json FROM intents WHERE kind = 'delete_bot' AND subject_id = ?")
             .bind(bot_id)
             .fetch_one(&app.db)
@@ -5642,6 +6169,13 @@ mod caller_audit_tests {
             .unwrap();
         let v: Value = serde_json::from_str(&payload).unwrap();
         (out.lines().next().unwrap_or_default().to_string(), v["requested_by"].as_str().unwrap_or_default().to_string())
+    }
+
+    /// As the User (shared UI token) plus these extra headers.
+    async fn delete_over_http(app: &Arc<App>, bot_id: &str, headers: &[(&str, &str)]) -> (String, String) {
+        let mut all = vec![("X-AM-Token", app.ui_token.as_str())];
+        all.extend_from_slice(headers);
+        delete_as(app, bot_id, &all).await
     }
 
     /// 只有 hook token 對得上才填 `bot=`；`X-AM-Caller` 不管寫什麼都只進 `caller_self_reported=`。
@@ -5660,18 +6194,14 @@ mod caller_audit_tests {
         assert!(by.contains(" bot=-"), "沒有 hook token 就不能有身分：{by}");
         assert!(by.contains("peer=127.0.0.1:") && by.contains("ua=curl/8"), "{by}");
 
-        // (2) 自稱是某顆 bot 但 token 對不上：一樣沒有身分。
-        let (_, by) = delete_over_http(
-            &app,
-            &impostor.id,
-            &[("X-AM-Bot-Id", &real.id), ("X-AM-Bot-Token", "not-the-token"), ("X-AM-Caller", "agm")],
-        )
-        .await;
-        assert!(by.contains(" bot=-"), "token 對不上不能算驗過：{by}");
+        // (2) 自稱是某顆 bot 但 token 對不上：#556 起中介層直接 401，不降級成 User，也就刪不掉、不留 intent。
+        let refused = delete_raw(&app, &impostor.id, &[("X-AM-Bot-Id", &real.id), ("X-AM-Bot-Token", "not-the-token"), ("X-AM-Caller", "agm")]).await;
+        assert!(refused.starts_with("HTTP/1.1 401"), "token 對不上不能算驗過：{refused}");
+        assert!(db::bot(&app.db, &impostor.id).await.unwrap().unwrap().deleted_at.is_none(), "被拒的請求不能刪掉 bot");
 
-        // (3) 帶對 token：用驗過的身分，自稱照樣只是自稱。
+        // (3) 帶對 token（Bot principal，不混帶 UI token）：用驗過的身分，自稱照樣只是自稱。
         let token: String = sqlx::query_scalar("SELECT hook_token FROM bots WHERE id = ?").bind(&real.id).fetch_one(&app.db).await.unwrap();
-        let (_, by) = delete_over_http(&app, &real.id, &[("X-AM-Bot-Id", &real.id), ("X-AM-Bot-Token", &token), ("X-AM-Caller", "agm")]).await;
+        let (_, by) = delete_as(&app, &real.id, &[("X-AM-Bot-Id", &real.id), ("X-AM-Bot-Token", &token), ("X-AM-Caller", "agm")]).await;
         assert!(by.contains(&format!("bot={}(charlie)", real.id)), "{by}");
         assert!(by.contains("caller_self_reported=agm"), "{by}");
     }

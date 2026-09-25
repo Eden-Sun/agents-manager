@@ -3,6 +3,20 @@
 這份 runbook 是 AGM 已核准維護窗口後的人工操作步驟。`herdr-update-kick.sh` 只偵測／派工，
 不會升級、不會重啟 server；正式操作前仍要取得部署租約、使用者同意與 AGM 排定的維護窗口。
 
+## Launchd service principal（issue #556）
+
+原始檔是 repo 的 [`herdr-upgrade.sh`](herdr-upgrade.sh)；`~/.config/agents-manager/ops/herdr-upgrade/herdr-upgrade.sh` 是從這裡複製過去的副本，下次維護窗口前**先把 repo 版複製過去**（副本還是舊寫法：讀 `ui-token`、以 bot 名義 `relay_from`）。它用 daemon 建的 `<data_dir>/service-tokens/herdr-upgrade.token`（目錄 `0700`、檔 `0600`）當 service principal：不是使用者、不冒充 bot，token 只在 python 裡讀進 header，不進 argv／環境變數／log。憑證缺、不安全或回 401／403 就停，不退回共用 UI token。先部署支援 `service_principals` 的 daemon（`GET /api/capabilities`），憑證檔才會存在。
+
+| 舊副本的呼叫 | repo 版 |
+|---|---|
+| `GET /api/session` 當 liveness | `GET /api/supervisor/health` |
+| `GET /api/state` 快照 | `GET /api/supervisor/state`（去敏；service 讀不到帶 env 的 `/api/state`） |
+| `GET /api/capabilities`、`/api/panes` | 同路徑，改帶 service principal |
+| `POST /api/bots/{id}/start?resume=native` | `POST /api/services/herdr-upgrade/resume/{id}`：daemon 固定 native resume，不收其他選項 |
+| `POST /api/bots/{AGM}/prompt`，`relay_from` 填某顆 bot | `POST /api/services/herdr-upgrade/notify`，body 只有 `{"text":"…"}`：daemon 只送協調者、來源固定 daemon |
+
+`scripts/ops/herdr-upgrade_test.sh` 對假 daemon 驗身分標頭與憑證檔檢查，並靜態檢查原始碼沒有退回 UI token 或冒名。
+
 ## 為什麼升級後一定要驗本機網路
 
 herdr 是 Homebrew 的 adhoc 簽章，每次升級簽章 identifier 都換：0.8.2＝`herdr-c2fd8e7c703fc4e`，

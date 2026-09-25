@@ -47,6 +47,7 @@ class FakeDaemon(BaseHTTPRequestHandler):
         type(self).seen.append({
             "method": method, "path": path, "token": self.headers.get("X-AM-Token"), "body": body,
             "bot_id": self.headers.get("X-AM-Bot-Id"), "bot_token": self.headers.get("X-AM-Bot-Token"),
+            "service_id": self.headers.get("X-AM-Service-Id"), "service_token": self.headers.get("X-AM-Service-Token"),
             "caller": self.headers.get("X-AM-Caller"),
         })
         if path in type(self).slow:
@@ -1499,7 +1500,7 @@ class DualRoleTest(CliCase):
 
     def setUp(self):
         super().setUp()
-        for k in ("AM_BOT_ID", "AM_HOOK_TOKEN"):
+        for k in ("AM_BOT_ID", "AM_BOT_TOKEN", "AM_HOOK_TOKEN", "AM_SERVICE_ID", "AM_SERVICE_TOKEN_FILE"):
             old = os.environ.pop(k, None)
             self.addCleanup(lambda k=k, v=old: os.environ.__setitem__(k, v) if v is not None else os.environ.pop(k, None))
         self.write_runtime({
@@ -1510,18 +1511,35 @@ class DualRoleTest(CliCase):
     def last(self, method: str, prefix: str) -> dict:
         return [r for r in FakeDaemon.seen if r["method"] == method and r["path"].startswith(prefix)][-1]
 
-    def test_the_role_token_rides_along_only_from_its_own_pane(self):
+    def test_each_bot_request_uses_its_pane_identity_without_the_shared_user_token(self):
         FakeDaemon.routes["POST /api/supervisor/inbox/e1/ack"] = (200, {})
-        os.environ["AM_BOT_ID"], os.environ["AM_HOOK_TOKEN"] = "bot-resp", "hook-secret"
+        os.environ["AM_BOT_ID"], os.environ["AM_BOT_TOKEN"] = "bot-resp", "hook-secret"
         self.ok("ack", "e1")
         seen = self.last("POST", "/api/supervisor/inbox/e1/ack")
         self.assertEqual((seen["bot_id"], seen["bot_token"]), ("bot-resp", "hook-secret"))
-        # 同一支 CLI 在別顆 bot 的 pane 裡跑：不帶那顆 bot 的 token，也就冒充不了協調者。
-        os.environ["AM_BOT_ID"] = "bot-worker"
+        self.assertIsNone(seen["token"], "a bot request must not also carry the shared User token")
+        # 同一支 CLI 在別顆 bot 的 pane 裡跑：改用那顆 bot 自己的 proof，不能借 AGM 的身分。
+        os.environ["AM_BOT_ID"], os.environ["AM_BOT_TOKEN"] = "bot-worker", "worker-secret"
         self.ok("ack", "e1")
         seen = self.last("POST", "/api/supervisor/inbox/e1/ack")
-        self.assertIsNone(seen["bot_token"])
+        self.assertEqual((seen["bot_id"], seen["bot_token"]), ("bot-worker", "worker-secret"))
+        self.assertIsNone(seen["token"], "a Bot principal must never carry the shared User token")
+        # A mismatched token remains a Bot request and must fail at the daemon; it is never retried as User.
+        os.environ["AM_BOT_TOKEN"] = "hook-secret"
+        self.ok("ack", "e1")
+        seen = self.last("POST", "/api/supervisor/inbox/e1/ack")
+        self.assertEqual((seen["bot_id"], seen["bot_token"]), ("bot-worker", "hook-secret"))
+        self.assertIsNone(seen["token"])
         self.assertNotIn("hook-secret", json.dumps(self.ok("whoami")))
+
+    def test_missing_bot_token_sends_partial_identity_instead_of_downgrading_to_user(self):
+        FakeDaemon.routes["POST /api/supervisor/inbox/e1/ack"] = (200, {})
+        os.environ["AM_BOT_ID"] = "bot-resp"
+        self.ok("ack", "e1")
+        seen = self.last("POST", "/api/supervisor/inbox/e1/ack")
+        self.assertEqual(seen["bot_id"], "bot-resp")
+        self.assertIsNone(seen["bot_token"])
+        self.assertIsNone(seen["token"], "a missing bot proof must be rejected by daemon, never retried as User")
 
     def test_whoami_and_inbox_mine_follow_the_runtime_role(self):
         self.assertEqual(self.ok("whoami")["role"], "responder")
@@ -1645,6 +1663,7 @@ class MissionCommandTest(CliCase):
         self.assertEqual(body["reply_to"], "e9")
         self.assertEqual(body["relay_from"], "bot-agm")
 
+
     def test_revise_posts_to_its_own_endpoint(self):
         FakeDaemon.routes["POST /api/missions/m1/revise"] = (200, {"id": "m2", "parent_mission_id": "m1"})
         out = self.ok("mission", "revise", "m1", "--text", "順便改標題", "--request-id", "rev1")
@@ -1718,6 +1737,44 @@ class MissionCommandTest(CliCase):
         FakeDaemon.routes["POST /api/missions/m1/deliver"] = (409, {"error": "conflict", "reason": "not_fast_forward"})
         err = self.bad("mission", "deliver", "m1", "--worktree", "/tmp/wt")
         self.assertEqual(err["detail"]["reason"], "not_fast_forward")
+
+
+class ServicePrincipalClientTest(CliCase):
+    def setUp(self):
+        super().setUp()
+        for k in ("AM_SERVICE_ID", "AM_SERVICE_TOKEN_FILE", "AM_BOT_ID", "AM_BOT_TOKEN", "AM_HOOK_TOKEN"):
+            old = os.environ.pop(k, None)
+            self.addCleanup(lambda k=k, v=old: os.environ.__setitem__(k, v) if v is not None else os.environ.pop(k, None))
+
+    def service_token_file(self, mode=0o600):
+        path = Path(self.dir.name) / "daemon-swap.token"
+        path.write_text("service-test-token\n", encoding="utf-8")
+        path.chmod(mode)
+        os.environ["AM_SERVICE_ID"] = "daemon-swap"
+        os.environ["AM_SERVICE_TOKEN_FILE"] = str(path)
+        return path
+
+    def test_service_identity_uses_private_file_without_fetching_ui_token(self):
+        self.service_token_file()
+        FakeDaemon.routes["GET /api/supervisor/health"] = (200, {"status": "healthy"})
+        self.ok("health")
+        seen = next(r for r in FakeDaemon.seen if r["path"] == "/api/supervisor/health")
+        self.assertEqual((seen["service_id"], seen["service_token"]), ("daemon-swap", "service-test-token"))
+        self.assertIsNone(seen["token"])
+        self.assertFalse(any(r["path"] == "/api/session" for r in FakeDaemon.seen))
+
+    def test_service_identity_rejects_a_group_or_world_readable_token_file(self):
+        self.service_token_file(0o644)
+        err = self.bad("health")
+        self.assertEqual(err["error"], "bad_service_auth")
+        self.assertEqual(FakeDaemon.seen, [], "unsafe credentials must fail before sending any request")
+
+    def test_service_identity_rejects_a_group_or_world_accessible_token_directory(self):
+        path = self.service_token_file()
+        path.parent.chmod(0o755)
+        err = self.bad("health")
+        self.assertEqual(err["error"], "bad_service_auth")
+        self.assertEqual(FakeDaemon.seen, [], "an exposed service-token directory must fail before sending any request")
 
 
 class AssignMissionFlagsTest(CliCase):
