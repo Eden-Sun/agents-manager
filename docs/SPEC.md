@@ -809,6 +809,8 @@ user 文字先照 CLI 自己的拆法還原（`lifecycle::pasted_content`，只�
 維持 queued 退避），不可能的回 422。規劃後、打第一個字前框才被填上的極小競態，把剛建的 turn 與 user 訊息刪回去再回
 409，讓同一個 request id 能重送。排隊中的 prompt 的重試規則見下方「排隊中的 prompt 重試」。
 
+第一次貼字前會重讀輸入框；若回合結束時 Codex 把未送出的提問答案放回 composer（0.157 起），daemon 保留該答案、回可重試的 `409 composer_busy`，不把新 prompt 接在後面。自動替 TUI 選答案的操作（數字、`y`，以及方向鍵後的 Enter）會在送鍵前重讀畫面並辨認仍開著的目標提示及選項；認不出來就不按。
+
 **空框的判定依各 provider 的實機畫面**（`screen.rs` 的真 fixture 都有測）：
 
 | provider | 輸入框長相 | 算空框 |
