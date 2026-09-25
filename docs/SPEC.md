@@ -1092,6 +1092,7 @@ stall watchdog 的自動補送走同一條驗證路徑，次數記在 `turns.res
    失敗 → Run `exited`、回 502。
 5. 更新 Run 的 `workspace_id`／`pane_id`／`tab_id`；先寫 `runs.agent_name`，再 `agent.start {name, kind, pane_id, args: injected ++ bot.args, timeout_ms: 60000}`
    （立即回 `launch_pending`）。之後所有 herdr 目標一律用 `run.agent_name`。pane 建好到 start 成功之間任何失敗 → Run `exited` + 盡力關 pane（tab 空了一併關）。
+   Codex 啟動（包含 resume／fork 與子 agent 原地重啟）在 `bot.args` 後固定加 `--no-daemon --no-alt-screen`：0.157 的 `--no-daemon` 不會連上或啟動共用背景 server，該 pane 使用自己的 embedded server；`--no-alt-screen` 強制終端 transcript 模式，即使 Codex 預設開啟 fullscreen transcript 也保留一般可讀畫面與 scrollback。這讓每個 pane 的 `AM_*`／hook 環境留在自己的 Codex 執行個體。
 6. 開該 pane 的狀態訂閱。
 7. `agent.wait {until:[idle,done,blocked], timeout_ms: 60000}`：idle/done → running+idle；blocked → running+blocked（例如 trust 提示）；
    timeout/error → 不關 pane，`agent.get` 有 agent → running+unknown，沒有 → `exited` + 關 pane。
