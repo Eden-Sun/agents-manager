@@ -34,6 +34,8 @@ class FakeDaemon(BaseHTTPRequestHandler):
     seen: list = []
     slow: set = set()
     drop: set = set()
+    # slow 的 handler 等這個 Event（最多 1.5 秒）：測試收尾時放行，handler 才不會活過它的測試（#560）。
+    release: threading.Event = threading.Event()
 
     def log_message(self, *_args):  # 別把測試輸出洗掉
         pass
@@ -48,7 +50,7 @@ class FakeDaemon(BaseHTTPRequestHandler):
             "caller": self.headers.get("X-AM-Caller"),
         })
         if path in type(self).slow:
-            time.sleep(1.5)
+            type(self).release.wait(1.5)
         if path in type(self).drop:
             # 收到請求後不回應就把連線掐掉（送達未知的那種故障）。
             self.request.shutdown(socket.SHUT_RDWR)
@@ -92,6 +94,36 @@ class FakeServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._idle = threading.Condition()
+        self.inflight = 0
+        self.errors: list = []
+
+    # daemon_threads 的 handler 沒人等：數著還在跑的，收尾才能等它們跑完（#560）。
+    def process_request(self, request, client_address):
+        with self._idle:
+            self.inflight += 1
+        super().process_request(request, client_address)
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            with self._idle:
+                self.inflight -= 1
+                self._idle.notify_all()
+
+    def handle_error(self, request, client_address):
+        # 標準版把 traceback 印到**呼叫當下的** `sys.stderr`：handler 執行緒出錯時若別的指令正在
+        # `bad()` 裡接 stderr，那段字會混在 CLI 的 JSON 前面（#560）。逾時／掐線測試本來就會讓
+        # handler 寫到關掉的連線，記在這裡給要看的測試查。
+        self.errors.append(sys.exc_info()[1])
+
+    def drain(self, timeout: float) -> bool:
+        with self._idle:
+            return self._idle.wait_for(lambda: self.inflight == 0, timeout)
+
     def server_bind(self):
         # HTTPServer.server_bind 會呼叫 socket.getfqdn()，在沒有反解的機器上要等
         # 三十秒才逾時。測試不需要 server_name，跳過那一步。
@@ -120,6 +152,8 @@ class CliCase(unittest.TestCase):
         FakeDaemon.seen = []
         FakeDaemon.slow = set()
         FakeDaemon.drop = set()
+        FakeDaemon.release = threading.Event()
+        self.addCleanup(self.release_server)
         self.dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.dir.cleanup)
         self.write_runtime({"daemon_url": f"http://127.0.0.1:{self.port}", "manager_bot_id": "bot-agm"})
@@ -129,6 +163,15 @@ class CliCase(unittest.TestCase):
         for var in ("HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"):
             os.environ[var] = "http://127.0.0.1:9"
             self.addCleanup(lambda v=var: os.environ.pop(v, None))
+
+    def release_server(self) -> None:
+        """收尾：放行卡在 slow 的 handler，等 in-flight 的全部跑完（#560）。
+
+        不等的話，逾時測試留下的 handler 會在**下一個**測試裡醒來、往關掉的連線寫回應，
+        那時的錯誤輸出會落進下一個測試 `bad()` 正在接的 stderr。
+        """
+        FakeDaemon.release.set()
+        self.assertTrue(self.server.drain(5), f"假 daemon 還有 {self.server.inflight} 個 handler 沒跑完")
 
     def write_runtime(self, cfg: dict) -> None:
         (Path(self.dir.name) / "runtime.json").write_text(json.dumps(cfg), encoding="utf-8")
@@ -157,6 +200,66 @@ class CliCase(unittest.TestCase):
         code, out, err = self.run_cli(*argv)
         self.assertNotEqual(code, 0, f"expected failure, stdout={out}")
         return json.loads(err)
+
+
+def _wait_until(cond, timeout: float = 5.0) -> bool:
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if cond():
+            return True
+        time.sleep(0.01)
+    return cond()
+
+
+class FakeServerIsolationTest(CliCase):
+    """假 daemon 的 handler 執行緒不能漏到別的指令、別的測試（issue #560）。
+
+    CI run 36124164820：逾時測試的 slow handler 活過了自己的測試，1.5 秒後在下一個測試裡醒來、
+    往關掉的連線寫回應而出錯，`socketserver` 把 traceback 印到當下的 `sys.stderr`——正好是
+    `test_missing_id_is_not_found` 的 `bad()` 在接的那個，JSON 解析失敗。這裡用 Event 把時序釘死重現。
+    """
+
+    def _fire(self, path: str) -> None:
+        """不經 agm、不等回應地打一發（proxy 環境變數在 setUp 被設成壞的，這裡直接開 socket）。"""
+        with contextlib.suppress(OSError), socket.create_connection(("127.0.0.1", self.port), timeout=10) as s:
+            s.sendall(f"GET {path} HTTP/1.0\r\n\r\n".encode())
+            while s.recv(4096):
+                pass
+
+    def test_a_late_handler_error_does_not_land_in_another_commands_stderr(self):
+        gate = threading.Event()
+
+        def late(_path):
+            gate.wait(5)
+            raise RuntimeError("late handler blew up")
+
+        FakeDaemon.routes["GET /late"] = late
+        threading.Thread(target=self._fire, args=("/late",), daemon=True).start()
+        self.assertTrue(_wait_until(lambda: self.server.inflight == 1), "那一發要先卡在 handler 裡")
+
+        def listing(_path):
+            # 在 agm 正在跑、stderr 被接走的這個時間點放行那個 handler，並等它連錯誤處理都做完。
+            gate.set()
+            _wait_until(lambda: self.server.inflight == 1)
+            return (200, {"assignments": [], "has_more": False})
+
+        FakeDaemon.routes["GET /api/supervisor/assignments"] = listing
+        self.assertEqual(self.bad("assignments", "--id", "nope")["error"], "not_found")
+        self.assertTrue(_wait_until(lambda: len(self.server.errors) == 1), "handler 的錯要記在伺服器上")
+        self.assertIn("late handler blew up", str(self.server.errors[0]))
+
+    def test_a_slow_handler_does_not_outlive_its_test(self):
+        FakeDaemon.routes["POST /api/supervisor/assignments"] = (200, {"id": "a1"})
+        FakeDaemon.slow = {"/api/supervisor/assignments"}
+        self.assertEqual(
+            self.bad("--timeout", "0.2", "assign", "--bot", "b1", "--text", "x", "--request-id", "r-slow")["error"],
+            "delivery_unknown",
+        )
+        self.assertGreaterEqual(self.server.inflight, 1, "客戶端逾時走了，handler 還在等")
+        started = time.monotonic()
+        self.release_server()
+        self.assertEqual(self.server.inflight, 0)
+        self.assertLess(time.monotonic() - started, 1.0, "收尾要放行它，不是乾等 1.5 秒")
 
 
 # --------------------------------------------------------------- loopback 防護
