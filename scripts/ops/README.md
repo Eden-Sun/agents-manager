@@ -6,6 +6,19 @@
 **這裡的檔案不會自動安裝。** daemon 只把 `bin/agm`（`scripts/agm.py`）部署到總管 cwd；
 這些 kick 腳本要不要裝、什麼時候裝，由 AGM 決定並在有窗口的時候執行。
 
+## relay 相容期 warn 計數（issue #410）
+
+`scripts/ops/relay-compat-warnings.sh` 唯讀統計 daemon log 中 `/prompt` 的 `relay_from` 未驗證相容期警告，
+輸出警告總數與最新 UTC 時間戳，不輸出 log 原文或 bot id：
+
+```sh
+scripts/ops/relay-compat-warnings.sh [~/.config/agents-manager/daemon.log]
+```
+
+省略路徑時依序採用 `DAEMON_LOG`，再用 `AM_DATA_DIR`／`AM_DATA` 下的 `daemon.log`，最後才用預設資料目錄。
+無法讀取 log 會以 exit 2 失敗；命中警告但沒有可辨識時間戳會以 exit 3 失敗，避免報成零或完整結果。
+這是對指定單一 log 的即時盤點；確認連續 7 天時，還要確認該檔涵蓋整段期間且沒有 log 輪替缺口。
+
 **裝了哪些、跟 repo 差多少**（issue #418）：要安裝的檔與位置只列在 `install-manifest.tsv`。
 `bin/agm ops-sync --check` 唯讀比對安裝端（AGM 目錄）與本機 repo 的 `origin/main`（要最新先 `git fetch`；
 `--repo` 預設 `AGM_REPO`，再退回 `~/project/agents-manager`），分四種報：
