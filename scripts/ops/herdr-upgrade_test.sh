@@ -13,11 +13,12 @@ check_no() { if grep -qF -- "$2" "$3"; then bad "$1（不該出現：$2）"; els
 command -v python3 >/dev/null 2>&1 || { echo "SKIP - 沒有 python3"; exit 0; }
 
 ROOT=$(mktemp -d)
-trap 'kill "${SRV_PID:-}" 2>/dev/null; rm -rf "$ROOT"' EXIT
+# 收掉自己起的假 daemon 並等它結束（不 wait 的話 bash 會在結尾印一行「Terminated」，看起來像出錯）。
+trap '[ -n "${SRV_PID:-}" ] && { kill "$SRV_PID" 2>/dev/null; wait "$SRV_PID" 2>/dev/null; }; rm -rf "$ROOT"' EXIT
 
 # 假 daemon：記下每個請求的 method、path 與身分標頭，/api/supervisor/health 回 200，其他 404。
 cat > "$ROOT/server.py" <<'PY'
-import http.server, json, sys
+import http.server, json, socketserver, sys
 log, portfile = sys.argv[1], sys.argv[2]
 class H(http.server.BaseHTTPRequestHandler):
     def handle_one(self, method):
@@ -33,19 +34,27 @@ class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self): self.handle_one("GET")
     def do_POST(self): self.handle_one("POST")
     def log_message(self, *a): pass
-s = http.server.HTTPServer(("127.0.0.1", 0), H)
+class Server(http.server.HTTPServer):
+    # HTTPServer.server_bind 會 socket.getfqdn("127.0.0.1") 反解主機名；CI runner 上反解可能卡好幾秒，
+    # port 檔就遲遲寫不出來（#571）。只綁 socket，不反解。
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+s = Server(("127.0.0.1", 0), H)
 open(portfile, "w").write(str(s.server_address[1]))
 s.serve_forever()
 PY
 # canary-gap: 假 daemon 只用 http.server 回固定 JSON、寫請求紀錄，沒有任何 subprocess／破壞性指令
 python3 "$ROOT/server.py" "$ROOT/requests.log" "$ROOT/port" 2> "$ROOT/server.err" & SRV_PID=$!
-# CI 的 macOS runner 起 python 可能要好幾秒：等到 30 秒，中途死掉就不必再等。
-for _ in $(seq 1 300); do
-  [ -s "$ROOT/port" ] && break
+# 等到 port 真的連得上才往下：總時限 30 秒，假 daemon 中途死掉就不必再等。
+up=""
+deadline=$((SECONDS + 30))
+while [ "$SECONDS" -lt "$deadline" ]; do
   kill -0 "$SRV_PID" 2>/dev/null || break
+  if [ -s "$ROOT/port" ] && (exec 3<>"/dev/tcp/127.0.0.1/$(cat "$ROOT/port")") 2>/dev/null; then up=1; break; fi
   sleep 0.1
 done
-[ -s "$ROOT/port" ] || { echo "FAIL - 假 daemon 沒起來"; sed 's/^/      /' "$ROOT/server.err"; exit 1; }
+[ -n "$up" ] || { echo "FAIL - 假 daemon 30 秒內連不上"; sed 's/^/      /' "$ROOT/server.err"; exit 1; }
 
 # 從腳本抽出 svc／svc_code（到下一個頂層 `}` 為止），不執行升級流程本身。
 sed -n '/^svc() {$/,/^}$/p; /^svc_code() /p' "$SCRIPT" > "$ROOT/svc.sh"
