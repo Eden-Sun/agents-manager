@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useChoiceMenu } from '../hooks/useChoiceMenu'
 import { usePendingQuestion } from '../hooks/usePendingQuestion'
-import { questionVisibleOnScreen } from '../lib/pendingQuestion'
+import { pendingAtOnScreen, questionVisibleOnScreen } from '../lib/pendingQuestion'
 import { PendingQuestionCard } from './PendingQuestionCard'
 import { herdrKeyFromEvent, KEYPAD, usePaneKeys } from '../hooks/usePaneKeys'
 import { blockedKeyAction, passthroughLive } from '../lib/blockedKeys'
@@ -39,6 +39,8 @@ export function BlockedModal({ botId, onClose }: { botId: string; onClose: () =>
   // 畫面上看不到題目（pane 太矮、claude 把選單裁掉）時，從 transcript 補題目（2026-09-23 使用者）。
   const pending = usePendingQuestion(botId, false)
   const showPending = pending.length > 0 && !questionVisibleOnScreen(pending, menu?.question)
+  // 畫面上是原題的第幾題：補題目、補「第幾題／上一題下一題」（issue #559）。
+  const pendingAt = pendingAtOnScreen(pending, menu)
   /** 選單模式預設只留問題與選項；終端原文、整排按鍵與鍵盤直通收在這顆開關後面。 */
   const [extras, setExtras] = useState(false)
   const showRaw = !menu || extras
@@ -127,16 +129,24 @@ export function BlockedModal({ botId, onClose }: { botId: string; onClose: () =>
 
         <CodexUpdateHint botId={botId} text={snap?.text} onAnswered={refresh} />
 
-        {showPending ? <PendingQuestionCard questions={pending} /> : null}
+        {/* 認不出選單時原題攤開、排在終端上面（那時它是唯一讀得懂的題目）；認得出時收進下面的主捲軸（#559）。 */}
+        {showPending && !menu ? <PendingQuestionCard questions={pending} defaultOpen answerWhere="below" /> : null}
 
-        {/* 選單模式只有一條主捲軸，問題行釘在上緣：兩塊各自捲在手機上分不清（2026-09-12 第二輪回饋第 4 點）。 */}
+        {/* 選單模式只有一條主捲軸，問題行釘在上緣：兩塊各自捲在手機上分不清（2026-09-12 第二輪回饋第 4 點）。
+            原題收成一行排在選項**後面**：手機第一屏要先給能點的選項（issue #559）。 */}
         {menu ? (
           <div className="blocked-modal-body">
             {surveyDraftAllowed(isSurvey(menu)) ? (
             <BlockedDraft botId={botId} menu={menu} onAnswered={refresh} />
           ) : (
-            <BlockedChoices botId={botId} menu={menu} onAnswered={refresh} />
+            <BlockedChoices
+              botId={botId}
+              menu={menu}
+              onAnswered={refresh}
+              pendingAt={pendingAt}
+            />
           )}
+            {showPending ? <PendingQuestionCard questions={pending} current={pendingAt?.at ?? -1} /> : null}
           </div>
         ) : null}
 
@@ -171,7 +181,8 @@ export function BlockedModal({ botId, onClose }: { botId: string; onClose: () =>
               />
               鍵盤直通
             </label>
-            <span className="hint">
+            {/* 直通關著時那段在講實體鍵盤：手機上藏起來，把高度留給選項（#559）；開關本身照樣看得見（#545）。 */}
+            <span className={`hint${!dangerous && !keysLive ? ' hint-keys-off' : ''}`}>
               {dangerous
                 ? 'claude 的防誤刪框：只有你本人能核准，而且要按上面那兩個選項。這種框上不開放鍵盤直通——打字打到一個 1 就等於按下「1. Yes」。'
                 : keysLive

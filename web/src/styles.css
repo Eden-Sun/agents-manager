@@ -2093,6 +2093,25 @@ button.run-debug-toggle:hover:not(:disabled) {
   line-height: 1.5;
 }
 
+/* 手機：跟其他對話框一樣是全螢幕 sheet（issue #559）。上面 `.modal.blocked-modal` 的特異性蓋掉了通用的 sheet 規則，
+   iOS 的 `100vh` 又比可視區高，框的標題與底部按鈕一起跑出畫面。 */
+@media (width <= 640px) {
+  .modal.blocked-modal {
+    width: 100%;
+    height: 100dvh;
+    min-height: 0;
+    max-height: none;
+  }
+
+  .blocked-modal-foot {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  .blocked-modal-hints .hint-keys-off {
+    display: none;
+  }
+}
+
 .term-pane .term {
   flex: 1;
   min-height: 0;

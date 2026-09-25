@@ -127,8 +127,8 @@
 
 - **畫面上看不到題目時，從 transcript 補**（2026-09-23 使用者：「為什麼看不見題目」）：pane 太矮（真機 14 行）時 claude 把 AskUserQuestion 裁掉，
   題目那行沒畫出來、選項只剩捲動中的一段（`↓ 3.`、跳到 `5.`），選單也因此認不出來。claude bot blocked 時每 5 秒讀
-  `GET /api/bots/{id}/pending-question`，畫面上的問句沒有包含這一題就在面板與全畫面視窗最上面疊一張卡：題目、header、選項與說明（只讀，
-  作答照舊用下面的按鍵），並寫明「終端太矮，題目被截掉了」。畫面本來就看得到題目時不疊。截圖：`docs/screenshots/pending-question/`。
+  `GET /api/bots/{id}/pending-question`，畫面上的問句沒有包含每一題就補一張「原題」卡：題目、header、選項與說明（只讀）。畫面本來就看得到題目時不補。
+  **卡片怎麼擺見下面「手機上點不到選項」（#559）**：認得出選單時收成一行、排在選項後面；認不出選單時才攤開在終端上面。截圖：`docs/screenshots/pending-question/`。
 
 - 標題列第二行常駐紅 `● 需要回應`（任何分頁都在，點了開全畫面終端，離開 blocked 才消失，沒有「知道了」）。
 - 認得出選單時（`lib/tuiChoices.ts`：至少兩項、連號、剛好一個游標、在畫面底部；認不出就整塊不長、退回終端快照＋按鍵面板）：
@@ -627,3 +627,19 @@ cc1 的 bot 好幾個回合都收在 `authentication_failed`，對話只寫「�
 - 截圖：`docs/screenshots/auth-cli-login/`（`scripts/auth-login-shots.mjs`，`MOBILE=1` 出手機那組；mock 模式：`__amMock.loggedOut('am-claude', 'cc1')` 後送含 `authfail` 的訊息）。
   ![桌機](screenshots/auth-cli-login/desktop-auth-fail.png) ![手機](screenshots/auth-cli-login/phone-auth-fail.png)
 
+## 「需要回應」框：手機上第一屏一定是能點的選項（2026-09-25 使用者，issue #559）
+
+使用者：「A 各種 手機版根本無法回應」。兩題的 AskUserQuestion、終端太矮：從對話紀錄補回來的原題卡整張攤開在框的最上面、
+又在唯一的捲軸外面，把選項擠到只剩半列；iOS 上框本身又比可視區高，標題與底部按鈕一起出畫面。
+
+- **選項優先**：原題卡在認得出選單時預設收成一行「▸ 原題（N 題）」，放進同一條主捲軸、排在選項**後面**；展開也不會把選項推走。
+  認不出選單時（只剩終端快照＋按鍵）才預設攤開、排在終端上面，那時它是唯一讀得懂的題目；它自己捲，不把底部按鍵擠出去。
+- **原題是唯讀摘要，不是第二份選項區**：作答要照畫面送鍵（送前重讀、對不上就不送），游標、`Type something`、`Submit` 列都只有畫面知道，
+  transcript 不知道；把它做成可點等於繞過這條規則。所以選項寫成散文清單（不編號、不加粗、不畫框），畫面上正在答的那一題不再列一次選項，
+  卡頭寫「只供閱讀；作答用上面的選項」。
+- **畫面沒畫出的東西從原題補到選項上面**：題目被裁掉時 `bc-question` 用原題的題目；分頁列被裁掉但原題有好幾題時，給「← 第 N／M 題 →」
+  （送 ←／→，跟分頁列同一條路）。第幾題是比對出來的（先比問句，沒有問句時比選項，兩題都對得上就不猜）。
+- **手機是全螢幕 sheet**：跟其他對話框一致（`.modal.blocked-modal` 的特異性原本蓋掉了通用 sheet 規則）。底部「鍵盤直通」的長說明在直通關著時講的是實體鍵盤，
+  手機上藏起來；開關本身照舊常駐（#545）。
+- 回歸檢查：`node scripts/verify-blocked-mobile.mjs`（mock `__amMock.twoAsk()`，量 390×844／390×640／1440×900 第一個選項整列可見且點得到，並在手機上真的點完兩題＋送出）。
+  ![修正前](screenshots/blocked-mobile/before-phone-390x844.png) ![修正後](screenshots/blocked-mobile/after-phone-390x844.png) ![展開原題](screenshots/blocked-mobile/after-phone-390x844-expanded.png) ![第二題](screenshots/blocked-mobile/after-flow-q2.png) ![桌機](screenshots/blocked-mobile/after-desktop-1440x900.png)

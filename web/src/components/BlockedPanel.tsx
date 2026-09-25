@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useChoiceMenu } from '../hooks/useChoiceMenu'
 import { usePendingQuestion } from '../hooks/usePendingQuestion'
-import { questionVisibleOnScreen } from '../lib/pendingQuestion'
+import { pendingAtOnScreen, questionVisibleOnScreen } from '../lib/pendingQuestion'
 import { PendingQuestionCard } from './PendingQuestionCard'
 import { KEYPAD, usePaneKeys } from '../hooks/usePaneKeys'
 import { useTerminalSnapshot } from '../hooks/useTerminalSnapshot'
@@ -35,6 +35,8 @@ export function BlockedPanel({
   // 畫面上看不到題目（pane 太矮、claude 把選單裁掉）時，從 transcript 補題目（2026-09-23 使用者）。
   const pending = usePendingQuestion(botId, paused)
   const showPending = pending.length > 0 && !questionVisibleOnScreen(pending, menu?.question)
+  // 畫面上是原題的第幾題：補題目、補「第幾題／上一題下一題」（issue #559）。
+  const pendingAt = pendingAtOnScreen(pending, menu)
   const [extras, setExtras] = useState(false)
   // `pre` 是 white-space: pre，內容一律當成一個字串算好再放進去，免得 JSX 的排版縮排跑進畫面。
   const body = err
@@ -72,14 +74,21 @@ export function BlockedPanel({
         ) : null}
       </div>
       <CodexUpdateHint botId={botId} text={snap?.text} onAnswered={refresh} />
-      {showPending ? <PendingQuestionCard questions={pending} /> : null}
+      {/* 同 `BlockedModal`：認得出選單時原題收成一行排在選項後面，認不出才攤開在最上面（issue #559）。 */}
+      {showPending && !menu ? <PendingQuestionCard questions={pending} defaultOpen answerWhere="below" /> : null}
       {menu ? (
         <>
           {surveyDraftAllowed(isSurvey(menu)) ? (
             <BlockedDraft botId={botId} menu={menu} onAnswered={refresh} />
           ) : (
-            <BlockedChoices botId={botId} menu={menu} onAnswered={refresh} />
+            <BlockedChoices
+              botId={botId}
+              menu={menu}
+              onAnswered={refresh}
+              pendingAt={pendingAt}
+            />
           )}
+          {showPending ? <PendingQuestionCard questions={pending} current={pendingAt?.at ?? -1} /> : null}
           <BlockedExtrasBar botId={botId} open={extras} onToggle={() => setExtras((v) => !v)} onAnswered={refresh} />
         </>
       ) : null}

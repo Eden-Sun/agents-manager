@@ -8,6 +8,7 @@ import { BOT_NAME_HINT, isValidBotName } from '../lib/botName'
 import { ApiError, BOT_KINDS } from './types'
 import type { BotKind } from './types'
 import { abortError } from './transport'
+import { TWO_ASK_QUESTIONS, twoAskKeys, twoAskScreen, twoAskStart, type TwoAskState } from './mockTwoAsk'
 import type { HttpMethod, SocketHandlers, Transport, UploadOptions } from './transport'
 
 /** 未知 kind 一律當 claude（與 daemon 的 400 不同，mock 寬鬆處理）。 */
@@ -2914,7 +2915,11 @@ export class MockTransport implements Transport {
     this.emitBotStatus(botId)
 
     const lowered = text.toLowerCase()
-    if (lowered.includes('tinyask')) {
+    if (lowered.includes('twoask')) {
+      // 兩題 AskUserQuestion、分頁列與題目都被裁掉（issue #559，`mockTwoAsk.ts`）。
+      this.twoAsk.set(botId, twoAskStart())
+      setTimeout(() => this.enterBlocked(botId), 900)
+    } else if (lowered.includes('tinyask')) {
       // pane 太矮、claude 把 AskUserQuestion 的題目裁掉（2026-09-23 真機）：畫面只剩選項，題目只在 transcript。
       this.tinyAsk.add(botId)
       setTimeout(() => this.enterBlocked(botId), 900)
@@ -3124,6 +3129,7 @@ export class MockTransport implements Transport {
   /** Public so the dev helper can force a blocked state without a prompt. */
   /** 走 tinyask 情境的 bot：畫面是裁過的選單、pending-question 回原題。 */
   private tinyAsk = new Set<string>()
+  private twoAsk = new Map<string, TwoAskState>()
   private bulletAsk = new Set<string>()
 
   /** 問句跟選項之間夾著條列說明的畫面（沒有 pending-question：這不是 AskUserQuestion）。回 bot id。 */
@@ -3140,6 +3146,7 @@ export class MockTransport implements Transport {
 
   private pendingQuestion(botId: string) {
     const run = this.activeRun(botId)
+    if (run?.agent_status === 'blocked' && this.twoAsk.has(botId)) return { questions: TWO_ASK_QUESTIONS }
     if (!run || run.agent_status !== 'blocked' || !this.tinyAsk.has(botId)) return { questions: null }
     return { questions: MOCK_TINY_ASK_QUESTIONS }
   }
@@ -3161,6 +3168,20 @@ export class MockTransport implements Transport {
     return id
   }
 
+  /** 兩題、第二題可複選、分頁列與題目被裁掉（issue #559）。沒指定就挑第一顆在跑的 claude。回 bot id。 */
+  enterTwoAsk(botId?: string): string | null {
+    const running =
+      botId && this.activeRun(botId) ? botId : this.bots.find((b) => b.kind === 'claude' && this.activeRun(b.id))?.id
+    // 一顆在跑的都沒有：起一顆 claude，等它跑起來再卡住（同 `enterTinyAsk`）。
+    const toStart = running ? null : (botId ?? this.bots.find((b) => b.kind === 'claude')?.id)
+    if (toStart) this.start(toStart)
+    const id = running ?? toStart
+    if (!id) return null
+    this.twoAsk.set(id, twoAskStart())
+    setTimeout(() => this.enterBlocked(id), toStart ? 2500 : 0)
+    return id
+  }
+
   enterBlocked(botId: string) {
     const run = this.activeRun(botId)
     if (!run) return
@@ -3176,6 +3197,15 @@ export class MockTransport implements Transport {
       throw new ApiError(409, { reason: 'expect_run_id 與目前 Run 不符', run_id: run.id }, 'conflict')
     }
     const keys = (Array.isArray(b.keys) ? b.keys : []).map(String)
+    const ask = run.agent_status === 'blocked' ? this.twoAsk.get(botId) : undefined
+    if (ask) {
+      const { state, outcome } = twoAskKeys(ask, keys)
+      this.twoAsk.set(botId, state)
+      if (outcome === null) return { ok: true, keys }
+      this.twoAsk.delete(botId)
+      // 交卷走下面 Enter 那條、取消走 Esc 那條。
+      keys.splice(0, keys.length, outcome === 'done' ? 'enter' : 'esc')
+    }
     if (run.agent_status === 'blocked') {
       this.tinyAsk.delete(botId)
       this.bulletAsk.delete(botId)
@@ -3528,8 +3558,11 @@ export class MockTransport implements Transport {
               .join(' ') + ` · ${bot.cwd ?? '~'} · Context 0% used · 5h 100% left`,
           ]
         : []
+    const twoAsk = this.twoAsk.get(botId)
     const body =
-      status === 'blocked' && this.tinyAsk.has(botId)
+      status === 'blocked' && twoAsk
+        ? twoAskScreen(twoAsk)
+        : status === 'blocked' && this.tinyAsk.has(botId)
         ? MOCK_TINY_ASK_SCREEN
         : status === 'blocked' && this.bulletAsk.has(botId)
         ? MOCK_BULLET_ASK_SCREEN
@@ -3610,6 +3643,8 @@ function installDevHelpers(mock: MockTransport) {
     block: (botIdOrName: string) => mock.enterBlocked(mock.botIdByName(botIdOrName) ?? botIdOrName),
     /** 題目被裁掉的 AskUserQuestion（pane 太矮）：畫面只剩選項，題目只能從 pending-question 讀。回 bot id。 */
     tinyAsk: (botIdOrName?: string) => mock.enterTinyAsk(botIdOrName ? (mock.botIdByName(botIdOrName) ?? botIdOrName) : undefined),
+    /** 兩題 AskUserQuestion、第二題可複選、分頁列與題目被裁掉（issue #559）。回 bot id。 */
+    twoAsk: (botIdOrName?: string) => mock.enterTwoAsk(botIdOrName ? (mock.botIdByName(botIdOrName) ?? botIdOrName) : undefined),
     /** 問句跟選項之間夾著 `·` 條列說明（claude 2.1.280 fullscreen renderer 邀請）。回 bot id。 */
     bulletAsk: (botIdOrName?: string) =>
       mock.enterBulletAsk(botIdOrName ? (mock.botIdByName(botIdOrName) ?? botIdOrName) : undefined),
