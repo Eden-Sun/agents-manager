@@ -985,15 +985,16 @@
   min-width: max-content;
 }
 
-/* 勾了停用的帳號不分剩餘寬度、條縮短，空間留給啟用的（2026-09-18 使用者）。 */
+/* 勾了停用的帳號不分剩餘寬度，空間留給啟用的（2026-09-18 使用者）。量表整排收掉，只留 logo、名稱與停用方塊
+   （2026-09-25 使用者：「若有已被 disable 的 identity 就讓寬度小一點」——只縮條寬時，倒數那列 `min-width: max-content`
+   照樣把格子撐到 230px）。點格子照樣開 popover 看明細。 */
 @media (width > 1024px) {
   .main-head .quota-hp.off {
-    flex: 0 1 auto;
+    flex: 0 0 auto;
   }
 
-  .main-head .quota-hp.off .quota-bar-wrap {
-    flex: 0 0 24px;
-    min-width: 24px;
+  .main-head .quota-hp.off .quota-bars-open {
+    display: none;
   }
 }
 
