@@ -435,6 +435,8 @@ pub async fn assign(
     }
     // Best effort: a failure here leaves the row queued, which is the recoverable state.
     controller::dispatch(app, &a.id).await;
+    // #557：路徑比對之後才問撞題。只 spawn，不等 Jev（#480）。答案不併進 ownership_conflicts，也不改這筆交辦。
+    crate::judge::collision::schedule_assignment(app, &a.id).await;
     let a = store::assignment(&app.db, &a.id).await.map_err(up)?.unwrap_or(a);
     app.emit("supervisor_changed", json!({"assignment_id": a.id, "status": a.status})).await;
     let mut out = a.to_json();

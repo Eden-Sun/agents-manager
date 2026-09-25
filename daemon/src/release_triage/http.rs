@@ -82,7 +82,14 @@ async fn post_verdicts(State(app): State<Arc<App>>, Json(sub): Json<Submission>)
     }
     let cfg = app.cfg.get().await.release_triage;
     let publish = if next == Status::Judged && cfg.publish {
-        Some(issue::publish_version(&app.db, &cfg, &sub.kind, &version).await.map_err(up)?)
+        let before = row.issues.clone();
+        let outcome = issue::publish_version(&app.db, &cfg, &sub.kind, &version).await.map_err(up)?;
+        let created = match &outcome {
+            Outcome::Published { created, .. } => *created,
+            _ => 0,
+        };
+        crate::judge::collision::hint_after_publish(&app, &before, &sub.kind, &version, created).await;
+        Some(outcome)
     } else {
         None
     };
@@ -143,7 +150,13 @@ async fn post_publish(State(app): State<Arc<App>>, body: Option<Json<PublishIn>>
     let rows = ledger::list(&app.db, b.kind.as_deref(), version.as_deref()).await.map_err(up)?;
     let mut out = Vec::new();
     for r in rows.iter().filter(|r| r.status == Status::Judged) {
+        let before = r.issues.clone();
         let o: Outcome = issue::publish_version(&app.db, &cfg, &r.kind, &r.version).await.map_err(up)?;
+        let created = match &o {
+            Outcome::Published { created, .. } => *created,
+            _ => 0,
+        };
+        crate::judge::collision::hint_after_publish(&app, &before, &r.kind, &r.version, created).await;
         out.push(json!({"kind": r.kind, "version": r.version, "result": o}));
     }
     Ok(Json(json!({"publish_enabled": cfg.publish, "results": out})))

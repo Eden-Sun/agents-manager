@@ -41,6 +41,7 @@ async fn get_shadow(State(app): State<Arc<App>>, Query(q): Query<ShadowQuery>) -
                 "composer_idle": r.get::<bool, _>("composer_idle"),
                 "regex_verdict": r.get::<String, _>("regex_verdict"),
                 "jev_is_live_ui": r.get::<Option<f64>, _>("jev_is_live_ui"),
+                "jev_same_work": r.get::<Option<f64>, _>("jev_same_work"),
                 "model": r.get::<Option<String>, _>("model"),
                 "ms": r.get::<Option<i64>, _>("ms"),
                 "input_tokens": r.get::<Option<i64>, _>("input_tokens"),
