@@ -1321,17 +1321,24 @@ herdr server 重啟會讓**所有** pane 同時消失。照 §6.5 的規則，�
    `rearm_queue_retries` 本來就把每一筆 queued 叫醒一次，flush 走到閘門照原本的到期時間重掛 timer。
    只有 claude＋`inject_hooks` 的 run 等：codex／grok 要等第一個回合結束才回報 session（`hookrecv`），在這裡等只會死結；
    沒有 hook 的 bot 沒有驗證來源。遲到的舊行程 hook 不會拿同一個 session 冒充新行程：見 §4.1 世代圍籬的 `run_id`。
-   **忙到一半被重啟的 claude 補一句續行提示**（claude 2.1.281 起手動 `--resume` 不再補隱藏的「Continue」，停在工具中間的對話接回來
-   只會停在輸入框；`lifecycle::resume_nudge`）：`resume_native` 起的 claude，重啟前在做事——`restart_bot_with` 停之前在鎖裡讀到
-   `working`／還有一回合沒收；或 `start` 時上一個 run 是被外力收掉的（`exited`，herdr 整個重啟）且最後記著 `working`（「上一個 run」
-   用 `rowid` 挑，不用 `started_at` 字串排序）——而且這次真的帶了 `--resume`，就排一則 `relay_from=daemon` 的續行提示進佇列
-   （「重啟前的工作被中斷了……先確認上一個工具的實際結果，再接著做完」），跟排隊的派工同一條送達路（上面的閘門、畫面閒置才送）。
-   條件照 #424 的提案收（#430）：停在等人畫面上的（`blocked`：確認框、問卷、額度選單——只有人能決定，#423 不准自動按）不補；
-   上一回合被 API 錯誤收掉的（撞額度等，`runs.turn_error`）、這個 run 裡使用者從網頁中斷過的不補；排進去時接回成不成還不知道，
-   flush 過了上面的閘門之後**只有 `resume_outcome=verified` 才送**，`mismatch`（CLI 開了新對話）、`unverified`（等滿窗口）、
-   沒有 hook 可驗的、排它的那個 run 已經換掉的，都把這一則撤掉並在聊天室說明。使用者自己停的（`stopped`）、閒著重啟的、
-   接不回退回開新對話的、codex／grok 都不補；佇列已經有一則（每個對話最多一筆 queued）就不補，那一則送進去 bot 自然會動。
-   同一個 run 只補一次（`client_request_id = resume-nudge:<run_id>`）。要不要做這件事本身（#424）仍待裁示。一鍵重啟（§6.9）要求閒置（`require_idle`，鎖內再判一次、停機那一步也要還閒著），不會遇到；實際會碰到的是 `restart?resume=native` 與 herdr 整個重啟後的 `start?resume=native`。
+   **忙到一半被重啟、被砍在工具中途的 claude 補一句續行提示**（claude 2.1.281 起手動 `--resume` 不再補隱藏的「Continue」，停在工具中間的
+   對話接回來只會停在輸入框；`lifecycle::resume_nudge`，#424 裁示丙，疊在 #430 的條件上）。候選：`resume_native` 起的 claude，重啟前在做事——
+   `restart_bot_with` 停之前在鎖裡讀到 `working`／還有一回合沒收；或 `start` 時上一個 run 是被外力收掉的（`exited`，herdr 整個重啟）且最後記著
+   `working`（「上一個 run」用 `rowid` 挑，不用 `started_at` 字串排序）——而且這次真的帶了 `--resume`。停在等人畫面上的（`blocked`：確認框、問卷、
+   額度選單——只有人能決定，#423 不准自動按）、上一回合被 API 錯誤收掉的（撞額度等，`runs.turn_error`）、這個 run 裡使用者從網頁中斷過的、
+   使用者自己停的（`stopped`）、閒著重啟的、接不回退回開新對話的、codex／grok 都不進候選。
+   **啟動當下不佔 queued 槽**，候選只記在記憶體裡。`resume_outcome=verified` 且畫面 `idle` 起算等 10 秒；這段期間每個狀態事件與接回結論都再看一次，
+   仍是同一個 run、仍 idle、佇列是空的、這個 run 上沒送過別的回合，時間到才讀 transcript 尾巴：結尾是沒有結果的 `tool_use`（herdr 砍 pane），
+   或是 `tool_result`（daemon／SIGTERM，例如 exit 137；2.1.281 接回時補的「outcome is unknown」也是 `tool_result`）且其後沒有模型回覆，才排一則
+   `relay_from=daemon` 的續行提示（「重啟前的工作被中斷了……先確認上一個工具的實際結果，再接著做完」），走跟派工同一條送達路。
+   結尾是模型回覆、使用者打的字（含 `[Request interrupted by user…]`）、空檔、讀不到的都不補。檔案照這顆 bot 實際帳號找：
+   `<CLAUDE_CONFIG_DIR>/projects/<cwd 目錄名>/<session>.jsonl`（`identity_config_dir`，沒設就是 `~/.claude`）——換身分時讀複製進新帳號的那份，
+   不讀舊帳號那份。只讀本機：遠端主機的 bot 讀不到尾巴，不補（同 `stuck_turns`）。
+   等的期間變成 `working`／`blocked`、有人排了派工或送了回合、接回是 `mismatch`／`unverified`／沒有 hook 可驗、使用者中斷，這一輪就取消，
+   AGM 或使用者的派工因此可以先佔。排進去之後才發現 run 換掉或接回不是 `verified` 的，flush 把它撤掉並在聊天室說明。
+   同一個 run 只補一次（`client_request_id = resume-nudge:<run_id>`）；等待記在行程記憶體裡，daemon 在這段時間重啟就不補。
+   一鍵重啟（§6.9）要求閒置（`require_idle`，鎖內再判一次、停機那一步也要還閒著），不會遇到；實際會碰到的是 `restart?resume=native` 與
+   herdr 整個重啟後的 `start?resume=native`。
 5. herdr 自己的 `[session] resume_agents_on_restore` 要關掉：它會在 pane 裡打不帶 daemon 參數（`--settings`、權限旗標、帳號環境）的 `claude --resume`，
    跟 daemon 的接回撞成兩份。子 agent 仍由父 agent 重開（`start` 對子 agent 一律拒絕，§6.5a）。
 
