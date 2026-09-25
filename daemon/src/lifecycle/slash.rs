@@ -248,6 +248,12 @@ async fn send_slash_line(client: &HerdrClient, pane_id: &str, line: &str) -> LcR
     if !crate::tui_prompts::is_switch_model_dialog(&screen) {
         return Ok(());
     }
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("slash_confirm_before_answer", pane_id).await;
+    let latest = client.pane_read(pane_id, "visible", 60).await.map(|r| r.text).unwrap_or_default();
+    if !crate::tui_prompts::is_switch_model_dialog(&latest) {
+        return Ok(());
+    }
     tracing::info!(pane_id, line, "claude asked to confirm the model switch; answering Yes");
     client.pane_send_keys(pane_id, &["1"]).await.map_err(up)?;
     tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
@@ -351,6 +357,7 @@ pub async fn login(app: &Arc<App>, bot_id: &str) -> LcResult<LoginOut> {
 #[cfg(test)]
 mod live_slash_tests {
     use super::{composer_settled, live_slash_command};
+    use crate::testing as tt;
 
     /// 2026-09-14 w1HJ:pH 在 `/effort max` 之後的真實畫面（使用者名稱換掉）。
     const EFFORT_MAX_SETTLED: &str = "✻ Sautéed for 15m 9s · done 2:18 PM
@@ -378,6 +385,22 @@ mod live_slash_tests {
         // 輸入列裡還有字：不是空的，不算穩。
         let typing = EFFORT_MAX_SETTLED.replace("\n❯\n", "\n❯ /effort max\n");
         assert!(!composer_settled("claude", Some(&typing), &typing));
+    }
+
+    #[tokio::test]
+    async fn a_closed_model_switch_confirmation_does_not_get_a_stale_one() {
+        let env = tt::env().await;
+        let pane = "pane-switch-race";
+        env.herdr.set_screen(pane, "Switch model?\nYour next response will be slower\n❯ 1. Yes, switch\n  2. No, go back\n");
+        let screens = env.herdr.screens.clone();
+        crate::lifecycle::race_point::arm("slash_confirm_before_answer", pane, move || async move {
+            screens.lock().unwrap().insert(pane.into(), "Claude Code\n❯\n".into());
+        });
+
+        super::send_slash_line(&env.app.herdr, pane, "/login").await.unwrap();
+        let keys = env.herdr.calls_to("pane.send_keys");
+        assert_eq!(keys.len(), 1, "only the initial Enter is sent");
+        assert_eq!(keys[0]["keys"], serde_json::json!(["Enter"]));
     }
 
     #[test]
@@ -502,4 +525,3 @@ mod login_slash_tests {
         assert_eq!(SlashBlocked::NoPane.reason(), "no_pane");
     }
 }
-
