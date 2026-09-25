@@ -94,6 +94,21 @@ approval，所以 approval 表就是唯一真相。數不出來（端點壞了�
 6. AGM 雙角色（SPEC §18.15）：idle 檢查另外排除協調者（`agm responder show` 有 `bot_id` 時）；runtime.json 有 `role` 才帶 `assign --review-by <role>`
    （巡檢目錄＝`patrol`，更新結果回巡檢驗收）。舊部署兩者都沒有，行為照舊。
 
+### 立即部署（使用者 2026-09-25，SPEC §18.2）
+
+網頁左上角按「立即部署」時，daemon（`POST /api/deploy/now`）以使用者的名義核准一筆 rebuild（requester＝`daemon-update-kick`），
+寫 `daemon-update.now.json`（`{approval_id,sha,live_sha,requested_at,requested_by}`），再 `launchctl kickstart gui/<uid>/com.agm.daemon-update`。
+kick 讀到這個檔就走立即模式：
+
+- **略過**：觸發條件、`daemon-update.last`（同一顆已派過）、申請／等 AGM 裁示 rebuild。
+- **核對那筆核准**：`approval list --id`，要 `purpose=rebuild`、`requester` 是自己的 `OWNER`、`target_commit` 等於請求的 sha、`approved` 沒過期。查不到＝這輪不知道（留著請求）；不能用＝`ops_alert now_approval_unusable` 並收掉請求。
+- **建確認框上那顆**：sha 要是 origin/main 的祖先（否則 `ops_alert now_target_invalid`）；`.built` 到它之間沒有程式碼差異就收掉請求（已經是最新）。
+- **照舊**：建置 child 要在、上一筆更新要結案、`lease safety`／`acquire`（等不到窗口就留著請求，下一輪再試）、token 檔、派工正文的固定條件。
+- **restart**：拿到 rebuild 窗口後以 `AGM_BUILD_BOT` 申請 restart（`--request-id deploy-now-restart-<rebuild 核准>`），同一輪 `approval decide --actor deploy-now:<rebuild 核准>`，正文叫 child 直接用它；開不出來就寫明「照 3c 自己申請」。
+- **派工**：request id `agm-daemon-update-<sha>-now-<核准>`，成功才刪請求檔；`daemon-update.approval.json` 改指那一筆。請求檔壞掉 → `ops_alert now_request_corrupt`、刪掉，這輪回到例行判斷。
+
+daemon 的 `kick_ready` 以「裝好的 kick 裡有沒有 `daemon-update.now.json` 這個字」判斷，所以**要先 install 這一版 kick，按鈕才按得下去**（舊 kick 不會讀請求檔，按了只會永遠停在「部署中」）。
+
 ### 隔離測試
 
 不要對正式 daemon 測。開一個獨立 daemon 與獨立資料目錄：

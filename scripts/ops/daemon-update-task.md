@@ -76,6 +76,13 @@ build 前 `git -C <checkout> log -1 --format=%h` 必須等於本次要上的 com
   4. 重啟後 daemon 會自動 release restart；仍 held 就用 acquire 回的 token 手動 release（3b）。
 - token 檔用完不要刪、不要貼進回報或對話；拿不到就照 3b 請 AGM force 並附理由。
 
+## 3d. 使用者按「立即部署」（2026-09-25 起）
+
+交辦末尾寫「使用者在 UI 左上角按『立即部署』觸發」時：rebuild 核准已由使用者核准；若也寫了預先核准的 restart 核准 id，
+就**跳過 3c 第 2 步**（不申請、不等 AGM），直接用它做 3c 第 3 步與 `daemon-swap.sh --approval <那個 id>`。
+**其他固定條件一條都不省**：乾淨 HEAD worktree、整樹測試、沒人 working 才換（等太久照 3 的規則）、`.bak`、驗證失敗回滾、寫 `.built`。
+建的是交辦寫的那顆 commit，不是 HEAD。沒寫 restart 核准 id 就照 3c 自己申請。
+
 ## 換版與重啟：用 scripts/ops/daemon-swap.sh，不要自己寫一份
 
 建置與整樹測試過了之後，**第 3～7 步（拿 restart 窗口、備份、換 binary、重啟、驗證、寫 `.built`）
