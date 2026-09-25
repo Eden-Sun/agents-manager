@@ -447,6 +447,19 @@ pub(crate) async fn pane_ready_for_prompt(app: &Arc<App>, bot: &db::Bot, run: &d
     if bot.kind == "codex" {
         if let Some(pane) = run.pane_id.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
             if let Ok(client) = client_for_run(app, run).await {
+                if let Ok(read) = client.pane_read(pane, "visible", 80).await {
+                    if crate::tui_prompts::is_codex_model_migration_prompt(&read.text) {
+                        crate::codex_model_migration::observe_screen(app, run, &read.text).await;
+                        return Err(LcError::conflict(
+                            "dialog_open",
+                            json!({"run_id": run.id, "message": crate::codex_model_migration::WAITING_HINT}),
+                        ));
+                    }
+                    if crate::codex_live::rate_limit_switch_prompt_open(&read.text) {
+                        let hint = "codex 正在問要不要為了降低額度消耗切換模型；請到「終端」選擇，daemon 不會替你選，也不會把訊息打進選單。";
+                        return Err(LcError::conflict("dialog_open", json!({"run_id": run.id, "message": hint})));
+                    }
+                }
                 if !crate::codex_live::close_picker(&client, pane).await {
                     let hint = "codex 的 /model 選單擋在輸入列前面，關不掉。請到「終端」分頁按 Esc 回到輸入列再送一次。";
                     let _ = insert_message(app, conv, None, "system", hint, "system", false, None).await;
@@ -1466,6 +1479,48 @@ mod prompt_tests {
         }
         let keys: Vec<String> = f.env.herdr.calls_to("pane.send_keys").iter().filter_map(|p| p.get("keys").and_then(|k| serde_json::to_string(k).ok())).collect();
         assert_eq!(keys, vec![r#"["Down","Enter"]"#.to_string()], "先替它選第二項 keep bypass");
+    }
+
+    #[tokio::test]
+    async fn codex_model_migration_is_blocked_without_choosing_or_typing() {
+        let f = fixture("codex", "test").await;
+        let app = f.env.app.clone();
+        sqlx::query("UPDATE runs SET pane_id='pane-prompt-test' WHERE id=?").bind(&f.run_id).execute(&app.db).await.unwrap();
+        f.env.herdr.set_screen("pane-prompt-test", include_str!("fixtures/codex-0.157-model-migration.txt"));
+        let bot = db::bot(&app.db, &f.bot_id).await.unwrap().unwrap();
+        let run = db::active_run(&app.db, &f.bot_id).await.unwrap().unwrap();
+
+        match pane_ready_for_prompt(&app, &bot, &run, &f.conv).await.unwrap_err() {
+            LcError::Conflict(body) => {
+                assert_eq!(body["reason"], "dialog_open", "{body}");
+                assert!(body["message"].as_str().unwrap().contains("不替你選"), "{body}");
+            }
+            other => panic!("{other:?}"),
+        }
+        let status: String = sqlx::query_scalar("SELECT agent_status FROM runs WHERE id=?").bind(&f.run_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(status, "blocked", "herdr 判 idle 時也要顯示 blocked");
+        assert!(f.env.herdr.calls_to("pane.send_keys").is_empty());
+        assert!(f.env.herdr.calls_to("pane.send_text").is_empty());
+    }
+
+    #[tokio::test]
+    async fn codex_rate_limit_suggestion_waits_for_a_user_choice() {
+        let f = fixture("codex", "test").await;
+        let app = f.env.app.clone();
+        sqlx::query("UPDATE runs SET pane_id='pane-prompt-test' WHERE id=?").bind(&f.run_id).execute(&app.db).await.unwrap();
+        f.env.herdr.set_screen("pane-prompt-test", include_str!("fixtures/codex-0.157-rate-limit-switch.txt"));
+        let bot = db::bot(&app.db, &f.bot_id).await.unwrap().unwrap();
+        let run = db::active_run(&app.db, &f.bot_id).await.unwrap().unwrap();
+
+        match pane_ready_for_prompt(&app, &bot, &run, &f.conv).await.unwrap_err() {
+            LcError::Conflict(body) => {
+                assert_eq!(body["reason"], "dialog_open", "{body}");
+                assert!(body["message"].as_str().unwrap().contains("切換模型"), "{body}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(f.env.herdr.calls_to("pane.send_keys").is_empty());
+        assert!(f.env.herdr.calls_to("pane.send_text").is_empty());
     }
 
     /// 2.1.281 的防誤刪框（herdr 判成 idle 也一樣）：409 `dangerous_rm_pending` 帶目標，一個鍵都不按、一個字都不打；

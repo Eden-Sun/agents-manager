@@ -27,6 +27,7 @@ mod child_alerts;
 mod child_reconcile_safety;
 mod child_retire;
 mod codex_live;
+mod codex_model_migration;
 mod config;
 mod config_audit;
 mod capture;

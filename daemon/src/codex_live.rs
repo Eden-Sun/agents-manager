@@ -190,21 +190,58 @@ async fn text(client: &HerdrClient, pane_id: &str, t: &str) -> bool {
     client.pane_send_text(pane_id, t).await.is_ok()
 }
 
-/// Is a `/model` picker on screen? Footer or heading (a short pane can scroll either away).
-/// Must be checked before typing into codex: 2026-09-10 a user message sent into a picker was
-/// eaten and its Enter switched the model.
+/// Is a Codex selection screen on screen? Footer or heading (a short pane can scroll either away).
+/// Must be checked before typing into codex: a user message sent into a picker was eaten and its
+/// Enter switched the model. Migration and rate-limit prompts are user decisions; never dismiss
+/// them from this helper.
 pub fn picker_open(screen: &str) -> bool {
     let t = screen.to_lowercase();
-    t.contains("press enter to confirm or esc to go back")
+    crate::tui_prompts::is_codex_model_migration_prompt(screen)
+        || rate_limit_switch_prompt_open(screen)
+        || t.contains("press enter to confirm or esc to go back")
         || t.contains("select model and effort")
         || t.contains("select reasoning level")
+}
+
+/// Codex 0.157.0's quota warning offers a model switch using the bottom selection popup.
+/// Match its structure and footer so a transcript merely mentioning the recommendation is ignored.
+pub fn rate_limit_switch_prompt_open(screen: &str) -> bool {
+    const TAIL_LINES: usize = 20;
+    let raw: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
+    let tail_raw = &raw[raw.len().saturating_sub(TAIL_LINES)..];
+    let lines: Vec<String> = tail_raw
+        .iter()
+        .map(|line| {
+            let spaced: String = line
+                .chars()
+                .map(|c| if c.is_whitespace() || "│┌┐└┘─├┤┬┴┼╭╮╯╰▎▔".contains(c) { ' ' } else { c.to_ascii_lowercase() })
+                .collect();
+            spaced
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .trim_start_matches(|c| "❯›»>*●•⏺⎿✻-— ".contains(c))
+                .trim()
+                .to_string()
+        })
+        .collect();
+    lines.iter().any(|l| l.starts_with("approaching rate limits"))
+        && lines.iter().any(|l| l.starts_with("switch to ") && l.contains("for lower credit usage?"))
+        && lines.iter().any(|l| l.starts_with("1. switch to "))
+        && lines.iter().any(|l| l.starts_with("2. keep current model"))
+        && lines.iter().any(|l| l.starts_with("3. keep current model (never show again)"))
+        && lines.last().is_some_and(|l| l.starts_with("enter select") && l.contains("esc back"))
 }
 
 /// Escapes until no picker is left. One Escape is not enough: from the level menu it only goes
 /// back to the model menu, and anything typed next would land in it.
 pub async fn close_picker(client: &HerdrClient, pane_id: &str) -> bool {
     for _ in 0..PICKER_ESCAPES {
-        if !picker_open(&read(client, pane_id).await) {
+        let screen = read(client, pane_id).await;
+        if crate::tui_prompts::is_codex_model_migration_prompt(&screen) || rate_limit_switch_prompt_open(&screen) {
+            return false;
+        }
+        if !picker_open(&screen) {
             return true;
         }
         if !key(client, pane_id, "Escape").await {
@@ -341,6 +378,11 @@ pub async fn apply(
     was_fast: Option<bool>,
     fields: &[&str],
 ) -> Result<CodexRuntime, &'static str> {
+    // The startup migration and rate-limit suggestion both require a user choice. Do not type into
+    // either screen or dismiss it with Escape while applying a setting.
+    if !close_picker(client, pane_id).await {
+        return Err("picker_open");
+    }
     if fields.iter().any(|f| *f == "model" || *f == "effort") {
         let model = bot.model.as_deref().map(str::trim).filter(|s| !s.is_empty());
         let effort = bot.effort.as_deref().map(str::trim).filter(|s| !s.is_empty());
@@ -431,6 +473,33 @@ mod tests {
     }
 
     use super::*;
+
+    #[tokio::test]
+    async fn close_picker_leaves_model_migration_and_rate_limit_choices_for_the_user() {
+        let env = crate::testing::env().await;
+        for (name, pane, screen) in [
+            (
+                "migration",
+                "pane-codex-migration",
+                include_str!("lifecycle/fixtures/codex-0.157-model-migration.txt"),
+            ),
+            (
+                "rate-limit",
+                "pane-codex-rate-limit",
+                include_str!("lifecycle/fixtures/codex-0.157-rate-limit-switch.txt"),
+            ),
+        ] {
+            let bot = crate::testing::claude_bot(&env.app, &env.project_id, name).await;
+            sqlx::query("UPDATE bots SET kind='codex' WHERE id=?").bind(&bot.id).execute(&env.app.db).await.unwrap();
+            let run_id = crate::testing::fake_run(&env.app, &bot.id).await;
+            sqlx::query("UPDATE runs SET pane_id=? WHERE id=?").bind(pane).bind(&run_id).execute(&env.app.db).await.unwrap();
+            env.herdr.set_screen(pane, screen);
+            let run = db::active_run(&env.app.db, &bot.id).await.unwrap().unwrap();
+            let client = env.app.herdr_for_run(&run).await.unwrap();
+            assert!(!close_picker(&client, pane).await, "{name} requires the user's choice");
+        }
+        assert!(env.herdr.calls_to("pane.send_keys").is_empty(), "Escape must not dismiss either choice");
+    }
 
     async fn run_with_runtime(env: &crate::testing::Env, fast: i64) -> String {
         let bot = crate::testing::claude_bot(&env.app, &env.project_id, "payload").await;
@@ -543,6 +612,18 @@ mod tests {
         assert_eq!(picker_number(EFFORT_MENU, "Max"), None, "max / ultra are one menu deeper");
         assert_eq!(picker_number(EFFORT_MENU, "Ultra"), None);
         assert_eq!(picker_number(MODEL_MENU, "gpt-4"), None);
+    }
+
+    #[test]
+    fn codex_0157_rate_limit_switch_prompt_is_a_choice_screen_not_a_quota_hit() {
+        let screen = include_str!("lifecycle/fixtures/codex-0.157-rate-limit-switch.txt");
+        assert!(rate_limit_switch_prompt_open(screen));
+        assert!(picker_open(screen));
+        assert!(parse_status_line(screen).is_none());
+        assert!(parse_status_quota(screen).is_none());
+
+        let quoted = format!("⏺ Codex suggested this option:\n{screen}\n{COMPOSER}");
+        assert!(!rate_limit_switch_prompt_open(&quoted), "quoted text outside the popup is not a live selector");
     }
 
     /// Real composer, codex 0.154.0 (2026-09-10) — nothing in the way.

@@ -413,9 +413,18 @@ async fn apply_migrations(pool: &SqlitePool) -> Result<()> {
     )
     .await
     .context("create runs_agent_status_since trigger")?;
-    // Data-only migration; exact comparisons preserve explicitly versioned Claude ids.
-    sqlx::query("UPDATE bots SET model='gpt-6-luna' WHERE kind='codex' AND model='gpt-5.6-luna'")
-        .execute(&mut *tx).await.context("remap retired Codex model")?;
+    // Data-only migration; exact comparisons preserve explicitly versioned model ids.
+    sqlx::query(
+        "UPDATE bots SET model = CASE model
+             WHEN 'gpt-5.6-sol' THEN 'gpt-6-sol'
+             WHEN 'gpt-5.6-terra' THEN 'gpt-6-sol'
+             WHEN 'gpt-5.6-luna' THEN 'gpt-6-luna'
+         END
+         WHERE kind='codex' AND model IN ('gpt-5.6-sol','gpt-5.6-terra','gpt-5.6-luna')",
+    )
+    .execute(&mut *tx)
+    .await
+    .context("remap retired Codex models")?;
     sqlx::query("UPDATE bots SET model='claude-opus-5-5' WHERE kind='claude' AND model='opus'")
         .execute(&mut *tx).await.context("remap retired Claude alias")?;
     // Turn 狀態轉移的單一權威（issue #68）：合法邊只定義在 `lifecycle::turn_controller::LEGAL_EDGES`，
@@ -1538,8 +1547,9 @@ mod tests {
         let pool = open(&dir.join("model-remap.sqlite3")).await.unwrap();
         sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES ('p','/tmp','p',?)").bind(now()).execute(&pool).await.unwrap();
         for (id, kind, model, deleted) in [
-            ("c1", "codex", "gpt-5.6-luna", None),
-            ("c2", "codex", "gpt-5.6-luna", Some(now())),
+            ("c1", "codex", "gpt-5.6-sol", None),
+            ("c2", "codex", "gpt-5.6-terra", Some(now())),
+            ("c3", "codex", "gpt-5.6-luna", None),
             ("a1", "claude", "opus", None),
             ("a2", "claude", "claude-opus-4-1", None),
         ] {
@@ -1552,8 +1562,9 @@ mod tests {
         assert_eq!(values, vec![
             ("a1".into(), Some("claude-opus-5-5".into())),
             ("a2".into(), Some("claude-opus-4-1".into())),
-            ("c1".into(), Some("gpt-6-luna".into())),
-            ("c2".into(), Some("gpt-6-luna".into())),
+            ("c1".into(), Some("gpt-6-sol".into())),
+            ("c2".into(), Some("gpt-6-sol".into())),
+            ("c3".into(), Some("gpt-6-luna".into())),
         ]);
         let version: i64 = sqlx::query_scalar("PRAGMA user_version").fetch_one(&pool).await.unwrap();
         // 蓋的是這顆 binary 的版本（之後再升版也一樣），不是寫死 15。

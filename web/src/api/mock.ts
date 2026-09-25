@@ -320,7 +320,7 @@ const TOOLS_ALL_OK: Record<BotKind, MockTool> = {
   grok: { installed: true, path: '/Users/me/.local/bin/grok', version: '1.0.13', logged_in: null },
 }
 
-/** Catalogue as the CLIs reported on 2026-09-06. claude 2.1 effort 每個 alias 同一組（codex 是 per-model）。 */
+/** Codex 0.157.0 catalogue after retired 5.6 ids are hidden; claude effort 每個 alias 同一組。 */
 const CLAUDE_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
 
 const MODELS: Record<BotKind, Rec[]> = {
@@ -332,11 +332,11 @@ const MODELS: Record<BotKind, Rec[]> = {
   ],
   codex: [
     {
-      id: 'gpt-5.5',
-      display_name: 'GPT-5.5',
-      description: '日常編碼的預設模型',
-      is_default: true,
-      default_effort: 'medium',
+      id: 'gpt-6-luna',
+      display_name: 'GPT-6 Luna',
+      description: '快速、經濟，適合一般工作',
+      is_default: false,
+      default_effort: 'low',
       efforts: ['low', 'medium', 'high', 'xhigh'],
       service_tiers: [
         { id: 'default', name: 'Standard', description: '一般佇列' },
@@ -344,32 +344,23 @@ const MODELS: Record<BotKind, Rec[]> = {
       ],
     },
     {
-      id: 'gpt-5.6-luna',
-      display_name: 'GPT-5.6 Luna',
-      description: '長脈絡、重構友善',
+      id: 'gpt-6-sol',
+      display_name: 'GPT-6 Sol',
+      description: '寫程式與日常工作的全能模型',
       is_default: false,
-      default_effort: 'high',
-      efforts: ['medium', 'high', 'xhigh'],
+      default_effort: 'medium',
+      efforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
       service_tiers: [
         { id: 'default', name: 'Standard', description: '一般佇列' },
-        { id: 'priority', name: 'Fast', description: '優先佇列' },
+        { id: 'priority', name: 'Fast', description: '優先佇列，較快但額度消耗較高' },
       ],
-    },
-    {
-      id: 'gpt-5.6-sol',
-      display_name: 'GPT-5.6 Sol',
-      description: '可靠的日常 agentic workhorse',
-      is_default: false,
-      default_effort: 'low',
-      efforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
-      service_tiers: [],
     },
     {
       id: 'gpt-6-astra',
       display_name: 'GPT-6 Astra',
       description: '規格審視 / 深度推理（無 fast tier）',
-      is_default: false,
-      default_effort: 'high',
+      is_default: true,
+      default_effort: 'low',
       efforts: ['high', 'xhigh'],
       service_tiers: [{ id: 'default', name: 'Standard', description: '一般佇列' }],
     },
