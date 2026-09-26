@@ -230,6 +230,8 @@ const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (23, "8118ff0f6b5b3027"),
     // issue #558：`judge_shadow.assignment_id`／`claims_verified`／`asks_parent_action`（回報證據旗標）。
     (24, "190576f2d85181bd"),
+    // issue #564：`cli_updates`（codex 一鍵安裝的持久紀錄，daemon 重啟後接手；每台最多一筆 running）。
+    (25, "62482003005235be"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -455,6 +457,7 @@ async fn apply_migrations(pool: &SqlitePool) -> Result<()> {
     crate::build_scheduler::migrate(pool).await?;
     crate::release_triage::ledger::migrate(pool).await?;
     crate::judge::migrate(pool).await?;
+    crate::cli_update::migrate(pool).await?;
     Ok(())
 }
 

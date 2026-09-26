@@ -681,8 +681,8 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
         "daemon_seq": app.current_seq(),
         // 現在有沒有一批一鍵重啟在跑（issue #492）：進度只走 WS，`bots_restart_done` 收不到時前端要有地方對帳。
         "restart_batch": crate::bulk_restart::running_batch(&app.data_dir),
-        // 現在在跑的 codex 升級（同一個理由：`cli_update_done` 收不到時的對帳來源）。
-        "cli_updates": crate::cli_update::running_list(&app.data_dir),
+        // 還沒收尾的 codex 升級（同一個理由：`cli_update_done` 收不到時的對帳來源）；存在 DB，daemon 重啟後也還在（#564）。
+        "cli_updates": crate::cli_update::running_list(app).await,
         "connected": connected,
         "default_connected": app.default_connected.load(Ordering::SeqCst),
         "herdr_session": app.herdr_session,

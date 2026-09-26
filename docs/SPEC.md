@@ -2059,7 +2059,12 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
      CDN 還沒傳到、PATH 上是別顆）：一顆 bot 都不重啟，`cli_update_done` 帶 `reason` 講原因、通知不動；比目標還新照成功走；
   4. 把那台 codex run 的通知改成「已安裝，重啟套用」，接著開一鍵重啟，**範圍只限那台主機的 codex**（`bulk_restart::spawn_scoped`；claude 與別台不在這批），之後照上面的規則與事件走。
   只收 UI token：帶 `X-AM-Bot-Id`／`X-AM-Bot-Token` 一律 403（換掉的是所有 codex bot 共用的 binary）；同一台同時只跑一個（409）。進度走 WS `cli_update_progress`／`cli_update_done`，
-  `GET /api/state` 的 `cli_updates` 列出在跑的，前端靠它對帳（同 #492）。多台都有「需安裝」時一次一台，裝完 chip 自然換到下一台。
+  `GET /api/state` 的 `cli_updates` 列出還沒收尾的，前端靠它對帳（同 #492）。
+  **「同一台只跑一個」不能只記在行程裡**（#564）：daemon 被砍掉時遠端的 `curl | sh` 不會跟著停，以前重啟後 map 空了、再按一次就疊出第二個安裝。
+  所以兩層：(a) 開跑前先寫 `cli_updates` 一列（部分唯一索引：每台最多一筆 `running`），結果寫進那一列才推 `cli_update_done`；開機時上一顆行程
+  （`boot` 不同）留下的 `running` 列由 `recover_at_startup` 接手——等那台的安裝鎖放掉再讀版本收尾，不重跑安裝、不自動開重啟（隔了一次重啟，閒著的 bot 已經不是當時那份），
+  到了目標就改通知讓一般的重啟收得到；(b) 安裝指令本身包在主機端的鎖裡（`$HOME` 下的 symlink，目標是持鎖 shell 的 pid，`ln -s` 原子地建鎖兼寫 pid；pid 死了＝被 SIGKILL 沒跑到 trap，當過期拿走），
+  擋的是 DB 擋不到的：接手等到上限才放掉的那一列、隔離實例對同一台開的安裝。已知的洞：持鎖的 shell 單獨被 SIGKILL、底下的 `curl | sh` 還活著時，鎖會被當成過期。多台都有「需安裝」時一次一台，裝完 chip 自然換到下一台。
   手機（≤640px）兩顆都要出現時合成一顆只留圖示的 ⌃⌃，點開兩項選單各自開原本的確認框（名字行放不下兩顆，UI-DECISIONS）。
   已經有一批重啟在跑時，裝好之後的那批會拿到 `already_running`（codex 這次沒排進去），等那批跑完再按一般的 ⌃⌃。
 
