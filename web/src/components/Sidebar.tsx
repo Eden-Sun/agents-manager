@@ -7,6 +7,7 @@ import { MOCK_MODE } from '../api'
 import type { Bot, BotKind, Lamp, MessageHit } from '../api/types'
 import { BOT_KINDS, LOCAL_HOST } from '../api/types'
 import { identityBadgeVisible } from '../lib/identityBadgeVisible'
+import { herdrIdentity } from '../lib/herdrIdentity'
 import {
   adjacentBotId,
   botLamp,
@@ -359,7 +360,7 @@ function BotRow({
             <UpdateBadge botId={botId} variant="dot" />
           </span>
           {/* 選取中的列，點名字才改名。 */}
-          <BotNameField botId={botId} name={bot.name} variant="row" armed={selected}>
+          <BotNameField botId={botId} name={bot.name} variant="row" armed={selected} hint={herdrIdentity(run, bot.agent_name)?.title}>
             {compact ? null : <PersonaMark persona={bot.persona} />}
             {/* 燈號說 idle 但回合是斷的，不能只留 tooltip；重送在 header chip。 */}
             {turnError ? (

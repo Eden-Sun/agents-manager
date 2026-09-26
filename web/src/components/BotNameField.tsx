@@ -13,12 +13,15 @@ export function BotNameField({
   name,
   variant = 'head',
   armed = true,
+  hint,
   children,
 }: {
   botId: string
   name: string
   variant?: 'head' | 'row'
   armed?: boolean
+  /** 接在 tooltip 第二行，例如 herdr agent 名與 pane id（#572）。 */
+  hint?: string
   /** Extra content that rides inside the name (persona mark, agent title …). */
   children?: ReactNode
 }) {
@@ -99,7 +102,7 @@ export function BotNameField({
     return (
       <span
         className={`bot-name${armed ? ' renamable' : ''}`}
-        title={armed ? `${name} · 點一下改名` : undefined}
+        title={armed || hint ? `${name}${armed ? ' · 點一下改名' : ''}${hint ? `\n${hint}` : ''}` : undefined}
         onClick={
           armed
             ? (e) => {

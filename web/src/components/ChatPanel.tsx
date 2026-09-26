@@ -17,6 +17,8 @@ import { queueFromComposer, settleComposerSend } from '../store/queuedSend'
 import { startingSend, startingSendLabel } from '../store/startingSend'
 import { composerPlaceholder, sendButtonLabel, sendButtonTitle } from '../lib/composerLabels'
 import { herdrJumpCommand } from '../lib/herdrJump'
+import { herdrIdentity } from '../lib/herdrIdentity'
+import { HerdrAgentName } from './HerdrAgentName'
 import { anchorOf, botLamp, composerState, inFlightTurn, liveReplyOf, projectHostName, toolsOfHost, useStore } from '../store/store'
 import { AttachPicker, AttachTray, DropVeil, MessageAttachments } from './Attachments'
 import { useAttachments, useDropTarget } from './attachmentsHelpers'
@@ -1189,6 +1191,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   const modelExtra = modelExtraOf(statusInfo)
   // logo 上的閃電跟 model chip 的「· fast」同一個來源：正在跑的那一份，不是設定值（設定改了還沒重啟時兩者不同）。
   const codexFast = bot?.kind === 'codex' && Boolean(statusInfo?.fast_mode)
+  const herdrId = herdrIdentity(run, bot?.agent_name)
   // Held here (not in the composer) so a drop anywhere in the chat area is accepted.
   const files = useAttachments(botId, botId)
   const drop = useDropTarget(files.add, !botId)
@@ -1333,16 +1336,18 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
                 {modelExtra ? <span className="model-tag-extra">{modelExtra}</span> : null}
               </ModelQuickPicker>
             ) : null}
-            {/* pane id（debug 用，點開識別列）；2026-09-11 使用者：從第一排搬到這一排。窄時只剩 `▾`。 */}
+            {/* pane id（debug 用，點開識別列）；2026-09-11 使用者：從第一排搬到這一排。窄時只剩 `▾`。
+                後面接 herdr 名，才對得到終端（#572）；擠的時候先截掉它。 */}
             {run?.pane_id ? (
               <button
                 type="button"
                 className={`main-status pane-toggle run-debug-toggle${runDebugOpen ? ' on' : ''}`}
                 aria-expanded={runDebugOpen}
-                title={`pane ${run.pane_id}（${LAMP_LABEL[lamp]}）· 點一下展開 run 識別資訊：agent、session、workspace、run id`}
+                title={`${herdrId?.title ?? `pane ${run.pane_id}`}（${LAMP_LABEL[lamp]}）· 點一下展開 run 識別資訊：agent、session、workspace、run id`}
                 onClick={() => setRunDebugOpen((v) => !v)}
               >
                 <span className="pane-id">{run.pane_id}</span>
+                {herdrId?.agent ? <HerdrAgentName agent={herdrId.agent} /> : null}
                 <span className="pane-chev" aria-hidden="true">
                   {runDebugOpen ? '▴' : '▾'}
                 </span>

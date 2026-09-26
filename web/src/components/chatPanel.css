@@ -759,7 +759,8 @@ button.run-debug-toggle:hover {
   padding: 0 4px;
   border-radius: 5px;
   gap: 3px;
-  max-width: 120px;
+  /* 放得下 `pane · herdr 名`（#572）；擠的時候照舊從尾巴截。 */
+  max-width: 240px;
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--text-dim);
@@ -769,6 +770,31 @@ button.run-debug-toggle:hover {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* herdr 名（#572）：比 pane id 先讓位，而且從中間截，尾碼（分得出是哪一顆）留著。`·` 用 ::before，免得吃 gap。 */
+.main-status.pane-toggle .pane-agent {
+  display: inline-flex;
+  flex: 0 1000 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.main-status.pane-toggle .pane-agent::before {
+  content: '·';
+  flex: none;
+  margin-right: 3px;
+}
+
+.main-status.pane-toggle .pane-agent-head {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.main-status.pane-toggle .pane-agent-tail {
+  flex: none;
 }
 
 .main-status.pane-toggle .pane-chev {
