@@ -1,4 +1,6 @@
 import type { AgentStatus, Bot, Run } from '../api/types'
+import { cmpVersion } from './releaseTriage'
+import { updateRange } from './updateRange'
 
 /**
  * 「重啟 N 顆閒置的 Bot」按鈕的數字（SPEC §6.9）。只畫按鈕用的前端副本，須與 daemon
@@ -62,7 +64,7 @@ export function updateBatchCounts(
 
 export interface CodexInstallPlan {
   host: string
-  /** 第一顆「需安裝」的通知：版本區間從這裡讀（`updateRange`）。 */
+  /** 那台「需安裝」通知裡目標最新的一則：版本區間從這裡讀（`updateRange`），跟 daemon 核對的目標同一個（#569）。 */
   notice: string
   /** 那台還寫著「需安裝」的 codex 有幾顆。 */
   installCount: number
@@ -90,7 +92,12 @@ export function codexInstallPlan(
   for (const bot of bots) {
     const run = runs[bot.id]
     if (bot.kind !== 'codex' || !run || !run.update_notice?.trim() || hostOf(bot) !== host) continue
-    if (needsManualInstall(bot, run)) plan.installCount += 1
+    if (needsManualInstall(bot, run)) {
+      plan.installCount += 1
+      const to = updateRange('codex', run.update_notice, null).to
+      const cur = updateRange('codex', plan.notice, null).to
+      if (to && (!cur || cmpVersion(to, cur) > 0)) plan.notice = run.update_notice
+    }
     // 子 agent 批次一律跳過（daemon `Skip::Child`，SPEC §6.5a），由父 bot 用 herdr 重開。
     const child = bot.managed_by === 'child' || Boolean(bot.parent_bot_id)
     const why = child ? '子 agent，由父 Bot 重開' : runBusyReason(run, hasInFlightTurn(bot.id))

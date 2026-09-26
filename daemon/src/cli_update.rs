@@ -9,6 +9,9 @@
 //! - 只給使用者在 UI 上按：帶 bot 身分的請求一律 403（同 `deploy_now::refuse_bot_caller`）——換掉的是所有 codex bot 共用的那顆 binary。
 //! - 指令不接受呼叫端傳入；同一台同時只跑一個（409）；有逾時；輸出寫 `<data_dir>/cli-update.log`。
 //! - 安裝失敗、讀不到版本、或裝完版本沒變：**一顆 bot 都不重啟**，`cli_update_done` 帶 `reason` 講清楚。
+//! - 綁定使用者核准的版本（#569）：請求帶確認框寫的 `target_version`，要等於 daemon 眼中那台「需安裝」通知的目標（不然 409
+//!   `stale_target`）；裝完要 `>= target` 才算成功，升了但沒到（CDN 還沒傳到、PATH 上是別顆）是 `target_not_reached`，不重啟。
+//!   安裝前磁碟已經 `>= target` 就不再跑安裝指令，直接改通知、開重啟。
 //! - 會動到機器的三件事（安裝、讀版本、開批次）都走 [`Runner`]，測試換成假的：測試裡絕對不能真的跑 `curl | sh`。
 
 use crate::bulk_restart::Scope;
@@ -107,6 +110,7 @@ struct Running {
     update_id: String,
     host: String,
     kind: String,
+    target: String,
 }
 
 /// 鍵是 `<data_dir>|<host>`：同一台同時只准一個安裝（兩個 `curl | sh` 疊在一起會互相覆蓋 `current` 連結）。
@@ -125,7 +129,7 @@ pub fn running_list(data_dir: &std::path::Path) -> Vec<Value> {
     let Ok(m) = running().lock() else { return Vec::new() };
     m.iter()
         .filter(|(k, _)| k.starts_with(&prefix))
-        .map(|(_, r)| json!({"update_id": r.update_id, "host": r.host, "kind": r.kind}))
+        .map(|(_, r)| json!({"update_id": r.update_id, "host": r.host, "kind": r.kind, "target_version": r.target}))
         .collect()
 }
 
@@ -152,6 +156,8 @@ fn refuse_bot_caller(headers: &HeaderMap) -> Result<(), LcError> {
 #[derive(Deserialize, Default)]
 pub struct CliUpdateIn {
     pub kind: Option<String>,
+    /// 確認框寫的「安裝 codex <target>」那一版（#569）。
+    pub target_version: Option<String>,
 }
 
 /// `POST /api/hosts/{name}/cli-update`
@@ -162,12 +168,19 @@ pub async fn post_cli_update(
     body: Option<Json<CliUpdateIn>>,
 ) -> Result<Response, LcError> {
     let b = body.map(|Json(b)| b).unwrap_or_default();
-    let v = start(&app, &headers, &host, b.kind.as_deref(), Arc::new(Real)).await?;
+    let v = start(&app, &headers, &host, b.kind.as_deref(), b.target_version.as_deref(), Arc::new(Real)).await?;
     Ok((StatusCode::ACCEPTED, Json(v)).into_response())
 }
 
 /// 檢查、佔位、背景執行；只回 `update_id`，進度與結果走 WS。
-pub async fn start(app: &Arc<App>, headers: &HeaderMap, host: &str, kind: Option<&str>, runner: Arc<dyn Runner>) -> Result<Value, LcError> {
+pub async fn start(
+    app: &Arc<App>,
+    headers: &HeaderMap,
+    host: &str,
+    kind: Option<&str>,
+    target: Option<&str>,
+    runner: Arc<dyn Runner>,
+) -> Result<Value, LcError> {
     refuse_bot_caller(headers)?;
     match kind.map(str::trim) {
         Some("codex") => {}
@@ -176,6 +189,23 @@ pub async fn start(app: &Arc<App>, headers: &HeaderMap, host: &str, kind: Option
     }
     if app.hosts.get(host).await.is_none() {
         return Err(LcError::NotFound("host".into()));
+    }
+    let Some(target) = target.and_then(|t| version_string(t.trim())) else {
+        return Err(LcError::Bad("要帶 target_version（確認框寫的那一版）；重新整理頁面再按一次".into()));
+    };
+    // 使用者核准的版本要跟 daemon 眼中那台「需安裝」的目標是同一版：舊分頁、別人剛裝好、帳本又出了新版都擋下來重看。
+    match pending_target(app, host).await {
+        Some(t) if parse_version(&t) == parse_version(&target) => {}
+        current => {
+            let message = match &current {
+                Some(t) => format!("{host} 的 codex 現在要裝的是 {t}，不是確認框寫的 {target}；重新開確認框再按一次"),
+                None => format!("{host} 已經沒有等著安裝的 codex 新版（可能剛裝好了），這一下沒有安裝"),
+            };
+            return Err(LcError::conflict(
+                "stale_target",
+                json!({"host": host, "kind": "codex", "target_version": target, "current_target": current, "message": message}),
+            ));
+        }
     }
     let key = slot_key(app, host);
     let update_id = crate::db::ulid();
@@ -187,21 +217,21 @@ pub async fn start(app: &Arc<App>, headers: &HeaderMap, host: &str, kind: Option
                 json!({"host": host, "kind": r.kind, "update_id": r.update_id, "message": format!("{host} 已經在安裝 {}，這一下沒有再開一次", r.kind)}),
             ));
         }
-        m.insert(key.clone(), Running { update_id: update_id.clone(), host: host.to_string(), kind: "codex".into() });
+        m.insert(key.clone(), Running { update_id: update_id.clone(), host: host.to_string(), kind: "codex".into(), target: target.clone() });
     }
     let slot = Slot(key);
-    let (app2, host2, id2) = (app.clone(), host.to_string(), update_id.clone());
+    let (app2, host2, id2, target2) = (app.clone(), host.to_string(), update_id.clone(), target.clone());
     tokio::spawn(async move {
         let _slot = slot;
-        run(&app2, runner.as_ref(), &host2, &id2).await;
+        run(&app2, runner.as_ref(), &host2, &id2, &target2).await;
     });
-    Ok(json!({"update_id": update_id, "host": host, "kind": "codex", "started": true}))
+    Ok(json!({"update_id": update_id, "host": host, "kind": "codex", "target_version": target, "started": true}))
 }
 
 /// 一次安裝的結果（也是 `cli_update_done` 的內容）。
-pub async fn run(app: &Arc<App>, runner: &dyn Runner, host: &str, update_id: &str) -> Value {
+pub async fn run(app: &Arc<App>, runner: &dyn Runner, host: &str, update_id: &str, target: &str) -> Value {
     let log_path = app.data_dir.join(LOG_FILE);
-    let base = json!({"update_id": update_id, "host": host, "kind": "codex", "log_path": log_path});
+    let base = json!({"update_id": update_id, "host": host, "kind": "codex", "target_version": target, "log_path": log_path});
     let progress = |phase: &str, extra: Value| {
         let mut v = base.clone();
         v["phase"] = json!(phase);
@@ -230,41 +260,82 @@ pub async fn run(app: &Arc<App>, runner: &dyn Runner, host: &str, update_id: &st
             return finish(done(false, json!({"reason": "version_unreadable", "error": "讀不到目前的 codex 版本，沒有安裝"}))).await;
         }
     };
-    app.emit("cli_update_progress", progress("installing", json!({"from": before}))).await;
-    log_line(app, &format!("[{update_id}] {host}：codex {before}，執行 {CODEX_INSTALL}"));
-    match runner.install(app, host).await {
-        Ok(out) => log_line(app, &format!("[{update_id}] 安裝輸出：\n{}", out.trim_end())),
-        Err(e) => {
-            log_line(app, &format!("[{update_id}] 安裝失敗：\n{e}"));
-            return finish(done(false, json!({"reason": "install_failed", "error": e, "from": before}))).await;
+    let target_v = parse_version(target);
+    // 磁碟上已經是核准的那一版（手動裝過、巡邏還沒更新通知）：不再跑一次安裝指令，直接改通知、開重啟。
+    let already = parse_version(&before) >= target_v;
+    let after = if already {
+        log_line(app, &format!("[{update_id}] {host}：codex 已經是 {before}（目標 {target}），不再安裝"));
+        before.clone()
+    } else {
+        app.emit("cli_update_progress", progress("installing", json!({"from": before}))).await;
+        log_line(app, &format!("[{update_id}] {host}：codex {before}，目標 {target}，執行 {CODEX_INSTALL}"));
+        match runner.install(app, host).await {
+            Ok(out) => log_line(app, &format!("[{update_id}] 安裝輸出：\n{}", out.trim_end())),
+            Err(e) => {
+                log_line(app, &format!("[{update_id}] 安裝失敗：\n{e}"));
+                return finish(done(false, json!({"reason": "install_failed", "error": e, "from": before}))).await;
+            }
         }
-    }
-    app.emit("cli_update_progress", progress("verifying", json!({"from": before}))).await;
-    let after = match runner.version(app, host).await.map(|raw| normalized(&raw)) {
-        Ok(Some(v)) => v,
-        Ok(None) | Err(_) => {
-            return finish(done(false, json!({"reason": "verify_failed", "from": before,
-                "error": "安裝指令跑完了，但讀不到 codex --version，沒有重啟任何 bot"})))
+        app.emit("cli_update_progress", progress("verifying", json!({"from": before}))).await;
+        let after = match runner.version(app, host).await.map(|raw| normalized(&raw)) {
+            Ok(Some(v)) => v,
+            Ok(None) | Err(_) => {
+                return finish(done(false, json!({"reason": "verify_failed", "from": before,
+                    "error": "安裝指令跑完了，但讀不到 codex --version，沒有重啟任何 bot"})))
+                .await;
+            }
+        };
+        if parse_version(&after) <= parse_version(&before) {
+            return finish(done(false, json!({"reason": "version_unchanged", "from": before, "to": after,
+                "error": format!("安裝指令跑完了，codex 還是 {after}（原本 {before}），沒有重啟任何 bot")})))
             .await;
         }
+        // 升了但沒到核准的那一版：不是使用者按的那個更新，通知維持「需安裝」、一顆都不重啟。
+        if parse_version(&after) < target_v {
+            return finish(done(false, json!({"reason": "target_not_reached", "from": before, "to": after,
+                "error": format!("安裝指令跑完了，codex 是 {after}，還沒到確認的 {target}（原本 {before}），沒有重啟任何 bot")})))
+            .await;
+        }
+        log_line(app, &format!("[{update_id}] 升級完成：{before} → {after}（目標 {target}）"));
+        after
     };
-    if parse_version(&after) <= parse_version(&before) {
-        return finish(done(false, json!({"reason": "version_unchanged", "from": before, "to": after,
-            "error": format!("安裝指令跑完了，codex 還是 {after}（原本 {before}），沒有重啟任何 bot")})))
-        .await;
-    }
-    log_line(app, &format!("[{update_id}] 升級完成：{before} → {after}"));
     let notices = mark_installed(app, host, &before, &after).await;
     crate::update_watch::forget_disk_version(host, "codex").await;
     app.emit("cli_update_progress", progress("restarting", json!({"from": before, "to": after}))).await;
     let restart = runner.restart(app, Scope { kind: "codex".into(), host: host.to_string() }).await;
     let v = match restart {
-        Ok(plan) => done(true, json!({"from": before, "to": after, "notices_updated": notices, "restart": plan})),
+        Ok(plan) => done(true, json!({"from": before, "to": after, "already_installed": already, "notices_updated": notices, "restart": plan})),
         // 裝好了但批次開不起來：新版已經在磁碟上，通知也改成「重啟套用」了，照一般的一鍵重啟再按一次就好。
-        Err(e) => done(true, json!({"from": before, "to": after, "notices_updated": notices, "restart": null,
-            "restart_error": format!("{e:#}")})),
+        Err(e) => done(true, json!({"from": before, "to": after, "already_installed": already, "notices_updated": notices,
+            "restart": null, "restart_error": format!("{e:#}")})),
     };
     finish(v).await
+}
+
+/// 那台主機上還寫著「需安裝」的 codex run 與它的通知。
+async fn pending_runs(app: &Arc<App>, host: &str) -> Vec<(crate::db::Run, String)> {
+    let mut out = Vec::new();
+    for run in crate::db::all_active_runs(&app.db).await.unwrap_or_default() {
+        let Some(notice) = run.update_notice.clone().filter(|t| t.contains("需安裝")) else { continue };
+        match crate::db::bot(&app.db, &run.bot_id).await {
+            Ok(Some(b)) if b.kind == "codex" => {}
+            _ => continue,
+        }
+        if crate::db::bot_host(&app.db, &run.bot_id).await.ok().as_deref() != Some(host) {
+            continue;
+        }
+        out.push((run, notice));
+    }
+    out
+}
+
+/// daemon 眼中那台現在要裝的版本：「需安裝」通知裡最新的目標（確認框取同一個，`codexInstallPlan`）。沒有就是 `None`。
+async fn pending_target(app: &Arc<App>, host: &str) -> Option<String> {
+    pending_runs(app, host)
+        .await
+        .iter()
+        .filter_map(|(_, n)| crate::codex_update::pending_to(n))
+        .max_by(|a, b| parse_version(a).cmp(&parse_version(b)))
 }
 
 fn merge(v: &mut Value, extra: Value) {
@@ -290,15 +361,7 @@ fn log_line(app: &App, line: &str) {
 /// 跑著的版本：記憶體裡看過的 → 通知寫的起點 → 安裝前的磁碟版本（這個 process 是裝之前起的，不會比它新）。
 async fn mark_installed(app: &Arc<App>, host: &str, before: &str, after: &str) -> usize {
     let mut n = 0;
-    for run in crate::db::all_active_runs(&app.db).await.unwrap_or_default() {
-        let Some(notice) = run.update_notice.clone().filter(|t| t.contains("需安裝")) else { continue };
-        match crate::db::bot(&app.db, &run.bot_id).await {
-            Ok(Some(b)) if b.kind == "codex" => {}
-            _ => continue,
-        }
-        if crate::db::bot_host(&app.db, &run.bot_id).await.ok().as_deref() != Some(host) {
-            continue;
-        }
+    for (run, notice) in pending_runs(app, host).await {
         let running = crate::codex_update::remember_running(&run.id, "", None)
             .or_else(|| crate::codex_update::pending_from(&notice))
             .unwrap_or_else(|| before.to_string());
@@ -409,7 +472,7 @@ mod tests {
         let fake = Fake::new(&["codex-cli 0.155.1", "codex-cli 0.157.0"], Ok("installed"));
         let mut rx = env.app.subscribe();
 
-        let v = super::run(&env.app, fake.as_ref(), "local", "u-1").await;
+        let v = super::run(&env.app, fake.as_ref(), "local", "u-1", "0.157.0").await;
 
         assert_eq!(v["ok"], true, "{v}");
         assert_eq!((v["from"].as_str(), v["to"].as_str()), (Some("0.155.1"), Some("0.157.0")));
@@ -431,7 +494,7 @@ mod tests {
         let fake = Fake::new(&["codex-cli 0.155.1", "codex-cli 0.157.0"], Err("curl: (6) Could not resolve host"));
         let mut rx = env.app.subscribe();
 
-        let v = super::run(&env.app, fake.as_ref(), "local", "u-2").await;
+        let v = super::run(&env.app, fake.as_ref(), "local", "u-2", "0.157.0").await;
 
         assert_eq!(v["ok"], false);
         assert_eq!(v["reason"], "install_failed");
@@ -448,7 +511,7 @@ mod tests {
         let (_bot, run) = codex_bot_with_notice(&env, "cx", &pending).await;
         let fake = Fake::new(&["codex-cli 0.155.1", "codex-cli 0.155.1"], Ok("ok"));
 
-        let v = super::run(&env.app, fake.as_ref(), "local", "u-3").await;
+        let v = super::run(&env.app, fake.as_ref(), "local", "u-3", "0.157.0").await;
 
         assert_eq!(v["reason"], "version_unchanged", "{v}");
         assert!(fake.restarts().is_empty(), "版本沒變不能重啟");
@@ -459,12 +522,12 @@ mod tests {
     async fn unreadable_versions_before_or_after_restart_nothing() {
         let env = crate::testing::env().await;
         let fake = Fake::new(&[], Ok("ok"));
-        let v = super::run(&env.app, fake.as_ref(), "local", "u-4").await;
+        let v = super::run(&env.app, fake.as_ref(), "local", "u-4", "0.157.0").await;
         assert_eq!(v["reason"], "version_unreadable");
         assert_eq!(fake.installs(), 0, "不知道現在的版本就不裝");
 
         let fake = Fake::new(&["codex-cli 0.155.1"], Ok("ok"));
-        let v = super::run(&env.app, fake.as_ref(), "local", "u-5").await;
+        let v = super::run(&env.app, fake.as_ref(), "local", "u-5", "0.157.0").await;
         assert_eq!(v["reason"], "verify_failed");
         assert!(fake.restarts().is_empty());
     }
@@ -499,31 +562,33 @@ mod tests {
         let fake = Fake::new(&[], Ok("ok"));
         let mut h = HeaderMap::new();
         h.insert("X-AM-Bot-Id", "b1".parse().unwrap());
-        let r = start(&env.app, &h, "local", Some("codex"), fake.clone()).await;
+        let r = start(&env.app, &h, "local", Some("codex"), Some("0.157.0"), fake.clone()).await;
         assert!(matches!(r, Err(LcError::Forbidden(ref v)) if v["reason"] == "ui_only"), "帶 bot 身分一律 403");
         let mut h = HeaderMap::new();
         h.insert("X-AM-Bot-Token", "tok".parse().unwrap());
-        assert!(matches!(start(&env.app, &h, "local", Some("codex"), fake.clone()).await, Err(LcError::Forbidden(_))));
+        assert!(matches!(start(&env.app, &h, "local", Some("codex"), Some("0.157.0"), fake.clone()).await, Err(LcError::Forbidden(_))));
 
         let ui = HeaderMap::new();
-        assert!(matches!(start(&env.app, &ui, "local", Some("claude"), fake.clone()).await, Err(LcError::Bad(_))));
-        assert!(matches!(start(&env.app, &ui, "local", None, fake.clone()).await, Err(LcError::Bad(_))));
-        assert!(matches!(start(&env.app, &ui, "nowhere", Some("codex"), fake.clone()).await, Err(LcError::NotFound(_))));
+        assert!(matches!(start(&env.app, &ui, "local", Some("claude"), Some("0.157.0"), fake.clone()).await, Err(LcError::Bad(_))));
+        assert!(matches!(start(&env.app, &ui, "local", None, Some("0.157.0"), fake.clone()).await, Err(LcError::Bad(_))));
+        assert!(matches!(start(&env.app, &ui, "nowhere", Some("codex"), Some("0.157.0"), fake.clone()).await, Err(LcError::NotFound(_))));
         assert_eq!(fake.installs(), 0, "被拒絕的請求什麼都不跑");
     }
 
     #[tokio::test]
     async fn a_second_install_on_the_same_host_is_a_409_until_the_first_finishes() {
         let env = crate::testing::env().await;
+        let pending = crate::codex_update::pending_text(Some("0.155.1"), "0.157.0");
+        let (_bot, run) = codex_bot_with_notice(&env, "cx", &pending).await;
         let slow = Arc::new(Fake {
             hold: Duration::from_millis(300),
             ..Arc::try_unwrap(Fake::new(&["codex-cli 0.155.1", "codex-cli 0.157.0"], Ok("ok"))).ok().unwrap()
         });
         let ui = HeaderMap::new();
-        let first = start(&env.app, &ui, "local", Some("codex"), slow.clone()).await.expect("第一個開得起來");
+        let first = start(&env.app, &ui, "local", Some("codex"), Some("0.157.0"), slow.clone()).await.expect("第一個開得起來");
         assert!(running_list(&env.app.data_dir).iter().any(|r| r["update_id"] == first["update_id"]), "state 看得到在跑的那一個");
 
-        let second = start(&env.app, &ui, "local", Some("codex"), Fake::new(&[], Ok("ok"))).await;
+        let second = start(&env.app, &ui, "local", Some("codex"), Some("0.157.0"), Fake::new(&[], Ok("ok"))).await;
         match second {
             Err(LcError::Conflict(v)) => {
                 assert_eq!(v["reason"], "cli_update_in_progress", "{v}");
@@ -533,6 +598,92 @@ mod tests {
         }
         assert!(crate::testing::eventually!(running_list(&env.app.data_dir).is_empty()), "跑完就放掉");
         assert_eq!(slow.restarts().len(), 1);
-        start(&env.app, &ui, "local", Some("codex"), Fake::new(&[], Ok("ok"))).await.expect("放掉之後可以再開");
+        // 第一次裝好會把通知改成「已安裝」；再開一次要有新的「需安裝」目標。
+        sqlx::query("UPDATE runs SET update_notice=? WHERE id=?").bind(&pending).bind(&run).execute(&env.app.db).await.unwrap();
+        start(&env.app, &ui, "local", Some("codex"), Some("0.157.0"), Fake::new(&[], Ok("ok"))).await.expect("放掉之後可以再開");
+    }
+
+    /// #569：升了但沒到確認框寫的那一版，不是使用者核准的更新——不改通知、一顆都不重啟。
+    #[tokio::test]
+    async fn an_install_below_the_approved_target_restarts_nothing() {
+        let env = crate::testing::env().await;
+        let pending = crate::codex_update::pending_text(Some("0.155.0"), "0.157.0");
+        let (_bot, run) = codex_bot_with_notice(&env, "cx", &pending).await;
+        let fake = Fake::new(&["codex-cli 0.155.0", "codex-cli 0.156.0"], Ok("ok"));
+        let mut rx = env.app.subscribe();
+
+        let v = super::run(&env.app, fake.as_ref(), "local", "u-6", "0.157.0").await;
+
+        assert_eq!(v["ok"], false, "{v}");
+        assert_eq!(v["reason"], "target_not_reached", "{v}");
+        assert_eq!((v["from"].as_str(), v["to"].as_str(), v["target_version"].as_str()), (Some("0.155.0"), Some("0.156.0"), Some("0.157.0")));
+        assert_eq!(fake.installs(), 1);
+        assert!(fake.restarts().is_empty(), "沒到目標不能重啟");
+        assert_eq!(notice_of(&env.app, &run).await, Some(pending), "通知維持「需安裝」");
+        assert_eq!(done_events(&mut rx)[0]["reason"], "target_not_reached");
+    }
+
+    /// 裝到比目標還新（安裝指令裝的是最新版，帳本還沒追上）：已經涵蓋使用者核准的那一版，照成功走。
+    #[tokio::test]
+    async fn an_install_past_the_target_is_accepted() {
+        let env = crate::testing::env().await;
+        let pending = crate::codex_update::pending_text(Some("0.155.0"), "0.157.0");
+        let (_bot, run) = codex_bot_with_notice(&env, "cx", &pending).await;
+        let fake = Fake::new(&["codex-cli 0.155.0", "codex-cli 0.158.0"], Ok("ok"));
+
+        let v = super::run(&env.app, fake.as_ref(), "local", "u-7", "0.157.0").await;
+
+        assert_eq!(v["ok"], true, "{v}");
+        assert_eq!(v["to"], "0.158.0");
+        assert_eq!(fake.restarts().len(), 1);
+        assert!(notice_of(&env.app, &run).await.unwrap().contains("已安裝"));
+    }
+
+    /// 磁碟上已經是目標版本：不再跑安裝指令，只改通知、開重啟。
+    #[tokio::test]
+    async fn a_disk_already_at_the_target_skips_the_installer() {
+        let env = crate::testing::env().await;
+        let pending = crate::codex_update::pending_text(Some("0.155.0"), "0.157.0");
+        let (_bot, run) = codex_bot_with_notice(&env, "cx", &pending).await;
+        let fake = Fake::new(&["codex-cli 0.157.0"], Ok("ok"));
+
+        let v = super::run(&env.app, fake.as_ref(), "local", "u-8", "0.157.0").await;
+
+        assert_eq!(v["ok"], true, "{v}");
+        assert_eq!(v["already_installed"], true);
+        assert_eq!(fake.installs(), 0, "已經裝好就不再跑 curl | sh");
+        assert_eq!(fake.restarts().len(), 1, "跑著的還是舊版，照樣要重啟套用");
+        assert!(notice_of(&env.app, &run).await.unwrap().contains("已安裝"));
+    }
+
+    /// 請求帶的版本要等於 daemon 眼中那台的目標：沒帶 400、不一樣或已經沒有「需安裝」都是 409 `stale_target`，什麼都不跑。
+    #[tokio::test]
+    async fn a_target_that_does_not_match_the_pending_notice_is_refused() {
+        let env = crate::testing::env().await;
+        let ui = HeaderMap::new();
+        let fake = Fake::new(&["codex-cli 0.155.0", "codex-cli 0.157.0"], Ok("ok"));
+
+        let none = start(&env.app, &ui, "local", Some("codex"), Some("0.157.0"), fake.clone()).await;
+        assert!(matches!(none, Err(LcError::Conflict(ref v)) if v["reason"] == "stale_target" && v["current_target"].is_null()), "{none:?}");
+
+        let older = crate::codex_update::pending_text(Some("0.155.0"), "0.156.1");
+        codex_bot_with_notice(&env, "cx-a", &older).await;
+        let newer = crate::codex_update::pending_text(Some("0.155.0"), "0.157.0");
+        codex_bot_with_notice(&env, "cx-b", &newer).await;
+
+        assert!(matches!(start(&env.app, &ui, "local", Some("codex"), None, fake.clone()).await, Err(LcError::Bad(_))), "沒帶目標 400");
+        match start(&env.app, &ui, "local", Some("codex"), Some("0.156.1"), fake.clone()).await {
+            Err(LcError::Conflict(v)) => {
+                assert_eq!(v["reason"], "stale_target", "{v}");
+                assert_eq!(v["current_target"], "0.157.0", "目標取那台「需安裝」裡最新的");
+            }
+            other => panic!("舊的目標要擋：{other:?}"),
+        }
+        assert_eq!(fake.installs(), 0, "被拒絕的請求什麼都不跑");
+
+        let ok = start(&env.app, &ui, "local", Some("codex"), Some("0.157.0"), fake.clone()).await.expect("跟最新目標一致就開");
+        assert_eq!(ok["target_version"], "0.157.0");
+        assert!(crate::testing::eventually!(running_list(&env.app.data_dir).is_empty()));
+        assert_eq!(fake.installs(), 1);
     }
 }

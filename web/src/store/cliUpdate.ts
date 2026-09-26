@@ -62,6 +62,7 @@ const REASON: Record<string, string> = {
   install_failed: '安裝失敗',
   verify_failed: '裝完讀不到 codex 版本',
   version_unchanged: '裝完版本沒變',
+  target_not_reached: '裝完還沒到確認的版本',
 }
 
 function toPlan(v: unknown): RestartPlan | null {
@@ -101,16 +102,18 @@ export function cliUpdateDone(data: Rec): CliUpdateResult {
     return { ok: false, message: error ? `${head}：${error}` : head, batch: null, joinBatchId: null }
   }
   const plan = toPlan(pick(data, 'restart'))
-  const up = from && to ? `${from} → ${to}` : to || '新版'
+  const up = from && to && from !== to ? `${from} → ${to}` : to || '新版'
+  // 磁碟上本來就是那一版（#569）：沒有跑安裝指令，只改通知、開重啟。
+  const verb = pick(data, 'already_installed') === true ? '本來就是' : '已升到'
   if (!plan) {
     const why = str(pick(data, 'restart_error'))
-    return { ok: true, message: `${host} 的 codex 已升到 ${up}，但重啟沒排起來${why ? `：${why}` : ''}；再按一次 ⌃⌃ 重啟`, batch: null, joinBatchId: null }
+    return { ok: true, message: `${host} 的 codex ${verb} ${up}，但重啟沒排起來${why ? `：${why}` : ''}；再按一次 ⌃⌃ 重啟`, batch: null, joinBatchId: null }
   }
   if (plan.already_running) {
-    return { ok: true, message: `${host} 的 codex 已升到 ${up}；已經有一批重啟在跑，那批跑完再按一次 ⌃⌃ 重啟 codex`, batch: null, joinBatchId: plan.batch_id }
+    return { ok: true, message: `${host} 的 codex ${verb} ${up}；已經有一批重啟在跑，那批跑完再按一次 ⌃⌃ 重啟 codex`, batch: null, joinBatchId: plan.batch_id }
   }
   const tail = plan.total > 0 ? `，重啟 ${plan.total} 顆閒置的 codex` : '；沒有閒置的 codex 可以重啟（在忙的之後再按 ⌃⌃）'
-  return { ok: true, message: `${host} 的 codex 已升到 ${up}${tail}`, batch: batchFromPlan(plan), joinBatchId: null }
+  return { ok: true, message: `${host} 的 codex ${verb} ${up}${tail}`, batch: batchFromPlan(plan), joinBatchId: null }
 }
 
 /**

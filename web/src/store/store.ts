@@ -521,7 +521,7 @@ export interface StoreState {
   clearRestartBatch: () => void
   /** header 一鍵升級 codex（SPEC §6.9）：那台裝好、驗過版本就接著重啟那台閒置的 codex。null＝沒有在裝。 */
   cliUpdate: CliUpdate | null
-  installCodexUpdate: (host: string) => Promise<void>
+  installCodexUpdate: (host: string, targetVersion: string) => Promise<void>
   removeBot: (botId: string, opts?: { confirmSupervisor?: boolean }) => Promise<void>
   /** 刪除被 daemon 以「這是 AGM 的 bot」擋下，等使用者第二次確認（issue #406）；null＝沒有在問。 */
   agmDeleteAsk: AgmDeleteAsk | null
@@ -1878,11 +1878,11 @@ export const useStore = create<StoreState>((set, get) => ({
     })
   },
 
-  async installCodexUpdate(host) {
+  async installCodexUpdate(host, targetVersion) {
     await guarded(set, get, `cli-update:${host}`, async () => {
       set({ cliUpdate: { id: '', host, kind: 'codex', phase: 'starting', from: null, to: null } })
       try {
-        const r = await api.startCliUpdate(host, 'codex')
+        const r = await api.startCliUpdate(host, 'codex', targetVersion)
         // 事件可能比回應先到（已經換成真的 id 與階段），那就不要蓋回 starting。
         set((s) => (s.cliUpdate?.phase === 'starting' ? { cliUpdate: { ...s.cliUpdate, id: r.update_id } } : {}))
       } catch (e) {

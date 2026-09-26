@@ -99,6 +99,14 @@ pub fn pending_from(notice: &str) -> Option<String> {
     versions_after(notice).and_then(|(from, _)| from)
 }
 
+/// 「需安裝」通知寫的目標版本（`b`）：header 一鍵安裝確認框寫的那一版，`cli_update` 拿它核對使用者核准的版本（#569）。
+pub fn pending_to(notice: &str) -> Option<String> {
+    if !(notice.starts_with(NOTICE_PREFIX) && notice.contains("需安裝")) {
+        return None;
+    }
+    versions_after(notice).map(|(_, to)| to)
+}
+
 /// 磁碟上已經是新版（安裝過了）、這個 run 還跑著舊的：重啟就換。`--version` 的原文（`codex-cli 0.155.1`）也收。
 pub fn installed_text(disk: &str, running: &str) -> Option<String> {
     let (d, r) = (parse_version(&cli_version_string(disk).unwrap_or_else(|| disk.to_string()))?, parse_version(running)?);
