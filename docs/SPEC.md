@@ -322,6 +322,9 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   （CAS，herdr 這段期間報過別的狀態就不動）並叫醒排隊的 flush。補標記（記憶體）在還原**寫進 DB 之後**才拿掉：寫失敗就留著、不發狀態不叫 flush，
   下一輪巡邏重試；CAS 沒命中（已被取代）或 run 已結束／不在才拿掉（#565）。**一個鍵都不按**：網頁用既有的 BlockedModal／BlockedPanel＋BlockedChoices 讓使用者自己點
   （`parseChoiceMenu` 把 `Session paused` 標題當題目、說明與 `Details:` 放 notes）。畫面在 `lifecycle/fixtures/claude-2.1.281-session-paused.txt`（只取選單那段，說明是假文字）。
+  **選單關掉、還原成 idle 之後 5 秒 run 仍 idle**（選了「Edit prompt and retry」＝這回合沒有回覆）就馬上收掉那筆 in-flight
+  （`stuck_turns::close_after_session_paused`，`completed_fallback`＋一則系統訊息說是被暫停），不等 §4.3 的 5 分鐘閒置門檻——
+  否則網頁一直顯示「等待回覆」而其實什麼都沒在跑（2026-09-26 使用者）。選「換模型重試」時 claude 接著跑同一回合、herdr 報 working，鎖內重讀不是 idle 就不動。
 - **claude 更新通知**：自動更新後 claude 只在 pane 最底印 `✔ Update installed · Restart to update`，不是事件。`update_watch` 每 30 秒
   對 running 的 claude run `pane.read visible 80`，認到就寫 `runs.update_notice` 並推 `bot_status`，消失就清 NULL（讀不到畫面不清）；不限 idle。
   認法（`tui_prompts::update_notice`）：兩段字都要中，**且只看最下面 6 行非空白**（正文引用這兩句時會誤中）。存在 run 上：重啟（套用更新本身）後的新 run 本來就沒有。

@@ -107,7 +107,7 @@ pub(crate) use interruption::{adopt_interrupted_on_restart, adopt_turns_of_ended
 pub(crate) use owed_delivery::{owed_as_unknown, settle_locked as settle_owed_deliveries};
 #[cfg(test)]
 pub(crate) use interrupt_grace::{expect_interrupt_echo, note_user_interrupt, InterruptedTurn};
-pub(crate) use stuck_turns::{observe as observe_agent_status, spawn_stuck_turn_sweeper, sweep as sweep_stuck_turns};
+pub(crate) use stuck_turns::{close_after_session_paused, observe as observe_agent_status, spawn_stuck_turn_sweeper, sweep as sweep_stuck_turns};
 
 #[derive(Debug)]
 pub enum LcError {
