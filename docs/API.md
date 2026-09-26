@@ -1305,6 +1305,9 @@ codex 的 `fast` **不再因為不知道現況而拒絕**（拿掉 `unknown_fast
 `reason`：`child`（子 agent，由父 bot 用 herdr 重開，SPEC §6.5a；2026-09-22）、`default_session`、`not_running`、`working`、`blocked`、`unknown_status`、`turn_in_flight`、`needs_manual_install`、`no_longer_pending`、`state_unreadable`。
 - **202**：回的是計畫，重啟在背景一顆一顆跑。`total = 0` 也是 202，並立刻推 `bots_restart_done`。
 - 已經有一批在跑：`202 {"batch_id": <那一批>, "total": 0, "planned": [], "skipped": [], "already_running": true}`，不另開一批、不推新的 `done`，進度照那一批的事件。
+- 自己開的一批回 `restart_status:"started"`。範圍批次（只有 `cli_update` 內部用，§12.7a）遇到已經在跑的一批另有兩種結果（#566），不會只憑「有一批在跑」就回 `already_running`：
+  `already_covered`（那一批還沒輪到的目標涵蓋這個範圍每一顆該重啟的，帶 `covered`）或 `deferred`（`batch_id:null`、`behind_batch_id`、`deferred`＝現在會重啟的那幾顆；
+  那一批結束時自動開這個範圍的一批，到時重新挑）。
 - 每顆 `restart_bot_with(resume_native)`，claude 拿到 `--resume <上一個 session>`（上下文不掉）；本機找不到 `transcript_path` 時開新對話。
 - 候選 = claude／codex 且 run 的 `update_notice` 非空（codex 的「需安裝」是候選但跳過，`needs_manual_install`）；非候選不出現在任何清單。`reason`：`default_session` / `not_running` / `working` / `blocked` / `unknown_status` / `turn_in_flight`，
   以及輪到它時已經不是候選的 `no_longer_pending`（每一顆真的重啟前會照同一張表再判斷一次）、輪到它時 DB 讀不到它的狀態的 `state_unreadable`
@@ -1626,8 +1629,10 @@ WS（`update_id`／`host`／`kind`／`target_version`／`log_path` 每則都帶�
   收尾推 `cli_update_done`，帶 `recovered:true`：到了 `target_version` 就改通知成「已安裝，重啟套用」、`ok:true`，但 `restart:null`＋`restart_error`
   （按下去的那一刻隔了一次重啟，不自動開批次，按一般的 ⌃⌃ 重啟）；沒到就是 `ok:false` `interrupted`，要裝再按一次（照常先讀版本，已經裝好就不再裝）。
 - 結果（`ok`／`reason`／版本）在推 `cli_update_done` **之前**寫進那一列（`status` `done`／`failed`），之後那台才能再開一次。
-- `ok:true` 的 `restart` 是 §10.3a 的計畫，之後照 `bots_restart_progress`／`bots_restart_done` 走；已經有一批在跑時是那一批的
-  `already_running:true`（codex 這次沒排進去，等那批跑完再按一次重啟）。批次開不起來時 `restart:null`＋`restart_error`（新版已裝好，照一般重啟再按一次）。
+- `ok:true` 的 `restart` 是 §10.3a 的計畫（範圍只限那台的 codex），之後照 `bots_restart_progress`／`bots_restart_done` 走；
+  `restart_status` 說重啟交到哪了（#566）：`started`（開了這台 codex 的一批）、`already_covered`（正在跑的那一批確實還排著這台每一顆該重啟的 codex，
+  `restart.batch_id` 是那一批）、`deferred`（正在跑的那一批沒涵蓋，排在它後面：`restart.batch_id:null`、`restart.behind_batch_id`＝那一批，
+  它結束時 daemon 自己接著開這台 codex 的一批，不用再按）、`error`（批次開不起來：`restart:null`＋`restart_error`，新版已裝好，照一般重啟再按一次）。
 
 ### 12.7 透過現有 agent 安裝 `POST /api/hosts/{name}/tools/install`
 `{ "kind": "grok", "via_bot_id": "01M1…" }`：daemon 組一則安裝 prompt（官方安裝方式：claude `curl -fsSL https://claude.ai/install.sh | bash`、codex `npm i -g @openai/codex`、

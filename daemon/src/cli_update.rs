@@ -502,10 +502,18 @@ pub async fn run(app: &Arc<App>, runner: &dyn Runner, host: &str, update_id: &st
     }
     let restart = runner.restart(app, Scope { kind: "codex".into(), host: host.to_string() }).await;
     let v = match restart {
-        Ok(plan) => done(true, json!({"from": before, "to": after, "already_installed": already, "notices_updated": notices, "restart": plan})),
+        // `restart_status` 照批次那邊講的（#566）：`started` 開了這台 codex 的一批；`already_covered` 正在跑的那一批
+        // 確實還排著這台每一顆該重啟的 codex；`deferred` 那一批沒涵蓋，排在它後面、它結束時自己接著開。
+        // 不能再把「剛好有一批在跑」（`already_running`）當成重啟已經交出去。
+        Ok(plan) => {
+            let status = plan["restart_status"].as_str().unwrap_or("started").to_string();
+            log_line(app, &format!("[{update_id}] 重啟：{status} {}", plan["batch_id"]));
+            done(true, json!({"from": before, "to": after, "already_installed": already, "notices_updated": notices,
+                "restart": plan, "restart_status": status}))
+        }
         // 裝好了但批次開不起來：新版已經在磁碟上，通知也改成「重啟套用」了，照一般的一鍵重啟再按一次就好。
         Err(e) => done(true, json!({"from": before, "to": after, "already_installed": already, "notices_updated": notices,
-            "restart": null, "restart_error": format!("{e:#}")})),
+            "restart": null, "restart_status": "error", "restart_error": format!("{e:#}")})),
     };
     finish(v).await
 }
@@ -686,6 +694,8 @@ mod tests {
         hold: Duration,
         /// 有的話，安裝等到它放行才回（測途中換主機用）。
         gate: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+        /// 批次走真的 `bulk_restart::spawn_scoped`（#566：要測跟正在跑的那一批怎麼互動）。
+        real_restart: bool,
     }
 
     impl Fake {
@@ -699,6 +709,7 @@ mod tests {
                 restarts: Mutex::new(Vec::new()),
                 hold: Duration::ZERO,
                 gate: Mutex::new(None),
+                real_restart: false,
             })
         }
         fn restarts(&self) -> Vec<(String, String)> {
@@ -740,9 +751,12 @@ mod tests {
                 }
             })
         }
-        fn restart<'a>(&'a self, _app: &'a Arc<App>, scope: Scope) -> BoxFuture<'a, anyhow::Result<Value>> {
+        fn restart<'a>(&'a self, app: &'a Arc<App>, scope: Scope) -> BoxFuture<'a, anyhow::Result<Value>> {
             Box::pin(async move {
-                self.restarts.lock().unwrap().push((scope.kind, scope.host));
+                self.restarts.lock().unwrap().push((scope.kind.clone(), scope.host.clone()));
+                if self.real_restart {
+                    return crate::bulk_restart::spawn_scoped(app, Some(&scope)).await;
+                }
                 Ok(json!({"batch_id": "b-1", "total": 1, "planned": [{"bot_id": "x", "name": "cx"}], "skipped": []}))
             })
         }
@@ -1212,5 +1226,47 @@ mod tests {
         assert!(matches!(classify_install_error(failed), InstallError::Failed(_)));
         assert!(std::fs::symlink_metadata(&lock).is_err(), "失敗也放掉鎖");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #566：一批不相干的 claude 全域重啟正在跑（清單在 codex 裝好之前就定了）。codex 在 local 裝好之後，
+    /// 結果不能只因為「有一批在跑」就報成重啟已經交出去、還指向那一批；要講 `deferred`，而且那批一結束，
+    /// 這台的 codex 自己接著跑一批——不用使用者再按一次。
+    #[tokio::test]
+    async fn an_install_behind_an_unrelated_running_batch_reports_deferred_and_restarts_codex_after_it() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let cl = crate::testing::claude_bot(&app, &env.project_id, "cl").await;
+        let cl_run = crate::testing::fake_run(&app, &cl.id).await;
+        sqlx::query("UPDATE runs SET update_notice='Update installed · Restart to update' WHERE id=?").bind(&cl_run).execute(&app.db).await.unwrap();
+        let pending = crate::codex_update::pending_text(Some("0.155.1"), "0.157.0");
+        let (cx, _) = codex_bot_with_notice(&env, "cx", &pending).await;
+        // 這台不認得的身分：重啟在 start 那一步被擋，不真的開 pane。
+        sqlx::query("UPDATE bots SET identity='nope' WHERE id IN (?, ?)").bind(&cl.id).bind(&cx).execute(&app.db).await.unwrap();
+        let seen = Arc::new(Mutex::new(Vec::<crate::state::WsEvent>::new()));
+        let (mut rx, out) = (app.subscribe(), seen.clone());
+        tokio::spawn(async move {
+            while let Ok(ev) = rx.recv().await {
+                out.lock().unwrap().push(ev);
+            }
+        });
+        let (release, gate) = tokio::sync::oneshot::channel::<()>();
+        crate::lifecycle::race_point::arm("bulk_restart_before_lookup", &cl.id, move || async move {
+            gate.await.ok();
+        });
+        let first = crate::bulk_restart::spawn(&app).await.unwrap();
+        assert_eq!(first["planned"].as_array().unwrap().len(), 1, "第一批只有 claude（codex 還是「需安裝」）：{first}");
+
+        let fake = Arc::new(Fake { real_restart: true, ..Arc::try_unwrap(Fake::new(&["codex-cli 0.155.1", "codex-cli 0.157.0"], Ok("ok"))).ok().unwrap() });
+        let v = super::run(&app, fake.as_ref(), "local", "u-566", "0.157.0").await;
+
+        assert_eq!(v["ok"], true, "新版確實裝好了：{v}");
+        assert_eq!(v["restart_status"], "deferred", "那一批沒涵蓋這台的 codex：{v}");
+        assert_eq!(v["restart"]["behind_batch_id"], first["batch_id"], "{v}");
+        assert_ne!(v["restart"]["batch_id"], first["batch_id"], "進度不能掛到不相干的那一批：{v}");
+        release.send(()).unwrap();
+        let codex_restarted_later = || {
+            seen.lock().unwrap().iter().any(|e| e.kind == "bots_restart_progress" && e.data["bot_id"] == cx.as_str() && e.data["batch_id"] != first["batch_id"])
+        };
+        assert!(crate::testing::eventually!(codex_restarted_later()), "那批結束後這台的 codex 要自己接著重啟");
     }
 }

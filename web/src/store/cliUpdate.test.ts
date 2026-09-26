@@ -74,6 +74,33 @@ test('成功但已經有一批在跑：接那一批，訊息請人等那批跑�
   assert.match(noPlan.message, /db locked/)
 })
 
+test('#566 排在不相干的那一批後面（deferred）：不接那一批的進度，講清楚跑完會自己接著重啟、不用再按', () => {
+  const r = cliUpdateDone({
+    ...base,
+    ok: true,
+    to: '0.157.0',
+    restart_status: 'deferred',
+    restart: { batch_id: null, total: 0, planned: [], skipped: [], restart_status: 'deferred', behind_batch_id: 'b0' },
+  })
+  assert.equal(r.ok, true)
+  assert.equal(r.batch, null)
+  assert.equal(r.joinBatchId, null, '不能把 codex 的升級掛到不相干的那一批')
+  assert.match(r.message, /自動/)
+  assert.doesNotMatch(r.message, /再按一次/)
+})
+
+test('#566 正在跑的那一批確實排著這台的 codex（already_covered）：接那一批的進度', () => {
+  const r = cliUpdateDone({
+    ...base,
+    ok: true,
+    to: '0.157.0',
+    restart_status: 'already_covered',
+    restart: { batch_id: 'b0', total: 0, planned: [], skipped: [], already_running: true, restart_status: 'already_covered' },
+  })
+  assert.equal(r.joinBatchId, 'b0')
+  assert.doesNotMatch(r.message, /再按一次/)
+})
+
 test('快照對帳：daemon 說沒在裝就清掉；不知道（舊 daemon）不動；剛按下還沒拿到 id 的不動', () => {
   const cur: CliUpdate = { id: 'u1', host: 'local', kind: 'codex', phase: 'installing', from: null, to: null }
   assert.equal(reconcileCliUpdate(cur, [{ update_id: 'u1', host: 'local' }]), cur)
