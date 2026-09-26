@@ -220,6 +220,9 @@ pub trait Pane: Send + Sync {
     fn read(&self) -> BoxFuture<'_, anyhow::Result<String>>;
     fn send_text<'a>(&'a self, text: &'a str) -> BoxFuture<'a, anyhow::Result<()>>;
     fn send_keys<'a>(&'a self, keys: &'a [&'a str]) -> BoxFuture<'a, anyhow::Result<()>>;
+    /// race point 的 key：每個 pane 各自一個（#573）。拿目標文字當 key 時，平行的測試倒同一句話會互相拿走對方的 hook。
+    #[cfg(test)]
+    fn race_key(&self) -> String;
 }
 
 pub struct HerdrPane {
@@ -228,6 +231,10 @@ pub struct HerdrPane {
 }
 
 impl Pane for HerdrPane {
+    #[cfg(test)]
+    fn race_key(&self) -> String {
+        self.pane_id.clone()
+    }
     /// 帶樣式讀（`format: ansi`）：跟其他看輸入列的地方同一支（7178806b）。純文字分不出 claude 2.1.280 輸入列裡 dim 的
     /// 「建議下一句」和使用者打的字，會把建議句當成有字、擋成 `composer_busy`。
     fn read(&self) -> BoxFuture<'_, anyhow::Result<String>> {
@@ -392,7 +399,7 @@ pub async fn drive(pane: &dyn Pane, target: &str, skip: usize) -> Result<Done, F
         return Err(Fail::ConfirmNotShown);
     };
     #[cfg(test)]
-    lifecycle::race_point::hit("rewind_before_restore", target).await;
+    lifecycle::race_point::hit("rewind_before_restore", &pane.race_key()).await;
     let latest = read(pane).await?;
     let Some(confirm) = parse_confirm(&latest) else {
         back_out(pane).await;
