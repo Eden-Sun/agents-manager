@@ -31,6 +31,10 @@ test('失敗：不開批次，訊息講原因與錯誤', () => {
   const same = cliUpdateDone({ ...base, ok: false, reason: 'version_unchanged', from: '0.155.1', to: '0.155.1' })
   assert.match(same.message, /版本沒變/)
   assert.equal(same.batch, null)
+  const below = cliUpdateDone({ ...base, ok: false, reason: 'target_not_reached', from: '0.155.0', to: '0.156.0', target_version: '0.157.0' })
+  assert.match(below.message, /還沒到確認的版本/)
+  assert.match(below.message, /沒有重啟任何 Bot/)
+  assert.equal(below.batch, null)
 })
 
 test('成功：一鍵重啟的計畫變成 header 的進度', () => {
@@ -65,4 +69,18 @@ test('快照對帳：daemon 說沒在裝就清掉；不知道（舊 daemon）不
   assert.equal(reconcileCliUpdate(cur, undefined), cur)
   const starting: CliUpdate = { ...cur, id: '', phase: 'starting' }
   assert.equal(reconcileCliUpdate(starting, []), starting)
+})
+
+test('磁碟本來就是目標版本（沒跑安裝指令）：講「本來就是」，照樣接手重啟的進度', () => {
+  const r = cliUpdateDone({
+    ...base,
+    ok: true,
+    already_installed: true,
+    from: '0.157.0',
+    to: '0.157.0',
+    restart: { batch_id: 'b2', total: 1, planned: [], skipped: [] },
+  })
+  assert.equal(r.batch?.id, 'b2')
+  assert.match(r.message, /本來就是 0\.157\.0/)
+  assert.doesNotMatch(r.message, /→/)
 })

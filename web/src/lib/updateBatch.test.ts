@@ -159,3 +159,15 @@ test('手機兩種更新都有時合成一顆；桌機或只有一種時照舊',
   assert.equal(mergeUpdateChips(true, true, false), false)
   assert.equal(mergeUpdateChips(true, false, true), false)
 })
+
+test('codexInstallPlan：同一台的「需安裝」目標不一樣時，取最新的那一版（跟 daemon 核對的目標一致，#569）', () => {
+  const bots = [bot('old', { kind: 'codex' }), bot('new', { kind: 'codex' }), bot('two', { kind: 'codex' })]
+  const runs = {
+    old: run('old', { update_notice: 'codex 有新版 0.155.1 → 0.156.1，需安裝後重啟' }),
+    new: run('new', { update_notice: 'codex 有新版 0.155.1 → 0.157.0，需安裝後重啟' }),
+    two: run('two', { update_notice: 'codex 有新版 0.155.1 → 0.156.9，需安裝後重啟' }),
+  }
+  const p = codexInstallPlan(bots, runs, none, () => 'local')
+  assert.equal(p?.notice, runs.new.update_notice)
+  assert.equal(p?.installCount, 3)
+})

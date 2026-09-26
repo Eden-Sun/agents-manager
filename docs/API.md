@@ -102,7 +102,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 會因為 id 對不上被整段丟掉）。欄位**不存在**（舊 daemon）是「不知道」，什麼都不動。
 **欄位不存在**（舊 daemon）跟 `null`（沒有批次在跑）是兩件事，不能混成同一個值——不知道時不該動手上的進度。
 
-`cli_updates`：現在在跑的 codex 升級（§12.7a）`[{"update_id","host","kind"}]`，沒有就是 `[]`。同一個理由：進度只走 WS，
+`cli_updates`：現在在跑的 codex 升級（§12.7a）`[{"update_id","host","kind","target_version"}]`，沒有就是 `[]`。同一個理由：進度只走 WS，
 `cli_update_done` 收不到時前端拿它對帳——手上那一次不在清單裡就清掉（header 的 chip 變回可以按）；欄位不存在（舊 daemon）不動。
 
 ```json
@@ -1586,20 +1586,22 @@ Project 底下所有存活 bot 的訊息合併，以插入順序（`rowid`）倒
 - 舊 daemon 沒有 `herdr` 欄位，前端一律當未知。
 
 ### 12.7a header 一鍵升級 codex `POST /api/hosts/{name}/cli-update`
-`{"kind":"codex"}`。在那台主機跑**寫死的**官方安裝指令 `curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh`
+`{"kind":"codex","target_version":"0.157.0"}`。`target_version` 是確認框寫的那一版（#569），daemon 要求它等於那台「需安裝」codex 通知裡最新的目標。在那台主機跑**寫死的**官方安裝指令 `curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh`
 （codex 自己升級提示寫的那一句；不接受呼叫端傳指令），確認 `codex --version` 真的升上去之後，把那台 codex run 的「需安裝」通知改成
 「已安裝，重啟套用」，接著開一鍵重啟（§10.3a），**範圍只限那台主機的 codex**（不動 claude、不動別台）。SPEC §6.9。
 
 ```json
-202 {"update_id":"01M4…","host":"local","kind":"codex","started":true}
+202 {"update_id":"01M4…","host":"local","kind":"codex","target_version":"0.157.0","started":true}
 ```
 - 403 `{"reason":"ui_only"}`：帶 `X-AM-Bot-Id` 或 `X-AM-Bot-Token`（bot 身分）一律拒絕——換掉的是所有 codex bot 共用的 binary。
-- 400：`kind` 不是 `codex`（claude 自己會下載新版，走 §10.3a 就好）；404：不認得的主機。
+- 400：`kind` 不是 `codex`（claude 自己會下載新版，走 §10.3a 就好）、沒帶或看不懂 `target_version`；404：不認得的主機。
+- 409 `{"reason":"stale_target","host","kind","target_version","current_target","message"}`：帶的版本不是 daemon 眼中那台現在的目標
+  （`current_target` 是現在的目標；`null`＝那台已經沒有「需安裝」的 codex）。什麼都不跑，重開確認框再按。
 - 409 `{"reason":"cli_update_in_progress","host","kind","update_id","message"}`：那台已經在裝（同一台同時只跑一個）。
 - 本機直接 `/bin/sh -c`，遠端走既有的 ssh 執行路徑（`ssh_exec_path_timeout`）；逾時 5 分鐘（遠端逾時只砍得掉本機那條 ssh，那台的安裝可能還在跑）。
   輸出逐次附加到 `<data_dir>/cli-update.log`。
 
-WS（`update_id`／`host`／`kind`／`log_path` 每則都帶）：`cli_update_progress` 的 `phase` 依序 `checking`（讀安裝前版本）→ `installing`（帶 `from`）→
+WS（`update_id`／`host`／`kind`／`target_version`／`log_path` 每則都帶）：`cli_update_progress` 的 `phase` 依序 `checking`（讀安裝前版本）→ `installing`（帶 `from`）→
 `verifying` → `restarting`（帶 `from`、`to`）；最後一則 `cli_update_done`：
 
 ```json
@@ -1607,8 +1609,10 @@ WS（`update_id`／`host`／`kind`／`log_path` 每則都帶）：`cli_update_pr
  "restart":{"batch_id":"01M2…","total":2,"planned":[…],"skipped":[…]}}
 {"update_id":"01M4…","host":"local","kind":"codex","ok":false,"reason":"install_failed","error":"安裝指令失敗（exit status: 6）：curl: (6) …","from":"0.155.1"}
 ```
+- 安裝前 `codex --version` 已經 `>= target_version`：不跑安裝指令、沒有 `installing`／`verifying`，直接改通知、開重啟，`ok:true` 帶 `already_installed:true`（`from`＝`to`）。
 - `ok:false` 一律**沒有重啟任何 bot**、通知不動。`reason`：`version_unreadable`（讀不到安裝前的版本，沒有安裝）、`install_failed`、
-  `verify_failed`（跑完讀不到版本）、`version_unchanged`（跑完版本沒變，帶 `from`／`to`）。
+  `verify_failed`（跑完讀不到版本）、`version_unchanged`（跑完版本沒變，帶 `from`／`to`）、`target_not_reached`（變新了但比 `target_version` 舊，帶 `from`／`to`）。
+  裝到比 `target_version` 還新算成功。
 - `ok:true` 的 `restart` 是 §10.3a 的計畫，之後照 `bots_restart_progress`／`bots_restart_done` 走；已經有一批在跑時是那一批的
   `already_running:true`（codex 這次沒排進去，等那批跑完再按一次重啟）。批次開不起來時 `restart:null`＋`restart_error`（新版已裝好，照一般重啟再按一次）。
 

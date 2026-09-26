@@ -103,7 +103,7 @@ export function CodexInstallChip({ control }: { control?: DialogControl } = {}) 
                 </ul>
               </>
             ) : null}
-            <p className="confirm-note">安裝失敗、或裝完版本沒變，就一顆都不重啟，並告訴你原因。</p>
+            <p className="confirm-note">安裝失敗、裝完版本沒變{version ? `或沒到${version}` : ''}，就一顆都不重啟，並告訴你原因。</p>
           </>
         }
         confirmLabel={plan.ready.length > 0 ? `安裝並重啟 ${plan.ready.length} 顆` : '只安裝'}
@@ -129,7 +129,7 @@ export function CodexInstallChip({ control }: { control?: DialogControl } = {}) 
         onCancel={() => setConfirming(false)}
         onConfirm={() => {
           setConfirming(false)
-          void install(plan.host)
+          void install(plan.host, range.to ?? '')
         }}
       />
     </>

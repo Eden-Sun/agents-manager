@@ -2531,7 +2531,12 @@ export class MockTransport implements Transport {
     const targets = this.bots.filter((x) => x.kind === 'codex' && hostOf(x.id) === host && this.activeRun(x.id)?.update_notice?.includes('需安裝'))
     const notice = targets.map((x) => this.activeRun(x.id)?.update_notice ?? '').find(Boolean) ?? ''
     const [from = '0.155.1', to = '0.157.0'] = notice.match(/\d+(?:\.\d+)+/g) ?? []
-    const base = { update_id, host, kind: 'codex' }
+    // daemon 核對確認框寫的那一版（#569）；mock 只比第一則通知的目標。
+    if (String(b.target_version ?? '') !== to) {
+      this.cliUpdateRunning.delete(host)
+      throw new ApiError(409, { error: 'conflict', reason: 'stale_target', host, current_target: to, message: `${host} 的 codex 現在要裝的是 ${to}` }, 'conflict')
+    }
+    const base = { update_id, host, kind: 'codex', target_version: to }
     const steps: [number, string, Rec][] = [
       [200, 'checking', {}],
       [700, 'installing', { from }],
