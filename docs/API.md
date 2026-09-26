@@ -363,6 +363,7 @@ turn JSON 帶 `awaits_start`（1＝bot 沒在跑時收下、在等它起來，is
 | `dialog_open` | claude 的「Switch model?」確認框（herdr 判成 idle；Enter 會替使用者按 Yes） | 按 Esc（No, go back）再送；退不掉才回 409 + system 訊息 |
 | `dangerous_rm_pending` | claude 2.1.281 的防誤刪框「Dangerous rm operation on …: <目標> / Do you want to proceed?」（bypass 模式也會跳，約 2 分鐘自動拒絕） | **不按任何鍵**（只有人能核准）：回 `{"reason":"dangerous_rm_pending","run_id","target","warning","message"}`，對話插一則帶目標與指令的 system 訊息（同一個框只插一次）；框關掉後排著的照常送（SPEC §3.1） |
 | `dialog_open` | claude 2.1.278 首次啟動的「Auto mode … Yes, set auto mode as my default permission mode／No, keep bypass permissions」推銷框（herdr 判 idle；2026-09-22 build child 卡了半小時） | 送 Down＋Enter 選「No, keep bypass permissions」再送；還在才回 409 + system 訊息 |
+| `dialog_open` | grok 1.0.34 的「Do you trust the contents of this directory?」 | 先把 bot 的 cwd（沒有就專案目錄）寫進**那台主機**的信任紀錄（`trust::pretrust_for_start`，遠端經 ssh），畫面還在才按 `y`；還在才回 409 + system 訊息。讀不到 bot 在哪台主機、或讀不到專案目錄（不是「沒有」）時一個鍵都不按、不寫信任，直接 409（不插 system 訊息，排隊的 prompt 每次重試都會走到這裡），讀得回來再照常處理（#243） |
 
 **排隊中的 prompt 送出時也過這幾道**：claim 之後、`agent.prompt` 之前中了就把 turn 放回 `queued`（清 `run_id`）並插同一則 system 訊息，等下一個 idle 再試。
 

@@ -424,11 +424,27 @@ pub(crate) async fn pane_ready_for_prompt(app: &Arc<App>, bot: &db::Bot, run: &d
                     if crate::tui_prompts::is_grok_trust_dialog(&r.text) {
                         // #407 review：這裡本來固定寫 daemon 這台的 `~/.grok`，遠端 grok 的信任紀錄在**那台**，
                         // 寫本機的等於沒寫。改走跟 `start_inner` 同一條（`pretrust_for_start`，遠端經 ssh）。
-                        let host = db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| crate::config::LOCAL_HOST.to_string());
-                        let cwd = match bot.cwd.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-                            Some(c) => c.to_string(),
-                            // `bot_cwd` 的規則：bot 沒有自己的 cwd 就是專案目錄，grok 開在那裡。
-                            None => db::project(&app.db, &bot.project_id).await.ok().flatten().map(|p| p.path).unwrap_or_default(),
+                        // #243：主機與 cwd 是信任紀錄寫到**哪台、哪個目錄**的權威。讀不到不等於本機／沒有目錄——
+                        // 當成本機會把遠端 bot 的信任寫進 daemon 這台。讀不到就一個鍵都不按、回錯，排隊的 prompt 會定時重試。
+                        #[cfg(test)]
+                        super::race_point::hit("grok_trust_before_host", &bot.id).await;
+                        let authority = async {
+                            let host = db::bot_host(&app.db, &bot.id).await?;
+                            let cwd = match bot.cwd.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                                Some(c) => c.to_string(),
+                                // `bot_cwd` 的規則：bot 沒有自己的 cwd 就是專案目錄，grok 開在那裡。
+                                None => db::project(&app.db, &bot.project_id).await?.map(|p| p.path).unwrap_or_default(),
+                            };
+                            anyhow::Ok((host, cwd))
+                        };
+                        let (host, cwd) = match authority.await {
+                            Ok(v) => v,
+                            Err(e) => {
+                                tracing::warn!(run = %run.id, error = %e, "cannot read the host/cwd of a grok bot; its trust dialog is left alone");
+                                let hint = "grok 在問「要不要信任這個目錄」，但讀不到這顆 bot 所在的主機或目錄，沒有自動按 y。稍後會自動再試；急的話請到「終端」分頁確認後按 y。";
+                                // 不寫系統訊息：排隊的 prompt 每次重試都會走到這裡，暫時的讀取失敗不該洗版；409 本身帶著說明。
+                                return Err(LcError::conflict("dialog_open", json!({"run_id": run.id, "message": hint})));
+                            }
                         };
                         if cwd.is_empty() {
                             tracing::warn!(bot = %bot.name, host, "grok 的信任目錄查不出來，只能按 y");
@@ -1595,6 +1611,87 @@ mod prompt_tests {
         pane_ready_for_prompt(&app, &bot, &run, &f.conv).await.unwrap();
         assert!(f.env.herdr.calls_to("pane.send_keys").is_empty(), "畫面已變，不能送 y");
         assert!(f.env.herdr.calls_to("pane.send_text").is_empty());
+    }
+
+    /// #243 重開：信任框要寫到**哪台**的信任紀錄，取決於 bot 在哪台主機。讀不到主機不能當成本機——
+    /// 遠端 grok 會被寫進 daemon 這台的 `~/.grok`，再替它按 `y`。讀不到就一個鍵都不按、不寫信任，
+    /// 回 409 讓排隊的 prompt 重試；讀得回來之後同一個 prompt 照常寫信任、按 `y`。
+    #[tokio::test]
+    async fn an_unreadable_host_leaves_the_grok_trust_dialog_alone_until_it_is_readable() {
+        let f = fixture("grok", "test").await;
+        let app = f.env.app.clone();
+        sqlx::query("UPDATE runs SET pane_id='pane-prompt-test' WHERE id=?").bind(&f.run_id).execute(&app.db).await.unwrap();
+        let grok_home = f.env.dir.join("grok-home");
+        std::fs::create_dir_all(&grok_home).unwrap();
+        let trust_file = grok_home.join("trusted_folders.toml");
+        let cwd = f.env.repo.to_string_lossy().into_owned();
+        sqlx::query("UPDATE bots SET cwd=?, env_json=? WHERE id=?")
+            .bind(&cwd)
+            .bind(json!({"GROK_HOME": grok_home.to_string_lossy()}).to_string())
+            .bind(&f.bot_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        f.env.herdr.set_screen("pane-prompt-test", "Do you trust the contents of this directory?\n  Yes, proceed                 y\n  No, quit                      n\nGrok Build 1.0.34\n");
+        let bot = db::bot(&app.db, &f.bot_id).await.unwrap().unwrap();
+        let run = db::active_run(&app.db, &f.bot_id).await.unwrap().unwrap();
+
+        // pane 的 client 已經照 run 拿到了，之後才讀不到主機——正是現場的窗口。
+        let app2 = app.clone();
+        super::super::race_point::arm("grok_trust_before_host", &f.bot_id, move || async move {
+            crate::testing::make_table_unreadable(&app2, "projects").await;
+        });
+        let err = pane_ready_for_prompt(&app, &bot, &run, &f.conv).await.unwrap_err();
+        crate::testing::make_table_readable(&app, "projects").await;
+        match err {
+            LcError::Conflict(v) => assert_eq!(v["reason"], "dialog_open", "{v}"),
+            other => panic!("{other:?}"),
+        }
+        assert!(f.env.herdr.calls_to("pane.send_keys").is_empty(), "主機讀不到：不能按 y");
+        assert!(!trust_file.exists(), "主機讀不到：不能把信任寫到 daemon 這台");
+
+        // 讀得回來：同一個 prompt 再試一次就照常信任並按 y（mock 畫面不會消失，所以仍是 409）。
+        assert!(pane_ready_for_prompt(&app, &bot, &run, &f.conv).await.is_err());
+        let keys: Vec<serde_json::Value> = f.env.herdr.calls_to("pane.send_keys").iter().filter_map(|p| p.get("keys").cloned()).collect();
+        assert_eq!(keys, vec![json!(["y"])]);
+        assert!(trust_file.exists(), "讀得到之後才寫信任");
+    }
+
+    /// 同一條的 cwd 那一半：bot 沒有自己的 cwd 時信任的是專案目錄。專案**讀不到**不等於「沒有目錄」——
+    /// 後者只能按 y，前者要等讀得到再來（不然信任沒寫、y 卻按了）。用 BLOB 塞進 `path` 讓只有這一列解不開，
+    /// 主機（同一張表的 `host`）照樣讀得到。
+    #[tokio::test]
+    async fn an_unreadable_project_dir_leaves_the_grok_trust_dialog_alone() {
+        let f = fixture("grok", "test").await;
+        let app = f.env.app.clone();
+        sqlx::query("UPDATE runs SET pane_id='pane-prompt-test' WHERE id=?").bind(&f.run_id).execute(&app.db).await.unwrap();
+        let grok_home = f.env.dir.join("grok-home");
+        std::fs::create_dir_all(&grok_home).unwrap();
+        let trust_file = grok_home.join("trusted_folders.toml");
+        sqlx::query("UPDATE bots SET cwd=NULL, env_json=? WHERE id=?")
+            .bind(json!({"GROK_HOME": grok_home.to_string_lossy()}).to_string())
+            .bind(&f.bot_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let path: String = sqlx::query_scalar("SELECT path FROM projects WHERE id=?").bind(&f.env.project_id).fetch_one(&app.db).await.unwrap();
+        sqlx::query("UPDATE projects SET path=X'FF00' WHERE id=?").bind(&f.env.project_id).execute(&app.db).await.unwrap();
+        f.env.herdr.set_screen("pane-prompt-test", "Do you trust the contents of this directory?\n  Yes, proceed                 y\n  No, quit                      n\nGrok Build 1.0.34\n");
+        let bot = db::bot(&app.db, &f.bot_id).await.unwrap().unwrap();
+        let run = db::active_run(&app.db, &f.bot_id).await.unwrap().unwrap();
+        assert!(db::project(&app.db, &f.env.project_id).await.is_err(), "前提：專案那一列解不開");
+
+        match pane_ready_for_prompt(&app, &bot, &run, &f.conv).await.unwrap_err() {
+            LcError::Conflict(v) => assert_eq!(v["reason"], "dialog_open", "{v}"),
+            other => panic!("{other:?}"),
+        }
+        assert!(f.env.herdr.calls_to("pane.send_keys").is_empty(), "目錄讀不到：不能按 y");
+
+        sqlx::query("UPDATE projects SET path=? WHERE id=?").bind(&path).bind(&f.env.project_id).execute(&app.db).await.unwrap();
+        assert!(pane_ready_for_prompt(&app, &bot, &run, &f.conv).await.is_err());
+        let keys: Vec<serde_json::Value> = f.env.herdr.calls_to("pane.send_keys").iter().filter_map(|p| p.get("keys").cloned()).collect();
+        assert_eq!(keys, vec![json!(["y"])]);
+        assert!(trust_file.exists(), "讀得到之後信任的是專案目錄");
     }
 
     /// 2.1.281 的防誤刪框（herdr 判成 idle 也一樣）：409 `dangerous_rm_pending` 帶目標，一個鍵都不按、一個字都不打；
