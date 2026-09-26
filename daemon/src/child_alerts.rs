@@ -11,6 +11,8 @@
 //! 幾條「不吵人」的界線：
 //! * daemon 自己會按掉的畫面不算（滿意度問卷、`/model` 確認框）——那些幾秒內就消失了；
 //! * 同一個問題只講一次（畫面尾段的指紋），child 在同一個提問上重畫不會變成連珠炮；
+//! * 「講過了」認的是 parent 那邊那一則真的送到了：排進佇列之後字沒送出去（#562 的短上限用完）的，child 還卡著就
+//!   冷卻後再講，最多 [`REARM_LIMIT`] 次；使用者撤回的那一次不再講（#567）；
 //! * 父 agent 沒有活著的 run 就不送：沒有 pane 可以收，UI 的徽章仍在，使用者看得到；
 //! * 父 agent 這一刻收不下（409）就在背景照 [`RETRY`] 再試，child 還卡著才試（issue #169）；
 //! * 只有 `managed_by = 'child'` 且真的有 `parent_bot_id` 的 bot 會觸發。
@@ -370,13 +372,21 @@ async fn tell_parent(app: &Arc<App>, run: &db::Run) -> anyhow::Result<Told> {
     let now = std::time::Instant::now();
     {
         let mut seen = spoken().lock().unwrap();
-        if !may_speak(seen.get(&child.id).copied(), fp, now, THROTTLE) {
+        let prev = seen.get(&child.id).copied();
+        if may_speak(prev, fp, now, THROTTLE) {
+            seen.insert(child.id.clone(), (fp, now));
+        } else if prev.map(|(seen_fp, _)| seen_fp) != Some(fp) {
+            // 換了問題但還在節流窗內。
             return Ok(Told::Settled);
         }
-        seen.insert(child.id.clone(), (fp, now));
+        // 同一個問題：講過了沒有、要不要再講，看 parent 那邊這一則實際怎麼了（#567）。
     }
+    let base = crid_base(&child.id, &question);
+    let Some(attempt) = next_attempt(last_sent(app, &parent_id, &base).await?, chrono::Utc::now()) else {
+        return Ok(Told::Settled);
+    };
 
-    match deliver(app, &parent_id, &child.id, &child.name, &question).await {
+    match deliver_attempt(app, &parent_id, &child.id, &child.name, &question, attempt).await {
         Ok(out) => {
             tracing::info!(child = %child.name, parent = %parent_id, delivery = %out.delivery, "told the parent its child is waiting");
             Ok(Told::Settled)
@@ -399,7 +409,8 @@ pub fn forget(bot_id: &str) {
 pub(crate) const CRID_PREFIX: &str = "child-blocked:";
 
 /// 把通知送給 parent（`prompt_relayed_queueable`：parent 在回合中就排隊，不插隊、不打斷）。
-/// 抽出來是為了讓「排隊而不是插隊」測得到——那條路只碰 DB，不需要 herdr。
+/// 抽出來是為了讓「排隊而不是插隊」測得到——那條路只碰 DB，不需要 herdr。正式路徑走 [`deliver_attempt`]（#567）。
+#[cfg(test)]
 pub async fn deliver(
     app: &Arc<App>,
     parent_id: &str,
@@ -407,9 +418,105 @@ pub async fn deliver(
     child_name: &str,
     question: &str,
 ) -> crate::lifecycle::LcResult<crate::lifecycle::PromptOut> {
-    // 冪等鍵＝這一次 blocked（episode）＋問題：同一次的重試不 fan-out，解除後再卡住是新的一則（issue #134）。
-    let crid = format!("{CRID_PREFIX}{child_id}:{}:{:x}", episode_for(child_id), fingerprint(question));
+    deliver_attempt(app, parent_id, child_id, child_name, question, 0).await
+}
+
+/// 同一次 blocked、同一個問題的第 `attempt` 次（從 0 起算，[`next_attempt`] 決定）。
+async fn deliver_attempt(
+    app: &Arc<App>,
+    parent_id: &str,
+    child_id: &str,
+    child_name: &str,
+    question: &str,
+    attempt: u32,
+) -> crate::lifecycle::LcResult<crate::lifecycle::PromptOut> {
+    let crid = attempt_crid(&crid_base(child_id, question), attempt);
     crate::lifecycle::prompt_relayed_queueable(app, parent_id, &message_for(child_name, question), &crid, Some(child_id)).await
+}
+
+/// 冪等鍵＝這一次 blocked（episode）＋問題：同一次的重試不 fan-out，解除後再卡住是新的一則（issue #134）。
+fn crid_base(child_id: &str, question: &str) -> String {
+    format!("{CRID_PREFIX}{child_id}:{}:{:x}", episode_for(child_id), fingerprint(question))
+}
+
+/// 第 0 次就是 [`crid_base`] 本身；字沒送出去、冷卻過後的第 n 次補 `:r<n>`（#567）。同一個 n 的重試照舊冪等。
+fn attempt_crid(base: &str, attempt: u32) -> String {
+    if attempt == 0 {
+        base.to_string()
+    } else {
+        format!("{base}:r{attempt}")
+    }
+}
+
+/// 字沒送出去（#562 的短上限用完、parent 的 run 沒了被撤掉…）之後，隔多久才再試一次（#567）。跟 [`THROTTLE`] 一樣長：
+/// 每一次失敗都在 parent 的佇列頭卡過約兩分鐘，不能變成每分鐘一次。
+const REARM_COOLDOWN: Duration = THROTTLE;
+
+/// 同一次 blocked、同一個問題，第一次之外最多再試幾次（#567）。parent 一直打不進字（框裡一直有使用者的草稿）時，
+/// 不能每 10 分鐘就在它的佇列頭卡一次、留一則「沒有送出」；試完就停，UI 的徽章仍在。
+const REARM_LIMIT: u32 = 3;
+
+/// 這一次 blocked、這一個問題，parent 那邊最後一則通知怎麼了（#567）。
+#[derive(Debug, Clone, PartialEq)]
+enum Sent {
+    /// 還沒送過。
+    Never,
+    /// 還在排、或正在送：同一次 blocked 最多一則在路上。
+    Outstanding,
+    /// 送到了（之後回合怎麼結束不管）：不重講。
+    Delivered,
+    /// 使用者撤回（`POST /api/turns/{id}/withdraw`）：這一次 blocked 不再送。
+    Withdrawn,
+    /// 字沒送出去就收成 failed：冷卻過了可以再試。
+    Undelivered { attempt: u32, at: chrono::DateTime<chrono::Utc> },
+}
+
+/// 下一則用第幾次；`None` ＝現在不送。純函式，時間從外面給。
+///
+/// 送不出去是傳輸的問題，child 還卡著就該再講——以前佇列把它收成 failed 之後，記憶體的指紋與冪等鍵都還當成
+/// 「講過了」，這一次 blocked 從此收不到（#567）。使用者撤回則是「這一次不要再送」，兩種收尾不共用重試。
+fn next_attempt(last: Sent, now: chrono::DateTime<chrono::Utc>) -> Option<u32> {
+    match last {
+        Sent::Never => Some(0),
+        Sent::Undelivered { attempt, at } => {
+            let cooled = now.signed_duration_since(at).to_std().is_ok_and(|d| d >= REARM_COOLDOWN);
+            (cooled && attempt < REARM_LIMIT).then_some(attempt + 1)
+        }
+        Sent::Outstanding | Sent::Delivered | Sent::Withdrawn => None,
+    }
+}
+
+/// 從 parent 的對話讀 `base` 這一串（第 0 次＋`:r<n>`）最新的一則。
+async fn last_sent(app: &Arc<App>, parent_id: &str, base: &str) -> anyhow::Result<Sent> {
+    let conv = db::conversation_id(&app.db, parent_id).await?;
+    let retry_prefix = format!("{base}:r");
+    let row: Option<(String, String, String, String, bool)> = sqlx::query_as(
+        "SELECT t.client_request_id, t.status, t.delivery, COALESCE(t.completed_at, t.created_at),
+                EXISTS (SELECT 1 FROM messages m WHERE m.turn_id = t.id AND m.role = 'system' AND m.content = ?)
+           FROM turns t
+          WHERE t.conversation_id = ?
+            AND (t.client_request_id = ? OR substr(t.client_request_id, 1, ?) = ?)
+          ORDER BY t.created_at DESC, t.rowid DESC
+          LIMIT 1",
+    )
+    .bind(crate::lifecycle::daemon_notice::WITHDRAWN_WHY)
+    .bind(&conv)
+    .bind(base)
+    .bind(retry_prefix.chars().count() as i64)
+    .bind(&retry_prefix)
+    .fetch_optional(&app.db)
+    .await?;
+    let Some((crid, status, delivery, at, withdrawn)) = row else { return Ok(Sent::Never) };
+    Ok(match status.as_str() {
+        "queued" | "in_flight" => Sent::Outstanding,
+        "failed" if delivery == "failed" && withdrawn => Sent::Withdrawn,
+        "failed" if delivery == "failed" => {
+            let attempt = crid.strip_prefix(&retry_prefix).and_then(|n| n.parse().ok()).unwrap_or(0);
+            let at = chrono::DateTime::parse_from_rfc3339(&at)?.with_timezone(&chrono::Utc);
+            Sent::Undelivered { attempt, at }
+        }
+        _ => Sent::Delivered,
+    })
 }
 
 #[cfg(test)]
@@ -781,6 +888,167 @@ mod tests {
         forget(&kid);
         assert_eq!(sweep(&app).await, 0, "已經不 blocked 的不補");
         assert_eq!(alerts_in(&app, &conv).await, 1, "不補送舊問題");
+    }
+
+    /// #567 用的一家：parent 是一顆框裡一直有使用者草稿的 grok（打不進字＝`composer_busy`），正在回合中（通知會排隊）；
+    /// child 停在提問上。回 `(parent, parent 的 run, 對話, 那一筆進行中的回合, child)`。
+    async fn stuck_family(e: &crate::testing::Env, tag: &str) -> (String, String, String, String, String) {
+        let app = e.app.clone();
+        let parent = crate::testing::claude_bot(&app, &e.project_id, &format!("p-{tag}")).await.id;
+        sqlx::query("UPDATE bots SET kind='grok' WHERE id=?").bind(&parent).execute(&app.db).await.unwrap();
+        let prun = crate::testing::fake_run(&app, &parent).await;
+        db::set_pane_typed(&app.db, &prun).await.unwrap();
+        e.herdr.live_pane(
+            &format!("pane-{parent}"),
+            crate::testing::LivePane { width: Some(120), boxed: true, composer: vec!["使用者的草稿".into()], ..Default::default() },
+        );
+        let conv = db::conversation_id(&app.db, &parent).await.unwrap();
+        let busy = db::ulid();
+        sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,delivery,created_at,prompt_text) VALUES (?,?,?,'web','in_flight','ok',?,'別的事')")
+            .bind(&busy).bind(&conv).bind(&prun).bind(db::now()).execute(&app.db).await.unwrap();
+        let kid = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, managed_by, parent_bot_id, created_at)
+             VALUES (?,?,?,'claude','[]',0,1,?,'child',?,?)",
+        )
+        .bind(&kid).bind(&e.project_id).bind(format!("kid-{tag}")).bind(format!("tok-{kid}")).bind(&parent).bind(db::now())
+        .execute(&app.db).await.unwrap();
+        crate::testing::fake_run(&app, &kid).await;
+        sqlx::query("UPDATE runs SET agent_status='blocked' WHERE bot_id=?").bind(&kid).execute(&app.db).await.unwrap();
+        e.herdr.set_screen(&format!("pane-{kid}"), PERMISSION);
+        (parent, prun, conv, busy, kid)
+    }
+
+    /// parent 對話裡的 child 通知 turn，照建立順序：`(client_request_id, status, delivery)`。
+    async fn alert_turns(app: &Arc<App>, conv: &str) -> Vec<(String, String, String)> {
+        sqlx::query_as("SELECT client_request_id, status, delivery FROM turns WHERE conversation_id=? AND client_request_id LIKE 'child-blocked:%' ORDER BY created_at, rowid")
+            .bind(conv)
+            .fetch_all(&app.db)
+            .await
+            .unwrap()
+    }
+
+    /// 走真的佇列 flush，把 `turn` 的 #562 短上限用完（每次都清掉退避，不等真實時間）。
+    async fn exhaust_notice_retries(app: &Arc<App>, parent: &str, turn: &str) {
+        for _ in 0..=crate::lifecycle::daemon_notice::RETRY_LIMIT {
+            crate::lifecycle::flush_queued_locked(app, parent).await.unwrap();
+            sqlx::query("UPDATE turns SET next_flush_at = NULL WHERE id = ?").bind(turn).execute(&app.db).await.unwrap();
+        }
+    }
+
+    async fn turn_id_by_crid(app: &Arc<App>, crid: &str) -> String {
+        sqlx::query_scalar("SELECT id FROM turns WHERE client_request_id=?").bind(crid).fetch_one(&app.db).await.unwrap()
+    }
+
+    /// 把一則收掉的通知的收尾時間往前推 `secs` 秒（冷卻是照這個算的）。
+    async fn age(app: &Arc<App>, turn: &str, secs: i64) {
+        let at = (chrono::Utc::now() - chrono::Duration::seconds(secs)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        sqlx::query("UPDATE turns SET completed_at=? WHERE id=?").bind(at).bind(turn).execute(&app.db).await.unwrap();
+    }
+
+    /// #567：通知排進佇列之後，#562 的短上限用完被收成 failed（讓路給使用者）。以前指紋與冪等鍵都還當成「講過了」，
+    /// child 還卡在同一個問題上，parent 從此收不到。現在：冷卻內不重講；冷卻過了、child 還卡著，補**一則**新的（冪等鍵帶
+    /// 第幾次），真的送得進 parent；之後再掃不多送。
+    #[tokio::test]
+    async fn an_alert_that_failed_in_transport_is_retold_once_after_the_cooldown() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let (parent, prun, conv, busy, _kid) = stuck_family(&e, "rearm").await;
+
+        assert_eq!(sweep(&app).await, 1);
+        let first = alert_turns(&app, &conv).await;
+        assert_eq!(first.len(), 1, "{first:?}");
+        assert_eq!(first[0].1, "queued", "parent 在回合中：排隊");
+        let first_crid = first[0].0.clone();
+        let first_id = turn_id_by_crid(&app, &first_crid).await;
+
+        // parent 的回合結束，佇列輪到這一則，可是框裡一直有草稿：真的 flush 把 #562 的短上限用完。
+        sqlx::query("UPDATE turns SET status='completed', completed_at=? WHERE id=?").bind(db::now()).bind(&busy).execute(&app.db).await.unwrap();
+        exhaust_notice_retries(&app, &parent, &first_id).await;
+        assert_eq!(alert_turns(&app, &conv).await[0].1, "failed", "前提：#562 的短上限用完、收成 failed");
+        // #562 不變：佇列讓路，使用者的訊息排得進來、也送得出去。
+        let user = db::ulid();
+        sqlx::query("INSERT INTO turns (id,conversation_id,origin,status,delivery,prompt_text,created_at) VALUES (?,?,'web','queued','pending','使用者的話',?)")
+            .bind(&user).bind(&conv).bind(db::now()).execute(&app.db).await.expect("讓路：使用者的訊息排得進來");
+        for st in ["in_flight", "completed"] {
+            sqlx::query("UPDATE turns SET status=?, run_id=?, completed_at=? WHERE id=?").bind(st).bind(&prun).bind(db::now()).bind(&user).execute(&app.db).await.unwrap();
+        }
+
+        // parent 又在回合中（排得進佇列）；child 還卡在同一個問題上。冷卻內再掃：不重講。
+        let busy2 = db::ulid();
+        sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,delivery,created_at,prompt_text) VALUES (?,?,?,'web','in_flight','ok',?,'又一件事')")
+            .bind(&busy2).bind(&conv).bind(&prun).bind(db::now()).execute(&app.db).await.unwrap();
+        sweep(&app).await;
+        assert_eq!(alert_turns(&app, &conv).await.len(), 1, "冷卻內不重講");
+
+        // 冷卻過了，parent 的框也清空了。
+        age(&app, &first_id, REARM_COOLDOWN.as_secs() as i64 + 1).await;
+        e.herdr.live_pane(&format!("pane-{parent}"), crate::testing::LivePane { width: Some(120), boxed: true, ..Default::default() });
+        sweep(&app).await;
+        let after = alert_turns(&app, &conv).await;
+        assert_eq!(after.len(), 2, "child 還卡著：補一則新的：{after:?}");
+        assert_eq!(after[1].0, format!("{first_crid}:r1"), "同一次 blocked，冪等鍵帶第幾次");
+        assert_eq!(after[1].1, "queued");
+        for _ in 0..3 {
+            sweep(&app).await;
+        }
+        assert_eq!(alert_turns(&app, &conv).await.len(), 2, "在路上的那一則還沒結束：不多送");
+
+        // parent 的回合結束，這一則真的打進去。
+        sqlx::query("UPDATE turns SET status='completed', completed_at=? WHERE id=?").bind(db::now()).bind(&busy2).execute(&app.db).await.unwrap();
+        let rearmed = turn_id_by_crid(&app, &after[1].0).await;
+        crate::lifecycle::flush_queued_locked(&app, &parent).await.unwrap();
+        let typed = e.herdr.pane(&format!("pane-{parent}")).unwrap().transcript;
+        assert!(typed.iter().any(|l| l.contains("Do you want to proceed?")), "補的那一則送進 parent 了：{typed:?}");
+        let (status, _): (String, String) = sqlx::query_as("SELECT status, delivery FROM turns WHERE id=?").bind(&rearmed).fetch_one(&app.db).await.unwrap();
+        assert_ne!(status, "queued", "已經領走送出");
+        age(&app, &rearmed, REARM_COOLDOWN.as_secs() as i64 * 10).await;
+        for _ in 0..3 {
+            sweep(&app).await;
+        }
+        assert_eq!(alert_turns(&app, &conv).await.len(), 2, "送到了就不再講，過多久都一樣");
+    }
+
+    /// #567：使用者撤回（`POST /api/turns/{id}/withdraw`）＝這一次 blocked 不要再送；跟「字沒送出去」是兩種收尾，不共用重試。
+    #[tokio::test]
+    async fn an_alert_the_user_withdrew_is_not_retold_for_that_episode() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let (_parent, _prun, conv, _busy, kid) = stuck_family(&e, "withdrawn").await;
+
+        assert_eq!(sweep(&app).await, 1);
+        let crid = alert_turns(&app, &conv).await[0].0.clone();
+        let id = turn_id_by_crid(&app, &crid).await;
+        crate::lifecycle::withdraw_turn(&app, &id).await.unwrap();
+        age(&app, &id, REARM_COOLDOWN.as_secs() as i64 * 10).await;
+        for _ in 0..3 {
+            sweep(&app).await;
+        }
+        assert_eq!(alert_turns(&app, &conv).await.len(), 1, "撤回的不補送");
+
+        // 解除之後再卡住是新的一次：照舊要講（撤回只管那一次）。
+        forget(&kid);
+        sweep(&app).await;
+        assert_eq!(alert_turns(&app, &conv).await.len(), 2, "新的一次 blocked 照講");
+    }
+
+    /// 下一則用第幾次：送不出去的冷卻過了才再試、有上限；在路上、送到了、撤回了都不送（#567）。
+    #[test]
+    fn a_transport_failure_is_retried_after_the_cooldown_up_to_a_limit() {
+        let t0 = chrono::Utc::now();
+        let cool = chrono::Duration::from_std(REARM_COOLDOWN).unwrap();
+        assert_eq!(next_attempt(Sent::Never, t0), Some(0));
+        for s in [Sent::Outstanding, Sent::Delivered, Sent::Withdrawn] {
+            assert_eq!(next_attempt(s.clone(), t0 + cool * 100), None, "{s:?}");
+        }
+        let failed = |attempt| Sent::Undelivered { attempt, at: t0 };
+        assert_eq!(next_attempt(failed(0), t0 + cool - chrono::Duration::seconds(1)), None, "冷卻內不送");
+        assert_eq!(next_attempt(failed(0), t0 + cool), Some(1));
+        assert_eq!(next_attempt(failed(REARM_LIMIT - 1), t0 + cool), Some(REARM_LIMIT));
+        assert_eq!(next_attempt(failed(REARM_LIMIT), t0 + cool * 100), None, "試完上限就停，UI 徽章仍在");
+        assert_eq!(next_attempt(failed(0), t0 - chrono::Duration::seconds(5)), None, "時鐘倒退不算冷卻過了");
+        assert_eq!(attempt_crid("child-blocked:k:e:ff", 0), "child-blocked:k:e:ff", "第 0 次的冪等鍵跟以前一樣");
+        assert_eq!(attempt_crid("child-blocked:k:e:ff", 2), "child-blocked:k:e:ff:r2");
     }
 
     fn status_event(kid: &str, status: &str) -> crate::herdr::Event {
