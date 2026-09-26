@@ -16,6 +16,7 @@
 
 use crate::bulk_restart::Scope;
 use crate::changelog::{cli_version_string, parse_version, version_string};
+use crate::hosts::HostFence;
 use crate::lifecycle::LcError;
 use crate::state::App;
 use axum::extract::{Path, State};
@@ -43,8 +44,9 @@ const TAIL_CHARS: usize = 1500;
 
 /// 會動到機器的三件事。正式版是 [`Real`]；測試換成假的。
 pub trait Runner: Send + Sync {
-    /// 跑安裝指令。`Ok` 是輸出，`Err` 是給人看的原因（含輸出尾巴）。
-    fn install<'a>(&'a self, app: &'a Arc<App>, host: &'a str) -> BoxFuture<'a, Result<String, String>>;
+    /// 跑安裝指令。`Ok` 是輸出，`Err` 是給人看的原因（含輸出尾巴）。遠端一律走 `fence` 記下的那條連線，
+    /// 不用主機名重新解析——途中同名主機改指到另一台，安裝也不能跑到新機器上（#347）。
+    fn install<'a>(&'a self, app: &'a Arc<App>, host: &'a str, fence: &'a HostFence) -> BoxFuture<'a, Result<String, String>>;
     /// 那台主機現在的 `codex --version` 原文。
     fn version<'a>(&'a self, app: &'a Arc<App>, host: &'a str) -> BoxFuture<'a, anyhow::Result<String>>;
     /// 開那台主機 codex 的一鍵重啟，回計畫（`POST /api/bots/restart-idle` 同一份形狀）。
@@ -54,7 +56,7 @@ pub trait Runner: Send + Sync {
 pub struct Real;
 
 impl Runner for Real {
-    fn install<'a>(&'a self, app: &'a Arc<App>, host: &'a str) -> BoxFuture<'a, Result<String, String>> {
+    fn install<'a>(&'a self, _app: &'a Arc<App>, host: &'a str, fence: &'a HostFence) -> BoxFuture<'a, Result<String, String>> {
         Box::pin(async move {
             if host == crate::config::LOCAL_HOST {
                 let child = tokio::process::Command::new("/bin/sh")
@@ -77,9 +79,8 @@ impl Runner for Real {
                     Err(format!("安裝指令失敗（{}）：{}", out.status, tail(&text)))
                 }
             } else {
-                let conn = app.hosts.get(host).await.ok_or_else(|| format!("不認得主機 `{host}`"))?;
                 // 遠端逾時只砍得掉本機這條 ssh；那邊的安裝可能還在跑，所以錯誤要講清楚、請人去那台看。
-                conn.ssh_exec_path_timeout(CODEX_INSTALL, INSTALL_TIMEOUT)
+                fence.conn().ssh_exec_path_timeout(CODEX_INSTALL, INSTALL_TIMEOUT)
                     .await
                     .map_err(|e| format!("在 {host} 安裝失敗（逾時的話那台的安裝可能還在跑）：{}", tail(&format!("{e:#}"))))
             }
@@ -229,6 +230,10 @@ pub async fn start(
 }
 
 /// 一次安裝的結果（也是 `cli_update_done` 的內容）。
+///
+/// 整段可能跑五分鐘，途中同名主機可能重連或改指到另一台（#347）：第一次讀版本之前記下 [`HostFence`]，每次讀完、
+/// 改通知與開批次之前都確認它還是權威。不是就停在那裡回 `superseded`——升級前後的版本可能是兩台機器讀的，
+/// 不能拿來判斷裝好了沒，更不能去改新機器的通知、重啟新機器的 bot。
 pub async fn run(app: &Arc<App>, runner: &dyn Runner, host: &str, update_id: &str, target: &str) -> Value {
     let log_path = app.data_dir.join(LOG_FILE);
     let base = json!({"update_id": update_id, "host": host, "kind": "codex", "target_version": target, "log_path": log_path});
@@ -253,8 +258,22 @@ pub async fn run(app: &Arc<App>, runner: &dyn Runner, host: &str, update_id: &st
         v
     };
 
+    let Some(fence) = app.hosts.fence(host).await else {
+        return finish(done(false, json!({"reason": "superseded", "error": format!("主機 {host} 已經不在設定裡，沒有安裝")}))).await;
+    };
+    let superseded = |phase: &str, extra: Value| {
+        let mut v = done(false, json!({"reason": "superseded",
+            "error": format!("主機 {host} 在{phase}時重連或改指到另一台，這次升級作廢：沒有改通知、沒有重啟任何 bot")}));
+        merge(&mut v, extra);
+        v
+    };
+
     app.emit("cli_update_progress", progress("checking", json!({}))).await;
-    let before = match runner.version(app, host).await.map(|raw| normalized(&raw)) {
+    let before = runner.version(app, host).await;
+    if !app.hosts.is_current(&fence).await {
+        return finish(superseded("讀目前版本", json!({}))).await;
+    }
+    let before = match before.map(|raw| normalized(&raw)) {
         Ok(Some(v)) => v,
         Ok(None) | Err(_) => {
             return finish(done(false, json!({"reason": "version_unreadable", "error": "讀不到目前的 codex 版本，沒有安裝"}))).await;
@@ -269,7 +288,12 @@ pub async fn run(app: &Arc<App>, runner: &dyn Runner, host: &str, update_id: &st
     } else {
         app.emit("cli_update_progress", progress("installing", json!({"from": before}))).await;
         log_line(app, &format!("[{update_id}] {host}：codex {before}，目標 {target}，執行 {CODEX_INSTALL}"));
-        match runner.install(app, host).await {
+        let installed = runner.install(app, host, &fence).await;
+        if !app.hosts.is_current(&fence).await {
+            log_line(app, &format!("[{update_id}] 安裝途中 {host} 換了連線，結果作廢"));
+            return finish(superseded("安裝", json!({"from": before}))).await;
+        }
+        match installed {
             Ok(out) => log_line(app, &format!("[{update_id}] 安裝輸出：\n{}", out.trim_end())),
             Err(e) => {
                 log_line(app, &format!("[{update_id}] 安裝失敗：\n{e}"));
@@ -277,7 +301,11 @@ pub async fn run(app: &Arc<App>, runner: &dyn Runner, host: &str, update_id: &st
             }
         }
         app.emit("cli_update_progress", progress("verifying", json!({"from": before}))).await;
-        let after = match runner.version(app, host).await.map(|raw| normalized(&raw)) {
+        let after = runner.version(app, host).await;
+        if !app.hosts.is_current(&fence).await {
+            return finish(superseded("確認新版本", json!({"from": before}))).await;
+        }
+        let after = match after.map(|raw| normalized(&raw)) {
             Ok(Some(v)) => v,
             Ok(None) | Err(_) => {
                 return finish(done(false, json!({"reason": "verify_failed", "from": before,
@@ -299,9 +327,15 @@ pub async fn run(app: &Arc<App>, runner: &dyn Runner, host: &str, update_id: &st
         log_line(app, &format!("[{update_id}] 升級完成：{before} → {after}（目標 {target}）"));
         after
     };
+    if !app.hosts.is_current(&fence).await {
+        return finish(superseded("改通知", json!({"from": before, "to": after}))).await;
+    }
     let notices = mark_installed(app, host, &before, &after).await;
     crate::update_watch::forget_disk_version(host, "codex").await;
     app.emit("cli_update_progress", progress("restarting", json!({"from": before, "to": after}))).await;
+    if !app.hosts.is_current(&fence).await {
+        return finish(superseded("開重啟批次", json!({"from": before, "to": after, "notices_updated": notices}))).await;
+    }
     let restart = runner.restart(app, Scope { kind: "codex".into(), host: host.to_string() }).await;
     let v = match restart {
         Ok(plan) => done(true, json!({"from": before, "to": after, "already_installed": already, "notices_updated": notices, "restart": plan})),
@@ -394,6 +428,8 @@ mod tests {
         restarts: Mutex<Vec<(String, String)>>,
         /// 安裝卡住多久（測並發用）。
         hold: Duration,
+        /// 有的話，安裝等到它放行才回（測途中換主機用）。
+        gate: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
     }
 
     impl Fake {
@@ -404,6 +440,7 @@ mod tests {
                 installs: Mutex::new(0),
                 restarts: Mutex::new(Vec::new()),
                 hold: Duration::ZERO,
+                gate: Mutex::new(None),
             })
         }
         fn restarts(&self) -> Vec<(String, String)> {
@@ -415,11 +452,15 @@ mod tests {
     }
 
     impl Runner for Fake {
-        fn install<'a>(&'a self, _app: &'a Arc<App>, _host: &'a str) -> BoxFuture<'a, Result<String, String>> {
+        fn install<'a>(&'a self, _app: &'a Arc<App>, _host: &'a str, _fence: &'a HostFence) -> BoxFuture<'a, Result<String, String>> {
             Box::pin(async move {
                 *self.installs.lock().unwrap() += 1;
                 if !self.hold.is_zero() {
                     tokio::time::sleep(self.hold).await;
+                }
+                let gate = self.gate.lock().unwrap().take();
+                if let Some(gate) = gate {
+                    gate.await.ok();
                 }
                 self.install.clone()
             })
@@ -554,6 +595,50 @@ mod tests {
         assert!(notice_of(&env.app, &here).await.unwrap().contains("已安裝"));
         assert_eq!(notice_of(&env.app, &far_run).await, Some(pending), "別台主機的 binary 沒換");
         assert_eq!(notice_of(&env.app, &claude_run).await.as_deref(), Some("Update installed · Restart to update"));
+    }
+
+    /// #347：A 機安裝還在跑時同名主機改指到 B（`?confirm=repoint`）。A 裝完之後不能讀 B 的版本當成「裝好了」、
+    /// 不能改 B 的通知、不能重啟 B 的 codex，結果要講明作廢。
+    #[tokio::test]
+    async fn an_update_whose_host_was_repointed_mid_install_touches_nothing_on_the_new_target() {
+        let env = crate::testing::env().await;
+        let host = "cx-347";
+        let cfg = |ssh: &str| crate::config::HostCfg {
+            name: host.into(),
+            ssh: ssh.into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "agents-manager".into(),
+            remote_path: String::new(),
+        };
+        env.app.hosts.insert_remote_for_test(cfg("target-a")).await;
+        let pid = db::ulid();
+        sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?, '/x', 'b', ?, ?)")
+            .bind(&pid)
+            .bind(host)
+            .bind(db::now())
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        let pending = crate::codex_update::pending_text(Some("0.155.1"), "0.157.0");
+        let (bot, run) = codex_bot_with_notice(&env, "cx-b", &pending).await;
+        sqlx::query("UPDATE bots SET project_id=? WHERE id=?").bind(&pid).bind(&bot).execute(&env.app.db).await.unwrap();
+        // 第二次讀版本讀到的是 B 已經比較新的 codex：沒有圍籬的話就會被當成「A 升上去了」。
+        let fake = Fake::new(&["codex-cli 0.155.1", "codex-cli 0.157.0"], Ok("installed on A"));
+        let (release, gate) = tokio::sync::oneshot::channel();
+        *fake.gate.lock().unwrap() = Some(gate);
+
+        let (app, f2) = (env.app.clone(), fake.clone());
+        let task = tokio::spawn(async move { super::run(&app, f2.as_ref(), host, "u-347", "0.157.0").await });
+        assert!(crate::testing::eventually!(fake.installs() == 1), "安裝要先開始");
+        env.app.hosts.replace_remote_for_test(&env.app, cfg("target-b")).await;
+        release.send(()).unwrap();
+        let v = task.await.unwrap();
+
+        assert_eq!(v["ok"], false, "{v}");
+        assert_eq!(v["reason"], "superseded", "{v}");
+        assert!(fake.restarts().is_empty(), "不能重啟 B 的 codex");
+        assert_eq!(notice_of(&env.app, &run).await, Some(pending), "B 的通知不動");
     }
 
     #[tokio::test]

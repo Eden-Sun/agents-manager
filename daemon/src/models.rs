@@ -444,8 +444,15 @@ pub async fn list(app: &Arc<App>, host: &str, kind: &str, identity: Option<&str>
             }
         }
     }
+    // 探測可能要好幾秒，途中同名主機可能重連或改指到另一台（#347），`fetch` 裡的各段也各自重新解析主機名：
+    // 開頭記下權威、在快取鎖裡確認沒換才寫。換過就整份作廢——換連線那一側清掉的快取不能被舊機器的清單種回來。
+    let fence = app.hosts.fence(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
     let v = fetch(app, host, kind, identity).await?;
-    app.models_cache.lock().await.insert(key, (Instant::now(), v.clone()));
+    let mut cache = app.models_cache.lock().await;
+    if !app.hosts.is_current(&fence).await {
+        bail!("host `{host}` was reconnected/reconfigured while listing {kind} models; stale result discarded");
+    }
+    cache.insert(key, (Instant::now(), v.clone()));
     Ok(v)
 }
 
@@ -608,6 +615,41 @@ mod tests {
         assert!(listed.is_err(), "模型清單不能拿內建預設充數、還快取十分鐘");
         assert!(e.app.models_cache.lock().await.is_empty(), "失敗的結果不能進快取");
         e.app.hosts.remove(&e.app, host).await;
+    }
+
+    /// #347：A 機的模型探測還在路上時同名主機改指到 B、B 的清單先進了快取；A 晚到的結果不能蓋掉它，也不能回給呼叫端當答案。
+    #[tokio::test]
+    async fn a_model_list_from_a_superseded_host_does_not_reach_the_cache() {
+        let e = crate::testing::env().await;
+        let host = "models-347";
+        let cfg = |ssh: &str| crate::config::HostCfg {
+            name: host.into(),
+            ssh: ssh.into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "agents-manager".into(),
+            remote_path: String::new(),
+        };
+        let answer = Arc::new(std::sync::Mutex::new(r#"{"effortLevel":"low"}"#.to_string()));
+        let a2 = answer.clone();
+        crate::hosts::set_ssh_fake(host, move |_| Ok(a2.lock().unwrap().clone()));
+        crate::hosts::set_ssh_delay(host, Duration::from_millis(400));
+        e.app.hosts.insert_remote_for_test(cfg("target-a")).await;
+        let app = e.app.clone();
+        let stale = tokio::spawn(async move { list(&app, host, "claude", None, true).await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        e.app.hosts.replace_remote_for_test(&e.app, cfg("target-b")).await;
+        *answer.lock().unwrap() = r#"{"effortLevel":"max"}"#.into();
+        crate::hosts::set_ssh_delay(host, Duration::ZERO);
+        let fresh = list(&e.app, host, "claude", None, true).await.expect("B 自己的清單");
+        assert_eq!(fresh["models"][0]["default_effort"], "max");
+        *answer.lock().unwrap() = r#"{"effortLevel":"low"}"#.into();
+
+        let r = stale.await.unwrap();
+        assert!(r.is_err(), "A 的結果作廢，不能當答案回：{r:?}");
+        let cached = e.app.models_cache.lock().await.get(&format!("{host}/claude/")).map(|(_, v)| v.clone()).expect("B 的還在");
+        assert_eq!(cached["models"][0]["default_effort"], "max", "快取要留著 B 的清單");
     }
 
     /// 缺檔是答案不是錯誤：本機回 `""`，遠端腳本要 exit 0（`ssh_exec` 看 exit code）。

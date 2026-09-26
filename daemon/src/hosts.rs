@@ -657,6 +657,25 @@ fn ssh_fake_for(host: &str) -> Option<SshFake> {
     SSH_FAKES.lock().unwrap().iter().find(|(h, _)| h == host).map(|(_, f)| f.clone())
 }
 
+/// 以主機名為鍵、描述「那台機器」的快取全部丟掉（#347）：偵測結果（`app.tools`，含身分與 herdr CLI 版本）、
+/// 額度（`<host>/…`，連重啟快取列）、模型清單（`<host>/<kind>/<identity>`）、這個 daemon 在那台開的 shell 清單。
+/// 移除主機與同名改設定都走這裡；新連線上線後由偵測／探測重新填。
+async fn forget_host_observations(app: &Arc<App>, name: &str) {
+    let prefix = format!("{name}/");
+    app.tools.lock().await.remove(name);
+    let removed: Vec<String> = {
+        let mut quotas = app.quotas.lock().await;
+        let removed = quotas.keys().filter(|k| k.starts_with(&prefix)).cloned().collect();
+        quotas.retain(|k, _| !k.starts_with(&prefix));
+        removed
+    };
+    for key in removed {
+        crate::quota::forget(app, &key).await;
+    }
+    app.models_cache.lock().await.retain(|k, _| !k.starts_with(&prefix));
+    app.host_shells.lock().await.retain(|s| s.host != name);
+}
+
 /// Test seam: make every ssh leg to this host take that long *asynchronously* — a host that accepts the
 /// connection and then says nothing. Pair it with [`set_ssh_fake`] for what the reply would have been.
 #[cfg(test)]
@@ -737,6 +756,23 @@ impl HostManager {
         conn
     }
 
+    /// Test seam: [`Self::apply_config`] 換掉同名連線的那一步（含快取失效），只是不起 supervisor、不真的連 ssh。
+    #[cfg(test)]
+    pub(crate) async fn replace_remote_for_test(&self, app: &Arc<App>, cfg: HostCfg) -> Arc<HostConn> {
+        let conn = HostConn::remote(cfg, app.instance());
+        self.install_conn(app, conn.clone()).await;
+        conn
+    }
+
+    /// 把 `conn` 放上去當這個名字的權威。原本就有同名連線（設定改了、可能改指到另一台）時，舊連線量到的東西
+    /// 一律作廢（#347）：先換連線、再清快取——順序反過來的話，清完到換上之間發布的舊觀測會通過權威檢查留下來。
+    async fn install_conn(&self, app: &Arc<App>, conn: Arc<HostConn>) {
+        let replaced = self.conns.lock().await.insert(conn.name.clone(), conn.clone()).is_some();
+        if replaced {
+            forget_host_observations(app, &conn.name).await;
+        }
+    }
+
     pub async fn client(&self, name: &str) -> Option<HerdrClient> {
         self.conns.lock().await.get(name).map(|c| c.client.clone())
     }
@@ -797,7 +833,7 @@ impl HostManager {
                 c.kill_master().await;
             }
             let conn = HostConn::remote(h.clone(), app.instance());
-            self.conns.lock().await.insert(h.name.clone(), conn.clone());
+            self.install_conn(app, conn.clone()).await;
             let gen = conn.generation.load(Ordering::SeqCst);
             let t = spawn_supervisor(app.clone(), conn.clone(), gen);
             *conn.supervisor.lock().await = Some(t);
@@ -815,16 +851,7 @@ impl HostManager {
         c.kill_master().await;
         c.connected.store(false, Ordering::SeqCst);
         // Stale `<gone>/claude` quota rows would read as local downstream — SPEC §14.
-        let prefix = format!("{name}/");
-        let removed: Vec<String> = {
-            let mut quotas = app.quotas.lock().await;
-            let removed = quotas.keys().filter(|k| k.starts_with(&prefix)).cloned().collect();
-            quotas.retain(|k, _| !k.starts_with(&prefix));
-            removed
-        };
-        for key in removed {
-            crate::quota::forget(app, &key).await;
-        }
+        forget_host_observations(app, name).await;
         app.emit("host_changed", json!({"name": name, "connected": false, "error": "removed"})).await;
         crate::state::emit_daemon_status(app).await;
         tracing::info!(host = %name, "host removed");
@@ -1111,6 +1138,51 @@ mod tests {
         let after = env.app.hosts.get(LOCAL_HOST).await.expect("本機那顆還要在");
         assert!(after.is_local(), "local 不可以變成 ssh 遠端");
         assert!(Arc::ptr_eq(&before, &after), "連那顆 HostConn 都不該被換掉（supervisor、master 都還在原位）");
+    }
+
+    /// #347：同名主機改設定（可能已經指到另一台）時，以主機名為鍵的觀測快取要當場作廢，
+    /// 不然新連線的偵測／探測回來之前，舊機器的身分、撞限、模型清單會被當成新機器的事實。
+    #[tokio::test]
+    async fn replacing_a_host_forgets_what_was_observed_through_the_old_connection() {
+        let env = crate::testing::env().await;
+        let app = &env.app;
+        let mk = |name: &str, ssh: &str| HostCfg { name: name.into(), ssh: ssh.into(), ..cfg() };
+        app.hosts.insert_remote_for_test(mk("inv-347", "target-a")).await;
+        app.hosts.insert_remote_for_test(mk("other-347", "target-o")).await;
+        let reading = || crate::quota::Quota {
+            five_hour: None, seven_day: None, fable: None, reset_credits: None, limit_hit: None, plan: None,
+            updated_at: crate::db::now(), source: "test".into(), account: None, host: String::new(),
+        };
+        let tools = || crate::tools::HostTools {
+            tools: Default::default(), identities: Default::default(), shell_identities: vec![], utc_offset_secs: None, herdr_cli: None,
+            checked_at: crate::db::now(),
+        };
+        let shell = |host: &str| crate::api::shell::HostShell {
+            host: host.into(), herdr_session: "agents-manager".into(), workspace_id: "w1".into(), tab_id: "w1:t1".into(),
+            pane_id: "w1:p1".into(), cwd: "/".into(), created_at: crate::db::now(),
+        };
+        for h in ["inv-347", "other-347"] {
+            app.tools.lock().await.insert(h.into(), tools());
+            crate::quota::set(app, h, "codex", reading()).await;
+            app.models_cache.lock().await.insert(format!("{h}/codex/"), (std::time::Instant::now(), json!({})));
+            app.host_shells.lock().await.push(shell(h));
+        }
+        let cached_rows = |key: &'static str| async move {
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM quota_cache WHERE key = ?").bind(key).fetch_one(&app.db).await.unwrap()
+        };
+        assert_eq!(cached_rows("inv-347/codex").await, 1);
+
+        app.hosts.replace_remote_for_test(app, mk("inv-347", "target-b")).await;
+
+        assert!(!app.tools.lock().await.contains_key("inv-347"), "舊機器的偵測結果（身分、登入）要丟");
+        assert!(!app.quotas.lock().await.contains_key("inv-347/codex"), "舊機器的額度不能擋新機器");
+        assert_eq!(cached_rows("inv-347/codex").await, 0, "重啟快取列也要清，不然下次開機又種回來");
+        assert!(!app.models_cache.lock().await.contains_key("inv-347/codex/"), "舊機器的模型清單要丟");
+        assert!(!app.host_shells.lock().await.iter().any(|s| s.host == "inv-347"), "舊機器上的 shell 不能拿來對新機器的 pane");
+        assert!(app.tools.lock().await.contains_key("other-347"), "別台不動");
+        assert!(app.quotas.lock().await.contains_key("other-347/codex"));
+        assert!(app.models_cache.lock().await.contains_key("other-347/codex/"));
+        assert!(app.host_shells.lock().await.iter().any(|s| s.host == "other-347"));
     }
 
     #[test]

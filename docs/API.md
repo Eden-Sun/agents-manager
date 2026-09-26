@@ -1611,8 +1611,9 @@ WS（`update_id`／`host`／`kind`／`target_version`／`log_path` 每則都帶�
 ```
 - 安裝前 `codex --version` 已經 `>= target_version`：不跑安裝指令、沒有 `installing`／`verifying`，直接改通知、開重啟，`ok:true` 帶 `already_installed:true`（`from`＝`to`）。
 - `ok:false` 一律**沒有重啟任何 bot**、通知不動。`reason`：`version_unreadable`（讀不到安裝前的版本，沒有安裝）、`install_failed`、
-  `verify_failed`（跑完讀不到版本）、`version_unchanged`（跑完版本沒變，帶 `from`／`to`）、`target_not_reached`（變新了但比 `target_version` 舊，帶 `from`／`to`）。
-  裝到比 `target_version` 還新算成功。
+  `verify_failed`（跑完讀不到版本）、`version_unchanged`（跑完版本沒變，帶 `from`／`to`）、`target_not_reached`（變新了但比 `target_version` 舊，帶 `from`／`to`）、
+  `superseded`（途中那台主機重連或改指到另一台，SPEC §11.3 第 7 點：安裝只跑在開始時那條連線上，換了之後讀到的版本不算數，也不改通知、不開批次；
+  安裝可能已經在舊連線那台跑完）。裝到比 `target_version` 還新算成功。
 - `ok:true` 的 `restart` 是 §10.3a 的計畫，之後照 `bots_restart_progress`／`bots_restart_done` 走；已經有一批在跑時是那一批的
   `already_running:true`（codex 這次沒排進去，等那批跑完再按一次重啟）。批次開不起來時 `restart:null`＋`restart_error`（新版已裝好，照一般重啟再按一次）。
 

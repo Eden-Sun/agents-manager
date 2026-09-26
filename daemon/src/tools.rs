@@ -401,7 +401,23 @@ pub async fn record_identity_login(
     account: Option<String>,
     plan: Option<String>,
 ) -> bool {
+    record_identity_login_fenced(app, host, name, None, logged_in, account, plan).await
+}
+
+/// `fence` 給了就只在它仍是這台主機的權威時寫（#347）；檢查與寫入在同一把 `app.tools` 鎖裡。
+async fn record_identity_login_fenced(
+    app: &Arc<App>,
+    host: &str,
+    name: &str,
+    fence: Option<&crate::hosts::HostFence>,
+    logged_in: Option<bool>,
+    account: Option<String>,
+    plan: Option<String>,
+) -> bool {
     let mut all = app.tools.lock().await;
+    if !still_current(app, fence).await {
+        return false;
+    }
     let Some(ht) = all.get_mut(host) else { return false };
     let Some(info) = ht.identities.get_mut(name) else { return false };
     // A pane answer of "could not tell" must not erase what we already knew.
@@ -441,8 +457,11 @@ pub(crate) fn logout_result(recheck: Option<bool>) -> Option<bool> {
 }
 
 /// 記下「這個身分已登出」：`account`／`plan` 一起清掉，否則列上會是「未登入」配著上一個帳號。
-pub async fn record_identity_logged_out(app: &Arc<App>, host: &str, name: &str, reason: &str) -> bool {
+async fn record_identity_logged_out(app: &Arc<App>, host: &str, name: &str, reason: &str, fence: &crate::hosts::HostFence) -> bool {
     let mut all = app.tools.lock().await;
+    if !still_current(app, Some(fence)).await {
+        return false;
+    }
     let Some(ht) = all.get_mut(host) else { return false };
     let Some(info) = ht.identities.get_mut(name) else { return false };
     let before = (info.logged_in, info.account.clone(), info.plan.clone());
@@ -456,6 +475,11 @@ pub async fn record_identity_logged_out(app: &Arc<App>, host: &str, name: &str, 
 /// The poller parks a logged-out identity for 30 min, so after a login the cache stays stale;
 /// `start_bot` rechecks before warning.
 pub async fn recheck_identity_login(app: &Arc<App>, host: &str, name: &str) -> Option<bool> {
+    recheck_identity_login_fenced(app, host, name, None).await
+}
+
+/// `fence` 給了而主機已經換掉：問到的答案（可能是新機器的）不寫進快取、也不解除停放，回 `None`（#347）。
+async fn recheck_identity_login_fenced(app: &Arc<App>, host: &str, name: &str, fence: Option<&crate::hosts::HostFence>) -> Option<bool> {
     let idn = identity_for_host(app, host, name).await?;
     let args: Vec<&str> = match idn.kind.as_str() {
         "claude" => CLAUDE_LOGIN_ARGS.to_vec(),
@@ -478,8 +502,11 @@ pub async fn recheck_identity_login(app: &Arc<App>, host: &str, name: &str) -> O
     let (logged_in, account, plan) = read_login_answer(&idn.kind, &out);
     let logged_in = logged_in?;
     let to_cache = login_answer_to_cache(host == LOCAL_HOST, &idn.kind, logged_in)?;
-    if record_identity_login(app, host, name, Some(to_cache), account, plan).await {
+    if record_identity_login_fenced(app, host, name, fence, Some(to_cache), account, plan).await {
         app.emit("host_changed", serde_json::json!({"host": host})).await;
+    }
+    if !still_current(app, fence).await {
+        return None;
     }
     if logged_in && idn.kind == "claude" {
         crate::quota_claude::unpark_identity(host, name);
@@ -487,10 +514,21 @@ pub async fn recheck_identity_login(app: &Arc<App>, host: &str, name: &str) -> O
     Some(logged_in)
 }
 
+async fn still_current(app: &Arc<App>, fence: Option<&crate::hosts::HostFence>) -> bool {
+    match fence {
+        Some(f) => app.hosts.is_current(f).await,
+        None => true,
+    }
+}
+
 /// Never copies the login pane's terminal output anywhere else.
 ///
 /// `logout`＝這個 pane 下的是登出指令：CLI 跑完之後重驗問不出來（遠端 claude 一律問不出來）就直接記未登入，
 /// 不然列上會一直顯示「已登入」、登出鈕也還按得下去（review3 c5 L3）。
+///
+/// `fence` 是開 pane 之前記下的主機權威（#347）：watcher 最多活 15 分鐘、每一輪都用主機**名字**重新解析，
+/// 途中同名主機重連或改指到另一台，就不能再看新機器上同 id 的 pane、把答案記到新機器的身分、或關掉新機器的 pane——
+/// 一發現權威換了就整個放手（舊機器上的 pane 留著，連線已經不是它的了）。
 pub fn spawn_identity_login_watch(
     app: Arc<App>,
     host: String,
@@ -498,17 +536,27 @@ pub fn spawn_identity_login_watch(
     name: String,
     kind: String,
     logout: bool,
+    fence: crate::hosts::HostFence,
 ) {
     tokio::spawn(async move {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(15 * 60);
         let startup_deadline = tokio::time::Instant::now() + Duration::from_secs(12);
         let mut saw_cli = false;
+        let close = || async {
+            if still_current(&app, Some(&fence)).await {
+                let _ = crate::api::shell::close(&app, &host, &pane_id).await;
+            }
+        };
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
+            if !still_current(&app, Some(&fence)).await {
+                tracing::info!(%host, %pane_id, identity = %name, "host was reconnected/reconfigured; login watcher gives up on the old connection");
+                return;
+            }
             let Some((client, _)) = crate::api::shell::client_for(&app, &host).await.ok() else { return };
             let Ok(processes) = client.pane_process_info(&pane_id).await else {
                 if tokio::time::Instant::now() >= deadline {
-                    let _ = crate::api::shell::close(&app, &host, &pane_id).await;
+                    close().await;
                     return;
                 }
                 continue;
@@ -520,19 +568,19 @@ pub fn spawn_identity_login_watch(
             });
             saw_cli |= cli_active;
             if (saw_cli && !cli_active) || (!saw_cli && tokio::time::Instant::now() >= startup_deadline) {
-                let after = recheck_identity_login(&app, &host, &name).await;
+                let after = recheck_identity_login_fenced(&app, &host, &name, Some(&fence)).await;
                 if logout && logout_result(after) == Some(false) {
                     let changed =
-                        record_identity_logged_out(&app, &host, &name, "剛剛在這台主機登出（重驗問不出來時照登出算）").await;
+                        record_identity_logged_out(&app, &host, &name, "剛剛在這台主機登出（重驗問不出來時照登出算）", &fence).await;
                     if changed {
                         app.emit("host_changed", serde_json::json!({"host": host})).await;
                     }
                 }
-                let _ = crate::api::shell::close(&app, &host, &pane_id).await;
+                close().await;
                 return;
             }
             if tokio::time::Instant::now() >= deadline {
-                let _ = crate::api::shell::close(&app, &host, &pane_id).await;
+                close().await;
                 return;
             }
         }
@@ -1455,5 +1503,54 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
         app.hosts.remove(&app, "build1").await;
         assert!(!install_host_tools_fenced(&app, "build1", ht_marked("ghost"), &fence).await);
         assert_eq!(marker(&app).await, None);
+    }
+
+    /// #347：登入／登出 watcher 開在 A 機的 pane 上，主機名改指到 B，B 上剛好也有同 id 的 pane、同名身分。
+    /// 舊 watcher 放行後不能看 B 的 pane 做判斷、不能把 B 的身分記成登出、也不能關掉 B 的 pane。
+    #[tokio::test]
+    async fn a_login_watcher_from_the_old_connection_leaves_the_new_host_alone() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let host = "login-347";
+        let cfg = |ssh: &str| crate::config::HostCfg { name: host.into(), ..host_cfg(ssh) };
+        let slug = format!("t347{}", &crate::db::ulid()[16..]).to_ascii_lowercase();
+        app.set_instance(Some(slug.clone()));
+        let dir = crate::hosts::short_dir(Some(&slug));
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::hosts::set_ssh_fake(host, |_| Ok(String::new()));
+
+        app.hosts.insert_remote_for_test(cfg("target-a")).await;
+        let fence_a = app.hosts.fence(host).await.unwrap();
+        spawn_identity_login_watch(app.clone(), host.into(), "w1:p1".into(), "cc1".into(), "claude".into(), true, fence_a);
+
+        let b = app.hosts.replace_remote_for_test(&app, cfg("target-b")).await;
+        b.connected.store(true, std::sync::atomic::Ordering::SeqCst);
+        let herdr_b = crate::testing::MockHerdr::start(b.client.socket_path().to_path_buf());
+        herdr_b.set_argv("w1:p1", &["claude"]);
+        let mut ht = ht_marked("B");
+        let mut cc1 = IdentityInfo::shell("cc1", "claude", None);
+        cc1.logged_in = Some(true);
+        ht.identities.insert("cc1".into(), cc1);
+        app.tools.lock().await.insert(host.into(), ht);
+        app.host_shells.lock().await.push(crate::api::shell::HostShell {
+            host: host.into(),
+            herdr_session: "agents-manager".into(),
+            workspace_id: "w1".into(),
+            tab_id: "w1:t1".into(),
+            pane_id: "w1:p1".into(),
+            cwd: "/".into(),
+            created_at: crate::db::now(),
+        });
+
+        // 第一輪（~1 秒）看得到 CLI、第二輪看到它結束：沒有圍籬的 watcher 這時就會收尾。
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        herdr_b.set_argv("w1:p1", &["zsh"]);
+        tokio::time::sleep(Duration::from_millis(2000)).await;
+
+        let logged_in = app.tools.lock().await.get(host).and_then(|t| t.identities.get("cc1").and_then(|i| i.logged_in));
+        assert_eq!(logged_in, Some(true), "B 的身分不能被 A 的登出記成未登入");
+        assert!(herdr_b.calls_to("pane.close").is_empty(), "B 上同 id 的 pane 不能被關：{:?}", herdr_b.methods());
+        assert!(herdr_b.calls_to("pane.process_info").is_empty(), "連看都不該去看 B 的 pane：{:?}", herdr_b.methods());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

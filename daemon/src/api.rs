@@ -2191,9 +2191,10 @@ async fn logout_identity(
 
 async fn identity_auth(app: Arc<App>, name: String, identity: String, logout: bool) -> Result<Response, LcError> {
     // 沒寫 host 的身分在遠端也生效：未知主機若先查 identity／PATH，會變成 409「CLI 不在 PATH」。
-    if app.hosts.get(&name).await.is_none() {
+    // 開 pane 之前記下主機權威，watcher 只對這一條連線收尾（#347）。
+    let Some(fence) = app.hosts.fence(&name).await else {
         return Err(LcError::NotFound("host".into()));
-    }
+    };
     let idn = crate::tools::identity_for_host(&app, &name, &identity)
         .await
         .ok_or_else(|| LcError::NotFound("identity".into()))?;
@@ -2222,7 +2223,7 @@ async fn identity_auth(app: Arc<App>, name: String, identity: String, logout: bo
         let _ = shell::close(&app, &name, &shell.pane_id).await;
         return Err(e);
     }
-    crate::tools::spawn_identity_login_watch(app, name, shell.pane_id.clone(), identity, idn.kind, logout);
+    crate::tools::spawn_identity_login_watch(app, name, shell.pane_id.clone(), identity, idn.kind, logout, fence);
     Ok((StatusCode::OK, Json(json!(shell))).into_response())
 }
 
