@@ -179,7 +179,7 @@ async fn probe_role(app: &Arc<App>, role: Role) -> Option<bool> {
     if !crate::tui_prompts::is_not_logged_in_reply(&read.text) {
         return Some(false);
     }
-    Some(quota_is_blank(app, &bot).await)
+    quota_is_blank(app, &bot).await
 }
 
 /// daemon 自己那份額度讀數是不是「空的」：整把 key 不在表裡、或它只是開機從 `quota_cache` 回填的
@@ -188,17 +188,19 @@ async fn probe_role(app: &Arc<App>, role: Role) -> Option<bool> {
 /// 登入失效的 CLI 跑不完任何一個回合，也就送不出 StatusLine hook，所以它的讀數只會停在舊的那一份；
 /// 而在回報裡引用那句話的 bot 是**剛跑完一個回合**才印得出那份回報，那一回合就會帶一份新的讀數進來。
 /// 這正是兩者的差別，而且完全不依賴畫面上印了什麼。
-async fn quota_is_blank(app: &Arc<App>, bot: &crate::db::Bot) -> bool {
-    let host = crate::db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| crate::config::LOCAL_HOST.to_string());
+///
+/// 讀不到這顆 bot 在哪台主機就回 `None`（#243）：當成本機會拿 daemon 這台的讀數去判遠端 bot 登入失效。
+async fn quota_is_blank(app: &Arc<App>, bot: &crate::db::Bot) -> Option<bool> {
+    let host = crate::db::bot_host(&app.db, &bot.id).await.ok()?;
     let base = crate::quota::quota_base_for_host(app, &host, &bot.kind, bot.identity.as_deref()).await;
     let key = crate::quota::quota_key(&host, &base);
     if app.quota_stale.lock().await.contains(&key) {
-        return true;
+        return Some(true);
     }
-    match app.quotas.lock().await.get(&key) {
+    Some(match app.quotas.lock().await.get(&key) {
         None => true,
         Some(q) => q.five_hour.is_none() && q.seven_day.is_none(),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -327,5 +329,22 @@ mod tests {
         sqlx::query("UPDATE supervisor_roles SET bot_id=NULL").execute(&app.db).await.unwrap();
         refresh(&app).await;
         assert!(snapshot(&app, RESPONDER).await.is_none(), "不再建立就不留陳舊的結論");
+    }
+
+    /// #243：讀不到 bot 在哪台主機時不能拿本機的額度讀數去判——本機那把 key 對遠端 bot 永遠是空的，
+    /// 會把一顆正常的遠端角色判成登入失效。回 `None`＝這一拍沒有證據。
+    #[tokio::test]
+    async fn an_unreadable_host_is_no_evidence_of_a_blank_quota() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        configure(&app, RESPONDER).await;
+        sqlx::query("UPDATE projects SET host='m4p' WHERE id='p'").execute(&app.db).await.unwrap();
+        let bot = crate::db::bot(&app.db, "bot-responder").await.unwrap().unwrap();
+
+        crate::testing::make_table_unreadable(&app, "projects").await;
+        let seen = quota_is_blank(&app, &bot).await;
+        crate::testing::make_table_readable(&app, "projects").await;
+        assert_eq!(seen, None, "讀不到主機不是「額度空的」");
+        assert_eq!(quota_is_blank(&app, &bot).await, Some(true), "讀得到之後照常判（遠端這把 key 沒有讀數）");
     }
 }
