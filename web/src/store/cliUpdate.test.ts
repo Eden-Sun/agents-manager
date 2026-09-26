@@ -37,6 +37,18 @@ test('失敗：不開批次，訊息講原因與錯誤', () => {
   assert.equal(below.batch, null)
 })
 
+test('#564：主機端的鎖被別的安裝拿著／重啟接手：訊息講清楚，不開批次', () => {
+  const locked = cliUpdateDone({ ...base, ok: false, reason: 'already_running', error: 'local 已經有另一個 codex 安裝在跑' })
+  assert.match(locked.message, /另一個安裝在跑/)
+  assert.equal(locked.batch, null)
+  const cut = cliUpdateDone({ ...base, ok: false, reason: 'interrupted', recovered: true })
+  assert.match(cut.message, /daemon 在安裝途中重啟過/)
+  assert.match(cut.message, /沒有重啟任何 Bot/)
+  const ok = cliUpdateDone({ ...base, ok: true, recovered: true, to: '0.157.0', restart: null, restart_error: 'daemon 在安裝途中重啟過，這次沒有自動重啟 bot' })
+  assert.equal(ok.batch, null)
+  assert.match(ok.message, /沒有自動重啟/)
+})
+
 test('成功：一鍵重啟的計畫變成 header 的進度', () => {
   const r = cliUpdateDone({
     ...base,

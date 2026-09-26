@@ -64,6 +64,8 @@ const REASON: Record<string, string> = {
   version_unchanged: '裝完版本沒變',
   target_not_reached: '裝完還沒到確認的版本',
   superseded: '途中主機重連或改指到另一台',
+  already_running: '那台已經有另一個安裝在跑',
+  interrupted: 'daemon 在安裝途中重啟過',
 }
 
 function toPlan(v: unknown): RestartPlan | null {

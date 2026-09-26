@@ -102,7 +102,8 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 會因為 id 對不上被整段丟掉）。欄位**不存在**（舊 daemon）是「不知道」，什麼都不動。
 **欄位不存在**（舊 daemon）跟 `null`（沒有批次在跑）是兩件事，不能混成同一個值——不知道時不該動手上的進度。
 
-`cli_updates`：現在在跑的 codex 升級（§12.7a）`[{"update_id","host","kind","target_version"}]`，沒有就是 `[]`。同一個理由：進度只走 WS，
+`cli_updates`：還沒收尾的 codex 升級（§12.7a）`[{"update_id","host","kind","target_version","phase","recovered"}]`，沒有就是 `[]`。存在 DB（#564）：
+daemon 重啟前開始、正在接手確認的那筆也在，`recovered:true`、`phase:"recovering"`。同一個理由：進度只走 WS，
 `cli_update_done` 收不到時前端拿它對帳——手上那一次不在清單裡就清掉（header 的 chip 變回可以按）；欄位不存在（舊 daemon）不動。
 
 ```json
@@ -1598,8 +1599,11 @@ Project 底下所有存活 bot 的訊息合併，以插入順序（`rowid`）倒
 - 400：`kind` 不是 `codex`（claude 自己會下載新版，走 §10.3a 就好）、沒帶或看不懂 `target_version`；404：不認得的主機。
 - 409 `{"reason":"stale_target","host","kind","target_version","current_target","message"}`：帶的版本不是 daemon 眼中那台現在的目標
   （`current_target` 是現在的目標；`null`＝那台已經沒有「需安裝」的 codex）。什麼都不跑，重開確認框再按。
-- 409 `{"reason":"cli_update_in_progress","host","kind","update_id","message"}`：那台已經在裝（同一台同時只跑一個）。
+- 409 `{"reason":"cli_update_in_progress","host","kind","update_id","recovered","message"}`：那台已經在裝（同一台同時只跑一個）。記在 DB 的
+  `cli_updates` 表，每台最多一筆 `running`，daemon 重啟後也還在；`recovered:true`＝那筆是重啟前開始的，daemon 正在確認那台的安裝跑完了沒（見下）。
 - 本機直接 `/bin/sh -c`，遠端走既有的 ssh 執行路徑（`ssh_exec_path_timeout`）；逾時 5 分鐘（遠端逾時只砍得掉本機那條 ssh，那台的安裝可能還在跑）。
+  安裝指令包在**主機端的鎖**裡（`$HOME/.agents-manager-codex-install.lock`，symlink 指向持鎖 shell 的 pid；pid 已死＝過期、拿走）：
+  鎖被活著的安裝拿著時不跑，`cli_update_done` 回 `already_running`。
   輸出逐次附加到 `<data_dir>/cli-update.log`。
 
 WS（`update_id`／`host`／`kind`／`target_version`／`log_path` 每則都帶）：`cli_update_progress` 的 `phase` 依序 `checking`（讀安裝前版本）→ `installing`（帶 `from`）→
@@ -1612,9 +1616,16 @@ WS（`update_id`／`host`／`kind`／`target_version`／`log_path` 每則都帶�
 ```
 - 安裝前 `codex --version` 已經 `>= target_version`：不跑安裝指令、沒有 `installing`／`verifying`，直接改通知、開重啟，`ok:true` 帶 `already_installed:true`（`from`＝`to`）。
 - `ok:false` 一律**沒有重啟任何 bot**、通知不動。`reason`：`version_unreadable`（讀不到安裝前的版本，沒有安裝）、`install_failed`、
+  `already_running`（那台的安裝鎖被另一個還活著的安裝拿著——上一顆 daemon 開的、或別的實例開的；這次**沒有**跑安裝指令，等它結束再按）、
+  `interrupted`（重啟接手的那筆收尾時版本沒到目標或讀不到、或等 15 分鐘那台的鎖還沒放；見下）、
   `verify_failed`（跑完讀不到版本）、`version_unchanged`（跑完版本沒變，帶 `from`／`to`）、`target_not_reached`（變新了但比 `target_version` 舊，帶 `from`／`to`）、
   `superseded`（途中那台主機重連或改指到另一台，SPEC §11.3 第 7 點：安裝只跑在開始時那條連線上，換了之後讀到的版本不算數，也不改通知、不開批次；
   安裝可能已經在舊連線那台跑完）。裝到比 `target_version` 還新算成功。
+- **daemon 重啟後接手**（#564）：開機時 `cli_updates` 裡上一顆行程留下的 `running` 列不丟掉，每筆背景每 5 秒探那台的安裝鎖，
+  等它沒有活著的主人（最多 15 分鐘）才讀 `codex --version` 收尾，**絕不重跑安裝指令**。期間那台照樣 409、`cli_updates` 照樣列著。
+  收尾推 `cli_update_done`，帶 `recovered:true`：到了 `target_version` 就改通知成「已安裝，重啟套用」、`ok:true`，但 `restart:null`＋`restart_error`
+  （按下去的那一刻隔了一次重啟，不自動開批次，按一般的 ⌃⌃ 重啟）；沒到就是 `ok:false` `interrupted`，要裝再按一次（照常先讀版本，已經裝好就不再裝）。
+- 結果（`ok`／`reason`／版本）在推 `cli_update_done` **之前**寫進那一列（`status` `done`／`failed`），之後那台才能再開一次。
 - `ok:true` 的 `restart` 是 §10.3a 的計畫，之後照 `bots_restart_progress`／`bots_restart_done` 走；已經有一批在跑時是那一批的
   `already_running:true`（codex 這次沒排進去，等那批跑完再按一次重啟）。批次開不起來時 `restart:null`＋`restart_error`（新版已裝好，照一般重啟再按一次）。
 
