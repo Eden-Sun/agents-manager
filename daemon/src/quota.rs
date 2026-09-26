@@ -734,11 +734,12 @@ async fn stale_split_keys(app: &Arc<App>, host: &str, kind: &str) -> Vec<String>
 
 /// 外部探測的結果只在探測開始時記下的 `fence` 仍是這台主機的權威時才發布（#347）：探測途中同名主機被重連／改指到
 /// 另一台、或被移除，舊機器的額度就不能寫進新機器（或已移除主機）的 key。不是權威就回 `Err`、什麼都不寫。
+/// 檢查在 `app.quotas` 鎖裡做：主機換連線時會清掉 `<host>/…`（`hosts::forget_host_observations`），檢查放在鎖外的話，
+/// 通過檢查到寫入之間清掉的那份會被舊讀數種回來。
 pub async fn set_fenced(app: &Arc<App>, host: &str, base: &str, q: Quota, fence: &crate::hosts::HostFence) -> Result<()> {
-    if !app.hosts.is_current(fence).await {
+    if !set_inner(app, host, base, q, Some(fence)).await {
         anyhow::bail!("host `{host}` was reconnected/reconfigured during the quota probe; stale reading discarded");
     }
-    set(app, host, base, q).await;
     Ok(())
 }
 
@@ -796,7 +797,12 @@ fn already_past(resets_at: Option<&str>) -> bool {
     }
 }
 
-pub async fn set(app: &Arc<App>, host: &str, base: &str, mut q: Quota) {
+pub async fn set(app: &Arc<App>, host: &str, base: &str, q: Quota) {
+    set_inner(app, host, base, q, None).await;
+}
+
+/// 回 `false`＝`fence` 已經不是這台主機的權威，什麼都沒寫。
+async fn set_inner(app: &Arc<App>, host: &str, base: &str, mut q: Quota, fence: Option<&crate::hosts::HostFence>) -> bool {
     q.host = host.to_string();
     let key = quota_key(host, base);
     let stale = if base.contains(':') { Vec::new() } else { stale_split_keys(app, host, base).await };
@@ -804,11 +810,16 @@ pub async fn set(app: &Arc<App>, host: &str, base: &str, mut q: Quota) {
     let brings_its_own_hit = q.limit_hit.is_some();
     let fresh = q.clone();
     let mut quotas = app.quotas.lock().await;
+    if let Some(f) = fence {
+        if !app.hosts.is_current(f).await {
+            return false;
+        }
+    }
     if q.source == "statusline" {
         if let Some(previous) = quotas.get(&key) {
             if let Some((bucket, previous_reset, incoming_reset)) = guard_statusline_windows(previous, &mut q, chrono::Utc::now()) {
                 tracing::debug!(host, key, bucket, previous_reset, incoming_reset, "discarded a stale Claude statusline quota snapshot");
-                return;
+                return true;
             }
         }
     }
@@ -886,7 +897,20 @@ pub async fn set(app: &Arc<App>, host: &str, base: &str, mut q: Quota) {
         delete_cache(app, old).await;
     }
     persist_cache(app, &key, &q).await;
+    // 寫進記憶體之後、寫快取列之前主機被換掉：換連線那一側已經清過這把 key，這裡剛寫的列會把舊機器的讀數留到下次開機。
+    // 讓快取列回到記憶體現在的樣子（被清掉就刪，新連線已寫了就用它的）。
+    if let Some(f) = fence {
+        if !app.hosts.is_current(f).await {
+            let now = app.quotas.lock().await.get(&key).cloned();
+            match now {
+                Some(cur) => persist_cache(app, &key, &cur).await,
+                None => delete_cache(app, &key).await,
+            }
+            return true;
+        }
+    }
     app.emit("quota_updated", json!({"kind": key, "host": host, "quota": quota_value(&q, false)})).await;
+    true
 }
 
 /// 兩個 `resets_at` 差這麼多以內算同一個窗：`/usage` 的結構化時間帶毫秒（`…:00.594Z`），statusLine 是整秒。

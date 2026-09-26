@@ -63,6 +63,7 @@ const REASON: Record<string, string> = {
   verify_failed: '裝完讀不到 codex 版本',
   version_unchanged: '裝完版本沒變',
   target_not_reached: '裝完還沒到確認的版本',
+  superseded: '途中主機重連或改指到另一台',
 }
 
 function toPlan(v: unknown): RestartPlan | null {
