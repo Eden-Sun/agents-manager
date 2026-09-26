@@ -111,12 +111,29 @@ pub(crate) async fn observe_screen(app: &Arc<App>, run: &db::Run, screen: &str) 
             retire(&run.id, epoch);
             app.emit_bot_status(&run.bot_id).await;
             crate::lifecycle::schedule_flush_queued(app, &run.bot_id);
+            if prev == "idle" {
+                close_paused_turn_later(app, &run.id);
+            }
         }
         // 已經不是 blocked（herdr／別的路徑改過）或 run 不在了：被取代，補標記沒有要還的東西了。
         Ok(_) => retire(&run.id, epoch),
         // 寫不進去：補標記留著，下一輪巡邏（`is_forced`）重試；DB 仍是 blocked，不發狀態、不叫 flush。
         Err(e) => tracing::warn!(run = %run.id, bot = %run.bot_id, error = %e, "Session paused 還原寫入失敗，下一輪巡邏重試"),
     }
+}
+
+/// 選單關掉後多久再看一次：選「換模型重試」的話 claude 會接著跑同一回合，herdr 要一點時間報 working。
+const AFTER_CLOSE: Duration = if cfg!(test) { Duration::from_millis(50) } else { Duration::from_secs(5) };
+
+/// 選單關掉、還原成 idle 之後：等一下，run 仍 idle 就把那筆沒有回覆的 in-flight 收掉（不等 5 分鐘閒置門檻）。
+fn close_paused_turn_later(app: &Arc<App>, run_id: &str) {
+    let (app, run_id) = (app.clone(), run_id.to_string());
+    tokio::spawn(async move {
+        tokio::time::sleep(AFTER_CLOSE).await;
+        if let Some(turn) = crate::lifecycle::close_after_session_paused(&app, &run_id).await {
+            tracing::info!(run = %run_id, turn = %turn, "Session paused 選單關掉、沒有回覆：直接收掉這個回合");
+        }
+    });
 }
 
 /// 巡邏收尾：補標記的 run 已經不在 active 名單上（結束或被刪）就拿掉，巡邏再也不會看它。
@@ -177,6 +194,44 @@ mod tests {
 
         for m in ["pane.send_keys", "pane.send_text", "agent.prompt"] {
             assert!(e.herdr.calls_to(m).is_empty(), "不能替使用者選：{m}");
+        }
+    }
+
+    /// 2026-09-26：選單關掉、還原成 idle，而那一回合沒有回覆——不留「等待中」到 5 分鐘後，馬上收掉。
+    #[tokio::test]
+    async fn closing_the_menu_on_an_idle_run_closes_the_turn_it_left_open() {
+        let _serial = serial().await;
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let bot = tt::claude_bot(&app, &e.project_id, "paused-turn").await;
+        let run_id = tt::fake_run(&app, &bot.id).await;
+        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        let turn_id = db::ulid();
+        sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'web','in_flight','unknown',?)")
+            .bind(&turn_id)
+            .bind(&conv)
+            .bind(&run_id)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        observe_screen(&app, &run_of(&app, &run_id).await, SESSION_PAUSED).await;
+        observe_screen(&app, &run_of(&app, &run_id).await, IDLE_CLAUDE).await;
+        let status = || async {
+            sqlx::query_scalar::<_, String>("SELECT status FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap()
+        };
+        let mut closed = false;
+        for _ in 0..40 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            if status().await != "in_flight" {
+                closed = true;
+                break;
+            }
+        }
+        assert!(closed, "選單關掉、run 仍 idle：那筆沒有回覆的 in-flight 要馬上收");
+        for m in ["pane.send_keys", "pane.send_text", "agent.prompt"] {
+            assert!(e.herdr.calls_to(m).is_empty(), "不能替使用者按：{m}");
         }
     }
 

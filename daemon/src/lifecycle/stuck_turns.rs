@@ -156,7 +156,7 @@ pub(crate) async fn sweep_at(app: &Arc<App>, host: Option<&str>, now: Instant, t
         if stuck < threshold {
             continue;
         }
-        match close_locked(app, &run, &turn, stuck).await {
+        match close_locked(app, &run, &turn, CloseWhy::Idle(stuck)).await {
             Ok(true) => {
                 closed.push(turn.id.clone());
                 // 卡住的就是排在後面的那一筆：同一把鎖裡馬上送，不等下一次喚醒。
@@ -171,8 +171,42 @@ pub(crate) async fn sweep_at(app: &Arc<App>, host: Option<&str>, now: Instant, t
     closed
 }
 
+/// 為什麼收：閒置太久（一般），或 claude 的 Session paused 選單剛關掉、沒有回覆（不必等滿閒置門檻）。
+#[derive(Clone, Copy)]
+pub(crate) enum CloseWhy {
+    Idle(Duration),
+    SessionPaused,
+}
+
+/// Session paused 選單關掉之後：run 還是 idle、還有一筆 in-flight 就馬上收，不等 5 分鐘的閒置門檻
+/// （2026-09-26 使用者：「判斷為等待中，實際上並沒有再輸出」）。選了「換模型重試」的話 claude 會接著跑同一回合、
+/// herdr 報 working，這裡在鎖內重讀看到不是 idle 就不動。回傳收掉的 turn id。
+pub(crate) async fn close_after_session_paused(app: &Arc<App>, run_id: &str) -> Option<String> {
+    let run = db::run(&app.db, run_id).await.ok()??;
+    let lock = app.bot_lock(&run.bot_id).await;
+    let _g = lock.lock().await;
+    let run = db::run(&app.db, run_id).await.ok()??;
+    if run.state != "running" || run.agent_status != "idle" {
+        return None;
+    }
+    let turn = db::in_flight_turn(&app.db, run_id).await.ok()??;
+    match close_locked(app, &run, &turn, CloseWhy::SessionPaused).await {
+        Ok(true) => {
+            if let Err(e) = flush_queued_locked(app, &run.bot_id).await {
+                tracing::warn!(bot = %run.bot_id, error = ?e, "queued prompt flush after a session-paused close failed");
+            }
+            Some(turn.id)
+        }
+        Ok(false) => None,
+        Err(e) => {
+            tracing::warn!(turn = %turn.id, error = ?e, "could not close the turn after the session-paused menu closed");
+            None
+        }
+    }
+}
+
 /// 收一筆。`Ok(false)`：CAS 沒搶到（別的路剛好收掉了）。
-async fn close_locked(app: &Arc<App>, run: &db::Run, turn: &db::Turn, idle: Duration) -> anyhow::Result<bool> {
+async fn close_locked(app: &Arc<App>, run: &db::Run, turn: &db::Turn, why: CloseWhy) -> anyhow::Result<bool> {
     let Some(bot) = db::bot(&app.db, &run.bot_id).await? else { return Ok(false) };
     let reply = proven_reply(app, &bot, run, turn).await?;
     let already_answered: bool =
@@ -180,7 +214,10 @@ async fn close_locked(app: &Arc<App>, run: &db::Run, turn: &db::Turn, idle: Dura
             .bind(&turn.id)
             .fetch_one(&app.db)
             .await?;
-    let mins = idle.as_secs() / 60;
+    let mins = match why {
+        CloseWhy::Idle(idle) => idle.as_secs() / 60,
+        CloseWhy::SessionPaused => 0,
+    };
     let status = if reply.is_some() { "completed" } else { "completed_fallback" };
 
     let mut tx = app.db.begin().await?;
@@ -196,10 +233,13 @@ async fn close_locked(app: &Arc<App>, run: &db::Run, turn: &db::Turn, idle: Dura
         Some(_) if already_answered => None,
         Some(text) => Some(insert_message_tx(&mut tx, &turn.conversation_id, Some(&turn.id), "assistant", text, "transcript", false, None).await?),
         None => {
-            let why = format!(
-                "這個回合沒有偵測到結束：agent 已經閒置 {mins} 分鐘，turn 仍是 in_flight，由 reconcile 收尾。\
-                 transcript 證不出這則 prompt 之後有完整回覆，所以標成 completed_fallback（不是失敗）。"
-            );
+            let why = match why {
+                CloseWhy::SessionPaused => "claude 的 Session paused 選單關掉了、這個回合沒有回覆（被暫停），直接收尾，不再顯示等待中。".to_string(),
+                CloseWhy::Idle(_) => format!(
+                    "這個回合沒有偵測到結束：agent 已經閒置 {mins} 分鐘，turn 仍是 in_flight，由 reconcile 收尾。\
+                     transcript 證不出這則 prompt 之後有完整回覆，所以標成 completed_fallback（不是失敗）。"
+                ),
+            };
             Some(insert_message_tx(&mut tx, &turn.conversation_id, Some(&turn.id), "system", &why, "system", false, None).await?)
         }
     };
@@ -428,6 +468,30 @@ mod tests {
         Fixture { env, bot_id: bot.id, run_id, turn_id }
     }
 
+    /// 2026-09-26 cf-ox-fork-fork：Session paused 選單關掉、run 回到 idle、沒有回覆——不等 5 分鐘，馬上收，
+    /// 對話裡寫明是被暫停，網頁不再顯示等待中。
+    #[tokio::test]
+    async fn a_turn_left_open_by_a_closed_session_paused_menu_is_closed_right_away() {
+        let f = stuck("被暫停的那則").await;
+        let app = f.env.app.clone();
+        assert_eq!(close_after_session_paused(&app, &f.run_id).await.as_deref(), Some(f.turn_id.as_str()));
+        assert_eq!(turn(&app, &f.turn_id).await.status, "completed_fallback");
+        let msgs = messages(&app, &f.turn_id).await;
+        assert!(msgs.iter().any(|(role, _, c)| role == "system" && c.contains("Session paused")), "{msgs:?}");
+        assert_eq!(close_after_session_paused(&app, &f.run_id).await, None, "已經收掉就不再動");
+    }
+
+    /// 選了「換模型重試」：claude 接著跑同一回合（herdr 報 working），不能收。
+    #[tokio::test]
+    async fn a_session_paused_turn_that_resumed_is_left_open() {
+        let f = stuck("換模型重試那則").await;
+        let app = f.env.app.clone();
+        sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&f.run_id).execute(&app.db).await.unwrap();
+        assert_eq!(close_after_session_paused(&app, &f.run_id).await, None);
+        assert_eq!(turn(&app, &f.turn_id).await.status, "in_flight");
+        let _ = &f.bot_id;
+    }
+
     async fn turn(app: &Arc<App>, id: &str) -> db::Turn {
         sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id = ?").bind(id).fetch_one(&app.db).await.unwrap()
     }
@@ -570,11 +634,11 @@ mod tests {
         let t = turn(&app, &f.turn_id).await;
 
         sqlx::query("ALTER TABLE projects RENAME TO projects_unreadable").execute(&app.db).await.unwrap();
-        assert!(close_locked(&app, &run, &t, 6 * MIN).await.is_err(), "讀不到主機是錯，不是「證不出來」");
+        assert!(close_locked(&app, &run, &t, CloseWhy::Idle(6 * MIN)).await.is_err(), "讀不到主機是錯，不是「證不出來」");
         sqlx::query("ALTER TABLE projects_unreadable RENAME TO projects").execute(&app.db).await.unwrap();
         assert_eq!(turn(&app, &f.turn_id).await.status, "in_flight", "這一輪不收");
 
-        assert!(close_locked(&app, &run, &t, 6 * MIN).await.unwrap(), "讀得到了：照常收");
+        assert!(close_locked(&app, &run, &t, CloseWhy::Idle(6 * MIN)).await.unwrap(), "讀得到了：照常收");
         assert_eq!(turn(&app, &f.turn_id).await.status, "completed", "transcript 證得出來");
         let msgs = messages(&app, &f.turn_id).await;
         assert!(msgs.contains(&("assistant".into(), "transcript".into(), "部署完成：pid 42894".into())), "{msgs:?}");
