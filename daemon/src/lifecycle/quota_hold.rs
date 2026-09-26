@@ -50,11 +50,16 @@ struct Held {
     held_at: String,
     /// 哪一輪開機寫的（`App::boot_id`）。
     boot: String,
+    /// 寫下時這顆 bot 的主機名指到哪台機器（[`host_target`]，#347）。同名主機之後改指到另一台，這筆撞限說的是舊機器的帳號，
+    /// 不能再擋新機器上的派工（[`still_holds`]）。舊版寫的沒有這一欄：照舊算數。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    target: Option<String>,
 }
 
 impl Held {
-    fn new(app: &App, identity: Option<&str>, hit: &crate::quota::LimitHit) -> Self {
+    fn new(app: &App, identity: Option<&str>, target: Option<String>, hit: &crate::quota::LimitHit) -> Self {
         Held {
+            target,
             identity: identity.map(String::from),
             message: hit.message.clone(),
             until: hit.until.clone(),
@@ -148,15 +153,35 @@ async fn still_holds(app: &Arc<App>, bot: &db::Bot, held: &Held) -> anyhow::Resu
     if held.identity != crate::quota::billing_identity(app, bot).await? || crate::quota::limit_hit_expired(Some(&held.hit())) {
         return Ok(false);
     }
+    // 寫下之後這個主機名改指到另一台（#347）：那是另一台機器上的帳號，撞限不跟過去。主機不在設定裡不算「換了」——
+    // 讀不到不放行，跟上面讀不到身分一樣。單純重連不改設定，照樣算數。
+    if let Some(then) = held.target.as_deref() {
+        let host = db::bot_host(&app.db, &bot.id).await?;
+        if host_target(app, &host).await.is_some_and(|now| now != then) {
+            return Ok(false);
+        }
+    }
     Ok(match chrono::DateTime::parse_from_rfc3339(&held.held_at) {
         Ok(t) => !crate::quota::limit_cleared_since(app, bot, t.with_timezone(&chrono::Utc)).await,
         Err(_) => true,
     })
 }
 
+/// 這個主機名**現在**指到哪台機器：本機是 `local`；遠端是 ssh 目標、port、herdr session（同 `api::repoints_host` 認的三項）。
+/// 不在設定裡回 `None`。
+async fn host_target(app: &App, host: &str) -> Option<String> {
+    if host == crate::config::LOCAL_HOST {
+        return Some(host.to_string());
+    }
+    let conn = app.hosts.get(host).await?;
+    let cfg = conn.cfg.as_ref()?;
+    Some(format!("{}:{}/{}", cfg.ssh, cfg.ssh_port, cfg.herdr_session))
+}
+
 async fn remember(app: &Arc<App>, turn_id: &str, bot: &db::Bot, hit: &crate::quota::LimitHit) -> anyhow::Result<()> {
     let identity = crate::quota::billing_identity(app, bot).await?;
-    let json = serde_json::to_string(&Held::new(app, identity.as_deref(), hit))?;
+    let target = host_target(app, &db::bot_host(&app.db, &bot.id).await?).await;
+    let json = serde_json::to_string(&Held::new(app, identity.as_deref(), target, hit))?;
     sqlx::query("UPDATE turns SET quota_hold=? WHERE id=? AND status='queued'").bind(&json).bind(turn_id).execute(&app.db).await?;
     Ok(())
 }
@@ -165,7 +190,8 @@ async fn remember(app: &Arc<App>, turn_id: &str, bot: &db::Bot, hit: &crate::quo
 /// flush 擋下才寫——記下到擋下之間 daemon 死掉、或 flush 那一下寫不進去，重啟之後都還有憑據。寫不進去回錯：撞限那條路
 /// 會把它記成欠著、`StopFailure` 由收件匣重試。
 pub(crate) async fn stamp_queued(app: &Arc<App>, bot_id: &str, identity: Option<&str>, hit: &crate::quota::LimitHit) -> anyhow::Result<()> {
-    let json = serde_json::to_string(&Held::new(app, identity, hit))?;
+    let target = host_target(app, &db::bot_host(&app.db, bot_id).await?).await;
+    let json = serde_json::to_string(&Held::new(app, identity, target, hit))?;
     sqlx::query(
         "UPDATE turns SET quota_hold=? WHERE status='queued'
             AND conversation_id IN (SELECT id FROM conversations WHERE bot_id=?)",
@@ -569,6 +595,7 @@ mod tests {
             bucket: bucket.map(String::from),
             held_at: db::iso_at(chrono::Utc::now() - chrono::Duration::minutes(5)),
             boot: "previous-boot".into(),
+            target: None,
         }
     }
 
@@ -650,6 +677,73 @@ mod tests {
         assert!(!state(&app, &a.turn).await.0, "回填跑完之後記憶體說了算");
         forget_queue_retry_timer(&a.bot.id);
         forget_held(&a.bot.id);
+    }
+
+    /// #347：撞限記錄帶著寫下時主機名指到的機器。重啟後回填（以及回填之前的 flush）只在那個名字**還指到同一台**時才算數：
+    /// 單純重連照樣種回、照樣擋；改指到另一台（ssh 目標換了）就不種、不擋——那是舊機器上的帳號。
+    #[tokio::test]
+    async fn a_previous_boot_hold_only_counts_while_the_host_still_points_at_the_same_machine() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let cfg = |name: &str, ssh: &str| crate::config::HostCfg {
+            name: name.into(),
+            ssh: ssh.into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "agents-manager".into(),
+            remote_path: String::new(),
+        };
+        let (same, moved) = ("qh-same-347", "qh-moved-347");
+        let same_conn = app.hosts.insert_remote_for_test(cfg(same, "target-a")).await;
+        app.hosts.insert_remote_for_test(cfg(moved, "target-a")).await;
+        let queue = |host: &'static str, name: &'static str| {
+            let app = app.clone();
+            async move {
+                let pid = db::ulid();
+                sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?, ?, ?, ?, ?)")
+                    .bind(&pid).bind(format!("/x/{name}")).bind(name).bind(host).bind(db::now()).execute(&app.db).await.unwrap();
+                let bot = tt::claude_bot(&app, &pid, name).await;
+                sqlx::query("UPDATE bots SET identity='cc-a' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
+                let bot = db::bot(&app.db, &bot.id).await.unwrap().unwrap();
+                tt::fake_run(&app, &bot.id).await;
+                let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+                let turn = db::ulid();
+                sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, delivery, prompt_text, created_at) VALUES (?,?,'web','queued','pending','派工',?)")
+                    .bind(&turn).bind(&conv).bind(db::now()).execute(&app.db).await.unwrap();
+                // 走正式的寫入路徑（撞限當下蓋上），再當成上一輪開機寫的。
+                stamp_queued(&app, &bot.id, Some("cc-a"), &hit(Some(&later(2)))).await.unwrap();
+                let (_, held) = state(&app, &turn).await;
+                put_hold(&app, &turn, &Held { boot: "previous-boot".into(), ..held.expect("蓋上了") }).await;
+                forget_queue_retry_timer(&bot.id);
+                forget_held(&bot.id);
+                (bot, turn)
+            }
+        };
+        let (same_bot, same_turn) = queue(same, "qh-same").await;
+        // moved 上兩顆：一顆看回填之前的 flush（放行會清掉它的憑據），一顆看回填。
+        let (flushed_bot, flushed_turn) = queue(moved, "qh-moved-flush").await;
+        let (moved_bot, moved_turn) = queue(moved, "qh-moved").await;
+        assert_eq!(state(&app, &same_turn).await.1.and_then(|h| h.target).as_deref(), Some("target-a:22/agents-manager"), "記下當時指到的機器");
+
+        // 重啟之後：same 只是重連（設定沒變），moved 改指到另一台。
+        same_conn.bump_generation_for_test();
+        app.hosts.replace_remote_for_test(&app, cfg(moved, "target-b")).await;
+
+        // 回填之前的 flush 直接看憑據。
+        assert!(blocking_hit(&app, &same_bot, &same_turn).await.is_some(), "重連：同一台的撞限照擋");
+        assert!(blocking_hit(&app, &flushed_bot, &flushed_turn).await.is_none(), "改指到另一台：舊機器的撞限不擋");
+        assert!(state(&app, &flushed_turn).await.1.is_none(), "放行就清掉那一列的憑據");
+        assert!(state(&app, &moved_turn).await.1.is_some(), "另一顆的憑據還在，下面的回填才有東西可判");
+
+        // 回填：same 種回，moved 另一則的憑據不種。
+        backfill_once(&app, same).await;
+        backfill_once(&app, moved).await;
+        assert!(crate::quota::limit_hit_for_bot(&app, &same_bot).await.is_some(), "重連：種回來");
+        assert!(crate::quota::limit_hit_for_bot(&app, &moved_bot).await.is_none(), "改指到另一台：不種回新機器");
+        for b in [&same_bot, &flushed_bot, &moved_bot] {
+            forget_queue_retry_timer(&b.id);
+            forget_held(&b.id);
+        }
     }
 
     async fn rename(app: &Arc<App>, from: &str, to: &str) {
