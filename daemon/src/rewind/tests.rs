@@ -145,6 +145,8 @@ struct Faults {
     styled_hint: Option<String>,
 }
 
+static NEXT_ID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 struct FakeTui {
     entries: StdMutex<Vec<String>>,
     ui: StdMutex<Ui>,
@@ -154,6 +156,8 @@ struct FakeTui {
     log: StdMutex<Vec<String>>,
     restored: StdMutex<Option<usize>>,
     hint_left: StdMutex<usize>,
+    /// race point 的 key：每個實例唯一（#573）。
+    id: String,
 }
 
 impl FakeTui {
@@ -166,6 +170,7 @@ impl FakeTui {
             log: StdMutex::new(Vec::new()),
             restored: StdMutex::new(None),
             hint_left: StdMutex::new(0),
+            id: format!("fake-tui-{}", NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)),
         })
     }
     fn ui(&self) -> Ui {
@@ -307,6 +312,9 @@ impl FakeTui {
 }
 
 impl Pane for FakeTui {
+    fn race_key(&self) -> String {
+        self.id.clone()
+    }
     fn read(&self) -> BoxFuture<'_, anyhow::Result<String>> {
         Box::pin(async move {
             let plain = self.render();
@@ -447,13 +455,30 @@ async fn a_confirm_page_with_other_text_backs_out_without_restoring() {
 async fn a_confirmation_that_closes_before_restore_does_not_get_a_stale_one() {
     let tui = FakeTui::new(&[A, SECOND, C], Faults::default());
     let racing_tui = tui.clone();
-    lifecycle::race_point::arm("rewind_before_restore", SECOND, move || async move {
+    lifecycle::race_point::arm("rewind_before_restore", &tui.race_key(), move || async move {
         racing_tui.close_confirmation();
     });
 
     assert_eq!(drive(tui.as_ref(), SECOND, 0).await.unwrap_err(), Fail::ConfirmNotShown);
     assert_eq!(tui.restored(), None);
     assert!(!tui.log().contains(&"1".to_string()), "沒有把選擇鍵送進離開後的畫面");
+}
+
+/// #573：race point 掛在某一個 pane 上，別的 pane 倒同一句話時不能把它拿走——以前 key 是目標文字，
+/// 平行跑的其他測試也倒 SECOND，先走到那一點的就把 hook 吃掉，上面那條間歇紅。
+#[tokio::test]
+async fn a_race_hook_armed_for_one_pane_is_not_taken_by_another_pane_rewinding_the_same_words() {
+    let mine = FakeTui::new(&[A, SECOND, C], Faults::default());
+    let other = FakeTui::new(&[A, SECOND, C], Faults::default());
+    let racing = mine.clone();
+    lifecycle::race_point::arm("rewind_before_restore", &mine.race_key(), move || async move {
+        racing.close_confirmation();
+    });
+
+    drive(other.as_ref(), SECOND, 0).await.unwrap();
+    assert_eq!(other.restored(), Some(1), "別的 pane 照常倒回");
+    assert_eq!(drive(mine.as_ref(), SECOND, 0).await.unwrap_err(), Fail::ConfirmNotShown, "hook 還留給掛它的那個 pane");
+    assert_eq!(mine.restored(), None);
 }
 
 /// 選 Restore 用 `1`，不靠游標：游標停在別的選項、或選項整組被擠出畫面（矮 pane）都一樣選到 Restore。
