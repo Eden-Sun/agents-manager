@@ -503,6 +503,12 @@ fn squash_ws(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// 「是不是同一句」只看非空白字元：送進 TUI 時 Tab 會被吃掉（`進貨單\t每張` → `進貨單每張`，2026-09-27 wits-pro），
+/// 收成一個空格還是對不上，回覆就被當成「另一句的」開成 external、原本那回合卡在送達未知。
+fn strip_ws(s: &str) -> String {
+    s.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
 /// The scraped echo may be wrapped or clipped at the column width, so containment either way
 /// counts as the same message (equality alone would add a second bubble).
 /// 這一回合的使用者訊息原文：codex 的 hook 直接帶；claude 的 Stop 沒帶，從 transcript 尾巴找最後一則。
@@ -536,7 +542,7 @@ fn last_transcript_user_text(path: &std::path::Path) -> Option<String> {
 /// （刮下來的回音、transcript 的折行都可能截斷一邊）。任一邊沒有就不下判斷。
 fn answers_another_prompt(prompt: Option<&str>, hook_user: Option<&str>) -> bool {
     let (Some(p), Some(u)) = (prompt, hook_user) else { return false };
-    let (p, u) = (squash_ws(p), squash_ws(u));
+    let (p, u) = (strip_ws(p), strip_ws(u));
     if p.is_empty() || u.is_empty() {
         return false;
     }
@@ -544,12 +550,12 @@ fn answers_another_prompt(prompt: Option<&str>, hook_user: Option<&str>) -> bool
 }
 
 fn hook_user_is_new(existing: &[String], incoming: &str) -> bool {
-    let inc = squash_ws(incoming);
+    let inc = strip_ws(incoming);
     if inc.is_empty() {
         return false;
     }
     !existing.iter().any(|e| {
-        let e = squash_ws(e);
+        let e = strip_ws(e);
         !e.is_empty() && (e.contains(&inc) || inc.contains(&e))
     })
 }
@@ -3130,6 +3136,17 @@ mod external_claim_tests {
         assert!(!answers_another_prompt(Some("跑一次測試"), None), "讀不到就不下判斷");
         assert!(!answers_another_prompt(None, Some("x")));
         assert!(answers_another_prompt(Some("跑一次測試"), Some("算了")));
+    }
+
+    /// 2026-09-27 wits-pro：貼上的 prompt 帶 Tab，送進 TUI 時 Tab 被吃掉。收成空格還是對不上，
+    /// 回覆被開成 external、使用者那回合卡在送達未知。只看非空白字元就是同一句。
+    #[test]
+    fn a_prompt_whose_tab_the_tui_swallowed_is_still_the_same_prompt() {
+        let sent = "條碼列印・進貨單\t每張 INBSHIP 一個批號 => 這樣一批最多能夠幾個item";
+        let seen = "條碼列印・進貨單每張 INBSHIP 一個批號 => 這樣一批最多能夠幾個item";
+        assert!(!answers_another_prompt(Some(sent), Some(seen)));
+        assert!(!hook_user_is_new(&[sent.to_string()], seen), "同一句不再多一則使用者訊息");
+        assert!(answers_another_prompt(Some(sent), Some("另一件事")), "真的是另一句照樣分得出來");
     }
 
     /// #217：`unknown` 那一則在 transcript 裡被 CLI 包成 `<pasted_content>`（真 transcript，2026-09-19 實測）還是同一則，照樣認領。
