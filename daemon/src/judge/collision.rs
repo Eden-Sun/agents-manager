@@ -34,6 +34,14 @@ const SUMMARY_CHARS: usize = 450;
 /// 提示文案要帶上的現實精度（#264：基準率約 7% 時 precision 約 0.68）。
 const HINT_NOISE: &str = "離線 precision 約 0.68，大約每三則有一則是雜訊";
 
+/// 還算「有人要開始做的工作」的交辦狀態（#568）：在途的三個，加上等額度（controller 時間到會自己重送）。
+/// 其餘——`awaiting_review`（含當場 `dispatch_failed`）、`blocked`、四個終局——都不會再開始，不拿去問、不推提示。
+/// 狀態機裡離開這四個之後沒有回頭邊（唯一的回頭邊是 `quota_blocked → queued`，兩端都在裡面），
+/// 所以答案回來之後「重讀還在這四個裡」就等於「中間沒有讓它不再開始的轉移」，不另帶世代戳記
+/// （`once_out_of_the_startable_states_an_assignment_never_comes_back` 釘著這個性質）。
+/// 也刻意不比 `updated_at`：`queued → delivered`、撞額度這種在途推進會動它，但工作照樣要開始。
+const STARTABLE: [&str; 4] = ["queued", "delivered", "unknown", "quota_blocked"];
+
 const SAME_WORK_QUESTION: &str = "Before a second agent starts on `candidate`, should a maintainer link or merge it with `existing` rather than let the two run independently?";
 const SAME_WORK_FOCUS: &str = "Answer yes only when the two would fix the same underlying cause or would step on each other's change. Sharing a subsystem, a file or vocabulary is not enough.";
 
@@ -115,8 +123,8 @@ pub(crate) async fn check_assignment(app: &Arc<App>, assignment_id: &str) -> Res
     let Some(a) = crate::supervisor::store::assignment(&app.db, assignment_id).await? else {
         return Ok(());
     };
-    // 通知不是新的工作。
-    if a.expects_review == 0 {
+    // 通知不是新的工作；已經不會開始的交辦（派送當場失敗、被取消／收掉）也不是（#568）。
+    if a.expects_review == 0 || !STARTABLE.contains(&a.status.as_str()) {
         return Ok(());
     }
     let Some(bot) = crate::db::bot(&app.db, &a.target_bot_id).await? else {
@@ -215,6 +223,12 @@ async fn check_candidate(app: &Arc<App>, cand: &Candidate) -> Result<()> {
                 Err(e) => (None, None, None, Some(e.to_string())),
             };
             settle_same_work(app, &slot, p, model, ms, tokens, error).await?;
+            // 問的時候交辦被取消、收掉或裁示了：答案照記，但標成過時、不推提示，後面的對也不再問（#568）。
+            // 第一對之前 `check_assignment` 看過；之後每一對之前都剛經過這裡，中間沒有 HTTP。
+            if let Some(status) = gone(app, cand).await? {
+                mark_stale(app, &slot, &status).await?;
+                return Ok(());
+            }
             // 失敗只留帳本。不把錯誤當成「撞了」去推 inbox。
             let Ok(a) = answer else { continue };
             if a.value >= SAME_WORK_THRESHOLD {
@@ -240,6 +254,24 @@ async fn settle_same_work(
         .bind(ms)
         .bind(tokens)
         .bind(error)
+        .bind(id)
+        .execute(&app.db)
+        .await?;
+    Ok(())
+}
+
+/// 候選是交辦、而那筆已經不在 [`STARTABLE`] 裡：回它現在的狀態（讀不到＝被刪了，也算）。開票那條沒有交辦，永遠 `None`。
+async fn gone(app: &Arc<App>, cand: &Candidate) -> Result<Option<String>> {
+    let Some(id) = cand.assignment_id.as_deref() else { return Ok(None) };
+    let status = crate::supervisor::store::assignment(&app.db, id).await?.map(|a| a.status).unwrap_or_else(|| "missing".into());
+    Ok((!STARTABLE.contains(&status.as_str())).then_some(status))
+}
+
+/// 帳本上這一對的 JSON 加 `stale`＝答案回來時交辦的狀態。觀察留著（`jev_same_work` 照填），事後算誤報率時要排除它：
+/// 候選根本沒開始，「後來有沒有被併掉」對它沒有意義。
+async fn mark_stale(app: &Arc<App>, id: &str, status: &str) -> Result<()> {
+    sqlx::query("UPDATE judge_shadow SET matched_line = json_set(matched_line, '$.stale', ?) WHERE id=?")
+        .bind(status)
         .bind(id)
         .execute(&app.db)
         .await?;
@@ -1000,6 +1032,124 @@ mod tests {
         let status = status_of(&app, id).await;
         assert!(status != "failed" && status != "cancelled", "逾時不影響交辦：{status}");
         assert!(inbox(&app).await.is_empty());
+    }
+
+    /// #568：真的走 `supervisor::assign`，派送當場就 `dispatch_failed`（整段是終端控制序列，清完什麼都不剩）。
+    /// 那筆已經停在 `awaiting_review`、不會開始了：不能再被當成「有人要開始做的工作」去問 Jev、推提示。
+    #[tokio::test]
+    async fn an_assignment_whose_dispatch_failed_on_the_spot_is_not_asked_or_hinted() {
+        let rig = stand(Mode::Noul(0.99), true, true).await;
+        let app = rig.env.app.clone();
+        let bot = tt::claude_bot(&app, &rig.env.project_id, "a").await;
+        let other = tt::claude_bot(&app, &rig.env.project_id, "b").await;
+        crate::supervisor::store::insert_assignment(&app.db, None, &other.id, "old", "修 quota 橫幅", &[], None, true).await.unwrap();
+        let manager = tt::claude_bot(&app, &rig.env.project_id, "agm").await;
+        crate::supervisor::store::get_or_init(&app.db).await.unwrap();
+        sqlx::query("UPDATE supervisors SET bot_id=? WHERE id=?")
+            .bind(&manager.id)
+            .bind(crate::supervisor::store::SUPERVISOR_ID)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let out = crate::supervisor::assign(&app, &bot.id, "\u{1b}[2J\u{1b}[31m", "crid-568", None, &[], None, true, None, None, None, Default::default())
+            .await
+            .unwrap();
+        let id = out["id"].as_str().unwrap().to_string();
+        let a = crate::supervisor::store::assignment(&app.db, &id).await.unwrap().unwrap();
+        assert_eq!((a.status.as_str(), a.turn_status.as_deref()), ("awaiting_review", Some("dispatch_failed")), "前提：派送當場失敗");
+        // 背景那個 task 跟這一次直接呼叫都要跳過；直接呼叫讓結果是決定性的，不靠等。
+        check_assignment(&app, &id).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(rig.seen.lock().unwrap().is_empty(), "不會開始的交辦不問 Jev");
+        assert!(shadow_rows(&app).await.is_empty(), "也不占帳本");
+        assert!(inbox(&app).await.is_empty(), "不推撞題提示");
+    }
+
+    /// 假 Jev：收到請求就卡住，直到 `release` 放行才回 `p`。
+    async fn gated_jev(p: f64) -> (String, Arc<std::sync::Mutex<Vec<Value>>>, Arc<tokio::sync::Semaphore>) {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let (log, g) = (seen.clone(), gate.clone());
+        let route = axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
+            let (log, g) = (log.clone(), g.clone());
+            async move {
+                log.lock().unwrap().push(body);
+                g.acquire().await.unwrap().forget();
+                axum::Json(json!({"model": "jev-1.13.0", "answers": {"same_work": {"type": "noul", "noul": p}}, "usage": {"input_tokens": 400}}))
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/v1/systemone", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, axum::Router::new().route("/v1/systemone", route)).await.unwrap() });
+        (url, seen, gate)
+    }
+
+    /// #568：Jev 還在回的時候交辦被取消／收掉，答案回來就不能再推提示；帳本留下這次觀察，但標成過時。
+    /// 對照組：在途之間的正常推進（送達、等額度）不是過時，照樣提示——只看 `updated_at` 變沒變的話這兩條會被誤殺。
+    #[tokio::test]
+    async fn a_lifecycle_change_while_jev_is_answering_suppresses_the_hint_and_marks_the_row_stale() {
+        use crate::supervisor::assignment_state::AssignmentState as S;
+        for (to, stale) in [
+            (S::Cancelled, true),
+            (S::AwaitingReview, true),
+            (S::Completed, true),
+            (S::Superseded, true),
+            (S::Blocked, true),
+            (S::Delivered, false),
+            (S::QuotaBlocked, false),
+        ] {
+            let rig = stand(Mode::Noul(0.0), true, true).await;
+            let app = rig.env.app.clone();
+            let (url, seen, gate) = gated_jev(0.93).await;
+            app.cfg.update(move |c| { c.judge.endpoint = url; c.judge.timeout_ms = 10_000; Ok(()) }).await.unwrap();
+            let bot = tt::claude_bot(&app, &rig.env.project_id, "a").await;
+            let other = tt::claude_bot(&app, &rig.env.project_id, "b").await;
+            crate::supervisor::store::insert_assignment(&app.db, None, &other.id, "old", "修 sidebar 的捲動", &[], None, true).await.unwrap();
+            let a = crate::supervisor::store::insert_assignment(&app.db, None, &bot.id, "new", "修 sidebar 的捲動殘影", &[], None, true).await.unwrap();
+
+            let task = {
+                let (app, id) = (app.clone(), a.id.clone());
+                tokio::spawn(async move { check_assignment(&app, &id).await })
+            };
+            let deadline = Instant::now() + std::time::Duration::from_secs(5);
+            while seen.lock().unwrap().is_empty() {
+                assert!(Instant::now() < deadline, "Jev 沒被問到");
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            let moved = crate::supervisor::assignment_state::set_status(&app.db, &a.id, S::Queued, to, "test").await.unwrap();
+            assert!(matches!(moved, crate::supervisor::assignment_state::Outcome::Applied), "{to:?}");
+            gate.add_permits(16);
+            task.await.unwrap().unwrap();
+
+            let rows: Vec<(Option<f64>, String)> = sqlx::query_as("SELECT jev_same_work, matched_line FROM judge_shadow WHERE regex_verdict='same_work'")
+                .fetch_all(&app.db)
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 1, "{to:?}");
+            assert_eq!(rows[0].0, Some(0.93), "{to:?}：觀察照記");
+            let line: Value = serde_json::from_str(&rows[0].1).unwrap();
+            if stale {
+                assert!(inbox(&app).await.is_empty(), "{to:?}：已經不會開始的交辦不推提示");
+                assert_eq!(line["stale"].as_str(), Some(to.as_str()), "{to:?}：帳本分得出這筆是過時的觀察");
+            } else {
+                assert_eq!(inbox(&app).await.len(), 1, "{to:?}：在途的正常推進照樣提示");
+                assert!(line.get("stale").is_none(), "{to:?}");
+            }
+        }
+    }
+
+    /// 答案回來之後只重讀狀態、不帶世代戳記，靠的是這個性質：離開可開工的狀態就回不來。
+    /// 狀態機哪天多了一條回頭邊（例如 `blocked → queued`），這裡要先紅，逼人補上真的世代比對。
+    #[test]
+    fn once_out_of_the_startable_states_an_assignment_never_comes_back() {
+        for from in crate::supervisor::assignment_state::ALL {
+            if STARTABLE.contains(&from) {
+                continue;
+            }
+            for to in STARTABLE {
+                assert!(!crate::supervisor::assignment_state::allowed(from, to), "{from} → {to}");
+            }
+        }
     }
 
     #[tokio::test]
