@@ -53,7 +53,7 @@ export interface CliUpdateResult {
   message: string
   /** 成功而且真的開了一批：把它當成一鍵重啟的進度接手。 */
   batch: RestartBatch | null
-  /** 已經有一批在跑，codex 這次沒排進去（要等那批跑完再按一次）。 */
+  /** 正在跑的那一批確實排著這台的 codex（`already_covered`）：接那一批的進度。排在後面（`deferred`）不接。 */
   joinBatchId: string | null
 }
 
@@ -111,6 +111,14 @@ export function cliUpdateDone(data: Rec): CliUpdateResult {
   if (!plan) {
     const why = str(pick(data, 'restart_error'))
     return { ok: true, message: `${host} 的 codex ${verb} ${up}，但重啟沒排起來${why ? `：${why}` : ''}；再按一次 ⌃⌃ 重啟`, batch: null, joinBatchId: null }
+  }
+  // #566：有一批在跑不等於 codex 被排進去了——daemon 用 `restart_status` 講清楚是哪一種。
+  const status = str(pick(data, 'restart_status'))
+  if (status === 'deferred') {
+    return { ok: true, message: `${host} 的 codex ${verb} ${up}；已經有一批重啟在跑，codex 排在那批後面，跑完會自動接著重啟`, batch: null, joinBatchId: null }
+  }
+  if (status === 'already_covered') {
+    return { ok: true, message: `${host} 的 codex ${verb} ${up}；正在跑的那批重啟已經排著這台的 codex`, batch: null, joinBatchId: plan.batch_id }
   }
   if (plan.already_running) {
     return { ok: true, message: `${host} 的 codex ${verb} ${up}；已經有一批重啟在跑，那批跑完再按一次 ⌃⌃ 重啟 codex`, batch: null, joinBatchId: plan.batch_id }

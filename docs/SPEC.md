@@ -2066,7 +2066,9 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   到了目標就改通知讓一般的重啟收得到；(b) 安裝指令本身包在主機端的鎖裡（`$HOME` 下的 symlink，目標是持鎖 shell 的 pid，`ln -s` 原子地建鎖兼寫 pid；pid 死了＝被 SIGKILL 沒跑到 trap，當過期拿走），
   擋的是 DB 擋不到的：接手等到上限才放掉的那一列、隔離實例對同一台開的安裝。已知的洞：持鎖的 shell 單獨被 SIGKILL、底下的 `curl | sh` 還活著時，鎖會被當成過期。多台都有「需安裝」時一次一台，裝完 chip 自然換到下一台。
   手機（≤640px）兩顆都要出現時合成一顆只留圖示的 ⌃⌃，點開兩項選單各自開原本的確認框（名字行放不下兩顆，UI-DECISIONS）。
-  已經有一批重啟在跑時，裝好之後的那批會拿到 `already_running`（codex 這次沒排進去），等那批跑完再按一般的 ⌃⌃。
+  已經有一批重啟在跑時（#566）：那一批的清單早就定了，裝好之前的 codex 是「需安裝」、不在裡面，所以**不能**只憑「有一批在跑」就當成重啟交出去了。
+  那一批還沒輪到的目標涵蓋這台每一顆該重啟的 codex 才算 `already_covered`；否則 `deferred`——記在那一批上，它放掉那一格時自動開這台 codex 的一批
+  （重新挑候選，已經被重啟過的不再是候選，不會重啟兩次）。`cli_update_done` 的 `restart_status` 分 `started`／`already_covered`／`deferred`／`error`。
 
   刻意保守：批次最不能做的就是砍掉使用者正在等的回合。
   **輪到那一顆真的要重啟前再判斷一次**（`bulk_restart::recheck`，同一張表，外加「已經不是候選」→ `no_longer_pending`）：計畫是按下去那一刻的快照，
@@ -2079,6 +2081,8 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   再看一次（沒 run、非 running、working、blocked、非 idle、有 in-flight turn），不閒置回 409 `not_idle`（`busy` 帶上面的代碼），什麼都不動。使用者自己按的單顆重啟不帶這個旗標。
   這一次看完到記 `stopping` 之間使用者直接在 pane 裡打字（`handle_status` 不拿 bot 鎖）也擋得住（#346）：`require_idle` 的停機許可跟閒置回收（§6.11，#144）同一句 UPDATE——`state='running' AND agent_status='idle'` 且沒有 in-flight turn 才記 `stopping`，輸了回 409 `not_idle`、不送 ctrl+c（排隊中的訊息不擋，`restart_hold` 保留它們；閒置回收才擋）。
 - **同時只准一批**：已經有一批在跑時再按，回那一批的 `batch_id`（`already_running: true`、`total: 0`），不另開一份重疊的清單。
+  範圍批次（`spawn_scoped`，cli-update 用）例外地不接回：要證明那一批「還沒輪到」的目標涵蓋自己的每一顆才算 `already_covered`，否則排成那一批的後續（`deferred`，見上面 codex 一鍵升級那一段）。
+  「還沒輪到」是輪到時就拿掉，不管結果；定清單之前是空的，所以那段期間到的一律是 `deferred`。後續在那一格放掉時（`BatchSlot` 的 drop，含 panic）接著開，一個一個來。
 - **執行**：序列、一顆一顆，每顆 `lifecycle::restart_bot_with(StartOpts { resume_native: true, require_idle: true })`——stop 與 start 在**同一次持有 bot 鎖**裡做完
   （中間有空檔時，拿鎖前讀了 agent 清單的 reconcile 會搶進來把剛停掉的 agent 收編成新 run，start 就以 `active run already exists` 放棄，bot 從此沒人拉起）。
   start 被一個 pane 已不存在的 run 擋住時先結束那個 run 再試。`stop_bot` 寫上 `ended_at` 後剛結束的 session 成為「上一個 session」，claude 拿到 `--resume <session>`。
