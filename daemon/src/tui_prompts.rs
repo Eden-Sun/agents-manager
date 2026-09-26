@@ -587,6 +587,7 @@ pub fn spawn_survey_watcher(app: Arc<App>) {
         loop {
             tokio::time::sleep(SWEEP).await;
             let runs = db::all_active_runs(&app.db).await.unwrap_or_default();
+            crate::session_paused::forget_ended(&app, &runs).await;
             for run in runs {
                 if run.agent_status == "blocked" || run.agent_status == "idle" || crate::dangerous_rm::is_open(&run.id) {
                     dismiss_if_survey(&app, &run).await;

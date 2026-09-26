@@ -319,7 +319,8 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   認法：最底 18 行非空行裡有一份開著的編號選單（從 `1.` 連號、至少兩項、**剛好一個**游標、最後一項底下 ≤ 6 行且只有腳註／`✻` spinner／statusLine、輸入列不是空的），
   選單正上方同一個框裡（中間沒有 `⏺`／`●`／`⎿` 對話輸出）有自己一行的 `Session paused`。回覆裡照抄這段（底下是回合結束那一行與空輸入列）不算。
   herdr 轉 `idle` 那一刻（等 0.8 秒畫完）與 10 秒巡邏都看：是就 CAS 補標 `blocked`（herdr 自己判的不動）；選單消失時照原值還回去
-  （CAS，herdr 這段期間報過別的狀態就不動）並叫醒排隊的 flush。**一個鍵都不按**：網頁用既有的 BlockedModal／BlockedPanel＋BlockedChoices 讓使用者自己點
+  （CAS，herdr 這段期間報過別的狀態就不動）並叫醒排隊的 flush。補標記（記憶體）在還原**寫進 DB 之後**才拿掉：寫失敗就留著、不發狀態不叫 flush，
+  下一輪巡邏重試；CAS 沒命中（已被取代）或 run 已結束／不在才拿掉（#565）。**一個鍵都不按**：網頁用既有的 BlockedModal／BlockedPanel＋BlockedChoices 讓使用者自己點
   （`parseChoiceMenu` 把 `Session paused` 標題當題目、說明與 `Details:` 放 notes）。畫面在 `lifecycle/fixtures/claude-2.1.281-session-paused.txt`（只取選單那段，說明是假文字）。
 - **claude 更新通知**：自動更新後 claude 只在 pane 最底印 `✔ Update installed · Restart to update`，不是事件。`update_watch` 每 30 秒
   對 running 的 claude run `pane.read visible 80`，認到就寫 `runs.update_notice` 並推 `bot_status`，消失就清 NULL（讀不到畫面不清）；不限 idle。
