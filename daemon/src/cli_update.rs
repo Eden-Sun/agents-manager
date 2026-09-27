@@ -1132,12 +1132,31 @@ async fn mark_installed_with_fence(
             }
             anyhow::bail!("could not prove Codex run {} no longer needs install notice transition", run.id);
         };
-        let result = sqlx::query("UPDATE runs SET update_notice = ? WHERE id = ? AND update_notice = ?")
-            .bind(&text)
-            .bind(&run.id)
-            .bind(notice)
-            .execute(&app.db)
-            .await?;
+        if let Some(fence) = fence {
+            if !app.hosts.is_current(fence).await {
+                return Ok(None);
+            }
+            #[cfg(test)]
+            crate::lifecycle::race_point::hit("cli_update_before_notice_cas", &run.id).await;
+        }
+        let write_notice = async {
+            sqlx::query("UPDATE runs SET update_notice = ? WHERE id = ? AND update_notice = ?")
+                .bind(&text)
+                .bind(&run.id)
+                .bind(notice)
+                .execute(&app.db)
+                .await
+        };
+        // Host replacement takes the same connection's write gate. Validate under its read side
+        // and keep that gate through the durable CAS, so repoint either wins first and refuses
+        // this write or waits until the notice transition has committed on its captured authority.
+        let result = match fence {
+            Some(fence) => match app.hosts.run_if_current(fence, write_notice).await {
+                Some(result) => result?,
+                None => return Ok(None),
+            },
+            None => write_notice.await?,
+        };
         if result.rows_affected() == 1 {
             n += 1;
             app.emit_bot_status(&run.bot_id).await;
@@ -1901,6 +1920,51 @@ mod tests {
         assert_eq!(v["reason"], "superseded", "{v}");
         assert!(fake.restarts().is_empty(), "不能重啟 B 的 codex");
         assert_eq!(notice_of(&env.app, &run).await, Some(pending), "B 的通知不動");
+    }
+
+    /// #605：the last standalone fence check succeeds, then H is repointed before the notice CAS.
+    /// The CAS must share authority serialization with the repoint so A cannot mutate the H row after B wins.
+    #[tokio::test]
+    async fn a_repoint_after_notice_fence_check_does_not_commit_the_old_authoritys_notice() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let host = "cli-update-notice-repoint";
+        let cfg = |ssh: &str| crate::config::HostCfg {
+            name: host.into(),
+            ssh: ssh.into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "agents-manager".into(),
+            remote_path: String::new(),
+        };
+        app.hosts.insert_remote_for_test(cfg("target-a")).await;
+        let pending = crate::codex_update::pending_text(Some("0.155.1"), "0.157.0");
+        let (bot, run) = codex_bot_with_notice(&env, "cx-notice-repoint", &pending).await;
+        sqlx::query("UPDATE projects SET host=? WHERE id=(SELECT project_id FROM bots WHERE id=?)")
+            .bind(host)
+            .bind(&bot)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        seed_running(&app, "u-notice-repoint", host, "0.157.0").await;
+
+        let app_to_repoint = app.clone();
+        let replacement = cfg("target-b");
+        crate::lifecycle::race_point::arm("cli_update_before_notice_cas", &run, move || async move {
+            app_to_repoint.hosts.replace_remote_for_test(&app_to_repoint, replacement).await;
+        });
+
+        let fake = Fake::new(&["codex-cli 0.155.1", "codex-cli 0.157.0"], Ok("installed on A"));
+        let mut rx = app.subscribe();
+        let result = super::run(&app, fake.as_ref(), host, "u-notice-repoint", "0.157.0").await;
+
+        assert_eq!(result["ok"], false, "a stale install must not report success: {result}");
+        assert_eq!(result["reason"], "superseded", "a stale host authority must fail closed: {result}");
+        assert_eq!(notice_of(&app, &run).await, Some(pending), "A must not commit its installed notice after H points to B");
+        assert!(fake.restarts().is_empty(), "a stale install must not restart bots on B");
+        let events = done_events(&mut rx);
+        assert_eq!(events.len(), 1, "publish one terminal result after the stale CAS is refused");
+        assert_eq!(events[0]["reason"], "superseded");
     }
 
     #[tokio::test]
