@@ -47,7 +47,8 @@ fn month_num(tok: &str) -> Option<u32> {
 }
 
 /// grok omits the year: assume this one, rolled forward if that puts the reset in the past.
-pub fn parse_reset(rest: &str, now: DateTime<Local>) -> Option<String> {
+/// The time is the wall clock of the host grok runs on (#629): `now` carries that host's zone.
+pub fn parse_reset<Tz: TimeZone>(rest: &str, now: DateTime<Tz>) -> Option<String> {
     let mut month = None;
     let mut day = None;
     let mut year = None;
@@ -78,16 +79,17 @@ pub fn parse_reset(rest: &str, now: DateTime<Local>) -> Option<String> {
     }
     let (month, day) = (month?, day?);
     let (h, m) = hm.unwrap_or((0, 0));
-    let build = |y: i32| -> Option<DateTime<Local>> {
+    let tz = now.timezone();
+    let build = |y: i32| -> Option<DateTime<Tz>> {
         let d = NaiveDate::from_ymd_opt(y, month, day)?.and_hms_opt(h, m, 0)?;
-        Local.from_local_datetime(&d).earliest()
+        tz.from_local_datetime(&d).earliest()
     };
     let dt = match year {
         Some(y) => build(y)?,
         None => {
             let this = build(now.year())?;
             // A reset more than a day behind us is last year's rendering of the same date.
-            if this < now - chrono::Duration::days(1) {
+            if this < now.clone() - chrono::Duration::days(1) {
                 build(now.year() + 1)?
             } else {
                 this
@@ -121,7 +123,7 @@ fn parse_header(line: &str) -> Option<(String, Option<String>)> {
     Some((window, plan.filter(|p| !p.is_empty())))
 }
 
-pub fn parse_grok_usage(screen: &str, now: DateTime<Local>) -> Option<Quota> {
+pub fn parse_grok_usage<Tz: TimeZone>(screen: &str, now: DateTime<Tz>) -> Option<Quota> {
     let lines: Vec<String> = screen.lines().map(clean).collect();
     let mut five: Option<Window> = None;
     let mut seven: Option<Window> = None;
@@ -143,7 +145,7 @@ pub fn parse_grok_usage(screen: &str, now: DateTime<Local>) -> Option<Quota> {
                 pct = parse_pct(&lines[j]);
             }
             if let Some(rest) = lines[j].strip_prefix("Resets:") {
-                resets = parse_reset(rest, now);
+                resets = parse_reset(rest, now.clone());
             }
             j += 1;
         }
@@ -175,6 +177,30 @@ pub fn parse_grok_usage(screen: &str, now: DateTime<Local>) -> Option<Quota> {
         account: None,
         host: LOCAL_HOST.into(),
     })
+}
+
+/// A remote grok prints the remote host's wall clock (#629), so read it with that host's detected UTC
+/// offset. No offset = don't guess (same as #59): keep the percentages, drop the reset time.
+fn parse_grok_usage_remote(screen: &str, now: DateTime<chrono::Utc>, offset_secs: Option<i32>) -> Option<Quota> {
+    match offset_secs.and_then(chrono::FixedOffset::east_opt) {
+        Some(tz) => parse_grok_usage(screen, now.with_timezone(&tz)),
+        None => {
+            let mut q = parse_grok_usage(screen, now)?;
+            for w in [&mut q.five_hour, &mut q.seven_day].into_iter().flatten() {
+                w.resets_at = None;
+            }
+            Some(q)
+        }
+    }
+}
+
+/// Local grok = the daemon's own zone; a remote one = that host's detected offset.
+async fn parse_probe_screen(app: &Arc<App>, host: &str, screen: &str, now: DateTime<chrono::Utc>) -> Option<Quota> {
+    if host == LOCAL_HOST {
+        return parse_grok_usage(screen, now.with_timezone(&Local));
+    }
+    let offset = app.tools.lock().await.get(host).and_then(|t| t.utc_offset_secs);
+    parse_grok_usage_remote(screen, now, offset)
 }
 
 const PROBE_SESSION: &str = "am-quota";
@@ -301,7 +327,7 @@ pub async fn refresh_grok(app: &Arc<App>, host: &str) -> Result<bool> {
     while tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(900)).await;
         last = client.pane_read(&pane_id, "visible", 120).await.map(|r| r.text).unwrap_or_default();
-        if let Some(q) = parse_grok_usage(&last, Local::now()) {
+        if let Some(q) = parse_probe_screen(app, host, &last, chrono::Utc::now()).await {
             let published = crate::quota::set_fenced(app, host, "grok", q, &fence).await;
             drop(probe);
             published?;
@@ -500,6 +526,50 @@ mod tests {
     fn an_explicit_year_is_honoured() {
         let r = parse_reset(" September 12, 2027 16:28", at("2026-09-06T12:00:00+08:00")).unwrap();
         assert!(r.starts_with("2027-09-12"), "{r}");
+    }
+
+    const REMOTE_SCREEN: &str = "Weekly limit (SuperGrok)\n  ████░░  14%\n  Resets: September 12, 2027 16:28";
+
+    #[test]
+    fn a_remote_grok_reset_uses_the_host_offset_not_the_daemon_timezone() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-06T12:00:00Z").unwrap().with_timezone(&chrono::Utc);
+        for (offset_secs, expected) in [(0, "2027-09-12T16:28:00.000Z"), (13 * 3600, "2027-09-12T03:28:00.000Z")] {
+            let quota = parse_grok_usage_remote(REMOTE_SCREEN, now, Some(offset_secs)).unwrap();
+            assert_eq!(quota.seven_day.unwrap().resets_at.as_deref(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn a_remote_grok_without_a_detected_offset_keeps_usage_but_does_not_guess_reset_time() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-06T12:00:00Z").unwrap().with_timezone(&chrono::Utc);
+        let quota = parse_grok_usage_remote(REMOTE_SCREEN, now, None).unwrap();
+        let weekly = quota.seven_day.unwrap();
+        assert_eq!(weekly.used_pct, 14.0);
+        assert_eq!(weekly.resets_at, None);
+    }
+
+    /// The probe reads the offset detected for that host (#629), not the daemon's zone.
+    #[tokio::test]
+    async fn the_probe_parses_a_remote_screen_with_that_hosts_offset() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let tools = |offset| crate::tools::HostTools {
+            tools: Default::default(),
+            identities: Default::default(),
+            shell_identities: vec![],
+            utc_offset_secs: offset,
+            herdr_cli: None,
+            checked_at: crate::db::now(),
+        };
+        app.tools.lock().await.insert("r13".into(), tools(Some(13 * 3600)));
+        app.tools.lock().await.insert("rnone".into(), tools(None));
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-06T12:00:00Z").unwrap().with_timezone(&chrono::Utc);
+        let reset = |q: Option<Quota>| q.unwrap().seven_day.unwrap().resets_at;
+        assert_eq!(reset(parse_probe_screen(&app, "r13", REMOTE_SCREEN, now).await).as_deref(), Some("2027-09-12T03:28:00.000Z"));
+        assert_eq!(reset(parse_probe_screen(&app, "rnone", REMOTE_SCREEN, now).await), None);
+        assert_eq!(reset(parse_probe_screen(&app, "unknown", REMOTE_SCREEN, now).await), None, "never detected = no offset");
+        let local = Local.from_local_datetime(&NaiveDate::from_ymd_opt(2027, 9, 12).unwrap().and_hms_opt(16, 28, 0).unwrap()).earliest().unwrap();
+        assert_eq!(reset(parse_probe_screen(&app, LOCAL_HOST, REMOTE_SCREEN, now).await), Some(crate::db::iso_at(local.with_timezone(&chrono::Utc))));
     }
 
     #[test]

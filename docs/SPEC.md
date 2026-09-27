@@ -2655,7 +2655,7 @@ pane 寬度來自 attach 的 client，窄終端會把百分比截掉；沒有 cl
 poller 啟動時 `sweep_stale()` 關掉 `am-quota` 與本機 session 裡 label 為 `am-quota-grok` 的殘留。
 
 解析（`quota_grok.rs`）：標題 `<window> limit (<plan>)`，window 含 `week` → `seven_day`、含 `hour` → `five_hour`；百分比只認同列有 `█`/`░` 的（避開 Context usage 分頁）；
-`Resets:` 沒年份，補當年、已過期超過一天就進位隔年，視為本機時區、輸出 RFC3339 UTC。頻率：啟動一次，之後每 30 秒（使用者指定）；`GET /api/quota?refresh=1` 也觸發。
+`Resets:` 沒年份，本機按 daemon 時區、遠端按 `tools::detect` 記下的 UTC offset（`HostTools.utc_offset_secs`）解析；偏移未知就保留百分比並令 `resets_at = None`，不猜。本機或遠端時區下都補當年、已過期超過一天就進位隔年，輸出 RFC3339 UTC。頻率：啟動一次，之後每 30 秒（使用者指定）；`GET /api/quota?refresh=1` 也觸發。
 
 ## 13. 專案群組聊天
 
