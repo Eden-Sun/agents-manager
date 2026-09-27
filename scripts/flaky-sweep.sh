@@ -12,7 +12,7 @@
 # 用法：scripts/flaky-sweep.sh --i-know [-n 輪數=5] [-c 同時幾份=2] [-t RUST_TEST_THREADS=64] [-o 輸出目錄] [-f 測試名過濾] [-k]
 #   -k  跳過編譯，直接用上次的測試 binary（改了程式要重編才會反映）
 # 輸出：<輸出目錄>/<份>-<輪>.log 是每一輪的完整輸出；最後列出清單（紅過的測試、紅了幾輪／總輪數、第一個 panic 訊息）。
-# 結束碼：0 全綠、1 有輪次紅、2 根本沒跑起來（參數不是正整數、編譯失敗、找不到 binary、一輪都沒跑到、沒有同意閘門）。
+# 結束碼：0 全綠、1 有輪次紅、2 根本沒跑起來（參數不是正整數、編譯失敗、找不到 binary、某輪沒有測試結果、一輪都沒跑到、沒有同意閘門）。
 #   **「一輪都沒跑」絕對不會回 0**（issue #479）：這支的用途就是拿數字當證據，假綠最傷。
 set -euo pipefail
 ROUNDS=5 COPIES=2 THREADS=64 OUT="" FILTER="" SKIP_BUILD=0
@@ -69,8 +69,14 @@ run_copy() { # $1=份
   }
   for r in $(seq 1 "$ROUNDS"); do
     rc=0
-    "$BIN" --test-threads="$THREADS" $FILTER >"$OUT/$1-$r.log" 2>&1 || rc=$?
-    echo "$1 $r $rc" >>"$OUT/rounds.txt"
+    log="$OUT/$1-$r.log"
+    "$BIN" --test-threads="$THREADS" $FILTER >"$log" 2>&1 || rc=$?
+    if grep -Eq '^test result: .* ([1-9][0-9]* passed|[1-9][0-9]* failed);' "$log"; then
+      echo "$1 $r $rc" >>"$OUT/rounds.txt"
+    else
+      echo "$1 $r $rc no-tests" >>"$OUT/rounds.txt"
+      echo "第 $1 份第 $r 輪沒有跑到任何測試（見 ${log}）" >&2
+    fi
   done
 }
 : >"$OUT/rounds.txt"
@@ -89,6 +95,11 @@ echo "共 $TOTAL 輪，紅了 $BAD 輪"
 WANT=$((ROUNDS * COPIES))
 if [ "$TOTAL" -ne "$WANT" ] || [ "$copy_bad" != 0 ]; then
   echo "只跑到 $TOTAL/$WANT 輪（有份沒跑起來？見 $OUT/rounds.txt 與 $OUT/build.log）——這輪不算數" >&2
+  exit 2
+fi
+NO_TESTS=$(awk '$4 == "no-tests" { n++ } END { print n+0 }' "$OUT/rounds.txt")
+if [ "$NO_TESTS" -ne 0 ]; then
+  echo "$NO_TESTS/$TOTAL 輪沒有跑到任何測試（可能 -f 沒有符合項目或測試 binary 沒有輸出結果）——這輪不算數" >&2
   exit 2
 fi
 # 每個紅過的測試：紅了幾輪（同一輪只算一次）＋第一個 panic 訊息。

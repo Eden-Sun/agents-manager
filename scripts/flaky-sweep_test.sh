@@ -1,5 +1,5 @@
 #!/bin/bash
-# flaky-sweep.sh 的隔離測試（issue #479）。
+# flaky-sweep.sh 的隔離測試（issue #479／#628）。
 #
 # 不編譯、不跑真的測試：`cargo` 與「測試 binary」都是 stub，只看這支腳本自己的決定——
 #   1. 沒有同意閘門就不准在本機跑（協調者 2026-09-24 裁示）。
@@ -45,13 +45,14 @@ setup() { # setup <假測試 binary 的結束碼>
   OUT="$ROOT/out" LOGF="$ROOT/run.log"
   mkdir -p "$ROOT/bin" "$ROOT/fake"
   export FAKE_MARK="$ROOT/truncated" FAKE_ROUNDS="$OUT/rounds.txt"
-  # 假的測試 binary：結束碼可控，紅的時候印出 cargo test 那種 FAILED 行（彙總那段要吃得到）。
+  # 假的測試 binary：結束碼與測試數可控，輸出 libtest summary 供 flaky-sweep 驗證。
   { echo '#!/bin/bash'
     # 等 rounds.txt 已經有東西才清（第一輪就清等於沒少掉任何一行）。
     echo 'if [ -n "${FAKE_TRUNCATE_ROUNDS:-}" ] && [ ! -e "$FAKE_MARK" ] && [ -s "$FAKE_ROUNDS" ]; then'
     echo '  : > "$FAKE_ROUNDS"; touch "$FAKE_MARK"'   # 模擬某一份中途死掉、輪次少了
     echo 'fi'
-    echo "[ \"$1\" = 0 ] || echo \"test a_flaky_one ... FAILED\""
+    echo "if [ \"\${FAKE_ZERO_TESTS:-0}\" = 1 ]; then echo 'test result: ok. 0 passed; 0 failed;'; exit 0; fi"
+    echo "if [ \"$1\" = 0 ]; then echo 'test result: ok. 1 passed; 0 failed;'; else echo 'test a_flaky_one ... FAILED'; echo 'test result: FAILED. 0 passed; 1 failed;'; fi"
     echo "exit $1"
   } > "$ROOT/fake/agents_managerd-deadbeef"
   chmod +x "$ROOT/fake/agents_managerd-deadbeef"
@@ -60,9 +61,9 @@ setup() { # setup <假測試 binary 的結束碼>
     echo "printf '{\"reason\":\"compiler-artifact\",\"executable\":\"$ROOT/fake/agents_managerd-deadbeef\"}\\n'"
   } > "$ROOT/bin/cargo"
   chmod +x "$ROOT/bin/cargo"
-  export PATH="$ROOT/bin:$PATH"
+  export PATH="$ROOT/bin:$PATH" FAKE_ZERO_TESTS=0
 }
-teardown() { rm -rf "$ROOT"; unset FAKE_TRUNCATE_ROUNDS; }
+teardown() { rm -rf "$ROOT"; unset FAKE_TRUNCATE_ROUNDS FAKE_ZERO_TESTS; }
 
 run() { # run <額外參數…>；一律帶 --i-know（唯一的同意方式），測閘門的 case 自己不帶
   bash "$SCRIPT" --i-know -k -o "$OUT" "$@" >"$LOGF" 2>&1
@@ -133,6 +134,15 @@ touch "$ROOT/blocked"
 rc=$(bash -c 'bash "$1" --i-know -k -o "$2" -n 1 -c 1 >"$3" 2>&1; echo $?' _ "$SCRIPT" "$ROOT/blocked/out" "$LOGF")
 check_eq "建不出輸出目錄 rc=2" "2" "$rc"
 check "講出是哪個目錄" "建不出輸出目錄" "$LOGF"
+teardown
+
+# 7. -f 沒配到任何測試：binary 每輪仍 rc=0，但不能把 0 passed 當成全綠。
+setup 0
+export FAKE_ZERO_TESTS=1
+rc=$(run -n 2 -c 2 -f old_test_name)
+check_eq "過濾到 0 條測試要 exit 2" "2" "$rc"
+check "講明有輪次沒有跑到測試" "輪沒有跑到任何測試" "$LOGF"
+check_eq "四輪都記下 no-tests" "4" "$(awk '$4 == "no-tests" {n++} END {print n+0}' "$OUT/rounds.txt")"
 teardown
 
 echo "$PASS passed, $FAIL failed"
