@@ -29,6 +29,8 @@ struct Episode {
     warning: String,
     /// 由這裡補標成 `blocked` 之前的狀態；`None` ＝herdr 自己判的，框關掉時不必還。
     forced_from: Option<String>,
+    /// Only one observer may finish the episode while it awaits a database restore.
+    closing: bool,
 }
 
 fn open() -> &'static Mutex<HashMap<String, Episode>> {
@@ -70,7 +72,7 @@ pub(crate) async fn notify_once(app: &Arc<App>, run: &db::Run, rm: &DangerousRm)
         match m.get(&run.id) {
             Some(ep) if ep.warning == rm.warning => return false,
             _ => {
-                m.insert(run.id.clone(), Episode { warning: rm.warning.clone(), forced_from: None });
+                m.insert(run.id.clone(), Episode { warning: rm.warning.clone(), forced_from: None, closing: false });
             }
         }
     }
@@ -128,18 +130,56 @@ pub(crate) async fn observe_screen(app: &Arc<App>, run: &db::Run, screen: &str) 
             }
         }
         None => {
-            let Some(ep) = open().lock().unwrap().remove(&run.id) else { return };
+            let forced_from = {
+                let mut episodes = open().lock().unwrap();
+                let Some(episode) = episodes.get_mut(&run.id) else { return };
+                if episode.closing {
+                    return;
+                }
+                episode.closing = true;
+                episode.forced_from.clone()
+            };
+
+            let (resolved, status_changed) = if let Some(previous) = &forced_from {
+                match sqlx::query("UPDATE runs SET agent_status=? WHERE id=? AND state='running' AND agent_status='blocked'")
+                    .bind(previous)
+                    .bind(&run.id)
+                    .execute(&app.db)
+                    .await
+                {
+                    Ok(result) if result.rows_affected() == 1 => (true, true),
+                    Ok(_) => match sqlx::query_as::<_, (String, String)>("SELECT state, agent_status FROM runs WHERE id=?")
+                        .bind(&run.id)
+                        .fetch_optional(&app.db)
+                        .await
+                    {
+                        Ok(Some((state, status))) => (state != "running" || status != "blocked", false),
+                        Ok(None) => (true, false),
+                        Err(error) => {
+                            tracing::warn!(run = %run.id, error = ?error, "could not verify synthetic Dangerous rm blocked status");
+                            (false, false)
+                        }
+                    },
+                    Err(error) => {
+                        tracing::warn!(run = %run.id, error = ?error, "could not restore synthetic Dangerous rm blocked status");
+                        (false, false)
+                    }
+                }
+            } else {
+                (true, false)
+            };
+            if !resolved {
+                if let Some(episode) = open().lock().unwrap().get_mut(&run.id) {
+                    episode.closing = false;
+                }
+                return;
+            }
+            open().lock().unwrap().remove(&run.id);
             tracing::info!(run = %run.id, bot = %run.bot_id, "Dangerous rm 確認框關掉了（回答或自動拒絕）");
             if let Ok(conv) = db::conversation_id(&app.db, &run.bot_id).await {
                 let _ = crate::lifecycle::insert_message(app, &conv, None, "system", CLOSED_NOTE, "system", false, None).await;
             }
-            if let Some(prev) = ep.forced_from {
-                // 只還我們自己標的那個 blocked：這段期間 herdr 已經報了別的狀態就是它的，不蓋。
-                let _ = sqlx::query("UPDATE runs SET agent_status=? WHERE id=? AND agent_status='blocked'")
-                    .bind(&prev)
-                    .bind(&run.id)
-                    .execute(&app.db)
-                    .await;
+            if status_changed {
                 app.emit_bot_status(&run.bot_id).await;
             }
             crate::lifecycle::schedule_flush_queued(app, &run.bot_id);
@@ -224,7 +264,88 @@ mod tests {
         let run_id = tt::fake_run(&app, &bot.id).await;
         observe_screen(&app, &run_of(&app, &run_id).await, DANGEROUS_RM).await;
         sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&run_id).execute(&app.db).await.unwrap();
+        crate::lifecycle::take_scheduled_flush_count(&bot.id);
         observe_screen(&app, &run_of(&app, &run_id).await, DANGEROUS_RM_AUTO_DENIED).await;
         assert_eq!(run_of(&app, &run_id).await.agent_status, "working");
+        assert!(!is_open(&run_id), "the newer herdr status authoritatively superseded our marker");
+        assert_eq!(system_messages(&app, &bot.id).await.last().map(String::as_str), Some(CLOSED_NOTE));
+        assert_eq!(crate::lifecycle::take_scheduled_flush_count(&bot.id), 1);
+    }
+
+    #[tokio::test]
+    async fn an_ended_run_releases_the_synthetic_blocked_episode() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let bot = tt::claude_bot(&app, &e.project_id, "rm-ended").await;
+        let run_id = tt::fake_run(&app, &bot.id).await;
+        observe_screen(&app, &run_of(&app, &run_id).await, DANGEROUS_RM).await;
+        sqlx::query("UPDATE runs SET state='exited' WHERE id=?")
+            .bind(&run_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        crate::lifecycle::take_scheduled_flush_count(&bot.id);
+
+        observe_screen(&app, &run_of(&app, &run_id).await, DANGEROUS_RM_AUTO_DENIED).await;
+
+        let run = run_of(&app, &run_id).await;
+        assert_eq!(run.state, "exited");
+        assert_eq!(run.agent_status, "blocked", "don't rewrite an ended run");
+        assert!(!is_open(&run_id), "the ended run authoritatively resolves the restore debt");
+        assert_eq!(system_messages(&app, &bot.id).await.len(), 2);
+        assert_eq!(crate::lifecycle::take_scheduled_flush_count(&bot.id), 1);
+    }
+
+    /// A failed restore is still owed: keep the episode for the next patrol, and don't announce
+    /// closure or wake queued prompts until the database accepts the restore.
+    #[tokio::test]
+    async fn a_failed_restore_keeps_the_episode_until_a_later_patrol_succeeds() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let bot = tt::claude_bot(&app, &e.project_id, "rm-restore").await;
+        let run_id = tt::fake_run(&app, &bot.id).await;
+        let run = run_of(&app, &run_id).await;
+        let conversation = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, origin, status, delivery, prompt_text, created_at)
+             VALUES (?,?,'web','queued','pending','next prompt',?)",
+        )
+        .bind(db::ulid())
+        .bind(&conversation)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        observe_screen(&app, &run, DANGEROUS_RM).await;
+        assert_eq!(run_of(&app, &run_id).await.agent_status, "blocked");
+        crate::lifecycle::take_scheduled_flush_count(&bot.id);
+        sqlx::query(
+            "CREATE TRIGGER refuse_dangerous_rm_restore BEFORE UPDATE OF agent_status ON runs
+             WHEN OLD.agent_status='blocked' AND NEW.agent_status='idle' BEGIN SELECT RAISE(ABORT, 'database is locked'); END",
+        )
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        observe_screen(&app, &run_of(&app, &run_id).await, DANGEROUS_RM_AUTO_DENIED).await;
+        assert_eq!(run_of(&app, &run_id).await.agent_status, "blocked", "restore did not commit");
+        assert!(is_open(&run_id), "the patrol needs the retained episode to retry");
+        assert_eq!(system_messages(&app, &bot.id).await.len(), 1, "don't announce closure before restore");
+        assert_eq!(crate::lifecycle::take_scheduled_flush_count(&bot.id), 0, "don't wake the queue yet");
+
+        sqlx::query("DROP TRIGGER refuse_dangerous_rm_restore")
+            .execute(&app.db)
+            .await
+            .unwrap();
+        observe_screen(&app, &run_of(&app, &run_id).await, DANGEROUS_RM_AUTO_DENIED).await;
+        assert_eq!(run_of(&app, &run_id).await.agent_status, "idle");
+        assert!(!is_open(&run_id));
+        assert_eq!(system_messages(&app, &bot.id).await, [notice(&crate::tui_prompts::dangerous_rm_prompt(DANGEROUS_RM).unwrap()), CLOSED_NOTE.to_string()]);
+        assert_eq!(crate::lifecycle::take_scheduled_flush_count(&bot.id), 1);
+
+        observe_screen(&app, &run_of(&app, &run_id).await, DANGEROUS_RM_AUTO_DENIED).await;
+        assert_eq!(system_messages(&app, &bot.id).await.len(), 2, "closure note is written once");
+        assert_eq!(crate::lifecycle::take_scheduled_flush_count(&bot.id), 0, "resolved episode wakes the queue once");
     }
 }
