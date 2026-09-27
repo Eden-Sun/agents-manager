@@ -159,14 +159,24 @@ case "$1 $2" in
     # --label 走 repo 的 issues 列表（#456：立即一致）；--search 走非同步索引。兩份分開餵，
     # 才測得出「列表看得到、搜尋還搜不到」那個空窗。
     case " $* " in
-      *" --label "*) cat "$D/labelled.json" 2>/dev/null || echo "[]" ;;
+      *" --label "*) if [ -f "$D/created_issue.json" ]; then cat "$D/created_issue.json"; else cat "$D/labelled.json" 2>/dev/null || echo "[]"; fi ;;
       *) if [ -f "$D/list.json" ]; then cat "$D/list.json"; else echo "[]"; fi ;;
     esac;;
   "issue create")
     [ -f "$D/fail_create" ] && { echo "API rate limit exceeded" >&2; exit 1; }
     if [ -f "$D/hang_create" ]; then sleep 120; fi
     printf '%s\n' "$@" > "$D/last_create.txt"
+    shift 2; title=; body=
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --title) title=$2; shift 2;;
+        --body) body=$2; shift 2;;
+        *) shift;;
+      esac
+    done
+    marker=$(printf '%s\n' "$body" | sed -n 's/^.*<!-- \(release-triage: .* -->\).*$/\1/p')
     n=$(cat "$D/n" 2>/dev/null || echo 100); n=$((n+1)); echo $n > "$D/n"
+    printf '[{"number":%s,"url":"https://github.com/o/r/issues/%s","title":"%s","body":"<!-- %s -->"}]\n' "$n" "$n" "$title" "$marker" > "$D/created_issue.json"
     echo "https://github.com/o/r/issues/$n";;
   "issue comment")
     printf '%s\n' "$@" > "$D/last_comment.txt"
@@ -257,6 +267,27 @@ async fn seed_version(p: &SqlitePool, version: &str, props: &[(&str, &[usize], O
     let v = serde_json::json!({"verdicts": [], "issues": stored});
     assert!(ledger::save_verdicts(p, "claude", version, &v, Status::Judged).await.unwrap());
     es
+}
+
+/// Seed a different version with issues counted by the cross-version daily cap.
+async fn seed_created_refs(p: &SqlitePool, version: &str, count: usize) {
+    ledger::insert_version(p, "claude", version, &entries277()).await.unwrap();
+    let refs: Vec<ledger::IssueRef> = (0..count)
+        .map(|n| ledger::IssueRef {
+            marker: format!("claude@{version}#seed{n}"),
+            entry_ids: vec![format!("seed{n}")],
+            number: n as i64 + 1,
+            url: String::new(),
+            created_at: ledger::now_ts(),
+            comment: false,
+        })
+        .collect();
+    sqlx::query("UPDATE release_triage SET status='judged', issue_numbers_json=? WHERE kind='claude' AND version=?")
+        .bind(serde_json::to_string(&refs).unwrap())
+        .bind(version)
+        .execute(p)
+        .await
+        .unwrap();
 }
 
 async fn row(p: &SqlitePool) -> ledger::Row {
@@ -443,6 +474,116 @@ async fn caps_guard_first_four_per_version_and_eight_per_day() {
     let o = issue::publish_version(&p, &gh.cfg(true), "claude", "2.1.277").await.unwrap();
     assert!(matches!(o, Outcome::Deferred { .. }), "{o:?}");
     assert_eq!((gh.count("issue create"), row(&p).await.status), (0, Status::Judged));
+}
+
+#[tokio::test]
+async fn a_create_recovered_after_ledger_failure_counts_toward_the_daily_cap() {
+    let p = pool().await;
+    let gh = FakeGh::new("create-ledger-crash-day");
+    let es = seed(&p, &[("guard", &[0], None), ("adopt", &[1], None)]).await;
+    seed_created_refs(&p, "2.1.270", 7).await;
+    let recovered_marker = issue::marker("claude", "2.1.277", &[judged(&es)[0].id.clone()]);
+    sqlx::query(
+        "CREATE TRIGGER fail_publish_ledger BEFORE UPDATE OF issue_numbers_json ON release_triage
+         WHEN OLD.version = '2.1.277'
+         BEGIN SELECT RAISE(ABORT, 'injected ledger write failure'); END",
+    )
+    .execute(&p)
+    .await
+    .unwrap();
+
+    let cfg = gh.cfg(true);
+    let first = issue::publish_version(&p, &cfg, "claude", "2.1.277").await;
+    assert!(first.is_err(), "the injected ledger failure must be visible: {first:?}; calls={:?}", gh.calls());
+    assert_eq!(gh.count("issue create"), 1, "the eighth issue was created remotely");
+    assert!(row(&p).await.issues.is_empty(), "the failed ledger commit left no IssueRef");
+
+    sqlx::query("DROP TRIGGER fail_publish_ledger").execute(&p).await.unwrap();
+    let preview = issue::preflight(&p, &cfg, Some("claude"), Some("2.1.277")).await.unwrap();
+    assert_eq!((preview["would_create"].as_u64(), preview["existing"].as_u64(), preview["blocked_by_caps"].as_u64()), (Some(0), Some(1), Some(1)));
+    let retry = issue::publish_version(&p, &cfg, "claude", "2.1.277").await.unwrap();
+    assert!(matches!(retry, Outcome::Deferred { .. }), "the ninth issue must be deferred: {retry:?}");
+    assert_eq!(gh.count("issue create"), 1, "retry recovers the remote issue and does not create a ninth");
+    let intent_action: Option<String> = sqlx::query_scalar(
+        "SELECT action FROM release_triage_publish_intents WHERE kind='claude' AND version='2.1.277' AND marker=?",
+    )
+    .bind(&recovered_marker)
+    .fetch_optional(&p)
+    .await
+    .unwrap();
+    assert_eq!(intent_action.as_deref(), Some("create"), "the create intent survives the lost issue_numbers_json write");
+    let r = row(&p).await;
+    assert_eq!(r.issues.len(), 1);
+    assert_eq!(r.issues[0].marker, recovered_marker);
+    assert_eq!((r.issues[0].number, r.issues[0].comment), (101, false));
+    assert_eq!(ledger::created_in_last_day(&p).await.unwrap(), MAX_PER_DAY, "recovered own create counts as the eighth daily issue");
+}
+
+#[tokio::test]
+async fn a_create_recovered_after_ledger_failure_counts_toward_the_version_cap() {
+    let p = pool().await;
+    let gh = FakeGh::new("create-ledger-crash-version");
+    let es = seed(&p, &[("guard", &[0], None), ("guard", &[1], None)]).await;
+    let prior_refs: Vec<ledger::IssueRef> = (0..3)
+        .map(|n| ledger::IssueRef {
+            marker: format!("claude@2.1.277#prior{n}"),
+            entry_ids: vec![format!("prior{n}")],
+            number: n as i64 + 1,
+            url: String::new(),
+            created_at: ledger::now_ts(),
+            comment: false,
+        })
+        .collect();
+    sqlx::query("UPDATE release_triage SET issue_numbers_json=? WHERE kind='claude' AND version='2.1.277'")
+        .bind(serde_json::to_string(&prior_refs).unwrap())
+        .execute(&p)
+        .await
+        .unwrap();
+    let recovered_marker = issue::marker("claude", "2.1.277", &[judged(&es)[0].id.clone()]);
+    let next_marker = issue::marker("claude", "2.1.277", &[judged(&es)[1].id.clone()]);
+    sqlx::query(
+        "CREATE TRIGGER fail_publish_ledger BEFORE UPDATE OF issue_numbers_json ON release_triage
+         WHEN OLD.version = '2.1.277'
+         BEGIN SELECT RAISE(ABORT, 'injected ledger write failure'); END",
+    )
+    .execute(&p)
+    .await
+    .unwrap();
+
+    let cfg = gh.cfg(true);
+    let first = issue::publish_version(&p, &cfg, "claude", "2.1.277").await;
+    assert!(first.is_err(), "the injected ledger failure must be visible: {first:?}; calls={:?}", gh.calls());
+    assert_eq!(gh.count("issue create"), 1, "the fourth issue was created remotely");
+    assert_eq!(row(&p).await.issues.len(), 3, "only the three seeded issues remain in the ledger");
+
+    sqlx::query("DROP TRIGGER fail_publish_ledger").execute(&p).await.unwrap();
+    let retry = issue::publish_version(&p, &cfg, "claude", "2.1.277").await.unwrap();
+    let Outcome::Published { skipped, .. } = retry else { panic!("{retry:?}") };
+    assert_eq!(skipped, [next_marker], "the fifth issue must be blocked by the recovered fourth issue");
+    assert_eq!(gh.count("issue create"), 1, "retry recovers #4 and does not create #5");
+    let r = row(&p).await;
+    assert_eq!(r.issues.len(), 4);
+    let recovered = r.issues.iter().find(|i| i.marker == recovered_marker).unwrap();
+    assert_eq!((recovered.number, recovered.comment), (101, false), "the recovered create keeps created provenance");
+    assert_eq!(ledger::created_in_last_day(&p).await.unwrap(), 4);
+}
+
+#[tokio::test]
+async fn an_issue_is_not_created_when_its_durable_create_intent_cannot_be_written() {
+    let p = pool().await;
+    let gh = FakeGh::new("create-intent-failure");
+    seed(&p, &[("guard", &[0], None)]).await;
+    sqlx::query(
+        "CREATE TRIGGER fail_publish_intent BEFORE INSERT ON release_triage_publish_intents
+         BEGIN SELECT RAISE(ABORT, 'injected intent write failure'); END",
+    )
+    .execute(&p)
+    .await
+    .unwrap();
+
+    let result = issue::publish_version(&p, &gh.cfg(true), "claude", "2.1.277").await;
+    assert!(result.is_err(), "failed intent persistence must fail closed: {result:?}");
+    assert_eq!(gh.count("issue create"), 0, "GitHub must not be mutated without a durable create intent");
 }
 
 #[tokio::test]
