@@ -236,6 +236,8 @@ const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (26, "4631f4f3433fc553"),
     // issue #611：`release_triage_publish_intents`（GitHub create/comment 副作用前的 durable marker）。
     (27, "ec6860a3b46abdd7"),
+    // 2026-09-28：`messages.sent_via`（插隊／補充送出的訊息，泡泡上標出來）。
+    (28, "a713484136f43301"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -406,6 +408,13 @@ async fn apply_migrations(pool: &SqlitePool) -> Result<()> {
         ("messages", "relay_unverified", "ALTER TABLE messages ADD COLUMN relay_unverified INTEGER NOT NULL DEFAULT 0"),
         // issue #554：run 為什麼被收成 exited；舊列 NULL＝不知道，退役紀錄當成「沒親眼看到 pane 被關」。
         ("runs", "exit_reason", "ALTER TABLE runs ADD COLUMN exit_reason TEXT"),
+        // 回合中送出的方式（使用者 2026-09-28）：`send_now`＝插隊、`supplement`＝補充（打進 pane、併在進行中的回合）。
+        // 舊列 NULL＝一般送出。`source` 的 CHECK 放不進新值（要重建表），所以另開一欄。
+        (
+            "messages",
+            "sent_via",
+            "ALTER TABLE messages ADD COLUMN sent_via TEXT CHECK (sent_via IN ('send_now','supplement'))",
+        ),
     ] {
         if !has_column(&mut *tx, table, col).await? {
             sqlx::query(ddl).execute(&mut *tx).await.with_context(|| format!("add {table}.{col}"))?;
@@ -899,6 +908,9 @@ pub struct Message {
     /// 對話倒回（`rewind.rs`）標掉的時間：這一則已經不在 CLI 的對話脈絡裡了。標記不刪，NULL＝還在。
     #[sqlx(default)]
     pub rewound_at: Option<String>,
+    /// `send_now`＝插隊送出、`supplement`＝回合中補充的一句（`POST /bots/:id/text` 帶 `record`）；NULL＝一般送出。
+    #[sqlx(default)]
+    pub sent_via: Option<String>,
 }
 
 #[derive(Debug, Clone, FromRow, serde::Serialize)]
@@ -1069,6 +1081,17 @@ pub async fn turn_user_messages(pool: &SqlitePool, turn_id: &str) -> Result<Vec<
         .bind(turn_id)
         .fetch_all(pool)
         .await?)
+}
+
+/// 回合中「補充」打進 pane 的每一句（`sent_via = 'supplement'`）：CLI 把它們當成同一回合裡的使用者訊息，
+/// hook 認領時要算成這一回合送出去的字。
+pub async fn turn_supplements(pool: &SqlitePool, turn_id: &str) -> Result<Vec<String>> {
+    Ok(sqlx::query_scalar(
+        "SELECT content FROM messages WHERE turn_id = ? AND role = 'user' AND sent_via = 'supplement' ORDER BY created_at, rowid",
+    )
+    .bind(turn_id)
+    .fetch_all(pool)
+    .await?)
 }
 
 /// Only the text with attachment paths (`attach::deliver_text`) matches the pane echo,

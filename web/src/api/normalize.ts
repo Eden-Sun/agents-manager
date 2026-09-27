@@ -114,6 +114,7 @@ const DELIVERIES = ['pending', 'ok', 'unknown', 'failed'] as const
 const ORIGINS = ['web', 'external'] as const
 const ROLES = ['user', 'assistant', 'system'] as const
 const SOURCES = ['web', 'hook', 'transcript', 'terminal_fallback', 'system'] as const
+const SENT_VIA = ['send_now', 'supplement', ''] as const
 
 /** 缺欄位＝舊 daemon，一律當未知（null），不猜。 */
 export function toHerdrVersion(v: unknown): HerdrVersion {
@@ -468,6 +469,7 @@ export function toMessage(v: unknown, botId?: string): Message | null {
     terminal_snapshot: optStr(pick(v, 'terminal_snapshot')),
     created_at: str(v.created_at),
     rewound_at: optStr(pick(v, 'rewound_at')),
+    sent_via: oneOf<'send_now' | 'supplement' | ''>(pick(v, 'sent_via'), SENT_VIA, '') || null,
   }
 }
 

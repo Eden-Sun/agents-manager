@@ -506,7 +506,8 @@ export interface StoreState {
   dismissComposerDraft: (botId: string) => void
   sendKeys: (botId: string, keys: string[]) => Promise<void>
   /** 多行內容要走這裡：`sendKeys` 吃鍵名，`\n` 不是鍵名（見 `store/alongside.ts`）。 */
-  sendText: (botId: string, text: string, enter: boolean) => Promise<boolean>
+  /** `record`：見 `api.sendText`（網頁的「補充」才帶）。 */
+  sendText: (botId: string, text: string, enter: boolean, record?: boolean) => Promise<boolean>
   abandonTurn: (botId: string, turnId: string) => Promise<void>
   addHost: (input: NewHostInput) => Promise<HostResult | null>
   addIdentity: (input: NewIdentityInput) => Promise<boolean>
@@ -1614,9 +1615,9 @@ export const useStore = create<StoreState>((set, get) => {
     }
   },
 
-  async sendText(botId, text, enter) {
+  async sendText(botId, text, enter, record = false) {
     try {
-      await sendWithFreshRun(get, botId, (runId) => api.sendText(botId, text, enter, runId))
+      await sendWithFreshRun(get, botId, (runId) => api.sendText(botId, text, enter, runId, record))
       return true
     } catch (e) {
       get().notify('error', `送出文字失敗：${errText(e)}`)

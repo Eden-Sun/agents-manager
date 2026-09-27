@@ -418,6 +418,8 @@ export interface Message {
   created_at: string
   /** 對話倒回（SPEC §6.13）標掉的時間：這一則已不在 CLI 的對話脈絡裡。沒有＝還在。 */
   rewound_at?: string | null
+  /** 回合中送出的方式：`send_now`＝插隊、`supplement`＝補充（打進 pane、併在進行中的回合）。沒有＝一般送出。 */
+  sent_via?: 'send_now' | 'supplement' | null
 }
 
 /** SPEC §13.4 `GET /api/projects/:id/messages` */

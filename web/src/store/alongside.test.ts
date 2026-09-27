@@ -4,12 +4,12 @@ import { typeAlongside } from './alongside.ts'
 
 /** 記下每一通 IO，好斷言「送出去的就是使用者打的那一整段」。 */
 function recorder(ok = true) {
-  const calls: { botId: string; text: string; enter: boolean }[] = []
+  const calls: { botId: string; text: string; enter: boolean; record: boolean }[] = []
   return {
     calls,
     io: {
-      sendText: (botId: string, text: string, enter: boolean) => {
-        calls.push({ botId, text, enter })
+      sendText: (botId: string, text: string, enter: boolean, record: boolean) => {
+        calls.push({ botId, text, enter, record })
         return Promise.resolve(ok)
       },
     },
@@ -20,7 +20,7 @@ test('多行文字一次整段送出，換行原樣保留', async () => {
   const body = '第一行\n第二行\n\n第四行 with spaces'
   const r = recorder()
   assert.equal(await typeAlongside(r.io, 'b1', body), true)
-  assert.deepEqual(r.calls, [{ botId: 'b1', text: body, enter: true }])
+  assert.deepEqual(r.calls, [{ botId: 'b1', text: body, enter: true, record: true }])
 })
 
 test('前後空白修掉，但內容裡的換行不動', async () => {
@@ -38,4 +38,10 @@ test('空白內容不送任何東西', async () => {
 test('送失敗就回 false，輸入框留著', async () => {
   const r = recorder(false)
   assert.equal(await typeAlongside(r.io, 'b1', '一句話'), false)
+})
+
+test('補充也是發出的訊息：一定帶 record，daemon 才記成對話裡的泡泡（使用者 2026-09-28）', async () => {
+  const r = recorder()
+  await typeAlongside(r.io, 'b1', '順便看 log')
+  assert.equal(r.calls[0].record, true)
 })

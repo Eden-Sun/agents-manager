@@ -167,6 +167,8 @@ interface MockMessage {
   attachments_json: string | null
   /** null = 使用者 / daemon 自己。 */
   relay_from: string | null
+  /** `send_now`＝插隊、`supplement`＝補充；沒有＝一般送出。 */
+  sent_via?: 'send_now' | 'supplement' | null
   created_at: string
 }
 
@@ -2903,6 +2905,7 @@ export class MockTransport implements Transport {
         : {}
       throw new ApiError(409, { error: 'conflict', reason: 'a turn is already in flight', turn_id: busy.id, ...why }, 'conflict')
     }
+    const interrupting = Boolean(busy)
     if (busy) {
       this.updateTurn(busy, { status: 'failed', completed_at: now() })
       this.addMessage({
@@ -2948,6 +2951,7 @@ export class MockTransport implements Transport {
       source: 'web',
       incomplete: 0,
       group_id: groupId,
+      ...(interrupting ? { sent_via: 'send_now' as const } : {}),
       attachments_json: attachIds.length
         ? JSON.stringify(
             attachIds.map((id) => ({
@@ -3283,7 +3287,14 @@ export class MockTransport implements Transport {
     if (typeof expect === 'string' && expect !== run.id) {
       throw new ApiError(409, { reason: 'expect_run_id 與目前 Run 不符', run_id: run.id }, 'conflict')
     }
-    return { ok: true, text: String(b.text ?? ''), enter: b.enter !== false }
+    const text = String(b.text ?? '')
+    if (b.record !== true) return { ok: true, text, enter: b.enter !== false }
+    // 「補充」：跟 daemon 一樣，有進行中的回合才記成它的使用者訊息。
+    const turn = text.trim() ? this.turns.find((t) => t.run_id === run.id && t.status === 'in_flight') : undefined
+    const msg = turn
+      ? this.addMessage({ conversation_id: turn.conversation_id, turn_id: turn.id, bot_id: botId, role: 'user', content: text, source: 'web', incomplete: 0, sent_via: 'supplement' })
+      : null
+    return { message_id: msg?.id ?? null }
   }
 
   private setIdle(botId: string) {

@@ -21,6 +21,20 @@ pub async fn send_keys(app: &Arc<App>, bot_id: &str, keys: Vec<String>, expect_r
 /// `send_keys`；Enter 另用 `pane.send_keys`（`send_text` 裡的 `\n` 是貼上換行）。不擋
 /// `agent_status`：用途就是回合中「併送」。
 pub async fn send_text(app: &Arc<App>, bot_id: &str, text: &str, enter: bool, expect_run_id: Option<String>) -> LcResult<()> {
+    send_text_recorded(app, bot_id, text, enter, expect_run_id, false).await.map(|_| ())
+}
+
+/// [`send_text`]，`record` 時打字成功後在同一把 bot 鎖裡把這句記成進行中回合的使用者訊息（`sent_via =
+/// 'supplement'`，網頁的「補充」）。沒有進行中的回合就不記：那一句 CLI 會當成新的一輪，hook 開外部回合時自己記。
+/// 打字失敗一個字都不記；打完了才寫不進去只記 log、回 `None`——字已經進 pane，回錯會讓使用者再補一次。
+pub async fn send_text_recorded(
+    app: &Arc<App>,
+    bot_id: &str,
+    text: &str,
+    enter: bool,
+    expect_run_id: Option<String>,
+    record: bool,
+) -> LcResult<Option<db::Message>> {
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
     let run = db::active_run(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("run".into()))?;
@@ -48,7 +62,35 @@ pub async fn send_text(app: &Arc<App>, bot_id: &str, text: &str, enter: bool, ex
     if enter {
         client.pane_send_keys(&pane_id, &["enter"]).await.map_err(up)?;
     }
-    Ok(())
+    if !record || text.trim().is_empty() {
+        return Ok(None);
+    }
+    match record_supplement(app, bot_id, &run.id, text).await {
+        Ok(m) => Ok(m),
+        Err(e) => {
+            tracing::warn!(bot = %bot_id, error = %e, "補充的字已經打進 pane，但記成訊息失敗");
+            Ok(None)
+        }
+    }
+}
+
+async fn record_supplement(app: &Arc<App>, bot_id: &str, run_id: &str, text: &str) -> anyhow::Result<Option<db::Message>> {
+    let Some(turn) = db::in_flight_turn(&app.db, run_id).await? else { return Ok(None) };
+    let id = db::ulid();
+    sqlx::query(
+        "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, sent_via, created_at)
+         VALUES (?,?,?,'user',?,'web','supplement',?)",
+    )
+    .bind(&id)
+    .bind(&turn.conversation_id)
+    .bind(&turn.id)
+    .bind(text)
+    .bind(db::now())
+    .execute(&app.db)
+    .await?;
+    let m = sqlx::query_as::<_, db::Message>("SELECT * FROM messages WHERE id = ?").bind(&id).fetch_one(&app.db).await?;
+    emit_message_added(app, bot_id, m.clone()).await;
+    Ok(Some(m))
 }
 
 /// TUI slash command for a live setting, or `None` (caller reports `needs_restart`).
@@ -1003,5 +1045,84 @@ mod send_text_tests {
         assert!(matches!(err, LcError::Upstream(_)), "{err:?}");
         assert!(env.herdr.calls_to("pane.send_text").is_empty(), "寫不進去就不打");
         assert!(env.herdr.calls_to("pane.send_keys").is_empty());
+    }
+
+    async fn in_flight_turn(app: &Arc<App>, bot_id: &str, run_id: &str) -> String {
+        let conv = crate::db::conversation_id(&app.db, bot_id).await.unwrap();
+        let turn_id = crate::db::ulid();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, prompt_text, created_at)
+             VALUES (?,?,?,'web','in_flight','ok','跑一次測試',?)",
+        )
+        .bind(&turn_id)
+        .bind(&conv)
+        .bind(run_id)
+        .bind(crate::db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        turn_id
+    }
+
+    async fn user_rows(app: &Arc<App>, bot_id: &str) -> Vec<(Option<String>, String, Option<String>)> {
+        let conv = crate::db::conversation_id(&app.db, bot_id).await.unwrap();
+        sqlx::query_as("SELECT turn_id, content, sent_via FROM messages WHERE conversation_id=? AND role='user' ORDER BY created_at, rowid")
+            .bind(conv)
+            .fetch_all(&app.db)
+            .await
+            .unwrap()
+    }
+
+    /// 使用者 2026-09-28：補充也是發出的訊息，要在對話窗右邊。打字成功後記成進行中回合的使用者訊息並推 `message_added`。
+    #[tokio::test]
+    async fn a_recorded_supplement_is_a_user_message_on_the_in_flight_turn() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "supp-rec").await;
+        let run_id = tt::fake_run(&env.app, &bot.id).await;
+        env.herdr.live_pane(&format!("pane-{}", bot.id), tt::LivePane::default());
+        let turn_id = in_flight_turn(&env.app, &bot.id, &run_id).await;
+        let mut rx = env.app.subscribe();
+
+        let m = send_text_recorded(&env.app, &bot.id, "順便看一下 log", true, None, true).await.unwrap().expect("有進行中的回合就記");
+        assert_eq!((m.role.as_str(), m.source.as_str(), m.sent_via.as_deref()), ("user", "web", Some("supplement")));
+        assert_eq!(user_rows(&env.app, &bot.id).await, vec![(Some(turn_id.clone()), "順便看一下 log".to_string(), Some("supplement".to_string()))]);
+        assert_eq!(env.herdr.calls_to("pane.send_text").len(), 1, "照樣打進 pane");
+        let mut pushed = false;
+        while let Ok(ev) = rx.try_recv() {
+            pushed |= ev.kind == "message_added" && ev.data["message"]["id"] == m.id && ev.data["bot_id"] == bot.id;
+        }
+        assert!(pushed, "推 message_added，網頁才看得到泡泡");
+
+        // 不帶 record（BlockedChoices 那些打字）照舊不留訊息。
+        assert!(send_text_recorded(&env.app, &bot.id, "1", true, None, false).await.unwrap().is_none());
+        assert_eq!(user_rows(&env.app, &bot.id).await.len(), 1);
+    }
+
+    /// 沒有進行中的回合：這一句 CLI 會當成新的一輪，hook 開外部回合時自己記；這裡記了就會多一則。
+    #[tokio::test]
+    async fn a_supplement_without_an_in_flight_turn_is_not_recorded() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "supp-idle").await;
+        tt::fake_run(&env.app, &bot.id).await;
+        env.herdr.live_pane(&format!("pane-{}", bot.id), tt::LivePane::default());
+
+        assert!(send_text_recorded(&env.app, &bot.id, "閒著", true, None, true).await.unwrap().is_none());
+        assert!(user_rows(&env.app, &bot.id).await.is_empty());
+    }
+
+    /// 打字失敗（這裡是 pane_typed 寫不進去、一個字都沒打）：不留訊息，錯照回。
+    #[tokio::test]
+    async fn a_supplement_that_was_not_typed_is_not_recorded() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "supp-fail").await;
+        let run_id = tt::fake_run(&env.app, &bot.id).await;
+        in_flight_turn(&env.app, &bot.id, &run_id).await;
+        sqlx::query("CREATE TRIGGER no_pane_typed BEFORE UPDATE OF pane_typed ON runs BEGIN SELECT RAISE(ABORT, 'disk hiccup'); END")
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+
+        assert!(send_text_recorded(&env.app, &bot.id, "沒打進去", true, None, true).await.is_err());
+        assert!(user_rows(&env.app, &bot.id).await.is_empty(), "沒打進去就不能有泡泡");
     }
 }

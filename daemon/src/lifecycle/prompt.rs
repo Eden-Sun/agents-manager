@@ -146,7 +146,8 @@ pub(super) async fn retract_unsent_turn(app: &Arc<App>, bot_id: &str, turn_id: &
 /// 這筆 turn 現在的樣子，換成給呼叫端的答覆。冪等重送（同一個 `client_request_id`）與「撤回時發現
 /// turn 已經被別的路徑收掉」都走這裡，同一筆 turn 才不會因為問法不同而拿到兩種答案（review3 L4）。
 pub(super) async fn answer_for_turn(app: &Arc<App>, t: &db::Turn) -> LcResult<PromptOut> {
-    let message_id = sqlx::query_scalar::<_, String>("SELECT id FROM messages WHERE turn_id=? AND role='user' LIMIT 1")
+    // 第一則才是這一回合的 prompt；之後的可能是回合中補充的（`sent_via = 'supplement'`）。
+    let message_id = sqlx::query_scalar::<_, String>("SELECT id FROM messages WHERE turn_id=? AND role='user' ORDER BY created_at, rowid LIMIT 1")
         .bind(&t.id)
         .fetch_optional(&app.db)
         .await
@@ -845,8 +846,9 @@ async fn prompt_inner(
         ));
     }
     let msg_id = db::ulid();
+    // 真的要打斷一個進行中的回合才標「插隊」；閒著時按插隊就是一般送出。
     sqlx::query(
-        "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, group_id, relay_from, relay_unverified, created_at) VALUES (?,?,?,'user',?,'web',?,?,?,?)",
+        "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, group_id, relay_from, relay_unverified, sent_via, created_at) VALUES (?,?,?,'user',?,'web',?,?,?,?,?)",
     )
     .bind(&msg_id)
     .bind(&conv)
@@ -855,6 +857,7 @@ async fn prompt_inner(
     .bind(group_id)
     .bind(relay.from)
     .bind(relay.unverified)
+    .bind(send_now_active.then_some("send_now"))
     .bind(db::now())
     .execute(&mut *tx)
     .await
@@ -2355,6 +2358,11 @@ mod send_now_tests {
             .unwrap();
         assert_eq!(note, 1, "對話裡看得到它是被插隊打斷的");
         assert_eq!(keys_sent(&f), vec![r#"["ctrl+x","ctrl+s"]"#.to_string()], "按的是 send-now 鍵，不是 Enter");
+        assert_eq!(sent_via(&f, &out.message_id).await.as_deref(), Some("send_now"), "泡泡標「插隊」（使用者 2026-09-28）");
+    }
+
+    async fn sent_via(f: &Fixture, message_id: &str) -> Option<String> {
+        sqlx::query_scalar("SELECT sent_via FROM messages WHERE id=? AND role='user'").bind(message_id).fetch_one(&f.env.app.db).await.unwrap()
     }
 
     /// #120：插隊送出在**按任何鍵之前**就被擋下（這裡讓 `set_pane_typed` 寫不進去，`NotAttempted`）時，
@@ -2825,6 +2833,7 @@ mod send_now_tests {
         assert_eq!(out.send_now, Some("idle"));
         assert_eq!(in_flight_count(&f).await, 1);
         assert!(!keys_sent(&f).iter().any(|k| k.contains("ctrl+s")), "沒有回合可以打斷就不按那顆鍵");
+        assert_eq!(sent_via(&f, &out.message_id).await, None, "什麼都沒打斷就不標插隊");
     }
     /// #157 的前半：送出鍵生效了，收舊回合那一半寫不進去（欠著），確認送出（`confirm_submitted`）又出錯——這裡讓它第一次
     /// 讀畫面就被 herdr 拒絕。回的是 `send_now_state_uncommitted`；帳上要記著新的那一則「鍵按過、證不出來」。

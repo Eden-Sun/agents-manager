@@ -491,8 +491,8 @@ pub async fn rewind(app: &Arc<App>, bot_id: &str, message_id: &str, pane: Option
     if msg.rewound_at.is_some() {
         return Err(conflict("already_rewound", "這一則已經倒回掉了。"));
     }
-    // 送出的字：排隊的網頁 prompt 記在 turn 上（跟畫面上的原文可能不一樣）。
-    let prompt_text: Option<String> = match msg.turn_id.as_deref() {
+    // 送出的字：排隊的網頁 prompt 記在 turn 上（跟畫面上的原文可能不一樣）。回合中補充的那句不是 turn 的 prompt，用它自己的原文。
+    let prompt_text: Option<String> = match msg.turn_id.as_deref().filter(|_| msg.sent_via.as_deref() != Some("supplement")) {
         Some(t) => sqlx::query_scalar("SELECT prompt_text FROM turns WHERE id = ?").bind(t).fetch_optional(&app.db).await.map_err(up)?.flatten(),
         None => None,
     };

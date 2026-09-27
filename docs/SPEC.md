@@ -1320,6 +1320,15 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run
      run 結束（`fail_in_flight_or_owe`）收它時，帳上的新那一則跟著一起收，不會被忘掉或蓋掉而變成 `run_id` 為空、永遠在飛的一筆（#164）。
    - **當下沒有回合在飛**：不按那顆鍵，照一般 Enter 送出（回應 `send_now: "idle"`），不替這條路多綁一個版本前提。
    - 灰字（sent／queued 到模型收到之前）是 CLI 自己畫的，daemon 與前端都不模擬。
+   - **泡泡標「插隊」**：真的要打斷一個回合（`send_now: "interrupted"` 那條路）時，新那一則的 user Message 寫 `sent_via = 'send_now'`；
+     閒著時按插隊就是一般送出，不標。
+10. **補充**（使用者 2026-09-28：「插隊或補充都要寫在右邊的對話窗，因為也是一種發出的訊息」）：`POST /bots/:id/text` 帶 `record: true`
+    （網頁鎖條上的「補充」）。不建新回合，字直接打進 pane；打字（含 Enter）成功後**同一把 bot 鎖裡**把它記成這個 run 進行中回合的
+    user Message（`source=web`、`sent_via='supplement'`、掛那一筆的 `turn_id`）並推 `message_added`。沒有進行中的回合不記（CLI 會開新的一輪，
+    外部回合自己存那句）；打字失敗一則都不記；打完了才寫不進去只記 log、回 `message_id: null`——字已經進 pane，回錯會讓人再補一次。
+    claude 把補充的字當成 transcript 裡同一回合的一則新使用者訊息，所以 hook 認領時它也算這一回合送出去的字（§6.7 第 4 點），
+    回合照常認領、不開外部回合，也不多存一則重複的使用者訊息。終端備援與 stuck 回合的「送了什麼」（`turn_echo_texts`）本來就讀
+    這一回合全部的 user Message，補充也在裡面。對話倒回倒到一則補充時用它自己的原文，不是回合的 `prompt_text`。
 
 ### 6.4 停止／刪除 Bot（per-bot 鎖內）
 - **遠端已刪 bot 的目錄靠 DB 推導的欠帳收**（issue #349，`daemon/src/remote_purge.rs`）：刪除 handler 的一次性 ssh purge 只在 handler 活著時有效；daemon 在「刪除已 commit、purge 還沒跑」之間死掉，
@@ -2068,6 +2077,9 @@ default Bot 的 prompt／keys／terminal 讀取依 Run 的 session 回到 defaul
      CAS 輸了且 Turn 已 `completed_fallback` → 把 native ids 蓋上；已有 assistant Message 就丟 payload，一則都沒有就用 hook 的回覆補上並改 `completed`。
      被其他原因收掉的（stop／failed）照舊保留回覆。
      `delivery=unknown` 的 Turn：hook 的使用者訊息對不上它的 `prompt_text` → 不認領，第 5 點。
+     「這一回合送出去的字」＝`prompt_text` 再加上回合中補充記下的每一句（`messages.sent_via = 'supplement'`，§6.3 第 10 點）：
+     補充之後 transcript 最後一則使用者訊息是補充的那句，只比 prompt 會被當成「回答的是別句」、開外部回合。這條與下面備援那條、
+     §4.3 晚到 hook 的比對都用同一組字；沒記下的（使用者在終端手打的）照舊分得出來。
    - 無 → 120 秒內有備援關掉、還沒 native id 的 Turn：hook 的使用者訊息對得上（或看不到）才照上一條補上回覆；對不上 → 第 5 點（§4.3 例外）。
      補上之後交辦拿回覆的規則見 §18.8。
    - 都沒有 → 第 5 點。

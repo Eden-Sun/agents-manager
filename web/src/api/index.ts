@@ -584,12 +584,16 @@ export async function sendKeys(botId: string, keys: string[], expectRunId: strin
   })
 }
 
-/** 多行文字走這裡，不要拆成 `sendKeys` 的鍵名。 */
-export async function sendText(botId: string, text: string, enter: boolean, expectRunId: string | null): Promise<void> {
+/**
+ * 多行文字走這裡，不要拆成 `sendKeys` 的鍵名。`record`＝回合中「補充」：daemon 打字成功後把它記成進行中回合的
+ * 使用者訊息（`message_added` 推過來），其他打字（回答選單、草稿）不帶。
+ */
+export async function sendText(botId: string, text: string, enter: boolean, expectRunId: string | null, record = false): Promise<void> {
   await transport.request('POST', `/bots/${encodeURIComponent(botId)}/text`, {
     text,
     enter,
     ...(expectRunId ? { expect_run_id: expectRunId } : {}),
+    ...(record ? { record: true } : {}),
   })
 }
 
