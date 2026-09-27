@@ -48,10 +48,10 @@ pub(crate) enum Step {
 }
 
 /// 這個名字對到哪顆在跑的 run：agent 名、pane id、或 bot 名。對不到（例如目標是使用者手開的 pane）就不管。
-async fn resolve(app: &Arc<App>, to_agent: &str) -> Option<db::Run> {
+pub(crate) async fn resolve(app: &Arc<App>, to_agent: &str) -> anyhow::Result<Option<db::Run>> {
     let to = to_agent.trim();
     if to.is_empty() {
-        return None;
+        return Ok(None);
     }
     let id: Option<String> = sqlx::query_scalar(
         "SELECT r.id FROM runs r JOIN bots b ON b.id = r.bot_id
@@ -60,10 +60,9 @@ async fn resolve(app: &Arc<App>, to_agent: &str) -> Option<db::Run> {
     )
     .bind(to)
     .fetch_optional(&app.db)
-    .await
-    .ok()
-    .flatten();
-    db::run(&app.db, &id?).await.ok().flatten()
+    .await?;
+    let Some(id) = id else { return Ok(None) };
+    db::run(&app.db, &id).await
 }
 
 /// 開進行中的回合。已經有回合在飛（收件方正忙，字會排在它後面）就不開，UI 本來就看得到。寫不進去只記 log，不擋補 Enter。
@@ -105,14 +104,26 @@ async fn try_open_turn(app: &Arc<App>, run: &db::Run, from_bot: &str, text: &str
 
 /// 看一次。`now` 由呼叫端給。
 pub(crate) async fn step(app: &Arc<App>, w: &mut Watch, now: Instant) -> Step {
-    let Ok(Some(run)) = db::run(&app.db, &w.run_id).await else { return Step::Done };
+    let run = match db::run(&app.db, &w.run_id).await {
+        Ok(Some(run)) => run,
+        Ok(None) => return Step::Done,
+        Err(error) => {
+            tracing::warn!(%error, run = %w.run_id, "relay watch could not read run; retrying next poll");
+            return Step::Waiting;
+        }
+    };
     if run.state != "running" {
         return Step::Done;
     }
     if let Some(t) = &w.turn_id {
         // 收掉了（hook 或終端備援）＝送達、答完了。
-        if !matches!(db::in_flight_turn(&app.db, &w.run_id).await, Ok(Some(cur)) if &cur.id == t) {
-            return Step::Done;
+        match db::in_flight_turn(&app.db, &w.run_id).await {
+            Ok(Some(cur)) if &cur.id == t => {}
+            Ok(_) => return Step::Done,
+            Err(error) => {
+                tracing::warn!(%error, run = %w.run_id, turn = %t, "relay watch could not read in-flight turn; retrying next poll");
+                return Step::Waiting;
+            }
         }
     }
     // agent 開始做事＝字被收下了，補 Enter 只會打到別的東西。
@@ -124,7 +135,14 @@ pub(crate) async fn step(app: &Arc<App>, w: &mut Watch, now: Instant) -> Step {
         mark_run_exited(app, &w.run_id, "pane gone").await;
         return Step::Done;
     }
-    let Ok(Some(bot)) = db::bot(&app.db, &w.bot_id).await else { return Step::Done };
+    let bot = match db::bot(&app.db, &w.bot_id).await {
+        Ok(Some(bot)) => bot,
+        Ok(None) => return Step::Done,
+        Err(error) => {
+            tracing::warn!(%error, bot = %w.bot_id, "relay watch could not read bot; retrying next poll");
+            return Step::Waiting;
+        }
+    };
     let read = match (run.pane_id.as_deref(), client_for_run(app, &run).await) {
         (Some(pane), Ok(client)) => {
             super::delivery::read_styled(&client, pane, "visible", 80).await.ok().map(|text| (client, pane.to_string(), text))
@@ -188,12 +206,14 @@ async fn give_up(app: &Arc<App>, w: &Watch) -> Step {
     Step::GaveUp
 }
 
-/// `/relay/announce` 之後呼叫：對得到在跑的 bot 就開回合並在背景盯。對不到什麼都不做。
-pub(crate) async fn on_announce(app: &Arc<App>, from_bot: &str, to_agent: &str, text: &str) {
+/// Start the watch only after the caller has completed [`resolve`] successfully. The announce API
+/// does this synchronously before acknowledging the shim, so a DB failure cannot be mistaken for
+/// an unmanaged target and followed by an unobserved direct prompt.
+pub(crate) async fn on_resolved_announce(app: &Arc<App>, from_bot: &str, text: &str, run: Option<db::Run>) {
     if text.trim().is_empty() {
         return;
     }
-    let Some(run) = resolve(app, to_agent).await else { return };
+    let Some(run) = run else { return };
     if run.bot_id == from_bot {
         return;
     }
@@ -266,9 +286,9 @@ mod tests {
         assert_eq!((content.as_str(), from.as_deref()), (TEXT, Some(sender.id.as_str())));
         assert!(open_turn(&app, &run, &sender.id, "第二句").await.is_none(), "已經有回合在飛：不重開");
 
-        assert_eq!(resolve(&app, "agent").await.map(|r| r.id), Some(f.run_id.clone()), "agent 名對得到");
-        assert_eq!(resolve(&app, &f.pane).await.map(|r| r.id), Some(f.run_id.clone()), "pane id 對得到");
-        assert!(resolve(&app, "沒有這個人").await.is_none());
+        assert_eq!(resolve(&app, "agent").await.unwrap().map(|r| r.id), Some(f.run_id.clone()), "agent 名對得到");
+        assert_eq!(resolve(&app, &f.pane).await.unwrap().map(|r| r.id), Some(f.run_id.clone()), "pane id 對得到");
+        assert!(resolve(&app, "沒有這個人").await.unwrap().is_none());
     }
 
     /// 2026-09-21 實機：字卡在輸入列、agent idle。超過 N 秒補一次 Enter，字進 transcript；沒到 N 秒不動。
@@ -368,6 +388,66 @@ mod tests {
         assert_eq!(run_state(&f).await, "exited", "run 收掉，側欄不再畫成活的");
     }
 
+    /// 一次暫時 DB read error 代表不知道，不是交辦已結束；DB 恢復後同一個 watcher 還要補 Enter。
+    #[tokio::test]
+    async fn a_transient_run_read_error_keeps_the_watch_alive() {
+        let f = fixture("run-read-retry").await;
+        let app = f.env.app.clone();
+        f.env.herdr.live_pane(&f.pane, tt::LivePane { composer: vec![TEXT.into()], width: Some(120), ..Default::default() });
+        let t0 = Instant::now();
+        let mut w = watch(&f, None, t0);
+
+        tt::make_table_unreadable(&app, "runs").await;
+        assert_eq!(step(&app, &mut w, t0 + NUDGE_AFTER).await, Step::Waiting, "讀取錯誤不能結束 watcher");
+        assert_eq!(keys_sent(&f), 0, "未知狀態時不可按鍵");
+        tt::make_table_readable(&app, "runs").await;
+
+        assert_eq!(step(&app, &mut w, t0 + NUDGE_AFTER).await, Step::Waiting, "恢復後先確認 composer");
+        assert_eq!(step(&app, &mut w, t0 + NUDGE_AFTER * 2).await, Step::Nudged, "持續看到 composer 超過 NUDGE_AFTER 後補 Enter");
+        assert_eq!(keys_sent(&f), 1);
+    }
+
+    /// in_flight_turn 讀取失敗也不能被當成「原回合已收掉」。
+    #[tokio::test]
+    async fn a_transient_in_flight_turn_read_error_keeps_the_watch_alive() {
+        let f = fixture("turn-read-retry").await;
+        let app = f.env.app.clone();
+        f.env.herdr.live_pane(&f.pane, tt::LivePane { composer: vec![TEXT.into()], width: Some(120), ..Default::default() });
+        let sender = tt::claude_bot(&app, &f.env.project_id, "turn-read-sender").await;
+        let run = db::run(&app.db, &f.run_id).await.unwrap().unwrap();
+        let turn_id = open_turn(&app, &run, &sender.id, TEXT).await.unwrap();
+        let t0 = Instant::now();
+        let mut w = watch(&f, Some(turn_id), t0);
+
+        tt::make_table_unreadable(&app, "turns").await;
+        assert_eq!(step(&app, &mut w, t0 + NUDGE_AFTER).await, Step::Waiting, "讀取錯誤不能被當成回合已收掉");
+        assert_eq!(keys_sent(&f), 0, "未知狀態時不可按鍵");
+        tt::make_table_readable(&app, "turns").await;
+
+        assert_eq!(step(&app, &mut w, t0 + NUDGE_AFTER).await, Step::Waiting, "恢復後先確認原回合仍在飛");
+        assert_eq!(step(&app, &mut w, t0 + NUDGE_AFTER * 2).await, Step::Nudged, "持續看到 composer 超過 NUDGE_AFTER 後補 Enter");
+        assert_eq!(keys_sent(&f), 1);
+    }
+
+    /// bot row 讀不到不是 bot 已刪除；恢復後要繼續看同一個 composer。
+    #[tokio::test]
+    async fn a_transient_bot_read_error_keeps_the_watch_alive() {
+        let f = fixture("bot-read-retry").await;
+        let app = f.env.app.clone();
+        f.env.herdr.live_pane(&f.pane, tt::LivePane { composer: vec![TEXT.into()], width: Some(120), ..Default::default() });
+        let t0 = Instant::now();
+        let mut w = watch(&f, None, t0);
+
+        tt::make_table_unreadable(&app, "bots").await;
+        assert_eq!(step(&app, &mut w, t0 + NUDGE_AFTER).await, Step::Waiting, "讀取錯誤不能結束 watcher");
+        assert_eq!(keys_sent(&f), 0, "未知狀態時不可按鍵");
+        tt::make_table_readable(&app, "bots").await;
+
+        assert_eq!(step(&app, &mut w, t0 + NUDGE_AFTER).await, Step::Waiting, "恢復後先確認 composer");
+        assert_eq!(step(&app, &mut w, t0 + NUDGE_AFTER * 2).await, Step::Nudged, "持續看到 composer 超過 NUDGE_AFTER 後補 Enter");
+        assert_eq!(keys_sent(&f), 1);
+    }
+
     /// 定時掃描：pane 明確不在的 running run 收成 exited；pane 還在的、herdr 維護中的都不動。
     #[tokio::test]
     async fn the_sweep_ends_only_runs_whose_pane_herdr_says_is_gone() {
@@ -387,7 +467,8 @@ mod tests {
         let app = f.env.app.clone();
         let sender = tt::claude_bot(&app, &f.env.project_id, "dead-sender").await;
         close_pane(&f);
-        on_announce(&app, &sender.id, "agent", TEXT).await;
+        let run = resolve(&app, "agent").await.unwrap();
+        on_resolved_announce(&app, &sender.id, TEXT, run).await;
         assert_eq!(run_state(&f).await, "exited");
         let turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE run_id=?").bind(&f.run_id).fetch_one(&app.db).await.unwrap();
         assert_eq!(turns, 0);

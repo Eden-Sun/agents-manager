@@ -370,10 +370,32 @@ async fn relay_announce(
         Ok(None) => {}
         Err(e) => return unavailable(format!("{e:?}")),
     }
+    // #610：shim 收到 2xx 後會直接把 prompt 送進 pane。先確認 watcher admission 的 DB lookup
+    // 成功；讀取錯誤不是「非 managed target」，必須回 retryable error，不能讓唯一的 watchdog 消失。
+    let relay_run = if body.text.trim().is_empty() {
+        None
+    } else {
+        match crate::lifecycle::relay_watch::resolve(&app, &body.to_agent).await {
+            Ok(run) => run,
+            Err(e) => {
+                tracing::warn!(to = %body.to_agent, error = ?e, "relay watch admission failed; refusing direct prompt so the shim can retry");
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({
+                        "error": "relay_watch_unavailable",
+                        "watch_unavailable": true,
+                        "retryable": true,
+                        "detail": format!("{e:#}"),
+                        "message": "收件目標狀態暫時讀不到；沒有直送，請稍後重試",
+                    })),
+                );
+            }
+        }
+    };
     crate::agent_relay::announce(&body.bot_id, &body.to_agent, &body.text);
-    // #380：收件方 UI 看得出在跑，字卡在輸入列時補 Enter；背景做，不拖慢 shim 的直送。
-    let (app2, from, to, text) = (app.clone(), body.bot_id.clone(), body.to_agent.clone(), body.text.clone());
-    tokio::spawn(async move { crate::lifecycle::relay_watch::on_announce(&app2, &from, &to, &text).await });
+    // #380：收件方 UI 看得出在跑，字卡在輸入列時補 Enter；resolve 已在回 2xx 前確認，後續盯梢仍背景做。
+    let (app2, from, text) = (app.clone(), body.bot_id.clone(), body.text.clone());
+    tokio::spawn(async move { crate::lifecycle::relay_watch::on_resolved_announce(&app2, &from, &text, relay_run).await });
     (StatusCode::OK, Json(json!({})))
 }
 
@@ -430,6 +452,35 @@ mod relay_announce_tests {
         let (code, v) = announce(&app, "AGM-responder", "請核准重啟 relay-143-lookup").await;
         assert!(code.is_server_error(), "{code} {v}");
         assert!(crate::agent_relay::claim("AGM-responder", "請核准重啟 relay-143-lookup").is_none());
+    }
+
+    /// #610：announce 的 managed-run 查詢讀不到時，不能先回 200 讓 shim 直送並永久略過 watchdog。
+    #[tokio::test]
+    async fn a_transient_relay_watch_admission_error_is_retryable_before_direct_announce() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let to = "relay-610-unknown";
+        let text = "請重試 relay-610-admission";
+        sqlx::query("INSERT INTO bots (id,project_id,name,kind,identity,hook_token,created_at) VALUES ('w1',?,'fixer','claude','cc0','tok-w1',?)")
+            .bind(&env.project_id)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        crate::testing::make_table_unreadable(&app, "runs").await;
+        let (code, body) = announce(&app, to, text).await;
+        let announced = crate::agent_relay::claim(to, text);
+        crate::testing::make_table_readable(&app, "runs").await;
+
+        assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE, "讀不到收件 run 時 shim 必須重試，不能直送：{body}");
+        assert_eq!(body["watch_unavailable"], true, "回應要明確標記 watcher admission 失敗：{body}");
+        assert_eq!(body["retryable"], true, "{body}");
+        assert!(announced.is_none(), "watcher admission 失敗時不能先宣告、放 shim 直送");
+
+        let (retry_code, retry_body) = announce(&app, to, text).await;
+        assert_eq!((retry_code, retry_body), (StatusCode::OK, json!({})), "資料庫恢復後可正常重試");
+        assert!(crate::agent_relay::claim(to, text).is_some(), "成功重試才記下直送 announce");
     }
 }
 
