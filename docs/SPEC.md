@@ -1110,6 +1110,8 @@ abort 之後照常 flush 出去（但先照下一段等寬限）。要取消排�
 （沒有 `next_flush_at` 的當作現在到期），以 `max(now, next_flush_at)` 為每顆 bot 重建唯一的 timer。直接送出的 409 回應則由呼叫端（或 AGM
 交辦的既有退避）重試。
 
+`emit_turn` 以一次 join 讀取回合與對話 owner；讀取失敗時不發布空 bot id 的事件，按 turn id 去重安排重試。佇列的持久重喚醒仍由重啟掃描所有 queued turn 負責。
+
 `auto_resend=0` 的 turn 同時把 `turns.resend_count` 設到上限：就算退回不認得 `auto_resend` 的舊 binary，也不會被自動重打一次。
 （反過來，`Handed` 這種 verified=0 但可重送的列，退回舊 binary 時會被舊的 `delivery_verified` 閘門擋著不重送——少送不會重複送。）
 
