@@ -58,14 +58,26 @@ fn only_verified_kinds_get_the_actions() {
 }
 
 #[test]
-fn a_long_draft_is_cut_for_display_and_matched_on_the_cut() {
+fn a_long_draft_is_cut_for_display_but_identified_by_full_text_and_run_pane() {
     let long = "字".repeat(DRAFT_SHOWN_CHARS + 20);
     let (text, cut) = shown(&long);
     assert_eq!(text.chars().count(), DRAFT_SHOWN_CHARS);
     assert!(cut);
-    assert!(same_draft(&text, &long));
-    assert!(!same_draft(&text, &format!("x{long}")));
+    let token = draft_token("run-1", "pane-1", &long);
+    assert_eq!(token.len(), 64);
+    assert!(same_draft(&token, "run-1", "pane-1", &long));
+    assert!(!same_draft(&token, "run-1", "pane-1", &format!("{long}changed suffix")));
+    assert!(!same_draft(&token, "run-2", "pane-1", &long));
+    assert!(!same_draft(&token, "run-1", "pane-2", &long));
     assert_eq!(shown("短短一句"), ("短短一句".into(), false));
+}
+
+#[test]
+fn a_full_draft_token_changes_when_only_the_unshown_suffix_changes() {
+    let prefix = "a".repeat(DRAFT_SHOWN_CHARS);
+    let one = draft_token("run-1", "pane-1", &format!("{prefix}suffix one"));
+    let two = draft_token("run-1", "pane-1", &format!("{prefix}suffix two"));
+    assert_ne!(one, two);
 }
 
 // ---- 走 prompt API：fake herdr 的框 ----
@@ -153,6 +165,11 @@ fn conflict(r: LcResult<PromptOut>) -> Value {
     }
 }
 
+async fn current_draft_token(f: &Fx, crid: &str) -> String {
+    let body = conflict(f.send("unused", crid, None).await);
+    body["draft_token"].as_str().expect("composer_busy includes a full-draft token").to_string()
+}
+
 /// 以前網頁只拿到「清掉或送出之後再送一次」，看不到框裡是什麼、也沒地方處理（2026-09-26 w16T:p3）。
 #[tokio::test]
 async fn a_busy_box_says_what_is_in_it_and_what_can_be_done() {
@@ -161,9 +178,48 @@ async fn a_busy_box_says_what_is_in_it_and_what_can_be_done() {
     assert_eq!(body["reason"], "composer_busy", "{body}");
     assert_eq!(body["draft"], "一段留在框裡的假草稿", "{body}");
     assert_eq!(body["draft_truncated"], false, "{body}");
+    assert_eq!(body["draft_token"].as_str().unwrap().len(), 64, "{body}");
     assert_eq!(body["draft_actions"], json!(["submit", "clear"]), "{body}");
     assert_eq!(f.turns().await, 0);
     assert!(f.keys().is_empty() && f.typed() == 0, "只看、不按");
+}
+
+/// A suffix changed after the 409 cannot be authorized by the display prefix alone.
+#[tokio::test]
+async fn an_unseen_long_suffix_change_blocks_submit_even_when_the_prefix_matches() {
+    let original = format!("{}suffix one", "a".repeat(DRAFT_SHOWN_CHARS));
+    let changed = format!("{}suffix two", "a".repeat(DRAFT_SHOWN_CHARS));
+    let f = idle("claude", &[&original], true).await;
+    let body = conflict(f.send("unused", "observe", None).await);
+    assert_eq!(body["draft"], "a".repeat(DRAFT_SHOWN_CHARS));
+    let old_token = body["draft_token"].as_str().unwrap().to_string();
+
+    f.env.herdr.live.lock().unwrap().get_mut("pane-d").unwrap().composer = vec![changed];
+    let result = submit(&f.env.app, &f.bot_id, &old_token, "submit-long").await;
+    let body = conflict(result);
+    assert_eq!(body["reason"], "draft_changed", "{body}");
+    assert_ne!(body["draft_token"], old_token, "the changed suffix gets a different token");
+    assert!(f.keys().is_empty(), "suffix mismatch must not send Enter");
+    assert_eq!(f.turns().await, 0);
+}
+
+/// The same hidden-suffix mismatch must not clear B while replacing it with the user's prompt.
+#[tokio::test]
+async fn an_unseen_long_suffix_change_blocks_clear_even_when_the_prefix_matches() {
+    let original = format!("{}suffix one", "a".repeat(DRAFT_SHOWN_CHARS));
+    let changed = format!("{}suffix two", "a".repeat(DRAFT_SHOWN_CHARS));
+    let f = idle("claude", &[&original], false).await;
+    let body = conflict(f.send("unused", "observe", None).await);
+    assert_eq!(body["draft"], "a".repeat(DRAFT_SHOWN_CHARS));
+    let old_token = body["draft_token"].as_str().unwrap().to_string();
+
+    f.env.herdr.live.lock().unwrap().get_mut("pane-d").unwrap().composer = vec![changed.clone()];
+    let body = conflict(f.send("my prompt", "clear-long", Some(&old_token)).await);
+    assert_eq!(body["reason"], "draft_changed", "{body}");
+    assert_ne!(body["draft_token"], old_token, "the changed suffix gets a different token");
+    assert!(f.keys().is_empty() && f.typed() == 0, "must neither clear nor type over the changed suffix");
+    assert_eq!(f.composer(), [changed]);
+    assert_eq!(f.turns().await, 0);
 }
 
 /// 清掉再送我這則：按一次清框鍵、重讀是空框，才照一般流程打字送出；框裡只剩（送出去的）我這則。
@@ -171,7 +227,8 @@ async fn a_busy_box_says_what_is_in_it_and_what_can_be_done() {
 async fn clearing_the_confirmed_draft_then_sends_the_prompt() {
     for kind in ["claude", "codex", "grok"] {
         let f = idle(kind, &["一段留在框裡的假草稿"], false).await;
-        let out = f.send("我自己要送的", "c1", Some("一段留在框裡的假草稿")).await.unwrap_or_else(|e| panic!("{kind}: {e:?}"));
+        let token = current_draft_token(&f, "observe").await;
+        let out = f.send("我自己要送的", "c1", Some(&token)).await.unwrap_or_else(|e| panic!("{kind}: {e:?}"));
         assert!(out.delivery == "ok" || out.delivery == "unverified", "{kind}: {}", out.delivery);
         assert_eq!(f.keys().first(), Some(&json!(["ctrl+c"])), "{kind}: 先清框");
         assert_eq!(f.typed(), 1, "{kind}");
@@ -197,11 +254,12 @@ async fn a_draft_that_changed_is_neither_cleared_nor_typed_over() {
 #[tokio::test]
 async fn a_draft_that_will_not_clear_blocks_the_prompt() {
     let f = idle("claude", &["一段留在框裡的假草稿"], false).await;
+    let token = current_draft_token(&f, "observe").await;
     let live = f.env.herdr.live.clone();
     super::super::race_point::arm("draft_after_clear_key", &f.bot_id, move || async move {
         live.lock().unwrap().get_mut("pane-d").unwrap().composer = vec!["清不掉的殘字".into()];
     });
-    let body = conflict(f.send("我自己要送的", "c1", Some("一段留在框裡的假草稿")).await);
+    let body = conflict(f.send("我自己要送的", "c1", Some(&token)).await);
     assert_eq!(body["reason"], "draft_uncleared", "{body}");
     assert_eq!(body["sent"], false, "{body}");
     assert_eq!(body["draft"], "清不掉的殘字", "{body}");
@@ -212,8 +270,10 @@ async fn a_draft_that_will_not_clear_blocks_the_prompt() {
 /// 框本來就空了（使用者已經在終端清掉）：沒有東西要清，不按 `ctrl+c`——空框的 `ctrl+c` 是「再按一次離開」。
 #[tokio::test]
 async fn an_empty_box_gets_no_clear_key() {
-    let f = idle("claude", &[], false).await;
-    f.send("我自己要送的", "c1", Some("一段留在框裡的假草稿")).await.unwrap();
+    let f = idle("claude", &["一段留在框裡的假草稿"], false).await;
+    let token = current_draft_token(&f, "observe").await;
+    f.env.herdr.live.lock().unwrap().get_mut("pane-d").unwrap().composer.clear();
+    f.send("我自己要送的", "c1", Some(&token)).await.unwrap();
     assert_eq!(f.typed(), 1);
     assert!(!f.keys().iter().any(|k| k == &json!(["ctrl+c"])), "{:?}", f.keys());
 }
@@ -222,7 +282,8 @@ async fn an_empty_box_gets_no_clear_key() {
 #[tokio::test]
 async fn submitting_the_draft_presses_enter_and_opens_a_proven_turn() {
     let f = idle("claude", &["一段留在框裡的假草稿"], true).await;
-    let out = submit(&f.env.app, &f.bot_id, "一段留在框裡的假草稿", "s1").await.unwrap();
+    let token = current_draft_token(&f, "observe").await;
+    let out = submit(&f.env.app, &f.bot_id, &token, "s1").await.unwrap();
     assert_eq!(out.delivery, "ok");
     assert_eq!(f.typed(), 0, "不重打字");
     assert_eq!(f.keys(), [json!(Submit::Enter.keys())], "只按一次送出鍵");
@@ -232,16 +293,29 @@ async fn submitting_the_draft_presses_enter_and_opens_a_proven_turn() {
     let delivery: String = sqlx::query_scalar("SELECT delivery FROM turns WHERE id = ?").bind(&out.turn_id).fetch_one(&f.env.app.db).await.unwrap();
     assert_eq!(delivery, "ok");
     // 同一個 request id 再問：拿到同一筆，不再按一次。
-    let again = submit(&f.env.app, &f.bot_id, "一段留在框裡的假草稿", "s1").await.unwrap();
+    let again = submit(&f.env.app, &f.bot_id, &token, "s1").await.unwrap();
     assert_eq!(again.turn_id, out.turn_id);
     assert_eq!(f.keys().len(), 1);
+}
+
+/// A token is tied to its original run and pane, even when the composer text is identical.
+#[tokio::test]
+async fn a_token_from_another_run_and_pane_cannot_submit_this_draft() {
+    let original = idle("claude", &["same draft"], true).await;
+    let token = current_draft_token(&original, "observe").await;
+    let other = idle("claude", &["same draft"], true).await;
+    let body = conflict(submit(&other.env.app, &other.bot_id, &token, "cross-run").await);
+    assert_eq!(body["reason"], "draft_changed", "{body}");
+    assert!(other.keys().is_empty());
+    assert_eq!(other.turns().await, 0);
 }
 
 /// 畫面讀來的字不是原文（這裡：行尾空白被畫面吃掉）：對話裡記 session log 那一則的原文。
 #[tokio::test]
 async fn the_conversation_keeps_the_session_logs_text_not_the_screen_reading() {
     let f = idle("claude", &["尾巴有空白的假草稿   "], true).await;
-    let out = submit(&f.env.app, &f.bot_id, "尾巴有空白的假草稿", "s1").await.unwrap();
+    let token = current_draft_token(&f, "observe").await;
+    let out = submit(&f.env.app, &f.bot_id, &token, "s1").await.unwrap();
     assert_eq!(out.delivery, "ok");
     assert_eq!(f.user_message().await, "尾巴有空白的假草稿   ");
 }
@@ -251,7 +325,8 @@ async fn the_conversation_keeps_the_session_logs_text_not_the_screen_reading() {
 async fn submitting_without_a_session_log_is_unverified() {
     for kind in ["codex", "grok"] {
         let f = idle(kind, &["一段留在框裡的假草稿"], false).await;
-        let out = submit(&f.env.app, &f.bot_id, "一段留在框裡的假草稿", "s1").await.unwrap_or_else(|e| panic!("{kind}: {e:?}"));
+        let token = current_draft_token(&f, "observe").await;
+        let out = submit(&f.env.app, &f.bot_id, &token, "s1").await.unwrap_or_else(|e| panic!("{kind}: {e:?}"));
         assert_eq!(out.delivery, "unverified", "{kind}");
         assert_eq!(f.typed(), 0, "{kind}");
         assert!(f.composer().is_empty(), "{kind}");
@@ -279,8 +354,9 @@ async fn submitting_a_draft_that_changed_or_is_gone_presses_nothing() {
 #[tokio::test]
 async fn an_enter_herdr_refused_withdraws_the_turn() {
     let f = idle("claude", &["一段留在框裡的假草稿"], true).await;
+    let token = current_draft_token(&f, "observe").await;
     f.env.herdr.fail_next("pane.send_keys", tt::Fault::Refuse);
-    match submit(&f.env.app, &f.bot_id, "一段留在框裡的假草稿", "s1").await {
+    match submit(&f.env.app, &f.bot_id, &token, "s1").await {
         Err(LcError::Upstream(m)) => assert!(m.contains("Enter"), "{m}"),
         other => panic!("expected a 502, got {:?}", other.map(|o| o.delivery)),
     }

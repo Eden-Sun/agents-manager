@@ -3502,13 +3502,13 @@ struct PromptIn {
     #[serde(default)]
     start_if_stopped: bool,
     /// 409 `composer_busy` 之後（2026-09-26）：`clear_draft` 先清掉框裡那段再送 `text`，`submit_draft` 改成送出框裡那段
-    /// （按 Enter、不帶 `text`）。兩個都要帶 `expect_draft`＝409 回的 `draft`，框裡換了字就 409 `draft_changed`、不動它。
+    /// （按 Enter、不帶 `text`）。兩個都要帶 `expect_draft_token`＝409 回的完整草稿 token；框裡換了字就 409 `draft_changed`、不動它。
     #[serde(default)]
     clear_draft: bool,
     #[serde(default)]
     submit_draft: bool,
     #[serde(default)]
-    expect_draft: Option<String>,
+    expect_draft_token: Option<String>,
 }
 
 async fn prompt_bot(
@@ -3539,9 +3539,9 @@ async fn prompt_bot(
         return Err(LcError::Bad("clear_draft / submit_draft are for the user's own prompts, not relayed ones".into()));
     }
     let expect = if b.clear_draft || b.submit_draft {
-        match b.expect_draft.as_deref().filter(|d| !d.trim().is_empty()) {
+        match b.expect_draft_token.as_deref().filter(|d| !d.trim().is_empty()) {
             Some(d) => Some(d),
-            None => return Err(LcError::Bad("clear_draft / submit_draft need expect_draft (the draft the 409 showed)".into())),
+            None => return Err(LcError::Bad("clear_draft / submit_draft need expect_draft_token (the token the 409 showed)".into())),
         }
     } else {
         None
@@ -5241,7 +5241,7 @@ mod prompt_route_tests {
     }
 
     async fn call(e: &crate::testing::Env, bot: &str, text: String, crid: &str) -> (StatusCode, Value) {
-        let body = PromptIn { text, client_request_id: Some(crid.into()), attachments: vec![], relay_from: None, ack: false, reply_to: None, send_now: false, start_if_stopped: false, clear_draft: false, submit_draft: false, expect_draft: None };
+        let body = PromptIn { text, client_request_id: Some(crid.into()), attachments: vec![], relay_from: None, ack: false, reply_to: None, send_now: false, start_if_stopped: false, clear_draft: false, submit_draft: false, expect_draft_token: None };
         let resp = match prompt_bot(State(e.app.clone()), Path(bot.to_string()), HeaderMap::new(), Json(body)).await {
             Ok(r) => r,
             Err(err) => err.into_response(),
@@ -6704,7 +6704,7 @@ mod relay_from_auth_tests {
             start_if_stopped: false,
             clear_draft: false,
             submit_draft: false,
-            expect_draft: None,
+            expect_draft_token: None,
         };
         let resp = match prompt_bot(State(app.clone()), Path(to.to_string()), h, Json(body)).await {
             Ok(r) => r,
@@ -6731,7 +6731,7 @@ mod relay_from_auth_tests {
             start_if_stopped: false,
             clear_draft: false,
             submit_draft: false,
-            expect_draft: None,
+            expect_draft_token: None,
         };
         let resp = match prompt_bot(State(app.clone()), Path(to.to_string()), h, Json(body)).await {
             Ok(r) => r,
@@ -6818,7 +6818,7 @@ mod relay_from_auth_tests {
             start_if_stopped: true,
             clear_draft: false,
             submit_draft: false,
-            expect_draft: None,
+            expect_draft_token: None,
         };
         let resp = prompt_bot(State(f.e.app.clone()), Path(stopped.id.clone()), HeaderMap::new(), Json(body)).await.unwrap();
         let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
@@ -6827,7 +6827,7 @@ mod relay_from_auth_tests {
         assert_eq!(stored(&f.e.app, out["message_id"].as_str().unwrap()).await, (Some(f.alfa.clone()), 1));
     }
 
-    /// 框裡的草稿（409 `composer_busy`）只有使用者自己處理：`clear_draft`／`submit_draft` 沒帶 `expect_draft` 是 400，
+    /// 框裡的草稿（409 `composer_busy`）只有使用者自己處理：`clear_draft`／`submit_draft` 沒帶 `expect_draft_token` 是 400，
     /// bot 轉送的也是 400——都在碰 pane 之前擋下，一個鍵都不按。
     #[tokio::test]
     async fn draft_actions_need_the_confirmed_draft_and_the_user_themself() {
@@ -6845,19 +6845,24 @@ mod relay_from_auth_tests {
                 start_if_stopped: false,
                 clear_draft: clear,
                 submit_draft: submit,
-                expect_draft: expect.map(str::to_string),
+                expect_draft_token: expect.map(str::to_string),
             };
             prompt_bot(State(f.e.app.clone()), Path(f.target.clone()), HeaderMap::new(), Json(body))
         };
+        let busy = call(false, false, None, None).await.expect_err("composer_busy");
+        let token = match busy {
+            LcError::Conflict(body) => body["draft_token"].as_str().expect("full draft token").to_string(),
+            other => panic!("expected composer_busy, got {other:?}"),
+        };
         for (clear, submit) in [(true, false), (false, true)] {
-            let err = call(clear, submit, None, None).await.err().expect("no expect_draft");
+            let err = call(clear, submit, None, None).await.expect_err("no expect_draft_token");
             assert!(matches!(err, LcError::Bad(_)), "{err:?}");
-            let err = call(clear, submit, Some("假草稿"), Some(f.alfa.clone())).await.err().expect("relayed");
+            let err = call(clear, submit, Some(&token), Some(f.alfa.clone())).await.expect_err("relayed");
             assert!(matches!(err, LcError::Bad(_)), "{err:?}");
         }
         assert!(f.e.herdr.calls_to("pane.send_keys").is_empty());
         // 帶齊了就真的送出框裡那段（grok：沒有無損證據，unverified）。
-        let resp = call(false, true, Some("假草稿"), None).await.unwrap();
+        let resp = call(false, true, Some(&token), None).await.unwrap();
         let out: Value = serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap()).unwrap();
         assert_eq!(out["delivery"], "unverified", "{out}");
     }

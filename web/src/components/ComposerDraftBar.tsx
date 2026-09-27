@@ -28,10 +28,10 @@ export function ComposerDraftBar({
   const hasMine = mine !== '' || attachments.length > 0
 
   const submitDraft = () => {
-    void sendPrompt(botId, '', [], false, false, { action: 'submit', expect: block.draft })
+    void sendPrompt(botId, '', [], false, false, { action: 'submit', token: block.token })
   }
   const clearAndSend = () => {
-    void sendPrompt(botId, mine, attachments, false, false, { action: 'clear', expect: block.draft }).then((ok) => {
+    void sendPrompt(botId, mine, attachments, false, false, { action: 'clear', token: block.token }).then((ok) => {
       if (ok) onSent()
     })
   }

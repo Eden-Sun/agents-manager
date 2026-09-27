@@ -1482,7 +1482,7 @@ export const useStore = create<StoreState>((set, get) => ({
   async sendPrompt(botId, text, attachments = [], sendNow = false, startIfStopped = false, draft) {
     // 連線斷在 daemon 收下之後（回應遺失）：使用者會再按一次同一句，要拿同一個 crid，daemon 才認得是同一件事而不是再送一次。
     // 只有「沒收到任何回覆」的失敗才沿用；daemon 明確回了（成功或 ApiError）就作廢，下一次是新的動作（#367）。
-    const draftKey = draft ? `:${draft.action}:${draft.expect}` : ''
+    const draftKey = draft ? `:${draft.action}:${draft.token}` : ''
     const reqKey = `send:${botId}:${sendNow ? 1 : 0}:${text}\u0000${attachments.join(',')}${draftKey}`
     const crid = createRequestId(reqKey)
     if (draft) set((s) => markDraftBusy(s, botId, draft.action))
