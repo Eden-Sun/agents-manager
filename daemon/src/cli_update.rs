@@ -55,6 +55,7 @@ const LOCKED_EXIT: i32 = 75;
 const LOCKED_MARK: &str = "AM_CODEX_INSTALL_LOCKED";
 
 /// 識別新式 `process-group-id:nonce` owner；舊版單 PID symlink 沒有足夠資料驗明身份，視為過期。
+/// 比對 command line 上的 nonce，因為 macOS 的 `ps` 不會用 Linux 的 `ps e` 方式輸出環境變數。
 fn lock_owner_check() -> &'static str {
     r#"lock_owner_alive() {
   owner=$1
@@ -64,7 +65,7 @@ fn lock_owner_check() -> &'static str {
   kill -0 "-$pgid" 2>/dev/null || return 1
   members=$(ps -A -o pid= -o pgid= 2>/dev/null | awk -v pgid="$pgid" '$2 == pgid { print $1 }') || return 1
   for member in $members; do
-    cmd=$(ps eww -p "$member" -o command= 2>/dev/null) || continue
+    cmd=$(ps -ww -p "$member" -o command= 2>/dev/null) || continue
     case "$cmd" in *"AM_CODEX_INSTALL_OWNER=$nonce"*) return 0 ;; esac
   done
   return 1
@@ -91,7 +92,7 @@ OUT=$2
 PARENT_PID=$1
 GROUP_ID=$(ps -p "$$" -o pgid= 2>/dev/null | tr -d '[:space:]')
 [ "$GROUP_ID" = "$$" ] || {{ echo "Could not isolate installer process group" >&2; exit 70; }}
-AM_CODEX_INSTALL_OWNER=$LOCK_NONCE
+AM_CODEX_INSTALL_OWNER={nonce}
 export AM_CODEX_INSTALL_OWNER
 {owner_check}
 cleanup() {{
@@ -106,8 +107,9 @@ if ! ln -s "$GROUP_ID:$LOCK_NONCE" "$L" 2>/dev/null; then
   rm -f "$L"
   ln -s "$GROUP_ID:$LOCK_NONCE" "$L" 2>/dev/null || {{ p=$(readlink "$L" 2>/dev/null); echo "{LOCKED_MARK} pid=${{p%%:*}}" >&2; exit {LOCKED_EXIT}; }}
 fi
-eval {inner}
+AM_CODEX_INSTALL_OWNER="$LOCK_NONCE" /bin/sh -c 'trap ":" EXIT; eval "$1"' "AM_CODEX_INSTALL_OWNER=$LOCK_NONCE" {inner}
 "#,
+        nonce = nonce,
         owner_check = lock_owner_check(),
     );
     let worker = crate::hosts::sh_quote(&worker);
@@ -116,12 +118,8 @@ eval {inner}
 LOCK_NONCE='{nonce}'
 OUT=$(mktemp "${{TMPDIR:-/tmp}}/am-codex-install.XXXXXX") || exit 70
 umask 077
-if command -v setsid >/dev/null 2>&1; then
-  AM_CODEX_INSTALL_OWNER="$LOCK_NONCE" nohup setsid /bin/sh -c {worker} am-codex-install "$$" "$OUT" > "$OUT" 2>&1 < /dev/null &
-else
-  set -m
-  AM_CODEX_INSTALL_OWNER="$LOCK_NONCE" nohup /bin/sh -c {worker} am-codex-install "$$" "$OUT" > "$OUT" 2>&1 < /dev/null &
-fi
+# Perl forks a child, puts it in its own process group, then execs the lock worker.
+AM_CODEX_INSTALL_OWNER="$LOCK_NONCE" nohup perl -e 'my $pid = fork(); die "fork: $!" unless defined $pid; if ($pid) {{ waitpid($pid, 0); my $status = $?; exit(($status & 127) ? 128 + ($status & 127) : $status >> 8); }} setpgrp(0, 0) or die "setpgrp: $!"; exec @ARGV or die "exec: $!";' /bin/sh -c {worker} am-codex-install "$$" "$OUT" > "$OUT" 2>&1 < /dev/null &
 worker_pid=$!
 trap 'exit 129' HUP
 trap 'exit 130' INT
@@ -1673,7 +1671,12 @@ mod tests {
         let lock = dir.join("codex-install.lock").display().to_string();
         let installer_pid_file = dir.join("installer.pid");
         let second_ran = dir.join("second-ran");
-        let inner = format!("sleep 2 & echo $! > '{}'; wait", installer_pid_file.display());
+        let release_file = dir.join("release-installer");
+        let inner = format!(
+            "(while [ ! -e '{}' ]; do sleep 0.05; done) & echo $! > '{}'; wait",
+            release_file.display(),
+            installer_pid_file.display()
+        );
 
         let mut control = tokio::process::Command::new("/bin/sh")
             .arg("-s")
@@ -1704,6 +1707,7 @@ mod tests {
         assert!(err.contains(LOCKED_MARK) && err.contains("75"), "{err}");
         assert!(!second_ran.exists(), "the contender must not enter its install section");
 
+        std::fs::write(&release_file, "release").unwrap();
         for _ in 0..300 {
             if unsafe { libc::kill(installer_pid as i32, 0) } != 0 {
                 break;
@@ -1733,7 +1737,12 @@ mod tests {
         let lock = dir.join("codex-install.lock").display().to_string();
         let installer_pid_file = dir.join("installer.pid");
         let second_ran = dir.join("second-ran");
-        let inner = format!("sleep 3 & echo $! > '{}'; wait", installer_pid_file.display());
+        let release_file = dir.join("release-installer");
+        let inner = format!(
+            "(while [ ! -e '{}' ]; do sleep 0.05; done) & echo $! > '{}'; wait",
+            release_file.display(),
+            installer_pid_file.display()
+        );
 
         let mut control = tokio::process::Command::new("/bin/sh")
             .arg("-s")
@@ -1773,6 +1782,7 @@ mod tests {
         let second_was_excluded = second.as_ref().is_err_and(|err| err.contains(LOCKED_MARK) && err.contains("75"));
         let second_did_not_run = !second_ran.exists();
 
+        std::fs::write(&release_file, "release").unwrap();
         for _ in 0..500 {
             if unsafe { libc::kill(installer_pid as i32, 0) } != 0 {
                 break;
@@ -1829,17 +1839,45 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let lock = dir.join("codex-install.lock").display().to_string();
         let marker = dir.join("installer-ran");
+        let pid_file = dir.join("unrelated-sleep.pid");
 
-        let mut unrelated = tokio::process::Command::new("setsid")
-            .arg("/bin/sleep")
-            .arg("30")
+        let mut unrelated = tokio::process::Command::new("perl")
+            .arg("-e")
+            .arg("my $pid = fork(); die \"fork: $!\" unless defined $pid; if ($pid) { waitpid($pid, 0); my $status = $?; exit(($status & 127) ? 128 + ($status & 127) : $status >> 8); } setpgrp(0, 0) or die \"setpgrp: $!\"; exec @ARGV or die \"exec: $!\";")
+            .arg("/bin/sh")
+            .arg("-c")
+            .arg(format!("echo $$ > '{}'; exec /bin/sleep 30", pid_file.display()))
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .kill_on_drop(true)
             .spawn()
             .unwrap();
-        let unrelated_pgid = unrelated.id().unwrap();
+        for _ in 0..200 {
+            if pid_file.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let unrelated_pid: i32 = match std::fs::read_to_string(&pid_file) {
+            Ok(pid) => pid.trim().parse().unwrap(),
+            Err(error) => {
+                let _ = unrelated.start_kill();
+                let _ = unrelated.wait().await;
+                panic!("unrelated process group did not start: {error}");
+            }
+        };
+        let unrelated_pgid = unsafe { libc::getpgid(unrelated_pid) };
+        if unrelated_pgid <= 0 {
+            unsafe { libc::kill(unrelated_pid, libc::SIGKILL) };
+            let _ = unrelated.wait().await;
+            panic!("the unrelated process group must still be alive");
+        }
+        if unrelated_pgid == unsafe { libc::getpgrp() } {
+            unsafe { libc::kill(unrelated_pid, libc::SIGKILL) };
+            let _ = unrelated.wait().await;
+            panic!("Perl setpgrp must isolate the unrelated process group");
+        }
         std::os::unix::fs::symlink(format!("{unrelated_pgid}:old-owner-nonce"), &lock).unwrap();
 
         let probe = local_sh(&probe_script(&lock), Duration::from_secs(5)).await.unwrap();
@@ -1848,7 +1886,7 @@ mod tests {
         let acquired = contender.is_ok();
         let installer_ran = marker.exists();
 
-        unrelated.start_kill().unwrap();
+        unsafe { libc::kill(unrelated_pid, libc::SIGKILL) };
         unrelated.wait().await.unwrap();
         std::fs::remove_dir_all(&dir).ok();
 
@@ -1865,10 +1903,13 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let lock = dir.join("codex-install.lock").display().to_string();
         let marker = dir.join("second-ran");
+        let release_file = dir.join("release-installer");
 
-        let first = tokio::process::Command::new("/bin/sh").arg("-c").arg(locked_script(&lock, "sleep 1")).spawn().unwrap();
+        let inner = format!("while [ ! -e '{}' ]; do sleep 0.05; done", release_file.display());
+        let first = tokio::process::Command::new("/bin/sh").arg("-c").arg(locked_script(&lock, &inner)).spawn().unwrap();
         assert!(crate::testing::eventually!(std::fs::symlink_metadata(&lock).is_ok()), "第一個要先拿到鎖");
-        assert!(parse_probe(&local_sh(&probe_script(&lock), Duration::from_secs(5)).await.unwrap()).unwrap(), "拿著的時候探測是 busy");
+        let probe = local_sh(&probe_script(&lock), Duration::from_secs(5)).await.unwrap();
+        assert!(parse_probe(&probe).unwrap(), "拿著的時候探測是 busy: {probe}");
 
         let second = local_sh(&locked_script(&lock, &format!("touch '{}'", marker.display())), Duration::from_secs(5)).await;
         let err = second.expect_err("鎖被拿著，第二個不能跑");
@@ -1876,6 +1917,7 @@ mod tests {
         assert!(matches!(classify_install_error(err), InstallError::Locked(_)));
         assert!(!marker.exists(), "第二個的指令一行都沒跑");
 
+        std::fs::write(&release_file, "release").unwrap();
         assert!(first.wait_with_output().await.unwrap().status.success());
         assert!(std::fs::symlink_metadata(&lock).is_err(), "跑完放掉鎖");
         assert!(!parse_probe(&local_sh(&probe_script(&lock), Duration::from_secs(5)).await.unwrap()).unwrap());
