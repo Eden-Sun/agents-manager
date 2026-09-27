@@ -246,6 +246,9 @@ const RECOVER_ENUM_RETRY_INITIAL: Duration = Duration::from_secs(1);
 const RECOVER_ENUM_RETRY_MAX: Duration = Duration::from_secs(60);
 /// DB 恢復後仍低頻巡查，讓稍後可讀的未收尾列也能在這次 daemon 執行期間被接手。
 const RECOVER_ENUM_SWEEP: Duration = Duration::from_secs(5 * 60);
+/// 終態 DB 寫入暫時失敗時保留 host slot，在目前 daemon 內持續補交。
+const FINISH_RETRY_INITIAL: Duration = Duration::from_secs(1);
+const FINISH_RETRY_MAX: Duration = Duration::from_secs(60);
 
 /// 這顆 daemon 行程的識別。`cli_updates.boot` 不是它的 `running` 列＝上一顆留下的孤兒（#564）。
 fn boot() -> &'static str {
@@ -313,21 +316,61 @@ async fn set_phase(app: &App, id: &str, phase: &str, from: Option<&str>) {
 }
 
 /// 結果寫進那一列（`running` → `done`／`failed`），之後這台才能再開一次。
-async fn finish_row(app: &App, id: &str, v: &Value) {
+/// DB 暫時不可寫時保持 `running`／`finishing` 並在本行程內退避重試；不會先發終態事件或放掉 host slot。
+async fn finish_row(app: &App, id: &str, v: &Value) -> Option<Value> {
     let status = if v["ok"] == json!(true) { "done" } else { "failed" };
-    let now = crate::db::now();
-    let res = sqlx::query(
-        "UPDATE cli_updates SET status = ?, result = ?, updated_at = ?, finished_at = ? WHERE id = ? AND status = 'running'",
-    )
-    .bind(status)
-    .bind(v.to_string())
-    .bind(&now)
-    .bind(&now)
-    .bind(id)
-    .execute(&app.db)
-    .await;
-    if let Err(e) = res {
-        tracing::error!(update_id = id, error = %e, "could not record the cli-update result; the host stays locked until the next restart reconciles it");
+    let serialized = v.to_string();
+    let mut retry = FINISH_RETRY_INITIAL;
+    loop {
+        set_phase(app, id, "finishing", None).await;
+        let now = crate::db::now();
+        let res = sqlx::query(
+            "UPDATE cli_updates SET status = ?, result = ?, updated_at = ?, finished_at = ? WHERE id = ? AND status = 'running'",
+        )
+        .bind(status)
+        .bind(&serialized)
+        .bind(&now)
+        .bind(&now)
+        .bind(id)
+        .execute(&app.db)
+        .await;
+        match res {
+            Ok(result) if result.rows_affected() == 1 => return Some(v.clone()),
+            Ok(result) => {
+                let stored: Result<Option<(String, Option<String>)>, sqlx::Error> = sqlx::query_as(
+                    "SELECT status, result FROM cli_updates WHERE id = ?",
+                )
+                .bind(id)
+                .fetch_optional(&app.db)
+                .await;
+                match stored {
+                    Ok(Some((stored_status, Some(stored_result)))) if stored_status == "done" || stored_status == "failed" => {
+                        return match serde_json::from_str(&stored_result) {
+                            Ok(value) => Some(value),
+                            Err(error) => {
+                                tracing::error!(update_id = id, error = %error, "the competing cli-update terminal result is unreadable; suppressing the local result");
+                                None
+                            }
+                        };
+                    }
+                    Ok(Some((stored_status, _))) if stored_status == "running" => {
+                        tracing::error!(update_id = id, rows_affected = result.rows_affected(), "cli-update terminal CAS made no change while the row is still running; retaining the host slot and retrying");
+                    }
+                    Ok(_) => {
+                        tracing::warn!(update_id = id, "cli-update row was removed or superseded before terminal commit; suppressing the local result");
+                        return None;
+                    }
+                    Err(error) => {
+                        tracing::error!(update_id = id, error = %error, "could not reread cli-update terminal state; retaining the host slot and retrying");
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::error!(update_id = id, error = %error, "could not record the cli-update result; retaining the host slot and retrying");
+            }
+        }
+        tokio::time::sleep(retry).await;
+        retry = retry.saturating_mul(2).min(FINISH_RETRY_MAX);
     }
 }
 
@@ -436,8 +479,12 @@ pub async fn start(
         use futures::FutureExt as _;
         let res = std::panic::AssertUnwindSafe(run(&app2, runner.as_ref(), &host2, &id2, &target2)).catch_unwind().await;
         if res.is_err() {
-            // `run` 只在收尾時寫結果；中途 panic 的話那一列還是 `running`，這台就再也開不了。
-            finish_row(&app2, &id2, &json!({"ok": false, "reason": "internal_error", "error": "安裝流程中途異常結束，沒有重啟任何 bot；看 daemon.log"})).await;
+            // 中途 panic 也要等終態寫進 DB 後才告訴 UI；finish_row 會在目前行程內保留 retry debt。
+            let failed = json!({"update_id": id2, "host": host2, "kind": "codex", "target_version": target2,
+                "ok": false, "reason": "internal_error", "error": "安裝流程中途異常結束，沒有重啟任何 bot；看 daemon.log"});
+            if let Some(durable) = finish_row(&app2, &id2, &failed).await {
+                app2.emit("cli_update_done", durable).await;
+            }
         }
     });
     Ok(json!({"update_id": update_id, "host": host, "kind": "codex", "target_version": target, "started": true}))
@@ -464,8 +511,11 @@ pub async fn run(app: &Arc<App>, runner: &dyn Runner, host: &str, update_id: &st
         v
     };
     let finish = |v: Value| async move {
-        // 結果先落進 DB 才推事件、才放這台的名額（#564）。
-        finish_row(app, update_id, &v).await;
+        // 結果先落進 DB 才推事件、才放這台的名額（#564、#577）。
+        let Some(v) = finish_row(app, update_id, &v).await else {
+            return json!({"update_id": update_id, "host": host, "kind": "codex", "target_version": target,
+                "ok": false, "reason": "superseded", "error": "終態列已不存在或已被其他流程取代；沒有發布本地結果"});
+        };
         if v["ok"] == json!(false) {
             tracing::warn!(host, reason = %v["reason"], error = %v["error"], "codex 升級沒有完成，沒有重啟任何 bot");
             log_line(app, &format!("[{update_id}] 結束：失敗 {} {}", v["reason"], v["error"]));
@@ -692,7 +742,10 @@ pub async fn recover(app: &Arc<App>, runner: &dyn Runner, update_id: &str, host:
         v
     };
     let finish = |v: Value| async move {
-        finish_row(app, update_id, &v).await;
+        let Some(v) = finish_row(app, update_id, &v).await else {
+            return json!({"update_id": update_id, "host": host, "kind": "codex", "target_version": target,
+                "recovered": true, "ok": false, "reason": "superseded", "error": "終態列已不存在或已被其他流程取代；沒有發布本地結果"});
+        };
         log_line(app, &format!("[{update_id}] 重啟後接手收尾：ok={} {} {}", v["ok"], v["reason"], v["error"]));
         app.emit("cli_update_done", v.clone()).await;
         v
@@ -823,6 +876,8 @@ mod tests {
         hold: Duration,
         /// 有的話，安裝等到它放行才回（測途中換主機用）。
         gate: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+        /// 有的話，重啟請求記錄後先停住，讓測試在終局寫入前安排 DB 競態。
+        restart_gate: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
         /// 批次走真的 `bulk_restart::spawn_scoped`（#566：要測跟正在跑的那一批怎麼互動）。
         real_restart: bool,
     }
@@ -840,6 +895,7 @@ mod tests {
                 restarts: Mutex::new(Vec::new()),
                 hold: Duration::ZERO,
                 gate: Mutex::new(None),
+                restart_gate: Mutex::new(None),
                 real_restart: false,
             })
         }
@@ -889,6 +945,10 @@ mod tests {
         fn restart<'a>(&'a self, app: &'a Arc<App>, scope: Scope) -> BoxFuture<'a, anyhow::Result<Value>> {
             Box::pin(async move {
                 self.restarts.lock().unwrap().push((scope.kind.clone(), scope.host.clone()));
+                let gate = self.restart_gate.lock().unwrap().take();
+                if let Some(gate) = gate {
+                    gate.await.ok();
+                }
                 if self.real_restart {
                     return crate::bulk_restart::spawn_scoped(app, Some(&scope)).await;
                 }
@@ -919,11 +979,199 @@ mod tests {
         out
     }
 
+    async fn seed_running(app: &Arc<App>, id: &str, host: &str, target: &str) {
+        let now = db::now();
+        sqlx::query(
+            "INSERT INTO cli_updates (id, host, kind, target_version, status, phase, boot, started_at, updated_at)
+             VALUES (?, ?, 'codex', ?, 'running', 'starting', ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(host)
+        .bind(target)
+        .bind(boot())
+        .bind(&now)
+        .bind(&now)
+        .execute(&app.db)
+        .await
+        .unwrap();
+    }
+
+    async fn fail_terminal_updates(app: &Arc<App>) {
+        sqlx::query(
+            "CREATE TRIGGER fail_cli_update_terminal BEFORE UPDATE OF status ON cli_updates
+             WHEN NEW.status IN ('done', 'failed')
+             BEGIN SELECT RAISE(ABORT, 'transient terminal write failure'); END",
+        )
+        .execute(&app.db)
+        .await
+        .unwrap();
+    }
+
+    async fn restore_terminal_updates(app: &Arc<App>) {
+        sqlx::query("DROP TRIGGER fail_cli_update_terminal")
+            .execute(&app.db)
+            .await
+            .unwrap();
+    }
+
+    async fn assert_slot_is_held(app: &Arc<App>, host: &str) {
+        let now = db::now();
+        let err = sqlx::query(
+            "INSERT INTO cli_updates (id, host, kind, target_version, status, phase, boot, started_at, updated_at)
+             VALUES ('slot-probe', ?, 'codex', '0.157.0', 'running', 'starting', ?, ?, ?)",
+        )
+        .bind(host)
+        .bind(boot())
+        .bind(&now)
+        .bind(&now)
+        .execute(&app.db)
+        .await
+        .expect_err("the running update must retain the host slot until its terminal result commits");
+        assert!(err.as_database_error().is_some_and(|e| e.is_unique_violation()), "{err}");
+    }
+
+    async fn assert_slot_is_released(app: &Arc<App>, host: &str) {
+        let now = db::now();
+        sqlx::query(
+            "INSERT INTO cli_updates (id, host, kind, target_version, status, phase, boot, started_at, updated_at)
+             VALUES ('slot-probe', ?, 'codex', '0.157.0', 'running', 'starting', ?, ?, ?)",
+        )
+        .bind(host)
+        .bind(boot())
+        .bind(&now)
+        .bind(&now)
+        .execute(&app.db)
+        .await
+        .expect("terminal commit must release the host slot");
+    }
+
+    async fn row_phase(app: &Arc<App>, id: &str) -> String {
+        sqlx::query_scalar("SELECT phase FROM cli_updates WHERE id = ?")
+            .bind(id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_successful_terminal_write_is_retried_before_done_and_releases_the_slot() {
+        let env = crate::testing::env().await;
+        let pending = crate::codex_update::pending_text(Some("0.155.1"), "0.157.0");
+        let (_bot, _run) = codex_bot_with_notice(&env, "cx", &pending).await;
+        seed_running(&env.app, "u-finish-ok", "local", "0.157.0").await;
+        let fake = Fake::new(&["codex-cli 0.155.1", "codex-cli 0.157.0"], Ok("installed"));
+        let (release, gate) = tokio::sync::oneshot::channel();
+        *fake.restart_gate.lock().unwrap() = Some(gate);
+        let mut rx = env.app.subscribe();
+        let (app, f) = (env.app.clone(), fake.clone());
+        let task = tokio::spawn(async move {
+            super::run(&app, f.as_ref(), "local", "u-finish-ok", "0.157.0").await
+        });
+
+        assert!(crate::testing::eventually!(fake.restarts().len() == 1), "run must reach the terminal path");
+        fail_terminal_updates(&env.app).await;
+        release.send(()).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let done_before_commit = done_events(&mut rx);
+        let was_running = row_status(&env.app, "u-finish-ok").await.0 == "running";
+        let phase_while_owed = row_phase(&env.app, "u-finish-ok").await;
+        assert_slot_is_held(&env.app, "local").await;
+
+        restore_terminal_updates(&env.app).await;
+        assert!(crate::testing::eventually!(task.is_finished()), "terminal debt should settle after DB recovery");
+        let result = task.await.unwrap();
+        let (status, stored) = row_status(&env.app, "u-finish-ok").await;
+        let done_after_commit = done_events(&mut rx);
+        assert!(done_before_commit.is_empty(), "done must wait for the DB commit: {done_before_commit:?}");
+        assert!(was_running, "the row must remain running while the terminal write is owed");
+        assert_eq!(phase_while_owed, "finishing", "the owed terminal write should be visible in API state");
+        assert_eq!(status, "done");
+        assert_eq!(stored, result);
+        assert_eq!(done_after_commit, [result]);
+        assert_slot_is_released(&env.app, "local").await;
+    }
+
+    #[tokio::test]
+    async fn a_failed_terminal_write_is_retried_before_done_and_releases_the_slot() {
+        let env = crate::testing::env().await;
+        let pending = crate::codex_update::pending_text(Some("0.155.1"), "0.157.0");
+        let (_bot, run) = codex_bot_with_notice(&env, "cx", &pending).await;
+        seed_running(&env.app, "u-finish-failed", "local", "0.157.0").await;
+        let fake = Fake::new(&["codex-cli 0.155.1"], Err("curl: (6) Could not resolve host"));
+        let (release, gate) = tokio::sync::oneshot::channel();
+        *fake.gate.lock().unwrap() = Some(gate);
+        let mut rx = env.app.subscribe();
+        let (app, f) = (env.app.clone(), fake.clone());
+        let task = tokio::spawn(async move {
+            super::run(&app, f.as_ref(), "local", "u-finish-failed", "0.157.0").await
+        });
+
+        assert!(crate::testing::eventually!(fake.installs() == 1), "installer must start before injecting the failure");
+        fail_terminal_updates(&env.app).await;
+        release.send(()).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let done_before_commit = done_events(&mut rx);
+        let was_running = row_status(&env.app, "u-finish-failed").await.0 == "running";
+        let phase_while_owed = row_phase(&env.app, "u-finish-failed").await;
+        assert_slot_is_held(&env.app, "local").await;
+
+        restore_terminal_updates(&env.app).await;
+        assert!(crate::testing::eventually!(task.is_finished()), "failed terminal debt should settle after DB recovery");
+        let result = task.await.unwrap();
+        let (status, stored) = row_status(&env.app, "u-finish-failed").await;
+        let done_after_commit = done_events(&mut rx);
+        assert!(done_before_commit.is_empty(), "failure must wait for the DB commit: {done_before_commit:?}");
+        assert!(was_running, "the row must remain running while the terminal write is owed");
+        assert_eq!(phase_while_owed, "finishing", "the owed terminal write should be visible in API state");
+        assert_eq!(result["reason"], "install_failed");
+        assert_eq!(status, "failed");
+        assert_eq!(stored, result);
+        assert_eq!(done_after_commit, [result]);
+        assert_eq!(notice_of(&env.app, &run).await, Some(pending));
+        assert_slot_is_released(&env.app, "local").await;
+    }
+
+    #[tokio::test]
+    async fn a_terminal_cas_loss_publishes_only_the_durable_result() {
+        let env = crate::testing::env().await;
+        let pending = crate::codex_update::pending_text(Some("0.155.1"), "0.157.0");
+        let (_bot, _run) = codex_bot_with_notice(&env, "cx", &pending).await;
+        seed_running(&env.app, "u-finish-cas", "local", "0.157.0").await;
+        let fake = Fake::new(&["codex-cli 0.155.1", "codex-cli 0.157.0"], Ok("installed"));
+        let (release, gate) = tokio::sync::oneshot::channel();
+        *fake.restart_gate.lock().unwrap() = Some(gate);
+        let mut rx = env.app.subscribe();
+        let (app, f) = (env.app.clone(), fake.clone());
+        let task = tokio::spawn(async move {
+            super::run(&app, f.as_ref(), "local", "u-finish-cas", "0.157.0").await
+        });
+
+        assert!(crate::testing::eventually!(fake.restarts().len() == 1), "run must reach the terminal path");
+        let durable = json!({"update_id": "u-finish-cas", "host": "local", "kind": "codex",
+            "target_version": "0.157.0", "ok": false, "reason": "other_terminalizer", "error": "stored result wins"});
+        let now = db::now();
+        assert_eq!(sqlx::query("UPDATE cli_updates SET status='failed', result=?, updated_at=?, finished_at=? WHERE id=? AND status='running'")
+            .bind(durable.to_string()).bind(&now).bind(&now).bind("u-finish-cas")
+            .execute(&env.app.db).await.unwrap().rows_affected(), 1);
+        release.send(()).unwrap();
+        assert!(crate::testing::eventually!(task.is_finished()), "the terminal CAS result should be reconciled");
+        let result = task.await.unwrap();
+
+        assert_eq!(result, durable, "a lost CAS must return the durable winner, not the local success");
+        let events = done_events(&mut rx);
+        assert_eq!(events.len(), 1, "only one terminal event should be published");
+        assert_eq!(events[0], durable, "only the durable terminal result may be published");
+        let (status, stored) = row_status(&env.app, "u-finish-cas").await;
+        assert_eq!(status, "failed");
+        assert_eq!(stored, durable);
+    }
+
     #[tokio::test]
     async fn a_successful_install_flips_the_notice_and_starts_the_codex_batch_for_that_host() {
         let env = crate::testing::env().await;
         let pending = crate::codex_update::pending_text(Some("0.155.1"), "0.157.0");
         let (_bot, run) = codex_bot_with_notice(&env, "cx", &pending).await;
+        seed_running(&env.app, "u-1", "local", "0.157.0").await;
         let fake = Fake::new(&["codex-cli 0.155.1", "codex-cli 0.157.0"], Ok("installed"));
         let mut rx = env.app.subscribe();
 
@@ -946,6 +1194,7 @@ mod tests {
         let env = crate::testing::env().await;
         let pending = crate::codex_update::pending_text(Some("0.155.1"), "0.157.0");
         let (_bot, run) = codex_bot_with_notice(&env, "cx", &pending).await;
+        seed_running(&env.app, "u-2", "local", "0.157.0").await;
         let fake = Fake::new(&["codex-cli 0.155.1", "codex-cli 0.157.0"], Err("curl: (6) Could not resolve host"));
         let mut rx = env.app.subscribe();
 
@@ -964,6 +1213,7 @@ mod tests {
         let env = crate::testing::env().await;
         let pending = crate::codex_update::pending_text(Some("0.155.1"), "0.157.0");
         let (_bot, run) = codex_bot_with_notice(&env, "cx", &pending).await;
+        seed_running(&env.app, "u-3", "local", "0.157.0").await;
         let fake = Fake::new(&["codex-cli 0.155.1", "codex-cli 0.155.1"], Ok("ok"));
 
         let v = super::run(&env.app, fake.as_ref(), "local", "u-3", "0.157.0").await;
@@ -977,11 +1227,13 @@ mod tests {
     async fn unreadable_versions_before_or_after_restart_nothing() {
         let env = crate::testing::env().await;
         let fake = Fake::new(&[], Ok("ok"));
+        seed_running(&env.app, "u-4", "local", "0.157.0").await;
         let v = super::run(&env.app, fake.as_ref(), "local", "u-4", "0.157.0").await;
         assert_eq!(v["reason"], "version_unreadable");
         assert_eq!(fake.installs(), 0, "不知道現在的版本就不裝");
 
         let fake = Fake::new(&["codex-cli 0.155.1"], Ok("ok"));
+        seed_running(&env.app, "u-5", "local", "0.157.0").await;
         let v = super::run(&env.app, fake.as_ref(), "local", "u-5", "0.157.0").await;
         assert_eq!(v["reason"], "verify_failed");
         assert!(fake.restarts().is_empty());
@@ -1037,6 +1289,7 @@ mod tests {
         let pending = crate::codex_update::pending_text(Some("0.155.1"), "0.157.0");
         let (bot, run) = codex_bot_with_notice(&env, "cx-b", &pending).await;
         sqlx::query("UPDATE bots SET project_id=? WHERE id=?").bind(&pid).bind(&bot).execute(&env.app.db).await.unwrap();
+        seed_running(&env.app, "u-347", host, "0.157.0").await;
         // 第二次讀版本讀到的是 B 已經比較新的 codex：沒有圍籬的話就會被當成「A 升上去了」。
         let fake = Fake::new(&["codex-cli 0.155.1", "codex-cli 0.157.0"], Ok("installed on A"));
         let (release, gate) = tokio::sync::oneshot::channel();
@@ -1111,6 +1364,7 @@ mod tests {
         let env = crate::testing::env().await;
         let pending = crate::codex_update::pending_text(Some("0.155.0"), "0.157.0");
         let (_bot, run) = codex_bot_with_notice(&env, "cx", &pending).await;
+        seed_running(&env.app, "u-6", "local", "0.157.0").await;
         let fake = Fake::new(&["codex-cli 0.155.0", "codex-cli 0.156.0"], Ok("ok"));
         let mut rx = env.app.subscribe();
 
@@ -1131,6 +1385,7 @@ mod tests {
         let env = crate::testing::env().await;
         let pending = crate::codex_update::pending_text(Some("0.155.0"), "0.157.0");
         let (_bot, run) = codex_bot_with_notice(&env, "cx", &pending).await;
+        seed_running(&env.app, "u-7", "local", "0.157.0").await;
         let fake = Fake::new(&["codex-cli 0.155.0", "codex-cli 0.158.0"], Ok("ok"));
 
         let v = super::run(&env.app, fake.as_ref(), "local", "u-7", "0.157.0").await;
@@ -1147,6 +1402,7 @@ mod tests {
         let env = crate::testing::env().await;
         let pending = crate::codex_update::pending_text(Some("0.155.0"), "0.157.0");
         let (_bot, run) = codex_bot_with_notice(&env, "cx", &pending).await;
+        seed_running(&env.app, "u-8", "local", "0.157.0").await;
         let fake = Fake::new(&["codex-cli 0.157.0"], Ok("ok"));
 
         let v = super::run(&env.app, fake.as_ref(), "local", "u-8", "0.157.0").await;
@@ -1374,6 +1630,7 @@ mod tests {
         let env = crate::testing::env().await;
         let pending = crate::codex_update::pending_text(Some("0.155.1"), "0.157.0");
         let (_bot, run) = codex_bot_with_notice(&env, "cx", &pending).await;
+        seed_running(&env.app, "u-9", "local", "0.157.0").await;
         let fake = Arc::new(Fake {
             install: Err(classify_install_error(format!("安裝指令失敗（exit status: 75）：{LOCKED_MARK} pid=4242"))),
             ..Arc::try_unwrap(Fake::new(&["codex-cli 0.155.1"], Ok("x"))).ok().unwrap()
@@ -1531,6 +1788,7 @@ mod tests {
         sqlx::query("UPDATE runs SET update_notice='Update installed · Restart to update' WHERE id=?").bind(&cl_run).execute(&app.db).await.unwrap();
         let pending = crate::codex_update::pending_text(Some("0.155.1"), "0.157.0");
         let (cx, _) = codex_bot_with_notice(&env, "cx", &pending).await;
+        seed_running(&app, "u-566", "local", "0.157.0").await;
         // 這台不認得的身分：重啟在 start 那一步被擋，不真的開 pane。
         sqlx::query("UPDATE bots SET identity='nope' WHERE id IN (?, ?)").bind(&cl.id).bind(&cx).execute(&app.db).await.unwrap();
         let seen = Arc::new(Mutex::new(Vec::<crate::state::WsEvent>::new()));
