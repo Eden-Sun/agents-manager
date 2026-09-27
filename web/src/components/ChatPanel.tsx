@@ -875,8 +875,8 @@ function Composer({
             </button>
           ) : null}
           {state.inFlightTurnId ? (
-            <button type="button" className="mini-btn" title="請 Bot 中斷目前回覆，Bot 仍保持啟動" onClick={() => void interruptBot(botId)}>
-              中斷回覆
+            <button type="button" className="mini-btn" title="送一個 Esc 請 Bot 中斷目前回覆，Bot 仍保持啟動" onClick={() => void interruptBot(botId)}>
+              ESC 中斷
             </button>
           ) : null}
           {state.inFlightTurnId && pending.trim() ? (
@@ -920,10 +920,10 @@ function Composer({
               type="button"
               className="mini-btn danger"
               disabled={aborting}
-              title="不等 agent 回應，直接把這回合標成失敗並解開輸入框。Bot 仍保持啟動——它那頭可能還在跑。"
+              title="對話卡住、送不出字時用這顆：不等 agent 回應，直接把這回合標成失敗並解開輸入框。Bot 仍保持啟動——它那頭可能還在跑。"
               onClick={() => void abortBot(botId)}
             >
-              {aborting ? '中止中…' : '強制中止'}
+              {aborting ? '解除中…' : '解除卡對話'}
             </button>
           ) : null}
         </div>
