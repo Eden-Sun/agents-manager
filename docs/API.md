@@ -578,7 +578,7 @@ bot 或 active Run 不存在 404。
 
 ### `GET /api/bots/{id}/local-image?path=<路徑>`
 對話 Markdown 裡的本機圖片（`![](docs/shot.png)`、`/Users/…/x.png`、`file://…`）。相對路徑先以該 bot 的工作目錄（`bots.cwd`，child 的 worktree）為底、那裡沒有再退回**專案目錄**；
-字面路徑讀不到時再試 `%XX` 解碼後的（Markdown 渲染會把中文檔名、空白編碼）。**允許範圍一律是專案目錄**：符號連結解開後仍須在專案目錄內，副檔名限 `png/jpg/jpeg/gif/webp`（不含 svg），≤ 20 MiB。回圖片位元組與對應 `Content-Type`。
+字面路徑讀不到時再試 `%XX` 解碼後的（Markdown 渲染會把中文檔名、空白編碼）。**允許範圍一律是專案目錄**：符號連結解開後仍須在專案目錄內，副檔名限 `png/jpg/jpeg/gif/webp`（不含 svg），≤ 20 MiB；檢查大小後又長大的檔案也會在讀取上限被拒絕。回圖片位元組與對應 `Content-Type`。
 專案外、非圖片、非一般檔案（含 FIFO）、不存在、太大、遠端主機的專案一律 `404 {"what":"image"}`；缺 `path` 400；bot 不存在 404。前端讀不到就把路徑寫成文字，不畫破圖。
 
 ### `GET /api/bots/{id}/outbox`
@@ -596,7 +596,7 @@ bot 或 active Run 不存在 404。
 - `outbox` 或 `<bot_id>` 這兩段是符號連結、或擁有者跟資料目錄不同 → `200 {"files":[],"ttl_secs":3600,"reason":"outbox_untrusted"}`，下載 404：界線不能跟著連結搬到別處（例如 `~/.codex`）。
 
 ### `GET /api/bots/{id}/outbox/file?path=<檔名>`
-下載 outbox 裡的一個檔案。`path` 解開符號連結後必須仍在該 bot 的 outbox 內、是一般檔案、路徑上沒有隱藏目錄、也不是上面「一律不列」的那幾類，否則 `404 {"what":"file"}`（指到 scratchpad 的絕對路徑或符號連結一樣 404）；缺 `path` 400；bot 不存在 404；遠端主機的 bot 409 `outbox_remote`；大於 64 MiB 409 `file_too_large`。
+下載 outbox 裡的一個檔案。`path` 解開符號連結後必須仍在該 bot 的 outbox 內、是一般檔案、路徑上沒有隱藏目錄、也不是上面「一律不列」的那幾類，否則 `404 {"what":"file"}`（指到 scratchpad 的絕對路徑或符號連結一樣 404）；缺 `path` 400；bot 不存在 404；遠端主機的 bot 409 `outbox_remote`；大於 64 MiB，或檢查大小後又長大的檔案，409 `file_too_large`。
 
 一律 `Content-Disposition: attachment`（檔名走 `filename` + RFC 5987 `filename*`），加 `X-Content-Type-Options: nosniff` 與 `Cache-Control: private, no-store`。`Content-Type` 只認白名單（文字/JSON/CSV/TSV/PNG/JPEG/GIF/WebP/PDF），其餘一律 `application/octet-stream`。只讀，沒有刪除或覆寫的端點。
 
