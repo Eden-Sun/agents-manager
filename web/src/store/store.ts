@@ -1542,6 +1542,13 @@ export const useStore = create<StoreState>((set, get) => ({
       // 送了、結果還沒寫進 DB（503）：不是沒送。回 false 會讓輸入框留著同一段字、排隊的被放回去，之後又送一次。
       const un = asUncommittedSend(e)
       if (un) {
+        if (draft) {
+          set((s) =>
+            un.sent === false
+              ? markDraftBusy(s, botId, undefined)
+              : { composerDrafts: withoutKey(s.composerDrafts, botId) },
+          )
+        }
         get().notify('error', uncommittedSendText(un))
         if (un.sent === false) {
           void get().loadMessages(botId)

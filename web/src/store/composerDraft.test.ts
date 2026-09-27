@@ -16,6 +16,8 @@ const json = (body: unknown, status: number) => new Response(JSON.stringify(body
 const busy = (draft: string, reason = 'composer_busy') =>
   json({ error: 'conflict', reason, retryable: true, sent: false, run_id: 'r1', draft, draft_truncated: false, draft_token: `token:${draft}`, draft_actions: ['submit', 'clear'] }, 409)
 const ok = () => json({ turn_id: 't1', message_id: 'm1', delivery: 'ok' }, 200)
+const uncommitted = (sent: boolean | null | undefined) =>
+  json({ error: 'delivery_state_uncommitted', turn_id: 't1', sent, delivery: sent === false ? 'failed' : 'pending' }, 503)
 
 function seed() {
   reset()
@@ -74,6 +76,37 @@ test('送出框裡那段：帶 submit_draft＋expect_draft_token、不帶 text�
   assert.equal('text' in body, false)
   assert.equal(block(), undefined)
   assert.equal(useStore.getState().turns.b1?.t1?.status, 'in_flight', '開了回合，輸入框跟一般送出一樣鎖上')
+})
+
+test('#625：草稿動作遇到送達狀態尚未寫入的 503，所有送達結果都會清 busy', async () => {
+  for (const action of ['submit', 'clear'] as const) {
+    for (const sent of [false, true, null, undefined] as const) {
+      seed()
+      useStore.setState({
+        composerDrafts: {
+          b1: { draft: '終端裡的草稿', token: 'draft-token', truncated: false, actions: ['submit', 'clear'] },
+        },
+      })
+      routeDaemon((r) =>
+        r.path.endsWith('/prompt') ? uncommitted(sent) : json({ messages: [], turns: [], has_more: false }, 200),
+      )
+
+      const accepted = await useStore.getState().sendPrompt('b1', '', [], false, false, { action, token: 'draft-token' })
+      assert.equal(accepted, sent === false ? false : true, `${action}, sent=${String(sent)}: preserve delivery handling`)
+      if (sent === false) {
+        assert.deepEqual(block(), {
+          draft: '終端裡的草稿',
+          token: 'draft-token',
+          truncated: false,
+          actions: ['submit', 'clear'],
+          busy: undefined,
+        }, `${action}: uncommitted but not sent keeps the draft and unlocks every button`)
+      } else {
+        assert.equal(block(), undefined, `${action}: sent or unknown must remove the stale draft bar`)
+      }
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    }
+  }
 })
 
 test('框裡換了字：那一條換成新的草稿、說一聲；框已經空了：收掉那一條', async () => {
