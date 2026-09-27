@@ -1302,6 +1302,9 @@ async fn create_bot(
     });
     let replayed: std::sync::Mutex<Option<(String, String)>> = std::sync::Mutex::new(None);
     let reused: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+    // child（reconcile 認領的）不在 config.toml，但 DB 的 `(project_id, name)` 唯一約束算它們。
+    // 只看 config 會先寫進檔、投影再爆，之後這個專案每次新增／修改都 502（#654）。
+    let db_names = live_bot_names(&app.db, &pid).await.map_err(any_err)?;
     let res = crate::projection::update_and_project(&app.cfg, &app.db, |cfg| {
         let p = cfg
             .projects
@@ -1319,7 +1322,7 @@ async fn create_bot(
                 anyhow::bail!("request-id-reused");
             }
         }
-        let taken = |n: &str| p.bots.iter().any(|x| x.name == n);
+        let taken = |n: &str| db_names.iter().any(|x| x == n) || p.bots.iter().any(|x| x.name == n);
         let name = if taken(&b.name) {
             if !b.name_auto {
                 anyhow::bail!("duplicate-name");
@@ -1376,6 +1379,14 @@ async fn create_bot(
     let mut body = json!({"bot_id": id, "name": name});
     if let Some(value) = remapped { body["remapped"] = value; }
     Ok((StatusCode::OK, Json(body)).into_response())
+}
+
+/// 這個專案還活著的 bot 名，含 child（不在 config.toml 裡的那些）。
+pub(crate) async fn live_bot_names(pool: &sqlx::SqlitePool, project_id: &str) -> Result<Vec<String>, sqlx::Error> {
+    sqlx::query_scalar("SELECT name FROM bots WHERE project_id = ? AND deleted_at IS NULL")
+        .bind(project_id)
+        .fetch_all(pool)
+        .await
 }
 
 /// `cc1-1` → `cc1-2`; `review` → `review-2`. Trims the base to stay within 32 chars.
@@ -7073,6 +7084,32 @@ mod create_bot_idempotency_tests {
 
     async fn bots_in_config(e: &Env) -> usize {
         e.app.cfg.get().await.projects[0].bots.len()
+    }
+
+    /// #654：child 占著 `review` 時，再建同名要 409，config 不能先寫進去。
+    #[tokio::test]
+    async fn creating_a_bot_with_a_childs_name_conflicts_and_the_next_create_still_works() {
+        let e = env().await;
+        seed_project(&e).await;
+        create(&e, json!({"name": "alfa", "kind": "claude"})).await.unwrap();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, managed_by, created_at)
+             VALUES ('child-review',?,'review','claude','[]',0,1,'tok','child',?)",
+        )
+        .bind(&e.project_id)
+        .bind(db::now())
+        .execute(&e.app.db)
+        .await
+        .unwrap();
+        let err = create(&e, json!({"name": "review", "kind": "claude"})).await.unwrap_err();
+        match err {
+            LcError::Conflict(v) => assert_eq!(v["reason"], "bot name already in use"),
+            other => panic!("要 409，不是投影 502：{other:?}"),
+        }
+        let names: Vec<String> = e.app.cfg.get().await.projects[0].bots.iter().map(|b| b.name.clone()).collect();
+        assert_eq!(names, vec!["alfa".to_string()]);
+        let bravo = create(&e, json!({"name": "bravo", "kind": "claude"})).await.unwrap();
+        assert!(db::bot(&e.app.db, bravo["bot_id"].as_str().unwrap()).await.unwrap().is_some());
     }
 
     #[tokio::test]

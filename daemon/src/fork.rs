@@ -140,6 +140,7 @@ async fn finish(app: &Arc<App>, mut op: ForkOp) -> Result<Response, LcError> {
     if op.state == "planned" {
         let used_name = std::sync::Mutex::new(op.name.clone());
         let wanted = op.name.clone();
+        let db_names = crate::api::live_bot_names(&app.db, &source.project_id).await.map_err(up)?;
         let res = crate::projection::update_and_project(&app.cfg, &app.db, |cfg| {
             let p = cfg
                 .projects
@@ -158,7 +159,7 @@ async fn finish(app: &Arc<App>, mut op: ForkOp) -> Result<Response, LcError> {
                 .ok_or_else(|| anyhow::anyhow!("not-in-config"))?;
             let mut src: BotCfg = p.bots[at].clone();
             src.model = src.model.as_deref().map(|m| crate::models::canonical_model(&src.kind, m).to_string());
-            let taken = |n: &str| p.bots.iter().any(|x| x.name == n);
+            let taken = |n: &str| db_names.iter().any(|x| x == n) || p.bots.iter().any(|x| x.name == n);
             let name = if taken(&wanted) { crate::api::next_free_name(&wanted, &taken) } else { wanted.clone() };
             *used_name.lock().unwrap() = name.clone();
             // 設定照抄（模型、強度、身份、env、人設、args）：同一個帳號目錄才找得到那段對話。
@@ -388,6 +389,19 @@ mod tests {
             .await
             .unwrap();
         assert!(text.contains("alfa") && text.contains("sid-alfa"), "{text}");
+    }
+
+    /// #654：預設名 `alfa-fork` 被 child 占著時要跳過，不能寫進 config 再讓投影 502。
+    #[tokio::test]
+    async fn a_fork_skips_a_name_a_child_already_has() {
+        let e = env().await;
+        let src = source_bot(&e, "claude", "alfa", "user").await;
+        source_bot(&e, "claude", "alfa-fork", "child").await;
+        let out = fork(&e, &src, None).await.unwrap();
+        assert_eq!(out["name"], "alfa-fork-1");
+        let names: Vec<String> = e.app.cfg.get().await.projects[0].bots.iter().map(|b| b.name.clone()).collect();
+        assert!(names.contains(&"alfa-fork-1".to_string()), "{names:?}");
+        assert!(!names.contains(&"alfa-fork".to_string()), "child 的名字不該被寫進 config：{names:?}");
     }
 
     /// fork 出來的 bot 排在來源正下方，不是專案最底下（config 陣列位置＝側欄順序）。

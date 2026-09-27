@@ -320,6 +320,9 @@ where
     F: FnOnce(&mut crate::config::ConfigFile) -> Result<T>,
 {
     let _g = PROJECTION.lock().await;
+    // 投影失敗要把這次寫進去的 TOML 退回。child 名字不在 config 裡，唯一約束會在寫檔之後才爆，
+    // 不退的話這個檔之後每一次投影都 502（#654）。
+    let snapshot = store.get().await;
     let db_bots: Vec<db::Bot> =
         db::live_bots(pool).await?.into_iter().filter(|b| b.managed_by == "user").collect();
     let db_projects = db::live_projects(pool).await?;
@@ -347,8 +350,22 @@ where
     // 寫檔已經過了同一份閘門，這裡是投影（`delete_from_config` 也是同一個形狀：拿著 `_g` 直接叫
     // `project_inner`，不重新拿鎖）。DB 沒被別人動過（還在臨界區內），所以 `project_inner` 自己那次
     // `guard_removals` 一定過，純粹是既有流程（補 id、upsert、soft-delete）的重用。
-    project_inner(at, store, pool, None, false).await?;
+    if let Err(e) = project_inner(at, store, pool, None, false).await {
+        match restore_config(at, store, snapshot).await {
+            Ok(()) => tracing::warn!(caller = %at, "投影失敗，config.toml 已退回這次寫入之前"),
+            Err(restore) => {
+                tracing::error!(caller = %at, error = %restore, "投影失敗，而且 config.toml 退不回去");
+                return Err(e.context(format!("config rollback failed: {restore:#}")));
+            }
+        }
+        return Err(e);
+    }
     Ok(out)
+}
+
+/// 把記憶體與磁碟上的 config 退成 `snapshot`。內容相同就不會重寫。
+async fn restore_config(at: &'static Location<'static>, store: &ConfigStore, snapshot: crate::config::ConfigFile) -> Result<()> {
+    store.update_guarded_at(at, |cfg| { *cfg = snapshot; Ok(()) }, |_| Ok(())).await.map(|_| ())
 }
 
 async fn project_inner(
@@ -1128,6 +1145,62 @@ mod tests {
         assert!(std::fs::read_to_string(&path).unwrap().contains("renamed"), "合法的改動要真的落盤");
         let projects = db::live_projects(&pool).await.unwrap();
         assert_eq!(projects[0].label, "renamed", "也要真的投影進 DB");
+
+        pool.close().await;
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// #654：config 寫進一個跟 child 同名的 bot 時，DB 唯一約束會失敗。檔要退回，下一筆無關的修改才寫得進去。
+    #[tokio::test]
+    async fn a_name_collision_with_a_child_rolls_the_config_back() {
+        let dir = std::env::temp_dir().join(format!("am-uap-child-{}", db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
+        project_text(&path, &pool, &config_text(&["alfa"])).await.unwrap();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, managed_by, created_at)
+             VALUES ('child-review','p1','review','claude','[]',0,1,'tok','child',?)",
+        )
+        .bind(db::now())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let store = ConfigStore::load(path.clone()).await.unwrap();
+
+        let err = update_and_project(&store, &pool, |cfg| {
+            let mut bot = cfg.projects[0].bots[0].clone();
+            bot.id = Some("user-review".into());
+            bot.name = "review".into();
+            cfg.projects[0].bots.push(bot);
+            Ok(())
+        })
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("UNIQUE"), "{err}");
+        let cfg_names: Vec<String> = store.get().await.projects[0].bots.iter().map(|b| b.name.clone()).collect();
+        assert_eq!(cfg_names, vec!["alfa".to_string()], "撞名之後 config 不能留下 review");
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("name = \"review\""), "磁碟上的 TOML 也不能留下 review");
+        let names: Vec<String> = sqlx::query_scalar("SELECT name FROM bots WHERE project_id = 'p1' AND deleted_at IS NULL ORDER BY name")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(names, vec!["alfa".to_string(), "review".to_string()], "child 還在，使用者那顆沒寫進 DB");
+
+        update_and_project(&store, &pool, |cfg| {
+            let mut bot = cfg.projects[0].bots[0].clone();
+            bot.id = Some("user-bravo".into());
+            bot.name = "bravo".into();
+            cfg.projects[0].bots.push(bot);
+            Ok(())
+        })
+        .await
+        .expect("退回之後，無關的新增要投影得成");
+        let names: Vec<String> = sqlx::query_scalar("SELECT name FROM bots WHERE project_id = 'p1' AND deleted_at IS NULL AND managed_by = 'user' ORDER BY name")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(names, vec!["alfa".to_string(), "bravo".to_string()]);
 
         pool.close().await;
         std::fs::remove_dir_all(&dir).unwrap();
