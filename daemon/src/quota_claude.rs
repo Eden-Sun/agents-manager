@@ -508,7 +508,7 @@ async fn run_probe_pane(
     let mut last = String::new();
     while tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(700)).await;
-        last = client.pane_read(&pane_id, "recent_unwrapped", 400).await.map(|r| r.text).unwrap_or_default();
+        last = client.pane_read(&pane_id, "recent_unwrapped", 400).await?.text;
         if let Some((auth, usage)) = split_probe_output(&last) {
             probe.close().await;
             return Ok(PaneRun::Done(auth, usage));
@@ -1029,6 +1029,18 @@ mod tests {
             let out = run_probe_pane(&c, "/tmp", LABEL, json!({}), "true", Duration::from_millis(800)).await.unwrap();
             assert!(matches!(out, PaneRun::TimedOut(_)), "{out:?}");
             assert_eq!(open_labels(&h, 0).await, Vec::<String>::new(), "逾時也要關");
+            std::fs::remove_dir_all(dir).ok();
+        }
+
+        #[tokio::test]
+        async fn an_unreadable_probe_screen_does_not_retype_the_command() {
+            let (h, c, dir) = herdr();
+            h.set_screen("*", "__READ_ERROR__");
+            let result = run_probe_pane(&c, "/tmp", LABEL, json!({}), "true", Duration::from_secs(6)).await;
+            assert!(result.is_err(), "an unreadable pane is not evidence the command was swallowed");
+            assert_eq!(h.calls_to("pane.send_text").len(), 1, "a read failure must not authorize another command");
+            assert_eq!(h.calls_to("pane.send_keys").len(), 1, "no second Enter after an unreadable screen");
+            assert_eq!(open_labels(&h, 0).await, Vec::<String>::new(), "read failure still closes the throwaway workspace");
             std::fs::remove_dir_all(dir).ok();
         }
 
