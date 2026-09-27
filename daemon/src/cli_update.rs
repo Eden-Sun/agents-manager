@@ -259,6 +259,8 @@ const RECOVER_ENUM_SWEEP: Duration = Duration::from_secs(5 * 60);
 /// 終態 DB 寫入暫時失敗時保留 host slot，在目前 daemon 內持續補交。
 const FINISH_RETRY_INITIAL: Duration = Duration::from_secs(1);
 const FINISH_RETRY_MAX: Duration = Duration::from_secs(60);
+const MARK_INSTALLED_RETRY_INITIAL: Duration = Duration::from_secs(1);
+const MARK_INSTALLED_RETRY_MAX: Duration = Duration::from_secs(60);
 
 /// 這顆 daemon 行程的識別。`cli_updates.boot` 不是它的 `running` 列＝上一顆留下的孤兒（#564）。
 fn boot() -> &'static str {
@@ -616,7 +618,7 @@ pub async fn run(app: &Arc<App>, runner: &dyn Runner, host: &str, update_id: &st
     if !app.hosts.is_current(&fence).await {
         return finish(superseded("改通知", json!({"from": before, "to": after}))).await;
     }
-    let notices = mark_installed(app, host, &before, &after).await;
+    let notices = mark_installed_until_durable(app, host, &before, &after).await;
     crate::update_watch::forget_disk_version(host, "codex").await;
     set_phase(app, update_id, "restarting", Some(&before)).await;
     app.emit("cli_update_progress", progress("restarting", json!({"from": before, "to": after}))).await;
@@ -873,7 +875,7 @@ async fn recover_with_registry(
         .await;
     };
     // 跑著的版本優先取通知寫的起點（`mark_installed` 自己會找）；這裡的 `from` 只是最後的退路。
-    let notices = mark_installed(app, host, from.unwrap_or(""), &after).await;
+    let notices = mark_installed_until_durable(app, host, from.unwrap_or(""), &after).await;
     crate::update_watch::forget_disk_version(host, "codex").await;
     finish(done(true, json!({"to": after, "notices_updated": notices, "restart": null,
         "restart_error": "daemon 在安裝途中重啟過，這次沒有自動重啟 bot；按一般的 ⌃⌃ 重啟套用"})))
@@ -925,28 +927,125 @@ fn log_line(app: &App, line: &str) {
     }
 }
 
-/// 那台主機上還寫著「需安裝」的 codex run 改成「已安裝，重啟套用」（批次只收這一種）。回改了幾筆。
+fn notice_versions(notice: &str) -> Vec<String> {
+    notice
+        .split(|c: char| !c.is_ascii_digit() && c != '.')
+        .filter_map(crate::changelog::version_string)
+        .collect()
+}
+
+fn notice_needs_this_install(notice: &str, after: &str) -> bool {
+    if !notice.starts_with(crate::codex_update::NOTICE_PREFIX) {
+        return false;
+    }
+    if notice.contains("需安裝") {
+        return crate::codex_update::pending_to(notice)
+            .and_then(|v| parse_version(&v))
+            .zip(parse_version(after))
+            .is_none_or(|(target, installed)| target <= installed);
+    }
+    if notice.contains("已安裝") {
+        return notice_versions(notice)
+            .first()
+            .and_then(|v| parse_version(v))
+            .zip(parse_version(after))
+            .is_none_or(|(recorded, installed)| recorded < installed);
+    }
+    false
+}
+
+async fn mark_installed_change_is_already_durable(app: &Arc<App>, host: &str, run_id: &str, after: &str) -> anyhow::Result<bool> {
+    let Some(run) = crate::db::run(&app.db, run_id).await? else {
+        return Ok(true);
+    };
+    if !matches!(run.state.as_str(), "starting" | "running" | "stopping") {
+        return Ok(true);
+    }
+    let Some(bot) = crate::db::bot(&app.db, &run.bot_id).await? else {
+        return Ok(true);
+    };
+    if bot.kind != "codex" || crate::db::bot_host(&app.db, &run.bot_id).await? != host {
+        return Ok(true);
+    }
+    let Some(notice) = run.update_notice.as_deref() else {
+        return Ok(true);
+    };
+    if notice.starts_with(crate::codex_update::NOTICE_PREFIX) && notice.contains("需安裝") {
+        let Some(target) = crate::codex_update::pending_to(notice).and_then(|v| parse_version(&v)) else {
+            anyhow::bail!("active Codex run {run_id} still has an unreadable install notice after a lost CAS");
+        };
+        let Some(installed) = parse_version(after) else {
+            anyhow::bail!("installed Codex version {after:?} is not parseable after a lost CAS");
+        };
+        return Ok(target > installed);
+    }
+    if notice.starts_with(crate::codex_update::NOTICE_PREFIX) && notice.contains("已安裝") {
+        let Some(recorded) = notice_versions(notice).first().and_then(|v| parse_version(v)) else {
+            anyhow::bail!("active Codex run {run_id} has an unreadable installed notice after a lost CAS");
+        };
+        let Some(installed) = parse_version(after) else {
+            anyhow::bail!("installed Codex version {after:?} is not parseable after a lost CAS");
+        };
+        return Ok(recorded >= installed);
+    }
+    // The run no longer carries this Codex install handoff, so it cannot be skipped by this operation's restart.
+    Ok(true)
+}
+
+/// 只將通知改成安裝完成；列舉、權威讀取、CAS 寫入或 CAS 衝突驗證失敗時回錯，不能把錯誤當成空名單。
+/// 確認沒有 relevant row 時回 `Ok(0)`，只有這個成功證明的空結果可視為無操作。
 /// 跑著的版本：記憶體裡看過的 → 通知寫的起點 → 安裝前的磁碟版本（這個 process 是裝之前起的，不會比它新）。
-async fn mark_installed(app: &Arc<App>, host: &str, before: &str, after: &str) -> usize {
+async fn mark_installed(app: &Arc<App>, host: &str, before: &str, after: &str) -> anyhow::Result<usize> {
     let mut n = 0;
-    for (run, notice) in pending_runs(app, host).await {
+    for run in crate::db::all_active_runs(&app.db).await? {
+        let Some(notice) = run.update_notice.as_deref() else { continue };
+        if !notice_needs_this_install(notice, after) {
+            continue;
+        }
+        let Some(bot) = crate::db::bot(&app.db, &run.bot_id).await? else { continue };
+        if bot.kind != "codex" || crate::db::bot_host(&app.db, &run.bot_id).await? != host {
+            continue;
+        }
         let running = crate::codex_update::remember_running(&run.id, "", None)
-            .or_else(|| crate::codex_update::pending_from(&notice))
+            .or_else(|| crate::codex_update::pending_from(notice))
+            .or_else(|| notice_versions(notice).get(1).cloned())
             .unwrap_or_else(|| before.to_string());
-        let Some(text) = crate::codex_update::installed_text(after, &running) else { continue };
-        // 只換掉讀到的那一句：這之間巡邏改過就讓巡邏的為準。
-        let res = sqlx::query("UPDATE runs SET update_notice = ? WHERE id = ? AND update_notice = ?")
+        let Some(text) = crate::codex_update::installed_text(after, &running) else {
+            if parse_version(&running).zip(parse_version(after)).is_some_and(|(r, a)| r >= a) {
+                continue;
+            }
+            anyhow::bail!("could not prove Codex run {} no longer needs install notice transition", run.id);
+        };
+        let result = sqlx::query("UPDATE runs SET update_notice = ? WHERE id = ? AND update_notice = ?")
             .bind(&text)
             .bind(&run.id)
-            .bind(&notice)
+            .bind(notice)
             .execute(&app.db)
-            .await;
-        if res.is_ok_and(|r| r.rows_affected() == 1) {
+            .await?;
+        if result.rows_affected() == 1 {
             n += 1;
             app.emit_bot_status(&run.bot_id).await;
+        } else if !mark_installed_change_is_already_durable(app, host, &run.id, after).await? {
+            anyhow::bail!("Codex run {} still needs the installed notice transition after a lost CAS", run.id);
         }
     }
-    n
+    Ok(n)
+}
+
+/// DB 錯誤時維持 cli_updates 的 running 列並退避重試；run/recover 都要等通知轉換可證明持久化後才收尾。
+async fn mark_installed_until_durable(app: &Arc<App>, host: &str, before: &str, after: &str) -> usize {
+    let mut retry = MARK_INSTALLED_RETRY_INITIAL;
+    loop {
+        match mark_installed(app, host, before, after).await {
+            Ok(n) => return n,
+            Err(error) => {
+                tracing::warn!(host, error = %error, "could not durably mark Codex update notices installed; keeping update running and retrying");
+                log_line(app, &format!("codex notice transition for {host} failed; update remains running: {error:#}"));
+                tokio::time::sleep(retry).await;
+                retry = retry.saturating_mul(2).min(MARK_INSTALLED_RETRY_MAX);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1106,6 +1205,200 @@ mod tests {
             .execute(&app.db)
             .await
             .unwrap();
+    }
+
+    #[derive(Clone, Copy)]
+    enum MarkInstalledFailure {
+        RunEnumeration,
+        BotRead,
+        BotHostRead,
+        NoticeWrite,
+        CompareAndSwapLost,
+    }
+
+    async fn install_waits_for_mark_installed_recovery(failure: MarkInstalledFailure) {
+        let env = crate::testing::env().await;
+        let pending = crate::codex_update::pending_text(Some("0.155.1"), "0.157.0");
+        let (_bot, run) = codex_bot_with_notice(&env, "cx-mark-retry", &pending).await;
+        seed_running(&env.app, "u-mark-retry", "local", "0.157.0").await;
+        let fake = Fake::new(&["codex-cli 0.155.1", "codex-cli 0.157.0"], Ok("ok"));
+        let mut rx = env.app.subscribe();
+
+        match failure {
+            MarkInstalledFailure::RunEnumeration => {
+                sqlx::query("ALTER TABLE runs RENAME TO runs_unavailable")
+                    .execute(&env.app.db)
+                    .await
+                    .unwrap();
+            }
+            MarkInstalledFailure::BotRead => {
+                sqlx::query("ALTER TABLE bots RENAME TO bots_unavailable")
+                    .execute(&env.app.db)
+                    .await
+                    .unwrap();
+            }
+            MarkInstalledFailure::BotHostRead => {
+                sqlx::query("ALTER TABLE projects RENAME TO projects_unavailable")
+                    .execute(&env.app.db)
+                    .await
+                    .unwrap();
+            }
+            MarkInstalledFailure::CompareAndSwapLost => {
+                sqlx::query(
+                    "CREATE TRIGGER ignore_update_notice BEFORE UPDATE OF update_notice ON runs
+                     BEGIN SELECT RAISE(IGNORE); END",
+                )
+                .execute(&env.app.db)
+                .await
+                .unwrap();
+            }
+            MarkInstalledFailure::NoticeWrite => {
+                sqlx::query(
+                    "CREATE TRIGGER fail_update_notice BEFORE UPDATE OF update_notice ON runs
+                     BEGIN SELECT RAISE(ABORT, 'transient notice update failure'); END",
+                )
+                .execute(&env.app.db)
+                .await
+                .unwrap();
+            }
+        }
+
+        let app = env.app.clone();
+        let runner = fake.clone();
+        let task = tokio::spawn(async move { super::run(&app, runner.as_ref(), "local", "u-mark-retry", "0.157.0").await });
+        tokio::time::sleep(Duration::from_millis(80)).await;
+
+        let status_before_recovery = row_status(&env.app, "u-mark-retry").await.0;
+        let restarts_before_recovery = fake.restarts();
+        let done_before_recovery = done_events(&mut rx);
+
+        match failure {
+            MarkInstalledFailure::RunEnumeration => {
+                sqlx::query("ALTER TABLE runs_unavailable RENAME TO runs")
+                    .execute(&env.app.db)
+                    .await
+                    .unwrap();
+            }
+            MarkInstalledFailure::BotRead => {
+                sqlx::query("ALTER TABLE bots_unavailable RENAME TO bots")
+                    .execute(&env.app.db)
+                    .await
+                    .unwrap();
+            }
+            MarkInstalledFailure::BotHostRead => {
+                sqlx::query("ALTER TABLE projects_unavailable RENAME TO projects")
+                    .execute(&env.app.db)
+                    .await
+                    .unwrap();
+            }
+            MarkInstalledFailure::CompareAndSwapLost => {
+                sqlx::query("DROP TRIGGER ignore_update_notice")
+                    .execute(&env.app.db)
+                    .await
+                    .unwrap();
+            }
+            MarkInstalledFailure::NoticeWrite => {
+                sqlx::query("DROP TRIGGER fail_update_notice")
+                    .execute(&env.app.db)
+                    .await
+                    .unwrap();
+            }
+        }
+
+        let result = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("the install should continue after SQLite recovers")
+            .expect("the install task should not panic");
+        assert_eq!(status_before_recovery, "running", "DB failure cannot terminalize the update before notice durability");
+        assert!(restarts_before_recovery.is_empty(), "DB failure cannot hand off a restart before notice durability");
+        assert!(done_before_recovery.is_empty(), "DB failure cannot publish success before notice durability");
+        assert_eq!(result["ok"], true, "{result}");
+        assert_eq!(result["notices_updated"], 1, "{result}");
+        assert_eq!(fake.restarts().len(), 1);
+        assert!(notice_of(&env.app, &run).await.unwrap().contains("已安裝"));
+        assert_eq!(row_status(&env.app, "u-mark-retry").await.0, "done");
+        assert_eq!(done_events(&mut rx).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_mark_installed_run_enumeration_failure_waits_for_database_recovery() {
+        install_waits_for_mark_installed_recovery(MarkInstalledFailure::RunEnumeration).await;
+    }
+
+    #[tokio::test]
+    async fn a_mark_installed_bot_read_failure_waits_for_database_recovery() {
+        install_waits_for_mark_installed_recovery(MarkInstalledFailure::BotRead).await;
+    }
+
+    #[tokio::test]
+    async fn a_mark_installed_bot_host_read_failure_waits_for_database_recovery() {
+        install_waits_for_mark_installed_recovery(MarkInstalledFailure::BotHostRead).await;
+    }
+
+    #[tokio::test]
+    async fn a_mark_installed_notice_write_failure_waits_for_database_recovery() {
+        install_waits_for_mark_installed_recovery(MarkInstalledFailure::NoticeWrite).await;
+    }
+
+    #[tokio::test]
+    async fn a_mark_installed_lost_cas_waits_until_the_notice_transition_is_durable() {
+        install_waits_for_mark_installed_recovery(MarkInstalledFailure::CompareAndSwapLost).await;
+    }
+
+    #[tokio::test]
+    async fn recovery_keeps_its_durable_debt_until_mark_installed_succeeds() {
+        let env = crate::testing::env().await;
+        let pending = crate::codex_update::pending_text(Some("0.155.1"), "0.157.0");
+        let (_bot, run) = codex_bot_with_notice(&env, "cx-recover-mark", &pending).await;
+        let orphan = orphan_row(&env.app, "local", "0.157.0", "verifying", Some("0.155.1")).await;
+        let fake = Fake::new(&["codex-cli 0.157.0"], Ok("unused"));
+        let mut rx = env.app.subscribe();
+        sqlx::query(
+            "CREATE TRIGGER fail_update_notice BEFORE UPDATE OF update_notice ON runs
+             BEGIN SELECT RAISE(ABORT, 'transient notice update failure'); END",
+        )
+        .execute(&env.app.db)
+        .await
+        .unwrap();
+
+        let app = env.app.clone();
+        let runner = fake.clone();
+        let orphan_for_task = orphan.clone();
+        let task = tokio::spawn(async move {
+            recover(
+                &app,
+                runner.as_ref(),
+                &orphan_for_task,
+                "local",
+                "0.157.0",
+                Some("0.155.1"),
+                Duration::from_millis(1),
+                Duration::from_secs(5),
+            )
+            .await
+        });
+        tokio::time::sleep(Duration::from_millis(80)).await;
+
+        let status_before_recovery = row_status(&env.app, &orphan).await.0;
+        let notice_before_recovery = notice_of(&env.app, &run).await.unwrap();
+        let done_before_recovery = done_events(&mut rx);
+        sqlx::query("DROP TRIGGER fail_update_notice")
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+
+        let result = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("startup recovery should resume when notice writes recover")
+            .expect("the recovery worker should not panic");
+        assert_eq!(status_before_recovery, "running", "recovery debt must stay durable during the DB fault");
+        assert_eq!(notice_before_recovery, pending, "failed notice writes must leave the pending notice intact");
+        assert!(done_before_recovery.is_empty(), "recovery cannot publish success before the notice transition");
+        assert_eq!(result["ok"], true, "{result}");
+        assert_eq!(result["recovered"], true);
+        assert!(notice_of(&env.app, &run).await.unwrap().contains("已安裝"));
+        assert_eq!(row_status(&env.app, &orphan).await.0, "done");
+        assert_eq!(done_events(&mut rx).len(), 1);
     }
 
     async fn assert_slot_is_held(app: &Arc<App>, host: &str) {
@@ -1351,10 +1644,19 @@ mod tests {
         let (far_bot, far_run) = codex_bot_with_notice(&env, "cx-far", &pending).await;
         sqlx::query("UPDATE bots SET project_id=? WHERE id=?").bind(&pid).bind(&far_bot).execute(&env.app.db).await.unwrap();
 
-        assert_eq!(mark_installed(&env.app, "local", "0.155.1", "0.157.0").await, 1);
+        assert_eq!(mark_installed(&env.app, "local", "0.155.1", "0.157.0").await.unwrap(), 1);
         assert!(notice_of(&env.app, &here).await.unwrap().contains("已安裝"));
         assert_eq!(notice_of(&env.app, &far_run).await, Some(pending), "別台主機的 binary 沒換");
         assert_eq!(notice_of(&env.app, &claude_run).await.as_deref(), Some("Update installed · Restart to update"));
+    }
+
+    #[tokio::test]
+    async fn a_successfully_proven_empty_mark_installed_set_is_a_valid_noop() {
+        let env = crate::testing::env().await;
+        let (_bot, run) = codex_bot_with_notice(&env, "cx-no-pending-update", "Codex is up to date").await;
+
+        assert_eq!(mark_installed(&env.app, "local", "0.155.1", "0.157.0").await.unwrap(), 0);
+        assert_eq!(notice_of(&env.app, &run).await.as_deref(), Some("Codex is up to date"));
     }
 
     /// #347：A 機安裝還在跑時同名主機改指到 B（`?confirm=repoint`）。A 裝完之後不能讀 B 的版本當成「裝好了」、
