@@ -387,7 +387,7 @@ pub struct BuildCfg {
     #[serde(default = "default_build_cargo_jobs")]
     pub cargo_jobs: usize,
     /// 名額 TTL（秒）：拿到之後這麼久沒 renew 就視為持有者已死，下一次 acquire 收回。
-    #[serde(default = "default_build_lease_ttl_secs")]
+    #[serde(default = "default_build_lease_ttl_secs", deserialize_with = "de_build_lease_ttl_secs")]
     pub lease_ttl_secs: u64,
     /// issue #104：開發者專用的外部 Cargo verification worker。密碼不在這裡，另存 data-dir/remote-cargo-password。
     #[serde(default)]
@@ -516,6 +516,13 @@ pub const MIN_BUILD_LEASE_TTL_SECS: u64 = 10;
 /// 上限（#639）：`u64::MAX` 用 `as i64` 會變成 -1，名額立刻過期；更大的秒數讓 `Duration`／`DateTime` 加法 panic。
 pub const MAX_BUILD_LEASE_TTL_SECS: u64 = 24 * 60 * 60;
 
+fn de_build_lease_ttl_secs<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<u64, D::Error> {
+    use serde::de::Error as _;
+
+    let secs = u64::deserialize(d)?;
+    checked_build_lease_ttl(secs).map(|_| secs).map_err(D::Error::custom)
+}
+
 /// 設定檔的 TTL 轉成可以加到現在的秒數。超出 [`MIN_BUILD_LEASE_TTL_SECS`]..=[`MAX_BUILD_LEASE_TTL_SECS`] 就拒絕。
 pub fn checked_build_lease_ttl(secs: u64) -> Result<i64, String> {
     if !(MIN_BUILD_LEASE_TTL_SECS..=MAX_BUILD_LEASE_TTL_SECS).contains(&secs) {
@@ -550,6 +557,30 @@ fn resolve_build_max_concurrent(env: Option<&str>, file: usize) -> usize {
 #[cfg(test)]
 mod build_cfg_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn loading_out_of_range_build_lease_ttl_is_rejected_with_the_valid_range() {
+        let dir = std::env::temp_dir().join(format!("am-build-lease-ttl-load-{}", crate::db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let mut failures = Vec::new();
+        for bad in [0_u64, u64::MAX, 10_000_000_000_000] {
+            std::fs::write(&path, format!("[build]\nlease_ttl_secs = {bad}\n")).unwrap();
+            match ConfigStore::load(path.clone()).await {
+                Err(err) => {
+                    let detail = format!("{err:#}");
+                    let clear = detail.contains("lease_ttl_secs")
+                        && (detail.contains("10..=86400") || (bad == u64::MAX && detail.contains("number too large")));
+                    if !clear {
+                        failures.push(format!("{bad}: rejected without a clear range/key error: {detail}"));
+                    }
+                }
+                Ok(_) => failures.push(format!("{bad}: invalid TTL was accepted while loading config")),
+            }
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
 
     /// 0 不是「停用排程」，是「誰都拿不到名額」——跟 `idle_close_secs` 同一條規矩：離譜的值回預設，不照單全收。
     #[test]
