@@ -232,6 +232,8 @@ const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (24, "190576f2d85181bd"),
     // issue #564：`cli_updates`（codex 一鍵安裝的持久紀錄，daemon 重啟後接手；每台最多一筆 running）。
     (25, "62482003005235be"),
+    // issue #347：`cli_updates.host_target` pins recovery to the host authority where the update started.
+    (26, "4631f4f3433fc553"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
