@@ -6039,7 +6039,7 @@ mod instruction_files_tests {
         seed_project(&e).await;
         let id = add(
             &e,
-            json!({"name": "deferred-stamp-retry", "kind": "codex", "model": "gpt-5.6-luna", "effort": "max", "fast": false}),
+            json!({"name": "deferred-stamp-retry", "kind": "codex", "model": "gpt-6-luna", "effort": "max", "fast": false}),
         )
         .await
         .unwrap();
@@ -6047,7 +6047,7 @@ mod instruction_files_tests {
         let pane = format!("pane-{id}");
         let baseline = crate::launch_rev::of(&db::bot(&e.app.db, &id).await.unwrap().unwrap());
         sqlx::query(
-            "UPDATE runs SET pane_id = ?, launch_rev = ?, runtime_model = 'gpt-5.6-luna', runtime_effort = 'max', runtime_fast = 0, agent_status = 'working' WHERE id = ?",
+            "UPDATE runs SET pane_id = ?, launch_rev = ?, runtime_model = 'gpt-6-luna', runtime_effort = 'max', runtime_fast = 0, agent_status = 'working' WHERE id = ?",
         )
         .bind(&pane)
         .bind(&baseline)
@@ -6060,23 +6060,22 @@ mod instruction_files_tests {
             .await
             .unwrap();
         assert_eq!(out["live_apply"]["deferred"], json!(true), "busy run should queue this live apply: {out}");
+        assert_eq!(db::bot(&e.app.db, &id).await.unwrap().unwrap().fast, 1);
         let target = crate::launch_rev::of(&db::bot(&e.app.db, &id).await.unwrap().unwrap());
         sqlx::query("UPDATE runs SET agent_status = 'idle' WHERE id = ?")
             .bind(&run_id)
             .execute(&e.app.db)
             .await
             .unwrap();
-        e.herdr.set_screen(&pane, "gpt-5.6-luna max · /tmp · Context 43% used · 5h 12% left\n");
-        let screens = e.herdr.screens.clone();
+        e.herdr.set_screen(&pane, "gpt-6-luna max · /tmp · Context 43% used · 5h 12% left\n");
+        let replace_screen = e.herdr.set_screen_later();
+        let toggled_screen = "gpt-6-luna max fast · /tmp · Context 43% used · 5h 12% left\n";
         let pane_after_toggle = pane.clone();
         crate::lifecycle::race_point::arm(
             "codex_after_fast_toggle",
             &pane,
             move || async move {
-                screens
-                    .lock()
-                    .unwrap()
-                    .insert(pane_after_toggle, "gpt-5.6-luna max fast · /tmp · Context 43% used · 5h 12% left\n".into());
+                replace_screen(&pane_after_toggle, toggled_screen);
             },
         );
         sqlx::query(&format!(
@@ -6088,22 +6087,46 @@ mod instruction_files_tests {
         .execute(&e.app.db)
         .await
         .unwrap();
+        assert_eq!(
+            crate::codex_live::parse_status_line(toggled_screen).map(|seen| seen.fast),
+            Some(true),
+            "the pane fixture must show Codex's confirmed fast tier"
+        );
 
-        lifecycle::apply_deferred_once(&e.app, &id).await;
+        let deferred_outcome = lifecycle::apply_deferred_once(&e.app, &id).await;
+        assert!(
+            matches!(deferred_outcome, Some(lifecycle::LiveApplyOutcome::Applied { .. })),
+            "the deferred TUI readback must succeed before stamp debt exists: {deferred_outcome:?}"
+        );
 
-        let (runtime, launch_rev, live_rev): (Option<String>, Option<String>, Option<String>) =
-            sqlx::query_as("SELECT runtime_model, launch_rev, live_rev FROM runs WHERE id = ?")
-                .bind(&run_id)
-                .fetch_one(&e.app.db)
-                .await
-                .unwrap();
-        assert_eq!(runtime.as_deref(), Some("gpt-5.6-luna"));
-        assert_eq!(launch_rev.as_deref(), Some(baseline.as_str()));
+        let sent_before_retry = e.herdr.calls_to("pane.send_keys").len();
+        assert_eq!(sent_before_retry, 1, "the deferred fast toggle ran exactly once");
+        assert_eq!(
+            e.herdr.screens.lock().unwrap().get(&pane).map(String::as_str),
+            Some(toggled_screen),
+            "the exact post-toggle pane revision must be visible at readback"
+        );
+
+        let (runtime, runtime_fast, launch_rev, live_rev): (
+            Option<String>,
+            Option<i64>,
+            Option<String>,
+            Option<String>,
+        ) = sqlx::query_as(
+            "SELECT runtime_model, runtime_fast, launch_rev, live_rev FROM runs WHERE id = ?",
+        )
+        .bind(&run_id)
+        .fetch_one(&e.app.db)
+        .await
+        .unwrap();
+        assert_eq!(runtime.as_deref(), Some("gpt-6-luna"));
         assert_eq!(
             live_rev.as_deref(),
             Some(target.as_str()),
             "a successful live readback must retain durable stamp retry debt"
         );
+        assert_eq!(launch_rev.as_deref(), Some(baseline.as_str()));
+        assert_eq!(runtime_fast, Some(1), "the readback snapshot includes the changed fast tier");
         let state = state_json(&e.app).await.unwrap();
         let shown = state["projects"][0]["bots"]
             .as_array()
@@ -6117,8 +6140,6 @@ mod instruction_files_tests {
             "the matching persisted live revision must prevent a false restart badge"
         );
 
-        let sent_before_retry = e.herdr.calls_to("pane.send_text").len();
-        assert_eq!(sent_before_retry, 1, "the deferred command ran exactly once");
         sqlx::query("DROP TRIGGER refuse_deferred_launch_stamp")
             .execute(&e.app.db)
             .await
@@ -6126,16 +6147,17 @@ mod instruction_files_tests {
         let _ = lifecycle::retry_live_apply_bookkeeping_once(&e.app, &run_id)
             .await
             .unwrap();
-        let (launch_rev, live_rev): (Option<String>, Option<String>) =
-            sqlx::query_as("SELECT launch_rev, live_rev FROM runs WHERE id = ?")
+        let (runtime_fast, launch_rev, live_rev): (Option<i64>, Option<String>, Option<String>) =
+            sqlx::query_as("SELECT runtime_fast, launch_rev, live_rev FROM runs WHERE id = ?")
                 .bind(&run_id)
                 .fetch_one(&e.app.db)
                 .await
                 .unwrap();
+        assert_eq!(runtime_fast, Some(1));
         assert_eq!(launch_rev.as_deref(), Some(target.as_str()));
         assert_eq!(live_rev, None);
         assert_eq!(
-            e.herdr.calls_to("pane.send_text").len(),
+            e.herdr.calls_to("pane.send_keys").len(),
             sent_before_retry,
             "retry changes bookkeeping only and never resends to the TUI"
         );
