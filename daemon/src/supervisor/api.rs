@@ -1080,6 +1080,18 @@ fn iso_in(secs: i64) -> String {
     crate::db::iso_in(secs)
 }
 
+/// 核准有效期。kick 的 6 小時（21600）在範圍內；比這更長的窗口沒有使用方。
+/// 不合法回 400，不讓 `DateTime + Duration` 溢位把 handler 打崩，也不寫一筆一開始就過期的核准（#655）。
+pub const APPROVAL_EXPIRES_MAX_SECS: i64 = 7 * 24 * 60 * 60;
+
+fn approval_expires(secs: Option<i64>) -> Result<Option<String>, LcError> {
+    let Some(secs) = secs else { return Ok(None) };
+    if !(1..=APPROVAL_EXPIRES_MAX_SECS).contains(&secs) {
+        return Err(LcError::Bad(format!("expires_in_secs must be 1..={APPROVAL_EXPIRES_MAX_SECS}")));
+    }
+    Ok(Some(iso_in(secs)))
+}
+
 /// 這筆申請的 `requester` 是不是真的是呼叫端本人（issue #436）。
 ///
 /// **驗過就必須是自己**：帶著 `X-AM-Bot-Id`＋自己的 hook token 來申請，卻把 `requester` 填成別人，
@@ -1107,8 +1119,8 @@ pub async fn post_approval(State(app): State<Arc<App>>, headers: HeaderMap, Json
     if !super::maintenance::RESOURCES.contains(&b.purpose.as_str()) {
         return Err(LcError::Bad(format!("purpose must be one of {:?}", super::maintenance::RESOURCES)));
     }
+    let expires = approval_expires(b.expires_in_secs)?;
     let unverified = requester_claim(&app, &headers, &b.requester).await?;
-    let expires = b.expires_in_secs.map(iso_in);
     let out = store::create_approval_notifying(
         &app.db,
         &b.requester,
@@ -1230,7 +1242,8 @@ pub async fn post_approval_decision(
         out["idempotent"] = json!(true);
         return Ok(Json(out));
     }
-    let expires = b.expires_in_secs.map(iso_in);
+    // 範圍先驗完再算時間。算在鎖裡、但在任何 UPDATE 之前：不合法直接 400，鎖放掉，列不動（#655）。
+    let expires = approval_expires(b.expires_in_secs)?;
     let actor = decision_actor(verified, b.actor.as_deref());
     // **第一個裁示定案**：approve／deny 只從 `pending` 寫得進去，而且條件寫在 SQL 裡、不看先前
     // 讀到的值。否則兩個角色同時決定時，後到的那個會把 `approved` 改成 `denied`——同一筆核准就
@@ -2241,6 +2254,47 @@ mod approval_decision_tests {
         let body: LeaseHolderIn = serde_json::from_value(json!({"owner": "runner", "fence": lease.fence})).unwrap();
         let Json(out) = post_lease_release(State(app.clone()), Path("rebuild".into()), HeaderMap::new(), Json(body)).await.unwrap();
         assert_eq!(out["released"], true, "舊租約要還得了");
+        app.db.close().await;
+        std::fs::remove_dir_all(&app.data_dir).unwrap();
+    }
+
+    /// #655：過大的 expires_in_secs 以前讓 `DateTime + Duration` panic（連線直接斷）；負數會建出一開始就過期的核准。
+    #[tokio::test]
+    async fn an_out_of_range_approval_expiry_is_rejected_before_anything_is_written() {
+        let app = app().await;
+        let _ = iso_in(100_000_000_000_000);
+        let _ = iso_in(i64::MIN);
+        let ask = |secs| ApprovalIn {
+            reason: None,
+            requester: "k8bw2f".into(),
+            purpose: "restart".into(),
+            scope: "daemon".into(),
+            target_commit: None,
+            expires_in_secs: Some(secs),
+            request_id: None,
+            supersedes: None,
+        };
+        for secs in [0_i64, -30, 100_000_000_000_000, APPROVAL_EXPIRES_MAX_SECS + 1] {
+            let err = post_approval(State(app.clone()), HeaderMap::new(), Json(ask(secs))).await.unwrap_err();
+            assert!(matches!(err, LcError::Bad(ref m) if m.contains("expires_in_secs")), "{secs}: {err:?}");
+        }
+        assert!(store::approvals(&app.db, 10).await.unwrap().is_empty(), "不合法的期限不能留下核准");
+
+        let Json(ok) = post_approval(State(app.clone()), HeaderMap::new(), Json(ask(21600))).await.unwrap();
+        let exp = ok["expires_at"].as_str().unwrap().to_string();
+        assert!(exp.as_str() > crate::db::now().as_str(), "6 小時後才到期：{exp}");
+
+        let id = ok["id"].as_str().unwrap().to_string();
+        let err = post_approval_decision(
+            State(app.clone()),
+            Path(id.clone()),
+            HeaderMap::new(),
+            Json(DecisionIn { decision: "deny".into(), actor: None, reason: None, expires_in_secs: Some(-1) }),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, LcError::Bad(_)), "{err:?}");
+        assert_eq!(store::approval(&app.db, &id).await.unwrap().unwrap().status, "pending", "400 不能把裁示寫進去");
         app.db.close().await;
         std::fs::remove_dir_all(&app.data_dir).unwrap();
     }

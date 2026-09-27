@@ -1956,6 +1956,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
   帶 `request_id`（穩定 id）時**冪等**：同一個 supervisor 下同一個 id 再送回**原本那一筆**（200、`created:false`），不新增、不重推 inbox；已經被 decide 的也照樣回它本人（狀態就是當時的裁示）。
   同一個 id 但 `requester`／`purpose`／`scope`／`target_commit` 不同 → `409 {"reason":"approval_request_mismatch", field, existing, requested, approval_id}`，原本那筆一個字都不動（另一顆 bot 撞同一個自然 id 拿不回別人的核准）。
   `expires_in_secs` 不參與比對：原本那筆的到期時間不會被重送改掉。不帶 `request_id` 就是舊行為，每次開一筆新的。
+  `expires_in_secs` 省略＝不過期；有帶就必須是 `1..=604800`（7 天，含 kick 的 21600）。超出範圍（含 0 與負數）回 400，不寫核准（#655）。`decide` 的 `expires_in_secs` 同一範圍。
   CLI：`agm approval request --request-id <id>`（不確定送出去沒有時用同一個 id 重送，不要換新的）；`--supersedes <舊 id>` 帶 `supersedes`。
 - `POST /api/supervisor/approvals/{id}/decide {decision:"approve"|"deny"|"revoke",actor?,reason?,expires_in_secs?}`：同 decision 重送回 `idempotent:true`。
   **`approve` 只給驗過的 AGM 角色**（issue #447，同 `require_role`）：User principal 或有效但不是巡檢／協調者的 Bot → `403 {"reason":"role_required"}`；Bot／service 身分不完整、憑證錯誤或混帶 principal 由全域中介層回 401；那筆都不動。
