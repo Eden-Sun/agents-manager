@@ -79,10 +79,8 @@ pub(crate) async fn apply_deferred_once(
     app: &Arc<App>,
     bot_id: &str,
 ) -> Option<super::LiveApplyOutcome> {
-    let Some(queued) = take(bot_id) else {
-        return None;
-    };
-    let fields: Vec<&str> = queued.fields.iter().copied().collect();
+    let queued = take(bot_id)?;
+    let fields = queued.fields.to_vec();
     let outcome = super::apply_live_setting_with_revision(
         app,
         bot_id,

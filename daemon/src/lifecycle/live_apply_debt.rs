@@ -132,10 +132,9 @@ pub(crate) async fn retry_once(app: &Arc<App>, run_id: &str) -> Result<bool, sql
     }
 
     let committed = commit_debt(&app.db, run_id).await?;
-    if committed.is_some() {
+    if let Some(committed) = committed {
         launch_rev::stamp_live_revision(&app.db, run_id).await?;
-        app.emit_bot_status(&committed.as_ref().unwrap().bot_id)
-            .await;
+        app.emit_bot_status(&committed.bot_id).await;
         return Ok(true);
     }
     let stamped = launch_rev::stamp_live_revision(&app.db, run_id).await?;

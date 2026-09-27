@@ -6206,6 +6206,7 @@ mod instruction_files_tests {
         .await
         .unwrap();
 
+        let mut events = e.app.subscribe();
         let out = patch(&e, &id, json!({"model": "claude-opus-5-5"}))
             .await
             .unwrap();
@@ -6236,6 +6237,12 @@ mod instruction_files_tests {
             Some("claude-sonnet-4-5"),
             "the rejected UPDATE leaves the prior runtime snapshot intact"
         );
+        while let Ok(event) = events.try_recv() {
+            assert_ne!(
+                event.kind, "bot_status",
+                "runtime status cannot be published before the runtime row commits"
+            );
+        }
         let debt: (String, String, String) = sqlx::query_as(
             "SELECT run_id, target_rev, runtime_model FROM live_apply_debts WHERE run_id = ?",
         )
@@ -6290,6 +6297,18 @@ mod instruction_files_tests {
             e.herdr.calls_to("pane.send_text").len(),
             sent_before,
             "recovery is bookkeeping only; no slash resend"
+        );
+        let mut committed_status = None;
+        while let Ok(event) = events.try_recv() {
+            if event.kind == "bot_status" {
+                committed_status = Some(event);
+            }
+        }
+        let committed_status = committed_status.expect("committed runtime row should publish bot_status");
+        assert_eq!(
+            committed_status.data["run"]["runtime_model"],
+            json!("claude-opus-5-5"),
+            "bot_status must only carry the committed runtime snapshot"
         );
         let state = state_json(&e.app).await.unwrap();
         let shown = state["projects"][0]["bots"]
