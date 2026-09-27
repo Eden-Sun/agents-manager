@@ -28,7 +28,8 @@ function isFullWrap(line: string | undefined, width: number): boolean {
 
 /**
  * 第 `i` 行的 URL 跑到行尾，是被折下去還是本來就結束？不能只看最長行：claude 登入畫面有 185 欄框線、URL 卻在 78 欄折（實測 2026-09-08）。
- * 三條證據中一條就接：(a) 下一行同寬且無空白 (b) 行長等於 `columns` (c) 是畫面最長行（不知 columns 的後路）。都不中寧可漏接。
+ * 三條證據中一條就接：(a) 下一行同寬且無空白 (b) 行長等於 `columns` (c) 是畫面最長行。
+ * 已知 `columns` 時 (c) 只接下一行完全沒有空白的續片，有空白的是新的一行（提示字元），不接（#659）。
  */
 function wrapsToNextLine(lines: string[], i: number, columns: number | null | undefined, longest: number): boolean {
   const width = lines[i].length
@@ -37,6 +38,12 @@ function wrapsToNextLine(lines: string[], i: number, columns: number | null | un
   if (columns && columns > 0 && width > columns) return false
   if (isFullWrap(lines[i + 1], width)) return true
   if (columns && columns > 0 && width === columns) return true
+  // 已知欄寬時，最長行這條後路只接「整行都沒有空白」的續片。有空白的下一行是新的提示字元（#659）。
+  // 欄寬未知時維持原後路：快照沒有 columns，只能靠最長行。
+  if (columns && columns > 0) {
+    const next = lines[i + 1]
+    if (!next || /\s/.test(next)) return false
+  }
   return width >= MIN_WRAP_WIDTH && width === longest
 }
 
@@ -91,5 +98,25 @@ export function termPieces(text: string, columns?: number | null): Piece[][] {
 function trimPunct(url: string): string {
   let u = url
   while (/[.,;:!?]$/.test(u)) u = u.slice(0, -1)
+  // 包住網址的 )／] 不是網址的一部分；網址自己成對的括號要留著（#659）。
+  const extra = (open: string, close: string) => {
+    let o = 0
+    let c = 0
+    for (const ch of u) {
+      if (ch === open) o++
+      else if (ch === close) c++
+    }
+    return c - o
+  }
+  let drop = extra('(', ')')
+  while (drop > 0 && u.endsWith(')')) {
+    u = u.slice(0, -1)
+    drop--
+  }
+  drop = extra('[', ']')
+  while (drop > 0 && u.endsWith(']')) {
+    u = u.slice(0, -1)
+    drop--
+  }
   return u
 }

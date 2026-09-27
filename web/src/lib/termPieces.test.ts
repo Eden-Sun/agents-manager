@@ -87,6 +87,26 @@ test('登入畫面：URL 在 93 欄折成 5 行，同一份快照裡另有 618 �
   assert.equal(rows[rows.length - 1][0].text, ' Paste code here if prompted >')
 })
 
+test('已知 columns：最長但沒滿欄的 URL 不把下一行提示字元接進去', () => {
+  const rows = termPieces(
+    'm4p@m4p % git push\nremote: Create a pull request: https://github.com/o/r/pull/new/feature-x\nm4p@m4p % ',
+    120,
+  )
+  assert.deepEqual(urlsOf(rows), [['https://github.com/o/r/pull/new/feature-x', 'https://github.com/o/r/pull/new/feature-x']])
+  assert.equal(rows[2][0].url, null)
+  assert.match(rows[2][0].text, /^m4p@m4p/)
+})
+
+test('括號包住的 URL 不把不成對的結尾括號算進去', () => {
+  assert.equal(urlsOf(termPieces('see (https://example.com/docs/page) here', 80))[0][1], 'https://example.com/docs/page')
+  assert.equal(urlsOf(termPieces('[docs](https://example.com/docs/page)', 80))[0][1], 'https://example.com/docs/page')
+  // 網址自己的括號是成對的，要留著。
+  assert.equal(
+    urlsOf(termPieces('https://en.wikipedia.org/wiki/Foo_(bar)', 80))[0][1],
+    'https://en.wikipedia.org/wiki/Foo_(bar)',
+  )
+})
+
 test('URL 剛好在行尾結束、下一行是新的一行：不接（不是每個行尾 URL 都是折行）', () => {
   // 這行 60 字（≥ MIN_WRAP_WIDTH）但既不等於 columns、也不是最長的一行，
   // 下一行也不是同寬的續行 → 不能黏。
