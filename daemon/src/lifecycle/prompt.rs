@@ -720,6 +720,9 @@ async fn prompt_inner(
         Err(not) => return Err(super::composer_draft::with_draft(&client, &run, &bot, not_attempted_error(&run.id, not)).await),
     };
 
+    #[cfg(test)]
+    super::race_point::hit("prompt_before_turn_commit", bot_id).await;
+
     // 插隊送出：被打斷的那一筆**現在不收**，要等送出鍵確定生效（#120，`send_now::deliver`）。新的那一則照樣先寫進 DB
     // （維護窗口的閘門、冪等都靠它），但 `run_id` 先留空：舊的那一筆還佔著 run 的 in-flight 名額
     // （`turns_one_in_flight`），送出鍵生效時跟收掉舊的同一個交易掛上去。連續兩次插隊送出也因此不會有兩個 in_flight：
@@ -731,9 +734,14 @@ async fn prompt_inner(
     // `auto_resend=0` 在打字之前寫死：送出之後結果寫不回來（#149），這一筆也不會變成可以自動重送；寫回時照證據打開。
     let turn_id = db::ulid();
     let mut tx = app.db.begin().await.map_err(up)?;
-    sqlx::query(
+    let inserted = sqlx::query(
         "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, client_request_id, created_at, prompt_text, auto_resend)
-         VALUES (?,?,?,'web','in_flight','pending',?,?,?,0)",
+         SELECT ?, ?, ?, 'web', 'in_flight', 'pending', ?, ?, ?, 0
+          WHERE EXISTS (
+              SELECT 1 FROM runs
+               WHERE id = ? AND bot_id = ? AND state = 'running'
+                 AND agent_name IS ? AND pane_id IS ? AND herdr_session IS ?
+          )",
     )
     .bind(&turn_id)
     .bind(&conv)
@@ -741,9 +749,21 @@ async fn prompt_inner(
     .bind(client_request_id)
     .bind(db::now())
     .bind(&deliver)
+    .bind(&run.id)
+    .bind(bot_id)
+    .bind(run.agent_name.as_deref())
+    .bind(run.pane_id.as_deref())
+    .bind(run.herdr_session.as_deref())
     .execute(&mut *tx)
     .await
     .map_err(up)?;
+    if inserted.rows_affected() == 0 {
+        tx.rollback().await.map_err(up)?;
+        return Err(LcError::conflict(
+            "run_ended",
+            json!({ "run_id": run.id, "retryable": true, "sent": false }),
+        ));
+    }
     let msg_id = db::ulid();
     sqlx::query(
         "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, group_id, relay_from, relay_unverified, created_at) VALUES (?,?,?,'user',?,'web',?,?,?,?)",
@@ -965,6 +985,65 @@ mod prompt_tests {
         // These exercise the agent.prompt path, which needs an agent herdr has a session bound to.
         env.herdr.set_agent("prompt-test", "pane-prompt-test", true);
         Fixture { env, bot_id, conv, run_id }
+    }
+
+    #[tokio::test]
+    async fn a_run_exit_before_direct_turn_admission_sends_nothing_and_allows_a_clean_retry() {
+        let f = fixture("claude", "test").await;
+        let app = f.env.app.clone();
+        let app_for_exit = app.clone();
+        let exiting_run = f.run_id.clone();
+        super::super::race_point::arm("prompt_before_turn_commit", &f.bot_id, move || async move {
+            assert_eq!(mark_run_exited(&app_for_exit, &exiting_run, "pane exited").await, RunExit::Recorded);
+        });
+
+        let out = prompt(&app, &f.bot_id, "這句不能送進已結束的 run", "race-before-turn").await;
+        let Err(LcError::Conflict(body)) = out else { panic!("losing the exit race must be retryable without creating a turn: {out:?}") };
+        assert_eq!(body["reason"], "run_ended", "{body}");
+        assert_eq!(body["run_id"], f.run_id, "{body}");
+        assert_eq!(body["retryable"], true, "{body}");
+        assert_eq!(body["sent"], false, "{body}");
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE conversation_id=?")
+            .bind(&f.conv).fetch_one(&app.db).await.unwrap();
+        assert_eq!(count, 0, "the lost admission leaves no in-flight or idempotency row");
+        for method in ["agent.prompt", "pane.send_text", "pane.send_keys"] {
+            assert!(f.env.herdr.calls_to(method).is_empty(), "the losing request has no delivery side effect: {method}");
+        }
+
+        let new_run = db::ulid();
+        sqlx::query("INSERT INTO runs (id, bot_id, state, agent_status, herdr_session, started_at) VALUES (?, ?, 'running', 'idle', 'test', ?)")
+            .bind(&new_run).bind(&f.bot_id).bind(db::now()).execute(&app.db).await.unwrap();
+        let retried = prompt(&app, &f.bot_id, "這句不能送進已結束的 run", "race-before-turn").await.unwrap();
+        assert_eq!(retried.delivery, "unknown", "the mock accepts the new run's RPC path");
+        let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE conversation_id=? AND client_request_id='race-before-turn'")
+            .bind(&f.conv).fetch_one(&app.db).await.unwrap();
+        assert_eq!(stored, 1, "the same client_request_id is reusable after the losing admission");
+    }
+
+    #[tokio::test]
+    async fn a_run_exit_after_turn_admission_closes_the_new_turn() {
+        let f = fixture("claude", "test").await;
+        let app_for_exit = f.env.app.clone();
+        let exiting_run = f.run_id.clone();
+        let conversation = f.conv.clone();
+        super::super::race_point::arm("prompt_before_typing", &f.bot_id, move || async move {
+            let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE conversation_id=? AND client_request_id='exit-after-admission'")
+                .bind(&conversation).fetch_one(&app_for_exit.db).await.unwrap();
+            assert_eq!(status, "in_flight", "the prompt transaction committed before run exit");
+            assert_eq!(mark_run_exited(&app_for_exit, &exiting_run, "pane exited").await, RunExit::Recorded);
+        });
+
+        let _ = prompt(&f.env.app, &f.bot_id, "在退出之前建立的回合", "exit-after-admission").await;
+        let (status, notes): (String, i64) = sqlx::query_as(
+            "SELECT t.status, (SELECT COUNT(*) FROM messages m WHERE m.turn_id=t.id AND m.role='system' AND m.content='run ended: pane exited')
+               FROM turns t WHERE t.conversation_id=? AND t.client_request_id='exit-after-admission'",
+        )
+        .bind(&f.conv)
+        .fetch_one(&f.env.app.db)
+        .await
+        .unwrap();
+        assert_eq!(status, "failed", "run-exit cleanup sees and closes the admitted turn");
+        assert_eq!(notes, 1, "run-exit cleanup leaves its normal explanation");
     }
 
     async fn attachment(app: &Arc<App>, bot_id: &str) -> String {
