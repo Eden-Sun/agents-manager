@@ -16,25 +16,47 @@ const SWEEP: Duration = Duration::from_secs(30);
 /// `--version` 是 process spawn（遠端是 ssh），每輪跑太兇；晚幾分鐘亮徽章沒差。
 const DISK_VERSION_TTL: Duration = Duration::from_secs(300);
 
-/// 鍵是 `<kind>@<host>`：claude 與 codex 各有各的磁碟版本。
-type DiskCache = tokio::sync::Mutex<HashMap<String, (Instant, Option<String>)>>;
+/// 項目鍵是 `<kind>@<host>`，值還綁住讀取時的 HostFence；同名主機換代後，舊 observation 不能命中。
+struct DiskVersionEntry {
+    at: Instant,
+    authority: crate::hosts::HostAuthorityKey,
+    version: Option<String>,
+}
+
+struct DiskVersionObservation {
+    version: Option<String>,
+    fence: crate::hosts::HostFence,
+}
+
+type DiskCache = tokio::sync::Mutex<HashMap<String, DiskVersionEntry>>;
 
 fn disk_cache() -> &'static DiskCache {
     static C: OnceLock<DiskCache> = OnceLock::new();
     C.get_or_init(Default::default)
 }
 
-async fn disk_version(app: &Arc<App>, host: &str, kind: &str) -> Option<String> {
+async fn disk_version(app: &Arc<App>, host: &str, kind: &str) -> Option<DiskVersionObservation> {
+    let fence = app.hosts.fence(host).await?;
     let key = format!("{kind}@{host}");
     let mut cache = disk_cache().lock().await;
-    if let Some((at, v)) = cache.get(&key) {
-        if at.elapsed() < DISK_VERSION_TTL {
-            return v.clone();
+    let cached = cache.get(&key).and_then(|entry| {
+        (entry.authority.matches(&fence) && entry.at.elapsed() < DISK_VERSION_TTL).then(|| entry.version.clone())
+    });
+    if let Some(version) = cached {
+        if !app.hosts.is_current(&fence).await {
+            return None;
         }
+        return Some(DiskVersionObservation { version, fence });
     }
+    // A cache row from a prior connection generation is not evidence for this host name anymore.
+    cache.remove(&key);
     let v = crate::changelog::installed_version(app, host, kind).await.ok();
-    cache.insert(key, (Instant::now(), v.clone()));
-    v
+    // The read may have crossed a reconnect or repoint. Discard it instead of publishing it under the new name.
+    if !app.hosts.is_current(&fence).await {
+        return None;
+    }
+    cache.insert(key, DiskVersionEntry { at: Instant::now(), authority: fence.authority_key(), version: v.clone() });
+    Some(DiskVersionObservation { version: v, fence })
 }
 
 /// 剛在這台裝過新版（`cli_update`）：丟掉快取，下一輪巡邏重讀，不要拿五分鐘前的舊版本把通知改回「需安裝」。
@@ -70,15 +92,17 @@ async fn sweep(app: &Arc<App>) {
             // 狀態列是 runtime 的權威，每輪校正（讀不到就不動）。
             crate::codex_live::sync_runtime(app, &client, &run.bot_id, &run.id, &pane).await;
         }
+        let mut observation_fence = None;
         let seen = if kind == "codex" {
             // 讀不到 host 就整輪跳過、不動既有通知（#243 的同一條理由）。
             let Ok(host) = db::bot_host(&app.db, &run.bot_id).await else { continue };
             let prompt = crate::codex_update::parse_prompt(&read.text);
             let running = crate::codex_update::remember_running(&run.id, &read.text, prompt.as_ref());
-            let disk = disk_version(app, &host, "codex").await;
+            let Some(disk) = disk_version(app, &host, "codex").await else { continue };
+            observation_fence = Some(disk.fence);
             // 上游最新版：分診帳本（`release-triage-kick` 抓 releases 寫的，跟主機無關）。issue #561。
             let upstream = crate::release_triage::ledger::max_version(&app.db, "codex").await.ok().flatten();
-            crate::codex_update::decide(prompt.as_ref(), running.as_deref(), disk.as_deref(), upstream.as_deref(), run.update_notice.as_deref())
+            crate::codex_update::decide(prompt.as_ref(), running.as_deref(), disk.version.as_deref(), upstream.as_deref(), run.update_notice.as_deref())
         } else {
             let mut seen = update_notice(&read.text);
             // 畫面原句優先（claude 自己說的較準），沒有才用版本比對。
@@ -86,9 +110,10 @@ async fn sweep(app: &Arc<App>) {
                 if let Some(running) = running_version(run.status_json.as_deref()) {
                     // 讀不到 host 就整輪跳過、不動既有通知：拿本機的 claude 去比遠端跑的版本會造出或清掉假通知（#243）。
                     let Ok(host) = db::bot_host(&app.db, &run.bot_id).await else { continue };
-                    if let Some(disk) = disk_version(app, &host, "claude").await {
-                        seen = version_notice(&disk, &running);
-                    }
+                    let Some(disk) = disk_version(app, &host, "claude").await else { continue };
+                    observation_fence = Some(disk.fence);
+                    let Some(version) = disk.version else { continue };
+                    seen = version_notice(&version, &running);
                 }
             }
             seen
@@ -99,11 +124,19 @@ async fn sweep(app: &Arc<App>) {
         if seen.is_some() {
             tracing::info!(run = %run.id, bot = %run.bot_id, kind = %kind, "有新版等著處理");
         }
-        let _ = sqlx::query("UPDATE runs SET update_notice = ? WHERE id = ?")
-            .bind(seen.as_deref())
-            .bind(&run.id)
-            .execute(&app.db)
-            .await;
+        let update = async {
+            sqlx::query("UPDATE runs SET update_notice = ? WHERE id = ?")
+                .bind(seen.as_deref())
+                .bind(&run.id)
+                .execute(&app.db)
+                .await
+        };
+        if let Some(fence) = observation_fence.as_ref() {
+            let Some(result) = app.hosts.run_if_current(fence, update).await else { continue };
+            let _ = result;
+        } else {
+            let _ = update.await;
+        }
         app.emit_bot_status(&run.bot_id).await;
     }
 }
@@ -160,14 +193,18 @@ mod tests {
     const CODEX_MENU: &str = "\
 >_ OpenAI Codex (v0.154.0)\n\n✨ Update available! 0.154.0 -> 0.155.1\n\n› 1. Update now (runs `npm install -g @openai/codex`)\n  2. Skip\n  3. Skip until next version\n";
 
-    /// 磁碟版本快取是全域的（鍵只有 `<kind>@<host>`）：這幾條測試各自種不同的版本，不能平行。
+    /// 磁碟版本快取是全域的：這幾條測試各自種不同的版本，不能平行。
     fn serial() -> &'static tokio::sync::Mutex<()> {
         static M: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
         M.get_or_init(Default::default)
     }
 
-    async fn seed_disk(kind: &str, v: &str) {
-        disk_cache().lock().await.insert(format!("{kind}@local"), (Instant::now(), Some(v.to_string())));
+    async fn seed_disk(app: &Arc<App>, host: &str, kind: &str, v: &str) {
+        let fence = app.hosts.fence(host).await.expect("test host exists");
+        disk_cache().lock().await.insert(
+            format!("{kind}@{host}"),
+            DiskVersionEntry { at: Instant::now(), authority: fence.authority_key(), version: Some(v.to_string()) },
+        );
     }
 
     async fn notice_of(app: &Arc<App>, run_id: &str) -> Option<String> {
@@ -181,13 +218,70 @@ mod tests {
         (bot.id.clone(), run, format!("pane-{}", bot.id))
     }
 
+    fn remote_host_cfg(name: &str, target: &str) -> crate::config::HostCfg {
+        crate::config::HostCfg {
+            name: name.into(),
+            ssh: target.into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "agents-manager".into(),
+            remote_path: String::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_repointed_host_does_not_use_the_old_disk_version_cache_for_update_notices() {
+        let _serial = serial().lock().await;
+        let e = crate::testing::env().await;
+        let host = "update-watch-597";
+        let conn_a = e.app.hosts.insert_remote_for_test(remote_host_cfg(host, "target-a")).await;
+        let remote_herdr = crate::testing::MockHerdr::start(conn_a.client.socket_path().to_path_buf());
+        let bot = crate::testing::claude_bot(&e.app, &e.project_id, "watch").await;
+        let run = crate::testing::fake_run(&e.app, &bot.id).await;
+        let pane = format!("pane-{}", bot.id);
+        remote_herdr.set_screen(&pane, "❯ hello\n");
+        sqlx::query("UPDATE projects SET host = ? WHERE id = ?")
+            .bind(host)
+            .bind(&e.project_id)
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE runs SET status_json = ?, herdr_session = 'agents-manager' WHERE id = ?")
+            .bind(r#"{"version":"2.1.0 (Claude Code)"}"#)
+            .bind(&run)
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+
+        let installed = Arc::new(std::sync::Mutex::new("2.2.0 (Claude Code)\n".to_string()));
+        let probes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let installed_for_ssh = installed.clone();
+        let probes_for_ssh = probes.clone();
+        crate::hosts::set_ssh_fake(host, move |_| {
+            probes_for_ssh.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(installed_for_ssh.lock().unwrap().clone())
+        });
+
+        sweep(&e.app).await;
+        let cached_notice = notice_of(&e.app, &run).await.expect("A 的較新版本先建立通知");
+        assert!(cached_notice.contains("2.2.0"), "A 版本要進入 notice：{cached_notice}");
+        assert_eq!(probes.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        *installed.lock().unwrap() = "2.0.0 (Claude Code)\n".to_string();
+        e.app.hosts.replace_remote_for_test(&e.app, remote_host_cfg(host, "target-b")).await;
+        sweep(&e.app).await;
+
+        assert_eq!(probes.load(std::sync::atomic::Ordering::SeqCst), 2, "B 必須在 TTL 到期前重新讀版本");
+        assert_eq!(notice_of(&e.app, &run).await, None, "B 的舊版本不可沿用 A 的 update_notice");
+    }
+
     #[tokio::test]
     async fn a_codex_run_gets_a_pending_notice_that_says_it_must_be_installed_first() {
         let _serial = serial().lock().await;
         let e = crate::testing::env().await;
         let (_, run, pane) = codex_bot_with_run(&e).await;
         e.herdr.set_screen(&pane, CODEX_MENU);
-        seed_disk("codex", "codex-cli 0.154.0").await;
+        seed_disk(&e.app, "local", "codex", "codex-cli 0.154.0").await;
         sweep(&e.app).await;
         let n = notice_of(&e.app, &run).await.expect("codex 的提示要被巡到");
         assert!(n.contains("0.154.0") && n.contains("0.155.1") && n.contains("需安裝後重啟"), "{n}");
@@ -200,13 +294,13 @@ mod tests {
         let e = crate::testing::env().await;
         let (_, run, pane) = codex_bot_with_run(&e).await;
         e.herdr.set_screen(&pane, CODEX_MENU);
-        seed_disk("codex", "codex-cli 0.154.0").await;
+        seed_disk(&e.app, "local", "codex", "codex-cli 0.154.0").await;
         sweep(&e.app).await;
         let pending = notice_of(&e.app, &run).await.unwrap();
         e.herdr.set_screen(&pane, "› a long conversation now\n");
         sweep(&e.app).await;
         assert_eq!(notice_of(&e.app, &run).await, Some(pending), "提示被推掉不代表新版不存在");
-        seed_disk("codex", "codex-cli 0.155.1").await;
+        seed_disk(&e.app, "local", "codex", "codex-cli 0.155.1").await;
         sweep(&e.app).await;
         let n = notice_of(&e.app, &run).await.unwrap();
         assert!(n.contains("已安裝") && n.contains("重啟套用") && !n.contains("需安裝"), "{n}");
@@ -219,11 +313,11 @@ mod tests {
         let e = crate::testing::env().await;
         let (_, run, pane) = codex_bot_with_run(&e).await;
         e.herdr.set_screen(&pane, ">_ OpenAI Codex (v0.150.0)\n› hello\n");
-        seed_disk("codex", "codex-cli 0.150.0").await;
+        seed_disk(&e.app, "local", "codex", "codex-cli 0.150.0").await;
         sweep(&e.app).await;
         assert_eq!(notice_of(&e.app, &run).await, None);
         e.herdr.set_screen(&pane, "› later, the banner is gone\n");
-        seed_disk("codex", "codex-cli 0.151.2").await;
+        seed_disk(&e.app, "local", "codex", "codex-cli 0.151.2").await;
         sweep(&e.app).await;
         let n = notice_of(&e.app, &run).await.expect("版本比對補位");
         assert!(n.contains("0.151.2") && n.contains("0.150.0"), "{n}");
@@ -238,7 +332,7 @@ mod tests {
         let e = crate::testing::env().await;
         let (bot, run, pane) = codex_bot_with_run(&e).await;
         e.herdr.set_screen(&pane, CODEX_MENU);
-        seed_disk("codex", "codex-cli 0.154.0").await;
+        seed_disk(&e.app, "local", "codex", "codex-cli 0.154.0").await;
         sweep(&e.app).await;
         assert!(notice_of(&e.app, &run).await.is_some());
         let cands = crate::bulk_restart::candidates(&e.app, None).await.unwrap();
