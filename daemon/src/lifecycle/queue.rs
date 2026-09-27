@@ -462,6 +462,9 @@ pub(crate) async fn revoke_all_orphaned_queued_turns(app: &Arc<App>) -> Vec<Stri
 static QUEUE_RETRY_TIMERS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, (u64, tokio::time::Instant)>>> =
     std::sync::OnceLock::new();
 static QUEUE_RETRY_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+#[cfg(test)]
+static TEST_QUEUE_FLUSH_REQUESTS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, usize>>> =
+    std::sync::OnceLock::new();
 
 /// How much sooner a new retry has to be before it replaces the timer already armed. Re-computing
 /// the same `next_flush_at` (every startup re-arm does) lands a hair either side of the old
@@ -582,6 +585,16 @@ pub(crate) fn forget_queue_retry_timer(bot_id: &str) {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn take_scheduled_flush_count(bot_id: &str) -> usize {
+    TEST_QUEUE_FLUSH_REQUESTS
+        .get_or_init(Default::default)
+        .lock()
+        .ok()
+        .and_then(|mut requests| requests.remove(bot_id))
+        .unwrap_or_default()
+}
+
 /// Try the queue again after `delay`, for conditions no lifecycle edge will announce.
 pub fn schedule_flush_retry(app: &Arc<App>, bot_id: &str, delay: std::time::Duration) {
     let app = app.clone();
@@ -592,20 +605,28 @@ pub fn schedule_flush_retry(app: &Arc<App>, bot_id: &str, delay: std::time::Dura
 /// Wake the durable prompt queue after a turn / Run transition. No-op in tests so a background
 /// RPC cannot race the DB state machine they drive.
 pub fn schedule_flush_queued(app: &Arc<App>, bot_id: &str) {
-    if cfg!(test) {
-        return;
-    }
-    let app = app.clone();
-    let bot_id = bot_id.to_string();
-    tokio::spawn(async move {
-        // Let the caller finish its current event / status write before taking the same lock.
-        tokio::task::yield_now().await;
-        let lock = app.bot_lock(&bot_id).await;
-        let _g = lock.lock().await;
-        if let Err(e) = flush_queued_locked(&app, &bot_id).await {
-            tracing::warn!(bot = %bot_id, error = ?e, "queued prompt flush failed");
+    #[cfg(test)]
+    {
+        let _ = app;
+        if let Ok(mut requests) = TEST_QUEUE_FLUSH_REQUESTS.get_or_init(Default::default).lock() {
+            *requests.entry(bot_id.to_string()).or_default() += 1;
         }
-    });
+    }
+
+    #[cfg(not(test))]
+    {
+        let app = app.clone();
+        let bot_id = bot_id.to_string();
+        tokio::spawn(async move {
+            // Let the caller finish its current event / status write before taking the same lock.
+            tokio::task::yield_now().await;
+            let lock = app.bot_lock(&bot_id).await;
+            let _g = lock.lock().await;
+            if let Err(e) = flush_queued_locked(&app, &bot_id).await {
+                tracing::warn!(bot = %bot_id, error = ?e, "queued prompt flush failed");
+            }
+        });
+    }
 }
 
 
@@ -2259,4 +2280,3 @@ mod flush_queue_tests {
         assert!(db::queued_turn(&app.db, &f.conv).await.unwrap().is_none());
     }
 }
-
