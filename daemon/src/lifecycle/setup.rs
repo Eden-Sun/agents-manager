@@ -622,7 +622,27 @@ pub(crate) async fn pane_env(
     run_id: &str,
     agent_name: &str,
     shim_dir: Option<&str>,
-) -> Value {
+) -> anyhow::Result<Value> {
+    let fence = app.hosts.fence(host).await.ok_or_else(|| anyhow::anyhow!("unknown host `{host}`"))?;
+    pane_env_for_fence(app, bot, host, run_id, agent_name, shim_dir, &fence).await
+}
+
+pub(crate) async fn pane_env_for_fence(
+    app: &Arc<App>,
+    bot: &db::Bot,
+    host: &str,
+    run_id: &str,
+    agent_name: &str,
+    shim_dir: Option<&str>,
+    fence: &crate::hosts::HostFence,
+) -> anyhow::Result<Value> {
+    if fence.conn().name != host {
+        anyhow::bail!("host fence `{}` does not match `{host}`", fence.conn().name);
+    }
+    let home = crate::hosts::home_for_fence(fence).await?;
+    if !app.hosts.is_current(fence).await {
+        anyhow::bail!("host `{host}` changed while resolving HOME");
+    }
     let mut env = serde_json::Map::new();
     env.insert("AM_BOT_ID".into(), json!(bot.id));
     // Name the herdr shim prefixes children with (SPEC §6.5b); the persona quotes it too.
@@ -644,13 +664,6 @@ pub(crate) async fn pane_env(
     if let Some(e) = bot.effort.as_deref().filter(|e| !e.trim().is_empty()) {
         env.insert("AM_EFFORT".into(), json!(e));
     }
-    let home = match app.hosts.get(host).await {
-        Some(c) => c.home().await.unwrap_or_else(|e| {
-            tracing::warn!(host, error = %e, "could not resolve the host's home; leaving $HOME unexpanded");
-            "$HOME".to_string()
-        }),
-        None => dirs::home_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
-    };
     if let Some(dir) = shim_dir {
     // Best effort only: the login shell's profile (`path_helper`, `brew shellenv`) pushes us back;
     // `start_inner` re-prepends in the pane's shell, which is what actually wins.
@@ -661,7 +674,7 @@ pub(crate) async fn pane_env(
             // 遠端：herdr 照字面設 env，所以 `remote_path`（CLI 裝在 `~/.local/bin` 之類）要在這裡展開接上。
             // 漏掉的話 pane 裡 `claude: command not found`，preflight 卻會過（它走 `ssh_exec_path`）——#92 live-SSH 撞到的。
             _ => {
-                let rp = app.hosts.get(host).await.and_then(|c| c.cfg.as_ref().map(|c| c.remote_path.clone())).unwrap_or_default();
+                let rp = fence.conn().cfg.as_ref().map(|c| c.remote_path.clone()).unwrap_or_default();
                 let mut dirs = vec![dir.to_string()];
                 dirs.extend(crate::hosts::remote_path_dirs(&rp, &home));
                 dirs.extend(["/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"].map(String::from));
@@ -708,7 +721,7 @@ pub(crate) async fn pane_env(
         Some(dir) => env.insert("AM_OUTBOX".into(), json!(dir.to_string_lossy())),
         None => env.remove("AM_OUTBOX"),
     };
-    Value::Object(env)
+    Ok(Value::Object(env))
 }
 
 /// Bot identity credentials are daemon-owned even when custom identity/bot env contains the same
@@ -1781,6 +1794,18 @@ mod pane_env_tests {
     use super::*;
     use crate::testing as tt;
 
+    async fn remote_home(app: &Arc<App>, host: &str, home: &str) {
+        let conn = app.hosts.insert_remote_for_test(crate::config::HostCfg {
+            name: host.into(),
+            ssh: "unused".into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "agents-manager".into(),
+            remote_path: String::new(),
+        }).await;
+        *conn.remote_home.lock().await = Some(home.into());
+    }
+
     /// 正式／隔離 × 本機／遠端 × 自訂 env 帶了偽造值、清空值、完全沒帶：結果只看 daemon 自己。
     #[test]
     fn reserved_instance_keys_ignore_whatever_custom_env_says() {
@@ -1806,11 +1831,12 @@ mod pane_env_tests {
     async fn a_local_pane_gets_its_own_outbox_that_custom_env_cannot_move() {
         let env = tt::env().await;
         let bot = tt::claude_bot(&env.app, &env.project_id, "alfa").await;
+        remote_home(&env.app, "box", "/home/remote").await;
         let want = env.app.data_dir.join("outbox").join(&bot.id);
-        let e = pane_env(&env.app, &bot, LOCAL_HOST, "run-1", "proj-alfa", None).await;
+        let e = pane_env(&env.app, &bot, LOCAL_HOST, "run-1", "proj-alfa", None).await.unwrap();
         assert_eq!(e["AM_OUTBOX"], json!(want.to_string_lossy()));
         assert!(want.is_dir(), "啟動時就建好");
-        assert!(pane_env(&env.app, &bot, "box", "run-1", "proj-alfa", None).await.get("AM_OUTBOX").is_none(), "遠端沒有");
+        assert!(pane_env(&env.app, &bot, "box", "run-1", "proj-alfa", None).await.unwrap().get("AM_OUTBOX").is_none(), "遠端沒有");
 
         sqlx::query("UPDATE bots SET env_json = ? WHERE id = ?")
             .bind(r#"{"AM_OUTBOX":"/elsewhere","FOO":"kept"}"#)
@@ -1819,10 +1845,10 @@ mod pane_env_tests {
             .await
             .unwrap();
         let bot = db::bot(&env.app.db, &bot.id).await.unwrap().unwrap();
-        let e = pane_env(&env.app, &bot, LOCAL_HOST, "run-1", "proj-alfa", None).await;
+        let e = pane_env(&env.app, &bot, LOCAL_HOST, "run-1", "proj-alfa", None).await.unwrap();
         assert_eq!(e["AM_OUTBOX"], json!(want.to_string_lossy()), "bot.env 蓋不過去");
         assert_eq!(e["FOO"], json!("kept"));
-        assert!(pane_env(&env.app, &bot, "box", "run-1", "proj-alfa", None).await.get("AM_OUTBOX").is_none(), "遠端也不留自訂的假路徑");
+        assert!(pane_env(&env.app, &bot, "box", "run-1", "proj-alfa", None).await.unwrap().get("AM_OUTBOX").is_none(), "遠端也不留自訂的假路徑");
     }
 
     #[tokio::test]
@@ -1838,7 +1864,7 @@ mod pane_env_tests {
                 .await
                 .unwrap();
             let current = db::bot(&env.app.db, &bot.id).await.unwrap().unwrap();
-            let pane = pane_env(&env.app, &current, LOCAL_HOST, "run-1", "proj-api-token", None).await;
+            let pane = pane_env(&env.app, &current, LOCAL_HOST, "run-1", "proj-api-token", None).await.unwrap();
             assert_eq!(pane["AM_BOT_ID"], json!(bot.id));
             assert_eq!(pane["AM_BOT_TOKEN"], json!(bot.hook_token), "API identity is always the stored per-bot token");
             assert_eq!(pane.get("AM_HOOK_TOKEN").is_some(), want_hook, "hook env still follows inject_hooks");
@@ -1854,13 +1880,14 @@ mod pane_env_tests {
     async fn claude_panes_start_with_prompt_suggestions_off() {
         let env = tt::env().await;
         let bot = tt::claude_bot(&env.app, &env.project_id, "alfa").await;
+        remote_home(&env.app, "box", "/home/remote").await;
         for host in [LOCAL_HOST, "box"] {
-            let e = pane_env(&env.app, &bot, host, "run-1", "proj-alfa", None).await;
+            let e = pane_env(&env.app, &bot, host, "run-1", "proj-alfa", None).await.unwrap();
             assert_eq!(e["CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"], json!("false"), "{host}");
         }
         let mut codex = bot.clone();
         codex.kind = "codex".into();
-        assert!(pane_env(&env.app, &codex, LOCAL_HOST, "run-1", "proj-alfa", None).await.get("CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION").is_none());
+        assert!(pane_env(&env.app, &codex, LOCAL_HOST, "run-1", "proj-alfa", None).await.unwrap().get("CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION").is_none());
 
         sqlx::query("UPDATE bots SET env_json = ? WHERE id = ?")
             .bind(r#"{"CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION":"true"}"#)
@@ -1869,7 +1896,7 @@ mod pane_env_tests {
             .await
             .unwrap();
         let bot = db::bot(&env.app.db, &bot.id).await.unwrap().unwrap();
-        let e = pane_env(&env.app, &bot, LOCAL_HOST, "run-1", "proj-alfa", None).await;
+        let e = pane_env(&env.app, &bot, LOCAL_HOST, "run-1", "proj-alfa", None).await.unwrap();
         assert_eq!(e["CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"], json!("true"), "使用者自己要開就尊重");
     }
 
@@ -1895,7 +1922,7 @@ mod pane_env_tests {
         *env.app.hosts.get("box").await.unwrap().remote_home.lock().await = Some("/home/u".into());
 
         let shim = "/home/u/.config/agents-manager/bots/B/bin";
-        let e = pane_env(&env.app, &bot, "box", "run-1", "proj-alfa", Some(shim)).await;
+        let e = pane_env(&env.app, &bot, "box", "run-1", "proj-alfa", Some(shim)).await.unwrap();
         assert_eq!(
             e["PATH"],
             json!(format!("{shim}:/opt/tools/bin:/home/u/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")),
@@ -1904,25 +1931,70 @@ mod pane_env_tests {
         env.app.hosts.remove(&env.app, "box").await;
     }
 
+    #[tokio::test]
+    async fn pane_env_fails_closed_on_remote_home_error_and_recovers_with_remote_home() {
+        let env = tt::env().await;
+        let app = &env.app;
+        let host = format!("pane-home-616-{}", crate::db::ulid().to_ascii_lowercase());
+        let conn = app.hosts.insert_remote_for_test(crate::config::HostCfg {
+            name: host.clone(),
+            ssh: "unused".into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "agents-manager".into(),
+            remote_path: String::new(),
+        }).await;
+        let bot = tt::claude_bot(app, &env.project_id, "home-failure").await;
+        app.cfg.update(|cfg| {
+            cfg.identities.push(crate::config::IdentityCfg {
+                name: "cc1".into(),
+                kind: "claude".into(),
+                host: Some(host.clone()),
+                env: [("CLAUDE_CONFIG_DIR".into(), "~/.claude-cc1".into())].into(),
+                args: vec![],
+            });
+            Ok(())
+        }).await.unwrap();
+        sqlx::query("UPDATE bots SET identity = ? WHERE id = ?").bind("cc1").bind(&bot.id).execute(&app.db).await.unwrap();
+        let bot = db::bot(&app.db, &bot.id).await.unwrap().unwrap();
+
+        let calls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let calls2 = calls.clone();
+        crate::hosts::set_ssh_fake(&host, move |script| {
+            calls2.lock().unwrap().push(script.to_string());
+            Err(anyhow::anyhow!("injected remote HOME read failure"))
+        });
+        let error = pane_env(app, &bot, &host, "run-1", "proj-home-failure", None)
+            .await
+            .expect_err("a remote pane cannot launch with unknown HOME authority");
+        assert!(error.to_string().contains("HOME"), "preserve the cause for retry/reporting: {error:#}");
+        assert_eq!(calls.lock().unwrap().len(), 1, "no path-dependent remote operation follows failed HOME lookup");
+
+        *conn.remote_home.lock().await = Some("/home/remote-pane".into());
+        let pane = pane_env(app, &bot, &host, "run-2", "proj-home-failure", None).await.unwrap();
+        assert_eq!(pane["CLAUDE_CONFIG_DIR"], "/home/remote-pane/.claude-cc1");
+    }
+
     /// hook 打不通時會 spool 到 `AM_DATA_DIR`；沒注入的話隔離跑的 bot 會把檔案丟進正式資料目錄，
     /// 換成正式 daemon 去重播它（sol 複審 2026-09-14）。
     #[tokio::test]
     async fn a_local_pane_learns_the_daemons_data_dir() {
         let env = tt::env().await;
         let bot = tt::claude_bot(&env.app, &env.project_id, "alfa").await;
-        let e = pane_env(&env.app, &bot, LOCAL_HOST, "run-1", "proj-alfa", None).await;
+        let e = pane_env(&env.app, &bot, LOCAL_HOST, "run-1", "proj-alfa", None).await.unwrap();
         assert_eq!(e["AM_DATA_DIR"], json!(env.app.data_dir.to_string_lossy()));
         assert_ne!(e["AM_DATA_DIR"], json!(""));
 
         // 遠端 pane 的 bot 目錄在遠端家目錄，注入本機路徑只會誤導（§11.4）。
-        let remote = pane_env(&env.app, &bot, "box", "run-1", "proj-alfa", None).await;
+        remote_home(&env.app, "box", "/home/remote").await;
+        let remote = pane_env(&env.app, &bot, "box", "run-1", "proj-alfa", None).await.unwrap();
         assert!(remote.get("AM_DATA_DIR").is_none());
 
         // 正式實例不設 AM_INSTANCE（舊 pane 也沒有，兩者一致）；隔離實例本機、遠端都要帶。
         assert!(e.get("AM_INSTANCE").is_none());
         env.app.set_instance(Some("a1b2".into()));
         for host in [LOCAL_HOST, "box"] {
-            let iso = pane_env(&env.app, &bot, host, "run-1", "proj-alfa", None).await;
+            let iso = pane_env(&env.app, &bot, host, "run-1", "proj-alfa", None).await.unwrap();
             assert_eq!(iso["AM_INSTANCE"], json!("a1b2"), "{host}");
         }
 
@@ -1973,7 +2045,7 @@ mod pane_env_tests {
             for instance in [None, Some("a1b2".to_string())] {
                 env.app.set_instance(instance.clone());
                 for host in [LOCAL_HOST, "box"] {
-                    let got = pane_env(&env.app, &bot, host, "run-1", "proj-alfa", None).await;
+                    let got = pane_env(&env.app, &bot, host, "run-1", "proj-alfa", None).await.unwrap();
                     let case = format!("layer={layer} instance={instance:?} host={host}");
                     assert_eq!(got.get("AM_INSTANCE"), instance.as_ref().map(|s| json!(s)).as_ref(), "{case}");
                     let dir = (host == LOCAL_HOST).then(|| json!(env.app.data_dir.to_string_lossy()));

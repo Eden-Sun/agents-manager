@@ -261,13 +261,6 @@ async fn client_for_fence(host: &str, fence: &crate::hosts::HostFence) -> Result
     Ok(conn.client.clone())
 }
 
-async fn host_home_for_fence(fence: &crate::hosts::HostFence) -> String {
-    if let Ok(h) = fence.conn().home().await {
-        return h;
-    }
-    dirs::home_dir().map(|p| p.display().to_string()).unwrap_or_else(|| "/tmp".into())
-}
-
 async fn probe_client() -> Result<HerdrClient> {
     let client = HerdrClient::new(HerdrClient::session_socket(PROBE_SESSION));
     if client.ping().await.is_ok() {
@@ -843,7 +836,10 @@ pub async fn refresh_claude(app: &Arc<App>, host: &str) -> Result<bool> {
     let _guard = crate::quota::probe_lock(host).await;
     let fence = app.hosts.fence(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
     // `~` expands against the *probed* host's home, not the daemon's.
-    let home = host_home_for_fence(&fence).await;
+    let home = crate::hosts::home_for_fence(&fence).await.map_err(|e| {
+        tracing::warn!(host, error = %e, "skipping Claude quota probe because the host HOME is unreadable");
+        e
+    })?;
     // `ccN` are per host (SPEC §16): cc1 on m4p is a different account than here.
     let identities = crate::tools::identities_for_host(app, host).await;
     let logins = app.tools.lock().await.get(host).map(|t| t.identities.clone()).unwrap_or_default();
@@ -956,7 +952,10 @@ fn forced_target(targets: Vec<Target>, account: Option<&str>) -> Option<Target> 
 pub async fn force_probe(app: &Arc<App>, host: &str, account: Option<&str>) -> Result<(String, Quota), ForceProbeError> {
     let _guard = crate::quota::probe_lock(host).await;
     let fence = app.hosts.fence(host).await.ok_or_else(|| ForceProbeError::Failed(format!("unknown host `{host}`")))?;
-    let home = host_home_for_fence(&fence).await;
+    let home = crate::hosts::home_for_fence(&fence).await.map_err(|e| {
+        tracing::warn!(host, error = %e, "skipping forced Claude quota probe because the host HOME is unreadable");
+        ForceProbeError::Failed(e.to_string())
+    })?;
     let identities = crate::tools::identities_for_host(app, host).await;
     let (logins, live, statusline_keys) = (BTreeMap::new(), Default::default(), Default::default());
     let input = PlanInput { host, home: &home, identities: &identities, logins: &logins, live: &live, off: &[], unnamed_running: true, statusline_keys: &statusline_keys };
@@ -1571,6 +1570,100 @@ AM_USAGE_DONE=0
         assert_eq!(current.logged_in, Some(true));
         assert_eq!(current.account.as_deref(), Some("b@example.test"));
         assert_eq!(current.plan.as_deref(), Some("B plan"));
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_remote_home_skips_claude_probe_and_recovers_next_poll() {
+        use crate::testing::MockHerdr;
+        use std::sync::atomic::Ordering;
+
+        let app = crate::testing::env().await.app.clone();
+        let local_fence = app.hosts.fence(LOCAL_HOST).await.unwrap();
+        let local_home = dirs::home_dir().map(|p| p.display().to_string()).unwrap_or_else(|| "/tmp".into());
+        assert_eq!(crate::hosts::home_for_fence(&local_fence).await.unwrap(), local_home, "local HOME behavior stays unchanged");
+        let host = format!("claude-home-595-{}", crate::db::ulid().to_ascii_lowercase());
+        let conn = app
+            .hosts
+            .insert_remote_for_test(crate::config::HostCfg {
+                name: host.clone(),
+                ssh: "unused".into(),
+                ssh_port: 22,
+                ssh_opts: vec![],
+                herdr_session: "agents-manager".into(),
+                remote_path: String::new(),
+            })
+            .await;
+        conn.connected.store(true, Ordering::SeqCst);
+        let socket = crate::hosts::short_dir(None).join(format!("{host}.sock"));
+        std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+        let h = MockHerdr::start(socket.clone());
+        h.set_screen(
+            "*",
+            &format!("{AUTH_BEGIN}\n{{\"loggedIn\":true,\"email\":\"remote@example.test\",\"subscriptionType\":\"max\"}}\n{AUTH_END}\nTotal cost: $0\n{USAGE_DONE}0\n"),
+        );
+
+        let mut env = BTreeMap::new();
+        env.insert("CLAUDE_CONFIG_DIR".into(), "~/.claude-cc1".into());
+        let identity_cfg = crate::config::IdentityCfg {
+            name: "cc1".into(),
+            kind: "claude".into(),
+            host: Some(host.clone()),
+            env,
+            args: vec![],
+        };
+        let mut identity = crate::tools::IdentityInfo::shell("cc1", "claude", Some("/previous/config".into()));
+        identity.logged_in = Some(true);
+        identity.account = Some("previous@example.test".into());
+        identity.plan = Some("previous plan".into());
+        app.tools.lock().await.insert(
+            host.clone(),
+            crate::tools::HostTools {
+                tools: [("claude".into(), crate::tools::ToolInfo { installed: true, path: Some("/usr/bin/claude".into()), version: None, logged_in: Some(true) })]
+                    .into_iter()
+                    .collect(),
+                identities: [("cc1".into(), identity)].into_iter().collect(),
+                shell_identities: vec![identity_cfg],
+                utc_offset_secs: None,
+                herdr_cli: None,
+                checked_at: crate::db::now(),
+            },
+        );
+
+        let ssh_calls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let ssh_calls2 = ssh_calls.clone();
+        crate::hosts::set_ssh_fake(&host, move |script| {
+            ssh_calls2.lock().unwrap().push(script.to_string());
+            Err(anyhow!("injected remote HOME read failure"))
+        });
+
+        let key = crate::quota::quota_key(&host, "claude:cc1");
+        let err = refresh_claude(&app, &host).await.expect_err("unreadable HOME must skip this host's probe");
+        assert!(err.to_string().contains("HOME"), "retain the reason for retry/logging: {err:#}");
+        assert!(h.calls_to("workspace.create").is_empty(), "do not launch a probe with a daemon-local path");
+        assert!(!cooling_down(&key, false, false), "HOME authority failure must not park the identity as a CLI probe failure");
+        {
+            let tools = app.tools.lock().await;
+            let previous = &tools[&host].identities["cc1"];
+            assert_eq!(previous.account.as_deref(), Some("previous@example.test"), "no login answer was published");
+            assert_eq!(previous.plan.as_deref(), Some("previous plan"));
+        }
+        assert!(!app.quotas.lock().await.contains_key(&key), "no quota observation was published");
+        assert_eq!(ssh_calls.lock().unwrap().len(), 1, "stop immediately after the failed HOME authority read");
+        let forced = force_probe(&app, &host, Some("cc1")).await;
+        assert!(matches!(forced, Err(ForceProbeError::Failed(ref e)) if e.contains("HOME")), "forced probes retain the HOME failure reason: {forced:?}");
+        assert!(h.calls_to("workspace.create").is_empty(), "forced probing also stops before launching a pane");
+        assert_eq!(ssh_calls.lock().unwrap().len(), 2, "both poll and forced refresh saw the HOME read failure");
+
+        *conn.remote_home.lock().await = Some("/home/remote".into());
+        assert!(refresh_claude(&app, &host).await.unwrap(), "the next poll retries naturally when HOME is readable");
+        let creates = h.calls_to("workspace.create");
+        assert!(!creates.is_empty(), "the recovered poll should start its expected identity probe");
+        assert!(creates.iter().all(|params| params["cwd"] == "/home/remote"), "workspace also belongs under the remote home: {creates:?}");
+        assert!(creates.iter().any(|params| params["env"]["CLAUDE_CONFIG_DIR"] == "/home/remote/.claude-cc1"), "identity env uses the remote HOME: {creates:?}");
+        assert_eq!(app.tools.lock().await[&host].identities["cc1"].account.as_deref(), Some("remote@example.test"));
+
+        drop(h);
+        let _ = std::fs::remove_file(socket);
     }
 
     /// 沒這個身分：什麼都不探、不開 pane，直接回 `UnknownAccount`（API 404）。

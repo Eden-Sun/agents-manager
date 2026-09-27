@@ -14,7 +14,7 @@ use crate::config::LOCAL_HOST;
 use crate::herdr::{AgentStatus, HerdrClient};
 use crate::quota::{Quota, Window};
 use crate::state::App;
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use chrono::{DateTime, Datelike, Local, NaiveDate, TimeZone};
 use serde_json::json;
 use std::sync::Arc;
@@ -272,33 +272,38 @@ impl Drop for Probe {
 }
 
 /// Remote hosts borrow the forwarded session — see [`crate::quota_claude::client_for`].
-async fn client_for(app: &Arc<App>, host: &str) -> Result<HerdrClient> {
-    if host == LOCAL_HOST {
+async fn client_for_fence(app: &Arc<App>, fence: &crate::hosts::HostFence) -> Result<HerdrClient> {
+    if fence.conn().is_local() {
         return probe_client().await;
     }
-    let conn = app.hosts.get(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
-    if !conn.is_connected() {
-        return Err(anyhow!("host `{host}` is not connected"));
+    if !fence.conn().is_connected() {
+        return Err(anyhow!("host `{}` is not connected", fence.conn().name));
     }
-    app.herdr_for(host).await.ok_or_else(|| anyhow!("no herdr client for `{host}`"))
+    let session = fence.conn().cfg.as_ref().map(|cfg| cfg.herdr_session.as_str())
+        .ok_or_else(|| anyhow!("host `{}` has no configured herdr session", fence.conn().name))?;
+    app.herdr_for_host_fence(fence, session).await
+        .ok_or_else(|| anyhow!("host `{}` changed or has no herdr client", fence.conn().name))
 }
 
 /// `Ok(false)` = grok is not installed there (quota stays null).
 pub async fn refresh_grok(app: &Arc<App>, host: &str) -> Result<bool> {
     let _guard = crate::quota::probe_lock(host).await;
     let fence = app.hosts.fence(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
+    let cwd = crate::hosts::home_for_fence(&fence).await?;
+    if !app.hosts.is_current(&fence).await {
+        bail!("host `{host}` changed while resolving HOME");
+    }
     // The start-up poller can beat detection; empty cache = unknown, not missing.
     if !app.tools.lock().await.contains_key(host) {
         crate::tools::detect(app, host).await?;
     }
+    if !app.hosts.is_current(&fence).await {
+        bail!("host `{host}` changed before its Grok quota probe");
+    }
     if crate::tools::cached_path(app, host, "grok").await.is_none() {
         return Ok(false);
     }
-    let client = client_for(app, host).await?;
-    let cwd = match app.hosts.get(host).await {
-        Some(conn) => conn.home().await.unwrap_or_else(|_| "/tmp".into()),
-        None => dirs::home_dir().map(|p| p.display().to_string()).unwrap_or_else(|| "/tmp".into()),
-    };
+    let client = client_for_fence(app, &fence).await?;
     let (ws, pane) = client.workspace_create(&cwd, PROBE_LABEL, json!({})).await?;
     let probe = Probe { client: client.clone(), workspace_id: ws.workspace_id.clone() };
     let pane_id = pane.pane_id.clone();
@@ -451,6 +456,57 @@ mod tests {
         park(&key, Duration::from_millis(0));
         std::thread::sleep(Duration::from_millis(5));
         assert!(!cooling_down(&key), "an expired park clears itself");
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_remote_home_skips_grok_probe_and_recovers_next_poll() {
+        use std::sync::atomic::Ordering;
+
+        let app = crate::testing::env().await.app.clone();
+        let host = format!("grok-home-618-{}", crate::db::ulid().to_ascii_lowercase());
+        let conn = app.hosts.insert_remote_for_test(crate::config::HostCfg {
+            name: host.clone(),
+            ssh: "unused".into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "agents-manager".into(),
+            remote_path: String::new(),
+        }).await;
+        conn.connected.store(true, Ordering::SeqCst);
+        app.tools.lock().await.insert(host.clone(), crate::tools::HostTools {
+            tools: [("grok".into(), crate::tools::ToolInfo { installed: true, path: Some("/usr/bin/grok".into()), version: None, logged_in: Some(true) })].into(),
+            identities: Default::default(),
+            shell_identities: vec![],
+            utc_offset_secs: None,
+            herdr_cli: None,
+            checked_at: crate::db::now(),
+        });
+        let ssh_calls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let ssh_calls2 = ssh_calls.clone();
+        crate::hosts::set_ssh_fake(&host, move |script| {
+            ssh_calls2.lock().unwrap().push(script.to_string());
+            Err(anyhow!("injected remote HOME read failure"))
+        });
+        let socket = conn.client.socket_path().to_path_buf();
+        let herdr = crate::testing::MockHerdr::start(socket.clone());
+
+        let key = crate::quota::quota_key(&host, "grok");
+        let err = refresh_grok(&app, &host).await.expect_err("unreadable remote HOME must stop the Grok probe");
+        assert!(err.to_string().contains("HOME"), "retain the HOME failure reason: {err:#}");
+        assert!(herdr.calls_to("workspace.create").is_empty(), "do not create a workspace at `/tmp` or daemon HOME");
+        assert!(!app.quotas.lock().await.contains_key(&key), "no quota observation is published");
+        assert_eq!(ssh_calls.lock().unwrap().len(), 1, "only the failed HOME read is allowed");
+
+        *conn.remote_home.lock().await = Some("/home/remote-grok".into());
+        herdr.set_screen("*", SCREEN);
+        assert!(refresh_grok(&app, &host).await.unwrap(), "the next poll retries naturally");
+        let creates = herdr.calls_to("workspace.create");
+        assert_eq!(creates.len(), 1, "one recovered Grok workspace is created");
+        assert_eq!(creates[0]["cwd"], "/home/remote-grok", "workspace uses the remote HOME");
+        assert!(app.quotas.lock().await.contains_key(&key), "the recovered quota is published");
+
+        drop(herdr);
+        let _ = std::fs::remove_file(socket);
     }
 
     const SCREEN: &str = "\

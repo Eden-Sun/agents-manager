@@ -321,15 +321,28 @@ pub(crate) async fn native_resume_plan(
 }
 
 /// 這個身分實際用的 `CLAUDE_CONFIG_DIR`（沒設、或身分未知都算預設帳號 `~/.claude`）。
-pub(crate) async fn identity_config_dir(app: &Arc<App>, host: &str, identity: Option<&str>) -> String {
-    let home = crate::tools::host_home(app, host).await;
+pub(crate) async fn identity_config_dir(app: &Arc<App>, host: &str, identity: Option<&str>) -> anyhow::Result<String> {
+    let fence = app.hosts.fence(host).await.ok_or_else(|| anyhow::anyhow!("unknown host `{host}`"))?;
+    identity_config_dir_for_fence(app, host, identity, &fence).await
+}
+
+pub(crate) async fn identity_config_dir_for_fence(
+    app: &Arc<App>,
+    host: &str,
+    identity: Option<&str>,
+    fence: &crate::hosts::HostFence,
+) -> anyhow::Result<String> {
+    let home = crate::hosts::home_for_fence(fence).await?;
+    if !app.hosts.is_current(fence).await {
+        anyhow::bail!("host `{host}` changed while resolving HOME");
+    }
     let dir = match identity.map(str::trim).filter(|s| !s.is_empty()) {
         Some(name) => crate::tools::identity_for_host(app, host, name)
             .await
             .and_then(|i| i.env.get("CLAUDE_CONFIG_DIR").map(|v| crate::config::expand_home(v, &home))),
         None => None,
     };
-    dir.unwrap_or_else(|| format!("{home}/.claude"))
+    Ok(dir.unwrap_or_else(|| format!("{home}/.claude")))
 }
 
 /// 把 `transcript` 複製到目前身分的 `projects/<同一個 cwd 目錄名>/` 下，讓 `--resume` 在那個身分
@@ -353,7 +366,13 @@ async fn stage_cross_identity_transcript_local(app: &Arc<App>, bot: &db::Bot, tr
     }
     let (Some(cwd_dir), Some(fname)) = (src.parent(), src.file_name()) else { return Err("transcript_missing") };
     let Some(old_projects) = cwd_dir.parent() else { return Err("transcript_missing") };
-    let new_dir = identity_config_dir(app, LOCAL_HOST, bot.identity.as_deref()).await;
+    let new_dir = match identity_config_dir(app, LOCAL_HOST, bot.identity.as_deref()).await {
+        Ok(dir) => dir,
+        Err(e) => {
+            tracing::warn!(bot = %bot.name, error = %e, "identity switch：無法確認本機 HOME，改開新對話");
+            return Err("transcript_missing");
+        }
+    };
     let new_projects = std::path::Path::new(&new_dir).join("projects");
     let same = match (std::fs::canonicalize(old_projects), std::fs::canonicalize(&new_projects)) {
         (Ok(a), Ok(b)) => a == b,
@@ -394,11 +413,17 @@ async fn stage_cross_identity_transcript_remote(app: &Arc<App>, bot: &db::Bot, h
     let (Some(cwd_dir), Some(fname)) = (src.parent(), src.file_name()) else { return Err("transcript_missing") };
     let Some(old_projects) = cwd_dir.parent() else { return Err("transcript_missing") };
     let Some(cwd_key) = cwd_dir.file_name() else { return Err("transcript_missing") };
-    let Some(conn) = app.hosts.get(host).await else {
+    let Some(fence) = app.hosts.fence(host).await else {
         tracing::warn!(bot = %bot.name, host, "identity switch：主機沒連線，改開新對話");
         return Err("transcript_missing");
     };
-    let new_dir = identity_config_dir(app, host, bot.identity.as_deref()).await;
+    let new_dir = match identity_config_dir_for_fence(app, host, bot.identity.as_deref(), &fence).await {
+        Ok(dir) => dir,
+        Err(e) => {
+            tracing::warn!(bot = %bot.name, host, error = %e, "identity switch：無法確認遠端身分目錄，改開新對話");
+            return Err("transcript_missing");
+        }
+    };
     let new_projects = std::path::Path::new(&new_dir).join("projects");
     let script = remote_stage_script(
         &old_projects.to_string_lossy(),
@@ -407,7 +432,11 @@ async fn stage_cross_identity_transcript_remote(app: &Arc<App>, bot: &db::Bot, h
         &fname.to_string_lossy(),
         src.file_stem().map(|s| s.to_string_lossy().into_owned()).as_deref(),
     );
-    let out = match conn.ssh_exec(&script).await {
+    let Some(result) = app.hosts.run_if_current(&fence, fence.conn().ssh_exec(&script)).await else {
+        tracing::warn!(bot = %bot.name, host, "identity switch：搬檔前主機權威已變更，改開新對話");
+        return Err("transcript_missing");
+    };
+    let out = match result {
         Ok(o) => o,
         Err(e) => {
             tracing::warn!(bot = %bot.name, host, error = %e, "identity switch：搬遠端 session 檔的 ssh 指令失敗，改開新對話");
@@ -687,7 +716,11 @@ async fn start_inner(
     }
     let agent = crate::config::agent_name(&project.label, &bot.id);
     let shim_dir = install_shim(app, bot, project).await;
-    let env = pane_env(app, bot, &host, run_id, &agent, shim_dir.as_deref()).await;
+    let env = match fence {
+        Some(fence) => pane_env_for_fence(app, bot, &host, run_id, &agent, shim_dir.as_deref(), fence).await,
+        None => pane_env(app, bot, &host, run_id, &agent, shim_dir.as_deref()).await,
+    }
+    .map_err(up)?;
     // SPEC §6.5c: claude learns herdr from a skill (the CLI's own doc), not the persona.
     install_herdr_skill(app, bot, project, &env, &agent).await;
 
@@ -1807,7 +1840,7 @@ mod resume_args_tests {
     mod remote_cross_identity_transcript_tests {
         use super::*;
         use crate::lifecycle::native_resume_plan;
-        use crate::lifecycle::start::{parse_stage_output, remote_stage_script};
+        use crate::lifecycle::start::{parse_stage_output, remote_stage_script, stage_cross_identity_transcript_remote};
         use std::time::Duration;
 
         /// `remote_stage_script` 只是拼字串，真正的守衛（`[ -f ... ]`／`mkdir -p ... ||`／
@@ -1951,6 +1984,41 @@ mod resume_args_tests {
             let bot = db::bot(&e.app.db, &pm.id).await.unwrap().unwrap();
             let plan = native_resume_plan(&e.app, &bot, "no-such-host", false, None).await.unwrap();
             assert_eq!(plan, Err("transcript_missing"));
+        }
+
+        #[tokio::test]
+        async fn remote_transcript_staging_skips_unreadable_home_and_retries_with_remote_home() {
+            let e = env().await;
+            let pm = claude_bot(&e.app, &e.project_id, "pm").await;
+            let host = format!("resume-home-616-{}", db::ulid().to_ascii_lowercase());
+            let conn = e.app.hosts.insert_remote_for_test(crate::config::HostCfg {
+                name: host.clone(),
+                ssh: "unused".into(),
+                ssh_port: 22,
+                ssh_opts: vec![],
+                herdr_session: "agents-manager".into(),
+                remote_path: String::new(),
+            }).await;
+            let transcript = e.dir.join("remote-home-resume.jsonl");
+            std::fs::write(&transcript, "{}\n").unwrap();
+            let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+            let calls2 = calls.clone();
+            crate::hosts::set_ssh_fake(&host, move |script| {
+                calls2.lock().unwrap().push(script.to_string());
+                Err(anyhow::anyhow!("injected remote HOME read failure"))
+            });
+
+            assert_eq!(stage_cross_identity_transcript_remote(&e.app, &pm, &host, transcript.to_str().unwrap()).await, Err("transcript_missing"));
+            assert_eq!(calls.lock().unwrap().len(), 1, "do not run a transcript-copy script with unknown identity HOME");
+
+            *conn.remote_home.lock().await = Some("/home/remote-resume".into());
+            let calls2 = calls.clone();
+            crate::hosts::set_ssh_fake(&host, move |script| {
+                calls2.lock().unwrap().push(script.to_string());
+                Ok("AM_SAME\n".into())
+            });
+            assert_eq!(stage_cross_identity_transcript_remote(&e.app, &pm, &host, transcript.to_str().unwrap()).await, Ok(()));
+            assert!(calls.lock().unwrap().last().unwrap().contains("/home/remote-resume/.claude/projects"), "retry uses the recovered remote HOME");
         }
 
         /// 主機有設定，但連不上（沒有東西在聽那個 port，connection refused）：ssh_exec 真的失敗，

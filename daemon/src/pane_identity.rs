@@ -199,6 +199,20 @@ pub async fn sync_child_identity(
     if !probe_due(&bot.id, pane_id) {
         return;
     }
+    let Some(fence) = app.hosts.fence(host).await else {
+        tracing::debug!(host, bot = %bot.name, "host disappeared before child identity detection");
+        return;
+    };
+    let home = match crate::hosts::home_for_fence(&fence).await {
+        Ok(home) => home,
+        Err(e) => {
+            tracing::warn!(host, bot = %bot.name, error = %e, "child identity detection deferred because the host HOME is unreadable");
+            return;
+        }
+    };
+    if !app.hosts.is_current(&fence).await {
+        return;
+    }
     let reader = app.proc_env.reader();
     let Some(env) = reader.env_of(app, host, pid).await else {
         // Not marked probed: a transient failure must not pin the child to the parent's account.
@@ -212,7 +226,6 @@ pub async fn sync_child_identity(
         return;
     }
     probed().lock().unwrap().insert(probe_key(&bot.id, pane_id));
-    let home = crate::tools::host_home(app, host).await;
     let dir = env.get(var).map(String::as_str);
     let Some(name) = child_identity(&identities, &bot.kind, var, &home, dir) else {
         tracing::debug!(host, bot = %bot.name, ?dir, "no identity owns the child's account; keeping the inherited identity");
@@ -220,6 +233,9 @@ pub async fn sync_child_identity(
     };
     let dir = dir.unwrap_or("");
     if bot.identity.as_deref() == Some(name.as_str()) {
+        return;
+    }
+    if !app.hosts.is_current(&fence).await {
         return;
     }
     // `managed_by` in WHERE too: a race with the TOML projection must never write a user bot.
@@ -241,6 +257,25 @@ pub async fn sync_child_identity(
 mod tests {
     use super::*;
     use crate::config::IdentityCfg;
+
+    struct FixedProcEnv {
+        reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        env: BTreeMap<String, String>,
+    }
+
+    impl ProcEnv for FixedProcEnv {
+        fn env_of<'a>(
+            &'a self,
+            _app: &'a Arc<App>,
+            _host: &'a str,
+            _pid: i64,
+        ) -> BoxFuture<'a, Option<BTreeMap<String, String>>> {
+            Box::pin(async move {
+                self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Some(self.env.clone())
+            })
+        }
+    }
 
     fn idn(name: &str, kind: &str, dir: Option<&str>) -> IdentityCfg {
         let mut env = BTreeMap::new();
@@ -289,5 +324,51 @@ mod tests {
         assert_eq!(child_identity(&ids, "claude", var, h, Some("/Users/m4p/.claude-ccompany")), Some("cc1".into()));
         assert_eq!(child_identity(&ids, "claude", var, h, Some("/Users/m4p/.claude-other")), None);
         assert_eq!(child_identity(&ids[1..], "claude", var, h, None), None);
+    }
+
+    #[tokio::test]
+    async fn child_identity_waits_for_remote_home_and_retries_after_recovery() {
+        use std::sync::atomic::Ordering;
+
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let host = format!("child-home-616-{}", crate::db::ulid().to_ascii_lowercase());
+        let conn = app.hosts.insert_remote_for_test(crate::config::HostCfg {
+            name: host.clone(),
+            ssh: "unused".into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "agents-manager".into(),
+            remote_path: String::new(),
+        }).await;
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "child-home").await;
+        sqlx::query("UPDATE bots SET managed_by='child', identity='cc1' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
+        let bot = crate::db::bot(&app.db, &bot.id).await.unwrap().unwrap();
+        app.cfg.update(|cfg| {
+            cfg.identities = vec![
+                idn("cc1", "claude", Some("~/.claude-cc1")),
+                idn("cc2", "claude", Some("~/.claude-cc2")),
+            ].into_iter().map(|mut identity| { identity.host = Some(host.clone()); identity }).collect();
+            Ok(())
+        }).await.unwrap();
+        let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        app.proc_env.set(std::sync::Arc::new(FixedProcEnv {
+            reads: reads.clone(),
+            env: [("CLAUDE_CONFIG_DIR".into(), "/home/remote-child/.claude-cc2".into())].into(),
+        }));
+        crate::hosts::set_ssh_fake(&host, |_| Err(anyhow::anyhow!("injected remote HOME read failure")));
+
+        sync_child_identity(&app, &host, &bot, "w1:p1", Some(901)).await;
+        let unchanged = crate::db::bot(&app.db, &bot.id).await.unwrap().unwrap();
+        assert_eq!(unchanged.identity.as_deref(), Some("cc1"), "unreadable HOME leaves the inherited identity alone");
+        assert!(probe_due(&bot.id, "w1:p1"), "HOME failure is retryable, not marked as probed");
+        assert_eq!(reads.load(Ordering::SeqCst), 0, "do not read or interpret the pane env without its host HOME");
+
+        *conn.remote_home.lock().await = Some("/home/remote-child".into());
+        sync_child_identity(&app, &host, &bot, "w1:p1", Some(901)).await;
+        let recovered = crate::db::bot(&app.db, &bot.id).await.unwrap().unwrap();
+        assert_eq!(recovered.identity.as_deref(), Some("cc2"), "later pass resolves the child's identity under remote HOME");
+        assert!(!probe_due(&bot.id, "w1:p1"));
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
     }
 }

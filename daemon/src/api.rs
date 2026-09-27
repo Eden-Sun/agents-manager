@@ -2333,7 +2333,7 @@ async fn identity_auth(app: Arc<App>, name: String, identity: String, logout: bo
             json!({"host": name, "identity": identity, "kind": idn.kind, "message": "CLI 不在 PATH，無法登入"}),
         ));
     };
-    let home = crate::tools::host_home(&app, &name).await;
+    let home = crate::hosts::home_for_fence(&fence).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     let env = idn
         .env
         .iter()
@@ -2347,11 +2347,16 @@ async fn identity_auth(app: Arc<App>, name: String, identity: String, logout: bo
         crate::tools::identity_login_command(&idn.kind, &env)
             .ok_or_else(|| LcError::Bad(format!("kind {} 沒有登入指令", idn.kind)))?
     };
-    let shell = shell::open(&app, &name, None).await?;
-    if let Err(e) = shell::send_text(&app, &name, &shell.pane_id, &command, true).await {
-        let _ = shell::close(&app, &name, &shell.pane_id).await;
-        return Err(e);
-    }
+    let opened = app.hosts.run_if_current(&fence, async {
+        let shell = shell::open(&app, &name, None).await?;
+        if let Err(e) = shell::send_text(&app, &name, &shell.pane_id, &command, true).await {
+            let _ = shell::close(&app, &name, &shell.pane_id).await;
+            return Err(e);
+        }
+        Ok::<_, LcError>(shell)
+    }).await;
+    let shell = opened
+        .ok_or_else(|| LcError::Upstream(format!("host `{name}` changed before identity authentication started")))??;
     crate::tools::spawn_identity_login_watch(app, name, shell.pane_id.clone(), identity, idn.kind, logout, fence);
     Ok((StatusCode::OK, Json(json!(shell))).into_response())
 }
@@ -2400,6 +2405,52 @@ mod identity_auth_error_tests {
         assert_eq!(body["reason"], "identity_login_unavailable", "{body}");
         assert_eq!(body["identity"], "cc1");
         assert_eq!(body["kind"], "claude");
+    }
+
+    #[tokio::test]
+    async fn identity_auth_stops_before_opening_a_shell_when_remote_home_is_unreadable() {
+        use std::sync::atomic::Ordering;
+
+        let e = crate::testing::env().await;
+        let host = format!("identity-api-home-616-{}", crate::db::ulid().to_ascii_lowercase());
+        let conn = e.app.hosts.insert_remote_for_test(HostCfg {
+            name: host.clone(),
+            ssh: "unused".into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "agents-manager".into(),
+            remote_path: String::new(),
+        }).await;
+        conn.connected.store(true, Ordering::SeqCst);
+        e.app.cfg.update(|cfg| {
+            cfg.identities.push(crate::config::IdentityCfg {
+                name: "cx1".into(),
+                kind: "codex".into(),
+                host: Some(host.clone()),
+                env: [("CODEX_HOME".into(), "~/.codex-cx1".into())].into(),
+                args: vec![],
+            });
+            Ok(())
+        }).await.unwrap();
+        e.app.tools.lock().await.insert(host.clone(), crate::tools::HostTools {
+            tools: [("codex".into(), crate::tools::ToolInfo { installed: true, path: Some("/usr/bin/codex".into()), version: None, logged_in: Some(true) })].into(),
+            identities: Default::default(),
+            shell_identities: vec![],
+            utc_offset_secs: None,
+            herdr_cli: None,
+            checked_at: crate::db::now(),
+        });
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let calls2 = calls.clone();
+        crate::hosts::set_ssh_fake(&host, move |script| {
+            calls2.lock().unwrap().push(script.to_string());
+            Err(anyhow::anyhow!("injected remote HOME read failure"))
+        });
+
+        let err = identity_auth(e.app.clone(), host.clone(), "cx1".into(), false).await.expect_err("unknown HOME must not start identity authentication");
+        assert!(matches!(err, LcError::Upstream(ref message) if message.contains("HOME")), "return a retryable upstream failure: {err:?}");
+        assert_eq!(calls.lock().unwrap().len(), 1, "only HOME resolution may run; no auth pane command is sent");
+        assert!(e.app.host_shells.lock().await.iter().all(|shell| shell.host != host), "no shell is opened on an unrelated path");
     }
 
     /// issue #544：`POST /api/hosts` 同時是新增與更新。把 `ssh` 改成指到**另一台機器**時，

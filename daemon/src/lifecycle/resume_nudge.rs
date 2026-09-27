@@ -328,7 +328,7 @@ async fn transcript_ends_mid_tool(app: &Arc<App>, bot: &db::Bot, run: &db::Run) 
     .await
     .map_err(|e| e.to_string())?;
     let recorded = recorded.ok_or("no transcript path was ever recorded for this session")?;
-    let config = super::start::identity_config_dir(app, &host, bot.identity.as_deref()).await;
+    let config = super::start::identity_config_dir(app, &host, bot.identity.as_deref()).await.map_err(|e| e.to_string())?;
     let path = account_transcript(&config, &recorded, &session).ok_or("the recorded transcript path has no cwd directory")?;
     let shown = path.display().to_string();
     let log = tokio::task::spawn_blocking(move || super::transcript_origin::read_tail(&path)).await.ok().flatten();
