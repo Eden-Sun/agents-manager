@@ -572,7 +572,7 @@ fn output_with_timeout(mut cmd: Command, limit: std::time::Duration) -> anyhow::
 fn probe(remote: &BuildRemoteCfg, data_dir: &Path) -> anyhow::Result<Value> {
     let pw = secret(data_dir, remote)?;
     let mut cmd = ssh_base(remote, pw.as_deref(), data_dir)?;
-    cmd.arg(PROBE_SH);
+    cmd.arg(login_shell_arg(PROBE_SH));
     let out = output_with_timeout(cmd, PROBE_TIMEOUT)?;
     if !out.status.success() {
         anyhow::bail!("ssh probe failed (exit {:?}): {}", out.status.code(), String::from_utf8_lossy(&out.stderr).trim());
@@ -617,7 +617,7 @@ command -v cc >/dev/null 2>&1 || command -v gcc >/dev/null 2>&1 || echo 'CC_MISS
 fn install_toolchain(remote: &BuildRemoteCfg, data_dir: &Path) -> anyhow::Result<Value> {
     let pw = secret(data_dir, remote)?;
     let mut cmd = ssh_base(remote, pw.as_deref(), data_dir)?;
-    cmd.arg(INSTALL_SH);
+    cmd.arg(login_shell_arg(INSTALL_SH));
     let out = output_with_timeout(cmd, INSTALL_TIMEOUT)?;
     let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
@@ -710,6 +710,12 @@ fn fnv1a64(s: &str) -> u64 {
         h = h.wrapping_mul(0x100000001b3);
     }
     h
+}
+
+/// ssh 把這條字串交給遠端的登入 shell（fish／tcsh 不吃 `VAR=value` 與 `$(…)`）。
+/// 跟守門腳本一樣先包一層 `sh -c`，登入 shell 只負責把引數交給 `/bin/sh`（#670）。
+pub fn login_shell_arg(script: &str) -> String {
+    format!("sh -c {}", sh_quote(script))
 }
 
 pub fn sh_quote(s: &str) -> String {
@@ -1620,7 +1626,7 @@ fn run_remote(remote: &BuildRemoteCfg, data_dir: &Path, lease: &Lease, sub: &str
     let pw = secret(data_dir, remote)?;
     let mut cmd = ssh_base(remote, pw.as_deref(), data_dir)?;
     let threads = pick_test_threads(std::env::var("RUST_TEST_THREADS").ok().as_deref(), remote.test_threads);
-    cmd.arg(run_script(&lease.hs.dir, sub, &lease.token, remote.cargo_jobs, threads, args));
+    cmd.arg(login_shell_arg(&run_script(&lease.hs.dir, sub, &lease.token, remote.cargo_jobs, threads, args)));
     let status = run_status(cmd, "remote cargo", deadline)?;
     Ok(status.code().unwrap_or(1))
 }
@@ -2083,6 +2089,32 @@ mod tests {
         assert!(INSTALL_SH.contains("--no-modify-path"), "{INSTALL_SH}");
         // rustup 不裝 linker：沒有 cc 的機器要當場講，不要等到 cargo test 連結失敗才看到天書。
         assert!(INSTALL_SH.contains("CC_MISSING=1"), "{INSTALL_SH}");
+    }
+
+    /// #670：登入 shell 是 fish／tcsh 時，裸的 `VAR=value` 腳本直接被拒。外層只接受 `sh -c '…'`。
+    #[test]
+    fn macos_local_remote_command_is_parsed_by_sh_not_the_login_shell() {
+        let fish = r#"cmd=$1
+case "$cmd" in
+  "sh -c "*) ;;
+  *) echo fish-reject >&2; exit 3 ;;
+esac
+inner=$(python3 -c 'import shlex,sys; print(shlex.split(sys.argv[1])[2])' "$cmd")
+exec /bin/sh -c "$inner"
+"#;
+        let run = |remote_arg: &str| {
+            let out = Command::new("/bin/sh").arg("-c").arg(fish).arg("fish").arg(remote_arg).output().unwrap();
+            (out.status.code().unwrap_or(99), String::from_utf8_lossy(&out.stderr).into_owned(), String::from_utf8_lossy(&out.stdout).into_owned())
+        };
+        let raw = run(PROBE_SH);
+        assert_eq!(raw.0, 3, "沒包 sh -c 時 fish 要拒：{raw:?}");
+        let wrapped = run(&login_shell_arg(PROBE_SH));
+        assert_ne!(wrapped.0, 3, "包了 sh -c 不該被 fish 拒：{wrapped:?}");
+        assert!(wrapped.2.contains("OS="), "{wrapped:?}");
+        for script in [INSTALL_SH, &run_script("/r/job", "", &LeaseToken::new(), 1, 0, &["--version".into()])] {
+            let (code, err, _) = run(&login_shell_arg(script));
+            assert_ne!(code, 3, "fish 拒了：{err} {script}");
+        }
     }
 
     /// 在 `sh` 裡真的跑遠端的腳本：`HOME` 是空沙盒、PATH 只有 `uname`，`cargo`／`rustup` 用 shell 函式假裝（不寫可執行檔，免得撞 ETXTBSY）。
