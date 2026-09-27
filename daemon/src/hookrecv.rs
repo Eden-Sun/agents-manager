@@ -647,6 +647,13 @@ async fn fill_or_drop_late_hook(
         tracing::info!(turn = %turn.id, has_reply, "late hook dropped; turn already completed via terminal fallback");
         return Ok(());
     }
+    // Keep the owner read in this transaction and ahead of durable message/status writes.
+    // On failure, the inbox delivery can be retried without leaving a misrouted event behind.
+    let bot_id = sqlx::query_scalar::<_, String>("SELECT bot_id FROM conversations WHERE id = ?")
+        .bind(&turn.conversation_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("conversation {} has no owner", turn.conversation_id))?;
     // 這一筆是備援關掉的（`completed_fallback`），遲到的 hook 把回覆補上才升級成 `completed`。
     // 以前這句沒有 guard（`WHERE id=?`）：中間若有別的路徑動過它，這裡會無聲蓋過去（issue #68）。
     if lifecycle::turn_controller::set_status_on(&mut tx, &turn.id, "completed_fallback", "completed", "遲到的 hook 補上回覆").await?
@@ -658,11 +665,6 @@ async fn fill_or_drop_late_hook(
     let message =
         lifecycle::insert_message_tx(&mut tx, &turn.conversation_id, Some(&turn.id), "assistant", body_text, "hook", false, None).await?;
     tx.commit().await?;
-    let bot_id = sqlx::query_scalar::<_, String>("SELECT bot_id FROM conversations WHERE id = ?")
-        .bind(&turn.conversation_id)
-        .fetch_one(&app.db)
-        .await
-        .unwrap_or_default();
     lifecycle::emit_message_added(app, &bot_id, message).await;
     tracing::info!(turn = %turn.id, "late hook filled a fallback-closed turn that had no reply");
     lifecycle::emit_turn(app, &turn.id).await;
@@ -1904,6 +1906,77 @@ mod external_claim_tests {
             .await
             .unwrap();
         assert_eq!(n, 1, "不會變成兩則");
+    }
+
+    #[tokio::test]
+    async fn unreadable_late_hook_message_owner_rolls_back_until_retry() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, created_at)
+             VALUES (?,?,'late-hook-owner-retry','grok','[]',0,1,'tok',?)",
+        )
+        .bind(&bot_id)
+        .bind(&env.project_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let conversation_id = db::conversation_id(&app.db, &bot_id).await.unwrap();
+        let turn_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, origin, status, delivery, created_at, completed_at)
+             VALUES (?,?,'web','completed_fallback','ok',?,?)",
+        )
+        .bind(&turn_id)
+        .bind(&conversation_id)
+        .bind(db::now())
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let turn = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?")
+            .bind(&turn_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        let mut events = app.subscribe();
+
+        tt::make_table_unreadable(&app, "conversations").await;
+        let first = fill_or_drop_late_hook(&app, &turn, "late reply", &Some("s1".into()), &Some("n1".into())).await;
+        tt::make_table_readable(&app, "conversations").await;
+
+        assert!(first.is_err(), "an unreadable owner must return a retryable error: {first:?}");
+        let mut failed_message_events = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if event.kind == "message_added" {
+                failed_message_events.push(event);
+            }
+        }
+        assert!(failed_message_events.is_empty(), "the failed attempt must not publish a message with an unknown owner");
+        let (status, native_turn_id): (String, Option<String>) =
+            sqlx::query_as("SELECT status, native_turn_id FROM turns WHERE id=?")
+                .bind(&turn_id)
+                .fetch_one(&app.db)
+                .await
+                .unwrap();
+        assert_eq!(status, "completed_fallback", "failed owner lookup rolls back the status transition");
+        assert_eq!(native_turn_id, None, "failed owner lookup rolls back native ids too");
+        let failed_replies: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='assistant'")
+            .bind(&turn_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(failed_replies, 0, "failed owner lookup cannot leave a durable reply without its event");
+
+        fill_or_drop_late_hook(&app, &turn, "late reply", &Some("s1".into()), &Some("n1".into())).await.unwrap();
+        let message_events: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
+            .filter(|event| event.kind == "message_added")
+            .collect();
+        assert_eq!(message_events.len(), 1, "the replay emits exactly one message_added event");
+        assert_eq!(message_events[0].data["bot_id"], bot_id);
+        assert_eq!(message_events[0].data["message"]["turn_id"], turn_id);
     }
 
     /// 空的 hook 不能把回合改成 completed——那等於宣稱有答案。
