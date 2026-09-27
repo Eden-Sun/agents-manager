@@ -85,8 +85,8 @@ async fn close(app: &Arc<App>, w: &Window, kind: &str, actor: &str, reason: Opti
 
 /// 維護期間被標 exited、到現在還沒有 active run 的子 agent：照原規則退休（跟 reconcile 平常做的一樣）。
 async fn retire_unreturned_children(app: &Arc<App>, since: &str) -> Result<Vec<String>> {
-    let kids: Vec<(String, String)> = sqlx::query_as(
-        "SELECT b.id, b.name FROM bots b
+    let kids: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT b.id, b.name, p.host FROM bots b JOIN projects p ON p.id = b.project_id
           WHERE b.managed_by = 'child' AND b.deleted_at IS NULL
             AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.bot_id = b.id AND r.state IN ('starting','running','stopping'))
             AND EXISTS (SELECT 1 FROM runs r WHERE r.bot_id = b.id AND r.ended_at >= ?)",
@@ -95,7 +95,19 @@ async fn retire_unreturned_children(app: &Arc<App>, since: &str) -> Result<Vec<S
     .fetch_all(&app.db)
     .await?;
     let mut names = Vec::new();
-    for (id, name) in kids {
+    for (id, name, host) in kids {
+        match crate::child_reconcile_safety::retirement_block(&app.db, &id).await {
+            Ok(Some(reason)) => {
+                tracing::info!(host = %host, bot = %name, reason, "herdr maintenance: child kept by a persisted retirement guard");
+                continue;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(host = %host, bot = %name, error = ?e, "herdr maintenance: cannot read child retirement guard; child kept and reconciliation deferred");
+                crate::reconcile::schedule_deferred_pass(app, &host);
+                continue;
+            }
+        }
         // 走退役的唯一入口（#413）：記呼叫端；AGM 的 child 不在這裡被隱式退役，擋下來、推一則給巡檢。
         use crate::child_retire::{retire, Mode, Outcome};
         if retire(app, &id, "herdr_maintenance_closed", Mode::Implicit).await? == Outcome::Retired {
@@ -333,6 +345,36 @@ mod tests {
         assert!(deleted(&app, &lost).await, "維護結束仍沒接回：照原規則退休");
         assert!(!deleted(&app, &back).await, "接回來的留著");
         assert!(!deleted(&app, &before).await, "不回頭清舊帳");
+    }
+
+    #[tokio::test]
+    async fn maintenance_close_preserves_children_with_an_active_retirement_hold() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let h = agm_headers(&app).await;
+        let _ = open(State(app.clone()), h.clone(), open_in(10)).await.unwrap();
+        let held = child_with_ended_run(&env, &crate::db::now()).await;
+        crate::child_reconcile_safety::hold_after_name_taken(&app.db, &held, "proj-agent-kid").await.unwrap();
+
+        let v = end(State(app.clone()), h, None).await.unwrap().0;
+
+        assert!(!deleted(&app, &held).await, "agent_name_taken ownership hold keeps the child alive");
+        assert!(v["retired_children"].as_array().unwrap().is_empty(), "held child is not reported as retired: {v}");
+    }
+
+    #[tokio::test]
+    async fn maintenance_close_preserves_children_during_restore_retirement_grace() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let h = agm_headers(&app).await;
+        let _ = open(State(app.clone()), h.clone(), open_in(10)).await.unwrap();
+        let restoring = child_with_ended_run(&env, &crate::db::now()).await;
+        crate::child_reconcile_safety::record_retirement_grace(&app.db, &restoring).await.unwrap();
+
+        let v = end(State(app.clone()), h, None).await.unwrap().0;
+
+        assert!(!deleted(&app, &restoring).await, "active restore grace keeps the child alive");
+        assert!(v["retired_children"].as_array().unwrap().is_empty(), "grace child is not reported as retired: {v}");
     }
 
     /// **#413，第三條路**：維護窗口收尾也直接 `UPDATE bots SET deleted_at`。AGM 專案底下的 child

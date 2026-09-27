@@ -527,7 +527,7 @@ const DEFERRED_PASS_DELAY: std::time::Duration =
 /// 這一輪有一件事因為讀不到而延後了（#94、#191）。對帳平常只在事件上跑（連上、`pane.agent_detected`、子 agent 的
 /// pane 關掉），延後的那一件若等不到下一個事件就一直掛著——排一輪晚一點的補跑。同一台主機同時只排一輪；補跑還是
 /// 讀不到就會再排，整輪失敗（DB、herdr）也再排；那台主機斷線或不在設定裡就停，重新連上時本來就會對帳。
-fn schedule_deferred_pass(app: &Arc<App>, host: &str) {
+pub(crate) fn schedule_deferred_pass(app: &Arc<App>, host: &str) {
     static PENDING: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
     let pending = PENDING.get_or_init(Default::default);
     // 測試共用這個行程：key 帶資料目錄，不同的 App 才不會互相吃掉。
