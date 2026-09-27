@@ -579,7 +579,7 @@ bot 或 active Run 不存在 404。
 ### `GET /api/bots/{id}/local-image?path=<路徑>`
 對話 Markdown 裡的本機圖片（`![](docs/shot.png)`、`/Users/…/x.png`、`file://…`）。相對路徑先以該 bot 的工作目錄（`bots.cwd`，child 的 worktree）為底、那裡沒有再退回**專案目錄**；
 字面路徑讀不到時再試 `%XX` 解碼後的（Markdown 渲染會把中文檔名、空白編碼）。**允許範圍一律是專案目錄**：符號連結解開後仍須在專案目錄內，副檔名限 `png/jpg/jpeg/gif/webp`（不含 svg），≤ 20 MiB。回圖片位元組與對應 `Content-Type`。
-專案外、非圖片、不存在、太大、遠端主機的專案一律 `404 {"what":"image"}`；缺 `path` 400；bot 不存在 404。前端讀不到就把路徑寫成文字，不畫破圖。
+專案外、非圖片、非一般檔案（含 FIFO）、不存在、太大、遠端主機的專案一律 `404 {"what":"image"}`；缺 `path` 400；bot 不存在 404。前端讀不到就把路徑寫成文字，不畫破圖。
 
 ### `GET /api/bots/{id}/outbox`
 這顆 bot 交給使用者的檔案（SPEC §6.5f，2026-09-16 使用者裁示取代 scratchpad）。bot 把要給使用者的檔案放進 `$AM_OUTBOX`（`<data_dir>/outbox/<bot_id>/`），前端「檔案暫存」下半段列出來讓人下載。**不讀 scratchpad。**

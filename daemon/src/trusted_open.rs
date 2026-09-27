@@ -98,9 +98,37 @@ pub(crate) fn open_bound_file(base: &Path, components: &[&OsStr], owner_uid: Opt
 /// `outbox::scan()` 判斷一個檔案要不要列出來得看內容開頭幾個位元組，這個判斷也要在同一個已驗證的
 /// 目錄 fd 底下做，不能又用路徑重新 open 一次那個檔名）。
 pub(crate) fn open_entry_in(dir: &File, name: &OsStr) -> io::Result<File> {
-    let file = openat_raw(dir.as_raw_fd(), name, libc::O_RDONLY | libc::O_NOFOLLOW)?;
+    open_entry_in_with(dir, name, |dir, name, flags| openat_raw(dir.as_raw_fd(), name, flags))
+}
+
+fn open_entry_in_with<F>(dir: &File, name: &OsStr, open: F) -> io::Result<File>
+where
+    F: FnOnce(&File, &OsStr, i32) -> io::Result<File>,
+{
+    // 先檢查名字目前指向的一般檔案，避免對 FIFO 做一般的 blocking open。之後名字仍可能被換掉，
+    // 所以 open 本身也必須帶 O_NONBLOCK，並在同一個已開啟的 fd 上再 fstat 一次。
+    let name_c = cstr(name)?;
+    let mut before: libc::stat = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::fstatat(dir.as_raw_fd(), name_c.as_ptr(), &mut before, libc::AT_SYMLINK_NOFOLLOW) };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if (before.st_mode & libc::S_IFMT) != libc::S_IFREG {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a regular file"));
+    }
+
+    let file = open(dir, name, libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK)?;
     if !file.metadata()?.is_file() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a regular file"));
+    }
+
+    // 一般檔案不需要非阻塞模式，且呼叫端可能會把這個 fd 交給一般的 Read 實作。
+    let status = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+    if status < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if status & libc::O_NONBLOCK != 0 && unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFL, status & !libc::O_NONBLOCK) } < 0 {
+        return Err(io::Error::last_os_error());
     }
     Ok(file)
 }
@@ -330,7 +358,7 @@ mod tests {
     /// `open_entry_in` 只認已經打開的目錄 fd 底下那一個項目：一般檔案放行，符號連結（就算指到界線外的
     /// 一般檔案）跟目錄都拒絕，不會重新用路徑解析 `dir` 本身。
     #[test]
-    fn open_entry_in_only_opens_a_regular_file_directly_under_the_given_fd() {
+    fn macos_local_open_entry_in_only_opens_a_regular_file_directly_under_the_given_fd() {
         let base = scratch("entry-in");
         std::fs::create_dir_all(base.join("root/sub")).unwrap();
         std::fs::write(base.join("root/a.txt"), b"hi").unwrap();
@@ -342,10 +370,75 @@ mod tests {
         let mut got = String::new();
         std::io::Read::read_to_string(&mut f, &mut got).unwrap();
         assert_eq!(got, "hi");
+        assert_eq!(unsafe { libc::fcntl(f.as_raw_fd(), libc::F_GETFL) } & libc::O_NONBLOCK, 0, "一般檔案回傳前要清掉 O_NONBLOCK");
         assert!(open_entry_in(&dir, OsStr::new("link.txt")).is_err(), "符號連結不能開");
         assert!(open_entry_in(&dir, OsStr::new("sub")).is_err(), "目錄不是一般檔案");
         assert!(open_entry_in(&dir, OsStr::new("missing.txt")).is_err());
         std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn macos_local_fifo_final_component_does_not_block() {
+        const CHILD_ROOT: &str = "AM_TRUSTED_OPEN_FIFO_TEST_ROOT";
+        const CHILD_MODE: &str = "AM_TRUSTED_OPEN_FIFO_TEST_MODE";
+
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            let root = Path::new(&root);
+            let dir = open_bound_dir(root, &[OsStr::new("root")], None).unwrap();
+            assert_eq!(std::env::var(CHILD_MODE).unwrap(), "replace");
+            let result = open_entry_in_with(&dir, OsStr::new("race.png"), |dir, name, flags| {
+                std::fs::remove_file(root.join("root/race.png")).unwrap();
+                let fifo = CString::new(root.join("root/race.png").as_os_str().as_bytes()).unwrap();
+                assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0, "replace with FIFO: {}", io::Error::last_os_error());
+                openat_raw(dir.as_raw_fd(), name, flags)
+            });
+            assert!(result.is_err(), "a regular file replaced by a FIFO must be rejected after open");
+            return;
+        }
+
+        use std::os::unix::ffi::OsStrExt as _;
+        use std::process::{Command, Stdio};
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        let base = scratch("fifo-no-block");
+        std::fs::create_dir_all(base.join("root")).unwrap();
+        let fifo = CString::new(base.join("root/image.png").as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0, "create FIFO: {}", io::Error::last_os_error());
+        let dir = open_bound_dir(&base, &[OsStr::new("root")], None).unwrap();
+        let mut open_called = false;
+        let result = open_entry_in_with(&dir, OsStr::new("image.png"), |dir, name, flags| {
+            open_called = true;
+            openat_raw(dir.as_raw_fd(), name, flags)
+        });
+        assert!(result.is_err(), "FIFO is not a regular file");
+        assert!(!open_called, "reject non-regular entries before calling openat");
+        std::fs::write(base.join("root/race.png"), b"regular").unwrap();
+
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .arg("macos_local_fifo_final_component_does_not_block")
+            .env(CHILD_ROOT, &base)
+            .env(CHILD_MODE, "replace")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break Some(status);
+            }
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                break None;
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+
+        std::fs::remove_dir_all(&base).unwrap();
+        assert!(status.is_some(), "opening a FIFO after the type check must return promptly");
+        assert!(status.unwrap().success(), "the replaced FIFO must be rejected as a non-regular file");
     }
 
     #[test]
