@@ -503,14 +503,47 @@ fn squash_ws(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// 「是不是同一句」只看非空白字元：送進 TUI 時 Tab 會被吃掉（`進貨單\t每張` → `進貨單每張`，2026-09-27 wits-pro），
-/// 收成一個空格還是對不上，回覆就被當成「另一句的」開成 external、原本那回合卡在送達未知。
-fn strip_ws(s: &str) -> String {
-    s.chars().filter(|c| !c.is_whitespace()).collect()
+/// Normalize layout whitespace without erasing word boundaries. A literal Tab may also be lost
+/// by the Claude TUI, so only text that originally contained one gets a tab-removed candidate.
+/// Containment handles clipped echoes, but short overlaps are too ambiguous to establish identity.
+const MIN_CLIPPED_PROMPT_CHARS: usize = 8;
+
+fn prompt_identity_candidates(s: &str) -> Vec<String> {
+    let mut candidates = vec![squash_ws(s)];
+    if s.contains('\t') {
+        candidates.push(squash_ws(&s.replace('\t', "")));
+    }
+    candidates.sort();
+    candidates.dedup();
+    candidates
 }
 
-/// The scraped echo may be wrapped or clipped at the column width, so containment either way
-/// counts as the same message (equality alone would add a second bubble).
+/// Equality after layout normalization is strong evidence; clipped containment needs a useful
+/// amount of text so a shared short prefix cannot assign a reply to the wrong turn.
+fn prompt_texts_match(left: &str, right: &str) -> bool {
+    if left.trim().is_empty() || right.trim().is_empty() {
+        return false;
+    }
+    let left_candidates = prompt_identity_candidates(left);
+    let right_candidates = prompt_identity_candidates(right);
+    left_candidates.iter().any(|l| {
+        right_candidates.iter().any(|r| {
+            if l.is_empty() || r.is_empty() {
+                return false;
+            }
+            if l == r {
+                return true;
+            }
+            let (short, long) = if l.chars().count() <= r.chars().count() {
+                (l, r)
+            } else {
+                (r, l)
+            };
+            short.chars().count() >= MIN_CLIPPED_PROMPT_CHARS && long.contains(short)
+        })
+    })
+}
+
 /// 這一回合的使用者訊息原文：codex 的 hook 直接帶；claude 的 Stop 沒帶，從 transcript 尾巴找最後一則。
 /// 讀不到就是 `None`（沒有證據，呼叫端照舊認領）。
 async fn hook_user_text(from_hook: Option<&str>, transcript_path: Option<&str>) -> Option<String> {
@@ -538,26 +571,21 @@ fn last_transcript_user_text(path: &std::path::Path) -> Option<String> {
         .map(|t| crate::lifecycle::pasted_content::original(&t).into_owned())
 }
 
-/// 有兩邊的原文、而且怎麼比都對不上，才算「hook 回答的是另一句」。去空白後互相包含就算同一句
-/// （刮下來的回音、transcript 的折行都可能截斷一邊）。任一邊沒有就不下判斷。
+/// 有兩邊原文而且保守比對仍對不上，才算「hook 回答的是另一句」。折疊排版空白後保留詞界；
+/// 只有原文含字面 Tab 才另試去 Tab 候選。長度至少 8 字元的互含可辨認截斷回音；任一邊沒有就不下判斷。
 fn answers_another_prompt(prompt: Option<&str>, hook_user: Option<&str>) -> bool {
     let (Some(p), Some(u)) = (prompt, hook_user) else { return false };
-    let (p, u) = (strip_ws(p), strip_ws(u));
-    if p.is_empty() || u.is_empty() {
+    if p.trim().is_empty() || u.trim().is_empty() {
         return false;
     }
-    !(p.contains(&u) || u.contains(&p))
+    !prompt_texts_match(p, u)
 }
 
 fn hook_user_is_new(existing: &[String], incoming: &str) -> bool {
-    let inc = strip_ws(incoming);
-    if inc.is_empty() {
+    if incoming.trim().is_empty() {
         return false;
     }
-    !existing.iter().any(|e| {
-        let e = strip_ws(e);
-        !e.is_empty() && (e.contains(&inc) || inc.contains(&e))
-    })
+    !existing.iter().any(|e| prompt_texts_match(e, incoming))
 }
 
 /// 只在既有那則是原文的（去空白）前綴且較短時才覆蓋；不是前綴就是另一句話，不能動。
@@ -1726,6 +1754,37 @@ mod external_claim_tests {
         assert!(!hook_user_is_new(&vec!["Reply with exactly MER".into()], "Reply with exactly MERGED-OK"));
     }
 
+    #[test]
+    fn hook_prompt_identity_keeps_word_boundaries_and_rejects_weak_overlap() {
+        let separated = "echo a b";
+        let joined = "echo ab";
+        assert!(answers_another_prompt(Some(separated), Some(joined)));
+        assert!(answers_another_prompt(Some(joined), Some(separated)));
+        assert!(hook_user_is_new(&[separated.into()], joined));
+        assert!(hook_user_is_new(&[joined.into()], separated));
+
+        // A short common prefix is not enough evidence to assign a hook to a prompt.
+        assert!(answers_another_prompt(Some("echo a much longer instruction"), Some("echo a")));
+        assert!(hook_user_is_new(&["echo a much longer instruction".into()], "echo a"));
+    }
+
+    #[test]
+    fn hook_prompt_identity_accepts_wrapping_and_repeated_whitespace() {
+        assert!(!answers_another_prompt(
+            Some("Reply with exactly MERGED-OK"),
+            Some("Reply with\n  exactly   MERGED-OK")
+        ));
+        assert!(!hook_user_is_new(
+            &["Reply with\n  exactly   MERGED-OK".into()],
+            "Reply with exactly MERGED-OK"
+        ));
+        // The existing clipped echo remains attributable when enough prompt text survived.
+        assert!(!answers_another_prompt(
+            Some("Reply with exactly MERGED-OK"),
+            Some("Reply with exactly MER")
+        ));
+    }
+
     /// #218：claude Stop 沒帶使用者訊息，從 transcript 尾巴補。CLI 把貼上的 prompt 包成 `<pasted_content id=…>`
     /// （真 transcript，2026-09-19 實測）：要拆回原文——不然記成外部回合時標籤會顯示給使用者，`agent_relay::claim` 也對不上。
     #[test]
@@ -2010,9 +2069,9 @@ mod external_claim_tests {
     async fn a_hook_answering_another_prompt_does_not_claim_the_unknown_turn() {
         let env = tt::env().await;
         let app = env.app.clone();
-        let (bot_id, conv, turn_id) = unknown_turn(&app, &env.project_id, "codex", "跑一次測試").await;
+        let (bot_id, conv, turn_id) = unknown_turn(&app, &env.project_id, "codex", "echo a b").await;
 
-        process(&app, &codex_done(&bot_id, "順便看一下 lint")).await.unwrap();
+        process(&app, &codex_done(&bot_id, "echo ab")).await.unwrap();
 
         let turn = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
         assert_eq!((turn.status.as_str(), turn.delivery.as_str()), ("in_flight", "unknown"), "原本那則原封不動");
@@ -2025,10 +2084,10 @@ mod external_claim_tests {
         .await
         .unwrap();
         assert_eq!(external.len(), 1, "答案記在一筆外部回合上");
-        assert_eq!(external[0].1, "順便看一下 lint");
+        assert_eq!(external[0].1, "echo ab");
     }
 
-    /// 同一句（去空白後互相包含）就照舊認領並把 unknown 升成 ok。
+    /// 同一句（折疊排版空白後相同）就照舊認領並把 unknown 升成 ok。
     #[tokio::test]
     async fn a_hook_answering_the_same_prompt_still_resolves_the_unknown_turn() {
         let env = tt::env().await;
@@ -3138,8 +3197,7 @@ mod external_claim_tests {
         assert!(answers_another_prompt(Some("跑一次測試"), Some("算了")));
     }
 
-    /// 2026-09-27 wits-pro：貼上的 prompt 帶 Tab，送進 TUI 時 Tab 被吃掉。收成空格還是對不上，
-    /// 回覆被開成 external、使用者那回合卡在送達未知。只看非空白字元就是同一句。
+    /// 2026-09-27 wits-pro：貼上的 prompt 帶 Tab，送進 TUI 時 Tab 被吃掉；只在原文有 Tab 時試去 Tab 候選。
     #[test]
     fn a_prompt_whose_tab_the_tui_swallowed_is_still_the_same_prompt() {
         let sent = "條碼列印・進貨單\t每張 INBSHIP 一個批號 => 這樣一批最多能夠幾個item";
