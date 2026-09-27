@@ -498,25 +498,38 @@ impl App {
     }
 
     pub async fn emit_bot_status(&self, bot_id: &str) {
-        if let Ok(Some(bot)) = crate::db::bot(&self.db, bot_id).await {
-            let run = crate::db::active_run(&self.db, bot_id).await.ok().flatten();
-            // 讀不到 host 就不發：發 `host:"local"` 會讓前端把遠端 bot 顯示成本機（#243）；DB 好了下一次事件會補。
-            let Ok(host) = crate::db::bot_host(&self.db, bot_id).await else {
-                tracing::warn!(bot_id, "bot_status not emitted: bot host unreadable");
+        let bot = match crate::db::bot(&self.db, bot_id).await {
+            Ok(Some(bot)) => bot,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(bot_id, error = %error, "bot_status not emitted: bot unreadable");
                 return;
-            };
-            self.emit(
-                "bot_status",
-                json!({
-                    "bot_id": bot.id,
-                    "run": run,
-                    "host": host,
-                    "herdr_session": bot.herdr_session,
-                    "connected": self.bot_connected(bot_id).await,
-                }),
-            )
-            .await;
-        }
+            }
+        };
+        let run = match crate::db::active_run(&self.db, bot_id).await {
+            Ok(run) => run,
+            Err(error) => {
+                // 不確定就跳過整個 frame，讓前端保留目前的 run；後續 status emit 會重新讀取 DB。
+                tracing::warn!(bot_id, error = %error, "bot_status not emitted: active run unreadable");
+                return;
+            }
+        };
+        // 讀不到 host 就不發：發 `host:"local"` 會讓前端把遠端 bot 顯示成本機（#243）；DB 好了下一次事件會補。
+        let Ok(host) = crate::db::bot_host(&self.db, bot_id).await else {
+            tracing::warn!(bot_id, "bot_status not emitted: bot host unreadable");
+            return;
+        };
+        self.emit(
+            "bot_status",
+            json!({
+                "bot_id": bot.id,
+                "run": run,
+                "host": host,
+                "herdr_session": bot.herdr_session,
+                "connected": self.bot_connected(bot_id).await,
+            }),
+        )
+        .await;
     }
 }
 
@@ -704,6 +717,31 @@ mod host_unreadable_tests {
         }
         app.emit_bot_status(&bot.id).await;
         assert_eq!(rx.try_recv().unwrap().data["host"], "local", "讀得到才發");
+    }
+}
+
+/// #599：讀不到 active run 不能讓 UI 誤以為 bot 已停止。
+#[cfg(test)]
+mod active_run_unreadable_tests {
+    use crate::testing as tt;
+
+    #[tokio::test]
+    async fn an_unreadable_active_run_is_not_announced_as_absent() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "running").await;
+        let run_id = tt::fake_run(&app, &bot.id).await;
+        let mut rx = app.subscribe();
+
+        tt::make_table_unreadable(&app, "runs").await;
+        app.emit_bot_status(&bot.id).await;
+        assert!(rx.try_recv().is_err(), "active run 讀不到時不能發出 run:null 或其他假的狀態");
+
+        tt::make_table_readable(&app, "runs").await;
+        app.emit_bot_status(&bot.id).await;
+        let event = rx.try_recv().expect("DB 恢復後下一次 emit 應發布狀態");
+        assert_eq!(event.kind, "bot_status");
+        assert_eq!(event.data["run"]["id"], run_id, "恢復後發布實際的 active run");
     }
 }
 
