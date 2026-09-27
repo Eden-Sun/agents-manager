@@ -1088,7 +1088,7 @@ pub(crate) async fn type_prepared(
 ) -> anyhow::Result<Delivered> {
     #[cfg(test)]
     super::race_point::hit("delivery_before_typing", &run.bot_id).await;
-    match type_text(client, run, bot, text, ready).await? {
+    match type_text(app, client, run, bot, text, ready).await? {
         Typing::Done(d) => Ok(d),
         Typing::Ready(t) => {
             press_submit(client, &t).await?;
@@ -1121,6 +1121,7 @@ fn typed_tail(text: &str) -> usize {
 
 /// 打字、看框（必要時重貼一次），停在送出鍵之前。插隊送出要在送出鍵上判斷有沒有打斷（#120），所以跟按鍵分開。
 pub(crate) async fn type_text(
+    app: &Arc<App>,
     client: &HerdrClient,
     run: &db::Run,
     bot: &db::Bot,
@@ -1129,6 +1130,12 @@ pub(crate) async fn type_text(
 ) -> anyhow::Result<Typing> {
     let (pane, proof, submit, offset, baseline) = match ready {
         Ready::AgentPrompt { target } => {
+            #[cfg(test)]
+            super::race_point::hit("agent_prompt_before_rpc", &run.bot_id).await;
+            if let Err(reason) = super::prompt::final_agent_prompt_guard(app, client, run, bot, &target).await {
+                tracing::warn!(run = %run.id, reason, "agent.prompt final pane fence refused delivery");
+                return Ok(Typing::Done(Delivered::NotAttempted { reason, retry: true }));
+            }
             client
                 .call_timeout("agent.prompt", json!({"target": target, "text": text}), Duration::from_secs(10))
                 .await?;

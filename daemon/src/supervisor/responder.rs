@@ -914,22 +914,23 @@ pub async fn notify(app: &Arc<App>) {
 }
 
 /// 協調者 pane 現在看得出要人登入嗎（登入選單、onboarding、或回合只回 `Not logged in`）。沒有 run 就是不知道。
-async fn login_problem_on_screen(app: &Arc<App>, bot: &crate::db::Bot) -> bool {
+async fn login_problem_on_screen(app: &Arc<App>, bot: &crate::db::Bot) -> Option<bool> {
     match crate::db::active_run(&app.db, &bot.id).await {
         Ok(Some(run)) => crate::tui_prompts::shows_login_problem(app, &run).await,
-        _ => false,
+        Ok(None) => Some(false),
+        Err(_) => None,
     }
 }
 
 async fn login_recovered(app: &Arc<App>, bot: &crate::db::Bot, since: Option<&str>) -> bool {
-    answered_since(app, &bot.id, since).await || !login_problem_on_screen(app, bot).await
+    answered_since(app, &bot.id, since).await || matches!(login_problem_on_screen(app, bot).await, Some(false))
 }
 
 /// 送不出去的那一次順便看畫面（issue #420）：協調者的 CLI 沒登入時，送出只會一直 `composer_unreadable`／
 /// 回合失敗，而 liveness 照樣是 idle、health 照樣 healthy，申請與核准靜默過期了 9 小時。看得出是登入問題就把
 /// 狀態標成 `needs_login`：health 轉 critical（#454），incident 探針開 `role_unavailable` 叫醒巡檢去找人。
 async fn note_login_problem(app: &Arc<App>, bot: &crate::db::Bot, status: &str) {
-    if status == "needs_login" || !login_problem_on_screen(app, bot).await {
+    if status == "needs_login" || login_problem_on_screen(app, bot).await != Some(true) {
         return;
     }
     let who = bot.identity.as_deref().unwrap_or("(身分不明)");
@@ -1573,6 +1574,10 @@ mod flow_tests {
         assert!(kinds(&probed).contains(&(crate::supervisor::incidents::ROLE_UNAVAILABLE_KIND.into(), "critical".into())), "{:?}", kinds(&probed));
 
         // 畫面還是那樣：不解除。
+        notify(&app).await;
+        assert_eq!(roles::get(&app.db, Role::Responder).await.unwrap().status, "needs_login");
+        // A failed screen read is uncertainty, not proof the login problem cleared.
+        env.herdr.fail_next("pane.read", crate::testing::Fault::Refuse);
         notify(&app).await;
         assert_eq!(roles::get(&app.db, Role::Responder).await.unwrap().status, "needs_login");
         // 登入了（畫面上看不到登入問題）：解除，incident 探針也不再看到它。

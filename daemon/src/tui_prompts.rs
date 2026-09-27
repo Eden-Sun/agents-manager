@@ -429,13 +429,16 @@ pub fn is_not_logged_in_reply(screen: &str) -> bool {
 /// 兩者以前共用同一個常數，放寬選單窗口時會連帶把這裡的「最近」也放寬。
 const LATEST_REPLY_TAIL_LINES: usize = 20;
 
-/// 畫面上看得出這個 pane 要人登入（登入選單、onboarding、或回合只回 `Not logged in`）。讀不到畫面就當不是。
-pub async fn shows_login_problem(app: &Arc<App>, run: &db::Run) -> bool {
-    let Some(pane) = run.pane_id.clone() else { return false };
-    let Some(client) = app.herdr_for_run(run).await else { return false };
-    match client.pane_read(&pane, "visible", 80).await {
-        Ok(r) => is_login_menu(&r.text) || is_onboarding_theme(&r.text) || is_not_logged_in_reply(&r.text),
-        Err(_) => false,
+/// `Some(true/false)` means the screen was read; `None` means it is unknown.
+pub async fn shows_login_problem(app: &Arc<App>, run: &db::Run) -> Option<bool> {
+    let pane = run.pane_id.as_deref()?.trim();
+    if pane.is_empty() {
+        return None;
+    }
+    let client = app.herdr_for_run(run).await?;
+    match client.pane_read(pane, "visible", 80).await {
+        Ok(r) => Some(is_login_menu(&r.text) || is_onboarding_theme(&r.text) || is_not_logged_in_reply(&r.text)),
+        Err(_) => None,
     }
 }
 
@@ -499,14 +502,9 @@ pub fn dangerous_rm_prompt(screen: &str) -> Option<DangerousRm> {
     Some(DangerousRm { warning, target, command: command.filter(|c| !c.is_empty()) })
 }
 
-/// 讀不到畫面就當不是——那不是這裡要擋的事。
-pub async fn stuck_at_login(app: &Arc<App>, run: &db::Run) -> bool {
-    let Some(pane) = run.pane_id.clone() else { return false };
-    let Some(client) = app.herdr_for_run(run).await else { return false };
-    match client.pane_read(&pane, "visible", 80).await {
-        Ok(r) => is_login_menu(&r.text) || is_onboarding_theme(&r.text),
-        Err(_) => false,
-    }
+/// Pure classifier for a screen that the caller has already read successfully.
+pub fn stuck_at_login(screen: &str) -> bool {
+    is_login_menu(screen) || is_onboarding_theme(screen)
 }
 
 /// 認出問卷之後**要不要真的按鍵**（#485）。
