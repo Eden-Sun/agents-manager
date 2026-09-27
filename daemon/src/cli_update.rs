@@ -285,15 +285,30 @@ pub async fn migrate(pool: &sqlx::SqlitePool) -> anyhow::Result<()> {
            result TEXT,
            started_at TEXT NOT NULL,
            updated_at TEXT NOT NULL,
-           finished_at TEXT
+           finished_at TEXT,
+           host_target TEXT
          )",
     )
     .execute(pool)
     .await?;
+    if !crate::db::has_column(pool, "cli_updates", "host_target").await? {
+        sqlx::query("ALTER TABLE cli_updates ADD COLUMN host_target TEXT")
+            .execute(pool)
+            .await?;
+    }
     sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS cli_updates_one_running ON cli_updates(host) WHERE status = 'running'")
         .execute(pool)
         .await?;
     Ok(())
+}
+
+/// Stable identity for a machine across daemon restarts. The same fields define a host repoint in
+/// `api::repoints_host` and durable quota holds; reconnect generations remain process-local fences.
+fn host_target_for_conn(conn: &crate::hosts::HostConn) -> String {
+    match conn.cfg.as_ref() {
+        None => crate::config::LOCAL_HOST.to_string(),
+        Some(cfg) => format!("{}:{}/{}", cfg.ssh, cfg.ssh_port, cfg.herdr_session),
+    }
 }
 
 /// `GET /api/state` 的 `cli_updates`：還沒收尾的安裝（含重啟後正在接手的那筆，帶 `recovered:true`）。
@@ -429,9 +444,10 @@ pub async fn start(
         Some("claude") => return Err(LcError::Bad("claude 會自己下載新版，重啟就套用，不需要安裝；用一鍵重啟（POST /api/bots/restart-idle）".into())),
         other => return Err(LcError::Bad(format!("kind 目前只收 codex，收到 `{}`", other.unwrap_or("")))),
     }
-    if app.hosts.get(host).await.is_none() {
+    let Some(operation_fence) = app.hosts.fence(host).await else {
         return Err(LcError::NotFound("host".into()));
-    }
+    };
+    let operation_host_target = host_target_for_conn(operation_fence.conn());
     let Some(target) = target.and_then(|t| version_string(t.trim())) else {
         return Err(LcError::Bad("要帶 target_version（確認框寫的那一版）；重新整理頁面再按一次".into()));
     };
@@ -449,12 +465,18 @@ pub async fn start(
             ));
         }
     }
+    if !app.hosts.is_current(&operation_fence).await {
+        return Err(LcError::conflict(
+            "host_changed",
+            json!({"host": host, "message": format!("{host} 在建立安裝紀錄前換了連線；沒有開始安裝，請重新整理後再按一次")}),
+        ));
+    }
     let update_id = crate::db::ulid();
     // 先寫進 DB 才開跑（#564）：每台最多一筆 `running`，重啟之後也還在，由 [`recover_at_startup`] 接手。
     let now = crate::db::now();
     let inserted = sqlx::query(
-        "INSERT INTO cli_updates (id, host, kind, target_version, status, phase, boot, started_at, updated_at)
-         VALUES (?, ?, 'codex', ?, 'running', 'starting', ?, ?, ?)",
+        "INSERT INTO cli_updates (id, host, kind, target_version, status, phase, boot, started_at, updated_at, host_target)
+         VALUES (?, ?, 'codex', ?, 'running', 'starting', ?, ?, ?, ?)",
     )
     .bind(&update_id)
     .bind(host)
@@ -462,6 +484,7 @@ pub async fn start(
     .bind(boot())
     .bind(&now)
     .bind(&now)
+    .bind(&operation_host_target)
     .execute(&app.db)
     .await;
     if let Err(e) = inserted {
@@ -486,10 +509,10 @@ pub async fn start(
             json!({"host": host, "kind": kind, "update_id": id, "recovered": recovered, "message": message}),
         ));
     }
-    let (app2, host2, id2, target2) = (app.clone(), host.to_string(), update_id.clone(), target.clone());
+    let (app2, host2, id2, target2, fence2) = (app.clone(), host.to_string(), update_id.clone(), target.clone(), operation_fence);
     tokio::spawn(async move {
         use futures::FutureExt as _;
-        let res = std::panic::AssertUnwindSafe(run(&app2, runner.as_ref(), &host2, &id2, &target2)).catch_unwind().await;
+        let res = std::panic::AssertUnwindSafe(run_with_fence(&app2, runner.as_ref(), &host2, &id2, &target2, Some(fence2))).catch_unwind().await;
         if res.is_err() {
             // 中途 panic 也要等終態寫進 DB 後才告訴 UI；finish_row 會在目前行程內保留 retry debt。
             let failed = json!({"update_id": id2, "host": host2, "kind": "codex", "target_version": target2,
@@ -507,7 +530,20 @@ pub async fn start(
 /// 整段可能跑五分鐘，途中同名主機可能重連或改指到另一台（#347）：第一次讀版本之前記下 [`HostFence`]，每次讀完、
 /// 改通知與開批次之前都確認它還是權威。不是就停在那裡回 `superseded`——升級前後的版本可能是兩台機器讀的，
 /// 不能拿來判斷裝好了沒，更不能去改新機器的通知、重啟新機器的 bot。
+#[cfg(test)]
 pub async fn run(app: &Arc<App>, runner: &dyn Runner, host: &str, update_id: &str, target: &str) -> Value {
+    let fence = app.hosts.fence(host).await;
+    run_with_fence(app, runner, host, update_id, target, fence).await
+}
+
+async fn run_with_fence(
+    app: &Arc<App>,
+    runner: &dyn Runner,
+    host: &str,
+    update_id: &str,
+    target: &str,
+    fence: Option<HostFence>,
+) -> Value {
     let log_path = app.data_dir.join(LOG_FILE);
     let base = json!({"update_id": update_id, "host": host, "kind": "codex", "target_version": target, "log_path": log_path});
     let progress = |phase: &str, extra: Value| {
@@ -536,7 +572,7 @@ pub async fn run(app: &Arc<App>, runner: &dyn Runner, host: &str, update_id: &st
         v
     };
 
-    let Some(fence) = app.hosts.fence(host).await else {
+    let Some(fence) = fence else {
         return finish(done(false, json!({"reason": "superseded", "error": format!("主機 {host} 已經不在設定裡，沒有安裝")}))).await;
     };
     let superseded = |phase: &str, extra: Value| {
@@ -618,7 +654,12 @@ pub async fn run(app: &Arc<App>, runner: &dyn Runner, host: &str, update_id: &st
     if !app.hosts.is_current(&fence).await {
         return finish(superseded("改通知", json!({"from": before, "to": after}))).await;
     }
-    let notices = mark_installed_until_durable(app, host, &before, &after).await;
+    let Some(notices) = mark_installed_until_durable(app, host, &before, &after, &fence).await else {
+        return finish(superseded("改通知", json!({"from": before, "to": after}))).await;
+    };
+    if !app.hosts.is_current(&fence).await {
+        return finish(superseded("確認通知持久化", json!({"from": before, "to": after, "notices_updated": notices}))).await;
+    }
     crate::update_watch::forget_disk_version(host, "codex").await;
     set_phase(app, update_id, "restarting", Some(&before)).await;
     app.emit("cli_update_progress", progress("restarting", json!({"from": before, "to": after}))).await;
@@ -643,7 +684,7 @@ pub async fn run(app: &Arc<App>, runner: &dyn Runner, host: &str, update_id: &st
     finish(v).await
 }
 
-type RecoveryRow = (String, String, String, Option<String>);
+type RecoveryRow = (String, String, String, Option<String>, Option<String>);
 
 /// 同一列可能在多輪掃描中一直是 `running`。Processed tombstones 必須保留到 daemon 結束：某一輪掃描
 /// 可能在 worker 終結前讀到舊 row，稍後才把那份結果送來 admission；只記錄 active worker 會重新啟動它。
@@ -693,7 +734,7 @@ impl Drop for RecoveryWorkerGuard {
 }
 
 fn spawn_recovery_worker(app: &Arc<App>, runner: &Arc<dyn Runner>, row: RecoveryRow) -> bool {
-    let (id, host, target, from) = row;
+    let (id, host, target, from, host_target) = row;
     let claimed = {
         let mut recoveries = active_recoveries()
             .lock()
@@ -722,6 +763,7 @@ fn spawn_recovery_worker(app: &Arc<App>, runner: &Arc<dyn Runner>, row: Recovery
             from.as_deref(),
             RECOVER_POLL,
             RECOVER_MAX,
+            host_target.as_deref(),
             Some(&_guard),
         )
         .await;
@@ -730,7 +772,7 @@ fn spawn_recovery_worker(app: &Arc<App>, runner: &Arc<dyn Runner>, row: Recovery
 }
 
 async fn unfinished_updates(app: &App) -> Result<Vec<RecoveryRow>, sqlx::Error> {
-    sqlx::query_as("SELECT id, host, target_version, from_version FROM cli_updates WHERE status = 'running' AND boot != ?")
+    sqlx::query_as("SELECT id, host, target_version, from_version, host_target FROM cli_updates WHERE status = 'running' AND boot != ?")
         .bind(boot())
         .fetch_all(&app.db)
         .await
@@ -795,6 +837,7 @@ pub async fn recover_at_startup(app: &Arc<App>) {
 ///
 /// 絕對不跑安裝指令。
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub async fn recover(
     app: &Arc<App>,
     runner: &dyn Runner,
@@ -805,7 +848,14 @@ pub async fn recover(
     poll: Duration,
     max: Duration,
 ) -> Value {
-    recover_with_registry(app, runner, update_id, host, target, from, poll, max, None).await
+    let host_target = sqlx::query_scalar::<_, Option<String>>("SELECT host_target FROM cli_updates WHERE id = ?")
+        .bind(update_id)
+        .fetch_optional(&app.db)
+        .await
+        .ok()
+        .flatten()
+        .flatten();
+    recover_with_registry(app, runner, update_id, host, target, from, poll, max, host_target.as_deref(), None).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -818,6 +868,7 @@ async fn recover_with_registry(
     from: Option<&str>,
     poll: Duration,
     max: Duration,
+    host_target: Option<&str>,
     registry_guard: Option<&RecoveryWorkerGuard>,
 ) -> Value {
     let log_path = app.data_dir.join(LOG_FILE);
@@ -846,18 +897,37 @@ async fn recover_with_registry(
         app.emit("cli_update_done", v.clone()).await;
         v
     };
+    let changed_authority = |message: String| done(false, json!({"reason": "host_changed", "error": message}));
+    let superseded = |message: String| done(false, json!({"reason": "superseded", "error": message}));
     set_phase(app, update_id, "recovering", None).await;
     let mut progress = base.clone();
     progress["phase"] = json!("installing");
     app.emit("cli_update_progress", progress).await;
 
+    let Some(host_target) = host_target else {
+        return finish(changed_authority(format!(
+            "這筆 {host} 的 cli-update 沒有保存啟動時的主機目標；不能把目前同名主機當成接手對象"
+        )))
+        .await;
+    };
+
     let deadline = tokio::time::Instant::now() + max;
-    loop {
+    let fence = loop {
         let Some(fence) = app.hosts.fence(host).await else {
-            return finish(done(false, json!({"reason": "superseded", "error": format!("主機 {host} 已經不在設定裡；上一次的安裝有沒有跑完要去那台看")}))).await;
+            return finish(changed_authority(format!("主機 {host} 已經不在設定裡；上一次的安裝有沒有跑完要去原本那台看"))).await;
         };
-        match runner.installer_busy(app, host, &fence).await {
-            Ok(false) => break,
+        if host_target_for_conn(fence.conn()) != host_target {
+            return finish(changed_authority(format!(
+                "{host} 現在指向另一個主機目標；這筆上次的安裝不會接手或改目前主機的通知"
+            )))
+            .await;
+        }
+        let probe = runner.installer_busy(app, host, &fence).await;
+        if !app.hosts.is_current(&fence).await {
+            return finish(superseded(format!("{host} 在安裝鎖探測期間重連或改設定；沒有讀版本、改通知或發布成功"))).await;
+        }
+        match probe {
+            Ok(false) => break fence,
             Ok(true) => {}
             Err(e) => tracing::debug!(host, error = %e, "could not probe the codex install lock yet"),
         }
@@ -867,15 +937,29 @@ async fn recover_with_registry(
             .await;
         }
         tokio::time::sleep(poll).await;
+    };
+    if !app.hosts.is_current(&fence).await {
+        return finish(superseded(format!("{host} 的安裝鎖已放開，但連線在版本核對前改變；沒有改通知"))).await;
     }
     let after = runner.version(app, host).await.ok().and_then(|raw| normalized(&raw));
+    if !app.hosts.is_current(&fence).await {
+        return finish(superseded(format!("{host} 在版本核對期間重連或改設定；沒有改通知"))).await;
+    }
     let Some(after) = after.clone().filter(|a| parse_version(a) >= parse_version(target)) else {
         return finish(done(false, json!({"reason": "interrupted", "to": after,
             "error": format!("daemon 在安裝途中重啟，{host} 的 codex 現在是 {}，沒到確認的 {target}；沒有重啟任何 bot，要裝就再按一次", after.as_deref().unwrap_or("（讀不到）"))})))
         .await;
     };
     // 跑著的版本優先取通知寫的起點（`mark_installed` 自己會找）；這裡的 `from` 只是最後的退路。
-    let notices = mark_installed_until_durable(app, host, from.unwrap_or(""), &after).await;
+    if !app.hosts.is_current(&fence).await || host_target_for_conn(fence.conn()) != host_target {
+        return finish(superseded(format!("{host} 在改通知前重連或改設定；沒有發布接手成功"))).await;
+    }
+    let Some(notices) = mark_installed_until_durable(app, host, from.unwrap_or(""), &after, &fence).await else {
+        return finish(superseded(format!("{host} 在改通知期間重連或改設定；沒有發布接手成功"))).await;
+    };
+    if !app.hosts.is_current(&fence).await || host_target_for_conn(fence.conn()) != host_target {
+        return finish(superseded(format!("{host} 在改通知持久化時重連或改設定；沒有發布接手成功"))).await;
+    }
     crate::update_watch::forget_disk_version(host, "codex").await;
     finish(done(true, json!({"to": after, "notices_updated": notices, "restart": null,
         "restart_error": "daemon 在安裝途中重啟過，這次沒有自動重啟 bot；按一般的 ⌃⌃ 重啟套用"})))
@@ -995,16 +1079,33 @@ async fn mark_installed_change_is_already_durable(app: &Arc<App>, host: &str, ru
 /// 只將通知改成安裝完成；列舉、權威讀取、CAS 寫入或 CAS 衝突驗證失敗時回錯，不能把錯誤當成空名單。
 /// 確認沒有 relevant row 時回 `Ok(0)`，只有這個成功證明的空結果可視為無操作。
 /// 跑著的版本：記憶體裡看過的 → 通知寫的起點 → 安裝前的磁碟版本（這個 process 是裝之前起的，不會比它新）。
-async fn mark_installed(app: &Arc<App>, host: &str, before: &str, after: &str) -> anyhow::Result<usize> {
+async fn mark_installed_with_fence(
+    app: &Arc<App>,
+    host: &str,
+    before: &str,
+    after: &str,
+    fence: Option<&HostFence>,
+) -> anyhow::Result<Option<usize>> {
     let mut n = 0;
     for run in crate::db::all_active_runs(&app.db).await? {
+        if let Some(fence) = fence {
+            if !app.hosts.is_current(fence).await {
+                return Ok(None);
+            }
+        }
         let Some(notice) = run.update_notice.as_deref() else { continue };
         if !notice_needs_this_install(notice, after) {
             continue;
         }
         let Some(bot) = crate::db::bot(&app.db, &run.bot_id).await? else { continue };
-        if bot.kind != "codex" || crate::db::bot_host(&app.db, &run.bot_id).await? != host {
+        let bot_host = crate::db::bot_host(&app.db, &run.bot_id).await?;
+        if bot.kind != "codex" || bot_host != host {
             continue;
+        }
+        if let Some(fence) = fence {
+            if !app.hosts.is_current(fence).await {
+                return Ok(None);
+            }
         }
         let running = crate::codex_update::remember_running(&run.id, "", None)
             .or_else(|| crate::codex_update::pending_from(notice))
@@ -1025,20 +1126,46 @@ async fn mark_installed(app: &Arc<App>, host: &str, before: &str, after: &str) -
         if result.rows_affected() == 1 {
             n += 1;
             app.emit_bot_status(&run.bot_id).await;
-        } else if !mark_installed_change_is_already_durable(app, host, &run.id, after).await? {
-            anyhow::bail!("Codex run {} still needs the installed notice transition after a lost CAS", run.id);
+        } else {
+            if let Some(fence) = fence {
+                if !app.hosts.is_current(fence).await {
+                    return Ok(None);
+                }
+            }
+            if !mark_installed_change_is_already_durable(app, host, &run.id, after).await? {
+                anyhow::bail!("Codex run {} still needs the installed notice transition after a lost CAS", run.id);
+            }
+            if let Some(fence) = fence {
+                if !app.hosts.is_current(fence).await {
+                    return Ok(None);
+                }
+            }
         }
     }
-    Ok(n)
+    Ok(Some(n))
 }
 
 /// DB 錯誤時維持 cli_updates 的 running 列並退避重試；run/recover 都要等通知轉換可證明持久化後才收尾。
-async fn mark_installed_until_durable(app: &Arc<App>, host: &str, before: &str, after: &str) -> usize {
+/// fence 失效就停止重試並拒絕發布成功，防止重試期間改寫同名新主機的通知。
+async fn mark_installed_until_durable(
+    app: &Arc<App>,
+    host: &str,
+    before: &str,
+    after: &str,
+    fence: &HostFence,
+) -> Option<usize> {
     let mut retry = MARK_INSTALLED_RETRY_INITIAL;
     loop {
-        match mark_installed(app, host, before, after).await {
-            Ok(n) => return n,
+        if !app.hosts.is_current(fence).await {
+            return None;
+        }
+        match mark_installed_with_fence(app, host, before, after, Some(fence)).await {
+            Ok(Some(n)) => return Some(n),
+            Ok(None) => return None,
             Err(error) => {
+                if !app.hosts.is_current(fence).await {
+                    return None;
+                }
                 tracing::warn!(host, error = %error, "could not durably mark Codex update notices installed; keeping update running and retrying");
                 log_line(app, &format!("codex notice transition for {host} failed; update remains running: {error:#}"));
                 tokio::time::sleep(retry).await;
@@ -1046,6 +1173,11 @@ async fn mark_installed_until_durable(app: &Arc<App>, host: &str, before: &str, 
             }
         }
     }
+}
+
+#[cfg(test)]
+async fn mark_installed(app: &Arc<App>, host: &str, before: &str, after: &str) -> anyhow::Result<usize> {
+    Ok(mark_installed_with_fence(app, host, before, after, None).await?.unwrap_or_default())
 }
 
 #[cfg(test)]
@@ -1724,6 +1856,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_started_update_persists_its_host_target_for_recovery() {
+        let env = crate::testing::env().await;
+        let host = "start-authority-347";
+        let cfg = crate::config::HostCfg {
+            name: host.into(),
+            ssh: "target-a".into(),
+            ssh_port: 2222,
+            ssh_opts: vec![],
+            herdr_session: "codex-work".into(),
+            remote_path: String::new(),
+        };
+        env.app.hosts.insert_remote_for_test(cfg).await;
+        let pending = crate::codex_update::pending_text(Some("0.155.1"), "0.157.0");
+        let (bot, _) = codex_bot_with_notice(&env, "cx-start-authority-347", &pending).await;
+        sqlx::query("UPDATE projects SET host=? WHERE id=(SELECT project_id FROM bots WHERE id=?)")
+            .bind(host)
+            .bind(&bot)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+
+        let started = start(
+            &env.app,
+            &HeaderMap::new(),
+            host,
+            Some("codex"),
+            Some("0.157.0"),
+            Fake::new(&["codex-cli 0.157.0"], Ok("already installed")),
+        )
+        .await
+        .unwrap();
+        let host_target: Option<String> = sqlx::query_scalar("SELECT host_target FROM cli_updates WHERE id=?")
+            .bind(started["update_id"].as_str().unwrap())
+            .fetch_one(&env.app.db)
+            .await
+            .unwrap();
+        assert_eq!(host_target.as_deref(), Some("target-a:2222/codex-work"));
+    }
+
+    #[tokio::test]
     async fn a_second_install_on_the_same_host_is_a_409_until_the_first_finishes() {
         let env = crate::testing::env().await;
         let pending = crate::codex_update::pending_text(Some("0.155.1"), "0.157.0");
@@ -1844,9 +2016,10 @@ mod tests {
     /// 上一顆 daemon 寫下、還沒收尾的那一列（它的行程已經不在了，`boot` 不是現在這顆）。
     async fn orphan_row(app: &Arc<App>, host: &str, target: &str, phase: &str, from: Option<&str>) -> String {
         let id = db::ulid();
+        let host_target = app.hosts.get(host).await.map(|conn| host_target_for_conn(&conn));
         sqlx::query(
-            "INSERT INTO cli_updates (id, host, kind, target_version, status, phase, from_version, boot, started_at, updated_at)
-             VALUES (?, ?, 'codex', ?, 'running', ?, ?, 'dead-daemon', ?, ?)",
+            "INSERT INTO cli_updates (id, host, kind, target_version, status, phase, from_version, boot, started_at, updated_at, host_target)
+             VALUES (?, ?, 'codex', ?, 'running', ?, ?, 'dead-daemon', ?, ?, ?)",
         )
         .bind(&id)
         .bind(host)
@@ -1855,6 +2028,7 @@ mod tests {
         .bind(from)
         .bind(db::now())
         .bind(db::now())
+        .bind(host_target)
         .execute(&app.db)
         .await
         .unwrap();
@@ -1914,6 +2088,66 @@ mod tests {
         start(&env.app, &ui, "local", Some("codex"), Some("0.158.0"), again.clone()).await.expect("收尾之後可以再裝");
         assert!(crate::testing::eventually!(running_list(&env.app).await.is_empty()));
         assert_eq!(again.installs(), 1);
+    }
+
+    /// #347: startup recovery must compare the durable operation authority before trusting the current same-name host.
+    #[tokio::test]
+    async fn recovery_does_not_adopt_a_repointed_host_that_already_has_the_target_version() {
+        let env = crate::testing::env().await;
+        let host = "recover-347";
+        let cfg = |ssh: &str| crate::config::HostCfg {
+            name: host.into(),
+            ssh: ssh.into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "agents-manager".into(),
+            remote_path: String::new(),
+        };
+        env.app.hosts.insert_remote_for_test(cfg("target-a")).await;
+        let orphan = orphan_row(&env.app, host, "0.157.0", "installing", Some("0.155.1")).await;
+        let pending = crate::codex_update::pending_text(Some("0.155.1"), "0.157.0");
+        let (bot, run) = codex_bot_with_notice(&env, "cx-recover-347", &pending).await;
+        sqlx::query("UPDATE projects SET host=? WHERE id=(SELECT project_id FROM bots WHERE id=?)")
+            .bind(host)
+            .bind(&bot)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+
+        env.app.hosts.replace_remote_for_test(&env.app, cfg("target-b")).await;
+        let fake = Fake::new(&["codex-cli 0.157.0"], Ok("already installed on B"));
+        let v = recover(&env.app, fake.as_ref(), &orphan, host, "0.157.0", Some("0.155.1"), Duration::ZERO, Duration::from_secs(5)).await;
+
+        assert_eq!(v["ok"], false, "recovery cannot adopt B's installed version: {v}");
+        assert_eq!(v["reason"], "host_changed", "the result must identify the durable authority mismatch: {v}");
+        assert_eq!(*fake.probes.lock().unwrap(), 0, "do not inspect the current host after the recorded target changed");
+        assert_eq!(*fake.version_reads.lock().unwrap(), 0, "do not read B's version as A's result");
+        assert_eq!(notice_of(&env.app, &run).await, Some(pending), "B's notice must remain untouched");
+        let (status, result) = row_status(&env.app, &orphan).await;
+        assert_eq!(status, "failed");
+        assert_eq!(result["reason"], "host_changed");
+    }
+
+    #[tokio::test]
+    async fn recovery_fails_closed_when_a_legacy_row_has_no_durable_host_target() {
+        let env = crate::testing::env().await;
+        let pending = crate::codex_update::pending_text(Some("0.155.1"), "0.157.0");
+        let (_bot, run) = codex_bot_with_notice(&env, "cx-recover-legacy-347", &pending).await;
+        let orphan = orphan_row(&env.app, "local", "0.157.0", "installing", Some("0.155.1")).await;
+        sqlx::query("UPDATE cli_updates SET host_target=NULL WHERE id=?")
+            .bind(&orphan)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        let fake = Fake::new(&["codex-cli 0.157.0"], Ok("already installed"));
+
+        let v = recover(&env.app, fake.as_ref(), &orphan, "local", "0.157.0", Some("0.155.1"), Duration::ZERO, Duration::from_secs(5)).await;
+
+        assert_eq!(v["ok"], false, "missing durable authority must not be inferred from the current host: {v}");
+        assert_eq!(v["reason"], "host_changed");
+        assert_eq!(*fake.probes.lock().unwrap(), 0);
+        assert_eq!(*fake.version_reads.lock().unwrap(), 0);
+        assert_eq!(notice_of(&env.app, &run).await, Some(pending));
     }
 
     /// #564 reopened: a transient failure during the first startup enumeration must not strand the durable row until another restart.
@@ -2036,6 +2270,50 @@ mod tests {
         ) -> BoxFuture<'a, anyhow::Result<Value>> {
             self.inner.restart(app, scope)
         }
+    }
+
+    #[tokio::test]
+    async fn recovery_keeps_the_free_lock_fence_through_version_and_notice_publish() {
+        let env = crate::testing::env().await;
+        let host = "recover-fence-347";
+        let cfg = |ssh: &str| crate::config::HostCfg {
+            name: host.into(),
+            ssh: ssh.into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "agents-manager".into(),
+            remote_path: String::new(),
+        };
+        env.app.hosts.insert_remote_for_test(cfg("target-a")).await;
+        let orphan = orphan_row(&env.app, host, "0.157.0", "installing", Some("0.155.1")).await;
+        let pending = crate::codex_update::pending_text(Some("0.155.1"), "0.157.0");
+        let (bot, run) = codex_bot_with_notice(&env, "cx-recover-fence-347", &pending).await;
+        sqlx::query("UPDATE projects SET host=? WHERE id=(SELECT project_id FROM bots WHERE id=?)")
+            .bind(host)
+            .bind(&bot)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+
+        let barrier = Arc::new(ProbeBarrier { entered: tokio::sync::Notify::new(), release: tokio::sync::Notify::new() });
+        let fake = Fake::new(&["codex-cli 0.157.0"], Ok("already installed on A"));
+        let runner: Arc<dyn Runner> = Arc::new(ProbeGatedRunner { inner: fake.clone(), barrier: barrier.clone() });
+        let (app, fake_host, fake_id, runner) = (env.app.clone(), host.to_string(), orphan.clone(), runner.clone());
+        let task = tokio::spawn(async move {
+            recover(&app, runner.as_ref(), &fake_id, &fake_host, "0.157.0", Some("0.155.1"), Duration::ZERO, Duration::from_secs(5)).await
+        });
+        tokio::time::timeout(Duration::from_secs(5), barrier.entered.notified())
+            .await
+            .expect("recovery must reach the lock probe on A");
+        env.app.hosts.replace_remote_for_test(&env.app, cfg("target-b")).await;
+        barrier.release.notify_one();
+        let v = task.await.unwrap();
+
+        assert_eq!(v["ok"], false, "the free-lock result from A is stale after replacement: {v}");
+        assert_eq!(v["reason"], "superseded", "the recovery fence changed before version verification: {v}");
+        assert_eq!(*fake.probes.lock().unwrap(), 1);
+        assert_eq!(*fake.version_reads.lock().unwrap(), 0, "a stale final lock result must not trigger a version read");
+        assert_eq!(notice_of(&env.app, &run).await, Some(pending), "B's notice must remain untouched");
     }
 
     #[tokio::test]
