@@ -41,7 +41,7 @@ pub fn inbox_notify_crid(prefix: &str, batch: &[(&str, i64)]) -> String {
         hasher.update(attempts.to_le_bytes());
     }
     let digest = hasher.finalize();
-    let hex: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
+    let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
     format!("{prefix}{hex}")
 }
 
