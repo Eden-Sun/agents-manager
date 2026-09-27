@@ -70,15 +70,41 @@ fn live_slash_command(kind: &str, field: &str, value: &str, effort: Option<&str>
 /// 回傳 `None` = 已套用；`Some(理由)` = 退回重啟。理由一路帶回 `live_apply` 並寫 log——
 /// 2026-09-13 使用者問 codex 改 effort 為何重啟，當時每個失敗出口都是靜默的。
 pub async fn apply_live_setting(app: &Arc<App>, bot_id: &str, fields: &[&str]) -> Option<String> {
-    let reason = apply_live_setting_inner(app, bot_id, fields).await;
-    match &reason {
-        Some(why) => tracing::info!(bot_id, ?fields, reason = %why, "設定沒能當場套用，改用重啟"),
-        None => tracing::info!(bot_id, ?fields, "設定已當場套用，不需要重啟"),
+    match apply_live_setting_with_run(app, bot_id, fields).await {
+        LiveApplyOutcome::Applied { .. } => None,
+        LiveApplyOutcome::Failed(why) => Some(why),
     }
-    reason
 }
 
-async fn apply_live_setting_inner(app: &Arc<App>, bot_id: &str, fields: &[&str]) -> Option<String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LiveApplyOutcome {
+    Applied { run_id: String },
+    Failed(String),
+}
+
+/// 帶回實際執行 slash/picker 的 run；呼叫端的 PATCH 快照可能已經過時。
+pub(crate) async fn apply_live_setting_with_run(app: &Arc<App>, bot_id: &str, fields: &[&str]) -> LiveApplyOutcome {
+    let mut applied_run_id = None;
+    let result = match apply_live_setting_inner(app, bot_id, fields, &mut applied_run_id).await {
+        Some(why) => LiveApplyOutcome::Failed(why),
+        None => match applied_run_id {
+            Some(run_id) => LiveApplyOutcome::Applied { run_id },
+            None => LiveApplyOutcome::Failed("live_apply_missing_run_receipt".into()),
+        },
+    };
+    match &result {
+        LiveApplyOutcome::Failed(why) => tracing::info!(bot_id, ?fields, reason = %why, "設定沒能當場套用，改用重啟"),
+        LiveApplyOutcome::Applied { run_id } => tracing::info!(bot_id, ?fields, run_id, "設定已當場套用，不需要重啟"),
+    }
+    result
+}
+
+async fn apply_live_setting_inner(
+    app: &Arc<App>,
+    bot_id: &str,
+    fields: &[&str],
+    applied_run_id: &mut Option<String>,
+) -> Option<String> {
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
     let Ok(Some(bot)) = db::bot(&app.db, bot_id).await else {
@@ -118,6 +144,7 @@ async fn apply_live_setting_inner(app: &Arc<App>, bot_id: &str, fields: &[&str])
         .await;
         app.emit_bot_status(bot_id).await;
         tracing::info!(bot_id, model = %seen.model, effort = ?seen.effort, fast = seen.fast, "codex applied live");
+        *applied_run_id = Some(run.id.clone());
         return None;
     }
 
@@ -211,6 +238,7 @@ async fn apply_live_setting_inner(app: &Arc<App>, bot_id: &str, fields: &[&str])
     }
     app.emit_bot_status(bot_id).await;
     tracing::info!(bot_id, line, "applied live via slash command");
+    *applied_run_id = Some(run.id.clone());
     None
 }
 
