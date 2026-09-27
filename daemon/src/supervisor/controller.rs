@@ -150,9 +150,18 @@ pub async fn dispatch(app: &Arc<App>, assignment_id: &str) {
     };
     // 這顆 bot 在排隊期間變成了 AGM 的角色（setup 挑中了它）：直接 prompt 會繞過角色佇列，
     // 把交接打進對方的 pane。停下來交給 AGM 用 `assign` 的角色路徑重下一次（SPEC §18.15）。
-    if super::roles::role_of_bot(&app.db, &a.target_bot_id).await.ok().flatten().is_some() {
-        dispatch_failed(app, &a, "target bot is now an AGM role; hand it over through the role queue instead").await;
-        return;
+    match super::roles::role_of_bot(&app.db, &a.target_bot_id).await {
+        Ok(Some(_)) => {
+            dispatch_failed(app, &a, "target bot is now an AGM role; hand it over through the role queue instead").await;
+            return;
+        }
+        Ok(None) => {}
+        Err(e) => {
+            let until = iso_in(super::maintenance::UNREADABLE_RETRY_SECS);
+            let _ = store::hold(&app.db, &a.id, &until, &format!("cannot tell whether the target is an AGM role: {e:#}")).await;
+            tracing::warn!(assignment = %a.id, bot = %a.target_bot_id, until, error = ?e, "assignment held: target role membership cannot be read");
+            return;
+        }
     }
     // 帳號正被 CLI 擋著（`You've hit your usage limit …`）：送出去只會換來一句系統錯誤，
     // 而 `queued` 的重試會在 backoff 用完之後把它變成 dispatch_failed——工作就這樣無聲斷掉。
@@ -5103,5 +5112,75 @@ mod report_evidence_tests {
         assert_eq!(seen.lock().unwrap().len(), 1);
         let status: String = sqlx::query_scalar("SELECT status FROM supervisor_assignments WHERE id = ?").bind(&done.id).fetch_one(&app.db).await.unwrap();
         assert_eq!(status, "awaiting_review", "旗標不改交辦狀態");
+    }
+}
+
+#[cfg(test)]
+mod role_dispatch_read_failure_tests {
+    use super::*;
+    use crate::testing as tt;
+
+    async fn queued_responder_assignment(name: &str) -> (tt::Env, String, String) {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let manager = tt::claude_bot(&app, &env.project_id, &format!("{name}-manager")).await;
+        let supervisor = store::get_or_init(&app.db).await.unwrap();
+        sqlx::query("UPDATE supervisors SET bot_id=? WHERE id=?")
+            .bind(&manager.id)
+            .bind(&supervisor.id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        let worker = tt::claude_bot(&app, &env.project_id, &format!("{name}-responder")).await;
+        super::super::roles::get(&app.db, super::super::roles::Role::Responder).await.unwrap();
+        sqlx::query("UPDATE supervisor_roles SET bot_id=? WHERE role='responder'")
+            .bind(&worker.id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let assignment = store::insert_assignment(&app.db, None, &worker.id, name, "做 X", &[], None, true).await.unwrap();
+        let pane = format!("pane-{name}");
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, pane_typed, started_at)
+             VALUES (?,?,'running','idle','ws-role',?,?,'test',1,?)",
+        )
+        .bind(crate::db::ulid())
+        .bind(&worker.id)
+        .bind(&pane)
+        .bind(format!("{name}-agent"))
+        .bind(crate::db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        env.herdr.live_pane(&pane, tt::LivePane { width: Some(120), ..Default::default() });
+        (env, assignment.id, pane)
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_target_role_holds_dispatch_until_role_routing_can_be_rechecked() {
+        let (env, assignment_id, pane) = queued_responder_assignment("role-read-606").await;
+        let app = env.app.clone();
+        crate::testing::make_table_unreadable(&app, "supervisor_roles").await;
+
+        {
+            let _guard = super::super::lock().await;
+            dispatch(&app, &assignment_id).await;
+        }
+        let held = store::assignment(&app.db, &assignment_id).await.unwrap().unwrap();
+        assert_eq!(held.status, "queued", "角色資料讀不到時 assignment 要留著稍後再檢查");
+        assert_eq!(held.attempts, 0, "暫時讀取錯誤不花派送失敗次數");
+        assert!(held.next_attempt_at.is_some(), "要安排重試");
+        assert!(env.herdr.calls_to("pane.send_text").iter().all(|p| p["pane_id"] != pane), "讀不到角色不能直接 prompt worker");
+
+        crate::testing::make_table_readable(&app, "supervisor_roles").await;
+        assert_eq!(super::super::roles::role_of_bot(&app.db, &held.target_bot_id).await.unwrap(), Some(super::super::roles::Role::Responder));
+        {
+            let _guard = super::super::lock().await;
+            dispatch(&app, &assignment_id).await;
+        }
+        let handed_off = store::assignment(&app.db, &assignment_id).await.unwrap().unwrap();
+        assert_eq!(handed_off.status, "awaiting_review", "讀回 responder 身分後改走角色 handoff");
+        assert!(env.herdr.calls_to("pane.send_text").iter().all(|p| p["pane_id"] != pane), "角色 handoff 不得 prompt 進角色 pane");
     }
 }
