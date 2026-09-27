@@ -296,7 +296,7 @@ pub async fn promote_bot(
         Some(r) => locate_live(&app, r).await?,
         None => locate_recorded(&app, &id).await?,
     };
-    let dest_dir = FsPath::new(&lifecycle::identity_config_dir(&app, LOCAL_HOST, child.identity.as_deref()).await)
+    let dest_dir = FsPath::new(&lifecycle::identity_config_dir(&app, LOCAL_HOST, child.identity.as_deref()).await.map_err(up)?)
         .join("projects")
         .join(cwd_key(&project.path));
 

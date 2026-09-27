@@ -744,6 +744,16 @@ impl HostFence {
     }
 }
 
+/// Resolve the home directory belonging to this captured host authority. A remote read failure
+/// is unknown authority and must never borrow this daemon's HOME (#595, #616, #618).
+pub(crate) async fn home_for_fence(fence: &HostFence) -> Result<String> {
+    let conn = fence.conn();
+    if conn.is_local() {
+        return Ok(dirs::home_dir().map(|p| p.display().to_string()).unwrap_or_else(|| "/tmp".into()));
+    }
+    conn.home().await.with_context(|| format!("remote HOME for host `{}` is unreadable", conn.name))
+}
+
 pub struct HostManager {
     conns: Mutex<HashMap<String, Arc<HostConn>>>,
 }

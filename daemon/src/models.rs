@@ -298,15 +298,15 @@ pub fn parse_claude_effort_settings(text: &str) -> (Option<String>, BTreeMap<Str
 }
 
 /// `None` = `~/.claude`; an unknown or non-claude identity silently falls back to that too.
-async fn claude_config_dir(app: &Arc<App>, host: &str, identity: Option<&str>) -> Option<String> {
-    let name = identity?;
-    let idn = crate::tools::identity_for_host(app, host, name).await?;
+async fn claude_config_dir(app: &Arc<App>, host: &str, identity: Option<&str>) -> Result<Option<String>> {
+    let Some(name) = identity else { return Ok(None) };
+    let Some(idn) = crate::tools::identity_for_host(app, host, name).await else { return Ok(None) };
     if idn.kind != "claude" {
-        return None;
+        return Ok(None);
     }
-    let dir = idn.env.get("CLAUDE_CONFIG_DIR")?;
-    let home = crate::tools::host_home(app, host).await;
-    Some(expand_home(dir, &home))
+    let Some(dir) = idn.env.get("CLAUDE_CONFIG_DIR") else { return Ok(None) };
+    let home = crate::tools::host_home(app, host).await?;
+    Ok(Some(expand_home(dir, &home)))
 }
 
 fn optional_cat_script(path_expr: &str) -> String {
@@ -352,7 +352,7 @@ const CLAUDE_BUILTIN_DEFAULT_EFFORT: &str = "high";
 /// What "不帶 `--effort`" resolves to; fills a spawned child's effort, since its argv never says.
 /// 讀不到設定檔回 `Err`（不是內建預設）：呼叫端會把這個值記進 bot，記錯了沒有人會再來讀一次。
 pub async fn claude_default_effort(app: &Arc<App>, host: &str, identity: Option<&str>, alias: &str) -> Result<String> {
-    let dir = claude_config_dir(app, host, identity).await;
+    let dir = claude_config_dir(app, host, identity).await?;
     let (global, per_model) = read_claude_effort_settings(app, host, dir.as_deref()).await?;
     let alias = alias.to_ascii_lowercase();
     Ok(per_model
@@ -420,7 +420,7 @@ pub async fn fetch(app: &Arc<App>, host: &str, kind: &str, identity: Option<&str
             ("grok-cli", m)
         }
         "claude" => {
-            let config_dir = claude_config_dir(app, host, identity).await;
+            let config_dir = claude_config_dir(app, host, identity).await?;
             let (global, per_model) = read_claude_effort_settings(app, host, config_dir.as_deref()).await?;
             ("static", claude_static_models(global.as_deref(), &per_model))
         }
@@ -599,6 +599,49 @@ mod tests {
         };
         e.app.hosts.apply_config(&e.app, &[cfg]).await;
         "unreachable-box"
+    }
+
+    #[tokio::test]
+    async fn a_remote_model_identity_does_not_probe_without_home_and_recovers() {
+        let e = crate::testing::env().await;
+        let host = format!("model-home-616-{}", crate::db::ulid().to_ascii_lowercase());
+        let conn = e.app.hosts.insert_remote_for_test(crate::config::HostCfg {
+            name: host.clone(),
+            ssh: "unused".into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "agents-manager".into(),
+            remote_path: String::new(),
+        }).await;
+        e.app.cfg.update(|cfg| {
+            cfg.identities.push(crate::config::IdentityCfg {
+                name: "cc1".into(),
+                kind: "claude".into(),
+                host: Some(host.clone()),
+                env: [("CLAUDE_CONFIG_DIR".into(), "~/.claude-cc1".into())].into(),
+                args: vec![],
+            });
+            Ok(())
+        }).await.unwrap();
+        let calls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let calls2 = calls.clone();
+        crate::hosts::set_ssh_fake(&host, move |script| {
+            calls2.lock().unwrap().push(script.to_string());
+            Err(anyhow!("injected remote HOME read failure"))
+        });
+
+        let err = claude_default_effort(&e.app, &host, Some("cc1"), "opus").await.expect_err("do not read an identity's model settings without its HOME");
+        assert!(err.to_string().contains("HOME"), "preserve the HOME failure reason: {err:#}");
+        assert_eq!(calls.lock().unwrap().len(), 1, "settings-file probe must not follow failed HOME resolution");
+
+        *conn.remote_home.lock().await = Some("/home/remote-model".into());
+        let calls2 = calls.clone();
+        crate::hosts::set_ssh_fake(&host, move |script| {
+            calls2.lock().unwrap().push(script.to_string());
+            Ok(r#"{"effortLevel":"medium"}"#.into())
+        });
+        assert_eq!(claude_default_effort(&e.app, &host, Some("cc1"), "opus").await.unwrap(), "medium");
+        assert!(calls.lock().unwrap().last().unwrap().contains("'/home/remote-model/.claude-cc1'/settings.json"), "recovery uses the remote identity path: {:?}", calls.lock().unwrap());
     }
 
     /// #268：遠端 settings.json 讀不到（ssh 失敗）不是「沒設定」——以前讀成 `""`，預設 effort 變成內建的 `high`，

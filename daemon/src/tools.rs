@@ -503,7 +503,16 @@ async fn recheck_identity_login_fenced(app: &Arc<App>, host: &str, name: &str, f
         k => login_status_args(k)?.to_vec(),
     };
     let bin = cached_path(app, host, &idn.kind).await.unwrap_or_else(|| idn.kind.clone());
-    let home = fence.conn().home().await.ok().or_else(|| dirs::home_dir().map(|p| p.display().to_string())).unwrap_or_else(|| "/tmp".into());
+    let home = match crate::hosts::home_for_fence(fence).await {
+        Ok(home) => home,
+        Err(e) => {
+            tracing::warn!(host, identity = name, error = %e, "skipping identity login recheck because the host HOME is unreadable");
+            return None;
+        }
+    };
+    if !app.hosts.is_current(fence).await {
+        return None;
+    }
     let mut script = String::new();
     for (k, v) in &idn.env {
         if valid_env_name(k) {
@@ -769,19 +778,16 @@ pub fn parse_identity_probe(out: &str, kinds: &BTreeMap<String, String>) -> BTre
     m
 }
 
-pub(crate) async fn host_home(app: &Arc<App>, host: &str) -> String {
-    if let Some(conn) = app.hosts.get(host).await {
-        if let Ok(h) = conn.home().await {
-            return h;
-        }
-    }
-    dirs::home_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_default()
+pub(crate) async fn host_home(app: &Arc<App>, host: &str) -> Result<String> {
+    let fence = app.hosts.fence(host).await.ok_or_else(|| anyhow::anyhow!("unknown host `{host}`"))?;
+    crate::hosts::home_for_fence(&fence).await
 }
 
 /// Never fails: a missing CLI or failed probe is reported as unknown.
 async fn detect_identities(
     app: &Arc<App>,
     host: &str,
+    fence: &crate::hosts::HostFence,
     tools: &BTreeMap<String, ToolInfo>,
     shell: &[crate::config::IdentityCfg],
 ) -> BTreeMap<String, IdentityInfo> {
@@ -789,7 +795,29 @@ async fn detect_identities(
     // Same precedence as [`identities_for_host`], which is what actually starts the bots. 以前這裡把 config 裡
     // **每一台**的身分都列進來（包括明寫給別台的），用這台的 env 去問登入狀態。
     let all = merge_identities(&cfg.identities, host, Some(shell));
-    let home = host_home(app, host).await;
+    if all.is_empty() {
+        return BTreeMap::new();
+    }
+    let home = match crate::hosts::home_for_fence(fence).await {
+        Ok(home) => home,
+        Err(e) => {
+            let reason = format!("host HOME 讀取失敗：{e}");
+            tracing::warn!(host, error = %e, "identity detection skipped because the host HOME is unreadable");
+            let known = app.tools.lock().await.get(host).map(|t| t.identities.clone()).unwrap_or_default();
+            let mut out: BTreeMap<String, IdentityInfo> = all
+                .iter()
+                .map(|(i, src)| (i.name.clone(), IdentityInfo::unknown(&i.name, &i.kind, src, None)))
+                .collect();
+            for (name, info) in &mut out {
+                carry_over(info, known.get(name));
+                info.reason = Some(reason.clone());
+            }
+            return out;
+        }
+    };
+    if !app.hosts.is_current(fence).await {
+        return BTreeMap::new();
+    }
     let dir_of = |i: &crate::config::IdentityCfg| {
         i.env.get("CLAUDE_CONFIG_DIR").map(|v| crate::config::expand_home(v, &home))
     };
@@ -830,11 +858,8 @@ async fn detect_identities(
     let res = if host == LOCAL_HOST {
         run_local(&script, IDENTITY_PROBE_TIMEOUT).await
     } else {
-        match app.hosts.get(host).await {
-            // The 30 s default is too short for many identities, and a timeout marks *every* one unprobed.
-            Some(conn) => conn.ssh_exec_path_timeout(&script, IDENTITY_PROBE_TIMEOUT).await,
-            None => Err(anyhow::anyhow!("unknown host `{host}`")),
-        }
+        // The 30 s default is too short for many identities, and a timeout marks *every* one unprobed.
+        fence.conn().ssh_exec_path_timeout(&script, IDENTITY_PROBE_TIMEOUT).await
     };
     // 重新偵測會整張表重建：這一輪問不到的，沿用上一輪知道的答案，否則每次重探都會把 claude 身分
     // 打回「未知」，UI 看起來就像帳號自己登出了（2026-09-16 使用者）。
@@ -909,7 +934,7 @@ pub(crate) async fn detect_with_fence(app: &Arc<App>, host: &str, fence: &crate:
     };
     let tools = parse_probe(&out);
     let shell_identities = parse_shell_identities(&out);
-    let identities = detect_identities(app, host, &tools, &shell_identities).await;
+    let identities = detect_identities(app, host, fence, &tools, &shell_identities).await;
     let utc_offset_secs = parse_utc_offset(&out);
     let herdr_cli = parse_herdr_cli(&out);
     let ht = HostTools { tools, identities, shell_identities, utc_offset_secs, herdr_cli, checked_at: crate::db::now() };
@@ -1569,6 +1594,120 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
         assert!(herdr_b.calls_to("pane.close").is_empty(), "B 上同 id 的 pane 不能被關：{:?}", herdr_b.methods());
         assert!(herdr_b.calls_to("pane.process_info").is_empty(), "連看都不該去看 B 的 pane：{:?}", herdr_b.methods());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn recheck_identity_login_skips_remote_probe_when_home_is_unreadable() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let host = format!("identity-home-616-{}", crate::db::ulid().to_ascii_lowercase());
+        let conn = app.hosts.insert_remote_for_test(crate::config::HostCfg {
+            name: host.clone(),
+            ssh: "unused".into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "agents-manager".into(),
+            remote_path: String::new(),
+        }).await;
+        conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);
+        let identity_cfg = crate::config::IdentityCfg {
+            name: "cc1".into(),
+            kind: "claude".into(),
+            host: Some(host.clone()),
+            env: [("CLAUDE_CONFIG_DIR".into(), "~/.claude-cc1".into())].into(),
+            args: vec![],
+        };
+        app.cfg.update(|cfg| { cfg.identities.push(identity_cfg.clone()); Ok(()) }).await.unwrap();
+        let mut previous = IdentityInfo::shell("cc1", "claude", Some("/previous/config".into()));
+        previous.logged_in = Some(true);
+        previous.account = Some("previous@example.test".into());
+        previous.plan = Some("previous plan".into());
+        app.tools.lock().await.insert(host.clone(), HostTools {
+            tools: [("claude".into(), ToolInfo { installed: true, path: Some("/usr/bin/claude".into()), version: None, logged_in: Some(true) })].into(),
+            identities: [("cc1".into(), previous)].into(),
+            shell_identities: vec![],
+            utc_offset_secs: None,
+            herdr_cli: None,
+            checked_at: crate::db::now(),
+        });
+        let calls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let calls2 = calls.clone();
+        crate::hosts::set_ssh_fake(&host, move |script| {
+            calls2.lock().unwrap().push(script.to_string());
+            Err(anyhow::anyhow!("injected remote HOME read failure"))
+        });
+
+        assert_eq!(recheck_identity_login(&app, &host, "cc1").await, None);
+        {
+            let calls = calls.lock().unwrap();
+            assert_eq!(calls.len(), 1, "HOME failure must stop before an auth-status script: {calls:?}");
+            assert!(calls[0].contains("$HOME"), "the only remote call must be the HOME read: {calls:?}");
+        }
+        let tools = app.tools.lock().await;
+        let current = &tools[&host].identities["cc1"];
+        assert_eq!(current.account.as_deref(), Some("previous@example.test"));
+        assert_eq!(current.plan.as_deref(), Some("previous plan"));
+    }
+
+    #[tokio::test]
+    async fn detect_identities_skips_remote_auth_probe_when_home_is_unreadable_and_recovers() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let host = format!("detect-home-616-{}", crate::db::ulid().to_ascii_lowercase());
+        let conn = app.hosts.insert_remote_for_test(crate::config::HostCfg {
+            name: host.clone(),
+            ssh: "unused".into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "agents-manager".into(),
+            remote_path: String::new(),
+        }).await;
+        app.cfg.update(|cfg| {
+            cfg.identities.push(crate::config::IdentityCfg {
+                name: "cx1".into(),
+                kind: "codex".into(),
+                host: Some(host.clone()),
+                env: [("CODEX_HOME".into(), "~/.codex-cx1".into())].into(),
+                args: vec![],
+            });
+            Ok(())
+        }).await.unwrap();
+        let mut previous = IdentityInfo::shell("cx1", "codex", None);
+        previous.logged_in = Some(true);
+        previous.account = Some("previous@example.test".into());
+        previous.plan = Some("previous plan".into());
+        app.tools.lock().await.insert(host.clone(), HostTools {
+            tools: Default::default(),
+            identities: [("cx1".into(), previous)].into(),
+            shell_identities: vec![],
+            utc_offset_secs: None,
+            herdr_cli: None,
+            checked_at: crate::db::now(),
+        });
+        let calls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let calls2 = calls.clone();
+        crate::hosts::set_ssh_fake(&host, move |script| {
+            calls2.lock().unwrap().push(script.to_string());
+            Err(anyhow::anyhow!("injected remote HOME read failure"))
+        });
+        let fence = app.hosts.fence(&host).await.unwrap();
+        let tools = [("codex".into(), ToolInfo { installed: true, path: Some("/usr/bin/codex".into()), version: None, logged_in: Some(true) })].into();
+        let identities = detect_identities(&app, &host, &fence, &tools, &[]).await;
+        assert_eq!(calls.lock().unwrap().len(), 1, "only the HOME read is allowed before recovery");
+        let unknown = &identities["cx1"];
+        assert!(unknown.reason.as_deref().unwrap_or_default().contains("HOME"), "keep an actionable retry reason: {unknown:?}");
+        assert_eq!(unknown.logged_in, Some(true), "a transient HOME failure preserves known login state");
+        assert_eq!(unknown.account.as_deref(), Some("previous@example.test"));
+
+        *conn.remote_home.lock().await = Some("/home/remote-codex".into());
+        let calls2 = calls.clone();
+        crate::hosts::set_ssh_fake(&host, move |script| {
+            calls2.lock().unwrap().push(script.to_string());
+            Ok("AM_IDENT_BEGIN cx1\nLogged in using recovered@example.test\nAM_IDENT_RC cx1 0\nAM_IDENT_END cx1\n".into())
+        });
+        let identities = detect_identities(&app, &host, &fence, &tools, &[]).await;
+        assert_eq!(identities["cx1"].account.as_deref(), Some("recovered@example.test"));
+        assert!(calls.lock().unwrap().last().unwrap().contains("/home/remote-codex/.codex-cx1"), "recovered auth probe expands env against remote HOME");
     }
 }
 
