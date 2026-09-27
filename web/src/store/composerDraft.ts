@@ -2,7 +2,7 @@
  * bot 的輸入框卡著一段沒送出的字（daemon 409 `composer_busy`）時，輸入列旁邊那一條（2026-09-26 w16T:p3）。
  *
  * 以前只跳一句「清掉或送出之後再送一次」的 toast，網頁上卻沒有地方能清掉或送出框裡那段，使用者只能自己去終端。
- * daemon 現在在 409 裡附上框裡的字（`draft`，截過）與這個 kind 驗過的動作（`draft_actions`）；這一條常駐到使用者
+ * daemon 現在在 409 裡附上框裡的字（`draft`，截過）、完整草稿識別碼（`draft_token`）與這個 kind 驗過的動作（`draft_actions`）；這一條常駐到使用者
  * 選了動作或按取消，不會一閃就沒了。
  */
 import { ApiError } from '../api/types.ts'
@@ -10,15 +10,17 @@ import { ApiError } from '../api/types.ts'
 /** daemon 給的動作：`submit`＝對 pane 按 Enter 送出框裡那段；`clear`＝清掉它再送自己這則。 */
 export type DraftAction = 'submit' | 'clear'
 
-/** 帶著這個送 `POST /prompt`：`expect` 是 409 給的 `draft`，框裡換了字 daemon 會回 `draft_changed`、不動它。 */
+/** 帶著這個送 `POST /prompt`：`token` 是 409 給的完整草稿識別碼，框裡換了字 daemon 會回 `draft_changed`、不動它。 */
 export interface DraftRequest {
   action: DraftAction
-  expect: string
+  token: string
 }
 
 export interface ComposerDraftBlock {
   /** 框裡那段（daemon 截過，最多 500 字）。 */
   draft: string
+  /** 完整草稿與 run/pane 的識別碼；不可用顯示用的 `draft` 代替。 */
+  token: string
   truncated: boolean
   actions: DraftAction[]
   /** 正在做哪一個動作（按鈕先鎖住）。 */
@@ -36,7 +38,8 @@ export function draftBlockFrom(e: unknown): ComposerDraftBlock | null {
   if (typeof draft !== 'string' || !draft.trim()) return null
   const raw = Array.isArray(e.body.draft_actions) ? e.body.draft_actions : []
   const actions = ACTIONS.filter((a) => raw.includes(a))
-  return { draft, truncated: e.body.draft_truncated === true, actions }
+  const token = typeof e.body.draft_token === 'string' ? e.body.draft_token : ''
+  return { draft, token, truncated: e.body.draft_truncated === true, actions: token ? actions : [] }
 }
 
 /** 草稿動作失敗時的說明（沒列到的走一般錯誤文字）。 */

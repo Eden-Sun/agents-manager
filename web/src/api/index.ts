@@ -557,7 +557,7 @@ export async function sendPrompt(
   sendNow = false,
   startIfStopped = false,
   /** 409 `composer_busy` 之後：`clear`＝清掉框裡那段再送 `text`；`submit`＝改成送出框裡那段（`text` 不送）。 */
-  draft?: { action: 'submit' | 'clear'; expect: string },
+  draft?: { action: 'submit' | 'clear'; token: string },
 ): Promise<PromptResult> {
   const raw = await transport.request('POST', `/bots/${encodeURIComponent(botId)}/prompt`, {
     ...(draft?.action === 'submit' ? {} : { text }),
@@ -565,7 +565,7 @@ export async function sendPrompt(
     ...(attachments.length ? { attachments } : {}),
     ...(sendNow ? { send_now: true } : {}),
     ...(startIfStopped ? { start_if_stopped: true } : {}),
-    ...(draft ? { [draft.action === 'submit' ? 'submit_draft' : 'clear_draft']: true, expect_draft: draft.expect } : {}),
+    ...(draft ? { [draft.action === 'submit' ? 'submit_draft' : 'clear_draft']: true, expect_draft_token: draft.token } : {}),
   })
   const o = isRec(raw) ? raw : {}
   const delivery = str(pick(o, 'delivery'), 'pending') as PromptResult['delivery']

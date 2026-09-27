@@ -893,7 +893,7 @@ user 文字先照 CLI 自己的拆法還原（`lifecycle::pasted_content`，只�
   清框鍵三種 kind 都是一次 `ctrl+c`：2026-09-26 在隔離的 herdr session（`env -i` + `--session`，daemon 看不到）實測 claude 2.1.281、codex 0.155.1、
   grok 1.0.41 的單行、多行與 claude 的十四列長段，一次就清空（fixtures `*-draft.ansi`／`*-cleared.ansi`）。框本來就空不按（空框的 `ctrl+c` 是
   「再按一次離開」）；有回合在跑不按（`ctrl+c` 會打斷它，插隊送出時回 `draft_clear_while_busy`）。
-兩個動作都要帶 409 給的草稿（`expect_draft`）：框裡換了字就 409 `draft_changed` 帶新的草稿，不送出、不清掉使用者沒看過的字。
+409 給網頁顯示的 `draft` 最多 500 字；動作要回傳同一個 body 裡的 `draft_token`（`expect_draft_token`）。token 是完整正規化草稿的 SHA-256，並綁定當時的 run 與 pane，因此隱藏後綴改變或 token 從另一個 run/pane 搬用都會 409 `draft_changed`，不送出、不清掉使用者沒看過的字。不要把完整長草稿送到網頁只為了做比對。
 只給使用者自己的 prompt，bot 轉送的不收。讀草稿時 grok 框底那一列（`╰── Grok 4.7 (high) · … ─╯`，寫著字）是框的下緣，不算草稿。
 
 **空框的判定依各 provider 的實機畫面**（`screen.rs` 的真 fixture 都有測）：

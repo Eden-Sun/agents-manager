@@ -4,12 +4,14 @@
 //! * **送出框裡那段**（[`submit`]）：對 pane 按 Enter，照一般 prompt 開回合、證明送達——不是把字重打一次。
 //! * **清掉再送我這則**（[`clear`]，`prompt` 帶 `clear_draft`）：清框、重讀畫面確認框是空的，才照一般流程打字。
 //!
-//! 兩件事都先確認框裡**還是使用者看到的那一段**（`expect_draft`＝409 回的 `draft`）：框在這之間換了字（有人在終端打字、
-//! CLI 自己放回一段），送出或清掉的就是使用者沒看過的東西——回 409 `draft_changed` 帶新的草稿，一個鍵都不按。
+//! 兩件事都先確認框裡**還是使用者看到的那一段**（`expect_draft_token`＝409 回的 `draft_token`）：token 綁完整草稿、run
+//! 與 pane；畫面用的 `draft` 仍可截短。框在這之間換了字（有人在終端打字、CLI 自己放回一段），就回 409 `draft_changed`
+//! 帶新的草稿與 token，一個鍵都不按。
 
 use super::*;
+use sha2::{Digest, Sha256};
 
-/// 回給網頁顯示的草稿最多幾個字（`draft_truncated` 說有沒有截）。`expect_draft` 比對的也是截過的這一段。
+/// 回給網頁顯示的草稿最多幾個字（`draft_truncated` 說有沒有截）；動作改比對整段文字的 `draft_token`。
 pub(crate) const DRAFT_SHOWN_CHARS: usize = 500;
 
 /// 清框的鍵按下去之後，等 TUI 重畫多久再重讀。
@@ -49,19 +51,33 @@ pub(crate) fn shown(draft: &str) -> (String, bool) {
     (draft.chars().take(DRAFT_SHOWN_CHARS).collect(), cut)
 }
 
-/// 框裡現在這段是不是使用者確認過的那一段。
-fn same_draft(expect: &str, now: &str) -> bool {
-    shown(now).0 == expect
+/// 把完整、已由 composer parser 正規化的文字和所屬 run/pane 綁成固定長度識別碼。
+fn draft_token(run_id: &str, pane: &str, draft: &str) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"agents-manager:composer-draft:v1\0");
+    for part in [run_id, pane, draft] {
+        hash.update((part.len() as u64).to_be_bytes());
+        hash.update(part.as_bytes());
+    }
+    format!("{:x}", hash.finalize())
 }
 
-/// 409 body 裡描述草稿的欄位。讀不出字（`None`）就不給動作：不知道框裡是什麼，就不替使用者送出或清掉。
-fn draft_fields(kind: &str, draft: Option<&str>) -> Value {
+/// 框裡現在這段是不是使用者確認過的完整草稿。
+fn same_draft(expect_token: &str, run_id: &str, pane: &str, now: &str) -> bool {
+    draft_token(run_id, pane, now) == expect_token
+}
+
+/// 409 body 裡描述草稿的欄位。讀不出字或沒有 pane 時不給動作：無法產生綁定 token，就不替使用者送出或清掉。
+fn draft_fields(kind: &str, run: &db::Run, draft: Option<&str>) -> Value {
     match draft {
         Some(d) => {
             let (text, truncated) = shown(d);
-            json!({"draft": text, "draft_truncated": truncated, "draft_actions": actions(kind)})
+            let token = pane_of(run).map(|pane| draft_token(&run.id, &pane, d));
+            let available = token.is_some();
+            json!({"draft": text, "draft_truncated": truncated, "draft_token": token,
+                "draft_actions": if available { actions(kind) } else { Vec::new() }})
         }
-        None => json!({"draft": null, "draft_truncated": false, "draft_actions": []}),
+        None => json!({"draft": null, "draft_truncated": false, "draft_token": null, "draft_actions": []}),
     }
 }
 
@@ -79,7 +95,7 @@ async fn read_draft(client: &HerdrClient, pane: &str, kind: &str) -> anyhow::Res
 
 fn refusal(reason: &str, run: &db::Run, retryable: bool, kind: &str, draft: Option<&str>) -> LcError {
     let mut extra = json!({"run_id": run.id, "retryable": retryable, "sent": false});
-    if let (Some(o), Some(f)) = (extra.as_object_mut(), draft_fields(kind, draft).as_object()) {
+    if let (Some(o), Some(f)) = (extra.as_object_mut(), draft_fields(kind, run, draft).as_object()) {
         o.extend(f.clone());
     }
     LcError::conflict(reason, extra)
@@ -89,7 +105,7 @@ fn unreadable(run: &db::Run) -> LcError {
     not_attempted_error(&run.id, Delivered::NotAttempted { reason: "composer_unreadable", retry: true })
 }
 
-/// 409 `composer_busy` 補上框裡現在的字（`draft`／`draft_truncated`／`draft_actions`），網頁才有東西給使用者看、可以處理。
+/// 409 `composer_busy` 補上框裡現在的字（`draft`／`draft_truncated`／`draft_token`／`draft_actions`），網頁才有東西給使用者看、可以處理。
 /// 其他錯誤原樣回。擋下之後才讀的：這一刻的畫面，讀不到就是 `draft: null`（沒有動作），409 照回。
 pub(crate) async fn with_draft(client: &HerdrClient, run: &db::Run, bot: &db::Bot, err: LcError) -> LcError {
     let LcError::Conflict(mut body) = err else { return err };
@@ -100,15 +116,15 @@ pub(crate) async fn with_draft(client: &HerdrClient, run: &db::Run, bot: &db::Bo
         Some(pane) => read_draft(client, &pane, &bot.kind).await.ok().and_then(|(_, d)| d),
         None => None,
     };
-    if let (Some(o), Some(f)) = (body.as_object_mut(), draft_fields(&bot.kind, draft.as_deref()).as_object()) {
+    if let (Some(o), Some(f)) = (body.as_object_mut(), draft_fields(&bot.kind, run, draft.as_deref()).as_object()) {
         o.extend(f.clone());
     }
     LcError::Conflict(body)
 }
 
-/// 清掉框裡使用者確認過的那段（`expect`），**重讀畫面確認框是空的**才回 `Ok`；清不掉就回錯，呼叫端一個字都不打。
+/// 清掉框裡使用者確認過的那段（`expect_token`），**重讀畫面確認框是空的**才回 `Ok`；清不掉就回錯，呼叫端一個字都不打。
 /// 框本來就空了＝沒有東西要清。`busy`＝有回合在跑（插隊送出）：`ctrl+c` 會打斷它，不按。
-pub(crate) async fn clear(client: &HerdrClient, run: &db::Run, bot: &db::Bot, expect: &str, busy: bool) -> LcResult<()> {
+pub(crate) async fn clear(client: &HerdrClient, run: &db::Run, bot: &db::Bot, expect_token: &str, busy: bool) -> LcResult<()> {
     let Some(keys) = clear_keys(&bot.kind) else {
         return Err(refusal("draft_clear_unsupported", run, false, &bot.kind, None));
     };
@@ -122,7 +138,7 @@ pub(crate) async fn clear(client: &HerdrClient, run: &db::Run, bot: &db::Bot, ex
         BoxState::Unready => return Err(unreadable(run)),
         BoxState::NonEmpty => {}
     }
-    if !now.as_deref().is_some_and(|d| same_draft(expect, d)) {
+    if !now.as_deref().is_some_and(|d| same_draft(expect_token, &run.id, &pane, d)) {
         return Err(refusal("draft_changed", run, true, &bot.kind, now.as_deref()));
     }
     if let Err(e) = client.pane_send_keys(&pane, keys).await {
@@ -250,7 +266,7 @@ async fn record_exact_text(app: &Arc<App>, turn_id: &str, msg_id: &str, text: &s
 
 /// `POST /bots/{id}/prompt` 帶 `submit_draft`：送出框裡那段。跟一般 prompt 同一套前提（冪等、維護窗口、回合在飛、
 /// 接回未驗證、畫面上開著的選單、unknown 回合）；差別只在不打字、改按 Enter，訊息內容是框裡那段。
-pub async fn submit(app: &Arc<App>, bot_id: &str, expect: &str, client_request_id: &str) -> LcResult<PromptOut> {
+pub async fn submit(app: &Arc<App>, bot_id: &str, expect_token: &str, client_request_id: &str) -> LcResult<PromptOut> {
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
     if let Err(e) = super::interruption::settle_locked(app, bot_id, super::interruption::Evidence::Nothing).await {
@@ -262,8 +278,8 @@ pub async fn submit(app: &Arc<App>, bot_id: &str, expect: &str, client_request_i
     if client_request_id.trim().is_empty() {
         return Err(LcError::Bad("client_request_id must not be empty".into()));
     }
-    if expect.trim().is_empty() {
-        return Err(LcError::Bad("submit_draft needs the expect_draft the 409 showed".into()));
+    if expect_token.trim().is_empty() {
+        return Err(LcError::Bad("submit_draft needs the expect_draft_token the 409 showed".into()));
     }
     let bot = db::bot(&app.db, bot_id).await.map_err(up)?.filter(|b| b.deleted_at.is_none()).ok_or_else(|| LcError::NotFound("bot".into()))?;
     let conv = db::conversation_id(&app.db, bot_id).await.map_err(up)?;
@@ -316,7 +332,7 @@ pub async fn submit(app: &Arc<App>, bot_id: &str, expect: &str, client_request_i
         BoxState::Unready => return Err(unreadable(&run)),
         BoxState::NonEmpty => {}
     }
-    let Some(draft) = now.filter(|d| same_draft(expect, d)) else {
+    let Some(draft) = now.filter(|d| same_draft(expect_token, &run.id, &pane, d)) else {
         let fresh = read_draft(&client, &pane, &bot.kind).await.ok().and_then(|(_, d)| d);
         return Err(refusal("draft_changed", &run, true, &bot.kind, fresh.as_deref()));
     };

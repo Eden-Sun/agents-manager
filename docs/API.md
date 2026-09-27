@@ -380,19 +380,19 @@ prompt 改成打字進 pane 並以無損證據確認。**一個字都沒打時�
 | 409 | `{"reason":"resume_unverified","run_id","session_id","retry_after_s"}` | 這個 run 是 `--resume` 接回來的 claude，還沒收到它回報 session（SessionStart hook），不知道接回的是不是原本那段對話（issue #92，SPEC §6.5.2 第 4 點）。連 turn 都不建；回報一到、或等滿 120 秒（刻意放行並在對話插說明）就恢復，同一個 `client_request_id` 原樣重送即可。等的時間可能更長：pane 停在要人回答的提示（信任目錄）那段不算，按掉之後還會再給 60 秒讓遠端的回報走完一輪 spool 掃描——照 `retry_after_s` 再問就好。AGM 派工不回這個 409——排進佇列等驗證。 |
 
 **輸入框卡著草稿（2026-09-26，SPEC §4.4a「框裡卡著草稿」）**：409 `composer_busy` 另外帶
-`"draft"`（框裡現在的字，最多 500 字；讀不出來是 `null`）、`"draft_truncated"`、`"draft_actions"`（這個 kind 驗過的動作，
-`["submit","clear"]`；`draft` 是 `null` 時是空陣列）。網頁拿它顯示框裡那段，並用同一個端點處理：
+`"draft"`（框裡現在的字，最多 500 字；讀不出來是 `null`）、`"draft_truncated"`、`"draft_token"` 與 `"draft_actions"`（這個 kind 驗過的動作，
+`["submit","clear"]`；`draft` 或 token 是 `null` 時是空陣列）。`draft_token` 是 daemon 對**完整正規化草稿、run 和 pane**產生的 SHA-256 識別碼；長草稿仍只把前 500 字送到網頁顯示。網頁拿 `draft` 顯示框裡那段，並用同一個端點處理：
 
 | body | 做什麼 |
 |---|---|
-| `{"submit_draft":true,"expect_draft","client_request_id"}` | **送出框裡那段**：對 pane 按 Enter（不重打字），照一般 prompt 開回合、證明送達；`text` 不用帶，user 訊息的內容是框裡那段（有 session log 證據時換成 log 裡那一則的原文）。回應同一般 prompt（`delivery` 為 `ok`／`unverified`／`unknown`）。不收 `attachments`／`send_now`／`start_if_stopped`／`clear_draft`（400）。 |
-| `{"text","clear_draft":true,"expect_draft","client_request_id",…}` | **清掉再送我這則**：先按清框鍵、重讀畫面確認框是空的，才照一般流程打 `text`。框本來就空了就不按鍵、直接送。 |
+| `{"submit_draft":true,"expect_draft_token","client_request_id"}` | **送出框裡那段**：對 pane 按 Enter（不重打字），照一般 prompt 開回合、證明送達；`text` 不用帶，user 訊息的內容是框裡那段（有 session log 證據時換成 log 裡那一則的原文）。回應同一般 prompt（`delivery` 為 `ok`／`unverified`／`unknown`）。不收 `attachments`／`send_now`／`start_if_stopped`／`clear_draft`（400）。 |
+| `{"text","clear_draft":true,"expect_draft_token","client_request_id",…}` | **清掉再送我這則**：先按清框鍵、重讀畫面確認框是空的，才照一般流程打 `text`。框本來就空了就不按鍵、直接送。 |
 
-兩者都要帶 `expect_draft`＝409 給的 `draft`（沒帶是 400）；bot 轉送的（`relay_from`）不收（400）。一個字都沒送時的 409：
+兩者都要帶 `expect_draft_token`＝409 給的 `draft_token`（沒帶是 400）；顯示用的 `draft` 不能當授權值，token 會比對完整草稿且綁定原 run/pane；bot 轉送的（`relay_from`）不收（400）。一個字都沒送時的 409：
 
 | reason | 意思 |
 |---|---|
-| `draft_changed` | 框裡的字跟 `expect_draft` 不一樣了（有人在終端打字、CLI 放回另一段）：一個鍵都沒按；body 帶新的 `draft`／`draft_actions`，`retryable:true`。 |
+| `draft_changed` | 框裡的完整草稿或 run/pane 跟 token 不一致（有人在終端打字、CLI 放回另一段）：一個鍵都沒按；body 帶新的 `draft`／`draft_token`／`draft_actions`，`retryable:true`。 |
 | `draft_uncleared` | 清框鍵按了、重讀框裡還有字（或 herdr 沒收下那顆鍵）：`text` 沒打；body 帶剩下的 `draft`，`retryable:false`。 |
 | `draft_gone` | `submit_draft` 時框已經空了，沒有東西可以送；`retryable:false`。 |
 | `draft_clear_while_busy` | 插隊送出（`send_now`）時有回合在跑：清框鍵會打斷它，不按。 |
