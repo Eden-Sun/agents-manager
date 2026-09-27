@@ -55,6 +55,64 @@ am_bot_token() {
     if [ -n "${AM_BOT_TOKEN:-}" ]; then printf '%s' "$AM_BOT_TOKEN"; else printf '%s' "${AM_HOOK_TOKEN:-}"; fi
 }
 
+# A bot pane must reserve its inherited proof before asking herdr to create a pane or child agent.
+# Rotation raises the matching daemon fence before its descendant snapshot; an unreadable / refused
+# gate means we do not run herdr. The permit remains open until the created pane is registered.
+am_spawn_begin() {
+    _AM_SPAWN_PERMIT=""
+    [ -n "${AM_BOT_ID:-}" ] || return 0
+    _tok=$(am_bot_token)
+    if [ -z "$_tok" ] || [ -z "${AM_PORT:-}" ] || ! command -v curl >/dev/null 2>&1; then
+        printf 'agents-manager: 無法確認憑證輪替狀態，拒絕建立會繼承 bot credential 的 pane\n' >&2
+        return 75
+    fi
+    _out=$(curl -s -m 2 -w '\n%{http_code}' -X POST "http://127.0.0.1:${AM_PORT}/relay/spawn/begin" \
+        -H "X-AM-Bot-Token: $_tok" \
+        --data-urlencode "bot_id=${AM_BOT_ID}" 2>/dev/null)
+    _rc=$?
+    _code=$(printf '%s\n' "$_out" | tail -n 1)
+    _body=$(printf '%s\n' "$_out" | sed '$d')
+    if [ "$_rc" -ne 0 ] || [ "$_code" != 200 ]; then
+        printf 'agents-manager: credential rotation 或 daemon 暫時不可確認，沒有建立子 pane；請稍後重試\n' >&2
+        return 75
+    fi
+    _AM_SPAWN_PERMIT=$(printf '%s\n' "$_body" | sed -n 's/.*"permit_id" *: *"\([^"]*\)".*/\1/p' | head -n 1)
+    if [ -z "$_AM_SPAWN_PERMIT" ]; then
+        printf 'agents-manager: daemon 沒有回 spawn permit，拒絕建立子 pane\n' >&2
+        return 75
+    fi
+    return 0
+}
+
+am_spawn_finish() {
+    _pane=$1
+    _purpose=$2
+    [ -n "${AM_BOT_ID:-}" ] || return 0
+    [ -n "${_AM_SPAWN_PERMIT:-}" ] || return 75
+    if [ -z "$_pane" ]; then
+        printf 'agents-manager: herdr 沒回新 pane id；保留 spawn fence，拒絕假裝已登記\n' >&2
+        return 75
+    fi
+    _tok=$(am_bot_token)
+    if [ -z "$_tok" ] || [ -z "${AM_PORT:-}" ] || ! command -v curl >/dev/null 2>&1; then
+        printf 'agents-manager: 無法登記憑證繼承 pane；保留 spawn fence\n' >&2
+        return 75
+    fi
+    _out=$(curl -s -m 2 -w '\n%{http_code}' -X POST "http://127.0.0.1:${AM_PORT}/relay/spawn/finish" \
+        -H "X-AM-Bot-Token: $_tok" \
+        --data-urlencode "bot_id=${AM_BOT_ID}" \
+        --data-urlencode "permit_id=${_AM_SPAWN_PERMIT}" \
+        --data-urlencode "pane_id=${_pane}" \
+        --data-urlencode "purpose=${_purpose}" 2>/dev/null)
+    _rc=$?
+    _code=$(printf '%s\n' "$_out" | tail -n 1)
+    if [ "$_rc" -ne 0 ] || [ "$_code" != 200 ]; then
+        printf 'agents-manager: 新 pane 尚未登記，保留 spawn fence 以免憑證失效；請回報 daemon 狀態\n' >&2
+        return 75
+    fi
+    return 0
+}
+
 # `<name>` → `<AM_AGENT_NAME>-<name>`, unless it already carries the prefix. herdr agent names
 # are `[a-z][a-z0-9_-]{0,31}`, so the result is cut to 32.
 am_child_name() {
@@ -156,8 +214,22 @@ am_agent_start() {
         fi
         printf 'agents-manager: 子 agent 沒指定模型，沿用母 bot 的 `%s`\n' "$AM_MODEL" >&2
     fi
+    [ -n "$_pane" ] || _pane=${HERDR_PANE_ID:-}
+    if [ -n "${AM_BOT_ID:-}" ] && [ -z "$_pane" ]; then
+        printf 'agents-manager: 找不到 agent start 的目標 pane，拒絕在憑證狀態未知時啟動 child\n' >&2
+        exit 75
+    fi
+    am_spawn_begin || exit $?
     am_reexport_env_before_start "$_pane"
-    exec "$AM_HERDR" agent start "$@"
+    if [ -z "${AM_BOT_ID:-}" ]; then
+        exec "$AM_HERDR" agent start "$@"
+    fi
+    _out=$("$AM_HERDR" agent start "$@")
+    _rc=$?
+    [ -z "$_out" ] || printf '%s\n' "$_out"
+    [ "$_rc" -eq 0 ] || exit "$_rc"
+    am_spawn_finish "$_pane" "" || exit $?
+    exit 0
 }
 
 # issue #57：`agent start` 沒有 `--env`，全靠假設「目標 pane 是 pane split 剛開的、帳號早就注入了」——
@@ -433,6 +505,18 @@ am_forward_with_env() {
         esac
         set -- "$@" --env "$_k=$_v"
     done
+    # Every managed pane creation is fenced, even without a display purpose: an empty pane still
+    # retains AM_BOT_ID / AM_BOT_TOKEN and can start a child after the parent restarts.
+    if [ -n "${AM_BOT_ID:-}" ]; then
+        am_spawn_begin || exit $?
+        _out=$("$AM_HERDR" "$_sub1" "$_sub2" "$@")
+        _rc=$?
+        [ -z "$_out" ] || printf '%s\n' "$_out"
+        [ "$_rc" -eq 0 ] || exit "$_rc"
+        _pane=$(printf '%s' "$_out" | tr ',' '\n' | sed -n 's/.*"pane_id" *: *"\([^"]*\)".*/\1/p' | head -n 1)
+        am_spawn_finish "$_pane" "$_purpose" || exit $?
+        exit 0
+    fi
     # §6.5e：開出來的 pane 要能說出「這是誰、為了什麼開的」。歸屬由 daemon 從行程環境推斷（AM_BOT_ID
     # 一定帶得下去），這裡只補**用途**：`--purpose <文字>` 是我們自己的旗標，轉發前剝掉。
     # 沒有 curl／沒有 token 就只是少一個字串，pane 照開。
@@ -561,6 +645,14 @@ mod tests {
                    exit 0\n\
                  fi\n\
                  for a in \"$@\"; do printf '%s\\n' \"$a\"; done\n",
+            );
+            write_script(
+                &fake.join("curl"),
+                "case \"$*\" in\n\
+                   */relay/spawn/begin*) printf '{\"permit_id\":\"test-permit\"}\\n200'; exit 0 ;;\n\
+                   */relay/spawn/finish*) printf '{\"registered\":true}\\n200'; exit 0 ;;\n\
+                   *) exit 7 ;;\n\
+                 esac\n",
             );
             Sandbox { dir }
         }
@@ -696,7 +788,17 @@ mod tests {
         let s = Sandbox::new();
         let fake_curl = s.dir.join("real").join("curl");
         let log = s.dir.join("curl.log");
-        write_script(&fake_curl, &format!("printf '%s\\n' \"$@\" >> '{}'\n", log.display()));
+        write_script(
+            &fake_curl,
+            &format!(
+                "printf '%s\\n' \"$@\" >> '{}'\n\
+                 case \"$*\" in\n\
+                   */relay/spawn/begin*) printf '{{\"permit_id\":\"test-permit\"}}\\n200'; exit 0 ;;\n\
+                   */relay/spawn/finish*) printf '{{\"registered\":true}}\\n200'; exit 0 ;;\n\
+                 esac\n",
+                log.display()
+            ),
+        );
         let created = r#"{"id":"cli:tab:create","result":{"root_pane":{"agent":null,"pane_id": "w5:p9","tab_id":"w5:t4","workspace_id":"w5"},"tab":{"label":"sh","tab_id":"w5:t4","workspace_id":"w5"},"type":"tab_created"}}"#;
         let env = [("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_PORT", "1"), ("AM_TEST_CREATE_JSON", created)];
         let (out, _) = s.run(&env, &["tab", "create", "--workspace", "w5", "--purpose", "dev-server"]);
@@ -704,6 +806,23 @@ mod tests {
         let sent = std::fs::read_to_string(&log).unwrap();
         assert!(sent.lines().any(|l| l == "pane_id=w5:p9"), "{sent}");
         assert!(sent.lines().any(|l| l == "purpose=dev-server"), "{sent}");
+    }
+
+    #[test]
+    fn a_refused_spawn_gate_never_invokes_herdr() {
+        let s = Sandbox::new();
+        s.install_fake_curl("printf '{\"reason\":\"credential_rotation_pending\"}\\n409");
+        let created = r#"{"id":"pane.created","result":{"pane":{"pane_id":"w1:p-child"}}}"#;
+        let env = [
+            ("AM_BOT_ID", "b1"),
+            ("AM_HOOK_TOKEN", "tok"),
+            ("AM_PORT", "7788"),
+            ("AM_TEST_CREATE_JSON", created),
+        ];
+        let (out, err, rc) = s.run_full(&env, &["pane", "split", "--pane", "w1:p-parent"]);
+        assert!(out.is_empty(), "herdr must not run when the gate refuses: {out:?} {err}");
+        assert_eq!(rc, 75, "a closed gate is an explicit retryable refusal: {err}");
+        assert!(err.contains("沒有建立子 pane"), "{err}");
     }
 
     /// §6.5f：子 pane 寫的檔案也要落在母 bot 的 outbox，使用者才在同一個地方看得到。
@@ -1009,6 +1128,7 @@ mod tests {
     #[test]
     fn a_managed_bot_without_curl_does_not_type_into_the_pane() {
         let s = Sandbox::new();
+        std::fs::remove_file(s.dir.join("real/curl")).unwrap();
         let tools = s.dir.join("tools");
         std::fs::create_dir_all(&tools).unwrap();
         for t in ["tr", "sed", "cut", "dirname", "head", "tail", "cat", "env", "sh"] {
@@ -1102,6 +1222,9 @@ mod tests {
         });
 
         let s = Sandbox::new();
+        // This test exercises a real TCP proxy; use the machine's curl, not the sandbox fake
+        // that answers only the spawn-permit endpoints.
+        std::fs::remove_file(s.dir.join("real/curl")).unwrap();
         let port = proxy_port.to_string();
         let text = "請核准重建 relay-143-lost-reply";
         let run = |s: Sandbox, port: String| {
@@ -1355,7 +1478,7 @@ mod tests {
         let quoted = s.dir.join("q'dir");
         std::fs::create_dir_all(&quoted).unwrap();
         std::fs::remove_file(&log).unwrap();
-        let env = [("AM_AGENT_NAME", "p-1"), ("AM_BOT_ID", "b1"), ("AM_TEST_SENDTEXT_LOG", log.to_str().unwrap()), ("TMPDIR", quoted.to_str().unwrap())];
+        let env = [("AM_AGENT_NAME", "p-1"), ("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_PORT", "7788"), ("AM_TEST_SENDTEXT_LOG", log.to_str().unwrap()), ("TMPDIR", quoted.to_str().unwrap())];
         s.run(&env, &["agent", "start", "kid", "--kind", "claude", "--pane", "w1:p9"]);
         let (_, sent) = s.sent_text();
         assert!(sent.starts_with(" . '") && sent.contains(r"q'\''dir"), "{sent}");
@@ -1372,6 +1495,8 @@ mod tests {
             ("PATH", fat.as_str()),
             ("AM_AGENT_NAME", "p-1"),
             ("AM_BOT_ID", "b1"),
+            ("AM_HOOK_TOKEN", "tok"),
+            ("AM_PORT", "7788"),
             ("CODEX_HOME", "/home/u/.codex"),
             ("CLAUDE_CONFIG_DIR", "/home/u/.claude-cc2"),
             ("AM_TEST_SENDTEXT_LOG", log.to_str().unwrap()),
@@ -1396,7 +1521,7 @@ mod tests {
             let log = s.dir.join("sendtext.log");
             let dir = s.dir.join(bad);
             std::fs::create_dir_all(&dir).unwrap();
-            let env = [("AM_AGENT_NAME", "p-1"), ("AM_BOT_ID", "b1"), ("AM_TEST_SENDTEXT_LOG", log.to_str().unwrap()), ("TMPDIR", dir.to_str().unwrap())];
+            let env = [("AM_AGENT_NAME", "p-1"), ("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_PORT", "7788"), ("AM_TEST_SENDTEXT_LOG", log.to_str().unwrap()), ("TMPDIR", dir.to_str().unwrap())];
             s.run(&env, &["agent", "start", "kid", "--kind", "claude", "--pane", "w1:p9"]);
             let (_, text) = s.sent_text();
             assert!(text.starts_with(" . '/tmp/am-env."), "{bad}：{text}");
@@ -1410,7 +1535,7 @@ mod tests {
     fn an_unwritable_env_file_falls_back_to_inline_exports() {
         let s = Sandbox::new();
         let log = s.dir.join("sendtext.log");
-        let env = [("AM_AGENT_NAME", "p-1"), ("AM_BOT_ID", "b1"), ("AM_TEST_SENDTEXT_LOG", log.to_str().unwrap()), ("TMPDIR", "/nonexistent-am-dir")];
+        let env = [("AM_AGENT_NAME", "p-1"), ("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_PORT", "7788"), ("AM_TEST_SENDTEXT_LOG", log.to_str().unwrap()), ("TMPDIR", "/nonexistent-am-dir")];
         s.run(&env, &["agent", "start", "kid", "--kind", "claude", "--pane", "w1:p9"]);
         let text = s.sent_text().1;
         assert!(text.contains("export AM_BOT_ID='b1'; "), "{text}");
