@@ -321,6 +321,13 @@ struct Parent {
     bot: db::Bot,
 }
 
+struct ParentReplacementEvidence<'a> {
+    agents: &'a [crate::herdr::AgentInfo],
+    by_name: &'a HashMap<String, &'a crate::herdr::AgentInfo>,
+    hints: &'a HashMap<String, String>,
+    claimed: &'a std::collections::HashSet<String>,
+}
+
 /// Length of `parent` as a `<parent>-<suffix>` prefix of `name`; 0 when it is not.
 fn prefix_score(parent: &str, name: &str) -> usize {
     if name.len() > parent.len() + 1 && name.starts_with(parent) && name.as_bytes()[parent.len()] == b'-' {
@@ -445,6 +452,74 @@ async fn may_retire_child(app: &Arc<App>, host: &str, bot: &db::Bot) -> bool {
     }
 }
 
+/// A missing child is a deliberate replacement only when its parent still has a live run and
+/// herdr lists an unclaimed successor that the normal child-adoption pass will attribute to it.
+/// A hint naming a different parent is authoritative and blocks the weaker tab/name fallbacks.
+async fn parent_replaced_child(
+    app: &Arc<App>,
+    host: &str,
+    session: &str,
+    client: &crate::herdr::HerdrClient,
+    child: &db::Bot,
+    evidence: ParentReplacementEvidence<'_>,
+) -> Result<bool> {
+    let ParentReplacementEvidence { agents, by_name, hints, claimed } = evidence;
+    let Some(parent_id) = child.parent_bot_id.as_deref() else { return Ok(false) };
+    let child_run: Option<db::Run> =
+        sqlx::query_as("SELECT * FROM runs WHERE bot_id = ? ORDER BY rowid DESC LIMIT 1").bind(&child.id).fetch_optional(&app.db).await?;
+    let Some(child_pane) = child_run.and_then(|run| run.pane_id) else { return Ok(false) };
+    // A listed successor alone does not prove a replacement if the old child's pane is still live.
+    // When Herdr cannot confirm the old pane is gone, keep the retirement unconfirmed.
+    match client.pane_get(&child_pane).await {
+        Ok(None) => {}
+        Ok(Some(_)) | Err(_) => return Ok(false),
+    }
+    let parent: Option<db::Bot> = sqlx::query_as(
+        "SELECT b.* FROM bots b JOIN projects p ON p.id = b.project_id
+         WHERE b.id = ? AND b.deleted_at IS NULL AND p.deleted_at IS NULL AND p.host = ?",
+    )
+    .bind(parent_id)
+    .bind(host)
+    .fetch_optional(&app.db)
+    .await?;
+    let Some(parent) = parent else { return Ok(false) };
+    if parent.herdr_session.as_deref().is_some_and(|s| s != session) {
+        return Ok(false);
+    }
+    let Some(run) = db::active_run(&app.db, &parent.id).await? else { return Ok(false) };
+    if run.herdr_session.as_deref().is_some_and(|s| s != session) {
+        return Ok(false);
+    }
+
+    let mut parent_agent_name = run.agent_name.filter(|name| !name.is_empty() && by_name.contains_key(name));
+    if parent_agent_name.is_none() && parent.managed_by != "child" {
+        let computed = db::agent_name_for_bot(&app.db, &parent).await?;
+        if by_name.contains_key(&computed) {
+            parent_agent_name = Some(computed);
+        }
+    }
+    let Some(parent_agent_name) = parent_agent_name else { return Ok(false) };
+    let Some(parent_agent) = by_name.get(&parent_agent_name) else { return Ok(false) };
+
+    for agent in agents {
+        let Some(name) = agent.name.as_deref() else { continue };
+        if claimed.contains(name) || name == parent_agent_name || agent.pane_id == parent_agent.pane_id {
+            continue;
+        }
+        let hint = hints.get(&agent.pane_id);
+        let belongs_to_parent = match hint {
+            Some(owner) => owner == &parent.id,
+            None => {
+                agent.tab_id == parent_agent.tab_id || prefix_score(&parent_agent_name, name) > 0
+            }
+        };
+        if belongs_to_parent {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// 延後的那一輪多久之後補跑。
 const DEFERRED_PASS_DELAY: std::time::Duration =
     if cfg!(test) { std::time::Duration::from_millis(50) } else { std::time::Duration::from_secs(15) };
@@ -554,6 +629,11 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<()> {
     }
 
     let bots = db::live_bots_on_host(&app.db, host).await?;
+    // Read hints before retiring missing children: a fresh hint is the direct evidence that the
+    // still-running parent launched the pane which this same pass will adopt as its successor.
+    // Keep read failure distinct from an empty result; adoption is already fail-closed below.
+    crate::spawn_hints::prune_stale(app).await;
+    let spawn_hints = crate::spawn_hints::for_host(app, host).await;
     // Unclaimed agent names are strangers, candidates for someone's child (below).
     let mut claimed: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut parents: Vec<Parent> = Vec::new();
@@ -765,7 +845,25 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<()> {
                     tracing::warn!(host, bot = %bot.name, run = %run.id, "reconcile: the run's exit was not recorded; bot left as is, will look again");
                     schedule_deferred_pass(app, host);
                 } else if bot.managed_by == "child" && may_retire_child(app, host, &bot).await {
-                    retire_child(app, host, &bot, "reconcile_agent_gone").await?;
+                    let why = if let Ok(hints) = &spawn_hints {
+                        if parent_replaced_child(
+                            app,
+                            host,
+                            &session,
+                            &client,
+                            &bot,
+                            ParentReplacementEvidence { agents: &agents, by_name: &by_name, hints, claimed: &claimed },
+                        )
+                        .await?
+                        {
+                            "parent_replaced_child"
+                        } else {
+                            "reconcile_agent_gone"
+                        }
+                    } else {
+                        "reconcile_agent_gone"
+                    };
+                    retire_child(app, host, &bot, why).await?;
                 }
             }
             (None, Some(agent)) => {
@@ -816,7 +914,25 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<()> {
                     .fetch_one(&app.db)
                     .await?;
                     if ended > 0 {
-                        retire_child(app, host, &bot, "reconcile_run_already_ended").await?;
+                        let why = if let Ok(hints) = &spawn_hints {
+                            if parent_replaced_child(
+                                app,
+                                host,
+                                &session,
+                                &client,
+                                &bot,
+                                ParentReplacementEvidence { agents: &agents, by_name: &by_name, hints, claimed: &claimed },
+                            )
+                            .await?
+                            {
+                                "parent_replaced_child"
+                            } else {
+                                "reconcile_run_already_ended"
+                            }
+                        } else {
+                            "reconcile_run_already_ended"
+                        };
+                        retire_child(app, host, &bot, why).await?;
                     }
                 }
             }
@@ -838,9 +954,8 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<()> {
     //
     // 讀不到 hint 不等於沒有 hint（#94 重開）：hint 可能好好地在表裡，只是這一輪 SELECT 失敗；這時退回同 tab／前綴推斷，
     // 正好把新 tab 裡的一排子代理串回鏈、掛錯 parent。所以這一輪一顆都不認領，排一輪晚一點的補跑；`Ok(空)` 才是真的沒有。
-    crate::spawn_hints::prune_stale(app).await;
     let (hints, strangers): (HashMap<String, String>, &[crate::herdr::AgentInfo]) =
-        match crate::spawn_hints::for_host(app, host).await {
+        match spawn_hints {
             Ok(h) => (h, agents.as_slice()),
             Err(e) => {
                 if agents.iter().any(|a| a.name.as_deref().is_some_and(|n| !claimed.contains(n))) {
@@ -2435,6 +2550,67 @@ mod compat_tests {
         assert_eq!(p["pane"], "gone", "{p}");
         assert_eq!(p["last_run"]["exit_reason"], "agent not found during reconcile", "{p}");
         assert_eq!(p["cause"], "unconfirmed", "{p}");
+    }
+
+    #[tokio::test]
+    async fn a_parent_replacing_a_missing_child_is_recorded_as_deliberate() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, _root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let parent_pane = client.tab_create(&ws.workspace_id, "/tmp/p", "parent", json!({})).await.unwrap();
+        let old_pane = client.tab_create(&ws.workspace_id, "/tmp/p", "old-child", json!({})).await.unwrap();
+        let successor_pane = client.tab_create(&ws.workspace_id, "/tmp/p", "successor", json!({})).await.unwrap();
+        let parent = a_bot(&env, "alfa").await;
+        let parent_agent = crate::config::agent_name("proj", &parent);
+        let parent_run = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, tab_id, pane_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','working',?,?,?,?,'test',?)",
+        )
+        .bind(&parent_run)
+        .bind(&parent)
+        .bind(&ws.workspace_id)
+        .bind(&parent_pane.tab_id)
+        .bind(&parent_pane.pane_id)
+        .bind(&parent_agent)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let old_agent = format!("{parent_agent}-codex");
+        let (old_child, _) = a_child(&env, &parent, "old-codex", &old_agent, &ws.workspace_id, &old_pane.tab_id, &old_pane.pane_id).await;
+        let successor_agent = format!("{parent_agent}-opus");
+        crate::spawn_hints::record(&app, &parent, &successor_pane.pane_id).await.unwrap();
+        client.pane_close(&old_pane.pane_id).await.unwrap();
+        *env.herdr.agents.lock().unwrap() = vec![
+            json!({
+                "name": parent_agent, "agent": "claude", "agent_status": "working",
+                "workspace_id": ws.workspace_id, "tab_id": parent_pane.tab_id, "pane_id": parent_pane.pane_id,
+                "cwd": "/tmp/p"
+            }),
+            json!({
+                "name": successor_agent, "agent": "claude", "agent_status": "working",
+                "workspace_id": ws.workspace_id, "tab_id": successor_pane.tab_id, "pane_id": successor_pane.pane_id,
+                "cwd": "/tmp/p"
+            }),
+        ];
+
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+
+        assert!(retired(&app, &old_child).await);
+        let (status, p) = retire_record(&app, &old_child).await.expect("replacement retirement is recorded");
+        assert_eq!(status, "done");
+        assert_eq!(p["why"], "parent_replaced_child", "{p}");
+        assert_eq!(p["cause"], "parent_replaced_child", "{p}");
+        assert_eq!(p["parent_bot_id"], parent.as_str(), "{p}");
+        let adopted: Option<(String, String)> = sqlx::query_as(
+            "SELECT name, parent_bot_id FROM bots WHERE managed_by='child' AND deleted_at IS NULL AND name='opus'",
+        )
+        .fetch_optional(&app.db)
+        .await
+        .unwrap();
+        assert_eq!(adopted, Some(("opus".into(), parent)), "the successor is adopted under the still-live parent");
     }
 
     /// 計畫中的 herdr 重啟（§6.5.2）：維護中兩條退休路徑都不刪子 agent；run 照樣結束。

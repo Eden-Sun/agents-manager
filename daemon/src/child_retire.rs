@@ -105,7 +105,7 @@ impl Pane {
 /// `pane_not_found`（`pane gone`）都不在這裡：那兩種只知道「現在不在」，不知道是誰、什麼時候關的。
 const OBSERVED_CLOSE: &[&str] = &["pane exited", "workspace closed"];
 
-/// 這次退役算不算**刻意**收掉（#554）。換版腳本只放過 `pane_closed` 與 `promoted`，其餘照樣回滾。
+/// 這次退役算不算**刻意**收掉（#554）。換版腳本放過 `pane_closed`、`promoted`，以及有活著的父 bot 和本輪後繼 child 證據的 `parent_replaced_child`；其餘照樣回滾。
 ///
 /// 為什麼要分：`reconcile_agent_gone`／`reconcile_run_already_ended` 同時可能是「父 bot `herdr pane close` 收掉 child」
 /// 和「換版造成 child 不見」。`daemon-swap.sh` 只重啟 daemon、herdr 不動，所以換版本身關不掉任何 pane；
@@ -117,10 +117,12 @@ const OBSERVED_CLOSE: &[&str] = &["pane exited", "workspace closed"];
 ///    不寫原因；停止／刪除會讓事件寫下 `pane exited`，但那本來就是有人明講的動作。
 /// 2. 退役當下 herdr 也說那個 pane 不在（[`Pane::Gone`]）。
 ///
-/// 父 bot 在 daemon 停著的那幾秒關掉 pane：沒有人收到事件，只會是 `unconfirmed`——寧可多回滾一次，也不要放過弄丟的。
+/// 父 bot 在 daemon 停著的那幾秒關掉 pane、又沒有可確認的後繼時，仍是 `unconfirmed`——寧可多回滾一次，也不要放過弄丟的。
 pub(crate) fn cause(why: &str, exit_reason: Option<&str>, pane: Pane) -> &'static str {
     match why {
         "promoted" | "promote_recovered" => "promoted",
+        // Reconcile saw the live parent and the unclaimed successor it launched in this pass.
+        "parent_replaced_child" => "parent_replaced_child",
         // herdr 計畫中重啟之後沒回來的：是 herdr 重啟造成的，不是有人收掉的。
         "herdr_maintenance_closed" => "herdr_restarted",
         _ => match pane {
