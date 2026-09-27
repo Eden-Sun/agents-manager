@@ -271,7 +271,7 @@ config.toml 裡沒有的 id（child、已刪）忽略。成功推 `project_chang
 ### 4.2 強制中止 `POST /api/bots/{id}/abort`
 `interrupt` 在 `esc` 送不出去時整個失敗、輸入框鎖死；`abort` **先保證解鎖**：
 - `esc` 盡力送一次，結果寫在 `keys_sent` / `key_error`，不影響其餘步驟。
-- in-flight 回合標 `failed`，對話留一則「回合已由使用者強制中止」；同 bot 的 `delivery = "unknown"` 回合一併收掉。
+- in-flight 回合標 `failed`，對話留一則「回合已由使用者強制中止」；同 bot 的 `delivery = "unknown"` 回合一併收掉。一次收掉好幾筆時只留一則、帶筆數（「回合已由使用者強制中止（共 N 筆）」，#581）。
 - 沒有 active run 不是錯誤。bot 不存在 404；沒有卡住的回合 → `200 {"aborted":[]}`（冪等）。agent 可能還在跑，要停就 `stop`。
 
 ## 5. 送訊息

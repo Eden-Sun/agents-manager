@@ -927,6 +927,13 @@ herdr 回錯且訊息明確提到 `format`（舊版或遠端不認得這個參�
 
 marker 列與框的邊之間多出任何一列（含空白列）、marker 後多打一格（沒有框的輸入框）、dim 提示後面多了非 dim 的字、跟要送的一模一樣的字
 ——都是非空，一律不代送、零寫入。認不出框的畫面是 `Unready`。
+**框比預設的搜尋範圍高**（#581，2026-09-27 wits-pro）：找輸入框平常只看底部 24 列（`COMPOSER_TAIL`）。claude 的框最多長到畫面列數的一半減 5，
+回合還沒吐字就被 `esc` 打斷時 claude 會把整段 prompt 放回框裡，二十幾列的框頂 `❯` 就落在範圍外——以前判成 `Unready`：中斷後的清框不按、
+之後每則都 409 `composer_unreadable`，網頁也拿不到清草稿的動作。現在（`delivery::composer_tail`，只限 claude）範圍內找不到時，從底部 24 列裡
+最下面那條全寬分隔線（框底）往上找第一條分隔線（框頂），框頂正下方那列開頭是 `❯` 才把範圍延伸到那裡；`box_state`、`plain_without_hints`、
+`poller::composer_text` 共用同一個範圍，所以這種框判成有草稿（`composer_busy` 帶草稿與動作）。框裡有一整列 `─`、或框頂下方不是 `❯` 就照舊 `Unready`。
+網頁 Esc 與強制中止之後的清框（`stop::clear_restored_prompt`）改用跟送出前同一種讀法（`recent_unwrapped` 400 列），按完 `ctrl+c` 重讀一次，
+框沒空只記 warn、不再按（空框的 `ctrl+c` 是「再按一次離開」）。真畫面：`fixtures/claude-2.1.281-tall-draft-after-interrupt.ansi`。
 
 **誰會建 `queued` turn**（2026-09-16 AGM 裁示）：對方**回合中**時，**只有 AGM 的派工／通知**這條路
 （`supervisor::controller::dispatch` → `lifecycle::prompt::prompt_relayed_queueable`）；另外 bot **沒在跑**時帶 `start_if_stopped` 的送出

@@ -564,19 +564,38 @@ pub async fn interrupt_turn(app: &Arc<App>, bot_id: &str, expect_turn: Option<&s
 
 /// claude 在吐出第一個字前被 `esc` 打斷，會把 prompt 放回輸入框（2026-09-08 實測），下一則
 /// 貼上會黏在後面。中斷後 composer 有字就 `ctrl+c` 清掉（有字時只清不退出）。只做 claude，失敗不報錯。
+///
+/// 讀法跟送出前的檢查一樣（#581）：以前讀 `visible` 80 列、放回來的長 prompt 撐高的框找不到框頂，
+/// 判成「框是空的」沒按，框就一直卡著那段字。按完重讀一次，框沒空就留一筆 log（不再按：空框的 `ctrl+c` 是「再按一次離開」）。
 async fn clear_restored_prompt(client: &HerdrClient, run: &db::Run, bot: &db::Bot) {
+    use super::delivery::{box_state, read_styled, BoxState, DELIVER_SCAN_LINES, SCAN_SOURCE};
     if bot.kind != "claude" {
         return;
     }
     let Some(pane) = run.pane_id.as_deref() else { return };
     tokio::time::sleep(Duration::from_millis(400)).await;
-    let Ok(screen) = super::delivery::read_styled(client, pane, "visible", 80).await else { return };
+    let Ok(screen) = read_styled(client, pane, SCAN_SOURCE, DELIVER_SCAN_LINES).await else { return };
     if composer_text(&bot.kind, &screen).is_none() {
         return;
     }
-    match client.pane_send_keys(pane, &["ctrl+c"]).await {
-        Ok(()) => tracing::info!(run = %run.id, "interrupt put the prompt back into the composer; cleared it"),
-        Err(e) => tracing::warn!(run = %run.id, error = ?e, "could not clear the restored prompt from the composer"),
+    if let Err(e) = client.pane_send_keys(pane, &["ctrl+c"]).await {
+        tracing::warn!(run = %run.id, error = ?e, "could not clear the restored prompt from the composer");
+        return;
+    }
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let after = read_styled(client, pane, SCAN_SOURCE, DELIVER_SCAN_LINES).await.map(|s| box_state(&bot.kind, &s));
+    match after {
+        Ok(BoxState::Empty) => tracing::info!(run = %run.id, "interrupt put the prompt back into the composer; cleared it"),
+        other => tracing::warn!(run = %run.id, state = ?other.ok(), "cleared the restored prompt but the composer did not read back empty"),
+    }
+}
+
+/// 強制中止在對話裡留的那一則：一次收好幾筆時帶筆數（#581）。
+fn abort_note(count: usize) -> String {
+    if count > 1 {
+        format!("回合已由使用者強制中止（共 {count} 筆）")
+    } else {
+        "回合已由使用者強制中止".to_string()
     }
 }
 
@@ -627,7 +646,18 @@ pub async fn abort_turns(app: &Arc<App>, bot_id: &str) -> LcResult<Value> {
         // 收不掉就不是成功（#147）：以前 `fail_in_flight` 把錯吞掉，下面的迴圈又因為它在 `aborted` 裡而跳過它，
         // 回 200 `aborted:[它]`、它卻還在飛。記成欠著，之後補。
         if let Some(t) = &in_flight {
-            if let Err(e) = super::interruption::interrupted(app, bot_id, &r.id, &t.id, "回合已由使用者強制中止").await {
+            // 下面要一起收的，算進這一則的筆數，不各寫一則（#581）。
+            let more: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM turns t JOIN conversations c ON c.id = t.conversation_id
+                 WHERE c.bot_id = ? AND t.id <> ? AND (t.status = 'in_flight' OR t.delivery = 'unknown')",
+            )
+            .bind(bot_id)
+            .bind(&t.id)
+            .fetch_one(&app.db)
+            .await
+            .map_err(up)?;
+            let note = abort_note(1 + usize::try_from(more).unwrap_or(0));
+            if let Err(e) = super::interruption::interrupted(app, bot_id, &r.id, &t.id, &note).await {
                 return Err(LcError::Upstream(format!("回合 {} 沒收成（稍後自動補上）：{e:#}", t.id)));
             }
         }
@@ -644,10 +674,10 @@ pub async fn abort_turns(app: &Arc<App>, bot_id: &str) -> LcResult<Value> {
     .fetch_all(&app.db)
     .await
     .map_err(up)?;
-    for t in unknown {
-        if aborted.contains(&t.id) && t.delivery != "unknown" {
-            continue;
-        }
+    // 一次收好幾筆時只寫一則說明、帶筆數（#581：wits-pro 一次收 5 筆，對話裡連著 5 則一樣的話）。在飛的那一筆
+    // 已經由它那一則說了（筆數算在裡面），這裡不再寫。一顆 bot 只有一段對話（`conversations.bot_id` UNIQUE）。
+    let turns: Vec<db::Turn> = unknown.into_iter().filter(|t| !(aborted.contains(&t.id) && t.delivery != "unknown")).collect();
+    if !turns.is_empty() {
         // 上面那句 SELECT 撈的是「in_flight **或** delivery='unknown'」，所以這裡拿到的不一定還在飛：
         // §4.3 的備援關掉的回合（`completed_fallback`）不會動 `delivery`，所以它可以是已經收好、
         // 但 `delivery` 還停在 `unknown` 的狀態。那種的**只清掉 `unknown` 這個停車位**（它是擋住下一則
@@ -656,28 +686,36 @@ pub async fn abort_turns(app: &Arc<App>, bot_id: &str) -> LcResult<Value> {
         // （`turn_controller` 的轉移表也沒有 `completed_fallback -> failed` 這條邊，issue #68。）
         // 收掉與說明同一個交易（#208，同 `fail_in_flight`）：以前說明寫不進去被 `let _` 吞掉，回合收了、對話裡卻沒有一句話。
         let mut tx = app.db.begin().await.map_err(up)?;
-        if t.status == "in_flight" {
-            super::turn_controller::fail_on(&mut tx, &t.id, super::turn_controller::DeliveryOnFail::FailedIfUnknown, "使用者強制中止")
-                .await
-                .map_err(up)?;
-        } else if t.delivery == "unknown" {
-            sqlx::query("UPDATE turns SET delivery='failed' WHERE id=? AND delivery='unknown'")
-                .bind(&t.id)
-                .execute(&mut *tx)
-                .await
-                .map_err(up)?;
+        for t in &turns {
+            if t.status == "in_flight" {
+                super::turn_controller::fail_on(&mut tx, &t.id, super::turn_controller::DeliveryOnFail::FailedIfUnknown, "使用者強制中止")
+                    .await
+                    .map_err(up)?;
+            } else if t.delivery == "unknown" {
+                sqlx::query("UPDATE turns SET delivery='failed' WHERE id=? AND delivery='unknown'")
+                    .bind(&t.id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(up)?;
+            }
         }
-        let note = if aborted.contains(&t.id) {
-            None
-        } else {
-            Some(insert_message_tx(&mut tx, &t.conversation_id, Some(&t.id), "system", "回合已由使用者強制中止", "system", false, None).await.map_err(up)?)
+        let fresh: Vec<&db::Turn> = turns.iter().filter(|t| !aborted.contains(&t.id)).collect();
+        let note = match fresh.first() {
+            Some(first) if in_flight.is_none() => Some(
+                insert_message_tx(&mut tx, &first.conversation_id, Some(&first.id), "system", &abort_note(fresh.len()), "system", false, None)
+                    .await
+                    .map_err(up)?,
+            ),
+            _ => None,
         };
         tx.commit().await.map_err(up)?;
         if let Some(m) = note {
             emit_message_added(app, bot_id, m).await;
-            aborted.push(t.id.clone());
         }
-        emit_turn(app, &t.id).await;
+        aborted.extend(fresh.iter().map(|t| t.id.clone()));
+        for t in &turns {
+            emit_turn(app, &t.id).await;
+        }
     }
 
     tracing::info!(bot = %bot.name, keys_sent, aborted = aborted.len(), "turn(s) force-aborted by user");
@@ -733,6 +771,10 @@ pub async fn move_pane_to_own_tab(app: &Arc<App>, bot_id: &str) -> LcResult<()> 
     app.emit_bot_status(bot_id).await;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "force_abort_tests.rs"]
+mod force_abort_tests;
 
 #[cfg(test)]
 mod abort_tests {
