@@ -754,6 +754,51 @@ mod tests {
         assert_eq!(picker_number(MODEL_MENU, "gpt-4"), None);
     }
 
+    /// issue #636: a model whose name merely *starts with* the wanted one must not win just
+    /// because it is listed first — codex would really switch to the preview / mini model.
+    #[test]
+    fn picker_rows_match_the_whole_name_not_a_prefix() {
+        const PREFIXED: &str = "\
+  Select Model and Effort
+
+› 1. gpt-6-sol-preview (current)  Preview build.
+  2. gpt-6-sol                    Reliable agentic workhorse.
+  3. gpt-5.5-mini                 Cheaper.
+  4. gpt-5.5                      Proven previous-generation model.
+
+  Press enter to confirm or esc to go back
+";
+        assert_eq!(picker_number(PREFIXED, "gpt-6-sol"), Some(2));
+        assert_eq!(picker_number(PREFIXED, "gpt-5.5"), Some(4));
+        assert_eq!(picker_number(PREFIXED, "gpt-6-sol-preview"), Some(1));
+        assert_eq!(picker_number(PREFIXED, "(current)"), Some(1));
+        assert_eq!(picker_number(PREFIXED, "gpt-6"), None, "a bare prefix names no row");
+        assert_eq!(picker_number(PREFIXED, "sol"), None);
+        const AMBIGUOUS: &str = "\
+  Select Model and Effort
+
+  1. gpt-5.5     First duplicate
+  2. gpt-5.5     Second duplicate
+
+  Press enter to confirm or esc to go back
+";
+        assert_eq!(picker_number(AMBIGUOUS, "gpt-5.5"), None, "ambiguous rows must not be selected");
+        // Same rule for effort labels: `High` must not pick `Extra high` or `Higher`.
+        const LEVELS: &str = "\
+  Select Reasoning Level for gpt-6-sol
+
+  1. Higher (default)  Hypothetical level listed first
+  2. High              Greater reasoning depth
+  3. Extra high        Extra high reasoning depth
+
+  Press enter to confirm or esc to go back
+";
+        assert_eq!(picker_number(LEVELS, "High"), Some(2));
+        assert_eq!(picker_number(LEVELS, "Extra high"), Some(3));
+        assert_eq!(picker_number(LEVELS, "(default)"), Some(1));
+        assert_eq!(picker_number(LEVELS, "Extra"), None);
+    }
+
     #[test]
     fn codex_0157_rate_limit_switch_prompt_is_a_choice_screen_not_a_quota_hit() {
         let screen = include_str!("lifecycle/fixtures/codex-0.157-rate-limit-switch.txt");
