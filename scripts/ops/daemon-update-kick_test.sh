@@ -38,7 +38,22 @@ done
 case "$sub:$op" in
   build-inputs:*)    printf '%s' "$STUB_BUILD_INPUTS" ;;
   state:*)           printf '%s' "$STUB_STATE" ;;
-  assignments:*)     printf '%s' "$STUB_ASSIGNMENTS" ;;
+  assignments:*)     case " $* " in
+                       *" --id "*)
+                         query_id=""; previous=""
+                         for a in "$@"; do
+                           if [ "$previous" = --id ]; then query_id="$a"; break; fi
+                           previous="$a"
+                         done
+                         case "$STUB_ASSIGNMENT_QUERY_MODE" in
+                           match) printf '{"id":"a-1","client_request_id":"%s","status":"delivered"}' "$query_id" ;;
+                           not_found_complete) printf '{"error":"not_found","id":"%s","complete":true}' "$query_id"; exit 4 ;;
+                           not_found_incomplete) printf '{"error":"not_found","id":"%s","complete":false}' "$query_id"; exit 4 ;;
+                           *) printf '%s' "$STUB_ASSIGNMENT_QUERY_BODY"; exit "${STUB_ASSIGNMENT_QUERY_RC:-1}" ;;
+                         esac
+                         ;;
+                       *) printf '%s' "$STUB_ASSIGNMENTS" ;;
+                     esac ;;
   lease:safety)      printf '%s' "$STUB_SAFETY" ;;
   lease:acquire)     printf '%s' "$STUB_ACQUIRE" ;;
   lease:release)     [ -n "${STUB_RELEASE_FAIL:-}" ] && { printf '%s' '{"error":"http_error","status":409,"detail":{"error":"conflict","reason":"fence_mismatch"}}'; exit 1; }
@@ -54,6 +69,7 @@ case "$sub:$op" in
                        eval "a=\${$i}"
                        case "$a" in --text-file) eval "f=\${$((i+1))}"; cat "$f" >> "$AGM_DIR/assign-body.txt" ;; esac
                      done
+                     [ -n "$STUB_ASSIGN_RC" ] && exit "$STUB_ASSIGN_RC"
                      [ -n "$STUB_ASSIGN_FAIL" ] && exit 1; printf '%s' '{"id":"a-1"}' ;;
   responder:show)    [ -n "${STUB_RESPONDER:-}" ] && printf '%s' "$STUB_RESPONDER" || printf '%s' '{}' ;;
   *)                 printf '%s' '{}' ;;
@@ -71,6 +87,7 @@ STUB
   export STUB_APPROVAL='{"id":"ap-1","status":"pending"}'
   export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"approved"}]}'
   export STUB_ASSIGN_FAIL=""
+  export STUB_ASSIGN_RC="" STUB_ASSIGNMENT_QUERY_MODE="" STUB_ASSIGNMENT_QUERY_BODY='{}' STUB_ASSIGNMENT_QUERY_RC=1
 }
 
 teardown() { rm -rf "$ROOT"; unset AGM_FAIL_ALERT_AFTER AGM_BUILD_BOT AGM_TEST_MINUTE AGM_REBUILD_THRESHOLD AGM_REBUILD_MAX_WAIT_MIN; }
@@ -153,6 +170,41 @@ setup
 export STUB_ASSIGN_FAIL=yes
 bash "$SCRIPT"
 check "派工失敗會交還窗口" "lease release rebuild" "$AGM_DIR/calls.log"
+teardown
+
+# issue #669：assign exit 7 是 delivery_unknown。先對帳；已存在就當成功，不能交還 lease 或刪 token。
+setup
+export AGM_TEST_MINUTE="0"
+export STUB_ACQUIRE='{"lease":{"fence":9,"resource":"rebuild"},"lease_token":"tok-abc123"}'
+export STUB_ASSIGN_RC=7 STUB_ASSIGNMENT_QUERY_MODE=match
+bash "$SCRIPT"
+check "delivery_unknown 用同一 CRID 對帳" "assignments --id agm-daemon-update-" "$AGM_DIR/calls.log"
+check_no "已查到交辦時不交還 rebuild 窗口" "lease release rebuild" "$AGM_DIR/calls.log"
+check_eq "已查到交辦時保留 lease token 檔" "1" "$(ls "$AGM_DIR"/daemon-update.lease-token.* 2>/dev/null | wc -l | tr -d ' ')"
+check_eq "已查到交辦時保存 STATE" "1" "$( [ -s "$AGM_DIR/daemon-update.last" ] && echo 1 || echo 0 )"
+teardown
+
+# 只有 assignments --id 的完整清單明確 not_found，才確定未送達並交還。
+setup
+export AGM_TEST_MINUTE="0"
+export STUB_ACQUIRE='{"lease":{"fence":9,"resource":"rebuild"},"lease_token":"tok-abc123"}'
+export STUB_ASSIGN_RC=7 STUB_ASSIGNMENT_QUERY_MODE=not_found_complete
+bash "$SCRIPT"
+check "完整查詢明確不存在" "assignments --id agm-daemon-update-" "$AGM_DIR/calls.log"
+check "確認不存在後交還 rebuild 窗口" "lease release rebuild" "$AGM_DIR/calls.log"
+check_eq "確認不存在後移除 token 檔" "0" "$(ls "$AGM_DIR"/daemon-update.lease-token.* 2>/dev/null | wc -l | tr -d ' ')"
+teardown
+
+# 查詢清單不完整時仍是不確定：必須留住租約憑證並立即告警。
+setup
+export AGM_TEST_MINUTE="0"
+export STUB_ACQUIRE='{"lease":{"fence":9,"resource":"rebuild"},"lease_token":"tok-abc123"}'
+export STUB_ASSIGN_RC=7 STUB_ASSIGNMENT_QUERY_MODE=not_found_incomplete
+bash "$SCRIPT"
+check "不完整查詢使用 CRID 對帳" "assignments --id agm-daemon-update-" "$AGM_DIR/calls.log"
+check_no "不完整查詢不交還 rebuild 窗口" "lease release rebuild" "$AGM_DIR/calls.log"
+check_eq "不完整查詢保留 token 檔" "1" "$(ls "$AGM_DIR"/daemon-update.lease-token.* 2>/dev/null | wc -l | tr -d ' ')"
+check "不完整查詢立即推 ops_alert" "ops-alert --source test-owner --reason assign_delivery_unknown" "$AGM_DIR/calls.log"
 teardown
 
 # 6b. 連續沒能完成：過閘的那幾輪累計，連續 N 輪推 ops_alert；非整點輪不動計數；完整跑完清零。

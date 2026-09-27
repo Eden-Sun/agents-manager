@@ -688,17 +688,70 @@ cat "$DIR/daemon-update-task.md" > "$TMP" 2>/dev/null || true
 # 立即模式的 request id 多帶核准 id：同一顆 commit 先前派過（沒上線）時，同一個 id 會被當成重送、拿回舊的那筆。
 CRID="agm-daemon-update-$APPR_COMMIT"
 [ "$NOW" = 1 ] && CRID="agm-daemon-update-${APPR_COMMIT}-now-${APPROVAL}"
+ASSIGN_RC=0
 if "$AGM" --compact assign --bot "$BOT" --text-file "$TMP" \
      --request-id "$CRID" ${REVIEW[@]+"${REVIEW[@]}"} \
      --owns daemon --owns web --owns Cargo.lock >> "$LOG" 2>&1; then
-  # 「已派過」記的是這次實際建出來的東西：DEFERRED 時記核准的 commit，下一輪才會看到 HEAD 還沒建（記 HEAD 會讓它被當成已派過）。
-  if [ "$DEFERRED" = 1 ]; then echo "$APPR_COMMIT" > "$STATE"; else echo "$HEAD_SHA" > "$STATE"; fi
-  log "已派工 ${CRID}（origin/main ${HEAD_SHA}）"
-  [ "$NOW" = 1 ] && drop_now "已派工 ${CRID}"
+  ASSIGN_RESULT=confirmed
 else
-  note_fail "派工失敗，嘗試交還窗口"
-  # shellcheck disable=SC2086  # TOKEN_ARG 是刻意要拆成兩個參數的（沒有 token 時是空字串）
-  release_rebuild "派工失敗" $TOKEN_ARG || true
-  [ -n "$TOKEN_FILE" ] && rm -f "$TOKEN_FILE"
+  ASSIGN_RC=$?
+  if [ "$ASSIGN_RC" -eq 7 ]; then
+    # delivery_unknown means assign may already have persisted and dispatched this CRID. Keep the
+    # rebuild fence and token unless a complete assignments scan proves the request is absent.
+    RECONCILE_OUT=""
+    RECONCILE_RC=0
+    RECONCILE_OUT=$("$AGM" --compact assignments --id "$CRID" 2>/dev/null) || RECONCILE_RC=$?
+    RECONCILE_RESULT=$(printf '%s' "$RECONCILE_OUT" | CRID="$CRID" python3 -c '
+import json, os, sys
+crid = os.environ["CRID"]
+try:
+    row = json.load(sys.stdin)
+except Exception:
+    row = None
+if (isinstance(row, dict) and not row.get("error")
+    and (row.get("id") == crid or row.get("client_request_id") == crid)):
+    print("present")
+elif (isinstance(row, dict) and row.get("error") == "not_found"
+      and row.get("id") == crid and row.get("complete") is True):
+    print("absent")
+else:
+    print("unknown")
+' 2>/dev/null) || RECONCILE_RESULT=unknown
+    case "$RECONCILE_RESULT" in
+      present)
+        ASSIGN_RESULT=confirmed
+        log "delivery_unknown 對帳確認交辦已存在（${CRID}，查詢 rc=${RECONCILE_RC}）"
+        ;;
+      absent) ASSIGN_RESULT=absent ;;
+      *) ASSIGN_RESULT=unknown ;;
+    esac
+  else
+    ASSIGN_RESULT=failed
+  fi
 fi
+
+case "$ASSIGN_RESULT" in
+  confirmed)
+    # 「已派過」記的是這次實際建出來的東西：DEFERRED 時記核准的 commit，下一輪才會看到 HEAD 還沒建（記 HEAD 會讓它被當成已派過）。
+    if [ "$DEFERRED" = 1 ]; then echo "$APPR_COMMIT" > "$STATE"; else echo "$HEAD_SHA" > "$STATE"; fi
+    log "已派工 ${CRID}（origin/main ${HEAD_SHA}）"
+    [ "$NOW" = 1 ] && drop_now "已派工 ${CRID}"
+    ;;
+  absent)
+    note_fail "delivery_unknown 對帳確認未送達（${CRID}），嘗試交還窗口"
+    # shellcheck disable=SC2086  # TOKEN_ARG 是刻意要拆成兩個參數的（沒有 token 時是空字串）
+    release_rebuild "delivery_unknown 已確認未送達" $TOKEN_ARG || true
+    [ -n "$TOKEN_FILE" ] && rm -f "$TOKEN_FILE"
+    ;;
+  unknown)
+    note_fail "delivery_unknown 對帳不確定（${CRID}，查詢 rc=${RECONCILE_RC}），保留 rebuild 窗口與 token"
+    alert assign_delivery_unknown "交辦 ${CRID} 回 delivery_unknown；對帳未能確認存在或完整不存在，保留 rebuild 窗口與 token（assign rc=${ASSIGN_RC}，query rc=${RECONCILE_RC}）。請人工確認，勿啟動另一份建置。"
+    ;;
+  failed)
+    note_fail "派工失敗，嘗試交還窗口"
+    # shellcheck disable=SC2086  # TOKEN_ARG 是刻意要拆成兩個參數的（沒有 token 時是空字串）
+    release_rebuild "派工失敗" $TOKEN_ARG || true
+    [ -n "$TOKEN_FILE" ] && rm -f "$TOKEN_FILE"
+    ;;
+esac
 rm -f "$TMP"
