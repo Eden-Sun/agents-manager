@@ -804,7 +804,7 @@ label = "foo"
 ## 6. 生命週期
 
 **送 prompt 的路徑（2026-09-14，sol review 後定案）**：daemon 一旦直接對某個 run 的 pane 打過字
-（當場套用 slash、codex 選單、`/login`），就把 `runs.pane_typed` 設為 1；herdr `agent.prompt` 在這種
+（當場套用 slash、codex 選單、`/login`、`POST /bots/:id/text` 併送），就把 `runs.pane_typed` 設為 1；寫不進去就不打。herdr `agent.prompt` 在這種
 pane 上回過 ok 卻沒送進去（wits-c1-op-xh 14:24、15:33，第二次距 slash 兩分鐘）。之後這個 run 的 prompt
 一律改成打字進 pane，`agent.get` 查不到 `agent_session` 綁定的 agent 也走這條（`lifecycle/delivery.rs`）。
 
@@ -875,6 +875,7 @@ user 文字先照 CLI 自己的拆法還原（`lifecycle::pasted_content`，只�
   **最前面的 1024 位元組不見了**，只剩尾巴進框（1048 B 只剩最後 4 行、1804 B 只剩最後 46 行；使用者 58 行的數字清單就這樣只送到最後 3 行，
   泡泡卻顯示整段）。`HerdrClient::pane_send_text` 一律拆成每段 ≤ 1000 B（優先在換行後切、不切斷多位元組字元）依序送——
   所有走 `pane.send_text` 的路（打字送出、`POST /bots/:id/text`、主機 shell）一次補齊；claude 收到的與原文逐字相同（3604 B／4 段實測）。
+  第 1 段已經進框、後面某一段被拒（#647）不是「一個字都沒進去」：錯誤是 `PartialPaste`，`never_applied` 不成立。插隊送出因此不回可重試 409，改走「沒按送出鍵、字可能還留在框裡」。
   拆段後最後一段若 ≤ 800 字不會被 claude 摺起來，框可以比預設的 24 列高：打字之後看框改用 `box_state_within(…, 24 + 這段字的列數)`，
   否則框頂的 `❯` 找不到、判成讀不出來而不按 Enter。第二層：按 Enter 之前框裡若**看得出缺了開頭**（`paste_check::lost_head`，只認 claude、
   框裡有摺起來的佔位或找不到框就不判），改送 `ctrl+c` 清框並回 `NotAttempted{paste_truncated, retry:true}`（409，一個字都沒到 agent）；清不掉才是 `Unproven`。
@@ -1286,8 +1287,9 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run
      在它建立之後出現了這一句＝送出鍵生效了，照平常的收尾做——run 上在飛的那一筆收成被插隊打斷、這一則掛上 run、送達記 `ok`（有證據）；
      不這樣做的話 claude 替它送的 Stop 會認領被插隊的那一筆，回覆掛錯回合（#229）。看不到、讀不到（遠端、grok）才收成 `failed`、
      送達 `unknown`，並寫明原因。開機恢復先處理這一步、再把在飛的回合接回 poller，接回的才是掛上去的那一則。
-   - **送出鍵之前的每一種放棄都不動舊回合**：準備被擋（框裡有字、證據讀不到、`pane_typed` 寫不進去）或 herdr 拒收打字
-     → 撤回新的那一則、回可重試的 409（`sent:false`、不留任何列，同一個 request id 可重送）；打字沒有回應、打完框是空的／讀不到、
+   - **送出鍵之前的每一種放棄都不動舊回合**：準備被擋（框裡有字、證據讀不到、`pane_typed` 寫不進去）或 herdr 在第一個字之前拒收打字
+     → 撤回新的那一則、回可重試的 409（`sent:false`、不留任何列，同一個 request id 可重送）。分段貼上已經有前段進框（#647）不算這一條。
+     打字沒有回應、打完框是空的／讀不到、前段已進框後續段被拒、
      herdr 拒收送出鍵 → 新的那一則收成 `failed`（送達 `failed`，說明「字可能還留在終端的輸入框」），回 `200 send_now:"not_sent"`。
    - **準備緊接在打字前面**，中間沒有任何 DB 寫入：重看一次框就是對「人在終端裡打字、CLI 跳出新框」（不受 bot 鎖管）的圍籬——
      框裡有字就不打（409 `composer_busy`），不會把兩段字接在一起送出去。herdr 沒有「框是空的才打字」的原子操作，
@@ -1584,7 +1586,7 @@ pane 打 `cargo` 就 permission denied）時，只 chmod 回 0755，不重寫內
 - host 連不上時只 defer，不影響任何事：host 已掉線就放棄，下次連上再補（冪等）。
 - **失敗要退避重試、放棄要開票**（issue #534）：重試節奏是立刻／5 分／15 分／60 分（`REMOTE_RETRY_WAITS`）——以前是 20 與 60 秒，只夠撐過「ssh 抖一下」，那台在重開機、網路斷幾分鐘時三次全都趕不上，而下一次機會要等它**掉線再連上**（一直連著就等到 daemon 重啟）。都失敗、或腳本跑完但有檔案換不動時，記一行「gave up」（不再寫 will retry）並開 `remote_shim_stale` incident（degraded，`resource` 是 host 名，detail 帶原因與該去那台機器看什麼）；下一次補成就自動消失。
 
-- `herdr agent start <name> …`：`<name>` 不以 `$AM_AGENT_NAME-` 開頭就補前綴（截到 32 字）並在 stderr 說明。旗標可在名字前面，`--kind`/`--pane`/`--timeout` 的值不誤認，`--` 之後原封不動。
+- `herdr agent start <name> …`：`<name>` 不以 `$AM_AGENT_NAME-` 開頭就補前綴。herdr 名稱上限 32 字。放得下就用 `<parent>-<suffix>`；放不下就把母名前綴截到 25 字再接字尾的 6 位數字雜湊（#665），**不會**截成母 bot 自己的名字，不同字尾也不會變成同一個前綴。算不出尾碼或結果仍是母名就 exit 75、不呼叫 herdr。頂層 `agent_name` 上限 24 字，留 8 字給 `-` 與子 agent 字尾。旗標可在名字前面，`--kind`/`--pane`/`--timeout` 的值不誤認，`--` 之後原封不動。
   **模型沿用**：`--` 之後沒有 `--model` 且 `--kind` 與母 bot 相同（或沒寫）時補 `-- --model $AM_MODEL`，claude 再補 `--effort $AM_EFFORT`；
   子 agent 自己寫的一律尊重（`--model`、codex/grok 的 `-m`、codex 的 `-c model=` / `-c model_reasoning_effort=`）。
   **帳號／hook 補救（issue #57）**：`agent start` 沒有 `--env`，只能假設 `--pane` 指到的 pane 是 `pane split` 剛開的、帳號早注入了；
@@ -2411,8 +2413,8 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   daemon 原地重啟 child 也不重建 env，所以對 child 輪替回 409 `child_uses_parent_credential`；若母 bot 有仍活著的 child／grandchild 後代 pane 繼承憑證，輪替亦回 409 `live_children_use_credential` 並列出依賴後代，不改 token、不重啟。child 以母 bot 的名義呼叫 API（跟它本來就能替母 bot 做事同一條界線）。Service token 在 `<data_dir>/service-tokens/` 建立（目錄 0700、token 檔 0600），重啟保持不變；`/api/capabilities` 的
   `service_principals` 標記代表 launchd clients 不得在憑證遺失時退回 User。service scope 與固定維運 route 見 API.md。
   開發版（`App::allow_lan`，跟 bind `0.0.0.0` 同一個判斷）對端與 `Origin` 都直接放行，同網段誰都拿得到 token：使用者裁示保留（`e7392dd` 撤掉配對碼時記明）。
-- `/hook/*`、`/relay/announce`、`/relay/pane`、`/relay/spawn/begin`、`/relay/spawn/finish` 驗 **per-bot** `X-AM-Bot-Token`。
-  shim 在建立會繼承 bot proof 的 pane／child agent 前取得 spawn permit；輪替在讀 descendants 前立起同 daemon 共用的 fence。permit 未完成時輪替回 409，fence 存在時 shim 不呼叫 herdr；pane 成功後先登記到 `panes` inventory 才釋放 permit。Bot 或 DB 讀取失敗時 spawn／rotation 都 fail closed。
+- `/hook/*`、`/relay/announce`、`/relay/pane`、`/relay/spawn/begin`、`/relay/spawn/finish`、`/relay/spawn/abort` 驗 **per-bot** `X-AM-Bot-Token`。
+  shim 在建立會繼承 bot proof 的 pane／child agent 前取得 spawn permit；輪替在讀 descendants 前立起同 daemon 共用的 fence。permit 未完成且未過期（60 秒）時輪替回 409，fence 存在時 shim 不呼叫 herdr；pane 成功後先登記到 `panes` inventory 才釋放 permit。herdr 失敗且沒有新 pane id、或 shim 被中斷，走 `POST /relay/spawn/abort` 釋放（#664）。Bot 或 DB 讀取失敗時 spawn／rotation 都 fail closed。
 
 ### 7.3 WebSocket `/ws`
 - 事件帶遞增 `seq`（記憶體，daemon 重啟從 0）。客戶端帶 `?since=`；daemon 保留最近 200 則，補不齊或 seq 倒退 → `{"type":"resync","seq":<現在的 seq>}`（lag 掉的那條也一樣帶 seq），客戶端重新 `GET /state` 與訊息。

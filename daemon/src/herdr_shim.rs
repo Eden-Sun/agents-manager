@@ -113,8 +113,26 @@ am_spawn_finish() {
     return 0
 }
 
+# herdr 沒開出 pane（或 shim 被中斷）時丟掉 permit。沒有 permit 就什麼都不做。
+am_spawn_abort() {
+    [ -n "${_AM_SPAWN_PERMIT:-}" ] || return 0
+    [ -n "${AM_BOT_ID:-}" ] || return 0
+    _tok=$(am_bot_token)
+    if [ -n "$_tok" ] && [ -n "${AM_PORT:-}" ] && command -v curl >/dev/null 2>&1; then
+        curl -s -m 2 -X POST "http://127.0.0.1:${AM_PORT}/relay/spawn/abort" \
+            -H "X-AM-Bot-Token: $_tok" \
+            --data-urlencode "bot_id=${AM_BOT_ID}" \
+            --data-urlencode "permit_id=${_AM_SPAWN_PERMIT}" >/dev/null 2>&1 || true
+    fi
+    _AM_SPAWN_PERMIT=""
+    return 0
+}
+
 # `<name>` → `<AM_AGENT_NAME>-<name>`, unless it already carries the prefix. herdr agent names
-# are `[a-z][a-z0-9_-]{0,31}`, so the result is cut to 32.
+# are `[a-z][a-z0-9_-]{0,31}` (32 chars). A blind `cut -c1-32` turns a 32-char parent into itself
+# and collapses every child of a 28–31 char parent onto one prefix (#665). When the readable
+# name does not fit, shorten the parent and append a 6-digit hash of the requested suffix.
+# Never return the parent name.
 am_child_name() {
     _n=$1
     if [ -z "${AM_AGENT_NAME:-}" ]; then
@@ -127,7 +145,35 @@ am_child_name() {
             return 0
             ;;
     esac
-    _full=$(printf '%s-%s' "$AM_AGENT_NAME" "$_n" | cut -c1-32)
+    _full=$(printf '%s-%s' "$AM_AGENT_NAME" "$_n")
+    if [ "${#_full}" -gt 32 ]; then
+        _sum=$(printf '%s' "$_n" | cksum 2>/dev/null | awk 'NR==1 { print $1 }')
+        if [ -z "$_sum" ]; then
+            printf 'agents-manager: 子 agent 名稱放不進 32 字，而且算不出尾碼，沒有改成母 bot `%s`\n' "$AM_AGENT_NAME" >&2
+            return 75
+        fi
+        _tail=$(printf '%06d' "$((_sum % 1000000))")
+        _pre=$(printf '%s' "$AM_AGENT_NAME" | cut -c1-25 | sed 's/-*$//')
+        [ -n "$_pre" ] || _pre=p
+        _full=$(printf '%s-%s' "$_pre" "$_tail")
+    fi
+    if [ "$_full" = "$AM_AGENT_NAME" ] || [ "${#_full}" -gt 32 ]; then
+        printf 'agents-manager: 子 agent 名稱放不進 32 字（母 agent 是 `%s`），沒有改成母 bot 自己\n' "$AM_AGENT_NAME" >&2
+        return 75
+    fi
+    case "$_full" in
+        "$AM_AGENT_NAME"-*) ;;
+        *)
+            # 母名太長、尾碼路徑把前綴截短了：結果必須仍比「空尾碼」長，且不能是母名本身（上面已擋）。
+            case "$_full" in
+                *-*) ;;
+                *)
+                    printf 'agents-manager: 子 agent 名稱放不進 32 字（母 agent 是 `%s`），沒有改成母 bot 自己\n' "$AM_AGENT_NAME" >&2
+                    return 75
+                    ;;
+            esac
+            ;;
+    esac
     printf 'agents-manager: 子 agent 已改名為 `%s`，才會掛在 `%s` 底下被追蹤\n' "$_full" "$AM_AGENT_NAME" >&2
     printf '%s' "$_full"
 }
@@ -189,7 +235,7 @@ am_agent_start() {
                         --) _stop=1 ;;
                         -*) : ;;
                         *)
-                            _a=$(am_child_name "$_a")
+                            _a=$(am_child_name "$_a") || exit $?
                             _named=1
                             ;;
                     esac
@@ -220,6 +266,7 @@ am_agent_start() {
         exit 75
     fi
     am_spawn_begin || exit $?
+    trap 'am_spawn_abort; exit 130' INT TERM
     am_reexport_env_before_start "$_pane"
     if [ -z "${AM_BOT_ID:-}" ]; then
         exec "$AM_HERDR" agent start "$@"
@@ -227,7 +274,11 @@ am_agent_start() {
     _out=$("$AM_HERDR" agent start "$@")
     _rc=$?
     [ -z "$_out" ] || printf '%s\n' "$_out"
-    [ "$_rc" -eq 0 ] || exit "$_rc"
+    if [ "$_rc" -ne 0 ]; then
+        am_spawn_abort
+        exit "$_rc"
+    fi
+    trap - INT TERM
     am_spawn_finish "$_pane" "" || exit $?
     exit 0
 }
@@ -290,7 +341,7 @@ am_agent_prompt() {
     # 原名本來就存在（AGM、其他頂層 bot、pane id）就照原名送；硬補前綴只會變成 unknown_target，
     # 訊息沒送到、stderr 還說「已改名」。找不到才當成自己的子 agent 補前綴。
     if ! "$AM_HERDR" agent get "$_name" >/dev/null 2>&1; then
-        _name=$(am_child_name "$_name")
+        _name=$(am_child_name "$_name") || exit $?
     fi
     # 我們自己的旗標（SPEC §18.15）：`--ack`（純告知，不叫醒 AGM）、`--reply-to <id>`（回哪一則事件／交辦）。
     # 真的 herdr 不認得，一律剝掉；沒帶就是新的事，AGM 會被叫醒。
@@ -509,11 +560,20 @@ am_forward_with_env() {
     # retains AM_BOT_ID / AM_BOT_TOKEN and can start a child after the parent restarts.
     if [ -n "${AM_BOT_ID:-}" ]; then
         am_spawn_begin || exit $?
+        trap 'am_spawn_abort; exit 130' INT TERM
         _out=$("$AM_HERDR" "$_sub1" "$_sub2" "$@")
         _rc=$?
         [ -z "$_out" ] || printf '%s\n' "$_out"
-        [ "$_rc" -eq 0 ] || exit "$_rc"
         _pane=$(printf '%s' "$_out" | tr ',' '\n' | sed -n 's/.*"pane_id" *: *"\([^"]*\)".*/\1/p' | head -n 1)
+        if [ "$_rc" -ne 0 ]; then
+            if [ -z "$_pane" ]; then
+                am_spawn_abort
+            else
+                am_spawn_finish "$_pane" "$_purpose" || exit $?
+            fi
+            exit "$_rc"
+        fi
+        trap - INT TERM
         am_spawn_finish "$_pane" "$_purpose" || exit $?
         exit 0
     fi
@@ -644,13 +704,16 @@ mod tests {
                    { for a in \"$@\"; do printf '%s\\n' \"$a\"; done; printf -- '---\\n'; } >> \"${AM_TEST_SENDTEXT_LOG:-/dev/null}\"\n\
                    exit 0\n\
                  fi\n\
-                 for a in \"$@\"; do printf '%s\\n' \"$a\"; done\n",
+                 if [ -n \"${AM_TEST_SIGNAL_PARENT:-}\" ]; then kill -INT \"$PPID\"; sleep 2; exit 1; fi\n\
+                 for a in \"$@\"; do printf '%s\\n' \"$a\"; done\n\
+                 [ -z \"${AM_TEST_HERDR_RC:-}\" ] || exit \"$AM_TEST_HERDR_RC\"\n",
             );
             write_script(
                 &fake.join("curl"),
                 "case \"$*\" in\n\
                    */relay/spawn/begin*) printf '{\"permit_id\":\"test-permit\"}\\n200'; exit 0 ;;\n\
                    */relay/spawn/finish*) printf '{\"registered\":true}\\n200'; exit 0 ;;\n\
+                   */relay/spawn/abort*) printf '{\"released\":true}\\n200'; exit 0 ;;\n\
                    *) exit 7 ;;\n\
                  esac\n",
             );
@@ -1313,8 +1376,11 @@ mod tests {
     fn a_long_name_is_cut_to_herdrs_32_characters() {
         let s = Sandbox::new();
         let (out, _) = s.run(&[("AM_AGENT_NAME", "proj-abc123")], &["agent", "start", &"x".repeat(40)]);
-        assert_eq!(out[2].len(), 32);
-        assert!(out[2].starts_with("proj-abc123-x"));
+        assert!(out[2].len() <= 32, "{}", out[2]);
+        assert!(out[2].starts_with("proj-abc123-"), "{}", out[2]);
+        assert_ne!(out[2], "proj-abc123");
+        let (other, _) = s.run(&[("AM_AGENT_NAME", "proj-abc123")], &["agent", "start", &"y".repeat(40)]);
+        assert_ne!(out[2], other[2], "不同字尾不能截成同一個名字");
     }
 
     #[test]
@@ -1598,5 +1664,87 @@ mod tests {
         let (out, err) = s.run(&[("AM_AGENT_NAME", "p-1")], &["agent", "list"]);
         assert_eq!(out, ["agent", "list"]);
         assert_eq!(err, "");
+    }
+
+    fn curl_log(s: &Sandbox) -> std::path::PathBuf {
+        let log = s.dir.join("curl.log");
+        s.install_fake_curl(&format!(
+            "printf '%s\\n' \"$*\" >> '{}'\n\
+             case \"$*\" in\n\
+               */relay/spawn/begin*) printf '{{\"permit_id\":\"test-permit\"}}\\n200'; exit 0 ;;\n\
+               */relay/spawn/abort*) printf '{{\"released\":true}}\\n200'; exit 0 ;;\n\
+               */relay/spawn/finish*) printf '{{\"registered\":true}}\\n200'; exit 0 ;;\n\
+             esac\n",
+            log.display()
+        ));
+        log
+    }
+
+    /// #664：agent start 失敗要 abort，不能把 permit 留到 daemon 重啟。
+    #[test]
+    fn a_failed_agent_start_releases_the_spawn_permit() {
+        let s = Sandbox::new();
+        let log = curl_log(&s);
+        let env = [
+            ("AM_AGENT_NAME", "parent"),
+            ("AM_BOT_ID", "b1"),
+            ("AM_HOOK_TOKEN", "tok"),
+            ("AM_PORT", "7788"),
+            ("HERDR_PANE_ID", "w1:p1"),
+            ("AM_TEST_HERDR_RC", "3"),
+            ("TMPDIR", s.dir.to_str().unwrap()),
+        ];
+        let (out, err, rc) = s.run_full(&env, &["agent", "start", "kid", "--pane", "w1:p1"]);
+        assert_eq!(rc, 3, "{out:?} {err}");
+        let sent = std::fs::read_to_string(&log).unwrap();
+        assert!(sent.contains("/relay/spawn/abort"), "{sent}");
+        assert!(!sent.contains("/relay/spawn/finish"), "失敗沒有新 pane，不能 finish：{sent}");
+    }
+
+    /// #664：herdr 還在跑時被中斷，trap 也要 abort。
+    #[test]
+    fn an_interrupted_agent_start_releases_the_spawn_permit() {
+        let s = Sandbox::new();
+        let log = curl_log(&s);
+        let env = [
+            ("AM_AGENT_NAME", "parent"),
+            ("AM_BOT_ID", "b1"),
+            ("AM_HOOK_TOKEN", "tok"),
+            ("AM_PORT", "7788"),
+            ("HERDR_PANE_ID", "w1:p1"),
+            ("AM_TEST_SIGNAL_PARENT", "1"),
+            ("TMPDIR", s.dir.to_str().unwrap()),
+        ];
+        let (out, err, rc) = s.run_full(&env, &["agent", "start", "kid", "--pane", "w1:p1"]);
+        assert_eq!(rc, 130, "{out:?} {err}");
+        let sent = std::fs::read_to_string(&log).unwrap();
+        assert!(sent.contains("/relay/spawn/abort"), "{sent}");
+    }
+
+    /// #665：母名已經 32 字時，子 agent 不能被改成母 bot 自己；不同字尾也不能撞成同一個名字。
+    #[test]
+    fn a_child_of_a_max_length_parent_is_not_renamed_to_the_parent() {
+        let s = Sandbox::new();
+        let parent = "paaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        assert_eq!(parent.len(), 32, "{parent}");
+        let env = [("AM_AGENT_NAME", parent), ("HERDR_PANE_ID", "w1:p1")];
+        let mut names = Vec::new();
+        for suffix in ["review", "reviewer2"] {
+            let (out, err, rc) = s.run_full(&env, &["agent", "start", suffix]);
+            assert_eq!(rc, 0, "{suffix}: {out:?} {err}");
+            let name = out.iter().find(|a| *a != "agent" && *a != "start").cloned().unwrap();
+            assert_ne!(name, parent, "{err}");
+            assert!(name.len() <= 32 && name.contains('-'), "{name}");
+            assert!(err.contains(&name), "{err}");
+            names.push(name);
+        }
+        assert_ne!(names[0], names[1], "兩個字尾不能截成同一個名字：{names:?}");
+
+        let (out, err, rc) = s.run_full(&env, &["agent", "prompt", "review", "please check"]);
+        assert_eq!(rc, 0, "{out:?} {err}");
+        assert_eq!(out.first().map(String::as_str), Some("agent"));
+        assert_eq!(out.get(1).map(String::as_str), Some("prompt"));
+        assert_ne!(out.get(2).map(String::as_str), Some(parent), "prompt 不能打回母 bot：{out:?}");
+        assert_eq!(out.get(2).map(String::as_str), Some(names[0].as_str()), "prompt 用的名字要跟 start 一樣：{out:?}");
     }
 }

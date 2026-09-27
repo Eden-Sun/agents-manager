@@ -8,6 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -17,18 +18,31 @@ use serde_json::{json, Value};
 
 use crate::state::App;
 
+/// A permit the shim never finishes (herdr failed, curl timed out after reserve, Ctrl-C) must not
+/// block credential rotation until the daemon restarts (#664).
+const PERMIT_TTL: Duration = Duration::from_secs(60);
+
 #[derive(Default)]
 pub struct Gate {
     rotating: HashSet<String>,
-    permits: HashMap<String, HashSet<String>>,
+    permits: HashMap<String, HashMap<String, Instant>>,
 }
 
 impl Gate {
+    fn sweep(&mut self, bot_id: &str, now: Instant) {
+        let Some(permits) = self.permits.get_mut(bot_id) else { return };
+        permits.retain(|_, at| now.saturating_duration_since(*at) < PERMIT_TTL);
+        if permits.is_empty() {
+            self.permits.remove(bot_id);
+        }
+    }
+
     fn begin_rotation(&mut self, bot_id: &str) -> Result<(), FenceError> {
         if !self.rotating.insert(bot_id.to_string()) {
             return Err(FenceError::AlreadyRotating);
         }
-        let in_flight = self.permits.get(bot_id).map_or(0, HashSet::len);
+        self.sweep(bot_id, Instant::now());
+        let in_flight = self.permits.get(bot_id).map_or(0, HashMap::len);
         if in_flight > 0 {
             self.rotating.remove(bot_id);
             return Err(FenceError::SpawnsInFlight(in_flight));
@@ -40,21 +54,32 @@ impl Gate {
         if self.rotating.contains(bot_id) {
             return Err(());
         }
-        self.permits.entry(bot_id.to_string()).or_default().insert(permit_id.to_string());
+        self.sweep(bot_id, Instant::now());
+        self.permits.entry(bot_id.to_string()).or_default().insert(permit_id.to_string(), Instant::now());
         Ok(())
     }
 
     fn permit_active(&self, bot_id: &str, permit_id: &str) -> bool {
-        self.permits.get(bot_id).is_some_and(|permits| permits.contains(permit_id))
+        self.permits.get(bot_id).is_some_and(|permits| {
+            permits.get(permit_id).is_some_and(|at| Instant::now().saturating_duration_since(*at) < PERMIT_TTL)
+        })
     }
 
     fn release(&mut self, bot_id: &str, permit_id: &str) -> bool {
         let Some(permits) = self.permits.get_mut(bot_id) else { return false };
-        let removed = permits.remove(permit_id);
+        let removed = permits.remove(permit_id).is_some();
         if permits.is_empty() {
             self.permits.remove(bot_id);
         }
         removed
+    }
+
+    /// Test-only: pretend `permit_id` was reserved `age` ago so TTL can be checked without sleeping.
+    #[cfg(test)]
+    fn age_permit(&mut self, bot_id: &str, permit_id: &str, age: Duration) {
+        if let Some(at) = self.permits.get_mut(bot_id).and_then(|p| p.get_mut(permit_id)) {
+            *at = Instant::now().checked_sub(age).unwrap_or_else(Instant::now);
+        }
     }
 }
 
@@ -121,6 +146,12 @@ pub struct SpawnFinish {
     pane_id: String,
     #[serde(default)]
     purpose: String,
+}
+
+#[derive(Deserialize)]
+pub struct SpawnAbort {
+    bot_id: String,
+    permit_id: String,
 }
 
 fn fail(status: StatusCode, reason: &str, message: &str) -> (StatusCode, Json<Value>) {
@@ -200,6 +231,21 @@ pub async fn finish(
     (StatusCode::OK, Json(json!({"pane_id": body.pane_id, "registered": true})))
 }
 
+/// `POST /relay/spawn/abort`: drop a permit when herdr did not create a pane (#664).
+/// Missing permits are still 200 — the shim retries and a TTL sweep may have won the race.
+pub async fn abort(
+    State(app): State<Arc<App>>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Form(body): axum::extract::Form<SpawnAbort>,
+) -> (StatusCode, Json<Value>) {
+    let token = headers.get("X-AM-Bot-Token").and_then(|v| v.to_str().ok()).unwrap_or("");
+    if let Err(response) = authenticated_bot(&app, &body.bot_id, token).await {
+        return response;
+    }
+    let released = release(&app, &body.bot_id, &body.permit_id);
+    (StatusCode::OK, Json(json!({"released": released})))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,5 +264,16 @@ mod tests {
         assert!(gate.reserve(bot, "during-rotation").is_err());
         gate.rotating.remove(bot);
         assert!(gate.reserve(bot, "after-aborted-rotation").is_ok());
+    }
+
+    /// #664：失敗的 agent start 留下的 permit 過了 TTL 就不再擋輪替。
+    #[test]
+    fn an_expired_spawn_permit_does_not_block_rotation() {
+        let mut gate = Gate::default();
+        let bot = "ttl";
+        gate.reserve(bot, "stuck").unwrap();
+        gate.age_permit(bot, "stuck", PERMIT_TTL + Duration::from_secs(1));
+        gate.begin_rotation(bot).unwrap();
+        assert!(!gate.permit_active(bot, "stuck"));
     }
 }

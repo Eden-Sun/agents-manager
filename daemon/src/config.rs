@@ -755,8 +755,11 @@ fn label_slug(project_label: &str) -> String {
 }
 
 /// `<project slug>-<ULID tail>`: the nickname never reaches herdr, so renaming needs no restart.
+///
+/// herdr names are at most 32 characters. Children are `<parent>-<suffix>` in the same budget
+/// (#665), so a top-level name stops at 24 and leaves 8 characters (`-` plus a 7-character suffix).
 pub fn agent_name(project_label: &str, bot_id: &str) -> String {
-    const MAX: usize = 32;
+    const MAX: usize = 24;
     let tail: String = bot_id.to_ascii_lowercase().chars().rev().take(6).collect::<Vec<_>>().into_iter().rev().collect();
     let hash: String = tail.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
     let hash = if hash.is_empty() { "bot".to_string() } else { hash };
@@ -1067,8 +1070,9 @@ mod agent_name_tests {
         assert_eq!(agent_name("2026 專案!!", "abcdef"), "p2026-abcdef");
         assert_eq!(agent_name("---", "abcdef"), "b-abcdef");
         let n = agent_name("a-very-long-project-label-indeed-and-more", "01M1S2SQPSYMQ8B1VQ50R963B9");
-        assert!(n.len() <= 32, "{n}");
+        assert!(n.len() <= 24, "{n}");
         assert!(n.ends_with("-r963b9"));
+        assert!(32 - n.len() >= 8, "子 agent 至少留得下 `-` 與 7 字尾碼：{n}");
     }
 
     #[test]
