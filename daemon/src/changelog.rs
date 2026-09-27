@@ -24,6 +24,14 @@ pub struct ChangelogCache {
     inner: Mutex<std::collections::HashMap<String, (Instant, String)>>,
 }
 
+#[cfg(test)]
+impl ChangelogCache {
+    /// 測試直接塞一份 CHANGELOG 進快取，不上網。
+    pub async fn seed(&self, kind: &str, text: &str) {
+        self.inner.lock().await.insert(kind.to_string(), (Instant::now(), text.to_string()));
+    }
+}
+
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct Section {
     pub version: String,
