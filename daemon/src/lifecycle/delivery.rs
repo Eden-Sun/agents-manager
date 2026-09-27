@@ -387,7 +387,31 @@ struct ComposerRow {
 
 /// The last row near the bottom whose first visible glyph is the kind's composer marker.
 fn composer_row(kind: &str, lines: &[&str]) -> Option<usize> {
-    locate_composer(kind, lines, false, COMPOSER_TAIL).map(|c| c.idx)
+    locate_composer(kind, lines, false, composer_tail(kind, lines)).map(|c| c.idx)
+}
+
+/// 找輸入框要從底部往上看幾列：平常是 [`COMPOSER_TAIL`]；claude 的框長得比它高、框頂的 `❯` 出了這個範圍時，
+/// 看到框頂為止（#581）。2026-09-27 wits-pro：回合還沒吐字就被強制中止，claude 把 25 行的 prompt 放回框裡
+/// （框上限是畫面列數的一半減 5，55 列的畫面就是 22 列），`❯` 落在倒數第 25 列之外——框明明有字，
+/// 卻判成讀不到：中止後的清框沒按、之後每則都 409 `composer_unreadable`，網頁也不給清草稿的動作
+/// （真畫面：fixtures/claude-2.1.281-tall-draft-after-interrupt.ansi）。
+///
+/// 只認 claude 的框形：底部 [`COMPOSER_TAIL`] 列裡最下面那條分隔線是框底，往上第一條分隔線是框頂，框頂正下方
+/// 那列開頭是 `❯` 才算。框裡有一整列 `─` 就停在那裡、照舊判讀不到——寧可讀不到，不猜。
+pub(crate) fn composer_tail(kind: &str, lines: &[&str]) -> usize {
+    if kind != "claude" || locate_composer(kind, lines, false, COMPOSER_TAIL).is_some() {
+        return COMPOSER_TAIL;
+    }
+    let rule = |i: usize| is_rule_row(strip_ansi(lines[i]).trim());
+    let n = lines.len();
+    let Some(bottom) = (n.saturating_sub(COMPOSER_TAIL)..n).rev().find(|&i| rule(i)) else { return COMPOSER_TAIL };
+    let Some(top) = (0..bottom).rev().find(|&i| rule(i)) else { return COMPOSER_TAIL };
+    let marker = top + 1;
+    if marker < bottom && strip_ansi(lines[marker]).trim_start().starts_with('❯') {
+        (n - marker).max(COMPOSER_TAIL)
+    } else {
+        COMPOSER_TAIL
+    }
 }
 
 /// codex (gpt-6-astra and later) animates braille particles (`⠁⠂⠄⠈⠐⠠⢀`) across its composer and
@@ -448,7 +472,8 @@ fn locate_composer(kind: &str, lines: &[&str], drop_particles: bool, tail: usize
 /// **entirely dim** (a placeholder or suggested prompt, whatever it says), which only a styled (`format: ansi`) read can show. A plain-text read never
 /// accepts a placeholder: the same words could have been typed (sol review round nine #2).
 pub(crate) fn box_state(kind: &str, screen: &str) -> BoxState {
-    box_state_within(kind, screen, COMPOSER_TAIL)
+    let lines: Vec<&str> = screen.lines().collect();
+    box_state_within(kind, screen, composer_tail(kind, &lines))
 }
 
 /// [`box_state`]，但輸入框可以高到 `tail` 列。剛貼上一段我們自己知道有幾列的字：拆成小段貼進去時最後一段可能沒被摺起來，
@@ -550,7 +575,7 @@ pub(crate) fn plain_without_hints(kind: &str, screen: &str) -> String {
     let lines: Vec<&str> = screen.lines().collect();
     let particles = kind == "codex";
     let mut plain: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
-    if let Some(c) = locate_composer(kind, &lines, particles, COMPOSER_TAIL) {
+    if let Some(c) = locate_composer(kind, &lines, particles, composer_tail(kind, &lines)) {
         let content = marker_row_content(kind, &c, particles);
         if let Some(n) = hint_rows(&c, &content, &lines, particles) {
             let cells = blank_particles(styled_cells(lines[c.idx]), particles);

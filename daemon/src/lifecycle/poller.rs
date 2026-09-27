@@ -666,7 +666,8 @@ pub(crate) fn composer_text(kind: &str, screen: &str) -> Option<String> {
         return None;
     }
     let lines: Vec<&str> = screen.lines().collect();
-    let from = lines.len().saturating_sub(COMPOSER_TAIL);
+    // claude 的框高過預設範圍時看到框頂（#581）：不然放回框裡的長 prompt 讀不到，中止後的清框就不按。
+    let from = lines.len().saturating_sub(super::delivery::composer_tail(kind, &lines));
     let tail = &lines[from..];
     let idx = tail.iter().rposition(|l| {
         let t = undecorate_row(l);
