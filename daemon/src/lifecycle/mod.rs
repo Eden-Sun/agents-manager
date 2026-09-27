@@ -35,6 +35,7 @@ pub(crate) mod setup;
 mod start;
 mod stop;
 mod deferred_live;
+mod live_apply_debt;
 mod slash;
 mod delivery;
 mod composer_draft;
@@ -113,6 +114,14 @@ pub(crate) use screen::*;
 pub(crate) use setup::*;
 pub(crate) use slash::*;
 pub(crate) use deferred_live::{defer_live, is_busy_reason, schedule_deferred_live};
+#[cfg(test)]
+pub(crate) use deferred_live::apply_deferred_once;
+
+pub(crate) async fn recover_live_apply_debts(app: &Arc<App>) {
+    live_apply_debt::recover(app).await;
+}
+
+pub(crate) use live_apply_debt::retry_once as retry_live_apply_bookkeeping_once;
 pub(crate) use delivery::*;
 pub(crate) use start::*;
 pub(crate) use start_send::{prompt_starting, withdraw_turn};

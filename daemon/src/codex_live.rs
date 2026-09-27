@@ -384,6 +384,8 @@ async fn toggle_fast(client: &HerdrClient, pane_id: &str) -> bool {
     if !key(client, pane_id, "Enter").await {
         return false;
     }
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("codex_after_fast_toggle", pane_id).await;
     tokio::time::sleep(Duration::from_millis(1000)).await;
     true
 }

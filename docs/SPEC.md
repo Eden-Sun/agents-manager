@@ -716,9 +716,9 @@ Codex 0.157.0 以舊模型啟動時可能顯示模型遷移選單（例如 `Meet
 
 1. **設定提交前先建立舊版本基準**：若有 active run、PATCH 涉及任一啟動相關欄位，而且 `runs.launch_rev` 是 NULL，先用 PATCH 前的 bot 設定補記。讀 bot、補記或確認 run 列的任何一步失敗，PATCH 回可重試錯誤，TOML 與 DB projection 都不改；不能把 NULL 當成「不需重啟」。
 2. **設定提交後才嘗試 live apply**：live apply 在 bot lock 內重新選 active run；這個實際目標 run 的 id 必須跟觀察到的 runtime snapshot 一起往後傳，呼叫端不得拿 PATCH 開始時讀到的 run id 代替。
-3. **TUI readback 與 runtime 寫入是成功門檻**：只有 readback 證明設定已套用，才以同一個 run id 寫 `runtime_*`。runtime UPDATE 必須成功且影響一列，並與 `runs.live_rev` 證據在同一個 DB 更新中提交。UPDATE 失敗時不回 `applied: true`、不清 restart drift；保留已讀回的 snapshot 與 run id，排程只做 DB bookkeeping 的重試，不重送 slash 或 picker 操作。這時 `needs_restart` 保持 true，直到 runtime 寫入成功。
+3. **TUI readback 與 runtime 寫入是成功門檻**：只有 readback 證明設定已套用，才以同一個 run id 寫 `runtime_*`。readback 後先把完整 runtime snapshot、`baseline_rev`、`target_rev` 與 run id 寫進 `live_apply_debts`；接著在一個交易內更新 runtime 欄位、條件式寫 `runs.live_rev`、刪除 debt。runtime UPDATE 必須成功且影響一列，整筆交易才提交。UPDATE 失敗時 debt 留在 DB，不回 `applied: true`、不清 restart drift；重試只讀 debt 並做 DB bookkeeping，不重送 slash 或 picker 操作。debt 還沒能寫入 DB 時，保留同一份記憶體 retry 工作並繼續嘗試持久化；不宣稱已套用。這時 `needs_restart` 保持 true，直到 runtime 寫入成功。
 4. **live revision 證據只消除這次已涵蓋的 drift**：`runs.live_rev` 是「runtime snapshot 已提交」的版本證明。只有 run 原本載入的版本等於 PATCH 前版本，或該 run 已在設定提交後以目標版本啟動，才能寫入目標 `live_rev`；若原 run 已有其他啟動設定落差，就只更新 readback 證實的 runtime 欄位，不得蓋掉那筆落差。`GET /api/state` 在 `live_rev` 等於目前 bot revision 時可判定不需重啟；之後設定再變，舊 `live_rev` 不匹配便不再提供豁免。
-5. **launch revision stamp 是可恢復的收尾**：runtime 與 `live_rev` 成功提交後，再以同一個目標 run id 將 `launch_rev` stamp 到目標 revision；`stamp` 必須確認恰有一列存在。stamp 失敗時，`live_rev` 是持久 retry debt，state/readback 修復可只用這個 marker 重試 stamp，不再碰 TUI。run 已換代時只更新原目標列；列不存在就回失敗，絕不把舊結果轉寫到新 run。
+5. **launch revision stamp 是可恢復的收尾**：runtime 與 `live_rev` 成功提交後，再以同一個目標 run id 將 `launch_rev` stamp 到目標 revision；`stamp` 必須確認恰有一列存在。stamp 失敗時，`live_rev` 是持久 retry debt，state/readback 與 daemon startup recovery 可只用這個 marker 重試 stamp，不再碰 TUI。marker 只在 stamp 同一交易成功後清除。run 已換代時只更新原目標列；列不存在就回失敗，絕不把舊結果轉寫到新 run。
 
 因此各失敗點的狀態固定如下：舊版本補記失敗＝設定未提交；TUI/readback 失敗＝設定已提交、runtime 未證實、需重啟；runtime DB 寫入失敗＝設定已提交、readback snapshot 留給 DB-only retry、仍需重啟；runtime 與 `live_rev` 已提交但 launch stamp 失敗＝live apply 可回報成功、marker 保留 stamp debt，state 不顯示假的 restart badge；完整成功＝runtime、`live_rev` 與 `launch_rev` 收斂到同一個 run/revision。
 
@@ -743,7 +743,7 @@ Codex 0.157.0 以舊模型啟動時可能顯示模型遷移選單（例如 `Meet
 - `/fast` 是開關，PATCH 的 live 欄位閘門要把 `fast` 算進去。**`/fast on`／`/fast off` 不是 slash 形式**（2026-09-22，0.154.0，隔離的 `CODEX_HOME` 實測）：
   裸 `/fast` 回 `Service tier set to priority`／`… default`（狀態列 `fast` 字樣隨之出現／消失），而 `/fast on` 會被當一般 prompt 送給模型、模型跑去查文件。
   所以目標 tier 一律靠「先讀狀態列（沒有再用 `runtime_fast`）→ 不同才按一下」（`codex_live::fast_plan`）；兩者都讀不到（以前直接拒絕 `unknown_fast_tier`）就按一下、讀回、方向錯才按回來（`needs_second_toggle`）；最後照舊讀回驗證。
-- **忙的時候不重啟**（#393）：bot 在 working／blocked／有回合在飛，`PATCH` 不回退成重啟，而是把欄位與版本基準記進 `lifecycle/deferred_live.rs`（排程本身在記憶體），下一次 idle 邊（`events.rs`）再套；套成功走上面的 runtime／`live_rev`／`launch_rev` 收斂流程並推 `bot_changed`，套不上才留下重啟徽章。已成功的 TUI 操作若 DB 收尾失敗，只保留 bookkeeping 債務，不再送第二次操作。
+- **忙的時候不重啟**（#393）：bot 在 working／blocked／有回合在飛，`PATCH` 不回退成重啟，而是把欄位、PATCH 前版本與目標版本記進 `lifecycle/deferred_live.rs`（排程本身在記憶體），下一次 idle 邊（`events.rs`）再套；套成功走上面的 runtime／`live_rev`／`launch_rev` 收斂流程並推 `bot_changed`，套不上才留下重啟徽章。已成功的 TUI 操作若 DB 收尾失敗，只保留 bookkeeping 債務，不再送第二次操作；一旦 readback snapshot 進入 `live_apply_debts`，daemon 重啟後也會做 DB-only recovery。
 - **子 agent 的 fast 從 argv 補**（#393）：收編的 codex 子 agent 若 argv 有 `-c service_tier="priority"`，`bots.fast` 記成 1，UI 就不會平白亮「fast 需重啟」。`sync_pane_model` 原本只在 model／effort 為 NULL 時才看 argv，
   model／effort 已有值（例如 fork 時帶入）的子 agent 永遠補不到；現在**收編後 10 分鐘內**也補 fast。刻意限縮在窗口內：`bots.fast=0` 分不出「沒設」與「使用者關掉了」，窗口外補會把使用者之後關掉的 fast 蓋回去。
 - **選單一律用讀的**：號碼、順序、`(default)`/`(current)` 會跑；每步回讀 pane，比對「號碼後到兩個空白為止」的 label（說明文字會含別的模型名）。

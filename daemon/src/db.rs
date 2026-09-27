@@ -84,7 +84,9 @@ CREATE TABLE IF NOT EXISTS runs (
   -- `mark_run_exited` 把 run 收成 exited 時的原因（`pane exited`、`agent not found during reconcile`…），只在它
   -- 的 CAS 真的寫下 exited 那一次記（issue #554）；退役紀錄靠它分辨 pane 是 herdr 親口報關掉的還是對帳時才發現不見。
   -- NULL＝不是那條路收的（停止、舊列）。
-  exit_reason TEXT
+  exit_reason TEXT,
+  -- live_apply 讀回且已持久化的 runtime snapshot 所屬版本；只在 launch_rev stamp 的同一交易清掉。
+  live_rev TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS runs_one_active ON runs(bot_id) WHERE state IN ('starting','running','stopping');
 CREATE INDEX IF NOT EXISTS runs_pane ON runs(pane_id);
@@ -169,6 +171,18 @@ CREATE TABLE IF NOT EXISTS quota_cache (
   quota_json TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+-- TUI 已回讀成功但 runtime_* 尚未落庫時的 DB-only retry debt。run_id 固定副作用目標，不得搬到新 run。
+CREATE TABLE IF NOT EXISTS live_apply_debts (
+  run_id TEXT PRIMARY KEY,
+  bot_id TEXT NOT NULL,
+  baseline_rev TEXT NOT NULL,
+  target_rev TEXT NOT NULL,
+  runtime_model TEXT,
+  runtime_effort TEXT,
+  runtime_fast INTEGER,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS live_apply_debts_bot ON live_apply_debts(bot_id);
 "#;
 
 /// 這個 binary 認得的 schema 版本，存在 SQLite 內建的 `PRAGMA user_version`（跟資料庫檔案綁在一起，
@@ -238,6 +252,8 @@ const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (27, "ec6860a3b46abdd7"),
     // 2026-09-28：`messages.sent_via`（插隊／補充送出的訊息，泡泡上標出來）。
     (28, "a713484136f43301"),
+    // issues #598/#603: persist runtime readback debt and launch-stamp retry proof.
+    (29, "PENDING"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -415,6 +431,7 @@ async fn apply_migrations(pool: &SqlitePool) -> Result<()> {
             "sent_via",
             "ALTER TABLE messages ADD COLUMN sent_via TEXT CHECK (sent_via IN ('send_now','supplement'))",
         ),
+        ("runs", "live_rev", "ALTER TABLE runs ADD COLUMN live_rev TEXT"),
     ] {
         if !has_column(&mut *tx, table, col).await? {
             sqlx::query(ddl).execute(&mut *tx).await.with_context(|| format!("add {table}.{col}"))?;
@@ -823,6 +840,9 @@ pub struct Run {
     /// 這個 run 啟動時載入的啟動設定版本（`launch_rev::of`）；NULL＝沒記（adopt 來的、升版前的舊列），不誤報「需重啟」。
     #[sqlx(default)]
     pub launch_rev: Option<String>,
+    /// 已落庫的 live runtime revision；等同 revision 的 `launch_rev` stamp 完成後清除。
+    #[sqlx(default)]
+    pub live_rev: Option<String>,
 }
 
 impl Run {

@@ -1606,6 +1606,7 @@ async fn patch_bot(
         || b.env.is_some()
         || b.auto_approve.is_some()
         || b.inject_hooks.is_some();
+    let mut pre_patch_rev = None;
     // 改設定之前：active run 還沒記啟動版本就用「改之前」的補記，改完才看得出過期（#353）。
     // 這是設定提交的 admission prerequisite；任何讀取或補記不確定都不可以繼續寫 TOML／DB。
     if restart_relevant {
@@ -1623,6 +1624,7 @@ async fn patch_bot(
                     })));
                 }
             };
+            pre_patch_rev = Some(crate::launch_rev::of(&before));
             if let Err(e) = crate::launch_rev::stamp_if_missing(&app.db, r, &before).await {
                 return Err(LcError::Unavailable(json!({
                     "reason": "launch_revision_baseline_failed",
@@ -1772,41 +1774,79 @@ async fn patch_bot(
         _ => Vec::new(),
     };
     // 失敗要說得出哪一步（2026-09-13 使用者：codex 改 effort 靜默落回重啟）。只在真的試過時才出現。
+    let mut live_revisions = None;
     let live = if needs_restart && !live_fields.is_empty() {
-        Some(lifecycle::apply_live_setting_with_run(&app, &id, &live_fields).await)
+        let target_rev = match db::bot(&app.db, &id).await {
+            Ok(Some(bot)) => crate::launch_rev::of(&bot),
+            Ok(None) => String::new(),
+            Err(e) => {
+                let mut out = json!({"needs_restart": true});
+                if let Some(value) = remapped {
+                    out["remapped"] = value;
+                }
+                out["live_apply"] = json!({
+                    "fields": live_fields,
+                    "applied": false,
+                    "deferred": false,
+                    "pending_bookkeeping": false,
+                    "reason": format!("target_revision_unreadable: {e}"),
+                });
+                return Ok((StatusCode::OK, Json(out)).into_response());
+            }
+        };
+        let baseline_rev = pre_patch_rev.clone().unwrap_or_else(|| target_rev.clone());
+        live_revisions = Some((baseline_rev.clone(), target_rev.clone()));
+        Some(
+            lifecycle::apply_live_setting_with_revision(
+                &app,
+                &id,
+                &live_fields,
+                &baseline_rev,
+                &target_rev,
+            )
+            .await,
+        )
     } else {
         None
     };
     // codex 的 fast（也含 model／effort）忙的時候不重啟：記下來，下一次 idle 再套（#393，lifecycle/deferred_live.rs）。
     let deferred = kind == "codex"
+        && live_revisions.is_some()
         && matches!(&live, Some(lifecycle::LiveApplyOutcome::Failed(why)) if lifecycle::is_busy_reason(why));
     if deferred {
-        lifecycle::defer_live(&id, &live_fields);
-    }
-    let needs_restart = match &live {
-        Some(lifecycle::LiveApplyOutcome::Applied { .. }) => false,
-        Some(lifecycle::LiveApplyOutcome::Failed(_)) => true,
-        None => needs_restart,
-    };
-    // 當場套用成功：執行中的 CLI 已經載入新值，這個 run 的版本跟著更新，不然會被誤判成過期（#353）。
-    if let Some(lifecycle::LiveApplyOutcome::Applied { run_id }) = &live {
-        if let Ok(Some(now_bot)) = db::bot(&app.db, &id).await {
-            if let Err(e) = crate::launch_rev::stamp(&app.db, run_id, &crate::launch_rev::of(&now_bot)).await {
-                tracing::warn!(bot = %id, error = %e, "could not record the launch revision after a live apply");
-            }
+        if let Some((baseline_rev, target_rev)) = live_revisions.as_ref() {
+            lifecycle::defer_live(&id, &live_fields, baseline_rev, target_rev);
         }
     }
+    let needs_restart = match &live {
+        Some(lifecycle::LiveApplyOutcome::Applied { .. }) => match (
+            db::bot(&app.db, &id).await,
+            db::active_run(&app.db, &id).await,
+        ) {
+            (Ok(Some(bot)), Ok(Some(run))) => crate::launch_rev::is_stale(&bot, &run),
+            _ => true,
+        },
+        Some(
+            lifecycle::LiveApplyOutcome::BookkeepingPending { .. }
+            | lifecycle::LiveApplyOutcome::Failed(_),
+        ) => true,
+        None => needs_restart,
+    };
     let mut out = json!({"needs_restart": needs_restart});
     if let Some(value) = remapped { out["remapped"] = value; }
     if let Some(outcome) = live {
-        let (applied, reason) = match outcome {
-            lifecycle::LiveApplyOutcome::Applied { .. } => (true, None),
-            lifecycle::LiveApplyOutcome::Failed(why) => (false, Some(why)),
+        let (applied, pending_bookkeeping, reason) = match outcome {
+            lifecycle::LiveApplyOutcome::Applied { .. } => (true, false, None),
+            lifecycle::LiveApplyOutcome::BookkeepingPending { reason, .. } => {
+                (false, true, Some(reason))
+            }
+            lifecycle::LiveApplyOutcome::Failed(why) => (false, false, Some(why)),
         };
         out["live_apply"] = json!({
             "fields": live_fields,
             "applied": applied,
             "deferred": deferred,
+            "pending_bookkeeping": pending_bookkeeping,
             "reason": reason,
         });
     }
@@ -5991,6 +6031,252 @@ mod instruction_files_tests {
         let state = state_json(&e.app).await.unwrap();
         let needs_restart = state["projects"][0]["bots"].as_array().unwrap().iter().find(|b| b["id"] == json!(id)).unwrap()["needs_restart"].clone();
         assert_eq!(needs_restart, json!(false));
+    }
+
+    #[tokio::test]
+    async fn a_deferred_live_apply_keeps_its_stamp_retry_after_launch_write_fails() {
+        let e = env().await;
+        seed_project(&e).await;
+        let id = add(
+            &e,
+            json!({"name": "deferred-stamp-retry", "kind": "codex", "model": "gpt-5.6-luna", "effort": "max", "fast": false}),
+        )
+        .await
+        .unwrap();
+        let run_id = tt::fake_run(&e.app, &id).await;
+        let pane = format!("pane-{id}");
+        let baseline = crate::launch_rev::of(&db::bot(&e.app.db, &id).await.unwrap().unwrap());
+        sqlx::query(
+            "UPDATE runs SET pane_id = ?, launch_rev = ?, runtime_model = 'gpt-5.6-luna', runtime_effort = 'max', runtime_fast = 0, agent_status = 'working' WHERE id = ?",
+        )
+        .bind(&pane)
+        .bind(&baseline)
+        .bind(&run_id)
+        .execute(&e.app.db)
+        .await
+        .unwrap();
+
+        let out = patch(&e, &id, json!({"fast": true}))
+            .await
+            .unwrap();
+        assert_eq!(out["live_apply"]["deferred"], json!(true), "busy run should queue this live apply: {out}");
+        let target = crate::launch_rev::of(&db::bot(&e.app.db, &id).await.unwrap().unwrap());
+        sqlx::query("UPDATE runs SET agent_status = 'idle' WHERE id = ?")
+            .bind(&run_id)
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        e.herdr.set_screen(&pane, "gpt-5.6-luna max · /tmp · Context 43% used · 5h 12% left\n");
+        let screens = e.herdr.screens.clone();
+        let pane_after_toggle = pane.clone();
+        crate::lifecycle::race_point::arm(
+            "codex_after_fast_toggle",
+            &pane,
+            move || async move {
+                screens
+                    .lock()
+                    .unwrap()
+                    .insert(pane_after_toggle, "gpt-5.6-luna max fast · /tmp · Context 43% used · 5h 12% left\n".into());
+            },
+        );
+        sqlx::query(&format!(
+            "CREATE TRIGGER refuse_deferred_launch_stamp BEFORE UPDATE OF launch_rev ON runs
+             WHEN OLD.id = '{}' AND NEW.launch_rev = '{}'
+             BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END",
+            run_id, target
+        ))
+        .execute(&e.app.db)
+        .await
+        .unwrap();
+
+        lifecycle::apply_deferred_once(&e.app, &id).await;
+
+        let (runtime, launch_rev, live_rev): (Option<String>, Option<String>, Option<String>) =
+            sqlx::query_as("SELECT runtime_model, launch_rev, live_rev FROM runs WHERE id = ?")
+                .bind(&run_id)
+                .fetch_one(&e.app.db)
+                .await
+                .unwrap();
+        assert_eq!(runtime.as_deref(), Some("gpt-5.6-luna"));
+        assert_eq!(launch_rev.as_deref(), Some(baseline.as_str()));
+        assert_eq!(
+            live_rev.as_deref(),
+            Some(target.as_str()),
+            "a successful live readback must retain durable stamp retry debt"
+        );
+        let state = state_json(&e.app).await.unwrap();
+        let shown = state["projects"][0]["bots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["id"] == json!(id))
+            .unwrap();
+        assert_eq!(
+            shown["needs_restart"],
+            json!(false),
+            "the matching persisted live revision must prevent a false restart badge"
+        );
+
+        let sent_before_retry = e.herdr.calls_to("pane.send_text").len();
+        assert_eq!(sent_before_retry, 1, "the deferred command ran exactly once");
+        sqlx::query("DROP TRIGGER refuse_deferred_launch_stamp")
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        let _ = lifecycle::retry_live_apply_bookkeeping_once(&e.app, &run_id)
+            .await
+            .unwrap();
+        let (launch_rev, live_rev): (Option<String>, Option<String>) =
+            sqlx::query_as("SELECT launch_rev, live_rev FROM runs WHERE id = ?")
+                .bind(&run_id)
+                .fetch_one(&e.app.db)
+                .await
+                .unwrap();
+        assert_eq!(launch_rev.as_deref(), Some(target.as_str()));
+        assert_eq!(live_rev, None);
+        assert_eq!(
+            e.herdr.calls_to("pane.send_text").len(),
+            sent_before_retry,
+            "retry changes bookkeeping only and never resends to the TUI"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_live_apply_with_a_failed_runtime_write_is_not_reported_as_applied() {
+        let e = env().await;
+        seed_project(&e).await;
+        let id = add(
+            &e,
+            json!({"name": "runtime-write-fails", "kind": "claude", "model": "claude-sonnet-4-5"}),
+        )
+        .await
+        .unwrap();
+        let run_id = tt::fake_run(&e.app, &id).await;
+        let pane = format!("pane-{id}");
+        let baseline = crate::launch_rev::of(&db::bot(&e.app.db, &id).await.unwrap().unwrap());
+        sqlx::query("UPDATE runs SET pane_id = ?, launch_rev = ?, runtime_model = 'claude-sonnet-4-5' WHERE id = ?")
+            .bind(&pane)
+            .bind(&baseline)
+            .bind(&run_id)
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        e.herdr.set_screen(&pane, "Switch model?\nYour next response will be slower\n❯ 1. Yes, switch to Claude Opus 5.5\n  2. No, go back\n");
+        let screens = e.herdr.screens.clone();
+        let pane_after_answer = pane.clone();
+        crate::lifecycle::race_point::arm(
+            "slash_after_answer_before_read",
+            &pane,
+            move || async move {
+                screens
+                    .lock()
+                    .unwrap()
+                    .insert(pane_after_answer, "Claude Code\n❯\n".into());
+            },
+        );
+        sqlx::query(&format!(
+            "CREATE TRIGGER refuse_live_runtime BEFORE UPDATE OF runtime_model ON runs
+             WHEN OLD.id = '{}' AND NEW.runtime_model = 'claude-opus-5-5'
+             BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END",
+            run_id
+        ))
+        .execute(&e.app.db)
+        .await
+        .unwrap();
+
+        let out = patch(&e, &id, json!({"model": "claude-opus-5-5"}))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            out["live_apply"]["applied"],
+            json!(false),
+            "runtime bookkeeping failed, so PATCH cannot claim a completed live apply: {out}"
+        );
+        assert_eq!(
+            out["live_apply"]["pending_bookkeeping"],
+            json!(true),
+            "the observed TUI result must become DB-only retry debt: {out}"
+        );
+        assert_eq!(
+            out["needs_restart"],
+            json!(true),
+            "failed runtime persistence cannot clear launch drift: {out}"
+        );
+        let runtime: Option<String> =
+            sqlx::query_scalar("SELECT runtime_model FROM runs WHERE id = ?")
+                .bind(&run_id)
+                .fetch_one(&e.app.db)
+                .await
+                .unwrap();
+        assert_eq!(
+            runtime.as_deref(),
+            Some("claude-sonnet-4-5"),
+            "the rejected UPDATE leaves the prior runtime snapshot intact"
+        );
+        let debt: (String, String, String) = sqlx::query_as(
+            "SELECT run_id, target_rev, runtime_model FROM live_apply_debts WHERE run_id = ?",
+        )
+        .bind(&run_id)
+        .fetch_one(&e.app.db)
+        .await
+        .unwrap();
+        assert_eq!(debt.0, run_id);
+        assert_eq!(
+            debt.1,
+            crate::launch_rev::of(&db::bot(&e.app.db, &id).await.unwrap().unwrap())
+        );
+        assert_eq!(
+            debt.2, "claude-opus-5-5",
+            "the TUI readback snapshot, not a new TUI command, is the retry input"
+        );
+        let sent_before = e.herdr.calls_to("pane.send_text").len();
+        assert_eq!(sent_before, 1, "the live command ran once");
+
+        sqlx::query("DROP TRIGGER refuse_live_runtime")
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        let _ = lifecycle::retry_live_apply_bookkeeping_once(&e.app, &run_id)
+            .await
+            .unwrap();
+
+        let (runtime, launch_rev, live_rev): (Option<String>, Option<String>, Option<String>) =
+            sqlx::query_as("SELECT runtime_model, launch_rev, live_rev FROM runs WHERE id = ?")
+                .bind(&run_id)
+                .fetch_one(&e.app.db)
+                .await
+                .unwrap();
+        assert_eq!(runtime.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(
+            launch_rev.as_deref(),
+            Some(debt.1.as_str()),
+            "retry stamps the exact run after its runtime snapshot commits"
+        );
+        assert_eq!(live_rev, None, "successful stamp clears its proof marker");
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM live_apply_debts WHERE run_id = ?")
+                .bind(&run_id)
+                .fetch_one(&e.app.db)
+                .await
+                .unwrap();
+        assert_eq!(
+            remaining, 0,
+            "the debt clears only with the successful runtime transaction"
+        );
+        assert_eq!(
+            e.herdr.calls_to("pane.send_text").len(),
+            sent_before,
+            "recovery is bookkeeping only; no slash resend"
+        );
+        let state = state_json(&e.app).await.unwrap();
+        let shown = state["projects"][0]["bots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["id"] == json!(id))
+            .unwrap();
+        assert_eq!(shown["needs_restart"], json!(false));
     }
 
     /// 值不在 CLI 的選項裡（CLI 會當成它自己的預設＝改讀 AGENTS.md）、非 claude 的 bot、child bot 都是 400，而且什麼都不改。
