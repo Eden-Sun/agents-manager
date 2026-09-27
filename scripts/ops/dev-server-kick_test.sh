@@ -96,6 +96,7 @@ STUB
   cat > "$BIN/bun" <<STUB
 #!/bin/bash
 echo "bun \$*" >> "${FIX}/calls.log"
+[ -f "${FIX}/install-fail" ] && exit 1
 exit 0
 STUB
   # 假 node：記下 argv；帶 vite 參數時真的起一個 HTTP server（讓 alive() 成立）。
@@ -249,6 +250,22 @@ serve >/dev/null; wait_ready
 run >/dev/null
 check "lock 變了就 bun install" "bun install --frozen-lockfile" "$FIX/calls.log"
 check "log 說明要重啟 vite" "web/bun.lock 變了" "$LOG"
+teardown
+
+# 11. bun install 失敗：不砍還在跑的 vite，HEAD 之後沒變也要重試（#645）。
+setup
+echo "bbbbbbb" > "$FIX/head.after"; echo "lock2" > "$FIX/lock.after"
+: > "$FIX/install-fail"
+pid=$(fake_listener "*:${PORT}" 1 "node /x/vite.js --host 0.0.0.0")
+serve >/dev/null; wait_ready
+run >/dev/null
+check "install 失敗有記 log" "不重啟還在跑的 vite" "$LOG"
+kill -0 "$pid" 2>/dev/null && { echo "ok   - install 失敗沒砍 vite"; PASS=$((PASS + 1)); } || { echo "FAIL - install 失敗沒砍 vite"; FAIL=$((FAIL + 1)); }
+[ -f "$ROOT/agm/dev-server.pending-install" ] && { echo "ok   - 留下待安裝標記"; PASS=$((PASS + 1)); } || { echo "FAIL - 留下待安裝標記"; FAIL=$((FAIL + 1)); }
+rm -f "$FIX/install-fail"
+run >/dev/null
+equals "HEAD 沒變也再裝一次" "$(grep -c 'bun install --frozen-lockfile' "$FIX/calls.log")" "2"
+[ ! -f "$ROOT/agm/dev-server.pending-install" ] && { echo "ok   - 裝成功就清標記"; PASS=$((PASS + 1)); } || { echo "FAIL - 裝成功就清標記"; FAIL=$((FAIL + 1)); }
 teardown
 
 echo "$PASS passed, $FAIL failed"
