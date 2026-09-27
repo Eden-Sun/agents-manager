@@ -88,7 +88,7 @@ pub(crate) enum Outcome {
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn deliver(
     app: &Arc<App>,
-    client: &HerdrClient,
+    client: &super::RunClient,
     run: &db::Run,
     bot: &db::Bot,
     text: &str,

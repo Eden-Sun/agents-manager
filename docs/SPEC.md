@@ -1235,6 +1235,7 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run
 2. 前置檢查：Run `running`；agent ≠ `blocked`；無 `in_flight` Turn；無 `delivery=unknown` Turn → 否則 409（body 含原因與既有 `turn_id`）。
 3. **先規劃再建 turn**（本章開頭「送 prompt 的路徑」）：路徑（`agent.prompt` 或打字）、證據、空框。`NotAttempted` 不建 turn：可重試的 409、不可能的 422。
    規劃通過才 `INSERT turns (in_flight, pending, web, prompt_text = 實際送出的字)` + user Message（泡泡原文）；commit；推 WS。
+   `agent.prompt` 的 client 與 HostFence 成對保留；最後 pane guard 前與其讀取完成後、RPC 前都確認 fence 仍有效。世代被重連或改指取代時不依 host 名稱重新解析 client，回可重試的 `NotAttempted(host_changed)`；直接送撤回未送出的 turn 回 409，排隊送出放回佇列。
 4. 鎖內照規劃送出，結果五種見本章開頭：`Submitted`／`Handed`／`Unverified` → `delivery=ok`（證據與能否重送分開記）；
    打第一個字之前才出現的 `NotAttempted` → 撤回 turn 與訊息回 409（turn 已被別的路徑收掉時不刪、照現況回 200，見 §4.4a）；
    `Unproven` 與打字後的錯誤 → `unknown`（不重送）；`agent_blocked` → `failed`。

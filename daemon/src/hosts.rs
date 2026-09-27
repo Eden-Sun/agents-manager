@@ -193,6 +193,13 @@ impl HostConn {
         })
     }
 
+    #[cfg(test)]
+    fn remote_with_client_for_test(cfg: HostCfg, instance: Option<String>, client: HerdrClient) -> Arc<Self> {
+        let mut conn = Self::remote(cfg, instance);
+        Arc::get_mut(&mut conn).expect("test remote connection is uniquely owned").client = client;
+        conn
+    }
+
     pub fn is_local(&self) -> bool {
         self.cfg.is_none()
     }
@@ -789,6 +796,18 @@ impl HostManager {
     #[cfg(test)]
     pub(crate) async fn insert_remote_for_test(&self, cfg: HostCfg) -> Arc<HostConn> {
         let conn = HostConn::remote(cfg, None);
+        self.insert_remote_conn_for_test(conn).await
+    }
+
+    /// Test seam: like [`Self::insert_remote_for_test`], with a caller-provided fake Herdr socket.
+    #[cfg(test)]
+    pub(crate) async fn insert_remote_with_client_for_test(&self, cfg: HostCfg, client: HerdrClient) -> Arc<HostConn> {
+        let conn = HostConn::remote_with_client_for_test(cfg, None, client);
+        self.insert_remote_conn_for_test(conn).await
+    }
+
+    #[cfg(test)]
+    async fn insert_remote_conn_for_test(&self, conn: Arc<HostConn>) -> Arc<HostConn> {
         if let Some(old) = self.get(&conn.name).await {
             let _authority = old.authority_gate.write().await;
             self.conns.lock().await.insert(conn.name.clone(), conn.clone());
@@ -802,6 +821,24 @@ impl HostManager {
     #[cfg(test)]
     pub(crate) async fn replace_remote_for_test(&self, app: &Arc<App>, cfg: HostCfg) -> Arc<HostConn> {
         let conn = HostConn::remote(cfg, app.instance());
+        if let Some(old) = self.get(&conn.name).await {
+            let _authority = old.authority_gate.write().await;
+            self.install_conn(app, conn.clone()).await;
+        } else {
+            self.install_conn(app, conn.clone()).await;
+        }
+        conn
+    }
+
+    /// Test seam: repoint a named remote while keeping both generations on distinct fake sockets.
+    #[cfg(test)]
+    pub(crate) async fn replace_remote_with_client_for_test(
+        &self,
+        app: &Arc<App>,
+        cfg: HostCfg,
+        client: HerdrClient,
+    ) -> Arc<HostConn> {
+        let conn = HostConn::remote_with_client_for_test(cfg, app.instance(), client);
         if let Some(old) = self.get(&conn.name).await {
             let _authority = old.authority_gate.write().await;
             self.install_conn(app, conn.clone()).await;
