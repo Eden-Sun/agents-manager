@@ -654,7 +654,7 @@ mod tests {
     /// 外部指令不可用或逾時（CI 的 macOS runner 上 `lsof` 出了名的慢，回 `None`）就略過並印原因，
     /// 不把「機器慢」當成程式錯；能讀到就一定要對。
     #[tokio::test]
-    async fn probe_smoke_real_ps_and_lsof_see_this_process_listening() {
+    async fn macos_local_probe_smoke_real_ps_and_lsof_see_this_process_listening() {
         let env = crate::testing::env().await;
         let probe = crate::pane_probe::Real;
         let me = i32::try_from(std::process::id()).unwrap();
