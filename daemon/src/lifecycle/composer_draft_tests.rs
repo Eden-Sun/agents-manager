@@ -412,15 +412,49 @@ async fn a_draft_that_will_not_clear_blocks_the_prompt() {
     assert_eq!(f.turns().await, 0);
 }
 
-/// 框本來就空了（使用者已經在終端清掉）：沒有東西要清，不按 `ctrl+c`——空框的 `ctrl+c` 是「再按一次離開」。
+/// 框本來就空了（使用者已經在終端清掉）：舊 token 不再授權「清掉再送」，也不按 `ctrl+c`。
 #[tokio::test]
-async fn an_empty_box_gets_no_clear_key() {
+async fn an_empty_box_rejects_the_stale_clear_token_without_sending_the_prompt() {
     let f = idle("claude", &["一段留在框裡的假草稿"], false).await;
     let token = current_draft_token(&f, "observe").await;
     f.env.herdr.live.lock().unwrap().get_mut("pane-d").unwrap().composer.clear();
-    f.send("我自己要送的", "c1", Some(&token)).await.unwrap();
-    assert_eq!(f.typed(), 1);
-    assert!(!f.keys().iter().any(|k| k == &json!(["ctrl+c"])), "{:?}", f.keys());
+    let body = conflict(f.send("我自己要送的", "c1", Some(&token)).await);
+    assert_eq!(body["reason"], "draft_gone", "{body}");
+    assert_eq!(body["sent"], false, "{body}");
+    assert!(f.keys().is_empty(), "empty composer must receive no key");
+    assert_eq!(f.typed(), 0, "stale clear authorization must not turn into a plain send");
+    assert_eq!(f.turns().await, 0, "stale clear authorization must not create a turn");
+}
+
+/// A token from R1/P1 cannot turn an empty R2/P2 composer into permission to send replacement text.
+#[tokio::test]
+async fn an_empty_new_run_rejects_a_clear_token_from_the_replaced_run() {
+    let f = idle("claude", &["draft A"], false).await;
+    let token = current_draft_token(&f, "observe-old-run").await;
+    let next_run = db::ulid();
+    sqlx::query("UPDATE runs SET state='exited' WHERE bot_id=? AND state='running'")
+        .bind(&f.bot_id)
+        .execute(&f.env.app.db)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, pane_typed, started_at)
+         VALUES (?,?,'running','idle','ws-1','pane-e','draft-bot','test',1,?)",
+    )
+    .bind(&next_run)
+    .bind(&f.bot_id)
+    .bind(db::now())
+    .execute(&f.env.app.db)
+    .await
+    .unwrap();
+    f.env.herdr.live_pane("pane-e", tt::LivePane { revision: 1, ..Default::default() });
+
+    let body = conflict(f.send("replacement prompt", "stale-cross-run", Some(&token)).await);
+    assert_eq!(body["reason"], "draft_gone", "{body}");
+    assert_eq!(body["sent"], false, "{body}");
+    assert!(f.keys().is_empty(), "replacement run must receive no key");
+    assert_eq!(f.typed(), 0, "replacement run must receive no prompt text");
+    assert_eq!(f.turns().await, 0, "a stale clear must not create a replacement-run turn");
 }
 
 /// 送出框裡那段：按 Enter、不重打；開一個回合，訊息就是框裡那段，transcript 多出來那一則就是證據。
