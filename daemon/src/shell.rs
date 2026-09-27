@@ -95,11 +95,18 @@ async fn acquire_pane(
 /// `POST /api/hosts/:name/shells`
 pub async fn open(app: &Arc<App>, host: &str, cwd: Option<&str>) -> LcResult<HostShell> {
     let (client, session) = client_for(app, host).await?;
-    // Counted before the pane is created, so a burst of clicks cannot race past the cap.
+    let host_lock = {
+        let mut locks = app.host_shell_open_locks.lock().await;
+        locks.entry(host.to_string()).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
+    };
+    // Keep this host's quota exclusive through creation and registration. Other hosts can still open shells.
+    let _opening = host_lock.lock().await;
     let live = app.host_shells.lock().await.iter().filter(|s| s.host == host).count();
     if live >= MAX_PER_HOST {
         return Err(LcError::conflict("too_many_shells", json!({"host": host, "max": MAX_PER_HOST})));
     }
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("host_shell_after_quota_check", host).await;
     let cwd = match cwd.map(str::trim).filter(|c| !c.is_empty()) {
         Some(c) => c.to_string(),
         None => default_cwd(app, host).await?,
@@ -363,6 +370,55 @@ pub async fn close_confirmed(app: &Arc<App>, host: &str, pane_id: &str, confirme
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Concurrent opens cannot both spend the final per-host slot after counting the same registry.
+    #[tokio::test]
+    async fn concurrent_opens_cannot_exceed_the_per_host_limit() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        {
+            let mut shells = app.host_shells.lock().await;
+            for n in 0..MAX_PER_HOST - 1 {
+                shells.push(HostShell {
+                    host: "local".into(),
+                    herdr_session: "agents-manager".into(),
+                    workspace_id: format!("ws-{n}"),
+                    tab_id: format!("ws-{n}:t1"),
+                    pane_id: format!("ws-{n}:p1"),
+                    cwd: "/tmp".into(),
+                    created_at: crate::db::now(),
+                });
+            }
+        }
+
+        let second_result = Arc::new(Mutex::new(None));
+        let second_done = Arc::new(tokio::sync::Notify::new());
+        let (result_slot, done) = (second_result.clone(), second_done.clone());
+        let second_app = app.clone();
+        crate::lifecycle::race_point::arm("host_shell_after_quota_check", "local", move || async move {
+            tokio::spawn(async move {
+                let result = open(&second_app, "local", Some("/tmp")).await;
+                *result_slot.lock().await = Some(result);
+                done.notify_one();
+            });
+            // The broken implementation lets the second open pass its count and finish here.
+            // With per-host serialization it waits on the lock held by this first open.
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(1), second_done.notified()).await;
+        });
+
+        let first = open(&app, "local", Some("/tmp")).await;
+        if second_result.lock().await.is_none() {
+            assert!(crate::testing::eventually!(second_result.lock().await.is_some()), "the waiting open should finish after the first releases its slot");
+        }
+        let second = second_result.lock().await.take().expect("second open completed");
+        assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1, "only the final available slot may be opened");
+        assert!(
+            matches!(first, Err(LcError::Conflict(ref body)) if body["reason"] == "too_many_shells")
+                || matches!(second, Err(LcError::Conflict(ref body)) if body["reason"] == "too_many_shells"),
+            "the losing open must report the host shell cap"
+        );
+        assert_eq!(app.host_shells.lock().await.iter().filter(|s| s.host == "local").count(), MAX_PER_HOST);
+    }
 
     /// The whitelist must key on **both** halves: a pane_id is only unique within a host.
     #[test]
