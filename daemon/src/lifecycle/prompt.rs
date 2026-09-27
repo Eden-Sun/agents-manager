@@ -96,6 +96,16 @@ pub(super) async fn retract_unsent_turn(app: &Arc<App>, bot_id: &str, turn_id: &
         let mut tx = app.db.begin().await?;
         // 訊息要先刪（`messages.turn_id` 指著 turns，反過來會踩到外鍵），turn 那句才是把關的：
         // 刪不到就 rollback，連訊息那句一起退掉——效果就是「turn 不是 in_flight 時一個字都不刪」。
+        // 附件的 message_id 指著這則訊息、沒有 ON DELETE。先解開再刪，不然帶圖的撤回會外鍵失敗，
+        // 可重試的 409 變成 502，回合被收成假的 failed、crid 也燒掉（#646）。
+        sqlx::query(
+            "UPDATE attachments SET message_id = NULL
+              WHERE message_id IN (SELECT id FROM messages WHERE id = ? OR turn_id = ?)",
+        )
+        .bind(msg_id)
+        .bind(turn_id)
+        .execute(&mut *tx)
+        .await?;
         sqlx::query("DELETE FROM messages WHERE id = ? OR turn_id = ?").bind(msg_id).bind(turn_id).execute(&mut *tx).await?;
         let gone = sqlx::query("DELETE FROM turns WHERE id = ? AND status = 'in_flight'").bind(turn_id).execute(&mut *tx).await?;
         if gone.rows_affected() == 0 {
@@ -1055,6 +1065,53 @@ mod prompt_tests {
         // These exercise the agent.prompt path, which needs an agent herdr has a session bound to.
         env.herdr.set_agent("prompt-test", "pane-prompt-test", true);
         Fixture { env, bot_id, conv, run_id }
+    }
+
+    /// 帶附件的回合一個字都還沒打就撤回：要先解開 attachments.message_id，不能踩外鍵（#646）。
+    #[tokio::test]
+    async fn retracting_an_unsent_turn_with_an_attachment_withdraws_it() {
+        let f = fixture("claude", "test").await;
+        let app = f.env.app.clone();
+        let turn_id = db::ulid();
+        let msg_id = db::ulid();
+        let file_id = attachment(&app, &f.bot_id).await;
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, client_request_id, created_at)
+             VALUES (?,?,?,'web','in_flight','pending','crid-attach',?)",
+        )
+        .bind(&turn_id)
+        .bind(&f.conv)
+        .bind(&f.run_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, created_at)
+             VALUES (?,?,?,'user','看這張圖','web',?)",
+        )
+        .bind(&msg_id)
+        .bind(&f.conv)
+        .bind(&turn_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE attachments SET message_id=? WHERE id=?")
+            .bind(&msg_id)
+            .bind(&file_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        let out = retract_unsent_turn(&app, &f.bot_id, &turn_id, &msg_id).await;
+        assert!(matches!(out, Ok(Retraction::Withdrawn)), "帶附件也要撤得掉");
+        let turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
+        let msgs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE id=?").bind(&msg_id).fetch_one(&app.db).await.unwrap();
+        let bound: Option<String> = sqlx::query_scalar("SELECT message_id FROM attachments WHERE id=?").bind(&file_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(turns, 0);
+        assert_eq!(msgs, 0);
+        assert!(bound.is_none(), "附件列留著，但不再指著已刪的訊息：{bound:?}");
     }
 
     #[tokio::test]
